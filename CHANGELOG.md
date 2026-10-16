@@ -6,12 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-10-16
+
+### Added
+- Third-party licence notices ship with the app: `src-tauri/licenses/THIRD-PARTY-NOTICES.md` with the licence texts of gwcs, asdf-astropy, fitsio-pure, cfitsio (whose codecs fitsio-pure ports), libm (musl and Sun notices), miniz_oxide, adler2, bytemuck, rayon, crossbeam and either, bundled with the desktop installers and the Linux tarball.
+- MAST Mission Search client for ten missions (search, product lists, image lists, thumbnails and previews, product retrieval, Roman authorisation check) and the backend of the upcoming archive browser: name lookup, query building, thumbnails and previews cached on disk and resized, product classification by what the app opens, cancellation and rate limits, and a Roman token that is checked against MAST before it is stored and never returned to the interface. The archive screen itself ships in 0.7.0.
+- ASDF: float16 arrays decode (Roman `wfi_image` >= 1.6.0 err and variance planes load and feed photometry); `fitswcs_imaging` transforms in pure ASDF files evaluate as an exact gWCS; Roman metadata reaches FILTER, PUPIL, DETECTOR, DATE-OBS, DATE-END, MJD-OBS, EXPMID and TIMESYS cards (ASDF time tags decoded); Roman WFI F062-F213 pivot wavelengths.
+
 ### Changed
 - Tile-compressed FITS is read, and RICE_1 / GZIP_2 written, through [fitsio-pure](https://crates.io/crates/fitsio-pure) with its `parallel` feature, a pure-Rust port of cfitsio's codecs, in place of the Rice, GZIP and quantization code in `infra/fits/compress` (net 1,388 lines removed).
   - Reads are bit-identical to the previous reader on the bundled fixtures, the HST sample data, astropy-written 26 MP RICE_1 / GZIP_1 / GZIP_2 files and Solar Orbiter EUI L2 frames. 26 MP compressed reads are 3.4 to 5.6x faster on 64 threads and 1.1 to 1.4x faster on one.
   - RICE_1 exports are 1.2 to 2.2x faster. Float exports quantize as cfitsio does: the same ZSCALE / ZZERO and error bound, with some pixels one step apart from before.
   - Lossless GZIP_2 floats carry `ZQUANTIZ = 'NONE'`, as cfitsio writes them.
   - The reader also opens HCOMPRESS_1, PLIO_1, any tile shape and SUBTRACTIVE_DITHER_2.
+
+### Fixed
+- Tile-compressed FITS no longer kills the app on a malformed or hostile file: the header is validated before decoding, and non-ASCII header bytes, a tile grid that does not match the table, a non-positive tile size, Rice BLOCKSIZE ≤ 0 (which looped forever), a BYTEPIX outside 1/2/4/8, column widths or a heap that run past the data, 64-bit descriptors that overflow, a GZIP tile that inflates beyond its size, a degenerate HCOMPRESS tile and a decoded size beyond the memory budget are refused with a message naming the cause. An integer compressed image whose nulls are declared only by ZBLANK now shows them as NaN. fitsio-pure is pinned to 0.21.6.
+- Quantized RICE_1 / GZIP_2 export of an image with ±inf pixels aborted the app inside the codec; infinities are now stored as NaN, finite values too large to quantize (above f32::MAX/16) are refused with a message suggesting a lossless or 16-bit export, and a refused export leaves no partial file behind.
+- Synthetic Airy stars: the Bessel J1 behind the Airy profile returned 1/√2 of the true value for arguments of 8 and above (beyond 2.55 λ/D from the centre), so the outer rings were drawn at half intensity and, after per-star normalisation, every pixel of a λ/D = 2.5 star was 2.1 % too bright. J1 now comes from libm (the FreeBSD msun implementation) and agrees with a high-precision series reference to 1e-12 over [0, 100].
+- Rotate and flip now transform the ERR and DQ planes with the image and write them as extensions with the source's observatory cards; photometry after a geometry step keeps errors and DQ masking.
+- A DQ or MASK plane from an instrument the app does not know (no JWST, Roman or HST telescope or instrument card on the image plane or on the DQ plane), such as the MASK HDU of a Subaru/HSC file opened as the active HDU, shows raw bit numbers (`BIT n`, only the bits present in the plane), overlays nothing by default and excludes nothing from statistics, contours and photometry, which no longer mark such a measurement as DQ-masked; it used to apply the JWST flag names, the JWST overlay and the JWST exclusion of bit 0. Photometry no longer reports DQ saturation from such a plane, and the headless server's pixel endpoint names its bits `BITn`. Cutouts of such files flag padded pixels with raw bits 0 and 9 and, when the box extends past the image, record it in a HISTORY card of the DQ extension.
 
 ## [0.6.7.2] - 2026-10-11
 

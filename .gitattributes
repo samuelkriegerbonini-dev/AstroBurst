@@ -1,3 +1,4 @@
 *.asdf binary
 *.fits binary
 tests/sample-data/*.fits filter=lfs diff=lfs merge=lfs -text
+src-tauri/licenses/** -text

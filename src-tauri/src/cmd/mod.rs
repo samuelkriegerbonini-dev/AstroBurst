@@ -28,3 +28,5 @@ pub mod spectral;
 pub mod catalog;
 pub mod geometry;
 pub mod pv;
+#[cfg(feature = "mast")]
+pub mod mast;

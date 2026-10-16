@@ -13,7 +13,7 @@ use crate::cmd::helpers;
 use crate::cmd::io::{load_rgb_file_planes, RgbPlanes};
 use crate::cmd::processing::is_display_referred;
 use crate::core::imaging::colormap::Colormap;
-use crate::core::imaging::dq_flags::{mask_preview_or, DqTable};
+use crate::core::imaging::dq_flags::{bits_present, mask_preview_or, DqTable};
 use crate::core::imaging::pixel_probe::{
     data_unit, grid_origin, grid_stats, grid_stats_json, int_grid, int_value_grid, pixel_grid,
     probe_companions, probe_json_with_companions, probe_pixel, wavelength_unit,
@@ -27,7 +27,7 @@ use crate::core::imaging::stf::{apply_stf_f32, auto_stf, make_stf_u8_fn, AutoStf
 use crate::infra::ipc::encode_mask_with_header;
 use crate::infra::render::tiles;
 use crate::types::constants::{
-    DEFAULT_MASK_PREVIEW_DIM, DEFAULT_PROBE_BOX, RES_ALGORITHM, RES_BIT, RES_CENTRE, RES_COLORMAPS,
+    DEFAULT_MASK_PREVIEW_DIM, DEFAULT_PROBE_BOX, RES_ALGORITHM, RES_BIT, RES_BITS_PRESENT, RES_CENTRE, RES_COLORMAPS,
     RES_DEFAULT_MASK, RES_DQ, RES_DQ_NAMES, RES_DQ_REF, RES_DQ_TABLE, RES_ELAPSED_MS, RES_ERR,
     RES_ERR_REF, RES_ERR_STATS, RES_EXCLUSION_MASK, RES_FLAGS, RES_HIGHLIGHT, RES_LABEL,
     RES_MIDTONE, RES_NAME, RES_NODATA, RES_NOTES, RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_SIZE,
@@ -117,23 +117,27 @@ pub(crate) fn resolve_overlay_mask(table: DqTable, requested: Option<u32>) -> u3
     requested.unwrap_or_else(|| table.default_overlay_mask())
 }
 
-pub(crate) fn dq_table_for(path: &str) -> anyhow::Result<(DqTable, Option<String>, Option<String>)> {
+pub(crate) fn dq_table_for(path: &str) -> anyhow::Result<(DqTable, Option<String>, Option<String>, Option<u32>)> {
     let active = load_cached_full(path)?;
     let comps = active.companions().cloned().unwrap_or_default();
     let dq_ref = comps.dq.as_ref().map(ImageRef::cache_key);
     let err_ref = comps.err.as_ref().map(ImageRef::cache_key);
     let loaded = load_companions(path)?;
-    let table = match loaded.dq {
-        Some((_, table)) => table,
+    let table = match &loaded.dq {
+        Some((_, table)) => *table,
         None => active.header().map(DqTable::select).unwrap_or(DqTable::Unknown),
     };
-    Ok((table, dq_ref, err_ref))
+    let present = (table == DqTable::Unknown).then(|| {
+        let plane = loaded.dq.as_ref().and_then(|(entry, _)| entry.int_plane());
+        plane.map_or(0, |plane| bits_present(&plane.bits))
+    });
+    Ok((table, dq_ref, err_ref, present))
 }
 
 #[tauri::command]
 pub async fn get_dq_flag_table_cmd(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let (table, dq_ref, err_ref) = dq_table_for(&path)?;
+        let (table, dq_ref, err_ref, present) = dq_table_for(&path)?;
         let flags: Vec<serde_json::Value> = table
             .flags()
             .iter()
@@ -145,6 +149,7 @@ pub async fn get_dq_flag_table_cmd(path: String) -> Result<serde_json::Value, St
             RES_FLAGS: flags,
             RES_DEFAULT_MASK: table.default_overlay_mask(),
             RES_EXCLUSION_MASK: table.exclusion_mask(),
+            RES_BITS_PRESENT: present,
             RES_DQ_REF: dq_ref,
             RES_ERR_REF: err_ref,
         }))
@@ -430,7 +435,8 @@ mod tests {
     fn overlay_mask_defaults_per_table() {
         assert_eq!(resolve_overlay_mask(DqTable::Jwst, None), 7);
         assert_eq!(resolve_overlay_mask(DqTable::Hst, None), 4 | 256 | 4096 | 8192);
-        assert_eq!(resolve_overlay_mask(DqTable::Unknown, None), 7);
+        assert_eq!(resolve_overlay_mask(DqTable::Unknown, None), 0);
+        assert_eq!(resolve_overlay_mask(DqTable::Unknown, Some(5)), 5);
         assert_eq!(resolve_overlay_mask(DqTable::Jwst, Some(0)), 0);
         assert_eq!(resolve_overlay_mask(DqTable::Hst, Some(1 << 31)), 1 << 31);
     }
@@ -445,18 +451,63 @@ mod tests {
         assert_eq!(sci_header.get("TELESCOP"), None);
         assert_eq!(DqTable::select(&sci_header), DqTable::Unknown);
 
-        let (table, dq_ref, err_ref) = dq_table_for(&format!("{}#hdu=1", p)).unwrap();
+        let (table, dq_ref, err_ref, present) = dq_table_for(&format!("{}#hdu=1", p)).unwrap();
         assert_eq!(table, DqTable::Jwst);
         assert_eq!(dq_ref.as_deref(), Some(format!("{}#hdu=3", p).as_str()));
         assert_eq!(err_ref.as_deref(), Some(format!("{}#hdu=2", p).as_str()));
+        assert_eq!(present, None);
 
-        let (table, dq_ref, _) = dq_table_for(&format!("{}#hdu=4", p)).unwrap();
+        let (table, dq_ref, _, present) = dq_table_for(&format!("{}#hdu=4", p)).unwrap();
         assert_eq!(table, DqTable::Unknown);
         assert!(dq_ref.is_none());
+        assert_eq!(present, Some(0));
 
-        let (table, dq_ref, _) = dq_table_for(&format!("{}#hdu=3", p)).unwrap();
+        let (table, dq_ref, _, _) = dq_table_for(&format!("{}#hdu=3", p)).unwrap();
         assert_eq!(table, DqTable::Jwst);
         assert_eq!(dq_ref.as_deref(), Some(format!("{}#hdu=3", p).as_str()));
+    }
+
+    #[tokio::test]
+    async fn dq_flag_table_lists_raw_bits_for_an_unknown_mask_and_names_for_jwst() {
+        use crate::infra::fits::reader::test_fixtures::{ramp_f32, write_test_mef, HduData, TestHdu};
+        let dir = tempfile::tempdir().unwrap();
+        let hsc = dir.path().join("hsc_mask.fits");
+        let mut mask = vec![0i32; 16];
+        mask[5] = 1;
+        write_test_mef(
+            &hsc,
+            &[("TELESCOP", "'Subaru'".into())],
+            &[
+                TestHdu { extname: Some("SCI"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("MASK"), extver: None, cols: 4, rows: 4, data: HduData::I32(mask), extra_cards: vec![] },
+            ],
+        );
+        let k = format!("{}#hdu=2", hsc.to_str().unwrap());
+        let unknown = get_dq_flag_table_cmd(k.clone()).await.unwrap();
+        assert_eq!(unknown[RES_TABLE], "unknown");
+        assert_eq!(unknown[RES_LABEL], "unknown (raw bits)");
+        assert_eq!(unknown[RES_FLAGS], json!([]));
+        assert_eq!(unknown[RES_BITS_PRESENT], 1);
+        assert_eq!(unknown[RES_EXCLUSION_MASK], 0);
+        assert_eq!(unknown[RES_DEFAULT_MASK], 0);
+        assert_eq!(unknown[RES_DQ_REF], k);
+
+        let jwst = dir.path().join("jwst_bits.fits");
+        let raw = |bits: u32| (bits as i64 - 2147483648) as i32;
+        let mut dq = vec![raw(0); 16];
+        dq[0] = raw(1);
+        dq[7] = raw(4);
+        dq[15] = raw(1 << 31);
+        sci_err_dq_mef_with_dq_cards(&jwst, 4, 4, dq, vec![("TELESCOP", "'JWST'".into())]);
+        let p = jwst.to_str().unwrap();
+        let named = get_dq_flag_table_cmd(format!("{p}#hdu=1")).await.unwrap();
+        assert_eq!(named[RES_TABLE], "jwst");
+        assert_eq!(named[RES_FLAGS].as_array().unwrap().len(), 32);
+        assert!(named[RES_BITS_PRESENT].is_null(), "{named}");
+        assert_eq!(named[RES_EXCLUSION_MASK], 1);
+        let lonely = get_dq_flag_table_cmd(format!("{p}#hdu=4")).await.unwrap();
+        assert_eq!(lonely[RES_BITS_PRESENT], 0);
+        assert!(lonely[RES_DQ_REF].is_null());
     }
 
     #[tokio::test]
@@ -890,12 +941,16 @@ mod tests {
         let key = format!("{}#hdu=1", path.to_str().unwrap());
         let loaded = load_companions(&key).unwrap();
         let (entry, table) = loaded.dq.unwrap();
+        assert_eq!(table, DqTable::Unknown);
         let plane = entry.int_plane().unwrap();
         let applied = resolve_overlay_mask(table, None);
+        assert_eq!(applied, 0);
+        assert!(mask_preview_or(&plane.bits, applied, 2).0.iter().all(|&c| c == 0));
+        let applied = resolve_overlay_mask(table, Some(1));
         let (cells, w, h) = mask_preview_or(&plane.bits, applied, 2);
         let bytes = encode_mask_with_header(&cells, w as u32, h as u32, applied, table.id());
         assert_eq!(bytes.len(), 16 + 4);
-        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 7);
+        assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 1);
         assert_eq!(u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]), 0xFFFF_FFFF);
         assert_eq!(&bytes[16..], &[0, 1, 0, 0]);
     }

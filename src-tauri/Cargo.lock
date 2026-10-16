@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "astroburst"
-version = "0.6.7"
+version = "0.6.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -176,6 +176,7 @@ dependencies = [
  "flate2",
  "image",
  "libc",
+ "libm",
  "log",
  "lz4_flex",
  "memmap2",

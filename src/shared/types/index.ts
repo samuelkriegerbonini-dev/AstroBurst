@@ -84,3 +84,31 @@ export type {
 } from "./regions";
 export { REGION_SHAPE_KINDS } from "./regions";
 export type { FrameGeometry, GeometryTarget, GeometrySite, ObservationGeometryResult, GeometryOverrides } from "./geometry";
+export type {
+  MastMissionId,
+  MastAvailability,
+  MastQuickFilter,
+  MastColumn,
+  MastMission,
+  MastResolved,
+  MastWhere,
+  MastFilterValues,
+  MastQuery,
+  MastLevelClass,
+  MastRow,
+  MastSearchPage,
+  MastImageEntry,
+  MastImageSet,
+  MastQuickWcs,
+  MastImageRef,
+  MastPreviewRef,
+  MastProductClass,
+  MastProduct,
+  MastProductList,
+  MastTokenStatus,
+  MastCacheInfo,
+  MastProgressEvent,
+  MastErrorCode,
+  MastErrorContext,
+  MastError,
+} from "./mast";

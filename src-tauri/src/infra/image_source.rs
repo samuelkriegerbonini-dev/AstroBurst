@@ -327,7 +327,10 @@ pub fn load_companions_into(
         }
     };
     let dq = comps.dq.as_ref().and_then(fetch).filter(|e| e.int_plane().is_some()).map(|e| {
-        let table = e.header().map(DqTable::select).unwrap_or(DqTable::Unknown);
+        let table = active
+            .header()
+            .map_or(DqTable::Unknown, DqTable::select)
+            .or_else(|| e.header().map_or(DqTable::Unknown, DqTable::select));
         (e, table)
     });
     let err = comps.err.as_ref().and_then(fetch);
@@ -388,8 +391,24 @@ pub fn plane_ref(path: &str, info: &HduInfo, is_asdf: bool) -> ImageRef {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) const ROMAN_TREE: &str = "roman:\n  meta:\n    instrument: {name: WFI}\n  data: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n  dq: !core/ndarray-1.0.0\n    data: [[0, 1], [0, 0]]\n    datatype: uint32\n";
+
+    pub(crate) fn write_asdf(dir: &tempfile::TempDir, name: &str, tree_yaml: &str) -> String {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.5.0\n%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
+        bytes.extend_from_slice(tree_yaml.as_bytes());
+        bytes.extend_from_slice(b"...\n");
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_support::{write_asdf, ROMAN_TREE};
     use crate::infra::fits::reader::test_fixtures::{
         cube_hdu, empty_primary_cards, plane_hdu, ramp_f32, sci_err_dq_mef, sci_err_dq_wave_mef,
         write_raw_hdus, write_test_mef, HduData, TestHdu,
@@ -404,16 +423,6 @@ mod tests {
         path.to_str().unwrap().to_string()
     }
 
-    fn write_asdf(dir: &tempfile::TempDir, name: &str, tree_yaml: &str) -> String {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"#ASDF 1.0.0\n#ASDF_STANDARD 1.5.0\n%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n");
-        bytes.extend_from_slice(tree_yaml.as_bytes());
-        bytes.extend_from_slice(b"...\n");
-        let path = dir.path().join(name);
-        std::fs::write(&path, bytes).unwrap();
-        path.to_str().unwrap().to_string()
-    }
-
     fn companions_of(r: &ImageRef) -> Companions {
         load_plane(r).unwrap().companions
     }
@@ -423,7 +432,6 @@ mod tests {
     }
 
     const ASDF_TREE: &str = "data: !core/ndarray-1.0.0\n  data: [[1, 2], [3, 4]]\n  datatype: float32\ndq: !core/ndarray-1.0.0\n  data: [[0, 1], [0, 0]]\n  datatype: uint32\nerr: !core/ndarray-1.0.0\n  data: [[0.1, 0.2], [0.3, 0.4]]\n  datatype: float32\n";
-    const ROMAN_TREE: &str = "roman:\n  meta:\n    instrument: {name: WFI}\n  data: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n  dq: !core/ndarray-1.0.0\n    data: [[0, 1], [0, 0]]\n    datatype: uint32\n";
 
     #[test]
     fn load_plane_resolves_fits_companions_by_extver() {

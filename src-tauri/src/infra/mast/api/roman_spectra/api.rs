@@ -4,7 +4,7 @@ use crate::infra::mast::api::mission::Mission;
 use crate::infra::mast::api::roman::RomanDatasetProducts;
 use crate::infra::mast::client::MastClient;
 use crate::infra::mast::error::MastResult;
-use crate::infra::mast::models::{DatasetIds, SearchParams};
+use crate::infra::mast::models::{AuthCheck, DatasetIds, SearchParams};
 
 #[derive(Debug, Clone)]
 pub struct RomanSpectraApi {
@@ -28,7 +28,7 @@ impl RomanSpectraApi {
         self.endpoint.search(params).await
     }
 
-    pub async fn auth_check(&self) -> MastResult<RomanSpectraSearchResults> {
+    pub async fn auth_check(&self) -> MastResult<AuthCheck> {
         self.endpoint.auth_check().await
     }
 

@@ -577,7 +577,7 @@ mod tests {
     use crate::cmd::analysis::resolve_dq_mask;
     use crate::core::imaging::region::test_support::{header_with_cd, north_up_cd};
     use crate::core::imaging::region_file::RegionProperties;
-    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef;
+    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef_with_dq_cards;
     use crate::infra::fits::writer::write_fits_mono;
     use ndarray::Array2;
 
@@ -640,7 +640,7 @@ mod tests {
         dq[1] = -2147483647;
         dq[6] = -2147483645;
         dq[9] = -2147483646;
-        sci_err_dq_mef(&path, 4, 4, dq);
+        sci_err_dq_mef_with_dq_cards(&path, 4, 4, dq, vec![("TELESCOP", "'JWST'".into())]);
         let key = format!("{}#hdu=1", path.to_str().unwrap());
         let whole = RegionShape::Box { x: 1.5, y: 1.5, width: 4.0, height: 4.0, angle: 0.0 };
         let overlapping_dq_pixel_6 = RegionShape::Box { x: 2.5, y: 1.5, width: 2.0, height: 2.0, angle: 0.0 };
@@ -991,7 +991,7 @@ mod tests {
         dq[1] = -2147483647;
         dq[6] = -2147483645;
         dq[9] = -2147483646;
-        sci_err_dq_mef(&path, 4, 4, dq);
+        sci_err_dq_mef_with_dq_cards(&path, 4, 4, dq, vec![("TELESCOP", "'JWST'".into())]);
         let key = format!("{}#hdu=1", path.to_str().unwrap());
         let entry = load_cached_full(&key).unwrap();
         let mask = resolve_dq_mask(&key, true, entry.arr().dim()).expect("mask");
@@ -1037,7 +1037,7 @@ mod tests {
         let mut dq = vec![-2147483648i32; 16];
         dq[1] = -2147483647;
         dq[6] = -2147483645;
-        sci_err_dq_mef(&path, 4, 4, dq);
+        sci_err_dq_mef_with_dq_cards(&path, 4, 4, dq, vec![("TELESCOP", "'JWST'".into())]);
         let key = format!("{}#hdu=1", path.to_str().unwrap());
         let entry = load_cached_full(&key).unwrap();
         let err = companion_err(&key, entry.arr().dim()).expect("ERR companion");

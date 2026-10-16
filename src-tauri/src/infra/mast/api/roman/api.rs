@@ -3,7 +3,7 @@ use crate::infra::mast::api::endpoint::MissionEndpoint;
 use crate::infra::mast::api::mission::Mission;
 use crate::infra::mast::client::MastClient;
 use crate::infra::mast::error::MastResult;
-use crate::infra::mast::models::{DatasetIds, ImageListResult, SearchParams};
+use crate::infra::mast::models::{AuthCheck, DatasetIds, ImageListResult, SearchParams};
 
 #[derive(Debug, Clone)]
 pub struct RomanApi {
@@ -27,7 +27,7 @@ impl RomanApi {
         self.endpoint.search(params).await
     }
 
-    pub async fn auth_check(&self) -> MastResult<RomanSearchResults> {
+    pub async fn auth_check(&self) -> MastResult<AuthCheck> {
         self.endpoint.auth_check().await
     }
 

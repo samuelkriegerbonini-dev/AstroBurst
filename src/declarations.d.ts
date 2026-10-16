@@ -25,16 +25,19 @@ declare module "lucide-react" {
   export const ArrowDown: Icon;
   export const ArrowLeftRight: Icon;
   export const ArrowRight: Icon;
+  export const AudioWaveform: Icon;
   export const BarChart3: Icon;
   export const Box: Icon;
   export const Camera: Icon;
   export const Check: Icon;
   export const CheckCircle2: Icon;
   export const ChevronDown: Icon;
+  export const ChevronLeft: Icon;
   export const ChevronRight: Icon;
   export const ChevronUp: Icon;
   export const ClipboardCopy: Icon;
   export const Clock: Icon;
+  export const CloudOff: Icon;
   export const Columns2: Icon;
   export const Compass: Icon;
   export const Copy: Icon;
@@ -43,6 +46,7 @@ declare module "lucide-react" {
   export const Database: Icon;
   export const Download: Icon;
   export const Eye: Icon;
+  export const ExternalLink: Icon;
   export const EyeOff: Icon;
   export const FileDown: Icon;
   export const FileSearch: Icon;
@@ -61,11 +65,15 @@ declare module "lucide-react" {
   export const ImageOff: Icon;
   export const Info: Icon;
   export const Key: Icon;
+  export const KeyRound: Icon;
   export const Keyboard: Icon;
   export const Layers: Icon;
   export const Layers2: Icon;
+  export const LayoutGrid: Icon;
   export const Link: Icon;
   export const Loader2: Icon;
+  export const Lock: Icon;
+  export const LockOpen: Icon;
   export const Maximize: Icon;
   export const Maximize2: Icon;
   export const Minimize2: Icon;
@@ -93,6 +101,7 @@ declare module "lucide-react" {
   export const Square: Icon;
   export const Star: Icon;
   export const Sun: Icon;
+  export const Table: Icon;
   export const Tag: Icon;
   export const Telescope: Icon;
   export const Timer: Icon;
@@ -153,6 +162,7 @@ declare module "@tauri-apps/plugin-fs" {
 
 declare module "@tauri-apps/plugin-opener" {
   export function revealItemInDir(path: string): Promise<void>;
+  export function openUrl(url: string | URL, openWith?: string): Promise<void>;
 }
 
 declare module "@tauri-apps/plugin-shell" {

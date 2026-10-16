@@ -1,14 +1,15 @@
-import { Telescope, Upload, FolderOpen } from "lucide-react";
+import { Telescope, Upload, FolderOpen, Archive } from "lucide-react";
 import { SUPPORTED_EXTENSIONS } from "../utils/validation";
 
 interface EmptyStateProps {
   onBrowseFiles: () => void;
   onSelectFolder: () => void;
+  onBrowseArchive?: () => void;
 }
 
 const FORMAT_BADGES = SUPPORTED_EXTENSIONS.map((ext) => `.${ext}`);
 
-export default function EmptyState({ onBrowseFiles, onSelectFolder }: EmptyStateProps) {
+export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArchive }: EmptyStateProps) {
   const handleBrowse = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -19,6 +20,12 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder }: EmptyState
     e.preventDefault();
     e.stopPropagation();
     onSelectFolder();
+  };
+
+  const handleArchive = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onBrowseArchive?.();
   };
 
   const isMac = navigator.platform?.includes("Mac");
@@ -57,7 +64,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder }: EmptyState
               <div className="flex-1 h-px bg-zinc-700/60" />
             </div>
 
-            <div className="flex gap-3">
+            <div className="flex flex-wrap justify-center gap-3">
               <button type="button" onClick={handleBrowse} className="ab-btn-primary">
                 <Upload size={16} />
                 Browse Files
@@ -72,6 +79,18 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder }: EmptyState
                 <FolderOpen size={16} />
                 Select Folder
               </button>
+              {onBrowseArchive && (
+                <button type="button" onClick={handleArchive} className="ab-btn-secondary" data-testid="empty-browse-archive">
+                  <Archive size={16} />
+                  Browse the MAST archive
+                  <kbd
+                    className="ml-1 text-[9px] font-mono px-1.5 py-0.5 rounded"
+                    style={{ background: "rgba(255,255,255,0.08)", color: "var(--ab-text-2)" }}
+                  >
+                    {isMac ? "⌘2" : "Ctrl+2"}
+                  </kbd>
+                </button>
+              )}
             </div>
           </div>
         </div>

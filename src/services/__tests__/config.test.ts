@@ -9,7 +9,7 @@ import { cleanupOutput, type AppConfig } from "../config";
 describe("AppConfig", () => {
   it("declares exactly the settings Rust AppConfig serializes, so no control writes a field update_config no longer has", () => {
     expectTypeOf<keyof AppConfig>().toEqualTypeOf<
-      "astrometry_api_key" | "astrometry_api_url" | "plate_solve_timeout_secs" | "output_max_size_mb"
+      "astrometry_api_key" | "astrometry_api_url" | "plate_solve_timeout_secs" | "output_max_size_mb" | "mast_token_transport"
     >();
   });
 });

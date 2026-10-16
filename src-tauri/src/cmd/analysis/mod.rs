@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::cmd::catalog::{cone_query_for_field, field_geometry, FieldGeometry};
 use crate::cmd::common::{
-    blocking_cmd, cached_header, dq_exclusion, load_cached, load_cached_full, load_companions, source_path,
+    blocking_cmd, cached_header, load_cached, load_cached_full, load_companions, source_path,
     HEADER_DISPLAY_REFERRED,
 };
 use crate::types::constants::{
@@ -80,14 +80,15 @@ pub(crate) fn resolve_dq_mask(path: &str, exclude_dq: bool, dims: (usize, usize)
     if !exclude_dq {
         return None;
     }
-    let map = match dq_exclusion(path) {
-        Ok(Some(m)) if m.dim() == dims => m,
-        Ok(_) => return None,
+    let (entry, table) = match load_companions(path) {
+        Ok(comps) => comps.dq.filter(|(_, table)| table.exclusion_mask() != 0)?,
         Err(e) => {
             log::warn!("DQ exclusion unavailable for {}: {:#}", path, e);
             return None;
         }
     };
+    let plane = entry.int_plane().filter(|plane| plane.bits.dim() == dims)?;
+    let map = exclusion_map(&plane.bits, table.exclusion_mask());
     let excluded = map.iter().filter(|&&v| v != 0).count() as u64;
     Some(DqMask { map, excluded })
 }
@@ -895,9 +896,10 @@ mod tests {
 
     use super::*;
     use crate::core::analysis::gain::{PoissonRoute, UnitClass, SKY_ONLY_ERRORS_WARNING};
+    use crate::cmd::common::dq_exclusion;
     use crate::core::astrometry::catalog::{catalog_cache_key, CatalogCacheKey, CatalogSource};
     use crate::infra::fits::reader::test_fixtures::{
-        cube_hdu, empty_primary_cards, sci_err_dq_mef, write_raw_hdus, write_test_mef, HduData, TestHdu,
+        cube_hdu, empty_primary_cards, sci_err_dq_mef_with_dq_cards, write_raw_hdus, write_test_mef, HduData, TestHdu,
     };
     use crate::types::constants::RES_GAIN_USED;
 
@@ -1209,6 +1211,27 @@ mod tests {
     }
 
     #[test]
+    fn a_dq_table_that_excludes_nothing_leaves_the_measurement_unmasked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hsc_mask.fits");
+        let mut mask = vec![0i32; 16];
+        mask[5] = 1;
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'Subaru'".into())],
+            &[
+                TestHdu { extname: Some("SCI"), extver: None, cols: 4, rows: 4, data: HduData::F32(vec![1.0; 16]), extra_cards: vec![] },
+                TestHdu { extname: Some("MASK"), extver: None, cols: 4, rows: 4, data: HduData::I32(mask), extra_cards: vec![] },
+            ],
+        );
+        let k = format!("{}#hdu=2", path.to_str().unwrap());
+        let dims = load_cached(&k).unwrap().arr().dim();
+        assert!(dq_exclusion(&k).unwrap().is_some());
+        assert!(resolve_dq_mask(&k, true, dims).is_none());
+        assert!(resolve_pixel_mask(&k, true, &[], dims).is_none());
+    }
+
+    #[test]
     fn resolve_dq_mask_counts_excluded_pixels_on_mef() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hist.fits");
@@ -1216,7 +1239,7 @@ mod tests {
         dq[1] = -2147483647;
         dq[6] = -2147483645;
         dq[9] = -2147483646;
-        sci_err_dq_mef(&path, 4, 4, dq);
+        sci_err_dq_mef_with_dq_cards(&path, 4, 4, dq, vec![("TELESCOP", "'JWST'".into())]);
         let key = format!("{}#hdu=1", path.to_str().unwrap());
         let entry = load_cached(&key).unwrap();
         let mask = resolve_dq_mask(&key, true, entry.arr().dim()).expect("mask");

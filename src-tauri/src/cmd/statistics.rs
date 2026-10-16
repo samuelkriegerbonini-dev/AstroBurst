@@ -154,7 +154,7 @@ mod tests {
         let path = dir.path().join(name);
         let mut dq = vec![-2147483648i32; 16];
         dq[3] = -2147483647;
-        sci_err_dq_mef_with_dq_cards(&path, 4, 4, dq, vec![("BUNIT", "'MJy/sr'".into())]);
+        sci_err_dq_mef_with_dq_cards(&path, 4, 4, dq, vec![("BUNIT", "'MJy/sr'".into()), ("TELESCOP", "'JWST'".into())]);
         path.to_str().unwrap().to_string()
     }
 
@@ -234,11 +234,38 @@ mod tests {
         let unit = entry.header().and_then(data_unit);
         assert_eq!(unit.as_deref(), Some("MJy/sr"));
         let mask = resolve_dq_mask(&key, true, entry.arr().dim()).expect("mask");
+        assert_eq!(mask.excluded, 1);
         let masked = channel_body(entry.arr(), None, Some(&mask.map), false).unwrap();
         let plain = channel_body(entry.arr(), None, None, false).unwrap();
         assert_eq!(masked.statistics.excluded, mask.excluded);
         assert_eq!(masked.statistics.count + masked.statistics.excluded, plain.statistics.count);
         assert_eq!(plain.statistics.excluded, 0);
+    }
+
+    #[tokio::test]
+    async fn statistics_of_an_unknown_origin_mask_plane_are_the_same_with_exclude_dq_on_and_off() {
+        use crate::infra::fits::reader::test_fixtures::{ramp_f32, write_test_mef, HduData, TestHdu};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hsc_mask.fits");
+        let mut mask = vec![0i32; 16];
+        mask[5] = 1;
+        mask[6] = 1 << 9;
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'Subaru'".into())],
+            &[
+                TestHdu { extname: Some("SCI"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("MASK"), extver: None, cols: 4, rows: 4, data: HduData::I32(mask), extra_cards: vec![] },
+            ],
+        );
+        let k = format!("{}#hdu=2", path.to_str().unwrap());
+        let mut on = compute_statistics_cmd(k.clone(), Some(true), None, None).await.unwrap();
+        let mut off = compute_statistics_cmd(k, Some(false), None, None).await.unwrap();
+        assert_eq!(on[RES_MASKED], false);
+        assert!(on[RES_DQ_EXCLUDED].is_null());
+        on.as_object_mut().unwrap().remove(RES_ELAPSED_MS);
+        off.as_object_mut().unwrap().remove(RES_ELAPSED_MS);
+        assert_eq!(on, off);
     }
 
     #[tokio::test]

@@ -22,6 +22,21 @@ pub const WCS_NODE_SEARCH_ORDER: [&str; 6] =
 
 const PIXEL_UNITS: [&str; 3] = ["", "pixel", "pix"];
 const ICRS_LIKE_REFERENCES: [&str; 3] = ["", "icrs", "fk5"];
+const FITSWCS_IMAGING: &str = "fitswcs_imaging";
+const FITSWCS_ANGLE_UNITS_DEG: [(&str, f64); 5] =
+    [("", 1.0), ("deg", 1.0), ("arcmin", 1.0 / 60.0), ("arcsec", 1.0 / 3600.0), ("mas", 1.0 / 3_600_000.0)];
+const PER_PIXEL_SUFFIXES: [&str; 4] = ["/pixel", "/pix", ".pixel**-1", ".pix**-1"];
+const ZENITHAL_PROJECTIONS: [&str; 8] = [
+    "zenithal_perspective",
+    "slant_zenithal_perspective",
+    "gnomonic",
+    "stereographic",
+    "slant_orthographic",
+    "zenithal_equidistant",
+    "zenithal_equal_area",
+    "airy",
+];
+const ZENITHAL_LON_POLE_DEG: f64 = 180.0;
 
 pub fn tag_family(node: &Value) -> Option<String> {
     matches!(node, Value::Tagged(_)).then(|| WcsInfo::model_name(node))
@@ -116,8 +131,13 @@ pub fn parse_node(node: &Value, arrays: ArrayResolver, path: &str) -> Result<Nod
 }
 
 fn parse_node_impl(node: &Value, arrays: ArrayResolver, path: &str, read_inverse: bool) -> Result<Node, GwcsError> {
-    let family = tag_family(node).unwrap_or_else(|| "untagged".to_string());
+    let family = if is_fitswcs_imaging(node) {
+        FITSWCS_IMAGING.to_string()
+    } else {
+        tag_family(node).unwrap_or_else(|| "untagged".to_string())
+    };
     let kind = match family.as_str() {
+        FITSWCS_IMAGING => fitswcs_imaging_kind(node, arrays, path)?,
         "compose" => {
             let (a, b) = compound_children(node, path)?;
             let a = parse_node_impl(a, arrays, &format!("{path}/forward[0]"), true)?;
@@ -503,6 +523,114 @@ fn affine_kind(node: &Value, arrays: ArrayResolver, path: &str) -> Result<Kind, 
     Ok(Kind::Affine2D { matrix: [[m[0], m[1]], [m[2], m[3]]], translation })
 }
 
+fn quantity_unit(v: &Value) -> String {
+    v.get("unit").and_then(Value::as_str).unwrap_or("").split_whitespace().collect()
+}
+
+fn pixel_factor(unit: &str) -> Option<f64> {
+    PIXEL_UNITS.iter().any(|u| u.eq_ignore_ascii_case(unit)).then_some(1.0)
+}
+
+fn dimensionless_factor(unit: &str) -> Option<f64> {
+    unit.is_empty().then_some(1.0)
+}
+
+fn angle_factor(unit: &str) -> Option<f64> {
+    FITSWCS_ANGLE_UNITS_DEG.iter().find(|(u, _)| u.eq_ignore_ascii_case(unit)).map(|&(_, f)| f)
+}
+
+fn angle_per_pixel_factor(unit: &str) -> Option<f64> {
+    let per_pixel = PER_PIXEL_SUFFIXES.iter().find_map(|suffix| unit.strip_suffix(suffix));
+    angle_factor(per_pixel.unwrap_or(unit))
+}
+
+struct FitswcsParam {
+    key: &'static str,
+    shape: &'static [usize],
+    default: &'static [f64],
+    factor: fn(&str) -> Option<f64>,
+    expected_units: &'static str,
+}
+
+const FITSWCS_CRPIX: FitswcsParam =
+    FitswcsParam { key: "crpix", shape: &[2], default: &[0.0, 0.0], factor: pixel_factor, expected_units: "pixel or dimensionless" };
+const FITSWCS_CRVAL: FitswcsParam =
+    FitswcsParam { key: "crval", shape: &[2], default: &[0.0, 0.0], factor: angle_factor, expected_units: "deg, arcmin, arcsec or mas" };
+const FITSWCS_CDELT: FitswcsParam = FitswcsParam {
+    key: "cdelt",
+    shape: &[2],
+    default: &[1.0, 1.0],
+    factor: angle_per_pixel_factor,
+    expected_units: "deg, arcmin, arcsec or mas (per pixel)",
+};
+const FITSWCS_PC: FitswcsParam =
+    FitswcsParam { key: "pc", shape: &[2, 2], default: &[1.0, 0.0, 0.0, 1.0], factor: dimensionless_factor, expected_units: "dimensionless" };
+
+fn fitswcs_values(node: &Value, param: &FitswcsParam, arrays: ArrayResolver, path: &str) -> Result<Vec<f64>, GwcsError> {
+    let Some(v) = node.get(param.key).filter(|v| !v.is_null()) else {
+        return Ok(param.default.to_vec());
+    };
+    let quantity = v.get("unit").is_some() && v.get("value").is_some();
+    let ((shape, values), unit) = if quantity {
+        (resolve_array(v, "value", arrays, path)?, quantity_unit(v))
+    } else {
+        (resolve_array(node, param.key, arrays, path)?, String::new())
+    };
+    if shape != param.shape {
+        return Err(GwcsError::Arrays {
+            path: path.to_string(),
+            reason: format!("fitswcs_imaging '{}' has shape {}; {} is required", param.key, shape_text(&shape), shape_text(param.shape)),
+        });
+    }
+    let Some(factor) = (param.factor)(&unit) else {
+        return Err(GwcsError::Parse(format!(
+            "fitswcs_imaging '{}' at {path} has unit '{unit}'; {} expected",
+            param.key, param.expected_units
+        )));
+    };
+    Ok(values.iter().map(|v| v * factor).collect())
+}
+
+fn fitswcs_projection(node: &Value, arrays: ArrayResolver, path: &str) -> Result<Node, GwcsError> {
+    let Some(projection) = node.get("projection").filter(|v| !v.is_null()) else {
+        return Err(GwcsError::Missing { path: path.to_string(), field: "projection".into() });
+    };
+    let projection_path = format!("{path}/projection");
+    let family = tag_family(projection).unwrap_or_else(|| "untagged".to_string());
+    if !ZENITHAL_PROJECTIONS.contains(&family.as_str()) {
+        return Err(GwcsError::Parse(format!(
+            "fitswcs_imaging projection '{family}' at {projection_path} is not zenithal: lon_pole is not derivable"
+        )));
+    }
+    let parsed = parse_node_impl(projection, arrays, &projection_path, true)?;
+    match parsed.kind {
+        Kind::Pix2SkyTan => Ok(parsed),
+        _ => Err(GwcsError::Parse(format!("fitswcs_imaging projection at {projection_path} must run pix2sky"))),
+    }
+}
+
+fn fitswcs_imaging_kind(node: &Value, arrays: ArrayResolver, path: &str) -> Result<Kind, GwcsError> {
+    let crpix = fitswcs_values(node, &FITSWCS_CRPIX, arrays, path)?;
+    let crval = fitswcs_values(node, &FITSWCS_CRVAL, arrays, path)?;
+    let cdelt = fitswcs_values(node, &FITSWCS_CDELT, arrays, path)?;
+    let pc = fitswcs_values(node, &FITSWCS_PC, arrays, path)?;
+    let projection = fitswcs_projection(node, arrays, path)?;
+    let leaf = |kind: Kind, tag: &str, param: &str| Node::new(kind, tag, &format!("{path}/{param}"));
+    let pair = |a: Kind, b: Kind, tag: &str, param: &str| {
+        leaf(Kind::Concatenate(Box::new(leaf(a, tag, param)), Box::new(leaf(b, tag, param))), "concatenate", param)
+    };
+    let stages = [
+        leaf(Kind::Affine2D { matrix: [[pc[0], pc[1]], [pc[2], pc[3]]], translation: [0.0, 0.0] }, "affine", "pc"),
+        pair(Kind::Scale(cdelt[0]), Kind::Scale(cdelt[1]), "scale", "cdelt"),
+        projection,
+        leaf(Kind::rotate_native2celestial(crval[0], crval[1], ZENITHAL_LON_POLE_DEG), "rotate3d", "crval"),
+    ];
+    let chain = stages.into_iter().fold(pair(Kind::Shift(-crpix[0]), Kind::Shift(-crpix[1]), "shift", "crpix"), |head, next| {
+        Node::new(Kind::Compose(Box::new(head), Box::new(next)), "compose", path)
+    });
+    Ok(chain.kind)
+}
+
 fn rotation_sequence_kind(node: &Value, path: &str) -> Result<Kind, GwcsError> {
     let Some(angles) = node.get("angles").and_then(Value::as_sequence) else {
         return Err(GwcsError::Missing { path: path.to_string(), field: "angles".into() });
@@ -649,25 +777,6 @@ mod tests {
     use super::super::transform::Vals;
     use super::super::NewtonOptions;
     use super::*;
-
-    fn wcs_body(first_frame: &str, transform: &str, last_frame: &str) -> String {
-        format!(
-            "wcs: !<tag:stsci.edu:gwcs/wcs-1.4.0>\n  name: ''\n  steps:\n  - !<tag:stsci.edu:gwcs/step-1.3.0>\n    frame: {first_frame}\n    transform: {transform}\n  - !<tag:stsci.edu:gwcs/step-1.3.0>\n    frame: {last_frame}\n    transform: null\n"
-        )
-    }
-
-    const DETECTOR: &str = "!<tag:stsci.edu:gwcs/frame2d-1.2.0> {axes_names: [x, y], axes_order: [0, 1], axis_physical_types: ['custom:x', 'custom:y'], name: detector, unit: [!unit/unit-1.0.0 pixel, !unit/unit-1.0.0 pixel]}";
-    const SHIFT_PAIR: &str = "!transform/concatenate-1.4.0 {forward: [!transform/shift-1.4.0 {inputs: [x], offset: 1.0, outputs: [y]}, !transform/shift-1.4.0 {inputs: [x], offset: 2.0, outputs: [y]}], inputs: [x0, x1], outputs: [y0, y1]}";
-
-    fn world(reference: &str, axes_order: &str, types: &str, unit: &str) -> String {
-        format!(
-            "!<tag:stsci.edu:gwcs/celestial_frame-1.2.0>\n      axes_names: [lon, lat]\n      axes_order: {axes_order}\n      axis_physical_types: {types}\n      name: world\n      reference_frame: !<tag:astropy.org:astropy/coordinates/frames/{reference}-1.1.0> {{frame_attributes: {{}}}}\n      unit: [!unit/unit-1.0.0 {unit}, !unit/unit-1.0.0 {unit}]"
-        )
-    }
-
-    fn icrs_world() -> String {
-        world("icrs", "[0, 1]", "[pos.eq.ra, pos.eq.dec]", "deg")
-    }
 
     fn parse_wcs_body(body: &str) -> Result<GwcsPipeline, GwcsError> {
         let tree = parse_real_syntax(body);
@@ -986,6 +1095,71 @@ mod tests {
         assert_eq!((transforms, wcs_files, refused), (34, 8, 2));
     }
 
+    const FITS_LIKE: &str = "!<tag:stsci.edu:gwcs/fitswcs_imaging-1.0.0> {crpix: [10.0, 20.0], crval: [1.0, 2.0], cdelt: [1.0e-5, 1.0e-5], pc: [[1, 0], [0, 1]], projection: !transform/gnomonic-1.3.0 {direction: pix2sky}}";
+    const STRUCTURAL_FITS_LIKE: &str = "{crpix: [10.0, 20.0], crval: [1.0, 2.0], projection: !transform/gnomonic-1.3.0 {direction: pix2sky}}";
+
+    fn leaf_kinds(node: &Node) -> Vec<String> {
+        match &node.kind {
+            Kind::Compose(a, b) | Kind::Concatenate(a, b) => [leaf_kinds(a), leaf_kinds(b)].concat(),
+            other => {
+                let debug = format!("{other:?}");
+                vec![debug.split(['(', ' ', '{']).next().unwrap_or_default().to_string()]
+            }
+        }
+    }
+
+    #[test]
+    fn fitswcs_imaging_expands_to_the_five_kinds() {
+        let body = wcs_body(DETECTOR, FITS_LIKE, &icrs_world());
+        assert_eq!(classify_wcs_node(&parse_real_syntax(&body)["wcs"]), WcsNodeClass::FitsEquivalent);
+        let pipeline = parse_wcs_body(&body).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(pipeline.n_steps(), 1);
+        assert_eq!(pipeline.frames_summary(), "detector->world");
+        let forward = pipeline.forward_node();
+        assert_eq!((forward.tag.as_str(), forward.n_inputs, forward.n_outputs), ("fitswcs_imaging", 2, 2));
+        assert_eq!(
+            leaf_kinds(forward),
+            ["Shift", "Shift", "Affine2D", "Scale", "Scale", "Pix2SkyTan", "RotateNative2Celestial"]
+        );
+        assert_close_slice(&pipeline.forward(10.0, 20.0, false), &[1.0, 2.0], 1e-12, "crpix (0-based) maps to crval");
+        assert_close_slice(&pipeline.backward_analytic(1.0, 2.0).unwrap(), &[10.0, 20.0], 1e-9, "crval maps back to crpix");
+        let off_reference = pipeline.forward(110.0, 20.0, false);
+        assert_close_slice(&pipeline.backward_analytic(off_reference[0], off_reference[1]).unwrap(), &[110.0, 20.0], 1e-8, "100 px from crpix, 1e-13 deg of round-off at cdelt 1e-5");
+        assert!((off_reference[0] - 1.0 - 1e-3 / 2f64.to_radians().cos()).abs() < 1e-8, "{off_reference:?}");
+    }
+
+    #[test]
+    fn a_fitswcs_imaging_with_a_non_zenithal_projection_is_refused_by_name() {
+        let refusal = |transform: &str| err_text(parse_wcs_body(&wcs_body(DETECTOR, transform, &icrs_world())));
+        assert_eq!(
+            refusal(&FITS_LIKE.replace("gnomonic-1.3.0", "mollweide-1.3.0")),
+            "gWCS: fitswcs_imaging projection 'mollweide' at steps[0].transform/projection is not zenithal: lon_pole is not derivable"
+        );
+        assert_eq!(
+            refusal(&FITS_LIKE.replace("gnomonic-1.3.0", "stereographic-1.3.0")),
+            "gWCS transform 'stereographic' at steps[0].transform/projection is not supported by the evaluator"
+        );
+        assert_eq!(
+            refusal(&FITS_LIKE.replace("direction: pix2sky", "direction: sky2pix")),
+            "gWCS: fitswcs_imaging projection at steps[0].transform/projection must run pix2sky"
+        );
+        assert_eq!(
+            refusal(&FITS_LIKE.replace("crval: [1.0, 2.0]", "crval: !unit/quantity-1.1.0 {value: [1.0, 2.0], unit: !unit/unit-1.0.0 rad}")),
+            "gWCS: fitswcs_imaging 'crval' at steps[0].transform has unit 'rad'; deg, arcmin, arcsec or mas expected"
+        );
+        assert_eq!(
+            refusal(&FITS_LIKE.replace("crpix: [10.0, 20.0]", "crpix: [10.0]")),
+            "gWCS array at steps[0].transform: fitswcs_imaging 'crpix' has shape [1]; [2] is required"
+        );
+
+        let structural = parse_wcs_body(&wcs_body(DETECTOR, STRUCTURAL_FITS_LIKE, &icrs_world())).unwrap_or_else(|e| panic!("{e:#}"));
+        assert_eq!(structural.forward_node().tag, "fitswcs_imaging");
+        assert_eq!(leaf_kinds(structural.forward_node()), leaf_kinds(parse_wcs_body(&wcs_body(DETECTOR, FITS_LIKE, &icrs_world())).unwrap().forward_node()));
+        assert_close_slice(&structural.forward(10.0, 20.0, false), &[1.0, 2.0], 1e-12, "defaults: crpix maps to crval");
+        let one_pixel_north = 2.0 + 1f64.to_radians().atan().to_degrees();
+        assert_close_slice(&structural.forward(10.0, 21.0, false), &[1.0, one_pixel_north], 1e-9, "default cdelt 1 deg and identity pc");
+    }
+
     #[test]
     fn find_wcs_node_follows_the_search_order_and_classifies() {
         let steps = "{steps: [{frame: !<tag:stsci.edu:gwcs/frame2d-1.2.0> {axes_names: [x, y], axes_order: [0, 1], name: detector}, transform: null}]}";
@@ -1006,11 +1180,11 @@ mod tests {
 
         let imaging = parse_real_syntax(&wcs_body(DETECTOR, SHIFT_PAIR, &icrs_world()));
         assert_eq!(classify_wcs_node(&imaging["wcs"]), WcsNodeClass::Imaging2D);
-        let fits_like = "!<tag:stsci.edu:gwcs/fitswcs_imaging-1.0.0> {crpix: [10.0, 20.0], crval: [1.0, 2.0], cdelt: [1.0e-5, 1.0e-5], pc: [[1, 0], [0, 1]], projection: !transform/gnomonic-1.3.0 {direction: pix2sky}}";
-        let i2d = parse_real_syntax(&wcs_body(DETECTOR, fits_like, &icrs_world()));
+        let i2d = parse_real_syntax(&wcs_body(DETECTOR, FITS_LIKE, &icrs_world()));
         assert_eq!(classify_wcs_node(&i2d["wcs"]), WcsNodeClass::FitsEquivalent);
         assert!(is_fitswcs_imaging(&i2d["wcs"]["steps"][0]["transform"]));
-        let structural = parse_real_syntax(&wcs_body(DETECTOR, "{crpix: [10.0, 20.0], crval: [1.0, 2.0], projection: !transform/gnomonic-1.3.0 {direction: pix2sky}}", &icrs_world()));
+        assert!(parse_wcs_body(&wcs_body(DETECTOR, FITS_LIKE, &icrs_world())).is_ok(), "the class keeps FITS ASDF HDUs on the header; the evaluator still reads the node");
+        let structural = parse_real_syntax(&wcs_body(DETECTOR, STRUCTURAL_FITS_LIKE, &icrs_world()));
         assert_eq!(classify_wcs_node(&structural["wcs"]), WcsNodeClass::FitsEquivalent);
         let cube = "!<tag:stsci.edu:gwcs/frame-1.2.0> {axes_names: [x, y, z], axes_order: [0, 1, 2], naxes: 3, name: detector}";
         let s3d = parse_real_syntax(&wcs_body(cube, SHIFT_PAIR, &icrs_world()));

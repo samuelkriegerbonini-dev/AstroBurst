@@ -11,16 +11,19 @@ use serde_json::json;
 use crate::core::analysis::gain::{CAMERA_GAIN_KEYWORD, GAIN_KEYWORDS};
 use crate::core::analysis::photometry::SATURATION_KEYWORDS;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
-use crate::core::imaging::dq_flags::{exclusion_map, DqTable};
+use crate::core::imaging::dq_flags::DqTable;
+use crate::core::imaging::push_history;
 use crate::core::imaging::sampling::{cell_range, preview_dims};
 use crate::core::imaging::stats::{compute_image_stats, is_valid_pixel};
 use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig, ImageStats, StfParams};
 use crate::core::metadata::photcal::{
     GENERIC_ZERO_POINT_KEYS, ROMAN_CONVERSION_MJY_KEYS, ROMAN_PIXEL_AREA_SR_KEYS,
 };
+use crate::infra::asdf::converter::is_asdf_file;
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry, PlaneLoad};
 use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::infra::fits::writer::is_layout_card;
+use crate::infra::fits::reader::extract_header_by_index;
+use crate::infra::fits::writer::{filter_header, is_layout_card, write_mef_images, HduData, ImageHdu};
 use crate::infra::image_source::{
     load_companions_into, load_plane, load_plane_header, resolve_plane_info, LoadedPlane,
 };
@@ -30,7 +33,7 @@ use crate::types::constants::{
     PLANE_KIND_HDU, RES_DQ_REF, RES_DQ_TABLE, RES_ERR_REF, RES_EXTNAME, RES_EXTVER, RES_INDEX, RES_IS_DQ, RES_IS_ERR,
     RES_KEY, RES_KIND, RES_SOURCE_PATH, WIZARD_CACHE_PREFIX,
 };
-use crate::types::header::HduHeader;
+use crate::types::header::{is_commentary_key, HduHeader};
 use crate::types::image_ref::{sanitize_fragment, ImageRef, OutputStems, PlaneSelector};
 
 pub(crate) use crate::infra::image_source::LoadedCompanions;
@@ -40,6 +43,7 @@ pub(crate) const HEADER_ABPROC: &str = "ABPROC";
 pub(crate) const HEADER_DISPLAY_REFERRED: &str = HEADER_DISPLAY_REFERRED_CARD;
 
 const DEFAULT_ABPROC: &str = "processed";
+const HEADER_PROGRAM: &str = "PROGRAM";
 const MAX_TRACKED_STAMPS: usize = 1024;
 const PREVIEW_PEAK_SIGNIFICANCE: f32 = 3.0;
 const READABLE_WIZARD_STEM_PREFIX: &str = "wizard_";
@@ -60,6 +64,9 @@ const CALIBRATION_CARDS: &[&str] = &[
     HEADER_DRIZZLE_SCALE,
 ];
 const CALIBRATION_PREFIXES: &[&str] = &["PHOT", "ROMAN_META_PHOTOMETRY"];
+const PLANE_ONLY_KEYS: &[&str] = &[
+    "BUNIT", "EXTNAME", "EXTVER", "LTV1", "LTV2", "LTM1_1", "LTM2_2", "BZERO", "BSCALE", "BLANK", "DATAMIN", "DATAMAX",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputValues {
@@ -278,12 +285,13 @@ pub(crate) fn load_companions(path: &str) -> Result<LoadedCompanions> {
     Ok(companions)
 }
 
+#[cfg(test)]
 pub(crate) fn dq_exclusion(path: &str) -> Result<Option<Array2<u8>>> {
     let comps = load_companions(path)?;
     Ok(comps.dq.and_then(|(entry, table)| {
         entry
             .int_plane()
-            .map(|plane| exclusion_map(&plane.bits, table.exclusion_mask()))
+            .map(|plane| crate::core::imaging::dq_flags::exclusion_map(&plane.bits, table.exclusion_mask()))
     }))
 }
 
@@ -302,7 +310,10 @@ pub(crate) fn plane_info_json(path: &str, entry: &ImageEntry) -> Result<serde_js
     let dq_ref = comps.dq.as_ref().map(ImageRef::cache_key);
     let err_ref = comps.err.as_ref().map(ImageRef::cache_key);
     let dq_table = match (&dq_ref, entry.header()) {
-        (Some(_), Some(header)) => Some(DqTable::select(header)),
+        (Some(dq_key), Some(header)) => Some(
+            DqTable::select(header)
+                .or_else(|| cached_header(dq_key).map_or(DqTable::Unknown, |h| DqTable::select(&h))),
+        ),
         _ => None,
     };
     Ok(json!({
@@ -411,6 +422,72 @@ pub(crate) fn write_derived_fits(path: &str, arr: &Array2<f32>, header: Option<&
     let written = crate::infra::fits::writer::write_fits_mono(path, arr, header);
     invalidate_written(path);
     written
+}
+
+fn names_program(header: Option<&HduHeader>) -> bool {
+    header.is_some_and(|h| h.cards.iter().any(|(k, _)| k.trim() == HEADER_PROGRAM))
+}
+
+fn with_software_stamp(header: Option<&HduHeader>, primary_header: Option<&HduHeader>) -> HduHeader {
+    let version = env!("CARGO_PKG_VERSION");
+    let mut stamped = header.cloned().unwrap_or_else(HduHeader::empty);
+    if !names_program(header) && !names_program(primary_header) {
+        stamped.set(HEADER_PROGRAM, format!("AstroBurst {version}"));
+    }
+    push_history(&mut stamped, &format!("Processed with AstroBurst {version}"));
+    stamped
+}
+
+fn same_data<'a>(data: &HduData<'a>) -> HduData<'a> {
+    match data {
+        HduData::F32(a) => HduData::F32(a),
+        HduData::I32(a) => HduData::I32(a),
+        HduData::U32(a) => HduData::U32(a),
+    }
+}
+
+pub(crate) fn write_derived_mef(path: &str, primary_header: Option<&HduHeader>, hdus: &[ImageHdu]) -> Result<()> {
+    let stamped = hdus.first().map(|first| with_software_stamp(first.header, primary_header));
+    let hdus: Vec<ImageHdu> = hdus
+        .iter()
+        .enumerate()
+        .map(|(i, hdu)| ImageHdu {
+            data: same_data(&hdu.data),
+            header: if i == 0 { stamped.as_ref() } else { hdu.header },
+            extname: hdu.extname,
+            extver: hdu.extver,
+        })
+        .collect();
+    GLOBAL_CUBE_CACHE.invalidate(path);
+    let written = write_mef_images(path, primary_header, &hdus);
+    invalidate_written(path);
+    written
+}
+
+pub(crate) fn provenance_only(merged: &HduHeader) -> HduHeader {
+    let mut out = HduHeader::empty();
+    let non_wcs = filter_header(merged, false, true).unwrap_or_else(HduHeader::empty);
+    for (key, value) in &non_wcs.cards {
+        let key = key.trim();
+        if is_commentary_key(key) {
+            out.cards.push((key.to_string(), value.clone()));
+        } else if !PLANE_ONLY_KEYS.contains(&key) {
+            out.set(key, value.clone());
+        }
+    }
+    out.inherit_string_keys(&non_wcs);
+    out
+}
+
+pub(crate) fn source_primary_header(path: &str, merged: Option<&HduHeader>) -> HduHeader {
+    let from_disk = resolve_single_image(&source_path(path)).ok().and_then(|(fits, _tmp)| {
+        if is_asdf_file(&fits) {
+            return None;
+        }
+        let file = File::open(&fits).ok()?;
+        extract_header_by_index(&file, 0).ok()
+    });
+    from_disk.as_ref().or(merged).map(provenance_only).unwrap_or_else(HduHeader::empty)
 }
 
 fn indexed_number(digits: &str) -> Option<usize> {
@@ -1000,6 +1077,50 @@ mod tests {
     }
 
     #[test]
+    fn provenance_only_drops_wcs_and_plane_cards_but_keeps_observation_metadata() {
+        let mut merged = HduHeader::empty();
+        for (k, v) in [
+            ("TELESCOP", "JWST"), ("INSTRUME", "NIRCAM"), ("DATE-OBS", "2024-01-01"), ("FILTER", "F200W"),
+            ("CRPIX1", "10"), ("CD1_1", "1e-5"), ("CTYPE1", "RA---TAN"), ("BUNIT", "MJy/sr"),
+            ("EXTNAME", "SCI"), ("EXTVER", "1"), ("LTV1", "-3"), ("BZERO", "0"),
+        ] {
+            merged.set(k, v.to_string());
+        }
+        let primary = provenance_only(&merged);
+        assert_eq!(primary.get("TELESCOP"), Some("JWST"));
+        assert_eq!(primary.get("INSTRUME"), Some("NIRCAM"));
+        assert_eq!(primary.get("DATE-OBS"), Some("2024-01-01"));
+        assert_eq!(primary.get("FILTER"), Some("F200W"));
+        for gone in ["CRPIX1", "CD1_1", "CTYPE1", "BUNIT", "EXTNAME", "EXTVER", "LTV1", "BZERO"] {
+            assert!(primary.get(gone).is_none(), "{gone}");
+            assert!(!primary.cards.iter().any(|(k, _)| k == gone), "{gone}");
+        }
+        assert!(provenance_only(&HduHeader::empty()).cards.is_empty());
+    }
+
+    #[test]
+    fn provenance_keeps_every_history_and_comment_line_out_of_the_keyword_index() {
+        let mut merged = HduHeader::empty();
+        merged.set("TELESCOP", "JWST".to_string());
+        for (key, line) in [("HISTORY", "flat-fielded"), ("COMMENT", "reduced by the pipeline"), ("HISTORY", "drizzled")] {
+            merged.cards.push((key.to_string(), line.to_string()));
+        }
+        let primary = provenance_only(&merged);
+        let commentary: Vec<(&str, &str)> = primary
+            .cards
+            .iter()
+            .filter(|(k, _)| is_commentary_key(k))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            commentary,
+            vec![("HISTORY", "flat-fielded"), ("COMMENT", "reduced by the pipeline"), ("HISTORY", "drizzled")]
+        );
+        assert!(primary.index.get("HISTORY").is_none() && primary.index.get("COMMENT").is_none());
+        assert_eq!(primary.get("TELESCOP"), Some("JWST"));
+    }
+
+    #[test]
     fn derived_output_header_removes_structure_and_keeps_calibration_only_for_linear_values() {
         let source = header_with(&[
             ("XTENSION", "IMAGE"),
@@ -1356,7 +1477,7 @@ mod tests {
         assert_eq!(j[RES_DQ_REF], format!("{}#hdu=3", p));
         assert_eq!(j[RES_ERR_REF], format!("{}#hdu=2", p));
         assert_eq!(j[RES_SOURCE_PATH], p);
-        assert_eq!(j[RES_DQ_TABLE], "unknown");
+        assert_eq!(j[RES_DQ_TABLE], "jwst");
 
         let lonely = format!("{}#hdu=4", p);
         let entry = load_cached_full(&lonely).unwrap();
@@ -1373,5 +1494,67 @@ mod tests {
         );
         let synthetic = GLOBAL_IMAGE_CACHE.get(synthetic_key).unwrap();
         assert!(plane_info_json(synthetic_key, &synthetic).is_err());
+    }
+
+    #[test]
+    fn an_active_mask_hdu_of_unknown_origin_keeps_raw_bits_and_excludes_nothing() {
+        use crate::infra::fits::reader::test_fixtures::{ramp_f32, write_test_mef, HduData, TestHdu};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hsc_mask.fits");
+        let mut mask = vec![0i32; 16];
+        mask[5] = 1;
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'Subaru'".into())],
+            &[
+                TestHdu { extname: Some("SCI"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("MASK"), extver: None, cols: 4, rows: 4, data: HduData::I32(mask), extra_cards: vec![] },
+            ],
+        );
+        let p = path.to_str().unwrap().to_string();
+        let k = format!("{p}#hdu=2");
+
+        let (dq, table) = load_companions(&k).unwrap().dq.expect("the active MASK HDU is its own DQ plane");
+        assert_eq!(table, DqTable::Unknown);
+        assert_eq!(dq.int_plane().unwrap().bits[[1, 1]], 1);
+        let excluded = dq_exclusion(&k).unwrap().expect("exclusion map of the MASK plane");
+        assert_eq!(excluded.dim(), (4, 4));
+        assert!(excluded.iter().all(|&v| v == 0), "{excluded:?}");
+
+        let entry = load_cached_full(&k).unwrap();
+        let info = plane_info_json(&k, &entry).unwrap();
+        assert_eq!(info[RES_IS_DQ], true);
+        assert_eq!(info[RES_DQ_REF], k);
+        assert_eq!(info[RES_DQ_TABLE], "unknown");
+
+        assert!(dq_exclusion(&format!("{p}#hdu=1")).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_dq_plane_without_telescope_cards_takes_the_table_of_its_image_plane() {
+        use crate::infra::fits::reader::test_fixtures::{ramp_f32, write_test_mef, HduData, TestHdu};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jwst_sci_cards.fits");
+        let mut dq = vec![0i32; 16];
+        dq[5] = 1;
+        dq[6] = 2;
+        write_test_mef(
+            &path,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![("TELESCOP", "'JWST'".into())] },
+                TestHdu { extname: Some("DQ"), extver: Some(1), cols: 4, rows: 4, data: HduData::I32(dq), extra_cards: vec![] },
+            ],
+        );
+        let k = format!("{}#hdu=1", path.to_str().unwrap());
+
+        let (_, table) = load_companions(&k).unwrap().dq.expect("dq companion");
+        assert_eq!(table, DqTable::Jwst);
+        let excluded = dq_exclusion(&k).unwrap().expect("exclusion map");
+        assert_eq!(excluded[[1, 1]], 1);
+        assert_eq!(excluded[[1, 2]], 0);
+        assert_eq!(excluded.iter().filter(|&&v| v != 0).count(), 1);
+        let info = plane_info_json(&k, &load_cached_full(&k).unwrap()).unwrap();
+        assert_eq!(info[RES_DQ_TABLE], "jwst");
     }
 }

@@ -12,6 +12,7 @@ use crate::types::image::IntPlane;
 use crate::types::{HduHeader, ImageRef, PlaneSelector};
 
 use super::compress;
+use super::compressed_guard;
 use super::file_bytes::read_file_bytes;
 
 pub fn create_mmap_random(file: &File) -> Result<Mmap> {
@@ -931,7 +932,7 @@ fn decode_hdu_plane(
     plane_index: usize,
 ) -> Result<Array2<f32>> {
     if hdu.is_compressed {
-        let mut planes = compress::decode_compressed_planes(mmap, &hdu.header, hdu.info.data_start)?;
+        let mut planes = compressed_guard::decode_planes(mmap, &hdu.header, hdu.info.data_start)?;
         if plane_index >= planes.len() {
             bail!(
                 "Compressed image HDU {} decoded to {} planes, plane {} was requested",
@@ -1099,7 +1100,7 @@ pub fn try_extract_rgb_mmap(file: &File) -> Result<Option<MmapRgbResult>> {
     };
 
     let (r, g, b) = if hdu.is_compressed {
-        let mut planes = compress::decode_compressed_planes(&mmap, &hdu.header, hdu.info.data_start)?;
+        let mut planes = compressed_guard::decode_planes(&mmap, &hdu.header, hdu.info.data_start)?;
         if planes.len() < 3 {
             bail!("Compressed RGB HDU decoded {} planes, expected at least 3", planes.len());
         }

@@ -75,6 +75,14 @@ pub const FILTER_WAVELENGTHS_NM: &[(&str, u32)] = &[
     ("F702W", 702),
     ("F775W", 775),
     ("F814W", 814),
+    ("F062", 629),
+    ("F087", 870),
+    ("F106", 1057),
+    ("F129", 1290),
+    ("F146", 1438),
+    ("F158", 1575),
+    ("F184", 1839),
+    ("F213", 2123),
 ];
 
 const FILTER_HEADER_KEYS: [&str; 6] = ["FILTER", "FILTER1", "FILTER2", "FILTNAM1", "FILTNAM2", "PUPIL"];
@@ -167,13 +175,40 @@ mod tests {
         assert_eq!(filter_code_and_wavelength_nm(""), None);
     }
 
+    const ROMAN_PIVOT_SOURCE: &str = "GalSim Roman_effarea_20210614 pivot; roman-docs WFI Optical Elements table (read 2026-10-16) agrees to the integer nm";
+
     #[test]
-    fn the_table_has_74_unique_codes() {
-        assert_eq!(FILTER_WAVELENGTHS_NM.len(), 74);
+    fn roman_wfi_pivots_resolve_exactly() {
+        let pivots: [(&str, u32, f64, &str); 8] = [
+            ("F062", 629, 0.6291, ROMAN_PIVOT_SOURCE),
+            ("F087", 870, 0.8696, ROMAN_PIVOT_SOURCE),
+            ("F106", 1057, 1.0567, ROMAN_PIVOT_SOURCE),
+            ("F129", 1290, 1.2901, ROMAN_PIVOT_SOURCE),
+            ("F146", 1438, 1.4378, ROMAN_PIVOT_SOURCE),
+            ("F158", 1575, 1.5749, ROMAN_PIVOT_SOURCE),
+            ("F184", 1839, 1.8394, ROMAN_PIVOT_SOURCE),
+            ("F213", 2123, 2.1230, ROMAN_PIVOT_SOURCE),
+        ];
+        for (code, nm, documented_um, source) in pivots {
+            assert_eq!(filter_code_and_wavelength_nm(code), Some((code, nm)), "{code} ({source})");
+            assert!((f64::from(nm) - documented_um * 1000.0).abs() <= 0.5, "{code}: table {nm} nm vs roman-docs {documented_um} um");
+        }
+        assert_eq!(filter_code_and_wavelength_nm("F158"), Some(("F158", 1575)));
+        assert_eq!(filter_code_and_wavelength_nm("F158M"), Some(("F158M", 1580)));
+        assert_eq!(filter_code_and_wavelength_nm("f129"), Some(("F129", 1290)));
+        assert_eq!(filter_code_and_wavelength_nm("F129;CLEAR"), Some(("F129", 1290)));
+        assert_eq!(filter_code_and_wavelength_nm("WFI/f213"), Some(("F213", 2123)));
+        let roman = header(&[("TELESCOP", "ROMAN"), ("INSTRUME", "WFI"), ("FILTER", "F129")]);
+        assert_eq!(effective_filter(&roman).as_deref(), Some("F129"));
+    }
+
+    #[test]
+    fn the_table_has_82_unique_codes() {
+        assert_eq!(FILTER_WAVELENGTHS_NM.len(), 82);
         let mut codes: Vec<&str> = FILTER_WAVELENGTHS_NM.iter().map(|(code, _)| *code).collect();
         codes.sort_unstable();
         codes.dedup();
-        assert_eq!(codes.len(), 74);
+        assert_eq!(codes.len(), 82);
         assert!(FILTER_WAVELENGTHS_NM.iter().all(|(code, nm)| *code == code.to_ascii_uppercase() && *nm > 0));
     }
 }

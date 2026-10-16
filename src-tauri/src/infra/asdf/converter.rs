@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use serde_yaml::Value;
 
 use super::parser::{AsdfError, AsdfFile};
-use super::tree::{untag, ArraySource, ByteOrder, DType, NdArrayMeta, WcsInfo};
+use super::tree::{f16_bits_to_f32, untag, ArraySource, ByteOrder, DType, NdArrayMeta, WcsInfo};
 use crate::core::astrometry::gwcs::{
     classify_wcs_node, find_wcs_node, fit_pipeline_tan_sip, parse_gwcs, SipFit, SipFitOptions, WcsNodeClass,
 };
@@ -55,7 +55,7 @@ pub fn bitpix_for_dtype(d: &DType) -> i64 {
         DType::Int16 | DType::UInt16 => 16,
         DType::Int32 | DType::UInt32 => 32,
         DType::Int64 | DType::UInt64 => 64,
-        DType::Float32 => -32,
+        DType::Float16 | DType::Float32 => -32,
         DType::Float64 => -64,
         DType::Complex64 | DType::Complex128 => 0,
     }
@@ -147,7 +147,7 @@ impl AsdfImage {
         let Some((key, node)) = find_wcs_node(&asdf.tree) else {
             return AsdfWcs::None(reason);
         };
-        if classify_wcs_node(node) != WcsNodeClass::Imaging2D {
+        if matches!(classify_wcs_node(node), WcsNodeClass::NotImaging2D(_)) {
             return AsdfWcs::None(reason);
         }
         let pipeline = match parse_gwcs(node, &arrays, &key.0) {
@@ -172,6 +172,7 @@ impl AsdfImage {
         let order = meta.byteorder;
         let values = match meta.dtype {
             DType::Float64 => raw.chunks_exact(8).map(|c| Self::read_f64(c, order)).collect(),
+            DType::Float16 => raw.chunks_exact(2).map(|c| f64::from(Self::read_f16(c, order))).collect(),
             DType::Float32 => raw
                 .chunks_exact(4)
                 .map(|c| f64::from(Self::read_f32(c, order)))
@@ -533,6 +534,14 @@ impl AsdfImage {
         Cow::Owned(out)
     }
 
+    fn read_f16(c: &[u8], order: ByteOrder) -> f32 {
+        let b = [c[0], c[1]];
+        f16_bits_to_f32(match order {
+            ByteOrder::Big => u16::from_be_bytes(b),
+            ByteOrder::Little => u16::from_le_bytes(b),
+        })
+    }
+
     fn read_f32(c: &[u8], order: ByteOrder) -> f32 {
         let b = [c[0], c[1], c[2], c[3]];
         match order {
@@ -586,6 +595,7 @@ impl AsdfImage {
             DType::UInt32 => decode!(4, u32),
             DType::Int64 => decode!(8, i64),
             DType::UInt64 => decode!(8, u64),
+            DType::Float16 => Self::decode_par(raw, 2, |c| Self::read_f16(c, order)),
             DType::Float32 => Self::decode_par(raw, 4, |c| Self::read_f32(c, order)),
             DType::Float64 => Self::decode_par(raw, 8, |c| Self::read_f64(c, order) as f32),
             DType::Complex64 => Self::decode_par(raw, 8, |c| {
@@ -1305,10 +1315,62 @@ mod tests {
         assert_eq!(bitpix_for_dtype(&DType::UInt32), 32);
         assert_eq!(bitpix_for_dtype(&DType::Int64), 64);
         assert_eq!(bitpix_for_dtype(&DType::UInt64), 64);
+        assert_eq!(bitpix_for_dtype(&DType::Float16), -32);
         assert_eq!(bitpix_for_dtype(&DType::Float32), -32);
         assert_eq!(bitpix_for_dtype(&DType::Float64), -64);
         assert_eq!(bitpix_for_dtype(&DType::Complex64), 0);
         assert_eq!(bitpix_for_dtype(&DType::Complex128), 0);
+    }
+
+    const FLOAT16_TREE: &str = "f16_le: !core/ndarray-1.0.0\n  source: 0\n  datatype: float16\n  byteorder: little\n  shape: [2, 3]\nf16_be: !core/ndarray-1.0.0\n  source: 1\n  datatype: float16\n  byteorder: big\n  shape: [2, 3]\nf16_special: !core/ndarray-1.0.0\n  source: 2\n  datatype: '<f2'\n  shape: [2, 4]\nroman:\n  var_rnoise: !core/ndarray-1.0.0\n    source: 0\n    datatype: float16\n    byteorder: little\n    shape: [2, 3]\n  var_flat: !core/ndarray-1.0.0\n    source: 1\n    datatype: float16\n    byteorder: big\n    shape: [2, 3]\n";
+
+    const F16_PLANE_BITS: [u16; 6] = [0x3C00, 0x3092, 0xC000, 0x7BFF, 0x3555, 0x0400];
+    const F16_PLANE_VALUES: [f32; 6] = [1.0, 0.142822265625, -2.0, 65504.0, 0.333251953125, 6.103515625e-5];
+    const F16_SPECIAL_BITS: [u16; 8] = [0x7C00, 0xFC00, 0x7E00, 0x7BFF, 0x0400, 0x0001, 0x8000, 0x3555];
+
+    fn float16_file() -> AsdfFile {
+        let le: Vec<u8> = F16_PLANE_BITS.iter().flat_map(|b| b.to_le_bytes()).collect();
+        let be: Vec<u8> = F16_PLANE_BITS.iter().flat_map(|b| b.to_be_bytes()).collect();
+        let special: Vec<u8> = F16_SPECIAL_BITS.iter().flat_map(|b| b.to_le_bytes()).collect();
+        AsdfFile::from_bytes(asdf_bytes(FLOAT16_TREE, &[raw_block(&le), raw_block(&be), raw_block(&special)])).unwrap()
+    }
+
+    #[test]
+    fn float16_blocks_decode_to_f32_in_both_byte_orders() {
+        let file = float16_file();
+        for key in ["f16_le", "f16_be", "roman.var_rnoise", "roman.var_flat"] {
+            let plane = AsdfImage::load_array(&file, key).unwrap_or_else(|e| panic!("{key}: {e}"));
+            assert_eq!((plane.height, plane.width, plane.channels), (2, 3, 1), "{key}");
+            assert_eq!(plane.data, F16_PLANE_VALUES, "{key}");
+            assert!(AsdfImage::load_array_int(&file, key).unwrap().is_none(), "{key} is a float plane, not an integer plane");
+        }
+        assert_eq!(AsdfImage::load_array(&file, "f16_le").unwrap().data[1], 0.142822265625, "1/7 rounded to binary16");
+
+        let special = AsdfImage::load_array(&file, "f16_special").unwrap().data;
+        assert_eq!(special.len(), 8);
+        assert_eq!((special[0], special[1]), (f32::INFINITY, f32::NEG_INFINITY));
+        assert!(special[2].is_nan());
+        assert_eq!(&special[3..6], &[65504.0, 6.103515625e-5, 5.960464477539063e-8]);
+        assert!(special[6] == 0.0 && special[6].is_sign_negative(), "{}", special[6]);
+        assert_eq!(special[7], 0.333251953125);
+
+        for key in ["f16_le", "f16_be", "f16_special"] {
+            let node = AsdfImage::node_at(&file.tree, key).unwrap();
+            let (shape, values) = AsdfImage::float_values(&file, node).unwrap_or_else(|| panic!("{key}: float_values"));
+            let widened: Vec<f64> = AsdfImage::load_array(&file, key).unwrap().data.iter().map(|&v| f64::from(v)).collect();
+            assert_eq!(shape.iter().product::<usize>(), values.len(), "{key}");
+            for (i, (got, expected)) in values.iter().zip(&widened).enumerate() {
+                assert!(got == expected || (got.is_nan() && expected.is_nan()), "{key}[{i}]: {got} vs {expected}");
+                assert_eq!(got.is_sign_negative(), expected.is_sign_negative(), "{key}[{i}] sign");
+            }
+        }
+
+        let listed: Vec<(String, i64, DType)> = list_arrays(&file).into_iter().map(|a| (a.key, a.bitpix, a.dtype)).collect();
+        let expected: Vec<(String, i64, DType)> = ["f16_le", "f16_be", "f16_special", "roman.var_rnoise", "roman.var_flat"]
+            .iter()
+            .map(|k| (k.to_string(), -32, DType::Float16))
+            .collect();
+        assert_eq!(listed, expected);
     }
 
     #[test]

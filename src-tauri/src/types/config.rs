@@ -7,6 +7,8 @@ pub struct AppConfig {
     pub plate_solve_timeout_secs: u64,
     #[serde(default)]
     pub output_max_size_mb: Option<u64>,
+    #[serde(default)]
+    pub mast_token_transport: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -16,6 +18,7 @@ impl Default for AppConfig {
             astrometry_api_url: "https://nova.astrometry.net".into(),
             plate_solve_timeout_secs: 120,
             output_max_size_mb: None,
+            mast_token_transport: None,
         }
     }
 }
@@ -37,6 +40,21 @@ mod tests {
         for field in RETIRED_FIELDS {
             assert!(value.get(field).is_none(), "{field} is still sent to the settings panel");
         }
+    }
+
+    #[test]
+    fn app_config_round_trips_mast_token_transport() {
+        let stored = serde_json::json!({
+            "astrometry_api_key": null,
+            "astrometry_api_url": "https://nova.astrometry.net",
+            "plate_solve_timeout_secs": 120,
+            "mast_token_transport": "cookie"
+        });
+        let config: AppConfig = serde_json::from_value(stored).unwrap();
+        let written = serde_json::to_value(&config).unwrap();
+        assert_eq!(written["mast_token_transport"], serde_json::json!("cookie"));
+        let defaults = serde_json::to_value(AppConfig::default()).unwrap();
+        assert_eq!(defaults["mast_token_transport"], serde_json::Value::Null);
     }
 
     #[test]

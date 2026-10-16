@@ -544,6 +544,15 @@ mod tests {
     }
 
     #[test]
+    fn roman_filter_code_is_not_misread_as_narrowband() {
+        let h = header_with(&[("TELESCOP", "ROMAN"), ("INSTRUME", "WFI"), ("FILTER", "F129")]);
+        assert!(detect_filter(&h).is_none());
+        for code in ["F062", "F087", "F106", "F146", "F158", "F184", "F213"] {
+            assert!(detect_filter(&header_with(&[("TELESCOP", "ROMAN"), ("FILTER", code)])).is_none(), "{code}");
+        }
+    }
+
+    #[test]
     fn test_detect_oiii_keyword() {
         let h = header_with(&[("FILTER", "OIII 6nm")]);
         let det = detect_filter(&h).unwrap();

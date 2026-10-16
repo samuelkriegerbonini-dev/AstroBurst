@@ -70,6 +70,7 @@ jobs:
             VERSION="${GITHUB_REF_NAME#v}"
             mkdir -p astroburst-${VERSION}
             cp "$BIN" astroburst-${VERSION}/
+            cp -r src-tauri/licenses astroburst-${VERSION}/
             tar czf astroburst-${VERSION}-linux-x86_64.tar.gz astroburst-${VERSION}
           fi
       - name: Upload artifacts to release

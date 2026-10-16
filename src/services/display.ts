@@ -40,8 +40,10 @@ export function probePixel(path: string, x: number, y: number, boxSize = 5): Pro
   return typedInvoke<PixelProbeResult>("probe_pixel_cmd", { path, x, y, boxSize });
 }
 
-export function getDqFlagTable(path: string): Promise<DqFlagTable> {
-  return typedInvoke<DqFlagTable>("get_dq_flag_table_cmd", { path });
+export type DqFlagTableResult = DqFlagTable & { bits_present: number | null };
+
+export function getDqFlagTable(path: string): Promise<DqFlagTableResult> {
+  return typedInvoke<DqFlagTableResult>("get_dq_flag_table_cmd", { path });
 }
 
 export async function getDqMaskPreview(path: string, mask: number, maxDim = 2048): Promise<DqMaskData> {

@@ -100,12 +100,96 @@ impl SearchParams {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct InfoColumn {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub column_type: Option<String>,
+    pub sortable: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawInfoColumn {
+    Name(String),
+    Object {
+        name: String,
+        #[serde(rename = "type", default)]
+        column_type: Option<Value>,
+        #[serde(default)]
+        sortable: Option<Value>,
+    },
+}
+
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(flag) => *flag,
+        Value::String(text) => {
+            let text = text.trim();
+            text.eq_ignore_ascii_case("yes") || text.eq_ignore_ascii_case("true")
+        }
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        _ => false,
+    }
+}
+
+fn value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+impl<'de> Deserialize<'de> for InfoColumn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(match RawInfoColumn::deserialize(deserializer)? {
+            RawInfoColumn::Name(name) => InfoColumn { name, column_type: None, sortable: false },
+            RawInfoColumn::Object { name, column_type, sortable } => InfoColumn {
+                name,
+                column_type: column_type.as_ref().and_then(value_text),
+                sortable: sortable.as_ref().is_some_and(truthy),
+            },
+        })
+    }
+}
+
+pub(crate) fn lenient_messages<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<Vec<Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|item| match item {
+            Value::Null => None,
+            Value::String(text) => Some(text),
+            Value::Object(map) => Some(
+                ["message", "msg", "text"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_else(|| Value::Object(map).to_string()),
+            ),
+            other => Some(other.to_string()),
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthCheck {
+    #[serde(default)]
+    pub authorized: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(deserialize = "T: Deserialize<'de>"))]
 pub struct SearchResults<T> {
     #[serde(default, deserialize_with = "null_as_default")]
-    pub info: Vec<String>,
-    #[serde(default, deserialize_with = "null_as_default")]
+    pub info: Vec<InfoColumn>,
+    #[serde(default, deserialize_with = "lenient_messages")]
     pub messages: Vec<String>,
     #[serde(default = "Vec::new", deserialize_with = "null_as_default")]
     pub results: Vec<T>,
@@ -197,6 +281,12 @@ pub struct ImageListResult {
     pub filename: String,
     #[serde(default)]
     pub category: String,
+    #[serde(rename = "productLevel", default, skip_serializing_if = "Option::is_none")]
+    pub product_level: Option<String>,
+    #[serde(rename = "vizUri", default, skip_serializing_if = "Option::is_none")]
+    pub viz_uri: Option<String>,
+    #[serde(rename = "scienceGroup", default, skip_serializing_if = "Option::is_none")]
+    pub science_group: Option<String>,
     #[serde(flatten)]
     pub extra: FieldMap,
 }
@@ -329,6 +419,80 @@ mod tests {
         assert_eq!(product.size, 1024);
         assert!(product.instrument_name.is_none());
         assert!(!product.mrp);
+    }
+
+    #[test]
+    fn info_columns_decode_both_conventions() {
+        let decoded: SearchResults<FieldMap> = serde_json::from_value(json!({
+            "info": [
+                {"name": "fileSetName", "type": "char", "sortable": "yes"},
+                {"name": "access", "type": "char", "sortable": "no"},
+                {"name": "search_pos", "type": "VARCHAR(255)", "sortable": true},
+                {"name": "ang_sep", "type": "NULL", "sortable": false},
+                {"name": "bare"},
+                "legacy_column"
+            ],
+            "messages": ["plain", {"message": "from object"}, {"code": 3}],
+            "results": []
+        }))
+        .unwrap();
+        let columns: Vec<(&str, Option<&str>, bool)> = decoded
+            .info
+            .iter()
+            .map(|c| (c.name.as_str(), c.column_type.as_deref(), c.sortable))
+            .collect();
+        assert_eq!(
+            columns,
+            vec![
+                ("fileSetName", Some("char"), true),
+                ("access", Some("char"), false),
+                ("search_pos", Some("VARCHAR(255)"), true),
+                ("ang_sep", Some("NULL"), false),
+                ("bare", None, false),
+                ("legacy_column", None, false),
+            ]
+        );
+        assert_eq!(decoded.messages, vec!["plain", "from object", "{\"code\":3}"]);
+    }
+
+    #[test]
+    fn live_fixtures_decode_with_object_info() {
+        for name in ["jwst_m16_l3.json", "hst_m16.json", "d.json", "c_wildcard.json"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/mast")
+                .join(name);
+            let bytes = std::fs::read(&path).unwrap();
+            let decoded: SearchResults<FieldMap> = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!decoded.info.is_empty(), "{name}");
+            assert!(decoded.total_results >= 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn auth_check_keeps_authorized_flag() {
+        let denied: AuthCheck = serde_json::from_str(r#"{"authorized":false}"#).unwrap();
+        let granted: AuthCheck = serde_json::from_str(r#"{"authorized":true,"extra":1}"#).unwrap();
+        assert!(!denied.authorized);
+        assert!(granted.authorized);
+    }
+
+    #[test]
+    fn image_list_entries_type_undocumented_keys() {
+        let entry: ImageListResult = serde_json::from_value(json!({
+            "url": "/get_image_thumbnail?fileset_name=ICK909030&filename=x_thumb.jpg",
+            "filename": "x_thumb.jpg",
+            "category": "THUMBNAIL",
+            "productLevel": "None",
+            "vizUri": "mast:hst/products/x.fits",
+            "scienceGroup": "HapScience",
+            "other": 1
+        }))
+        .unwrap();
+        assert_eq!(entry.product_level.as_deref(), Some("None"));
+        assert_eq!(entry.viz_uri.as_deref(), Some("mast:hst/products/x.fits"));
+        assert_eq!(entry.science_group.as_deref(), Some("HapScience"));
+        assert_eq!(entry.extra.len(), 1);
     }
 
     #[test]

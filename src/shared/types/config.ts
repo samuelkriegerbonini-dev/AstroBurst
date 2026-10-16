@@ -3,6 +3,7 @@ export interface AppConfig {
   astrometry_api_url: string;
   plate_solve_timeout_secs: number;
   output_max_size_mb: number | null;
+  mast_token_transport: "header" | "cookie" | null;
 }
 
 export interface ApiKeyResult {

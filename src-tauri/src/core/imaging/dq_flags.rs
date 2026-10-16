@@ -108,7 +108,7 @@ pub const HST_FLAGS: &[DqFlag] = &[
     flag(16384, "MANUAL"),
 ];
 
-const TELESCOPE_KEYS: &[&str] = &[
+pub(crate) const TELESCOPE_KEYS: &[&str] = &[
     "TELESCOP",
     "INSTRUME",
     "META_TELESCOPE",
@@ -139,11 +139,19 @@ impl DqTable {
         DqTable::Unknown
     }
 
+    pub fn or_else(self, fallback: impl FnOnce() -> DqTable) -> DqTable {
+        match self {
+            DqTable::Unknown => fallback(),
+            named => named,
+        }
+    }
+
     pub fn flags(self) -> &'static [DqFlag] {
         match self {
             DqTable::Hst => HST_FLAGS,
             DqTable::Roman => ROMAN_FLAGS,
-            DqTable::Jwst | DqTable::Unknown => JWST_FLAGS,
+            DqTable::Jwst => JWST_FLAGS,
+            DqTable::Unknown => &[],
         }
     }
 
@@ -152,7 +160,7 @@ impl DqTable {
             DqTable::Jwst => "jwst",
             DqTable::Roman => "roman",
             DqTable::Hst => "hst",
-            DqTable::Unknown => "unknown (JWST-convention bits)",
+            DqTable::Unknown => "unknown (raw bits)",
         }
     }
 
@@ -191,8 +199,9 @@ impl DqTable {
         let mut mask = 0u32;
         for name in names {
             let wanted = name.trim();
-            match self.flags().iter().find(|f| f.name.eq_ignore_ascii_case(wanted)) {
-                Some(f) => mask |= f.bit,
+            let named = self.flags().iter().find(|f| f.name.eq_ignore_ascii_case(wanted)).map(|f| f.bit);
+            match named.or_else(|| raw_bit(wanted)) {
+                Some(bit) => mask |= bit,
                 None => return Err(format!("unknown DQ flag name '{}' for table {}", wanted, self.label())),
             }
         }
@@ -202,15 +211,35 @@ impl DqTable {
     pub fn default_overlay_mask(self) -> u32 {
         match self {
             DqTable::Hst => 4 | 256 | 4096 | 8192,
-            DqTable::Jwst | DqTable::Roman | DqTable::Unknown => 7,
+            DqTable::Jwst | DqTable::Roman => 7,
+            DqTable::Unknown => 0,
         }
     }
 
     pub fn exclusion_mask(self) -> u32 {
         match self {
             DqTable::Hst => 0x3FFF,
-            DqTable::Jwst | DqTable::Roman | DqTable::Unknown => 1,
+            DqTable::Jwst | DqTable::Roman => 1,
+            DqTable::Unknown => 0,
         }
+    }
+}
+
+fn raw_bit(name: &str) -> Option<u32> {
+    let digits = name.get(..3).filter(|prefix| prefix.eq_ignore_ascii_case("BIT")).and(name.get(3..))?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u32>().ok().filter(|n| *n < 32).map(|n| 1u32 << n)
+}
+
+pub fn bits_present(bits: &Array2<u32>) -> u32 {
+    match bits.as_slice() {
+        Some(src) => src
+            .par_chunks(1 << 16)
+            .map(|chunk| chunk.iter().fold(0, |acc, &b| acc | b))
+            .reduce(|| 0, |a, b| a | b),
+        None => bits.iter().fold(0, |acc, &b| acc | b),
     }
 }
 
@@ -344,9 +373,9 @@ mod tests {
     }
 
     #[test]
-    fn roman_uses_its_own_table_and_unknown_uses_jwst_convention() {
+    fn roman_uses_its_own_table() {
         assert_eq!(DqTable::Roman.flags(), ROMAN_FLAGS);
-        assert_eq!(DqTable::Unknown.flags(), JWST_FLAGS);
+        assert_eq!(DqTable::Jwst.flags(), JWST_FLAGS);
         assert_eq!(DqTable::Hst.flags(), HST_FLAGS);
         assert_eq!(DqTable::Roman.format(128), "128: OUTLIER");
         assert_eq!(DqTable::Roman.format(16), "16: GW_AFFECTED_DATA");
@@ -361,7 +390,6 @@ mod tests {
             assert_eq!(DqTable::Roman.decode(f.bit), vec![f.name.to_string()]);
         }
         assert_eq!(DqTable::Roman.label(), "roman");
-        assert!(DqTable::Unknown.label().contains("JWST-convention"));
         assert_eq!(DqTable::Jwst.label(), "jwst");
         assert_eq!(DqTable::Hst.label(), "hst");
         assert_eq!(DqTable::Jwst.id(), 0);
@@ -373,6 +401,45 @@ mod tests {
         assert_eq!(DqTable::Roman.exclusion_mask(), 1);
         assert_eq!(DqTable::Hst.exclusion_mask(), 0x3FFF);
         assert_eq!(serde_json::to_value(DqTable::Roman).unwrap(), serde_json::json!("roman"));
+    }
+
+    #[test]
+    fn unknown_table_names_raw_bits_and_excludes_nothing() {
+        assert!(DqTable::Unknown.flags().is_empty());
+        assert_eq!(DqTable::Unknown.decode(5), vec!["BIT0".to_string(), "BIT2".to_string()]);
+        assert_eq!(DqTable::Unknown.format(1), "1: BIT0");
+        assert_eq!(DqTable::Unknown.format(0), "0: GOOD");
+        assert_eq!(DqTable::Unknown.decode(u32::MAX).len(), 32);
+        assert_eq!(DqTable::Unknown.exclusion_mask(), 0);
+        assert_eq!(DqTable::Unknown.default_overlay_mask(), 0);
+        assert_eq!(DqTable::Unknown.label(), "unknown (raw bits)");
+        assert_eq!(DqTable::Unknown.mask_from_names(&["BIT3"]), Ok(8));
+        assert_eq!(DqTable::Unknown.mask_from_names(&["BIT0", "bit31"]), Ok(1 | (1 << 31)));
+        assert_eq!(DqTable::Jwst.mask_from_names(&["BIT9"]), Ok(512));
+        assert_eq!(DqTable::Hst.mask_from_names(&["BIT20", "MASKED"]), Ok((1 << 20) | 8));
+        assert!(DqTable::Unknown.mask_from_names(&["DO_NOT_USE"]).is_err());
+        for bad in ["BIT32", "BIT", "BIT-1", "BIT 3", "BITX", "BIT1a"] {
+            assert!(DqTable::Unknown.mask_from_names(&[bad]).is_err(), "{bad}");
+        }
+        let unnamed = DqTable::Unknown.mask_from_names(&["SATURATED"]).unwrap_err();
+        assert!(unnamed.contains("unknown (raw bits)"), "{unnamed}");
+        assert_eq!(DqTable::Unknown.id(), 0xFFFF_FFFF);
+        let bits = Array2::from_shape_vec((1, 3), vec![0u32, 1, 4]).unwrap();
+        assert!(exclusion_map(&bits, DqTable::Unknown.exclusion_mask()).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn bits_present_ors_every_pixel_in_any_memory_order() {
+        let mut bits = Array2::<u32>::zeros((300, 400));
+        bits[[0, 0]] = 1;
+        bits[[150, 7]] = 4;
+        bits[[299, 399]] = 1 << 31;
+        assert_eq!(bits_present(&bits), 1 | 4 | (1 << 31));
+        let fortran = bits.clone().reversed_axes();
+        assert!(fortran.as_slice().is_none());
+        assert_eq!(bits_present(&fortran), 1 | 4 | (1 << 31));
+        assert_eq!(bits_present(&Array2::<u32>::zeros((3, 3))), 0);
+        assert_eq!(bits_present(&Array2::<u32>::zeros((0, 0))), 0);
     }
 
     #[test]

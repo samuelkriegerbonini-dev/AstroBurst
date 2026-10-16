@@ -35,6 +35,8 @@ fn urlencoding_decode(input: &str) -> String {
 pub fn run() {
     crate::core::astrometry::catalog_disk::init_from_env();
     crate::core::astrometry::catalog::init_vizier_url_from_env();
+    #[cfg(feature = "mast")]
+    crate::infra::mast::settings::init_from_env();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -105,6 +107,8 @@ pub fn run() {
                 let _ = std::fs::remove_dir_all(&output_dir);
                 let _ = std::fs::create_dir_all(&output_dir);
             }
+            #[cfg(feature = "mast")]
+            cmd::mast::install(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -248,6 +252,34 @@ pub fn run() {
             cmd::output::cancel_progress_cmd,
             cmd::geometry::observation_geometry_cmd,
             cmd::pv::pv_diagram_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_missions_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_probe_mission_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_resolve_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_search_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_image_list_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_thumbnail_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_preview_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_products_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_cancel_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_token_status_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_token_save_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_token_clear_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_cache_info_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_cache_clear_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AstroBurst");

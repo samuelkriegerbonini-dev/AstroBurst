@@ -630,9 +630,53 @@ fn rice_quantized(quantize_level: f64) -> TileCompression {
     )
 }
 
+fn quantizes_floats(compression: &TileCompression) -> bool {
+    *compression != compression.clone().lossless()
+}
+
+const NOISE5_WEIGHT_SUM: f32 = 16.0;
+
+fn quantizable_floats<'a, T>(pixels: &'a [T], naxes: &[usize], limit: T, nan: T) -> Result<Cow<'a, [T]>>
+where
+    T: Copy + Send + Sync + Into<f64> + std::fmt::LowerExp,
+{
+    let bound: f64 = limit.into();
+    let too_large = |v: f64| v.is_finite() && v.abs() > bound;
+    if let Some(index) = pixels.par_iter().position_first(|&v| too_large(v.into())) {
+        let plane_pixels = naxes[0] * naxes[1];
+        let plane = if naxes.len() > 2 { format!(" of plane {}", index / plane_pixels) } else { String::new() };
+        bail!(
+            "cannot quantize the value {:e} at column {}, row {}{plane}: a quantized export needs every value within ±{limit:e}; use a lossless or 16-bit export for this image",
+            pixels[index],
+            index % naxes[0],
+            index % plane_pixels / naxes[0],
+        );
+    }
+    let is_infinite = |v: T| Into::<f64>::into(v).is_infinite();
+    Ok(if pixels.par_iter().any(|&v| is_infinite(v)) {
+        Cow::Owned(pixels.par_iter().map(|&v| if is_infinite(v) { nan } else { v }).collect())
+    } else {
+        Cow::Borrowed(pixels)
+    })
+}
+
+struct CompressedHdu {
+    header: Vec<u8>,
+    table: Vec<u8>,
+    data_start: usize,
+}
+
+impl CompressedHdu {
+    fn write_to(&self, writer: &mut BufWriter<File>) -> Result<()> {
+        writer.write_all(&self.header)?;
+        write_header_end(writer, self.header.len())?;
+        writer.write_all(&self.table[self.data_start..])?;
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn write_compressed_image(
-    writer: &mut BufWriter<File>,
+fn compressed_image_hdu(
     pixels: TilePixels,
     ncols: usize,
     nrows_per_plane: usize,
@@ -643,15 +687,24 @@ fn write_compressed_image(
     bzero: f64,
     bscale: f64,
     header: Option<&HduHeader>,
-) -> Result<()> {
+) -> Result<CompressedHdu> {
     let mut naxes = vec![ncols, nrows_per_plane];
     if nplanes > 1 {
         naxes.push(nplanes);
     }
+    let quantized = quantizes_floats(compression);
     let hdu = match &pixels {
         TilePixels::U8(p) => compress_image_hdu(&naxes, p, compression, &[]),
         TilePixels::I16(p) => compress_image_hdu(&naxes, p, compression, &[]),
         TilePixels::I32(p) => compress_image_hdu(&naxes, p, compression, &[]),
+        TilePixels::F32(p) if quantized => {
+            let limit = f32::MAX / NOISE5_WEIGHT_SUM;
+            compress_image_hdu(&naxes, &quantizable_floats(p, &naxes, limit, f32::NAN)?, compression, &[])
+        }
+        TilePixels::F64(p) if quantized => {
+            let limit = f64::MAX / f64::from(NOISE5_WEIGHT_SUM);
+            compress_image_hdu(&naxes, &quantizable_floats(p, &naxes, limit, f64::NAN)?, compression, &[])
+        }
         TilePixels::F32(p) => compress_image_hdu(&naxes, p, compression, &[]),
         TilePixels::F64(p) => compress_image_hdu(&naxes, p, compression, &[]),
     }
@@ -683,10 +736,11 @@ fn write_compressed_image(
     }
     push_provenance(&mut buf, header);
 
-    writer.write_all(&buf)?;
-    write_header_end(writer, buf.len())?;
-    writer.write_all(&hdu[data_start..])?;
-    Ok(())
+    Ok(CompressedHdu {
+        header: buf,
+        table: hdu,
+        data_start,
+    })
 }
 
 pub fn write_fits_mono_rice(
@@ -722,11 +776,7 @@ pub fn write_fits_mono_rice(
         )
     };
 
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    write_primary_hdu_stub(&mut writer, None)?;
-    write_compressed_image(
-        &mut writer,
+    let hdu = compressed_image_hdu(
         pixels,
         ncols,
         nrows,
@@ -738,6 +788,14 @@ pub fn write_fits_mono_rice(
         bscale,
         header,
     )?;
+    write_compressed_file(path, &hdu)
+}
+
+fn write_compressed_file(path: &str, hdu: &CompressedHdu) -> Result<()> {
+    let file = File::create(path).context("Failed to create FITS file")?;
+    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
+    write_primary_hdu_stub(&mut writer, None)?;
+    hdu.write_to(&mut writer)?;
     writer.flush()?;
     Ok(())
 }
@@ -797,11 +855,7 @@ pub fn write_fits_rgb_rice(
         )
     };
 
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    write_primary_hdu_stub(&mut writer, None)?;
-    write_compressed_image(
-        &mut writer,
+    let hdu = compressed_image_hdu(
         pixels,
         ncols,
         nrows,
@@ -813,8 +867,7 @@ pub fn write_fits_rgb_rice(
         bscale,
         header,
     )?;
-    writer.flush()?;
-    Ok(())
+    write_compressed_file(path, &hdu)
 }
 
 pub(crate) fn write_planes_quantized(
@@ -836,8 +889,7 @@ pub(crate) fn write_planes_quantized(
         pixels.extend_from_slice(p.as_slice().context("plane not contiguous")?);
     }
 
-    write_compressed_image(
-        writer,
+    compressed_image_hdu(
         TilePixels::F32(Cow::Owned(pixels)),
         ncols,
         nrows,
@@ -848,7 +900,8 @@ pub(crate) fn write_planes_quantized(
         0.0,
         1.0,
         header,
-    )
+    )?
+    .write_to(writer)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -879,8 +932,7 @@ pub(crate) fn write_planes_lossless_int(
         other => bail!("write_planes_lossless_int: unsupported ZBITPIX {other}"),
     };
 
-    write_compressed_image(
-        writer,
+    compressed_image_hdu(
         pixels,
         ncols,
         nrows,
@@ -891,7 +943,8 @@ pub(crate) fn write_planes_lossless_int(
         bzero,
         bscale,
         header,
-    )
+    )?
+    .write_to(writer)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -939,8 +992,7 @@ pub(crate) fn write_planes_gzip2_lossless(
         )
     };
 
-    write_compressed_image(
-        writer,
+    compressed_image_hdu(
         pixels,
         ncols,
         nrows,
@@ -951,7 +1003,8 @@ pub(crate) fn write_planes_gzip2_lossless(
         bzero,
         bscale,
         header,
-    )
+    )?
+    .write_to(writer)
 }
 
 pub enum HduData<'a> {
@@ -2019,5 +2072,291 @@ mod tests {
         }
         let int16 = dir.path().join("q_int16.fits");
         write_fits_mono_rice(int16.to_str().unwrap(), &data, None, 16, 0.0).unwrap();
+    }
+
+    fn with_values_at_columns_2_and_4(mut data: Array2<f32>, rows: &[(usize, f32)]) -> Array2<f32> {
+        for &(row, value) in rows {
+            data[[row, 2]] = value;
+            data[[row, 4]] = value;
+        }
+        data
+    }
+
+    fn with_nan_for_infinities(data: &Array2<f32>) -> Array2<f32> {
+        data.mapv(|v| if v.is_infinite() { f32::NAN } else { v })
+    }
+
+    fn assert_infinities_decode_as_nan(original: &Array2<f32>, decoded: &Array2<f32>) {
+        assert_eq!(decoded.dim(), original.dim());
+        let infinities = original.iter().filter(|v| v.is_infinite()).count();
+        assert!(infinities > 0, "the fixture must carry infinities");
+        for (index, (o, d)) in original.iter().zip(decoded.iter()).enumerate() {
+            if o.is_infinite() {
+                assert!(d.is_nan(), "pixel {index}: {o} must decode as NaN, got {d}");
+            } else {
+                assert!((o - d).abs() < 2.0, "pixel {index}: orig={o} dec={d}");
+            }
+        }
+    }
+
+    fn assert_same_pixels(a: &Array2<f32>, b: &Array2<f32>) {
+        assert_eq!(a.dim(), b.dim());
+        for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()), "pixel {index}: {x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn quantized_mono_export_with_infinities_stores_them_as_nan() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = with_values_at_columns_2_and_4(
+            smooth_test_image(217, 300),
+            &[(100, f32::INFINITY), (150, f32::NEG_INFINITY)],
+        );
+        let path = dir.path().join("inf_mono.fits");
+        write_fits_mono_rice(path.to_str().unwrap(), &data, None, -32, 4.0).unwrap();
+        let (_, decoded) = read_back_mono(path.to_str().unwrap());
+        assert_infinities_decode_as_nan(&data, &decoded);
+
+        let nan_path = dir.path().join("nan_mono.fits");
+        write_fits_mono_rice(nan_path.to_str().unwrap(), &with_nan_for_infinities(&data), None, -32, 4.0).unwrap();
+        let (_, from_nan) = read_back_mono(nan_path.to_str().unwrap());
+        assert_same_pixels(&decoded, &from_nan);
+    }
+
+    #[test]
+    fn quantized_rgb_export_with_infinities_stores_them_as_nan() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = smooth_test_image(217, 300);
+        let g = with_values_at_columns_2_and_4(r.mapv(|v| v * 0.5), &[(60, f32::INFINITY)]);
+        let b = r.mapv(|v| v + 5.0);
+        let path = dir.path().join("inf_rgb.fits");
+        write_fits_rgb_rice(path.to_str().unwrap(), &r, &g, &b, None, -32, 4.0).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let primary = parse_header_at(&bytes, 0).unwrap();
+        let parsed = parse_header_at(&bytes, primary.next_hdu_offset).unwrap();
+        let planes = decode_compressed_planes(&bytes, &parsed.header, parsed.data_start).unwrap();
+        assert_eq!(planes.len(), 3);
+        assert_infinities_decode_as_nan(&g, &planes[1]);
+        for (plane, original) in [(&planes[0], &r), (&planes[2], &b)] {
+            for (o, d) in original.iter().zip(plane.iter()) {
+                assert!((o - d).abs() < 2.0, "orig={o} dec={d}");
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_mef_export_with_infinities_stores_them_as_nan() {
+        use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
+        use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData, TestHdu};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (rows, cols) = (217, 300);
+        let sci = with_values_at_columns_2_and_4(smooth_test_image(rows, cols), &[(100, f32::INFINITY)]);
+        let err = smooth_test_image(rows, cols).mapv(|v| v * 0.1);
+        let source = dir.path().join("inf_source.fits");
+        write_test_mef(
+            &source,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols, rows, data: HduData::F32(sci.iter().copied().collect()), extra_cards: vec![] },
+                TestHdu { extname: Some("ERR"), extver: Some(1), cols, rows, data: HduData::F32(err.iter().copied().collect()), extra_cards: vec![] },
+            ],
+        );
+        let output = dir.path().join("inf_lossy.fits");
+        let opts = CompressOptions { mode: CompressMode::Lossy { quantize_level: 4.0 }, drop_extnames: vec![], raw_extnames: vec![] };
+        write_compressed_mef(source.to_str().unwrap(), output.to_str().unwrap(), &opts).unwrap();
+
+        let bytes = std::fs::read(&output).unwrap();
+        let primary = parse_header_at(&bytes, 0).unwrap();
+        let sci_hdu = parse_header_at(&bytes, primary.next_hdu_offset).unwrap();
+        assert_eq!(sci_hdu.header.get("EXTNAME"), Some("SCI"));
+        let decoded = decode_compressed_image(&bytes, &sci_hdu.header, sci_hdu.data_start).unwrap();
+        assert_infinities_decode_as_nan(&sci, &decoded);
+    }
+
+    #[test]
+    fn lossless_mef_export_keeps_infinities_bit_exact() {
+        use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
+        use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData, TestHdu};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (rows, cols) = (40, 60);
+        let sci = with_values_at_columns_2_and_4(
+            smooth_test_image(rows, cols),
+            &[(10, f32::INFINITY), (20, f32::NEG_INFINITY)],
+        );
+        let source = dir.path().join("inf_lossless_source.fits");
+        write_test_mef(
+            &source,
+            &[],
+            &[TestHdu { extname: Some("SCI"), extver: Some(1), cols, rows, data: HduData::F32(sci.iter().copied().collect()), extra_cards: vec![] }],
+        );
+        let output = dir.path().join("inf_lossless.fits");
+        let opts = CompressOptions { mode: CompressMode::Lossless, drop_extnames: vec![], raw_extnames: vec![] };
+        write_compressed_mef(source.to_str().unwrap(), output.to_str().unwrap(), &opts).unwrap();
+
+        let bytes = std::fs::read(&output).unwrap();
+        let primary = parse_header_at(&bytes, 0).unwrap();
+        let sci_hdu = parse_header_at(&bytes, primary.next_hdu_offset).unwrap();
+        let decoded = decode_compressed_image(&bytes, &sci_hdu.header, sci_hdu.data_start).unwrap();
+        assert_same_pixels(&sci, &decoded);
+    }
+
+    const BEYOND_THE_NOISE_RANGE: f32 = 1e38;
+
+    fn assert_refused_as_too_large(result: Result<()>, value: &str, at: &str) {
+        let err = format!("{:#}", result.expect_err("a value whose noise estimate overflows must be refused"));
+        assert!(
+            err.contains(value) && err.contains(at) && err.contains("lossless") && err.contains("16-bit"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn quantized_mono_export_refuses_values_whose_noise_estimate_overflows() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = with_values_at_columns_2_and_4(smooth_test_image(217, 300), &[(100, BEYOND_THE_NOISE_RANGE)]);
+        let path = dir.path().join("huge_mono.fits");
+        let result = write_fits_mono_rice(path.to_str().unwrap(), &data, None, -32, 4.0);
+        assert_refused_as_too_large(result, "1e38", "column 2, row 100");
+    }
+
+    #[test]
+    fn quantized_rgb_export_refuses_values_whose_noise_estimate_overflows() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = smooth_test_image(217, 300);
+        let g = with_values_at_columns_2_and_4(r.clone(), &[(100, BEYOND_THE_NOISE_RANGE)]);
+        let path = dir.path().join("huge_rgb.fits");
+        let result = write_fits_rgb_rice(path.to_str().unwrap(), &r, &g, &r, None, -32, 4.0);
+        assert_refused_as_too_large(result, "1e38", "column 2, row 100 of plane 1");
+    }
+
+    #[test]
+    fn lossy_mef_export_refuses_values_whose_noise_estimate_overflows() {
+        use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
+        use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData, TestHdu};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (rows, cols) = (217, 300);
+        let sci = with_values_at_columns_2_and_4(smooth_test_image(rows, cols), &[(100, BEYOND_THE_NOISE_RANGE)]);
+        let source = dir.path().join("huge_source.fits");
+        write_test_mef(
+            &source,
+            &[],
+            &[TestHdu { extname: Some("SCI"), extver: Some(1), cols, rows, data: HduData::F32(sci.iter().copied().collect()), extra_cards: vec![] }],
+        );
+        let output = dir.path().join("huge_lossy.fits");
+        let opts = CompressOptions { mode: CompressMode::Lossy { quantize_level: 4.0 }, drop_extnames: vec![], raw_extnames: vec![] };
+        let result = write_compressed_mef(source.to_str().unwrap(), output.to_str().unwrap(), &opts).map(|_| ());
+        assert_refused_as_too_large(result, "1e38", "column 2, row 100");
+    }
+
+    fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_refused_quantized_export_creates_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = with_values_at_columns_2_and_4(smooth_test_image(217, 300), &[(100, BEYOND_THE_NOISE_RANGE)]);
+        let mono = dir.path().join("refused_mono.fits");
+        assert!(write_fits_mono_rice(mono.to_str().unwrap(), &data, None, -32, 4.0).is_err());
+        let rgb = dir.path().join("refused_rgb.fits");
+        assert!(write_fits_rgb_rice(rgb.to_str().unwrap(), &data, &data, &data, None, -32, 4.0).is_err());
+        assert_eq!(dir_entries(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_refused_quantized_export_keeps_the_previous_file_at_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = with_values_at_columns_2_and_4(smooth_test_image(217, 300), &[(100, BEYOND_THE_NOISE_RANGE)]);
+        let mono = dir.path().join("previous_mono.fits");
+        let rgb = dir.path().join("previous_rgb.fits");
+        for path in [&mono, &rgb] {
+            std::fs::write(path, b"previous export").unwrap();
+        }
+        assert!(write_fits_mono_rice(mono.to_str().unwrap(), &data, None, -32, 4.0).is_err());
+        assert!(write_fits_rgb_rice(rgb.to_str().unwrap(), &data, &data, &data, None, -32, 4.0).is_err());
+        for path in [&mono, &rgb] {
+            assert_eq!(std::fs::read(path).unwrap(), b"previous export", "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn a_refused_lossy_mef_export_creates_no_file_and_keeps_the_previous_one() {
+        use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
+        use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData, TestHdu};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (rows, cols) = (217, 300);
+        let sci = with_values_at_columns_2_and_4(smooth_test_image(rows, cols), &[(100, BEYOND_THE_NOISE_RANGE)]);
+        let source = dir.path().join("source.fits");
+        write_test_mef(
+            &source,
+            &[],
+            &[TestHdu { extname: Some("SCI"), extver: Some(1), cols, rows, data: HduData::F32(sci.iter().copied().collect()), extra_cards: vec![] }],
+        );
+        let opts = CompressOptions { mode: CompressMode::Lossy { quantize_level: 4.0 }, drop_extnames: vec![], raw_extnames: vec![] };
+
+        let fresh = dir.path().join("fresh.fits");
+        assert!(write_compressed_mef(source.to_str().unwrap(), fresh.to_str().unwrap(), &opts).is_err());
+        assert_eq!(dir_entries(dir.path()), ["source.fits"]);
+
+        let previous = dir.path().join("previous.fits");
+        std::fs::write(&previous, b"previous export").unwrap();
+        assert!(write_compressed_mef(source.to_str().unwrap(), previous.to_str().unwrap(), &opts).is_err());
+        assert_eq!(std::fs::read(&previous).unwrap(), b"previous export");
+        assert_eq!(dir_entries(dir.path()), ["previous.fits", "source.fits"]);
+    }
+
+    #[test]
+    fn quantized_f64_tiles_refuse_values_whose_noise_estimate_overflows() {
+        let (rows, cols) = (217, 300);
+        let mut pixels: Vec<f64> = smooth_test_image(rows, cols).iter().map(|&v| f64::from(v)).collect();
+        for column in [2, 4] {
+            pixels[100 * cols + column] = 1e308;
+        }
+        let result = compressed_image_hdu(
+            TilePixels::F64(pixels),
+            cols,
+            rows,
+            1,
+            false,
+            &rice_quantized(4.0),
+            None,
+            0.0,
+            1.0,
+            None,
+        )
+        .map(|_| ());
+        assert_refused_as_too_large(result, "1e308", "column 2, row 100");
+    }
+
+    #[test]
+    fn quantized_export_keeps_the_largest_values_its_noise_estimate_can_take() {
+        let dir = tempfile::tempdir().unwrap();
+        let limit = f32::MAX / 16.0;
+        let mut data = smooth_test_image(217, 300);
+        let extremes: Vec<(usize, usize)> = [100, 150]
+            .into_iter()
+            .flat_map(|row| [2, 4, 6, 8, 10].map(|column| (row, column)))
+            .collect();
+        for &(row, column) in &extremes {
+            let alternating = if column % 4 == 2 { limit } else { -limit };
+            data[[row, column]] = if row == 100 { alternating } else { -alternating };
+        }
+        let path = dir.path().join("largest_quantizable.fits");
+        write_fits_mono_rice(path.to_str().unwrap(), &data, None, -32, 4.0).unwrap();
+        let (_, decoded) = read_back_mono(path.to_str().unwrap());
+        for &(row, column) in &extremes {
+            assert_eq!(decoded[[row, column]], data[[row, column]], "({row}, {column})");
+        }
     }
 }

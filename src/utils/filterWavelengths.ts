@@ -24,6 +24,8 @@ const FILTER_WAVELENGTHS_NM = new Map<string, number>([
   ["F439W", 439], ["F450W", 450], ["F475W", 475], ["F555W", 555],
   ["F606W", 606], ["F625W", 625], ["F675W", 675], ["F702W", 702],
   ["F775W", 775], ["F814W", 814],
+  ["F062", 629], ["F087", 870], ["F106", 1057], ["F129", 1290],
+  ["F146", 1438], ["F158", 1575], ["F184", 1839], ["F213", 2123],
 ]);
 
 export function filterWavelengthEntries(): [string, number][] {

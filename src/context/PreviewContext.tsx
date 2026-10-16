@@ -30,14 +30,13 @@ import type {
   RawPixelData,
   RawRgbPixelData,
   PlaneInfo,
-  DqFlagTable,
   DqMaskData,
   DqOverlaySettings,
 } from "../shared/types";
 import type { FileRenderState, ProcessedResult, ProcessingChain } from "../shared/types/preview";
 import type { CubeDims } from "../shared/types";
 import { DEFAULT_DISPLAY_SETTINGS, type DisplaySettings, type ScaleLimits } from "../shared/types/display";
-import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview } from "../services/display";
+import { computeScaleLimits, getColormapLut, getDqFlagTable, getDqMaskPreview, type DqFlagTableResult } from "../services/display";
 import { GRAY_LUT_RGBA } from "../utils/displayTransfer";
 import {
   displayForRecordChange,
@@ -182,7 +181,7 @@ interface DisplayContextValue {
 
 interface DqContextValue {
   plane: PlaneInfo | null;
-  flagTable: DqFlagTable | null;
+  flagTable: DqFlagTableResult | null;
   overlay: DqOverlaySettings;
   setOverlay: (patch: Partial<DqOverlaySettings>) => void;
   excludeDq: boolean;
@@ -404,7 +403,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [limitsLoading, setLimitsLoading] = useState(false);
   const [limitsError, setLimitsError] = useState<string | null>(null);
   const [lut, setLut] = useState<Uint8Array | null>(GRAY_LUT_RGBA);
-  const [flagTable, setFlagTable] = useState<DqFlagTable | null>(null);
+  const [flagTable, setFlagTable] = useState<DqFlagTableResult | null>(null);
   const [overlay, setOverlayRaw] = useState<DqOverlaySettings>(DEFAULT_DQ_OVERLAY);
   const [excludeDq, setExcludeDq] = useState(false);
   const [dqMask, setDqMask] = useState<DqMaskData | null>(null);

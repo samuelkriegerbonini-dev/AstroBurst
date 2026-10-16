@@ -8,6 +8,7 @@ use crate::infra::asdf::converter::{
     auto_data_key, is_interleaved_layout, list_arrays, plane_geometry, shape_label,
     AsdfArrayInfo, AsdfImage, AsdfWcs,
 };
+use crate::infra::asdf::time as asdf_time;
 use crate::infra::asdf::AsdfFile;
 use crate::infra::fits::reader::{HduInfo, MmapImageResult};
 use crate::types::constants::HEADER_BUNIT;
@@ -23,31 +24,106 @@ pub const ASDF_PLANE_COUNT: &str = "ASDFNPLN";
 pub const ASDF_DATA_KEY_CARD: &str = "ASDFKEY";
 pub const ASDF_WCS_NOTE_CARD: &str = "ASDFWCS";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AliasDecode {
+    Raw,
+    TimeIso,
+    TimeMjd,
+    TimeScale,
+}
+
 struct FitsAlias {
     card: &'static str,
     sources: &'static [&'static str],
     numeric: bool,
     photometric: bool,
+    decode: AliasDecode,
 }
 
-const FITS_ALIASES: [FitsAlias; 6] = [
+const START_TIME_SOURCES: [&str; 2] = ["meta.exposure.start_time", "roman.meta.exposure.start_time"];
+
+const FITS_ALIASES: [FitsAlias; 14] = [
     FitsAlias {
         card: "TELESCOP",
         sources: &["meta.telescope", "roman.meta.telescope", "header.TELESCOP"],
         numeric: false,
         photometric: false,
+        decode: AliasDecode::Raw,
     },
     FitsAlias {
         card: "INSTRUME",
         sources: &["meta.instrument.name", "roman.meta.instrument.name", "header.INSTRUME"],
         numeric: false,
         photometric: false,
+        decode: AliasDecode::Raw,
     },
     FitsAlias {
         card: "EXPTIME",
         sources: &["meta.exposure.exposure_time", "roman.meta.exposure.exposure_time", "header.EXPTIME"],
         numeric: true,
         photometric: false,
+        decode: AliasDecode::Raw,
+    },
+    FitsAlias {
+        card: "FILTER",
+        sources: &[
+            "meta.instrument.filter",
+            "meta.instrument.optical_element",
+            "roman.meta.instrument.optical_element",
+            "header.FILTER",
+        ],
+        numeric: false,
+        photometric: false,
+        decode: AliasDecode::Raw,
+    },
+    FitsAlias {
+        card: "PUPIL",
+        sources: &["meta.instrument.pupil", "header.PUPIL"],
+        numeric: false,
+        photometric: false,
+        decode: AliasDecode::Raw,
+    },
+    FitsAlias {
+        card: "DETECTOR",
+        sources: &["meta.instrument.detector", "roman.meta.instrument.detector", "header.DETECTOR"],
+        numeric: false,
+        photometric: false,
+        decode: AliasDecode::Raw,
+    },
+    FitsAlias {
+        card: "DATE-OBS",
+        sources: &[START_TIME_SOURCES[0], START_TIME_SOURCES[1], "meta.observation.date", "header.DATE-OBS"],
+        numeric: false,
+        photometric: false,
+        decode: AliasDecode::TimeIso,
+    },
+    FitsAlias {
+        card: "DATE-END",
+        sources: &["meta.exposure.end_time", "roman.meta.exposure.end_time", "header.DATE-END"],
+        numeric: false,
+        photometric: false,
+        decode: AliasDecode::TimeIso,
+    },
+    FitsAlias {
+        card: "MJD-OBS",
+        sources: &[START_TIME_SOURCES[0], START_TIME_SOURCES[1], "header.MJD-OBS"],
+        numeric: true,
+        photometric: false,
+        decode: AliasDecode::TimeMjd,
+    },
+    FitsAlias {
+        card: "EXPMID",
+        sources: &["meta.exposure.mid_time", "roman.meta.exposure.mid_time", "header.EXPMID"],
+        numeric: true,
+        photometric: false,
+        decode: AliasDecode::TimeMjd,
+    },
+    FitsAlias {
+        card: "TIMESYS",
+        sources: &[START_TIME_SOURCES[0], START_TIME_SOURCES[1], "meta.observation.date"],
+        numeric: false,
+        photometric: false,
+        decode: AliasDecode::TimeScale,
     },
     FitsAlias {
         card: "PHOTMJSR",
@@ -58,6 +134,7 @@ const FITS_ALIASES: [FitsAlias; 6] = [
         ],
         numeric: true,
         photometric: true,
+        decode: AliasDecode::Raw,
     },
     FitsAlias {
         card: "PIXAR_SR",
@@ -68,6 +145,7 @@ const FITS_ALIASES: [FitsAlias; 6] = [
         ],
         numeric: true,
         photometric: true,
+        decode: AliasDecode::Raw,
     },
     FitsAlias {
         card: "PIXAR_A2",
@@ -78,6 +156,7 @@ const FITS_ALIASES: [FitsAlias; 6] = [
         ],
         numeric: true,
         photometric: true,
+        decode: AliasDecode::Raw,
     },
 ];
 
@@ -134,13 +213,29 @@ fn metadata_value<'a>(metadata: &'a HashMap<String, String>, key: &str) -> Optio
         .filter(|v| !v.is_empty())
 }
 
+fn mjd_card(mjd: f64) -> String {
+    let fixed = format!("{mjd:.9}");
+    let trimmed = fixed.trim_end_matches('0');
+    if trimmed.ends_with('.') {
+        format!("{trimmed}0")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn alias_value(metadata: &HashMap<String, String>, alias: &FitsAlias) -> Option<String> {
-    alias
-        .sources
-        .iter()
-        .filter_map(|k| metadata_value(metadata, k))
-        .find(|v| !alias.numeric || v.parse::<f64>().is_ok_and(f64::is_finite))
-        .map(str::to_string)
+    let decoded_time = || alias.sources.iter().find_map(|k| asdf_time::decode(metadata, k));
+    match alias.decode {
+        AliasDecode::Raw => alias
+            .sources
+            .iter()
+            .filter_map(|k| metadata_value(metadata, k))
+            .find(|v| !alias.numeric || v.parse::<f64>().is_ok_and(f64::is_finite))
+            .map(str::to_string),
+        AliasDecode::TimeIso => decoded_time().map(|t| t.iso),
+        AliasDecode::TimeMjd => decoded_time().map(|t| mjd_card(t.mjd)),
+        AliasDecode::TimeScale => decoded_time().map(|t| t.scale),
+    }
 }
 
 pub fn extract_image_from_asdf(path: &Path) -> Result<MmapImageResult> {
@@ -421,7 +516,10 @@ mod tests {
     use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
     use crate::core::metadata::photcal::PhotCal;
     use crate::infra::asdf::converter::test_fixtures::nircam_gwcs_with_inline_data;
+    use crate::infra::asdf::tree::DType;
+    use crate::infra::image_source::load_plane;
     use crate::types::image::IntPlane;
+    use crate::types::image_ref::ImageRef;
 
     fn int_plane(path: &Path, key: &str) -> Result<Option<IntPlane>> {
         let asdf = AsdfFile::open(path).map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
@@ -672,6 +770,73 @@ mod tests {
         assert!((one(&written) - one(&full)).abs() < 1e-18);
     }
 
+    const ROMAN_TIMES: &str = "roman:\n  meta:\n    telescope: ROMAN\n    instrument: {detector: WFI01, name: WFI, optical_element: F129}\n    exposure:\n      start_time: !time/time-1.4.0 2026-10-31T00:00:00.000\n      mid_time: !time/time-1.4.0 2026-10-31T00:01:07.993\n      end_time: !time/time-1.4.0 2026-10-31T00:02:15.986\n      exposure_time: 135.98622\n  data: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n";
+
+    const TIME_CARDS: [&str; 5] = ["DATE-OBS", "DATE-END", "MJD-OBS", "EXPMID", "TIMESYS"];
+
+    #[test]
+    fn roman_metadata_reaches_filter_detector_and_time_cards() {
+        use crate::core::astrometry::spectral::mid_exposure_jd;
+        use crate::core::metadata::filter_wavelengths::effective_filter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let header = extract_image_from_asdf(&write_asdf(&dir, ROMAN_TIMES)).unwrap().header;
+        for (card, expected) in [
+            ("FILTER", "F129"),
+            ("DETECTOR", "WFI01"),
+            ("DATE-OBS", "2026-10-31T00:00:00.000"),
+            ("DATE-END", "2026-10-31T00:02:15.986"),
+            ("TIMESYS", "UTC"),
+            ("INSTRUME", "WFI"),
+            ("EXPTIME", "135.98622"),
+        ] {
+            assert_eq!(header.get(card), Some(expected), "{card}");
+        }
+        assert_eq!(header.get_f64("MJD-OBS"), Some(61344.0));
+        assert!((header.get_f64("EXPMID").unwrap() - 61344.000786956).abs() < 1e-9, "{:?}", header.get("EXPMID"));
+        assert_eq!(header.get("PUPIL"), None);
+        assert_eq!(effective_filter(&header).as_deref(), Some("F129"));
+        let (jd, source) = mid_exposure_jd(&header).expect("a Roman L2 header has a mid-exposure time");
+        assert_eq!(source, "mid-exposure from EXPMID");
+        assert!((jd - 2461344.500786956).abs() < 1e-8, "{jd}");
+        assert_eq!(fits_legal(&header).get("DATE-OBS"), Some("2026-10-31T00:00:00.000"), "the time cards are FITS-legal keywords");
+
+        let tt = ROMAN_TIMES.replace(
+            "start_time: !time/time-1.4.0 2026-10-31T00:00:00.000",
+            "start_time: !time/time-1.4.0 {value: '2026-10-31T00:00:00.000', scale: tt}",
+        );
+        let header = extract_image_from_asdf(&write_asdf(&dir, &tt)).unwrap().header;
+        assert_eq!(header.get("TIMESYS"), Some("TT"));
+        assert_eq!(header.get("DATE-OBS"), Some("2026-10-31T00:00:00.000"));
+        assert_eq!(header.get_f64("MJD-OBS"), Some(61344.0));
+
+        let jwst = format!("meta:\n  telescope: JWST\n  instrument: {{name: NIRCAM, filter: F200W, pupil: CLEAR, detector: NRCB1}}\n  observation: {{date: '2022-07-12'}}\n{INLINE_DATA}");
+        let header = extract_image_from_asdf(&write_asdf(&dir, &jwst)).unwrap().header;
+        for (card, expected) in [("FILTER", "F200W"), ("PUPIL", "CLEAR"), ("DETECTOR", "NRCB1"), ("DATE-OBS", "2022-07-12"), ("TIMESYS", "UTC")] {
+            assert_eq!(header.get(card), Some(expected), "{card}");
+        }
+        for card in ["DATE-END", "MJD-OBS", "EXPMID"] {
+            assert_eq!(header.get(card), None, "{card}: a date without a time gives no MJD");
+        }
+        assert_eq!(effective_filter(&header).as_deref(), Some("F200W"));
+
+        let jwst_mjd = format!("meta:\n  instrument: {{name: NIRSPEC}}\n  exposure: {{start_time: 59772.5, mid_time: 59772.5005, end_time: 59772.501}}\n{INLINE_DATA}");
+        let header = extract_image_from_asdf(&write_asdf(&dir, &jwst_mjd)).unwrap().header;
+        assert_eq!(header.get("DATE-OBS"), Some("2022-07-12T12:00:00.000"));
+        assert_eq!(header.get_f64("EXPMID"), Some(59772.5005));
+
+        let timeless = "roman:\n  meta:\n    instrument: {name: WFI, optical_element: F158}\n    exposure: {exposure_time: 10.0, start_time: !time/time-1.4.0 {value: 'J2026.5', format: jyear_str}}\n  data: !core/ndarray-1.0.0\n    data: [[1, 2], [3, 4]]\n    datatype: float32\n";
+        let header = extract_image_from_asdf(&write_asdf(&dir, timeless)).unwrap().header;
+        assert_eq!(header.get("FILTER"), Some("F158"));
+        for card in TIME_CARDS {
+            assert_eq!(header.get(card), None, "{card} is not written without a decodable time");
+        }
+        let plain = extract_image_from_asdf(&write_asdf(&dir, INLINE_DATA)).unwrap().header;
+        for card in TIME_CARDS.iter().chain(&["FILTER", "PUPIL", "DETECTOR"]) {
+            assert_eq!(plain.get(card), None, "{card}");
+        }
+    }
+
     #[test]
     fn a_gwcs_without_sky_anchor_leaves_no_wcs_cards_and_says_why() {
         let dir = tempfile::tempdir().unwrap();
@@ -835,6 +1000,80 @@ mod tests {
             truth.points.len()
         );
         assert!(worst_mas <= 1e-4, "{worst_mas} mas");
+    }
+
+    #[test]
+    #[ignore]
+    fn gwcs_real_roman_float16_err_and_variance_planes_load() {
+        let path = real_data_dir().join("r9999901001001001001_0001_wfi01_f129_cal.asdf");
+        if skip_if_absent(&path) {
+            return;
+        }
+        let path_text = path.to_string_lossy().into_owned();
+        let asdf = AsdfFile::open(&path).unwrap();
+        let float16: Vec<String> = list_arrays(&asdf).into_iter().filter(|a| a.dtype == DType::Float16).map(|a| a.key).collect();
+        assert_eq!(float16, ["roman.err", "roman.var_poisson", "roman.chisq", "roman.dumo"]);
+        let listed = list_asdf_arrays(&path).unwrap();
+        for key in &float16 {
+            let hdu = listed
+                .iter()
+                .find(|h| h.extname.as_deref() == Some(key.as_str()))
+                .unwrap_or_else(|| panic!("{key} is listed in the Structure panel"));
+            assert!(hdu.has_data, "{key}");
+            assert_eq!((hdu.bitpix, hdu.naxis1, hdu.naxis2), (-32, 4088, 4088), "{key}");
+        }
+
+        let err = extract_plane_from_asdf(&path, Some("roman.err")).unwrap();
+        assert_eq!(err.image.dim(), (4088, 4088));
+        let finite: Vec<f32> = err.image.iter().copied().filter(|v| v.is_finite()).collect();
+        let finite_fraction = finite.len() as f64 / err.image.len() as f64;
+        let min = finite.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = finite.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        println!("roman.err: finite fraction {finite_fraction:.6}, min {min}, max {max}");
+        assert!(finite_fraction > 0.99, "{finite_fraction}");
+        assert!(min >= 0.0, "{min}");
+        assert_eq!(err.header.get(HEADER_BUNIT), None, "the tree has no bunit or bunit_err key, so no unit is invented");
+
+        let loaded = load_plane(&ImageRef::parse(&path_text)).unwrap();
+        assert_eq!(loaded.info.extname.as_deref(), Some("roman.data"));
+        assert_eq!(loaded.companions.err, Some(ImageRef::array(&path_text, "roman.err")));
+    }
+
+    #[test]
+    #[ignore]
+    fn gwcs_real_roman_cal_header_has_filter_time_and_detector() {
+        use crate::core::astrometry::geometry::header_time;
+        use crate::core::astrometry::spectral::mid_exposure_jd;
+        use crate::core::metadata::filter_wavelengths::{effective_filter, filter_code_and_wavelength_nm};
+
+        let path = real_data_dir().join("r9999901001001001001_0001_wfi01_f129_cal.asdf");
+        if skip_if_absent(&path) {
+            return;
+        }
+        let header = extract_image_from_asdf(&path).unwrap().header;
+        let filter = effective_filter(&header);
+        assert_eq!(filter.as_deref(), Some("F129"));
+        assert_eq!(filter_code_and_wavelength_nm(filter.as_deref().unwrap()), Some(("F129", 1290)));
+        assert_eq!(header.get("DETECTOR"), Some("WFI01"));
+        assert_eq!(header.get("DATE-OBS"), Some("2026-10-31T00:00:00.000"));
+        assert_eq!(header.get("DATE-END"), Some("2026-10-31T00:02:15.986"));
+        assert_eq!(header.get_f64("MJD-OBS"), Some(61344.0));
+        let (jd, source) = mid_exposure_jd(&header).expect("mid-exposure time");
+        assert_eq!(source, "mid-exposure from EXPMID");
+        assert!((jd - 2461344.500786956).abs() < 1e-8, "{jd}");
+        let time = header_time(&header).expect("header time");
+        assert_eq!(time.scale, "UTC");
+        println!(
+            "roman cal: FILTER {:?} DETECTOR {:?} DATE-OBS {:?} DATE-END {:?} MJD-OBS {:?} EXPMID {:?} TIMESYS {:?}; mid JD {jd} ({source}); scale {}",
+            header.get("FILTER"),
+            header.get("DETECTOR"),
+            header.get("DATE-OBS"),
+            header.get("DATE-END"),
+            header.get("MJD-OBS"),
+            header.get("EXPMID"),
+            header.get("TIMESYS"),
+            time.scale
+        );
     }
 
     #[test]

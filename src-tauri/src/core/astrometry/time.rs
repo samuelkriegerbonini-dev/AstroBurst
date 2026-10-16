@@ -7,7 +7,6 @@ pub fn jd_from_mjd(mjd: f64) -> f64 {
     mjd + MJD_EPOCH_JD
 }
 
-#[cfg(test)]
 pub fn mjd_from_jd(jd: f64) -> f64 {
     jd - MJD_EPOCH_JD
 }
@@ -25,6 +24,23 @@ pub fn jd_from_gregorian(year: i32, month: u32, day: f64) -> f64 {
     let a = (y as f64 / 100.0).floor();
     let b = 2.0 - a + (a / 4.0).floor();
     (365.25 * (y as f64 + 4716.0)).floor() + (30.6001 * (m as f64 + 1.0)).floor() + day + b - 1524.5
+}
+
+pub fn gregorian_from_jd(jd: f64) -> (i32, u32, u32, u32, u32, f64) {
+    let shifted = jd + 0.5;
+    let z = shifted.floor();
+    let alpha = ((z - 1867216.25) / 36524.25).floor();
+    let b = z + 1.0 + alpha - (alpha / 4.0).floor() + 1524.0;
+    let c = ((b - 122.1) / 365.25).floor();
+    let d = (365.25 * c).floor();
+    let e = ((b - d) / 30.6001).floor();
+    let day = b - d - (30.6001 * e).floor();
+    let month = if e < 14.0 { e - 1.0 } else { e - 13.0 };
+    let year = if month > 2.0 { c - 4716.0 } else { c - 4715.0 };
+    let seconds = (shifted - z) * SECONDS_PER_DAY;
+    let hour = (seconds / 3600.0).floor();
+    let minute = ((seconds - hour * 3600.0) / 60.0).floor();
+    (year as i32, month as u32, day as u32, hour as u32, minute as u32, seconds - hour * 3600.0 - minute * 60.0)
 }
 
 pub fn gmst_deg(jd_ut: f64) -> f64 {
@@ -198,5 +214,19 @@ mod tests {
         let jd = jd_from_gregorian(1987, 4, 10.0);
         let hours = gmst_deg(jd) / 15.0;
         assert!((hours - 13.1795463).abs() < 1e-5, "{hours}");
+    }
+
+    #[test]
+    fn gregorian_from_jd_inverts_jd_from_gregorian() {
+        let mut dates: Vec<(i32, u32, u32)> = vec![(2000, 2, 29), (2100, 3, 1), (2100, 2, 28), (1900, 3, 1), (1582, 10, 15), (2026, 10, 31), (2026, 12, 31)];
+        dates.extend((0..193).map(|k| (1850 + (k * 7) as i32 % 300, 1 + (k * 5) as u32 % 12, 1 + (k * 11) as u32 % 28)));
+        assert_eq!(dates.len(), 200);
+        for (y, m, d) in dates {
+            assert_eq!(gregorian_from_jd(jd_from_gregorian(y, m, d as f64)), (y, m, d, 0, 0, 0.0), "{y}-{m}-{d}");
+        }
+        assert_eq!(gregorian_from_jd(2461344.75), (2026, 10, 31, 6, 0, 0.0));
+        let (y, m, d, h, min, s) = gregorian_from_jd(jd_from_mjd(61344.000786956));
+        assert_eq!((y, m, d, h, min), (2026, 10, 31, 0, 1));
+        assert!((s - 7.993).abs() < 1e-4, "{s}");
     }
 }

@@ -19,7 +19,8 @@ use crate::infra::asdf::AsdfFile;
 use crate::infra::fits::reader::{extract_header_by_index, list_extensions, read_primary_header, HduInfo};
 use crate::infra::fits::table::{list_tables, load_bintable, Column, ColumnInfo, ColumnValues, TableHdu};
 use crate::types::constants::{
-    HEADER_BUNIT, RES_FITS_PATH, RES_FRAME_INDEX, RES_FRAMES, RES_HEIGHT, RES_OUTPUT_PATH, RES_RAMP, RES_UNIT, RES_WIDTH,
+    EXTNAME_SCI, HEADER_BUNIT, RES_FITS_PATH, RES_FRAME_INDEX, RES_FRAMES, RES_HEIGHT, RES_OUTPUT_PATH, RES_RAMP,
+    RES_UNIT, RES_WIDTH,
 };
 use crate::types::header::HduHeader;
 use crate::types::image_ref::path_key;
@@ -29,7 +30,6 @@ pub const RAMP_TABLE_TYPE_CODES: [char; 6] = ['B', 'I', 'J', 'K', 'E', 'D'];
 pub const DEFAULT_TABLE_ROWS: usize = 200;
 pub const ABPROC_RAMP_FRAME: &str = "ramp-frame";
 pub const RAMP_UNIT_DN: &str = "DN";
-pub const EXTNAME_SCI: &str = "SCI";
 pub const EXTNAME_GROUP: &str = "GROUP";
 pub const EXTNAME_INT_TIMES: &str = "INT_TIMES";
 pub const ROMAN_FRAME_TIME_KEY: &str = "roman.meta.exposure.frame_time";

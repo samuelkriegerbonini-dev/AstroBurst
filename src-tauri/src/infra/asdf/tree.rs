@@ -29,6 +29,7 @@ pub enum DType {
     UInt16,
     UInt32,
     UInt64,
+    Float16,
     Float32,
     Float64,
     Bool8,
@@ -162,6 +163,7 @@ impl DType {
             "u2" | "uint16" => DType::UInt16,
             "u4" | "uint32" => DType::UInt32,
             "u8" | "uint64" => DType::UInt64,
+            "f2" | "float16" => DType::Float16,
             "f4" | "float32" => DType::Float32,
             "f8" | "float64" => DType::Float64,
             "b1" | "bool8" | "bool" => DType::Bool8,
@@ -177,7 +179,7 @@ impl DType {
             DType::Complex128 => 16,
             DType::Float64 | DType::Complex64 | DType::Int64 | DType::UInt64 => 8,
             DType::Float32 | DType::Int32 | DType::UInt32 => 4,
-            DType::Int16 | DType::UInt16 => 2,
+            DType::Int16 | DType::UInt16 | DType::Float16 => 2,
             DType::Int8 | DType::UInt8 | DType::Bool8 => 1,
         }
     }
@@ -190,6 +192,20 @@ impl ByteOrder {
             _ => ByteOrder::Little,
         }
     }
+}
+
+const F16_SUBNORMAL_STEP: f32 = 1.0 / 16_777_216.0;
+
+pub fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exponent = u32::from((bits >> 10) & 0x1F);
+    let mantissa = u32::from(bits & 0x03FF);
+    let magnitude = match exponent {
+        0 => (mantissa as f32 * F16_SUBNORMAL_STEP).to_bits(),
+        0x1F => 0x7F80_0000 | (mantissa << 13),
+        _ => ((exponent + 127 - 15) << 23) | (mantissa << 13),
+    };
+    f32::from_bits(sign | magnitude)
 }
 
 impl NdArrayMeta {
@@ -787,6 +803,7 @@ mod tests {
             ("uint16", DType::UInt16, 2),
             ("uint32", DType::UInt32, 4),
             ("uint64", DType::UInt64, 8),
+            ("float16", DType::Float16, 2),
             ("float32", DType::Float32, 4),
             ("float64", DType::Float64, 8),
             ("bool8", DType::Bool8, 1),
@@ -817,8 +834,43 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_dtype_errors() {
-        assert!(DType::parse("float16").is_err());
+    fn float16_parses_with_both_spellings() {
+        for (name, order) in [
+            ("float16", ByteOrder::Little),
+            ("f2", ByteOrder::Little),
+            ("<f2", ByteOrder::Little),
+            (">f2", ByteOrder::Big),
+        ] {
+            assert_eq!(DType::parse(name).unwrap(), (DType::Float16, order), "{name}");
+        }
+        assert_eq!(DType::Float16.byte_size(), 2);
+        assert!(matches!(DType::parse("float128"), Err(AsdfError::InvalidDtype(d)) if d == "float128"));
+    }
+
+    #[test]
+    fn f16_bits_to_f32_matches_ieee_binary16() {
+        let cases: [(u16, f32); 9] = [
+            (0x3C00, 1.0),
+            (0xC000, -2.0),
+            (0x7BFF, 65504.0),
+            (0x3555, 0.333251953125),
+            (0x0400, 6.103515625e-5),
+            (0x0001, 5.960464477539063e-8),
+            (0x3092, 0.142822265625),
+            (0x7C00, f32::INFINITY),
+            (0xFC00, f32::NEG_INFINITY),
+        ];
+        for (bits, expected) in cases {
+            assert_eq!(f16_bits_to_f32(bits), expected, "{bits:#06x}");
+        }
+        let negative_zero = f16_bits_to_f32(0x8000);
+        assert_eq!(negative_zero, 0.0);
+        assert!(negative_zero.is_sign_negative(), "the sign bit of -0.0 is kept");
+        assert!(f16_bits_to_f32(0x0000).is_sign_positive());
+        assert_eq!(f16_bits_to_f32(0x83FF), -(1023.0 * 2f32.powi(-24)), "largest negative subnormal");
+        for nan in [0x7E00u16, 0xFE01, 0x7C01] {
+            assert!(f16_bits_to_f32(nan).is_nan(), "{nan:#06x}");
+        }
     }
 
     #[test]

@@ -242,6 +242,25 @@ pub(crate) mod test_support {
         }
     }
 
+    pub(crate) fn wcs_body(first_frame: &str, transform: &str, last_frame: &str) -> String {
+        format!(
+            "wcs: !<tag:stsci.edu:gwcs/wcs-1.4.0>\n  name: ''\n  steps:\n  - !<tag:stsci.edu:gwcs/step-1.3.0>\n    frame: {first_frame}\n    transform: {transform}\n  - !<tag:stsci.edu:gwcs/step-1.3.0>\n    frame: {last_frame}\n    transform: null\n"
+        )
+    }
+
+    pub(crate) const DETECTOR: &str = "!<tag:stsci.edu:gwcs/frame2d-1.2.0> {axes_names: [x, y], axes_order: [0, 1], axis_physical_types: ['custom:x', 'custom:y'], name: detector, unit: [!unit/unit-1.0.0 pixel, !unit/unit-1.0.0 pixel]}";
+    pub(crate) const SHIFT_PAIR: &str = "!transform/concatenate-1.4.0 {forward: [!transform/shift-1.4.0 {inputs: [x], offset: 1.0, outputs: [y]}, !transform/shift-1.4.0 {inputs: [x], offset: 2.0, outputs: [y]}], inputs: [x0, x1], outputs: [y0, y1]}";
+
+    pub(crate) fn world(reference: &str, axes_order: &str, types: &str, unit: &str) -> String {
+        format!(
+            "!<tag:stsci.edu:gwcs/celestial_frame-1.2.0>\n      axes_names: [lon, lat]\n      axes_order: {axes_order}\n      axis_physical_types: {types}\n      name: world\n      reference_frame: !<tag:astropy.org:astropy/coordinates/frames/{reference}-1.1.0> {{frame_attributes: {{}}}}\n      unit: [!unit/unit-1.0.0 {unit}, !unit/unit-1.0.0 {unit}]"
+        )
+    }
+
+    pub(crate) fn icrs_world() -> String {
+        world("icrs", "[0, 1]", "[pos.eq.ra, pos.eq.dec]", "deg")
+    }
+
     pub(crate) fn real_syntax(body: &str) -> String {
         format!("#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n%YAML 1.1\n%TAG ! tag:stsci.edu:asdf/\n--- !core/asdf-1.1.0\n{body}...\n")
     }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decodeDqBits, formatDqBits, toggleBit, hasBit } from "../dqFlags";
+import { decodeDqBits, formatDqBits, toggleBit, hasBit, rawBitFlags, listedDqFlags } from "../dqFlags";
 import type { DqFlag } from "../../shared/types/dq";
 
 const FLAGS: DqFlag[] = [
@@ -38,6 +38,27 @@ describe("formatDqBits", () => {
   it("joins names with a pipe", () => {
     expect(formatDqBits(3, FLAGS)).toBe("3: DO_NOT_USE | SATURATED");
     expect(formatDqBits(2147483648, FLAGS)).toBe("2147483648: REFERENCE_PIXEL");
+  });
+});
+
+describe("rawBitFlags / listedDqFlags", () => {
+  it("names each set bit BIT n in ascending order, unsigned-safe for bit 31", () => {
+    expect(rawBitFlags(0b101)).toEqual([
+      { bit: 1, name: "BIT 0" },
+      { bit: 4, name: "BIT 2" },
+    ]);
+    expect(rawBitFlags(0)).toEqual([]);
+    expect(rawBitFlags(-2147483648)).toEqual([{ bit: 2147483648, name: "BIT 31" }]);
+    expect(rawBitFlags(4294967295)).toHaveLength(32);
+  });
+
+  it("lists raw bits for an unknown table and the named flags otherwise", () => {
+    expect(listedDqFlags({ table: "unknown", flags: [], bits_present: 513 })).toEqual([
+      { bit: 1, name: "BIT 0" },
+      { bit: 512, name: "BIT 9" },
+    ]);
+    expect(listedDqFlags({ table: "jwst", flags: FLAGS, bits_present: null })).toBe(FLAGS);
+    expect(listedDqFlags({ table: "unknown", flags: [], bits_present: null })).toEqual([]);
   });
 });
 

@@ -150,8 +150,9 @@ fn source_from_tree(asdf: &AsdfFile, hdu_index: Option<usize>) -> GwcsLookup {
         return Ok(None);
     };
     match classify_wcs_node(node) {
-        WcsNodeClass::FitsEquivalent | WcsNodeClass::NotImaging2D(_) => Ok(None),
-        WcsNodeClass::Imaging2D => {
+        WcsNodeClass::NotImaging2D(_) => Ok(None),
+        WcsNodeClass::FitsEquivalent if hdu_index.is_some() => Ok(None),
+        WcsNodeClass::FitsEquivalent | WcsNodeClass::Imaging2D => {
             let pipeline =
                 parse_gwcs(node, &|n| AsdfImage::float_values(asdf, n), &key.0).map_err(|e| format!("{e:#}"))?;
             let (wcsinfo_sip_max_err_px, wcsinfo_sip_inv_err_px) = wcsinfo_sip_residuals(&asdf.tree);
@@ -214,10 +215,11 @@ mod tests {
     use super::test_fixtures::{insert_before_top_level_wcs, join_yaml, split_yaml, tan_cards};
     use super::*;
     use crate::core::astrometry::gwcs::test_support::{
-        assert_close_slice, documents_fits_dir, fixtures_dir, heavy_test_dir, mast_dir, real_data_dir, real_syntax, skip_if_absent,
+        assert_close_slice, documents_fits_dir, fixtures_dir, heavy_test_dir, icrs_world, mast_dir, real_data_dir, real_syntax,
+        skip_if_absent, wcs_body, DETECTOR,
     };
     use crate::core::astrometry::gwcs::{parse_gwcs, wcs_node_at, GwcsOrigin, Kind, Node};
-    use crate::core::astrometry::wcs::WcsKind;
+    use crate::core::astrometry::wcs::{angular_separation, WcsKind};
     use crate::infra::asdf::{AsdfFile, AsdfImage};
     use crate::infra::fits::asdf_hdu::find_asdf_hdu;
     use crate::infra::fits::asdf_hdu::test_fixtures::write_fits_with_asdf_cell;
@@ -619,6 +621,101 @@ mod tests {
         same_sky(&wcs, &WcsTransform::from_header(&header).unwrap(), 1.5, 1.5);
         assert_eq!(wcs.orientation(4, 4).projection, "TAN");
         assert_eq!((wcs.kind(), wcs.gwcs_refusal()), (WcsKind::Header, None));
+    }
+
+    fn write_pure_asdf(dir: &Path, name: &str, bytes: &[u8]) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        s(&path)
+    }
+
+    const IMAGE_SIDE_WITH_CENTRE_OFF_THE_REFERENCE_PIXEL: usize = 11;
+
+    fn fitswcs_imaging_transform(case: usize, lon: f64, lat: f64) -> String {
+        let crval = match case % 3 {
+            0 => format!("!core/ndarray-1.0.0 {{data: [{lon:?}, {lat:?}], datatype: float64, shape: [2]}}"),
+            1 => format!("!unit/quantity-1.1.0 {{value: [{lon:?}, {lat:?}], unit: !unit/unit-1.0.0 deg}}"),
+            _ => format!("!unit/quantity-1.1.0 {{value: [{:?}, {:?}], unit: !unit/unit-1.0.0 arcsec}}", lon * 3600.0, lat * 3600.0),
+        };
+        let cdelt = match case % 3 {
+            0 => "[-1.0e-5, 1.0e-5]",
+            1 => "!unit/quantity-1.1.0 {value: !core/ndarray-1.0.0 {data: [-0.036, 0.036], datatype: float64, shape: [2]}, unit: !unit/unit-1.0.0 arcsec / pix}",
+            _ => "!unit/quantity-1.1.0 {value: [-1.0e-5, 1.0e-5], unit: !unit/unit-1.0.0 deg}",
+        };
+        format!(
+            "!<tag:stsci.edu:gwcs/fitswcs_imaging-1.0.0> {{cdelt: {cdelt}, crpix: [4.5, 4.5], crval: {crval}, inputs: [x, y], outputs: [lon, lat], pc: !core/ndarray-1.0.0 {{data: [[0.9, 0.1], [-0.1, 0.9]], datatype: float64, shape: [2, 2]}}, projection: !transform/gnomonic-1.3.0 {{direction: pix2sky, inputs: [x, y], outputs: [phi, theta]}}}}"
+        )
+    }
+
+    fn pure_fitswcs_imaging_doc(case: usize, lon: f64, lat: f64) -> Vec<u8> {
+        let row = format!("[{}]", vec!["1.0"; IMAGE_SIDE_WITH_CENTRE_OFF_THE_REFERENCE_PIXEL].join(", "));
+        let data = format!("data: !core/ndarray-1.0.0\n  data: [{}]\n  datatype: float32\n", vec![row; IMAGE_SIDE_WITH_CENTRE_OFF_THE_REFERENCE_PIXEL].join(", "));
+        let wcs = wcs_body(DETECTOR, &fitswcs_imaging_transform(case, lon, lat), &icrs_world());
+        asdf_doc(&format!("{data}{wcs}"))
+    }
+
+    fn fits_tan_oracle(lon: f64, lat: f64) -> WcsTransform {
+        let mut header = HduHeader::empty();
+        for (key, value) in [
+            ("NAXIS", "2".to_string()),
+            ("NAXIS1", IMAGE_SIDE_WITH_CENTRE_OFF_THE_REFERENCE_PIXEL.to_string()),
+            ("NAXIS2", IMAGE_SIDE_WITH_CENTRE_OFF_THE_REFERENCE_PIXEL.to_string()),
+            ("CTYPE1", "'RA---TAN'".to_string()),
+            ("CTYPE2", "'DEC--TAN'".to_string()),
+            ("CRPIX1", "5.5".to_string()),
+            ("CRPIX2", "5.5".to_string()),
+            ("CDELT1", "-1.0E-5".to_string()),
+            ("CDELT2", "1.0E-5".to_string()),
+            ("PC1_1", "0.9".to_string()),
+            ("PC1_2", "0.1".to_string()),
+            ("PC2_1", "-0.1".to_string()),
+            ("PC2_2", "0.9".to_string()),
+            ("CRVAL1", format!("{lon:?}")),
+            ("CRVAL2", format!("{lat:?}")),
+            ("LONPOLE", "180.0".to_string()),
+        ] {
+            header.set(key, value);
+        }
+        WcsTransform::from_header(&header).unwrap()
+    }
+
+    #[test]
+    fn pure_asdf_fitswcs_imaging_matches_the_equivalent_fits_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [(5.36, -72.5), (0.0, 0.0), (359.999, 45.0), (180.0, 90.0), (90.0, -90.0)];
+        let grid: Vec<f64> = (0..11).map(|k| -0.5 + k as f64).collect();
+        for (case, &(lon, lat)) in cases.iter().enumerate() {
+            let path = write_pure_asdf(dir.path(), &format!("fitswcs_imaging_{case}.asdf"), &pure_fitswcs_imaging_doc(case, lon, lat));
+            let source = gwcs_for_path(&path).unwrap_or_else(|e| panic!("({lon}, {lat}): {e}")).unwrap_or_else(|| panic!("({lon}, {lat}): a pure ASDF fitswcs_imaging is an exact gWCS"));
+            assert_eq!(source.origin, GwcsOrigin::AsdfTree { key: "wcs".into() });
+            let header = header_of(&path);
+            assert!(header.get("CTYPE1").is_some_and(|c| c.starts_with("RA---TAN")), "({lon}, {lat}): {:?}", header.get("CTYPE1"));
+            assert_eq!(header.get(crate::infra::asdf_bridge::ASDF_WCS_NOTE_CARD), None, "({lon}, {lat}): the fitted header carries no refusal note");
+            let exact = load_wcs(&path, &header).unwrap();
+            assert_eq!((exact.kind(), exact.gwcs_refusal()), (WcsKind::Gwcs, None), "({lon}, {lat})");
+            let info = exact.gwcs_info().expect("gwcs info");
+            assert_eq!((info.n_steps, info.frames.clone()), (1, vec!["detector".to_string(), "world".to_string()]));
+            let oracle = fits_tan_oracle(lon, lat);
+            let mut worst_deg = 0.0f64;
+            let mut worst_round_trip_px = 0.0f64;
+            for &y in &grid {
+                for &x in &grid {
+                    let (p, q) = (exact.pixel_to_world(x, y), oracle.pixel_to_world(x, y));
+                    worst_deg = worst_deg.max(angular_separation(p.ra, p.dec, q.ra, q.dec));
+                    let (bx, by) = exact.world_to_pixel(p.ra, p.dec);
+                    worst_round_trip_px = worst_round_trip_px.max((bx - x).hypot(by - y));
+                }
+            }
+            println!("fitswcs_imaging ({lon}, {lat}): max separation vs wcs-rs {worst_deg:.3e} deg, max round trip {worst_round_trip_px:.3e} px");
+            assert!(worst_deg <= 1e-9, "({lon}, {lat}): gWCS vs wcs-rs header {worst_deg:e} deg");
+            assert!(worst_round_trip_px <= 1e-7, "({lon}, {lat}): world_to_pixel round trip {worst_round_trip_px:e} px");
+        }
+
+        let cell = pure_fitswcs_imaging_doc(0, 5.36, -72.5);
+        let wrapped = write_tan_fits_with_cell(dir.path(), "i2d_fitswcs.fits", &cell);
+        assert!(matches!(gwcs_for_path(&wrapped), Ok(None)), "{:?}", outcome(&gwcs_for_path(&wrapped)));
+        let header = header_of(&wrapped);
+        assert_eq!(load_wcs(&wrapped, &header).unwrap().kind(), WcsKind::Header, "a FITS ASDF HDU keeps the header TAN");
     }
 
     #[test]

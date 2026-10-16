@@ -5,7 +5,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use ndarray::Array2;
 use serde::Serialize;
 
-use crate::cmd::common::{blocking_cmd, invalidate_written, load_cached_full, load_companions, output_stem, source_path};
+use crate::cmd::common::{
+    blocking_cmd, invalidate_written, load_cached_full, load_companions, output_stem, source_path, source_primary_header,
+};
 use crate::core::astrometry::wcs::{header_has_sip, WcsTransform, SIP_RESIDUAL_KEYS};
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::imaging::cutout::{
@@ -14,22 +16,18 @@ use crate::core::imaging::cutout::{
 };
 use crate::core::imaging::dq_flags::DqTable;
 use crate::core::imaging::region::{RegionShape, RegionSystem};
-use crate::infra::asdf::converter::is_asdf_file;
-use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::infra::fits::reader::extract_header_by_index;
-use crate::infra::fits::writer::{filter_header, write_mef_images, HduData, ImageHdu};
+use crate::infra::fits::writer::{write_mef_images, HduData, ImageHdu};
 use crate::infra::wcs_source::load_wcs;
-use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR};
-use crate::types::header::{is_commentary_key, HduHeader};
+use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, EXTNAME_SCI};
+use crate::types::header::HduHeader;
 
-pub const EXTNAME_SCI: &str = "SCI";
 pub const MAX_CUTOUT_PLANE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 const PADDED_FLAGS_JWST: &[&str] = &["DO_NOT_USE", "NON_SCIENCE"];
 const PADDED_FLAGS_HST: &[&str] = &["REPLACED_FILL", "MASKED"];
-const PLANE_ONLY_KEYS: &[&str] = &[
-    "BUNIT", "EXTNAME", "EXTVER", "LTV1", "LTV2", "LTM1_1", "LTM2_2", "BZERO", "BSCALE", "BLANK", "DATAMIN", "DATAMAX",
-];
+const PADDED_FLAGS_RAW: &[&str] = &["BIT0", "BIT9"];
+const CARD_HISTORY: &str = "HISTORY";
+const RAW_PADDING_HISTORY: &str = "DQ padding flagged with raw bits 0 and 9 (flag table unknown)";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CutoutExport {
@@ -52,7 +50,8 @@ enum IntPixels {
 pub fn padded_dq_bits(table: DqTable) -> Result<u32> {
     let names = match table {
         DqTable::Hst => PADDED_FLAGS_HST,
-        DqTable::Jwst | DqTable::Roman | DqTable::Unknown => PADDED_FLAGS_JWST,
+        DqTable::Jwst | DqTable::Roman => PADDED_FLAGS_JWST,
+        DqTable::Unknown => PADDED_FLAGS_RAW,
     };
     table.mask_from_names(names).map_err(|e| anyhow!(e))
 }
@@ -100,32 +99,6 @@ pub(crate) fn refuse_source_as_target(target: &str, source_ref: &str) -> Result<
     Ok(())
 }
 
-pub(crate) fn provenance_only(merged: &HduHeader) -> HduHeader {
-    let mut out = HduHeader::empty();
-    let non_wcs = filter_header(merged, false, true).unwrap_or_else(HduHeader::empty);
-    for (key, value) in &non_wcs.cards {
-        let key = key.trim();
-        if is_commentary_key(key) {
-            out.cards.push((key.to_string(), value.clone()));
-        } else if !PLANE_ONLY_KEYS.contains(&key) {
-            out.set(key, value.clone());
-        }
-    }
-    out.inherit_string_keys(&non_wcs);
-    out
-}
-
-fn source_primary_header(path: &str, merged: Option<&HduHeader>) -> HduHeader {
-    let from_disk = resolve_single_image(&source_path(path)).ok().and_then(|(fits, _tmp)| {
-        if is_asdf_file(&fits) {
-            return None;
-        }
-        let file = std::fs::File::open(&fits).ok()?;
-        extract_header_by_index(&file, 0).ok()
-    });
-    from_disk.as_ref().or(merged).map(provenance_only).unwrap_or_else(HduHeader::empty)
-}
-
 fn with_sip_residual_cards(mut header: HduHeader, wcs: Option<&WcsTransform>) -> HduHeader {
     let Some((Some(max_err_px), inv_err_px)) = wcs.map(WcsTransform::sip_fit_residuals) else {
         return header;
@@ -144,6 +117,16 @@ fn synthetic_dq_header(sci_header: Option<&HduHeader>) -> Option<HduHeader> {
     let mut header = sci_header?.clone();
     header.remove("BUNIT");
     Some(header)
+}
+
+fn with_padding_note(header: Option<HduHeader>, table: DqTable, padded: bool) -> Option<HduHeader> {
+    header.map(|mut h| {
+        let noted = h.cards.iter().any(|(k, v)| k.trim() == CARD_HISTORY && v == RAW_PADDING_HISTORY);
+        if padded && table == DqTable::Unknown && !noted {
+            h.cards.push((CARD_HISTORY.to_string(), RAW_PADDING_HISTORY.to_string()));
+        }
+        h
+    })
 }
 
 pub(crate) fn export_cutout(
@@ -170,6 +153,8 @@ pub(crate) fn export_cutout(
     let rect = resolve_cutout_rect(&budget_request, img_w, img_h, None, MAX_CUTOUT_PLANE_BYTES).map_err(|e| anyhow!(e))?;
     let target = resolve_target_path(path, output_path, output_dir, &rect)?;
     let companions = load_companions(path)?;
+    let on_image = fraction_on_image(&rect, img_w, img_h);
+    let padded = on_image < 1.0;
 
     let mut warnings = Vec::new();
     if region_rect.rotated_box_used_bounds {
@@ -194,7 +179,7 @@ pub(crate) fn export_cutout(
             let plane = e.int_plane().context("DQ companion has no integer plane")?;
             let bits = cut_int_plane(&plane.bits, &rect, padded_dq_bits(*table)?);
             let pixels = if plane.signed { IntPixels::Signed(bits.mapv(|b| b as i32)) } else { IntPixels::Unsigned(bits) };
-            Some((pixels, e.header().map(|h| shift_header(h, &rect))))
+            Some((pixels, with_padding_note(e.header().map(|h| shift_header(h, &rect)), *table, padded)))
         }
         (true, None) => {
             let table = entry.header().map(DqTable::select).unwrap_or(DqTable::Unknown);
@@ -203,7 +188,7 @@ pub(crate) fn export_cutout(
                 table.label()
             ));
             let bits = padding_plane(&rect, img_w, img_h, padded_dq_bits(table)?);
-            Some((IntPixels::Unsigned(bits), synthetic_dq_header(sci_header.as_ref())))
+            Some((IntPixels::Unsigned(bits), with_padding_note(synthetic_dq_header(sci_header.as_ref()), table, padded)))
         }
     };
 
@@ -230,7 +215,7 @@ pub(crate) fn export_cutout(
         hdus: hdus.iter().map(|h| h.extname.to_string()).collect(),
         output_path: target,
         rect,
-        fraction_on_image: fraction_on_image(&rect, img_w, img_h),
+        fraction_on_image: on_image,
         ltv1,
         ltv2,
         rotated_box_used_bounds: region_rect.rotated_box_used_bounds,
@@ -452,6 +437,104 @@ mod tests {
         assert_eq!(list_extensions(&file).unwrap().len(), 2);
     }
 
+    const RAW_PADDING_NOTE: &str = "DQ padding flagged with raw bits 0 and 9 (flag table unknown)";
+
+    fn subaru_mef(dir: &tempfile::TempDir, name: &str, mask: Option<Vec<i32>>) -> String {
+        let path = dir.path().join(name);
+        let mut hdus = vec![TestHdu {
+            extname: Some("SCI"),
+            extver: None,
+            cols: COLS,
+            rows: ROWS,
+            data: TestData::F32(ramp_f32(COLS, ROWS)),
+            extra_cards: vec![],
+        }];
+        if let Some(bits) = mask {
+            hdus.push(TestHdu { extname: Some("MASK"), extver: None, cols: COLS, rows: ROWS, data: TestData::I32(bits), extra_cards: vec![] });
+        }
+        write_test_mef(&path, &[("TELESCOP", "'Subaru'".into())], &hdus);
+        path.to_str().unwrap().to_string()
+    }
+
+    fn has_history(header: &HduHeader, text: &str) -> bool {
+        header.cards.iter().any(|(k, v)| k.trim() == "HISTORY" && v.contains(text))
+    }
+
+    #[test]
+    fn an_unknown_table_cutout_synthesises_dq_padded_with_raw_bits_0_and_9() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = subaru_mef(&dir, "hsc_sci.fits", None);
+        let out_dir = dir.path().to_str().unwrap().to_string();
+
+        let report = export_cutout(&src, "", Some(&out_dir), &overhanging_box(), false, true, false).unwrap();
+        assert_eq!(report.hdus, vec!["SCI", "DQ"]);
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].contains("synthetic DQ (unknown (raw bits))"), "{:?}", report.warnings);
+
+        let file = std::fs::File::open(&report.output_path).unwrap();
+        let dq = extract_int_plane_by_index(&file, 2).unwrap();
+        assert_eq!(dq.bits.iter().filter(|&&v| v == (1 | 512)).count(), 16);
+        assert_eq!(dq.bits.iter().filter(|&&v| v == 0).count(), 20);
+        assert!(has_history(&extract_header_by_index(&file, 2).unwrap(), RAW_PADDING_NOTE));
+        assert!(!has_history(&extract_header_by_index(&file, 1).unwrap(), RAW_PADDING_NOTE));
+    }
+
+    #[test]
+    fn a_cutout_of_an_active_mask_hdu_of_unknown_origin_pads_with_raw_bits_0_and_9() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mask = vec![0i32; COLS * ROWS];
+        mask[COLS + 3] = 1 << 5;
+        let src = subaru_mef(&dir, "hsc_mask.fits", Some(mask));
+        let key = format!("{src}#hdu=2");
+        let out_dir = dir.path().to_str().unwrap().to_string();
+
+        let report = export_cutout(&key, "", Some(&out_dir), &overhanging_box(), false, true, false).unwrap();
+        assert_eq!(report.rect, CutoutRect { x0: 2, y0: -1, width: 6, height: 6 });
+        assert_eq!(report.hdus, vec!["SCI", "DQ"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let file = std::fs::File::open(&report.output_path).unwrap();
+        let dq = extract_int_plane_by_index(&file, 2).unwrap();
+        assert!(dq.signed);
+        assert_eq!(dq.bits[[2, 1]], 1 << 5);
+        assert_eq!(dq.bits.iter().filter(|&&v| v == (1 | 512)).count(), 16);
+        assert_eq!(dq.bits.iter().filter(|&&v| v == 0).count(), 19);
+        assert!(has_history(&extract_header_by_index(&file, 2).unwrap(), RAW_PADDING_NOTE));
+
+        let recut = export_cutout(&format!("{}#hdu=1", report.output_path), "", Some(&out_dir), &overhanging_box(), false, true, false).unwrap();
+        let file = std::fs::File::open(&recut.output_path).unwrap();
+        let dq_header = extract_header_by_index(&file, 2).unwrap();
+        assert_eq!(dq_header.cards.iter().filter(|(k, v)| k.trim() == "HISTORY" && v.contains(RAW_PADDING_NOTE)).count(), 1);
+
+        let jwst = jwst_mef(&dir, "named.fits");
+        let named = export_cutout(&format!("{jwst}#hdu=1"), "", Some(&out_dir), &overhanging_box(), false, true, false).unwrap();
+        let file = std::fs::File::open(&named.output_path).unwrap();
+        assert!(!has_history(&extract_header_by_index(&file, 2).unwrap(), RAW_PADDING_NOTE));
+    }
+
+    #[test]
+    fn an_in_bounds_cutout_of_an_unknown_table_records_no_padding() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mask = vec![0i32; COLS * ROWS];
+        mask[COLS + 1] = 1;
+        let src = subaru_mef(&dir, "hsc_inside.fits", Some(mask));
+        let out_dir = dir.path().to_str().unwrap().to_string();
+        let inside = RegionShape::Box { x: 1.5, y: 1.5, width: 4.0, height: 4.0, angle: 0.0 };
+
+        let masked = export_cutout(&format!("{src}#hdu=2"), "", Some(&out_dir), &inside, false, true, false).unwrap();
+        assert_eq!(masked.rect, CutoutRect { x0: 0, y0: 0, width: 4, height: 4 });
+        assert_eq!(masked.fraction_on_image, 1.0);
+        let file = std::fs::File::open(&masked.output_path).unwrap();
+        assert_eq!(extract_int_plane_by_index(&file, 2).unwrap().bits[[1, 1]], 1);
+        assert!(!has_history(&extract_header_by_index(&file, 2).unwrap(), RAW_PADDING_NOTE));
+
+        let synthetic = export_cutout(&src, "", Some(&out_dir), &inside, false, true, false).unwrap();
+        assert_eq!(synthetic.hdus, vec!["SCI", "DQ"]);
+        let file = std::fs::File::open(&synthetic.output_path).unwrap();
+        assert!(extract_int_plane_by_index(&file, 2).unwrap().bits.iter().all(|&v| v == 0));
+        assert!(!has_history(&extract_header_by_index(&file, 2).unwrap(), RAW_PADDING_NOTE));
+    }
+
     #[test]
     fn export_rejects_non_box_regions_and_the_source_as_target() {
         let dir = tempfile::tempdir().unwrap();
@@ -517,50 +600,6 @@ mod tests {
         assert_eq!(sci.get("BUNIT"), Some("MJy/sr"));
         assert_eq!(sci.get("TELESCOP"), Some("JWST"));
         assert!(extract_image_mmap_by_index(&file, 1).unwrap().image[[0, 0]].is_nan());
-    }
-
-    #[test]
-    fn provenance_only_drops_wcs_and_plane_cards_but_keeps_observation_metadata() {
-        let mut merged = HduHeader::empty();
-        for (k, v) in [
-            ("TELESCOP", "JWST"), ("INSTRUME", "NIRCAM"), ("DATE-OBS", "2024-01-01"), ("FILTER", "F200W"),
-            ("CRPIX1", "10"), ("CD1_1", "1e-5"), ("CTYPE1", "RA---TAN"), ("BUNIT", "MJy/sr"),
-            ("EXTNAME", "SCI"), ("EXTVER", "1"), ("LTV1", "-3"), ("BZERO", "0"),
-        ] {
-            merged.set(k, v.to_string());
-        }
-        let primary = provenance_only(&merged);
-        assert_eq!(primary.get("TELESCOP"), Some("JWST"));
-        assert_eq!(primary.get("INSTRUME"), Some("NIRCAM"));
-        assert_eq!(primary.get("DATE-OBS"), Some("2024-01-01"));
-        assert_eq!(primary.get("FILTER"), Some("F200W"));
-        for gone in ["CRPIX1", "CD1_1", "CTYPE1", "BUNIT", "EXTNAME", "EXTVER", "LTV1", "BZERO"] {
-            assert!(primary.get(gone).is_none(), "{gone}");
-            assert!(!primary.cards.iter().any(|(k, _)| k == gone), "{gone}");
-        }
-        assert!(provenance_only(&HduHeader::empty()).cards.is_empty());
-    }
-
-    #[test]
-    fn provenance_keeps_every_history_and_comment_line_out_of_the_keyword_index() {
-        let mut merged = HduHeader::empty();
-        merged.set("TELESCOP", "JWST".to_string());
-        for (key, line) in [("HISTORY", "flat-fielded"), ("COMMENT", "reduced by the pipeline"), ("HISTORY", "drizzled")] {
-            merged.cards.push((key.to_string(), line.to_string()));
-        }
-        let primary = provenance_only(&merged);
-        let commentary: Vec<(&str, &str)> = primary
-            .cards
-            .iter()
-            .filter(|(k, _)| is_commentary_key(k))
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        assert_eq!(
-            commentary,
-            vec![("HISTORY", "flat-fielded"), ("COMMENT", "reduced by the pipeline"), ("HISTORY", "drizzled")]
-        );
-        assert!(primary.index.get("HISTORY").is_none() && primary.index.get("COMMENT").is_none());
-        assert_eq!(primary.get("TELESCOP"), Some("JWST"));
     }
 
     fn primary_value_field(path: &str, key: &str) -> String {

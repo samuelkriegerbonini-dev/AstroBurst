@@ -61,6 +61,21 @@ describe("filter table additions", () => {
     }
   });
 
+  it("resolves the Roman WFI pivot wavelengths", () => {
+    const roman: [string, number][] = [
+      ["F062", 629], ["F087", 870], ["F106", 1057], ["F129", 1290],
+      ["F146", 1438], ["F158", 1575], ["F184", 1839], ["F213", 2123],
+    ];
+    for (const [code, nm] of roman) {
+      expect(filterCodeAndWavelengthNm(code)).toEqual({ code, nm });
+    }
+    expect(filterCodeAndWavelengthNm("F129")).toEqual({ code: "F129", nm: 1290 });
+    expect(filterCodeAndWavelengthNm("f129")).toEqual({ code: "F129", nm: 1290 });
+    expect(filterCodeAndWavelengthNm("F129;CLEAR")).toEqual({ code: "F129", nm: 1290 });
+    expect(filterCodeAndWavelengthNm("F158")).toEqual({ code: "F158", nm: 1575 });
+    expect(filterCodeAndWavelengthNm("F158M")).toEqual({ code: "F158M", nm: 1580 });
+  });
+
   it("matches the Rust mirror entry for entry", () => {
     const rustPath = fileURLToPath(new URL("../../../src-tauri/src/core/metadata/filter_wavelengths.rs", import.meta.url));
     const src = readFileSync(rustPath, "utf8");
@@ -70,10 +85,10 @@ describe("filter table additions", () => {
     const rust: [string, number][] = [...table.matchAll(/\("([A-Z0-9_]+)",\s*(\d+)\)/g)].map((m) => [m[1], Number(m[2])]);
     const ts = filterWavelengthEntries();
     const byKey = (a: [string, number], b: [string, number]) => a[0].localeCompare(b[0]);
-    expect(rust).toHaveLength(74);
-    expect(ts).toHaveLength(74);
-    expect(new Set(rust.map(([k]) => k)).size).toBe(74);
-    expect(new Set(ts.map(([k]) => k)).size).toBe(74);
+    expect(rust).toHaveLength(82);
+    expect(ts).toHaveLength(82);
+    expect(new Set(rust.map(([k]) => k)).size).toBe(82);
+    expect(new Set(ts.map(([k]) => k)).size).toBe(82);
     expect([...rust].sort(byKey)).toEqual([...ts].sort(byKey));
     expect([...ts].sort(byKey)).toEqual([...rust].sort(byKey));
   });

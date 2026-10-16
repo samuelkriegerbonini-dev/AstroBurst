@@ -12,6 +12,12 @@ export class TauriCommandError extends Error {
   }
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 export function normalizeTauriError(command: string, raw: unknown): TauriCommandError {
   if (raw instanceof TauriCommandError) {
     return raw;
@@ -28,6 +34,7 @@ export function normalizeTauriError(command: string, raw: unknown): TauriCommand
       command,
       String(obj.message ?? obj.error ?? JSON.stringify(raw)),
       typeof obj.code === "string" ? obj.code : undefined,
+      isPlainObject(obj.context) ? { ...obj.context } : undefined,
     );
   }
   return new TauriCommandError(command, String(raw));

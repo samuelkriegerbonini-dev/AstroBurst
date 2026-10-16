@@ -2,10 +2,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use super::mission::Mission;
-use crate::infra::mast::client::{MastClient, QueryPairs};
+use crate::infra::mast::client::{ChunkSink, ImageDownload, ImageOp, MastClient, QueryPairs};
 use crate::infra::mast::error::MastResult;
 use crate::infra::mast::models::{
-    DatasetIds, DatasetProducts, ImageListResult, SearchParams, SearchResults,
+    AuthCheck, DatasetIds, DatasetProducts, ImageListResult, SearchParams, SearchResults,
 };
 
 pub(crate) fn present<'a, const N: usize>(
@@ -62,10 +62,7 @@ impl MissionEndpoint {
         self.client.get_json(&self.path(operation), query).await
     }
 
-    pub async fn auth_check<T>(&self) -> MastResult<SearchResults<T>>
-    where
-        T: DeserializeOwned,
-    {
+    pub async fn auth_check(&self) -> MastResult<AuthCheck> {
         self.client.get_json(&self.path("auth_check"), &[]).await
     }
 
@@ -110,7 +107,7 @@ impl MissionEndpoint {
         filename: Option<&str>,
         fileset_name: Option<&str>,
     ) -> MastResult<Vec<u8>> {
-        self.get_image("get_image_preview", filename, fileset_name)
+        self.get_image(ImageOp::Preview, filename, fileset_name)
             .await
     }
 
@@ -119,7 +116,21 @@ impl MissionEndpoint {
         filename: Option<&str>,
         fileset_name: Option<&str>,
     ) -> MastResult<Vec<u8>> {
-        self.get_image("get_image_thumbnail", filename, fileset_name)
+        self.get_image(ImageOp::Thumbnail, filename, fileset_name)
+            .await
+    }
+
+    pub async fn download_image(
+        &self,
+        op: ImageOp,
+        filename: Option<&str>,
+        fileset_name: Option<&str>,
+        cap: u64,
+        sink: &mut ChunkSink<'_>,
+    ) -> MastResult<ImageDownload> {
+        let query = present([("filename", filename), ("fileset_name", fileset_name)]);
+        self.client
+            .download_image(&self.path(op.operation()), &query, cap, sink)
             .await
     }
 
@@ -132,19 +143,24 @@ impl MissionEndpoint {
 
     async fn get_image(
         &self,
-        operation: &str,
+        op: ImageOp,
         filename: Option<&str>,
         fileset_name: Option<&str>,
     ) -> MastResult<Vec<u8>> {
-        let query = present([("filename", filename), ("fileset_name", fileset_name)]);
-        self.client.get_bytes(&self.path(operation), &query).await
+        let mut bytes = Vec::new();
+        self.download_image(op, filename, fileset_name, op.cap(), &mut |chunk: &[u8], _total: Option<u64>| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        })
+        .await?;
+        Ok(bytes)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::mast::client::tests::{serve_once, test_client};
+    use crate::infra::mast::client::tests::{serve_once, test_client, JPEG_HEAD};
     use crate::infra::mast::models::DatasetProduct;
     use serde_json::{json, Value};
 
@@ -201,18 +217,27 @@ mod tests {
 
     #[tokio::test]
     async fn image_requests_only_send_present_query_values() {
-        let (base, server) = serve_once("200 OK", "image/jpeg", vec![0xFF, 0xD8]).await;
+        let (base, server) = serve_once("200 OK", "application/octet-stream", JPEG_HEAD.to_vec()).await;
         let endpoint = MissionEndpoint::new(test_client(&base), Mission::Roman);
         let bytes = endpoint
             .get_image_thumbnail(None, Some("r0001"))
             .await
             .unwrap();
-        assert_eq!(bytes, vec![0xFF, 0xD8]);
+        assert_eq!(bytes, JPEG_HEAD.to_vec());
         let request = server.await.unwrap();
         assert_eq!(
             request.target,
             "/search/roman/api/v0.1/get_image_thumbnail?fileset_name=r0001"
         );
+    }
+
+    #[tokio::test]
+    async fn auth_check_decodes_the_authorized_flag() {
+        let (base, server) = serve_once("200 OK", "application/json", br#"{"authorized":false}"#.to_vec()).await;
+        let endpoint = MissionEndpoint::new(test_client(&base), Mission::Roman);
+        let check = endpoint.auth_check().await.unwrap();
+        assert!(!check.authorized);
+        assert_eq!(server.await.unwrap().target, "/search/roman/api/v0.1/auth_check");
     }
 
     #[tokio::test]

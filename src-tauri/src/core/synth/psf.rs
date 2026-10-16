@@ -1,3 +1,4 @@
+use libm::j1 as bessel_j1;
 use ndarray::Array2;
 use std::f64::consts::PI;
 
@@ -88,38 +89,6 @@ impl PsfModel for AiryPsf {
     }
 }
 
-fn bessel_j1(x: f64) -> f64 {
-    let ax = x.abs();
-    if ax < 8.0 {
-        let y = x * x;
-        let num = x
-            * (72362614232.0
-                + y * (-7895059235.0
-                    + y * (242396853.1
-                        + y * (-2972611.439 + y * (15704.4826 + y * (-30.16036606))))));
-        let den = 144725228442.0
-            + y * (2300535178.0
-                + y * (18583304.74 + y * (99447.43394 + y * (376.9991397 + y))));
-        num / den
-    } else {
-        let z = 8.0 / ax;
-        let y = z * z;
-        let xx = ax - 2.356194491;
-        let p = 1.0
-            + y * (0.183105e-2
-                + y * (-0.3516396496e-4 + y * (0.2457520174e-5 + y * (-0.240337019e-6))));
-        let q = 0.04687499995
-            + y * (-0.2002690873e-3
-                + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
-        let ans = (0.5641895835 / ax.sqrt()) * (xx.cos() * p - z * xx.sin() * q);
-        if x < 0.0 {
-            -ans
-        } else {
-            ans
-        }
-    }
-}
-
 pub fn render_stars(
     stars: &[Star],
     psf: &dyn PsfModel,
@@ -164,4 +133,65 @@ pub fn render_stars(
         }
     }
     image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const J1_REFERENCE: [(f64, f64); 10] = [
+        (0.5, 0.2422684576748739),
+        (1.0, 0.4400505857449335),
+        (2.0, 0.5767248077568734),
+        (3.8317059702075125, -6.149807356994906e-17),
+        (5.0, -0.32757913759146523),
+        (8.0, 0.23463634685391463),
+        (10.0, 0.04347274616886144),
+        (20.0, 0.06683312417585005),
+        (50.0, -0.09751182812517514),
+        (100.0, -0.07714535201411216),
+    ];
+
+    #[test]
+    fn bessel_j1_matches_double_precision_reference() {
+        let failures: Vec<String> = J1_REFERENCE
+            .iter()
+            .filter_map(|&(x, expected)| {
+                let got = bessel_j1(x);
+                let delta = (got - expected).abs();
+                (delta > 1e-12).then(|| {
+                    format!("x={x}: got {got:e}, expected {expected:e}, |delta|={delta:e}")
+                })
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn airy_render_matches_the_series_reference_within_f32_resolution() {
+        let star = Star {
+            x: 32.0,
+            y: 32.0,
+            z: 0.0,
+            flux: 1000.0,
+            temperature: 5800.0,
+        };
+        let image = render_stars(&[star], &AiryPsf::new(2.5), 64, 64);
+        let samples = [
+            ("peak", image[[32, 32]], 131.41490173339844),
+            ("r=1", image[[32, 33]], 87.32694244384766),
+            ("r=3", image[[32, 35]], 0.02325810119509697),
+            ("r=6", image[[32, 38]], 0.19441719353199005),
+        ];
+        let failures: Vec<String> = samples
+            .iter()
+            .filter_map(|&(name, got, expected)| {
+                let rel = (got as f64 - expected).abs() / expected;
+                (rel > 1e-6).then(|| format!("{name}: got {got}, expected {expected}, rel={rel:e}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        let sum: f64 = image.iter().map(|&v| v as f64).sum();
+        assert!((sum - 1000.0).abs() / 1000.0 <= 1e-6, "sum {sum}");
+    }
 }

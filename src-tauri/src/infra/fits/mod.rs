@@ -1,5 +1,6 @@
 pub mod asdf_hdu;
 pub mod compress;
+pub mod compressed_guard;
 pub mod dispatcher;
 pub mod file_bytes;
 pub mod mef_writer;

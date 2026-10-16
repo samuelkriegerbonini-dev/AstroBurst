@@ -24,6 +24,7 @@
     "fs:allow-appdata-write-recursive",
     "fs:allow-download-read-recursive",
     "fs:allow-download-write-recursive",
-    "opener:default"
+    "opener:default",
+    { "identifier": "fs:scope", "deny": [{ "path": "$CONFIG/astroburst/*_api_key.txt" }] }
   ]
 }

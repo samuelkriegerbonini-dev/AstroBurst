@@ -103,12 +103,16 @@ pub fn pixel_map(op: GeometryOp, dims: (usize, usize)) -> (Mat, Vec2) {
 }
 
 pub fn apply_geometry(arr: &Array2<f32>, op: GeometryOp) -> Array2<f32> {
+    apply_geometry_generic(arr, op)
+}
+
+pub fn apply_geometry_generic<T: Copy + Default + Send + Sync>(arr: &Array2<T>, op: GeometryOp) -> Array2<T> {
     let (rows, cols) = arr.dim();
     let (out_rows, out_cols) = op.output_dims((rows, cols));
     if arr.is_empty() {
-        return Array2::zeros((out_rows, out_cols));
+        return Array2::from_elem((out_rows, out_cols), T::default());
     }
-    let mut data = vec![0f32; out_rows * out_cols];
+    let mut data = vec![T::default(); out_rows * out_cols];
     data.par_chunks_mut(out_cols).enumerate().for_each(|(r, row)| {
         for (c, v) in row.iter_mut().enumerate() {
             let (sy, sx) = source_index(op, rows, cols, r, c);
@@ -498,6 +502,32 @@ mod tests {
         assert_eq!(GeometryOp::from_name("rot90"), Some(GeometryOp::Rot90Cw));
         assert_eq!(GeometryOp::from_name("flip_v"), Some(GeometryOp::FlipV));
         assert_eq!(GeometryOp::from_name("rotate"), None);
+    }
+
+    #[test]
+    fn apply_geometry_generic_permutes_u32_and_f32_identically() {
+        let (rows, cols) = (3, 5);
+        let high_bit = 1u32 << 31;
+        let bits = Array2::from_shape_fn((rows, cols), |(y, x)| (y * cols + x) as u32 | high_bit);
+        let as_float = |b: u32| match b & !high_bit {
+            7 => f32::NAN,
+            i => i as f32 + 0.25,
+        };
+        let floats = bits.mapv(as_float);
+        let same_bits = |a: &Array2<f32>, b: &Array2<f32>| a.dim() == b.dim() && a.iter().zip(b).all(|(p, q)| p.to_bits() == q.to_bits());
+        for op in ALL_OPS {
+            let permuted = apply_geometry_generic(&bits, op);
+            assert_eq!(permuted.dim(), op.output_dims((rows, cols)), "{}", op.name());
+            for ((r, c), v) in permuted.indexed_iter() {
+                let (sy, sx) = source_index(op, rows, cols, r, c);
+                assert_eq!(*v, bits[[sy, sx]], "{} ({r}, {c})", op.name());
+            }
+            let wrapped = apply_geometry(&floats, op);
+            assert!(same_bits(&wrapped, &apply_geometry_generic(&floats, op)), "{}", op.name());
+            assert!(same_bits(&wrapped, &permuted.mapv(as_float)), "{}", op.name());
+        }
+        let empty = apply_geometry_generic(&Array2::<u32>::zeros((0, 4)), GeometryOp::Rot90Cw);
+        assert_eq!(empty.dim(), (4, 0));
     }
 
     #[test]
