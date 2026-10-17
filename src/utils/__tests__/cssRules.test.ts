@@ -49,6 +49,20 @@ describe("viewer canvas", () => {
   });
 });
 
+describe("disabled primary and secondary buttons", () => {
+  for (const button of [".ab-btn-primary", ".ab-btn-secondary"]) {
+    it(`${button} looks disabled and does not react to hover or press when disabled`, () => {
+      const disabled = rule(indexCss, `${button}:disabled`);
+      expect(Number(disabled.get("opacity"))).toBeLessThan(0.6);
+      expect(disabled.get("cursor")).toBe("not-allowed");
+      expect(ruleBody(indexCss, `${button}:hover`)).toBeNull();
+      expect(ruleBody(indexCss, `${button}:active`)).toBeNull();
+      expect(rule(indexCss, `${button}:hover:not(:disabled)`).get("transform")).toBe("translateY(-1px)");
+      expect(rule(indexCss, `${button}:active:not(:disabled)`).get("transform")).toBe("scale(0.98)");
+    });
+  }
+});
+
 describe("Run button and palette classes", () => {
   it("define a small Run button with less padding and a smaller font than the default one", () => {
     const base = rule(indexCss, ".ab-run-btn");

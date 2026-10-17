@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Disabled primary and secondary buttons now look disabled (dimmed, not-allowed cursor, no hover lift), so a blocked action such as Show on image for a moving target no longer looks like a button that does nothing.
+
 ## [0.7.0] - 2026-10-17
 
 ### Added
