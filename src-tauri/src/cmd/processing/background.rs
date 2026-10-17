@@ -6,120 +6,23 @@ use serde_json::json;
 use crate::cmd::common::{blocking_cmd, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir, save_auto_stf_preview_png, write_derived_fits, OutputValues};
 use crate::cmd::compose::rescale_header_to_grid;
 use crate::cmd::processing::local_contrast::source_header;
-use crate::core::imaging::background::{extract_background, extract_background_linked, neutralize_background, deband, detect_band_axis, dispersed_exposure, DebandAxis, DebandConfig, BackgroundConfig, BackgroundMode};
+use crate::core::imaging::background::{extract_background_linked, neutralize_background, deband, detect_band_axis, DebandAxis, DebandConfig, BackgroundConfig};
 use crate::core::imaging::stats::compute_image_stats;
-use crate::core::stacking::cfa_guard::cfa_pattern;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
-    HEADER_DEBAND, MODE_DIVIDE, PROGRESS_EVENT, PROGRESS_STEPS,
-    MIN_GRID_SIZE, MAX_GRID_SIZE, MIN_POLY_DEGREE, MAX_POLY_DEGREE, MIN_ITERATIONS, MAX_ITERATIONS,
+    HEADER_DEBAND, PROGRESS_EVENT, PROGRESS_STEPS,
     RES_AXIS, RES_CORRECTED_PNG, RES_MODEL_PNG, RES_CORRECTED_FITS, RES_SAMPLE_COUNT,
     RES_RMS_RESIDUAL, RES_ELAPSED_MS, RES_DIMENSIONS, RES_CACHE_KEY,
 };
-use crate::types::header::HduHeader;
 use crate::types::image_ref::sanitize_fragment;
 
-const ABPROC_BG_CORRECTED: &str = "bg_corrected";
+pub(crate) const ABPROC_BG_CORRECTED: &str = "bg_corrected";
 
-enum DebandRequest {
-    Fixed(DebandAxis),
-    Auto,
-}
-
-fn deband_request(mode: &str) -> Option<DebandRequest> {
-    match mode {
-        "deband_rows" => Some(DebandRequest::Fixed(DebandAxis::Rows)),
-        "deband_cols" => Some(DebandRequest::Fixed(DebandAxis::Columns)),
-        "deband_both" => Some(DebandRequest::Fixed(DebandAxis::Both)),
-        "deband_auto" => Some(DebandRequest::Auto),
-        _ => None,
-    }
-}
-
-fn deband_axis_token(axis: DebandAxis) -> &'static str {
-    match axis {
-        DebandAxis::Rows => "rows",
-        DebandAxis::Columns => "cols",
-        DebandAxis::Both => "both",
-    }
-}
-
-fn dispersed_error(exp_type: &str) -> String {
-    format!(
-        "De-banding is for imaging frames; this is a dispersed exposure (EXP_TYPE={exp_type}) whose rows and columns carry spectra, so a band model would subtract signal."
-    )
-}
-
-fn cfa_error(pattern: &str) -> String {
-    format!(
-        "De-banding is for debayered frames; this is a Bayer mosaic (BAYERPAT={pattern}) whose row and column medians alternate by colour, so a band model would tint the image. Debayer it first (Processing > Debayer)."
-    )
-}
-
-fn deband_guard<'a>(mut headers: impl Iterator<Item = &'a HduHeader> + Clone) -> anyhow::Result<()> {
-    if let Some(exp_type) = headers.clone().find_map(dispersed_exposure) {
-        anyhow::bail!("{}", dispersed_error(&exp_type));
-    }
-    if let Some(pattern) = headers.find_map(cfa_pattern) {
-        anyhow::bail!("{}", cfa_error(pattern.name()));
-    }
-    Ok(())
-}
-
-struct SingleOutput {
-    corrected: Array2<f32>,
-    model: Array2<f32>,
-    deband: Option<(DebandAxis, bool)>,
-    sample_count: Option<usize>,
-    rms_residual: Option<f64>,
-    elapsed_ms: u64,
-}
-
-fn deband_single(image: &Array2<f32>, request: DebandRequest, sigma_clip: f32, iterations: usize) -> SingleOutput {
-    let t0 = std::time::Instant::now();
-    let base = DebandConfig { axis: DebandAxis::Both, sigma_clip, iterations: iterations.clamp(1, 5) };
-    let (axis, detected) = match request {
-        DebandRequest::Fixed(axis) => (axis, false),
-        DebandRequest::Auto => (detect_band_axis(image, &base), true),
-    };
-    let corrected = deband(image, &DebandConfig { axis, ..base });
-    let model = Array2::from_shape_fn(image.dim(), |ix| {
-        let v = image[ix];
-        if v.is_finite() { v - corrected[ix] } else { f32::NAN }
-    });
-    SingleOutput {
-        corrected,
-        model,
-        deband: Some((axis, detected)),
-        sample_count: None,
-        rms_residual: None,
-        elapsed_ms: t0.elapsed().as_millis() as u64,
-    }
-}
-
-pub(crate) fn background_config(
-    grid_size: usize,
-    poly_degree: usize,
-    sigma_clip: f64,
-    iterations: usize,
-    mode: &str,
-) -> anyhow::Result<BackgroundConfig> {
-    let clip = sigma_clip as f32;
-    if !(clip.is_finite() && clip > 0.0) {
-        anyhow::bail!("sigma_clip must be a finite number greater than 0, got {}", sigma_clip);
-    }
-    Ok(BackgroundConfig {
-        grid_size: grid_size.clamp(MIN_GRID_SIZE, MAX_GRID_SIZE),
-        poly_degree: poly_degree.clamp(MIN_POLY_DEGREE, MAX_POLY_DEGREE),
-        sigma_clip: clip,
-        iterations: iterations.clamp(MIN_ITERATIONS, MAX_ITERATIONS),
-        mode: match mode {
-            MODE_DIVIDE => BackgroundMode::Divide,
-            _ => BackgroundMode::Subtract,
-        },
-    })
-}
+pub(crate) use crate::core::ops::background::{
+    background_config, deband_axis_token, deband_guard, deband_request, model_for_mode,
+};
+use crate::core::ops::{run_op, OpInput, OpSpec, OpVersion};
 
 fn background_png_paths(output_dir: &str, stem: &str, bin_id: Option<&str>) -> (String, String) {
     let base = match bin_id {
@@ -132,7 +35,7 @@ fn background_png_paths(output_dir: &str, stem: &str, bin_id: Option<&str>) -> (
     )
 }
 
-fn run_extract_background(
+pub(crate) fn run_extract_background(
     path: &str,
     output_dir: &str,
     config: &BackgroundConfig,
@@ -143,66 +46,50 @@ fn run_extract_background(
 ) -> anyhow::Result<serde_json::Value> {
     let entry = load_from_cache_or_disk(path)?;
     let source = source_header(path, &entry);
-    let request = deband_request(mode);
-    if request.is_some() {
-        deband_guard(source.iter())?;
-    }
-    let output = match request {
-        Some(request) => {
-            let output = deband_single(entry.arr(), request, config.sigma_clip, iterations);
-            if let Some(p) = progress {
-                p.emit_complete();
-            }
-            output
-        }
-        None => {
-            let bg = extract_background(entry.arr(), config, progress)?;
-            SingleOutput {
-                corrected: bg.corrected,
-                model: bg.model,
-                deband: None,
-                sample_count: Some(bg.sample_count),
-                rms_residual: Some(bg.rms_residual),
-                elapsed_ms: bg.elapsed_ms,
-            }
-        }
-    };
+    let spec = OpSpec::Background { v: OpVersion, model: model_for_mode(mode, config.clone(), iterations) };
+
+    let t0 = std::time::Instant::now();
+    let mut output = run_op(&spec, &OpInput::mono(entry.arr(), source.as_ref()), progress)?;
+    let elapsed_ms = t0.elapsed().as_millis() as u64;
+    let corrected = output.planes.swap_remove(0);
+    let model = output.model.take().ok_or_else(|| anyhow::anyhow!("the background op returned no model"))?;
 
     let stem = output_stem(path);
     let (corrected_png, model_png) = background_png_paths(output_dir, &stem, bin_id);
-    let (rows, cols) = output.corrected.dim();
-    save_auto_stf_preview_png(&output.corrected, &corrected_png)?;
-    save_auto_stf_preview_png(&output.model, &model_png)?;
+    let (rows, cols) = corrected.dim();
+    save_auto_stf_preview_png(&corrected, &corrected_png)?;
+    save_auto_stf_preview_png(&model, &model_png)?;
 
     let corrected_fits = format!("{}/{}_bg_corrected.fits", output_dir, stem);
     let mut header = derived_output_header(source.as_ref(), ABPROC_BG_CORRECTED, OutputValues::Linear);
-    let axis = output.deband.map(|(axis, _)| deband_axis_token(axis));
-    if let Some((axis, detected)) = output.deband {
-        let token = deband_axis_token(axis);
+    let axis = output.extras.get(RES_AXIS).cloned().unwrap_or(serde_json::Value::Null);
+    if let Some(token) = axis.as_str() {
         header.set(HEADER_DEBAND, token.to_string());
-        let note = if detected { format!("deband {token} (auto)") } else { format!("deband {token}") };
+    }
+    for note in output.history_lines {
         header.cards.push(("HISTORY".to_string(), note));
     }
     let (cache_key, entry_header) = match bin_id {
         Some(bid) => (crate::types::constants::wizard_bg_key(bid), Some(header)),
         None => {
-            write_derived_fits(&corrected_fits, &output.corrected, Some(&header))?;
+            write_derived_fits(&corrected_fits, &corrected, Some(&header))?;
             (corrected_fits, None)
         }
     };
 
-    let stats = compute_image_stats(&output.corrected);
-    GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&cache_key, Arc::new(output.corrected), stats, entry_header);
+    let stats = compute_image_stats(&corrected);
+    GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&cache_key, Arc::new(corrected), stats, entry_header);
 
+    let extra = |key: &str| output.extras.get(key).cloned().unwrap_or(serde_json::Value::Null);
     Ok(json!({
         RES_CORRECTED_PNG: corrected_png,
         RES_MODEL_PNG: model_png,
         RES_CORRECTED_FITS: cache_key,
         RES_CACHE_KEY: cache_key,
-        RES_SAMPLE_COUNT: output.sample_count,
-        RES_RMS_RESIDUAL: output.rms_residual,
+        RES_SAMPLE_COUNT: extra(RES_SAMPLE_COUNT),
+        RES_RMS_RESIDUAL: extra(RES_RMS_RESIDUAL),
         RES_AXIS: axis,
-        RES_ELAPSED_MS: output.elapsed_ms,
+        RES_ELAPSED_MS: elapsed_ms,
         RES_DIMENSIONS: [cols, rows],
     }))
 }
@@ -369,6 +256,7 @@ pub async fn extract_background_batch_cmd(
 mod tests {
     use super::*;
     use crate::types::constants::wizard_bg_key;
+    use crate::core::ops::background::{deband_single, DebandRequest};
 
     fn sky(seed: usize) -> Array2<f32> {
         Array2::from_shape_fn((64, 64), |(y, x)| {

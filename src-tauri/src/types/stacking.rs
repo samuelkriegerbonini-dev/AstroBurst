@@ -351,7 +351,8 @@ pub struct DrizzleResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RLConfig {
     pub iterations: usize,
     pub regularization: f64,

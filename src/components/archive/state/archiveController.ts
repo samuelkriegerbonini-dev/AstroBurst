@@ -2,6 +2,8 @@ import type { WcsInfo } from "../../../shared/types/astrometry";
 import type {
   MastCacheInfo,
   MastColumn,
+  MastError,
+  MastErrorCode,
   MastFilterValues,
   MastImageRef,
   MastImageSet,
@@ -52,15 +54,14 @@ import {
 import { interpretQuery, type QueryKind } from "../logic/interpretQuery";
 import { nextOffset, nextSort, sortMode, SORT_BLOCKED_HINT } from "../logic/paging";
 import { failedCount, nextStarts } from "../logic/thumbQueue";
-import { generationPrefix, pageId, resolveId, searchId, thumbId, TOKEN_CHECK_ID, TOKEN_SAVE_ID } from "../logic/requestIds";
-import { errorView, type BannerKind } from "../logic/errorCopy";
+import { generationOf, generationPrefix, nonThumbPrefixes, pageId, resolveId, searchId, thumbId, TOKEN_CHECK_ID, TOKEN_SAVE_ID } from "../logic/requestIds";
+import { errorView, slotError, type BannerKind } from "../logic/errorCopy";
 import { missionEntries, resultsGate, romanLock } from "../logic/missionState";
 import { aroundQueryText, type AroundTarget } from "../logic/aroundQuery";
-import { isPublic } from "../logic/cardLabel";
 import { formatBytes, type ProductMode } from "../logic/productView";
 import { displayRows, type ChipId } from "../logic/resultsView";
 import type { Suggestion } from "../logic/suggestions";
-import { parseStripKey, stepEntry } from "../logic/detailView";
+import { parseStripKey, previewsAllowed, stepEntry } from "../logic/detailView";
 import { MAST_TOKEN_PAGE_URL, checkTokenFormat } from "../logic/tokenFormat";
 import { OPEN_PAGE_FAILED_TEXT, tokenWasSaved } from "../logic/romanPanel";
 import { detailEntry, imageSetKey, largeEntry, resultsState, visibleBanner, type ArchiveState, type DetailTab, type ResultsView } from "./archiveReducer";
@@ -137,7 +138,7 @@ export interface ArchiveController {
   runSuggestion(suggestion: Suggestion): Promise<void>;
   searchAround(target: AroundTarget): Promise<void>;
   widen(radiusArcmin: number): Promise<void>;
-  select(datasetId: string | null): void;
+  select(datasetId: string | null, rowKey?: string | null): void;
   toggleView(): void;
   setView(view: ResultsView): void;
   toggleTableThumbs(): void;
@@ -149,6 +150,7 @@ export interface ArchiveController {
   copy(text: string, label?: string): Promise<void>;
   dismissToast(): void;
   clearCache(): Promise<void>;
+  imageMissing(url: string): void;
   setNarrow(narrow: boolean): void;
   setDetailTab(tab: DetailTab): void;
   toggleDetail(): void;
@@ -176,6 +178,8 @@ export interface ArchiveController {
 
 const LOOKUP_FALLBACK = new Set(["mast_network", "mast_server", "mast_timeout", "mast_decode"]);
 const DEFAULT_RETRY_AFTER_SEC = 10;
+const FAILURE_BURST_MS = 1500;
+const QUIET_FAILURES = new Set(["mast_no_image", "mast_unauthorized", "mast_cancelled"]);
 
 const CHIP_PATCH: Record<ChipId, Partial<MastFilterValues>> = {
   level: { level: "all" },
@@ -200,6 +204,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
   const get = () => store.getState();
   const dispatch = store.dispatch;
   const thumbRequests = new Map<string, string>();
+  const supersededThumbs = new Map<string, string>();
   let initRun: Promise<void> | null = null;
   let pauseTimer: { at: number; handle: unknown } | null = null;
   let pumping = false;
@@ -210,6 +215,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
   let tokenRequest: string | null = null;
   let autoChecked = false;
   let failedPage: { generation: number; offset: number } | null = null;
+  let failureBurst: { count: number; byCode: Map<MastErrorCode, { count: number; error: MastError }>; handle: unknown } | null = null;
 
   function call<T>(kind: InflightKind, fn: () => Promise<T>): Promise<T> {
     const end = inflight.begin(kind);
@@ -224,6 +230,41 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
 
   function cancelGeneration(generation: number): void {
     services.cancel({ prefix: generationPrefix(generation) }).catch(() => 0);
+  }
+
+  function cancelAllButThumbs(generation: number): void {
+    for (const prefix of nonThumbPrefixes(generation)) services.cancel({ prefix }).catch(() => 0);
+  }
+
+  function cancelThumbs(requestIds: string[]): void {
+    if (requestIds.length) services.cancel({ requestIds }).catch(() => 0);
+  }
+
+  function cancelEveryThumb(): void {
+    const ids = [...thumbRequests.values(), ...supersededThumbs.keys()];
+    thumbRequests.clear();
+    supersededThumbs.clear();
+    cancelThumbs(ids);
+  }
+
+  function pruneThumbs(s: ArchiveState): void {
+    if (s.run || (thumbRequests.size === 0 && supersededThumbs.size === 0)) return;
+    let onScreen: Set<string> | null = null;
+    const shown = (key: string) => {
+      onScreen ??= new Set(s.results?.rows.map((r) => r.datasetId) ?? []);
+      return onScreen.has(parseStripKey(key)?.datasetId ?? key);
+    };
+    for (const [key, requestId] of thumbRequests) {
+      if (generationOf(requestId) === s.generation || shown(key)) continue;
+      thumbRequests.delete(key);
+      cancelThumbs([requestId]);
+      if (s.thumbs.inflight.includes(key)) dispatch({ type: "thumbDropped", key });
+    }
+    for (const [requestId, key] of supersededThumbs) {
+      if (thumbRequests.has(key) && shown(key)) continue;
+      supersededThumbs.delete(requestId);
+      cancelThumbs([requestId]);
+    }
   }
 
   function missionOf(s: ArchiveState, id: MastMissionId = s.form.mission): MastMission | undefined {
@@ -252,9 +293,22 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     return !!run && run.generation === generation;
   }
 
+  function thumbAllowed(s: ArchiveState): (key: string) => boolean {
+    const results = s.results;
+    const mission = results ? missionOf(s, results.mission) : undefined;
+    if (!results || !mission) return () => true;
+    return (key) => {
+      const datasetId = parseStripKey(key)?.datasetId ?? key;
+      const row = results.rows.find((r) => r.datasetId === datasetId);
+      return !row || previewsAllowed(row, mission);
+    };
+  }
+
   function pushDemand(): void {
-    const selected = [...cardDemand.selected, ...stripDemand.filter((k) => !cardDemand.selected.includes(k))];
-    dispatch({ type: "thumbDemand", selected, visible: cardDemand.visible, ahead: cardDemand.ahead });
+    const allowed = thumbAllowed(get());
+    const cards = new Set([...cardDemand.selected, ...cardDemand.visible]);
+    const visible = [...cardDemand.visible, ...stripDemand.filter((k) => !cards.has(k))];
+    dispatch({ type: "thumbDemand", selected: cardDemand.selected.filter(allowed), visible: visible.filter(allowed), ahead: cardDemand.ahead.filter(allowed) });
   }
 
   const detail = createDetailEffects({
@@ -426,7 +480,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
       return;
     }
     const generation = s.generation + 1;
-    cancelGeneration(s.generation);
+    cancelAllButThumbs(s.generation);
     const meaning = interpretQuery(form.text, form.kindOverride);
     const kind: QueryKind = meaning.kind === "empty" ? "name" : meaning.kind;
     dispatch({
@@ -478,6 +532,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
 
   function moveTo(form: ArchiveForm): void {
     const s = get();
+    cancelEveryThumb();
     cancelGeneration(s.generation);
     dispatch({ type: "missionSwitched", form, generation: s.generation + 1 });
   }
@@ -619,6 +674,27 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     return nextStarts(s.thumbs, clock.now());
   }
 
+  function noteFailure(error: MastError): void {
+    if (QUIET_FAILURES.has(error.code)) return;
+    if (!failureBurst) {
+      const handle = clock.setTimeout(() => {
+        const burst = failureBurst;
+        failureBurst = null;
+        if (!burst) return;
+        let top: { count: number; error: MastError } | null = null;
+        for (const entry of burst.byCode.values()) if (!top || entry.count > top.count) top = entry;
+        if (!top) return;
+        const view = slotError(top.error, { surface: "thumb" });
+        const noun = burst.count === 1 ? "thumbnail" : "thumbnails";
+        dispatch({ type: "announce", text: `${burst.count} ${noun} failed: ${[view?.title ?? top.error.message, view?.meta].filter(Boolean).join(", ")}` });
+      }, FAILURE_BURST_MS);
+      failureBurst = { count: 0, byCode: new Map(), handle };
+    }
+    failureBurst.count += 1;
+    const seen = failureBurst.byCode.get(error.code);
+    failureBurst.byCode.set(error.code, { count: (seen?.count ?? 0) + 1, error: seen?.error ?? error });
+  }
+
   function startThumb(s: ArchiveState, key: string): void {
     const results = s.results;
     if (!results) return;
@@ -629,8 +705,11 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     const filename = strip?.filename ?? null;
     const row = results.rows.find((r) => r.datasetId === datasetId);
     const requestId = thumbId(generation, datasetId, filename);
+    const older = thumbRequests.get(key);
+    if (older !== undefined && older !== requestId) supersededThumbs.set(older, key);
     thumbRequests.set(key, requestId);
     const finish = (apply: () => void) => {
+      supersededThumbs.delete(requestId);
       if (thumbRequests.get(key) !== requestId) return;
       thumbRequests.delete(key);
       if (get().generation !== generation) {
@@ -652,7 +731,8 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
             const c = e.context;
             dispatch({ type: "thumbRateLimited", key, at: clock.now(), retryAfterSec: c.retryAfterSec ?? DEFAULT_RETRY_AFTER_SEC, consecutive: c.consecutive ?? 1, status: c.status ?? null });
           } else {
-            dispatch({ type: "thumbFailed", key, reason: errorView(e, { surface: "thumb", rowPublic: row ? isPublic(row) : true }).short });
+            dispatch({ type: "thumbFailed", key, error: e, at: clock.now() });
+            noteFailure(e);
           }
         });
       });
@@ -662,12 +742,13 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     if (pumping) return;
     pumping = true;
     try {
+      pruneThumbs(get());
       for (;;) {
         const s = get();
         schedulePause(s);
         const starts = startable(s);
         if (starts.length === 0) return;
-        dispatch({ type: "thumbsStarted", keys: starts });
+        dispatch({ type: "thumbsStarted", keys: starts, at: clock.now() });
         for (const key of starts) startThumb(s, key);
       }
     } finally {
@@ -709,10 +790,10 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
   function largeStepDataset(dir: 1 | -1): void {
     const s = get();
     if (!s.large.open || !s.results) return;
-    const rows = displayRows(s.results, s.sort);
-    const at = rows.findIndex((r) => r.datasetId === s.large.datasetId);
-    const next = at >= 0 ? rows[at + dir] : undefined;
-    if (next) dispatch({ type: "largeDataset", datasetId: next.datasetId });
+    const ids = [...new Set(displayRows(s.results, s.sort).map((r) => r.datasetId))];
+    const at = s.large.datasetId ? ids.indexOf(s.large.datasetId) : -1;
+    const next = at >= 0 ? ids[at + dir] : undefined;
+    if (next) dispatch({ type: "largeDataset", datasetId: next });
   }
 
   function stepImage(dir: 1 | -1): void {
@@ -751,7 +832,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     runSuggestion,
     searchAround,
     widen,
-    select: (datasetId) => dispatch({ type: "selected", datasetId }),
+    select: (datasetId, rowKey) => dispatch({ type: "selected", datasetId, rowKey: rowKey ?? null }),
     toggleView: () => {
       if (galleryAllowed(get())) dispatch({ type: "viewToggled" });
     },
@@ -779,11 +860,13 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     async clearCache() {
       try {
         const info = await services.cacheClear("all");
+        dispatch({ type: "cacheCleared" });
         dispatch({ type: "toast", text: `MAST cache cleared: ${formatBytes(info.bytes)} freed` });
       } catch (err) {
         dispatch({ type: "toast", text: `Could not clear the MAST cache: ${mastErrorOf(err).message}` });
       }
     },
+    imageMissing: (url) => dispatch({ type: "imageMissing", url }),
     setNarrow: (narrow) => dispatch({ type: "narrowSet", narrow }),
     setDetailTab: (tab) => dispatch({ type: "detailTab", tab }),
     toggleDetail: () => {
@@ -822,6 +905,8 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
       progressOff = null;
       if (pauseTimer) clock.clearTimeout(pauseTimer.handle);
       pauseTimer = null;
+      if (failureBurst) clock.clearTimeout(failureBurst.handle);
+      failureBurst = null;
     },
   };
 }

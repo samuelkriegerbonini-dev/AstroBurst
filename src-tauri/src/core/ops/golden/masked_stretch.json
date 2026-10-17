@@ -1,0 +1,16 @@
+[
+  {
+    "op": "masked_stretch",
+    "v": 1,
+    "iterations": 10,
+    "targetBackground": 0.25,
+    "maskGrowth": 2.5,
+    "maskSoftness": 4.0,
+    "detectionSigma": 8.0,
+    "maxEccentricity": 0.85,
+    "luminanceProtect": true,
+    "luminanceCeiling": 0.85,
+    "protectionAmount": 0.85,
+    "convergenceThreshold": 0.00001
+  }
+]

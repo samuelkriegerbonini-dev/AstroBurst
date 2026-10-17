@@ -45,6 +45,7 @@ use crate::core::imaging::stats::{
 use crate::core::imaging::stf::auto_stf;
 use crate::core::metadata::photcal::{missing_calibration_reason, PhotCal};
 use crate::infra::cache::ImageEntry;
+use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::reader::list_extensions;
 use crate::types::header::HduHeader;
 use crate::types::image_ref::PlaneSelector;
@@ -496,7 +497,10 @@ fn is_err_extname(extname: Option<&str>) -> bool {
 }
 
 pub(crate) fn has_err_extension(path: &str, dims: (usize, usize)) -> bool {
-    let Ok(file) = std::fs::File::open(source_path(path)) else {
+    let Ok((readable, _decompressed)) = resolve_gzip(std::path::Path::new(&source_path(path))) else {
+        return false;
+    };
+    let Ok(file) = std::fs::File::open(readable) else {
         return false;
     };
     let Ok(hdus) = list_extensions(&file) else {
@@ -1544,6 +1548,17 @@ mod tests {
             "{warnings:?}"
         );
         assert!(!has_err_extension(&plain, (rows, cols)));
+    }
+
+    #[test]
+    fn has_err_extension_sees_the_err_plane_of_a_gzip_compressed_mef() {
+        use crate::infra::fits::gzip::test_support::gzip_copy;
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("cal.fits");
+        sci_err_dq_mef_with_dq_cards(&plain, 6, 5, vec![0; 30], vec![]);
+        let gz = gzip_copy(&plain, "cal.fits.gz");
+        assert!(has_err_extension(plain.to_str().unwrap(), (5, 6)));
+        assert!(has_err_extension(gz.to_str().unwrap(), (5, 6)));
     }
 
     #[tokio::test]

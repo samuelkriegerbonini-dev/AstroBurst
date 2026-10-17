@@ -11,6 +11,7 @@ use serde_json::json;
 use crate::core::analysis::gain::{CAMERA_GAIN_KEYWORD, GAIN_KEYWORDS};
 use crate::core::analysis::photometry::SATURATION_KEYWORDS;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
+use crate::core::history::stamp::{file_stamp, FileStamp};
 use crate::core::imaging::dq_flags::DqTable;
 use crate::core::imaging::push_history;
 use crate::core::imaging::sampling::{cell_range, preview_dims};
@@ -22,6 +23,7 @@ use crate::core::metadata::photcal::{
 use crate::infra::asdf::converter::is_asdf_file;
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry, PlaneLoad};
 use crate::infra::fits::dispatcher::resolve_single_image;
+use crate::infra::fits::gzip::SharedTempDir;
 use crate::infra::fits::reader::extract_header_by_index;
 use crate::infra::fits::writer::{filter_header, is_layout_card, write_mef_images, HduData, ImageHdu};
 use crate::infra::image_source::{
@@ -68,12 +70,7 @@ const PLANE_ONLY_KEYS: &[&str] = &[
     "BUNIT", "EXTNAME", "EXTVER", "LTV1", "LTV2", "LTM1_1", "LTM2_2", "BZERO", "BSCALE", "BLANK", "DATAMIN", "DATAMAX",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutputValues {
-    Linear,
-    Rescaled,
-    DisplayReferred,
-}
+pub(crate) use crate::core::ops::OutputValues;
 
 #[cfg(test)]
 pub(crate) fn auto_stretch_preview(arr: &Array2<f32>) -> Vec<u8> {
@@ -157,7 +154,7 @@ pub(crate) fn save_auto_stf_preview_png(arr: &Array2<f32>, png_path: &str) -> Re
     save_stf_preview_png(arr, &stf, &stats, png_path)
 }
 
-fn save_output_preview(arr: &Array2<f32>, values: OutputValues, png_path: &str) -> Result<()> {
+pub(crate) fn save_output_preview(arr: &Array2<f32>, values: OutputValues, png_path: &str) -> Result<()> {
     match values {
         OutputValues::DisplayReferred => save_reduced_preview(arr, png_path, display_referred_preview),
         OutputValues::Linear | OutputValues::Rescaled => save_auto_stf_preview_png(arr, png_path),
@@ -167,7 +164,7 @@ fn save_output_preview(arr: &Array2<f32>, values: OutputValues, png_path: &str) 
 pub(crate) struct ResolvedImage {
     pub arr: Array2<f32>,
     pub header: HduHeader,
-    pub _tmp: Option<tempfile::TempDir>,
+    pub _tmp: Option<SharedTempDir>,
 }
 
 pub(crate) fn image_ref(path: &str) -> ImageRef {
@@ -331,17 +328,11 @@ pub(crate) fn plane_info_json(path: &str, entry: &ImageEntry) -> Result<serde_js
     }))
 }
 
-type FileStamp = (u64, Option<std::time::SystemTime>);
-
 static SOURCE_STAMPS: LazyLock<Mutex<HashMap<String, FileStamp>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn lock_stamps() -> MutexGuard<'static, HashMap<String, FileStamp>> {
     SOURCE_STAMPS.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn file_stamp(meta: &std::fs::Metadata) -> FileStamp {
-    (meta.len(), meta.modified().ok())
 }
 
 fn is_key_of_source(key: &str, source: &str) -> bool {
@@ -667,7 +658,7 @@ pub(crate) struct ResolvedRgbImage {
     pub g: Array2<f32>,
     pub b: Array2<f32>,
     pub header: HduHeader,
-    pub _tmp: Option<tempfile::TempDir>,
+    pub _tmp: Option<SharedTempDir>,
 }
 
 pub(crate) fn try_extract_rgb_resolved(path: &str) -> Result<Option<ResolvedRgbImage>> {

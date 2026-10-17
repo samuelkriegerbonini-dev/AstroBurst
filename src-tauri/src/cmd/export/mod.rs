@@ -23,8 +23,9 @@ use crate::infra::fits::writer::{
 };
 use crate::infra::render::grayscale::{render_grayscale_hq, render_grayscale_16bit, render_stretched_8bit, render_stretched_16bit};
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
+use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
-use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DISPLAY_REFERRED, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_SIZE_BYTES, RES_UNCOMPRESSED, RES_WCS_WRITTEN};
+use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DISPLAY_REFERRED, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_DECOMPRESSED_BYTES, RES_SOURCE_SIZE_BYTES, RES_UNCOMPRESSED, RES_WCS_WRITTEN};
 use crate::types::header::HduHeader;
 
 const DEFAULT_QUANTIZE_LEVEL: f64 = 16.0;
@@ -559,11 +560,16 @@ pub async fn compress_mef_cmd(
 
         let opts = CompressOptions { mode, drop_extnames, raw_extnames };
 
+        let (readable, decompressed) = resolve_gzip(std::path::Path::new(&source_path))?;
+        if decompressed.is_some() {
+            refuse_source_as_target(&output_path, &source_path)?;
+        }
         crate::core::cube::cache::GLOBAL_CUBE_CACHE.invalidate(&output_path);
-        let report = write_compressed_mef(&source_path, &output_path, &opts)?;
+        let report = write_compressed_mef(&readable.to_string_lossy(), &output_path, &opts)?;
         invalidate_written(&output_path);
 
         let source_size = std::fs::metadata(&source_path).map(|m| m.len()).unwrap_or(0);
+        let source_decompressed = std::fs::metadata(&readable).map_or(source_size, |m| m.len());
         let output_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
 
         Ok(json!({
@@ -572,6 +578,7 @@ pub async fn compress_mef_cmd(
             RES_KEPT_RAW: report.kept_raw,
             RES_UNCOMPRESSED: report.uncompressed,
             RES_SOURCE_SIZE_BYTES: source_size,
+            RES_SOURCE_DECOMPRESSED_BYTES: source_decompressed,
             RES_OUTPUT_SIZE_BYTES: output_size,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
@@ -696,7 +703,7 @@ mod tests {
     use crate::infra::fits::reader::test_fixtures::{ramp_f32, sci_err_dq_mef, write_test_mef, HduData, TestHdu};
     use crate::types::constants::{
         BLOCK_SIZE, RES_DROPPED, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES,
-        RES_SOURCE_SIZE_BYTES,
+        RES_SOURCE_DECOMPRESSED_BYTES, RES_SOURCE_SIZE_BYTES,
     };
 
     fn calibrated_source(dir: &tempfile::TempDir) -> String {
@@ -909,6 +916,33 @@ mod tests {
         assert!(compressed[sci], "SCI must be compressed");
         let err = extnames.iter().position(|n| n == "ERR").unwrap();
         assert!(!compressed[err], "ERR must be copied verbatim");
+    }
+
+    #[tokio::test]
+    async fn compress_mef_cmd_reads_a_gzip_compressed_source_and_refuses_to_overwrite_it() {
+        use crate::infra::fits::gzip::test_support::gzip_copy;
+        use crate::infra::fits::reader::extract_image_mmap_by_index;
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("mef_plain.fits");
+        sci_err_dq_mef(&plain, 8, 8, vec![0i32; 64]);
+        let gz = gzip_copy(&plain, "mef_plain.fits.gz");
+        let gz_key = gz.to_str().unwrap().to_string();
+        let output = dir.path().join("mef_from_gz.fits");
+
+        let value = compress_mef_cmd(gz_key.clone(), output.to_str().unwrap().to_string(), true, None, Vec::new(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(value[RES_OUTPUT_PATH], output.to_str().unwrap());
+        let sci = |path: &std::path::Path| extract_image_mmap_by_index(&File::open(path).unwrap(), 1).unwrap().image;
+        assert_eq!(sci(&output), sci(&plain));
+        let size = |path: &std::path::Path| std::fs::metadata(path).unwrap().len();
+        assert_eq!(value[RES_SOURCE_SIZE_BYTES], size(&gz));
+        assert_eq!(value[RES_SOURCE_DECOMPRESSED_BYTES], size(&plain));
+
+        let before = std::fs::read(&gz).unwrap();
+        let err = compress_mef_cmd(gz_key.clone(), gz_key, true, None, Vec::new(), Vec::new()).await.unwrap_err();
+        assert!(err.contains("source"), "{err}");
+        assert_eq!(std::fs::read(&gz).unwrap(), before);
     }
 
     #[tokio::test]

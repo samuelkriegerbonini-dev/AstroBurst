@@ -1,31 +1,14 @@
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk};
-use crate::core::imaging::psf_estimation::{
-    estimate_psf, PsfEstimationConfig, PsfResult,
-};
+use crate::core::imaging::psf_estimation::{estimate_psf, PsfResult};
 use crate::types::constants::{
     RES_X, RES_Y, RES_PEAK, RES_FLUX, RES_FWHM, RES_ELLIPTICITY, RES_SNR,
     RES_KERNEL_SIZE, RES_AVERAGE_FWHM, RES_AVERAGE_ELLIPTICITY,
     RES_SPREAD_PIXELS, RES_STARS_USED, RES_STARS_REJECTED, RES_KERNEL,
 };
 
-pub(crate) fn psf_config(
-    num_stars: Option<usize>,
-    cutout_radius: Option<usize>,
-    saturation_threshold: Option<f64>,
-    max_ellipticity: Option<f64>,
-) -> PsfEstimationConfig {
-    PsfEstimationConfig {
-        num_stars: num_stars.unwrap_or(30),
-        cutout_radius: cutout_radius.unwrap_or(15),
-        saturation_threshold: saturation_threshold.unwrap_or(0.95),
-        min_peak_fraction: 0.10,
-        max_ellipticity: max_ellipticity.unwrap_or(0.3),
-        edge_margin: 30,
-        max_center_distance_fraction: 0.7,
-    }
-}
+pub(crate) use crate::core::ops::psf::psf_config;
 
 pub(crate) fn psf_result_json(result: &PsfResult) -> serde_json::Value {
     let stars_json: Vec<serde_json::Value> = result.stars_used.iter().map(|s| {

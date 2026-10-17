@@ -67,8 +67,10 @@ export function filterRangeText(filters: readonly string[]): string {
   return [...sorted, ...others].map((k) => k.text).join(", ");
 }
 
-export function isPublic(row: Pick<MastRow, "access">): boolean {
-  return row.access === null || row.access.trim().toUpperCase() === "PUBLIC";
+export function isPublic(row: Pick<MastRow, "access" | "releaseDate">, now: number = Date.now()): boolean {
+  if (row.access !== null) return row.access.trim().toUpperCase() === "PUBLIC";
+  const release = dateText(row.releaseDate);
+  return !/^\d{4}-\d{2}-\d{2}$/.test(release) || release <= new Date(now).toISOString().slice(0, 10);
 }
 
 export function exclusiveText(row: Pick<MastRow, "access" | "releaseDate">): string | null {
@@ -90,9 +92,8 @@ export function cardAccessibleName(row: MastRow, missionLabel: string): string {
   if (filters) parts.push(filters);
   const date = dateText(row.dateObs);
   if (date) parts.push(date);
-  if (row.access !== null) {
-    const exclusive = exclusiveText(row);
-    parts.push(exclusive ? exclusive.charAt(0).toLowerCase() + exclusive.slice(1) : "public");
-  }
+  const exclusive = exclusiveText(row);
+  if (exclusive) parts.push(exclusive.charAt(0).toLowerCase() + exclusive.slice(1));
+  else if (row.access !== null) parts.push("public");
   return parts.join(", ");
 }

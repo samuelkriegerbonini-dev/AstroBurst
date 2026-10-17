@@ -51,9 +51,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 base64 = "0.22.1"
 log = "0.4.29"
 fitsio-pure = { version = "=0.21.6", features = ["parallel"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+sha2 = "0.10"
 
 [features]
 default = ["tauri", "astrometry-net", "asdf-full", "vizier", "mast"]
@@ -61,9 +63,10 @@ tauri = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs", "dep:tau
 # Headless HTTP server — contributed by Jae-Joon Lee (https://github.com/leejjoon).
 # Build: cargo build --no-default-features --features server,astrometry-net,asdf-full,vizier
 server = ["dep:axum", "dep:dashmap", "dep:uuid", "dep:tokio-stream", "dep:tokio-util", "dep:env_logger"]
-astrometry-net = ["dep:reqwest"]
-vizier = ["reqwest/blocking"]
-mast = ["dep:reqwest"]
+net = ["dep:reqwest"]
+astrometry-net = ["net"]
+vizier = ["net", "reqwest/blocking"]
+mast = ["net"]
 asdf-full = ["dep:bzip2", "dep:lz4_flex"]
 
 [build-dependencies]
@@ -91,11 +94,14 @@ strip = true
 opt-level = 3
 panic = "abort"
 
+[profile.dev.package."*"]
+opt-level = 3
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

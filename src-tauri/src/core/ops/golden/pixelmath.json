@@ -1,0 +1,23 @@
+[
+  {
+    "op": "pixelmath",
+    "v": 1,
+    "expression": "($T - med($T)) / (max($T) - med($T))",
+    "slots": [],
+    "truncate": true,
+    "rescale": false
+  },
+  {
+    "op": "pixelmath",
+    "v": 1,
+    "expression": "0.5 * $T + 0.5 * Ha",
+    "slots": [
+      {
+        "name": "Ha",
+        "ref": "C:/data/m42_ha.fits#hdu=1"
+      }
+    ],
+    "truncate": false,
+    "rescale": true
+  }
+]

@@ -558,6 +558,199 @@
   font-size: 10px;
 }
 
+.ab-mast-thumb-locked {
+  color: var(--ab-amber);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.ab-mast-slot-error {
+  --ab-slot-tone: var(--ab-text-4);
+  color: var(--ab-text-2);
+}
+
+.ab-mast-slot-error[data-tone="server"] {
+  --ab-slot-tone: var(--ab-rose);
+}
+
+.ab-mast-slot-error[data-tone="transient"] {
+  --ab-slot-tone: var(--ab-amber);
+}
+
+.ab-mast-slot-icon {
+  flex: none;
+  color: var(--ab-slot-tone);
+}
+
+.ab-mast-slot-error[data-size="tile"] {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  padding: 6px 8px 22px;
+  overflow: hidden;
+  border-top: 2px solid var(--ab-slot-tone);
+  text-align: center;
+}
+
+.ab-mast-slot-error[data-size="tile"] .ab-mast-slot-title {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ab-text-2);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 13px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.ab-mast-slot-error[data-size="tile"] .ab-mast-slot-meta {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ab-text-3);
+  font-family: var(--ab-font-mono);
+  font-size: 10px;
+  line-height: 12px;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.ab-mast-slot-error[data-size="tile"] .ab-mast-slot-detail {
+  display: -webkit-box;
+  flex-shrink: 1;
+  min-height: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ab-text-3);
+  font-size: 10px;
+  line-height: 12px;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.ab-mast-slot-retry {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.ab-mast-slot-retry:focus-visible,
+.ab-mast-slot-actions button:focus-visible {
+  outline: 2px solid var(--ab-accent);
+  outline-offset: 1px;
+}
+
+.ab-mast-slot-error[data-size="cell"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+}
+
+.ab-mast-slot-badge {
+  padding: 0 3px;
+  border: 1px solid var(--ab-slot-tone);
+  border-radius: 3px;
+  color: var(--ab-text-2);
+  font-family: var(--ab-font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+.ab-mast-slot-error[data-size="stage"] {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: min(520px, 100%);
+  max-height: 100%;
+  padding: 10px 12px;
+  overflow-y: auto;
+  border-top: 2px solid var(--ab-slot-tone);
+  text-align: center;
+}
+
+.ab-mast-slot-error[data-size="stage"] p {
+  margin: 0;
+}
+
+.ab-mast-slot-error[data-size="stage"] .ab-mast-slot-title {
+  color: var(--ab-text-1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ab-mast-slot-error[data-size="stage"] .ab-mast-slot-text {
+  color: var(--ab-text-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ab-mast-slot-error[data-size="stage"] .ab-mast-slot-meta {
+  color: var(--ab-text-3);
+  font-family: var(--ab-font-mono);
+  font-size: 11px;
+}
+
+.ab-mast-slot-error[data-size="stage"] .ab-mast-slot-detail {
+  max-width: 100%;
+  max-height: 72px;
+  margin: 0;
+  padding: 4px 8px;
+  overflow-y: auto;
+  border-left: 2px solid var(--ab-slot-tone);
+  color: var(--ab-text-2);
+  font-family: var(--ab-font-mono);
+  font-size: 11px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.ab-mast-slot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.ab-mast-wait {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ab-mast-wait-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ab-text-3);
+  font-family: var(--ab-font-mono);
+  font-size: 10px;
+}
+
+.ab-mast-queued {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ab-mast-strip-none {
+  display: inline-flex;
+  color: var(--ab-text-4);
+}
+
 .ab-mast-placeholder {
   width: 128px;
   height: 96px;

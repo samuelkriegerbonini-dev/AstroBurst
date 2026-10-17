@@ -6,6 +6,7 @@ import type { ArchiveController } from "./state/archiveController";
 import { useNow } from "./state/useNow";
 import {
   EXCLUSIVE_PREVIEWS_TEXT,
+  cardThumbFor,
   entriesInGroup,
   entryFilename,
   entryTitle,
@@ -23,12 +24,15 @@ import {
   stripKey,
   stripPosition,
   stripThumbUrl,
+  waitedOf,
 } from "./logic/detailView";
 import { previewsKeyCommand } from "./logic/detailKeys";
 import { isTextEntry } from "./logic/archiveKeys";
 import { isPublic } from "./logic/cardLabel";
 import { thumbStatus } from "./logic/thumbQueue";
+import { pausedSlot, slotCellTitle, slotError, type SlotErrorView } from "./logic/errorCopy";
 import { getFilterColor } from "../../utils/filterColors";
+import SlotError from "./SlotError";
 
 interface PreviewsTabProps {
   state: ArchiveState;
@@ -38,6 +42,11 @@ interface PreviewsTabProps {
 }
 
 const STRIP_SELECTOR = '[data-testid="mast-strip-item"]';
+const NO_THUMBNAIL_TEXT = "MAST lists no thumbnail for this image";
+
+export function SlotStage({ ctl, view, text, onRetry }: { ctl: ArchiveController; view: SlotErrorView; text: string; onRetry: () => void }) {
+  return <SlotError view={view} size="stage" text={text} onRetry={onRetry} onCopy={() => void ctl.copy(view.lines.join("\n"), "the error details")} />;
+}
 
 export function ProgressBar({ fraction }: { fraction: number | null }) {
   if (fraction === null) {
@@ -85,28 +94,45 @@ function Stage({
     );
   }
   if (preview?.stage === "ready" && preview.ref && preview.url) {
+    const url = preview.url;
     return (
       <img
         data-testid="mast-preview-img"
         data-filename={filename}
         data-stage="ready"
         className="ab-mast-preview"
-        src={preview.url}
+        src={url}
         alt={previewAlt(entry, preview.ref)}
         width={preview.ref.width}
         height={preview.ref.height}
         draggable={false}
         decoding="async"
         onDoubleClick={() => ctl.openLarge(row.datasetId, entry.key)}
+        onError={() => ctl.imageMissing(url)}
       />
     );
   }
   if (preview?.stage === "failed" && preview.error) {
+    const view = slotError(preview.error, { surface: "preview", rowPublic: isPublic(row), waitedMs: waitedOf(preview) });
     return (
-      <div data-testid="mast-preview-img" data-filename={filename} data-stage="failed" className="ab-mast-stage-msg" role="alert">
-        <ImageOff size={18} aria-hidden="true" />
-        <p>{previewFailureText(preview.error, isPublic(row))}</p>
-        <RetryButton onRetry={() => ctl.retryDetail()} />
+      <div
+        data-testid="mast-preview-img"
+        data-filename={filename}
+        data-stage="failed"
+        data-error-code={preview.error.code}
+        data-error-status={preview.error.context.status}
+        className="ab-mast-stage-msg"
+        role="alert"
+      >
+        {view ? (
+          <SlotStage ctl={ctl} view={view} text={previewFailureText(preview.error, isPublic(row))} onRetry={() => ctl.retryDetail()} />
+        ) : (
+          <>
+            <ImageOff size={18} aria-hidden="true" />
+            <p>{previewFailureText(preview.error, isPublic(row))}</p>
+            <RetryButton onRetry={() => ctl.retryDetail()} />
+          </>
+        )}
       </div>
     );
   }
@@ -154,10 +180,17 @@ export default function PreviewsTab({ state, ctl, row, mission }: PreviewsTabPro
   }
   if (!set) {
     if (list?.error) {
+      const view = slotError(list.error, { surface: "list", waitedMs: waitedOf(list) });
       return (
-        <div className="ab-mast-detail-error" role="alert">
-          <p>{listFailureText(list.error)}</p>
-          <RetryButton onRetry={() => ctl.retryDetail()} />
+        <div className="ab-mast-detail-error" role="alert" data-error-code={list.error.code} data-error-status={list.error.context.status}>
+          {view ? (
+            <SlotStage ctl={ctl} view={view} text={listFailureText(list.error)} onRetry={() => ctl.retryDetail()} />
+          ) : (
+            <>
+              <p>{listFailureText(list.error)}</p>
+              <RetryButton onRetry={() => ctl.retryDetail()} />
+            </>
+          )}
         </div>
       );
     }
@@ -172,11 +205,26 @@ export default function PreviewsTab({ state, ctl, row, mission }: PreviewsTabPro
   const groups = groupsOf(set);
   const strip = entriesInGroup(set, entry.group);
   const pos = stripPosition(set, entry);
-  const card = state.thumbRefs[row.datasetId];
+  const card = cardThumbFor(set, state.thumbRefs[row.datasetId]);
   const backdrop = stripThumbUrl(row.datasetId, entry, state.thumbRefs, card);
+  const paused = state.thumbs.pausedUntil !== null ? pausedSlot(state.thumbs, now) : null;
+
+  const failedStripKey = (target: HTMLElement | null): string | null => {
+    const item = target?.closest<HTMLElement>(STRIP_SELECTOR);
+    if (!item || item.dataset.thumb !== "failed") return null;
+    const picked = set.entries.find((x) => entryFilename(x) === item.dataset.filename);
+    return picked?.thumbnailFilename ? stripKey(row.datasetId, picked.thumbnailFilename) : null;
+  };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const target = e.target instanceof HTMLElement ? e.target : null;
+    const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+    const retryKey = plain && e.key.toLowerCase() === "r" ? failedStripKey(target) : null;
+    if (retryKey) {
+      e.preventDefault();
+      ctl.retryThumbs([retryKey]);
+      return;
+    }
     const cmd = previewsKeyCommand(e, { inInput: isTextEntry(target) });
     if (!cmd) return;
     const onStrip = !!target?.closest(STRIP_SELECTOR);
@@ -221,27 +269,40 @@ export default function PreviewsTab({ state, ctl, row, mission }: PreviewsTabPro
           {strip.map((e) => {
             const current = e.key === entry.key;
             const url = stripThumbUrl(row.datasetId, e, state.thumbRefs, card);
-            const status = e.thumbnailFilename ? thumbStatus(state.thumbs, stripKey(row.datasetId, e.thumbnailFilename), now) : "failed";
+            const thumbKey = e.thumbnailFilename ? stripKey(row.datasetId, e.thumbnailFilename) : null;
+            const status = thumbKey ? (url ? "ready" : thumbStatus(state.thumbs, thumbKey, now)) : "none";
+            const failure = thumbKey && status === "failed" ? state.thumbs.failures[thumbKey] : undefined;
+            const failed = failure ? slotError(failure.error, { surface: "thumb", rowPublic: isPublic(row), waitedMs: failure.waitedMs }) : null;
+            const slot = failed ?? (status === "paused" ? paused : null);
+            const title = !thumbKey ? `${entryTitle(e)}\n${NO_THUMBNAIL_TEXT}` : slot ? `${entryTitle(e)}\n${slotCellTitle(slot)}` : entryTitle(e);
             return (
               <button
                 key={e.key}
                 type="button"
                 data-testid="mast-strip-item"
                 data-filename={entryFilename(e)}
+                data-thumb={status}
+                data-error-code={failed ? failed.code : undefined}
+                data-error-status={failure?.error.context.status}
                 aria-current={current ? "true" : undefined}
                 tabIndex={current ? 0 : -1}
                 className="ab-mast-strip-item"
-                title={entryTitle(e)}
+                title={title}
                 onClick={() => ctl.selectImage(e.key)}
                 onDoubleClick={() => ctl.openLarge(row.datasetId, e.key)}
               >
                 <span className="ab-mast-strip-thumb">
                   {url ? (
-                    <img src={url} alt="" draggable={false} decoding="async" />
-                  ) : status === "failed" ? (
-                    <ImageOff size={12} aria-hidden="true" />
+                    <img src={url} alt="" draggable={false} decoding="async" onError={() => ctl.imageMissing(url)} />
+                  ) : !thumbKey ? (
+                    <span className="ab-mast-strip-none">
+                      <ImageOff size={12} aria-hidden="true" />
+                      <span className="sr-only">{NO_THUMBNAIL_TEXT}</span>
+                    </span>
+                  ) : slot ? (
+                    <SlotError view={slot} size="cell" noun="Thumbnail" />
                   ) : (
-                    <span className="ab-mast-placeholder ab-mast-shimmer" aria-hidden="true" />
+                    <span className={status === "loading" ? "ab-mast-placeholder ab-mast-shimmer" : "ab-mast-placeholder ab-mast-queued"} aria-hidden="true" />
                   )}
                 </span>
                 <span className="ab-mast-strip-label">

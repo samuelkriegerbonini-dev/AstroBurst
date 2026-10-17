@@ -41,6 +41,8 @@ import { gpuDisplayStore } from "../hooks/useGpuDisplay";
 import DqControls from "./preview/DqControls";
 import DqOverlayCanvas from "./preview/DqOverlayCanvas";
 import ViewerStatusStrip from "./preview/ViewerStatusStrip";
+import HistoryShortcuts from "./history/HistoryShortcuts";
+import { useHistoryController } from "../hooks/useHistory";
 import DisplayControls from "./preview/DisplayControls";
 import PreviewTab from "./preview/PreviewTab";
 import {
@@ -72,7 +74,8 @@ export default function PreviewPanel() {
   const { rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
   const { processed, processedVersion, stfPreviewUrl, chain } = useRenderContext();
-  const { resetProcessed, currentFileKey, setStfPreviewUrl } = useRenderActions();
+  const { currentFileKey, setStfPreviewUrl } = useRenderActions();
+  const history = useHistoryController();
   const { histData, histDataPath, stfParams } = useHistContext();
   const displayed = useDisplayedImage();
   const processedSourcePath = processed?.fitsPath ?? null;
@@ -464,10 +467,11 @@ export default function PreviewPanel() {
           )}
           {file && !compositeMode && canReset && (
             <button
-              onClick={resetProcessed}
+              data-testid="revert-original"
+              onClick={() => void history.revert()}
               className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-200 transition-colors"
               style={{ border: "1px solid var(--ab-border)" }}
-              title={processed ? `Showing ${processed.label}. Revert to the original image; step outputs stay on disk` : "Clear the processing chain of this file"}
+              title={processed ? `Showing ${processed.label}. Revert to the original image; the history keeps every step (Ctrl+Z steps back one)` : "Clear the processing chain of this file"}
             >
               <SkipBack size={10} />
               Revert to original
@@ -521,6 +525,7 @@ export default function PreviewPanel() {
       </div>
 
       {file && <ViewerStatusStrip />}
+      <HistoryShortcuts />
     </div>
   );
 }

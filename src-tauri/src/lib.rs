@@ -53,6 +53,16 @@ pub fn run() {
                 path
             };
 
+            if crate::infra::config::is_api_key_file(&path) {
+                let refused = tauri::http::Response::builder()
+                    .status(404)
+                    .header("Cache-Control", "no-store")
+                    .body(Vec::new())
+                    .unwrap();
+                responder.respond(refused);
+                return;
+            }
+
             std::thread::spawn(move || {
                 const RETRY_DELAYS: &[u64] = &[100, 300, 800];
                 let mut data = std::fs::read(&path);
@@ -99,13 +109,8 @@ pub fn run() {
             });
         })
         .setup(|app| {
-            if let Some(data_dir) = app.path().app_data_dir().ok() {
-                if !data_dir.exists() {
-                    let _ = std::fs::create_dir_all(&data_dir);
-                }
-                let output_dir = data_dir.join("output");
-                let _ = std::fs::remove_dir_all(&output_dir);
-                let _ = std::fs::create_dir_all(&output_dir);
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                cmd::output::clear_output_dir(&data_dir);
             }
             #[cfg(feature = "mast")]
             cmd::mast::install(app);
@@ -226,6 +231,8 @@ pub fn run() {
             cmd::spectral::spectral_axis_cmd,
             cmd::spectral::radial_velocity_correction_cmd,
             cmd::spectral::read_x1d_spectrum_cmd,
+            cmd::spectrum1d::read_spectrum1d_cmd,
+            cmd::spectrum1d::probe_spectrum1d_cmd,
             cmd::cutout::export_cutout_cmd,
             cmd::catalog::catalog_cone_search_cmd,
             cmd::catalog::catalog_crossmatch_cmd,
@@ -249,6 +256,18 @@ pub fn run() {
             cmd::synth::generate_synth_stack_cmd,
             cmd::output::get_output_dir_info,
             cmd::output::cleanup_output_cmd,
+            cmd::output::cleanup_history_cmd,
+            cmd::ops::run_op_cmd,
+            cmd::ops::history_get_cmd,
+            cmd::ops::history_set_head_cmd,
+            cmd::ops::history_undo_cmd,
+            cmd::ops::history_redo_cmd,
+            cmd::ops::history_rerun_cmd,
+            cmd::ops::history_rehydrate_cmd,
+            cmd::ops::history_delete_branch_cmd,
+            cmd::ops::history_copy_to_output_cmd,
+            cmd::ops::history_estimate_cmd,
+            cmd::ops::history_kernel_cmd,
             cmd::output::cancel_progress_cmd,
             cmd::geometry::observation_geometry_cmd,
             cmd::pv::pv_diagram_cmd,

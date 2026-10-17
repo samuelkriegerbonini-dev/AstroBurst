@@ -178,11 +178,12 @@ pub async fn resolve(hub: &MastHub, name: &str) -> Result<Option<MastResolved>, 
     }
     let op = Operation::new(None, OpKind::Lookup, LOOKUP_PATH);
     let body = lookup_request(&query);
+    let sent = Instant::now();
     let answer: Result<LookupResponse, _> = hub.anon_client(OpKind::Lookup).post_form(LOOKUP_PATH, &[("request", body.as_str())]).await;
     let response = match answer {
         Ok(response) => response,
         Err(error) => {
-            let consecutive = hub.limiter().record(&error, &op, Instant::now());
+            let consecutive = hub.limiter().record(&error, &op, sent, Instant::now());
             return Err(classify(&error, &op, consecutive));
         }
     };

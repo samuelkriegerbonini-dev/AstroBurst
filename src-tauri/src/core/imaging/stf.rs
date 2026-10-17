@@ -38,6 +38,17 @@ pub fn auto_stf(stats: &ImageStats, config: &AutoStfConfig) -> StfParams {
     }
 }
 
+pub fn compute_linked_stf_with_stats(
+    stats_r: &ImageStats,
+    stats_g: &ImageStats,
+    stats_b: &ImageStats,
+    config: &AutoStfConfig,
+) -> (StfParams, ImageStats) {
+    let combined = stats::combine_channel_stats(stats_r, stats_g, stats_b);
+    let stf = auto_stf(&combined, config);
+    (stf, combined)
+}
+
 fn mtf_balance(m: f64, t: f64) -> f64 {
     let denom = 2.0 * t * m - t - m;
     if denom.abs() < 1e-15 {

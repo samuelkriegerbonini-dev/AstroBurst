@@ -32,6 +32,8 @@ import {
   stripPosition,
   stripThumbKeys,
   stripThumbUrl,
+  cardThumbFor,
+  stripCover,
   tabLabels,
 } from "../logic/detailView";
 import { pixelScaleText } from "../logic/quickWcs";
@@ -149,6 +151,28 @@ describe("groups and filmstrip", () => {
     expect(stripThumbUrl("jw02739-o001_t001_nircam", F187N, refs, card)).toBe("http://asset.localhost/card.jpg");
     expect(stripThumbUrl("jw02739-o001_t001_nircam", L3.entries[3], refs, card)).toBeNull();
   });
+
+  it("reads a representative card thumbnail as the thumbnail of the set's representative image", () => {
+    const card = { url: "http://asset.localhost/rep.jpg", width: 128, height: 77, imageCount: null, filename: "_representative.jpg" };
+    const mapped = cardThumbFor(L3, card);
+    expect(mapped?.filename).toBe(L3.entries[L3.representative ?? 0].thumbnailFilename);
+    expect(stripThumbKeys("jw02739-o001_t001_nircam", L3.entries, mapped)).toHaveLength(5);
+    expect(stripThumbUrl("jw02739-o001_t001_nircam", F187N, {}, mapped)).toBe("http://asset.localhost/rep.jpg");
+    const named = { ...card, filename: "jw02739-o001_t001_nircam_clear-f090w_i2d_thumb.jpg" };
+    expect(cardThumbFor(L3, named)).toBe(named);
+    expect(cardThumbFor(L3, undefined)).toBeUndefined();
+    expect(cardThumbFor({ ...L3, representative: null }, card)).toBe(card);
+  });
+
+  it("lets a card thumbnail that is still loading cover the representative image in the filmstrip", () => {
+    const rep = L3.entries[L3.representative ?? 0].thumbnailFilename;
+    expect(stripCover(L3, undefined, true)?.filename).toBe(rep);
+    expect(stripCover(L3, undefined, false)).toBeUndefined();
+    expect(stripThumbKeys("jw02739-o001_t001_nircam", L3.entries, stripCover(L3, undefined, true))).toHaveLength(5);
+    expect(stripCover({ ...L3, representative: null }, undefined, true)).toBeUndefined();
+    const named = { url: "http://asset.localhost/c.jpg", width: 1, height: 1, imageCount: null, filename: "x_thumb.jpg" };
+    expect(stripCover(L3, named, true)).toBe(named);
+  });
 });
 
 describe("preview text", () => {
@@ -208,7 +232,7 @@ describe("preview text", () => {
   it("words the product listing and failures of lists and listings", () => {
     expect(productsListingText("jw02739-o001_t001_nircam", 12_000)).toBe("Listing products for jw02739-o001_t001_nircam … 12 s");
     expect(PRODUCTS_SLOW_NOTE).toBe("MAST takes 20 to 30 s for listings it has not seen recently.");
-    expect(listFailureText({ code: "mast_network", message: "connection refused", context: {} })).toBe("Could not reach MAST (mast.stsci.edu): connection refused.");
+    expect(listFailureText({ code: "mast_network", message: "connection refused", context: { host: "mast.stsci.edu" } })).toBe("Could not reach MAST (mast.stsci.edu): connection refused.");
     expect(productsFailureText({ code: "mast_server", message: "x", context: { status: 504 } })).toBe("MAST had a problem answering (HTTP 504). This is on MAST's side; try again in a moment.");
   });
 

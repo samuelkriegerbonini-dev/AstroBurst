@@ -1,11 +1,13 @@
 import { useState, useCallback, useMemo } from "react";
 import { X } from "lucide-react";
-import { deconvolveRL } from "../../services/processing";
+import { deconvolveOptionsOf, recordDeconvolveRL, type DeconvolveSettings } from "../../services/processing";
 import { compositeDeconvolveRL } from "../../services/compositeChain";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
 import { useRenderContext } from "../../context/PreviewContext";
@@ -46,15 +48,7 @@ interface DeconvResult {
   psf_source?: PsfSource;
 }
 
-interface DeconvParams {
-  iterations: number;
-  psfSigma: number;
-  psfSize: number;
-  regularization: number;
-  deringing: boolean;
-  deringThreshold: number;
-  useEmpiricalPsf: boolean;
-}
+type DeconvParams = DeconvolveSettings;
 
 interface DeconvFileRun {
   composite: false;
@@ -79,7 +73,7 @@ type DeconvRun = DeconvFileRun | DeconvCompositeRun;
 interface DeconvolutionPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onProcessingDone?: (result: DeconvResult) => void;
+  onProcessingDone?: (result: DeconvResult) => void | Promise<void>;
   chainedFrom?: string | null;
   psfKernel?: number[][] | null;
   inputPreviewUrl?: string | null;
@@ -114,15 +108,21 @@ export default function DeconvolutionPanel({
 }: DeconvolutionPanelProps) {
   const progress = useProgress(DECONV_PROGRESS_EVENT);
   const resetProgress = progress.reset;
-  const [params, setParams] = useState<DeconvParams>({
-    iterations: 20,
-    psfSigma: 2.0,
-    psfSize: 15,
-    regularization: 0.001,
-    deringing: true,
-    deringThreshold: 0.1,
-    useEmpiricalPsf: false,
-  });
+  const initial = useRerunInitial("deconvolution", deconvolveOptionsOf);
+  const [params, setParams] = useState<DeconvParams>(
+    () =>
+      initial?.params ?? {
+        iterations: 20,
+        psfSigma: 2.0,
+        psfSize: 15,
+        regularization: 0.001,
+        deringing: true,
+        deringThreshold: 0.1,
+        useEmpiricalPsf: false,
+      },
+  );
+  useRerunUpdates("deconvolution", initial, deconvolveOptionsOf, setParams);
+  const scope = useHistoryScope();
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<DeconvRun>("deconv", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -137,21 +137,22 @@ export default function DeconvolutionPanel({
       : chainHoldsOutput(chain, "deconv", runResult.res.fits_path)
     : false;
   const result = held ? runResult : null;
-  const canRun = compositeMode ? compositeInput !== null : !!selectedFile;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile && !!scope;
 
   const update = useCallback(<K extends keyof DeconvParams>(key: K, value: DeconvParams[K]) => {
     setParams((prev) => ({ ...prev, [key]: value }));
   }, []);
 
   const handleFileRun = useCallback(() => {
-    if (!selectedFile?.path) return;
+    if (!selectedFile?.path || !scope) return;
     const path = selectedFile.path;
+    const runScope = scope;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     const requestedIterations = params.iterations;
     resetProgress();
     void run(async (ctx) => {
-      const res = await deconvolveRL(path, outputDir, {
+      const res = await recordDeconvolveRL(runScope, path, {
         iterations: params.iterations,
         psfSigma: params.psfSigma,
         psfSize: enforceOdd(params.psfSize),
@@ -162,10 +163,10 @@ export default function DeconvolutionPanel({
         psfKernel: requestedPsfKernel(params.useEmpiricalPsf, psfKernel),
       });
       if (!ctx.inputUnchanged("deconv")) throw new Error(INPUT_CHANGED_MESSAGE);
-      onProcessingDone?.(res);
+      await onProcessingDone?.(res);
       return { composite: false as const, res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, requestedIterations };
     }, isCancelMessage).finally(resetProgress);
-  }, [selectedFile, outputDir, params, psfKernel, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+  }, [selectedFile, scope, params, psfKernel, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
 
   const handleCompositeRun = useCallback(() => {
     if (!compositeInput) return;

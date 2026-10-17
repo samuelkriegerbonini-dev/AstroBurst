@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_fs::FsExt;
 
 use crate::core::mast::errors::{bad_input, internal};
 use crate::core::mast::types::{
@@ -76,11 +77,21 @@ pub fn install(app: &tauri::App) {
             None
         }
     };
-    let state = MastState::open(settings::settings().clone(), app.path().app_local_data_dir().ok(), store);
+    let settings = settings::settings();
+    close_test_config(app, settings);
+    let state = MastState::open(settings.clone(), settings.local_data_dir(app.path().app_local_data_dir().ok()), store);
     if let Ok(hub) = state.hub() {
         tauri::async_runtime::spawn(warm_up(hub));
     }
     app.manage(state);
+}
+
+fn close_test_config(app: &tauri::App, settings: &MastSettings) {
+    let Some(dir) = settings.config_dir() else { return };
+    let closed = std::fs::create_dir_all(&dir).and_then(|_| std::fs::canonicalize(&dir)).unwrap_or(dir);
+    if let Err(error) = app.fs_scope().forbid_directory(&closed, true) {
+        log::warn!("the test config folder could not be closed to the interface: {error}");
+    }
 }
 
 pub async fn warm_up(hub: Arc<MastHub>) {
@@ -391,20 +402,31 @@ mod tests {
             .collect()
     }
 
+    fn assert_wiring(lib: &str, cmd_mod: &str) {
+        let lib = lib.replace("\r\n", "\n");
+        let cmd_mod = cmd_mod.replace("\r\n", "\n");
+        let gated = Regex::new(r#"#\[cfg\(feature = "mast"\)\]\s*cmd::mast::(mast_\w+),"#).unwrap();
+        let registered: Vec<String> = gated.captures_iter(&lib).map(|found| found[1].to_owned()).collect();
+        assert_eq!(registered, MAST_COMMANDS);
+        assert_eq!(lib.matches("cmd::mast::mast_").count(), MAST_COMMANDS.len());
+        assert!(lib.contains("#[cfg(feature = \"mast\")]\n    crate::infra::mast::settings::init_from_env();"));
+        assert!(lib.contains("#[cfg(feature = \"mast\")]\n            cmd::mast::install(app);"));
+        assert!(cmd_mod.contains("#[cfg(feature = \"mast\")]\npub mod mast;"));
+    }
+
     #[test]
     fn command_names_match_contract() {
         let contract: Vec<&str> = CONTRACT_ARGS.iter().map(|(name, _)| *name).collect();
         assert_eq!(contract, MAST_COMMANDS);
         let defined: Vec<String> = defined_commands().into_iter().map(|(name, _)| name).collect();
         assert_eq!(defined, MAST_COMMANDS);
-        let lib = include_str!("../lib.rs");
-        let gated = Regex::new(r#"#\[cfg\(feature = "mast"\)\]\s*cmd::mast::(mast_\w+),"#).unwrap();
-        let registered: Vec<String> = gated.captures_iter(lib).map(|found| found[1].to_owned()).collect();
-        assert_eq!(registered, MAST_COMMANDS);
-        assert_eq!(lib.matches("cmd::mast::mast_").count(), MAST_COMMANDS.len());
-        assert!(lib.contains("#[cfg(feature = \"mast\")]\n    crate::infra::mast::settings::init_from_env();"));
-        assert!(lib.contains("#[cfg(feature = \"mast\")]\n            cmd::mast::install(app);"));
-        assert!(include_str!("mod.rs").contains("#[cfg(feature = \"mast\")]\npub mod mast;"));
+        assert_wiring(include_str!("../lib.rs"), include_str!("mod.rs"));
+    }
+
+    #[test]
+    fn wiring_check_holds_on_crlf_checkouts() {
+        let crlf = |text: &str| text.replace("\r\n", "\n").replace('\n', "\r\n");
+        assert_wiring(&crlf(include_str!("../lib.rs")), &crlf(include_str!("mod.rs")));
     }
 
     #[test]
@@ -701,8 +723,17 @@ mod tests {
         let lists = root.join("lists").join("jwst");
         write_aged(&lists.join("a.images.json"), 700, 300);
         write_aged(&lists.join("b.images.json"), 700, 100);
+        let foreign = u32::MAX - 1;
+        let stale = [images.join(format!("dl-{foreign}-0.part")), root.join(format!("names.json.{foreign}.tmp"))];
+        for path in &stale {
+            write_aged(path, 100, 10);
+        }
+        let own = images.join(format!("dl-{}-0.part", std::process::id()));
+        write_aged(&own, 100, 0);
         assert!(!hub.has_token_client());
         warm_up(Arc::clone(&hub)).await;
+        assert!(stale.iter().all(|path| !path.exists()), "stale temporary files survived the warm-up");
+        assert!(own.is_file(), "a part file of this process was swept");
         assert!(dir_info(&root.join("img")).bytes <= 1000);
         assert!(images.join("new_thumb.jpg").is_file());
         assert!(!images.join("old_thumb.jpg").exists());

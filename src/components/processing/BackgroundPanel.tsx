@@ -1,7 +1,10 @@
 import { useState, useCallback, useId, useMemo } from "react";
 import { X } from "lucide-react";
-import { extractBackground } from "../../services/processing";
-import { extractBackgroundDbe } from "../../services/dbe";
+import { backgroundOptionsOf, recordExtractBackground, type BackgroundSettings } from "../../services/processing";
+import { recordBackgroundDbe } from "../../services/dbe";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
+import type { HistoryScope } from "../../shared/types/ops";
 import { compositeBackground } from "../../services/compositeChain";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
@@ -100,7 +103,7 @@ const RESULT_VIEW_LABELS: Record<ResultView, string> = {
 interface BackgroundPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onProcessingDone?: (result: BackgroundResult) => void;
+  onProcessingDone?: (result: BackgroundResult) => void | Promise<void>;
   chainedFrom?: string | null;
   fileKey?: string | null;
   disabledReason?: string | null;
@@ -120,6 +123,12 @@ const SAMPLE_STROKE = { accepted: "#34d399", manual: "#fbbf24", rejected: "#f871
 function sampleStroke(sample: DbeSample): string {
   if (sample.rejected) return SAMPLE_STROKE.rejected;
   return sample.manual ? SAMPLE_STROKE.manual : SAMPLE_STROKE.accepted;
+}
+
+const DEFAULT_PARAMS: BackgroundParams = { gridSize: 8, polyDegree: 3, sigmaClip: 2.5, iterations: 3, mode: "subtract" };
+
+function paramsAfter(prev: BackgroundParams, settings: BackgroundSettings): BackgroundParams {
+  return settings.model === "spline" ? { ...prev, mode: settings.dbe.mode } : { ...prev, ...settings.params };
 }
 
 function formatCount(v: number): string {
@@ -149,15 +158,17 @@ export default function BackgroundPanel({
 }: BackgroundPanelProps) {
   const progress = useProgress(BACKGROUND_PROGRESS_EVENT);
   const resetProgress = progress.reset;
-  const [model, setModel] = useState<BackgroundModel>("polynomial");
-  const [params, setParams] = useState<BackgroundParams>({
-    gridSize: 8,
-    polyDegree: 3,
-    sigmaClip: 2.5,
-    iterations: 3,
-    mode: "subtract",
-  });
-  const [dbe, setDbe] = useState<DbeConfig>(DEFAULT_DBE_CONFIG);
+  const initial = useRerunInitial("background", backgroundOptionsOf);
+  const [model, setModel] = useState<BackgroundModel>(initial?.params.model ?? "polynomial");
+  const [params, setParams] = useState<BackgroundParams>(() => (initial ? paramsAfter(DEFAULT_PARAMS, initial.params) : DEFAULT_PARAMS));
+  const [dbe, setDbe] = useState<DbeConfig>(initial?.params.model === "spline" ? initial.params.dbe : DEFAULT_DBE_CONFIG);
+  const applyRerun = useCallback((settings: BackgroundSettings) => {
+    setModel(settings.model);
+    setParams((prev) => paramsAfter(prev, settings));
+    if (settings.model === "spline") setDbe(settings.dbe);
+  }, []);
+  useRerunUpdates("background", initial, backgroundOptionsOf, applyRerun);
+  const scope = useHistoryScope();
   const [usePointRegions, setUsePointRegions] = useState(true);
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<BackgroundRun>("background", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
   const { chain } = useRenderContext();
@@ -173,7 +184,7 @@ export default function BackgroundPanel({
       : chainHoldsOutput(chain, "background", runResult.res.corrected_fits)
     : false;
   const result = held ? runResult : null;
-  const canRun = compositeMode ? compositeInput !== null : !!selectedFile;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile && !!scope;
   const [view, setView] = useState<ResultView>("corrected");
   const [showSamples, setShowSamples] = useState(true);
 
@@ -201,35 +212,36 @@ export default function BackgroundPanel({
   const debandBlockedTitle = isSpline ? DEBAND_SPLINE_TITLE : compositeMode ? DEBAND_COMPOSITE_TITLE : null;
   const mode: BackgroundMode = debandBlockedTitle ? dbe.mode : params.mode;
 
-  const runPolynomial = useCallback(async (path: string): Promise<BackgroundResult> => {
-    return extractBackground(path, outputDir, {
+  const runPolynomial = useCallback(async (runScope: HistoryScope, path: string): Promise<BackgroundResult> => {
+    return recordExtractBackground(runScope, path, {
       gridSize: params.gridSize,
       polyDegree: params.polyDegree,
       sigmaClip: params.sigmaClip,
       iterations: params.iterations,
       mode,
     });
-  }, [outputDir, params, mode]);
+  }, [params, mode]);
 
-  const runSpline = useCallback(async (path: string): Promise<BackgroundResult> => {
+  const runSpline = useCallback(async (runScope: HistoryScope, path: string): Promise<BackgroundResult> => {
     const config: DbeConfig = { ...dbe, manualSamples: usePointRegions ? pointSamples : [] };
     const dims = selectedFile?.result?.dimensions;
     const imageSize = dims ? { width: dims[0], height: dims[1] } : null;
     const validation = validateDbeParams(config, imageSize);
     if (!validation.ok) throw new Error(validation.errors.join("; "));
-    return extractBackgroundDbe(path, outputDir, config);
-  }, [dbe, usePointRegions, pointSamples, selectedFile, outputDir]);
+    return recordBackgroundDbe(runScope, path, config);
+  }, [dbe, usePointRegions, pointSamples, selectedFile]);
 
   const handleFileRun = useCallback(() => {
-    if (!selectedFile?.path) return;
+    if (!selectedFile?.path || !scope) return;
     const path = selectedFile.path;
+    const runScope = scope;
     const inputUrl = selectedFile.result?.previewUrl ?? null;
     const spline = model === "spline";
     const sampleRadius = dbe.sampleRadius;
     resetProgress();
     void run(async () => {
-      const res = spline ? await runSpline(path) : await runPolynomial(path);
-      onProcessingDone?.(res);
+      const res = spline ? await runSpline(runScope, path) : await runPolynomial(runScope, path);
+      await onProcessingDone?.(res);
       const stamp = Date.now();
       return {
         composite: false as const,
@@ -242,7 +254,7 @@ export default function BackgroundPanel({
         sampleRadius,
       };
     }, isCancelMessage).finally(resetProgress);
-  }, [selectedFile, model, dbe.sampleRadius, runSpline, runPolynomial, resetProgress, run, onProcessingDone]);
+  }, [selectedFile, scope, model, dbe.sampleRadius, runSpline, runPolynomial, resetProgress, run, onProcessingDone]);
 
   const handleCompositeRun = useCallback(() => {
     if (!compositeInput) return;

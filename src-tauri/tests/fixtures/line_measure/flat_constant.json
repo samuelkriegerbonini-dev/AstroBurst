@@ -1,0 +1,52 @@
+{
+  "axis_unit": "",
+  "centroid": 1.032,
+  "continuum_channels": 12,
+  "continuum_level": 1.0,
+  "continuum_linear": true,
+  "continuum_reference": 1.032,
+  "continuum_sigma": 0.0,
+  "continuum_slope": 0.0,
+  "continuum_windows": [
+    [
+      0,
+      5
+    ],
+    [
+      34,
+      39
+    ]
+  ],
+  "equivalent_width": -0.0,
+  "fit": {
+    "amplitude": 0.0,
+    "amplitude_err": null,
+    "centre": 1.008,
+    "centre_err": null,
+    "chi2": 0.0,
+    "converged": false,
+    "dof": 22,
+    "iterations": 16,
+    "sigma": 0.006000000000000005,
+    "sigma_err": null
+  },
+  "flux": 0.0,
+  "flux_err": 0.0,
+  "flux_unit": "",
+  "fwhm": null,
+  "n_channels": 25,
+  "notes": [
+    "flux is not positive: centroid set to the peak channel, sigma undefined",
+    "continuum scatter is zero or unknown: flux error and SNR are not meaningful",
+    "continuum scatter is zero or unknown: the Gaussian fit used unit weights",
+    "Gaussian fit did not converge after 16 iterations: the non-parametric values stand",
+    "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid"
+  ],
+  "peak": 0.0,
+  "peak_channel": 32,
+  "sigma": null,
+  "snr": null,
+  "velocity": null,
+  "z0": 8,
+  "z1": 32
+}

@@ -139,8 +139,22 @@ where
 }
 
 fn formal_errors(normal: &[Vec<f64>], chi2: f64, dof: usize) -> Vec<f64> {
-    let np = normal.len();
     let scale = if dof > 0 { chi2 / dof as f64 } else { 1.0 };
+    scaled_errors(normal, scale)
+}
+
+pub fn absolute_errors<F>(x: &[f64], y: &[f64], weights: &[f64], params: &[f64], model: F) -> Vec<f64>
+where
+    F: Fn(f64, &[f64], &mut [f64]) -> f64,
+{
+    match linearise(x, y, weights, params, &model) {
+        Some(lin) => scaled_errors(&lin.normal, 1.0),
+        None => vec![f64::NAN; params.len()],
+    }
+}
+
+fn scaled_errors(normal: &[Vec<f64>], scale: f64) -> Vec<f64> {
+    let np = normal.len();
     match invert(normal) {
         Some(inverse) => (0..np)
             .map(|i| {
@@ -494,5 +508,33 @@ mod tests {
         assert!(solve_linear(&mut singular, &mut rhs).is_none());
         let inverse = invert(&[vec![4.0, 7.0], vec![2.0, 6.0]]).unwrap();
         assert!((inverse[0][0] - 0.6).abs() < 1e-12 && (inverse[1][0] + 0.2).abs() < 1e-12, "{:?}", inverse);
+    }
+
+    fn straight_line(x: f64, p: &[f64], jac: &mut [f64]) -> f64 {
+        jac[0] = 1.0;
+        jac[1] = x;
+        p[0] + p[1] * x
+    }
+
+    #[test]
+    fn absolute_errors_follow_the_weights_and_ignore_the_residual_scatter() {
+        let x: Vec<f64> = (0..12).map(|i| i as f64 * 0.5).collect();
+        let sigma: Vec<f64> = (0..12).map(|i| 0.1 + 0.02 * i as f64).collect();
+        let w: Vec<f64> = sigma.iter().map(|s| 1.0 / (s * s)).collect();
+        let s: f64 = w.iter().sum();
+        let sx: f64 = w.iter().zip(&x).map(|(w, x)| w * x).sum();
+        let sxx: f64 = w.iter().zip(&x).map(|(w, x)| w * x * x).sum();
+        let d = s * sxx - sx * sx;
+        let expected = [(sxx / d).sqrt(), (s / d).sqrt()];
+        for amplitude in [0.0, 0.01, 3.0] {
+            let y: Vec<f64> = x.iter().enumerate().map(|(i, x)| 2.0 - 0.5 * x + sample_noise(i, amplitude)).collect();
+            let errors = absolute_errors(&x, &y, &w, &[2.0, -0.5], straight_line);
+            for (found, want) in errors.iter().zip(expected) {
+                assert!((found - want).abs() <= 1e-12 * want, "amplitude {} errors {:?} expected {:?}", amplitude, errors, expected);
+            }
+        }
+        let flat = vec![1.0; 12];
+        let singular = absolute_errors(&[1.0; 12], &flat, &w, &[1.0, 0.0], straight_line);
+        assert!(singular.iter().all(|e| e.is_nan()), "{:?}", singular);
     }
 }

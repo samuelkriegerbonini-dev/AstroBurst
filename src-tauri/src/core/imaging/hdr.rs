@@ -18,7 +18,7 @@ pub const HDR_LINEAR_INPUT_ERROR: &str =
 const LINEAR_MEDIAN_FRACTION: f32 = 0.01;
 const OVERDRIVE_LAYERS: usize = 2;
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct HdrConfig {
     pub layers: usize,

@@ -41,6 +41,7 @@ declare module "lucide-react" {
   export const Columns2: Icon;
   export const Compass: Icon;
   export const Copy: Icon;
+  export const CornerDownRight: Icon;
   export const Cpu: Icon;
   export const Crosshair: Icon;
   export const Database: Icon;
@@ -56,9 +57,11 @@ declare module "lucide-react" {
   export const FlaskConical: Icon;
   export const FolderOpen: Icon;
   export const Globe: Icon;
+  export const GitBranch: Icon;
   export const Grid3X3: Icon;
   export const GripVertical: Icon;
   export const HardDrive: Icon;
+  export const History: Icon;
   export const Home: Icon;
   export const Image: Icon;
   export const ImageIcon: Icon;
@@ -83,10 +86,12 @@ declare module "lucide-react" {
   export const Palette: Icon;
   export const PanelLeftClose: Icon;
   export const PanelLeftOpen: Icon;
+  export const Pencil: Icon;
   export const Pause: Icon;
   export const Pin: Icon;
   export const Play: Icon;
   export const Plus: Icon;
+  export const Redo2: Icon;
   export const RefreshCw: Icon;
   export const Repeat: Icon;
   export const RotateCcw: Icon;
@@ -107,6 +112,7 @@ declare module "lucide-react" {
   export const Timer: Icon;
   export const Trash2: Icon;
   export const Unlink: Icon;
+  export const Undo2: Icon;
   export const Upload: Icon;
   export const Wand2: Icon;
   export const X: Icon;

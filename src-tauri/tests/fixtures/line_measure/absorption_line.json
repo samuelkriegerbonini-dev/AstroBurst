@@ -1,0 +1,49 @@
+{
+  "axis_unit": "",
+  "centroid": 1.0199999863832008,
+  "continuum_channels": 12,
+  "continuum_level": 0.9999988229860447,
+  "continuum_linear": true,
+  "continuum_reference": 1.0199999863832008,
+  "continuum_sigma": 1.1338168939232672e-6,
+  "continuum_slope": -0.00003938194414651511,
+  "continuum_windows": [
+    [
+      0,
+      5
+    ],
+    [
+      34,
+      39
+    ]
+  ],
+  "equivalent_width": 0.0037598107200497097,
+  "fit": {
+    "amplitude": -0.49999915331818207,
+    "amplitude_err": 4.250114900932496e-7,
+    "centre": 1.0199999979961245,
+    "centre_err": 2.944560625635537e-9,
+    "chi2": 10.958255908389372,
+    "converged": true,
+    "dof": 22,
+    "iterations": 6,
+    "sigma": 0.002999990151443718,
+    "sigma_err": 2.9445632442498236e-9
+  },
+  "flux": -0.0037598062946999707,
+  "flux_err": 5.669084469616341e-9,
+  "flux_unit": "",
+  "fwhm": 0.007062462506742727,
+  "n_channels": 25,
+  "notes": [
+    "flux is negative: centroid and sigma are weighted by the absorbed flux",
+    "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid"
+  ],
+  "peak": -0.00016607787257660878,
+  "peak_channel": 32,
+  "sigma": 0.002999151685346685,
+  "snr": -663212.2549682909,
+  "velocity": null,
+  "z0": 8,
+  "z1": 32
+}

@@ -14,7 +14,7 @@ pub const LHE_HIST_BITS_ALLOWED: [u8; 3] = [8, 10, 12];
 
 const FLAT_RANGE_EPSILON: f32 = 1e-12;
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LheConfig {
     pub kernel_radius: usize,

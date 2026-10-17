@@ -7,6 +7,11 @@ export function generationPrefix(generation: number): string {
   return `g${generation}:`;
 }
 
+export function nonThumbPrefixes(generation: number): string[] {
+  const g = generationPrefix(generation);
+  return [`${g}search`, `${g}resolve`, `${g}page:`, `${g}list:`, `${g}preview:`, `${g}products:`];
+}
+
 export function searchId(generation: number): string {
   return `g${generation}:search`;
 }
@@ -19,16 +24,16 @@ export function pageId(generation: number, offset: number): string {
   return `g${generation}:page:${offset}`;
 }
 
-export function listId(generation: number, datasetId: string): string {
-  return `g${generation}:list:${datasetId}`;
+export function listId(generation: number, datasetId: string, attempt: number): string {
+  return `g${generation}:list:${datasetId}:a${attempt}`;
 }
 
 export function thumbId(generation: number, datasetId: string, filename: string | null): string {
   return filename ? `g${generation}:thumb:${datasetId}:${filename}` : `g${generation}:thumb:${datasetId}`;
 }
 
-export function previewId(generation: number, datasetId: string, filename: string, size: "pane" | "large"): string {
-  return `g${generation}:preview:${datasetId}:${filename}:${size}`;
+export function previewId(generation: number, datasetId: string, filename: string, size: "pane" | "large", attempt: number): string {
+  return `g${generation}:preview:${datasetId}:${filename}:${size}:a${attempt}`;
 }
 
 export function productsId(generation: number, datasetId: string): string {

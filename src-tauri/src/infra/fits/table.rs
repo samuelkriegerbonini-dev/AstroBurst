@@ -5,6 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 use anyhow::{bail, Context, Result};
 
 use crate::core::astrometry::spectral::{TabColumn, TabTables};
+use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::reader::{list_extensions, read_header_blocks, ParsedHdu};
 use crate::types::HduHeader;
 
@@ -431,7 +432,8 @@ impl BintableData {
 }
 
 pub fn load_bintable(path: &str, hdu: usize) -> Result<BintableData> {
-    let mut file = File::open(path).with_context(|| format!("Failed to open {path}"))?;
+    let (readable, _decompressed) = resolve_gzip(std::path::Path::new(path))?;
+    let mut file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
     let extensions = list_extensions(&file)?;
     let info = extensions
         .get(hdu)

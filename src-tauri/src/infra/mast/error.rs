@@ -35,6 +35,8 @@ pub enum MastError {
         summary: String,
         detail: HttpValidationError,
     },
+    #[error("MAST sent an empty answer from {url}")]
+    Empty { url: String },
     #[error("failed to decode MAST response from {url}: {source}")]
     Decode {
         url: String,

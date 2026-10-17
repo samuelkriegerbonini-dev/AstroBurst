@@ -1,11 +1,13 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { X } from "lucide-react";
-import { waveletDenoise } from "../../services/processing";
+import { recordWaveletDenoise, waveletOptionsOf, type WaveletSettings } from "../../services/processing";
 import { compositeWaveletDenoise } from "../../services/compositeChain";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
 import { useRenderContext } from "../../context/PreviewContext";
@@ -53,7 +55,7 @@ type WaveletRun = WaveletFileRun | WaveletCompositeRun;
 interface WaveletPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onProcessingDone?: (result: WaveletResult) => void;
+  onProcessingDone?: (result: WaveletResult) => void | Promise<void>;
   chainedFrom?: string | null;
   inputPreviewUrl?: string | null;
   inputLabel?: string;
@@ -107,10 +109,19 @@ export default function WaveletPanel({
 }: WaveletPanelProps) {
   const progress = useProgress(WAVELET_PROGRESS_EVENT);
   const resetProgress = progress.reset;
-  const [numScales, setNumScales] = useState(5);
-  const [thresholds, setThresholds] = useState<number[]>([...DEFAULT_THRESHOLDS]);
-  const [layerBias, setLayerBias] = useState<number[]>(() => Array(5).fill(DEFAULT_BIAS));
-  const [linear, setLinear] = useState(true);
+  const initial = useRerunInitial("denoise", waveletOptionsOf);
+  const [numScales, setNumScales] = useState(initial?.params.numScales ?? 5);
+  const [thresholds, setThresholds] = useState<number[]>(() => initial?.params.thresholds ?? [...DEFAULT_THRESHOLDS]);
+  const [layerBias, setLayerBias] = useState<number[]>(() => initial?.params.layerBias ?? Array(5).fill(DEFAULT_BIAS));
+  const [linear, setLinear] = useState(initial?.params.linear ?? true);
+  const applyRerun = useCallback((settings: WaveletSettings) => {
+    setNumScales(settings.numScales);
+    setThresholds(settings.thresholds);
+    setLayerBias(settings.layerBias);
+    setLinear(settings.linear);
+  }, []);
+  useRerunUpdates("denoise", initial, waveletOptionsOf, applyRerun);
+  const scope = useHistoryScope();
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<WaveletRun>("denoise", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -125,7 +136,7 @@ export default function WaveletPanel({
       : chainHoldsOutput(chain, "denoise", runResult.res.fits_path)
     : false;
   const result = held ? runResult : null;
-  const canRun = compositeMode ? compositeInput !== null : !!selectedFile;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile && !!scope;
 
   const updateThreshold = useCallback((idx: number, value: number) => {
     setThresholds((prev) => {
@@ -155,23 +166,24 @@ export default function WaveletPanel({
   const hasBias = layerBias.slice(0, numScales).some((b) => b !== DEFAULT_BIAS);
 
   const handleFileRun = useCallback(() => {
-    if (!selectedFile?.path) return;
+    if (!selectedFile?.path || !scope) return;
     const path = selectedFile.path;
+    const runScope = scope;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     resetProgress();
     void run(async (ctx) => {
-      const res = await waveletDenoise(path, outputDir, {
+      const res = await recordWaveletDenoise(runScope, path, {
         numScales,
         thresholds: thresholds.slice(0, numScales),
         linear,
         layerBias: layerBias.slice(0, numScales),
       });
       if (!ctx.inputUnchanged("denoise")) throw new Error(INPUT_CHANGED_MESSAGE);
-      onProcessingDone?.(res);
+      await onProcessingDone?.(res);
       return { composite: false as const, res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel };
     }, isCancelMessage).finally(resetProgress);
-  }, [selectedFile, outputDir, numScales, thresholds, linear, layerBias, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+  }, [selectedFile, scope, numScales, thresholds, linear, layerBias, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
 
   const handleCompositeRun = useCallback(() => {
     if (!compositeInput) return;

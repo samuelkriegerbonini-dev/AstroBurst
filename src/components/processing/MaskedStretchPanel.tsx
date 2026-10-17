@@ -1,5 +1,8 @@
 import { useState, useCallback } from "react";
-import { maskedStretch, maskedStretchComposite } from "../../services/processing";
+import { maskedStretchComposite, maskedStretchOptionsOf, recordMaskedStretch } from "../../services/processing";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
+import type { OpSpec } from "../../shared/types/ops";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 import type { ProcessedFile } from "../../shared/types";
@@ -41,6 +44,13 @@ interface MaskedStretchParams {
   luminanceProtect: boolean;
 }
 
+function paramsOf(op: OpSpec): MaskedStretchParams | null {
+  const options = maskedStretchOptionsOf(op);
+  if (!options) return null;
+  const { iterations, targetBackground, maskGrowth, maskSoftness, protectionAmount, luminanceProtect } = options;
+  return { iterations, targetBackground, maskGrowth, maskSoftness, protectionAmount, luminanceProtect };
+}
+
 interface MaskedStretchRun {
   res: MaskedStretchResult;
   resultUrl: string | undefined;
@@ -52,7 +62,7 @@ interface MaskedStretchRun {
 interface MaskedStretchPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onProcessingDone?: (result: MaskedStretchResult) => void;
+  onProcessingDone?: (result: MaskedStretchResult) => void | Promise<void>;
   chainedFrom?: string;
   inputPreviewUrl?: string | null;
   inputLabel?: string;
@@ -85,14 +95,20 @@ function percent(v: number): string {
 }
 
 export default function MaskedStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: MaskedStretchPanelProps) {
-  const [params, setParams] = useState<MaskedStretchParams>({
-    iterations: 10,
-    targetBackground: 0.25,
-    maskGrowth: 2.5,
-    maskSoftness: 4.0,
-    protectionAmount: 0.85,
-    luminanceProtect: true,
-  });
+  const initial = useRerunInitial("masked_stretch", paramsOf);
+  const [params, setParams] = useState<MaskedStretchParams>(
+    () =>
+      initial?.params ?? {
+        iterations: 10,
+        targetBackground: 0.25,
+        maskGrowth: 2.5,
+        maskSoftness: 4.0,
+        protectionAmount: 0.85,
+        luminanceProtect: true,
+      },
+  );
+  useRerunUpdates("masked_stretch", initial, paramsOf, setParams);
+  const scope = useHistoryScope();
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<MaskedStretchRun>("maskedStretch", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -101,7 +117,7 @@ export default function MaskedStretchPanel({ selectedFile, outputDir = "./output
     ? compositeChainHolds(compositeChain, "maskedStretch", runResult.resultUrl)
     : chainHoldsOutput(chain, "maskedStretch", runResult.res.fits_path));
   const result = holds ? runResult : null;
-  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path && !!scope;
 
   const update = useCallback(<K extends keyof MaskedStretchParams>(key: K, value: MaskedStretchParams[K]) => {
     setParams((prev) => ({ ...prev, [key]: value }));
@@ -133,17 +149,18 @@ export default function MaskedStretchPanel({ selectedFile, outputDir = "./output
       });
       return;
     }
-    if (!selectedFile?.path) return;
+    if (!selectedFile?.path || !scope) return;
     const path = selectedFile.path;
+    const runScope = scope;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     void run(async (ctx) => {
-      const res = await maskedStretch(path, outputDir, options);
+      const res = await recordMaskedStretch(runScope, path, options);
       if (!ctx.inputUnchanged("maskedStretch")) throw new Error(INPUT_CHANGED_MESSAGE);
-      onProcessingDone?.(res);
+      await onProcessingDone?.(res);
       return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     });
-  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile, outputDir, params, run, inputPreviewUrl, inputLabel, onProcessingDone, onCompositeDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile, scope, outputDir, params, run, inputPreviewUrl, inputLabel, onProcessingDone, onCompositeDone]);
 
   const channels = result?.res.channels;
   const passes = result ? stretchPassesSummary(result.res) : null;

@@ -8,7 +8,6 @@ use serde_json::json;
 
 use crate::core::imaging::sampling::{cell_range, preview_dims};
 use crate::core::imaging::stats::{compute_image_stats, is_valid_pixel};
-use crate::core::imaging::stf::{auto_stf, AutoStfConfig};
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::types::compose::{AlignMethod, WhiteBalance};
 use crate::types::constants::{
@@ -408,16 +407,7 @@ pub(crate) fn stf_json(stf: &StfParams) -> serde_json::Value {
     })
 }
 
-pub(crate) fn compute_linked_stf_with_stats(
-    stats_r: &ImageStats,
-    stats_g: &ImageStats,
-    stats_b: &ImageStats,
-    config: &AutoStfConfig,
-) -> (StfParams, ImageStats) {
-    let combined = crate::core::imaging::stats::combine_channel_stats(stats_r, stats_g, stats_b);
-    let stf = auto_stf(&combined, config);
-    (stf, combined)
-}
+pub(crate) use crate::core::imaging::stf::compute_linked_stf_with_stats;
 
 type RgbPlanes = (Array2<f32>, Array2<f32>, Array2<f32>);
 

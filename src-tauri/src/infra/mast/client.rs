@@ -415,6 +415,17 @@ impl MastClient {
         self.json_response(&url, request).await
     }
 
+    pub async fn get_json_present<T>(&self, path: &str, query: &QueryPairs<'_>) -> MastResult<T>
+    where
+        T: DeserializeOwned,
+    {
+        let url = self.url(path);
+        let request = self.http.get(&url).query(query).header(ACCEPT, JSON_MIME);
+        let response = self.send(&url, request).await?;
+        let body = self.read_capped(&url, response, self.json_cap).await?;
+        decode_present(&url, &self.scrubbed(body, false))
+    }
+
     pub async fn post_json<B, T>(&self, path: &str, payload: &B) -> MastResult<T>
     where
         B: Serialize + ?Sized,
@@ -429,6 +440,24 @@ impl MastClient {
             .header(CONTENT_TYPE, JSON_MIME)
             .body(body);
         self.json_response(&url, request).await
+    }
+
+    pub async fn post_json_present<B, T>(&self, path: &str, payload: &B) -> MastResult<T>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        let url = self.url(path);
+        let body = serde_json::to_vec(payload).map_err(MastError::Encode)?;
+        let request = self
+            .http
+            .post(&url)
+            .header(ACCEPT, JSON_MIME)
+            .header(CONTENT_TYPE, JSON_MIME)
+            .body(body);
+        let response = self.send(&url, request).await?;
+        let body = self.read_capped(&url, response, self.json_cap).await?;
+        decode_present(&url, &self.scrubbed(body, false))
     }
 
     pub async fn post_form<T>(&self, path: &str, form: &QueryPairs<'_>) -> MastResult<T>
@@ -494,7 +523,14 @@ impl MastClient {
         let response = self.send(url, request).await?;
         let status = response.status();
         let body = self.read_capped(url, response, self.json_cap).await?;
-        decode_json(status, url, &body)
+        decode_json(status, url, &self.scrubbed(body, false))
+    }
+
+    fn scrubbed(&self, body: Vec<u8>, cut: bool) -> Vec<u8> {
+        match &self.token {
+            Some(token) => scrub_secret(&body, token.expose().as_bytes(), cut),
+            None => body,
+        }
     }
 
     fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
@@ -542,11 +578,12 @@ impl MastClient {
                 _ => break,
             }
         }
+        let cut = body.len() >= ERROR_READ_LIMIT;
         body.truncate(ERROR_READ_LIMIT);
         if !self.error_bodies {
             body.clear();
         }
-        error_for_status(status, url, &body, &headers)
+        error_for_status(status, url, &self.scrubbed(body, cut), &headers)
     }
 
     async fn read_capped(&self, url: &str, mut response: Response, cap: u64) -> MastResult<Vec<u8>> {
@@ -562,6 +599,29 @@ impl MastClient {
         }
         Ok(body)
     }
+}
+
+fn scrub_secret(body: &[u8], secret: &[u8], cut: bool) -> Vec<u8> {
+    if secret.is_empty() {
+        return body.to_vec();
+    }
+    let mut out = Vec::with_capacity(body.len());
+    let mut at = 0;
+    while at < body.len() {
+        if body[at..].starts_with(secret) {
+            out.extend_from_slice(b"***");
+            at += secret.len();
+        } else {
+            out.push(body[at]);
+            at += 1;
+        }
+    }
+    if cut {
+        if let Some(kept) = (1..secret.len()).rev().find(|n| out.ends_with(&secret[..*n])) {
+            out.truncate(out.len() - kept);
+        }
+    }
+    out
 }
 
 fn rounded_secs(duration: Duration) -> u64 {
@@ -592,14 +652,35 @@ where
     if status == StatusCode::NO_CONTENT || body.iter().all(u8::is_ascii_whitespace) {
         return Ok(T::default());
     }
+    decode_present(url, body)
+}
+
+fn decode_present<T: DeserializeOwned>(url: &str, body: &[u8]) -> MastResult<T> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Err(MastError::Empty { url: url.to_owned() });
+    }
     serde_json::from_slice(body).map_err(|source| MastError::Decode {
         url: url.to_owned(),
         source,
     })
 }
 
+fn leading_detail(body: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    if !text.trim_start().starts_with('{') {
+        return None;
+    }
+    let key = text.find("\"detail\"")?;
+    let value = text[key + "\"detail\"".len()..].trim_start().strip_prefix(':')?.trim_start();
+    let detail: String = serde_json::Deserializer::from_str(value).into_iter::<String>().next()?.ok()?;
+    let detail = detail.trim().to_owned();
+    (!detail.is_empty()).then_some(detail)
+}
+
 fn status_detail(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return leading_detail(body);
+    };
     let detail = match value.get("detail")? {
         serde_json::Value::String(text) => text.trim().to_owned(),
         serde_json::Value::Array(items) => items
@@ -977,6 +1058,11 @@ pub(crate) mod tests {
             decode_json::<Vec<Value>>(StatusCode::OK, "u", b"{oops"),
             Err(MastError::Decode { .. })
         ));
+        for blank in [&b""[..], b"  
+"] {
+            assert!(matches!(decode_present::<Vec<Value>>("u", blank), Err(MastError::Empty { .. })));
+        }
+        assert_eq!(decode_present::<Vec<Value>>("u", b"[]").unwrap(), Vec::<Value>::new());
     }
 
     #[test]
@@ -1035,6 +1121,29 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn long_json_detail_survives_a_cut_error_body() {
+        use crate::core::mast::errors::{classify, OpKind, Operation, DETAIL_LIMIT};
+        use crate::core::mast::types::MastMissionId;
+        let detail = "d".repeat(800);
+        let body = json!({"detail": detail, "trace": "t".repeat(ERROR_READ_LIMIT * 2)}).to_string();
+        let server = serve_routes(vec![Route::get("/index").status(500).json(body)]).await;
+        let error = test_client(&server.base).get_json::<Value>("index", &[]).await.unwrap_err();
+        assert!(matches!(&error, MastError::Status { status: 500, detail: Some(found), .. } if *found == detail), "{error:?}");
+        let classified = classify(&error, &Operation::mission(MastMissionId::Jwst, OpKind::ImageList, "get_image_list"), 0);
+        assert_eq!(classified.context.detail.as_deref(), Some(&detail[..DETAIL_LIMIT]));
+        for (cut, expected) in [
+            (r#"{"detail": "kept", "trace": "lost"#, Some("kept")),
+            (r#"{"trace": "lo"#, None),
+            (r#"{"detail": "unterminat"#, None),
+            (r#"{"detail": 5, "trace": "x"#, None),
+            (r#"{"message": "a \"detail\": \"fake\"", "x": "y"#, None),
+            ("not json \"detail\": \"no\"", None),
+        ] {
+            assert_eq!(status_detail(cut.as_bytes()).as_deref(), expected, "{cut}");
+        }
+    }
+
+    #[tokio::test]
     async fn token_is_sent_as_authorization_header() {
         let (base, server) = serve_once("200 OK", "application/json", b"[]".to_vec()).await;
         let client = test_client(&base).with_token("secret");
@@ -1044,6 +1153,34 @@ pub(crate) mod tests {
         assert_eq!(request.method, "GET");
         assert_eq!(request.target, "/ping?a=1");
         assert!(request.headers.contains("authorization: token secret"));
+    }
+
+    #[tokio::test]
+    async fn echoed_token_is_scrubbed_from_answers() {
+        let echoed = format!(r#"{{"detail":"invalid token {MARKER_TOKEN}"}}"#);
+        let invalid = format!(r#"{{"detail":[{{"loc":["body","token"],"msg":"bad {MARKER_TOKEN}","type":"value_error"}}]}}"#);
+        let page = format!(r#"{{"messages":["token {MARKER_TOKEN} accepted"],"results":[]}}"#);
+        let cut = format!("{}{}", "x".repeat(ERROR_READ_LIMIT - 10), MARKER_TOKEN);
+        let server = serve_routes(vec![
+            Route::get("/unauthorized").status(401).json(echoed),
+            Route::get("/invalid").status(422).json(invalid),
+            Route::get("/page").json(page),
+            Route::get("/cut").status(500).html(cut),
+        ])
+        .await;
+        let client = test_client(&server.base).with_token(MARKER_TOKEN);
+        let unauthorized = client.get_json::<Value>("unauthorized", &[]).await.unwrap_err();
+        let invalid = client.get_json::<Value>("invalid", &[]).await.unwrap_err();
+        let page: Value = client.get_json("page", &[]).await.unwrap();
+        let cut = client.get_json::<Value>("cut", &[]).await.unwrap_err();
+        assert!(matches!(&unauthorized, MastError::Status { detail: Some(detail), .. } if detail == "invalid token ***"), "{unauthorized:?}");
+        assert_eq!(page["messages"][0], "token *** accepted");
+        let partial = &MARKER_TOKEN[..10];
+        for text in [format!("{unauthorized:?} {unauthorized}"), format!("{invalid:?} {invalid}"), page.to_string(), format!("{cut:?}")] {
+            assert!(!text.contains(partial), "{text}");
+        }
+        let anonymous = test_client(&server.base).get_json::<Value>("unauthorized", &[]).await.unwrap_err();
+        assert!(format!("{anonymous:?}").contains(MARKER_TOKEN), "a client without a token keeps the body as sent");
     }
 
     #[tokio::test]

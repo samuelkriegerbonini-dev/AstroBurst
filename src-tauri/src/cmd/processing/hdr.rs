@@ -3,7 +3,8 @@ use serde_json::json;
 use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir};
 use crate::cmd::compose::composite_chain::DisplayStf;
 use crate::cmd::processing::local_contrast::{run_composite_contrast, run_composite_contrast_chain, save_contrast_output, source_header};
-use crate::core::imaging::hdr::{hdrmt_rgb, hdrmt_with_progress, HdrConfig};
+use crate::core::imaging::hdr::{hdrmt_rgb, HdrConfig};
+use crate::core::ops::{run_op, OpInput, OpSpec, OpVersion};
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH};
 
@@ -27,11 +28,12 @@ pub async fn hdrmt_cmd(
         let header = source_header(&path, &entry);
 
         let t0 = std::time::Instant::now();
-        let compressed = hdrmt_with_progress(entry.arr(), &config, Some(&progress_clone))?;
+        let input = OpInput::mono(entry.arr(), header.as_ref());
+        let compressed = run_op(&OpSpec::Hdrmt { v: OpVersion, config }, &input, Some(&progress_clone))?;
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
         let (ro, fits_path) =
-            save_contrast_output(&compressed, &path, &output_dir, SUFFIX_HDR, ABPROC_HDRMT, header.as_ref())?;
+            save_contrast_output(&compressed.planes[0], &path, &output_dir, SUFFIX_HDR, ABPROC_HDRMT, header.as_ref())?;
         let (rows, cols) = ro.dims;
 
         Ok(json!({

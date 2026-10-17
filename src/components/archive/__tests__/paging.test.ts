@@ -50,6 +50,14 @@ describe("mergePage", () => {
     expect(second.rows).toHaveLength(202);
   });
 
+  it("keeps a later page's row whose dataset id repeats with other values, as IUE lists one row per aperture", () => {
+    const aperture = (id: string, aper: string) => row(id, { values: { iue_data_id: id, iue_aper: aper } });
+    const first = mergePage(null, page([...rows(199), aperture("LWP15521", "LARGE")], { hasMore: true, totalReported: 272 }));
+    const second = mergePage(first, page([aperture("LWP15521", "LARGE"), aperture("LWP15521", "SMALL"), aperture("LWP15526", "LARGE")], { offset: 200, hasMore: false }));
+    expect(second.rows).toHaveLength(202);
+    expect(second.rows.slice(-3).map((r) => `${r.datasetId} ${r.values.iue_aper}`)).toEqual(["LWP15521 LARGE", "LWP15521 SMALL", "LWP15526 LARGE"]);
+  });
+
   it("ignores a page whose offset does not continue the set", () => {
     const first = mergePage(null, page(rows(200), { hasMore: true }));
     expect(mergePage(first, page(rows(200, 600), { offset: 600, hasMore: true }))).toBe(first);

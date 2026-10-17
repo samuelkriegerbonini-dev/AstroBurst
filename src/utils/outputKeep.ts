@@ -32,14 +32,23 @@ export interface KeepInput {
   wizard?: KeepWizard | null;
   compositeChain?: CompositeChain | null;
   previewUrls?: readonly (string | null | undefined)[];
+  historyDir?: string | null;
+}
+
+function underDir(dir: string | null | undefined): (key: string) => boolean {
+  if (!dir) return () => false;
+  const prefix = `${normalizeOutputPath(dir).replace(/\/+$/, "")}/`;
+  return (key) => key.startsWith(prefix);
 }
 
 export function outputKeepList(input: KeepInput): string[] {
   const kept = new Map<string, string>();
+  const inHistory = underDir(input.historyDir);
   const add = (value: string | null | undefined) => {
     if (!value || value.startsWith("__")) return;
     const path = parseImageRef(value).path;
     const key = normalizeOutputPath(path);
+    if (inHistory(key)) return;
     if (!kept.has(key)) kept.set(key, path);
   };
   const addUrl = (url: string | null | undefined) => add(urlToLocalPath(url));

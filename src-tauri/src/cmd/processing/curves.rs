@@ -22,37 +22,7 @@ use crate::types::image::{ScnrConfig, StfParams};
 
 pub const RES_CONTRAST_REAPPLIED: &str = "contrast_reapplied";
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ToneLevelsInput {
-    pub black: f64,
-    pub gamma: f64,
-    pub white: f64,
-}
-
-impl From<&ToneLevelsInput> for LevelsParams {
-    fn from(input: &ToneLevelsInput) -> Self {
-        Self {
-            black: input.black,
-            gamma: input.gamma,
-            white: input.white,
-        }
-    }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ToneCurveInput {
-    pub points: Vec<[f64; 2]>,
-}
-
-pub(crate) fn build_spline(input: &ToneCurveInput) -> SplineLut {
-    let pts: Vec<(f64, f64)> = input.points.iter().map(|p| (p[0], p[1])).collect();
-    SplineLut::from_points(&pts)
-}
-
-pub(crate) fn is_curve_identity(input: &ToneCurveInput) -> bool {
-    let pts: Vec<(f64, f64)> = input.points.iter().map(|p| (p[0], p[1])).collect();
-    SplineLut::is_identity(&pts)
-}
+pub(crate) use crate::core::ops::tone::{build_spline, is_curve_identity, ToneCurveInput, ToneLevelsInput};
 
 fn identity_lut() -> SplineLut {
     SplineLut::from_points(&[(0.0, 0.0), (1.0, 1.0)])

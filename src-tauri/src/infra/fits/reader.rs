@@ -14,6 +14,7 @@ use crate::types::{HduHeader, ImageRef, PlaneSelector};
 use super::compress;
 use super::compressed_guard;
 use super::file_bytes::read_file_bytes;
+use super::gzip::{resolve_gzip, starts_with_gzip, GZIP_BYTES_REFUSAL, GZIP_MAGIC};
 
 pub fn create_mmap_random(file: &File) -> Result<Mmap> {
     let mmap = unsafe { MmapOptions::new().map(file).context("mmap random failed")? };
@@ -370,30 +371,26 @@ fn parse_card(card: &[u8]) -> HeaderCard {
     }
 }
 
-const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
-
-fn reject_gzip(head: &[u8]) -> Result<()> {
-    if head.starts_with(&GZIP_MAGIC) {
-        bail!("gzip-compressed FITS is not supported; decompress first");
+fn refuse_gzip_bytes(head: &[u8]) -> Result<()> {
+    if starts_with_gzip(head) {
+        bail!(GZIP_BYTES_REFUSAL);
     }
     Ok(())
 }
 
-fn reject_gzip_file(file: &File) -> Result<()> {
+fn refuse_gzip_file(file: &File) -> Result<()> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut f = file;
     f.seek(SeekFrom::Start(0)).context("seek to the start of the file failed")?;
     let mut head = Vec::with_capacity(GZIP_MAGIC.len());
-    f.take(GZIP_MAGIC.len() as u64)
-        .read_to_end(&mut head)
-        .context("reading the start of the file failed")?;
-    reject_gzip(&head)
+    f.take(GZIP_MAGIC.len() as u64).read_to_end(&mut head).context("reading the start of the file failed")?;
+    refuse_gzip_bytes(&head)
 }
 
 pub fn parse_header_at(mmap: &[u8], offset: usize) -> Result<ParsedHdu> {
     if offset == 0 {
-        reject_gzip(mmap)?;
+        refuse_gzip_bytes(mmap)?;
     }
     parse_header_blocks(mmap, offset)
 }
@@ -555,7 +552,7 @@ fn scan_all_hdus(mmap: &[u8]) -> Result<Vec<ScannedHdu>> {
     if mmap.is_empty() {
         bail!("File is empty (0 bytes) — the download or copy may have failed");
     }
-    reject_gzip(mmap)?;
+    refuse_gzip_bytes(mmap)?;
     let mut hdus = Vec::new();
     let mut offset: usize = 0;
 
@@ -585,7 +582,7 @@ pub(crate) fn read_header_blocks(file: &File, offset: usize) -> Result<ParsedHdu
     use std::io::{Read, Seek, SeekFrom};
 
     if offset == 0 {
-        reject_gzip_file(file)?;
+        refuse_gzip_file(file)?;
     }
     let mut f = file;
     f.seek(SeekFrom::Start(offset as u64))
@@ -624,7 +621,7 @@ fn scan_hdu_headers(file: &File) -> Result<Vec<ScannedHdu>> {
     if file_len == 0 {
         bail!("File is empty (0 bytes) — the download or copy may have failed");
     }
-    reject_gzip_file(file)?;
+    refuse_gzip_file(file)?;
     let mut hdus = Vec::new();
     let mut offset: usize = 0;
 
@@ -717,6 +714,8 @@ fn shape_label(hdu: &ScannedHdu) -> String {
     format!("{prefix}NAXIS={naxis} [{}]", dims.join("x"))
 }
 
+pub const ONE_D_ARRAY_VERDICT: &str = "1D array, not an image";
+
 fn hdu_usability_reason(hdu: &ScannedHdu) -> String {
     if hdu.is_single_plane_image {
         return "loadable 2D image".to_string();
@@ -728,7 +727,7 @@ fn hdu_usability_reason(hdu: &ScannedHdu) -> String {
         return "header only, no pixel data".to_string();
     }
     if hdu.info.naxis == 1 {
-        return "1D array, not an image".to_string();
+        return ONE_D_ARRAY_VERDICT.to_string();
     }
     if hdu.plane_count > 1 {
         return format!(
@@ -1139,7 +1138,8 @@ pub fn extract_header_by_index(file: &File, hdu_index: usize) -> Result<HduHeade
 
 pub fn load_fits_image(path: &str) -> Result<Array2<f32>> {
     let r = ImageRef::parse(path);
-    let file = File::open(&r.path)
+    let (readable, _decompressed) = resolve_gzip(std::path::Path::new(&r.path))?;
+    let file = File::open(&readable)
         .with_context(|| format!("Failed to open {}", r.path))?;
     let result = match &r.plane {
         PlaneSelector::Auto => extract_image_mmap(&file),
@@ -1151,7 +1151,8 @@ pub fn load_fits_image(path: &str) -> Result<Array2<f32>> {
 }
 
 pub fn read_primary_header(path: &str) -> Result<HduHeader> {
-    let file = File::open(path)
+    let (readable, _decompressed) = resolve_gzip(std::path::Path::new(path))?;
+    let file = File::open(&readable)
         .with_context(|| format!("Failed to open {}", path))?;
     Ok(read_header_blocks(&file, 0)?.header)
 }
@@ -2469,15 +2470,11 @@ mod tests {
         assert!(extract_image_mmap(&file).is_err());
     }
 
-    fn gzip(bytes: &[u8]) -> Vec<u8> {
-        use std::io::Write;
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(bytes).unwrap();
-        encoder.finish().unwrap()
-    }
-
     #[test]
-    fn a_gzip_compressed_fits_is_refused_with_its_reason() {
+    fn gzip_bytes_handed_to_an_open_file_reader_are_refused_and_path_readers_decompress_them() {
+        use crate::infra::fits::gzip::test_support::gzip_bytes as gzip;
+        use crate::infra::fits::gzip::GZIP_BYTES_REFUSAL;
+
         let dir = tempfile::tempdir().unwrap();
         let large = dir.path().join("large.fits");
         let mut noisy = plane_hdu("SCI", 64, 64);
@@ -2497,7 +2494,7 @@ mod tests {
         assert!(large_gz.len() >= BLOCK_SIZE, "one archive must pass the one-block size check");
         assert!(small_gz.len() < BLOCK_SIZE, "one archive must be shorter than a FITS block");
 
-        for (name, bytes) in [("large.fits.gz", large_gz), ("small.fits.gz", small_gz)] {
+        for (name, bytes, plain) in [("large.fits.gz", large_gz, &large), ("small.fits.gz", small_gz, &small)] {
             let gz = dir.path().join(name);
             std::fs::write(&gz, &bytes).unwrap();
             let file = File::open(&gz).unwrap();
@@ -2510,15 +2507,22 @@ mod tests {
                 extract_header_by_index(&file, 0).err(),
                 list_extensions(&file).err(),
                 auto_hdu_index(&file).err(),
-                read_primary_header(gz.to_str().unwrap()).err(),
+                read_header_blocks(&file, 0).err(),
                 parse_header_at(&bytes, 0).err(),
             ];
             for (i, err) in errors.into_iter().enumerate() {
                 let msg = format!("{:#}", err.unwrap_or_else(|| panic!("{name}: reader {i} accepted gzip bytes")));
-                assert!(msg.contains("gzip-compressed FITS is not supported; decompress first"), "{name}: reader {i}: {msg}");
+                assert!(msg.contains(GZIP_BYTES_REFUSAL), "{name}: reader {i}: {msg}");
             }
+            assert_eq!(
+                read_primary_header(gz.to_str().unwrap()).unwrap().cards,
+                read_primary_header(plain.to_str().unwrap()).unwrap().cards,
+                "{name}"
+            );
         }
 
+        let large_gz = dir.path().join("large.fits.gz");
+        assert_eq!(load_fits_image(&format!("{}#hdu=1", large_gz.to_str().unwrap())).unwrap().dim(), (64, 64));
         assert_eq!(extract_image_mmap(&File::open(&large).unwrap()).unwrap().image.dim(), (64, 64));
     }
 

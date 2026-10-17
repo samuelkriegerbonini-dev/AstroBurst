@@ -5,8 +5,10 @@ use ndarray::Array2;
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, render_and_save_as, resolve_output_dir, OutputValues, MAX_PREVIEW_DIM};
 use crate::cmd::compose::composite_chain::{key_planes, run_chain_step, stretched_state, ChainCall, ChainStep, DisplayStf, StepOutput};
 use crate::cmd::helpers;
-use crate::core::imaging::stretch::{arcsinh_stretch, arcsinh_stretch_rgb, ghs_stretch, ghs_stretch_rgb, GhsParams};
+use crate::core::imaging::stretch::{arcsinh_stretch_rgb, ghs_stretch_rgb};
 use crate::core::imaging::masked_stretch::{masked_stretch, masked_stretch_rgb_shared, MaskedStretchConfig};
+use crate::core::ops::stretch::{arcsinh_factor, ghs_params_from_args, masked_stretch_config};
+use crate::core::ops::{run_op, OpInput, OpSpec, OpVersion};
 use crate::types::constants::{
     RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH,
     RES_STRETCH_FACTOR, RES_ITERATIONS_RUN, RES_STARS_MASKED,
@@ -27,42 +29,22 @@ pub async fn apply_arcsinh_stretch_cmd(
         let output_dir = resolve_output_dir(&output_dir)?;
 
         let entry = load_from_cache_or_disk(&path)?;
-        let image = entry.arr();
-
-        let clamped_factor = (factor as f32).clamp(1.0, 500.0);
 
         let t0 = std::time::Instant::now();
-        let stretched = arcsinh_stretch(image, clamped_factor);
+        let stretched = run_op(&OpSpec::Arcsinh { v: OpVersion, factor }, &OpInput::mono(entry.arr(), None), None)?;
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
-        let ro = render_and_save_as(&stretched, &path, &output_dir, "arcsinh", true, OutputValues::DisplayReferred)?;
+        let ro = render_and_save_as(&stretched.planes[0], &path, &output_dir, "arcsinh", true, OutputValues::DisplayReferred)?;
         let (rows, cols) = ro.dims;
 
         Ok(json!({
             RES_PNG_PATH: ro.png_path,
             RES_FITS_PATH: ro.fits_path,
-            RES_STRETCH_FACTOR: clamped_factor,
+            RES_STRETCH_FACTOR: stretched.extras[RES_STRETCH_FACTOR],
             RES_ELAPSED_MS: elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
         }))
     })
-}
-
-fn ghs_params_from_args(
-    stretch_factor: f64,
-    local_intensity: Option<f64>,
-    symmetry_point: Option<f64>,
-    shadow_protect: Option<f64>,
-    highlight_protect: Option<f64>,
-) -> GhsParams {
-    let sp = symmetry_point.unwrap_or(0.05).clamp(0.0, 1.0);
-    GhsParams {
-        d: stretch_factor.clamp(0.0, 50.0),
-        b: local_intensity.unwrap_or(0.0).clamp(-10.0, 15.0),
-        sp,
-        lp: shadow_protect.unwrap_or(0.0).clamp(0.0, sp),
-        hp: highlight_protect.unwrap_or(1.0).clamp(sp, 1.0),
-    }
 }
 
 #[tauri::command]
@@ -79,7 +61,6 @@ pub async fn apply_ghs_stretch_cmd(
         let output_dir = resolve_output_dir(&output_dir)?;
 
         let entry = load_from_cache_or_disk(&path)?;
-        let image = entry.arr();
 
         let params = ghs_params_from_args(
             stretch_factor,
@@ -90,20 +71,21 @@ pub async fn apply_ghs_stretch_cmd(
         );
 
         let t0 = std::time::Instant::now();
-        let stretched = ghs_stretch(image, &params);
+        let stretched = run_op(&OpSpec::Ghs { v: OpVersion, params }, &OpInput::mono(entry.arr(), None), None)?;
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
-        let ro = render_and_save_as(&stretched, &path, &output_dir, "ghs", true, OutputValues::DisplayReferred)?;
+        let ro = render_and_save_as(&stretched.planes[0], &path, &output_dir, "ghs", true, OutputValues::DisplayReferred)?;
         let (rows, cols) = ro.dims;
 
+        let extra = |key: &str| stretched.extras[key].clone();
         Ok(json!({
             RES_PNG_PATH: ro.png_path,
             RES_FITS_PATH: ro.fits_path,
-            RES_STRETCH_FACTOR: params.d,
-            RES_LOCAL_INTENSITY: params.b,
-            RES_SYMMETRY_POINT: params.sp,
-            RES_SHADOW_PROTECT: params.lp,
-            RES_HIGHLIGHT_PROTECT: params.hp,
+            RES_STRETCH_FACTOR: extra(RES_STRETCH_FACTOR),
+            RES_LOCAL_INTENSITY: extra(RES_LOCAL_INTENSITY),
+            RES_SYMMETRY_POINT: extra(RES_SYMMETRY_POINT),
+            RES_SHADOW_PROTECT: extra(RES_SHADOW_PROTECT),
+            RES_HIGHLIGHT_PROTECT: extra(RES_HIGHLIGHT_PROTECT),
             RES_ELAPSED_MS: elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
         }))
@@ -176,35 +158,34 @@ pub async fn masked_stretch_cmd(
         let output_dir = resolve_output_dir(&output_dir)?;
 
         let entry = load_from_cache_or_disk(&path)?;
-        let image = entry.arr();
 
-        let config = MaskedStretchConfig {
-            iterations: iterations.unwrap_or(10),
-            target_background: target_background.unwrap_or(0.25),
-            mask_growth: mask_growth.unwrap_or(2.5),
-            mask_softness: mask_softness.unwrap_or(4.0),
-            protection_amount: protection_amount.unwrap_or(0.85),
-            luminance_protect: luminance_protect.unwrap_or(true),
-            detection_sigma: detection_sigma.unwrap_or(8.0).clamp(3.0, 20.0),
-            max_eccentricity: max_eccentricity.unwrap_or(0.85).clamp(0.3, 1.0),
-            ..MaskedStretchConfig::default()
-        };
+        let config = masked_stretch_config(
+            iterations,
+            target_background,
+            mask_growth,
+            mask_softness,
+            protection_amount,
+            luminance_protect,
+            detection_sigma,
+            max_eccentricity,
+        );
 
         let t0 = std::time::Instant::now();
-        let result = masked_stretch(image, &config).map_err(|e| anyhow::anyhow!(e))?;
+        let result = run_op(&OpSpec::MaskedStretch { v: OpVersion, config }, &OpInput::mono(entry.arr(), None), None)?;
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
-        let ro = render_and_save_as(&result.image, &path, &output_dir, SUFFIX_MASKED_STRETCH, true, OutputValues::DisplayReferred)?;
+        let ro = render_and_save_as(&result.planes[0], &path, &output_dir, SUFFIX_MASKED_STRETCH, true, OutputValues::DisplayReferred)?;
         let (rows, cols) = ro.dims;
 
+        let extra = |key: &str| result.extras[key].clone();
         Ok(json!({
             RES_PNG_PATH: ro.png_path,
             RES_FITS_PATH: ro.fits_path,
-            RES_ITERATIONS_RUN: result.iterations_run,
-            RES_FINAL_BACKGROUND: result.final_background,
-            RES_STARS_MASKED: result.stars_masked,
-            RES_MASK_COVERAGE: result.mask_coverage,
-            RES_CONVERGED: result.converged,
+            RES_ITERATIONS_RUN: extra(RES_ITERATIONS_RUN),
+            RES_FINAL_BACKGROUND: extra(RES_FINAL_BACKGROUND),
+            RES_STARS_MASKED: extra(RES_STARS_MASKED),
+            RES_MASK_COVERAGE: extra(RES_MASK_COVERAGE),
+            RES_CONVERGED: extra(RES_CONVERGED),
             RES_ELAPSED_MS: elapsed_ms,
             RES_DIMENSIONS: [cols, rows],
         }))
@@ -219,7 +200,7 @@ pub async fn arcsinh_stretch_composite_cmd(
     display_stf: Option<DisplayStf>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let clamped_factor = (factor as f32).clamp(1.0, 500.0);
+        let clamped_factor = arcsinh_factor(factor);
 
         if let Some(chain_input) = chain_input {
             let call = ChainCall { output_dir, chain_input, display_stf };
@@ -346,17 +327,16 @@ pub async fn masked_stretch_composite_cmd(
     display_stf: Option<DisplayStf>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let config = MaskedStretchConfig {
-            iterations: iterations.unwrap_or(10),
-            target_background: target_background.unwrap_or(0.25),
-            mask_growth: mask_growth.unwrap_or(2.5),
-            mask_softness: mask_softness.unwrap_or(4.0),
-            protection_amount: protection_amount.unwrap_or(0.85),
-            luminance_protect: luminance_protect.unwrap_or(true),
-            detection_sigma: detection_sigma.unwrap_or(8.0).clamp(3.0, 20.0),
-            max_eccentricity: max_eccentricity.unwrap_or(0.85).clamp(0.3, 1.0),
-            ..MaskedStretchConfig::default()
-        };
+        let config = masked_stretch_config(
+            iterations,
+            target_background,
+            mask_growth,
+            mask_softness,
+            protection_amount,
+            luminance_protect,
+            detection_sigma,
+            max_eccentricity,
+        );
         let use_shared = shared_mask.unwrap_or(true);
 
         if let Some(chain_input) = chain_input {

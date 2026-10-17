@@ -71,6 +71,9 @@ jobs:
       - name: Run backend test suite (lib + server binary)
         run: cargo test --all-features
         working-directory: src-tauri
+      - name: Run op runner and history tests without tauri
+        run: cargo test --lib --no-default-features --features server -- core::ops core::history
+        working-directory: src-tauri
 
   frontend-tests:
     runs-on: ubuntu-latest

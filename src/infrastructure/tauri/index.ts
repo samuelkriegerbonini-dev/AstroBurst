@@ -3,7 +3,7 @@ import { getOutputDir } from "./output";
 import { announceCommandOutputs } from "./outputEvents";
 
 export { typedInvoke, isTauri, getPreviewUrl } from "./client";
-export { getOutputDir, getOutputDirTiles, getExportDir } from "./output";
+export { getOutputDir, getOutputDirTiles, getExportDir, getHistoryDir } from "./output";
 export { parseRawPixelBuffer, toUint8Array, parseFftBuffer, parseDqMaskBuffer } from "./parsers";
 export { announceCommandOutputs, onCommandOutputs } from "./outputEvents";
 

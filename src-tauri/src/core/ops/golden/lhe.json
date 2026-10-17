@@ -1,0 +1,11 @@
+[
+  {
+    "op": "lhe",
+    "v": 1,
+    "kernelRadius": 64,
+    "contrastLimit": 2.0,
+    "amount": 1.0,
+    "histBits": 8,
+    "circular": true
+  }
+]

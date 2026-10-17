@@ -80,4 +80,19 @@ describe("card text helpers", () => {
     expect(exclusiveText(row("a", { access: "EXCLUSIVE", releaseDate: null }))).toBe("Exclusive access");
     expect(exclusiveText(row("a"))).toBeNull();
   });
+
+  it("treats a release date still to come as exclusive when MAST gives no access column", () => {
+    const today = Date.UTC(2026, 9, 16, 12);
+    const hst = (releaseDate: string | null) => row("ICK909030", { access: null, releaseDate });
+    expect(isPublic(hst("2026-10-17T00:00:00"), today)).toBe(false);
+    expect(isPublic(hst("2026-10-16T18:56:50.210000"), today)).toBe(true);
+    expect(isPublic(hst("2007-05-18T18:56:50.210000"), today)).toBe(true);
+    expect(isPublic(hst(null), today)).toBe(true);
+    expect(isPublic(hst("not a date"), today)).toBe(true);
+    expect(isPublic(row("a", { access: "PUBLIC", releaseDate: "2999-01-01T00:00:00" }), today)).toBe(true);
+    expect(isPublic(hst("2999-01-01T00:00:00"))).toBe(false);
+    expect(exclusiveText(hst("2999-01-01T00:00:00"))).toBe("Exclusive until 2999-01-01");
+    expect(cardAccessibleName(hst("2999-01-01T00:00:00"), "HST")).toMatch(/exclusive until 2999-01-01$/);
+    expect(cardAccessibleName(hst("2007-05-18T18:56:50.210000"), "HST")).not.toMatch(/exclusive|public/);
+  });
 });

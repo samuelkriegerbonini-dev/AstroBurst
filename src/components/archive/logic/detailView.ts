@@ -30,6 +30,7 @@ export const EXCLUSIVE_PREVIEWS_TEXT = "MAST serves no preview of exclusive-acce
 export const PRODUCTS_SLOW_NOTE = "MAST takes 20 to 30 s for listings it has not seen recently.";
 export const PREVIEW_DWELL_MS = 400;
 export const STRIP_LIMIT = 24;
+export const REPRESENTATIVE_STEM = "_representative";
 
 const SIZE_EDGE: Record<PreviewSize, number> = { pane: 2048, large: 4096 };
 const TOKEN_MISSIONS: readonly MastMissionId[] = ["roman", "roman_cgi"];
@@ -61,7 +62,7 @@ export function entryTitle(entry: MastImageEntry): string {
   return `${label} ${suffix}`;
 }
 
-export function previewsAllowed(row: Pick<MastRow, "access">, mission: MastMission): boolean {
+export function previewsAllowed(row: Pick<MastRow, "access" | "releaseDate">, mission: MastMission): boolean {
   return mission.capabilities.images && (isPublic(row) || TOKEN_MISSIONS.includes(mission.id));
 }
 
@@ -113,6 +114,23 @@ export function stripThumbKeys(datasetId: string, entries: readonly MastImageEnt
     .filter((e): e is MastImageEntry & { thumbnailFilename: string } => !!e.thumbnailFilename && card?.filename !== e.thumbnailFilename)
     .slice(0, STRIP_LIMIT)
     .map((e) => stripKey(datasetId, e.thumbnailFilename));
+}
+
+function representativeThumb(set: MastImageSet): string | null {
+  return set.representative === null ? null : (set.entries[set.representative]?.thumbnailFilename ?? null);
+}
+
+export function cardThumbFor<T extends StripThumb>(set: MastImageSet, card: T | undefined): T | undefined {
+  const filename = representativeThumb(set);
+  if (!card || !card.filename.startsWith(`${REPRESENTATIVE_STEM}.`) || !filename) return card;
+  return { ...card, filename };
+}
+
+export function stripCover(set: MastImageSet, card: StripThumb | undefined, cardLoading: boolean): StripThumb | undefined {
+  const mapped = cardThumbFor(set, card);
+  if (mapped || !cardLoading) return mapped;
+  const filename = representativeThumb(set);
+  return filename ? { url: "", filename } : undefined;
 }
 
 export function stripThumbUrl(datasetId: string, entry: MastImageEntry, refs: Readonly<Record<string, StripThumb | undefined>>, card: StripThumb | undefined): string | null {
@@ -186,6 +204,10 @@ export function previewStatusText(phase: PreviewPhase, entry: MastImageEntry, si
     default:
       return "";
   }
+}
+
+export function waitedOf(p: { startedAt: number; endedAt: number | null }): number | null {
+  return p.endedAt !== null ? Math.max(0, p.endedAt - p.startedAt) : null;
 }
 
 export function listingText(datasetId: string, elapsedMs: number): string {

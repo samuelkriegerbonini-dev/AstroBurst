@@ -53,11 +53,11 @@ function renderDebayer(compositeMode: boolean): string {
 }
 
 describe("PixelMathPanel target selector", () => {
-  it("is hidden in file mode, with no composite notice", () => {
+  it("is hidden in file mode, with no composite notice and no output name: the history names the step", () => {
     const html = renderPixelMath(false);
     expect(html).not.toContain("Composite (per channel)");
     expect(html).not.toContain("the composite on screen does not change");
-    expect(html).toContain("Output name");
+    expect(html).not.toContain("Output name");
   });
 
   it("appears in composite mode with File selected by default and the file-only notice", () => {
@@ -144,7 +144,7 @@ describe("PixelMathPanel slot image options after a run", () => {
       ["pixelMath", shownResult("pixelmath", PM_PATH, BG_PATH, "PixelMath")],
     ]);
     const key = fileKeyOf(file);
-    retain(key, { expression: "$T - A", slots: [{ name: "A", path: BG_PATH }], truncate: false, rescale: false, outputName: "", slotsTouched: true });
+    retain(key, { expression: "$T - A", slots: [{ name: "A", path: BG_PATH }], truncate: false, rescale: false, slotsTouched: true });
     const panel = createElement(PixelMathPanel, {
       selectedFile: file,
       outputDir: "C:/out",
@@ -205,7 +205,7 @@ describe("PixelMathPanel slot image options with chain outputs", () => {
       ["denoise", shownResult("processing", denoised, BG_PATH, "Denoise")],
     ]);
     const key = fileKeyOf(file);
-    retain(key, { expression: "$T - A", slots: [{ name: "A", path: RAW_PATH }], truncate: false, rescale: false, outputName: "", slotsTouched: true });
+    retain(key, { expression: "$T - A", slots: [{ name: "A", path: RAW_PATH }], truncate: false, rescale: false, slotsTouched: true });
     const panel = createElement(PixelMathPanel, {
       selectedFile: file,
       outputDir: "C:/out",

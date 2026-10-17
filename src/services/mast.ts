@@ -136,8 +136,8 @@ const MAST_ERROR_CODES: ReadonlySet<string> = new Set<MastErrorCode>([
   "mast_cache",
 ]);
 
-const NUMBER_KEYS = ["status", "retryAfterSec", "timeoutSec", "bytes", "consecutive"] as const;
-const STRING_KEYS = ["detail", "mission", "operation"] as const;
+const NUMBER_KEYS = ["status", "retryAfterSec", "timeoutSec", "bytes", "consecutive", "attempts", "elapsedMs"] as const;
+const STRING_KEYS = ["detail", "mission", "operation", "host"] as const;
 
 function pickContext(raw: unknown): MastErrorContext {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};

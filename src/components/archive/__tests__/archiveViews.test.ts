@@ -215,22 +215,125 @@ describe("results region", () => {
     expect(markup).toContain('data-testid="mast-summary"');
   });
 
-  it("shows a ready thumbnail as an asset image with empty alt text and a failed one with its reason", () => {
-    let s = searched();
+  it("shows a ready thumbnail as an asset image with empty alt text and a failed one with its cause", () => {
+    const rows = [ROWS[0], row("jw02739-o003_t001_nircam")];
+    let s = searched(base(), rows);
     s = run(
       s,
-      { type: "thumbDemand", selected: [], visible: ["jw02739-o001_t001_nircam", "jw02739-o002_t001_miri"], ahead: [] },
-      { type: "thumbsStarted", keys: ["jw02739-o001_t001_nircam", "jw02739-o002_t001_miri"] },
+      { type: "thumbDemand", selected: [], visible: ["jw02739-o001_t001_nircam", "jw02739-o003_t001_nircam"], ahead: [] },
+      { type: "thumbsStarted", keys: ["jw02739-o001_t001_nircam", "jw02739-o003_t001_nircam"], at: 0 },
       { type: "thumbReady", key: "jw02739-o001_t001_nircam", ref: { url: "http://asset.localhost/C%3A%5Ct.jpg", width: 128, height: 75, imageCount: 6, filename: "t_thumb.jpg" } },
-      { type: "thumbFailed", key: "jw02739-o002_t001_miri", reason: "not an image" },
+      { type: "thumbFailed", key: "jw02739-o003_t001_nircam", error: { code: "mast_not_image", message: "response is not an image", context: { operation: "search/jwst/api/v0.1/get_image_thumbnail" } }, at: 900 },
     );
     const markup = html(ResultsRegion, { state: s, ctl, around: null });
     expect(tag(markup, "mast-card", ' data-dataset="jw02739-o001_t001_nircam"')).toContain('data-thumb="ready"');
     expect(markup).toMatch(/<img[^>]*src="http:\/\/asset\.localhost\/C%3A%5Ct\.jpg"[^>]*>/);
     expect(markup).toMatch(/<img[^>]*alt=""/);
-    expect(tag(markup, "mast-card", ' data-dataset="jw02739-o002_t001_miri"')).toContain('data-thumb="failed"');
-    expect(markup).toContain('title="No preview (not an image)"');
+    expect(tag(markup, "mast-card", ' data-dataset="jw02739-o003_t001_nircam"')).toContain('data-thumb="failed"');
+    expect(tag(markup, "mast-card", ' data-dataset="jw02739-o003_t001_nircam"')).toContain('data-error-code="mast_not_image"');
+    expect(markup).toContain(">MAST sent something that is not an image<");
+    expect(markup).not.toContain("No preview");
     expect(markup).toMatch(/>6</);
+  });
+
+  describe("a thumbnail that failed shows MAST's answer where the image would be", () => {
+    const A = "jw02739-o001_t001_nircam";
+    const B = "jw02739-o003_t001_nircam";
+    const unavailable: MastError = { code: "mast_server", message: "HTTP 503", context: { status: 503, detail: "Service Unavailable", operation: "search/jwst/api/v0.1/get_image_thumbnail" } };
+    const slow: MastError = { code: "mast_timeout", message: "no answer within 30 s", context: { timeoutSec: 30, operation: "search/jwst/api/v0.1/get_image_thumbnail" } };
+
+    function failedOn(error: MastError, waitedMs = 2000): ArchiveState {
+      return run(
+        searched(base(), [row(A), row(B)]),
+        { type: "thumbDemand", selected: [], visible: [A, B], ahead: [] },
+        { type: "thumbsStarted", keys: [A], at: 1000 },
+        { type: "thumbFailed", key: A, error, at: 1000 + waitedMs },
+      );
+    }
+
+    function card(markup: string, id: string): string {
+      const start = markup.indexOf(`data-dataset="${id}"`);
+      const open = markup.lastIndexOf("<div", start);
+      const next = markup.indexOf('data-testid="mast-card"', start);
+      return markup.slice(open, next < 0 ? undefined : markup.lastIndexOf("<div", next));
+    }
+
+    it("shows the title, the HTTP status, MAST's text and a Retry button on the card, never 'No preview'", () => {
+      const markup = html(ResultsRegion, { state: failedOn(unavailable), ctl, around: null });
+      const tile = card(markup, A);
+      const open = tag(markup, "mast-card", ` data-dataset="${A}"`);
+      expect(open).toContain('data-thumb="failed"');
+      expect(open).toContain('data-error-code="mast_server"');
+      expect(open).toContain('data-error-status="503"');
+      expect(open).toContain('data-error-waited-ms="2000"');
+      expect(tile).toContain(">MAST server error<");
+      expect(tile).toContain(">HTTP 503<");
+      expect(tile).toContain(">Service Unavailable<");
+      expect(tile).toMatch(/<button[^>]*tabindex="-1"[^>]*>Retry/);
+      expect(tile).not.toContain("No preview");
+      const described = /aria-describedby="([^"]+)"/.exec(open)?.[1];
+      expect(described).toBeTruthy();
+      expect(tile).toContain(`id="${described}"`);
+      expect(tile).toContain('data-tone="server"');
+    });
+
+    it("shows a timeout with the limit and the time the card waited", () => {
+      const markup = html(ResultsRegion, { state: failedOn(slow, 41_000), ctl, around: null });
+      const tile = card(markup, A);
+      expect(tile).toContain(">MAST did not answer<");
+      expect(tile).toContain("no answer within 30 s · waited 41 s");
+      expect(tag(markup, "mast-card", ` data-dataset="${A}"`)).toContain('data-error-waited-ms="41000"');
+      expect(tile).toContain('data-tone="transient"');
+    });
+
+    it("shows a mono badge with the status in the table cell, and the cause in its tooltip", () => {
+      const s = run(failedOn(unavailable), { type: "viewSet", view: "table" }, { type: "tableThumbsToggled" });
+      const markup = html(ResultsRegion, { state: s, ctl, around: null });
+      const cell = /<div role="gridcell"[^>]*data-error-code="mast_server"[^>]*>[\s\S]*?<\/div>/.exec(markup)?.[0] ?? "";
+      expect(cell).toContain('data-error-status="503"');
+      expect(cell).toMatch(/>503</);
+      expect(cell).toMatch(/title="[^"]*HTTP 503[^"]*Service Unavailable[^"]*"/);
+      expect(cell).toContain("Press R to retry");
+    });
+
+    it("shows the queue paused by MAST with its countdown on the card, and WAIT in the table instead of a shimmer", () => {
+      const now = Date.now();
+      const paused = run(
+        searched(base(), [row(A), row(B)]),
+        { type: "thumbDemand", selected: [], visible: [A, B], ahead: [] },
+        { type: "thumbsStarted", keys: [A], at: now },
+        { type: "thumbRateLimited", key: A, at: now, retryAfterSec: 30, consecutive: 1, status: 429 },
+      );
+      const gallery = html(ResultsRegion, { state: paused, ctl, around: null });
+      const tile = card(gallery, A);
+      expect(tag(gallery, "mast-card", ` data-dataset="${A}"`)).toContain('data-thumb="paused"');
+      expect(tile).toContain(">Paused by MAST<");
+      expect(tile).toMatch(/HTTP 429 · resumes in (29|30) s/);
+      const table = html(ResultsRegion, { state: run(paused, { type: "viewSet", view: "table" }, { type: "tableThumbsToggled" }), ctl, around: null });
+      const cells = table.match(/<div role="gridcell" class="ab-mast-td ab-mast-td-thumb"[\s\S]*?<\/div>/g) ?? [];
+      expect(cells).toHaveLength(2);
+      for (const c of cells) {
+        expect(c).toMatch(/>WAIT</);
+        expect(c).not.toContain("ab-mast-shimmer");
+      }
+    });
+
+    it("says Queued before a request starts and how long a slow one has been loading", () => {
+      const s = run(searched(base(), [row(A), row(B)]), { type: "thumbDemand", selected: [], visible: [A, B], ahead: [] }, { type: "thumbsStarted", keys: [A], at: Date.now() - 12_400 });
+      const markup = html(ResultsRegion, { state: s, ctl, around: null });
+      expect(card(markup, A)).toMatch(/Loading · 1[23] s/);
+      expect(card(markup, A)).toContain("ab-mast-shimmer");
+      expect(card(markup, B)).toContain("Queued");
+      expect(card(markup, B)).not.toContain("ab-mast-shimmer");
+    });
+  });
+
+  it("shows a lock tile instead of a thumbnail for an exclusive row of a mission that takes no token", () => {
+    const markup = html(ResultsRegion, { state: searched(), ctl, around: null });
+    const locked = tag(markup, "mast-card", ' data-dataset="jw02739-o002_t001_miri"');
+    expect(locked).toContain('data-thumb="locked"');
+    expect(markup).toMatch(/ab-mast-thumb-locked[^>]*>.*EXCL\./);
+    expect(tag(markup, "mast-card", ' data-dataset="jw02739-o001_t001_nircam"')).toContain('data-thumb="pending"');
   });
 
   it("mounts at most 200 cards for a 2,000-row result", () => {
@@ -279,7 +382,7 @@ describe("results region", () => {
   });
 
   it("shows the blocking network error with Try again and the details", () => {
-    const err: MastError = { code: "mast_network", message: "connection refused", context: { operation: "search/jwst/api/v0.1/search" } };
+    const err: MastError = { code: "mast_network", message: "connection refused", context: { operation: "search/jwst/api/v0.1/search", host: "mast.stsci.edu" } };
     const s = run(
       { ...base(), form: { ...base().form, text: "M16" } },
       { type: "searchStarted", generation: 1, text: "M16", kind: "name", name: "M16", query: null, at: 0 },

@@ -8,13 +8,21 @@ use crate::math::median::median_f32_mut;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::error::AppError;
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WaveletConfig {
     pub num_scales: usize,
     pub thresholds: Vec<f32>,
     pub linear_denoise: bool,
     #[serde(default)]
     pub layer_bias: Option<Vec<f32>>,
+}
+
+pub fn check_layer_bias(layer_bias: Option<&[f32]>) -> Result<()> {
+    if layer_bias.is_some_and(|bias| bias.iter().any(|b| !b.is_finite())) {
+        anyhow::bail!("layer_bias must contain only finite values");
+    }
+    Ok(())
 }
 
 impl Default for WaveletConfig {

@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{
@@ -9,12 +8,11 @@ use crate::cmd::common::{
     ResolvedRgbImage, MAX_PREVIEW_DIM,
 };
 use crate::cmd::helpers;
-use crate::cmd::processing::curves::{build_spline, is_curve_identity, ToneCurveInput, ToneLevelsInput};
-use crate::cmd::processing::local_contrast::{is_display_referred, source_header};
-use crate::core::imaging::curves::{apply_curve, apply_levels, LevelsParams, SplineLut};
+use crate::cmd::processing::curves::{ToneCurveInput, ToneLevelsInput};
+use crate::cmd::processing::local_contrast::source_header;
 use crate::core::imaging::push_history;
-use crate::core::imaging::stats::compute_image_stats;
-use crate::core::imaging::stf::{apply_stf_f32, auto_stf, AutoStfConfig, ImageStats, StfParams};
+use crate::core::ops::tone::ToneOps;
+use crate::core::ops::{run_op, OpInput, OpOutput, OpSpec, OpVersion};
 use crate::infra::fits::writer::write_fits_rgb;
 use crate::types::constants::{
     RES_CURVES_APPLIED, RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_INPUT_NORMALIZED, RES_IS_RGB,
@@ -22,87 +20,24 @@ use crate::types::constants::{
 };
 use crate::types::header::HduHeader;
 
-pub(crate) const TONE_IDENTITY_ERROR: &str = "Nothing to apply: the levels and the curve are both identity.";
 pub(crate) const TONE_CUBE_ERROR: &str = "Curves work on a 2-D image; select a plane of the cube first.";
 const SUFFIX_TONE: &str = "tone";
 
-struct ToneOps {
-    levels: Option<LevelsParams>,
-    curve: Option<(SplineLut, usize)>,
-}
-
-impl ToneOps {
-    fn parse(levels: Option<&ToneLevelsInput>, curve: Option<&ToneCurveInput>) -> anyhow::Result<Self> {
-        let levels = levels.map(LevelsParams::from).filter(|l| !l.is_identity());
-        let curve = curve
-            .filter(|c| !is_curve_identity(c))
-            .map(|c| (build_spline(c), c.points.len()));
-        if levels.is_none() && curve.is_none() {
-            anyhow::bail!(TONE_IDENTITY_ERROR);
-        }
-        Ok(Self { levels, curve })
-    }
-
-    fn apply(&self, display: &Array2<f32>) -> Array2<f32> {
-        match (&self.levels, &self.curve) {
-            (Some(l), Some((lut, _))) => apply_curve(&apply_levels(display, l), lut),
-            (Some(l), None) => apply_levels(display, l),
-            (None, Some((lut, _))) => apply_curve(display, lut),
-            (None, None) => display.clone(),
-        }
-    }
-
-    fn history(&self) -> String {
-        let l = self.levels.clone().unwrap_or_default();
-        format!(
-            "tone: levels black {:.4} gamma {:.4} white {:.4}; curve {} points",
-            l.black,
-            l.gamma,
-            l.white,
-            self.curve.as_ref().map_or(0, |(_, n)| *n)
-        )
-    }
-}
-
-fn stf_history(stf: &StfParams) -> String {
-    format!(
-        "tone: linear input stretched with auto-STF (shadow {:.4} midtone {:.4} highlight {:.4})",
-        stf.shadow, stf.midtone, stf.highlight
-    )
-}
-
-fn tone_header(source: Option<&HduHeader>, stf: Option<&StfParams>, ops: &ToneOps) -> HduHeader {
+fn tone_header(source: Option<&HduHeader>, history_lines: &[String]) -> HduHeader {
     let mut header = derived_output_header(source, SUFFIX_TONE, OutputValues::DisplayReferred);
-    if let Some(stf) = stf {
-        push_history(&mut header, &stf_history(stf));
+    for line in history_lines {
+        push_history(&mut header, line);
     }
-    push_history(&mut header, &ops.history());
     header
 }
 
-fn keep_nonfinite(input: &Array2<f32>, mut toned: Array2<f32>) -> Array2<f32> {
-    ndarray::Zip::from(&mut toned).and(input).for_each(|t, &v| {
-        if !v.is_finite() {
-            *t = f32::NAN;
-        }
-    });
-    toned
-}
-
-fn normalized_json(stats: Option<&ImageStats>) -> serde_json::Value {
-    match stats {
-        Some(s) => json!({ "min": s.min, "max": s.max }),
-        None => serde_json::Value::Null,
-    }
-}
-
-pub(super) fn is_cube_header(header: Option<&HduHeader>) -> bool {
+pub(crate) fn is_cube_header(header: Option<&HduHeader>) -> bool {
     header
         .and_then(|h| h.get_i64("NAXIS3"))
         .is_some_and(|n| n > 1)
 }
 
-pub(super) fn has_only_cube_planes(path: &str) -> bool {
+pub(crate) fn has_only_cube_planes(path: &str) -> bool {
     let r = image_ref(path);
     if r.is_synthetic() {
         return false;
@@ -121,8 +56,7 @@ fn response(
     fits_path: String,
     dims: (usize, usize),
     is_rgb: bool,
-    ops: &ToneOps,
-    stats: Option<&ImageStats>,
+    toned: &OpOutput,
     t0: Instant,
 ) -> serde_json::Value {
     let (rows, cols) = dims;
@@ -131,14 +65,14 @@ fn response(
         RES_FITS_PATH: fits_path,
         RES_DIMENSIONS: [cols, rows],
         RES_IS_RGB: is_rgb,
-        RES_LEVELS_APPLIED: ops.levels.is_some(),
-        RES_CURVES_APPLIED: ops.curve.is_some(),
-        RES_INPUT_NORMALIZED: normalized_json(stats),
+        RES_LEVELS_APPLIED: toned.extras[RES_LEVELS_APPLIED],
+        RES_CURVES_APPLIED: toned.extras[RES_CURVES_APPLIED],
+        RES_INPUT_NORMALIZED: toned.extras[RES_INPUT_NORMALIZED],
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
     })
 }
 
-fn run_tone_mono(path: &str, output_dir: &str, ops: &ToneOps, t0: Instant) -> anyhow::Result<serde_json::Value> {
+fn run_tone_mono(path: &str, output_dir: &str, spec: &OpSpec, t0: Instant) -> anyhow::Result<serde_json::Value> {
     let entry = match load_from_cache_or_disk(path) {
         Ok(entry) => entry,
         Err(_) if has_only_cube_planes(path) => anyhow::bail!(TONE_CUBE_ERROR),
@@ -149,46 +83,31 @@ fn run_tone_mono(path: &str, output_dir: &str, ops: &ToneOps, t0: Instant) -> an
         anyhow::bail!(TONE_CUBE_ERROR);
     }
 
-    let (toned, stf) = if is_display_referred(source.as_ref()) {
-        (keep_nonfinite(entry.arr(), ops.apply(entry.arr())), None)
-    } else {
-        let stats = compute_image_stats(entry.arr());
-        let stf = auto_stf(&stats, &AutoStfConfig::default());
-        let toned = ops.apply(&apply_stf_f32(entry.arr(), &stf, &stats));
-        (keep_nonfinite(entry.arr(), toned), Some((stf, stats)))
-    };
-
-    let ro = render_and_save_as(&toned, path, output_dir, SUFFIX_TONE, false, OutputValues::DisplayReferred)?;
-    let header = tone_header(source.as_ref(), stf.as_ref().map(|(s, _)| s), ops);
+    let toned = run_op(spec, &OpInput::mono(entry.arr(), source.as_ref()), None)?;
+    let plane = &toned.planes[0];
+    let ro = render_and_save_as(plane, path, output_dir, SUFFIX_TONE, false, OutputValues::DisplayReferred)?;
+    let header = tone_header(source.as_ref(), &toned.history_lines);
     let fits_path = format!("{}/{}_{}.fits", output_dir, output_stem(path), SUFFIX_TONE);
-    write_derived_fits(&fits_path, &toned, Some(&header))?;
-    Ok(response(ro.png_path, fits_path, ro.dims, false, ops, stf.as_ref().map(|(_, s)| s), t0))
+    write_derived_fits(&fits_path, plane, Some(&header))?;
+    Ok(response(ro.png_path, fits_path, ro.dims, false, &toned, t0))
 }
 
-fn run_tone_rgb(rgb: &ResolvedRgbImage, path: &str, output_dir: &str, ops: &ToneOps, t0: Instant) -> anyhow::Result<serde_json::Value> {
+fn run_tone_rgb(rgb: &ResolvedRgbImage, path: &str, output_dir: &str, spec: &OpSpec, t0: Instant) -> anyhow::Result<serde_json::Value> {
     let source = Some(&rgb.header);
-    let planes = [&rgb.r, &rgb.g, &rgb.b];
-    let (toned, stf) = if is_display_referred(source) {
-        (planes.map(|p| keep_nonfinite(p, ops.apply(p))), None)
-    } else {
-        let stats = planes.map(compute_image_stats);
-        let (stf, combined) =
-            helpers::compute_linked_stf_with_stats(&stats[0], &stats[1], &stats[2], &AutoStfConfig::default());
-        (planes.map(|p| keep_nonfinite(p, ops.apply(&apply_stf_f32(p, &stf, &combined)))), Some((stf, combined)))
-    };
-    let [r, g, b] = toned;
+    let toned = run_op(spec, &OpInput::rgb([&rgb.r, &rgb.g, &rgb.b], source), None)?;
+    let [r, g, b] = [&toned.planes[0], &toned.planes[1], &toned.planes[2]];
 
     let stem = output_stem(path);
     let png_path = format!("{}/{}_{}.png", output_dir, stem, SUFFIX_TONE);
     let fits_path = format!("{}/{}_{}.fits", output_dir, stem, SUFFIX_TONE);
     let unit = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    helpers::render_rgb_preview_with_stf(&r, &g, &b, unit, unit, unit, &png_path, MAX_PREVIEW_DIM)?;
+    helpers::render_rgb_preview_with_stf(r, g, b, unit, unit, unit, &png_path, MAX_PREVIEW_DIM)?;
 
-    let header = tone_header(source, stf.as_ref().map(|(s, _)| s), ops);
+    let header = tone_header(source, &toned.history_lines);
     crate::core::cube::cache::GLOBAL_CUBE_CACHE.invalidate(&fits_path);
-    write_fits_rgb(&fits_path, &r, &g, &b, Some(&header))?;
+    write_fits_rgb(&fits_path, r, g, b, Some(&header))?;
     invalidate_written(&fits_path);
-    Ok(response(png_path, fits_path, r.dim(), true, ops, stf.as_ref().map(|(_, s)| s), t0))
+    Ok(response(png_path, fits_path, r.dim(), true, &toned, t0))
 }
 
 #[tauri::command]
@@ -200,12 +119,13 @@ pub async fn apply_tone_cmd(
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
-        let ops = ToneOps::parse(levels.as_ref(), curve.as_ref())?;
+        ToneOps::parse(levels.as_ref(), curve.as_ref())?;
+        let spec = OpSpec::Tone { v: OpVersion, levels, curve };
         let output_dir = resolve_output_dir(&output_dir)?;
         let rgb = if image_ref(&path).is_synthetic() { None } else { try_extract_rgb_resolved(&path)? };
         match rgb {
-            Some(rgb) => run_tone_rgb(&rgb, &path, &output_dir, &ops, t0),
-            None => run_tone_mono(&path, &output_dir, &ops, t0),
+            Some(rgb) => run_tone_rgb(&rgb, &path, &output_dir, &spec, t0),
+            None => run_tone_mono(&path, &output_dir, &spec, t0),
         }
     })
 }
@@ -246,7 +166,14 @@ pub(crate) fn write_cube(path: &std::path::Path, cols: usize, rows: usize, depth
 mod tests {
     use super::*;
 
+    use ndarray::Array2;
+
     use crate::cmd::common::{cached_header, extract_image_resolved, HEADER_ABPROC, HEADER_DISPLAY_REFERRED};
+    use crate::core::imaging::curves::{apply_curve, apply_levels, LevelsParams, SplineLut};
+    use crate::core::imaging::stats::compute_image_stats;
+    use crate::core::imaging::stf::{apply_stf_f32, auto_stf, AutoStfConfig};
+    use crate::core::ops::tone::{stf_history, TONE_IDENTITY_ERROR};
+    use crate::core::ops::OutputValues;
     use crate::infra::fits::writer::write_fits_mono;
 
     struct Lcg(u64);
@@ -461,6 +388,72 @@ mod tests {
             }
             assert_eq!(written.iter().filter(|v| !v.is_finite()).count(), holes.len(), "{src}");
         }
+    }
+
+    fn assert_bitwise(actual: &Array2<f32>, expected: &Array2<f32>, what: &str) {
+        assert_eq!(actual.dim(), expected.dim(), "{what}");
+        let differing = actual.iter().zip(expected.iter()).filter(|(a, e)| a.to_bits() != e.to_bits()).count();
+        assert_eq!(differing, 0, "{what}: {differing} pixels differ");
+    }
+
+    fn tone_spec() -> OpSpec {
+        OpSpec::Tone { v: OpVersion, levels: Some(levels()), curve: Some(curve()) }
+    }
+
+    #[tokio::test]
+    async fn run_op_tone_on_linear_input_matches_apply_tone_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = dir.path().join("linear_run_op.fits").to_str().unwrap().to_string();
+        let mut input = star_field(31);
+        input[[7, 9]] = f32::NAN;
+        write_fits_mono(&src, &input, None).unwrap();
+
+        let value = apply_tone_cmd(src, out, Some(levels()), Some(curve())).await.unwrap();
+        let fits = value[RES_FITS_PATH].as_str().unwrap();
+        let written = extract_image_resolved(fits).unwrap().arr;
+        let notes = history(&cached_header(fits).unwrap()).join(" ");
+
+        let ran = run_op(&tone_spec(), &OpInput::mono(&input, None), None).unwrap();
+        assert_eq!(ran.planes.len(), 1);
+        assert_bitwise(&ran.planes[0], &written, "mono tone");
+        assert!(ran.planes[0][[7, 9]].is_nan());
+        assert_eq!(ran.values, OutputValues::DisplayReferred);
+        assert_eq!(ran.history_lines.len(), 2, "{:?}", ran.history_lines);
+        assert!(ran.history_lines.iter().all(|line| notes.contains(line.as_str())), "{:?} vs {notes}", ran.history_lines);
+        for key in [RES_INPUT_NORMALIZED, RES_LEVELS_APPLIED, RES_CURVES_APPLIED] {
+            assert_eq!(ran.extras[key], value[key], "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn run_op_tone_on_rgb_file_matches_apply_tone_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = dir.path().join("colour_run_op.fits").to_str().unwrap().to_string();
+        let mut r = star_field(41);
+        r[[2, 3]] = f32::NAN;
+        r[[0, 0]] = f32::NAN;
+        let g = star_field(42).mapv(|v| v * 1.5);
+        let b = star_field(43).mapv(|v| v * 0.5);
+        write_fits_rgb(&src, &r, &g, &b, None).unwrap();
+
+        let value = apply_tone_cmd(src, out, Some(levels()), Some(curve())).await.unwrap();
+        let fits = value[RES_FITS_PATH].as_str().unwrap();
+        let written = try_extract_rgb_resolved(fits).unwrap().expect("a 3-plane RGB FITS");
+        let notes = history(&written.header).join(" ");
+
+        let ran = run_op(&tone_spec(), &OpInput::rgb([&r, &g, &b], None), None).unwrap();
+        assert_eq!(ran.planes.len(), 3);
+        for (plane, (expected, name)) in ran.planes.iter().zip([(&written.r, "r"), (&written.g, "g"), (&written.b, "b")]) {
+            assert_bitwise(plane, expected, name);
+        }
+        assert!(ran.planes[0][[2, 3]].is_nan() && ran.planes[0][[0, 0]].is_nan());
+        assert_eq!(ran.planes[0].iter().filter(|v| v.is_nan()).count(), 2);
+        assert_eq!(ran.values, OutputValues::DisplayReferred);
+        assert_eq!(ran.history_lines.iter().filter(|l| l.contains("auto-STF")).count(), 1, "{:?}", ran.history_lines);
+        assert!(ran.history_lines.iter().all(|line| notes.contains(line.as_str())), "{:?} vs {notes}", ran.history_lines);
+        assert_eq!(ran.extras[RES_INPUT_NORMALIZED], value[RES_INPUT_NORMALIZED]);
     }
 
     #[test]

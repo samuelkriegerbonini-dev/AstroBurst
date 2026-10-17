@@ -1,8 +1,9 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 
@@ -10,7 +11,8 @@ use super::api::MissionEndpoint;
 use super::auth;
 use super::cache::{
     cached_image, dataset_dir, dir_info, evict_to_cap, list_file, read_stored, read_stored_at, remove_file, remove_tree, representative_file,
-    safe_filename, stored_name, touch, write_atomic, write_stored, DiskBudget, ListKind, IMG_DIR, LISTS_DIR, LIST_TTL, REPRESENTATIVE_STEM,
+    safe_filename, stored_name, sweep_stale_temps, touch, write_atomic, write_stored, DiskBudget, ListKind, IMG_DIR, LISTS_DIR, LIST_TTL, REPRESENTATIVE_NAME,
+    REPRESENTATIVE_STEM,
 };
 use super::client::ImageOp;
 use super::download::{fetch, Fetched, ProgressThrottle, HEAD_KEEP};
@@ -18,7 +20,8 @@ use super::error::MastError;
 use super::hub::{MastHub, ProbeResult, StoredProducts};
 use super::lookup::{self, NAMES_FILE};
 use super::models::{DatasetIds, DatasetProduct, FieldMap, ImageListResult};
-use crate::core::mast::errors::{bad_input, classify, internal, OpKind, Operation, NETWORK_MESSAGE_LIMIT};
+use super::ratelimit::is_rate_limit;
+use crate::core::mast::errors::{bad_input, classify, internal, io_cause, OpKind, Operation};
 use crate::core::mast::ids::validate_request_id;
 use crate::core::mast::images::{merge_lists, needs_list_after_redirect, prefer_filter, product_stem, representative_entry};
 use crate::core::mast::jpeg::{dimensions, quick_wcs, scale_wcs};
@@ -48,9 +51,70 @@ pub fn missions(hub: &MastHub) -> Vec<MastMission> {
         .collect()
 }
 
-fn failure(hub: &MastHub, error: &MastError, op: &Operation) -> MastCmdError {
-    let consecutive = hub.limiter().record(error, op, Instant::now());
+fn failure(hub: &MastHub, error: &MastError, op: &Operation, sent: Instant) -> MastCmdError {
+    let consecutive = hub.limiter().record(error, op, sent, Instant::now());
     classify(error, op, consecutive)
+}
+
+const IMAGE_ATTEMPTS: u32 = 2;
+
+struct Tried<T> {
+    result: Result<T, MastError>,
+    first_sent: Instant,
+    last_sent: Instant,
+    attempts: u32,
+}
+
+impl<T> Tried<T> {
+    fn classified(self, hub: &MastHub, op: &Operation) -> Result<T, MastCmdError> {
+        let Tried { result, first_sent, last_sent, attempts } = self;
+        result.map_err(|error| {
+            if worth_retrying(&error) {
+                hub.limiter().note_server_trouble(Instant::now());
+            }
+            let mut failed = failure(hub, &error, op, last_sent);
+            failed.context.attempts = Some(attempts);
+            failed.context.elapsed_ms = Some(elapsed_ms(first_sent));
+            failed
+        })
+    }
+}
+
+fn worth_retrying(error: &MastError) -> bool {
+    match error {
+        MastError::Transport { .. } => true,
+        MastError::Status { status, .. } => *status >= 500 && !is_rate_limit(error),
+        _ => false,
+    }
+}
+
+fn jittered(base: Duration) -> Duration {
+    let spread = (base.as_millis() / 4) as u64;
+    base + Duration::from_millis(rand::random::<u64>() % (spread + 1))
+}
+
+fn may_retry(hub: &MastHub) -> bool {
+    let now = Instant::now();
+    hub.limiter().open_window(now).is_none() && !hub.limiter().server_trouble(now)
+}
+
+async fn with_retry<T, F, Fut>(hub: &MastHub, mut call: F) -> Tried<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, MastError>>,
+{
+    let first_sent = Instant::now();
+    let mut tried = Tried { result: call().await, first_sent, last_sent: first_sent, attempts: 1 };
+    while tried.attempts < IMAGE_ATTEMPTS && tried.result.as_ref().is_err_and(worth_retrying) && may_retry(hub) {
+        tokio::time::sleep(jittered(hub.settings().retry_backoff)).await;
+        if !may_retry(hub) {
+            break;
+        }
+        tried.last_sent = Instant::now();
+        tried.attempts += 1;
+        tried.result = call().await;
+    }
+    tried
 }
 
 pub async fn probe_mission(hub: &MastHub, id: MastMissionId) -> Result<MastMission, MastCmdError> {
@@ -59,13 +123,14 @@ pub async fn probe_mission(hub: &MastHub, id: MastMissionId) -> Result<MastMissi
         Err(error) => return Err(error),
         Ok(endpoint) => {
             let op = Operation::mission(id, OpKind::Probe, "search");
+            let sent = Instant::now();
             match endpoint.search::<FieldMap>(&probe_params()).await {
                 Ok(_) => {
                     hub.limiter().on_success();
                     MastAvailability::Open
                 }
                 Err(error) => {
-                    let classified = failure(hub, &error, &op);
+                    let classified = failure(hub, &error, &op, sent);
                     match classified.code {
                         MastErrorCode::NotDeployed => MastAvailability::NotDeployed,
                         MastErrorCode::Unauthorized => MastAvailability::Token,
@@ -105,9 +170,10 @@ async fn run_search(hub: &MastHub, request_id: &str, query: &MastQuery, refresh:
         }
     }
     let op = Operation::mission(valid.mission, OpKind::Search, "search");
+    let sent = Instant::now();
     let results = match endpoint.search::<FieldMap>(&params).await {
         Ok(results) => results,
-        Err(error) => return Err(failure(hub, &error, &op)),
+        Err(error) => return Err(failure(hub, &error, &op, sent)),
     };
     hub.limiter().on_success();
     let request_body = serde_json::to_value(&params).unwrap_or(Value::Null);
@@ -159,7 +225,7 @@ fn no_thumbnail(op: &Operation) -> MastCmdError {
 }
 
 fn cache_failure(error: &std::io::Error) -> MastCmdError {
-    MastCmdError::new(MastErrorCode::Cache, error.to_string().chars().take(NETWORK_MESSAGE_LIMIT).collect::<String>())
+    MastCmdError::new(MastErrorCode::Cache, io_cause(error))
 }
 
 fn with_operation(mut error: MastCmdError, op: &Operation) -> MastCmdError {
@@ -227,6 +293,8 @@ fn note_list_write(hub: &MastHub, bytes: u64) {
 }
 
 pub fn evict_cache(hub: &MastHub) {
+    let longest = hub.settings().timeout(OpKind::Preview);
+    sweep_stale_temps(hub.cache_root(), std::process::id(), SystemTime::now(), longest);
     for (budget, dir) in [
         (hub.image_budget(), hub.cache_root().join(IMG_DIR)),
         (hub.list_budget(), hub.cache_root().join(LISTS_DIR)),
@@ -247,6 +315,10 @@ struct ImageCall<'a> {
     started: Instant,
 }
 
+fn worth_storing(set: &MastImageSet) -> bool {
+    set.entries.iter().any(|entry| entry.thumbnail_filename.is_some()) && set.entries.iter().any(|entry| entry.preview_filename.is_some())
+}
+
 fn cached_set(hub: &MastHub, id: MastMissionId, dataset: &str) -> Option<MastImageSet> {
     let key = (id, dataset.to_owned());
     if let Some(set) = hub.image_sets().get(&key, Instant::now()) {
@@ -254,7 +326,7 @@ fn cached_set(hub: &MastHub, id: MastMissionId, dataset: &str) -> Option<MastIma
     }
     let path = list_file(hub.cache_root(), id, dataset, ListKind::Images).ok()?;
     let set: MastImageSet = read_stored(&path, LIST_TTL, SystemTime::now())?;
-    if set.mission != id || set.dataset_id != dataset {
+    if set.mission != id || set.dataset_id != dataset || !worth_storing(&set) {
         return None;
     }
     touch(&path);
@@ -264,6 +336,9 @@ fn cached_set(hub: &MastHub, id: MastMissionId, dataset: &str) -> Option<MastIma
 
 fn store_set(hub: &MastHub, set: &MastImageSet) {
     hub.image_sets().insert((set.mission, set.dataset_id.clone()), set.clone(), Instant::now());
+    if !worth_storing(set) {
+        return;
+    }
     let Ok(path) = list_file(hub.cache_root(), set.mission, &set.dataset_id, ListKind::Images) else { return };
     match write_stored(&path, set, SystemTime::now()) {
         Ok(bytes) => note_list_write(hub, bytes),
@@ -271,12 +346,24 @@ fn store_set(hub: &MastHub, set: &MastImageSet) {
     }
 }
 
-async fn fetch_list(hub: &MastHub, endpoint: &MissionEndpoint, dataset: &str, category: &str) -> Result<Vec<ImageListResult>, MastError> {
-    let _permit = hub.list_permits().acquire().await;
-    endpoint.get_image_list(dataset, Some(category)).await
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    Card,
+    Pane,
 }
 
-async fn load_set(hub: &MastHub, id: MastMissionId, dataset: &str) -> Result<(MastImageSet, bool), MastCmdError> {
+async fn fetch_list(hub: &MastHub, endpoint: &MissionEndpoint, dataset: &str, category: &str, caller: Caller) -> Tried<Vec<ImageListResult>> {
+    let _permit = match caller {
+        Caller::Pane => hub.list_permits().acquire().await,
+        Caller::Card => {
+            let _turn = hub.card_list_turn().lock().await;
+            hub.list_permits().acquire().await
+        }
+    };
+    with_retry(hub, move || endpoint.get_image_list(dataset, Some(category))).await
+}
+
+async fn load_set(hub: &MastHub, id: MastMissionId, dataset: &str, caller: Caller) -> Result<(MastImageSet, bool), MastCmdError> {
     if let Some(set) = cached_set(hub, id, dataset) {
         return Ok((set, true));
     }
@@ -284,11 +371,15 @@ async fn load_set(hub: &MastHub, id: MastMissionId, dataset: &str) -> Result<(Ma
     let endpoint = hub.endpoint(id, OpKind::ImageList)?;
     window_check(hub, &op)?;
     let (thumbs, previews) = tokio::join!(
-        fetch_list(hub, &endpoint, dataset, THUMBNAIL_LIST),
-        fetch_list(hub, &endpoint, dataset, PREVIEW_LIST)
+        fetch_list(hub, &endpoint, dataset, THUMBNAIL_LIST, caller),
+        fetch_list(hub, &endpoint, dataset, PREVIEW_LIST, caller)
     );
-    let thumbs = thumbs.map_err(|error| failure(hub, &error, &op))?;
-    let previews = previews.map_err(|error| failure(hub, &error, &op))?;
+    let thumbs = thumbs.classified(hub, &op)?;
+    let previews = match previews.classified(hub, &op) {
+        Ok(previews) => previews,
+        Err(_) if caller == Caller::Card => return Ok((merge_lists(id, dataset, &thumbs, &[]), false)),
+        Err(error) => return Err(error),
+    };
     hub.limiter().on_success();
     let set = merge_lists(id, dataset, &thumbs, &previews);
     store_set(hub, &set);
@@ -320,7 +411,7 @@ async fn run_image_list(hub: &MastHub, id: MastMissionId, dataset_id: &str) -> R
         return Err(not_deployed(&Operation::mission(id, OpKind::ImageList, "get_image_list"), NO_IMAGES));
     }
     hub.client_for(id, OpKind::ImageList)?;
-    let (set, from_cache) = load_set(hub, id, dataset_id).await?;
+    let (set, from_cache) = load_set(hub, id, dataset_id, Caller::Pane).await?;
     Ok(stamp(hub, set, started, from_cache))
 }
 
@@ -384,17 +475,29 @@ impl ImageCall<'_> {
     }
 
     async fn download_thumbnail(&self, endpoint: &MissionEndpoint, filename: Option<&str>, op: &Operation) -> Result<Fetched, MastCmdError> {
-        window_check(self.hub, op)?;
+        self.sent_thumbnail(endpoint, filename, op).await.0
+    }
+
+    async fn sent_thumbnail(&self, endpoint: &MissionEndpoint, filename: Option<&str>, op: &Operation) -> (Result<Fetched, MastCmdError>, bool) {
+        if let Err(error) = window_check(self.hub, op) {
+            return (Err(error), false);
+        }
         let _permit = self.hub.thumb_permits().acquire().await;
-        let fetched = fetch(endpoint, ImageOp::Thumbnail, filename, Some(self.dataset), ImageOp::Thumbnail.cap(), &self.dir, &mut |_, _| {})
-            .await
-            .map_err(|error| failure(self.hub, &error, op))?;
-        self.hub.limiter().on_success();
-        Ok(fetched)
+        let calm = !self.hub.limiter().server_trouble(Instant::now());
+        let (dataset, dir) = (self.dataset, self.dir.as_path());
+        let tried = with_retry(self.hub, move || async move {
+            fetch(endpoint, ImageOp::Thumbnail, filename, Some(dataset), ImageOp::Thumbnail.cap(), dir, &mut |_, _| {}).await
+        })
+        .await;
+        let fetched = tried.classified(self.hub, op);
+        if fetched.is_ok() {
+            self.hub.limiter().on_success();
+        }
+        (fetched, calm)
     }
 
     async fn named_thumbnail(&self, endpoint: &MissionEndpoint, filename: &str, op: &Operation) -> Result<MastImageRef, MastCmdError> {
-        let (set, _) = load_set(self.hub, self.id, self.dataset).await?;
+        let (set, _) = load_set(self.hub, self.id, self.dataset, Caller::Card).await?;
         if !set.entries.iter().any(|entry| entry.thumbnail_filename.as_deref() == Some(filename)) {
             return Err(bad_input("filename", "is not in the thumbnail list of this dataset"));
         }
@@ -406,10 +509,30 @@ impl ImageCall<'_> {
         self.finish(fetched, filename, count, op)
     }
 
+    fn keep_representative_name(&self, name: &str) {
+        match write_atomic(&self.dir.join(REPRESENTATIVE_NAME), name.as_bytes()) {
+            Ok(bytes) => note_image_write(self.hub, bytes),
+            Err(error) => log::warn!("MAST representative name was not kept: {error}"),
+        }
+    }
+
+    fn kept_representative_name(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.dir.join(REPRESENTATIVE_NAME)).ok()?;
+        safe_filename(text.trim()).ok().map(str::to_owned)
+    }
+
     fn cached_representative(&self, set: Option<&MastImageSet>) -> Option<MastImageRef> {
         let count = set.map(|set| set.entries.len());
         if let Some(name) = self.hub.chosen_representative(self.id, self.dataset) {
             if let Some(found) = self.cached_named(&name, count) {
+                touch(&self.dir.join(REPRESENTATIVE_NAME));
+                return Some(found);
+            }
+        }
+        if let Some(name) = self.kept_representative_name() {
+            if let Some(found) = self.cached_named(&name, count) {
+                touch(&self.dir.join(REPRESENTATIVE_NAME));
+                self.hub.remember_representative(self.id, self.dataset, &name);
                 return Some(found);
             }
         }
@@ -430,29 +553,49 @@ impl ImageCall<'_> {
         }
         let known = cached.as_ref().map(|set| set.entries.len());
         let mut first_error = None;
+        let mut stand_in = None;
         if level_class != MastLevelClass::Exposure && !self.hub.fileset_failed(self.id, level_class) {
-            match self.download_thumbnail(endpoint, None, op).await {
+            let (sent, calm) = self.sent_thumbnail(endpoint, None, op).await;
+            match sent {
                 Ok(fetched) => match served_name(&fetched.download.final_url) {
                     Some(name) if self.id == MastMissionId::Hst && needs_list_after_redirect(&name) => {
-                        if let Err(error) = self.commit(fetched, &name, op) {
-                            log::warn!("MAST exposure thumbnail was not kept: {}", error.message);
+                        let bytes = fetched.download.received;
+                        match self.commit(fetched, &name, op) {
+                            Ok((path, head)) => stand_in = self.image_ref(&path, &head, bytes, &name, None, false),
+                            Err(error) => log::warn!("MAST exposure thumbnail was not kept: {}", error.message),
                         }
                     }
                     Some(name) => {
                         let found = self.finish(fetched, &name, known, op)?;
                         self.hub.remember_representative(self.id, self.dataset, &name);
+                        self.keep_representative_name(&name);
                         return Ok(found);
                     }
                     None => return self.finish(fetched, REPRESENTATIVE_STEM, known, op),
                 },
-                Err(error) if matches!(error.code, MastErrorCode::NoImage | MastErrorCode::NotImage) => {
-                    self.hub.remember_fileset_failure(self.id, level_class);
+                Err(error) if falls_back_to_list(&error, calm) && self.hub.limiter().open_window(Instant::now()).is_none() => {
+                    if error.code == MastErrorCode::NotImage {
+                        self.hub.remember_fileset_failure(self.id, level_class);
+                    }
                     first_error = Some(error);
                 }
                 Err(error) => return Err(error),
             }
         }
-        let set = hinted(self.hub, load_set(self.hub, self.id, self.dataset).await?.0);
+        match (self.listed_representative(endpoint, first_error, op).await, stand_in) {
+            (Err(error), Some(kept)) => {
+                log::warn!("MAST representative thumbnail fell back to the exposure thumbnail: {}", error.message);
+                Ok(kept)
+            }
+            (listed, _) => listed,
+        }
+    }
+
+    async fn listed_representative(&self, endpoint: &MissionEndpoint, first_error: Option<MastCmdError>, op: &Operation) -> Result<MastImageRef, MastCmdError> {
+        let set = match load_set(self.hub, self.id, self.dataset, Caller::Card).await {
+            Ok((set, _)) => hinted(self.hub, set),
+            Err(error) => return Err(first_cause(first_error, error)),
+        };
         let count = Some(set.entries.len());
         let Some(name) = representative_entry(&set).and_then(|entry| entry.thumbnail_filename.clone()) else {
             return Err(first_error.unwrap_or_else(|| no_thumbnail(op)));
@@ -488,13 +631,14 @@ impl ImageCall<'_> {
         if let Some((path, head)) = self.cached_original(filename) {
             return Ok((path, head, false));
         }
+        let sent = Instant::now();
         let fetched = fetch(endpoint, ImageOp::Preview, Some(filename), Some(self.dataset), ImageOp::Preview.cap(), &self.dir, &mut |received, total| {
             if let Some(event) = throttle.download(received, total, Instant::now()) {
                 progress(event);
             }
         })
         .await
-        .map_err(|error| failure(self.hub, &error, op))?;
+        .map_err(|error| failure(self.hub, &error, op, sent))?;
         self.hub.limiter().on_success();
         let (path, head) = self.commit(fetched, filename, op)?;
         Ok((path, head, true))
@@ -512,6 +656,21 @@ impl ImageCall<'_> {
         let written = job.await.map_err(|_| internal())?.map_err(|error| with_operation(error, op))?;
         note_image_write(self.hub, written);
         Ok(())
+    }
+}
+
+fn falls_back_to_list(error: &MastCmdError, calm: bool) -> bool {
+    match error.code {
+        MastErrorCode::NoImage | MastErrorCode::NotImage => true,
+        MastErrorCode::Server => calm,
+        _ => false,
+    }
+}
+
+fn first_cause(first: Option<MastCmdError>, listed: MastCmdError) -> MastCmdError {
+    match first {
+        Some(first) if first.code == MastErrorCode::Server || listed.code == MastErrorCode::NoImage => first,
+        _ => listed,
     }
 }
 
@@ -553,11 +712,21 @@ async fn run_thumbnail(
         return Err(not_deployed(&op, NO_IMAGES));
     }
     let endpoint = hub.endpoint(id, OpKind::Thumbnail)?;
+    let mut flight = hub.thumbnail_flight(id, dataset_id, filename).await;
+    if let Some(answer) = flight.earlier_failure() {
+        return Err(answer);
+    }
     let call = ImageCall { hub, request_id, id, dataset: dataset_id, dir, started };
-    match filename {
+    let result = match filename {
         Some(name) => call.named_thumbnail(&endpoint, name, &op).await,
         None => call.representative_thumbnail(&endpoint, level_class, &op).await,
+    };
+    if let Err(error) = &result {
+        if error.code != MastErrorCode::Cancelled {
+            flight.share_failure(error);
+        }
     }
+    result
 }
 
 fn prepared_matches(path: &Path, width: u32, height: u32) -> bool {
@@ -595,7 +764,7 @@ async fn run_preview(
     }
     let endpoint = hub.endpoint(id, OpKind::Preview)?;
     let call = ImageCall { hub, request_id, id, dataset: dataset_id, dir, started };
-    let (set, _) = load_set(hub, id, dataset_id).await?;
+    let (set, _) = load_set(hub, id, dataset_id, Caller::Pane).await?;
     if !set.entries.iter().any(|entry| entry.preview_filename.as_deref() == Some(filename)) {
         return Err(bad_input("filename", "is not in the preview list of this dataset"));
     }
@@ -698,6 +867,9 @@ fn cached_products(hub: &MastHub, id: MastMissionId, dataset: &str) -> Option<Ma
 fn store_products(hub: &MastHub, list: &MastProductList, stored_at: SystemTime) {
     let Some(dataset) = list.dataset_ids.first() else { return };
     hub.product_lists().insert((list.mission, dataset.clone()), (list.clone(), stored_at + LIST_TTL), Instant::now());
+    if list.products.is_empty() {
+        return;
+    }
     let Ok(path) = list_file(hub.cache_root(), list.mission, dataset, ListKind::Products) else { return };
     match write_stored(&path, list, stored_at) {
         Ok(bytes) => note_list_write(hub, bytes),
@@ -738,10 +910,11 @@ async fn run_products(hub: &MastHub, request_id: &str, id: MastMissionId, datase
     }
     let mut listing = Vec::new();
     for chunk in ids.chunks(PRODUCT_CHUNK) {
+        let sent = Instant::now();
         let page = endpoint
             .post_list_products::<DatasetProduct>(&DatasetIds::new(chunk.iter().cloned()))
             .await
-            .map_err(|error| failure(hub, &error, &op))?;
+            .map_err(|error| failure(hub, &error, &op, sent))?;
         listing.extend(page.products);
     }
     hub.limiter().on_success();
@@ -778,21 +951,23 @@ pub fn cache_info(hub: &MastHub) -> MastCacheInfo {
 
 pub fn cache_clear(hub: &MastHub, kind: MastCacheKind) -> Result<MastCacheInfo, MastCmdError> {
     let root = hub.cache_root();
-    let failed = |error: std::io::Error| cache_failure(&error);
-    let freed = match kind {
-        MastCacheKind::Images => remove_tree(&root.join(IMG_DIR)).map_err(failed)?,
-        MastCacheKind::Lists => remove_tree(&root.join(LISTS_DIR)).map_err(failed)?,
-        MastCacheKind::Names => remove_file(&root.join(NAMES_FILE)).map_err(failed)?,
-        MastCacheKind::All => remove_tree(root).map_err(failed)?,
+    let (freed, error) = match kind {
+        MastCacheKind::Images => remove_tree(&root.join(IMG_DIR)),
+        MastCacheKind::Lists => remove_tree(&root.join(LISTS_DIR)),
+        MastCacheKind::Names => match remove_file(&root.join(NAMES_FILE)) {
+            Ok(freed) => (freed, None),
+            Err(error) => (MastCacheInfo::default(), Some(error)),
+        },
+        MastCacheKind::All => remove_tree(root),
     };
     if matches!(kind, MastCacheKind::Images | MastCacheKind::All) {
         hub.forget_images();
-        hub.image_budget().reset();
+        hub.image_budget().reset(dir_info(&root.join(IMG_DIR)).bytes);
     }
     if matches!(kind, MastCacheKind::Lists | MastCacheKind::All) {
         hub.image_sets().clear();
         hub.product_lists().clear();
-        hub.list_budget().reset();
+        hub.list_budget().reset(dir_info(&root.join(LISTS_DIR)).bytes);
     }
     if matches!(kind, MastCacheKind::Names | MastCacheKind::All) {
         hub.names().clear_negative();
@@ -800,7 +975,14 @@ pub fn cache_clear(hub: &MastHub, kind: MastCacheKind) -> Result<MastCacheInfo, 
     if kind == MastCacheKind::All {
         hub.searches().clear();
     }
-    Ok(freed)
+    match error {
+        Some(error) if freed.files == 0 => Err(cache_failure(&error)),
+        Some(error) => {
+            log::warn!("MAST cache was cleared in part: {error}");
+            Ok(freed)
+        }
+        None => Ok(freed),
+    }
 }
 
 #[cfg(test)]
@@ -818,7 +1000,7 @@ mod tests {
     use crate::infra::mast::api::MissionEndpoint;
     use crate::infra::mast::lookup::NAMES_FILE;
     use crate::infra::mast::models::{SearchParams, SearchResults};
-    use crate::infra::mast::settings::{MastSettings, ENV_MAST_TIMEOUT_MS, ENV_MAST_URL};
+    use crate::infra::mast::settings::{MastSettings, ENV_MAST_RETRY_MS, ENV_MAST_TIMEOUT_MS, ENV_MAST_URL};
     use crate::core::mast::types::{ProgressStage, WcsOrientation};
     use crate::infra::mast::testing::{form_value, serve_routes, synthetic_jpeg, Recorded, Route, TestServer};
     use serde_json::{json, Value};
@@ -830,14 +1012,25 @@ mod tests {
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mast").join(name)).unwrap()
     }
 
-    fn hub_for(server: &TestServer, dir: &Path) -> Arc<MastHub> {
+    const RETRY_MS: u64 = 50;
+
+    fn hub_with(server: &TestServer, dir: &Path, timeout_ms: u64, retry_ms: u64) -> Arc<MastHub> {
         let base = server.base.clone();
         let settings = MastSettings::from_lookup(move |name| match name {
             ENV_MAST_URL => Some(base.clone()),
-            ENV_MAST_TIMEOUT_MS => Some("5000".to_owned()),
+            ENV_MAST_TIMEOUT_MS => Some(timeout_ms.to_string()),
+            ENV_MAST_RETRY_MS => Some(retry_ms.to_string()),
             _ => None,
         });
         Arc::new(MastHub::new(settings, dir.to_path_buf()).unwrap())
+    }
+
+    fn hub_with_timeout(server: &TestServer, dir: &Path, timeout_ms: u64) -> Arc<MastHub> {
+        hub_with(server, dir, timeout_ms, RETRY_MS)
+    }
+
+    fn hub_for(server: &TestServer, dir: &Path) -> Arc<MastHub> {
+        hub_with_timeout(server, dir, 5000)
     }
 
     fn live_hub(dir: &Path) -> Arc<MastHub> {
@@ -1327,6 +1520,108 @@ mod tests {
         assert_eq!(server.requests().len(), before);
     }
 
+    fn images_file(root: &Path, mission: &str, dataset: &str) -> std::path::PathBuf {
+        root.join("lists").join(mission).join(format!("{dataset}.images.json"))
+    }
+
+    #[tokio::test]
+    async fn blank_image_list_body_is_an_error_and_is_not_stored() {
+        let server = serve_routes(vec![
+            Route::get("/search/hst/api/v0.1/get_image_list?fileset_name=EMPTY1&category=THUMBNAIL").bytes(Vec::new()),
+            Route::get("/search/hst/api/v0.1/get_image_list?fileset_name=EMPTY1&category=PREVIEW").bytes(Vec::new()),
+            Route::get("/search/hst/api/v0.1/get_image_list?fileset_name=EMPTY2&category=").status(204),
+            Route::get("/search/hst/api/v0.1/get_image_list?fileset_name=EMPTY3&category=").bytes(b" 
+ ".to_vec()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        for dataset in ["EMPTY1", "EMPTY2", "EMPTY3"] {
+            let error = image_list(&hub, MastMissionId::Hst, dataset).await.unwrap_err();
+            assert_eq!(error.code, MastErrorCode::Decode, "{dataset}");
+            assert_eq!(error.message, "empty answer", "{dataset}");
+            assert_eq!(error.context.operation.as_deref(), Some("search/hst/api/v0.1/get_image_list"), "{dataset}");
+            assert!(!images_file(dir.path(), "hst", dataset).exists(), "{dataset}");
+        }
+        let card = thumbnail(&hub, "g1:thumb:e", MastMissionId::Hst, "EMPTY1", MastLevelClass::Exposure, None).await.unwrap_err();
+        assert_eq!(card.code, MastErrorCode::Decode);
+        assert_eq!(server.count("/search/hst/api/v0.1/get_image_list?fileset_name=EMPTY1"), 4, "a blank answer is never cached");
+        assert!(!dir.path().join("lists").exists());
+    }
+
+    #[tokio::test]
+    async fn empty_image_lists_stay_in_memory() {
+        let mut routes = vec![
+            list_route("hst", "NONE1", "THUMBNAIL", "[]".into()),
+            list_route("hst", "NONE1", "PREVIEW", "[]".into()),
+            list_route("hst", "HALF1", "THUMBNAIL", fixture(&format!("il_{ASSOCIATION}_THUMBNAIL.json")).replace(ASSOCIATION, "HALF1")),
+            list_route("hst", "HALF1", "PREVIEW", "[]".into()),
+        ];
+        routes.extend(hst_list_routes());
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let none = image_list(&hub, MastMissionId::Hst, "NONE1").await.unwrap();
+        assert!(none.entries.is_empty());
+        assert!(!none.from_cache);
+        let half = image_list(&hub, MastMissionId::Hst, "HALF1").await.unwrap();
+        assert!(!half.entries.is_empty());
+        for dataset in ["NONE1", "HALF1"] {
+            assert!(!images_file(dir.path(), "hst", dataset).exists(), "{dataset}: a set with an empty list stays off the disk");
+            assert!(image_list(&hub, MastMissionId::Hst, dataset).await.unwrap().from_cache, "{dataset}: kept for the session");
+        }
+        assert_eq!(server.count("/search/hst/api/v0.1/get_image_list"), 4);
+        let full = image_list(&hub, MastMissionId::Hst, ASSOCIATION).await.unwrap();
+        assert!(images_file(dir.path(), "hst", ASSOCIATION).is_file());
+
+        let legacy = merge_lists(MastMissionId::Hst, "OLD1", &[], &[]);
+        write_stored(&images_file(dir.path(), "hst", "OLD1"), &legacy, SystemTime::now()).unwrap();
+        let restarted = hub_for(&server, dir.path());
+        for dataset in ["NONE1", "HALF1"] {
+            assert!(!image_list(&restarted, MastMissionId::Hst, dataset).await.unwrap().from_cache, "{dataset}");
+        }
+        assert_eq!(server.count("/search/hst/api/v0.1/get_image_list"), 10);
+        assert!(image_list(&restarted, MastMissionId::Hst, ASSOCIATION).await.unwrap().from_cache);
+        assert_eq!(image_list(&restarted, MastMissionId::Hst, ASSOCIATION).await.unwrap().entries, full.entries);
+        let old = image_list(&restarted, MastMissionId::Hst, "OLD1").await.unwrap_err();
+        assert_eq!(old.code, MastErrorCode::Server, "an empty set an older build stored is fetched again");
+        assert_eq!(server.count("/search/hst/api/v0.1/get_image_list?fileset_name=OLD1"), 4);
+    }
+
+    #[tokio::test]
+    async fn pane_list_is_not_queued_behind_card_lists() {
+        let wave = Duration::from_millis(500);
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let cards = ["jw02739001002_02101_00002", "jw02739001002_02101_00003", "jw02739001002_02101_00004", "jw02739001002_02101_00005"];
+        let pane = "jw02739001002_02101_00006";
+        let mut routes = vec![Route::get("/search/jwst/api/v0.1/get_image_thumbnail?filename=").bytes(thumb.clone())];
+        for dataset in cards.iter().chain([&pane]) {
+            for category in ["THUMBNAIL", "PREVIEW"] {
+                routes.push(list_route("jwst", dataset, category, fixture(&format!("il_{EXPOSURE}_{category}.json"))).delay(wave));
+            }
+        }
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let started: Vec<_> = cards
+            .iter()
+            .map(|dataset| {
+                let (hub, dataset) = (Arc::clone(&hub), dataset.to_string());
+                tokio::spawn(async move { thumbnail(&hub, "g1:thumb:x", MastMissionId::Jwst, &dataset, MastLevelClass::Exposure, None).await })
+            })
+            .collect();
+        server.wait_for(|r| r.iter().filter(|x| x.target.contains("get_image_list")).count() >= 2).await;
+        let set = image_list(&hub, MastMissionId::Jwst, pane).await.unwrap();
+        assert_eq!(set.entries.len(), 60);
+        let lists: Vec<String> = server.requests().iter().filter(|r| r.target.contains("get_image_list")).map(|r| r.target.clone()).collect();
+        let last_pane = lists.iter().rposition(|t| t.contains(pane)).unwrap();
+        assert!(last_pane <= 5, "the pane list went out behind {last_pane} card lists: {lists:#?}");
+        for card in started {
+            assert!(card.await.unwrap().is_ok());
+        }
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_list"), 10);
+    }
+
     #[tokio::test]
     async fn representative_jwst_l3_uses_fileset_only() {
         let thumb = fixture_bytes("t_clear-f187n.bin");
@@ -1367,7 +1662,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn representative_falls_back_to_list_on_401_and_remembers() {
+    async fn representative_falls_back_to_list_on_401_without_remembering() {
         let thumb = fixture_bytes("t_clear-f187n.bin");
         let mut routes = vec![
             Route::get("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name=")
@@ -1390,8 +1685,7 @@ mod tests {
         assert!(first.path.ends_with("jw02739-o001_t001_nircam_clear-f090w_i2d_thumb.jpg"), "{}", first.path);
         assert_cache_path(&first.path, dir.path());
         assert_eq!(first.image_count, Some(6));
-        assert!(hub.fileset_failed(MastMissionId::Jwst, MastLevelClass::Combined));
-        assert!(!hub.fileset_failed(MastMissionId::Hst, MastLevelClass::Combined));
+        assert!(!hub.fileset_failed(MastMissionId::Jwst, MastLevelClass::Combined), "a 401 is about this dataset, not the level class");
         let named = server.requests().into_iter().find(|r| r.target.contains("?filename=")).unwrap();
         assert_eq!(
             named.target,
@@ -1402,7 +1696,7 @@ mod tests {
         let second = thumbnail(&hub, "g1:thumb:b", MastMissionId::Jwst, MIRI, MastLevelClass::Combined, None).await.unwrap();
         assert_eq!(second.filename, "jw02739-o002_t001_miri_clear-f187n_i2d_thumb.jpg", "the list path follows the row filter");
         assert_eq!(second.image_count, Some(6));
-        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name="), 1, "the failure is remembered");
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name="), 2, "each dataset tries the fileset-only call");
         assert_eq!(server.count("/search/jwst/api/v0.1/get_image_list"), 4);
         let empty = thumbnail(&hub, "g1:thumb:c", MastMissionId::Jwst, "jw02739-o003_t002_nircam", MastLevelClass::Combined, None)
             .await
@@ -1411,7 +1705,229 @@ mod tests {
         let exposure = thumbnail(&hub, "g1:thumb:d", MastMissionId::Jwst, EXPOSURE, MastLevelClass::Exposure, None).await.unwrap();
         assert_eq!(exposure.filename, "jw02739001002_02101_00001_nrcalong_cal_thumb.jpg");
         assert_eq!(exposure.image_count, Some(60));
-        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name="), 1);
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name="), 3);
+    }
+
+    #[tokio::test]
+    async fn representative_falls_back_to_the_list_after_a_fileset_5xx() {
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let fileset = format!("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name={L3}");
+        let mut routes = vec![
+            Route::get(&fileset).status(500).header("Content-Type", "text/plain; charset=utf-8").bytes(b"Internal Server Error".to_vec()),
+            Route::get("/search/jwst/api/v0.1/get_image_thumbnail?filename=").bytes(thumb.clone()),
+        ];
+        routes.extend(l3_list_routes(L3));
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let found = thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, None).await.unwrap();
+        assert_eq!(found.filename, "jw02739-o001_t001_nircam_clear-f090w_i2d_thumb.jpg");
+        assert_eq!(found.image_count, Some(6));
+        assert!(!found.from_cache);
+        let kinds: Vec<&str> = server
+            .requests()
+            .iter()
+            .map(|r| if r.target.starts_with(&fileset) { "fileset" } else if r.target.contains("get_image_list") { "list" } else { "named" })
+            .collect();
+        assert_eq!(kinds, ["fileset", "fileset", "list", "list", "named"]);
+        assert!(!hub.fileset_failed(MastMissionId::Jwst, MastLevelClass::Combined), "a 500 is about this request, not the level class");
+    }
+
+    #[tokio::test]
+    async fn a_fileset_timeout_is_shown_without_a_retry_or_a_list_fallback() {
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let fileset = format!("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name={L3}");
+        let mut routes = vec![
+            Route::get(&fileset).delay(Duration::from_secs(3)).bytes(thumb.clone()),
+            Route::get("/search/jwst/api/v0.1/get_image_thumbnail?filename=").bytes(thumb.clone()),
+        ];
+        routes.extend(l3_list_routes(L3));
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_with_timeout(&server, dir.path(), 300);
+        let failed = thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, None).await.unwrap_err();
+        assert_eq!(failed.code, MastErrorCode::Timeout);
+        assert_eq!(failed.context.timeout_sec, Some(1));
+        assert_eq!(failed.context.attempts, Some(1));
+        assert_eq!(failed.context.operation.as_deref(), Some("search/jwst/api/v0.1/get_image_thumbnail"));
+        assert_eq!(server.count(&fileset), 1);
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_list"), 0);
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_thumbnail?filename="), 0);
+    }
+
+    #[tokio::test]
+    async fn a_5xx_outage_stops_retries_and_list_fallbacks_for_the_next_cards() {
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let fileset = "/search/jwst/api/v0.1/get_image_thumbnail?fileset_name=";
+        let lists = "/search/jwst/api/v0.1/get_image_list";
+        let server = serve_routes(vec![
+            Route::get(fileset).times(3).status(500).header("Content-Type", "text/plain; charset=utf-8").bytes(b"Internal Server Error".to_vec()),
+            Route::get(fileset).bytes(thumb.clone()),
+            Route::get(lists).status(500).json(r#"{"detail":"image index down"}"#),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let first = thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, None).await.unwrap_err();
+        assert_eq!(first.code, MastErrorCode::Server);
+        assert_eq!((server.count(fileset), server.count(lists)), (2, 2), "the first card retries once and tries the lists once");
+
+        let second = thumbnail(&hub, "g1:thumb:b", MastMissionId::Jwst, MIRI, MastLevelClass::Combined, None).await.unwrap_err();
+        assert_eq!(second.code, MastErrorCode::Server);
+        assert_eq!(second.context.attempts, Some(1));
+        assert_eq!((server.count(fileset), server.count(lists)), (3, 2), "during the outage a card costs one request");
+
+        let recovered = thumbnail(&hub, "g1:thumb:c", MastMissionId::Jwst, "jw02739-o003_t002_nircam", MastLevelClass::Combined, None).await.unwrap();
+        assert!(!recovered.from_cache);
+        assert!(!hub.limiter().server_trouble(Instant::now()), "an answer ends the outage");
+    }
+
+    #[tokio::test]
+    async fn a_failed_list_fallback_reports_the_fileset_error() {
+        let server = serve_routes(vec![
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name={L3}")).status(500).json(r#"{"detail":"fileset index down"}"#),
+            Route::get("/search/jwst/api/v0.1/get_image_list").status(502).json(r#"{"detail":"list index down"}"#),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let failed = thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, None).await.unwrap_err();
+        assert_eq!(failed.code, MastErrorCode::Server);
+        assert_eq!(failed.context.status, Some(500));
+        assert_eq!(failed.context.detail.as_deref(), Some("fileset index down"));
+        assert_eq!(failed.context.operation.as_deref(), Some("search/jwst/api/v0.1/get_image_thumbnail"));
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_list"), 2, "the list fallback still ran");
+    }
+
+    #[tokio::test]
+    async fn card_thumbnail_survives_a_failed_preview_list() {
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let server = serve_routes(vec![
+            list_route("jwst", EXPOSURE, "THUMBNAIL", fixture(&format!("il_{EXPOSURE}_THUMBNAIL.json"))),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_list?fileset_name={EXPOSURE}&category=PREVIEW"))
+                .status(500)
+                .json(r#"{"detail":"preview index unavailable"}"#),
+            Route::get("/search/jwst/api/v0.1/get_image_thumbnail?filename=").bytes(thumb.clone()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let card = thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, EXPOSURE, MastLevelClass::Exposure, None).await.unwrap();
+        assert_eq!(card.filename, "jw02739001002_02101_00001_nrcalong_cal_thumb.jpg");
+        assert_eq!(card.image_count, Some(60));
+        let strip_name = "jw02739001002_02101_00001_nrcb1_cal_thumb.jpg";
+        let strip = thumbnail(&hub, "g1:thumb:b", MastMissionId::Jwst, EXPOSURE, MastLevelClass::Exposure, Some(strip_name)).await.unwrap();
+        assert_eq!(strip.filename, strip_name);
+        let pane = image_list(&hub, MastMissionId::Jwst, EXPOSURE).await.unwrap_err();
+        assert_eq!(pane.code, MastErrorCode::Server);
+        assert_eq!(pane.context.status, Some(500));
+        assert_eq!(pane.context.detail.as_deref(), Some("preview index unavailable"));
+        assert!(!images_file(dir.path(), "jwst", EXPOSURE).exists());
+        assert!(hub.image_sets().is_empty(), "a set missing its preview list is not kept");
+    }
+
+    #[tokio::test]
+    async fn hst_redirect_thumbnail_is_served_from_disk_after_restart() {
+        let thumb = fixture_bytes("thumb_hst.bin");
+        let server = serve_routes(vec![
+            Route::get("/search/hst/api/v0.1/get_image_thumbnail?fileset_name=IDNM20010")
+                .status(307)
+                .header("Location", "/s3/hst/public/idnm/idnm20010/idnm20010_drz_thumb.jpg"),
+            Route::get("/s3/hst/public/idnm/idnm20010/idnm20010_drz_thumb.jpg").header("Content-Type", "image/jpeg").bytes(thumb.clone()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let first = thumbnail(&hub, "g1:thumb:IDNM20010", MastMissionId::Hst, "IDNM20010", MastLevelClass::Unknown, None).await.unwrap();
+        assert_eq!(first.filename, "idnm20010_drz_thumb.jpg");
+        assert!(!first.from_cache);
+        let before = server.requests().len();
+        assert_eq!(before, 2);
+
+        let restarted = hub_for(&server, dir.path());
+        let again = thumbnail(&restarted, "g3:thumb:IDNM20010", MastMissionId::Hst, "IDNM20010", MastLevelClass::Unknown, None).await.unwrap();
+        assert!(again.from_cache);
+        assert_eq!(again.filename, "idnm20010_drz_thumb.jpg");
+        assert_eq!(again.path, first.path);
+        assert_eq!(server.requests().len(), before, "the redirect name survives a restart");
+
+        let folder = dataset_folder(dir.path(), "hst", "IDNM20010");
+        std::fs::write(folder.join("_representative.name"), "../escape_thumb.jpg").unwrap();
+        let tampered = hub_for(&server, dir.path());
+        let refetched = thumbnail(&tampered, "g4:thumb:IDNM20010", MastMissionId::Hst, "IDNM20010", MastLevelClass::Unknown, None).await.unwrap();
+        assert!(!refetched.from_cache, "an unusable name is ignored");
+        assert_eq!(std::fs::read_to_string(folder.join("_representative.name")).unwrap(), "idnm20010_drz_thumb.jpg");
+
+        std::fs::remove_file(folder.join("idnm20010_drz_thumb.jpg")).unwrap();
+        let evicted = hub_for(&server, dir.path());
+        let downloaded = thumbnail(&evicted, "g5:thumb:IDNM20010", MastMissionId::Hst, "IDNM20010", MastLevelClass::Unknown, None).await.unwrap();
+        assert!(!downloaded.from_cache, "a name without its file falls through to MAST");
+        assert_eq!(server.count("/search/hst/api/v0.1/get_image_thumbnail?fileset_name=IDNM20010"), 3);
+    }
+
+    #[tokio::test]
+    async fn serving_a_kept_representative_name_keeps_it_fresh_for_eviction() {
+        let thumb = fixture_bytes("thumb_hst.bin");
+        let server = serve_routes(vec![
+            Route::get("/search/hst/api/v0.1/get_image_thumbnail?fileset_name=IDNM20010")
+                .status(307)
+                .header("Location", "/s3/hst/public/idnm/idnm20010/idnm20010_drz_thumb.jpg"),
+            Route::get("/s3/hst/public/idnm/idnm20010/idnm20010_drz_thumb.jpg").header("Content-Type", "image/jpeg").bytes(thumb.clone()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        thumbnail(&hub, "g1:thumb:IDNM20010", MastMissionId::Hst, "IDNM20010", MastLevelClass::Unknown, None).await.unwrap();
+        let sidecar = dataset_folder(dir.path(), "hst", "IDNM20010").join("_representative.name");
+        let stale = SystemTime::now() - Duration::from_secs(3 * 24 * 3600);
+        std::fs::File::options().write(true).open(&sidecar).unwrap().set_modified(stale).unwrap();
+        let restarted = hub_for(&server, dir.path());
+        let again = thumbnail(&restarted, "g2:thumb:IDNM20010", MastMissionId::Hst, "IDNM20010", MastLevelClass::Unknown, None).await.unwrap();
+        assert!(again.from_cache);
+        let modified = std::fs::metadata(&sidecar).unwrap().modified().unwrap();
+        assert!(modified > stale + Duration::from_secs(24 * 3600), "the name file keeps its old age and is evicted before its image");
+    }
+
+    #[tokio::test]
+    async fn hst_redirect_keeps_the_raw_thumbnail_when_the_list_fails() {
+        let thumb = fixture_bytes("thumb_hst.bin");
+        let server = serve_routes(vec![
+            Route::get(&format!("/search/hst/api/v0.1/get_image_thumbnail?fileset_name={ASSOCIATION}"))
+                .status(307)
+                .header("Location", "/s3/hst/public/ick9/ick909c1q/ick909c1q_raw_thumb.jpg"),
+            Route::get("/s3/hst/public/ick9/ick909c1q/ick909c1q_raw_thumb.jpg").header("Content-Type", "image/jpeg").bytes(thumb.clone()),
+            Route::get("/search/hst/api/v0.1/get_image_list").status(502).html("<html>bad gateway</html>"),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let kept = thumbnail(&hub, "g1:thumb:ICK909030", MastMissionId::Hst, ASSOCIATION, MastLevelClass::Unknown, None).await.unwrap();
+        assert_eq!(kept.filename, "ick909c1q_raw_thumb.jpg");
+        assert_eq!((kept.width, kept.height), (117, 128));
+        assert!(!kept.from_cache);
+        assert_cache_path(&kept.path, dir.path());
+        assert_eq!(hub.chosen_representative(MastMissionId::Hst, ASSOCIATION), None, "an exposure thumbnail is a stand-in, not the representative");
+        assert_eq!(files_under(&dataset_folder(dir.path(), "hst", ASSOCIATION)), ["ick909c1q_raw_thumb.jpg"]);
+        assert_eq!(server.count("/search/hst/api/v0.1/get_image_list"), 4);
+    }
+
+    #[tokio::test]
+    async fn representative_remembers_a_non_image_fileset_answer() {
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let mut routes = vec![
+            Route::get("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name=").html("<html>not an image</html>"),
+            Route::get("/search/jwst/api/v0.1/get_image_thumbnail?filename=").bytes(thumb.clone()),
+        ];
+        routes.extend(l3_list_routes(L3));
+        routes.extend(l3_list_routes(MIRI));
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, None).await.unwrap();
+        assert!(hub.fileset_failed(MastMissionId::Jwst, MastLevelClass::Combined));
+        assert!(!hub.fileset_failed(MastMissionId::Hst, MastLevelClass::Combined));
+        thumbnail(&hub, "g1:thumb:b", MastMissionId::Jwst, MIRI, MastLevelClass::Combined, None).await.unwrap();
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name="), 1, "the failure is remembered");
     }
 
     #[tokio::test]
@@ -1453,7 +1969,7 @@ mod tests {
         assert!(drz.path.ends_with("idnm20010_drz_thumb.jpg"), "{}", drz.path);
         assert_eq!(drz.image_count, None);
         assert_eq!(server.count("/search/hst/api/v0.1/get_image_list?fileset_name=IDNM20010"), 0);
-        assert_eq!(files_under(&dataset_folder(dir.path(), "hst", "IDNM20010")), ["idnm20010_drz_thumb.jpg"]);
+        assert_eq!(files_under(&dataset_folder(dir.path(), "hst", "IDNM20010")), ["_representative.name", "idnm20010_drz_thumb.jpg"]);
         let before = server.requests().len();
         let cached = thumbnail(&hub, "g2:thumb:IDNM20010", MastMissionId::Hst, "IDNM20010", MastLevelClass::Unknown, None).await.unwrap();
         assert!(cached.from_cache);
@@ -1462,6 +1978,200 @@ mod tests {
         assert!(again.from_cache);
         assert_eq!(again.filename, "ick909030_drc_thumb.jpg");
         assert_eq!(server.requests().len(), before);
+    }
+
+    const NGINX_504: &str = "<html><head><title>504 Gateway Time-out</title></head><body><center><h1>504 Gateway Time-out</h1></center></body></html>";
+
+    #[tokio::test]
+    async fn thumbnails_and_image_lists_retry_once_after_a_5xx_or_a_dropped_connection() {
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let broken = "jw02739-o001_t001_nircam_clear-f187n_i2d_thumb.jpg";
+        let slow = "jw02739-o001_t001_nircam_clear-f200w_i2d_thumb.jpg";
+        let dropped = "jw02739-o001_t001_nircam_clear-f335m_i2d_thumb.jpg";
+        let fileset = format!("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name={L3}");
+        let mut routes = vec![
+            Route::get(&fileset).status(500).times(1).html("<html>busy</html>"),
+            Route::get(&fileset).bytes(thumb.clone()),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={broken}")).status(502).json(r#"{"detail":"Bad Gateway"}"#),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={slow}")).delay(Duration::from_secs(3)).bytes(thumb.clone()),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={dropped}")).times(1).close_without_answer(),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={dropped}")).bytes(thumb.clone()),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_list?fileset_name={MIRI}&category=THUMBNAIL")).status(504).times(1).html(NGINX_504),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_preview?filename=jw02739-o001_t001_nircam_clear-f090w_i2d.jpg")).status(500).html("<html>x</html>"),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename=jw02739-o001_t001_nircam_clear-f444w_i2d_thumb.jpg"))
+                .status(404)
+                .json(r#"{"detail":"Image not found"}"#),
+        ];
+        routes.extend(l3_list_routes(L3));
+        routes.extend(l3_list_routes(MIRI));
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+
+        let recovered = thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, None).await.unwrap();
+        assert!(!recovered.from_cache);
+        assert_eq!(server.count(&fileset), 2, "one retry after the 500");
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_list"), 0);
+
+        let listed = image_list(&hub, MastMissionId::Jwst, MIRI).await.unwrap();
+        assert_eq!(listed.entries.len(), 6);
+        assert_eq!(server.count(&format!("/search/jwst/api/v0.1/get_image_list?fileset_name={MIRI}&category=THUMBNAIL")), 2, "one retry after the 504");
+
+        let started = Instant::now();
+        let failed = thumbnail(&hub, "g1:thumb:b", MastMissionId::Jwst, L3, MastLevelClass::Combined, Some(broken)).await.unwrap_err();
+        assert_eq!(failed.code, MastErrorCode::Server);
+        assert_eq!(failed.context.status, Some(502));
+        assert_eq!(failed.context.detail.as_deref(), Some("Bad Gateway"));
+        assert_eq!(failed.context.attempts, Some(2));
+        let elapsed = failed.context.elapsed_ms.expect("elapsedMs on a retried failure");
+        assert!(elapsed >= RETRY_MS && elapsed <= elapsed_ms(started), "{elapsed}");
+        assert_eq!(server.count(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={broken}")), 2);
+        let value = serde_json::to_value(&failed).unwrap();
+        assert_eq!(value["context"]["attempts"], json!(2));
+        assert_eq!(value["context"]["elapsedMs"], json!(elapsed));
+
+        let missing = thumbnail(&hub, "g1:thumb:c", MastMissionId::Jwst, L3, MastLevelClass::Combined, Some("jw02739-o001_t001_nircam_clear-f444w_i2d_thumb.jpg"))
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, MastErrorCode::NoImage);
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_thumbnail?filename=jw02739-o001_t001_nircam_clear-f444w"), 1, "a 404 is an answer, not a hiccup");
+
+        let pane = preview(&hub, "g1:preview:a", MastMissionId::Jwst, L3, "jw02739-o001_t001_nircam_clear-f090w_i2d.jpg", PreviewSize::Pane, &quiet).await.unwrap_err();
+        assert_eq!(pane.code, MastErrorCode::Server);
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_preview"), 1, "previews are not retried");
+
+        let calm = hub_for(&server, dir.path());
+        let reconnected = thumbnail(&calm, "g1:thumb:e", MastMissionId::Jwst, L3, MastLevelClass::Combined, Some(dropped)).await.unwrap();
+        assert_eq!(reconnected.filename, dropped);
+        assert_eq!(server.count(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={dropped}")), 2, "one retry after a dropped connection");
+
+        let impatient = hub_with_timeout(&server, dir.path(), 300);
+        let timed_out = thumbnail(&impatient, "g1:thumb:d", MastMissionId::Jwst, L3, MastLevelClass::Combined, Some(slow)).await.unwrap_err();
+        assert_eq!(timed_out.code, MastErrorCode::Timeout);
+        assert_eq!(timed_out.context.timeout_sec, Some(1));
+        assert_eq!(timed_out.context.attempts, Some(1), "a timeout is shown at once, not retried");
+        let slow_requests = server.wait_for(|r| r.iter().any(|x| x.target.contains(slow) && x.aborted)).await;
+        assert_eq!(slow_requests.iter().filter(|x| x.target.contains(slow)).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_retry_is_dropped_when_a_rate_limit_opens_during_its_backoff() {
+        let broken = "jw02739-o001_t001_nircam_clear-f187n_i2d_thumb.jpg";
+        let limited = "jw02739-o001_t001_nircam_clear-f200w_i2d_thumb.jpg";
+        let mut routes = vec![
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={broken}")).status(500).json(r#"{"detail":"busy"}"#),
+            Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={limited}"))
+                .status(429)
+                .header("Retry-After", "5")
+                .json(r#"{"detail":"slow down"}"#),
+        ];
+        routes.extend(l3_list_routes(L3));
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_with(&server, dir.path(), 5000, 1500);
+        image_list(&hub, MastMissionId::Jwst, L3).await.unwrap();
+        let first = {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move { thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, Some(broken)).await })
+        };
+        server.wait_for(|r| r.iter().any(|x| x.target.contains(broken))).await;
+        let paused = thumbnail(&hub, "g1:thumb:b", MastMissionId::Jwst, L3, MastLevelClass::Combined, Some(limited)).await.unwrap_err();
+        assert_eq!(paused.code, MastErrorCode::RateLimited);
+        let failed = first.await.unwrap().unwrap_err();
+        assert_eq!(failed.code, MastErrorCode::Server);
+        assert_eq!(failed.context.attempts, Some(1));
+        assert_eq!(server.count(&format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={broken}")), 1, "no retry into an open rate-limit window");
+    }
+
+    #[test]
+    fn retry_backoff_spreads_retries_over_a_quarter_of_the_wait() {
+        let base = Duration::from_millis(1000);
+        let waits: HashSet<Duration> = (0..64).map(|_| jittered(base)).collect();
+        assert!(waits.iter().all(|wait| *wait >= base && *wait <= base + base / 4), "{waits:?}");
+        assert!(waits.len() > 1, "every retry left at the same instant");
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_for_one_thumbnail_share_one_download() {
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let fileset = format!("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name={L3}");
+        let stuck = format!("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name={MIRI}");
+        let server = serve_routes(vec![
+            Route::get(&fileset).delay(Duration::from_millis(400)).bytes(thumb.clone()),
+            Route::get(&stuck).delay(Duration::from_secs(20)).bytes(thumb.clone()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let run = |id: &'static str, dataset: &'static str| {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                let worker = Arc::clone(&hub);
+                hub.registry()
+                    .run(id, async move { thumbnail(&worker, id, MastMissionId::Jwst, dataset, MastLevelClass::Combined, None).await })
+                    .await
+            })
+        };
+        let earlier = run("g3:thumb:jw02739-o001_t001_nircam", L3);
+        server.wait_for(|r| r.len() == 1).await;
+        let later = run("g4:thumb:jw02739-o001_t001_nircam", L3);
+        let earlier = earlier.await.unwrap().unwrap();
+        let later = later.await.unwrap().unwrap();
+        assert!(!earlier.from_cache);
+        assert!(later.from_cache, "the next generation reuses the download already in flight");
+        assert_eq!(later.request_id, "g4:thumb:jw02739-o001_t001_nircam");
+        assert_eq!(later.path, earlier.path);
+        assert_eq!(server.count(&fileset), 1);
+
+        let holder = run("g5:thumb:jw02739-o002_t001_miri", MIRI);
+        server.wait_for(|r| r.iter().any(|x| x.target.starts_with(&stuck))).await;
+        let waiter = run("g6:thumb:jw02739-o002_t001_miri", MIRI);
+        wait_registered(&hub, "g6:thumb:jw02739-o002_t001_miri").await;
+        assert_eq!(server.count(&stuck), 1, "the second request waits for the first");
+        assert_eq!(hub.registry().cancel(None, Some("g5:")).unwrap(), 1);
+        assert_eq!(holder.await.unwrap().unwrap_err().code, MastErrorCode::Cancelled);
+        let taken_over = server.wait_for(|r| r.iter().filter(|x| x.target.starts_with(&stuck)).count() == 2).await;
+        assert_eq!(taken_over.iter().filter(|x| x.target.starts_with(&stuck)).count(), 2, "a cancelled holder hands over to the waiter");
+        assert_eq!(hub.registry().cancel(None, Some("g6:")).unwrap(), 1);
+        assert_eq!(waiter.await.unwrap().unwrap_err().code, MastErrorCode::Cancelled);
+        assert!(hub.registry().is_empty());
+        assert_eq!(hub.thumbnails_in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn requests_queued_behind_a_failing_thumbnail_get_its_answer() {
+        let broken = "jw02739-o001_t001_nircam_clear-f187n_i2d_thumb.jpg";
+        let route = format!("/search/jwst/api/v0.1/get_image_thumbnail?filename={broken}");
+        let mut routes = vec![Route::get(&route).delay(Duration::from_millis(600)).status(500).json(r#"{"detail":"thumbnail store down"}"#)];
+        routes.extend(l3_list_routes(L3));
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        image_list(&hub, MastMissionId::Jwst, L3).await.unwrap();
+        let run = |id: &'static str| {
+            let hub = Arc::clone(&hub);
+            tokio::spawn(async move {
+                let worker = Arc::clone(&hub);
+                hub.registry()
+                    .run(id, async move { thumbnail(&worker, id, MastMissionId::Jwst, L3, MastLevelClass::Combined, Some(broken)).await })
+                    .await
+            })
+        };
+        let holder = run("g1:thumb:jw02739-o001_t001_nircam:f187n");
+        server.wait_for(|r| r.iter().any(|x| x.target.starts_with(&route))).await;
+        let waiter = run("g2:thumb:jw02739-o001_t001_nircam:f187n");
+        wait_registered(&hub, "g2:thumb:jw02739-o001_t001_nircam:f187n").await;
+        let held = holder.await.unwrap().unwrap_err();
+        let shared = waiter.await.unwrap().unwrap_err();
+        assert_eq!(held.code, MastErrorCode::Server);
+        assert_eq!(shared.code, MastErrorCode::Server);
+        assert_eq!(shared.context.detail.as_deref(), Some("thumbnail store down"));
+        assert_eq!(server.count(&route), 2, "the queued request takes the holder's answer instead of asking MAST again");
+        assert_eq!(hub.thumbnails_in_flight(), 0);
+
+        let later = thumbnail(&hub, "g3:thumb:jw02739-o001_t001_nircam:f187n", MastMissionId::Jwst, L3, MastLevelClass::Combined, Some(broken)).await.unwrap_err();
+        assert_eq!(later.code, MastErrorCode::Server);
+        assert!(server.count(&route) > 2, "a request made after the flight ended asks MAST again");
     }
 
     #[tokio::test]
@@ -1703,7 +2413,7 @@ mod tests {
         let mut now = t0;
         for (expected_consecutive, expected_wait) in [(1u32, 10u64), (2, 30), (3, 60), (4, 60)] {
             assert!(limiter.open_window(now).is_none());
-            assert_eq!(limiter.record(&limited, &op, now), expected_consecutive);
+            assert_eq!(limiter.record(&limited, &op, now, now), expected_consecutive);
             let window = limiter.open_window(now).unwrap();
             assert_eq!((window.remaining_secs, window.consecutive), (expected_wait, expected_consecutive));
             let classified = classify(&limited, &op, expected_consecutive);
@@ -1714,21 +2424,51 @@ mod tests {
         assert_eq!(limiter.consecutive(), 0);
         assert!(limiter.open_window(now).is_none());
 
-        let server = serve_routes(vec![Route::get("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name=").status(503).html("<html>busy</html>")]).await;
+        let server = serve_routes(vec![
+            Route::get("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name=").status(503).html("<html>busy</html>"),
+            Route::get("/search/jwst/api/v0.1/get_image_list").status(404).json(r#"{"detail":"Image not found"}"#),
+        ])
+        .await;
         let dir = tempfile::tempdir().unwrap();
         let hub = hub_for(&server, dir.path());
-        for (i, dataset) in ["jw01", "jw02", "jw03"].into_iter().enumerate() {
+        for (i, (dataset, attempts)) in [("jw01", 2), ("jw02", 1), ("jw03", 1)].into_iter().enumerate() {
             let error = thumbnail(&hub, "g1:thumb:x", MastMissionId::Jwst, dataset, MastLevelClass::Combined, None).await.unwrap_err();
-            assert_eq!(error.code, MastErrorCode::Server, "{dataset}");
+            assert_eq!(error.code, MastErrorCode::Server, "{dataset}: the 503 is what the card shows");
             assert_eq!(error.context.status, Some(503));
-            assert_eq!(hub.limiter().consecutive(), i as u32 + 1);
+            assert_eq!(error.context.operation.as_deref(), Some("search/jwst/api/v0.1/get_image_thumbnail"));
+            assert_eq!(error.context.attempts, Some(attempts), "{dataset}: only the first busy answer is retried, the next cards see the outage");
+            assert_eq!(hub.limiter().consecutive(), i as u32 + 1, "a retried request counts once");
         }
         let breaker = thumbnail(&hub, "g1:thumb:y", MastMissionId::Jwst, "jw04", MastLevelClass::Combined, None).await.unwrap_err();
         assert_eq!(breaker.code, MastErrorCode::RateLimited);
         assert_eq!(breaker.context.consecutive, Some(3));
         assert!((59..=60).contains(&breaker.context.retry_after_sec.unwrap()), "{breaker:?}");
-        assert_eq!(server.requests().len(), 3);
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_thumbnail"), 4);
+        assert_eq!(server.count("/search/jwst/api/v0.1/get_image_list"), 2, "only the first card tries the lists; the others fail during the outage");
         assert!(!hub.fileset_failed(MastMissionId::Jwst, MastLevelClass::Combined), "a 503 is not a missing image");
+    }
+
+    #[tokio::test]
+    async fn one_burst_of_rate_limits_is_one_episode() {
+        let server = serve_routes(vec![Route::get("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name=")
+            .status(429)
+            .header("Retry-After", "5")
+            .delay(Duration::from_millis(300))
+            .html("<html>slow down</html>")])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let call = |dataset: &'static str| thumbnail(&hub, "g1:thumb:x", MastMissionId::Jwst, dataset, MastLevelClass::Combined, None);
+        let (a, b, c, d) = tokio::join!(call("jw01"), call("jw02"), call("jw03"), call("jw04"));
+        for error in [a, b, c, d].map(Result::unwrap_err) {
+            assert_eq!(error.code, MastErrorCode::RateLimited, "{error:?}");
+            assert_eq!(error.context.consecutive, Some(1), "{error:?}");
+            assert_eq!(error.context.retry_after_sec, Some(5), "{error:?}");
+        }
+        let blocked = call("jw05").await.unwrap_err();
+        assert_eq!(blocked.code, MastErrorCode::RateLimited);
+        assert_eq!(blocked.context.consecutive, Some(1), "{blocked:?}");
+        assert_eq!(server.requests().len(), 4);
     }
 
     #[tokio::test]
@@ -1781,6 +2521,72 @@ mod tests {
         assert_eq!(cache_info(&hub), MastCacheInfo::default());
         assert!(hub.image_sets().is_empty());
         assert!(!search(&hub, "g4:search", &m16(MastMissionId::Jwst), false).await.unwrap().from_cache);
+    }
+
+    struct Undeletable {
+        #[cfg(unix)]
+        folder: PathBuf,
+        #[cfg(windows)]
+        _open: std::fs::File,
+    }
+
+    impl Undeletable {
+        #[cfg(windows)]
+        fn new(path: &Path) -> Self {
+            use std::os::windows::fs::OpenOptionsExt;
+            Self { _open: std::fs::OpenOptions::new().read(true).share_mode(0).open(path).unwrap() }
+        }
+
+        #[cfg(unix)]
+        fn new(path: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let folder = path.parent().unwrap().to_path_buf();
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+            Self { folder }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Undeletable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.folder, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[tokio::test]
+    async fn clearing_resets_memory_and_reports_what_was_freed_when_a_file_stays() {
+        let thumb = fixture_bytes("t_clear-f187n.bin");
+        let mut routes = vec![Route::get(&format!("/search/jwst/api/v0.1/get_image_thumbnail?fileset_name={L3}")).bytes(thumb.clone())];
+        routes.extend(l3_list_routes(L3));
+        routes.push(Route::post("/search/jwst/api/v0.1/search").json(fixture("jwst_m16_l3.json")));
+        let server = serve_routes(routes).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        thumbnail(&hub, "g1:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, None).await.unwrap();
+        image_list(&hub, MastMissionId::Jwst, L3).await.unwrap();
+        search(&hub, "g1:search", &m16(MastMissionId::Jwst), false).await.unwrap();
+        let before = cache_info(&hub);
+        let stuck = dataset_folder(dir.path(), "jwst", "jw00001-o001_t001_nircam").join("stuck_thumb.jpg");
+        std::fs::create_dir_all(stuck.parent().unwrap()).unwrap();
+        std::fs::write(&stuck, b"locked").unwrap();
+        let pinned = Undeletable::new(&stuck);
+        let freed = cache_clear(&hub, MastCacheKind::All).unwrap();
+        assert_eq!(freed, before, "every other file is removed and reported");
+        assert!(stuck.exists());
+        assert!(hub.image_sets().is_empty());
+        assert_eq!(hub.image_budget().used(), Some(6), "the budget counts what stayed on disk");
+        assert!(!search(&hub, "g2:search", &m16(MastMissionId::Jwst), false).await.unwrap().from_cache);
+        let refetched = thumbnail(&hub, "g2:thumb:a", MastMissionId::Jwst, L3, MastLevelClass::Combined, None).await.unwrap();
+        assert!(!refetched.from_cache);
+        drop(pinned);
+        let only_stuck = Undeletable::new(&stuck);
+        cache_clear(&hub, MastCacheKind::Images).unwrap();
+        let error = cache_clear(&hub, MastCacheKind::Images).unwrap_err();
+        assert_eq!(error.code, MastErrorCode::Cache);
+        let expected = if cfg!(windows) { "file in use by another program" } else { "permission denied" };
+        assert_eq!(error.message, expected);
+        drop(only_stuck);
     }
 
     #[tokio::test]
@@ -1988,6 +2794,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blank_product_listing_is_an_error_and_is_not_stored() {
+        let blank = "jw09001-o001_t001_nircam";
+        let no_content = "jw09002-o001_t001_nircam";
+        let spaces = "jw09003-o001_t001_nircam";
+        let server = serve_routes(vec![
+            Route::post(PRODUCTS_PATH).when(move |r| r.body.contains(blank)).bytes(Vec::new()),
+            Route::post(PRODUCTS_PATH).when(move |r| r.body.contains(no_content)).status(204),
+            Route::post(PRODUCTS_PATH).when(move |r| r.body.contains(spaces)).bytes(b" \r\n ".to_vec()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        for dataset in [blank, no_content, spaces] {
+            let error = products(&hub, "g1:products:e", MastMissionId::Jwst, &[dataset.to_owned()], false).await.unwrap_err();
+            assert_eq!(error.code, MastErrorCode::Decode, "{dataset}");
+            assert_eq!(error.message, "empty answer", "{dataset}");
+            assert_eq!(error.context.operation.as_deref(), Some("search/jwst/api/v0.1/post_list_products"), "{dataset}");
+            assert!(!dir.path().join("lists").join("jwst").join(format!("{dataset}.products.json")).exists(), "{dataset}");
+        }
+        assert!(products(&hub, "g2:products:e", MastMissionId::Jwst, &[blank.to_owned()], false).await.is_err());
+        assert_eq!(server.count(PRODUCTS_PATH), 4, "a blank answer is never cached");
+        assert!(hub.product_lists().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_product_listing_is_not_stored_on_disk() {
+        let server = serve_routes(vec![Route::post(PRODUCTS_PATH).json(r#"{"products": []}"#)]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let single = [L3.to_owned()];
+        let first = products(&hub, "g1:products:z", MastMissionId::Jwst, &single, false).await.unwrap();
+        assert_eq!(first.total_count, 0);
+        assert!(!first.from_cache);
+        assert!(!dir.path().join("lists").join("jwst").join(format!("{L3}.products.json")).exists());
+        assert!(products(&hub, "g2:products:z", MastMissionId::Jwst, &single, false).await.unwrap().from_cache);
+        assert_eq!(server.count(PRODUCTS_PATH), 1);
+        let restarted = hub_for(&server, dir.path());
+        let again = products(&restarted, "g1:products:z", MastMissionId::Jwst, &single, false).await.unwrap();
+        assert!(!again.from_cache, "an empty listing is asked for again after a restart");
+        assert_eq!(server.count(PRODUCTS_PATH), 2);
+    }
+
+    #[tokio::test]
     async fn products_refused_for_unverified_missions() {
         let classy = json!({
             "products": [product_entry("J0036-3333", "hlsp_classy_hst_cos_j0036-3333_multi_v1_coadded.fits", "SCIENCE", "coadded", 14_469_120)]
@@ -2181,6 +3030,21 @@ mod tests {
         );
         assert!(near_dates.len() > 10 && prog_dates.len() > 5);
         assert_eq!(descending(&near_dates) && descending(&prog_dates), JWST_DATE_SORT_OK);
+    }
+
+    #[tokio::test]
+    #[ignore = "live MAST request"]
+    async fn live_server_error_reaches_the_card_with_what_mast_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = live_hub(dir.path());
+        let started = Instant::now();
+        let error = thumbnail(&hub, "live:thumb:ICK909C1Q", MastMissionId::Hst, "ICK909C1Q", MastLevelClass::Unknown, None).await.unwrap_err();
+        eprintln!("live_server_error_reaches_the_card_with_what_mast_said: {error:?} ({} ms)", elapsed_ms(started));
+        assert_eq!(error.code, MastErrorCode::Server);
+        assert_eq!(error.context.status, Some(500));
+        assert_eq!(error.context.detail.as_deref(), Some("Internal Server Error"));
+        assert_eq!(error.context.attempts, Some(2));
+        assert!(!dir.path().join("lists").exists());
     }
 
     #[tokio::test]

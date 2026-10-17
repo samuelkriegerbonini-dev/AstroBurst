@@ -1,0 +1,42 @@
+[
+  {
+    "op": "rl_deconv",
+    "v": 1,
+    "iterations": 20,
+    "regularization": 0.001,
+    "deringing": true,
+    "deringingThreshold": 0.1,
+    "psf": {
+      "kind": "gaussian",
+      "sigma": 2.0,
+      "size": 15
+    }
+  },
+  {
+    "op": "rl_deconv",
+    "v": 1,
+    "iterations": 30,
+    "regularization": 0.002,
+    "deringing": false,
+    "deringingThreshold": 0.25,
+    "psf": {
+      "kind": "empirical",
+      "numStars": 30,
+      "cutoutRadius": 15
+    }
+  },
+  {
+    "op": "rl_deconv",
+    "v": 1,
+    "iterations": 15,
+    "regularization": 0.001,
+    "deringing": true,
+    "deringingThreshold": 0.1,
+    "psf": {
+      "kind": "kernel",
+      "hash": "9f3a51c2e07b8d14",
+      "rows": 31,
+      "cols": 31
+    }
+  }
+]

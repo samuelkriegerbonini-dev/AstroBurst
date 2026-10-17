@@ -23,7 +23,9 @@ pub const LIST_CAP_BYTES: u64 = 50 * 1024 * 1024;
 pub const IMG_DIR: &str = "img";
 pub const LISTS_DIR: &str = "lists";
 pub const REPRESENTATIVE_STEM: &str = "_representative";
+pub const REPRESENTATIVE_NAME: &str = "_representative.name";
 pub const PART_EXTENSION: &str = "part";
+pub const TEMP_EXTENSION: &str = "tmp";
 
 struct Slot<K, V> {
     key: K,
@@ -251,8 +253,8 @@ pub fn dir_info(dir: &Path) -> MastCacheInfo {
 }
 
 pub fn evict_to_cap(dir: &Path, cap: u64, target: u64) -> io::Result<u64> {
-    let mut files: Vec<CachedFile> = files_in(dir).into_iter().filter(|file| !is_part(&file.path)).collect();
-    let mut total: u64 = files.iter().map(|file| file.len).sum();
+    let (parts, mut files): (Vec<CachedFile>, Vec<CachedFile>) = files_in(dir).into_iter().partition(|file| is_part(&file.path));
+    let mut total: u64 = files.iter().chain(&parts).map(|file| file.len).sum();
     if total <= cap {
         return Ok(total);
     }
@@ -273,7 +275,35 @@ pub fn evict_to_cap(dir: &Path, cap: u64, target: u64) -> io::Result<u64> {
     first_error.map_or(Ok(total), Err)
 }
 
-pub fn remove_tree(dir: &Path) -> io::Result<MastCacheInfo> {
+fn temp_owner(name: &str) -> Option<u32> {
+    let stem = name.strip_suffix(".part").or_else(|| name.strip_suffix(".tmp"))?;
+    let tail = match stem.strip_prefix("dl-") {
+        Some(rest) => rest,
+        None => stem.rsplit_once('.').map_or(stem, |(_, tail)| tail),
+    };
+    tail.split('-').next()?.parse().ok()
+}
+
+fn is_temp(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == PART_EXTENSION || ext == TEMP_EXTENSION)
+}
+
+pub fn sweep_stale_temps(root: &Path, pid: u32, now: SystemTime, max_age: Duration) -> u64 {
+    let mut freed = 0;
+    for file in files_in(root).into_iter().filter(|file| is_temp(&file.path)) {
+        let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let recent = file.modified.is_some_and(|modified| now.duration_since(modified).map_or(true, |age| age <= max_age));
+        if temp_owner(&name) == Some(pid) && recent {
+            continue;
+        }
+        if std::fs::remove_file(&file.path).is_ok() {
+            freed += file.len;
+        }
+    }
+    freed
+}
+
+pub fn remove_tree(dir: &Path) -> (MastCacheInfo, Option<io::Error>) {
     let mut freed = MastCacheInfo::default();
     let mut first_error: Option<io::Error> = None;
     for file in files_in(dir) {
@@ -295,7 +325,7 @@ pub fn remove_tree(dir: &Path) -> io::Result<MastCacheInfo> {
             Err(error) => first_error = Some(error),
         }
     }
-    first_error.map_or(Ok(freed), Err)
+    (freed, first_error)
 }
 
 pub fn remove_file(path: &Path) -> io::Result<MastCacheInfo> {
@@ -379,9 +409,9 @@ impl DiskBudget {
         state.evicting = false;
     }
 
-    pub fn reset(&self) {
+    pub fn reset(&self, remaining: u64) {
         let mut state = self.state();
-        state.used = Some(0);
+        state.used = Some(remaining);
         state.pending = 0;
     }
 
@@ -493,18 +523,53 @@ mod tests {
         write(&oldest, 100, 300);
         write(&middle, 100, 200);
         write(&newest, 100, 100);
-        write(&part, 500, 900);
-        assert_eq!(evict_to_cap(root, 300, 270).unwrap(), 300);
+        write(&part, 50, 900);
+        assert_eq!(evict_to_cap(root, 350, 320).unwrap(), 350);
         assert!(oldest.exists() && middle.exists() && newest.exists());
         touch(&oldest);
-        assert_eq!(evict_to_cap(root, 250, 200).unwrap(), 200);
+        assert_eq!(evict_to_cap(root, 300, 250).unwrap(), 250, "part files count toward the cap");
         assert!(oldest.exists(), "touched file was evicted");
         assert!(!middle.exists(), "least recently used file survived");
         assert!(newest.exists());
         assert!(part.exists(), "an in-flight part file was evicted");
-        assert_eq!(evict_to_cap(root, 50, 0).unwrap(), 0);
+        assert_eq!(evict_to_cap(root, 50, 0).unwrap(), 50);
         assert!(!oldest.exists() && !newest.exists());
+        assert!(part.exists());
         assert_eq!(evict_to_cap(&root.join("missing"), 10, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn stale_temp_files_of_other_processes_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pid = std::process::id();
+        let foreign = u32::MAX - 1;
+        let images = root.join("img").join("jwst").join("jw1");
+        let stale = [
+            images.join(format!("dl-{foreign}-0.part")),
+            images.join(format!("x_thumb.jpg.{foreign}-3.part")),
+            root.join("lists").join("jwst").join(format!("jw1.images.json.{foreign}-1.part")),
+            root.join(format!("names.json.{foreign}.tmp")),
+            images.join(format!("dl-{pid}-7.part")),
+            images.join("odd.part"),
+        ];
+        let kept = [images.join(format!("dl-{pid}-8.part")), root.join(format!("names.json.{pid}.tmp")), images.join("x_thumb.jpg")];
+        for path in &stale[..4] {
+            write(path, 40, 0);
+        }
+        write(&stale[4], 40, 900);
+        write(&stale[5], 40, 0);
+        for path in &kept {
+            write(path, 40, 0);
+        }
+        assert_eq!(sweep_stale_temps(root, pid, SystemTime::now(), Duration::from_secs(120)), 6 * 40);
+        for path in &stale {
+            assert!(!path.exists(), "{} survived", path.display());
+        }
+        for path in &kept {
+            assert!(path.exists(), "{} was swept", path.display());
+        }
+        assert_eq!(sweep_stale_temps(&root.join("missing"), pid, SystemTime::now(), Duration::from_secs(120)), 0);
     }
 
     #[test]
@@ -526,10 +591,13 @@ mod tests {
         assert_eq!(info.files, 3);
         assert_eq!(info.bytes, 40 + 2 + std::fs::metadata(&path).unwrap().len());
         assert_eq!(dir_info(&dir.path().join("missing")), MastCacheInfo::default());
-        let freed = remove_tree(&dir.path().join("img")).unwrap();
+        let (freed, error) = remove_tree(&dir.path().join("img"));
         assert_eq!(freed, MastCacheInfo { bytes: 40, files: 1 });
+        assert!(error.is_none());
         assert!(!dir.path().join("img").exists());
-        assert_eq!(remove_tree(&dir.path().join("img")).unwrap(), MastCacheInfo::default());
+        let (again, error) = remove_tree(&dir.path().join("img"));
+        assert_eq!(again, MastCacheInfo::default());
+        assert!(error.is_none());
         assert_eq!(remove_file(&dir.path().join("names.json")).unwrap(), MastCacheInfo { bytes: 2, files: 1 });
         assert_eq!(remove_file(&dir.path().join("names.json")).unwrap(), MastCacheInfo::default());
     }
@@ -554,8 +622,10 @@ mod tests {
         assert_eq!(budget.used(), Some(85));
         assert!(budget.note_write(20));
         budget.finish(10);
-        budget.reset();
+        budget.reset(0);
         assert_eq!(budget.used(), Some(0));
+        budget.reset(7);
+        assert_eq!(budget.used(), Some(7));
         let fresh = DiskBudget::new(100);
         assert!(fresh.begin());
         assert!(!fresh.begin());

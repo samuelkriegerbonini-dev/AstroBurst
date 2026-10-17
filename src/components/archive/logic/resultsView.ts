@@ -288,6 +288,36 @@ export function displayRows(results: ResultSet | null, sort: TableSort): MastRow
   return results.rows;
 }
 
+export function rowKeys(rows: readonly MastRow[]): string[] {
+  const used = new Set<string>();
+  return rows.map((r) => {
+    let key = r.datasetId;
+    for (let n = 2; used.has(key); n += 1) key = `${r.datasetId}#${n}`;
+    used.add(key);
+    return key;
+  });
+}
+
+const keyMaps = new WeakMap<readonly MastRow[], Map<MastRow, string>>();
+
+export function rowKeyMap(rows: readonly MastRow[]): Map<MastRow, string> {
+  const known = keyMaps.get(rows);
+  if (known) return known;
+  const keys = rowKeys(rows);
+  const map = new Map(rows.map((r, i) => [r, keys[i]]));
+  keyMaps.set(rows, map);
+  return map;
+}
+
+export function rovingRow(rows: readonly MastRow[], keyOf: ReadonlyMap<MastRow, string>, selectedId: string | null, selectedKey: string | null): number {
+  if (selectedId === null) return 0;
+  if (selectedKey !== null) {
+    const exact = rows.findIndex((r) => r.datasetId === selectedId && keyOf.get(r) === selectedKey);
+    if (exact >= 0) return exact;
+  }
+  return Math.max(0, rows.findIndex((r) => r.datasetId === selectedId));
+}
+
 function sortLabel(column: string, columns: readonly MastColumn[]): string {
   return (columns.find((c) => c.name === column)?.label ?? column).toUpperCase();
 }

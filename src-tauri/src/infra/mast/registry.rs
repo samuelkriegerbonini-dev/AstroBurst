@@ -144,6 +144,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_late_cancel_of_one_attempt_never_reaches_the_next_attempt() {
+        const FIRST: &str = "g3:preview:ICK909030:ick909030_drc.jpg:pane:1";
+        const SECOND: &str = "g3:preview:ICK909030:ick909030_drc.jpg:pane:2";
+        const THIRD: &str = "g3:preview:ICK909030:ick909030_drc.jpg:pane:3";
+        let registry = Arc::new(Registry::new());
+        let start = |id: &'static str| {
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move {
+                registry
+                    .run(id, async move {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        Ok(id)
+                    })
+                    .await
+            })
+        };
+        let first = start(FIRST);
+        wait_until(&registry, FIRST).await;
+        assert_eq!(registry.cancel(Some(&[FIRST.to_owned()]), None).unwrap(), 1);
+        let second = start(SECOND);
+        wait_until(&registry, SECOND).await;
+        assert_eq!(registry.cancel(Some(&[FIRST.to_owned()]), None).unwrap(), 0, "a cancel that arrives late finds nothing");
+        assert_eq!(first.await.unwrap().unwrap_err().code, MastErrorCode::Cancelled);
+        assert_eq!(second.await.unwrap().unwrap(), SECOND);
+        let third = start(THIRD);
+        wait_until(&registry, THIRD).await;
+        assert_eq!(registry.cancel(None, Some("g3:")).unwrap(), 1, "a generation prefix still reaches numbered attempts");
+        assert_eq!(third.await.unwrap().unwrap_err().code, MastErrorCode::Cancelled);
+        assert!(registry.is_empty());
+    }
+
+    #[tokio::test]
     async fn finished_tasks_leave_the_registry_and_panics_are_internal() {
         let registry = Arc::new(Registry::new());
         assert_eq!(registry.run("g1:search", async { Ok(7) }).await.unwrap(), 7);

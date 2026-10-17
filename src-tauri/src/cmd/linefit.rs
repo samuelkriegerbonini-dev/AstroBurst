@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use ndarray::Array2;
 use serde::Serialize;
 
@@ -12,17 +10,15 @@ use crate::cmd::common::{
 };
 use crate::cmd::cube::{linear_preview, strip_spectral_axis, MapFiles};
 use crate::core::astrometry::spectral::VelocityConvention;
-use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
+pub(crate) use crate::core::cube::companions::{open_cube_set, CubeSet};
 use crate::core::cube::lazy::LazyCube;
 use crate::core::cube::linefit::{
-    fit_cube_lines, fit_spaxel, plane_names, Components, LineFitConfig, LineFitInputs, LineFitMaps, Weighting,
+    fit_cube_lines, fit_spaxel, plane_names, Components, LineFitConfig, LineFitMaps, Weighting,
 };
 use crate::core::cube::moments::{ContinuumWindows, VELOCITY_UNIT};
-use crate::infra::fits::reader::{list_extensions, HduInfo};
 use crate::infra::render::grayscale::render_grayscale;
-use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, HEADER_BUNIT};
+use crate::types::constants::HEADER_BUNIT;
 use crate::types::header::HduHeader;
-use crate::types::image_ref::ImageRef;
 
 pub const ABPROC_PREFIX: &str = "linefit-";
 pub const FILE_TAG: &str = "linefit";
@@ -65,64 +61,6 @@ const VELOCITY_PLANES: [&str; 13] = [
     "c2_sigma_obs",
     "c2_sigma_err",
 ];
-
-pub(crate) struct CubeSet {
-    pub sci: Arc<LazyCube>,
-    pub err: Option<Arc<LazyCube>>,
-    pub dq: Option<Arc<LazyCube>>,
-}
-
-impl CubeSet {
-    fn inputs(&self) -> LineFitInputs<'_> {
-        LineFitInputs { sci: &self.sci, err: self.err.as_deref(), dq: self.dq.as_deref() }
-    }
-}
-
-fn card_text(header: &HduHeader, key: &str) -> Option<String> {
-    header
-        .get(key)
-        .map(|s| s.trim().trim_matches('\'').trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn companion_index(extensions: &[HduInfo], name: &str, sci: &LazyCube) -> Option<usize> {
-    let g = &sci.geometry;
-    let shape = (g.naxis1 as i64, g.naxis2 as i64, g.naxis3 as i64);
-    extensions
-        .iter()
-        .find(|h| {
-            h.index != sci.hdu_index
-                && h.naxis == 3
-                && (h.naxis1, h.naxis2, h.naxis3) == shape
-                && h.extname.as_deref().is_some_and(|e| e.trim().trim_matches('\'').trim().eq_ignore_ascii_case(name))
-        })
-        .map(|h| h.index)
-}
-
-pub(crate) fn open_cube_set(path: &str) -> Result<CubeSet> {
-    let sci = GLOBAL_CUBE_CACHE.get_or_open(path)?;
-    if let Some(name) = card_text(&sci.header, "EXTNAME").map(|s| s.to_uppercase()) {
-        if name == EXTNAME_ERR || name == EXTNAME_DQ {
-            bail!(
-                "{} opens the {} extension (HDU {}): the line fit needs the SCI cube",
-                path,
-                name,
-                sci.hdu_index
-            );
-        }
-    }
-    let base = ImageRef::parse(path).path;
-    let extensions = File::open(&base).ok().and_then(|file| list_extensions(&file).ok()).unwrap_or_default();
-    let open = |name: &str| -> Result<Option<Arc<LazyCube>>> {
-        match companion_index(&extensions, name, &sci) {
-            Some(index) => Ok(Some(GLOBAL_CUBE_CACHE.get_or_open(&format!("{}#hdu={}", base, index))?)),
-            None => Ok(None),
-        }
-    };
-    let err = open(EXTNAME_ERR)?;
-    let dq = open(EXTNAME_DQ)?;
-    Ok(CubeSet { sci, err, dq })
-}
 
 pub(crate) fn plane_unit(plane: &str, maps: &LineFitMaps) -> Option<String> {
     if FLUX_PLANES.contains(&plane) {
@@ -298,7 +236,7 @@ pub(crate) fn line_fit_files(
         n_const_continuum: maps.n_const_continuum,
         n_two_components: maps.n_two_components,
         median_chi2_red: maps.median_chi2_red,
-        notes: maps.notes,
+        notes: set.notes.iter().cloned().chain(maps.notes).collect(),
         dimensions: [cols, rows],
         elapsed_ms: t0.elapsed().as_millis() as u64,
     })
@@ -314,7 +252,8 @@ fn line_fit_json(path: &str, output_dir: &str, cfg: &LineFitConfig) -> Result<se
 
 fn spaxel_json(path: &str, cfg: &LineFitConfig, x: usize, y: usize) -> Result<serde_json::Value> {
     let set = open_cube_set(path)?;
-    let spaxel = fit_spaxel(&set.inputs(), cfg, x, y)?;
+    let mut spaxel = fit_spaxel(&set.inputs(), cfg, x, y)?;
+    spaxel.notes.splice(0..0, set.notes.iter().cloned());
     Ok(serde_json::to_value(&spaxel)?)
 }
 
@@ -339,11 +278,14 @@ pub async fn cube_line_fit_spaxel_cmd(
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+
     use super::*;
     use crate::cmd::common::HEADER_ABPROC;
     use crate::cmd::line_measure::{measure_line_json, LineRequest, SpectrumSource};
     use crate::core::analysis::line_measure::LineModel;
     use crate::core::astrometry::wcs::WcsTransform;
+    use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
     use crate::core::cube::lazy::test_support::*;
     use crate::core::cube::linefit::test_support::*;
     use crate::core::cube::linefit::{MASK_CONST_CONTINUUM, MASK_FITTED, MASK_NOT_CONVERGED, MASK_TWO_COMPONENTS};

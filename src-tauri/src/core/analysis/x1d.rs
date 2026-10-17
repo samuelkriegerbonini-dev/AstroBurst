@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::core::astrometry::spectral::wavelength_unit_to_um;
 use crate::core::imaging::dq_flags::DqTable;
+use crate::infra::fits::gzip::{resolve_gzip, split_gz_suffix};
 use crate::infra::fits::reader::{read_primary_header, ParsedHdu};
 use crate::infra::fits::table::{list_tables, load_bintable, Column, ColumnValues, TableHdu};
 use crate::types::constants::DEFAULT_WAVELENGTH_UNIT;
@@ -69,24 +70,27 @@ pub fn resolve_x1d_path(path: &str) -> Result<PathBuf, String> {
     let bare = ImageRef::parse(path).path;
     let candidate = Path::new(&bare);
     let name = file_name(candidate);
-    let stem = candidate.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let ext = candidate.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let (inner, gz_suffix) = split_gz_suffix(&name);
+    let inner = Path::new(inner);
+    let stem = inner.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = inner.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
     let lower = stem.to_lowercase();
     let Some(suffix) = X1D_SIBLING_SUFFIXES.iter().find(|s| lower.ends_with(*s)) else {
         return Ok(candidate.to_path_buf());
     };
     let base = &stem[..stem.len() - suffix.len()];
-    let sibling_name = if ext.is_empty() {
+    let plain_name = if ext.is_empty() {
         format!("{base}{X1D_SUFFIX}")
     } else {
         format!("{base}{X1D_SUFFIX}.{ext}")
     };
-    let sibling = candidate.with_file_name(&sibling_name);
-    if sibling.is_file() {
-        Ok(sibling)
-    } else {
-        Err(format!("no pipeline x1d next to {name}: expected {sibling_name}"))
-    }
+    let gz_name = format!("{plain_name}{}", gz_suffix.unwrap_or(".gz"));
+    let names = if gz_suffix.is_some() { [gz_name, plain_name] } else { [plain_name, gz_name] };
+    names
+        .iter()
+        .map(|sibling| candidate.with_file_name(sibling))
+        .find(|sibling| sibling.is_file())
+        .ok_or_else(|| format!("no pipeline x1d next to {name}: expected {} or {}", names[0], names[1]))
 }
 
 fn is_extract1d(table: &TableHdu) -> bool {
@@ -163,7 +167,9 @@ pub fn read_x1d_spectrum(path: &str, hdu: Option<usize>) -> Result<X1dSpectrum> 
     let resolved = resolve_x1d_path(path).map_err(anyhow::Error::msg)?;
     let resolved_key = resolved.to_string_lossy().into_owned();
     let name = file_name(&resolved);
-    let file = File::open(&resolved).with_context(|| format!("Failed to open {resolved_key}"))?;
+    let (readable, _decompressed) = resolve_gzip(&resolved)?;
+    let readable_key = readable.to_string_lossy().into_owned();
+    let file = File::open(&readable).with_context(|| format!("Failed to open {resolved_key}"))?;
     let tables = list_tables(&file)?;
     let refs = extract1d_refs(&tables);
     if refs.is_empty() {
@@ -184,7 +190,7 @@ pub fn read_x1d_spectrum(path: &str, hdu: Option<usize>) -> Result<X1dSpectrum> 
         .with_context(|| format!("HDU {} of {name} is not listed as a table", chosen.hdu))?;
 
     let mut notes = Vec::new();
-    let data = load_bintable(&resolved_key, chosen.hdu)?;
+    let data = load_bintable(&readable_key, chosen.hdu)?;
     let required = data.columns(&[COL_WAVELENGTH, COL_FLUX])?;
     let mut columns = Vec::with_capacity(required.len() + OPTIONAL_COLUMNS.len());
     columns.extend(required);
@@ -221,7 +227,7 @@ pub fn read_x1d_spectrum(path: &str, hdu: Option<usize>) -> Result<X1dSpectrum> 
     let optional = |col: &str| column(col).map(as_f64);
     let dq = column(COL_DQ).map(as_u32);
     let dq_flagged_rows = dq.as_ref().map_or(0, |d| d.iter().filter(|&&v| v != 0).count());
-    let primary = read_primary_header(&resolved_key)?;
+    let primary = read_primary_header(&readable_key)?;
 
     Ok(X1dSpectrum {
         path: resolved_key,
@@ -424,6 +430,33 @@ mod tests {
 
         let direct = key(&dir.path().join("foo_x1d.fits"));
         assert_eq!(resolve_x1d_path(&direct).unwrap(), dir.path().join("foo_x1d.fits"));
+    }
+
+    #[test]
+    fn a_gzip_compressed_cube_finds_its_x1d_sibling_compressed_first_then_plain() {
+        use crate::infra::fits::gzip::test_support::gzip_copy;
+        let dir = tempfile::tempdir().unwrap();
+        let plain_x1d = write_x1d_fixture(dir.path(), "jw_x1d.fits", 4, &[1], "um");
+        let gz_x1d = gzip_copy(&plain_x1d, "jw_x1d.fits.gz");
+        let gz_s3d = key(&dir.path().join("jw_s3d.fits.gz"));
+        let plain_s3d = key(&dir.path().join("jw_s3d.fits"));
+        assert_eq!(resolve_x1d_path(&gz_s3d).unwrap(), gz_x1d);
+        assert_eq!(resolve_x1d_path(&plain_s3d).unwrap(), plain_x1d);
+        let s = read_x1d_spectrum(&format!("{gz_s3d}#hdu=1"), None).unwrap();
+        assert_eq!(s.path, key(&gz_x1d));
+        assert_eq!(s.n_rows, 4);
+
+        std::fs::remove_file(&gz_x1d).unwrap();
+        assert_eq!(resolve_x1d_path(&gz_s3d).unwrap(), plain_x1d);
+        let gz_x1d = gzip_copy(&plain_x1d, "jw_x1d.fits.gz");
+        std::fs::remove_file(&plain_x1d).unwrap();
+        assert_eq!(resolve_x1d_path(&plain_s3d).unwrap(), gz_x1d);
+
+        let lonely = key(&dir.path().join("solo_cal.FITS.GZ"));
+        let err = resolve_x1d_path(&lonely).unwrap_err();
+        assert_eq!(err, "no pipeline x1d next to solo_cal.FITS.GZ: expected solo_x1d.FITS.GZ or solo_x1d.FITS");
+        let direct = key(&gz_x1d);
+        assert_eq!(resolve_x1d_path(&direct).unwrap(), gz_x1d);
     }
 
     #[test]

@@ -17,6 +17,29 @@ const UNCAL_GRID: [number, number] = [2048, 3200];
 
 const state: ViewState = { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false };
 
+const { hostProps, captureHost, revertMock, resetProcessedMock } = vi.hoisted(() => {
+  const hostProps = new Map<string, Record<string, unknown>>();
+  type Factory = (type: unknown, props: Record<string, unknown> | null, ...rest: unknown[]) => unknown;
+  const captureHost = (factory: Factory): Factory => (type, props, ...rest) => {
+    const id = props?.["data-testid"];
+    if (typeof type === "string" && typeof id === "string") hostProps.set(id, props as Record<string, unknown>);
+    return factory(type, props, ...rest);
+  };
+  return { hostProps, captureHost, revertMock: vi.fn(async () => {}), resetProcessedMock: vi.fn() };
+});
+
+vi.mock("react/jsx-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react/jsx-runtime")>();
+  return { ...actual, jsx: captureHost(actual.jsx as never), jsxs: captureHost(actual.jsxs as never) };
+});
+
+vi.mock("react/jsx-dev-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react/jsx-dev-runtime")>();
+  return { ...actual, jsxDEV: captureHost(actual.jsxDEV as never) };
+});
+
+vi.mock("../../hooks/useHistory", () => ({ useHistoryController: () => ({ revert: revertMock }) }));
+
 vi.mock("../../context/PreviewContext", () => ({
   fileKeyOf: (file: { id: string; path: string } | null) => (file ? `${file.id}|${file.path}` : null),
   useFileContext: () => ({
@@ -53,7 +76,7 @@ vi.mock("../../context/PreviewContext", () => ({
     stfPreviewUrl: null,
     chain: { psfKernel: null },
   }),
-  useRenderActions: () => ({ resetProcessed: () => {}, currentFileKey: () => null, setStfPreviewUrl: () => {} }),
+  useRenderActions: () => ({ resetProcessed: resetProcessedMock, currentFileKey: () => null, setStfPreviewUrl: () => {} }),
   useHistContext: () => ({ histData: null, histDataPath: null, stfParams: { shadow: 0, midtone: 0.5, highlight: 1 } }),
   seedRgbFileView: () => {},
   useStarOverlayContext: () => ({ starOverlayRef: { current: null } }),
@@ -90,6 +113,7 @@ vi.mock("../viewer/AdvancedImageViewer", () => ({
     return createElement("div", { "data-canvas-hint": props.canvasHint ?? "" });
   },
 }));
+vi.mock("../history/HistoryShortcuts", () => ({ default: () => createElement("i", { "data-history-shortcuts": "" }) }));
 vi.mock("../preview/DqControls", () => ({ default: () => null }));
 vi.mock("../preview/DqOverlayCanvas", () => ({ default: () => null }));
 vi.mock("../preview/ViewerStatusStrip", () => ({ default: () => null }));
@@ -164,5 +188,27 @@ describe("PreviewPanel spectrum click on the GPU viewer", () => {
 
   it("passes the spectrum click handler on the cube's spatial grid", () => {
     expect(typeof tabClickAfterRender({ displayedDims: S3D_GRID })).toBe("function");
+  });
+});
+
+describe("PreviewPanel history shortcuts", () => {
+  it("mounts the undo and redo keys inside the preview on both viewers", () => {
+    expect(render({})).toContain("data-history-shortcuts");
+    expect(render({ gpu: true })).toContain("data-history-shortcuts");
+  });
+});
+
+describe("PreviewPanel Revert to original", () => {
+  it("moves the history head to the original instead of dropping the chain", () => {
+    hostProps.clear();
+    revertMock.mockClear();
+    resetProcessedMock.mockClear();
+    render({ label: "Wavelet Denoise", isCube: false, isSpectralCube: false });
+    const revert = hostProps.get("revert-original");
+    if (!revert) throw new Error("Revert to original is not shown while a result is on screen");
+    expect(String(revert.title)).toContain("the history keeps every step");
+    (revert.onClick as () => void)();
+    expect(revertMock).toHaveBeenCalledTimes(1);
+    expect(resetProcessedMock).not.toHaveBeenCalled();
   });
 });

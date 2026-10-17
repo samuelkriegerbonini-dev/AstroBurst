@@ -9,5 +9,7 @@ pub mod metadata;
 pub mod synth;
 pub mod pixelmath;
 pub mod ramp;
+pub mod ops;
+pub mod history;
 #[cfg(feature = "mast")]
 pub mod mast;

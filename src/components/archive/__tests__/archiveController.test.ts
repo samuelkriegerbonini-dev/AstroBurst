@@ -12,6 +12,7 @@ import type {
   MastError,
   MastImageEntry,
   MastImageRef,
+  MastImageSet,
   MastMissionId,
   MastPreviewRef,
   MastProductList,
@@ -137,6 +138,10 @@ function rows(n: number, prefix = "jw02739-o0") {
   return Array.from({ length: n }, (_, i) => row(`${prefix}${String(i).padStart(2, "0")}_t001_nircam`));
 }
 
+function attemptOf(id: string) {
+  return expect.stringMatching(new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:a\\d+$`));
+}
+
 describe("init", () => {
   it("loads the missions, the stored level and the token status without a network check", async () => {
     const t = await ready({}, memoryStorage({ [LEVEL_STORAGE_KEY]: "all" }));
@@ -160,7 +165,8 @@ describe("search flow", () => {
     const t = await ready();
     t.ctl.setText("M16");
     await t.ctl.search();
-    expect(t.svc.cancel).toHaveBeenCalledWith({ prefix: "g0:" });
+    expect(t.svc.cancel).toHaveBeenCalledWith({ prefix: "g0:search" });
+    expect(t.svc.cancel).not.toHaveBeenCalledWith({ prefix: "g0:" });
     expect(t.svc.resolve).toHaveBeenCalledWith("g1:resolve", "M16");
     expect(t.svc.search).toHaveBeenCalledWith(
       "g1:search",
@@ -238,7 +244,7 @@ describe("search flow", () => {
     const pending = t.ctl.search();
     await flush();
     expect(resultsState(t.store.getState())).toBe("searching");
-    expect(t.svc.cancel).toHaveBeenLastCalledWith({ prefix: "g1:" });
+    expect(t.svc.cancel).toHaveBeenCalledWith({ prefix: "g1:search" });
     t.ctl.cancelSearch();
     expect(t.svc.cancel).toHaveBeenLastCalledWith({ prefix: "g2:" });
     second.reject(mastErr("mast_cancelled"));
@@ -426,14 +432,58 @@ describe("thumbnail queue", () => {
     expect(t.inflight.snapshot().thumbs).toBe(4);
   });
 
-  it("marks a failed thumbnail with its short reason", async () => {
+  it("marks a failed thumbnail with MAST's error", async () => {
     const t = await withResults(1, { thumbnail: vi.fn(async () => Promise.reject(mastErr("mast_not_image"))) });
     const id = t.list[0].datasetId;
     t.ctl.setThumbDemand({ selected: [], visible: [id], ahead: [] });
     await flush();
     const q = t.store.getState().thumbs;
     expect(q.done[id]).toBe("failed");
-    expect(q.reasons[id]).toBe("not an image");
+    expect(q.failures[id]).toEqual({ error: mastErr("mast_not_image"), waitedMs: 0 });
+  });
+
+  it("keeps MAST's error and the time the card waited since its request started", async () => {
+    const failure = mastErr("mast_server", { status: 500, detail: "Internal Server Error", operation: "search/hst/api/v0.1/get_image_thumbnail" }, "HTTP 500");
+    const pending = deferred<MastImageRef>();
+    const t = await withResults(1, { thumbnail: vi.fn(() => pending.promise) });
+    const id = t.list[0].datasetId;
+    t.ctl.setThumbDemand({ selected: [], visible: [id], ahead: [] });
+    t.clock.advance(41_000);
+    pending.reject(failure);
+    await flush();
+    expect(t.store.getState().thumbs.failures[id]).toEqual({ error: failure, waitedMs: 41_000 });
+  });
+
+  it("announces a burst of thumbnail failures once, and never a missing image", async () => {
+    const failure = mastErr("mast_server", { status: 503, detail: "Service Unavailable" }, "HTTP 503");
+    const t = await withResults(4, {
+      thumbnail: vi.fn(async (_i: string, _m: string, d: string) => Promise.reject(d.includes("o003") ? mastErr("mast_no_image", { status: 404 }) : failure)),
+    });
+    const ids = t.list.map((r) => r.datasetId);
+    const before = t.store.getState().live.seq;
+    t.ctl.setThumbDemand({ selected: [], visible: ids, ahead: [] });
+    await flush();
+    expect(t.store.getState().live.seq).toBe(before);
+    t.clock.advance(1500);
+    const live = t.store.getState().live;
+    expect(live.seq).toBe(before + 1);
+    expect(live.text).toBe("3 thumbnails failed: MAST server error, HTTP 503");
+    t.clock.advance(5000);
+    expect(t.store.getState().live.seq).toBe(before + 1);
+  });
+
+  it("names the most frequent cause when one burst mixes failures", async () => {
+    const timeout = mastErr("mast_timeout", { timeoutSec: 30 }, "no answer within 30 s");
+    const server = mastErr("mast_server", { status: 500 }, "HTTP 500");
+    const t = await withResults(6, {
+      thumbnail: vi.fn(async (_i: string, _m: string, d: string) => Promise.reject(d.includes("o000") ? timeout : server)),
+    });
+    const ids = t.list.map((r) => r.datasetId);
+    t.ctl.setThumbDemand({ selected: [], visible: ids, ahead: [] });
+    await flush();
+    await flush();
+    t.clock.advance(1500);
+    expect(t.store.getState().live.text).toBe("6 thumbnails failed: MAST server error, HTTP 500");
   });
 
   it("pauses on a rate limit, shows the queue as paused and resumes after Retry-After", async () => {
@@ -478,6 +528,77 @@ describe("thumbnail queue", () => {
     expect(s.thumbRefs["old-a"]).toBeUndefined();
     expect(s.thumbs.done["old-a"]).toBeUndefined();
     expect(t.inflight.snapshot().thumbs).toBe(0);
+  });
+
+  it("lets thumbnails still on screen finish when a new search runs on the same mission, and stops the others once the new rows arrive", async () => {
+    const thumbnail = vi.fn(() => new Promise<MastImageRef>(() => {}));
+    const second = deferred<MastSearchPage>();
+    const search = vi.fn().mockResolvedValueOnce(page([row("keep"), row("drop")])).mockReturnValueOnce(second.promise);
+    const t = await ready({ search, thumbnail });
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [], visible: ["keep", "drop"], ahead: [] });
+    expect(thumbnail.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["g1:thumb:keep", "g1:thumb:drop"]);
+    vi.mocked(t.svc.cancel).mockClear();
+    void t.ctl.search();
+    await flush();
+    const asked = () => vi.mocked(t.svc.cancel).mock.calls.map((c) => c[0]);
+    expect(asked()).toEqual(["g1:search", "g1:resolve", "g1:page:", "g1:list:", "g1:preview:", "g1:products:"].map((prefix) => ({ prefix })));
+    second.resolve(page([row("keep"), row("new")]));
+    await flush();
+    expect(asked()).toContainEqual({ requestIds: ["g1:thumb:drop"] });
+    expect(asked()).not.toContainEqual({ requestIds: ["g1:thumb:keep"] });
+    expect(t.store.getState().thumbs.inflight).not.toContain("drop");
+  });
+
+  it("stops every thumbnail, older generations included, when the mission changes", async () => {
+    const thumbnail = vi.fn(() => new Promise<MastImageRef>(() => {}));
+    const t = await ready({ search: vi.fn(async () => page([row("a"), row("b")])), thumbnail });
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [], visible: ["a"], ahead: [] });
+    await t.ctl.search();
+    vi.mocked(t.svc.cancel).mockClear();
+    t.ctl.switchMission("hst");
+    const asked = vi.mocked(t.svc.cancel).mock.calls.map((c) => c[0]);
+    expect(asked).toContainEqual({ requestIds: ["g1:thumb:a"] });
+    expect(asked).toContainEqual({ prefix: "g2:" });
+  });
+
+  it("stops an older generation's thumbnail that a newer search restarted, when the mission changes", async () => {
+    const thumbnail = vi.fn(() => new Promise<MastImageRef>(() => {}));
+    const t = await ready({ search: vi.fn(async () => page([row("x"), row("y")])), thumbnail });
+    t.ctl.setText("M16");
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [], visible: ["x"], ahead: [] });
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [], visible: ["x"], ahead: [] });
+    expect(thumbnail.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["g1:thumb:x", "g2:thumb:x"]);
+    vi.mocked(t.svc.cancel).mockClear();
+    t.ctl.switchMission("hst");
+    const cancelled = vi.mocked(t.svc.cancel).mock.calls.flatMap((c) => c[0].requestIds ?? []);
+    expect(cancelled).toContain("g1:thumb:x");
+    expect(cancelled).toContain("g2:thumb:x");
+  });
+
+  it("stops a superseded thumbnail once its dataset leaves the results", async () => {
+    const thumbnail = vi.fn(() => new Promise<MastImageRef>(() => {}));
+    const third = deferred<MastSearchPage>();
+    const search = vi.fn().mockResolvedValueOnce(page([row("x")])).mockResolvedValueOnce(page([row("x")])).mockReturnValueOnce(third.promise);
+    const t = await ready({ search, thumbnail });
+    t.ctl.setText("M16");
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [], visible: ["x"], ahead: [] });
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [], visible: ["x"], ahead: [] });
+    vi.mocked(t.svc.cancel).mockClear();
+    void t.ctl.search();
+    await flush();
+    third.resolve(page([row("z")]));
+    await flush();
+    const cancelled = vi.mocked(t.svc.cancel).mock.calls.flatMap((c) => c[0].requestIds ?? []);
+    expect(cancelled).toContain("g1:thumb:x");
+    expect(cancelled).toContain("g2:thumb:x");
   });
 
   it("retries failed thumbnails on request", async () => {
@@ -607,12 +728,12 @@ describe("detail pane", () => {
 
   it("lists the selected dataset's images at once and loads the pane preview after 400 ms of stable selection", async () => {
     const t = await detailReady();
-    expect(t.svc.imageList).toHaveBeenCalledWith(`g1:list:${NIRCAM}`, "jwst", NIRCAM);
+    expect(t.svc.imageList).toHaveBeenCalledWith(attemptOf(`g1:list:${NIRCAM}`), "jwst", NIRCAM);
     expect(t.svc.preview).not.toHaveBeenCalled();
     t.clock.advance(399);
     expect(t.svc.preview).not.toHaveBeenCalled();
     t.clock.advance(1);
-    expect(t.svc.preview).toHaveBeenCalledWith(`g1:preview:${NIRCAM}:${F187N.previewFilename}:pane`, "jwst", NIRCAM, F187N.previewFilename, "pane");
+    expect(t.svc.preview).toHaveBeenCalledWith(attemptOf(`g1:preview:${NIRCAM}:${F187N.previewFilename}:pane`), "jwst", NIRCAM, F187N.previewFilename, "pane");
     await flush();
     const p = t.store.getState().previews[paneKey(NIRCAM, F187N)];
     expect(p.stage).toBe("ready");
@@ -631,7 +752,18 @@ describe("detail pane", () => {
     pending.reject(mastErr("mast_cancelled"));
     await flush();
     expect(t.store.getState().previews).toEqual({});
-    expect(t.svc.imageList).toHaveBeenLastCalledWith(`g1:list:${MIRI}`, "jwst", MIRI);
+    expect(t.svc.imageList).toHaveBeenLastCalledWith(attemptOf(`g1:list:${MIRI}`), "jwst", MIRI);
+  });
+
+  it("asks again with a new request id after a cancel, so the late cancel cannot stop the new attempt", async () => {
+    const t = await detailReady({ preview: vi.fn(() => new Promise<MastPreviewRef>(() => {})), imageList: vi.fn(() => new Promise<MastImageSet>(() => {})) });
+    const firstList = vi.mocked(t.svc.imageList).mock.calls[0][0];
+    t.ctl.select(MIRI);
+    t.ctl.select(NIRCAM);
+    const lists = vi.mocked(t.svc.imageList).mock.calls.map((c) => c[0]);
+    expect(t.svc.cancel).toHaveBeenCalledWith({ requestIds: [firstList] });
+    expect(lists[lists.length - 1]).toMatch(new RegExp(`^g1:list:${NIRCAM}:a\\d+$`));
+    expect(lists[lists.length - 1]).not.toBe(firstList);
   });
 
   it("follows mast:progress for the preview in flight", async () => {
@@ -668,7 +800,7 @@ describe("detail pane", () => {
     await flush();
     t.ctl.openLarge(NIRCAM);
     expect(t.store.getState().large).toMatchObject({ open: true, datasetId: NIRCAM, imageKey: F187N.key });
-    expect(t.svc.preview).toHaveBeenLastCalledWith(`g1:preview:${NIRCAM}:${F187N.previewFilename}:large`, "jwst", NIRCAM, F187N.previewFilename, "large");
+    expect(t.svc.preview).toHaveBeenLastCalledWith(attemptOf(`g1:preview:${NIRCAM}:${F187N.previewFilename}:large`), "jwst", NIRCAM, F187N.previewFilename, "large");
     await flush();
     expect(t.store.getState().previews[paneKey(NIRCAM, F187N, "large")].stage).toBe("ready");
     t.ctl.closeLarge();
@@ -685,7 +817,7 @@ describe("detail pane", () => {
     const t = await detailReady({ preview });
     t.ctl.openLarge(MIRI);
     await flush();
-    expect(t.svc.imageList).toHaveBeenLastCalledWith(`g1:list:${MIRI}`, "jwst", MIRI);
+    expect(t.svc.imageList).toHaveBeenLastCalledWith(attemptOf(`g1:list:${MIRI}`), "jwst", MIRI);
     expect(preview).toHaveBeenCalledTimes(1);
     expect(preview.mock.calls[0].slice(2)).toEqual([MIRI, jwstL3Set(MIRI).entries[1].previewFilename, "pane"]);
     panes.resolve(previewRef(MIRI, "x", "pane"));
@@ -702,7 +834,7 @@ describe("detail pane", () => {
     t.ctl.openLarge(NIRCAM);
     await flush();
     const firstLarge = preview.mock.calls.find((c) => c[4] === "large")?.[0];
-    expect(firstLarge).toBe(`g1:preview:${NIRCAM}:${F187N.previewFilename}:large`);
+    expect(firstLarge).toEqual(attemptOf(`g1:preview:${NIRCAM}:${F187N.previewFilename}:large`));
     t.ctl.largeStepImage(1);
     expect(t.store.getState().large.imageKey).toBe(jwstL3Set(NIRCAM).entries[2].key);
     expect(t.svc.cancel).toHaveBeenCalledWith({ requestIds: [firstLarge] });
@@ -760,6 +892,34 @@ describe("detail pane", () => {
     expect(vi.mocked(t.svc.thumbnail).mock.calls.length).toBeLessThanOrEqual(6);
   });
 
+  it("asks for filmstrip thumbnails after the visible cards, never ahead of them", async () => {
+    const list = rows(8);
+    const ids = list.map((r) => r.datasetId);
+    const pending: Deferred<MastImageRef>[] = [];
+    const thumbnail = vi.fn(() => {
+      const d = deferred<MastImageRef>();
+      pending.push(d);
+      return d.promise;
+    });
+    const t = await ready({ search: vi.fn(async () => page(list)), imageList: vi.fn(async (_id: string, _m: MastMissionId, datasetId: string) => jwstL3Set(datasetId)), thumbnail });
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [ids[0]], visible: ids, ahead: [] });
+    await flush();
+    const q = t.store.getState().thumbs;
+    expect(q.selected).toEqual([ids[0]]);
+    expect(q.visible.slice(0, ids.length)).toEqual(ids);
+    const strip = q.visible.slice(ids.length);
+    expect(strip.length).toBeGreaterThan(0);
+    expect(strip.every((k) => k.startsWith(`${ids[0]}:`))).toBe(true);
+    const asked = () => thumbnail.mock.calls.map((c) => (c as unknown[])[0]);
+    expect(asked()).toEqual(ids.slice(0, 4).map((id) => `g1:thumb:${id}`));
+    pending.slice(0, 4).forEach((d, i) => d.resolve(thumbRef(ids[i])));
+    await flush();
+    await flush();
+    expect(asked().slice(4, 8)).toEqual(ids.slice(4, 8).map((id) => `g1:thumb:${id}`));
+  });
+
   it("makes no image requests for exclusive data or while the pane is hidden", async () => {
     const t = await ready({
       search: vi.fn(async () => page([row("jw01234-o001_t001_miri", { access: "PROPRIETARY", releaseDate: "2027-03-02T00:00:00" }), row(MIRI)])),
@@ -777,7 +937,7 @@ describe("detail pane", () => {
     await flush();
     expect(t.svc.imageList).not.toHaveBeenCalled();
     t.ctl.toggleDetail();
-    expect(t.svc.imageList).toHaveBeenCalledWith(`g1:list:${MIRI}`, "jwst", MIRI);
+    expect(t.svc.imageList).toHaveBeenCalledWith(attemptOf(`g1:list:${MIRI}`), "jwst", MIRI);
   });
 
   it("opens the drawer in a narrow window and sends focus back to the card when it closes", async () => {
@@ -785,9 +945,9 @@ describe("detail pane", () => {
     t.ctl.setNarrow(true);
     t.ctl.select(MIRI);
     await flush();
-    expect(t.svc.imageList).not.toHaveBeenCalledWith(`g1:list:${MIRI}`, "jwst", MIRI);
+    expect(t.svc.imageList).not.toHaveBeenCalledWith(attemptOf(`g1:list:${MIRI}`), "jwst", MIRI);
     t.ctl.openDrawer();
-    expect(t.svc.imageList).toHaveBeenLastCalledWith(`g1:list:${MIRI}`, "jwst", MIRI);
+    expect(t.svc.imageList).toHaveBeenLastCalledWith(attemptOf(`g1:list:${MIRI}`), "jwst", MIRI);
     t.ctl.closeDrawer();
     const s = t.store.getState();
     expect(s.detail.drawerOpen).toBe(false);
@@ -1039,5 +1199,100 @@ describe("mission probes", () => {
     await flush();
     expect(search).toHaveBeenCalledTimes(2);
     expect(resultsState(t.store.getState())).toBe("ready");
+  });
+});
+
+describe("cache clearing, missing files and exclusive rows", () => {
+  const NIRCAM = "jw02739-o001_t001_nircam";
+  const MIRI = "jw02739-o002_t001_miri";
+
+  async function shown(over: Partial<ArchiveServices> = {}) {
+    const t = await ready({
+      search: vi.fn(async () => page([row(NIRCAM), row(MIRI)])),
+      imageList: vi.fn(async (_id: string, _m: MastMissionId, datasetId: string) => jwstL3Set(datasetId)),
+      ...over,
+    });
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    await flush();
+    t.ctl.setThumbDemand({ selected: [], visible: [NIRCAM, MIRI], ahead: [] });
+    await flush();
+    return t;
+  }
+
+  const cardCalls = (t: { svc: ArchiveServices }) => vi.mocked(t.svc.thumbnail).mock.calls.filter((c) => c[4] === null).map((c) => c[2]);
+
+  it("asks again for the thumbnails and the image list on screen after the cache is cleared", async () => {
+    const t = await shown();
+    expect(cardCalls(t)).toEqual([NIRCAM, MIRI]);
+    expect(t.svc.imageList).toHaveBeenCalledTimes(1);
+    await t.ctl.clearCache();
+    await flush();
+    expect(cardCalls(t)).toEqual([NIRCAM, MIRI, NIRCAM, MIRI]);
+    expect(t.svc.imageList).toHaveBeenCalledTimes(2);
+    expect(t.store.getState().thumbs.done).toMatchObject({ [NIRCAM]: "ready", [MIRI]: "ready" });
+    expect(t.store.getState().toast?.text).toBe("MAST cache cleared: 2.5 MB freed");
+  });
+
+  it("keeps what is shown when the cache could not be cleared", async () => {
+    const t = await shown({ cacheClear: vi.fn(async () => Promise.reject(mastErr("mast_cache", {}, "access denied"))) });
+    await t.ctl.clearCache();
+    await flush();
+    expect(cardCalls(t)).toEqual([NIRCAM, MIRI]);
+    expect(t.store.getState().thumbRefs[NIRCAM]).toBeDefined();
+    expect(t.store.getState().toast?.text).toBe("Could not clear the MAST cache: access denied");
+  });
+
+  it("marks a thumbnail failed when the webview cannot load its file, and R loads it again", async () => {
+    const t = await shown();
+    const url = t.store.getState().thumbRefs[NIRCAM].url;
+    t.ctl.imageMissing(url);
+    expect(t.store.getState().thumbs.done[NIRCAM]).toBe("failed");
+    expect(t.store.getState().thumbs.failures[NIRCAM]?.error.code).toBe("mast_cache");
+    t.ctl.retry();
+    await flush();
+    expect(cardCalls(t)).toEqual([NIRCAM, MIRI, NIRCAM]);
+    expect(t.store.getState().thumbs.done[NIRCAM]).toBe("ready");
+  });
+
+  it("starts no thumbnail for exclusive rows of a mission that takes no token", async () => {
+    const open = row(NIRCAM);
+    const locked = row("jw09999-o001_t001_nircam", { access: "EXCLUSIVE", releaseDate: "2999-01-01T00:00:00" });
+    const t = await ready({ search: vi.fn(async () => page([open, locked])) });
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [locked.datasetId], visible: [open.datasetId, locked.datasetId], ahead: [] });
+    await flush();
+    expect(cardCalls(t)).toEqual([open.datasetId]);
+  });
+});
+
+describe("filmstrip and the card thumbnail", () => {
+  it("does not download the representative image's thumbnail while the card thumbnail for it is loading", async () => {
+    const NIRCAM = "jw02739-o001_t001_nircam";
+    const set = jwstL3Set(NIRCAM);
+    const rep = set.entries[set.representative ?? 0].thumbnailFilename;
+    const card = deferred<MastImageRef>();
+    const thumbnail = vi.fn((_id: string, _m: MastMissionId, datasetId: string, _l: string, filename: string | null) =>
+      filename === null && datasetId === NIRCAM ? card.promise : Promise.resolve({ ...thumbRef(datasetId), filename: filename ?? `${datasetId}_thumb.jpg` }),
+    );
+    const t = await ready({
+      search: vi.fn(async () => page([row(NIRCAM)])),
+      imageList: vi.fn(async () => set),
+      thumbnail,
+    });
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [NIRCAM], visible: [NIRCAM], ahead: [] });
+    await flush();
+    await flush();
+    const named = () => thumbnail.mock.calls.map((c) => c[4]).filter((f) => f !== null);
+    expect(named().length).toBeGreaterThan(0);
+    expect(named()).not.toContain(rep);
+    card.resolve({ ...thumbRef(NIRCAM), filename: "_representative.jpg" });
+    await flush();
+    await flush();
+    expect(named()).not.toContain(rep);
+    expect(named()).toHaveLength(set.entries.length - 1);
   });
 });

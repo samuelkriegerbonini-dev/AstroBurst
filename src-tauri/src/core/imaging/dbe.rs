@@ -28,7 +28,7 @@ pub const REASON_FINITE: &str = "finite";
 pub const REASON_STAR: &str = "star";
 pub const REASON_DEVIATION: &str = "deviation";
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct DbeConfig {
     pub sample_radius: usize,

@@ -25,7 +25,7 @@ vi.mock("react/jsx-dev-runtime", async (importOriginal) => {
 
 vi.mock("../../../services/toneFile", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/toneFile")>()),
-  applyToneFile: applyToneFileMock,
+  recordToneFile: applyToneFileMock,
 }));
 
 import { CompositeProvider } from "../../../context/CompositeContext";
@@ -153,9 +153,9 @@ describe("CurvesPanel run button", () => {
     (runButton().onClick as () => void)();
     await vi.waitFor(() => expect(onProcessingDone).toHaveBeenCalledTimes(1));
     expect(applyToneFileMock).toHaveBeenCalledTimes(1);
-    const [path, dir, options] = applyToneFileMock.mock.calls[0];
+    const [scope, path, options] = applyToneFileMock.mock.calls[0];
+    expect(scope).toEqual({ imageKey: file.path, basePath: null });
     expect(path).toBe(file.path);
-    expect(dir).toBe("C:/out");
     expect(options.curve).toEqual(MOVED_CURVE);
     expect(onProcessingDone.mock.calls[0][0].fits_path).toBe("C:/out/moved_tone.fits");
   });

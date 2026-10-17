@@ -51,7 +51,7 @@ describe("DEFAULT_DOCK_LAYOUT", () => {
     expect(DEFAULT_DOCK_LAYOUT.anchors).toEqual({
       "left-top": ["files", "info"],
       "left-bottom": ["compose"],
-      "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "stacking"],
+      "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "stacking"],
       "right-bottom": ["synth", "export", "config", "log"],
     });
     expect(anchorOf(DEFAULT_DOCK_LAYOUT, "log")).toBe("right-bottom");
@@ -120,17 +120,17 @@ describe("DOCK_TOOL_META", () => {
 
   it("keeps today's strip labels and panel labels", () => {
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].shortLabel)).toEqual([
-      "Files", "Info", "Comp", "Headers", "Image", "Astro", "Phot", "Cube", "Proc", "Stack", "Synth", "Export", "Config", "Log",
+      "Files", "Info", "Comp", "Headers", "Image", "Astro", "Phot", "Cube", "Proc", "Hist", "Stack", "Synth", "Export", "Config", "Log",
     ]);
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].label)).toEqual([
-      "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Cube", "Processing", "Stacking", "Synth", "Export", "Settings", "Log",
+      "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Cube", "Processing", "History", "Stacking", "Synth", "Export", "Settings", "Log",
     ]);
     expect(DOCK_TOOL_META.config.keywords).toEqual(["Config"]);
   });
 
   it("lists the tools in strip order with the analysis tools in the slot Analysis had", () => {
     expect(DOCK_TOOL_IDS).toEqual([
-      "files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "stacking", "synth", "export", "config", "log",
+      "files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "stacking", "synth", "export", "config", "log",
     ]);
     expect((DOCK_TOOL_IDS as readonly string[]).includes("analysis")).toBe(false);
   });
@@ -167,7 +167,7 @@ describe("DOCK_TOOL_META", () => {
   });
 
   it("gives Files and Info the sidebar minimum and every other tool the right-column minimum", () => {
-    expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].minWidth)).toEqual([180, 180, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280]);
+    expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].minWidth)).toEqual([180, 180, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280]);
   });
 });
 
@@ -175,7 +175,7 @@ describe("dockReducer move to another anchor", () => {
   it("appends to the target, opens the tool there and leaves the source's open tool alone", () => {
     const next = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-bottom" });
     expect(next.anchors["left-bottom"]).toEqual(["compose", "image"]);
-    expect(next.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "processing", "stacking"]);
+    expect(next.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "processing", "history", "stacking"]);
     expect(next.active).toEqual({ "left-top": "files", "left-bottom": "image", "right-top": null, "right-bottom": null });
     expect(dockLayoutErrors(next)).toEqual([]);
   });
@@ -221,14 +221,14 @@ describe("dockReducer move inside the same anchor", () => {
 
   it("never changes the open tool and equals reorder", () => {
     const moved = dockReducer(open, { type: "move", tool: "headers", anchor: "right-top", index: 3 });
-    expect(moved.anchors["right-top"]).toEqual(["image", "astrometry", "photometry", "headers", "cube", "processing", "stacking"]);
+    expect(moved.anchors["right-top"]).toEqual(["image", "astrometry", "photometry", "headers", "cube", "processing", "history", "stacking"]);
     expect(moved.active).toEqual(open.active);
     expect(moved).toEqual(dockReducer(open, { type: "reorder", anchor: "right-top", from: 0, to: 3 }));
   });
 
   it("does not open a closed dragged tool", () => {
     const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "stacking", anchor: "right-top", index: 0 });
-    expect(moved.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing"]);
+    expect(moved.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history"]);
     expect(moved.active["right-top"]).toBeNull();
   });
 
@@ -242,20 +242,20 @@ describe("dockReducer move inside the same anchor", () => {
 
   it("clamps the index to the last position", () => {
     expect(dockReducer(open, { type: "move", tool: "headers", anchor: "right-top", index: 99 }).anchors["right-top"])
-      .toEqual(["image", "astrometry", "photometry", "cube", "processing", "stacking", "headers"]);
+      .toEqual(["image", "astrometry", "photometry", "cube", "processing", "history", "stacking", "headers"]);
   });
 });
 
 describe("dockReducer reorder", () => {
   it("moves an item inside one anchor without touching the open tools", () => {
     const layout = withActive({ "right-top": "image" });
-    const next = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 6, to: 0 });
-    expect(next.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing"]);
+    const next = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 7, to: 0 });
+    expect(next.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history"]);
     expect(next.active).toEqual(layout.active);
   });
 
   it("returns the same object out of bounds and when from equals to", () => {
-    for (const [from, to] of [[-1, 0], [0, 7], [7, 0], [1, 1], [0.5, 2]]) {
+    for (const [from, to] of [[-1, 0], [0, 8], [8, 0], [1, 1], [0.5, 2]]) {
       expect(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from, to })).toBe(DEFAULT_DOCK_LAYOUT);
     }
   });

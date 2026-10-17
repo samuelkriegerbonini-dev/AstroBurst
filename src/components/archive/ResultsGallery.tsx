@@ -6,6 +6,10 @@ import type { ArchiveController } from "./state/archiveController";
 import { galleryColumns, galleryMove } from "./logic/gridNav";
 import { thumbStatus } from "./logic/thumbQueue";
 import { resultsKeyCommand } from "./logic/detailKeys";
+import { previewsAllowed } from "./logic/detailView";
+import { pausedSlot } from "./logic/errorCopy";
+import { useNow } from "./state/useNow";
+import { rovingRow, rowKeyMap } from "./logic/resultsView";
 
 interface ResultsGalleryProps {
   state: ArchiveState;
@@ -23,8 +27,8 @@ const ROW_H = CARD_H + GAP;
 const OVERSCAN_ROWS = 1;
 const MAX_MOUNTED = 200;
 
-function cardSelector(id: string): string {
-  return `[data-testid="mast-card"][data-dataset="${CSS.escape(id)}"]`;
+function cardSelector(rowKey: string): string {
+  return `[data-testid="mast-card"][data-row-key="${CSS.escape(rowKey)}"]`;
 }
 
 export default function ResultsGallery({ state, ctl, rows, missionLabel, onOpenDetail }: ResultsGalleryProps) {
@@ -57,8 +61,9 @@ export default function ResultsGallery({ state, ctl, rows, missionLabel, onOpenD
   const lastVisible = Math.min(rowCount, Math.ceil((scrollTop + box.height - PAD) / ROW_H));
   const start = Math.max(0, firstVisible - OVERSCAN_ROWS);
   const end = Math.min(rowCount, lastVisible + OVERSCAN_ROWS, start + Math.max(1, Math.floor(MAX_MOUNTED / columns)));
-  const selectedIndex = rows.findIndex((r) => r.datasetId === state.selectedId);
-  const rovingIndex = selectedIndex >= 0 ? selectedIndex : 0;
+  const keyOf = useMemo(() => rowKeyMap(state.results?.rows ?? rows), [state.results, rows]);
+  const keyAt = (index: number) => keyOf.get(rows[index]) ?? rows[index].datasetId;
+  const rovingIndex = rovingRow(rows, keyOf, state.selectedId, state.selectedKey);
   const rovingMounted = rovingIndex >= start * columns && rovingIndex < end * columns;
 
   const demand = useMemo(() => {
@@ -107,27 +112,30 @@ export default function ResultsGallery({ state, ctl, rows, missionLabel, onOpenD
     [columns],
   );
 
-  const onSelect = useCallback((datasetId: string) => ctl.select(datasetId), [ctl]);
+  const onSelect = useCallback((datasetId: string, rowKey: string) => ctl.select(datasetId, rowKey), [ctl]);
   const onOpen = useCallback((datasetId: string) => ctl.openLarge(datasetId), [ctl]);
+  const onThumbError = useCallback((url: string) => ctl.imageMissing(url), [ctl]);
+  const onRetry = useCallback((datasetId: string) => ctl.retryThumbs([datasetId]), [ctl]);
+  useNow(state.thumbs.inflight.length > 0 ? 1000 : null);
 
   useEffect(() => {
     const req = state.focusRequest;
     if (!req || req.seq === handledFocus.current) return;
     handledFocus.current = req.seq;
-    const index = rows.findIndex((r) => r.datasetId === req.datasetId);
-    if (index < 0) return;
-    pendingFocus.current = req.datasetId;
+    if (!rows.some((r) => r.datasetId === req.datasetId)) return;
+    const index = rovingRow(rows, keyOf, req.datasetId, state.selectedKey);
+    const key = keyOf.get(rows[index]) ?? req.datasetId;
+    pendingFocus.current = key;
     ensureVisible(index);
-    const el = scrollRef.current?.querySelector<HTMLElement>(cardSelector(req.datasetId));
+    const el = scrollRef.current?.querySelector<HTMLElement>(cardSelector(key));
     if (!el) return;
     pendingFocus.current = null;
     el.focus({ preventScroll: true });
-  }, [state.focusRequest, rows, ensureVisible]);
+  }, [state.focusRequest, state.selectedKey, rows, keyOf, ensureVisible]);
 
   const onGridFocus = (e: FocusEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget || rows.length === 0) return;
-    const target = rows[rovingIndex];
-    pendingFocus.current = target.datasetId;
+    pendingFocus.current = keyAt(rovingIndex);
     ensureVisible(rovingIndex);
   };
 
@@ -156,15 +164,17 @@ export default function ResultsGallery({ state, ctl, rows, missionLabel, onOpenD
     if (!move) return;
     e.preventDefault();
     const target = rows[move.index];
-    pendingFocus.current = target.datasetId;
-    if (target.datasetId !== state.selectedId) ctl.select(target.datasetId);
+    pendingFocus.current = keyAt(move.index);
+    if (move.index !== rovingIndex) ctl.select(target.datasetId, keyAt(move.index));
     ensureVisible(move.index);
     if (move.atEnd) void ctl.loadMore({ auto: true });
   };
 
   const now = Date.now();
+  const paused = state.thumbs.pausedUntil !== null ? pausedSlot(state.thumbs, now) : null;
   const rowIndexes = Array.from({ length: Math.max(0, end - start) }, (_, i) => start + i);
   const results = state.results;
+  const mission = results ? state.missions.find((m) => m.id === results.mission) : undefined;
   return (
     <div ref={scrollRef} className="ab-mast-scroll" onScroll={onScroll}>
       <div
@@ -184,19 +194,28 @@ export default function ResultsGallery({ state, ctl, rows, missionLabel, onOpenD
             {rows.slice(r * columns, r * columns + columns).map((row, c) => {
               const index = r * columns + c;
               const id = row.datasetId;
+              const rowKey = keyAt(index);
+              const status = thumbStatus(state.thumbs, id, now);
+              const started = state.thumbs.startedAt[id];
               return (
                 <DatasetCard
-                  key={id}
+                  key={rowKey}
                   row={row}
+                  rowKey={rowKey}
                   missionLabel={missionLabel}
-                  status={thumbStatus(state.thumbs, id, now)}
+                  status={status}
                   thumb={state.thumbRefs[id]}
-                  reason={state.thumbs.reasons[id]}
-                  selected={id === state.selectedId}
+                  failure={state.thumbs.failures[id]}
+                  paused={status === "paused" ? paused : null}
+                  loadingSec={status === "loading" && started !== undefined ? Math.max(0, Math.floor((now - started) / 1000)) : null}
+                  locked={!!mission && !previewsAllowed(row, mission)}
+                  selected={index === rovingIndex && id === state.selectedId}
                   tabbable={index === rovingIndex}
                   onPick={onSelect}
                   onFocusCard={onSelect}
                   onOpen={onOpen}
+                  onRetry={onRetry}
+                  onThumbError={onThumbError}
                 />
               );
             })}

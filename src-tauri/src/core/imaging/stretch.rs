@@ -1,7 +1,7 @@
 use ndarray::{Array2, Zip};
 use rayon::prelude::*;
 
-fn finite_min_max(data: &Array2<f32>) -> (f32, f32) {
+pub(crate) fn finite_min_max(data: &Array2<f32>) -> (f32, f32) {
     let mut mn = f32::INFINITY;
     let mut mx = f32::NEG_INFINITY;
     match data.as_slice() {
@@ -164,7 +164,8 @@ pub fn arcsinh_stretch_rgb_with_stats(
     (ro, go, bo)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GhsParams {
     pub d: f64,
     pub b: f64,

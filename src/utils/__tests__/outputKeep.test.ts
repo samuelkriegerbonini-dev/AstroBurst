@@ -65,6 +65,7 @@ describe("outputKeepList", () => {
       },
       chain,
       version: 5,
+      historyId: null,
     };
     const keep = outputKeepList({ files: [], records: [record] });
     expect(keep).toEqual(expect.arrayContaining([
@@ -114,6 +115,36 @@ describe("outputKeepList", () => {
       `${OUT}/composite_chain_stretch_3.png`,
     ]));
     expect(outputKeepList({ files: [], records: [], compositeChain: null })).toEqual([]);
+  });
+
+  it("output_keep_list_skips_history_paths", () => {
+    const HISTORY = "C:\\Users\\u\\AppData\\astroburst\\history";
+    const node = (id: string) => `C:/Users/u/AppData/astroburst/history/0123456789abcdef/${id}`;
+    const chain = withStep(
+      withStep(EMPTY_CHAIN, "background", { fitsPath: node("n0001.fits"), previewUrl: asset(node("n0001.png")), dimensions: null }),
+      "denoise",
+      { fitsPath: `${OUT}/A_dn.fits`, previewUrl: asset(`${OUT}/A_dn.png`), dimensions: null },
+    );
+    const record: FileRenderState = {
+      processed: {
+        fitsPath: node("n0002.fits"),
+        previewUrl: `${asset(node("n0002.png"))}?v=4`,
+        dimensions: null,
+        label: "Arcsinh",
+        kind: "processing",
+        inputPath: node("n0001.fits"),
+      },
+      chain,
+      version: 4,
+      historyId: "0123456789abcdef",
+    };
+    const keep = outputKeepList({ files: [file("A")], records: [record], historyDir: HISTORY });
+    expect(keep.filter((p) => p.toLowerCase().replace(/\\/g, "/").includes("/history/"))).toEqual([]);
+    expect(keep).toEqual(expect.arrayContaining([`${OUT}/A_dn.fits`, `${OUT}/A_dn.png`, `${OUT}/A.png`, "D:/data/A.fits"]));
+
+    const sibling = outputKeepList({ files: [], records: [record], historyDir: `${HISTORY}-old` });
+    expect(sibling).toContain(node("n0002.fits"));
+    expect(outputKeepList({ files: [], records: [record] })).toContain(node("n0001.fits"));
   });
 
   it("strips plane fragments and collapses duplicates that differ only by case or slashes", () => {

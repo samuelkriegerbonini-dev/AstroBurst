@@ -7,7 +7,9 @@ use crate::cmd::common::{
     save_auto_stf_preview_png, write_derived_fits,
 };
 use crate::core::imaging::background::BackgroundMode;
-use crate::core::imaging::dbe::{extract_background_dbe, DbeConfig};
+use crate::core::imaging::dbe::DbeConfig;
+use crate::core::ops::background::BackgroundModel;
+use crate::core::ops::{run_op, OpInput, OpSpec, OpVersion};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::infra::fits::writer::filter_header;
@@ -19,8 +21,7 @@ use crate::types::constants::{
 use crate::types::header::HduHeader;
 
 pub const RES_DBE_MODEL_FITS: &str = "model_fits";
-pub const RES_DBE_REJECTED_COUNT: &str = "rejected_count";
-pub const RES_DBE_SAMPLES: &str = "samples";
+pub use crate::types::constants::{RES_DBE_REJECTED_COUNT, RES_DBE_SAMPLES};
 pub const ABPROC_KEY: &str = "ABPROC";
 pub const ABPROC_DBE_SUBTRACT: &str = "dbe-subtract";
 pub const ABPROC_DBE_DIVIDE: &str = "dbe-divide";
@@ -57,37 +58,43 @@ fn run_dbe(
     let entry = load_cached(path)?;
     let header = source_header(path, &entry);
 
-    let result = extract_background_dbe(entry.arr(), config, progress)?;
+    let spec = OpSpec::Background { v: OpVersion, model: BackgroundModel::Spline(config.clone()) };
+    let t0 = std::time::Instant::now();
+    let mut result = run_op(&spec, &OpInput::mono(entry.arr(), header.as_ref()), progress)?;
+    let elapsed_ms = t0.elapsed().as_millis() as u64;
+    let corrected = result.planes.swap_remove(0);
+    let model = result.model.take().ok_or_else(|| anyhow::anyhow!("the DBE op returned no model"))?;
 
     let stem = output_stem(path);
-    let (rows, cols) = result.corrected.dim();
+    let (rows, cols) = corrected.dim();
     let corrected_png = format!("{}/{}_dbe_corrected.png", output_dir, stem);
     let model_png = format!("{}/{}_dbe_model.png", output_dir, stem);
-    save_auto_stf_preview_png(&result.corrected, &corrected_png)?;
-    save_auto_stf_preview_png(&result.model, &model_png)?;
+    save_auto_stf_preview_png(&corrected, &corrected_png)?;
+    save_auto_stf_preview_png(&model, &model_png)?;
 
     let corrected_fits = format!("{}/{}_dbe_corrected.fits", output_dir, stem);
     let model_fits = format!("{}/{}_dbe_model.fits", output_dir, stem);
     let corrected_header = output_header(header.as_ref(), abproc_for_mode(&config.mode));
     let model_header = output_header(header.as_ref(), ABPROC_DBE_MODEL);
-    write_derived_fits(&corrected_fits, &result.corrected, Some(&corrected_header))?;
-    write_derived_fits(&model_fits, &result.model, Some(&model_header))?;
+    write_derived_fits(&corrected_fits, &corrected, Some(&corrected_header))?;
+    write_derived_fits(&model_fits, &model, Some(&model_header))?;
 
-    let stats = compute_image_stats(&result.corrected);
-    GLOBAL_IMAGE_CACHE.insert_synthetic(&corrected_fits, Arc::new(result.corrected), stats);
+    let stats = compute_image_stats(&corrected);
+    GLOBAL_IMAGE_CACHE.insert_synthetic(&corrected_fits, Arc::new(corrected), stats);
 
+    let extra = |key: &str| result.extras.get(key).cloned().unwrap_or(serde_json::Value::Null);
     Ok(json!({
         RES_CORRECTED_PNG: corrected_png,
         RES_MODEL_PNG: model_png,
         RES_CORRECTED_FITS: corrected_fits,
         RES_CACHE_KEY: corrected_fits,
         RES_DBE_MODEL_FITS: model_fits,
-        RES_SAMPLE_COUNT: result.sample_count,
-        RES_DBE_REJECTED_COUNT: result.rejected_count,
-        RES_RMS_RESIDUAL: result.rms_residual,
-        RES_ELAPSED_MS: result.elapsed_ms,
+        RES_SAMPLE_COUNT: extra(RES_SAMPLE_COUNT),
+        RES_DBE_REJECTED_COUNT: extra(RES_DBE_REJECTED_COUNT),
+        RES_RMS_RESIDUAL: extra(RES_RMS_RESIDUAL),
+        RES_ELAPSED_MS: elapsed_ms,
         RES_DIMENSIONS: [cols, rows],
-        RES_DBE_SAMPLES: serde_json::to_value(&result.samples)?,
+        RES_DBE_SAMPLES: extra(RES_DBE_SAMPLES),
     }))
 }
 

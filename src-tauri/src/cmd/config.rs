@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
+use tauri::Manager;
 
 use crate::cmd::common::blocking_cmd;
 use crate::infra::config;
@@ -28,11 +29,25 @@ pub async fn get_config() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub async fn update_config(field: String, value: serde_json::Value) -> Result<serde_json::Value, String> {
+pub async fn update_config(
+    app: tauri::AppHandle,
+    field: String,
+    value: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let managed = app_managed_dirs(&app);
     blocking_cmd!({
-        let cfg = config::update_config_field(&field, value)?;
+        let reserved: Vec<&Path> = managed.iter().map(PathBuf::as_path).collect();
+        let cfg = config::update_config_field(&field, value, &reserved)?;
         Ok(serde_json::to_value(&cfg)?)
     })
+}
+
+fn app_managed_dirs(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let paths = app.path();
+    [paths.app_data_dir(), paths.app_local_data_dir()]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect()
 }
 
 #[tauri::command]

@@ -87,7 +87,7 @@ impl MissionEndpoint {
         P: DeserializeOwned,
     {
         self.client
-            .post_json(&self.path("post_list_products"), dataset_ids)
+            .post_json_present(&self.path("post_list_products"), dataset_ids)
             .await
     }
 
@@ -98,7 +98,7 @@ impl MissionEndpoint {
     ) -> MastResult<Vec<ImageListResult>> {
         let query = present([("fileset_name", Some(fileset_name)), ("category", category)]);
         self.client
-            .get_json(&self.path("get_image_list"), &query)
+            .get_json_present(&self.path("get_image_list"), &query)
             .await
     }
 

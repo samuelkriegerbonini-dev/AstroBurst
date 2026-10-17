@@ -1,0 +1,49 @@
+{
+  "axis_unit": "",
+  "centroid": 0.652447754484626,
+  "continuum_channels": 15,
+  "continuum_level": 303.33848875704086,
+  "continuum_linear": true,
+  "continuum_reference": 0.652447754484626,
+  "continuum_sigma": 21.60127794342041,
+  "continuum_slope": 1273.745786453307,
+  "continuum_windows": [
+    [
+      0,
+      7
+    ],
+    [
+      53,
+      59
+    ]
+  ],
+  "equivalent_width": -0.0006190416463885339,
+  "fit": {
+    "amplitude": 774.5711548302147,
+    "amplitude_err": 20.94542877634427,
+    "centre": 0.6528009293339454,
+    "centre_err": 3.7069847371338145e-6,
+    "chi2": 40.318297649216326,
+    "converged": true,
+    "dof": 38,
+    "iterations": 16,
+    "sigma": 0.00011742621741384115,
+    "sigma_err": 3.627186793583182e-6
+  },
+  "flux": 0.1877811088125112,
+  "flux_err": 0.017289458294879823,
+  "flux_unit": "",
+  "fwhm": null,
+  "n_channels": 41,
+  "notes": [
+    "continuum-subtracted profile has a negative second moment: sigma undefined",
+    "continuum: first-order line fitted over 15 channels in 0..=7 and 53..=59, level quoted at the centroid"
+  ],
+  "peak": 775.6360577753919,
+  "peak_channel": 30,
+  "sigma": null,
+  "snr": 10.861017483012844,
+  "velocity": null,
+  "z0": 10,
+  "z1": 50
+}

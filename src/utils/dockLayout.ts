@@ -1,4 +1,4 @@
-export const DOCK_TOOL_IDS = ["files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "stacking", "synth", "export", "config", "log"] as const;
+export const DOCK_TOOL_IDS = ["files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "stacking", "synth", "export", "config", "log"] as const;
 export type DockToolId = (typeof DOCK_TOOL_IDS)[number];
 export const DOCK_ANCHORS = ["left-top", "left-bottom", "right-top", "right-bottom"] as const;
 export type DockAnchor = (typeof DOCK_ANCHORS)[number];
@@ -98,6 +98,16 @@ export const DOCK_TOOL_META: Record<DockToolId, DockToolMeta> = {
     keepGroup: "analysis",
   },
   processing: { id: "processing", label: "Processing", shortLabel: "Proc", accent: "var(--ab-amber)", needsFile: true, mount: "whileOpen", minWidth: 280 },
+  history: {
+    id: "history",
+    label: "History",
+    shortLabel: "Hist",
+    accent: "var(--ab-amber)",
+    keywords: ["Undo", "Redo", "Processing history", "Re-run"],
+    needsFile: true,
+    mount: "whileOpen",
+    minWidth: 280,
+  },
   stacking: { id: "stacking", label: "Stacking", shortLabel: "Stack", accent: "var(--ab-blue)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   synth: { id: "synth", label: "Synth", shortLabel: "Synth", accent: "var(--ab-rose)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   export: { id: "export", label: "Export", shortLabel: "Export", accent: "var(--ab-amber)", needsFile: true, mount: "whileOpen", minWidth: 280 },
@@ -159,7 +169,7 @@ export const DEFAULT_DOCK_LAYOUT: DockLayout = freezeLayout({
   anchors: {
     "left-top": ["files", "info"],
     "left-bottom": ["compose"],
-    "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "stacking"],
+    "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "stacking"],
     "right-bottom": ["synth", "export", "config", "log"],
   },
   active: { "left-top": "files", "left-bottom": "compose", "right-top": null, "right-bottom": null },

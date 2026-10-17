@@ -1,19 +1,27 @@
 let _outputDir: string | null = null;
 let _outputDirTiles: string | null = null;
 let _exportDir: string | null = null;
+let _historyDir: string | null = null;
 let _resolving: Promise<string> | null = null;
 let _resolvingExport: Promise<string> | null = null;
 
-const FALLBACK = "./output";
+const OUTPUT_DIR_NAME = "output";
+const HISTORY_DIR_NAME = "history";
+const FALLBACK = `./${OUTPUT_DIR_NAME}`;
+const HISTORY_FALLBACK = `./${HISTORY_DIR_NAME}`;
 const EXPORT_FALLBACK = ".";
 
-async function resolveTauriOutputDir(): Promise<string> {
+async function resolveAppDataChild(name: string, fallback: string): Promise<string> {
   try {
     const { appDataDir, join } = await import("@tauri-apps/api/path");
-    return await join(await appDataDir(), "output");
+    return await join(await appDataDir(), name);
   } catch {
-    return FALLBACK;
+    return fallback;
   }
+}
+
+function resolveTauriOutputDir(): Promise<string> {
+  return resolveAppDataChild(OUTPUT_DIR_NAME, FALLBACK);
 }
 
 export async function firstResolvedDir(
@@ -66,4 +74,10 @@ export async function getOutputDirTiles(): Promise<string> {
   const base = await getOutputDir();
   _outputDirTiles = `${base}/tiles`;
   return _outputDirTiles;
+}
+
+export async function getHistoryDir(): Promise<string> {
+  if (_historyDir) return _historyDir;
+  _historyDir = await resolveAppDataChild(HISTORY_DIR_NAME, HISTORY_FALLBACK);
+  return _historyDir;
 }

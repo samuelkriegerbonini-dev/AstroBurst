@@ -1,5 +1,7 @@
 import { useState, useCallback } from "react";
-import { applyArcsinhStretch, arcsinhStretchComposite } from "../../services/processing";
+import { arcsinhOptionsOf, arcsinhStretchComposite, recordArcsinhStretch } from "../../services/processing";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import type { ArcsinhResult } from "../../shared/types";
 import { useRenderContext } from "../../context/PreviewContext";
 import { useCompositeStf } from "../../context/CompositeContext";
@@ -22,7 +24,7 @@ interface ArcsinhRun {
 interface ArcsinhStretchPanelProps extends CompositePanelProps {
   selectedFile: { path: string; result?: unknown } | null;
   outputDir?: string;
-  onProcessingDone?: (result: ArcsinhResult) => void;
+  onProcessingDone?: (result: ArcsinhResult) => void | Promise<void>;
   chainedFrom?: string;
   inputPreviewUrl?: string | null;
   inputLabel?: string;
@@ -51,7 +53,11 @@ const ICON = (
 );
 
 export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: ArcsinhStretchPanelProps) {
-  const [factor, setFactor] = useState(50.0);
+  const initial = useRerunInitial("stretch", arcsinhOptionsOf);
+  const [factor, setFactor] = useState(initial?.params.factor ?? 50.0);
+  const applyRerun = useCallback((settings: { factor: number }) => setFactor(settings.factor), []);
+  useRerunUpdates("stretch", initial, arcsinhOptionsOf, applyRerun);
+  const scope = useHistoryScope();
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<ArcsinhRun>("stretch", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -60,7 +66,7 @@ export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./outpu
     ? compositeChainHolds(compositeChain, "stretch", runResult.resultUrl)
     : chainHoldsOutput(chain, "stretch", runResult.res.fits_path));
   const result = holds ? runResult : null;
-  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path && !!scope;
 
   const logMin = linearToLog(FACTOR_MIN);
   const logMax = linearToLog(FACTOR_MAX);
@@ -88,17 +94,18 @@ export default function ArcsinhStretchPanel({ selectedFile, outputDir = "./outpu
       });
       return;
     }
-    if (!selectedFile?.path) return;
+    if (!selectedFile?.path || !scope) return;
     const path = selectedFile.path;
+    const runScope = scope;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     void run(async (ctx) => {
-      const res = await applyArcsinhStretch(path, outputDir, factor);
+      const res = await recordArcsinhStretch(runScope, path, factor);
       if (!ctx.inputUnchanged("stretch")) throw new Error(INPUT_CHANGED_MESSAGE);
-      onProcessingDone?.(res);
+      await onProcessingDone?.(res);
       return { res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     });
-  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, factor, outputDir, run, inputPreviewUrl, inputLabel, onProcessingDone, onCompositeDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, scope, factor, outputDir, run, inputPreviewUrl, inputLabel, onProcessingDone, onCompositeDone]);
 
   return (
     <div className="flex flex-col gap-3 p-4">

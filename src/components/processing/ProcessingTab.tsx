@@ -1,8 +1,8 @@
-import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect, useId } from "react";
+import { lazy, Suspense, memo, useState, useCallback, useMemo, useRef, useEffect, useId, useSyncExternalStore } from "react";
 import { Loader2, ArrowRight } from "lucide-react";
 import { fileKeyOf, getRenderRecord, useFileContext, useRenderActions, useRenderContext } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeActions } from "../../context/CompositeContext";
-import type { ChainEntry, ChainStep, ProcessedKind, ProcessingChain } from "../../shared/types/preview";
+import type { ChainEntry, ChainStep, ProcessingChain } from "../../shared/types/preview";
 import type {
   CompositeChain,
   CompositeChainEntry,
@@ -20,15 +20,11 @@ import {
   inputFor,
   lastStep,
   pixelMathCompareBase,
-  pixelMathInputPreview,
-  pixelMathTarget,
   pngOnlyInputNotice,
   psfUseOf,
   sectionInputName,
   samePath,
   showsPsfCrumb,
-  withStep,
-  withVersionParam,
   type PsfUse,
 } from "../../utils/processingChain";
 import {
@@ -48,7 +44,10 @@ import { useComposeWizardContext } from "../../context/ComposeWizardContext";
 import { useCompositeMode } from "../../hooks/useCompositeMode";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { beginCompositeCheck } from "../../hooks/useProcessingRun";
-import { toDims } from "../../utils/stackingOutputs";
+import { adoptRun, useHistoryController, useHistoryRender, useHistorySnapshot } from "../../hooks/useHistory";
+import { nodeAtPath, opLabel } from "../../utils/historyModel";
+import { historyRerunStore, type PendingRerun } from "../../utils/historyRerunStore";
+import type { HistoryState } from "../../shared/types/ops";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { CompositeInputView } from "./compositeProps";
 import { rgbFitsDisabledReason } from "./rgbFitsNotice";
@@ -107,24 +106,14 @@ const SECTION_STEP: Partial<Record<ProcessingSection, ChainStep>> = {
   pixelmath: "pixelMath",
 };
 
-interface StepDoneResult {
-  previewUrl?: string;
-  corrected_fits?: string;
-  fits_path?: string;
-  dimensions?: number[];
-  psf_source?: PsfSource;
+function recordedNode(result: object): string | undefined {
+  return "node" in result && typeof result.node === "string" ? result.node : undefined;
 }
 
 type CompositePsfEntry = CompositeChainEntry & PsfUse;
 
 function psfSourceOf(result: CompositeStepResult | CompositeDeconvolveResult): PsfSource | undefined {
   return "psf_source" in result ? result.psf_source : undefined;
-}
-
-interface PixelMathDoneResult {
-  fits_path?: string;
-  previewUrl?: string;
-  dimensions?: number[];
 }
 
 const STEP_LABELS: Record<ChainStep, string> = {
@@ -179,53 +168,101 @@ function chainInput(chain: ProcessingChain, step: ChainStep, originalPath: strin
 interface Crumb {
   label: string;
   current: boolean;
+  target?: { node: string | null };
 }
 
 function baseStillIs(key: string, filePath: string, basePath: string): boolean {
   return samePath(chainBasePath(getRenderRecord(key)?.chain ?? EMPTY_CHAIN, filePath), basePath);
 }
 
-function chainCrumbs(first: string, showPsf: boolean, currentOf: (step: ChainStep) => boolean | null): Crumb[] {
-  const crumbs: Crumb[] = [{ label: first, current: false }];
+function chainCrumbs(
+  first: Crumb,
+  showPsf: boolean,
+  currentOf: (step: ChainStep) => boolean | null,
+  targetOf: (step: ChainStep) => Crumb["target"] = () => undefined,
+): Crumb[] {
+  const crumbs: Crumb[] = [first];
   for (const s of CHAIN_ORDER) {
     if (s === "deconv" && showPsf) crumbs.push({ label: "PSF", current: false });
     const current = currentOf(s);
     if (current === null) continue;
-    crumbs.push({ label: INDICATOR_LABELS[s], current });
+    crumbs.push({ label: INDICATOR_LABELS[s], current, target: targetOf(s) });
   }
   return crumbs;
 }
 
-function fileCrumbs(chain: ProcessingChain, displayedFits: string | null, originalName: string): Crumb[] {
-  return chainCrumbs(originalName, showsPsfCrumb(chain.psfKernel, chain.steps.deconv), (s) => {
-    const entry = chain.steps[s];
-    if (!entry) return null;
-    return displayedFits !== null && samePath(entry.fitsPath, displayedFits);
-  });
+function historyNodeOf(history: HistoryState | null, fitsPath: string | undefined) {
+  const doc = history?.read_only === null ? history.doc : null;
+  return doc && history && fitsPath ? nodeAtPath(doc, history.history_dir, fitsPath) : null;
+}
+
+function fileCrumbs(chain: ProcessingChain, displayedFits: string | null, originalName: string, history: HistoryState | null): Crumb[] {
+  const hasHistory = (history?.doc?.nodes.length ?? 0) > 0 && history?.read_only === null;
+  const first: Crumb = { label: originalName, current: false, target: hasHistory ? { node: null } : undefined };
+  return chainCrumbs(
+    first,
+    showsPsfCrumb(chain.psfKernel, chain.steps.deconv),
+    (s) => {
+      const entry = chain.steps[s];
+      if (!entry) return null;
+      return displayedFits !== null && samePath(entry.fitsPath, displayedFits);
+    },
+    (s) => {
+      const node = historyNodeOf(history, chain.steps[s]?.fitsPath);
+      return node ? { node: node.id } : undefined;
+    },
+  );
 }
 
 function compositeCrumbs(chain: CompositeChain, compositePreviewUrl: string | null): Crumb[] {
   const deconv: CompositePsfEntry | undefined = chain.steps.deconv;
-  return chainCrumbs("Composite", showsPsfCrumb(chain.psfKernel, deconv), (s) => {
+  return chainCrumbs({ label: "Composite", current: false }, showsPsfCrumb(chain.psfKernel, deconv), (s) => {
     const entry = chain.steps[s];
     if (!entry) return null;
     return compositePreviewUrl !== null && samePreview(entry.previewUrl, compositePreviewUrl);
   });
 }
 
-function ChainIndicator({ crumbs }: { crumbs: Crumb[] }) {
+function ChainIndicator({ crumbs, onSelect }: { crumbs: Crumb[]; onSelect: (node: string | null) => void }) {
   if (crumbs.length <= 1) return null;
 
   return (
     <div className="flex items-center gap-1 px-4 py-1.5 text-[10px] font-mono text-zinc-600 border-b border-zinc-800/30">
-      {crumbs.map((s, i) => (
-        <span key={i} className="flex items-center gap-1">
-          {i > 0 && <ArrowRight size={8} className="text-zinc-700" />}
-          <span className={s.current ? "text-emerald-400/80" : "text-zinc-500"}>
-            {s.label}
+      {crumbs.map((s, i) => {
+        const tone = s.current ? "text-emerald-400/80" : "text-zinc-500";
+        const target = s.target;
+        return (
+          <span key={i} className="flex items-center gap-1">
+            {i > 0 && <ArrowRight size={8} className="text-zinc-700" />}
+            {target ? (
+              <button
+                type="button"
+                data-history-crumb={target.node ?? "root"}
+                className={`${tone} hover:text-zinc-200 hover:underline`}
+                title={target.node ? `Go to ${s.label} (${target.node})` : "Go to the original image; the history keeps every step"}
+                onClick={() => onSelect(target.node)}
+              >
+                {s.label}
+              </button>
+            ) : (
+              <span className={tone}>{s.label}</span>
+            )}
           </span>
-        </span>
-      ))}
+        );
+      })}
+    </div>
+  );
+}
+
+function RerunNotice({ armed, onCancel }: { armed: PendingRerun; onCancel: () => void }) {
+  return (
+    <div role="note" data-history-rerun="" className="mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-violet-200/90 bg-violet-900/20 border border-violet-700/30 flex items-center gap-2">
+      <span className="flex-1">
+        The next {opLabel(armed.op)} run re-runs {armed.node} and re-applies the steps after it on a new branch.
+      </span>
+      <button type="button" className="text-violet-300 hover:text-white underline" onClick={onCancel}>
+        Cancel
+      </button>
     </div>
   );
 }
@@ -276,7 +313,23 @@ function ProcessingTabInner() {
     };
   }, [currentFileKey]);
   const compositeChain = useCompositeChain();
-  const [active, setActive] = useState<ProcessingSection>("background");
+  const history = useHistoryController();
+  const historyRender = useHistoryRender();
+  const historySnapshot = useHistorySnapshot();
+  const historyTarget = history.target;
+  const historyState = historySnapshot.fileKey === historyTarget?.fileKey ? historySnapshot.state : null;
+  const [active, setActive] = useState<ProcessingSection>(historyRerunStore.get()?.section ?? "background");
+  const pendingRerun = useSyncExternalStore(historyRerunStore.subscribe, historyRerunStore.get, historyRerunStore.get);
+  const armedRerun = useSyncExternalStore(historyRerunStore.subscribe, historyRerunStore.armed, historyRerunStore.armed);
+  const pendingSection = pendingRerun?.section ?? null;
+  const pendingSeq = pendingRerun?.seq ?? null;
+  useEffect(() => {
+    if (pendingSection !== null && pendingSeq !== null) setActive(pendingSection);
+  }, [pendingSection, pendingSeq]);
+  const armedHere =
+    armedRerun && historyTarget && armedRerun.scope.imageKey === historyTarget.scope.imageKey && armedRerun.scope.basePath === historyTarget.scope.basePath
+      ? armedRerun
+      : null;
   const disabledReason = rgbFitsDisabledReason({ fileIsRgb: !!file?.result?.is_rgb, compositeMode });
   const disabledReasonId = useId();
 
@@ -312,62 +365,12 @@ function ProcessingTabInner() {
     };
   }, [compositeMode, compositeChain, compositePreviewUrl]);
 
-  const makeStepDone = useCallback(
-    (step: ChainStep, label: string, inputPath: string | null) =>
-      (result: StepDoneResult) => {
-        if (!runKey || !runPath || !result) return;
-        const fits = (step === "background" ? result.corrected_fits : result.fits_path) ?? null;
-        const previewUrl = result.previewUrl ?? null;
-        const dimensions = toDims(result.dimensions);
-        const kind: ProcessedKind = "processing";
-        const input = inputPath ?? runPath;
-        if (step === "background" && !baseStillIs(runKey, runPath, input)) return;
-        if (!fits) {
-          if (previewUrl) publishProcessed(runKey, { fitsPath: null, previewUrl, dimensions: null, label, kind, inputPath: input });
-          return;
-        }
-        const entry: ChainEntry = {
-          fitsPath: fits,
-          previewUrl: previewUrl ? withVersionParam(previewUrl, Date.now()) : null,
-          dimensions,
-          ...psfUseOf(step, result.psf_source),
-        };
-        publishProcessed(runKey, { fitsPath: fits, previewUrl, dimensions, label, kind, inputPath: input }, (c) => withStep(c, step, entry));
-      },
-    [runKey, runPath, publishProcessed],
-  );
-
-  const handleBackgroundDone = useMemo(
-    () => makeStepDone("background", STEP_LABELS.background, original),
-    [makeStepDone, original],
-  );
-  const handleDenoiseDone = useMemo(
-    () => makeStepDone("denoise", STEP_LABELS.denoise, inputs.denoise.path),
-    [makeStepDone, inputs.denoise.path],
-  );
-  const handleDeconvDone = useMemo(
-    () => makeStepDone("deconv", STEP_LABELS.deconv, inputs.deconv.path),
-    [makeStepDone, inputs.deconv.path],
-  );
-  const handleStretchDone = useMemo(
-    () => makeStepDone("stretch", STEP_LABELS.stretch, inputs.stretch.path),
-    [makeStepDone, inputs.stretch.path],
-  );
-  const handleMaskedStretchDone = useMemo(
-    () => makeStepDone("maskedStretch", STEP_LABELS.maskedStretch, inputs.stretch.path),
-    [makeStepDone, inputs.stretch.path],
-  );
-  const handleLheDone = useMemo(
-    () => makeStepDone("localContrast", "LHE", inputs.localContrast.path),
-    [makeStepDone, inputs.localContrast.path],
-  );
-  const handleHdrDone = useMemo(
-    () => makeStepDone("localContrast", "HDRMT", inputs.localContrast.path),
-    [makeStepDone, inputs.localContrast.path],
-  );
-  const handleToneDone = useMemo(
-    () => makeStepDone("tone", STEP_LABELS.tone, inputs.tone.path),
-    [makeStepDone, inputs.tone.path],
+  const handleStepDone = useCallback(
+    async (result: object) => {
+      if (!historyTarget) return;
+      await adoptRun(historyTarget, historyRender, recordedNode(result));
+    },
+    [historyTarget, historyRender],
   );
 
   const handleCompositeDone = useCallback(
@@ -407,34 +410,6 @@ function ProcessingTabInner() {
       setCompositePreviewUrl(previewUrl);
     },
     [setCompositeAutoStf, setCompositeStf, setCompositeStfLinked, setCompositePreviewUrl, replaceParked, wizardDispatch],
-  );
-
-  const handlePixelMathDone = useCallback(
-    (result: PixelMathDoneResult) => {
-      if (!runKey || !runPath || !result?.fits_path) return;
-      const fits = result.fits_path;
-      const previewUrl = result.previewUrl ?? null;
-      const dimensions = toDims(result.dimensions);
-      const entry: ChainEntry = {
-        fitsPath: fits,
-        previewUrl: previewUrl ? withVersionParam(previewUrl, Date.now()) : null,
-        dimensions,
-      };
-      publishProcessed(
-        runKey,
-        {
-          fitsPath: fits,
-          previewUrl,
-          dimensions,
-          label: STEP_LABELS.pixelMath,
-          kind: "pixelmath",
-          inputPath: pixelMathTarget(processed, runPath),
-          inputPreviewUrl: pixelMathInputPreview(processed, filePreviewUrl),
-        },
-        (c) => withStep(c, "pixelMath", entry),
-      );
-    },
-    [runKey, runPath, processed, filePreviewUrl, publishProcessed],
   );
 
   const handleDebayerPreview = useCallback(
@@ -487,8 +462,16 @@ function ProcessingTabInner() {
 
   const displayedFits = processed?.fitsPath ?? null;
   const originalName = chainBase?.label ?? (file?.name?.split(/[/\\]/).pop()?.replace(/\.(fits?|asdf)$/i, "") || "original");
-  const crumbs = compositeMode ? compositeCrumbs(compositeChain, compositePreviewUrl) : fileCrumbs(chain, displayedFits, originalName);
-  const activeSteps: Partial<Record<ChainStep, unknown>> = compositeMode ? compositeChain.steps : chain.steps;
+  const crumbs = compositeMode ? compositeCrumbs(compositeChain, compositePreviewUrl) : fileCrumbs(chain, displayedFits, originalName, historyState);
+  const presentSteps = useMemo(() => {
+    const steps: Partial<Record<ChainStep, ChainEntry>> = {};
+    for (const s of CHAIN_ORDER) {
+      const entry = chain.steps[s];
+      if (entry && historyNodeOf(historyState, entry.fitsPath)?.present !== false) steps[s] = entry;
+    }
+    return steps;
+  }, [chain, historyState]);
+  const activeSteps: Partial<Record<ChainStep, unknown>> = compositeMode ? compositeChain.steps : presentSteps;
   const activePsfKernel = compositeMode ? compositeChain.psfKernel : chain.psfKernel;
 
   return (
@@ -517,7 +500,9 @@ function ProcessingTabInner() {
         </div>
       </div>
 
-      <ChainIndicator crumbs={crumbs} />
+      <ChainIndicator crumbs={crumbs} onSelect={(node) => void history.goTo(node)} />
+
+      {!compositeMode && armedHere && <RerunNotice armed={armedHere} onCancel={historyRerunStore.disarm} />}
 
       {disabledReason && active !== "curves" && active !== "geometry" && (
         <div id={disabledReasonId} role="note" className="mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
@@ -555,7 +540,7 @@ function ProcessingTabInner() {
             <BackgroundPanel
               selectedFile={backgroundInput}
               outputDir={resolvedDir}
-              onProcessingDone={handleBackgroundDone}
+              onProcessingDone={handleStepDone}
               chainedFrom={bannerFor(inputs.background, compositeInputs?.background)}
               fileKey={runKey}
               compositeMode={compositeMode}
@@ -570,7 +555,7 @@ function ProcessingTabInner() {
             <WaveletPanel
               selectedFile={denoiseInput}
               outputDir={resolvedDir}
-              onProcessingDone={handleDenoiseDone}
+              onProcessingDone={handleStepDone}
               chainedFrom={bannerFor(inputs.denoise, compositeInputs?.denoise)}
               inputPreviewUrl={inputPreviewOf(inputs.denoise)}
               inputLabel={inputLabelOf(inputs.denoise)}
@@ -600,7 +585,7 @@ function ProcessingTabInner() {
             <DeconvolutionPanel
               selectedFile={deconvInput}
               outputDir={resolvedDir}
-              onProcessingDone={handleDeconvDone}
+              onProcessingDone={handleStepDone}
               chainedFrom={bannerFor(inputs.deconv, compositeInputs?.deconv)}
               psfKernel={activePsfKernel}
               inputPreviewUrl={inputPreviewOf(inputs.deconv)}
@@ -618,7 +603,7 @@ function ProcessingTabInner() {
             <ArcsinhStretchPanel
               selectedFile={stretchInput}
               outputDir={resolvedDir}
-              onProcessingDone={handleStretchDone}
+              onProcessingDone={handleStepDone}
               chainedFrom={bannerFor(inputs.stretch, compositeInputs?.stretch)}
               inputPreviewUrl={inputPreviewOf(inputs.stretch)}
               inputLabel={inputLabelOf(inputs.stretch)}
@@ -635,7 +620,7 @@ function ProcessingTabInner() {
             <MaskedStretchPanel
               selectedFile={stretchInput}
               outputDir={resolvedDir}
-              onProcessingDone={handleMaskedStretchDone}
+              onProcessingDone={handleStepDone}
               chainedFrom={bannerFor(inputs.stretch, compositeInputs?.stretch)}
               inputPreviewUrl={inputPreviewOf(inputs.stretch)}
               inputLabel={inputLabelOf(inputs.stretch)}
@@ -652,7 +637,7 @@ function ProcessingTabInner() {
             <LocalContrastPanel
               selectedFile={nonLinearInput}
               outputDir={resolvedDir}
-              onProcessingDone={handleLheDone}
+              onProcessingDone={handleStepDone}
               chainedFrom={bannerFor(inputs.localContrast, compositeInputs?.localContrast)}
               inputPreviewUrl={inputPreviewOf(inputs.localContrast)}
               inputLabel={inputLabelOf(inputs.localContrast)}
@@ -669,7 +654,7 @@ function ProcessingTabInner() {
             <HdrPanel
               selectedFile={nonLinearInput}
               outputDir={resolvedDir}
-              onProcessingDone={handleHdrDone}
+              onProcessingDone={handleStepDone}
               chainedFrom={bannerFor(inputs.localContrast, compositeInputs?.localContrast)}
               inputPreviewUrl={inputPreviewOf(inputs.localContrast)}
               inputLabel={inputLabelOf(inputs.localContrast)}
@@ -686,7 +671,7 @@ function ProcessingTabInner() {
             <CurvesPanel
               selectedFile={toneInput}
               outputDir={resolvedDir}
-              onProcessingDone={handleToneDone}
+              onProcessingDone={handleStepDone}
               chainedFrom={bannerOf(inputs.tone)}
               inputPreviewUrl={inputPreviewOf(inputs.tone)}
               inputLabel={inputLabelOf(inputs.tone)}
@@ -702,7 +687,7 @@ function ProcessingTabInner() {
               selectedFile={file}
               outputDir={resolvedDir}
               chainedFrom={pixelMathChainNotice}
-              onProcessingDone={handlePixelMathDone}
+              onProcessingDone={handleStepDone}
               inputPreviewUrl={pixelMathBase.previewUrl}
               inputLabel={pixelMathBase.label}
               fileKey={runKey}

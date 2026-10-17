@@ -11,6 +11,7 @@ pub use self::astrometry_net_impl::solve_astrometry_net;
 mod astrometry_net_impl {
     use anyhow::{bail, Context, Result};
     use super::{FieldAnnotation, SolveResult, SolveConfig};
+    use crate::infra::net::http::get_with_retry;
     use crate::types::error::AppError;
 
     const REFERER: &str = "https://nova.astrometry.net/api/login";
@@ -18,78 +19,11 @@ mod astrometry_net_impl {
     const SESSION_LOG_CHARS: usize = 8;
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
     const POLLS_PER_LOG: u64 = 10;
-    const GET_ATTEMPTS: u32 = 3;
-    const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
     const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
     const CANCEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-    fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
-        let mut parts = vec![error.to_string()];
-        let mut source = error.source();
-        while let Some(cause) = source {
-            let text = cause.to_string();
-            if !parts.iter().any(|p| p.contains(&text)) {
-                parts.push(text);
-            }
-            source = cause.source();
-        }
-        parts.join(": ")
-    }
-
-    fn is_transient(error: &reqwest::Error) -> bool {
-        error.is_connect() || error.is_request() || error.is_timeout() || error.is_body()
-    }
-
-    async fn get_with_retry(
-        client: &reqwest::Client,
-        url: &str,
-        label: &str,
-        subject: &str,
-        referer: bool,
-    ) -> Result<(reqwest::StatusCode, Vec<u8>)> {
-        let mut last_error: Option<reqwest::Error> = None;
-        for attempt in 1..=GET_ATTEMPTS {
-            if attempt > 1 {
-                tokio::time::sleep(RETRY_BACKOFF * (attempt - 1)).await;
-            }
-            let mut request = client.get(url);
-            if referer {
-                request = request.header("Referer", REFERER);
-            }
-            let response = match request.send().await {
-                Ok(response) => response,
-                Err(error) if is_transient(&error) => {
-                    log::warn!("{label} ({subject}) attempt {attempt}/{GET_ATTEMPTS}: {}", error_chain(&error));
-                    last_error = Some(error);
-                    continue;
-                }
-                Err(error) => bail!("{label} request failed ({subject}): {}", error_chain(&error)),
-            };
-            let status = response.status();
-            if status.is_server_error() && attempt < GET_ATTEMPTS {
-                log::warn!("{label} ({subject}) attempt {attempt}/{GET_ATTEMPTS}: HTTP {status}");
-                continue;
-            }
-            match response.bytes().await {
-                Ok(body) => return Ok((status, body.to_vec())),
-                Err(error) if is_transient(&error) => {
-                    log::warn!("{label} ({subject}) body attempt {attempt}/{GET_ATTEMPTS}: {}", error_chain(&error));
-                    last_error = Some(error);
-                }
-                Err(error) => bail!("{label}: failed to read response body ({subject}): {}", error_chain(&error)),
-            }
-        }
-        match last_error {
-            Some(error) => bail!(
-                "{label} request failed after {GET_ATTEMPTS} attempts ({subject}): {}",
-                error_chain(&error)
-            ),
-            None => bail!("{label} request failed after {GET_ATTEMPTS} attempts ({subject})"),
-        }
-    }
-
     async fn get_json(client: &reqwest::Client, url: &str, label: &str, subject: &str) -> Result<serde_json::Value> {
-        let (status, body) = get_with_retry(client, url, label, subject, false).await?;
+        let (status, body) = get_with_retry(client, url, label, subject, None).await?;
         let body = String::from_utf8_lossy(&body);
         if !status.is_success() {
             bail!("{}: HTTP {} -- {}", label, status, char_prefix(&body, ERROR_SNIPPET_CHARS));
@@ -197,7 +131,7 @@ mod astrometry_net_impl {
 
     async fn fetch_wcs_cards(client: &reqwest::Client, base_url: &str, jid: u64) -> Result<Vec<(String, String)>> {
         let url = format!("{}/wcs_file/{}", base_url, jid);
-        let (status, bytes) = get_with_retry(client, &url, "wcs_file", &format!("job {jid}"), true).await?;
+        let (status, bytes) = get_with_retry(client, &url, "wcs_file", &format!("job {jid}"), Some(REFERER)).await?;
         if !status.is_success() {
             bail!("wcs_file: HTTP {}", status);
         }
@@ -393,7 +327,7 @@ mod astrometry_net_impl {
         );
 
         let annotations_url = format!("{}/api/jobs/{}/annotations", base_url, jid);
-        let annotations = match get_with_retry(&client, &annotations_url, "Annotations", &job_subject, true).await {
+        let annotations = match get_with_retry(&client, &annotations_url, "Annotations", &job_subject, Some(REFERER)).await {
             Ok((status, body)) if status.is_success() => {
                 match parse_json_body(&String::from_utf8_lossy(&body), "Annotations") {
                     Ok(json) => parse_annotations(&json),

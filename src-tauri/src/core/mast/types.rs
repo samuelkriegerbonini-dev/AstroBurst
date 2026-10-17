@@ -541,6 +541,12 @@ pub struct MastErrorContext {
     pub bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consecutive: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,10 +7,11 @@ import SummaryLine from "./SummaryLine";
 import ResultsGallery from "./ResultsGallery";
 import ResultsTable from "./ResultsTable";
 import { BlockingError, EmptyResults, LockedView, NoImagesIntro, NotResolved, UnavailableView } from "./StateViews";
-import { currentMission, effectiveView, resultsState, visibleBanner, type ArchiveState } from "./state/archiveReducer";
+import { currentMission, effectiveView, resultsState, rowsOnScreen, visibleBanner, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { displayRows, searchProgress } from "./logic/resultsView";
 import type { AroundTarget } from "./logic/aroundQuery";
+import { missionLabelOf } from "./logic/missionLabels";
 import { useNow } from "./state/useNow";
 
 interface ResultsRegionProps {
@@ -29,7 +30,7 @@ function hasCountdown(state: ArchiveState): boolean {
 function ResultsBody({ state, ctl, onOpenDetail }: { state: ArchiveState; ctl: ArchiveController; onOpenDetail?: () => void }) {
   const rows = useMemo(() => displayRows(state.results, state.sort), [state.results, state.sort]);
   const mission = currentMission(state);
-  const label = mission?.label ?? state.results?.mission.toUpperCase() ?? "MAST";
+  const label = mission?.label ?? missionLabelOf(state.results?.mission ?? state.form.mission);
   if (effectiveView(state) === "table") return <ResultsTable state={state} ctl={ctl} rows={rows} mission={mission} missionLabel={label} onOpenDetail={onOpenDetail} />;
   return <ResultsGallery state={state} ctl={ctl} rows={rows} missionLabel={label} onOpenDetail={onOpenDetail} />;
 }
@@ -39,7 +40,7 @@ function SearchProgress({ state, ctl }: { state: ArchiveState; ctl: ArchiveContr
   const run = state.run;
   if (!run) return null;
   const mission = currentMission(state);
-  const view = searchProgress(run, { missionLabel: mission?.label ?? state.form.mission.toUpperCase(), radiusText: state.form.radiusText, filters: run.query?.filters ?? state.form.filters, now });
+  const view = searchProgress(run, { missionLabel: mission?.label ?? missionLabelOf(state.form.mission), radiusText: state.form.radiusText, filters: run.query?.filters ?? state.form.filters, now });
   return (
     <div className="ab-mast-progress" role="status">
       <ul className="ab-mast-progress-lines">
@@ -81,7 +82,7 @@ export default function ResultsRegion({ state, ctl, around, onEditQuery, onSwitc
 
   const running = rs === "resolving" || rs === "searching";
   const hasRows = !!state.results && state.results.rows.length > 0;
-  const showBody = hasRows && (running || rs === "ready");
+  const showBody = rowsOnScreen(state);
 
   let content = null;
   switch (rs) {
@@ -99,7 +100,7 @@ export default function ResultsRegion({ state, ctl, around, onEditQuery, onSwitc
       content = <NotResolved state={state} ctl={ctl} onEditQuery={editQuery} />;
       break;
     case "error":
-      content = state.error ? <BlockingError error={state.error} missionLabel={mission?.label ?? state.form.mission.toUpperCase()} ctl={ctl} /> : null;
+      content = state.error ? <BlockingError error={state.error} missionLabel={mission?.label ?? missionLabelOf(state.form.mission)} ctl={ctl} /> : null;
       break;
     case "locked":
       content = mission?.id === "roman" ? <RomanPanel state={state} ctl={ctl} /> : <LockedView state={state} />;

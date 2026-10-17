@@ -1,27 +1,29 @@
+use std::sync::Mutex;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{bail, Context};
 use ndarray::Array2;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cmd::common::{
     blocking_cmd, derived_output_header, load_cached_full, output_stem, resolve_output_dir,
     save_auto_stf_preview_png, source_path, write_derived_fits, OutputValues,
 };
-use crate::core::imaging::stats::{finite_output_stats, is_padding};
-use crate::core::pixelmath::{compile, evaluate, validate, OutputOptions, PixelMathError};
+use crate::core::imaging::stats::is_padding;
+use crate::core::ops::pixelmath::{self as ops, entry_warnings, pixelmath_error, slot_names_with_target, SlotLoader};
+use crate::core::ops::{run_op, OpCompanions, OpInput, OpSpec, OpVersion};
+use crate::core::pixelmath::{compile, validate, OutputOptions};
 use crate::infra::cache::ImageEntry;
 use crate::types::constants::{
     RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH, RES_STATS, RES_WARNINGS,
 };
 use crate::types::header::HduHeader;
-use crate::types::image::ImageStats;
 use crate::types::image_ref::path_key;
 
-pub const RES_NON_FINITE_COUNT: &str = "non_finite_count";
+pub(crate) use crate::core::ops::pixelmath::{ChannelPixelMath, PixelMathSlot, TARGET_SYMBOL};
+
+pub use crate::types::constants::RES_NON_FINITE_COUNT;
 pub const DEFAULT_PIXELMATH_SUFFIX: &str = "pixelmath";
-pub const TARGET_SYMBOL: &str = "$T";
 
 const PREVIEW_PNG_SUFFIX: &str = "preview";
 const USER_SUFFIX_PREFIX: &str = "pm_";
@@ -31,25 +33,11 @@ const LEGACY_HEADER_PMSOURCE: &str = "PMSOURCE";
 const MAX_HEADER_VALUE_BYTES: usize = 67;
 const MAX_CONTINUATION_CARDS: usize = 9;
 const TRUNCATION_MARKER: &str = "...";
-const ZERO_FRACTION_WARNING: f64 = 0.05;
 
 const KEY_OK: &str = "ok";
 const KEY_MESSAGE: &str = "message";
 const KEY_POSITION: &str = "position";
 const KEY_LENGTH: &str = "length";
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PixelMathSlot {
-    pub name: String,
-    pub path: String,
-}
-
-fn pixelmath_error(err: PixelMathError) -> anyhow::Error {
-    match err.position {
-        Some(position) => anyhow!("pixelmath: {} (position {})", err.message, position),
-        None => anyhow!("pixelmath: {}", err.message),
-    }
-}
 
 fn header_safe(value: &str) -> String {
     let mut cleaned = String::with_capacity(value.len());
@@ -188,138 +176,13 @@ fn preview_display(result: &Array2<f32>, inputs: &[&Array2<f32>]) -> Array2<f32>
     Array2::from_shape_vec(result.dim(), display).unwrap_or_else(|_| result.clone())
 }
 
-fn exact_zero_fraction(arr: &Array2<f32>) -> f64 {
-    let (finite, zeros) = arr.iter().fold((0usize, 0usize), |(finite, zeros), &v| {
-        if v.is_finite() {
-            (finite + 1, zeros + usize::from(v == 0.0))
-        } else {
-            (finite, zeros)
-        }
-    });
-    if finite == 0 {
-        0.0
-    } else {
-        zeros as f64 / finite as f64
-    }
-}
-
-fn plane_count(entry: &ImageEntry) -> Option<i64> {
-    entry
-        .header()
-        .and_then(|h| h.get_i64("NAXIS3"))
-        .filter(|&n| n > 1)
-}
-
-pub(crate) fn slot_names_with_target(names: &[String]) -> Vec<String> {
-    std::iter::once(TARGET_SYMBOL.to_string())
-        .chain(names.iter().cloned())
-        .collect()
-}
-
-fn entry_warnings(label: &str, entry: &ImageEntry) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if let Some(planes) = plane_count(entry) {
-        warnings.push(format!(
-            "{} is plane 1 of {}; the other planes were not read",
-            label, planes
-        ));
-    }
-    if entry.plane_info().is_some_and(|info| info.is_dq) {
-        warnings.push(format!(
-            "{} is a data-quality plane read as 32-bit float; flag values above 16777216 lose their low bits, so only zero/non-zero tests are exact",
-            label
-        ));
-    }
-    warnings
-}
-
-fn padding_warning(label: &str, arr: &Array2<f32>, reduced: bool) -> Option<String> {
-    if !reduced {
-        return None;
-    }
-    let zeros = exact_zero_fraction(arr);
-    if zeros < ZERO_FRACTION_WARNING {
-        return None;
-    }
-    Some(format!(
-        "{} is {:.0}% exact zeros, the value mosaics use as padding; med, mean, sdev, mdev, adev, min and max of {} include those pixels",
-        label,
-        zeros * 100.0,
-        label
-    ))
-}
-
-pub(crate) struct ChannelPixelMath {
-    pub results: [Array2<f32>; 3],
-    pub stats: [Option<ImageStats>; 3],
-    pub non_finite: [usize; 3],
-    pub warnings: Vec<String>,
-}
-
-const CHANNEL_LABELS: [&str; 3] = ["R", "G", "B"];
-
 pub(crate) fn evaluate_per_channel(
     expression: &str,
     slots: &[PixelMathSlot],
     opts: &OutputOptions,
     channels: [&Array2<f32>; 3],
 ) -> anyhow::Result<ChannelPixelMath> {
-    let user_names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
-    let slot_names = slot_names_with_target(&user_names);
-    let program = compile(expression, &slot_names).map_err(pixelmath_error)?;
-    let referenced = program.referenced_slots();
-    let reduced = program.reduced_slots();
-    let (rows, cols) = channels[0].dim();
-
-    let mut entries: Vec<Option<ImageEntry>> = Vec::with_capacity(slots.len());
-    let mut warnings: Vec<String> = Vec::new();
-    for (i, slot) in slots.iter().enumerate() {
-        if !referenced[i + 1] {
-            entries.push(None);
-            continue;
-        }
-        let entry = load_cached_full(&slot.path)
-            .with_context(|| format!("slot {} = {}", slot.name, slot.path))?;
-        let (slot_rows, slot_cols) = entry.arr().dim();
-        if (slot_rows, slot_cols) != (rows, cols) {
-            bail!(
-                "pixelmath: slot {} is {}x{} but the composite is {}x{} (width x height)",
-                slot.name,
-                slot_cols,
-                slot_rows,
-                cols,
-                rows
-            );
-        }
-        warnings.extend(entry_warnings(&slot.name, &entry));
-        warnings.extend(padding_warning(&slot.name, entry.arr(), reduced[i + 1]));
-        entries.push(Some(entry));
-    }
-
-    let mut results = Vec::with_capacity(3);
-    let mut stats = Vec::with_capacity(3);
-    let mut non_finite = Vec::with_capacity(3);
-    for (channel, label) in channels.into_iter().zip(CHANNEL_LABELS) {
-        warnings.extend(padding_warning(&format!("{} ({})", TARGET_SYMBOL, label), channel, reduced[0]));
-        let arrays: Vec<&Array2<f32>> = std::iter::once(channel)
-            .chain(entries.iter().map(|e| e.as_ref().map(|e| e.arr()).unwrap_or(channel)))
-            .collect();
-        let result = evaluate(&program, &arrays, opts).map_err(pixelmath_error)?;
-        let (channel_stats, channel_non_finite) = finite_output_stats(&result);
-        results.push(result);
-        stats.push(channel_stats);
-        non_finite.push(channel_non_finite);
-    }
-
-    let [r, g, b] = <[Array2<f32>; 3]>::try_from(results).map_err(|_| anyhow!("pixelmath: expected three channels"))?;
-    let [sr, sg, sb] = <[Option<ImageStats>; 3]>::try_from(stats).map_err(|_| anyhow!("pixelmath: expected three channels"))?;
-    let [nr, ng, nb] = <[usize; 3]>::try_from(non_finite).map_err(|_| anyhow!("pixelmath: expected three channels"))?;
-    Ok(ChannelPixelMath {
-        results: [r, g, b],
-        stats: [sr, sg, sb],
-        non_finite: [nr, ng, nb],
-        warnings,
-    })
+    ops::evaluate_per_channel(expression, slots, opts, channels, &load_cached_full)
 }
 
 fn ensure_outputs_are_not_inputs(outputs: &[&str], inputs: &[(&str, &str)]) -> anyhow::Result<()> {
@@ -349,10 +212,7 @@ pub(crate) fn run_pixelmath(
     let output_dir = resolve_output_dir(output_dir)?;
 
     let user_names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
-    let slot_names = slot_names_with_target(&user_names);
-    let program = compile(expression, &slot_names).map_err(pixelmath_error)?;
-    let referenced = program.referenced_slots();
-    let reduced = program.reduced_slots();
+    let referenced = compile(expression, &slot_names_with_target(&user_names)).map_err(pixelmath_error)?.referenced_slots();
 
     let suffix = output_suffix(name);
     let stem = output_stem(path);
@@ -365,51 +225,44 @@ pub(crate) fn run_pixelmath(
 
     let target = load_cached_full(path)
         .with_context(|| format!("{} = {}", TARGET_SYMBOL, path))?;
-    let mut entries: Vec<Option<ImageEntry>> = Vec::with_capacity(slots.len() + 1);
-    entries.push(Some(target.clone()));
-    for (i, slot) in slots.iter().enumerate() {
-        if !referenced[i + 1] {
-            entries.push(None);
-            continue;
-        }
-        let entry = load_cached_full(&slot.path)
-            .with_context(|| format!("slot {} = {}", slot.name, slot.path))?;
-        entries.push(Some(entry));
-    }
-
-    let mut warnings: Vec<String> = Vec::new();
-    for (i, entry) in entries.iter().enumerate() {
-        let Some(entry) = entry else { continue };
-        warnings.extend(entry_warnings(&slot_names[i], entry));
-        warnings.extend(padding_warning(&slot_names[i], entry.arr(), reduced.get(i).copied().unwrap_or(false)));
-    }
-
-    let target_arr = target.arr();
-    let arrays: Vec<&Array2<f32>> = entries
-        .iter()
-        .map(|e| e.as_ref().map(|e| e.arr()).unwrap_or(target_arr))
-        .collect();
-    let result = evaluate(&program, &arrays, &opts).map_err(pixelmath_error)?;
+    let spec = OpSpec::Pixelmath {
+        v: OpVersion,
+        expression: expression.to_string(),
+        slots: slots.to_vec(),
+        truncate: opts.truncate,
+        rescale: opts.rescale,
+    };
+    let loaded_slots: Mutex<Vec<ImageEntry>> = Mutex::new(Vec::new());
+    let remember = |key: &str| -> anyhow::Result<ImageEntry> {
+        let entry = load_cached_full(key)?;
+        loaded_slots.lock().unwrap_or_else(|e| e.into_inner()).push(entry.clone());
+        Ok(entry)
+    };
+    let load: SlotLoader = &remember;
+    let companions = OpCompanions { load_slot: Some(load), ..OpCompanions::default() };
+    let evaluated = run_op(&spec, &OpInput::mono(target.arr(), target.header()).with_companions(companions), None)?;
+    let mut warnings = entry_warnings(TARGET_SYMBOL, &target);
+    warnings.extend(evaluated.extras[RES_WARNINGS].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
+    let result = &evaluated.planes[0];
 
     let header = output_header(target.header(), expression, &source_path(path));
-    write_derived_fits(&fits_path, &result, Some(&header))?;
+    write_derived_fits(&fits_path, result, Some(&header))?;
 
-    let referenced_inputs: Vec<&Array2<f32>> = arrays
-        .iter()
-        .zip(&referenced)
-        .filter(|(_, used)| **used)
-        .map(|(arr, _)| *arr)
-        .collect();
     let (rows, cols) = result.dim();
-    save_auto_stf_preview_png(&preview_display(&result, &referenced_inputs), &png_path)?;
+    let slot_entries = loaded_slots.into_inner().unwrap_or_else(|e| e.into_inner());
+    let inputs: Vec<&Array2<f32>> = referenced[0]
+        .then(|| target.arr())
+        .into_iter()
+        .chain(slot_entries.iter().map(|entry| entry.arr()))
+        .collect();
+    save_auto_stf_preview_png(&preview_display(result, &inputs), &png_path)?;
 
-    let (stats, non_finite) = finite_output_stats(&result);
     Ok(json!({
         RES_PNG_PATH: png_path,
         RES_FITS_PATH: fits_path,
         RES_DIMENSIONS: [cols, rows],
-        RES_STATS: stats,
-        RES_NON_FINITE_COUNT: non_finite,
+        RES_STATS: evaluated.extras[RES_STATS],
+        RES_NON_FINITE_COUNT: evaluated.extras[RES_NON_FINITE_COUNT],
         RES_WARNINGS: warnings,
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
     }))
@@ -462,6 +315,7 @@ pub async fn pixelmath_validate_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::imaging::stats::finite_output_stats;
     use crate::cmd::common::test_support::{assert_png_matches, gpu_view_with_auto_stf, wide_textured_sky};
     use crate::cmd::common::{auto_stretch_preview, HEADER_ABPROC};
     use crate::core::imaging::stats::compute_image_stats;

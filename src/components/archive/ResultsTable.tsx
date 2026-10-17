@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
-import { ChevronDown, ChevronUp, ImageOff } from "lucide-react";
+import { ChevronDown, ChevronUp, Lock } from "lucide-react";
 import type { MastColumn, MastMission, MastRow } from "../../shared/types/mast";
 import type { ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { tableMove } from "./logic/gridNav";
 import { thumbStatus } from "./logic/thumbQueue";
 import { SORT_BLOCKED_HINT, sortMode } from "./logic/paging";
-import { cellText, columnWidth, fitColumns, rowsText, sortText, tableColumns } from "./logic/resultsView";
+import { cellText, columnWidth, fitColumns, rovingRow, rowKeyMap, rowsText, sortText, tableColumns } from "./logic/resultsView";
 import { rowTsv } from "./logic/copyBuilders";
 import { resultsKeyCommand } from "./logic/detailKeys";
+import { previewsAllowed } from "./logic/detailView";
+import { isPublic } from "./logic/cardLabel";
+import { pausedSlot, slotCellTitle, slotError, type SlotErrorView } from "./logic/errorCopy";
+import SlotError from "./SlotError";
 
 interface ResultsTableProps {
   state: ArchiveState;
@@ -26,9 +30,10 @@ const THUMB_COL = 72;
 const OVERSCAN = 8;
 const MAX_MOUNTED = 200;
 const SORT_HINT_ID = "mast-sort-hint";
+const FIRST_BODY_ROW = 2;
 
-function rowSelector(id: string): string {
-  return `[data-testid="mast-row"][data-dataset="${CSS.escape(id)}"]`;
+function rowAt(index: number): string {
+  return `[data-testid="mast-row"][aria-rowindex="${index + FIRST_BODY_ROW}"]`;
 }
 
 export default function ResultsTable({ state, ctl, rows, mission, missionLabel, onOpenDetail }: ResultsTableProps) {
@@ -36,7 +41,7 @@ export default function ResultsTable({ state, ctl, rows, mission, missionLabel, 
   const [box, setBox] = useState({ width: 960, height: 640 });
   const [scrollTop, setScrollTop] = useState(0);
   const [cell, setCell] = useState<number | null>(null);
-  const pendingFocus = useRef<string | null>(null);
+  const pendingFocus = useRef<number | null>(null);
   const frame = useRef<number | null>(null);
   const handledFocus = useRef(state.focusRequest?.seq ?? 0);
   const results = state.results;
@@ -67,8 +72,9 @@ export default function ResultsTable({ state, ctl, rows, mission, missionLabel, 
   const last = Math.min(rows.length, Math.ceil((scrollTop + bodyHeight) / rowH));
   const start = Math.max(0, first - OVERSCAN);
   const end = Math.min(rows.length, last + OVERSCAN, start + MAX_MOUNTED);
-  const selectedIndex = rows.findIndex((r) => r.datasetId === state.selectedId);
-  const rovingIndex = selectedIndex >= 0 ? selectedIndex : 0;
+  const keyOf = useMemo(() => rowKeyMap(results?.rows ?? rows), [results, rows]);
+  const keys = useMemo(() => rows.map((r) => keyOf.get(r) ?? r.datasetId), [rows, keyOf]);
+  const rovingIndex = rovingRow(rows, keyOf, state.selectedId, state.selectedKey);
   const rovingMounted = rovingIndex >= start && rovingIndex < end;
 
   const demand = useMemo(() => {
@@ -91,9 +97,9 @@ export default function ResultsTable({ state, ctl, rows, mission, missionLabel, 
   }, [ctl, hasMore, idle, rows.length, last]);
 
   useLayoutEffect(() => {
-    const id = pendingFocus.current;
-    if (!id) return;
-    const el = scrollRef.current?.querySelector<HTMLElement>(rowSelector(id));
+    const index = pendingFocus.current;
+    if (index === null) return;
+    const el = scrollRef.current?.querySelector<HTMLElement>(rowAt(index));
     if (!el) return;
     pendingFocus.current = null;
     el.focus({ preventScroll: true });
@@ -123,15 +129,15 @@ export default function ResultsTable({ state, ctl, rows, mission, missionLabel, 
     const req = state.focusRequest;
     if (!req || req.seq === handledFocus.current) return;
     handledFocus.current = req.seq;
-    const index = rows.findIndex((r) => r.datasetId === req.datasetId);
-    if (index < 0) return;
-    pendingFocus.current = req.datasetId;
+    if (!rows.some((r) => r.datasetId === req.datasetId)) return;
+    const index = rovingRow(rows, keyOf, req.datasetId, state.selectedKey);
+    pendingFocus.current = index;
     ensureVisible(index);
-    const el = scrollRef.current?.querySelector<HTMLElement>(rowSelector(req.datasetId));
+    const el = scrollRef.current?.querySelector<HTMLElement>(rowAt(index));
     if (!el) return;
     pendingFocus.current = null;
     el.focus({ preventScroll: true });
-  }, [state.focusRequest, rows, ensureVisible]);
+  }, [state.focusRequest, state.selectedKey, rows, keyOf, ensureVisible]);
 
   if (!results) return null;
 
@@ -186,20 +192,25 @@ export default function ResultsTable({ state, ctl, rows, mission, missionLabel, 
     if (!move) return;
     e.preventDefault();
     const target = rows[move.index];
-    pendingFocus.current = target.datasetId;
-    if (target.datasetId !== state.selectedId) ctl.select(target.datasetId);
+    pendingFocus.current = move.index;
+    if (move.index !== rovingIndex) ctl.select(target.datasetId, keys[move.index]);
     ensureVisible(move.index);
     if (move.atEnd) void ctl.loadMore({ auto: true });
   };
 
   const onGridFocus = (e: FocusEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget || rows.length === 0) return;
-    pendingFocus.current = rows[rovingIndex].datasetId;
+    pendingFocus.current = rovingIndex;
     ensureVisible(rovingIndex);
   };
 
   const sortKeyOf = (c: MastColumn) => state.sort.keys.find((k) => k.column === c.name);
   const now = Date.now();
+  const paused = thumbs && state.thumbs.pausedUntil !== null ? pausedSlot(state.thumbs, now) : null;
+  const failureOf = (row: MastRow, status: string): SlotErrorView | null => {
+    const failure = status === "failed" ? state.thumbs.failures[row.datasetId] : undefined;
+    return failure ? slotError(failure.error, { surface: "thumb", rowPublic: isPublic(row), waitedMs: failure.waitedMs }) : null;
+  };
   const sortLine = sortText(state.sort, allColumns, results);
   const lastShown = Math.max(first + 1, last);
 
@@ -267,36 +278,49 @@ export default function ResultsTable({ state, ctl, rows, mission, missionLabel, 
             {rows.slice(start, end).map((row, offset) => {
               const index = start + offset;
               const id = row.datasetId;
-              const selected = id === state.selectedId;
+              const selected = index === rovingIndex && id === state.selectedId;
               const status = thumbStatus(state.thumbs, id, now);
               const ref = state.thumbRefs[id];
+              const locked = !!mission && images && !previewsAllowed(row, mission);
+              const failed = thumbs && !locked ? failureOf(row, status) : null;
+              const slot = failed ?? (thumbs && !locked && status === "paused" ? paused : null);
               return (
                 <div
-                  key={id}
+                  key={keys[index]}
                   role="row"
-                  aria-rowindex={index + 2}
+                  aria-rowindex={index + FIRST_BODY_ROW}
                   data-testid="mast-row"
                   data-dataset={id}
-                  data-thumb={status}
+                  data-thumb={locked ? "locked" : status}
                   data-mast-focus={index === rovingIndex ? "true" : undefined}
                   aria-selected={selected}
                   tabIndex={index === rovingIndex ? 0 : -1}
                   className="ab-mast-tr"
                   style={{ top: index * rowH, height: rowH }}
-                  onClick={() => ctl.select(id)}
+                  onClick={() => ctl.select(id, keys[index])}
                   onDoubleClick={() => ctl.openLarge(id)}
-                  onFocus={() => ctl.select(id)}
+                  onFocus={() => ctl.select(id, keys[index])}
                 >
                   {thumbs ? (
-                    <div role="gridcell" className="ab-mast-td ab-mast-td-thumb" style={{ width: THUMB_COL }}>
-                      {status === "ready" && ref ? (
-                        <img className="ab-mast-row-thumb" src={ref.url} alt="" draggable={false} decoding="async" />
-                      ) : status === "failed" ? (
-                        <span className="ab-mast-thumb-note" title={`No preview (${state.thumbs.reasons[id] ?? "unknown"})`}>
-                          <ImageOff size={12} aria-hidden="true" />
+                    <div
+                      role="gridcell"
+                      className="ab-mast-td ab-mast-td-thumb"
+                      style={{ width: THUMB_COL }}
+                      data-error-code={failed ? failed.code : undefined}
+                      data-error-status={failed ? state.thumbs.failures[id]?.error.context.status : undefined}
+                      data-error-waited-ms={failed ? (state.thumbs.failures[id]?.waitedMs ?? undefined) : undefined}
+                      title={slot ? slotCellTitle(slot) : undefined}
+                    >
+                      {locked ? (
+                        <span className="ab-mast-thumb-note" title="Exclusive access">
+                          <Lock size={12} aria-hidden="true" />
                         </span>
+                      ) : status === "ready" && ref ? (
+                        <img className="ab-mast-row-thumb" src={ref.url} alt="" draggable={false} decoding="async" onError={() => ctl.imageMissing(ref.url)} />
+                      ) : slot ? (
+                        <SlotError view={slot} size="cell" noun="Thumbnail" />
                       ) : (
-                        <span className="ab-mast-row-thumb ab-mast-shimmer" aria-hidden="true" />
+                        <span className={status === "loading" ? "ab-mast-row-thumb ab-mast-shimmer" : "ab-mast-row-thumb ab-mast-queued"} aria-hidden="true" />
                       )}
                     </div>
                   ) : null}

@@ -17,7 +17,7 @@ use crate::core::imaging::dbe::{extract_background_dbe, DbeConfig};
 use crate::core::imaging::psf_estimation::estimate_psf;
 use crate::core::imaging::stats::{combine_channel_stats, compute_image_stats, is_valid_pixel};
 use crate::core::imaging::stf::{auto_stf, make_stf_u8_fn, AutoStfConfig};
-use crate::core::imaging::wavelet::{wavelet_denoise, WaveletConfig};
+use crate::core::imaging::wavelet::{check_layer_bias, wavelet_denoise, WaveletConfig};
 use crate::core::pixelmath::OutputOptions;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
@@ -652,11 +652,7 @@ pub async fn composite_wavelet_denoise_cmd(
     let progress = ProgressHandle::new(&app, EVENT_WAVELET_PROGRESS, (n_scales * 2 + 1) as u64);
 
     blocking_cmd!({
-        if let Some(bias) = &layer_bias {
-            if bias.iter().any(|b| !b.is_finite()) {
-                bail!("layer_bias must contain only finite values");
-            }
-        }
+        check_layer_bias(layer_bias.as_deref())?;
         let config = WaveletConfig {
             num_scales: n_scales,
             thresholds: thresholds.iter().map(|&t| t as f32).collect(),

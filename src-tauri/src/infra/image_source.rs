@@ -13,6 +13,7 @@ use crate::infra::asdf_bridge::{
 };
 use crate::infra::cache::{ImageCache, ImageEntry, PlaneLoad};
 use crate::infra::fits::dispatcher::resolve_single_image;
+use crate::infra::fits::gzip::SharedTempDir;
 use crate::infra::fits::reader::{
     auto_hdu_index, extract_header_by_index_merged, extract_header_mmap,
     extract_image_mmap_by_index, extract_int_plane_by_index, list_extensions, HduInfo,
@@ -70,7 +71,7 @@ pub struct LoadedPlane {
     pub info: PlaneInfo,
     pub int_plane: Option<IntPlane>,
     pub companions: Companions,
-    pub _tmp: Option<tempfile::TempDir>,
+    pub _tmp: Option<SharedTempDir>,
 }
 
 impl LoadedPlane {
@@ -206,7 +207,7 @@ fn fits_plane(file: &File, index: usize, want_int: bool) -> Result<(MmapImageRes
 fn fits_loaded(
     source: &Path,
     index: Option<usize>,
-    tmp: Option<tempfile::TempDir>,
+    tmp: Option<SharedTempDir>,
     ref_path: Option<&str>,
 ) -> Result<LoadedPlane> {
     let file = File::open(source).with_context(|| format!("Failed to open {}", source.display()))?;
@@ -229,7 +230,7 @@ fn fits_loaded(
     })
 }
 
-fn asdf_loaded(source: &Path, key: Option<&str>, tmp: Option<tempfile::TempDir>, ref_path: &str) -> Result<LoadedPlane> {
+fn asdf_loaded(source: &Path, key: Option<&str>, tmp: Option<SharedTempDir>, ref_path: &str) -> Result<LoadedPlane> {
     let asdf = AsdfFile::open(source).map_err(|e| anyhow::anyhow!("ASDF load failed: {}", e))?;
     let result = extract_plane_from_open_asdf(&asdf, key)?;
     let data_key = result.selected_extension.clone().unwrap_or_default();

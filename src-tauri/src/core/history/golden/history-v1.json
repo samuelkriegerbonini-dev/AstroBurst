@@ -1,0 +1,209 @@
+{
+  "format": "astroburst-history",
+  "version": 1,
+  "image": {
+    "ref": "d:/jwst/jw01475001001_02101_00001_nrca1_i2d.fits#hdu=1",
+    "id": "3f9c0a1e5b7d2c44",
+    "size": 118702080,
+    "mtime": "2026-10-09T12:42:10.512000000Z"
+  },
+  "image_key": "D:\\jwst\\jw01475001001_02101_00001_nrca1_i2d.fits#hdu=1",
+  "base_path": null,
+  "head": "n0004",
+  "policy": {
+    "k": 4
+  },
+  "app": "0.6.9",
+  "threads": 16,
+  "masks": {
+    "m01": {
+      "feather_px": 3,
+      "growth": 2.5,
+      "invert": true,
+      "kind": "stars",
+      "sigma": 5.0,
+      "softness": 4.0,
+      "source": {
+        "node": "n0002",
+        "pre": "none"
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "n0001",
+      "parent": null,
+      "op": {
+        "op": "background",
+        "v": 1,
+        "model": "polynomial",
+        "config": {
+          "gridSize": 8,
+          "polyDegree": 3,
+          "sigmaClip": 2.5,
+          "iterations": 3,
+          "mode": "subtract"
+        }
+      },
+      "mask": null,
+      "output": {
+        "path": "n0001.fits",
+        "png": "n0001.png",
+        "extras": [
+          "n0001_model.png"
+        ],
+        "dims": [
+          2058,
+          2058
+        ],
+        "planes": 1,
+        "domain": "linear"
+      },
+      "at": "2026-10-10T14:03:11.204518300Z",
+      "elapsed_ms": 812,
+      "app": "0.6.9",
+      "threads": 16,
+      "present": true,
+      "bytes": 17024320,
+      "checkpoint": false
+    },
+    {
+      "id": "n0002",
+      "parent": "n0001",
+      "op": {
+        "op": "wavelet_denoise",
+        "v": 1,
+        "numScales": 5,
+        "thresholds": [
+          3.0,
+          2.5,
+          2.0,
+          1.5,
+          1.0
+        ],
+        "linearDenoise": true,
+        "layerBias": null
+      },
+      "mask": null,
+      "output": {
+        "path": "n0002.fits",
+        "png": "n0002.png",
+        "extras": [],
+        "dims": [
+          2058,
+          2058
+        ],
+        "planes": 1,
+        "domain": "linear"
+      },
+      "at": "2026-10-10T14:03:40.017733900Z",
+      "elapsed_ms": 1430,
+      "app": "0.6.9",
+      "threads": 16,
+      "present": false,
+      "bytes": 17024320,
+      "checkpoint": false
+    },
+    {
+      "id": "n0003",
+      "parent": "n0002",
+      "op": {
+        "op": "rl_deconv",
+        "v": 1,
+        "iterations": 15,
+        "regularization": 0.001,
+        "deringing": true,
+        "deringingThreshold": 0.1,
+        "psf": {
+          "kind": "kernel",
+          "hash": "9f3a51c2e07b8d14",
+          "rows": 31,
+          "cols": 31
+        }
+      },
+      "mask": null,
+      "output": {
+        "path": "n0003.fits",
+        "png": "n0003.png",
+        "extras": [],
+        "dims": [
+          2058,
+          2058
+        ],
+        "planes": 1,
+        "domain": "linear"
+      },
+      "at": "2026-10-10T14:04:58.940012000Z",
+      "elapsed_ms": 9120,
+      "app": "0.6.9",
+      "threads": 16,
+      "present": true,
+      "bytes": 17024320,
+      "checkpoint": false
+    },
+    {
+      "id": "n0004",
+      "parent": "n0003",
+      "op": {
+        "op": "arcsinh",
+        "v": 1,
+        "factor": 50.0
+      },
+      "mask": "m01",
+      "output": {
+        "path": "n0004.fits",
+        "png": "n0004.png",
+        "extras": [],
+        "dims": [
+          2058,
+          2058
+        ],
+        "planes": 1,
+        "domain": "display_referred"
+      },
+      "at": "2026-10-10T14:05:20Z",
+      "elapsed_ms": 233,
+      "app": "0.6.9",
+      "threads": 16,
+      "present": true,
+      "bytes": 17024320,
+      "checkpoint": true
+    },
+    {
+      "id": "n0005",
+      "parent": "n0001",
+      "op": {
+        "op": "tone",
+        "v": 1,
+        "levels": {
+          "black": 0.1,
+          "gamma": 1.0,
+          "white": 0.9
+        }
+      },
+      "mask": {
+        "feather_px": 0,
+        "invert": false,
+        "kind": "luminance"
+      },
+      "output": {
+        "path": "n0005.fits",
+        "png": "n0005.png",
+        "extras": [],
+        "dims": [
+          2058,
+          2058
+        ],
+        "planes": 1,
+        "domain": "display_referred"
+      },
+      "at": "2026-10-10T14:07:02.500000000Z",
+      "elapsed_ms": 96,
+      "app": "0.6.9",
+      "threads": 16,
+      "present": true,
+      "bytes": 17024320,
+      "checkpoint": false
+    }
+  ]
+}

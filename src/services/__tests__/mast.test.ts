@@ -165,6 +165,17 @@ describe("mastErrorOf", () => {
     expect(mastErrorOf(err).context).toEqual({ bytes: 300000, operation: "search/jwst/api/v0.1/get_image_thumbnail" });
   });
 
+  it("keeps the attempt count, the time MAST took and the host it tried", () => {
+    const err = new TauriCommandError("mast_thumbnail_cmd", "no answer within 30 s", "mast_timeout", {
+      timeoutSec: 30,
+      attempts: 2,
+      elapsedMs: 61_000,
+      host: "127.0.0.1:9",
+      operation: "search/hst/api/v0.1/get_image_thumbnail",
+    });
+    expect(mastErrorOf(err).context).toEqual({ timeoutSec: 30, attempts: 2, elapsedMs: 61_000, host: "127.0.0.1:9", operation: "search/hst/api/v0.1/get_image_thumbnail" });
+  });
+
   it("maps a raw structured rejection object", () => {
     expect(mastErrorOf({ code: "mast_rate_limited", message: "429", context: { retryAfterSec: 5, consecutive: 2 } })).toEqual({
       code: "mast_rate_limited",

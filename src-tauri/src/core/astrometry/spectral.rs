@@ -300,6 +300,11 @@ pub fn is_non_linear_spectral_ctype(ctype: &str) -> bool {
     classify_ctype(Some(text.to_string())).map_or(true, |c| c.tabulated)
 }
 
+pub fn is_spectral_ctype(ctype: &str) -> bool {
+    let text = ctype.trim().trim_matches('\'').trim();
+    classify_ctype(Some(text.to_string())).map_or(true, |c| c.kind != AxisKind::Unknown)
+}
+
 pub fn tab_axis_values(psi: &[f64], coords: &[f64], index: Option<&[f64]>) -> Result<Vec<f64>, String> {
     let k = coords.len();
     if k == 0 {

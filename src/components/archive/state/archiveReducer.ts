@@ -1,5 +1,6 @@
 import type {
   MastError,
+  MastErrorCode,
   MastImageEntry,
   MastMissionId,
   MastImageSet,
@@ -27,6 +28,7 @@ import {
 } from "../logic/missionState";
 import {
   createThumbQueue,
+  forget,
   markDropped,
   markFailed,
   markRateLimited,
@@ -40,19 +42,23 @@ import {
   type ThumbQueue,
 } from "../logic/thumbQueue";
 import {
+  CACHE_TROUBLE_TEXT,
+  MISSING_FILE,
   ROMAN_CONFIRMED_TEXT,
   ROMAN_NO_ACCESS_TEXT,
   THUMBS_GAVE_UP_TEXT,
   TOKEN_CHECK_UNREACHABLE_TEXT,
   errorView,
   rateLimitText,
+  slotError,
   tokenSaveFailureText,
   type BannerKind,
 } from "../logic/errorCopy";
-import type { TableSort } from "../logic/resultsView";
+import { rowKeyMap, type TableSort } from "../logic/resultsView";
 import { DETAIL_WIDTH_DEFAULT, clampDetailWidth } from "../logic/detailLayout";
 import type { ProductMode } from "../logic/productView";
 import { TOKEN_REMOVED_TEXT, type RomanPanelState } from "../logic/romanPanel";
+import { missionLabelOf as staticMissionLabel } from "../logic/missionLabels";
 
 export type ResultsState =
   | "idle"
@@ -127,6 +133,7 @@ export interface DetailState {
 export interface ListState {
   requestId: string;
   startedAt: number;
+  endedAt: number | null;
   error: MastError | null;
 }
 
@@ -152,6 +159,7 @@ export interface PreviewState {
   received: number;
   total: number | null;
   startedAt: number;
+  endedAt: number | null;
   ref: MastPreviewRef | null;
   url: string | null;
   error: MastError | null;
@@ -195,6 +203,7 @@ export interface ArchiveState {
   unavailable: Unavailable | null;
   probes: MissionProbes;
   selectedId: string | null;
+  selectedKey: string | null;
   view: ResultsView;
   loadingMore: number | null;
   recent: string[];
@@ -237,7 +246,7 @@ export type ArchiveAction =
   | { type: "pageFailed"; generation: number; error: MastError; at: number }
   | { type: "searchFailed"; generation: number; error: MastError; at: number }
   | { type: "searchCancelled"; generation: number }
-  | { type: "selected"; datasetId: string | null }
+  | { type: "selected"; datasetId: string | null; rowKey?: string | null }
   | { type: "viewToggled" }
   | { type: "viewSet"; view: ResultsView }
   | { type: "sortSet"; sort: TableSort }
@@ -248,7 +257,7 @@ export type ArchiveAction =
   | { type: "detailResized"; width: number }
   | { type: "narrowSet"; narrow: boolean }
   | { type: "imageListStarted"; key: string; requestId: string; at: number }
-  | { type: "imageListFailed"; key: string; requestId: string; error: MastError }
+  | { type: "imageListFailed"; key: string; requestId: string; error: MastError; at: number }
   | { type: "imageListCancelled"; key: string; requestId: string }
   | { type: "imageListRetried"; key: string }
   | { type: "imageListLoaded"; key: string; set: MastImageSet }
@@ -262,7 +271,7 @@ export type ArchiveAction =
   | { type: "previewStarted"; key: string; requestId: string; at: number }
   | { type: "previewProgress"; requestId: string; received: number; total: number | null; stage: "download" | "decode" | "ready" }
   | { type: "previewLoaded"; key: string; requestId: string; ref: MastPreviewRef; url: string }
-  | { type: "previewFailed"; key: string; requestId: string; error: MastError }
+  | { type: "previewFailed"; key: string; requestId: string; error: MastError; at: number }
   | { type: "previewCancelled"; key: string; requestId: string }
   | { type: "previewRetried"; key: string }
   | { type: "productsStarted"; key: string; requestId: string; at: number }
@@ -287,14 +296,16 @@ export type ArchiveAction =
   | { type: "bannerRaised"; banner: Banner }
   | { type: "bannerDismissed"; kind: BannerKind }
   | { type: "thumbDemand"; selected: string[]; visible: string[]; ahead: string[] }
-  | { type: "thumbsStarted"; keys: string[] }
+  | { type: "thumbsStarted"; keys: string[]; at: number }
   | { type: "thumbReady"; key: string; ref?: ThumbRef }
-  | { type: "thumbFailed"; key: string; reason: string }
+  | { type: "thumbFailed"; key: string; error: MastError; at: number }
   | { type: "thumbDropped"; key: string }
   | { type: "thumbRateLimited"; key: string; at: number; retryAfterSec: number; consecutive: number; status: number | null }
   | { type: "thumbsTick"; now: number }
   | { type: "thumbsResumed" }
   | { type: "thumbsRetried"; keys?: string[] }
+  | { type: "cacheCleared" }
+  | { type: "imageMissing"; url: string }
   | { type: "archiveActive"; active: boolean }
   | { type: "toast"; text: string }
   | { type: "toastDismissed" }
@@ -302,7 +313,7 @@ export type ArchiveAction =
 
 const RECENT_LIMIT = 10;
 const BANNER_ORDER: readonly BannerKind[] = ["rate-limited", "network", "timeout", "server", "decode", "cache"];
-const THUMB_FAILURE_BANNERS: Record<string, BannerKind> = { network: "network", "timed out": "timeout", "MAST error": "server" };
+const THUMB_FAILURE_BANNERS: Partial<Record<MastErrorCode, BannerKind>> = { mast_network: "network", mast_timeout: "timeout", mast_server: "server", mast_cache: "cache" };
 
 const LOCAL_ORDER: TableSort = { keys: [], by: "local" };
 const CLOSED_LARGE: LargeState = { open: false, datasetId: null, imageKey: null, group: null, filter: null };
@@ -334,6 +345,7 @@ export function createInitialState(form: Partial<ArchiveForm> = {}): ArchiveStat
     unavailable: null,
     probes: {},
     selectedId: null,
+    selectedKey: null,
     view: "gallery",
     loadingMore: null,
     recent: [],
@@ -369,7 +381,7 @@ function missionOf(s: ArchiveState, id = s.form.mission): MastMission | undefine
 }
 
 function missionLabel(s: ArchiveState): string {
-  return missionOf(s)?.label ?? s.form.mission.toUpperCase();
+  return missionLabelOf(s, s.form.mission);
 }
 
 function tokenView(s: ArchiveState): TokenView {
@@ -440,9 +452,21 @@ export function largeEntry(s: ArchiveState): MastImageEntry | null {
   return representative(set);
 }
 
+export function rowsOnScreen(s: ArchiveState): boolean {
+  if (!s.results || s.results.rows.length === 0) return false;
+  const rs = resultsState(s);
+  return rs === "ready" || rs === "resolving" || rs === "searching";
+}
+
 export function selectedRow(s: ArchiveState): MastRow | null {
-  if (!s.selectedId || !s.results) return null;
-  return s.results.rows.find((r) => r.datasetId === s.selectedId) ?? null;
+  if (!s.selectedId || !s.results || !rowsOnScreen(s)) return null;
+  const rows = s.results.rows;
+  if (s.selectedKey !== null) {
+    const keyOf = rowKeyMap(rows);
+    const exact = rows.find((r) => r.datasetId === s.selectedId && keyOf.get(r) === s.selectedKey);
+    if (exact) return exact;
+  }
+  return rows.find((r) => r.datasetId === s.selectedId) ?? null;
 }
 
 export function detailMode(s: ArchiveState): DetailMode {
@@ -511,13 +535,31 @@ export function romanPanelState(s: ArchiveState): RomanPanelState {
   return "unreachable";
 }
 
+function bannerError(error: MastError): BannerKind | null {
+  if (error === MISSING_FILE) return null;
+  return THUMB_FAILURE_BANNERS[error.code] ?? null;
+}
+
 function thumbFailureBanner(s: ArchiveState): Banner | null {
   if (s.thumbBannerHidden) return null;
-  for (const reason of Object.keys(THUMB_FAILURE_BANNERS)) {
-    const failed = Object.keys(s.thumbs.done).some((k) => s.thumbs.done[k] === "failed" && s.thumbs.reasons[k] === reason);
-    if (failed) return { kind: THUMB_FAILURE_BANNERS[reason], text: `Some images could not be loaded (${reason}).`, retry: "thumbs" };
+  const tally = new Map<MastErrorCode, { count: number; error: MastError }>();
+  for (const [key, failure] of Object.entries(s.thumbs.failures)) {
+    if (s.thumbs.done[key] !== "failed" || !bannerError(failure.error)) continue;
+    const seen = tally.get(failure.error.code);
+    tally.set(failure.error.code, { count: (seen?.count ?? 0) + 1, error: seen?.error ?? failure.error });
   }
-  return null;
+  let top: { count: number; error: MastError } | null = null;
+  for (const code of Object.keys(THUMB_FAILURE_BANNERS) as MastErrorCode[]) {
+    const entry = tally.get(code);
+    if (entry && (!top || entry.count > top.count)) top = entry;
+  }
+  if (!top) return null;
+  const kind = bannerError(top.error) ?? "server";
+  if (kind === "cache") return { kind, text: CACHE_TROUBLE_TEXT, retry: "thumbs" };
+  const view = slotError(top.error, { surface: "thumb" });
+  const said = [view?.meta, view?.detail].filter(Boolean).join(": ");
+  const noun = top.count === 1 ? "thumbnail" : "thumbnails";
+  return { kind, text: `${top.count} ${noun} failed: ${view?.title ?? top.error.message}${said ? ` (${said})` : ""}.`, retry: "thumbs" };
 }
 
 function thumbPauseBanner(s: ArchiveState, now: number): Banner | null {
@@ -558,7 +600,7 @@ function resetForResults(s: ArchiveState): Pick<ArchiveState, "imageSets" | "lis
     lists: {},
     previews: {},
     products: {},
-    thumbs: { ...createThumbQueue(), active: q.active, pausedUntil: q.pausedUntil, retryAfterSec: q.retryAfterSec, status: q.status, consecutive: q.consecutive, gaveUp: q.gaveUp },
+    thumbs: { ...createThumbQueue(), active: q.active, pausedUntil: q.pausedUntil, retryAfterSec: q.retryAfterSec, status: q.status, consecutive: q.consecutive },
     thumbBannerHidden: false,
     thumbRefs: {},
     detail: { ...s.detail, imageKey: null, group: null, drawerOpen: false },
@@ -576,11 +618,20 @@ function orderOf(query: MastQuery | null, page: MastSearchPage): TableSort {
   return keys.length ? { keys, by: "server" } : LOCAL_ORDER;
 }
 
+function notResolvedState(s: ArchiveState, name: string, elapsedMs: number): ArchiveState {
+  return announce(
+    { ...s, ...resetForResults(s), run: null, results: null, resultsQuery: null, resolved: null, error: null, selectedId: null, selectedKey: null, notResolved: { name, elapsedMs } },
+    "Name not found",
+  );
+}
+
 function onPageLoaded(s: ArchiveState, a: Extract<ArchiveAction, { type: "pageLoaded" }>): ArchiveState {
   if (a.generation !== s.generation) return s;
   const first = a.page.offset === 0;
   if (first) {
     if (!s.run || s.run.generation !== a.generation) return s;
+    const unresolved = a.page.unresolvedTargets[0];
+    if (a.page.rows.length === 0 && unresolved) return notResolvedState(s, s.run.name ?? unresolved, a.page.elapsedMs);
     const results = mergePage(null, a.page);
     const count = results.totalReliable && results.totalReported !== null ? Math.max(results.totalReported, results.rows.length) : results.rows.length;
     const next: ArchiveState = {
@@ -596,6 +647,7 @@ function onPageLoaded(s: ArchiveState, a: Extract<ArchiveAction, { type: "pageLo
       queryError: null,
       loadingMore: null,
       selectedId: results.rows[0]?.datasetId ?? null,
+      selectedKey: null,
     };
     return announce(next, results.rows.length ? `Search finished: ${datasetsText(count)}` : "No results");
   }
@@ -613,7 +665,7 @@ function onSearchFailed(s: ArchiveState, a: Extract<ArchiveAction, { type: "sear
     case "silent":
       return base;
     case "blocking":
-      return announce({ ...base, error: a.error, results: null, resultsQuery: null, notResolved: null, selectedId: null }, view.title ?? view.text);
+      return announce({ ...base, error: a.error, results: null, resultsQuery: null, notResolved: null, selectedId: null, selectedKey: null }, view.title ?? view.text);
     case "inline":
       return announce({ ...base, queryError: { text: view.text, field: view.field ?? "query" } }, view.text);
     case "unavailable": {
@@ -669,6 +721,7 @@ function onMissionSwitched(s: ArchiveState, a: Extract<ArchiveAction, { type: "m
     error: null,
     queryError: null,
     selectedId: null,
+    selectedKey: null,
     loadingMore: null,
   };
 }
@@ -699,6 +752,28 @@ function rememberLarge(large: LargeState, entry: MastImageEntry | null): LargeSt
   return entry ? { ...large, group: entry.group, filter: filterOf(entry) } : large;
 }
 
+function onCacheCleared(s: ArchiveState): ArchiveState {
+  const previews = Object.fromEntries(Object.entries(s.previews).filter(([, p]) => p.stage === "download" || p.stage === "decode"));
+  const banners = { ...s.banners };
+  delete banners.cache;
+  return { ...s, banners, imageSets: {}, previews, thumbRefs: {}, thumbs: forget(s.thumbs, Object.keys(s.thumbs.done)), thumbBannerHidden: false };
+}
+
+function onImageMissing(s: ArchiveState, url: string): ArchiveState {
+  const thumbKeys = Object.keys(s.thumbRefs).filter((k) => s.thumbRefs[k].url === url);
+  const previewKeys = Object.keys(s.previews).filter((k) => s.previews[k].stage === "ready" && s.previews[k].url === url);
+  if (thumbKeys.length === 0 && previewKeys.length === 0) return s;
+  let thumbs = s.thumbs;
+  const thumbRefs = { ...s.thumbRefs };
+  for (const key of thumbKeys) {
+    thumbs = markFailed(thumbs, key, MISSING_FILE, null);
+    delete thumbRefs[key];
+  }
+  const previews = { ...s.previews };
+  for (const key of previewKeys) previews[key] = { ...previews[key], stage: "failed", error: MISSING_FILE };
+  return { ...s, thumbs, thumbRefs, previews };
+}
+
 function onPreviewProgress(s: ArchiveState, a: Extract<ArchiveAction, { type: "previewProgress" }>): ArchiveState {
   const key = Object.keys(s.previews).find((k) => s.previews[k].requestId === a.requestId);
   if (!key) return s;
@@ -726,7 +801,7 @@ function focusOn(token: TokenState, target: TokenFocusTarget): TokenState {
 }
 
 function missionLabelOf(s: ArchiveState, id: MastMissionId): string {
-  return missionOf(s, id)?.label ?? id.toUpperCase();
+  return missionOf(s, id)?.label ?? staticMissionLabel(id);
 }
 
 function probeAnnouncement(m: MastMission, at: number): string {
@@ -812,10 +887,7 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
       return { ...s, run: { ...s.run, phase: "searching", resolved: null, query: a.query, searchStartedAt: a.at } };
     case "nameNotResolved":
       if (!s.run || s.run.generation !== a.generation) return s;
-      return announce(
-        { ...s, ...resetForResults(s), run: null, results: null, resultsQuery: null, resolved: null, error: null, selectedId: null, notResolved: { name: a.name, elapsedMs: a.elapsedMs } },
-        "Name not found",
-      );
+      return notResolvedState(s, a.name, a.elapsedMs);
     case "pageLoaded":
       return onPageLoaded(s, a);
     case "pageRequested":
@@ -828,9 +900,11 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
     case "searchCancelled":
       if (!s.run || s.run.generation !== a.generation) return s;
       return { ...s, run: null };
-    case "selected":
-      if (a.datasetId === s.selectedId) return s;
-      return { ...s, selectedId: a.datasetId, detail: { ...s.detail, imageKey: null, group: null } };
+    case "selected": {
+      const selectedKey = a.rowKey ?? null;
+      if (a.datasetId === s.selectedId) return selectedKey === s.selectedKey ? s : { ...s, selectedKey };
+      return { ...s, selectedId: a.datasetId, selectedKey, detail: { ...s.detail, imageKey: null, group: null } };
+    }
     case "viewToggled":
       return { ...s, view: effectiveView(s) === "gallery" ? "table" : "gallery" };
     case "viewSet":
@@ -852,11 +926,11 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
     case "narrowSet":
       return s.detail.narrow === a.narrow ? s : { ...s, detail: { ...s.detail, narrow: a.narrow, drawerOpen: false } };
     case "imageListStarted":
-      return { ...s, lists: { ...s.lists, [a.key]: { requestId: a.requestId, startedAt: a.at, error: null } } };
+      return { ...s, lists: { ...s.lists, [a.key]: { requestId: a.requestId, startedAt: a.at, endedAt: null, error: null } } };
     case "imageListFailed": {
       const list = s.lists[a.key];
       if (!list || list.requestId !== a.requestId) return s;
-      return { ...s, lists: { ...s.lists, [a.key]: { ...list, error: a.error } } };
+      return { ...s, lists: { ...s.lists, [a.key]: { ...list, error: a.error, endedAt: a.at } } };
     }
     case "imageListCancelled": {
       const list = s.lists[a.key];
@@ -875,8 +949,9 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
       return { ...s, detail: { ...s.detail, group: a.group, imageKey: null } };
     case "largeOpened": {
       const large: LargeState = { open: true, datasetId: a.datasetId, imageKey: a.imageKey, group: null, filter: null };
-      const detail = a.datasetId === s.selectedId ? s.detail : { ...s.detail, imageKey: null, group: null };
-      const next: ArchiveState = { ...s, selectedId: a.datasetId, detail, large };
+      const same = a.datasetId === s.selectedId;
+      const detail = same ? s.detail : { ...s.detail, imageKey: null, group: null };
+      const next: ArchiveState = { ...s, selectedId: a.datasetId, selectedKey: same ? s.selectedKey : null, detail, large };
       return { ...next, large: rememberLarge(large, largeEntry(next)) };
     }
     case "largeImage": {
@@ -890,6 +965,7 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
       return {
         ...s,
         selectedId: a.datasetId,
+        selectedKey: null,
         detail: { ...s.detail, imageKey: null, group: null },
         large: { ...remembered, datasetId: a.datasetId, imageKey: null },
       };
@@ -901,13 +977,13 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
       return { ...s, detail, large: CLOSED_LARGE };
     }
     case "previewStarted":
-      return { ...s, previews: { ...s.previews, [a.key]: { requestId: a.requestId, stage: "download", received: 0, total: null, startedAt: a.at, ref: null, url: null, error: null } } };
+      return { ...s, previews: { ...s.previews, [a.key]: { requestId: a.requestId, stage: "download", received: 0, total: null, startedAt: a.at, endedAt: null, ref: null, url: null, error: null } } };
     case "previewProgress":
       return onPreviewProgress(s, a);
     case "previewLoaded":
       return withPreview(s, a.key, a.requestId, { stage: "ready", ref: a.ref, url: a.url, error: null });
     case "previewFailed":
-      return withPreview(s, a.key, a.requestId, { stage: "failed", error: a.error });
+      return withPreview(s, a.key, a.requestId, { stage: "failed", error: a.error, endedAt: a.at });
     case "previewCancelled": {
       const prev = s.previews[a.key];
       if (!prev || prev.requestId !== a.requestId) return s;
@@ -972,11 +1048,11 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
     case "thumbDemand":
       return { ...s, thumbs: setDemand(s.thumbs, a) };
     case "thumbsStarted":
-      return { ...s, thumbs: markStarted(s.thumbs, a.keys) };
+      return { ...s, thumbs: markStarted(s.thumbs, a.keys, a.at) };
     case "thumbReady":
       return { ...s, thumbs: markReady(s.thumbs, a.key), thumbRefs: a.ref ? { ...s.thumbRefs, [a.key]: a.ref } : s.thumbRefs };
     case "thumbFailed":
-      return { ...s, thumbs: markFailed(s.thumbs, a.key, a.reason), thumbBannerHidden: a.reason in THUMB_FAILURE_BANNERS ? false : s.thumbBannerHidden };
+      return { ...s, thumbs: markFailed(s.thumbs, a.key, a.error, a.at), thumbBannerHidden: bannerError(a.error) ? false : s.thumbBannerHidden };
     case "thumbDropped":
       return { ...s, thumbs: markDropped(s.thumbs, a.key) };
     case "thumbRateLimited": {
@@ -992,6 +1068,10 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
       return { ...s, thumbs: resumeNow(s.thumbs) };
     case "thumbsRetried":
       return { ...s, thumbs: retryFailed(s.thumbs, a.keys), thumbBannerHidden: false };
+    case "cacheCleared":
+      return onCacheCleared(s);
+    case "imageMissing":
+      return onImageMissing(s, a.url);
     case "archiveActive":
       return { ...s, thumbs: setActive(s.thumbs, a.active) };
     case "toast": {

@@ -127,6 +127,7 @@ interface RenderActionsContextValue {
   publishProcessed: (fileKey: string, result: ProcessedResult, chainUpdate?: (c: ProcessingChain) => ProcessingChain) => void;
   setChain: (fileKey: string, update: (c: ProcessingChain) => ProcessingChain) => void;
   resetProcessed: () => void;
+  setHistoryId: (fileKey: string, historyId: string | null) => void;
   forgetOutputs: (paths: string[]) => void;
   setStfPreviewUrl: (url: string | null) => void;
 }
@@ -290,7 +291,7 @@ interface RenderView extends FileRenderState {
   key: string | null;
 }
 
-const EMPTY_VIEW: RenderView = { key: null, processed: null, chain: EMPTY_CHAIN, version: 0 };
+const EMPTY_VIEW: RenderView = { key: null, processed: null, chain: EMPTY_CHAIN, version: 0, historyId: null };
 
 function viewFor(key: string | null): RenderView {
   const record = key ? renderRecords.get(key) : undefined;
@@ -517,6 +518,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         processed,
         chain: chainForPublish(baseChain, processed, chainUpdate),
         version,
+        historyId: base?.historyId ?? null,
       };
       putCapped(renderRecords, key, record, RENDER_CACHE_MAX);
       if (isCurrent) commitView({ key, ...record });
@@ -532,6 +534,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         processed: base?.processed ?? null,
         chain: update(base?.chain ?? EMPTY_CHAIN),
         version: base?.version ?? 0,
+        historyId: base?.historyId ?? null,
       };
       putCapped(renderRecords, key, record, RENDER_CACHE_MAX);
       if (isCurrent) commitView({ key, ...record });
@@ -542,9 +545,24 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const resetProcessed = useCallback(() => {
     const key = fileKeyRef.current;
     if (!key) return;
-    renderRecords.delete(key);
-    commitView({ key, processed: null, chain: EMPTY_CHAIN, version: nextRenderVersion() });
+    const historyId = (renderRecords.get(key) ?? viewRef.current).historyId;
+    const record: FileRenderState = { processed: null, chain: EMPTY_CHAIN, version: nextRenderVersion(), historyId };
+    if (historyId === null) renderRecords.delete(key);
+    else putCapped(renderRecords, key, record, RENDER_CACHE_MAX);
+    commitView({ key, ...record });
   }, [commitView]);
+
+  const setHistoryId = useCallback(
+    (key: string, historyId: string | null) => {
+      const isCurrent = key === fileKeyRef.current;
+      const base = renderRecords.get(key) ?? (isCurrent ? viewRef.current : null);
+      if (!base || base.historyId === historyId) return;
+      const record: FileRenderState = { processed: base.processed, chain: base.chain, version: base.version, historyId };
+      putCapped(renderRecords, key, record, RENDER_CACHE_MAX);
+      if (isCurrent) commitView({ key, ...record });
+    },
+    [commitView],
+  );
 
   const forgetOutputs = useCallback(
     (paths: string[]) => {
@@ -1063,8 +1081,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const renderActionsValue = useMemo<RenderActionsContextValue>(
-    () => ({ currentFileKey, publishProcessed, setChain, resetProcessed, forgetOutputs, setStfPreviewUrl }),
-    [currentFileKey, publishProcessed, setChain, resetProcessed, forgetOutputs, setStfPreviewUrl],
+    () => ({ currentFileKey, publishProcessed, setChain, resetProcessed, setHistoryId, forgetOutputs, setStfPreviewUrl }),
+    [currentFileKey, publishProcessed, setChain, resetProcessed, setHistoryId, forgetOutputs, setStfPreviewUrl],
   );
 
   const rawPixelsValue = useMemo<RawPixelsContextValue>(

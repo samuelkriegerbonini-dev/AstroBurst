@@ -1,0 +1,52 @@
+{
+  "axis_unit": "um",
+  "centroid": 1.020294963041596,
+  "continuum_channels": 12,
+  "continuum_level": 1.0000023540278764,
+  "continuum_linear": true,
+  "continuum_reference": 1.020294963041596,
+  "continuum_sigma": 2.2676337878465344e-6,
+  "continuum_slope": 0.00007874136644705721,
+  "continuum_windows": [
+    [
+      0,
+      5
+    ],
+    [
+      34,
+      39
+    ]
+  ],
+  "equivalent_width": -0.007521745590720533,
+  "fit": null,
+  "flux": 0.0075217632971189136,
+  "flux_err": 1.1341411801719127e-8,
+  "flux_unit": "Jy/beam x um",
+  "fwhm": 0.007064482463250969,
+  "n_channels": 25,
+  "notes": [
+    "air wavelengths converted to vacuum with Greisen et al. 2006 (FITS Paper III eq. 65)",
+    "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid",
+    "line velocity from the optical convention with rest wavelength 1.02 um, axis frame BARYCENT, no frame shift applied"
+  ],
+  "peak": 0.9999976459710544,
+  "peak_channel": 20,
+  "sigma": 0.003000009481895727,
+  "snr": 663212.2551073198,
+  "source": {
+    "kind": "pixel",
+    "x": 16,
+    "y": 16
+  },
+  "velocity": {
+    "axis_frame": "BARYCENT",
+    "centroid_kms": 86.69381888160144,
+    "convention": "optical",
+    "fwhm_kms": 2076.3515315254635,
+    "rest_um": 1.02,
+    "shift_applied_kms": 0.0,
+    "sigma_kms": 881.7453103929963
+  },
+  "z0": 8,
+  "z1": 32
+}

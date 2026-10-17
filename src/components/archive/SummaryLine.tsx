@@ -2,6 +2,7 @@ import { RefreshCw } from "lucide-react";
 import { currentMission, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { summaryView } from "./logic/resultsView";
+import { missionLabelOf } from "./logic/missionLabels";
 
 interface SummaryLineProps {
   state: ArchiveState;
@@ -12,7 +13,7 @@ export default function SummaryLine({ state, ctl }: SummaryLineProps) {
   const results = state.results;
   if (!results) return null;
   const mission = currentMission(state);
-  const view = summaryView({ results, resolved: state.resolved, query: state.resultsQuery, missionLabel: mission?.label ?? results.mission.toUpperCase() });
+  const view = summaryView({ results, resolved: state.resolved, query: state.resultsQuery, missionLabel: mission?.label ?? missionLabelOf(results.mission) });
   const notes = [...results.messages, ...results.unresolvedTargets.map((t) => `MAST could not resolve ${t}`)].filter(Boolean);
   return (
     <div className="ab-mast-summary-row">

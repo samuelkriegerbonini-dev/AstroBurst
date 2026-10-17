@@ -62,3 +62,24 @@ describe("firstResolvedDir", () => {
     expect(dir).toBe("/docs");
   });
 });
+
+describe("getHistoryDir", () => {
+  beforeEach(() => {
+    pathMock.appDataDir.mockReset();
+    pathMock.appDataDir.mockResolvedValue("/app");
+  });
+
+  it("puts history beside the output folder the launch wipes, never inside it", async () => {
+    const { getHistoryDir, getOutputDir } = await freshOutputModule();
+    const historyDir = await getHistoryDir();
+    expect(historyDir).toBe("/app/history");
+    expect(historyDir.startsWith(`${await getOutputDir()}/`)).toBe(false);
+    expect(historyDir.split("/").some((part) => part.startsWith("."))).toBe(false);
+  });
+
+  it("falls back to a relative history folder outside Tauri", async () => {
+    pathMock.appDataDir.mockRejectedValue(new Error("not in tauri"));
+    const { getHistoryDir } = await freshOutputModule();
+    await expect(getHistoryDir()).resolves.toBe("./history");
+  });
+});

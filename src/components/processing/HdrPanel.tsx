@@ -1,6 +1,8 @@
 import { useState, useCallback } from "react";
 import { X } from "lucide-react";
-import { applyHdrmt, applyHdrmtComposite } from "../../services/localContrast";
+import { applyHdrmtComposite, hdrmtConfigOf, recordHdrmt } from "../../services/localContrast";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
@@ -29,7 +31,7 @@ interface HdrRun {
 interface HdrPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onProcessingDone?: (result: LocalContrastResult) => void;
+  onProcessingDone?: (result: LocalContrastResult) => void | Promise<void>;
   chainedFrom?: string;
   inputPreviewUrl?: string | null;
   inputLabel?: string;
@@ -56,7 +58,10 @@ function isLinearInputError(message: string | null): boolean {
 export default function HdrPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: HdrPanelProps) {
   const progress = useProgress(HDR_PROGRESS_EVENT);
   const resetProgress = progress.reset;
-  const [config, setConfig] = useState<HdrConfig>(DEFAULT_HDR_CONFIG);
+  const initial = useRerunInitial("hdr", hdrmtConfigOf);
+  const [config, setConfig] = useState<HdrConfig>(initial?.params ?? DEFAULT_HDR_CONFIG);
+  useRerunUpdates("hdr", initial, hdrmtConfigOf, setConfig);
+  const scope = useHistoryScope();
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<HdrRun>("hdr", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -70,7 +75,7 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
     setConfig((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path && !!scope;
 
   const handleRun = useCallback(() => {
     const runConfig = config;
@@ -95,17 +100,18 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
       return;
     }
     const path = selectedFile?.path;
-    if (!path) return;
+    if (!path || !scope) return;
+    const runScope = scope;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     resetProgress();
     void run(async (ctx) => {
-      const res = await applyHdrmt(path, outputDir, runConfig);
+      const res = await recordHdrmt(runScope, path, runConfig);
       if (!ctx.inputUnchanged("localContrast")) throw new Error(INPUT_CHANGED_MESSAGE);
-      onProcessingDone?.(res);
+      await onProcessingDone?.(res);
       return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     }, isCancelMessage).finally(resetProgress);
-  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, outputDir, config, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, scope, outputDir, config, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">

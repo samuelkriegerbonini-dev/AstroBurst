@@ -231,6 +231,9 @@ export interface MastErrorContext {
   timeoutSec?: number;
   bytes?: number;
   consecutive?: number;
+  attempts?: number;
+  elapsedMs?: number;
+  host?: string;
 }
 
 export interface MastError {

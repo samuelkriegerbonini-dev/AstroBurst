@@ -6,4 +6,4 @@ export const FILE_STATUS = {
   TABLE: "table",
 } as const;
 
-export const APP_VERSION = "v0.6.9";
+export const APP_VERSION = "v0.6.9.5";

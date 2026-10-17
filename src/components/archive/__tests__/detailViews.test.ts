@@ -106,7 +106,7 @@ function buttons(markup: string): string[] {
   return [...markup.matchAll(/<button[^>]*>([\s\S]*?)<\/button>/g)].map((m) => m[1].replace(/<[^>]+>/g, "").trim());
 }
 
-const netErr: MastError = { code: "mast_network", message: "connection refused", context: { operation: "search/jwst/api/v0.1/get_image_list" } };
+const netErr: MastError = { code: "mast_network", message: "connection refused", context: { operation: "search/jwst/api/v0.1/get_image_list", host: "mast.stsci.edu" } };
 
 describe("detail pane", () => {
   it("renders the selected dataset with its header, tabs and filmstrip", () => {
@@ -167,7 +167,7 @@ describe("detail pane", () => {
     expect(markup).toContain("2.2 of 5.8 MB");
     expect(markup).toMatch(/role="progressbar"[^>]*aria-valuenow="38"/);
     expect(buttons(markup)).toContain("Cancel");
-    const failed = run(loading, { type: "previewFailed", key: PANE, requestId: r.requestId, error: { code: "mast_no_image", message: "404", context: { status: 404, detail: "Image not found" } } });
+    const failed = run(loading, { type: "previewFailed", key: PANE, requestId: r.requestId, error: { code: "mast_no_image", message: "404", context: { status: 404, detail: "Image not found" } }, at: 3000 });
     const after = html(DetailPane, { state: failed, ctl });
     expect(tag(after, "mast-preview-img")).toContain('data-stage="failed"');
     expect(after).toContain("No preview for this image (MAST: Image not found).");
@@ -177,10 +177,82 @@ describe("detail pane", () => {
   it("says when the image list is still loading or could not be loaded", () => {
     const loading = run(searched(), { type: "imageListStarted", key: KEY, requestId: `g1:list:${ID}`, at: 0 });
     expect(html(DetailPane, { state: loading, ctl })).toContain(`Listing images for ${ID} …`);
-    const failed = run(loading, { type: "imageListFailed", key: KEY, requestId: `g1:list:${ID}`, error: netErr });
+    const failed = run(loading, { type: "imageListFailed", key: KEY, requestId: `g1:list:${ID}`, error: netErr, at: 1200 });
     const markup = html(DetailPane, { state: failed, ctl });
     expect(markup).toContain("Could not reach MAST (mast.stsci.edu): connection refused.");
     expect(buttons(markup).some((b) => b.startsWith("Retry"))).toBe(true);
+  });
+
+  describe("image slots in the detail show MAST's answer instead of the image", () => {
+    const badGateway: MastError = { code: "mast_server", message: "HTTP 502", context: { status: 502, detail: "Bad Gateway", operation: "search/jwst/api/v0.1/get_image_preview" } };
+    const slowThumb: MastError = { code: "mast_timeout", message: "no answer within 30 s", context: { timeoutSec: 30, operation: "search/jwst/api/v0.1/get_image_thumbnail" } };
+    const listDown: MastError = { code: "mast_server", message: "HTTP 503", context: { status: 503, detail: "Service Unavailable", operation: "search/jwst/api/v0.1/get_image_list" } };
+
+    it("puts the title, the HTTP status, MAST's text, Retry and Copy details in the preview stage", () => {
+      const r = ref("pane");
+      const s = run(withList(), { type: "previewStarted", key: PANE, requestId: r.requestId, at: 1000 }, { type: "previewFailed", key: PANE, requestId: r.requestId, error: badGateway, at: 42_000 });
+      const markup = html(DetailPane, { state: s, ctl });
+      const stage = tag(markup, "mast-preview-img");
+      expect(stage).toContain('data-stage="failed"');
+      expect(stage).toContain('data-error-code="mast_server"');
+      expect(stage).toContain('data-error-status="502"');
+      expect(stage).toContain('role="alert"');
+      expect(markup).toContain(">MAST server error<");
+      expect(markup).toContain("MAST had a problem answering (HTTP 502: Bad Gateway).");
+      expect(markup).toContain("HTTP 502 · previews · waited 41 s");
+      expect(markup).toMatch(/<blockquote[^>]*>Bad Gateway<\/blockquote>/);
+      const labels = buttons(markup);
+      expect(labels.some((b) => b.startsWith("Retry"))).toBe(true);
+      expect(labels).toContain("Copy details");
+      expect(markup).toContain("Code: mast_server");
+      expect(markup).toContain("Waited: 41 s");
+    });
+
+    it("shows a failed strip thumbnail as a badge with the cause in its title, and an entry with no thumbnail as listed by MAST", () => {
+      const first = L3.entries[0];
+      const thumbKey = `${ID}:${first.thumbnailFilename}`;
+      const noThumb = { ...L3, entries: L3.entries.map((e, i) => (i === 2 ? { ...e, thumbnailFilename: null } : e)) };
+      const s = run(
+        searched(),
+        { type: "imageListLoaded", key: KEY, set: noThumb },
+        { type: "thumbDemand", selected: [], visible: [thumbKey], ahead: [] },
+        { type: "thumbsStarted", keys: [thumbKey], at: 0 },
+        { type: "thumbFailed", key: thumbKey, error: slowThumb, at: 30_500 },
+      );
+      const markup = html(DetailPane, { state: s, ctl });
+      const item = /<button[^>]*data-testid="mast-strip-item"[^>]*data-error-code="mast_timeout"[^>]*>[\s\S]*?<\/button>/.exec(markup)?.[0] ?? "";
+      expect(item).toContain(`data-filename="${first.previewFilename}"`);
+      expect(item).toMatch(/>30s</);
+      expect(item).toMatch(/title="[^"]*MAST did not answer[^"]*"/);
+      expect(item).toMatch(/title="[^"]*no answer within 30 s · waited 31 s[^"]*"/);
+      const listed = tag(markup, "mast-strip-item", ` data-filename="${L3.entries[2].previewFilename}"`);
+      expect(listed).toContain('data-thumb="none"');
+      expect(listed).toContain("MAST lists no thumbnail for this image");
+    });
+
+    it("shows WAIT on strip thumbnails while MAST pauses requests", () => {
+      const now = Date.now();
+      const first = L3.entries[0];
+      const thumbKey = `${ID}:${first.thumbnailFilename}`;
+      const s = run(withList(), { type: "thumbDemand", selected: [], visible: [thumbKey], ahead: [] }, { type: "thumbsStarted", keys: [thumbKey], at: now }, { type: "thumbRateLimited", key: thumbKey, at: now, retryAfterSec: 30, consecutive: 1, status: 429 });
+      const markup = html(DetailPane, { state: s, ctl });
+      const item = tag(markup, "mast-strip-item", ` data-filename="${first.previewFilename}"`);
+      expect(item).toContain('data-thumb="paused"');
+      const body = /<button[^>]*data-testid="mast-strip-item"[^>]*data-thumb="paused"[^>]*>[\s\S]*?<\/button>/.exec(markup)?.[0] ?? "";
+      expect(body).toMatch(/>WAIT</);
+      expect(body).not.toContain("ab-mast-shimmer");
+    });
+
+    it("shows a failed image list as the same alert with the HTTP status and MAST's text", () => {
+      const s = run(searched(), { type: "imageListStarted", key: KEY, requestId: `g1:list:${ID}`, at: 0 }, { type: "imageListFailed", key: KEY, requestId: `g1:list:${ID}`, error: listDown, at: 2500 });
+      const markup = html(DetailPane, { state: s, ctl });
+      const alert = /<div[^>]*role="alert"[^>]*data-error-code="mast_server"[^>]*>|<div[^>]*data-error-code="mast_server"[^>]*role="alert"[^>]*>/.exec(markup)?.[0] ?? "";
+      expect(alert).toContain('data-error-status="503"');
+      expect(markup).toContain("MAST had a problem answering (HTTP 503: Service Unavailable).");
+      expect(markup).toContain("HTTP 503 · image lists · waited 2.5 s");
+      expect(buttons(markup)).toContain("Copy details");
+      expect(markup).not.toContain("MAST lists no preview");
+    });
   });
 
   it("becomes a drawer in a narrow window, hidden and inert until it is opened", () => {
@@ -316,6 +388,55 @@ describe("Large view", () => {
     expect(markup).toContain('src="http://asset.localhost/pane.jpg"');
     expect(markup).toContain("ab-mast-large-blur");
     expect(markup).toContain("Loading the 4096 px copy");
+  });
+
+  it("shows a failed image list and a failed pane copy as an alert with the HTTP status and MAST's text", () => {
+    const down: MastError = { code: "mast_server", message: "HTTP 503", context: { status: 503, detail: "Service Unavailable", operation: "search/jwst/api/v0.1/get_image_list" } };
+    const listFailed = run(
+      opened(searched()),
+      { type: "imageListStarted", key: KEY, requestId: `g1:list:${ID}`, at: 0 },
+      { type: "imageListFailed", key: KEY, requestId: `g1:list:${ID}`, error: down, at: 1000 },
+    );
+    const list = html(LargeView, { state: listFailed, ctl });
+    expect(list).toMatch(/class="ab-mast-large-status"[^>]*role="alert"|role="alert"[^>]*class="ab-mast-large-status"/);
+    expect(list).toContain("HTTP 503");
+    expect(list).toContain("Service Unavailable");
+    expect(list).not.toMatch(/class="ab-mast-large-status"[^>]*role="status"/);
+    const r = ref("pane");
+    const paneFailed = run(opened(), { type: "previewStarted", key: PANE, requestId: r.requestId, at: 0 }, { type: "previewFailed", key: PANE, requestId: r.requestId, error: { ...down, context: { ...down.context, operation: "search/jwst/api/v0.1/get_image_preview" } }, at: 500 });
+    const pane = html(LargeView, { state: paneFailed, ctl });
+    expect(pane).toMatch(/role="alert"/);
+    expect(pane).toContain("HTTP 503");
+    expect(pane).toContain("Service Unavailable");
+    expect(pane).toContain('data-error-code="mast_server"');
+  });
+
+  it("shows a compact chip with the HTTP status when the 4096 px copy fails", () => {
+    const r = ref("large");
+    const s = run(
+      ready(opened(), PANE, "pane"),
+      { type: "previewStarted", key: LARGE, requestId: r.requestId, at: 0 },
+      { type: "previewFailed", key: LARGE, requestId: r.requestId, error: { code: "mast_server", message: "HTTP 503", context: { status: 503, detail: "Service Unavailable" } }, at: 800 },
+    );
+    const markup = html(LargeView, { state: s, ctl });
+    const chip = /<div class="ab-mast-large-chip"[^>]*>[\s\S]*?<\/div>/.exec(markup)?.[0] ?? "";
+    expect(chip).toContain("4096 px copy failed: HTTP 503 · Service Unavailable");
+    expect(chip).toMatch(/title="[^"]*Code: mast_server[^"]*"/);
+    expect(chip).toContain("Retry");
+  });
+
+  it("shows the pane copy sharp under the chip once the 4096 px copy has failed", () => {
+    const r = ref("large");
+    const s = run(
+      ready(opened(), PANE, "pane"),
+      { type: "previewStarted", key: LARGE, requestId: r.requestId, at: 0 },
+      { type: "previewFailed", key: LARGE, requestId: r.requestId, error: { code: "mast_server", message: "HTTP 503", context: { status: 503, detail: "Service Unavailable" } }, at: 800 },
+    );
+    const markup = html(LargeView, { state: s, ctl });
+    const img = /<img[^>]*src="http:\/\/asset\.localhost\/pane\.jpg"[^>]*>/.exec(markup)?.[0] ?? "";
+    expect(img).not.toBe("");
+    expect(img).not.toContain("ab-mast-large-blur");
+    expect(img).not.toContain('aria-hidden="true"');
   });
 
   it("says it is listing images for a dataset reached with Up or Down", () => {

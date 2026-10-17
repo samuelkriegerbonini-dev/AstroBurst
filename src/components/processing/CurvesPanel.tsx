@@ -1,9 +1,11 @@
 import { useCallback, useState } from "react";
 import type { CurvePoint, LevelsParams } from "../../services/tone";
-import { IDENTITY_CURVE, IDENTITY_LEVELS, TONE_IDENTITY_MESSAGE, applyToneFile, isToneIdentity, type ToneFileResult } from "../../services/toneFile";
+import { IDENTITY_CURVE, IDENTITY_LEVELS, TONE_IDENTITY_MESSAGE, isToneIdentity, recordToneFile, toneOptionsOf, type ToneFileResult, type ToneSettings } from "../../services/toneFile";
 import { useRenderContext } from "../../context/PreviewContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import CurveEditor from "../compose/CurveEditor";
 import { Slider, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
 
@@ -13,7 +15,7 @@ export const COMPOSITE_CURVES_NOTICE = "Curves on the composite live in Compose 
 export interface CurvesPanelProps {
   selectedFile: { path: string; result?: { is_rgb?: boolean } | null } | null;
   outputDir?: string;
-  onProcessingDone?: (result: ToneFileResult) => void;
+  onProcessingDone?: (result: ToneFileResult) => void | Promise<void>;
   chainedFrom?: string;
   inputPreviewUrl?: string | null;
   inputLabel?: string;
@@ -60,7 +62,6 @@ function appliedParts(res: ToneFileResult): string {
 
 export function CurvesPanelView({
   selectedFile,
-  outputDir = "./output",
   onProcessingDone,
   chainedFrom,
   inputPreviewUrl,
@@ -76,28 +77,30 @@ export function CurvesPanelView({
 }: CurvesPanelViewProps) {
   const { running, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<CurvesRun>("tone", fileKey ?? null);
   const { chain } = useRenderContext();
+  const scope = useHistoryScope();
   const result = !compositeMode && runResult !== null && chainHoldsOutput(chain, "tone", runResult.res.fits_path) ? runResult : null;
   const isRgb = !!selectedFile?.result?.is_rgb;
   const externalReason = compositeMode || isRgb ? null : disabledReason ?? null;
   const reason = compositeMode ? COMPOSITE_CURVES_NOTICE : externalReason;
   const identity = isToneIdentity({ levels, curve: points });
-  const canRun = !!selectedFile?.path && !identity && !reason;
+  const canRun = !!selectedFile?.path && !!scope && !identity && !reason;
   const title = reason ?? (identity ? TONE_IDENTITY_MESSAGE : busyTitle);
   const disabled = !canRun || blocked;
 
   const handleRun = useCallback(() => {
-    if (!selectedFile?.path || compositeMode) return;
+    if (!selectedFile?.path || compositeMode || !scope) return;
     const path = selectedFile.path;
+    const runScope = scope;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     const options = { levels, curve: points };
     void run(async (ctx) => {
-      const res = await applyToneFile(path, outputDir, options);
+      const res = await recordToneFile(runScope, path, options);
       if (!ctx.inputUnchanged("tone")) throw new Error(INPUT_CHANGED_MESSAGE);
-      onProcessingDone?.(res);
+      await onProcessingDone?.(res);
       return { res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel };
     });
-  }, [selectedFile?.path, compositeMode, inputPreviewUrl, inputLabel, levels, points, outputDir, run, onProcessingDone]);
+  }, [selectedFile?.path, compositeMode, scope, inputPreviewUrl, inputLabel, levels, points, run, onProcessingDone]);
 
   const setLevel = (key: keyof LevelsParams) => (value: number) => onLevelsChange({ ...levels, [key]: value });
 
@@ -177,7 +180,13 @@ export function CurvesPanelView({
 }
 
 export default function CurvesPanel(props: CurvesPanelProps) {
-  const [levels, setLevels] = useState<LevelsParams>(IDENTITY_LEVELS);
-  const [points, setPoints] = useState<CurvePoint[]>(freshIdentityCurve);
+  const initial = useRerunInitial("curves", toneOptionsOf);
+  const [levels, setLevels] = useState<LevelsParams>(initial?.params.levels ?? IDENTITY_LEVELS);
+  const [points, setPoints] = useState<CurvePoint[]>(() => initial?.params.curve ?? freshIdentityCurve());
+  const applyRerun = useCallback((tone: ToneSettings) => {
+    setLevels(tone.levels);
+    setPoints(tone.curve);
+  }, []);
+  useRerunUpdates("curves", initial, toneOptionsOf, applyRerun);
   return <CurvesPanelView {...props} levels={levels} points={points} onLevelsChange={setLevels} onPointsChange={setPoints} />;
 }

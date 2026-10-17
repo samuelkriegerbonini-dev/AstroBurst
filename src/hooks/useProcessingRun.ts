@@ -248,6 +248,20 @@ export function useProcessingRun<T>(panel: string, fileKey: string | null): Proc
   };
 }
 
+export type Exclusive<T> = { ran: true; value: T } | { ran: false };
+
+export async function runExclusive<T>(panel: string, key: string, task: () => Promise<T>): Promise<Exclusive<T>> {
+  const token = ++tokenSeq;
+  const acquired = acquireRun(runState, panel, key, token);
+  if (!acquired) return { ran: false };
+  commit(acquired);
+  try {
+    return { ran: true, value: await task() };
+  } finally {
+    commit(settleRun(runState, panel, key, token, null, null));
+  }
+}
+
 export function useRunLocked(key: string): boolean {
   return useSyncExternalStore(subscribe, () => isRunLocked(runState, key), () => isRunLocked(runState, key));
 }

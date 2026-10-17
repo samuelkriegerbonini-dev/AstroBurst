@@ -1,0 +1,53 @@
+{
+  "axis_unit": "um",
+  "centroid": 1.0289278965360014,
+  "continuum_channels": 12,
+  "continuum_level": 1.0006755738100297,
+  "continuum_linear": true,
+  "continuum_reference": 1.0289278965360014,
+  "continuum_sigma": 0.03208724585473537,
+  "continuum_slope": 0.285119269188899,
+  "continuum_windows": [
+    [
+      0,
+      5
+    ],
+    [
+      34,
+      39
+    ]
+  ],
+  "equivalent_width": 0.00018102886278093701,
+  "fit": null,
+  "flux": -0.0001811516092953194,
+  "flux_err": 0.00016043622927367702,
+  "flux_unit": "Jy/beam x um",
+  "fwhm": null,
+  "n_channels": 25,
+  "notes": [
+    "flux is negative: centroid and sigma are weighted by the absorbed flux",
+    "continuum-subtracted profile has a negative second moment: sigma undefined",
+    "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid",
+    "line velocity from the optical convention with rest wavelength 1.02 um, axis frame BARYCENT, no frame shift applied"
+  ],
+  "peak": 0.04984131477257758,
+  "peak_channel": 8,
+  "sigma": null,
+  "snr": -1.1291190905908506,
+  "source": {
+    "kind": "pixel",
+    "x": 2,
+    "y": 2
+  },
+  "velocity": {
+    "axis_frame": "BARYCENT",
+    "centroid_kms": 2624.035340487773,
+    "convention": "optical",
+    "fwhm_kms": null,
+    "rest_um": 1.02,
+    "shift_applied_kms": 0.0,
+    "sigma_kms": null
+  },
+  "z0": 8,
+  "z1": 32
+}

@@ -208,6 +208,7 @@ pub const COPY_WCS: &str = "copy_wcs";
 
 pub const RES_FILE_SIZE_BYTES: &str = "file_size_bytes";
 pub const RES_SOURCE_SIZE_BYTES: &str = "source_size_bytes";
+pub const RES_SOURCE_DECOMPRESSED_BYTES: &str = "source_decompressed_bytes";
 pub const RES_OUTPUT_SIZE_BYTES: &str = "output_size_bytes";
 pub const RES_DROPPED: &str = "dropped";
 pub const RES_KEPT_RAW: &str = "kept_raw";
@@ -276,6 +277,8 @@ pub const RES_FILE_COUNT: &str = "file_count";
 pub const RES_OUTPUT_DIR: &str = "output_dir";
 pub const RES_TOTAL_SIZE: &str = "total_size";
 pub const RES_MAX_SIZE: &str = "max_size";
+pub const RES_HISTORY_ROOT: &str = "history_root";
+pub const RES_REPLAYABLE_NODES: &str = "replayable_nodes";
 
 pub const WIZARD_CACHE_PREFIX: &str = "__wizard_ch_";
 
@@ -612,6 +615,9 @@ pub const RES_PREFILTER_K: &str = "prefilter_k";
 pub const RES_RESIDUAL_MEASURED: &str = "residual_measured";
 pub const RES_AXIS: &str = "axis";
 pub const RES_INPUT_NORMALIZED: &str = "input_normalized";
+pub const RES_NON_FINITE_COUNT: &str = "non_finite_count";
+pub const RES_DBE_REJECTED_COUNT: &str = "rejected_count";
+pub const RES_DBE_SAMPLES: &str = "samples";
 pub const RES_OP: &str = "op";
 pub const RES_WCS_UPDATED: &str = "wcs_updated";
 

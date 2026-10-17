@@ -3,6 +3,7 @@ pub mod grid;
 pub mod plate_solve;
 pub mod spcc;
 pub mod spectral;
+pub mod stcs;
 pub mod time;
 pub mod wcs;
 pub mod catalog;

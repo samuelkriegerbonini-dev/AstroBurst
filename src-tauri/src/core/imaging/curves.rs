@@ -1,7 +1,8 @@
 use ndarray::Array2;
 use rayon::prelude::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LevelsParams {
     pub black: f64,
     pub gamma: f64,

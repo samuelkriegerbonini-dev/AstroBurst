@@ -14,7 +14,8 @@ const MAX_POLY_TERMS: usize = 21;
 const MIN_SCALED_PIVOT: f64 = 1e-10;
 const SKY_LEVEL_MAX_SAMPLES: usize = 262_144;
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackgroundConfig {
     pub grid_size: usize,
     pub poly_degree: usize,

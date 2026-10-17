@@ -1,0 +1,39 @@
+{
+  "axis_unit": "",
+  "centroid": 1.0121521348520666,
+  "continuum_channels": 12,
+  "continuum_level": 0.9856415919488872,
+  "continuum_linear": true,
+  "continuum_reference": 1.0121521348520666,
+  "continuum_sigma": 0.03723220458626747,
+  "continuum_slope": -0.09355553891908146,
+  "continuum_windows": [
+    [
+      0,
+      5
+    ],
+    [
+      34,
+      39
+    ]
+  ],
+  "equivalent_width": -0.00015641870984420058,
+  "fit": null,
+  "flux": 0.00015417285071690664,
+  "flux_err": 0.00018239980647053407,
+  "flux_unit": "",
+  "fwhm": null,
+  "n_channels": 24,
+  "notes": [
+    "1 channels with non-finite flux were skipped",
+    "continuum-subtracted profile has a negative second moment: sigma undefined",
+    "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid"
+  ],
+  "peak": 0.06401201067103313,
+  "peak_channel": 17,
+  "sigma": null,
+  "snr": 0.8452467889093546,
+  "velocity": null,
+  "z0": 8,
+  "z1": 32
+}

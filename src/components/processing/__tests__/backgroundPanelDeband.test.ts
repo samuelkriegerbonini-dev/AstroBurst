@@ -44,7 +44,7 @@ vi.mock("../../ui", async (importOriginal) => {
 
 vi.mock("../../../services/processing", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/processing")>()),
-  extractBackground: extractBackgroundMock,
+  recordExtractBackground: extractBackgroundMock,
 }));
 
 vi.mock("../../../services/compositeChain", async (importOriginal) => ({
@@ -169,7 +169,7 @@ describe("BackgroundPanel de-band modes", () => {
     expect(optionTag(render(file, {}, done), "deband_auto")).toContain('selected=""');
     clickRun();
     await vi.waitFor(() => expect(done).toHaveBeenCalledTimes(1));
-    expect(extractBackgroundMock).toHaveBeenCalledWith(RAW, "C:/out", { gridSize: 8, polyDegree: 3, sigmaClip: 2.5, iterations: 3, mode: "deband_auto" });
+    expect(extractBackgroundMock).toHaveBeenCalledWith({ imageKey: RAW, basePath: null }, RAW, { gridSize: 8, polyDegree: 3, sigmaClip: 2.5, iterations: 3, mode: "deband_auto" });
     expect(done.mock.calls[0][0]).toMatchObject({ corrected_fits: CORRECTED, axis: "rows" });
     publishBackground(file);
     const html = render(file);

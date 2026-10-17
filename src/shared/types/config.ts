@@ -4,6 +4,8 @@ export interface AppConfig {
   plate_solve_timeout_secs: number;
   output_max_size_mb: number | null;
   mast_token_transport: "header" | "cookie" | null;
+  data_dir_override: string | null;
+  mast_quota_gb: number | null;
 }
 
 export interface ApiKeyResult {

@@ -16,6 +16,7 @@ use crate::infra::asdf::converter::{
 };
 use crate::infra::asdf::tree::untag;
 use crate::infra::asdf::AsdfFile;
+use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::reader::{extract_header_by_index, list_extensions, read_primary_header, HduInfo};
 use crate::infra::fits::table::{list_tables, load_bintable, Column, ColumnInfo, ColumnValues, TableHdu};
 use crate::types::constants::{
@@ -392,7 +393,8 @@ pub(crate) fn ramp_tables_json(path: &str, max_rows: Option<usize>) -> Result<se
     if is_asdf_ref(&reference) {
         return Ok(json!({ KEY_GROUP_TABLE: serde_json::Value::Null, KEY_INT_TIMES_TABLE: serde_json::Value::Null }));
     }
-    let file = File::open(&reference.path).with_context(|| format!("Failed to open {}", reference.path))?;
+    let (readable, _decompressed) = resolve_gzip(std::path::Path::new(&reference.path))?;
+    let file = File::open(&readable).with_context(|| format!("Failed to open {}", reference.path))?;
     let tables = list_tables(&file)?;
     let max_rows = max_rows.unwrap_or(DEFAULT_TABLE_ROWS);
     let preview_of = |wanted: &str| -> Result<Option<TablePreview>> {
@@ -654,6 +656,17 @@ mod tests {
         let asdf = write_asdf(&dir, "roman.asdf", ROMAN_RAMP_TREE);
         let none = ramp_tables_json(&asdf, None).unwrap();
         assert!(none[KEY_GROUP_TABLE].is_null() && none[KEY_INT_TIMES_TABLE].is_null());
+    }
+
+    #[test]
+    fn ramp_tables_cmd_reads_a_gzip_compressed_uncal_like_the_plain_file() {
+        use crate::infra::fits::gzip::test_support::gzip_copy;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_owner_like_tables(&dir, "tables_uncal.fits");
+        let gz = gzip_copy(std::path::Path::new(&path), "tables_uncal.fits.gz");
+        let tables = ramp_tables_json(gz.to_str().unwrap(), None).unwrap();
+        assert!(!tables[KEY_GROUP_TABLE].is_null());
+        assert_eq!(tables, ramp_tables_json(&path, None).unwrap());
     }
 
     #[test]

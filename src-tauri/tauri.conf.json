@@ -18,7 +18,7 @@
     },
     "windows": [
       {
-        "title": "AstroBurst — JWST FITS Processor",
+        "title": "AstroBurst — FITS & ASDF Astronomy Workbench",
         "label": "main",
         "width": 1280,
         "height": 800,

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -10,9 +11,15 @@ pub const DEFAULT_AUTH_URL: &str = "https://auth.mast.stsci.edu";
 pub const ENV_MAST_URL: &str = "ASTROBURST_MAST_URL";
 pub const ENV_MAST_AUTH_URL: &str = "ASTROBURST_MAST_AUTH_URL";
 pub const ENV_MAST_TIMEOUT_MS: &str = "ASTROBURST_MAST_TIMEOUT_MS";
+pub const ENV_MAST_RETRY_MS: &str = "ASTROBURST_MAST_RETRY_MS";
+pub const ENV_TEST_DATA_DIR: &str = "ASTROBURST_TEST_DATA_DIR";
+pub const TEST_CONFIG_DIR: &str = "config";
+pub const TEST_LOCAL_DIR: &str = "local";
+pub const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 pub const CACHE_DIR: &str = "mast";
 pub const TEST_CACHE_DIR: &str = "mast-test";
 pub const LOOPBACK_HOST: &str = "127.0.0.1";
+pub const STSCI_DOMAIN: &str = "stsci.edu";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostOverride {
@@ -27,6 +34,8 @@ pub struct MastSettings {
     pub base_override: Option<HostOverride>,
     pub auth_override: Option<HostOverride>,
     pub timeout_override: Option<Duration>,
+    pub retry_backoff: Duration,
+    pub test_data_dir: Option<PathBuf>,
 }
 
 impl Default for MastSettings {
@@ -37,6 +46,8 @@ impl Default for MastSettings {
             base_override: None,
             auth_override: None,
             timeout_override: None,
+            retry_backoff: DEFAULT_RETRY_BACKOFF,
+            test_data_dir: None,
         }
     }
 }
@@ -53,7 +64,7 @@ pub fn parse_override(value: &str) -> Option<(String, HostOverride)> {
     }
     let host = url.host_str()?.to_ascii_lowercase();
     match url.scheme() {
-        "https" => {
+        "https" if host == STSCI_DOMAIN || host.ends_with(&format!(".{STSCI_DOMAIN}")) => {
             let base = match url.port() {
                 Some(port) => format!("https://{host}:{port}"),
                 None => format!("https://{host}"),
@@ -94,7 +105,7 @@ impl MastSettings {
                     settings.base_url = base;
                     settings.base_override = Some(host);
                 }
-                None => log::warn!("{ENV_MAST_URL} ignored: expected https://<host> or http://127.0.0.1:<port>"),
+                None => log::warn!("{ENV_MAST_URL} ignored: expected https://<host>.stsci.edu or http://127.0.0.1:<port>"),
             }
         }
         if let Some(raw) = read_var(&lookup, ENV_MAST_AUTH_URL) {
@@ -103,7 +114,7 @@ impl MastSettings {
                     settings.auth_url = base;
                     settings.auth_override = Some(host);
                 }
-                None => log::warn!("{ENV_MAST_AUTH_URL} ignored: expected https://<host> or http://127.0.0.1:<port>"),
+                None => log::warn!("{ENV_MAST_AUTH_URL} ignored: expected https://<host>.stsci.edu or http://127.0.0.1:<port>"),
             }
         }
         if let Some(raw) = read_var(&lookup, ENV_MAST_TIMEOUT_MS) {
@@ -112,7 +123,29 @@ impl MastSettings {
                 None => log::warn!("{ENV_MAST_TIMEOUT_MS} ignored: expected a positive number of milliseconds"),
             }
         }
+        if let Some(raw) = read_var(&lookup, ENV_MAST_RETRY_MS) {
+            match parse_timeout_ms(&raw) {
+                Some(backoff) => settings.retry_backoff = backoff,
+                None => log::warn!("{ENV_MAST_RETRY_MS} ignored: expected a positive number of milliseconds"),
+            }
+        }
+        if let Some(raw) = read_var(&lookup, ENV_TEST_DATA_DIR) {
+            let dir = PathBuf::from(raw);
+            match (&settings.base_override, dir.is_absolute()) {
+                (Some(_), true) => settings.test_data_dir = Some(dir),
+                (Some(_), false) => log::warn!("{ENV_TEST_DATA_DIR} ignored: expected an absolute path"),
+                (None, _) => log::warn!("{ENV_TEST_DATA_DIR} ignored: it is honoured only together with {ENV_MAST_URL}"),
+            }
+        }
         settings
+    }
+
+    pub fn config_dir(&self) -> Option<PathBuf> {
+        self.test_data_dir.as_ref().map(|dir| dir.join(TEST_CONFIG_DIR))
+    }
+
+    pub fn local_data_dir(&self, app_local: Option<PathBuf>) -> Option<PathBuf> {
+        self.test_data_dir.as_ref().map(|dir| dir.join(TEST_LOCAL_DIR)).or(app_local)
     }
 
     pub fn timeout(&self, kind: OpKind) -> Duration {
@@ -140,7 +173,10 @@ impl MastSettings {
 static SETTINGS: OnceLock<MastSettings> = OnceLock::new();
 
 pub fn init_from_env() {
-    SETTINGS.get_or_init(|| MastSettings::from_lookup(|name| std::env::var(name).ok()));
+    let settings = SETTINGS.get_or_init(|| MastSettings::from_lookup(|name| std::env::var(name).ok()));
+    if let Some(dir) = settings.config_dir() {
+        crate::infra::config::redirect_config_dir(dir);
+    }
 }
 
 pub fn settings() -> &'static MastSettings {
@@ -171,12 +207,15 @@ mod tests {
         assert_eq!(defaults.timeout(OpKind::Products), Duration::from_secs(120));
         assert_eq!(defaults.timeout(OpKind::AuthCheck), Duration::from_secs(30));
         assert_eq!(defaults.timeout(OpKind::Info), Duration::from_secs(30));
+        assert_eq!(defaults.retry_backoff, Duration::from_secs(1));
 
         let canned = with(&[
             (ENV_MAST_URL, "http://127.0.0.1:43123/"),
             (ENV_MAST_AUTH_URL, "http://127.0.0.1:43123"),
             (ENV_MAST_TIMEOUT_MS, "4000"),
+            (ENV_MAST_RETRY_MS, "250"),
         ]);
+        assert_eq!(canned.retry_backoff, Duration::from_millis(250));
         assert_eq!(canned.base_url, "http://127.0.0.1:43123");
         assert_eq!(canned.auth_url, "http://127.0.0.1:43123");
         assert_eq!(canned.base_override, Some(HostOverride::Loopback(43123)));
@@ -189,14 +228,17 @@ mod tests {
         assert!(!list.allows(&Url::parse("http://127.0.0.1:43124/x").unwrap()));
         assert!(list.allows(&Url::parse("https://stpubdata.s3.us-east-1.amazonaws.com/x").unwrap()));
 
-        let mirror = with(&[(ENV_MAST_URL, "https://Mirror.Example.org")]);
-        assert_eq!(mirror.base_url, "https://mirror.example.org");
-        assert_eq!(mirror.base_override, Some(HostOverride::Https("mirror.example.org".into())));
+        let mirror = with(&[(ENV_MAST_URL, "https://MastDev.STScI.edu"), (ENV_MAST_AUTH_URL, "https://auth.mastdev.stsci.edu:8443")]);
+        assert_eq!(mirror.base_url, "https://mastdev.stsci.edu");
+        assert_eq!(mirror.base_override, Some(HostOverride::Https("mastdev.stsci.edu".into())));
         assert_eq!(mirror.cache_dir_name(), TEST_CACHE_DIR);
-        assert!(mirror.redirect_allowlist().allows(&Url::parse("https://mirror.example.org/x").unwrap()));
-        assert_eq!(mirror.auth_url, DEFAULT_AUTH_URL);
+        assert!(mirror.redirect_allowlist().allows(&Url::parse("https://mastdev.stsci.edu/x").unwrap()));
+        assert_eq!(mirror.auth_url, "https://auth.mastdev.stsci.edu:8443");
 
         for rejected in [
+            "https://mirror.example.org",
+            "https://stsci.edu.example.org",
+            "https://evilstsci.edu",
             "http://mast.stsci.edu",
             "http://localhost:8080",
             "http://127.0.0.1",
@@ -217,6 +259,37 @@ mod tests {
         }
         for rejected in ["0", "-5", "abc", "1.5", ""] {
             assert_eq!(with(&[(ENV_MAST_TIMEOUT_MS, rejected)]).timeout_override, None, "{rejected}");
+            assert_eq!(with(&[(ENV_MAST_RETRY_MS, rejected)]).retry_backoff, DEFAULT_RETRY_BACKOFF, "{rejected}");
+        }
+    }
+
+    #[test]
+    fn test_data_dir_is_honoured_only_for_a_test_server() {
+        let scratch = std::env::temp_dir().join("ab-cdp-canned");
+        let dir = scratch.to_string_lossy().into_owned();
+        let app_local = Some(PathBuf::from("app-local"));
+        for url in ["http://127.0.0.1:43123", "https://mastdev.stsci.edu", "https://mast.stsci.edu"] {
+            let test = with(&[(ENV_MAST_URL, url), (ENV_TEST_DATA_DIR, &dir)]);
+            assert_eq!(test.test_data_dir.as_deref(), Some(scratch.as_path()), "{url}");
+            assert_eq!(test.config_dir(), Some(scratch.join(TEST_CONFIG_DIR)), "{url}");
+            assert_eq!(test.local_data_dir(app_local.clone()), Some(scratch.join(TEST_LOCAL_DIR)), "{url}");
+            assert_eq!(test.cache_dir_name(), TEST_CACHE_DIR, "{url}");
+        }
+        for (url, value) in [
+            (None, dir.as_str()),
+            (Some("http://localhost:8080"), dir.as_str()),
+            (Some("https://mirror.example.org"), dir.as_str()),
+            (Some("http://127.0.0.1:43123"), "relative/data"),
+            (Some("http://127.0.0.1:43123"), ""),
+        ] {
+            let mut vars = vec![(ENV_TEST_DATA_DIR, value)];
+            if let Some(url) = url {
+                vars.push((ENV_MAST_URL, url));
+            }
+            let normal = with(&vars);
+            assert_eq!(normal.test_data_dir, None, "{url:?} {value:?}");
+            assert_eq!(normal.config_dir(), None, "{url:?} {value:?}");
+            assert_eq!(normal.local_data_dir(app_local.clone()), app_local, "{url:?} {value:?}");
         }
     }
 }

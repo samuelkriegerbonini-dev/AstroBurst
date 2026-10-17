@@ -2,9 +2,10 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { captured, runPixelMathMock } = vi.hoisted(() => ({
+const { captured, runPixelMathMock, copyMock } = vi.hoisted(() => ({
   captured: { onClick: null as null | (() => void) },
   runPixelMathMock: vi.fn(),
+  copyMock: vi.fn(),
 }));
 
 vi.mock("../../ui", async (importOriginal) => {
@@ -20,7 +21,12 @@ vi.mock("../../ui", async (importOriginal) => {
 
 vi.mock("../../../services/pixelmath", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/pixelmath")>()),
-  runPixelMath: runPixelMathMock,
+  recordPixelMath: runPixelMathMock,
+}));
+
+vi.mock("../../../services/ops", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../services/ops")>()),
+  copyStepToOutput: copyMock,
 }));
 
 import { CompositeProvider } from "../../../context/CompositeContext";
@@ -31,12 +37,14 @@ import { INPUT_CHANGED_MESSAGE } from "../../../hooks/useProcessingRun";
 import { withStep } from "../../../utils/processingChain";
 import { rebindUntouchedSlots } from "../../../utils/pixelmathSlots";
 import PixelMathPanel from "../PixelMathPanel";
-import { retain, retainedFor } from "../pixelMathPanelState";
+import { outputCopyOf, retain, retainedFor } from "../pixelMathPanelState";
 import type { AstroFile, ProcessedFile } from "../../../shared/types";
 import type { PixelMathResult, PixelMathSlot } from "../../../shared/types/pixelmath";
 
 const SOURCE = "C:/data/673nmos.fits";
 const OUTPUT = "C:/out/673nmos_pixelmath.fits";
+const NODE = "C:/app/history/3f9c0a1e5b7d2c44/n0001.fits";
+const SCOPE = { imageKey: SOURCE, basePath: null };
 const BG = "C:/out/673nmos_bg.fits";
 const LOADED_502 = "C:/data/502nmos.fits";
 const LOADED_656 = "C:/data/656nmos.fits";
@@ -57,8 +65,9 @@ function sourceFile(id: string): ProcessedFile {
   };
 }
 
-function pixelMathResult(fitsPath: string): PixelMathResult {
+function pixelMathResult(fitsPath: string): PixelMathResult & { node: string } {
   return {
+    node: "n0001",
     png_path: fitsPath.replace(/\.fits$/, ".png"),
     fits_path: fitsPath,
     previewUrl: "asset://out/673nmos_pixelmath.png",
@@ -101,7 +110,7 @@ function showBackgroundOutput(file: ProcessedFile): void {
 
 function seedPanel(file: ProcessedFile, expression: string, slots: PixelMathSlot[]): string {
   const key = fileKeyOf(file) as string;
-  retain(key, { expression, slots, truncate: false, rescale: false, outputName: "", slotsTouched: false });
+  retain(key, { expression, slots, truncate: false, rescale: false, slotsTouched: false });
   return key;
 }
 
@@ -121,21 +130,26 @@ describe("PixelMathPanel file-mode run and the Files list", () => {
     captured.onClick = null;
     ingest.mockClear();
     runPixelMathMock.mockReset();
+    copyMock.mockReset();
+    copyMock.mockResolvedValue({ node: "n0001", fits_path: OUTPUT });
     unregister = registerFileIngest(ingest);
   });
 
   afterEach(() => unregister());
 
-  it("adds the result to the Files list after publishing it, once across re-runs, and keeps the selection", async () => {
+  it("adds a copy of the recorded step under output/ to the Files list, once across re-runs, and keeps the selection", async () => {
     const selectedId = loadAndSelectSource();
     const file = sourceFile("pm-run-ingest");
     const onProcessingDone = vi.fn();
-    runPixelMathMock.mockResolvedValue(pixelMathResult(OUTPUT));
+    runPixelMathMock.mockResolvedValue(pixelMathResult(NODE));
 
     renderPanel(file, onProcessingDone);
     captured.onClick?.();
     await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
+    expect(copyMock).toHaveBeenCalledWith(SCOPE, "n0001", "C:/out");
     expect(ingest).toHaveBeenCalledWith([{ name: "673nmos_pixelmath.fits", path: OUTPUT, size: 0 }], { quiet: true });
+    expect(outputCopyOf(NODE)).toBe(OUTPUT);
+    expect(outputCopyOf("C:/app/history/3f9c0a1e5b7d2c44/n0002.fits")).toBeNull();
     expect(onProcessingDone).toHaveBeenCalledTimes(1);
     expect(onProcessingDone.mock.invocationCallOrder[0]).toBeLessThan(ingest.mock.invocationCallOrder[0]);
 
@@ -156,13 +170,14 @@ describe("PixelMathPanel file-mode run and the Files list", () => {
     const onProcessingDone = vi.fn();
     runPixelMathMock.mockImplementation(async () => {
       showBackgroundOutput(file);
-      return pixelMathResult(OUTPUT);
+      return pixelMathResult(NODE);
     });
 
     renderPanel(file, onProcessingDone);
     captured.onClick?.();
     await vi.waitFor(() => expect(renderPanel(file, onProcessingDone)).toContain(INPUT_CHANGED_MESSAGE));
     expect(onProcessingDone).not.toHaveBeenCalled();
+    expect(copyMock).not.toHaveBeenCalled();
     expect(ingest).not.toHaveBeenCalled();
     expect(fileStore.getFiles().map((f) => f.path)).toEqual([SOURCE]);
     expect(retainedFor(key)?.slotsTouched).toBe(false);
@@ -186,16 +201,33 @@ describe("PixelMathPanel file-mode run and the Files list", () => {
     fileStore.addFiles(others.map((path) => ({ name: path.split("/").pop() ?? path, path, size: 0 })));
     const file = sourceFile(`pm-run-keeps-slots-${slots.length}`);
     const key = seedPanel(file, expression, slots);
-    runPixelMathMock.mockResolvedValue(pixelMathResult(OUTPUT));
+    runPixelMathMock.mockResolvedValue(pixelMathResult(NODE));
 
     renderPanel(file, vi.fn());
     captured.onClick?.();
     await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
-    expect(runPixelMathMock).toHaveBeenCalledWith(SOURCE, "C:/out", expression, expect.objectContaining({ slots }));
+    expect(runPixelMathMock).toHaveBeenCalledWith(SCOPE, SOURCE, expression, expect.objectContaining({ slots }));
 
     const loadedAfterRun = fileStore.getFiles().map((f) => ({ path: f.path }));
     expect(loadedAfterRun.map((f) => f.path)).toEqual([SOURCE, ...others, OUTPUT]);
     const saved = retainedFor(key);
     expect(rebindUntouchedSlots(saved?.slots ?? [], loadedAfterRun, SOURCE, saved?.slotsTouched ?? false, OUTPUT)).toEqual(slots);
+  });
+
+  it("still shows the recorded step when the copy under output/ cannot be written", async () => {
+    loadAndSelectSource();
+    const file = sourceFile("pm-run-copy-fails");
+    const onProcessingDone = vi.fn();
+    runPixelMathMock.mockResolvedValue(pixelMathResult(NODE));
+    copyMock.mockRejectedValue(new Error("disk full"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    renderPanel(file, onProcessingDone);
+    captured.onClick?.();
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    expect(onProcessingDone).toHaveBeenCalledTimes(1);
+    expect(ingest).not.toHaveBeenCalled();
+    expect(renderPanel(file, onProcessingDone)).not.toContain("disk full");
+    warn.mockRestore();
   });
 });

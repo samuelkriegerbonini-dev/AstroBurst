@@ -1,0 +1,13 @@
+[
+  {
+    "op": "hdrmt",
+    "v": 1,
+    "layers": 6,
+    "iterations": 1,
+    "overdrive": 0.0,
+    "inverted": false,
+    "toLightness": true,
+    "deringing": false,
+    "deringingAmount": 0.5
+  }
+]

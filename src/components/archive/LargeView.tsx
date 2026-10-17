@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, ImageOff, Info, Minus, Plus, X } from "lucide-react";
-import { ProgressBar } from "./PreviewsTab";
+import { ProgressBar, SlotStage } from "./PreviewsTab";
 import { imageSetKey, largeEntry, type ArchiveState, type PreviewState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { useNow } from "./state/useNow";
@@ -26,13 +26,17 @@ import {
   railObservationLines,
   sourceWcs,
   stripPosition,
+  waitedOf,
 } from "./logic/detailView";
 import { largeKeyCommand } from "./logic/detailKeys";
 import { isPublic } from "./logic/cardLabel";
 import { displayRows } from "./logic/resultsView";
 import { scaleBar } from "./logic/quickWcs";
+import { missionLabelOf } from "./logic/missionLabels";
 import { ZOOM_STEP, arcsecPerScreenPx, clampView, fitView, isFit, maxScale, panBy, zoomAt, zoomTo, type Size, type ZoomView } from "./logic/zoom";
 import { FOCUSABLE_SELECTOR, focusTrapTarget } from "../../utils/focusTrap";
+import { slotError, slotTooltip } from "./logic/errorCopy";
+import type { MastError } from "../../shared/types/mast";
 
 interface LargeViewProps {
   state: ArchiveState;
@@ -72,6 +76,7 @@ function LargeDialog({ state, ctl, onFocusQuery }: LargeViewProps) {
   const pane = readyOf(paneState);
   const large = readyOf(largeState);
   const wantsLarge = !!pane && largeNeeded(pane.ref);
+  const awaitingLarge = wantsLarge && largeState?.stage !== "failed";
   const main = large ?? pane;
   const source: Size | null = main ? { w: main.ref.source.width, h: main.ref.source.height } : null;
   const max = source ? maxScale(source) : 1;
@@ -192,7 +197,7 @@ function LargeDialog({ state, ctl, onFocusQuery }: LargeViewProps) {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
-  const label = mission?.label ?? results?.mission.toUpperCase() ?? "MAST";
+  const label = mission?.label ?? (results ? missionLabelOf(results.mission) : "MAST");
   const allowed = !!row && !!mission && previewsAllowed(row, mission);
   const imgStyle = view && source ? { left: view.x, top: view.y, width: source.w * view.scale, height: source.h * view.scale } : undefined;
   const wcs = main ? sourceWcs(main.ref) : null;
@@ -202,26 +207,31 @@ function LargeDialog({ state, ctl, onFocusQuery }: LargeViewProps) {
   const pos = set && entry ? stripPosition(set, entry) : null;
   const showBackdrop = !!pane && (!large || loadedUrl !== large.url);
 
-  let status: ReactNode = null;
-  if (!allowed) status = <p>{EXCLUSIVE_PREVIEWS_TEXT}</p>;
-  else if (!set) {
-    status = list?.error ? (
+  const rowPublic = row ? isPublic(row) : true;
+  const failureView = (error: MastError, surface: "list" | "preview", text: string, waitedMs: number | null): ReactNode => {
+    const view = slotError(error, { surface, rowPublic, waitedMs });
+    return view ? (
+      <SlotStage ctl={ctl} view={view} text={text} onRetry={() => ctl.retryLarge()} />
+    ) : (
       <>
-        <p>{listFailureText(list.error)}</p>
+        <p>{text}</p>
         <RetryLarge ctl={ctl} />
       </>
-    ) : (
-      <p>{listingText(datasetId ?? "", list ? Math.max(0, now - list.startedAt) : 0)}</p>
     );
+  };
+  let status: ReactNode = null;
+  let failure: MastError | null = null;
+  if (!allowed) status = <p>{EXCLUSIVE_PREVIEWS_TEXT}</p>;
+  else if (!set) {
+    if (list?.error) {
+      failure = list.error;
+      status = failureView(list.error, "list", listFailureText(list.error), waitedOf(list));
+    } else status = <p>{listingText(datasetId ?? "", list ? Math.max(0, now - list.startedAt) : 0)}</p>;
   } else if (!entry) status = <p>MAST lists no preview images for this dataset.</p>;
   else if (!entry.previewFilename) status = <p>MAST lists no preview for this image.</p>;
   else if (paneState?.stage === "failed" && paneState.error) {
-    status = (
-      <>
-        <p>{previewFailureText(paneState.error, row ? isPublic(row) : true)}</p>
-        <RetryLarge ctl={ctl} />
-      </>
-    );
+    failure = paneState.error;
+    status = failureView(paneState.error, "preview", previewFailureText(paneState.error, rowPublic), waitedOf(paneState));
   } else if (!pane) {
     const phase = paneState ? paneState.stage : "pending";
     status = (
@@ -234,11 +244,15 @@ function LargeDialog({ state, ctl, onFocusQuery }: LargeViewProps) {
   }
 
   let chip: ReactNode = null;
+  let chipTitle: string | undefined;
   if (pane && wantsLarge && !large) {
+    const largeView = largeState?.stage === "failed" && largeState.error ? slotError(largeState.error, { surface: "preview", rowPublic, waitedMs: waitedOf(largeState) }) : null;
     if (largeState?.stage === "failed" && largeState.error) {
+      chipTitle = largeView ? slotTooltip(largeView) : undefined;
+      const said = largeView ? [largeView.meta, largeView.detail].filter(Boolean).join(" · ") || largeView.title : previewFailureText(largeState.error, rowPublic);
       chip = (
         <>
-          <span>{`The 4096 px copy did not load: ${previewFailureText(largeState.error, row ? isPublic(row) : true)}`}</span>
+          <span>{`4096 px copy failed: ${said}`}</span>
           <RetryLarge ctl={ctl} />
         </>
       );
@@ -288,27 +302,42 @@ function LargeDialog({ state, ctl, onFocusQuery }: LargeViewProps) {
           onPointerCancel={onPointerUp}
         >
           {large && entry ? (
-            <img className="ab-mast-large-img" src={large.url} alt={previewAlt(entry, large.ref)} draggable={false} decoding="async" style={imgStyle} onLoad={() => setLoadedUrl(large.url)} />
+            <img
+              className="ab-mast-large-img"
+              src={large.url}
+              alt={previewAlt(entry, large.ref)}
+              draggable={false}
+              decoding="async"
+              style={imgStyle}
+              onLoad={() => setLoadedUrl(large.url)}
+              onError={() => ctl.imageMissing(large.url)}
+            />
           ) : null}
           {pane && entry && showBackdrop ? (
             <img
-              className={wantsLarge ? "ab-mast-large-img ab-mast-large-blur" : "ab-mast-large-img"}
+              className={awaitingLarge ? "ab-mast-large-img ab-mast-large-blur" : "ab-mast-large-img"}
               src={pane.url}
               alt={large ? "" : previewAlt(entry, pane.ref)}
               aria-hidden={large ? true : undefined}
               draggable={false}
               decoding="async"
               style={imgStyle}
+              onError={() => ctl.imageMissing(pane.url)}
             />
           ) : null}
           {status ? (
-            <div className="ab-mast-large-status" role="status">
-              {!allowed || paneState?.stage === "failed" ? <ImageOff size={20} aria-hidden="true" /> : null}
+            <div
+              className="ab-mast-large-status"
+              role={failure ? "alert" : "status"}
+              data-error-code={failure?.code}
+              data-error-status={failure?.context.status}
+            >
+              {!allowed || (paneState?.stage === "failed" && !failure) ? <ImageOff size={20} aria-hidden="true" /> : null}
               {status}
             </div>
           ) : null}
           {chip ? (
-            <div className="ab-mast-large-chip" role="status">
+            <div className="ab-mast-large-chip" role="status" title={chipTitle}>
               {chip}
             </div>
           ) : null}

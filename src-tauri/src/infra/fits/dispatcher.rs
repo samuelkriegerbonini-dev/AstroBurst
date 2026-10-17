@@ -5,17 +5,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use tempfile::TempDir;
 
-pub fn resolve_single_image(path: &str) -> Result<(PathBuf, Option<TempDir>)> {
+use super::gzip::{resolve_gzip, SharedTempDir};
+
+pub fn resolve_single_image(path: &str) -> Result<(PathBuf, Option<SharedTempDir>)> {
     let p = Path::new(path);
     if !is_zip_path(p) {
-        return Ok((PathBuf::from(path), None));
+        return resolve_gzip(p);
     }
     let (files, tmp) = extract_zip_images(p)?;
     let first = files
         .into_iter()
         .next()
         .context("No supported image files inside ZIP")?;
-    Ok((first, Some(tmp)))
+    Ok((first, Some(SharedTempDir::new(tmp))))
 }
 
 fn is_zip_path(p: &Path) -> bool {

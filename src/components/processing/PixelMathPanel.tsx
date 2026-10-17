@@ -8,7 +8,11 @@ import { chainHoldsOutput, pixelMathTarget } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { ingestUnlessLoaded } from "../../hooks/useFileIngest";
-import { runPixelMath, validatePixelMath } from "../../services/pixelmath";
+import { pixelMathOptionsOf, recordPixelMath, validatePixelMath, type PixelMathSettings } from "../../services/pixelmath";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { copyStepToOutput } from "../../services/ops";
+import type { HistoryScope, RunOpResult } from "../../shared/types/ops";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import { compositePixelMath } from "../../services/compositeChain";
 import type { PixelMathResult, PixelMathSlot, PixelMathStats, PixelMathValidation } from "../../shared/types/pixelmath";
 import type { ProcessedFile } from "../../shared/types/fits.types";
@@ -20,7 +24,16 @@ import {
   type CompositePanelProps,
   type CompositePixelMathResult,
 } from "./compositeProps";
-import { chainOutputs, markSlotsTouched, pixelMathFileOptions, retain, retainedFor, slotsTouchedFor } from "./pixelMathPanelState";
+import {
+  chainOutputs,
+  markSlotsTouched,
+  outputCopyOf,
+  pixelMathFileOptions,
+  rememberOutputCopy,
+  retain,
+  retainedFor,
+  slotsTouchedFor,
+} from "./pixelMathPanelState";
 import {
   EXAMPLE_EXPRESSIONS,
   MAX_SLOTS,
@@ -38,7 +51,7 @@ interface PixelMathPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
   chainedFrom?: string;
-  onProcessingDone?: (result: PixelMathResult) => void;
+  onProcessingDone?: (result: PixelMathResult) => void | Promise<void>;
   inputPreviewUrl?: string | null;
   inputLabel?: string;
   fileKey?: string | null;
@@ -91,6 +104,16 @@ function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
 }
 
+async function listInFiles(scope: HistoryScope, step: RunOpResult, outputDir: string): Promise<void> {
+  try {
+    const copy = await copyStepToOutput(scope, step.node, outputDir);
+    rememberOutputCopy(step.fits_path, copy.fits_path);
+    ingestUnlessLoaded(copy.fits_path);
+  } catch (e) {
+    console.warn(`[AstroBurst] the PixelMath step ${step.node} could not be added to the Files list:`, e);
+  }
+}
+
 function formatValue(v: number | undefined): string {
   if (v == null || !Number.isFinite(v)) return "--";
   const abs = Math.abs(v);
@@ -130,7 +153,7 @@ export default function PixelMathPanel({
   const displayed = useDisplayedImage();
   const { chain, processed } = useRenderContext();
   const targetPath = selectedFile ? pixelMathTarget(processed, selectedFile.path) : null;
-  const pixelMathOutput = chain.steps.pixelMath?.fitsPath ?? null;
+  const pixelMathOutput = outputCopyOf(chain.steps.pixelMath?.fitsPath ?? null);
   const retainKey = fileKey ?? null;
   const targetBaseUrl = displayed.previewOnly
     ? selectedFile?.result?.previewUrl ?? null
@@ -139,12 +162,13 @@ export default function PixelMathPanel({
       : selectedFile?.result?.previewUrl ?? null;
   const targetBaseLabel = displayed.previewOnly ? "Original" : inputLabel ?? "Original";
 
-  const initial = retainedFor(retainKey);
+  const rerun = useRerunInitial("pixelmath", pixelMathOptionsOf);
+  const initial = rerun ? { ...rerun.params, slotsTouched: true } : retainedFor(retainKey);
   const [expression, setExpression] = useState(initial?.expression ?? "");
   const [slots, setSlots] = useState<PixelMathSlot[]>(initial?.slots ?? []);
   const [truncate, setTruncate] = useState(initial?.truncate ?? false);
   const [rescale, setRescale] = useState(initial?.rescale ?? false);
-  const [outputName, setOutputName] = useState(initial?.outputName ?? "");
+  const scope = useHistoryScope();
   const [validation, setValidation] = useState<PixelMathValidation | null>(null);
   const [target, setTarget] = useState<PixelMathTarget>("file");
   const perChannel = compositeMode && target === "composite";
@@ -155,11 +179,18 @@ export default function PixelMathPanel({
   const compositeResult = runResult?.mode === "composite" && compositeChainHolds(compositeChain, "pixelMath", runResult.afterUrl) ? runResult : null;
   const validationSeq = useRef(0);
   const expressionId = useId();
-  const outputNameId = useId();
   const targetId = useId();
 
   const slotsTouchedRef = useRef(initial?.slotsTouched ?? false);
   const restoredForRef = useRef(retainKey);
+  const applyRerun = useCallback((settings: PixelMathSettings) => {
+    slotsTouchedRef.current = true;
+    setExpression(settings.expression);
+    setSlots(settings.slots);
+    setTruncate(settings.truncate);
+    setRescale(settings.rescale);
+  }, []);
+  useRerunUpdates("pixelmath", rerun, pixelMathOptionsOf, applyRerun);
 
   useEffect(() => {
     if (restoredForRef.current === retainKey) return;
@@ -170,7 +201,6 @@ export default function PixelMathPanel({
     setSlots(saved?.slots ?? []);
     setTruncate(saved?.truncate ?? false);
     setRescale(saved?.rescale ?? false);
-    setOutputName(saved?.outputName ?? "");
     setValidation(null);
   }, [retainKey]);
 
@@ -180,10 +210,9 @@ export default function PixelMathPanel({
       slots,
       truncate,
       rescale,
-      outputName,
       slotsTouched: slotsTouchedRef.current || slotsTouchedFor(retainKey),
     });
-  }, [retainKey, expression, slots, truncate, rescale, outputName]);
+  }, [retainKey, expression, slots, truncate, rescale]);
 
   useEffect(() => {
     const touched = slotsTouchedRef.current || slotsTouchedFor(retainKey);
@@ -260,27 +289,27 @@ export default function PixelMathPanel({
   );
 
   const handleRun = useCallback(() => {
-    if (!targetPath) return;
+    if (!targetPath || !scope) return;
     const ranOn = targetPath;
+    const runScope = scope;
     const referenced = referencedSymbols(expression);
     const baseUrl = targetBaseUrl;
     const baseLabel = targetBaseLabel;
     void run(async (ctx) => {
-      const res = await runPixelMath(ranOn, outputDir, expression, {
+      const res = await recordPixelMath(runScope, ranOn, expression, {
         slots: slots
           .map((s) => ({ name: s.name.trim(), path: s.path }))
           .filter((s) => referenced.includes(s.name)),
         truncate,
         rescale,
-        name: outputName,
       });
       if (!ctx.displayedUnchanged()) throw new Error(INPUT_CHANGED_MESSAGE);
-      onProcessingDone?.(res);
+      await onProcessingDone?.(res);
       markSlotsTouched(ctx.key);
-      ingestUnlessLoaded(res.fits_path);
+      await listInFiles(runScope, res, outputDir);
       return { mode: "file", res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel };
     });
-  }, [targetPath, targetBaseUrl, targetBaseLabel, outputDir, expression, slots, truncate, rescale, outputName, run, onProcessingDone]);
+  }, [targetPath, scope, targetBaseUrl, targetBaseLabel, outputDir, expression, slots, truncate, rescale, run, onProcessingDone]);
 
   const handleRunComposite = useCallback(() => {
     if (!compositeInput) return;
@@ -310,7 +339,7 @@ export default function PixelMathPanel({
       ? caretLines(expression, validationError.position, validationError.length ?? 1)
       : null;
   const expressionReady = expression.trim().length > 0 && !hasSlotErrors && !validationError;
-  const canRun = perChannel ? compositeInput !== null && expressionReady : !!targetPath && expressionReady;
+  const canRun = perChannel ? compositeInput !== null && expressionReady : !!targetPath && !!scope && expressionReady;
 
   const originalUrl = fileResult?.baseUrl ?? null;
   const resultUrl = fileResult?.resultUrl;
@@ -480,19 +509,6 @@ export default function PixelMathPanel({
       <div className="flex flex-col gap-2">
         <Toggle label="Truncate result to [0, 1]" checked={truncate} disabled={isRunning} accent={ACCENT} onChange={setTruncate} />
         <Toggle label="Rescale result to [0, 1]" checked={rescale} disabled={isRunning} accent={ACCENT} onChange={setRescale} />
-        {!perChannel && (
-          <div className="flex items-center justify-between gap-2">
-            <label htmlFor={outputNameId} className="text-xs text-zinc-400">Output name</label>
-            <input
-              id={outputNameId}
-              className={`${INPUT_CLASS} w-40`}
-              value={outputName}
-              disabled={isRunning}
-              placeholder="pixelmath"
-              onChange={(e) => setOutputName(e.target.value)}
-            />
-          </div>
-        )}
       </div>
 
       <div title={disabledReason ?? busyTitle}>

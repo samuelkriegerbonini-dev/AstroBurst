@@ -10,19 +10,22 @@ use rayon::prelude::*;
 
 use crate::core::analysis::aperture::{annulus, circular_aperture, total_weight, AperturePixel};
 use crate::core::astrometry::spectral::SpectralAxis;
+use crate::core::cube::companions::check_companion;
 use crate::core::cube::eager::DISPLAY_ASINH_ALPHA;
+use crate::core::cube::linefit::dq_flagged;
 use crate::core::imaging::region::RegionShape;
 use crate::core::imaging::stats::is_valid_pixel;
 use crate::core::ramp::info::{ramp_info, RampInfo};
 use crate::infra::fits::compress::is_compressed_image_hdu;
 use crate::infra::fits::dispatcher::resolve_single_image;
+use crate::infra::fits::gzip::SharedTempDir;
 use crate::infra::fits::file_bytes::{io_mode, prefer_mmap, IoMode};
 use crate::infra::fits::reader::{create_mmap_random, decode_pixels_blank, parse_header_at, read_header_blocks, ParsedHdu};
 use crate::infra::fits::table::FileTabTables;
 use crate::infra::render::grayscale::render_stretched_8bit;
 use crate::math::median::f32_cmp;
 use crate::math::{exact_median_mut, sigma_clipped_stats};
-use crate::types::constants::MAD_TO_SIGMA;
+use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, MAD_TO_SIGMA};
 use crate::types::{HduHeader, ImageRef, PlaneSelector};
 
 #[derive(Debug, Clone)]
@@ -133,6 +136,7 @@ fn stats_sample_plan(naxis3: usize, npix: usize) -> (usize, usize) {
 
 const BACKGROUND_CLIP_SIGMA: f32 = 3.0;
 const BACKGROUND_CLIP_ITERATIONS: usize = 5;
+const MEDIAN_VARIANCE_FACTOR: f64 = std::f64::consts::FRAC_PI_2;
 const RANGE_MEDIAN_SINGLE_PASS_BYTES: usize = 1 << 30;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -142,6 +146,69 @@ pub struct ApertureSpectrum {
     pub npix: f64,
     pub bg_per_pixel: Option<Vec<f32>>,
     pub n_bg: usize,
+    pub err: Option<Vec<f32>>,
+    pub n_dq_excluded: Vec<u32>,
+    pub used_weight: Vec<f64>,
+    pub bg_err_per_pixel: Option<Vec<f32>>,
+    #[serde(skip)]
+    pub dropouts: ApertureDropouts,
+}
+
+const DROPOUT_WORD_BITS: usize = u64::BITS as usize;
+
+#[derive(Debug, Clone, Default)]
+pub struct ApertureDropouts {
+    words_per_channel: usize,
+    bits: Vec<u64>,
+}
+
+impl ApertureDropouts {
+    fn for_aperture(spaxels: usize, depth: usize) -> Self {
+        let words_per_channel = spaxels.div_ceil(DROPOUT_WORD_BITS);
+        ApertureDropouts { words_per_channel, bits: Vec::with_capacity(words_per_channel * depth) }
+    }
+
+    fn push_channel(&mut self) -> &mut [u64] {
+        let start = self.bits.len();
+        self.bits.resize(start + self.words_per_channel, 0);
+        &mut self.bits[start..]
+    }
+
+    fn channel(&self, z: usize) -> &[u64] {
+        &self.bits[z * self.words_per_channel..(z + 1) * self.words_per_channel]
+    }
+
+    fn depth(&self) -> usize {
+        self.bits.len().checked_div(self.words_per_channel).unwrap_or(0)
+    }
+
+    fn persistent(&self, reference: &[usize]) -> Vec<u64> {
+        let mut common = vec![u64::MAX; self.words_per_channel];
+        for &z in reference.iter().filter(|&&z| z < self.depth()) {
+            for (c, w) in common.iter_mut().zip(self.channel(z)) {
+                *c &= w;
+            }
+        }
+        common
+    }
+
+    pub fn dropped_in_every(&self, reference: &[usize]) -> usize {
+        if !reference.iter().any(|&z| z < self.depth()) {
+            return 0;
+        }
+        self.persistent(reference).iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    pub fn incomplete_channels(&self, reference: &[usize]) -> Vec<bool> {
+        let common = self.persistent(reference);
+        (0..self.depth()).map(|z| self.channel(z).iter().zip(&common).any(|(w, c)| w & !c != 0)).collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RangeCollapse {
+    pub value: Array2<f32>,
+    pub err: Option<Array2<f32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -216,11 +283,70 @@ fn row_span(pixels: &[AperturePixel]) -> Option<(usize, usize)> {
     Some((lo, hi))
 }
 
-fn clipped_background_level(mut samples: Vec<f32>) -> f32 {
+struct BackgroundLevel {
+    level: f32,
+    err: f64,
+}
+
+pub(crate) fn err_variance(err: f32) -> f64 {
+    if err.is_finite() && err >= 0.0 {
+        let e = err as f64;
+        e * e
+    } else {
+        f64::NAN
+    }
+}
+
+fn median_to_mean_variance_ratio(samples: usize) -> f64 {
+    if samples <= 2 {
+        1.0
+    } else {
+        MEDIAN_VARIANCE_FACTOR
+    }
+}
+
+fn clipped_background(mut samples: Vec<f32>, sample_errs: Option<Vec<f32>>) -> BackgroundLevel {
     if samples.is_empty() {
+        return BackgroundLevel { level: f32::NAN, err: f64::NAN };
+    }
+    let with_errs = sample_errs.map(|errs| (samples.clone(), errs));
+    let (median, scatter) = sigma_clipped_stats(&mut samples, BACKGROUND_CLIP_SIGMA, BACKGROUND_CLIP_ITERATIONS);
+    let ratio = median_to_mean_variance_ratio(samples.len());
+    let n = samples.len() as f64;
+    let level_variance = match with_errs {
+        Some((unclipped, errs)) => {
+            let lo = samples.iter().copied().fold(f32::INFINITY, f32::min);
+            let hi = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let sum_err2: f64 = unclipped
+                .iter()
+                .zip(&errs)
+                .filter(|(v, _)| (lo..=hi).contains(*v))
+                .map(|(_, e)| err_variance(*e))
+                .sum();
+            ratio * sum_err2 / (n * n)
+        }
+        None if samples.len() < 2 => f64::NAN,
+        None => ratio * scatter * scatter / n,
+    };
+    BackgroundLevel { level: median as f32, err: level_variance.sqrt() }
+}
+
+fn companion_batch_channels(companions: usize) -> usize {
+    BATCH_SIZE / (1 + companions)
+}
+
+fn collapse_error(variance: f64, channels: usize, mode: CollapseMode) -> f32 {
+    if channels == 0 {
         return f32::NAN;
     }
-    sigma_clipped_stats(&mut samples, BACKGROUND_CLIP_SIGMA, BACKGROUND_CLIP_ITERATIONS).0 as f32
+    let sum_err = variance.sqrt();
+    let n = channels as f64;
+    let err = match mode {
+        CollapseMode::Sum => sum_err,
+        CollapseMode::Mean => sum_err / n,
+        CollapseMode::Median => median_to_mean_variance_ratio(channels).sqrt() * sum_err / n,
+    };
+    err as f32
 }
 
 pub fn median_band_rows(range_len: usize, cols: usize, rows: usize, limit_bytes: usize) -> usize {
@@ -461,7 +587,7 @@ fn find_cube_hdu(data: &CubeData, plane: &PlaneSelector) -> Result<FoundCube> {
 
 pub struct LazyCube {
     data: CubeData,
-    _tmp: Option<tempfile::TempDir>,
+    _tmp: Option<SharedTempDir>,
     pub source_path: String,
     pub header: HduHeader,
     pub primary_header: Option<HduHeader>,
@@ -679,6 +805,19 @@ impl LazyCube {
         background: Option<&RegionShape>,
         subsamples: u8,
     ) -> Result<ApertureSpectrum> {
+        self.extract_spectrum_aperture_with(shape, background, subsamples, None, None)
+    }
+
+    pub fn extract_spectrum_aperture_with(
+        &self,
+        shape: &RegionShape,
+        background: Option<&RegionShape>,
+        subsamples: u8,
+        err: Option<&LazyCube>,
+        dq: Option<&LazyCube>,
+    ) -> Result<ApertureSpectrum> {
+        check_companion(EXTNAME_ERR, self, err)?;
+        check_companion(EXTNAME_DQ, self, dq)?;
         let g = &self.geometry;
         let (rows, cols, depth) = (g.naxis2, g.naxis1, g.depth);
         let pixels = region_pixels(shape, rows, cols, subsamples)?;
@@ -703,31 +842,65 @@ impl LazyCube {
 
         let mut sum = Vec::with_capacity(depth);
         let mut mean = Vec::with_capacity(depth);
+        let mut errors: Option<Vec<f32>> = err.map(|_| Vec::with_capacity(depth));
+        let mut n_dq_excluded = Vec::with_capacity(depth);
+        let mut used_weight = Vec::with_capacity(depth);
         let mut bg_levels: Option<Vec<f32>> = bg_pixels.as_ref().map(|_| Vec::with_capacity(depth));
+        let mut bg_errors: Option<Vec<f32>> = bg_pixels.as_ref().map(|_| Vec::with_capacity(depth));
+        let mut dropouts = ApertureDropouts::for_aperture(pixels.len(), depth);
+        let batch_channels = companion_batch_channels(usize::from(err.is_some()) + usize::from(dq.is_some()));
 
-        for batch_start in (0..depth).step_by(BATCH_SIZE) {
-            let batch_end = (batch_start + BATCH_SIZE).min(depth);
+        for batch_start in (0..depth).step_by(batch_channels) {
+            let batch_end = (batch_start + batch_channels).min(depth);
             let bands = self.decode_row_band_batch(batch_start, batch_end, y0, row_count)?;
-            for band in &bands {
-                let sample = |p: &AperturePixel| band[(p.y - y0) * cols + p.x];
+            let err_bands = err.map(|c| c.decode_row_band_batch(batch_start, batch_end, y0, row_count)).transpose()?;
+            let dq_bands = dq.map(|c| c.decode_row_band_batch(batch_start, batch_end, y0, row_count)).transpose()?;
+            for (k, band) in bands.iter().enumerate() {
+                let err_band = err_bands.as_ref().map(|b| &b[k]);
+                let dq_band = dq_bands.as_ref().map(|b| &b[k]);
+                let index = |p: &AperturePixel| (p.y - y0) * cols + p.x;
+                let flagged = |i: usize| dq_band.is_some_and(|d| dq_flagged(d[i]));
                 let mut acc = 0.0f64;
                 let mut weight = 0.0f64;
-                for p in &pixels {
-                    let v = sample(p);
+                let mut variance = 0.0f64;
+                let mut excluded = 0u32;
+                let dropped = dropouts.push_channel();
+                for (j, p) in pixels.iter().enumerate() {
+                    let i = index(p);
+                    let is_flagged = flagged(i);
+                    let v = band[i];
+                    if is_flagged || !v.is_finite() {
+                        dropped[j / DROPOUT_WORD_BITS] |= 1u64 << (j % DROPOUT_WORD_BITS);
+                    }
+                    if is_flagged {
+                        excluded += 1;
+                        continue;
+                    }
                     if v.is_finite() {
-                        acc += p.weight as f64 * v as f64;
-                        weight += p.weight as f64;
+                        let w = p.weight as f64;
+                        acc += w * v as f64;
+                        weight += w;
+                        if let Some(e) = err_band {
+                            variance += w * w * err_variance(e[i]);
+                        }
                     }
                 }
-                if let (Some(bg), Some(levels)) = (&bg_pixels, bg_levels.as_mut()) {
-                    let samples: Vec<f32> = bg.iter().map(sample).filter(|v| v.is_finite()).collect();
-                    let level = clipped_background_level(samples);
-                    if level.is_finite() {
-                        acc -= level as f64 * weight;
+                n_dq_excluded.push(excluded);
+                used_weight.push(weight);
+                if let (Some(bg), Some(levels), Some(level_errors)) = (&bg_pixels, bg_levels.as_mut(), bg_errors.as_mut()) {
+                    let usable: Vec<usize> =
+                        bg.iter().map(index).filter(|&i| !flagged(i) && band[i].is_finite()).collect();
+                    let samples: Vec<f32> = usable.iter().map(|&i| band[i]).collect();
+                    let sample_errs = err_band.map(|e| usable.iter().map(|&i| e[i]).collect());
+                    let background = clipped_background(samples, sample_errs);
+                    if background.level.is_finite() {
+                        acc -= background.level as f64 * weight;
                     } else {
                         acc = f64::NAN;
                     }
-                    levels.push(level);
+                    variance += weight * weight * background.err * background.err;
+                    levels.push(background.level);
+                    level_errors.push(background.err as f32);
                 }
                 if weight > 0.0 {
                     sum.push(acc as f32);
@@ -735,6 +908,9 @@ impl LazyCube {
                 } else {
                     sum.push(f32::NAN);
                     mean.push(f32::NAN);
+                }
+                if let Some(errors) = errors.as_mut() {
+                    errors.push(if weight > 0.0 { variance.sqrt() as f32 } else { f32::NAN });
                 }
             }
         }
@@ -745,45 +921,74 @@ impl LazyCube {
             npix: total_weight(&pixels),
             bg_per_pixel: bg_levels,
             n_bg: bg_pixels.map_or(0, |p| p.len()),
+            err: errors,
+            n_dq_excluded,
+            used_weight,
+            bg_err_per_pixel: bg_errors,
+            dropouts,
         })
     }
 
-    pub fn collapse_range(&self, z0: usize, z1: usize, mode: CollapseMode) -> Result<Array2<f32>> {
+    pub fn collapse_range_with_err(
+        &self,
+        z0: usize,
+        z1: usize,
+        mode: CollapseMode,
+        err: Option<&LazyCube>,
+    ) -> Result<RangeCollapse> {
         self.check_channel_range(z0, z1)?;
+        check_companion(EXTNAME_ERR, self, err)?;
         match mode {
-            CollapseMode::Sum | CollapseMode::Mean => self.collapse_range_linear(z0, z1, mode),
+            CollapseMode::Sum | CollapseMode::Mean => self.collapse_range_linear(z0, z1, mode, err),
             CollapseMode::Median => {
                 let g = &self.geometry;
                 let band_rows = median_band_rows(z1 - z0 + 1, g.naxis1, g.naxis2, RANGE_MEDIAN_SINGLE_PASS_BYTES);
-                self.collapse_range_median_banded(z0, z1, band_rows)
+                self.collapse_range_median_banded_with(z0, z1, band_rows, err)
             }
         }
     }
 
-    fn collapse_range_linear(&self, z0: usize, z1: usize, mode: CollapseMode) -> Result<Array2<f32>> {
+    pub fn collapse_range(&self, z0: usize, z1: usize, mode: CollapseMode) -> Result<Array2<f32>> {
+        Ok(self.collapse_range_with_err(z0, z1, mode, None)?.value)
+    }
+
+    fn collapse_range_linear(
+        &self,
+        z0: usize,
+        z1: usize,
+        mode: CollapseMode,
+        err: Option<&LazyCube>,
+    ) -> Result<RangeCollapse> {
         let g = &self.geometry;
         let (rows, cols) = (g.naxis2, g.naxis1);
         let npix = rows * cols;
         let mut sum = vec![0.0f64; npix];
         let mut count = vec![0u32; npix];
+        let mut variance = err.map(|_| vec![0.0f64; npix]);
+        let batch_channels = companion_batch_channels(usize::from(err.is_some()));
 
-        for batch_start in (z0..=z1).step_by(BATCH_SIZE) {
-            let batch_end = (batch_start + BATCH_SIZE).min(z1 + 1);
+        for batch_start in (z0..=z1).step_by(batch_channels) {
+            let batch_end = (batch_start + batch_channels).min(z1 + 1);
             let frames = self.decode_frames(batch_start, batch_end)?;
-            for pixels in &frames {
+            let err_frames = err.map(|c| c.decode_frames(batch_start, batch_end)).transpose()?;
+            for (k, pixels) in frames.iter().enumerate() {
+                let sigma = err_frames.as_ref().map(|f| &f[k]);
                 for (i, &v) in pixels.iter().enumerate().take(npix) {
                     if is_valid_pixel(v) {
                         sum[i] += v as f64;
                         count[i] += 1;
+                        if let (Some(variance), Some(sigma)) = (variance.as_mut(), sigma) {
+                            variance[i] += err_variance(sigma[i]);
+                        }
                     }
                 }
             }
         }
 
         let data: Vec<f32> = sum
-            .into_par_iter()
-            .zip(count.into_par_iter())
-            .map(|(s, c)| {
+            .par_iter()
+            .zip(count.par_iter())
+            .map(|(&s, &c)| {
                 if c == 0 {
                     f32::NAN
                 } else if mode == CollapseMode::Mean {
@@ -793,39 +998,71 @@ impl LazyCube {
                 }
             })
             .collect();
-        Array2::from_shape_vec((rows, cols), data).context("Failed to reshape collapsed range")
+        let value = Array2::from_shape_vec((rows, cols), data).context("Failed to reshape collapsed range")?;
+        let err = variance
+            .map(|variance| {
+                let data = variance.iter().zip(&count).map(|(&v, &c)| collapse_error(v, c as usize, mode)).collect();
+                Array2::from_shape_vec((rows, cols), data).context("Failed to reshape the collapsed range error")
+            })
+            .transpose()?;
+        Ok(RangeCollapse { value, err })
     }
 
     pub fn collapse_range_median_banded(&self, z0: usize, z1: usize, band_rows: usize) -> Result<Array2<f32>> {
+        Ok(self.collapse_range_median_banded_with(z0, z1, band_rows, None)?.value)
+    }
+
+    fn collapse_range_median_banded_with(
+        &self,
+        z0: usize,
+        z1: usize,
+        band_rows: usize,
+        err: Option<&LazyCube>,
+    ) -> Result<RangeCollapse> {
         self.check_channel_range(z0, z1)?;
         let g = &self.geometry;
         let (rows, cols) = (g.naxis2, g.naxis1);
         let band_rows = band_rows.clamp(1, rows.max(1));
         let mut data: Vec<f32> = Vec::with_capacity(rows * cols);
+        let mut errors: Option<Vec<f32>> = err.map(|_| Vec::with_capacity(rows * cols));
+        let batch_channels = companion_batch_channels(usize::from(err.is_some()));
 
         for band_start in (0..rows).step_by(band_rows) {
             let band_end = (band_start + band_rows).min(rows);
             let row_count = band_end - band_start;
             let band_npix = row_count * cols;
             let mut samples: Vec<Vec<f32>> = vec![Vec::with_capacity(z1 - z0 + 1); band_npix];
+            let mut variance = vec![0.0f64; if err.is_some() { band_npix } else { 0 }];
 
-            for batch_start in (z0..=z1).step_by(BATCH_SIZE) {
-                let batch_end = (batch_start + BATCH_SIZE).min(z1 + 1);
+            for batch_start in (z0..=z1).step_by(batch_channels) {
+                let batch_end = (batch_start + batch_channels).min(z1 + 1);
                 let bands = self.decode_row_band_batch(batch_start, batch_end, band_start, row_count)?;
-                for pixels in &bands {
-                    for (slot, &v) in samples.iter_mut().zip(pixels.iter()) {
+                let err_bands = err.map(|c| c.decode_row_band_batch(batch_start, batch_end, band_start, row_count)).transpose()?;
+                for (k, pixels) in bands.iter().enumerate() {
+                    let sigma = err_bands.as_ref().map(|b| &b[k]);
+                    for (i, (slot, &v)) in samples.iter_mut().zip(pixels.iter()).enumerate() {
                         if is_valid_pixel(v) {
                             slot.push(v);
+                            if let Some(sigma) = sigma {
+                                variance[i] += err_variance(sigma[i]);
+                            }
                         }
                     }
                 }
             }
 
+            if let Some(errors) = errors.as_mut() {
+                errors.extend(variance.iter().zip(&samples).map(|(&v, s)| collapse_error(v, s.len(), CollapseMode::Median)));
+            }
             let band_result: Vec<f32> = samples.into_par_iter().map(|mut vals| median_or_nan(&mut vals)).collect();
             data.extend_from_slice(&band_result);
         }
 
-        Array2::from_shape_vec((rows, cols), data).context("Failed to reshape collapsed median range")
+        let value = Array2::from_shape_vec((rows, cols), data).context("Failed to reshape collapsed median range")?;
+        let err = errors
+            .map(|e| Array2::from_shape_vec((rows, cols), e).context("Failed to reshape the collapsed median error"))
+            .transpose()?;
+        Ok(RangeCollapse { value, err })
     }
 
     pub fn compute_global_stats_streaming(&self) -> Result<GlobalCubeStats> {
@@ -1117,6 +1354,31 @@ pub(crate) mod test_support {
         write_bytes(path, &bytes);
     }
 
+    pub fn write_sci_err_dq_mef(
+        path: &std::path::Path,
+        cols: usize,
+        rows: usize,
+        depth: usize,
+        sci: impl Fn(usize, usize, usize) -> f32,
+        err: impl Fn(usize, usize, usize) -> f32,
+        dq: impl Fn(usize, usize, usize) -> i32,
+    ) {
+        let axes = [cols, rows, depth];
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &[("EXTEND", "T")], Vec::new());
+        bytes.extend(image_hdu("XTENSION", &axes, -32, &[("EXTNAME", "'SCI'")], f32_samples(cols, rows, depth, sci)));
+        bytes.extend(image_hdu("XTENSION", &axes, -32, &[("EXTNAME", "'ERR'")], f32_samples(cols, rows, depth, err)));
+        let mut dq_data = Vec::with_capacity(cols * rows * depth * 4);
+        for z in 0..depth {
+            for y in 0..rows {
+                for x in 0..cols {
+                    dq_data.extend_from_slice(&dq(z, y, x).to_be_bytes());
+                }
+            }
+        }
+        bytes.extend(image_hdu("XTENSION", &axes, 32, &[("EXTNAME", "'DQ'")], dq_data));
+        write_bytes(path, &bytes);
+    }
+
     pub fn line_profile(z: usize) -> f32 {
         let d = z as f64 - LINE_CENTRE_CHANNEL;
         (-d * d / (2.0 * LINE_SIGMA_CHANNELS * LINE_SIGMA_CHANNELS)).exp() as f32
@@ -1180,10 +1442,7 @@ pub(crate) mod test_support {
             LINE_CUBE_SIZE,
             LINE_CUBE_DEPTH,
             &line_cube_cards(),
-            |z, y, x| {
-                let line = if inside_disk(y, x) { line_profile(z) } else { 0.0 };
-                LINE_CONTINUUM + line + deterministic_noise(z, y, x, noise_amplitude)
-            },
+            |z, y, x| line_cube_value(z, y, x, noise_amplitude),
         );
     }
 
@@ -1196,10 +1455,54 @@ pub(crate) mod test_support {
             all.retain(|(k, _)| k != key);
             all.push((key, value));
         }
-        write_cube(path, LINE_CUBE_SIZE, LINE_CUBE_SIZE, LINE_CUBE_DEPTH, &all, |z, y, x| {
-            let line = if inside_disk(y, x) { line_profile(z) } else { 0.0 };
-            LINE_CONTINUUM + line
-        });
+        write_cube(path, LINE_CUBE_SIZE, LINE_CUBE_SIZE, LINE_CUBE_DEPTH, &all, |z, y, x| line_cube_value(z, y, x, 0.0));
+    }
+
+    pub fn line_cube_value(z: usize, y: usize, x: usize, noise_amplitude: f32) -> f32 {
+        let line = if inside_disk(y, x) { line_profile(z) } else { 0.0 };
+        LINE_CONTINUUM + line + deterministic_noise(z, y, x, noise_amplitude)
+    }
+
+    pub fn write_line_cube_mef(
+        path: &std::path::Path,
+        noise_amplitude: f32,
+        err: impl Fn(usize, usize, usize) -> f32,
+        dq: impl Fn(usize, usize, usize) -> i32,
+    ) {
+        write_line_cube_mef_with_cards(path, &[], noise_amplitude, err, dq);
+    }
+
+    pub fn write_line_cube_mef_with_cards(
+        path: &std::path::Path,
+        cards: &[(&'static str, &'static str)],
+        noise_amplitude: f32,
+        err: impl Fn(usize, usize, usize) -> f32,
+        dq: impl Fn(usize, usize, usize) -> i32,
+    ) {
+        write_line_cube_mef_from(path, cards, |z, y, x| line_cube_value(z, y, x, noise_amplitude), err, dq);
+    }
+
+    pub fn write_line_cube_mef_from(
+        path: &std::path::Path,
+        cards: &[(&'static str, &'static str)],
+        sci: impl Fn(usize, usize, usize) -> f32,
+        err: impl Fn(usize, usize, usize) -> f32,
+        dq: impl Fn(usize, usize, usize) -> i32,
+    ) {
+        let axes = [LINE_CUBE_SIZE, LINE_CUBE_SIZE, LINE_CUBE_DEPTH];
+        let mut sci_cards = vec![("EXTNAME", "'SCI'")];
+        sci_cards.extend(line_cube_cards().into_iter().filter(|(k, _)| !cards.iter().any(|(c, _)| c == k)));
+        sci_cards.extend_from_slice(cards);
+        let sci = f32_samples(axes[0], axes[1], axes[2], sci);
+        let dq_data: Vec<u8> = (0..axes[2])
+            .flat_map(|z| (0..axes[1]).flat_map(move |y| (0..axes[0]).map(move |x| (z, y, x))))
+            .flat_map(|(z, y, x)| dq(z, y, x).to_be_bytes())
+            .collect();
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &[("EXTEND", "T")], Vec::new());
+        bytes.extend(image_hdu("XTENSION", &axes, -32, &sci_cards, sci));
+        bytes.extend(image_hdu("XTENSION", &axes, -32, &[("EXTNAME", "'ERR'")], f32_samples(axes[0], axes[1], axes[2], err)));
+        bytes.extend(image_hdu("XTENSION", &axes, 32, &[("EXTNAME", "'DQ'")], dq_data));
+        write_bytes(path, &bytes);
     }
 
     pub fn context_hdu(cols: usize, rows: usize, planes: usize) -> Vec<u8> {
@@ -1412,6 +1715,572 @@ mod tests {
             .contains("background"));
     }
 
+    const GOLDEN_APERTURE_NOISE: f32 = 0.01;
+    const GOLDEN_APERTURE_SUBSAMPLES: u8 = 5;
+    const GOLDEN_APERTURE_SHA256: [(&str, &str); 2] = [
+        ("disk", "ac5592a2abc5f6c1c068db65baf1cd100970503fa5d0ade37876d193a4d82de8"),
+        ("disk_annulus", "37c19b8f028b5c36d0e06375f2ff39e28ded116c0731ee43e5f61de3bcaae4d8"),
+    ];
+
+    fn golden_background() -> RegionShape {
+        RegionShape::Annulus { x: LINE_DISK_CENTRE, y: LINE_DISK_CENTRE, r_inner: 9.0, r_outer: 13.0 }
+    }
+
+    fn aperture_bits_sha256(spectrum: &ApertureSpectrum) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for v in spectrum.sum.iter().chain(&spectrum.mean).chain(spectrum.bg_per_pixel.iter().flatten()) {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        hasher.update(spectrum.npix.to_bits().to_le_bytes());
+        hasher.update((spectrum.n_bg as u64).to_le_bytes());
+        hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    #[test]
+    fn the_old_aperture_entry_point_keeps_its_pre_error_sum_and_mean_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let cube = open_line_cube(&dir, GOLDEN_APERTURE_NOISE);
+        let background = golden_background();
+        let plain = cube.extract_spectrum_aperture(&disk_circle(), None, GOLDEN_APERTURE_SUBSAMPLES).unwrap();
+        let with_bg = cube.extract_spectrum_aperture(&disk_circle(), Some(&background), GOLDEN_APERTURE_SUBSAMPLES).unwrap();
+        let hashes = vec![("disk", aperture_bits_sha256(&plain)), ("disk_annulus", aperture_bits_sha256(&with_bg))];
+        let expected: Vec<(&str, String)> = GOLDEN_APERTURE_SHA256.iter().map(|&(k, v)| (k, v.to_string())).collect();
+        assert_eq!(hashes, expected);
+    }
+
+    #[test]
+    fn the_old_aperture_entry_point_is_the_new_one_without_companions() {
+        let dir = tempfile::tempdir().unwrap();
+        let cube = open_line_cube(&dir, GOLDEN_APERTURE_NOISE);
+        let background = golden_background();
+        for bg in [None, Some(&background)] {
+            let old = cube.extract_spectrum_aperture(&disk_circle(), bg, GOLDEN_APERTURE_SUBSAMPLES).unwrap();
+            let new = cube.extract_spectrum_aperture_with(&disk_circle(), bg, GOLDEN_APERTURE_SUBSAMPLES, None, None).unwrap();
+            assert_eq!(aperture_bits_sha256(&old), aperture_bits_sha256(&new));
+            assert!(new.err.is_none());
+            assert_eq!(new.n_dq_excluded, vec![0u32; LINE_CUBE_DEPTH]);
+            match bg {
+                None => assert!(new.bg_err_per_pixel.is_none()),
+                Some(_) => {
+                    let bg_err = new.bg_err_per_pixel.as_ref().expect("background error from the robust scatter");
+                    assert_eq!(bg_err.len(), LINE_CUBE_DEPTH);
+                    assert!(bg_err.iter().all(|e| e.is_finite() && *e > 0.0), "{:?}", bg_err);
+                }
+            }
+        }
+    }
+
+    const NOISE_CUBE_SIZE: usize = 16;
+    const NOISE_CUBE_DEPTH: usize = 64;
+    const NOISE_SIGMA: f32 = 2.0;
+    const NOISE_CENTRE: f64 = 8.0;
+    const NOISE_APERTURE_RADIUS: f64 = 3.0;
+    const NOISE_ANNULUS_RADII: (f64, f64) = (4.0, 6.0);
+    const NOISE_SUBSAMPLES: u8 = 5;
+    const AC1_REALISATIONS: usize = 1000;
+    const AC1_REALISATIONS_PER_FILE: usize = 100;
+    const AC1_SEED: u64 = 20_261_016;
+    const AC1_TOLERANCE: f64 = 0.02;
+
+    fn noise_aperture() -> RegionShape {
+        RegionShape::Circle { x: NOISE_CENTRE, y: NOISE_CENTRE, r: NOISE_APERTURE_RADIUS }
+    }
+
+    fn noise_annulus() -> RegionShape {
+        let (r_inner, r_outer) = NOISE_ANNULUS_RADII;
+        RegionShape::Annulus { x: NOISE_CENTRE, y: NOISE_CENTRE, r_inner, r_outer }
+    }
+
+    struct GaussianSource {
+        splitmix_state: u64,
+        spare: Option<f64>,
+    }
+
+    impl GaussianSource {
+        fn new(seed: u64) -> Self {
+            GaussianSource { splitmix_state: seed, spare: None }
+        }
+
+        fn uniform(&mut self) -> f64 {
+            self.splitmix_state = self.splitmix_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.splitmix_state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            (z >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        fn next(&mut self) -> f64 {
+            if let Some(v) = self.spare.take() {
+                return v;
+            }
+            let u1 = self.uniform().max(1e-300);
+            let u2 = self.uniform();
+            let radius = (-2.0 * u1.ln()).sqrt();
+            let angle = 2.0 * std::f64::consts::PI * u2;
+            self.spare = Some(radius * angle.sin());
+            radius * angle.cos()
+        }
+    }
+
+    #[derive(Default)]
+    struct PooledScatter {
+        samples: usize,
+        sum_sq: f64,
+        err_sq: f64,
+        level_sq: f64,
+        bg_err_sq: f64,
+        bg_scatter_err_sq: f64,
+    }
+
+    impl PooledScatter {
+        fn add(&mut self, with_err: &ApertureSpectrum, without_err: &ApertureSpectrum) {
+            let err = with_err.err.as_ref().expect("propagated error with an ERR cube");
+            assert_eq!(with_err.sum, without_err.sum, "the ERR cube must not change the sum");
+            for z in 0..with_err.sum.len() {
+                self.samples += 1;
+                self.sum_sq += (with_err.sum[z] as f64).powi(2);
+                self.err_sq += (err[z] as f64).powi(2);
+                if let (Some(levels), Some(bg_err), Some(bg_scatter_err)) = (
+                    with_err.bg_per_pixel.as_ref(),
+                    with_err.bg_err_per_pixel.as_ref(),
+                    without_err.bg_err_per_pixel.as_ref(),
+                ) {
+                    self.level_sq += (levels[z] as f64).powi(2);
+                    self.bg_err_sq += (bg_err[z] as f64).powi(2);
+                    self.bg_scatter_err_sq += (bg_scatter_err[z] as f64).powi(2);
+                }
+            }
+        }
+
+        fn rms(&self, total: f64) -> f64 {
+            (total / self.samples as f64).sqrt()
+        }
+    }
+
+    fn pooled_region_scatter(background: Option<&RegionShape>) -> PooledScatter {
+        let size = NOISE_CUBE_SIZE;
+        let depth = NOISE_CUBE_DEPTH * AC1_REALISATIONS_PER_FILE;
+        let dir = tempfile::tempdir().unwrap();
+        let err_path = dir.path().join("err.fits");
+        write_cube(&err_path, size, size, depth, &[], |_, _, _| NOISE_SIGMA);
+        let err_cube = LazyCube::open(err_path.to_str().unwrap()).unwrap();
+        let mut gauss = GaussianSource::new(AC1_SEED);
+        let mut pooled = PooledScatter::default();
+        for file in 0..AC1_REALISATIONS / AC1_REALISATIONS_PER_FILE {
+            let noise: Vec<f32> = (0..size * size * depth).map(|_| (NOISE_SIGMA as f64 * gauss.next()) as f32).collect();
+            let path = dir.path().join(format!("noise_{}.fits", file));
+            write_cube(&path, size, size, depth, &[], |z, y, x| noise[(z * size + y) * size + x]);
+            {
+                let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+                let with_err = cube
+                    .extract_spectrum_aperture_with(&noise_aperture(), background, NOISE_SUBSAMPLES, Some(&err_cube), None)
+                    .unwrap();
+                let without_err = cube.extract_spectrum_aperture(&noise_aperture(), background, NOISE_SUBSAMPLES).unwrap();
+                pooled.add(&with_err, &without_err);
+            }
+            std::fs::remove_file(&path).unwrap();
+        }
+        pooled
+    }
+
+    fn noise_aperture_weights() -> (f64, f64) {
+        let pixels = region_pixels(&noise_aperture(), NOISE_CUBE_SIZE, NOISE_CUBE_SIZE, NOISE_SUBSAMPLES).unwrap();
+        let w2 = pixels.iter().map(|p| (p.weight as f64).powi(2)).sum();
+        (total_weight(&pixels), w2)
+    }
+
+    fn assert_within(label: &str, measured: f64, expected: f64, tolerance: f64) {
+        let ratio = measured / expected;
+        assert!((ratio - 1.0).abs() <= tolerance, "{}: measured {} expected {} ratio {}", label, measured, expected, ratio);
+    }
+
+    #[test]
+    fn region_sum_scatter_matches_the_propagated_err_within_2_percent_pooled_64000_samples_seed_20261016() {
+        let pooled = pooled_region_scatter(None);
+        assert_eq!(pooled.samples, AC1_REALISATIONS * NOISE_CUBE_DEPTH);
+        let (_, w2) = noise_aperture_weights();
+        let formula = NOISE_SIGMA as f64 * w2.sqrt();
+        assert_within("propagated err against sigma sqrt(sum w^2)", pooled.rms(pooled.err_sq), formula, 1e-6);
+        assert_within("Monte Carlo sigma of the sum", pooled.rms(pooled.sum_sq), pooled.rms(pooled.err_sq), AC1_TOLERANCE);
+    }
+
+    #[test]
+    fn annulus_background_variance_includes_the_clipped_median_term_within_2_percent_seed_20261016() {
+        let background = noise_annulus();
+        let pooled = pooled_region_scatter(Some(&background));
+        let (weight, w2) = noise_aperture_weights();
+        let sigma = NOISE_SIGMA as f64;
+        let bg_err = pooled.rms(pooled.bg_err_sq);
+        let annulus_share = weight * weight * bg_err * bg_err / (w2 * sigma * sigma + weight * weight * bg_err * bg_err);
+        assert!((0.3..0.5).contains(&annulus_share), "annulus share of the variance {}", annulus_share);
+        assert_within("Monte Carlo sigma of the sum", pooled.rms(pooled.sum_sq), pooled.rms(pooled.err_sq), AC1_TOLERANCE);
+        assert_within("Monte Carlo sigma of the level against ERR", pooled.rms(pooled.level_sq), bg_err, AC1_TOLERANCE);
+        assert_within(
+            "Monte Carlo sigma of the level against the robust scatter",
+            pooled.rms(pooled.level_sq),
+            pooled.rms(pooled.bg_scatter_err_sq),
+            AC1_TOLERANCE,
+        );
+    }
+
+    const DQ_CUBE_DEPTH: usize = 40;
+    const DQ_FLAGGED_APERTURE: [(usize, usize, i32); 2] = [(8, 8, 1), (8, 9, 513)];
+    const DQ_INFORMATIONAL: (usize, usize, i32) = (9, 8, 4);
+    const DQ_BOUNDARY_SPAXEL: (usize, usize) = (7, 9);
+    const DQ_BOUNDARY_CHANNELS: [usize; 4] = [9, 10, 31, 32];
+
+    fn centre_distance(y: usize, x: usize) -> f64 {
+        ((y as f64 - NOISE_CENTRE).powi(2) + (x as f64 - NOISE_CENTRE).powi(2)).sqrt()
+    }
+
+    fn flagged_background_pixel(y: usize, x: usize) -> bool {
+        (y == NOISE_CENTRE as usize || x == NOISE_CENTRE as usize) && centre_distance(y, x) > NOISE_APERTURE_RADIUS + 1.0
+    }
+
+    fn dq_fixture(z: usize, y: usize, x: usize) -> i32 {
+        if let Some(&(_, _, value)) = DQ_FLAGGED_APERTURE.iter().find(|&&(fy, fx, _)| (fy, fx) == (y, x)) {
+            return value;
+        }
+        if (y, x) == DQ_BOUNDARY_SPAXEL && DQ_BOUNDARY_CHANNELS.contains(&z) {
+            return 1;
+        }
+        if (y, x) == (DQ_INFORMATIONAL.0, DQ_INFORMATIONAL.1) {
+            return DQ_INFORMATIONAL.2;
+        }
+        if flagged_background_pixel(y, x) {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn dq_cube_sci(x: usize) -> f32 {
+        1.0 + x as f32
+    }
+
+    fn dq_cube_err(z: usize) -> f32 {
+        NOISE_SIGMA * (1.0 + 0.05 * z as f32)
+    }
+
+    fn dq_dropped(z: usize, y: usize, x: usize) -> bool {
+        DQ_FLAGGED_APERTURE.iter().any(|&(fy, fx, _)| (fy, fx) == (y, x))
+            || ((y, x) == DQ_BOUNDARY_SPAXEL && DQ_BOUNDARY_CHANNELS.contains(&z))
+    }
+
+    #[test]
+    fn dq_bit_zero_drops_aperture_spaxels_per_channel_with_err_and_dq_aligned_in_z_with_sci() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq_s3d.fits");
+        let size = NOISE_CUBE_SIZE;
+        write_sci_err_dq_mef(&path, size, size, DQ_CUBE_DEPTH, |_, _, x| dq_cube_sci(x), |z, _, _| dq_cube_err(z), dq_fixture);
+        let key = path.to_str().unwrap();
+        let sci = LazyCube::open(key).unwrap();
+        let err = LazyCube::open(&format!("{}#hdu=2", key)).unwrap();
+        let dq = LazyCube::open(&format!("{}#hdu=3", key)).unwrap();
+        assert_eq!((sci.hdu_index, err.hdu_index, dq.hdu_index), (1, 2, 3));
+
+        let pixels = region_pixels(&noise_aperture(), size, size, NOISE_SUBSAMPLES).unwrap();
+        assert!(pixels.iter().any(|p| (p.y, p.x) == DQ_BOUNDARY_SPAXEL && p.weight == 1.0));
+        assert!(pixels.iter().any(|p| (p.y, p.x) == (DQ_BOUNDARY_SPAXEL.1, DQ_BOUNDARY_SPAXEL.0) && p.weight == 1.0));
+        let kept = |z: usize| pixels.iter().filter(move |p| !dq_dropped(z, p.y, p.x));
+        let kept_weight = |z: usize| kept(z).map(|p| p.weight as f64).sum::<f64>();
+        let kept_sum = |z: usize| kept(z).map(|p| p.weight as f64 * dq_cube_sci(p.x) as f64).sum::<f64>();
+        let kept_w2 = |z: usize| kept(z).map(|p| (p.weight as f64).powi(2)).sum::<f64>();
+
+        let spectrum = sci
+            .extract_spectrum_aperture_with(&noise_aperture(), None, NOISE_SUBSAMPLES, Some(&err), Some(&dq))
+            .unwrap();
+        let batch = companion_batch_channels(2);
+        assert!(DQ_CUBE_DEPTH >= 3 * batch, "depth {} spans fewer than three batches of {}", DQ_CUBE_DEPTH, batch);
+        assert!(DQ_BOUNDARY_CHANNELS.windows(2).any(|p| p[1] == p[0] + 1 && p[1] % batch == 0), "batch {}", batch);
+        let expected_excluded: Vec<u32> =
+            (0..DQ_CUBE_DEPTH).map(|z| if DQ_BOUNDARY_CHANNELS.contains(&z) { 3 } else { 2 }).collect();
+        assert_eq!(spectrum.n_dq_excluded, expected_excluded);
+        let errors = spectrum.err.as_ref().expect("propagated error");
+        assert_eq!((spectrum.sum.len(), errors.len()), (DQ_CUBE_DEPTH, DQ_CUBE_DEPTH));
+        for z in 0..DQ_CUBE_DEPTH {
+            let label = |what: &str| format!("{} in channel {}", what, z);
+            assert!((spectrum.used_weight[z] - kept_weight(z)).abs() < 1e-9, "{}", label("used weight"));
+            assert_within(&label("sum without the flagged spaxels"), spectrum.sum[z] as f64, kept_sum(z), 1e-6);
+            assert_within(&label("mean without the flagged spaxels"), spectrum.mean[z] as f64, kept_sum(z) / kept_weight(z), 1e-6);
+            let expected_err = dq_cube_err(z) as f64 * kept_w2(z).sqrt();
+            assert_within(&label("err without the flagged spaxels"), errors[z] as f64, expected_err, 1e-6);
+        }
+
+        let unflagged = sci.extract_spectrum_aperture(&noise_aperture(), None, NOISE_SUBSAMPLES).unwrap();
+        let all_sum: f64 = pixels.iter().map(|p| p.weight as f64 * dq_cube_sci(p.x) as f64).sum();
+        assert_within("sum when DQ is not given", unflagged.sum[0] as f64, all_sum, 1e-6);
+
+        let background = noise_annulus();
+        let bg_pixels = region_pixels(&background, size, size, NOISE_SUBSAMPLES).unwrap();
+        let flagged_bg = bg_pixels.iter().filter(|p| flagged_background_pixel(p.y, p.x)).count();
+        assert!(flagged_bg >= 4, "{}", flagged_bg);
+        let mut kept_bg_values: Vec<f32> =
+            bg_pixels.iter().filter(|p| !flagged_background_pixel(p.y, p.x)).map(|p| dq_cube_sci(p.x)).collect();
+        let kept_bg = kept_bg_values.len() as f64;
+        let expected_level = exact_median_mut(&mut kept_bg_values);
+        let with_bg = sci
+            .extract_spectrum_aperture_with(&noise_aperture(), Some(&background), NOISE_SUBSAMPLES, Some(&err), Some(&dq))
+            .unwrap();
+        assert_eq!(with_bg.n_bg, bg_pixels.len());
+        assert_eq!(with_bg.n_dq_excluded, expected_excluded);
+        let levels = with_bg.bg_per_pixel.as_ref().expect("background level");
+        let bg_err = with_bg.bg_err_per_pixel.as_ref().expect("background error");
+        assert_eq!((levels.len(), bg_err.len()), (DQ_CUBE_DEPTH, DQ_CUBE_DEPTH));
+        for z in 0..DQ_CUBE_DEPTH {
+            let expected_bg_err = (std::f64::consts::FRAC_PI_2).sqrt() * dq_cube_err(z) as f64 / kept_bg.sqrt();
+            assert_within(&format!("background error in channel {}", z), bg_err[z] as f64, expected_bg_err, 1e-6);
+            assert_within(&format!("background level in channel {}", z), levels[z] as f64, expected_level, 1e-6);
+            let expected_sum = kept_sum(z) - expected_level * kept_weight(z);
+            assert!((with_bg.sum[z] as f64 - expected_sum).abs() < 1e-4, "channel {}: sum {} expected {}", z, with_bg.sum[z], expected_sum);
+        }
+    }
+
+    const DROPOUT_DEPTH: usize = 25;
+    const DROPOUT_RADIUS: f64 = 5.5;
+    const DROPOUT_PERSISTENT: (usize, usize) = (8, 8);
+    const DROPOUT_NAN: (usize, usize) = (12, 9);
+    const DROPOUT_NAN_CHANNELS: [usize; 3] = [3, 9, 10];
+    const DROPOUT_FLAGGED: (usize, usize) = (5, 6);
+    const DROPOUT_FLAGGED_CHANNEL: usize = 20;
+
+    fn dropout_aperture() -> RegionShape {
+        RegionShape::Circle { x: NOISE_CENTRE, y: NOISE_CENTRE, r: DROPOUT_RADIUS }
+    }
+
+    fn dropout_dq(z: usize, y: usize, x: usize) -> i32 {
+        i32::from((y, x) == DROPOUT_PERSISTENT || ((y, x) == DROPOUT_FLAGGED && z == DROPOUT_FLAGGED_CHANNEL))
+    }
+
+    fn channel_set(mask: &[bool]) -> Vec<usize> {
+        mask.iter().enumerate().filter(|(_, &m)| m).map(|(z, _)| z).collect()
+    }
+
+    #[test]
+    fn aperture_dropouts_name_the_channels_that_lost_spaxels_kept_by_the_reference_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dropouts_s3d.fits");
+        let size = NOISE_CUBE_SIZE;
+        let sci = |z: usize, y: usize, x: usize| {
+            if (y, x) == DROPOUT_NAN && DROPOUT_NAN_CHANNELS.contains(&z) {
+                f32::NAN
+            } else {
+                1.0
+            }
+        };
+        write_sci_err_dq_mef(&path, size, size, DROPOUT_DEPTH, sci, |_, _, _| 0.1, dropout_dq);
+        let key = path.to_str().unwrap();
+        let cube = LazyCube::open(key).unwrap();
+        let err = LazyCube::open(&format!("{}#hdu=2", key)).unwrap();
+        let dq = LazyCube::open(&format!("{}#hdu=3", key)).unwrap();
+        let pixels = region_pixels(&dropout_aperture(), size, size, NOISE_SUBSAMPLES).unwrap();
+        let position = |spaxel: (usize, usize)| pixels.iter().position(|p| (p.y, p.x) == spaxel).unwrap();
+        assert!(pixels.len() > DROPOUT_WORD_BITS, "{} aperture spaxels", pixels.len());
+        assert!(position(DROPOUT_NAN) >= DROPOUT_WORD_BITS && position(DROPOUT_FLAGGED) < DROPOUT_WORD_BITS);
+        let batch = companion_batch_channels(2);
+        assert!(DROPOUT_NAN_CHANNELS.windows(2).any(|p| p[1] % batch == 0 && p[0] + 1 == p[1]), "batch {}", batch);
+
+        let all: Vec<usize> = (0..DROPOUT_DEPTH).collect();
+        let flagged = cube
+            .extract_spectrum_aperture_with(&dropout_aperture(), None, NOISE_SUBSAMPLES, Some(&err), Some(&dq))
+            .unwrap();
+        let mut lost_beyond_persistent = DROPOUT_NAN_CHANNELS.to_vec();
+        lost_beyond_persistent.push(DROPOUT_FLAGGED_CHANNEL);
+        assert_eq!(channel_set(&flagged.dropouts.incomplete_channels(&all)), lost_beyond_persistent);
+        assert_eq!(flagged.dropouts.dropped_in_every(&all), 1);
+        let nan_channel = [DROPOUT_NAN_CHANNELS[0]];
+        assert_eq!(channel_set(&flagged.dropouts.incomplete_channels(&nan_channel)), vec![DROPOUT_FLAGGED_CHANNEL]);
+        assert_eq!(flagged.dropouts.dropped_in_every(&nan_channel), 2);
+        assert_eq!(flagged.dropouts.dropped_in_every(&[]), 0);
+        assert!(flagged.dropouts.incomplete_channels(&[]).iter().all(|&m| !m));
+
+        let unflagged = cube.extract_spectrum_aperture(&dropout_aperture(), None, NOISE_SUBSAMPLES).unwrap();
+        assert_eq!(channel_set(&unflagged.dropouts.incomplete_channels(&all)), DROPOUT_NAN_CHANNELS.to_vec());
+        assert_eq!(unflagged.dropouts.dropped_in_every(&all), 0);
+        assert_eq!(unflagged.n_dq_excluded, vec![0u32; DROPOUT_DEPTH]);
+    }
+
+    #[test]
+    fn companion_cubes_of_another_shape_are_refused_naming_their_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = |name: &str, cols: usize, rows: usize, depth: usize| {
+            let path = dir.path().join(name);
+            write_cube(&path, cols, rows, depth, &[], |_, _, _| 1.0);
+            LazyCube::open(path.to_str().unwrap()).unwrap()
+        };
+        let sci = open("sci.fits", 16, 16, 8);
+        let err = open("err.fits", 16, 16, 4);
+        let dq = open("dq.fits", 8, 16, 8);
+        let refused = sci
+            .extract_spectrum_aperture_with(&noise_aperture(), None, NOISE_SUBSAMPLES, Some(&err), None)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("ERR cube 16x16x4 does not match the SCI cube"), "{}", refused);
+        let refused = sci
+            .extract_spectrum_aperture_with(&noise_aperture(), None, NOISE_SUBSAMPLES, None, Some(&dq))
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("DQ cube 8x16x8 does not match the SCI cube"), "{}", refused);
+    }
+
+    #[test]
+    fn a_companion_whose_depth_differs_through_a_fourth_axis_is_refused_naming_both_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ramp_path = dir.path().join("jw_ramp.fits");
+        let primary = [("NGROUPS", "3"), ("NINTS", "2"), ("TGROUP", "10.0"), ("DATAMODL", "'Level1bModel'")];
+        write_u16_ramp_mef(&ramp_path, 4, 3, 3, 2, &primary, &[], ramp_value);
+        let ramp = LazyCube::open(ramp_path.to_str().unwrap()).unwrap();
+        assert_eq!((ramp.geometry.naxis3, ramp.geometry.naxis4, ramp.geometry.depth), (3, 2, 6));
+        let flat_path = dir.path().join("flat.fits");
+        write_cube(&flat_path, 4, 3, 3, &[], |_, _, _| 1.0);
+        let flat = LazyCube::open(flat_path.to_str().unwrap()).unwrap();
+        let region = RegionShape::Circle { x: 1.5, y: 1.0, r: 1.0 };
+        let refused = ramp.extract_spectrum_aperture_with(&region, None, 1, Some(&flat), None).unwrap_err().to_string();
+        assert!(refused.contains("ERR cube 4x3x3 does not match the SCI cube 4x3x3x2"), "{}", refused);
+        let refused = flat.extract_spectrum_aperture_with(&region, None, 1, None, Some(&ramp)).unwrap_err().to_string();
+        assert!(refused.contains("DQ cube 4x3x3x2 does not match the SCI cube 4x3x3"), "{}", refused);
+    }
+
+    const SMALL_BG_DEPTH: usize = 4;
+    const SMALL_BG_FIRST: (usize, usize, f32, f32) = (8, 14, 1.0, 0.3);
+    const SMALL_BG_SECOND: (usize, usize, f32, f32) = (14, 8, 3.0, 0.4);
+    const SMALL_BG_SECOND_FROM_CHANNEL: usize = 2;
+    const FOOTPRINT_RADIUS: f64 = 3.75;
+
+    fn small_background_annulus() -> RegionShape {
+        RegionShape::Annulus { x: NOISE_CENTRE, y: NOISE_CENTRE, r_inner: 5.0, r_outer: 7.0 }
+    }
+
+    fn small_background_pixel(z: usize, y: usize, x: usize) -> Option<(usize, usize, f32, f32)> {
+        let present = |p: &(usize, usize, f32, f32)| (p.0, p.1) == (y, x);
+        if present(&SMALL_BG_FIRST) {
+            Some(SMALL_BG_FIRST)
+        } else {
+            Some(SMALL_BG_SECOND).filter(|p| present(p) && z >= SMALL_BG_SECOND_FROM_CHANNEL)
+        }
+    }
+
+    fn small_background_sci(z: usize, y: usize, x: usize) -> f32 {
+        if centre_distance(y, x) < FOOTPRINT_RADIUS {
+            return 1.0;
+        }
+        small_background_pixel(z, y, x).map_or(f32::NAN, |p| p.2)
+    }
+
+    fn small_background_err(z: usize, y: usize, x: usize) -> f32 {
+        small_background_pixel(z, y, x).map_or(NOISE_SIGMA, |p| p.3)
+    }
+
+    #[test]
+    fn a_background_with_one_or_two_usable_pixels_takes_the_mean_variance_and_one_pixel_without_err_has_no_level_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edge_s3d.fits");
+        let size = NOISE_CUBE_SIZE;
+        write_sci_err_dq_mef(&path, size, size, SMALL_BG_DEPTH, small_background_sci, small_background_err, |_, _, _| 0);
+        let key = path.to_str().unwrap();
+        let sci = LazyCube::open(key).unwrap();
+        let err = LazyCube::open(&format!("{}#hdu=2", key)).unwrap();
+        let annulus = small_background_annulus();
+
+        let with_err = sci
+            .extract_spectrum_aperture_with(&noise_aperture(), Some(&annulus), NOISE_SUBSAMPLES, Some(&err), None)
+            .unwrap();
+        let bg_err = with_err.bg_err_per_pixel.as_ref().expect("background error with ERR");
+        let (e1, e2) = (SMALL_BG_FIRST.3 as f64, SMALL_BG_SECOND.3 as f64);
+        for z in 0..SMALL_BG_DEPTH {
+            let expected = if z < SMALL_BG_SECOND_FROM_CHANNEL { e1 } else { (e1 * e1 + e2 * e2).sqrt() / 2.0 };
+            assert_within(&format!("level error of the median of few pixels in channel {}", z), bg_err[z] as f64, expected, 1e-6);
+            assert!(with_err.err.as_ref().unwrap()[z].is_finite(), "channel {}", z);
+        }
+
+        let without_err = sci.extract_spectrum_aperture(&noise_aperture(), Some(&annulus), NOISE_SUBSAMPLES).unwrap();
+        let bg_err = without_err.bg_err_per_pixel.as_ref().expect("background error from the scatter");
+        let levels = without_err.bg_per_pixel.as_ref().expect("background level");
+        for z in 0..SMALL_BG_SECOND_FROM_CHANNEL {
+            assert!(bg_err[z].is_nan(), "one background pixel has no scatter, channel {}: {}", z, bg_err[z]);
+            assert_eq!(levels[z], SMALL_BG_FIRST.2);
+            assert!(without_err.sum[z].is_finite(), "channel {}", z);
+        }
+        let two_pixel_scatter = (SMALL_BG_SECOND.2 - SMALL_BG_FIRST.2) as f64 / 2.0 * MAD_TO_SIGMA;
+        for z in SMALL_BG_SECOND_FROM_CHANNEL..SMALL_BG_DEPTH {
+            assert_within(&format!("two-pixel level error in channel {}", z), bg_err[z] as f64, two_pixel_scatter / 2f64.sqrt(), 1e-6);
+        }
+    }
+
+    const ERR_RULES_DEPTH: usize = 6;
+    const ERR_RULES_NAN_SPAXEL: (usize, usize, usize) = (1, 8, 8);
+    const ERR_RULES_ZERO_SPAXEL: (usize, usize, usize) = (2, 8, 9);
+    const ERR_RULES_UNFLAGGED_NAN_BACKGROUND: (usize, usize, usize) = (3, 13, 8);
+    const ERR_RULES_NEGATIVE_SPAXEL: (usize, usize, usize) = (4, 9, 8);
+    const ERR_RULES_BLANK_CHANNEL: usize = 5;
+    const ERR_RULES_FLAGGED_BACKGROUND: (usize, usize) = (8, 13);
+
+    fn err_rules_err(z: usize, y: usize, x: usize) -> f32 {
+        match (z, y, x) {
+            t if t == ERR_RULES_NAN_SPAXEL || t == ERR_RULES_UNFLAGGED_NAN_BACKGROUND => f32::NAN,
+            t if t == ERR_RULES_ZERO_SPAXEL => 0.0,
+            t if t == ERR_RULES_NEGATIVE_SPAXEL => -1.0,
+            (_, y, x) if (y, x) == ERR_RULES_FLAGGED_BACKGROUND => f32::NAN,
+            _ => NOISE_SIGMA,
+        }
+    }
+
+    #[test]
+    fn a_bad_err_on_a_used_spaxel_poisons_only_its_channel_zero_err_is_accepted_and_flagged_background_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules_s3d.fits");
+        let size = NOISE_CUBE_SIZE;
+        let sci = |z: usize, _: usize, _: usize| if z == ERR_RULES_BLANK_CHANNEL { f32::NAN } else { 1.0 };
+        let dq = |_: usize, y: usize, x: usize| i32::from((y, x) == ERR_RULES_FLAGGED_BACKGROUND);
+        write_sci_err_dq_mef(&path, size, size, ERR_RULES_DEPTH, sci, err_rules_err, dq);
+        let key = path.to_str().unwrap();
+        let sci = LazyCube::open(key).unwrap();
+        let err = LazyCube::open(&format!("{}#hdu=2", key)).unwrap();
+        let dq = LazyCube::open(&format!("{}#hdu=3", key)).unwrap();
+        let pixels = region_pixels(&noise_aperture(), size, size, NOISE_SUBSAMPLES).unwrap();
+        let (_, w2) = noise_aperture_weights();
+        let zero_weight = pixels.iter().find(|p| (p.y, p.x) == (ERR_RULES_ZERO_SPAXEL.1, ERR_RULES_ZERO_SPAXEL.2)).unwrap().weight as f64;
+        let sigma = NOISE_SIGMA as f64;
+
+        let plain = sci
+            .extract_spectrum_aperture_with(&noise_aperture(), None, NOISE_SUBSAMPLES, Some(&err), Some(&dq))
+            .unwrap();
+        let errors = plain.err.as_ref().unwrap();
+        assert_within("err in a clean channel", errors[0] as f64, sigma * w2.sqrt(), 1e-6);
+        assert!(errors[ERR_RULES_NAN_SPAXEL.0].is_nan(), "NaN ERR on a used spaxel: {}", errors[1]);
+        let without_zero = sigma * (w2 - zero_weight * zero_weight).sqrt();
+        assert_within("err with one zero ERR spaxel", errors[ERR_RULES_ZERO_SPAXEL.0] as f64, without_zero, 1e-6);
+        assert_within("err when only a background ERR is NaN", errors[3] as f64, sigma * w2.sqrt(), 1e-6);
+        assert!(errors[ERR_RULES_NEGATIVE_SPAXEL.0].is_nan(), "negative ERR on a used spaxel: {}", errors[4]);
+        assert!(errors[ERR_RULES_BLANK_CHANNEL].is_nan() && plain.sum[ERR_RULES_BLANK_CHANNEL].is_nan());
+        assert_eq!(plain.n_dq_excluded, vec![0u32; ERR_RULES_DEPTH]);
+        let (weight, _) = noise_aperture_weights();
+        for z in 0..ERR_RULES_DEPTH {
+            let expected = if z == ERR_RULES_BLANK_CHANNEL { 0.0 } else { weight };
+            assert!((plain.used_weight[z] - expected).abs() < 1e-9, "channel {}: used weight {}", z, plain.used_weight[z]);
+        }
+
+        let background = noise_annulus();
+        let bg_pixels = region_pixels(&background, size, size, NOISE_SUBSAMPLES).unwrap();
+        assert!(bg_pixels.iter().any(|p| (p.y, p.x) == ERR_RULES_FLAGGED_BACKGROUND));
+        assert!(bg_pixels.iter().any(|p| (p.y, p.x) == (ERR_RULES_UNFLAGGED_NAN_BACKGROUND.1, ERR_RULES_UNFLAGGED_NAN_BACKGROUND.2)));
+        let kept_bg = (bg_pixels.len() - 1) as f64;
+        let with_bg = sci
+            .extract_spectrum_aperture_with(&noise_aperture(), Some(&background), NOISE_SUBSAMPLES, Some(&err), Some(&dq))
+            .unwrap();
+        let bg_err = with_bg.bg_err_per_pixel.as_ref().unwrap();
+        let expected_bg_err = (std::f64::consts::FRAC_PI_2).sqrt() * sigma / kept_bg.sqrt();
+        for z in [0, ERR_RULES_NAN_SPAXEL.0, ERR_RULES_ZERO_SPAXEL.0, ERR_RULES_NEGATIVE_SPAXEL.0] {
+            assert_within(&format!("background error beside a flagged NaN-ERR pixel, channel {}", z), bg_err[z] as f64, expected_bg_err, 1e-6);
+            assert!(with_bg.sum[z].abs() < 1e-4, "channel {}: {}", z, with_bg.sum[z]);
+        }
+        let unflagged = ERR_RULES_UNFLAGGED_NAN_BACKGROUND.0;
+        assert!(bg_err[unflagged].is_nan() && with_bg.err.as_ref().unwrap()[unflagged].is_nan());
+        assert!(with_bg.err.as_ref().unwrap()[0].is_finite());
+    }
+
     #[test]
     fn collapse_range_sum_over_the_line_matches_the_analytic_sum() {
         let dir = tempfile::tempdir().unwrap();
@@ -1430,6 +2299,108 @@ mod tests {
         assert!((mean[[0, 0]] as f64 - 1.0).abs() < 1e-6);
         assert!((median[centre] - (1.0 + line_profile(17))).abs() < 1e-6, "{}", median[centre]);
         assert!((median[[0, 0]] - 1.0).abs() < 1e-6);
+    }
+
+    const COLLAPSE_MC_BLOCK: usize = 16;
+    const COLLAPSE_MC_REALISATIONS: usize = 300;
+    const COLLAPSE_MC_CHANNELS: usize = 24;
+    const COLLAPSE_MC_SIGMA: f32 = 2.0;
+    const COLLAPSE_MC_LEVEL: f64 = 3.0;
+    const COLLAPSE_MC_SEED: u64 = 20_261_016;
+    const COLLAPSE_MC_TOLERANCE: f64 = 0.02;
+
+    fn bits_of(map: &Array2<f32>) -> Vec<u32> {
+        map.iter().map(|v| v.to_bits()).collect()
+    }
+
+    fn plan_collapse_error(mode: CollapseMode, sigma: f64, channels: usize) -> f64 {
+        let n = channels as f64;
+        let sum_err = sigma * n.sqrt();
+        match mode {
+            CollapseMode::Sum => sum_err,
+            CollapseMode::Mean => sum_err / n,
+            CollapseMode::Median => 1.2533 * sum_err / n,
+        }
+    }
+
+    #[test]
+    fn collapse_errors_are_sigma_sqrt_n_for_the_sum_and_match_monte_carlo_within_2_percent_pooled_76800_samples_seed_20261016() {
+        let (cols, rows, depth) = (COLLAPSE_MC_BLOCK, COLLAPSE_MC_BLOCK * COLLAPSE_MC_REALISATIONS, COLLAPSE_MC_CHANNELS);
+        let sigma = COLLAPSE_MC_SIGMA as f64;
+        let mut gauss = GaussianSource::new(COLLAPSE_MC_SEED);
+        let noise: Vec<f32> = (0..cols * rows * depth).map(|_| (sigma * gauss.next()) as f32).collect();
+        let sample = |z: usize, y: usize, x: usize| (COLLAPSE_MC_LEVEL + noise[(z * rows + y) * cols + x] as f64) as f32;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("white.fits");
+        write_cube(&path, cols, rows, depth, &[], sample);
+        let err_path = dir.path().join("white_err.fits");
+        write_cube(&err_path, cols, rows, depth, &[], |_, _, _| COLLAPSE_MC_SIGMA);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let err = LazyCube::open(err_path.to_str().unwrap()).unwrap();
+        let (z0, z1) = (0, depth - 1);
+        let used: Vec<usize> = (0..rows * cols)
+            .map(|i| (0..depth).filter(|&z| is_valid_pixel(sample(z, i / cols, i % cols))).count())
+            .collect();
+        let complete = used.iter().filter(|&&k| k == depth).count();
+        assert!(complete + 3 >= rows * cols, "{} of {} pixels use every channel", complete, rows * cols);
+        for (mode, level) in [
+            (CollapseMode::Sum, depth as f64 * COLLAPSE_MC_LEVEL),
+            (CollapseMode::Mean, COLLAPSE_MC_LEVEL),
+            (CollapseMode::Median, COLLAPSE_MC_LEVEL),
+        ] {
+            let plain = cube.collapse_range(z0, z1, mode).unwrap();
+            let without = cube.collapse_range_with_err(z0, z1, mode, None).unwrap();
+            assert_eq!(bits_of(&without.value), bits_of(&plain), "{} value without ERR", mode.name());
+            assert!(without.err.is_none());
+            let collapsed = cube.collapse_range_with_err(z0, z1, mode, Some(&err)).unwrap();
+            assert_eq!(bits_of(&collapsed.value), bits_of(&plain), "{} value with ERR", mode.name());
+            let errors = collapsed.err.as_ref().expect("error plane with an ERR cube");
+            assert_eq!(errors.dim(), (rows, cols));
+            let tolerance = if mode == CollapseMode::Median { 1e-4 } else { 1e-6 };
+            for (e, &k) in errors.iter().zip(&used) {
+                assert_within(&format!("{} error over {} channels", mode.name(), k), *e as f64, plan_collapse_error(mode, sigma, k), tolerance);
+            }
+            if mode != CollapseMode::Median {
+                let residuals: Vec<f64> =
+                    collapsed.value.iter().zip(&used).filter(|(_, &k)| k == depth).map(|(v, _)| *v as f64 - level).collect();
+                let pooled = (residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64).sqrt();
+                let formula = plan_collapse_error(mode, sigma, depth);
+                assert_within(&format!("{} Monte Carlo sigma over {} pixels", mode.name(), residuals.len()), pooled, formula, COLLAPSE_MC_TOLERANCE);
+            }
+        }
+    }
+
+    #[test]
+    fn collapse_errors_count_only_the_channels_the_collapse_uses_and_a_bad_err_poisons_its_pixel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zeros.fits");
+        write_cube(&path, 4, 4, 6, &[], |z, y, x| zeros_fixture_value(z, y, x).unwrap_or(f32::NAN));
+        let err_path = dir.path().join("zeros_err.fits");
+        let err_value = |z: usize, y: usize, x: usize| match (z, y, x) {
+            (1, 3, 3) | (2, 1, 1) => f32::NAN,
+            _ => 0.5,
+        };
+        write_cube(&err_path, 4, 4, 6, &[], err_value);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let err = LazyCube::open(err_path.to_str().unwrap()).unwrap();
+
+        let sum = cube.collapse_range_with_err(0, 5, CollapseMode::Sum, Some(&err)).unwrap();
+        let sum_err = sum.err.as_ref().expect("error plane");
+        assert_within("sum error over five used channels", sum_err[[1, 1]] as f64, 0.5 * 5f64.sqrt(), 1e-6);
+        assert_within("sum error over four used channels", sum_err[[0, 0]] as f64, 1.0, 1e-6);
+        assert!(sum_err[[3, 3]].is_nan(), "NaN ERR on a used channel: {}", sum_err[[3, 3]]);
+        let mean = cube.collapse_range_with_err(0, 5, CollapseMode::Mean, Some(&err)).unwrap();
+        assert_within("mean error", mean.err.as_ref().unwrap()[[0, 0]] as f64, 0.25, 1e-6);
+        let median = cube.collapse_range_with_err(0, 5, CollapseMode::Median, Some(&err)).unwrap();
+        assert_within("median error", median.err.as_ref().unwrap()[[0, 0]] as f64, 0.25 * MEDIAN_VARIANCE_FACTOR.sqrt(), 1e-6);
+        let only_zeros = cube.collapse_range_with_err(2, 2, CollapseMode::Mean, Some(&err)).unwrap();
+        assert!(only_zeros.err.as_ref().unwrap().iter().all(|e| e.is_nan()));
+
+        let short_path = dir.path().join("short_err.fits");
+        write_cube(&short_path, 4, 4, 5, &[], |_, _, _| 0.5);
+        let short = LazyCube::open(short_path.to_str().unwrap()).unwrap();
+        let refused = cube.collapse_range_with_err(0, 3, CollapseMode::Sum, Some(&short)).unwrap_err().to_string();
+        assert!(refused.contains("ERR cube 4x4x5 does not match the SCI cube 4x4x6"), "{}", refused);
     }
 
     #[test]

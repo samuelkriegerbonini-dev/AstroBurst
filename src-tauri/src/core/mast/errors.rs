@@ -62,22 +62,125 @@ fn truncate(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
 }
 
-fn innermost_cause(error: &(dyn StdError + 'static)) -> String {
-    let mut current = error;
-    while let Some(next) = current.source() {
-        current = next;
+fn os_error_phrase(kind: std::io::ErrorKind) -> Option<&'static str> {
+    use std::io::ErrorKind as Kind;
+    let phrase = match kind {
+        Kind::ConnectionRefused => "connection refused",
+        Kind::ConnectionReset => "connection reset",
+        Kind::ConnectionAborted => "connection aborted",
+        Kind::NotConnected => "not connected",
+        Kind::TimedOut => "timed out",
+        Kind::HostUnreachable => "host unreachable",
+        Kind::NetworkUnreachable => "network unreachable",
+        Kind::NetworkDown => "network down",
+        Kind::AddrNotAvailable => "address not available",
+        Kind::AddrInUse => "address in use",
+        Kind::BrokenPipe => "broken pipe",
+        Kind::UnexpectedEof => "connection closed early",
+        Kind::Interrupted => "interrupted",
+        Kind::NotFound => "not found",
+        Kind::PermissionDenied => "permission denied",
+        Kind::AlreadyExists => "already exists",
+        Kind::StorageFull => "disk full",
+        Kind::ReadOnlyFilesystem => "read-only file system",
+        Kind::ResourceBusy => "resource busy",
+        _ => return None,
+    };
+    Some(phrase)
+}
+
+const LOOKUP_FAILED: &str = "host name lookup failed";
+const STD_LOOKUP_FAILURE_PREFIX: &str = "failed to lookup address information";
+
+#[cfg(windows)]
+fn os_code_phrase(code: i32) -> Option<&'static str> {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const WSAHOST_NOT_FOUND: i32 = 11001;
+    const WSATRY_AGAIN: i32 = 11002;
+    const WSANO_RECOVERY: i32 = 11003;
+    const WSANO_DATA: i32 = 11004;
+    match code {
+        ERROR_SHARING_VIOLATION => Some("file in use by another program"),
+        ERROR_LOCK_VIOLATION => Some("file locked by another program"),
+        WSAHOST_NOT_FOUND => Some("host not found"),
+        WSATRY_AGAIN | WSANO_RECOVERY => Some(LOOKUP_FAILED),
+        WSANO_DATA => Some("host has no address"),
+        _ => None,
     }
-    let text = current.to_string();
+}
+
+#[cfg(not(windows))]
+fn os_code_phrase(_code: i32) -> Option<&'static str> {
+    None
+}
+
+fn kind_phrase(kind: std::io::ErrorKind) -> Option<String> {
+    if let Some(phrase) = os_error_phrase(kind) {
+        return Some(phrase.to_owned());
+    }
+    let name = format!("{kind:?}");
+    if matches!(name.as_str(), "Uncategorized" | "Other") {
+        return None;
+    }
+    let mut phrase = String::with_capacity(name.len() + 4);
+    for c in name.chars() {
+        if c.is_ascii_uppercase() && !phrase.is_empty() {
+            phrase.push(' ');
+        }
+        phrase.push(c.to_ascii_lowercase());
+    }
+    Some(phrase)
+}
+
+fn os_cause(error: &std::io::Error) -> Option<String> {
+    let code = error.raw_os_error()?;
+    os_code_phrase(code).map(str::to_owned).or_else(|| kind_phrase(error.kind()))
+}
+
+fn without_urls(text: &str) -> String {
     let cleaned = text
         .split_whitespace()
         .filter(|word| !word.contains("://") && !word.contains('?'))
         .collect::<Vec<_>>()
         .join(" ");
-    let cleaned = truncate(cleaned.trim(), NETWORK_MESSAGE_LIMIT);
+    truncate(cleaned.trim(), NETWORK_MESSAGE_LIMIT)
+}
+
+fn innermost_cause(error: &(dyn StdError + 'static)) -> String {
+    let mut parent = None;
+    let mut current = error;
+    while let Some(next) = current.source() {
+        parent = Some(current);
+        current = next;
+    }
+    let os_error = current.downcast_ref::<std::io::Error>().and_then(|io| io.raw_os_error().map(|code| (io, code)));
+    if let Some((io, code)) = os_error {
+        if let Some(phrase) = os_cause(io) {
+            return phrase;
+        }
+        let what = parent
+            .map(|p| without_urls(&p.to_string().replace(&io.to_string(), "")).trim_end_matches([':', ' ']).to_owned())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "connection failed".to_owned());
+        return format!("{what} (os error {code})");
+    }
+    let text = current.to_string();
+    if text.starts_with(STD_LOOKUP_FAILURE_PREFIX) {
+        return LOOKUP_FAILED.to_owned();
+    }
+    let cleaned = without_urls(&text);
     if cleaned.is_empty() {
         "connection failed".to_owned()
     } else {
         cleaned
+    }
+}
+
+pub fn io_cause(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(code) => os_cause(error).unwrap_or_else(|| format!("OS error {code}")),
+        None => truncate(&error.to_string(), NETWORK_MESSAGE_LIMIT),
     }
 }
 
@@ -96,6 +199,20 @@ fn json_detail(body: &str) -> Option<String> {
     }
 }
 
+fn plain_detail(body: &str, content_type: Option<&str>) -> Option<String> {
+    let typed = content_type.map(str::to_ascii_lowercase).unwrap_or_default();
+    if ["html", "json", "xml"].iter().any(|kind| typed.contains(kind)) {
+        return None;
+    }
+    let text = body.trim();
+    if text.is_empty() || text.contains('<') || text.starts_with('{') || text.starts_with('[') {
+        return None;
+    }
+    let folded = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let printable: String = folded.chars().filter(|c| !c.is_control()).collect();
+    Some(truncate(&printable, DETAIL_LIMIT)).filter(|d| !d.is_empty())
+}
+
 fn is_nginx_404(body: &str, content_type: Option<&str>) -> bool {
     let html = content_type.is_some_and(|ct| ct.to_ascii_lowercase().contains("text/html"))
         || body.trim_start().starts_with('<');
@@ -112,6 +229,22 @@ fn base_context(op: &Operation) -> MastErrorContext {
     MastErrorContext {
         operation: Some(op.path.clone()),
         ..Default::default()
+    }
+}
+
+fn host_of(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    Some(match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
+}
+
+fn reach_context(op: &Operation, url: &str) -> MastErrorContext {
+    MastErrorContext {
+        host: host_of(url),
+        ..base_context(op)
     }
 }
 
@@ -147,7 +280,9 @@ fn status_error(op: &Operation, consecutive: u32, input: StatusInput<'_>) -> Mas
         context.consecutive = Some(consecutive);
         return MastCmdError::new(MastErrorCode::RateLimited, format!("rate limited (HTTP {status})")).with_context(context);
     }
+    let server_detail = || detail.clone().or_else(|| plain_detail(body, content_type));
     if status >= 500 {
+        context.detail = server_detail();
         return MastCmdError::new(MastErrorCode::Server, format!("HTTP {status}")).with_context(context);
     }
     if status == 400 || status == 422 {
@@ -169,6 +304,7 @@ fn status_error(op: &Operation, consecutive: u32, input: StatusInput<'_>) -> Mas
         return MastCmdError::new(MastErrorCode::NoImage, message).with_context(context);
     }
     if status == 404 {
+        context.detail = server_detail();
         return MastCmdError::new(MastErrorCode::Server, "HTTP 404").with_context(context);
     }
     if status == 401 {
@@ -185,14 +321,14 @@ pub fn classify(error: &MastError, op: &Operation, consecutive: u32) -> MastCmdE
         MastError::Client(source) => {
             MastCmdError::new(MastErrorCode::Network, innermost_cause(source)).with_context(base_context(op))
         }
-        MastError::Transport { source, .. } => {
-            MastCmdError::new(MastErrorCode::Network, innermost_cause(source)).with_context(base_context(op))
+        MastError::Transport { source, url } => {
+            MastCmdError::new(MastErrorCode::Network, innermost_cause(source)).with_context(reach_context(op, url))
         }
-        MastError::RedirectRefused { .. } => {
-            MastCmdError::new(MastErrorCode::Network, "redirect refused").with_context(base_context(op))
+        MastError::RedirectRefused { url } => {
+            MastCmdError::new(MastErrorCode::Network, "redirect refused").with_context(reach_context(op, url))
         }
-        MastError::Timeout { timeout_secs, .. } => {
-            let mut context = base_context(op);
+        MastError::Timeout { timeout_secs, url } => {
+            let mut context = reach_context(op, url);
             context.timeout_sec = Some(*timeout_secs);
             MastCmdError::new(MastErrorCode::Timeout, format!("no answer within {timeout_secs} s")).with_context(context)
         }
@@ -225,8 +361,9 @@ pub fn classify(error: &MastError, op: &Operation, consecutive: u32) -> MastCmdE
             context.detail = Some(detail.clone());
             MastCmdError::new(MastErrorCode::Rejected, detail).with_context(context)
         }
+        MastError::Empty { .. } => MastCmdError::new(MastErrorCode::Decode, "empty answer").with_context(base_context(op)),
         MastError::Decode { .. } | MastError::Encode(_) => unexpected_format(op),
-        MastError::Io(source) => MastCmdError::new(MastErrorCode::Cache, truncate(&source.to_string(), NETWORK_MESSAGE_LIMIT)),
+        MastError::Io(source) => MastCmdError::new(MastErrorCode::Cache, io_cause(source)),
     }
 }
 
@@ -436,6 +573,80 @@ mod tests {
     }
 
     #[test]
+    fn network_and_timeout_errors_name_the_host_they_tried() {
+        let thumb = op(MastMissionId::Hst, OpKind::Thumbnail, "get_image_thumbnail");
+        let builder_error = reqwest::Client::new().get("not a url").build().unwrap_err();
+        let refused = classify(
+            &MastError::Transport {
+                url: "http://127.0.0.1:9/search/hst/api/v0.1/get_image_thumbnail?fileset_name=X".into(),
+                source: builder_error,
+            },
+            &thumb,
+            0,
+        );
+        assert_eq!(refused.context.host.as_deref(), Some("127.0.0.1:9"));
+        let slow = MastError::Timeout {
+            url: "https://mast.stsci.edu/search/hst/api/v0.1/get_image_thumbnail?fileset_name=X".into(),
+            timeout_secs: 30,
+        };
+        assert_eq!(classify(&slow, &thumb, 0).context.host.as_deref(), Some("mast.stsci.edu"));
+        let redirect = classify(&MastError::RedirectRefused { url: "http://127.0.0.1:43123/x".into() }, &thumb, 0);
+        assert_eq!(redirect.context.host.as_deref(), Some("127.0.0.1:43123"));
+        assert_eq!(classify(&MastError::Timeout { url: "u".into(), timeout_secs: 30 }, &thumb, 0).context.host, None);
+        assert_eq!(classify(&status(500, "Internal Server Error", "text/plain", None), &thumb, 0).context.host, None);
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(json["context"]["host"], "127.0.0.1:9");
+    }
+
+    #[test]
+    fn server_status_keeps_what_mast_said() {
+        let thumb = op(MastMissionId::Hst, OpKind::Thumbnail, "get_image_thumbnail");
+        let search = op(MastMissionId::Jwst, OpKind::Search, "search");
+
+        let json = classify(&status(500, r#"{"detail":"image index backend timed out"}"#, "application/json", None), &thumb, 0);
+        assert_eq!(json.code, MastErrorCode::Server);
+        assert_eq!(json.message, "HTTP 500");
+        assert_eq!(json.context.status, Some(500));
+        assert_eq!(json.context.detail.as_deref(), Some("image index backend timed out"));
+        assert_eq!(json.context.operation.as_deref(), Some("search/hst/api/v0.1/get_image_thumbnail"));
+
+        let plain = classify(&status(500, "Internal Server Error", "text/plain; charset=utf-8", None), &thumb, 0);
+        assert_eq!(plain.message, "HTTP 500");
+        assert_eq!(plain.context.detail.as_deref(), Some("Internal Server Error"));
+
+        let folded = classify(&status(503, "Service\r\n  Unavailable\n", "text/plain", None), &thumb, 0);
+        assert_eq!(folded.code, MastErrorCode::Server);
+        assert_eq!(folded.context.detail.as_deref(), Some("Service Unavailable"));
+
+        let nginx = classify(&status(504, "<html><body><h1>504 Gateway Time-out</h1></body></html>", "text/html", None), &thumb, 0);
+        assert_eq!(nginx.context.status, Some(504));
+        assert_eq!(nginx.context.detail, None);
+        let tagless_html = classify(&status(502, "Bad Gateway", "text/html", None), &thumb, 0);
+        assert_eq!(tagless_html.context.detail, None);
+
+        let long = classify(&status(502, &"b".repeat(900), "text/plain", None), &thumb, 0);
+        assert_eq!(long.context.detail.as_ref().map(|d| d.chars().count()), Some(DETAIL_LIMIT));
+
+        for body in [r#"{"error":"x"}"#, r#"["x"]"#, "   ", ""] {
+            let quiet = classify(&status(500, body, "application/json", None), &thumb, 0);
+            assert_eq!(quiet.context.detail, None, "{body}");
+            let untyped = classify(&status(500, body, "", None), &thumb, 0);
+            assert_eq!(untyped.context.detail, None, "{body}");
+        }
+
+        let gone = classify(&status(404, r#"{"detail":"Dataset gone"}"#, "application/json", None), &search, 0);
+        assert_eq!(gone.code, MastErrorCode::Server);
+        assert_eq!(gone.message, "HTTP 404");
+        assert_eq!(gone.context.detail.as_deref(), Some("Dataset gone"));
+        let gone_plain = classify(&status(404, "no such dataset", "text/plain", None), &search, 0);
+        assert_eq!(gone_plain.context.detail.as_deref(), Some("no such dataset"));
+
+        for error in [&json, &plain, &folded, &nginx, &long, &gone] {
+            assert_safe_message(error);
+        }
+    }
+
+    #[test]
     fn status_detail_field_is_preferred_and_local_errors_are_shaped() {
         let error = MastError::Status {
             status: 400,
@@ -459,6 +670,110 @@ mod tests {
         let internal = internal();
         assert_eq!(internal.code, MastErrorCode::Decode);
         assert_eq!(internal.message, "internal error");
+    }
+
+    #[derive(Debug)]
+    struct Wrapped {
+        text: &'static str,
+        source: std::io::Error,
+    }
+
+    impl std::fmt::Display for Wrapped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.text)
+        }
+    }
+
+    impl StdError for Wrapped {
+        fn source(&self) -> Option<&(dyn StdError + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    fn os_error_where(wanted: impl Fn(&std::io::Error) -> bool) -> std::io::Error {
+        (1..20_000).map(std::io::Error::from_raw_os_error).find(|e| wanted(e)).expect("an OS error code of that kind")
+    }
+
+    fn os_error_of(kind: std::io::ErrorKind) -> std::io::Error {
+        os_error_where(|e| e.kind() == kind)
+    }
+
+    fn uncategorized_os_error() -> std::io::Error {
+        os_error_where(|e| format!("{:?}", e.kind()) == "Uncategorized")
+    }
+
+    #[test]
+    fn os_error_causes_read_the_same_in_every_system_language() {
+        use std::io::ErrorKind;
+        for (kind, phrase) in [
+            (ErrorKind::ConnectionRefused, "connection refused"),
+            (ErrorKind::ConnectionReset, "connection reset"),
+            (ErrorKind::ConnectionAborted, "connection aborted"),
+            (ErrorKind::TimedOut, "timed out"),
+        ] {
+            let wrapped = Wrapped { text: "tcp connect error", source: os_error_of(kind) };
+            assert_eq!(innermost_cause(&wrapped), phrase, "{kind:?}");
+        }
+
+        let unmapped = uncategorized_os_error();
+        let code = unmapped.raw_os_error().unwrap();
+        assert_eq!(innermost_cause(&Wrapped { text: "dns error", source: unmapped }), format!("dns error (os error {code})"));
+        assert_eq!(innermost_cause(&uncategorized_os_error()), format!("connection failed (os error {code})"));
+
+        let custom = std::io::Error::other("peer closed connection without sending TLS close_notify");
+        assert_eq!(
+            innermost_cause(&Wrapped { text: "client error (Connect)", source: custom }),
+            "peer closed connection without sending TLS close_notify"
+        );
+
+        let thumb = op(MastMissionId::Jwst, OpKind::Thumbnail, "get_image_thumbnail");
+        let missing = classify(&MastError::Io(os_error_of(ErrorKind::NotFound)), &thumb, 0);
+        assert_eq!(missing.code, MastErrorCode::Cache);
+        assert_eq!(missing.message, "not found");
+        assert_eq!(io_cause(&os_error_of(ErrorKind::PermissionDenied)), "permission denied");
+        assert_eq!(io_cause(&uncategorized_os_error()), format!("OS error {code}"));
+        assert_eq!(io_cause(&std::io::Error::other("disk full")), "disk full");
+    }
+
+    fn plain_phrase(text: &str) -> bool {
+        !text.is_empty() && text.chars().all(|c| c.is_ascii_lowercase() || c == ' ' || c == '-')
+    }
+
+    #[test]
+    fn every_os_error_kind_std_names_reads_as_a_fixed_phrase() {
+        let named: Vec<std::io::Error> = (1..20_000)
+            .map(std::io::Error::from_raw_os_error)
+            .filter(|e| !matches!(format!("{:?}", e.kind()).as_str(), "Uncategorized" | "Other"))
+            .collect();
+        assert!(named.len() > 10, "{}", named.len());
+        for error in named {
+            let kind = error.kind();
+            let code = error.raw_os_error();
+            let cause = io_cause(&error);
+            assert!(plain_phrase(&cause), "{kind:?} {code:?}: {cause}");
+            assert_eq!(innermost_cause(&Wrapped { text: "tcp connect error", source: error }), cause, "{kind:?} {code:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_name_lookup_and_file_lock_codes_read_as_phrases() {
+        let lookup = |code| innermost_cause(&Wrapped { text: "dns error", source: std::io::Error::from_raw_os_error(code) });
+        assert_eq!(lookup(11001), "host not found");
+        assert_eq!(lookup(11002), "host name lookup failed");
+        assert_eq!(lookup(11003), "host name lookup failed");
+        assert_eq!(lookup(11004), "host has no address");
+        assert_eq!(io_cause(&std::io::Error::from_raw_os_error(32)), "file in use by another program");
+        assert_eq!(io_cause(&std::io::Error::from_raw_os_error(33)), "file locked by another program");
+        let thumb = op(MastMissionId::Jwst, OpKind::Thumbnail, "get_image_thumbnail");
+        let shared = classify(&MastError::Io(std::io::Error::from_raw_os_error(32)), &thumb, 0);
+        assert_eq!((shared.code, shared.message.as_str()), (MastErrorCode::Cache, "file in use by another program"));
+    }
+
+    #[test]
+    fn name_lookup_failures_from_std_read_the_same_in_every_system_language() {
+        let localized = std::io::Error::other("failed to lookup address information: Nome ou serviço desconhecido");
+        assert_eq!(innermost_cause(&Wrapped { text: "dns error", source: localized }), "host name lookup failed");
     }
 
     #[test]

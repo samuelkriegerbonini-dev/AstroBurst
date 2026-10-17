@@ -1,0 +1,32 @@
+[
+  {
+    "op": "wavelet_denoise",
+    "v": 1,
+    "numScales": 5,
+    "thresholds": [
+      3.0,
+      2.5,
+      2.0,
+      1.5,
+      1.0
+    ],
+    "linearDenoise": true,
+    "layerBias": null
+  },
+  {
+    "op": "wavelet_denoise",
+    "v": 1,
+    "numScales": 3,
+    "thresholds": [
+      4.0,
+      3.0,
+      2.0
+    ],
+    "linearDenoise": false,
+    "layerBias": [
+      1.25,
+      1.0,
+      0.75
+    ]
+  }
+]

@@ -17,26 +17,94 @@ import type {
 } from "../shared/types/compositeChain";
 import type { CompositeStfFields } from "../shared/types/compose";
 import { CHAIN_PREVIEWS, chainArgs } from "./compositeChain";
+import { recordOp } from "./ops";
+import type { HistoryScope, OpSpec, PsfSpec, RunOpResult } from "../shared/types/ops";
+import type { DbeConfig } from "../shared/types/dbe";
 
 export interface DeconvolveRunResult extends DeconvolveResult {
   psf_source: PsfSource;
 }
 
+export interface DeconvolveOptions {
+  iterations?: number;
+  psfSigma?: number;
+  psfSize?: number;
+  regularization?: number;
+  deringing?: boolean;
+  deringThreshold?: number;
+  useEmpiricalPsf?: boolean;
+  psfNumStars?: number;
+  psfCutoutRadius?: number;
+  psfKernel?: number[][] | null;
+}
+
+export interface DeconvolveSettings {
+  iterations: number;
+  psfSigma: number;
+  psfSize: number;
+  regularization: number;
+  deringing: boolean;
+  deringThreshold: number;
+  useEmpiricalPsf: boolean;
+}
+
+const DECONV_DEFAULTS: DeconvolveSettings = {
+  iterations: 20,
+  psfSigma: 2.0,
+  psfSize: 15,
+  regularization: 0.001,
+  deringing: true,
+  deringThreshold: 0.1,
+  useEmpiricalPsf: false,
+};
+const EMPIRICAL_PSF_STARS = 30;
+const EMPIRICAL_PSF_RADIUS = 15;
+
+function psfSpecOf(options: DeconvolveOptions): PsfSpec {
+  const kernel = options.psfKernel;
+  if (!options.useEmpiricalPsf) return { kind: "gaussian", sigma: options.psfSigma ?? DECONV_DEFAULTS.psfSigma, size: options.psfSize ?? DECONV_DEFAULTS.psfSize };
+  if (kernel && kernel.length > 0) return { kind: "kernel", hash: "", rows: kernel.length, cols: kernel[0].length };
+  return { kind: "empirical", numStars: options.psfNumStars ?? EMPIRICAL_PSF_STARS, cutoutRadius: options.psfCutoutRadius ?? EMPIRICAL_PSF_RADIUS };
+}
+
+export function deconvolveOp(options: DeconvolveOptions): OpSpec {
+  return {
+    op: "rl_deconv",
+    v: 1,
+    iterations: options.iterations ?? DECONV_DEFAULTS.iterations,
+    regularization: options.regularization ?? DECONV_DEFAULTS.regularization,
+    deringing: options.deringing ?? DECONV_DEFAULTS.deringing,
+    deringingThreshold: options.deringThreshold ?? DECONV_DEFAULTS.deringThreshold,
+    psf: psfSpecOf(options),
+  };
+}
+
+export function deconvolveOptionsOf(op: OpSpec): DeconvolveSettings | null {
+  if (op.op !== "rl_deconv") return null;
+  const gaussian = op.psf.kind === "gaussian" ? op.psf : null;
+  return {
+    iterations: op.iterations,
+    psfSigma: gaussian?.sigma ?? DECONV_DEFAULTS.psfSigma,
+    psfSize: gaussian?.size ?? DECONV_DEFAULTS.psfSize,
+    regularization: op.regularization,
+    deringing: op.deringing,
+    deringThreshold: op.deringingThreshold,
+    useEmpiricalPsf: gaussian === null,
+  };
+}
+
+export type RecordedResult<T> = T & RunOpResult;
+
+export async function recordDeconvolveRL(scope: HistoryScope, path: string, options: DeconvolveOptions = {}): Promise<RecordedResult<DeconvolveRunResult>> {
+  const op = deconvolveOp(options);
+  const psfKernel = op.op === "rl_deconv" && op.psf.kind === "kernel" ? options.psfKernel ?? null : null;
+  return (await recordOp(scope, path, op, { psfKernel })) as RecordedResult<DeconvolveRunResult>;
+}
+
 export function deconvolveRL(
   path: string,
   outputDir?: string,
-  options: {
-    iterations?: number;
-    psfSigma?: number;
-    psfSize?: number;
-    regularization?: number;
-    deringing?: boolean;
-    deringThreshold?: number;
-    useEmpiricalPsf?: boolean;
-    psfNumStars?: number;
-    psfCutoutRadius?: number;
-    psfKernel?: number[][] | null;
-  } = {},
+  options: DeconvolveOptions = {},
 ): Promise<DeconvolveRunResult> {
   return withPreview<DeconvolveRunResult>("deconvolve_rl_cmd", outputDir, {
     path,
@@ -53,17 +121,82 @@ export function deconvolveRL(
   });
 }
 
+export interface BackgroundOptions {
+  gridSize?: number;
+  polyDegree?: number;
+  sigmaClip?: number;
+  iterations?: number;
+  mode?: string;
+}
+
+const BACKGROUND_DEFAULTS = { gridSize: 8, polyDegree: 3, sigmaClip: 2.5, iterations: 3, mode: "subtract" } as const;
+const DEBAND_MODELS = ["deband_rows", "deband_cols", "deband_both", "deband_auto"] as const;
+export type DebandModel = (typeof DEBAND_MODELS)[number];
+
+function isDebandModel(mode: string): mode is DebandModel {
+  return (DEBAND_MODELS as readonly string[]).includes(mode);
+}
+
+export function backgroundOp(options: BackgroundOptions): OpSpec {
+  const sigmaClip = options.sigmaClip ?? BACKGROUND_DEFAULTS.sigmaClip;
+  const iterations = options.iterations ?? BACKGROUND_DEFAULTS.iterations;
+  const mode = options.mode ?? BACKGROUND_DEFAULTS.mode;
+  if (isDebandModel(mode)) return { op: "background", v: 1, model: mode, config: { sigmaClip, iterations } };
+  return {
+    op: "background",
+    v: 1,
+    model: "polynomial",
+    config: {
+      gridSize: options.gridSize ?? BACKGROUND_DEFAULTS.gridSize,
+      polyDegree: options.polyDegree ?? BACKGROUND_DEFAULTS.polyDegree,
+      sigmaClip,
+      iterations,
+      mode: mode === "divide" ? "divide" : "subtract",
+    },
+  };
+}
+
+export interface PolynomialSettings {
+  gridSize?: number;
+  polyDegree?: number;
+  sigmaClip: number;
+  iterations: number;
+  mode: "subtract" | "divide" | DebandModel;
+}
+
+export type BackgroundSettings = { model: "polynomial"; params: PolynomialSettings } | { model: "spline"; dbe: DbeConfig };
+
+export function backgroundOptionsOf(op: OpSpec): BackgroundSettings | null {
+  if (op.op !== "background") return null;
+  if (op.model === "spline") return { model: "spline", dbe: op.config };
+  if (op.model === "polynomial") return { model: "polynomial", params: { ...op.config } };
+  return { model: "polynomial", params: { sigmaClip: op.config.sigmaClip, iterations: op.config.iterations, mode: op.model } };
+}
+
+export interface RecordedBackgroundResult extends RecordedResult<BackgroundResult> {
+  corrected_fits: string;
+  corrected_png: string;
+  modelUrl?: string;
+}
+
+export function asBackgroundResult(res: RunOpResult): RecordedBackgroundResult {
+  return {
+    ...res,
+    corrected_fits: res.fits_path,
+    corrected_png: res.png_path,
+    model_png: res.model_png ?? "",
+    modelUrl: res.modelPreviewUrl,
+  } as RecordedBackgroundResult;
+}
+
+export async function recordExtractBackground(scope: HistoryScope, path: string, options: BackgroundOptions = {}): Promise<RecordedBackgroundResult> {
+  return asBackgroundResult(await recordOp(scope, path, backgroundOp(options)));
+}
+
 export function extractBackground(
   path: string,
   outputDir?: string,
-  options: {
-    gridSize?: number;
-    polyDegree?: number;
-    sigmaClip?: number;
-    iterations?: number;
-    mode?: string;
-    binId?: string;
-  } = {},
+  options: BackgroundOptions & { binId?: string } = {},
 ): Promise<BackgroundResult> {
   return withPreview<BackgroundResult>("extract_background_cmd", outputDir, {
     path,
@@ -115,15 +248,51 @@ export function extractBackgroundBatch(
   });
 }
 
+export interface WaveletOptions {
+  numScales?: number;
+  thresholds?: number[];
+  linear?: boolean;
+  layerBias?: number[];
+}
+
+export interface WaveletSettings {
+  numScales: number;
+  thresholds: number[];
+  linear: boolean;
+  layerBias: number[];
+}
+
+const WAVELET_DEFAULT_THRESHOLDS = [3.0, 2.5, 2.0, 1.5, 1.0];
+
+export function waveletOp(options: WaveletOptions): OpSpec {
+  return {
+    op: "wavelet_denoise",
+    v: 1,
+    numScales: options.numScales ?? 5,
+    thresholds: options.thresholds ?? WAVELET_DEFAULT_THRESHOLDS,
+    linearDenoise: options.linear ?? true,
+    layerBias: options.layerBias ?? null,
+  };
+}
+
+export function waveletOptionsOf(op: OpSpec): WaveletSettings | null {
+  if (op.op !== "wavelet_denoise") return null;
+  return {
+    numScales: op.numScales,
+    thresholds: [...op.thresholds],
+    linear: op.linearDenoise,
+    layerBias: op.layerBias ? [...op.layerBias] : op.thresholds.map(() => 0),
+  };
+}
+
+export async function recordWaveletDenoise(scope: HistoryScope, path: string, options: WaveletOptions = {}): Promise<RecordedResult<WaveletResult>> {
+  return (await recordOp(scope, path, waveletOp(options))) as RecordedResult<WaveletResult>;
+}
+
 export function waveletDenoise(
   path: string,
   outputDir?: string,
-  options: {
-    numScales?: number;
-    thresholds?: number[];
-    linear?: boolean;
-    layerBias?: number[];
-  } = {},
+  options: WaveletOptions = {},
 ): Promise<WaveletResult> {
   return withPreview<WaveletResult>("wavelet_denoise_cmd", outputDir, {
     path,
@@ -154,6 +323,14 @@ export function estimatePsf(
 
 export function applyArcsinhStretch(path: string, outputDir?: string, factor = 50.0): Promise<ArcsinhResult> {
   return withPreview<ArcsinhResult>("apply_arcsinh_stretch_cmd", outputDir, { path, factor });
+}
+
+export function arcsinhOptionsOf(op: OpSpec): { factor: number } | null {
+  return op.op === "arcsinh" ? { factor: op.factor } : null;
+}
+
+export async function recordArcsinhStretch(scope: HistoryScope, path: string, factor = 50.0): Promise<RecordedResult<ArcsinhResult>> {
+  return (await recordOp(scope, path, { op: "arcsinh", v: 1, factor })) as RecordedResult<ArcsinhResult>;
 }
 
 export interface DebayerResult {
@@ -222,6 +399,27 @@ export interface GhsOptions {
   highlightProtect?: number;
 }
 
+export function ghsOp(options: GhsOptions): OpSpec {
+  return {
+    op: "ghs",
+    v: 1,
+    d: options.stretchFactor,
+    b: options.localIntensity ?? 0.0,
+    sp: options.symmetryPoint ?? 0.05,
+    lp: options.shadowProtect ?? 0.0,
+    hp: options.highlightProtect ?? 1.0,
+  };
+}
+
+export function ghsOptionsOf(op: OpSpec): Required<GhsOptions> | null {
+  if (op.op !== "ghs") return null;
+  return { stretchFactor: op.d, localIntensity: op.b, symmetryPoint: op.sp, shadowProtect: op.lp, highlightProtect: op.hp };
+}
+
+export async function recordGhsStretch(scope: HistoryScope, path: string, options: GhsOptions = { stretchFactor: 2.0 }): Promise<RecordedResult<ArcsinhResult>> {
+  return (await recordOp(scope, path, ghsOp(options))) as RecordedResult<ArcsinhResult>;
+}
+
 export function applyGhsStretch(
   path: string,
   outputDir?: string,
@@ -252,19 +450,59 @@ export async function ghsStretchComposite(
   });
 }
 
+export interface MaskedStretchOptions {
+  iterations?: number;
+  targetBackground?: number;
+  maskGrowth?: number;
+  maskSoftness?: number;
+  protectionAmount?: number;
+  luminanceProtect?: boolean;
+  detectionSigma?: number;
+  maxEccentricity?: number;
+}
+
+const MASKED_STRETCH_LUMINANCE_CEILING = 0.85;
+const MASKED_STRETCH_CONVERGENCE = 0.00001;
+
+export function maskedStretchOp(options: MaskedStretchOptions): OpSpec {
+  return {
+    op: "masked_stretch",
+    v: 1,
+    iterations: options.iterations ?? 10,
+    targetBackground: options.targetBackground ?? 0.25,
+    maskGrowth: options.maskGrowth ?? 2.5,
+    maskSoftness: options.maskSoftness ?? 4.0,
+    detectionSigma: options.detectionSigma ?? 8.0,
+    maxEccentricity: options.maxEccentricity ?? 0.85,
+    luminanceProtect: options.luminanceProtect ?? true,
+    luminanceCeiling: MASKED_STRETCH_LUMINANCE_CEILING,
+    protectionAmount: options.protectionAmount ?? 0.85,
+    convergenceThreshold: MASKED_STRETCH_CONVERGENCE,
+  };
+}
+
+export function maskedStretchOptionsOf(op: OpSpec): Required<MaskedStretchOptions> | null {
+  if (op.op !== "masked_stretch") return null;
+  return {
+    iterations: op.iterations,
+    targetBackground: op.targetBackground,
+    maskGrowth: op.maskGrowth,
+    maskSoftness: op.maskSoftness,
+    protectionAmount: op.protectionAmount,
+    luminanceProtect: op.luminanceProtect,
+    detectionSigma: op.detectionSigma,
+    maxEccentricity: op.maxEccentricity,
+  };
+}
+
+export async function recordMaskedStretch(scope: HistoryScope, path: string, options: MaskedStretchOptions = {}): Promise<RecordedResult<MaskedStretchResult>> {
+  return (await recordOp(scope, path, maskedStretchOp(options))) as RecordedResult<MaskedStretchResult>;
+}
+
 export function maskedStretch(
   path: string,
   outputDir?: string,
-  options: {
-    iterations?: number;
-    targetBackground?: number;
-    maskGrowth?: number;
-    maskSoftness?: number;
-    protectionAmount?: number;
-    luminanceProtect?: boolean;
-    detectionSigma?: number;
-    maxEccentricity?: number;
-  } = {},
+  options: MaskedStretchOptions = {},
 ): Promise<MaskedStretchResult> {
   return withPreview<MaskedStretchResult>("masked_stretch_cmd", outputDir, {
     path,

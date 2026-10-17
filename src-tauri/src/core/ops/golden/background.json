@@ -1,0 +1,71 @@
+[
+  {
+    "op": "background",
+    "v": 1,
+    "model": "polynomial",
+    "config": {
+      "gridSize": 8,
+      "polyDegree": 3,
+      "sigmaClip": 2.5,
+      "iterations": 3,
+      "mode": "subtract"
+    }
+  },
+  {
+    "op": "background",
+    "v": 1,
+    "model": "spline",
+    "config": {
+      "sampleRadius": 5,
+      "tolerance": 1.0,
+      "smoothing": 0.25,
+      "autoGrid": 10,
+      "manualSamples": [
+        [
+          12.0,
+          40.5
+        ]
+      ],
+      "rejectStars": true,
+      "mode": "divide",
+      "normalize": true,
+      "maxSamples": 400
+    }
+  },
+  {
+    "op": "background",
+    "v": 1,
+    "model": "deband_rows",
+    "config": {
+      "sigmaClip": 3.0,
+      "iterations": 3
+    }
+  },
+  {
+    "op": "background",
+    "v": 1,
+    "model": "deband_cols",
+    "config": {
+      "sigmaClip": 3.0,
+      "iterations": 2
+    }
+  },
+  {
+    "op": "background",
+    "v": 1,
+    "model": "deband_both",
+    "config": {
+      "sigmaClip": 2.5,
+      "iterations": 4
+    }
+  },
+  {
+    "op": "background",
+    "v": 1,
+    "model": "deband_auto",
+    "config": {
+      "sigmaClip": 3.0,
+      "iterations": 3
+    }
+  }
+]

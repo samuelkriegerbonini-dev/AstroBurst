@@ -44,4 +44,5 @@ export interface FileRenderState {
   processed: ProcessedResult | null;
   chain: ProcessingChain;
   version: number;
+  historyId: string | null;
 }

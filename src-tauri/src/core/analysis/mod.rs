@@ -5,6 +5,7 @@ pub mod fft;
 pub mod gain;
 pub mod line_measure;
 pub mod photometry;
+pub mod spectrum1d;
 pub mod star_detection;
 pub mod subframe;
 pub mod x1d;

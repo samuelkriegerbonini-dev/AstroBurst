@@ -7,6 +7,7 @@ use crate::core::astrometry::spectral::{
     air_formula_applies, air_to_vacuum_um, velocity_kms, wavelength_um_from_frequency_ghz, AxisKind, SpectralAxis,
     VelocityConvention, AIR_FORMULA_MIN_UM, AIR_VACUUM_FORMULA, SPEED_OF_LIGHT_KMS,
 };
+use crate::core::cube::companions::{check_companion, CubeSet};
 use crate::core::cube::lazy::{median_band_rows, LazyCube};
 use crate::core::cube::moments::{channel_widths, ContinuumWindows, DEFAULT_SNR_THRESHOLD, VELOCITY_UNIT};
 use crate::math::gauss_newton::{fit_least_squares, FitResult};
@@ -182,6 +183,12 @@ pub struct LineFitInputs<'a> {
     pub sci: &'a LazyCube,
     pub err: Option<&'a LazyCube>,
     pub dq: Option<&'a LazyCube>,
+}
+
+impl CubeSet {
+    pub fn inputs(&self) -> LineFitInputs<'_> {
+        LineFitInputs { sci: &self.sci, err: self.err.as_deref(), dq: self.dq.as_deref() }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1186,22 +1193,6 @@ fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[f
     outcome.single = Some(component);
     outcome.continuum = Some(continuum);
     outcome
-}
-
-fn check_companion(name: &str, sci: &LazyCube, cube: Option<&LazyCube>) -> Result<()> {
-    if let Some(c) = cube {
-        let (a, b) = (&sci.geometry, &c.geometry);
-        if (a.naxis1, a.naxis2, a.naxis3) != (b.naxis1, b.naxis2, b.naxis3) {
-            bail!(
-                "{} cube {}x{}x{} does not match the SCI cube",
-                name,
-                b.naxis1,
-                b.naxis2,
-                b.naxis3
-            );
-        }
-    }
-    Ok(())
 }
 
 struct ResolvedInputs<'a> {

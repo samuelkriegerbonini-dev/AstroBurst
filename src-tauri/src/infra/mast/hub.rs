@@ -33,6 +33,8 @@ pub const SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 
 pub type DatasetKey = (MastMissionId, String);
 pub type StoredProducts = (MastProductList, SystemTime);
+type FlightSlot = Arc<tokio::sync::Mutex<Option<MastCmdError>>>;
+type Flights = Mutex<HashMap<String, FlightSlot>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeResult {
@@ -57,8 +59,10 @@ pub struct MastHub {
     row_filters: Mutex<MemoryLru<DatasetKey, String>>,
     chosen: Mutex<MemoryLru<DatasetKey, String>>,
     fileset_failures: Mutex<HashSet<(MastMissionId, MastLevelClass)>>,
+    thumb_flights: Flights,
     thumb_permits: Semaphore,
     list_permits: Semaphore,
+    card_list_turn: tokio::sync::Mutex<()>,
     preview_permits: Semaphore,
     decode_permits: Arc<Semaphore>,
     product_permits: Semaphore,
@@ -88,6 +92,34 @@ fn guard<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+pub struct Flight<'a> {
+    flights: &'a Flights,
+    key: String,
+    held: Option<tokio::sync::OwnedMutexGuard<Option<MastCmdError>>>,
+}
+
+impl Flight<'_> {
+    pub fn earlier_failure(&self) -> Option<MastCmdError> {
+        self.held.as_deref().and_then(Option::clone)
+    }
+
+    pub fn share_failure(&mut self, error: &MastCmdError) {
+        if let Some(slot) = self.held.as_deref_mut() {
+            *slot = Some(error.clone());
+        }
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        drop(self.held.take());
+        let mut flights = guard(self.flights);
+        if flights.get(&self.key).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+            flights.remove(&self.key);
+        }
+    }
+}
+
 impl MastHub {
     pub fn new(settings: MastSettings, cache_root: PathBuf) -> MastResult<Self> {
         let anon = MastClient::builder()
@@ -111,8 +143,10 @@ impl MastHub {
             row_filters: Mutex::new(MemoryLru::new(ROW_HINT_ENTRIES, SESSION_TTL)),
             chosen: Mutex::new(MemoryLru::new(ROW_HINT_ENTRIES, SESSION_TTL)),
             fileset_failures: Mutex::new(HashSet::new()),
+            thumb_flights: Mutex::new(HashMap::new()),
             thumb_permits: Semaphore::new(THUMBNAIL_PERMITS),
             list_permits: Semaphore::new(LIST_PERMITS),
+            card_list_turn: tokio::sync::Mutex::new(()),
             preview_permits: Semaphore::new(PREVIEW_PERMITS),
             decode_permits: Arc::new(Semaphore::new(DECODE_PERMITS)),
             product_permits: Semaphore::new(PRODUCT_PERMITS),
@@ -138,6 +172,11 @@ impl MastHub {
 
     pub fn auth_serial(&self) -> &tokio::sync::Mutex<()> {
         &self.auth_serial
+    }
+
+    #[cfg(test)]
+    pub fn thumbnails_in_flight(&self) -> usize {
+        guard(&self.thumb_flights).len()
     }
 
     #[cfg(test)]
@@ -196,12 +235,23 @@ impl MastHub {
         guard(&self.fileset_failures).insert((mission, level));
     }
 
+    pub async fn thumbnail_flight(&self, mission: MastMissionId, dataset: &str, filename: Option<&str>) -> Flight<'_> {
+        let key = format!("{}/{dataset}/{}", mission.slug(), filename.unwrap_or_default());
+        let lock = Arc::clone(guard(&self.thumb_flights).entry(key.clone()).or_default());
+        let held = lock.lock_owned().await;
+        Flight { flights: &self.thumb_flights, key, held: Some(held) }
+    }
+
     pub fn thumb_permits(&self) -> &Semaphore {
         &self.thumb_permits
     }
 
     pub fn list_permits(&self) -> &Semaphore {
         &self.list_permits
+    }
+
+    pub fn card_list_turn(&self) -> &tokio::sync::Mutex<()> {
+        &self.card_list_turn
     }
 
     pub fn preview_permits(&self) -> &Semaphore {

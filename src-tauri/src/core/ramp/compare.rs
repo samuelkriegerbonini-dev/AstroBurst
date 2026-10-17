@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::ops::Range;
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use ndarray::{s, Array2, ArrayView2, Axis, Zip};
@@ -7,6 +8,7 @@ use serde::Serialize;
 
 use crate::core::ramp::irs2::Irs2Layout;
 use crate::core::ramp::quick_slope::{DQ_DO_NOT_USE, DQ_JUMP_DET, DQ_SATURATED};
+use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::reader::{extract_image_mmap_by_index, extract_int_plane_by_index, list_extensions, read_primary_header, HduInfo};
 use crate::math::median::{f32_cmp, f64_cmp};
 
@@ -118,7 +120,8 @@ fn check_plane_shape(name: &str, shape: (usize, usize), reference: (usize, usize
 }
 
 pub fn read_official_rate(path: &str) -> Result<OfficialRate> {
-    let file = File::open(path).with_context(|| format!("Failed to open {path}"))?;
+    let (readable, _decompressed) = resolve_gzip(Path::new(path))?;
+    let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
     let hdus = list_extensions(&file)?;
     let sci = extract_image_mmap_by_index(&file, required_hdu(&hdus, "SCI", path)?)?.image;
     let err = match hdu_named(&hdus, "ERR") {
@@ -138,7 +141,8 @@ pub fn read_official_rate(path: &str) -> Result<OfficialRate> {
 }
 
 pub fn read_qslope(path: &str) -> Result<QuickSlopePlanes> {
-    let file = File::open(path).with_context(|| format!("Failed to open {path}"))?;
+    let (readable, _decompressed) = resolve_gzip(Path::new(path))?;
+    let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
     let hdus = list_extensions(&file)?;
     let sci = extract_image_mmap_by_index(&file, required_hdu(&hdus, "SCI", path)?)?.image;
     let dq = extract_int_plane_by_index(&file, required_hdu(&hdus, "DQ", path)?)?.bits;
@@ -473,6 +477,7 @@ mod tests {
     use super::*;
     use crate::core::ramp::quick_slope::{DQ_DO_NOT_USE, DQ_JUMP_DET, DQ_SATURATED};
     use crate::core::ramp::test_support::{irs2_truth_slope, truth_rate_planes, write_synthetic_rate, SYNTHETIC_ERR};
+    use crate::infra::fits::gzip::test_support::gzip_copy;
     use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData, TestHdu};
 
     struct Pixel {
@@ -778,5 +783,15 @@ mod tests {
         let missing = dir.path().join("no_dq.fits");
         write_test_mef(&missing, &[], &[TestHdu { extname: Some("SCI"), extver: Some(1), cols: 2, rows: 2, data: HduData::F32(vec![1.0; 4]), extra_cards: vec![] }]);
         assert!(read_official_rate(missing.to_str().unwrap()).is_err());
+
+        let rate_gz = gzip_copy(&rate_path, "synthetic_rate.fits.gz");
+        let from_gz = read_official_rate(rate_gz.to_str().unwrap()).unwrap();
+        assert_eq!(from_gz.sci, official.sci);
+        assert_eq!(from_gz.err, official.err);
+        assert_eq!(from_gz.dq, official.dq);
+        assert_eq!(from_gz.detector, official.detector);
+        let qslope_gz = gzip_copy(&qslope_path, "synthetic_qslope.fits.gz");
+        let quick_gz = read_qslope(qslope_gz.to_str().unwrap()).unwrap();
+        assert_eq!((quick_gz.sci, quick_gz.dq, quick_gz.ngood), (quick.sci, quick.dq, quick.ngood));
     }
 }

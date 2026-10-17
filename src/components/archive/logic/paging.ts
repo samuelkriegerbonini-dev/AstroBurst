@@ -49,11 +49,15 @@ function fromPage(page: MastSearchPage, rows: MastRow[]): ResultSet {
   };
 }
 
+function rowIdentity(row: MastRow): string {
+  return `${row.datasetId} ${JSON.stringify(row.values)}`;
+}
+
 export function mergePage(prev: ResultSet | null, page: MastSearchPage): ResultSet {
   if (page.offset === 0 || !prev) return fromPage(page, page.rows);
   if (page.offset !== nextOffset(prev)) return prev;
-  const seen = new Set(prev.rows.map((r) => r.datasetId));
-  const added = page.rows.filter((r) => !seen.has(r.datasetId));
+  const seen = new Set(prev.rows.map(rowIdentity));
+  const added = page.rows.filter((r) => !seen.has(rowIdentity(r)));
   const merged = fromPage(page, [...prev.rows, ...added]);
   return { ...merged, columns: prev.columns.length ? prev.columns : page.columns, requestBody: prev.requestBody, applied: prev.applied, elapsedMs: prev.elapsedMs };
 }

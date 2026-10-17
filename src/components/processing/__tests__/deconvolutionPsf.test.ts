@@ -21,7 +21,7 @@ vi.mock("../../ui", async (importOriginal) => {
 
 vi.mock("../../../services/processing", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/processing")>()),
-  deconvolveRL: deconvolveMock,
+  recordDeconvolveRL: deconvolveMock,
 }));
 
 vi.mock("../../../services/compositeChain", async (importOriginal) => ({
@@ -119,6 +119,7 @@ describe("DeconvolutionPanel run with Empirical PSF off", () => {
     render({ psfKernel: KERNEL, compositeMode: false });
     captured.onClick?.();
     await vi.waitFor(() => expect(deconvolveMock).toHaveBeenCalledTimes(1));
+    expect(deconvolveMock.mock.calls[0][0]).toEqual({ imageKey: FILE.path, basePath: null });
     expect(deconvolveMock.mock.calls[0][2]).toHaveProperty("psfKernel", null);
     expect(deconvolveMock.mock.calls[0][2]).toHaveProperty("useEmpiricalPsf", false);
   });

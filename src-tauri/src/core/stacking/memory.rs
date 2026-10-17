@@ -2,6 +2,7 @@ use std::fs::File;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::reader::{extract_header_by_index_merged, extract_header_mmap};
 use crate::types::header::HduHeader;
 use crate::types::image_ref::{ImageRef, PlaneSelector};
@@ -170,7 +171,8 @@ pub fn header_size(header: &HduHeader) -> FrameSize {
 
 fn frame_size(path: &str) -> Result<FrameSize> {
     let reference = ImageRef::parse(path);
-    let file = File::open(&reference.path).with_context(|| format!("Failed to open {}", reference.path))?;
+    let (readable, _decompressed) = resolve_gzip(std::path::Path::new(&reference.path))?;
+    let file = File::open(&readable).with_context(|| format!("Failed to open {}", reference.path))?;
     let header = match &reference.plane {
         PlaneSelector::Auto => extract_header_mmap(&file),
         PlaneSelector::Hdu(n) => extract_header_by_index_merged(&file, *n),

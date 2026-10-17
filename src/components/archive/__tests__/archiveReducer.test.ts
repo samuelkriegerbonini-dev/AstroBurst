@@ -16,6 +16,7 @@ import {
   type ArchiveAction,
   type ArchiveState,
 } from "../state/archiveReducer";
+import { MISSING_FILE } from "../logic/errorCopy";
 import { MISSIONS, hstSet, jwstL3Set, page, productList, row } from "./fixtures";
 import type { MastError, MastQuery, MastResolved } from "../../../shared/types/mast";
 
@@ -51,7 +52,8 @@ function searched(state = base()): ArchiveState {
   );
 }
 
-const netErr: MastError = { code: "mast_network", message: "connection refused", context: { operation: "search/jwst/api/v0.1/search" } };
+const netErr: MastError = { code: "mast_network", message: "connection refused", context: { operation: "search/jwst/api/v0.1/search", host: "mast.stsci.edu" } };
+const thumbNetErr: MastError = { code: "mast_network", message: "connection refused", context: { operation: "search/jwst/api/v0.1/get_image_thumbnail", host: "mast.stsci.edu" } };
 
 describe("search states", () => {
   it("starts idle on JWST with nothing selected", () => {
@@ -357,6 +359,31 @@ describe("Roman token panel", () => {
     expect(resultsState(viaSearch)).toBe("locked");
   });
 
+  it("hides the selected row and its detail with the results when the Roman panel replaces them", () => {
+    const romanQuery: MastQuery = { ...QUERY, mission: "roman", filters: {} };
+    const id = "r0000101001001001001_0001_wfi01";
+    const shown = run(
+      roman(run(base(), { type: "tokenStatus", status: { present: true, authorized: true } })),
+      { type: "searchStarted", generation: 9, text: "M16", kind: "coordinates", name: null, query: romanQuery, at: 0 },
+      { type: "pageLoaded", generation: 9, page: page([row(id, { instrument: "WFI" })], { mission: "roman" }) },
+    );
+    expect(resultsState(shown)).toBe("ready");
+    expect(selectedRow(shown)?.datasetId).toBe(id);
+    expect(detailShown(shown)).toBe(true);
+    const again = { type: "searchStarted", generation: 10, text: "M16", kind: "coordinates", name: null, query: romanQuery, at: 2 } as const;
+    const expired = run(shown, again, { type: "searchFailed", generation: 10, error: { code: "mast_token_rejected", message: "", context: {} }, at: 3 });
+    expect(resultsState(expired)).toBe("locked");
+    expect(romanPanelState(expired)).toBe("expired");
+    expect(selectedRow(expired)).toBeNull();
+    expect(detailShown(expired)).toBe(false);
+    const noAccess = run(shown, again, { type: "searchFailed", generation: 10, error: { code: "mast_unauthorized", message: "", context: { mission: "roman", status: 401 } }, at: 3 });
+    expect(resultsState(noAccess)).toBe("locked");
+    expect(selectedRow(noAccess)).toBeNull();
+    const back = run(expired, { type: "tokenChecked", status: { present: true, authorized: true }, at: 4 });
+    expect(resultsState(back)).toBe("ready");
+    expect(selectedRow(back)?.datasetId).toBe(id);
+  });
+
   it("marks Roman not authorized after a Roman 401", () => {
     const s = run(
       roman(run(base(), { type: "tokenStatus", status: { present: true, authorized: true } })),
@@ -512,6 +539,15 @@ describe("mission probes", () => {
     const again = run(s, { type: "searchFailed", generation: 2, error: notDeployed, at: at + 61_000 });
     expect(resultsState(again)).toBe("unavailable");
     expect(unavailableInfo(again)).toMatchObject({ mission: "jwst", at: at + 61_000, status: 404 });
+    const hidden = run(
+      answered,
+      { type: "searchStarted", generation: 3, text: "274.688 -13.792", kind: "coordinates", name: null, query: QUERY, at: at + 62_000 },
+      { type: "searchFailed", generation: 3, error: notDeployed, at: at + 63_000 },
+    );
+    expect(resultsState(hidden)).toBe("unavailable");
+    expect(hidden.results?.rows).toHaveLength(2);
+    expect(selectedRow(hidden)).toBeNull();
+    expect(detailShown(hidden)).toBe(false);
   });
 
   it("keeps another mission's not-deployed answer when a search starts elsewhere", () => {
@@ -539,7 +575,7 @@ describe("banners", () => {
     expect(visibleBanner(s, 0)?.kind).toBe("server");
     s = run(s, { type: "bannerRaised", banner: { kind: "network", text: "n", retry: "search" } });
     expect(visibleBanner(s, 0)?.kind).toBe("network");
-    s = run(s, { type: "thumbDemand", selected: ["a"], visible: [], ahead: [] }, { type: "thumbsStarted", keys: ["a"] }, { type: "thumbRateLimited", key: "a", at: 0, retryAfterSec: 42, consecutive: 1, status: 429 });
+    s = run(s, { type: "thumbDemand", selected: ["a"], visible: [], ahead: [] }, { type: "thumbsStarted", keys: ["a"], at: 0 }, { type: "thumbRateLimited", key: "a", at: 0, retryAfterSec: 42, consecutive: 1, status: 429 });
     const top = visibleBanner(s, 0);
     expect(top?.kind).toBe("rate-limited");
     expect(top?.text).toBe("MAST is limiting requests (HTTP 429). Thumbnails are paused and resume in 42 s.");
@@ -550,13 +586,71 @@ describe("banners", () => {
   });
 
   it("summarises thumbnail network failures with a retry", () => {
-    const s = run(searched(), { type: "thumbDemand", selected: [], visible: ["a", "b"], ahead: [] }, { type: "thumbsStarted", keys: ["a", "b"] }, { type: "thumbFailed", key: "a", reason: "network" });
-    expect(visibleBanner(s, 0)).toEqual({ kind: "network", text: "Some images could not be loaded (network).", retry: "thumbs" });
+    const s = run(searched(), { type: "thumbDemand", selected: [], visible: ["a", "b"], ahead: [] }, { type: "thumbsStarted", keys: ["a", "b"], at: 0 }, { type: "thumbFailed", key: "a", error: thumbNetErr, at: 900 });
+    expect(visibleBanner(s, 0)).toEqual({ kind: "network", text: "1 thumbnail failed: Could not reach MAST (mast.stsci.edu · connection refused).", retry: "thumbs" });
+  });
+
+  it("lets a new search start thumbnails again after the breaker gave up, keeping the pause MAST asked for", () => {
+    let s = run(searched(), { type: "thumbDemand", selected: [], visible: ["a", "b", "c"], ahead: [] }, { type: "thumbsStarted", keys: ["a", "b", "c"], at: 0 });
+    s = run(
+      s,
+      { type: "thumbRateLimited", key: "a", at: 0, retryAfterSec: 10, consecutive: 1, status: 429 },
+      { type: "thumbRateLimited", key: "b", at: 0, retryAfterSec: 30, consecutive: 2, status: 429 },
+      { type: "thumbRateLimited", key: "c", at: 0, retryAfterSec: 60, consecutive: 3, status: 429 },
+    );
+    expect(s.thumbs.gaveUp).toBe(true);
+    s = run(s, { type: "searchStarted", generation: 2, text: "M16", kind: "name", name: "M16", query: QUERY, at: 1000 }, { type: "pageLoaded", generation: 2, page: page(ROWS) });
+    expect(s.thumbs.gaveUp).toBe(false);
+    expect(s.thumbs.pausedUntil).toBe(60_000);
+    expect(visibleBanner(s, 61_000)).toBeNull();
   });
 
   it("turns the pause into an error banner once the breaker gives up", () => {
-    const s = run(searched(), { type: "thumbDemand", selected: ["a"], visible: [], ahead: [] }, { type: "thumbsStarted", keys: ["a"] }, { type: "thumbRateLimited", key: "a", at: 0, retryAfterSec: 60, consecutive: 3, status: 429 });
+    const s = run(searched(), { type: "thumbDemand", selected: ["a"], visible: [], ahead: [] }, { type: "thumbsStarted", keys: ["a"], at: 0 }, { type: "thumbRateLimited", key: "a", at: 0, retryAfterSec: 60, consecutive: 3, status: 429 });
     expect(visibleBanner(s, 0)).toEqual({ kind: "rate-limited", text: "MAST kept limiting requests, so thumbnails stay paused.", retry: "thumbs" });
+  });
+});
+
+describe("thumbnail failures keep MAST's answer", () => {
+  const unavailable: MastError = { code: "mast_server", message: "HTTP 503", context: { status: 503, detail: "Service Unavailable", operation: "search/jwst/api/v0.1/get_image_thumbnail" } };
+  const slow: MastError = { code: "mast_timeout", message: "no answer within 30 s", context: { timeoutSec: 30, operation: "search/jwst/api/v0.1/get_image_thumbnail" } };
+  const gone: MastError = { code: "mast_no_image", message: "Image not found", context: { status: 404, detail: "Image not found", operation: "search/jwst/api/v0.1/get_image_thumbnail" } };
+  const started = (keys: string[]) =>
+    run(searched(), { type: "thumbDemand", selected: [], visible: keys, ahead: [] }, { type: "thumbsStarted", keys, at: 1000 });
+
+  it("stores the error with the time waited and raises the server banner with the HTTP status and MAST's text", () => {
+    const s = run(started(["a"]), { type: "thumbFailed", key: "a", error: unavailable, at: 4000 });
+    expect(s.thumbs.failures.a).toEqual({ error: unavailable, waitedMs: 3000 });
+    const banner = visibleBanner(s, 0);
+    expect(banner?.kind).toBe("server");
+    expect(banner?.retry).toBe("thumbs");
+    expect(banner?.text).toBe("1 thumbnail failed: MAST server error (HTTP 503: Service Unavailable).");
+  });
+
+  it("names the most frequent failure and counts it", () => {
+    const s = run(
+      started(["a", "b", "c"]),
+      { type: "thumbFailed", key: "a", error: slow, at: 31_000 },
+      { type: "thumbFailed", key: "b", error: unavailable, at: 2000 },
+      { type: "thumbFailed", key: "c", error: slow, at: 31_000 },
+    );
+    expect(visibleBanner(s, 0)).toEqual({ kind: "timeout", text: "2 thumbnails failed: MAST did not answer (no answer within 30 s).", retry: "thumbs" });
+  });
+
+  it("stores a no-image answer and raises no banner for it", () => {
+    const s = run(started(["a"]), { type: "thumbFailed", key: "a", error: gone, at: 1500 });
+    expect(s.thumbs.done.a).toBe("failed");
+    expect(s.thumbs.failures.a.error).toBe(gone);
+    expect(visibleBanner(s, 0)).toBeNull();
+  });
+
+  it("records when a preview and an image list failed", () => {
+    let s = run(searched(), { type: "previewStarted", key: "k", requestId: "p1", at: 1000 }, { type: "imageListStarted", key: "l", requestId: "l1", at: 2000 });
+    expect(s.previews.k.endedAt).toBeNull();
+    expect(s.lists.l.endedAt).toBeNull();
+    s = run(s, { type: "previewFailed", key: "k", requestId: "p1", error: unavailable, at: 9000 }, { type: "imageListFailed", key: "l", requestId: "l1", error: slow, at: 9000 });
+    expect(s.previews.k.endedAt).toBe(9000);
+    expect(s.lists.l.endedAt).toBe(9000);
   });
 });
 
@@ -589,7 +683,7 @@ describe("results shell state", () => {
   it("keeps the query of the shown results and the thumbnail refs until new results replace them", () => {
     let s = searched();
     expect(s.resultsQuery).toEqual(QUERY);
-    s = run(s, { type: "thumbDemand", selected: [], visible: ["jw02739-o001_t001_nircam"], ahead: [] }, { type: "thumbsStarted", keys: ["jw02739-o001_t001_nircam"] });
+    s = run(s, { type: "thumbDemand", selected: [], visible: ["jw02739-o001_t001_nircam"], ahead: [] }, { type: "thumbsStarted", keys: ["jw02739-o001_t001_nircam"], at: 0 });
     s = run(s, { type: "thumbReady", key: "jw02739-o001_t001_nircam", ref: REF });
     expect(s.thumbRefs["jw02739-o001_t001_nircam"]).toEqual(REF);
     s = run(
@@ -679,10 +773,10 @@ describe("detail pane state", () => {
 
   it("tracks an image list for its own request only, and lets a failure be retried", () => {
     let s = run(searched(), { type: "imageListStarted", key: KEY, requestId: "g1:list:a", at: 5 });
-    expect(s.lists[KEY]).toEqual({ requestId: "g1:list:a", startedAt: 5, error: null });
-    s = run(s, { type: "imageListFailed", key: KEY, requestId: "g0:list:a", error: err });
+    expect(s.lists[KEY]).toEqual({ requestId: "g1:list:a", startedAt: 5, endedAt: null, error: null });
+    s = run(s, { type: "imageListFailed", key: KEY, requestId: "g0:list:a", error: err, at: 7 });
     expect(s.lists[KEY].error).toBeNull();
-    s = run(s, { type: "imageListFailed", key: KEY, requestId: "g1:list:a", error: err });
+    s = run(s, { type: "imageListFailed", key: KEY, requestId: "g1:list:a", error: err, at: 8 });
     expect(s.lists[KEY].error).toEqual(err);
     s = run(s, { type: "imageListRetried", key: KEY });
     expect(s.lists[KEY]).toBeUndefined();
@@ -711,7 +805,7 @@ describe("detail pane state", () => {
     };
     let s = run(searched(), { type: "previewStarted", key: "k", requestId: "p", at: 0 }, { type: "previewLoaded", key: "k", requestId: "p", ref, url: "http://asset.localhost/a.jpg" });
     expect(s.previews.k).toMatchObject({ stage: "ready", url: "http://asset.localhost/a.jpg", ref });
-    s = run(s, { type: "previewStarted", key: "f", requestId: "q", at: 0 }, { type: "previewFailed", key: "f", requestId: "q", error: err });
+    s = run(s, { type: "previewStarted", key: "f", requestId: "q", at: 0 }, { type: "previewFailed", key: "f", requestId: "q", error: err, at: 1 });
     expect(s.previews.f.stage).toBe("failed");
     s = run(s, { type: "previewRetried", key: "f" }, { type: "previewRetried", key: "k" });
     expect(s.previews.f).toBeUndefined();
@@ -773,5 +867,100 @@ describe("detail pane state", () => {
     );
     expect(s.large.open).toBe(false);
     expect(detailEntry(s)?.filter).toBe("F200W");
+  });
+});
+
+describe("cache, missing files and unresolved names", () => {
+  const ID_A = "jw02739-o001_t001_nircam";
+  const ID_B = "jw02739-o002_t001_miri";
+  const THUMB = { url: "http://asset.localhost/C%3A%2Fmast%2Fa_thumb.jpg", width: 128, height: 75, imageCount: 6, filename: "a_thumb.jpg" };
+  const PANE = {
+    requestId: "p",
+    path: "C:/mast/a.2048.jpg",
+    width: 2048,
+    height: 1226,
+    bytes: 9,
+    filename: "a.2048.jpg",
+    wcs: null,
+    imageCount: 6,
+    elapsedMs: 1,
+    fromCache: false,
+    size: "pane" as const,
+    channels: 1 as const,
+    source: { width: 14341, height: 8583, bytes: 5_800_000 },
+  };
+  const PANE_URL = "http://asset.localhost/C%3A%2Fmast%2Fa.2048.jpg";
+
+  function shown(): ArchiveState {
+    return run(
+      searched(),
+      { type: "thumbDemand", selected: [], visible: [ID_A, ID_B], ahead: [] },
+      { type: "thumbsStarted", keys: [ID_A, ID_B], at: 0 },
+      { type: "thumbReady", key: ID_A, ref: THUMB },
+      { type: "thumbFailed", key: ID_B, error: thumbNetErr, at: 0 },
+      { type: "imageListLoaded", key: `jwst:${ID_A}`, set: jwstL3Set(ID_A) },
+      { type: "previewStarted", key: "pane", requestId: "p", at: 0 },
+      { type: "previewLoaded", key: "pane", requestId: "p", ref: PANE, url: PANE_URL },
+      { type: "previewStarted", key: "busy", requestId: "q", at: 0 },
+    );
+  }
+
+  it("shows not-resolved when MAST could not resolve the name it searched for", () => {
+    const s = run(
+      searched(),
+      { type: "searchStarted", generation: 2, text: "Pilars", kind: "name", name: "Pilars", query: null, at: 0 },
+      { type: "serverResolve", generation: 2, query: QUERY, at: 30 },
+      { type: "pageLoaded", generation: 2, page: page([], { unresolvedTargets: ["Pilars"], totalReported: 0, elapsedMs: 1200 }) },
+    );
+    expect(resultsState(s)).toBe("not-resolved");
+    expect(s.notResolved).toEqual({ name: "Pilars", elapsedMs: 1200 });
+    expect(s.results).toBeNull();
+    expect(s.live.text).toBe("Name not found");
+  });
+
+  it("keeps rows that MAST found even when one target was not resolved", () => {
+    const s = run(
+      base(),
+      { type: "searchStarted", generation: 1, text: "Pilars", kind: "name", name: "Pilars", query: null, at: 0 },
+      { type: "serverResolve", generation: 1, query: QUERY, at: 30 },
+      { type: "pageLoaded", generation: 1, page: page(ROWS, { unresolvedTargets: ["Pilars"] }) },
+    );
+    expect(resultsState(s)).toBe("ready");
+    expect(s.notResolved).toBeNull();
+  });
+
+  it("forgets every image it showed once the MAST cache is cleared, and keeps what is still loading", () => {
+    const s = run(shown(), { type: "bannerRaised", banner: { kind: "cache", text: "x", retry: null } }, { type: "cacheCleared" });
+    expect(s.thumbRefs).toEqual({});
+    expect(s.thumbs.done).toEqual({});
+    expect(s.thumbs.failures).toEqual({});
+    expect(s.thumbs.visible).toEqual([ID_A, ID_B]);
+    expect(s.imageSets).toEqual({});
+    expect(Object.keys(s.previews)).toEqual(["busy"]);
+    expect(visibleBanner(s, 0)).toBeNull();
+    expect(resultsState(s)).toBe("ready");
+    expect(s.selectedId).toBe(ID_A);
+  });
+
+  it("marks a thumbnail and a preview failed when their file is gone", () => {
+    const s = run(shown(), { type: "imageMissing", url: THUMB.url }, { type: "imageMissing", url: PANE_URL }, { type: "imageMissing", url: "http://asset.localhost/other.jpg" });
+    expect(s.thumbs.done[ID_A]).toBe("failed");
+    expect(s.thumbs.failures[ID_A]).toEqual({ error: MISSING_FILE, waitedMs: null });
+    expect(s.thumbRefs[ID_A]).toBeUndefined();
+    expect(s.previews.pane.stage).toBe("failed");
+    expect(s.previews.pane.error?.code).toBe("mast_cache");
+    expect(s.previews.busy.stage).toBe("download");
+    expect(visibleBanner(s, 0)?.kind).toBe("network");
+    const retried = run(s, { type: "thumbsRetried" }, { type: "previewRetried", key: "pane" });
+    expect(retried.thumbs.done[ID_A]).toBeUndefined();
+    expect(retried.previews.pane).toBeUndefined();
+  });
+
+  it("raises one cache banner when thumbnails cannot be stored", () => {
+    const s = run(searched(), { type: "thumbsStarted", keys: [ID_A], at: 0 }, { type: "thumbFailed", key: ID_A, error: { code: "mast_cache", message: "disk full", context: {} }, at: 10 });
+    const banner = visibleBanner(s, 0);
+    expect(banner?.kind).toBe("cache");
+    expect(banner?.retry).toBe("thumbs");
+    expect(banner?.text).toMatch(/free disk space or run Clear MAST cache/);
   });
 });

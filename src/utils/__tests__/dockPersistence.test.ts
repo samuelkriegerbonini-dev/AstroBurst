@@ -48,7 +48,7 @@ describe("parseDockLayout", () => {
       },
     }));
     expect(layout.anchors["left-top"]).toEqual(["files", "image", "astrometry", "photometry", "cube", "info"]);
-    expect(layout.anchors["right-top"]).toEqual(["headers", "processing", "stacking"]);
+    expect(layout.anchors["right-top"]).toEqual(["headers", "processing", "stacking", "history"]);
     expect(layout.anchors["right-bottom"]).toEqual(["synth", "export", "config", "log"]);
   });
 
@@ -57,14 +57,14 @@ describe("parseDockLayout", () => {
     expect(layout.anchors).toEqual({
       "left-top": ["info", "files"],
       "left-bottom": ["compose"],
-      "right-top": ["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing"],
+      "right-top": ["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history"],
       "right-bottom": ["synth", "export", "config", "log"],
     });
     expect(dockLayoutErrors(layout)).toEqual([]);
   });
 
   it("keeps a tool docked in a non-default anchor and lets other anchors be empty", () => {
-    const all = ["files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "stacking", "synth", "export", "config", "log"];
+    const all = ["files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "stacking", "synth", "export", "config", "log"];
     const layout = parseDockLayout(persisted({ anchors: { "right-bottom": all }, active: { "right-bottom": "export" } }));
     expect(layout.anchors).toEqual({ "left-top": [], "left-bottom": [], "right-top": [], "right-bottom": all });
     expect(layout.active).toEqual({ "left-top": null, "left-bottom": null, "right-top": null, "right-bottom": "export" });
@@ -120,7 +120,7 @@ function oldBlob(anchors: Record<string, unknown> = {}, active: Record<string, u
 describe("legacy analysis tool", () => {
   it("replaces Analysis by the four analysis tools at its slot, opens Image in its place and docks Log bottom right", () => {
     const layout = parseDockLayout(oldBlob({}, { "right-top": "analysis" }));
-    expect(layout.anchors["right-top"]).toEqual(["headers", "image", "astrometry", "photometry", "cube", "processing", "stacking"]);
+    expect(layout.anchors["right-top"]).toEqual(["headers", "image", "astrometry", "photometry", "cube", "processing", "stacking", "history"]);
     expect(layout.active["right-top"]).toBe("image");
     expect(layout.anchors["right-bottom"]).toEqual(["synth", "export", "config", "log"]);
     expect(layout.anchors["left-top"]).toEqual(["files", "info"]);
@@ -132,14 +132,14 @@ describe("legacy analysis tool", () => {
   it("expands Analysis where the user had moved it", () => {
     const layout = parseDockLayout(oldBlob({ "left-bottom": ["analysis", "compose"], "right-top": ["headers", "processing", "stacking"] }));
     expect(layout.anchors["left-bottom"]).toEqual(["image", "astrometry", "photometry", "cube", "compose"]);
-    expect(layout.anchors["right-top"]).toEqual(["headers", "processing", "stacking"]);
+    expect(layout.anchors["right-top"]).toEqual(["headers", "processing", "stacking", "history"]);
     expect(layout.active["right-top"]).toBeNull();
   });
 
   it("keeps an analysis tool already docked elsewhere and expands only the others", () => {
     const layout = parseDockLayout(oldBlob({ "left-top": ["files", "info", "image"] }));
     expect(layout.anchors["left-top"]).toEqual(["files", "info", "image"]);
-    expect(layout.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "processing", "stacking"]);
+    expect(layout.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "processing", "stacking", "history"]);
     expect(dockLayoutErrors(layout)).toEqual([]);
   });
 

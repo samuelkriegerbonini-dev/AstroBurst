@@ -232,7 +232,7 @@ describe("footer MAST text", () => {
 
   it("counts queued thumbnails as wanted, not started and not finished", () => {
     let q = setDemand(createThumbQueue(), { selected: ["a"], visible: ["a", "b", "c", "d", "e", "f"], ahead: ["g"] });
-    q = markStarted(q, ["a", "b"]);
+    q = markStarted(q, ["a", "b"], 0);
     q = markReady(q, "a");
     expect(queuedThumbs(q)).toBe(5);
   });

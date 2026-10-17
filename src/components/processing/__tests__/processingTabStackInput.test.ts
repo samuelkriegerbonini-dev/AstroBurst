@@ -9,6 +9,7 @@ interface PanelFile {
 }
 
 interface StepDone {
+  node?: string;
   corrected_fits?: string;
   fits_path?: string;
   previewUrl?: string;
@@ -20,13 +21,24 @@ interface PanelProps {
   chainedFrom?: string;
   inputPreviewUrl?: string | null;
   inputLabel?: string;
-  onProcessingDone?: (res: StepDone) => void;
+  onProcessingDone?: (res: StepDone) => void | Promise<void>;
   onPreviewUpdate?: (url: string | null | undefined, dims: readonly number[] | null | undefined) => void;
   onPsfReady?: (kernel: number[][]) => void;
 }
 
-const { captured } = vi.hoisted(() => ({
+const { captured, getHistoryMock } = vi.hoisted(() => ({
   captured: {} as Record<string, PanelProps | undefined>,
+  getHistoryMock: vi.fn(),
+}));
+
+vi.mock("../../../services/ops", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../services/ops")>()),
+  getHistory: getHistoryMock,
+}));
+
+vi.mock("../../../infrastructure/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../infrastructure/tauri")>()),
+  getPreviewUrl: async (path: string) => path,
 }));
 
 function capture(name: string) {
@@ -50,11 +62,62 @@ import { PreviewProvider, fileKeyOf, getRenderRecord, useRenderActions } from ".
 import ProcessingTab from "../ProcessingTab";
 import type { ProcessedFile } from "../../../shared/types";
 import type { ProcessedResult } from "../../../shared/types/preview";
+import type { HistoryNode, HistoryState, OpSpec } from "../../../shared/types/ops";
 
 const LIGHT = "C:/data/light_001.fits";
 const STACK = "C:/out/light_001_stack3_20261010-120000-000.fits";
 const STACK_LABEL = "Stack - 3 frames";
 const PV = "C:/out/g235h_pv.fits";
+const HISTORY_DIR = "C:/app/history/5d2e7c1a9b3f0e86";
+const STACK_BG = `${HISTORY_DIR}/n0001.fits`;
+const BACKGROUND: OpSpec = { op: "background", v: 1, model: "polynomial", config: { gridSize: 8, polyDegree: 3, sigmaClip: 2.5, iterations: 3, mode: "subtract" } };
+const PIXELMATH: OpSpec = { op: "pixelmath", v: 1, expression: "$T * 2", slots: [], truncate: false, rescale: false };
+
+function historyNode(id: string, parent: string | null, op: OpSpec): HistoryNode {
+  return {
+    id,
+    parent,
+    op,
+    mask: null,
+    output: { path: `${id}.fits`, png: `${id}.png`, extras: [], dims: [8, 8], planes: 1, domain: "display_referred" },
+    at: "2026-10-16T12:00:00Z",
+    elapsed_ms: 1,
+    app: "0.6.9",
+    threads: 8,
+    present: true,
+    bytes: 256,
+    checkpoint: false,
+  };
+}
+
+function historyState(rootPath: string, basePath: string | null, nodes: HistoryNode[], head: string | null): HistoryState {
+  return {
+    image_id: "3f9c0a1e5b7d2c44",
+    history_dir: HISTORY_DIR,
+    root_path: rootPath,
+    doc: {
+      format: "astroburst-history",
+      version: 1,
+      image: { id: "3f9c0a1e5b7d2c44", ref: rootPath, size: 1, mtime: null },
+      image_key: rootPath,
+      base_path: basePath,
+      head,
+      policy: { k: 4 },
+      app: "0.6.9",
+      threads: 8,
+      masks: {},
+      nodes,
+    },
+    read_only: null,
+    fingerprint_matches: true,
+    busy: false,
+  };
+}
+
+function stackBackgroundRun(): StepDone {
+  getHistoryMock.mockResolvedValue(historyState(STACK, STACK, [historyNode("n0001", null, BACKGROUND)], "n0001"));
+  return { node: "n0001", corrected_fits: STACK_BG, previewUrl: "asset://out/stack_bg.png", dimensions: [66, 50] };
+}
 
 function fileOf(id: string): ProcessedFile {
   return {
@@ -126,11 +189,12 @@ describe("ProcessingTab with a stack on screen", () => {
     const key = fileKeyOf(file) as string;
     publish(key, stackRecord());
     await renderTab(file);
-    panel("background").onProcessingDone?.({ corrected_fits: "C:/out/stack_bg.fits", previewUrl: "asset://out/stack_bg.png", dimensions: [66, 50] });
+    await panel("background").onProcessingDone?.(stackBackgroundRun());
+    expect(getHistoryMock).toHaveBeenLastCalledWith({ imageKey: LIGHT, basePath: STACK });
     const record = getRenderRecord(key);
-    expect(record?.processed).toMatchObject({ fitsPath: "C:/out/stack_bg.fits", inputPath: STACK, kind: "processing" });
+    expect(record?.processed).toMatchObject({ fitsPath: STACK_BG, inputPath: STACK, kind: "processing" });
     expect(record?.chain.base?.path).toBe(STACK);
-    expect(record?.chain.steps.background?.fitsPath).toBe("C:/out/stack_bg.fits");
+    expect(record?.chain.steps.background?.fitsPath).toBe(STACK_BG);
   });
 
   it("hands Denoise the stack with its preview and label when no step ran", async () => {
@@ -148,7 +212,7 @@ describe("ProcessingTab with a stack on screen", () => {
     const key = fileKeyOf(file) as string;
     publish(key, stackRecord());
     await renderTab(file);
-    panel("background").onProcessingDone?.({ corrected_fits: "C:/out/stack_bg.fits", previewUrl: "asset://out/stack_bg.png", dimensions: [66, 50] });
+    await panel("background").onProcessingDone?.(stackBackgroundRun());
     const html = await renderTab(file);
     expect(html).toContain(STACK_LABEL);
     expect(html).not.toMatch(/>light_001<\/span>/);
@@ -199,7 +263,10 @@ describe("ProcessingTab PixelMath compare on a non-file input", () => {
       await renderTab(file);
       const pm = panel("pixelMath");
       bases.push({ inputPreviewUrl: pm.inputPreviewUrl, inputLabel: pm.inputLabel });
-      pm.onProcessingDone?.({ fits_path: "C:/out/g235h_pv_pixelmath.fits", previewUrl: "asset://out/pm.png", dimensions: [40, 900] });
+      const node = `n000${run + 1}`;
+      const nodes = Array.from({ length: run + 1 }, (_, i) => historyNode(`n000${i + 1}`, null, PIXELMATH));
+      getHistoryMock.mockResolvedValue(historyState(PV, PV, nodes, node));
+      await pm.onProcessingDone?.({ node, fits_path: `${HISTORY_DIR}/${node}.fits`, previewUrl: "asset://out/pm.png", dimensions: [40, 900] });
       expect(getRenderRecord(key)?.processed?.inputPath).toBe(PV);
     }
     await renderTab(file);
@@ -209,15 +276,13 @@ describe("ProcessingTab PixelMath compare on a non-file input", () => {
     expect(bases).toEqual([pvBase, pvBase, pvBase]);
   });
 
-  it("falls back to the preview stored at run time for an input outside the chain", async () => {
+  it("compares with the image on screen when it is outside the chain", async () => {
     const file = fileOf("wcs-pixelmath");
     const key = fileKeyOf(file) as string;
     publish(key, { fitsPath: "C:/out/light_001_wcs.fits", previewUrl: "asset://out/wcs.png", dimensions: [64, 48], label: "Solved WCS", kind: "processing", inputPath: LIGHT });
     await renderTab(file);
-    panel("pixelMath").onProcessingDone?.({ fits_path: "C:/out/light_001_wcs_pixelmath.fits", previewUrl: "asset://out/pm.png", dimensions: [64, 48] });
-    expect(getRenderRecord(key)?.processed?.inputPreviewUrl).toMatch(/^asset:\/\/out\/wcs\.png\?v=\d+$/);
-    await renderTab(file);
     expect(panel("pixelMath").inputPreviewUrl).toMatch(/^asset:\/\/out\/wcs\.png\?v=\d+$/);
+    expect(panel("pixelMath").inputLabel).toBe("Solved WCS");
   });
 });
 
@@ -230,7 +295,9 @@ describe("ProcessingTab when the frame on screen changes during a run", () => {
     const bg = panel("background");
     expect(bg.selectedFile?.path).toBe("C:/out/f120.fits");
     publish(key, frameRecord(121));
-    bg.onProcessingDone?.({ corrected_fits: "C:/out/f120_bg.fits", previewUrl: "asset://out/f120_bg.png", dimensions: [64, 48] });
+    getHistoryMock.mockResolvedValue(historyState(LIGHT, "C:/out/f120.fits", [historyNode("n0001", null, BACKGROUND)], "n0001"));
+    await bg.onProcessingDone?.({ node: "n0001", corrected_fits: `${HISTORY_DIR}/n0001.fits`, previewUrl: "asset://out/f120_bg.png", dimensions: [64, 48] });
+    expect(getHistoryMock).toHaveBeenLastCalledWith({ imageKey: LIGHT, basePath: "C:/out/f120.fits" });
     const record = getRenderRecord(key);
     expect(record?.chain.base?.path).toBe("C:/out/f121.fits");
     expect(record?.chain.steps.background).toBeUndefined();

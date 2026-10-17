@@ -207,6 +207,7 @@ describe("pruneRecord", () => {
       base: null,
     },
     version: 2,
+    historyId: null,
   };
 
   it("drops the whole record when the displayed output was deleted", () => {

@@ -1,6 +1,6 @@
 import type { MastError, MastImageSet, MastMission, MastMissionId, MastPreviewRef, MastProductList, MastProgressEvent } from "../../../shared/types/mast";
 import { mastErrorOf } from "../../../services/mast";
-import { PREVIEW_DWELL_MS, entriesInGroup, largeNeeded, previewKey, previewsAllowed, stripThumbKeys, type PreviewSize } from "../logic/detailView";
+import { PREVIEW_DWELL_MS, entriesInGroup, largeNeeded, previewKey, previewsAllowed, stripCover, stripThumbKeys, type PreviewSize } from "../logic/detailView";
 import { listId, previewId, productsId } from "../logic/requestIds";
 import { detailEntry, detailShown, detailTabOf, imageSetKey, largeEntry, selectedRow, type ArchiveState } from "./archiveReducer";
 import type { ArchiveStore } from "./archiveStore";
@@ -96,8 +96,8 @@ export function createDetailEffects(deps: DetailEffectsDeps): DetailEffects {
   }
 
   function startList(s: ArchiveState, mission: MastMissionId, datasetId: string, key: string): void {
-    const requestId = listId(s.generation, datasetId);
     const attempt = begin(`list:${key}`);
+    const requestId = listId(s.generation, datasetId, attempt);
     dispatch({ type: "imageListStarted", key, requestId, at: clock.now() });
     call("other", () => services.imageList(requestId, mission, datasetId)).then(
       (set) => {
@@ -107,15 +107,15 @@ export function createDetailEffects(deps: DetailEffectsDeps): DetailEffects {
         if (!current(`list:${key}`, attempt)) return;
         const e = mastErrorOf(err);
         if (e.code === "mast_cancelled") dispatch({ type: "imageListCancelled", key, requestId });
-        else dispatch({ type: "imageListFailed", key, requestId, error: e });
+        else dispatch({ type: "imageListFailed", key, requestId, error: e, at: clock.now() });
       },
     );
   }
 
   function startPreview(s: ArchiveState, target: Target, size: PreviewSize): void {
-    const requestId = previewId(s.generation, target.datasetId, target.filename, size);
     const key = target.key;
     const attempt = begin(`preview:${key}`);
+    const requestId = previewId(s.generation, target.datasetId, target.filename, size, attempt);
     dispatch({ type: "previewStarted", key, requestId, at: clock.now() });
     call("other", () => services.preview(requestId, target.mission, target.datasetId, target.filename, size))
       .then(async (ref) => {
@@ -129,7 +129,7 @@ export function createDetailEffects(deps: DetailEffectsDeps): DetailEffects {
           if (inFlight(get().previews[key]?.stage)) dispatch({ type: "previewCancelled", key, requestId });
           return;
         }
-        dispatch({ type: "previewFailed", key, requestId, error: e });
+        dispatch({ type: "previewFailed", key, requestId, error: e, at: clock.now() });
       });
   }
 
@@ -214,7 +214,7 @@ export function createDetailEffects(deps: DetailEffectsDeps): DetailEffects {
     const previewsTab = idle && shown && tab === "previews" && !!mission && !!sel && rowAllowed(s, mission, sel);
     const set = previewsTab && mission && sel ? s.imageSets[imageSetKey(mission.id, sel)] : undefined;
     const entry = previewsTab ? detailEntry(s) : null;
-    const nextStrip = set && entry && sel ? stripThumbKeys(sel, entriesInGroup(set, entry.group), s.thumbRefs[sel]) : [];
+    const nextStrip = set && entry && sel ? stripThumbKeys(sel, entriesInGroup(set, entry.group), stripCover(set, s.thumbRefs[sel], s.thumbs.inflight.includes(sel))) : [];
     if (!sameKeys(nextStrip, strip)) {
       strip = nextStrip;
       onStripDemand(nextStrip);
@@ -302,7 +302,7 @@ export function createDetailEffects(deps: DetailEffectsDeps): DetailEffects {
     if (!p || !inFlight(p.stage)) return;
     attempts.delete(`preview:${key}`);
     cancelRequest(p.requestId);
-    dispatch({ type: "previewFailed", key, requestId: p.requestId, error: CANCELLED_BY_USER });
+    dispatch({ type: "previewFailed", key, requestId: p.requestId, error: CANCELLED_BY_USER, at: clock.now() });
   }
 
   function retryFailedPreview(key: string | null): void {

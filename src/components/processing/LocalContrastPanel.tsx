@@ -1,6 +1,8 @@
 import { useState, useCallback } from "react";
 import { X } from "lucide-react";
-import { applyLhe, applyLheComposite } from "../../services/localContrast";
+import { applyLheComposite, lheConfigOf, recordLhe } from "../../services/localContrast";
+import { useHistoryScope } from "../../hooks/useHistory";
+import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRun } from "../../hooks/useProcessingRun";
@@ -29,7 +31,7 @@ interface LheRun {
 interface LocalContrastPanelProps extends CompositePanelProps {
   selectedFile: ProcessedFile | null;
   outputDir?: string;
-  onProcessingDone?: (result: LocalContrastResult) => void;
+  onProcessingDone?: (result: LocalContrastResult) => void | Promise<void>;
   chainedFrom?: string;
   inputPreviewUrl?: string | null;
   inputLabel?: string;
@@ -51,7 +53,10 @@ const ICON = (
 export default function LocalContrastPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: LocalContrastPanelProps) {
   const progress = useProgress(LHE_PROGRESS_EVENT);
   const resetProgress = progress.reset;
-  const [config, setConfig] = useState<LheConfig>(DEFAULT_LHE_CONFIG);
+  const initial = useRerunInitial("local_contrast", lheConfigOf);
+  const [config, setConfig] = useState<LheConfig>(initial?.params ?? DEFAULT_LHE_CONFIG);
+  useRerunUpdates("local_contrast", initial, lheConfigOf, setConfig);
+  const scope = useHistoryScope();
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<LheRun>("lhe", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -65,7 +70,7 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
     setConfig((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path;
+  const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path && !!scope;
 
   const handleRun = useCallback(() => {
     const runConfig = config;
@@ -90,17 +95,18 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
       return;
     }
     const path = selectedFile?.path;
-    if (!path) return;
+    if (!path || !scope) return;
+    const runScope = scope;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     resetProgress();
     void run(async (ctx) => {
-      const res = await applyLhe(path, outputDir, runConfig);
+      const res = await recordLhe(runScope, path, runConfig);
       if (!ctx.inputUnchanged("localContrast")) throw new Error(INPUT_CHANGED_MESSAGE);
-      onProcessingDone?.(res);
+      await onProcessingDone?.(res);
       return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     }, isCancelMessage).finally(resetProgress);
-  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, outputDir, config, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, scope, outputDir, config, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">

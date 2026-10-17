@@ -1,0 +1,75 @@
+{
+  "axis_unit": "um",
+  "centroid": 1.0200360185836774,
+  "continuum_channels": 12,
+  "continuum_level": 0.02653662204640075,
+  "continuum_linear": true,
+  "continuum_reference": 1.0200360185836774,
+  "continuum_sigma": 0.3953765457808971,
+  "continuum_slope": -11.199498396497601,
+  "continuum_windows": [
+    [
+      0,
+      5
+    ],
+    [
+      34,
+      39
+    ]
+  ],
+  "equivalent_width": null,
+  "fit": {
+    "amplitude": 107.99938740273133,
+    "amplitude_err": 0.18915079219337896,
+    "centre": 1.0200008554451907,
+    "centre_err": 6.069042406334857e-6,
+    "chi2": 17.855197831268832,
+    "converged": true,
+    "dof": 22,
+    "iterations": 4,
+    "sigma": 0.003000986429623949,
+    "sigma_err": 6.069047862568529e-6
+  },
+  "flux": 0.8116439583322833,
+  "flux_err": 0.0019768827289044872,
+  "flux_unit": "Jy/beam x pix x um",
+  "fwhm": 0.007030025617399797,
+  "n_channels": 25,
+  "notes": [
+    "circle region: flux summed over 112.7 pixels, sky from 244 background pixels subtracted per channel",
+    "continuum reaches or crosses zero inside the line: equivalent width undefined",
+    "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid",
+    "line velocity from the optical convention with rest wavelength 1.02 um, axis frame BARYCENT, no frame shift applied"
+  ],
+  "peak": 108.1937249659108,
+  "peak_channel": 20,
+  "sigma": 0.0029853770067204445,
+  "snr": 410.5675801933205,
+  "source": {
+    "background": {
+      "r_inner": 8.0,
+      "r_outer": 11.0,
+      "shape": "annulus",
+      "x": 16.0,
+      "y": 16.0
+    },
+    "kind": "region",
+    "shape": {
+      "r": 6.0,
+      "shape": "circle",
+      "x": 16.0,
+      "y": 16.0
+    }
+  },
+  "velocity": {
+    "axis_frame": "BARYCENT",
+    "centroid_kms": 10.586372288558472,
+    "convention": "optical",
+    "fwhm_kms": 2066.2241761208907,
+    "rest_um": 1.02,
+    "shift_applied_kms": 0.0,
+    "sigma_kms": 877.4446185308121
+  },
+  "z0": 8,
+  "z1": 32
+}

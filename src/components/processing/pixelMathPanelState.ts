@@ -1,6 +1,6 @@
 import type { PixelMathSlot } from "../../shared/types/pixelmath";
 import type { ChainStep, ProcessingChain } from "../../shared/types/preview";
-import { CHAIN_ORDER, normalizeOutputPath } from "../../utils/processingChain";
+import { CHAIN_ORDER, normalizeOutputPath, putCapped } from "../../utils/processingChain";
 import { fileBaseName } from "../../utils/spectrumExport";
 import { TARGET_SYMBOL } from "../../utils/pixelmathSlots";
 
@@ -60,7 +60,6 @@ export interface RetainedPanelState {
   slots: PixelMathSlot[];
   truncate: boolean;
   rescale: boolean;
-  outputName: string;
   slotsTouched: boolean;
 }
 
@@ -79,6 +78,16 @@ export function retain(key: string | null, state: RetainedPanelState): void {
     if (oldest === undefined) break;
     retained.delete(oldest);
   }
+}
+
+const outputCopies = new Map<string, string>();
+
+export function rememberOutputCopy(stepPath: string, copyPath: string): void {
+  putCapped(outputCopies, normalizeOutputPath(stepPath), copyPath, MAX_RETAINED_PANELS);
+}
+
+export function outputCopyOf(stepPath: string | null): string | null {
+  return stepPath ? outputCopies.get(normalizeOutputPath(stepPath)) ?? null : null;
 }
 
 export function markSlotsTouched(key: string): void {

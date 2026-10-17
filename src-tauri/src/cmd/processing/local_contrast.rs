@@ -5,11 +5,12 @@ use serde_json::json;
 
 use crate::cmd::common::{
     blocking_cmd, derived_output_header, load_cached, load_cached_full, output_stem, render_and_save_as,
-    resolve_output_dir, write_derived_fits, OutputValues, RenderOutput, HEADER_DISPLAY_REFERRED, MAX_PREVIEW_DIM,
+    resolve_output_dir, write_derived_fits, OutputValues, RenderOutput, MAX_PREVIEW_DIM,
 };
 use crate::cmd::compose::composite_chain::{contrast_planes, run_chain_step, toned_state, ChainCall, ChainStep, DisplayStf, StepOutput};
 use crate::cmd::helpers;
-use crate::core::imaging::local_contrast::{lhe_rgb, lhe_with_progress, LheConfig};
+use crate::core::imaging::local_contrast::{lhe_rgb, LheConfig};
+use crate::core::ops::{run_op, OpInput, OpSpec, OpVersion};
 use crate::infra::cache::ImageEntry;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH};
@@ -21,15 +22,7 @@ pub const ABPROC_LHE: &str = "lhe";
 pub const COMPOSITE_STRETCH_REQUIRED: &str =
     "No stretched composite is loaded: run a stretch on the composite first";
 
-pub(crate) fn is_display_referred(source: Option<&HduHeader>) -> bool {
-    source
-        .and_then(|h| h.get(HEADER_DISPLAY_REFERRED))
-        .is_some_and(|v| v.trim().trim_matches('\'').trim() == "T")
-}
-
-pub(crate) fn output_values_for(source: Option<&HduHeader>, fallback: OutputValues) -> OutputValues {
-    if is_display_referred(source) { OutputValues::DisplayReferred } else { fallback }
-}
+pub(crate) use crate::core::ops::domain::{is_display_referred, output_values_for};
 
 pub(crate) fn processed_header(source: Option<&HduHeader>, abproc: &str) -> HduHeader {
     derived_output_header(source, abproc, output_values_for(source, OutputValues::Rescaled))
@@ -240,11 +233,12 @@ pub async fn lhe_cmd(
         let header = source_header(&path, &entry);
 
         let t0 = std::time::Instant::now();
-        let result = lhe_with_progress(entry.arr(), &config, Some(&progress_clone))?;
+        let input = OpInput::mono(entry.arr(), header.as_ref());
+        let result = run_op(&OpSpec::Lhe { v: OpVersion, config }, &input, Some(&progress_clone))?;
         let elapsed_ms = t0.elapsed().as_millis() as u64;
 
         let (ro, fits_path) =
-            save_contrast_output(&result.image, &path, &output_dir, SUFFIX_LHE, ABPROC_LHE, header.as_ref())?;
+            save_contrast_output(&result.planes[0], &path, &output_dir, SUFFIX_LHE, ABPROC_LHE, header.as_ref())?;
         let (rows, cols) = ro.dims;
 
         Ok(json!({
@@ -290,7 +284,7 @@ pub async fn lhe_composite_cmd(
 mod tests {
     use super::*;
 
-    use crate::cmd::common::HEADER_ABPROC;
+    use crate::cmd::common::{HEADER_ABPROC, HEADER_DISPLAY_REFERRED};
     use crate::cmd::processing::{hdrmt_composite_cmd, ABPROC_HDRMT, SUFFIX_HDR};
     use crate::core::imaging::hdr::{hdrmt_rgb, HdrConfig};
 

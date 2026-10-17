@@ -8,7 +8,8 @@ use crate::types::image::{AutoStfConfig, ImageStats};
 const MINMAX_CHUNK: usize = 1 << 16;
 const CORRECTION_PASSES: usize = 3;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MaskedStretchConfig {
     pub iterations: usize,
     pub target_background: f64,

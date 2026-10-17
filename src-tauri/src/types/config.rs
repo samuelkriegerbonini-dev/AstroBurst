@@ -9,6 +9,10 @@ pub struct AppConfig {
     pub output_max_size_mb: Option<u64>,
     #[serde(default)]
     pub mast_token_transport: Option<String>,
+    #[serde(default)]
+    pub data_dir_override: Option<String>,
+    #[serde(default)]
+    pub mast_quota_gb: Option<f64>,
 }
 
 impl Default for AppConfig {
@@ -19,6 +23,8 @@ impl Default for AppConfig {
             plate_solve_timeout_secs: 120,
             output_max_size_mb: None,
             mast_token_transport: None,
+            data_dir_override: None,
+            mast_quota_gb: None,
         }
     }
 }

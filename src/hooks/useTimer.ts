@@ -1,49 +1,60 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { formatTime } from "../utils/format";
+
+export const TIMER_TICK_MS = 100;
+
+export interface Stopwatch {
+  start: () => void;
+  stop: () => void;
+  reset: () => void;
+  dispose: () => void;
+}
+
+export function createStopwatch(onChange: (elapsedMs: number) => void, now: () => number = Date.now): Stopwatch {
+  let interval: ReturnType<typeof setInterval> | null = null;
+  let startedAt: number | null = null;
+  let carried = 0;
+
+  const halt = (): boolean => {
+    if (!interval) return false;
+    clearInterval(interval);
+    interval = null;
+    if (startedAt !== null) carried = now() - startedAt;
+    startedAt = null;
+    return true;
+  };
+
+  return {
+    start() {
+      if (interval) return;
+      startedAt = now() - carried;
+      interval = setInterval(() => onChange(now() - (startedAt ?? now())), TIMER_TICK_MS);
+    },
+    stop() {
+      if (halt()) onChange(carried);
+    },
+    reset() {
+      halt();
+      carried = 0;
+      onChange(0);
+    },
+    dispose() {
+      halt();
+    },
+  };
+}
 
 export function useTimer() {
   const [elapsed, setElapsed] = useState(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startTimeRef = useRef<number | null>(null);
-  const elapsedRef = useRef(0);
+  const [watch] = useState(() => createStopwatch(setElapsed));
 
-  elapsedRef.current = elapsed;
-
-  const start = useCallback(() => {
-    if (intervalRef.current) return;
-    startTimeRef.current = Date.now() - elapsedRef.current;
-    intervalRef.current = setInterval(() => {
-      setElapsed(Date.now() - (startTimeRef.current || 0));
-    }, 100);
-  }, []);
-
-  const stop = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-  }, []);
-
-  const reset = useCallback(() => {
-    stop();
-    setElapsed(0);
-    elapsedRef.current = 0;
-    startTimeRef.current = null;
-  }, [stop]);
-
-  useEffect(() => {
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-    };
-  }, []);
+  useEffect(() => () => watch.dispose(), [watch]);
 
   return {
     elapsed,
     formatted: formatTime(elapsed),
-    start,
-    stop,
-    reset,
+    start: watch.start,
+    stop: watch.stop,
+    reset: watch.reset,
   };
 }
