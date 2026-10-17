@@ -613,6 +613,7 @@ pub(crate) mod v2_fixtures {
             ("BITPIX", "8".into()),
             ("NAXIS", "0".into()),
             ("EXTEND", "T".into()),
+            ("TELESCOP", "'JWST'".into()),
         ];
         primary.extend(wcs_cards());
 
@@ -936,7 +937,7 @@ async fn v2_pixel_reports_dq_and_err_companions() {
     let json = body_json(resp).await;
     assert_eq!(json["dq"]["text"], "3: DO_NOT_USE | SATURATED");
     assert_eq!(json["dq"]["bits"], 3);
-    assert_eq!(json["dq"]["table"], "unknown");
+    assert_eq!(json["dq"]["table"], "jwst");
     assert_eq!(json["dq"]["names"], serde_json::json!(["DO_NOT_USE", "SATURATED"]));
     assert!((json["err"]["value"].as_f64().unwrap() - 0.5).abs() < 1e-6);
     assert_eq!(json["err"]["unit"], "MJy/sr");
