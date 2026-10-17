@@ -48,6 +48,7 @@ import type { SkySeparationResult } from "../../shared/types/astrometry";
 import type { CrossMatchResult } from "../../shared/types/catalog";
 import type { ChannelStatisticsBody } from "../../shared/types/statistics";
 import type { LineMeasurement, SpectralAxisInfo } from "../../shared/types/spectral";
+import type { Spectrum1d } from "../../shared/types/spectrum1d";
 import type {
   LineCut,
   RadialProfile,
@@ -59,6 +60,7 @@ import type {
   SbProfile,
 } from "../../shared/types/regions";
 import type { PvDiagramResult, PvRun } from "../../shared/types/pv";
+import type { RegionSpectrum } from "../../shared/types/cube";
 import type { LineFitRun } from "../lineFit";
 import type { SpectrumExportInput } from "../spectrumExport";
 import type { ComparisonCsvInput, ComparisonEntry } from "../spectrumCompare";
@@ -233,6 +235,12 @@ function lineMeasurement(extra: Partial<LineMeasurement> = {}): LineMeasurement 
     snr: 25,
     velocity: { centroid_kms: 12.5, sigma_kms: 150, fwhm_kms: 353.2, rest_um: 0.6565, convention: "optical", shift_applied_kms: -7.25, axis_frame: "barycentric" },
     fit: { amplitude: 3.1, centre: 1.0011, sigma: 0.00049, amplitude_err: 0.1, centre_err: 0.00001, sigma_err: 0.00002, chi2: 12.3, dof: 15, iterations: 6, converged: true },
+    err_used: false,
+    flux_err_terms: null,
+    n_dq_excluded: 0,
+    n_nonfinite: 0,
+    n_bad_err: 0,
+    err_source: "none",
     notes: ["line note"],
     elapsed_ms: 2,
     source: { kind: "pixel", x: 3, y: 4 },
@@ -874,6 +882,46 @@ describe("builders", () => {
     expect(bare.source).toBe(JSON.stringify({ kind: "region", shape: CIRCLE, background: null }));
   });
 
+  it("lineEntry names a spectrum file as the measured image and records the ERR, the DQ request and the exclusions", () => {
+    const weighted = lineMeasurement({
+      source: { kind: "file", hdu: 1 },
+      flux_unit: "Jy x um",
+      err_used: true,
+      err_source: "FLUX_ERROR column (HDU 1)",
+      flux_err_terms: { pixel: 0.08, level: 0.05, slope: 0.01 },
+      n_dq_excluded: 3,
+      n_nonfinite: 2,
+      n_bad_err: 58,
+    });
+    const entry = lineEntry("C:\\d\\jw_x1d.fits", weighted, "gaussian", true);
+    expect(entry.image).toBe("spectrum file");
+    expect(entry.dq).toBe("excluded");
+    expect(entry.source).toBe('{"kind":"file","hdu":1}');
+    expect(entry.params.err_used).toBe(true);
+    expect(entry.params.err_source).toBe("FLUX_ERROR column (HDU 1)");
+    expect(entry.values.flux_err_pixel).toBe(0.08);
+    expect(entry.values.flux_err_level).toBe(0.05);
+    expect(entry.values.flux_err_slope).toBe(0.01);
+    expect(entry.values.n_dq_excluded).toBe(3);
+    expect(entry.values.n_nonfinite).toBe(2);
+    expect(entry.values.n_bad_err).toBe(58);
+    expect(entry.notes[entry.notes.length - 1]).toContain("flux_err_pixel, flux_err_level, flux_err_slope in Jy x um");
+
+    expect(lineEntry("C:\\d\\jw_x1d.fits", { ...weighted, n_dq_excluded: 0 }, "gaussian", true).dq).toBe("requested");
+    expect(lineEntry("C:\\d\\jw_x1d.fits", weighted, "gaussian", false).dq).toBe("off");
+    const unweighted = lineEntry("C:\\d\\ha.fits", lineMeasurement({ source: { kind: "file", hdu: 0 } }), "none", true);
+    expect(unweighted.params.err_used).toBe(false);
+    expect(unweighted.params.err_source).toBe("none");
+    expect(unweighted.values.flux_err_pixel).toBeNull();
+  });
+
+  it("lineEntry records a cube measurement that asked for DQ, and keeps one without a request as not applied", () => {
+    const cube = lineMeasurement({ n_dq_excluded: 4 });
+    expect(lineEntry("C:\\d\\x.fits", cube, "none", true).dq).toBe("excluded");
+    expect(lineEntry("C:\\d\\x.fits", cube, "none", true).image).toBe("loaded cube");
+    expect(lineEntry("C:\\d\\x.fits", cube, "none").dq).toBe("not_applied");
+  });
+
   it("timeSeriesEntry computes the target rms from the differential light curve and names the time scale", () => {
     const res = analyticSeries();
     const entry = timeSeriesEntry(res, { apertureRadius: 5, annulusInner: 8, annulusOuter: 12, gain: 1.5, excludeDq: true, trackDrift: false });
@@ -1458,5 +1506,155 @@ describe("builders", () => {
     expect(entrySummary(entry)).toBe("a=1, b=x, c=--");
     expect(entrySummary(entry, 4)).toBe("a=1, b=x, c=--, d=2.5");
     expect(entrySummary({ ...entry, values: {} })).toBe("");
+  });
+});
+
+function fileSpectrumOf(dq: number[] | null, path = "C:/data/jw_test_x1d.fits"): Spectrum1d {
+  const axis = waveAxis([2.0, 2.001, 2.002]);
+  return {
+    source: { kind: "x1d", path, hdu: 1, extver: 1 },
+    axis,
+    wavelength_frame: "vacuum",
+    precision: "f64",
+    flux: [1, 3, 2],
+    err: [0.1, 0.1, 0.1],
+    dq,
+    dq_table: "jwst",
+    flux_unit: "Jy",
+    n_rows: 3,
+    cards: {},
+    notes: [],
+  };
+}
+
+function fileExportInput(fileSpectrum: Spectrum1d, hdu: number | null = 1): SpectrumExportInput {
+  return {
+    ...exportInput(),
+    fileName: "jw_test_x1d.fits",
+    axis: fileSpectrum.axis,
+    source: { kind: "file", hdu },
+    bunit: fileSpectrum.flux_unit,
+    values: fileSpectrum.flux,
+    sky: null,
+    fileSpectrum,
+  };
+}
+
+const WINDOWS_DOC_PATH = "C:\\data\\jw_test_x1d.fits";
+
+describe("spectrumExportEntry for a spectrum file", () => {
+  it("logs the export as a spectrum file with the document path, its HDU and the DQ it reports", () => {
+    const entry = spectrumExportEntry(WINDOWS_DOC_PATH, fileExportInput(fileSpectrumOf([0, 1, 0])), "C:/out/jw_test_x1d_spectrum.csv");
+    expect(entry).toMatchObject({
+      kind: "spectrum_export",
+      file: "jw_test_x1d.fits",
+      image: "spectrum file",
+      dq: "reported",
+      unit: "Jy",
+      source: '{"kind":"file","hdu":1}',
+    });
+    expect(entry.params).toMatchObject({
+      document_path: WINDOWS_DOC_PATH,
+      saved_path: "C:/out/jw_test_x1d_spectrum.csv",
+      source: "spectrum file, HDU 1",
+      err_column: true,
+      dq_column: true,
+      dq_table: "jwst",
+    });
+    expect(entry.values.flux_max).toBe(3);
+  });
+
+  it("keeps an opened CSV path as the document path and marks a file without DQ as not applied", () => {
+    const csvPath = "C:/out/jw_test_x1d_spectrum.csv";
+    const entry = spectrumExportEntry(csvPath, fileExportInput(fileSpectrumOf(null, csvPath), null), null);
+    expect(entry.file).toBe("jw_test_x1d_spectrum.csv");
+    expect(entry.dq).toBe("not_applied");
+    expect(entry.source).toBe('{"kind":"file","hdu":null}');
+    expect(entry.params.document_path).toBe(csvPath);
+    expect(entry.params.dq_column).toBe(false);
+  });
+
+  it("logs a comparison made on a spectrum file as a spectrum file, not a loaded cube", () => {
+    const documentEntry: ComparisonEntry = { ...comparisonEntry("document", "doc.fits"), kind: "document", source: { kind: "file", hdu: 1 }, document: { flux: [1, 2], fluxUnit: "Jy" } };
+    const compared = spectrumCompareEntry(WINDOWS_DOC_PATH, { ...comparisonInput(), entries: [documentEntry, comparisonEntry("x1d", "other.fits")] }, null);
+    expect(compared.image).toBe("spectrum file");
+    expect(spectrumCompareEntry(WINDOWS_DOC_PATH, comparisonInput(), null).image).toBe("loaded cube");
+  });
+
+  it("adds no document path to a cube export", () => {
+    expect(spectrumExportEntry("C:\\d\\x.fits#hdu=1", exportInput(), null).params).not.toHaveProperty("document_path");
+  });
+});
+
+const NOISE_WARNING =
+  "the empirical noise is 2.00 +- 0.10 x the propagated error over 40 line-free channels, outside [0.8, 1.25] by more than 2 standard errors: the ERR plane does not describe the scatter of this spectrum";
+
+function erroredRegionSpectrum(extra: Partial<RegionSpectrum> = {}): RegionSpectrum {
+  return {
+    sum: [1, 2],
+    mean: [0.1, 0.2],
+    npix: 10,
+    n_bg: 0,
+    bg_per_pixel: null,
+    wavelengths: null,
+    unit: "um",
+    bg_subtracted: false,
+    flux_jy: null,
+    err: [0.3, 0.4],
+    err_scaled: [0.6, 0.8],
+    mean_err: [0.03, 0.04],
+    used_weight: [10, 10],
+    err_source: "ERR HDU 2",
+    bg_err_per_pixel: null,
+    flux_jy_err: null,
+    n_dq_excluded: [0, 0],
+    noise_factor: {
+      factor: 2,
+      factor_se: 0.1,
+      n_channels: 40,
+      windows: [
+        [0, 19],
+        [60, 79],
+      ],
+      warning: null,
+    },
+    notes: [],
+    elapsed_ms: 1,
+    ...extra,
+  };
+}
+
+function regionExportInput(region: RegionSpectrum): SpectrumExportInput {
+  return { ...exportInput(), source: { kind: "region", shape: CIRCLE, background: null }, region, values: region.sum };
+}
+
+describe("spectrumExportEntry for a region spectrum with propagated errors", () => {
+  it("logs the error source and the noise factor as a number", () => {
+    const entry = spectrumExportEntry("C:\\d\\cube_s3d.fits", regionExportInput(erroredRegionSpectrum()), null);
+    expect(entry.params.err_source).toBe("ERR HDU 2");
+    expect(entry.params.noise_factor).toBe(2);
+    expect(entry.notes).toEqual([]);
+  });
+
+  it("logs no factor and the none source for a cube without ERR", () => {
+    const entry = spectrumExportEntry(
+      "C:\\d\\cube_s3d.fits",
+      regionExportInput(erroredRegionSpectrum({ err: null, err_scaled: null, mean_err: null, err_source: "none", noise_factor: null, n_dq_excluded: null })),
+      null,
+    );
+    expect(entry.params.err_source).toBe("none");
+    expect(entry.params.noise_factor).toBeNull();
+    expect(entry.dq).toBe("not_applied");
+  });
+
+  it("keeps the backend's noise-factor warning verbatim in the notes", () => {
+    const region = erroredRegionSpectrum();
+    region.noise_factor = { ...region.noise_factor!, warning: NOISE_WARNING };
+    expect(spectrumExportEntry("C:\\d\\cube_s3d.fits", regionExportInput(region), null).notes).toEqual([NOISE_WARNING]);
+  });
+
+  it("derives the DQ field from the DQ cube the region spectrum used instead of not applied", () => {
+    expect(spectrumExportEntry("C:\\d\\cube_s3d.fits", regionExportInput(erroredRegionSpectrum({ n_dq_excluded: [0, 3] })), null).dq).toBe("excluded");
+    expect(spectrumExportEntry("C:\\d\\cube_s3d.fits", regionExportInput(erroredRegionSpectrum({ n_dq_excluded: [0, 0] })), null).dq).toBe("requested");
   });
 });

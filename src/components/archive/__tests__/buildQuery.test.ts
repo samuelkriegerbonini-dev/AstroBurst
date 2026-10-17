@@ -62,6 +62,7 @@ describe("planSearch", () => {
         program: null,
         datasetId: null,
         filters: { level: "combined" },
+        preset: null,
         sort: [],
         offset: 0,
         limit: 200,
@@ -171,6 +172,7 @@ describe("switchMission", () => {
       kindOverride: "name",
       radiusText: "5",
       filters: { dateFrom: "2022-01-01", dateTo: "2023-01-01" },
+      preset: null,
     });
   });
 

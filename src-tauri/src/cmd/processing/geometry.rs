@@ -11,6 +11,7 @@ use crate::cmd::common::{
 use crate::cmd::helpers;
 use crate::cmd::processing::local_contrast::{is_display_referred, output_values_for, source_header};
 use crate::cmd::processing::tone::{has_only_cube_planes, is_cube_header};
+use crate::core::imaging::cfa::{remove_cfa_cards, CfaPattern};
 use crate::core::imaging::dq_flags::TELESCOPE_KEYS;
 use crate::core::imaging::geometry::{
     apply_geometry, apply_geometry_generic, geometry_header, has_linear_wcs, GeometryOp,
@@ -33,6 +34,7 @@ use crate::types::image_ref::PlaneSelector;
 pub(crate) const GEOMETRY_CUBE_ERROR: &str = "Geometry works on a 2-D image; select a plane of the cube first.";
 const ERR_EXTENSION_CARDS: &[&str] = &["BUNIT"];
 const ASDF_SCIENCE_KEY: &str = "data";
+const STALE_XTRANS_CARDS_HISTORY: &str = "geometry: X-Trans CFA cards removed (the planes are already debayered)";
 
 #[derive(Default)]
 struct CarriedPlanes {
@@ -200,6 +202,15 @@ fn run_geometry_mono(path: &str, output_dir: &str, op: GeometryOp, t0: Instant) 
     Ok(response(ro.png_path, fits_path, entry.arr().dim(), transformed.dim(), op, false, wcs_updated, t0))
 }
 
+fn without_stale_xtrans_cards(header: &HduHeader) -> HduHeader {
+    let mut planes = header.clone();
+    if CfaPattern::declared(header).is_some_and(|p| p.is_xtrans()) {
+        remove_cfa_cards(&mut planes);
+        push_history(&mut planes, STALE_XTRANS_CARDS_HISTORY);
+    }
+    planes
+}
+
 fn run_geometry_rgb(
     rgb: &ResolvedRgbImage,
     path: &str,
@@ -207,7 +218,8 @@ fn run_geometry_rgb(
     op: GeometryOp,
     t0: Instant,
 ) -> anyhow::Result<serde_json::Value> {
-    let source = Some(&rgb.header);
+    let planes_header = without_stale_xtrans_cards(&rgb.header);
+    let source = Some(&planes_header);
     let [r, g, b] = [&rgb.r, &rgb.g, &rgb.b].map(|p| apply_geometry(p, op));
     let values = output_values_for(source, OutputValues::Linear);
     let (header, wcs_updated) = output_header(source, op, rgb.r.dim(), values, &[])?;
@@ -439,6 +451,36 @@ mod tests {
         assert_eq!(written.b, apply_geometry(&b, GeometryOp::FlipH));
         assert!((written.header.get_f64("CD1_1").unwrap() - 1e-4).abs() < 1e-18, "{:?}", written.header.get("CD1_1"));
         assert!(std::path::Path::new(value[RES_PNG_PATH].as_str().unwrap()).exists());
+    }
+
+    #[tokio::test]
+    async fn an_rgb_fits_with_a_stale_xtrans_card_is_transformed_and_the_cards_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = dir.path().join("debayered.fits").to_str().unwrap().to_string();
+        let (r, g, b) = (ramp(6, 9, 1.0), ramp(6, 9, 100.0), ramp(6, 9, 1000.0));
+        let mut header = wcs_header();
+        header.set("BAYERPAT", format!("'{}'", crate::core::imaging::cfa::test_fixtures::XTRANS_LAYOUT));
+        header.set("XBAYROFF", "1".to_string());
+        write_fits_rgb(&src, &r, &g, &b, Some(&header)).unwrap();
+
+        let value = transform_geometry_cmd(src, out, "rot90".to_string()).await.unwrap();
+        assert_eq!(value[RES_IS_RGB], true);
+        let written = try_extract_rgb_resolved(value[RES_FITS_PATH].as_str().unwrap()).unwrap().expect("RGB");
+        assert_eq!(written.r, apply_geometry(&r, GeometryOp::Rot90Cw));
+        for key in ["BAYERPAT", "COLORTYP", "XBAYROFF", "YBAYROFF"] {
+            assert!(written.header.get(key).is_none(), "{key} kept");
+        }
+        assert!(
+            history(&written.header).iter().any(|h| h.contains("X-Trans CFA cards removed")),
+            "{:?}",
+            history(&written.header)
+        );
+
+        let mosaic = dir.path().join("mosaic.fits").to_str().unwrap().to_string();
+        write_fits_mono(&mosaic, &ramp(6, 9, 0.0), Some(&header)).unwrap();
+        let refused = transform_geometry_cmd(mosaic, dir.path().to_str().unwrap().to_string(), "rot90".to_string()).await;
+        assert!(refused.is_err_and(|e| e.contains("X-Trans")));
     }
 
     #[tokio::test]

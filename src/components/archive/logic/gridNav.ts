@@ -20,8 +20,32 @@ export interface TableGrid {
   pageRows: number;
 }
 
+export interface GalleryWindow {
+  columns: number;
+  firstVisible: number;
+  lastVisible: number;
+  pageRows: number;
+}
+
+export interface GalleryDemand {
+  selected: string[];
+  visible: string[];
+  ahead: string[];
+  firstRow: number;
+}
+
 export function galleryColumns(width: number, cardWidth: number, gap: number): number {
   return Math.max(1, Math.floor((width + gap) / (cardWidth + gap)));
+}
+
+export function galleryDemand(rows: readonly { datasetId: string }[], win: GalleryWindow, selectedId: string | null): GalleryDemand {
+  const ids = (fromRow: number, toRow: number) => rows.slice(fromRow * win.columns, toRow * win.columns).map((r) => r.datasetId);
+  return {
+    selected: selectedId && rows.some((r) => r.datasetId === selectedId) ? [selectedId] : [],
+    visible: ids(win.firstVisible, win.lastVisible),
+    ahead: ids(win.lastVisible, win.lastVisible + win.pageRows),
+    firstRow: win.columns,
+  };
 }
 
 function clamp(value: number, max: number): number {

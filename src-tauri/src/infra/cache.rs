@@ -6,6 +6,8 @@ use anyhow::Result;
 use ndarray::Array2;
 
 use crate::infra::image_source::{Companions, PlaneInfo};
+#[cfg(test)]
+use crate::types::constants::WIZARD_CACHE_PREFIX;
 use crate::types::ImageStats;
 use crate::types::header::HduHeader;
 use crate::types::image::IntPlane;
@@ -375,6 +377,8 @@ impl ImageCache {
         stats: ImageStats,
         header: Option<HduHeader>,
     ) {
+        #[cfg(test)]
+        assert_wizard_entries_locked(self, key.starts_with(WIZARD_CACHE_PREFIX));
         let header = header.map(|mut header| {
             let (rows, cols) = arr.dim();
             header.set("NAXIS1", cols.to_string());
@@ -394,6 +398,8 @@ impl ImageCache {
     }
 
     pub fn invalidate(&self, path: &str) {
+        #[cfg(test)]
+        assert_wizard_entries_locked(self, path.starts_with(WIZARD_CACHE_PREFIX));
         let mut cache = self.inner.write().unwrap();
         cache.remove(path);
     }
@@ -403,6 +409,8 @@ impl ImageCache {
     }
 
     pub fn remove_prefix(&self, prefix: &str) {
+        #[cfg(test)]
+        assert_wizard_entries_locked(self, overlaps_wizard_keys(prefix));
         let mut cache = self.inner.write().unwrap();
         cache.remove_where(|k| k.starts_with(prefix));
     }
@@ -413,6 +421,8 @@ impl ImageCache {
     }
 
     pub fn remove_prefix_except(&self, prefix: &str, keep_prefix: &str) {
+        #[cfg(test)]
+        assert_wizard_entries_locked(self, overlaps_wizard_keys(prefix));
         let mut cache = self.inner.write().unwrap();
         cache.remove_where(|k| k.starts_with(prefix) && !k.starts_with(keep_prefix));
     }
@@ -440,9 +450,26 @@ pub static GLOBAL_IMAGE_CACHE: LazyLock<ImageCache> = LazyLock::new(|| {
 });
 
 #[cfg(test)]
+static WIZARD_ENTRIES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 pub(crate) fn lock_wizard_entries() -> std::sync::MutexGuard<'static, ()> {
-    static WIZARD_ENTRIES: std::sync::Mutex<()> = std::sync::Mutex::new(());
     WIZARD_ENTRIES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+fn overlaps_wizard_keys(prefix: &str) -> bool {
+    prefix.starts_with(WIZARD_CACHE_PREFIX) || WIZARD_CACHE_PREFIX.starts_with(prefix)
+}
+
+#[cfg(test)]
+fn assert_wizard_entries_locked(cache: &ImageCache, touches_wizard_keys: bool) {
+    if touches_wizard_keys && std::ptr::eq(cache, &*GLOBAL_IMAGE_CACHE) {
+        assert!(
+            matches!(WIZARD_ENTRIES.try_lock(), Err(std::sync::TryLockError::WouldBlock)),
+            "a test wrote or removed {WIZARD_CACHE_PREFIX}* keys of GLOBAL_IMAGE_CACHE without holding lock_wizard_entries()"
+        );
+    }
 }
 
 #[cfg(test)]

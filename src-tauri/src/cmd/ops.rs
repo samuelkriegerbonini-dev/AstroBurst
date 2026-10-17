@@ -1106,6 +1106,7 @@ mod tests {
         use crate::core::imaging::background::BackgroundConfig;
         use crate::types::constants::{wizard_bg_key, RES_CACHE_KEY, RES_CORRECTED_FITS};
 
+        let _wizard = crate::infra::cache::lock_wizard_entries();
         let fx = Fixture::new();
         let input = sky(8, 1.0);
         let key = fx.mono("m42.fits", &input);
@@ -1121,6 +1122,7 @@ mod tests {
 
         let config = BackgroundConfig { grid_size: 4, poly_degree: 2, ..BackgroundConfig::default() };
         let wizard = run_extract_background(&key, &out, &config, "subtract", 3, Some("bin-ha"), None).unwrap();
+        crate::infra::cache::GLOBAL_IMAGE_CACHE.remove(&wizard_bg_key("bin-ha"));
         assert_eq!(wizard[RES_CACHE_KEY], wizard_bg_key("bin-ha"));
         assert_eq!(wizard[RES_CORRECTED_FITS], wizard_bg_key("bin-ha"));
         assert!(!Path::new(&out).join("m42_bg_corrected.fits").exists(), "the wizard shape wrote a FITS");

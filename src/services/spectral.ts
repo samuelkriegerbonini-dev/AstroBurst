@@ -2,14 +2,15 @@ import { typedInvoke } from "../infrastructure/tauri";
 import type { ContinuumWindows } from "../shared/types/cube";
 import type {
   LineMeasurement,
+  LineMeasurementSource,
   LineModel,
   RadialVelocityCorrectionError,
   RadialVelocityCorrectionResponse,
   SpectralAxisInfo,
-  SpectrumSource,
   VelocityConvention,
   X1dSpectrum,
 } from "../shared/types/spectral";
+import type { WavelengthFrameChoice } from "../shared/types/spectrum1d";
 
 export function getSpectralAxis(path: string): Promise<SpectralAxisInfo> {
   return typedInvoke<SpectralAxisInfo>("spectral_axis_cmd", { path });
@@ -45,11 +46,14 @@ export interface MeasureLineOptions {
   convention?: VelocityConvention;
   model?: LineModel;
   velocityShiftKms?: number | null;
+  useErr?: boolean | null;
+  useDq?: boolean | null;
+  wavelengthFrame?: WavelengthFrameChoice | null;
 }
 
 export function measureSpectralLine(
   path: string,
-  source: SpectrumSource,
+  source: LineMeasurementSource,
   opts: MeasureLineOptions,
 ): Promise<LineMeasurement> {
   return typedInvoke<LineMeasurement>("measure_spectral_line_cmd", {
@@ -62,5 +66,8 @@ export function measureSpectralLine(
     convention: opts.convention ?? "optical",
     model: opts.model ?? "none",
     velocityShiftKms: opts.velocityShiftKms ?? null,
+    useErr: opts.useErr ?? null,
+    useDq: opts.useDq ?? null,
+    wavelengthFrame: opts.wavelengthFrame ?? null,
   });
 }

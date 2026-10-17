@@ -185,6 +185,8 @@ pub fn run() {
             cmd::processing::resample_fits_cmd,
             cmd::processing::debayer_fits_cmd,
             cmd::processing::debayer_batch_cmd,
+            cmd::processing::extract_cfa_cmd,
+            cmd::processing::extract_cfa_batch_cmd,
             cmd::processing::deconvolve_rl_cmd,
             cmd::processing::extract_background_cmd,
             cmd::processing::extract_background_batch_cmd,
@@ -233,10 +235,16 @@ pub fn run() {
             cmd::spectral::read_x1d_spectrum_cmd,
             cmd::spectrum1d::read_spectrum1d_cmd,
             cmd::spectrum1d::probe_spectrum1d_cmd,
+            cmd::spectrum1d::read_spectrum_csv_cmd,
             cmd::cutout::export_cutout_cmd,
             cmd::catalog::catalog_cone_search_cmd,
             cmd::catalog::catalog_crossmatch_cmd,
             cmd::catalog::catalog_export_csv_cmd,
+            cmd::catalog_store::catalog_status_cmd,
+            cmd::catalog_store::catalog_install_cmd,
+            cmd::catalog_store::catalog_use_file_cmd,
+            cmd::catalog_store::catalog_use_siril_dir_cmd,
+            cmd::catalog_store::catalog_remove_cmd,
             cmd::astrometry::plate_solve_cmd,
             cmd::astrometry::write_solved_wcs_cmd,
             cmd::astrometry::get_wcs_info,
@@ -299,6 +307,20 @@ pub fn run() {
             cmd::mast::mast_cache_info_cmd,
             #[cfg(feature = "mast")]
             cmd::mast::mast_cache_clear_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_download_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_download_cancel_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_downloads_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_presets_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_footprints_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_footprints_reg_cmd,
+            #[cfg(feature = "mast")]
+            cmd::mast::mast_peek_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AstroBurst");

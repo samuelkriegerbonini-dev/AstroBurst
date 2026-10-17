@@ -7,6 +7,8 @@ pub mod error;
 pub mod hub;
 pub mod lookup;
 pub mod models;
+pub mod peek;
+pub mod queue;
 pub mod ratelimit;
 pub mod registry;
 pub mod secret;
@@ -14,6 +16,7 @@ pub mod service;
 pub mod settings;
 #[cfg(test)]
 pub mod testing;
+pub mod transfer;
 
 pub use api::{Mission, MissionEndpoint};
 pub use client::{AuthTransport, MastClient, MastClientBuilder, RedirectAllowlist, RedirectRules, DEFAULT_BASE_URL};

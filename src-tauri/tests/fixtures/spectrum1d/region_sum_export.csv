@@ -1,0 +1,22 @@
+# file: jw_test_s3d.fits
+# image: jw_test_s3d.fits (loaded cube; extracted from the cube on disk, not from the processed step)
+# source: circle region; circle (20.0, 20.0) r=3.0; region: r1; text: -; background: none
+# sky_frame: ICRS
+# sky_ra_deg: 10.5
+# sky_dec_deg: -20.25
+# stored_frame: not stated
+# velocity_frame: as stored; shift_kms: 0; method: -; the shift is applied to velocity columns only; wavelength_vacuum_um is as stored
+# view: sum
+# flux_unit: MJy/sr x pix
+# flux_jy_basis: aperture sum x PIXAR_SR x 1e6 (total over the region, also in the mean view)
+# err_source: ERR HDU 2
+# err_basis: err is the propagated error of the flux column, the aperture sum; err_scaled = err x the noise factor
+# noise_factor: 1.31 +- 0.05 (12 line-free channels, continuum 0-1 and 4-5)
+# exported_utc: 2026-10-17T12:00:00.000Z
+channel,wavelength_vacuum_um,vacuum_wavelength_um,flux,flux_unit,flux_jy,npix,bg_subtracted,n_bg,err,err_scaled
+0,2,2,3.5,MJy/sr x pix,0.00008225,12.5,false,0,0.02,0.0262
+1,2.001,2.001,3.75,MJy/sr x pix,0.000088125,12.5,false,0,0.021,0.027510000000000003
+2,2.002,2.002,,MJy/sr x pix,,12.5,false,0,0.022,0.02882
+3,2.003,2.003,4.25,MJy/sr x pix,0.00009987499999999999,12.5,false,0,0.023,0.03013
+4,2.004,2.004,4.5,MJy/sr x pix,0.00010575,12.5,false,0,,
+5,2.005,2.005,4.75,MJy/sr x pix,0.00011162499999999999,12.5,false,0,0.025,0.03275

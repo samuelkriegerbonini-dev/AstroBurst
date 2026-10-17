@@ -4,8 +4,25 @@ import {
   combineAttemptErrors,
   selectCubePlaneHdu,
   isCubePlaneResult,
+  ONE_D_ARRAY_HINT,
+  ONE_D_ARRAY_VERDICT,
+  spectrum1dHint,
+  spectrumProbeFailure,
 } from "../fitsErrors";
 import { TABLE_ONLY_HINT, tableOnlyFileHint } from "../x1dCompare";
+
+const ONE_D_REJECTION =
+  "Failed to load C:/data/ha_spectrum.fits: HDU 0 (SCI): 1D array, not an image; " +
+  "no HDU in this file holds a 2D image. " +
+  "HDUs: [0] EXTNAME=SCI XTENSION=PRIMARY NAXIS=1 [2048] -- 1D array, not an image; " +
+  "[1] EXTNAME=ERR XTENSION=IMAGE NAXIS=1 [2048] -- 1D array, not an image";
+
+const CUBE_WITH_ONE_D_REJECTION =
+  "Failed to load C:/data/odd_s3d.fits: HDU 1 (SCI): 3D cube of 40 planes, not a single 2D image; " +
+  "no HDU in this file holds a 2D image. " +
+  "HDUs: [0] EXTNAME=(none) XTENSION=PRIMARY NAXIS=0 -- header only, no pixel data; " +
+  "[1] EXTNAME=SCI XTENSION=IMAGE NAXIS=3 [50x60x40] -- 3D cube of 40 planes, not a single 2D image; " +
+  "[2] EXTNAME=WAVE XTENSION=IMAGE NAXIS=1 [40] -- 1D array, not an image";
 
 const CUBE_REJECTION =
   "Failed to load C:/data/jw01234_s3d.fits: HDU 1 (SCI): 3D cube of 1400 planes, not a single 2D image; " +
@@ -129,9 +146,9 @@ describe("isCubePlaneResult", () => {
 });
 
 describe("tableOnlyFileHint", () => {
-  it("turns the x1d rejection into the Spectroscopy hint", () => {
+  it("turns the x1d rejection into the spectrum table note", () => {
     expect(tableOnlyFileHint(X1D_REJECTION)).toBe(TABLE_ONLY_HINT);
-    expect(TABLE_ONLY_HINT).toBe("1D spectrum table (EXTRACT1D): open it from the Spectroscopy panel of its cube");
+    expect(TABLE_ONLY_HINT).toBe("1D spectrum, EXTRACT1D table");
   });
 
   it("leaves the cube rejection, other tables and missing errors alone", () => {
@@ -140,6 +157,56 @@ describe("tableOnlyFileHint", () => {
     expect(tableOnlyFileHint("EXTRACT1D mentioned without the table rejection")).toBeNull();
     expect(tableOnlyFileHint(null)).toBeNull();
     expect(tableOnlyFileHint(undefined)).toBeNull();
+  });
+});
+
+describe("spectrum1dHint", () => {
+  it("names the 1D array verdict the Rust reader writes for a 1D spectrum", () => {
+    expect(ONE_D_ARRAY_VERDICT).toBe("1D array, not an image");
+    expect(spectrum1dHint(ONE_D_REJECTION)).toBe(ONE_D_ARRAY_HINT);
+    expect(ONE_D_ARRAY_HINT).toBe("1D spectrum, 1D array");
+  });
+
+  it("names the EXTRACT1D table verdict with the table note", () => {
+    expect(spectrum1dHint(X1D_REJECTION)).toBe(TABLE_ONLY_HINT);
+  });
+
+  it("reads the verdict past a semicolon in the file path", () => {
+    expect(spectrum1dHint(X1D_REJECTION.replace("C:/data/jw01234_x1d.fits", "C:/data/run;2/jw01234_x1d.fits"))).toBe(TABLE_ONLY_HINT);
+    expect(spectrum1dHint(ONE_D_REJECTION.replace("C:/data/ha_spectrum.fits", "C:/data/run;2/ha_spectrum.fits"))).toBe(ONE_D_ARRAY_HINT);
+    expect(spectrum1dHint(CUBE_WITH_ONE_D_REJECTION.replace("C:/data/odd_s3d.fits", "C:/data/run;2/odd_s3d.fits"))).toBeNull();
+  });
+
+  it("reads only the verdict, so a cube whose inventory lists a 1D array or an EXTRACT1D table is no spectrum", () => {
+    expect(spectrum1dHint(CUBE_WITH_ONE_D_REJECTION)).toBeNull();
+    expect(spectrum1dHint(CUBE_REJECTION)).toBeNull();
+  });
+
+  it("leaves ASDF, plain and missing errors alone", () => {
+    expect(spectrum1dHint("HDU 1 (ASDF): BINTABLE extension, holds no image pixels")).toBeNull();
+    expect(spectrum1dHint("Failed to load C:/d/broken.fits: No such file or directory (os error 2)")).toBeNull();
+    expect(spectrum1dHint("")).toBeNull();
+    expect(spectrum1dHint(null)).toBeNull();
+    expect(spectrum1dHint(undefined)).toBeNull();
+  });
+});
+
+describe("spectrumProbeFailure", () => {
+  it("puts the probe error right after the image verdict, ahead of the HDU inventory the row clips", () => {
+    const combined = spectrumProbeFailure(ONE_D_REJECTION, "Failed to open C:/data/ha_spectrum.fits");
+    expect(combined).toBe(
+      "Failed to load C:/data/ha_spectrum.fits: HDU 0 (SCI): 1D array, not an image; " +
+        "opening it as a 1D spectrum also failed: Failed to open C:/data/ha_spectrum.fits; " +
+        "no HDU in this file holds a 2D image. " +
+        "HDUs: [0] EXTNAME=SCI XTENSION=PRIMARY NAXIS=1 [2048] -- 1D array, not an image; " +
+        "[1] EXTNAME=ERR XTENSION=IMAGE NAXIS=1 [2048] -- 1D array, not an image",
+    );
+  });
+
+  it("appends the probe error to a message without an HDU inventory", () => {
+    expect(spectrumProbeFailure("HDU 0 (SCI): 1D array, not an image", "locked")).toBe(
+      "HDU 0 (SCI): 1D array, not an image (opening it as a 1D spectrum also failed: locked)",
+    );
   });
 });
 

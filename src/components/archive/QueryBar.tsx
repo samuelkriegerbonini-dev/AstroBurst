@@ -3,6 +3,7 @@ import { ChevronDown, Search } from "lucide-react";
 import MissionTabs from "./MissionTabs";
 import MoreMenu from "./MoreMenu";
 import QuickFilters, { ViewToggle } from "./QuickFilters";
+import PresetPicker from "./PresetPicker";
 import { currentMission, resultsState, romanLockOf, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { interpretQuery, QUERY_KINDS, type QueryKind } from "./logic/interpretQuery";
@@ -253,6 +254,7 @@ export default function QueryBar({ state, ctl, queryRef, onLeaveQuery }: QueryBa
       {state0 !== "locked" && state0 !== "unavailable" ? (
         <div className="ab-mast-filter-row">
           <QuickFilters state={state} ctl={ctl} />
+          <PresetPicker state={state} ctl={ctl} />
           <ViewToggle state={state} ctl={ctl} />
         </div>
       ) : null}

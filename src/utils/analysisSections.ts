@@ -24,6 +24,7 @@ export interface AnalysisSectionsInput {
   hasHistogram: boolean;
   isCube: boolean;
   isRamp?: boolean;
+  isSpectrum?: boolean;
   showFft: boolean;
   showDeepZoom: boolean;
 }
@@ -69,7 +70,11 @@ export function toolSections(tool: AnalysisToolId, input: AnalysisSectionsInput)
     case "photometry":
       return [s.photometry, s.table, s.series];
     case "cube":
-      return [...(input.isRamp ? [s.ramp] : []), ...(input.isCube ? [s.spectrum] : []), ...(input.isCube && !input.isRamp ? [s.pv] : [])];
+      return [
+        ...(input.isRamp ? [s.ramp] : []),
+        ...(input.isCube || input.isSpectrum ? [s.spectrum] : []),
+        ...(input.isCube && !input.isRamp ? [s.pv] : []),
+      ];
     case "log":
       return [s.log];
   }
@@ -81,8 +86,8 @@ export function showSectionChips(sections: readonly AnalysisSection[]): boolean 
 
 export type AnalysisRouteTool = "image" | "cube";
 
-export function analysisToolForFile(input: { isCube: boolean; isRamp?: boolean }): AnalysisRouteTool {
-  return input.isCube || input.isRamp ? "cube" : "image";
+export function analysisToolForFile(input: { isCube: boolean; isRamp?: boolean; isSpectrum?: boolean }): AnalysisRouteTool {
+  return input.isCube || input.isRamp || input.isSpectrum ? "cube" : "image";
 }
 
 export interface AnalysisRouteInput {
@@ -90,6 +95,7 @@ export interface AnalysisRouteInput {
   fileKey: string | null;
   isCube: boolean;
   isRamp: boolean;
+  isSpectrum: boolean;
   memory: ReadonlyMap<string, AnalysisRouteTool>;
 }
 
@@ -106,12 +112,12 @@ function openRouteTools(open: DockLayout["active"]): AnalysisRouteTool[] {
   return DOCK_ANCHORS.map((anchor) => open[anchor]).filter(isRouteTool);
 }
 
-export function nextAnalysisRoute({ layout, fileKey, isCube, isRamp, memory }: AnalysisRouteInput): AnalysisRouteStep[] {
+export function nextAnalysisRoute({ layout, fileKey, isCube, isRamp, isSpectrum, memory }: AnalysisRouteInput): AnalysisRouteStep[] {
   if (fileKey === null) return [];
   const open = openRouteTools(layout.active);
   if (open.length === 0) return [];
   const wanted = memory.get(fileKey) ?? analysisToolForFile({ isCube, isRamp });
-  const tool = wanted === "cube" && !isCube && !isRamp ? "image" : wanted;
+  const tool = isSpectrum ? "cube" : wanted === "cube" && !isCube && !isRamp ? "image" : wanted;
   if (open.includes(tool)) return [];
   const anchor = DOCK_ANCHORS.find((a) => layout.anchors[a].includes(tool));
   return anchor === undefined ? [] : [{ anchor, tool }];

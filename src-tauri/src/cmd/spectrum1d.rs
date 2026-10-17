@@ -4,7 +4,7 @@ use anyhow::Context;
 
 use crate::cmd::common::blocking_cmd;
 use crate::infra::fits::gzip::resolve_gzip;
-use crate::infra::fits::spectrum1d::{classify, load_spectrum1d};
+use crate::infra::fits::spectrum1d::{classify, load_spectrum1d, read_spectrum_csv};
 
 pub const EMPTY_PATH_ERROR: &str = "path must name a spectrum file, got an empty string";
 
@@ -23,6 +23,15 @@ pub async fn read_spectrum1d_cmd(
     checked_path(&path)?;
     blocking_cmd!({
         let spectrum = load_spectrum1d(&path, hdu)?;
+        Ok(serde_json::to_value(&spectrum)?)
+    })
+}
+
+#[tauri::command]
+pub async fn read_spectrum_csv_cmd(path: String) -> Result<serde_json::Value, String> {
+    checked_path(&path)?;
+    blocking_cmd!({
+        let spectrum = read_spectrum_csv(&path)?;
         Ok(serde_json::to_value(&spectrum)?)
     })
 }
@@ -299,6 +308,53 @@ mod tests {
             value["flux"],
             read_spectrum1d_cmd(plain, None).await.unwrap()["flux"]
         );
+    }
+
+    fn exported_csv(dir: &tempfile::TempDir) -> String {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("spectrum1d")
+            .join("document_export.csv");
+        let path = dir.path().join("jw_test_x1d_spectrum.csv");
+        std::fs::copy(fixture, &path).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn read_spectrum_csv_cmd_returns_the_csv_document_with_its_errors_and_dq() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = exported_csv(&dir);
+        let value = read_spectrum_csv_cmd(path.clone()).await.unwrap();
+        assert_eq!(sorted_keys(&value), DOCUMENT_KEYS);
+        assert_eq!(
+            value["source"],
+            serde_json::json!({ "kind": "csv", "path": path })
+        );
+        assert_eq!(value["wavelength_frame"], "vacuum");
+        assert_eq!(value["flux_unit"], "Jy");
+        assert_eq!(value["dq_table"], "jwst");
+        assert_eq!(value["n_rows"], 12);
+        assert_eq!(value["axis"]["values"][0], 1.8);
+        assert!(value["flux"][5].is_null() && value["err"][7].is_null());
+        assert_eq!(value["dq"][9], 2_147_483_648_u64);
+        assert_eq!(
+            read_spectrum1d_cmd(path, None).await.unwrap()["source"],
+            value["source"]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_spectrum_csv_cmd_refuses_an_empty_path_and_names_an_unreadable_csv() {
+        let empty = read_spectrum_csv_cmd(" ".to_string()).await.unwrap_err();
+        assert!(empty.contains("empty"), "{empty}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_axis.csv");
+        std::fs::write(&path, "channel,flux\n0,1\n").unwrap();
+        let err = read_spectrum_csv_cmd(path.to_str().unwrap().to_string())
+            .await
+            .unwrap_err();
+        assert!(err.contains("wavelength_vacuum_um"), "{err}");
     }
 
     #[tokio::test]

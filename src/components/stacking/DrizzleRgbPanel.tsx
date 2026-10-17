@@ -11,9 +11,10 @@ import { DRIZZLE_ALIGNMENT_METHODS, DRIZZLE_RGB_PROGRESS_EVENT } from "../../sha
 import { REJECTION_OPTIONS, rejectionUsesSigma, stackProgressText } from "../../utils/stackingRejection";
 import { DRIZZLE_GAIN_FIELD, drizzleResultItems, isCancelledRun, manualGains } from "../../utils/drizzleRgbResult";
 import { cullDrizzleChannels, subframeExclusionNotice } from "../../utils/subframeCull";
+import { autoDetectChannel, type DrizzleChannel } from "../../utils/drizzleChannel";
 import type { RunTarget } from "./StackingTab";
 
-type Channel = "r" | "g" | "b";
+type Channel = DrizzleChannel;
 
 interface DrizzleRgbPanelProps {
   files: ProcessedFile[];
@@ -32,20 +33,6 @@ const CHANNEL_STYLES: Record<Channel, { active: string; idle: string }> = {
   g: { active: "bg-green-500/25 text-green-300 ring-1 ring-green-500/50", idle: "text-zinc-600 hover:text-green-400" },
   b: { active: "bg-blue-500/25 text-blue-300 ring-1 ring-blue-500/50", idle: "text-zinc-600 hover:text-blue-400" },
 };
-
-const AUTO_PATTERNS: [Channel, RegExp][] = [
-  ["r", /(?:[_.-](?:r|red)[_.-]|[_-](?:r|red)$|^(?:r|red)[_-])/i],
-  ["g", /(?:[_.-](?:g|green)[_.-]|[_-](?:g|green)$|^(?:g|green)[_-])/i],
-  ["b", /(?:[_.-](?:b|blue)[_.-]|[_-](?:b|blue)$|^(?:b|blue)[_-])/i],
-];
-
-function autoDetectChannel(name: string): Channel | null {
-  const stem = name.replace(/\.(fits?|fts|fit)$/i, "");
-  for (const [ch, re] of AUTO_PATTERNS) {
-    if (re.test(stem)) return ch;
-  }
-  return null;
-}
 
 const KERNELS = [
   { value: "square", label: "Square" },

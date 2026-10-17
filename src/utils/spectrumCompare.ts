@@ -3,13 +3,16 @@ import type { ContinuumWindows, CubeSpectrum, RegionSpectrum } from "../shared/t
 import type { Region } from "../shared/types/regions";
 import type {
   CorrectionFrame,
+  FileSpectrumSource,
   RadialVelocityCorrectionResult,
   SpectralAxisMode,
   SpectrumSource,
   TableSource,
 } from "../shared/types/spectral";
 import { buildCsv, CSV_LINE_END, type CsvColumn } from "./catalogCsv";
+import { spectrumSourceLabel } from "./lineMeasure";
 import { shapeSummary } from "./regionGeometry";
+import { isSpectrumCsvPath } from "./spectrumDocument";
 import {
   NO_JY_REASON,
   fileBaseName,
@@ -67,19 +70,34 @@ const TABLE_RESAMPLING = "linear onto the cube vacuum axis, never across a dropp
 const X1D_FLUX_HEADER = "x1d_flux_jy";
 const X1D_FLUX_ERR_HEADER = "x1d_flux_err_jy";
 const TABLE_ERROR_NOTE = `${X1D_FLUX_ERR_HEADER}: FLUX_ERROR combined in quadrature between the bracketing rows`;
+const DOCUMENT_IMAGE_NOTE = "spectrum file, read from disk";
+const COMPARED_RESAMPLING = "linear onto the spectrum vacuum axis, never across a dropped row";
+const COMPARED_FLUX_HEADER = "compared_flux";
+const COMPARED_FLUX_ERR_HEADER = "compared_flux_err";
+const COMPARED_ERROR_NOTE = `${COMPARED_FLUX_ERR_HEADER}: errors combined in quadrature between the bracketing rows`;
+
+export interface DocumentSeries {
+  flux: number[];
+  fluxUnit: string;
+}
 
 export interface ComparisonEntry {
   id: string;
-  kind: "region" | "pixel" | "table";
+  kind: "region" | "pixel" | "table" | "document";
   label: string;
   color: string;
-  source: SpectrumSource | TableSource;
+  source: SpectrumSource | TableSource | FileSpectrumSource;
   regionText: string | null;
   backgroundId: string | null;
   region: RegionSpectrum | null;
   pixel: CubeSpectrum | null;
   table: TableEntryData | null;
+  document?: DocumentSeries | null;
   error: string | null;
+}
+
+export function hasDocumentEntry(entries: readonly ComparisonEntry[]): boolean {
+  return entries.some((entry) => entry.kind === "document");
 }
 
 export interface ComparisonOmission {
@@ -167,6 +185,7 @@ export function entriesFrom(
 }
 
 function entryLength(entry: ComparisonEntry): number | null {
+  if (entry.kind === "document") return entry.document?.flux.length ?? null;
   if (entry.kind === "region") return entry.region ? entry.region.sum.length : null;
   if (entry.kind === "table") return entry.table?.resampled.flux.length ?? null;
   return entry.pixel ? entry.pixel.values.length : null;
@@ -182,6 +201,7 @@ export function pruneEntries(entries: ComparisonEntry[], regions: Region[], chan
 }
 
 export function entryValues(entry: ComparisonEntry, view: SpectrumView): number[] | null {
+  if (entry.kind === "document") return entry.document?.flux ?? null;
   if (entry.kind === "region") {
     const region = entry.region;
     if (!region) return null;
@@ -373,8 +393,30 @@ export function plottedTable(entries: ComparisonEntry[], result: ComparisonSerie
   return entry?.table ?? null;
 }
 
-function tableLine(table: TableEntryData): string {
-  return `x1d: ${table.path}; hdu: ${table.hdu}; rows: ${table.nRows}; dq_rows_dropped: ${table.resampled.droppedDq}; resampling: ${TABLE_RESAMPLING}; ${TABLE_ERROR_NOTE}; ${APERTURE_NOTE}`;
+function tableLine(table: TableEntryData, documentMode: boolean): string {
+  if (!documentMode) {
+    return `x1d: ${table.path}; hdu: ${table.hdu}; rows: ${table.nRows}; dq_rows_dropped: ${table.resampled.droppedDq}; resampling: ${TABLE_RESAMPLING}; ${TABLE_ERROR_NOTE}; ${APERTURE_NOTE}`;
+  }
+  const hdu = isSpectrumCsvPath(table.path) ? EMPTY_FIELD : String(table.hdu);
+  return `compared: ${table.path}; hdu: ${hdu}; rows: ${table.nRows}; dq_rows_dropped: ${table.resampled.droppedDq}; resampling: ${COMPARED_RESAMPLING}; ${COMPARED_ERROR_NOTE}`;
+}
+
+function comparedName(source: TableSource): string {
+  const name = fileBaseName(source.path);
+  return isSpectrumCsvPath(source.path) ? name : `${name} HDU ${source.hdu}`;
+}
+
+function seriesWhere(source: ComparisonEntry["source"], documentMode: boolean): string {
+  switch (source.kind) {
+    case "pixel":
+      return `pixel (${source.x}, ${source.y})`;
+    case "file":
+      return spectrumSourceLabel(source);
+    case "table":
+      return documentMode ? `compared ${comparedName(source)}` : `x1d ${fileBaseName(source.path)} HDU ${source.hdu}`;
+    case "region":
+      return shapeSummary(source.shape);
+  }
 }
 
 function normaliseLine(input: ComparisonCsvInput): string {
@@ -386,16 +428,11 @@ function normaliseLine(input: ComparisonCsvInput): string {
   return `normalise: ${input.mode}`;
 }
 
-function seriesLine(entry: ComparisonEntry, plotted: ComparisonPlotted): string {
+function seriesLine(entry: ComparisonEntry, plotted: ComparisonPlotted, documentMode: boolean): string {
   const source = entry.source;
-  const where =
-    source.kind === "pixel"
-      ? `pixel (${source.x}, ${source.y})`
-      : source.kind === "table"
-        ? `x1d ${fileBaseName(source.path)} HDU ${source.hdu}`
-        : shapeSummary(source.shape);
+  const where = seriesWhere(source, documentMode);
   const background =
-    source.kind === "table"
+    source.kind === "table" && !documentMode
       ? TABLE_BACKGROUND
       : source.kind === "region" && source.background
         ? `annulus ${entry.backgroundId ?? EMPTY_FIELD}`
@@ -409,9 +446,10 @@ function seriesLine(entry: ComparisonEntry, plotted: ComparisonPlotted): string 
 
 export function comparisonCsv(input: ComparisonCsvInput): string {
   const byId = new Map(input.entries.map((entry) => [entry.id, entry]));
+  const documentMode = hasDocumentEntry(input.entries);
   const lines = [
     `file: ${input.fileName}`,
-    `image: ${input.fileName} (${IMAGE_NOTE})`,
+    `image: ${input.fileName} (${documentMode ? DOCUMENT_IMAGE_NOTE : IMAGE_NOTE})`,
     `view: ${input.view}`,
     normaliseLine(input),
     ...frameLines(input.specsys, input.axisMode, input.correction, input.correctionResult),
@@ -420,11 +458,11 @@ export function comparisonCsv(input: ComparisonCsvInput): string {
   ];
   input.result.plotted.forEach((plotted) => {
     const entry = byId.get(plotted.id);
-    if (entry) lines.push(seriesLine(entry, plotted));
+    if (entry) lines.push(seriesLine(entry, plotted, documentMode));
   });
   for (const omission of input.result.omitted) lines.push(`omitted: ${omission.label}; ${omission.reason}`);
   const table = input.table === undefined ? plottedTable(input.entries, input.result) : input.table;
-  if (table !== null) lines.push(tableLine(table));
+  if (table !== null) lines.push(tableLine(table, documentMode));
 
   const columns: CsvColumn<number>[] = [{ header: CHANNEL_HEADER, value: (i) => i }];
   const vacuumValues = input.vacuum.values;
@@ -439,8 +477,9 @@ export function comparisonCsv(input: ComparisonCsvInput): string {
   });
   if (table !== null) {
     const { flux, fluxErr } = table.resampled;
-    columns.push({ header: X1D_FLUX_HEADER, value: (i) => flux[i] ?? null });
-    columns.push({ header: X1D_FLUX_ERR_HEADER, value: (i) => fluxErr[i] ?? null });
+    const unit = documentMode ? ` [${table.fluxUnit}]` : "";
+    columns.push({ header: `${documentMode ? COMPARED_FLUX_HEADER : X1D_FLUX_HEADER}${unit}`, value: (i) => flux[i] ?? null });
+    columns.push({ header: `${documentMode ? COMPARED_FLUX_ERR_HEADER : X1D_FLUX_ERR_HEADER}${unit}`, value: (i) => fluxErr[i] ?? null });
   }
   const rows = Array.from({ length: input.channelCount }, (_, i) => i);
   return lines.map((line) => `# ${line}`).join(CSV_LINE_END) + CSV_LINE_END + buildCsv(columns, rows);

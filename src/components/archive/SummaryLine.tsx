@@ -13,7 +13,7 @@ export default function SummaryLine({ state, ctl }: SummaryLineProps) {
   const results = state.results;
   if (!results) return null;
   const mission = currentMission(state);
-  const view = summaryView({ results, resolved: state.resolved, query: state.resultsQuery, missionLabel: mission?.label ?? missionLabelOf(results.mission) });
+  const view = summaryView({ results, resolved: state.resolved, query: state.resultsQuery, missionLabel: mission?.label ?? missionLabelOf(results.mission), presets: state.presets });
   const notes = [...results.messages, ...results.unresolvedTargets.map((t) => `MAST could not resolve ${t}`)].filter(Boolean);
   return (
     <div className="ab-mast-summary-row">
@@ -23,11 +23,17 @@ export default function SummaryLine({ state, ctl }: SummaryLineProps) {
         data-dec={view.decDeg ?? undefined}
         data-total={view.total}
         data-applied={view.applied}
+        data-preset={view.preset ?? undefined}
         className="ab-mast-summary"
         title={view.text}
       >
         {view.text}
       </div>
+      {view.ignored ? (
+        <span data-testid="mast-summary-ignored" className="ab-mast-summary-note" title={view.ignored}>
+          {view.ignored}
+        </span>
+      ) : null}
       {notes.length ? (
         <span className="ab-mast-summary-note" title={notes.join("\n")}>
           {notes[0]}

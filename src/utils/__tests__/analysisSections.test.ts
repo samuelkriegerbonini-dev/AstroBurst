@@ -70,6 +70,11 @@ describe("toolSections", () => {
     expect(labels("cube", everything)).toEqual(["Ramp", "Spectrum"]);
   });
 
+  it("gives a 1D spectrum file only the Spectrum section of the Cube tool", () => {
+    expect(toolSections("cube", { ...nothing, isSpectrum: true })).toEqual([ANALYSIS_SECTION.spectrum]);
+    expect(labels("cube", { ...nothing, isSpectrum: false })).toEqual([]);
+  });
+
   it("gives the Log tool only the log section", () => {
     for (const input of [everything, nothing]) expect(toolSections("log", input)).toEqual([ANALYSIS_SECTION.log]);
   });
@@ -160,6 +165,11 @@ describe("analysisToolForFile", () => {
     expect(analysisToolForFile({ isCube: false, isRamp: false })).toBe("image");
     expect(analysisToolForFile({ isCube: false })).toBe("image");
   });
+
+  it("opens Cube for a 1D spectrum file", () => {
+    expect(analysisToolForFile({ isCube: false, isSpectrum: true })).toBe("cube");
+    expect(analysisToolForFile({ isCube: false, isRamp: false, isSpectrum: false })).toBe("image");
+  });
 });
 
 describe("CUBE_TOOL_EMPTY_TITLE", () => {
@@ -170,9 +180,11 @@ describe("CUBE_TOOL_EMPTY_TITLE", () => {
 
 const after = (...actions: DockAction[]): DockLayout => actions.reduce(dockReducer, DEFAULT_DOCK_LAYOUT);
 const memoryOf = (entries: [string, AnalysisRouteTool][] = []) => new Map<string, AnalysisRouteTool>(entries);
-const plain = { isCube: false, isRamp: false };
-const cube = { isCube: true, isRamp: false };
-const rampOnly = { isCube: false, isRamp: true };
+const plain = { isCube: false, isRamp: false, isSpectrum: false };
+const cube = { isCube: true, isRamp: false, isSpectrum: false };
+const rampOnly = { isCube: false, isRamp: true, isSpectrum: false };
+const spectrum = { isCube: false, isRamp: false, isSpectrum: true };
+const SPECTRUM_KEY = "spec|C:/d/a_x1d.fits";
 
 describe("nextAnalysisRoute", () => {
   it("swaps Image for Cube in the shared anchor when a cube is selected", () => {
@@ -222,6 +234,30 @@ describe("nextAnalysisRoute", () => {
     expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "cube" }), fileKey: "p", ...plain, memory: memoryOf([["p", "cube"]]) })).toEqual([
       { anchor: "right-top", tool: "image" },
     ]);
+  });
+
+  it("keeps the Cube tool that Open as spectrum opened for a spectrum file", () => {
+    const opened = after({ type: "open", tool: "cube" });
+    expect(nextAnalysisRoute({ layout: opened, fileKey: SPECTRUM_KEY, ...spectrum, memory: memoryOf([[SPECTRUM_KEY, "cube"]]) })).toEqual([]);
+    expect(nextAnalysisRoute({ layout: opened, fileKey: SPECTRUM_KEY, ...spectrum, memory: memoryOf() })).toEqual([]);
+  });
+
+  it("swaps Image for Cube in the shared anchor when a spectrum file is selected", () => {
+    const layout = after({ type: "open", tool: "image" });
+    expect(nextAnalysisRoute({ layout, fileKey: SPECTRUM_KEY, ...spectrum, memory: memoryOf() })).toEqual([{ anchor: "right-top", tool: "cube" }]);
+  });
+
+  it("routes a spectrum file to Cube even when Image was the last choice for it, since Image has nothing to show for it", () => {
+    const remembered = memoryOf([[SPECTRUM_KEY, "image"]]);
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "image" }), fileKey: SPECTRUM_KEY, ...spectrum, memory: remembered })).toEqual([
+      { anchor: "right-top", tool: "cube" },
+    ]);
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "cube" }), fileKey: SPECTRUM_KEY, ...spectrum, memory: remembered })).toEqual([]);
+  });
+
+  it("never opens a tool for a spectrum file when neither Image nor Cube is open", () => {
+    expect(nextAnalysisRoute({ layout: DEFAULT_DOCK_LAYOUT, fileKey: SPECTRUM_KEY, ...spectrum, memory: memoryOf() })).toEqual([]);
+    expect(nextAnalysisRoute({ layout: after({ type: "open", tool: "photometry" }), fileKey: SPECTRUM_KEY, ...spectrum, memory: memoryOf() })).toEqual([]);
   });
 
   it("opens the desired tool in its own anchor and leaves the other anchor alone", () => {

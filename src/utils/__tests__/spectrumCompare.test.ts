@@ -67,6 +67,16 @@ function regionSpectrum(sum: number[], extra: Partial<RegionSpectrum> = {}): Reg
     unit: "um",
     bg_subtracted: false,
     flux_jy: null,
+    err: null,
+    err_scaled: null,
+    mean_err: null,
+    used_weight: sum.map(() => 10),
+    err_source: "none",
+    bg_err_per_pixel: null,
+    flux_jy_err: null,
+    n_dq_excluded: null,
+    noise_factor: null,
+    notes: [],
     elapsed_ms: 1,
     ...extra,
   };
@@ -576,5 +586,127 @@ describe("table entries", () => {
     const none = comparisonCsv({ ...tableCsvInput(new Set()), table: null });
     expect(none).not.toContain("x1d_flux_jy");
     expect(none.split("\r\n").some((line) => line.startsWith("# x1d:"))).toBe(false);
+  });
+});
+
+describe("spectrum file entries", () => {
+  const CSV_PATH = "C:/d/g235h_spectrum.csv";
+
+  function documentEntryOf(flux: number[], fluxUnit = "erg/s/cm2/A"): ComparisonEntry {
+    return {
+      id: "document",
+      kind: "document",
+      label: "ha_bess.fits",
+      color: "#e4e4e7",
+      source: { kind: "file", hdu: 0 },
+      regionText: null,
+      backgroundId: null,
+      region: null,
+      pixel: null,
+      table: null,
+      document: { flux, fluxUnit },
+      error: null,
+    };
+  }
+
+  function comparedEntryOf(flux: number[], path = CSV_PATH, hdu = 0): ComparisonEntry {
+    const name = path.split("/").pop() ?? path;
+    return {
+      id: "x1d",
+      kind: "table",
+      label: name,
+      color: "#f0abfc",
+      source: { kind: "table", path, hdu },
+      regionText: null,
+      backgroundId: null,
+      region: null,
+      pixel: null,
+      table: {
+        path,
+        hdu,
+        nRows: 3,
+        fluxUnit: "Jy",
+        sbUnit: null,
+        resampled: {
+          flux,
+          fluxErr: flux.map((v) => (Number.isFinite(v) ? v / 10 : null)),
+          surfBright: null,
+          rowsUsed: 3,
+          droppedDq: 0,
+          overlap: [1, 1.002],
+        },
+      },
+      error: null,
+    };
+  }
+
+  function documentCsvInput(entries: ComparisonEntry[]): ComparisonCsvInput {
+    const axis = axisOf("wave", [1.0, 1.001, 1.002]);
+    const axisColumn = comparisonAxis(axis, "wavelength_vac", null, "optical", "none", null, 3);
+    return {
+      fileName: "ha_bess.fits",
+      view: "sum",
+      mode: "none",
+      windows: null,
+      axis: axisColumn,
+      axisKnown: true,
+      vacuum: vacuumUmAxis(axis, null, "optical", 3),
+      channelCount: 3,
+      entries,
+      result: comparisonSeries(entries, new Set(), axisColumn.values ?? axis3, "sum", "none", null, null, null),
+      specsys: null,
+      axisMode: "wavelength_vac",
+      correction: "none",
+      correctionResult: null,
+      exportedAtUtc: "2026-10-17T12:00:00.000Z",
+    };
+  }
+
+  it("entryValues gives the spectrum's own flux in every view and pruneEntries keeps it on its channel grid", () => {
+    const entry = documentEntryOf([1, NaN, 3]);
+    expect(entryValues(entry, "sum")).toEqual([1, NaN, 3]);
+    expect(entryValues(entry, "mean")).toEqual([1, NaN, 3]);
+    expect(entryValues(entry, "jy")).toEqual([1, NaN, 3]);
+    expect(pruneEntries([entry], [], 3)).toEqual([entry]);
+    expect(pruneEntries([entry], [], 4)).toEqual([]);
+  });
+
+  it("comparisonSeries plots the spectrum with its own unit next to the resampled spectrum", () => {
+    const result = comparisonSeries([documentEntryOf([1, 2, 3]), comparedEntryOf([10, NaN, 30])], new Set(), axis3, "sum", "none", null, null, "MJy/sr");
+    expect(result.plotted.map((p) => p.unit)).toEqual(["erg/s/cm2/A", "Jy"]);
+    expect(result.series[0].y).toEqual([1, 2, 3]);
+    expect(result.series[1].y).toEqual([10, null, 30]);
+    expect(result.yLabel).toBe("flux (mixed units)");
+  });
+
+  it("comparisonCsv of a spectrum file names the file, the spectrum axis and the compared columns with their unit", () => {
+    const csv = comparisonCsv(documentCsvInput([documentEntryOf([1, 2, 3]), comparedEntryOf([10, NaN, 30])]));
+    const lines = csv.split("\r\n");
+    expect(lines).toContain("# image: ha_bess.fits (spectrum file, read from disk)");
+    expect(lines).toContain(
+      `# compared: ${CSV_PATH}; hdu: -; rows: 3; dq_rows_dropped: 0; resampling: linear onto the spectrum vacuum axis, never across a dropped row; compared_flux_err: errors combined in quadrature between the bracketing rows`,
+    );
+    expect(lines).toContain(
+      "# series: ha_bess.fits; document; spectrum file, HDU 0; background: none; npix: -; n_bg: -; bg_subtracted: -; unit: erg/s/cm2/A; factor: 1; offset: 0",
+    );
+    expect(lines).toContain(
+      "# series: g235h_spectrum.csv; table; compared g235h_spectrum.csv; background: none; npix: -; n_bg: -; bg_subtracted: -; unit: Jy; factor: 1; offset: 0",
+    );
+    const header = lines.find((line) => !line.startsWith("#")) ?? "";
+    expect(header).toBe(
+      "channel,wavelength_vacuum_um,vacuum_wavelength_um,ha_bess.fits [erg/s/cm2/A],g235h_spectrum.csv [Jy],compared_flux [Jy],compared_flux_err [Jy]",
+    );
+    const rows = lines.filter((line) => line !== "" && !line.startsWith("#")).slice(1);
+    expect(rows[1]).toBe("1,1.001,1.001,2,,,");
+    expect(csv).not.toContain(APERTURE_NOTE);
+    expect(csv).not.toContain("x1d_flux_jy");
+    expect(csv).not.toContain("loaded cube");
+  });
+
+  it("names the HDU of a compared FITS spectrum", () => {
+    const csv = comparisonCsv(documentCsvInput([documentEntryOf([1, 2, 3]), comparedEntryOf([10, 20, 30], "C:/d/b_x1d.fits", 1)]));
+    const lines = csv.split("\r\n");
+    expect(lines.some((line) => line.startsWith("# compared: C:/d/b_x1d.fits; hdu: 1;"))).toBe(true);
+    expect(lines.some((line) => line.includes("; table; compared b_x1d.fits HDU 1;"))).toBe(true);
   });
 });

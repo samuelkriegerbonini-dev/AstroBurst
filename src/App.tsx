@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore, useId, lazy, Suspense, type CSSProperties } from "react";
-import { Plus, RotateCcw, FolderOpen, Info as InfoIcon, X, Download, Columns2, Sparkles, Undo2, Redo2 } from "lucide-react";
+import { Plus, RotateCcw, FolderOpen, Info as InfoIcon, X, Download, Columns2, Sparkles, Undo2, Redo2, Activity } from "lucide-react";
 import { historyStore } from "./utils/historyStore";
 
 import DropZone from "./components/file/DropZone";
@@ -7,6 +7,8 @@ import EmptyState from "./components/EmptyState";
 import AppFooter from "./components/AppFooter";
 import { appModeStore, modeFromShortcut, useAppMode } from "./hooks/useAppMode";
 import { useArchivePaletteActions } from "./components/archive/state/useArchivePaletteActions";
+import { workspaceFileRef } from "./components/archive/state/useAroundTarget";
+import DisplayedImageBridge from "./components/archive/DisplayedImageBridge";
 import { ARCHIVE_SHORTCUTS } from "./components/archive/logic/shortcuts";
 import MetadataFileList from "./components/file/MetadataFileList";
 import type { MetadataFile } from "./components/file/MetadataFileList";
@@ -24,18 +26,21 @@ import { registerFileIngest, type IngestOptions } from "./hooks/useFileIngest";
 import { quietCompletion } from "./utils/quietCompletion";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
-import { SUPPORTED_EXTENSIONS, astroFileFromPath, folderErrorReport, folderReport, partitionIncoming, rejectionReport, type IngestReport } from "./utils/validation";
+import { SUPPORTED_EXTENSIONS, astroFileFromPath, dialogExtensions, folderErrorReport, folderReport, partitionIncoming, rejectionReport, type IngestReport } from "./utils/validation";
 import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "./hooks/useProductFilter";
 import { displayFilterValue } from "./utils/channelMapping";
 import { FOCUSABLE_SELECTOR, focusTrapTarget } from "./utils/focusTrap";
-import { findSiblingCube, tableBlockers } from "./utils/x1dCompare";
+import { comparableX1dIds, findSiblingCube } from "./utils/x1dCompare";
 import { spectrumComparisonStore } from "./hooks/useSpectrumComparisonStore";
 
 import type { AstroFile, ProcessedFile } from "./shared/types";
 import { FILE_STATUS } from "./utils/constants";
+import { fallbackSelectionId, selectableRows } from "./utils/fileSelection";
 import { CompositeProvider } from "./context/CompositeContext";
 import { ComposeWizardProvider } from "./context/ComposeWizardContext";
-import { PreviewProvider } from "./context/PreviewContext";
+import { PreviewProvider, fileKeyOf } from "./context/PreviewContext";
+import { openSpectrumCsv, spectrumCsvStore } from "./hooks/useSpectrum1dStore";
+import { openSpectrumCsvPaletteAction } from "./utils/spectrumDocument";
 
 import { terminateStfWorker } from "./utils/stfworker";
 import CommandPalette, { type PaletteAction, type PaletteFile } from "./components/CommandPalette";
@@ -97,6 +102,7 @@ function toMetadataFiles(
       size: f.size ?? 0,
       status: (f.status ?? FILE_STATUS.QUEUED) as MetadataFile["status"],
       error: f.error ?? undefined,
+      spectrum: f.spectrum,
       metadata: header
         ? {
           filter: displayFilterValue(f) ?? undefined,
@@ -196,7 +202,7 @@ export default function App() {
     if (isTauri()) {
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
-        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: [...SUPPORTED_EXTENSIONS] }] });
+        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: dialogExtensions(SUPPORTED_EXTENSIONS, IS_MAC) }] });
         if (result) {
           const partition = partitionIncoming(Array.isArray(result) ? result : [result]);
           setIngestReport(rejectionReport(partition));
@@ -313,6 +319,7 @@ export default function App() {
   const handleNewBatch = useCallback(() => {
     reset();
     resetProductFilter();
+    spectrumCsvStore.close();
     setView("empty");
     setShowConfetti(false);
   }, [reset, resetProductFilter]);
@@ -350,6 +357,12 @@ export default function App() {
     dockStore.dispatch({ type: "open", tool: "cube" });
   }, []);
 
+  const handleOpenSpectrum = useCallback((id: string) => {
+    if (!fileStore.getFile(id)) return;
+    fileStore.selectFile(id);
+    dockStore.dispatch({ type: "open", tool: "cube" });
+  }, []);
+
   const handleExportZip = useCallback(() => {
     const all = fileStore.getFiles();
     exportZip(
@@ -367,7 +380,7 @@ export default function App() {
     [fileIds, storeVersion],
   );
 
-  const metadataTableBlockers = useMemo(() => tableBlockers(metadataFiles), [metadataFiles]);
+  const comparableX1d = useMemo(() => comparableX1dIds(metadataFiles), [metadataFiles]);
 
   const productTypes = useMemo(
     () => detectProductTypes(fileIds.map((id) => fileStore.getFile(id)?.name ?? "")),
@@ -379,14 +392,10 @@ export default function App() {
     return metadataFiles.filter((f) => matchesActiveFilters(metadataFilterable(f), activeFilters, filterMode));
   }, [metadataFiles, activeFilters, filterMode]);
 
-  const filteredSelectedId = useMemo(() => {
-    if (!selectedId) return null;
-    if (activeFilters.length === 0) return selectedId;
-    const exists = filteredMetadataFiles.some((f) => f.id === selectedId);
-    if (exists) return selectedId;
-    const firstDone = filteredMetadataFiles.find((f) => f.status === "done");
-    return firstDone?.id ?? null;
-  }, [selectedId, activeFilters, filteredMetadataFiles]);
+  const filteredSelectedId = useMemo(
+    () => fallbackSelectionId(filteredMetadataFiles, selectedId, activeFilters.length > 0),
+    [selectedId, activeFilters, filteredMetadataFiles],
+  );
 
   useEffect(() => {
     if (filteredSelectedId !== null && filteredSelectedId !== selectedId) {
@@ -401,12 +410,14 @@ export default function App() {
   }, [selectedFile, activeFilters, filteredMetadataFiles]);
 
   const hasVisibleFile = visibleSelectedFile !== null;
+  const visibleFileKey = fileKeyOf(visibleSelectedFile);
 
   const selectedPath = selectedFile?.path ?? null;
   const selectedName = selectedFile?.name ?? null;
+  const selectedStatus = selectedFile?.status ?? null;
   const workspaceFile = useMemo(
-    () => (selectedPath !== null && selectedName !== null ? { path: selectedPath, name: selectedName } : null),
-    [selectedPath, selectedName],
+    () => workspaceFileRef(selectedPath, selectedName, selectedStatus),
+    [selectedPath, selectedName, selectedStatus],
   );
   const archivePaletteActions = useArchivePaletteActions({ mode, setMode: appModeStore.set, workspaceFile });
 
@@ -436,6 +447,16 @@ export default function App() {
         icon: Columns2,
         run: inWorkspace(() => dockStore.resetAll()),
       });
+      acts.push({
+        ...openSpectrumCsvPaletteAction(
+          inWorkspace(() => {
+            void openSpectrumCsv(visibleFileKey).then((opened) => {
+              if (opened) dockStore.dispatch({ type: "open", tool: "cube" });
+            });
+          }),
+        ),
+        icon: Activity,
+      });
       acts.push({ id: "dock-tips", label: "Show tool window tips", keywords: ["Layout", "Drag", "Dock", "Onboarding"], icon: Sparkles, run: inWorkspace(() => dockOnboardingStore.show()) });
       acts.push({ id: "history-undo", label: "Undo processing step", hint: "Ctrl+Z", keywords: ["History", "Undo"], icon: Undo2, run: inWorkspace(() => historyStore.undo()) });
       acts.push({ id: "history-redo", label: "Redo processing step", hint: "Ctrl+Shift+Z", keywords: ["History", "Redo"], icon: Redo2, run: inWorkspace(() => historyStore.redo()) });
@@ -445,7 +466,7 @@ export default function App() {
     acts.push(...archivePaletteActions);
     acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
     return acts;
-  }, [view, dockLayout, hasVisibleFile, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleExportZip, handleNewBatchClick, archivePaletteActions]);
+  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleExportZip, handleNewBatchClick, archivePaletteActions]);
 
   const handlePaletteSelectFile = useCallback((id: string) => {
     showWorkspace();
@@ -458,9 +479,7 @@ export default function App() {
   );
 
   const paletteFiles = useMemo<PaletteFile[]>(
-    () => filteredMetadataFiles
-      .filter((f) => f.status === "done")
-      .map((f) => ({ id: f.id, name: f.name, filter: f.metadata?.filter })),
+    () => selectableRows(filteredMetadataFiles).map((f) => ({ id: f.id, name: f.name, filter: f.metadata?.filter })),
     [filteredMetadataFiles],
   );
 
@@ -541,6 +560,7 @@ export default function App() {
                     <CompositeProvider>
                       <ComposeWizardProvider>
                         <PreviewProvider file={visibleSelectedFile} doneFiles={filteredDoneFiles}>
+                          <DisplayedImageBridge />
                           <div className="flex flex-col h-full">
                             <div
                               className="shrink-0 grid"
@@ -597,8 +617,9 @@ export default function App() {
                                       onClearFilters={clearAll}
                                       onAddCustomChip={addCustomChip}
                                       onRemoveCustomChip={removeCustomChip}
+                                      onOpenSpectrum={handleOpenSpectrum}
                                       onOpenTable={handleOpenTable}
-                                      tableBlockers={metadataTableBlockers}
+                                      comparableX1d={comparableX1d}
                                     />
                                 ),
                               }}

@@ -25,6 +25,14 @@ export interface CubeSpectrum {
   flux_jy?: number[] | null;
 }
 
+export interface NoiseFactor {
+  factor: number;
+  factor_se: number;
+  n_channels: number;
+  windows: ContinuumWindows;
+  warning: string | null;
+}
+
 export interface RegionSpectrum {
   sum: number[];
   mean: number[];
@@ -35,8 +43,37 @@ export interface RegionSpectrum {
   unit: string;
   bg_subtracted: boolean;
   flux_jy: number[] | null;
+  err: number[] | null;
+  err_scaled: number[] | null;
+  mean_err: number[] | null;
+  used_weight: number[];
+  err_source: string;
+  bg_err_per_pixel: number[] | null;
+  flux_jy_err: number[] | null;
+  n_dq_excluded: number[] | null;
+  noise_factor: NoiseFactor | null;
+  notes: string[];
   elapsed_ms: number;
 }
+
+export type NullableSeries = (number | null)[];
+
+type RegionSeriesKey = "sum" | "mean";
+
+type RegionOptionalSeriesKey =
+  | "bg_per_pixel"
+  | "flux_jy"
+  | "err"
+  | "err_scaled"
+  | "mean_err"
+  | "bg_err_per_pixel"
+  | "flux_jy_err";
+
+export type RegionSpectrumWire = Omit<RegionSpectrum, RegionSeriesKey | RegionOptionalSeriesKey> & {
+  [K in RegionSeriesKey]: NullableSeries;
+} & {
+  [K in RegionOptionalSeriesKey]: NullableSeries | null;
+};
 
 export type CollapseRangeMode = "sum" | "mean" | "median";
 
@@ -49,6 +86,9 @@ export interface CollapseRangeResult {
   z1: number;
   mode: CollapseRangeMode;
   dimensions: [number, number];
+  has_err: boolean;
+  err_source: string;
+  notes: string[];
   elapsed_ms: number;
   previewUrl?: string;
 }
@@ -85,6 +125,9 @@ export interface MomentMapsResult {
   n_channels: number;
   notes: string[];
   dimensions: [number, number];
+  has_err: boolean;
+  err_source: string;
+  noise_factor: number | null;
   elapsed_ms: number;
 }
 

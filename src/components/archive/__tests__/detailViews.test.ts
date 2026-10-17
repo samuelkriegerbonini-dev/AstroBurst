@@ -3,10 +3,11 @@ import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import DetailPane from "../DetailPane";
 import LargeView from "../LargeView";
+import ProductsTab from "../ProductsTab";
 import { archiveReducer, createInitialState, type ArchiveAction, type ArchiveState } from "../state/archiveReducer";
 import type { ArchiveController } from "../state/archiveController";
 import { EXCLUSIVE_PREVIEWS_TEXT, previewKey } from "../logic/detailView";
-import { L3_FILTERS, MISSIONS, jwstL3Set, page, productList, row } from "./fixtures";
+import { L3_FILTERS, MISSIONS, jwstL3Set, page, product, productList, row } from "./fixtures";
 import type { MastError, MastPreviewRef, MastQuery, MastResolved, MastRow } from "../../../shared/types/mast";
 
 const M16: MastResolved = { query: "M16", canonicalName: "M 16", resolver: "SIMBAD", raDeg: 274.688, decDeg: -13.792, objectType: null, elapsedMs: 870, fromCache: false };
@@ -16,6 +17,7 @@ const QUERY: MastQuery = {
   program: null,
   datasetId: null,
   filters: { level: "combined" },
+  preset: null,
   sort: [],
   offset: 0,
   limit: 200,
@@ -291,7 +293,11 @@ describe("detail pane", () => {
     expect(tag(markup, "mast-tab-metadata")).toContain('aria-selected="true"');
     expect(markup).toContain(ID);
     expect(markup).toContain("2739 / 1");
-    expect(markup).toContain("Footprint on the image arrives in v1.1");
+    expect(markup).toContain('<span class="ab-mast-meta-note">Open an image in the workspace to draw footprints on it</span>');
+    expect(markup).not.toContain("Draw it on the open image with Show on, above");
+    expect(tag(markup, "mast-footprint-toggle")).toContain("disabled");
+    expect(markup).toMatch(/data-testid="mast-footprint-reason"[^>]*>Open an image in the workspace to draw footprints on it</);
+    expect(markup).toContain("Show on image");
     const labels = buttons(markup);
     for (const b of ["Copy request JSON", "Copy curl", "Copy row as TSV"]) expect(labels).toContain(b);
     expect(markup).toContain("All columns (6)");
@@ -311,7 +317,7 @@ describe("products tab", () => {
     expect(buttons(markup)).toContain("Cancel");
   });
 
-  it("groups the listing, counts hidden files and offers only copy actions", () => {
+  it("groups the listing, counts hidden files and offers selection, downloads and copy actions", () => {
     const s = run(
       productsTab(withList()),
       { type: "productsStarted", key: KEY, requestId: `g1:products:${ID}`, at: 0 },
@@ -329,9 +335,68 @@ describe("products tab", () => {
     expect(markup).toContain("a_i2d.fits");
     expect(markup).toContain('title="5,420,000,000 bytes"');
     const downloadButtons = buttons(markup).filter((b) => /download/i.test(b));
-    expect(downloadButtons).toEqual(["Copy Download/file URLs"]);
+    expect(downloadButtons).toEqual(["Download", "Download and open", "Copy Download/file URLs"]);
     expect(buttons(markup)).toContain("Copy MAST URIs");
-    expect(markup).toContain("Downloading inside AstroBurst arrives with the download engine (v1.1).");
+    expect(tag(markup, "mast-dl-bar")).not.toBe("");
+    expect(markup).toContain("Select files to download");
+    expect(markup).toMatch(/<input type="checkbox" class="ab-mast-prow-pick" aria-label="Select a_i2d.fits"/);
+    expect(markup).not.toContain("mast-dl-confirm");
+    expect(markup).toContain("Downloads go to the mast folder of the Data folder (Settings)");
+    expect(markup).not.toContain("arrives with the download engine");
+  });
+
+  it("lists Roman products without checkboxes or download buttons and says why", () => {
+    const roman = MISSIONS.find((m) => m.id === "roman");
+    if (!roman) throw new Error("the fixtures lost the Roman mission");
+    const key = "roman:r0001";
+    const s = run(
+      base(),
+      { type: "productsStarted", key, requestId: "g1:products:r0001", at: 0 },
+      { type: "productsLoaded", key, requestId: "g1:products:r0001", list: productList() },
+    );
+    const markup = html(ProductsTab, { state: s, ctl, row: row("r0001"), mission: roman });
+    expect(tag(markup, "mast-products")).toContain('data-state="ready"');
+    expect(markup).toContain("a_i2d.fits");
+    expect(markup).not.toContain("ab-mast-prow-pick");
+    expect(tag(markup, "mast-dl-bar")).toContain('data-state="unavailable"');
+    expect(markup).toContain("Roman downloads are not enabled yet.");
+    expect(buttons(markup).filter((b) => /^Download/.test(b))).toEqual([]);
+  });
+
+  it("lists IUE products without checkboxes or download buttons and says why", () => {
+    const iue = MISSIONS.find((m) => m.id === "iue");
+    if (!iue) throw new Error("the fixtures lost the IUE mission");
+    const key = "iue:lwp00501";
+    const lwp = product("lwp00501.lihi.gz", "spectrum", 717_341, { datasetId: "lwp00501", mastUri: "mast:IUE/url//pub/iue/data/lwp/00000/lwp00501.lihi.gz" });
+    const s = run(
+      base(),
+      { type: "productsStarted", key, requestId: "g1:products:lwp00501", at: 0 },
+      { type: "productsLoaded", key, requestId: "g1:products:lwp00501", list: { ...productList(), mission: "iue", datasetIds: ["lwp00501"], products: [lwp] } },
+    );
+    const markup = html(ProductsTab, { state: s, ctl, row: row("lwp00501"), mission: { ...iue, capabilities: { ...iue.capabilities, products: true } } });
+    expect(tag(markup, "mast-products")).toContain('data-state="ready"');
+    expect(markup).not.toContain("ab-mast-prow-pick");
+    expect(tag(markup, "mast-dl-bar")).toContain('data-state="unavailable"');
+    expect(markup).toContain("IUE downloads are not enabled yet.");
+    expect(buttons(markup).filter((b) => /^Download/.test(b))).toEqual([]);
+  });
+
+  it("disables the checkbox of a file the app cannot download and keeps the others", () => {
+    const classy = product("hlsp_classy_hst_cos_j0021+0052_g130m_v1_coadded.fits", "image", 1_000, {
+      mastUri: "mast:HLSP/classy/j0021+0052/hlsp_classy_hst_cos_j0021+0052_g130m_v1_coadded.fits",
+    });
+    const list = productList();
+    const s = run(
+      productsTab(withList()),
+      { type: "productsStarted", key: KEY, requestId: `g1:products:${ID}`, at: 0 },
+      { type: "productsLoaded", key: KEY, requestId: `g1:products:${ID}`, list: { ...list, products: [...list.products, classy] } },
+    );
+    const markup = html(DetailPane, { state: s, ctl });
+    expect(markup).toMatch(/<input type="checkbox" class="ab-mast-prow-pick" aria-label="Select a_i2d.fits"/);
+    const box = /<input[^>]*aria-label="Select hlsp_classy_hst_cos_j0021\+0052_g130m_v1_coadded.fits"[^>]*>/.exec(markup)?.[0] ?? "";
+    expect(box).toContain('disabled=""');
+    expect(box).toContain("title=\"Only HLSP files");
+    expect(tag(markup, "mast-dl-bar")).not.toContain('data-state="unavailable"');
   });
 
   it("puts the error inside the tab with Retry", () => {

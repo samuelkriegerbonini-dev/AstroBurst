@@ -4,7 +4,39 @@ const { typedInvokeMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn() }));
 
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock }));
 
-import { exportFitsRgb, exportFitsRgbWithHeader, exportValuesCell, type ExportResult } from "../export";
+import { exportFitsRgb, exportFitsRgbWithHeader, exportValuesCell, mefSizeSummary, type CompressMefResult, type ExportResult } from "../export";
+
+describe("compress_mef source sizes", () => {
+  it("reports the decompressed source size next to the on-disk size", () => {
+    expectTypeOf<CompressMefResult["source_size_bytes"]>().toEqualTypeOf<number>();
+    expectTypeOf<CompressMefResult["source_decompressed_bytes"]>().toEqualTypeOf<number>();
+  });
+});
+
+describe("mefSizeSummary", () => {
+  const result = (source: number, decompressed: number, output: number): CompressMefResult => ({
+    output_path: "/x/out.fits",
+    dropped: [],
+    kept_raw: [],
+    uncompressed: [],
+    source_size_bytes: source,
+    source_decompressed_bytes: decompressed,
+    output_size_bytes: output,
+    elapsed_ms: 85,
+  });
+
+  it("keeps the plain-source line: on-disk size, output size and ratio", () => {
+    expect(mefSizeSummary(result(2_048_000, 2_048_000, 512_000))).toBe("2000 KB → 500 KB (25%), 85 ms");
+  });
+
+  it("bases the ratio of a .fits.gz source on its decompressed size and names the .gz size", () => {
+    expect(mefSizeSummary(result(1_024_000, 4_096_000, 2_048_000))).toBe("4000 KB decompressed (1000 KB .gz on disk) → 2000 KB (50%), 85 ms");
+  });
+
+  it("prints no ratio for an empty source", () => {
+    expect(mefSizeSummary(result(0, 0, 2_880))).toBe("0 KB → 3 KB, 85 ms");
+  });
+});
 
 describe("export_fits display-referred flag", () => {
   it("is an optional boolean on the export result", () => {

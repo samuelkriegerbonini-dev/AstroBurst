@@ -195,6 +195,7 @@ mod tests {
             rp: None,
             bp_rp: Some(0.8),
             parallax_mas: None,
+            teff_k: None,
         }
     }
 
@@ -235,6 +236,22 @@ mod tests {
         let entry = load(dir.path(), &key).expect("a stored entry loads");
         assert_eq!(entry.fetched_unix_s, 1_700_000_000);
         assert_eq!(entry.rows, rows);
+    }
+
+    #[test]
+    fn disk_cache_entries_without_teff_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = query(210.0, -20.5);
+        let key = catalog_cache_key(&q);
+        let written_before_teff = r#"{"version":1,"fetched_unix_s":1700000000,"query":{"ra":210.0,"dec":-20.5,"radius_deg":0.05,"mag_limit":17.0,"max_rows":500},"rows":[{"id":"a","ra":210.001,"dec":-20.499,"ra_epoch":210.001,"dec_epoch":-20.499,"pm_ra_masyr":null,"pm_dec_masyr":null,"g":12.5,"bp":null,"rp":null,"bp_rp":0.8,"parallax_mas":null}]}"#;
+        fs::write(dir.path().join(file_name(&key)), written_before_teff).unwrap();
+
+        let entry = load(dir.path(), &key).expect("an entry written before teff_k existed still loads");
+
+        assert_eq!(entry.fetched_unix_s, 1_700_000_000);
+        assert_eq!(entry.rows, vec![row("a", 210.001, -20.499)]);
+        let reloaded = serde_json::to_value(&entry.rows[0]).unwrap();
+        assert_eq!(reloaded.get("teff_k"), Some(&serde_json::Value::Null), "the row carries an empty teff_k: {reloaded}");
     }
 
     #[test]

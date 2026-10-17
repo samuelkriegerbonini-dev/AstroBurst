@@ -20,6 +20,7 @@ pub struct AlignPairResult {
     pub matched_stars: usize,
     pub inliers: usize,
     pub residual_px: f64,
+    pub rejection: Option<String>,
 }
 
 pub fn offset_within_limits(dy: f64, dx: f64, rows: usize, cols: usize) -> bool {
@@ -27,13 +28,6 @@ pub fn offset_within_limits(dy: f64, dx: f64, rows: usize, cols: usize) -> bool 
         && dx.is_finite()
         && dx.abs() <= cols as f64 * MAX_OFFSET_FRACTION
         && dy.abs() <= rows as f64 * MAX_OFFSET_FRACTION
-}
-
-fn center_displacement(transform: &affine::AffineTransform, rows: usize, cols: usize) -> (f64, f64) {
-    let cx = (cols as f64 - 1.0) * 0.5;
-    let cy = (rows as f64 - 1.0) * 0.5;
-    let (sx, sy) = transform.map(cx, cy);
-    (sy - cy, sx - cx)
 }
 
 fn ensure_contiguous(image: &Array2<f32>) -> Array2<f32> {
@@ -90,6 +84,7 @@ pub fn align_pair(
                     matched_stars: 0,
                     inliers: 0,
                     residual_px: 0.0,
+                    rejection: None,
                 })
             } else {
                 let shifted = shift_image_subpixel(target, pc.dy, pc.dx);
@@ -103,6 +98,7 @@ pub fn align_pair(
                     matched_stars: 0,
                     inliers: 0,
                     residual_px: 0.0,
+                    rejection: None,
                 })
             }
         }
@@ -112,13 +108,14 @@ pub fn align_pair(
             Ok(AlignPairResult {
                 aligned: warped,
                 offset: (result.transform.ty, result.transform.tx),
-                center_offset: center_displacement(&result.transform, rows, cols),
+                center_offset: affine::center_displacement(&result.transform, rows, cols),
                 registered: result.method != affine::AffineAlignMethod::Identity,
                 confidence: result.confidence,
                 method_used: result.method.to_string(),
                 matched_stars: result.matched_stars,
                 inliers: result.inliers,
                 residual_px: result.residual_px,
+                rejection: result.rejection,
             })
         }
     }

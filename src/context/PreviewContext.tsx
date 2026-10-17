@@ -15,6 +15,7 @@ import { getRawPixelsPreview, getRawRgbPixelsPreview } from "../services/fits";
 import { detectNarrowbandFilters } from "../services/header";
 import type { NarrowbandDetection, NarrowbandFilterDetection } from "../services/header";
 import { fileStore } from "../hooks/useFileStore";
+import { FILE_STATUS } from "../utils/constants";
 import { resetRampIntegration } from "../hooks/useRampStore";
 import { rampOpenPlan } from "../utils/rampLabels";
 import type { CubeInfoWithRamp, RampInfo, RampSource } from "../shared/types/ramp";
@@ -102,6 +103,7 @@ interface HistContextValue {
 
 interface CubeContextValue {
   isCube: boolean;
+  isSpectrum: boolean;
   isSpectralCube: boolean;
   spectralReason: string | null;
   cubeDims: CubeDims | null;
@@ -245,10 +247,14 @@ export const useNarrowbandContext = () => useCtx(NarrowbandCtx, "useNarrowbandCo
 export const useDisplayContext = () => useCtx(DisplayCtx, "useDisplayContext");
 export const useDqContext = () => useCtx(DqCtx, "useDqContext");
 
+export function imagePathOf(file: ProcessedFile | null): string | null {
+  return file !== null && file.status !== FILE_STATUS.SPECTRUM ? file.path : null;
+}
+
 export function useDisplayedImage(): DisplayedImage {
   const { file } = useCtx(FileCtx, "useDisplayedImage");
   const { processed } = useCtx(RenderCtx, "useDisplayedImage");
-  const filePath = file?.path ?? null;
+  const filePath = imagePathOf(file);
   const fileDims = file?.result?.dimensions ?? null;
   const filePreviewUrl = file?.result?.previewUrl ?? null;
   return useMemo<DisplayedImage>(
@@ -422,6 +428,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const processedVersion = current.version;
   const processedPath = processed?.fitsPath ?? null;
   const filePath = file?.path ?? null;
+  const imagePath = imagePathOf(file);
+  const isSpectrum = file?.status === FILE_STATUS.SPECTRUM;
   const groupKey = useMemo(() => displayGroupKey(file), [file]);
   const stfSource = stfSourceKey({ filePath, processedPath, version: processedVersion, excludeDq });
   const nextDisplayToken: DisplayToken = { fileKey, groupKey, sameGroup };
@@ -474,6 +482,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   rgbRawPixelsLoadingRef.current = rgbRawPixelsLoading;
   const filePathRef = useRef(file?.path);
   filePathRef.current = file?.path;
+  const imagePathRef = useRef(imagePath);
+  imagePathRef.current = imagePath;
   const fileKeyRef = useRef(fileKey);
   fileKeyRef.current = fileKey;
   const viewRef = useRef<RenderView>(current);
@@ -694,14 +704,14 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   useEffect(() => {
     const seq = ++limitsSeqRef.current;
-    if (!filePath || displayStretch === "mtf") {
+    if (!imagePath || displayStretch === "mtf") {
       setLimitsLoading(false);
       setLimitsError(null);
       return;
     }
     setLimitsLoading(true);
     const timer = window.setTimeout(() => {
-      computeScaleLimits(processedPath ?? filePath, {
+      computeScaleLimits(processedPath ?? imagePath, {
         ...DEFAULT_DISPLAY_SETTINGS,
         limits: displayLimits,
         percentileLow,
@@ -730,7 +740,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [filePath, processedPath, sourceVersion, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi, displaySymmetric, displayCentre]);
+  }, [imagePath, processedPath, sourceVersion, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi, displaySymmetric, displayCentre]);
 
   useEffect(() => {
     let cancelled = false;
@@ -775,7 +785,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, [doneFiles, selectedPalette]);
 
   const loadRawPixels = useCallback((force = false) => {
-    const path = processedRef.current?.fitsPath ?? filePathRef.current;
+    const path = processedRef.current?.fitsPath ?? imagePathRef.current;
     if (!path) return;
     if (!force && (rawPixelsRef.current || rawPixelsLoadingRef.current)) return;
     setRawPixelsLoading(true);
@@ -907,6 +917,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
     const seq = ++seqRef.current;
     const stale = () => seqRef.current !== seq;
+    if (isSpectrum) return;
 
     if (isRgbFits && file.result) seedRgbFileView(composite, file.result, fileEntry(displayMemory.get(), file.path));
 
@@ -974,14 +985,14 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const precomputedHist = file?.result?.histogram ?? null;
 
   useEffect(() => {
-    if (!fileKey || !filePath) return;
+    if (!fileKey || !imagePath) return;
     const seq = ++histSeqRef.current;
     const precomputed = processedPath || excludeDq ? null : precomputedHist;
-    const histPath = processedPath ?? filePath;
-    const source = stfSourceKey({ filePath, processedPath, version: sourceVersion, excludeDq });
+    const histPath = processedPath ?? imagePath;
+    const source = stfSourceKey({ filePath: imagePath, processedPath, version: sourceVersion, excludeDq });
     const applyAutoStf = (auto: StfParams | null) => {
       autoStfRef.current = auto;
-      const stf = resolveStf(fileEntry(displayMemory.get(), filePath), source, processedPath !== null, auto, linearRef.current !== null);
+      const stf = resolveStf(fileEntry(displayMemory.get(), imagePath), source, processedPath !== null, auto, linearRef.current !== null);
       if (stf) setStfParams(stf);
     };
     if (precomputed?.bins) {
@@ -1000,15 +1011,15 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       .catch((err) => {
         if (histSeqRef.current === seq) console.error("[AstroBurst] Histogram fetch failed:", err);
       });
-  }, [fileKey, filePath, processedPath, sourceVersion, excludeDq, precomputedHist]);
+  }, [fileKey, imagePath, processedPath, sourceVersion, excludeDq, precomputedHist]);
 
   const plane = file?.result?.plane ?? null;
   const dqRef = plane?.dq_ref ?? null;
 
   useEffect(() => {
-    if (!filePath || !dqRef) return;
+    if (!imagePath || !dqRef) return;
     const seq = ++flagTableSeqRef.current;
-    getDqFlagTable(filePath)
+    getDqFlagTable(imagePath)
       .then((table) => {
         if (flagTableSeqRef.current !== seq) return;
         setFlagTable(table);
@@ -1018,13 +1029,13 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (flagTableSeqRef.current !== seq) return;
         console.error("[AstroBurst] DQ flag table fetch failed:", err);
       });
-  }, [fileKey, filePath, dqRef]);
+  }, [fileKey, imagePath, dqRef]);
 
   const overlayEnabled = overlay.enabled;
   const overlayMask = overlay.mask;
 
   useEffect(() => {
-    if (!filePath || !dqRef || !overlayEnabled) return;
+    if (!imagePath || !dqRef || !overlayEnabled) return;
     const maxDim = computePreviewMaxDim();
     const key = `${fileKey}|${overlayMask}|${maxDim}`;
     if (dqMaskKeyRef.current === key) return;
@@ -1032,7 +1043,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const seq = ++dqMaskSeqRef.current;
     setDqMaskLoading(true);
     setDqMask(null);
-    getDqMaskPreview(filePath, overlayMask, maxDim)
+    getDqMaskPreview(imagePath, overlayMask, maxDim)
       .then((mask) => {
         if (dqMaskSeqRef.current !== seq) return;
         setDqMask(mask);
@@ -1048,7 +1059,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (dqMaskSeqRef.current !== seq) return;
         setDqMaskLoading(false);
       });
-  }, [fileKey, filePath, dqRef, overlayEnabled, overlayMask, dqMaskRefetch]);
+  }, [fileKey, imagePath, dqRef, overlayEnabled, overlayMask, dqMaskRefetch]);
 
   const fileValue = useMemo<FileContextValue>(
     () => ({ file }),
@@ -1066,8 +1077,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const cubeValue = useMemo<CubeContextValue>(
-    () => ({ isCube, isSpectralCube, spectralReason, cubeDims, ramp, rampSource, cubeFileKey }),
-    [isCube, isSpectralCube, spectralReason, cubeDims, ramp, rampSource, cubeFileKey],
+    () => ({ isCube, isSpectrum, isSpectralCube, spectralReason, cubeDims, ramp, rampSource, cubeFileKey }),
+    [isCube, isSpectrum, isSpectralCube, spectralReason, cubeDims, ramp, rampSource, cubeFileKey],
   );
 
   const rgbValue = useMemo<RgbContextValue>(

@@ -23,7 +23,7 @@ import {
   SlidersHorizontal,
   Pin,
   X,
-  Grid3X3,
+  Activity,
 } from "lucide-react";
 
 export interface FileMetadata {
@@ -41,8 +41,9 @@ export interface MetadataFile {
   name: string;
   path: string;
   size: number;
-  status: "queued" | "processing" | "done" | "error" | "table";
+  status: "queued" | "processing" | "done" | "error" | "spectrum";
   error?: string;
+  spectrum?: Spectrum1dKind;
   metadata?: FileMetadata;
   previewUrl?: string;
   dimensions?: [number, number];
@@ -50,11 +51,23 @@ export interface MetadataFile {
 }
 
 import { fileSearchText, metadataFilterable, type FilterMode } from "../../hooks/useProductFilter";
-import { tableOnlyFileHint } from "../../utils/x1dCompare";
+import { ONE_D_ARRAY_HINT } from "../../utils/fitsErrors";
+import { TABLE_ONLY_HINT } from "../../utils/x1dCompare";
+import { isSelectableStatus, nextSelectableIndex } from "../../utils/fileSelection";
+import type { Spectrum1dKind } from "../../shared/types/spectrum1d";
 import { fileListNames } from "../../utils/fileListNames";
+import { rowTops, rowWindow } from "../../utils/fileListRows";
 import { getFilterColor } from "../../utils/filterColors";
 
 const OPEN_TABLE_TITLE = "Select its cube, open Cube and compare this x1d with the cube spectrum in Spectroscopy";
+const OPEN_SPECTRUM_TITLE = "Select this spectrum and open the Cube tool";
+const SPECTRUM_NOTE = "1D spectrum";
+
+function spectrumNote(spectrum: Spectrum1dKind | undefined): { text: string; title: string } {
+  if (spectrum === undefined) return { text: SPECTRUM_NOTE, title: SPECTRUM_NOTE };
+  const text = spectrum.kind === "x1d" ? TABLE_ONLY_HINT : ONE_D_ARRAY_HINT;
+  return { text, title: `${text}, HDU ${spectrum.hdu}` };
+}
 
 interface MetadataFileListProps {
   files: MetadataFile[];
@@ -78,8 +91,9 @@ interface MetadataFileListProps {
   onClearFilters?: () => void;
   onAddCustomChip?: (text: string) => void;
   onRemoveCustomChip?: (text: string) => void;
+  onOpenSpectrum?: (id: string) => void;
   onOpenTable?: (id: string) => void;
-  tableBlockers?: ReadonlyMap<string, string | null>;
+  comparableX1d?: ReadonlySet<string>;
 }
 
 const STATUS_CONFIG = {
@@ -87,7 +101,7 @@ const STATUS_CONFIG = {
   processing: { icon: Loader2, color: "", accentColor: "var(--ab-teal)" },
   done: { icon: CheckCircle2, color: "", accentColor: "var(--ab-green)" },
   error: { icon: XCircle, color: "text-red-400", accentColor: "" },
-  table: { icon: Grid3X3, color: "text-fuchsia-300", accentColor: "" },
+  spectrum: { icon: Activity, color: "text-fuchsia-300", accentColor: "" },
 };
 
 function filterChipStyle(filter: string): React.CSSProperties {
@@ -102,6 +116,7 @@ function filterChipStyle(filter: string): React.CSSProperties {
 const START_CLIP_STYLE: React.CSSProperties = { direction: "rtl", textAlign: "left" };
 
 const ITEM_HEIGHT = 72;
+const TWO_ACTION_ITEM_HEIGHT = 92;
 const OVERSCAN = 4;
 
 interface MetadataFileItemProps {
@@ -109,22 +124,23 @@ interface MetadataFileItemProps {
   displayName: string;
   clipStart: boolean;
   isSelected: boolean;
+  height: number;
   onSelect: (id: string) => void;
+  onOpenSpectrum?: (id: string) => void;
   onOpenTable?: (id: string) => void;
-  tableBlocker: string | null;
+  siblingCubeLoaded: boolean;
 }
 
-function MetadataFileItem({ file, displayName, clipStart, isSelected, onSelect, onOpenTable, tableBlocker }: MetadataFileItemProps) {
+function MetadataFileItem({ file, displayName, clipStart, isSelected, height, onSelect, onOpenSpectrum, onOpenTable, siblingCubeLoaded }: MetadataFileItemProps) {
   const [thumbError, setThumbError] = useState(false);
   const [thumbLoaded, setThumbLoaded] = useState(false);
 
   const status = file.status;
   const config = STATUS_CONFIG[status];
   const Icon = config.icon;
-  const isClickable = status === "done";
+  const isClickable = isSelectableStatus(status);
   const meta = file.metadata;
-  const tableHint = status === "table" || status === "error" ? tableOnlyFileHint(file.error) : null;
-  const noteClass = status === "table" ? "ab-mfl-table-text" : "ab-mfl-error-text";
+  const note = spectrumNote(file.spectrum);
 
   useEffect(() => {
     setThumbError(false);
@@ -160,7 +176,7 @@ function MetadataFileItem({ file, displayName, clipStart, isSelected, onSelect, 
       role="option"
       aria-selected={isSelected}
       className={`ab-mfl-item ${isSelected ? "ab-mfl-item-selected" : ""} ${isClickable ? "ab-mfl-item-clickable" : ""}`}
-      style={{ height: ITEM_HEIGHT, overflow: "hidden" }}
+      style={{ height, overflow: "hidden" }}
       onClick={handleClick}
       draggable={status === "done"}
       onDragStart={handleDragStart}
@@ -237,24 +253,36 @@ function MetadataFileItem({ file, displayName, clipStart, isSelected, onSelect, 
           {status === "queued" && (
             <span className="ab-mfl-queued-text">Queued</span>
           )}
-          {(status === "error" || status === "table") && tableHint === null && (
-            <span className={noteClass} title={file.error}>{file.error}</span>
+          {status === "error" && (
+            <span className="ab-mfl-error-text" title={file.error}>{file.error}</span>
           )}
-          {tableHint !== null && (
+          {status === "spectrum" && (
             <>
-              <span className={noteClass} title={file.error}>{tableHint}</span>
-              {onOpenTable && (
+              <span className="ab-mfl-spectrum-text" title={note.title}>{note.text}</span>
+              {onOpenSpectrum && (
                 <button
                   type="button"
-                  className="ab-mfl-chip ab-mfl-chip-neutral disabled:opacity-40"
-                  disabled={tableBlocker !== null}
-                  title={tableBlocker ?? OPEN_TABLE_TITLE}
+                  className="ab-mfl-chip ab-mfl-chip-neutral"
+                  title={OPEN_SPECTRUM_TITLE}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenSpectrum(file.id);
+                  }}
+                >
+                  Open as spectrum
+                </button>
+              )}
+              {onOpenTable && siblingCubeLoaded && (
+                <button
+                  type="button"
+                  className="ab-mfl-chip ab-mfl-chip-neutral"
+                  title={OPEN_TABLE_TITLE}
                   onClick={(e) => {
                     e.stopPropagation();
                     onOpenTable(file.id);
                   }}
                 >
-                  Open in Spectroscopy
+                  Compare with its cube
                 </button>
               )}
             </>
@@ -262,7 +290,7 @@ function MetadataFileItem({ file, displayName, clipStart, isSelected, onSelect, 
         </div>
       </div>
 
-      {isSelected && status === "done" && (
+      {isSelected && isClickable && (
         <div className="ab-mfl-active-bar" />
       )}
     </div>
@@ -274,11 +302,14 @@ const MemoFileItem = memo(MetadataFileItem, (prev, next) =>
   && prev.displayName === next.displayName
   && prev.clipStart === next.clipStart
   && prev.isSelected === next.isSelected
+  && prev.height === next.height
   && prev.file.status === next.file.status
   && prev.file.previewUrl === next.file.previewUrl
   && prev.file.error === next.file.error
+  && prev.file.spectrum === next.file.spectrum
+  && prev.onOpenSpectrum === next.onOpenSpectrum
   && prev.onOpenTable === next.onOpenTable
-  && prev.tableBlocker === next.tableBlocker,
+  && prev.siblingCubeLoaded === next.siblingCubeLoaded,
 );
 
 function MetadataFileList({
@@ -302,8 +333,9 @@ function MetadataFileList({
                             onClearFilters,
                             onAddCustomChip,
                             onRemoveCustomChip,
+                            onOpenSpectrum,
                             onOpenTable,
-                            tableBlockers,
+                            comparableX1d,
                           }: MetadataFileListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -344,8 +376,16 @@ function MetadataFileList({
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
   }, []);
 
-  const startIdx = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN);
-  const endIdx = Math.min(filteredFiles.length, Math.ceil((scrollTop + viewHeight) / ITEM_HEIGHT) + OVERSCAN);
+  const tops = useMemo(
+    () =>
+      rowTops(
+        filteredFiles.map((f) =>
+          f.status === "spectrum" && onOpenSpectrum && onOpenTable && comparableX1d?.has(f.id) ? TWO_ACTION_ITEM_HEIGHT : ITEM_HEIGHT,
+        ),
+      ),
+    [filteredFiles, onOpenSpectrum, onOpenTable, comparableX1d],
+  );
+  const { start: startIdx, end: endIdx } = rowWindow(tops, scrollTop, viewHeight, OVERSCAN);
   const visibleFiles = useMemo(
     () => filteredFiles.slice(startIdx, endIdx),
     [filteredFiles, startIdx, endIdx],
@@ -355,22 +395,17 @@ function MetadataFileList({
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
     const dir = e.key === "ArrowDown" ? 1 : -1;
-    const curIdx = filteredFiles.findIndex((f) => f.id === selectedId);
-    let idx = curIdx === -1 ? (dir === 1 ? -1 : filteredFiles.length) : curIdx;
-    for (;;) {
-      idx += dir;
-      if (idx < 0 || idx >= filteredFiles.length) return;
-      if (filteredFiles[idx].status === "done") break;
-    }
+    const idx = nextSelectableIndex(filteredFiles, filteredFiles.findIndex((f) => f.id === selectedId), dir);
+    if (idx === null) return;
     onSelect(filteredFiles[idx].id);
     const el = scrollRef.current;
     if (el) {
-      const top = idx * ITEM_HEIGHT;
-      const bottom = top + ITEM_HEIGHT;
+      const top = tops[idx];
+      const bottom = tops[idx + 1];
       if (top < el.scrollTop) el.scrollTop = top;
       else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
     }
-  }, [filteredFiles, selectedId, onSelect]);
+  }, [filteredFiles, selectedId, onSelect, tops]);
 
   const searchTerm = searchQuery.trim();
   const isFiltered = activeFilters.length > 0;
@@ -560,18 +595,20 @@ function MetadataFileList({
             )}
           </div>
         ) : (
-          <div style={{ height: filteredFiles.length * ITEM_HEIGHT, position: "relative" }}>
-            <div style={{ position: "absolute", top: startIdx * ITEM_HEIGHT, left: 0, right: 0 }}>
-              {visibleFiles.map((file) => (
+          <div style={{ height: tops[filteredFiles.length], position: "relative" }}>
+            <div style={{ position: "absolute", top: tops[startIdx], left: 0, right: 0 }}>
+              {visibleFiles.map((file, i) => (
                 <MemoFileItem
                   key={file.id}
                   file={file}
                   displayName={displayNames.get(file.id)?.text ?? file.name}
                   clipStart={displayNames.get(file.id)?.clipStart ?? false}
                   isSelected={file.id === selectedId}
+                  height={tops[startIdx + i + 1] - tops[startIdx + i]}
                   onSelect={onSelect}
+                  onOpenSpectrum={onOpenSpectrum}
                   onOpenTable={onOpenTable}
-                  tableBlocker={tableBlockers?.get(file.id) ?? null}
+                  siblingCubeLoaded={comparableX1d?.has(file.id) ?? false}
                 />
               ))}
             </div>

@@ -4,6 +4,9 @@ use crate::core::astrometry::time::{
     gmst_deg, jd_from_mjd, julian_centuries_j2000, parse_fits_date_and_time, parse_fits_datetime,
     SECONDS_PER_DAY,
 };
+use crate::core::metadata::header_aliases::{
+    first_f64, keyword_alternatives, SexagesimalRaUnit, POINTING_DEGREE_PAIRS,
+};
 use crate::types::header::HduHeader;
 
 pub const SPEED_OF_LIGHT_KMS: f64 = 299792.458;
@@ -167,15 +170,6 @@ fn card_string(header: &HduHeader, key: &str) -> Option<String> {
 
 fn card_string_upper(header: &HduHeader, key: &str) -> Option<String> {
     card_string(header, key).map(|s| s.to_uppercase())
-}
-
-fn first_f64(header: &HduHeader, keys: &[&'static str]) -> Option<(f64, &'static str)> {
-    for key in keys {
-        if let Some(v) = header.get_f64(key).filter(|v| v.is_finite()) {
-            return Some((v, key));
-        }
-    }
-    None
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -848,6 +842,24 @@ fn first_angle(header: &HduHeader, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|k| header.get(k).and_then(parse_angle_card))
 }
 
+const OBSGEO_CARTESIAN_SOURCE: &str = "OBSGEO-X/Y/Z";
+const OBSGEO_GEODETIC_SOURCE: &str = "OBSGEO-L/B/H";
+const SITE_KEYWORD_PAIRS: [([&str; 2], &str, &str); 5] = [
+    (["SITELAT", "SITELONG"], "SITEELEV", "SITELAT/SITELONG"),
+    (["LAT-OBS", "LONG-OBS"], "ALT-OBS", "LAT-OBS/LONG-OBS"),
+    (["OBSLAT", "OBSLONG"], "OBSALT", "OBSLAT/OBSLONG"),
+    (["LATITUDE", "LONGITUD"], "ELEVATIO", "LATITUDE/LONGITUD"),
+    (["SITE-LAT", "SITE-LONG"], "SITE-ELEV", "SITE-LAT/SITE-LONG"),
+];
+
+pub(crate) fn no_site_in_header_message() -> String {
+    let sources: Vec<&str> = [OBSGEO_CARTESIAN_SOURCE, OBSGEO_GEODETIC_SOURCE]
+        .into_iter()
+        .chain(SITE_KEYWORD_PAIRS.iter().map(|(_, _, source)| *source))
+        .collect();
+    format!("no observatory location in the header ({})", keyword_alternatives(&sources))
+}
+
 pub fn site_location(header: &HduHeader) -> Option<(SiteLocation, &'static str)> {
     if let (Some(x), Some(y), Some(z)) = (
         header.get_f64("OBSGEO-X"),
@@ -855,20 +867,14 @@ pub fn site_location(header: &HduHeader) -> Option<(SiteLocation, &'static str)>
         header.get_f64("OBSGEO-Z"),
     ) {
         if x.is_finite() && y.is_finite() && z.is_finite() && (x != 0.0 || y != 0.0 || z != 0.0) {
-            return Some((geocentric_to_geodetic(x, y, z), "OBSGEO-X/Y/Z"));
+            return Some((geocentric_to_geodetic(x, y, z), OBSGEO_CARTESIAN_SOURCE));
         }
     }
     if let (Some(lon), Some(lat)) = (header.get_f64("OBSGEO-L"), header.get_f64("OBSGEO-B")) {
         let height_m = header.get_f64("OBSGEO-H").unwrap_or(0.0);
-        return Some((SiteLocation { lon_deg: lon, lat_deg: lat, height_m }, "OBSGEO-L/B/H"));
+        return Some((SiteLocation { lon_deg: lon, lat_deg: lat, height_m }, OBSGEO_GEODETIC_SOURCE));
     }
-    let triples: [([&str; 2], &str, &'static str); 4] = [
-        (["SITELAT", "SITELONG"], "SITEELEV", "SITELAT/SITELONG"),
-        (["LAT-OBS", "LONG-OBS"], "ALT-OBS", "LAT-OBS/LONG-OBS"),
-        (["OBSLAT", "OBSLONG"], "OBSALT", "OBSLAT/OBSLONG"),
-        (["LATITUDE", "LONGITUD"], "ELEVATIO", "LATITUDE/LONGITUD"),
-    ];
-    for (lat_lon, height_key, label) in triples {
+    for (lat_lon, height_key, label) in SITE_KEYWORD_PAIRS {
         if let (Some(lat), Some(lon)) = (first_angle(header, &lat_lon[..1]), first_angle(header, &lat_lon[1..])) {
             let height_m = header.get_f64(height_key).filter(|v| v.is_finite()).unwrap_or(0.0);
             return Some((SiteLocation { lon_deg: lon, lat_deg: lat, height_m }, label));
@@ -887,20 +893,14 @@ pub fn header_target_coordinates(header: &HduHeader) -> Option<(f64, f64, &'stat
             }
         }
     }
-    let degree_pairs: [(&str, &str, &'static str); 5] = [
-        ("RA_TARG", "DEC_TARG", "RA_TARG/DEC_TARG"),
-        ("TARG_RA", "TARG_DEC", "TARG_RA/TARG_DEC"),
-        ("RA", "DEC", "RA/DEC"),
-        ("OBJRA", "OBJDEC", "OBJRA/OBJDEC"),
-        ("RA_OBJ", "DEC_OBJ", "RA_OBJ/DEC_OBJ"),
-    ];
-    for (ra_key, dec_key, label) in degree_pairs {
+    for (ra_key, dec_key, label, sexagesimal_ra_unit) in POINTING_DEGREE_PAIRS {
         let (Some(ra_raw), Some(dec_raw)) = (header.get(ra_key), header.get(dec_key)) else {
             continue;
         };
         let ra_is_sexagesimal = ra_raw.trim().trim_matches('\'').trim().parse::<f64>().is_err();
+        let ra_is_hours = ra_is_sexagesimal && sexagesimal_ra_unit == SexagesimalRaUnit::Hours;
         if let (Some(ra), Some(dec)) = (parse_angle_card(ra_raw), parse_angle_card(dec_raw)) {
-            let ra_deg = if ra_is_sexagesimal { ra * 15.0 } else { ra };
+            let ra_deg = if ra_is_hours { ra * 15.0 } else { ra };
             return Some((ra_deg, dec, label));
         }
     }
@@ -1230,9 +1230,7 @@ pub fn radial_velocity_correction(header: &HduHeader, ra_deg: f64, dec_deg: f64)
     let site = if geocentric {
         None
     } else {
-        Some(site_location(header).ok_or_else(|| {
-            "no observatory location in the header (OBSGEO-X/Y/Z, OBSGEO-L/B/H, SITELAT/SITELONG or LAT-OBS/LONG-OBS)".to_string()
-        })?)
+        Some(site_location(header).ok_or_else(no_site_in_header_message)?)
     };
     let (jd_mid, time_source) = timing.ok_or_else(|| {
         "no observation time in the header (MJD-AVG, EXPMID, DATE-AVG, DATE-OBS or MJD-OBS)".to_string()
@@ -1847,6 +1845,76 @@ mod tests {
         let (ra, dec, _) = header_target_coordinates(&h).unwrap();
         assert!((ra - 97.5).abs() < 1e-9 && (dec - 45.0).abs() < 1e-9);
         assert!(header_target_coordinates(&axis_header(&[("OBJECT", "M31")])).is_none());
+    }
+
+    #[test]
+    fn ra_d_dec_d_are_read_as_degrees() {
+        let h = axis_header(&[("RA_D", "83.8221"), ("DEC_D", "-5.3911")]);
+        assert_eq!(header_target_coordinates(&h), Some((83.8221, -5.3911, "RA_D/DEC_D")));
+        let h = axis_header(&[("RA_D", "83.8221"), ("DEC_D", "-5.3911"), ("RA", "5.588"), ("DEC", "-5.3911"), ("OBJCTRA", "'05 35 17'"), ("OBJCTDEC", "'-05 23 28'")]);
+        assert_eq!(header_target_coordinates(&h), Some((83.8221, -5.3911, "RA_D/DEC_D")), "the degree pair wins over an RA card of unknown unit");
+        let h = axis_header(&[("RA_TARG", "10.0"), ("DEC_TARG", "20.0"), ("RA_D", "83.8221"), ("DEC_D", "-5.3911")]);
+        assert_eq!(header_target_coordinates(&h).map(|(_, _, source)| source), Some("RA_TARG/DEC_TARG"));
+        assert!(header_target_coordinates(&axis_header(&[("RA_D", "83.8221")])).is_none());
+    }
+
+    #[test]
+    fn sexagesimal_ra_d_stays_in_degrees_while_sexagesimal_ra_is_hours() {
+        let h = axis_header(&[("RA_D", "'83:49:19.6'"), ("DEC_D", "'-05:23:28'")]);
+        let (ra, dec, source) = header_target_coordinates(&h).unwrap();
+        assert!((ra - 83.822_111).abs() < 1e-5 && (dec + 5.391_111).abs() < 1e-5, "RA {ra} Dec {dec}");
+        assert_eq!(source, "RA_D/DEC_D");
+        let h = axis_header(&[("RA", "'05:35:17.3'"), ("DEC", "'-05:23:28'")]);
+        let (ra, _, source) = header_target_coordinates(&h).unwrap();
+        assert!((ra - 83.822_083).abs() < 1e-5, "RA {ra}");
+        assert_eq!(source, "RA/DEC");
+    }
+
+    #[test]
+    fn site_lat_site_long_resolve_the_site_naming_the_keys() {
+        use crate::core::astrometry::geometry::{geometry_method_notes, resolve_site, GeometryOverrides};
+        let h = axis_header(&[("SITE-LAT", "'+45:30:00'"), ("SITE-LONG", "-73.5"), ("SITE-ELEV", "57")]);
+        let (site, source) = site_location(&h).unwrap();
+        assert_eq!(source, "SITE-LAT/SITE-LONG");
+        assert_eq!(site, SiteLocation { lon_deg: -73.5, lat_deg: 45.5, height_m: 57.0 });
+        assert_eq!(resolve_site(&h, &GeometryOverrides::default()).unwrap().source, "SITE-LAT/SITE-LONG");
+        assert!(longitude_sign_is_ambiguous(source));
+        let both = axis_header(&[("SITELAT", "19.82"), ("SITELONG", "-155.47"), ("SITE-LAT", "45.5"), ("SITE-LONG", "-73.5")]);
+        assert_eq!(site_location(&both).unwrap().1, "SITELAT/SITELONG");
+        let none = axis_header(&[("OBJECT", "M31")]);
+        let notes = geometry_method_notes(&none, None, resolve_site(&none, &GeometryOverrides::default()).as_ref());
+        assert!(notes.iter().any(|n| n.starts_with("no observatory location") && n.contains("SITE-LAT/SITE-LONG")), "{notes:?}");
+    }
+
+    #[test]
+    fn no_site_messages_name_every_keyword_set_the_resolver_accepts() {
+        use crate::core::astrometry::geometry::{geometry_method_notes, resolve_site, GeometryOverrides};
+        let sites: [(&[(&str, &str)], &str); 7] = [
+            (&[("OBSGEO-X", "-5464487.8"), ("OBSGEO-Y", "-2492806.0"), ("OBSGEO-Z", "2151240.2")], "OBSGEO-X/Y/Z"),
+            (&[("OBSGEO-L", "-155.47"), ("OBSGEO-B", "19.82")], "OBSGEO-L/B/H"),
+            (&[("SITELAT", "19.82"), ("SITELONG", "-155.47")], "SITELAT/SITELONG"),
+            (&[("LAT-OBS", "19.82"), ("LONG-OBS", "-155.47")], "LAT-OBS/LONG-OBS"),
+            (&[("OBSLAT", "19.82"), ("OBSLONG", "-155.47")], "OBSLAT/OBSLONG"),
+            (&[("LATITUDE", "19.82"), ("LONGITUD", "-155.47")], "LATITUDE/LONGITUD"),
+            (&[("SITE-LAT", "19.82"), ("SITE-LONG", "-155.47")], "SITE-LAT/SITE-LONG"),
+        ];
+        let siteless = axis_header(&[("DATE-OBS", "2026-03-21T10:00:00"), ("EXPTIME", "600")]);
+        let error = radial_velocity_correction(&siteless, 180.0, 0.0).unwrap_err();
+        let notes = geometry_method_notes(&siteless, None, resolve_site(&siteless, &GeometryOverrides::default()).as_ref());
+        let note = notes.iter().find(|n| n.starts_with("no observatory location in the header")).unwrap();
+        for (cards, label) in sites {
+            assert_eq!(site_location(&axis_header(cards)).map(|(_, source)| source), Some(label));
+            assert!(error.contains(label), "{label} missing from: {error}");
+            assert!(note.contains(label), "{label} missing from: {note}");
+        }
+        for ([lat_key, lon_key], _, label) in SITE_KEYWORD_PAIRS {
+            let row = axis_header(&[(lat_key, "19.82"), (lon_key, "-155.47")]);
+            assert_eq!(site_location(&row).map(|(_, source)| source), Some(label));
+            assert!(no_site_in_header_message().contains(label), "{label}");
+        }
+        let expected = "OBSGEO-X/Y/Z, OBSGEO-L/B/H, SITELAT/SITELONG, LAT-OBS/LONG-OBS, OBSLAT/OBSLONG, LATITUDE/LONGITUD or SITE-LAT/SITE-LONG";
+        assert_eq!(error, format!("no observatory location in the header ({expected})"));
+        assert_eq!(*note, format!("no observatory location in the header ({expected}): enter the site to get the topocentric block"));
     }
 
     #[test]

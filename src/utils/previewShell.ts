@@ -12,17 +12,27 @@ export interface GpuDisplayInput {
   useGpu: boolean;
   hasRawPixels: boolean;
   previewOnly: boolean;
+  isSpectrum?: boolean;
 }
 
-export function gpuDisplayOnScreen({ hasFile, rgbView, useGpu, hasRawPixels, previewOnly }: GpuDisplayInput): boolean {
-  return hasFile && !rgbView && useGpu && hasRawPixels && !previewOnly;
+export function gpuDisplayOnScreen({ hasFile, rgbView, useGpu, hasRawPixels, previewOnly, isSpectrum }: GpuDisplayInput): boolean {
+  return hasFile && !isSpectrum && !rgbView && useGpu && hasRawPixels && !previewOnly;
 }
 
-export type PreviewViewer = "empty" | "cpu" | "preview-tab";
+export type PreviewViewer = "empty" | "spectrum" | "cpu" | "preview-tab";
 
 export function previewViewer(input: GpuDisplayInput): PreviewViewer {
   if (!input.hasFile) return "empty";
-  return input.rgbView || gpuDisplayOnScreen(input) ? "preview-tab" : "cpu";
+  if (input.rgbView) return "preview-tab";
+  if (input.isSpectrum) return "spectrum";
+  return gpuDisplayOnScreen(input) ? "preview-tab" : "cpu";
+}
+
+export const SPECTRUM_VIEWER_HINT = "It has no image to show here. The Cube tool plots and measures it.";
+export const SPECTRUM_VIEWER_OPEN_CUBE = "Open the Cube tool";
+
+export function spectrumViewerTitle(name: string): string {
+  return `${name} is a 1D spectrum`;
 }
 
 export const NEEDS_GPU_TITLE = "needs GPU rendering";

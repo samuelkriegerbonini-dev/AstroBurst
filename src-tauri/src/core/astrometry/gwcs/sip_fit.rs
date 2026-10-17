@@ -227,20 +227,20 @@ fn normalise_ra(ra: f64) -> f64 {
     }
 }
 
-struct NativePlane {
+pub(crate) struct NativePlane {
     rotate: Node,
     project: Node,
 }
 
 impl NativePlane {
-    fn new(lon: f64, lat: f64) -> Self {
+    pub(crate) fn new(lon: f64, lat: f64) -> Self {
         Self {
             rotate: Node::new(Kind::rotate_celestial2native(lon, lat, TAN_LON_POLE), "rotate3d", "sip_fit"),
             project: Node::new(Kind::Sky2PixTan, "gnomonic", "sip_fit"),
         }
     }
 
-    fn project(&self, sky: [f64; 2]) -> [f64; 2] {
+    pub(crate) fn project(&self, sky: [f64; 2]) -> [f64; 2] {
         let out = self.project.eval(self.rotate.eval(Vals::pair(sky[0], sky[1])));
         [out.v[0], out.v[1]]
     }

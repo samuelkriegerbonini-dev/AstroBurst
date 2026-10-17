@@ -8,8 +8,10 @@ import {
   combineAttemptErrors,
   selectCubePlaneHdu,
   isCubePlaneResult,
+  spectrum1dHint,
+  spectrumProbeFailure,
 } from "../utils/fitsErrors";
-import { tableOnlyFileHint } from "../utils/x1dCompare";
+import { probeSpectrum1d } from "../services/spectrum1d";
 import { fileStore } from "./useFileStore";
 import { refreshOverwrittenFiles } from "./refreshOverwrittenFiles";
 import { onCommandOutputs } from "../infrastructure/tauri";
@@ -85,17 +87,23 @@ async function loadFirstCubePlane(file: ProcessedFile, rejection: string): Promi
   }
 }
 
-export function ingestOutcome(msg: string): "table" | "cube-fallback" {
-  const verdictEnd = msg.indexOf(";");
-  const verdict = verdictEnd === -1 ? msg : msg.slice(0, verdictEnd);
-  return tableOnlyFileHint(verdict) !== null ? "table" : "cube-fallback";
+export function ingestOutcome(msg: string): "spectrum" | "cube-fallback" {
+  return spectrum1dHint(msg) !== null ? "spectrum" : "cube-fallback";
+}
+
+async function settledAsSpectrum(file: ProcessedFile, msg: string): Promise<boolean> {
+  try {
+    const probe = await probeSpectrum1d(file.path);
+    if (probe === null) return false;
+    fileStore.fileSpectrum(file.id, probe);
+  } catch (e) {
+    fileStore.fileError(file.id, spectrumProbeFailure(msg, e instanceof Error ? e.message : String(e)));
+  }
+  return true;
 }
 
 export async function settleIngestFailure(file: ProcessedFile, msg: string): Promise<void> {
-  if (ingestOutcome(msg) === "table") {
-    fileStore.fileTable(file.id, msg);
-    return;
-  }
+  if (ingestOutcome(msg) === "spectrum" && (await settledAsSpectrum(file, msg))) return;
   const loadedAsCube = await loadFirstCubePlane(file, msg);
   if (!loadedAsCube) fileStore.fileError(file.id, msg);
 }

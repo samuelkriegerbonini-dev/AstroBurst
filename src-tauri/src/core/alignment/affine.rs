@@ -2,37 +2,26 @@ use ndarray::Array2;
 use rayon::prelude::*;
 
 use crate::core::alignment::phase_correlation;
-use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
+use crate::core::alignment::triangles::{self, StarPair, TriangleParams};
+use crate::core::analysis::star_detection::detect_stars;
 use crate::core::imaging::sampling::bicubic_sample;
 
-const MAX_STARS: usize = 60;
-const TRIANGLE_TOLERANCE: f64 = 0.02;
-const TRIANGLE_TIE_MARGIN: f64 = 0.03;
 const MIN_MATCHES_AFFINE: usize = 6;
 const MIN_MATCHES_RIGID: usize = 4;
-const RANSAC_ITERATIONS: usize = 2000;
-const RANSAC_CHUNKS: usize = 16;
-const SINGULAR_RELATIVE_DET: f64 = 1e-12;
-const RANSAC_INLIER_PX: f64 = 3.0;
 const DETECTION_SIGMA: f64 = 3.5;
-const MIN_TRIANGLE_SIDE: f64 = 15.0;
-const MIN_VOTES: u32 = 1;
-const MIN_INLIER_RATIO: f64 = 0.20;
-const MAX_RESIDUAL_PX: f64 = 5.0;
 const MAX_OFFSET_FRACTION: f64 = 0.40;
-const MAX_ROTATION_DEG: f64 = 30.0;
 const MIN_SCALE: f64 = 0.70;
 const MAX_SCALE: f64 = 1.40;
+const MIN_REFLECTION_INLIERS: usize = 5;
 
 fn normalize_for_detection(image: &Array2<f32>) -> Array2<f32> {
-    let slice = image.as_slice().unwrap();
-    let len = slice.len();
+    let len = image.len();
     if len == 0 {
         return image.clone();
     }
 
     let sample_step = (len / 100_000).max(1);
-    let mut samples: Vec<f32> = slice.iter().step_by(sample_step).copied().filter(|v| v.is_finite()).collect();
+    let mut samples: Vec<f32> = image.iter().step_by(sample_step).copied().filter(|v| v.is_finite()).collect();
     if samples.len() < 100 {
         return image.clone();
     }
@@ -101,8 +90,10 @@ pub struct AffineAlignResult {
     pub matched_stars: usize,
     pub inliers: usize,
     pub residual_px: f64,
+    pub rms_px: f64,
     pub method: AffineAlignMethod,
     pub confidence: f64,
+    pub rejection: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -124,13 +115,6 @@ impl std::fmt::Display for AffineAlignMethod {
     }
 }
 
-struct TriangleDesc {
-    sorted_vertices: [usize; 3],
-    ratio_mid: f64,
-    ratio_long: f64,
-    orientation: bool,
-}
-
 pub fn align_channel_affine(
     reference: &Array2<f32>,
     target: &Array2<f32>,
@@ -148,106 +132,219 @@ pub fn align_channel_affine(
         ref_det.stars.len(), tgt_det.stars.len(), cols, rows
     );
 
-    let ref_stars = select_alignment_stars(&ref_det.stars, MAX_STARS, rows, cols);
-    let tgt_stars = select_alignment_stars(&tgt_det.stars, MAX_STARS, rows, cols);
+    let params = &TriangleParams::ALIGNMENT;
+    let ref_stars = triangles::select_alignment_stars(&ref_det.stars, params.max_stars, rows, cols);
+    let tgt_stars = triangles::select_alignment_stars(&tgt_det.stars, params.max_stars, rows, cols);
 
+    match register_star_lists(&ref_stars, &tgt_stars, rows, cols, params) {
+        Ok(result) => result,
+        Err(rejection) => fallback_phase_correlation(reference, target, rows, cols, rejection),
+    }
+}
+
+fn register_star_lists(
+    ref_stars: &[(f64, f64)],
+    tgt_stars: &[(f64, f64)],
+    rows: usize,
+    cols: usize,
+    params: &TriangleParams,
+) -> Result<AffineAlignResult, Option<String>> {
     if ref_stars.len() < MIN_MATCHES_RIGID || tgt_stars.len() < MIN_MATCHES_RIGID {
         log::info!(
             "Affine: insufficient stars (ref={}, tgt={}), fallback to phase correlation",
             ref_stars.len(), tgt_stars.len()
         );
-        return fallback_phase_correlation(reference, target, rows, cols);
+        return Err(None);
     }
 
-    let ref_tris = build_triangles(&ref_stars);
-    let tgt_tris = build_triangles(&tgt_stars);
+    let ref_tris = triangles::build_triangles(ref_stars, params);
+    let tgt_tris = triangles::build_triangles(tgt_stars, params);
+    let same = triangles::match_triangles(ref_stars, tgt_stars, &ref_tris, &tgt_tris, params);
 
     log::info!(
-        "Affine: triangles ref={}, tgt={}, stars ref={}, tgt={}",
-        ref_tris.len(), tgt_tris.len(), ref_stars.len(), tgt_stars.len()
+        "Affine: {} triangle matches ({} votes) from stars ref={}, tgt={}",
+        same.pairs.len(), same.votes, ref_stars.len(), tgt_stars.len()
     );
 
-    if ref_tris.is_empty() || tgt_tris.is_empty() {
-        log::info!(
-            "Affine: no triangles (ref={}, tgt={}), fallback to phase correlation",
-            ref_tris.len(), tgt_tris.len()
-        );
-        return fallback_phase_correlation(reference, target, rows, cols);
+    let rejection = match fit_same_parity(&same.pairs, rows, cols, params) {
+        Ok(result) => return Ok(result),
+        Err(rejection) => rejection,
+    };
+
+    let more_voted = triangles::match_star_lists(ref_stars, tgt_stars, params);
+    if !more_voted.flipped {
+        return Err(rejection);
     }
+    match reflection_refusal(&more_voted.pairs, rows, cols, params) {
+        Some(refused) => Ok(refused),
+        None => Err(rejection),
+    }
+}
 
-    let matches = match_triangles(&ref_stars, &tgt_stars, &ref_tris, &tgt_tris);
-
+fn fit_same_parity(
+    matches: &[StarPair],
+    rows: usize,
+    cols: usize,
+    params: &TriangleParams,
+) -> Result<AffineAlignResult, Option<String>> {
     if matches.len() < MIN_MATCHES_RIGID {
         log::info!(
             "Affine: too few triangle matches ({}), fallback to phase correlation",
             matches.len()
         );
-        return fallback_phase_correlation(reference, target, rows, cols);
+        return Err(None);
     }
 
+    let mut rejection: Option<String> = None;
+
     if matches.len() >= MIN_MATCHES_AFFINE {
-        if let Some(result) = ransac_affine(&matches, AffineAlignMethod::Affine) {
-            match check_transform_sanity(&result, rows, cols) {
-                Ok(()) => return result,
-                Err(reason) => log::warn!(
-                    "Affine transform rejected: {}. stars={}, inliers={}, residual={:.2}px. Trying rigid.",
-                    reason, result.matched_stars, result.inliers, result.residual_px
-                ),
+        if let Some(result) = triangles::ransac_affine(matches, AffineAlignMethod::Affine, params) {
+            match check_transform_sanity(&result, rows, cols, params) {
+                Ok(()) => return Ok(result),
+                Err(rejected) => {
+                    log::warn!(
+                        "Affine transform rejected: {}. stars={}, inliers={}, residual={:.2}px, rms={:.2}px. Trying rigid.",
+                        rejected.reason, result.matched_stars, result.inliers, result.residual_px, result.rms_px
+                    );
+                    rejection = Some(rejected.reason);
+                }
             }
         } else {
             log::info!("Affine RANSAC returned no result with {} matches, trying rigid", matches.len());
         }
     }
 
-    if matches.len() >= MIN_MATCHES_RIGID {
-        if let Some(result) = ransac_affine(&matches, AffineAlignMethod::Rigid) {
-            match check_transform_sanity(&result, rows, cols) {
-                Ok(()) => return result,
-                Err(reason) => log::warn!(
-                    "Rigid transform rejected: {}. stars={}, inliers={}, residual={:.2}px. Fallback to PC.",
-                    reason, result.matched_stars, result.inliers, result.residual_px
-                ),
+    if let Some(result) = triangles::ransac_affine(matches, AffineAlignMethod::Rigid, params) {
+        match check_transform_sanity(&result, rows, cols, params) {
+            Ok(()) => return Ok(result),
+            Err(rejected) => {
+                log::warn!(
+                    "Rigid transform rejected: {}. stars={}, inliers={}, residual={:.2}px.",
+                    rejected.reason, result.matched_stars, result.inliers, result.residual_px
+                );
+                rejection.get_or_insert(rejected.reason);
             }
-        } else {
-            log::info!("Rigid RANSAC returned no result with {} matches, fallback to PC", matches.len());
         }
+    } else {
+        log::info!("Rigid RANSAC returned no result with {} matches", matches.len());
     }
 
-    fallback_phase_correlation(reference, target, rows, cols)
+    Err(rejection)
 }
 
-fn check_transform_sanity(result: &AffineAlignResult, rows: usize, cols: usize) -> Result<(), String> {
+fn reflection_refusal(
+    mirrored_pairs: &[StarPair],
+    rows: usize,
+    cols: usize,
+    params: &TriangleParams,
+) -> Option<AffineAlignResult> {
+    if mirrored_pairs.len() < MIN_MATCHES_AFFINE {
+        return None;
+    }
+    let fit = triangles::ransac_affine(mirrored_pairs, AffineAlignMethod::Affine, params)?;
+    let rejected = check_transform_sanity(&fit, rows, cols, params).err()?;
+    if !rejected.reflection || !is_decisive_reflection(&fit) {
+        return None;
+    }
+    log::warn!(
+        "Affine: mirrored star pattern, {} of {} mirrored matches agree: {}",
+        fit.inliers, fit.matched_stars, rejected.reason
+    );
+    Some(AffineAlignResult {
+        transform: AffineTransform::identity(),
+        method: AffineAlignMethod::Identity,
+        confidence: 0.0,
+        rejection: Some(rejected.reason),
+        ..fit
+    })
+}
+
+fn is_decisive_reflection(fit: &AffineAlignResult) -> bool {
+    let t = &fit.transform;
+    let det = t.a * t.d - t.b * t.c;
+    fit.inliers >= MIN_REFLECTION_INLIERS && det.abs() >= MIN_SCALE * MIN_SCALE
+}
+
+struct SanityRejection {
+    reason: String,
+    reflection: bool,
+}
+
+impl SanityRejection {
+    fn other(reason: String) -> Self {
+        Self { reason, reflection: false }
+    }
+}
+
+fn check_transform_sanity(
+    result: &AffineAlignResult,
+    rows: usize,
+    cols: usize,
+    params: &TriangleParams,
+) -> Result<(), SanityRejection> {
     let t = &result.transform;
-
-    let max_tx = cols as f64 * MAX_OFFSET_FRACTION;
-    let max_ty = rows as f64 * MAX_OFFSET_FRACTION;
-    if t.tx.abs() > max_tx || t.ty.abs() > max_ty {
-        return Err(format!(
-            "translation ({:.1}, {:.1}) exceeds limit ({:.0}, {:.0})",
-            t.tx, t.ty, max_tx, max_ty
-        ));
+    if ![t.a, t.b, t.tx, t.c, t.d, t.ty].iter().all(|v| v.is_finite()) {
+        return Err(SanityRejection::other("non-finite transform rejected".to_string()));
     }
 
-    let rot = t.rotation_deg().abs();
-    if rot > MAX_ROTATION_DEG {
-        return Err(format!("rotation {:.2} deg exceeds {:.0} deg limit", rot, MAX_ROTATION_DEG));
-    }
-
-    let sx = t.scale_x();
-    let sy = t.scale_y();
-    if sx < MIN_SCALE || sx > MAX_SCALE || sy < MIN_SCALE || sy > MAX_SCALE {
-        return Err(format!(
+    let (sx, sy) = (t.scale_x(), t.scale_y());
+    let scale_range = MIN_SCALE..=MAX_SCALE;
+    if !scale_range.contains(&sx) || !scale_range.contains(&sy) {
+        return Err(SanityRejection::other(format!(
             "scale ({:.3}, {:.3}) outside [{:.2}, {:.2}] range",
             sx, sy, MIN_SCALE, MAX_SCALE
-        ));
+        )));
     }
 
     let det = t.a * t.d - t.b * t.c;
     if det <= 0.0 {
-        return Err(format!("reflection (det={:.3}) rejected", det));
+        return Err(SanityRejection {
+            reason: format!("reflection (det={:.3}) rejected", det),
+            reflection: true,
+        });
+    }
+
+    let rotation = t.rotation_deg();
+    let max_dx = cols as f64 * MAX_OFFSET_FRACTION;
+    let max_dy = rows as f64 * MAX_OFFSET_FRACTION;
+    if rotation.abs() <= params.wide_rotation_above_deg {
+        if t.tx.abs() > max_dx || t.ty.abs() > max_dy {
+            return Err(SanityRejection::other(format!(
+                "translation ({:.1}, {:.1}) exceeds limit ({:.0}, {:.0})",
+                t.tx, t.ty, max_dx, max_dy
+            )));
+        }
+    } else {
+        let (dy, dx) = center_displacement(t, rows, cols);
+        if dx.abs() > max_dx || dy.abs() > max_dy {
+            return Err(SanityRejection::other(format!(
+                "centre displacement ({:.1}, {:.1}) exceeds limit ({:.0}, {:.0})",
+                dx, dy, max_dx, max_dy
+            )));
+        }
+    }
+
+    let wide_fit = params.is_wide_rotation_fit(result.matched_stars, result.inliers, result.rms_px);
+    if rotation.abs() > params.wide_rotation_above_deg && !wide_fit {
+        return Err(SanityRejection::other(format!(
+            "rotation {:.2} deg needs at least {} inliers and RMS <= {:.1} px, got {} of {} matches at RMS {:.2} px",
+            rotation,
+            params.wide_rotation_inliers_needed(result.matched_stars),
+            params.wide_rotation_max_rms_px,
+            result.inliers,
+            result.matched_stars,
+            result.rms_px
+        )));
     }
 
     Ok(())
+}
+
+pub(crate) fn center_displacement(transform: &AffineTransform, rows: usize, cols: usize) -> (f64, f64) {
+    let cx = (cols as f64 - 1.0) * 0.5;
+    let cy = (rows as f64 - 1.0) * 0.5;
+    let (sx, sy) = transform.map(cx, cy);
+    (sy - cy, sx - cx)
 }
 
 fn fallback_phase_correlation(
@@ -255,6 +352,7 @@ fn fallback_phase_correlation(
     target: &Array2<f32>,
     rows: usize,
     cols: usize,
+    rejection: Option<String>,
 ) -> AffineAlignResult {
     let pc = phase_correlation::phase_correlate(reference, target);
 
@@ -266,8 +364,10 @@ fn fallback_phase_correlation(
             matched_stars: 0,
             inliers: 0,
             residual_px: 0.0,
+            rms_px: 0.0,
             method: AffineAlignMethod::Identity,
             confidence: 0.0,
+            rejection,
         };
     }
 
@@ -276,473 +376,11 @@ fn fallback_phase_correlation(
         matched_stars: 0,
         inliers: 0,
         residual_px: 0.0,
+        rms_px: 0.0,
         method: AffineAlignMethod::PhaseCorrelation,
         confidence: pc.confidence,
+        rejection,
     }
-}
-
-fn select_alignment_stars(
-    stars: &[DetectedStar],
-    n: usize,
-    rows: usize,
-    cols: usize,
-) -> Vec<(f64, f64)> {
-    if stars.len() <= n {
-        return stars.iter().map(|s| (s.x, s.y)).collect();
-    }
-    const GRID: usize = 4;
-    let cell_w = (cols as f64 / GRID as f64).max(1.0);
-    let cell_h = (rows as f64 / GRID as f64).max(1.0);
-    let per_cell = (n / (GRID * GRID)).max(1);
-    let mut cell_counts = vec![0usize; GRID * GRID];
-    let mut selected: Vec<usize> = Vec::with_capacity(n);
-    let mut skipped: Vec<usize> = Vec::new();
-    for (idx, s) in stars.iter().enumerate() {
-        let gx = ((s.x / cell_w) as usize).min(GRID - 1);
-        let gy = ((s.y / cell_h) as usize).min(GRID - 1);
-        let cell = gy * GRID + gx;
-        if cell_counts[cell] < per_cell && selected.len() < n {
-            cell_counts[cell] += 1;
-            selected.push(idx);
-        } else {
-            skipped.push(idx);
-        }
-    }
-    for idx in skipped {
-        if selected.len() >= n {
-            break;
-        }
-        selected.push(idx);
-    }
-    selected.sort_unstable();
-    selected.into_iter().map(|i| (stars[i].x, stars[i].y)).collect()
-}
-
-fn build_triangles(stars: &[(f64, f64)]) -> Vec<TriangleDesc> {
-    let n = stars.len();
-    if n < 3 {
-        return Vec::new();
-    }
-    let limit = n.min(MAX_STARS);
-
-    let tris: Vec<TriangleDesc> = (0..limit)
-        .into_par_iter()
-        .flat_map(|i| {
-            let mut local = Vec::new();
-            for j in (i + 1)..limit {
-                for k in (j + 1)..limit {
-                    let mut sides = [
-                        dist(stars[i], stars[j]),
-                        dist(stars[j], stars[k]),
-                        dist(stars[i], stars[k]),
-                    ];
-                    sides.sort_by(|a, b| a.total_cmp(b));
-
-                    if sides[0] < MIN_TRIANGLE_SIDE {
-                        continue;
-                    }
-
-                    let ratio_mid = sides[1] / sides[0];
-                    let ratio_long = sides[2] / sides[0];
-
-                    if (ratio_mid - 1.0).abs() < TRIANGLE_TIE_MARGIN
-                        || (ratio_long - ratio_mid).abs() < TRIANGLE_TIE_MARGIN
-                    {
-                        continue;
-                    }
-
-                    let sorted = sort_triangle_vertices(stars, &[i, j, k]);
-                    let (ax, ay) = stars[sorted[0]];
-                    let (bx, by) = stars[sorted[1]];
-                    let (cx, cy) = stars[sorted[2]];
-                    let orientation = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) >= 0.0;
-
-                    local.push(TriangleDesc {
-                        sorted_vertices: sorted,
-                        ratio_mid,
-                        ratio_long,
-                        orientation,
-                    });
-                }
-            }
-            local
-        })
-        .collect();
-
-    tris
-}
-
-fn match_triangles(
-    ref_stars: &[(f64, f64)],
-    tgt_stars: &[(f64, f64)],
-    ref_tris: &[TriangleDesc],
-    tgt_tris: &[TriangleDesc],
-) -> Vec<(f64, f64, f64, f64)> {
-    let mut buckets: std::collections::HashMap<(i64, i64), Vec<usize>> =
-        std::collections::HashMap::new();
-    for (idx, tt) in tgt_tris.iter().enumerate() {
-        let key = (
-            (tt.ratio_mid / TRIANGLE_TOLERANCE).floor() as i64,
-            (tt.ratio_long / TRIANGLE_TOLERANCE).floor() as i64,
-        );
-        buckets.entry(key).or_default().push(idx);
-    }
-
-    let local_votes: Vec<std::collections::HashMap<(usize, usize), u32>> = ref_tris
-        .par_iter()
-        .map(|rt| {
-            let mut votes = std::collections::HashMap::new();
-            let km = (rt.ratio_mid / TRIANGLE_TOLERANCE).floor() as i64;
-            let kl = (rt.ratio_long / TRIANGLE_TOLERANCE).floor() as i64;
-            for dm in -1..=1 {
-                for dl in -1..=1 {
-                    let Some(indices) = buckets.get(&(km + dm, kl + dl)) else {
-                        continue;
-                    };
-                    for &tt_idx in indices {
-                        let tt = &tgt_tris[tt_idx];
-                        if rt.orientation != tt.orientation {
-                            continue;
-                        }
-                        let d_mid = (rt.ratio_mid - tt.ratio_mid).abs();
-                        let d_long = (rt.ratio_long - tt.ratio_long).abs();
-
-                        if d_mid > TRIANGLE_TOLERANCE || d_long > TRIANGLE_TOLERANCE {
-                            continue;
-                        }
-
-                        for p in 0..3 {
-                            let ri = rt.sorted_vertices[p];
-                            let ti = tt.sorted_vertices[p];
-                            *votes.entry((ri, ti)).or_insert(0) += 1;
-                        }
-                    }
-                }
-            }
-            votes
-        })
-        .collect();
-
-    let mut vote_map: std::collections::HashMap<(usize, usize), u32> =
-        std::collections::HashMap::new();
-    for local in local_votes {
-        for (k, v) in local {
-            *vote_map.entry(k).or_insert(0) += v;
-        }
-    }
-
-    let mut pairs: Vec<((usize, usize), u32)> = vote_map.into_iter().collect();
-    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-    let mut used_ref = vec![false; ref_stars.len()];
-    let mut used_tgt = vec![false; tgt_stars.len()];
-    let mut matches = Vec::new();
-
-    for ((ri, ti), votes) in &pairs {
-        if *votes < MIN_VOTES {
-            break;
-        }
-        if used_ref[*ri] || used_tgt[*ti] {
-            continue;
-        }
-        used_ref[*ri] = true;
-        used_tgt[*ti] = true;
-        matches.push((
-            ref_stars[*ri].0,
-            ref_stars[*ri].1,
-            tgt_stars[*ti].0,
-            tgt_stars[*ti].1,
-        ));
-    }
-
-    matches
-}
-
-fn sort_triangle_vertices(
-    stars: &[(f64, f64)],
-    indices: &[usize; 3],
-) -> [usize; 3] {
-    let [i, j, k] = *indices;
-    let mut verts = [
-        (i, dist(stars[j], stars[k])),
-        (j, dist(stars[i], stars[k])),
-        (k, dist(stars[i], stars[j])),
-    ];
-    verts.sort_by(|a, b| a.1.total_cmp(&b.1));
-    [verts[0].0, verts[1].0, verts[2].0]
-}
-
-fn ransac_affine(
-    matches: &[(f64, f64, f64, f64)],
-    method: AffineAlignMethod,
-) -> Option<AffineAlignResult> {
-    let n = matches.len();
-    let min_sample = if method == AffineAlignMethod::Affine { 3 } else { 2 };
-    if n < min_sample {
-        return None;
-    }
-
-    let chunk_size = RANSAC_ITERATIONS.div_ceil(RANSAC_CHUNKS);
-
-    let chunk_results: Vec<(usize, AffineTransform, Vec<bool>)> = (0..RANSAC_CHUNKS)
-        .into_par_iter()
-        .map(|chunk| {
-            let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_BABEu64.wrapping_add((chunk as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15u64));
-            let inline_rand = |state: &mut u64| -> usize {
-                *state ^= *state << 13;
-                *state ^= *state >> 7;
-                *state ^= *state << 17;
-                (*state as usize) % n
-            };
-
-            let mut local_best_inliers = 0usize;
-            let mut local_best_transform = AffineTransform::identity();
-            let mut local_best_mask = vec![false; n];
-            let mut mask = vec![false; n];
-
-            for _ in 0..chunk_size {
-                let mut sample = Vec::with_capacity(min_sample);
-                let mut attempts = 0;
-                while sample.len() < min_sample && attempts < 20 {
-                    let idx = inline_rand(&mut rng_state);
-                    if !sample.contains(&idx) {
-                        sample.push(idx);
-                    }
-                    attempts += 1;
-                }
-                if sample.len() < min_sample {
-                    continue;
-                }
-
-                let sample_matches: Vec<(f64, f64, f64, f64)> =
-                    sample.iter().map(|&i| matches[i]).collect();
-
-                let transform = match method {
-                    AffineAlignMethod::Affine => fit_affine(&sample_matches),
-                    _ => fit_rigid(&sample_matches),
-                };
-                let transform = match transform {
-                    Some(t) => t,
-                    None => continue,
-                };
-
-                mask.fill(false);
-                let mut inlier_count = 0;
-                for (i, &(rx, ry, tx, ty)) in matches.iter().enumerate() {
-                    let (px, py) = transform.map(rx, ry);
-                    let err = ((px - tx).powi(2) + (py - ty).powi(2)).sqrt();
-                    if err < RANSAC_INLIER_PX {
-                        inlier_count += 1;
-                        mask[i] = true;
-                    }
-                }
-
-                if inlier_count > local_best_inliers {
-                    local_best_inliers = inlier_count;
-                    local_best_transform = transform;
-                    local_best_mask.copy_from_slice(&mask);
-                }
-            }
-
-            (local_best_inliers, local_best_transform, local_best_mask)
-        })
-        .collect();
-    let best = chunk_results
-        .into_iter()
-        .reduce(|a, b| if b.0 > a.0 { b } else { a })
-        .unwrap_or((0, AffineTransform::identity(), vec![false; n]));
-
-    let (best_inliers, _best_transform, best_inlier_mask) = best;
-
-    if best_inliers < MIN_MATCHES_RIGID {
-        log::debug!("RANSAC: best_inliers {} < MIN_MATCHES_RIGID {}", best_inliers, MIN_MATCHES_RIGID);
-        return None;
-    }
-
-    let inlier_ratio = best_inliers as f64 / n as f64;
-    if inlier_ratio < MIN_INLIER_RATIO {
-        log::debug!("RANSAC: inlier_ratio {:.3} < MIN_INLIER_RATIO {:.2}", inlier_ratio, MIN_INLIER_RATIO);
-        return None;
-    }
-
-    let inlier_matches: Vec<(f64, f64, f64, f64)> = matches
-        .iter()
-        .zip(best_inlier_mask.iter())
-        .filter(|(_, &m)| m)
-        .map(|(&pt, _)| pt)
-        .collect();
-
-    let refined = match method {
-        AffineAlignMethod::Affine => fit_affine(&inlier_matches),
-        _ => fit_rigid(&inlier_matches),
-    }
-        .unwrap_or(_best_transform);
-
-    let residual = compute_residual(&inlier_matches, &refined);
-    if residual > MAX_RESIDUAL_PX {
-        log::debug!("RANSAC: refined residual {:.3}px > MAX_RESIDUAL_PX {:.1}", residual, MAX_RESIDUAL_PX);
-        return None;
-    }
-
-    Some(AffineAlignResult {
-        transform: refined,
-        matched_stars: matches.len(),
-        inliers: best_inliers,
-        residual_px: residual,
-        method,
-        confidence: 1.0,
-    })
-}
-
-fn fit_affine(matches: &[(f64, f64, f64, f64)]) -> Option<AffineTransform> {
-    let n = matches.len();
-    if n < 3 {
-        return None;
-    }
-
-    let (ab, tx) = solve_3x3_ls(matches, true)?;
-    let (cd, ty) = solve_3x3_ls(matches, false)?;
-
-    Some(AffineTransform {
-        a: ab.0,
-        b: ab.1,
-        tx,
-        c: cd.0,
-        d: cd.1,
-        ty,
-    })
-}
-
-fn solve_3x3_ls(
-    matches: &[(f64, f64, f64, f64)],
-    solve_x: bool,
-) -> Option<((f64, f64), f64)> {
-    let count = matches.len() as f64;
-    let (sum_x, sum_y) = matches.iter().fold((0.0, 0.0), |(sx, sy), &(rx, ry, _, _)| (sx + rx, sy + ry));
-    let (mean_x, mean_y) = (sum_x / count, sum_y / count);
-    let mut ata = [[0.0f64; 3]; 3];
-    let mut atb = [0.0f64; 3];
-
-    for &(rx, ry, tx, ty) in matches {
-        let target = if solve_x { tx } else { ty };
-        let row = [rx - mean_x, ry - mean_y, 1.0];
-
-        for i in 0..3 {
-            for j in 0..3 {
-                ata[i][j] += row[i] * row[j];
-            }
-            atb[i] += row[i] * target;
-        }
-    }
-
-    let x = solve_3x3(ata, atb)?;
-    Some(((x[0], x[1]), x[2] - x[0] * mean_x - x[1] * mean_y))
-}
-
-fn solve_3x3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
-    let det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
-        - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
-        + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
-
-    let hadamard_bound: f64 = a
-        .iter()
-        .map(|row| row.iter().map(|v| v * v).sum::<f64>().sqrt())
-        .product();
-    if !det.is_finite() || !(det.abs() > SINGULAR_RELATIVE_DET * hadamard_bound) {
-        return None;
-    }
-
-    let inv_det = 1.0 / det;
-
-    let inv = [
-        [
-            (a[1][1] * a[2][2] - a[1][2] * a[2][1]) * inv_det,
-            (a[0][2] * a[2][1] - a[0][1] * a[2][2]) * inv_det,
-            (a[0][1] * a[1][2] - a[0][2] * a[1][1]) * inv_det,
-        ],
-        [
-            (a[1][2] * a[2][0] - a[1][0] * a[2][2]) * inv_det,
-            (a[0][0] * a[2][2] - a[0][2] * a[2][0]) * inv_det,
-            (a[0][2] * a[1][0] - a[0][0] * a[1][2]) * inv_det,
-        ],
-        [
-            (a[1][0] * a[2][1] - a[1][1] * a[2][0]) * inv_det,
-            (a[0][1] * a[2][0] - a[0][0] * a[2][1]) * inv_det,
-            (a[0][0] * a[1][1] - a[0][1] * a[1][0]) * inv_det,
-        ],
-    ];
-
-    Some([
-        inv[0][0] * b[0] + inv[0][1] * b[1] + inv[0][2] * b[2],
-        inv[1][0] * b[0] + inv[1][1] * b[1] + inv[1][2] * b[2],
-        inv[2][0] * b[0] + inv[2][1] * b[1] + inv[2][2] * b[2],
-    ])
-}
-
-fn fit_rigid(matches: &[(f64, f64, f64, f64)]) -> Option<AffineTransform> {
-    let n = matches.len();
-    if n < 2 {
-        return None;
-    }
-
-    let (mut rcx, mut rcy, mut tcx, mut tcy) = (0.0, 0.0, 0.0, 0.0);
-    for &(rx, ry, tx, ty) in matches {
-        rcx += rx;
-        rcy += ry;
-        tcx += tx;
-        tcy += ty;
-    }
-    let nf = n as f64;
-    rcx /= nf;
-    rcy /= nf;
-    tcx /= nf;
-    tcy /= nf;
-
-    let mut num = 0.0;
-    let mut den = 0.0;
-    for &(rx, ry, tx, ty) in matches {
-        let drx = rx - rcx;
-        let dry = ry - rcy;
-        let dtx = tx - tcx;
-        let dty = ty - tcy;
-        num += drx * dty - dry * dtx;
-        den += drx * dtx + dry * dty;
-    }
-
-    let theta = num.atan2(den);
-    let cos_t = theta.cos();
-    let sin_t = theta.sin();
-
-    let tx = tcx - cos_t * rcx + sin_t * rcy;
-    let ty = tcy - sin_t * rcx - cos_t * rcy;
-
-    Some(AffineTransform {
-        a: cos_t,
-        b: -sin_t,
-        tx,
-        c: sin_t,
-        d: cos_t,
-        ty,
-    })
-}
-
-fn compute_residual(matches: &[(f64, f64, f64, f64)], transform: &AffineTransform) -> f64 {
-    if matches.is_empty() {
-        return 0.0;
-    }
-    let sum: f64 = matches
-        .iter()
-        .map(|&(rx, ry, tx, ty)| {
-            let (px, py) = transform.map(rx, ry);
-            ((px - tx).powi(2) + (py - ty).powi(2)).sqrt()
-        })
-        .sum();
-    sum / matches.len() as f64
-}
-
-#[inline]
-fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
-    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
 }
 
 pub fn warp_image(
@@ -753,13 +391,19 @@ pub fn warp_image(
 ) -> Array2<f32> {
     let (src_rows, src_cols) = image.dim();
     let total = out_rows * out_cols;
+    if total == 0 {
+        return Array2::zeros((out_rows, out_cols));
+    }
     let mut buf = vec![f32::NAN; total];
 
     if src_rows == 0 || src_cols == 0 {
         return Array2::from_shape_vec((out_rows, out_cols), buf).unwrap();
     }
 
-    let slice = image.as_slice().expect("contiguous");
+    let standard = image.as_standard_layout();
+    let Some(slice) = standard.as_slice() else {
+        return Array2::from_elem((out_rows, out_cols), f32::NAN);
+    };
     let max_x = src_cols as f64 - 0.5;
     let max_y = src_rows as f64 - 0.5;
 
@@ -781,6 +425,258 @@ pub fn warp_image(
 mod tests {
     use super::*;
 
+    fn sanity(result: &AffineAlignResult, rows: usize, cols: usize) -> Result<(), String> {
+        check_transform_sanity(result, rows, cols, &TriangleParams::ALIGNMENT).map_err(|rejected| rejected.reason)
+    }
+
+    fn named_reflection(result: &AffineAlignResult, rows: usize, cols: usize) -> bool {
+        check_transform_sanity(result, rows, cols, &TriangleParams::ALIGNMENT)
+            .is_err_and(|rejected| rejected.reflection)
+    }
+
+    fn rotation_about_centre(deg: f64, rows: usize, cols: usize) -> AffineTransform {
+        let (cx, cy) = ((cols as f64 - 1.0) * 0.5, (rows as f64 - 1.0) * 0.5);
+        let (sin, cos) = deg.to_radians().sin_cos();
+        AffineTransform {
+            a: cos,
+            b: -sin,
+            tx: cx - cos * cx + sin * cy,
+            c: sin,
+            d: cos,
+            ty: cy - sin * cx - cos * cy,
+        }
+    }
+
+    fn fitted(transform: AffineTransform, matched: usize, inliers: usize, rms_px: f64) -> AffineAlignResult {
+        AffineAlignResult {
+            transform,
+            matched_stars: matched,
+            inliers,
+            residual_px: rms_px,
+            rms_px,
+            method: AffineAlignMethod::Affine,
+            confidence: 1.0,
+            rejection: None,
+        }
+    }
+
+    #[test]
+    fn a_180_degree_rotation_about_the_centre_passes_the_translation_rule() {
+        let half_turn = rotation_about_centre(180.0, 2048, 2048);
+        assert!(half_turn.tx > 2000.0 && half_turn.ty > 2000.0, "{half_turn:?}");
+        let (dy, dx) = center_displacement(&half_turn, 2048, 2048);
+        assert!(dy.abs() < 1e-9 && dx.abs() < 1e-9, "({dy}, {dx})");
+        assert_eq!(sanity(&fitted(half_turn, 60, 40, 0.02), 2048, 2048), Ok(()));
+    }
+
+    #[test]
+    fn a_small_rotation_keeps_todays_thresholds() {
+        let ten_degrees = rotation_about_centre(10.0, 1000, 1000);
+        assert_eq!(sanity(&fitted(ten_degrees, 12, 6, 2.5), 1000, 1000), Ok(()));
+        let thirty_degrees = rotation_about_centre(30.0, 1000, 1000);
+        assert_eq!(sanity(&fitted(thirty_degrees, 12, 6, 2.5), 1000, 1000), Ok(()));
+    }
+
+    #[test]
+    fn a_wide_rotation_needs_eight_inliers_a_quarter_of_the_matches_and_one_pixel_rms() {
+        for deg in [37.0, 90.0, -135.0, 179.5] {
+            let turn = rotation_about_centre(deg, 1000, 1000);
+            assert_eq!(sanity(&fitted(turn, 12, 8, 0.9), 1000, 1000), Ok(()), "{deg} deg");
+            assert_eq!(sanity(&fitted(turn, 40, 10, 1.0), 1000, 1000), Ok(()), "{deg} deg");
+            for (matched, inliers, rms) in [(12, 7, 0.5), (40, 9, 0.5), (12, 12, 1.01), (12, 6, 2.5)] {
+                let verdict = sanity(&fitted(turn, matched, inliers, rms), 1000, 1000);
+                let reason = verdict.expect_err("a weak wide rotation was accepted");
+                assert!(reason.starts_with("rotation "), "{deg} deg: {reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_rotation_is_judged_by_the_displacement_of_the_frame_centre() {
+        let mut shifted = rotation_about_centre(90.0, 1000, 1000);
+        shifted.tx += 401.0;
+        let reason = sanity(&fitted(shifted, 40, 30, 0.2), 1000, 1000).expect_err("accepted");
+        assert!(reason.starts_with("centre displacement"), "{reason}");
+        shifted.tx -= 2.0;
+        assert_eq!(sanity(&fitted(shifted, 40, 30, 0.2), 1000, 1000), Ok(()));
+    }
+
+    #[test]
+    fn a_narrow_rotation_keeps_todays_raw_translation_limit() {
+        let mut shifted = rotation_about_centre(5.0, 1000, 1000);
+        shifted.tx += 360.0;
+        let (_, dx) = center_displacement(&shifted, 1000, 1000);
+        assert!(dx.abs() < 400.0 && shifted.tx > 400.0, "{shifted:?}");
+        let reason = sanity(&fitted(shifted, 40, 30, 0.2), 1000, 1000).expect_err("accepted");
+        assert!(reason.starts_with("translation"), "{reason}");
+        shifted.tx -= 10.0;
+        assert_eq!(sanity(&fitted(shifted, 40, 30, 0.2), 1000, 1000), Ok(()));
+    }
+
+    fn rotated_and_shifted(deg: f64, shift: (f64, f64), size: usize) -> AffineTransform {
+        let mut truth = rotation_about_centre(deg, size, size);
+        truth.tx += shift.0;
+        truth.ty += shift.1;
+        truth
+    }
+
+    fn largest_corner_error(found: &AffineTransform, truth: &AffineTransform, size: usize) -> f64 {
+        let edge = size as f64 - 1.0;
+        let centre = edge * 0.5;
+        [(0.0, 0.0), (edge, 0.0), (0.0, edge), (edge, edge), (centre, centre)]
+            .iter()
+            .map(|&(x, y)| {
+                let (fx, fy) = found.map(x, y);
+                let (tx, ty) = truth.map(x, y);
+                (fx - tx).hypot(fy - ty)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    const CHANCE_MIRROR_REFERENCE: [(f64, f64); 17] = [
+        (730.964859664504, 492.2078142278369),
+        (447.49865217257377, 135.079590836146),
+        (730.3194979306118, 514.8065453268692),
+        (902.8712912289085, 817.3189681165184),
+        (273.1386261867581, 696.8800897111793),
+        (429.4341275258039, 694.6389248672868),
+        (87.4108979128066, 448.15411197843036),
+        (673.7122716700512, 189.9315935718026),
+        (648.9151497476287, 778.02448543915),
+        (930.3331210950173, 481.0783262006324),
+        (88.44200179156066, 521.9742991631281),
+        (852.2739485684973, 624.086211845046),
+        (940.4529929478748, 958.4881009681876),
+        (728.755290955321, 793.9306243264987),
+        (607.4513525555768, 316.3515541408454),
+        (740.5344785398265, 360.2618838614576),
+        (555.221021202917, 622.1362674087133),
+    ];
+
+    const CHANCE_MIRROR_TARGET: [(f64, f64); 17] = [
+        (259.23655768665276, 875.5269150169505),
+        (152.17189370770544, 943.7614033508783),
+        (772.7583090130126, 366.1450881995878),
+        (625.5951467914987, 539.9161853901414),
+        (460.1751239809228, 174.7968117191904),
+        (698.2934163469951, 194.82192086759397),
+        (652.682722731817, 152.00969985137743),
+        (840.5260353521998, 150.82327302021736),
+        (520.4922500995442, 362.2073484122256),
+        (917.9971893616212, 1019.204723991537),
+        (375.8448014015446, 344.15771226619984),
+        (253.83760596800002, 187.09382661360598),
+        (951.813320396572, 222.28732136543945),
+        (727.8304330066561, 488.87860919437253),
+        (567.6115426003923, 145.24337567468947),
+        (203.01307463533382, 152.3018145547455),
+        (395.326065192628, 155.2186058286517),
+    ];
+
+    #[test]
+    fn a_four_inlier_mirrored_fit_does_not_leave_an_unmirrored_sparse_frame_out() {
+        let params = &TriangleParams::ALIGNMENT;
+        assert!(triangles::match_star_lists(&CHANCE_MIRROR_REFERENCE, &CHANCE_MIRROR_TARGET, params).flipped);
+        let verdict = register_star_lists(&CHANCE_MIRROR_REFERENCE, &CHANCE_MIRROR_TARGET, 1024, 1024, params);
+        assert!(verdict.is_err(), "the frame was not handed to phase correlation: {verdict:?}");
+    }
+
+    const FALSE_AFFINE_REFERENCE: [(f64, f64); 17] = [
+        (289.5656748740216, 245.99161755919764),
+        (208.80009158561927, 612.8819209919176),
+        (520.9701970485187, 695.5887457857672),
+        (390.535297691627, 272.4214833092252),
+        (138.7517723207108, 74.48271247447005),
+        (497.00548627246724, 249.5601868247227),
+        (141.69682606419076, 885.7322050557246),
+        (861.2803016257042, 708.817015714098),
+        (352.33828057441605, 497.3836287180795),
+        (577.8435739638203, 528.5417873372335),
+        (510.92514005811296, 458.1567615786247),
+        (845.0016266454782, 475.03186941014616),
+        (568.4583704258077, 146.38733107167224),
+        (712.595600790411, 427.8035318786565),
+        (463.9728036348406, 351.536127139502),
+        (817.5934000179938, 382.30256371218593),
+        (740.1244119570497, 764.2880809923537),
+    ];
+
+    const FALSE_AFFINE_TARGET: [(f64, f64); 17] = [
+        (429.72936969631667, 318.0264189886992),
+        (364.0311219786802, 403.79536413670127),
+        (68.92096893201862, 243.36706389095315),
+        (495.50769836405476, 649.9978003213804),
+        (667.3073047207206, 426.5758765223702),
+        (244.4789344113895, 186.92591769765005),
+        (615.177718598002, 945.1175457323249),
+        (686.7733419736691, 364.95647216933935),
+        (511.2853516045316, 78.76318925906254),
+        (559.3115512900995, 475.637167668307),
+        (439.27904543990803, 180.94239943700023),
+        (819.5909108885461, 404.90568787983625),
+        (490.96652040339285, 236.3777469484976),
+        (564.8765661903578, 419.07288027550845),
+        (459.87216427378075, 200.0061657133784),
+        (679.2155479038763, 801.0856600658628),
+        (194.57263208816974, 584.3467631378174),
+    ];
+
+    #[test]
+    fn a_false_four_inlier_affine_beyond_the_raw_shift_limit_gives_way_to_the_rigid_fit() {
+        let params = &TriangleParams::ALIGNMENT;
+        let truth = rotated_and_shifted(-3.695993724347916, (-20.368615948732526, -48.69650174302055), 1024);
+        let result = register_star_lists(&FALSE_AFFINE_REFERENCE, &FALSE_AFFINE_TARGET, 1024, 1024, params)
+            .unwrap_or_else(|rejection| panic!("the frame lost its star registration: {rejection:?}"));
+        let error = largest_corner_error(&result.transform, &truth, 1024);
+        assert!(error < 1.5, "registered {error:.1} px away from the truth: {result:?}");
+        assert_eq!(result.method, AffineAlignMethod::Rigid, "{result:?}");
+    }
+
+    #[test]
+    fn a_reflection_is_named_as_such_whatever_the_quality_of_its_fit() {
+        let mirror = AffineTransform { a: -1.0, b: 0.0, tx: 999.0, c: 0.0, d: 1.0, ty: 0.0 };
+        for fit in [fitted(mirror, 40, 30, 0.1), fitted(mirror, 40, 7, 0.1), fitted(mirror, 40, 30, 1.5)] {
+            let reason = sanity(&fit, 1000, 1000).expect_err("a reflection was accepted");
+            assert!(reason.starts_with("reflection (det=-1.000)"), "{reason}");
+            assert!(named_reflection(&fit, 1000, 1000), "{fit:?}");
+        }
+        let squeezed = AffineTransform { a: -0.5, b: 0.0, tx: 600.0, c: 0.0, d: 0.5, ty: 0.0 };
+        let reason = sanity(&fitted(squeezed, 40, 30, 0.1), 1000, 1000).expect_err("accepted");
+        assert!(reason.starts_with("scale"), "{reason}");
+        assert!(!named_reflection(&fitted(squeezed, 40, 30, 0.1), 1000, 1000));
+        let half_turn = rotation_about_centre(180.0, 1000, 1000);
+        assert!(!named_reflection(&fitted(half_turn, 12, 7, 0.5), 1000, 1000));
+    }
+
+    #[test]
+    fn a_column_major_frame_aligns_and_warps_like_its_row_major_copy() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView};
+        use ndarray::ShapeBuilder;
+        let reference = a1_reference(512, 60);
+        let target = a1_frame(512, 60, FrameView::Rotated(3.0));
+        let mut column_major = Array2::<f32>::zeros((512, 512).f());
+        column_major.assign(&target);
+        assert!(column_major.as_slice().is_none());
+
+        let expected = align_channel_affine(&reference, &target);
+        let found = align_channel_affine(&reference, &column_major);
+        assert_eq!(found.method, expected.method);
+        assert_eq!(found.inliers, expected.inliers);
+        let (e, f) = (expected.transform, found.transform);
+        assert_eq!([f.a, f.b, f.tx, f.c, f.d, f.ty], [e.a, e.b, e.tx, e.c, e.d, e.ty]);
+
+        let warped = warp_image(&column_major, &found.transform, 512, 512);
+        let reference_warp = warp_image(&target, &found.transform, 512, 512);
+        assert!(warped.iter().zip(reference_warp.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    #[test]
+    fn a_non_finite_transform_is_refused() {
+        let mut broken = AffineTransform::identity();
+        broken.tx = f64::NAN;
+        assert!(sanity(&fitted(broken, 40, 30, 0.1), 1000, 1000).is_err());
+    }
+
     #[test]
     fn test_identity_transform() {
         let t = AffineTransform::identity();
@@ -795,80 +691,6 @@ mod tests {
         let (x, y) = t.map(10.0, 20.0);
         assert!((x - 15.0).abs() < 1e-10);
         assert!((y - 17.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_fit_rigid_pure_translation() {
-        let matches = vec![
-            (0.0, 0.0, 2.0, 3.0),
-            (10.0, 0.0, 12.0, 3.0),
-            (0.0, 10.0, 2.0, 13.0),
-            (10.0, 10.0, 12.0, 13.0),
-        ];
-        let t = fit_rigid(&matches).unwrap();
-        assert!((t.tx - 2.0).abs() < 0.01, "tx={}", t.tx);
-        assert!((t.ty - 3.0).abs() < 0.01, "ty={}", t.ty);
-        assert!(t.rotation_deg().abs() < 0.01);
-    }
-
-    #[test]
-    fn test_fit_rigid_rotation() {
-        let angle = 2.0f64.to_radians();
-        let cos_a = angle.cos();
-        let sin_a = angle.sin();
-
-        let ref_pts = vec![
-            (100.0, 100.0),
-            (200.0, 100.0),
-            (100.0, 200.0),
-            (200.0, 200.0),
-            (150.0, 150.0),
-        ];
-
-        let matches: Vec<(f64, f64, f64, f64)> = ref_pts
-            .iter()
-            .map(|&(rx, ry)| {
-                let tx = cos_a * rx - sin_a * ry;
-                let ty = sin_a * rx + cos_a * ry;
-                (rx, ry, tx, ty)
-            })
-            .collect();
-
-        let t = fit_rigid(&matches).unwrap();
-        assert!(
-            (t.rotation_deg() - 2.0).abs() < 0.1,
-            "rotation={:.3}",
-            t.rotation_deg()
-        );
-    }
-
-    #[test]
-    fn test_fit_affine_translation() {
-        let matches = vec![
-            (0.0, 0.0, 5.0, -2.0),
-            (100.0, 0.0, 105.0, -2.0),
-            (0.0, 100.0, 5.0, 98.0),
-            (100.0, 100.0, 105.0, 98.0),
-        ];
-        let t = fit_affine(&matches).unwrap();
-        assert!((t.tx - 5.0).abs() < 0.01);
-        assert!((t.ty - (-2.0)).abs() < 0.01);
-        assert!((t.a - 1.0).abs() < 0.01);
-        assert!((t.d - 1.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_solve_3x3_identity() {
-        let a = [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ];
-        let b = [3.0, 5.0, 7.0];
-        let x = solve_3x3(a, b).unwrap();
-        assert!((x[0] - 3.0).abs() < 1e-10);
-        assert!((x[1] - 5.0).abs() < 1e-10);
-        assert!((x[2] - 7.0).abs() < 1e-10);
     }
 
     #[test]
@@ -898,20 +720,6 @@ mod tests {
     }
 
     #[test]
-    fn test_triangle_matching_identical() {
-        let stars = vec![
-            (10.0, 10.0),
-            (50.0, 10.0),
-            (30.0, 40.0),
-            (80.0, 20.0),
-            (60.0, 70.0),
-        ];
-        let tris = build_triangles(&stars);
-        let matches = match_triangles(&stars, &stars, &tris, &tris);
-        assert!(matches.len() >= 4, "got {} matches", matches.len());
-    }
-
-    #[test]
     fn test_nan_fill_outside_bounds() {
         let img = Array2::from_elem((50, 50), 100.0f32);
         let t = AffineTransform::translation(1000.0, 1000.0);
@@ -936,6 +744,42 @@ mod tests {
     }
 
     #[test]
+    fn a_sparse_star_list_keeps_its_same_parity_fit_when_the_mirrored_votes_are_higher() {
+        let reference = [
+            (622.83, 677.42), (262.93, 697.45), (625.19, 704.36), (497.51, 91.19), (376.52, 945.85),
+            (943.44, 401.77), (431.83, 532.71), (895.37, 743.31), (525.99, 782.11), (702.74, 572.82),
+            (769.7, 509.03), (278.03, 770.21), (158.7, 60.51), (266.82, 116.45), (591.28, 566.06),
+            (98.0, 811.62), (548.4, 731.32),
+        ];
+        let target = [
+            (677.21, 649.38), (318.31, 681.63), (680.3, 676.39), (532.51, 67.7), (440.48, 926.23),
+            (770.23, 388.67), (66.56, 367.63), (730.85, 118.41), (119.67, 435.12), (62.14, 89.26),
+            (672.42, 809.96), (330.95, 649.6), (243.44, 119.31), (611.99, 464.62), (242.08, 399.45),
+            (805.76, 495.05), (640.8, 203.16),
+        ];
+        let params = &TriangleParams::ALIGNMENT;
+        assert!(triangles::match_star_lists(&reference, &target, params).flipped);
+
+        let result = register_star_lists(&reference, &target, 1000, 1000, params)
+            .unwrap_or_else(|rejection| panic!("the same-parity fit was discarded: {rejection:?}"));
+        assert!(
+            matches!(result.method, AffineAlignMethod::Affine | AffineAlignMethod::Rigid) && result.rejection.is_none(),
+            "{result:?}"
+        );
+        for (&(rx, ry), &(tx, ty)) in reference.iter().zip(&target).take(5) {
+            let (px, py) = result.transform.map(rx, ry);
+            assert!((px - tx).hypot(py - ty) < 1.0, "({rx}, {ry}) maps to ({px:.2}, {py:.2}): {result:?}");
+        }
+    }
+
+    #[test]
+    fn warp_image_with_an_empty_output_returns_an_empty_frame() {
+        let img = Array2::from_elem((5, 5), 1.0f32);
+        assert_eq!(warp_image(&img, &AffineTransform::identity(), 5, 0).dim(), (5, 0));
+        assert_eq!(warp_image(&img, &AffineTransform::identity(), 0, 5).dim(), (0, 5));
+    }
+
+    #[test]
     fn test_check_transform_sanity_rejects_reflection() {
         let reflection = AffineTransform { a: 1.0, b: 0.0, tx: 0.0, c: 0.0, d: -1.0, ty: 0.0 };
         let result = AffineAlignResult {
@@ -943,96 +787,12 @@ mod tests {
             matched_stars: 10,
             inliers: 10,
             residual_px: 0.5,
+            rms_px: 0.5,
             method: AffineAlignMethod::Affine,
             confidence: 1.0,
+            rejection: None,
         };
-        assert!(check_transform_sanity(&result, 100, 100).is_err());
-    }
-
-    struct Xorshift(u64);
-
-    impl Xorshift {
-        fn unit(&mut self) -> f64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            (self.0 >> 11) as f64 / (1u64 << 53) as f64
-        }
-    }
-
-    #[test]
-    fn fit_affine_rejects_collinear_samples_at_image_scale() {
-        let mut rng = Xorshift(0x1234_5678_9ABC_DEF1);
-        for _ in 0..500 {
-            let (x0, y0) = (1000.0 + rng.unit() * 2000.0, 1000.0 + rng.unit() * 2000.0);
-            let angle = rng.unit() * std::f64::consts::TAU;
-            let (ux, uy) = (angle.cos(), angle.sin());
-            let matches: Vec<(f64, f64, f64, f64)> = [0.0, 317.37 + rng.unit(), 811.13 + rng.unit()]
-                .iter()
-                .map(|t| {
-                    let (rx, ry) = (x0 + t * ux, y0 + t * uy);
-                    (rx, ry, rx + 5.0, ry - 3.0)
-                })
-                .collect();
-            assert!(fit_affine(&matches).is_none(), "collinear sample solved: {matches:?}");
-        }
-        let triangle = [(1200.3, 1100.7), (2900.1, 1300.2), (1800.6, 2950.9)];
-        let matches: Vec<(f64, f64, f64, f64)> =
-            triangle.iter().map(|&(x, y)| (x, y, x + 5.0, y - 3.0)).collect();
-        let t = fit_affine(&matches).expect("triangle solves");
-        assert!((t.tx - 5.0).abs() < 1e-6 && (t.ty + 3.0).abs() < 1e-6, "{t:?}");
-        assert!((t.a - 1.0).abs() < 1e-9 && t.b.abs() < 1e-9 && t.c.abs() < 1e-9 && (t.d - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn match_triangles_is_deterministic_across_calls() {
-        let stars = vec![
-            (12.0, 15.0),
-            (97.0, 22.0),
-            (41.0, 88.0),
-            (150.0, 61.0),
-            (73.0, 140.0),
-            (180.0, 170.0),
-            (25.0, 190.0),
-            (130.0, 115.0),
-        ];
-        let tris = build_triangles(&stars);
-        let first = match_triangles(&stars, &stars, &tris, &tris);
-        assert!(first.len() >= 4);
-        for _ in 0..24 {
-            assert_eq!(match_triangles(&stars, &stars, &tris, &tris), first);
-        }
-    }
-
-    #[test]
-    fn ransac_result_does_not_depend_on_thread_count() {
-        let mut rng = Xorshift(0x0DDB_A11C_AFE0_F00D);
-        let mut matches = Vec::new();
-        for i in 0..40 {
-            let (rx, ry) = (50.0 + rng.unit() * 900.0, 50.0 + rng.unit() * 900.0);
-            let noise = if i % 5 == 0 { 40.0 } else { 6.0 };
-            let tx = rx * 1.001 + 0.02 * ry + 7.0 + (rng.unit() - 0.5) * noise;
-            let ty = -0.02 * rx + ry * 0.999 - 4.0 + (rng.unit() - 0.5) * noise;
-            matches.push((rx, ry, tx, ty));
-        }
-        let run = |threads: usize| {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap()
-                .install(|| ransac_affine(&matches, AffineAlignMethod::Affine))
-                .map(|r| (r.inliers, [r.transform.a, r.transform.b, r.transform.tx, r.transform.c, r.transform.d, r.transform.ty]))
-        };
-        let single = run(1);
-        assert!(single.is_some());
-        for threads in [2, 3, 4, 8] {
-            let other = run(threads);
-            assert_eq!(
-                other.map(|(n, t)| (n, t.map(f64::to_bits))),
-                single.map(|(n, t)| (n, t.map(f64::to_bits))),
-                "{threads} threads"
-            );
-        }
+        assert!(sanity(&result, 100, 100).is_err());
     }
 
     #[test]
@@ -1042,9 +802,12 @@ mod tests {
             matched_stars: 10,
             inliers: 10,
             residual_px: 0.5,
+            rms_px: 0.5,
             method: AffineAlignMethod::Affine,
             confidence: 1.0,
+            rejection: None,
         };
-        assert!(check_transform_sanity(&result, 100, 100).is_ok());
+        assert!(sanity(&result, 100, 100).is_ok());
     }
+
 }

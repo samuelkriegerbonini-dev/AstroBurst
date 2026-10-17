@@ -10,6 +10,7 @@ import type {
   MastLevelClass,
   MastMission,
   MastMissionId,
+  MastPreset,
   MastPreviewRef,
   MastProductList,
   MastProgressEvent,
@@ -25,6 +26,7 @@ import {
   mastErrorOf,
   mastImageList,
   mastMissions,
+  mastPresets,
   mastPreview,
   mastProbeMission,
   mastProducts,
@@ -61,7 +63,7 @@ import { aroundQueryText, type AroundTarget } from "../logic/aroundQuery";
 import { formatBytes, type ProductMode } from "../logic/productView";
 import { displayRows, type ChipId } from "../logic/resultsView";
 import type { Suggestion } from "../logic/suggestions";
-import { parseStripKey, previewsAllowed, stepEntry } from "../logic/detailView";
+import { parseStripKey, previewsAllowed, stepEntry, STRIP_PRIORITY } from "../logic/detailView";
 import { MAST_TOKEN_PAGE_URL, checkTokenFormat } from "../logic/tokenFormat";
 import { OPEN_PAGE_FAILED_TEXT, tokenWasSaved } from "../logic/romanPanel";
 import { detailEntry, imageSetKey, largeEntry, resultsState, visibleBanner, type ArchiveState, type DetailTab, type ResultsView } from "./archiveReducer";
@@ -71,6 +73,7 @@ import { createDetailEffects } from "./detailEffects";
 
 export interface ArchiveServices {
   missions(): Promise<MastMission[]>;
+  presets(): Promise<MastPreset[]>;
   probeMission(mission: MastMissionId): Promise<MastMission>;
   resolve(requestId: string, name: string): Promise<MastResolved | null>;
   search(requestId: string, query: MastQuery, refresh: boolean): Promise<MastSearchPage>;
@@ -109,6 +112,7 @@ export interface ThumbDemand {
   selected: string[];
   visible: string[];
   ahead: string[];
+  firstRow?: number;
 }
 
 export interface ArchiveController {
@@ -118,6 +122,7 @@ export interface ArchiveController {
   setKindOverride(kind: QueryKind | null): void;
   setRadius(text: string): void;
   setFilters(patch: Partial<MastFilterValues>, opts?: { rerun?: boolean }): void;
+  setPreset(id: string | null, opts?: { rerun?: boolean }): void;
   removeFilter(id: ChipId): Promise<void>;
   switchMission(id: MastMissionId): void;
   tryMission(id: MastMissionId): Promise<void>;
@@ -307,7 +312,10 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
   function pushDemand(): void {
     const allowed = thumbAllowed(get());
     const cards = new Set([...cardDemand.selected, ...cardDemand.visible]);
-    const visible = [...cardDemand.visible, ...stripDemand.filter((k) => !cards.has(k))];
+    const strip = stripDemand.filter((k) => !cards.has(k));
+    const firstRow = cardDemand.visible.slice(0, cardDemand.firstRow ?? cardDemand.visible.length);
+    const otherCards = cardDemand.visible.slice(firstRow.length);
+    const visible = [...firstRow, ...strip.slice(0, STRIP_PRIORITY), ...otherCards, ...strip.slice(STRIP_PRIORITY)];
     dispatch({ type: "thumbDemand", selected: cardDemand.selected.filter(allowed), visible: visible.filter(allowed), ahead: cardDemand.ahead.filter(allowed) });
   }
 
@@ -342,7 +350,8 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
       const form = get().form;
       const level = loadLevel(storage);
       if (form.mission === "jwst" && form.filters.level !== level) dispatch({ type: "formChanged", patch: { filters: { ...form.filters, level } } });
-      const [missions, token] = await Promise.allSettled([services.missions(), services.tokenStatus(TOKEN_CHECK_ID, false)]);
+      const [missions, token, presets] = await Promise.allSettled([services.missions(), services.tokenStatus(TOKEN_CHECK_ID, false), services.presets()]);
+      if (presets.status === "fulfilled") dispatch({ type: "presetsLoaded", presets: presets.value });
       if (missions.status === "fulfilled") {
         dispatch({ type: "missionsLoaded", missions: missions.value });
       } else {
@@ -587,6 +596,12 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     if (opts.rerun && hasSearched(s)) void search();
   }
 
+  function setPreset(id: string | null, opts: { rerun?: boolean } = {}): void {
+    const s = get();
+    dispatch({ type: "formChanged", patch: { preset: id } });
+    if (opts.rerun && hasSearched(s)) void search();
+  }
+
   async function removeFilter(id: ChipId): Promise<void> {
     setFilters(CHIP_PATCH[id]);
     await search();
@@ -601,7 +616,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     await init();
     const s = get();
     if (!enabled(s, suggestion.mission)) return;
-    const fields = { text: suggestion.text, kindOverride: null, radiusText: String(DEFAULT_RADIUS_ARCMIN), filters: { ...suggestion.filters } };
+    const fields = { text: suggestion.text, kindOverride: null, radiusText: String(DEFAULT_RADIUS_ARCMIN), filters: { ...suggestion.filters }, preset: null };
     if (suggestion.mission !== s.form.mission) moveTo({ ...switchMissionForm(s.form, suggestion.mission, storage), ...fields });
     else dispatch({ type: "formChanged", patch: fields });
     if (suggestion.filters.level) saveLevel(storage, suggestion.filters.level);
@@ -812,6 +827,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     setKindOverride: (kind) => dispatch({ type: "formChanged", patch: { kindOverride: kind } }),
     setRadius: (radiusText) => dispatch({ type: "formChanged", patch: { radiusText } }),
     setFilters,
+    setPreset,
     removeFilter,
     switchMission,
     tryMission,
@@ -842,7 +858,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     toggleTableThumbs: () => dispatch({ type: "tableThumbsToggled" }),
     sortBy,
     setThumbDemand: (demand) => {
-      cardDemand = { selected: [...demand.selected], visible: [...demand.visible], ahead: [...demand.ahead] };
+      cardDemand = { selected: [...demand.selected], visible: [...demand.visible], ahead: [...demand.ahead], firstRow: demand.firstRow };
       pushDemand();
     },
     retryThumbs: (keys) => dispatch({ type: "thumbsRetried", keys }),
@@ -920,6 +936,7 @@ const realClock: ArchiveClock = {
 export function defaultArchiveServices(): ArchiveServices {
   return {
     missions: mastMissions,
+    presets: mastPresets,
     probeMission: mastProbeMission,
     resolve: mastResolve,
     search: mastSearch,

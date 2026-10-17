@@ -282,7 +282,7 @@ mod tests {
 
     use super::*;
     use crate::cmd::common::HEADER_ABPROC;
-    use crate::cmd::line_measure::{measure_line_json, LineRequest, SpectrumSource};
+    use crate::cmd::line_measure::{measure_line_json_with, LineRequest, MeasureOptions, SpectrumSource};
     use crate::core::analysis::line_measure::LineModel;
     use crate::core::astrometry::wcs::WcsTransform;
     use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
@@ -665,7 +665,8 @@ mod tests {
                 model: LineModel::Gaussian,
                 velocity_shift_kms: None,
             };
-            let shipped = measure_line_json(&key, &SpectrumSource::Pixel { x, y }, &request).unwrap();
+            let unweighted = MeasureOptions { use_err: false, use_dq: false, wavelength_frame: None };
+            let shipped = measure_line_json_with(&key, &SpectrumSource::Pixel { x, y }, &request, &unweighted).unwrap();
             let centre = shipped["fit"]["centre"].as_f64().unwrap();
             let sigma = shipped["fit"]["sigma"].as_f64().unwrap();
             let d_centre = (single.centre - centre).abs() / G235H_CDELT_UM;

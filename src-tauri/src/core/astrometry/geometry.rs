@@ -5,7 +5,7 @@ use crate::core::astrometry::frames::{
 };
 use crate::core::astrometry::spectral::{
     earth_heliocentric_position_au, header_target_coordinates, is_spacecraft, longitude_sign_is_ambiguous,
-    mid_exposure_jd, moon_geocentric_ecliptic_au, site_location, sun_barycentric_position_au,
+    mid_exposure_jd, moon_geocentric_ecliptic_au, no_site_in_header_message, site_location, sun_barycentric_position_au,
     sun_geometric_longitude_deg, target_unit_vector, SiteLocation, AU_KM, SPEED_OF_LIGHT_KMS, WGS84_A_M, WGS84_F,
 };
 use crate::core::astrometry::time::{gmst_deg, jd_from_gregorian, julian_centuries_j2000, JD_J2000, SECONDS_PER_DAY};
@@ -73,7 +73,6 @@ const POLE_COS_LATITUDE_LIMIT: f64 = 1e-12;
 const NO_TARGET_LIGHT_TIME_NOTE: &str = "no target coordinates: BJD_TDB and HJD_UTC need a WCS, RA/DEC keywords or a target override";
 const NO_TARGET_HORIZONTAL_NOTE: &str = "no target coordinates: hour angle, altitude, azimuth, airmass, parallactic angle and the Moon separation need a target";
 const NO_SITE_NOTE: &str = "no observatory location: local sidereal time, hour angle, altitude, azimuth, airmass, parallactic angle and the Sun and Moon altitude need a site";
-const NO_SITE_HEADER_NOTE: &str = "no observatory location in the header (OBSGEO-X/Y/Z, OBSGEO-L/B/H, SITELAT/SITELONG, LAT-OBS/LONG-OBS, OBSLAT/OBSLONG or LATITUDE/LONGITUD): enter the site to get the topocentric block";
 const GEOCENTRIC_MOON_SEPARATION_NOTE: &str = "Moon separation from the geocentric Moon (no site for the topocentric one)";
 const BARYCENTRIC_TIME_SITE_REASON: &str = "the header time is barycentric and JD_UTC still carries the light-time term (up to 8.3 min)";
 const TOPOCENTRIC_METHOD_NOTE: &str = "topocentric block: mean equinox of date (Meeus ch. 21 precession, nutation omitted), unrefracted altitude, UTC used as UT1, airmass Kasten & Young 1989";
@@ -646,7 +645,7 @@ pub fn geometry_method_notes(header: &HduHeader, target: Option<&ResolvedTarget>
                 ));
             }
         }
-        None => notes.push(NO_SITE_HEADER_NOTE.to_string()),
+        None => notes.push(format!("{}: enter the site to get the topocentric block", no_site_in_header_message())),
     }
     notes.push(TOPOCENTRIC_METHOD_NOTE.to_string());
     notes.push(LIGHT_TIME_METHOD_NOTE.to_string());

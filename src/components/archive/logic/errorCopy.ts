@@ -92,6 +92,12 @@ const SHORT: Record<MastErrorCode, string> = {
   mast_bad_input: "invalid",
   mast_token_rejected: "token rejected",
   mast_cache: "cache",
+  mast_size_mismatch: "size mismatch",
+  mast_busy: "busy",
+  mast_stale: "newer at MAST",
+  mast_quota: "quota",
+  mast_uri_refused: "not downloadable",
+  mast_peek_incomplete: "header not reached",
 };
 
 const OPERATION_NAMES: [RegExp, string][] = [
@@ -336,6 +342,13 @@ export function errorView(err: MastError, ctx: ErrorContextInput): ErrorView {
       return isSearch ? level("server", tooLargeText(err)) : { placement: "item", text: tooLargeText(err), short };
     case "mast_not_image":
       return isSearch ? level("decode", NOT_IMAGE_TEXT) : { placement: "item", text: NOT_IMAGE_TEXT, short };
+    case "mast_size_mismatch":
+    case "mast_busy":
+    case "mast_stale":
+    case "mast_quota":
+    case "mast_uri_refused":
+    case "mast_peek_incomplete":
+      return { placement: "item", text: sentence(err.message), short };
   }
 }
 
@@ -429,6 +442,18 @@ function slotCopy(err: MastError, ctx: SlotContext): SlotCopy | null {
       return { tone: "muted", title: "Request not sent", meta: causeText(err), badge: "BAD", retry: false };
     case "mast_token_rejected":
       return { tone: "muted", title: "Token not accepted", meta: null, badge: "KEY", retry: false };
+    case "mast_size_mismatch":
+      return { tone: "server", title: "Size differs from the listing", meta: causeText(err), badge: "SIZE", retry: true };
+    case "mast_busy":
+      return { tone: "transient", title: "Already downloading", meta: causeText(err), badge: "BUSY", retry: false };
+    case "mast_stale":
+      return { tone: "muted", title: "Newer version at MAST", meta: causeText(err), badge: "NEW", retry: false };
+    case "mast_quota":
+      return { tone: "muted", title: "Download quota reached", meta: causeText(err), badge: "QUOTA", retry: false };
+    case "mast_uri_refused":
+      return { tone: "muted", title: "Not downloadable", meta: causeText(err), badge: "URI", retry: false };
+    case "mast_peek_incomplete":
+      return { tone: "muted", title: "Header beyond the peek window", meta: causeText(err), badge: "PEEK", retry: false };
   }
 }
 

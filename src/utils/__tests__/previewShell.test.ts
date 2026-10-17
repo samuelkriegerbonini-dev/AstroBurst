@@ -29,6 +29,9 @@ import {
   previewViewer,
   recordGrid,
   reseedsRgbFileView,
+  SPECTRUM_VIEWER_HINT,
+  SPECTRUM_VIEWER_OPEN_CUBE,
+  spectrumViewerTitle,
   statusStripIdleText,
   statusStripParts,
   viewerClickRoute,
@@ -239,6 +242,11 @@ describe("gpuDisplayOnScreen", () => {
     expect(gpuDisplayOnScreen({ ...onGpu, hasRawPixels: false })).toBe(false);
     expect(gpuDisplayOnScreen({ ...onGpu, hasFile: false })).toBe(false);
   });
+
+  it("is false for a 1D spectrum file, which has no pixels to show", () => {
+    expect(gpuDisplayOnScreen({ ...onGpu, isSpectrum: true })).toBe(false);
+    expect(gpuDisplayOnScreen({ ...onGpu, isSpectrum: false })).toBe(true);
+  });
 });
 
 describe("previewViewer", () => {
@@ -269,6 +277,21 @@ describe("previewViewer", () => {
   it("is empty without a file", () => {
     expect(previewViewer({ ...gpuFits, hasFile: false })).toBe("empty");
     expect(previewViewer({ ...gpuFits, hasFile: false, rgbView: true })).toBe("empty");
+  });
+
+  it("shows the spectrum empty state for a 1D spectrum file whatever the GPU state", () => {
+    for (const useGpu of [true, false]) {
+      for (const hasRawPixels of [true, false]) {
+        for (const previewOnly of [true, false]) {
+          expect(previewViewer({ ...gpuFits, useGpu, hasRawPixels, previewOnly, isSpectrum: true })).toBe("spectrum");
+        }
+      }
+    }
+  });
+
+  it("keeps a colour composite put on screen over a selected spectrum file, and is empty without a file", () => {
+    expect(previewViewer({ ...gpuFits, rgbView: true, isSpectrum: true })).toBe("preview-tab");
+    expect(previewViewer({ ...gpuFits, hasFile: false, isSpectrum: true })).toBe("empty");
   });
 
   it("uses the preview tab exactly when the GPU display is on screen, outside colour views", () => {
@@ -722,5 +745,13 @@ describe("formatWavelength", () => {
 
   it("omits the unit when the plane has none", () => {
     expect(formatWavelength({ value: 2.5, unit: null })).toBe("λ 2.5000");
+  });
+});
+
+describe("spectrum viewer empty state", () => {
+  it("names the file and the Cube tool instead of showing an image", () => {
+    expect(spectrumViewerTitle("jw01266_x1d.fits")).toBe("jw01266_x1d.fits is a 1D spectrum");
+    expect(SPECTRUM_VIEWER_HINT).toBe("It has no image to show here. The Cube tool plots and measures it.");
+    expect(SPECTRUM_VIEWER_OPEN_CUBE).toBe("Open the Cube tool");
   });
 });

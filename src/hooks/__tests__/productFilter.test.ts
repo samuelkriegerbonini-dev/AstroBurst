@@ -17,6 +17,18 @@ describe("extractProductType", () => {
     expect(extractProductType("jw_nrs1_uncal.fits")).toBe("uncal");
     expect(extractProductType("jw_nrs1_rate.fits")).toBe("rate");
   });
+
+  it("tags a gzip-compressed FITS product like its plain file", () => {
+    expect(extractProductType("jw01_nrs1_s3d.fits.gz")).toBe("s3d");
+    expect(extractProductType("jw01_nrs1_x1d.FIT.GZ")).toBe("x1d");
+    expect(extractProductType("jw01_nrcb1_cal.fts.gz")).toBe("cal");
+  });
+
+  it("allows the gzip suffix after the FITS spellings only", () => {
+    expect(extractProductType("jw01_nrs1_cal.asdf.gz")).toBeNull();
+    expect(extractProductType("jw01_nrs1_s3d.gz")).toBeNull();
+    expect(extractProductType("jw01_nrs1_s3d.tar.gz")).toBeNull();
+  });
 });
 
 describe("fileSearchText", () => {

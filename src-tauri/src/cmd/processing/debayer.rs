@@ -4,6 +4,7 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached_full, output_stem, resolve_output_dir, write_derived_fits, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
+use crate::core::imaging::cfa::{remove_cfa_cards, scaled_header};
 use crate::core::imaging::debayer::{debayer_bilinear, debayer_superpixel, BayerPattern};
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{make_stf_u8_fn, AutoStfConfig};
@@ -15,25 +16,16 @@ use crate::types::constants::{
 };
 use crate::types::header::HduHeader;
 
-fn output_header(source: Option<&HduHeader>, superpixel: bool) -> Option<HduHeader> {
-    let mut h = source?.clone();
-    h.remove("BAYERPAT");
-    h.remove("XBAYROFF");
-    h.remove("YBAYROFF");
-    h.remove("COLORTYP");
-    if superpixel {
-        for key in ["CRPIX1", "CRPIX2"] {
-            if let Some(v) = h.get_f64(key) {
-                h.set_f64(key, (v - 0.5) / 2.0 + 0.5);
-            }
+fn output_header(source: Option<&HduHeader>, superpixel_dims: Option<(usize, usize)>) -> Option<HduHeader> {
+    let source = source?;
+    Some(match superpixel_dims {
+        Some((rows, cols)) => scaled_header(source, (rows * 2, cols * 2), (rows, cols)),
+        None => {
+            let mut header = source.clone();
+            remove_cfa_cards(&mut header);
+            header
         }
-        for key in ["CD1_1", "CD1_2", "CD2_1", "CD2_2", "CDELT1", "CDELT2"] {
-            if let Some(v) = h.get_f64(key) {
-                h.set_f64(key, v * 2.0);
-            }
-        }
-    }
-    Some(h)
+    })
 }
 
 fn method_name(superpixel: bool) -> &'static str {
@@ -78,7 +70,7 @@ fn debayer_one(
         debayer_bilinear(entry.arr(), pattern)
     };
 
-    let hdr = output_header(entry.header(), superpixel);
+    let hdr = output_header(entry.header(), superpixel.then(|| r.dim()));
     let [r_path, g_path, b_path] = channel_paths(output_dir, &debayer_tag(path, superpixel, pattern));
 
     write_derived_fits(&r_path, &r, hdr.as_ref())?;
@@ -110,7 +102,7 @@ pub async fn debayer_fits_cmd(
         };
         let (rows, cols) = r.dim();
 
-        let hdr = output_header(entry.header(), superpixel);
+        let hdr = output_header(entry.header(), superpixel.then_some((rows, cols)));
         let tag = debayer_tag(&path, superpixel, pat);
         let [r_path, g_path, b_path] = channel_paths(&out_dir, &tag);
 
@@ -207,6 +199,52 @@ mod tests {
     use super::*;
     use crate::cmd::common::extract_image_resolved;
     use crate::infra::fits::writer::write_fits_mono;
+
+    #[tokio::test]
+    async fn superpixel_output_scales_wcs_sip_ltv_and_binning() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = dir.path().join("osc.fits").to_str().unwrap().to_string();
+        let mut header = HduHeader::empty();
+        for (key, value) in [
+            ("BAYERPAT", "'RGGB'"),
+            ("CTYPE1", "'RA---TAN-SIP'"),
+            ("CTYPE2", "'DEC--TAN-SIP'"),
+            ("CRVAL1", "83.8"),
+            ("CRVAL2", "-5.4"),
+            ("CRPIX1", "8.5"),
+            ("CRPIX2", "8.5"),
+            ("CD1_1", "1.0E-4"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "1.0E-4"),
+            ("A_ORDER", "2"),
+            ("A_2_0", "1.0E-7"),
+            ("B_ORDER", "2"),
+            ("B_0_2", "1.0E-7"),
+            ("LTV1", "10"),
+        ] {
+            header.set(key, value.to_string());
+        }
+        write_fits_mono(&src, &Array2::from_elem((17, 16), 100.0f32), Some(&header)).unwrap();
+
+        let superpixel = debayer_fits_cmd(src.clone(), out.clone(), Some(METHOD_SUPERPIXEL.into()), None).await.unwrap();
+        let written = extract_image_resolved(superpixel[RES_R_PATH].as_str().unwrap()).unwrap();
+        assert_eq!(written.arr.dim(), (8, 8));
+        let h = &written.header;
+        assert!(h.get("BAYERPAT").is_none());
+        assert_eq!((h.get_f64("CRPIX1"), h.get_f64("CD1_1")), (Some(4.5), Some(2.0e-4)));
+        assert_eq!((h.get_f64("A_2_0"), h.get_f64("B_0_2")), (Some(2.0e-7), Some(2.0e-7)));
+        assert_eq!(h.get_f64("LTV1"), Some(5.25));
+        assert_eq!((h.get_i64("XBINNING"), h.get_i64("YBINNING")), (Some(2), Some(2)));
+
+        let bilinear = debayer_fits_cmd(src, out, None, None).await.unwrap();
+        let written = extract_image_resolved(bilinear[RES_R_PATH].as_str().unwrap()).unwrap();
+        let h = &written.header;
+        assert!(h.get("BAYERPAT").is_none());
+        assert_eq!((h.get_f64("CRPIX1"), h.get_f64("CD1_1"), h.get_f64("LTV1")), (Some(8.5), Some(1.0e-4), Some(10.0)));
+        assert_eq!(h.get("XBINNING"), None);
+    }
 
     #[tokio::test]
     async fn runs_with_another_method_or_pattern_write_their_own_files() {

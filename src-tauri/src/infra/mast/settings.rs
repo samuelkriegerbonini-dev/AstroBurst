@@ -15,6 +15,7 @@ pub const ENV_MAST_RETRY_MS: &str = "ASTROBURST_MAST_RETRY_MS";
 pub const ENV_TEST_DATA_DIR: &str = "ASTROBURST_TEST_DATA_DIR";
 pub const TEST_CONFIG_DIR: &str = "config";
 pub const TEST_LOCAL_DIR: &str = "local";
+pub const TEST_DATA_DIR: &str = "data";
 pub const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 pub const CACHE_DIR: &str = "mast";
 pub const TEST_CACHE_DIR: &str = "mast-test";
@@ -86,7 +87,7 @@ pub fn parse_timeout_ms(value: &str) -> Option<Duration> {
 pub const fn default_timeout(kind: OpKind) -> Duration {
     let secs = match kind {
         OpKind::Search | OpKind::Preview | OpKind::Products => 120,
-        OpKind::ImageList => 60,
+        OpKind::ImageList | OpKind::Download => 60,
         OpKind::Probe | OpKind::Lookup | OpKind::Thumbnail | OpKind::AuthCheck | OpKind::Info => 30,
     };
     Duration::from_secs(secs)

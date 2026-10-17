@@ -15,13 +15,19 @@ export interface MetaSection {
   rows: MetaRow[];
 }
 
+export interface MetaPeek {
+  filename: string;
+  summary: string;
+  polygons: number;
+}
+
 export interface MetaColumn {
   name: string;
   label: string;
   value: string;
 }
 
-export const FOOTPRINT_NOTE = "Footprint on the image arrives in v1.1";
+export const FOOTPRINT_NOTE = "Draw it on the open image with Show on, above";
 export const SEP_NOTE = "unit and meaning differ by mission";
 
 const S_REGION_FULL_MAX = 40;
@@ -60,7 +66,17 @@ function identifiers(row: MastRow): MetaRow[] {
   return rows;
 }
 
-function pointing(row: MastRow, resolved: MastResolved | null, searchPosition: { raDeg: number; decDeg: number } | null): MetaRow[] {
+function peekFootprint(peek: MetaPeek): string {
+  return `${peek.polygons} ${peek.polygons === 1 ? "polygon" : "polygons"} from the ${peek.filename} header`;
+}
+
+function pointing(
+  row: MastRow,
+  resolved: MastResolved | null,
+  searchPosition: { raDeg: number; decDeg: number } | null,
+  footprintNote: string | null,
+  peek: MetaPeek | null,
+): MetaRow[] {
   const rows: MetaRow[] = [];
   if (searchPosition) {
     const coords = coordinatesText(searchPosition.raDeg, searchPosition.decDeg);
@@ -70,11 +86,12 @@ function pointing(row: MastRow, resolved: MastResolved | null, searchPosition: {
   if (row.sepArcmin !== null && Number.isFinite(row.sepArcmin)) {
     rows.push(row.sepVerified ? metaRow("Sep", `${row.sepArcmin.toFixed(2)}'`) : metaRow("Sep (MAST)", row.sepArcmin.toFixed(3), null, SEP_NOTE));
   }
-  if (row.sRegion) rows.push(metaRow("s_region", sRegionText(row.sRegion), row.sRegion, FOOTPRINT_NOTE));
+  if (row.sRegion) rows.push(metaRow("s_region", sRegionText(row.sRegion), row.sRegion, footprintNote ?? FOOTPRINT_NOTE));
+  else if (peek && peek.polygons > 0) rows.push(metaRow("Footprint", peekFootprint(peek), null, footprintNote ?? FOOTPRINT_NOTE));
   return rows;
 }
 
-function observation(row: MastRow): MetaRow[] {
+function observation(row: MastRow, peek: MetaPeek | null): MetaRow[] {
   const rows: MetaRow[] = [];
   const add = (label: string, value: string | null | undefined) => {
     if (value) rows.push(metaRow(label, value));
@@ -87,15 +104,22 @@ function observation(row: MastRow): MetaRow[] {
   add("Exposure", row.expTimeS !== null && Number.isFinite(row.expTimeS) ? `${Number(row.expTimeS.toFixed(2))} s` : null);
   add("Access", row.access);
   if (!isPublic(row)) add("Public from", dateText(row.releaseDate));
+  if (peek) rows.push(metaRow("Header peek", peek.summary, null, peek.filename));
   return rows;
 }
 
-export function metadataSections(input: { row: MastRow; resolved: MastResolved | null; searchPosition: { raDeg: number; decDeg: number } | null }): MetaSection[] {
-  const { row, resolved, searchPosition } = input;
+export function metadataSections(input: {
+  row: MastRow;
+  resolved: MastResolved | null;
+  searchPosition: { raDeg: number; decDeg: number } | null;
+  footprintNote?: string | null;
+  peek?: MetaPeek | null;
+}): MetaSection[] {
+  const { row, resolved, searchPosition, footprintNote = null, peek = null } = input;
   return [
     { key: "identifiers", title: "Identifiers", rows: identifiers(row) },
-    { key: "pointing", title: "Pointing", rows: pointing(row, resolved, searchPosition) },
-    { key: "observation", title: "Observation", rows: observation(row) },
+    { key: "pointing", title: "Pointing", rows: pointing(row, resolved, searchPosition, footprintNote, peek) },
+    { key: "observation", title: "Observation", rows: observation(row, peek) },
   ];
 }
 

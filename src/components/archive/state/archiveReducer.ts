@@ -5,6 +5,7 @@ import type {
   MastMissionId,
   MastImageSet,
   MastMission,
+  MastPreset,
   MastPreviewRef,
   MastProductList,
   MastQuery,
@@ -192,6 +193,7 @@ export interface UnavailableInfo {
 
 export interface ArchiveState {
   missions: MastMission[];
+  presets: MastPreset[];
   form: ArchiveForm;
   generation: number;
   run: SearchRun | null;
@@ -231,6 +233,7 @@ export interface ArchiveState {
 
 export type ArchiveAction =
   | { type: "missionsLoaded"; missions: MastMission[] }
+  | { type: "presetsLoaded"; presets: MastPreset[] }
   | { type: "missionProbeStarted"; mission: MastMissionId; at: number }
   | { type: "missionProbed"; mission: MastMission; at: number }
   | { type: "missionProbeFailed"; mission: MastMissionId; error: MastError; at: number }
@@ -334,6 +337,7 @@ const EMPTY_TOKEN: TokenState = {
 export function createInitialState(form: Partial<ArchiveForm> = {}): ArchiveState {
   return {
     missions: [],
+    presets: [],
     form: { ...DEFAULT_FORM, filters: { ...DEFAULT_FORM.filters }, ...form },
     generation: 0,
     run: null,
@@ -860,6 +864,8 @@ export function archiveReducer(s: ArchiveState, a: ArchiveAction): ArchiveState 
   switch (a.type) {
     case "missionsLoaded":
       return { ...s, missions: a.missions };
+    case "presetsLoaded":
+      return { ...s, presets: a.presets };
     case "missionProbeStarted":
       return { ...s, probes: { ...s.probes, [a.mission]: { stage: "checking", at: a.at, error: null } } };
     case "missionProbed":

@@ -61,6 +61,7 @@ function AstrometryTool() {
     [publishProcessed, fileKey, filePath, effectivePath],
   );
 
+  const skyFilePath = effectivePath === null ? null : regionKey;
   const stars = starResult?.stars ?? EMPTY_STARS;
   const compositeMeasurementBadge = useMemo(() => <MeasurementBadge measuresComposite />, []);
   const solveMeasurementBadge = useMemo(() => <MeasurementBadge />, []);
@@ -97,11 +98,11 @@ function AstrometryTool() {
         </section>
 
         <section id={ANALYSIS_SECTION.catalog.id}>
-          <CatalogPanel filePath={regionKey} measurePath={effectivePath} />
+          <CatalogPanel filePath={skyFilePath} measurePath={effectivePath} />
         </section>
 
         <section id={ANALYSIS_SECTION.targets.id}>
-          <TargetsPanel filePath={regionKey} measurePath={effectivePath} />
+          <TargetsPanel filePath={skyFilePath} measurePath={effectivePath} />
         </section>
       </div>
     </Suspense>

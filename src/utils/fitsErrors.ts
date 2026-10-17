@@ -1,3 +1,5 @@
+import { tableOnlyFileHint } from "./x1dCompare";
+
 export const TASK_PANIC_PREFIX = "Task join failed";
 
 export function shouldRetryWithoutFullAnalysis(message: string): boolean {
@@ -7,6 +9,29 @@ export function shouldRetryWithoutFullAnalysis(message: string): boolean {
 export function combineAttemptErrors(firstMessage: string, retryMessage: string): string {
   if (retryMessage === firstMessage) return firstMessage;
   return `${firstMessage} (retry without full analysis also failed: ${retryMessage})`;
+}
+
+export const ONE_D_ARRAY_VERDICT = "1D array, not an image";
+export const ONE_D_ARRAY_HINT = "1D spectrum, 1D array";
+
+const NO_IMAGE_HDU_MARKER = "no HDU in this file holds a 2D image";
+
+function ingestVerdict(message: string): string {
+  const end = message.indexOf(NO_IMAGE_HDU_MARKER);
+  return end === -1 ? message : message.slice(0, end);
+}
+
+export function spectrum1dHint(message: string | null | undefined): string | null {
+  if (!message) return null;
+  const verdict = ingestVerdict(message);
+  return tableOnlyFileHint(verdict) ?? (verdict.includes(ONE_D_ARRAY_VERDICT) ? ONE_D_ARRAY_HINT : null);
+}
+
+export function spectrumProbeFailure(ingestMessage: string, probeMessage: string): string {
+  const failure = `opening it as a 1D spectrum also failed: ${probeMessage}`;
+  const inventoryAt = ingestMessage.indexOf(NO_IMAGE_HDU_MARKER);
+  if (inventoryAt === -1) return `${ingestMessage} (${failure})`;
+  return `${ingestMessage.slice(0, inventoryAt)}${failure}; ${ingestMessage.slice(inventoryAt)}`;
 }
 
 export interface HduShape {

@@ -53,6 +53,13 @@ export type SpectrumSource =
   | { kind: "pixel"; x: number; y: number }
   | { kind: "region"; shape: RegionShape; background: RegionShape | null };
 
+export interface FileSpectrumSource {
+  kind: "file";
+  hdu: number | null;
+}
+
+export type LineMeasurementSource = SpectrumSource | FileSpectrumSource;
+
 export interface TableSource {
   kind: "table";
   path: string;
@@ -115,6 +122,12 @@ export interface GaussianFitResult {
   converged: boolean;
 }
 
+export interface FluxErrorTerms {
+  pixel: number;
+  level: number;
+  slope: number;
+}
+
 export interface LineMeasurement {
   z0: number;
   z1: number;
@@ -139,7 +152,13 @@ export interface LineMeasurement {
   snr: number | null;
   velocity: LineVelocity | null;
   fit: GaussianFitResult | null;
+  err_used: boolean;
+  flux_err_terms: FluxErrorTerms | null;
+  n_dq_excluded: number;
+  n_nonfinite: number;
+  n_bad_err: number;
+  err_source: string;
   notes: string[];
   elapsed_ms: number;
-  source: SpectrumSource;
+  source: LineMeasurementSource;
 }

@@ -41,6 +41,7 @@ export interface AlignedChannel {
   wcs_rotation_deg?: number | null;
   prefilter_k?: number | null;
   residual_measured?: boolean;
+  star_match_rejection?: string | null;
 }
 
 export interface AlignResult {

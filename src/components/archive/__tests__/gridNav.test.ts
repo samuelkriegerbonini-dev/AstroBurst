@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { galleryColumns, galleryMove, tableMove } from "../logic/gridNav";
+import { galleryColumns, galleryDemand, galleryMove, tableMove } from "../logic/gridNav";
 
 const key = (k: string, ctrl = false) => ({ key: k, ctrlKey: ctrl, metaKey: false });
 
@@ -9,6 +9,24 @@ describe("galleryColumns", () => {
     expect(galleryColumns(152, 152, 12)).toBe(1);
     expect(galleryColumns(20, 152, 12)).toBe(1);
     expect(galleryColumns(164 * 5 + 152 - 164, 152, 12)).toBe(5);
+  });
+});
+
+describe("galleryDemand", () => {
+  const rows = Array.from({ length: 11 }, (_, i) => ({ datasetId: `d${i}` }));
+
+  it("names the cards on screen, the next page and the width of the first visible row", () => {
+    expect(galleryDemand(rows, { columns: 3, firstVisible: 1, lastVisible: 3, pageRows: 1 }, "d4")).toEqual({
+      selected: ["d4"],
+      visible: ["d3", "d4", "d5", "d6", "d7", "d8"],
+      ahead: ["d9", "d10"],
+      firstRow: 3,
+    });
+  });
+
+  it("drops a selection that is not among the rows", () => {
+    expect(galleryDemand(rows, { columns: 4, firstVisible: 0, lastVisible: 1, pageRows: 1 }, "gone").selected).toEqual([]);
+    expect(galleryDemand(rows, { columns: 4, firstVisible: 0, lastVisible: 1, pageRows: 1 }, null).selected).toEqual([]);
   });
 });
 

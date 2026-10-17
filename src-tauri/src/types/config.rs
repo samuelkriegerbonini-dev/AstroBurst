@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +15,10 @@ pub struct AppConfig {
     pub data_dir_override: Option<String>,
     #[serde(default)]
     pub mast_quota_gb: Option<f64>,
+    #[serde(default)]
+    pub external_catalogs: BTreeMap<String, String>,
+    #[serde(default)]
+    pub siril_catalog_dir: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -25,6 +31,8 @@ impl Default for AppConfig {
             mast_token_transport: None,
             data_dir_override: None,
             mast_quota_gb: None,
+            external_catalogs: BTreeMap::new(),
+            siril_catalog_dir: None,
         }
     }
 }

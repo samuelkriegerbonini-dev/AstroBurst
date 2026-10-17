@@ -23,7 +23,7 @@ use crate::infra::wcs_source::load_wcs;
 use crate::types::compose::AlignMethod;
 use crate::types::header::HduHeader;
 use crate::types::ImageStats;
-use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_AUTO_STF, RES_CACHE_KEY, RES_CONFIDENCE, RES_METHOD_USED, RES_MATCHED_STARS, RES_INLIERS, RES_RESIDUAL_PX, RES_REGISTERED, RES_STF_LINKED, RES_STF_NOTE, STF_B, STF_G, STF_R, RES_REFERENCE_INDEX, RES_REFERENCE_RULE, RES_RUN_TOKEN, RES_REPROJECTED, RES_WCS_SCALE_RATIO, RES_WCS_ROTATION_DEG, RES_PREFILTER_K, RES_WCS_KIND, RES_RESIDUAL_MEASURED, RES_WARNINGS, ALIGN_METHOD_PHASE};
+use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_AUTO_STF, RES_CACHE_KEY, RES_CONFIDENCE, RES_METHOD_USED, RES_MATCHED_STARS, RES_INLIERS, RES_RESIDUAL_PX, RES_REGISTERED, RES_STF_LINKED, RES_STF_NOTE, STF_B, STF_G, STF_R, RES_REFERENCE_INDEX, RES_REFERENCE_RULE, RES_RUN_TOKEN, RES_REPROJECTED, RES_WCS_SCALE_RATIO, RES_WCS_ROTATION_DEG, RES_PREFILTER_K, RES_WCS_KIND, RES_RESIDUAL_MEASURED, RES_STAR_MATCH_REJECTION, RES_WARNINGS, ALIGN_METHOD_PHASE};
 
 use super::rgb::{composite_png_path, load_entry};
 
@@ -527,6 +527,7 @@ fn wcs_only_result(image: Array2<f32>, registered: bool, confidence: f64) -> Ali
         matched_stars: 0,
         inliers: 0,
         residual_px: 0.0,
+        rejection: None,
     }
 }
 
@@ -549,6 +550,7 @@ fn verified_residual(reference: &Array2<f32>, reprojection: Array2<f32>, measure
         matched_stars: stars.matched,
         inliers: stars.agreeing,
         residual_px: stars.rms_px,
+        rejection: measured.rejection,
     };
     (result, true)
 }
@@ -611,6 +613,7 @@ fn channel_json(channel: &RegisteredChannel, cache_key: &str) -> serde_json::Val
         RES_PREFILTER_K: g.map(|g| g.prefilter_k),
         RES_WCS_KIND: g.map(|g| g.wcs_kind),
         RES_RESIDUAL_MEASURED: channel.residual_measured,
+        RES_STAR_MATCH_REJECTION: r.rejection,
     })
 }
 
@@ -1725,6 +1728,7 @@ mod tests {
             matched_stars: 0,
             inliers: 0,
             residual_px: 0.0,
+            rejection: None,
         };
 
         let (result, residual_measured) = verified_residual(&reference, reprojection, measured);
@@ -1740,6 +1744,32 @@ mod tests {
     }
 
     #[test]
+    fn the_channel_report_carries_the_star_match_rejection() {
+        let channel = |rejection: Option<&str>| RegisteredChannel {
+            result: AlignPairResult {
+                aligned: Array2::zeros((2, 2)),
+                offset: (0.0, 0.0),
+                center_offset: (0.0, 0.0),
+                registered: false,
+                confidence: 0.0,
+                method_used: "identity".into(),
+                matched_stars: 40,
+                inliers: 39,
+                residual_px: 0.01,
+                rejection: rejection.map(str::to_string),
+            },
+            header: HduHeader::empty(),
+            geometry: None,
+            residual_measured: false,
+            warnings: Vec::new(),
+        };
+        let refused = channel_json(&channel(Some("reflection (det=-1.000) rejected")), "key");
+        assert_eq!(refused["star_match_rejection"], "reflection (det=-1.000) rejected", "{refused}");
+        let plain = channel_json(&channel(None), "key");
+        assert_eq!(plain["star_match_rejection"], serde_json::Value::Null, "{plain}");
+    }
+
+    #[test]
     fn a_phase_correlation_residual_without_point_sources_is_not_applied() {
         let flat = Array2::from_elem((128, 128), 100.0f32);
         let measured = AlignPairResult {
@@ -1752,6 +1782,7 @@ mod tests {
             matched_stars: 0,
             inliers: 0,
             residual_px: 0.0,
+            rejection: None,
         };
 
         let (result, residual_measured) = verified_residual(&flat, flat.clone(), measured);

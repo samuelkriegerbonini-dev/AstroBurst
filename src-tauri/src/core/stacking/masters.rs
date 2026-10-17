@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 pub use crate::core::imaging::calibration_pipeline::DarkGroup;
 use crate::core::imaging::calibration_pipeline::CalibrationMasters;
+use crate::core::metadata::header_aliases::{keyword_alternatives, TEMPERATURE_KEYS};
 use crate::core::stacking::calibration::{
     create_master_bias_cancellable, create_master_dark_cancellable, create_master_flat_cancellable,
     create_master_flat_dark_cancellable,
@@ -396,9 +397,10 @@ fn assign_by_temperature(
         .collect();
     if unknown > 0 && groups.len() > 1 {
         warnings.push(format!(
-            "{}{} lights have no CCD-TEMP/SET-TEMP; they use the {} °C dark group ({} frames).",
+            "{}{} lights have no temperature card ({}); they use the {} °C dark group ({} frames).",
             channel_prefix(channel),
             unknown,
+            keyword_alternatives(&TEMPERATURE_KEYS),
             groups[largest].0.map(format_temp).unwrap_or_else(|| "unknown".to_string()),
             groups[largest].1
         ));
@@ -627,7 +629,7 @@ mod tests {
         assert!(warnings[0].ends_with("add darks near -14.0 °C."), "{}", warnings[0]);
         assert_eq!(
             warnings[1],
-            "Channel 'R': 1 lights have no CCD-TEMP/SET-TEMP; they use the -20.0 °C dark group (5 frames)."
+            "Channel 'R': 1 lights have no temperature card (CCD-TEMP, CCD_TEMP, CCDTEMP, TEMPERAT, CAMTCCD or SET-TEMP); they use the -20.0 °C dark group (5 frames)."
         );
     }
 

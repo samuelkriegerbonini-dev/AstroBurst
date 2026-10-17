@@ -112,6 +112,7 @@ export function page(rows: MastRow[], over: Partial<MastSearchPage> = {}): MastS
     radiusClamped: false,
     searchPosition: { raDeg: 274.688, decDeg: -13.792 },
     applied: { conditions: [{ productLevel: "3" }], sortBy: [], sortDesc: [] },
+    droppedConditions: [],
     requestBody: { target: ["274.688 -13.792"], radius: 3, conditions: [{ productLevel: "3" }] },
     messages: [],
     unresolvedTargets: [],
@@ -182,7 +183,7 @@ export function hstSet(datasetId = "ICK909030"): MastImageSet {
   };
 }
 
-function product(filename: string, cls: MastProductClass, sizeBytes: number, over: Partial<MastProduct> = {}): MastProduct {
+export function product(filename: string, cls: MastProductClass, sizeBytes: number, over: Partial<MastProduct> = {}): MastProduct {
   const opens: MastProduct["opensAs"] = cls === "image" || cls === "cube" || cls === "spectrum" || cls === "ramp" || cls === "catalog" ? cls : null;
   return {
     datasetId: "jw02739-o001_t001_nircam",

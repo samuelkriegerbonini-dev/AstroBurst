@@ -14,6 +14,7 @@ import type {
   MastImageRef,
   MastImageSet,
   MastMissionId,
+  MastPreset,
   MastPreviewRef,
   MastProductList,
   MastProgressEvent,
@@ -78,6 +79,7 @@ function thumbRef(datasetId: string): MastImageRef {
 function services(over: Partial<ArchiveServices> = {}): ArchiveServices {
   return {
     missions: vi.fn(async () => MISSIONS),
+    presets: vi.fn(async () => []),
     probeMission: vi.fn(async () => MISSIONS[0]),
     resolve: vi.fn(async () => M16),
     search: vi.fn(async () => page([row("jw02739-o001_t001_nircam"), row("jw02739-o002_t001_miri")])),
@@ -398,6 +400,66 @@ describe("mission switch and filters", () => {
     await t.ctl.searchAround({ raDeg: 274.71, decDeg: -13.83, radiusArcmin: 4.2, label: "673nmos.fits" });
     expect(t.store.getState().form).toMatchObject({ text: "274.71000 -13.83000", radiusText: "4.2" });
     expect(t.svc.search).toHaveBeenCalledWith("g1:search", expect.objectContaining({ where: { kind: "position", raDeg: 274.71, decDeg: -13.83, radiusArcmin: 4.2, label: null } }), false);
+  });
+});
+
+describe("search presets", () => {
+  const TSO: MastPreset = {
+    id: "tso",
+    mission: "jwst",
+    label: "TSO",
+    description: "Time-series observations",
+    conditions: [{ column: "tsovisit", value: "t" }],
+    products: ["x1dints", "calints"],
+  };
+
+  it("loads the preset table with the missions", async () => {
+    const presets = vi.fn(async () => [TSO]);
+    const t = await ready({ presets });
+    expect(presets).toHaveBeenCalledTimes(1);
+    expect(t.store.getState().presets).toEqual([TSO]);
+    await t.ctl.init();
+    expect(presets).toHaveBeenCalledTimes(1);
+  });
+
+  it("searches without presets when the table cannot be loaded", async () => {
+    const t = await ready({ presets: vi.fn(async () => Promise.reject(mastErr("mast_cache"))) });
+    const s = t.store.getState();
+    expect(s.presets).toEqual([]);
+    expect(s.missions).toHaveLength(10);
+    expect(visibleBanner(s, t.clock.now())).toBeNull();
+  });
+
+  it("reruns a shown search with the chosen preset and without it again", async () => {
+    const t = await ready({ presets: vi.fn(async () => [TSO]) });
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    expect(t.svc.search).toHaveBeenLastCalledWith("g1:search", expect.objectContaining({ program: 2739, preset: null }), false);
+    t.ctl.setPreset("tso", { rerun: true });
+    await flush();
+    expect(t.store.getState().form.preset).toBe("tso");
+    expect(t.svc.search).toHaveBeenLastCalledWith("g2:search", expect.objectContaining({ program: 2739, preset: "tso" }), false);
+    expect(t.store.getState().resultsQuery?.preset).toBe("tso");
+    t.ctl.setPreset(null, { rerun: true });
+    await flush();
+    expect(t.svc.search).toHaveBeenLastCalledWith("g3:search", expect.objectContaining({ preset: null }), false);
+  });
+
+  it("keeps a preset chosen before the first search and drops it on a mission switch or a suggestion", async () => {
+    const t = await ready({ presets: vi.fn(async () => [TSO]) });
+    t.ctl.setPreset("tso", { rerun: true });
+    await flush();
+    expect(t.svc.search).not.toHaveBeenCalled();
+    expect(t.store.getState().form.preset).toBe("tso");
+    t.ctl.switchMission("hst");
+    expect(t.store.getState().form.preset).toBeNull();
+    t.ctl.switchMission("jwst");
+    t.ctl.setPreset("tso");
+    const jwst = SUGGESTIONS.find((s) => s.mission === "jwst");
+    expect(jwst).toBeDefined();
+    await t.ctl.runSuggestion(jwst!);
+    expect(t.store.getState().form.preset).toBeNull();
+    expect(t.svc.search).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ preset: null }), false);
   });
 });
 
@@ -892,7 +954,7 @@ describe("detail pane", () => {
     expect(vi.mocked(t.svc.thumbnail).mock.calls.length).toBeLessThanOrEqual(6);
   });
 
-  it("asks for filmstrip thumbnails after the visible cards, never ahead of them", async () => {
+  it("asks for filmstrip thumbnails after the visible cards when the view gives no first row", async () => {
     const list = rows(8);
     const ids = list.map((r) => r.datasetId);
     const pending: Deferred<MastImageRef>[] = [];
@@ -918,6 +980,42 @@ describe("detail pane", () => {
     await flush();
     await flush();
     expect(asked().slice(4, 8)).toEqual(ids.slice(4, 8).map((id) => `g1:thumb:${id}`));
+  });
+
+  it("asks for the first six filmstrip thumbnails right after the first visible gallery row", async () => {
+    const list = rows(8);
+    const ids = list.map((r) => r.datasetId);
+    const pending: Deferred<MastImageRef>[] = [];
+    const thumbnail = vi.fn(() => {
+      const d = deferred<MastImageRef>();
+      pending.push(d);
+      return d.promise;
+    });
+    const longSet = (datasetId: string): MastImageSet => {
+      const set = jwstL3Set(datasetId);
+      const entries = Array.from({ length: 10 }, (_, i) => ({ ...set.entries[0], key: `${datasetId}_e${i}`, thumbnailFilename: `${datasetId}_e${i}_thumb.jpg`, previewFilename: `${datasetId}_e${i}.jpg` }));
+      return { ...set, entries, groups: [{ ...set.groups[0], count: entries.length }] };
+    };
+    const t = await ready({ search: vi.fn(async () => page(list)), imageList: vi.fn(async (_id: string, _m: MastMissionId, datasetId: string) => longSet(datasetId)), thumbnail });
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    t.ctl.setThumbDemand({ selected: [ids[0]], visible: ids, ahead: [], firstRow: 3 });
+    await flush();
+    const q = t.store.getState().thumbs;
+    const strip = q.visible.filter((k) => k.startsWith(`${ids[0]}:`));
+    expect(strip).toHaveLength(9);
+    expect(q.visible).toEqual([...ids.slice(0, 3), ...strip.slice(0, 6), ...ids.slice(3), ...strip.slice(6)]);
+    const asked = () => thumbnail.mock.calls.map((c) => (c as unknown[])[0]);
+    const thumbIdOf = (key: string) => `g1:thumb:${key}`;
+    expect(asked()).toEqual(ids.slice(0, 4).map(thumbIdOf));
+    pending.slice(0, 4).forEach((d, i) => d.resolve({ ...thumbRef(ids[i]), filename: "_representative.jpg" }));
+    await flush();
+    await flush();
+    expect(asked().slice(4, 8)).toEqual(strip.slice(0, 4).map(thumbIdOf));
+    pending.slice(4, 8).forEach((d) => d.resolve(thumbRef(ids[0])));
+    await flush();
+    await flush();
+    expect(asked().slice(8, 12)).toEqual([...strip.slice(4, 6), ...ids.slice(4, 6)].map(thumbIdOf));
   });
 
   it("makes no image requests for exclusive data or while the pane is hidden", async () => {

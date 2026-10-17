@@ -32,6 +32,7 @@ export interface SpectralAxisControlsProps {
   correction: CorrectionFrame;
   onCorrectionChange: (frame: CorrectionFrame) => void;
   onCorrectionLoaded?: (correction: RadialVelocityCorrectionResult | null) => void;
+  correctionUnavailable?: string | null;
 }
 
 const SELECT_CLASS =
@@ -62,6 +63,7 @@ function SpectralAxisControls({
   correction,
   onCorrectionChange,
   onCorrectionLoaded,
+  correctionUnavailable = null,
 }: SpectralAxisControlsProps) {
   const axisId = useId();
   const restId = useId();
@@ -92,7 +94,7 @@ function SpectralAxisControls({
   }, [modes, mode, onModeChange]);
 
   useEffect(() => {
-    if (!filePath) {
+    if (!filePath || correctionUnavailable) {
       setResponse(null);
       setLoading(false);
       loadedRef.current?.(null);
@@ -119,7 +121,7 @@ function SpectralAxisControls({
     return () => {
       cancelled = true;
     };
-  }, [filePath]);
+  }, [filePath, correctionUnavailable]);
 
   const result = response && !isCorrectionError(response) ? response : null;
   const failure = response && isCorrectionError(response) ? response.error : null;
@@ -217,7 +219,10 @@ function SpectralAxisControls({
           {loading && <Loader2 size={10} className="animate-spin text-zinc-500" />}
           {axis?.specsys && <span className="ml-auto text-zinc-600">SPECSYS {axis.specsys}</span>}
         </div>
-        {!filePath && <p className="mt-1 text-zinc-600">Load a spectrum or cube to compute the correction.</p>}
+        {correctionUnavailable && <p className="mt-1 text-zinc-600">{correctionUnavailable}</p>}
+        {!filePath && !correctionUnavailable && (
+          <p className="mt-1 text-zinc-600">Load a spectrum or cube to compute the correction.</p>
+        )}
         {failure && <p className="mt-1 text-red-400/80 break-words">{failure}</p>}
         {result && (
           <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-zinc-300">

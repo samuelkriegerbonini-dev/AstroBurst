@@ -391,6 +391,81 @@ export async function debayerBatch(
   return result;
 }
 
+export type CfaExtractMode = "green" | "ha" | "ha_oiii" | "split";
+
+export interface CfaExtractPlane {
+  tag: string;
+  filter: string | null;
+  provenance: string;
+  fits_path: string;
+}
+
+export interface CfaOiiiScale {
+  scale: number;
+  offset: number;
+}
+
+export interface CfaExtractResult {
+  png_path?: string | null;
+  previewUrl?: string;
+  path: string;
+  pattern: string;
+  mode: CfaExtractMode;
+  paths: string[];
+  planes: CfaExtractPlane[];
+  dimensions: [number, number];
+  trimmed: boolean;
+  oiii_scale: CfaOiiiScale | null;
+  elapsed_ms: number;
+}
+
+export interface CfaExtractBatchItem {
+  path: string;
+  pattern?: string;
+  paths?: string[];
+  planes?: CfaExtractPlane[];
+  dimensions?: [number, number];
+  trimmed?: boolean;
+  oiii_scale?: CfaOiiiScale | null;
+  error?: string;
+}
+
+export interface CfaExtractBatchResult {
+  results: CfaExtractBatchItem[];
+  succeeded: number;
+  failed: number;
+  mode: CfaExtractMode;
+  elapsed_ms: number;
+}
+
+export function extractCfa(
+  path: string,
+  outputDir: string | undefined,
+  options: { mode: CfaExtractMode; pattern?: string },
+): Promise<CfaExtractResult> {
+  return withPreview<CfaExtractResult>("extract_cfa_cmd", outputDir, {
+    path,
+    mode: options.mode,
+    pattern: options.pattern ?? null,
+  });
+}
+
+export async function extractCfaBatch(
+  paths: string[],
+  outputDir: string | undefined,
+  options: { mode: CfaExtractMode; pattern?: string },
+): Promise<CfaExtractBatchResult> {
+  const dir = outputDir ?? await getOutputDir();
+  const result = await typedInvoke<CfaExtractBatchResult>("extract_cfa_batch_cmd", {
+    paths,
+    outputDir: dir,
+    mode: options.mode,
+    pattern: options.pattern ?? null,
+  });
+  announceCommandOutputs(result);
+  return result;
+}
+
 export interface GhsOptions {
   stretchFactor: number;
   localIntensity?: number;

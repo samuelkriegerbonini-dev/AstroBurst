@@ -93,8 +93,23 @@ export interface CompressMefResult {
   kept_raw: string[];
   uncompressed: string[];
   source_size_bytes: number;
+  source_decompressed_bytes: number;
   output_size_bytes: number;
   elapsed_ms: number;
+}
+
+function kilobytes(bytes: number): string {
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
+export function mefSizeSummary(result: CompressMefResult): string {
+  const source = result.source_decompressed_bytes;
+  const sourceText =
+    source === result.source_size_bytes
+      ? kilobytes(source)
+      : `${kilobytes(source)} decompressed (${kilobytes(result.source_size_bytes)} .gz on disk)`;
+  const ratio = source > 0 ? ` (${Math.round((result.output_size_bytes / source) * 100)}%)` : "";
+  return `${sourceText} → ${kilobytes(result.output_size_bytes)}${ratio}, ${result.elapsed_ms} ms`;
 }
 
 export function parseExtnameList(text: string): string[] {

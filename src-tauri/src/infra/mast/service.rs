@@ -26,7 +26,7 @@ use crate::core::mast::ids::validate_request_id;
 use crate::core::mast::images::{merge_lists, needs_list_after_redirect, prefer_filter, product_stem, representative_entry};
 use crate::core::mast::jpeg::{dimensions, quick_wcs, scale_wcs};
 use crate::core::mast::missions::{merge_probe, mission, missions as static_missions, utc_date, utc_datetime};
-use crate::core::mast::normalize::{normalize_page, PageRequest};
+use crate::core::mast::normalize::{dropped_conditions, normalize_page, PageRequest};
 use crate::core::mast::preview::{plan, prepared_name, resize_jpeg, PreviewPlan};
 use crate::core::mast::products::classify as classify_products;
 use crate::core::mast::query::{build_params, canonical_key, probe_params, validate};
@@ -166,6 +166,7 @@ async fn run_search(hub: &MastHub, request_id: &str, query: &MastQuery, refresh:
             page.request_id = request_id.to_owned();
             page.from_cache = true;
             page.elapsed_ms = elapsed_ms(started);
+            page.dropped_conditions = dropped_conditions(&valid, &page.applied);
             return Ok(page);
         }
     }
@@ -285,7 +286,7 @@ fn note_image_write(hub: &MastHub, bytes: u64) {
     }
 }
 
-fn note_list_write(hub: &MastHub, bytes: u64) {
+pub(crate) fn note_list_write(hub: &MastHub, bytes: u64) {
     let budget = hub.list_budget();
     if budget.note_write(bytes) {
         spawn_eviction(budget, hub.cache_root().join(LISTS_DIR));
@@ -1044,6 +1045,7 @@ mod tests {
             program: None,
             dataset_id: None,
             filters: MastFilterValues::default(),
+            preset: None,
             sort: Vec::new(),
             offset: 0,
             limit: PAGE_LIMIT,
@@ -1159,7 +1161,8 @@ mod tests {
         assert_eq!(sent["target"], json!(["274.688 -13.792"]));
         assert_eq!(sent["conditions"], json!([{"productLevel": "3"}]));
         assert_eq!(sent["limit"], json!(200));
-        assert_eq!(sent["select_cols"].as_array().unwrap().len(), 16);
+        assert_eq!(sent["select_cols"].as_array().unwrap().len(), 17);
+        assert_eq!(sent["select_cols"][16], json!("targtype"));
         let bad = MastQuery { where_: MastWhere::None, ..m16(MastMissionId::Jwst) };
         assert_eq!(search(&hub, "g1:search", &bad, false).await.unwrap_err().code, MastErrorCode::BadInput);
         assert_eq!(search(&hub, "bad id", &query, false).await.unwrap_err().code, MastErrorCode::BadInput);
@@ -1191,6 +1194,39 @@ mod tests {
         let hub_hst = hub_for(&server_hst, dir.path());
         assert!(!search(&hub_hst, "g1:search", &hst, false).await.unwrap().from_cache);
         assert_eq!(server.count("/search/jwst"), 3);
+    }
+
+    #[tokio::test]
+    async fn preset_searches_name_dropped_conditions_for_the_query_that_reads_the_page() {
+        let mut silent: Value = serde_json::from_str(&fixture("jwst_m16_l3.json")).unwrap();
+        silent["search_params"]["conditions"] = json!([]);
+        let server = serve_routes(vec![Route::post("/search/jwst/api/v0.1/search").json(silent.to_string())]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let mut plain = m16(MastMissionId::Jwst);
+        plain.filters.level = Some(LevelFilter::Combined);
+        let catalogues = MastQuery { preset: Some("pipeline_catalogs".into()), ..plain.clone() };
+        let first = search(&hub, "g1:search", &catalogues, false).await.unwrap();
+        assert!(!first.from_cache);
+        assert_eq!(first.dropped_conditions, ["productLevel"]);
+        let sent: Value = serde_json::from_str(&server.requests()[0].body).unwrap();
+        assert_eq!(sent["conditions"], json!([{"productLevel": "3"}]));
+        let reused = search(&hub, "g2:search", &plain, false).await.unwrap();
+        assert!(reused.from_cache);
+        assert_eq!(reused.dropped_conditions, Vec::<String>::new());
+        let again = search(&hub, "g3:search", &catalogues, false).await.unwrap();
+        assert!(again.from_cache);
+        assert_eq!(again.dropped_conditions, ["productLevel"]);
+        let tso = MastQuery { preset: Some("tso".into()), ..plain.clone() };
+        let fresh = search(&hub, "g4:search", &tso, false).await.unwrap();
+        assert!(!fresh.from_cache);
+        assert_eq!(fresh.dropped_conditions, ["tsovisit", "exp_type"]);
+        let sent: Value = serde_json::from_str(&server.requests()[1].body).unwrap();
+        assert_eq!(
+            sent["conditions"],
+            json!([{"productLevel": "3"}, {"tsovisit": "t"}, {"exp_type": "NRS_BRIGHTOBJ,NIS_SOSS,MIR_LRS-SLITLESS,NRC_TSGRISM"}])
+        );
+        assert_eq!(server.count("/search/jwst"), 2);
     }
 
     #[tokio::test]
@@ -3030,6 +3066,81 @@ mod tests {
         );
         assert!(near_dates.len() > 10 && prog_dates.len() > 5);
         assert_eq!(descending(&near_dates) && descending(&prog_dates), JWST_DATE_SORT_OK);
+    }
+
+    fn live_value(row: &FieldMap, column: &str) -> String {
+        match row.get(column) {
+            Some(Value::String(text)) => text.trim().to_ascii_lowercase(),
+            Some(other) => other.to_string(),
+            None => String::new(),
+        }
+    }
+
+    async fn live_preset_holds(endpoint: &MissionEndpoint, id: &str, program: i64) -> bool {
+        let preset = crate::core::mast::presets::find(MastMissionId::Jwst, id).unwrap();
+        let query = MastQuery {
+            mission: MastMissionId::Jwst,
+            where_: MastWhere::None,
+            program: Some(program),
+            dataset_id: None,
+            filters: MastFilterValues { level: Some(LevelFilter::All), ..Default::default() },
+            preset: Some(id.to_owned()),
+            sort: Vec::new(),
+            offset: 0,
+            limit: PAGE_LIMIT,
+        };
+        let valid = validate(&query).unwrap();
+        let params = build_params(&valid).select(preset.conditions.iter().map(|(column, _)| *column));
+        let started = Instant::now();
+        let hit: SearchResults<FieldMap> = endpoint.search(&params).await.unwrap();
+        let hit_ms = elapsed_ms(started);
+        let rows = hit.results.len();
+        let all_match = hit.results.iter().all(|row| {
+            preset.conditions.iter().all(|(column, value)| {
+                let found = live_value(row, column);
+                value.split(',').any(|part| part.eq_ignore_ascii_case(&found))
+            })
+        });
+        let total = hit.total_results;
+        let page = normalize_page(
+            MastMissionId::Jwst,
+            hit,
+            PageRequest { request_id: "live:preset", query: &valid, request_body: Value::Null, elapsed_ms: hit_ms },
+        );
+        let mut controls = Vec::new();
+        for (column, _) in preset.conditions {
+            let control = SearchParams::new().page(0, 50).select(["fileSetName"]).condition("program", program).condition(*column, "zz_none");
+            let started = Instant::now();
+            let none: SearchResults<FieldMap> = endpoint.search(&control).await.unwrap();
+            controls.push((*column, none.results.len(), none.total_results, elapsed_ms(started)));
+        }
+        eprintln!(
+            "live_jwst_presets {id} (programme {program}): rows {rows} total {total} all_match {all_match} dropped {:?} echo {:?} ({hit_ms} ms); controls (column, rows, total, ms) {controls:?}",
+            page.dropped_conditions, page.applied.conditions
+        );
+        rows > 0 && all_match && page.dropped_conditions.is_empty() && controls.iter().all(|(_, rows, _, _)| *rows == 0)
+    }
+
+    #[tokio::test]
+    #[ignore = "live MAST request"]
+    async fn live_jwst_presets() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = live_hub(dir.path());
+        let endpoint: MissionEndpoint = hub.endpoint(MastMissionId::Jwst, OpKind::Search).unwrap();
+        let mut failed = Vec::new();
+        for (id, program) in [
+            ("tso", 1366),
+            ("ifu_cubes", 1266),
+            ("slit_spectra", 2736),
+            ("psf_calibration", 1386),
+            ("pure_parallel", 2514),
+            ("pipeline_catalogs", 2739),
+        ] {
+            if !live_preset_holds(&endpoint, id, program).await {
+                failed.push(id);
+            }
+        }
+        assert_eq!(failed, Vec::<&str>::new());
     }
 
     #[tokio::test]

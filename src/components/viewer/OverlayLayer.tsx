@@ -11,6 +11,7 @@ import { screenPxPerImagePx, type ViewerTransform } from "../../utils/pixelMappi
 import { isRegionMappingUsable, regionPointToScreen, resolveRegionHost, type RegionMapping } from "../../utils/regionCoords";
 import type { Pt } from "../../utils/regionGeometry";
 import { COMPASS_LAYER_ID, COMPASS_LAYER_KIND, createCompassPainter } from "./painters/compassPainter";
+import { overlayDataAttributes } from "./overlayAttributes";
 import { createGridPainter, GRID_LAYER_ID, GRID_LAYER_KIND } from "./painters/gridPainter";
 
 interface OverlayLayerProps {
@@ -173,6 +174,7 @@ function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   return (
     <canvas
       ref={attachCanvas}
+      {...overlayDataAttributes(doc.layers)}
       style={{
         position: "absolute",
         inset: 0,

@@ -1398,6 +1398,35 @@
   white-space: nowrap;
 }
 
+.ab-mast-footprint {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ab-mast-footprint-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.ab-mast-footprint-row .ab-mast-action[aria-pressed="true"] {
+  border-color: var(--ab-violet);
+  color: var(--ab-violet);
+}
+
+.ab-mast-footprint-count {
+  color: var(--ab-text-3);
+  font-size: 11px;
+}
+
+.ab-mast-footprint-reason {
+  color: var(--ab-text-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .ab-mast-detail-tabs {
   display: flex;
   flex: none;
@@ -1835,7 +1864,7 @@
 
 .ab-mast-prow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 76px 72px auto;
+  grid-template-columns: 14px minmax(0, 1fr) 76px 72px auto;
   align-items: center;
   gap: 6px;
   padding: 1px 0 1px 8px;
@@ -1883,6 +1912,46 @@
   color: var(--ab-text-2);
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+.ab-mast-prow-tail {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.ab-mast-prow-peek-btn {
+  padding: 0 4px;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.ab-mast-prow-peek-btn:disabled {
+  color: var(--ab-text-3);
+  cursor: progress;
+}
+
+.ab-mast-prow-peek {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 0 3px 30px;
+  color: var(--ab-text-2);
+  font-size: 10.5px;
+}
+
+.ab-mast-prow-peek[data-state="failed"] {
+  color: var(--ab-rose);
+}
+
+.ab-mast-prow-peek-text,
+.ab-mast-prow-peek-note {
+  overflow-wrap: anywhere;
+}
+
+.ab-mast-prow-peek-note {
+  color: var(--ab-text-3);
 }
 
 .ab-mast-hidden {
@@ -2441,6 +2510,145 @@
   to {
     transform: rotate(360deg);
   }
+}
+
+.ab-mast-prow-pick {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--ab-accent);
+  cursor: pointer;
+}
+
+.ab-mast-dl-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ab-border);
+}
+
+.ab-mast-dl-bar-row,
+.ab-mast-dl-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.ab-mast-dl-selection {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ab-text-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ab-mast-dl-confirm {
+  padding: 6px 8px;
+  background: var(--ab-bg-raised);
+  border: 1px solid var(--ab-amber);
+  border-radius: var(--ab-radius-sm);
+  color: var(--ab-text-1);
+  font-size: 11px;
+}
+
+.ab-mast-dl-confirm > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ab-mast-dl-drawer {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(460px, calc(100% - 24px));
+  max-height: min(420px, calc(100% - 24px));
+  padding: 8px 10px;
+  background: var(--ab-bg-panel);
+  border: 1px solid var(--ab-border-strong);
+  border-radius: var(--ab-radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+}
+
+.ab-mast-dl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ab-mast-dl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.ab-mast-dl-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  padding: 4px 0 4px 8px;
+  border-left: 2px solid var(--ab-text-3);
+}
+
+.ab-mast-dl-item[data-state="downloading"] {
+  border-left-color: var(--ab-accent);
+}
+
+.ab-mast-dl-item[data-state="done"] {
+  border-left-color: var(--ab-emerald);
+}
+
+.ab-mast-dl-item[data-state="error"] {
+  border-left-color: var(--ab-rose);
+}
+
+.ab-mast-dl-name {
+  overflow: hidden;
+  color: var(--ab-text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ab-mast-dl-status {
+  grid-column: 1 / -1;
+  color: var(--ab-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.ab-mast-dl-status[data-unverified="true"] {
+  color: var(--ab-amber);
+}
+
+.ab-mast-dl-progress {
+  grid-column: 1 / -1;
+  height: 3px;
+  overflow: hidden;
+  background: var(--ab-border);
+  border-radius: 2px;
+}
+
+.ab-mast-dl-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--ab-accent);
+}
+
+.ab-mast-dl-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 @media (prefers-reduced-motion: reduce) {

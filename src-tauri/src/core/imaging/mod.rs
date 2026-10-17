@@ -3,6 +3,7 @@ use crate::types::header::HduHeader;
 pub mod background;
 pub mod boundary;
 pub mod calibration_pipeline;
+pub mod cfa;
 pub mod colormap;
 pub mod contour;
 pub mod cosmetic;

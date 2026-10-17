@@ -13,3 +13,8 @@ pub mod wcs_source;
 pub mod mast;
 #[cfg(feature = "net")]
 pub mod net;
+#[cfg(not(feature = "net"))]
+pub mod net {
+    pub mod paths;
+}
+pub mod catalog_store;

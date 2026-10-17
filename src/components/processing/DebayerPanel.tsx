@@ -1,11 +1,21 @@
 import { useState, useCallback, useId } from "react";
 import { Grid3X3, CheckCircle2, Layers } from "lucide-react";
 import { RunButton, ResultGrid, ErrorAlert, SectionHeader } from "../ui";
-import { debayerFits, debayerBatch } from "../../services/processing";
-import type { DebayerResult, DebayerBatchResult } from "../../services/processing";
 import { useDoneFilesContext, useRenderContext } from "../../context/PreviewContext";
 import { useProcessingRun } from "../../hooks/useProcessingRun";
 import { fileOnlyNotice, type CompositeNoticeProps } from "./compositeProps";
+import { CfaExtractResultView } from "./CfaExtractResultView";
+import {
+  EXTRACT_MODES,
+  RECONSTRUCT_MODES,
+  isExtractMode,
+  isExtractResult,
+  runPanelBatch,
+  runPanelMode,
+  type PanelBatchResult,
+  type PanelMode,
+  type PanelRunResult,
+} from "./debayerModes";
 
 interface DebayerPanelProps extends CompositeNoticeProps {
   selectedFile: { path: string; name?: string } | null;
@@ -24,25 +34,21 @@ const PATTERNS = [
   { value: "GBRG", label: "GBRG" },
 ] as const;
 
-const METHODS = [
-  { value: "bilinear", label: "Bilinear (full resolution)" },
-  { value: "superpixel", label: "Super-pixel (half resolution)" },
-] as const;
-
 const ICON = <Grid3X3 size={14} className="text-orange-400" />;
 
 export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate, fileKey, compositeMode, fileName, disabledReason, disabledReasonId }: DebayerPanelProps) {
   const { doneFiles } = useDoneFilesContext();
   const [pattern, setPattern] = useState("");
-  const [method, setMethod] = useState<"bilinear" | "superpixel">("bilinear");
-  const { running: isRunning, blocked, busyTitle, result: runResult, error, run, clearError } = useProcessingRun<DebayerResult>("debayer", fileKey ?? null);
+  const [method, setMethod] = useState<PanelMode>("bilinear");
+  const { running: isRunning, blocked, busyTitle, result: runResult, error, run, clearError } = useProcessingRun<PanelRunResult>("debayer", fileKey ?? null);
   const { processed } = useRenderContext();
   const result = runResult && processed?.kind === "debayer" ? runResult : null;
   const [isBatchRunning, setIsBatchRunning] = useState(false);
-  const [batchResult, setBatchResult] = useState<DebayerBatchResult | null>(null);
+  const [batchResult, setBatchResult] = useState<PanelBatchResult | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
   const patternId = useId();
   const methodId = useId();
+  const extracting = isExtractMode(method);
 
   const handleRun = useCallback(() => {
     if (!selectedFile?.path) return;
@@ -50,10 +56,7 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
     setBatchError(null);
     setBatchResult(null);
     void run(async () => {
-      const res = await debayerFits(path, outputDir, {
-        method,
-        pattern: pattern || undefined,
-      });
+      const res = await runPanelMode(method, path, outputDir, pattern);
       onPreviewUpdate?.(res.previewUrl, res.dimensions);
       return res;
     });
@@ -66,10 +69,11 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
     setBatchError(null);
     setBatchResult(null);
     try {
-      const res = await debayerBatch(
+      const res = await runPanelBatch(
+        method,
         doneFiles.map((f) => f.path),
         outputDir,
-        { method, pattern: pattern || undefined },
+        pattern,
       );
       setBatchResult(res);
     } catch (e: unknown) {
@@ -80,13 +84,14 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
   }, [doneFiles, outputDir, method, pattern, clearError]);
 
   const inputName = selectedFile?.name || selectedFile?.path?.split(/[/\\]/).pop();
+  const verb = extracting ? "Extract" : "Debayer";
 
   return (
     <div className="flex flex-col gap-3 p-3">
       <SectionHeader
         icon={ICON}
         title="Debayer (OSC)"
-        subtitle="Reconstruct R/G/B from a Bayer color camera frame"
+        subtitle="Reconstruct R/G/B or extract CFA planes from a Bayer color camera frame"
       />
 
       {compositeMode && fileName && (
@@ -121,24 +126,31 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
       </div>
 
       <div className="flex items-center justify-between">
-        <label htmlFor={methodId} className="text-xs text-zinc-400">Method</label>
+        <label htmlFor={methodId} className="text-xs text-zinc-400">Mode</label>
         <select
           id={methodId}
           value={method}
-          onChange={(e) => setMethod(e.target.value as typeof method)}
+          onChange={(e) => setMethod(e.target.value as PanelMode)}
           className="ab-select"
           disabled={isRunning || isBatchRunning}
         >
-          {METHODS.map((m) => (
-            <option key={m.value} value={m.value}>{m.label}</option>
-          ))}
+          <optgroup label="Reconstruct R/G/B">
+            {RECONSTRUCT_MODES.map((m) => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </optgroup>
+          <optgroup label="Extract CFA planes">
+            {EXTRACT_MODES.map((m) => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </optgroup>
         </select>
       </div>
 
       <div title={disabledReason ?? busyTitle}>
         <RunButton
-          label="Debayer Current File"
-          runningLabel="Debayering..."
+          label={`${verb} Current File`}
+          runningLabel={extracting ? "Extracting..." : "Debayering..."}
           running={isRunning}
           disabled={!selectedFile?.path || isBatchRunning || blocked || !!disabledReason}
           describedBy={disabledReason ? disabledReasonId : undefined}
@@ -148,8 +160,8 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
       </div>
 
       <RunButton
-        label={`Debayer All Loaded (${doneFiles.length})`}
-        runningLabel="Debayering batch..."
+        label={`${verb} All Loaded (${doneFiles.length})`}
+        runningLabel={extracting ? "Extracting batch..." : "Debayering batch..."}
         running={isBatchRunning}
         disabled={doneFiles.length === 0 || isRunning}
         accent="amber"
@@ -160,7 +172,9 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
 
       <ErrorAlert message={error ?? batchError} />
 
-      {result && (
+      {result && isExtractResult(result) && <CfaExtractResultView result={result} />}
+
+      {result && !isExtractResult(result) && (
         <div className="flex flex-col gap-2 animate-fade-in bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5">
           <div className="flex items-center gap-1.5 text-xs text-emerald-300 font-medium">
             <CheckCircle2 size={12} />
@@ -200,7 +214,9 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
             </div>
           ))}
           <div className="text-[9px] text-zinc-600">
-            R/G/B FITS files were written next to your output folder, named &lt;frame&gt;_R/_G/_B.fits.
+            {"mode" in batchResult
+              ? "CFA planes were written to your output folder, named <frame>_<mode>_<plane>.fits."
+              : "R/G/B FITS files were written next to your output folder, named <frame>_R/_G/_B.fits."}
           </div>
         </div>
       )}

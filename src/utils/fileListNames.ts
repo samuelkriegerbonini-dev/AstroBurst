@@ -2,6 +2,8 @@ const FILTER_TOKEN = /^f\d{3,4}[a-z]/i;
 const SEPARATORS = /[_-]+/;
 const LAST_THREE_TOKENS = /[^_-]+[_-]+[^_-]+[_-]+[^_-]+$/;
 const DROPPED = "...";
+const GZIP_FITS = /\.(?:fits|fit|fts)\.gz$/i;
+const LAST_EXTENSION = /\.[^.]+$/;
 
 export interface FileListEntry {
   name: string;
@@ -14,7 +16,12 @@ export interface FileListName {
 }
 
 function stemOf(name: string): string {
-  return name.replace(/\.[^.]+$/, "") || name;
+  return name.replace(GZIP_FITS.test(name) ? GZIP_FITS : LAST_EXTENSION, "") || name;
+}
+
+function distinctNames(entries: readonly FileListEntry[]): string[] | null {
+  const names = entries.map((entry) => entry.name);
+  return new Set(names).size === names.length ? names : null;
 }
 
 function tokensOf(text: string): string[] {
@@ -98,7 +105,8 @@ export function fileListNames(entries: readonly FileListEntry[]): FileListName[]
   const labels = stems.map((stem) => labelOf.get(stem) ?? { text: stem, clipStart: false });
   for (const rows of rowsByValue(labels.map((label) => label.text)).values()) {
     if (rows.length < 2) continue;
-    const texts = withFolders(labels[rows[0]].text, rows.map((row) => entries[row]));
+    const listed = rows.map((row) => entries[row]);
+    const texts = withFolders(labels[rows[0]].text, listed) ?? distinctNames(listed);
     if (texts) rows.forEach((row, k) => {
       labels[row] = { text: texts[k], clipStart: false };
     });

@@ -17,6 +17,7 @@ export interface ResultSet {
   radiusClamped: boolean;
   searchPosition: MastSearchPage["searchPosition"];
   applied: MastSearchPage["applied"];
+  droppedConditions: string[];
   requestBody: unknown;
   messages: string[];
   unresolvedTargets: string[];
@@ -41,6 +42,7 @@ function fromPage(page: MastSearchPage, rows: MastRow[]): ResultSet {
     radiusClamped: page.radiusClamped,
     searchPosition: page.searchPosition,
     applied: page.applied,
+    droppedConditions: page.droppedConditions,
     requestBody: page.requestBody,
     messages: page.messages,
     unresolvedTargets: page.unresolvedTargets,
@@ -59,7 +61,7 @@ export function mergePage(prev: ResultSet | null, page: MastSearchPage): ResultS
   const seen = new Set(prev.rows.map(rowIdentity));
   const added = page.rows.filter((r) => !seen.has(rowIdentity(r)));
   const merged = fromPage(page, [...prev.rows, ...added]);
-  return { ...merged, columns: prev.columns.length ? prev.columns : page.columns, requestBody: prev.requestBody, applied: prev.applied, elapsedMs: prev.elapsedMs };
+  return { ...merged, columns: prev.columns.length ? prev.columns : page.columns, requestBody: prev.requestBody, applied: prev.applied, droppedConditions: prev.droppedConditions, elapsedMs: prev.elapsedMs };
 }
 
 export function nextOffset(set: ResultSet): number | null {

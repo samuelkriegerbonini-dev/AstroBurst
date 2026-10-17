@@ -175,7 +175,7 @@ fn validated_data_dir(value: serde_json::Value, reserved: &[&Path]) -> Result<se
     Ok(serde_json::Value::String(text.to_owned()))
 }
 
-fn is_same_or_inside(candidate: &Path, root: &Path) -> bool {
+pub(crate) fn is_same_or_inside(candidate: &Path, root: &Path) -> bool {
     let root = comparable_components(root);
     !root.is_empty() && comparable_components(candidate).starts_with(&root)
 }

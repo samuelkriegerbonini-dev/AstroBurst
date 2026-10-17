@@ -793,9 +793,16 @@ fn align_to_reference(
             cols,
         ) {
             Ok(res) if res.registered => Ok(res.aligned),
-            Ok(res) => Err(format!("{}, confidence {:.2}", res.method_used, res.confidence)),
+            Ok(res) => Err(unregistered_reason(&res)),
             Err(e) => Err(format!("{:#}", e)),
         },
+    }
+}
+
+fn unregistered_reason(result: &crate::core::alignment::pair::AlignPairResult) -> String {
+    match result.rejection.as_deref() {
+        Some(reason) => format!("{}, confidence {:.2}: {}", result.method_used, result.confidence, reason),
+        None => format!("{}, confidence {:.2}", result.method_used, result.confidence),
     }
 }
 
@@ -1641,6 +1648,27 @@ mod tests {
                 "Channel 'L': frame 3 of 3 was left out of the stack: it could not be aligned to frame 1 (identity, confidence 0.00)"
                     .to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn unregistered_reason_carries_the_star_match_rejection() {
+        let unregistered = |rejection: Option<&str>| crate::core::alignment::pair::AlignPairResult {
+            aligned: Array2::zeros((2, 2)),
+            offset: (0.0, 0.0),
+            center_offset: (0.0, 0.0),
+            registered: false,
+            confidence: 0.0,
+            method_used: "identity".into(),
+            matched_stars: 60,
+            inliers: 41,
+            residual_px: 0.01,
+            rejection: rejection.map(str::to_string),
+        };
+        assert_eq!(unregistered_reason(&unregistered(None)), "identity, confidence 0.00");
+        assert_eq!(
+            unregistered_reason(&unregistered(Some("reflection (det=-1.000) rejected"))),
+            "identity, confidence 0.00: reflection (det=-1.000) rejected"
         );
     }
 

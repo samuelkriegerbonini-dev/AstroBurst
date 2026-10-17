@@ -19,6 +19,7 @@ pub enum OpKind {
     Products,
     AuthCheck,
     Info,
+    Download,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +171,15 @@ fn innermost_cause(error: &(dyn StdError + 'static)) -> String {
         return LOOKUP_FAILED.to_owned();
     }
     let cleaned = without_urls(&text);
+    if cleaned.is_empty() {
+        "connection failed".to_owned()
+    } else {
+        cleaned
+    }
+}
+
+pub fn transport_message(text: &str) -> String {
+    let cleaned = without_urls(text);
     if cleaned.is_empty() {
         "connection failed".to_owned()
     } else {

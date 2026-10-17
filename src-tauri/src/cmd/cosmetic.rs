@@ -9,9 +9,10 @@ use crate::cmd::common::{
     blocking_cmd, load_cached, load_cached_full, load_companions, output_stem, reduce_for_preview,
     render_and_save, resolve_output_dir, write_derived_fits, MAX_PREVIEW_DIM,
 };
+use crate::core::imaging::cfa::CfaPattern;
 use crate::core::imaging::cosmetic::{
-    cosmetic_correct_with_cfa, cosmetic_defect_map, count_flags, effective_cfa, parse_defect_list, CosmeticConfig,
-    CosmeticResult, FLAG_COLD, FLAG_HOT,
+    cosmetic_correct_with_cfa, cosmetic_defect_map, count_flags, effective_cfa, parse_defect_list,
+    refuse_xtrans_cosmetic, CosmeticConfig, CosmeticResult, FLAG_COLD, FLAG_HOT,
 };
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{apply_stf, auto_stf, AutoStfConfig};
@@ -96,6 +97,7 @@ fn correct_one(
     cfg: &CosmeticConfig,
 ) -> Result<serde_json::Value> {
     let entry = load_cached_full(path).or_else(|_| load_cached(path))?;
+    refuse_xtrans_cosmetic(cfg.cfa, entry.header().and_then(CfaPattern::declared).as_ref())?;
     let (cfa, cfa_source) = effective_cfa(cfg, entry.header());
     let result = cosmetic_correct_with_cfa(entry.arr(), master_dark, cfg, cfa)?;
     let ro = render_and_save(&result.corrected, path, out_dir, SUFFIX_COSMETIC, false)?;
@@ -181,6 +183,7 @@ fn dry_run_one(
     cfg: &CosmeticConfig,
 ) -> Result<serde_json::Value> {
     let entry = load_cached_full(path).or_else(|_| load_cached(path))?;
+    refuse_xtrans_cosmetic(cfg.cfa, entry.header().and_then(CfaPattern::declared).as_ref())?;
     let (cfa, cfa_source) = effective_cfa(cfg, entry.header());
     let map = cosmetic_defect_map(entry.arr(), master_dark, cfg, cfa)?;
     let (flagged, hot, cold, listed) = count_flags(&map);
@@ -371,6 +374,33 @@ mod tests {
         let body = correct_one(&format!("{plain}#hdu=1"), &out, None, &auto).unwrap();
         assert_eq!(body[RES_CFA_APPLIED], false);
         assert_eq!(body[RES_CFA_SOURCE], "none");
+    }
+
+    #[test]
+    fn xtrans_mosaics_are_refused_unless_mono_mode_is_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let out = out.to_str().unwrap().to_string();
+
+        let mut header = HduHeader::empty();
+        header.set("BAYERPAT", format!("'{}'", crate::core::imaging::cfa::test_fixtures::XTRANS_LAYOUT));
+        let xtrans = dir.path().join("xtrans.fits").to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&xtrans, &Array2::from_elem((12, 12), 100.0f32), Some(&header)).unwrap();
+
+        for cfa in [None, Some(true)] {
+            let cfg = CosmeticConfig { cfa, ..list_only("Point 2 2") };
+            for err in [correct_one(&xtrans, &out, None, &cfg), dry_run_one(&xtrans, &out, None, &cfg)] {
+                let err = format!("{:#}", err.unwrap_err());
+                assert!(err.contains("X-Trans") && err.contains("debayered channels"), "{cfa:?}: {err}");
+            }
+        }
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "a refused run wrote files");
+
+        let mono = CosmeticConfig { cfa: Some(false), ..list_only("Point 2 2") };
+        let body = correct_one(&xtrans, &out, None, &mono).unwrap();
+        assert_eq!(body[RES_CFA_APPLIED], false);
+        assert_eq!(body[RES_CFA_SOURCE], "explicit");
     }
 
     #[test]

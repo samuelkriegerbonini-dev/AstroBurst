@@ -370,6 +370,7 @@ fn register_frame(
                 method: "phase_correlation".into(),
                 confidence: Some(pc.confidence),
                 included: true,
+                rejection: None,
             };
             return (Registration::Shift(pc.dx, pc.dy), record);
         }
@@ -380,6 +381,7 @@ fn register_frame(
         method: result.method.to_string(),
         confidence: Some(result.confidence),
         included: registered,
+        rejection: result.rejection,
     };
     if !registered {
         return (Registration::Failed, record);
@@ -486,14 +488,27 @@ pub fn drizzle_stack_staged(
                 Registration::Warped(warped) => {
                     offsets.push((0.0, 0.0));
                     frames.push(Cow::Owned(warped));
+                    if let Some(reason) = record.rejection.as_deref() {
+                        let message = format!(
+                            "Frame {} of {} was drizzled on a {} shift (confidence {:.2}) after its star match was refused: {}",
+                            i + 2,
+                            total,
+                            record.method,
+                            record.confidence.unwrap_or(0.0),
+                            reason
+                        );
+                        log::warn!("{}", message);
+                        warnings.push(message);
+                    }
                 }
                 Registration::Failed => {
                     let message = format!(
-                        "Frame {} of {} was left out of the drizzle: it could not be aligned to frame 1 ({}, confidence {:.2})",
+                        "Frame {} of {} was left out of the drizzle: it could not be aligned to frame 1 ({}, confidence {:.2}){}",
                         i + 2,
                         total,
                         record.method,
-                        record.confidence.unwrap_or(0.0)
+                        record.confidence.unwrap_or(0.0),
+                        record.rejection.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
                     );
                     log::warn!("{}", message);
                     warnings.push(message);
@@ -642,6 +657,57 @@ mod tests {
         let lonely = vec![reference, blob_frame(250.0)];
         let err = drizzle_stack(&lonely, &cfg).unwrap_err().to_string();
         assert!(err.contains("at least 2 aligned frames"), "{err}");
+    }
+
+    #[test]
+    fn a_mirrored_frame_is_left_out_of_the_drizzle_with_the_reflection_named() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let frames = vec![
+            a1_reference(A1_SIZE, A1_STARS),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0)),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Mirrored),
+        ];
+        let mut cfg = config(1.0);
+        cfg.align = true;
+        cfg.alignment_method = AlignmentMethod::Affine;
+        cfg.pixfrac = 1.0;
+        cfg.rejection = RejectionMethod::None;
+        let result = drizzle_stack(&frames, &cfg).unwrap();
+        assert_eq!(result.frame_count, 2, "{:?}", result.alignment);
+        assert!(result.alignment[1].included, "{:?}", result.alignment[1]);
+        assert!(!result.alignment[2].included, "{:?}", result.alignment[2]);
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert!(
+            result.warnings[0].starts_with("Frame 3 of 3 was left out of the drizzle: it could not be aligned to frame 1 (identity, confidence 0.00): reflection (det="),
+            "{}",
+            result.warnings[0]
+        );
+    }
+
+    #[test]
+    fn a_frame_shifted_by_phase_correlation_after_its_star_match_was_refused_is_named_in_a_drizzle_warning() {
+        use crate::core::alignment::triangles::{a1_jittered_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let frames = vec![
+            a1_reference(A1_SIZE, A1_STARS),
+            a1_jittered_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0), 1.2),
+        ];
+        let mut cfg = config(1.0);
+        cfg.align = true;
+        cfg.alignment_method = AlignmentMethod::Affine;
+        cfg.pixfrac = 1.0;
+        cfg.rejection = RejectionMethod::None;
+        let result = drizzle_stack(&frames, &cfg).unwrap();
+        let record = &result.alignment[1];
+        assert!(record.included && record.method == "phase_correlation", "{record:?}");
+        let reason = record.rejection.clone().unwrap_or_default();
+        assert!(reason.starts_with("rotation "), "{record:?}");
+        assert_eq!(
+            result.warnings,
+            vec![format!(
+                "Frame 2 of 2 was drizzled on a phase_correlation shift (confidence {:.2}) after its star match was refused: {reason}",
+                record.confidence.unwrap_or_default()
+            )]
+        );
     }
 
     #[test]

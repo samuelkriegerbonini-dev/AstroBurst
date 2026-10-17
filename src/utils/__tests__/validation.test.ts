@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   astroFileFromPath,
+  dialogExtensions,
+  FITS_FILE_EXTENSIONS,
   folderErrorReport,
   folderReport,
   isValidFitsFile,
@@ -14,9 +16,9 @@ const CALIB = "C:\\crds\\jwst_nircam_distortion_0001.asdf";
 
 describe("partitionIncoming", () => {
   it("splits paths into accepted images, unsupported files and calibration references", () => {
-    const result = partitionIncoming(["C:\\a\\m42.fits", "C:\\a\\notes.txt", CALIB, "/b/cube.asdf", "/b/c.fits.gz"]);
-    expect(result.accepted).toEqual(["C:\\a\\m42.fits", "/b/cube.asdf"]);
-    expect(result.skipped).toEqual(["C:\\a\\notes.txt", "/b/c.fits.gz"]);
+    const result = partitionIncoming(["C:\\a\\m42.fits", "C:\\a\\notes.txt", CALIB, "/b/cube.asdf", "/b/c.fits.gz", "/b/d.tar.gz"]);
+    expect(result.accepted).toEqual(["C:\\a\\m42.fits", "/b/cube.asdf", "/b/c.fits.gz"]);
+    expect(result.skipped).toEqual(["C:\\a\\notes.txt", "/b/d.tar.gz"]);
     expect(result.calib).toEqual([CALIB]);
   });
 
@@ -93,8 +95,14 @@ describe("isValidFitsFile", () => {
     expect(isValidFitsFile("/data/frame.fz")).toBe(true);
   });
 
-  it("keeps rejecting gzip-compressed FITS, which the reader cannot decode", () => {
-    expect(isValidFitsFile("image.fits.gz")).toBe(false);
+  it("accepts gzip-compressed FITS in its three spellings, which the reader decompresses", () => {
+    expect(isValidFitsFile("image.fits.gz")).toBe(true);
+    expect(isValidFitsFile("C:\\data\\IMAGE.FIT.GZ")).toBe(true);
+    expect(isValidFitsFile("/data/frame.fts.gz")).toBe(true);
+  });
+
+  it("rejects every other gzip file, so a tarball never reaches the reader", () => {
+    for (const name of ["archive.tar.gz", "table.csv.gz", "notes.gz", "cube.asdf.gz", "frame.fz.gz"]) expect(isValidFitsFile(name), name).toBe(false);
   });
 
   it("keeps the existing formats", () => {
@@ -105,5 +113,31 @@ describe("isValidFitsFile", () => {
   it("offers fz in the open dialog filter and the drop hint", () => {
     expect(SUPPORTED_EXTENSIONS).toContain("fz");
     expect(SUPPORTED_EXTENSIONS_LABEL).toContain(".fz");
+  });
+
+  it("offers the gzip FITS spellings, never a bare gz, in the dialog filter and the drop hint", () => {
+    for (const ext of ["fits.gz", "fit.gz", "fts.gz"]) expect(SUPPORTED_EXTENSIONS).toContain(ext);
+    expect(SUPPORTED_EXTENSIONS).not.toContain("gz");
+    expect(SUPPORTED_EXTENSIONS_LABEL).toContain(".fits.gz");
+  });
+});
+
+describe("dialogExtensions", () => {
+  it("keeps the multi-dot gzip patterns as they are on Windows and Linux", () => {
+    expect(dialogExtensions(SUPPORTED_EXTENSIONS, false)).toEqual([...SUPPORTED_EXTENSIONS]);
+  });
+
+  it("adds gz on macOS, whose open panel matches only the last extension of fits.gz", () => {
+    const mac = dialogExtensions(SUPPORTED_EXTENSIONS, true);
+    expect(mac).toEqual([...SUPPORTED_EXTENSIONS, "gz"]);
+  });
+
+  it("adds nothing on macOS when no gzip spelling is offered", () => {
+    expect(dialogExtensions(["fits", "fit", "fts"], true)).toEqual(["fits", "fit", "fts"]);
+  });
+
+  it("lists the FITS spellings with their gzip forms for spectrum pickers", () => {
+    expect(FITS_FILE_EXTENSIONS).toEqual(["fits", "fit", "fts", "fits.gz", "fit.gz", "fts.gz"]);
+    for (const ext of FITS_FILE_EXTENSIONS) expect(isValidFitsFile(`a.${ext}`), ext).toBe(true);
   });
 });

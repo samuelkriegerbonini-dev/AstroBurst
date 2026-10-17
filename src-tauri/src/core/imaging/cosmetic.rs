@@ -3,6 +3,7 @@ use ndarray::{Array2, Zip};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::core::imaging::cfa::CfaPattern;
 use crate::core::stacking::cfa_guard::cfa_pattern;
 use crate::math::median::{exact_mad_mut, exact_median_mut, f32_cmp, median_f32_mut};
 use crate::types::constants::MAD_TO_SIGMA;
@@ -89,6 +90,15 @@ pub fn effective_cfa(config: &CosmeticConfig, header: Option<&HduHeader>) -> (bo
         None if header.is_some_and(|h| cfa_pattern(h).is_some()) => (true, CFA_SOURCE_HEADER),
         None => (false, CFA_SOURCE_NONE),
     }
+}
+
+pub fn refuse_xtrans_cosmetic(explicit_cfa: Option<bool>, pattern: Option<&CfaPattern>) -> Result<()> {
+    if explicit_cfa == Some(false) || !pattern.is_some_and(CfaPattern::is_xtrans) {
+        return Ok(());
+    }
+    bail!(
+        "X-Trans CFA mosaic (36-character BAYERPAT): cosmetic correction has no 6x6 mode yet; run it on debayered channels (X-Trans mosaics cannot be debayered here yet, debayer them in the camera software)"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1116,6 +1126,32 @@ mod tests {
             constant[[y, x]] = 5000.0;
         }
         assert_eq!(flagged_positions(&defect_map_from_dark(&constant, Some(3.0), Some(3.0))), expected);
+    }
+
+    #[test]
+    fn xtrans_cosmetic_is_refused_unless_mono_mode_was_explicit() {
+        let layout = crate::core::imaging::cfa::test_fixtures::XTRANS_LAYOUT;
+        let xtrans = CfaPattern::parse(layout).expect("the published X-Trans layout parses");
+        for explicit in [None, Some(true)] {
+            let err = refuse_xtrans_cosmetic(explicit, Some(&xtrans)).unwrap_err().to_string();
+            for needle in ["X-Trans", "no 6x6 mode yet", "debayered channels"] {
+                assert!(err.contains(needle), "{explicit:?}: missing {needle:?} in {err}");
+            }
+        }
+        let err = refuse_xtrans_cosmetic(None, Some(&xtrans)).unwrap_err().to_string();
+        for steer in ["mono", "CFA mode off"] {
+            assert!(!err.contains(steer), "the refusal points at the colour-mixing lattice: {err}");
+        }
+        assert!(refuse_xtrans_cosmetic(Some(false), Some(&xtrans)).is_ok());
+        let bayer = CfaPattern::Bayer(crate::core::imaging::debayer::BayerPattern::Rggb);
+        for explicit in [None, Some(true), Some(false)] {
+            assert!(refuse_xtrans_cosmetic(explicit, Some(&bayer)).is_ok());
+            assert!(refuse_xtrans_cosmetic(explicit, None).is_ok());
+        }
+        let mut header = HduHeader::empty();
+        header.set("BAYERPAT", format!("'{layout}'"));
+        let auto = CosmeticConfig { cfa: None, ..Default::default() };
+        assert_eq!(effective_cfa(&auto, Some(&header)), (false, "none"));
     }
 
     #[test]

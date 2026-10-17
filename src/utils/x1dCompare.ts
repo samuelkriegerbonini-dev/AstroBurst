@@ -1,25 +1,27 @@
 import type { ProcessedFile } from "../shared/types";
-import type { X1dSpectrum } from "../shared/types/spectral";
+import type { FileSpectrumSource, X1dSpectrum } from "../shared/types/spectral";
+import type { Spectrum1d, Spectrum1dKind } from "../shared/types/spectrum1d";
 import { parseImageRef } from "./imageRef";
 import type { ComparisonEntry } from "./spectrumCompare";
-import { fluxUnitLabel, type SpectrumView, type VacuumAxis } from "./spectrumExport";
+import { fileBaseName, fluxUnitLabel, vacuumUmAxis, type SpectrumView, type VacuumAxis } from "./spectrumExport";
 
 export type SiblingCandidate = Pick<ProcessedFile, "path" | "status">;
 
 export interface ListedFile extends SiblingCandidate {
   id: string;
-  error?: string | null;
+  spectrum?: Spectrum1dKind;
 }
 
 export const TABLE_ENTRY_ID = "x1d";
 export const TABLE_SERIES_COLOR = "#f0abfc";
-export const X1D_SIBLING_RE = /_(s3d|cal)(\.fits|\.fit|\.fts)$/i;
-export const TABLE_ONLY_HINT = "1D spectrum table (EXTRACT1D): open it from the Spectroscopy panel of its cube";
+export const DOCUMENT_ENTRY_ID = "document";
+export const DOCUMENT_SERIES_COLOR = "#e4e4e7";
+export const TABLE_ONLY_HINT = "1D spectrum, EXTRACT1D table";
 export const APERTURE_NOTE =
   "the pipeline aperture differs from your region: compare shapes and line positions, not absolute levels";
 
-const X1D_NAME_RE = /_x1d(\.fits|\.fit|\.fts)$/i;
-const FITS_EXTENSION_RE = /\.(fits|fit|fts)$/i;
+const X1D_NAME_RE = /_x1d(\.fits|\.fit|\.fts)(\.gz)?$/i;
+const FITS_EXTENSION_RE = /\.(fits|fit|fts)(\.gz)?$/i;
 const CUBE_SUFFIX = "_s3d";
 const EXACT_HIT_RELATIVE = 1e-9;
 const TABLE_REJECTION = "BINTABLE extension, holds no image pixels";
@@ -27,6 +29,10 @@ const EXTRACT1D = "EXTRACT1D";
 const DEFAULT_SB_UNIT = "MJy/sr";
 const DEFAULT_FLUX_UNIT = "Jy";
 const TABLE_LABEL = "x1d";
+const NATIVE_FLUX_UNIT = "native";
+const MICRON_UNIT = "um";
+const CSV_TABLE_HDU = 0;
+const UNKNOWN_DQ_TABLE = "unknown";
 
 export interface ResampledTable {
   flux: number[];
@@ -212,12 +218,6 @@ function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-export function siblingX1dPath(path: string): string | null {
-  const file = parseImageRef(path).path;
-  if (X1D_NAME_RE.test(file)) return file;
-  return X1D_SIBLING_RE.test(file) ? file.replace(X1D_SIBLING_RE, "_x1d$2") : null;
-}
-
 export function x1dStem(path: string): string | null {
   const name = baseName(parseImageRef(path).path);
   return X1D_NAME_RE.test(name) ? name.replace(X1D_NAME_RE, "") : null;
@@ -240,20 +240,8 @@ function siblingIn<T>(cubes: ReadonlyMap<string, T>, x1dPath: string): T | null 
   return stem ? (cubes.get(`${stem.toLowerCase()}${CUBE_SUFFIX}`) ?? null) : null;
 }
 
-function blockerIn(cubes: ReadonlyMap<string, unknown>, x1dPath: string): string | null {
-  const stem = x1dStem(x1dPath);
-  if (stem === null) {
-    return `${baseName(parseImageRef(x1dPath).path)} is not named <cube>_x1d.fits: use Pick x1d… in the Spectroscopy panel of its cube`;
-  }
-  return siblingIn(cubes, x1dPath) === null ? `load ${stem}${CUBE_SUFFIX}.fits first` : null;
-}
-
 export function findSiblingCube<T extends SiblingCandidate>(files: readonly T[], x1dPath: string): T | null {
   return siblingIn(loadedCubes(files), x1dPath);
-}
-
-export function openTableBlocker(files: readonly SiblingCandidate[], x1dPath: string): string | null {
-  return blockerIn(loadedCubes(files), x1dPath);
 }
 
 export function tableOnlyFileHint(error: string | null | undefined): string | null {
@@ -261,16 +249,90 @@ export function tableOnlyFileHint(error: string | null | undefined): string | nu
   return error.includes(TABLE_REJECTION) && error.includes(EXTRACT1D) ? TABLE_ONLY_HINT : null;
 }
 
-export function tableBlockers(files: readonly ListedFile[]): Map<string, string | null> {
-  const blockers = new Map<string, string | null>();
-  const tables = files.filter((file) => tableOnlyFileHint(file.error) !== null);
-  if (tables.length === 0) return blockers;
+export function comparableX1dIds(files: readonly ListedFile[]): Set<string> {
+  const ids = new Set<string>();
+  const tables = files.filter((file) => file.status === "spectrum" && file.spectrum?.kind === "x1d");
+  if (tables.length === 0) return ids;
   const cubes = loadedCubes(files);
-  for (const file of tables) blockers.set(file.id, blockerIn(cubes, file.path));
-  return blockers;
+  for (const file of tables) if (siblingIn(cubes, file.path) !== null) ids.add(file.id);
+  return ids;
+}
+
+export function documentAsTable(spectrum: Spectrum1d): X1dSpectrum {
+  const source = spectrum.source;
+  const vacuum = vacuumUmAxis(spectrum.axis, null, "optical", spectrum.flux.length);
+  if (vacuum.values === null) throw new Error(`${fileBaseName(source.path)}: ${vacuum.reason}`);
+  const card = (key: string) => cardText(spectrum.cards[key] ?? null);
+  const dq = spectrum.dq_table === UNKNOWN_DQ_TABLE ? null : spectrum.dq;
+  return {
+    path: source.path,
+    hdu: source.kind === "csv" ? CSV_TABLE_HDU : source.hdu,
+    extver: source.kind === "x1d" ? source.extver : null,
+    n_rows: spectrum.n_rows,
+    wavelength_um: vacuum.values,
+    wavelength_unit: MICRON_UNIT,
+    flux: spectrum.flux,
+    flux_error: spectrum.err,
+    flux_unit: spectrum.flux_unit ?? NATIVE_FLUX_UNIT,
+    surf_bright: null,
+    surf_bright_unit: null,
+    background: null,
+    npixels: null,
+    dq,
+    dq_table: spectrum.dq_table,
+    dq_flagged_rows: dq?.filter((bits) => bits !== 0).length ?? 0,
+    srctype: card("SRCTYPE"),
+    grating: card("GRATING"),
+    filter: card("FILTER"),
+    detector: card("DETECTOR"),
+    instrument: card("INSTRUME"),
+    target: card("TARGNAME") ?? card("OBJECT"),
+    other_tables: [],
+    notes: spectrum.notes,
+  };
+}
+
+export function documentComparisonEntries(
+  spectrum: Spectrum1d,
+  source: FileSpectrumSource,
+  table: X1dSpectrum | null,
+  vacuum: VacuumAxis,
+  channelCount: number,
+): ComparisonEntry[] {
+  const own: ComparisonEntry = {
+    id: DOCUMENT_ENTRY_ID,
+    kind: "document",
+    label: fileBaseName(spectrum.source.path),
+    color: DOCUMENT_SERIES_COLOR,
+    source,
+    regionText: null,
+    backgroundId: null,
+    region: null,
+    pixel: null,
+    table: null,
+    document: { flux: spectrum.flux, fluxUnit: spectrum.flux_unit ?? NATIVE_FLUX_UNIT },
+    error: null,
+  };
+  if (table === null) return [own];
+  return [own, { ...tableEntry(table, vacuum, channelCount), label: fileBaseName(table.path) }];
+}
+
+export interface ComparisonReaders {
+  x1d: (path: string, hdu: number | null) => Promise<X1dSpectrum>;
+  document: (path: string, hdu: number | null) => Promise<Spectrum1d>;
+}
+
+export async function readComparisonTable(
+  path: string,
+  hdu: number | null,
+  documentMode: boolean,
+  readers: ComparisonReaders,
+): Promise<X1dSpectrum> {
+  return documentMode ? documentAsTable(await readers.document(path, hdu)) : readers.x1d(path, hdu);
 }
 
 export function entryFluxUnit(entry: ComparisonEntry, bunit: string | null, view: SpectrumView): string {
+  if (entry.kind === "document") return entry.document?.fluxUnit ?? NATIVE_FLUX_UNIT;
   if (entry.kind === "table") {
     const table = entry.table;
     if (view === "mean") return table?.sbUnit ?? DEFAULT_SB_UNIT;

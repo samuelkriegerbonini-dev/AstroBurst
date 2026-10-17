@@ -772,18 +772,32 @@ pub fn stack_images_staged(
             method: result.method_used.clone(),
             confidence: Some(result.confidence),
             included: result.registered,
+            rejection: result.rejection.clone(),
         });
         if result.registered {
             offsets[i] = (result.center_offset.0.round() as i32, result.center_offset.1.round() as i32);
             aligned.push(Cow::Owned(result.aligned));
             members.push(i);
+            if let Some(reason) = result.rejection.as_deref() {
+                let message = format!(
+                    "Frame {} of {} was stacked on a {} shift (confidence {:.2}) after its star match was refused: {}",
+                    i + 1,
+                    n,
+                    result.method_used,
+                    result.confidence,
+                    reason
+                );
+                log::warn!("{}", message);
+                warnings.push(message);
+            }
         } else {
             let message = format!(
-                "Frame {} of {} was left out of the stack: it could not be aligned to frame 1 ({}, confidence {:.2})",
+                "Frame {} of {} was left out of the stack: it could not be aligned to frame 1 ({}, confidence {:.2}){}",
                 i + 1,
                 n,
                 result.method_used,
-                result.confidence
+                result.confidence,
+                result.rejection.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
             );
             log::warn!("{}", message);
             warnings.push(message);
@@ -1707,6 +1721,71 @@ mod tests {
         let result = stack_images(&images, &config).unwrap();
         assert!(result.alignment[1].included, "{:?}", result.alignment[1]);
         assert_eq!(result.offsets[1], (0, 0));
+    }
+
+    fn affine_stack_config() -> StackConfig {
+        StackConfig {
+            align_method: crate::types::compose::AlignMethod::Affine,
+            ..plain_stack_config()
+        }
+    }
+
+    #[test]
+    fn meridian_flip_halves_are_both_stacked() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView, A1_ROTATIONS_DEG, A1_SIZE, A1_STARS};
+        let mut images = vec![a1_reference(A1_SIZE, A1_STARS)];
+        images.extend(A1_ROTATIONS_DEG.iter().map(|&deg| a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(deg))));
+        images.push(a1_frame(A1_SIZE, A1_STARS, FrameView::Mirrored));
+        let result = stack_images(&images, &affine_stack_config()).unwrap();
+        let summary: Vec<String> = result.alignment.iter().map(|a| format!("{a:?}")).collect();
+        assert_eq!(result.frame_count, 1 + A1_ROTATIONS_DEG.len(), "{}", summary.join("\n"));
+        for (index, deg) in A1_ROTATIONS_DEG.iter().enumerate() {
+            let record = &result.alignment[index + 1];
+            assert!(record.included && record.rejection.is_none(), "{deg} deg: {record:?}");
+        }
+        let mirrored = &result.alignment[images.len() - 1];
+        assert!(!mirrored.included, "{mirrored:?}");
+        assert!(mirrored.rejection.as_deref().unwrap_or_default().contains("reflection"), "{mirrored:?}");
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn a_mirrored_frames_stack_warning_contains_reflection() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let images = vec![
+            a1_reference(A1_SIZE, A1_STARS),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0)),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Mirrored),
+        ];
+        let result = stack_images(&images, &affine_stack_config()).unwrap();
+        assert_eq!(result.frame_count, 2);
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        let warning = &result.warnings[0];
+        assert!(
+            warning.starts_with("Frame 3 of 3 was left out of the stack: it could not be aligned to frame 1 (identity, confidence 0.00): reflection (det="),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn a_frame_shifted_by_phase_correlation_after_its_star_match_was_refused_is_named_in_a_warning() {
+        use crate::core::alignment::triangles::{a1_jittered_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let images = vec![
+            a1_reference(A1_SIZE, A1_STARS),
+            a1_jittered_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0), 1.2),
+        ];
+        let result = stack_images(&images, &affine_stack_config()).unwrap();
+        let record = &result.alignment[1];
+        assert!(record.included && record.method == "phase_correlation", "{record:?}");
+        let reason = record.rejection.clone().unwrap_or_default();
+        assert!(reason.starts_with("rotation "), "{record:?}");
+        assert_eq!(
+            result.warnings,
+            vec![format!(
+                "Frame 2 of 2 was stacked on a phase_correlation shift (confidence {:.2}) after its star match was refused: {reason}",
+                record.confidence.unwrap_or_default()
+            )]
+        );
     }
 
     #[test]

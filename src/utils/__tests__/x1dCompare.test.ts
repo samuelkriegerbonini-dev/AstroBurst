@@ -1,15 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   APERTURE_NOTE,
+  DOCUMENT_ENTRY_ID,
   TABLE_ENTRY_ID,
   TABLE_SERIES_COLOR,
+  comparableX1dIds,
+  documentAsTable,
+  documentComparisonEntries,
   entryFluxUnit,
   findSiblingCube,
   interpolateOnto,
-  openTableBlocker,
+  readComparisonTable,
   resampleTable,
-  siblingX1dPath,
-  tableBlockers,
   tableEntry,
   tableLabel,
   usableRows,
@@ -17,9 +19,11 @@ import {
   x1dStem,
 } from "../x1dCompare";
 import type { ComparisonEntry } from "../spectrumCompare";
-import type { VacuumAxis } from "../spectrumExport";
+import { vacuumUmAxis, type VacuumAxis } from "../spectrumExport";
+import { airToVacuumUm } from "../spectralAxis";
 import type { ProcessedFile } from "../../shared/types";
-import type { X1dSpectrum } from "../../shared/types/spectral";
+import type { SpectralAxisInfo, X1dSpectrum } from "../../shared/types/spectral";
+import type { Spectrum1d } from "../../shared/types/spectrum1d";
 
 function x1dOf(wavelength: number[], flux: number[], extra: Partial<X1dSpectrum> = {}): X1dSpectrum {
   return {
@@ -318,21 +322,36 @@ describe("labels and entries", () => {
 });
 
 describe("sibling paths", () => {
-  it("siblingX1dPath maps an s3d or cal path to its x1d and keeps an x1d path", () => {
-    expect(siblingX1dPath("C:/d/jw01_nrs1_s3d.fits#hdu=1")).toBe("C:/d/jw01_nrs1_x1d.fits");
-    expect(siblingX1dPath("C:\\d\\jw01_nrs1_cal.fits")).toBe("C:\\d\\jw01_nrs1_x1d.fits");
-    expect(siblingX1dPath("C:/d/jw01_nrs1_S3D.FIT")).toBe("C:/d/jw01_nrs1_x1d.FIT");
-    expect(siblingX1dPath("C:/d/jw01_nrs1_x1d.fits")).toBe("C:/d/jw01_nrs1_x1d.fits");
-    expect(siblingX1dPath("C:/d/jw01_nrs1_x1d.fits#hdu=1")).toBe("C:/d/jw01_nrs1_x1d.fits");
-    expect(siblingX1dPath("C:/d/jw01_nrs1_rate.fits")).toBeNull();
-    expect(siblingX1dPath("C:/d/cube.fits")).toBeNull();
-  });
-
   it("x1dStem strips the folder and the _x1d suffix", () => {
     expect(x1dStem("C:/d/jw01266005001_02103_00001_nrs1_x1d.fits")).toBe("jw01266005001_02103_00001_nrs1");
     expect(x1dStem("C:\\d\\a_x1d.FTS")).toBe("a");
     expect(x1dStem("C:/d/a_s3d.fits")).toBeNull();
     expect(x1dStem("C:/d/spectrum.fits")).toBeNull();
+  });
+
+  it("x1dStem strips a gzip suffix after the FITS spelling", () => {
+    expect(x1dStem("C:/d/jw01_nrs1_x1d.fits.gz")).toBe("jw01_nrs1");
+    expect(x1dStem("C:\\d\\a_x1d.FTS.GZ#hdu=1")).toBe("a");
+    expect(x1dStem("C:/d/a_x1d.fit.gz")).toBe("a");
+    expect(x1dStem("C:/d/a_x1d.tar.gz")).toBeNull();
+    expect(x1dStem("C:/d/a_x1d.gz")).toBeNull();
+  });
+
+  it("findSiblingCube pairs gzip and plain names in every combination", () => {
+    const gzCube = fileOf("g", "C:/d/jw01_nrs1_s3d.fits.gz#hdu=1");
+    const plainCube = fileOf("p", "C:/d/jw01_nrs1_s3d.fits#hdu=1");
+    expect(findSiblingCube([gzCube], "C:/d/jw01_nrs1_x1d.fits.gz")).toBe(gzCube);
+    expect(findSiblingCube([gzCube], "C:/d/jw01_nrs1_x1d.fits")).toBe(gzCube);
+    expect(findSiblingCube([plainCube], "C:/d/jw01_nrs1_x1d.fits.gz")).toBe(plainCube);
+    expect(findSiblingCube([fileOf("t", "C:/d/jw01_nrs1_s3d.tar.gz")], "C:/d/jw01_nrs1_x1d.fits.gz")).toBeNull();
+  });
+
+  it("comparableX1dIds offers the cube comparison for a gzip x1d row", () => {
+    const files: ProcessedFile[] = [
+      { ...fileOf("x", "C:/d/jw01_nrs1_x1d.fits.gz", "spectrum"), spectrum: { kind: "x1d", hdu: 1 } },
+      fileOf("s", "C:/d/jw01_nrs1_s3d.fits.gz#hdu=1"),
+    ];
+    expect([...comparableX1dIds(files)]).toEqual(["x"]);
   });
 
   it("findSiblingCube matches the first loaded s3d, never the 2D cal, and ignores files not done", () => {
@@ -349,43 +368,208 @@ describe("sibling paths", () => {
     expect(findSiblingCube([s3d], "C:/d/spectrum.fits")).toBeNull();
   });
 
-  it("tableBlockers maps every x1d error row to its blocker and skips the other rows", () => {
-    const x1dError =
-      "Failed to load C:/d/jw01_nrs1_x1d.fits: HDU 1 (EXTRACT1D): BINTABLE extension, holds no image pixels; no HDU in this file holds a 2D image.";
+  it("comparableX1dIds lists the x1d spectrum rows whose s3d cube is loaded and skips every other row", () => {
+    const x1dRow = (id: string, path: string): ProcessedFile => ({ ...fileOf(id, path, "spectrum"), spectrum: { kind: "x1d", hdu: 1 } });
     const files = [
-      { ...fileOf("x", "C:/d/jw01_nrs1_x1d.fits", "error"), error: x1dError },
-      { ...fileOf("y", "C:/d/jw02_nrs1_x1d.fits", "error"), error: x1dError.replace("jw01", "jw02") },
-      { ...fileOf("e", "C:/d/broken.fits", "error"), error: "Failed to open C:/d/broken.fits: No such file" },
+      x1dRow("x", "C:/d/jw01_nrs1_x1d.fits"),
+      x1dRow("y", "C:/d/jw02_nrs1_x1d.fits"),
+      { ...fileOf("w", "C:/d/jw01_nrs1_x1d.fits", "spectrum"), spectrum: { kind: "wcs1d", hdu: 0 } as const },
+      fileOf("n", "C:/d/jw01_nrs1_x1d.fits", "spectrum"),
+      { ...fileOf("e", "C:/d/jw01_nrs1_x1d.fits", "error"), error: "Failed to load C:/d/jw01_nrs1_x1d.fits: HDU 1 (EXTRACT1D): BINTABLE extension, holds no image pixels" },
+      x1dRow("z", "C:/d/spectrum.fits"),
+      fileOf("c", "C:/d/jw02_nrs1_cal.fits"),
       fileOf("s", "C:/d/jw01_nrs1_s3d.fits#hdu=1"),
     ];
-    const blockers = tableBlockers(files);
-    expect([...blockers.keys()]).toEqual(["x", "y"]);
-    expect(blockers.get("x")).toBeNull();
-    expect(blockers.get("y")).toBe("load jw02_nrs1_s3d.fits first");
+    expect([...comparableX1dIds(files)]).toEqual(["x"]);
+    expect(comparableX1dIds([fileOf("s", "C:/d/jw01_nrs1_s3d.fits#hdu=1")]).size).toBe(0);
   });
 
-  it("tableBlockers resolves many x1d rows against many loaded files", () => {
-    const error = (i: number) =>
-      `Failed to load C:/d/jw${i}_nrs1_x1d.fits: HDU 1 (EXTRACT1D): BINTABLE extension, holds no image pixels; no HDU in this file holds a 2D image.`;
+  it("comparableX1dIds resolves many x1d rows against many loaded files", () => {
     const files: ProcessedFile[] = [];
-    for (let i = 0; i < 300; i++) files.push({ ...fileOf(`x${i}`, `C:/d/jw${i}_nrs1_x1d.fits`, "error"), error: error(i) });
+    for (let i = 0; i < 300; i++) files.push({ ...fileOf(`x${i}`, `C:/d/jw${i}_nrs1_x1d.fits`, "spectrum"), spectrum: { kind: "x1d", hdu: 1 } });
     for (let i = 0; i < 700; i++) files.push(fileOf(`r${i}`, `C:/d/jw${i}_nrs1_rate.fits`));
     for (let i = 0; i < 300; i += 2) files.push(fileOf(`s${i}`, `C:/d/jw${i}_nrs1_s3d.fits#hdu=1`));
     files.push(fileOf("c1", "C:/d/jw1_nrs1_cal.fits"));
-    const blockers = tableBlockers(files);
-    expect(blockers.size).toBe(300);
-    for (let i = 0; i < 300; i++) expect(blockers.get(`x${i}`)).toBe(i % 2 === 0 ? null : `load jw${i}_nrs1_s3d.fits first`);
+    const ids = comparableX1dIds(files);
+    expect(ids.size).toBe(150);
+    for (let i = 0; i < 300; i++) expect(ids.has(`x${i}`)).toBe(i % 2 === 0);
+  });
+});
+
+function spectrumOf(axis: SpectralAxisInfo, flux: number[], extra: Partial<Spectrum1d> = {}): Spectrum1d {
+  return {
+    source: { kind: "x1d", path: "C:/d/jw01_g395h_x1d.fits", hdu: 1, extver: 1 },
+    axis,
+    wavelength_frame: axis.kind === "awav" ? "air" : "vacuum",
+    precision: "f64",
+    flux,
+    err: flux.map(() => 0.5),
+    dq: null,
+    dq_table: "unknown",
+    flux_unit: "Jy",
+    n_rows: flux.length,
+    cards: {},
+    notes: [],
+    ...extra,
+  };
+}
+
+function axisOf(kind: SpectralAxisInfo["kind"], values: number[], extra: Partial<SpectralAxisInfo> = {}): SpectralAxisInfo {
+  return {
+    kind,
+    ctype: "WAVELENGTH",
+    unit: "um",
+    header_unit: "um",
+    header_scale: 1,
+    values,
+    crval: values[0] ?? 0,
+    cdelt: values.length > 1 ? values[1] - values[0] : 0,
+    crpix: 1,
+    rest_wavelength_um: null,
+    rest_frequency_hz: null,
+    specsys: null,
+    velosys: null,
+    notes: [],
+    ...extra,
+  };
+}
+
+describe("documentAsTable", () => {
+  it("turns a CSV spectrum into a table on vacuum wavelengths with its errors, DQ, unit and optics", () => {
+    const doc = spectrumOf(axisOf("wave", [2.0, 2.1, 2.2]), [1, 2, 3], {
+      source: { kind: "csv", path: "C:/d/g235h_spectrum.csv" },
+      err: [0.1, 0.2, 0.3],
+      dq: [0, 1, 0],
+      dq_table: "jwst",
+      cards: { GRATING: "G235H", FILTER: "F170LP", DETECTOR: "NRS1", INSTRUME: "NIRSPEC", TARGNAME: "T", SRCTYPE: "POINT" },
+      notes: ["CSV file, column wavelength_vacuum_um: vacuum wavelengths"],
+    });
+    expect(documentAsTable(doc)).toEqual({
+      path: "C:/d/g235h_spectrum.csv",
+      hdu: 0,
+      extver: null,
+      n_rows: 3,
+      wavelength_um: [2.0, 2.1, 2.2],
+      wavelength_unit: "um",
+      flux: [1, 2, 3],
+      flux_error: [0.1, 0.2, 0.3],
+      flux_unit: "Jy",
+      surf_bright: null,
+      surf_bright_unit: null,
+      background: null,
+      npixels: null,
+      dq: [0, 1, 0],
+      dq_table: "jwst",
+      dq_flagged_rows: 1,
+      srctype: "POINT",
+      grating: "G235H",
+      filter: "F170LP",
+      detector: "NRS1",
+      instrument: "NIRSPEC",
+      target: "T",
+      other_tables: [],
+      notes: ["CSV file, column wavelength_vacuum_um: vacuum wavelengths"],
+    });
   });
 
-  it("openTableBlocker names the cube to load, ignores a loaded 2D cal and is null once the s3d is loaded", () => {
-    const x1d = "C:/d/jw01266005001_02103_00001_nrs1_x1d.fits";
-    expect(openTableBlocker([], x1d)).toBe("load jw01266005001_02103_00001_nrs1_s3d.fits first");
-    expect(openTableBlocker([fileOf("c", "C:/d/jw01266005001_02103_00001_nrs1_cal.fits")], x1d)).toBe(
-      "load jw01266005001_02103_00001_nrs1_s3d.fits first",
-    );
-    expect(openTableBlocker([fileOf("s", "C:/d/jw01266005001_02103_00001_nrs1_s3d.fits#hdu=1")], x1d)).toBeNull();
-    expect(openTableBlocker([], "C:/d/spectrum.fits")).toBe(
-      "spectrum.fits is not named <cube>_x1d.fits: use Pick x1d… in the Spectroscopy panel of its cube",
-    );
+  it("keeps the HDU of a FITS spectrum and names a missing flux unit as native", () => {
+    const x1d = documentAsTable(spectrumOf(axisOf("wave", [2.0, 2.1]), [1, 2], { source: { kind: "x1d", path: "C:/d/a_x1d.fits", hdu: 2, extver: 2 } }));
+    expect(x1d.hdu).toBe(2);
+    expect(x1d.extver).toBe(2);
+    const wcs1d = documentAsTable(spectrumOf(axisOf("wave", [2.0, 2.1]), [1, 2], { source: { kind: "wcs1d", path: "C:/d/b.fits", hdu: 0 }, flux_unit: null }));
+    expect(wcs1d.hdu).toBe(0);
+    expect(wcs1d.flux_unit).toBe("native");
+  });
+
+  it("converts an air axis to vacuum wavelengths so it resamples onto a vacuum axis", () => {
+    const air = [0.6562, 0.6563, 0.6564];
+    const table = documentAsTable(spectrumOf(axisOf("awav", air), [1, 2, 3]));
+    expect(table.wavelength_um).toEqual(air.map(airToVacuumUm));
+  });
+
+  it("keeps every row of a spectrum whose DQ table is unknown, as the line measurement does", () => {
+    const axis = [2.0, 2.1, 2.2];
+    const doc = spectrumOf(axisOf("wave", axis), [1, 2, 3], {
+      source: { kind: "csv", path: "C:/d/no_table_spectrum.csv" },
+      dq: [0, 4, 0],
+      dq_table: "unknown",
+    });
+    const table = documentAsTable(doc);
+    expect(table.dq).toBeNull();
+    expect(table.dq_flagged_rows).toBe(0);
+    const resampled = resampleTable(table, axis);
+    expect(resampled.flux).toEqual([1, 2, 3]);
+    expect(resampled.droppedDq).toBe(0);
+    const known = resampleTable(documentAsTable({ ...doc, dq_table: "jwst", dq: [0, 1, 0] }), axis);
+    expect(known.flux[1]).toBeNaN();
+    expect(known.droppedDq).toBe(1);
+  });
+
+  it("refuses a spectrum whose axis has no vacuum wavelength, naming the file", () => {
+    const velocity = spectrumOf(axisOf("vopt", [0, 10, 20], { unit: "km/s" }), [1, 2, 3], { source: { kind: "csv", path: "C:/d/v.csv" } });
+    expect(() => documentAsTable(velocity)).toThrow(/v\.csv: .*rest wavelength/);
+  });
+});
+
+describe("documentComparisonEntries", () => {
+  const AXIS = Array.from({ length: 10 }, (_, i) => 2.0 + i * 0.001);
+
+  function documentOnAxis(): Spectrum1d {
+    return spectrumOf(axisOf("wave", AXIS), AXIS.map((_, i) => 10 + i));
+  }
+
+  it("puts the spectrum first and resamples a second x1d onto the spectrum's own vacuum axis", () => {
+    const second = x1dOf([1.9995, 2.0025, 2.0055, 2.0085, 2.0115], [1, 4, 7, 10, 13]);
+    const doc = documentOnAxis();
+    const vacuum = vacuumUmAxis(doc.axis, null, "optical", AXIS.length);
+    const entries = documentComparisonEntries(doc, { kind: "file", hdu: 1 }, second, vacuum, AXIS.length);
+    expect(entries.map((e) => e.id)).toEqual([DOCUMENT_ENTRY_ID, TABLE_ENTRY_ID]);
+    expect(entries[0]).toMatchObject({
+      kind: "document",
+      label: "jw01_g395h_x1d.fits",
+      source: { kind: "file", hdu: 1 },
+      document: { flux: doc.flux, fluxUnit: "Jy" },
+      error: null,
+    });
+    const table = entries[1];
+    expect(table.kind).toBe("table");
+    expect(table.label).toBe("jw01_nrs1_x1d.fits");
+    expect(table.error).toBeNull();
+    const resampled = table.table?.resampled.flux ?? [];
+    expect(resampled).toHaveLength(AXIS.length);
+    AXIS.forEach((w, i) => expect(resampled[i]).toBeCloseTo(1 + 1000 * (w - 1.9995), 9));
+    expect(table.table?.resampled).toEqual(resampleTable(second, AXIS));
+  });
+
+  it("shows the spectrum alone before a second spectrum is picked", () => {
+    const doc = documentOnAxis();
+    const entries = documentComparisonEntries(doc, { kind: "file", hdu: 1 }, null, vacuumUmAxis(doc.axis, null, "optical", AXIS.length), AXIS.length);
+    expect(entries.map((e) => e.kind)).toEqual(["document"]);
+  });
+
+  it("reports the document unit for its entry", () => {
+    const doc = spectrumOf(axisOf("wave", AXIS), AXIS.map(() => 1), { flux_unit: "erg/s/cm2/A" });
+    const [entry] = documentComparisonEntries(doc, { kind: "file", hdu: 0 }, null, vacuumUmAxis(doc.axis, null, "optical", AXIS.length), AXIS.length);
+    expect(entryFluxUnit(entry, "MJy/sr", "sum")).toBe("erg/s/cm2/A");
+  });
+});
+
+describe("readComparisonTable", () => {
+  const x1d = x1dOf([2.0, 2.1], [1, 2]);
+
+  it("reads the pipeline x1d of a cube with the x1d reader", async () => {
+    const readers = { x1d: vi.fn(async () => x1d), document: vi.fn() };
+    await expect(readComparisonTable("C:/d/jw_x1d.fits", 2, false, readers)).resolves.toBe(x1d);
+    expect(readers.x1d).toHaveBeenCalledWith("C:/d/jw_x1d.fits", 2);
+    expect(readers.document).not.toHaveBeenCalled();
+  });
+
+  it("reads any x1d, 1D FITS or CSV spectrum next to a spectrum file with the document reader and converts it", async () => {
+    const doc = spectrumOf(axisOf("wave", [2.0, 2.1]), [5, 6], { source: { kind: "csv", path: "C:/d/s.csv" } });
+    const readers = { x1d: vi.fn(), document: vi.fn(async () => doc) };
+    const table = await readComparisonTable("C:/d/s.csv", null, true, readers);
+    expect(readers.document).toHaveBeenCalledWith("C:/d/s.csv", null);
+    expect(readers.x1d).not.toHaveBeenCalled();
+    expect(table).toEqual(documentAsTable(doc));
   });
 });

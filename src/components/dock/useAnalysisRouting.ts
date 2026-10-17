@@ -7,7 +7,7 @@ import type { DockLayout } from "../../utils/dockLayout";
 const analysisChoices = new Map<string, AnalysisRouteTool>();
 
 export function useAnalysisRouting(active: DockLayout["active"], fileKey: string | null): void {
-  const { isCube, ramp, cubeFileKey } = useCubeContext();
+  const { isCube, isSpectrum, ramp, cubeFileKey } = useCubeContext();
   const seenActive = useRef(active);
   const routedActive = useRef<DockLayout["active"] | null>(null);
   const routedKey = useRef<string | null>(null);
@@ -24,9 +24,9 @@ export function useAnalysisRouting(active: DockLayout["active"], fileKey: string
     }
     if (!analysisRouteDue({ fileKey, flagsKey: cubeFileKey, routedKey: routedKey.current })) return;
     routedKey.current = fileKey;
-    const steps = nextAnalysisRoute({ layout: dockStore.get(), fileKey, isCube, isRamp: ramp !== null, memory: analysisChoices });
+    const steps = nextAnalysisRoute({ layout: dockStore.get(), fileKey, isCube, isRamp: ramp !== null, isSpectrum, memory: analysisChoices });
     if (steps.length === 0) return;
     for (const { tool } of steps) dockStore.dispatch({ type: "open", tool });
     routedActive.current = dockStore.get().active;
-  }, [fileKey, cubeFileKey, isCube, ramp]);
+  }, [fileKey, cubeFileKey, isCube, isSpectrum, ramp]);
 }

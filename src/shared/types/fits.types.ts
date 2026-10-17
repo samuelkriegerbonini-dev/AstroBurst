@@ -1,6 +1,7 @@
 import type { FileStatus } from "./queue";
 import type { HistogramData } from "./analysis";
 import type { DqTableName } from "./dq";
+import type { Spectrum1dKind } from "./spectrum1d";
 
 export type PlaneKind = "hdu" | "array";
 
@@ -86,4 +87,5 @@ export interface ProcessedFile {
   error: string | null;
   startedAt: number | null;
   finishedAt: number | null;
+  spectrum?: Spectrum1dKind;
 }

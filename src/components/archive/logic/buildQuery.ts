@@ -7,6 +7,7 @@ export interface ArchiveForm {
   kindOverride: QueryKind | null;
   radiusText: string;
   filters: MastFilterValues;
+  preset: string | null;
 }
 
 export interface SortKey {
@@ -42,6 +43,7 @@ export const DEFAULT_FORM: ArchiveForm = {
   kindOverride: null,
   radiusText: String(DEFAULT_RADIUS_ARCMIN),
   filters: { level: "combined" },
+  preset: null,
 };
 
 export function parseRadius(text: string): number | null {
@@ -81,6 +83,7 @@ function query(form: ArchiveForm, where: MastQuery["where"], available: readonly
       program: null,
       datasetId: null,
       filters: applicableFilters(form.filters, available),
+      preset: form.preset,
       sort: (opts.sort ?? []).map((s) => ({ column: s.column, desc: s.desc })),
       offset: opts.offset ?? 0,
       limit: PAGE_LIMIT,
@@ -97,7 +100,7 @@ export function planSearch(form: ArchiveForm, available: readonly QuickFilterId[
     return query(form, { kind: "none" }, available, opts, { program: meaning.program });
   }
   if (meaning.kind === "dataset" && meaning.datasetId !== null) {
-    return query(form, { kind: "none" }, [], opts, { datasetId: meaning.datasetId });
+    return query(form, { kind: "none" }, [], opts, { datasetId: meaning.datasetId, preset: null });
   }
   const radius = parseRadius(form.radiusText);
   if (radius === null) return { kind: "blocked", field: "radius", message: RADIUS_HINT };
@@ -143,5 +146,5 @@ export function switchMission(form: ArchiveForm, mission: MastMissionId, storage
   if (form.filters.dateFrom) filters.dateFrom = form.filters.dateFrom;
   if (form.filters.dateTo) filters.dateTo = form.filters.dateTo;
   if (mission === "jwst") filters.level = loadLevel(storage);
-  return { mission, text: form.text, kindOverride: form.kindOverride, radiusText: form.radiusText, filters };
+  return { mission, text: form.text, kindOverride: form.kindOverride, radiusText: form.radiusText, filters, preset: null };
 }

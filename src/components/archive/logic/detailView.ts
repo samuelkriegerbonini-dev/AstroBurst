@@ -30,6 +30,7 @@ export const EXCLUSIVE_PREVIEWS_TEXT = "MAST serves no preview of exclusive-acce
 export const PRODUCTS_SLOW_NOTE = "MAST takes 20 to 30 s for listings it has not seen recently.";
 export const PREVIEW_DWELL_MS = 400;
 export const STRIP_LIMIT = 24;
+export const STRIP_PRIORITY = 6;
 export const REPRESENTATIVE_STEM = "_representative";
 
 const SIZE_EDGE: Record<PreviewSize, number> = { pane: 2048, large: 4096 };

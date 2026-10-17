@@ -4,16 +4,20 @@ import ProfilePlot from "../regions/ProfilePlot";
 import { DecimalNumberField } from "../ui";
 import { getCubeSpectrum, getCubeSpectrumRegion } from "../../services/cube";
 import { readX1dSpectrum } from "../../services/spectral";
+import { readSpectrumDocument } from "../../services/spectrum1d";
 import { spectrumComparisonStore, useSpectrumComparison } from "../../hooks/useSpectrumComparisonStore";
 import { measurementLog, spectrumCompareEntry } from "../../utils/measurementLog";
 import type { ContinuumWindows } from "../../shared/types/cube";
+import type { Region } from "../../shared/types/regions";
 import type {
   CorrectionFrame,
+  FileSpectrumSource,
   RadialVelocityCorrectionResult,
   SpectralAxisInfo,
   SpectralAxisMode,
   VelocityConvention,
 } from "../../shared/types/spectral";
+import type { Spectrum1d } from "../../shared/types/spectrum1d";
 import type { RegionDoc } from "../../utils/regionStore";
 import {
   COMPARE_DEBOUNCE_MS,
@@ -39,7 +43,15 @@ import {
   type SpectrumView,
 } from "../../utils/spectrumExport";
 import { windowsAreValid } from "../../utils/spectrumRange";
-import { APERTURE_NOTE, siblingX1dPath, withTable } from "../../utils/x1dCompare";
+import {
+  APERTURE_NOTE,
+  documentComparisonEntries,
+  readComparisonTable,
+  withTable,
+  type ComparisonReaders,
+} from "../../utils/x1dCompare";
+import { dialogExtensions, FITS_FILE_EXTENSIONS } from "../../utils/validation";
+import { isMacPlatform } from "../../utils/historyKeys";
 
 interface SpectrumComparisonSectionProps {
   filePath: string;
@@ -55,6 +67,8 @@ interface SpectrumComparisonSectionProps {
   bunit: string | null;
   channelCount: number;
   windows: ContinuumWindows | null;
+  fileSpectrum?: Spectrum1d | null;
+  fileSpectrumSource?: FileSpectrumSource | null;
 }
 
 const ACCENT = "#22d3ee";
@@ -69,17 +83,23 @@ const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] font-mono text-zinc-200 focus:border-violet-500/50 w-16 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 const SMALL_BUTTON_CLASS = "px-2 py-0.5 rounded border transition-colors text-zinc-500 hover:text-zinc-300 disabled:opacity-40";
-const FITS_FILTER = { name: "FITS", extensions: ["fits", "fit", "fts"] };
+const FITS_FILTER = { name: "FITS", extensions: [...FITS_FILE_EXTENSIONS] };
+const SPECTRUM_FILTER = { name: "Spectrum (FITS or CSV)", extensions: [...FITS_FILE_EXTENSIONS, "csv"] };
 const PICK_TITLE = "Pick a pipeline x1d table";
+const PICK_SPECTRUM_TITLE = "Pick an x1d, 1D FITS or CSV spectrum";
+const PICK_SPECTRUM_HINT = "pick an x1d, 1D FITS or CSV spectrum to compare";
+const NO_REGIONS: Region[] = [];
+const COMPARISON_READERS: ComparisonReaders = { x1d: readX1dSpectrum, document: readSpectrumDocument };
 const CANCEL_TABLE_TITLE = "Stop loading the x1d";
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function tableOverlapTitle(entry: ComparisonEntry): string | undefined {
+function tableOverlapTitle(entry: ComparisonEntry, documentMode: boolean): string | undefined {
   const overlap = entry.table?.resampled.overlap;
-  return overlap ? `overlap with the cube: ${overlap[0].toFixed(4)}-${overlap[1].toFixed(4)} µm (vacuum)` : undefined;
+  const target = documentMode ? "spectrum" : "cube";
+  return overlap ? `overlap with the ${target}: ${overlap[0].toFixed(4)}-${overlap[1].toFixed(4)} µm (vacuum)` : undefined;
 }
 
 function SpectrumComparisonSection({
@@ -96,7 +116,10 @@ function SpectrumComparisonSection({
   bunit,
   channelCount,
   windows,
+  fileSpectrum = null,
+  fileSpectrumSource = null,
 }: SpectrumComparisonSectionProps) {
+  const documentMode = fileSpectrum !== null && fileSpectrumSource !== null;
   const doc = useSpectrumComparison(filePath);
   const normaliseId = useId();
   const stepId = useId();
@@ -104,12 +127,12 @@ function SpectrumComparisonSection({
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
   const noticeTimerRef = useRef<number | null>(null);
 
-  const regions = regionDoc.regions;
+  const regions = documentMode ? NO_REGIONS : regionDoc.regions;
   const limited = useMemo(() => limitCandidates(comparisonCandidates(regions), regions), [regions]);
   const candidates = limited.compared;
   const pixelKey = useMemo(
-    () => (doc.includePixel && pixelCoord ? `${pixelCoord.x},${pixelCoord.y}` : null),
-    [doc.includePixel, pixelCoord],
+    () => (!documentMode && doc.includePixel && pixelCoord ? `${pixelCoord.x},${pixelCoord.y}` : null),
+    [documentMode, doc.includePixel, pixelCoord],
   );
   const axisCol = useMemo(
     () => comparisonAxis(axis, mode, restUm, convention, correction, correctionResult, channelCount),
@@ -121,8 +144,11 @@ function SpectrumComparisonSection({
   );
   const vacuum = useMemo(() => vacuumUmAxis(axis, restUm, convention, channelCount), [axis, restUm, convention, channelCount]);
   const entries = useMemo(
-    () => withTable(pruneEntries(doc.entries, regions, channelCount), doc.table, vacuum, channelCount),
-    [doc.entries, regions, channelCount, doc.table, vacuum],
+    () =>
+      fileSpectrum !== null && fileSpectrumSource !== null
+        ? documentComparisonEntries(fileSpectrum, fileSpectrumSource, doc.table, vacuum, channelCount)
+        : withTable(pruneEntries(doc.entries, regions, channelCount), doc.table, vacuum, channelCount),
+    [fileSpectrum, fileSpectrumSource, doc.entries, regions, channelCount, doc.table, vacuum],
   );
   const hidden = useMemo(() => new Set(doc.hidden), [doc.hidden]);
   const windowsValid = windowsAreValid(windows, channelCount);
@@ -132,7 +158,9 @@ function SpectrumComparisonSection({
     [entries, hidden, axisValues, view, doc.normalise, usableWindows, doc.offsetStep, bunit, limited.omitted],
   );
   const tablePlotted = useMemo(() => plottedTable(entries, result), [entries, result]);
-  const stale = doc.loading || doc.tableLoading || doc.regionVersion !== regionDoc.version || doc.pixelKey !== pixelKey;
+  const stale = documentMode
+    ? doc.tableLoading
+    : doc.loading || doc.tableLoading || doc.regionVersion !== regionDoc.version || doc.pixelKey !== pixelKey;
 
   const showNotice = useCallback((text: string, error: boolean) => {
     if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
@@ -160,7 +188,7 @@ function SpectrumComparisonSection({
   }, [filePath, regionDoc.version, pixelKey, pixelCoord, candidates, regions]);
 
   useEffect(() => {
-    if (!doc.enabled) return;
+    if (!doc.enabled || documentMode) return;
     if (doc.loading) {
       if (doc.pendingRegionVersion === regionDoc.version && doc.pendingPixelKey === pixelKey) return;
       spectrumComparisonStore.invalidate(filePath);
@@ -171,6 +199,7 @@ function SpectrumComparisonSection({
     return () => window.clearTimeout(timer);
   }, [
     filePath,
+    documentMode,
     doc.enabled,
     doc.loading,
     doc.regionVersion,
@@ -190,25 +219,31 @@ function SpectrumComparisonSection({
     if (!doc.enabled || doc.tablePath === null || doc.table !== null || doc.tableError !== null || doc.tableLoading) return;
     const request = spectrumComparisonStore.beginTable(filePath);
     if (!request) return;
-    void readX1dSpectrum(request.path, request.hdu).then(
+    void readComparisonTable(request.path, request.hdu, documentMode, COMPARISON_READERS).then(
       (x1d) => spectrumComparisonStore.commitTable(filePath, request, x1d),
       (e: unknown) => spectrumComparisonStore.failTable(filePath, request, errorMessage(e)),
     );
-  }, [filePath, doc.enabled, doc.tablePath, doc.table, doc.tableError, doc.tableLoading]);
+  }, [filePath, documentMode, doc.enabled, doc.tablePath, doc.table, doc.tableError, doc.tableLoading]);
 
   const requestSiblingTable = useCallback(() => {
-    spectrumComparisonStore.requestTable(filePath, siblingX1dPath(filePath) ?? filePath);
+    spectrumComparisonStore.requestTable(filePath, filePath);
   }, [filePath]);
 
   const pickTable = useCallback(async () => {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const picked = await open({ multiple: false, directory: false, filters: [FITS_FILTER], title: PICK_TITLE });
+      const filter = documentMode ? SPECTRUM_FILTER : FITS_FILTER;
+      const picked = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: filter.name, extensions: dialogExtensions(filter.extensions, isMacPlatform(navigator.platform)) }],
+        title: documentMode ? PICK_SPECTRUM_TITLE : PICK_TITLE,
+      });
       if (typeof picked === "string") spectrumComparisonStore.requestTable(filePath, picked);
     } catch (e) {
       showNotice(`pick failed: ${errorMessage(e)}`, true);
     }
-  }, [filePath, showNotice]);
+  }, [filePath, documentMode, showNotice]);
 
   const tableHduOptions = useMemo(() => {
     const table = doc.table;
@@ -263,9 +298,9 @@ function SpectrumComparisonSection({
     skippedCount > 0
       ? `first ${candidateCount} of ${candidateCount + skippedCount} regions`
       : `${candidateCount} region${candidateCount === 1 ? "" : "s"}`;
-  const enableHint = `${regionHint}${pixelCoord ? " + pixel" : ""}`;
-  const canEnable = candidateCount > 0 || pixelCoord !== null;
-  const nothingToCompare = candidateCount === 0 && !pixelCoord;
+  const enableHint = documentMode ? PICK_SPECTRUM_HINT : `${regionHint}${pixelCoord ? " + pixel" : ""}`;
+  const canEnable = documentMode || candidateCount > 0 || pixelCoord !== null;
+  const nothingToCompare = !documentMode && candidateCount === 0 && !pixelCoord;
 
   return (
     <div className="w-full self-stretch px-3 pb-2 flex flex-col gap-2" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
@@ -288,9 +323,11 @@ function SpectrumComparisonSection({
           </>
         ) : (
           <>
-            <button onClick={() => void runFetch()} disabled={doc.loading} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
-              Refresh
-            </button>
+            {!documentMode && (
+              <button onClick={() => void runFetch()} disabled={doc.loading} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
+                Refresh
+              </button>
+            )}
             <button
               onClick={() => spectrumComparisonStore.patch(filePath, { enabled: false })}
               className={SMALL_BUTTON_CLASS}
@@ -298,18 +335,20 @@ function SpectrumComparisonSection({
             >
               Close
             </button>
-            <button onClick={requestSiblingTable} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
-              Compare with pipeline x1d
-            </button>
+            {!documentMode && (
+              <button onClick={requestSiblingTable} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
+                Compare with pipeline x1d
+              </button>
+            )}
             <button onClick={() => void pickTable()} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
-              Pick x1d…
+              {documentMode ? "Pick spectrum…" : "Pick x1d…"}
             </button>
             {(doc.loading || doc.tableLoading) && (
               <div className="w-3 h-3 rounded-full animate-spin" style={{ border: "1.5px solid transparent", borderTopColor: ACCENT }} />
             )}
             {doc.tableLoading && (
               <>
-                <span className="text-zinc-600">loading x1d…</span>
+                <span className="text-zinc-600">{documentMode ? "loading spectrum…" : "loading x1d…"}</span>
                 <button
                   type="button"
                   onClick={() => spectrumComparisonStore.clearTable(filePath)}
@@ -330,7 +369,7 @@ function SpectrumComparisonSection({
         <>
           {doc.tableError !== null && (
             <span className="text-[10px] font-mono text-red-400/80 break-words" role="alert">
-              x1d: {doc.tableError}
+              {documentMode ? "compared" : "x1d"}: {doc.tableError}
             </span>
           )}
 
@@ -350,7 +389,7 @@ function SpectrumComparisonSection({
                       </span>
                     )}
                     {entry.table && (
-                      <span className="text-zinc-600" title={tableOverlapTitle(entry)}>
+                      <span className="text-zinc-600" title={tableOverlapTitle(entry, documentMode)}>
                         {entry.table.nRows} rows · {entry.table.resampled.droppedDq} DQ rows dropped
                       </span>
                     )}
@@ -447,10 +486,10 @@ function SpectrumComparisonSection({
 
           {tablePlotted && (
             <div className="flex flex-col gap-0.5 text-[10px] font-mono text-zinc-600">
-              <span className="break-words">{APERTURE_NOTE}</span>
+              {!documentMode && <span className="break-words">{APERTURE_NOTE}</span>}
               {doc.table?.notes.map((note) => (
                 <span key={note} className="break-words">
-                  x1d: {note}
+                  {documentMode ? "compared" : "x1d"}: {note}
                 </span>
               ))}
             </div>

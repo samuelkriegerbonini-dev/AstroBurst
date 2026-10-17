@@ -8,6 +8,7 @@ import {
   exportPng,
   exportRgbPng,
   exportValuesCell,
+  mefSizeSummary,
   parseExtnameList,
   riceSupportsBitpix,
   DEFAULT_QUANTIZE_LEVEL,
@@ -782,11 +783,7 @@ export default function ExportPanel({
         {sectionFeedback("mef")}
         {mefResult && (
           <div className="flex flex-col gap-0.5 px-1">
-            <p className="text-[10px] text-emerald-300 font-mono">
-              {(mefResult.source_size_bytes / 1024).toFixed(0)} KB → {(mefResult.output_size_bytes / 1024).toFixed(0)} KB
-              {mefResult.source_size_bytes > 0 && ` (${Math.round((mefResult.output_size_bytes / mefResult.source_size_bytes) * 100)}%)`}
-              , {mefResult.elapsed_ms} ms
-            </p>
+            <p className="text-[10px] text-emerald-300 font-mono">{mefSizeSummary(mefResult)}</p>
             {mefHduSummary(mefResult).map((line) => (
               <p key={line} className="text-[10px] text-zinc-500 font-mono">{line}</p>
             ))}

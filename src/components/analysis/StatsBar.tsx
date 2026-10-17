@@ -34,10 +34,10 @@ function StatsBar({ stats, isProcessing, isComplete }: StatsBarProps) {
             <span className="text-red-400">{stats.failed} err</span>
           </>
         )}
-        {stats.tables > 0 && (
+        {stats.spectra > 0 && (
           <>
             <span style={{ color: "var(--ab-border-strong)" }}>|</span>
-            <span className="text-zinc-400">{stats.tables} {stats.tables === 1 ? "table" : "tables"}</span>
+            <span className="text-zinc-400">{stats.spectra} {stats.spectra === 1 ? "spectrum" : "spectra"}</span>
           </>
         )}
         <span style={{ color: "var(--ab-border-strong)" }}>|</span>

@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::missions::{column, dataset_column, has_synthetic, synthetic_columns, PROG_OBS_COLUMN, SEP_COLUMN};
+use super::presets;
 use super::query::{ValidQuery, MAX_ROWS};
 use super::types::{AppliedEcho, MastColumn, MastLevelClass, MastMissionId, MastRow, MastSearchPage, SearchPosition};
 use crate::infra::mast::models::{FieldMap, SearchResults};
@@ -301,6 +302,10 @@ fn applied(results: &SearchResults<FieldMap>) -> AppliedEcho {
     }
 }
 
+pub fn dropped_conditions(query: &ValidQuery, applied: &AppliedEcho) -> Vec<String> {
+    query.preset.map(|preset| presets::dropped_conditions(preset, applied)).unwrap_or_default()
+}
+
 fn parse_search_pos(text: &str) -> Option<SearchPosition> {
     let mut parts = text.split_whitespace();
     let ra_deg = parts.next()?.parse::<f64>().ok()?;
@@ -325,6 +330,7 @@ pub fn normalize_page(mission: MastMissionId, results: SearchResults<FieldMap>, 
         Some(total) => loaded < total,
         None => rows.len() == limit && limit > 0,
     };
+    let echo = applied(&results);
     let search_position = query
         .position()
         .or_else(|| results.results.iter().find_map(|raw| text(raw, "search_pos").and_then(|t| parse_search_pos(&t))));
@@ -341,7 +347,8 @@ pub fn normalize_page(mission: MastMissionId, results: SearchResults<FieldMap>, 
         radius_arcmin: query.radius_arcmin,
         radius_clamped: query.radius_clamped,
         search_position,
-        applied: applied(&results),
+        dropped_conditions: dropped_conditions(query, &echo),
+        applied: echo,
         request_body: request.request_body,
         unresolved_targets: unresolved_targets(&results.messages),
         messages: results.messages,
@@ -370,6 +377,7 @@ mod tests {
             program: None,
             dataset_id: None,
             filters: MastFilterValues::default(),
+            preset: None,
             sort: Vec::new(),
             offset: 0,
             limit: PAGE_LIMIT,
@@ -566,6 +574,31 @@ mod tests {
     }
 
     #[test]
+    fn a_preset_condition_missing_from_the_echo_is_named_on_the_page() {
+        let mut query = position_query(MastMissionId::Jwst, 3.0);
+        query.preset = Some(crate::core::mast::presets::find(MastMissionId::Jwst, "tso").unwrap());
+        let dropped = page_of(MastMissionId::Jwst, "jwst_m16_l3.json", &query);
+        assert_eq!(dropped.applied.conditions.len(), 1);
+        assert_eq!(dropped.dropped_conditions, ["tsovisit", "exp_type"]);
+        let mut honoured = fixture("jwst_m16_l3.json");
+        honoured.search_params.conditions = Some(
+            [("productLevel", "3"), ("tsovisit", "t"), ("exp_type", "NRS_BRIGHTOBJ,NIS_SOSS,MIR_LRS-SLITLESS,NRC_TSGRISM")]
+                .iter()
+                .map(|(column, value)| FieldMap::from_iter([((*column).to_owned(), json!(value))]))
+                .collect(),
+        );
+        let page = normalize_page(
+            MastMissionId::Jwst,
+            honoured,
+            PageRequest { request_id: "g1:search", query: &query, request_body: json!({}), elapsed_ms: 0 },
+        );
+        assert_eq!(page.dropped_conditions, Vec::<String>::new());
+        let plain = page_of(MastMissionId::Jwst, "jwst_m16_l3.json", &position_query(MastMissionId::Jwst, 3.0));
+        assert_eq!(plain.dropped_conditions, Vec::<String>::new());
+        assert_eq!(serde_json::to_value(&dropped).unwrap()["droppedConditions"], json!(["tsovisit", "exp_type"]));
+    }
+
+    #[test]
     fn wildcard_marks_total_unreliable() {
         let mut query = position_query(MastMissionId::Jwst, 10.0);
         query.conditions = vec![("exp_type".into(), json!("NRC_*"))];
@@ -630,6 +663,7 @@ mod tests {
             program: None,
             dataset_id: None,
             filters: MastFilterValues::default(),
+            preset: None,
             sort: Vec::new(),
             offset: 0,
             limit: PAGE_LIMIT,

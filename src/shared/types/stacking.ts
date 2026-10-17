@@ -49,6 +49,7 @@ export interface StackFrameAlignment {
   method_used: string;
   confidence: number | null;
   included: boolean;
+  star_match_rejection?: string | null;
 }
 
 export interface StackResult {

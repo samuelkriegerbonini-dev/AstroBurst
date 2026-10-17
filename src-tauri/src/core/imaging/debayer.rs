@@ -32,13 +32,17 @@ impl BayerPattern {
     }
 
     #[inline]
-    fn cell(&self) -> [[u8; 2]; 2] {
+    pub(crate) fn cell(&self) -> [[u8; 2]; 2] {
         match self {
             Self::Rggb => [[0, 1], [1, 2]],
             Self::Bggr => [[2, 1], [1, 0]],
             Self::Grbg => [[1, 0], [2, 1]],
             Self::Gbrg => [[1, 2], [0, 1]],
         }
+    }
+
+    pub fn colour_at(&self, y: usize, x: usize) -> u8 {
+        self.cell()[y % 2][x % 2]
     }
 
     fn from_cell(cell: [[u8; 2]; 2]) -> Option<Self> {
@@ -76,7 +80,7 @@ impl BayerPattern {
     }
 }
 
-fn is_bottom_up(header: &HduHeader) -> bool {
+pub(crate) fn is_bottom_up(header: &HduHeader) -> bool {
     header
         .get("ROWORDER")
         .is_some_and(|v| v.trim().trim_matches('\'').trim().eq_ignore_ascii_case("BOTTOM-UP"))

@@ -8,15 +8,23 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_fs::FsExt;
 
+use crate::cmd::common::image_ref;
 use crate::core::mast::errors::{bad_input, internal};
 use crate::core::mast::types::{
-    MastCacheInfo, MastCacheKind, MastCmdError, MastErrorCode, MastImageRef, MastImageSet, MastLevelClass, MastMission, MastMissionId,
-    MastPreviewRef, MastProductList, MastProgressEvent, MastQuery, MastResolved, MastSearchPage, MastTokenStatus, PreviewSize,
+    MastCacheInfo, MastCacheKind, MastCmdError, MastDownloadInput, MastDownloadItem, MastErrorCode, MastFootprintInput, MastFootprintRegions,
+    MastFootprintSet, MastImageRef, MastImageSet, MastLevelClass, MastMission, MastMissionId, MastPeek, MastPreset, MastPreviewRef,
+    MastProductList, MastProgressEvent, MastQuery, MastResolved, MastSearchPage, MastTokenStatus, PreviewSize,
 };
+use crate::core::mast::{footprints, presets};
+use crate::infra::image_source::load_plane_header;
+use crate::infra::wcs_source::load_wcs;
 use crate::infra::mast::auth::TokenStore;
 use crate::infra::mast::cache::cache_root;
+use crate::infra::mast::peek::{self, PeekRequest};
+use crate::infra::mast::queue::{DownloadQueue, EnqueueRequest, QueueConfig, DOWNLOAD_EVENT};
 use crate::infra::mast::settings::{self, MastSettings};
-use crate::infra::mast::{service, MastHub};
+use crate::infra::mast::{service, transfer, MastHub};
+use crate::infra::net::paths;
 
 pub const PROGRESS_EVENT: &str = "mast:progress";
 pub const RESTORE_REQUEST_ID: &str = "token:restore";
@@ -84,6 +92,22 @@ pub fn install(app: &tauri::App) {
         tauri::async_runtime::spawn(warm_up(hub));
     }
     app.manage(state);
+    app.manage(downloads(app, settings));
+}
+
+fn downloads(app: &tauri::App, settings: &MastSettings) -> DownloadQueue {
+    let reserved: Vec<PathBuf> = [app.path().app_data_dir(), app.path().app_local_data_dir()].into_iter().filter_map(Result::ok).collect();
+    let storage_settings = settings.clone();
+    let handle = app.handle().clone();
+    DownloadQueue::new(QueueConfig {
+        client: transfer::transfer_client(),
+        base_url: settings.base_url.clone(),
+        storage: Arc::new(move || transfer::storage(&storage_settings, &reserved)),
+        free_space: paths::free_space,
+        emit: Arc::new(move |item: &MastDownloadItem| {
+            let _ = handle.emit(DOWNLOAD_EVENT, item);
+        }),
+    })
 }
 
 fn close_test_config(app: &tauri::App, settings: &MastSettings) {
@@ -182,6 +206,31 @@ pub async fn token_status(hub: Arc<MastHub>, request_id: String, check: bool) ->
 
 pub async fn token_save(hub: Arc<MastHub>, request_id: String, token: String) -> Result<MastTokenStatus, MastCmdError> {
     registered(hub, request_id, |hub, id| async move { service::token_save(&hub, &id, &token).await }).await
+}
+
+pub fn presets(state: &MastState) -> Result<Vec<MastPreset>, MastCmdError> {
+    state.hub().map(|_| presets::table())
+}
+
+fn path_problem(what: &str, error: &anyhow::Error) -> MastCmdError {
+    let reason: String = format!("{what}: {error:#}").chars().take(REASON_LIMIT).collect();
+    bad_input("path", &reason)
+}
+
+pub fn project_footprints(path: &str, items: &[MastFootprintInput]) -> Result<MastFootprintSet, MastCmdError> {
+    let sky = footprints::sky_footprints(items)?;
+    let header = load_plane_header(&image_ref(path)).map_err(|e| path_problem("the image header could not be read", &e))?;
+    let wcs = load_wcs(path, &header).map_err(|e| path_problem("the image has no celestial WCS", &e))?;
+    let (width, height) = footprints::image_size(&header);
+    Ok(footprints::project(path, sky, &wcs, width, height))
+}
+
+pub fn footprint_regions(items: &[MastFootprintInput]) -> Result<MastFootprintRegions, MastCmdError> {
+    footprints::region_text(items)
+}
+
+pub async fn peek(hub: Arc<MastHub>, request_id: String, request: PeekRequest) -> Result<MastPeek, MastCmdError> {
+    registered(hub, request_id, |hub, _| async move { peek::peek_product(&hub, &request).await }).await
 }
 
 pub async fn cache_info(hub: Arc<MastHub>) -> Result<MastCacheInfo, MastCmdError> {
@@ -321,9 +370,81 @@ pub async fn mast_cache_clear_cmd(state: State<'_, MastState>, kind: Arg<MastCac
     cache_clear(state.hub()?, kind.get("kind")?).await
 }
 
+#[tauri::command]
+pub async fn mast_download_cmd(
+    state: State<'_, DownloadQueue>,
+    request_id: Arg<String>,
+    mission: Arg<MastMissionId>,
+    items: Arg<Vec<MastDownloadInput>>,
+    open: Arg<bool>,
+) -> Result<Vec<MastDownloadItem>, MastCmdError> {
+    let request = EnqueueRequest {
+        request_id: request_id.get(REQUEST_ID)?,
+        mission: mission.get("mission")?,
+        items: items.get("items")?,
+        open: open.get("open")?,
+    };
+    state.enqueue(request).await
+}
+
+#[tauri::command]
+pub async fn mast_download_cancel_cmd(state: State<'_, DownloadQueue>, request_id: Arg<String>) -> Result<usize, MastCmdError> {
+    state.cancel(&request_id.get(REQUEST_ID)?)
+}
+
+#[tauri::command]
+pub async fn mast_downloads_cmd(state: State<'_, DownloadQueue>) -> Result<Vec<MastDownloadItem>, MastCmdError> {
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+pub async fn mast_presets_cmd(state: State<'_, MastState>) -> Result<Vec<MastPreset>, MastCmdError> {
+    presets(&state)
+}
+
+#[tauri::command]
+pub async fn mast_footprints_cmd(
+    state: State<'_, MastState>,
+    path: Arg<String>,
+    items: Arg<Vec<MastFootprintInput>>,
+) -> Result<MastFootprintSet, MastCmdError> {
+    state.hub()?;
+    let path = path.get("path")?;
+    let items = items.get("items")?;
+    blocking(move || project_footprints(&path, &items)).await
+}
+
+#[tauri::command]
+pub async fn mast_footprints_reg_cmd(state: State<'_, MastState>, items: Arg<Vec<MastFootprintInput>>) -> Result<MastFootprintRegions, MastCmdError> {
+    state.hub()?;
+    let items = items.get("items")?;
+    blocking(move || footprint_regions(&items)).await
+}
+
+#[tauri::command]
+pub async fn mast_peek_cmd(
+    state: State<'_, MastState>,
+    request_id: Arg<String>,
+    mission: Arg<MastMissionId>,
+    dataset_id: Arg<String>,
+    filename: Arg<String>,
+    uri: Arg<Option<String>>,
+) -> Result<MastPeek, MastCmdError> {
+    let request = PeekRequest {
+        mission: mission.get("mission")?,
+        dataset_id: dataset_id.get("datasetId")?,
+        filename: filename.get("filename")?,
+        uri: uri.get("uri")?,
+    };
+    peek(state.hub()?, request_id.get(REQUEST_ID)?, request).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::regions::{regions_export_cmd, regions_import_cmd};
+    use crate::core::imaging::region::RegionShape;
+    use crate::core::imaging::region_file::{Region, RegionProperties};
     use crate::core::mast::query::PAGE_LIMIT;
     use crate::core::mast::types::{MastErrorCode, MastFilterValues, MastWhere, ProgressStage};
     use crate::infra::mast::cache::dir_info;
@@ -336,7 +457,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
-    const MAST_COMMANDS: [&str; 14] = [
+    const MAST_COMMANDS: [&str; 21] = [
         "mast_missions_cmd",
         "mast_probe_mission_cmd",
         "mast_resolve_cmd",
@@ -351,9 +472,16 @@ mod tests {
         "mast_token_clear_cmd",
         "mast_cache_info_cmd",
         "mast_cache_clear_cmd",
+        "mast_download_cmd",
+        "mast_download_cancel_cmd",
+        "mast_downloads_cmd",
+        "mast_presets_cmd",
+        "mast_footprints_cmd",
+        "mast_footprints_reg_cmd",
+        "mast_peek_cmd",
     ];
 
-    const CONTRACT_ARGS: [(&str, &[&str]); 14] = [
+    const CONTRACT_ARGS: [(&str, &[&str]); 21] = [
         ("mast_missions_cmd", &[]),
         ("mast_probe_mission_cmd", &["mission"]),
         ("mast_resolve_cmd", &["requestId", "name"]),
@@ -368,6 +496,13 @@ mod tests {
         ("mast_token_clear_cmd", &[]),
         ("mast_cache_info_cmd", &[]),
         ("mast_cache_clear_cmd", &["kind"]),
+        ("mast_download_cmd", &["requestId", "mission", "items", "open"]),
+        ("mast_download_cancel_cmd", &["requestId"]),
+        ("mast_downloads_cmd", &[]),
+        ("mast_presets_cmd", &[]),
+        ("mast_footprints_cmd", &["path", "items"]),
+        ("mast_footprints_reg_cmd", &["items"]),
+        ("mast_peek_cmd", &["requestId", "mission", "datasetId", "filename", "uri"]),
     ];
 
     const SLOW: Duration = Duration::from_secs(20);
@@ -564,10 +699,24 @@ mod tests {
             program: None,
             dataset_id: None,
             filters: MastFilterValues::default(),
+            preset: None,
             sort: Vec::new(),
             offset: 0,
             limit: PAGE_LIMIT,
         }
+    }
+
+    #[test]
+    fn presets_come_from_the_core_table_once_mast_is_available() {
+        let local = tempfile::tempdir().unwrap();
+        let state = MastState::open(MastSettings::default(), Some(local.path().to_path_buf()), None);
+        let listed = presets(&state).unwrap();
+        assert_eq!(listed, crate::core::mast::presets::table());
+        assert_eq!(listed.len(), 7);
+        assert!(listed.iter().all(|preset| preset.mission == MastMissionId::Jwst));
+        let missing = MastState::open(MastSettings::default(), None, None);
+        assert_eq!(presets(&missing).unwrap_err().code, MastErrorCode::Cache);
+        assert!(std::fs::read_dir(local.path()).unwrap().next().is_none());
     }
 
     #[tokio::test]
@@ -761,5 +910,178 @@ mod tests {
         assert_eq!(cache_clear(Arc::clone(&rig.hub), MastCacheKind::All).await.unwrap(), MastCacheInfo { bytes: 5, files: 1 });
         assert_eq!(cache_info(Arc::clone(&rig.hub)).await.unwrap(), MastCacheInfo::default());
         assert!(rig.server.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn peeks_run_as_registered_requests_and_cancel_by_id() {
+        use crate::infra::net::test_server::{serve, Resource};
+        let mut body = b"SIMPLE  =                    T".to_vec();
+        body.resize(200_000, b' ');
+        let server = serve(Resource::new(body).stall_after(10));
+        let local = tempfile::tempdir().unwrap();
+        let hub = MastState::open(settings_for(&server.base), Some(local.path().to_path_buf()), None).hub().unwrap();
+        let request = PeekRequest { mission: MastMissionId::Hst, dataset_id: "j9irw3fwq".into(), filename: "j9irw3fwq_flc.fits".into(), uri: None };
+        let id = "g5:peek:j9irw3fwq:j9irw3fwq_flc.fits";
+        let task = tokio::spawn(peek(Arc::clone(&hub), id.to_owned(), request.clone()));
+        wait_until(&hub, 1).await;
+        for _ in 0..400 {
+            if !server.requests().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(server.requests().len(), 1, "the peek never reached the server");
+        assert!(hub.registry().contains(id));
+        assert_eq!(cancel(&hub, Some(vec![id.to_owned()]), None).unwrap(), 1);
+        assert_eq!(task.await.unwrap().unwrap_err().code, MastErrorCode::Cancelled);
+        assert!(hub.registry().is_empty());
+        let bad = peek(Arc::clone(&hub), "bad id".to_owned(), request).await.unwrap_err();
+        assert_eq!(bad.code, MastErrorCode::BadInput);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    const SQUARE_PX: [(f64, f64); 4] = [(10.0, 10.0), (80.0, 10.0), (80.0, 70.0), (10.0, 70.0)];
+
+    fn write_field(dir: &Path, name: &str, with_wcs: bool) -> String {
+        use crate::core::imaging::region::test_support::{make_header, rotated_cd, wcs_cards};
+        let cards = wcs_cards(rotated_cd(30.0));
+        let pairs: Vec<(&str, &str)> = cards.iter().filter(|(k, _)| with_wcs || k.starts_with("NAXIS")).map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let path = dir.join(name).to_string_lossy().into_owned();
+        crate::infra::fits::writer::write_fits_mono(&path, &ndarray::Array2::<f32>::zeros((100, 100)), Some(&make_header(&pairs))).unwrap();
+        path
+    }
+
+    fn footprint_item(id: &str, s_region: Option<String>) -> MastFootprintInput {
+        MastFootprintInput { dataset_id: id.to_owned(), s_region, polygons: None, targtype: None }
+    }
+
+    fn sky_polygon_text(path: &str, pixels: &[(f64, f64)]) -> String {
+        let header = load_plane_header(&image_ref(path)).unwrap();
+        let wcs = load_wcs(path, &header).unwrap();
+        let coords: Vec<String> = pixels
+            .iter()
+            .map(|&(x, y)| {
+                let c = wcs.pixel_to_world(x, y);
+                format!("{} {}", c.ra, c.dec)
+            })
+            .collect();
+        format!("POLYGON ICRS  {}", coords.join(" "))
+    }
+
+    fn worst_difference(got: &[Region], set: &MastFootprintSet) -> f64 {
+        let want: Vec<(&str, &Vec<[f64; 2]>)> = set.footprints.iter().flat_map(|f| f.polygons.iter().map(move |p| (f.dataset_id.as_str(), p))).collect();
+        assert_eq!(got.len(), want.len());
+        let mut worst = 0.0f64;
+        for (region, (id, polygon)) in got.iter().zip(want) {
+            assert_eq!(region.props.text.as_deref(), Some(id));
+            let RegionShape::Polygon { points } = &region.shape else { panic!("expected a polygon for {id}") };
+            assert_eq!(points.len(), polygon.len(), "{id}");
+            for (g, w) in points.iter().zip(polygon) {
+                worst = worst.max((g[0] - w[0]).abs()).max((g[1] - w[1]).abs());
+            }
+        }
+        worst
+    }
+
+    async fn round_trip(path: &str, items: &[MastFootprintInput], set: &MastFootprintSet) -> (f64, f64) {
+        let regions: Vec<Region> = set
+            .footprints
+            .iter()
+            .flat_map(|f| {
+                f.polygons.iter().map(|p| Region {
+                    shape: RegionShape::Polygon { points: p.clone() },
+                    props: RegionProperties { text: Some(f.dataset_id.clone()), ..Default::default() },
+                })
+            })
+            .collect();
+        let exported = regions_export_cmd(path.to_owned(), regions, "image".into(), Some(true)).await.unwrap();
+        assert_eq!(exported["system"], json!("image"));
+        let back = regions_import_cmd(path.to_owned(), exported["reg_text"].as_str().unwrap().to_owned()).await.unwrap();
+        let image: Vec<Region> = serde_json::from_value(back["regions"].clone()).unwrap();
+
+        let icrs = footprint_regions(items).unwrap();
+        assert_eq!(icrs.reg_text.lines().nth(2), Some("icrs"), "{}", icrs.reg_text);
+        let back = regions_import_cmd(path.to_owned(), icrs.reg_text).await.unwrap();
+        assert_eq!(back["has_wcs"], json!(true));
+        let sky: Vec<Region> = serde_json::from_value(back["regions"].clone()).unwrap();
+        (worst_difference(&image, set), worst_difference(&sky, set))
+    }
+
+    #[test]
+    fn footprints_project_onto_an_open_image_and_name_what_went_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_field(dir.path(), "field.fits", true);
+        let items = [footprint_item("jw-square", Some(sky_polygon_text(&path, &SQUARE_PX))), footprint_item("hst-row", None)];
+        let set = project_footprints(&path, &items).unwrap();
+        assert_eq!((set.path.as_str(), set.width, set.height), (path.as_str(), 100, 100));
+        let square = &set.footprints[0];
+        assert!(square.on_image);
+        assert_eq!(square.polygons.len(), 1);
+        for (got, want) in square.polygons[0].iter().zip(SQUARE_PX) {
+            assert!((got[0] - want.0).abs() < 1e-6 && (got[1] - want.1).abs() < 1e-6, "{got:?} vs {want:?}");
+        }
+        assert_eq!(set.footprints[1].note.as_deref(), Some(footprints::MISSING_NOTE));
+
+        let bare = write_field(dir.path(), "bare.fits", false);
+        let error = project_footprints(&bare, &items).unwrap_err();
+        assert_eq!(error.code, MastErrorCode::BadInput);
+        assert!(error.message.starts_with("path: ") && error.message.contains("celestial WCS"), "{}", error.message);
+        let missing = dir.path().join("missing.fits").to_string_lossy().into_owned();
+        let error = project_footprints(&missing, &items).unwrap_err();
+        assert_eq!(error.code, MastErrorCode::BadInput);
+        assert!(error.message.starts_with("path: "), "{}", error.message);
+
+        let crowd: Vec<MastFootprintInput> = (0..313).map(|i| footprint_item(&format!("c{i}"), Some("CIRCLE ICRS 150 2 0.001".into()))).collect();
+        let error = project_footprints(&missing, &crowd).unwrap_err();
+        assert!(error.message.starts_with("items: "), "the cap is checked before the file is read: {}", error.message);
+    }
+
+    #[tokio::test]
+    async fn footprint_regions_round_trip_through_regions_import_within_a_micro_pixel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_field(dir.path(), "field.fits", true);
+        let union = format!("UNION ICRS ( {} CIRCLE 150.001 2.002 0.003 )", sky_polygon_text(&path, &[(5.0, 90.0), (40.0, 95.0), (20.0, 60.0)]).replace("POLYGON ICRS  ", "POLYGON "));
+        let items = [
+            footprint_item("jw-square", Some(sky_polygon_text(&path, &SQUARE_PX))),
+            footprint_item("jw-union", Some(union)),
+            MastFootprintInput { targtype: Some("MOVING".into()), ..footprint_item("comet", Some("CIRCLE ICRS 150 2 0.001".into())) },
+        ];
+        let set = project_footprints(&path, &items).unwrap();
+        assert_eq!(set.footprints.iter().map(|f| f.polygons.len()).collect::<Vec<_>>(), [1, 2, 0]);
+        let (image, icrs) = round_trip(&path, &items, &set).await;
+        assert!(image < 1e-6 && icrs < 1e-6, "image {image:e} px, icrs {icrs:e} px");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn jwst_nrca1_cal_s_region_projects_onto_its_own_edges_and_round_trips() {
+        let Some(path) = std::env::var_os("ASTROBURST_MAST_PEEK_SAMPLE") else {
+            eprintln!("SKIPPED: ASTROBURST_MAST_PEEK_SAMPLE unset, the nrca1 footprint oracle did not run");
+            return;
+        };
+        let path = path.to_string_lossy().into_owned();
+        let header = load_plane_header(&image_ref(&path)).unwrap();
+        assert!(load_wcs(&path, &header).unwrap().gwcs_info().is_some(), "the sample must project through its gWCS");
+        let card = |key: &str| header.get(key).map(|v| v.trim().trim_matches('\'').trim().to_owned());
+        let s_region = card("S_REGION").expect("the SCI header carries S_REGION");
+        let items = [MastFootprintInput { targtype: card("TARGTYPE"), ..footprint_item("jw02739001001_02105_00001_nrca1", Some(s_region.clone())) }];
+        let set = project_footprints(&path, &items).unwrap();
+        assert_eq!((set.width, set.height), (2048, 2048));
+        let fp = &set.footprints[0];
+        assert_eq!(fp.note, None);
+        assert!(fp.on_image);
+        assert_eq!(fp.polygons.len(), 1);
+        assert_eq!(fp.polygons[0].len(), 4);
+        let (lo, hi) = (-0.5, 2047.5);
+        let mut worst = 0.0f64;
+        for p in &fp.polygons[0] {
+            assert!(p.iter().all(|v| (lo - 0.5..=hi + 0.5).contains(v)), "{p:?} lies off the detector");
+            let edge = [p[0] - lo, hi - p[0], p[1] - lo, hi - p[1]].iter().map(|d| d.abs()).fold(f64::INFINITY, f64::min);
+            worst = worst.max(edge);
+        }
+        assert!(worst <= 0.5, "a vertex is {worst} px from the nearest image edge");
+        let (image, icrs) = round_trip(&path, &items, &set).await;
+        assert!(image < 1e-6 && icrs < 1e-6, "image {image:e} px, icrs {icrs:e} px");
+        eprintln!("S_REGION {s_region}\nvertices {:?}\nworst edge distance {worst:.4} px, reg round trip image {image:.3e} px, icrs {icrs:.3e} px", fp.polygons[0]);
     }
 }

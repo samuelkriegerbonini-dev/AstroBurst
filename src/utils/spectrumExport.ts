@@ -2,16 +2,20 @@ import type { RegionSpectrum } from "../shared/types/cube";
 import type { Region, RegionShape } from "../shared/types/regions";
 import type {
   CorrectionFrame,
+  LineMeasurementSource,
   RadialVelocityCorrectionResult,
   SpectralAxisInfo,
   SpectralAxisMode,
   SpectrumSource,
   VelocityConvention,
 } from "../shared/types/spectral";
+import type { Spectrum1d } from "../shared/types/spectrum1d";
 import { buildCsv, CSV_LINE_END, type CsvColumn } from "./catalogCsv";
 import { spectrumSourceLabel } from "./lineMeasure";
 import { shapeSummary } from "./regionGeometry";
-import { applyCorrectionKms, defaultRestUm, formatAxis, wavelengthFromVelocityUm } from "./spectralAxis";
+import { documentLayout } from "./spectrumDocument";
+import { regionViewErrors, windowsText, type RegionViewErrors } from "./regionErrors";
+import { AIR_VACUUM_FORMULA, applyCorrectionKms, defaultRestUm, formatAxis, wavelengthFromVelocityUm } from "./spectralAxis";
 
 export type SpectrumView = "sum" | "mean" | "jy";
 
@@ -36,7 +40,7 @@ export interface SpectrumExportInput {
   convention: VelocityConvention;
   correction: CorrectionFrame;
   correctionResult: RadialVelocityCorrectionResult | null;
-  source: SpectrumSource;
+  source: LineMeasurementSource;
   regionId: string | null;
   regionText: string | null;
   backgroundId: string | null;
@@ -48,6 +52,7 @@ export interface SpectrumExportInput {
   pixelFluxJyError: string | null;
   sky: { ra: number; dec: number } | null;
   exportedAtUtc: string;
+  fileSpectrum?: Spectrum1d | null;
 }
 
 export const CHANNEL_AXIS_LABEL = "Channel";
@@ -71,6 +76,24 @@ const SKY_NOTE = "no WCS or off-sky position";
 const VELOCITY_FRAME_NOTE = "the shift is applied to velocity columns only; wavelength_vacuum_um is as stored";
 const REGION_JY_BASIS = "aperture sum x PIXAR_SR x 1e6 (total over the region, also in the mean view)";
 const PIXEL_JY_BASIS = "pixel value x PIXAR_SR x 1e6";
+const ERR_HEADER = "err";
+const ERR_SCALED_HEADER = "err_scaled";
+const ERR_BASIS: Record<SpectrumView, string> = {
+  sum: "the aperture sum",
+  mean: "the aperture mean (mean_err = aperture-sum error / used weight)",
+  jy: "the aperture sum in Jy",
+};
+const ERR_SCALED_BASIS = "err_scaled = err x the noise factor";
+const DQ_HEADER = "dq";
+const DQ_TABLE_KEY = "dq_table";
+const FILE_IMAGE_NOTE = "spectrum file, read from disk";
+const FILE_SKY_NOTE = "spectrum file: no sky position is read for a 1D spectrum";
+const FILE_JY_REASON = "spectrum file: flux exported in its own unit (flux_unit)";
+const AIR_HEADER = "wavelength_air_um";
+const AIR_NOTE_KEY = "wavelength_air_note";
+const AIR_NOTE = `${VACUUM_HEADER} converted from the spectrum's air wavelengths with ${AIR_VACUUM_FORMULA}; ${AIR_HEADER} holds the spectrum's own air axis`;
+const PRECISION_KEY = "precision";
+const F32_WIDENED = "f32_widened";
 
 export function numericSeries(values: readonly unknown[]): number[] {
   return values.map((v) => (typeof v === "number" ? v : NaN));
@@ -197,11 +220,11 @@ export function vacuumLines(vacuum: VacuumAxis): string[] {
   return lines;
 }
 
-export function fluxUnitLabel(bunit: string | null, view: SpectrumView, kind: "pixel" | "region"): string {
+export function fluxUnitLabel(bunit: string | null, view: SpectrumView, kind: LineMeasurementSource["kind"]): string {
   const trimmed = (bunit ?? "").trim().replace(/^'+|'+$/g, "").trim();
   const base = trimmed === "" ? NATIVE_FLUX_UNIT : trimmed;
   if (view === "jy") return JY_UNIT;
-  if (view === "mean" || kind === "pixel") return base;
+  if (view === "mean" || kind !== "region") return base;
   return `${base}${REGION_SUM_UNIT_SUFFIX}`;
 }
 
@@ -244,10 +267,11 @@ function fileStem(filePath: string | null): string {
   return dot > 0 ? base.slice(0, dot) : base;
 }
 
-export function spectrumCsvFileName(filePath: string | null, source: SpectrumSource): string {
+export function spectrumCsvFileName(filePath: string | null, source: LineMeasurementSource): string {
   const stem = fileStem(filePath);
   if (stem === "") return DEFAULT_CSV_NAME;
-  return source.kind === "pixel" ? `${stem}_spectrum_pixel_${source.x}_${source.y}.csv` : `${stem}_spectrum_region.csv`;
+  if (source.kind === "pixel") return `${stem}_spectrum_pixel_${source.x}_${source.y}.csv`;
+  return source.kind === "region" ? `${stem}_spectrum_region.csv` : `${stem}_spectrum.csv`;
 }
 
 type JyColumn = { values: number[]; reason: null } | { values: null; reason: string };
@@ -256,13 +280,16 @@ interface ExportPlan {
   values: number[];
   n: number;
   vacuum: VacuumAxis;
+  air: number[] | null;
   displayed: AxisColumn;
   jy: JyColumn;
   unit: string;
   applied: AppliedFrame;
+  regionErrors: RegionViewErrors | null;
 }
 
 function jyColumn(input: SpectrumExportInput, n: number): JyColumn {
+  if (input.source.kind === "file") return { values: null, reason: FILE_JY_REASON };
   const raw = input.source.kind === "region" ? (input.region?.flux_jy ?? null) : input.pixelFluxJy;
   if (raw === null) {
     if (input.source.kind === "pixel" && input.pixelFluxJyError !== null) {
@@ -275,6 +302,20 @@ function jyColumn(input: SpectrumExportInput, n: number): JyColumn {
   return { values, reason: null };
 }
 
+function fileAirAxis(input: SpectrumExportInput, n: number): number[] | null {
+  const axis = input.axis;
+  if (input.source.kind !== "file" || axis === null || axis.kind !== "awav") return null;
+  return axis.values.length === n ? axis.values : null;
+}
+
+function regionErrorsOf(input: SpectrumExportInput, n: number): RegionViewErrors | null {
+  const region = input.source.kind === "region" ? input.region : null;
+  if (region === null || region.err === null) return null;
+  const errors = regionViewErrors(region, input.view);
+  if (errors.err === null || errors.err.length !== n) return null;
+  return errors.scaled !== null && errors.scaled.length !== n ? { err: errors.err, scaled: null } : errors;
+}
+
 function exportPlan(input: SpectrumExportInput): ExportPlan {
   const values = numericSeries(input.values);
   const n = values.length;
@@ -282,10 +323,12 @@ function exportPlan(input: SpectrumExportInput): ExportPlan {
     values,
     n,
     vacuum: vacuumUmAxis(input.axis, input.restUm, input.convention, n),
+    air: fileAirAxis(input, n),
     displayed: comparisonAxis(input.axis, input.mode, input.restUm, input.convention, input.correction, input.correctionResult, n),
     jy: jyColumn(input, n),
     unit: fluxUnitLabel(input.bunit, input.view, input.source.kind),
     applied: appliedFrame(input.mode, input.correction, input.correctionResult),
+    regionErrors: regionErrorsOf(input, n),
   };
 }
 
@@ -293,9 +336,16 @@ function provenanceLine(key: string, value: string): string {
   return value === "" ? `# ${key}:` : `# ${key}: ${value}`;
 }
 
+function sourceWhere(input: SpectrumExportInput): string {
+  const source = input.source;
+  if (source.kind === "pixel") return `pixel (${source.x}, ${source.y})`;
+  if (source.kind === "region") return shapeSummary(source.shape);
+  return input.fileSpectrum ? documentLayout(input.fileSpectrum.source) : EMPTY_FIELD;
+}
+
 function sourceLine(input: SpectrumExportInput): string {
   const source = input.source;
-  const where = source.kind === "pixel" ? `pixel (${source.x}, ${source.y})` : shapeSummary(source.shape);
+  const where = sourceWhere(input);
   const text = input.regionText === null ? EMPTY_FIELD : input.regionText.replace(/[\r\n]+/g, " ");
   const background =
     source.kind === "region" && source.background
@@ -304,25 +354,27 @@ function sourceLine(input: SpectrumExportInput): string {
   return `${spectrumSourceLabel(source)}; ${where}; region: ${input.regionId ?? EMPTY_FIELD}; text: ${text}; background: ${background}`;
 }
 
-function skyLines(sky: { ra: number; dec: number } | null): string[] {
+function skyLines(sky: { ra: number; dec: number } | null, note: string): string[] {
   const usable = sky !== null && Number.isFinite(sky.ra) && Number.isFinite(sky.dec);
   const lines = [
     provenanceLine("sky_frame", SKY_FRAME_LABEL),
     provenanceLine("sky_ra_deg", usable ? String(sky.ra) : ""),
     provenanceLine("sky_dec_deg", usable ? String(sky.dec) : ""),
   ];
-  if (!usable) lines.push(provenanceLine("sky_note", SKY_NOTE));
+  if (!usable) lines.push(provenanceLine("sky_note", note));
   return lines;
 }
 
 function provenanceWithPlan(input: SpectrumExportInput, plan: ExportPlan): string[] {
+  const isFile = input.source.kind === "file";
   const lines = [
     provenanceLine("file", input.fileName),
-    provenanceLine("image", `${input.fileName} (${IMAGE_NOTE})`),
+    provenanceLine("image", `${input.fileName} (${isFile ? FILE_IMAGE_NOTE : IMAGE_NOTE})`),
     provenanceLine("source", sourceLine(input)),
-    ...skyLines(input.sky),
+    ...skyLines(input.sky, isFile ? FILE_SKY_NOTE : SKY_NOTE),
     ...frameLines(input.axis?.specsys ?? null, input.mode, input.correction, input.correctionResult).map((line) => `# ${line}`),
     ...vacuumLines(plan.vacuum).map((line) => `# ${line}`),
+    ...(plan.air !== null ? [provenanceLine(AIR_NOTE_KEY, AIR_NOTE)] : []),
     provenanceLine("view", input.view),
     provenanceLine("flux_unit", plan.unit),
   ];
@@ -331,8 +383,38 @@ function provenanceWithPlan(input: SpectrumExportInput, plan: ExportPlan): strin
   } else {
     lines.push(provenanceLine("flux_jy_note", plan.jy.reason));
   }
+  lines.push(...regionErrorLines(input, plan));
+  const dqTable = fileDq(input)?.table ?? null;
+  if (dqTable !== null) lines.push(provenanceLine(DQ_TABLE_KEY, dqTable));
+  if (input.fileSpectrum?.precision === F32_WIDENED) lines.push(provenanceLine(PRECISION_KEY, F32_WIDENED));
   lines.push(provenanceLine("exported_utc", input.exportedAtUtc));
   return lines;
+}
+
+function regionErrorLines(input: SpectrumExportInput, plan: ExportPlan): string[] {
+  const region = input.region;
+  if (plan.regionErrors === null || region === null) return [];
+  const scaled = plan.regionErrors.scaled !== null ? `; ${ERR_SCALED_BASIS}` : "";
+  const lines = [
+    provenanceLine("err_source", region.err_source),
+    provenanceLine("err_basis", `err is the propagated error of the flux column, ${ERR_BASIS[input.view]}${scaled}`),
+  ];
+  const factor = region.noise_factor;
+  if (factor !== null) {
+    const windows = windowsText(factor.windows, " and ", "-");
+    lines.push(provenanceLine("noise_factor", `${factor.factor} +- ${factor.factor_se} (${factor.n_channels} line-free channels, continuum ${windows})`));
+    if (factor.warning !== null) lines.push(provenanceLine("noise_factor_warning", factor.warning));
+  }
+  return lines;
+}
+
+function fileErr(input: SpectrumExportInput): number[] | null {
+  return input.fileSpectrum?.err ?? null;
+}
+
+function fileDq(input: SpectrumExportInput): { values: number[]; table: string } | null {
+  const spectrum = input.fileSpectrum ?? null;
+  return spectrum?.dq ? { values: spectrum.dq, table: spectrum.dq_table } : null;
 }
 
 export function spectrumProvenance(input: SpectrumExportInput): string[] {
@@ -344,6 +426,8 @@ export function spectrumCsv(input: SpectrumExportInput): string {
   const columns: CsvColumn<number>[] = [{ header: CHANNEL_HEADER, value: (i) => i }];
   const vacuumValues = plan.vacuum.values;
   if (vacuumValues !== null) columns.push({ header: VACUUM_HEADER, value: (i) => vacuumValues[i] });
+  const airValues = plan.air;
+  if (airValues !== null) columns.push({ header: AIR_HEADER, value: (i) => airValues[i] });
   const displayedValues = plan.displayed.values;
   if (displayedValues !== null && plan.displayed.header !== CHANNEL_HEADER) {
     columns.push({ header: plan.displayed.header, value: (i) => displayedValues[i] });
@@ -358,6 +442,14 @@ export function spectrumCsv(input: SpectrumExportInput): string {
     columns.push({ header: "bg_subtracted", value: () => region.bg_subtracted });
     columns.push({ header: "n_bg", value: () => region.n_bg });
   }
+  const regionErr = plan.regionErrors?.err ?? null;
+  if (regionErr !== null) columns.push({ header: ERR_HEADER, value: (i) => regionErr[i] });
+  const regionScaled = plan.regionErrors?.scaled ?? null;
+  if (regionScaled !== null) columns.push({ header: ERR_SCALED_HEADER, value: (i) => regionScaled[i] });
+  const err = fileErr(input);
+  if (err !== null) columns.push({ header: ERR_HEADER, value: (i) => err[i] });
+  const dq = fileDq(input);
+  if (dq !== null) columns.push({ header: DQ_HEADER, value: (i) => dq.values[i] });
   const rows = Array.from({ length: plan.n }, (_, i) => i);
   return provenanceWithPlan(input, plan).join(CSV_LINE_END) + CSV_LINE_END + buildCsv(columns, rows);
 }
@@ -382,6 +474,13 @@ export function spectrumExportSummary(input: SpectrumExportInput): {
 } {
   const plan = exportPlan(input);
   const region = input.source.kind === "region" ? input.region : null;
+  const fileParams: Record<string, string | boolean | null> =
+    input.source.kind === "file"
+      ? { err_column: fileErr(input) !== null, dq_column: fileDq(input) !== null, dq_table: fileDq(input)?.table ?? null }
+      : {};
+  const regionParams: Record<string, string | number | null> = region
+    ? { err_source: region.err_source, noise_factor: region.noise_factor?.factor ?? null }
+    : {};
   return {
     params: {
       source: spectrumSourceLabel(input.source),
@@ -399,6 +498,8 @@ export function spectrumExportSummary(input: SpectrumExportInput): {
       npix: region?.npix ?? null,
       n_bg: region?.n_bg ?? null,
       bg_subtracted: region?.bg_subtracted ?? null,
+      ...fileParams,
+      ...regionParams,
     },
     values: {
       ra_deg: input.sky?.ra ?? null,

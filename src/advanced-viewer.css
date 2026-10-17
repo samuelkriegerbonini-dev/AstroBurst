@@ -832,7 +832,7 @@
   background: #ef4444;
 }
 
-.ab-mfl-status-dot[data-status="table"] {
+.ab-mfl-status-dot[data-status="spectrum"] {
   background: #f0abfc;
 }
 
@@ -890,7 +890,7 @@
   user-select: text;
 }
 
-.ab-mfl-table-text {
+.ab-mfl-spectrum-text {
   font-size: 10px;
   line-height: 1.25;
   color: var(--ab-text-3);

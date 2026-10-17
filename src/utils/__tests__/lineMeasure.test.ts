@@ -6,6 +6,7 @@ import {
   formatAxisQuantity,
   formatQuantity,
   gaussianModel,
+  lineMeasurementAxis,
   lineMeasurementCsv,
   lineMeasurementRows,
   lineOverlayPolylines,
@@ -17,8 +18,8 @@ import {
   spectrumSourceLabel,
   type PlotFrame,
 } from "../lineMeasure";
-import { airToVacuumUm } from "../spectralAxis";
-import { axisValueToPixel, type PlotMapping } from "../spectrumRange";
+import { airToVacuumUm, formatAxis } from "../spectralAxis";
+import { axisValueToPixel, channelAxisValue, type PlotMapping } from "../spectrumRange";
 import type { LineMeasurement, SpectralAxisInfo } from "../../shared/types/spectral";
 
 const AXIS = Array.from({ length: 40 }, (_, i) => 1.0 + i * 0.001);
@@ -70,6 +71,12 @@ function measurement(overrides: Partial<LineMeasurement> = {}): LineMeasurement 
       iterations: 6,
       converged: true,
     },
+    err_used: false,
+    flux_err_terms: null,
+    n_dq_excluded: 0,
+    n_nonfinite: 0,
+    n_bad_err: 0,
+    err_source: "none",
     notes: ["continuum: first-order line"],
     elapsed_ms: 3,
     source: { kind: "pixel", x: 16, y: 16 },
@@ -181,6 +188,12 @@ describe("line measurement provenance", () => {
     const annulus = { shape: "annulus", x: 20, y: 20, r_inner: 5, r_outer: 8 } as const;
     expect(spectrumSourceLabel({ kind: "region", shape: small, background: annulus })).toBe("circle region with background");
   });
+
+  it("labels a spectrum file source with its HDU when the backend resolved one", () => {
+    expect(spectrumSourceLabel({ kind: "file", hdu: 1 })).toBe("spectrum file, HDU 1");
+    expect(spectrumSourceLabel({ kind: "file", hdu: 0 })).toBe("spectrum file, HDU 0");
+    expect(spectrumSourceLabel({ kind: "file", hdu: null })).toBe("spectrum file");
+  });
 });
 
 describe("momentVelocityFrameNote", () => {
@@ -211,6 +224,8 @@ describe("lineMeasurementRows", () => {
       "Continuum",
       "Velocity frame",
       "Gaussian fit",
+      "Error source",
+      "Excluded channels",
     ]);
     expect(rows[0].value).toBe("0.007520 ± 5.000e-5 Jy/beam x um");
     expect(rows[2].value).toBe("1.02000 um / 0.2 km/s");
@@ -390,5 +405,142 @@ describe("measurement helpers", () => {
     expect(convergedFit(null)).toBeNull();
     expect(convergedFit({ ...measurement().fit!, sigma: null })).toBeNull();
     expect(convergedFit(measurement().fit)).toEqual({ amplitude: 1.0, centre: 1.02, sigma: 0.003 });
+  });
+});
+
+const FILE_WEIGHTED: Partial<LineMeasurement> = {
+  source: { kind: "file", hdu: 1 },
+  flux_unit: "Jy x um",
+  err_used: true,
+  err_source: "FLUX_ERROR column (HDU 1)",
+  flux_err_terms: { pixel: 4e-5, level: 2.5e-5, slope: 1.2e-6 },
+  n_dq_excluded: 3,
+  n_nonfinite: 2,
+  n_bad_err: 58,
+};
+
+describe("lineMeasurementRows error rows", () => {
+  const row = (m: LineMeasurement, label: string) => lineMeasurementRows(m).find((r) => r.label === label)?.value;
+
+  it("names the ERR source used as weights", () => {
+    expect(row(measurement(FILE_WEIGHTED), "Error source")).toBe("FLUX_ERROR column (HDU 1), weights 1/ERR^2");
+    expect(row(measurement({ err_used: true, err_source: "ERR HDU 2" }), "Error source")).toBe("ERR HDU 2, weights 1/ERR^2");
+  });
+
+  it("says the flux error comes from the continuum scatter when no ERR was used", () => {
+    expect(row(measurement(), "Error source")).toBe("none: flux error from the continuum scatter");
+  });
+
+  it("lists the pixel, level and slope terms of the flux error in the flux unit, only when ERR was used", () => {
+    expect(row(measurement(FILE_WEIGHTED), "Error terms")).toBe("pixel 4.000e-5, level 2.500e-5, slope 1.200e-6 Jy x um");
+    expect(row(measurement(), "Error terms")).toBeUndefined();
+    const order = lineMeasurementRows(measurement(FILE_WEIGHTED)).map((r) => r.label);
+    expect(order.slice(-3)).toEqual(["Error source", "Error terms", "Excluded channels"]);
+  });
+
+  it("counts the channels left out by DQ, non-finite flux and unusable ERR", () => {
+    expect(row(measurement(FILE_WEIGHTED), "Excluded channels")).toBe("3 DQ-flagged, 2 non-finite flux, 58 ERR <= 0 or non-finite");
+    expect(row(measurement(), "Excluded channels")).toBe("0 DQ-flagged, 0 non-finite flux, 0 ERR <= 0 or non-finite");
+  });
+});
+
+describe("line measurement CSV for a spectrum file", () => {
+  const cellOf = (m: LineMeasurement, column: (typeof CSV_COLUMNS)[number]) =>
+    lineMeasurementCsv(m).split("\n")[1].split(",")[CSV_COLUMNS.indexOf(column)];
+
+  it("keeps the existing columns in place and appends the HDU and the error columns", () => {
+    expect(CSV_COLUMNS.indexOf("fit_converged")).toBe(40);
+    expect(CSV_COLUMNS.slice(41)).toEqual([
+      "source_hdu",
+      "err_used",
+      "err_source",
+      "flux_err_pixel",
+      "flux_err_level",
+      "flux_err_slope",
+      "n_dq_excluded",
+      "n_nonfinite",
+      "n_bad_err",
+    ]);
+  });
+
+  it("writes the file source with its HDU and the ERR and exclusion figures", () => {
+    const m = measurement(FILE_WEIGHTED);
+    expect(lineMeasurementCsv(m).split("\n")[1].split(",")).toHaveLength(CSV_COLUMNS.length);
+    expect(cellOf(m, "source_kind")).toBe("file");
+    expect(cellOf(m, "source_x")).toBe("");
+    expect(cellOf(m, "source_region")).toBe("");
+    expect(cellOf(m, "source_hdu")).toBe("1");
+    expect(cellOf(m, "err_used")).toBe("true");
+    expect(cellOf(m, "err_source")).toBe("FLUX_ERROR column (HDU 1)");
+    expect(cellOf(m, "flux_err_pixel")).toBe("0.00004");
+    expect(cellOf(m, "flux_err_level")).toBe("0.000025");
+    expect(cellOf(m, "flux_err_slope")).toBe("0.0000012");
+    expect(cellOf(m, "n_dq_excluded")).toBe("3");
+    expect(cellOf(m, "n_nonfinite")).toBe("2");
+    expect(cellOf(m, "n_bad_err")).toBe("58");
+  });
+
+  it("leaves the HDU and the terms blank for a cube pixel without ERR", () => {
+    const m = measurement();
+    expect(cellOf(m, "source_hdu")).toBe("");
+    expect(cellOf(m, "err_used")).toBe("false");
+    expect(cellOf(m, "err_source")).toBe("none");
+    expect(cellOf(m, "flux_err_pixel")).toBe("");
+  });
+});
+
+describe("spectrum file runs", () => {
+  it("keys a file source by its HDU so the overlay stays on the document it was measured on", () => {
+    const run = { key: spectrumSourceKey({ kind: "file", hdu: 1 }, "sum") };
+    expect(run.key).toBe('file:sum:{"kind":"file","hdu":1}');
+    expect(runForSource(run, { kind: "file", hdu: 1 }, "sum")).toBe(run);
+    expect(runForSource(run, { kind: "file", hdu: 2 }, "sum")).toBeNull();
+    expect(runForSource(run, { kind: "pixel", x: 1, y: 1 }, "sum")).toBeNull();
+  });
+});
+
+describe("lineMeasurementAxis", () => {
+  const AIR_VALUES = Array.from({ length: 40 }, (_, i) => 0.6555 + i * 1e-4);
+  const airAxis: SpectralAxisInfo = {
+    kind: "awav",
+    ctype: "LINEAR",
+    unit: "um",
+    header_unit: "angstroms",
+    header_scale: 1e-4,
+    values: AIR_VALUES,
+    crval: AIR_VALUES[0],
+    cdelt: 1e-4,
+    crpix: 1,
+    rest_wavelength_um: null,
+    rest_frequency_hz: null,
+    specsys: null,
+    velosys: null,
+    notes: [],
+  };
+  const airRun = measurement({
+    source: { kind: "file", hdu: 0 },
+    z0: 10,
+    z1: 30,
+    continuum_reference: AIR_VALUES[20],
+    continuum_slope: 0,
+    fit: { ...measurement().fit!, centre: AIR_VALUES[20], sigma: 2e-4 },
+  });
+
+  it("keeps the native axis of a spectrum file, where the backend measured, and converts a cube's air axis", () => {
+    expect(lineMeasurementAxis(airAxis, true)).toBe(AIR_VALUES);
+    expect(lineMeasurementAxis(null, true)).toBeNull();
+    expect(lineMeasurementAxis(airAxis, false)![20]).toBeCloseTo(airToVacuumUm(AIR_VALUES[20]), 12);
+  });
+
+  it("draws the model peak of an air document at the native channel of fit.centre on the vacuum display", () => {
+    const display = formatAxis(airAxis, "wavelength_vac", null, "optical")!.values;
+    const m = mapping(display);
+    const peakOf = (axis: number[]) => {
+      const { model } = lineOverlayPolylines(airRun, axis, m, FRAME);
+      return model.reduce((best, p) => (p.y < best.y ? p : best), model[0]);
+    };
+    const expected = axisValueToPixel(channelAxisValue(20, m), m);
+    expect(Math.abs(peakOf(lineMeasurementAxis(airAxis, true)!).x - expected)).toBeLessThan(0.5);
+    expect(Math.abs(peakOf(measurementAxisValues(airAxis)!).x - expected)).toBeGreaterThan(5);
   });
 });

@@ -701,6 +701,7 @@ mod tests {
                     rp: None,
                     bp_rp: Some(0.8),
                     parallax_mas: None,
+                    teff_k: None,
                 }
             })
             .collect()
@@ -849,6 +850,7 @@ mod tests {
             rp: None,
             bp_rp: None,
             parallax_mas: None,
+            teff_k: None,
         });
         prime_cache(&query, rows);
 

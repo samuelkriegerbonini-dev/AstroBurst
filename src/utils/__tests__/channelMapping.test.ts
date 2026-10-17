@@ -97,6 +97,13 @@ describe("detectChannel on the real MAST file", () => {
     expect(resolveFilterFromName(NIRCAM_NAME)).toEqual({ code: "F444W", nm: 4440 });
     expect(resolveFilterFromName("jw06565_t001_miri_f1130w_i2d.fits")).toEqual({ code: "F1130W", nm: 11300 });
   });
+
+  it("resolves a filter named by the whole stem of a gzip-compressed FITS like its plain file", () => {
+    expect(resolveFilterFromName("H_ALPHA.fits")).toEqual({ code: "H_ALPHA", nm: 656 });
+    expect(resolveFilterFromName("H_ALPHA.fits.gz")).toEqual({ code: "H_ALPHA", nm: 656 });
+    expect(resolveFilterFromName("h_alpha.FIT.GZ")).toEqual({ code: "H_ALPHA", nm: 656 });
+    expect(resolveFilterFromName("jw06565_t001_miri_f1130w_i2d.fts.gz")).toEqual({ code: "F1130W", nm: 11300 });
+  });
 });
 
 describe("HST filter wheels", () => {

@@ -3,7 +3,7 @@ import DatasetCard from "./DatasetCard";
 import type { MastRow } from "../../shared/types/mast";
 import type { ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
-import { galleryColumns, galleryMove } from "./logic/gridNav";
+import { galleryColumns, galleryDemand, galleryMove } from "./logic/gridNav";
 import { thumbStatus } from "./logic/thumbQueue";
 import { resultsKeyCommand } from "./logic/detailKeys";
 import { previewsAllowed } from "./logic/detailView";
@@ -66,12 +66,10 @@ export default function ResultsGallery({ state, ctl, rows, missionLabel, onOpenD
   const rovingIndex = rovingRow(rows, keyOf, state.selectedId, state.selectedKey);
   const rovingMounted = rovingIndex >= start * columns && rovingIndex < end * columns;
 
-  const demand = useMemo(() => {
-    const visible = rows.slice(firstVisible * columns, lastVisible * columns).map((r) => r.datasetId);
-    const ahead = rows.slice(lastVisible * columns, (lastVisible + pageRows) * columns).map((r) => r.datasetId);
-    const selected = state.selectedId && rows.some((r) => r.datasetId === state.selectedId) ? [state.selectedId] : [];
-    return { selected, visible, ahead };
-  }, [rows, columns, firstVisible, lastVisible, pageRows, state.selectedId]);
+  const demand = useMemo(
+    () => galleryDemand(rows, { columns, firstVisible, lastVisible, pageRows }, state.selectedId),
+    [rows, columns, firstVisible, lastVisible, pageRows, state.selectedId],
+  );
 
   useEffect(() => {
     ctl.setThumbDemand(demand);

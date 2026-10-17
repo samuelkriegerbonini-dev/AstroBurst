@@ -114,10 +114,20 @@ pub fn process_drizzle_rgb(
                 if let Some(img) = planes[idx].as_mut() {
                     let label = CHANNEL_LABELS[idx];
                     match align_pair_with_label(&reference, img, config.align_method, out_rows, out_cols, label) {
-                        Ok(res) if res.registered => *img = res.aligned,
+                        Ok(res) if res.registered => {
+                            if let Some(reason) = res.rejection.as_deref() {
+                                warnings.push(format!(
+                                    "channel {label} was registered to channel {ref_label} on a {} shift (confidence {:.2}) after its star match was refused: {reason}",
+                                    res.method_used, res.confidence
+                                ));
+                            }
+                            *img = res.aligned;
+                        }
                         Ok(res) => warnings.push(format!(
-                            "channel {label} could not be registered to channel {ref_label} ({}, confidence {:.2}); it is combined without registration",
-                            res.method_used, res.confidence
+                            "channel {label} could not be registered to channel {ref_label} ({}, confidence {:.2}{}); it is combined without registration",
+                            res.method_used,
+                            res.confidence,
+                            res.rejection.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
                         )),
                         Err(e) => warnings.push(format!(
                             "channel {label} registration to channel {ref_label} failed ({e:#}); it is combined without registration"
@@ -542,6 +552,35 @@ mod tests {
 
         let unaligned = process_drizzle_rgb(&channels(Some(blobs(32)), Some(blobs(32)), None), &config_without_stretch()).unwrap();
         assert!(unaligned.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_channel_star_match_refusal_reaches_the_channel_warning() {
+        use crate::core::alignment::triangles::{a1_frame, a1_jittered_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let config = DrizzleRgbConfig { align: true, align_method: AlignMethod::Affine, ..config_without_stretch() };
+        let processed = process_drizzle_rgb(
+            &channels(
+                Some(a1_reference(A1_SIZE, A1_STARS)),
+                Some(a1_frame(A1_SIZE, A1_STARS, FrameView::Mirrored)),
+                Some(a1_jittered_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0), 1.2)),
+            ),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(processed.warnings.len(), 2, "{:?}", processed.warnings);
+        assert!(
+            processed.warnings[0].starts_with(
+                "channel G could not be registered to channel R (identity, confidence 0.00: reflection (det=-1.000) rejected); it is combined without registration"
+            ),
+            "{:?}",
+            processed.warnings
+        );
+        assert!(
+            processed.warnings[1].starts_with("channel B was registered to channel R on a phase_correlation shift (confidence ")
+                && processed.warnings[1].contains(") after its star match was refused: rotation "),
+            "{:?}",
+            processed.warnings
+        );
     }
 
     fn drizzled(warnings: &[&str]) -> DrizzleResult {

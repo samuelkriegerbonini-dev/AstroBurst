@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
   axisColumnHeader,
@@ -20,6 +22,7 @@ import { airToVacuumUm, velocityKms, wavelengthFromVelocityUm, SPEED_OF_LIGHT_KM
 import type { RadialVelocityCorrectionResult, SpectralAxisInfo, SpectralAxisKind, SpectrumSource } from "../../shared/types/spectral";
 import type { Region, RegionShape } from "../../shared/types/regions";
 import type { RegionSpectrum } from "../../shared/types/cube";
+import type { Spectrum1d } from "../../shared/types/spectrum1d";
 
 const H_ALPHA_UM = 0.656461;
 const LINE_END = "\r\n";
@@ -74,6 +77,16 @@ function regionSpectrum(extra: Partial<RegionSpectrum> = {}): RegionSpectrum {
     unit: "um",
     bg_subtracted: true,
     flux_jy: [1.5e-5, 2e-5, 2.5e-5],
+    err: null,
+    err_scaled: null,
+    mean_err: null,
+    used_weight: [28.27, 28.27, 28.27],
+    err_source: "none",
+    bg_err_per_pixel: null,
+    flux_jy_err: null,
+    n_dq_excluded: null,
+    noise_factor: null,
+    notes: [],
     elapsed_ms: 1,
     ...extra,
   };
@@ -472,5 +485,339 @@ describe("spectrumCsv", () => {
     expect(summary.values.flux_jy_max).toBe(4);
     expect(summary.values.ra_deg).toBe(10.5);
     expect(summary.values.dec_deg).toBe(-20.25);
+  });
+});
+
+const EXPORT_FIXTURE = fileURLToPath(new URL("../../../src-tauri/tests/fixtures/spectrum1d/document_export.csv", import.meta.url));
+const DOC_ROWS = 12;
+const DOC_PATH = "C:/data/jw_test_x1d.fits";
+
+function docWavelength(i: number): number {
+  return 1.8 + i * 0.00137;
+}
+
+function docFlux(i: number): number {
+  return i === 5 ? NaN : 0.0123 + i * 4.56e-5;
+}
+
+function docErr(i: number): number {
+  return i === 7 ? NaN : 1e-4 + i * 1e-6;
+}
+
+function docDq(i: number): number {
+  if (i === 3) return 1;
+  if (i === 9) return 2147483648;
+  return i === 10 ? 2 : 0;
+}
+
+function x1dDocument(extra: Partial<Spectrum1d> = {}): Spectrum1d {
+  const rows = Array.from({ length: DOC_ROWS }, (_, i) => i);
+  return {
+    source: { kind: "x1d", path: DOC_PATH, hdu: 1, extver: 1 },
+    axis: axisOf("wave", rows.map(docWavelength), { ctype: "WAVELENGTH", tabulated: true }),
+    wavelength_frame: "vacuum",
+    precision: "f64",
+    flux: rows.map(docFlux),
+    err: rows.map(docErr),
+    dq: rows.map(docDq),
+    dq_table: "jwst",
+    flux_unit: "Jy",
+    n_rows: DOC_ROWS,
+    cards: {},
+    notes: [],
+    ...extra,
+  };
+}
+
+function documentExportInput(document: Spectrum1d = x1dDocument(), extra: Partial<SpectrumExportInput> = {}): SpectrumExportInput {
+  return {
+    fileName: "jw_test_x1d.fits",
+    axis: document.axis,
+    mode: "wavelength_vac",
+    restUm: null,
+    convention: "optical",
+    correction: "none",
+    correctionResult: null,
+    source: { kind: "file", hdu: 1 },
+    regionId: null,
+    regionText: null,
+    backgroundId: null,
+    view: "sum",
+    bunit: document.flux_unit,
+    values: document.flux,
+    region: null,
+    pixelFluxJy: null,
+    pixelFluxJyError: null,
+    sky: null,
+    exportedAtUtc: "2026-10-17T12:00:00.000Z",
+    fileSpectrum: document,
+    ...extra,
+  };
+}
+
+describe("spectrumCsv for a spectrum file", () => {
+  it("writes the file's flux with its err and dq columns exactly as the backend CSV reader expects", () => {
+    const csv = spectrumCsv(documentExportInput());
+    expect(csv).toContain("\r\n");
+    const golden = readFileSync(EXPORT_FIXTURE, "utf8").replace(/\r\n/g, "\n");
+    expect(csv.replace(/\r\n/g, "\n")).toBe(golden);
+  });
+
+  it("leaves out the err and dq columns and the DQ table line of a file without them", () => {
+    const csv = spectrumCsv(documentExportInput(x1dDocument({ err: null, dq: null })));
+    expect(headerRow(csv)).toBe("channel,wavelength_vacuum_um,vacuum_wavelength_um,flux,flux_unit");
+    expect(csv).not.toContain("# dq_table:");
+    expect(dataRows(csv)[0]).toBe("0,1.8,1.8,0.0123,Jy");
+  });
+
+  it("names the export after the file without a pixel or region suffix", () => {
+    expect(spectrumCsvFileName(DOC_PATH, { kind: "file", hdu: 1 })).toBe("jw_test_x1d_spectrum.csv");
+    expect(spectrumCsvFileName("C:/data/exported_spectrum.csv", { kind: "file", hdu: null })).toBe("exported_spectrum_spectrum.csv");
+  });
+
+  it("summarises the file export with its source, unit and error columns", () => {
+    const summary = spectrumExportSummary(documentExportInput());
+    expect(summary.params.source).toBe("spectrum file, HDU 1");
+    expect(summary.params.flux_unit).toBe("Jy");
+    expect(summary.params.err_column).toBe(true);
+    expect(summary.params.dq_column).toBe(true);
+    expect(summary.params.dq_table).toBe("jwst");
+    expect(summary.params.npix).toBeNull();
+    expect(summary.values.flux_max).toBe(docFlux(11));
+    expect(summary.values.flux_jy_max).toBeNull();
+    expect(summary.values.ra_deg).toBeNull();
+    const bare = spectrumExportSummary(documentExportInput(x1dDocument({ err: null, dq: null })));
+    expect(bare.params.err_column).toBe(false);
+    expect(bare.params.dq_column).toBe(false);
+    expect(bare.params.dq_table).toBeNull();
+  });
+
+  it("keeps the cube export summary free of the file-only parameters", () => {
+    const summary = spectrumExportSummary(exportInput());
+    expect(summary.params).not.toHaveProperty("err_column");
+    expect(summary.params).not.toHaveProperty("dq_column");
+    expect(summary.params).not.toHaveProperty("dq_table");
+  });
+});
+
+const AIR_UM = [0.65628, 0.65629, 0.6563];
+const AIR_NOTE_LINE =
+  "# wavelength_air_note: wavelength_vacuum_um converted from the spectrum's air wavelengths with Greisen et al. 2006 (FITS Paper III eq. 65); wavelength_air_um holds the spectrum's own air axis";
+
+function airDocument(extra: Partial<Spectrum1d> = {}): Spectrum1d {
+  return {
+    source: { kind: "wcs1d", path: "C:/data/ha.fits", hdu: 0 },
+    axis: axisOf("awav", AIR_UM, { ctype: "LINEAR" }),
+    wavelength_frame: "air",
+    precision: "f64",
+    flux: [1.5, 2.5, 3.5],
+    err: null,
+    dq: null,
+    dq_table: "unknown",
+    flux_unit: "erg/s/cm2/A",
+    n_rows: AIR_UM.length,
+    cards: {},
+    notes: [],
+    ...extra,
+  };
+}
+
+function airExportInput(document: Spectrum1d = airDocument(), extra: Partial<SpectrumExportInput> = {}): SpectrumExportInput {
+  return documentExportInput(document, { fileName: "ha.fits", source: { kind: "file", hdu: 0 }, ...extra });
+}
+
+describe("spectrumCsv for other spectrum file shapes", () => {
+  it("writes an air spectrum's own air axis next to its Greisen vacuum wavelengths and says which formula made them", () => {
+    const csv = spectrumCsv(airExportInput());
+    expect(headerRow(csv)).toBe("channel,wavelength_vacuum_um,wavelength_air_um,vacuum_wavelength_um,flux,flux_unit");
+    expect(airToVacuumUm(0.65628)).toBe(0.6564712848862345);
+    expect(dataRows(csv)).toEqual(
+      AIR_UM.map((air, i) => `${i},${airToVacuumUm(air)},${air},${airToVacuumUm(air)},${[1.5, 2.5, 3.5][i]},erg/s/cm2/A`),
+    );
+    expect(csvLines(csv)).toContain(AIR_NOTE_LINE);
+  });
+
+  it("writes the air, f32 and unitless spectrum the backend reader test reads back as air", () => {
+    const fixture = fileURLToPath(new URL("../../../src-tauri/tests/fixtures/spectrum1d/air_document_export.csv", import.meta.url));
+    const csv = spectrumCsv(airExportInput(airDocument({ precision: "f32_widened", flux_unit: null }), { mode: "wavelength_air" }));
+    expect(csv.replace(/\r\n/g, "\n")).toBe(readFileSync(fixture, "utf8").replace(/\r\n/g, "\n"));
+  });
+
+  it("writes no air column for a spectrum measured in vacuum, nor for a cube on an air axis", () => {
+    const asVacuum = airDocument();
+    const vacuumCsv = spectrumCsv(airExportInput(asVacuum, { axis: { ...asVacuum.axis, kind: "wave" } }));
+    expect(headerRow(vacuumCsv)).toBe("channel,wavelength_vacuum_um,vacuum_wavelength_um,flux,flux_unit");
+    expect(vacuumCsv).not.toContain("wavelength_air_note");
+    const cubeCsv = spectrumCsv(exportInput({ axis: axisOf("awav", [0.65628, 0.65629, 0.6563]), mode: "wavelength_vac" }));
+    expect(headerRow(cubeCsv)).not.toContain("wavelength_air_um");
+    expect(cubeCsv).not.toContain("wavelength_air_note");
+  });
+
+  it("writes the f32 precision of a widened spectrum as a provenance line and nothing for an f64 one", () => {
+    expect(csvLines(spectrumCsv(airExportInput(airDocument({ precision: "f32_widened" }))))).toContain("# precision: f32_widened");
+    expect(spectrumCsv(airExportInput())).not.toContain("# precision:");
+  });
+
+  it("re-exports an opened CSV as a spectrum file without an HDU", () => {
+    const opened = x1dDocument({ source: { kind: "csv", path: "C:/data/jw_test_x1d_spectrum.csv" } });
+    const lines = csvLines(
+      spectrumCsv(documentExportInput(opened, { fileName: "jw_test_x1d_spectrum.csv", source: { kind: "file", hdu: null } })),
+    );
+    expect(lines).toContain("# image: jw_test_x1d_spectrum.csv (spectrum file, read from disk)");
+    expect(lines).toContain("# source: spectrum file; CSV file; region: -; text: -; background: none");
+    expect(lines).toContain("# dq_table: jwst");
+    expect(spectrumCsvFileName("C:/data/jw_test_x1d_spectrum.csv", { kind: "file", hdu: null })).toBe("jw_test_x1d_spectrum_spectrum.csv");
+  });
+
+  it("writes no wavelength column for a velocity spectrum without a rest wavelength and says why", () => {
+    const velocity = airDocument({
+      axis: axisOf("vopt", [-10, 0, 10], { ctype: "VOPT" }),
+      wavelength_frame: "not_wavelength",
+    });
+    const csv = spectrumCsv(airExportInput(velocity, { mode: "velocity" }));
+    expect(headerRow(csv)).toBe("channel,velocity_kms,flux,flux_unit");
+    expect(csvLines(csv)).toContain(
+      "# wavelength_note: velocity axis without a rest wavelength (RESTFRQ/RESTWAV absent, none typed)",
+    );
+  });
+});
+
+const REGION_ROWS = 6;
+const REGION_WEIGHT = 12.5;
+const REGION_JY_PER_SUM = 2.35e-5;
+const REGION_FACTOR = 1.31;
+const REGION_NAN_FLUX_ROW = 2;
+const REGION_NAN_ERR_ROW = 4;
+const REGION_WARNING =
+  "the empirical noise is 1.31 +- 0.05 x the propagated error over 12 line-free channels, outside [0.8, 1.25] by more than 2 standard errors: the ERR plane does not describe the scatter of this spectrum";
+
+function regionSum(i: number): number {
+  return i === REGION_NAN_FLUX_ROW ? NaN : 3.5 + i * 0.25;
+}
+
+function regionErr(i: number): number {
+  return i === REGION_NAN_ERR_ROW ? NaN : 0.02 + i * 0.001;
+}
+
+function erroredRegion(extra: Partial<RegionSpectrum> = {}): RegionSpectrum {
+  const rows = Array.from({ length: REGION_ROWS }, (_, i) => i);
+  return regionSpectrum({
+    sum: rows.map(regionSum),
+    mean: rows.map((i) => regionSum(i) / REGION_WEIGHT),
+    npix: REGION_WEIGHT,
+    n_bg: 0,
+    bg_subtracted: false,
+    flux_jy: rows.map((i) => regionSum(i) * REGION_JY_PER_SUM),
+    err: rows.map(regionErr),
+    err_scaled: rows.map((i) => regionErr(i) * REGION_FACTOR),
+    mean_err: rows.map((i) => regionErr(i) / REGION_WEIGHT),
+    used_weight: rows.map(() => REGION_WEIGHT),
+    err_source: "ERR HDU 2",
+    flux_jy_err: rows.map((i) => regionErr(i) * REGION_JY_PER_SUM),
+    n_dq_excluded: rows.map((i) => (i === 1 ? 2 : 0)),
+    noise_factor: {
+      factor: REGION_FACTOR,
+      factor_se: 0.05,
+      n_channels: 12,
+      windows: [
+        [0, 1],
+        [4, 5],
+      ],
+      warning: null,
+    },
+    ...extra,
+  });
+}
+
+function regionErrorInput(view: "sum" | "mean" | "jy", region: RegionSpectrum = erroredRegion()): SpectrumExportInput {
+  const rows = Array.from({ length: REGION_ROWS }, (_, i) => i);
+  const values = view === "sum" ? region.sum : view === "mean" ? region.mean : region.flux_jy!;
+  return exportInput({
+    fileName: "jw_test_s3d.fits",
+    axis: axisOf("wave", rows.map((i) => 2 + i * 0.001)),
+    mode: "wavelength_vac",
+    source: { kind: "region", shape: circle, background: null },
+    regionId: "r1",
+    regionText: null,
+    backgroundId: null,
+    view,
+    values,
+    region,
+    exportedAtUtc: "2026-10-17T12:00:00.000Z",
+  });
+}
+
+function regionFixture(view: "sum" | "mean" | "jy"): string {
+  const path = fileURLToPath(new URL(`../../../src-tauri/tests/fixtures/spectrum1d/region_${view}_export.csv`, import.meta.url));
+  return readFileSync(path, "utf8").replace(/\r\n/g, "\n");
+}
+
+function column(csv: string, header: string): string[] {
+  const index = headerRow(csv).split(",").indexOf(header);
+  expect(index, `${header} in ${headerRow(csv)}`).toBeGreaterThanOrEqual(0);
+  return dataRows(csv).map((row) => row.split(",")[index]);
+}
+
+function cells(values: number[]): string[] {
+  return values.map((v) => (Number.isFinite(v) ? String(v) : ""));
+}
+
+describe("spectrumCsv for a region spectrum with propagated errors", () => {
+  it("writes each view exactly as the backend CSV reader test reads it back, err pairing the flux column of that view", () => {
+    for (const view of ["sum", "mean", "jy"] as const) {
+      const csv = spectrumCsv(regionErrorInput(view));
+      expect(csv.replace(/\r\n/g, "\n"), view).toBe(regionFixture(view));
+    }
+  });
+
+  it("writes err as the error of the exported flux: the sum error, the mean error or the Jy error", () => {
+    const region = erroredRegion();
+    expect(column(spectrumCsv(regionErrorInput("sum")), "err")).toEqual(cells(region.err!));
+    expect(column(spectrumCsv(regionErrorInput("mean")), "err")).toEqual(cells(region.mean_err!));
+    expect(column(spectrumCsv(regionErrorInput("jy")), "err")).toEqual(cells(region.flux_jy_err!));
+  });
+
+  it("writes err_scaled right after err, and only when the backend measured a noise factor", () => {
+    const scaled = spectrumCsv(regionErrorInput("sum"));
+    expect(headerRow(scaled).endsWith(",err,err_scaled")).toBe(true);
+    expect(column(scaled, "err_scaled")).toEqual(cells(erroredRegion().err_scaled!));
+    const unscaled = spectrumCsv(regionErrorInput("sum", erroredRegion({ err_scaled: null, noise_factor: null })));
+    expect(headerRow(unscaled).endsWith(",n_bg,err")).toBe(true);
+    expect(unscaled).not.toContain("err_scaled");
+    expect(unscaled).not.toContain("# noise_factor:");
+  });
+
+  it("states the error source, what err holds in this view and the noise factor in the provenance", () => {
+    const sum = csvLines(spectrumCsv(regionErrorInput("sum")));
+    expect(sum).toContain("# err_source: ERR HDU 2");
+    expect(sum).toContain("# err_basis: err is the propagated error of the flux column, the aperture sum; err_scaled = err x the noise factor");
+    expect(sum).toContain("# noise_factor: 1.31 +- 0.05 (12 line-free channels, continuum 0-1 and 4-5)");
+    const mean = csvLines(spectrumCsv(regionErrorInput("mean")));
+    expect(mean).toContain(
+      "# err_basis: err is the propagated error of the flux column, the aperture mean (mean_err = aperture-sum error / used weight); err_scaled = err x the noise factor",
+    );
+    expect(sum).not.toContain(`# noise_factor_warning: ${REGION_WARNING}`);
+    const warned = erroredRegion();
+    warned.noise_factor = { ...warned.noise_factor!, warning: REGION_WARNING };
+    expect(csvLines(spectrumCsv(regionErrorInput("sum", warned)))).toContain(`# noise_factor_warning: ${REGION_WARNING}`);
+  });
+
+  it("keeps the export of a region without ERR free of error columns and error lines", () => {
+    const csv = spectrumCsv(exportInput());
+    expect(headerRow(csv)).toBe("channel,wavelength_vacuum_um,frequency_ghz,flux,flux_unit,flux_jy,npix,bg_subtracted,n_bg");
+    expect(csv).not.toContain("# err_source:");
+    expect(csv).not.toContain("# err_basis:");
+  });
+
+  it("summarises the error source and the noise factor of a region export, and nothing of them for a pixel", () => {
+    const summary = spectrumExportSummary(regionErrorInput("mean"));
+    expect(summary.params.err_source).toBe("ERR HDU 2");
+    expect(summary.params.noise_factor).toBe(REGION_FACTOR);
+    const bare = spectrumExportSummary(exportInput());
+    expect(bare.params.err_source).toBe("none");
+    expect(bare.params.noise_factor).toBeNull();
+    const pixel = spectrumExportSummary(exportInput({ source: { kind: "pixel", x: 3, y: 4 }, region: null }));
+    expect(pixel.params).not.toHaveProperty("err_source");
+    expect(pixel.params).not.toHaveProperty("noise_factor");
   });
 });

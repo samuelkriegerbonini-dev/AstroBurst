@@ -41,6 +41,8 @@ import { gpuDisplayStore } from "../hooks/useGpuDisplay";
 import DqControls from "./preview/DqControls";
 import DqOverlayCanvas from "./preview/DqOverlayCanvas";
 import ViewerStatusStrip from "./preview/ViewerStatusStrip";
+import SpectrumViewerEmpty from "./preview/SpectrumViewerEmpty";
+import { dockStore } from "../hooks/useDockLayout";
 import HistoryShortcuts from "./history/HistoryShortcuts";
 import { useHistoryController } from "../hooks/useHistory";
 import DisplayControls from "./preview/DisplayControls";
@@ -69,7 +71,7 @@ const GPU_TOGGLE_STYLES: Record<GpuToggleTone, React.CSSProperties> = {
 
 export default function PreviewPanel() {
   const { file } = useFileContext();
-  const { isCube, isSpectralCube, ramp } = useCubeContext();
+  const { isCube, isSpectralCube, isSpectrum, ramp } = useCubeContext();
   const rampIntegration = useRampIntegration();
   const { rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
           rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
@@ -115,9 +117,11 @@ export default function PreviewPanel() {
   const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
   const gpuLoadError = useGpu && !isRgbView && !rawPixelsLoading ? rawPixelsError : null;
 
-  const gpuDisplayInput = { hasFile: !!file, rgbView: isRgbView, useGpu, hasRawPixels: rawPixels !== null, previewOnly: displayed.previewOnly };
+  const gpuDisplayInput = { hasFile: !!file, rgbView: isRgbView, useGpu, hasRawPixels: rawPixels !== null, previewOnly: displayed.previewOnly, isSpectrum };
   const gpuDisplay = gpuDisplayOnScreen(gpuDisplayInput);
   const viewer = previewViewer(gpuDisplayInput);
+  const spectrumShown = viewer === "spectrum";
+  const openCubeTool = useCallback(() => dockStore.dispatch({ type: "open", tool: "cube" }), []);
   useLayoutEffect(() => gpuDisplayStore.set(gpuDisplay), [gpuDisplay]);
   useLayoutEffect(() => () => gpuDisplayStore.set(false), []);
 
@@ -440,7 +444,7 @@ export default function PreviewPanel() {
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {file && <DqControls />}
+          {file && !spectrumShown && <DqControls />}
           {file && <DqOverlayCanvas canvasRef={dqCanvasRef} />}
           {canCompositeReset && (
             <button
@@ -477,8 +481,9 @@ export default function PreviewPanel() {
               Revert to original
             </button>
           )}
-          {file && (
+          {file && !spectrumShown && (
             <button onClick={handleToggleGpu} disabled={gpuProbing || (gpuAvailable === false && !useGpu && !gpuSupported)}
+                    data-testid="gpu-toggle"
                     title={gpuToggle.title}
                     className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed"
                     style={GPU_TOGGLE_STYLES[gpuToggle.tone]}>
@@ -492,6 +497,8 @@ export default function PreviewPanel() {
       <div data-dock-viewport="" className="flex-1 overflow-hidden min-h-0">
         {viewer === "empty" ? (
           <AdvancedImageViewer original={null} processed={null} />
+        ) : viewer === "spectrum" ? (
+          <SpectrumViewerEmpty name={file?.name ?? ""} onOpenCubeTool={openCubeTool} />
         ) : viewer === "cpu" ? (
           <div className="flex flex-col h-full">
             <DisplayControls vmin={Number.NaN} vmax={Number.NaN} renderOnlyDisabled renderOnlyTitle={cpuDisplayTitle} />
@@ -524,7 +531,7 @@ export default function PreviewPanel() {
         )}
       </div>
 
-      {file && <ViewerStatusStrip />}
+      {file && !spectrumShown && <ViewerStatusStrip />}
       <HistoryShortcuts />
     </div>
   );

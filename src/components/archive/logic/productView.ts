@@ -1,7 +1,8 @@
-import type { MastProduct, MastProductClass, MastProductList } from "../../../shared/types/mast";
+import type { MastPreset, MastProduct, MastProductClass, MastProductList } from "../../../shared/types/mast";
+import { presetProducts } from "./presetView";
 
 export type ProductMode = "opens" | "everything";
-export type SectionKey = "opens" | "catalog" | "preview" | "association" | "auxiliary" | "other" | "hidden";
+export type SectionKey = "preset" | "opens" | "catalog" | "preview" | "association" | "auxiliary" | "other" | "hidden";
 
 export interface ProductSection {
   key: SectionKey;
@@ -36,6 +37,7 @@ export interface ProductView {
   sections: ProductSection[];
   hidden: HiddenSummary;
   visible: MastProduct[];
+  presetNote: string | null;
 }
 
 const UNITS: [number, string][] = [
@@ -105,15 +107,34 @@ export function productSummary(list: MastProductList): string {
   return list.cachedUntil ? `${head} · ${listed} · cached until ${cachedText(list.cachedUntil)}` : `${head} · ${listed}`;
 }
 
-export function productView(list: MastProductList, mode: ProductMode, showHidden: boolean): ProductView {
+function presetSection(preset: MastPreset, products: MastProduct[]): ProductSection {
+  const bytes = sum(products);
+  return {
+    key: "preset",
+    title: `${preset.label} files`,
+    detail: `${plural(products.length, "file", "files")}, ${formatBytes(bytes)}`,
+    note: null,
+    classes: [...new Set(products.map((p) => p.cls))],
+    products,
+    count: products.length,
+    bytes,
+    expanded: true,
+  };
+}
+
+export function productView(list: MastProductList, mode: ProductMode, showHidden: boolean, preset: MastPreset | null = null): ProductView {
   const everything = mode === "everything";
   const sections: ProductSection[] = [];
-  const opens = list.products.filter((p) => OPENS.includes(p.cls));
+  const picked = preset ? presetProducts(preset, list.products) : [];
+  const focused = picked.length > 0;
+  if (focused && preset) sections.push(presetSection(preset, picked));
+  const rest = list.products.filter((p) => !picked.includes(p));
+  const opens = rest.filter((p) => OPENS.includes(p.cls));
   if (opens.length) {
-    sections.push({ key: "opens", title: "Opens in the app", detail: opensDetail(opens), note: null, classes: [...OPENS], products: opens, count: opens.length, bytes: sum(opens), expanded: true });
+    sections.push({ key: "opens", title: "Opens in the app", detail: opensDetail(opens), note: null, classes: [...OPENS], products: opens, count: opens.length, bytes: sum(opens), expanded: everything || !focused });
   }
   for (const spec of SECTIONS) {
-    const products = list.products.filter((p) => spec.classes.includes(p.cls));
+    const products = rest.filter((p) => spec.classes.includes(p.cls));
     if (!products.length) continue;
     const bytes = sum(products);
     sections.push({
@@ -125,7 +146,7 @@ export function productView(list: MastProductList, mode: ProductMode, showHidden
       products,
       count: products.length,
       bytes,
-      expanded: everything || spec.key === "catalog",
+      expanded: everything || (!focused && spec.key === "catalog"),
     });
   }
   const hiddenProducts = list.products.filter((p) => p.cls === "reference" || p.cls === "guidestar");
@@ -143,7 +164,8 @@ export function productView(list: MastProductList, mode: ProductMode, showHidden
     sections.push({ key: "hidden", title: "Hidden", detail: hidden.text, note: null, classes: ["reference", "guidestar"], products: hiddenProducts, count: hiddenProducts.length, bytes: hiddenBytes, expanded: true });
   }
   const visible = sections.filter((s) => s.expanded).flatMap((s) => s.products);
-  return { summary: productSummary(list), sections, hidden, visible };
+  const presetNote = preset && !focused ? `No ${preset.label} files (${preset.products.join(", ")}) in this dataset` : null;
+  return { summary: productSummary(list), sections, hidden, visible, presetNote };
 }
 
 export const CLASS_LABELS: Readonly<Record<MastProductClass, string>> = {

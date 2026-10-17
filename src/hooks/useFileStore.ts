@@ -4,6 +4,7 @@ import { generateId } from "../utils/format";
 import { isCalibRefAsdf } from "../utils/validation";
 import { normalizeOutputPath } from "../utils/processingChain";
 import type { ProcessedFile, QueueStats, AstroFile, ProcessResult, ResampleResult } from "../shared/types";
+import type { Spectrum1dKind } from "../shared/types/spectrum1d";
 
 type Listener = () => void;
 
@@ -31,7 +32,7 @@ class FileStore {
     fileMap: new Map(),
     selected: null,
     isProcessing: false,
-    stats: { total: 0, done: 0, failed: 0, tables: 0, totalBytes: 0 },
+    stats: { total: 0, done: 0, failed: 0, spectra: 0, totalBytes: 0 },
     version: 0,
     selectedVersion: 0,
     statsVersion: 0,
@@ -109,11 +110,11 @@ class FileStore {
   getDoneCount = () => this.state.stats.done;
   getIsComplete = () => {
     const s = this.state.stats;
-    return s.total > 0 && s.done + s.failed + s.tables === s.total && !this.state.isProcessing;
+    return s.total > 0 && s.done + s.failed + s.spectra === s.total && !this.state.isProcessing;
   };
   getProgress = () => {
     const s = this.state.stats;
-    return s.total > 0 ? Math.round(((s.done + s.failed + s.tables) / s.total) * 100) : 0;
+    return s.total > 0 ? Math.round(((s.done + s.failed + s.spectra) / s.total) * 100) : 0;
   };
 
   private scheduleFlush(channels: number) {
@@ -259,19 +260,20 @@ class FileStore {
     return true;
   }
 
-  fileTable(id: string, message: string) {
+  fileSpectrum(id: string, probe: Spectrum1dKind) {
     const existing = this.state.fileMap.get(id);
     if (!existing) return;
 
     const updated: ProcessedFile = {
       ...existing,
-      status: FILE_STATUS.TABLE,
-      error: message,
+      status: FILE_STATUS.SPECTRUM,
+      spectrum: probe,
+      error: null,
       finishedAt: Date.now(),
     };
     this.state.fileMap.set(id, updated);
 
-    this.state.stats = { ...this.state.stats, tables: this.state.stats.tables + 1 };
+    this.state.stats = { ...this.state.stats, spectra: this.state.stats.spectra + 1 };
     this.state.statsVersion++;
     this.bumpVersion();
 
@@ -338,7 +340,7 @@ class FileStore {
       fileMap: new Map(),
       selected: null,
       isProcessing: false,
-      stats: { total: 0, done: 0, failed: 0, tables: 0, totalBytes: 0 },
+      stats: { total: 0, done: 0, failed: 0, spectra: 0, totalBytes: 0 },
       version: 0,
       selectedVersion: 0,
       statsVersion: 0,

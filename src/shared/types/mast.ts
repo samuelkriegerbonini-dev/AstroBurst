@@ -62,9 +62,24 @@ export interface MastQuery {
   program: number | null;
   datasetId: string | null;
   filters: MastFilterValues;
+  preset: string | null;
   sort: { column: string; desc: boolean }[];
   offset: number;
   limit: number;
+}
+
+export interface MastPresetCondition {
+  column: string;
+  value: string;
+}
+
+export interface MastPreset {
+  id: string;
+  mission: MastMissionId;
+  label: string;
+  description: string;
+  conditions: MastPresetCondition[];
+  products: string[];
 }
 
 export type MastLevelClass = "combined" | "exposure" | "unknown";
@@ -106,6 +121,7 @@ export interface MastSearchPage {
   radiusClamped: boolean;
   searchPosition: { raDeg: number; decDeg: number } | null;
   applied: { conditions: Record<string, string>[]; sortBy: string[]; sortDesc: boolean[] };
+  droppedConditions: string[];
   requestBody: unknown;
   messages: string[];
   unresolvedTargets: string[];
@@ -220,7 +236,9 @@ export type MastErrorCode =
   | "mast_network" | "mast_timeout" | "mast_cancelled" | "mast_rate_limited"
   | "mast_server" | "mast_rejected" | "mast_unauthorized" | "mast_no_image"
   | "mast_not_deployed" | "mast_decode" | "mast_too_large" | "mast_not_image"
-  | "mast_bad_input" | "mast_token_rejected" | "mast_cache";
+  | "mast_bad_input" | "mast_token_rejected" | "mast_cache"
+  | "mast_size_mismatch" | "mast_busy" | "mast_stale" | "mast_quota" | "mast_uri_refused"
+  | "mast_peek_incomplete";
 
 export interface MastErrorContext {
   status?: number;
@@ -240,4 +258,123 @@ export interface MastError {
   code: MastErrorCode;
   message: string;
   context: MastErrorContext;
+}
+
+export type MastOpensAs = "image" | "cube" | "spectrum" | "ramp" | "catalog";
+
+export type MastDownloadState = "queued" | "downloading" | "done" | "error" | "cancelled";
+
+export type MastDownloadAction = "resume" | "retry" | "replace" | "redownload";
+
+export interface MastDownloadInput {
+  datasetId: string;
+  filename: string;
+  program: string | null;
+  sizeBytes: number;
+  uri: string | null;
+  opensAs: MastOpensAs | null;
+  replace: boolean;
+}
+
+export interface MastDownloadItem {
+  id: string;
+  requestId: string;
+  mission: MastMissionId;
+  datasetId: string;
+  filename: string;
+  program: string | null;
+  uri: string;
+  sizeBytes: number;
+  opensAs: MastOpensAs | null;
+  open: boolean;
+  replace: boolean;
+  state: MastDownloadState;
+  received: number;
+  total: number | null;
+  path: string;
+  resumedFrom: number;
+  reused: boolean;
+  verified: boolean | null;
+  action: MastDownloadAction | null;
+  error: MastError | null;
+}
+
+export interface MastFootprintInput {
+  datasetId: string;
+  sRegion: string | null;
+  polygons: [number, number][][] | null;
+  targtype: string | null;
+}
+
+export interface MastBoundingCone {
+  ra: number;
+  dec: number;
+  radiusDeg: number;
+}
+
+export interface MastFootprint {
+  datasetId: string;
+  polygons: [number, number][][];
+  onImage: boolean;
+  vertices: number;
+  cone: MastBoundingCone | null;
+  note: string | null;
+}
+
+export interface MastFootprintSet {
+  path: string;
+  width: number;
+  height: number;
+  footprints: MastFootprint[];
+}
+
+export interface MastFootprintNote {
+  datasetId: string;
+  note: string;
+}
+
+export interface MastFootprintRegions {
+  regText: string;
+  polygons: number;
+  notes: MastFootprintNote[];
+}
+
+export interface MastPeekHdu {
+  index: number;
+  extname: string | null;
+  extver: number | null;
+  bitpix: number;
+  dims: number[];
+  wcsError: string | null;
+}
+
+export interface MastPeekFootprint {
+  hdu: number;
+  corners: [number, number][];
+  center: [number, number];
+  fovArcmin: [number, number];
+}
+
+export interface MastPeek {
+  datasetId: string;
+  filename: string;
+  uri: string;
+  dims: number[];
+  bitpix: number | null;
+  bunit: string | null;
+  exptime: number | null;
+  dateObs: string | null;
+  filter: string | null;
+  instrume: string | null;
+  footprints: MastPeekFootprint[];
+  hdus: MastPeekHdu[];
+  bytesFetched: number;
+  ranges: number;
+  fileBytes: number | null;
+  complete: boolean;
+  rangeIgnored: boolean;
+  note: string | null;
+  etag: string | null;
+  elapsedMs: number;
+  fromCache: boolean;
 }

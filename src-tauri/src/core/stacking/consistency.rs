@@ -125,19 +125,21 @@ pub fn imagetyp_verdict(kind: MasterKind, frame: FrameKind) -> Verdict {
 
 fn check_imagetyp(kind: MasterKind, frames: &[FrameCards], warnings: &mut Vec<String>) -> Result<()> {
     for frame in frames {
-        let value = frame.imagetyp.as_deref().unwrap_or("");
+        let (key, value) = frame.imagetyp.as_ref().map_or(("IMAGETYP", ""), |(text, key)| (*key, text.as_str()));
         match imagetyp_verdict(kind, frame.frame_kind) {
             Verdict::Accept => {}
             Verdict::Warn => warnings.push(format!(
-                "{} has IMAGETYP='{}' in the {} row; it is used as a {} frame.",
+                "{} has {}='{}' in the {} row; it is used as a {} frame.",
                 file_label(&frame.path),
+                key,
                 value,
                 kind.label(),
                 kind.label()
             )),
             Verdict::Refuse => bail!(
-                "{} has IMAGETYP='{}' but was given as a {} frame.",
+                "{} has {}='{}' but was given as a {} frame.",
                 file_label(&frame.path),
+                key,
                 value,
                 kind.label()
             ),
@@ -414,6 +416,9 @@ mod tests {
             ybinning: None,
             temp_c: None,
             cfa: false,
+            cfa_pattern: None,
+            pixel_size_um: None,
+            focal_mm: None,
         }
     }
 
@@ -499,6 +504,19 @@ mod tests {
         assert_eq!(err, "flat_as_dark.fits has IMAGETYP='Flat Field' but was given as a dark frame.");
         let report = check_master_set(MasterKind::Dark, &[typed("fd.fits", "  Flat Dark ")]).unwrap();
         assert_eq!(report.warnings, vec!["fd.fits has IMAGETYP='Flat Dark' in the dark row; it is used as a dark frame.".to_string()]);
+    }
+
+    #[test]
+    fn frame_type_messages_name_the_card_the_value_came_from() {
+        let frametyp = |path: &str, value: &str| {
+            let mut header = HduHeader::empty();
+            header.set("FRAMETYP", format!("'{value}'"));
+            frame_cards_from_header(path, &header)
+        };
+        let err = check_master_set(MasterKind::Dark, &[frametyp("C:/darks/x.fits", "Light")]).unwrap_err().to_string();
+        assert_eq!(err, "x.fits has FRAMETYP='Light' but was given as a dark frame.");
+        let report = check_master_set(MasterKind::Dark, &[frametyp("b.fits", "Bias")]).unwrap();
+        assert_eq!(report.warnings, vec!["b.fits has FRAMETYP='Bias' in the dark row; it is used as a dark frame.".to_string()]);
     }
 
     #[test]

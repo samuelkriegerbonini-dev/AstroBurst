@@ -14,6 +14,23 @@ use crate::types::header::HduHeader;
 
 pub const MORTON_AIR_FORMULA: &str = "Morton (2000, ApJS 130, 403)";
 pub const IRAF_WAT_CARD_WIDTH: usize = 68;
+pub const CSV_WAVELENGTH_VACUUM_COLUMN: &str = "wavelength_vacuum_um";
+pub const CSV_WAVELENGTH_AIR_COLUMN: &str = "wavelength_air_um";
+pub const CSV_FLUX_COLUMN: &str = "flux";
+pub const CSV_FLUX_UNIT_COLUMN: &str = "flux_unit";
+pub const CSV_ERR_COLUMN: &str = "err";
+pub const CSV_DQ_COLUMN: &str = "dq";
+pub const CSV_DQ_TABLE_KEY: &str = "dq_table";
+
+const CSV_FLUX_UNIT_KEY: &str = "flux_unit";
+const CSV_NATIVE_FLUX_UNIT: &str = "native";
+const CSV_PRECISION_KEY: &str = "precision";
+const CSV_F32_WIDENED: &str = "f32_widened";
+const CSV_FILE_KEY: &str = "file";
+const CSV_COMMENT: char = '#';
+const CSV_QUOTE: char = '"';
+const CSV_SEPARATOR: char = ',';
+const BYTE_ORDER_MARK: char = '\u{feff}';
 
 const MORTON_CONSTANT: f64 = 8.34254e-5;
 const MORTON_UV_TERM: f64 = 2.406147e-2;
@@ -70,6 +87,9 @@ pub enum Spectrum1dSource {
     Wcs1d {
         path: String,
         hdu: usize,
+    },
+    Csv {
+        path: String,
     },
 }
 
@@ -149,7 +169,7 @@ impl Spectrum1d {
                 hdu: x1d.hdu,
                 extver: x1d.extver,
             },
-            axis: tabulated_wavelength_axis(x1d.wavelength_um),
+            axis: tabulated_axis(x1d.wavelength_um, AxisKind::Wave, COL_WAVELENGTH),
             wavelength_frame: WavelengthFrame::Vacuum,
             precision: Precision::F64,
             n_rows: x1d.n_rows,
@@ -205,6 +225,251 @@ impl Spectrum1d {
             notes,
         })
     }
+
+    pub fn from_csv(path: &str, text: &str) -> Result<Spectrum1d, String> {
+        let text = text.strip_prefix(BYTE_ORDER_MARK).unwrap_or(text);
+        let mut provenance = BTreeMap::new();
+        let mut lines = text
+            .lines()
+            .enumerate()
+            .map(|(i, line)| (i + 1, line))
+            .filter(|(_, line)| !line.trim().is_empty());
+        let (header_line, header) = loop {
+            match lines.next() {
+                None => {
+                    return Err(format!(
+                        "{path} holds no header row: a spectrum CSV needs a header naming {CSV_WAVELENGTH_VACUUM_COLUMN} (or {CSV_WAVELENGTH_AIR_COLUMN}) and {CSV_FLUX_COLUMN}"
+                    ))
+                }
+                Some((_, line)) if is_csv_comment(line) => record_provenance(line, &mut provenance),
+                Some(found) => break found,
+            }
+        };
+        let names = csv_fields(header, header_line)?;
+        let columns = CsvColumns::find(&names)?;
+        let mut rows = CsvRows::default();
+        for (number, line) in lines.filter(|(_, line)| !is_csv_comment(line)) {
+            let fields = csv_fields(line, number)?;
+            if fields.len() != names.len() {
+                return Err(format!(
+                    "line {number}: {} fields, the header has {}",
+                    fields.len(),
+                    names.len()
+                ));
+            }
+            rows.push(&columns, &fields, number)?;
+        }
+        if rows.flux.is_empty() {
+            return Err(format!("{path} holds no data rows below its header"));
+        }
+        let dq_table = provenance
+            .get(CSV_DQ_TABLE_KEY)
+            .map(|name| csv_dq_table(name))
+            .transpose()?
+            .unwrap_or(DqTable::Unknown);
+        let mut notes = vec![format!(
+            "CSV file, column {}: {}",
+            columns.wavelength_name,
+            match columns.frame {
+                WavelengthFrame::Air => "air wavelengths",
+                _ => "vacuum wavelengths",
+            }
+        )];
+        if let Some(file) = provenance.get(CSV_FILE_KEY) {
+            notes.push(format!("exported from {file}"));
+        }
+        let flux_unit = rows
+            .flux_unit
+            .or_else(|| provenance.get(CSV_FLUX_UNIT_KEY).cloned())
+            .filter(|unit| !unit.is_empty() && !unit.eq_ignore_ascii_case(CSV_NATIVE_FLUX_UNIT));
+        if flux_unit.is_none() {
+            notes.push(format!(
+                "{CSV_FLUX_UNIT_COLUMN} missing or '{CSV_NATIVE_FLUX_UNIT}': flux in native units"
+            ));
+        }
+        let precision = match provenance.get(CSV_PRECISION_KEY) {
+            Some(name) if name.eq_ignore_ascii_case(CSV_F32_WIDENED) => {
+                notes.push(format!("'# {CSV_PRECISION_KEY}: {CSV_F32_WIDENED}' line: the exported flux was decoded at f32 precision, about 7 significant digits kept"));
+                Precision::F32Widened
+            }
+            _ => Precision::F64,
+        };
+        if rows.dq.is_some() && !provenance.contains_key(CSV_DQ_TABLE_KEY) {
+            notes.push(format!(
+                "{CSV_DQ_COLUMN} column without a '# {CSV_DQ_TABLE_KEY}:' line: no channel is excluded by its flags"
+            ));
+        }
+        let kind = match columns.frame {
+            WavelengthFrame::Air => AxisKind::Awav,
+            _ => AxisKind::Wave,
+        };
+        Ok(Spectrum1d {
+            source: Spectrum1dSource::Csv {
+                path: path.to_string(),
+            },
+            axis: tabulated_axis(rows.wavelength, kind, columns.wavelength_name),
+            wavelength_frame: columns.frame,
+            precision,
+            n_rows: rows.flux.len(),
+            flux: rows.flux,
+            err: rows.err,
+            dq: rows.dq,
+            dq_table,
+            flux_unit,
+            cards: provenance,
+            notes,
+        })
+    }
+}
+
+struct CsvColumns {
+    wavelength: usize,
+    wavelength_name: &'static str,
+    frame: WavelengthFrame,
+    flux: usize,
+    flux_unit: Option<usize>,
+    err: Option<usize>,
+    dq: Option<usize>,
+}
+
+impl CsvColumns {
+    fn find(names: &[String]) -> Result<CsvColumns, String> {
+        let column = |name: &str| {
+            names
+                .iter()
+                .position(|header| header.trim().eq_ignore_ascii_case(name))
+        };
+        let (wavelength, wavelength_name, frame) = match (
+            column(CSV_WAVELENGTH_AIR_COLUMN),
+            column(CSV_WAVELENGTH_VACUUM_COLUMN),
+        ) {
+            (Some(i), _) => (i, CSV_WAVELENGTH_AIR_COLUMN, WavelengthFrame::Air),
+            (None, Some(i)) => (i, CSV_WAVELENGTH_VACUUM_COLUMN, WavelengthFrame::Vacuum),
+            (None, None) => {
+                return Err(format!(
+                    "the CSV header names no {CSV_WAVELENGTH_VACUUM_COLUMN} or {CSV_WAVELENGTH_AIR_COLUMN} column: a spectrum CSV needs wavelengths in micrometres"
+                ))
+            }
+        };
+        let flux = column(CSV_FLUX_COLUMN)
+            .ok_or_else(|| format!("the CSV header names no {CSV_FLUX_COLUMN} column"))?;
+        Ok(CsvColumns {
+            wavelength,
+            wavelength_name,
+            frame,
+            flux,
+            flux_unit: column(CSV_FLUX_UNIT_COLUMN),
+            err: column(CSV_ERR_COLUMN),
+            dq: column(CSV_DQ_COLUMN),
+        })
+    }
+}
+
+#[derive(Default)]
+struct CsvRows {
+    wavelength: Vec<f64>,
+    flux: Vec<f64>,
+    err: Option<Vec<f64>>,
+    dq: Option<Vec<u32>>,
+    flux_unit: Option<String>,
+}
+
+impl CsvRows {
+    fn push(&mut self, columns: &CsvColumns, fields: &[String], line: usize) -> Result<(), String> {
+        self.wavelength.push(csv_number(
+            &fields[columns.wavelength],
+            line,
+            columns.wavelength_name,
+        )?);
+        self.flux
+            .push(csv_number(&fields[columns.flux], line, CSV_FLUX_COLUMN)?);
+        if let Some(i) = columns.err {
+            let value = csv_number(&fields[i], line, CSV_ERR_COLUMN)?;
+            self.err.get_or_insert_with(Vec::new).push(value);
+        }
+        if let Some(i) = columns.dq {
+            let flags = csv_flags(&fields[i], line)?;
+            self.dq.get_or_insert_with(Vec::new).push(flags);
+        }
+        if let Some(i) = columns.flux_unit.filter(|_| self.flux_unit.is_none()) {
+            let unit = fields[i].trim();
+            if !unit.is_empty() {
+                self.flux_unit = Some(unit.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_csv_comment(line: &str) -> bool {
+    line.trim_start().starts_with(CSV_COMMENT)
+}
+
+fn record_provenance(line: &str, provenance: &mut BTreeMap<String, String>) {
+    let comment = line.trim_start().trim_start_matches(CSV_COMMENT);
+    if let Some((key, value)) = comment.split_once(':') {
+        let key = key.trim();
+        if !key.is_empty() {
+            provenance
+                .entry(key.to_string())
+                .or_insert_with(|| value.trim().to_string());
+        }
+    }
+}
+
+fn csv_fields(line: &str, number: usize) -> Result<Vec<String>, String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quoted, c) {
+            (true, CSV_QUOTE) if chars.peek() == Some(&CSV_QUOTE) => {
+                field.push(CSV_QUOTE);
+                chars.next();
+            }
+            (true, CSV_QUOTE) => quoted = false,
+            (false, CSV_QUOTE) if field.trim().is_empty() => {
+                field.clear();
+                quoted = true;
+            }
+            (false, CSV_SEPARATOR) => fields.push(std::mem::take(&mut field)),
+            (_, c) => field.push(c),
+        }
+    }
+    if quoted {
+        return Err(format!("line {number}: unterminated quoted field"));
+    }
+    fields.push(field);
+    Ok(fields)
+}
+
+fn csv_number(field: &str, line: usize, column: &str) -> Result<f64, String> {
+    let text = field.trim();
+    if text.is_empty() {
+        return Ok(f64::NAN);
+    }
+    text.parse::<f64>()
+        .map_err(|_| format!("line {line}: {column} value '{text}' is not a number"))
+}
+
+fn csv_flags(field: &str, line: usize) -> Result<u32, String> {
+    let text = field.trim();
+    text.parse::<u32>().map_err(|_| {
+        format!("line {line}: {CSV_DQ_COLUMN} value '{text}' is not an unsigned 32-bit integer")
+    })
+}
+
+fn csv_dq_table(name: &str) -> Result<DqTable, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "jwst" => Ok(DqTable::Jwst),
+        "roman" => Ok(DqTable::Roman),
+        "hst" => Ok(DqTable::Hst),
+        "unknown" => Ok(DqTable::Unknown),
+        _ => Err(format!(
+            "{CSV_DQ_TABLE_KEY} '{name}' is not one of jwst, roman, hst, unknown"
+        )),
+    }
 }
 
 fn card(header: &HduHeader, key: &str) -> Option<String> {
@@ -218,15 +483,15 @@ fn card_upper(header: &HduHeader, key: &str) -> Option<String> {
     card(header, key).map(|s| s.to_uppercase())
 }
 
-fn tabulated_wavelength_axis(values: Vec<f64>) -> SpectralAxis {
+fn tabulated_axis(values: Vec<f64>, kind: AxisKind, ctype: &str) -> SpectralAxis {
     let steps: Vec<f64> = values
         .windows(2)
         .map(|w| w[1] - w[0])
         .filter(|d| d.is_finite())
         .collect();
     SpectralAxis {
-        kind: AxisKind::Wave,
-        ctype: COL_WAVELENGTH.to_string(),
+        kind,
+        ctype: ctype.to_string(),
         unit: DEFAULT_WAVELENGTH_UNIT.to_string(),
         header_unit: DEFAULT_WAVELENGTH_UNIT.to_string(),
         header_scale: 1.0,
@@ -1002,6 +1267,349 @@ mod tests {
             "{:?}",
             s.notes
         );
+    }
+
+    const CSV_PATH: &str = "C:/data/jw_test_x1d_spectrum.csv";
+    const CSV_ROWS: usize = 12;
+    const CSV_NAN_FLUX_ROW: usize = 5;
+    const CSV_NAN_ERR_ROW: usize = 7;
+    const CSV_ROUND_TRIP_TOLERANCE: f64 = 1e-12;
+
+    fn exported_csv() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("spectrum1d")
+            .join("document_export.csv");
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    fn exported_wavelength(i: usize) -> f64 {
+        1.8 + i as f64 * 0.00137
+    }
+
+    fn exported_flux(i: usize) -> f64 {
+        if i == CSV_NAN_FLUX_ROW {
+            f64::NAN
+        } else {
+            0.0123 + i as f64 * 4.56e-5
+        }
+    }
+
+    fn exported_err(i: usize) -> f64 {
+        if i == CSV_NAN_ERR_ROW {
+            f64::NAN
+        } else {
+            1e-4 + i as f64 * 1e-6
+        }
+    }
+
+    fn exported_dq() -> Vec<u32> {
+        let mut dq = vec![0; CSV_ROWS];
+        dq[3] = 1;
+        dq[9] = 1 << 31;
+        dq[10] = 2;
+        dq
+    }
+
+    fn assert_round_trip(what: &str, actual: &[f64], expected: impl Fn(usize) -> f64) {
+        assert_eq!(actual.len(), CSV_ROWS, "{what}");
+        for (i, &value) in actual.iter().enumerate() {
+            let want = expected(i);
+            if want.is_nan() {
+                assert!(value.is_nan(), "{what}[{i}] = {value}, expected NaN");
+            } else {
+                assert!(
+                    ((value - want) / want).abs() <= CSV_ROUND_TRIP_TOLERANCE,
+                    "{what}[{i}] = {value}, expected {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn from_csv_reads_the_frontend_document_export_back_to_1e12() {
+        let lf = exported_csv().replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        let with_bom = format!("\u{feff}{crlf}");
+        for text in [lf, crlf, with_bom] {
+            let s = Spectrum1d::from_csv(CSV_PATH, &text).unwrap();
+            assert_eq!(s.n_rows, CSV_ROWS);
+            assert_round_trip("wavelength", &s.axis.values, exported_wavelength);
+            assert_round_trip("flux", &s.flux, exported_flux);
+            assert_round_trip("err", s.err.as_deref().unwrap(), exported_err);
+            assert_eq!(s.dq, Some(exported_dq()));
+            assert_eq!(s.dq_table, DqTable::Jwst);
+            assert_eq!(s.flux_unit.as_deref(), Some("Jy"));
+            assert_eq!(s.wavelength_frame, WavelengthFrame::Vacuum);
+            assert_eq!(s.precision, Precision::F64);
+            assert_eq!(s.axis.kind, AxisKind::Wave);
+            assert_eq!(s.axis.unit, "um");
+            assert!(s.axis.tabulated);
+            assert_eq!(
+                s.source,
+                Spectrum1dSource::Csv {
+                    path: CSV_PATH.to_string()
+                }
+            );
+            assert_eq!(
+                s.cards.get("file").map(String::as_str),
+                Some("jw_test_x1d.fits")
+            );
+            assert!(
+                s.notes
+                    .iter()
+                    .any(|n| n.contains("wavelength_vacuum_um") && n.contains("vacuum wavelengths")),
+                "{:?}",
+                s.notes
+            );
+        }
+    }
+
+    #[test]
+    fn from_csv_reads_an_air_wavelength_column_a_quoted_unit_and_dq_without_a_table() {
+        let text = "# file: ha.fits\nchannel,wavelength_air_um,flux,flux_unit,dq\n0,0.6562,1.5,\"erg/s/cm2/A, x1e-17\",0\n1,0.6563,2.5,\"erg/s/cm2/A, x1e-17\",4\n";
+        let s = Spectrum1d::from_csv(CSV_PATH, text).unwrap();
+        assert_eq!(s.wavelength_frame, WavelengthFrame::Air);
+        assert_eq!(s.axis.kind, AxisKind::Awav);
+        assert_eq!(s.axis.values, vec![0.6562, 0.6563]);
+        assert_eq!(s.flux, vec![1.5, 2.5]);
+        assert_eq!(s.flux_unit.as_deref(), Some("erg/s/cm2/A, x1e-17"));
+        assert!(s.err.is_none());
+        assert_eq!(s.dq, Some(vec![0, 4]));
+        assert_eq!(s.dq_table, DqTable::Unknown);
+        assert!(
+            s.notes.iter().any(|n| n.contains("dq_table")),
+            "{:?}",
+            s.notes
+        );
+        assert!(
+            s.notes.iter().any(|n| n.contains("air wavelengths")),
+            "{:?}",
+            s.notes
+        );
+    }
+
+    #[test]
+    fn from_csv_takes_the_flux_unit_from_the_provenance_line_without_a_unit_column() {
+        let text = "# flux_unit: MJy/sr\nwavelength_vacuum_um,flux\n2.0,1\n2.1,2\n";
+        let s = Spectrum1d::from_csv(CSV_PATH, text).unwrap();
+        assert_eq!(s.flux_unit.as_deref(), Some("MJy/sr"));
+        let s = Spectrum1d::from_csv(CSV_PATH, "wavelength_vacuum_um,flux\n2.0,1\n").unwrap();
+        assert!(s.flux_unit.is_none());
+        assert!(
+            s.notes.iter().any(|n| n.contains("native units")),
+            "{:?}",
+            s.notes
+        );
+    }
+
+    #[test]
+    fn from_csv_reads_an_air_document_export_on_its_own_air_column_not_the_greisen_vacuum_one() {
+        let text = "# file: ha.fits\n# wavelength_air_note: wavelength_vacuum_um converted from air\nchannel,wavelength_vacuum_um,wavelength_air_um,flux,flux_unit\n0,0.6564712848862345,0.65628,1.5,Jy\n1,0.6564812876247376,0.65629,2.5,Jy\n";
+        let s = Spectrum1d::from_csv(CSV_PATH, text).unwrap();
+        assert_eq!(s.wavelength_frame, WavelengthFrame::Air);
+        assert_eq!(s.axis.kind, AxisKind::Awav);
+        assert_eq!(s.axis.ctype, CSV_WAVELENGTH_AIR_COLUMN);
+        assert_eq!(s.axis.values, vec![0.65628, 0.65629]);
+        assert!(
+            s.notes
+                .iter()
+                .any(|n| n.contains("wavelength_air_um") && n.contains("air wavelengths")),
+            "{:?}",
+            s.notes
+        );
+    }
+
+    #[test]
+    fn from_csv_reads_the_frontend_air_export_back_in_air_without_a_unit_at_f32_precision() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("spectrum1d")
+            .join("air_document_export.csv");
+        let lf = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        for text in [lf.clone(), lf.replace('\n', "\r\n")] {
+            let s = Spectrum1d::from_csv(CSV_PATH, &text).unwrap();
+            assert_eq!(s.wavelength_frame, WavelengthFrame::Air);
+            assert_eq!(s.axis.kind, AxisKind::Awav);
+            assert_eq!(s.axis.values, vec![0.65628, 0.65629, 0.6563]);
+            assert_eq!(s.flux, vec![1.5, 2.5, 3.5]);
+            assert!(s.flux_unit.is_none(), "{:?}", s.flux_unit);
+            assert_eq!(s.precision, Precision::F32Widened);
+            assert!(s.err.is_none() && s.dq.is_none());
+        }
+    }
+
+    const REGION_ROWS: usize = 6;
+    const REGION_WEIGHT: f64 = 12.5;
+    const REGION_JY_PER_SUM: f64 = 2.35e-5;
+    const REGION_NAN_FLUX_ROW: usize = 2;
+    const REGION_NAN_ERR_ROW: usize = 4;
+
+    fn region_sum(i: usize) -> f64 {
+        if i == REGION_NAN_FLUX_ROW {
+            f64::NAN
+        } else {
+            3.5 + i as f64 * 0.25
+        }
+    }
+
+    fn region_err(i: usize) -> f64 {
+        if i == REGION_NAN_ERR_ROW {
+            f64::NAN
+        } else {
+            0.02 + i as f64 * 0.001
+        }
+    }
+
+    fn region_export(view: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("spectrum1d")
+            .join(format!("region_{view}_export.csv"));
+        std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    }
+
+    fn assert_region_column(what: &str, actual: &[f64], expected: impl Fn(usize) -> f64) {
+        assert_eq!(actual.len(), REGION_ROWS, "{what}");
+        for (i, &value) in actual.iter().enumerate() {
+            let want = expected(i);
+            if want.is_nan() {
+                assert!(value.is_nan(), "{what}[{i}] = {value}, expected NaN");
+            } else {
+                assert!(
+                    ((value - want) / want).abs() <= CSV_ROUND_TRIP_TOLERANCE,
+                    "{what}[{i}] = {value}, expected {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn from_csv_pairs_the_flux_of_each_region_view_export_with_the_error_of_that_view() {
+        let views: [(&str, &str, fn(usize) -> f64, fn(usize) -> f64); 3] = [
+            ("sum", "MJy/sr x pix", region_sum, region_err),
+            (
+                "mean",
+                "MJy/sr",
+                |i| region_sum(i) / REGION_WEIGHT,
+                |i| region_err(i) / REGION_WEIGHT,
+            ),
+            (
+                "jy",
+                "Jy",
+                |i| region_sum(i) * REGION_JY_PER_SUM,
+                |i| region_err(i) * REGION_JY_PER_SUM,
+            ),
+        ];
+        for (view, unit, flux, err) in views {
+            let s = Spectrum1d::from_csv(CSV_PATH, &region_export(view)).unwrap();
+            assert_region_column(&format!("{view} wavelength"), &s.axis.values, |i| {
+                2.0 + i as f64 * 0.001
+            });
+            assert_region_column(&format!("{view} flux"), &s.flux, flux);
+            assert_region_column(&format!("{view} err"), s.err.as_deref().unwrap(), err);
+            assert_eq!(s.flux_unit.as_deref(), Some(unit), "{view}");
+            assert_eq!(s.cards.get("view").map(String::as_str), Some(view));
+            assert_eq!(
+                s.cards.get("err_source").map(String::as_str),
+                Some("ERR HDU 2")
+            );
+        }
+    }
+
+    #[test]
+    fn from_csv_reads_the_native_unit_placeholder_of_the_export_as_no_unit() {
+        let text = "# flux_unit: native\nwavelength_vacuum_um,flux,flux_unit\n2.0,1,native\n2.1,2,native\n";
+        let s = Spectrum1d::from_csv(CSV_PATH, text).unwrap();
+        assert!(s.flux_unit.is_none(), "{:?}", s.flux_unit);
+        assert!(
+            s.notes.iter().any(|n| n.contains("native units")),
+            "{:?}",
+            s.notes
+        );
+        let s = Spectrum1d::from_csv(
+            CSV_PATH,
+            "wavelength_vacuum_um,flux,flux_unit\n2.0,1,Native\n",
+        )
+        .unwrap();
+        assert!(s.flux_unit.is_none(), "{:?}", s.flux_unit);
+    }
+
+    #[test]
+    fn from_csv_keeps_the_f32_widened_precision_its_provenance_line_names() {
+        let text =
+            "# precision: f32_widened\nwavelength_vacuum_um,flux\n2.0,0.012300000339746475\n";
+        let s = Spectrum1d::from_csv(CSV_PATH, text).unwrap();
+        assert_eq!(s.precision, Precision::F32Widened);
+        assert!(
+            s.notes.iter().any(|n| n.contains("f32 precision")),
+            "{:?}",
+            s.notes
+        );
+        let s = Spectrum1d::from_csv(
+            CSV_PATH,
+            "# precision: f64\nwavelength_vacuum_um,flux\n2.0,1\n",
+        )
+        .unwrap();
+        assert_eq!(s.precision, Precision::F64);
+        assert!(
+            !s.notes.iter().any(|n| n.contains("f32 precision")),
+            "{:?}",
+            s.notes
+        );
+    }
+
+    #[test]
+    fn from_csv_refuses_a_csv_it_cannot_read_naming_the_line_and_the_column() {
+        let refusals: [(&str, &[&str]); 9] = [
+            ("# only provenance\n", &["no header row"]),
+            (
+                "channel,flux\n0,1\n",
+                &["wavelength_vacuum_um", "wavelength_air_um"],
+            ),
+            ("channel,wavelength_vacuum_um\n0,1\n", &["flux column"]),
+            ("wavelength_vacuum_um,flux\n", &["no data rows"]),
+            (
+                "wavelength_vacuum_um,flux\n1.0,2.0,3.0\n",
+                &["line 2", "3 fields", "header has 2"],
+            ),
+            (
+                "wavelength_vacuum_um,flux\n1.0,abc\n",
+                &["line 2", "flux", "'abc'"],
+            ),
+            (
+                "wavelength_vacuum_um,flux,dq\n1.0,2.0,-1\n",
+                &["line 2", "dq", "'-1'"],
+            ),
+            (
+                "wavelength_vacuum_um,flux,flux_unit\n1.0,2.0,\"Jy\n",
+                &["line 2", "unterminated"],
+            ),
+            (
+                "# dq_table: kepler\nwavelength_vacuum_um,flux,dq\n1.0,2.0,0\n",
+                &["dq_table 'kepler'"],
+            ),
+        ];
+        for (text, expected) in refusals {
+            let err = Spectrum1d::from_csv(CSV_PATH, text).unwrap_err();
+            for part in expected {
+                assert!(err.contains(part), "{text:?}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn serialised_csv_source_is_tagged_csv_with_its_path() {
+        let s = Spectrum1d::from_csv(CSV_PATH, "wavelength_vacuum_um,flux\n2.0,1\n").unwrap();
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            json["source"],
+            serde_json::json!({ "kind": "csv", "path": CSV_PATH })
+        );
+        assert_eq!(json["wavelength_frame"], "vacuum");
     }
 
     #[test]

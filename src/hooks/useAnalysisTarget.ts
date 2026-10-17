@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useCompositePreview } from "../context/CompositeContext";
-import { useDisplayedImage, useFileContext, type DisplayedImage } from "../context/PreviewContext";
+import { imagePathOf, useDisplayedImage, useFileContext, type DisplayedImage } from "../context/PreviewContext";
 import { describeMeasurementSource, isCompositeOnScreen, isFileRgbView, rgbMeasurePath, type MeasurementSource } from "../utils/analysisTarget";
 
 export interface AnalysisTarget {
@@ -19,9 +19,9 @@ export function useAnalysisTarget(): AnalysisTarget {
   const displayed = useDisplayedImage();
   const { compositePreviewUrl } = useCompositePreview();
   const fileIsRgb = file?.result?.is_rgb === true;
-  const filePath = file?.path ?? null;
+  const filePath = imagePathOf(file);
   const fileName = file?.name ?? null;
-  const fileDims = file?.result?.dimensions ?? null;
+  const fileDims = filePath === null ? null : (file?.result?.dimensions ?? null);
   const filePreviewUrl = file?.result?.previewUrl ?? null;
   const composite = isCompositeOnScreen({
     compositePreviewUrl,

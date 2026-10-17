@@ -4,6 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use crate::core::astrometry::stcs::BoundingCone;
 pub use crate::infra::mast::Mission as MastMissionId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,11 +152,31 @@ pub struct MastQuery {
     #[serde(default)]
     pub filters: MastFilterValues,
     #[serde(default)]
+    pub preset: Option<String>,
+    #[serde(default)]
     pub sort: Vec<MastSort>,
     #[serde(default)]
     pub offset: i64,
     #[serde(default)]
     pub limit: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastPresetCondition {
+    pub column: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastPreset {
+    pub id: String,
+    pub mission: MastMissionId,
+    pub label: String,
+    pub description: String,
+    pub conditions: Vec<MastPresetCondition>,
+    pub products: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -222,6 +243,8 @@ pub struct MastSearchPage {
     pub radius_clamped: bool,
     pub search_position: Option<SearchPosition>,
     pub applied: AppliedEcho,
+    #[serde(default)]
+    pub dropped_conditions: Vec<String>,
     pub request_body: Value,
     pub messages: Vec<String>,
     pub unresolved_targets: Vec<String>,
@@ -480,10 +503,22 @@ pub enum MastErrorCode {
     TokenRejected,
     #[serde(rename = "mast_cache")]
     Cache,
+    #[serde(rename = "mast_size_mismatch")]
+    SizeMismatch,
+    #[serde(rename = "mast_busy")]
+    Busy,
+    #[serde(rename = "mast_stale")]
+    Stale,
+    #[serde(rename = "mast_quota")]
+    Quota,
+    #[serde(rename = "mast_uri_refused")]
+    UriRefused,
+    #[serde(rename = "mast_peek_incomplete")]
+    PeekIncomplete,
 }
 
 impl MastErrorCode {
-    pub const ALL: [MastErrorCode; 15] = [
+    pub const ALL: [MastErrorCode; 21] = [
         MastErrorCode::Network,
         MastErrorCode::Timeout,
         MastErrorCode::Cancelled,
@@ -499,6 +534,12 @@ impl MastErrorCode {
         MastErrorCode::BadInput,
         MastErrorCode::TokenRejected,
         MastErrorCode::Cache,
+        MastErrorCode::SizeMismatch,
+        MastErrorCode::Busy,
+        MastErrorCode::Stale,
+        MastErrorCode::Quota,
+        MastErrorCode::UriRefused,
+        MastErrorCode::PeekIncomplete,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -518,8 +559,173 @@ impl MastErrorCode {
             MastErrorCode::BadInput => "mast_bad_input",
             MastErrorCode::TokenRejected => "mast_token_rejected",
             MastErrorCode::Cache => "mast_cache",
+            MastErrorCode::SizeMismatch => "mast_size_mismatch",
+            MastErrorCode::Busy => "mast_busy",
+            MastErrorCode::Stale => "mast_stale",
+            MastErrorCode::Quota => "mast_quota",
+            MastErrorCode::UriRefused => "mast_uri_refused",
+            MastErrorCode::PeekIncomplete => "mast_peek_incomplete",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MastDownloadState {
+    Queued,
+    Downloading,
+    Done,
+    Error,
+    Cancelled,
+}
+
+impl MastDownloadState {
+    pub const fn is_active(self) -> bool {
+        matches!(self, MastDownloadState::Queued | MastDownloadState::Downloading)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MastDownloadAction {
+    Resume,
+    Retry,
+    Replace,
+    Redownload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastDownloadInput {
+    pub dataset_id: String,
+    pub filename: String,
+    #[serde(default)]
+    pub program: Option<String>,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub uri: Option<String>,
+    #[serde(default)]
+    pub opens_as: Option<OpensAs>,
+    #[serde(default)]
+    pub replace: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastDownloadItem {
+    pub id: String,
+    pub request_id: String,
+    pub mission: MastMissionId,
+    pub dataset_id: String,
+    pub filename: String,
+    pub program: Option<String>,
+    pub uri: String,
+    pub size_bytes: u64,
+    pub opens_as: Option<OpensAs>,
+    pub open: bool,
+    pub replace: bool,
+    pub state: MastDownloadState,
+    pub received: u64,
+    pub total: Option<u64>,
+    pub path: String,
+    pub resumed_from: u64,
+    pub reused: bool,
+    pub verified: Option<bool>,
+    pub action: Option<MastDownloadAction>,
+    pub error: Option<MastCmdError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastFootprintInput {
+    pub dataset_id: String,
+    #[serde(default)]
+    pub s_region: Option<String>,
+    #[serde(default)]
+    pub polygons: Option<Vec<Vec<[f64; 2]>>>,
+    #[serde(default)]
+    pub targtype: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastFootprint {
+    pub dataset_id: String,
+    pub polygons: Vec<Vec<[f64; 2]>>,
+    pub on_image: bool,
+    pub vertices: usize,
+    pub cone: Option<BoundingCone>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastFootprintSet {
+    pub path: String,
+    pub width: usize,
+    pub height: usize,
+    pub footprints: Vec<MastFootprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastFootprintNote {
+    pub dataset_id: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastFootprintRegions {
+    pub reg_text: String,
+    pub polygons: usize,
+    pub notes: Vec<MastFootprintNote>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastPeekHdu {
+    pub index: usize,
+    pub extname: Option<String>,
+    pub extver: Option<i64>,
+    pub bitpix: i64,
+    pub dims: Vec<u64>,
+    pub wcs_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastPeekFootprint {
+    pub hdu: usize,
+    pub corners: [[f64; 2]; 4],
+    pub center: [f64; 2],
+    pub fov_arcmin: [f64; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastPeek {
+    pub dataset_id: String,
+    pub filename: String,
+    pub uri: String,
+    pub dims: Vec<u64>,
+    pub bitpix: Option<i64>,
+    pub bunit: Option<String>,
+    pub exptime: Option<f64>,
+    pub date_obs: Option<String>,
+    pub filter: Option<String>,
+    pub instrume: Option<String>,
+    pub footprints: Vec<MastPeekFootprint>,
+    pub hdus: Vec<MastPeekHdu>,
+    pub bytes_fetched: u64,
+    pub ranges: usize,
+    pub file_bytes: Option<u64>,
+    pub complete: bool,
+    pub range_ignored: bool,
+    pub note: Option<String>,
+    pub etag: Option<String>,
+    pub elapsed_ms: u64,
+    pub from_cache: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -607,6 +813,46 @@ mod tests {
         let name: MastWhere = serde_json::from_value(json!({"kind": "name", "name": "M16", "radiusArcmin": 2.0})).unwrap();
         assert_eq!(name, MastWhere::Name { name: "M16".into(), radius_arcmin: 2.0 });
         assert_eq!(serde_json::to_value(MastWhere::None).unwrap(), json!({"kind": "none"}));
+        assert_eq!(query.preset, None);
+    }
+
+    #[test]
+    fn query_carries_an_optional_preset_and_pages_name_dropped_conditions() {
+        let query: MastQuery = serde_json::from_value(json!({
+            "mission": "jwst",
+            "where": {"kind": "name", "name": "WASP-39", "radiusArcmin": 3.0},
+            "filters": {},
+            "preset": "tso",
+            "offset": 0,
+            "limit": 200
+        }))
+        .unwrap();
+        assert_eq!(query.preset.as_deref(), Some("tso"));
+        assert_eq!(serde_json::to_value(&query).unwrap()["preset"], json!("tso"));
+        let none: MastQuery = serde_json::from_value(json!({"mission": "hst", "where": {"kind": "none"}, "preset": null})).unwrap();
+        assert_eq!(none.preset, None);
+        let page = MastSearchPage {
+            request_id: "g1:search".into(),
+            mission: MastMissionId::Jwst,
+            columns: Vec::new(),
+            rows: Vec::new(),
+            offset: 0,
+            limit: 200,
+            has_more: false,
+            total_reported: Some(0),
+            total_reliable: true,
+            radius_arcmin: None,
+            radius_clamped: false,
+            search_position: None,
+            applied: AppliedEcho::default(),
+            dropped_conditions: vec!["tsovisit".into()],
+            request_body: Value::Null,
+            messages: Vec::new(),
+            unresolved_targets: Vec::new(),
+            elapsed_ms: 0,
+            from_cache: false,
+        };
+        assert_eq!(serde_json::to_value(&page).unwrap()["droppedConditions"], json!(["tsovisit"]));
     }
 
     #[test]
@@ -642,6 +888,128 @@ mod tests {
     }
 
     #[test]
+    fn download_codes_join_the_contract_list_and_items_use_camel_case() {
+        let names: Vec<&str> = MastErrorCode::ALL.iter().map(|code| code.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "mast_network",
+                "mast_timeout",
+                "mast_cancelled",
+                "mast_rate_limited",
+                "mast_server",
+                "mast_rejected",
+                "mast_unauthorized",
+                "mast_no_image",
+                "mast_not_deployed",
+                "mast_decode",
+                "mast_too_large",
+                "mast_not_image",
+                "mast_bad_input",
+                "mast_token_rejected",
+                "mast_cache",
+                "mast_size_mismatch",
+                "mast_busy",
+                "mast_stale",
+                "mast_quota",
+                "mast_uri_refused",
+                "mast_peek_incomplete",
+            ]
+        );
+        for code in MastErrorCode::ALL {
+            assert_eq!(serde_json::from_value::<MastErrorCode>(json!(code.as_str())).unwrap(), code);
+        }
+
+        let input: MastDownloadInput = serde_json::from_value(json!({
+            "datasetId": "jw02739001001_02105_00001_nrca1",
+            "filename": "jw02739001001_02105_00001_nrca1_cal.fits",
+            "sizeBytes": 117_573_120u64
+        }))
+        .unwrap();
+        assert_eq!((input.program, input.uri, input.opens_as, input.replace), (None, None, None, false));
+
+        let item = MastDownloadItem {
+            id: "dl1:0".into(),
+            request_id: "dl1".into(),
+            mission: MastMissionId::Jwst,
+            dataset_id: "d".into(),
+            filename: "d_cal.fits".into(),
+            program: Some("2739".into()),
+            uri: "mast:JWST/product/d_cal.fits".into(),
+            size_bytes: 10,
+            opens_as: Some(OpensAs::Image),
+            open: true,
+            replace: true,
+            state: MastDownloadState::Error,
+            received: 4,
+            total: Some(10),
+            path: "C:/data/mast/JWST/2739/d_cal.fits".into(),
+            resumed_from: 0,
+            reused: false,
+            verified: None,
+            action: Some(MastDownloadAction::Redownload),
+            error: Some(MastCmdError::new(MastErrorCode::Stale, "MAST has a newer version of this file")),
+        };
+        let value = serde_json::to_value(&item).unwrap();
+        assert_eq!(value["requestId"], json!("dl1"));
+        assert_eq!(value["datasetId"], json!("d"));
+        assert_eq!(value["sizeBytes"], json!(10));
+        assert_eq!(value["opensAs"], json!("image"));
+        assert_eq!(value["resumedFrom"], json!(0));
+        assert_eq!(value["state"], json!("error"));
+        assert_eq!(value["action"], json!("redownload"));
+        assert_eq!(value["replace"], json!(true));
+        assert_eq!(value["verified"], json!(null));
+        assert_eq!(value["error"]["code"], json!("mast_stale"));
+        assert!(MastDownloadState::Queued.is_active() && MastDownloadState::Downloading.is_active());
+        assert!(!MastDownloadState::Done.is_active() && !MastDownloadState::Cancelled.is_active());
+    }
+
+    #[test]
+    fn footprint_items_decode_with_optional_sources_and_results_use_camel_case() {
+        let bare: MastFootprintInput = serde_json::from_value(json!({"datasetId": "jw02739-o001_t001_nircam"})).unwrap();
+        assert_eq!((bare.s_region, bare.polygons, bare.targtype), (None, None, None));
+        let peeked: MastFootprintInput = serde_json::from_value(json!({
+            "datasetId": "j9irw3fwq",
+            "sRegion": null,
+            "polygons": [[[274.7, -13.8], [274.8, -13.8], [274.8, -13.7]]],
+            "targtype": null
+        }))
+        .unwrap();
+        assert_eq!(peeked.polygons, Some(vec![vec![[274.7, -13.8], [274.8, -13.8], [274.8, -13.7]]]));
+        assert!(serde_json::from_value::<MastFootprintInput>(json!({"datasetId": "a", "polygons": [[[1.0]]]})).is_err());
+
+        let set = MastFootprintSet {
+            path: "C:/data/a_cal.fits".into(),
+            width: 2048,
+            height: 2048,
+            footprints: vec![MastFootprint {
+                dataset_id: "a".into(),
+                polygons: vec![vec![[0.5, 1.5], [2.0, 3.0], [4.0, 0.0]]],
+                on_image: true,
+                vertices: 3,
+                cone: Some(BoundingCone { ra: 274.7, dec: -13.8, radius_deg: 0.05 }),
+                note: None,
+            }],
+        };
+        let value = serde_json::to_value(&set).unwrap();
+        assert_eq!(value["footprints"][0]["datasetId"], json!("a"));
+        assert_eq!(value["footprints"][0]["onImage"], json!(true));
+        assert_eq!(value["footprints"][0]["polygons"][0][0], json!([0.5, 1.5]));
+        assert_eq!(value["footprints"][0]["cone"], json!({"ra": 274.7, "dec": -13.8, "radiusDeg": 0.05}));
+        assert_eq!(value["footprints"][0]["note"], json!(null));
+        let regions = MastFootprintRegions {
+            reg_text: "icrs\n".into(),
+            polygons: 0,
+            notes: vec![MastFootprintNote { dataset_id: "b".into(), note: "moving".into() }],
+        };
+        assert_eq!(
+            serde_json::to_value(&regions).unwrap(),
+            json!({"regText": "icrs\n", "polygons": 0, "notes": [{"datasetId": "b", "note": "moving"}]})
+        );
+    }
+
+    #[test]
     fn preview_ref_flattens_the_image_ref() {
         let preview = MastPreviewRef {
             image: MastImageRef {
@@ -666,5 +1034,52 @@ mod tests {
         assert_eq!(value["size"], json!("pane"));
         assert_eq!(value["source"]["width"], json!(7065));
         assert!(value.get("image").is_none());
+    }
+
+    #[test]
+    fn peek_results_use_camel_case_and_round_trip_through_the_cache_shape() {
+        let peek = MastPeek {
+            dataset_id: "j9irw3fwq".into(),
+            filename: "j9irw3fwq_flc.fits".into(),
+            uri: "mast:HST/product/j9irw3fwq_flc.fits".into(),
+            dims: vec![4096, 2048],
+            bitpix: Some(-32),
+            bunit: Some("ELECTRONS".into()),
+            exptime: Some(507.0),
+            date_obs: Some("2004-09-12T06:35:21".into()),
+            filter: Some("F606W".into()),
+            instrume: Some("ACS".into()),
+            footprints: vec![MastPeekFootprint {
+                hdu: 1,
+                corners: [[150.0, 2.0], [150.1, 2.0], [150.1, 2.1], [150.0, 2.1]],
+                center: [150.05, 2.05],
+                fov_arcmin: [3.4, 1.7],
+            }],
+            hdus: vec![MastPeekHdu {
+                index: 1,
+                extname: Some("SCI".into()),
+                extver: Some(1),
+                bitpix: -32,
+                dims: vec![4096, 2048],
+                wcs_error: None,
+            }],
+            bytes_fetched: 524_288,
+            ranges: 7,
+            file_bytes: Some(168_000_000),
+            complete: true,
+            range_ignored: false,
+            note: None,
+            etag: Some("\"ab\"".into()),
+            elapsed_ms: 12,
+            from_cache: false,
+        };
+        let value = serde_json::to_value(&peek).unwrap();
+        let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        for key in ["datasetId", "dateObs", "bytesFetched", "fileBytes", "rangeIgnored", "elapsedMs", "fromCache"] {
+            assert!(keys.contains(&key), "{key} missing from {keys:?}");
+        }
+        assert_eq!(value["footprints"][0]["fovArcmin"], json!([3.4, 1.7]));
+        assert_eq!(value["hdus"][0]["wcsError"], json!(null));
+        assert_eq!(serde_json::from_value::<MastPeek>(value).unwrap(), peek);
     }
 }

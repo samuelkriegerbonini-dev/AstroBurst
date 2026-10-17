@@ -2,14 +2,21 @@ import { typedInvoke } from "../infrastructure/tauri";
 import { TauriCommandError } from "../shared/types/errors";
 import type {
   MastCacheInfo,
+  MastDownloadInput,
+  MastDownloadItem,
   MastError,
   MastErrorCode,
   MastErrorContext,
+  MastFootprintInput,
+  MastFootprintRegions,
+  MastFootprintSet,
   MastImageRef,
   MastImageSet,
   MastLevelClass,
   MastMission,
   MastMissionId,
+  MastPeek,
+  MastPreset,
   MastPreviewRef,
   MastProductList,
   MastProgressEvent,
@@ -34,11 +41,20 @@ export const MAST_COMMANDS = [
   "mast_token_clear_cmd",
   "mast_cache_info_cmd",
   "mast_cache_clear_cmd",
+  "mast_download_cmd",
+  "mast_download_cancel_cmd",
+  "mast_downloads_cmd",
+  "mast_presets_cmd",
+  "mast_footprints_cmd",
+  "mast_footprints_reg_cmd",
+  "mast_peek_cmd",
 ] as const;
 
 export type MastCommand = (typeof MAST_COMMANDS)[number];
 
 export const MAST_PROGRESS_EVENT = "mast:progress";
+
+export const MAST_DOWNLOAD_EVENT = "mast:download";
 
 export type MastCacheKind = "images" | "lists" | "names" | "all";
 
@@ -113,12 +129,45 @@ export function mastCacheClear(kind: MastCacheKind): Promise<MastCacheInfo> {
   return typedInvoke<MastCacheInfo>("mast_cache_clear_cmd", { kind });
 }
 
+export function mastDownload(requestId: string, mission: MastMissionId, items: readonly MastDownloadInput[], open: boolean): Promise<MastDownloadItem[]> {
+  return typedInvoke<MastDownloadItem[]>("mast_download_cmd", { requestId, mission, items: items.map((item) => ({ ...item })), open });
+}
+
+export function mastDownloadCancel(requestId: string): Promise<number> {
+  return typedInvoke<number>("mast_download_cancel_cmd", { requestId });
+}
+
+export function mastDownloads(): Promise<MastDownloadItem[]> {
+  return typedInvoke<MastDownloadItem[]>("mast_downloads_cmd", {});
+}
+
+export function mastPresets(): Promise<MastPreset[]> {
+  return typedInvoke<MastPreset[]>("mast_presets_cmd", {});
+}
+
+export function mastFootprints(path: string, items: readonly MastFootprintInput[]): Promise<MastFootprintSet> {
+  return typedInvoke<MastFootprintSet>("mast_footprints_cmd", { path, items: items.map((item) => ({ ...item })) });
+}
+
+export function mastFootprintsReg(items: readonly MastFootprintInput[]): Promise<MastFootprintRegions> {
+  return typedInvoke<MastFootprintRegions>("mast_footprints_reg_cmd", { items: items.map((item) => ({ ...item })) });
+}
+
+export function mastPeek(requestId: string, mission: MastMissionId, datasetId: string, filename: string, uri: string | null): Promise<MastPeek> {
+  return typedInvoke<MastPeek>("mast_peek_cmd", { requestId, mission, datasetId, filename, uri });
+}
+
+export async function onMastDownload(cb: (item: MastDownloadItem) => void): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<MastDownloadItem>(MAST_DOWNLOAD_EVENT, (event) => cb(event.payload));
+}
+
 export async function onMastProgress(cb: (event: MastProgressEvent) => void): Promise<() => void> {
   const { listen } = await import("@tauri-apps/api/event");
   return listen<MastProgressEvent>(MAST_PROGRESS_EVENT, (event) => cb(event.payload));
 }
 
-const MAST_ERROR_CODES: ReadonlySet<string> = new Set<MastErrorCode>([
+export const MAST_ERROR_CODES: readonly MastErrorCode[] = [
   "mast_network",
   "mast_timeout",
   "mast_cancelled",
@@ -134,7 +183,15 @@ const MAST_ERROR_CODES: ReadonlySet<string> = new Set<MastErrorCode>([
   "mast_bad_input",
   "mast_token_rejected",
   "mast_cache",
-]);
+  "mast_size_mismatch",
+  "mast_busy",
+  "mast_stale",
+  "mast_quota",
+  "mast_uri_refused",
+  "mast_peek_incomplete",
+];
+
+const KNOWN_CODES: ReadonlySet<string> = new Set<string>(MAST_ERROR_CODES);
 
 const NUMBER_KEYS = ["status", "retryAfterSec", "timeoutSec", "bytes", "consecutive", "attempts", "elapsedMs"] as const;
 const STRING_KEYS = ["detail", "mission", "operation", "host"] as const;
@@ -155,7 +212,7 @@ function pickContext(raw: unknown): MastErrorContext {
 }
 
 function isMastErrorCode(code: unknown): code is MastErrorCode {
-  return typeof code === "string" && MAST_ERROR_CODES.has(code);
+  return typeof code === "string" && KNOWN_CODES.has(code);
 }
 
 export function mastErrorOf(err: unknown): MastError {

@@ -9,7 +9,7 @@ use crate::core::analysis::line_measure::{
     measure_line_with_errors, resolve_windows, with_velocity, ContinuumWindows, LineMeasurement, LineModel,
 };
 use crate::core::analysis::spectrum1d::{
-    vacuum_to_air_morton_um, Spectrum1d, Spectrum1dSource, WavelengthFrame, MORTON_AIR_FORMULA,
+    vacuum_to_air_morton_um, Spectrum1d, Spectrum1dSource, WavelengthFrame, CSV_ERR_COLUMN, MORTON_AIR_FORMULA,
 };
 use crate::core::analysis::x1d::{COL_FLUX_ERROR, EXTNAME_EXTRACT1D};
 use crate::core::astrometry::spectral::{
@@ -325,9 +325,10 @@ fn frame_text(frame: WavelengthFrame) -> &'static str {
     }
 }
 
-fn document_hdu(source: &Spectrum1dSource) -> usize {
+fn document_hdu(source: &Spectrum1dSource) -> Option<usize> {
     match source {
-        Spectrum1dSource::X1d { hdu, .. } | Spectrum1dSource::Wcs1d { hdu, .. } => *hdu,
+        Spectrum1dSource::X1d { hdu, .. } | Spectrum1dSource::Wcs1d { hdu, .. } => Some(*hdu),
+        Spectrum1dSource::Csv { .. } => None,
     }
 }
 
@@ -335,6 +336,7 @@ fn document_label(source: &Spectrum1dSource) -> String {
     match source {
         Spectrum1dSource::X1d { hdu, .. } => format!("{} table in HDU {}", EXTNAME_EXTRACT1D, hdu),
         Spectrum1dSource::Wcs1d { hdu, .. } => format!("1D array in HDU {}", hdu),
+        Spectrum1dSource::Csv { .. } => "CSV file".to_string(),
     }
 }
 
@@ -343,6 +345,7 @@ fn document_err_source(source: &Spectrum1dSource, err_used: bool) -> String {
         (_, false) => ERR_SOURCE_NONE.to_string(),
         (Spectrum1dSource::X1d { hdu, .. }, true) => format!("{} column (HDU {})", COL_FLUX_ERROR, hdu),
         (Spectrum1dSource::Wcs1d { .. }, true) => format!("{} extension", EXTNAME_ERR),
+        (Spectrum1dSource::Csv { .. }, true) => format!("{} column (CSV)", CSV_ERR_COLUMN),
     }
 }
 
@@ -441,7 +444,7 @@ fn measure_file_line(
         (rest, _) => rest,
     };
     add_velocity(&mut m, &doc.axis, rest, request);
-    Ok((m, SpectrumSource::File { hdu: Some(document_hdu(&doc.source)) }, err_label))
+    Ok((m, SpectrumSource::File { hdu: document_hdu(&doc.source) }, err_label))
 }
 
 #[cfg(test)]
@@ -1022,6 +1025,34 @@ mod tests {
         assert!(parse_wavelength_frame("not_wavelength").unwrap_err().contains("unknown wavelength frame"));
     }
 
+    fn write_csv_document(dir: &tempfile::TempDir, axis: &[f64], flux: &[f32], err: &[f64]) -> String {
+        let mut text = String::from("# flux_unit: Jy\nchannel,wavelength_vacuum_um,flux,flux_unit,err,dq\n");
+        for (i, ((w, f), e)) in axis.iter().zip(flux).zip(err).enumerate() {
+            text.push_str(&format!("{},{},{},Jy,{},0\n", i, w, f64::from(*f), e));
+        }
+        let path = dir.path().join("exported_spectrum.csv");
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_csv_spectrum_is_measured_with_its_err_column_and_refuses_an_hdu() {
+        let dir = tempfile::tempdir().unwrap();
+        let (axis, flux) = centre_arrays(0.05);
+        let n = axis.len();
+        let path = write_csv_document(&dir, &axis, &flux, &vec![DOCUMENT_ERR; n]);
+        let value = measure_line_json(&path, &file_source(), &request(LineModel::Gaussian)).unwrap();
+        assert_eq!(value[RES_SOURCE], serde_json::json!({ "kind": "file", "hdu": null }));
+        assert_eq!(value["err_used"], true);
+        assert_eq!(value[KEY_ERR_SOURCE], "err column (CSV)");
+        assert_eq!(value["flux_unit"], "Jy x um");
+        let flux_err = number(&value, "flux_err");
+        assert!((number(&value, "flux") - EXPECTED_FLUX).abs() < 3.0 * flux_err, "flux {} err {}", value["flux"], flux_err);
+        assert!(notes_of(&value).iter().any(|n| n.contains("CSV file: vacuum wavelengths")), "{:?}", notes_of(&value));
+        let err = measure_line_json(&path, &SpectrumSource::File { hdu: Some(0) }, &request(LineModel::None)).unwrap_err().to_string();
+        assert!(err.contains("HDU 0") && err.contains("CSV"), "{}", err);
+    }
+
     #[test]
     fn a_file_source_deserializes_from_the_frontend_shape_and_echoes_the_file_kind() {
         let explicit: SpectrumSource = serde_json::from_str(r#"{"kind":"file","hdu":2}"#).unwrap();
@@ -1330,5 +1361,147 @@ mod tests {
             assert_relative("scatter error", number(&value, "flux_err"), continuum_sigma * 5.0 * mean_dx, 1e-12);
         }
         GLOBAL_CUBE_CACHE.invalidate(&path);
+    }
+
+    const G395H_X1D: &str = "jw01266-o005_t001_nirspec_g395h-f290lp_x1d.fits";
+    const G395H_BR_ALPHA_GOLDEN: &str = "line_measure_goldens/jw01266_g395h_br_alpha.json";
+    const BR_ALPHA_LINE: (usize, usize) = (1769, 1786);
+    const BR_ALPHA_CONTINUUM: ContinuumWindows = ((1750, 1762), (1789, 1800));
+    const G395H_DETECTOR_GAP: (usize, usize) = (1814, 1871);
+    const G395H_GAP_CHANNELS: usize = 58;
+    const ACROSS_GAP_LINE: (usize, usize) = (1801, 1900);
+    const ACROSS_GAP_CONTINUUM: ContinuumWindows = ((1750, 1762), (1905, 1920));
+
+    struct X1dArrays {
+        axis: Vec<f64>,
+        flux: Vec<f32>,
+        err: Vec<f64>,
+        excluded: Vec<bool>,
+    }
+
+    fn g395h_path() -> String {
+        crate::core::astrometry::gwcs::test_support::documents_fits_dir().join(G395H_X1D).to_str().unwrap().to_string()
+    }
+
+    fn g395h_arrays(path: &str) -> X1dArrays {
+        let x1d = crate::core::analysis::x1d::read_x1d_spectrum(path, None).unwrap();
+        assert_eq!(x1d.dq_table, crate::core::imaging::dq_flags::DqTable::Jwst);
+        X1dArrays {
+            flux: x1d.flux.iter().map(|&v| v as f32).collect(),
+            err: x1d.flux_error.expect("the G395H x1d has a FLUX_ERROR column"),
+            excluded: x1d.dq.expect("the G395H x1d has a DQ column").iter().map(|&bits| bits & DO_NOT_USE as u32 != 0).collect(),
+            axis: x1d.wavelength_um,
+        }
+    }
+
+    fn g395h_request(line: (usize, usize), continuum: ContinuumWindows, model: LineModel) -> LineRequest {
+        LineRequest {
+            z0: line.0,
+            z1: line.1,
+            continuum: Some(continuum),
+            rest_um: None,
+            convention: VelocityConvention::Optical,
+            model,
+            velocity_shift_kms: None,
+        }
+    }
+
+    fn considered_channels(line: (usize, usize), continuum: ContinuumWindows) -> Vec<usize> {
+        let mut channels: Vec<usize> =
+            (line.0..=line.1).chain(continuum.0 .0..=continuum.0 .1).chain(continuum.1 .0..=continuum.1 .1).collect();
+        channels.sort_unstable();
+        channels.dedup();
+        channels
+    }
+
+    fn bad_err_channels(err: &[f64], channels: &[usize]) -> Vec<usize> {
+        channels.iter().copied().filter(|&z| !(err[z].is_finite() && err[z] > 0.0)).collect()
+    }
+
+    #[test]
+    #[ignore = "needs ASTROBURST_DOCUMENTS_FITS_DIR with the jw01266 G395H x1d and its local Br-alpha golden"]
+    fn the_g395h_x1d_file_source_reproduces_the_br_alpha_golden_and_measures_it_with_its_flux_error() {
+        let path = g395h_path();
+        let source = SpectrumSource::File { hdu: None };
+        let request = g395h_request(BR_ALPHA_LINE, BR_ALPHA_CONTINUUM, LineModel::Gaussian);
+        let golden = read_golden(
+            &crate::core::astrometry::gwcs::test_support::documents_fits_dir().join(G395H_BR_ALPHA_GOLDEN),
+        );
+
+        let plain = MeasureOptions { use_err: false, use_dq: false, wavelength_frame: None };
+        let unweighted = without_elapsed(measure_line_json_with(&path, &source, &request, &plain).unwrap());
+        let mut diffs = golden_diffs(&without_document_keys(golden.clone()), &without_document_keys(unweighted.clone()));
+        diffs.extend(unweighted_diffs(&unweighted, 0));
+        assert!(diffs.is_empty(), "{}", diffs.join("\n"));
+
+        let value = measure_line_json(&path, &source, &request).unwrap();
+        assert_eq!(value[RES_SOURCE], serde_json::json!({ "kind": "file", "hdu": 1 }));
+        assert_eq!(value["err_used"], true);
+        assert_eq!(value[KEY_ERR_SOURCE], "FLUX_ERROR column (HDU 1)");
+        assert_eq!(value["flux_unit"], "Jy x um");
+        assert_total_is_the_quadrature_of_the_terms(&value);
+
+        let x1d = g395h_arrays(&path);
+        let considered = considered_channels(BR_ALPHA_LINE, BR_ALPHA_CONTINUUM);
+        assert_eq!(value["n_bad_err"], bad_err_channels(&x1d.err, &considered).len());
+        assert_eq!(value["n_dq_excluded"], considered.iter().filter(|&&z| x1d.excluded[z]).count());
+        assert_eq!(value["n_nonfinite"], considered.iter().filter(|&&z| !x1d.flux[z].is_finite()).count());
+        assert_eq!((value["n_bad_err"].as_u64(), value["n_dq_excluded"].as_u64()), (Some(0), Some(0)));
+
+        let same_arrays = measure_line_with_errors(
+            &x1d.axis,
+            &x1d.flux,
+            Some(&x1d.err),
+            Some(&x1d.excluded),
+            BR_ALPHA_LINE,
+            Some(BR_ALPHA_CONTINUUM),
+            LineModel::Gaussian,
+        )
+        .unwrap();
+        assert_eq!(number(&value, "flux").to_bits(), same_arrays.flux.to_bits());
+        assert_eq!(number(&value, "centroid").to_bits(), same_arrays.centroid.to_bits());
+        assert_eq!(number(&value, "flux_err").to_bits(), same_arrays.flux_err.to_bits());
+        let scatter_error = number(&golden, "flux_err");
+        assert!(
+            (number(&value, "flux") - number(&golden, "flux")).abs() < scatter_error,
+            "weighted flux {} against the unweighted golden {} +- {}",
+            value["flux"],
+            golden["flux"],
+            scatter_error
+        );
+    }
+
+    #[test]
+    #[ignore = "needs ASTROBURST_DOCUMENTS_FITS_DIR with the jw01266 G395H x1d"]
+    fn a_g395h_line_range_across_the_detector_gap_excludes_and_counts_its_58_zero_error_channels() {
+        let path = g395h_path();
+        let x1d = g395h_arrays(&path);
+        let every_channel: Vec<usize> = (0..x1d.err.len()).collect();
+        let gap: Vec<usize> = (G395H_DETECTOR_GAP.0..=G395H_DETECTOR_GAP.1).collect();
+        assert_eq!(bad_err_channels(&x1d.err, &every_channel), gap);
+        assert_eq!(gap.len(), G395H_GAP_CHANNELS);
+        assert!(gap.iter().all(|&z| x1d.excluded[z]));
+
+        let source = SpectrumSource::File { hdu: None };
+        let request = g395h_request(ACROSS_GAP_LINE, ACROSS_GAP_CONTINUUM, LineModel::None);
+        let line_channels = ACROSS_GAP_LINE.1 - ACROSS_GAP_LINE.0 + 1;
+        let value = measure_line_json(&path, &source, &request).unwrap();
+        assert_eq!(value["err_used"], true);
+        assert_eq!(value["n_bad_err"], G395H_GAP_CHANNELS);
+        assert_eq!(value["n_dq_excluded"], G395H_GAP_CHANNELS);
+        assert_eq!(value["n_nonfinite"], 0);
+        assert_eq!(value["n_channels"], line_channels - G395H_GAP_CHANNELS);
+        let excluded_note = format!(
+            "excluded among the {} line and continuum channels: {} DQ-flagged, 0 with non-finite flux, {} with ERR <= 0 or not finite; a channel can count under several reasons",
+            considered_channels(ACROSS_GAP_LINE, ACROSS_GAP_CONTINUUM).len(),
+            G395H_GAP_CHANNELS,
+            G395H_GAP_CHANNELS
+        );
+        assert!(notes_of(&value).contains(&excluded_note), "{:?}", notes_of(&value));
+
+        let plain = MeasureOptions { use_err: false, use_dq: false, wavelength_frame: None };
+        let unweighted = measure_line_json_with(&path, &source, &request, &plain).unwrap();
+        assert_eq!(unweighted["n_channels"], line_channels);
+        assert_eq!((unweighted["n_bad_err"].as_u64(), unweighted["n_dq_excluded"].as_u64()), (Some(0), Some(0)));
     }
 }

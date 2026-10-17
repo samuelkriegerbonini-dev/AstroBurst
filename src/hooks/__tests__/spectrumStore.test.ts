@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SpectrumStore } from "../useSpectrumStore";
-import type { RegionSpectrum } from "../../shared/types/cube";
+import type { ContinuumWindows, RegionSpectrum } from "../../shared/types/cube";
 import type { SpectrumSource } from "../../shared/types/spectral";
 
 const extracted: RegionSpectrum = {
@@ -13,6 +13,16 @@ const extracted: RegionSpectrum = {
   unit: "",
   bg_subtracted: false,
   flux_jy: null,
+  err: null,
+  err_scaled: null,
+  mean_err: null,
+  used_weight: [28.27, 28.27, 28.27],
+  err_source: "none",
+  bg_err_per_pixel: null,
+  flux_jy_err: null,
+  n_dq_excluded: null,
+  noise_factor: null,
+  notes: [],
   elapsed_ms: 1,
 };
 const smallCircle: SpectrumSource = { kind: "region", shape: { shape: "circle", x: 20, y: 20, r: 3 }, background: null };
@@ -40,6 +50,31 @@ describe("SpectrumStore region source", () => {
     store.commitRegion(extracted, smallCircle);
     store.reset();
     expect(store.getSnapshot().regionSource).toBeNull();
+  });
+
+  it("keeps the continuum windows the region spectrum was asked with, and forgets them with the region", () => {
+    const store = new SpectrumStore();
+    const windows: ContinuumWindows = [
+      [0, 4],
+      [35, 39],
+    ];
+    expect(store.getSnapshot().regionContinuum).toBeNull();
+    store.commitRegion(extracted, smallCircle, windows);
+    expect(store.getSnapshot().regionContinuum).toEqual(windows);
+    store.beginRegion();
+    store.failRegion("boom");
+    expect(store.getSnapshot().regionContinuum).toEqual(windows);
+    store.commitRegion(extracted, smallCircle);
+    expect(store.getSnapshot().regionContinuum).toBeNull();
+    store.commitRegion(extracted, smallCircle, windows);
+    store.begin({ x: 1, y: 1 });
+    expect(store.getSnapshot().regionContinuum).toBeNull();
+    store.commitRegion(extracted, smallCircle, windows);
+    store.commit({ x: 1, y: 1, values: [1, 2, 3], wavelengths: [] }, 5);
+    expect(store.getSnapshot().regionContinuum).toBeNull();
+    store.commitRegion(extracted, smallCircle, windows);
+    store.clearRegion();
+    expect(store.getSnapshot().regionContinuum).toBeNull();
   });
 
   it("keeps the source of the plotted spectrum while a new region extraction is running", () => {

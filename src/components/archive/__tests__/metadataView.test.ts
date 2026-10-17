@@ -35,8 +35,14 @@ describe("metadataSections", () => {
     expect(section("pointing", sections).rows).toEqual([
       { label: "Search position", value: '274.68800 -13.79200 (SIMBAD "M 16")', copy: "274.68800 -13.79200", note: null },
       { label: "Sep (MAST)", value: "0.449", copy: null, note: "unit and meaning differ by mission" },
-      { label: "s_region", value: sRegionText(jw.sRegion ?? ""), copy: jw.sRegion, note: "Footprint on the image arrives in v1.1" },
+      { label: "s_region", value: sRegionText(jw.sRegion ?? ""), copy: jw.sRegion, note: "Draw it on the open image with Show on, above" },
     ]);
+  });
+
+  it("puts the projected footprint summary on the s_region row", () => {
+    const summary = "1 polygon, 3 vertices, cone 274.7347 -13.8672 r 0.62', overlaps a.fits";
+    const shown = metadataSections({ row: jw, resolved: null, searchPosition: null, footprintNote: summary });
+    expect(section("pointing", shown).rows.find((r) => r.label === "s_region")?.note).toBe(summary);
   });
 
   it("converts a verified separation to arcminutes", () => {

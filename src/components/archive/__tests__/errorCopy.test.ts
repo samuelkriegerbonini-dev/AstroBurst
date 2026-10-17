@@ -314,3 +314,23 @@ describe("errorDetails", () => {
     ]);
   });
 });
+
+describe("download error codes", () => {
+  it("place each download refusal on its item with Rust's wording", () => {
+    const cases: [MastError["code"], string, string][] = [
+      ["mast_size_mismatch", "MAST listed 3145728 bytes, the server sent 3145729", "size mismatch"],
+      ["mast_busy", "this file is already downloading", "busy"],
+      ["mast_stale", "MAST has a newer version of this file", "newer at MAST"],
+      ["mast_quota", "the MAST download quota (20 GB) would be exceeded", "quota"],
+      ["mast_uri_refused", "Roman downloads are not enabled yet", "not downloadable"],
+      ["mast_peek_incomplete", "no science header within the first 524288 bytes (7 ranges)", "header not reached"],
+    ];
+    for (const [code, message, short] of cases) {
+      expect(errorView(err(code, message), { surface: "products" })).toEqual({ placement: "item", text: `${message}.`, short });
+      const slot = slotError(err(code, message), { surface: "list" });
+      expect(slot?.code).toBe(code);
+      expect(slot?.meta).toBe(message);
+      expect(slot?.retry).toBe(code === "mast_size_mismatch");
+    }
+  });
+});

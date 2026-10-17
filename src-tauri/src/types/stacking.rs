@@ -251,15 +251,16 @@ pub struct FrameAlignment {
     pub method: String,
     pub confidence: Option<f64>,
     pub included: bool,
+    pub rejection: Option<String>,
 }
 
 impl FrameAlignment {
     pub fn reference() -> Self {
-        Self { method: "reference".into(), confidence: None, included: true }
+        Self { method: "reference".into(), confidence: None, included: true, rejection: None }
     }
 
     pub fn unaligned() -> Self {
-        Self { method: "none".into(), confidence: None, included: true }
+        Self { method: "none".into(), confidence: None, included: true, rejection: None }
     }
 }
 

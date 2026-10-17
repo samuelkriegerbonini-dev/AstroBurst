@@ -1,0 +1,27 @@
+# file: jw_test_x1d.fits
+# image: jw_test_x1d.fits (spectrum file, read from disk)
+# source: spectrum file, HDU 1; EXTRACT1D table in HDU 1; region: -; text: -; background: none
+# sky_frame: ICRS
+# sky_ra_deg:
+# sky_dec_deg:
+# sky_note: spectrum file: no sky position is read for a 1D spectrum
+# stored_frame: not stated
+# velocity_frame: as stored; shift_kms: 0; method: -; the shift is applied to velocity columns only; wavelength_vacuum_um is as stored
+# view: sum
+# flux_unit: Jy
+# flux_jy_note: spectrum file: flux exported in its own unit (flux_unit)
+# dq_table: jwst
+# exported_utc: 2026-10-17T12:00:00.000Z
+channel,wavelength_vacuum_um,vacuum_wavelength_um,flux,flux_unit,err,dq
+0,1.8,1.8,0.0123,Jy,0.0001,0
+1,1.8013700000000001,1.8013700000000001,0.0123456,Jy,0.000101,0
+2,1.80274,1.80274,0.0123912,Jy,0.000102,0
+3,1.80411,1.80411,0.0124368,Jy,0.00010300000000000001,1
+4,1.80548,1.80548,0.0124824,Jy,0.00010400000000000001,0
+5,1.80685,1.80685,,Jy,0.000105,0
+6,1.80822,1.80822,0.0125736,Jy,0.000106,0
+7,1.80959,1.80959,0.0126192,Jy,,0
+8,1.8109600000000001,1.8109600000000001,0.0126648,Jy,0.00010800000000000001,0
+9,1.81233,1.81233,0.0127104,Jy,0.000109,2147483648
+10,1.8137,1.8137,0.012756,Jy,0.00011,2
+11,1.81507,1.81507,0.0128016,Jy,0.000111,0

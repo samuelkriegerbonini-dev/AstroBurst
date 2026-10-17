@@ -1,15 +1,18 @@
 import "./archive.css";
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import QueryBar from "./QueryBar";
 import ResultsRegion from "./ResultsRegion";
 import DetailPane from "./DetailPane";
 import LargeView from "./LargeView";
 import ArchiveToast from "./ArchiveToast";
 import ArchiveLiveRegion from "./ArchiveLiveRegion";
+import DownloadQueue from "./DownloadQueue";
 import { archiveStore, useArchiveState } from "./state/archiveStore";
 import { archiveController } from "./state/archiveController";
 import { selectedRow } from "./state/archiveReducer";
-import { useAroundTarget, type WorkspaceFileRef } from "./state/useAroundTarget";
+import { useAroundTarget, useWcsCheck, type WorkspaceFileRef } from "./state/useAroundTarget";
+import { footprintImage, useDisplayedImageRef } from "./state/displayedImage";
+import { footprintsController, hoveredDataset } from "./state/footprintsController";
 import { archiveKeyCommand, isTextEntry } from "./logic/archiveKeys";
 import { innermostLayer } from "./logic/escLayers";
 import { isNarrow } from "./logic/detailLayout";
@@ -41,6 +44,17 @@ export default function ArchiveRoot({ active, workspaceFile, onSwitchToWorkspace
   useEffect(() => {
     ctl.setActive(active);
   }, [ctl, active]);
+
+  const displayed = useDisplayedImageRef();
+  const image = useMemo(() => footprintImage(workspaceFile, displayed), [workspaceFile, displayed]);
+  const wcs = useWcsCheck(image?.projectionPath ?? null);
+  useEffect(() => {
+    void footprintsController.setWorkspace(image, wcs);
+  }, [image, wcs]);
+
+  useEffect(() => {
+    footprintsController.focus(state.selectedId);
+  }, [state.selectedId]);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -192,12 +206,13 @@ export default function ArchiveRoot({ active, workspaceFile, onSwitchToWorkspace
   return (
     <div ref={rootRef} className="ab-archive" data-active={active ? "true" : "false"}>
       <QueryBar state={state} ctl={ctl} queryRef={queryRef} onLeaveQuery={focusResults} />
-      <div className="ab-archive-body">
+      <div className="ab-archive-body" onMouseOver={(e) => footprintsController.hover(hoveredDataset(e.target))} onMouseLeave={() => footprintsController.hover(null)}>
         <ResultsRegion state={state} ctl={ctl} around={around} onEditQuery={focusQuery} onSwitchToWorkspace={onSwitchToWorkspace} onOpenDetail={openDetail} />
         <DetailPane state={state} ctl={ctl} />
       </div>
       <LargeView state={state} ctl={ctl} onFocusQuery={focusQuery} />
       <ArchiveToast toast={state.toast} ctl={ctl} />
+      <DownloadQueue />
       <ArchiveLiveRegion live={state.live} />
     </div>
   );

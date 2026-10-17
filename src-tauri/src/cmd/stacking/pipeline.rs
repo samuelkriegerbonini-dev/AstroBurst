@@ -9,7 +9,7 @@ use crate::core::imaging::calibration_pipeline::{
     BatchPipelineResult, BatchPipelineStats, BatchStackConfig, CalibrationMasters, ChannelInput,
     DQ_COSMETIC_WARNING,
 };
-use crate::core::imaging::cosmetic::CosmeticConfig;
+use crate::core::imaging::cosmetic::{refuse_xtrans_cosmetic, CosmeticConfig};
 use crate::core::stacking::calibration::load_fits_image;
 use crate::core::stacking::cfa_guard::{refuse_cfa_frames, CfaStep};
 use crate::core::stacking::frame_cards::{read_frame_cards, FrameCards};
@@ -426,6 +426,12 @@ fn run_pipeline_request_with_memory(
         .iter()
         .map(|ch| ch.paths.iter().map(|p| read_frame_cards(p)).collect())
         .collect();
+    if let Some(cosmetic) = &request.cosmetic {
+        for card in channel_cards.iter().flatten() {
+            refuse_xtrans_cosmetic(cosmetic.cfa, card.cfa_pattern.as_ref())
+                .map_err(|e| format!("{}: {:#}", card.path, e))?;
+        }
+    }
     let mut warnings = pipeline_warnings(&request.channels, cosmetic_enabled);
     for (ch, cards) in request.channels.iter().zip(&channel_cards) {
         warnings.extend(
@@ -1063,6 +1069,53 @@ mod tests {
         let mono = run_pipeline_request(request(Some(false)), &out_dir(&dir), Some("mono")).unwrap();
         let replaced = master_pixel(&mono, 4, 4);
         assert!((replaced - 100.0).abs() < 1e-3, "an explicit cfa=false keeps the stride-1 median: {replaced}");
+    }
+
+    #[test]
+    fn pipeline_cosmetic_refuses_xtrans_lights_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set("BAYERPAT", format!("'{}'", crate::core::imaging::cfa::test_fixtures::XTRANS_LAYOUT));
+        let mut lights = write_frames(&dir, "plain", 1, 500.0);
+        let xtrans = dir.path().join("xtrans_light.fits").to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&xtrans, &Array2::from_elem((12, 12), 500.0f32), Some(&header)).unwrap();
+        lights.push(xtrans);
+        let request = |cfa: Option<bool>, cosmetic_on: bool| PipelineRequest {
+            channels: vec![ChannelFilesInput { label: "L".into(), paths: lights.clone() }],
+            dark_paths: vec![],
+            flat_paths: vec![],
+            bias_paths: vec![],
+            flat_dark_paths: vec![],
+            sigma_low: None,
+            sigma_high: None,
+            normalize: Some(false),
+            align: Some(false),
+            rejection: Some("none".into()),
+            combine: None,
+            cosmetic: cosmetic_on.then(|| CosmeticConfig {
+                cfa,
+                defects: vec![crate::core::imaging::cosmetic::Defect::Point { x: 4, y: 4 }],
+                use_master_dark: false,
+                auto_hot_sigma: None,
+                auto_cold_sigma: None,
+                ..Default::default()
+            }),
+            dark_optimize: false,
+        };
+
+        for cfa in [None, Some(true)] {
+            let out = out_dir(&dir);
+            let err = run_pipeline_request(request(cfa, true), &out, Some("xtrans")).unwrap_err();
+            for needle in ["xtrans_light.fits", "X-Trans", "debayered channels"] {
+                assert!(err.contains(needle), "{cfa:?}: missing {needle:?} in {err}");
+            }
+            assert!(!err.contains("plain0.fits"), "{err}");
+            assert!(!std::path::Path::new(&out).exists(), "the output dir was created before the refusal");
+        }
+        let mono = run_pipeline_request(request(Some(false), true), &out_dir(&dir), Some("mono")).unwrap();
+        assert_eq!(mono[RES_MASTERS].as_array().map(|m| m.len()), Some(1));
+        let plain = run_pipeline_request(request(None, false), &out_dir(&dir), Some("plain")).unwrap();
+        assert_eq!(plain[RES_MASTERS].as_array().map(|m| m.len()), Some(1));
     }
 
     #[test]

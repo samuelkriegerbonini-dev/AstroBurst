@@ -15,7 +15,7 @@ import type { LineFitRun } from "./lineFit";
 import { regionSkyOf } from "./regionCsv";
 import { isExcludeRegion } from "./regionExclude";
 import { firstSurfaceBrightness } from "./sbProfile";
-import type { ComparisonCsvInput } from "./spectrumCompare";
+import { hasDocumentEntry, type ComparisonCsvInput } from "./spectrumCompare";
 import { spectrumExportSummary, type SpectrumExportInput } from "./spectrumExport";
 
 export const MAX_LOG_ENTRIES = 5000;
@@ -50,6 +50,7 @@ const SUMMARY_DIGITS = 6;
 const NO_STATISTICS_NOTE = "no statistics";
 export const EXCLUDE_ROW_NOTE = "exclude region: measured on its own pixels, without the exclude mask";
 const LOADED_CUBE_IMAGE = "loaded cube";
+const SPECTRUM_FILE_IMAGE = "spectrum file";
 const LOADED_FILE_IMAGE = "loaded file";
 const ORIGINAL_IMAGE = "original";
 const PARAM_PREFIX = "p_";
@@ -205,7 +206,7 @@ export function spectrumUnitOf(fluxUnit: string, axisUnit: string): string | nul
 
 export function lineUnitNote(fluxUnit: string, axisUnit: string): string {
   const spectrumUnit = spectrumUnitOf(fluxUnit, axisUnit) ?? "the flux unit without the axis factor";
-  return `flux, flux_err in ${fluxUnit}; peak, continuum_level, continuum_sigma, fit_amplitude in the spectrum unit (${spectrumUnit}); continuum_slope in the spectrum unit per ${axisUnit}; centroid, sigma, fwhm, equivalent_width, fit_centre, fit_sigma, fit_centre_err, fit_sigma_err in ${axisUnit}; centroid_kms, sigma_kms, fwhm_kms in km/s`;
+  return `flux, flux_err, flux_err_pixel, flux_err_level, flux_err_slope in ${fluxUnit}; peak, continuum_level, continuum_sigma, fit_amplitude in the spectrum unit (${spectrumUnit}); continuum_slope in the spectrum unit per ${axisUnit}; centroid, sigma, fwhm, equivalent_width, fit_centre, fit_sigma, fit_centre_err, fit_sigma_err in ${axisUnit}; centroid_kms, sigma_kms, fwhm_kms in km/s`;
 }
 
 export interface RadialLogRequest {
@@ -669,14 +670,20 @@ export function skySeparationEntry(
   };
 }
 
-export function lineEntry(filePath: string, result: LineMeasurement, model: LineModel): MeasurementLogDraft {
+export function lineEntry(
+  filePath: string,
+  result: LineMeasurement,
+  model: LineModel,
+  dqRequested: boolean | null = null,
+): MeasurementLogDraft {
   const velocity = result.velocity;
   const fit = result.fit;
+  const terms = result.flux_err_terms;
   return {
     kind: "line",
     file: fileNameOf(filePath),
-    image: LOADED_CUBE_IMAGE,
-    dq: "not_applied",
+    image: result.source.kind === "file" ? SPECTRUM_FILE_IMAGE : LOADED_CUBE_IMAGE,
+    dq: dqRequested === null ? "not_applied" : dqHandlingOf(dqRequested, result.n_dq_excluded > 0),
     unit: result.flux_unit,
     source: JSON.stringify(result.source),
     params: {
@@ -693,10 +700,18 @@ export function lineEntry(filePath: string, result: LineMeasurement, model: Line
       convention: velocity?.convention ?? null,
       shift_applied_kms: finiteOrNull(velocity?.shift_applied_kms),
       axis_frame: velocity?.axis_frame ?? null,
+      err_used: result.err_used,
+      err_source: result.err_source,
     },
     values: {
       flux: finiteOrNull(result.flux),
       flux_err: finiteOrNull(result.flux_err),
+      flux_err_pixel: finiteOrNull(terms?.pixel),
+      flux_err_level: finiteOrNull(terms?.level),
+      flux_err_slope: finiteOrNull(terms?.slope),
+      n_dq_excluded: result.n_dq_excluded,
+      n_nonfinite: result.n_nonfinite,
+      n_bad_err: result.n_bad_err,
       equivalent_width: finiteOrNull(result.equivalent_width),
       centroid: finiteOrNull(result.centroid),
       sigma: finiteOrNull(result.sigma),
@@ -910,16 +925,26 @@ export function crossMatchEntry(
 export function spectrumExportEntry(filePath: string, input: SpectrumExportInput, savedPath: string | null): MeasurementLogDraft {
   const summary = spectrumExportSummary(input);
   const fluxUnit = summary.params.flux_unit;
+  const isFile = input.source.kind === "file";
+  const region = input.source.kind === "region" ? input.region : null;
+  const regionDq = region?.n_dq_excluded ?? null;
+  const dq: DqHandling =
+    isFile && summary.params.dq_column === true
+      ? "reported"
+      : regionDq !== null
+        ? dqHandlingOf(true, regionDq.some((n) => n > 0))
+        : "not_applied";
+  const warning = region?.noise_factor?.warning ?? null;
   return {
     kind: "spectrum_export",
     file: fileNameOf(filePath),
-    image: LOADED_CUBE_IMAGE,
-    dq: "not_applied",
+    image: isFile ? SPECTRUM_FILE_IMAGE : LOADED_CUBE_IMAGE,
+    dq,
     unit: typeof fluxUnit === "string" ? fluxUnit : null,
     source: JSON.stringify(input.source),
-    params: { ...summary.params, saved_path: savedPath },
+    params: { ...summary.params, saved_path: savedPath, ...(isFile ? { document_path: filePath } : {}) },
     values: { ...summary.values },
-    notes: input.pixelFluxJyError !== null ? [input.pixelFluxJyError] : [],
+    notes: [...(input.pixelFluxJyError !== null ? [input.pixelFluxJyError] : []), ...(warning !== null ? [warning] : [])],
   };
 }
 
@@ -927,7 +952,7 @@ export function spectrumCompareEntry(filePath: string, csvInput: ComparisonCsvIn
   return {
     kind: "spectrum_compare",
     file: fileNameOf(filePath),
-    image: LOADED_CUBE_IMAGE,
+    image: hasDocumentEntry(csvInput.entries) ? SPECTRUM_FILE_IMAGE : LOADED_CUBE_IMAGE,
     dq: "not_applied",
     unit: null,
     source: FILE_SOURCE,

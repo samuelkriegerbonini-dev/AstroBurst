@@ -3,6 +3,7 @@ import { Copy, Lock, X } from "lucide-react";
 import PreviewsTab from "./PreviewsTab";
 import MetadataTab from "./MetadataTab";
 import ProductsTab from "./ProductsTab";
+import FootprintToggle from "./FootprintToggle";
 import { detailMode, detailTabOf, imageSetKey, selectedRow, type ArchiveState, type DetailTab } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { detailHeader, tabLabels } from "./logic/detailView";
@@ -153,6 +154,7 @@ export default function DetailPane({ state, ctl }: DetailPaneProps) {
             ) : null}
           </div>
           {header.line ? <p className="ab-mast-detail-line">{header.line}</p> : null}
+          <FootprintToggle row={row} mission={mission.id} />
         </header>
         <div role="tablist" aria-label="Detail" className="ab-mast-detail-tabs" onKeyDown={onTabsKey}>
           {TABS.map((t) => {

@@ -2,8 +2,8 @@ import type {
   CorrectionFrame,
   GaussianFitResult,
   LineMeasurement,
+  LineMeasurementSource,
   SpectralAxisInfo,
-  SpectrumSource,
 } from "../shared/types/spectral";
 import { airToVacuumUm } from "./spectralAxis";
 import { axisValueToPixel, channelAxisValue, type PlotMapping } from "./spectrumRange";
@@ -55,6 +55,7 @@ const AXIS_DECIMALS = 5;
 const MAX_AXIS_DECIMALS = 10;
 const VELOCITY_DECIMALS = 1;
 const UNDECLARED_AXIS_FRAME = "axis frame not declared (no SPECSYS)";
+const NO_ERR_SOURCE = "none: flux error from the continuum scatter";
 
 export const CSV_COLUMNS = [
   "source_kind",
@@ -98,6 +99,15 @@ export const CSV_COLUMNS = [
   "fit_dof",
   "fit_iterations",
   "fit_converged",
+  "source_hdu",
+  "err_used",
+  "err_source",
+  "flux_err_pixel",
+  "flux_err_level",
+  "flux_err_slope",
+  "n_dq_excluded",
+  "n_nonfinite",
+  "n_bad_err",
 ] as const;
 
 function finite(value: number | null | undefined): value is number {
@@ -158,16 +168,22 @@ export function measurementAxisValues(axis: SpectralAxisInfo | null): number[] |
   return axis.kind === "awav" ? axis.values.map(airToVacuumUm) : axis.values;
 }
 
-export function spectrumSourceKey(source: SpectrumSource, view: string): string {
+export function lineMeasurementAxis(axis: SpectralAxisInfo | null, documentMode: boolean): number[] | null {
+  if (!documentMode) return measurementAxisValues(axis);
+  return axis ? axis.values : null;
+}
+
+export function spectrumSourceKey(source: LineMeasurementSource, view: string): string {
   return `${source.kind}:${view}:${JSON.stringify(source)}`;
 }
 
-export function spectrumSourceLabel(source: SpectrumSource): string {
+export function spectrumSourceLabel(source: LineMeasurementSource): string {
   if (source.kind === "pixel") return `pixel (${source.x}, ${source.y})`;
+  if (source.kind === "file") return source.hdu === null ? "spectrum file" : `spectrum file, HDU ${source.hdu}`;
   return `${source.shape.shape} region${source.background ? " with background" : ""}`;
 }
 
-export function runForSource<T extends { key: string }>(run: T | null, source: SpectrumSource | null, view: string): T | null {
+export function runForSource<T extends { key: string }>(run: T | null, source: LineMeasurementSource | null, view: string): T | null {
   return run && source && spectrumSourceKey(source, view) === run.key ? run : null;
 }
 
@@ -275,6 +291,18 @@ export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
       value: `A ${formatQuantity(f.amplitude)} ${PLUS_MINUS} ${formatQuantity(f.amplitude_err)}, c ${formatAxisQuantity(f.centre, f.centre_err)} ${PLUS_MINUS} ${formatQuantity(f.centre_err)}, s ${formatQuantity(f.sigma)} ${PLUS_MINUS} ${formatQuantity(f.sigma_err)} ${unit}, chi2/dof ${formatQuantity(f.chi2)}/${f.dof}, ${f.iterations} it`,
     });
   }
+  rows.push({ label: "Error source", value: m.err_used ? `${m.err_source}, weights 1/ERR^2` : NO_ERR_SOURCE });
+  const terms = m.flux_err_terms;
+  if (terms) {
+    rows.push({
+      label: "Error terms",
+      value: `pixel ${formatQuantity(terms.pixel)}, level ${formatQuantity(terms.level)}, slope ${formatQuantity(terms.slope)} ${m.flux_unit}`,
+    });
+  }
+  rows.push({
+    label: "Excluded channels",
+    value: `${m.n_dq_excluded} DQ-flagged, ${m.n_nonfinite} non-finite flux, ${m.n_bad_err} ERR <= 0 or non-finite`,
+  });
   return rows;
 }
 
@@ -332,6 +360,15 @@ export function lineMeasurementCsv(m: LineMeasurement): string {
     f?.dof ?? null,
     f?.iterations ?? null,
     f?.converged ?? null,
+    s.kind === "file" ? s.hdu : null,
+    m.err_used,
+    m.err_source,
+    m.flux_err_terms?.pixel ?? null,
+    m.flux_err_terms?.level ?? null,
+    m.flux_err_terms?.slope ?? null,
+    m.n_dq_excluded,
+    m.n_nonfinite,
+    m.n_bad_err,
   ];
   return `${CSV_COLUMNS.join(",")}\n${values.map(csvCell).join(",")}`;
 }

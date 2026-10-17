@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const { processFitsFullMock, getFitsExtensionsMock, releaseCubesMock } = vi.hoisted(() => ({
+const { processFitsFullMock, getFitsExtensionsMock, releaseCubesMock, probeSpectrum1dMock } = vi.hoisted(() => ({
   processFitsFullMock: vi.fn(),
   getFitsExtensionsMock: vi.fn(),
   releaseCubesMock: vi.fn(async () => {}),
+  probeSpectrum1dMock: vi.fn(),
 }));
 
 vi.mock("../../services/fits", () => ({
@@ -16,6 +17,7 @@ vi.mock("../../services/header", () => ({
   getFitsExtensions: getFitsExtensionsMock,
 }));
 vi.mock("../../services/cube", () => ({ releaseCubes: releaseCubesMock }));
+vi.mock("../../services/spectrum1d", () => ({ probeSpectrum1d: probeSpectrum1dMock }));
 
 import { fileStore } from "../useFileStore";
 import { ingestOutcome, pathToRelease, releaseCubesOnSwitch, settleIngestFailure } from "../useFileQueue";
@@ -35,6 +37,12 @@ const CUBE_WITH_TABLE_REJECTION =
 
 const PLAIN_REJECTION = "Failed to load C:/d/broken.fits: No such file or directory (os error 2)";
 
+const ONE_D_REJECTION =
+  "Failed to load C:/d/ha_spectrum.fits: HDU 0 (SCI): 1D array, not an image; " +
+  "no HDU in this file holds a 2D image. " +
+  "HDUs: [0] EXTNAME=SCI XTENSION=PRIMARY NAXIS=1 [2048] -- 1D array, not an image; " +
+  "[1] EXTNAME=ERR XTENSION=IMAGE NAXIS=1 [2048] -- 1D array, not an image";
+
 function queued(name: string) {
   fileStore.addFiles([{ name, path: `C:/d/${name}`, size: 1 }]);
   const files = fileStore.getFiles();
@@ -42,15 +50,25 @@ function queued(name: string) {
 }
 
 describe("ingestOutcome", () => {
-  it("routes the real x1d rejection to the table status", () => {
-    expect(ingestOutcome(X1D_REJECTION)).toBe("table");
+  it("routes the real x1d rejection to the spectrum status", () => {
+    expect(ingestOutcome(X1D_REJECTION)).toBe("spectrum");
+  });
+
+  it("routes the 1D array verdict to the spectrum status", () => {
+    expect(ingestOutcome(ONE_D_REJECTION)).toBe("spectrum");
+    expect(ingestOutcome("HDU 0 (PRIMARY): 1D array, not an image; no HDU in this file holds a 2D image. HDUs: []")).toBe("spectrum");
+  });
+
+  it("reads the verdict past a semicolon in the file path", () => {
+    expect(ingestOutcome(X1D_REJECTION.replace("C:/d/jw_x1d.fits", "C:/data/run;2/jw_x1d.fits"))).toBe("spectrum");
+    expect(ingestOutcome(ONE_D_REJECTION.replace("C:/d/ha_spectrum.fits", "C:/data/run;2/ha_spectrum.fits"))).toBe("spectrum");
   });
 
   it("keeps the cube fallback when the EXTRACT1D table only appears in the HDU inventory", () => {
     expect(ingestOutcome(CUBE_WITH_TABLE_REJECTION)).toBe("cube-fallback");
   });
 
-  it("keeps the cube fallback for a non-table error", () => {
+  it("keeps the cube fallback for an ASDF or plain error", () => {
     expect(ingestOutcome(PLAIN_REJECTION)).toBe("cube-fallback");
     expect(ingestOutcome("HDU 1 (ASDF): BINTABLE extension, holds no image pixels")).toBe("cube-fallback");
   });
@@ -61,14 +79,53 @@ describe("settleIngestFailure", () => {
     fileStore.reset();
     processFitsFullMock.mockReset();
     getFitsExtensionsMock.mockReset();
+    probeSpectrum1dMock.mockReset();
   });
 
-  it("lists an x1d as a table without scanning extensions and without counting a failure", async () => {
+  it("lists an x1d as a spectrum with its probe, without scanning extensions and without counting a failure", async () => {
     const file = queued("a_x1d.fits");
+    probeSpectrum1dMock.mockResolvedValue({ kind: "x1d", hdu: 1 });
     await settleIngestFailure(file, X1D_REJECTION);
+    expect(probeSpectrum1dMock).toHaveBeenCalledWith("C:/d/a_x1d.fits");
     expect(getFitsExtensionsMock).not.toHaveBeenCalled();
-    expect(fileStore.getFile(file.id)).toMatchObject({ status: "table", error: X1D_REJECTION });
-    expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 0, tables: 1 });
+    expect(fileStore.getFile(file.id)).toMatchObject({ status: "spectrum", error: null, spectrum: { kind: "x1d", hdu: 1 } });
+    expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 0, spectra: 1 });
+  });
+
+  it("lists a 1D array file as a wcs1d spectrum on the HDU the probe found", async () => {
+    const file = queued("ha_spectrum.fits");
+    probeSpectrum1dMock.mockResolvedValue({ kind: "wcs1d", hdu: 0 });
+    await settleIngestFailure(file, ONE_D_REJECTION);
+    expect(fileStore.getFile(file.id)).toMatchObject({ status: "spectrum", spectrum: { kind: "wcs1d", hdu: 0 } });
+    expect(fileStore.getStats()).toMatchObject({ failed: 0, spectra: 1 });
+  });
+
+  it("reports a probe error as a file error carrying the ingest message and the probe error", async () => {
+    const file = queued("ha_spectrum.fits");
+    probeSpectrum1dMock.mockRejectedValue(new Error("Failed to open C:/d/ha_spectrum.fits"));
+    await settleIngestFailure(file, ONE_D_REJECTION);
+    expect(getFitsExtensionsMock).not.toHaveBeenCalled();
+    expect(fileStore.getFile(file.id)).toMatchObject({
+      status: "error",
+      error:
+        "Failed to load C:/d/ha_spectrum.fits: HDU 0 (SCI): 1D array, not an image; " +
+        "opening it as a 1D spectrum also failed: Failed to open C:/d/ha_spectrum.fits; " +
+        "no HDU in this file holds a 2D image. " +
+        "HDUs: [0] EXTNAME=SCI XTENSION=PRIMARY NAXIS=1 [2048] -- 1D array, not an image; " +
+        "[1] EXTNAME=ERR XTENSION=IMAGE NAXIS=1 [2048] -- 1D array, not an image",
+    });
+    expect(fileStore.getFile(file.id)?.spectrum).toBeUndefined();
+    expect(fileStore.getStats()).toMatchObject({ failed: 1, spectra: 0 });
+  });
+
+  it("falls back to the cube path when the probe finds no spectral axis on the 1D array", async () => {
+    const file = queued("profile.fits");
+    probeSpectrum1dMock.mockResolvedValue(null);
+    getFitsExtensionsMock.mockResolvedValue({ extensions: [] });
+    await settleIngestFailure(file, ONE_D_REJECTION);
+    expect(getFitsExtensionsMock).toHaveBeenCalledWith("C:/d/profile.fits");
+    expect(fileStore.getFile(file.id)).toMatchObject({ status: "error", error: ONE_D_REJECTION });
+    expect(fileStore.getStats()).toMatchObject({ failed: 1, spectra: 0 });
   });
 
   it("still loads the first cube plane of a cube that also carries an EXTRACT1D table", async () => {
@@ -82,17 +139,19 @@ describe("settleIngestFailure", () => {
     });
     processFitsFullMock.mockResolvedValue({ dimensions: [50, 60], elapsed_ms: 1 });
     await settleIngestFailure(file, CUBE_WITH_TABLE_REJECTION);
+    expect(probeSpectrum1dMock).not.toHaveBeenCalled();
     expect(processFitsFullMock).toHaveBeenCalledWith(`${file.path}#hdu=1`);
     expect(fileStore.getFile(file.id)?.status).toBe("done");
-    expect(fileStore.getStats()).toMatchObject({ done: 1, failed: 0, tables: 0 });
+    expect(fileStore.getStats()).toMatchObject({ done: 1, failed: 0, spectra: 0 });
   });
 
   it("reports a plain failure as an error when no cube plane exists", async () => {
     const file = queued("broken.fits");
     getFitsExtensionsMock.mockResolvedValue({ extensions: [] });
     await settleIngestFailure(file, PLAIN_REJECTION);
+    expect(probeSpectrum1dMock).not.toHaveBeenCalled();
     expect(fileStore.getFile(file.id)).toMatchObject({ status: "error", error: PLAIN_REJECTION });
-    expect(fileStore.getStats()).toMatchObject({ done: 0, failed: 1, tables: 0 });
+    expect(fileStore.getStats()).toMatchObject({ done: 0, failed: 1, spectra: 0 });
   });
 });
 

@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { WriteSolvedWcsResult } from "../../../shared/types/astrometry";
 import { SOLVED_WCS_LABEL, solvedWcsFor } from "../../../utils/solvedWcs";
+import { targetProjectionPath } from "../../../utils/skyList";
 
 interface CapturedPanelProps {
   filePath?: string | null;
@@ -11,13 +12,21 @@ interface CapturedPanelProps {
   onWcsWritten?: (result: WriteSolvedWcsResult) => void;
 }
 
-const { captured, publishProcessed } = vi.hoisted(() => ({
+interface SkyPanelProps {
+  filePath: string | null;
+  measurePath?: string | null;
+}
+
+const { captured, publishProcessed, skyPanels, measureOverride } = vi.hoisted(() => ({
   captured: { props: null as CapturedPanelProps | null },
   publishProcessed: vi.fn(),
+  skyPanels: { catalog: null as SkyPanelProps | null, targets: null as SkyPanelProps | null },
+  measureOverride: { value: {} as Record<string, unknown> },
 }));
 
 const STACK_PATH = "/out/stack.fits";
 const FRAME_PATH = "/data/frame1.fits";
+const X1D_PATH = "/data/jw01266-o005_t001_nirspec_g395h-f290lp_x1d.fits";
 
 vi.mock("../../../hooks/useAnalysisMeasure", () => ({
   useAnalysisMeasure: () => ({
@@ -33,6 +42,7 @@ vi.mock("../../../hooks/useAnalysisMeasure", () => ({
     fileKey: "file-key",
     detectionScope: `image:${STACK_PATH}`,
     starsOnMeasuredImage: true,
+    ...measureOverride.value,
   }),
 }));
 vi.mock("../../../hooks/useAnalysisTarget", () => ({
@@ -50,8 +60,18 @@ vi.mock("../../../hooks/useStarDetectionStore", () => ({
 vi.mock("../../../services/analysis", () => ({ detectStars: async () => null, detectStarsComposite: async () => null }));
 vi.mock("../SectionChips", () => ({ default: () => null }));
 vi.mock("../ObservationGeometryPanel", () => ({ default: () => null }));
-vi.mock("../CatalogPanel", () => ({ default: () => null }));
-vi.mock("../TargetsPanel", () => ({ default: () => null }));
+vi.mock("../CatalogPanel", () => ({
+  default: (props: SkyPanelProps) => {
+    skyPanels.catalog = props;
+    return null;
+  },
+}));
+vi.mock("../TargetsPanel", () => ({
+  default: (props: SkyPanelProps) => {
+    skyPanels.targets = props;
+    return null;
+  },
+}));
 vi.mock("../PlateSolvePanel", () => ({
   default: (props: CapturedPanelProps) => {
     captured.props = props;
@@ -110,5 +130,31 @@ describe("AstrometryTool plate solve target", () => {
     });
     expect(solvedWcsFor(STACK_PATH)).toBe("/out/stack_wcs_spcc.fits");
     expect(solvedWcsFor(FRAME_PATH)).toBeNull();
+  });
+});
+
+describe("AstrometryTool catalog and targets panels", () => {
+  afterEach(() => {
+    measureOverride.value = {};
+    skyPanels.catalog = null;
+    skyPanels.targets = null;
+  });
+
+  it("gives them no file and no projection for a selected 1D spectrum, which has no image to project on", async () => {
+    measureOverride.value = { effectivePath: null, regionKey: X1D_PATH, filePath: X1D_PATH, measureKey: null, detectionScope: "image:" };
+    await renderTool();
+    for (const panel of [skyPanels.catalog, skyPanels.targets]) {
+      expect(panel).not.toBeNull();
+      expect(panel?.filePath).toBeNull();
+      expect(targetProjectionPath(panel?.filePath ?? null, panel?.measurePath ?? null)).toBeNull();
+    }
+  });
+
+  it("keeps the selected file as their identity and projects through the measured image (control)", async () => {
+    await renderTool();
+    for (const panel of [skyPanels.catalog, skyPanels.targets]) {
+      expect(panel?.filePath).toBe(FRAME_PATH);
+      expect(panel?.measurePath).toBe(STACK_PATH);
+    }
   });
 });

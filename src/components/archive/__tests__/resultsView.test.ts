@@ -32,6 +32,7 @@ function positionQuery(radiusArcmin = 3, over: Partial<MastQuery> = {}): MastQue
     program: null,
     datasetId: null,
     filters: { level: "combined" },
+    preset: null,
     sort: [],
     offset: 0,
     limit: 200,

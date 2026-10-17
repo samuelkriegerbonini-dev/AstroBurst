@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useId, useMemo, memo } from "react";
-import { Activity, BarChart3, CircleDot, Crosshair, Layers } from "lucide-react";
+import { Activity, BarChart3, CircleDot, Crosshair, FileText, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import LineMeasurementSection from "./LineMeasurementSection";
 import LineFitSection from "./LineFitSection";
@@ -50,6 +50,7 @@ import {
 } from "../../hooks/useSpectrumStore";
 import type {
   CollapseRangeMode,
+  CollapseRangeResult,
   ContinuumWindows,
   CubeDims,
   LineFitComponents,
@@ -64,6 +65,7 @@ import type { Region, RegionShape } from "../../shared/types/regions";
 import type {
   CorrectionFrame,
   LineMeasurement,
+  LineMeasurementSource,
   LineModel,
   RadialVelocityCorrectionResult,
   SpectralAxisInfo,
@@ -72,13 +74,24 @@ import type {
   VelocityConvention,
 } from "../../shared/types/spectral";
 import {
+  lineMeasurementAxis,
   lineOverlayPolylines,
-  measurementAxisValues,
   momentVelocityFrameNote,
   runForSource,
   spectrumSourceKey,
+  spectrumSourceLabel,
   type PlotPoint,
 } from "../../utils/lineMeasure";
+import type { WavelengthFrameChoice } from "../../shared/types/spectrum1d";
+import {
+  AIR_FRAME_FORMULA_NOTE,
+  SPECTRUM_FILE_CORRECTION_NOTE,
+  defaultFrameChoice,
+  documentAxis,
+  documentFrameLine,
+  documentSummary,
+  type SpectrumDocument,
+} from "../../utils/spectrumDocument";
 import { applyCorrectionKms, formatAxis, formatAxisValue } from "../../utils/spectralAxis";
 import { pixelToWorld } from "../../services/astrometry";
 import { shapeCentre } from "../../utils/regionGeometry";
@@ -121,6 +134,18 @@ import {
 import { formatAxisTick } from "../../utils/plotScale";
 import { decimalFieldState } from "../../utils/decimalText";
 import { themeColor } from "../../utils/themeColor";
+import {
+  errPlaneLabel,
+  errorBandExtent,
+  errorBandKind,
+  errorBandLegend,
+  errorBandRuns,
+  noiseFactorStaleNote,
+  regionErrorLine,
+  regionNotesShown,
+  regionViewErrors,
+  type ErrorBandRun,
+} from "../../utils/regionErrors";
 import {
   axisValueToPixel,
   channelAxisValue,
@@ -166,6 +191,8 @@ interface SpectroscopyPanelProps {
   onFramePreview?: (previewUrl: string, frameIndex: number, fitsPath?: string) => void;
   onCubeResult?: (result: CubeResult) => void;
   publishGate: FramePublishGate;
+  documentMode?: boolean;
+  spectrumDocument?: SpectrumDocument | null;
 }
 
 type BrushTarget = "range" | "left" | "right";
@@ -192,6 +219,54 @@ function strokeDashed(ctx: CanvasRenderingContext2D, points: PlotPoint[], color:
   ctx.moveTo(points[0].x, points[0].y);
   for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
   ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function traceBand(ctx: CanvasRenderingContext2D, run: ErrorBandRun, toPx: (x: number) => number, toY: (y: number) => number) {
+  ctx.moveTo(toPx(run.x[0]), toY(run.upper[0]));
+  for (let i = 1; i < run.x.length; i++) ctx.lineTo(toPx(run.x[i]), toY(run.upper[i]));
+  for (let i = run.x.length - 1; i >= 0; i--) ctx.lineTo(toPx(run.x[i]), toY(run.lower[i]));
+  ctx.closePath();
+}
+
+function fillBand(
+  ctx: CanvasRenderingContext2D,
+  runs: ErrorBandRun[],
+  toPx: (x: number) => number,
+  toY: (y: number) => number,
+  color: string,
+) {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  for (const run of runs) {
+    ctx.beginPath();
+    traceBand(ctx, run, toPx, toY);
+    if (run.x.length > 1) ctx.fill();
+    else ctx.stroke();
+  }
+}
+
+function outlineBand(
+  ctx: CanvasRenderingContext2D,
+  runs: ErrorBandRun[],
+  toPx: (x: number) => number,
+  toY: (y: number) => number,
+  color: string,
+  dash: number[],
+) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.setLineDash(dash);
+  for (const run of runs) {
+    for (const edge of [run.upper, run.lower]) {
+      ctx.beginPath();
+      ctx.moveTo(toPx(run.x[0]), toY(edge[0]));
+      for (let i = 1; i < run.x.length; i++) ctx.lineTo(toPx(run.x[i]), toY(edge[i]));
+      ctx.stroke();
+    }
+  }
   ctx.setLineDash([]);
 }
 
@@ -257,6 +332,9 @@ const FRAME_MARKER_LABEL_PAD = 3;
 const LINE_LIST_COLOR = "rgba(34,211,238,0.6)";
 const LINE_LIST_PICKED_COLOR = "rgba(34,211,238,1)";
 const LINE_LIST_DASH = [2, 3];
+const ERROR_BAND_FILL = "rgba(34,211,238,0.16)";
+const ERROR_BAND_SCALED_STROKE = "rgba(34,211,238,0.55)";
+const ERROR_BAND_SCALED_DASH = [3, 3];
 const LINE_LIST_FONT = "9px 'JetBrains Mono', monospace";
 const LINE_LIST_LABEL_H = 12;
 const LINE_PICK_DOUBLE_CLICK_GUARD_MS = 400;
@@ -271,20 +349,26 @@ const INPUT_CLASS =
 const SELECT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 focus:border-violet-500/50 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
+const WAVELENGTH_FRAME_CHOICES: readonly WavelengthFrameChoice[] = ["air", "vacuum"];
 
 function SpectroscopyPanel({
   spectrum = [],
   wavelengths = null,
-  pixelCoord = null,
+  pixelCoord: pixelCoordProp = null,
   isLoading = false,
-  cubeDims = null,
+  cubeDims: cubeDimsProp = null,
   elapsed = 0,
   error = null,
   filePath,
   onFramePreview,
   onCubeResult,
   publishGate: framePublishGate,
+  documentMode = false,
+  spectrumDocument = null,
 }: SpectroscopyPanelProps) {
+  const pixelCoord = documentMode ? null : pixelCoordProp;
+  const cubeDims = documentMode ? null : cubeDimsProp;
+  const docSpectrum = documentMode ? (spectrumDocument?.spectrum ?? null) : null;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -303,14 +387,20 @@ function SpectroscopyPanel({
   const inspectKeyRef = useRef<string | null>(null);
   const previousFileRef = useRef<string | undefined>(filePath);
 
-  const { region, regionSource, regionLoading, regionError } = useSpectrum();
+  const spectrumStore = useSpectrum();
+  const region = documentMode ? null : spectrumStore.region;
+  const regionSource = documentMode ? null : spectrumStore.regionSource;
+  const regionContinuum = documentMode ? null : spectrumStore.regionContinuum;
+  const regionLoading = !documentMode && spectrumStore.regionLoading;
+  const regionError = documentMode ? null : spectrumStore.regionError;
   const { processed } = useRenderContext();
   const { file } = useFileContext();
-  const { ramp } = useCubeContext();
+  const { ramp: cubeRamp } = useCubeContext();
+  const ramp = documentMode ? null : cubeRamp;
   const spectral = spectralSectionsVisible(ramp);
   const rampIntegration = useRampIntegration();
   const lastRampIntegrationRef = useRef(rampIntegration);
-  const bunit = file?.result?.header?.BUNIT ?? null;
+  const bunit = documentMode ? (docSpectrum?.flux_unit ?? null) : (file?.result?.header?.BUNIT ?? null);
   const shownFrame = displayedChannel(processed, filePath);
   const regionKey = useRegionKey();
   const regionDoc = useRegionDoc(regionKey);
@@ -321,7 +411,16 @@ function SpectroscopyPanel({
   const exportSeqRef = useRef(0);
   const exportNoticeTimerRef = useRef<number | null>(null);
 
-  const headerAxis = cubeDims?.spectral_axis ?? null;
+  const [frameDoc, setFrameDoc] = useState(docSpectrum);
+  const [frameChoice, setFrameChoice] = useState<WavelengthFrameChoice | null>(() =>
+    defaultFrameChoice(docSpectrum?.wavelength_frame),
+  );
+  if (frameDoc !== docSpectrum) {
+    setFrameDoc(docSpectrum);
+    setFrameChoice(defaultFrameChoice(docSpectrum?.wavelength_frame));
+  }
+  const docAxis = useMemo(() => (docSpectrum ? documentAxis(docSpectrum.axis, frameChoice) : null), [docSpectrum, frameChoice]);
+  const headerAxis = documentMode ? docAxis : (cubeDims?.spectral_axis ?? null);
   const [headerFallbackAxis, setHeaderFallbackAxis] = useState<SpectralAxisInfo | null>(null);
   const [axisError, setAxisError] = useState<string | null>(null);
   const axis = headerAxis ?? headerFallbackAxis;
@@ -346,6 +445,7 @@ function SpectroscopyPanel({
   const [rangeMode, setRangeMode] = useState<CollapseRangeMode>("sum");
   const [rangeLoading, setRangeLoading] = useState(false);
   const [rangeError, setRangeError] = useState<string | null>(null);
+  const [rangeResult, setRangeResult] = useState<CollapseRangeResult | null>(null);
   const [snrText, setSnrText] = useState(String(DEFAULT_SNR));
   const [maskBelow, setMaskBelow] = useState(true);
   const [momentLoading, setMomentLoading] = useState(false);
@@ -358,6 +458,17 @@ function SpectroscopyPanel({
   const [lineError, setLineError] = useState<string | null>(null);
   const [useErr, setUseErr] = useState(true);
   const [useDq, setUseDq] = useState(true);
+  const chooseFrame = useCallback(
+    (choice: WavelengthFrameChoice) => {
+      if (choice === frameChoice) return;
+      lineSeqRef.current++;
+      setLineResult(null);
+      setLineError(null);
+      setLineLoading(false);
+      setFrameChoice(choice);
+    },
+    [frameChoice],
+  );
   const [emissionOnly, setEmissionOnly] = useState(true);
   const [lineFitSnrText, setLineFitSnrText] = useState(String(DEFAULT_LINE_FIT_SNR));
   const [resolvingPowerText, setResolvingPowerText] = useState("");
@@ -399,6 +510,7 @@ function SpectroscopyPanel({
     setWindows(null);
     setMomentResult(null);
     setRangeError(null);
+    setRangeResult(null);
     setMomentError(null);
     setCollapseResult(null);
     setCollapseError(null);
@@ -426,7 +538,7 @@ function SpectroscopyPanel({
   useEffect(() => {
     setHeaderFallbackAxis(null);
     setAxisError(null);
-    if (!filePath || headerAxis) return;
+    if (!filePath || headerAxis || documentMode) return;
     let cancelled = false;
     getSpectralAxis(filePath)
       .then((info) => {
@@ -438,18 +550,22 @@ function SpectroscopyPanel({
     return () => {
       cancelled = true;
     };
-  }, [filePath, headerAxis]);
+  }, [filePath, headerAxis, documentMode]);
 
   const series = useMemo<number[]>(() => {
+    if (documentMode) return docSpectrum?.flux ?? [];
     if (region) {
       if (regionView === "jy" && region.flux_jy) return region.flux_jy;
       return regionView === "mean" ? region.mean : region.sum;
     }
     return spectrum;
-  }, [region, regionView, spectrum]);
+  }, [documentMode, docSpectrum, region, regionView, spectrum]);
+  const shownRegionView: RegionView = region && regionView === "jy" && !region.flux_jy ? "sum" : regionView;
+  const bandErrors = useMemo(() => (region ? regionViewErrors(region, shownRegionView) : null), [region, shownRegionView]);
   const n = series.length;
   const totalFrames = cubeDims ? (cubeDims.frames ?? 0) : 0;
   const channelCount = totalFrames > 0 ? totalFrames : n;
+  const continuumToSend = windowsAreValid(windows, channelCount) ? windows : null;
   const frameLinked = totalFrames > 1;
 
   const formatted = useMemo(() => formatAxis(axis, mode, restUm, convention), [axis, mode, restUm, convention]);
@@ -511,18 +627,25 @@ function SpectroscopyPanel({
   const plotParams = useMemo(() => {
     if (n === 0) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
     const [xMin, xMax] = axisX.values ? arrayMinMax(axisX.values) : [0, n - 1];
-    const [rawYMin, rawYMax] = arrayMinMax(series);
+    const [seriesMin, seriesMax] = arrayMinMax(series);
+    const band = errorBandExtent(axisX.values, series, bandErrors);
+    const rawYMin = band ? Math.min(seriesMin, band[0]) : seriesMin;
+    const rawYMax = band ? Math.max(seriesMax, band[1]) : seriesMax;
     const span = rawYMax - rawYMin;
     const yPad = span > 0 ? span * 0.05 : Math.max(Math.abs(rawYMax), 1) * 0.05;
     return { xMin, xMax, yMin: rawYMin - yPad, yMax: rawYMax + yPad };
-  }, [series, axisX, n]);
+  }, [series, axisX, n, bandErrors]);
 
   const currentSource = useMemo<SpectrumSource | null>(() => {
     if (region) return regionSource;
     return pixelCoord ? { kind: "pixel", x: pixelCoord.x, y: pixelCoord.y } : null;
   }, [region, regionSource, pixelCoord]);
-  const lineOverlayVisible = runForSource(lineResult, currentSource, region ? regionView : MEASURED_SERIES_VIEW) !== null;
-  const visibleLineResult = runForSource(lineResult, currentSource, MEASURED_SERIES_VIEW)?.result ?? null;
+  const measureSource = useMemo<LineMeasurementSource | null>(
+    () => (documentMode ? (spectrumDocument?.source ?? null) : currentSource),
+    [documentMode, spectrumDocument, currentSource],
+  );
+  const lineOverlayVisible = runForSource(lineResult, measureSource, region ? regionView : MEASURED_SERIES_VIEW) !== null;
+  const visibleLineResult = runForSource(lineResult, measureSource, MEASURED_SERIES_VIEW)?.result ?? null;
   const lineShiftKms = useMemo(
     () => (correction !== "none" && correctionResult ? applyCorrectionKms([0], correctionResult, correction)[0] : null),
     [correction, correctionResult],
@@ -604,6 +727,20 @@ function SpectroscopyPanel({
       ctx.stroke();
     }
 
+    if (bandErrors?.err) {
+      const toPx = (x: number) => axisValueToPixel(x, m);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(PAD.left, PAD.top, W - PAD.left - PAD.right, plotH);
+      ctx.clip();
+      fillBand(ctx, errorBandRuns(axisX.values, series, bandErrors.err), toPx, toY, ERROR_BAND_FILL);
+      if (bandErrors.scaled) {
+        const scaledRuns = errorBandRuns(axisX.values, series, bandErrors.scaled);
+        outlineBand(ctx, scaledRuns, toPx, toY, ERROR_BAND_SCALED_STROKE, ERROR_BAND_SCALED_DASH);
+      }
+      ctx.restore();
+    }
+
     ctx.strokeStyle = region ? "#22d3ee" : "#a855f7";
     ctx.lineWidth = 1.2;
     ctx.beginPath();
@@ -646,7 +783,7 @@ function SpectroscopyPanel({
     for (const tick of xTicks) ctx.fillText(tick.label, tick.px, plotBottom + X_TICK_BASELINE);
     ctx.fillStyle = themeColor("--ab-text-4", "#8b8b94");
     ctx.fillText(axisX.label, W / 2, H - 4);
-  }, [series, n, axisX, plotParams, mappingFor, region]);
+  }, [series, n, axisX, plotParams, mappingFor, region, bandErrors]);
 
   const drawOverlay = useCallback(() => {
     const overlay = overlayRef.current;
@@ -937,18 +1074,18 @@ function SpectroscopyPanel({
     const source: SpectrumSource = { kind: "region", shape: picked.target.shape, background: picked.background?.shape ?? null };
     beginRegionSpectrum();
     try {
-      const result = await getCubeSpectrumRegion(filePath, source.shape, source.background);
+      const result = await getCubeSpectrumRegion(filePath, source.shape, source.background, continuumToSend);
       if (regionSeqRef.current !== seq) return;
-      commitRegionSpectrum(result, source);
+      commitRegionSpectrum(result, source, continuumToSend);
       setRegionView((view) => (view === "jy" && !result.flux_jy ? "sum" : view));
     } catch (e) {
       if (regionSeqRef.current === seq) failRegionSpectrum(e instanceof Error ? e.message : String(e));
     }
-  }, [filePath, picked]);
+  }, [filePath, picked, continuumToSend]);
 
   const handleExportSpectrum = useCallback(
     async (destination: "copy" | "save") => {
-      if (!filePath || !currentSource || n === 0) return;
+      if (!filePath || !measureSource || n === 0) return;
       const seq = ++exportSeqRef.current;
       const notify = (text: string) => {
         if (exportNoticeTimerRef.current !== null) window.clearTimeout(exportNoticeTimerRef.current);
@@ -959,26 +1096,28 @@ function SpectroscopyPanel({
       try {
         let pixelFluxJy: number[] | null = null;
         let pixelFluxJyError: string | null = null;
-        if (currentSource.kind === "pixel") {
+        if (measureSource.kind === "pixel") {
           try {
-            pixelFluxJy = (await getCubeSpectrum(filePath, currentSource.x, currentSource.y)).flux_jy ?? null;
+            pixelFluxJy = (await getCubeSpectrum(filePath, measureSource.x, measureSource.y)).flux_jy ?? null;
           } catch (e) {
             pixelFluxJyError = e instanceof Error ? e.message : String(e);
           }
         }
-        const centre = currentSource.kind === "pixel" ? { x: currentSource.x, y: currentSource.y } : shapeCentre(currentSource.shape);
         let sky: { ra: number; dec: number } | null = null;
-        try {
-          const point = (await pixelToWorld(filePath, [[centre.x, centre.y]], "icrs")).points[0] ?? null;
-          if (point) sky = { ra: point[0], dec: point[1] };
-        } catch {
-          sky = null;
+        if (measureSource.kind !== "file") {
+          const centre = measureSource.kind === "pixel" ? { x: measureSource.x, y: measureSource.y } : shapeCentre(measureSource.shape);
+          try {
+            const point = (await pixelToWorld(filePath, [[centre.x, centre.y]], "icrs")).points[0] ?? null;
+            if (point) sky = { ra: point[0], dec: point[1] };
+          } catch {
+            sky = null;
+          }
         }
         if (exportSeqRef.current !== seq) return;
-        const match = regionForSource(regionDoc.regions, currentSource);
+        const match = measureSource.kind === "file" ? null : regionForSource(regionDoc.regions, measureSource);
         const backgroundId =
-          currentSource.kind === "region" && currentSource.background
-            ? (regionForShape(regionDoc.regions, currentSource.background)?.id ?? null)
+          measureSource.kind === "region" && measureSource.background
+            ? (regionForShape(regionDoc.regions, measureSource.background)?.id ?? null)
             : null;
         const exportInput: SpectrumExportInput = {
           fileName: fileBaseName(filePath),
@@ -988,7 +1127,7 @@ function SpectroscopyPanel({
           convention,
           correction,
           correctionResult,
-          source: currentSource,
+          source: measureSource,
           regionId: match?.id ?? null,
           regionText: match?.props.text ?? null,
           backgroundId,
@@ -1000,6 +1139,7 @@ function SpectroscopyPanel({
           pixelFluxJyError,
           sky,
           exportedAtUtc: new Date().toISOString(),
+          fileSpectrum: docSpectrum,
         };
         const csv = spectrumCsv(exportInput);
         if (destination === "copy") {
@@ -1007,7 +1147,7 @@ function SpectroscopyPanel({
           measurementLog.append(spectrumExportEntry(filePath, exportInput, null));
           notify("copied");
         } else {
-          const saved = await saveCsvDialog(csv, spectrumCsvFileName(filePath, currentSource), "Save spectrum CSV");
+          const saved = await saveCsvDialog(csv, spectrumCsvFileName(filePath, measureSource), "Save spectrum CSV");
           if (saved) notify(`saved: ${saved}`);
           if (saved) measurementLog.append(spectrumExportEntry(filePath, exportInput, saved));
         }
@@ -1017,7 +1157,7 @@ function SpectroscopyPanel({
         if (exportSeqRef.current === seq) setExportBusy(false);
       }
     },
-    [filePath, currentSource, n, regionDoc.regions, axis, mode, restUm, convention, correction, correctionResult, region, regionView, bunit, series],
+    [filePath, measureSource, n, regionDoc.regions, axis, mode, restUm, convention, correction, correctionResult, region, regionView, bunit, series, docSpectrum],
   );
 
   const handleCollapseRange = useCallback(async () => {
@@ -1025,10 +1165,12 @@ function SpectroscopyPanel({
     const seq = ++rangeSeqRef.current;
     setRangeLoading(true);
     setRangeError(null);
+    setRangeResult(null);
     try {
       const dir = await getOutputDir();
       const result = await collapseCubeRange(filePath, dir, range.z0, range.z1, rangeMode);
       if (rangeSeqRef.current !== seq) return;
+      setRangeResult(result);
       if (result.previewUrl) {
         publishCubeResult({
           label: `Collapse ${result.mode} · ch ${result.z0}-${result.z1}`,
@@ -1096,12 +1238,12 @@ function SpectroscopyPanel({
   }, [filePath, range, snrText, restUm, convention, windows, channelCount, maskBelow, showMoment]);
 
   const handleMeasureLine = useCallback(async () => {
-    if (!filePath || !range || !currentSource) return;
+    if (!filePath || !range || !measureSource) return;
     if (windows && !windowsAreValid(windows, channelCount)) {
       setLineError(`continuum windows must be channel ranges inside 0–${Math.max(channelCount - 1, 0)}`);
       return;
     }
-    const measurementAxis = measurementAxisValues(axis);
+    const measurementAxis = lineMeasurementAxis(axis, documentMode);
     if (!measurementAxis) {
       setLineError("no spectral axis for this cube: the line measurement needs a wavelength, frequency or velocity axis");
       return;
@@ -1110,7 +1252,8 @@ function SpectroscopyPanel({
     setLineLoading(true);
     setLineError(null);
     try {
-      const result = await measureSpectralLine(filePath, currentSource, {
+      const documentOptions = documentMode ? { useErr, useDq, wavelengthFrame: frameChoice } : {};
+      const result = await measureSpectralLine(filePath, measureSource, {
         z0: range.z0,
         z1: range.z1,
         continuum: windows,
@@ -1118,16 +1261,32 @@ function SpectroscopyPanel({
         convention,
         model: lineModel,
         velocityShiftKms: lineShiftKms,
+        ...documentOptions,
       });
       if (lineSeqRef.current !== seq) return;
-      setLineResult({ key: spectrumSourceKey(currentSource, MEASURED_SERIES_VIEW), measurementAxis, result });
-      measurementLog.append(lineEntry(filePath, result, lineModel));
+      setLineResult({ key: spectrumSourceKey(measureSource, MEASURED_SERIES_VIEW), measurementAxis, result });
+      measurementLog.append(lineEntry(filePath, result, lineModel, documentMode ? useDq : true));
     } catch (e) {
       if (lineSeqRef.current === seq) setLineError(e instanceof Error ? e.message : String(e));
     } finally {
       if (lineSeqRef.current === seq) setLineLoading(false);
     }
-  }, [filePath, range, currentSource, windows, channelCount, axis, lineShiftKms, restUm, convention, lineModel]);
+  }, [
+    filePath,
+    range,
+    measureSource,
+    windows,
+    channelCount,
+    axis,
+    documentMode,
+    lineShiftKms,
+    restUm,
+    convention,
+    lineModel,
+    useErr,
+    useDq,
+    frameChoice,
+  ]);
 
   const showLineFitPlane = useCallback(
     (run: LineFitRun, plane: LineFitPlane) => {
@@ -1244,18 +1403,25 @@ function SpectroscopyPanel({
 
   const labelMapping = useMemo(() => mappingFor(LABEL_MAPPING_WIDTH), [mappingFor]);
   const rangeLabel = range ? formatRangeLabel(range, labelMapping, axisX.unit) : "drag on the plot to select channels";
-  const regionAvailable = !!filePath && !!picked.target && totalFrames > 1;
+  const regionAvailable = !documentMode && !!filePath && !!picked.target && totalFrames > 1;
+  const brushable = !!filePath && (documentMode ? n > 0 : !!cubeDims && totalFrames > 1);
   const velocityReady = mode === "velocity" || axis?.kind === "vrad" || axis?.kind === "vopt" || axis?.kind === "velo";
   const momentsReady = !!range && (restUm !== null || (axis?.rest_wavelength_um ?? null) !== null || velocityReady);
   const lineHint = !range
     ? "brush a line range first"
     : !axis
       ? "no spectral axis for this cube"
-      : !currentSource
+      : !measureSource
         ? "click the preview or pick a region first"
         : null;
   const lineDisabled = lineLoading || lineHint !== null || !filePath;
   const overlapNote = continuumOverlapNote(windows, range);
+  const regionFactor = region?.noise_factor ?? null;
+  const regionFactorStale = regionFactor ? noiseFactorStaleNote(regionFactor, continuumToSend) : null;
+  const regionNotes = region ? regionNotesShown(region) : [];
+  const regionErrors = region ? regionErrorLine(region.err_source, regionFactor, regionContinuum) : null;
+  const bandKind = errorBandKind(bandErrors);
+  const bandLegend = errorBandLegend(bandKind);
 
   const regionButton = regionAvailable && (
     <button
@@ -1277,6 +1443,26 @@ function SpectroscopyPanel({
       {regionLoading ? "Extracting…" : "Region spectrum"}
     </button>
   );
+
+  if (documentMode && n === 0 && !isLoading) {
+    return (
+      <div className="ab-panel p-6 flex flex-col items-center gap-3">
+        <div
+          className="w-10 h-10 rounded-xl flex items-center justify-center"
+          style={{ background: "rgba(168,85,247,0.06)", border: "1px solid rgba(168,85,247,0.1)" }}
+        >
+          <FileText size={18} style={{ color: "var(--ab-violet)", opacity: 0.5 }} />
+        </div>
+        {error ? (
+          <p className="text-[10px] text-red-400/80 text-center px-2 py-1 rounded bg-red-900/15 border border-red-800/20">
+            This spectrum could not be read: {error}
+          </p>
+        ) : (
+          <p className="text-[11px] text-zinc-500">This spectrum has no flux values to plot</p>
+        )}
+      </div>
+    );
+  }
 
   if (n === 0 && !isLoading && !regionLoading) {
     return (
@@ -1340,6 +1526,11 @@ function SpectroscopyPanel({
               {regionSource?.kind === "region" ? regionSource.shape.shape : "region"} · {region.npix.toFixed(1)} px
               {region.bg_subtracted ? " · sky-subtracted" : ""}
             </span>
+          ) : documentMode && spectrumDocument ? (
+            <span className="flex items-center gap-1">
+              <FileText size={10} />
+              {spectrumSourceLabel(spectrumDocument.source)}
+            </span>
           ) : (
             pixelCoord && (
               <span className="flex items-center gap-1">
@@ -1350,6 +1541,33 @@ function SpectroscopyPanel({
           {elapsed > 0 && <span>{elapsed}ms</span>}
         </div>
       </div>
+
+      {docSpectrum && (
+        <div data-document-frame className="px-3 pb-2 flex flex-col gap-1 text-[10px] font-mono">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={LABEL_CLASS}>Frame</span>
+            {frameChoice !== null &&
+              WAVELENGTH_FRAME_CHOICES.map((choice) => (
+                <button
+                  key={choice}
+                  data-frame-choice={choice}
+                  aria-pressed={frameChoice === choice}
+                  disabled={lineLoading}
+                  onClick={() => chooseFrame(choice)}
+                  className="px-2 py-0.5 rounded border transition-colors disabled:opacity-40"
+                  style={{
+                    borderColor: frameChoice === choice ? "var(--ab-violet)" : "var(--ab-border)",
+                    color: frameChoice === choice ? "var(--ab-violet)" : "var(--ab-text-3)",
+                  }}
+                >
+                  {choice}
+                </button>
+              ))}
+            <span className="text-zinc-500">{documentFrameLine(docSpectrum.wavelength_frame, frameChoice)}</span>
+          </div>
+          {frameChoice === "air" && <span className="text-zinc-600">{AIR_FRAME_FORMULA_NOTE}</span>}
+        </div>
+      )}
 
       {spectral && (
         <SpectralAxisControls
@@ -1364,6 +1582,7 @@ function SpectroscopyPanel({
           correction={correction}
           onCorrectionChange={setCorrection}
           onCorrectionLoaded={setCorrectionResult}
+          correctionUnavailable={documentMode ? SPECTRUM_FILE_CORRECTION_NOTE : null}
         />
       )}
 
@@ -1412,6 +1631,7 @@ function SpectroscopyPanel({
             <canvas
               ref={canvasRef}
               height={CANVAS_H}
+              data-error-band={bandKind}
               className="w-full rounded-md cursor-crosshair"
               style={{ height: CANVAS_H }}
               onMouseMove={handleMouseMove}
@@ -1456,13 +1676,44 @@ function SpectroscopyPanel({
           </button>
         </div>
       )}
+      {region && (region.err !== null || regionNotes.length > 0) && (
+        <div className="px-3 pb-2 flex flex-col gap-1 text-[10px] font-mono text-zinc-500">
+          {region.err !== null && regionErrors && (
+            <span>
+              <span data-noise-factor={regionErrors.factor}>{regionErrors.text}</span>
+              {bandLegend && <span className="text-zinc-600">{` (${bandLegend})`}</span>}
+            </span>
+          )}
+          {regionFactorStale && <span className="text-zinc-600">{regionFactorStale}</span>}
+          {regionFactor?.warning && (
+            <p
+              data-noise-warning=""
+              className="text-amber-300/80 px-2 py-1 rounded bg-amber-900/15 border border-amber-800/20 break-words"
+            >
+              {regionFactor.warning}
+            </p>
+          )}
+          {regionNotes.length > 0 && (
+            <details className="text-zinc-600">
+              <summary className="cursor-pointer select-none">notes ({regionNotes.length})</summary>
+              <ul className="mt-0.5 flex flex-col gap-0.5">
+                {regionNotes.map((note, i) => (
+                  <li key={i} className="break-words">
+                    {note}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
       {regionError && (
         <p className="mx-3 mb-2 text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">
           Region spectrum failed: {regionError}
         </p>
       )}
 
-      {n > 0 && filePath && currentSource && (
+      {n > 0 && filePath && measureSource && (
         <div className="px-3 pb-2 flex items-center gap-2 text-[10px] font-mono">
           <span className="text-zinc-500">Export</span>
           <button
@@ -1489,6 +1740,24 @@ function SpectroscopyPanel({
         <div className="px-3 pb-1 text-[10px] font-mono text-zinc-600">
           Cube: {cubeDims.width} × {cubeDims.height} × {cubeDims.frames}
           {n > 0 ? ` — ${n} channels` : ""}
+        </div>
+      )}
+
+      {docSpectrum && (
+        <div className="px-3 pb-1 text-[10px] font-mono text-zinc-600">
+          <span>{documentSummary(docSpectrum)}</span>
+          {docSpectrum.notes.length > 0 && (
+            <details className="mt-0.5">
+              <summary className="cursor-pointer select-none">notes ({docSpectrum.notes.length})</summary>
+              <ul className="mt-0.5 flex flex-col gap-0.5">
+                {docSpectrum.notes.map((note, i) => (
+                  <li key={i} className="break-words">
+                    {note}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
         </div>
       )}
 
@@ -1522,7 +1791,7 @@ function SpectroscopyPanel({
         </div>
       )}
 
-      {filePath && cubeDims && totalFrames > 1 && (
+      {brushable && (
         <div className="px-3 pb-2 flex flex-col gap-2" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
           <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
             {spectral && (
@@ -1556,25 +1825,29 @@ function SpectroscopyPanel({
               placeholder="z1"
               onCommit={(value) => commitRange("z1", value)}
             />
-            <select
-              value={rangeMode}
-              aria-label="Range collapse mode"
-              onChange={(e) => setRangeMode(e.target.value as CollapseRangeMode)}
-              className={SELECT_CLASS}
-            >
-              {COLLAPSE_RANGE_MODES.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-            <CollapseBtn
-              label="Collapse range"
-              loading={rangeLoading}
-              disabled={rangeLoading || !range}
-              color="var(--ab-violet)"
-              onClick={handleCollapseRange}
-            />
+            {!documentMode && (
+              <>
+                <select
+                  value={rangeMode}
+                  aria-label="Range collapse mode"
+                  onChange={(e) => setRangeMode(e.target.value as CollapseRangeMode)}
+                  className={SELECT_CLASS}
+                >
+                  {COLLAPSE_RANGE_MODES.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                <CollapseBtn
+                  label="Collapse range"
+                  loading={rangeLoading}
+                  disabled={rangeLoading || !range}
+                  color="var(--ab-violet)"
+                  onClick={handleCollapseRange}
+                />
+              </>
+            )}
             {range && (
               <button onClick={() => setRange(null)} className="text-zinc-500 hover:text-zinc-300">
                 clear
@@ -1583,6 +1856,24 @@ function SpectroscopyPanel({
           </div>
           {rangeError && (
             <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{rangeError}</p>
+          )}
+          {rangeResult && !documentMode && (
+            <div className="text-[10px] font-mono text-zinc-500">
+              <span>{`${rangeResult.mode} collapse, ch ${rangeResult.z0}–${rangeResult.z1}: `}</span>
+              <span data-err-plane="collapse">{errPlaneLabel(rangeResult.has_err, rangeResult.err_source, null)}</span>
+              {rangeResult.notes.length > 0 && (
+                <details className="mt-0.5 text-zinc-600">
+                  <summary className="cursor-pointer select-none">notes ({rangeResult.notes.length})</summary>
+                  <ul className="mt-0.5 flex flex-col gap-0.5">
+                    {rangeResult.notes.map((note, i) => (
+                      <li key={i} className="break-words">
+                        {note}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
           )}
 
           {spectral && (
@@ -1625,73 +1916,80 @@ function SpectroscopyPanel({
                 <p className="text-[10px] text-amber-300/80 px-2 py-1 rounded bg-amber-900/15 border border-amber-800/20">{overlapNote}</p>
               )}
 
-              <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
-                <label htmlFor={snrId} className={LABEL_CLASS}>
-                  SNR
-                </label>
-                <DecimalField
-                  id={snrId}
-                  min={SNR_FIELD.min}
-                  value={snrText}
-                  onChange={setSnrText}
-                  className={INPUT_CLASS}
-                />
-                <label className="flex items-center gap-1 text-zinc-500 cursor-pointer">
-                  <input type="checkbox" checked={maskBelow} onChange={(e) => setMaskBelow(e.target.checked)} />
-                  mask M0
-                </label>
-                <CollapseBtn
-                  label="Moments"
-                  icon={<BarChart3 size={10} />}
-                  loading={momentLoading}
-                  disabled={momentLoading || !momentsReady}
-                  color="var(--ab-amber)"
-                  onClick={handleMoments}
-                />
-                {!momentsReady && range && (
-                  <span className="text-zinc-600">set a rest wavelength for velocity moments</span>
-                )}
-                {momentResult && (
-                  <span className="flex items-center gap-1 ml-auto">
-                    {MOMENT_KINDS.map((kind) => (
-                      <button
-                        key={kind}
-                        onClick={() => showMoment(momentResult, kind)}
-                        className="px-2 py-0.5 rounded border transition-colors uppercase"
-                        style={{
-                          borderColor: momentKind === kind ? "var(--ab-amber)" : "var(--ab-border)",
-                          color: momentKind === kind ? "var(--ab-amber)" : "var(--ab-text-3)",
-                        }}
-                      >
-                        {kind}
-                      </button>
-                    ))}
-                  </span>
-                )}
-              </div>
-              {momentError && (
-                <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{momentError}</p>
-              )}
-              {momentResult && (
-                <div className="text-[10px] font-mono text-zinc-500">
-                  <span>
-                    M0 in {momentResult.m0_unit}, M1/M2 in {momentResult.velocity_unit}, {momentResult.n_channels} channels
-                    {momentResult.noise_per_channel !== null ? `, noise ${momentResult.noise_per_channel.toExponential(2)}` : ""}
-                    {`, ${momentVelocityFrameNote(axis?.specsys ?? null, correction, lineShiftKms)}`}
-                  </span>
-                  {momentResult.notes.length > 0 && (
-                    <details className="mt-0.5 text-zinc-600">
-                      <summary className="cursor-pointer select-none">notes ({momentResult.notes.length})</summary>
-                      <ul className="mt-0.5 flex flex-col gap-0.5">
-                        {momentResult.notes.map((note, i) => (
-                          <li key={i} className="break-words">
-                            {note}
-                          </li>
+              {!documentMode && (
+                <>
+                  <div className="flex items-center gap-2 flex-wrap text-[10px] font-mono">
+                    <label htmlFor={snrId} className={LABEL_CLASS}>
+                      SNR
+                    </label>
+                    <DecimalField
+                      id={snrId}
+                      min={SNR_FIELD.min}
+                      value={snrText}
+                      onChange={setSnrText}
+                      className={INPUT_CLASS}
+                    />
+                    <label className="flex items-center gap-1 text-zinc-500 cursor-pointer">
+                      <input type="checkbox" checked={maskBelow} onChange={(e) => setMaskBelow(e.target.checked)} />
+                      mask M0
+                    </label>
+                    <CollapseBtn
+                      label="Moments"
+                      icon={<BarChart3 size={10} />}
+                      loading={momentLoading}
+                      disabled={momentLoading || !momentsReady}
+                      color="var(--ab-amber)"
+                      onClick={handleMoments}
+                    />
+                    {!momentsReady && range && (
+                      <span className="text-zinc-600">set a rest wavelength for velocity moments</span>
+                    )}
+                    {momentResult && (
+                      <span className="flex items-center gap-1 ml-auto">
+                        {MOMENT_KINDS.map((kind) => (
+                          <button
+                            key={kind}
+                            onClick={() => showMoment(momentResult, kind)}
+                            className="px-2 py-0.5 rounded border transition-colors uppercase"
+                            style={{
+                              borderColor: momentKind === kind ? "var(--ab-amber)" : "var(--ab-border)",
+                              color: momentKind === kind ? "var(--ab-amber)" : "var(--ab-text-3)",
+                            }}
+                          >
+                            {kind}
+                          </button>
                         ))}
-                      </ul>
-                    </details>
+                      </span>
+                    )}
+                  </div>
+                  {momentError && (
+                    <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{momentError}</p>
                   )}
-                </div>
+                  {momentResult && (
+                    <div className="text-[10px] font-mono text-zinc-500">
+                      <span>
+                        M0 in {momentResult.m0_unit}, M1/M2 in {momentResult.velocity_unit}, {momentResult.n_channels} channels
+                        {momentResult.noise_per_channel !== null ? `, noise ${momentResult.noise_per_channel.toExponential(2)}` : ""}
+                        {`, ${momentVelocityFrameNote(axis?.specsys ?? null, correction, lineShiftKms)}`}
+                      </span>
+                      <span className="block" data-err-plane="moments">
+                        {errPlaneLabel(momentResult.has_err, momentResult.err_source, momentResult.noise_factor)}
+                      </span>
+                      {momentResult.notes.length > 0 && (
+                        <details className="mt-0.5 text-zinc-600">
+                          <summary className="cursor-pointer select-none">notes ({momentResult.notes.length})</summary>
+                          <ul className="mt-0.5 flex flex-col gap-0.5">
+                            {momentResult.notes.map((note, i) => (
+                              <li key={i} className="break-words">
+                                {note}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}
@@ -1729,7 +2027,7 @@ function SpectroscopyPanel({
         />
       )}
 
-      {spectral && filePath && cubeDims && totalFrames > 1 && (
+      {spectral && brushable && (
         <LineMeasurementSection
           result={visibleLineResult}
           loading={lineLoading}
@@ -1739,10 +2037,22 @@ function SpectroscopyPanel({
           onMeasure={handleMeasureLine}
           disabled={lineDisabled}
           disabledHint={lineHint}
+          errControls={
+            docSpectrum
+              ? {
+                  useErr,
+                  onUseErr: setUseErr,
+                  useDq,
+                  onUseDq: setUseDq,
+                  errAvailable: docSpectrum.err !== null,
+                  dqAvailable: docSpectrum.dq !== null,
+                }
+              : null
+          }
         />
       )}
 
-      {spectral && filePath && cubeDims && totalFrames > 1 && (
+      {spectral && filePath && (docSpectrum ? n > 0 : !!cubeDims && totalFrames > 1) && (
         <SpectrumComparisonSection
           filePath={filePath}
           regionDoc={regionDoc}
@@ -1755,8 +2065,10 @@ function SpectroscopyPanel({
           pixelCoord={pixelCoord ?? null}
           view={regionView}
           bunit={bunit}
-          channelCount={totalFrames}
+          channelCount={docSpectrum ? n : totalFrames}
           windows={windows}
+          fileSpectrum={docSpectrum}
+          fileSpectrumSource={documentMode ? (spectrumDocument?.source ?? null) : null}
         />
       )}
 

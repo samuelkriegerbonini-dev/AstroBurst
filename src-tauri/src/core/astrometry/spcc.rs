@@ -860,6 +860,7 @@ mod tests {
             rp,
             bp_rp,
             parallax_mas: None,
+            teff_k: None,
         };
         vec![
             row("a", 265.51, 31.26, Some(0.65), None, None, Some(8.5)),

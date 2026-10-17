@@ -133,6 +133,23 @@ describe("fileListNames", () => {
     expect(texts([".fits", ".fit", "502nmos.fits"])).toEqual([".fits", ".fit", "502nmos"]);
   });
 
+  it("drops a gzip FITS extension whole, like a plain one, and keeps any other .gz name", () => {
+    expect(texts(["673nmos_gz.fits.gz", "502nmos.fit.gz", "M42.FTS.GZ", "notes.tar.gz", ".fits.gz"])).toEqual([
+      "673nmos_gz",
+      "502nmos",
+      "M42",
+      "notes.tar",
+      ".fits.gz",
+    ]);
+    const x1d = "jw01366-o004_t001_nirspec_clear-prism-s1600a1-sub512_x1d";
+    expect(texts([`${x1d}.fits.gz`])).toEqual(texts([`${x1d}.fits`]));
+  });
+
+  it("tells a plain and a gzip copy of one file in the same folder apart by their names", () => {
+    expect(texts(["673nmos.fits", "673nmos.fits.gz"])).toEqual(["673nmos.fits", "673nmos.fits.gz"]);
+    expect(labelsOf(["C:/a/673nmos.fits", "C:/a/673nmos.fits"])).toEqual(["673nmos", "673nmos"]);
+  });
+
   it("every name in the real JWST folders is unique", () => {
     expect([HEAVY_TEST.length, M104.length, NIRSPEC_1266.length]).toEqual([6, 96, 52]);
     for (const folder of [HEAVY_TEST, M104, NIRSPEC_1266, EVERY_FOLDER]) {

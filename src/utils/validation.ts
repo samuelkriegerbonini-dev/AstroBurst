@@ -1,10 +1,20 @@
 import type { AstroFile } from "../shared/types";
 
-const VALID_EXTENSIONS = [".fits", ".fit", ".fts", ".fz", ".asdf", ".zip"];
+const FITS_SPELLINGS = [".fits", ".fit", ".fts"];
+const GZIP_SUFFIX = ".gz";
+const GZIP_FITS_EXTENSIONS = FITS_SPELLINGS.map((ext) => `${ext}${GZIP_SUFFIX}`);
+const VALID_EXTENSIONS = [...FITS_SPELLINGS, ".fz", ".asdf", ".zip", ...GZIP_FITS_EXTENSIONS];
 
 export const SUPPORTED_EXTENSIONS: readonly string[] = VALID_EXTENSIONS.map((ext) => ext.slice(1));
 
 export const SUPPORTED_EXTENSIONS_LABEL = VALID_EXTENSIONS.join(" ");
+
+export const FITS_FILE_EXTENSIONS: readonly string[] = [...FITS_SPELLINGS, ...GZIP_FITS_EXTENSIONS].map((ext) => ext.slice(1));
+
+export function dialogExtensions(extensions: readonly string[], mac: boolean): string[] {
+  const offersGzip = extensions.some((ext) => ext.endsWith(GZIP_SUFFIX));
+  return mac && offersGzip ? [...extensions, GZIP_SUFFIX.slice(1)] : [...extensions];
+}
 
 export function isValidFitsFile(nameOrPath: string): boolean {
   const lower = nameOrPath.toLowerCase();

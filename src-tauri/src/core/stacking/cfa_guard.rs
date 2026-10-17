@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 
+use crate::core::imaging::cfa::CfaPattern;
 use crate::core::imaging::debayer::BayerPattern;
 use crate::infra::image_source::load_plane_header;
 use crate::types::header::HduHeader;
@@ -18,25 +19,35 @@ pub fn cfa_pattern(header: &HduHeader) -> Option<BayerPattern> {
         .and_then(BayerPattern::parse)
 }
 
-pub fn cfa_refusal(patterns: &[Option<BayerPattern>], step: CfaStep) -> Option<String> {
+pub fn cfa_pattern_any(header: &HduHeader) -> Option<CfaPattern> {
+    CfaPattern::detect(header)
+}
+
+pub fn cfa_refusal(patterns: &[Option<CfaPattern>], step: CfaStep) -> Option<String> {
     let first = patterns.iter().flatten().next()?;
     let n = patterns.iter().flatten().count();
     let m = patterns.len();
     let pattern = first.name();
-    Some(match step {
-        CfaStep::Align => format!(
+    Some(match (step, first.is_xtrans()) {
+        (CfaStep::Align, false) => format!(
             "{n} of {m} lights are one-shot-colour frames (BAYERPAT={pattern}); aligning them before debayering mixes the colour sites. Calibrate the lights, debayer them (Processing > Debayer > Debayer All Loaded), then stack the _R, _G and _B files as separate channels; or turn alignment off for undithered frames."
         ),
-        CfaStep::Drizzle => format!(
+        (CfaStep::Drizzle, false) => format!(
             "{n} of {m} lights are one-shot-colour frames (BAYERPAT={pattern}); drizzle resamples across the colour sites and has no CFA mode. Calibrate the lights, debayer them (Processing > Debayer > Debayer All Loaded), then drizzle the _R, _G and _B files as separate channels."
+        ),
+        (CfaStep::Align, true) => format!(
+            "{n} of {m} lights are X-Trans one-shot-colour frames (BAYERPAT={pattern}); aligning them before debayering mixes the colour sites, and X-Trans mosaics cannot be debayered here yet. Debayer them in the camera software and stack the R, G and B files as separate channels; or turn alignment off for undithered frames."
+        ),
+        (CfaStep::Drizzle, true) => format!(
+            "{n} of {m} lights are X-Trans one-shot-colour frames (BAYERPAT={pattern}); drizzle resamples across the colour sites and has no CFA mode, and X-Trans mosaics cannot be debayered here yet. Debayer them in the camera software and drizzle the R, G and B files as separate channels."
         ),
     })
 }
 
 pub fn refuse_cfa_frames(paths: &[String], step: CfaStep) -> Result<()> {
-    let patterns: Vec<Option<BayerPattern>> = paths
+    let patterns: Vec<Option<CfaPattern>> = paths
         .iter()
-        .map(|p| load_plane_header(&ImageRef::parse(p)).ok().and_then(|h| cfa_pattern(&h)))
+        .map(|p| load_plane_header(&ImageRef::parse(p)).ok().and_then(|h| CfaPattern::declared(&h)))
         .collect();
     if let Some(text) = cfa_refusal(&patterns, step) {
         bail!("{text}");
@@ -50,6 +61,7 @@ mod tests {
     use ndarray::Array2;
 
     use crate::core::compose::drizzle_rgb::drizzle_rgb;
+    use crate::core::imaging::cfa::test_fixtures::XTRANS_LAYOUT;
     use crate::core::stacking::calibration::{drizzle_from_paths, stack_from_paths};
     use crate::infra::fits::writer::write_fits_mono;
     use crate::types::compose::{DrizzleRgbConfig, WhiteBalance};
@@ -101,8 +113,36 @@ mod tests {
     }
 
     #[test]
+    fn cfa_pattern_any_detects_bayer_and_xtrans_with_offsets() {
+        let quoted = format!("'{XTRANS_LAYOUT}'");
+        let xtrans = cfa_pattern_any(&header(&[("BAYERPAT", &quoted)])).expect("X-Trans detected");
+        assert!(xtrans.is_xtrans());
+        assert_eq!(cfa_pattern(&header(&[("BAYERPAT", &quoted)])), None, "the Bayer-only reader is unchanged");
+        let shifted = cfa_pattern_any(&header(&[("BAYERPAT", "'RGGB'"), ("XBAYROFF", "1")]));
+        assert_eq!(shifted, Some(CfaPattern::Bayer(BayerPattern::Grbg)));
+        assert_eq!(cfa_pattern_any(&header(&[("COLORTYP", "MONO")])), None);
+        assert_eq!(cfa_pattern_any(&HduHeader::empty()), None);
+    }
+
+    #[test]
+    fn xtrans_refusal_text_names_xtrans_and_the_36_character_pattern() {
+        let xtrans = CfaPattern::parse(XTRANS_LAYOUT);
+        let patterns = [xtrans, None, xtrans];
+        let align = cfa_refusal(&patterns, CfaStep::Align).expect("align refusal");
+        for needle in ["2 of 3 lights", "X-Trans", XTRANS_LAYOUT, "turn alignment off"] {
+            assert!(align.contains(needle), "missing {needle:?} in {align}");
+        }
+        assert!(!align.contains("Debayer All Loaded"), "{align}");
+        let drizzle = cfa_refusal(&patterns, CfaStep::Drizzle).expect("drizzle refusal");
+        for needle in ["2 of 3 lights", "X-Trans", XTRANS_LAYOUT, "no CFA mode"] {
+            assert!(drizzle.contains(needle), "missing {needle:?} in {drizzle}");
+        }
+    }
+
+    #[test]
     fn refusal_names_the_count_and_the_pattern() {
-        let patterns = [Some(BayerPattern::Rggb), None, Some(BayerPattern::Rggb)];
+        let rggb = Some(CfaPattern::Bayer(BayerPattern::Rggb));
+        let patterns = [rggb, None, rggb];
         let align = cfa_refusal(&patterns, CfaStep::Align).expect("align refusal");
         for needle in ["2 of 3 lights", "BAYERPAT=RGGB", "Debayer All Loaded", "turn alignment off"] {
             assert!(align.contains(needle), "missing {needle:?} in {align}");
@@ -176,6 +216,43 @@ mod tests {
         assert!(err.contains("4 of 4 lights"), "{err}");
         assert!(err.contains("drizzle resamples"), "{err}");
         assert!(!png.exists(), "the PNG was written despite the refusal");
+    }
+
+    fn xtrans_frames(dir: &tempfile::TempDir, prefix: &str, count: usize) -> Vec<String> {
+        let quoted = format!("'{XTRANS_LAYOUT}'");
+        write_frames(dir, prefix, count, &[("BAYERPAT", &quoted), ("EXPTIME", "60.0")])
+    }
+
+    #[test]
+    fn xtrans_lights_are_refused_by_name_for_align_and_drizzle() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = xtrans_frames(&dir, "xtrans", 3);
+        for step in [CfaStep::Align, CfaStep::Drizzle] {
+            let err = format!("{:#}", refuse_cfa_frames(&paths, step).unwrap_err());
+            for needle in ["3 of 3 lights", "X-Trans", XTRANS_LAYOUT] {
+                assert!(err.contains(needle), "{step:?}: missing {needle:?} in {err}");
+            }
+        }
+        let aligned = StackConfig { align: true, ..StackConfig::default() };
+        let err = format!("{:#}", stack_from_paths(&paths, &aligned, None).unwrap_err());
+        assert!(err.contains("X-Trans") && err.contains("aligning them"), "{err}");
+        let drizzle = DrizzleConfig { align: false, ..DrizzleConfig::default() };
+        let err = format!("{:#}", drizzle_from_paths(&paths, &drizzle, None).unwrap_err());
+        assert!(err.contains("X-Trans") && err.contains("drizzle resamples"), "{err}");
+        let unaligned = StackConfig { align: false, ..StackConfig::default() };
+        assert_eq!(stack_from_paths(&paths, &unaligned, None).unwrap().frame_count, 3);
+    }
+
+    #[test]
+    fn the_refusal_echoes_the_card_of_bottom_up_lights() {
+        let dir = tempfile::tempdir().unwrap();
+        let bayer = write_frames(&dir, "bayer", 2, &[("BAYERPAT", "'RGGB'"), ("ROWORDER", "'BOTTOM-UP'")]);
+        let err = format!("{:#}", refuse_cfa_frames(&bayer, CfaStep::Align).unwrap_err());
+        assert!(err.contains("BAYERPAT=RGGB"), "{err}");
+        let quoted = format!("'{XTRANS_LAYOUT}'");
+        let xtrans = write_frames(&dir, "xtrans", 2, &[("BAYERPAT", &quoted), ("ROWORDER", "'BOTTOM-UP'")]);
+        let err = format!("{:#}", refuse_cfa_frames(&xtrans, CfaStep::Drizzle).unwrap_err());
+        assert!(err.contains(&format!("BAYERPAT={XTRANS_LAYOUT}")), "{err}");
     }
 
     #[test]

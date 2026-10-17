@@ -1,4 +1,5 @@
 mod background;
+mod cfa_extract;
 mod curves;
 mod dbe;
 mod debayer;
@@ -13,6 +14,7 @@ mod tone;
 mod wavelet;
 
 pub use background::*;
+pub use cfa_extract::*;
 pub use curves::*;
 pub use dbe::*;
 pub use debayer::*;

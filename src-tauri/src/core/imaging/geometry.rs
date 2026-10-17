@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 
 use crate::core::astrometry::wcs::read_effective_cd;
+use crate::core::imaging::cfa::CfaPattern;
 use crate::core::imaging::debayer::BayerPattern;
 use crate::core::imaging::push_history;
 use crate::types::header::HduHeader;
@@ -315,6 +316,12 @@ fn remap_physical(header: &mut HduHeader, source: &HduHeader, m: &Mat, t_f: Vec2
 }
 
 pub fn geometry_header(source: &HduHeader, op: GeometryOp, dims: (usize, usize)) -> Result<HduHeader> {
+    if CfaPattern::declared(source).is_some_and(|p| p.is_xtrans()) {
+        bail!(
+            "{}: X-Trans CFA mosaic (36-character BAYERPAT); rotate or flip the debayered channels instead, the 6x6 remap is not implemented",
+            op.name()
+        );
+    }
     let (rows, cols) = dims;
     let (out_rows, out_cols) = op.output_dims(dims);
     let (m, t_f) = pixel_map(op, dims);
@@ -772,6 +779,45 @@ mod tests {
         let plain = geometry_header(&tan_cd_header(64), GeometryOp::Rot90Cw, (64, 64)).unwrap();
         assert!(plain.get("BAYERPAT").is_none());
         assert!(history(&plain).iter().all(|h| !h.contains("CFA")), "{:?}", history(&plain));
+    }
+
+    #[test]
+    fn xtrans_mosaics_are_refused_by_name_and_bayer_still_remaps() {
+        let layout = crate::core::imaging::cfa::test_fixtures::XTRANS_LAYOUT;
+        let mut xtrans = tan_cd_header(64);
+        xtrans.set("BAYERPAT", format!("'{layout}'"));
+        let mut bottom_up = xtrans.clone();
+        bottom_up.set("ROWORDER", "'BOTTOM-UP'".to_string());
+        bottom_up.set("NAXIS2", "12".to_string());
+        for header in [&xtrans, &bottom_up] {
+            for op in ALL_OPS {
+                let err = geometry_header(header, op, (12, 18)).unwrap_err().to_string();
+                for needle in [op.name(), "X-Trans", "debayered channels", "6x6 remap is not implemented"] {
+                    assert!(err.contains(needle), "{}: missing {needle:?} in {err}", op.name());
+                }
+            }
+        }
+        let mut bayer = tan_cd_header(64);
+        bayer.set("BAYERPAT", "'RGGB'".to_string());
+        let flip = geometry_header(&bayer, GeometryOp::FlipH, (4, 6)).unwrap();
+        assert_eq!(text(&flip, "BAYERPAT"), Some("GRBG"));
+    }
+
+    #[test]
+    fn a_bottom_up_xtrans_header_without_a_height_is_still_refused() {
+        let layout = crate::core::imaging::cfa::test_fixtures::XTRANS_LAYOUT;
+        let mut header = HduHeader::empty();
+        header.set("BAYERPAT", format!("'{layout}'"));
+        header.set("ROWORDER", "'BOTTOM-UP'".to_string());
+        for op in ALL_OPS {
+            let refused = geometry_header(&header, op, (12, 18));
+            assert!(
+                refused.as_ref().is_err_and(|e| e.to_string().contains("X-Trans")),
+                "{}: {:?}",
+                op.name(),
+                refused.map(|h| history(&h))
+            );
+        }
     }
 
     #[test]

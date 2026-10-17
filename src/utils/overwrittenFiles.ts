@@ -13,6 +13,7 @@ export function writtenFitsPaths(result: unknown): string[] {
       if (typeof path === "string" && path.length > 0) out.push(path);
     }
     if (Array.isArray(record.results)) record.results.forEach(visit);
+    if (Array.isArray(record.planes)) record.planes.forEach(visit);
   };
   visit(result);
   return out;

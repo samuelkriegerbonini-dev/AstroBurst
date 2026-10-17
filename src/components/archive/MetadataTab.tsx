@@ -5,6 +5,11 @@ import type { ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { allColumns, metadataSections, type MetaRow } from "./logic/metadataView";
 import { curlCommand, requestJson, rowTsv } from "./logic/copyBuilders";
+import { availabilityOf, footprintFor, shownInput, useFootprints } from "./state/footprintsStore";
+import { datasetPeek, latestPeek, usePeeks } from "./state/peeksStore";
+import { sRegionNote } from "./logic/footprintView";
+import { peekPolygons, peekSummary } from "./logic/peekView";
+import { footprintInput, footprintSummary } from "../../utils/mastFootprints";
 
 interface MetadataTabProps {
   state: ArchiveState;
@@ -21,8 +26,18 @@ function copyLabel(r: MetaRow, text: string): string {
 
 export default function MetadataTab({ state, ctl, row, mission }: MetadataTabProps) {
   const [filter, setFilter] = useState("");
+  const footprints = useFootprints();
+  const peeks = usePeeks();
+  const shapes = datasetPeek(peeks, mission.id, row.datasetId);
+  const peek = shapes ?? latestPeek(peeks, mission.id, row.datasetId);
+  const fresh = footprintInput(row, shapes ? peekPolygons(shapes) : null);
+  const input = shownInput(footprints, fresh);
+  const drawn = footprintFor(footprints, input);
+  const summary = drawn && footprints.target ? footprintSummary(drawn, footprints.target.name) : null;
+  const footprintNote = sRegionNote(summary, availabilityOf(footprints, input));
   const results = state.results;
-  const sections = metadataSections({ row, resolved: state.resolved, searchPosition: results?.searchPosition ?? null }).filter((s) => s.rows.length > 0);
+  const peekMeta = peek ? { filename: peek.filename, summary: peekSummary(peek), polygons: fresh.polygons?.length ?? 0 } : null;
+  const sections = metadataSections({ row, resolved: state.resolved, searchPosition: results?.searchPosition ?? null, footprintNote, peek: peekMeta }).filter((s) => s.rows.length > 0);
   const columns = results ? allColumns(row, results.columns, filter) : [];
   const total = results?.columns.length ?? 0;
   const body = results?.requestBody ?? null;

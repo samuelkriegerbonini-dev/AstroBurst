@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -25,6 +26,8 @@ const MAX_WAT_CARDS: usize = 999;
 const WAT1_WAVELENGTH_LABEL: &str = "label=wavelength";
 const SUPPORTED_BITPIX: [i64; 6] = [8, 16, 32, 64, -32, -64];
 const F32_WIDENED_BITPIX: i64 = -64;
+const CSV_EXTENSION: &str = "csv";
+const MAX_SPECTRUM_CSV_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -90,7 +93,43 @@ pub fn read_1d_array(path: &str, hdu: usize) -> Result<(HduHeader, Wcs1dArrays)>
     ))
 }
 
+fn is_spectrum_csv_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(CSV_EXTENSION))
+}
+
+pub fn read_spectrum_csv(path: &str) -> Result<Spectrum1d> {
+    read_spectrum_csv_capped(path, MAX_SPECTRUM_CSV_BYTES)
+}
+
+fn read_spectrum_csv_capped(path: &str, max_bytes: u64) -> Result<Spectrum1d> {
+    let file = File::open(path).with_context(|| format!("Failed to open {path}"))?;
+    let size = file
+        .metadata()
+        .with_context(|| format!("Failed to read the size of {path}"))?
+        .len();
+    if size > max_bytes {
+        bail!("{path} holds {size} bytes, more than the {max_bytes} bytes a spectrum CSV may hold");
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("Failed to read {path}"))?;
+    let text = String::from_utf8(bytes).map_err(|e| {
+        anyhow::anyhow!("{path} is not UTF-8 text ({e}): a spectrum CSV must be UTF-8")
+    })?;
+    Spectrum1d::from_csv(path, &text).map_err(anyhow::Error::msg)
+}
+
 pub fn load_spectrum1d(path: &str, hdu: Option<usize>) -> Result<Spectrum1d> {
+    if is_spectrum_csv_path(path) {
+        if let Some(n) = hdu {
+            bail!("HDU {n} requested but {path} is a CSV spectrum, which has no HDUs");
+        }
+        return read_spectrum_csv(path);
+    }
     let (readable, _decompressed) = resolve_gzip(Path::new(path))?;
     let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
     let tables = extract1d_tables(&file)?;
@@ -1021,6 +1060,58 @@ mod tests {
             assert!(s3d.is_file(), "{} is missing", s3d.display());
             assert_eq!(kind_of(&s3d), None, "{}", s3d.display());
         }
+    }
+
+    const SMALL_CSV: &str =
+        "# flux_unit: Jy\nwavelength_vacuum_um,flux,err\n2.0,1.5,0.1\n2.1,2.5,0.2\n";
+
+    #[test]
+    fn load_spectrum1d_reads_a_csv_path_as_a_csv_document_and_refuses_an_hdu() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exported_spectrum.CSV");
+        std::fs::write(&path, SMALL_CSV).unwrap();
+        let s = load_spectrum1d(text(&path), None).unwrap();
+        assert_eq!(
+            s.source,
+            Spectrum1dSource::Csv {
+                path: text(&path).to_string()
+            }
+        );
+        assert_eq!(s.flux, vec![1.5, 2.5]);
+        assert_eq!(s.err, Some(vec![0.1, 0.2]));
+        assert_eq!(s.flux_unit.as_deref(), Some("Jy"));
+        let err = load_spectrum1d(text(&path), Some(1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("HDU 1") && err.contains("CSV"), "{err}");
+    }
+
+    #[test]
+    fn read_spectrum_csv_refuses_a_file_above_the_cap_text_that_is_not_utf8_and_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spectrum.csv");
+        std::fs::write(&path, SMALL_CSV).unwrap();
+        let limit = SMALL_CSV.len() as u64 - 1;
+        let err = read_spectrum_csv_capped(text(&path), limit)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&SMALL_CSV.len().to_string()) && err.contains(&limit.to_string()),
+            "{err}"
+        );
+        assert_eq!(
+            read_spectrum_csv_capped(text(&path), SMALL_CSV.len() as u64)
+                .unwrap()
+                .n_rows,
+            2
+        );
+        let binary = dir.path().join("binary.csv");
+        std::fs::write(&binary, [0xff_u8, 0xfe, 0x00, 0x41]).unwrap();
+        let err = read_spectrum_csv(text(&binary)).unwrap_err().to_string();
+        assert!(err.contains("UTF-8"), "{err}");
+        let missing = dir.path().join("missing.csv");
+        let err = read_spectrum_csv(text(&missing)).unwrap_err().to_string();
+        assert!(err.contains("Failed to open"), "{err}");
     }
 
     #[test]

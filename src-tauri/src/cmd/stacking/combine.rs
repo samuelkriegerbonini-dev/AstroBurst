@@ -22,8 +22,8 @@ use crate::types::constants::{
     EVENT_CALIBRATE_PROGRESS, EVENT_STACK_PROGRESS, KERNEL_GAUSSIAN, KERNEL_LANCZOS3, STAGE_RENDER, STAGE_SAVE,
     RES_CONFIDENCE, RES_DARK_SCALE, RES_DIMENSIONS, RES_DX, RES_DY, RES_ELAPSED_MS, RES_FITS_PATH, RES_FRAME_COUNT,
     RES_HAS_BIAS, RES_HAS_DARK, RES_HAS_FLAT, RES_HAS_FLAT_DARK, RES_MAX, RES_MEAN, RES_METHOD_USED, RES_MIN,
-    RES_OFFSETS, RES_PATH, RES_PNG_PATH, RES_REJECTED_PIXELS, RES_SCALE, RES_SIGMA, RES_STATS,
-    RES_WARNINGS, RES_WEIGHTS_APPLIED,
+    RES_OFFSETS, RES_PATH, RES_PNG_PATH, RES_REJECTED_PIXELS, RES_SCALE, RES_SIGMA, RES_STAR_MATCH_REJECTION,
+    RES_STATS, RES_WARNINGS, RES_WEIGHTS_APPLIED,
 };
 use crate::types::header::HduHeader;
 use crate::types::image::ImageStats;
@@ -83,6 +83,7 @@ fn alignment_json(paths: &[String], alignment: &[FrameAlignment]) -> Vec<serde_j
                 RES_METHOD_USED: frame.method,
                 RES_CONFIDENCE: frame.confidence,
                 RES_INCLUDED: frame.included,
+                RES_STAR_MATCH_REJECTION: frame.rejection,
             })
         })
         .collect()
@@ -475,7 +476,7 @@ mod tests {
         let paths = vec!["a.fits".to_string(), "b.fits".to_string()];
         let alignment = vec![
             FrameAlignment::reference(),
-            FrameAlignment { method: "phase_correlation_identity".into(), confidence: Some(2.5), included: false },
+            FrameAlignment { method: "phase_correlation_identity".into(), confidence: Some(2.5), included: false, rejection: None },
         ];
         let report = alignment_json(&paths, &alignment);
         assert_eq!(report.len(), 2);
@@ -484,6 +485,23 @@ mod tests {
         assert_eq!(report[1][RES_METHOD_USED], "phase_correlation_identity");
         assert_eq!(report[1][RES_INCLUDED], false);
         assert_eq!(report[1][RES_CONFIDENCE], 2.5);
+    }
+
+    #[test]
+    fn alignment_report_carries_the_star_match_rejection() {
+        let paths = vec!["a.fits".to_string(), "b.fits".to_string()];
+        let alignment = vec![
+            FrameAlignment::reference(),
+            FrameAlignment {
+                method: "identity".into(),
+                confidence: Some(0.0),
+                included: false,
+                rejection: Some("reflection (det=-1.000) rejected".into()),
+            },
+        ];
+        let report = alignment_json(&paths, &alignment);
+        assert_eq!(report[0]["star_match_rejection"], serde_json::Value::Null, "{report:?}");
+        assert_eq!(report[1]["star_match_rejection"], "reflection (det=-1.000) rejected", "{report:?}");
     }
 
     #[test]
@@ -697,8 +715,8 @@ mod tests {
             weights_applied: vec![None; 3],
             alignment: vec![
                 FrameAlignment::reference(),
-                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.1), included: false },
-                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.9), included: true },
+                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.1), included: false, rejection: None },
+                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.9), included: true, rejection: None },
             ],
             warnings: Vec::new(),
         };
@@ -832,7 +850,7 @@ mod tests {
             weights_applied: vec![Some(0.4), None, Some(1.6)],
             alignment: vec![
                 FrameAlignment::reference(),
-                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.1), included: false },
+                FrameAlignment { method: "phase_correlation".into(), confidence: Some(0.1), included: false, rejection: None },
                 FrameAlignment::unaligned(),
             ],
             warnings: Vec::new(),

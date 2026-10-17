@@ -53,6 +53,8 @@ pub struct CatalogRow {
     pub rp: Option<f64>,
     pub bp_rp: Option<f64>,
     pub parallax_mas: Option<f64>,
+    #[serde(default)]
+    pub teff_k: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -218,6 +220,7 @@ pub fn parse_gaia_tsv(body: &str) -> Result<Vec<CatalogRow>, String> {
             rp,
             bp_rp,
             parallax_mas: cell_f64(&fields, map.parallax),
+            teff_k: None,
         });
     }
     Ok(rows)
@@ -647,6 +650,7 @@ mod tests {
             rp: None,
             bp_rp: None,
             parallax_mas: None,
+            teff_k: None,
         }
     }
 

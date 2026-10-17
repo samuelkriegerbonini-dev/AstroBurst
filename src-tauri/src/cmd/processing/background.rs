@@ -268,10 +268,9 @@ mod tests {
     async fn run_batch(mode: &str, tag: &str) -> serde_json::Value {
         let dir = tempfile::tempdir().unwrap();
         let bins: Vec<String> = ["r", "g"].iter().map(|c| format!("bg_batch_{tag}_{c}")).collect();
-        let inputs: Vec<String> = bins.iter().map(|b| format!("__bg_batch_input_{b}")).collect();
-        for (i, key) in inputs.iter().enumerate() {
-            let arr = sky(i);
-            GLOBAL_IMAGE_CACHE.insert_synthetic(key, Arc::new(arr.clone()), compute_image_stats(&arr));
+        let inputs: Vec<String> = bins.iter().map(|b| dir.path().join(format!("{b}.fits")).to_str().unwrap().to_string()).collect();
+        for (i, path) in inputs.iter().enumerate() {
+            crate::infra::fits::writer::write_fits_mono(path, &sky(i), None).unwrap();
         }
         let value = extract_background_batch_cmd(
             inputs.clone(),
@@ -308,6 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn sigma_clip_values_that_would_poison_the_sky_level_are_refused() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
         for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e300, 1e-60] {
             let err = background_config(8, 2, bad, 3, "subtract").unwrap_err().to_string();
             assert!(err.contains("sigma_clip"), "{bad}: {err}");
@@ -355,6 +355,7 @@ mod tests {
 
     #[test]
     fn a_wizard_extraction_leaves_the_processing_previews_of_the_same_file_alone() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap();
         let src = sky_file(&dir, "M42.fits");
@@ -412,12 +413,12 @@ mod tests {
     async fn wizard_background_entries_carry_the_header_of_their_grid() {
         let _wizard = crate::infra::cache::lock_wizard_entries();
         let dir = tempfile::tempdir().unwrap();
-        let inputs = ["__bg_wcs_input_r".to_string(), "__bg_wcs_input_g".to_string()];
+        let inputs = ["bg_wcs_input_r", "bg_wcs_input_g"].map(|n| dir.path().join(format!("{n}.fits")).to_str().unwrap().to_string());
         let bins = ["bgw_r".to_string(), "bgw_g".to_string()];
         let full = sky(0);
         let half = Array2::from_shape_fn((32, 32), |(y, x)| full[[2 * y, 2 * x]]);
-        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&inputs[0], Arc::new(full.clone()), compute_image_stats(&full), Some(solved_header(10.0, 1e-5)));
-        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(&inputs[1], Arc::new(half.clone()), compute_image_stats(&half), Some(solved_header(10.0, 2e-5)));
+        crate::infra::fits::writer::write_fits_mono(&inputs[0], &full, Some(&solved_header(10.0, 1e-5))).unwrap();
+        crate::infra::fits::writer::write_fits_mono(&inputs[1], &half, Some(&solved_header(10.0, 2e-5))).unwrap();
 
         let value = extract_background_batch_cmd(
             inputs.to_vec(),
@@ -478,6 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn modes_that_fit_no_model_report_no_residual_instead_of_a_perfect_one() {
+        let _wizard = crate::infra::cache::lock_wizard_entries();
         let deband = run_batch("deband_rows", "deband").await;
         assert!(deband[RES_RMS_RESIDUAL].is_null(), "{deband}");
         for r in deband["results"].as_array().unwrap() {
@@ -584,18 +586,19 @@ mod tests {
         (single, batch)
     }
 
-    fn insert_with_cards(key: &str, cards: &[(&str, String)]) {
-        let arr = sky(1);
+    fn fits_with_cards(dir: &tempfile::TempDir, name: &str, cards: &[(&str, String)]) -> String {
+        let path = dir.path().join(format!("{name}.fits")).to_str().unwrap().to_string();
         let mut header = crate::types::header::HduHeader::empty();
         for (k, v) in cards {
             header.set(k, v.clone());
         }
-        GLOBAL_IMAGE_CACHE.insert_synthetic_with_header(key, Arc::new(arr.clone()), compute_image_stats(&arr), Some(header));
+        crate::infra::fits::writer::write_fits_mono(&path, &sky(1), Some(&header)).unwrap();
+        path
     }
 
-    fn insert_with_exp_type(key: &str, exp_type: Option<&str>) {
+    fn fits_with_exp_type(dir: &tempfile::TempDir, name: &str, exp_type: Option<&str>) -> String {
         let cards: Vec<(&str, String)> = exp_type.map(|v| ("EXP_TYPE", format!("'{v}'"))).into_iter().collect();
-        insert_with_cards(key, &cards);
+        fits_with_cards(dir, name, &cards)
     }
 
     #[tokio::test]
@@ -604,8 +607,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap().to_string();
         for (card, pattern) in [("BAYERPAT", "RGGB"), ("BAYERPAT", "GRBG"), ("COLORTYP", "BGGR")] {
-            let key = format!("__deband_cfa_{card}_{pattern}");
-            insert_with_cards(&key, &[(card, format!("'{pattern}'"))]);
+            let key = fits_with_cards(&dir, &format!("deband_cfa_{card}_{pattern}"), &[(card, format!("'{pattern}'"))]);
             let (single, batch) = deband_both_commands(&key, &out).await;
             GLOBAL_IMAGE_CACHE.remove(&key);
             let needle = format!("Bayer mosaic (BAYERPAT={pattern})");
@@ -615,10 +617,9 @@ mod tests {
             let batch_err = batch.expect_err(pattern);
             assert!(batch_err.contains(&needle), "{card}={pattern}: {batch_err}");
         }
-        let key = "__deband_cfa_subtract";
-        insert_with_cards(key, &[("BAYERPAT", "'RGGB'".to_string())]);
-        let subtract = run_extract_background(key, &out, &config(8), "subtract", 3, None, None);
-        GLOBAL_IMAGE_CACHE.remove(key);
+        let key = fits_with_cards(&dir, "deband_cfa_subtract", &[("BAYERPAT", "'RGGB'".to_string())]);
+        let subtract = run_extract_background(&key, &out, &config(8), "subtract", 3, None, None);
+        GLOBAL_IMAGE_CACHE.remove(&key);
         let subtract = subtract.unwrap_or_else(|e| panic!("subtract on a Bayer frame: {e:#}"));
         GLOBAL_IMAGE_CACHE.remove(subtract[RES_CORRECTED_FITS].as_str().unwrap());
     }
@@ -629,8 +630,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap().to_string();
         for exp_type in ["NRS_IFU", "NRS_FIXEDSLIT", "MIR_MRS", "MIR_LRS-FIXEDSLIT", "NIS_SOSS", "NIS_WFSS", "NRC_GRISM", "NRC_WFSS", "NRC_TSGRISM"] {
-            let key = format!("__deband_guard_{}", sanitize_fragment(exp_type));
-            insert_with_exp_type(&key, Some(exp_type));
+            let key = fits_with_exp_type(&dir, &format!("deband_guard_{}", sanitize_fragment(exp_type)), Some(exp_type));
             let (single, batch) = deband_both_commands(&key, &out).await;
             GLOBAL_IMAGE_CACHE.remove(&key);
             let single_err = format!("{:#}", single.expect_err(exp_type));
@@ -640,8 +640,7 @@ mod tests {
             assert!(batch_err.contains("dispersed exposure (EXP_TYPE="), "{exp_type}: {batch_err}");
         }
         for exp_type in [Some("NRC_IMAGE"), Some("MIR_IMAGE"), Some("NIS_IMAGE"), None] {
-            let key = format!("__deband_guard_ok_{}", exp_type.unwrap_or("none"));
-            insert_with_exp_type(&key, exp_type);
+            let key = fits_with_exp_type(&dir, &format!("deband_guard_ok_{}", exp_type.unwrap_or("none")), exp_type);
             let (single, batch) = deband_both_commands(&key, &out).await;
             GLOBAL_IMAGE_CACHE.remove(&key);
             let single = single.unwrap_or_else(|e| panic!("{exp_type:?}: {e:#}"));
@@ -658,10 +657,9 @@ mod tests {
         let _wizard = crate::infra::cache::lock_wizard_entries();
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap().to_string();
-        let key = "__deband_axis_token_input";
-        insert_with_exp_type(key, Some("NRC_IMAGE"));
+        let key = fits_with_exp_type(&dir, "deband_axis_token_input", Some("NRC_IMAGE"));
         let batch = extract_background_batch_cmd(
-            vec![key.to_string()],
+            vec![key.clone()],
             vec!["axis_token".to_string()],
             out,
             8,
@@ -673,7 +671,7 @@ mod tests {
             None,
         )
         .await;
-        GLOBAL_IMAGE_CACHE.remove(key);
+        GLOBAL_IMAGE_CACHE.remove(&key);
         let batch = batch.unwrap();
         let results = batch["results"].as_array().unwrap();
         for r in results {
@@ -719,9 +717,8 @@ mod tests {
         let _wizard = crate::infra::cache::lock_wizard_entries();
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap().to_string();
-        let input = "__bg_token_input_r".to_string();
-        let arr = sky(2);
-        GLOBAL_IMAGE_CACHE.insert_synthetic(&input, Arc::new(arr.clone()), compute_image_stats(&arr));
+        let input = dir.path().join("bg_token_input_r.fits").to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&input, &sky(2), None).unwrap();
         let run = |token: Option<&str>| {
             extract_background_batch_cmd(
                 vec![input.clone()],
@@ -756,9 +753,8 @@ mod tests {
         let _wizard = crate::infra::cache::lock_wizard_entries();
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap().to_string();
-        let input = "__bg_late_input_r".to_string();
-        let arr = sky(4);
-        GLOBAL_IMAGE_CACHE.insert_synthetic(&input, Arc::new(arr.clone()), compute_image_stats(&arr));
+        let input = dir.path().join("bg_late_input_r.fits").to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&input, &sky(4), None).unwrap();
         let run = |token: Option<&str>| {
             extract_background_batch_cmd(
                 vec![input.clone()],

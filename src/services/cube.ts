@@ -2,6 +2,7 @@ import { typedInvoke, withPreview, getOutputDir, getPreviewUrl } from "../infras
 import type {
   CollapseRangeMode,
   CollapseRangeResult,
+  ContinuumWindows,
   CubeDims,
   CubeSpectrum,
   LineFitConfig,
@@ -9,7 +10,9 @@ import type {
   LineFitSpaxel,
   MomentConfig,
   MomentMapsResult,
+  NullableSeries,
   RegionSpectrum,
+  RegionSpectrumWire,
 } from "../shared/types/cube";
 import type { RegionShape } from "../shared/types/regions";
 import { parseImageRef } from "../utils/imageRef";
@@ -66,12 +69,37 @@ export async function getCubeSpectrum(path: string, x: number, y: number): Promi
   return toCubeSpectrum(raw, x, y);
 }
 
-export function getCubeSpectrumRegion(
+function nanForNull(series: NullableSeries): number[] {
+  return series.map((value) => value ?? Number.NaN);
+}
+
+function optionalSeries(series: NullableSeries | null | undefined): number[] | null {
+  return series ? nanForNull(series) : null;
+}
+
+export function fromRegionSpectrumWire(wire: RegionSpectrumWire): RegionSpectrum {
+  return {
+    ...wire,
+    sum: nanForNull(wire.sum),
+    mean: nanForNull(wire.mean),
+    bg_per_pixel: optionalSeries(wire.bg_per_pixel),
+    flux_jy: optionalSeries(wire.flux_jy),
+    err: optionalSeries(wire.err),
+    err_scaled: optionalSeries(wire.err_scaled),
+    mean_err: optionalSeries(wire.mean_err),
+    bg_err_per_pixel: optionalSeries(wire.bg_err_per_pixel),
+    flux_jy_err: optionalSeries(wire.flux_jy_err),
+  };
+}
+
+export async function getCubeSpectrumRegion(
   path: string,
   shape: RegionShape,
   background: RegionShape | null,
+  continuum: ContinuumWindows | null = null,
 ): Promise<RegionSpectrum> {
-  return typedInvoke<RegionSpectrum>("get_cube_spectrum_region_cmd", { path, shape, background });
+  const wire = await typedInvoke<RegionSpectrumWire>("get_cube_spectrum_region_cmd", { path, shape, background, continuum });
+  return fromRegionSpectrumWire(wire);
 }
 
 export function collapseCubeRange(

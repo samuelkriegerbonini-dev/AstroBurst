@@ -26,6 +26,7 @@ const QUERY: MastQuery = {
   program: null,
   datasetId: null,
   filters: { level: "combined" },
+  preset: null,
   sort: [],
   offset: 0,
   limit: 200,

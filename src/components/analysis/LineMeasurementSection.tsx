@@ -4,6 +4,15 @@ import type { LineMeasurement, LineModel } from "../../shared/types/spectral";
 import { LINE_MODELS } from "../../shared/types/spectral";
 import { lineMeasurementCsv, lineMeasurementRows, spectrumSourceLabel } from "../../utils/lineMeasure";
 
+export interface LineErrControls {
+  useErr: boolean;
+  onUseErr: (useErr: boolean) => void;
+  useDq: boolean;
+  onUseDq: (useDq: boolean) => void;
+  errAvailable: boolean;
+  dqAvailable: boolean;
+}
+
 interface LineMeasurementSectionProps {
   result: LineMeasurement | null;
   loading: boolean;
@@ -13,6 +22,7 @@ interface LineMeasurementSectionProps {
   onMeasure: () => void;
   disabled: boolean;
   disabledHint: string | null;
+  errControls?: LineErrControls | null;
 }
 
 const ACCENT = "var(--ab-violet)";
@@ -62,6 +72,7 @@ function LineMeasurementSection({
   onMeasure,
   disabled,
   disabledHint,
+  errControls = null,
 }: LineMeasurementSectionProps) {
   const modelId = useId();
   const [copied, setCopied] = useState(false);
@@ -112,6 +123,32 @@ function LineMeasurementSection({
           ))}
         </select>
         <MeasureBtn label="Measure line" loading={loading} disabled={disabled} onClick={onMeasure} />
+        {errControls && (
+          <>
+            <label className="flex items-center gap-1 text-zinc-500 cursor-pointer">
+              <input
+                type="checkbox"
+                aria-label="Weight by ERR"
+                checked={errControls.useErr}
+                onChange={(e) => errControls.onUseErr(e.target.checked)}
+                disabled={loading}
+              />
+              Weight by ERR
+            </label>
+            {!errControls.errAvailable && <span className="text-zinc-600">no ERR in this file</span>}
+            <label className="flex items-center gap-1 text-zinc-500 cursor-pointer">
+              <input
+                type="checkbox"
+                aria-label="Mask DQ channels"
+                checked={errControls.useDq}
+                onChange={(e) => errControls.onUseDq(e.target.checked)}
+                disabled={loading}
+              />
+              Mask DQ channels
+            </label>
+            {!errControls.dqAvailable && <span className="text-zinc-600">no DQ in this file</span>}
+          </>
+        )}
         {disabled && !loading && disabledHint && <span className="text-zinc-600">{disabledHint}</span>}
         {result && (
           <button

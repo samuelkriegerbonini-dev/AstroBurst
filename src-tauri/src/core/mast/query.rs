@@ -3,6 +3,7 @@ use serde_json::Value;
 use super::errors::bad_input;
 use super::ids::validate_dataset_id;
 use super::missions::{verified_server_sort, HST_DATASET_CONDITION_OK, JWST_FILTER_WILDCARD_OK};
+use super::presets::{self, PresetSpec};
 use super::types::{LevelFilter, MastCmdError, MastFilterValues, MastMissionId, MastQuery, MastWhere, SearchPosition};
 use crate::infra::mast::models::SearchParams;
 
@@ -16,7 +17,7 @@ pub const NAME_MAX: usize = 200;
 pub const PROGRAM_MAX: i64 = 99_999;
 pub const EMPTY_QUERY: &str = "Add a target, coordinates, programme or dataset id";
 
-const JWST_COLUMNS: [&str; 16] = [
+const JWST_COLUMNS: [&str; 17] = [
     "fileSetName",
     "productLevel",
     "targname",
@@ -33,6 +34,7 @@ const JWST_COLUMNS: [&str; 16] = [
     "access",
     "publicReleaseDate",
     "s_region",
+    "targtype",
 ];
 const HST_COLUMNS: [&str; 12] = [
     "sci_data_set_name",
@@ -77,6 +79,7 @@ pub struct ValidQuery {
     pub radius_arcmin: Option<f64>,
     pub radius_clamped: bool,
     pub conditions: Vec<(String, Value)>,
+    pub preset: Option<&'static PresetSpec>,
     pub sort: Vec<(String, bool)>,
     pub offset: i64,
     pub limit: i64,
@@ -198,7 +201,7 @@ fn parse_date(text: &str) -> Result<&str, MastCmdError> {
     date_value(text).ok_or_else(|| bad_input("date", "use the form YYYY-MM-DD"))
 }
 
-fn filter_conditions(mission: MastMissionId, filters: &MastFilterValues) -> Result<Vec<(String, Value)>, MastCmdError> {
+fn filter_conditions(mission: MastMissionId, filters: &MastFilterValues, preset: Option<&PresetSpec>) -> Result<Vec<(String, Value)>, MastCmdError> {
     let columns = filter_columns(mission);
     let mut conditions = Vec::new();
     if let (Some(column), Some(LevelFilter::Combined)) = (columns.level, filters.level) {
@@ -232,7 +235,17 @@ fn filter_conditions(mission: MastMissionId, filters: &MastFilterValues) -> Resu
     if let (Some(column), Some(true)) = (columns.public, filters.public_only) {
         conditions.push((column.to_owned(), Value::from("PUBLIC")));
     }
+    for (column, value) in preset.map(|preset| preset.conditions).unwrap_or_default() {
+        let value = Value::from(*value);
+        if !conditions.iter().any(|(present, existing)| present == column && *existing == value) {
+            conditions.push(((*column).to_owned(), value));
+        }
+    }
     Ok(conditions)
+}
+
+fn preset_of(query: &MastQuery) -> Result<Option<&'static PresetSpec>, MastCmdError> {
+    trimmed(&query.preset).map(|id| presets::find(query.mission, id)).transpose()
 }
 
 pub fn validate_name(name: &str) -> Result<String, MastCmdError> {
@@ -314,7 +327,8 @@ pub fn validate(query: &MastQuery) -> Result<ValidQuery, MastCmdError> {
     if query.limit != PAGE_LIMIT {
         return Err(bad_input("limit", "must be 200"));
     }
-    conditions.extend(filter_conditions(query.mission, &query.filters)?);
+    let preset = preset_of(query)?;
+    conditions.extend(filter_conditions(query.mission, &query.filters, preset)?);
     let sort = query
         .sort
         .iter()
@@ -331,6 +345,7 @@ pub fn validate(query: &MastQuery) -> Result<ValidQuery, MastCmdError> {
         radius_arcmin,
         radius_clamped,
         conditions,
+        preset,
         sort,
         offset: query.offset,
         limit: query.limit,
@@ -377,6 +392,7 @@ mod tests {
             program: None,
             dataset_id: None,
             filters: MastFilterValues::default(),
+            preset: None,
             sort: Vec::new(),
             offset: 0,
             limit: PAGE_LIMIT,
@@ -635,7 +651,8 @@ mod tests {
             jwst["select_cols"],
             json!([
                 "fileSetName", "productLevel", "targname", "targ_ra", "targ_dec", "instrume", "exp_type", "filter",
-                "opticalElements", "program", "observtn", "date_obs", "effexptm", "access", "publicReleaseDate", "s_region"
+                "opticalElements", "program", "observtn", "date_obs", "effexptm", "access", "publicReleaseDate", "s_region",
+                "targtype"
             ])
         );
         let hst = serde_json::to_value(build_params(&validate(&m16(MastMissionId::Hst)).unwrap())).unwrap();
@@ -651,6 +668,88 @@ mod tests {
             let params = serde_json::to_value(build_params(&validate(&m16(mission)).unwrap())).unwrap();
             assert!(params.get("select_cols").is_none(), "{mission:?}");
         }
+    }
+
+    fn with_preset(id: &str) -> MastQuery {
+        let mut query = m16(MastMissionId::Jwst);
+        query.filters.level = Some(LevelFilter::Combined);
+        query.preset = Some(id.to_owned());
+        query
+    }
+
+    #[test]
+    fn presets_build_golden_requests_after_the_quick_filters() {
+        let select = json!([
+            "fileSetName", "productLevel", "targname", "targ_ra", "targ_dec", "instrume", "exp_type", "filter",
+            "opticalElements", "program", "observtn", "date_obs", "effexptm", "access", "publicReleaseDate", "s_region",
+            "targtype"
+        ]);
+        let request = |conditions: Value| {
+            json!({
+                "target": ["274.688 -13.792"],
+                "radius": 3.0,
+                "radius_units": "arcminutes",
+                "offset": 0,
+                "limit": 200,
+                "select_cols": select,
+                "conditions": conditions
+            })
+        };
+        for (id, conditions) in [
+            ("tso", json!([{"productLevel": "3"}, {"tsovisit": "t"}, {"exp_type": "NRS_BRIGHTOBJ,NIS_SOSS,MIR_LRS-SLITLESS,NRC_TSGRISM"}])),
+            ("ifu_cubes", json!([{"productLevel": "3"}, {"exp_type": "NRS_IFU,MIR_MRS"}])),
+            ("slit_spectra", json!([{"productLevel": "3"}, {"exp_type": "NRS_FIXEDSLIT,NRS_MSASPEC,MIR_LRS-FIXEDSLIT"}])),
+            ("spectra_1d", json!([{"productLevel": "3"}])),
+            ("psf_calibration", json!([{"productLevel": "3"}, {"is_psf": "t"}])),
+            ("pure_parallel", json!([{"productLevel": "3"}, {"visitype": "PARALLEL_PURE"}])),
+            ("pipeline_catalogs", json!([{"productLevel": "3"}])),
+        ] {
+            let valid = validate(&with_preset(id)).unwrap();
+            assert_eq!(valid.preset.map(|preset| preset.id), Some(id));
+            assert_eq!(serde_json::to_value(build_params(&valid)).unwrap(), request(conditions), "{id}");
+        }
+        let mut all_levels = with_preset("ifu_cubes");
+        all_levels.filters = MastFilterValues {
+            level: Some(LevelFilter::All),
+            instrument: Some("nirspec".into()),
+            date_from: Some("2023-01-01".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            conditions(&all_levels),
+            json!([{"instrume": "NIRSPEC"}, {"date_obs": ">=2023-01-01"}, {"exp_type": "NRS_IFU,MIR_MRS"}, {"productLevel": "3"}])
+        );
+        let mut programme = with_preset("tso");
+        programme.where_ = MastWhere::None;
+        programme.program = Some(1366);
+        assert_eq!(
+            conditions(&programme),
+            json!([{"program": 1366}, {"productLevel": "3"}, {"tsovisit": "t"}, {"exp_type": "NRS_BRIGHTOBJ,NIS_SOSS,MIR_LRS-SLITLESS,NRC_TSGRISM"}])
+        );
+        assert_ne!(
+            canonical_key(MastMissionId::Jwst, &build_params(&validate(&with_preset("tso")).unwrap())),
+            canonical_key(MastMissionId::Jwst, &build_params(&validate(&m16(MastMissionId::Jwst)).unwrap()))
+        );
+    }
+
+    #[test]
+    fn presets_are_validated_and_never_stand_in_for_a_target() {
+        let unknown = bad(&with_preset("transits"));
+        assert!(unknown.starts_with("preset: unknown preset; use tso, "), "{unknown}");
+        let mut hst = m16(MastMissionId::Hst);
+        hst.preset = Some("tso".into());
+        assert_eq!(bad(&hst), "preset: Presets are available for JWST");
+        let mut only_preset = with_preset("tso");
+        only_preset.where_ = MastWhere::None;
+        assert_eq!(bad(&only_preset), format!("query: {EMPTY_QUERY}"));
+        let mut blank = m16(MastMissionId::Jwst);
+        blank.preset = Some("  ".into());
+        let valid = validate(&blank).unwrap();
+        assert_eq!(valid.preset, None);
+        assert_eq!(conditions(&blank), Value::Null);
+        let padded = validate(&with_preset(" tso ")).unwrap();
+        assert_eq!(padded.preset.map(|preset| preset.id), Some("tso"));
+        assert_eq!(validate(&m16(MastMissionId::Jwst)).unwrap().preset, None);
     }
 
     #[test]

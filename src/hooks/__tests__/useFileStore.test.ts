@@ -1,52 +1,59 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { fileStore } from "../useFileStore";
+import { isSelectableStatus } from "../../utils/fileSelection";
 
-const X1D_REJECTION =
-  "Failed to load C:/d/jw_x1d.fits: HDU 1 (EXTRACT1D): BINTABLE extension, holds no image pixels; " +
-  "no HDU in this file holds a 2D image. " +
-  "HDUs: [0] EXTNAME=(none) XTENSION=PRIMARY NAXIS=0 -- header only, no pixel data; " +
-  "[1] EXTNAME=EXTRACT1D XTENSION=BINTABLE NAXIS=2 [232x1024] -- BINTABLE extension, holds no image pixels";
+const X1D_PROBE = { kind: "x1d", hdu: 1 } as const;
 
-describe("fileStore table-only files", () => {
+describe("fileStore spectrum files", () => {
   beforeEach(() => {
     fileStore.reset();
   });
 
-  it("a table-only x1d is listed as a table, not counted as a failure, and still completes the batch", () => {
+  it("a spectrum x1d is listed as a spectrum with its probe, not counted as a failure, and still completes the batch", () => {
     fileStore.addFiles([
       { name: "a_x1d.fits", path: "C:/d/a_x1d.fits", size: 1 },
       { name: "b_s3d.fits", path: "C:/d/b_s3d.fits", size: 1 },
     ]);
     const [x1d, cube] = fileStore.getFiles();
-    fileStore.fileTable(x1d.id, X1D_REJECTION);
+    fileStore.fileSpectrum(x1d.id, X1D_PROBE);
     fileStore.fileDone(cube.id, null);
-    expect(fileStore.getStats()).toMatchObject({ total: 2, done: 1, failed: 0, tables: 1 });
-    expect(fileStore.getFile(x1d.id)).toMatchObject({ status: "table", error: X1D_REJECTION });
+    expect(fileStore.getStats()).toMatchObject({ total: 2, done: 1, failed: 0, spectra: 1 });
+    expect(fileStore.getFile(x1d.id)).toMatchObject({ status: "spectrum", error: null, spectrum: X1D_PROBE });
     expect(fileStore.getIsComplete()).toBe(true);
     expect(fileStore.getProgress()).toBe(100);
     expect(fileStore.getDoneFiles().map((f) => f.id)).toEqual([cube.id]);
   });
 
-  it("an x1d-only batch completes with failed 0 and tables N", () => {
+  it("an x1d-only batch completes with failed 0 and spectra N and selects nothing on its own", () => {
     fileStore.addFiles([
       { name: "a_x1d.fits", path: "C:/d/a_x1d.fits", size: 1 },
       { name: "b_x1d.fits", path: "C:/d/b_x1d.fits", size: 1 },
       { name: "c_x1d.fits", path: "C:/d/c_x1d.fits", size: 1 },
     ]);
-    for (const f of fileStore.getFiles()) fileStore.fileTable(f.id, X1D_REJECTION);
-    expect(fileStore.getStats()).toMatchObject({ total: 3, done: 0, failed: 0, tables: 3 });
+    for (const f of fileStore.getFiles()) fileStore.fileSpectrum(f.id, X1D_PROBE);
+    expect(fileStore.getStats()).toMatchObject({ total: 3, done: 0, failed: 0, spectra: 3 });
     expect(fileStore.getIsComplete()).toBe(true);
     expect(fileStore.getProgress()).toBe(100);
     expect(fileStore.getSelected()).toBeNull();
   });
 
-  it("reset and addFiles start the tables counter at zero and keep real errors in failed", () => {
-    expect(fileStore.getStats()).toEqual({ total: 0, done: 0, failed: 0, tables: 0, totalBytes: 0 });
+  it("reset and addFiles start the spectra counter at zero and keep real errors in failed", () => {
+    expect(fileStore.getStats()).toEqual({ total: 0, done: 0, failed: 0, spectra: 0, totalBytes: 0 });
     fileStore.addFiles([{ name: "bad.fits", path: "C:/d/bad.fits", size: 1 }]);
     const [bad] = fileStore.getFiles();
     fileStore.fileError(bad.id, "No such file");
-    expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 1, tables: 0 });
+    expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 1, spectra: 0 });
     expect(fileStore.getIsComplete()).toBe(true);
+  });
+
+  it("a spectrum row has a selectable status and is never requeued as a failure", () => {
+    fileStore.addFiles([{ name: "a_x1d.fits", path: "C:/d/a_x1d.fits", size: 1 }]);
+    const [x1d] = fileStore.getFiles();
+    fileStore.fileSpectrum(x1d.id, X1D_PROBE);
+    const settled = fileStore.getFile(x1d.id);
+    expect(settled?.spectrum).toEqual(X1D_PROBE);
+    expect(isSelectableStatus(settled?.status ?? "")).toBe(true);
+    expect(fileStore.requeueFile(x1d.id)).toBe(false);
   });
 });
 

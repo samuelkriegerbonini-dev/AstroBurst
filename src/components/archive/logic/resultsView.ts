@@ -1,9 +1,10 @@
-import type { MastColumn, MastFilterValues, MastMission, MastMissionId, MastQuery, MastResolved, MastRow, MastSearchPage } from "../../../shared/types/mast";
+import type { MastColumn, MastFilterValues, MastMission, MastMissionId, MastPreset, MastQuery, MastResolved, MastRow, MastSearchPage } from "../../../shared/types/mast";
 import type { SortKey } from "./buildQuery";
 import { interpretQuery, type QueryKind } from "./interpretQuery";
 import { sortRows, type ResultSet } from "./paging";
 import type { ThumbQueue } from "./thumbQueue";
 import { coordinatesText } from "./copyBuilders";
+import { droppedText, presetById } from "./presetView";
 
 export interface TableSort {
   keys: SortKey[];
@@ -16,6 +17,8 @@ export interface SummaryView {
   decDeg: number | null;
   total: number;
   applied: string;
+  preset: string | null;
+  ignored: string | null;
 }
 
 export interface RunLike {
@@ -112,11 +115,13 @@ function headOf(results: ResultSet, resolved: MastResolved | null, query: MastQu
   return coords;
 }
 
-export function summaryView(input: { results: ResultSet; resolved: MastResolved | null; query: MastQuery | null; missionLabel: string }): SummaryView {
+export function summaryView(input: { results: ResultSet; resolved: MastResolved | null; query: MastQuery | null; missionLabel: string; presets?: readonly MastPreset[] }): SummaryView {
   const { results, resolved, query } = input;
   const parts: string[] = [];
   const head = headOf(results, resolved, query);
   if (head) parts.push(head);
+  const preset = presetById(input.presets ?? [], query?.preset);
+  if (preset) parts.push(`Preset ${preset.label}`);
   const usesCone = !query || (query.program === null && !query.datasetId);
   const radius = radiusOf(results, query);
   if (usesCone && radius !== null) parts.push(`r ${radius}'${results.radiusClamped ? " (clamped)" : ""}`);
@@ -126,7 +131,15 @@ export function summaryView(input: { results: ResultSet; resolved: MastResolved 
   const applied = appliedText(results.applied);
   parts.push(`MAST applied: ${applied}`);
   const pos = positionOf(results, query) ?? (resolved ? { raDeg: resolved.raDeg, decDeg: resolved.decDeg } : null);
-  return { text: parts.join(" · "), raDeg: pos?.raDeg ?? null, decDeg: pos?.decDeg ?? null, total, applied };
+  return {
+    text: parts.join(" · "),
+    raDeg: pos?.raDeg ?? null,
+    decDeg: pos?.decDeg ?? null,
+    total,
+    applied,
+    preset: preset?.id ?? null,
+    ignored: droppedText(results.droppedConditions),
+  };
 }
 
 export function filterSummary(filters: MastFilterValues): string {

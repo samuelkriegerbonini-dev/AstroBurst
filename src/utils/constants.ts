@@ -3,7 +3,7 @@ export const FILE_STATUS = {
   PROCESSING: "processing",
   DONE: "done",
   ERROR: "error",
-  TABLE: "table",
+  SPECTRUM: "spectrum",
 } as const;
 
-export const APP_VERSION = "v0.6.9.5";
+export const APP_VERSION = "v0.7.0";

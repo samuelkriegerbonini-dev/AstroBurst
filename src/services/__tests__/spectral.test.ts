@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, expectTypeOf, beforeEach, vi } from "vitest";
 
 const { typedInvokeMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn() }));
 
@@ -9,8 +9,38 @@ vi.mock("../../infrastructure/tauri", () => ({
   getPreviewUrl: vi.fn(),
 }));
 
-import { getSpectralAxis, measureSpectralLine, readX1dSpectrum } from "../spectral";
-import type { SpectrumSource } from "../../shared/types/spectral";
+import { getSpectralAxis, measureSpectralLine, readX1dSpectrum, type MeasureLineOptions } from "../spectral";
+import type {
+  FileSpectrumSource,
+  FluxErrorTerms,
+  LineMeasurement,
+  LineMeasurementSource,
+  SpectrumSource,
+} from "../../shared/types/spectral";
+
+describe("line measurement types", () => {
+  it("accepts a spectrum file source next to the cube sources", () => {
+    expectTypeOf<FileSpectrumSource>().toEqualTypeOf<{ kind: "file"; hdu: number | null }>();
+    expectTypeOf<LineMeasurementSource>().toEqualTypeOf<SpectrumSource | FileSpectrumSource>();
+    expectTypeOf<LineMeasurement["source"]>().toEqualTypeOf<LineMeasurementSource>();
+  });
+
+  it("carries the error and exclusion fields every measurement response holds", () => {
+    expectTypeOf<FluxErrorTerms>().toEqualTypeOf<{ pixel: number; level: number; slope: number }>();
+    expectTypeOf<LineMeasurement["err_used"]>().toEqualTypeOf<boolean>();
+    expectTypeOf<LineMeasurement["flux_err_terms"]>().toEqualTypeOf<FluxErrorTerms | null>();
+    expectTypeOf<LineMeasurement["n_dq_excluded"]>().toEqualTypeOf<number>();
+    expectTypeOf<LineMeasurement["n_nonfinite"]>().toEqualTypeOf<number>();
+    expectTypeOf<LineMeasurement["n_bad_err"]>().toEqualTypeOf<number>();
+    expectTypeOf<LineMeasurement["err_source"]>().toEqualTypeOf<string>();
+  });
+
+  it("takes the ERR, DQ and air or vacuum options", () => {
+    expectTypeOf<MeasureLineOptions["useErr"]>().toEqualTypeOf<boolean | null | undefined>();
+    expectTypeOf<MeasureLineOptions["useDq"]>().toEqualTypeOf<boolean | null | undefined>();
+    expectTypeOf<MeasureLineOptions["wavelengthFrame"]>().toEqualTypeOf<"air" | "vacuum" | null | undefined>();
+  });
+});
 
 describe("measureSpectralLine", () => {
   beforeEach(() => {
@@ -32,6 +62,9 @@ describe("measureSpectralLine", () => {
       convention: "optical",
       model: "none",
       velocityShiftKms: null,
+      useErr: null,
+      useDq: null,
+      wavelengthFrame: null,
     });
   });
 
@@ -68,6 +101,36 @@ describe("measureSpectralLine", () => {
       convention: "radio",
       model: "gaussian",
       velocityShiftKms: -12.5,
+      useErr: null,
+      useDq: null,
+      wavelengthFrame: null,
+    });
+  });
+
+  it("sends the file source with the ERR, DQ and wavelength frame choices", async () => {
+    typedInvokeMock.mockResolvedValue({ flux: 1 });
+    const source: FileSpectrumSource = { kind: "file", hdu: 1 };
+    await measureSpectralLine("C:/d/hd.fits", source, {
+      z0: 100,
+      z1: 120,
+      restUm: 0.656461,
+      useErr: false,
+      useDq: true,
+      wavelengthFrame: "vacuum",
+    });
+    expect(typedInvokeMock).toHaveBeenCalledWith("measure_spectral_line_cmd", {
+      path: "C:/d/hd.fits",
+      source: { kind: "file", hdu: 1 },
+      z0: 100,
+      z1: 120,
+      continuum: null,
+      restUm: 0.656461,
+      convention: "optical",
+      model: "none",
+      velocityShiftKms: null,
+      useErr: false,
+      useDq: true,
+      wavelengthFrame: "vacuum",
     });
   });
 });

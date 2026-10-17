@@ -88,7 +88,7 @@ export function displayFilterValue(file: ChannelSource): string | null {
 }
 
 export function resolveFilterFromName(name: string): { code: string; nm: number } | null {
-  return filterCodeAndWavelengthNm(name.replace(/\.(fits?|fts|asdf)$/i, ""));
+  return filterCodeAndWavelengthNm(name.replace(/\.(?:(?:fits?|fts)(?:\.gz)?|asdf)$/i, ""));
 }
 
 export function resolveFileFilter(file: ChannelSource): { code: string; nm: number } | null {

@@ -366,6 +366,7 @@ mod tests {
             program: None,
             dataset_id: None,
             filters: MastFilterValues::default(),
+            preset: None,
             sort: Vec::new(),
             offset: 0,
             limit: PAGE_LIMIT,
