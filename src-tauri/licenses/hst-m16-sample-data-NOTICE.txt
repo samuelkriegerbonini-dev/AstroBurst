@@ -1,0 +1,7 @@
+Sample data shipped with AstroBurst: three HST/WFPC2 narrowband frames of the Eagle Nebula (M16)
+
+Files: sample-data/502nmos.fits ([OIII] 502 nm), sample-data/656nmos.fits (H-alpha 656 nm), sample-data/673nmos.fits ([SII] 673 nm)
+
+Credit: NASA, ESA, J. Hester and P. Scowen (Arizona State University). Observations with the Hubble Space Telescope (WFPC2, 1995), obtained from the Space Telescope Science Institute (STScI), operated by AURA under NASA contract NAS5-26555.
+
+Hubble data in the public archive is not subject to copyright and may be used freely; the credit line above is requested by STScI. See https://hubblesite.org/copyright and https://archive.stsci.edu/

@@ -366,13 +366,37 @@ fn register_frame(
     if method == AlignmentMethod::PhaseCorrelation {
         let pc = phase_correlation::phase_correlate(reference, target);
         if !phase_correlation::is_low_confidence(pc.confidence) && pair::offset_within_limits(pc.dy, pc.dx, rows, cols) {
-            let record = FrameAlignment {
-                method: "phase_correlation".into(),
-                confidence: Some(pc.confidence),
-                included: true,
-                rejection: None,
+            let shift = |rejection: Option<String>| {
+                let record = FrameAlignment {
+                    method: "phase_correlation".into(),
+                    confidence: Some(pc.confidence),
+                    included: true,
+                    rejection,
+                };
+                (Registration::Shift(pc.dx, pc.dy), record)
             };
-            return (Registration::Shift(pc.dx, pc.dy), record);
+            return match affine::check_translation_against_stars(reference, target, pc.dy, pc.dx) {
+                affine::TranslationCheck::Inconclusive | affine::TranslationCheck::Agrees => shift(None),
+                affine::TranslationCheck::FitRejected(reason) => shift(Some(reason)),
+                affine::TranslationCheck::Prefer(result) => {
+                    let record = FrameAlignment {
+                        method: result.method.to_string(),
+                        confidence: Some(result.confidence),
+                        included: true,
+                        rejection: result.rejection,
+                    };
+                    (Registration::Warped(affine::warp_image(target, &result.transform, rows, cols)), record)
+                }
+                affine::TranslationCheck::Refused(result) => {
+                    let record = FrameAlignment {
+                        method: result.method.to_string(),
+                        confidence: Some(result.confidence),
+                        included: false,
+                        rejection: result.rejection,
+                    };
+                    (Registration::Failed, record)
+                }
+            };
         }
     }
     let result = affine::align_channel_affine(reference, target);
@@ -484,6 +508,18 @@ pub fn drizzle_stack_staged(
                 Registration::Shift(dx, dy) => {
                     offsets.push((dx, dy));
                     frames.push(Cow::Borrowed(images_ref[1 + i].as_ref()));
+                    if let Some(reason) = record.rejection.as_deref() {
+                        let message = format!(
+                            "Frame {} of {} was drizzled on a {} shift (confidence {:.2}) after its star match was refused: {}",
+                            i + 2,
+                            total,
+                            record.method,
+                            record.confidence.unwrap_or(0.0),
+                            reason
+                        );
+                        log::warn!("{}", message);
+                        warnings.push(message);
+                    }
                 }
                 Registration::Warped(warped) => {
                     offsets.push((0.0, 0.0));
@@ -708,6 +744,49 @@ mod tests {
                 record.confidence.unwrap_or_default()
             )]
         );
+    }
+
+    #[test]
+    fn the_default_method_registers_a_rotated_frame_through_the_star_check_and_keeps_pc_for_a_plain_one() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let frames = vec![
+            a1_reference(A1_SIZE, A1_STARS),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(0.0)),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0)),
+        ];
+        let mut cfg = config(1.0);
+        cfg.align = true;
+        cfg.pixfrac = 1.0;
+        cfg.rejection = RejectionMethod::None;
+        assert_eq!(cfg.alignment_method, AlignmentMethod::PhaseCorrelation);
+        let result = drizzle_stack(&frames, &cfg).unwrap();
+        let identity = &result.alignment[1];
+        assert!(identity.included && identity.method == "phase_correlation", "{identity:?}");
+        let rotated = &result.alignment[2];
+        assert!(rotated.included, "{rotated:?}");
+        assert!(rotated.method == "affine" || rotated.method == "rigid", "{rotated:?}");
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn the_default_method_leaves_a_mirrored_frame_out_through_the_star_check() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let frames = vec![
+            a1_reference(A1_SIZE, A1_STARS),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(0.0)),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Mirrored),
+        ];
+        let mut cfg = config(1.0);
+        cfg.align = true;
+        cfg.pixfrac = 1.0;
+        cfg.rejection = RejectionMethod::None;
+        let result = drizzle_stack(&frames, &cfg).unwrap();
+        assert_eq!(result.frame_count, 2, "{:?}", result.alignment);
+        let mirrored = &result.alignment[2];
+        assert!(!mirrored.included, "{mirrored:?}");
+        assert!(mirrored.rejection.as_deref().unwrap_or_default().contains("reflection"), "{mirrored:?}");
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert!(result.warnings[0].contains("left out of the drizzle"), "{}", result.warnings[0]);
     }
 
     #[test]

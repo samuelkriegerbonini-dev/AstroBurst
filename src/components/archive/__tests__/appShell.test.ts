@@ -193,6 +193,41 @@ describe("EmptyState archive entry", () => {
   });
 });
 
+describe("EmptyState sample data entry", () => {
+  const base = { onBrowseFiles: () => {}, onSelectFolder: () => {} };
+
+  it("offers no sample data button unless onOpenSampleData is passed", () => {
+    const html = renderToStaticMarkup(createElement(EmptyState, base));
+    expect(html).not.toContain("Open sample data");
+    expect(html).not.toContain('data-testid="empty-open-sample"');
+  });
+
+  it("adds Open sample data naming the HST M16 frames after the archive button", () => {
+    vi.stubGlobal("navigator", { platform: "Win32" });
+    const html = renderToStaticMarkup(createElement(EmptyState, { ...base, onBrowseArchive: () => {}, onOpenSampleData: () => {} }));
+    const tag = /<button[^>]*data-testid="empty-open-sample"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(tag).toContain('type="button"');
+    expect(tag).toContain('class="ab-btn-secondary"');
+    const button = html.slice(html.indexOf(tag), html.indexOf("</button>", html.indexOf(tag)));
+    expect(button).toContain("Open sample data");
+    expect(html).toContain("HST narrowband frames of M16");
+    expect(html.indexOf("Browse the MAST archive")).toBeLessThan(html.indexOf("Open sample data"));
+  });
+
+  it("calls onOpenSampleData without letting the click reach the drop zone", () => {
+    const onOpenSampleData = vi.fn();
+    const onBrowseFiles = vi.fn();
+    const tree = EmptyState({ ...base, onBrowseFiles, onOpenSampleData });
+    const sample = buttons(tree).find((b) => textOf(b.props.children).includes("Open sample data"));
+    const event = clickEvent();
+    (sample?.props.onClick as (e: ReturnType<typeof clickEvent>) => void)(event);
+    expect(onOpenSampleData).toHaveBeenCalledTimes(1);
+    expect(onBrowseFiles).not.toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("ambient declarations for the archive", () => {
   it("declare the lucide icons the archive uses", () => {
     for (const icon of [Lock, LockOpen, KeyRound, Table, LayoutGrid, CloudOff, AudioWaveform, ChevronLeft, ExternalLink]) {

@@ -51,6 +51,7 @@ import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
 import { useLingeringVisibility } from "./hooks/useLingeringVisibility";
 import { isTauri } from "./infrastructure/tauri";
+import { sampleDataPaths } from "./services/sampleData";
 
 type ViewState = "empty" | "processing" | "complete";
 
@@ -222,6 +223,16 @@ export default function App() {
       input.click();
     }
   }, [handleFilesAdded]);
+
+  const handleOpenSampleData = useCallback(async () => {
+    try {
+      const { paths } = await sampleDataPaths();
+      const partition = partitionIncoming(paths);
+      setIngestReport(rejectionReport(partition));
+      handleFilesAdded(partition.accepted.map(astroFileFromPath));
+    } catch (err) { console.error("[AstroBurst] Sample data:", err); }
+  }, [handleFilesAdded]);
+  const openSampleData = isTauri() ? handleOpenSampleData : undefined;
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const shortcutsRef = useRef<HTMLDivElement>(null);
@@ -430,6 +441,7 @@ export default function App() {
       { id: "open-files", label: "Open FITS Files...", hint: "Ctrl+O", icon: FolderOpen, run: handleBrowseFiles },
       { id: "open-folder", label: "Open Folder...", icon: FolderOpen, run: handleSelectFolder },
     ];
+    if (openSampleData) acts.push({ id: "open-sample", label: "Open sample data (HST narrowband frames of M16)", keywords: ["Sample", "Example", "M16", "Eagle"], icon: Sparkles, run: openSampleData });
     if (view !== "empty") {
       for (const { tool, label } of paletteToolEntries(dockLayout, hasVisibleFile)) {
         acts.push({
@@ -466,7 +478,7 @@ export default function App() {
     acts.push(...archivePaletteActions);
     acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
     return acts;
-  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, handleExportZip, handleNewBatchClick, archivePaletteActions]);
+  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, openSampleData, handleExportZip, handleNewBatchClick, archivePaletteActions]);
 
   const handlePaletteSelectFile = useCallback((id: string) => {
     showWorkspace();
@@ -554,7 +566,7 @@ export default function App() {
                 <div data-testid="workspace-root" className="absolute inset-0" style={mode === "workspace" ? undefined : HIDDEN_LAYER} inert={mode !== "workspace"}>
                   {view === "empty" ? (
                     <div className="h-full flex items-center justify-center">
-                      <EmptyState onBrowseFiles={handleBrowseFiles} onSelectFolder={handleSelectFolder} onBrowseArchive={showArchive} />
+                      <EmptyState onBrowseFiles={handleBrowseFiles} onSelectFolder={handleSelectFolder} onBrowseArchive={showArchive} onOpenSampleData={openSampleData} />
                     </div>
                   ) : (
                     <CompositeProvider>

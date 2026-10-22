@@ -13,6 +13,55 @@ const MAX_OFFSET_FRACTION: f64 = 0.40;
 const MIN_SCALE: f64 = 0.70;
 const MAX_SCALE: f64 = 1.40;
 const MIN_REFLECTION_INLIERS: usize = 5;
+const TRANSLATION_AGREE_ROTATION_DEG: f64 = 0.3;
+const TRANSLATION_AGREE_SCALE: f64 = 0.01;
+const TRANSLATION_AGREE_PX: f64 = 2.0;
+const TRANSLATION_AGREE_FRACTION: f64 = 0.02;
+
+pub enum TranslationCheck {
+    Inconclusive,
+    Agrees,
+    Prefer(AffineAlignResult),
+    Refused(AffineAlignResult),
+    FitRejected(String),
+}
+
+pub fn check_translation_against_stars(
+    reference: &Array2<f32>,
+    target: &Array2<f32>,
+    dy: f64,
+    dx: f64,
+) -> TranslationCheck {
+    let (rows, cols) = reference.dim();
+    let ref_norm = normalize_for_detection(reference);
+    let tgt_norm = normalize_for_detection(target);
+    let ref_det = detect_stars(&ref_norm, DETECTION_SIGMA);
+    let tgt_det = detect_stars(&tgt_norm, DETECTION_SIGMA);
+    let params = &TriangleParams::ALIGNMENT;
+    let ref_stars = triangles::select_alignment_stars(&ref_det.stars, params.max_stars, rows, cols);
+    let tgt_stars = triangles::select_alignment_stars(&tgt_det.stars, params.max_stars, rows, cols);
+    match register_star_lists(&ref_stars, &tgt_stars, rows, cols, params) {
+        Ok(result) if result.method == AffineAlignMethod::Identity => TranslationCheck::Refused(result),
+        Ok(result) if agrees_with_translation(&result.transform, dy, dx, rows, cols) => TranslationCheck::Agrees,
+        Ok(result) => TranslationCheck::Prefer(result),
+        Err(Some(reason)) => TranslationCheck::FitRejected(reason),
+        Err(None) => TranslationCheck::Inconclusive,
+    }
+}
+
+fn agrees_with_translation(transform: &AffineTransform, dy: f64, dx: f64, rows: usize, cols: usize) -> bool {
+    if transform.rotation_deg().abs() > TRANSLATION_AGREE_ROTATION_DEG {
+        return false;
+    }
+    if (transform.scale_x() - 1.0).abs() > TRANSLATION_AGREE_SCALE || (transform.scale_y() - 1.0).abs() > TRANSLATION_AGREE_SCALE {
+        return false;
+    }
+    let (sy, sx) = center_displacement(transform, rows, cols);
+    let tolerance = TRANSLATION_AGREE_PX + TRANSLATION_AGREE_FRACTION * (dx * dx + dy * dy).sqrt();
+    let direct = ((sx - dx).powi(2) + (sy - dy).powi(2)).sqrt();
+    let inverse = ((sx + dx).powi(2) + (sy + dy).powi(2)).sqrt();
+    direct.min(inverse) <= tolerance
+}
 
 fn normalize_for_detection(image: &Array2<f32>) -> Array2<f32> {
     let len = image.len();

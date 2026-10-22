@@ -1,15 +1,17 @@
-import { Telescope, Upload, FolderOpen, Archive } from "lucide-react";
+import { Telescope, Upload, FolderOpen, Archive, Sparkles } from "lucide-react";
 import { SUPPORTED_EXTENSIONS } from "../utils/validation";
 
 interface EmptyStateProps {
   onBrowseFiles: () => void;
   onSelectFolder: () => void;
   onBrowseArchive?: () => void;
+  onOpenSampleData?: () => void;
 }
 
 const FORMAT_BADGES = SUPPORTED_EXTENSIONS.map((ext) => `.${ext}`);
+export const SAMPLE_DATA_HINT = "Three HST narrowband frames of M16 ship with the app";
 
-export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArchive }: EmptyStateProps) {
+export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArchive, onOpenSampleData }: EmptyStateProps) {
   const handleBrowse = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -26,6 +28,12 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
     e.preventDefault();
     e.stopPropagation();
     onBrowseArchive?.();
+  };
+
+  const handleSampleData = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onOpenSampleData?.();
   };
 
   const isMac = navigator.platform?.includes("Mac");
@@ -91,7 +99,16 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                   </kbd>
                 </button>
               )}
+              {onOpenSampleData && (
+                <button type="button" onClick={handleSampleData} className="ab-btn-secondary" data-testid="empty-open-sample" title={SAMPLE_DATA_HINT}>
+                  <Sparkles size={16} />
+                  Open sample data
+                </button>
+              )}
             </div>
+            {onOpenSampleData && (
+              <p className="text-zinc-500 text-xs -mt-2">{SAMPLE_DATA_HINT}</p>
+            )}
           </div>
         </div>
       </div>

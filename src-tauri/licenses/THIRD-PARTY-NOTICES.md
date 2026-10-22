@@ -42,3 +42,9 @@ Scope: the ports and crates listed below. The rest of the Rust and npm dependenc
 | iana-time-zone | 0.1.65 | MIT OR Apache-2.0. Linked only by the Linux and macOS builds, through chrono's `clock` feature on Unix targets. | https://github.com/strawlab/iana-time-zone | `iana-time-zone-LICENSE-MIT`, `iana-time-zone-LICENSE-APACHE` |
 | bzip2 | 0.5.2 | MIT OR Apache-2.0. A required dependency of every build: the catalogue store (`src-tauri/src/infra/catalog_store.rs`) decodes the bzip2-compressed Siril catalogue extract with it, and the ASDF reader (`src-tauri/src/infra/asdf/blocks.rs`) decodes bzip2 blocks. | https://github.com/trifectatechfoundation/bzip2-rs | `bzip2-LICENSE-MIT`, `bzip2-LICENSE-APACHE` |
 | bzip2-sys | 0.1.13+1.0.8 | MIT OR Apache-2.0 for the binding. It compiles the libbzip2 1.0.8 C sources it bundles on Windows, and on Linux and macOS when pkg-config finds no system libbzip2; `libbzip2-LICENSE` is the libbzip2 licence (BSD-style, copyright Julian R Seward) that the crate ships as `bzip2-1.0.8/LICENSE`. | https://github.com/alexcrichton/bzip2-rs | `bzip2-sys-LICENSE-MIT`, `bzip2-sys-LICENSE-APACHE`, `libbzip2-LICENSE` |
+
+## Data
+
+| Name | Version | Licence | URL | File |
+|---|---|---|---|---|
+| HST/WFPC2 M16 narrowband frames | 1995 observations, as shipped in `exampleFits/sample-data/` | Public-domain Hubble archive data; credit requested by STScI: NASA, ESA, J. Hester and P. Scowen (Arizona State University). Bundled with the installers under `sample-data/` for the Open sample data entry. | https://archive.stsci.edu/ | `hst-m16-sample-data-NOTICE.txt` |

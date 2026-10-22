@@ -33,3 +33,4 @@ pub mod pv;
 #[cfg(feature = "mast")]
 pub mod mast;
 pub mod catalog_store;
+pub mod sample_data;

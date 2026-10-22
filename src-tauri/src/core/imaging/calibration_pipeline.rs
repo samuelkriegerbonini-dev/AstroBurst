@@ -779,10 +779,24 @@ fn align_to_reference(
     );
     match pc {
         Ok(res) if res.method_used == "phase_correlation" => {
-            if res.offset.0.abs() < 0.05 && res.offset.1.abs() < 0.05 {
-                Ok(target.clone())
-            } else {
-                Ok(res.aligned)
+            use crate::core::alignment::affine::{self, TranslationCheck};
+            match affine::check_translation_against_stars(reference, target, res.offset.0, res.offset.1) {
+                TranslationCheck::Prefer(result) => Ok(affine::warp_image(target, &result.transform, rows, cols)),
+                TranslationCheck::Refused(result) => Err(match result.rejection {
+                    Some(reason) => format!("{}, confidence {:.2}: {}", result.method, result.confidence, reason),
+                    None => format!("{}, confidence {:.2}", result.method, result.confidence),
+                }),
+                TranslationCheck::FitRejected(reason) => {
+                    log::warn!("Pipeline kept a phase-correlation shift after its star match was refused: {reason}");
+                    Ok(res.aligned)
+                }
+                TranslationCheck::Inconclusive | TranslationCheck::Agrees => {
+                    if res.offset.0.abs() < 0.05 && res.offset.1.abs() < 0.05 {
+                        Ok(target.clone())
+                    } else {
+                        Ok(res.aligned)
+                    }
+                }
             }
         }
         _ => match crate::core::alignment::pair::align_pair(
@@ -1648,6 +1662,31 @@ mod tests {
                 "Channel 'L': frame 3 of 3 was left out of the stack: it could not be aligned to frame 1 (identity, confidence 0.00)"
                     .to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn the_pipeline_checks_a_confident_phase_shift_against_the_star_match() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let reference = a1_reference(A1_SIZE, A1_STARS);
+        let peak = reference.indexed_iter().max_by(|a, b| a.1.total_cmp(b.1)).map(|(idx, _)| idx).unwrap();
+        let channel = light_channel(vec![
+            reference.clone(),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0)),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Mirrored),
+        ]);
+        let res = run_batch_pipeline(vec![channel], &CalibrationMasters::default(), &aligned_mean_stack()).unwrap();
+        let stats = &res.stats.channels[0];
+        assert_eq!(stats.excluded_frames, vec![2], "{:?}", stats.warnings);
+        assert_eq!(stats.lights_after_rejection.len(), 2);
+        assert_eq!(stats.warnings.len(), 1, "{:?}", stats.warnings);
+        assert!(stats.warnings[0].contains("reflection"), "{:?}", stats.warnings);
+        let master = &res.master_channels[0].1;
+        assert!(
+            master[peak] >= reference[peak] * 0.75,
+            "the rotated frame diluted the star: {} vs {}",
+            master[peak],
+            reference[peak]
         );
     }
 
