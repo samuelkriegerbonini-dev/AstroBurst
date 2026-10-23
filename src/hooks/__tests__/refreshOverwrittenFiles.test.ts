@@ -7,7 +7,9 @@ vi.mock("../../services/fits", () => ({ processFitsFull: processFitsFullMock }))
 import { fileStore } from "../useFileStore";
 import { refreshOverwrittenFiles } from "../refreshOverwrittenFiles";
 import { registerFileIngest } from "../useFileIngest";
-import type { ProcessResult } from "../../shared/types";
+import { fileKeyOf } from "../../context/PreviewContext";
+import { pixelSourceVersion } from "../../utils/pixelSource";
+import type { ProcessedFile, ProcessResult } from "../../shared/types";
 
 function loaded(name: string, path: string, median: number): string {
   fileStore.addFiles([{ name, path, size: 0 }]);
@@ -41,6 +43,28 @@ describe("refreshOverwrittenFiles", () => {
     expect(fileStore.getFile(output)?.result?.stats?.median).toBe(0.6);
     expect(fileStore.getFile(output)?.result?.previewUrl).toMatch(/^asset:\/\/M42_arcsinh\.png\?v=\d+$/);
     expect(fileStore.getFile(source)?.result?.stats?.median).toBe(10);
+  });
+
+  it("gives a rewritten file that is open in the viewer a new pixel version, so the GPU pixels, scale limits and DQ mask are fetched again", async () => {
+    const PATH = "C:/data/mast/JWST/2739/xc1_i2d.fits";
+    const id = loaded("xc1_i2d.fits", PATH, 128);
+    fileStore.selectFile(id);
+    const before = fileStore.getFile(id) as ProcessedFile;
+    processFitsFullMock.mockResolvedValue({
+      png_path: "C:/out/xc1_i2d.png",
+      previewUrl: "asset://xc1_i2d.png",
+      dimensions: [256, 256],
+      elapsed_ms: 1,
+      stats: { min: 1000, max: 1510, mean: 1255, sigma: 147, median: 1255 },
+    });
+
+    expect(await refreshOverwrittenFiles({ output_path: PATH })).toEqual([id]);
+
+    const after = fileStore.getFile(id) as ProcessedFile;
+    expect(after.result?.stats?.mean).toBe(1255);
+    expect(fileKeyOf(after)).toBe(fileKeyOf(before));
+    expect(fileStore.getSelected()).toBe(id);
+    expect(pixelSourceVersion(after, null, 0)).not.toBe(pixelSourceVersion(before, null, 0));
   });
 
   it("does nothing when the step wrote no loaded file", async () => {

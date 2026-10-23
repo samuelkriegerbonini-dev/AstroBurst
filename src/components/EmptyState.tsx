@@ -1,17 +1,39 @@
-import { Telescope, Upload, FolderOpen, Archive, Sparkles } from "lucide-react";
+import { Telescope, Upload, FolderOpen, Archive, Sparkles, Download, RotateCcw, X, type LucideIcon } from "lucide-react";
 import { SUPPORTED_EXTENSIONS } from "../utils/validation";
+import { formatBytes } from "./archive/logic/productView";
+import ProgressBar from "./file/ProgressBar";
+import type { SampleControls } from "../hooks/useSampleData";
 
 interface EmptyStateProps {
   onBrowseFiles: () => void;
   onSelectFolder: () => void;
   onBrowseArchive?: () => void;
-  onOpenSampleData?: () => void;
+  sample?: SampleControls;
 }
 
 const FORMAT_BADGES = SUPPORTED_EXTENSIONS.map((ext) => `.${ext}`);
-export const SAMPLE_DATA_HINT = "Three HST narrowband frames of M16 ship with the app";
+export const SAMPLE_DATA_HINT = "Three HST narrowband frames of M16, downloaded once and kept in the data folder";
 
-export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArchive, onOpenSampleData }: EmptyStateProps) {
+function samplePercent(sample: SampleControls): number {
+  if (sample.totalBytes <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.floor((sample.receivedBytes * 100) / sample.totalBytes)));
+}
+
+function receivedLabel(sample: SampleControls): string {
+  const received = formatBytes(sample.receivedBytes);
+  return received === formatBytes(sample.totalBytes) ? `${samplePercent(sample)}%` : received;
+}
+
+function sampleButton(sample: SampleControls): { label: string; icon: LucideIcon; run: () => void } {
+  if (sample.state === "ready") return { label: "Open sample data", icon: Sparkles, run: sample.open };
+  if (sample.error) return { label: "Retry sample download", icon: RotateCcw, run: sample.retry };
+  if (sample.state === "partial" && sample.receivedBytes > 0) {
+    return { label: `Resume sample download (${receivedLabel(sample)} of ${formatBytes(sample.totalBytes)})`, icon: Download, run: sample.download };
+  }
+  return { label: `Download sample data (${formatBytes(sample.totalBytes)})`, icon: Download, run: sample.download };
+}
+
+export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArchive, sample }: EmptyStateProps) {
   const handleBrowse = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -30,10 +52,20 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
     onBrowseArchive?.();
   };
 
+  const sampleAction = sample && sample.state !== "downloading" ? sampleButton(sample) : null;
+  const SampleIcon = sampleAction?.icon ?? Sparkles;
+  const percent = sample ? samplePercent(sample) : 0;
+
   const handleSampleData = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     e.stopPropagation();
-    onOpenSampleData?.();
+    sampleAction?.run();
+  };
+
+  const handleSampleCancel = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    sample?.cancel();
   };
 
   const isMac = navigator.platform?.includes("Mac");
@@ -99,15 +131,43 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                   </kbd>
                 </button>
               )}
-              {onOpenSampleData && (
+              {sampleAction && (
                 <button type="button" onClick={handleSampleData} className="ab-btn-secondary" data-testid="empty-open-sample" title={SAMPLE_DATA_HINT}>
-                  <Sparkles size={16} />
-                  Open sample data
+                  <SampleIcon size={16} />
+                  {sampleAction.label}
                 </button>
               )}
+              {sample?.state === "downloading" && (
+                <div className="flex items-center gap-3">
+                  <div
+                    role="progressbar"
+                    aria-label="Sample data download"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={percent}
+                    aria-valuetext={`${formatBytes(sample.receivedBytes)} of ${formatBytes(sample.totalBytes)}`}
+                    data-testid="empty-sample-progress"
+                    className="w-40"
+                    title={sample.file ?? undefined}
+                  >
+                    <ProgressBar value={percent} />
+                  </div>
+                  <span className="text-zinc-400 text-xs font-mono tabular-nums">{percent}%</span>
+                  <button type="button" onClick={handleSampleCancel} className="ab-btn-secondary" data-testid="empty-sample-cancel" aria-label="Cancel sample download">
+                    <X size={16} />
+                    Cancel
+                  </button>
+                </div>
+              )}
             </div>
-            {onOpenSampleData && (
-              <p className="text-zinc-500 text-xs -mt-2">{SAMPLE_DATA_HINT}</p>
+            {sample && (
+              <div className="flex flex-col items-center gap-1 -mt-2 max-w-md text-center text-xs">
+                {sample.error && (
+                  <p className="text-red-400" role="alert" data-testid="empty-sample-error">{sample.error}</p>
+                )}
+                <p className="text-zinc-500">{SAMPLE_DATA_HINT}</p>
+                <p className="text-zinc-600">{sample.credit}</p>
+              </div>
             )}
           </div>
         </div>

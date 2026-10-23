@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::missions::{column, dataset_column, has_synthetic, synthetic_columns, PROG_OBS_COLUMN, SEP_COLUMN};
-use super::presets;
+use super::missions::{column, dataset_column, has_synthetic, synthetic_columns, CATEGORY_COLUMN, PROG_OBS_COLUMN, SEP_COLUMN};
+use super::object_filters::{category_text, is_object_column, object_type_column, row_categories};
+use super::presets::{self, PresetSpec};
 use super::query::{ValidQuery, MAX_ROWS};
 use super::types::{AppliedEcho, MastColumn, MastLevelClass, MastMissionId, MastRow, MastSearchPage, SearchPosition};
 use crate::infra::mast::models::{FieldMap, SearchResults};
@@ -240,6 +241,10 @@ pub fn normalize_row(mission: MastMissionId, raw: &FieldMap, index: i64) -> Mast
     if has_synthetic(mission, SEP_COLUMN) {
         values.insert(SEP_COLUMN.to_owned(), float_value(fields.sep_arcmin));
     }
+    let categories = row_categories(mission, raw);
+    if has_synthetic(mission, CATEGORY_COLUMN) {
+        values.insert(CATEGORY_COLUMN.to_owned(), category_text(&categories).map_or(Value::Null, Value::String));
+    }
     let filters = fields.filters.unwrap_or_else(|| fields.filter.iter().cloned().collect());
     MastRow {
         dataset_id,
@@ -262,6 +267,8 @@ pub fn normalize_row(mission: MastMissionId, raw: &FieldMap, index: i64) -> Mast
         dec_deg: fields.dec_deg,
         s_region: text(raw, "s_region"),
         values,
+        categories,
+        target_description: object_type_column(mission).and_then(|column| text(raw, column)),
     }
 }
 
@@ -303,7 +310,9 @@ fn applied(results: &SearchResults<FieldMap>) -> AppliedEcho {
 }
 
 pub fn dropped_conditions(query: &ValidQuery, applied: &AppliedEcho) -> Vec<String> {
-    query.preset.map(|preset| presets::dropped_conditions(preset, applied)).unwrap_or_default()
+    let mut sent = query.preset.map(PresetSpec::sent).unwrap_or_default();
+    sent.extend(query.conditions.iter().filter(|(column, _)| is_object_column(query.mission, column)).cloned());
+    presets::dropped_conditions(&sent, applied)
 }
 
 fn parse_search_pos(text: &str) -> Option<SearchPosition> {
@@ -324,7 +333,7 @@ pub fn normalize_page(mission: MastMissionId, results: SearchResults<FieldMap>, 
         .map(|(i, raw)| normalize_row(mission, raw, query.offset + i as i64))
         .collect();
     let total_reported = (results.total_results >= 0).then_some(results.total_results);
-    let total_reliable = !query.wildcard() && total_reported.is_some();
+    let total_reliable = !query.unreliable_total() && total_reported.is_some();
     let loaded = query.offset + rows.len() as i64;
     let more_reported = match total_reported.filter(|_| total_reliable) {
         Some(total) => loaded < total,
@@ -354,6 +363,9 @@ pub fn normalize_page(mission: MastMissionId, results: SearchResults<FieldMap>, 
         messages: results.messages,
         elapsed_ms: request.elapsed_ms,
         from_cache: false,
+        level_filtered_locally: false,
+        level_applied_locally: None,
+        unfiltered_total: None,
     }
 }
 
@@ -362,7 +374,7 @@ mod tests {
     use super::*;
     use crate::core::mast::missions::verified_server_sort;
     use crate::core::mast::query::{build_params, validate, Target, PAGE_LIMIT};
-    use crate::core::mast::types::{MastFilterValues, MastQuery, MastWhere};
+    use crate::core::mast::types::{MastFilterValues, MastQuery, MastWhere, ObjectCategory};
     use serde_json::json;
 
     fn fixture(name: &str) -> SearchResults<FieldMap> {
@@ -464,13 +476,16 @@ mod tests {
             assert_eq!(page.rows[1].level_class, MastLevelClass::Combined);
             let names: Vec<&str> = page.columns.iter().map(|c| c.name.as_str()).collect();
             assert_eq!(names.first(), Some(&"fileSetName"));
-            assert!(names.ends_with(&[PROG_OBS_COLUMN, SEP_COLUMN]), "{names:?}");
+            assert!(names.ends_with(&[PROG_OBS_COLUMN, SEP_COLUMN, CATEGORY_COLUMN]), "{names:?}");
             let file_set = &page.columns[0];
             assert_eq!(file_set.label, "Dataset");
             assert_eq!(file_set.sortable, verified_server_sort(MastMissionId::Jwst, "fileSetName"));
             let synthetic = page.columns.iter().filter(|c| c.name.starts_with('_'));
             assert!(synthetic.clone().all(|c| !c.sortable));
-            assert_eq!(synthetic.count(), 2);
+            assert_eq!(synthetic.count(), 3);
+            assert_eq!(nircam.values[CATEGORY_COLUMN], Value::Null);
+            assert!(nircam.categories.is_empty());
+            assert_eq!(nircam.target_description, None);
         }
         let plain = page_of(MastMissionId::Jwst, "jwst_m16_l3.json", &query);
         assert_eq!(plain.rows[0].filters, vec!["F187N"]);
@@ -602,7 +617,7 @@ mod tests {
     fn wildcard_marks_total_unreliable() {
         let mut query = position_query(MastMissionId::Jwst, 10.0);
         query.conditions = vec![("exp_type".into(), json!("NRC_*"))];
-        assert!(query.wildcard());
+        assert!(query.unreliable_total());
         let page = page_of(MastMissionId::Jwst, "c_wildcard.json", &query);
         assert_eq!(page.total_reported, Some(237));
         assert_eq!(page.rows.len(), 61);
@@ -618,10 +633,111 @@ mod tests {
         );
         assert!(full_page.has_more);
         let plain = position_query(MastMissionId::Jwst, 10.0);
-        assert!(!plain.wildcard());
+        assert!(!plain.unreliable_total());
         let reliable = page_of(MastMissionId::Jwst, "c_wildcard.json", &plain);
         assert!(reliable.total_reliable);
         assert!(reliable.has_more);
+        for (column, value) in [("targdesc", "*Planetary nebulae*"), ("opticalElements", "*F444W*")] {
+            let mut contains = position_query(MastMissionId::Jwst, 10.0);
+            contains.conditions = vec![(column.into(), json!(value))];
+            let page = page_of(MastMissionId::Jwst, "c_wildcard.json", &contains);
+            assert!(page.total_reliable, "{column}");
+            assert_eq!(page.total_reported, Some(237));
+            assert!(page.has_more, "{column}");
+        }
+    }
+
+    fn object_query(mission: MastMissionId, categories: Vec<ObjectCategory>) -> ValidQuery {
+        validate(&MastQuery {
+            mission,
+            where_: MastWhere::Position { ra_deg: 274.688, dec_deg: -13.792, radius_arcmin: 3.0, label: None },
+            program: None,
+            dataset_id: None,
+            filters: MastFilterValues { categories, ..Default::default() },
+            preset: None,
+            sort: Vec::new(),
+            offset: 0,
+            limit: PAGE_LIMIT,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn rows_carry_categories() {
+        let jwst = page_of(MastMissionId::Jwst, "jwst_m16_ism.json", &object_query(MastMissionId::Jwst, vec![ObjectCategory::Ism]));
+        assert_eq!(jwst.rows.len(), 113);
+        for row in &jwst.rows {
+            assert_eq!(row.categories, [ObjectCategory::Ism], "{}", row.dataset_id);
+            assert_eq!(row.target_description.as_deref(), Some("Molecular clouds; Nebulae; Protostars"));
+            assert_eq!(row.values[CATEGORY_COLUMN], json!("Nebulae and ISM"));
+            assert_eq!(row.values["targcat"], json!("ISM"));
+        }
+        let names: Vec<&str> = jwst.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"targcat") && names.contains(&"targdesc"), "{names:?}");
+        assert_eq!(jwst.columns.iter().find(|c| c.name == "targdesc").unwrap().label, "Target description");
+        assert_eq!(names.last(), Some(&CATEGORY_COLUMN));
+        let serialised = serde_json::to_value(&jwst.rows[0]).unwrap();
+        assert_eq!(serialised["categories"], json!(["ism"]));
+        assert_eq!(serialised["targetDescription"], json!("Molecular clouds; Nebulae; Protostars"));
+        let hst = page_of(MastMissionId::Hst, "hst_m16_ism.json", &object_query(MastMissionId::Hst, vec![ObjectCategory::Ism]));
+        assert_eq!((hst.rows.len(), hst.total_reported, hst.total_reliable), (37, Some(37), true));
+        assert!(hst.rows.iter().all(|row| row.categories == [ObjectCategory::Ism]));
+        assert!(hst.rows.iter().all(|row| row.target_description.as_deref().is_some_and(|text| text.starts_with("ISM;HII REGION"))));
+        assert_eq!(hst.rows[0].values[CATEGORY_COLUMN], json!("Nebulae and ISM"));
+        let iue = page_of(MastMissionId::Iue, "iue_m16_stars.json", &object_query(MastMissionId::Iue, vec![ObjectCategory::Stars]));
+        assert_eq!(iue.rows.len(), 24);
+        for row in &iue.rows {
+            assert_eq!(row.categories, [ObjectCategory::Stars], "{}", row.dataset_id);
+            assert_eq!(row.target_description, None);
+            assert_eq!(row.values[CATEGORY_COLUMN], json!("Stars"));
+        }
+        assert_eq!(iue.columns.last().map(|c| (c.name.as_str(), c.label.as_str())), Some((CATEGORY_COLUMN, "Category")));
+        assert_eq!(iue.columns.iter().find(|c| c.name == "iue_category").unwrap().label, "Object class");
+        let row = |mission: MastMissionId, column: &str, value: Value| normalize_row(mission, &FieldMap::from([(column.to_owned(), value)]), 0);
+        let both = row(MastMissionId::Hst, "sci_broad_category", json!("STAR;GALAXY"));
+        assert_eq!(both.categories, [ObjectCategory::Galaxies, ObjectCategory::Stars]);
+        assert_eq!(both.values[CATEGORY_COLUMN], json!("Galaxies, Stars"));
+        let commas = row(MastMissionId::Hst, "sci_broad_category", json!("STELLAR CLUSTER, OPEN CLUSTER"));
+        assert!(commas.categories.is_empty());
+        assert_eq!(commas.values[CATEGORY_COLUMN], Value::Null);
+        assert_eq!(row(MastMissionId::Iue, "iue_category", json!(83)).categories, [ObjectCategory::StarClusters]);
+        let unknown = row(MastMissionId::Jwst, "targcat", Value::Null);
+        assert!(unknown.categories.is_empty());
+        assert_eq!(unknown.values[CATEGORY_COLUMN], Value::Null);
+        assert_eq!(row(MastMissionId::Jwst, "targdesc", json!("  ")).target_description, None);
+        assert_eq!(row(MastMissionId::Hst, "sci_target_descrip", json!(" STAR;DA ")).target_description.as_deref(), Some("STAR;DA"));
+        let roman = row(MastMissionId::Roman, "targcat", json!("Galaxy"));
+        assert!(roman.categories.is_empty());
+        assert!(!roman.values.contains_key(CATEGORY_COLUMN));
+        assert_eq!(roman.target_description, None);
+    }
+
+    #[test]
+    fn dropped_object_conditions_are_named_on_the_page() {
+        let query = object_query(MastMissionId::Jwst, vec![ObjectCategory::Ism]);
+        assert_eq!(page_of(MastMissionId::Jwst, "jwst_m16_ism.json", &query).dropped_conditions, Vec::<String>::new());
+        let mut ignored = fixture("jwst_m16_ism.json");
+        ignored.search_params.conditions = Some(vec![FieldMap::from([("targcat".to_owned(), json!(""))])]);
+        let page = normalize_page(
+            MastMissionId::Jwst,
+            ignored,
+            PageRequest { request_id: "g1:search", query: &query, request_body: json!({}), elapsed_ms: 0 },
+        );
+        assert_eq!(page.dropped_conditions, ["targcat"]);
+        let iue = object_query(MastMissionId::Iue, vec![ObjectCategory::Stars]);
+        let page = page_of(MastMissionId::Iue, "iue_m16_stars.json", &iue);
+        assert_eq!(page.applied.conditions[0]["iue_category"], "10..66,!=98,!=99");
+        assert_eq!(page.dropped_conditions, Vec::<String>::new());
+        let hst = object_query(MastMissionId::Hst, vec![ObjectCategory::Ism]);
+        assert_eq!(page_of(MastMissionId::Hst, "hst_m16_ism.json", &hst).dropped_conditions, Vec::<String>::new());
+        let mut silent = fixture("hst_m16_ism.json");
+        silent.search_params.conditions = Some(Vec::new());
+        let page = normalize_page(
+            MastMissionId::Hst,
+            silent,
+            PageRequest { request_id: "g1:search", query: &hst, request_body: json!({}), elapsed_ms: 0 },
+        );
+        assert_eq!(page.dropped_conditions, ["sci_broad_category"]);
     }
 
     #[test]

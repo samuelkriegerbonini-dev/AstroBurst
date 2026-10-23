@@ -1,13 +1,17 @@
 import type { ChannelStatistics, DataRange, StatisticsUnit } from "../shared/types/statistics";
+import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "./analysisLabels";
 
 export const UINT16_MAX = 65535;
+export const MAD_TO_SIGMA = 1.4826;
 
 export type StatisticKind = "count" | "fraction" | "location" | "scale" | "variance" | "sum";
+export type StatisticKey = keyof ChannelStatistics | "sigma_mad";
 
 export interface StatisticRow {
-  key: keyof ChannelStatistics;
+  key: StatisticKey;
   label: string;
   kind: StatisticKind;
+  title?: string;
 }
 
 export const STATISTIC_ROWS: readonly StatisticRow[] = [
@@ -17,6 +21,7 @@ export const STATISTIC_ROWS: readonly StatisticRow[] = [
   { key: "median", label: "median", kind: "location" },
   { key: "avg_dev", label: "avgDev", kind: "scale" },
   { key: "mad", label: "MAD", kind: "scale" },
+  { key: "sigma_mad", label: SIGMA_MAD_LABEL, kind: "scale", title: SIGMA_MAD_TITLE },
   { key: "bwmv_sqrt", label: "sqrt(BWMV)", kind: "scale" },
   { key: "std_dev", label: "stdDev", kind: "scale" },
   { key: "variance", label: "variance", kind: "variance" },
@@ -27,6 +32,10 @@ export const STATISTIC_ROWS: readonly StatisticRow[] = [
   { key: "padding", label: "padding (0)", kind: "count" },
   { key: "excluded", label: "excluded", kind: "count" },
 ];
+
+export function statisticValue(stats: ChannelStatistics, key: StatisticKey): number {
+  return key === "sigma_mad" ? MAD_TO_SIGMA * stats.mad : stats[key];
+}
 
 export interface UnitTransform {
   scale: number;
@@ -134,6 +143,6 @@ export function statisticsToCsv(
 ): string {
   const converted = channels.map((c) => convertStatistics(c.stats, unit, range));
   const header = ["statistic", ...channels.map((c) => c.label)].join(",");
-  const rows = STATISTIC_ROWS.map((row) => [row.key, ...converted.map((s) => String(s[row.key]))].join(","));
+  const rows = STATISTIC_ROWS.map((row) => [row.key, ...converted.map((s) => String(statisticValue(s, row.key)))].join(","));
   return [header, ...rows].join("\n");
 }

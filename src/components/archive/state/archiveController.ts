@@ -61,7 +61,8 @@ import { errorView, slotError, type BannerKind } from "../logic/errorCopy";
 import { missionEntries, resultsGate, romanLock } from "../logic/missionState";
 import { aroundQueryText, type AroundTarget } from "../logic/aroundQuery";
 import { formatBytes, type ProductMode } from "../logic/productView";
-import { displayRows, type ChipId } from "../logic/resultsView";
+import { displayRows, type BaseChipId, type ChipId } from "../logic/resultsView";
+import { NO_OBJECT_FILTERS, objectChangeText, parseObjectChip, withoutOption, type ObjectFilters } from "../logic/objectFilters";
 import type { Suggestion } from "../logic/suggestions";
 import { parseStripKey, previewsAllowed, stepEntry, STRIP_PRIORITY } from "../logic/detailView";
 import { MAST_TOKEN_PAGE_URL, checkTokenFormat } from "../logic/tokenFormat";
@@ -123,6 +124,8 @@ export interface ArchiveController {
   setRadius(text: string): void;
   setFilters(patch: Partial<MastFilterValues>, opts?: { rerun?: boolean }): void;
   setPreset(id: string | null, opts?: { rerun?: boolean }): void;
+  setObjectFilters(patch: ObjectFilters): void;
+  clearObjectFilters(): Promise<void>;
   removeFilter(id: ChipId): Promise<void>;
   switchMission(id: MastMissionId): void;
   tryMission(id: MastMissionId): Promise<void>;
@@ -185,8 +188,9 @@ const LOOKUP_FALLBACK = new Set(["mast_network", "mast_server", "mast_timeout", 
 const DEFAULT_RETRY_AFTER_SEC = 10;
 const FAILURE_BURST_MS = 1500;
 const QUIET_FAILURES = new Set(["mast_no_image", "mast_unauthorized", "mast_cancelled"]);
+const OBJECT_SEARCH_DELAY_MS = 400;
 
-const CHIP_PATCH: Record<ChipId, Partial<MastFilterValues>> = {
+const CHIP_PATCH: Record<BaseChipId, Partial<MastFilterValues>> = {
   level: { level: "all" },
   instrument: { instrument: undefined },
   filter: { filter: undefined },
@@ -198,7 +202,7 @@ const CHIP_PATCH: Record<ChipId, Partial<MastFilterValues>> = {
 function cleanFilters(filters: MastFilterValues): MastFilterValues {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(filters)) {
-    if (v === undefined || v === null || v === "" || v === false) continue;
+    if (v === undefined || v === null || v === "" || v === false || (Array.isArray(v) && v.length === 0)) continue;
     out[k] = v;
   }
   return out as MastFilterValues;
@@ -221,6 +225,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
   let autoChecked = false;
   let failedPage: { generation: number; offset: number } | null = null;
   let failureBurst: { count: number; byCode: Map<MastErrorCode, { count: number; error: MastError }>; handle: unknown } | null = null;
+  let objectSearch: { handle: unknown } | null = null;
 
   function call<T>(kind: InflightKind, fn: () => Promise<T>): Promise<T> {
     const end = inflight.begin(kind);
@@ -238,6 +243,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
   }
 
   function cancelAllButThumbs(generation: number): void {
+    services.cancel({ requestIds: [searchId(generation), resolveId(generation)] }).catch(() => 0);
     for (const prefix of nonThumbPrefixes(generation)) services.cancel({ prefix }).catch(() => 0);
   }
 
@@ -274,6 +280,19 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
 
   function missionOf(s: ArchiveState, id: MastMissionId = s.form.mission): MastMission | undefined {
     return s.missions.find((m) => m.id === id);
+  }
+
+  function groupsOf(s: ArchiveState, id: MastMissionId = s.form.mission) {
+    return missionOf(s, id)?.filterGroups ?? [];
+  }
+
+  function formFor(s: ArchiveState, id: MastMissionId): ArchiveForm {
+    return switchMissionForm(s.form, id, storage, groupsOf(s, id));
+  }
+
+  function cancelObjectSearch(): void {
+    if (objectSearch) clock.clearTimeout(objectSearch.handle);
+    objectSearch = null;
   }
 
   function lockOf(s: ArchiveState) {
@@ -449,7 +468,14 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     }
   }
 
-  async function resolveStep(generation: number, name: string, form: ArchiveForm, available: readonly QuickFilterId[], sort: SortKey[]): Promise<MastQuery | null> {
+  async function resolveStep(
+    generation: number,
+    name: string,
+    form: ArchiveForm,
+    available: readonly QuickFilterId[],
+    groups: MastMission["filterGroups"],
+    sort: SortKey[],
+  ): Promise<MastQuery | null> {
     const started = clock.now();
     try {
       const resolved = await call("other", () => services.resolve(resolveId(generation), name));
@@ -458,7 +484,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
         dispatch({ type: "nameNotResolved", generation, name, elapsedMs: clock.now() - started });
         return null;
       }
-      const plan = planSearch(form, available, { resolved, sort });
+      const plan = planSearch(form, available, { resolved, sort }, groups);
       if (plan.kind !== "search") return null;
       dispatch({ type: "nameResolved", generation, resolved, query: plan.query, at: clock.now() });
       return plan.query;
@@ -469,7 +495,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
         dispatch({ type: "searchFailed", generation, error: e, at: clock.now() });
         return null;
       }
-      const plan = planSearch(form, available, { serverResolve: true, sort });
+      const plan = planSearch(form, available, { serverResolve: true, sort }, groups);
       if (plan.kind !== "search") return null;
       dispatch({ type: "serverResolve", generation, query: plan.query, at: clock.now() });
       return plan.query;
@@ -477,13 +503,15 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
   }
 
   async function search(opts: { refresh?: boolean; sort?: SortKey[] } = {}): Promise<void> {
+    cancelObjectSearch();
     const s = get();
     const mission = missionOf(s);
     if (!mission || !gateOpen(s)) return;
     const form = s.form;
     const sort = opts.sort ?? [];
     const available = mission.quickFilters.map((f) => f.id);
-    const plan = planSearch(form, available, { sort });
+    const groups = mission.filterGroups;
+    const plan = planSearch(form, available, { sort }, groups);
     if (plan.kind === "blocked") {
       dispatch({ type: "queryBlocked", field: plan.field, message: plan.message });
       return;
@@ -501,7 +529,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
       query: plan.kind === "search" ? plan.query : null,
       at: clock.now(),
     });
-    const query = plan.kind === "resolve" ? await resolveStep(generation, plan.name, form, available, sort) : plan.query;
+    const query = plan.kind === "resolve" ? await resolveStep(generation, plan.name, form, available, groups, sort) : plan.query;
     if (!query || !isCurrent(generation)) return;
     try {
       const page = await call("other", () => services.search(searchId(generation), query, opts.refresh ?? false));
@@ -513,6 +541,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
   }
 
   function cancelSearch(): void {
+    cancelObjectSearch();
     const run = get().run;
     if (!run) return;
     services.cancel({ prefix: generationPrefix(run.generation) }).catch(() => 0);
@@ -541,6 +570,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
 
   function moveTo(form: ArchiveForm): void {
     const s = get();
+    cancelObjectSearch();
     cancelEveryThumb();
     cancelGeneration(s.generation);
     dispatch({ type: "missionSwitched", form, generation: s.generation + 1 });
@@ -550,7 +580,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     const s = get();
     if (id === s.form.mission || !enabled(s, id)) return;
     const rerun = hasSearched(s) && s.form.text.trim() !== "";
-    moveTo(switchMissionForm(s.form, id, storage));
+    moveTo(formFor(s, id));
     if (rerun) void search();
     if (id === "roman") maybeAutoCheck();
   }
@@ -573,7 +603,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     const s = get();
     if (id !== s.form.mission) {
       if (!enabled(s, id)) return;
-      moveTo(switchMissionForm(s.form, id, storage));
+      moveTo(formFor(s, id));
     }
     await search();
   }
@@ -602,8 +632,33 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     if (opts.rerun && hasSearched(s)) void search();
   }
 
+  function setObjectFilters(patch: ObjectFilters): void {
+    const s = get();
+    setFilters(patch);
+    const searched = hasSearched(s);
+    const change = objectChangeText(s.form.filters, get().form.filters, groupsOf(s));
+    if (change) dispatch({ type: "announce", text: searched ? `${change}, searching` : change });
+    if (!searched) return;
+    cancelObjectSearch();
+    const handle = clock.setTimeout(() => {
+      objectSearch = null;
+      void search();
+    }, OBJECT_SEARCH_DELAY_MS);
+    objectSearch = { handle };
+  }
+
+  async function clearObjectFilters(): Promise<void> {
+    cancelObjectSearch();
+    const s = get();
+    setFilters(NO_OBJECT_FILTERS);
+    const searched = hasSearched(s);
+    dispatch({ type: "announce", text: searched ? "Object filters cleared, searching" : "Object filters cleared" });
+    if (searched) await search();
+  }
+
   async function removeFilter(id: ChipId): Promise<void> {
-    setFilters(CHIP_PATCH[id]);
+    const object = parseObjectChip(id);
+    setFilters(object ? withoutOption(get().form.filters, object.key, object.option) : CHIP_PATCH[id as BaseChipId]);
     await search();
   }
 
@@ -617,7 +672,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     const s = get();
     if (!enabled(s, suggestion.mission)) return;
     const fields = { text: suggestion.text, kindOverride: null, radiusText: String(DEFAULT_RADIUS_ARCMIN), filters: { ...suggestion.filters }, preset: null };
-    if (suggestion.mission !== s.form.mission) moveTo({ ...switchMissionForm(s.form, suggestion.mission, storage), ...fields });
+    if (suggestion.mission !== s.form.mission) moveTo({ ...formFor(s, suggestion.mission), ...fields });
     else dispatch({ type: "formChanged", patch: fields });
     if (suggestion.filters.level) saveLevel(storage, suggestion.filters.level);
     await search();
@@ -628,7 +683,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     const s = get();
     const fields = { text: aroundQueryText(target), kindOverride: null, radiusText: String(target.radiusArcmin) };
     const mission = missionOf(s);
-    if (!mission || !gateOpen(s) || !mission.capabilities.images) moveTo({ ...switchMissionForm(s.form, "jwst", storage), ...fields });
+    if (!mission || !gateOpen(s) || !mission.capabilities.images) moveTo({ ...formFor(s, "jwst"), ...fields });
     else dispatch({ type: "formChanged", patch: fields });
     await search();
   }
@@ -828,6 +883,8 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     setRadius: (radiusText) => dispatch({ type: "formChanged", patch: { radiusText } }),
     setFilters,
     setPreset,
+    setObjectFilters,
+    clearObjectFilters,
     removeFilter,
     switchMission,
     tryMission,
@@ -923,6 +980,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
       pauseTimer = null;
       if (failureBurst) clock.clearTimeout(failureBurst.handle);
       failureBurst = null;
+      cancelObjectSearch();
     },
   };
 }

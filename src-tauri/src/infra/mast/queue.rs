@@ -1465,11 +1465,9 @@ mod tests {
             i.state == MastDownloadState::Downloading
         })
         .await;
-        let start = Instant::now();
-        while rig.server.requests().is_empty() {
-            assert!(start.elapsed() < PATIENCE);
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        tokio::time::timeout(PATIENCE, rig.server.received(1))
+            .await
+            .expect("the download reaches the server");
         tokio::time::sleep(Duration::from_millis(1000)).await;
         assert_eq!(rig.queue.cancel("c1").unwrap(), 1);
         let cancelled = settle(&rig.queue, "c1:0").await;
@@ -1512,6 +1510,9 @@ mod tests {
             i.state == MastDownloadState::Downloading
         })
         .await;
+        tokio::time::timeout(PATIENCE, rig.server.received(2))
+            .await
+            .expect("both running items reach the server");
         assert_eq!(
             find(&rig.queue, "w1:2").unwrap().state,
             MastDownloadState::Queued
@@ -1734,46 +1735,6 @@ mod tests {
         settle(&rig.queue, "u2:0").await;
     }
 
-    struct HeldServer {
-        base: String,
-        arrived: std::sync::mpsc::Receiver<()>,
-        release: std::sync::mpsc::Sender<()>,
-    }
-
-    fn held_server(payload: Vec<u8>) -> HeldServer {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let (arrived_tx, arrived) = std::sync::mpsc::channel();
-        let (release, release_rx) = std::sync::mpsc::channel::<()>();
-        std::thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            let mut head = Vec::new();
-            let mut buffer = [0u8; 1024];
-            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => return,
-                    Ok(read) => head.extend_from_slice(&buffer[..read]),
-                }
-            }
-            let _ = arrived_tx.send(());
-            let _ = release_rx.recv();
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nConnection: close\r\nETag: \"held\"\r\nContent-Length: {}\r\n\r\n",
-                payload.len()
-            );
-            let _ = stream.write_all(reply.as_bytes());
-            let _ = stream.write_all(&payload);
-        });
-        HeldServer {
-            base,
-            arrived,
-            release,
-        }
-    }
-
     fn queue_at(base: &str, root: PathBuf) -> DownloadQueue {
         DownloadQueue::new(QueueConfig {
             client: build_client(&HttpProfile::transfer()),
@@ -1790,40 +1751,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_new_request_takes_back_a_cancel_the_stalled_transfer_has_not_seen() {
+    async fn a_cancel_while_mast_holds_the_headers_is_seen_and_a_new_request_downloads_the_file() {
         let payload = body(64 * KIB, 22);
-        let held = held_server(payload.clone());
+        let server = serve(Resource::new(payload.clone()).withhold_headers());
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("data").join("mast-test");
-        let queue = queue_at(&held.base, root.clone());
+        let queue = queue_at(&server.base, root.clone());
         queue
             .enqueue(request("k1", vec![item("a_cal.fits", 64 * KIB)]))
             .await
             .unwrap();
-        let start = Instant::now();
-        while held.arrived.try_recv().is_err() {
-            assert!(
-                start.elapsed() < PATIENCE,
-                "the request never reached the server"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        tokio::time::timeout(PATIENCE, server.received(1))
+            .await
+            .expect("the request reaches the server");
         assert_eq!(queue.cancel("k1").unwrap(), 1);
+        let cancelled = tokio::time::timeout(Duration::from_secs(1), settle(&queue, "k1:0"))
+            .await
+            .expect("the cancel is seen while the headers are held");
+        assert_eq!(
+            (cancelled.state, cancelled.action),
+            (
+                MastDownloadState::Cancelled,
+                Some(MastDownloadAction::Resume)
+            )
+        );
+        let path = root.join("JWST").join("2739").join("a_cal.fits");
+        assert!(!path.exists() && !part_of(&path).exists());
         let again = queue
             .enqueue(request("k2", vec![item("a_cal.fits", 64 * KIB)]))
             .await
             .unwrap();
         assert_eq!(
             again.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
-            ["k1:0"]
+            ["k2:0"]
         );
-        held.release.send(()).unwrap();
-        let done = settle(&queue, "k1:0").await;
+        let done = settle(&queue, "k2:0").await;
         assert_eq!((done.state, done.action), (MastDownloadState::Done, None));
-        assert_eq!(
-            std::fs::read(root.join("JWST").join("2739").join("a_cal.fits")).unwrap(),
-            payload
-        );
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+        assert_eq!(server.requests().len(), 2);
     }
 
     #[tokio::test]
@@ -1870,6 +1835,52 @@ mod tests {
                 MastDownloadState::Cancelled,
                 Some(MastDownloadAction::Resume)
             )
+        );
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn download_pressed_again_before_a_running_transfer_sees_its_cancel_takes_the_cancel_back(
+    ) {
+        let rig = rig(Resource::new(body(4 * KIB, 25)));
+        let held = Arc::clone(&rig.queue.inner.permits)
+            .acquire_many_owned(DOWNLOAD_PERMITS as u32)
+            .await
+            .unwrap();
+        rig.queue
+            .enqueue(request("j1", vec![item("a_cal.fits", 4 * KIB)]))
+            .await
+            .unwrap();
+        let cancel = {
+            let mut entries = guard(&rig.queue.inner.entries);
+            let entry = entries.iter_mut().find(|e| e.item.id == "j1:0").unwrap();
+            entry.item.state = MastDownloadState::Downloading;
+            Arc::clone(&entry.cancel)
+        };
+        cancel.store(true, Ordering::SeqCst);
+        let again = rig
+            .queue
+            .enqueue(request("j2", vec![item("a_cal.fits", 4 * KIB)]))
+            .await
+            .unwrap();
+        assert_eq!(
+            again
+                .iter()
+                .map(|i| (i.id.as_str(), i.state))
+                .collect::<Vec<_>>(),
+            [("j1:0", MastDownloadState::Downloading)]
+        );
+        assert!(!cancel.load(Ordering::SeqCst));
+        assert!(find(&rig.queue, "j2:0").is_none());
+        assert!(!rig.queue.inner.finish(
+            "j1:0",
+            MastMissionId::Jwst,
+            Err(DownloadError::Cancelled),
+            false
+        ));
+        assert_eq!(
+            find(&rig.queue, "j1:0").unwrap().state,
+            MastDownloadState::Downloading
         );
         drop(held);
     }

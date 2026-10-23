@@ -55,7 +55,7 @@ import {
   tokenSaveFailureText,
   type BannerKind,
 } from "../logic/errorCopy";
-import { rowKeyMap, type TableSort } from "../logic/resultsView";
+import { isLevelSearch, rowKeyMap, type TableSort } from "../logic/resultsView";
 import { DETAIL_WIDTH_DEFAULT, clampDetailWidth } from "../logic/detailLayout";
 import type { ProductMode } from "../logic/productView";
 import { TOKEN_REMOVED_TEXT, type RomanPanelState } from "../logic/romanPanel";
@@ -86,6 +86,7 @@ export interface Banner {
   kind: BannerKind;
   text: string;
   retry: BannerRetry;
+  allLevels?: boolean;
 }
 
 interface StoredBanner extends Banner {
@@ -574,7 +575,7 @@ function thumbPauseBanner(s: ArchiveState, now: number): Banner | null {
 }
 
 function storedBanner(b: StoredBanner, now: number): Banner | null {
-  if (b.until === null) return { kind: b.kind, text: b.text, retry: b.retry };
+  if (b.until === null) return b.allLevels ? { kind: b.kind, text: b.text, retry: b.retry, allLevels: true } : { kind: b.kind, text: b.text, retry: b.retry };
   if (now >= b.until) return null;
   return { kind: b.kind, text: rateLimitText("search", (b.until - now) / 1000, b.status), retry: b.retry };
 }
@@ -664,7 +665,8 @@ function onSearchFailed(s: ArchiveState, a: Extract<ArchiveAction, { type: "sear
   if (!s.run || s.run.generation !== a.generation) return s;
   const base: ArchiveState = { ...s, run: null };
   const hasResults = !!s.results && s.results.rows.length > 0;
-  const view = errorView(a.error, { surface: "search", hasResults, missionLabel: missionLabel(s), now: new Date(a.at) });
+  const levelSearch = isLevelSearch(s.form, s.presets);
+  const view = errorView(a.error, { surface: "search", hasResults, missionLabel: missionLabel(s), now: new Date(a.at), levelSearch });
   switch (view.placement) {
     case "silent":
       return base;
@@ -682,7 +684,8 @@ function onSearchFailed(s: ArchiveState, a: Extract<ArchiveAction, { type: "sear
       const kind = view.bannerKind ?? "server";
       const rateLimited = a.error.code === "mast_rate_limited";
       const until = rateLimited ? a.at + (a.error.context.retryAfterSec ?? 10) * 1000 : null;
-      return announce(raise(base, { kind, text: view.text, retry: "search" }, until, a.error.context.status ?? null), view.text);
+      const banner: Banner = levelSearch && a.error.code === "mast_timeout" ? { kind, text: view.text, retry: "search", allLevels: true } : { kind, text: view.text, retry: "search" };
+      return announce(raise(base, banner, until, a.error.context.status ?? null), view.text);
     }
   }
 }

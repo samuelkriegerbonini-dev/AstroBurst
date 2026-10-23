@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import LineMeasurementSection from "../LineMeasurementSection";
-import type { LineMeasurement } from "../../../shared/types/spectral";
+import { LINE_MODEL_LABELS, LINE_MODELS, type LineMeasurement } from "../../../shared/types/spectral";
 
 const RESULT: LineMeasurement = {
   z0: 5,
@@ -82,5 +82,22 @@ describe("LineMeasurementSection error rows and switches", () => {
     const html = render({ errControls: { ...CONTROLS, errAvailable: false, dqAvailable: false } });
     expect(html).toContain("no ERR in this file");
     expect(html).toContain("no DQ in this file");
+  });
+});
+
+describe("LineMeasurementSection model names and equivalent-width sign", () => {
+  it("names the models by what they compute and keeps the logged values", () => {
+    expect(LINE_MODEL_LABELS).toEqual({ none: "direct integration", gaussian: "direct + Gaussian fit" });
+    expect(LINE_MODELS).toEqual(["none", "gaussian"]);
+  });
+
+  it("shows the model names in the select with the values none and gaussian", () => {
+    const html = render({ model: "none" });
+    expect(html).toMatch(/<option value="none"[^>]*>direct integration<\/option>/);
+    expect(html).toMatch(/<option value="gaussian"[^>]*>direct \+ Gaussian fit<\/option>/);
+  });
+
+  it("labels the equivalent-width card with its sign convention", () => {
+    expect(render()).toContain("Equivalent width (absorption &gt; 0, emission &lt; 0)");
   });
 });

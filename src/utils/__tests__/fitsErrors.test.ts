@@ -36,6 +36,26 @@ const X1D_REJECTION =
   "HDUs: [0] EXTNAME=(none) XTENSION=PRIMARY NAXIS=0 -- header only, no pixel data; " +
   "[1] EXTNAME=EXTRACT1D XTENSION=BINTABLE NAXIS=2 [232x1024] -- BINTABLE extension, holds no image pixels";
 
+const SHORT_X1D_REJECTION =
+  "Failed to load C:/data/jw02072-o001_t010_miri_p750l_x1d.fits: HDU 2 (ASDF): BINTABLE extension, holds no image pixels; " +
+  "no HDU in this file holds a 2D image. " +
+  "HDUs: [0] EXTNAME=(none) XTENSION=PRIMARY NAXIS=0 -- header only, no pixel data; " +
+  "[1] EXTNAME=EXTRACT1D XTENSION=BINTABLE NAXIS=2 [140x388] -- BINTABLE extension, holds no image pixels; " +
+  "[2] EXTNAME=ASDF XTENSION=BINTABLE NAXIS=2 [86664x1] -- BINTABLE extension, holds no image pixels";
+
+const ASDF_ONLY_REJECTION =
+  "Failed to load C:/data/meta.fits: HDU 1 (ASDF): BINTABLE extension, holds no image pixels; " +
+  "no HDU in this file holds a 2D image. " +
+  "HDUs: [0] EXTNAME=(none) XTENSION=PRIMARY NAXIS=0 -- header only, no pixel data; " +
+  "[1] EXTNAME=ASDF XTENSION=BINTABLE NAXIS=2 [86664x1] -- BINTABLE extension, holds no image pixels";
+
+const CUBE_WITH_X1D_REJECTION =
+  "Failed to load C:/data/odd_s3d.fits: HDU 1 (SCI): 3D cube of 1400 planes, not a single 2D image; " +
+  "no HDU in this file holds a 2D image. " +
+  "HDUs: [0] EXTNAME=(none) XTENSION=PRIMARY NAXIS=0 -- header only, no pixel data; " +
+  "[1] EXTNAME=SCI XTENSION=IMAGE NAXIS=3 [50x50x1400] -- 3D cube of 1400 planes, not a single 2D image; " +
+  "[2] EXTNAME=EXTRACT1D XTENSION=BINTABLE NAXIS=2 [140x1400] -- BINTABLE extension, holds no image pixels";
+
 function legacyIsRetriable(msg: string): boolean {
   return (
     !msg.includes("Calibration reference file") &&
@@ -180,6 +200,15 @@ describe("spectrum1dHint", () => {
   it("reads only the verdict, so a cube whose inventory lists a 1D array or an EXTRACT1D table is no spectrum", () => {
     expect(spectrum1dHint(CUBE_WITH_ONE_D_REJECTION)).toBeNull();
     expect(spectrum1dHint(CUBE_REJECTION)).toBeNull();
+    expect(spectrum1dHint(CUBE_WITH_X1D_REJECTION)).toBeNull();
+  });
+
+  it("names a short x1d whose ASDF table outweighs its EXTRACT1D table, since no HDU holds an image", () => {
+    expect(spectrum1dHint(SHORT_X1D_REJECTION)).toBe(TABLE_ONLY_HINT);
+  });
+
+  it("keeps a tables-only file without an EXTRACT1D table out of the spectrum path", () => {
+    expect(spectrum1dHint(ASDF_ONLY_REJECTION)).toBeNull();
   });
 
   it("leaves ASDF, plain and missing errors alone", () => {

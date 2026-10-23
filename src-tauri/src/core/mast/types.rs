@@ -69,6 +69,31 @@ pub struct MissionViews {
     pub table: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterGroupId {
+    Category,
+    ObjectType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastFilterOption {
+    pub id: String,
+    pub label: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MastFilterGroup {
+    pub id: FilterGroupId,
+    pub label: String,
+    pub column: String,
+    pub info: String,
+    pub options: Vec<MastFilterOption>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MastMission {
@@ -81,6 +106,7 @@ pub struct MastMission {
     pub default_columns: Vec<MastColumn>,
     pub note: Option<String>,
     pub checked_on: String,
+    pub filter_groups: Vec<MastFilterGroup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,7 +143,34 @@ pub enum MastWhere {
 #[serde(rename_all = "snake_case")]
 pub enum LevelFilter {
     Combined,
+    Exposures,
     All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectCategory {
+    Galaxies,
+    GalaxyClusters,
+    Ism,
+    StarClusters,
+    Stars,
+    SolarSystem,
+    Fields,
+    Calibration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectType {
+    PlanetaryNebulae,
+    NebulaeStarForming,
+    YoungStarsDisks,
+    Exoplanets,
+    AgnQuasars,
+    InteractingGalaxies,
+    SupernovaeTransients,
+    CompactSubstellar,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -129,6 +182,8 @@ pub struct MastFilterValues {
     pub date_from: Option<String>,
     pub date_to: Option<String>,
     pub public_only: Option<bool>,
+    pub categories: Vec<ObjectCategory>,
+    pub object_types: Vec<ObjectType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,6 +265,10 @@ pub struct MastRow {
     pub dec_deg: Option<f64>,
     pub s_region: Option<String>,
     pub values: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub categories: Vec<ObjectCategory>,
+    #[serde(default)]
+    pub target_description: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -250,6 +309,12 @@ pub struct MastSearchPage {
     pub unresolved_targets: Vec<String>,
     pub elapsed_ms: u64,
     pub from_cache: bool,
+    #[serde(default)]
+    pub level_filtered_locally: bool,
+    #[serde(default)]
+    pub level_applied_locally: Option<String>,
+    #[serde(default)]
+    pub unfiltered_total: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -851,8 +916,86 @@ mod tests {
             unresolved_targets: Vec::new(),
             elapsed_ms: 0,
             from_cache: false,
+            level_filtered_locally: true,
+            level_applied_locally: Some("productLevel = 3".into()),
+            unfiltered_total: Some(1913),
         };
-        assert_eq!(serde_json::to_value(&page).unwrap()["droppedConditions"], json!(["tsovisit"]));
+        let value = serde_json::to_value(&page).unwrap();
+        assert_eq!(value["droppedConditions"], json!(["tsovisit"]));
+        assert_eq!((&value["levelFilteredLocally"], &value["unfilteredTotal"]), (&json!(true), &json!(1913)));
+        assert_eq!(value["levelAppliedLocally"], json!("productLevel = 3"));
+        let mut old = value;
+        old.as_object_mut().unwrap().retain(|key, _| !["levelFilteredLocally", "levelAppliedLocally", "unfilteredTotal"].contains(&key.as_str()));
+        let decoded: MastSearchPage = serde_json::from_value(old).unwrap();
+        assert_eq!((decoded.level_filtered_locally, decoded.level_applied_locally, decoded.unfiltered_total), (false, None, None));
+    }
+
+    #[test]
+    fn filters_decode_the_three_levels_and_object_ids_and_reject_unknown_ids() {
+        let filters: MastFilterValues = serde_json::from_value(json!({
+            "level": "exposures",
+            "instrument": "NIRCAM",
+            "publicOnly": true,
+            "categories": ["galaxies", "ism"],
+            "objectTypes": ["planetary_nebulae", "compact_substellar"]
+        }))
+        .unwrap();
+        assert_eq!(filters.level, Some(LevelFilter::Exposures));
+        assert_eq!(filters.categories, [ObjectCategory::Galaxies, ObjectCategory::Ism]);
+        assert_eq!(filters.object_types, [ObjectType::PlanetaryNebulae, ObjectType::CompactSubstellar]);
+        let old: MastFilterValues = serde_json::from_value(json!({"level": "combined", "dateFrom": "2022-01-01"})).unwrap();
+        assert_eq!((old.categories.len(), old.object_types.len()), (0, 0));
+        for (level, id) in [(LevelFilter::Combined, "combined"), (LevelFilter::Exposures, "exposures"), (LevelFilter::All, "all")] {
+            assert_eq!(serde_json::to_value(level).unwrap(), json!(id));
+        }
+        let ids: Vec<Value> = [
+            ObjectCategory::Galaxies,
+            ObjectCategory::GalaxyClusters,
+            ObjectCategory::Ism,
+            ObjectCategory::StarClusters,
+            ObjectCategory::Stars,
+            ObjectCategory::SolarSystem,
+            ObjectCategory::Fields,
+            ObjectCategory::Calibration,
+        ]
+        .iter()
+        .map(|id| serde_json::to_value(id).unwrap())
+        .collect();
+        assert_eq!(
+            ids,
+            ["galaxies", "galaxy_clusters", "ism", "star_clusters", "stars", "solar_system", "fields", "calibration"].map(Value::from)
+        );
+        let types: Vec<Value> = [
+            ObjectType::PlanetaryNebulae,
+            ObjectType::NebulaeStarForming,
+            ObjectType::YoungStarsDisks,
+            ObjectType::Exoplanets,
+            ObjectType::AgnQuasars,
+            ObjectType::InteractingGalaxies,
+            ObjectType::SupernovaeTransients,
+            ObjectType::CompactSubstellar,
+        ]
+        .iter()
+        .map(|id| serde_json::to_value(id).unwrap())
+        .collect();
+        assert_eq!(
+            types,
+            [
+                "planetary_nebulae",
+                "nebulae_star_forming",
+                "young_stars_disks",
+                "exoplanets",
+                "agn_quasars",
+                "interacting_galaxies",
+                "supernovae_transients",
+                "compact_substellar"
+            ]
+            .map(Value::from)
+        );
+        let unknown = serde_json::from_value::<MastFilterValues>(json!({"categories": ["nebulas"]})).unwrap_err().to_string();
+        assert!(unknown.starts_with("unknown variant `nebulas`"), "{unknown}");
+        assert!(serde_json::from_value::<MastFilterValues>(json!({"objectTypes": ["Galaxies"]})).is_err());
+        assert!(serde_json::from_value::<MastFilterValues>(json!({"level": "l3"})).is_err());
     }
 
     #[test]

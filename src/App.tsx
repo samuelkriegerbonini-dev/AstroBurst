@@ -9,7 +9,7 @@ import { appModeStore, modeFromShortcut, useAppMode } from "./hooks/useAppMode";
 import { useArchivePaletteActions } from "./components/archive/state/useArchivePaletteActions";
 import { workspaceFileRef } from "./components/archive/state/useAroundTarget";
 import DisplayedImageBridge from "./components/archive/DisplayedImageBridge";
-import { ARCHIVE_SHORTCUTS } from "./components/archive/logic/shortcuts";
+import { shortcutSheet, type ShortcutRow } from "./utils/shortcutSheet";
 import MetadataFileList from "./components/file/MetadataFileList";
 import type { MetadataFile } from "./components/file/MetadataFileList";
 import PreviewPanel from "./components/PreviewPanel";
@@ -22,7 +22,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
-import { registerFileIngest, type IngestOptions } from "./hooks/useFileIngest";
+import { registerFileIngest, showWorkspaceUnlessKept, type IngestOptions } from "./hooks/useFileIngest";
 import { quietCompletion } from "./utils/quietCompletion";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
@@ -51,7 +51,9 @@ import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
 import { useLingeringVisibility } from "./hooks/useLingeringVisibility";
 import { isTauri } from "./infrastructure/tauri";
-import { sampleDataPaths } from "./services/sampleData";
+import { sampleDataStore, samplePaletteAction, useSampleData } from "./hooks/useSampleData";
+import { openSampleProducts, paletteSampleSets, paletteSampleSetsKey, sampleSetPaletteActions, type SampleSetRun } from "./utils/sampleOffers";
+import type { SampleOpen } from "./services/sampleData";
 
 type ViewState = "empty" | "processing" | "complete";
 
@@ -61,18 +63,24 @@ const ArchiveFooterStatus = lazy(() => import("./components/archive/ArchiveFoote
 const HIDDEN_LAYER: CSSProperties = { visibility: "hidden" };
 const showWorkspace = () => appModeStore.set("workspace");
 const showArchive = () => appModeStore.set("archive");
+const showCubeTool = () => {
+  showWorkspace();
+  dockStore.dispatch({ type: "open", tool: "cube" });
+};
+const SAMPLE_SET_RUN: SampleSetRun = {
+  download: (id) => {
+    showCubeTool();
+    void sampleDataStore.download(id, openSampleProducts);
+  },
+  open: (id) => {
+    showCubeTool();
+    void sampleDataStore.open(id, openSampleProducts);
+  },
+};
 const IS_MAC = typeof navigator !== "undefined" && (navigator.platform?.toLowerCase().includes("mac") ?? false);
-const WORKSPACE_SHORTCUTS = [
-  { keys: IS_MAC ? "⌘O" : "Ctrl+O", desc: "Open FITS files" },
-  { keys: IS_MAC ? "⌘K" : "Ctrl+K", desc: "Search everywhere" },
-  { keys: "Shift Shift", desc: "Search everywhere" },
-  { keys: "↑ / ↓", desc: "Navigate file list (when focused)" },
-  { keys: "Enter", desc: "Select focused file" },
-  { keys: "?", desc: "Toggle this help" },
-  { keys: "Esc", desc: "Close overlays" },
-];
+const SHORTCUT_GROUPS = shortcutSheet(IS_MAC).filter((g) => g.rows.length > 0);
 
-function ShortcutRows({ rows }: { rows: readonly { keys: string; desc: string }[] }) {
+function ShortcutRows({ rows }: { rows: readonly ShortcutRow[] }) {
   return (
     <div className="flex flex-col gap-1.5 text-[11px]">
       {rows.map((s) => (
@@ -163,7 +171,7 @@ export default function App() {
 
   const handleFilesAdded = useCallback((newFiles: AstroFile[], options?: IngestOptions) => {
     if (newFiles.length === 0) return;
-    appModeStore.set("workspace");
+    showWorkspaceUnlessKept(options);
     quietCompletionRef.current = quietCompletion(options?.quiet === true, prevCompleteRef.current, quietCompletionRef.current);
     addFiles(newFiles);
     setView((v) => (v === "empty" || v === "complete") ? "processing" : v);
@@ -224,15 +232,22 @@ export default function App() {
     }
   }, [handleFilesAdded]);
 
-  const handleOpenSampleData = useCallback(async () => {
-    try {
-      const { paths } = await sampleDataPaths();
-      const partition = partitionIncoming(paths);
-      setIngestReport(rejectionReport(partition));
-      handleFilesAdded(partition.accepted.map(astroFileFromPath));
-    } catch (err) { console.error("[AstroBurst] Sample data:", err); }
+  const openSampleFrames = useCallback((opened: SampleOpen) => {
+    const partition = partitionIncoming(opened.paths);
+    setIngestReport(rejectionReport(partition));
+    handleFilesAdded(partition.accepted.map(astroFileFromPath));
   }, [handleFilesAdded]);
-  const openSampleData = isTauri() ? handleOpenSampleData : undefined;
+  const sampleData = useSampleData(openSampleFrames);
+  const sampleEntries = useSyncExternalStore(sampleDataStore.subscribe, sampleDataStore.get, sampleDataStore.get);
+  const sampleSetsKey = paletteSampleSetsKey(sampleEntries);
+  const sampleState = sampleData?.state;
+  const sampleTotalBytes = sampleData?.totalBytes ?? 0;
+  const downloadSample = sampleData?.download;
+  const openSample = sampleData?.open;
+  const samplePalette = useMemo(
+    () => (sampleState && downloadSample && openSample ? { state: sampleState, totalBytes: sampleTotalBytes, download: downloadSample, open: openSample } : null),
+    [sampleState, sampleTotalBytes, downloadSample, openSample],
+  );
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const shortcutsRef = useRef<HTMLDivElement>(null);
@@ -422,6 +437,10 @@ export default function App() {
 
   const hasVisibleFile = visibleSelectedFile !== null;
   const visibleFileKey = fileKeyOf(visibleSelectedFile);
+  const sampleSetActions = useMemo(
+    () => sampleSetPaletteActions(paletteSampleSets(sampleSetsKey), hasVisibleFile, SAMPLE_SET_RUN),
+    [sampleSetsKey, hasVisibleFile],
+  );
 
   const selectedPath = selectedFile?.path ?? null;
   const selectedName = selectedFile?.name ?? null;
@@ -441,7 +460,9 @@ export default function App() {
       { id: "open-files", label: "Open FITS Files...", hint: "Ctrl+O", icon: FolderOpen, run: handleBrowseFiles },
       { id: "open-folder", label: "Open Folder...", icon: FolderOpen, run: handleSelectFolder },
     ];
-    if (openSampleData) acts.push({ id: "open-sample", label: "Open sample data (HST narrowband frames of M16)", keywords: ["Sample", "Example", "M16", "Eagle"], icon: Sparkles, run: openSampleData });
+    const sampleAction = samplePaletteAction(samplePalette, view === "empty", showWorkspace);
+    if (sampleAction) acts.push(sampleAction);
+    acts.push(...sampleSetActions);
     if (view !== "empty") {
       for (const { tool, label } of paletteToolEntries(dockLayout, hasVisibleFile)) {
         acts.push({
@@ -478,7 +499,7 @@ export default function App() {
     acts.push(...archivePaletteActions);
     acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
     return acts;
-  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, openSampleData, handleExportZip, handleNewBatchClick, archivePaletteActions]);
+  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, samplePalette, sampleSetActions, handleExportZip, handleNewBatchClick, archivePaletteActions]);
 
   const handlePaletteSelectFile = useCallback((id: string) => {
     showWorkspace();
@@ -515,6 +536,7 @@ export default function App() {
             <div
               ref={shortcutsRef}
               role="dialog"
+              data-testid="shortcuts-sheet"
               aria-modal="true"
               aria-labelledby={shortcutsTitleId}
               tabIndex={-1}
@@ -529,11 +551,12 @@ export default function App() {
                   <X size={12} />
                 </button>
               </div>
-              <ShortcutRows rows={WORKSPACE_SHORTCUTS} />
-              <div data-testid="shortcuts-archive" className="mt-4">
-                <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-2">Archive</div>
-                <ShortcutRows rows={ARCHIVE_SHORTCUTS} />
-              </div>
+              {SHORTCUT_GROUPS.map((g, i) => (
+                <div key={g.id} data-testid={`shortcuts-${g.id}`} className={i > 0 ? "mt-4" : undefined}>
+                  {g.title && <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-2">{g.title}</div>}
+                  <ShortcutRows rows={g.rows} />
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -566,7 +589,7 @@ export default function App() {
                 <div data-testid="workspace-root" className="absolute inset-0" style={mode === "workspace" ? undefined : HIDDEN_LAYER} inert={mode !== "workspace"}>
                   {view === "empty" ? (
                     <div className="h-full flex items-center justify-center">
-                      <EmptyState onBrowseFiles={handleBrowseFiles} onSelectFolder={handleSelectFolder} onBrowseArchive={showArchive} onOpenSampleData={openSampleData} />
+                      <EmptyState onBrowseFiles={handleBrowseFiles} onSelectFolder={handleSelectFolder} onBrowseArchive={showArchive} sample={sampleData ?? undefined} />
                     </div>
                   ) : (
                     <CompositeProvider>

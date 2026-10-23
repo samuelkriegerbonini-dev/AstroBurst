@@ -1,10 +1,23 @@
-import type { MastColumn, MastFilterValues, MastMission, MastMissionId, MastPreset, MastQuery, MastResolved, MastRow, MastSearchPage } from "../../../shared/types/mast";
-import type { SortKey } from "./buildQuery";
+import type {
+  MastColumn,
+  MastFilterGroup,
+  MastFilterValues,
+  MastLevel,
+  MastMission,
+  MastMissionId,
+  MastPreset,
+  MastQuery,
+  MastResolved,
+  MastRow,
+  MastSearchPage,
+} from "../../../shared/types/mast";
+import type { ArchiveForm, SortKey } from "./buildQuery";
 import { interpretQuery, type QueryKind } from "./interpretQuery";
 import { sortRows, type ResultSet } from "./paging";
 import type { ThumbQueue } from "./thumbQueue";
 import { coordinatesText } from "./copyBuilders";
-import { droppedText, presetById } from "./presetView";
+import { PURE_PARALLEL_NOTE, PURE_PARALLEL_PRESET, droppedText, presetById, presetLevel } from "./presetView";
+import { OBJECT_KEY, hasObjectFilters, objectChips, objectLabels, offeredIds, parseObjectChip, type ObjectChipId } from "./objectFilters";
 
 export interface TableSort {
   keys: SortKey[];
@@ -19,6 +32,7 @@ export interface SummaryView {
   applied: string;
   preset: string | null;
   ignored: string | null;
+  unknownNote: string | null;
 }
 
 export interface RunLike {
@@ -42,7 +56,8 @@ export interface SearchProgressView {
   slowNote: string | null;
 }
 
-export type ChipId = "level" | "instrument" | "filter" | "dateFrom" | "dateTo" | "publicOnly";
+export type BaseChipId = "level" | "instrument" | "filter" | "dateFrom" | "dateTo" | "publicOnly";
+export type ChipId = BaseChipId | ObjectChipId;
 
 export interface FilterChip {
   id: ChipId;
@@ -56,16 +71,24 @@ export interface EmptyView {
   clearFilters: boolean;
   allLevels: boolean;
   tryOn: { mission: MastMissionId; label: string } | null;
+  classLine: string | null;
 }
 
 export const WIDEN_STEPS: readonly number[] = [3, 10, 30];
 export const SLOW_NOTE = "MAST answers queries it has not seen recently slowly (25 to 80 s measured); repeats take 1 to 3 s.";
 export const SLOW_AFTER_MS = 8000;
 export const ELAPSED_AFTER_MS = 1000;
+const CATEGORY_COLUMN = "_category";
+export const UNKNOWN_TEXT = "unknown";
+const CLASS_LINE = "Category and Object type come from what each proposal declared; a field can be filed under another class.";
+export const UNKNOWN_CLEAR_TEXT = "Remove object filters";
+
+const UNKNOWN_TAIL = "Datasets with no proposal category, such as most MSA source spectra and parallel fields, never match";
+const LEVEL_LABELS: Record<MastLevel, string | null> = { combined: "Combined L3", exposures: "Exposures L1-2", all: null };
 
 const OPERATOR = /^(>=|<=|!=|<|>)/;
 const DATASET_COLUMNS = new Set(["fileSetName", "sci_data_set_name", "iue_data_id", "Target", "target_id"]);
-const CHIP_FILTER: Record<ChipId, MastMission["quickFilters"][number]["id"]> = {
+const CHIP_FILTER: Record<BaseChipId, MastMission["quickFilters"][number]["id"]> = {
   level: "level",
   instrument: "instrument",
   filter: "filter",
@@ -76,7 +99,7 @@ const CHIP_FILTER: Record<ChipId, MastMission["quickFilters"][number]["id"]> = {
 const OTHER_MISSION: Partial<Record<MastMissionId, MastMissionId>> = { jwst: "hst", hst: "jwst" };
 
 export function appliedText(applied: MastSearchPage["applied"]): string {
-  const parts = applied.conditions.flatMap((c) => Object.entries(c).map(([k, v]) => (OPERATOR.test(v) ? `${k} ${v}` : `${k} = ${v}`)));
+  const parts = applied.conditions.flatMap((c) => Object.entries(c).flatMap(([k, v]) => (v.trim() === "" ? [] : [OPERATOR.test(v) ? `${k} ${v}` : `${k} = ${v}`])));
   return parts.length ? parts.join(", ") : "none";
 }
 
@@ -115,13 +138,31 @@ function headOf(results: ResultSet, resolved: MastResolved | null, query: MastQu
   return coords;
 }
 
-export function summaryView(input: { results: ResultSet; resolved: MastResolved | null; query: MastQuery | null; missionLabel: string; presets?: readonly MastPreset[] }): SummaryView {
+function countText(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+function unknownNoteText(shown: number, unfilteredTotal: number | null): string {
+  if (unfilteredTotal === null) return `${UNKNOWN_TAIL} Category or Object type.`;
+  return `Showing ${countText(shown)} of ${countText(unfilteredTotal)} datasets from the same search without Category or Object type. ${UNKNOWN_TAIL}.`;
+}
+
+export function summaryView(input: {
+  results: ResultSet;
+  resolved: MastResolved | null;
+  query: MastQuery | null;
+  missionLabel: string;
+  presets?: readonly MastPreset[];
+  groups?: readonly MastFilterGroup[];
+}): SummaryView {
   const { results, resolved, query } = input;
   const parts: string[] = [];
   const head = headOf(results, resolved, query);
   if (head) parts.push(head);
   const preset = presetById(input.presets ?? [], query?.preset);
   if (preset) parts.push(`Preset ${preset.label}`);
+  const objects = query ? objectLabels(query.filters, input.groups ?? []) : [];
+  if (objects.length) parts.push(`Filters: ${objects.join(", ")}`);
   const usesCone = !query || (query.program === null && !query.datasetId);
   const radius = radiusOf(results, query);
   if (usesCone && radius !== null) parts.push(`r ${radius}'${results.radiusClamped ? " (clamped)" : ""}`);
@@ -130,6 +171,7 @@ export function summaryView(input: { results: ResultSet; resolved: MastResolved 
   parts.push(`${elapsedText(results.elapsedMs)}${results.fromCache ? " (cached)" : ""}`);
   const applied = appliedText(results.applied);
   parts.push(`MAST applied: ${applied}`);
+  if (results.levelAppliedLocally) parts.push(`AstroBurst applied: ${results.levelAppliedLocally}`);
   const pos = positionOf(results, query) ?? (resolved ? { raDeg: resolved.raDeg, decDeg: resolved.decDeg } : null);
   return {
     text: parts.join(" · "),
@@ -139,17 +181,20 @@ export function summaryView(input: { results: ResultSet; resolved: MastResolved 
     applied,
     preset: preset?.id ?? null,
     ignored: droppedText(results.droppedConditions),
+    unknownNote: hasObjectFilters(query?.filters) ? unknownNoteText(total, results.unfilteredTotal) : null,
   };
 }
 
-export function filterSummary(filters: MastFilterValues): string {
+export function filterSummary(filters: MastFilterValues, groups: readonly MastFilterGroup[] = []): string {
   const parts: string[] = [];
-  if (filters.level === "combined") parts.push("Combined L3");
+  const level = filters.level ? LEVEL_LABELS[filters.level] : null;
+  if (level) parts.push(level);
   if (filters.instrument) parts.push(filters.instrument);
   if (filters.filter) parts.push(`filter ${filters.filter}`);
   if (filters.dateFrom) parts.push(`from ${filters.dateFrom}`);
   if (filters.dateTo) parts.push(`to ${filters.dateTo}`);
   if (filters.publicOnly) parts.push("public only");
+  parts.push(...objectLabels(filters, groups));
   return parts.join(", ");
 }
 
@@ -158,14 +203,22 @@ function since(now: number, start: number): string | null {
   return ms >= ELAPSED_AFTER_MS ? elapsedText(ms) : null;
 }
 
-function searchLine(run: RunLike, ctx: { missionLabel: string; radiusText: string; filters: MastFilterValues; now: number }): ProgressLine {
+interface ProgressContext {
+  missionLabel: string;
+  radiusText: string;
+  filters: MastFilterValues;
+  now: number;
+  groups?: readonly MastFilterGroup[];
+}
+
+function searchLine(run: RunLike, ctx: ProgressContext): ProgressLine {
   const where = run.kind === "programme" ? `programme ${run.text}` : run.kind === "dataset" ? `dataset ${run.text}` : `r ${ctx.radiusText.trim().replace(/'$/, "")}'`;
-  const filters = filterSummary(ctx.filters);
+  const filters = filterSummary(ctx.filters, ctx.groups);
   const text = [`Searching ${ctx.missionLabel}`, where, filters].filter(Boolean).join(" ");
   return { key: "search", text, elapsed: since(ctx.now, run.searchStartedAt) };
 }
 
-export function searchProgress(run: RunLike, ctx: { missionLabel: string; radiusText: string; filters: MastFilterValues; now: number }): SearchProgressView {
+export function searchProgress(run: RunLike, ctx: ProgressContext): SearchProgressView {
   const lines: ProgressLine[] = [];
   const lookupName = run.name ?? run.text;
   if (run.phase === "resolving") {
@@ -182,27 +235,41 @@ export function searchProgress(run: RunLike, ctx: { missionLabel: string; radius
   return { lines, slowNote: ctx.now - run.startedAt >= SLOW_AFTER_MS ? SLOW_NOTE : null };
 }
 
-function chipsOf(filters: MastFilterValues): FilterChip[] {
+function chipsOf(filters: MastFilterValues, groups: readonly MastFilterGroup[]): FilterChip[] {
   const chips: FilterChip[] = [];
-  if (filters.level === "combined") chips.push({ id: "level", label: "Combined L3" });
+  const level = filters.level ? LEVEL_LABELS[filters.level] : null;
+  if (level) chips.push({ id: "level", label: level });
   if (filters.instrument) chips.push({ id: "instrument", label: filters.instrument });
   if (filters.filter) chips.push({ id: "filter", label: `Filter ${filters.filter}` });
   if (filters.dateFrom) chips.push({ id: "dateFrom", label: `From ${filters.dateFrom}` });
   if (filters.dateTo) chips.push({ id: "dateTo", label: `To ${filters.dateTo}` });
   if (filters.publicOnly) chips.push({ id: "publicOnly", label: "Public only" });
+  for (const chip of objectChips(filters, groups)) chips.push({ id: chip.id, label: chip.label });
   return chips;
+}
+
+function chipFits(chip: FilterChip, other: MastMission, quick: ReadonlySet<string>): boolean {
+  if (chip.id === "level") return true;
+  const object = parseObjectChip(chip.id);
+  if (!object) return quick.has(CHIP_FILTER[chip.id as BaseChipId]);
+  const group = other.filterGroups.find((g) => OBJECT_KEY[g.id] === object.key);
+  return offeredIds([object.option], group).length === 1;
 }
 
 function tryOnOf(mission: MastMission, missions: readonly MastMission[], chips: readonly FilterChip[]): EmptyView["tryOn"] {
   const otherId = OTHER_MISSION[mission.id];
   const other = otherId ? missions.find((m) => m.id === otherId) : undefined;
   if (!other || other.availability !== "open" || !other.capabilities.search) return null;
-  const ids = new Set(other.quickFilters.map((f) => f.id));
-  const fits = chips.filter((c) => c.id !== "level").every((c) => ids.has(CHIP_FILTER[c.id]));
-  return fits ? { mission: other.id, label: `Try on ${other.label}` } : null;
+  const quick = new Set<string>(other.quickFilters.map((f) => f.id));
+  return chips.every((c) => chipFits(c, other, quick)) ? { mission: other.id, label: `Try on ${other.label}` } : null;
 }
 
-export function emptyView(input: { query: MastQuery | null; results: ResultSet; missions: readonly MastMission[]; mission: MastMission }): EmptyView {
+function classLineOf(filters: MastFilterValues, preset: MastPreset | null): string | null {
+  if (!hasObjectFilters(filters)) return null;
+  return preset?.id === PURE_PARALLEL_PRESET ? PURE_PARALLEL_NOTE : CLASS_LINE;
+}
+
+export function emptyView(input: { query: MastQuery | null; results: ResultSet; missions: readonly MastMission[]; mission: MastMission; presets?: readonly MastPreset[] }): EmptyView {
   const { query, results, missions, mission } = input;
   const label = mission.label;
   const radius = radiusOf(results, query);
@@ -216,15 +283,22 @@ export function emptyView(input: { query: MastQuery | null; results: ResultSet; 
     widenTo = WIDEN_STEPS.find((step) => step > radius) ?? null;
   }
   const filters = query?.filters ?? {};
-  const chips = chipsOf(filters);
+  const chips = chipsOf(filters, mission.filterGroups);
+  const objects = objectLabels(filters, mission.filterGroups);
   return {
-    title,
+    title: objects.length ? `${title} with ${objects.join(", ")}` : title,
     chips,
     widenTo,
     clearFilters: chips.some((c) => c.id !== "level"),
-    allLevels: mission.id === "jwst" && filters.level === "combined",
+    allLevels: mission.id === "jwst" && (filters.level === "combined" || filters.level === "exposures"),
     tryOn: tryOnOf(mission, missions, chips),
+    classLine: classLineOf(filters, presetById(input.presets ?? [], query?.preset)),
   };
+}
+
+export function isLevelSearch(form: Pick<ArchiveForm, "mission" | "filters" | "preset">, presets: readonly MastPreset[]): boolean {
+  const level = form.filters.level;
+  return form.mission === "jwst" && (level === "combined" || level === "exposures") && !hasObjectFilters(form.filters) && presetLevel(presetById(presets, form.preset)) === null;
 }
 
 export function notResolvedView(name: string, elapsedMs: number): { title: string; programmeOffer: boolean } {
@@ -280,6 +354,10 @@ export function fitColumns(columns: readonly MastColumn[], width: number): MastC
     used += w;
   }
   return out;
+}
+
+export function isUnknownCell(column: Pick<MastColumn, "name">, value: string | number | boolean | null | undefined): boolean {
+  return column.name === CATEGORY_COLUMN && (value === null || value === undefined || value === "");
 }
 
 export function cellText(value: string | number | boolean | null | undefined, column: Pick<MastColumn, "kind">): string {

@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use ndarray::Array2;
 use serde::Serialize;
 
+use crate::cmd::analysis::area::{area_companion, AREA_EXTNAME};
 use crate::cmd::common::{
     blocking_cmd, invalidate_written, load_cached_full, load_companions, output_stem, source_path, source_primary_header,
 };
@@ -192,6 +193,8 @@ pub(crate) fn export_cutout(
         }
     };
 
+    let area = area_companion(path, &entry).map(|a| (cut_plane(a.arr(), &rect), a.header().map(|h| shift_header(h, &rect))));
+
     let primary = source_primary_header(path, entry.header());
     let mut hdus = vec![ImageHdu { data: HduData::F32(&sci), header: sci_header.as_ref(), extname: EXTNAME_SCI, extver: 1 }];
     if let Some((arr, header)) = err.as_ref() {
@@ -203,6 +206,9 @@ pub(crate) fn export_cutout(
             IntPixels::Signed(bits) => HduData::I32(bits),
         };
         hdus.push(ImageHdu { data, header: header.as_ref(), extname: EXTNAME_DQ, extver: 1 });
+    }
+    if let Some((arr, header)) = area.as_ref() {
+        hdus.push(ImageHdu { data: HduData::F32(arr), header: header.as_ref(), extname: AREA_EXTNAME, extver: 1 });
     }
     GLOBAL_CUBE_CACHE.invalidate(&target);
     invalidate_written(&target);
@@ -663,6 +669,57 @@ mod tests {
         let file = std::fs::File::open(path).unwrap();
         let sci = list_extensions(&file).unwrap().iter().position(|h| h.extname.as_deref() == Some("SCI")).expect("SCI HDU");
         extract_header_by_index(&file, sci).unwrap()
+    }
+
+    #[test]
+    fn a_cutout_of_a_cal_carries_the_area_map_and_keeps_the_aperture_flux() {
+        use crate::cmd::analysis::area::test_fixtures::{
+            area_hdu, blocked_area, cal_sci_cards, jwst_cal_mef, square, CalPlanes, CAL_APERTURE_RADIUS, CAL_SIZE,
+        };
+        use crate::cmd::analysis::{photometry_for_path, RES_PHOTCAL};
+        use crate::types::constants::{RES_LABEL, RES_PHOTOMETRY};
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent = jwst_cal_mef(
+            &dir.path().join("cal.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(blocked_area(), CAL_SIZE, Some(1))],
+        );
+        let out = dir.path().join("cal_cut.fits").to_str().unwrap().to_string();
+        let region = RegionShape::Box { x: 32.0, y: 32.0, width: 40.0, height: 40.0, angle: 0.0 };
+        let report = export_cutout(&parent.key, &out, None, &region, true, true, false).unwrap();
+        assert_eq!(report.rect, CutoutRect { x0: 12, y0: 12, width: 40, height: 40 });
+        assert_eq!(report.hdus, vec!["SCI", "ERR", "DQ", "AREA"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let file = std::fs::File::open(&out).unwrap();
+        let exts = list_extensions(&file).unwrap();
+        let area_ext = exts.iter().find(|e| e.extname.as_deref() == Some("AREA")).expect("AREA HDU in the cutout");
+        assert_eq!(area_ext.extver, Some(1));
+        let area = extract_image_mmap_by_index(&file, area_ext.index).unwrap().image;
+        assert_eq!(area, cut_plane(&square(&blocked_area()), &report.rect));
+        let area_header = extract_header_by_index(&file, area_ext.index).unwrap();
+        assert_eq!(area_header.get("EXTNAME"), Some("AREA"));
+        assert!(area_header.get("BUNIT").is_none(), "{:?}", area_header.get("BUNIT"));
+
+        let measure = |path: &str, x: f64, y: f64| {
+            photometry_for_path(path, x, y, Some(CAL_APERTURE_RADIUS), None, false, true, None).unwrap()
+        };
+        let before = measure(&parent.key, 32.0, 32.0);
+        let after = measure(&format!("{out}#hdu=1"), 32.0 - report.rect.x0 as f64, 32.0 - report.rect.y0 as f64);
+        assert_eq!(before[RES_PHOTOMETRY]["area_applied"], true);
+        assert_eq!(after[RES_PHOTOMETRY]["area_applied"], true, "{}", after[RES_PHOTCAL]);
+        assert_eq!(after[RES_PHOTCAL][RES_LABEL], before[RES_PHOTCAL][RES_LABEL]);
+        assert_eq!(after[RES_PHOTOMETRY]["n_masked"], before[RES_PHOTOMETRY]["n_masked"]);
+        for field in ["net_flux", "flux_err", "flux_jy", "mag_ab"] {
+            let (a, b) = (before[RES_PHOTOMETRY][field].as_f64().unwrap(), after[RES_PHOTOMETRY][field].as_f64().unwrap());
+            assert!((a - b).abs() <= 1e-9 * a.abs(), "{field}: parent {a} vs cutout {b}");
+        }
+
+        let sci_only = export_cutout(&parent.key, "", Some(dir.path().to_str().unwrap()), &region, false, false, false).unwrap();
+        assert_eq!(sci_only.hdus, vec!["SCI", "AREA"]);
     }
 
     #[test]

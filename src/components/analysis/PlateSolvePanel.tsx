@@ -1,8 +1,9 @@
 import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "react";
-import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save, X } from "lucide-react";
+import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save, X, Copy, Check } from "lucide-react";
 import { cancelPlateSolve, plateSolve, getWcsInfo, writeSolvedWcs } from "../../services/astrometry";
 import type { WcsInfo, WriteSolvedWcsResult } from "../../services/astrometry";
 import { shouldResetSolve, solvedWcsSummary, wcsRewriteBlocker, wcsWriteBlocker, type SolveIdentity } from "../../utils/solvedWcs";
+import OutputNote from "./OutputNote";
 import { getApiKey, getConfig } from "../../services/config";
 import {
   VIEW_SCALE_ATTRIBUTE,
@@ -27,6 +28,13 @@ import {
 } from "../../utils/plateSolveScale";
 import { starCountLabel } from "../../utils/analysisLabels";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
+import {
+  fieldOfViewText,
+  pixelScaleText,
+  solveCentreText,
+  solveSummaryLine,
+  type SolveCentre,
+} from "../../utils/coordFormat";
 
 export interface Star {
   x: number;
@@ -34,23 +42,6 @@ export interface Star {
   flux: number;
   fwhm: number;
   snr: number;
-}
-
-function formatRA(ra: number): string {
-  const h = ra / 15;
-  const hours = Math.floor(h);
-  const minutes = Math.floor((h - hours) * 60);
-  const seconds = ((h - hours) * 60 - minutes) * 60;
-  return `${hours}h ${minutes}m ${seconds.toFixed(2)}s`;
-}
-
-function formatDec(dec: number): string {
-  const sign = dec >= 0 ? "+" : "-";
-  const abs = Math.abs(dec);
-  const degrees = Math.floor(abs);
-  const arcmin = Math.floor((abs - degrees) * 60);
-  const arcsec = ((abs - degrees) * 60 - arcmin) * 60;
-  return `${sign}${degrees}° ${arcmin}' ${arcsec.toFixed(1)}"`;
 }
 
 interface FieldAnnotation {
@@ -82,6 +73,102 @@ const DEFAULT_SOLVE_TIMEOUT_SECS = 120;
 function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+const CARD_CLASS = "bg-zinc-900/80 rounded px-2 py-1.5";
+const CENTRE_TONES = { solve: "text-emerald-300", header: "text-zinc-300" } as const;
+const COPY_CENTRE_LABEL = "Copy centre, scale and FOV";
+const COPY_CENTRE_TITLE = "Copy the centre in decimal degrees and sexagesimal, the pixel scale and the FOV as one line";
+const COPIED_FEEDBACK_MS = 1500;
+const COPIED_TEXT = "Copied";
+
+interface SolveCentreCardsProps {
+  centre: SolveCentre;
+  source: keyof typeof CENTRE_TONES;
+}
+
+export function SolveCentreCards({ centre, source }: SolveCentreCardsProps) {
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const text = solveCentreText(centre.center_ra, centre.center_dec);
+  const scale = pixelScaleText(centre.pixel_scale_arcsec);
+  const fov = fieldOfViewText(centre.field_of_view_w_arcmin, centre.field_of_view_h_arcmin);
+  const copyable = Number.isFinite(centre.center_ra) && Number.isFinite(centre.center_dec);
+  const valueClass = `${CENTRE_TONES[source]} font-mono`;
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
+
+  const copy = async () => {
+    setCopyError(null);
+    try {
+      await navigator.clipboard.writeText(solveSummaryLine(centre));
+      setCopied(true);
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
+    } catch (e: unknown) {
+      setCopied(false);
+      setCopyError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  return (
+    <>
+      <div className={CARD_CLASS} data-centre-source={source}>
+        <div className="text-zinc-500">Centre RA</div>
+        <div className={valueClass} data-centre-ra>{text.ra}</div>
+        <div className="text-zinc-500 font-mono" data-centre-ra-deg>{text.raDeg}</div>
+      </div>
+      <div className={CARD_CLASS}>
+        <div className="flex items-center justify-between gap-1">
+          <span className="text-zinc-500">Centre Dec</span>
+          {copyable && (
+            <>
+              <button
+                type="button"
+                onClick={() => void copy()}
+                aria-label={COPY_CENTRE_LABEL}
+                title={COPY_CENTRE_TITLE}
+                className="text-zinc-500 hover:text-zinc-200 transition-colors"
+              >
+                {copied ? <Check size={10} className="text-emerald-400" /> : <Copy size={10} />}
+              </button>
+              <span role="status" className="sr-only" data-copy-status>
+                {copied ? COPIED_TEXT : ""}
+              </span>
+            </>
+          )}
+        </div>
+        <div className={valueClass} data-centre-dec>{text.dec}</div>
+        <div className="text-zinc-500 font-mono" data-centre-dec-deg>{text.decDeg}</div>
+      </div>
+      {scale && (
+        <div className={CARD_CLASS}>
+          <div className="text-zinc-500">Pixel Scale</div>
+          <div className={valueClass}>{scale}</div>
+        </div>
+      )}
+      {fov && (
+        <div className={CARD_CLASS}>
+          <div className="text-zinc-500">FOV</div>
+          <div className={valueClass}>{fov}</div>
+        </div>
+      )}
+      {copyError && (
+        <div
+          role="alert"
+          data-copy-error
+          className="col-span-2 text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words"
+        >
+          {copyError}
+        </div>
+      )}
+    </>
+  );
 }
 
 interface PlateSolvePanelProps {
@@ -905,24 +992,7 @@ function PlateSolvePanel({
 
           {solveResult && (
             <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-              <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                <div className="text-zinc-500">Center RA</div>
-                <div className="text-emerald-300 font-mono">{formatRA(solveResult.center_ra)}</div>
-              </div>
-              <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                <div className="text-zinc-500">Center Dec</div>
-                <div className="text-emerald-300 font-mono">{formatDec(solveResult.center_dec)}</div>
-              </div>
-              <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                <div className="text-zinc-500">Pixel Scale</div>
-                <div className="text-emerald-300 font-mono">{solveResult.pixel_scale_arcsec?.toFixed(3)}"/px</div>
-              </div>
-              <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                <div className="text-zinc-500">FOV</div>
-                <div className="text-emerald-300 font-mono">
-                  {solveResult.field_of_view_w_arcmin?.toFixed(1)}' x {solveResult.field_of_view_h_arcmin?.toFixed(1)}'
-                </div>
-              </div>
+              <SolveCentreCards centre={solveResult} source="solve" />
               {solveResult.orientation !== undefined && (
                 <div className="bg-zinc-900/80 rounded px-2 py-1.5 col-span-2">
                   <div className="text-zinc-500">Orientation</div>
@@ -965,31 +1035,11 @@ function PlateSolvePanel({
               {solvedWcsSummary(wcsWritten)}
             </div>
           )}
+          {wcsWritten?.fits_path && <OutputNote path={wcsWritten.fits_path} />}
 
           {!solveResult && wcsInfo && wcsInfo.center_ra !== undefined && (
             <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-              <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                <div className="text-zinc-500">Center RA</div>
-                <div className="text-zinc-300 font-mono">{formatRA(wcsInfo.center_ra)}</div>
-              </div>
-              <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                <div className="text-zinc-500">Center Dec</div>
-                <div className="text-zinc-300 font-mono">{formatDec(wcsInfo.center_dec)}</div>
-              </div>
-              {wcsInfo.pixel_scale_arcsec != null && (
-                <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                  <div className="text-zinc-500">Pixel Scale</div>
-                  <div className="text-zinc-300 font-mono">{wcsInfo.pixel_scale_arcsec.toFixed(3)}"/px</div>
-                </div>
-              )}
-              {wcsInfo.fov_arcmin && (
-                <div className="bg-zinc-900/80 rounded px-2 py-1.5">
-                  <div className="text-zinc-500">FOV</div>
-                  <div className="text-zinc-300 font-mono">
-                    {wcsInfo.fov_arcmin[0].toFixed(1)}' x {wcsInfo.fov_arcmin[1].toFixed(1)}'
-                  </div>
-                </div>
-              )}
+              <SolveCentreCards centre={wcsInfo} source="header" />
             </div>
           )}
         </div>

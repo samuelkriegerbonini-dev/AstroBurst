@@ -70,6 +70,62 @@ export function formatLat(deg: number, opts: { format: CoordFormat; precision?: 
   return `${sign}${pad2(whole)}°${pad2(minutes)}'${padSeconds(seconds, precision)}"`;
 }
 
+export interface CentreText {
+  ra: string;
+  dec: string;
+  raDeg: string;
+  decDeg: string;
+}
+
+export interface SolveCentre {
+  center_ra: number;
+  center_dec: number;
+  pixel_scale_arcsec?: number | null;
+  field_of_view_w_arcmin?: number | null;
+  field_of_view_h_arcmin?: number | null;
+}
+
+const DEGREE_SIGN = "°";
+const DECIMAL_UNIT_AND_FRAME = "deg ICRS";
+const SCALE_SIGNIFICANT_DIGITS = 4;
+
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+export function solveCentreText(raDeg: number, decDeg: number): CentreText {
+  return {
+    ra: formatLon(raDeg, { hours: true, format: "sexagesimal", precision: 2 }),
+    dec: formatLat(decDeg, { format: "sexagesimal", precision: 1 }),
+    raDeg: formatLon(raDeg, { hours: false, format: "decimal", precision: 6 }),
+    decDeg: formatLat(decDeg, { format: "decimal", precision: 6 }),
+  };
+}
+
+export function pixelScaleText(arcsecPerPx: number | null | undefined): string | null {
+  if (!isFiniteNumber(arcsecPerPx) || arcsecPerPx <= 0) return null;
+  const decimals = Math.max(0, SCALE_SIGNIFICANT_DIGITS - 1 - Math.floor(Math.log10(arcsecPerPx)));
+  return `${arcsecPerPx.toFixed(decimals)}"/px`;
+}
+
+export function fieldOfViewText(widthArcmin: number | null | undefined, heightArcmin: number | null | undefined): string | null {
+  if (!isFiniteNumber(widthArcmin) || !isFiniteNumber(heightArcmin)) return null;
+  if (Math.max(widthArcmin, heightArcmin) < 1) return `${Math.round(widthArcmin * 60)}" x ${Math.round(heightArcmin * 60)}"`;
+  return `${widthArcmin.toFixed(1)}' x ${heightArcmin.toFixed(1)}'`;
+}
+
+export function skyPositionLine(raDeg: number, decDeg: number): string {
+  const text = solveCentreText(raDeg, decDeg);
+  return `${text.raDeg.replace(DEGREE_SIGN, "")} ${text.decDeg.replace(DEGREE_SIGN, "")} ${DECIMAL_UNIT_AND_FRAME} | ${text.ra} ${text.dec}`;
+}
+
+export function solveSummaryLine(centre: SolveCentre): string {
+  const fov = fieldOfViewText(centre.field_of_view_w_arcmin, centre.field_of_view_h_arcmin);
+  return [skyPositionLine(centre.center_ra, centre.center_dec), pixelScaleText(centre.pixel_scale_arcsec), fov && `FOV ${fov}`]
+    .filter((part): part is string => Boolean(part))
+    .join(" | ");
+}
+
 export function frameAxisLabels(frame: SkyFrame): [string, string] {
   switch (frame) {
     case "galactic":

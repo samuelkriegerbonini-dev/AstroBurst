@@ -120,6 +120,7 @@ export interface WcsOrientationInfo {
   gwcs_vs_header_sip_max_mas?: number | null;
   gwcs_vs_header_sip_max_px?: number | null;
   gwcs_refusal?: string | null;
+  wcs_warning?: string | null;
 }
 
 export interface WorldToPixelResult {

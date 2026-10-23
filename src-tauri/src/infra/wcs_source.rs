@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::ErrorKind;
@@ -15,7 +16,7 @@ use crate::infra::asdf::converter::is_asdf_file;
 use crate::infra::asdf::{AsdfFile, AsdfImage};
 use crate::infra::fits::asdf_hdu::{find_asdf_hdu, read_asdf_hdu_bytes};
 use crate::infra::fits::dispatcher::resolve_single_image;
-use crate::types::header::HduHeader;
+use crate::types::header::{parse_fits_float, HduHeader};
 use crate::types::image_ref::ImageRef;
 
 pub type GwcsLookup = Result<Option<Arc<GwcsSource>>, String>;
@@ -97,6 +98,8 @@ pub fn invalidate_gwcs_cache(path: &str) {
 }
 
 pub fn load_wcs(path: &str, header: &HduHeader) -> Result<WcsTransform> {
+    let header = header_without_tan_pv(header);
+    let header = header.as_ref();
     match gwcs_for_path(path) {
         Ok(Some(source)) => match WcsTransform::from_gwcs(source, header) {
             Ok(wcs) => Ok(wcs),
@@ -108,6 +111,94 @@ pub fn load_wcs(path: &str, header: &HduHeader) -> Result<WcsTransform> {
         Ok(None) => WcsTransform::from_header(header),
         Err(refusal) => WcsTransform::from_header(header).map(|wcs| wcs.with_gwcs_refusal(refusal)),
     }
+}
+
+pub fn header_wcs(header: &HduHeader) -> Result<WcsTransform> {
+    WcsTransform::from_header(&header_without_tan_pv(header))
+}
+
+struct PvCard<'a> {
+    key: &'a str,
+    axis: u32,
+    m: u32,
+    value: &'a str,
+}
+
+impl PvCard<'_> {
+    fn number(&self) -> Option<f64> {
+        parse_fits_float(self.value.trim().trim_matches('\'').trim())
+    }
+
+    fn is_identity_term(&self) -> bool {
+        self.number() == Some(if self.m == 1 { 1.0 } else { 0.0 })
+    }
+
+    fn is_paper_ii_default(&self) -> bool {
+        let default = match (self.axis, self.m) {
+            (1, 0 | 1) => 0.0,
+            (1, 2) => 90.0,
+            _ => return false,
+        };
+        self.number() == Some(default)
+    }
+}
+
+fn states_the_default_fiducial_point(cards: &[PvCard]) -> bool {
+    let stated = |m| cards.iter().any(|card| card.axis == 1 && card.m == m);
+    stated(1) && stated(2) && cards.iter().all(PvCard::is_paper_ii_default)
+}
+
+fn is_tan_projection(header: &HduHeader) -> bool {
+    ["CTYPE1", "CTYPE2"].iter().all(|key| {
+        header.get(key).is_some_and(|raw| {
+            let ctype = raw.trim().trim_matches('\'').trim().to_ascii_uppercase();
+            ctype.trim_end_matches("-SIP").get(5..8) == Some("TAN")
+        })
+    })
+}
+
+fn tan_pv_cards(header: &HduHeader) -> Vec<PvCard<'_>> {
+    if !is_tan_projection(header) {
+        return Vec::new();
+    }
+    header
+        .cards
+        .iter()
+        .filter_map(|(key, value)| {
+            let upper = key.trim().to_ascii_uppercase();
+            let (axis, m) = upper.strip_prefix("PV")?.split_once('_')?;
+            let axis = axis.parse::<u32>().ok().filter(|axis| matches!(axis, 1 | 2))?;
+            Some(PvCard { key, axis, m: m.parse().ok()?, value })
+        })
+        .collect()
+}
+
+pub fn tan_pv_warning(header: &HduHeader) -> Option<String> {
+    let cards = tan_pv_cards(header);
+    if states_the_default_fiducial_point(&cards) {
+        return None;
+    }
+    let mut named: Vec<(u32, u32)> =
+        cards.iter().filter(|card| !card.is_identity_term()).map(|card| (card.axis, card.m)).collect();
+    if named.is_empty() {
+        return None;
+    }
+    named.sort_unstable();
+    named.dedup();
+    let names: Vec<String> = named.iter().map(|(axis, m)| format!("PV{axis}_{m}")).collect();
+    Some(format!("PV distortion not applied: {}", names.join(", ")))
+}
+
+fn header_without_tan_pv(header: &HduHeader) -> Cow<'_, HduHeader> {
+    let keys: Vec<String> = tan_pv_cards(header).iter().map(|card| card.key.to_string()).collect();
+    if keys.is_empty() {
+        return Cow::Borrowed(header);
+    }
+    let mut linear = header.clone();
+    for key in &keys {
+        linear.remove(key);
+    }
+    Cow::Owned(linear)
 }
 
 fn lookup_gwcs(source: &str) -> GwcsLookup {
@@ -172,6 +263,18 @@ fn source_from_tree(asdf: &AsdfFile, hdu_index: Option<usize>) -> GwcsLookup {
 
 #[cfg(test)]
 pub(crate) mod test_fixtures {
+    pub(crate) const PV_DISTORTION_CARDS: [(&str, &str); 9] = [
+        ("PV1_0", "4.0E-4"),
+        ("PV1_1", "1.02"),
+        ("PV1_2", "-3.0E-2"),
+        ("PV1_4", "6.0E-3"),
+        ("PV1_7", "0.0"),
+        ("PV2_0", "9.0E-3"),
+        ("PV2_1", "1.0"),
+        ("PV2_2", "7.0E-3"),
+        ("PV2_10", "-4.0E-2"),
+    ];
+
     pub(crate) fn tan_cards() -> Vec<(&'static str, String)> {
         vec![
             ("CTYPE1", "'RA---TAN'".into()),
@@ -212,14 +315,14 @@ mod tests {
 
     use serde_yaml::Value;
 
-    use super::test_fixtures::{insert_before_top_level_wcs, join_yaml, split_yaml, tan_cards};
+    use super::test_fixtures::{insert_before_top_level_wcs, join_yaml, split_yaml, tan_cards, PV_DISTORTION_CARDS};
     use super::*;
     use crate::core::astrometry::gwcs::test_support::{
         assert_close_slice, documents_fits_dir, fixtures_dir, heavy_test_dir, icrs_world, mast_dir, real_data_dir, real_syntax,
         skip_if_absent, wcs_body, DETECTOR,
     };
     use crate::core::astrometry::gwcs::{parse_gwcs, wcs_node_at, GwcsOrigin, Kind, Node};
-    use crate::core::astrometry::wcs::{angular_separation, WcsKind};
+    use crate::core::astrometry::wcs::{angular_separation, pixel_center, pixel_edge_corners, WcsKind};
     use crate::infra::asdf::{AsdfFile, AsdfImage};
     use crate::infra::fits::asdf_hdu::find_asdf_hdu;
     use crate::infra::fits::asdf_hdu::test_fixtures::write_fits_with_asdf_cell;
@@ -874,6 +977,112 @@ mod tests {
         let again = cache.lookup(&path).unwrap().unwrap();
         assert!(Arc::ptr_eq(&first, &again), "filling the global cache to capacity does not evict a private instance");
         assert!(!GWCS_CACHE.entries().contains_key(&path), "a private lookup leaves no entry in the global cache");
+    }
+
+    const PV_IMAGE_SIDE: usize = 64;
+
+    const TAN: (&str, &str) = ("'RA---TAN'", "'DEC--TAN'");
+    const TAN_SIP: (&str, &str) = ("'RA---TAN-SIP'", "'DEC--TAN-SIP'");
+
+    const SIP_CARDS: [(&str, &str); 4] = [("A_ORDER", "2"), ("A_2_0", "2.0E-5"), ("B_ORDER", "2"), ("B_0_2", "-1.5E-5")];
+
+    const PV_DISTORTION_WARNING: &str = "PV distortion not applied: PV1_0, PV1_1, PV1_2, PV1_4, PV2_0, PV2_2, PV2_10";
+
+    const PV_IDENTITY_CARDS: [(&str, &str); 6] =
+        [("PV1_0", "0.0"), ("PV1_1", "1.0"), ("PV1_2", "0.0"), ("PV2_0", "0.0"), ("PV2_1", "1.0"), ("PV2_2", "0.0")];
+
+    fn write_celestial_fits(dir: &Path, name: &str, ctype: (&'static str, &'static str), extra: &[(&'static str, &'static str)]) -> String {
+        let (mut sci, data) = plane_hdu("SCI", PV_IMAGE_SIDE, PV_IMAGE_SIDE);
+        sci.extend(tan_cards().into_iter().filter(|(key, _)| !key.starts_with("CTYPE")));
+        sci.push(("CTYPE1", ctype.0.to_string()));
+        sci.push(("CTYPE2", ctype.1.to_string()));
+        sci.extend(extra.iter().map(|&(key, value)| (key, value.to_string())));
+        let path = dir.join(name);
+        write_raw_hdus(&path, &[(empty_primary_cards(), Vec::new()), (sci, data)]);
+        s(&path)
+    }
+
+    fn worst_separation_arcsec(a: &WcsTransform, b: &WcsTransform) -> f64 {
+        let mut pixels = pixel_edge_corners(PV_IMAGE_SIDE, PV_IMAGE_SIDE).to_vec();
+        pixels.push(pixel_center(PV_IMAGE_SIDE, PV_IMAGE_SIDE));
+        pixels
+            .into_iter()
+            .map(|(x, y)| {
+                let (p, q) = (a.pixel_to_world(x, y), b.pixel_to_world(x, y));
+                angular_separation(p.ra, p.dec, q.ra, q.dec) * 3600.0
+            })
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn a_tan_header_with_pv_distortion_keeps_its_linear_wcs_and_names_the_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        for (label, ctype, base) in [("TAN", TAN, &[][..]), ("TAN-SIP", TAN_SIP, &SIP_CARDS[..])] {
+            let with_pv: Vec<(&'static str, &'static str)> = base.iter().chain(PV_DISTORTION_CARDS.iter()).copied().collect();
+            let distorted = write_celestial_fits(dir.path(), &format!("{label}_pv.fits"), ctype, &with_pv);
+            let linear = write_celestial_fits(dir.path(), &format!("{label}_linear.fits"), ctype, base);
+            let header = header_of(&distorted);
+            let wcs = load_wcs(&distorted, &header).unwrap_or_else(|e| panic!("{label}: a TAN+PV header keeps a WCS: {e:#}"));
+            let reference = WcsTransform::from_header(&header_of(&linear)).unwrap();
+            let worst = worst_separation_arcsec(&wcs, &reference);
+            assert!(worst <= 1e-6, "{label}: TAN+PV through load_wcs vs the same header without PV cards: {worst:e} arcsec");
+            assert_eq!((wcs.kind(), wcs.gwcs_refusal()), (WcsKind::Header, None), "{label}");
+            assert_eq!(wcs.orientation(PV_IMAGE_SIDE, PV_IMAGE_SIDE).projection, "TAN", "{label}");
+            assert_eq!(tan_pv_warning(&header).as_deref(), Some(PV_DISTORTION_WARNING), "{label}");
+            assert_eq!(tan_pv_warning(&header_of(&linear)), None, "{label}: no PV cards, no warning");
+        }
+    }
+
+    #[test]
+    fn identity_pv_cards_give_no_warning_and_the_plain_tan() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = WcsTransform::from_header(&header_of(&write_celestial_fits(dir.path(), "plain.fits", TAN, &[]))).unwrap();
+        let cases: [(&str, &[(&'static str, &'static str)]); 6] = [
+            ("the full identity set", &PV_IDENTITY_CARDS),
+            ("PV1_1 alone", &[("PV1_1", "1.0")]),
+            ("PV2_1 alone", &[("PV2_1", "1.0")]),
+            ("D exponents", &[("PV1_1", "1.0D0"), ("PV1_2", "0.0D0"), ("PV2_1", "1.0D0")]),
+            ("the Paper II default fiducial point", &[("PV1_1", "0.0"), ("PV1_2", "90.0"), ("LONPOLE", "180.0")]),
+            ("the Paper II defaults with PV1_0", &[("PV1_0", "0.0"), ("PV1_1", "0.0"), ("PV1_2", "90.0")]),
+        ];
+        for (i, (label, cards)) in cases.into_iter().enumerate() {
+            let path = write_celestial_fits(dir.path(), &format!("identity_{i}.fits"), TAN, cards);
+            let header = header_of(&path);
+            assert_eq!(tan_pv_warning(&header), None, "{label}");
+            let wcs = load_wcs(&path, &header).unwrap_or_else(|e| panic!("{label}: {e:#}"));
+            let worst = worst_separation_arcsec(&wcs, &plain);
+            assert!(worst <= 1e-6, "{label}: identity PV vs plain TAN: {worst:e} arcsec");
+        }
+        let mixed = write_celestial_fits(dir.path(), "paper_ii_and_pv2.fits", TAN, &[("PV1_1", "0.0"), ("PV1_2", "90.0"), ("PV2_2", "7.0E-3")]);
+        assert_eq!(
+            tan_pv_warning(&header_of(&mixed)).as_deref(),
+            Some("PV distortion not applied: PV1_1, PV1_2, PV2_2"),
+            "a distortion card next to the Paper II pair still warns"
+        );
+    }
+
+    #[test]
+    fn a_tpv_header_is_still_refused_by_name_without_a_tan_pv_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_celestial_fits(dir.path(), "tpv.fits", ("'RA---TPV'", "'DEC--TPV'"), &PV_DISTORTION_CARDS);
+        let header = header_of(&path);
+        let refusal = format!("{:#}", load_wcs(&path, &header).err().expect("RA---TPV is refused"));
+        assert!(refusal.contains("'TPV'"), "{refusal}");
+        assert_eq!(tan_pv_warning(&header), None);
+    }
+
+    #[test]
+    fn projection_parameters_of_other_projections_are_still_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let azp = ("'RA---AZP'", "'DEC--AZP'");
+        let tilted = write_celestial_fits(dir.path(), "azp_tilted.fits", azp, &[("PV2_1", "0.5"), ("PV2_2", "30.0")]);
+        let untilted = write_celestial_fits(dir.path(), "azp.fits", azp, &[]);
+        let header = header_of(&tilted);
+        let wcs = load_wcs(&tilted, &header).unwrap();
+        assert_eq!(worst_separation_arcsec(&wcs, &WcsTransform::from_header(&header).unwrap()), 0.0);
+        let shift = worst_separation_arcsec(&wcs, &WcsTransform::from_header(&header_of(&untilted)).unwrap());
+        assert!(shift > 1.0, "PV2_1/PV2_2 still shape the AZP projection: {shift} arcsec");
+        assert_eq!(tan_pv_warning(&header), None);
     }
 
     fn mast_files(select: impl Fn(&str) -> bool) -> Vec<PathBuf> {

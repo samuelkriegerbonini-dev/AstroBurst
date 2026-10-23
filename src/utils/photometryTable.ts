@@ -1,6 +1,7 @@
 import type { StarPhotometry } from "../services/analysis";
 import type { PlotReferenceLine } from "../components/regions/ProfilePlot";
 import { buildCsv, type CsvCell, type CsvColumn } from "./catalogCsv";
+import { formatSignificantFixed } from "./formatSignificant";
 import { parseImageRef } from "./imageRef";
 
 export interface PhotometryTableRow {
@@ -85,6 +86,22 @@ export function rowValue(row: PhotometryTableRow, key: PhotometryColumnKey): Csv
     default:
       return p ? finiteOrNull(p[key]) : null;
   }
+}
+
+const MISSING_CELL = "--";
+const MAG_DECIMALS = 3;
+const FLUX_DIGITS = 4;
+const FLUX_EXPONENT_FROM = 1e6;
+
+export function fluxCellText(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return MISSING_CELL;
+  return Math.abs(value) >= FLUX_EXPONENT_FROM ? value.toPrecision(FLUX_DIGITS) : formatSignificantFixed(value, FLUX_DIGITS);
+}
+
+export function abCellText(mag: number | null | undefined, err: number | null | undefined): string {
+  if (mag == null || !Number.isFinite(mag)) return MISSING_CELL;
+  const text = mag.toFixed(MAG_DECIMALS);
+  return err != null && Number.isFinite(err) ? `${text} ± ${err.toFixed(MAG_DECIMALS)}` : text;
 }
 
 export const PHOTOMETRY_CSV_COLUMNS: CsvColumn<PhotometryTableRow>[] = PHOTOMETRY_COLUMN_KEYS.map((key) => ({

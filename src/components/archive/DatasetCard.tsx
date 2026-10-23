@@ -5,7 +5,7 @@ import type { ThumbFailure, ThumbStatus } from "./logic/thumbQueue";
 import type { ThumbRef } from "./state/archiveReducer";
 import SlotError from "./SlotError";
 import { slotError, type SlotErrorView } from "./logic/errorCopy";
-import { cardAccessibleName, dateText, exclusiveText, exposureText, filterRangeText, instrumentText, isPublic, levelBadge } from "./logic/cardLabel";
+import { cardAccessibleName, categoryText, dateText, exclusiveText, exposureText, filterRangeText, instrumentText, isPublic, levelBadge } from "./logic/cardLabel";
 
 export const SLOW_LOADING_SEC = 3;
 
@@ -31,7 +31,8 @@ interface DatasetCardProps {
 function DatasetCard({ row, rowKey, missionLabel, status, thumb, failure, paused, loadingSec, locked, selected, tabbable, onPick, onFocusCard, onOpen, onRetry, onThumbError }: DatasetCardProps) {
   const errorId = useId();
   const exclusive = exclusiveText(row);
-  const level = levelBadge(row.levelClass);
+  const level = levelBadge(row);
+  const category = categoryText(row);
   const instrument = instrumentText(row.instrument);
   const title = row.target?.trim() || row.datasetId;
   const meta = [dateText(row.dateObs), exposureText(row.expTimeS)].filter(Boolean).join("  ");
@@ -106,6 +107,11 @@ function DatasetCard({ row, rowKey, missionLabel, status, thumb, failure, paused
       </div>
       <div className="ab-mast-card-body">
         <span className="ab-mast-card-title">{title}</span>
+        {category ? (
+          <span className="ab-mast-card-cat" title={row.targetDescription ?? undefined}>
+            {category}
+          </span>
+        ) : null}
         <span className="ab-mast-card-meta">{filterRangeText(row.filters)}</span>
         <span className="ab-mast-card-meta">{meta}</span>
         {exclusive ? <span className="ab-mast-card-excl">{exclusive}</span> : null}

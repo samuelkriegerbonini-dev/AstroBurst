@@ -500,6 +500,7 @@ pub const RES_GWCS_SOURCE: &str = "gwcs_source";
 pub const RES_GWCS_VS_SIP_MAX_MAS: &str = "gwcs_vs_header_sip_max_mas";
 pub const RES_GWCS_VS_SIP_MAX_PX: &str = "gwcs_vs_header_sip_max_px";
 pub const RES_GWCS_REFUSAL: &str = "gwcs_refusal";
+pub const RES_WCS_WARNING: &str = "wcs_warning";
 pub const RES_NORTH_VEC: &str = "north_vec";
 pub const RES_EAST_VEC: &str = "east_vec";
 pub const RES_ON_IMAGE: &str = "on_image";

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useId, useMemo, memo } from "react";
-import { Crosshair, Loader2, Star as StarIcon } from "lucide-react";
+import { Check, Copy, Crosshair, Loader2, Star as StarIcon } from "lucide-react";
 import { measurePhotometry, photometryGainModel } from "../../services/analysis";
 import type { GainModel, PhotometryMeasurement, StarPhotometry } from "../../services/analysis";
 import { getWcsInfo } from "../../services/astrometry";
@@ -18,6 +18,7 @@ import {
 } from "../../utils/photometryPanel";
 import { GAIN_TITLE, gainCaption, nextGainText } from "../../utils/photometryGain";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
+import { skyPositionLine } from "../../utils/coordFormat";
 import { DecimalField, Toggle } from "../ui";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import ProfilePlot from "../regions/ProfilePlot";
@@ -48,6 +49,11 @@ const SKY_OUT_TITLE = "Outer sky radius in pixels; blank uses 3 × r_ap";
 const GAIA_PENDING_TEXT = "Querying Gaia DR3 (VizieR)...";
 const NO_PLATEAU_TEXT =
   "no plateau: the curve of growth did not flatten before the sky annulus (crowded field, extended source or annulus too close), so the aperture correction, total flux and EE radii are not available";
+const COPY_SKY_LABEL = "Copy sky position";
+const COPY_SKY_TITLE = "Copy the sky position in decimal degrees and sexagesimal as one line";
+const COPIED_FEEDBACK_MS = 1500;
+const COPIED_TEXT = "Copied";
+const CLIPBOARD_FAILED = "Clipboard copy failed: ";
 
 const APERTURE_FIELD: DecimalFieldOptions = { optional: true };
 const SKY_IN_FIELD: DecimalFieldOptions = { optional: true, min: 1 };
@@ -128,6 +134,8 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const [result, setResult] = useState<PhotometryMeasurement | null>(null);
   const [history, setHistory] = useState<PhotometryMeasurement[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [skyCopied, setSkyCopied] = useState(false);
+  const skyCopiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const click = usePixelClick();
   const { excludeDq } = useDqContext();
   const { active } = useToolHost();
@@ -260,6 +268,27 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
     lastSeqRef.current = click.seq;
     void measure(click.x, click.y);
   }, [active, armed, click, measure]);
+
+  useEffect(() => {
+    return () => {
+      if (skyCopiedTimerRef.current) clearTimeout(skyCopiedTimerRef.current);
+    };
+  }, []);
+
+  const sky = result?.sky ?? null;
+  const copySky = useCallback(async () => {
+    if (!sky) return;
+    try {
+      await navigator.clipboard.writeText(skyPositionLine(sky.ra, sky.dec));
+      setError((current) => (current?.startsWith(CLIPBOARD_FAILED) ? null : current));
+      setSkyCopied(true);
+      if (skyCopiedTimerRef.current) clearTimeout(skyCopiedTimerRef.current);
+      skyCopiedTimerRef.current = setTimeout(() => setSkyCopied(false), COPIED_FEEDBACK_MS);
+    } catch (e: unknown) {
+      setSkyCopied(false);
+      setError(`${CLIPBOARD_FAILED}${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [sky]);
 
   const phot = result?.photometry;
   const photcal = result?.photcal ?? null;
@@ -466,11 +495,25 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                 </div>
               </div>
             )}
-            {result?.sky && (
+            {sky && (
               <div className="bg-zinc-900/80 rounded px-2 py-1.5 col-span-2">
-                <div className="text-zinc-500">Sky (RA, Dec)</div>
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-zinc-500">Sky (RA, Dec)</span>
+                  <button
+                    type="button"
+                    onClick={() => void copySky()}
+                    aria-label={COPY_SKY_LABEL}
+                    title={COPY_SKY_TITLE}
+                    className="text-zinc-500 hover:text-zinc-200 transition-colors"
+                  >
+                    {skyCopied ? <Check size={10} className="text-emerald-400" /> : <Copy size={10} />}
+                  </button>
+                  <span role="status" className="sr-only" data-copy-status>
+                    {skyCopied ? COPIED_TEXT : ""}
+                  </span>
+                </div>
                 <div className="text-zinc-300 font-mono">
-                  {result.sky.ra.toFixed(5)}°, {result.sky.dec.toFixed(5)}°
+                  {sky.ra.toFixed(5)}°, {sky.dec.toFixed(5)}°
                 </div>
               </div>
             )}

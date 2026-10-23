@@ -15,6 +15,9 @@ use astroburst_lib::core::stacking::CancelCheck;
 use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::infra::fits::reader::load_fits_image;
 use astroburst_lib::types::compose::AlignMethod;
+use astroburst_lib::types::constants::{
+    ALIGN_METHOD_AFFINE, ALIGN_METHOD_PHASE, KERNEL_GAUSSIAN, KERNEL_LANCZOS, KERNEL_LANCZOS3,
+};
 use astroburst_lib::types::error::AppError as CoreError;
 use astroburst_lib::types::stacking::{
     CombineMethod, DrizzleConfig, DrizzleKernel, NormalizationMethod, RejectionMethod,
@@ -27,12 +30,26 @@ use crate::job::{new_job, spawn_job, Job};
 use crate::state::AppState;
 
 const LOAD_PCT: usize = 60;
+const KERNEL_SQUARE: &str = "square";
 
-fn parse_kernel(s: Option<&str>) -> DrizzleKernel {
-    match s {
-        Some("gaussian") => DrizzleKernel::Gaussian,
-        Some("lanczos3") | Some("lanczos") => DrizzleKernel::Lanczos3,
-        _ => DrizzleKernel::Square,
+fn parse_kernel(name: &str) -> std::result::Result<DrizzleKernel, String> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        KERNEL_SQUARE => Ok(DrizzleKernel::Square),
+        KERNEL_GAUSSIAN => Ok(DrizzleKernel::Gaussian),
+        KERNEL_LANCZOS3 | KERNEL_LANCZOS => Ok(DrizzleKernel::Lanczos3),
+        other => Err(format!(
+            "unknown kernel '{other}' (supported: {KERNEL_SQUARE}, {KERNEL_GAUSSIAN}, {KERNEL_LANCZOS3}, {KERNEL_LANCZOS})"
+        )),
+    }
+}
+
+fn parse_align_method(name: &str) -> std::result::Result<AlignMethod, String> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        ALIGN_METHOD_PHASE => Ok(AlignMethod::PhaseCorrelation),
+        ALIGN_METHOD_AFFINE => Ok(AlignMethod::Affine),
+        other => Err(format!(
+            "unknown align_method '{other}' (supported: {ALIGN_METHOD_PHASE}, {ALIGN_METHOD_AFFINE})"
+        )),
     }
 }
 
@@ -215,10 +232,11 @@ pub async fn stack(
         sigma_high: params.sigma_high.unwrap_or(defaults.sigma_high),
         max_iterations: params.max_iterations.unwrap_or(defaults.max_iterations),
         align: params.align.unwrap_or(true),
-        align_method: match params.align_method.as_deref() {
-            Some("affine") => AlignMethod::Affine,
-            _ => AlignMethod::PhaseCorrelation,
-        },
+        align_method: parse_named(
+            params.align_method.as_deref(),
+            parse_align_method,
+            defaults.align_method,
+        )?,
         weights: params.weights,
         rejection: parse_named(params.rejection.as_deref(), RejectionMethod::from_name, defaults.rejection)?,
         combine: parse_named(params.combine.as_deref(), CombineMethod::from_name, defaults.combine)?,
@@ -284,7 +302,11 @@ pub async fn drizzle(
     let config = DrizzleConfig {
         scale: params.scale.unwrap_or(2.0),
         pixfrac: params.pixfrac.unwrap_or(0.7),
-        kernel: parse_kernel(params.kernel.as_deref()),
+        kernel: parse_named(
+            params.kernel.as_deref(),
+            parse_kernel,
+            DrizzleKernel::Square,
+        )?,
         sigma_low: params.sigma_low.unwrap_or(3.0),
         sigma_high: params.sigma_high.unwrap_or(3.0),
         align: params.align.unwrap_or(true),
@@ -522,5 +544,34 @@ mod tests {
             assert!(validate_drizzle_config(&config).is_err(), "{scale} {pixfrac}");
         }
         assert!(validate_drizzle_config(&DrizzleConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn each_accepted_name_selects_its_own_align_method_and_kernel() {
+        let methods = [
+            ("phase_correlation", AlignMethod::PhaseCorrelation),
+            ("Phase_Correlation", AlignMethod::PhaseCorrelation),
+            ("affine", AlignMethod::Affine),
+            (" Affine ", AlignMethod::Affine),
+        ];
+        let kernels = [
+            ("square", DrizzleKernel::Square),
+            (" gaussian ", DrizzleKernel::Gaussian),
+            ("GAUSSIAN", DrizzleKernel::Gaussian),
+            ("lanczos3", DrizzleKernel::Lanczos3),
+            ("LANCZOS", DrizzleKernel::Lanczos3),
+        ];
+        let wrong: Vec<String> = methods
+            .iter()
+            .filter_map(|&(name, expected)| {
+                let got = parse_align_method(name);
+                (got != Ok(expected)).then(|| format!("align_method {name:?} -> {got:?}, expected {expected:?}"))
+            })
+            .chain(kernels.iter().filter_map(|&(name, expected)| {
+                let got = parse_kernel(name);
+                (got != Ok(expected)).then(|| format!("kernel {name:?} -> {got:?}, expected {expected:?}"))
+            }))
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("; "));
     }
 }

@@ -15,10 +15,14 @@ Acknowledgement: data and metadata from the Mikulski Archive for Space Telescope
 | `c_nowild.json` | 2061 | `POST https://mast.stsci.edu/search/jwst/api/v0.1/search`, target M16, 10', `count_only`, `exp_type` `NRC_IMAGE` (total 61) | 2026-10-16 |
 | `c_wildcard.json` | 29432 | `POST https://mast.stsci.edu/search/jwst/api/v0.1/search`, target M16, 10', limit 200, `exp_type` `NRC_*` (61 rows, total 237) | 2026-10-16 |
 | `classy_il.json` | 22 | `GET https://mast.stsci.edu/search/classy/api/v0.1/get_image_list` (FastAPI 404 `{"detail":"Not Found"}`; IUE and ULLYSES answer the same bytes) | 2026-10-16 |
+| `column_list_hst.json` | 19442 | `GET https://mast.stsci.edu/search/util/api/v0.1/column_list?mission=hst` (62 columns; `sci_broad_category` qual_type `string`, `sci_target_descrip` qual_type `substring`) | 2026-10-23 17:36 UTC |
+| `column_list_iue.json` | 24023 | `GET https://mast.stsci.edu/search/util/api/v0.1/column_list?mission=iue` (82 columns; `iue_category` qual_type `integer`) | 2026-10-23 17:36 UTC |
+| `column_list_jwst.json` | 101303 | `GET https://mast.stsci.edu/search/util/api/v0.1/column_list?mission=jwst` (257 columns; `targcat`, `targdesc`, `productLevel` queryable) | 2026-10-23 17:36 UTC |
 | `hpL_hst_15238_20_wfc3_ir_total_idnm20_drz_color_sos.bin` | 945 | head of `GET https://mast.stsci.edu/search/hst/api/v0.1/get_image_preview?fileset_name=IDNM20010&filename=hst_15238_20_wfc3_ir_total_idnm20_drz_color.jpg`, served after a 307 by `https://stpubdata.s3.us-east-1.amazonaws.com/hst/public/idnm/hst_15238_20/hst_15238_20_wfc3_ir_total_idnm20_drz_color.jpg` (489,647 bytes in all) | 2026-10-16 07:11 UTC |
 | `hst_il_IDNM20010_PREVIEW.json` | 5353 | `GET https://mast.stsci.edu/search/hst/api/v0.1/get_image_list?fileset_name=IDNM20010&category=PREVIEW` | 2026-10-16 |
 | `hst_il_IDNM20010_THUMBNAIL.json` | 5673 | `GET https://mast.stsci.edu/search/hst/api/v0.1/get_image_list?fileset_name=IDNM20010&category=THUMBNAIL` | 2026-10-16 |
 | `hst_m16.json` | 5604 | `POST https://mast.stsci.edu/search/hst/api/v0.1/search`, target M16, 3', limit 5 (total 265) | 2026-10-16 |
+| `hst_m16_ism.json` | 19473 | `POST https://mast.stsci.edu/search/hst/api/v0.1/search`, target M16, 3', limit 200, the 14 `select_cols` AstroBurst 0.7.1 sends (`sci_broad_category`, `sci_target_descrip` added), `sci_broad_category` `ISM, ISM;*, *;ISM, *;ISM;*, EXT-MEDIUM, EXT-MEDIUM;*, *;EXT-MEDIUM, *;EXT-MEDIUM;*` (37 rows, total 37) | 2026-10-23 17:36 UTC |
 | `hst_search_wfc3.json` | 3139 | `POST https://mast.stsci.edu/search/hst/api/v0.1/search`, target M16, 3', limit 6, `sci_instrume` `WFC3` (total 29) | 2026-10-16 |
 | `il_ICK909030_PREVIEW.json` | 4658 | `GET https://mast.stsci.edu/search/hst/api/v0.1/get_image_list?fileset_name=ICK909030&category=PREVIEW` (also 2026-10-13) | 2026-10-16 |
 | `il_ICK909030_THUMBNAIL.json` | 4930 | `GET https://mast.stsci.edu/search/hst/api/v0.1/get_image_list?fileset_name=ICK909030&category=THUMBNAIL` | 2026-10-16 |
@@ -26,6 +30,8 @@ Acknowledgement: data and metadata from the Mikulski Archive for Space Telescope
 | `il_jw02739-o001_t001_nircam_THUMBNAIL.json` | 1867 | `GET https://mast.stsci.edu/search/jwst/api/v0.1/get_image_list?fileset_name=jw02739-o001_t001_nircam&category=THUMBNAIL` (also 2026-10-13) | 2026-10-16 |
 | `il_jw02739001002_02101_00001_PREVIEW.json` | 17419 | `GET https://mast.stsci.edu/search/jwst/api/v0.1/get_image_list?fileset_name=jw02739001002_02101_00001&category=PREVIEW` | 2026-10-16 |
 | `il_jw02739001002_02101_00001_THUMBNAIL.json` | 18379 | `GET https://mast.stsci.edu/search/jwst/api/v0.1/get_image_list?fileset_name=jw02739001002_02101_00001&category=THUMBNAIL` | 2026-10-16 |
+| `iue_m16_stars.json` | 10691 | `POST https://mast.stsci.edu/search/iue/api/v0.1/search`, target M16, 3', limit 200, `iue_category` `10..66` (24 rows; the echo adds `!=98,!=99`) | 2026-10-23 17:36 UTC |
+| `jwst_m16_ism.json` | 97332 | `POST https://mast.stsci.edu/search/jwst/api/v0.1/search`, target M16, 3', limit 2000, the 19 `select_cols` AstroBurst 0.7.1 sends (the 17 of `jwst_m16_l3.json` plus `targcat`, `targdesc`), `targcat` `ISM` (113 rows: 2 at `productLevel` `3`, 111 at `1b, 2a, 2b, 2c`) | 2026-10-23 17:36 UTC |
 | `jwst_m16_l3.json` | 5173 | `POST https://mast.stsci.edu/search/jwst/api/v0.1/search`, target M16, 3', limit 20, `productLevel` `3` (2 rows) | 2026-10-16 |
 | `jwst_m16_l3_optical.json` | 5317 | `POST https://mast.stsci.edu/search/jwst/api/v0.1/search`, target M16, 3', limit 12, `productLevel` `3`, sorted by `date_obs` descending, `opticalElements` selected (2 rows) | 2026-10-16 |
 | `jwst_p2739.json` | 16359 | `POST https://mast.stsci.edu/search/jwst/api/v0.1/search`, `program` `2739`, `productLevel` `3`, limit 10 (total 14) | 2026-10-16 |

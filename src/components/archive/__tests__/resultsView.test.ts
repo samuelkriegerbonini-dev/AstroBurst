@@ -9,6 +9,8 @@ import {
   filterSummary,
   fitColumns,
   footerMastText,
+  isLevelSearch,
+  isUnknownCell,
   notResolvedView,
   queuedThumbs,
   rowsText,
@@ -20,8 +22,32 @@ import {
 } from "../logic/resultsView";
 import { mergePage } from "../logic/paging";
 import { createThumbQueue, markReady, markStarted, setDemand } from "../logic/thumbQueue";
-import { COLUMNS, MISSIONS, missionById, page, row } from "./fixtures";
-import type { MastColumn, MastMission, MastQuery, MastResolved } from "../../../shared/types/mast";
+import { COLUMNS, JWST_GROUPS, MISSIONS, missionById, page, row } from "./fixtures";
+import type { MastColumn, MastMission, MastPreset, MastQuery, MastResolved, MastSearchPage } from "../../../shared/types/mast";
+
+const IFU: MastPreset = {
+  id: "ifu_cubes",
+  mission: "jwst",
+  label: "IFU cubes",
+  description: "NIRSpec IFU and MIRI MRS combined cubes",
+  conditions: [
+    { column: "exp_type", value: "NRS_IFU,MIR_MRS" },
+    { column: "productLevel", value: "3" },
+  ],
+  products: ["s3d", "x1d"],
+};
+
+const PURE_PARALLEL: MastPreset = {
+  id: "pure_parallel",
+  mission: "jwst",
+  label: "Pure parallel",
+  description: "Pure-parallel visits",
+  conditions: [{ column: "visitype", value: "PARALLEL_PURE" }],
+  products: ["cal"],
+};
+
+const UNKNOWN_TAIL = "Datasets with no proposal category, such as most MSA source spectra and parallel fields, never match";
+const CLASS_LINE = "Category and Object type come from what each proposal declared; a field can be filed under another class.";
 
 const M16: MastResolved = { query: "M16", canonicalName: "M 16", resolver: "SIMBAD", raDeg: 274.688, decDeg: -13.792, objectType: "open cluster", elapsedMs: 870, fromCache: false };
 
@@ -51,6 +77,11 @@ describe("appliedText", () => {
     expect(appliedText({ conditions: [{ sci_start_time: ">=2014-01-01,<=2014-12-31" }], sortBy: [], sortDesc: [] })).toBe(
       "sci_start_time >=2014-01-01,<=2014-12-31",
     );
+  });
+
+  it("leaves out a column MAST echoed without a value, since it applied nothing there", () => {
+    expect(appliedText({ conditions: [{ targcat: "" }, { productLevel: "3" }], sortBy: [], sortDesc: [] })).toBe("productLevel = 3");
+    expect(appliedText({ conditions: [{ targcat: " " }], sortBy: [], sortDesc: [] })).toBe("none");
   });
 
   it("says none when MAST applied nothing", () => {
@@ -110,6 +141,46 @@ describe("summaryView", () => {
   });
 });
 
+describe("summaryView with object filters", () => {
+  const objectQuery = (filters: MastQuery["filters"], over: Partial<MastQuery> = {}) => positionQuery(3, { filters, ...over });
+  const targcat: MastSearchPage["applied"] = { conditions: [{ targcat: "Galaxy" }, { targdesc: "*Planetary nebulae*" }], sortBy: [], sortDesc: [] };
+
+  it("keeps a plain search byte for byte and has no unknown note", () => {
+    const results = mergePage(null, page(TWO));
+    const v = summaryView({ results, resolved: M16, query: positionQuery(), missionLabel: "JWST", groups: JWST_GROUPS });
+    expect(v.text).toBe('M16 → SIMBAD "M 16" 274.68800 -13.79200 · r 3\' · 2 datasets · 1.7 s · MAST applied: productLevel = 3');
+    expect(v.unknownNote).toBeNull();
+  });
+
+  it("names the object filters after the preset part and counts against the cached search without them", () => {
+    const results = mergePage(null, page(TWO, { applied: targcat, unfilteredTotal: 1913 }));
+    const v = summaryView({ results, resolved: M16, query: objectQuery({ level: "all", categories: ["galaxies"], objectTypes: ["planetary_nebulae"] }), missionLabel: "JWST", groups: JWST_GROUPS });
+    expect(v.text).toBe(
+      'M16 → SIMBAD "M 16" 274.68800 -13.79200 · Filters: Galaxies, Planetary nebulae · r 3\' · 2 datasets · 1.7 s · MAST applied: targcat = Galaxy, targdesc = *Planetary nebulae*',
+    );
+    expect(v.applied).toBe("targcat = Galaxy, targdesc = *Planetary nebulae*");
+    expect(v.unknownNote).toBe(`Showing 2 of 1,913 datasets from the same search without Category or Object type. ${UNKNOWN_TAIL}.`);
+  });
+
+  it("says when AstroBurst applied the level itself, in the words Rust sends with the page", () => {
+    const targcatOnly: MastSearchPage["applied"] = { conditions: [{ targcat: "Galaxy" }], sortBy: [], sortDesc: [] };
+    const local = (text: string) => mergePage(null, page(TWO, { applied: targcatOnly, levelFilteredLocally: true, levelAppliedLocally: text }));
+    const combined = summaryView({ results: local("productLevel = 3"), resolved: null, query: objectQuery({ level: "combined", categories: ["galaxies"] }), missionLabel: "JWST", groups: JWST_GROUPS });
+    expect(combined.text).toBe("274.68800 -13.79200 · Filters: Galaxies · r 3' · 2 datasets · 1.7 s · MAST applied: targcat = Galaxy · AstroBurst applied: productLevel = 3");
+    expect(combined.unknownNote).toBe(`${UNKNOWN_TAIL} Category or Object type.`);
+    const exposures = summaryView({ results: local("productLevel in 1b, 2a, 2b, 2c"), resolved: null, query: objectQuery({ level: "combined", categories: ["galaxies"] }), missionLabel: "JWST", groups: JWST_GROUPS });
+    expect(exposures.text).toMatch(/ · AstroBurst applied: productLevel in 1b, 2a, 2b, 2c$/);
+    const preset = summaryView({ results: local("productLevel = 3"), resolved: null, query: objectQuery({ level: "exposures", categories: ["galaxies"] }, { preset: "ifu_cubes" }), missionLabel: "JWST", presets: [IFU], groups: JWST_GROUPS });
+    expect(preset.text).toBe("274.68800 -13.79200 · Preset IFU cubes · Filters: Galaxies · r 3' · 2 datasets · 1.7 s · MAST applied: targcat = Galaxy · AstroBurst applied: productLevel = 3");
+    const server = summaryView({ results: mergePage(null, page(TWO)), resolved: null, query: objectQuery({ level: "combined", categories: ["galaxies"] }), missionLabel: "JWST", groups: JWST_GROUPS });
+    expect(server.text).not.toContain("AstroBurst applied");
+    const first = mergePage(null, page(TWO, { applied: targcatOnly, hasMore: true, levelFilteredLocally: true, levelAppliedLocally: "productLevel = 3" }));
+    const second = mergePage(first, page([row("c")], { offset: 200, applied: targcatOnly, levelFilteredLocally: true, levelAppliedLocally: null }));
+    expect(second.rows).toHaveLength(3);
+    expect(summaryView({ results: second, resolved: null, query: objectQuery({ level: "combined", categories: ["galaxies"] }), missionLabel: "JWST", groups: JWST_GROUPS }).text).toMatch(/ · AstroBurst applied: productLevel = 3$/);
+  });
+});
+
 describe("elapsedText and filterSummary", () => {
   it("shows tenths below 10 s and whole seconds above", () => {
     expect(elapsedText(870)).toBe("0.9 s");
@@ -122,6 +193,13 @@ describe("elapsedText and filterSummary", () => {
       "Combined L3, NIRCAM, filter F444W, from 2014-01-01, to 2014-12-31, public only",
     );
     expect(filterSummary({ level: "all" })).toBe("");
+  });
+
+  it("names Exposures L1-2 and the object filters by their labels", () => {
+    expect(filterSummary({ level: "exposures", categories: ["ism"], objectTypes: ["exoplanets", "planetary_nebulae"] }, JWST_GROUPS)).toBe(
+      "Exposures L1-2, Nebulae and ISM, Planetary nebulae, Exoplanets",
+    );
+    expect(filterSummary({ level: "all", categories: ["ism"] })).toBe("");
   });
 });
 
@@ -201,6 +279,41 @@ describe("emptyView", () => {
     expect(v.tryOn).toEqual({ mission: "jwst", label: "Try on JWST" });
   });
 
+  it("lists object filters as removable chips, names them in the title and explains where the class comes from", () => {
+    const results = mergePage(null, page([], { radiusArcmin: 3 }));
+    const query = positionQuery(3, { filters: { level: "exposures", categories: ["galaxies"], objectTypes: ["planetary_nebulae"] } });
+    const v = emptyView({ query, results, missions: MISSIONS, mission: jwst });
+    expect(v.title).toBe("No JWST datasets within 3' of 274.68800 -13.79200 with Galaxies, Planetary nebulae");
+    expect(v.chips).toEqual([
+      { id: "level", label: "Exposures L1-2" },
+      { id: "category:galaxies", label: "Galaxies" },
+      { id: "objectType:planetary_nebulae", label: "Planetary nebulae" },
+    ]);
+    expect(v.clearFilters).toBe(true);
+    expect(v.allLevels).toBe(true);
+    expect(v.classLine).toBe(CLASS_LINE);
+    expect(v.tryOn).toEqual({ mission: "hst", label: "Try on HST" });
+  });
+
+  it("offers Try on JWST from HST with object filters, and none from IUE", () => {
+    const hst = emptyView({ query: positionQuery(3, { mission: "hst", filters: { categories: ["stars"] } }), results: mergePage(null, page([], { mission: "hst", radiusArcmin: 3 })), missions: MISSIONS, mission: missionById("hst") });
+    expect(hst.chips).toEqual([{ id: "category:stars", label: "Stars" }]);
+    expect(hst.tryOn).toEqual({ mission: "jwst", label: "Try on JWST" });
+    const iue = emptyView({ query: positionQuery(3, { mission: "iue", filters: { categories: ["stars"] } }), results: mergePage(null, page([], { mission: "iue", radiusArcmin: 3 })), missions: MISSIONS, mission: missionById("iue") });
+    expect(iue.tryOn).toBeNull();
+    expect(iue.clearFilters).toBe(true);
+    const plain = emptyView({ query: positionQuery(3), results: mergePage(null, page([], { radiusArcmin: 3 })), missions: MISSIONS, mission: jwst });
+    expect(plain.classLine).toBeNull();
+  });
+
+  it("explains that pure-parallel visits carry no category", () => {
+    const results = mergePage(null, page([], { radiusArcmin: 3 }));
+    const query = positionQuery(3, { preset: "pure_parallel", filters: { level: "combined", categories: ["galaxies"] } });
+    expect(emptyView({ query, results, missions: MISSIONS, mission: jwst, presets: [PURE_PARALLEL] }).classLine).toBe(
+      "Pure-parallel visits carry no proposal category, so Category and Object type match nothing.",
+    );
+  });
+
   it("titles programme and dataset queries without a radius", () => {
     const results = mergePage(null, page([], { radiusArcmin: null, searchPosition: null }));
     expect(emptyView({ query: positionQuery(3, { where: { kind: "none" }, program: 9999 }), results, missions: MISSIONS, mission: jwst })).toMatchObject({
@@ -236,6 +349,36 @@ describe("footer MAST text", () => {
     q = markStarted(q, ["a", "b"], 0);
     q = markReady(q, "a");
     expect(queuedThumbs(q)).toBe(5);
+  });
+});
+
+describe("level searches", () => {
+  it("are JWST searches with Combined L3 or Exposures L1-2 that no preset fixes", () => {
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "combined" }, preset: null }, [])).toBe(true);
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "exposures" }, preset: null }, [])).toBe(true);
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "all" }, preset: null }, [])).toBe(false);
+    expect(isLevelSearch({ mission: "jwst", filters: {}, preset: null }, [])).toBe(false);
+    expect(isLevelSearch({ mission: "hst", filters: { level: "combined" }, preset: null }, [])).toBe(false);
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "combined" }, preset: "ifu_cubes" }, [IFU])).toBe(false);
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "combined" }, preset: "pure_parallel" }, [PURE_PARALLEL])).toBe(true);
+  });
+
+  it("are not JWST searches with an object filter, whose first request to MAST carries no level", () => {
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "combined", categories: ["ism"] }, preset: null }, [])).toBe(false);
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "exposures", objectTypes: ["exoplanets"] }, preset: null }, [])).toBe(false);
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "combined", categories: [] }, preset: null }, [])).toBe(true);
+  });
+});
+
+describe("unknown category cells", () => {
+  const category: MastColumn = { name: "_category", label: "Category", kind: "text", sortable: false, unit: null };
+
+  it("marks only an empty synthetic Category cell as unknown", () => {
+    expect(isUnknownCell(category, null)).toBe(true);
+    expect(isUnknownCell(category, undefined)).toBe(true);
+    expect(isUnknownCell(category, "")).toBe(true);
+    expect(isUnknownCell(category, "Nebulae and ISM")).toBe(false);
+    expect(isUnknownCell(COLUMNS[1], null)).toBe(false);
   });
 });
 

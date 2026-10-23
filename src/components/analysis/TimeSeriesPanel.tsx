@@ -44,13 +44,28 @@ import {
   type LightCurvePoint,
   type TimeAxis,
 } from "../../utils/differentialPhotometry";
+import {
+  EXOCLOCK_TIMES,
+  defaultPointLabel,
+  etdBlocker,
+  etdFileName,
+  etdText,
+  exoClockBlocker,
+  exoClockCsv,
+  exoClockFileName,
+  exportBlockerNotes,
+  withCurrentLabels,
+  type ExoClockTime,
+  type LightCurveExportSource,
+} from "../../utils/lightCurveExports";
 import { loadSiteOverride } from "../../utils/observationGeometry";
-import { MAX_SKY_OUTER_RADIUS_PX, apertureRadiusInRange } from "../../utils/photometryTable";
+import { MAX_SKY_OUTER_RADIUS_PX, apertureRadiusInRange, fluxCellText } from "../../utils/photometryTable";
 import { apertureRangeHint } from "../../utils/analysisTarget";
 import { GAIN_TITLE, gainCaption, loadGainPrefill, nextGainText } from "../../utils/photometryGain";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import { displaysFileGrid, otherGridHint } from "../../utils/stackingOutputs";
 import { abandonRun, beginRun, createRunTracker, isCurrentRun, settleRun } from "../../utils/runTracker";
+import { createTimedNotice } from "../../utils/timedNotice";
 import { DecimalField, ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
 
 interface TimeSeriesPanelProps {
@@ -60,6 +75,12 @@ interface TimeSeriesPanelProps {
 interface SeriesOption {
   key: string;
   label: string;
+}
+
+interface SaveDialog {
+  defaultPath: string;
+  filters: { name: string; extensions: string[] }[];
+  title: string;
 }
 
 const DEFAULT_APERTURE_RADIUS_PX = "5";
@@ -82,6 +103,10 @@ const FRAMES_HINT = "Load the other frames of the sequence; only done files with
 const NO_PLOT_HINT = "No frame has a positive target and comparison flux to plot.";
 const BJD_AXIS_HINT = "BJD_TDB needs a time, a target and no skipped-geometry frame";
 const AIRMASS_COLUMN_TITLE = "header AIRMASS, else Kasten & Young 1989";
+const ETD_TITLE = "ETD (var.astro.cz): JD_UT, V-C, err as Siril writes it; upload with Time standard Gjd and Brightness in Magnitudes";
+const EXOCLOCK_TITLE =
+  "ExoClock: mid-exposure time, relative flux and detrending columns; set the upload's time format to the chosen column and the flux format to flux";
+const EXOCLOCK_TIME_TITLE = "Time column of the ExoClock file; ExoClock recommends JD_UTC and converts to BJD_TDB itself";
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-amber-500/50 w-full";
@@ -132,10 +157,12 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const [trackDrift, setTrackDrift] = useState(true);
   const [seriesKey, setSeriesKey] = useState(SERIES_TARGET);
   const [timeAxis, setTimeAxis] = useState<TimeAxis>("bjd");
+  const [exoClockTime, setExoClockTime] = useState<ExoClockTime>("jd_utc");
   const [result, setResult] = useState<TimeSeriesResult | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [showSavedPath] = useState(() => createTimedNotice<string>(setSavedPath, SAVED_NOTICE_MS));
   const runRef = useRef(createRunTracker());
   const resultRef = useRef<TimeSeriesResult | null>(null);
   const gainTextRef = useRef(gainText);
@@ -195,7 +222,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
         target: {
           x: region.shape.x,
           y: region.shape.y,
-          label: region.props.text || `P${index + 1}`,
+          label: region.props.text || defaultPointLabel(index),
           role: roles[region.id] ?? defaultRole(index),
         },
       });
@@ -384,25 +411,52 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     }
   }, [csvText]);
 
-  const saveCsv = useCallback(async () => {
-    if (!result) return;
+  const saveText = useCallback(async (dialog: SaveDialog, text: () => string) => {
     setError(null);
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
-      const target = await save({
-        defaultPath: lightCurveCsvFileName(result.reference_path),
-        filters: [{ name: "CSV", extensions: ["csv"] }],
-        title: "Save light curve",
-      });
+      const target = await save(dialog);
       if (!target) return;
       const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-      await writeTextFile(target, csvText());
-      setSavedPath(target);
-      setTimeout(() => setSavedPath(null), SAVED_NOTICE_MS);
+      await writeTextFile(target, text());
+      showSavedPath(target);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [result, csvText]);
+  }, [showSavedPath]);
+
+  const saveCsv = useCallback(async () => {
+    if (!result) return;
+    await saveText(
+      { defaultPath: lightCurveCsvFileName(result.reference_path), filters: [{ name: "CSV", extensions: ["csv"] }], title: "Save light curve" },
+      csvText,
+    );
+  }, [result, csvText, saveText]);
+
+  const exportSource = useMemo((): LightCurveExportSource | null => {
+    if (!result || !analysis) return null;
+    const labelled = withCurrentLabels(result, targets.map((t) => t.target));
+    return { result: labelled, targetIdx: analysis.targetIdx, compIdx: analysis.compIdx };
+  }, [result, analysis, targets]);
+  const etdBlock = useMemo(() => (exportSource ? etdBlocker(exportSource) : null), [exportSource]);
+  const exoClockBlock = useMemo(() => (exportSource ? exoClockBlocker(exportSource, exoClockTime) : null), [exportSource, exoClockTime]);
+  const exportNotes = useMemo(() => exportBlockerNotes(etdBlock, exoClockBlock), [etdBlock, exoClockBlock]);
+
+  const saveEtd = useCallback(async () => {
+    if (!exportSource || etdBlock) return;
+    await saveText(
+      { defaultPath: etdFileName(exportSource), filters: [{ name: "ETD text", extensions: ["txt"] }], title: "Save ETD light curve" },
+      () => etdText(exportSource),
+    );
+  }, [exportSource, etdBlock, saveText]);
+
+  const saveExoClock = useCallback(async () => {
+    if (!exportSource || exoClockBlock) return;
+    await saveText(
+      { defaultPath: exoClockFileName(exportSource, exoClockTime), filters: [{ name: "CSV", extensions: ["csv"] }], title: "Save ExoClock light curve" },
+      () => exoClockCsv(exportSource, exoClockTime),
+    );
+  }, [exportSource, exoClockBlock, exoClockTime, saveText]);
 
   const xLabel = timeAxisLabel(analysis?.axis ?? "index", analysis?.jd0 ?? 0);
   const axes = useMemo(() => (result ? timeAxisAvailability(result) : { jd: false, bjd: false, any: false }), [result]);
@@ -712,12 +766,14 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                         <td className="text-right px-1.5 py-0.5" title={AIRMASS_COLUMN_TITLE}>
                           {fmt(frame.airmass ?? frame.geometry?.airmass_computed ?? null, 3)}
                         </td>
-                        <td className="text-right px-1.5 py-0.5">
-                          {point && point.mag !== null ? `${fmt(point.mag, 4)} +/- ${fmt(point.err, 4)}` : "--"}
+                        <td className="text-right whitespace-nowrap px-1.5 py-0.5">
+                          {point && point.mag !== null ? `${fmt(point.mag, 4)} ± ${fmt(point.err, 4)}` : "--"}
                         </td>
                         <td className="text-right px-1.5 py-0.5">{fmt(target?.snr, 1)}</td>
                         <td className="text-right px-1.5 py-0.5">{fmt(target?.fwhm, 2)}</td>
-                        <td className="text-right px-1.5 py-0.5">{fmt(target?.bg_mean, 2)}</td>
+                        <td className="text-right px-1.5 py-0.5" data-column="bg_mean">
+                          {fluxCellText(target?.bg_mean)}
+                        </td>
                         <td className="text-right px-1.5 py-0.5">
                           {frame.offset ? `${fmt(frame.offset.dx, 2)}/${fmt(frame.offset.dy, 2)}` : "--"}
                         </td>
@@ -757,8 +813,48 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                 <Download size={10} />
                 Save CSV
               </button>
+              <button
+                type="button"
+                onClick={() => void saveEtd()}
+                disabled={etdBlock !== null}
+                title={etdBlock ?? ETD_TITLE}
+                data-export="etd"
+                className={SMALL_BUTTON_CLASS}
+              >
+                <Download size={10} />
+                ETD
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveExoClock()}
+                disabled={exoClockBlock !== null}
+                title={exoClockBlock ?? EXOCLOCK_TITLE}
+                data-export="exoclock"
+                className={SMALL_BUTTON_CLASS}
+              >
+                <Download size={10} />
+                ExoClock
+              </button>
+              <select
+                value={exoClockTime}
+                aria-label="ExoClock time column"
+                title={EXOCLOCK_TIME_TITLE}
+                onChange={(e) => setExoClockTime(e.target.value as ExoClockTime)}
+                className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[10px] text-zinc-300 font-mono"
+              >
+                {EXOCLOCK_TIMES.map((time) => (
+                  <option key={time} value={time}>
+                    {time}
+                  </option>
+                ))}
+              </select>
               <span className="text-[9px] text-zinc-500 font-mono ml-auto">{result.elapsed_ms} ms</span>
             </div>
+            {exportNotes.map((note) => (
+              <div key={note.key} className="text-[9px] text-zinc-500" data-export-blocker={note.key}>
+                {note.text}
+              </div>
+            ))}
             {savedPath && <div className="text-[9px] text-emerald-400/90 break-all">Saved {savedPath}</div>}
           </>
         )}

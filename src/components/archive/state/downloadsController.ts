@@ -1,7 +1,7 @@
 import type { AstroFile } from "../../../shared/types";
 import type { MastDownloadInput, MastDownloadItem, MastMissionId } from "../../../shared/types/mast";
 import { mastDownload, mastDownloadCancel, mastDownloads, mastErrorOf, onMastDownload } from "../../../services/mast";
-import { ingestUnlessLoaded } from "../../../hooks/useFileIngest";
+import { ingestUnlessLoaded, openUnlessLoaded, showFile } from "../../../hooks/useFileIngest";
 import { fileStore } from "../../../hooks/useFileStore";
 import { refreshOverwrittenFiles } from "../../../hooks/refreshOverwrittenFiles";
 import { spectrum1dStore } from "../../../hooks/useSpectrum1dStore";
@@ -13,7 +13,7 @@ import { openableDownload, recoveryInput } from "../logic/downloadView";
 import { downloadsStore, pendingOpens, unsettledDownloads, type DownloadsStore } from "./downloadsStore";
 
 export interface OpenDeps {
-  ingest: (files: AstroFile[]) => boolean;
+  ingest: (files: AstroFile[], show?: boolean) => boolean;
   setMode: (mode: AppMode) => void;
   reload: (path: string) => void;
 }
@@ -22,10 +22,10 @@ function rowsHolding(path: string) {
   return overwrittenFileIds(fileStore.getFiles(), [path]).flatMap((id) => fileStore.getFile(id) ?? []);
 }
 
-function showOrLoad(path: string): boolean {
+function showOrLoad(path: string, show: boolean): boolean {
   const loaded = rowsHolding(path).find((row) => row.status !== FILE_STATUS.ERROR);
-  if (!loaded) return ingestUnlessLoaded(path);
-  fileStore.selectFile(loaded.id);
+  if (!loaded) return show ? openUnlessLoaded(path) : ingestUnlessLoaded(path, { keepMode: true });
+  if (show) showFile(loaded);
   return true;
 }
 
@@ -38,12 +38,13 @@ export async function reloadRewritten(path: string): Promise<void> {
 }
 
 const LIVE_DEPS: OpenDeps = {
-  ingest: (files) => files.map((file) => showOrLoad(file.path)).some(Boolean),
+  ingest: (files, show = true) => files.map((file) => showOrLoad(file.path, show)).some(Boolean),
   setMode: (mode) => appModeStore.set(mode),
   reload: (path) => void reloadRewritten(path),
 };
 
 let requestSeq = 0;
+const shownRequests = new Set<string>();
 let watching: Promise<void> | null = null;
 let autoSettle: (() => void) | null = null;
 
@@ -64,8 +65,15 @@ function settleFinished(store: DownloadsStore, deps: OpenDeps): void {
   if (!due.length) return;
   const opens = pendingOpens(state);
   store.dispatch({ type: "settled", ids: due.map((item) => item.id) });
+  for (const item of opens) {
+    if (shownRequests.has(item.requestId)) {
+      deps.ingest([astroFileFromPath(item.path)], false);
+      continue;
+    }
+    shownRequests.add(item.requestId);
+    openDownloaded(item, deps);
+  }
   for (const item of due) if (!item.reused) deps.reload(item.path);
-  for (const item of opens) openDownloaded(item, deps);
 }
 
 export function watchDownloads(store: DownloadsStore = downloadsStore, deps: OpenDeps = LIVE_DEPS): Promise<void> {

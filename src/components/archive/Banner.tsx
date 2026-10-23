@@ -4,7 +4,7 @@ import type { ArchiveController } from "./state/archiveController";
 
 interface BannerProps {
   banner: BannerModel;
-  ctl: Pick<ArchiveController, "retryThumbs" | "resumeThumbs" | "search" | "loadMore" | "dismissBanner">;
+  ctl: Pick<ArchiveController, "retryThumbs" | "resumeThumbs" | "search" | "loadMore" | "dismissBanner" | "setFilters">;
 }
 
 function retryLabel(banner: BannerModel): string | null {
@@ -39,6 +39,11 @@ export default function Banner({ banner, ctl }: BannerProps) {
         <button type="button" className="ab-mast-link-btn" onClick={onRetry}>
           {label}
           {banner.retry === "thumbs" || banner.retry === "search" ? <kbd className="ab-cmdp-kbd">R</kbd> : null}
+        </button>
+      ) : null}
+      {banner.allLevels ? (
+        <button type="button" data-testid="mast-banner-all-levels" className="ab-mast-link-btn" onClick={() => ctl.setFilters({ level: "all" }, { rerun: true })}>
+          Search all levels
         </button>
       ) : null}
       <button type="button" className="ab-mast-icon-btn" aria-label="Dismiss" title="Dismiss" onClick={() => ctl.dismissBanner(banner.kind)}>

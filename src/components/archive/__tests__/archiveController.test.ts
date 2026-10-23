@@ -167,7 +167,7 @@ describe("search flow", () => {
     const t = await ready();
     t.ctl.setText("M16");
     await t.ctl.search();
-    expect(t.svc.cancel).toHaveBeenCalledWith({ prefix: "g0:search" });
+    expect(t.svc.cancel).toHaveBeenCalledWith({ requestIds: ["g0:search", "g0:resolve"] });
     expect(t.svc.cancel).not.toHaveBeenCalledWith({ prefix: "g0:" });
     expect(t.svc.resolve).toHaveBeenCalledWith("g1:resolve", "M16");
     expect(t.svc.search).toHaveBeenCalledWith(
@@ -186,6 +186,33 @@ describe("search flow", () => {
     expect(s.selectedId).toBe("jw02739-o001_t001_nircam");
     expect(s.resultsQuery?.where).toMatchObject({ kind: "position", label: "M 16" });
     expect(t.inflight.snapshot()).toEqual({ total: 0, thumbs: 0 });
+  });
+
+  it("stops the superseded search through cancels the Rust registry accepts", async () => {
+    const running = new Set<string>();
+    const cancel = vi.fn(async (target: { requestIds?: string[]; prefix?: string }) => {
+      if (target.prefix !== undefined && !target.prefix.endsWith(":")) throw mastErr("mast_bad_input", {}, "prefix: must be a non-empty request id prefix ending with :");
+      const hit = [...running].filter((id) => target.requestIds?.includes(id) || (target.prefix !== undefined && id.startsWith(target.prefix)));
+      hit.forEach((id) => running.delete(id));
+      return hit.length;
+    });
+    const slow = deferred<MastSearchPage>();
+    const search = vi.fn((id: string) => {
+      running.add(id);
+      return id === "g1:search" ? slow.promise : Promise.resolve(page([row("second")]));
+    });
+    const t = await ready({ search, cancel });
+    t.ctl.setText("M16");
+    const first = t.ctl.search();
+    await flush();
+    expect(running.has("g1:search")).toBe(true);
+    await t.ctl.search();
+    const answers = await Promise.allSettled(cancel.mock.results.map((r) => r.value as Promise<number>));
+    expect(answers.filter((a) => a.status === "rejected")).toEqual([]);
+    expect(running.has("g1:search")).toBe(false);
+    slow.reject(mastErr("mast_cancelled"));
+    await first;
+    expect(t.store.getState().results?.rows.map((r) => r.datasetId)).toEqual(["second"]);
   });
 
   it("blocks an empty query with the hint and sends nothing", async () => {
@@ -246,7 +273,7 @@ describe("search flow", () => {
     const pending = t.ctl.search();
     await flush();
     expect(resultsState(t.store.getState())).toBe("searching");
-    expect(t.svc.cancel).toHaveBeenCalledWith({ prefix: "g1:search" });
+    expect(t.svc.cancel).toHaveBeenCalledWith({ requestIds: ["g1:search", "g1:resolve"] });
     t.ctl.cancelSearch();
     expect(t.svc.cancel).toHaveBeenLastCalledWith({ prefix: "g2:" });
     second.reject(mastErr("mast_cancelled"));
@@ -400,6 +427,136 @@ describe("mission switch and filters", () => {
     await t.ctl.searchAround({ raDeg: 274.71, decDeg: -13.83, radiusArcmin: 4.2, label: "673nmos.fits" });
     expect(t.store.getState().form).toMatchObject({ text: "274.71000 -13.83000", radiusText: "4.2" });
     expect(t.svc.search).toHaveBeenCalledWith("g1:search", expect.objectContaining({ where: { kind: "position", raDeg: 274.71, decDeg: -13.83, radiusArcmin: 4.2, label: null } }), false);
+  });
+});
+
+describe("object filters", () => {
+  async function searchedProgramme(over: Partial<ArchiveServices> = {}) {
+    const t = await ready(over);
+    t.ctl.setText("2739");
+    await t.ctl.search();
+    return t;
+  }
+
+  it("runs one search 400 ms after the last of three chip changes made during a run, in a new generation", async () => {
+    const t = await searchedProgramme();
+    const slow = deferred<MastSearchPage>();
+    vi.mocked(t.svc.search).mockImplementationOnce(() => slow.promise);
+    void t.ctl.search();
+    expect(t.svc.search).toHaveBeenCalledTimes(2);
+    t.ctl.setObjectFilters({ categories: ["galaxies"] });
+    t.clock.advance(200);
+    t.ctl.setObjectFilters({ categories: ["galaxies", "ism"] });
+    t.clock.advance(200);
+    t.ctl.setObjectFilters({ categories: ["galaxies", "ism"], objectTypes: ["exoplanets"] });
+    expect(t.store.getState().live.text).toBe("Filter Exoplanets added, searching");
+    t.clock.advance(399);
+    expect(t.svc.search).toHaveBeenCalledTimes(2);
+    t.clock.advance(1);
+    await flush();
+    expect(t.svc.search).toHaveBeenCalledTimes(3);
+    expect(t.svc.search).toHaveBeenLastCalledWith(
+      "g3:search",
+      expect.objectContaining({ program: 2739, filters: { level: "combined", categories: ["galaxies", "ism"], objectTypes: ["exoplanets"] } }),
+      false,
+    );
+    expect(t.svc.cancel).toHaveBeenCalledWith({ requestIds: ["g2:search", "g2:resolve"] });
+    slow.resolve(page([row("late")]));
+    await flush();
+    expect(t.store.getState().results?.rows.map((r) => r.datasetId)).not.toContain("late");
+  });
+
+  it("changes the form without searching before any search was made", async () => {
+    const t = await ready();
+    t.ctl.setText("2739");
+    t.ctl.setObjectFilters({ categories: ["stars"] });
+    t.clock.advance(1000);
+    await flush();
+    expect(t.svc.search).not.toHaveBeenCalled();
+    expect(t.store.getState().form.filters).toEqual({ level: "combined", categories: ["stars"] });
+    expect(t.store.getState().live.text).toBe("Filter Stars added");
+  });
+
+  it("clears both object filters and searches once at once, dropping a pending change", async () => {
+    const t = await searchedProgramme();
+    t.ctl.setFilters({ instrument: "NIRCAM" });
+    t.ctl.setObjectFilters({ categories: ["galaxies"], objectTypes: ["exoplanets"] });
+    await t.ctl.clearObjectFilters();
+    expect(t.svc.search).toHaveBeenCalledTimes(2);
+    expect(t.svc.search).toHaveBeenLastCalledWith("g2:search", expect.objectContaining({ filters: { level: "combined", instrument: "NIRCAM" } }), false);
+    t.clock.advance(1000);
+    await flush();
+    expect(t.svc.search).toHaveBeenCalledTimes(2);
+    expect(t.store.getState().form.filters).toEqual({ level: "combined", instrument: "NIRCAM" });
+  });
+
+  it("points a timed-out level search with results on screen to All levels, and an All levels search not", async () => {
+    const t = await searchedProgramme();
+    vi.mocked(t.svc.search).mockImplementation(async () => Promise.reject(mastErr("mast_timeout", { timeoutSec: 120 }, "timed out")));
+    await t.ctl.search();
+    const level = visibleBanner(t.store.getState(), t.clock.now());
+    expect(level?.kind).toBe("timeout");
+    expect(level?.text).toBe("MAST did not answer within 120 s. MAST is sometimes slow with a level condition; All levels usually answers in a few seconds.");
+    expect(level?.allLevels).toBe(true);
+    t.ctl.setFilters({ level: "all" });
+    await t.ctl.search();
+    const all = visibleBanner(t.store.getState(), t.clock.now());
+    expect(all?.text).toContain("First queries of the day");
+    expect(all?.allLevels).toBeFalsy();
+  });
+
+  it("drops a pending change when the user searches first", async () => {
+    const t = await searchedProgramme();
+    t.ctl.setObjectFilters({ categories: ["galaxies"] });
+    await t.ctl.search();
+    t.clock.advance(1000);
+    await flush();
+    expect(t.svc.search).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a pending change when the user cancels the running search", async () => {
+    const t = await searchedProgramme();
+    const slow = deferred<MastSearchPage>();
+    vi.mocked(t.svc.search).mockImplementationOnce(() => slow.promise);
+    void t.ctl.search();
+    t.ctl.setObjectFilters({ categories: ["galaxies"] });
+    t.ctl.cancelSearch();
+    expect(t.store.getState().run).toBeNull();
+    t.clock.advance(400);
+    await flush();
+    expect(t.svc.search).toHaveBeenCalledTimes(2);
+    expect(t.store.getState().run).toBeNull();
+    expect(t.store.getState().form.filters).toEqual({ level: "combined", categories: ["galaxies"] });
+  });
+
+  it("strips empty lists from the form", async () => {
+    const t = await ready();
+    t.ctl.setObjectFilters({ categories: ["galaxies"], objectTypes: [] });
+    expect(t.store.getState().form.filters).toEqual({ level: "combined", categories: ["galaxies"] });
+    t.ctl.setFilters({ categories: [] });
+    expect(t.store.getState().form.filters).toEqual({ level: "combined" });
+  });
+
+  it("removes one object chip by its id and searches again", async () => {
+    const t = await searchedProgramme({ search: vi.fn(async () => page([])) });
+    t.ctl.setFilters({ categories: ["galaxies", "ism"], objectTypes: ["exoplanets"] });
+    await t.ctl.removeFilter("category:galaxies");
+    expect(t.store.getState().form.filters).toEqual({ level: "combined", categories: ["ism"], objectTypes: ["exoplanets"] });
+    expect(t.svc.search).toHaveBeenLastCalledWith("g2:search", expect.objectContaining({ filters: { level: "combined", categories: ["ism"], objectTypes: ["exoplanets"] } }), false);
+    await t.ctl.removeFilter("objectType:exoplanets");
+    expect(t.store.getState().form.filters).toEqual({ level: "combined", categories: ["ism"] });
+    await t.ctl.removeFilter("level");
+    expect(t.store.getState().form.filters).toEqual({ level: "all", categories: ["ism"] });
+  });
+
+  it("keeps the object ids the next mission offers on a switch and sends them there", async () => {
+    const t = await searchedProgramme();
+    t.ctl.setText("M16");
+    t.ctl.setFilters({ categories: ["galaxies", "galaxy_clusters"], objectTypes: ["exoplanets"] });
+    t.ctl.switchMission("iue");
+    expect(t.store.getState().form.filters).toEqual({ categories: ["galaxies"] });
+    await flush();
+    expect(t.svc.search).toHaveBeenLastCalledWith(expect.stringMatching(/^g\d+:search$/), expect.objectContaining({ mission: "iue", filters: { categories: ["galaxies"] } }), false);
   });
 });
 
@@ -605,7 +762,7 @@ describe("thumbnail queue", () => {
     void t.ctl.search();
     await flush();
     const asked = () => vi.mocked(t.svc.cancel).mock.calls.map((c) => c[0]);
-    expect(asked()).toEqual(["g1:search", "g1:resolve", "g1:page:", "g1:list:", "g1:preview:", "g1:products:"].map((prefix) => ({ prefix })));
+    expect(asked()).toEqual([{ requestIds: ["g1:search", "g1:resolve"] }, ...["g1:page:", "g1:list:", "g1:preview:", "g1:products:"].map((prefix) => ({ prefix }))]);
     second.resolve(page([row("keep"), row("new")]));
     await flush();
     expect(asked()).toContainEqual({ requestIds: ["g1:thumb:drop"] });

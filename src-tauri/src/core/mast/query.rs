@@ -3,8 +3,9 @@ use serde_json::Value;
 use super::errors::bad_input;
 use super::ids::validate_dataset_id;
 use super::missions::{verified_server_sort, HST_DATASET_CONDITION_OK, JWST_FILTER_WILDCARD_OK};
+use super::object_filters::{self, LEVEL_COLUMN};
 use super::presets::{self, PresetSpec};
-use super::types::{LevelFilter, MastCmdError, MastFilterValues, MastMissionId, MastQuery, MastWhere, SearchPosition};
+use super::types::{MastCmdError, MastFilterValues, MastMissionId, MastQuery, MastWhere, SearchPosition};
 use crate::infra::mast::models::SearchParams;
 
 pub const PAGE_LIMIT: i64 = 200;
@@ -17,7 +18,7 @@ pub const NAME_MAX: usize = 200;
 pub const PROGRAM_MAX: i64 = 99_999;
 pub const EMPTY_QUERY: &str = "Add a target, coordinates, programme or dataset id";
 
-const JWST_COLUMNS: [&str; 17] = [
+const JWST_COLUMNS: [&str; 19] = [
     "fileSetName",
     "productLevel",
     "targname",
@@ -35,8 +36,10 @@ const JWST_COLUMNS: [&str; 17] = [
     "publicReleaseDate",
     "s_region",
     "targtype",
+    "targcat",
+    "targdesc",
 ];
-const HST_COLUMNS: [&str; 12] = [
+const HST_COLUMNS: [&str; 14] = [
     "sci_data_set_name",
     "sci_targname",
     "sci_instrume",
@@ -49,6 +52,8 @@ const HST_COLUMNS: [&str; 12] = [
     "sci_dec",
     "sci_release_date",
     "s_region",
+    "sci_broad_category",
+    "sci_target_descrip",
 ];
 const ROMAN_COLUMNS: [&str; 13] = [
     "fileSetName",
@@ -86,8 +91,10 @@ pub struct ValidQuery {
 }
 
 impl ValidQuery {
-    pub fn wildcard(&self) -> bool {
-        self.conditions.iter().any(|(_, value)| value.as_str().is_some_and(|text| text.contains('*')))
+    pub fn unreliable_total(&self) -> bool {
+        self.conditions
+            .iter()
+            .any(|(column, value)| column == "exp_type" && value.as_str().is_some_and(|text| text.contains('*')))
     }
 
     pub fn position(&self) -> Option<SearchPosition> {
@@ -127,7 +134,7 @@ struct FilterColumns {
 fn filter_columns(mission: MastMissionId) -> FilterColumns {
     match mission {
         MastMissionId::Jwst => FilterColumns {
-            level: Some("productLevel"),
+            level: Some(LEVEL_COLUMN),
             instrument: Some("instrume"),
             filter: Some(if JWST_FILTER_WILDCARD_OK { "opticalElements" } else { "filter" }),
             filter_wildcard: JWST_FILTER_WILDCARD_OK,
@@ -204,8 +211,8 @@ fn parse_date(text: &str) -> Result<&str, MastCmdError> {
 fn filter_conditions(mission: MastMissionId, filters: &MastFilterValues, preset: Option<&PresetSpec>) -> Result<Vec<(String, Value)>, MastCmdError> {
     let columns = filter_columns(mission);
     let mut conditions = Vec::new();
-    if let (Some(column), Some(LevelFilter::Combined)) = (columns.level, filters.level) {
-        conditions.push((column.to_owned(), Value::from("3")));
+    if let (Some(column), Some(value)) = (columns.level, filters.level.and_then(object_filters::level_value)) {
+        conditions.push((column.to_owned(), Value::from(value)));
     }
     if let (Some(column), Some(text)) = (columns.instrument, trimmed(&filters.instrument)) {
         conditions.push((column.to_owned(), Value::from(token_value("instrument", text)?)));
@@ -235,11 +242,15 @@ fn filter_conditions(mission: MastMissionId, filters: &MastFilterValues, preset:
     if let (Some(column), Some(true)) = (columns.public, filters.public_only) {
         conditions.push((column.to_owned(), Value::from("PUBLIC")));
     }
+    conditions.extend(object_filters::category_condition(mission, &filters.categories)?);
+    conditions.extend(object_filters::object_type_condition(mission, &filters.object_types)?);
     for (column, value) in preset.map(|preset| preset.conditions).unwrap_or_default() {
         let value = Value::from(*value);
-        if !conditions.iter().any(|(present, existing)| present == column && *existing == value) {
-            conditions.push(((*column).to_owned(), value));
+        if conditions.iter().any(|(present, existing)| present == column && *existing == value) {
+            continue;
         }
+        conditions.retain(|(present, _)| present != column);
+        conditions.push(((*column).to_owned(), value));
     }
     Ok(conditions)
 }
@@ -382,7 +393,7 @@ pub fn probe_params() -> SearchParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::mast::types::{MastErrorCode, MastSort};
+    use crate::core::mast::types::{LevelFilter, MastErrorCode, MastSort, ObjectCategory, ObjectType};
     use serde_json::json;
 
     fn base(mission: MastMissionId, where_: MastWhere) -> MastQuery {
@@ -495,6 +506,7 @@ mod tests {
             date_from: Some("2022-01-01".into()),
             date_to: Some("2022-12-31".into()),
             public_only: Some(true),
+            ..Default::default()
         };
         let filter = if JWST_FILTER_WILDCARD_OK { json!({"opticalElements": "*F444W*"}) } else { json!({"filter": "F444W"}) };
         assert_eq!(
@@ -508,7 +520,7 @@ mod tests {
                 {"access": "PUBLIC"}
             ])
         );
-        assert_eq!(validate(&query).unwrap().wildcard(), JWST_FILTER_WILDCARD_OK);
+        assert!(!validate(&query).unwrap().unreliable_total());
         let mut all_levels = m16(MastMissionId::Jwst);
         all_levels.filters.level = Some(LevelFilter::All);
         all_levels.filters.public_only = Some(false);
@@ -544,6 +556,7 @@ mod tests {
             date_from: Some("2014-01-01".into()),
             date_to: Some("2014-12-31".into()),
             public_only: Some(true),
+            ..Default::default()
         };
         assert_eq!(
             conditions(&query),
@@ -554,7 +567,7 @@ mod tests {
                 {"sci_start_time": "<=2014-12-31"}
             ])
         );
-        assert!(!validate(&query).unwrap().wildcard());
+        assert!(!validate(&query).unwrap().unreliable_total());
         let mut roman = m16(MastMissionId::Roman);
         roman.filters = MastFilterValues {
             level: Some(LevelFilter::Combined),
@@ -563,6 +576,7 @@ mod tests {
             date_from: Some("2027-01-01".into()),
             date_to: None,
             public_only: Some(true),
+            ..Default::default()
         };
         assert_eq!(
             conditions(&roman),
@@ -652,7 +666,7 @@ mod tests {
             json!([
                 "fileSetName", "productLevel", "targname", "targ_ra", "targ_dec", "instrume", "exp_type", "filter",
                 "opticalElements", "program", "observtn", "date_obs", "effexptm", "access", "publicReleaseDate", "s_region",
-                "targtype"
+                "targtype", "targcat", "targdesc"
             ])
         );
         let hst = serde_json::to_value(build_params(&validate(&m16(MastMissionId::Hst)).unwrap())).unwrap();
@@ -660,7 +674,8 @@ mod tests {
             hst["select_cols"],
             json!([
                 "sci_data_set_name", "sci_targname", "sci_instrume", "sci_aper_1234", "sci_spec_1234", "sci_actual_duration",
-                "sci_start_time", "sci_pep_id", "sci_ra", "sci_dec", "sci_release_date", "s_region"
+                "sci_start_time", "sci_pep_id", "sci_ra", "sci_dec", "sci_release_date", "s_region", "sci_broad_category",
+                "sci_target_descrip"
             ])
         );
         assert_eq!(select_cols(MastMissionId::Roman).map(<[&str]>::len), Some(13));
@@ -682,7 +697,7 @@ mod tests {
         let select = json!([
             "fileSetName", "productLevel", "targname", "targ_ra", "targ_dec", "instrume", "exp_type", "filter",
             "opticalElements", "program", "observtn", "date_obs", "effexptm", "access", "publicReleaseDate", "s_region",
-            "targtype"
+            "targtype", "targcat", "targdesc"
         ]);
         let request = |conditions: Value| {
             json!({
@@ -773,5 +788,144 @@ mod tests {
         assert_ne!(a, canonical_key(MastMissionId::Hst, &build_params(&valid)));
         let probe = serde_json::to_value(probe_params()).unwrap();
         assert_eq!(probe, json!({"target": ["0 0"], "radius": 0.1, "radius_units": "arcminutes", "count_only": true}));
+    }
+
+    fn with_objects(mission: MastMissionId, categories: &[ObjectCategory], object_types: &[ObjectType]) -> MastQuery {
+        let mut query = m16(mission);
+        query.filters.categories = categories.to_vec();
+        query.filters.object_types = object_types.to_vec();
+        query
+    }
+
+    fn key_of(query: &MastQuery) -> String {
+        canonical_key(query.mission, &build_params(&validate(query).unwrap()))
+    }
+
+    #[test]
+    fn object_categories_map_to_one_condition_per_column() {
+        let jwst = with_objects(MastMissionId::Jwst, &[ObjectCategory::Ism, ObjectCategory::Galaxies, ObjectCategory::Ism], &[]);
+        assert_eq!(conditions(&jwst), json!([{"targcat": "Galaxy, ISM"}]));
+        let ordered = with_objects(MastMissionId::Jwst, &[ObjectCategory::Galaxies, ObjectCategory::Ism], &[]);
+        assert_eq!(build_params(&validate(&jwst).unwrap()), build_params(&validate(&ordered).unwrap()));
+        assert_eq!(key_of(&jwst), key_of(&ordered));
+        assert_ne!(key_of(&jwst), key_of(&m16(MastMissionId::Jwst)));
+        let stars = with_objects(MastMissionId::Hst, &[ObjectCategory::Stars], &[]);
+        assert_eq!(
+            conditions(&stars),
+            json!([{"sci_broad_category": "STAR, STAR;*, *;STAR, *;STAR;*, EXT-STAR, EXT-STAR;*, *;EXT-STAR, *;EXT-STAR;*"}])
+        );
+        let extended = with_objects(MastMissionId::Hst, &[ObjectCategory::StarClusters, ObjectCategory::Ism], &[]);
+        assert_eq!(
+            conditions(&extended),
+            json!([{"sci_broad_category": "ISM, ISM;*, *;ISM, *;ISM;*, EXT-MEDIUM, EXT-MEDIUM;*, *;EXT-MEDIUM, *;EXT-MEDIUM;*, STELLAR CLUSTER, STELLAR CLUSTER;*, *;STELLAR CLUSTER, *;STELLAR CLUSTER;*, EXT-CLUSTER, EXT-CLUSTER;*, *;EXT-CLUSTER, *;EXT-CLUSTER;*"}])
+        );
+        let iue = with_objects(MastMissionId::Iue, &[ObjectCategory::Ism, ObjectCategory::Galaxies], &[]);
+        assert_eq!(conditions(&iue), json!([{"iue_category": "80..82, 84..88, 69..76"}]));
+        assert_eq!(key_of(&iue), key_of(&with_objects(MastMissionId::Iue, &[ObjectCategory::Galaxies, ObjectCategory::Ism], &[])));
+        let both = with_objects(MastMissionId::Jwst, &[ObjectCategory::Ism], &[ObjectType::PlanetaryNebulae]);
+        assert_eq!(conditions(&both), json!([{"targcat": "ISM"}, {"targdesc": "*Planetary nebulae*"}]));
+        let hst_type = with_objects(MastMissionId::Hst, &[], &[ObjectType::PlanetaryNebulae]);
+        assert_eq!(conditions(&hst_type), json!([{"sci_target_descrip": "PLANETARY NEBULA"}]));
+        let mut everything = with_objects(MastMissionId::Jwst, &[ObjectCategory::Galaxies], &[ObjectType::AgnQuasars]);
+        everything.program = Some(1266);
+        everything.filters.level = Some(LevelFilter::Exposures);
+        everything.filters.instrument = Some("miri".into());
+        everything.filters.date_from = Some("2022-07-01".into());
+        everything.filters.public_only = Some(true);
+        let columns: Vec<String> = validate(&everything).unwrap().conditions.into_iter().map(|(column, _)| column).collect();
+        assert_eq!(columns, ["program", "productLevel", "instrume", "date_obs", "access", "targcat", "targdesc"]);
+    }
+
+    #[test]
+    fn filters_the_mission_lacks_are_rejected() {
+        assert_eq!(bad(&with_objects(MastMissionId::Roman, &[ObjectCategory::Galaxies], &[])), "categories: Category is available for JWST, HST and IUE");
+        assert_eq!(bad(&with_objects(MastMissionId::Classy, &[ObjectCategory::Galaxies], &[])), "categories: Category is available for JWST, HST and IUE");
+        assert_eq!(bad(&with_objects(MastMissionId::Iue, &[], &[ObjectType::Exoplanets])), "objectTypes: Object type is available for JWST and HST");
+        assert_eq!(bad(&with_objects(MastMissionId::Roman, &[], &[ObjectType::Exoplanets])), "objectTypes: Object type is available for JWST and HST");
+        assert_eq!(
+            bad(&with_objects(MastMissionId::Iue, &[ObjectCategory::Stars, ObjectCategory::GalaxyClusters], &[])),
+            "categories: Galaxy clusters and groups is not available for IUE"
+        );
+        assert_eq!(bad(&with_objects(MastMissionId::Iue, &[ObjectCategory::Fields], &[])), "categories: Deep and blank fields is not available for IUE");
+        assert_eq!(bad(&with_objects(MastMissionId::Iue, &[ObjectCategory::Calibration], &[])), "categories: Calibration targets is not available for IUE");
+        assert_eq!(conditions(&with_objects(MastMissionId::Roman, &[], &[])), Value::Null);
+    }
+
+    #[test]
+    fn object_filters_never_stand_in_for_a_target() {
+        let mut categories = with_objects(MastMissionId::Jwst, &[ObjectCategory::Galaxies], &[ObjectType::InteractingGalaxies]);
+        categories.where_ = MastWhere::None;
+        assert_eq!(bad(&categories), format!("query: {EMPTY_QUERY}"));
+        let mut types = with_objects(MastMissionId::Hst, &[], &[ObjectType::Exoplanets]);
+        types.where_ = MastWhere::None;
+        assert_eq!(bad(&types), format!("query: {EMPTY_QUERY}"));
+        let mut unoffered = with_objects(MastMissionId::Roman, &[ObjectCategory::Galaxies], &[]);
+        unoffered.where_ = MastWhere::None;
+        assert_eq!(bad(&unoffered), format!("query: {EMPTY_QUERY}"));
+    }
+
+    #[test]
+    fn level_exposures_maps_to_the_four_tokens() {
+        let mut exposures = m16(MastMissionId::Jwst);
+        exposures.filters.level = Some(LevelFilter::Exposures);
+        assert_eq!(conditions(&exposures), json!([{"productLevel": "1b, 2a, 2b, 2c"}]));
+        let mut combined = m16(MastMissionId::Jwst);
+        combined.filters.level = Some(LevelFilter::Combined);
+        assert_eq!(conditions(&combined), json!([{"productLevel": "3"}]));
+        assert_ne!(key_of(&exposures), key_of(&combined));
+        for mission in [MastMissionId::Hst, MastMissionId::Roman, MastMissionId::Iue] {
+            let mut query = m16(mission);
+            query.filters.level = Some(LevelFilter::Exposures);
+            assert_eq!(conditions(&query), Value::Null, "{mission:?}");
+        }
+    }
+
+    #[test]
+    fn presets_own_their_columns() {
+        let mut exposures = with_preset("ifu_cubes");
+        exposures.filters.level = Some(LevelFilter::Exposures);
+        assert_eq!(conditions(&exposures), json!([{"exp_type": "NRS_IFU,MIR_MRS"}, {"productLevel": "3"}]));
+        assert_eq!(conditions(&with_preset("ifu_cubes")), json!([{"productLevel": "3"}, {"exp_type": "NRS_IFU,MIR_MRS"}]));
+        let mut catalogues = with_preset("pipeline_catalogs");
+        catalogues.filters.level = Some(LevelFilter::Exposures);
+        assert_eq!(conditions(&catalogues), json!([{"productLevel": "3"}]));
+        let mut tso = with_preset("tso");
+        tso.filters.level = Some(LevelFilter::Exposures);
+        assert_eq!(
+            conditions(&tso),
+            json!([{"productLevel": "1b, 2a, 2b, 2c"}, {"tsovisit": "t"}, {"exp_type": "NRS_BRIGHTOBJ,NIS_SOSS,MIR_LRS-SLITLESS,NRC_TSGRISM"}])
+        );
+        let mut objects = with_preset("ifu_cubes");
+        objects.filters.categories = vec![ObjectCategory::Galaxies];
+        objects.filters.object_types = vec![ObjectType::AgnQuasars];
+        assert_eq!(
+            conditions(&objects),
+            json!([
+                {"productLevel": "3"},
+                {"targcat": "Galaxy"},
+                {"targdesc": "*Active galactic nuclei*, *Active galaxies*, *Quasars*, *Seyfert galaxies*, *Radio galaxies*, *Quasar-galaxy pairs*, *Black holes*"},
+                {"exp_type": "NRS_IFU,MIR_MRS"}
+            ])
+        );
+        objects.filters.level = Some(LevelFilter::Exposures);
+        let levels = validate(&objects).unwrap().conditions.iter().filter(|(column, _)| column == "productLevel").count();
+        assert_eq!(levels, 1);
+    }
+
+    #[test]
+    fn only_exp_type_wildcards_make_the_total_unreliable() {
+        let mut optical = m16(MastMissionId::Jwst);
+        optical.filters.filter = Some("F444W".into());
+        assert!(!validate(&optical).unwrap().unreliable_total());
+        let typed = with_objects(MastMissionId::Jwst, &[], &[ObjectType::NebulaeStarForming]);
+        assert!(!validate(&typed).unwrap().unreliable_total());
+        let hst = with_objects(MastMissionId::Hst, &[ObjectCategory::Stars], &[]);
+        assert!(!validate(&hst).unwrap().unreliable_total());
+        assert!(!validate(&with_preset("tso")).unwrap().unreliable_total());
+        let mut exposure_types = validate(&m16(MastMissionId::Jwst)).unwrap();
+        exposure_types.conditions = vec![("exp_type".into(), json!("NRC_*"))];
+        assert!(exposure_types.unreliable_total());
+        exposure_types.conditions = vec![("opticalElements".into(), json!("*F444W*")), ("targdesc".into(), json!("*Exoplanet*"))];
+        assert!(!exposure_types.unreliable_total());
     }
 }

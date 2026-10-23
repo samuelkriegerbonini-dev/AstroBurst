@@ -9,7 +9,7 @@ import ResultsTable from "./ResultsTable";
 import { BlockingError, EmptyResults, LockedView, NoImagesIntro, NotResolved, UnavailableView } from "./StateViews";
 import { currentMission, effectiveView, resultsState, rowsOnScreen, visibleBanner, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
-import { displayRows, searchProgress } from "./logic/resultsView";
+import { displayRows, isLevelSearch, searchProgress } from "./logic/resultsView";
 import type { AroundTarget } from "./logic/aroundQuery";
 import { missionLabelOf } from "./logic/missionLabels";
 import { useNow } from "./state/useNow";
@@ -40,7 +40,13 @@ function SearchProgress({ state, ctl }: { state: ArchiveState; ctl: ArchiveContr
   const run = state.run;
   if (!run) return null;
   const mission = currentMission(state);
-  const view = searchProgress(run, { missionLabel: mission?.label ?? missionLabelOf(state.form.mission), radiusText: state.form.radiusText, filters: run.query?.filters ?? state.form.filters, now });
+  const view = searchProgress(run, {
+    missionLabel: mission?.label ?? missionLabelOf(state.form.mission),
+    radiusText: state.form.radiusText,
+    filters: run.query?.filters ?? state.form.filters,
+    now,
+    groups: mission?.filterGroups ?? [],
+  });
   return (
     <div className="ab-mast-progress" role="status">
       <ul className="ab-mast-progress-lines">
@@ -100,7 +106,9 @@ export default function ResultsRegion({ state, ctl, around, onEditQuery, onSwitc
       content = <NotResolved state={state} ctl={ctl} onEditQuery={editQuery} />;
       break;
     case "error":
-      content = state.error ? <BlockingError error={state.error} missionLabel={mission?.label ?? missionLabelOf(state.form.mission)} ctl={ctl} /> : null;
+      content = state.error ? (
+        <BlockingError error={state.error} missionLabel={mission?.label ?? missionLabelOf(state.form.mission)} ctl={ctl} levelSearch={isLevelSearch(state.form, state.presets)} />
+      ) : null;
       break;
     case "locked":
       content = mission?.id === "roman" ? <RomanPanel state={state} ctl={ctl} /> : <LockedView state={state} />;

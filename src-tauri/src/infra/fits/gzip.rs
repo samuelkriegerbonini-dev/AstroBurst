@@ -46,9 +46,41 @@ pub fn resolve_gzip(path: &Path) -> Result<(PathBuf, Option<SharedTempDir>)> {
     }
     let root = std::env::temp_dir();
     SWEEP.call_once(|| sweep_stale_copies(&root, SystemTime::now(), STALE_COPY_AGE));
-    let cap = || decompression_cap(effective_memory(), temp_volume_free(&root), &root);
-    let (copy, dir) = COPIES.resolve(path, &root, &cap)?;
+    let (copy, dir) = COPIES.resolve(path, &root, &temp_folder_cap)?;
     Ok((copy, Some(dir)))
+}
+
+pub(crate) fn temp_folder_cap() -> Cap {
+    let root = std::env::temp_dir();
+    decompression_cap(effective_memory(), temp_volume_free(&root), &root)
+}
+
+pub(crate) fn gunzip_or_copy(
+    mut input: impl Read,
+    output: &mut impl Write,
+    cap: &dyn Fn() -> Cap,
+    label: &str,
+) -> Result<u64> {
+    let mut head = Vec::with_capacity(GZIP_MAGIC.len());
+    input
+        .by_ref()
+        .take(GZIP_MAGIC.len() as u64)
+        .read_to_end(&mut head)
+        .map_err(|e| anyhow!("{label} could not be extracted: {e}"))?;
+    let stream = head.as_slice().chain(input);
+    if !starts_with_gzip(&head) {
+        return copy_capped(stream, output, &cap(), label);
+    }
+    Ok(gunzip_capped(stream, output, &cap(), label)?)
+}
+
+pub(crate) fn copy_capped(input: impl Read, output: &mut impl Write, cap: &Cap, label: &str) -> Result<u64> {
+    let copied = std::io::copy(&mut input.take(cap.bytes.saturating_add(1)), output)
+        .map_err(|e| anyhow!("{label} could not be extracted: {e}"))?;
+    if copied > cap.bytes {
+        return Err(anyhow!(cap.refusal(label, "the extracted member")));
+    }
+    Ok(copied)
 }
 
 pub(crate) fn split_gz_suffix(name: &str) -> (&str, Option<&str>) {
@@ -76,20 +108,20 @@ enum CapSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Cap {
+pub(crate) struct Cap {
     bytes: u64,
     source: CapSource,
 }
 
 impl Cap {
-    fn refusal(&self, label: &str) -> String {
+    fn refusal(&self, label: &str, subject: &str) -> String {
         let limit = format_bytes(self.bytes);
         match &self.source {
             CapSource::MemoryBudget => format!(
-                "{label}: the decompressed gzip stream is larger than {limit}, the memory budget for opening a compressed file, so it was refused before decompressing further. If the system can hold it, set {MEMORY_BUDGET_ENV} to the memory to allow (in MB) and restart."
+                "{label}: {subject} is larger than {limit}, the memory budget for opening a compressed file, so it was refused before decompressing further. If the system can hold it, set {MEMORY_BUDGET_ENV} to the memory to allow (in MB) and restart."
             ),
             CapSource::TempVolume(root) => format!(
-                "{label}: the decompressed gzip stream is larger than {limit}, the free space in the temporary folder {} once {} is kept free, so it was refused before decompressing further. Free space on that drive, or set TMP and TEMP (TMPDIR on Linux and macOS) to a folder on a larger drive and restart.",
+                "{label}: {subject} is larger than {limit}, the free space in the temporary folder {} once {} is kept free, so it was refused before decompressing further. Free space on that drive, or set TMP and TEMP (TMPDIR on Linux and macOS) to a folder on a larger drive and restart.",
                 root.display(),
                 format_bytes(TEMP_FREE_MARGIN)
             ),
@@ -391,7 +423,7 @@ fn gunzip_capped(
             total = total.saturating_add(read as u64);
             if total > cap.bytes {
                 return Err(GunzipError::TooLarge {
-                    message: cap.refusal(label),
+                    message: cap.refusal(label, "the decompressed gzip stream"),
                     cap: cap.bytes,
                 });
             }
@@ -462,6 +494,13 @@ pub(crate) mod test_support {
 
     pub fn decodes_on_this_thread() -> usize {
         super::DECODES.with(std::cell::Cell::get)
+    }
+
+    pub fn memory_budget(bytes: u64) -> super::Cap {
+        super::Cap {
+            bytes,
+            source: super::CapSource::MemoryBudget,
+        }
     }
 }
 
@@ -607,6 +646,24 @@ mod tests {
             "{} bytes written past the cap",
             out.len()
         );
+    }
+
+    #[test]
+    fn plain_bytes_are_copied_up_to_the_cap_and_refused_past_it() {
+        let plain = vec![7u8; 4096];
+        let mut out = Vec::new();
+        let copied = gunzip_or_copy(plain.as_slice(), &mut out, &|| budget(4096), "exact.fits").unwrap();
+        assert_eq!((copied, out), (4096, plain.clone()));
+
+        let mut out = Vec::new();
+        let err = gunzip_or_copy(plain.as_slice(), &mut out, &|| budget(4095), "over.fits")
+            .unwrap_err()
+            .to_string();
+        for expected in ["over.fits", format_bytes(4095).as_str(), MEMORY_BUDGET_ENV] {
+            assert!(err.contains(expected), "missing {expected}: {err}");
+        }
+        assert!(!err.contains("gzip stream"), "{err}");
+        assert!(out.len() <= 4096, "{} bytes written past the cap", out.len());
     }
 
     #[test]
@@ -898,7 +955,7 @@ mod tests {
             }
         );
         assert_eq!(decompression_cap(None, Some(TEMP_FREE_MARGIN / 2), root).bytes, 0);
-        let message = tight.refusal("big.fits.gz");
+        let message = tight.refusal("big.fits.gz", "the decompressed gzip stream");
         for expected in [
             "big.fits.gz",
             "T:/scratch",

@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 
+use super::object_filters::{filter_groups, LEVEL_COLUMN};
 use super::types::{
     ColumnKind, MastAvailability, MastColumn, MastMission, MastMissionId, MastQuickFilter, MissionCapabilities,
     MissionViews, QuickFilterId,
@@ -8,6 +9,7 @@ use super::types::{
 pub const CHECKED_ON: &str = "2026-10-16";
 pub const PROG_OBS_COLUMN: &str = "_prog_obs";
 pub const SEP_COLUMN: &str = "_sep_arcmin";
+pub const CATEGORY_COLUMN: &str = "_category";
 pub const JWST_FILTER_WILDCARD_OK: bool = true;
 pub const JWST_DATE_SORT_OK: bool = false;
 pub const HST_DATASET_CONDITION_OK: bool = true;
@@ -61,6 +63,7 @@ pub fn verified_server_sort(mission: MastMissionId, column: &str) -> bool {
 fn shared_label(name: &str) -> Option<&'static str> {
     let label = match name {
         PROG_OBS_COLUMN => "Prog.Obs",
+        CATEGORY_COLUMN => "Category",
         "s_region" => "Footprint",
         _ => return None,
     };
@@ -84,6 +87,8 @@ fn jwst_label(name: &str) -> Option<&'static str> {
         "targ_ra" => "RA",
         "targ_dec" => "Dec",
         "publicReleaseDate" => "Public release",
+        "targcat" => "Category",
+        "targdesc" => "Target description",
         SEP_COLUMN => "Sep (MAST)",
         _ => return None,
     };
@@ -103,6 +108,8 @@ fn hst_label(name: &str) -> Option<&'static str> {
         "sci_ra" => "RA",
         "sci_dec" => "Dec",
         "sci_release_date" => "Public release",
+        "sci_broad_category" => "Category",
+        "sci_target_descrip" => "Target description",
         "ang_sep" => "Sep (MAST)",
         SEP_COLUMN => "Sep",
         _ => return None,
@@ -137,6 +144,7 @@ fn other_label(mission: MastMissionId, name: &str) -> Option<&'static str> {
         (MastMissionId::Iue, "iue_aper") => "Aperture",
         (MastMissionId::Iue, "iue_obs_start_time") => "Date obs (UTC)",
         (MastMissionId::Iue, "iue_com_exp_time") => "Exp (s)",
+        (MastMissionId::Iue, "iue_category") => "Object class",
         (MastMissionId::Classy, "Target") => "Target",
         (MastMissionId::Classy, "distance") => "Distance",
         (MastMissionId::Classy, "log_Mstar") => "log M*",
@@ -229,12 +237,13 @@ pub fn has_synthetic(mission: MastMissionId, name: &str) -> bool {
     match name {
         PROG_OBS_COLUMN => matches!(mission, MastMissionId::Jwst | MastMissionId::Hst | MastMissionId::Roman),
         SEP_COLUMN => matches!(mission, MastMissionId::Jwst | MastMissionId::Hst),
+        CATEGORY_COLUMN => matches!(mission, MastMissionId::Jwst | MastMissionId::Hst | MastMissionId::Iue),
         _ => false,
     }
 }
 
 pub fn synthetic_columns(mission: MastMissionId) -> Vec<MastColumn> {
-    [PROG_OBS_COLUMN, SEP_COLUMN]
+    [PROG_OBS_COLUMN, SEP_COLUMN, CATEGORY_COLUMN]
         .into_iter()
         .filter(|name| has_synthetic(mission, name))
         .map(|name| column(mission, name, None, false))
@@ -250,6 +259,7 @@ fn default_column_names(mission: MastMissionId) -> &'static [&'static str] {
             "filter",
             "exp_type",
             "targname",
+            CATEGORY_COLUMN,
             PROG_OBS_COLUMN,
             "date_obs",
             "effexptm",
@@ -262,6 +272,7 @@ fn default_column_names(mission: MastMissionId) -> &'static [&'static str] {
             "sci_spec_1234",
             "sci_aper_1234",
             "sci_targname",
+            CATEGORY_COLUMN,
             PROG_OBS_COLUMN,
             "sci_start_time",
             "sci_actual_duration",
@@ -278,7 +289,7 @@ fn default_column_names(mission: MastMissionId) -> &'static [&'static str] {
             "exposure_time",
             "access",
         ],
-        MastMissionId::Iue => &["iue_data_id", "iue_target_name", "iue_disp", "iue_aper", "iue_obs_start_time", "iue_com_exp_time"],
+        MastMissionId::Iue => &["iue_data_id", "iue_target_name", CATEGORY_COLUMN, "iue_disp", "iue_aper", "iue_obs_start_time", "iue_com_exp_time"],
         MastMissionId::Classy => &["Target", "z", "distance", "log_Mstar", "log_SFR"],
         MastMissionId::Ullyses => &["target_name_ullyses", "target_classification", "spectral_type", "instrument", "grating", "filter"],
         MastMissionId::RomanCgi | MastMissionId::RomanSpectra | MastMissionId::Tess | MastMissionId::MultiMission => &[],
@@ -298,7 +309,7 @@ fn quick_filters(mission: MastMissionId) -> Vec<MastQuickFilter> {
     let jwst_filter_column = if JWST_FILTER_WILDCARD_OK { "opticalElements" } else { "filter" };
     match mission {
         MastMissionId::Jwst => vec![
-            quick(QuickFilterId::Level, "Level", "productLevel", Some(&["combined", "all"])),
+            quick(QuickFilterId::Level, "Level", LEVEL_COLUMN, Some(&["combined", "exposures", "all"])),
             quick(QuickFilterId::Instrument, "Instrument", "instrume", Some(&["NIRCAM", "MIRI", "NIRSPEC", "NIRISS", "FGS"])),
             quick(QuickFilterId::Filter, "Filter", jwst_filter_column, None),
             quick(QuickFilterId::Date, "Date", "date_obs", None),
@@ -369,6 +380,7 @@ pub fn mission(id: MastMissionId) -> MastMission {
         default_columns: default_column_names(id).iter().map(|name| column(id, name, None, true)).collect(),
         note,
         checked_on: CHECKED_ON.to_owned(),
+        filter_groups: filter_groups(id),
     }
 }
 
@@ -466,7 +478,7 @@ mod tests {
                 (QuickFilterId::Public, "access"),
             ]
         );
-        assert_eq!(jwst.quick_filters[0].options, Some(vec!["combined".to_owned(), "all".to_owned()]));
+        assert_eq!(jwst.quick_filters[0].options, Some(["combined", "exposures", "all"].map(str::to_owned).to_vec()));
         assert_eq!(
             jwst.quick_filters[1].options,
             Some(["NIRCAM", "MIRI", "NIRSPEC", "NIRISS", "FGS"].map(str::to_owned).to_vec())
@@ -493,17 +505,17 @@ mod tests {
         let jwst_cols: Vec<&str> = jwst.default_columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             jwst_cols,
-            vec!["fileSetName", "productLevel", "instrume", "filter", "exp_type", "targname", "_prog_obs", "date_obs", "effexptm", "_sep_arcmin", "access"]
+            vec!["fileSetName", "productLevel", "instrume", "filter", "exp_type", "targname", "_category", "_prog_obs", "date_obs", "effexptm", "_sep_arcmin", "access"]
         );
         let hst_cols: Vec<&str> = hst.default_columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             hst_cols,
-            vec!["sci_data_set_name", "sci_instrume", "sci_spec_1234", "sci_aper_1234", "sci_targname", "_prog_obs", "sci_start_time", "sci_actual_duration", "_sep_arcmin"]
+            vec!["sci_data_set_name", "sci_instrume", "sci_spec_1234", "sci_aper_1234", "sci_targname", "_category", "_prog_obs", "sci_start_time", "sci_actual_duration", "_sep_arcmin"]
         );
         let labels: Vec<&str> = jwst.default_columns.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(
             labels,
-            vec!["Dataset", "Lvl", "Instr", "Filter", "Exp type", "Target", "Prog.Obs", "Date obs (UTC)", "Exp (s)", "Sep (MAST)", "Access"]
+            vec!["Dataset", "Lvl", "Instr", "Filter", "Exp type", "Target", "Category", "Prog.Obs", "Date obs (UTC)", "Exp (s)", "Sep (MAST)", "Access"]
         );
         let effexptm = jwst.default_columns.iter().find(|c| c.name == "effexptm").unwrap();
         assert_eq!((effexptm.kind, effexptm.unit.as_deref()), (ColumnKind::Float, Some("s")));
@@ -515,10 +527,63 @@ mod tests {
         for m in &all {
             assert!(m.default_columns.iter().all(|c| !c.name.starts_with('_') || !c.sortable));
         }
+        let iue_cols: Vec<(&str, &str)> = all[3].default_columns.iter().map(|c| (c.name.as_str(), c.label.as_str())).collect();
+        assert_eq!(
+            iue_cols,
+            vec![
+                ("iue_data_id", "Dataset"),
+                ("iue_target_name", "Target"),
+                ("_category", "Category"),
+                ("iue_disp", "Dispersion"),
+                ("iue_aper", "Aperture"),
+                ("iue_obs_start_time", "Date obs (UTC)"),
+                ("iue_com_exp_time", "Exp (s)")
+            ]
+        );
+        for m in &all[4..] {
+            assert!(m.default_columns.iter().all(|c| c.name != CATEGORY_COLUMN), "{}", m.label);
+        }
         assert!(all[6].note.as_deref().unwrap().contains("coronagraphy"));
         for m in &all[7..] {
             assert_eq!(m.note.as_deref(), Some("not deployed by MAST (checked 2026-10-16)"));
         }
+    }
+
+    #[test]
+    fn missions_carry_their_filter_groups_and_category_columns() {
+        let all = missions();
+        let groups: Vec<usize> = all.iter().map(|m| m.filter_groups.len()).collect();
+        assert_eq!(groups, [2, 2, 0, 1, 0, 0, 0, 0, 0, 0]);
+        for m in &all {
+            assert_eq!(m.filter_groups, crate::core::mast::object_filters::filter_groups(m.id), "{}", m.label);
+        }
+        let jwst = serde_json::to_value(&all[0]).unwrap();
+        assert_eq!(jwst["filterGroups"][0]["id"], serde_json::json!("category"));
+        assert_eq!(jwst["filterGroups"][1]["options"].as_array().unwrap().len(), 8);
+        assert_eq!(all[3].filter_groups[0].options.len(), 5);
+        let merged = merge_probe(mission(MastMissionId::Iue), MastAvailability::Open, "2026-11-02");
+        assert_eq!(merged.filter_groups, all[3].filter_groups);
+        for (mission, name, label) in [
+            (MastMissionId::Jwst, "targcat", "Category"),
+            (MastMissionId::Jwst, "targdesc", "Target description"),
+            (MastMissionId::Hst, "sci_broad_category", "Category"),
+            (MastMissionId::Hst, "sci_target_descrip", "Target description"),
+            (MastMissionId::Iue, "iue_category", "Object class"),
+            (MastMissionId::Jwst, CATEGORY_COLUMN, "Category"),
+            (MastMissionId::Iue, CATEGORY_COLUMN, "Category"),
+        ] {
+            assert_eq!(column(mission, name, Some("char"), true).label, label, "{mission:?} {name}");
+        }
+        let synthetic = column(MastMissionId::Hst, CATEGORY_COLUMN, None, true);
+        assert_eq!((synthetic.kind, synthetic.sortable, synthetic.unit), (ColumnKind::Text, false, None));
+        for mission in [MastMissionId::Jwst, MastMissionId::Hst, MastMissionId::Iue] {
+            assert!(has_synthetic(mission, CATEGORY_COLUMN), "{mission:?}");
+            assert_eq!(synthetic_columns(mission).last().map(|c| c.name.as_str()), Some(CATEGORY_COLUMN), "{mission:?}");
+        }
+        for mission in [MastMissionId::Roman, MastMissionId::Classy, MastMissionId::Ullyses, MastMissionId::Tess] {
+            assert!(!has_synthetic(mission, CATEGORY_COLUMN), "{mission:?}");
+        }
+        assert_eq!(synthetic_columns(MastMissionId::Iue).len(), 1);
     }
 
     #[test]

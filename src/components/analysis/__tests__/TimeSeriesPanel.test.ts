@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GAIN_TITLE } from "../../../utils/photometryGain";
+import timeSeriesPanelSource from "../TimeSeriesPanel.tsx?raw";
 
 vi.mock("../../../context/PreviewContext", () => ({
   useDqContext: () => ({ excludeDq: false }),
@@ -39,5 +40,20 @@ describe("TimeSeriesPanel fields (followups-9, followups-10, science0925-19)", (
     expect(markup).toContain(`title="${GAIN_TITLE}"`);
     expect(markup).toContain("data-gain-source");
     expect(markup).toContain("data-gain-caption");
+  });
+});
+
+describe("TimeSeriesPanel table cells (UX-07)", () => {
+  it("prints the sky level through the shared flux formatter", () => {
+    expect(timeSeriesPanelSource).toMatch(/data-column="bg_mean">\s*\{fluxCellText\(target\?\.bg_mean\)\}/);
+  });
+
+  it("writes the differential magnitude error with ± on one line, as the photometry table does", () => {
+    expect(timeSeriesPanelSource.match(/\+\/-/g) ?? []).toEqual([]);
+    const cell = timeSeriesPanelSource.match(
+      /<td className="([^"]*)">\s*\{point && point\.mag !== null \? `\$\{fmt\(point\.mag, 4\)\} ± \$\{fmt\(point\.err, 4\)\}` : "--"\}/,
+    );
+    expect(cell).not.toBeNull();
+    expect(cell![1].split(" ")).toContain("whitespace-nowrap");
   });
 });

@@ -22,6 +22,7 @@ pub const ROMAN_PIXEL_AREA_SR_KEYS: [&str; 2] = [
 
 const MJY_PER_SR_UNITS: [&str; 6] = ["MJY/SR", "MJYSR-1", "MJY.SR-1", "MJY.SR**-1", "MJYSR**-1", "MJY/STERADIAN"];
 const PIXEL_AREA_TOLERANCE_RATIO: f64 = 1.10;
+const JWST_MJY_SR_NOTE: &str = "JWST MJy/sr: flux [Jy] = sum(MJy/sr) * PIXAR_SR * 1e6";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -60,6 +61,7 @@ pub struct PhotCal {
     pub bunit: Option<String>,
     pub notes: Vec<String>,
     pub warnings: Vec<String>,
+    pub area_applied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -116,6 +118,11 @@ fn areas_disagree(card: f64, wcs: f64) -> bool {
     ratio > PIXEL_AREA_TOLERANCE_RATIO || ratio < PIXEL_AREA_TOLERANCE_RATIO.recip()
 }
 
+#[cfg(feature = "tauri")]
+pub(crate) fn is_relative_pixel_area(mean: f64) -> bool {
+    mean.is_finite() && !areas_disagree(mean, 1.0)
+}
+
 struct PixelArea {
     steradians: f64,
     derived: bool,
@@ -170,7 +177,7 @@ impl PhotCal {
                     a2
                 }),
             };
-            notes.push("JWST MJy/sr: flux [Jy] = sum(MJy/sr) * PIXAR_SR * 1e6".into());
+            notes.push(JWST_MJY_SR_NOTE.into());
             if header.get("PHOTMJSR").is_some() {
                 notes.push("PHOTMJSR present but not applied: the data are already in MJy/sr".into());
             }
@@ -230,14 +237,27 @@ impl PhotCal {
             return None;
         };
 
-        Some(PhotCal { convention, bunit, notes, warnings })
+        Some(PhotCal { convention, bunit, notes, warnings, area_applied: false })
+    }
+
+    pub fn pixar_from_header(&self) -> bool {
+        matches!(self.convention, FluxConvention::JwstMjySr { derived_pixar: false, .. })
+    }
+
+    pub fn apply_area_map(&mut self, hdu: usize, map_mean: f64) {
+        self.area_applied = true;
+        self.notes.retain(|note| note != JWST_MJY_SR_NOTE);
+        self.notes.push(format!(
+            "AREA pixel-area map applied (HDU {hdu}, map mean {map_mean:.4}): flux [Jy] = sum((SB - sky) * AREA) * PIXAR_SR * 1e6"
+        ));
     }
 
     pub fn label(&self) -> String {
         match &self.convention {
             FluxConvention::JwstMjySr { derived_pixar, .. } => format!(
-                "JWST MJy/sr, PIXAR_SR {}",
-                if *derived_pixar { "derived from the WCS" } else { "from header" }
+                "JWST MJy/sr, PIXAR_SR {}{}",
+                if *derived_pixar { "derived from the WCS" } else { "from header" },
+                if self.area_applied { ", AREA pixel-area map applied" } else { "" }
             ),
             FluxConvention::JwstDnPerSec { .. } => "JWST DN/s via PHOTMJSR and PIXAR_SR".into(),
             FluxConvention::HstCounts { per_second, .. } => format!(

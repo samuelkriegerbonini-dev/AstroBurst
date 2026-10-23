@@ -1,7 +1,7 @@
 use ndarray::Array2;
 use serde::Serialize;
 
-use crate::core::analysis::aperture::{annulus, circular_aperture, weighted_sum, AperturePixel};
+use crate::core::analysis::aperture::{annulus, circular_aperture, weighted_sum, AperturePixel, ApertureSum};
 use crate::core::imaging::dq_flags::apply_exclusion;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::header::HduHeader;
@@ -131,6 +131,7 @@ pub struct StarPhotometry {
     pub growth_curve: Vec<GrowthPoint>,
     pub ee50_radius: Option<f64>,
     pub ee80_radius: Option<f64>,
+    pub area_applied: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -264,9 +265,129 @@ fn fwhm_truncated_moments(image: &Array2<f32>, x: f64, y: f64, bg: f64) -> f64 {
     fwhm.clamp(0.5, 40.0)
 }
 
+fn area_factor(value: f32) -> f64 {
+    let area = value as f64;
+    if area.is_finite() && area > 0.0 {
+        area
+    } else {
+        1.0
+    }
+}
+
+pub fn area_map_mean(area: &Array2<f32>) -> f64 {
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
+    for &value in area.iter() {
+        let a = value as f64;
+        if a.is_finite() && a > 0.0 {
+            sum += a;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        f64::NAN
+    } else {
+        sum / count as f64
+    }
+}
+
+fn pixel_weight(p: &AperturePixel, area: Option<&Array2<f32>>) -> f64 {
+    let weight = p.weight as f64;
+    match area {
+        Some(map) => weight * area_factor(map[[p.y, p.x]]),
+        None => weight,
+    }
+}
+
+struct ApertureFlux {
+    sum: f64,
+    weight: f64,
+    noise_sum: f64,
+    noise_weight: f64,
+    geometric_weight: f64,
+    n_finite: u32,
+    n_masked: u32,
+}
+
+impl ApertureFlux {
+    fn geometric(ap: &ApertureSum) -> Self {
+        Self {
+            sum: ap.sum,
+            weight: ap.weight,
+            noise_sum: ap.sum,
+            noise_weight: ap.weight,
+            geometric_weight: ap.weight,
+            n_finite: ap.n_finite,
+            n_masked: ap.n_masked,
+        }
+    }
+
+    fn net(&self, sky_mean: f64) -> f64 {
+        self.sum - sky_mean * self.weight
+    }
+
+    fn noise_net(&self, sky_mean: f64) -> f64 {
+        self.noise_sum - sky_mean * self.noise_weight
+    }
+}
+
+fn area_weighted_sum(
+    image: &Array2<f32>,
+    area: &Array2<f32>,
+    pixels: &[AperturePixel],
+    excluded: Option<&Array2<u8>>,
+) -> ApertureFlux {
+    let mask = excluded.filter(|m| m.dim() == image.dim());
+    let mut flux = ApertureFlux {
+        sum: 0.0,
+        weight: 0.0,
+        noise_sum: 0.0,
+        noise_weight: 0.0,
+        geometric_weight: 0.0,
+        n_finite: 0,
+        n_masked: 0,
+    };
+    for p in pixels {
+        let Some(&value) = image.get((p.y, p.x)) else {
+            continue;
+        };
+        if mask.is_some_and(|m| m[[p.y, p.x]] != 0) {
+            flux.n_masked += 1;
+            continue;
+        }
+        if !value.is_finite() {
+            continue;
+        }
+        let geometric = p.weight as f64;
+        let a = area_factor(area[[p.y, p.x]]);
+        let w = geometric * a;
+        let v = value as f64;
+        flux.sum += w * v;
+        flux.weight += w;
+        flux.noise_sum += w * a * v;
+        flux.noise_weight += w * a;
+        flux.geometric_weight += geometric;
+        flux.n_finite += 1;
+    }
+    flux
+}
+
+fn aperture_flux(
+    image: &Array2<f32>,
+    area: Option<&Array2<f32>>,
+    pixels: &[AperturePixel],
+    excluded: Option<&Array2<u8>>,
+) -> ApertureFlux {
+    match area {
+        Some(map) => area_weighted_sum(image, map, pixels, excluded),
+        None => ApertureFlux::geometric(&weighted_sum(image, pixels, excluded)),
+    }
+}
+
 fn err_weighted_variance(
     image: &Array2<f32>,
     err: &Array2<f32>,
+    area: Option<&Array2<f32>>,
     pixels: &[AperturePixel],
     excluded: Option<&Array2<u8>>,
     model_variance: impl Fn(f64) -> f64,
@@ -281,7 +402,7 @@ fn err_weighted_variance(
             }
             let e = err[[p.y, p.x]] as f64;
             let pixel_variance = if e.is_finite() { e * e } else { model_variance(v) };
-            Some((p.weight as f64).powi(2) * pixel_variance)
+            Some(pixel_weight(p, area).powi(2) * pixel_variance)
         })
         .sum()
 }
@@ -295,6 +416,7 @@ struct GrowthPlateau {
 pub fn growth_curve(
     image: &Array2<f32>,
     excluded: Option<&Array2<u8>>,
+    area: Option<&Array2<f32>>,
     x: f64,
     y: f64,
     r_max: f64,
@@ -305,13 +427,14 @@ pub fn growth_curve(
         return Vec::new();
     }
     let (h, w) = image.dim();
+    let area = area.filter(|a| a.dim() == image.dim());
     let step = GROWTH_CURVE_STEP.max(r_max / GROWTH_CURVE_MAX_POINTS as f64);
     let n = ((r_max / step).floor() as usize).min(GROWTH_CURVE_MAX_POINTS);
     (1..=n)
         .map(|k| {
             let r = k as f64 * step;
-            let ring = weighted_sum(image, &circular_aperture(h, w, x, y, r, subsamples), excluded);
-            GrowthPoint { r, flux: ring.sum - sky_mean * ring.weight }
+            let flux = aperture_flux(image, area, &circular_aperture(h, w, x, y, r, subsamples), excluded);
+            GrowthPoint { r, flux: flux.net(sky_mean) }
         })
         .collect()
 }
@@ -366,6 +489,7 @@ pub struct MaskedImage<'a> {
     image: &'a Array2<f32>,
     excluded: Option<&'a Array2<u8>>,
     masked: Option<Array2<f32>>,
+    area: Option<&'a Array2<f32>>,
 }
 
 impl<'a> MaskedImage<'a> {
@@ -375,7 +499,12 @@ impl<'a> MaskedImage<'a> {
             .map(|mask| apply_exclusion(image, mask))
             .transpose()
             .map_err(|e| e.to_string())?;
-        Ok(Self { image, excluded, masked })
+        Ok(Self { image, excluded, masked, area: None })
+    }
+
+    pub fn with_area(mut self, area: Option<&'a Array2<f32>>) -> Self {
+        self.area = area.filter(|a| a.dim() == self.image.dim());
+        self
     }
 
     fn working(&self) -> &Array2<f32> {
@@ -405,6 +534,7 @@ pub fn measure_star_prepared(
 ) -> Result<StarPhotometry, String> {
     let image = source.image;
     let excluded = source.excluded;
+    let area = source.area;
     let working = source.working();
     let dims = image.dim();
     let (h, w) = dims;
@@ -491,12 +621,12 @@ pub fn measure_star_prepared(
     }
 
     let pixels = circular_aperture(h, w, x, y, r_ap, config.subsamples);
-    let ap = weighted_sum(image, &pixels, excluded);
+    let ap = aperture_flux(image, area, &pixels, excluded);
     if ap.n_finite == 0 {
         return Err("Aperture contains no finite pixels".into());
     }
 
-    let net_flux = ap.sum - sky.mean * ap.weight;
+    let net_flux = ap.net(sky.mean);
     let n_ap = ap.weight;
     let n_bg = sky.count as f64;
     let sky_variance = if n_bg > 0.0 {
@@ -510,11 +640,11 @@ pub fn measure_star_prepared(
             let model_variance = |v: f64| {
                 sky.sigma * sky.sigma + gain.map_or(0.0, |g| (v - sky.mean).max(0.0) / g)
             };
-            (err_weighted_variance(image, err_plane, &pixels, excluded, model_variance) + sky_variance, true)
+            (err_weighted_variance(image, err_plane, area, &pixels, excluded, model_variance) + sky_variance, true)
         }
         None => {
-            let poisson = gain.map_or(0.0, |g| net_flux.max(0.0) / g);
-            (poisson + n_ap * sky.sigma * sky.sigma + sky_variance, false)
+            let poisson = gain.map_or(0.0, |g| ap.noise_net(sky.mean).max(0.0) / g);
+            (poisson + ap.noise_weight * sky.sigma * sky.sigma + sky_variance, false)
         }
     };
     let flux_err = variance.max(0.0).sqrt();
@@ -539,7 +669,7 @@ pub fn measure_star_prepared(
         (None, None) => (false, NO_SATURATION_SOURCE),
     };
 
-    let curve = growth_curve(image, excluded, x, y, GROWTH_CURVE_REACH_FACTOR * r_ap, sky.mean, config.subsamples);
+    let curve = growth_curve(image, excluded, area, x, y, GROWTH_CURVE_REACH_FACTOR * r_ap, sky.mean, config.subsamples);
     let plateau = growth_plateau(&curve, r_ap, sky_inner)
         .filter(|_| net_flux > 0.0)
         .filter(|p| (net_flux / p.flux).is_finite() && net_flux / p.flux > 0.0);
@@ -559,8 +689,8 @@ pub fn measure_star_prepared(
         snr,
         fwhm,
         aperture_radius: r_ap,
-        aperture_pixels: ap.weight.round() as u32,
-        aperture_area: ap.weight,
+        aperture_pixels: ap.geometric_weight.round() as u32,
+        aperture_area: ap.geometric_weight,
         bg_mean: sky.mean,
         bg_sigma: sky.sigma,
         bg_pixels: sky.count,
@@ -583,13 +713,13 @@ pub fn measure_star_prepared(
         growth_curve: curve,
         ee50_radius,
         ee80_radius,
+        area_applied: area.is_some(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::analysis::aperture::ApertureSum;
 
     fn measure_star(
         image: &Array2<f32>,
@@ -1189,7 +1319,7 @@ mod tests {
         let sigma = 3.0;
         let amp = 1000.0;
         let img = gaussian_scene(128, 128, 64.0, 64.0, amp, sigma, 10.0);
-        let curve = growth_curve(&img, None, 64.0, 64.0, 24.0, 10.0, 5);
+        let curve = growth_curve(&img, None, None, 64.0, 64.0, 24.0, 10.0, 5);
         assert_eq!(curve.len(), 48);
         assert!((curve[0].r - GROWTH_CURVE_STEP).abs() < 1e-12);
         for pair in curve.windows(2) {
@@ -1199,9 +1329,9 @@ mod tests {
         let true_flux = 2.0 * std::f64::consts::PI * amp * sigma * sigma;
         let last = curve.last().unwrap().flux;
         assert!((last - true_flux).abs() / true_flux < 0.01, "last={last} vs {true_flux}");
-        assert!(growth_curve(&img, None, 64.0, 64.0, 0.0, 10.0, 5).is_empty());
-        assert!(growth_curve(&img, None, 64.0, 64.0, f64::NAN, 10.0, 5).is_empty());
-        let wide = growth_curve(&img, None, 64.0, 64.0, 240.0, 10.0, 1);
+        assert!(growth_curve(&img, None, None, 64.0, 64.0, 0.0, 10.0, 5).is_empty());
+        assert!(growth_curve(&img, None, None, 64.0, 64.0, f64::NAN, 10.0, 5).is_empty());
+        let wide = growth_curve(&img, None, None, 64.0, 64.0, 240.0, 10.0, 1);
         assert!(wide.len() <= GROWTH_CURVE_MAX_POINTS);
         assert!((wide[0].r - 1.5).abs() < 1e-12);
     }
@@ -1309,7 +1439,7 @@ mod tests {
     fn growth_plateau_keeps_the_integer_step_semantics_of_the_previous_search() {
         let img = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, 3.0, 10.0);
         let r_ap = 8.0;
-        let curve = growth_curve(&img, None, 64.0, 64.0, GROWTH_CURVE_REACH_FACTOR * r_ap, 10.0, 5);
+        let curve = growth_curve(&img, None, None, 64.0, 64.0, GROWTH_CURVE_REACH_FACTOR * r_ap, 10.0, 5);
         let plateau = growth_plateau(&curve, r_ap, SKY_ANNULUS_INNER_FACTOR * r_ap).expect("plateau");
         assert!(plateau.radius >= 11.0 && plateau.radius <= 12.0, "plateau at {}", plateau.radius);
         assert!((plateau.radius / GROWTH_CURVE_STEP).fract().abs() < 1e-12);

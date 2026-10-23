@@ -49,6 +49,8 @@ export type LineModel = "none" | "gaussian";
 
 export const LINE_MODELS: readonly LineModel[] = ["none", "gaussian"];
 
+export const LINE_MODEL_LABELS: Record<LineModel, string> = { none: "direct integration", gaussian: "direct + Gaussian fit" };
+
 export type SpectrumSource =
   | { kind: "pixel"; x: number; y: number }
   | { kind: "region"; shape: RegionShape; background: RegionShape | null };

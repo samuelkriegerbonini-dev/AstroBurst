@@ -88,4 +88,5 @@ export interface ProcessedFile {
   startedAt: number | null;
   finishedAt: number | null;
   spectrum?: Spectrum1dKind;
+  reloads?: number;
 }

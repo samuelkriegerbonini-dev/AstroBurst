@@ -3,6 +3,7 @@ import { Activity, FileText, FolderOpen, X } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import ProfilePlot, { type ProfileSeries } from "../regions/ProfilePlot";
 import RampComparePanel from "./RampComparePanel";
+import OutputNote from "./OutputNote";
 import { ErrorAlert, RunButton, Slider, WarningList } from "../ui";
 import { getPreviewUrl, isTauri } from "../../infrastructure/tauri";
 import { useDisplayedImage } from "../../context/PreviewContext";
@@ -621,6 +622,7 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
                 </div>
                 <div>band scales {result.band_scales_dn.map((s) => s.toFixed(1)).join(", ")} DN</div>
               </div>
+              {result.fits_path && <OutputNote path={result.fits_path} />}
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" onClick={pickRate} className={SMALL_BUTTON_CLASS} disabled={!isTauri()}>
                   <FolderOpen size={9} />

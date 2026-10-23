@@ -19,7 +19,10 @@ function rules(css: string): { selectors: string[]; body: string }[] {
 }
 
 function reducedMotionBlock(css: string): string {
-  const start = css.indexOf("@media (prefers-reduced-motion: reduce)");
+  return atBlock(css, css.indexOf("@media (prefers-reduced-motion: reduce)"));
+}
+
+function atBlock(css: string, start: number): string {
   if (start < 0) return "";
   let depth = 0;
   for (let i = css.indexOf("{", start); i < css.length; i += 1) {
@@ -50,6 +53,45 @@ describe("archive sources", () => {
         .map((name) => `${file}: ${name}`),
     );
     expect(missing).toEqual([]);
+  });
+
+  it("give the loading skeleton the card height the gallery lays out with", () => {
+    const heightOf = (selector: string) => /(?:^|;|\s)height:\s*(\d+)px/.exec(rules(archiveCss).find((r) => r.selectors.includes(selector))?.body ?? "")?.[1];
+    const cardH = /const CARD_H = (\d+);/.exec(COMPONENTS["../ResultsGallery.tsx"])?.[1];
+    expect(cardH).toBeDefined();
+    expect(heightOf(".ab-mast-card")).toBe(cardH);
+    expect(heightOf(".ab-mast-skeleton")).toBe(cardH);
+  });
+
+  it("keep results in view at short windows: Clear beside the active chips, chips scrolling within two rows, the note's action on its text line", () => {
+    const body = (css: string, selector: string) => rules(css).find((r) => r.selectors.includes(selector))?.body ?? "";
+    expect(body(archiveCss, ".ab-mast-active-row")).toMatch(/flex-wrap:\s*nowrap/);
+    expect(body(archiveCss, ".ab-mast-summary-unknown")).toMatch(/display:\s*block/);
+    const short = atBlock(archiveCss, archiveCss.search(/@media \(max-height: \d+px\)/));
+    const chips = body(short, ".ab-mast-active-chips");
+    expect(Number(/max-height:\s*(\d+)px/.exec(chips)?.[1] ?? Infinity)).toBeLessThanOrEqual(2 * 24 + 6);
+    expect(chips).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("keep a whole first card in view at 900 x 600 with the filter panel open: quick filters share the filter row's lines, one row of active chips beside the open panel, a one-line unknown note, the measured short-window spacing", () => {
+    const body = (list: { selectors: string[]; body: string }[], selector: string) => list.find((r) => r.selectors.includes(selector))?.body ?? "";
+    const px = (text: string, prop: string) => Number(new RegExp(`(?:^|[;\\s])${prop}:\\s*(\\d+)px`).exec(text)?.[1] ?? Infinity);
+    expect(body(rules(archiveCss), ".ab-mast-filters")).toMatch(/display:\s*contents/);
+    const at = archiveCss.search(/@media \(max-height: \d+px\)/);
+    const block = atBlock(archiveCss, at);
+    const short = rules(block);
+    const later = new Set(rules(archiveCss.slice(at + block.length)).flatMap((r) => r.selectors));
+    expect(short.flatMap((r) => r.selectors).filter((selector) => later.has(selector))).toEqual([]);
+    expect(px(body(short, '.ab-mast-querybar[data-filters-open="true"] .ab-mast-active-chips'), "max-height")).toBeLessThanOrEqual(24);
+    expect(body(short, ".ab-mast-summary-unknown")).toMatch(/display:\s*flex/);
+    expect(body(short, ".ab-mast-summary-unknown-text")).toMatch(/text-overflow:\s*ellipsis/);
+    expect(body(short, ".ab-mast-summary-unknown-text")).toMatch(/white-space:\s*nowrap/);
+    const querybar = body(short, ".ab-mast-querybar");
+    const panel = body(short, ".ab-mast-filter-panel");
+    expect([px(querybar, "gap"), px(querybar, "padding-top"), px(querybar, "padding-bottom")]).toEqual([4, 6, 6]);
+    expect(px(body(short, ".ab-mast-filter-row"), "row-gap")).toBe(6);
+    expect([px(panel, "gap"), px(panel, "padding-top"), px(panel, "padding-bottom")]).toEqual([6, 6, 6]);
+    expect(px(body(short, ".ab-mast-filter-options"), "row-gap")).toBe(4);
   });
 
   it("use the grey tokens instead of #71717a or #52525b", () => {

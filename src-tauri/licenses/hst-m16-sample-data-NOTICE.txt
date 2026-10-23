@@ -1,6 +1,8 @@
-Sample data shipped with AstroBurst: three HST/WFPC2 narrowband frames of the Eagle Nebula (M16)
+Sample data downloaded on demand by AstroBurst: three HST/WFPC2 narrowband frames of the Eagle Nebula (M16)
 
-Files: sample-data/502nmos.fits ([OIII] 502 nm), sample-data/656nmos.fits (H-alpha 656 nm), sample-data/673nmos.fits ([SII] 673 nm)
+Files: 502nmos.fits ([OIII] 502 nm), 656nmos.fits (H-alpha 656 nm), 673nmos.fits ([SII] 673 nm)
+
+The frames are not shipped with the installers. The Download sample data entry downloads them on demand from the AstroBurst repository at commit 360a861 (https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/360a86196b9316e3cda5c610bc4e6be7225e0988/exampleFits/sample-data/), checks each against its published SHA-256 and keeps them in the data folder's samples/hst-m16-wfpc2/.
 
 Credit: NASA, ESA, J. Hester and P. Scowen (Arizona State University). Observations with the Hubble Space Telescope (WFPC2, 1995), obtained from the Space Telescope Science Institute (STScI), operated by AURA under NASA contract NAS5-26555.
 

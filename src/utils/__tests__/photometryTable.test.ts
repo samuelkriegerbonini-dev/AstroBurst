@@ -6,7 +6,9 @@ import {
   MIN_APERTURE_RADIUS_PX,
   PHOTOMETRY_COLUMN_KEYS,
   PHOTOMETRY_CSV_COLUMNS,
+  abCellText,
   apertureRadiusInRange,
+  fluxCellText,
   flagDuplicates,
   growthReferenceLines,
   medianSnr,
@@ -242,5 +244,49 @@ describe("growthReferenceLines", () => {
 
   it("returns nothing when no radius is usable", () => {
     expect(growthReferenceLines(phot({ aperture_radius: Number.NaN, sky_inner: Number.NaN, sky_outer: Number.NaN }))).toEqual([]);
+  });
+});
+
+describe("fluxCellText (UX-07)", () => {
+  it("prints a faint calibrated flux to four significant figures, never as 0.0", () => {
+    expect(fluxCellText(0.0312)).toBe("0.0312");
+    expect(fluxCellText(0.0312)).not.toBe("0.0");
+    expect(fluxCellText(0.004)).toBe("0.004");
+    expect(fluxCellText(-0.00012346)).toBe("-0.0001235");
+  });
+
+  it("rounds every magnitude of flux to four significant figures", () => {
+    for (const v of [0.0312, 0.123456, 12.3456, 1234.5, 430123.4, 1234567.8, -98765.4]) {
+      expect(Number(fluxCellText(v))).toBe(Number(v.toPrecision(4)));
+    }
+    expect(fluxCellText(430123.4)).toBe("430100");
+  });
+
+  it("switches to exponent form from 10^6, as the other table columns do, so no padded zeros read as measured", () => {
+    expect(fluxCellText(23456789)).toBe("2.346e+7");
+    expect(fluxCellText(-6554321)).toBe("-6.554e+6");
+    expect(fluxCellText(1234567.8)).toBe("1.235e+6");
+    expect(fluxCellText(999949)).toBe("999900");
+  });
+
+  it("keeps the placeholder for missing values", () => {
+    expect(fluxCellText(null)).toBe("--");
+    expect(fluxCellText(undefined)).toBe("--");
+    expect(fluxCellText(Number.NaN)).toBe("--");
+    expect(fluxCellText(0)).toBe("0");
+  });
+});
+
+describe("abCellText (UX-07)", () => {
+  it("prints the AB magnitude with its error to the millimag, as the single-star panel does", () => {
+    expect(abCellText(24.512, 0.031)).toContain("±");
+    expect(abCellText(24.512, 0.031)).toBe("24.512 ± 0.031");
+  });
+
+  it("prints the magnitude alone when the error is missing and the placeholder when the magnitude is", () => {
+    expect(abCellText(24.512, null)).toBe("24.512");
+    expect(abCellText(24.512, Number.NaN)).toBe("24.512");
+    expect(abCellText(null, 0.031)).toBe("--");
+    expect(abCellText(undefined, undefined)).toBe("--");
   });
 });

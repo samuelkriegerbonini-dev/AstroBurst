@@ -10,6 +10,8 @@ mod state;
 mod v2;
 
 #[cfg(test)]
+mod route_docs;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
@@ -26,6 +28,8 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
     astroburst_lib::core::astrometry::catalog_disk::init_from_env();
     astroburst_lib::core::astrometry::catalog::init_vizier_url_from_env();
+    #[cfg(feature = "mast")]
+    astroburst_lib::infra::mast::settings::init_from_env();
 
     log::info!(
         "AstroBurst Headless Server v{}",

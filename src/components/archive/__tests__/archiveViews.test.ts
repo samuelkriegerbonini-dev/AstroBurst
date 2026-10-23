@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import QueryBar from "../QueryBar";
 import MissionTabs from "../MissionTabs";
 import QuickFilters, { ViewToggle } from "../QuickFilters";
+import { ActiveFilters, FilterPanel, FiltersToggle } from "../ObjectFilters";
+import { BlockingError } from "../StateViews";
 import SummaryLine from "../SummaryLine";
 import ResultsRegion from "../ResultsRegion";
 import Banner from "../Banner";
@@ -12,9 +14,10 @@ import ArchiveLiveRegion from "../ArchiveLiveRegion";
 import { FooterStatusView } from "../ArchiveFooterStatus";
 import ArchiveRoot from "../ArchiveRoot";
 import { archiveReducer, createInitialState, type ArchiveAction, type ArchiveState } from "../state/archiveReducer";
+import { chipAfterRemoval } from "../logic/objectFilters";
 import type { ArchiveController } from "../state/archiveController";
-import { MISSIONS, page, row } from "./fixtures";
-import type { MastError, MastQuery, MastResolved } from "../../../shared/types/mast";
+import { COLUMNS, MISSIONS, page, row } from "./fixtures";
+import type { MastColumn, MastError, MastFilterValues, MastPreset, MastQuery, MastResolved } from "../../../shared/types/mast";
 
 const M16: MastResolved = { query: "M16", canonicalName: "M 16", resolver: "SIMBAD", raDeg: 274.688, decDeg: -13.792, objectType: null, elapsedMs: 870, fromCache: false };
 const QUERY: MastQuery = {
@@ -163,6 +166,171 @@ describe("quick filters and view toggle", () => {
     expect(off).toMatch(/data-view="gallery"[^>]*aria-pressed="false"[^>]*aria-disabled="true"/);
     expect(off).toMatch(/data-view="table"[^>]*aria-pressed="true"/);
     expect(off).toContain("serves no thumbnails or previews");
+  });
+});
+
+describe("object filters", () => {
+  const IFU: MastPreset = {
+    id: "ifu_cubes",
+    mission: "jwst",
+    label: "IFU cubes",
+    description: "NIRSpec IFU and MIRI MRS combined cubes",
+    conditions: [
+      { column: "exp_type", value: "NRS_IFU,MIR_MRS" },
+      { column: "productLevel", value: "3" },
+    ],
+    products: ["s3d", "x1d"],
+  };
+  const PURE_PARALLEL: MastPreset = { id: "pure_parallel", mission: "jwst", label: "Pure parallel", description: "Pure-parallel visits", conditions: [{ column: "visitype", value: "PARALLEL_PURE" }], products: ["cal"] };
+
+  function withFilters(filters: MastFilterValues, state = base()): ArchiveState {
+    return { ...state, form: { ...state.form, filters } };
+  }
+
+  function on(mission: "iue" | "classy" | "hst"): ArchiveState {
+    return run(base(), { type: "missionSwitched", form: { ...base().form, mission, filters: {} }, generation: 1 });
+  }
+
+  function levelButtons(markup: string): string[] {
+    const start = markup.indexOf('data-testid="mast-filter-level"');
+    return [...markup.slice(start, markup.indexOf("</div>", start)).matchAll(/<button[^>]*>/g)].map((m) => m[0]);
+  }
+
+  it("renders the Filters disclosure with its state and the number of active filters in its name", () => {
+    const closed = tag(html(FiltersToggle, { state: base(), open: false, onToggle: vi.fn() }), "mast-filters-toggle");
+    expect(closed).toContain('aria-expanded="false"');
+    expect(closed).toContain('aria-controls="mast-filter-panel"');
+    expect(closed).toContain('aria-label="Filters"');
+    const open = tag(html(FiltersToggle, { state: withFilters({ level: "combined", categories: ["galaxies", "ism"], objectTypes: ["exoplanets"] }), open: true, onToggle: vi.fn() }), "mast-filters-toggle");
+    expect(open).toContain('aria-expanded="true"');
+    expect(open).toContain('aria-label="Filters, 3 active"');
+    expect(html(FiltersToggle, { state: on("classy"), open: false, onToggle: vi.fn() })).toBe("");
+  });
+
+  it("renders each group as a fieldset described by its info text, with pressed options that stay enabled during a run", () => {
+    const running = run(withFilters({ level: "combined", categories: ["galaxies"] }, { ...base(), form: { ...base().form, text: "M16" } }), {
+      type: "searchStarted",
+      generation: 1,
+      text: "M16",
+      kind: "name",
+      name: "M16",
+      query: null,
+      at: 0,
+    });
+    const markup = html(FilterPanel, { state: { ...running, form: { ...running.form, filters: { level: "combined", categories: ["galaxies"] } } }, ctl, open: true });
+    expect(tag(markup, "mast-filter-panel")).toContain('id="mast-filter-panel"');
+    expect(tag(markup, "mast-filter-group-category")).toMatch(/^<fieldset[^>]*aria-describedby="mast-filter-info-category"/);
+    expect(tag(markup, "mast-filter-group-object_type")).toMatch(/^<fieldset[^>]*aria-describedby="mast-filter-info-object_type"/);
+    expect(markup).toMatch(/<legend[^>]*>[\s\S]*?Category[\s\S]*?<\/legend>/);
+    expect(markup).toMatch(/id="mast-filter-info-category"[^>]*>From the proposal: the target category chosen in APT \(TARGCAT\).</);
+    expect(tag(markup, "mast-filter-group-category")).toContain('aria-labelledby="mast-filter-label-category"');
+    expect(markup).toMatch(/<span[^>]*id="mast-filter-label-category"[^>]*>Category<\/span>/);
+    expect(markup).toMatch(/<button[^>]*aria-label="About Category"/);
+    expect(markup).not.toMatch(/<button[^>]*aria-describedby=/);
+    expect(count(markup, "mast-filter-option-category-galaxies")).toBe(1);
+    expect(markup.split('data-testid="mast-filter-option-category-').length - 1).toBe(8);
+    expect(markup.split('data-testid="mast-filter-option-object_type-').length - 1).toBe(8);
+    const galaxies = tag(markup, "mast-filter-option-category-galaxies");
+    expect(galaxies).toContain('aria-pressed="true"');
+    expect(galaxies).toContain('title="targcat Galaxies"');
+    expect(galaxies).not.toContain("disabled");
+    expect(tag(markup, "mast-filter-option-category-ism")).toContain('aria-pressed="false"');
+    expect(markup).not.toContain('data-testid="mast-preset-object-note"');
+  });
+
+  it("keeps the controlled panel in place but hides it while closed", () => {
+    const markup = html(FilterPanel, { state: base(), ctl, open: false });
+    expect(tag(markup, "mast-filter-panel")).toContain("hidden");
+    expect(markup).not.toContain("mast-filter-option-");
+    expect(html(FilterPanel, { state: on("classy"), ctl, open: true })).toBe("");
+  });
+
+  it("lists active filters as a list of removable chips with Clear, and nothing without them", () => {
+    const markup = html(ActiveFilters, { state: withFilters({ level: "combined", categories: ["galaxies"], objectTypes: ["planetary_nebulae"] }), ctl });
+    expect(tag(markup, "mast-filter-chips")).toContain('role="list"');
+    expect(tag(markup, "mast-filter-chip-category-galaxies")).toContain('aria-label="Remove filter Galaxies"');
+    expect(tag(markup, "mast-filter-chip-object_type-planetary_nebulae")).toContain('aria-label="Remove filter Planetary nebulae"');
+    expect(markup.indexOf("mast-filter-chip-category-galaxies")).toBeLessThan(markup.indexOf("mast-filter-chip-object_type-planetary_nebulae"));
+    expect(tag(markup, "mast-filters-reset")).toContain('aria-label="Clear object filters"');
+    expect(markup).toContain(">Clear<");
+    expect(html(ActiveFilters, { state: base(), ctl })).toBe("");
+  });
+
+  it("moves focus after a chip is removed to the next chip, else the previous chip, else nowhere so the Filters button takes it", () => {
+    const chips = ["galaxies", "ism", "exoplanets"];
+    expect(chipAfterRemoval(chips, 0)).toBe("ism");
+    expect(chipAfterRemoval(chips, 1)).toBe("exoplanets");
+    expect(chipAfterRemoval(chips, 2)).toBe("ism");
+    expect(chipAfterRemoval(["galaxies"], 0)).toBeNull();
+  });
+
+  it("puts the Filters button between the preset and the view toggle, with the active row and panel under the filter row", () => {
+    const s = withFilters({ level: "combined", categories: ["galaxies"] }, run(base(), { type: "presetsLoaded", presets: [IFU] }));
+    const markup = html(QueryBar, { state: s, ctl });
+    const preset = markup.indexOf('data-testid="mast-preset"');
+    const toggle = markup.indexOf('data-testid="mast-filters-toggle"');
+    const view = markup.indexOf('data-testid="mast-view-toggle"');
+    expect(preset).toBeGreaterThan(0);
+    expect(toggle).toBeGreaterThan(preset);
+    expect(view).toBeGreaterThan(toggle);
+    expect(markup.indexOf('data-testid="mast-filter-chips"')).toBeGreaterThan(view);
+    expect(markup.indexOf('data-testid="mast-filter-panel"')).toBeGreaterThan(view);
+  });
+
+  it("marks the query bar while the filter panel is open, so a short window keeps the active chips to one row beside it", () => {
+    const s = withFilters({ level: "combined", categories: ["galaxies"] });
+    const bar = (stored: string | null) => {
+      vi.stubGlobal("localStorage", { getItem: () => stored, setItem: vi.fn() });
+      try {
+        return /<div role="search"[^>]*>/.exec(html(QueryBar, { state: s, ctl }))?.[0] ?? "";
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    };
+    expect(bar("1")).toContain('data-filters-open="true"');
+    expect(bar("0")).toContain('data-filters-open="false"');
+  });
+
+  it("shows IUE's Filters button and five categories, without the 'No quick filters' text", () => {
+    const iue = on("iue");
+    expect(html(QuickFilters, { state: iue, ctl })).not.toContain("No quick filters");
+    expect(html(QueryBar, { state: iue, ctl })).toContain('data-testid="mast-filters-toggle"');
+    const panel = html(FilterPanel, { state: iue, ctl, open: true });
+    expect(panel.split('data-testid="mast-filter-option-category-').length - 1).toBe(5);
+    expect(panel).not.toContain("mast-filter-group-object_type");
+    expect(html(QuickFilters, { state: on("classy"), ctl })).toContain("No quick filters for this mission");
+  });
+
+  it("notes in the panel that pure-parallel visits carry no category", () => {
+    const s = run(base(), { type: "presetsLoaded", presets: [PURE_PARALLEL] });
+    const markup = html(FilterPanel, { state: { ...s, form: { ...s.form, preset: "pure_parallel" } }, ctl, open: true });
+    expect(tag(markup, "mast-preset-object-note")).not.toBe("");
+    expect(markup).toContain("Pure-parallel visits carry no proposal category, so Category and Object type match nothing.");
+  });
+
+  it("offers three levels and remembers Exposures L1-2 as active", () => {
+    const markup = html(QuickFilters, { state: withFilters({ level: "exposures" }), ctl });
+    const buttons = levelButtons(markup);
+    expect(buttons).toHaveLength(3);
+    expect(markup).toMatch(/>Combined L3</);
+    expect(markup).toMatch(/data-active="true"[^>]*>Exposures L1-2</);
+    expect(markup).toMatch(/>All levels</);
+    expect(markup).not.toContain('data-testid="mast-level-lock"');
+    for (const b of buttons) expect(b).not.toContain('aria-disabled="true"');
+  });
+
+  it("locks the Level control with a visible, focusable reason when a preset sets the level", () => {
+    const s = run(base(), { type: "presetsLoaded", presets: [IFU] });
+    const markup = html(QuickFilters, { state: { ...s, form: { ...s.form, preset: "ifu_cubes", filters: { level: "exposures" } } }, ctl });
+    const buttons = levelButtons(markup);
+    expect(buttons).toHaveLength(3);
+    for (const b of buttons) {
+      expect(b).toContain('aria-disabled="true"');
+      expect(b).toContain('aria-describedby="mast-level-lock"');
+      expect(b).not.toMatch(/\sdisabled=""/);
+    }
+    expect(tag(markup, "mast-level-lock")).toContain('id="mast-level-lock"');
+    expect(markup).toContain(">Level 3 set by preset IFU cubes<");
   });
 });
 
@@ -370,6 +538,21 @@ describe("results region", () => {
     expect(markup).toContain("All levels");
   });
 
+  it("shows object chips with Remove, the filters in the title and where the class comes from", () => {
+    const query: MastQuery = { ...QUERY, filters: { level: "combined", categories: ["galaxies"], objectTypes: ["planetary_nebulae"] } };
+    const s = run(
+      { ...base(), form: { ...base().form, text: "M16", filters: query.filters } },
+      { type: "searchStarted", generation: 1, text: "M16", kind: "name", name: "M16", query, at: 0 },
+      { type: "pageLoaded", generation: 1, page: page([]) },
+    );
+    const markup = html(ResultsRegion, { state: s, ctl, around: null });
+    expect(markup).toContain("No JWST datasets within 3&#x27; of 274.68800 -13.79200 with Galaxies, Planetary nebulae");
+    expect(markup).toContain('aria-label="Remove filter Galaxies"');
+    expect(markup).toContain('aria-label="Remove filter Planetary nebulae"');
+    expect(markup).toContain("Category and Object type come from what each proposal declared; a field can be filed under another class.");
+    expect(markup).toContain(">Clear filters<");
+  });
+
   it("shows the not-resolved state", () => {
     const s = run(
       { ...base(), form: { ...base().form, text: "Pilars of Creation" } },
@@ -380,6 +563,17 @@ describe("results region", () => {
     expect(tag(markup, "mast-results")).toContain('data-state="not-resolved"');
     expect(markup).toContain("MAST name lookup found no object called &quot;Pilars of Creation&quot;");
     expect(markup).toContain("Edit query");
+  });
+
+  it("offers Search all levels next to Try again when a level search timed out", () => {
+    const timeout: MastError = { code: "mast_timeout", message: "timed out", context: { timeoutSec: 120 } };
+    const level = html(BlockingError, { error: timeout, missionLabel: "JWST", ctl, levelSearch: true });
+    expect(level).toContain("MAST is sometimes slow with a level condition; All levels usually answers in a few seconds.");
+    expect(tag(level, "mast-timeout-all-levels")).not.toBe("");
+    expect(level.indexOf('data-testid="mast-try-again"')).toBeLessThan(level.indexOf('data-testid="mast-timeout-all-levels"'));
+    expect(html(BlockingError, { error: timeout, missionLabel: "HST", ctl })).not.toContain("mast-timeout-all-levels");
+    const network: MastError = { code: "mast_network", message: "refused", context: {} };
+    expect(html(BlockingError, { error: network, missionLabel: "JWST", ctl, levelSearch: true })).not.toContain("mast-timeout-all-levels");
   });
 
   it("shows the blocking network error with Try again and the details", () => {
@@ -429,6 +623,53 @@ describe("results region", () => {
   });
 });
 
+describe("categories in the results", () => {
+  const CATEGORY: MastColumn = { name: "_category", label: "Category", kind: "text", sortable: false, unit: null };
+  const filed = row("jw02739-o001_t001_nircam", { values: { ...row("x").values, _category: "Nebulae and ISM" }, targetDescription: "Molecular clouds; Nebulae; Protostars" });
+  const unknown = row("jw02739-o002_t001_nircam", { level: "2bs, 3", levelClass: "exposure", values: { ...row("y").values, _category: null } });
+
+  function filtered(filters: MastFilterValues, over: Parameters<typeof page>[1] = {}): ArchiveState {
+    const query: MastQuery = { ...QUERY, filters };
+    return run(
+      { ...base(), form: { ...base().form, text: "M16", filters } },
+      { type: "searchStarted", generation: 1, text: "M16", kind: "name", name: "M16", query, at: 0 },
+      { type: "pageLoaded", generation: 1, page: page([filed, unknown], { columns: [...COLUMNS, CATEGORY], ...over }) },
+    );
+  }
+
+  it("puts the category line on the card with the raw description as its title, and the L3 badge on 2bs, 3 rows", () => {
+    const markup = html(ResultsRegion, { state: filtered({ level: "combined" }), ctl, around: null });
+    expect(markup).toMatch(/<span class="ab-mast-card-cat" title="Molecular clouds; Nebulae; Protostars">Nebulae and ISM<\/span>/);
+    expect(tag(markup, "mast-card", ' data-dataset="jw02739-o001_t001_nircam"')).toContain("category Nebulae and ISM");
+    const second = tag(markup, "mast-card", ' data-dataset="jw02739-o002_t001_nircam"');
+    expect(second).toContain("category unknown");
+    expect(markup.split("ab-mast-card-cat").length - 1).toBe(1);
+    expect(markup.split('class="ab-mast-badge">L3<').length - 1).toBe(2);
+  });
+
+  it("reads unknown in muted text in the table", () => {
+    const s = run(filtered({ level: "combined" }), { type: "viewSet", view: "table" });
+    const markup = html(ResultsRegion, { state: s, ctl, around: null });
+    expect(markup).toMatch(/<span class="ab-mast-td-unknown">unknown<\/span>/);
+    expect(markup).toContain(">Nebulae and ISM<");
+  });
+
+  it("explains unknown categories under the summary with the cached count and a way back", () => {
+    const markup = html(SummaryLine, { state: filtered({ level: "all", categories: ["ism"] }, { unfilteredTotal: 1913 }), ctl });
+    const note = tag(markup, "mast-summary-unknown");
+    expect(note).not.toBe("");
+    expect(markup).toContain("Showing 2 of 1,913 datasets from the same search without Category or Object type.");
+    expect(tag(markup, "mast-summary-unknown-clear")).not.toBe("");
+    expect(markup).toContain(">Remove object filters<");
+    expect(html(SummaryLine, { state: filtered({ level: "all" }), ctl })).not.toContain("mast-summary-unknown");
+  });
+
+  it("gives the unknown note its whole text as a title, for a short window that cuts it to one line", () => {
+    const markup = html(SummaryLine, { state: filtered({ level: "all", categories: ["ism"] }, { unfilteredTotal: 1913 }), ctl });
+    expect(markup).toMatch(/<span class="ab-mast-summary-unknown-text" title="Showing 2 of 1,913 datasets from the same search without Category or Object type\. Datasets with no proposal category[^"]*never match\.">/);
+  });
+});
+
 describe("banner, toast, live region and footer", () => {
   it("renders a banner with its retry action and a close button", () => {
     const markup = html(Banner, { banner: { kind: "rate-limited", text: "MAST is limiting requests (HTTP 429). Thumbnails are paused and resume in 42 s.", retry: "resume" }, ctl });
@@ -438,6 +679,16 @@ describe("banner, toast, live region and footer", () => {
     expect(markup).toContain('aria-label="Dismiss"');
     const retry = html(Banner, { banner: { kind: "network", text: "Some images could not be loaded (network).", retry: "thumbs" }, ctl });
     expect(retry).toContain("Retry failed");
+    expect(retry).not.toContain("mast-banner-all-levels");
+  });
+
+  it("offers Search all levels next to Try again on a timed-out level search banner", () => {
+    const text = "MAST did not answer within 120 s. MAST is sometimes slow with a level condition; All levels usually answers in a few seconds.";
+    const markup = html(Banner, { banner: { kind: "timeout", text, retry: "search", allLevels: true }, ctl });
+    expect(markup).toContain("Try again");
+    expect(tag(markup, "mast-banner-all-levels")).not.toBe("");
+    expect(markup).toContain(">Search all levels<");
+    expect(html(Banner, { banner: { kind: "timeout", text, retry: "search" }, ctl })).not.toContain("mast-banner-all-levels");
   });
 
   it("renders the toast and the polite live region", () => {

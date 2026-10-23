@@ -107,3 +107,33 @@ describe("fileStore requeue", () => {
     expect(fileStore.getFiles()).toHaveLength(3);
   });
 });
+
+describe("fileStore reload of a rewritten file", () => {
+  const PATH = "C:/data/mast/JWST/2739/xc1_i2d.fits";
+
+  beforeEach(() => {
+    fileStore.reset();
+  });
+
+  it("fileReloaded counts each reload on the row and keeps its id, path and selection", () => {
+    fileStore.addFiles([{ name: "xc1_i2d.fits", path: PATH, size: 0 }]);
+    const [row] = fileStore.getFiles();
+    fileStore.fileDone(row.id, { previewUrl: "v1.png", dimensions: [256, 256] } as never);
+    expect(fileStore.getFile(row.id)?.reloads ?? 0).toBe(0);
+
+    fileStore.fileReloaded(row.id, { previewUrl: "v2.png?v=1", dimensions: [256, 256] } as never);
+    expect(fileStore.getFile(row.id)).toMatchObject({ id: row.id, path: PATH, reloads: 1 });
+    fileStore.fileReloaded(row.id, { previewUrl: "v2.png?v=2", dimensions: [256, 256] } as never);
+    expect(fileStore.getFile(row.id)?.reloads).toBe(2);
+    expect(fileStore.getSelected()).toBe(row.id);
+  });
+
+  it("other updates of the row do not count as a reload", () => {
+    fileStore.addFiles([{ name: "xc1_i2d.fits", path: PATH, size: 0 }]);
+    const [row] = fileStore.getFiles();
+    fileStore.fileStarted(row.id);
+    fileStore.fileDone(row.id, { previewUrl: "v1.png", dimensions: [256, 256] } as never);
+    fileStore.fileResampled(row.id, { fits_path: "C:/out/xc1_resampled.fits" } as never);
+    expect(fileStore.getFile(row.id)?.reloads ?? 0).toBe(0);
+  });
+});

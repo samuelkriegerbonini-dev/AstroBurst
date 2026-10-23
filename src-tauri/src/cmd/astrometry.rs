@@ -7,14 +7,14 @@ use crate::cmd::common::{
 use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
 use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
 use crate::core::astrometry::wcs::{
-    angular_separation, pixel_center, pixel_edge_corners, position_angle_deg, WcsTransform,
+    angular_separation, pixel_center, pixel_edge_corners, position_angle_deg, WcsKind, WcsTransform,
 };
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::writer::{filter_header, is_wcs_card};
 use crate::infra::image_source::{load_plane, load_plane_header};
 use crate::infra::progress::ProgressHandle;
-use crate::infra::wcs_source::load_wcs;
+use crate::infra::wcs_source::{load_wcs, tan_pv_warning};
 use crate::types::constants::{
     DEFAULT_API_KEY_SERVICE, HEADER_NAXIS1, HEADER_NAXIS2, RES_A_SKY, RES_B_SKY, RES_CENTER_DEC,
     RES_CENTER_RA, RES_DIMENSIONS, RES_EAST_VEC, RES_ELAPSED_MS, RES_FITS_PATH, RES_FLIPPED,
@@ -24,7 +24,7 @@ use crate::types::constants::{
     RES_PIXEL_SCALE_X_ARCSEC, RES_PIXEL_SCALE_Y_ARCSEC, RES_PNG_PATH, RES_POINTS,
     RES_POSITION_ANGLE_DEG, RES_PROJECTION, RES_ROTATION_DEG, RES_SEPARATION_ARCMIN,
     RES_SEPARATION_ARCSEC, RES_SEPARATION_DEG, RES_SIP_INV_ERR_PX, RES_SIP_MAX_ERR_PX,
-    RES_SIP_PRESENT, RES_WCS_KIND,
+    RES_SIP_PRESENT, RES_WCS_KIND, RES_WCS_WARNING,
 };
 use crate::types::config::AppConfig;
 use crate::types::header::HduHeader;
@@ -453,6 +453,7 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
             RES_GWCS_VS_SIP_MAX_MAS: gwcs.and_then(|g| g.vs_header_sip_max_mas),
             RES_GWCS_VS_SIP_MAX_PX: gwcs.and_then(|g| g.vs_header_sip_max_px),
             RES_GWCS_REFUSAL: wcs.gwcs_refusal(),
+            RES_WCS_WARNING: (wcs.kind() == WcsKind::Header).then(|| tan_pv_warning(&header)).flatten(),
         }))
     })
 }
@@ -1368,6 +1369,31 @@ mod tests {
         let info = super::get_wcs_info(fits_path).await.unwrap();
         assert_eq!(info["sip_max_err_px"].as_f64(), Some(0.0098), "{info}");
         assert_eq!(info["sip_inv_err_px"].as_f64(), Some(0.012), "{info}");
+    }
+
+    #[tokio::test]
+    async fn get_wcs_info_names_the_pv_cards_a_tan_header_does_not_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tan_pv.fits").to_string_lossy().to_string();
+        let mut cards = wcs_cards(north_up_cd());
+        cards.extend(
+            [("PV1_1", "1.02"), ("PV1_2", "-3.0E-2"), ("PV2_1", "1.0"), ("PV2_4", "6.0E-3")].map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        let pairs: Vec<(&str, &str)> = cards.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        crate::infra::fits::writer::write_fits_mono(&path, &ndarray::Array2::<f32>::zeros((100, 100)), Some(&make_header(&pairs))).unwrap();
+
+        let info = super::get_wcs_info(path).await.unwrap();
+        assert_eq!(info["wcs_warning"], "PV distortion not applied: PV1_1, PV1_2, PV2_4", "{info}");
+        assert_eq!(info["projection"], "TAN", "{info}");
+        let (nx, ny) = sky_of(&info, "north_vec");
+        assert!(nx.abs() < 1e-6 && (ny - 1.0).abs() < 1e-6, "the linear TAN is north up: north ({nx}, {ny})");
+        let (ex, ey) = sky_of(&info, "east_vec");
+        assert!((ex + 1.0).abs() < 1e-6 && ey.abs() < 1e-6, "east ({ex}, {ey})");
+
+        let plain = dir.path().join("plain.fits").to_string_lossy().to_string();
+        write_north_up_fits(&plain, 100);
+        let info = super::get_wcs_info(plain).await.unwrap();
+        assert_eq!(info.get("wcs_warning"), Some(&serde_json::Value::Null), "{info}");
     }
 
     #[tokio::test]

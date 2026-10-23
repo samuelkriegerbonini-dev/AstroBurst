@@ -23,6 +23,7 @@ import { useCompositeActions, useCompositePreview } from "./CompositeContext";
 import { useComposeWizardContext } from "./ComposeWizardContext";
 import { fileSwitchCompositeAction, reseedsRgbFileView } from "../utils/previewShell";
 import { rawPixelsHolder } from "../utils/pixelHolder";
+import { pixelSourceVersion } from "../utils/pixelSource";
 import type {
   ProcessedFile,
   ProcessResult,
@@ -450,7 +451,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setDisplayState((s) => displayForRecordChange(s, hintSource, processed));
   }
   const chain = current.chain;
-  const sourceVersion = processedPath ? processedVersion : 0;
+  const sourceVersion = pixelSourceVersion(file, processedPath, processedVersion);
+  const fileVersion = pixelSourceVersion(file, null, 0);
   const processedPreviewOnly = processed !== null && processed.fitsPath === null && processed.previewUrl !== null;
   const stfPreviewUrl =
     !processedPreviewOnly && stfPreview.key === fileKey && stfPreview.version === processedVersion ? stfPreview.url : null;
@@ -1037,7 +1039,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   useEffect(() => {
     if (!imagePath || !dqRef || !overlayEnabled) return;
     const maxDim = computePreviewMaxDim();
-    const key = `${fileKey}|${overlayMask}|${maxDim}`;
+    const key = `${fileKey}|${fileVersion}|${overlayMask}|${maxDim}`;
     if (dqMaskKeyRef.current === key) return;
     dqMaskKeyRef.current = key;
     const seq = ++dqMaskSeqRef.current;
@@ -1059,7 +1061,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (dqMaskSeqRef.current !== seq) return;
         setDqMaskLoading(false);
       });
-  }, [fileKey, imagePath, dqRef, overlayEnabled, overlayMask, dqMaskRefetch]);
+  }, [fileKey, fileVersion, imagePath, dqRef, overlayEnabled, overlayMask, dqMaskRefetch]);
 
   const fileValue = useMemo<FileContextValue>(
     () => ({ file }),

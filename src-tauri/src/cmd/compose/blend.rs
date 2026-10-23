@@ -10,7 +10,7 @@ use crate::cmd::helpers;
 use crate::cmd::processing::source_header;
 use crate::core::alignment::pair::{align_pair_with_label, shift_image_subpixel, AlignPairResult};
 use crate::core::alignment::wcs_reproject::{pixel_area_ratio, point_source_residual, prefilter_coarse_target, reproject_to_grid, REF_TIE_TOLERANCE};
-use crate::core::astrometry::wcs::{WcsKind, WcsTransform};
+use crate::core::astrometry::wcs::WcsKind;
 use crate::core::compose::rgb::{harmonize_dimensions, align_channels};
 use crate::core::analysis::photometry::SATURATION_KEYWORDS;
 use crate::core::compose::channel_blend::{blend_channels, BlendWeight};
@@ -19,7 +19,7 @@ use crate::core::imaging::stats::compute_image_stats;
 use crate::core::metadata::photcal::{GENERIC_ZERO_POINT_KEYS, ROMAN_PIXEL_AREA_SR_KEYS};
 use crate::infra::fits::writer::filter_header;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
-use crate::infra::wcs_source::load_wcs;
+use crate::infra::wcs_source::{header_wcs, load_wcs};
 use crate::types::compose::AlignMethod;
 use crate::types::header::HduHeader;
 use crate::types::ImageStats;
@@ -498,7 +498,7 @@ fn reproject_channel(
     let target_wcs = load_wcs(target_path, target_header).ok()?;
     let ratio = reference_wcs.pixel_scale_arcsec() / target_wcs.pixel_scale_arcsec();
     let reduced = prefilter_coarse_target(target, target_header, ratio)
-        .and_then(|(arr, header, k)| WcsTransform::from_header(&header).ok().map(|wcs| (arr, wcs, k)));
+        .and_then(|(arr, header, k)| header_wcs(&header).ok().map(|wcs| (arr, wcs, k)));
     let (image, report) = match &reduced {
         Some((arr, wcs, _)) => reproject_to_grid(arr, wcs, &reference_wcs, rows, cols),
         None => reproject_to_grid(target, &target_wcs, &reference_wcs, rows, cols),
@@ -754,6 +754,7 @@ pub async fn align_channels_cmd(
 mod tests {
     use super::*;
     use crate::cmd::common::load_cached_full;
+    use crate::core::astrometry::wcs::WcsTransform;
     use crate::infra::fits::writer::write_fits_mono;
     use crate::types::constants::ALIGN_METHOD_AFFINE;
 
@@ -1879,6 +1880,31 @@ mod tests {
         assert_eq!(res[RES_REFERENCE_INDEX], 1, "{res}");
         assert_eq!(res[CHANNELS][0][RES_PREFILTER_K], 1, "a finer reference never pre-reduces: {res}");
         assert_eq!(res[DIMENSIONS], json!([256, 256]), "{res}");
+    }
+
+    #[test]
+    fn a_prefiltered_tan_pv_channel_is_reprojected_like_the_same_channel_without_pv_cards() {
+        use crate::infra::wcs_source::test_fixtures::PV_DISTORTION_CARDS;
+
+        let reference_header = tan_header(128, (64.5, 64.5), (83.0, 22.0), rotated_cd(0.2, 0.0));
+        let linear_header = tan_header(256, (128.5, 128.5), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let mut pv_header = linear_header.clone();
+        for (key, value) in PV_DISTORTION_CARDS {
+            pv_header.set(key, value.to_string());
+        }
+        let stars: Vec<(f64, f64)> = STAR_REF_POSITIONS.iter().map(|&(x, y)| (x / 2.0, y / 2.0)).collect();
+        let target = render_stars(256, 100.0, &stars, 3.0);
+        let reproject = |header: &HduHeader| {
+            reproject_channel(&target, "__tan_pv_target", Some(header), "__tan_pv_reference", Some(&reference_header), 128, 128)
+                .expect("both channels carry a celestial WCS")
+        };
+
+        let (linear, with_pv) = (reproject(&linear_header), reproject(&pv_header));
+
+        assert_eq!(linear.geometry.prefilter_k, 2);
+        assert_eq!(with_pv.geometry.prefilter_k, linear.geometry.prefilter_k, "the TAN+PV channel skipped the prefilter");
+        let differing = with_pv.image.iter().zip(linear.image.iter()).filter(|(a, b)| !(a == b || (a.is_nan() && b.is_nan()))).count();
+        assert_eq!(differing, 0, "TAN+PV vs linear TAN reprojection: {differing} of {} pixels differ, coverage {} vs {}", linear.image.len(), with_pv.coverage, linear.coverage);
     }
 
     #[tokio::test]

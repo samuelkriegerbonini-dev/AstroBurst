@@ -3,6 +3,7 @@ import { Activity } from "lucide-react";
 import type { LineFitComponents, LineFitPlane, LineFitSpaxel } from "../../shared/types/cube";
 import { LINE_FIT_COMPONENTS } from "../../shared/types/cube";
 import LineFitInspectPlot from "./LineFitInspectPlot";
+import OutputNote from "./OutputNote";
 import { DecimalField } from "../ui";
 import {
   RESOLVING_POWER_HINT,
@@ -123,6 +124,7 @@ function LineFitSection({
   const result = run?.result ?? null;
   const rows = inspect && result ? lineFitSpaxelRows(inspect, result.units, result.resolving_power) : [];
   const spaxelNotes = inspect && result ? lineFitSpaxelNotes(inspect, result.notes) : [];
+  const outputPath = result?.planes[shownPlane ?? "velocity"]?.fits_path || null;
   const errText = availabilityText("ERR", errAvailable);
   const dqText = availabilityText("DQ", dqAvailable);
 
@@ -260,6 +262,7 @@ function LineFitSection({
             <span data-linefit-sigma>{sigmaCaption(result)}</span>
             <span data-linefit-frame>{frameNote}</span>
           </div>
+          {outputPath && <OutputNote path={outputPath} />}
           {result.notes.length > 0 && (
             <details data-linefit-notes className="text-[10px] font-mono text-zinc-600">
               <summary className="cursor-pointer select-none">notes ({result.notes.length})</summary>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   cardAccessibleName,
+  categoryText,
   dateText,
   exclusiveText,
   exposureText,
@@ -10,6 +11,20 @@ import {
   levelBadge,
 } from "../logic/cardLabel";
 import { row } from "./fixtures";
+
+describe("card category", () => {
+  it("reads the category labels from the synthetic column", () => {
+    expect(categoryText(row("a", { values: { _category: "Nebulae and ISM" } }))).toBe("Nebulae and ISM");
+    expect(categoryText(row("a", { values: { _category: null } }))).toBeNull();
+    expect(categoryText(row("a"))).toBeNull();
+  });
+
+  it("names the category, or says it is unknown, only for missions that carry one", () => {
+    expect(cardAccessibleName(row("a", { values: { _category: "Stars, Galaxies" } }), "JWST")).toBe("M 16, JWST NIRCam, level 3, category Stars, Galaxies, 6 filters, 2022-08-14, public");
+    expect(cardAccessibleName(row("a", { values: { _category: null } }), "JWST")).toBe("M 16, JWST NIRCam, level 3, category unknown, 6 filters, 2022-08-14, public");
+    expect(cardAccessibleName(row("a"), "JWST")).not.toContain("category");
+  });
+});
 
 describe("cardAccessibleName", () => {
   it("says what the card shows", () => {
@@ -66,10 +81,14 @@ describe("card text helpers", () => {
     expect(instrumentText(null)).toBe("");
   });
 
-  it("badges the level class", () => {
-    expect(levelBadge("combined")).toBe("L3");
-    expect(levelBadge("exposure")).toBe("L1-2");
-    expect(levelBadge("unknown")).toBeNull();
+  it("badges the level from its tokens, so source-based 2bs, 3 sets read L3 like the Combined L3 filter", () => {
+    expect(levelBadge({ level: "3", levelClass: "combined" })).toBe("L3");
+    expect(levelBadge({ level: "2bs, 3", levelClass: "exposure" })).toBe("L3");
+    expect(levelBadge({ level: "1b, 2a, 2b", levelClass: "exposure" })).toBe("L1-2");
+    expect(levelBadge({ level: "2b", levelClass: "exposure" })).toBe("L1-2");
+    expect(levelBadge({ level: "2bs", levelClass: "exposure" })).toBe("L2bs");
+    expect(levelBadge({ level: null, levelClass: "unknown" })).toBeNull();
+    expect(levelBadge({ level: "wfi_image", levelClass: "unknown" })).toBeNull();
   });
 
   it("words exclusive access", () => {

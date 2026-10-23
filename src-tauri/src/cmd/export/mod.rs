@@ -13,7 +13,6 @@ use crate::cmd::compose::rescale_header_to_grid;
 use crate::cmd::cutout::refuse_source_as_target;
 use crate::cmd::helpers;
 use crate::cmd::processing::is_display_referred;
-use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::stats::{combine_channel_stats, compute_image_stats};
 use crate::core::imaging::stf::{apply_stf_f32, auto_stf, AutoStfConfig, ImageStats, StfParams};
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
@@ -25,6 +24,7 @@ use crate::infra::render::grayscale::{render_grayscale_hq, render_grayscale_16bi
 use crate::infra::render::rgb::{render_rgb, render_rgb_16bit};
 use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::mef_writer::{write_compressed_mef, CompressMode, CompressOptions};
+use crate::infra::wcs_source::header_wcs;
 use crate::types::constants::{COPY_WCS, COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B, RES_APPLY_STF, RES_BIT_DEPTH, RES_BITPIX, RES_COMPRESS, RES_COPY_METADATA, RES_DIMENSIONS, RES_DISPLAY_REFERRED, RES_DROPPED, RES_ELAPSED_MS, RES_FILE_SIZE_BYTES, RES_KEPT_RAW, RES_OUTPUT_PATH, RES_OUTPUT_SIZE_BYTES, RES_QUANTIZE_LEVEL, RES_SOURCE_DECOMPRESSED_BYTES, RES_SOURCE_SIZE_BYTES, RES_UNCOMPRESSED, RES_WCS_WRITTEN};
 use crate::types::header::HduHeader;
 
@@ -164,7 +164,7 @@ fn writes_celestial_wcs(header: Option<&HduHeader>, dims: (usize, usize)) -> boo
         let mut probe = written.clone();
         probe.set("NAXIS1", dims.1.to_string());
         probe.set("NAXIS2", dims.0.to_string());
-        WcsTransform::from_header(&probe).is_ok()
+        header_wcs(&probe).is_ok()
     })
 }
 
@@ -1391,6 +1391,32 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(with_wcs[RES_WCS_WRITTEN], json!(true), "{with_wcs}");
+    }
+
+    #[tokio::test]
+    async fn an_rgb_export_of_tan_pv_channels_reports_the_wcs_it_wrote() {
+        use crate::infra::wcs_source::test_fixtures::{tan_cards, PV_DISTORTION_CARDS};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut header = header_with(&PV_DISTORTION_CARDS);
+        for (key, value) in tan_cards() {
+            header.set(key, value);
+        }
+        let [r, g, b] = ["r", "g", "b"].map(|c| {
+            let path = tmp_path(&dir, &format!("tan_pv_{c}.fits"));
+            crate::infra::fits::writer::write_fits_mono(&path, &ramp(1.0), Some(&header)).unwrap();
+            path
+        });
+        let out = tmp_path(&dir, "rgb_tan_pv.fits");
+
+        let result = export_fits_rgb(Some(r), Some(g), Some(b), out.clone(), Some(true), None, None, None, None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result[RES_WCS_WRITTEN], json!(true), "the TAN+PV cards were written but reported missing: {result}");
+        let written = try_extract_rgb_resolved(&out).unwrap().expect("a 3-plane RGB FITS");
+        assert_eq!(written.header.get_f64("PV1_1"), Some(1.02), "the PV cards travel with the exported WCS");
+        crate::infra::wcs_source::load_wcs(&out, &written.header).expect("the exported header loads as a celestial WCS");
     }
 
     #[tokio::test]

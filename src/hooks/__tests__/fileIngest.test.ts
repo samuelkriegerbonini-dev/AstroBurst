@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { fileStore } from "../useFileStore";
-import { ingestFiles, ingestUnlessLoaded, registerFileIngest, type IngestOptions } from "../useFileIngest";
+import { ingestFiles, ingestUnlessLoaded, registerFileIngest, showOrOpen, type IngestOptions } from "../useFileIngest";
 import type { AstroFile } from "../../shared/types";
 
 const SOURCE = "C:/data/673nmos.fits";
@@ -54,6 +54,12 @@ describe("file ingest", () => {
     expect(options).toEqual([{ quiet: true }]);
   });
 
+  it("ingestUnlessLoaded passes a keep-mode request through with the quiet add", () => {
+    loadAndSelect(SOURCE);
+    expect(ingestUnlessLoaded(OUTPUT, { keepMode: true })).toBe(true);
+    expect(options).toEqual([{ quiet: true, keepMode: true }]);
+  });
+
   it("ingestFiles passes no options, so files opened by the user stay a normal add", () => {
     expect(ingestFiles([{ name: "656nmos.fits", path: "C:/data/656nmos.fits", size: 0 }])).toBe(true);
     expect(options).toEqual([undefined]);
@@ -98,5 +104,56 @@ describe("file ingest", () => {
     unregister();
     expect(ingestUnlessLoaded(OUTPUT)).toBe(false);
     expect(fileStore.getFiles()).toHaveLength(0);
+  });
+});
+
+describe("showOrOpen", () => {
+  let added: AstroFile[][];
+  let unregister: () => void;
+
+  beforeEach(() => {
+    fileStore.reset();
+    added = [];
+    unregister = registerFileIngest((files) => {
+      added.push(files);
+      fileStore.addFiles(files);
+    });
+  });
+
+  afterEach(() => unregister());
+
+  const rowOf = (path: string) => fileStore.getFiles().find((f) => f.path === path)?.id as string;
+
+  it("shows a row the Files list holds at once and adds nothing", () => {
+    fileStore.addFiles([
+      { name: "673nmos_pixelmath.fits", path: OUTPUT, size: 0 },
+      { name: "673nmos.fits", path: SOURCE, size: 0 },
+    ]);
+    fileStore.fileDone(rowOf(OUTPUT), null);
+    fileStore.fileDone(rowOf(SOURCE), null);
+    fileStore.selectFile(rowOf(SOURCE));
+
+    expect(showOrOpen("c:\\out\\673NMOS_pixelmath.fits")).toBe(true);
+
+    expect(fileStore.getSelected()).toBe(rowOf(OUTPUT));
+    expect(added).toEqual([]);
+  });
+
+  it("retries a row that failed to load and shows it once it loads, although another file was shown", () => {
+    fileStore.addFiles([
+      { name: "673nmos.fits", path: SOURCE, size: 0 },
+      { name: "673nmos_pixelmath.fits", path: OUTPUT, size: 0 },
+    ]);
+    fileStore.fileDone(rowOf(SOURCE), null);
+    fileStore.selectFile(rowOf(SOURCE));
+    fileStore.fileError(rowOf(OUTPUT), "No such file");
+
+    expect(showOrOpen(OUTPUT)).toBe(true);
+
+    expect(fileStore.getSelected()).toBe(rowOf(SOURCE));
+    expect(fileStore.getFiles().map((f) => f.path)).toEqual([SOURCE, OUTPUT]);
+    expect(added).toHaveLength(1);
+    fileStore.fileDone(rowOf(OUTPUT), null);
+    expect(fileStore.getSelected()).toBe(rowOf(OUTPUT));
   });
 });

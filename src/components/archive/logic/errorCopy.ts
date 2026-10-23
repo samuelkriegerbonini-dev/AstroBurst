@@ -16,6 +16,7 @@ export interface ErrorContextInput {
   now?: Date;
   rowPublic?: boolean;
   tokenSaved?: boolean;
+  levelSearch?: boolean;
 }
 
 export interface ErrorView {
@@ -186,10 +187,11 @@ function triesText(err: MastError): string {
   return attempts !== undefined && attempts > 1 ? ` (${attempts} tries)` : "";
 }
 
-function timeoutText(err: MastError, surface: ErrorSurface): string {
+function timeoutText(err: MastError, surface: ErrorSurface, levelSearch: boolean): string {
   const seconds = err.context.timeoutSec ?? DEFAULT_TIMEOUT_SEC[surface];
   const subject = timeoutSubject(err, surface);
   if (subject) return `MAST did not send ${subject} within ${seconds} s${triesText(err)}. Try again in a moment.`;
+  if (levelSearch) return `MAST did not answer within ${seconds} s. MAST is sometimes slow with a level condition; All levels usually answers in a few seconds.`;
   return `MAST did not answer within ${seconds} s. First queries of the day can take over a minute; try again, or narrow the radius or add a filter.`;
 }
 
@@ -306,7 +308,7 @@ export function errorView(err: MastError, ctx: ErrorContextInput): ErrorView {
     case "mast_network":
       return level("network", networkText(err));
     case "mast_timeout":
-      return level("timeout", timeoutText(err, surface));
+      return level("timeout", timeoutText(err, surface, ctx.levelSearch ?? false));
     case "mast_server":
       return level("server", serverText(err));
     case "mast_decode":

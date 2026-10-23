@@ -50,6 +50,7 @@ pub struct Resource {
     content_length: bool,
     segment_cap: Option<u64>,
     hang_up: bool,
+    withhold_headers: bool,
 }
 
 impl Resource {
@@ -71,6 +72,7 @@ impl Resource {
             content_length: true,
             segment_cap: None,
             hang_up: false,
+            withhold_headers: false,
         }
     }
 
@@ -150,6 +152,11 @@ impl Resource {
         self
     }
 
+    pub fn withhold_headers(mut self) -> Self {
+        self.withhold_headers = true;
+        self
+    }
+
     fn etag_of(&self, version: usize) -> Option<String> {
         self.etag.then(|| {
             let tag = format!("\"ab-v{version}\"");
@@ -198,9 +205,22 @@ impl Reply {
     }
 }
 
+#[derive(Default)]
+struct RequestLog {
+    entries: Mutex<Vec<Recorded>>,
+    arrived: tokio::sync::Notify,
+}
+
+impl RequestLog {
+    fn push(&self, recorded: Recorded) {
+        self.entries.lock().unwrap().push(recorded);
+        self.arrived.notify_waiters();
+    }
+}
+
 pub struct TestServer {
     pub base: String,
-    log: Arc<Mutex<Vec<Recorded>>>,
+    log: Arc<RequestLog>,
 }
 
 impl TestServer {
@@ -209,7 +229,17 @@ impl TestServer {
     }
 
     pub fn requests(&self) -> Vec<Recorded> {
-        self.log.lock().unwrap().clone()
+        self.log.entries.lock().unwrap().clone()
+    }
+
+    pub async fn received(&self, count: usize) {
+        loop {
+            let arrived = self.log.arrived.notified();
+            if self.log.entries.lock().unwrap().len() >= count {
+                return;
+            }
+            arrived.await;
+        }
     }
 }
 
@@ -218,12 +248,13 @@ struct Counters {
     requests: AtomicUsize,
     dropped: AtomicBool,
     stalled: AtomicBool,
+    withheld: AtomicBool,
 }
 
 pub fn serve(resource: Resource) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let log = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::new(RequestLog::default());
     let shared = Arc::new((resource, Counters::default(), Arc::clone(&log)));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -254,7 +285,7 @@ fn handle(
     mut stream: TcpStream,
     resource: &Resource,
     counters: &Counters,
-    log: &Mutex<Vec<Recorded>>,
+    log: &RequestLog,
 ) {
     let Some(head) = read_head(&mut stream) else {
         return;
@@ -277,14 +308,19 @@ fn handle(
         body_bytes: 0,
     };
     if resource.hang_up {
-        log.lock().unwrap().push(recorded);
+        log.push(recorded);
+        return;
+    }
+    if resource.withhold_headers && !counters.withheld.swap(true, Ordering::SeqCst) {
+        log.push(recorded);
+        std::thread::sleep(STALL);
         return;
     }
     let reply = plan(resource, resource.version_of(ordinal), &recorded);
     let delivery = deliver(resource, counters, &reply);
     recorded.status = reply.status;
     recorded.body_bytes = delivery.limit as u64;
-    log.lock().unwrap().push(recorded);
+    log.push(recorded);
     send(&mut stream, resource, &reply, &delivery);
 }
 

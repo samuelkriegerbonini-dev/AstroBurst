@@ -1,6 +1,6 @@
 import type { Pt } from "./regionGeometry";
 import type { MeasurementSource } from "./analysisTarget";
-import type { ContourLevel, ContourMode, ContourOptions } from "../shared/types/contours";
+import type { ContourLevel, ContourMode, ContourOptions, ContourResult } from "../shared/types/contours";
 
 export type ContourColourMode = "single" | "ramp";
 
@@ -10,6 +10,7 @@ export const DEFAULT_BIN_TARGET_DIM = 2048;
 export const DEFAULT_POLYGON_MAX_VERTICES = 512;
 export const SINGLE_CONTOUR_COLOUR = "#14b8a6";
 export const DEFAULT_SIGMA_MULTIPLES_TEXT = "3, 5, 10";
+export const CONTOUR_SIGMA_FIELD_LABEL = "Sigma multiples above the median (sigma of the binned, smoothed image)";
 export const CONTOUR_HINT_ON_SCREEN =
   "Contours are traced on the image on screen; contours from another file need reprojection (not available).";
 export const CONTOUR_HINT_OTHER_SOURCE =
@@ -136,6 +137,12 @@ export function formatLevelValue(value: number): string {
 
 export function contourHint(source: MeasurementSource | null): string {
   return source?.tone === "original" ? CONTOUR_HINT_OTHER_SOURCE : CONTOUR_HINT_ON_SCREEN;
+}
+
+export function contourBackgroundText(result: ContourResult, smoothPx: number): string {
+  const plane = result.bin > 1 ? `clipped tile scatter of the ${result.bin}x${result.bin}-binned plane` : "clipped tile scatter";
+  const scatter = smoothPx > 0 ? `${plane} after smoothing σ = ${smoothPx} px` : `${plane}, no smoothing`;
+  return `background ${formatLevelValue(result.background_median)} ± ${formatLevelValue(result.background_sigma)} (${scatter})`;
 }
 
 export type ContourBinChoice = "auto" | "1" | "2" | "4" | "8";

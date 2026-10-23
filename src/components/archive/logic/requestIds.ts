@@ -9,7 +9,7 @@ export function generationPrefix(generation: number): string {
 
 export function nonThumbPrefixes(generation: number): string[] {
   const g = generationPrefix(generation);
-  return [`${g}search`, `${g}resolve`, `${g}page:`, `${g}list:`, `${g}preview:`, `${g}products:`];
+  return [`${g}page:`, `${g}list:`, `${g}preview:`, `${g}products:`];
 }
 
 export function searchId(generation: number): string {

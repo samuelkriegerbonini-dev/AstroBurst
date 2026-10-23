@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useId, useRef, useState } from "react";
 import { Activity, Copy } from "lucide-react";
 import type { LineMeasurement, LineModel } from "../../shared/types/spectral";
-import { LINE_MODELS } from "../../shared/types/spectral";
+import { LINE_MODEL_LABELS, LINE_MODELS } from "../../shared/types/spectral";
 import { lineMeasurementCsv, lineMeasurementRows, spectrumSourceLabel } from "../../utils/lineMeasure";
 
 export interface LineErrControls {
@@ -118,7 +118,7 @@ function LineMeasurementSection({
         >
           {LINE_MODELS.map((m) => (
             <option key={m} value={m}>
-              {m}
+              {LINE_MODEL_LABELS[m]}
             </option>
           ))}
         </select>

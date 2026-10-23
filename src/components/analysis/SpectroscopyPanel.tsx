@@ -3,6 +3,7 @@ import { Activity, BarChart3, CircleDot, Crosshair, FileText, Layers } from "luc
 import CubeFrameNav from "../CubeFrameNav";
 import LineMeasurementSection from "./LineMeasurementSection";
 import LineFitSection from "./LineFitSection";
+import OutputNote from "./OutputNote";
 import LineListControls from "./LineListControls";
 import SpectralAxisControls from "./SpectralAxisControls";
 import SpectrumComparisonSection from "./SpectrumComparisonSection";
@@ -374,7 +375,7 @@ function SpectroscopyPanel({
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const [collapseLoading, setCollapseLoading] = useState(false);
-  const [collapseResult, setCollapseResult] = useState<{ elapsed_ms: number } | null>(null);
+  const [collapseResult, setCollapseResult] = useState<{ elapsed_ms: number; fits_path: string } | null>(null);
   const [collapseError, setCollapseError] = useState<string | null>(null);
   const [collapseMode, setCollapseMode] = useState<FullCollapseMode>("mean");
   const regionSeqRef = useRef(0);
@@ -1788,6 +1789,11 @@ function SpectroscopyPanel({
               Cube collapse failed: {collapseError}
             </p>
           )}
+          {collapseResult?.fits_path && !collapseLoading && (
+            <div className="w-full">
+              <OutputNote path={collapseResult.fits_path} />
+            </div>
+          )}
         </div>
       )}
 
@@ -1861,6 +1867,7 @@ function SpectroscopyPanel({
             <div className="text-[10px] font-mono text-zinc-500">
               <span>{`${rangeResult.mode} collapse, ch ${rangeResult.z0}–${rangeResult.z1}: `}</span>
               <span data-err-plane="collapse">{errPlaneLabel(rangeResult.has_err, rangeResult.err_source, null)}</span>
+              {rangeResult.fits_path && <OutputNote path={rangeResult.fits_path} />}
               {rangeResult.notes.length > 0 && (
                 <details className="mt-0.5 text-zinc-600">
                   <summary className="cursor-pointer select-none">notes ({rangeResult.notes.length})</summary>
@@ -1975,6 +1982,7 @@ function SpectroscopyPanel({
                       <span className="block" data-err-plane="moments">
                         {errPlaneLabel(momentResult.has_err, momentResult.err_source, momentResult.noise_factor)}
                       </span>
+                      {momentResult[momentKind].fits_path && <OutputNote path={momentResult[momentKind].fits_path} />}
                       {momentResult.notes.length > 0 && (
                         <details className="mt-0.5 text-zinc-600">
                           <summary className="cursor-pointer select-none">notes ({momentResult.notes.length})</summary>

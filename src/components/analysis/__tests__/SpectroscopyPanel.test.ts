@@ -159,6 +159,7 @@ vi.mock("../LineMeasurementSection", () => ({ default: () => "[line-measure]" })
 vi.mock("../../CubeFrameNav", () => ({ default: () => "[frame-nav]" }));
 
 import SpectroscopyPanel from "../SpectroscopyPanel";
+import OutputNote from "../OutputNote";
 
 const RAMP: RampInfo = {
   kind: "jwst_groups",
@@ -411,7 +412,7 @@ describe("SpectroscopyPanel document mode", () => {
 type Props = Record<string, unknown>;
 const panelFunction = (SpectroscopyPanel as unknown as { type: (props: Props) => ReactNode }).type;
 
-function findProps(node: ReactNode, match: (props: Props) => boolean): Props | null {
+function findProps(node: ReactNode, match: (props: Props, type: unknown) => boolean): Props | null {
   if (Array.isArray(node)) {
     for (const child of node) {
       const found = findProps(child, match);
@@ -420,11 +421,11 @@ function findProps(node: ReactNode, match: (props: Props) => boolean): Props | n
     return null;
   }
   if (!isValidElement<Props>(node)) return null;
-  if (match(node.props)) return node.props;
+  if (match(node.props, node.type)) return node.props;
   return findProps(node.props.children as ReactNode, match);
 }
 
-function mustFind(node: ReactNode, match: (props: Props) => boolean, what: string): Props {
+function mustFind(node: ReactNode, match: (props: Props, type: unknown) => boolean, what: string): Props {
   const found = findProps(node, match);
   expect(found, what).not.toBeNull();
   return found!;
@@ -1084,6 +1085,34 @@ describe("SpectroscopyPanel moment and collapse error planes", () => {
     commitRangeStart(pass(props), 5);
     await (mustFind(pass(props), (p) => p.label === "Moments", "Moments button").onClick as () => Promise<void>)();
     expect(errPlane(pass(props), "moments").children).toBe("no ERR written (error source: none)");
+  });
+
+  const outputNoteFor = (tree: ReactNode, path: string, what: string) => mustFind(tree, (p, type) => type === OutputNote && p.path === path, what);
+
+  it("names the moment map on screen as a file of the output folder, which is cleared at launch", async () => {
+    const m0 = { png_path: "C:/out/cube_moment0_5-39.png", fits_path: "C:/out/cube_moment0_5-39.fits" };
+    const m1 = { png_path: "C:/out/cube_moment1_5-39.png", fits_path: "C:/out/cube_moment1_5-39.fits" };
+    backend.moments.mockResolvedValue(momentResult({ m0, m1 }));
+    const props = cubeProps(restDims);
+    pass(props);
+    commitRangeStart(pass(props), 5);
+    await (mustFind(pass(props), (p) => p.label === "Moments", "Moments button").onClick as () => Promise<void>)();
+    outputNoteFor(pass(props), m0.fits_path, "M0 output note");
+    (mustFind(pass(props), (p) => p.children === "m1", "m1 button").onClick as () => void)();
+    outputNoteFor(pass(props), m1.fits_path, "M1 output note");
+  });
+
+  it("names the range collapse and the full collapse as files of the output folder", async () => {
+    backend.collapseRange.mockResolvedValue(collapseResult({ fits_path: "C:/out/cube_collapse_median_5-39.fits" }));
+    const props = cubeProps();
+    pass(props);
+    commitRangeStart(pass(props), 5);
+    await (mustFind(pass(props), (p) => p.label === "Collapse range", "Collapse range button").onClick as () => Promise<void>)();
+    outputNoteFor(pass(props), "C:/out/cube_collapse_median_5-39.fits", "range collapse output note");
+
+    backend.collapseRange.mockResolvedValue(collapseResult({ fits_path: "C:/out/cube_collapse_mean_0-39.fits", mode: "mean", z0: 0 }));
+    await (mustFind(pass(props), (p) => p.label === "Collapse Mean", "Collapse Mean button").onClick as () => Promise<void>)();
+    outputNoteFor(pass(props), "C:/out/cube_collapse_mean_0-39.fits", "full collapse output note");
   });
 
   it("shows the range collapse's error source and its notes, the approximate median error among them", async () => {

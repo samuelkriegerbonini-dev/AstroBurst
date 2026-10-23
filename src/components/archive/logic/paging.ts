@@ -23,6 +23,8 @@ export interface ResultSet {
   unresolvedTargets: string[];
   elapsedMs: number;
   fromCache: boolean;
+  levelAppliedLocally: string | null;
+  unfilteredTotal: number | null;
 }
 
 export type SortMode = "local" | "server" | "none";
@@ -48,6 +50,8 @@ function fromPage(page: MastSearchPage, rows: MastRow[]): ResultSet {
     unresolvedTargets: page.unresolvedTargets,
     elapsedMs: page.elapsedMs,
     fromCache: page.fromCache,
+    levelAppliedLocally: page.levelAppliedLocally,
+    unfilteredTotal: page.unfilteredTotal,
   };
 }
 
@@ -61,7 +65,16 @@ export function mergePage(prev: ResultSet | null, page: MastSearchPage): ResultS
   const seen = new Set(prev.rows.map(rowIdentity));
   const added = page.rows.filter((r) => !seen.has(rowIdentity(r)));
   const merged = fromPage(page, [...prev.rows, ...added]);
-  return { ...merged, columns: prev.columns.length ? prev.columns : page.columns, requestBody: prev.requestBody, applied: prev.applied, droppedConditions: prev.droppedConditions, elapsedMs: prev.elapsedMs };
+  return {
+    ...merged,
+    columns: prev.columns.length ? prev.columns : page.columns,
+    requestBody: prev.requestBody,
+    applied: prev.applied,
+    droppedConditions: prev.droppedConditions,
+    elapsedMs: prev.elapsedMs,
+    levelAppliedLocally: prev.levelAppliedLocally,
+    unfilteredTotal: prev.unfilteredTotal,
+  };
 }
 
 export function nextOffset(set: ResultSet): number | null {

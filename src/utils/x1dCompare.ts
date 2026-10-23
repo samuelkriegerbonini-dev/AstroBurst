@@ -26,6 +26,7 @@ const CUBE_SUFFIX = "_s3d";
 const EXACT_HIT_RELATIVE = 1e-9;
 const TABLE_REJECTION = "BINTABLE extension, holds no image pixels";
 const EXTRACT1D = "EXTRACT1D";
+const EXTRACT1D_TABLE_ENTRY = "EXTNAME=EXTRACT1D XTENSION=BINTABLE";
 const DEFAULT_SB_UNIT = "MJy/sr";
 const DEFAULT_FLUX_UNIT = "Jy";
 const TABLE_LABEL = "x1d";
@@ -247,6 +248,10 @@ export function findSiblingCube<T extends SiblingCandidate>(files: readonly T[],
 export function tableOnlyFileHint(error: string | null | undefined): string | null {
   if (!error) return null;
   return error.includes(TABLE_REJECTION) && error.includes(EXTRACT1D) ? TABLE_ONLY_HINT : null;
+}
+
+export function tableOnlyInventoryHint(verdict: string, inventory: string): string | null {
+  return verdict.includes(TABLE_REJECTION) && inventory.includes(EXTRACT1D_TABLE_ENTRY) ? TABLE_ONLY_HINT : null;
 }
 
 export function comparableX1dIds(files: readonly ListedFile[]): Set<string> {

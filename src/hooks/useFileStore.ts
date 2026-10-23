@@ -2,7 +2,7 @@ import { useSyncExternalStore, useCallback, useRef } from "react";
 import { FILE_STATUS } from "../utils/constants";
 import { generateId } from "../utils/format";
 import { isCalibRefAsdf } from "../utils/validation";
-import { normalizeOutputPath } from "../utils/processingChain";
+import { normalizeOutputPath, samePath } from "../utils/processingChain";
 import type { ProcessedFile, QueueStats, AstroFile, ProcessResult, ResampleResult } from "../shared/types";
 import type { Spectrum1dKind } from "../shared/types/spectrum1d";
 
@@ -13,6 +13,11 @@ const enum NotifyChannel {
   Stats = 2,
   Selected = 4,
   List = 8,
+}
+
+interface SelectOnLoad {
+  path: string;
+  onSelected: (file: ProcessedFile) => void;
 }
 
 interface StoreState {
@@ -45,6 +50,7 @@ class FileStore {
 
   private pendingFlush = false;
   private pendingChannels = 0;
+  private selectOnLoad: SelectOnLoad | null = null;
 
   private _doneFilesCache: ProcessedFile[] = [];
   private _doneFilesCacheVersion = -1;
@@ -139,6 +145,17 @@ class FileStore {
     this.state.version++;
   }
 
+  private takeSelectOnLoad(file: ProcessedFile): SelectOnLoad | null {
+    const slot = this.selectOnLoad;
+    if (!slot || !samePath(slot.path, file.sourcePath)) return null;
+    this.selectOnLoad = null;
+    return slot;
+  }
+
+  selectWhenLoaded(path: string, onSelected: (file: ProcessedFile) => void) {
+    this.selectOnLoad = { path, onSelected };
+  }
+
   addFiles(fileList: AstroFile[]) {
     const queued = new Set<string>();
     for (const f of this.state.fileMap.values()) {
@@ -213,8 +230,9 @@ class FileStore {
     this.state.fileMap.set(id, updated);
 
     const done = this.state.stats.done + 1;
+    const opened = this.takeSelectOnLoad(existing);
     const autoSelect =
-      this.state.selected === null && done === 1 ? id : this.state.selected;
+      opened || (this.state.selected === null && done === 1) ? id : this.state.selected;
     const selectedChanged = autoSelect !== this.state.selected;
 
     this.state.selected = autoSelect;
@@ -226,6 +244,7 @@ class FileStore {
     let channels = NotifyChannel.All | NotifyChannel.Stats;
     if (selectedChanged) channels |= NotifyChannel.Selected;
     this.scheduleFlush(channels);
+    opened?.onSelected(updated);
   }
 
   fileError(id: string, error: string) {
@@ -239,6 +258,7 @@ class FileStore {
       finishedAt: Date.now(),
     };
     this.state.fileMap.set(id, updated);
+    this.takeSelectOnLoad(existing);
 
     this.state.stats = { ...this.state.stats, failed: this.state.stats.failed + 1 };
     this.state.statsVersion++;
@@ -273,11 +293,18 @@ class FileStore {
     };
     this.state.fileMap.set(id, updated);
 
+    const opened = this.takeSelectOnLoad(existing);
+    const selectedChanged = opened !== null && this.state.selected !== id;
+    if (selectedChanged) {
+      this.state.selected = id;
+      this.state.selectedVersion++;
+    }
     this.state.stats = { ...this.state.stats, spectra: this.state.stats.spectra + 1 };
     this.state.statsVersion++;
     this.bumpVersion();
 
-    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats);
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | (selectedChanged ? NotifyChannel.Selected : 0));
+    opened?.onSelected(updated);
   }
 
   fileResampled(id: string, resampleResult: ResampleResult) {
@@ -302,7 +329,7 @@ class FileStore {
     const existing = this.state.fileMap.get(id);
     if (!existing || existing.status !== FILE_STATUS.DONE) return;
 
-    this.state.fileMap.set(id, { ...existing, result });
+    this.state.fileMap.set(id, { ...existing, result, reloads: (existing.reloads ?? 0) + 1 });
     this.state.statsVersion++;
     const isSelected = this.state.selected === id;
     if (isSelected) this.state.selectedVersion++;
@@ -328,6 +355,7 @@ class FileStore {
   }
 
   selectFile(id: string) {
+    this.selectOnLoad = null;
     if (this.state.selected === id) return;
     this.state.selected = id;
     this.state.selectedVersion++;
@@ -350,6 +378,7 @@ class FileStore {
     this._allFilesCache = [];
     this._allFilesCacheVersion = -1;
     this.pendingChannels = 0;
+    this.selectOnLoad = null;
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.Selected | NotifyChannel.List);
   }
 }

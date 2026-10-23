@@ -9,6 +9,7 @@ import AppFooter from "../../AppFooter";
 import EmptyState from "../../EmptyState";
 import { APP_VERSION } from "../../../utils/constants";
 import type { AppMode } from "../../../hooks/useAppMode";
+import type { SampleControls } from "../../../hooks/useSampleData";
 
 type AnyElement = ReactElement<Record<string, unknown> & { children?: ReactNode }>;
 
@@ -195,33 +196,159 @@ describe("EmptyState archive entry", () => {
 
 describe("EmptyState sample data entry", () => {
   const base = { onBrowseFiles: () => {}, onSelectFolder: () => {} };
+  const TOTAL = 30_896_640;
+  const CREDIT = "HST/WFPC2 narrowband frames of the Eagle Nebula (M16): NASA, ESA, J. Hester and P. Scowen (Arizona State University), data via STScI";
 
-  it("offers no sample data button unless onOpenSampleData is passed", () => {
+  function sample(over: Partial<SampleControls> = {}): SampleControls {
+    return {
+      id: "hst-m16-wfpc2",
+      title: "HST/WFPC2 narrowband frames of M16 (Eagle Nebula)",
+      credit: CREDIT,
+      state: "absent",
+      receivedBytes: 0,
+      totalBytes: TOTAL,
+      file: null,
+      error: null,
+      download: vi.fn(async () => {}),
+      cancel: vi.fn(async () => {}),
+      open: vi.fn(async () => {}),
+      retry: vi.fn(async () => {}),
+      ...over,
+    };
+  }
+
+  function render(over: Partial<SampleControls> = {}) {
+    return renderToStaticMarkup(createElement(EmptyState, { ...base, onBrowseArchive: () => {}, sample: sample(over) }));
+  }
+
+  function testId(html: string, id: string): string {
+    const tag = new RegExp(`<(\\w+)[^>]*data-testid="${id}"[^>]*>`).exec(html);
+    if (!tag) return "";
+    const at = html.indexOf(tag[0]);
+    return html.slice(at, html.indexOf(`</${tag[1]}>`, at));
+  }
+
+  it("offers no sample data block unless the sample set is passed", () => {
     const html = renderToStaticMarkup(createElement(EmptyState, base));
-    expect(html).not.toContain("Open sample data");
+    expect(html).not.toContain("sample data");
     expect(html).not.toContain('data-testid="empty-open-sample"');
+    expect(html).not.toContain("HST narrowband frames of M16");
   });
 
-  it("adds Open sample data naming the HST M16 frames after the archive button", () => {
+  it("offers Download sample data with the set size after the archive button when the frames are absent", () => {
     vi.stubGlobal("navigator", { platform: "Win32" });
-    const html = renderToStaticMarkup(createElement(EmptyState, { ...base, onBrowseArchive: () => {}, onOpenSampleData: () => {} }));
+    const html = render();
     const tag = /<button[^>]*data-testid="empty-open-sample"[^>]*>/.exec(html)?.[0] ?? "";
     expect(tag).toContain('type="button"');
     expect(tag).toContain('class="ab-btn-secondary"');
-    const button = html.slice(html.indexOf(tag), html.indexOf("</button>", html.indexOf(tag)));
-    expect(button).toContain("Open sample data");
-    expect(html).toContain("HST narrowband frames of M16");
-    expect(html.indexOf("Browse the MAST archive")).toBeLessThan(html.indexOf("Open sample data"));
+    expect(testId(html, "empty-open-sample")).toContain("Download sample data (31 MB)");
+    expect(html.indexOf("Browse the MAST archive")).toBeLessThan(html.indexOf("Download sample data"));
+    expect(html).not.toContain('data-testid="empty-sample-progress"');
+    expect(html).not.toContain('data-testid="empty-sample-error"');
   });
 
-  it("calls onOpenSampleData without letting the click reach the drop zone", () => {
-    const onOpenSampleData = vi.fn();
+  it("says the frames are downloaded once and kept in the data folder, with the credit", () => {
+    const html = render();
+    expect(html).toContain("HST narrowband frames of M16");
+    expect(html).toContain("downloaded once and kept in the data folder");
+    expect(html).toContain(CREDIT);
+  });
+
+  it("offers to resume with the received amount when a download stopped part way", () => {
+    const html = render({ state: "partial", receivedBytes: 10_298_880 });
+    expect(testId(html, "empty-open-sample")).toContain("Resume sample download (10 MB of 31 MB)");
+  });
+
+  it("gives the percentage when the received amount would round to the whole set", () => {
+    expect(testId(render({ state: "partial", receivedBytes: 30_600_000 }), "empty-open-sample")).toContain("Resume sample download (99% of 31 MB)");
+  });
+
+  it("offers a plain download when a partial set has nothing received yet", () => {
+    const button = testId(render({ state: "partial", receivedBytes: 0 }), "empty-open-sample");
+    expect(button).toContain("Download sample data (31 MB)");
+    expect(button).not.toContain("Resume");
+  });
+
+  it("shows a progress bar with the percentage and Cancel instead of the button while downloading", () => {
+    const html = render({ state: "downloading", receivedBytes: 15_448_320, file: "656nmos.fits" });
+    expect(html).not.toContain('data-testid="empty-open-sample"');
+    const bar = /<div[^>]*data-testid="empty-sample-progress"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(bar).toContain('role="progressbar"');
+    expect(bar).toContain('aria-valuemin="0"');
+    expect(bar).toContain('aria-valuemax="100"');
+    expect(bar).toContain('aria-valuenow="50"');
+    expect(html).toContain("50%");
+    expect(html.indexOf("Browse the MAST archive")).toBeLessThan(html.indexOf('data-testid="empty-sample-progress"'));
+    const cancel = /<button[^>]*data-testid="empty-sample-cancel"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(cancel).toContain('type="button"');
+    expect(testId(html, "empty-sample-cancel")).toContain("Cancel");
+  });
+
+  it("names the received amount on the bar and the download on Cancel for screen readers", () => {
+    const html = render({ state: "downloading", receivedBytes: 15_448_320, file: "656nmos.fits" });
+    const bar = /<div[^>]*data-testid="empty-sample-progress"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(bar).toContain('aria-valuetext="15 MB of 31 MB"');
+    const cancel = /<button[^>]*data-testid="empty-sample-cancel"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(cancel).toContain('aria-label="Cancel sample download"');
+  });
+
+  it("holds the bar below 100% until the last byte arrives", () => {
+    expect(render({ state: "downloading", receivedBytes: TOTAL - 1 })).toContain('aria-valuenow="99"');
+    expect(render({ state: "downloading", receivedBytes: TOTAL })).toContain('aria-valuenow="100"');
+    expect(render({ state: "downloading", receivedBytes: 0, totalBytes: 0 })).toContain('aria-valuenow="0"');
+  });
+
+  it("offers Open sample data once the frames are kept", () => {
+    const html = render({ state: "ready", receivedBytes: TOTAL });
+    expect(testId(html, "empty-open-sample")).toContain("Open sample data");
+    expect(html).not.toContain("Download sample data");
+  });
+
+  it("shows the error with Retry", () => {
+    const html = render({ state: "partial", receivedBytes: 10_298_880, error: "656nmos.fits: the server answered HTTP 404" });
+    const error = /<p[^>]*data-testid="empty-sample-error"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(error).toContain('role="alert"');
+    expect(testId(html, "empty-sample-error")).toContain("656nmos.fits: the server answered HTTP 404");
+    expect(testId(html, "empty-open-sample")).toContain("Retry sample download");
+  });
+
+  it("keeps Open sample data for kept frames whose open failed, with the error beside it", () => {
+    const html = render({ state: "ready", receivedBytes: TOTAL, error: "the Data folder setting could not be read: x" });
+    expect(testId(html, "empty-open-sample")).toContain("Open sample data");
+    expect(html).not.toContain("Retry sample download");
+    expect(testId(html, "empty-sample-error")).toContain("the Data folder setting could not be read: x");
+  });
+
+  it.each([
+    ["absent", {}, "download"],
+    ["partial", { state: "partial", receivedBytes: 10_298_880 }, "download"],
+    ["ready", { state: "ready", receivedBytes: TOTAL }, "open"],
+    ["failed", { state: "partial", receivedBytes: 10_298_880, error: "network unreachable" }, "retry"],
+    ["ready after a failed open", { state: "ready", receivedBytes: TOTAL, error: "not readable" }, "open"],
+  ] as const)("runs the %s action without letting the click reach the drop zone", (_label, over, action) => {
     const onBrowseFiles = vi.fn();
-    const tree = EmptyState({ ...base, onBrowseFiles, onOpenSampleData });
-    const sample = buttons(tree).find((b) => textOf(b.props.children).includes("Open sample data"));
+    const set = sample(over);
+    const tree = EmptyState({ ...base, onBrowseFiles, sample: set });
+    const main = buttons(tree).find((b) => b.props["data-testid"] === "empty-open-sample");
     const event = clickEvent();
-    (sample?.props.onClick as (e: ReturnType<typeof clickEvent>) => void)(event);
-    expect(onOpenSampleData).toHaveBeenCalledTimes(1);
+    (main?.props.onClick as (e: ReturnType<typeof clickEvent>) => void)(event);
+    for (const name of ["download", "open", "retry", "cancel"] as const) {
+      expect(set[name]).toHaveBeenCalledTimes(name === action ? 1 : 0);
+    }
+    expect(onBrowseFiles).not.toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a running download without letting the click reach the drop zone", () => {
+    const onBrowseFiles = vi.fn();
+    const set = sample({ state: "downloading", receivedBytes: 1_000 });
+    const tree = EmptyState({ ...base, onBrowseFiles, sample: set });
+    const cancel = buttons(tree).find((b) => b.props["data-testid"] === "empty-sample-cancel");
+    const event = clickEvent();
+    (cancel?.props.onClick as (e: ReturnType<typeof clickEvent>) => void)(event);
+    expect(set.cancel).toHaveBeenCalledTimes(1);
+    expect(set.download).not.toHaveBeenCalled();
     expect(onBrowseFiles).not.toHaveBeenCalled();
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
     expect(event.stopPropagation).toHaveBeenCalledTimes(1);

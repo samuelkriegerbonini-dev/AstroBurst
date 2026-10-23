@@ -20,7 +20,7 @@ interface ResultsGalleryProps {
 }
 
 const CARD_W = 152;
-const CARD_H = 196;
+const CARD_H = 210;
 const GAP = 12;
 const PAD = 12;
 const ROW_H = CARD_H + GAP;

@@ -18,3 +18,5 @@ pub mod net {
     pub mod paths;
 }
 pub mod catalog_store;
+#[cfg(feature = "net")]
+pub mod samples;

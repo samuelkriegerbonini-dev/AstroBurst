@@ -8,6 +8,7 @@ import {
   clearConfirmText,
   entrySummary,
   filterEntries,
+  logSessionNote,
   measurementLog,
   measurementLogCsv,
   measurementLogCsvFileName,
@@ -225,6 +226,12 @@ function MeasurementLogPanel() {
             </button>
           )}
         </div>
+
+        {entries.length > 0 && (
+          <div data-testid="log-session-note" className="text-[9px] text-zinc-400">
+            {logSessionNote(entries.length, shown.length)}
+          </div>
+        )}
 
         {savedPath && <div className="text-[9px] text-emerald-400/90 break-all">Saved {savedPath}</div>}
       </div>

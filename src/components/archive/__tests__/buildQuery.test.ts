@@ -2,16 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_FORM,
   EMPTY_QUERY_HINT,
+  FILTERS_OPEN_STORAGE_KEY,
   LEVEL_STORAGE_KEY,
   applicableFilters,
+  loadFiltersOpen,
   loadLevel,
   parseRadius,
   planSearch,
+  saveFiltersOpen,
   saveLevel,
   switchMission,
   type ArchiveForm,
 } from "../logic/buildQuery";
 import type { MastResolved } from "../../../shared/types/mast";
+import { HST_GROUPS, IUE_GROUPS, JWST_GROUPS } from "./fixtures";
 
 const JWST_FILTERS = ["level", "instrument", "filter", "date", "public"] as const;
 const HST_FILTERS = ["instrument", "filter", "date"] as const;
@@ -155,6 +159,61 @@ describe("applicableFilters", () => {
       dateTo: "2014-12-31",
     });
   });
+
+  it("keeps the category and object type ids the mission offers, in option order, once each, and drops empty lists", () => {
+    expect(applicableFilters({ level: "combined", categories: ["stars", "galaxy_clusters", "galaxies", "stars"], objectTypes: ["exoplanets", "planetary_nebulae"] }, [...JWST_FILTERS], JWST_GROUPS)).toEqual({
+      level: "combined",
+      categories: ["galaxies", "galaxy_clusters", "stars"],
+      objectTypes: ["planetary_nebulae", "exoplanets"],
+    });
+    expect(applicableFilters({ categories: ["galaxy_clusters", "stars"], objectTypes: ["exoplanets"] }, [], IUE_GROUPS)).toEqual({ categories: ["stars"] });
+    expect(applicableFilters({ categories: ["galaxy_clusters"], objectTypes: [] }, [], IUE_GROUPS)).toEqual({});
+    expect(applicableFilters({ categories: ["galaxies"], objectTypes: ["exoplanets"] }, [...JWST_FILTERS])).toEqual({});
+  });
+});
+
+describe("object filters in a planned search", () => {
+  it("sends the offered category and object type ids with a name, coordinates or programme query", () => {
+    const f = form({ text: "M16", filters: { level: "combined", categories: ["ism", "galaxies"], objectTypes: ["planetary_nebulae"] } });
+    const named = planSearch(f, [...JWST_FILTERS], { resolved: M16 }, JWST_GROUPS);
+    expect(named.kind === "search" && named.query.filters).toEqual({ level: "combined", categories: ["galaxies", "ism"], objectTypes: ["planetary_nebulae"] });
+    const programme = planSearch({ ...f, text: "2739" }, [...JWST_FILTERS], {}, JWST_GROUPS);
+    expect(programme.kind === "search" && programme.query.filters).toEqual({ level: "combined", categories: ["galaxies", "ism"], objectTypes: ["planetary_nebulae"] });
+  });
+
+  it("drops object filters from a dataset query and when no group is passed", () => {
+    const f = form({ text: "jw02739-o001_t001_nircam", filters: { level: "combined", categories: ["ism"] } });
+    const dataset = planSearch(f, [...JWST_FILTERS], {}, JWST_GROUPS);
+    expect(dataset.kind === "search" && dataset.query.filters).toEqual({});
+    const without = planSearch({ ...f, text: "2739" }, [...JWST_FILTERS]);
+    expect(without.kind === "search" && without.query.filters).toEqual({ level: "combined" });
+  });
+
+  it("still blocks a query that has only object filters", () => {
+    expect(planSearch(form({ text: "", filters: { categories: ["galaxies"] } }), [...JWST_FILTERS], {}, JWST_GROUPS)).toEqual({ kind: "blocked", field: "query", message: EMPTY_QUERY_HINT });
+  });
+});
+
+describe("filters panel memory", () => {
+  it("is closed by default, with an unknown value, without storage or when storage throws", () => {
+    expect(FILTERS_OPEN_STORAGE_KEY).toBe("astroburst.mast.filtersOpen");
+    expect(loadFiltersOpen(null)).toBe(false);
+    expect(loadFiltersOpen({ getItem: () => "yes" })).toBe(false);
+    expect(loadFiltersOpen({ getItem: () => { throw new Error("blocked"); } })).toBe(false);
+  });
+
+  it("writes 1 and 0 under its key and swallows storage errors", () => {
+    const store = new Map<string, string>();
+    const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) };
+    saveFiltersOpen(storage, true);
+    expect(store.get(FILTERS_OPEN_STORAGE_KEY)).toBe("1");
+    expect(loadFiltersOpen(storage)).toBe(true);
+    saveFiltersOpen(storage, false);
+    expect(store.get(FILTERS_OPEN_STORAGE_KEY)).toBe("0");
+    expect(loadFiltersOpen(storage)).toBe(false);
+    expect(() => saveFiltersOpen({ setItem: () => { throw new Error("quota"); } }, true)).not.toThrow();
+    expect(() => saveFiltersOpen(null, true)).not.toThrow();
+  });
 });
 
 describe("switchMission", () => {
@@ -176,6 +235,14 @@ describe("switchMission", () => {
     });
   });
 
+  it("keeps the category and object type ids the target mission offers", () => {
+    const before = form({ text: "M16", filters: { level: "exposures", dateFrom: "2022-01-01", categories: ["galaxies", "galaxy_clusters", "stars"], objectTypes: ["exoplanets"] } });
+    expect(switchMission(before, "hst", null, HST_GROUPS).filters).toEqual({ dateFrom: "2022-01-01", categories: ["galaxies", "galaxy_clusters", "stars"], objectTypes: ["exoplanets"] });
+    expect(switchMission(before, "iue", null, IUE_GROUPS).filters).toEqual({ dateFrom: "2022-01-01", categories: ["galaxies", "stars"] });
+    expect(switchMission(before, "classy", null, []).filters).toEqual({ dateFrom: "2022-01-01" });
+    expect(switchMission(before, "hst", null).filters).toEqual({ dateFrom: "2022-01-01" });
+  });
+
   it("restores the remembered JWST level when switching back", () => {
     const storage = { getItem: vi.fn(() => "all"), setItem: vi.fn() };
     const after = switchMission(form({ mission: "hst", filters: {} }), "jwst", storage);
@@ -185,6 +252,15 @@ describe("switchMission", () => {
 });
 
 describe("level memory", () => {
+  it("remembers Exposures L1-2 as its own level", () => {
+    const store = new Map<string, string>();
+    const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) };
+    saveLevel(storage, "exposures");
+    expect(store.get(LEVEL_STORAGE_KEY)).toBe("exposures");
+    expect(loadLevel(storage)).toBe("exposures");
+    expect(switchMission(form({ mission: "hst", filters: {} }), "jwst", storage).filters.level).toBe("exposures");
+  });
+
   it("defaults to combined without storage, with an unknown value or when storage throws", () => {
     expect(loadLevel(null)).toBe("combined");
     expect(loadLevel({ getItem: () => "weird" })).toBe("combined");

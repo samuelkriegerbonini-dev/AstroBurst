@@ -446,7 +446,7 @@ mod tests {
     use crate::core::imaging::region::RegionShape;
     use crate::core::imaging::region_file::{Region, RegionProperties};
     use crate::core::mast::query::PAGE_LIMIT;
-    use crate::core::mast::types::{MastErrorCode, MastFilterValues, MastWhere, ProgressStage};
+    use crate::core::mast::types::{LevelFilter, MastErrorCode, MastFilterValues, MastWhere, ObjectCategory, ObjectType, ProgressStage};
     use crate::infra::mast::cache::dir_info;
     use crate::infra::mast::settings::{CACHE_DIR, ENV_MAST_AUTH_URL, ENV_MAST_TIMEOUT_MS, ENV_MAST_URL, TEST_CACHE_DIR};
     use crate::infra::mast::testing::{serve_routes, Route, TestServer, MARKER_TOKEN};
@@ -704,6 +704,79 @@ mod tests {
             offset: 0,
             limit: PAGE_LIMIT,
         }
+    }
+
+    #[derive(Deserialize)]
+    struct SearchArgs {
+        query: Arg<MastQuery>,
+    }
+
+    fn search_args(filters: serde_json::Value) -> SearchArgs {
+        serde_json::from_value(json!({
+            "query": {
+                "mission": "jwst",
+                "where": {"kind": "position", "raDeg": 274.688, "decDeg": -13.792, "radiusArcmin": 3.0},
+                "filters": filters,
+                "offset": 0,
+                "limit": 200
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn search_query_arg_decodes_object_filters_and_rejects_unknown_ids_as_bad_input() {
+        let query = search_args(json!({"level": "exposures", "categories": ["galaxies", "ism"], "objectTypes": ["planetary_nebulae"]}))
+            .query
+            .get("query")
+            .unwrap();
+        assert_eq!(query.filters.level, Some(LevelFilter::Exposures));
+        assert_eq!(query.filters.categories, [ObjectCategory::Galaxies, ObjectCategory::Ism]);
+        assert_eq!(query.filters.object_types, [ObjectType::PlanetaryNebulae]);
+        let old = search_args(json!({"level": "combined", "publicOnly": true})).query.get("query").unwrap();
+        assert!(old.filters.categories.is_empty() && old.filters.object_types.is_empty());
+        for (filters, unknown) in [
+            (json!({"categories": ["nebulas"]}), "nebulas"),
+            (json!({"objectTypes": ["galaxies"]}), "galaxies"),
+            (json!({"level": "l3"}), "l3"),
+        ] {
+            let error = search_args(filters).query.get("query").unwrap_err();
+            assert_eq!(error.code, MastErrorCode::BadInput);
+            assert!(error.message.starts_with(&format!("query: unknown variant `{unknown}`")), "{}", error.message);
+            assert_eq!(error.context, Default::default());
+        }
+    }
+
+    #[tokio::test]
+    async fn missions_and_search_pages_carry_the_filter_contract() {
+        let rig = rig(vec![Route::post("/search/jwst/api/v0.1/search").json(fixture("jwst_m16_ism.json"))]).await;
+        let listed = service::missions(&rig.hub);
+        assert_eq!(listed.len(), 10);
+        let jwst = serde_json::to_value(&listed[0]).unwrap();
+        assert_eq!(jwst["quickFilters"][0]["options"], json!(["combined", "exposures", "all"]));
+        assert_eq!(jwst["filterGroups"][0]["column"], json!("targcat"));
+        assert_eq!(
+            jwst["filterGroups"][1]["options"][0],
+            json!({"id": "planetary_nebulae", "label": "Planetary nebulae", "title": "targdesc contains Planetary nebulae"})
+        );
+        let keys: Vec<&str> = jwst["filterGroups"][0].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["column", "id", "info", "label", "options"]);
+        assert_eq!(serde_json::to_value(&listed[2]).unwrap()["filterGroups"], json!([]));
+        let mut query = m16();
+        query.filters.level = Some(LevelFilter::Combined);
+        query.filters.categories = vec![ObjectCategory::Ism];
+        let page = search(Arc::clone(&rig.hub), "g1:search".to_owned(), query, false).await.unwrap();
+        let value = serde_json::to_value(&page).unwrap();
+        assert_eq!((&value["levelFilteredLocally"], &value["unfilteredTotal"]), (&json!(true), &json!(null)));
+        assert_eq!(value["levelAppliedLocally"], json!("productLevel = 3"));
+        assert_eq!(value["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(value["rows"][0]["categories"], json!(["ism"]));
+        assert_eq!(value["rows"][0]["targetDescription"], json!("Molecular clouds; Nebulae; Protostars"));
+        assert_eq!(value["rows"][0]["values"]["_category"], json!("Nebulae and ISM"));
+        assert_eq!(value["rows"][0]["level"], json!("3"));
+        let sent: serde_json::Value = serde_json::from_str(&rig.server.requests()[0].body).unwrap();
+        assert_eq!(sent["conditions"], json!([{"targcat": "ISM"}]));
+        assert_eq!(sent["limit"], json!(2000));
     }
 
     #[test]

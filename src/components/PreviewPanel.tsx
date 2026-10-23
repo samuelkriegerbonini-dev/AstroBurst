@@ -34,6 +34,7 @@ import { COMPOSITE_RUN_KEY, compositeResultTarget, hasCompositeReset, lastCompos
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
 import { monoPixelsAction } from "../utils/gpuMonoPixels";
+import { pixelSourceVersion } from "../utils/pixelSource";
 import { afterGpuLoss, gpuLossToggleView } from "../utils/gpuLoss";
 import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { parseImageRef, planeLabel } from "../utils/imageRef";
@@ -81,7 +82,7 @@ export default function PreviewPanel() {
   const { histData, histDataPath, stfParams } = useHistContext();
   const displayed = useDisplayedImage();
   const processedSourcePath = processed?.fitsPath ?? null;
-  const processedSourceVersion = processedSourcePath ? processedVersion : 0;
+  const sourceVersion = pixelSourceVersion(file, processedSourcePath, processedVersion);
   const { compositePreviewUrl, compositeVersion, canShowParked } = useCompositePreview();
   const { initRgb, setCompositePreviewUrl, clearComposite, resetComposite, setCompositeStf, setCompositeAutoStf, setCompositeStfLinked, park, replaceParked, showParkedComposite } = useCompositeActions();
   const compositeMode = useCompositeMode();
@@ -197,7 +198,7 @@ export default function PreviewPanel() {
 
   const wantGpu = !!gpuAvailable && useGpu;
   const filePath = file?.path ?? null;
-  const monoLoadKey = fileKey ? `${fileKey}|${processedSourcePath ?? filePath}|${processedSourceVersion}` : null;
+  const monoLoadKey = fileKey ? `${fileKey}|${processedSourcePath ?? filePath}|${sourceVersion}` : null;
   const pngOnlyRecord = displayed.previewOnly;
   const rgbSource = isFileRgbView ? filePath : null;
   const rgbLoadKey = fileKey && isRgbView ? `${fileKey}|${rgbSource ?? ""}|${compositeVersion}` : null;

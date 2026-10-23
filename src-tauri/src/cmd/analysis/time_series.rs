@@ -5,7 +5,7 @@ use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    annulus_arg, aperture_radius_arg, apply_calibration, check_annulus_clears_aperture, photometry_planes,
+    annulus_arg, aperture_radius_arg, apply_calibration, area_map, check_annulus_clears_aperture, photometry_planes,
     processed_data_warning, resolve_dq_mask,
 };
 use crate::cmd::common::{blocking_cmd, load_cached, load_cached_full};
@@ -292,7 +292,15 @@ fn measure_frame(
         }
     }
     let wcs = header.and_then(|h| load_wcs(path, h).ok());
-    let photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
+    let mut photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
+    let mut area_warnings = Vec::new();
+    let area = area_map(path, entry, photcal.as_mut(), &mut area_warnings);
+    for message in area_warnings {
+        let message = format!("{file_name}: {message}");
+        if !warnings.contains(&message) {
+            warnings.push(message);
+        }
+    }
     let config = PhotometryConfig {
         saturation: Some(saturation_level(header, entry.stats().max)),
         ..config_base.clone()
@@ -306,7 +314,8 @@ fn measure_frame(
         FrameShift { offset: None, dx: 0.0, dy: 0.0 }
     };
     let registered = index > 0 && shift.offset.as_ref().is_some_and(|o| o.registered);
-    let source = MaskedImage::new(entry.arr(), mask.as_ref().map(|m| &m.map));
+    let source = MaskedImage::new(entry.arr(), mask.as_ref().map(|m| &m.map))
+        .map(|s| s.with_area(area.as_ref().map(|a| a.arr())));
 
     let mut measured: Vec<Option<StarPhotometry>> = Vec::with_capacity(targets.len());
     let mut errors: Vec<Option<String>> = Vec::with_capacity(targets.len());

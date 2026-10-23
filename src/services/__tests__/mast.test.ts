@@ -45,6 +45,8 @@ import { TauriCommandError } from "../../shared/types/errors";
 import type {
   MastDownloadInput,
   MastDownloadItem,
+  MastFilterGroup,
+  MastFilterOption,
   MastFootprint,
   MastFootprintInput,
   MastFootprintRegions,
@@ -53,6 +55,9 @@ import type {
   MastPreset,
   MastProgressEvent,
   MastQuery,
+  MastSearchPage,
+  ObjectCategoryId,
+  ObjectTypeId,
 } from "../../shared/types/mast";
 
 const rustSource = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../src-tauri/src/${rel}`, import.meta.url)), "utf8");
@@ -228,6 +233,41 @@ describe("MAST presets contract", () => {
     };
     expect(fields(rust, "MastDownloadInput")).toEqual(Object.keys(CAL_INPUT));
     expect(fields(rust, "MastDownloadItem")).toEqual(Object.keys(item));
+  });
+
+  it("mirror the object filter contract of core/mast/types.rs", () => {
+    const rust = rustSource("core/mast/types.rs");
+    const snake = (name: string) => name.replace(/(?<!^)([A-Z])/g, "_$1").toLowerCase();
+    const variants = (name: string) => {
+      const start = rust.indexOf(`pub enum ${name} {`);
+      if (start < 0) return [];
+      const body = rust.slice(rust.indexOf("{", start) + 1, rust.indexOf("}", start));
+      return [...body.matchAll(/([A-Z]\w*)/g)].map((m) => snake(m[1]));
+    };
+    const option: MastFilterOption = { id: "galaxies", label: "Galaxies", title: "targcat = Galaxy" };
+    const group: MastFilterGroup = { id: "category", label: "Category", column: "targcat", info: "IUE object class (IUE_CATEGORY).", options: [option] };
+    const categories: ObjectCategoryId[] = ["galaxies", "galaxy_clusters", "ism", "star_clusters", "stars", "solar_system", "fields", "calibration"];
+    const types: ObjectTypeId[] = [
+      "planetary_nebulae",
+      "nebulae_star_forming",
+      "young_stars_disks",
+      "exoplanets",
+      "agn_quasars",
+      "interacting_galaxies",
+      "supernovae_transients",
+      "compact_substellar",
+    ];
+    const page: Pick<MastSearchPage, "levelFilteredLocally" | "levelAppliedLocally" | "unfilteredTotal"> = { levelFilteredLocally: true, levelAppliedLocally: "productLevel = 3", unfilteredTotal: 1913 };
+    expect(fields(rust, "MastFilterOption")).toEqual(Object.keys(option));
+    expect(fields(rust, "MastFilterGroup")).toEqual(Object.keys(group));
+    expect(fields(rust, "MastMission")).toContain("filterGroups");
+    expect(fields(rust, "MastRow")).toEqual(expect.arrayContaining(["categories", "targetDescription"]));
+    expect(fields(rust, "MastSearchPage")).toEqual(expect.arrayContaining(Object.keys(page)));
+    expect(fields(rust, "MastFilterValues")).toEqual(expect.arrayContaining(["level", "categories", "objectTypes"]));
+    expect(variants("LevelFilter")).toEqual(["combined", "exposures", "all"]);
+    expect(variants("FilterGroupId")).toEqual(["category", "object_type"]);
+    expect(variants("ObjectCategory")).toEqual(categories);
+    expect(variants("ObjectType")).toEqual(types);
   });
 
   it("mirror the header peek result of core/mast/types.rs", () => {

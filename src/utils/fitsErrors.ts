@@ -1,4 +1,4 @@
-import { tableOnlyFileHint } from "./x1dCompare";
+import { tableOnlyFileHint, tableOnlyInventoryHint } from "./x1dCompare";
 
 export const TASK_PANIC_PREFIX = "Task join failed";
 
@@ -24,7 +24,11 @@ function ingestVerdict(message: string): string {
 export function spectrum1dHint(message: string | null | undefined): string | null {
   if (!message) return null;
   const verdict = ingestVerdict(message);
-  return tableOnlyFileHint(verdict) ?? (verdict.includes(ONE_D_ARRAY_VERDICT) ? ONE_D_ARRAY_HINT : null);
+  return (
+    tableOnlyFileHint(verdict) ??
+    tableOnlyInventoryHint(verdict, message.slice(verdict.length)) ??
+    (verdict.includes(ONE_D_ARRAY_VERDICT) ? ONE_D_ARRAY_HINT : null)
+  );
 }
 
 export function spectrumProbeFailure(ingestMessage: string, probeMessage: string): string {

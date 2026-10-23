@@ -11,3 +11,6 @@ pub mod catalog_disk;
 pub mod gwcs;
 pub mod geometry;
 pub mod healpix_cat;
+pub mod object_names;
+pub mod solve_hints;
+pub mod local_solve;

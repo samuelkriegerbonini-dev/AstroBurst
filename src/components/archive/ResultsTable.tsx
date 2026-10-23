@@ -6,7 +6,7 @@ import type { ArchiveController } from "./state/archiveController";
 import { tableMove } from "./logic/gridNav";
 import { thumbStatus } from "./logic/thumbQueue";
 import { SORT_BLOCKED_HINT, sortMode } from "./logic/paging";
-import { cellText, columnWidth, fitColumns, rovingRow, rowKeyMap, rowsText, sortText, tableColumns } from "./logic/resultsView";
+import { UNKNOWN_TEXT, cellText, columnWidth, fitColumns, isUnknownCell, rovingRow, rowKeyMap, rowsText, sortText, tableColumns } from "./logic/resultsView";
 import { rowTsv } from "./logic/copyBuilders";
 import { resultsKeyCommand } from "./logic/detailKeys";
 import { previewsAllowed } from "./logic/detailView";
@@ -325,7 +325,9 @@ export default function ResultsTable({ state, ctl, rows, mission, missionLabel, 
                     </div>
                   ) : null}
                   {columns.map((c, ci) => {
-                    const text = cellText(row.values[c.name], c);
+                    const value = row.values[c.name];
+                    const unknown = isUnknownCell(c, value);
+                    const text = cellText(value, c);
                     return (
                       <div
                         key={c.name}
@@ -334,9 +336,9 @@ export default function ResultsTable({ state, ctl, rows, mission, missionLabel, 
                         data-cell-focus={selected && cell === ci ? "true" : undefined}
                         className="ab-mast-td"
                         style={{ width: columnWidth(c, ci === 0) }}
-                        title={text}
+                        title={unknown ? UNKNOWN_TEXT : text}
                       >
-                        {text}
+                        {unknown ? <span className="ab-mast-td-unknown">{UNKNOWN_TEXT}</span> : text}
                       </div>
                     );
                   })}

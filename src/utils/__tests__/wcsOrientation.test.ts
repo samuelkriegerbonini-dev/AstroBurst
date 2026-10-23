@@ -216,3 +216,29 @@ describe("gwcsSuffix", () => {
     );
   });
 });
+
+describe("orientationLine on a TAN header with PV distortion cards", () => {
+  const PV_WARNING = "PV distortion not applied: PV1_0, PV1_1, PV1_2, PV1_4, PV2_0, PV2_2, PV2_10";
+
+  it("names the PV cards the header WCS does not apply", () => {
+    expect(orientationLine(info({ wcs_kind: "header", wcs_warning: PV_WARNING }))).toBe(
+      `TAN - 0.031"/px x 0.031"/px - rot -0.5 deg - E left - ${PV_WARNING}`,
+    );
+  });
+
+  it("puts the warning after the SIP marker and before a gWCS refusal", () => {
+    const line = orientationLine(
+      info({ wcs_kind: "header", sip_present: true, wcs_warning: PV_WARNING, gwcs_refusal: TABULAR_REFUSAL }),
+    )!;
+    expect(line).toBe(
+      `TAN - 0.031"/px x 0.031"/px - rot -0.5 deg - E left - SIP - ${PV_WARNING} - gWCS not used: gWCS transform 'tabular' at steps[0].transform is not supporte…`,
+    );
+  });
+
+  it("shows no warning in gWCS mode or without one", () => {
+    expect(orientationLine(gwcsInfo({ wcs_warning: PV_WARNING }))).not.toContain("PV distortion");
+    expect(orientationLine(info({ wcs_kind: "header", wcs_warning: null }))).toBe(
+      'TAN - 0.031"/px x 0.031"/px - rot -0.5 deg - E left',
+    );
+  });
+});

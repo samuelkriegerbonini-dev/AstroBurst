@@ -23,6 +23,7 @@ import {
   convertStatistics,
   fitsSixteenBit,
   formatStatistic,
+  statisticValue,
   statisticsToCsv,
 } from "../../utils/statisticsUnits";
 
@@ -316,11 +317,13 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
                 </thead>
                 <tbody>
                   {STATISTIC_ROWS.map((row) => (
-                    <tr key={row.key} className="border-t border-zinc-800/30">
-                      <td className="px-2 py-0.5 text-zinc-400">{row.label}</td>
+                    <tr key={row.key} data-statistic={row.key} className="border-t border-zinc-800/30">
+                      <td className="px-2 py-0.5 text-zinc-400" title={row.title}>
+                        {row.label}
+                      </td>
                       {converted.map((s, i) => (
                         <td key={result.channels[i].label} className="px-2 py-0.5 text-right font-mono text-zinc-200">
-                          {formatStatistic(s[row.key], row.kind, unit)}
+                          {formatStatistic(statisticValue(s, row.key), row.kind, unit)}
                         </td>
                       ))}
                     </tr>

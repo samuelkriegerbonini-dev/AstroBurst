@@ -25,11 +25,13 @@ use crate::core::mast::errors::{bad_input, classify, internal, io_cause, OpKind,
 use crate::core::mast::ids::validate_request_id;
 use crate::core::mast::images::{merge_lists, needs_list_after_redirect, prefer_filter, product_stem, representative_entry};
 use crate::core::mast::jpeg::{dimensions, quick_wcs, scale_wcs};
+use crate::core::mast::local_level;
 use crate::core::mast::missions::{merge_probe, mission, missions as static_missions, utc_date, utc_datetime};
 use crate::core::mast::normalize::{dropped_conditions, normalize_page, PageRequest};
+use crate::core::mast::object_filters::is_object_column;
 use crate::core::mast::preview::{plan, prepared_name, resize_jpeg, PreviewPlan};
 use crate::core::mast::products::classify as classify_products;
-use crate::core::mast::query::{build_params, canonical_key, probe_params, validate};
+use crate::core::mast::query::{build_params, canonical_key, probe_params, validate, ValidQuery, PAGE_LIMIT};
 use crate::core::mast::types::{
     MastAvailability, MastCacheInfo, MastCacheKind, MastCmdError, MastErrorCode, MastErrorContext, MastImageRef, MastImageSet, MastLevelClass,
     MastMission, MastMissionId, MastPreviewRef, MastProductList, MastProgressEvent, MastQuery, MastResolved, MastSearchPage, MastTokenStatus,
@@ -158,7 +160,34 @@ async fn run_search(hub: &MastHub, request_id: &str, query: &MastQuery, refresh:
     validate_request_id(request_id)?;
     let valid = validate(query)?;
     let endpoint = hub.endpoint(valid.mission, OpKind::Search)?;
-    let params = build_params(&valid);
+    let unfiltered_total = unfiltered_total(hub, &valid);
+    if let Some(plan) = local_level::plan(&valid) {
+        let wide = search_page(hub, &endpoint, request_id, &plan.wide, refresh, started).await?;
+        if let Some(mut page) = local_level::page(&wide, &valid, &plan) {
+            page.request_id = request_id.to_owned();
+            page.elapsed_ms = elapsed_ms(started);
+            page.unfiltered_total = unfiltered_total;
+            hub.remember_row_filters(valid.mission, &page.rows);
+            return Ok(page);
+        }
+    }
+    let mut page = search_page(hub, &endpoint, request_id, &valid, refresh, started).await?;
+    if !page.from_cache {
+        hub.remember_row_filters(valid.mission, &page.rows);
+    }
+    page.unfiltered_total = unfiltered_total;
+    Ok(page)
+}
+
+async fn search_page(
+    hub: &MastHub,
+    endpoint: &MissionEndpoint,
+    request_id: &str,
+    valid: &ValidQuery,
+    refresh: bool,
+    started: Instant,
+) -> Result<MastSearchPage, MastCmdError> {
+    let params = build_params(valid);
     let key = canonical_key(valid.mission, &params);
     if !refresh {
         let cached = hub.searches().get(&key, Instant::now());
@@ -166,7 +195,7 @@ async fn run_search(hub: &MastHub, request_id: &str, query: &MastQuery, refresh:
             page.request_id = request_id.to_owned();
             page.from_cache = true;
             page.elapsed_ms = elapsed_ms(started);
-            page.dropped_conditions = dropped_conditions(&valid, &page.applied);
+            page.dropped_conditions = dropped_conditions(valid, &page.applied);
             return Ok(page);
         }
     }
@@ -181,11 +210,26 @@ async fn run_search(hub: &MastHub, request_id: &str, query: &MastQuery, refresh:
     let page = normalize_page(
         valid.mission,
         results,
-        PageRequest { request_id, query: &valid, request_body, elapsed_ms: elapsed_ms(started) },
+        PageRequest { request_id, query: valid, request_body, elapsed_ms: elapsed_ms(started) },
     );
-    hub.remember_row_filters(valid.mission, &page.rows);
     hub.searches().insert(key, page.clone(), Instant::now());
     Ok(page)
+}
+
+fn unfiltered_total(hub: &MastHub, valid: &ValidQuery) -> Option<i64> {
+    let object = |column: &str| is_object_column(valid.mission, column);
+    if !valid.conditions.iter().any(|(column, _)| object(column)) {
+        return None;
+    }
+    let plain = ValidQuery {
+        conditions: valid.conditions.iter().filter(|(column, _)| !object(column)).cloned().collect(),
+        offset: 0,
+        limit: PAGE_LIMIT,
+        ..valid.clone()
+    };
+    let key = canonical_key(plain.mission, &build_params(&plain));
+    let cached = hub.searches().get(&key, Instant::now());
+    cached.filter(|page| page.total_reliable).and_then(|page| page.total_reported)
 }
 
 pub type ProgressSink<'a> = dyn Fn(MastProgressEvent) + Send + Sync + 'a;
@@ -997,7 +1041,7 @@ mod tests {
     use crate::core::mast::types::MastProductClass;
     use crate::infra::mast::models::DatasetProducts;
     use crate::core::mast::query::PAGE_LIMIT;
-    use crate::core::mast::types::{LevelFilter, MastFilterValues, MastWhere};
+    use crate::core::mast::types::{LevelFilter, MastFilterValues, MastWhere, ObjectCategory, ObjectType};
     use crate::infra::mast::api::MissionEndpoint;
     use crate::infra::mast::lookup::NAMES_FILE;
     use crate::infra::mast::models::{SearchParams, SearchResults};
@@ -1161,8 +1205,9 @@ mod tests {
         assert_eq!(sent["target"], json!(["274.688 -13.792"]));
         assert_eq!(sent["conditions"], json!([{"productLevel": "3"}]));
         assert_eq!(sent["limit"], json!(200));
-        assert_eq!(sent["select_cols"].as_array().unwrap().len(), 17);
+        assert_eq!(sent["select_cols"].as_array().unwrap().len(), 19);
         assert_eq!(sent["select_cols"][16], json!("targtype"));
+        assert_eq!(sent["select_cols"][18], json!("targdesc"));
         let bad = MastQuery { where_: MastWhere::None, ..m16(MastMissionId::Jwst) };
         assert_eq!(search(&hub, "g1:search", &bad, false).await.unwrap_err().code, MastErrorCode::BadInput);
         assert_eq!(search(&hub, "bad id", &query, false).await.unwrap_err().code, MastErrorCode::BadInput);
@@ -1227,6 +1272,163 @@ mod tests {
             json!([{"productLevel": "3"}, {"tsovisit": "t"}, {"exp_type": "NRS_BRIGHTOBJ,NIS_SOSS,MIR_LRS-SLITLESS,NRC_TSGRISM"}])
         );
         assert_eq!(server.count("/search/jwst"), 2);
+    }
+
+    fn ism_answer(copies: usize, total: usize) -> String {
+        let mut answer: Value = serde_json::from_str(&fixture("jwst_m16_ism.json")).unwrap();
+        let rows = answer["results"].as_array().unwrap().clone();
+        let copied: Vec<Value> = (0..copies)
+            .flat_map(|copy| {
+                rows.iter().map(move |row| {
+                    let mut row = row.clone();
+                    if copy > 0 {
+                        row["fileSetName"] = json!(format!("{}_{copy}", row["fileSetName"].as_str().unwrap()));
+                    }
+                    row
+                })
+            })
+            .take(total)
+            .collect();
+        answer["totalResults"] = json!(copied.len());
+        answer["results"] = Value::Array(copied);
+        answer.to_string()
+    }
+
+    fn ism(level: LevelFilter, offset: i64) -> MastQuery {
+        let mut query = m16(MastMissionId::Jwst);
+        query.filters.level = Some(level);
+        query.filters.categories = vec![ObjectCategory::Ism];
+        query.offset = offset;
+        query
+    }
+
+    fn body_of(request: &Recorded) -> Value {
+        serde_json::from_str(&request.body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_level_service_path() {
+        let server = serve_routes(vec![
+            Route::post("/search/jwst/api/v0.1/search").when(|r| r.body.contains("\"productLevel\":")).json(fixture("jwst_m16_l3.json")),
+            Route::post("/search/jwst/api/v0.1/search").json(ism_answer(4, usize::MAX)),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let first = search(&hub, "g1:search", &ism(LevelFilter::Exposures, 0), false).await.unwrap();
+        assert_eq!(server.count("/search/jwst"), 1);
+        let sent = body_of(&server.requests()[0]);
+        assert_eq!(sent["conditions"], json!([{"targcat": "ISM"}]));
+        assert_eq!((&sent["offset"], &sent["limit"]), (&json!(0), &json!(2000)));
+        assert_eq!(sent["select_cols"].as_array().unwrap().len(), 19);
+        assert!(first.level_filtered_locally);
+        assert_eq!(first.level_applied_locally.as_deref(), Some("productLevel in 1b, 2a, 2b, 2c"));
+        assert!(!first.from_cache);
+        assert_eq!(first.request_id, "g1:search");
+        assert_eq!((first.rows.len(), first.total_reported, first.total_reliable, first.has_more), (200, Some(444), true, true));
+        assert_eq!((first.offset, first.limit), (0, 200));
+        assert!(first.rows.iter().all(|row| row.level.as_deref() == Some("1b, 2a, 2b, 2c")));
+        assert_eq!(first.request_body, sent);
+        assert_eq!(first.dropped_conditions, Vec::<String>::new());
+        assert_eq!(first.unfiltered_total, None);
+        let second = search(&hub, "g1:page:200", &ism(LevelFilter::Exposures, 200), false).await.unwrap();
+        assert!(second.from_cache && second.level_filtered_locally);
+        assert_eq!((second.rows.len(), second.offset, second.has_more), (200, 200, true));
+        assert_ne!(second.rows[0].dataset_id, first.rows[0].dataset_id);
+        let last = search(&hub, "g1:page:400", &ism(LevelFilter::Exposures, 400), false).await.unwrap();
+        assert_eq!((last.rows.len(), last.has_more), (44, false));
+        let combined = search(&hub, "g2:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
+        assert!(combined.from_cache && combined.level_filtered_locally);
+        assert_eq!((combined.rows.len(), combined.total_reported, combined.has_more), (8, Some(8), false));
+        assert_eq!(server.count("/search/jwst"), 1, "later pages and the other level come from the one wide answer");
+        assert_eq!(hub.row_filter(MastMissionId::Jwst, "jw02739-o002_t001_miri_3").as_deref(), Some("F770W"));
+        let refreshed = search(&hub, "g3:search", &ism(LevelFilter::Combined, 0), true).await.unwrap();
+        assert!(!refreshed.from_cache && refreshed.level_filtered_locally);
+        assert_eq!(server.count("/search/jwst"), 2);
+        let all_levels = search(&hub, "g4:search", &ism(LevelFilter::All, 0), false).await.unwrap();
+        assert!(!all_levels.level_filtered_locally);
+        assert_eq!(all_levels.level_applied_locally, None);
+        assert_eq!(body_of(&server.requests()[2])["limit"], json!(200));
+        let mut hst = m16(MastMissionId::Hst);
+        hst.filters.level = Some(LevelFilter::Combined);
+        hst.filters.categories = vec![ObjectCategory::Ism];
+        let server_hst = serve_routes(vec![Route::post("/search/hst/").json(fixture("hst_m16_ism.json"))]).await;
+        let hub_hst = hub_for(&server_hst, dir.path());
+        let page = search(&hub_hst, "g1:search", &hst, false).await.unwrap();
+        assert!(!page.level_filtered_locally);
+        assert_eq!(body_of(&server_hst.requests()[0])["limit"], json!(200));
+    }
+
+    #[tokio::test]
+    async fn a_full_wide_answer_falls_back_to_the_server_level() {
+        let mut level_answer: Value = serde_json::from_str(&fixture("jwst_m16_l3.json")).unwrap();
+        level_answer["search_params"]["conditions"] = json!([{"productLevel": "3"}, {"targcat": "ISM"}]);
+        let server = serve_routes(vec![
+            Route::post("/search/jwst/api/v0.1/search").when(|r| r.body.contains("\"productLevel\":")).json(level_answer.to_string()),
+            Route::post("/search/jwst/api/v0.1/search").json(ism_answer(18, 2000)),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let page = search(&hub, "g1:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
+        assert!(!page.level_filtered_locally);
+        assert_eq!(page.level_applied_locally, None);
+        assert_eq!(server.count("/search/jwst"), 2);
+        let requests = server.requests();
+        assert_eq!(body_of(&requests[0])["limit"], json!(2000));
+        let fallback = body_of(&requests[1]);
+        assert_eq!(fallback["conditions"], json!([{"productLevel": "3"}, {"targcat": "ISM"}]));
+        assert_eq!(fallback["limit"], json!(200));
+        assert_eq!(page.request_body, fallback);
+        assert_eq!((page.rows.len(), page.total_reported), (2, Some(2)));
+        assert_eq!(page.dropped_conditions, Vec::<String>::new());
+        let again = search(&hub, "g2:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
+        assert!(again.from_cache && !again.level_filtered_locally);
+        assert_eq!(server.count("/search/jwst"), 2);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_totals_come_from_the_search_cache_only() {
+        let server = serve_routes(vec![
+            Route::post("/search/jwst/api/v0.1/search").when(|r| r.body.contains("targcat\":")).json(ism_answer(1, usize::MAX)),
+            Route::post("/search/jwst/api/v0.1/search").json(fixture("jwst_m16_l3.json")),
+            Route::post("/search/hst/").when(|r| r.body.contains("sci_broad_category\":")).json(fixture("hst_m16_ism.json")),
+            Route::post("/search/hst/").json(fixture("hst_m16.json")),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let cold = search(&hub, "g1:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
+        assert!(cold.level_filtered_locally);
+        assert_eq!(cold.unfiltered_total, None);
+        assert_eq!(server.count("/search/jwst"), 1);
+        let mut plain = m16(MastMissionId::Jwst);
+        plain.filters.level = Some(LevelFilter::Combined);
+        let baseline = search(&hub, "g2:search", &plain, false).await.unwrap();
+        assert_eq!((baseline.total_reported, baseline.total_reliable, baseline.unfiltered_total), (Some(2), true, None));
+        assert_eq!(server.count("/search/jwst"), 2);
+        let warm = search(&hub, "g3:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
+        assert_eq!(warm.unfiltered_total, Some(2));
+        assert_eq!(server.count("/search/jwst"), 2);
+        let all_levels = search(&hub, "g4:search", &ism(LevelFilter::All, 0), false).await.unwrap();
+        assert_eq!(all_levels.unfiltered_total, None);
+        assert_eq!(server.count("/search/jwst"), 3);
+        let everything = m16(MastMissionId::Jwst);
+        assert_eq!(search(&hub, "g5:search", &everything, false).await.unwrap().total_reported, Some(2));
+        let cached = search(&hub, "g6:search", &ism(LevelFilter::All, 0), false).await.unwrap();
+        assert!(cached.from_cache);
+        assert_eq!(cached.unfiltered_total, Some(2));
+        assert_eq!(server.count("/search/jwst"), 4);
+        let mut hst = m16(MastMissionId::Hst);
+        hst.filters.categories = vec![ObjectCategory::Ism];
+        assert_eq!(search(&hub, "g7:search", &hst, false).await.unwrap().unfiltered_total, None);
+        assert_eq!(search(&hub, "g8:search", &m16(MastMissionId::Hst), false).await.unwrap().total_reported, Some(265));
+        let filtered = search(&hub, "g9:search", &hst, false).await.unwrap();
+        assert!(filtered.from_cache);
+        assert_eq!((filtered.unfiltered_total, filtered.total_reported), (Some(265), Some(37)));
+        assert_eq!(server.count("/search/hst"), 2);
+        let serialised = serde_json::to_value(&filtered).unwrap();
+        assert_eq!((&serialised["unfilteredTotal"], &serialised["levelFilteredLocally"]), (&json!(265), &json!(false)));
     }
 
     #[tokio::test]
@@ -2948,6 +3150,70 @@ mod tests {
 
     fn descending(dates: &[String]) -> bool {
         dates.windows(2).all(|pair| pair[0] >= pair[1])
+    }
+
+    fn live_cone(mission: MastMissionId, ra_deg: f64, dec_deg: f64, level: LevelFilter) -> MastQuery {
+        let mut query = m16(mission);
+        query.where_ = MastWhere::Position { ra_deg, dec_deg, radius_arcmin: 3.0, label: None };
+        query.filters.level = Some(level);
+        query
+    }
+
+    #[tokio::test]
+    #[ignore = "live MAST request"]
+    async fn live_object_filters_and_local_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = live_hub(dir.path());
+        let mut m16_ism = live_cone(MastMissionId::Jwst, 274.688, -13.792, LevelFilter::Combined);
+        m16_ism.filters.categories = vec![ObjectCategory::Ism];
+        let started = Instant::now();
+        let page = search(&hub, "live:1", &m16_ism, false).await.unwrap();
+        let seconds = started.elapsed().as_secs_f64();
+        eprintln!(
+            "L2 M16 Combined ISM: rows {} total {:?} local {} dropped {:?} {:.1} s levels {:?}",
+            page.rows.len(),
+            page.total_reported,
+            page.level_filtered_locally,
+            page.dropped_conditions,
+            seconds,
+            page.rows.iter().map(|row| row.level.clone()).collect::<Vec<_>>()
+        );
+        assert!(page.level_filtered_locally);
+        assert_eq!(page.rows.len(), 2);
+        assert!(page.rows.iter().all(|row| row.categories == [ObjectCategory::Ism]));
+        assert!(seconds < 15.0);
+        let mut all_levels = m16_ism.clone();
+        all_levels.filters.level = Some(LevelFilter::All);
+        let wide = search(&hub, "live:2", &all_levels, false).await.unwrap();
+        eprintln!("L1 M16 All ISM: rows {} total {:?} reliable {}", wide.rows.len(), wide.total_reported, wide.total_reliable);
+        assert!(wide.rows.iter().all(|row| row.values["targcat"] == "ISM"));
+        let mut trappist = live_cone(MastMissionId::Jwst, 346.6223, -5.0414, LevelFilter::Combined);
+        trappist.filters.object_types = vec![ObjectType::Exoplanets];
+        let started = Instant::now();
+        let planets = search(&hub, "live:3", &trappist, false).await.unwrap();
+        let seconds = started.elapsed().as_secs_f64();
+        eprintln!("L8 TRAPPIST-1 Combined Exoplanets: rows {} local {} {:.1} s", planets.rows.len(), planets.level_filtered_locally, seconds);
+        assert!(planets.level_filtered_locally && seconds < 15.0);
+        assert!(planets.rows.iter().all(|row| row.target_description.as_deref().is_some_and(|text| text.contains("Exoplanet"))));
+        let mut hst = live_cone(MastMissionId::Hst, 274.688, -13.792, LevelFilter::All);
+        hst.filters.categories = vec![ObjectCategory::Ism];
+        let hst_page = search(&hub, "live:4", &hst, false).await.unwrap();
+        eprintln!(
+            "L5 HST M16 ISM: rows {} total {:?} reliable {} dropped {:?}",
+            hst_page.rows.len(),
+            hst_page.total_reported,
+            hst_page.total_reliable,
+            hst_page.dropped_conditions
+        );
+        assert_eq!(hst_page.total_reported, Some(hst_page.rows.len() as i64));
+        assert!(hst_page.rows.iter().all(|row| row.categories.contains(&ObjectCategory::Ism)));
+        let mut iue = live_cone(MastMissionId::Iue, 274.688, -13.792, LevelFilter::All);
+        iue.filters.categories = vec![ObjectCategory::Stars];
+        let iue_page = search(&hub, "live:5", &iue, false).await.unwrap();
+        eprintln!("L9 IUE M16 Stars: rows {} dropped {:?}", iue_page.rows.len(), iue_page.dropped_conditions);
+        assert!(!iue_page.rows.is_empty());
+        assert!(iue_page.rows.iter().all(|row| row.categories == [ObjectCategory::Stars]));
+        assert!(iue_page.dropped_conditions.is_empty());
     }
 
     #[tokio::test]

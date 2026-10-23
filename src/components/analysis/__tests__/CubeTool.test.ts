@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ANALYSIS_SECTION, CUBE_TOOL_EMPTY_TITLE } from "../../../utils/analysisSections";
 import type { RampInfo } from "../../../shared/types/ramp";
 import type { Spectrum1d } from "../../../shared/types/spectrum1d";
+import type { OpenSampleFrames, SampleDataStore, SampleEntry } from "../../../hooks/useSampleData";
 
 const cubeState = vi.hoisted(() => ({
   isCube: true,
@@ -17,6 +18,11 @@ const docState = vi.hoisted(() => ({
   csv: null as { path: string; over: string | null } | null,
 }));
 const panelProps = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
+const samples = vi.hoisted(() => ({
+  entries: [] as Record<string, unknown>[],
+  opens: [] as unknown[],
+  started: [] as string[],
+}));
 
 vi.mock("../../../context/PreviewContext", () => ({
   fileKeyOf: (file: { id: string; path: string } | null) => (file ? `${file.id}|${file.path}` : null),
@@ -50,6 +56,24 @@ vi.mock("../SpectroscopyPanel", () => ({
   },
 }));
 vi.mock("../PvPanel", () => ({ default: () => "[pv-panel]" }));
+vi.mock("../../../hooks/useSampleData", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../hooks/useSampleData")>();
+  const entries = () => samples.entries as unknown as SampleEntry[];
+  const store: SampleDataStore = { ...actual.sampleDataStore, subscribe: () => () => {}, get: entries };
+  const sampleActions: typeof actual.sampleActions = (_store, id, onOpen) => {
+    samples.opens.push(onOpen);
+    return actual.sampleActions(store, id, onOpen);
+  };
+  return {
+    ...actual,
+    sampleDataStore: store,
+    sampleActions,
+    useSampleData: (onOpen: OpenSampleFrames, id: string) => {
+      samples.started.push(id);
+      return actual.sampleControls(entries().find((e) => e.id === id), sampleActions(store, id, onOpen));
+    },
+  };
+});
 vi.mock("../RampPanel", () => ({ default: () => "[ramp-panel]" }));
 
 import CubeTool from "../CubeTool";
@@ -101,6 +125,9 @@ beforeEach(() => {
   docState.requests = [];
   docState.csv = null;
   panelProps.current = null;
+  samples.entries = [];
+  samples.opens = [];
+  samples.started = [];
 });
 
 describe("CubeTool sections", () => {
@@ -211,5 +238,117 @@ describe("CubeTool spectrum documents", () => {
     await renderCubeTool(null);
     expect(docState.requests.every(([path]) => path === null)).toBe(true);
     expect(panelProps.current?.documentMode).toBeFalsy();
+  });
+});
+
+const IFU_ID = "jwst-gc-nirspec-ifu";
+const LRS_ID = "jwst-miri-lrs";
+const IFU_CREDIT = "JWST/NIRSpec IFU cube and 1-D spectrum of the Galactic Center (GC-NIRSPEC-1): NASA, ESA, CSA, GTO programme 1266 (PI M. Garcia Marin), data via MAST at STScI";
+const LRS_CREDIT = "JWST/MIRI LRS spectrum of SN 2021aefx: NASA, ESA, CSA, GO programme 2072 (PI S. W. Jha), data via MAST at STScI";
+const LICENCE = "Public JWST archive data; acknowledgement requested by STScI";
+const IFU_SHOWS = "Cube: spectra with error bands, moment maps, line fits and line measurement, next to the pipeline's 1-D spectrum";
+
+function offer(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+  const ifu = id === IFU_ID;
+  return {
+    id,
+    title: ifu ? "JWST/NIRSpec IFU cube of the Galactic Center (G395H/F290LP) with its 1-D spectrum" : "JWST/MIRI LRS spectrum of SN 2021aefx",
+    credit: ifu ? IFU_CREDIT : LRS_CREDIT,
+    licence: LICENCE,
+    demonstrates: ifu ? IFU_SHOWS : "",
+    total_bytes: ifu ? 175_680_000 : 35_164_800,
+    file_count: ifu ? 2 : 3,
+    state: "absent",
+    received_bytes: 0,
+    folder: `C:/Users/me/AstroBurst/samples/${id}`,
+    newer_at_mast: false,
+    file: null,
+    error: null,
+    ...over,
+  };
+}
+
+function listSets(...sets: Record<string, unknown>[]): void {
+  samples.entries = sets;
+}
+
+function offerBlock(html: string, id: string): string {
+  const at = html.indexOf(`data-cube-sample="${id}"`);
+  if (at < 0) return "";
+  const next = html.indexOf("data-cube-sample=", at + 1);
+  return html.slice(at, next < 0 ? undefined : next);
+}
+
+describe("CubeTool sample sets (UX-34b)", () => {
+  it("offers the NIRSpec IFU and MIRI LRS sample sets with their size, credit and licence when the Cube tool has nothing to show", async () => {
+    cubeState.isCube = false;
+    cubeState.file = { id: "img", path: "C:/data/m31.fits" };
+    listSets(offer(IFU_ID), offer(LRS_ID));
+    const html = await render();
+    expect(html).toContain(CUBE_TOOL_EMPTY_TITLE);
+    const ifu = offerBlock(html, IFU_ID);
+    const lrs = offerBlock(html, LRS_ID);
+    expect(ifu).toContain("JWST/NIRSpec IFU cube of the Galactic Center");
+    expect(ifu).toContain("Download sample (176 MB)");
+    expect(ifu).toContain(IFU_CREDIT);
+    expect(ifu).toContain(LICENCE);
+    expect(ifu).toContain(IFU_SHOWS.replace("'", "&#x27;"));
+    expect(lrs).toContain("Download sample (35 MB)");
+    expect(lrs).toContain(LRS_CREDIT);
+    expect(html.indexOf(`data-cube-sample="${IFU_ID}"`)).toBeLessThan(html.indexOf(`data-cube-sample="${LRS_ID}"`));
+  });
+
+  it("opens a kept set and resumes a partial one", async () => {
+    cubeState.isCube = false;
+    listSets(offer(IFU_ID, { state: "ready", received_bytes: 175_680_000 }), offer(LRS_ID, { state: "partial", received_bytes: 12_000_000 }));
+    const html = await render();
+    expect(offerBlock(html, IFU_ID)).toContain("Open sample");
+    expect(offerBlock(html, LRS_ID)).toContain("Resume sample download (12 MB of 35 MB)");
+  });
+
+  it("shows a failed download with Retry next to its error", async () => {
+    cubeState.isCube = false;
+    listSets(offer(IFU_ID, { state: "partial", received_bytes: 1_000, error: "the sample host answered 404" }));
+    const block = offerBlock(await render(), IFU_ID);
+    expect(block).toContain("Retry sample download");
+    expect(block).toMatch(/role="alert"[^>]*>the sample host answered 404</);
+  });
+
+  it("keeps a running sample download visible with its bar and Cancel beside a cube, and hides the idle set", async () => {
+    listSets(offer(IFU_ID, { state: "downloading", received_bytes: 52_000_000 }), offer(LRS_ID));
+    const html = await renderCubeTool(null);
+    expect(html).toContain("[spectroscopy-panel]");
+    const ifu = offerBlock(html, IFU_ID);
+    expect(ifu).toMatch(/role="progressbar"[^>]*aria-valuenow="29"/);
+    expect(ifu).toContain("Cancel");
+    expect(offerBlock(html, LRS_ID)).toBe("");
+  });
+
+  it("offers no set beside a cube when nothing downloads, nor outside the desktop app where no set is listed", async () => {
+    listSets(offer(IFU_ID), offer(LRS_ID));
+    expect(await renderCubeTool(null)).not.toContain("data-cube-sample=");
+    cubeState.isCube = false;
+    listSets();
+    const html = await render();
+    expect(html).not.toContain("data-cube-sample=");
+    expect(html).toContain("Open spectrum (CSV)");
+  });
+
+  it("opens a set's files through the sample opener that shows its cube or spectrum", async () => {
+    const { openSampleProducts } = await import("../../../utils/sampleOffers");
+    cubeState.isCube = false;
+    listSets(offer(IFU_ID), offer(LRS_ID));
+    await render();
+    expect(samples.opens.length).toBeGreaterThan(0);
+    expect(samples.opens.every((onOpen) => onOpen === openSampleProducts)).toBe(true);
+  });
+
+  it("reads the sets from the store App starts, without starting the store again for each offer", async () => {
+    cubeState.isCube = false;
+    listSets(offer(IFU_ID), offer(LRS_ID));
+    const html = await render();
+    expect(offerBlock(html, IFU_ID)).toContain("Download sample (176 MB)");
+    expect(offerBlock(html, LRS_ID)).toContain("Download sample (35 MB)");
+    expect(samples.started).toEqual([]);
   });
 });

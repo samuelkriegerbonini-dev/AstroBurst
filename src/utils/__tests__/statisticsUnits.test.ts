@@ -7,9 +7,12 @@ import {
   convertScaleValue,
   convertStatistics,
   formatStatistic,
+  statisticValue,
   statisticsToCsv,
 } from "../statisticsUnits";
+import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../analysisLabels";
 import type { ChannelStatistics } from "../../shared/types/statistics";
+import statisticsPanelSource from "../../components/analysis/StatisticsPanel.tsx?raw";
 
 const stats: ChannelStatistics = {
   count: 5,
@@ -141,7 +144,7 @@ describe("statisticsToCsv", () => {
     const padded: ChannelStatistics = { ...stats, total: 10, fraction: 5 / 10, nan_count: 1, padding: 4, excluded: 0 };
     const accounted = STATISTIC_ROWS
       .filter((row) => row.kind === "count")
-      .reduce((sum, row) => sum + Number(padded[row.key]), 0);
+      .reduce((sum, row) => sum + statisticValue(padded, row.key), 0);
     expect(accounted).toBe(padded.total);
     const csv = statisticsToCsv([{ label: "K", stats: padded }], "raw").split("\n");
     expect(csv.find((l) => l.startsWith("padding,"))).toBe("padding,4");
@@ -163,5 +166,69 @@ describe("statisticsToCsv", () => {
     expect(minLine.split(",").slice(1).map(Number)).toEqual([0, 0, 0]);
     const maxLine = lines.find((l) => l.startsWith("max,"))!;
     expect(maxLine.split(",").slice(1).map(Number)).toEqual([1, 1, 1]);
+  });
+});
+
+describe("robust sigma row (UX-35)", () => {
+  function csvRow(csv: string, key: string): number[] | undefined {
+    const line = csv.split("\n").find((l) => l.startsWith(`${key},`));
+    return line?.split(",").slice(1).map(Number);
+  }
+
+  function expectRelativelyEqual(actual: number, expected: number) {
+    expect(Math.abs(actual - expected) / Math.abs(expected)).toBeLessThan(1e-12);
+  }
+
+  it("writes a sigma_mad row equal to 1.4826 × the mad row", () => {
+    const csv = statisticsToCsv(
+      [
+        { label: "R", stats },
+        { label: "G", stats: { ...stats, mad: 0.0123 } },
+        { label: "B", stats: { ...stats, mad: 2.7e-7 } },
+      ],
+      "raw",
+    );
+    const mad = csvRow(csv, "mad")!;
+    const sigma = csvRow(csv, "sigma_mad");
+    expect(sigma).toBeDefined();
+    expect(sigma).toHaveLength(3);
+    sigma!.forEach((value, i) => expectRelativelyEqual(value, 1.4826 * mad[i]));
+  });
+
+  it("converts the robust sigma like MAD in normalized and 16-bit units", () => {
+    const normalized = statisticsToCsv([{ label: "K", stats }], "normalized", { min: 1, max: 100 });
+    expectRelativelyEqual(csvRow(normalized, "sigma_mad")![0], (1.4826 * 1) / 99);
+    const small: ChannelStatistics = { ...stats, min: 0, max: 0.5, mad: 0.1 };
+    const sixteen = statisticsToCsv([{ label: "K", stats: small }], "16bit", { min: 0, max: 0.5 });
+    expectRelativelyEqual(csvRow(sixteen, "sigma_mad")![0], 1.4826 * 0.1 * UINT16_MAX);
+  });
+
+  it("puts the row right after MAD with the shared label and title, as a scale statistic", () => {
+    const madAt = STATISTIC_ROWS.findIndex((row) => row.key === "mad");
+    const row = STATISTIC_ROWS[madAt + 1];
+    expect(row.key).toBe("sigma_mad");
+    expect(row.label).toBe(SIGMA_MAD_LABEL);
+    expect(row.title).toBe(SIGMA_MAD_TITLE);
+    expect(row.kind).toBe("scale");
+    const lines = statisticsToCsv([{ label: "K", stats }], "raw").split("\n");
+    expect(lines.findIndex((l) => l.startsWith("sigma_mad,"))).toBe(lines.findIndex((l) => l.startsWith("mad,")) + 1);
+  });
+
+  it("reads table values by row key, deriving the robust sigma from MAD", () => {
+    expect(statisticValue(stats, "median")).toBe(3);
+    expect(statisticValue({ ...stats, mad: 2 }, "sigma_mad")).toBe(1.4826 * 2);
+    expect(statisticValue({ ...stats, mad: Number.NaN }, "sigma_mad")).toBeNaN();
+  });
+});
+
+describe("StatisticsPanel table wiring (UX-35)", () => {
+  it("reads every cell through statisticValue, so the sigma_mad row reaches the table", () => {
+    expect(statisticsPanelSource).toContain("formatStatistic(statisticValue(s, row.key), row.kind, unit)");
+    expect(statisticsPanelSource).not.toMatch(/s\[row\.key\]/);
+  });
+
+  it("tags each row with its key and gives the label cell the row title", () => {
+    expect(statisticsPanelSource).toContain("data-statistic={row.key}");
+    expect(statisticsPanelSource).toMatch(/<td className="[^"]*" title=\{row\.title\}>\s*\{row\.label\}/);
   });
 });

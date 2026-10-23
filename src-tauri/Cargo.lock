@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "astroburst"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -206,7 +206,9 @@ dependencies = [
  "uuid",
  "wcs",
  "windows-sys 0.61.2",
+ "xz2",
  "zip",
+ "zstd",
 ]
 
 [[package]]

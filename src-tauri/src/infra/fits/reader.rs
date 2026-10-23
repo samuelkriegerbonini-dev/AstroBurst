@@ -1656,6 +1656,29 @@ mod tests {
     }
 
     #[test]
+    fn a_short_x1d_names_its_larger_asdf_table_and_lists_the_extract1d_entry_the_frontend_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short_x1d.fits");
+        write_raw_hdus(
+            &path,
+            &[
+                (empty_primary_cards(), Vec::new()),
+                bintable_hdu("EXTRACT1D", 16, 4),
+                bintable_hdu("ASDF", 128, 1),
+            ],
+        );
+        let msg = format!("{:#}", auto_hdu_index(&File::open(&path).unwrap()).unwrap_err());
+        assert!(
+            msg.starts_with("HDU 2 (ASDF): BINTABLE extension, holds no image pixels;"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("[1] EXTNAME=EXTRACT1D XTENSION=BINTABLE NAXIS=2 [16x4] -- BINTABLE extension, holds no image pixels"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn rejection_message_front_loads_the_verdict_for_the_most_image_like_hdu() {
         let dir = tempfile::tempdir().unwrap();
 

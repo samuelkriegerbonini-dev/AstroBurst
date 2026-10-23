@@ -3,6 +3,7 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
+use crate::cmd::analysis::area::{area_companion, AREA_EXTNAME};
 use crate::cmd::common::{
     blocking_cmd, derived_output_header, image_ref, invalidate_written, load_companions, load_from_cache_or_disk,
     output_stem, render_and_save_as, resolve_output_dir, source_primary_header, try_extract_rgb_resolved,
@@ -40,12 +41,13 @@ const STALE_XTRANS_CARDS_HISTORY: &str = "geometry: X-Trans CFA cards removed (t
 struct CarriedPlanes {
     err: Option<(Array2<f32>, HduHeader)>,
     dq: Option<(IntPlane, HduHeader)>,
+    area: Option<(Array2<f32>, HduHeader)>,
     notes: Vec<String>,
 }
 
 impl CarriedPlanes {
     fn is_empty(&self) -> bool {
-        self.err.is_none() && self.dq.is_none()
+        self.err.is_none() && self.dq.is_none() && self.area.is_none()
     }
 }
 
@@ -89,9 +91,14 @@ fn is_science_plane(info: Option<&PlaneInfo>) -> bool {
 }
 
 fn carried_planes(path: &str, entry: &ImageEntry, op: GeometryOp) -> anyhow::Result<CarriedPlanes> {
-    let refs = entry.companions().cloned().unwrap_or_default();
-    if !is_science_plane(entry.plane_info()) || (refs.err.is_none() && refs.dq.is_none()) {
+    if !is_science_plane(entry.plane_info()) {
         return Ok(CarriedPlanes::default());
+    }
+    let area = area_companion(path, entry).map(|a| (apply_geometry(a.arr(), op), copied_cards(a.header(), &[])));
+    let area_note = area.as_ref().map(|_| "geometry: AREA transformed with SCI".to_string());
+    let refs = entry.companions().cloned().unwrap_or_default();
+    if refs.err.is_none() && refs.dq.is_none() {
+        return Ok(CarriedPlanes { area, notes: area_note.into_iter().collect(), ..CarriedPlanes::default() });
     }
     let loaded = load_companions(path)?;
     let err = loaded.err.map(|e| (apply_geometry(e.arr(), op), copied_cards(e.header(), ERR_EXTENSION_CARDS)));
@@ -104,7 +111,8 @@ fn carried_planes(path: &str, entry: &ImageEntry, op: GeometryOp) -> anyhow::Res
         plane_names(err.is_some(), dq.is_some()).map(|names| format!("geometry: {names} transformed with SCI"));
     let unreadable = plane_names(refs.err.is_some() && err.is_none(), refs.dq.is_some() && dq.is_none())
         .map(|names| format!("geometry: {names} not transformed (the plane could not be read)"));
-    Ok(CarriedPlanes { err, dq, notes: carried.into_iter().chain(unreadable).collect() })
+    let notes = carried.into_iter().chain(area_note).chain(unreadable).collect();
+    Ok(CarriedPlanes { err, dq, area, notes })
 }
 
 fn output_header(
@@ -150,6 +158,9 @@ fn write_with_companions(
             None => HduData::U32(&plane.bits),
         };
         hdus.push(ImageHdu { data, header: Some(header), extname: EXTNAME_DQ, extver: 1 });
+    }
+    if let Some((arr, header)) = &carried.area {
+        hdus.push(ImageHdu { data: HduData::F32(arr), header: Some(header), extname: AREA_EXTNAME, extver: 1 });
     }
     write_derived_mef(fits_path, Some(primary), &hdus)
 }
@@ -300,7 +311,15 @@ mod tests {
         (TestData::I32(raw), vec![("BZERO", "2147483648".into()), ("BSCALE", "1".into())])
     }
 
-    fn jwst_cal_mef(dir: &tempfile::TempDir, (dq, dq_cards): (TestData, Vec<(&'static str, String)>)) -> String {
+    fn jwst_cal_mef(dir: &tempfile::TempDir, dq: (TestData, Vec<(&'static str, String)>)) -> String {
+        jwst_cal_mef_with(dir, dq, vec![])
+    }
+
+    fn jwst_cal_mef_with(
+        dir: &tempfile::TempDir,
+        (dq, dq_cards): (TestData, Vec<(&'static str, String)>),
+        extra: Vec<TestHdu>,
+    ) -> String {
         let path = dir.path().join("frame.fits");
         let plane = |offset: f32| ramp(ROWS, COLS, offset).iter().copied().collect::<Vec<f32>>();
         let sci_cards: Vec<(&'static str, String)> = vec![
@@ -315,6 +334,12 @@ mod tests {
             ("CD2_2", "1.0E-4".into()),
         ];
         let hdu = |extname, data, extra_cards| TestHdu { extname: Some(extname), extver: Some(1), cols: COLS, rows: ROWS, data, extra_cards };
+        let mut hdus = vec![
+            hdu("SCI", TestData::F32(plane(10.0)), sci_cards),
+            hdu("ERR", TestData::F32(plane(0.5)), vec![("BUNIT", "'MJy/sr'".into())]),
+            hdu("DQ", dq, dq_cards),
+        ];
+        hdus.extend(extra);
         write_test_mef(
             &path,
             &[
@@ -326,13 +351,88 @@ mod tests {
                 ("DATE", "'2024-05-01T12:00:00.000'".into()),
                 ("NEXTEND", "6".into()),
             ],
-            &[
-                hdu("SCI", TestData::F32(plane(10.0)), sci_cards),
-                hdu("ERR", TestData::F32(plane(0.5)), vec![("BUNIT", "'MJy/sr'".into())]),
-                hdu("DQ", dq, dq_cards),
-            ],
+            &hdus,
         );
         path.to_str().unwrap().to_string()
+    }
+
+    fn source_area() -> Array2<f32> {
+        Array2::from_shape_fn((ROWS, COLS), |(y, x)| 1.0 + 0.001 * (y * COLS + x) as f32)
+    }
+
+    fn area_test_hdu() -> TestHdu {
+        TestHdu {
+            extname: Some("AREA"),
+            extver: Some(1),
+            cols: COLS,
+            rows: ROWS,
+            data: TestData::F32(source_area().iter().copied().collect()),
+            extra_cards: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn transform_geometry_carries_the_area_map_with_sci() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = jwst_cal_mef_with(&dir, unsigned_dq_hdu_data(), vec![area_test_hdu()]);
+
+        let value = transform_geometry_cmd(src, out, "flip_v".to_string()).await.unwrap();
+        let fits = value[RES_FITS_PATH].as_str().unwrap().to_string();
+        assert_eq!(
+            extnames(&fits),
+            vec![None, Some("SCI".to_string()), Some("ERR".to_string()), Some("DQ".to_string()), Some("AREA".to_string())]
+        );
+        let file = std::fs::File::open(&fits).unwrap();
+        let area = extract_image_mmap_by_index(&file, 4).unwrap().image;
+        assert_eq!(area, apply_geometry(&source_area(), GeometryOp::FlipV));
+        let area_header = extract_header_by_index(&file, 4).unwrap();
+        assert_eq!(area_header.get_i64("EXTVER"), Some(1));
+        let notes = history(&cached_header(&fits).unwrap());
+        assert!(notes.iter().any(|h| h.contains("geometry: ERR and DQ transformed with SCI")), "{notes:?}");
+        assert!(notes.iter().any(|h| h.contains("geometry: AREA transformed with SCI")), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn rot180_of_a_synthetic_cal_with_an_area_map_keeps_the_aperture_flux() {
+        use crate::cmd::analysis::area::test_fixtures::{
+            area_hdu, blocked_area, cal_sci_cards, jwst_cal_mef, CalPlanes, CAL_APERTURE_RADIUS, CAL_SIZE,
+        };
+        use crate::cmd::analysis::{photometry_for_path, RES_PHOTCAL};
+        use crate::types::constants::{RES_LABEL, RES_PHOTOMETRY};
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = jwst_cal_mef(
+            &dir.path().join("cal.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(blocked_area(), CAL_SIZE, Some(1))],
+        );
+        let op = GeometryOp::Rot180;
+        let value = transform_geometry_cmd(src.path.clone(), out, op.name().to_string()).await.unwrap();
+        let fits = value[RES_FITS_PATH].as_str().unwrap().to_string();
+        assert_eq!(
+            extnames(&fits),
+            vec![None, Some("SCI".to_string()), Some("ERR".to_string()), Some("DQ".to_string()), Some("AREA".to_string())]
+        );
+
+        let (ym, xm) = mapped(op, (CAL_SIZE, CAL_SIZE), (32, 32));
+        let measure = |path: &str, x: usize, y: usize| {
+            photometry_for_path(path, x as f64, y as f64, Some(CAL_APERTURE_RADIUS), None, false, true, None).unwrap()
+        };
+        let before = measure(&src.key, 32, 32);
+        let after = measure(&fits, xm, ym);
+        assert_eq!(before[RES_PHOTOMETRY]["area_applied"], true);
+        assert_eq!(after[RES_PHOTOMETRY]["area_applied"], true, "{}", after[RES_PHOTCAL]);
+        assert_eq!(after[RES_PHOTCAL][RES_LABEL], before[RES_PHOTCAL][RES_LABEL]);
+        assert_eq!(after[RES_PHOTOMETRY]["n_masked"], before[RES_PHOTOMETRY]["n_masked"]);
+        assert_eq!(after[RES_PHOTOMETRY]["n_masked"], 1);
+        for field in ["net_flux", "flux_err", "flux_jy", "mag_ab"] {
+            let (a, b) = (before[RES_PHOTOMETRY][field].as_f64().unwrap(), after[RES_PHOTOMETRY][field].as_f64().unwrap());
+            assert!((a - b).abs() <= 1e-6 * a.abs(), "{field}: source {a} vs rot180 {b}");
+        }
     }
 
     fn mapped(op: GeometryOp, dims: (usize, usize), (y, x): (usize, usize)) -> (usize, usize) {
@@ -731,7 +831,10 @@ mod tests {
             .await
             .unwrap();
         let fits = value[RES_FITS_PATH].as_str().unwrap().to_string();
-        assert_eq!(extnames(&fits), vec![None, Some("SCI".to_string()), Some("ERR".to_string()), Some("DQ".to_string())]);
+        assert_eq!(
+            extnames(&fits),
+            vec![None, Some("SCI".to_string()), Some("ERR".to_string()), Some("DQ".to_string()), Some("AREA".to_string())]
+        );
 
         let sci = load_cached(&src).unwrap();
         let dims = sci.arr().dim();

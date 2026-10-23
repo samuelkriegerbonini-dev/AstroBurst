@@ -1,6 +1,6 @@
 [package]
 name = "astroburst"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "AstroBurst -- High-Performance JWST FITS Processing"
 license = "AGPL-3.0-or-later"
@@ -53,6 +53,8 @@ base64 = "0.22.1"
 log = "0.4.29"
 fitsio-pure = { version = "=0.21.6", features = ["parallel"] }
 sha2 = "0.10"
+zstd = { version = "0.13", optional = true }
+xz2 = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -68,6 +70,7 @@ astrometry-net = ["net"]
 vizier = ["net", "reqwest/blocking"]
 mast = ["net"]
 asdf-full = ["dep:lz4_flex"]
+tools = ["dep:zstd", "dep:xz2"]
 
 [build-dependencies]
 tauri-build = { version = "2.5", features = [] }
@@ -86,6 +89,11 @@ required-features = ["tauri"]
 name = "astroburst-server"
 path = "src/server/main.rs"
 required-features = ["server"]
+
+[[bin]]
+name = "build_catalog"
+path = "src/bin/build_catalog.rs"
+required-features = ["tools"]
 
 [profile.release]
 lto = true

@@ -50,6 +50,17 @@ describe("metadataSections", () => {
     expect(section("pointing", hst).rows[0]).toEqual({ label: "Sep", value: "1.23'", copy: null, note: null });
   });
 
+  it("puts the category and the raw target description first in the observation section", () => {
+    const filed = metadataSections({ row: row("a", { values: { _category: "Nebulae and ISM" }, targetDescription: "Molecular clouds; Nebulae; Protostars" }), resolved: null, searchPosition: null });
+    expect(section("observation", filed).rows.slice(0, 3).map((r) => [r.label, r.value])).toEqual([
+      ["Category", "Nebulae and ISM"],
+      ["Target description", "Molecular clouds; Nebulae; Protostars"],
+      ["Instrument", "NIRCAM"],
+    ]);
+    const unknown = metadataSections({ row: row("a", { values: { _category: null } }), resolved: null, searchPosition: null });
+    expect(section("observation", unknown).rows[0]).toEqual({ label: "Category", value: "unknown", copy: null, note: null });
+  });
+
   it("lists the observation fields that are present", () => {
     expect(section("observation", sections).rows.map((r) => [r.label, r.value])).toEqual([
       ["Instrument", "NIRCAM"],

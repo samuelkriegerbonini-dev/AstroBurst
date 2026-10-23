@@ -1,5 +1,6 @@
 import type {
   MastColumn,
+  MastFilterGroup,
   MastImageEntry,
   MastImageSet,
   MastMission,
@@ -13,12 +14,56 @@ import type {
 
 const CHECKED_ON = "2026-10-16";
 
+const CATEGORY_LABELS: [string, string][] = [
+  ["galaxies", "Galaxies"],
+  ["galaxy_clusters", "Galaxy clusters and groups"],
+  ["ism", "Nebulae and ISM"],
+  ["star_clusters", "Star clusters"],
+  ["stars", "Stars"],
+  ["solar_system", "Solar System"],
+  ["fields", "Deep and blank fields"],
+  ["calibration", "Calibration targets"],
+];
+
+const OBJECT_TYPE_LABELS: [string, string][] = [
+  ["planetary_nebulae", "Planetary nebulae"],
+  ["nebulae_star_forming", "Nebulae and star-forming regions"],
+  ["young_stars_disks", "Young stars and disks"],
+  ["exoplanets", "Exoplanets"],
+  ["agn_quasars", "Active galaxies, quasars and black holes"],
+  ["interacting_galaxies", "Interacting galaxies"],
+  ["supernovae_transients", "Supernovae and transients"],
+  ["compact_substellar", "White dwarfs and brown dwarfs"],
+];
+
+const IUE_CATEGORIES = ["galaxies", "ism", "star_clusters", "stars", "solar_system"];
+
+function group(id: MastFilterGroup["id"], column: string, labels: [string, string][], info: string): MastFilterGroup {
+  const label = id === "category" ? "Category" : "Object type";
+  return { id, label, column, info, options: labels.map(([optionId, optionLabel]) => ({ id: optionId, label: optionLabel, title: `${column} ${optionLabel}` })) };
+}
+
+export const JWST_GROUPS: MastFilterGroup[] = [
+  group("category", "targcat", CATEGORY_LABELS, "From the proposal: the target category chosen in APT (TARGCAT)."),
+  group("object_type", "targdesc", OBJECT_TYPE_LABELS, "From the proposal's target description keywords (TARGDESC)."),
+];
+
+export const HST_GROUPS: MastFilterGroup[] = [
+  group("category", "sci_broad_category", CATEGORY_LABELS, "From the proposal: SCI_BROAD_CATEGORY."),
+  group("object_type", "sci_target_descrip", OBJECT_TYPE_LABELS, "From the proposal's target description (SCI_TARGET_DESCRIP)."),
+];
+
+export const IUE_GROUPS: MastFilterGroup[] = [
+  group("category", "iue_category", CATEGORY_LABELS.filter(([id]) => IUE_CATEGORIES.includes(id)), "IUE object class (IUE_CATEGORY)."),
+];
+
 function mission(
   id: MastMissionId,
   label: string,
   availability: MastMission["availability"],
   caps: MastMission["capabilities"],
   quick: MastMission["quickFilters"] = [],
+  filterGroups: MastFilterGroup[] = [],
 ): MastMission {
   return {
     id,
@@ -30,24 +75,25 @@ function mission(
     defaultColumns: [],
     note: null,
     checkedOn: CHECKED_ON,
+    filterGroups,
   };
 }
 
 export const MISSIONS: MastMission[] = [
   mission("jwst", "JWST", "open", { search: true, images: true, products: true }, [
-    { id: "level", label: "Level", column: "productLevel", options: ["combined", "all"] },
+    { id: "level", label: "Level", column: "productLevel", options: ["combined", "exposures", "all"] },
     { id: "instrument", label: "Instrument", column: "instrume", options: ["NIRCAM", "MIRI", "NIRSPEC", "NIRISS", "FGS"] },
     { id: "filter", label: "Filter", column: "opticalElements", options: null },
     { id: "date", label: "Date", column: "date_obs", options: null },
     { id: "public", label: "Public only", column: "access", options: null },
-  ]),
+  ], JWST_GROUPS),
   mission("hst", "HST", "open", { search: true, images: true, products: true }, [
     { id: "instrument", label: "Instrument", column: "sci_instrume", options: ["WFC3", "ACS", "WFPC2", "NICMOS", "STIS", "COS"] },
     { id: "filter", label: "Filter", column: "sci_spec_1234", options: null },
     { id: "date", label: "Date", column: "sci_start_time", options: null },
-  ]),
+  ], HST_GROUPS),
   mission("roman", "Roman", "token", { search: true, images: true, products: true }),
-  mission("iue", "IUE", "open", { search: true, images: false, products: false }),
+  mission("iue", "IUE", "open", { search: true, images: false, products: false }, [], IUE_GROUPS),
   mission("classy", "CLASSY", "open", { search: true, images: false, products: false }),
   mission("ullyses", "ULLYSES", "open", { search: true, images: false, products: false }),
   mission("roman_cgi", "Roman CGI", "token", { search: false, images: false, products: false }),
@@ -93,6 +139,8 @@ export function row(datasetId: string, over: Partial<MastRow> = {}): MastRow {
     decDeg: -13.792,
     sRegion: "POLYGON ICRS 274.69 -13.89 274.76 -13.91 274.77 -13.79",
     values: { fileSetName: datasetId, productLevel: "3", effexptm: 5797.86, date_obs: "2022-08-14T08:33:45.2960000", program: 2739, _prog_obs: "2739.1" },
+    categories: [],
+    targetDescription: null,
     ...over,
   };
 }
@@ -118,6 +166,9 @@ export function page(rows: MastRow[], over: Partial<MastSearchPage> = {}): MastS
     unresolvedTargets: [],
     elapsedMs: 1700,
     fromCache: false,
+    levelFilteredLocally: false,
+    levelAppliedLocally: null,
+    unfilteredTotal: null,
     ...over,
   };
 }

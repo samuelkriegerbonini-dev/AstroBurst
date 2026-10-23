@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 
 use super::compress::is_compressed_image_hdu;
 use super::reader::{parse_header_at, ParsedHdu};
-use crate::core::astrometry::wcs::{pixel_center, pixel_edge_corners, WcsTransform};
+use crate::core::astrometry::wcs::{pixel_center, pixel_edge_corners};
+use crate::infra::wcs_source::header_wcs;
 use crate::types::constants::BLOCK_SIZE;
 use crate::types::header::{HduHeader, MAX_FITS_AXES};
 
@@ -350,7 +351,7 @@ fn plane_dims(dims: &[u64]) -> Option<(usize, usize)> {
 }
 
 fn footprint(index: usize, header: &HduHeader, cols: usize, rows: usize) -> Result<Footprint> {
-    let wcs = WcsTransform::from_header(header)?;
+    let wcs = header_wcs(header)?;
     let sky = |(x, y): (f64, f64)| -> Result<[f64; 2]> {
         let c = wcs.pixel_to_world(x, y);
         if !c.ra.is_finite() || !c.dec.is_finite() {
@@ -994,6 +995,29 @@ mod tests {
         assert!(peek.footprints.is_empty());
         let reason = peek.hdus[0].wcs_error.clone().unwrap();
         assert!(reason.contains("CRPIX1"), "{reason}");
+    }
+
+    #[test]
+    fn a_tan_header_with_pv_cards_gets_the_footprint_of_its_linear_tan() {
+        use crate::infra::wcs_source::test_fixtures::PV_DISTORTION_CARDS;
+
+        let linear = tan_wcs_cards((180.0, 45.0), (50.5, 50.5), 1e-5, 0.0);
+        let mut with_pv = linear.clone();
+        with_pv.extend(PV_DISTORTION_CARDS.map(|(key, value)| (key, value.to_string())));
+        let peek = |wcs: &Cards| {
+            let mut file = SparseFits::default();
+            file.push_hdu(&primary_cards(&[]), 0);
+            file.push_hdu(&image_cards("SCI", 1, -32, 100, 100, wcs), 100 * 100 * 4);
+            parse_peek(&file.read(0, 8 * 2880), PeekTarget::FirstImage, 16).unwrap()
+        };
+        let (got, want) = (peek(&with_pv), peek(&linear));
+        assert_eq!(got.hdus[0].wcs_error, None);
+        assert_eq!((got.footprints.len(), want.footprints.len()), (1, 1));
+        let (fp, reference) = (got.footprints[0], want.footprints[0]);
+        for (got, want) in fp.corners.iter().zip(reference.corners) {
+            assert_sky_close(*got, want, 1e-12, "corner");
+        }
+        assert_sky_close(fp.center, reference.center, 1e-12, "centre");
     }
 
     #[test]

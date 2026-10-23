@@ -11,6 +11,7 @@ import { OPEN_SPECTRUM_CSV_LABEL, cubeToolContent, type SpectrumDocument } from 
 import { fileBaseName } from "../../utils/spectrumExport";
 import type { CubeResult } from "./SpectroscopyPanel";
 import TabSpinner from "./TabSpinner";
+import CubeSampleOffers from "./CubeSampleOffers";
 
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
 const PvPanel = lazy(() => import("./PvPanel"));
@@ -92,6 +93,7 @@ function CubeTool() {
             </button>
           </div>
         )}
+        <CubeSampleOffers idle={content === "empty"} />
 
         {docPath !== null && (
           <section id={ANALYSIS_SECTION.spectrum.id} className="flex flex-col gap-2">

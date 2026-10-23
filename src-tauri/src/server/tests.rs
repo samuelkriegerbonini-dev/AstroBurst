@@ -3326,6 +3326,152 @@ async fn drizzle_refuses_cfa_lights_even_with_alignment_off() {
 }
 
 #[tokio::test]
+async fn unknown_align_method_is_400_before_any_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_lights(&dir, "light", 3, None);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-align-name");
+    let _pool_full = Arc::clone(&state.job_semaphore).try_acquire_many_owned(state.config.jobs_max as u32).unwrap();
+
+    let body = serde_json::json!({ "paths": paths, "align": true, "align_method": "zncc", "result_slot": "zncc" });
+    let message = refused(&state, "/sessions/s-align-name/stacking/stack", &body).await;
+    assert!(message.contains("'zncc'"), "{message}");
+    assert!(message.contains("phase_correlation") && message.contains("affine"), "{message}");
+    assert!(state.sessions.get("s-align-name").unwrap().jobs.is_empty(), "a job was queued despite the refusal");
+}
+
+#[tokio::test]
+async fn both_known_align_methods_still_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_lights(&dir, "light", 3, None);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-align-known");
+    let uri = "/sessions/s-align-known/stacking/stack";
+
+    for (method, slot) in [("affine", "affine"), ("phase_correlation", "phase"), (" Affine ", "affine_case")] {
+        let body = serde_json::json!({ "paths": paths, "align": true, "align_method": method, "result_slot": slot });
+        accepted(&state, "s-align-known", uri, &body).await;
+        let session = state.sessions.get("s-align-known").unwrap();
+        assert_eq!(session.cache.get(slot).expect("stacked slot").arr().dim(), (8, 8), "{method}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_kernel_is_400() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = write_lights(&dir, "light", 3, None);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-kernel");
+    let uri = "/sessions/s-kernel/stacking/drizzle";
+    let body = |kernel: &str| {
+        serde_json::json!({
+            "paths": paths, "align": false, "scale": 1.0, "pixfrac": 1.0, "kernel": kernel, "result_slot": kernel
+        })
+    };
+
+    let pool_full = Arc::clone(&state.job_semaphore).try_acquire_many_owned(state.config.jobs_max as u32).unwrap();
+    let message = refused(&state, uri, &body("turbo")).await;
+    assert!(message.contains("'turbo'"), "{message}");
+    for name in ["square", "gaussian", "lanczos3", "lanczos"] {
+        assert!(message.contains(name), "{message}");
+    }
+    assert!(state.sessions.get("s-kernel").unwrap().jobs.is_empty(), "a job was queued despite the refusal");
+    drop(pool_full);
+
+    for name in ["square", "gaussian", "lanczos3", "lanczos"] {
+        accepted(&state, "s-kernel", uri, &body(name)).await;
+        let session = state.sessions.get("s-kernel").unwrap();
+        assert_eq!(session.cache.get(name).expect("drizzled slot").arr().dim(), (8, 8), "{name}");
+    }
+}
+
+const CC2_SIZE: u32 = 1024;
+const CC2_SHIFT: (f64, f64) = (12.25, -7.5);
+const CC2_MIN_SEPARATION_PX: f64 = 24.0;
+const CC2_TOLERANCE_PX: f64 = 0.5;
+
+fn cc2_frame(rotated_180: bool) -> ndarray::Array2<f32> {
+    use astroburst_lib::core::synth::psf::{render_stars, GaussianPsf};
+    use astroburst_lib::core::synth::star_field::{uniform_field, FieldConfig};
+    let size = CC2_SIZE as f64;
+    let centre = (size - 1.0) * 0.5;
+    let field = FieldConfig { width: CC2_SIZE, height: CC2_SIZE, n_stars: 400, flux_min: 2000.0, flux_max: 20000.0, seed: 7 };
+    let mut sky: Vec<astroburst_lib::core::synth::star_field::Star> = Vec::new();
+    for star in uniform_field(&field) {
+        let inside = (star.x - centre).hypot(star.y - centre) <= size * 0.45;
+        let isolated = sky.iter().all(|s| (s.x - star.x).hypot(s.y - star.y) >= CC2_MIN_SEPARATION_PX);
+        if inside && isolated {
+            sky.push(star);
+        }
+    }
+    if rotated_180 {
+        for star in &mut sky {
+            star.x = 2.0 * centre - star.x + CC2_SHIFT.0;
+            star.y = 2.0 * centre - star.y + CC2_SHIFT.1;
+        }
+    }
+    render_stars(&sky, &GaussianPsf::from_fwhm(3.0), CC2_SIZE, CC2_SIZE)
+}
+
+fn cc2_centroids(image: &ndarray::Array2<f32>) -> Vec<(f64, f64)> {
+    astroburst_lib::core::analysis::star_detection::detect_stars(image, 5.0)
+        .stars
+        .iter()
+        .map(|s| (s.x, s.y))
+        .collect()
+}
+
+fn cc2_mismatch(route: &str, reference: &[(f64, f64)], result: &[(f64, f64)]) -> Option<String> {
+    let nearest = |p: &(f64, f64), set: &[(f64, f64)]| {
+        set.iter().map(|q| (p.0 - q.0).hypot(p.1 - q.1)).fold(f64::INFINITY, f64::min)
+    };
+    let moved = reference.iter().filter(|p| nearest(p, result) > CC2_TOLERANCE_PX).count();
+    let doubled: Vec<&(f64, f64)> = result.iter().filter(|p| nearest(p, reference) > CC2_TOLERANCE_PX).collect();
+    if moved == 0 && doubled.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{route}: {moved} of {} frame-0 stars have no result star within {CC2_TOLERANCE_PX} px; {} of {} result stars match no frame-0 star (doubled stars), first at {:?}",
+        reference.len(),
+        doubled.len(),
+        result.len(),
+        doubled.first()
+    ))
+}
+
+#[tokio::test]
+async fn drizzle_and_pipeline_register_a_180_degree_frame_without_doubled_stars() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference_frame = cc2_frame(false);
+    let mut paths = Vec::new();
+    for (name, frame) in [("frame0.fits", reference_frame.clone()), ("frame1_rot180.fits", cc2_frame(true))] {
+        let p = dir.path().join(name);
+        let pixels: Vec<f32> = frame.iter().copied().collect();
+        v2_fixtures::write_pixels_fits(&p, CC2_SIZE as usize, CC2_SIZE as usize, &pixels);
+        paths.push(p.to_str().unwrap().to_string());
+    }
+    let reference = cc2_centroids(&reference_frame);
+    assert!(reference.len() >= 100, "{} frame-0 stars", reference.len());
+
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-cc2");
+    let drizzle = serde_json::json!({ "paths": paths, "scale": 1.0, "pixfrac": 1.0, "rejection": "none", "result_slot": "cc2_drz" });
+    accepted(&state, "s-cc2", "/sessions/s-cc2/stacking/drizzle", &drizzle).await;
+    let pipeline = serde_json::json!({ "channels": [{ "label": "L", "paths": paths }], "result_prefix": "cc2_" });
+    accepted(&state, "s-cc2", "/sessions/s-cc2/pipeline/run", &pipeline).await;
+
+    let session = state.sessions.get("s-cc2").unwrap();
+    let mismatches: Vec<String> = [("drizzle", "cc2_drz"), ("pipeline", "cc2_L")]
+        .into_iter()
+        .filter_map(|(route, slot)| {
+            let entry = session.cache.get(slot).expect("result slot");
+            cc2_mismatch(route, &reference, &cc2_centroids(entry.arr()))
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+#[tokio::test]
 async fn pipeline_refuses_cfa_lights_when_aligning_and_accepts_them_unaligned() {
     let dir = tempfile::tempdir().unwrap();
     let r = write_lights(&dir, "r", 2, Some("RGGB"));

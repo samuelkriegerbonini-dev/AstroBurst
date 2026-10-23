@@ -118,6 +118,10 @@ class ProductFilterStore {
     this.notify();
   }
 
+  reveal(file: FilterableFile) {
+    this.setActiveFilters(filtersRevealing(file, this.state.activeFilters, this.state.mode));
+  }
+
   clearAll() {
     if (this.state.activeFilters.length === 0) return;
     this.state.activeFilters = [];

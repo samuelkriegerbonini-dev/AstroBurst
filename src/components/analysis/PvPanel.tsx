@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, Loader2 } from "lucide-react";
 import SpectralAxisControls from "./SpectralAxisControls";
+import OutputNote from "./OutputNote";
 import ProfilePlot from "../regions/ProfilePlot";
 import { computePvDiagram } from "../../services/pv";
 import { measurementLog, pvEntry } from "../../utils/measurementLog";
@@ -406,6 +407,7 @@ function PvPanel({ filePath, fileKey, cubeDims }: PvPanelProps) {
             <div className="text-[9px] font-mono text-zinc-600 truncate">
               {res.elapsed_ms} ms · {baseName(res.fits_path)}
             </div>
+            {res.fits_path && <OutputNote path={res.fits_path} />}
           </>
         )}
       </div>

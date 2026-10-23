@@ -215,7 +215,7 @@ describe("lineMeasurementRows", () => {
     const labels = rows.map((r) => r.label);
     expect(labels).toEqual([
       "Flux",
-      "Equivalent width",
+      "Equivalent width (absorption > 0, emission < 0)",
       "Centroid",
       "Sigma",
       "FWHM",
@@ -232,6 +232,12 @@ describe("lineMeasurementRows", () => {
     expect(rows[5].value).toBe("1.000 at ch 20");
     expect(rows[6].value).toBe("150.4");
     expect(rows[8].value).toBe("optical, rest 1.02000 um, axis frame not declared (no SPECSYS)");
+  });
+
+  it("states the equivalent-width sign of specutils and IRAF splot next to a negative emission width", () => {
+    const row = lineMeasurementRows(measurement()).find((r) => r.label.startsWith("Equivalent width"));
+    expect(row?.label).toBe("Equivalent width (absorption > 0, emission < 0)");
+    expect(row?.value).toBe("-0.007520 um");
   });
 
   it("names the axis frame instead of assuming topocentric, and adds a frame shift when one was applied", () => {

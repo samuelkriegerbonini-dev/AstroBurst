@@ -33,8 +33,13 @@ describe("request ids", () => {
     expect(previewId(3, "a", "b.jpg", "pane", 8)).toBe("g3:preview:a:b.jpg:pane:a8");
     expect(previewId(3, "a", "b.jpg", "pane", 9)).not.toBe(previewId(3, "a", "b.jpg", "pane", 8));
     expect(isValidRequestId(previewId(3, "jw02739001002_02101_00001", "jw02739001002_02101_00001_nrcalong_cal.jpg", "large", 12345))).toBe(true);
-    expect(listId(3, "a", 1).startsWith(nonThumbPrefixes(3)[3])).toBe(true);
-    expect(previewId(3, "a", "b.jpg", "large", 2).startsWith(nonThumbPrefixes(3)[4])).toBe(true);
+    expect(nonThumbPrefixes(3).some((p) => listId(3, "a", 1).startsWith(p))).toBe(true);
+    expect(nonThumbPrefixes(3).some((p) => previewId(3, "a", "b.jpg", "large", 2).startsWith(p))).toBe(true);
+  });
+
+  it("ends every cancel prefix with the colon Rust requires, so the search and the lookup are cancelled by their ids", () => {
+    expect(nonThumbPrefixes(3)).toEqual(["g3:page:", "g3:list:", "g3:preview:", "g3:products:"]);
+    expect(nonThumbPrefixes(3).every((p) => p.endsWith(":") && isValidRequestId(p))).toBe(true);
   });
 
   it("uses fixed ids for the token commands", () => {

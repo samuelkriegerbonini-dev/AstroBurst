@@ -4,6 +4,7 @@ import { currentMission, romanLockOf, unavailableInfo, type ArchiveState } from 
 import type { ArchiveController } from "./state/archiveController";
 import { emptyView, notResolvedView } from "./logic/resultsView";
 import { errorDetails, errorView } from "./logic/errorCopy";
+import { NO_OBJECT_FILTERS } from "./logic/objectFilters";
 import { ROMAN_SEARCH_DISABLED, missionEntries, notDeployedView, viewAvailability } from "./logic/missionState";
 import { useNow } from "./state/useNow";
 
@@ -12,12 +13,12 @@ interface ViewProps {
   ctl: ArchiveController;
 }
 
-const CLEAR_ALL = { instrument: undefined, filter: undefined, dateFrom: undefined, dateTo: undefined, publicOnly: undefined };
+const CLEAR_ALL = { instrument: undefined, filter: undefined, dateFrom: undefined, dateTo: undefined, publicOnly: undefined, ...NO_OBJECT_FILTERS };
 
 export function EmptyResults({ state, ctl }: ViewProps) {
   const mission = currentMission(state);
   if (!state.results || !mission) return null;
-  const v = emptyView({ query: state.resultsQuery, results: state.results, missions: state.missions, mission });
+  const v = emptyView({ query: state.resultsQuery, results: state.results, missions: state.missions, mission, presets: state.presets });
   const { widenTo, tryOn } = v;
   return (
     <div className="ab-mast-state">
@@ -35,6 +36,7 @@ export function EmptyResults({ state, ctl }: ViewProps) {
           ))}
         </div>
       ) : null}
+      {v.classLine ? <p className="ab-mast-state-text">{v.classLine}</p> : null}
       <div className="ab-mast-actions">
         {widenTo !== null ? (
           <button type="button" className="ab-btn-secondary ab-mast-action" onClick={() => void ctl.widen(widenTo)}>
@@ -90,8 +92,18 @@ export function NotResolved({ state, ctl, onEditQuery }: ViewProps & { onEditQue
   );
 }
 
-export function BlockingError({ error, missionLabel, ctl }: { error: MastError; missionLabel: string; ctl: Pick<ArchiveController, "retry"> }) {
-  const view = errorView(error, { surface: "search", hasResults: false, missionLabel });
+export function BlockingError({
+  error,
+  missionLabel,
+  ctl,
+  levelSearch = false,
+}: {
+  error: MastError;
+  missionLabel: string;
+  ctl: Pick<ArchiveController, "retry" | "setFilters">;
+  levelSearch?: boolean;
+}) {
+  const view = errorView(error, { surface: "search", hasResults: false, missionLabel, levelSearch });
   const title = view.title ?? view.text;
   return (
     <div data-testid="mast-error" data-code={error.code} data-kind={view.bannerKind ?? undefined} className="ab-mast-state">
@@ -103,6 +115,11 @@ export function BlockingError({ error, missionLabel, ctl }: { error: MastError; 
           Try again
           <kbd className="ab-cmdp-kbd">R</kbd>
         </button>
+        {levelSearch && error.code === "mast_timeout" ? (
+          <button type="button" data-testid="mast-timeout-all-levels" className="ab-btn-secondary ab-mast-action" onClick={() => ctl.setFilters({ level: "all" }, { rerun: true })}>
+            Search all levels
+          </button>
+        ) : null}
       </div>
       <details className="ab-mast-details">
         <summary>Details</summary>

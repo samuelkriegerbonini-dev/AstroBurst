@@ -184,15 +184,37 @@ impl Record {
 }
 
 #[derive(Clone)]
-struct Files {
-    dest: PathBuf,
+pub(crate) struct Files {
+    pub(crate) dest: PathBuf,
     part: PathBuf,
     sidecar: PathBuf,
     record: PathBuf,
 }
 
 impl Files {
-    fn for_dest(dest: &Path) -> Self {
+    pub(crate) fn recorded_sha256_hex(&self, size: u64) -> Option<String> {
+        read_json::<Record>(&self.record)
+            .filter(|record| record.version == FORMAT_VERSION && record.size == size)
+            .and_then(|record| record.sha256_hex)
+    }
+
+    pub(crate) fn resumable_bytes(&self, expected_size: u64) -> Option<u64> {
+        let part_len = fs::metadata(&self.part)
+            .ok()
+            .filter(|meta| meta.is_file())?
+            .len();
+        let sidecar = read_json::<Sidecar>(&self.sidecar)?;
+        let offset = part_len.min(sidecar.received);
+        (sidecar.version == FORMAT_VERSION
+            && offset > 0
+            && offset <= expected_size
+            && sidecar
+                .expected_size
+                .is_none_or(|recorded| recorded == expected_size))
+        .then_some(offset)
+    }
+
+    pub(crate) fn for_dest(dest: &Path) -> Self {
         let with = |suffix: &str| {
             let mut name = dest.as_os_str().to_owned();
             name.push(suffix);
@@ -410,7 +432,7 @@ pub async fn download(
             }
             .filter(|record| record.describes(&req.url, meta.len()));
             if let Some(record) = record {
-                return reuse(client, req, &files, record).await;
+                return reuse(client, req, &files, record, observer).await;
             }
             if !req.overwrite {
                 return Err(DownloadError::Exists);
@@ -426,7 +448,7 @@ pub async fn download(
     let mut resume = resume_point(&files, req)?;
     let mut carry = None;
     loop {
-        let response = send(ranged(client, req, resume.as_ref())).await?;
+        let response = send(ranged(client, req, resume.as_ref()), observer).await?;
         match accept(&response, resume.take())? {
             Next::Restart => carry = None,
             Next::Finalise(resume) => return finalise_part(req, &files, resume, &claim).await,
@@ -520,11 +542,25 @@ fn ranged(client: &Client, req: &DownloadRequest, resume: Option<&Resume>) -> Re
     }
 }
 
-async fn send(builder: RequestBuilder) -> Result<Response, DownloadError> {
-    builder
-        .send()
-        .await
-        .map_err(|error| DownloadError::Transport(error_chain(&error)))
+pub(crate) async fn send(
+    builder: RequestBuilder,
+    observer: &dyn DownloadObserver,
+) -> Result<Response, DownloadError> {
+    let sending = builder.send();
+    tokio::pin!(sending);
+    let mut poll = tokio::time::interval(CANCEL_POLL);
+    loop {
+        tokio::select! {
+            sent = &mut sending => {
+                return sent.map_err(|error| DownloadError::Transport(error_chain(&error)));
+            }
+            _ = poll.tick() => {
+                if observer.is_cancelled() {
+                    return Err(DownloadError::Cancelled);
+                }
+            }
+        }
+    }
 }
 
 fn accept(response: &Response, resume: Option<Resume>) -> Result<Next, DownloadError> {
@@ -817,6 +853,7 @@ async fn reuse(
     req: &DownloadRequest,
     files: &Files,
     record: Record,
+    observer: &dyn DownloadObserver,
 ) -> Result<DownloadOutcome, DownloadError> {
     if req.expected_size.is_some_and(|size| size != record.size) {
         return Err(DownloadError::Stale {
@@ -847,8 +884,10 @@ async fn reuse(
         (None, Some(date)) => probe.header(IF_MODIFIED_SINCE, date.as_str()),
         (None, None) => return unrevalidated(req, record, files, sha256_hex),
     };
-    let Ok(response) = send(probe).await else {
-        return unrevalidated(req, record, files, sha256_hex);
+    let response = match send(probe, observer).await {
+        Ok(response) => response,
+        Err(DownloadError::Cancelled) => return Err(DownloadError::Cancelled),
+        Err(_) => return unrevalidated(req, record, files, sha256_hex),
     };
     let remote_etag = header_text(response.headers(), &ETAG);
     let remote_modified = header_text(response.headers(), &LAST_MODIFIED);
@@ -1774,6 +1813,64 @@ mod tests {
         );
         assert_eq!(fs::metadata(&spot.files.part).unwrap().len(), 256 * KIB);
         assert_eq!(read_sidecar(&spot.files).received, 256 * KIB);
+    }
+
+    async fn cancel_once_received(
+        server: &TestServer,
+        req: DownloadRequest,
+    ) -> (Result<DownloadOutcome, DownloadError>, Duration) {
+        let cancel = AtomicCancel::default();
+        let flag = cancel.0.clone();
+        let running = tokio::spawn(async move {
+            download(
+                &client_with_read_timeout(Duration::from_secs(30)),
+                &req,
+                &cancel,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), server.received(1))
+            .await
+            .expect("the request never reached the canned server");
+        flag.store(true, Ordering::SeqCst);
+        let asked = Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(3), running)
+            .await
+            .expect("the cancel was not seen while the server withheld its headers")
+            .unwrap();
+        (result, asked.elapsed())
+    }
+
+    #[tokio::test]
+    async fn a_cancel_while_the_server_withholds_the_headers_is_acknowledged_within_a_second() {
+        let server = serve(Resource::new(body(SIZE, 48)).withhold_headers());
+        let spot = spot();
+        let req = request(&server, &spot);
+        let (result, waited) = cancel_once_received(&server, req).await;
+        let error = result.unwrap_err();
+        assert!(matches!(error, DownloadError::Cancelled), "{error:?}");
+        assert!(waited < Duration::from_secs(1), "{waited:?}");
+        assert_eq!(left_behind(&spot.files), NOTHING);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_while_a_revalidation_waits_for_headers_is_acknowledged_within_a_second() {
+        let payload = body(SIZE, 49);
+        let origin = serve(Resource::new(payload.clone()));
+        let spot = spot();
+        let mut req = request(&origin, &spot);
+        fetch(&req).await.unwrap();
+        let silent = serve(Resource::new(Vec::new()).withhold_headers());
+        req.url = silent.url("/product.fits");
+        edit_record(&spot.files, |record| record.url = req.url.to_string());
+        let (result, waited) = cancel_once_received(&silent, req).await;
+        let error = result.unwrap_err();
+        assert!(matches!(error, DownloadError::Cancelled), "{error:?}");
+        assert!(waited < Duration::from_secs(1), "{waited:?}");
+        assert_eq!(left_behind(&spot.files), ONLY_DEST_AND_RECORD);
+        assert_eq!(file_digest(&spot.files.dest), digest(&payload));
+        assert_eq!(silent.requests()[0].header("range"), Some("bytes=0-0"));
     }
 
     #[tokio::test]

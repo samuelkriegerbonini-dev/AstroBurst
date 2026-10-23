@@ -72,7 +72,7 @@ export function detailHeader(row: MastRow, missionLabel: string): DetailHeader {
   const instrument = row.instrument?.trim();
   if (instrument) badges.push(instrument);
   if (row.expType) badges.push(row.expType);
-  const level = levelBadge(row.levelClass);
+  const level = levelBadge(row);
   if (level) badges.push(level);
   else if (row.filter && row.filters.length <= 1) badges.push(row.filter);
   if (row.access !== null && isPublic(row)) badges.push("PUBLIC");

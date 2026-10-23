@@ -35,6 +35,15 @@ describe("errorView: search surface", () => {
     });
   });
 
+  it("blames the level condition and points to All levels when a JWST level search times out", () => {
+    const text = "MAST did not answer within 120 s. MAST is sometimes slow with a level condition; All levels usually answers in a few seconds.";
+    expect(errorView(err("mast_timeout", "timed out"), { surface: "search", hasResults: false, levelSearch: true })).toMatchObject({ placement: "blocking", bannerKind: "timeout", title: "MAST did not answer in time", text });
+    expect(errorView(err("mast_timeout", "timed out", { timeoutSec: 4 }), { surface: "search", hasResults: true, levelSearch: true }).text).toBe(
+      "MAST did not answer within 4 s. MAST is sometimes slow with a level condition; All levels usually answers in a few seconds.",
+    );
+    expect(errorView(err("mast_timeout", "x", { timeoutSec: 30 }), { surface: "thumb", levelSearch: true }).text).toBe("MAST did not send this thumbnail within 30 s. Try again in a moment.");
+  });
+
   it("names the HTTP status of a server error", () => {
     expect(errorView(err("mast_server", "bad gateway", { status: 504 }), { surface: "search", hasResults: true })).toMatchObject({
       placement: "banner",

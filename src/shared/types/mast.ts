@@ -4,6 +4,34 @@ export type MastMissionId =
 
 export type MastAvailability = "open" | "token" | "not_deployed" | "unsupported";
 
+export type MastLevel = "combined" | "exposures" | "all";
+
+export type ObjectCategoryId = "galaxies" | "galaxy_clusters" | "ism" | "star_clusters" | "stars" | "solar_system" | "fields" | "calibration";
+
+export type ObjectTypeId =
+  | "planetary_nebulae"
+  | "nebulae_star_forming"
+  | "young_stars_disks"
+  | "exoplanets"
+  | "agn_quasars"
+  | "interacting_galaxies"
+  | "supernovae_transients"
+  | "compact_substellar";
+
+export interface MastFilterOption {
+  id: string;
+  label: string;
+  title: string;
+}
+
+export interface MastFilterGroup {
+  id: "category" | "object_type";
+  label: string;
+  column: string;
+  info: string;
+  options: MastFilterOption[];
+}
+
 export interface MastQuickFilter {
   id: "level" | "instrument" | "filter" | "date" | "public";
   label: string;
@@ -29,6 +57,7 @@ export interface MastMission {
   defaultColumns: MastColumn[];
   note: string | null;
   checkedOn: string;
+  filterGroups: MastFilterGroup[];
 }
 
 export interface MastResolved {
@@ -48,12 +77,14 @@ export type MastWhere =
   | { kind: "name"; name: string; radiusArcmin: number };
 
 export interface MastFilterValues {
-  level?: "combined" | "all";
+  level?: MastLevel;
   instrument?: string;
   filter?: string;
   dateFrom?: string;
   dateTo?: string;
   publicOnly?: boolean;
+  categories?: ObjectCategoryId[];
+  objectTypes?: ObjectTypeId[];
 }
 
 export interface MastQuery {
@@ -105,6 +136,8 @@ export interface MastRow {
   decDeg: number | null;
   sRegion: string | null;
   values: Record<string, string | number | boolean | null>;
+  categories: ObjectCategoryId[];
+  targetDescription: string | null;
 }
 
 export interface MastSearchPage {
@@ -127,6 +160,9 @@ export interface MastSearchPage {
   unresolvedTargets: string[];
   elapsedMs: number;
   fromCache: boolean;
+  levelFilteredLocally: boolean;
+  levelAppliedLocally: string | null;
+  unfilteredTotal: number | null;
 }
 
 export interface MastImageEntry {

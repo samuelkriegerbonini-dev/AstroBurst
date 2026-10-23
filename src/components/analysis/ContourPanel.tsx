@@ -11,12 +11,14 @@ import { generateId } from "../../utils/format";
 import {
   buildContourRequest,
   closedContourPolygons,
+  contourBackgroundText,
   contourHint,
   formatLevelValue,
   levelColour,
   levelsText,
   suggestBin,
   CONTOUR_BIN_CHOICES,
+  CONTOUR_SIGMA_FIELD_LABEL,
   DEFAULT_SIGMA_MULTIPLES_TEXT,
   MAX_REGION_POLYGONS,
   MAX_SMOOTH_SIGMA_PX,
@@ -64,10 +66,6 @@ const MODE_LABELS: Record<ContourMode, string> = {
   sigma: "Sigma above sky",
 };
 
-function fmt(v: number, digits = 2): string {
-  return Number.isFinite(v) ? v.toFixed(digits) : "--";
-}
-
 function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKey }: ContourPanelProps) {
   const modeId = useId();
   const levelsId = useId();
@@ -94,6 +92,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
   const [colourMode, setColourMode] = useState<ContourColourMode>(DEFAULT_COLOUR_MODE);
   const [lineWidthText, setLineWidthText] = useState<string>(DEFAULT_LINE_WIDTH);
   const [result, setResult] = useState<ContourResult | null>(null);
+  const [resultSmoothPx, setResultSmoothPx] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -184,6 +183,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
       const next = await contourLines(filePath, request.options);
       if (requestSeqRef.current !== seq) return;
       setResult(next);
+      setResultSmoothPx(request.options.smoothSigma ?? 0);
       setHidden(new Set());
       setHighlightIndex(null);
     } catch (e: unknown) {
@@ -308,7 +308,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
         {mode === "sigma" && (
           <div className="flex flex-col gap-0.5">
             <label htmlFor={sigmaId} className={LABEL_CLASS}>
-              Sigma multiples above the median
+              {CONTOUR_SIGMA_FIELD_LABEL}
             </label>
             <input
               id={sigmaId}
@@ -388,9 +388,9 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
           <>
             <div className="bg-zinc-900/80 rounded px-2 py-1.5 text-[10px]">
               <div className="text-zinc-500">Background and trace</div>
-              <div className="text-zinc-300 font-mono">
-                background {fmt(result.background_median, 3)} +/- {fmt(result.background_sigma, 3)}, bin {result.bin},{" "}
-                {result.n_points} points, {result.elapsed_ms} ms{result.masked ? ", DQ excluded" : ""}
+              <div data-testid="contour-background" className="text-zinc-300 font-mono">
+                {contourBackgroundText(result, resultSmoothPx)}, bin {result.bin}, {result.n_points} points, {result.elapsed_ms} ms
+                {result.masked ? ", DQ excluded" : ""}
               </div>
             </div>
 

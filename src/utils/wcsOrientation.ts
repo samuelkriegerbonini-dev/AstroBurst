@@ -27,6 +27,10 @@ export function gwcsSuffix(info: WcsOrientationInfo): string {
   return ` - header SIP within ${shownPx} px (${mas.toFixed(MAS_DIGITS)} mas)`;
 }
 
+function warningSuffix(info: WcsOrientationInfo): string {
+  return typeof info.wcs_warning === "string" ? ` - ${info.wcs_warning}` : "";
+}
+
 function refusalSuffix(info: WcsOrientationInfo): string {
   if (info.wcs_kind !== "header" || typeof info.gwcs_refusal !== "string") return "";
   const suffix = ` - gWCS not used: ${info.gwcs_refusal}`;
@@ -54,6 +58,6 @@ export function orientationLine(info: WcsInfo): string | null {
   const east = flipped ? "right" : "left";
   const gwcs = info.wcs_kind === "gwcs";
   const head = (gwcs ? gwcsHead(info) : null) ?? projection;
-  const suffix = gwcs ? gwcsSuffix(info) : `${sipSuffix(info)}${refusalSuffix(info)}`;
+  const suffix = gwcs ? gwcsSuffix(info) : `${sipSuffix(info)}${warningSuffix(info)}${refusalSuffix(info)}`;
   return `${head} - ${scale} - rot ${rotation_deg.toFixed(ROTATION_DIGITS)} deg - E ${east}${suffix}`;
 }

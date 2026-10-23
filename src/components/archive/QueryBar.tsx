@@ -4,10 +4,11 @@ import MissionTabs from "./MissionTabs";
 import MoreMenu from "./MoreMenu";
 import QuickFilters, { ViewToggle } from "./QuickFilters";
 import PresetPicker from "./PresetPicker";
+import { ActiveFilters, FilterPanel, FiltersToggle } from "./ObjectFilters";
 import { currentMission, resultsState, romanLockOf, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { interpretQuery, QUERY_KINDS, type QueryKind } from "./logic/interpretQuery";
-import { EMPTY_QUERY_HINT } from "./logic/buildQuery";
+import { EMPTY_QUERY_HINT, browserLevelStorage, loadFiltersOpen, saveFiltersOpen } from "./logic/buildQuery";
 import { ROMAN_SEARCH_DISABLED, resultsGate } from "./logic/missionState";
 import { ROMAN_SEARCH_HINT } from "./logic/romanPanel";
 
@@ -41,6 +42,7 @@ export default function QueryBar({ state, ctl, queryRef, onLeaveQuery }: QueryBa
   const [kindMenu, setKindMenu] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
   const [recentAt, setRecentAt] = useState(0);
+  const [filtersOpen, setFiltersOpen] = useState(() => loadFiltersOpen(browserLevelStorage()));
   const form = state.form;
   const running = !!state.run;
   const meaning = interpretQuery(form.text, form.kindOverride);
@@ -97,6 +99,12 @@ export default function QueryBar({ state, ctl, queryRef, onLeaveQuery }: QueryBa
     }
   };
 
+  const toggleFilters = () => {
+    const next = !filtersOpen;
+    saveFiltersOpen(browserLevelStorage(), next);
+    setFiltersOpen(next);
+  };
+
   const chooseKind = (next: QueryKind | null) => {
     setKindMenu(false);
     ctl.setKindOverride(next);
@@ -104,7 +112,7 @@ export default function QueryBar({ state, ctl, queryRef, onLeaveQuery }: QueryBa
   };
 
   return (
-    <div role="search" aria-label="Search MAST" className="ab-mast-querybar" data-mast-region="query">
+    <div role="search" aria-label="Search MAST" className="ab-mast-querybar" data-mast-region="query" data-filters-open={filtersOpen ? "true" : "false"}>
       <div className="ab-mast-query-row">
         <MissionTabs state={state} ctl={ctl} />
         <MoreMenu state={state} ctl={ctl} onPicked={() => queryRef?.current?.focus()} />
@@ -252,11 +260,16 @@ export default function QueryBar({ state, ctl, queryRef, onLeaveQuery }: QueryBa
         </p>
       ) : null}
       {state0 !== "locked" && state0 !== "unavailable" ? (
-        <div className="ab-mast-filter-row">
-          <QuickFilters state={state} ctl={ctl} />
-          <PresetPicker state={state} ctl={ctl} />
-          <ViewToggle state={state} ctl={ctl} />
-        </div>
+        <>
+          <div className="ab-mast-filter-row">
+            <QuickFilters state={state} ctl={ctl} />
+            <PresetPicker state={state} ctl={ctl} />
+            <FiltersToggle state={state} open={filtersOpen} onToggle={toggleFilters} />
+            <ViewToggle state={state} ctl={ctl} />
+          </div>
+          <ActiveFilters state={state} ctl={ctl} />
+          <FilterPanel state={state} ctl={ctl} open={filtersOpen} />
+        </>
       ) : null}
     </div>
   );

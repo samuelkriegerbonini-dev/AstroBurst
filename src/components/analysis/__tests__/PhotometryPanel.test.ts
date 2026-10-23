@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement } from "react";
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
+import { Check } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { GainModel } from "../../../services/analysis";
+import type { GainModel, PhotometryMeasurement } from "../../../services/analysis";
 
 const hooks = vi.hoisted(() => {
   type Cell = { value?: unknown; deps?: readonly unknown[]; set?: (next: unknown) => void; cleanup?: unknown };
@@ -49,6 +50,7 @@ const gainModelMock = vi.hoisted(() => vi.fn<(path: string) => Promise<GainModel
 const measureMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 const batchMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 const pixelClick = vi.hoisted(() => ({ current: null as { seq: number; x: number; y: number } | null }));
+const clipboardWrite = vi.hoisted(() => vi.fn<(text: string) => Promise<void>>());
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -86,6 +88,7 @@ import PhotometryTablePanel from "../PhotometryTablePanel";
 const GAIN_TITLE_TEXT = "Gain in e-/ADU; prefilled from the header when known";
 
 vi.stubGlobal("localStorage", { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+vi.stubGlobal("navigator", { clipboard: { writeText: clipboardWrite } });
 
 function gainInput(markup: string): string {
   const input = markup.match(new RegExp(`<input[^>]*title="${GAIN_TITLE_TEXT}"[^>]*>`));
@@ -288,6 +291,146 @@ describe("PhotometryPanel with a decimal comma in the aperture", () => {
     expect(fieldErrorText(tree)).toBeNull();
     expect(measureMock).toHaveBeenCalledTimes(1);
     expect(measureMock.mock.calls[0][3]).toMatchObject({ apertureRadius: 2.5 });
+  });
+});
+
+function measurementAt(sky: { ra: number; dec: number }): PhotometryMeasurement {
+  return {
+    photometry: {
+      x: 10,
+      y: 12,
+      peak: 500,
+      net_flux: 1234.5,
+      flux_err: 12.3,
+      mag_inst: -7.73,
+      snr: 100.4,
+      fwhm: 3.2,
+      aperture_radius: 4.8,
+      aperture_pixels: 72,
+      aperture_area: 72.4,
+      bg_mean: 10,
+      bg_sigma: 1.5,
+      bg_pixels: 300,
+      saturated: false,
+      saturation_source: "none",
+      n_masked: 0,
+      n_saturated: 0,
+      err_used: false,
+      aperture_correction: null,
+      flux_total: null,
+      plateau_radius: null,
+      flux_jy: null,
+      flux_err_jy: null,
+      mag_ab: null,
+      mag_ab_err: null,
+      mag_ab_total: null,
+      st_mag: null,
+      sky_inner: 9.6,
+      sky_outer: 14.4,
+      growth_curve: [],
+      ee50_radius: null,
+      ee80_radius: null,
+    },
+    sky,
+    gaia: null,
+    photcal: null,
+    warnings: [],
+    masked: false,
+    elapsed_ms: 3,
+  };
+}
+
+const COPY_SKY_LABEL = "Copy sky position";
+const CLIPBOARD_DENIED = "Document is not focused.";
+const SKY_LINE = "83.822080 -5.391110 deg ICRS | 05h35m17.30s -05°23'28.0\"";
+
+const skyCopyButton = (tree: ReactNode) => findElement(tree, (props) => props["aria-label"] === COPY_SKY_LABEL);
+const copyStatusText = (tree: ReactNode) => findElement(tree, (props) => props["data-copy-status"] === true)?.children ?? null;
+const showsCopied = (tree: ReactNode) => (skyCopyButton(tree)!.children as ReactElement).type === Check;
+
+describe("PhotometryPanel sky position copy", () => {
+  const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+  const measureStar = async (settle: () => Promise<unknown>) => {
+    (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+    pixelClick.current = { seq: 1, x: 10, y: 12 };
+    show();
+    await settle();
+  };
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    measureMock.mockReset().mockResolvedValue(measurementAt({ ra: 83.82208, dec: -5.39111 }));
+    clipboardWrite.mockReset().mockResolvedValue(undefined);
+    pixelClick.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+    vi.useRealTimers();
+  });
+
+  it("copies the measured star's sky position in decimal degrees and sexagesimal", async () => {
+    await measureStar(flush);
+    const copy = skyCopyButton(show());
+    expect(copy, "sky position copy button").not.toBeNull();
+    expect(copy!.type).toBe("button");
+    (copy!.onClick as () => void)();
+    await vi.waitFor(() => expect(clipboardWrite).toHaveBeenCalledTimes(1));
+    expect(clipboardWrite.mock.calls[0][0]).toBe(SKY_LINE);
+  });
+
+  it("offers no sky copy before a measurement", () => {
+    const tree = renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+    expect(skyCopyButton(tree)).toBeNull();
+  });
+
+  it("names a refused clipboard write instead of leaving the previous clipboard text unannounced", async () => {
+    clipboardWrite.mockReset().mockRejectedValue(new DOMException(CLIPBOARD_DENIED, "NotAllowedError"));
+    await measureStar(flush);
+    (skyCopyButton(show())!.onClick as () => void)();
+    await flush();
+    const tree = show();
+    expect(findElement(tree, (props) => props.children === `Clipboard copy failed: ${CLIPBOARD_DENIED}`)).not.toBeNull();
+    expect(showsCopied(tree)).toBe(false);
+    expect(copyStatusText(tree)).toBe("");
+  });
+
+  it("clears the clipboard error once a copy succeeds", async () => {
+    clipboardWrite.mockReset().mockRejectedValueOnce(new DOMException(CLIPBOARD_DENIED, "NotAllowedError")).mockResolvedValue(undefined);
+    await measureStar(flush);
+    const failure = `Clipboard copy failed: ${CLIPBOARD_DENIED}`;
+    (skyCopyButton(show())!.onClick as () => void)();
+    await flush();
+    expect(findElement(show(), (props) => props.children === failure)).not.toBeNull();
+    (skyCopyButton(show())!.onClick as () => void)();
+    await flush();
+    expect(findElement(show(), (props) => props.children === failure)).toBeNull();
+  });
+
+  it("announces the copy to assistive technology", async () => {
+    await measureStar(flush);
+    expect(copyStatusText(show())).toBe("");
+    (skyCopyButton(show())!.onClick as () => void)();
+    await flush();
+    expect(copyStatusText(show())).toBe("Copied");
+  });
+
+  it("keeps the copied mark for the full time after a second click", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const settle = () => vi.advanceTimersByTimeAsync(0);
+    await measureStar(settle);
+    (skyCopyButton(show())!.onClick as () => void)();
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    (skyCopyButton(show())!.onClick as () => void)();
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(showsCopied(show())).toBe(true);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(showsCopied(show())).toBe(false);
   });
 });
 

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Open sample data: the empty workspace and the command palette offer the three HST/WFPC2 narrowband frames of M16 ([OIII], Hα, [SII]) that now ship with the installers and the Linux tarball under `sample-data/`, opened straight from the app's resources without copying them into your data folder; the credit line is in the third-party notices.
+- Download sample data: the empty workspace and the command palette download the three HST/WFPC2 narrowband frames of M16 ([OIII], Hα, [SII]), about 31 MB, from the AstroBurst repository at a pinned commit, check each against its published SHA-256, resume an interrupted transfer, show the progress with Cancel and keep the frames in the data folder's `samples/` folder, from where Open sample data reopens them without the network; the frames open as soon as the download finishes, and the credit line is in the third-party notices.
 
 ### Changed
 - Drizzle with its default method and the batch Pipeline no longer trust a confident phase-correlation shift on its own: when both frames have enough stars, the shift is checked against the star-triangle match, a rotated frame (meridian flips included) is registered through the star transform instead, a mirrored frame is left out with the reflection named in the warning, and a frame whose star fit was refused keeps the shift with the refusal in the warning. Plain shifts keep the phase-correlation result unchanged.

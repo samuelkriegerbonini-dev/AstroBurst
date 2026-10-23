@@ -245,7 +245,14 @@ pub fn run() {
             cmd::catalog_store::catalog_use_file_cmd,
             cmd::catalog_store::catalog_use_siril_dir_cmd,
             cmd::catalog_store::catalog_remove_cmd,
-            cmd::sample_data::sample_data_paths_cmd,
+            #[cfg(feature = "net")]
+            cmd::sample_data::sample_sets_cmd,
+            #[cfg(feature = "net")]
+            cmd::sample_data::sample_download_cmd,
+            #[cfg(feature = "net")]
+            cmd::sample_data::sample_cancel_cmd,
+            #[cfg(feature = "net")]
+            cmd::sample_data::sample_open_cmd,
             cmd::astrometry::plate_solve_cmd,
             cmd::astrometry::write_solved_wcs_cmd,
             cmd::astrometry::get_wcs_info,

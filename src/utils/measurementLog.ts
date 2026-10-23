@@ -85,10 +85,22 @@ export interface MeasurementProvenance {
 
 export const EMPTY_LOG: readonly MeasurementLogEntry[] = Object.freeze([]) as readonly MeasurementLogEntry[];
 
-export const LOG_SESSION_NOTE = "Kept for this session only; Save CSV to keep it.";
+const LOG_SESSION_PREFIX = "Kept for this session only:";
+
+export const LOG_SESSION_NOTE = `${LOG_SESSION_PREFIX} Save CSV to keep it.`;
+
+function rowCount(n: number): string {
+  return `${n} row${n === 1 ? "" : "s"}`;
+}
+
+export function logSessionNote(total: number, shown: number): string {
+  if (shown === 0) return `${LOG_SESSION_PREFIX} no row is shown; clear the filters to save the ${rowCount(total)} with Save CSV.`;
+  if (shown < total) return `${LOG_SESSION_PREFIX} Save CSV writes the ${shown} shown ${shown === 1 ? "row" : "rows"} of ${total}; clear the filters to keep them all.`;
+  return `${LOG_SESSION_PREFIX} Save CSV to keep ${total === 1 ? "this 1 row" : `these ${total} rows`}.`;
+}
 
 export function clearConfirmText(total: number, shown: number): string {
-  const rows = `${total} row${total === 1 ? "" : "s"}`;
+  const rows = rowCount(total);
   return shown < total ? `Clear all ${rows}, not only the ${shown} shown?` : `Clear ${rows}?`;
 }
 

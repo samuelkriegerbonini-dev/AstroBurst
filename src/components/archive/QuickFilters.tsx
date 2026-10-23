@@ -1,25 +1,31 @@
 import type { KeyboardEvent } from "react";
 import { LayoutGrid, Table } from "lucide-react";
+import type { MastLevel } from "../../shared/types/mast";
 import { currentMission, effectiveView, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { viewAvailability } from "./logic/missionState";
+import { levelLockText, presetById } from "./logic/presetView";
 
 interface FiltersProps {
   state: ArchiveState;
   ctl: Pick<ArchiveController, "setFilters" | "search" | "setView">;
 }
 
-const LEVELS: { value: "combined" | "all"; label: string }[] = [
-  { value: "combined", label: "Combined L3" },
-  { value: "all", label: "All levels" },
+const LEVEL_LOCK_ID = "mast-level-lock";
+
+const LEVELS: { value: MastLevel; label: string; title: string }[] = [
+  { value: "combined", label: "Combined L3", title: "Level 3: combined mosaics, cubes and spectra of several exposures, including source-based products (2bs, 3)" },
+  { value: "exposures", label: "Exposures L1-2", title: "Levels 1b to 2c: single exposures, from uncalibrated ramps to calibrated frames" },
+  { value: "all", label: "All levels", title: "Every level, including the source-based sets that carry only 2bs" },
 ];
 
 export default function QuickFilters({ state, ctl }: FiltersProps) {
   const mission = currentMission(state);
   const quick = mission?.quickFilters ?? [];
-  if (quick.length === 0) return <span className="ab-mast-filters-none">No quick filters for this mission</span>;
+  if (quick.length === 0) return mission?.filterGroups.length ? null : <span className="ab-mast-filters-none">No quick filters for this mission</span>;
   const disabled = !!state.run;
   const f = state.form.filters;
+  const lock = levelLockText(presetById(state.presets, state.form.preset));
   const runOnEnter = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
@@ -37,7 +43,7 @@ export default function QuickFilters({ state, ctl }: FiltersProps) {
                   Level
                 </span>
                 <div data-testid="mast-filter-level" role="group" aria-labelledby="mast-filter-level-label" className="ab-mast-segment">
-                  {LEVELS.map((l) => {
+                  {LEVELS.filter((l) => !q.options || q.options.includes(l.value)).map((l) => {
                     const active = (f.level ?? "all") === l.value;
                     return (
                       <button
@@ -46,9 +52,12 @@ export default function QuickFilters({ state, ctl }: FiltersProps) {
                         className="ab-pill ab-mast-seg"
                         data-active={active ? "true" : "false"}
                         aria-pressed={active}
-                        disabled={disabled}
+                        aria-disabled={lock ? true : undefined}
+                        aria-describedby={lock ? LEVEL_LOCK_ID : undefined}
+                        title={l.title}
+                        disabled={disabled && !lock}
                         onClick={() => {
-                          if (!active) ctl.setFilters({ level: l.value }, { rerun: true });
+                          if (!active && !lock) ctl.setFilters({ level: l.value }, { rerun: true });
                         }}
                       >
                         {l.label}
@@ -56,6 +65,11 @@ export default function QuickFilters({ state, ctl }: FiltersProps) {
                     );
                   })}
                 </div>
+                {lock ? (
+                  <span id={LEVEL_LOCK_ID} data-testid={LEVEL_LOCK_ID} className="ab-mast-level-lock">
+                    {lock}
+                  </span>
+                ) : null}
               </div>
             );
           case "instrument":

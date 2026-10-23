@@ -1,3 +1,5 @@
+use serde_json::Value;
+
 use super::errors::bad_input;
 use super::types::{AppliedEcho, MastCmdError, MastMissionId, MastPreset, MastPresetCondition};
 
@@ -76,6 +78,13 @@ pub static PRESETS: [PresetSpec; 7] = [
 ];
 
 impl PresetSpec {
+    pub fn sent(&self) -> Vec<(String, Value)> {
+        self.conditions
+            .iter()
+            .map(|(column, value)| ((*column).to_owned(), Value::from(*value)))
+            .collect()
+    }
+
     fn to_contract(&self) -> MastPreset {
         MastPreset {
             id: self.id.to_owned(),
@@ -141,17 +150,22 @@ fn echoed_values(applied: &AppliedEcho, column: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn dropped_conditions(preset: &PresetSpec, applied: &AppliedEcho) -> Vec<String> {
-    preset
-        .conditions
-        .iter()
+fn sent_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+pub fn dropped_conditions(sent: &[(String, Value)], applied: &AppliedEcho) -> Vec<String> {
+    sent.iter()
         .filter(|(column, value)| {
             let echoed = echoed_values(applied, column);
-            !value
+            !sent_text(value)
                 .split(',')
                 .all(|part| echoed.contains(&part.trim().to_ascii_lowercase()))
         })
-        .map(|(column, _)| (*column).to_owned())
+        .map(|(column, _)| column.clone())
         .collect()
 }
 
@@ -274,7 +288,7 @@ mod tests {
 
     #[test]
     fn the_echo_check_names_conditions_mast_dropped() {
-        let tso = find(MastMissionId::Jwst, "tso").unwrap();
+        let tso = &find(MastMissionId::Jwst, "tso").unwrap().sent();
         let full = echo(&[
             ("productLevel", "3"),
             ("tsovisit", "t"),
@@ -299,10 +313,37 @@ mod tests {
             dropped_conditions(tso, &echo(&[])),
             ["tsovisit", "exp_type"]
         );
-        let ifu = find(MastMissionId::Jwst, "ifu_cubes").unwrap();
+        let ifu = &find(MastMissionId::Jwst, "ifu_cubes").unwrap().sent();
         let level_merged = echo(&[("productLevel", "3,3"), ("exp_type", "NRS_IFU,MIR_MRS")]);
         assert_eq!(dropped_conditions(ifu, &level_merged), Vec::<String>::new());
-        let one_d = find(MastMissionId::Jwst, "spectra_1d").unwrap();
+        let one_d = &find(MastMissionId::Jwst, "spectra_1d").unwrap().sent();
         assert_eq!(dropped_conditions(one_d, &echo(&[])), Vec::<String>::new());
+    }
+
+    fn sent(conditions: &[(&str, &str)]) -> Vec<(String, Value)> {
+        conditions.iter().map(|(column, value)| ((*column).to_owned(), Value::from(*value))).collect()
+    }
+
+    #[test]
+    fn dropped_conditions_cover_object_filters() {
+        let category = sent(&[("targcat", "Galaxy, ISM")]);
+        assert_eq!(dropped_conditions(&category, &echo(&[("targcat", "")])), ["targcat"]);
+        assert_eq!(dropped_conditions(&category, &echo(&[])), ["targcat"]);
+        assert_eq!(dropped_conditions(&category, &echo(&[("targcat", "Galaxy")])), ["targcat"]);
+        assert_eq!(dropped_conditions(&category, &echo(&[("targcat", "galaxy,ism")])), Vec::<String>::new());
+        let iue = sent(&[("iue_category", "80..82, 84..88, 69..76")]);
+        assert_eq!(dropped_conditions(&iue, &echo(&[("iue_category", "80..82,84..88,69..76,!=98,!=99")])), Vec::<String>::new());
+        assert_eq!(dropped_conditions(&iue, &echo(&[("iue_category", "!=98,!=99")])), ["iue_category"]);
+        let hst = sent(&[
+            ("sci_broad_category", "STAR, STAR;*, *;STAR, *;STAR;*"),
+            ("sci_target_descrip", "PLANETARY NEBULA"),
+        ]);
+        let honoured = echo(&[("sci_broad_category", "STAR, STAR;*, *;STAR, *;STAR;*"), ("sci_target_descrip", "PLANETARY NEBULA")]);
+        assert_eq!(dropped_conditions(&hst, &honoured), Vec::<String>::new());
+        assert_eq!(dropped_conditions(&hst, &echo(&[("sci_broad_category", "STAR, STAR;*, *;STAR, *;STAR;*")])), ["sci_target_descrip"]);
+        let typed = sent(&[("targdesc", "*Planetary nebulae*, *Exoplanet*")]);
+        assert_eq!(dropped_conditions(&typed, &echo(&[("targdesc", "*Planetary nebulae*,*Exoplanet*")])), Vec::<String>::new());
+        let numbers = vec![("program".to_owned(), Value::from(2739))];
+        assert_eq!(dropped_conditions(&numbers, &echo(&[("program", "2739")])), Vec::<String>::new());
     }
 }

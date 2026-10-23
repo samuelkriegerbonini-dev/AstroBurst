@@ -3,6 +3,7 @@ import {
   boundsOffScreen,
   buildContourRequest,
   closedContourPolygons,
+  contourBackgroundText,
   contourHint,
   contourToPolygon,
   cullPolyline,
@@ -11,6 +12,7 @@ import {
   CONTOUR_BIN_CHOICES,
   CONTOUR_HINT_ON_SCREEN,
   CONTOUR_HINT_OTHER_SOURCE,
+  CONTOUR_SIGMA_FIELD_LABEL,
   DEFAULT_SIGMA_MULTIPLES_TEXT,
   formatLevelValue,
   levelColour,
@@ -23,7 +25,7 @@ import {
 } from "../contourLevels";
 import { describeMeasurementSource } from "../analysisTarget";
 import type { Pt } from "../regionGeometry";
-import type { ContourLevel } from "../../shared/types/contours";
+import type { ContourLevel, ContourResult } from "../../shared/types/contours";
 
 const identity = (p: Pt): Pt => p;
 const scaled = (p: Pt): Pt => ({ x: p.x * 2 + 100, y: p.y * 2 + 50 });
@@ -203,6 +205,54 @@ describe("contourHint", () => {
   it("keeps the on-screen hint for the original file and for a processed FITS", () => {
     expect(contourHint(describeMeasurementSource(base))).toBe(CONTOUR_HINT_ON_SCREEN);
     expect(contourHint(describeMeasurementSource({ ...base, processedLabel: "Denoise" }))).toBe(CONTOUR_HINT_ON_SCREEN);
+  });
+});
+
+describe("contourBackgroundText", () => {
+  const result: ContourResult = {
+    levels: [],
+    bin: 1,
+    n_points: 0,
+    background_median: 1.5,
+    background_sigma: 0.25,
+    notes: [],
+    masked: false,
+    elapsed_ms: 3,
+  };
+
+  it("says the sigma is the clipped tile scatter of the image smoothed with the sigma used for the run", () => {
+    expect(contourBackgroundText(result, 1)).toBe("background 1.5 ± 0.25 (clipped tile scatter after smoothing σ = 1 px)");
+    expect(contourBackgroundText(result, 1)).toContain("after smoothing σ = 1 px");
+    expect(contourBackgroundText(result, 2.5)).toContain("after smoothing σ = 2.5 px");
+  });
+
+  it("says no smoothing was applied when the run used 0 px", () => {
+    expect(contourBackgroundText(result, 0)).toBe("background 1.5 ± 0.25 (clipped tile scatter, no smoothing)");
+  });
+
+  it("says the sigma belongs to the block-mean binned plane when the run binned it", () => {
+    expect(contourBackgroundText({ ...result, bin: 4 }, 1)).toBe(
+      "background 1.5 ± 0.25 (clipped tile scatter of the 4x4-binned plane after smoothing σ = 1 px)",
+    );
+    expect(contourBackgroundText({ ...result, bin: 2 }, 0)).toBe("background 1.5 ± 0.25 (clipped tile scatter of the 2x2-binned plane, no smoothing)");
+  });
+
+  it("prints the median and sigma with the precision of the level chips, so a small sigma is not 0.000", () => {
+    const faint = { ...result, background_median: 2.3e-5, background_sigma: 4.1e-6 };
+    expect(contourBackgroundText(faint, 1)).toBe("background 2.300e-5 ± 4.100e-6 (clipped tile scatter after smoothing σ = 1 px)");
+    const hst = { ...result, background_median: 0.021337, background_sigma: 0.0041834 };
+    expect(contourBackgroundText(hst, 1)).toContain(`background ${formatLevelValue(0.021337)} ± ${formatLevelValue(0.0041834)} (`);
+    expect(contourBackgroundText(hst, 1)).toContain("± 0.0041834 (");
+  });
+
+  it("labels the sigma field with the binned, smoothed image", () => {
+    expect(CONTOUR_SIGMA_FIELD_LABEL).toBe("Sigma multiples above the median (sigma of the binned, smoothed image)");
+  });
+
+  it("marks a non-finite background", () => {
+    expect(contourBackgroundText({ ...result, background_median: NaN, background_sigma: Infinity }, 1)).toBe(
+      "background -- ± -- (clipped tile scatter after smoothing σ = 1 px)",
+    );
   });
 });
 

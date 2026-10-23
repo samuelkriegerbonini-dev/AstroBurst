@@ -265,7 +265,7 @@ export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
   const v = m.velocity;
   const rows: MeasurementRow[] = [
     { label: "Flux", value: `${formatQuantity(m.flux)} ${PLUS_MINUS} ${formatQuantity(m.flux_err)} ${m.flux_unit}` },
-    { label: "Equivalent width", value: `${formatQuantity(m.equivalent_width)} ${unit}` },
+    { label: "Equivalent width (absorption > 0, emission < 0)", value: `${formatQuantity(m.equivalent_width)} ${unit}` },
     { label: "Centroid", value: withVelocity(`${formatAxisQuantity(m.centroid)} ${unit}`, v?.centroid_kms, v !== null) },
     { label: "Sigma", value: withVelocity(`${formatQuantity(m.sigma)} ${unit}`, v?.sigma_kms, v !== null) },
     { label: "FWHM", value: withVelocity(`${formatQuantity(m.fwhm)} ${unit}`, v?.fwhm_kms, v !== null) },

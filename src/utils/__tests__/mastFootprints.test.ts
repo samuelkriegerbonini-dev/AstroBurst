@@ -41,6 +41,8 @@ function row(over: Partial<MastRow> = {}): MastRow {
     decDeg: -13.792,
     sRegion: "POLYGON ICRS  274.69 -13.89 274.76 -13.91 274.77 -13.79",
     values: { targtype: "FIXED" },
+    categories: [],
+    targetDescription: null,
     ...over,
   };
 }

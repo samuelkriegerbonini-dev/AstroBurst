@@ -1,5 +1,7 @@
+pub(crate) mod area;
 mod time_series;
 pub use time_series::*;
+use area::{area_map, extname_is, holds_one_plane};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -486,14 +488,11 @@ pub(crate) struct PhotometryContext {
     pub entry: ImageEntry,
     pub mask: Option<DqMask>,
     pub planes: PhotometryPlanes,
+    pub area: Option<ImageEntry>,
     pub wcs: Option<WcsTransform>,
     pub photcal: Option<PhotCal>,
     pub gain_model: GainModel,
     pub warnings: Vec<String>,
-}
-
-fn is_err_extname(extname: Option<&str>) -> bool {
-    extname.is_some_and(|name| name.trim().trim_matches('\'').trim().eq_ignore_ascii_case(ERR_EXTNAME))
 }
 
 pub(crate) fn has_err_extension(path: &str, dims: (usize, usize)) -> bool {
@@ -508,9 +507,8 @@ pub(crate) fn has_err_extension(path: &str, dims: (usize, usize)) -> bool {
     };
     let (rows, cols) = dims;
     hdus.iter().any(|h| {
-        is_err_extname(h.extname.as_deref())
-            && h.has_data
-            && (h.naxis == 2 || (h.naxis == 3 && h.naxis3 == 1))
+        extname_is(h.extname.as_deref(), ERR_EXTNAME)
+            && holds_one_plane(h)
             && h.naxis1 == cols as i64
             && h.naxis2 == rows as i64
     })
@@ -523,15 +521,16 @@ pub(crate) fn photometry_context(path: &str, exclude_dq: bool) -> anyhow::Result
     let planes = photometry_planes(path, dims);
     let header = entry.header();
     let wcs = header.and_then(|h| load_wcs(path, h).ok());
-    let photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
+    let mut photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
     let gain_model = gain_model(header, planes.err.is_some());
     let mut warnings: Vec<String> = Vec::new();
     match &photcal {
         Some(cal) => warnings.extend(cal.warnings.iter().cloned()),
         None => warnings.push(missing_calibration_reason(header)),
     }
+    let area = area_map(path, &entry, photcal.as_mut(), &mut warnings);
     warnings.extend(processed_data_warning(header));
-    Ok(PhotometryContext { entry, mask, planes, wcs, photcal, gain_model, warnings })
+    Ok(PhotometryContext { entry, mask, planes, area, wcs, photcal, gain_model, warnings })
 }
 
 pub(crate) fn processed_data_warning(header: Option<&HduHeader>) -> Option<String> {
@@ -552,6 +551,7 @@ impl PhotometryContext {
 
     fn masked_image(&self) -> Result<MaskedImage<'_>, String> {
         MaskedImage::new(self.entry.arr(), self.mask.as_ref().map(|m| &m.map))
+            .map(|source| source.with_area(self.area.as_ref().map(|a| a.arr())))
     }
 
     fn measure(&self, source: &MaskedImage, x: f64, y: f64, config: &PhotometryConfig) -> Result<StarPhotometry, String> {
@@ -899,9 +899,12 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use super::area::test_fixtures::*;
     use crate::core::analysis::gain::{PoissonRoute, UnitClass, SKY_ONLY_ERRORS_WARNING};
     use crate::cmd::common::dq_exclusion;
+    use crate::core::analysis::aperture::circular_aperture;
     use crate::core::astrometry::catalog::{catalog_cache_key, CatalogCacheKey, CatalogSource};
+    use crate::core::metadata::photcal::{AB_MAG_ZERO_POINT, JY_PER_MJY};
     use crate::infra::fits::reader::test_fixtures::{
         cube_hdu, empty_primary_cards, sci_err_dq_mef_with_dq_cards, write_raw_hdus, write_test_mef, HduData, TestHdu,
     };
@@ -935,17 +938,6 @@ mod tests {
         assert_eq!(model.poisson_route, PoissonRoute::HeaderGain);
         let note = model.note.as_deref().unwrap_or("");
         assert!(note.contains("NCOMBINE=2") && note.contains("14"), "{note}");
-    }
-
-    fn gaussian_pixels(size: usize, amp: f32, sigma: f32, bg: f32) -> Vec<f32> {
-        let c = (size / 2) as f32;
-        (0..size * size)
-            .map(|i| {
-                let x = (i % size) as f32 - c;
-                let y = (i / size) as f32 - c;
-                bg + amp * (-(x * x + y * y) / (2.0 * sigma * sigma)).exp()
-            })
-            .collect()
     }
 
     fn jwst_star_mef(path: &std::path::Path, sci_cards: Vec<(&'static str, String)>) -> String {
@@ -2051,5 +2043,556 @@ mod tests {
             warnings.iter().any(|w| w.as_str().unwrap() == "Gaia match skipped: the file has no celestial WCS"),
             "{warnings:?}"
         );
+    }
+
+    fn cal_photometry_with_gain(key: &str, exclude_dq: bool, gain: Option<f64>) -> serde_json::Value {
+        photometry_for_path(key, 32.0, 32.0, Some(CAL_APERTURE_RADIUS), None, false, exclude_dq, gain).unwrap()
+    }
+
+    fn cal_photometry(key: &str, exclude_dq: bool) -> serde_json::Value {
+        cal_photometry_with_gain(key, exclude_dq, None)
+    }
+
+    fn plain_cal(dir: &std::path::Path, name: &str, planes: CalPlanes, exclude_dq: bool, gain: Option<f64>) -> serde_json::Value {
+        let plain = jwst_cal_mef(&dir.join(name), &[], cal_sci_cards(), planes, vec![]);
+        cal_photometry_with_gain(&plain.key, exclude_dq, gain)
+    }
+
+    const FLUX_FIELDS: [&str; 8] =
+        ["net_flux", "flux_err", "snr", "flux_jy", "flux_err_jy", "mag_ab", "mag_ab_err", "mag_ab_total"];
+
+    fn flux_bits(phot: &serde_json::Value) -> Vec<u64> {
+        let mut bits: Vec<u64> = FLUX_FIELDS.iter().map(|f| phot[f].as_f64().unwrap().to_bits()).collect();
+        bits.extend(phot["growth_curve"].as_array().unwrap().iter().map(|p| p["flux"].as_f64().unwrap().to_bits()));
+        bits
+    }
+
+    const HEAD_15AFA22_FLUX_BITS: [u64; 48] = [
+        0x40d75c70674d66e1, 0x400fc29c5ad9e12b, 0x40b78997fc2dd42a, 0x3f41f85858818451,
+        0x3e786e5372411c0e, 0x40310d602c12372e, 0x3f279e162f820bf8, 0x4030ffbd755aac0d,
+        0x408a393148ebcb56, 0x40a556062cd496c9, 0x40b805056b3f574c, 0x40c2c2bd8a6c847b,
+        0x40ca5f6f7f358ad2, 0x40d04d371bace26e, 0x40d33f33a038ba1b, 0x40d506b4dd20abd0,
+        0x40d6883460052aa6, 0x40d75c70674d66e1, 0x40d7f39cca6557ae, 0x40d83ca7d26b0ca2,
+        0x40d8684e461bcf10, 0x40d87be8f02a60aa, 0x40d88429e75192a3, 0x40d8878eea6c1ba0,
+        0x40d88924aa49fcac, 0x40d8898ee2ac7720, 0x40d88a8720604db2, 0x40d88ad549dff961,
+        0x40d88accb6fc3754, 0x40d88a25e40dcede, 0x40d888dbc6d4d012, 0x40d8891ff82b1b3c,
+        0x40d8895afa6c920e, 0x40d8896100069a3e, 0x40d88a559d158afe, 0x40d88a4a24dbd3e4,
+        0x40d888dbb2e5f9ac, 0x40d8883f5b43948c, 0x40d887f3a33a88a4, 0x40d8882b0f7e0564,
+        0x40d888a5603f7c50, 0x40d888c1277c1cb4, 0x40d889229160b098, 0x40d888110c29d574,
+        0x40d886b8036f7328, 0x40d886d1e9ced978, 0x40d886f28331d198, 0x40d886ed3199d5c4,
+    ];
+    const HEAD_LABEL: &str = "JWST MJy/sr, PIXAR_SR from header";
+    const AREA_LABEL: &str = "JWST MJy/sr, PIXAR_SR from header, AREA pixel-area map applied";
+    const JWST_MJY_SR_NOTE: &str = "JWST MJy/sr: flux [Jy] = sum(MJy/sr) * PIXAR_SR * 1e6";
+    const AREA_NOTE: &str =
+        "AREA pixel-area map applied (HDU 4, map mean 1.0001): flux [Jy] = sum((SB - sky) * AREA) * PIXAR_SR * 1e6";
+
+    fn native_bits(phot: &serde_json::Value) -> Vec<u64> {
+        let mut bits = vec![phot["net_flux"].as_f64().unwrap().to_bits(), phot["flux_err"].as_f64().unwrap().to_bits()];
+        bits.extend(phot["growth_curve"].as_array().unwrap().iter().map(|p| p["flux"].as_f64().unwrap().to_bits()));
+        bits
+    }
+
+    fn relative_gap(value: f64, expected: f64) -> f64 {
+        (value - expected).abs() / expected.abs()
+    }
+
+    fn number(phot: &serde_json::Value, field: &str) -> f64 {
+        phot[field].as_f64().unwrap_or_else(|| panic!("{field}: {phot}"))
+    }
+
+    fn mentions_area(values: &serde_json::Value) -> bool {
+        values.as_array().map_or(false, |items| items.iter().any(|v| v.as_str().unwrap_or("").contains("AREA")))
+    }
+
+    fn area_warnings(out: &serde_json::Value) -> Vec<String> {
+        out[RES_WARNINGS]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap().to_string())
+            .filter(|w| w.contains("AREA"))
+            .collect()
+    }
+
+    fn notes_of(out: &serde_json::Value) -> Vec<String> {
+        out[RES_PHOTCAL]["notes"].as_array().map_or(Vec::new(), |n| n.iter().map(|v| v.as_str().unwrap().to_string()).collect())
+    }
+
+    fn tan_wcs_cards(arcsec_per_pixel: f64) -> Vec<(&'static str, String)> {
+        let deg = arcsec_per_pixel / 3600.0;
+        vec![
+            ("CTYPE1", "'RA---TAN'".into()),
+            ("CTYPE2", "'DEC--TAN'".into()),
+            ("CRPIX1", "32.5".into()),
+            ("CRPIX2", "32.5".into()),
+            ("CRVAL1", "150.0".into()),
+            ("CRVAL2", "2.0".into()),
+            ("CD1_1", format!("{:.12E}", -deg)),
+            ("CD1_2", "0.0".into()),
+            ("CD2_1", "0.0".into()),
+            ("CD2_2", format!("{:.12E}", deg)),
+        ]
+    }
+
+    fn sci_cards_with(cards: Vec<(&'static str, String)>) -> Vec<(&'static str, String)> {
+        let mut all = cal_sci_cards();
+        all.extend(cards);
+        all
+    }
+
+    fn sci_cards_without(key: &str) -> Vec<(&'static str, String)> {
+        cal_sci_cards().into_iter().filter(|(k, _)| *k != key).collect()
+    }
+
+    fn sci_cards_replacing(key: &str, value: &str) -> Vec<(&'static str, String)> {
+        let mut cards = sci_cards_without(key);
+        cards.push(("PIXAR_SR", value.to_string()));
+        cards
+    }
+
+    #[test]
+    fn a_jwst_cal_without_an_area_extension_keeps_the_head_photometry_bit_for_bit() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = jwst_cal_mef(&dir.path().join("cal.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![]);
+        let out = cal_photometry(&fixture.key, false);
+        let phot = &out[RES_PHOTOMETRY];
+        assert_eq!(flux_bits(phot), HEAD_15AFA22_FLUX_BITS.to_vec());
+        assert_eq!(out[RES_PHOTCAL][RES_LABEL], HEAD_LABEL);
+        assert!(notes_of(&out).iter().any(|n| n == JWST_MJY_SR_NOTE), "{:?}", notes_of(&out));
+        assert!(!mentions_area(&out[RES_PHOTCAL]["notes"]), "{}", out[RES_PHOTCAL]["notes"]);
+        assert!(!mentions_area(&out[RES_WARNINGS]), "{}", out[RES_WARNINGS]);
+        assert_eq!(phot["area_applied"], false);
+    }
+
+    #[test]
+    fn an_i2d_with_an_r_area_card_but_no_area_extension_matches_the_plain_cal_bit_for_bit() {
+        let dir = tempfile::tempdir().unwrap();
+        let size = CAL_SIZE;
+        let primary = [
+            ("S_RESAMP", "'COMPLETE'".to_string()),
+            ("R_AREA", "'crds://jwst_nircam_area_0312.fits'".to_string()),
+        ];
+        let resampled_products = vec![
+            TestHdu {
+                extname: Some("CON"),
+                extver: Some(1),
+                cols: size,
+                rows: size,
+                data: HduData::I32(vec![1; size * size]),
+                extra_cards: vec![],
+            },
+            TestHdu {
+                extname: Some("WHT"),
+                extver: Some(1),
+                cols: size,
+                rows: size,
+                data: HduData::F32(vec![1.0; size * size]),
+                extra_cards: vec![],
+            },
+        ];
+        let fixture = jwst_cal_mef(&dir.path().join("i2d.fits"), &primary, cal_sci_cards(), CalPlanes::SCI_ERR, resampled_products);
+        let out = cal_photometry(&fixture.key, false);
+        let reference = plain_cal(dir.path(), "plain.fits", CalPlanes::SCI_ERR, false, None);
+        let phot = &out[RES_PHOTOMETRY];
+        assert_eq!(flux_bits(phot), flux_bits(&reference[RES_PHOTOMETRY]));
+        assert_eq!(out[RES_PHOTCAL][RES_LABEL], HEAD_LABEL);
+        assert!(!mentions_area(&out[RES_PHOTCAL]["notes"]), "{}", out[RES_PHOTCAL]["notes"]);
+        assert!(!mentions_area(&out[RES_WARNINGS]), "{}", out[RES_WARNINGS]);
+        assert_eq!(phot["area_applied"], false);
+    }
+
+    #[test]
+    fn area_map_fluxes_match_a_hand_sum_over_the_masked_aperture() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = jwst_cal_mef(
+            &dir.path().join("cal_area.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(blocked_area(), CAL_SIZE, Some(1))],
+        );
+        let area = square(&blocked_area());
+        let out = cal_photometry(&fixture.key, true);
+        let phot = &out[RES_PHOTOMETRY];
+        let mask = dq_exclusion(&fixture.key).unwrap().expect("DQ exclusion map");
+        assert_ne!(mask[[CAL_EXCLUDED_PIXEL.0, CAL_EXCLUDED_PIXEL.1]], 0);
+        assert_eq!(phot["n_masked"], 1);
+
+        let (x, y, r) = (number(phot, "x"), number(phot, "y"), number(phot, "aperture_radius"));
+        let bg_mean = number(phot, "bg_mean");
+        let bg_sigma = number(phot, "bg_sigma");
+        let bg_pixels = number(phot, "bg_pixels");
+        assert!(bg_sigma > 0.0);
+        let mut net = 0.0f64;
+        let mut variance = 0.0f64;
+        let mut area_weight = 0.0f64;
+        let mut touched_block = false;
+        for p in circular_aperture(CAL_SIZE, CAL_SIZE, x, y, r, 5) {
+            if mask[[p.y, p.x]] != 0 {
+                continue;
+            }
+            let a = area[[p.y, p.x]] as f64;
+            touched_block |= a != 1.0;
+            let w = p.weight as f64 * a;
+            net += w * (fixture.sci[[p.y, p.x]] as f64 - bg_mean);
+            variance += (w * fixture.err[[p.y, p.x]] as f64).powi(2);
+            area_weight += w;
+        }
+        assert!(touched_block, "the 1.02 block must overlap the aperture");
+        variance += area_weight * area_weight * bg_sigma * bg_sigma / bg_pixels;
+        let expected_jy = JY_PER_MJY * CAL_PIXAR_SR * net;
+        let expected_err_jy = JY_PER_MJY * CAL_PIXAR_SR * variance.sqrt();
+
+        let flux_jy = number(phot, "flux_jy");
+        assert!(relative_gap(flux_jy, expected_jy) < 1e-9, "flux_jy {flux_jy} vs hand sum {expected_jy}");
+        let flux_err_jy = number(phot, "flux_err_jy");
+        assert!(relative_gap(flux_err_jy, expected_err_jy) < 1e-9, "flux_err_jy {flux_err_jy} vs hand sum {expected_err_jy}");
+        let mag_ab = number(phot, "mag_ab");
+        assert!((mag_ab - (-2.5 * flux_jy.log10() + AB_MAG_ZERO_POINT)).abs() < 1e-12, "mag_ab {mag_ab}");
+        assert!(relative_gap(number(phot, "net_flux"), net) < 1e-9);
+        assert_eq!(phot["area_applied"], true);
+        assert_eq!(out[RES_PHOTCAL][RES_LABEL], AREA_LABEL);
+        let notes = notes_of(&out);
+        assert!(notes.iter().any(|n| n == AREA_NOTE), "{notes:?}");
+        assert!(!notes.iter().any(|n| n == JWST_MJY_SR_NOTE), "the generic MJy/sr formula must be replaced: {notes:?}");
+        assert!(!mentions_area(&out[RES_WARNINGS]), "{}", out[RES_WARNINGS]);
+    }
+
+    #[test]
+    fn an_area_map_of_ones_is_bit_identical_and_a_uniform_map_scales_the_flux_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = plain_cal(dir.path(), "cal_plain.fits", CalPlanes::ALL, false, None);
+        let ones = jwst_cal_mef(
+            &dir.path().join("cal_ones.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(1.0), CAL_SIZE, Some(1))],
+        );
+        let out = cal_photometry(&ones.key, false);
+        assert_eq!(flux_bits(&out[RES_PHOTOMETRY]), flux_bits(&reference[RES_PHOTOMETRY]));
+        assert_eq!(out[RES_PHOTOMETRY]["area_applied"], true);
+        assert_eq!(out[RES_PHOTCAL][RES_LABEL], AREA_LABEL);
+
+        let scaled = jwst_cal_mef(
+            &dir.path().join("cal_102.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(AREA_BLOCK_VALUE), CAL_SIZE, Some(1))],
+        );
+        let out = cal_photometry(&scaled.path, false);
+        let phot = &out[RES_PHOTOMETRY];
+        let plain = &reference[RES_PHOTOMETRY];
+        assert_eq!(out[RES_PHOTCAL][RES_LABEL], AREA_LABEL, "an Auto plane resolved to SCI takes the AREA map");
+        let scale = f64::from(AREA_BLOCK_VALUE);
+        for field in ["net_flux", "flux_err", "flux_jy", "flux_err_jy"] {
+            let value = number(phot, field);
+            let expected = scale * number(plain, field);
+            assert!(relative_gap(value, expected) < 1e-12, "{field} {value} vs {expected}");
+        }
+        let mag_ab = number(phot, "mag_ab");
+        assert!((mag_ab - (number(plain, "mag_ab") - 2.5 * scale.log10())).abs() < 1e-12, "mag_ab {mag_ab}");
+        assert!(relative_gap(number(phot, "snr"), number(plain, "snr")) < 1e-12);
+        for field in ["x", "y", "peak", "fwhm", "aperture_radius", "aperture_pixels", "aperture_area", "bg_mean", "bg_sigma", "bg_pixels", "n_masked", "sky_inner", "sky_outer"] {
+            assert_eq!(phot[field], plain[field], "{field}");
+        }
+        assert!(relative_gap(number(phot, "aperture_correction"), number(plain, "aperture_correction")) < 1e-12);
+    }
+
+    #[test]
+    fn a_non_finite_or_non_positive_area_pixel_gets_unit_weight() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = plain_cal(dir.path(), "cal_plain.fits", CalPlanes::ALL, true, None);
+        let mut area = uniform_area(1.0);
+        area[32 * CAL_SIZE + 33] = f32::NAN;
+        area[31 * CAL_SIZE + 31] = 0.0;
+        area[33 * CAL_SIZE + 30] = -1.0;
+        let holed = jwst_cal_mef(&dir.path().join("cal_holes.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![area_hdu(area, CAL_SIZE, Some(1))]);
+        let out = cal_photometry(&holed.key, true);
+        assert_eq!(flux_bits(&out[RES_PHOTOMETRY]), flux_bits(&reference[RES_PHOTOMETRY]));
+        assert_eq!(out[RES_PHOTOMETRY]["area_applied"], true);
+        assert_eq!(out[RES_PHOTCAL][RES_LABEL], AREA_LABEL);
+        assert!(area_warnings(&out).is_empty(), "{:?}", area_warnings(&out));
+    }
+
+    #[test]
+    fn without_an_err_plane_the_area_map_propagates_into_the_error_squared() {
+        let dir = tempfile::tempdir().unwrap();
+        let scale = f64::from(AREA_BLOCK_VALUE);
+        for (name, gain) in [("nogain", None), ("gain", Some(2.0))] {
+            let reference = plain_cal(dir.path(), &format!("plain_{name}.fits"), CalPlanes::SCI_DQ, false, gain);
+            let scaled = jwst_cal_mef(
+                &dir.path().join(format!("uniform_{name}.fits")),
+                &[],
+                cal_sci_cards(),
+                CalPlanes::SCI_DQ,
+                vec![area_hdu(uniform_area(AREA_BLOCK_VALUE), CAL_SIZE, Some(1))],
+            );
+            let out = cal_photometry_with_gain(&scaled.key, false, gain);
+            let (phot, plain) = (&out[RES_PHOTOMETRY], &reference[RES_PHOTOMETRY]);
+            assert_eq!(phot["err_used"], false);
+            assert_eq!(phot["area_applied"], true);
+            let (flux_err, expected) = (number(phot, "flux_err"), scale * number(plain, "flux_err"));
+            assert!(relative_gap(flux_err, expected) < 1e-12, "{name}: flux_err {flux_err} vs {scale} x {}", number(plain, "flux_err"));
+            let (snr, plain_snr) = (number(phot, "snr"), number(plain, "snr"));
+            assert!(relative_gap(snr, plain_snr) < 1e-12, "{name}: snr {snr} vs {plain_snr}");
+        }
+
+        let gain = 2.0;
+        let blocked = jwst_cal_mef(
+            &dir.path().join("blocked_noerr.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::SCI_DQ,
+            vec![area_hdu(blocked_area(), CAL_SIZE, Some(1))],
+        );
+        let area = square(&blocked_area());
+        let out = cal_photometry_with_gain(&blocked.key, true, Some(gain));
+        let phot = &out[RES_PHOTOMETRY];
+        let mask = dq_exclusion(&blocked.key).unwrap().expect("DQ exclusion map");
+        let (x, y, r) = (number(phot, "x"), number(phot, "y"), number(phot, "aperture_radius"));
+        let (bg_mean, bg_sigma, bg_pixels) = (number(phot, "bg_mean"), number(phot, "bg_sigma"), number(phot, "bg_pixels"));
+        let mut net = 0.0f64;
+        let mut noise_net = 0.0f64;
+        let mut noise_weight = 0.0f64;
+        let mut area_weight = 0.0f64;
+        for p in circular_aperture(CAL_SIZE, CAL_SIZE, x, y, r, 5) {
+            if mask[[p.y, p.x]] != 0 {
+                continue;
+            }
+            let (w, a) = (p.weight as f64, area[[p.y, p.x]] as f64);
+            let signal = blocked.sci[[p.y, p.x]] as f64 - bg_mean;
+            net += w * a * signal;
+            noise_net += w * a * a * signal;
+            noise_weight += w * a * a;
+            area_weight += w * a;
+        }
+        let variance = noise_net.max(0.0) / gain + noise_weight * bg_sigma * bg_sigma + area_weight * area_weight * bg_sigma * bg_sigma / bg_pixels;
+        let flux_err = number(phot, "flux_err");
+        assert!(relative_gap(number(phot, "net_flux"), net) < 1e-9);
+        assert!(relative_gap(flux_err, variance.sqrt()) < 1e-9, "flux_err {flux_err} vs hand sum {}", variance.sqrt());
+        assert_eq!(phot["err_used"], false);
+    }
+
+    #[test]
+    fn an_area_extension_that_fails_a_gate_is_ignored_with_a_named_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = plain_cal(dir.path(), "plain.fits", CalPlanes::ALL, false, None);
+        let plain_native = native_bits(&reference[RES_PHOTOMETRY]);
+        let map = |value: f32| vec![area_hdu(uniform_area(value), CAL_SIZE, Some(1))];
+        let steradians = jwst_cal_mef(&dir.path().join("sr.fits"), &[], cal_sci_cards(), CalPlanes::ALL, map(2.29249e-14));
+        let wrong_size = jwst_cal_mef(&dir.path().join("dims.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![area_hdu(vec![1.0; 32 * 32], 32, Some(1))]);
+        let other_extver = jwst_cal_mef(&dir.path().join("extver.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![area_hdu(uniform_area(1.02), CAL_SIZE, Some(2))]);
+        let resampled = jwst_cal_mef(&dir.path().join("resampled.fits"), &[], sci_cards_with(tan_wcs_cards(0.0625)), CalPlanes::ALL, map(1.02));
+        let mut no_pixar_cards = sci_cards_without("PIXAR_SR");
+        no_pixar_cards.extend(tan_wcs_cards(0.0312));
+        let no_pixar = jwst_cal_mef(&dir.path().join("nopixar.fits"), &[], no_pixar_cards, CalPlanes::ALL, map(1.02));
+        let mut zero_pixar_cards = sci_cards_replacing("PIXAR_SR", "0.0");
+        zero_pixar_cards.extend(tan_wcs_cards(0.0312));
+        let zero_pixar = jwst_cal_mef(&dir.path().join("zeropixar.fits"), &[], zero_pixar_cards, CalPlanes::ALL, map(1.02));
+        let uncalibrated = jwst_cal_mef(&dir.path().join("uncal.fits"), &[], sci_cards_without("PIXAR_SR"), CalPlanes::ALL, map(1.02));
+        let mut rate_cards = sci_cards_without("BUNIT");
+        rate_cards.push(("BUNIT", "'DN/s'".into()));
+        let rate = jwst_cal_mef(&dir.path().join("rate.fits"), &[], rate_cards, CalPlanes::ALL, map(1.02));
+        let derived = "JWST MJy/sr, PIXAR_SR derived from the WCS";
+        let cases = [
+            (&steradians, "AREA extension ignored: map mean 2.29e-14 is not a relative pixel area (expected about 1)", Some(HEAD_LABEL)),
+            (&wrong_size, "AREA extension ignored: its size 32 x 32 differs from the image 64 x 64", Some(HEAD_LABEL)),
+            (&other_extver, "AREA extension ignored: EXTVER 2 differs from SCI EXTVER 1", Some(HEAD_LABEL)),
+            (&resampled, "AREA extension ignored: PIXAR_SR was replaced by the WCS pixel area (resampled image)", Some(derived)),
+            (&no_pixar, "AREA extension ignored: PIXAR_SR is missing, so the pixel area comes from the WCS", Some(derived)),
+            (&zero_pixar, "AREA extension ignored: PIXAR_SR is missing, so the pixel area comes from the WCS", Some(derived)),
+            (&uncalibrated, "AREA extension ignored: the header has no photometric calibration", None),
+            (&rate, "AREA extension ignored: JWST DN/s via PHOTMJSR and PIXAR_SR is not JWST MJy/sr", Some("JWST DN/s via PHOTMJSR and PIXAR_SR")),
+        ];
+        for (fixture, expected_warning, label) in cases {
+            let out = cal_photometry(&fixture.key, false);
+            let phot = &out[RES_PHOTOMETRY];
+            assert_eq!(native_bits(phot), plain_native, "{}", fixture.key);
+            assert_eq!(phot["area_applied"], false, "{}", fixture.key);
+            assert_eq!(out[RES_PHOTCAL][RES_LABEL].as_str(), label, "{}", fixture.key);
+            assert!(!mentions_area(&out[RES_PHOTCAL]["notes"]), "{}: {}", fixture.key, out[RES_PHOTCAL]["notes"]);
+            assert_eq!(area_warnings(&out), vec![expected_warning.to_string()], "{}", fixture.key);
+        }
+        let out = cal_photometry(&steradians.key, false);
+        assert_eq!(flux_bits(&out[RES_PHOTOMETRY]), flux_bits(&reference[RES_PHOTOMETRY]));
+    }
+
+    #[test]
+    fn an_area_hdu_without_an_extver_card_is_the_map_of_sci_extver_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = plain_cal(dir.path(), "plain.fits", CalPlanes::ALL, false, None);
+        let fixture = jwst_cal_mef(
+            &dir.path().join("noextver.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(AREA_BLOCK_VALUE), CAL_SIZE, None)],
+        );
+        let out = cal_photometry(&fixture.key, false);
+        assert_eq!(out[RES_PHOTOMETRY]["area_applied"], true);
+        assert_eq!(out[RES_PHOTCAL][RES_LABEL], AREA_LABEL);
+        assert!(area_warnings(&out).is_empty(), "{:?}", area_warnings(&out));
+        let scale = f64::from(AREA_BLOCK_VALUE);
+        let (flux, plain) = (number(&out[RES_PHOTOMETRY], "net_flux"), number(&reference[RES_PHOTOMETRY], "net_flux"));
+        assert!(relative_gap(flux, scale * plain) < 1e-12, "{flux} vs {scale} x {plain}");
+    }
+
+    #[tokio::test]
+    async fn batch_photometry_with_an_area_map_equals_the_single_measurement() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = jwst_cal_mef(
+            &dir.path().join("batch_area.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(blocked_area(), CAL_SIZE, Some(1))],
+        );
+        let single = measure_photometry_cmd(fixture.key.clone(), 32.0, 32.0, Some(CAL_APERTURE_RADIUS), None, None, Some(false), Some(true), None)
+            .await
+            .unwrap();
+        let batch = measure_photometry_batch_cmd(fixture.key.clone(), vec![(32.0, 32.0)], Some(CAL_APERTURE_RADIUS), None, None, None, Some(true), Some(true))
+            .await
+            .unwrap();
+        let rows = batch[RES_ROWS].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(single[RES_PHOTOMETRY]["area_applied"], true);
+        assert_eq!(rows[0][RES_PHOTOMETRY], single[RES_PHOTOMETRY]);
+        assert_eq!(batch[RES_PHOTCAL], single[RES_PHOTCAL]);
+        assert_eq!(batch[RES_PHOTCAL][RES_LABEL], AREA_LABEL);
+        assert_eq!(batch[RES_WARNINGS], single[RES_WARNINGS]);
+    }
+
+    #[test]
+    fn a_time_series_applies_the_area_map_frame_by_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_area = jwst_cal_mef(
+            &dir.path().join("frame_area.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(AREA_BLOCK_VALUE), CAL_SIZE, Some(1))],
+        );
+        let plain = jwst_cal_mef(&dir.path().join("frame_plain.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![]);
+        let refused = jwst_cal_mef(
+            &dir.path().join("frame_sr.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(2.29249e-14), CAL_SIZE, Some(1))],
+        );
+        let single_plain = cal_photometry(&plain.key, false);
+        let targets = vec![TimeSeriesTarget { x: 32.0, y: 32.0, label: "T".into(), role: "target".into() }];
+        let config = PhotometryConfig { aperture_radius: Some(CAL_APERTURE_RADIUS), ..PhotometryConfig::default() };
+        let out = measure_time_series(&[with_area.key.clone(), plain.key.clone(), refused.key.clone()], &targets, &config, false, false, None).unwrap();
+        assert_eq!(out.n_skipped, 0, "{:?}", out.frames.iter().map(|f| f.skipped.clone()).collect::<Vec<_>>());
+        let first = serde_json::to_value(out.frames[0].targets[0].as_ref().expect("target on the AREA frame")).unwrap();
+        let second = serde_json::to_value(out.frames[1].targets[0].as_ref().expect("target on the plain frame")).unwrap();
+        let third = serde_json::to_value(out.frames[2].targets[0].as_ref().expect("target on the refused frame")).unwrap();
+        assert_eq!(first["area_applied"], true);
+        assert_eq!(second["area_applied"], false);
+        assert_eq!(third["area_applied"], false);
+        for field in ["net_flux", "flux_err", "flux_jy", "mag_ab"] {
+            assert_eq!(number(&second, field).to_bits(), number(&single_plain[RES_PHOTOMETRY], field).to_bits(), "{field}");
+            assert_eq!(number(&third, field).to_bits(), number(&single_plain[RES_PHOTOMETRY], field).to_bits(), "{field}");
+        }
+        let (a, b) = (number(&first, "flux_jy"), number(&second, "flux_jy"));
+        let scale = f64::from(AREA_BLOCK_VALUE);
+        assert!(relative_gap(a, scale * b) < 1e-12, "{a} vs {scale} x {b}");
+        assert_eq!(out.frames[0].photcal_label.as_deref(), Some(AREA_LABEL));
+        assert_eq!(out.frames[1].photcal_label.as_deref(), Some(HEAD_LABEL));
+        assert_eq!(out.frames[2].photcal_label.as_deref(), Some(HEAD_LABEL));
+        let area_warnings: Vec<&String> = out.warnings.iter().filter(|w| w.contains("AREA")).collect();
+        assert_eq!(
+            area_warnings,
+            vec!["frame_sr.fits: AREA extension ignored: map mean 2.29e-14 is not a relative pixel area (expected about 1)"],
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn real_jw01475_cal_flux_ratio_equals_the_flux_weighted_aperture_mean_area() {
+        use crate::core::astrometry::gwcs::test_support::mast_dir;
+        let dir = mast_dir();
+        let cal = dir.join("jw01475001001_02101_00001_nrca1_cal.fits");
+        if !cal.is_file() {
+            eprintln!("skipped: {} is missing", cal.display());
+            return;
+        }
+        let ctx = photometry_context(&format!("{}#hdu=1", cal.display()), true).unwrap();
+        let area = ctx.area.as_ref().expect("AREA map attached to the _cal frame").arr();
+        assert_eq!(ctx.photcal.as_ref().unwrap().label(), AREA_LABEL);
+        assert!(!ctx.warnings.iter().any(|w| w.contains("AREA")), "{:?}", ctx.warnings);
+        let (h, w) = ctx.entry.arr().dim();
+        let mut stars = detect_stars_core(ctx.entry.arr(), 20.0).stars;
+        stars.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+        let config = ctx.config(Some(CAL_APERTURE_RADIUS), None, None);
+        let mask = ctx.mask.as_ref().map(|m| &m.map);
+        let bare_source = MaskedImage::new(ctx.entry.arr(), mask).unwrap();
+        let with_area_source = ctx.masked_image().unwrap();
+        let mut checked = 0;
+        for star in stars.iter().filter(|s| s.x > 40.0 && s.y > 40.0 && s.x < (w - 40) as f64 && s.y < (h - 40) as f64) {
+            let err = ctx.planes.err.as_ref().map(|e| e.arr());
+            let Ok(bare) = measure_star_prepared(&bare_source, err, ctx.planes.saturated.as_ref(), star.x, star.y, &config) else {
+                continue;
+            };
+            if bare.saturated || bare.net_flux <= 0.0 {
+                continue;
+            }
+            let with = ctx.measure(&with_area_source, star.x, star.y, &config).unwrap();
+            assert!(with.area_applied && !bare.area_applied);
+            assert_eq!((with.x, with.y, with.bg_mean, with.aperture_area), (bare.x, bare.y, bare.bg_mean, bare.aperture_area));
+            let mut numerator = 0.0f64;
+            let mut denominator = 0.0f64;
+            for p in circular_aperture(h, w, bare.x, bare.y, bare.aperture_radius, 5) {
+                if mask.is_some_and(|m| m[[p.y, p.x]] != 0) {
+                    continue;
+                }
+                let v = ctx.entry.arr()[[p.y, p.x]] as f64;
+                if !v.is_finite() {
+                    continue;
+                }
+                let weight = p.weight as f64 * (v - bare.bg_mean);
+                numerator += weight * area[[p.y, p.x]] as f64;
+                denominator += weight;
+            }
+            let expected = numerator / denominator;
+            let ratio = with.net_flux / bare.net_flux;
+            assert!((ratio - expected).abs() < 1e-6, "star ({:.1}, {:.1}): ratio {ratio} vs aperture mean AREA {expected}", bare.x, bare.y);
+            eprintln!(
+                "star ({:.1}, {:.1}): net {:.6e} -> {:.6e}, ratio {ratio:.6}, flux-weighted mean AREA {expected:.6}, delta mag_ab {:+.4}, mag_ab {:.4}",
+                bare.x,
+                bare.y,
+                bare.net_flux,
+                with.net_flux,
+                -2.5 * ratio.log10(),
+                with.mag_ab.unwrap_or(f64::NAN)
+            );
+            checked += 1;
+            if checked == 5 {
+                break;
+            }
+        }
+        assert!(checked >= 3, "only {checked} stars could be measured");
+
+        let i2d = dir.join("jw01475001001_02101_00001_nrca1_i2d.fits");
+        if i2d.is_file() {
+            let ctx = photometry_context(&format!("{}#hdu=1", i2d.display()), false).unwrap();
+            assert!(ctx.area.is_none(), "an i2d has no AREA extension");
+            assert!(!ctx.photcal.as_ref().unwrap().label().contains("AREA"));
+            assert!(!ctx.warnings.iter().any(|w| w.contains("AREA")), "{:?}", ctx.warnings);
+            eprintln!("i2d: {} ({:?})", ctx.photcal.as_ref().unwrap().label(), ctx.warnings);
+        }
+        let crf = dir.join("jw01475001001_02101_00001_nrca1_o001_crf.fits");
+        if crf.is_file() {
+            let ctx = photometry_context(&format!("{}#hdu=1", crf.display()), false).unwrap();
+            assert!(ctx.area.is_some(), "the crf carries the same AREA extension as the cal");
+            assert_eq!(ctx.photcal.as_ref().unwrap().label(), AREA_LABEL);
+            eprintln!("crf: {}", ctx.photcal.as_ref().unwrap().notes.join(" | "));
+        }
     }
 }

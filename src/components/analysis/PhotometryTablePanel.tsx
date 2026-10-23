@@ -15,8 +15,10 @@ import {
   BATCH_SEMANTICS_TEXT,
   MAX_SKY_OUTER_RADIUS_PX,
   STARS_ELSEWHERE_NOTICE,
+  abCellText,
   apertureRadiusInRange,
   flagDuplicates,
+  fluxCellText,
   medianSnr,
   parsePositions,
   photometryCsvFileName,
@@ -54,7 +56,6 @@ interface BatchRun {
 interface TableColumn {
   key: PhotometryColumnKey;
   header: string;
-  digits: number;
   note?: string;
 }
 
@@ -78,16 +79,16 @@ const SMALL_BUTTON_CLASS =
   "flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed";
 
 const TABLE_COLUMNS: TableColumn[] = [
-  { key: "label", header: "label", digits: 0 },
-  { key: "x", header: "x", digits: 1, note: ZERO_BASED_PIXEL_TITLE },
-  { key: "y", header: "y", digits: 1, note: ZERO_BASED_PIXEL_TITLE },
-  { key: "net_flux", header: "flux", digits: 1 },
-  { key: "snr", header: "SNR", digits: 1 },
-  { key: "mag_ab", header: "AB", digits: 2 },
-  { key: "mag_inst", header: "inst", digits: 2 },
-  { key: "fwhm", header: "FWHM", digits: 2 },
-  { key: "ee50_radius", header: "EE50", digits: 2 },
-  { key: "aperture_correction", header: "corr", digits: 3 },
+  { key: "label", header: "label" },
+  { key: "x", header: "x", note: ZERO_BASED_PIXEL_TITLE },
+  { key: "y", header: "y", note: ZERO_BASED_PIXEL_TITLE },
+  { key: "net_flux", header: "flux" },
+  { key: "snr", header: "SNR" },
+  { key: "mag_ab", header: "AB" },
+  { key: "mag_inst", header: "inst" },
+  { key: "fwhm", header: "FWHM" },
+  { key: "ee50_radius", header: "EE50" },
+  { key: "aperture_correction", header: "corr" },
 ];
 
 const APERTURE_FIELD: DecimalFieldOptions = { optional: true };
@@ -106,23 +107,23 @@ function cellText(row: PhotometryTableRow, column: TableColumn): string {
   if (!p) return "--";
   switch (column.key) {
     case "x":
-      return fmt(p.x, column.digits);
+      return fmt(p.x, 1);
     case "y":
-      return fmt(p.y, column.digits);
+      return fmt(p.y, 1);
     case "net_flux":
-      return fmt(p.net_flux, column.digits);
+      return fluxCellText(p.net_flux);
     case "snr":
-      return fmt(p.snr, column.digits);
+      return fmt(p.snr, 1);
     case "mag_ab":
-      return fmt(p.mag_ab, column.digits);
+      return abCellText(p.mag_ab, p.mag_ab_err);
     case "mag_inst":
-      return fmt(p.mag_inst, column.digits);
+      return fmt(p.mag_inst, 2);
     case "fwhm":
-      return fmt(p.fwhm, column.digits);
+      return fmt(p.fwhm, 2);
     case "ee50_radius":
-      return fmt(p.ee50_radius, column.digits);
+      return fmt(p.ee50_radius, 2);
     case "aperture_correction":
-      return fmt(p.aperture_correction, column.digits);
+      return fmt(p.aperture_correction, 3);
     default:
       return "--";
   }
@@ -558,7 +559,8 @@ function PhotometryTablePanel({
                       {TABLE_COLUMNS.map((column) => (
                         <td
                           key={column.key}
-                          className={`${column.key === "label" ? "text-left truncate max-w-[90px]" : "text-right"} px-1.5 py-0.5`}
+                          data-column={column.key}
+                          className={`${column.key === "label" ? "text-left truncate max-w-[90px]" : "text-right whitespace-nowrap"} px-1.5 py-0.5`}
                           title={column.key === "label" ? row.label : undefined}
                         >
                           {cellText(row, column)}

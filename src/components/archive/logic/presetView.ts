@@ -18,6 +18,20 @@ export function presetTitle(preset: MastPreset): string {
   return `${preset.description}. MAST conditions: ${conditionText(preset)}. Files: ${preset.products.join(", ")}`;
 }
 
+export const PURE_PARALLEL_PRESET = "pure_parallel";
+export const PURE_PARALLEL_NOTE = "Pure-parallel visits carry no proposal category, so Category and Object type match nothing.";
+
+const LEVEL_COLUMN = "productLevel";
+
+export function presetLevel(preset: MastPreset | null): string | null {
+  return preset?.conditions.find((c) => c.column === LEVEL_COLUMN)?.value ?? null;
+}
+
+export function levelLockText(preset: MastPreset | null): string | null {
+  const level = presetLevel(preset);
+  return preset && level ? `Level ${level} set by preset ${preset.label}` : null;
+}
+
 export function droppedText(columns: readonly string[]): string | null {
   return columns.length ? `MAST ignored ${columns.join(", ")}` : null;
 }

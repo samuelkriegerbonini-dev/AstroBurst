@@ -60,6 +60,25 @@ impl TriangleParams {
         parity: Parity::Either,
     };
 
+    pub(crate) const SOLVER: TriangleParams = TriangleParams {
+        max_stars: 60,
+        tolerance: 0.02,
+        tie_margin: 0.03,
+        min_side_px: 15.0,
+        min_votes: 1,
+        ransac_iterations: 2000,
+        ransac_chunks: 16,
+        inlier_px: 3.0,
+        min_inliers: 8,
+        min_inlier_ratio: 0.10,
+        max_residual_px: 5.0,
+        wide_rotation_above_deg: 30.0,
+        wide_rotation_min_inliers: 8,
+        wide_rotation_min_inlier_ratio: 0.25,
+        wide_rotation_max_rms_px: 1.0,
+        parity: Parity::Either,
+    };
+
     pub(crate) fn wide_rotation_inliers_needed(&self, matched: usize) -> usize {
         let by_ratio = (self.wide_rotation_min_inlier_ratio * matched as f64).ceil() as usize;
         self.wide_rotation_min_inliers.max(by_ratio)
