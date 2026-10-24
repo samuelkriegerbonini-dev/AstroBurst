@@ -4,7 +4,7 @@ import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
 import type { WcsInfo, SkyFrame } from "../../shared/types/astrometry";
 import { formatLat, formatLon, frameAxisLabels, frameLonInHours, type CoordFormat } from "../../utils/coordFormat";
 import { ZERO_BASED_PIXEL_TITLE, zeroBasedPixelText } from "../../utils/regionGeometry";
-import { orientationLine } from "../../utils/wcsOrientation";
+import { ROTATION_TITLE, orientationLine } from "../../utils/wcsOrientation";
 
 interface WcsReadoutProps {
   filePath: string | null;
@@ -184,7 +184,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
           </span>
         )}
       </div>
-      {orientation && <div className="text-zinc-600">{orientation}</div>}
+      {orientation && <div className="text-zinc-600" title={ROTATION_TITLE}>{orientation}</div>}
     </div>
   );
 }

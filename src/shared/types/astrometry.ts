@@ -74,6 +74,8 @@ export interface PointingOverlapResult {
   threshold: number;
 }
 
+export type PlateSolver = "auto" | "local" | "astrometry.net";
+
 export interface PlateSolveOptions {
   apiKey?: string;
   scaleLower?: number;
@@ -83,6 +85,38 @@ export interface PlateSolveOptions {
   centerRa?: number;
   centerDec?: number;
   radius?: number;
+  solver?: PlateSolver;
+  nearRadiusDeg?: number;
+}
+
+export interface SolveHintPointing {
+  ra: number;
+  dec: number;
+  source: string;
+}
+
+export interface SolveHintScale {
+  low_arcsec: number;
+  high_arcsec: number;
+  source: string;
+}
+
+export interface SolveHintObject {
+  text: string;
+  designation: string;
+  ra: number;
+  dec: number;
+}
+
+export interface SolveHints {
+  centre?: SolveHintPointing | null;
+  scale?: SolveHintScale | null;
+  fov_deg?: number | null;
+  epoch_year?: number | null;
+  cfa?: string | null;
+  object?: SolveHintObject | null;
+  expected_tier0_stars?: number | null;
+  warnings?: string[];
 }
 
 export type WcsCard = [string, string];

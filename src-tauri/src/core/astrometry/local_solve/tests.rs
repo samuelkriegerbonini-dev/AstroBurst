@@ -40,6 +40,28 @@ const DISTORTED_MAX_ERROR_PX: f64 = 0.5;
 const BINNING_FRAME: (usize, usize) = (1920, 1080);
 const BINNING_SCALE_ARCSEC: f64 = 1.5;
 const SMALL_FIELD_LONG_SIDE_DEG: f64 = 0.25;
+const CLIPPED_FIELD_SCALE_ARCSEC: f64 = 6.0;
+const CLIPPED_FIELD_FLUX_AT_DEPTH: f64 = 5_000.0;
+const CLIPPED_FIELD_BACKGROUNDS: [f64; 2] = [1_000.0, 3_000.0];
+const CLIPPED_FIELD_MIN_PIXELS: usize = 40;
+const CLIP_ADU: f32 = 65_000.0;
+const BLEED_HALF_LENGTH_PX: usize = 12;
+const OFF_FRAME_GROUP_STARS: usize = 80;
+const OFF_FRAME_GROUP_MAGS: (f64, f64) = (5.0, 7.0);
+const OFF_FRAME_GROUP_SHORT_SIDES: (f64, f64) = (0.85, 1.05);
+const CHANCE_PAIR_FWHM_PX: f64 = 2.0;
+const CHANCE_PAIR_TRUE: usize = 55;
+const CHANCE_PAIR_CHANCE: usize = 15;
+const CHANCE_PAIR_SCATTER_PX: f64 = 0.3;
+const CHANCE_PAIR_OFFSETS_PX: (f64, f64) = (2.0, 2.8);
+const BEYOND_RADIUS_CASES: [(f64, f64, u8); 2] = [(12.0, 60.0, 4), (6.0, 40.0, 3)];
+const BEYOND_RADIUS_STARS_IN_FRAME: f64 = 500.0;
+const INVERSE_CUBIC_NEWTON_STEPS: usize = 30;
+const ELONGATED_SMEAR_HALF_WIDTH: usize = 2;
+const COARSE_TAN_STARS: usize = 200;
+const COARSE_TAN_JITTER_PX: f64 = 0.1;
+const COARSE_TAN_SHIFT_PX: f64 = 1.5;
+const COARSE_TAN_ROTATION_DEG: f64 = 0.1;
 const TIER0_LABEL: &str = "tier0-synthetic";
 const TIER1_LABEL: &str = "tier1-synthetic";
 const TIER2_LABEL: &str = "tier2-synthetic";
@@ -321,6 +343,7 @@ fn a_random_star_list_never_passes_the_odds_gate_in_1000_trials() {
     );
     let params = LocalSolveParams {
         near_radius_deg: 0.0,
+        near_radius_fields: 0.0,
         ..LocalSolveParams::default()
     };
     let accepted: Vec<String> = (0..RANDOM_TRIALS)
@@ -352,6 +375,7 @@ fn a_dense_random_star_list_never_passes_the_odds_gate() {
     );
     let params = LocalSolveParams {
         near_radius_deg: 0.0,
+        near_radius_fields: 0.0,
         ..LocalSolveParams::default()
     };
     let accepted: Vec<String> = (0..DENSE_RANDOM_TRIALS)
@@ -835,6 +859,34 @@ fn radial_cubic(truth: &TruthField, corner_px: f64) -> impl Fn(f64, f64) -> (f64
         let (u, v) = ((x - xc) / half_diagonal, (y - yc) / half_diagonal);
         let r2 = u * u + v * v;
         (x + corner_px * r2 * u, y + corner_px * r2 * v)
+    }
+}
+
+fn rendered_by_inverse_radial_cubic(
+    truth: &TruthField,
+    corner_px: f64,
+) -> impl Fn(f64, f64) -> (f64, f64) {
+    let (xc, yc) = (
+        (truth.width as f64 - 1.0) / 2.0,
+        (truth.height as f64 - 1.0) / 2.0,
+    );
+    let half_diagonal = (truth.width as f64 / 2.0).hypot(truth.height as f64 / 2.0);
+    let k = corner_px / half_diagonal;
+    move |x, y| {
+        let (u, v) = ((x - xc) / half_diagonal, (y - yc) / half_diagonal);
+        let tau = u.hypot(v);
+        if tau == 0.0 {
+            return (x, y);
+        }
+        let mut rho = tau;
+        for _ in 0..INVERSE_CUBIC_NEWTON_STEPS {
+            rho -= (rho + k * rho * rho * rho - tau) / (1.0 + 3.0 * k * rho * rho);
+        }
+        let shrink = rho / tau;
+        (
+            xc + u * shrink * half_diagonal,
+            yc + v * shrink * half_diagonal,
+        )
     }
 }
 
@@ -1349,6 +1401,7 @@ fn a_binning_wide_scale_hint_solves_at_both_ends_of_the_range() {
     let hints_high = 2.0 * BINNING_SCALE_ARCSEC * (1.0 + SCALE_HINT_MARGIN);
     let params = LocalSolveParams {
         near_radius_deg: 0.0,
+        near_radius_fields: 0.0,
         ..LocalSolveParams::default()
     };
     let mut failures = Vec::new();
@@ -1392,6 +1445,548 @@ fn a_binning_wide_scale_hint_solves_at_both_ends_of_the_range() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_wide_field_with_clipped_bright_stars_solves_on_a_dark_and_a_bright_sky() {
+    let truth = TruthField::new(
+        (90.0, -30.0),
+        CLIPPED_FIELD_SCALE_ARCSEC,
+        30.0,
+        false,
+        FRAME.0,
+        FRAME.1,
+    );
+    let provider = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        5.0,
+        TIER1_CUT_STARS_PER_DEG2,
+        (6.0, 15.5),
+        500,
+    );
+    let hints = truth.hints(0.3, 60.0);
+    let params = LocalSolveParams::default();
+    let mut failures = Vec::new();
+    for background in CLIPPED_FIELD_BACKGROUNDS {
+        let mut image = render_field(
+            &truth,
+            provider.rows(),
+            15.5,
+            &FrameStyle {
+                background,
+                noise_sigma: 10.0,
+                flux_at_depth: CLIPPED_FIELD_FLUX_AT_DEPTH,
+                seed: 501,
+                ..FrameStyle::default()
+            },
+        );
+        image.mapv_inplace(|value| value.min(CLIP_ADU));
+        let clipped = image.iter().filter(|&&value| value >= CLIP_ADU).count();
+        let flagged = detect_for_solve(&image, &hints, &params)
+            .iter()
+            .filter(|d| d.saturated)
+            .count();
+        let label = format!(
+            "{:.2} deg, background {background} ADU, {clipped} pixels clipped at {CLIP_ADU}, {flagged} detections flagged saturated",
+            truth.long_side_deg()
+        );
+        assert!(
+            clipped >= CLIPPED_FIELD_MIN_PIXELS,
+            "{label}: the fixture must clip its bright stars"
+        );
+        let outcome = solve_local(
+            &image,
+            &hints,
+            &provider,
+            &params,
+            &never_cancelled,
+            &no_stage,
+        );
+        match outcome {
+            Err(failure) => failures.push(format!("{label}: {failure:?}")),
+            Ok(solution) => {
+                let corner = truth.worst_corner_px(&solution.wcs_cards);
+                eprintln!(
+                    "{label}: {} matched of {} predicted, rms {:.3} px, worst corner {corner:.3} px, {} centres",
+                    solution.matched, solution.predicted, solution.rms_px, solution.centres_tried
+                );
+                if !at_most(corner, SOLVED_WORST_CORNER_PX) {
+                    failures.push(format!("{label}: worst corner {corner:.3} px"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn bleed_clipped_columns(image: &mut Array2<f32>) {
+    let (rows, _) = image.dim();
+    let clipped: Vec<(usize, usize)> = image
+        .indexed_iter()
+        .filter(|(_, &value)| value >= CLIP_ADU)
+        .map(|((row, col), _)| (row, col))
+        .collect();
+    for (row, col) in clipped {
+        let top = row.saturating_sub(BLEED_HALF_LENGTH_PX);
+        let bottom = (row + BLEED_HALF_LENGTH_PX).min(rows - 1);
+        for bleed_row in top..=bottom {
+            image[[bleed_row, col]] = CLIP_ADU;
+        }
+    }
+}
+
+#[test]
+fn saturated_stars_with_bleed_columns_are_counted_before_the_eccentricity_filter() {
+    let truth = TruthField::new(
+        (90.0, -30.0),
+        CLIPPED_FIELD_SCALE_ARCSEC,
+        30.0,
+        false,
+        FRAME.0,
+        FRAME.1,
+    );
+    let provider = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        5.0,
+        TIER1_CUT_STARS_PER_DEG2,
+        (6.0, 15.5),
+        500,
+    );
+    let hints = truth.hints(0.3, 60.0);
+    let params = LocalSolveParams::default();
+    let mut image = render_field(
+        &truth,
+        provider.rows(),
+        15.5,
+        &FrameStyle {
+            background: CLIPPED_FIELD_BACKGROUNDS[0],
+            noise_sigma: 10.0,
+            flux_at_depth: CLIPPED_FIELD_FLUX_AT_DEPTH,
+            seed: 501,
+            ..FrameStyle::default()
+        },
+    );
+    image.mapv_inplace(|value| value.min(CLIP_ADU));
+    bleed_clipped_columns(&mut image);
+    let detections = detect_for_solve(&image, &hints, &params);
+    let flagged = detections.iter().filter(|d| d.saturated).count();
+    let bleeding = detections
+        .iter()
+        .filter(|d| d.saturated && d.star.eccentricity > params.max_eccentricity)
+        .count();
+    let label = format!(
+        "{:.2} deg with bleed columns: {flagged} detections flagged saturated, {bleeding} of them eccentric",
+        truth.long_side_deg()
+    );
+    let mut failures = Vec::new();
+    if bleeding == 0 {
+        failures.push(format!(
+            "{label}: bleeding saturated stars must be flagged and counted before the eccentricity filter drops them"
+        ));
+    }
+    match solve_local(
+        &image,
+        &hints,
+        &provider,
+        &params,
+        &never_cancelled,
+        &no_stage,
+    ) {
+        Err(failure) => failures.push(format!("{label}: {failure:?}")),
+        Ok(solution) => {
+            let corner = truth.worst_corner_px(&solution.wcs_cards);
+            eprintln!(
+                "{label}: {} matched of {} predicted, rms {:.3} px, worst corner {corner:.3} px, {} centres",
+                solution.matched, solution.predicted, solution.rms_px, solution.centres_tried
+            );
+            if !at_most(corner, SOLVED_WORST_CORNER_PX) {
+                failures.push(format!("{label}: worst corner {corner:.3} px"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn the_triangle_stars_come_from_inside_the_frame_not_from_the_cone_around_it() {
+    let truth = TruthField::with_long_side((200.0, -35.0), 5.0, 20.0, false, FRAME.0, FRAME.1);
+    let field = truth.field();
+    let diagonal = field.width_deg.hypot(field.height_deg);
+    let uniform = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        1.2 * diagonal,
+        truth.density_for(200.0),
+        (8.0, 13.0),
+        610,
+    );
+    let mut rows = uniform.rows().to_vec();
+    let mut rng = StdRng::seed_from_u64(611);
+    let (xc, yc) = (
+        (truth.width as f64 - 1.0) / 2.0,
+        (truth.height as f64 - 1.0) / 2.0,
+    );
+    let short_side = truth.height.min(truth.width) as f64;
+    for index in 0..OFF_FRAME_GROUP_STARS {
+        let above = OFF_FRAME_GROUP_SHORT_SIDES.0
+            + (OFF_FRAME_GROUP_SHORT_SIDES.1 - OFF_FRAME_GROUP_SHORT_SIDES.0) * rng.gen::<f64>();
+        let x = xc + 0.3 * truth.width as f64 * (rng.gen::<f64>() - 0.5);
+        let y = yc - above * short_side;
+        let (ra, dec) = truth.to_sky(x, y);
+        let mag = OFF_FRAME_GROUP_MAGS.0
+            + (OFF_FRAME_GROUP_MAGS.1 - OFF_FRAME_GROUP_MAGS.0) * rng.gen::<f64>();
+        rows.push(super::synthetic::catalog_row(
+            100_000 + index,
+            ra,
+            dec,
+            Some(mag),
+        ));
+    }
+    let provider = SyntheticProvider::new(TIER1_LABEL, rows, 13.0);
+    let image = render_field(
+        &truth,
+        provider.rows(),
+        13.0,
+        &FrameStyle {
+            seed: 612,
+            ..FrameStyle::default()
+        },
+    );
+    let hints = truth.hints(0.0, 0.0);
+    let params = LocalSolveParams {
+        near_radius_deg: 0.0,
+        near_radius_fields: 0.0,
+        ..LocalSolveParams::default()
+    };
+    let label = format!(
+        "{} deg field with {OFF_FRAME_GROUP_STARS} bright stars above the frame, inside the old cone",
+        truth.long_side_deg()
+    );
+    let outcome = solve_local(
+        &image,
+        &hints,
+        &provider,
+        &params,
+        &never_cancelled,
+        &no_stage,
+    );
+    let failures = end_to_end_errors(&label, &truth, outcome, false, 0.0);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn the_rms_gate_ignores_chance_pairs_inside_the_match_radius() {
+    let params = LocalSolveParams::default();
+    let truth = TruthField::new((150.0, 2.2), 2.0, 31.0, false, ODDS_SIZE, ODDS_SIZE);
+    let total = CHANCE_PAIR_TRUE + CHANCE_PAIR_CHANCE;
+    let radius = params
+        .match_radius_px
+        .max(params.match_radius_fwhm * CHANCE_PAIR_FWHM_PX);
+    let exclusion = 3.0 * radius;
+    let mut rng = StdRng::seed_from_u64(620);
+    let margin = 5.0;
+    let span = ODDS_SIZE as f64 - 1.0 - 2.0 * margin;
+    let mut catalogue_px: Vec<(f64, f64)> = Vec::with_capacity(total);
+    while catalogue_px.len() < total {
+        let p = (
+            margin + span * rng.gen::<f64>(),
+            margin + span * rng.gen::<f64>(),
+        );
+        if catalogue_px
+            .iter()
+            .all(|&q| pixel_distance(p, q) >= exclusion)
+        {
+            catalogue_px.push(p);
+        }
+    }
+    let detections: Vec<Detection> = catalogue_px
+        .iter()
+        .enumerate()
+        .map(|(index, &(x, y))| {
+            let (dx, dy) = if index < CHANCE_PAIR_TRUE {
+                (
+                    CHANCE_PAIR_SCATTER_PX * super::synthetic::gaussian(&mut rng),
+                    CHANCE_PAIR_SCATTER_PX * super::synthetic::gaussian(&mut rng),
+                )
+            } else {
+                let distance = CHANCE_PAIR_OFFSETS_PX.0
+                    + (CHANCE_PAIR_OFFSETS_PX.1 - CHANCE_PAIR_OFFSETS_PX.0) * rng.gen::<f64>();
+                let angle = rng.gen::<f64>() * std::f64::consts::TAU;
+                (distance * angle.cos(), distance * angle.sin())
+            };
+            detection(x + dx, y + dy, 1000.0, CHANCE_PAIR_FWHM_PX)
+        })
+        .collect();
+    let catalogue: Vec<(f64, f64)> = catalogue_px
+        .iter()
+        .map(|&(x, y)| truth.to_sky(x, y))
+        .collect();
+    let v = verify(
+        &truth.tan,
+        &detections,
+        &catalogue,
+        (ODDS_SIZE, ODDS_SIZE),
+        Some((1.8, 2.2)),
+        &params,
+    );
+    eprintln!(
+        "{CHANCE_PAIR_TRUE} pairs at {CHANCE_PAIR_SCATTER_PX} px and {CHANCE_PAIR_CHANCE} chance pairs at {:?} px inside r = {radius} px: {v:?}",
+        CHANCE_PAIR_OFFSETS_PX
+    );
+    assert_eq!(v.matched, total, "{v:?}");
+    assert!((v.radius_px - radius).abs() < 1e-12, "{v:?}");
+    assert!(v.false_alarm_log10 < -9.0, "{v:?}");
+    assert!(
+        at_most(v.rms_px, 2.0 * CHANCE_PAIR_SCATTER_PX),
+        "rms must describe the matched core, not the chance pairs: {v:?}"
+    );
+    assert!(v.accepted, "{v:?}");
+}
+
+#[test]
+fn distortion_beyond_the_match_radius_is_recovered_by_matching_through_the_provisional_sip() {
+    let params = LocalSolveParams::default();
+    let mut failures = Vec::new();
+    for (index, &(long_side, corner_px, max_order)) in BEYOND_RADIUS_CASES.iter().enumerate() {
+        let seed = 630 + index as u64;
+        let truth = TruthField::with_long_side(
+            (40.0 + 100.0 * index as f64, -20.0 + 50.0 * index as f64),
+            long_side,
+            15.0 + 70.0 * index as f64,
+            index == 1,
+            FRAME.0,
+            FRAME.1,
+        );
+        let field = truth.field();
+        let diagonal = field.width_deg.hypot(field.height_deg);
+        let provider = SyntheticProvider::uniform(
+            TIER1_LABEL,
+            truth.centre(),
+            1.2 * diagonal,
+            truth.density_for(BEYOND_RADIUS_STARS_IN_FRAME),
+            (8.0, 13.0),
+            seed,
+        );
+        let distortion = rendered_by_inverse_radial_cubic(&truth, corner_px);
+        let image = render_field(
+            &truth,
+            provider.rows(),
+            13.0,
+            &FrameStyle {
+                seed,
+                distortion: Some(Box::new(rendered_by_inverse_radial_cubic(
+                    &truth, corner_px,
+                ))),
+                ..FrameStyle::default()
+            },
+        );
+        let hints = truth.hints(0.2, 30.0 + 90.0 * index as f64);
+        let label = format!(
+            "{long_side} deg, {corner_px} px corner distortion beyond the match radius, order up to {max_order}"
+        );
+        let solution = match solve_local(
+            &image,
+            &hints,
+            &provider,
+            &params,
+            &never_cancelled,
+            &no_stage,
+        ) {
+            Ok(solution) => solution,
+            Err(failure) => {
+                failures.push(format!("{label}: {failure:?}"));
+                continue;
+            }
+        };
+        let (forward, inverse) =
+            rendered_distortion_error_px(&truth, &distortion, &solution.wcs_cards);
+        eprintln!(
+            "{label}: {} matched of {} predicted, rms {:.3} px, log10 P {:.1}, sip {:?}, forward {forward:.3} px, inverse {inverse:.3} px, {} centres",
+            solution.matched,
+            solution.predicted,
+            solution.rms_px,
+            solution.false_alarm_log10,
+            solution.sip_order,
+            solution.centres_tried
+        );
+        if !(at_most(forward, DISTORTED_MAX_ERROR_PX) && at_most(inverse, DISTORTED_MAX_ERROR_PX)) {
+            failures.push(format!(
+                "{label}: forward {forward:.3} px, inverse {inverse:.3} px over the distorted grid"
+            ));
+        }
+        if !matches!(solution.sip_order, Some(order) if (2..=max_order).contains(&order)) {
+            failures.push(format!("{label}: sip order {:?}", solution.sip_order));
+        }
+        let expected_parity = if index == 1 {
+            ImageParity::Flipped
+        } else {
+            ImageParity::Normal
+        };
+        if solution.parity != expected_parity {
+            failures.push(format!("{label}: parity {:?}", solution.parity));
+        }
+        if !(solution.matched >= 8 && solution.rms_px <= 1.0 && solution.false_alarm_log10 < -9.0) {
+            failures.push(format!(
+                "{label}: matched {}, rms {}, log10 P {}",
+                solution.matched, solution.rms_px, solution.false_alarm_log10
+            ));
+        }
+        if solution.matched * 2 < solution.predicted {
+            failures.push(format!(
+                "{label}: only {} of {} predicted stars matched, the corners stayed outside the match radius",
+                solution.matched, solution.predicted
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn smear_horizontally(image: &mut Array2<f32>, half_width: usize) {
+    let (rows, cols) = image.dim();
+    let window = (2 * half_width + 1) as f32;
+    for row in 0..rows {
+        let line: Vec<f32> = (0..cols).map(|col| image[[row, col]]).collect();
+        for col in 0..cols {
+            let lo = col.saturating_sub(half_width);
+            let hi = (col + half_width).min(cols - 1);
+            let sum: f32 = line[lo..=hi].iter().sum();
+            image[[row, col]] = sum / window;
+        }
+    }
+}
+
+#[test]
+fn an_elongated_psf_keeps_its_stars_for_the_triangle_stage() {
+    let truth = TruthField::with_long_side((200.0, -35.0), 5.0, 20.0, false, FRAME.0, FRAME.1);
+    let field = truth.field();
+    let diagonal = field.width_deg.hypot(field.height_deg);
+    let provider = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        1.2 * diagonal,
+        truth.density_for(200.0),
+        (8.0, 13.0),
+        640,
+    );
+    let mut image = render_field(
+        &truth,
+        provider.rows(),
+        13.0,
+        &FrameStyle {
+            seed: 641,
+            ..FrameStyle::default()
+        },
+    );
+    smear_horizontally(&mut image, ELONGATED_SMEAR_HALF_WIDTH);
+    let hints = truth.hints(0.1, 45.0);
+    let params = LocalSolveParams::default();
+    let detections = detect_for_solve(&image, &hints, &params);
+    let elongated = detections
+        .iter()
+        .filter(|d| d.star.eccentricity > params.max_eccentricity)
+        .count();
+    let label = format!(
+        "{} deg field smeared over {} px: {elongated} of {} detections above eccentricity {}",
+        truth.long_side_deg(),
+        2 * ELONGATED_SMEAR_HALF_WIDTH + 1,
+        detections.len(),
+        params.max_eccentricity
+    );
+    eprintln!("{label}");
+    assert!(
+        elongated * 2 > detections.len(),
+        "the smear must elongate most stars past the fixed cut: {label}"
+    );
+    let outcome = solve_local(
+        &image,
+        &hints,
+        &provider,
+        &params,
+        &never_cancelled,
+        &no_stage,
+    );
+    let failures = end_to_end_errors(&label, &truth, outcome, false, 0.0);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_coarse_tan_above_the_rms_gate_is_refined_before_the_gate_applies() {
+    let params = LocalSolveParams::default();
+    let truth = TruthField::new((150.0, 2.2), 2.0, 31.0, false, FRAME.0, FRAME.1);
+    let pairs = exact_pairs(&truth, COARSE_TAN_STARS, 650);
+    let mut rng = StdRng::seed_from_u64(651);
+    let detections: Vec<Detection> = pairs
+        .iter()
+        .map(|p| {
+            detection(
+                p.x + COARSE_TAN_JITTER_PX * super::synthetic::gaussian(&mut rng),
+                p.y + COARSE_TAN_JITTER_PX * super::synthetic::gaussian(&mut rng),
+                1000.0,
+                3.0,
+            )
+        })
+        .collect();
+    let catalogue: Vec<(f64, f64)> = pairs.iter().map(|p| (p.ra, p.dec)).collect();
+    let rows: Vec<CatalogRow> = pairs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| super::synthetic::catalog_row(i, p.ra, p.dec, Some(10.0)))
+        .collect();
+    let provider = SyntheticProvider::new(TIER1_LABEL, rows, 13.0);
+    let shifted = destination(truth.centre(), 90.0, COARSE_TAN_SHIFT_PX * 2.0 / ARCSEC_PER_DEG);
+    let coarse = TruthField::new(
+        shifted,
+        2.0,
+        31.0 + COARSE_TAN_ROTATION_DEG,
+        false,
+        FRAME.0,
+        FRAME.1,
+    )
+    .tan;
+    let before = verify(
+        &coarse,
+        &detections,
+        &catalogue,
+        truth.size(),
+        Some((1.8, 2.2)),
+        &params,
+    );
+    eprintln!("coarse TAN on the footprint set: {before:?}");
+    assert!(
+        before.matched >= params.min_matches
+            && before.false_alarm_log10 < params.max_false_alarm.log10()
+            && before.rms_px > params.max_rms_px
+            && !before.accepted,
+        "the coarse TAN must be significant but above the RMS gate: {before:?}"
+    );
+    let ctx = SearchContext {
+        detections: detections.clone(),
+        saturated: 0,
+        size: truth.size(),
+        catalog: &provider,
+        params: &params,
+        epoch_year: None,
+        scale_range: (1.8, 2.2),
+        trials: 1,
+    };
+    let gate = StageGate {
+        max_rms_px: params.max_rms_px,
+        trials: 1,
+    };
+    let (refined, after, kept) = refine_on(coarse, &catalogue, &ctx, gate);
+    let corner = truth.worst_corner_px(&tan_cards(&refined));
+    eprintln!(
+        "refined: {after:?}, {} pairs kept, worst corner {corner:.3} px",
+        kept.len()
+    );
+    assert!(after.accepted, "the refit must pass the gate: {after:?}");
+    assert!(
+        at_most(after.rms_px, 3.0 * COARSE_TAN_JITTER_PX) && after.matched >= COARSE_TAN_STARS * 9 / 10,
+        "{after:?}"
+    );
+    assert!(at_most(corner, 0.2), "worst corner {corner:.3} px");
 }
 
 #[test]

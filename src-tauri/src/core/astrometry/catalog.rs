@@ -556,6 +556,16 @@ pub fn spcc_cone_query(ra: f64, dec: f64, radius_deg: f64) -> ConeQuery {
     }
 }
 
+pub fn solver_cone_query(ra: f64, dec: f64, radius_deg: f64, max_rows: usize) -> ConeQuery {
+    ConeQuery {
+        ra,
+        dec,
+        radius_deg: radius_deg.clamp(MIN_CONE_RADIUS_DEG, MAX_CONE_RADIUS_DEG),
+        mag_limit: Some(GAIA_MATCH_MAG_LIMIT),
+        max_rows: max_rows.max(1),
+    }
+}
+
 pub fn gaia_cone_stars_cached(ra: f64, dec: f64, radius_deg: f64) -> Result<CatalogHit, String> {
     query_gaia_cached(&spcc_cone_query(ra, dec, radius_deg))
 }
@@ -600,6 +610,26 @@ pub fn query_gaia(_q: &ConeQuery) -> Result<Vec<CatalogRow>, String> {
 
 #[cfg(feature = "vizier")]
 pub fn query_gaia(q: &ConeQuery) -> Result<Vec<CatalogRow>, String> {
+    query_gaia_from(vizier_url(), q)
+}
+
+#[cfg(feature = "vizier")]
+fn vizier_request_failure(error: reqwest::Error) -> String {
+    let host = error.url().and_then(|url| {
+        url.host_str().map(|host| match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        })
+    });
+    let error = error.without_url();
+    match host {
+        Some(host) => format!("VizieR request failed: {error} for {host}"),
+        None => format!("VizieR request failed: {error}"),
+    }
+}
+
+#[cfg(feature = "vizier")]
+fn query_gaia_from(url: &str, q: &ConeQuery) -> Result<Vec<CatalogRow>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(VIZIER_TIMEOUT_SECS))
         .user_agent(concat!("AstroBurst/", env!("CARGO_PKG_VERSION")))
@@ -608,10 +638,10 @@ pub fn query_gaia(q: &ConeQuery) -> Result<Vec<CatalogRow>, String> {
 
     let params = vizier_query_params(q);
     let response = client
-        .get(vizier_url())
+        .get(url)
         .query(&params)
         .send()
-        .map_err(|e| format!("VizieR request failed: {}", e))?;
+        .map_err(vizier_request_failure)?;
 
     if !response.status().is_success() {
         return Err(format!("VizieR returned HTTP {}", response.status()));
@@ -1044,6 +1074,47 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "a failure leaves no file behind");
     }
 
+    #[cfg(feature = "vizier")]
+    #[test]
+    fn an_unreachable_vizier_is_named_by_its_host_without_the_request_url() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut chunk).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+            }
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        let q = ConeQuery {
+            ra: 117.182536,
+            dec: 51.011914,
+            radius_deg: 1.3756,
+            mag_limit: Some(17.0),
+            max_rows: 9447,
+        };
+
+        let err =
+            query_gaia_from(&format!("http://127.0.0.1:{port}/viz-bin/asu-tsv"), &q).unwrap_err();
+
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("GET /viz-bin/asu-tsv?-source=I%2F355%2Fgaiadr3"),
+            "{request}"
+        );
+        assert_eq!(
+            err,
+            format!("VizieR request failed: error sending request for 127.0.0.1:{port}")
+        );
+    }
+
     #[test]
     fn the_vizier_url_falls_back_to_the_constant() {
         assert_eq!(vizier_url(), VIZIER_ASU_TSV_URL);
@@ -1061,6 +1132,16 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         assert_eq!(spcc_cone_query(203.0, -33.0, 0.25).radius_deg, 0.25);
         assert_eq!(spcc_cone_query(203.0, -33.0, 9.0).radius_deg, MAX_CONE_RADIUS_DEG);
         assert_eq!((SPCC_GAIA_MAG_LIMIT, SPCC_GAIA_MAX_ROWS), (GAIA_MATCH_MAG_LIMIT, GAIA_MATCH_FALLBACK_ROWS));
+    }
+
+    #[test]
+    fn the_solver_cone_clamps_its_radius_to_the_vizier_range_and_keeps_the_match_limit() {
+        let q = solver_cone_query(83.82, -5.39, 0.8, 8476);
+        assert_eq!((q.ra, q.dec, q.radius_deg, q.max_rows), (83.82, -5.39, 0.8, 8476));
+        assert_eq!(q.mag_limit, Some(GAIA_MATCH_MAG_LIMIT));
+        assert_eq!(solver_cone_query(0.0, 0.0, 12.0, 10).radius_deg, MAX_CONE_RADIUS_DEG);
+        assert_eq!(solver_cone_query(0.0, 0.0, 0.0, 10).radius_deg, MIN_CONE_RADIUS_DEG);
+        assert_eq!(solver_cone_query(0.0, 0.0, 1.0, 0).max_rows, 1);
     }
 
     #[test]

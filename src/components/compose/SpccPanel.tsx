@@ -4,6 +4,7 @@ import { RunButton, ResultGrid, ErrorAlert, SectionHeader, DecimalField } from "
 import { spccResultWavelengths, spccWavelengthsLine, type SpccTriplet } from "../../utils/spccWavelengths";
 import { decimalFieldState, type DecimalFieldOptions } from "../../utils/decimalText";
 import { wcsSourceLabel } from "../../utils/solvedWcs";
+import { spccSyntheticNotice, type SpccCatalogChoice } from "../../utils/spccCatalog";
 
 interface SpccResult {
   r_factor?: number;
@@ -55,7 +56,8 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, wav
   const catalogId = useId();
   const minSnrId = useId();
   const [whiteRef, setWhiteRef] = useState("average_spiral");
-  const [catalog, setCatalog] = useState<"gaia" | "builtin">("gaia");
+  const [catalog, setCatalog] = useState<SpccCatalogChoice>("gaia");
+  const [resultCatalog, setResultCatalog] = useState<SpccCatalogChoice>("gaia");
   const [minSnrText, setMinSnrText] = useState("20");
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<SpccResult | null>(null);
@@ -77,6 +79,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, wav
         catalog,
         wavelengthsNm,
       }) as SpccResult;
+      setResultCatalog(catalog);
       setResult(res);
       if (res?.r_factor != null && res?.g_factor != null && res?.b_factor != null) {
         onFactorsReady?.(res.r_factor, res.g_factor, res.b_factor);
@@ -126,7 +129,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, wav
         <select
           id={catalogId}
           value={catalog}
-          onChange={(e) => setCatalog(e.target.value as "gaia" | "builtin")}
+          onChange={(e) => setCatalog(e.target.value as SpccCatalogChoice)}
           className="ab-select"
           disabled={isRunning}
         >
@@ -187,8 +190,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, wav
 
           {result.is_synthetic_catalog && (
             <div className="text-[10px] text-amber-400/90 bg-amber-900/20 border border-amber-800/30 rounded px-2.5 py-1.5">
-              Gaia unavailable — factors come from the synthetic built-in catalog and are not
-              photometrically reliable. Check your connection and re-run for a real calibration.
+              {spccSyntheticNotice(resultCatalog)}
             </div>
           )}
 

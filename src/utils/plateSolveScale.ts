@@ -1,6 +1,7 @@
-import type { WcsInfo } from "../shared/types/astrometry";
+import type { SolveHints, WcsInfo } from "../shared/types/astrometry";
 import { parseDecimalText } from "./decimalText";
 import { normalizeAngle } from "./regionGeometry";
+import { parseAngle } from "./skyList";
 
 export const DEFAULT_SCALE_LOW_TEXT = "0.1";
 export const DEFAULT_SCALE_HIGH_TEXT = "10";
@@ -30,11 +31,13 @@ export function scaleHintFromPixelScale(pixelScaleArcsec: number | null | undefi
 const MAX_CENTRE_RA_DEG = 360;
 const MAX_CENTRE_DEC_DEG = 90;
 const MAX_SEARCH_RADIUS_DEG = 180;
-const CENTRE_RA_ERROR = "Centre RA must be decimal degrees from 0 to 360, written with a dot (e.g. 190.03).";
-const CENTRE_DEC_ERROR = "Centre Dec must be decimal degrees from -90 to 90, written with a dot (e.g. -11.63).";
+export const MAX_OFFLINE_NEAR_RADIUS_DEG = 15;
+const CENTRE_RA_ERROR = "Centre RA must be degrees from 0 to 360 written with a dot (e.g. 190.03), or hours as h:m:s (e.g. 12:40:07.2).";
+const CENTRE_DEC_ERROR = "Centre Dec must be degrees from -90 to 90 written with a dot (e.g. -11.63), or d:m:s (e.g. -11:38:00).";
 const SEARCH_RADIUS_ERROR = "Radius must be decimal degrees above 0 and up to 180, written with a dot (e.g. 1.5).";
 const HINTED_SOLVE_STATUS = "Hinted solve around the field centre";
-const BLIND_SOLVE_STATUS = "Blind solve: fill both centre fields to hint it";
+const BLIND_SOLVE_STATUS = "Blind solve: only astrometry.net solves without a centre; fill both centre fields to solve offline";
+const NEGATIVE_SIGN = "-";
 
 function positiveNumber(text: string): number | null {
   const value = parseDecimalText(text);
@@ -52,17 +55,24 @@ export function parseScaleRange(lowText: string, highText: string): ScaleRange {
 
 function parseRightAscension(text: string): number | null {
   const value = parseDecimalText(text);
-  return value !== null && value >= 0 && value <= MAX_CENTRE_RA_DEG ? value : null;
+  if (value !== null) return value >= 0 && value <= MAX_CENTRE_RA_DEG ? value : null;
+  if (text.trim().startsWith(NEGATIVE_SIGN)) return null;
+  return parseAngle(text, "lon").value;
 }
 
 function parseDeclination(text: string): number | null {
   const value = parseDecimalText(text);
-  return value !== null && Math.abs(value) <= MAX_CENTRE_DEC_DEG ? value : null;
+  if (value !== null) return Math.abs(value) <= MAX_CENTRE_DEC_DEG ? value : null;
+  return parseAngle(text, "lat").value;
 }
 
 export function parseRadius(text: string): number | null {
   const value = parseDecimalText(text);
   return value !== null && value > 0 && value <= MAX_SEARCH_RADIUS_DEG ? value : null;
+}
+
+export function offlineNearRadius(radius: number | null): number | undefined {
+  return radius === null ? undefined : Math.min(radius, MAX_OFFLINE_NEAR_RADIUS_DEG);
 }
 
 export interface PositionHint {
@@ -189,4 +199,93 @@ export function mergeHintTexts(
   if (!SCALE_HINT_FIELDS.some((field) => touched.has(field))) SCALE_HINT_FIELDS.forEach(take);
   POSITION_HINT_FIELDS.filter((field) => !touched.has(field)).forEach(take);
   return next;
+}
+
+export const WCS_HINT_SOURCE = "WCS";
+export const TYPED_HINT_SOURCE = "typed";
+
+export interface HintSources {
+  centre: string | null;
+  scale: string | null;
+}
+
+export const NO_HINT_SOURCES: HintSources = { centre: null, scale: null };
+
+type HeaderHintInfo = Pick<WcsInfo, "pixel_scale_arcsec" | "center_ra" | "center_dec" | "fov_arcmin">;
+
+function pickHints(hints: Partial<HintTexts>, fields: readonly HintField[]): Partial<HintTexts> {
+  const picked: Partial<HintTexts> = {};
+  for (const field of fields) {
+    if (hints[field] !== undefined) Object.assign(picked, { [field]: hints[field] });
+  }
+  return picked;
+}
+
+export function solveHintTexts(hints: SolveHints): Partial<HintTexts> {
+  const texts: Partial<HintTexts> = {};
+  const scale = hints.scale;
+  if (scale && scale.low_arcsec > 0 && scale.high_arcsec >= scale.low_arcsec && Number.isFinite(scale.high_arcsec)) {
+    texts.scaleLow = roundSignificant(scale.low_arcsec, "down");
+    texts.scaleHigh = roundSignificant(scale.high_arcsec, "up");
+    texts.scaleUnits = "arcsecperpix";
+  }
+  const centre = hints.centre;
+  if (centre && Number.isFinite(centre.ra) && Number.isFinite(centre.dec) && Math.abs(centre.dec) <= MAX_CENTRE_DEC_DEG) {
+    texts.centerRa = normalizeAngle(centre.ra).toFixed(6);
+    texts.centerDec = centre.dec.toFixed(6);
+  }
+  return texts;
+}
+
+export function panelHints(
+  info: HeaderHintInfo | null,
+  hints: SolveHints | null,
+): { texts: Partial<HintTexts>; sources: HintSources } {
+  const wcs = info ? headerHintTexts(info) : {};
+  const header = hints ? solveHintTexts(hints) : {};
+  const centreFromWcs = wcs.centerRa !== undefined;
+  const scaleFromWcs = wcs.scaleLow !== undefined;
+  const centreFromHints = header.centerRa !== undefined;
+  const scaleFromHints = header.scaleLow !== undefined;
+  const position = pickHints(centreFromWcs ? wcs : header, POSITION_HINT_FIELDS);
+  return {
+    texts: {
+      ...pickHints(scaleFromWcs ? wcs : header, SCALE_HINT_FIELDS),
+      ...(position.centerRa === undefined ? position : { radius: DEFAULT_HINT_TEXTS.radius, ...position }),
+    },
+    sources: {
+      centre: centreFromWcs ? WCS_HINT_SOURCE : centreFromHints ? (hints?.centre?.source ?? null) : null,
+      scale: scaleFromWcs ? WCS_HINT_SOURCE : scaleFromHints ? (hints?.scale?.source ?? null) : null,
+    },
+  };
+}
+
+const CENTRE_HINT_FIELDS: readonly HintField[] = ["centerRa", "centerDec"];
+
+export function editedHintSources(current: HintSources, field: HintField): HintSources {
+  if (CENTRE_HINT_FIELDS.includes(field)) return { ...current, centre: TYPED_HINT_SOURCE };
+  if (SCALE_HINT_FIELDS.includes(field)) return { ...current, scale: TYPED_HINT_SOURCE };
+  return current;
+}
+
+export function mergeHintSources(current: HintSources, next: HintSources, touched: ReadonlySet<HintField>): HintSources {
+  const centreTyped = CENTRE_HINT_FIELDS.some((field) => touched.has(field));
+  const scaleTyped = SCALE_HINT_FIELDS.some((field) => touched.has(field));
+  return {
+    centre: centreTyped ? current.centre : next.centre,
+    scale: scaleTyped ? current.scale : next.scale,
+  };
+}
+
+function sourcePhrase(group: "centre" | "scale", source: string | null): string {
+  if (source === TYPED_HINT_SOURCE) return `${group} typed`;
+  if (source === WCS_HINT_SOURCE) return `${group} from the header WCS`;
+  if (source !== null) return `${group} from ${source}`;
+  return group === "centre" ? "no centre in the header" : "default scale range";
+}
+
+export function hintSourceLine(sources: HintSources): string | null {
+  if (sources.centre === null && sources.scale === null) return null;
+  if (sources.centre === WCS_HINT_SOURCE && sources.scale === WCS_HINT_SOURCE) return "Hints from the header WCS";
+  return `Hints: ${sourcePhrase("centre", sources.centre)}; ${sourcePhrase("scale", sources.scale)}`;
 }

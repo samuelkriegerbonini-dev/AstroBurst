@@ -254,6 +254,7 @@ pub fn run() {
             #[cfg(feature = "net")]
             cmd::sample_data::sample_open_cmd,
             cmd::astrometry::plate_solve_cmd,
+            cmd::astrometry::solve_hints_cmd,
             cmd::astrometry::write_solved_wcs_cmd,
             cmd::astrometry::get_wcs_info,
             cmd::astrometry::pixel_to_world_cmd,

@@ -38,7 +38,7 @@ const TIER0_LEVEL: u8 = 6;
 const TIER0_STARS_PER_PIXEL: usize = 52;
 const TIER0_EPOCH_YEAR: f32 = 2026.0;
 const PLEIADES: (f64, f64) = (56.75, 24.12);
-const CONE_DIAGONAL_FRACTION: f64 = 0.6;
+const CONE_SHORT_SIDE_FRACTION: f64 = 0.5;
 const FIELD_ASPECT: f64 = 1.5;
 const FIELD_LONG_SIDES_DEG: [f64; 4] = [1.0, 3.0, 10.0, 30.0];
 
@@ -201,9 +201,8 @@ fn bench_cone(report: &mut BenchReport) {
     let path = dir.path().join("tier0-like.abcat");
     std::fs::write(&path, tier0_like_catalogue()).expect("write synthetic tier 0");
     let catalog = HealpixCatalog::open_file(&path).expect("open synthetic tier 0");
-    let diagonal_per_long_side = (1.0 + FIELD_ASPECT.powi(-2)).sqrt();
     for long_side in FIELD_LONG_SIDES_DEG {
-        let radius = CONE_DIAGONAL_FRACTION * long_side * diagonal_per_long_side;
+        let radius = CONE_SHORT_SIDE_FRACTION * long_side / FIELD_ASPECT;
         let (durations, rows) = timed(|| {
             catalog
                 .cone(

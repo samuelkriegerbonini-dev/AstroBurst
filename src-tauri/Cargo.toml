@@ -2,6 +2,7 @@
 name = "astroburst"
 version = "0.8.0"
 edition = "2021"
+default-run = "astroburst"
 description = "AstroBurst -- High-Performance JWST FITS Processing"
 license = "AGPL-3.0-or-later"
 authors = ["Samuel Krieger Bonini"]

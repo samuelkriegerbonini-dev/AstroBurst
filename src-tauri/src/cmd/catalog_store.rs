@@ -310,7 +310,13 @@ mod tests {
         }
         let tycho = rows.iter().find(|row| row["id"] == TYCHO2_ID).unwrap();
         assert_eq!(tycho["kind"], "tier0_bundled");
-        assert_eq!(tycho["size_bytes"], serde_json::Value::Null);
+        assert_eq!(tycho["size_bytes"], 15_541_742);
+        assert_eq!(tycho["installable"], false);
+        let twomass = rows.iter().find(|row| row["id"] == TWOMASS_ID).unwrap();
+        assert_eq!(twomass["kind"], "hosted");
+        assert_eq!(twomass["size_bytes"], 154_140_794);
+        assert_eq!(twomass["installable"], cfg!(feature = "net"));
+        assert_eq!(twomass["status"]["state"], "missing");
     }
 
     #[tokio::test]

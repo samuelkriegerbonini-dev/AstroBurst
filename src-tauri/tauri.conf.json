@@ -5,7 +5,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && node scripts/fetch-tier0.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -34,7 +34,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "licenses/": "licenses/"
+      "licenses/": "licenses/",
+      "resources/catalogs/": "catalogs/"
     },
     "icon": [
       "icons/32x32.png",

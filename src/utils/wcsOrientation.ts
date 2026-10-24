@@ -7,6 +7,9 @@ const MAS_DIGITS = 2;
 const SUB_RESOLUTION_PX = 0.0005;
 const REFUSAL_SUFFIX_MAX_CHARS = 80;
 
+export const ROTATION_TITLE =
+  "rot is the header CROTA2 angle, atan2(-CD1_2, CD2_2). Plate Solve reports the orientation in astrometry.net's convention (degrees E of N of the image's up direction), which has the opposite sign";
+
 function finiteResidual(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }

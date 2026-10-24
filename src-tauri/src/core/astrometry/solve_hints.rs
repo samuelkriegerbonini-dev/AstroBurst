@@ -363,6 +363,27 @@ mod tests {
     }
 
     #[test]
+    fn a_free_text_object_starting_with_c_and_a_digit_gives_no_caldwell_centre() {
+        let hints = solve_hints(&header(&[("OBJECT", "'C1 test'")]), 1536, 1024);
+        assert_eq!(hints.centre, None);
+        assert_eq!(hints.object, None);
+        assert!(
+            hints
+                .warnings
+                .iter()
+                .any(|w| w.contains("'C1 test' is not in the offline object list")),
+            "{:?}",
+            hints.warnings
+        );
+        let caldwell = solve_hints(&header(&[("OBJECT", "'C1'")]), 1536, 1024);
+        assert_eq!(
+            caldwell.object.as_ref().map(|o| o.designation.as_str()),
+            Some("C 1")
+        );
+        assert!(caldwell.centre.is_some(), "{caldwell:?}");
+    }
+
+    #[test]
     fn nina_sexagesimal_objctra_is_hours() {
         let h = header(&[
             ("OBJCTRA", "'05 34 31.940'"),

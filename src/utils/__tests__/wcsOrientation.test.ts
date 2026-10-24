@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gwcsSuffix, orientationLine, sipSuffix } from "../wcsOrientation";
+import { ROTATION_TITLE, gwcsSuffix, orientationLine, sipSuffix } from "../wcsOrientation";
 import type { WcsInfo } from "../../shared/types/astrometry";
 
 function info(overrides: Partial<WcsInfo> = {}): WcsInfo {
@@ -50,6 +50,15 @@ describe("orientationLine", () => {
   it("returns null when an orientation field is missing", () => {
     expect(orientationLine(info({ projection: undefined }))).toBeNull();
     expect(orientationLine(info({ rotation_deg: undefined }))).toBeNull();
+  });
+});
+
+describe("ROTATION_TITLE", () => {
+  it("names the readout's rotation as the header CROTA2 angle and its opposite sign to the Plate Solve orientation", () => {
+    expect(ROTATION_TITLE).toMatch(/CROTA2/);
+    expect(ROTATION_TITLE).toContain("atan2(-CD1_2, CD2_2)");
+    expect(ROTATION_TITLE).toMatch(/E of N/);
+    expect(ROTATION_TITLE).toMatch(/opposite sign/);
   });
 });
 

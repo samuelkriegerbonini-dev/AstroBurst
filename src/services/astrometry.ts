@@ -7,9 +7,11 @@ import type {
   PointingOverlapResult,
   SkyFrame,
   SkySeparationResult,
+  SolveHints,
   WcsCard,
   WcsGridError,
   WcsGridResult,
+  WcsParity,
   WorldToPixelResult,
   WriteSolvedWcsResult,
 } from "../shared/types/astrometry";
@@ -17,6 +19,8 @@ import type {
 export type {
   WcsInfo,
   PlateSolveOptions,
+  PlateSolver,
+  SolveHints,
   PixelToWorldResult,
   PointingOverlapResult,
   SkyFrame,
@@ -43,15 +47,40 @@ export function gridLines(
   return typedInvoke<WcsGridResult>("grid_lines_cmd", { path, frame, density });
 }
 
+export interface PlateSolveAnnotation {
+  type: string;
+  names: string[];
+  pixelx: number;
+  pixely: number;
+  radius?: number | null;
+}
+
 export interface PlateSolveResult {
   center_ra: number;
   center_dec: number;
-  orientation: number;
+  orientation?: number | null;
   pixel_scale_arcsec: number;
   field_of_view_w_arcmin: number;
   field_of_view_h_arcmin: number;
   wcs_cards: WcsCard[];
+  annotations?: PlateSolveAnnotation[];
+  solver?: string | null;
+  tier?: number | null;
+  catalog?: string | null;
+  matched?: number | null;
+  predicted?: number | null;
+  rms_px?: number | null;
+  sip_order?: number | null;
+  sip_max_err_px?: number | null;
+  hint_source?: string | null;
+  elapsed_ms?: number | null;
+  parity?: WcsParity | null;
+  warnings?: string[];
 }
+
+export const LOCAL_NO_SOLUTION_CODE = "local_no_solution";
+export const LOCAL_MISSING_HINT_CODE = "local_missing_hint";
+export const LOCAL_NO_CATALOGUE_CODE = "local_no_catalogue";
 
 export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<PlateSolveResult> {
   return typedInvoke<PlateSolveResult>("plate_solve_cmd", {
@@ -64,7 +93,13 @@ export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<
     centerRa: opts.centerRa ?? null,
     centerDec: opts.centerDec ?? null,
     radius: opts.radius ?? null,
+    solver: opts.solver ?? null,
+    nearRadiusDeg: opts.nearRadiusDeg ?? null,
   });
+}
+
+export function getSolveHints(path: string): Promise<SolveHints> {
+  return typedInvoke<SolveHints>("solve_hints_cmd", { path });
 }
 
 export const PLATE_SOLVE_PROGRESS_EVENT = "plate-solve-progress";

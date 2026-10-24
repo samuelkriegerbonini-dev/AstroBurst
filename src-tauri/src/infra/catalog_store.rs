@@ -36,8 +36,17 @@ pub const FIELD_EXTERNAL_CATALOGS: &str = "external_catalogs";
 pub const FIELD_SIRIL_CATALOG_DIR: &str = "siril_catalog_dir";
 pub const TYCHO2_ID: &str = "tycho2-l6-v1";
 pub const TYCHO2_FILE: &str = "tycho2-l6-v1.abcat";
+pub const TYCHO2_BYTES: u64 = 15_541_742;
+pub const TYCHO2_SHA256_HEX: &str =
+    "bf01b058e7c9babe03d38d367c98d6a0dbb0e9785741a9c842d053574fa17076";
+pub const TYCHO2_SHA256: [u8; 32] = sha256_from_hex(TYCHO2_SHA256_HEX);
 pub const BUNDLED_RESOURCES_DIR: &str = "resources";
 pub const TWOMASS_ID: &str = "2mass-l8-v1";
+pub const TWOMASS_FILE: &str = "2mass-l8-v1.dat";
+pub const TWOMASS_BYTES: u64 = 154_140_794;
+pub const TWOMASS_SHA256_HEX: &str =
+    "c9abb1b90124f310cb3b2875037a9fcb0cf94b977df59e21f9ceb9433eb05d96";
+pub const TWOMASS_SHA256: [u8; 32] = sha256_from_hex(TWOMASS_SHA256_HEX);
 pub const SIRIL_GAIA_ID: &str = "siril-gaia-astro-v1";
 pub const SIRIL_GAIA_URL: &str =
     "https://zenodo.org/records/14692304/files/siril_cat_healpix8_astro.dat.bz2";
@@ -71,6 +80,27 @@ const REDIRECT_HOSTS: &[&str] = &[
 ];
 const COMPACT_TYPES: &[CatType] = &[CatType::Compact6, CatType::Compact12];
 const ASTROMETRIC_TYPES: &[CatType] = &[CatType::Astrometric];
+
+const fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => panic!("a pinned sha-256 holds only hexadecimal digits"),
+    }
+}
+
+pub const fn sha256_from_hex(text: &str) -> [u8; 32] {
+    let bytes = text.as_bytes();
+    assert!(bytes.len() == 64, "a pinned sha-256 holds 64 hexadecimal digits");
+    let mut digest = [0u8; 32];
+    let mut index = 0;
+    while index < 32 {
+        digest[index] = (hex_nibble(bytes[2 * index]) << 4) | hex_nibble(bytes[2 * index + 1]);
+        index += 1;
+    }
+    digest
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatasetKind {
@@ -279,6 +309,8 @@ pub enum StoreError {
     },
     #[error("{id}: the install was cancelled; what was downloaded is kept and the next install resumes from there")]
     Cancelled { id: String },
+    #[error("{id} is not published yet: {url} answered HTTP 404; it can be installed once its release asset is uploaded")]
+    NotPublished { id: String, url: String },
     #[cfg(feature = "net")]
     #[error("{id}: the download failed: {source}")]
     Download { id: String, source: DownloadError },
@@ -348,8 +380,8 @@ pub fn built_in_datasets() -> Vec<DatasetSpec> {
             kind: DatasetKind::Tier0Bundled,
             file_name: TYCHO2_FILE,
             url: None,
-            size_bytes: None,
-            sha256: None,
+            size_bytes: Some(TYCHO2_BYTES),
+            sha256: Some(TYCHO2_SHA256),
             compressed: Compression::None,
             header: Some(HeaderRule {
                 cat_types: COMPACT_TYPES,
@@ -363,10 +395,10 @@ pub fn built_in_datasets() -> Vec<DatasetSpec> {
             id: TWOMASS_ID,
             title: "2MASS star cut (hosted offline tier 1)",
             kind: DatasetKind::Hosted,
-            file_name: "2mass-l8-v1.dat",
-            url: Some(hosted_url("2mass-l8-v1.dat")),
-            size_bytes: None,
-            sha256: None,
+            file_name: TWOMASS_FILE,
+            url: Some(hosted_url(TWOMASS_FILE)),
+            size_bytes: Some(TWOMASS_BYTES),
+            sha256: Some(TWOMASS_SHA256),
             compressed: Compression::None,
             header: Some(HeaderRule {
                 cat_types: COMPACT_TYPES,
@@ -1075,7 +1107,14 @@ impl CatalogStore {
                 actual_hex: hex(&actual),
             });
         }
-        self.write_marker(spec, path, &hex(&actual))
+        if let Err(error) = self.write_marker(spec, path, &hex(&actual)) {
+            log::warn!(
+                "{}: {} matches its sha-256, but the check could not be recorded, so it runs again at the next open: {error}",
+                spec.id,
+                path.display()
+            );
+        }
+        Ok(())
     }
 
     fn check_file(&self, spec: &DatasetSpec, path: &Path) -> Result<(), String> {
@@ -1263,7 +1302,7 @@ impl CatalogStore {
             };
             let outcome = download(client, &request, &DownloadPhase(observer.as_ref()))
                 .await
-                .map_err(|error| download_failure(spec.id, &dest, error))?;
+                .map_err(|error| download_failure(spec.id, &request.url, &dest, error))?;
             if outcome.sha256_hex.as_deref() != Some(hex(&plan.sha256).as_str()) {
                 return Err(invalid_file(
                     spec.id,
@@ -1467,9 +1506,13 @@ impl CatalogStore {
 }
 
 #[cfg(feature = "net")]
-fn download_failure(id: &str, dest: &Path, error: DownloadError) -> StoreError {
+fn download_failure(id: &str, url: &Url, dest: &Path, error: DownloadError) -> StoreError {
     match error {
         DownloadError::Cancelled => StoreError::Cancelled { id: id.to_owned() },
+        DownloadError::Http { status: 404 } => StoreError::NotPublished {
+            id: id.to_owned(),
+            url: url.to_string(),
+        },
         DownloadError::ChecksumMismatch {
             expected_hex,
             actual_hex,

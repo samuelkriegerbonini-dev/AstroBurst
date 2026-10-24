@@ -583,7 +583,13 @@ async fn an_install_is_cancelled_within_one_progress_tick_and_keeps_the_part_fil
 
 #[tokio::test]
 async fn install_refuses_a_dataset_without_a_published_size_or_digest() {
-    let rig = Rig::new();
+    let mut unpinned = built_in_datasets()
+        .into_iter()
+        .find(|spec| spec.id == TWOMASS_ID)
+        .unwrap();
+    unpinned.size_bytes = None;
+    unpinned.sha256 = None;
+    let rig = Rig::new().with(unpinned);
     for (id, needle) in [
         (TYCHO2_ID, "ships with the app"),
         (TWOMASS_ID, "download size"),
@@ -604,14 +610,346 @@ async fn install_refuses_a_dataset_without_a_published_size_or_digest() {
             "{id}: {message}"
         );
     }
-    let built_in = [TYCHO2_ID, TWOMASS_ID, SIRIL_GAIA_ID];
     let report = rig.store.report(&AppConfig::default());
-    let rows: Vec<&DatasetReport> = report
+    let installable: Vec<(&str, bool)> = report
         .iter()
-        .filter(|row| built_in.contains(&row.id))
+        .filter(|row| [TYCHO2_ID, TWOMASS_ID, SIRIL_GAIA_ID].contains(&row.id))
+        .map(|row| (row.id, row.installable))
         .collect();
-    assert_eq!(rows.len(), built_in.len());
-    assert!(rows.iter().all(|row| !row.installable), "{rows:?}");
+    assert_eq!(
+        installable,
+        [
+            (TYCHO2_ID, false),
+            (SIRIL_GAIA_ID, false),
+            (TWOMASS_ID, false)
+        ]
+    );
+}
+
+#[test]
+fn the_built_in_catalogues_carry_the_pins_of_the_catalogs_v1_release() {
+    assert_eq!(
+        DEFAULT_CATALOG_BASE_URL,
+        "https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/download/catalogs-v1/"
+    );
+    assert_eq!(hex_of(&TYCHO2_SHA256), TYCHO2_SHA256_HEX);
+    assert_eq!(hex_of(&TWOMASS_SHA256), TWOMASS_SHA256_HEX);
+    let specs = built_in_datasets();
+    let spec = |id: &str| specs.iter().find(|spec| spec.id == id).unwrap();
+    let tycho = spec(TYCHO2_ID);
+    assert_eq!(
+        (tycho.file_name, tycho.size_bytes, tycho.sha256),
+        (TYCHO2_FILE, Some(15_541_742), Some(TYCHO2_SHA256))
+    );
+    assert_eq!(
+        tycho.url, None,
+        "tier 0 is bundled at build time, never downloaded by the app"
+    );
+    let twomass = spec(TWOMASS_ID);
+    assert_eq!(
+        (twomass.file_name, twomass.size_bytes, twomass.sha256),
+        (TWOMASS_FILE, Some(154_140_794), Some(TWOMASS_SHA256))
+    );
+    assert_eq!(
+        twomass.url.as_deref(),
+        Some(hosted_url(TWOMASS_FILE).as_str())
+    );
+    assert_eq!(twomass.compressed, Compression::None);
+
+    let rig = Rig::new();
+    let report = rig.store.report(&AppConfig::default());
+    let row = |id: &str| report.iter().find(|row| row.id == id).unwrap();
+    assert!(row(TWOMASS_ID).installable, "{:?}", row(TWOMASS_ID));
+    assert_eq!(
+        row(TWOMASS_ID).url_host,
+        url_host(&hosted_url(TWOMASS_FILE))
+    );
+    assert_eq!(row(TWOMASS_ID).size_bytes, Some(TWOMASS_BYTES));
+    assert_eq!(row(TYCHO2_ID).size_bytes, Some(TYCHO2_BYTES));
+    assert!(!row(TYCHO2_ID).installable);
+}
+
+fn script_constant<'a>(script: &'a str, name: &str) -> &'a str {
+    let prefix = format!("export const {name} = ");
+    script
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(prefix.as_str()))
+        .and_then(|value| value.strip_suffix(';'))
+        .unwrap_or_else(|| panic!("scripts/fetch-tier0.mjs has no {name}"))
+}
+
+#[test]
+fn the_bundled_tier0_pins_match_the_build_fetch_script_and_the_bundle_mapping() {
+    let script = include_str!("../../../../scripts/fetch-tier0.mjs");
+    assert_eq!(
+        script_constant(script, "TIER0_FILE"),
+        format!("\"{TYCHO2_FILE}\"")
+    );
+    assert_eq!(
+        script_constant(script, "TIER0_BYTES"),
+        TYCHO2_BYTES.to_string()
+    );
+    assert_eq!(
+        script_constant(script, "TIER0_SHA256"),
+        format!("\"{TYCHO2_SHA256_HEX}\"")
+    );
+    assert_eq!(
+        script_constant(script, "DEFAULT_BASE_URL"),
+        format!("\"{DEFAULT_CATALOG_BASE_URL}\"")
+    );
+    assert_eq!(
+        script_constant(script, "ENV_BASE_URL"),
+        format!("\"{ENV_CATALOG_BASE_URL}\"")
+    );
+    assert!(
+        script_constant(script, "DEFAULT_OUT")
+            .contains("\"src-tauri\", \"resources\", \"catalogs\", TIER0_FILE"),
+        "the script writes outside the bundled resource folder"
+    );
+
+    let conf: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tauri.conf.json")).unwrap();
+    let mapped = conf["bundle"]["resources"]["resources/catalogs/"]
+        .as_str()
+        .expect("tauri.conf.json bundles resources/catalogs/");
+    let resource_dir = PathBuf::from("installed-app");
+    let probed = tier0_dirs(None, Some(&resource_dir));
+    assert!(
+        probed.contains(&resource_dir.join(mapped.trim_end_matches('/'))),
+        "the bundle puts tier 0 under {mapped}, the store probes {probed:?}"
+    );
+    let before_build = conf["build"]["beforeBuildCommand"].as_str().unwrap();
+    assert!(
+        before_build.contains("node scripts/fetch-tier0.mjs"),
+        "{before_build}"
+    );
+    let ignore = include_str!("../../../../.gitignore");
+    assert!(
+        ignore
+            .lines()
+            .any(|line| line.trim() == "/src-tauri/resources/catalogs/*.abcat"),
+        "the fetched catalogue must stay out of git"
+    );
+}
+
+#[test]
+fn tier0_resource_resolves_and_verifies_its_pinned_hash() {
+    let tier0 = catalogue(&CatHeader::whole("tier 0", 6, 128), &[]);
+    let resource_dir = tempfile::tempdir().unwrap();
+    let mapped = resource_dir.path().join(CATALOGS_DIR).join(TYCHO2_FILE);
+    write_file(&mapped, &tier0);
+    let rig = Rig::new();
+    let mut roots = rig.store.roots().clone();
+    roots.tier0_dirs = tier0_dirs(None, Some(resource_dir.path()));
+    let config = AppConfig::default();
+
+    let pinned = CatalogStore::new(roots.clone());
+    let refused = match pinned.open(TYCHO2_ID, &config, PLATE_SOLVE) {
+        Ok(_) => panic!("a file that is not the published tier 0 was opened"),
+        Err(error) => error.to_string(),
+    };
+    assert!(refused.contains(TYCHO2_SHA256_HEX), "{refused}");
+    assert!(refused.contains(&hex_of(&digest(&tier0))), "{refused}");
+
+    let mut spec = pinned.spec(TYCHO2_ID).unwrap().clone();
+    spec.sha256 = Some(digest(&tier0));
+    spec.size_bytes = Some(tier0.len() as u64);
+    let store = CatalogStore::new(roots).with_dataset(spec.clone());
+    assert_eq!(
+        store.status(TYCHO2_ID, &config).unwrap(),
+        DatasetStatus::Installed {
+            path: mapped.clone(),
+            verified: false
+        }
+    );
+    let lease = store.open(TYCHO2_ID, &config, PLATE_SOLVE).unwrap();
+    assert_eq!(lease.path(), mapped.as_path());
+    drop(lease);
+    assert_eq!(
+        store.status(TYCHO2_ID, &config).unwrap(),
+        DatasetStatus::Installed {
+            path: mapped.clone(),
+            verified: true
+        }
+    );
+
+    let flipped_dir = tempfile::tempdir().unwrap();
+    let flipped = flipped_dir.path().join(CATALOGS_DIR).join(TYCHO2_FILE);
+    let mut bytes = tier0.clone();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    write_file(&flipped, &bytes);
+    let fresh = Rig::new();
+    let mut roots = fresh.store.roots().clone();
+    roots.tier0_dirs = tier0_dirs(None, Some(flipped_dir.path()));
+    let store = CatalogStore::new(roots).with_dataset(spec);
+    let refused = match store.open(TYCHO2_ID, &config, PLATE_SOLVE) {
+        Ok(_) => panic!("a tier 0 file with a flipped byte was opened"),
+        Err(error) => error,
+    };
+    let message = refused.to_string();
+    assert!(matches!(refused, StoreError::Checksum { .. }), "{message}");
+    assert!(message.contains(&hex_of(&digest(&tier0))), "{message}");
+    assert!(message.contains(&hex_of(&digest(&bytes))), "{message}");
+}
+
+#[test]
+fn a_bundled_tier0_that_matches_its_pin_opens_when_the_data_folder_cannot_be_written() {
+    let tier0 = catalogue(&CatHeader::whole("tier 0", 6, 128), &[]);
+    let resource_dir = tempfile::tempdir().unwrap();
+    let mapped = resource_dir.path().join(CATALOGS_DIR).join(TYCHO2_FILE);
+    write_file(&mapped, &tier0);
+    let rig = Rig::new();
+    write_file(
+        &rig.store.roots().catalogs,
+        b"a file where the catalogue folder should be",
+    );
+    let mut roots = rig.store.roots().clone();
+    roots.tier0_dirs = tier0_dirs(None, Some(resource_dir.path()));
+    let mut spec = CatalogStore::new(roots.clone())
+        .spec(TYCHO2_ID)
+        .unwrap()
+        .clone();
+    spec.sha256 = Some(digest(&tier0));
+    spec.size_bytes = Some(tier0.len() as u64);
+    let store = CatalogStore::new(roots).with_dataset(spec);
+    let config = AppConfig::default();
+
+    for attempt in 1..=2 {
+        let lease = store
+            .open(TYCHO2_ID, &config, PLATE_SOLVE)
+            .unwrap_or_else(|error| panic!("open {attempt} of the verified tier 0: {error}"));
+        assert_eq!(lease.path(), mapped.as_path());
+    }
+
+    let mut flipped = tier0.clone();
+    let last = flipped.len() - 1;
+    flipped[last] ^= 0x01;
+    write_file(&mapped, &flipped);
+    let refused = match store.open(TYCHO2_ID, &config, PLATE_SOLVE) {
+        Ok(_) => panic!("a tier 0 file changed after an unrecorded verification was opened"),
+        Err(error) => error,
+    };
+    assert!(matches!(refused, StoreError::Checksum { .. }), "{refused}");
+}
+
+#[tokio::test]
+async fn a_tier1_install_before_the_release_is_published_says_not_published_yet() {
+    let body = payload(64 * KIB, 9);
+    let server = serve(Resource::new(Vec::new()).status(404));
+    let url = server.url("/catalogs-v1/2mass-l8-v1.dat").to_string();
+    let rig = Rig::new().with(hosted(TWOMASS_ID, TWOMASS_FILE, url.clone(), &body));
+    let refused = rig
+        .store
+        .install(TWOMASS_ID, &client(), recorder())
+        .await
+        .unwrap_err();
+    let message = refused.to_string();
+    assert!(
+        matches!(refused, StoreError::NotPublished { .. }),
+        "{message}"
+    );
+    assert!(message.contains("not published yet"), "{message}");
+    assert!(
+        message.contains(&url) && message.contains("HTTP 404"),
+        "{message}"
+    );
+    assert_eq!(
+        rig.store.status(TWOMASS_ID, &AppConfig::default()).unwrap(),
+        DatasetStatus::Missing
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn ac11_the_real_2mass_cut_resumes_after_an_interruption_and_a_flipped_byte_is_refused() {
+    let Some(path) = std::env::var_os("ASTROBURST_TIER1_PATH") else {
+        eprintln!("skipped: set ASTROBURST_TIER1_PATH to the 2mass-l8-v1.dat file");
+        return;
+    };
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(bytes.len() as u64, TWOMASS_BYTES);
+    let half = TWOMASS_BYTES / 2;
+    let built_in = built_in_datasets()
+        .into_iter()
+        .find(|spec| spec.id == TWOMASS_ID)
+        .unwrap();
+    let mut config = AppConfig::default();
+
+    let started = std::time::Instant::now();
+    let server = serve(Resource::new(bytes.clone()).drop_after(half));
+    let spec = DatasetSpec {
+        url: Some(server.url("/catalogs-v1/2mass-l8-v1.dat").to_string()),
+        ..built_in.clone()
+    };
+    let rig = Rig::new().with(spec);
+    let interrupted = rig
+        .store
+        .install(TWOMASS_ID, &client(), recorder())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(interrupted, StoreError::Download { .. }),
+        "{interrupted}"
+    );
+    assert_eq!(
+        rig.store.status(TWOMASS_ID, &config).unwrap(),
+        DatasetStatus::Partial {
+            received: half,
+            total: Some(TWOMASS_BYTES)
+        }
+    );
+    let outcome = install_from(&rig, TWOMASS_ID).await;
+    assert_eq!(outcome.resumed_from, half);
+    assert_eq!(outcome.bytes, TWOMASS_BYTES);
+    assert_eq!(outcome.sha256_hex, TWOMASS_SHA256_HEX);
+    let lease = rig.store.open(TWOMASS_ID, &config, PLATE_SOLVE).unwrap();
+    let pleiades = lease.cone(56.75, 24.12, 1.0, None).unwrap().len();
+    assert_eq!(pleiades, 1911, "the tier-1 cone at the Pleiades");
+    drop(lease);
+    let removed = rig.store.remove(TWOMASS_ID, &mut config).unwrap();
+    assert!(removed.freed_bytes >= TWOMASS_BYTES, "{removed:?}");
+    assert!(!rig.installed(TWOMASS_ID).exists());
+    println!(
+        "AC-11 resume: {} bytes, resumed from {}, sha-256 {}, Pleiades cone {} rows, removed {} bytes, {:.1} s",
+        outcome.bytes,
+        outcome.resumed_from,
+        outcome.sha256_hex,
+        pleiades,
+        removed.freed_bytes,
+        started.elapsed().as_secs_f64()
+    );
+    drop(server);
+
+    let flip_at = TWOMASS_BYTES / 3;
+    let mut served = bytes.clone();
+    served[flip_at as usize] ^= 0xFF;
+    let flipped_digest = hex_of(&digest(&served));
+    drop(served);
+    let server = serve(Resource::new(bytes).flip_byte_at(flip_at));
+    let spec = DatasetSpec {
+        url: Some(server.url("/catalogs-v1/2mass-l8-v1.dat").to_string()),
+        ..built_in
+    };
+    let rig = Rig::new().with(spec);
+    let refused = rig
+        .store
+        .install(TWOMASS_ID, &client(), recorder())
+        .await
+        .unwrap_err();
+    let message = refused.to_string();
+    assert!(matches!(refused, StoreError::Checksum { .. }), "{message}");
+    assert!(
+        message.contains(TWOMASS_SHA256_HEX) && message.contains(&flipped_digest),
+        "{message}"
+    );
+    assert!(!rig.installed(TWOMASS_ID).exists());
+    assert_eq!(
+        rig.store.status(TWOMASS_ID, &config).unwrap(),
+        DatasetStatus::Missing
+    );
+    println!("AC-11 flipped byte at {flip_at}: {message}");
 }
 
 #[tokio::test]
@@ -1081,6 +1419,17 @@ fn removing_the_external_slot_forgets_the_file_and_folder_but_keeps_the_users_fi
     );
 }
 
+fn unpinned_tier0() -> DatasetSpec {
+    DatasetSpec {
+        size_bytes: None,
+        sha256: None,
+        ..built_in_datasets()
+            .into_iter()
+            .find(|spec| spec.id == TYCHO2_ID)
+            .unwrap()
+    }
+}
+
 #[test]
 fn a_bundled_tier0_file_is_verified_against_its_sidecar_at_first_use() {
     let tier0 = catalogue(&CatHeader::whole("tier 0", 6, 128), &[]);
@@ -1097,7 +1446,7 @@ fn a_bundled_tier0_file_is_verified_against_its_sidecar_at_first_use() {
         .roots()
         .clone()
         .with_tier0_dir(resources.path().to_path_buf());
-    rig.store = CatalogStore::new(roots);
+    rig.store = CatalogStore::new(roots).with_dataset(unpinned_tier0());
     let config = AppConfig::default();
 
     assert_eq!(
@@ -1136,7 +1485,8 @@ fn a_bundled_tier0_file_is_verified_against_its_sidecar_at_first_use() {
             .roots()
             .clone()
             .with_tier0_dir(other.path().to_path_buf()),
-    );
+    )
+    .with_dataset(unpinned_tier0());
     let refused = match store.open(TYCHO2_ID, &config, PLATE_SOLVE) {
         Ok(_) => panic!("a tier 0 file with the wrong digest was opened"),
         Err(error) => error.to_string(),
@@ -1571,4 +1921,47 @@ fn register_refuses_a_file_name_that_leaves_the_dataset_folder() {
         );
         assert!(!registered().iter().any(|spec| spec.id == id), "{name:?}");
     }
+}
+
+#[test]
+#[ignore]
+fn the_real_tier0_file_verifies_against_its_pin_and_holds_the_pleiades() {
+    let Some(path) = std::env::var_os("ASTROBURST_TIER0_PATH") else {
+        eprintln!("skipped: set ASTROBURST_TIER0_PATH to the tycho2-l6-v1.abcat file");
+        return;
+    };
+    let path = PathBuf::from(path);
+    let rig = Rig::new();
+    let roots = rig.store.roots().clone().with_tier0_dir(path.clone());
+    let store = CatalogStore::new(roots);
+    let config = AppConfig::default();
+    assert_eq!(
+        store.status(TYCHO2_ID, &config).unwrap(),
+        DatasetStatus::Installed {
+            path: path.clone(),
+            verified: false
+        }
+    );
+    let started = std::time::Instant::now();
+    let lease = store.open(TYCHO2_ID, &config, PLATE_SOLVE).unwrap();
+    let verified_in = started.elapsed();
+    let pleiades = lease.cone(56.75, 24.12, 1.0, None).unwrap();
+    assert_eq!(
+        pleiades.len(),
+        171,
+        "Tycho-2 within 1 deg of the Pleiades at J2026.0"
+    );
+    drop(lease);
+    assert_eq!(
+        store.status(TYCHO2_ID, &config).unwrap(),
+        DatasetStatus::Installed {
+            path,
+            verified: true
+        }
+    );
+    println!(
+        "tier 0 verified against {TYCHO2_SHA256_HEX} in {:.0} ms; Pleiades cone {} rows",
+        verified_in.as_secs_f64() * 1000.0,
+        pleiades.len()
+    );
 }

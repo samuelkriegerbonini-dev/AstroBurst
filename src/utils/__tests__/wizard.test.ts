@@ -4,6 +4,7 @@ import { prerender } from "react-dom/static";
 import { CompositeProvider } from "../../context/CompositeContext";
 import { ComposeWizardProvider, useComposeWizardContext } from "../../context/ComposeWizardContext";
 import {
+  ALIGN_NO_OVERLAP_NOTE,
   alignChannelOutcome,
   alignRunMethodLabel,
   alignedRunFromChannels,
@@ -1042,6 +1043,20 @@ describe("alignChannelOutcome", () => {
       unregistered: null,
       usedMethod: "WCS",
     });
+  });
+
+  it("tags every channel placed through WCS, and says a footprint outside the reference is empty rather than a weak match", () => {
+    const outside = alignChannelOutcome({ registered: false, method_used: "wcs", reprojected: true }, "phase_correlation", false);
+    expect(outside.usedMethod).toBe("WCS");
+    expect(outside.unregistered).toBe(ALIGN_NO_OVERLAP_NOTE);
+    expect(ALIGN_NO_OVERLAP_NOTE).not.toMatch(/low-confidence|unshifted|try /);
+    expect(alignChannelOutcome({ registered: true, method_used: "wcs", reprojected: true }, "phase_correlation", false)).toEqual({
+      unregistered: null,
+      usedMethod: "WCS",
+    });
+    expect(alignChannelOutcome({ registered: false, method_used: "identity", reprojected: false }, "affine", false).unregistered).toMatch(
+      /low-confidence/,
+    );
   });
 
   it("never tags the reference channel", () => {

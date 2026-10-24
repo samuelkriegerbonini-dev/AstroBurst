@@ -1,8 +1,6 @@
 pub use crate::core::astrometry::plate_solve::{
     FieldAnnotation, SolveConfig, SolveResult,
 };
-#[cfg(not(feature = "astrometry-net"))]
-pub use crate::core::astrometry::plate_solve::solve_offline_placeholder;
 
 #[cfg(feature = "astrometry-net")]
 pub use self::astrometry_net_impl::solve_astrometry_net;
@@ -11,6 +9,7 @@ pub use self::astrometry_net_impl::solve_astrometry_net;
 mod astrometry_net_impl {
     use anyhow::{bail, Context, Result};
     use super::{FieldAnnotation, SolveResult, SolveConfig};
+    use crate::core::astrometry::plate_solve::{parity_name, SOLVER_ASTROMETRY_NET};
     use crate::infra::net::http::get_with_retry;
     use crate::types::error::AppError;
 
@@ -91,7 +90,8 @@ mod astrometry_net_impl {
     pub(super) struct Calibration {
         pub ra: f64,
         pub dec: f64,
-        pub orientation: f64,
+        pub orientation: Option<f64>,
+        pub parity: Option<f64>,
         pub pixscale: f64,
     }
 
@@ -106,7 +106,8 @@ mod astrometry_net_impl {
         Ok(Calibration {
             ra,
             dec,
-            orientation: cal["orientation"].as_f64().unwrap_or(0.0),
+            orientation: finite("orientation"),
+            parity: finite("parity"),
             pixscale,
         })
     }
@@ -316,13 +317,13 @@ mod astrometry_net_impl {
         )
         .await?;
 
-        let Calibration { ra: ra_center, dec: dec_center, orientation, pixscale: pixel_scale } =
+        let Calibration { ra: ra_center, dec: dec_center, orientation, parity, pixscale: pixel_scale } =
             parse_calibration(&cal, jid)?;
         let field_w = pixel_scale * image_width as f64 / 60.0;
         let field_h = pixel_scale * image_height as f64 / 60.0;
 
         log::info!(
-            "Solved: RA={:.4} Dec={:.4} scale={:.3}\"/px orient={:.1}deg FOV={:.1}'x{:.1}'",
+            "Solved: RA={:.4} Dec={:.4} scale={:.3}\"/px orient={:?}deg FOV={:.1}'x{:.1}'",
             ra_center, dec_center, pixel_scale, orientation, field_w, field_h
         );
 
@@ -361,6 +362,9 @@ mod astrometry_net_impl {
             field_h_arcmin: field_h,
             annotations,
             wcs_cards,
+            solver: SOLVER_ASTROMETRY_NET.to_string(),
+            parity: parity.map(|p| parity_name(p > 0.0).to_string()),
+            ..SolveResult::default()
         })
     }
 }
@@ -536,9 +540,20 @@ mod tests {
         assert!(err.contains("no usable pixscale;"), "{err}");
 
         let cal = parse_calibration(&serde_json::from_str(FULL_CALIBRATION).unwrap(), 42).unwrap();
-        assert_eq!((cal.ra, cal.dec, cal.orientation, cal.pixscale), (83.822, -5.391, 91.2, 2.0));
+        assert_eq!((cal.ra, cal.dec, cal.orientation, cal.pixscale), (83.822, -5.391, Some(91.2), 2.0));
+    }
+
+    #[test]
+    fn parse_calibration_without_orientation_yields_none_and_keeps_the_parity() {
         let no_orientation = parse_calibration(&json!({"ra": 1.0, "dec": 2.0, "pixscale": 3.0}), 1).unwrap();
-        assert_eq!(no_orientation.orientation, 0.0);
+        assert_eq!(no_orientation.orientation, None, "a missing orientation must not become a measured 0");
+        assert_eq!(no_orientation.parity, None);
+        let mirrored = parse_calibration(&json!({"ra": 1.0, "dec": 2.0, "pixscale": 3.0, "orientation": 12.5, "parity": -1.0}), 1).unwrap();
+        assert_eq!((mirrored.orientation, mirrored.parity), (Some(12.5), Some(-1.0)));
+        let full = parse_calibration(&serde_json::from_str(FULL_CALIBRATION).unwrap(), 42).unwrap();
+        assert_eq!(full.parity, Some(1.0));
+        let junk = parse_calibration(&json!({"ra": 1.0, "dec": 2.0, "pixscale": 3.0, "orientation": "up", "parity": "odd"}), 1).unwrap();
+        assert_eq!((junk.orientation, junk.parity), (None, None));
     }
 
     #[test]
@@ -571,7 +586,9 @@ mod tests {
         assert_eq!(result.ra_center, 83.822);
         assert_eq!(result.dec_center, -5.391);
         assert_eq!(result.pixel_scale, 2.0);
-        assert_eq!(result.orientation, 91.2);
+        assert_eq!(result.orientation, Some(91.2));
+        assert_eq!(result.solver, "astrometry.net");
+        assert_eq!(result.parity.as_deref(), Some("flipped"));
         assert!((result.field_w_arcmin - 2.0 * 1024.0 / 60.0).abs() < 1e-9);
         assert!(!result.wcs_cards.is_empty(), "the solve carries no WCS cards");
         assert_eq!(result.wcs_cards, nova_wcs_cards());

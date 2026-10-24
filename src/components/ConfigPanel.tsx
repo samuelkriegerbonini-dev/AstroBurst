@@ -12,6 +12,7 @@ import { outputKeepList } from "../utils/outputKeep";
 import { historyStore } from "../utils/historyStore";
 import { watchStorage } from "../utils/storageRefresh";
 import { decimalDraftText, decimalFieldState } from "../utils/decimalText";
+import CatalogsSettings from "./CatalogsSettings";
 
 const DEFAULT_MAST_QUOTA_GB = 20;
 const QUOTA_LABEL = "MAST download quota";
@@ -387,7 +388,7 @@ export default function ConfigPanel() {
           </button>
         </div>
         <p className="text-[10px] text-zinc-600 mt-2">
-          Required for plate solving. Get one at nova.astrometry.net
+          Only for the optional astrometry.net fallback after an offline solve fails. Get one at nova.astrometry.net
         </p>
       </div>
 
@@ -435,6 +436,8 @@ export default function ConfigPanel() {
               />
             </div>
           </div>
+
+          <CatalogsSettings />
 
           <ArchiveDownloadsFields
             dataDirId={dataDirId}

@@ -3,17 +3,38 @@ import {
   DEFAULT_HINT_TEXTS,
   DEFAULT_SCALE_HIGH_TEXT,
   DEFAULT_SCALE_LOW_TEXT,
+  NO_HINT_SOURCES,
+  TYPED_HINT_SOURCE,
+  WCS_HINT_SOURCE,
+  editedHintSources,
   headerHintTexts,
   headerPositionHintTexts,
+  hintSourceLine,
+  mergeHintSources,
   mergeHintTexts,
+  offlineNearRadius,
+  panelHints,
   parsePositionHint,
   parseRadius,
   parseScaleRange,
   positionHintStatus,
   scaleHintFromPixelScale,
+  solveHintTexts,
   type HintField,
   type HintTexts,
 } from "../plateSolveScale";
+import type { SolveHints } from "../../shared/types/astrometry";
+
+describe("offlineNearRadius", () => {
+  it("caps the near-search radius the offline solver gets at its 15 degrees and keeps smaller ones", () => {
+    const tess = headerPositionHintTexts({ center_ra: 90, center_dec: -66, fov_arcmin: [1440, 1440] })!;
+    expect(tess.radius).toBe("16.9706");
+    expect(offlineNearRadius(parseRadius(tess.radius!))).toBe(15);
+    expect(offlineNearRadius(3)).toBe(3);
+    expect(offlineNearRadius(15)).toBe(15);
+    expect(offlineNearRadius(null)).toBeUndefined();
+  });
+});
 
 describe("scaleHintFromPixelScale", () => {
   it("brackets a NIRCam short-wave scale by 0.8x and 1.25x, rounded outwards", () => {
@@ -80,8 +101,8 @@ describe("parseScaleRange", () => {
   });
 });
 
-const RA_ERROR = "Centre RA must be decimal degrees from 0 to 360, written with a dot (e.g. 190.03).";
-const DEC_ERROR = "Centre Dec must be decimal degrees from -90 to 90, written with a dot (e.g. -11.63).";
+const RA_ERROR = "Centre RA must be degrees from 0 to 360 written with a dot (e.g. 190.03), or hours as h:m:s (e.g. 12:40:07.2).";
+const DEC_ERROR = "Centre Dec must be degrees from -90 to 90 written with a dot (e.g. -11.63), or d:m:s (e.g. -11:38:00).";
 const RADIUS_ERROR = "Radius must be decimal degrees above 0 and up to 180, written with a dot (e.g. 1.5).";
 const NO_FLAGS = { raInvalid: false, decInvalid: false, radiusInvalid: false, error: null };
 
@@ -195,8 +216,35 @@ describe("parsePositionHint", () => {
   });
 });
 
+describe("sexagesimal centre hints (UX-16)", () => {
+  it("reads an h:m:s RA and a d:m:s Dec through parseAngle", () => {
+    const hint = parsePositionHint("18:18:48", "-13:49:00", "");
+    expect(hint.error).toBeNull();
+    expect(hint.raInvalid || hint.decInvalid).toBe(false);
+    expect(hint.centerRa).toBeCloseTo(274.7, 9);
+    expect(hint.centerDec).toBeCloseTo(-13.816667, 6);
+    expect(positionHintStatus(hint)).toBe(HINTED_STATUS);
+  });
+
+  it("reads the letter and space forms that planners and SIMBAD print", () => {
+    expect(parsePositionHint("12h40m07.2s", "-11d38m00s", "").centerRa).toBeCloseTo(190.03, 9);
+    expect(parsePositionHint("12 40 07.2", "-11 38 00", "").centerDec).toBeCloseTo(-(11 + 38 / 60), 9);
+    expect(parsePositionHint("05:35:17.3", "+22:00:52", "1.5")).toMatchObject({ radius: 1.5, error: null });
+  });
+
+  it("refuses a negative sexagesimal RA, as it refuses a negative decimal one", () => {
+    expect(parsePositionHint("-01:00:00", "-11.6", "")).toMatchObject({ centerRa: null, raInvalid: true, error: RA_ERROR });
+  });
+
+  it("refuses minutes or seconds of 60, more than 24 hours and a Dec beyond a pole", () => {
+    expect(parsePositionHint("18:60:00", "-13:49:00", "").error).toBe(RA_ERROR);
+    expect(parsePositionHint("25:00:00", "-13:49:00", "").error).toBe(RA_ERROR);
+    expect(parsePositionHint("18:18:48", "-91:00:00", "")).toMatchObject({ decInvalid: true, error: DEC_ERROR });
+  });
+});
+
 const HINTED_STATUS = "Hinted solve around the field centre";
-const BLIND_STATUS = "Blind solve: fill both centre fields to hint it";
+const BLIND_STATUS = "Blind solve: only astrometry.net solves without a centre; fill both centre fields to solve offline";
 
 describe("positionHintStatus", () => {
   it("names a hinted or a blind solve while every hint field is valid", () => {
@@ -343,5 +391,104 @@ describe("mergeHintTexts", () => {
     const current: HintTexts = { ...DEFAULT_HINT_TEXTS };
     mergeHintTexts(current, F200W_HINTS, NOTHING_TOUCHED);
     expect(current).toEqual(DEFAULT_HINT_TEXTS);
+  });
+});
+
+const OBJCT_HINTS: SolveHints = {
+  centre: { ra: 274.7, dec: -13.816667, source: "OBJCTRA/OBJCTDEC" },
+  scale: { low_arcsec: 2.1537, high_arcsec: 2.6324, source: "XPIXSZ 2.9 µm / FOCALLEN 250 mm" },
+  fov_deg: 3.6,
+  epoch_year: 2024.5,
+  cfa: null,
+  object: null,
+  expected_tier0_stars: null,
+  warnings: [],
+};
+const OBJCT_SOURCES = { centre: "OBJCTRA/OBJCTDEC", scale: "XPIXSZ 2.9 µm / FOCALLEN 250 mm" };
+
+describe("solveHintTexts", () => {
+  it("writes the header pointing and the widened scale range the way the parsers read them", () => {
+    const texts = solveHintTexts(OBJCT_HINTS);
+    expect(texts).toEqual({
+      scaleLow: "2.15",
+      scaleHigh: "2.64",
+      scaleUnits: "arcsecperpix",
+      centerRa: "274.700000",
+      centerDec: "-13.816667",
+    });
+    expect(parsePositionHint(texts.centerRa!, texts.centerDec!, "").error).toBeNull();
+    expect(parseScaleRange(texts.scaleLow!, texts.scaleHigh!).error).toBeNull();
+  });
+
+  it("fills nothing for a hint the header does not give", () => {
+    expect(solveHintTexts({ ...OBJCT_HINTS, centre: null, scale: null })).toEqual({});
+    expect(solveHintTexts({ ...OBJCT_HINTS, scale: { ...OBJCT_HINTS.scale!, low_arcsec: Number.NaN } })).not.toHaveProperty("scaleLow");
+  });
+});
+
+describe("panelHints", () => {
+  it("headerHintTexts_prefers_solve_hints_and_names_the_source when the header has no WCS", () => {
+    expect(panelHints(null, OBJCT_HINTS)).toEqual({
+      texts: { ...solveHintTexts(OBJCT_HINTS), radius: DEFAULT_HINT_TEXTS.radius },
+      sources: OBJCT_SOURCES,
+    });
+  });
+
+  it("keeps the header WCS fill, with its radius, when the file has a celestial WCS", () => {
+    const wcsHints = { ...OBJCT_HINTS, centre: { ...OBJCT_HINTS.centre!, source: WCS_HINT_SOURCE } };
+    expect(panelHints(F200W_HEADER, wcsHints)).toEqual({
+      texts: F200W_HINTS,
+      sources: { centre: WCS_HINT_SOURCE, scale: WCS_HINT_SOURCE },
+    });
+  });
+
+  it("puts the default radius back with a header centre from the cards, so From header drops a typed radius", () => {
+    const afterCancelledRun: HintTexts = {
+      ...DEFAULT_HINT_TEXTS,
+      ...solveHintTexts(OBJCT_HINTS),
+      centerRa: "299.7",
+      radius: "15",
+    };
+    const refill = panelHints(null, OBJCT_HINTS).texts;
+    expect(mergeHintTexts(afterCancelledRun, refill, NOTHING_TOUCHED)).toEqual({
+      ...DEFAULT_HINT_TEXTS,
+      ...solveHintTexts(OBJCT_HINTS),
+      radius: DEFAULT_HINT_TEXTS.radius,
+    });
+    const noCentre = panelHints(null, { ...OBJCT_HINTS, centre: null }).texts;
+    expect(mergeHintTexts(afterCancelledRun, noCentre, NOTHING_TOUCHED).radius).toBe("15");
+  });
+
+  it("takes each hint group from wherever the header gives it", () => {
+    const noScale = { ...F200W_HEADER, pixel_scale_arcsec: 0 };
+    expect(panelHints(noScale, OBJCT_HINTS).sources).toEqual({ centre: WCS_HINT_SOURCE, scale: OBJCT_SOURCES.scale });
+    expect(panelHints(null, null)).toEqual({ texts: {}, sources: NO_HINT_SOURCES });
+  });
+});
+
+describe("hint sources", () => {
+  it("marks the group the user edits as typed", () => {
+    expect(editedHintSources(OBJCT_SOURCES, "centerDec")).toEqual({ ...OBJCT_SOURCES, centre: TYPED_HINT_SOURCE });
+    expect(editedHintSources(OBJCT_SOURCES, "scaleUnits")).toEqual({ ...OBJCT_SOURCES, scale: TYPED_HINT_SOURCE });
+    expect(editedHintSources(OBJCT_SOURCES, "radius")).toEqual(OBJCT_SOURCES);
+  });
+
+  it("keeps the typed groups when the header hints are applied again, as mergeHintTexts keeps the typed text", () => {
+    const typed = { centre: TYPED_HINT_SOURCE, scale: OBJCT_SOURCES.scale };
+    expect(mergeHintSources(typed, { centre: WCS_HINT_SOURCE, scale: WCS_HINT_SOURCE }, new Set<HintField>(["centerRa"]))).toEqual({
+      centre: TYPED_HINT_SOURCE,
+      scale: WCS_HINT_SOURCE,
+    });
+    expect(mergeHintSources(typed, OBJCT_SOURCES, NOTHING_TOUCHED)).toEqual(OBJCT_SOURCES);
+  });
+
+  it("names where the centre and the scale came from in one line", () => {
+    expect(hintSourceLine(OBJCT_SOURCES)).toBe("Hints: centre from OBJCTRA/OBJCTDEC; scale from XPIXSZ 2.9 µm / FOCALLEN 250 mm");
+    expect(hintSourceLine({ centre: WCS_HINT_SOURCE, scale: WCS_HINT_SOURCE })).toBe("Hints from the header WCS");
+    expect(hintSourceLine({ centre: TYPED_HINT_SOURCE, scale: null })).toBe("Hints: centre typed; default scale range");
+    expect(hintSourceLine({ centre: null, scale: OBJCT_SOURCES.scale })).toBe(
+      "Hints: no centre in the header; scale from XPIXSZ 2.9 µm / FOCALLEN 250 mm",
+    );
+    expect(hintSourceLine(NO_HINT_SOURCES)).toBeNull();
   });
 });

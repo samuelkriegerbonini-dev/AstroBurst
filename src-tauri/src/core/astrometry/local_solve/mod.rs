@@ -55,6 +55,12 @@ const SATURATION_PLATEAU_PIXELS: usize = 4;
 const RANSAC_INLIER_FIELD_FACTOR: f64 = 0.1;
 const REFINE_PASSES: usize = 2;
 const SIP_FOLDS: usize = 5;
+const SIP_PASSES: usize = 6;
+const SIP_PASS_RADIUS_GROWTH: f64 = 2.0;
+const SIP_PASS_MAX_RADIUS_FRACTION: f64 = 0.01;
+const RADIAL_RMS_PER_MEDIAN: f64 = 1.201_122_408_786_45;
+const MATCH_WINDOWS: usize = 4;
+const MATCH_WINDOW_FRACTION: f64 = 2.0 / 3.0;
 
 pub trait CatalogProvider: Send + Sync {
     fn cone(
@@ -211,10 +217,12 @@ pub struct DistortionFit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalSolveParams {
     pub near_radius_deg: f64,
+    pub near_radius_fields: f64,
     pub max_centres: usize,
     pub max_side_px: usize,
     pub detect_sigma: f64,
     pub max_eccentricity: f64,
+    pub compact_quantile: f64,
     pub detection_stars: usize,
     pub catalogue_stars: usize,
     pub hinted_match_stars: usize,
@@ -222,7 +230,7 @@ pub struct LocalSolveParams {
     pub footprint_margin: f64,
     pub footprint_stars_per_detection: usize,
     pub footprint_min_stars: usize,
-    pub cone_diagonal_fraction: f64,
+    pub cone_short_side_fraction: f64,
     pub spiral_spacing_fraction: f64,
     pub min_matches: usize,
     pub max_false_alarm: f64,
@@ -241,18 +249,20 @@ impl Default for LocalSolveParams {
     fn default() -> Self {
         Self {
             near_radius_deg: 3.0,
+            near_radius_fields: 0.5,
             max_centres: 600,
             max_side_px: 2048,
             detect_sigma: 5.0,
             max_eccentricity: 0.6,
-            detection_stars: 80,
+            compact_quantile: 0.75,
+            detection_stars: 300,
             catalogue_stars: 120,
             hinted_match_stars: 60,
             spiral_match_stars: 40,
             footprint_margin: 1.2,
             footprint_stars_per_detection: 3,
             footprint_min_stars: 200,
-            cone_diagonal_fraction: 0.6,
+            cone_short_side_fraction: 0.5,
             spiral_spacing_fraction: 0.5,
             min_matches: 8,
             max_false_alarm: 1e-9,
@@ -666,6 +676,60 @@ fn tan_pass(
     Some((TanParams { crval, crpix, cd }, residuals))
 }
 
+fn median_sorted(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        0.0
+    } else if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    }
+}
+
+fn plain_rms(distances: &[f64]) -> f64 {
+    if distances.is_empty() {
+        0.0
+    } else {
+        (distances.iter().map(|d| d * d).sum::<f64>() / distances.len() as f64).sqrt()
+    }
+}
+
+pub fn clipped_rms(distances: &[f64], clip_sigma: f64) -> f64 {
+    if distances.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = distances
+        .iter()
+        .copied()
+        .filter(|d| d.is_finite())
+        .collect();
+    if sorted.is_empty() {
+        return f64::INFINITY;
+    }
+    sorted.sort_by(f64::total_cmp);
+    let mut threshold =
+        (clip_sigma * RADIAL_RMS_PER_MEDIAN * median_sorted(&sorted)).max(CLIP_FLOOR_PX);
+    let mut rms = plain_rms(&sorted);
+    for _ in 0..MAX_CLIP_ROUNDS {
+        let kept: Vec<f64> = sorted
+            .iter()
+            .copied()
+            .take_while(|d| *d <= threshold)
+            .collect();
+        if kept.is_empty() {
+            break;
+        }
+        rms = plain_rms(&kept);
+        let next = (clip_sigma * rms).max(CLIP_FLOOR_PX);
+        if next >= threshold {
+            break;
+        }
+        threshold = next;
+    }
+    rms
+}
+
 fn masked_rms(residuals: &[f64], mask: &[bool]) -> f64 {
     let (sum, count) = residuals
         .iter()
@@ -794,6 +858,8 @@ pub fn false_alarm_log10(matched: usize, lambda: f64, trials: usize) -> f64 {
     (poisson_tail_log10(scored, lambda) + (trials.max(1) as f64).log10()).min(0.0)
 }
 
+type SkyToPixel<'a> = &'a dyn Fn(f64, f64) -> Option<(f64, f64)>;
+
 fn verify_pairs(
     tan: &TanParams,
     detections: &[Detection],
@@ -803,22 +869,45 @@ fn verify_pairs(
     params: &LocalSolveParams,
     gate: StageGate,
 ) -> (Verification, Vec<SkyPair>) {
+    let predict = |ra: f64, dec: f64| sky_to_pixel(tan, ra, dec);
+    verify_with(
+        &predict,
+        match_radius(detections, params),
+        tan,
+        detections,
+        catalogue,
+        size,
+        scale_range_arcsec,
+        params,
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_with(
+    predict: SkyToPixel,
+    radius: f64,
+    tan: &TanParams,
+    detections: &[Detection],
+    catalogue: &[(f64, f64)],
+    size: (usize, usize),
+    scale_range_arcsec: Option<(f64, f64)>,
+    params: &LocalSolveParams,
+    gate: StageGate,
+) -> (Verification, Vec<SkyPair>) {
     let (width, height) = size;
-    let radius = match_radius(detections, params);
     let projected: Vec<((f64, f64), (f64, f64))> = catalogue
         .iter()
         .filter_map(|&(ra, dec)| {
-            let pixel = sky_to_pixel(tan, ra, dec)?;
-            inside(size, pixel).then_some((pixel, (ra, dec)))
+            let pixel = predict(ra, dec)?;
+            (pixel.0.is_finite() && pixel.1.is_finite() && inside(size, pixel))
+                .then_some((pixel, (ra, dec)))
         })
         .collect();
     let positions: Vec<(f64, f64)> = projected.iter().map(|(pixel, _)| *pixel).collect();
     let matched = nearest_pairs(&positions, detections, radius);
-    let rms = if matched.is_empty() {
-        0.0
-    } else {
-        (matched.iter().map(|(_, _, d)| d * d).sum::<f64>() / matched.len() as f64).sqrt()
-    };
+    let distances: Vec<f64> = matched.iter().map(|&(_, _, d)| d).collect();
+    let rms = clipped_rms(&distances, params.clip_sigma);
     let lambda =
         projected.len() as f64 * detections.len() as f64 * std::f64::consts::PI * radius * radius
             / (width as f64 * height as f64);
@@ -925,6 +1014,118 @@ fn plain_tan(tan: &TanParams) -> DistortionFit {
     }
 }
 
+#[derive(Clone)]
+struct SipModel {
+    forward: PolyModel,
+    inverse: PolyModel,
+    kept: Vec<SkyPair>,
+}
+
+struct SipSelection {
+    considered: Vec<(u8, f64, f64)>,
+    model: Option<SipModel>,
+}
+
+fn poly_pairs(pairs: &[SkyPair], tan: &TanParams) -> Vec<(f64, f64, f64, f64)> {
+    pairs
+        .iter()
+        .filter_map(|p| sky_to_pixel(tan, p.ra, p.dec).map(|(tx, ty)| (p.x, p.y, tx, ty)))
+        .collect()
+}
+
+fn max_sip_order(tan: &TanParams, size: (usize, usize), params: &LocalSolveParams) -> u8 {
+    let long_side_deg = size.0.max(size.1) as f64 * scale_arcsec(&tan.cd) / ARCSEC_PER_DEG;
+    if long_side_deg > params.sip_order_4_above_deg {
+        4
+    } else {
+        3
+    }
+}
+
+fn fit_sip_model(
+    pairs: &[SkyPair],
+    tan: &TanParams,
+    size: (usize, usize),
+    params: &LocalSolveParams,
+) -> Option<SipSelection> {
+    if pairs.len() < params.sip_min_inliers || quadrants(pairs, size) < params.sip_min_quadrants {
+        return None;
+    }
+    let max_order = max_sip_order(tan, size, params);
+    let mut kept: Vec<SkyPair> = pairs.to_vec();
+    for round in 0..MAX_CLIP_ROUNDS {
+        let rows = poly_pairs(&kept, tan);
+        let selection = poly::fit_select(&rows, 1..=max_order, SIP_FOLDS)?;
+        let residuals = selection.model.residuals(&rows);
+        let threshold =
+            (params.clip_sigma * clipped_rms(&residuals, params.clip_sigma)).max(CLIP_FLOOR_PX);
+        let next: Vec<SkyPair> = kept
+            .iter()
+            .zip(&residuals)
+            .filter(|(_, r)| **r <= threshold)
+            .map(|(p, _)| *p)
+            .collect();
+        let stable = next.len() == kept.len()
+            || next.len() < params.sip_min_inliers
+            || round + 1 == MAX_CLIP_ROUNDS;
+        if !stable {
+            kept = next;
+            continue;
+        }
+        if quadrants(&kept, size) < params.sip_min_quadrants {
+            return None;
+        }
+        let considered = selection.considered;
+        if selection.model.order <= 1 {
+            return Some(SipSelection {
+                considered,
+                model: None,
+            });
+        }
+        let swapped: Vec<(f64, f64, f64, f64)> =
+            rows.iter().map(|&(x, y, tx, ty)| (tx, ty, x, y)).collect();
+        let inverse = poly::fit(&swapped, selection.model.order);
+        return Some(SipSelection {
+            considered,
+            model: inverse.map(|inverse| SipModel {
+                forward: selection.model,
+                inverse,
+                kept,
+            }),
+        });
+    }
+    None
+}
+
+fn sip_cards(
+    model: &PolyModel,
+    considered: Vec<(u8, f64, f64)>,
+    tan: &TanParams,
+    size: (usize, usize),
+) -> Result<DistortionFit, String> {
+    let bbox = [[-0.5, size.0 as f64 - 0.5], [-0.5, size.1 as f64 - 0.5]];
+    let options = SipFitOptions {
+        degree: Some(vec![model.order]),
+        crpix: Some([tan.crpix.0, tan.crpix.1]),
+        ..SipFitOptions::default()
+    };
+    let sip = model
+        .to_sip_cards(tan, bbox, &options)
+        .map_err(|error| error.to_string())?;
+    let sip_tan = TanParams {
+        crval: (sip.crval[0], sip.crval[1]),
+        crpix: (sip.crpix[0], sip.crpix[1]),
+        cd: sip.cd,
+    };
+    Ok(DistortionFit {
+        order: sip.a_order,
+        considered,
+        wcs_cards: sip.header_cards(),
+        sip_max_err_px: Some(sip.max_err_px),
+        tan: sip_tan,
+    })
+}
+
 fn distortion_with_model(
     pairs: &[SkyPair],
     tan: &TanParams,
@@ -935,24 +1136,11 @@ fn distortion_with_model(
         return Err("TAN parameters are not finite".to_string());
     }
     let plain = plain_tan(tan);
-    if pairs.len() < params.sip_min_inliers || quadrants(pairs, size) < params.sip_min_quadrants {
-        return Ok((plain, None));
-    }
-    let long_side_deg = size.0.max(size.1) as f64 * scale_arcsec(&tan.cd) / ARCSEC_PER_DEG;
-    let max_order = if long_side_deg > params.sip_order_4_above_deg {
-        4
-    } else {
-        3
-    };
-    let poly_pairs: Vec<(f64, f64, f64, f64)> = pairs
-        .iter()
-        .filter_map(|p| sky_to_pixel(tan, p.ra, p.dec).map(|(tx, ty)| (p.x, p.y, tx, ty)))
-        .collect();
-    let Some(selection) = poly::fit_select(&poly_pairs, 1..=max_order, SIP_FOLDS) else {
+    let Some(selection) = fit_sip_model(pairs, tan, size, params) else {
         return Ok((plain, None));
     };
     let considered = selection.considered;
-    if selection.model.order <= 1 {
+    let Some(model) = selection.model else {
         return Ok((
             DistortionFit {
                 considered,
@@ -960,32 +1148,9 @@ fn distortion_with_model(
             },
             None,
         ));
-    }
-    let bbox = [[-0.5, size.0 as f64 - 0.5], [-0.5, size.1 as f64 - 0.5]];
-    let options = SipFitOptions {
-        degree: Some(vec![selection.model.order]),
-        crpix: Some([tan.crpix.0, tan.crpix.1]),
-        ..SipFitOptions::default()
     };
-    let sip = selection
-        .model
-        .to_sip_cards(tan, bbox, &options)
-        .map_err(|error| error.to_string())?;
-    let sip_tan = TanParams {
-        crval: (sip.crval[0], sip.crval[1]),
-        crpix: (sip.crpix[0], sip.crpix[1]),
-        cd: sip.cd,
-    };
-    Ok((
-        DistortionFit {
-            order: sip.a_order,
-            considered,
-            wcs_cards: sip.header_cards(),
-            sip_max_err_px: Some(sip.max_err_px),
-            tan: sip_tan,
-        },
-        Some(selection.model),
-    ))
+    let fit = sip_cards(&model.forward, considered, tan, size)?;
+    Ok((fit, Some(model.forward)))
 }
 
 pub fn fit_distortion(
@@ -1091,10 +1256,10 @@ fn detect_for_solve(
     let (rows, cols) = working.dim();
     let saturation = saturation_level(&working);
     let detected = detect_stars(&working, params.detect_sigma);
+    let background = detected.background_median;
     detected
         .stars
         .into_iter()
-        .filter(|star| star.eccentricity <= params.max_eccentricity)
         .filter(|star| {
             let margin = EDGE_MARGIN_PX.max(EDGE_MARGIN_FWHM * star.fwhm);
             star.x >= margin
@@ -1103,8 +1268,8 @@ fn detect_for_solve(
                 && star.y <= rows as f64 - 1.0 - margin
         })
         .map(|star| {
-            let saturated =
-                saturation.is_some_and(|level| star.peak >= SATURATION_FRACTION * level);
+            let saturated = saturation
+                .is_some_and(|level| star.peak + background >= SATURATION_FRACTION * level);
             Detection {
                 star: DetectedStar {
                     x: map_x.apply(star.x),
@@ -1118,20 +1283,71 @@ fn detect_for_solve(
         .collect()
 }
 
-fn select_detections(
-    detections: &[Detection],
-    (width, height): (usize, usize),
-    params: &LocalSolveParams,
-) -> Vec<Detection> {
+fn compactness_limit(detections: &[Detection], params: &LocalSolveParams) -> f64 {
+    let mut brightest: Vec<&Detection> = detections
+        .iter()
+        .filter(|d| d.star.x.is_finite() && d.star.y.is_finite())
+        .filter(|d| d.star.eccentricity.is_finite())
+        .collect();
+    brightest.sort_by(|a, b| b.star.flux.total_cmp(&a.star.flux));
+    let mut eccentricities: Vec<f64> = brightest
+        .iter()
+        .take(params.detection_stars.max(1))
+        .map(|d| d.star.eccentricity)
+        .collect();
+    if eccentricities.is_empty() {
+        return params.max_eccentricity;
+    }
+    eccentricities.sort_by(f64::total_cmp);
+    let rank = ((eccentricities.len() - 1) as f64 * params.compact_quantile.clamp(0.0, 1.0))
+        .round() as usize;
+    params.max_eccentricity.max(eccentricities[rank])
+}
+
+fn is_compact(detection: &Detection, limit: f64) -> bool {
+    detection.star.eccentricity <= limit
+}
+
+fn usable_detections(detections: &[Detection], params: &LocalSolveParams) -> Vec<Detection> {
+    let limit = compactness_limit(detections, params);
     let mut usable: Vec<Detection> = detections
         .iter()
-        .filter(|d| !d.saturated && d.star.eccentricity <= params.max_eccentricity)
+        .filter(|d| is_compact(d, limit))
         .filter(|d| d.star.x.is_finite() && d.star.y.is_finite())
         .cloned()
         .collect();
     usable.sort_by(|a, b| b.star.flux.total_cmp(&a.star.flux));
+    usable
+}
+
+fn dropped_saturated(detections: &[Detection], params: &LocalSolveParams) -> usize {
+    let limit = compactness_limit(detections, params);
+    detections
+        .iter()
+        .filter(|d| d.saturated && !is_compact(d, limit))
+        .count()
+}
+
+fn disc_points(
+    usable: &[Detection],
+    (width, height): (usize, usize),
+    radius_px: f64,
+) -> Vec<(f64, f64)> {
+    let (xc, yc) = ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0);
+    usable
+        .iter()
+        .map(|d| (d.star.x, d.star.y))
+        .filter(|&(x, y)| (x - xc).hypot(y - yc) <= radius_px)
+        .collect()
+}
+
+fn spread_detections(
+    usable: &[Detection],
+    (width, height): (usize, usize),
+    limit: usize,
+) -> Vec<Detection> {
     let stars: Vec<DetectedStar> = usable.iter().map(|d| d.star.clone()).collect();
-    let chosen = select_alignment_stars(&stars, params.detection_stars, height, width);
+    let chosen = select_alignment_stars(&stars, limit, height, width);
     let index: HashMap<(u64, u64), usize> = usable
         .iter()
         .enumerate()
@@ -1194,6 +1410,39 @@ impl MatchSide {
     }
 }
 
+fn window_inliers(side: &MatchSide, catalogue: &[(f64, f64)]) -> Option<Vec<StarPair>> {
+    let (same, mirrored) = side.match_catalogue(catalogue);
+    let [same_inliers, mirrored_inliers] = [&same, &mirrored].map(|m| {
+        ransac_affine(&m.pairs, AffineAlignMethod::Affine, &side.params)
+            .map(|fit| inlier_pairs(&m.pairs, &fit.transform, side.params.inlier_px))
+    });
+    match (same_inliers, mirrored_inliers) {
+        (Some(a), Some(b)) if b.len() > a.len() => Some(b),
+        (Some(a), _) => Some(a),
+        (None, b) => b,
+    }
+}
+
+fn best_window_inliers(side: &MatchSide, catalogue: &[(f64, f64)]) -> Option<Vec<StarPair>> {
+    let window = ((side.params.max_stars as f64 * MATCH_WINDOW_FRACTION).round() as usize)
+        .max(side.params.min_inliers);
+    let step = (window / 2).max(1);
+    let mut best: Option<Vec<StarPair>> = None;
+    for index in 0..MATCH_WINDOWS {
+        let start = index * step;
+        if start + side.params.min_inliers > catalogue.len() {
+            break;
+        }
+        let end = (start + window).min(catalogue.len());
+        if let Some(inliers) = window_inliers(side, &catalogue[start..end]) {
+            if best.as_ref().is_none_or(|b| inliers.len() > b.len()) {
+                best = Some(inliers);
+            }
+        }
+    }
+    best.filter(|inliers| inliers.len() >= side.params.min_inliers)
+}
+
 fn ransac_inlier_px(long_side_px: usize, long_side_deg: f64) -> f64 {
     let long_side_rad = long_side_deg.to_radians();
     TriangleParams::SOLVER
@@ -1218,6 +1467,7 @@ fn inlier_pairs(
 
 struct SearchContext<'a> {
     detections: Vec<Detection>,
+    saturated: usize,
     size: (usize, usize),
     catalog: &'a dyn CatalogProvider,
     params: &'a LocalSolveParams,
@@ -1230,6 +1480,7 @@ struct Hypothesis {
     scale_deg: f64,
     spacing_deg: f64,
     cone_radius_deg: f64,
+    bright_skip: usize,
     stage_rms_px: f64,
     hinted: MatchSide,
     spiral: Option<MatchSide>,
@@ -1239,6 +1490,7 @@ impl Hypothesis {
     fn new(
         nominal_arcsec: f64,
         points: &[(f64, f64)],
+        saturated: usize,
         size: (usize, usize),
         params: &LocalSolveParams,
     ) -> Self {
@@ -1248,10 +1500,13 @@ impl Hypothesis {
         let field_h = height as f64 * scale_deg;
         let long_side_deg = field_w.max(field_h);
         let inlier_px = ransac_inlier_px(width.max(height), long_side_deg);
+        let cone_radius_deg = params.cone_short_side_fraction * field_w.min(field_h);
+        let cone_area = std::f64::consts::PI * cone_radius_deg * cone_radius_deg;
         Self {
             scale_deg,
             spacing_deg: params.spiral_spacing_fraction * field_w.min(field_h),
-            cone_radius_deg: params.cone_diagonal_fraction * field_w.hypot(field_h),
+            cone_radius_deg,
+            bright_skip: (saturated as f64 * cone_area / (field_w * field_h)).round() as usize,
             stage_rms_px: params
                 .max_rms_px
                 .max(params.tan_rms_px_per_deg * long_side_deg),
@@ -1282,7 +1537,7 @@ struct CentreOutcome {
     solved: Option<Solved>,
 }
 
-fn ranked_sky(rows: &[CatalogRow], limit: usize) -> Vec<(f64, f64)> {
+fn ranked_sky(rows: &[CatalogRow], skip: usize, limit: usize) -> Vec<(f64, f64)> {
     let mut ranked: Vec<(f64, usize)> = rows
         .iter()
         .enumerate()
@@ -1292,6 +1547,7 @@ fn ranked_sky(rows: &[CatalogRow], limit: usize) -> Vec<(f64, f64)> {
     ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     ranked
         .iter()
+        .skip(skip)
         .take(limit)
         .map(|&(_, i)| (rows[i].ra_epoch, rows[i].dec_epoch))
         .collect()
@@ -1308,11 +1564,19 @@ fn footprint_catalogue(tan: &TanParams, ctx: &SearchContext) -> Result<Vec<(f64,
     }
     let limit = (ctx.params.footprint_stars_per_detection * ctx.detections.len())
         .max(ctx.params.footprint_min_stars);
-    Ok(ranked_sky(&rows, usize::MAX)
+    Ok(ranked_sky(&rows, 0, usize::MAX)
         .into_iter()
         .filter(|&(ra, dec)| sky_to_pixel(tan, ra, dec).is_some_and(|p| inside(ctx.size, p)))
+        .skip(ctx.saturated)
         .take(limit)
         .collect())
+}
+
+fn is_significant(verification: &Verification, params: &LocalSolveParams) -> bool {
+    verification.matched >= params.min_matches
+        && verification.false_alarm_log10 < params.max_false_alarm.log10()
+        && verification.corners_finite
+        && verification.scale_in_range
 }
 
 fn refine_on(
@@ -1331,7 +1595,7 @@ fn refine_on(
         gate,
     );
     for _ in 0..REFINE_PASSES {
-        if !verification.accepted {
+        if !is_significant(&verification, ctx.params) {
             break;
         }
         let Some(refined) = fit_tan(&pairs, ctx.size, tan.crval, ctx.params) else {
@@ -1347,7 +1611,7 @@ fn refine_on(
             gate,
         );
         let worse = again.rms_px > verification.rms_px && again.matched <= verification.matched;
-        if !again.accepted || worse {
+        if !is_significant(&again, ctx.params) || worse {
             break;
         }
         tan = refined.tan;
@@ -1357,16 +1621,104 @@ fn refine_on(
     (tan, verification, pairs)
 }
 
-fn model_rms_px(model: &PolyModel, pairs: &[SkyPair], tan: &TanParams, fallback: f64) -> f64 {
-    let poly_pairs: Vec<(f64, f64, f64, f64)> = pairs
-        .iter()
-        .filter_map(|p| sky_to_pixel(tan, p.ra, p.dec).map(|(tx, ty)| (p.x, p.y, tx, ty)))
-        .collect();
-    let residuals = model.residuals(&poly_pairs);
+fn model_rms_px(
+    model: &PolyModel,
+    pairs: &[SkyPair],
+    tan: &TanParams,
+    fallback: f64,
+    params: &LocalSolveParams,
+) -> f64 {
+    let residuals = model.residuals(&poly_pairs(pairs, tan));
     if residuals.is_empty() {
         fallback
     } else {
-        (residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64).sqrt()
+        clipped_rms(&residuals, params.clip_sigma)
+    }
+}
+
+struct Matched {
+    verification: Verification,
+    pairs: Vec<SkyPair>,
+}
+
+fn verify_through(
+    model: &SipModel,
+    radius: f64,
+    tan: &TanParams,
+    catalogue: &[(f64, f64)],
+    ctx: &SearchContext,
+    gate: StageGate,
+) -> Matched {
+    let predict =
+        |ra: f64, dec: f64| sky_to_pixel(tan, ra, dec).map(|(tx, ty)| model.inverse.eval(tx, ty));
+    let (verification, pairs) = verify_with(
+        &predict,
+        radius,
+        tan,
+        &ctx.detections,
+        catalogue,
+        ctx.size,
+        Some(ctx.scale_range),
+        ctx.params,
+        gate,
+    );
+    Matched {
+        verification,
+        pairs,
+    }
+}
+
+fn sip_passes(
+    tan: &TanParams,
+    first: Matched,
+    catalogue: &[(f64, f64)],
+    ctx: &SearchContext,
+    gate: StageGate,
+) -> (Matched, Option<SipSelection>) {
+    let Some(SipSelection { considered, model }) =
+        fit_sip_model(&first.pairs, tan, ctx.size, ctx.params)
+    else {
+        return (first, None);
+    };
+    let Some(first_model) = model else {
+        return (
+            first,
+            Some(SipSelection {
+                considered,
+                model: None,
+            }),
+        );
+    };
+    let base_radius = match_radius(&ctx.detections, ctx.params);
+    let long_side_px = ctx.size.0.max(ctx.size.1) as f64;
+    let max_radius = base_radius.max(SIP_PASS_MAX_RADIUS_FRACTION * long_side_px);
+    let mut radius = base_radius;
+    let mut current = first_model.clone();
+    let mut grew = false;
+    for _ in 0..SIP_PASSES {
+        radius = (radius * SIP_PASS_RADIUS_GROWTH).min(max_radius);
+        let matched = verify_through(&current, radius, tan, catalogue, ctx, gate);
+        match fit_sip_model(&matched.pairs, tan, ctx.size, ctx.params).and_then(|s| s.model) {
+            Some(model) if model.kept.len() > current.kept.len() => {
+                current = model;
+                grew = true;
+            }
+            _ => break,
+        }
+    }
+    let first_selection = SipSelection {
+        considered,
+        model: Some(first_model),
+    };
+    if !grew {
+        return (first, Some(first_selection));
+    }
+    let matched = verify_through(&current, base_radius, tan, catalogue, ctx, gate);
+    match fit_sip_model(&matched.pairs, tan, ctx.size, ctx.params) {
+        Some(selection) if matched.verification.accepted && selection.model.is_some() => {
+            (matched, Some(selection))
+        }
+        _ => (first, Some(first_selection)),
     }
 }
 
@@ -1382,7 +1734,7 @@ fn try_centre(
     if let Some(epoch) = ctx.epoch_year {
         propagate_epoch(&mut rows, epoch);
     }
-    let sky = ranked_sky(&rows, ctx.params.catalogue_stars);
+    let sky = ranked_sky(&rows, hypothesis.bright_skip, ctx.params.catalogue_stars);
     let plane: Vec<((f64, f64), (f64, f64))> = sky
         .iter()
         .filter_map(|&(ra, dec)| {
@@ -1392,7 +1744,6 @@ fn try_centre(
                 (ra, dec),
             ))
         })
-        .take(side.params.max_stars)
         .collect();
     let none = CentreOutcome {
         candidate: None,
@@ -1406,21 +1757,9 @@ fn try_centre(
         .iter()
         .map(|&((x, y), sky)| ((x.to_bits(), y.to_bits()), sky))
         .collect();
-    let (same, mirrored) = side.match_catalogue(&catalogue);
-    let fits = [&same, &mirrored].map(|m| {
-        ransac_affine(&m.pairs, AffineAlignMethod::Affine, &side.params)
-            .map(|fit| inlier_pairs(&m.pairs, &fit.transform, side.params.inlier_px))
-    });
-    let [same_inliers, mirrored_inliers] = fits;
-    let inliers = match (same_inliers, mirrored_inliers) {
-        (Some(a), Some(b)) if b.len() > a.len() => b,
-        (Some(a), _) => a,
-        (None, Some(b)) => b,
-        (None, None) => return Ok(none),
-    };
-    if inliers.len() < side.params.min_inliers {
+    let Some(inliers) = best_window_inliers(side, &catalogue) else {
         return Ok(none);
-    }
+    };
     let sky_pairs: Vec<SkyPair> = inliers
         .iter()
         .filter_map(|&(rx, ry, tx, ty)| {
@@ -1440,15 +1779,7 @@ fn try_centre(
         max_rms_px: hypothesis.stage_rms_px,
         trials: ctx.trials,
     };
-    let (coarse, _) = verify_pairs(
-        &fit.tan,
-        &ctx.detections,
-        &sky,
-        ctx.size,
-        Some(ctx.scale_range),
-        ctx.params,
-        gate,
-    );
+    let (coarse_tan, coarse, _) = refine_on(fit.tan, &sky, ctx, gate);
     let numbers = |tan: &TanParams, v: &Verification, rms_px: f64| CandidateNumbers {
         centre: tan.crval,
         matched: v.matched,
@@ -1458,29 +1789,64 @@ fn try_centre(
     };
     if !coarse.accepted {
         return Ok(CentreOutcome {
-            candidate: Some(numbers(&fit.tan, &coarse, coarse.rms_px)),
+            candidate: Some(numbers(&coarse_tan, &coarse, coarse.rms_px)),
             solved: None,
         });
     }
-    let footprint = footprint_catalogue(&fit.tan, ctx)?;
-    let (tan, verification, pairs) = refine_on(fit.tan, &footprint, ctx, gate);
+    let footprint = footprint_catalogue(&coarse_tan, ctx)?;
+    let (tan, verification, pairs) = refine_on(coarse_tan, &footprint, ctx, gate);
     if !verification.accepted {
         return Ok(CentreOutcome {
             candidate: Some(numbers(&tan, &verification, verification.rms_px)),
             solved: None,
         });
     }
+    let (matched, selection) = sip_passes(
+        &tan,
+        Matched {
+            verification,
+            pairs,
+        },
+        &footprint,
+        ctx,
+        gate,
+    );
+    let Matched {
+        verification,
+        pairs,
+    } = matched;
     let mut warnings = Vec::new();
-    let (distortion, model) = match distortion_with_model(&pairs, &tan, ctx.size, ctx.params) {
-        Ok(fitted) => fitted,
-        Err(error) => {
-            warnings.push(format!("SIP fit skipped: {error}"));
-            (plain_tan(&tan), None)
-        }
-    };
-    let rms_px = match &model {
-        Some(model) => model_rms_px(model, &pairs, &tan, verification.rms_px),
-        None => verification.rms_px,
+    let (distortion, rms_px) = match selection {
+        None => (plain_tan(&tan), verification.rms_px),
+        Some(SipSelection {
+            considered,
+            model: None,
+        }) => (
+            DistortionFit {
+                considered,
+                ..plain_tan(&tan)
+            },
+            verification.rms_px,
+        ),
+        Some(SipSelection {
+            considered,
+            model: Some(model),
+        }) => match sip_cards(&model.forward, considered, &tan, ctx.size) {
+            Ok(fit) => (
+                fit,
+                model_rms_px(
+                    &model.forward,
+                    &pairs,
+                    &tan,
+                    verification.rms_px,
+                    ctx.params,
+                ),
+            ),
+            Err(error) => {
+                warnings.push(format!("SIP fit skipped: {error}"));
+                (plain_tan(&tan), verification.rms_px)
+            }
+        },
     };
     let candidate = numbers(&tan, &verification, rms_px);
     let solved = (rms_px <= ctx.params.max_rms_px).then_some(Solved {
@@ -1607,7 +1973,8 @@ fn solve_detections(
             None,
         ));
     }
-    let selected = select_detections(detections, size, params);
+    let usable = usable_detections(detections, params);
+    let selected = spread_detections(&usable, size, params.detection_stars);
     let n_det = selected.len();
     if n_det < params.min_matches {
         return Err(failure(
@@ -1630,13 +1997,20 @@ fn solve_detections(
             None,
         ));
     }
-    let points: Vec<(f64, f64)> = selected.iter().map(|d| (d.star.x, d.star.y)).collect();
+    let disc_radius_px = params.cone_short_side_fraction * width.min(height) as f64;
+    let points = disc_points(&usable, size, disc_radius_px);
+    let saturated = dropped_saturated(detections, params);
     let mut hypotheses: Vec<Hypothesis> = nominal
         .iter()
-        .map(|&arcsec| Hypothesis::new(arcsec, &points, size, params))
+        .map(|&arcsec| Hypothesis::new(arcsec, &points, saturated, size, params))
         .collect();
     let spacings: Vec<f64> = hypotheses.iter().map(|h| h.spacing_deg).collect();
-    let requested_radius = params.near_radius_deg.clamp(0.0, MAX_NEAR_RADIUS_DEG);
+    let widest_field_deg =
+        nominal.iter().copied().fold(0.0f64, f64::max) * width.max(height) as f64 / ARCSEC_PER_DEG;
+    let requested_radius = params
+        .near_radius_deg
+        .max(params.near_radius_fields * widest_field_deg)
+        .clamp(0.0, MAX_NEAR_RADIUS_DEG);
     let plan = search_plan(
         (centre.ra, centre.dec),
         &spacings,
@@ -1655,6 +2029,7 @@ fn solve_detections(
     }
     let ctx = SearchContext {
         detections: selected,
+        saturated,
         size,
         catalog,
         params,

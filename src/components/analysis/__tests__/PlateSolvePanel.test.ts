@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createElement, isValidElement } from "react";
+import { Fragment, createElement, isValidElement } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Check } from "lucide-react";
@@ -48,6 +48,9 @@ const hooks = vi.hoisted(() => {
 const clipboardWrite = vi.hoisted(() => vi.fn<(text: string) => Promise<void>>());
 const wcsInfoMock = vi.hoisted(() => vi.fn<(path: string) => Promise<unknown>>());
 const plateSolveMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
+const solveHintsMock = vi.hoisted(() => vi.fn<(path: string) => Promise<unknown>>());
+const apiKeyMock = vi.hoisted(() => vi.fn<() => Promise<{ key: string | null }>>(() => Promise.resolve({ key: "test-key" })));
+const cancelSolveMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Promise.resolve(true)));
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -63,19 +66,21 @@ vi.mock("react", async (importOriginal) => {
 vi.mock("../../../services/astrometry", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/astrometry")>()),
   getWcsInfo: wcsInfoMock,
+  getSolveHints: solveHintsMock,
   plateSolve: plateSolveMock,
-  cancelPlateSolve: () => Promise.resolve(),
+  cancelPlateSolve: cancelSolveMock,
 }));
 vi.mock("../../../services/config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/config")>()),
-  getApiKey: () => Promise.resolve({ key: "test-key" }),
-  getConfig: () => Promise.resolve({ plate_solve_timeout_secs: 120 }),
+  getApiKey: apiKeyMock,
+  getConfig: () => Promise.resolve({ plate_solve_timeout_secs: 120, astrometry_api_url: "https://nova.astrometry.net" }),
 }));
 
 vi.stubGlobal("navigator", { clipboard: { writeText: clipboardWrite } });
 
 import PlateSolvePanel, { SolveActions, SolveCentreCards } from "../PlateSolvePanel";
 import { solveSummaryLine } from "../../../utils/coordFormat";
+import { TauriCommandError } from "../../../shared/types/errors";
 
 function inputTitled(markup: string, titleStart: string): string {
   const input = markup.match(new RegExp(`<input[^>]*title="${titleStart}[^"]*"[^>]*>`));
@@ -154,7 +159,7 @@ function renderTree(component: Component, props: Props): ReactNode {
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function unescapeHtml(text: string): string {
-  return text.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, "&");
+  return text.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 
 function textWith(markup: string, attribute: string): string {
@@ -316,6 +321,7 @@ describe("PlateSolvePanel centre blocks in the panel", () => {
     hooks.run.active = true;
     hooks.run.cells = [];
     wcsInfoMock.mockReset().mockResolvedValue(HEADER_WCS);
+    solveHintsMock.mockReset().mockRejectedValue(new Error("no solve_hints_cmd"));
     plateSolveMock.mockReset().mockResolvedValue(SOLVE_RESULT);
   });
 
@@ -369,5 +375,264 @@ describe("PlateSolvePanel cancel", () => {
     const markup = actions(false);
     expect(markup).not.toContain("Cancel");
     expect(buttonEndingWith(markup, "Plate Solve")).not.toMatch(/^<button[^>]*\sdisabled=""/);
+  });
+});
+
+const LOCAL_RESULT = {
+  ...SOLVE_RESULT,
+  orientation: null,
+  wcs_cards: [["CTYPE1", "'RA---TAN-SIP'"]],
+  solver: "local",
+  catalog: "tier0-tycho2",
+  matched: 293,
+  predicted: 410,
+  rms_px: 0.0684,
+  sip_order: 3,
+  sip_max_err_px: 0.0041,
+  hint_source: "OBJCTRA/OBJCTDEC",
+  elapsed_ms: 778,
+  parity: "normal",
+  warnings: ["SIP order 4 was not tried: the field is under 5 degrees"],
+};
+
+const NO_SOLUTION_TEXT = "No solution: the best candidate matched 14 stars with an RMS of 6.27 px";
+
+const OBJCT_HINTS = {
+  centre: { ra: 274.7, dec: -13.816667, source: "OBJCTRA/OBJCTDEC" },
+  scale: { low_arcsec: 2.1537, high_arcsec: 2.6324, source: "XPIXSZ 2.9 µm / FOCALLEN 250 mm" },
+  fov_deg: 3.6,
+  epoch_year: 2024.5,
+  cfa: null,
+  object: null,
+  expected_tier0_stars: 20.4,
+  warnings: ["XBINNING 2 read as both binnings"],
+};
+
+function markupOf(tree: ReactNode): string {
+  const wasActive = hooks.run.active;
+  hooks.run.active = false;
+  try {
+    return unescapeHtml(renderToStaticMarkup(createElement(Fragment, null, tree)));
+  } finally {
+    hooks.run.active = wasActive;
+  }
+}
+
+describe("PlateSolvePanel local-first solve (M08)", () => {
+  const panel = (PlateSolvePanel as unknown as { type: Component }).type;
+  const show = () => renderTree(panel, { filePath: "C:/data/m16.fits", solvePath: "C:/data/m16.fits" });
+  const solveActions = (tree: ReactNode) => findElement(tree, (props) => typeof props.onSolve === "function");
+  const fallbackBlock = (tree: ReactNode) => findElement(tree, (props) => typeof props.onFallback === "function");
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    wcsInfoMock.mockReset().mockRejectedValue(new Error("no celestial WCS"));
+    solveHintsMock.mockReset().mockResolvedValue(OBJCT_HINTS);
+    plateSolveMock.mockReset().mockResolvedValue(LOCAL_RESULT);
+    apiKeyMock.mockReset().mockResolvedValue({ key: "test-key" });
+    cancelSolveMock.mockClear();
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    vi.useRealTimers();
+  });
+
+  const solveOnce = async () => {
+    show();
+    await flush();
+    (solveActions(show())!.onSolve as () => void)();
+    await flush();
+    return show();
+  };
+
+  it("labels the centre fields with both accepted forms", () => {
+    const markup = unescapeHtml(renderToStaticMarkup(createElement(PlateSolvePanel, { filePath: "C:/x.fits", solvePath: "C:/x.fits" })));
+    expect(markup).toContain("Centre RA (deg or h:m:s)");
+    expect(markup).toContain("Centre Dec (deg or d:m:s)");
+  });
+
+  it("does not ask for an astrometry.net key before a local solve has failed", async () => {
+    apiKeyMock.mockResolvedValue({ key: null });
+    show();
+    await flush();
+    expect(markupOf(show())).not.toMatch(/API key/);
+  });
+
+  it("solves on this computer by default through the auto chain, which may add the online Gaia tier, and never names astrometry.net", async () => {
+    show();
+    await flush();
+    (solveActions(show())!.onSolve as () => void)();
+    await flush();
+    expect(plateSolveMock).toHaveBeenCalledTimes(1);
+    const [path, options] = plateSolveMock.mock.calls[0] as [string, Record<string, unknown>];
+    expect(path).toBe("C:/data/m16.fits");
+    expect(options).toMatchObject({ solver: "auto", centerRa: 274.7, centerDec: -13.816667 });
+  });
+
+  it("caps the offline near-search radius at 15 degrees and keeps the full radius for astrometry.net", async () => {
+    wcsInfoMock.mockResolvedValue({
+      center_ra: 90,
+      center_dec: -66,
+      pixel_scale_arcsec: 21,
+      fov_arcmin: [1440, 1440],
+      naxis1: 4096,
+      naxis2: 4096,
+    } as WcsInfo);
+    solveHintsMock.mockRejectedValue(new Error("no solve_hints_cmd"));
+    show();
+    await flush();
+    expect(markupOf(show())).toContain('value="16.9706"');
+    (solveActions(show())!.onSolve as () => void)();
+    await flush();
+    expect(plateSolveMock.mock.calls[0][1]).toMatchObject({ solver: "auto", radius: 16.9706, nearRadiusDeg: 15 });
+  });
+
+  it.each([
+    [
+      "local_missing_hint",
+      "The offline solver needs an approximate centre and none was found in the header or the panel; type it in the hint fields, or try astrometry.net, which can solve without hints",
+      "Not enough hints to solve offline",
+    ],
+    [
+      "local_no_catalogue",
+      "No offline star catalogue is available (none installed); install one in Settings > Catalogs",
+      "No offline catalogue",
+    ],
+  ])("offers astrometry.net after the backend's %s error", async (code, message, heading) => {
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", message, code, { canFallback: true, apiKeyStored: true, missing: ["centre"] }),
+    );
+    const tree = await solveOnce();
+    expect(fallbackBlock(tree), "fallback offered").not.toBeNull();
+    const markup = markupOf(tree);
+    expect(markup).toContain(heading);
+    expect(markup).toContain(message);
+    expect(markup).not.toContain("No offline solution");
+    expect(buttonEndingWith(markup, "Try astrometry.net")).not.toMatch(/^<button[^>]*\sdisabled=""/);
+  });
+
+  it("re-reads the saved key at the click, so a key saved in Settings after the failure is used", async () => {
+    apiKeyMock.mockResolvedValue({ key: null });
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", { canFallback: true, apiKeyStored: false }),
+    );
+    const failed = await solveOnce();
+    const markup = markupOf(failed);
+    expect(markup).toContain("needs an astrometry.net API key: save it in Settings, then click Try astrometry.net.");
+    expect(buttonEndingWith(markup, "Try astrometry.net")).not.toMatch(/^<button[^>]*\sdisabled=""/);
+    apiKeyMock.mockResolvedValue({ key: "saved-later" });
+    plateSolveMock.mockResolvedValueOnce(SOLVE_RESULT);
+    (fallbackBlock(failed)!.onFallback as () => void)();
+    await flush();
+    expect(plateSolveMock).toHaveBeenCalledTimes(2);
+    expect(plateSolveMock.mock.calls[1][1]).toMatchObject({ solver: "astrometry.net" });
+  });
+
+  it("uploads nothing and says why when no key is saved at the click", async () => {
+    apiKeyMock.mockResolvedValue({ key: null });
+    plateSolveMock.mockRejectedValueOnce(new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", {}));
+    const failed = await solveOnce();
+    (fallbackBlock(failed)!.onFallback as () => void)();
+    await flush();
+    expect(plateSolveMock).toHaveBeenCalledTimes(1);
+    const tree = show();
+    expect(fallbackBlock(tree)).not.toBeNull();
+    expect(markupOf(tree)).toContain("No astrometry.net API key is saved, so nothing was uploaded.");
+  });
+
+  it("takes the stored-key state from the backend's failure", async () => {
+    apiKeyMock.mockResolvedValue({ key: null });
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", { canFallback: true, apiKeyStored: true }),
+    );
+    expect(markupOf(await solveOnce())).toContain("Uploads this image to nova.astrometry.net with your API key; the solve runs there.");
+  });
+
+  it("cancels the offline solve when the panel's deadline fires, and offers astrometry.net", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    plateSolveMock.mockReturnValueOnce(new Promise(() => {}));
+    show();
+    await vi.advanceTimersByTimeAsync(0);
+    (solveActions(show())!.onSolve as () => void)();
+    await vi.advanceTimersByTimeAsync(119_000);
+    expect(cancelSolveMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(cancelSolveMock).toHaveBeenCalledTimes(1);
+    const tree = show();
+    expect(fallbackBlock(tree), "fallback offered after the deadline").not.toBeNull();
+    const markup = markupOf(tree);
+    expect(markup).toContain("The offline solve ran out of time");
+    expect(markup).toContain("The offline solve gave up after 2:00 (Settings > Timeout).");
+  });
+
+  it("fills the hints from solve_hints_cmd and names their source under the fields", async () => {
+    show();
+    await flush();
+    const markup = markupOf(show());
+    expect(solveHintsMock).toHaveBeenCalledWith("C:/data/m16.fits");
+    expect(markup).toContain("Hints: centre from OBJCTRA/OBJCTDEC; scale from XPIXSZ 2.9 µm / FOCALLEN 250 mm");
+    expect(markup).toContain('value="274.700000"');
+    expect(markup).toContain('value="2.15"');
+    expect(markup).toContain("XBINNING 2 read as both binnings");
+  });
+
+  it("shows which tier and catalogue solved it, matched/predicted, RMS, SIP order and -- for a missing orientation", async () => {
+    show();
+    await flush();
+    (solveActions(show())!.onSolve as () => void)();
+    await flush();
+    const markup = markupOf(show());
+    expect(markup).toContain("Offline solver on this computer");
+    expect(markup).toContain("Tier 0: Tycho-2 (bundled)");
+    expect(markup).toContain("293 of 410 predicted");
+    expect(markup).toContain("0.068 px");
+    expect(markup).toContain("SIP order 3 (SIPMXERR 0.0041 px)");
+    expect(markup).toMatch(/Orientation<\/div><div[^>]*>--<\/div>/);
+    expect(markup).toContain("SIP order 4 was not tried: the field is under 5 degrees");
+    expect(markup).not.toContain("Try astrometry.net");
+  });
+
+  it("shows the no-solution reason and offers astrometry.net once, saying it uploads the image", async () => {
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", {
+        best: { matched: 14, predicted: 120, rms_px: 6.27 },
+        expectedTier0Stars: 20.4,
+        centresTried: 397,
+        canFallback: true,
+      }),
+    );
+    show();
+    await flush();
+    expect(fallbackBlock(show())).toBeNull();
+    (solveActions(show())!.onSolve as () => void)();
+    await flush();
+    const failed = show();
+    const markup = markupOf(failed);
+    expect(markup).toContain(NO_SOLUTION_TEXT);
+    expect(markup).toContain("Best candidate: 14 of 120 predicted stars matched, RMS 6.27 px");
+    expect(markup).toContain("add a deeper catalogue in Settings > Catalogs, such as a Siril Gaia DR3 extract");
+    expect(markup).toContain("Uploads this image to nova.astrometry.net with your API key; the solve runs there.");
+    expect(markup).toMatch(/<button[^>]*>[\s\S]*Try astrometry\.net<\/button>/);
+    plateSolveMock.mockRejectedValueOnce(new Error("astrometry.net: job failed"));
+    (fallbackBlock(failed)!.onFallback as () => void)();
+    await flush();
+    expect(plateSolveMock).toHaveBeenCalledTimes(2);
+    expect(plateSolveMock.mock.calls[1][1]).toMatchObject({ solver: "astrometry.net" });
+    const after = show();
+    expect(fallbackBlock(after)).toBeNull();
+    expect(markupOf(after)).toContain("astrometry.net: job failed");
+  });
+
+  it("offers no fallback for an error that is not a local no-solution", async () => {
+    plateSolveMock.mockRejectedValueOnce(new Error("the image has 3 planes"));
+    show();
+    await flush();
+    (solveActions(show())!.onSolve as () => void)();
+    await flush();
+    const tree = show();
+    expect(fallbackBlock(tree)).toBeNull();
+    expect(markupOf(tree)).toContain("the image has 3 planes");
   });
 });

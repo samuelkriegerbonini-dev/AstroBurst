@@ -23,6 +23,7 @@ const CATALOGUE_PREFIXES: [(&str, &str); 6] = [
 ];
 const NUMBER_SEPARATORS: [u8; 3] = [b' ', b'_', b'-'];
 const MAX_CATALOGUE_DIGITS: usize = 4;
+const CALDWELL_SHORT_PREFIX: &str = "C";
 
 fn catalogue_number(rest: &[u8]) -> Option<u32> {
     let start = rest.iter().position(|b| !NUMBER_SEPARATORS.contains(b))?;
@@ -40,14 +41,23 @@ fn catalogue_number(rest: &[u8]) -> Option<u32> {
         .filter(|&number| number > 0)
 }
 
+fn compact_caldwell_in_free_text(prefix: &str, start: usize, rest: &[u8]) -> bool {
+    prefix == CALDWELL_SHORT_PREFIX
+        && !rest.first().is_some_and(|b| NUMBER_SEPARATORS.contains(b))
+        && !(start == 0 && rest.iter().all(u8::is_ascii_digit))
+}
+
 pub fn designation(text: &str) -> Option<String> {
-    let upper = text.to_ascii_uppercase();
+    let upper = text.trim().to_ascii_uppercase();
     let bytes = upper.as_bytes();
     (0..bytes.len())
         .filter(|&start| start == 0 || !bytes[start - 1].is_ascii_alphanumeric())
         .find_map(|start| {
             CATALOGUE_PREFIXES.iter().find_map(|(prefix, short)| {
                 let rest = bytes[start..].strip_prefix(prefix.as_bytes())?;
+                if compact_caldwell_in_free_text(prefix, start, rest) {
+                    return None;
+                }
                 catalogue_number(rest).map(|number| format!("{short} {number}"))
             })
         })
@@ -632,7 +642,11 @@ mod tests {
             ("IC 1805 Heart", "IC 1805"),
             ("IC1396A", "IC 1396"),
             ("C 20", "C 20"),
+            ("C20", "C 20"),
+            (" c20 ", "C 20"),
+            ("C_20 Veil", "C 20"),
             ("Caldwell 20", "C 20"),
+            ("Caldwell20 east", "C 20"),
             ("M31 and M110", "M 31"),
         ] {
             assert_eq!(designation(text).as_deref(), Some(expected), "{text:?}");
@@ -653,6 +667,18 @@ mod tests {
             "M 0",
             "Flat",
             "PIC 5",
+        ] {
+            assert_eq!(designation(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_compact_c_number_inside_free_text_is_not_read_as_caldwell() {
+        for text in [
+            "C1 test",
+            "C1 fov2 fov2_mid1",
+            "Light_C2_300s",
+            "cam C3 flat",
         ] {
             assert_eq!(designation(text), None, "{text:?}");
         }

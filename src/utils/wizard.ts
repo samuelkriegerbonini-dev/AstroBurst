@@ -879,19 +879,25 @@ export interface AlignChannelOutcome {
   usedMethod: string | null;
 }
 
+export const ALIGN_NO_OVERLAP_NOTE =
+  "placed through WCS, but its footprint does not overlap the reference grid, so the channel is empty after reprojection";
+
 export function alignChannelOutcome(
-  channel: { registered?: boolean; method_used?: string } | undefined,
+  channel: { registered?: boolean; method_used?: string; reprojected?: boolean } | undefined,
   requestedMethod: string,
   isReference: boolean,
 ): AlignChannelOutcome {
   if (!channel || isReference) return { unregistered: null, usedMethod: null };
   const used = channel.method_used;
+  const usedMethod = used && used !== requestedMethod ? ALIGN_METHOD_LABELS[used] ?? used : null;
+  if (channel.reprojected === true) {
+    return { unregistered: channel.registered === false ? ALIGN_NO_OVERLAP_NOTE : null, usedMethod };
+  }
   const registered = channel.registered ?? !(used && IDENTITY_ALIGN_METHODS.has(used));
   if (!registered) {
     const other = requestedMethod === "affine" ? "Phase Correlation" : "Star-based Affine";
     return { unregistered: `not registered — low-confidence match, channel left unshifted; try ${other}`, usedMethod: null };
   }
-  const usedMethod = used && used !== requestedMethod ? ALIGN_METHOD_LABELS[used] ?? used : null;
   return { unregistered: null, usedMethod };
 }
 

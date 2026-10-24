@@ -5,8 +5,11 @@ const { typedInvokeMock, withPreviewMock } = vi.hoisted(() => ({ typedInvokeMock
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, withPreview: withPreviewMock }));
 
 import {
+  LOCAL_NO_SOLUTION_CODE,
   PLATE_SOLVE_PROGRESS_EVENT,
   cancelPlateSolve,
+  getSolveHints,
+  plateSolve,
   skySeparation,
   worldToPixel,
   writeSolvedWcs,
@@ -14,7 +17,7 @@ import {
 } from "../astrometry";
 
 describe("PlateSolveResult", () => {
-  it("declares only the SolveResult fields plate_solve_cmd still serializes", () => {
+  it("declares the SolveResult fields plate_solve_cmd serializes, the local solver's with serde(default)", () => {
     expectTypeOf<keyof PlateSolveResult>().toEqualTypeOf<
       | "center_ra"
       | "center_dec"
@@ -23,8 +26,63 @@ describe("PlateSolveResult", () => {
       | "field_of_view_w_arcmin"
       | "field_of_view_h_arcmin"
       | "wcs_cards"
+      | "annotations"
+      | "solver"
+      | "tier"
+      | "catalog"
+      | "matched"
+      | "predicted"
+      | "rms_px"
+      | "sip_order"
+      | "sip_max_err_px"
+      | "hint_source"
+      | "elapsed_ms"
+      | "parity"
+      | "warnings"
     >();
     expectTypeOf<PlateSolveResult["wcs_cards"]>().toEqualTypeOf<[string, string][]>();
+    expectTypeOf<PlateSolveResult["orientation"]>().toEqualTypeOf<number | null | undefined>();
+  });
+});
+
+describe("plateSolve", () => {
+  beforeEach(() => typedInvokeMock.mockReset().mockResolvedValue({}));
+
+  it("routes to the local solver with its near-search radius when the panel asks for it", async () => {
+    await plateSolve("C:/d/light.fits", { solver: "local", centerRa: 274.7, centerDec: -13.82, radius: 2.5, nearRadiusDeg: 2.5 });
+    expect(typedInvokeMock).toHaveBeenCalledWith("plate_solve_cmd", {
+      path: "C:/d/light.fits",
+      apiKey: null,
+      scaleLower: null,
+      scaleUpper: null,
+      scaleUnits: null,
+      downsampleFactor: null,
+      centerRa: 274.7,
+      centerDec: -13.82,
+      radius: 2.5,
+      solver: "local",
+      nearRadiusDeg: 2.5,
+    });
+  });
+
+  it("leaves the solver and the near radius to the command's defaults when they are not given", async () => {
+    await plateSolve("C:/d/light.fits");
+    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ solver: null, nearRadiusDeg: null });
+  });
+
+  it("names the error code of a local no-solution", () => {
+    expect(LOCAL_NO_SOLUTION_CODE).toBe("local_no_solution");
+  });
+});
+
+describe("getSolveHints", () => {
+  beforeEach(() => typedInvokeMock.mockReset());
+
+  it("invokes solve_hints_cmd with the image path", async () => {
+    const hints = { centre: { ra: 274.7, dec: -13.8, source: "OBJCTRA/OBJCTDEC" }, scale: null, warnings: [] };
+    typedInvokeMock.mockResolvedValue(hints);
+    await expect(getSolveHints("C:/d/light.fits")).resolves.toBe(hints);
+    expect(typedInvokeMock).toHaveBeenCalledWith("solve_hints_cmd", { path: "C:/d/light.fits" });
   });
 });
 

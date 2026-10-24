@@ -2,17 +2,64 @@ name: Flatpak
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tarball_url:
+        description: URL of the astroburst-<version>-linux-x86_64.tar.gz release asset
+        required: true
+      sha256:
+        description: SHA-256 of that tarball
+        required: true
 
 jobs:
   flatpak:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
+    env:
+      MANIFEST: flatpak/io.github.samuelkriegerbonini_dev.AstroBurst.yml
     steps:
       - uses: actions/checkout@v4
+      - name: Check for the Flatpak manifest
+        id: manifest
+        run: |
+          if [ -f "$MANIFEST" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "::error::$MANIFEST is not in the repository; a dispatched run must build a Flatpak, so it fails"
+              exit 1
+            fi
+            echo "::warning::$MANIFEST is not in the repository; no Flatpak is built"
+          fi
+      - name: Point the manifest at the dispatched tarball
+        if: steps.manifest.outputs.present == 'true' && github.event_name == 'workflow_dispatch'
+        env:
+          TARBALL_URL: ${{ inputs.tarball_url }}
+          TARBALL_SHA256: ${{ inputs.sha256 }}
+        run: |
+          python3 - "$MANIFEST" <<'PY'
+          import os, re, sys
+          path = sys.argv[1]
+          url, digest = os.environ["TARBALL_URL"], os.environ["TARBALL_SHA256"]
+          if not re.fullmatch(r"https://\S+-linux-x86_64\.tar\.gz", url) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+              sys.exit("tarball_url must be an https ...-linux-x86_64.tar.gz URL and sha256 64 lowercase hex digits")
+          lines = open(path, encoding="utf-8").read().split("\n")
+          found = [i for i, line in enumerate(lines) if re.fullmatch(r"\s*url:\s*https://\S+-linux-x86_64\.tar\.gz\s*", line)]
+          if len(found) != 1 or not re.fullmatch(r"\s*sha256:\s*\S+\s*", lines[found[0] + 1]):
+              sys.exit(f"expected one tarball url line followed by its sha256 line in {path}")
+          at = found[0]
+          lines[at] = re.sub(r"https://\S+", url, lines[at])
+          lines[at + 1] = re.sub(r"(sha256:\s*)\S+", lambda m: m.group(1) + digest, lines[at + 1])
+          open(path, "w", encoding="utf-8").write("\n".join(lines))
+          PY
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        if: steps.manifest.outputs.present == 'true'
         with:
-          manifest-path: flatpak/io.github.samuelkriegerbonini_dev.AstroBurst.yml
+          manifest-path: ${{ env.MANIFEST }}
           bundle: astroburst.flatpak
       - uses: actions/upload-artifact@v4
+        if: steps.manifest.outputs.present == 'true'
         with:
           name: astroburst-flatpak
           path: astroburst.flatpak
