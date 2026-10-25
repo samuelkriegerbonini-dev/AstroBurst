@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::core::astrometry::healpix_cat::{
-    CatHeader, CatType, HealpixCatalog, MmapSource, SIRIL_ASTROMETRIC_FILE,
+    CatHeader, CatType, HealpixCatalog, MmapSource, HEADER_LEN, SIRIL_ASTROMETRIC_FILE,
 };
 #[cfg(feature = "net")]
 use crate::infra::net::download::{download, DownloadError, DownloadObserver, DownloadRequest};
@@ -25,6 +25,14 @@ use crate::infra::net::download::{download, DownloadError, DownloadObserver, Dow
 use crate::infra::net::http::{build_client, HttpProfile, RedirectRule};
 use crate::infra::net::paths;
 use crate::types::config::AppConfig;
+
+#[cfg(feature = "net")]
+mod zenodo;
+
+#[cfg(feature = "net")]
+use zenodo::fetch_zenodo_record;
+#[cfg(feature = "net")]
+pub use zenodo::{parse_sha256sum, parse_zenodo_record, ZenodoListing};
 
 pub const CATALOGS_DIR: &str = "catalogs";
 pub const INSTALL_PROGRESS_EVENT: &str = "catalog-install-progress";
@@ -51,12 +59,28 @@ pub const SIRIL_GAIA_ID: &str = "siril-gaia-astro-v1";
 pub const SIRIL_GAIA_URL: &str =
     "https://zenodo.org/records/14692304/files/siril_cat_healpix8_astro.dat.bz2";
 pub const SIRIL_GAIA_BZ2_BYTES: u64 = 1_142_276_749;
+pub const ZENODO_RECORD_ID: &str = "14692304";
+pub const ENV_ZENODO_RECORD_URL: &str = "ASTROBURST_ZENODO_RECORD_URL";
+pub const DEFAULT_ZENODO_RECORD_URL: &str = "https://zenodo.org/api/records/14692304";
+pub const SIRIL_GAIA_ARCHIVE_KEY: &str = "siril_cat_healpix8_astro.dat.bz2";
+pub const SIRIL_GAIA_ARCHIVE_SUM_KEY: &str = "siril_cat_healpix8_astro.dat.bz2.sha256sum";
+pub const SIRIL_GAIA_DECODED_SUM_KEY: &str = "uncompressed_files.sha256sum";
+pub const ASTROMETRIC_RECORD_BYTES: u64 = 16;
+pub const SIRIL_GAIA_LEVEL8_PIXELS: u64 = 12 << 16;
+pub const SIRIL_GAIA_MAX_STARS_PER_PIXEL: u64 = 127;
+pub const SIRIL_GAIA_DECODED_MAX_BYTES: u64 = HEADER_LEN as u64
+    + SIRIL_GAIA_LEVEL8_PIXELS
+        * (INDEX_ENTRY_BYTES + SIRIL_GAIA_MAX_STARS_PER_PIXEL * ASTROMETRIC_RECORD_BYTES);
+pub const GAIA_TERMS: &str = "Gaia-derived data: Gaia DR3 (ESA/Gaia/DPAC), whose terms are CC BY-NC 3.0 IGO. Your copy of AstroBurst downloads it from Zenodo with your consent and uses it on this computer only; it is never redistributed or hosted by AstroBurst. Credit Gaia DR3 (Vallenari et al. 2023, ESA/Gaia/DPAC) wherever results use it.";
 pub const VERIFIED_MARKER_SUFFIX: &str = ".sha256.ok";
 pub const DIGEST_SIDECAR_SUFFIX: &str = ".sha256";
 pub const DECODE_READ_BUFFER_BYTES: usize = 64 * 1024;
 pub const DECODE_WRITE_BUFFER_BYTES: usize = 1 << 20;
 
 const BZIP2_SUFFIX: &str = ".bz2";
+const INDEX_ENTRY_BYTES: u64 = 4;
+#[cfg(feature = "net")]
+const CONSENT_NEEDED: &str = "downloading the Siril Gaia extract from Zenodo needs your consent: review its source, size and licence in Settings > Catalogs and confirm the download there";
 #[cfg(feature = "net")]
 const DECODING_SUFFIX: &str = ".decoding";
 const ENGINE_PART_SUFFIX: &str = ".part";
@@ -92,7 +116,10 @@ const fn hex_nibble(byte: u8) -> u8 {
 
 pub const fn sha256_from_hex(text: &str) -> [u8; 32] {
     let bytes = text.as_bytes();
-    assert!(bytes.len() == 64, "a pinned sha-256 holds 64 hexadecimal digits");
+    assert!(
+        bytes.len() == 64,
+        "a pinned sha-256 holds 64 hexadecimal digits"
+    );
     let mut digest = [0u8; 32];
     let mut index = 0;
     while index < 32 {
@@ -240,7 +267,9 @@ pub struct DatasetReport {
     pub licence: &'static str,
     pub credit: &'static str,
     pub url_host: Option<String>,
+    pub zenodo_record: Option<&'static str>,
     pub folder: PathBuf,
+    pub folder_bytes: u64,
     pub free_space_bytes: Option<u64>,
 }
 
@@ -251,7 +280,69 @@ pub struct InstallOutcome {
     pub bytes: u64,
     pub resumed_from: u64,
     pub sha256_hex: String,
+    pub sha256_verified: bool,
     pub already_installed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZenodoSource {
+    pub record_url: String,
+    pub decoded_max_bytes: u64,
+}
+
+impl ZenodoSource {
+    pub fn from_env() -> Self {
+        zenodo_source(std::env::var_os(ENV_ZENODO_RECORD_URL))
+    }
+}
+
+pub fn zenodo_source(env: Option<OsString>) -> ZenodoSource {
+    let record_url = env
+        .and_then(|value| value.into_string().ok())
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| DEFAULT_ZENODO_RECORD_URL.to_owned());
+    ZenodoSource {
+        record_url,
+        decoded_max_bytes: SIRIL_GAIA_DECODED_MAX_BYTES,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ZenodoFile {
+    pub key: String,
+    pub size: u64,
+    pub checksum: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ZenodoOffer {
+    pub id: &'static str,
+    pub record_url: String,
+    pub record_page: Option<String>,
+    pub doi: Option<String>,
+    pub title: Option<String>,
+    pub record_licence: Option<String>,
+    pub gaia_terms: &'static str,
+    pub host: String,
+    pub files: Vec<ZenodoFile>,
+    pub archive_key: &'static str,
+    pub archive_url: String,
+    pub archive_bytes: u64,
+    pub archive_sha256: Option<String>,
+    pub decoded_sha256: Option<String>,
+    pub decoded_max_bytes: u64,
+    pub resume_from: u64,
+    pub need_bytes: u64,
+    pub free_space_bytes: Option<u64>,
+    pub folder: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZenodoConsent {
+    pub archive_bytes: u64,
+    pub archive_sha256: Option<String>,
+    pub licence_acknowledged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -425,7 +516,7 @@ pub fn built_in_datasets() -> Vec<DatasetSpec> {
                 level: 8,
                 whole_sky: true,
             }),
-            licence: "Siril catalogue format specification: CC BY 4.0; data: Gaia DR3, ESA/Gaia/DPAC, on the terms of Zenodo record 14692304; never bundled or hosted by AstroBurst",
+            licence: "Siril catalogue format specification: CC BY 4.0; data: Gaia DR3, ESA/Gaia/DPAC, CC BY-NC 3.0 IGO (Zenodo record 14692304 labels the extract CC BY 4.0); downloaded only with your consent, never bundled or hosted by AstroBurst",
             credit: "ESA/Gaia/DPAC; HEALPix extract published by the Siril project (Zenodo record 14692304)",
         },
     ]
@@ -708,8 +799,30 @@ impl DownloadObserver for DownloadPhase<'_> {
 struct InstallPlan {
     url: Url,
     size: u64,
-    sha256: [u8; 32],
-    decode: Option<(u64, [u8; 32])>,
+    sha256: Option<[u8; 32]>,
+    decode: Option<DecodePlan>,
+}
+
+#[cfg(feature = "net")]
+#[derive(Debug, Clone, Copy)]
+struct DecodePlan {
+    size: Option<u64>,
+    cap: u64,
+    sha256: Option<[u8; 32]>,
+}
+
+#[cfg(feature = "net")]
+impl InstallPlan {
+    fn final_bytes(&self) -> (Option<u64>, Option<[u8; 32]>) {
+        match self.decode {
+            None => (Some(self.size), self.sha256),
+            Some(decode) => (decode.size, decode.sha256),
+        }
+    }
+
+    fn checks_sha256(&self) -> bool {
+        self.sha256.is_some() || self.final_bytes().1.is_some()
+    }
 }
 
 #[cfg(feature = "net")]
@@ -745,15 +858,19 @@ fn install_plan(spec: &DatasetSpec) -> Result<InstallPlan, StoreError> {
         Compression::Bzip2 {
             decoded_size,
             decoded_sha256,
-        } => Some((
-            decoded_size.ok_or_else(|| missing("decoded size"))?,
-            decoded_sha256.ok_or_else(|| missing("decoded sha-256"))?,
-        )),
+        } => {
+            let size = decoded_size.ok_or_else(|| missing("decoded size"))?;
+            Some(DecodePlan {
+                size: Some(size),
+                cap: size,
+                sha256: Some(decoded_sha256.ok_or_else(|| missing("decoded sha-256"))?),
+            })
+        }
     };
     Ok(InstallPlan {
         url,
         size,
-        sha256,
+        sha256: Some(sha256),
         decode,
     })
 }
@@ -806,6 +923,7 @@ pub fn decode_bzip2<R: Read, W: Write>(
     out: W,
     observer: &dyn InstallObserver,
     total: Option<u64>,
+    limit: u64,
 ) -> Result<Decoded<W>, StoreError> {
     let failed = |stage: &'static str, source: io::Error| StoreError::Decode {
         id: id.to_owned(),
@@ -837,11 +955,19 @@ pub fn decode_bzip2<R: Read, W: Write>(
                 io::Error::other("the decoder reported more bytes than its buffer holds"),
             )
         })?;
+        bytes += chunk.len() as u64;
+        if bytes > limit {
+            return Err(failed(
+                "decoding",
+                io::Error::other(format!(
+                    "the archive decodes past {limit} bytes, the most this catalogue can hold"
+                )),
+            ));
+        }
         hasher.update(chunk);
         writer
             .write_all(chunk)
             .map_err(|error| failed("writing", error))?;
-        bytes += chunk.len() as u64;
         if reported.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL) {
             observer.progress(InstallStage::Decode, bytes, total);
             reported = Some(Instant::now());
@@ -863,8 +989,7 @@ struct DecodeJob {
     id: &'static str,
     source: PathBuf,
     target: PathBuf,
-    size: u64,
-    sha256: [u8; 32],
+    plan: DecodePlan,
 }
 
 #[cfg(feature = "net")]
@@ -889,21 +1014,25 @@ impl DecodeJob {
             .map_err(|error| io_error(self.id, "cannot open", &self.source, error))?;
         let target =
             File::create(temp).map_err(|error| io_error(self.id, "cannot create", temp, error))?;
-        let decoded = decode_bzip2(self.id, source, target, observer, Some(self.size))?;
-        if decoded.bytes != self.size {
+        let decoded = decode_bzip2(
+            self.id,
+            source,
+            target,
+            observer,
+            self.plan.size,
+            self.plan.cap,
+        )?;
+        if let Some(size) = self.plan.size.filter(|&size| size != decoded.bytes) {
             return Err(invalid_file(
                 self.id,
                 &self.source,
-                format!(
-                    "it decodes to {} bytes, {} expected",
-                    decoded.bytes, self.size
-                ),
+                format!("it decodes to {} bytes, {size} expected", decoded.bytes),
             ));
         }
-        if decoded.sha256 != self.sha256 {
+        if let Some(expected) = self.plan.sha256.filter(|&digest| digest != decoded.sha256) {
             return Err(StoreError::Checksum {
                 id: self.id.to_owned(),
-                expected_hex: hex(&self.sha256),
+                expected_hex: hex(&expected),
                 actual_hex: hex(&decoded.sha256),
             });
         }
@@ -1217,7 +1346,10 @@ impl CatalogStore {
                     licence: spec.licence,
                     credit: spec.credit,
                     url_host: spec.url.as_deref().and_then(url_host),
+                    zenodo_record: (cfg!(feature = "net") && spec.id == SIRIL_GAIA_ID)
+                        .then_some(ZENODO_RECORD_ID),
                     free_space_bytes: (self.free_space)(&folder).ok(),
+                    folder_bytes: dir_usage(&folder).0,
                     folder,
                 }
             })
@@ -1233,26 +1365,37 @@ impl CatalogStore {
     ) -> Result<InstallOutcome, StoreError> {
         let spec = self.spec(id)?.clone();
         let plan = install_plan(&spec)?;
+        self.run_install(spec, plan, client, observer).await
+    }
+
+    #[cfg(feature = "net")]
+    async fn run_install(
+        &self,
+        spec: DatasetSpec,
+        plan: InstallPlan,
+        client: &Client,
+        observer: Arc<dyn InstallObserver>,
+    ) -> Result<InstallOutcome, StoreError> {
         let dir = self.dataset_dir(&spec);
         let _installing = InstallGuard::take(&dir, spec.id)?;
         drop(release_mappings(spec.id, |path| path.starts_with(&dir))?);
         let installed = self.installed_path(&spec);
-        let (final_size, final_digest) = plan.decode.unwrap_or((plan.size, plan.sha256));
+        discard(spec.id, &[sibling(&installed, DECODING_SUFFIX)])?;
+        let (final_size, final_digest) = plan.final_bytes();
+        let sha256_verified = plan.checks_sha256();
         if installed.is_file() {
-            let marked = self.is_verified(&spec, &installed);
-            if marked
-                || holds_published_bytes(spec.id, &installed, final_size, final_digest).await?
+            if let Some(sha256_hex) = self
+                .installed_digest(&spec, &installed, final_size, final_digest)
+                .await?
             {
-                if !marked {
-                    self.seal(&spec, &installed, &hex(&final_digest))?;
-                }
                 let bytes = file_len(spec.id, &installed)?;
                 return Ok(InstallOutcome {
                     id: spec.id,
                     path: installed,
                     bytes,
                     resumed_from: bytes,
-                    sha256_hex: hex(&final_digest),
+                    sha256_hex,
+                    sha256_verified,
                     already_installed: true,
                 });
             }
@@ -1268,7 +1411,7 @@ impl CatalogStore {
         let dest = self.download_dest(&spec);
         let kept_download = dest != installed
             && dest.is_file()
-            && holds_published_bytes(spec.id, &dest, plan.size, plan.sha256).await?;
+            && holds_published_bytes(spec.id, &dest, Some(plan.size), plan.sha256).await?;
         if dest != installed && !kept_download {
             discard(
                 spec.id,
@@ -1276,7 +1419,7 @@ impl CatalogStore {
             )?;
         }
         let need = plan.size.saturating_sub(already_downloaded(&dest))
-            + plan.decode.map_or(0, |(size, _)| size);
+            + plan.decode.map_or(0, |decode| decode.cap);
         let available = (self.free_space)(&dir)
             .map_err(|error| io_error(spec.id, "cannot measure the free space of", &dir, error))?;
         if available < need {
@@ -1291,10 +1434,10 @@ impl CatalogStore {
             plan.size
         } else {
             let request = DownloadRequest {
-                url: plan.url,
+                url: plan.url.clone(),
                 dest: dest.clone(),
                 expected_size: Some(plan.size),
-                expected_sha256: Some(plan.sha256),
+                expected_sha256: plan.sha256,
                 expected_etag: None,
                 headers: Vec::new(),
                 max_bytes: plan.size,
@@ -1303,7 +1446,10 @@ impl CatalogStore {
             let outcome = download(client, &request, &DownloadPhase(observer.as_ref()))
                 .await
                 .map_err(|error| download_failure(spec.id, &request.url, &dest, error))?;
-            if outcome.sha256_hex.as_deref() != Some(hex(&plan.sha256).as_str()) {
+            let confirmed = plan.sha256.is_none_or(|expected| {
+                outcome.sha256_hex.as_deref() == Some(hex(&expected).as_str())
+            });
+            if !confirmed {
                 return Err(invalid_file(
                     spec.id,
                     &dest,
@@ -1313,14 +1459,16 @@ impl CatalogStore {
             outcome.resumed_from
         };
         let sha256_hex = match plan.decode {
-            None => hex(&plan.sha256),
-            Some((size, sha256)) => {
+            None => match plan.sha256 {
+                Some(expected) => hex(&expected),
+                None => hex(&hash_off_thread(spec.id, &dest).await?),
+            },
+            Some(decode) => {
                 let job = DecodeJob {
                     id: spec.id,
                     source: dest.clone(),
                     target: installed.clone(),
-                    size,
-                    sha256,
+                    plan: decode,
                 };
                 let observer = Arc::clone(&observer);
                 tokio::task::spawn_blocking(move || job.run(observer.as_ref()))
@@ -1343,8 +1491,33 @@ impl CatalogStore {
             bytes,
             resumed_from,
             sha256_hex,
+            sha256_verified,
             already_installed: false,
         })
+    }
+
+    #[cfg(feature = "net")]
+    async fn installed_digest(
+        &self,
+        spec: &DatasetSpec,
+        installed: &Path,
+        size: Option<u64>,
+        digest: Option<[u8; 32]>,
+    ) -> Result<Option<String>, StoreError> {
+        if self.is_verified(spec, installed) {
+            let marked =
+                read_json::<VerifiedMarker>(&self.marker_path(spec)).map(|marker| marker.sha256);
+            return Ok(marked.or_else(|| digest.map(|expected| hex(&expected))));
+        }
+        let Some(expected) = digest else {
+            return Ok(None);
+        };
+        if !holds_published_bytes(spec.id, installed, size, Some(expected)).await? {
+            return Ok(None);
+        }
+        let sha256_hex = hex(&expected);
+        self.seal(spec, installed, &sha256_hex)?;
+        Ok(Some(sha256_hex))
     }
 
     #[cfg(not(feature = "net"))]
@@ -1354,6 +1527,90 @@ impl CatalogStore {
         _observer: Arc<dyn InstallObserver>,
     ) -> Result<InstallOutcome, StoreError> {
         Err(refused(self.spec(id)?.id, NO_NETWORK))
+    }
+
+    #[cfg(feature = "net")]
+    pub async fn zenodo_offer(
+        &self,
+        client: &Client,
+        source: &ZenodoSource,
+    ) -> Result<ZenodoOffer, StoreError> {
+        let spec = self.spec(SIRIL_GAIA_ID)?;
+        let record = fetch_zenodo_record(spec.id, client, source).await?;
+        let folder = self.dataset_dir(spec);
+        let resume_from = already_downloaded(&self.download_dest(spec)).min(record.archive_bytes);
+        Ok(ZenodoOffer {
+            id: spec.id,
+            host: record.record_url.host_str().unwrap_or_default().to_owned(),
+            record_url: record.record_url.to_string(),
+            record_page: record.listing.page,
+            doi: record.listing.doi,
+            title: record.listing.title,
+            record_licence: record.listing.licence,
+            gaia_terms: GAIA_TERMS,
+            files: record
+                .listing
+                .files
+                .into_iter()
+                .map(|(file, _)| file)
+                .collect(),
+            archive_key: SIRIL_GAIA_ARCHIVE_KEY,
+            archive_url: record.archive_url.to_string(),
+            archive_bytes: record.archive_bytes,
+            archive_sha256: record.archive_sha256.map(|digest| hex(&digest)),
+            decoded_sha256: record.decoded_sha256.map(|digest| hex(&digest)),
+            decoded_max_bytes: source.decoded_max_bytes,
+            resume_from,
+            need_bytes: record.archive_bytes - resume_from + source.decoded_max_bytes,
+            free_space_bytes: (self.free_space)(&folder).ok(),
+            folder,
+        })
+    }
+
+    #[cfg(not(feature = "net"))]
+    pub async fn zenodo_offer(&self) -> Result<ZenodoOffer, StoreError> {
+        Err(refused(self.spec(SIRIL_GAIA_ID)?.id, NO_NETWORK))
+    }
+
+    #[cfg(feature = "net")]
+    pub async fn install_siril_from_zenodo(
+        &self,
+        client: &Client,
+        source: &ZenodoSource,
+        consent: Option<&ZenodoConsent>,
+        observer: Arc<dyn InstallObserver>,
+    ) -> Result<InstallOutcome, StoreError> {
+        let base = self.spec(SIRIL_GAIA_ID)?.clone();
+        let consent = consent
+            .filter(|consent| consent.licence_acknowledged)
+            .ok_or_else(|| refused(base.id, CONSENT_NEEDED))?;
+        let record = fetch_zenodo_record(base.id, client, source).await?;
+        record.check_consent(base.id, consent)?;
+        let plan = InstallPlan {
+            url: record.archive_url.clone(),
+            size: record.archive_bytes,
+            sha256: record.archive_sha256,
+            decode: Some(DecodePlan {
+                size: None,
+                cap: source.decoded_max_bytes,
+                sha256: record.decoded_sha256,
+            }),
+        };
+        let spec = DatasetSpec {
+            compressed: Compression::Bzip2 {
+                decoded_size: None,
+                decoded_sha256: record.decoded_sha256,
+            },
+            ..base
+        };
+        self.run_install(spec, plan, client, observer).await
+    }
+
+    pub fn use_downloaded_siril(&self, config: &mut AppConfig) -> Result<PathBuf, StoreError> {
+        let spec = self.spec(SIRIL_GAIA_ID)?;
+        let file = self.use_siril_dir(&self.dataset_dir(spec), config)?;
+        config.external_catalogs.remove(spec.id);
+        Ok(file)
     }
 
     #[cfg(feature = "net")]
@@ -1485,22 +1742,38 @@ impl CatalogStore {
         let dir = self.dataset_dir(spec);
         let _installing = InstallGuard::take(&dir, spec.id)?;
         let external = self.external_path(spec, config);
+        let keeps_folder = external
+            .as_deref()
+            .is_some_and(|path| !path.starts_with(&dir));
         let open = release_mappings(spec.id, |path| {
-            path.starts_with(&dir) || external.as_deref() == Some(path)
+            (!keeps_folder && path.starts_with(&dir)) || external.as_deref() == Some(path)
         })?;
-        let (freed_bytes, _) = dir_usage(&dir);
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(spec.id, "cannot delete", &dir, error)),
-        }
+        let freed_bytes = if keeps_folder {
+            0
+        } else {
+            let (bytes, _) = dir_usage(&dir);
+            match fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(spec.id, "cannot delete", &dir, error)),
+            }
+            bytes
+        };
         drop(open);
-        let forgot_file = config.external_catalogs.remove(spec.id).is_some();
-        let forgot_folder = spec.id == SIRIL_GAIA_ID && config.siril_catalog_dir.take().is_some();
+        let outside = |choice: &str| !Path::new(choice).starts_with(&dir);
+        let forgets = |choice: &String| !keeps_folder || outside(choice);
+        let mut forgotten = Vec::new();
+        if let Some(choice) = config.external_catalogs.get(spec.id).filter(|c| forgets(c)) {
+            forgotten.push(choice.clone());
+            config.external_catalogs.remove(spec.id);
+        }
+        if spec.id == SIRIL_GAIA_ID {
+            forgotten.extend(config.siril_catalog_dir.take_if(|choice| forgets(choice)));
+        }
         Ok(Removed {
             id: spec.id,
             freed_bytes,
-            forgot_external: forgot_file || forgot_folder,
+            forgot_external: forgotten.iter().any(|choice| outside(choice)),
         })
     }
 }
@@ -1544,29 +1817,21 @@ fn download_failure(id: &str, url: &Url, dest: &Path, error: DownloadError) -> S
 async fn holds_published_bytes(
     id: &'static str,
     path: &Path,
-    size: u64,
-    sha256: [u8; 32],
+    size: Option<u64>,
+    sha256: Option<[u8; 32]>,
 ) -> Result<bool, StoreError> {
     let len = file_len(id, path)?;
-    if len != size {
+    if let Some(size) = size.filter(|&size| size != len) {
         log::warn!(
             "{id}: {} holds {len} bytes where {size} are published; it is downloaded again",
             path.display()
         );
         return Ok(false);
     }
-    let hashed = path.to_path_buf();
-    let actual = tokio::task::spawn_blocking(move || hash_file(&hashed))
-        .await
-        .map_err(|error| {
-            io_error(
-                id,
-                "the hash task failed for",
-                path,
-                io::Error::other(error),
-            )
-        })?
-        .map_err(|error| io_error(id, "cannot read", path, error))?;
+    let Some(sha256) = sha256 else {
+        return Ok(true);
+    };
+    let actual = hash_off_thread(id, path).await?;
     if actual != sha256 {
         log::warn!(
             "{id}: {} failed its sha-256 check (expected {}, found {}); it is downloaded again",
@@ -1678,6 +1943,22 @@ fn parse_digest(text: &str) -> Option<[u8; 32]> {
         *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
     }
     Some(digest)
+}
+
+#[cfg(feature = "net")]
+async fn hash_off_thread(id: &'static str, path: &Path) -> Result<[u8; 32], StoreError> {
+    let hashed = path.to_path_buf();
+    tokio::task::spawn_blocking(move || hash_file(&hashed))
+        .await
+        .map_err(|error| {
+            io_error(
+                id,
+                "the hash task failed for",
+                path,
+                io::Error::other(error),
+            )
+        })?
+        .map_err(|error| io_error(id, "cannot read", path, error))
 }
 
 fn hex(bytes: &[u8]) -> String {

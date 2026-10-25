@@ -19,7 +19,7 @@ use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFra
 use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
 use crate::core::astrometry::local_solve::{
     solve_local, CatalogProvider, CatalogTier, FailureReason, FieldSize, ImageParity, LocalSolution,
-    LocalSolveParams, SolveFailure, TierChain, MAX_NEAR_RADIUS_DEG, TIER0_MEAN_STARS_PER_DEG2,
+    LocalSolveParams, RankingKey, SolveFailure, TierChain, MAX_NEAR_RADIUS_DEG, TIER0_MEAN_STARS_PER_DEG2,
 };
 use crate::core::astrometry::plate_solve::{
     orientation_east_of_north_deg, parity_name, SolveConfig, SolveResult, SOLVER_ASTROMETRY_NET, SOLVER_LOCAL,
@@ -51,12 +51,16 @@ use crate::types::constants::{
 use crate::types::config::AppConfig;
 use crate::types::header::HduHeader;
 
+pub(crate) mod gaia_refine;
+
 const MAX_UPLOAD_DIM: usize = 2048;
 const MAX_SKY_POINTS: usize = 20_000;
 const MAX_LATITUDE_DEG: f64 = 90.0;
 const PARITY_NORMAL: &str = "normal";
 const PARITY_FLIPPED: &str = "flipped";
 const ABPROC_PLATE_SOLVED: &str = "platesolved";
+const RADESYS_KEY: &str = "RADESYS";
+const DEPRECATED_RADESYS_KEY: &str = "RADECSYS";
 const PLATE_SOLVE_PROGRESS_EVENT: &str = "plate-solve-progress";
 
 fn load_header_and_wcs(path: &str) -> anyhow::Result<(crate::types::header::HduHeader, WcsTransform)> {
@@ -295,6 +299,7 @@ struct StoreProvider {
     lease: CatalogLease,
     label: &'static str,
     depth_mag: f64,
+    ranking: RankingKey,
 }
 
 impl CatalogProvider for StoreProvider {
@@ -317,6 +322,10 @@ impl CatalogProvider for StoreProvider {
 
     fn depth_mag(&self) -> f64 {
         self.depth_mag
+    }
+
+    fn ranking_key(&self) -> RankingKey {
+        self.ranking
     }
 }
 
@@ -753,6 +762,7 @@ struct OfflineTier {
     id: &'static str,
     label: &'static str,
     depth_mag: f64,
+    ranking: RankingKey,
 }
 
 const OFFLINE_TIERS: [OfflineTier; 3] = [
@@ -761,18 +771,21 @@ const OFFLINE_TIERS: [OfflineTier; 3] = [
         id: TYCHO2_ID,
         label: TIER0_LABEL,
         depth_mag: TIER0_DEPTH_MAG,
+        ranking: RankingKey::MAGNITUDE,
     },
     OfflineTier {
         tier: CatalogTier::Tier1,
         id: SIRIL_GAIA_ID,
         label: TIER1_SIRIL_LABEL,
         depth_mag: TIER1_SIRIL_DEPTH_MAG,
+        ranking: RankingKey::MAGNITUDE,
     },
     OfflineTier {
         tier: CatalogTier::Tier1,
         id: TWOMASS_ID,
         label: TIER1_2MASS_LABEL,
         depth_mag: TIER1_2MASS_DEPTH_MAG,
+        ranking: RankingKey::TWO_MASS_J_KS,
     },
 ];
 
@@ -800,6 +813,7 @@ pub(crate) fn offline_tiers(store: &CatalogStore, config: &AppConfig) -> TierSet
                     lease,
                     label: offline.label,
                     depth_mag: offline.depth_mag,
+                    ranking: offline.ranking,
                 }),
             ),
             Err(error) => set.notes.push(format!("{}: skipped, {error}", offline.label)),
@@ -897,6 +911,7 @@ fn no_solution_error(
                 "predicted": best.predicted,
                 "rmsPx": best.rms_px,
                 "falseAlarmLog10": best.false_alarm_log10,
+                "coverageLog10": best.coverage_log10,
             })
         }),
     );
@@ -1219,12 +1234,23 @@ fn rescale_wcs_cards_to_original(
     header.cards
 }
 
+#[cfg(test)]
 pub(crate) fn write_solved_wcs(
     path: &str,
     wcs_cards: &[(String, String)],
     output_dir: &str,
 ) -> anyhow::Result<serde_json::Value> {
+    write_wcs_copy(path, wcs_cards, output_dir, None)
+}
+
+pub(crate) fn write_wcs_copy(
+    path: &str,
+    wcs_cards: &[(String, String)],
+    output_dir: &str,
+    gaia_history: Option<&[String]>,
+) -> anyhow::Result<serde_json::Value> {
     let started = std::time::Instant::now();
+    let gaia_history = gaia_history.filter(|lines| !lines.is_empty());
     let name = output_stem(path);
     let source_header = cached_header(path)?;
     let planes = source_header.get_i64("NAXIS3").unwrap_or(1);
@@ -1235,13 +1261,20 @@ pub(crate) fn write_solved_wcs(
     let entry = load_cached_full(path)?;
     let source = entry.header().cloned().unwrap_or_else(HduHeader::empty);
     let mut merged = filter_header(&source, false, true).unwrap_or_else(HduHeader::empty);
+    if wcs_cards.iter().any(|(key, _)| key.trim() == RADESYS_KEY) {
+        merged.remove(DEPRECATED_RADESYS_KEY);
+    }
     for (key, value) in wcs_cards {
         let key = key.trim();
         if is_wcs_card(key) {
             merged.set(key, value.clone());
         }
     }
-    let header = derived_output_header(Some(&merged), ABPROC_PLATE_SOLVED, OutputValues::Linear);
+    let abproc = if gaia_history.is_some() { gaia_refine::ABPROC_GAIA_TIED } else { ABPROC_PLATE_SOLVED };
+    let mut header = derived_output_header(Some(&merged), abproc, OutputValues::Linear);
+    for line in gaia_refine::history_cards(gaia_history.unwrap_or_default()) {
+        header.cards.push(("HISTORY".to_string(), line));
+    }
 
     let (rows, cols) = entry.arr().dim();
     let mut probe = header.clone();
@@ -1278,8 +1311,9 @@ pub async fn write_solved_wcs_cmd(
     path: String,
     wcs_cards: Vec<(String, String)>,
     output_dir: String,
+    gaia_history: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
-    blocking_cmd!(write_solved_wcs(&path, &wcs_cards, &output_dir))
+    blocking_cmd!(write_wcs_copy(&path, &wcs_cards, &output_dir, gaia_history.as_deref()))
 }
 
 fn image_dims(header: &crate::types::header::HduHeader) -> (usize, usize) {

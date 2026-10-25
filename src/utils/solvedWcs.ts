@@ -1,4 +1,6 @@
-import type { WriteSolvedWcsResult } from "../shared/types/astrometry";
+import type { WcsCard, WriteSolvedWcsResult } from "../shared/types/astrometry";
+import type { GaiaRefineDecision, GaiaRefineResult } from "../services/astrometry";
+import type { SolveField } from "./plateSolveResult";
 import { effectiveBinFiles, spccInputs, type WizardState } from "./wizard";
 import { normalizeOutputPath } from "./processingChain";
 
@@ -32,6 +34,155 @@ export function solvedWcsSummary(result: WriteSolvedWcsResult): string {
   return `Wrote ${baseName(result.fits_path)}: centre ${centre}, ${scale}${result.sip_present ? ", SIP" : ""}`;
 }
 
+export const GAIA_REFINE_CONSENT =
+  "Refine with Gaia DR3 sends the field centre and radius to VizieR (CDS) and downloads the Gaia DR3 star list of this field; the image stays on this computer. Gaia DR3 data: ESA/Gaia/DPAC, CC BY-NC 3.0 IGO.";
+export const NO_WCS_TO_REFINE = "Plate solve the image first, or open an image whose header has a celestial WCS.";
+const EPOCH_ERROR = "Epoch: type a decimal year between 1900 and 2100, or leave it empty to use the header date";
+const MIN_EPOCH_YEAR = 1900;
+const MAX_EPOCH_YEAR = 2100;
+const ARCSEC_PER_DEG = 3600;
+const ASSUMED_EPOCH_UNCERTAINTY_YR = 10;
+
+const REFINE_HEADINGS: Readonly<Record<GaiaRefineDecision, string>> = {
+  applied: "Refined with Gaia DR3",
+  no_significant_correction: "No significant correction",
+  refused: "Not refined",
+};
+
+const REFINED_WCS_NAMES: Readonly<Record<string, string>> = {
+  solve: "Plate solve",
+  header: "Header WCS",
+  gwcs: "gWCS (JWST distortion model)",
+};
+
+const REFINE_MODEL_NAMES: Readonly<Record<string, string>> = {
+  shift: "Shift",
+  rshift: "Shift + rotation",
+  rscale: "Shift + rotation + scale",
+  general: "General linear",
+};
+
+function finiteOrNull(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function signed(value: number, digits: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+export function gaiaRefineBlocker(hasWcs: boolean): string | null {
+  return hasWcs ? null : NO_WCS_TO_REFINE;
+}
+
+export interface RefineSource {
+  solveCards: readonly WcsCard[];
+  solvedPath: string | null;
+  path: string;
+  fileWcsKind: string | null | undefined;
+}
+
+export function refineSolveCards({ solveCards, solvedPath, path, fileWcsKind }: RefineSource): readonly WcsCard[] | null {
+  if (solveCards.length === 0 || solvedPath === null || fileWcsKind === "gwcs") return null;
+  return normalizeOutputPath(solvedPath) === normalizeOutputPath(path) ? solveCards : null;
+}
+
+export function appliedRefinement(result: GaiaRefineResult | null): GaiaRefineResult | null {
+  return result !== null && result.decision === "applied" && result.wcs_cards.length > 0 ? result : null;
+}
+
+export function gaiaRefineHeading(result: GaiaRefineResult): string {
+  return REFINE_HEADINGS[result.decision] ?? result.decision;
+}
+
+function rmsText(result: GaiaRefineResult): string | null {
+  const holdoutBefore = finiteOrNull(result.holdout_rms_before_mas);
+  const holdoutAfter = finiteOrNull(result.holdout_rms_after_mas);
+  if (holdoutBefore !== null && holdoutAfter !== null) {
+    return `${holdoutBefore.toFixed(1)} mas before, ${holdoutAfter.toFixed(1)} mas after (hold-out)`;
+  }
+  const before = finiteOrNull(result.rms_before_mas);
+  const after = finiteOrNull(result.rms_after_mas);
+  if (before === null && after === null) return null;
+  const parts = [before === null ? null : `${before.toFixed(1)} mas before`, after === null ? null : `${after.toFixed(1)} mas after`];
+  return parts.filter((p): p is string => p !== null).join(", ");
+}
+
+function shiftText(result: GaiaRefineResult): string | null {
+  const east = finiteOrNull(result.shift_east_mas);
+  const north = finiteOrNull(result.shift_north_mas);
+  if (east === null || north === null) return null;
+  const errEast = finiteOrNull(result.shift_err_east_mas);
+  const errNorth = finiteOrNull(result.shift_err_north_mas);
+  const sigma = errEast !== null && errNorth !== null ? ` (1σ ${errEast.toFixed(1)}, ${errNorth.toFixed(1)})` : "";
+  return `${signed(east, 1)} mas E, ${signed(north, 1)} mas N${sigma}`;
+}
+
+function rotationText(result: GaiaRefineResult): string | null {
+  const rotation = finiteOrNull(result.rotation_deg);
+  if (rotation === null) return null;
+  const err = finiteOrNull(result.rotation_err_deg);
+  const sigma = err === null ? "" : ` (1σ ${err.toFixed(5)}°)`;
+  return `${signed(rotation, 5)}° (${signed(rotation * ARCSEC_PER_DEG, 2)}")${sigma}`;
+}
+
+function scaleText(result: GaiaRefineResult): string | null {
+  const ppm = finiteOrNull(result.scale_ppm);
+  if (ppm === null) return null;
+  const err = finiteOrNull(result.scale_err_ppm);
+  return `${signed(ppm, 1)} ppm${err === null ? "" : ` (1σ ${err.toFixed(1)})`}`;
+}
+
+function epochText(result: GaiaRefineResult): string {
+  const year = finiteOrNull(result.epoch_year);
+  if (year === null || result.epoch_source === "none") return "J2016.0 (no date in the header)";
+  return `${year.toFixed(3)} (${result.epoch_source})`;
+}
+
+function modelText(model: string | null | undefined): string | null {
+  if (!model) return null;
+  const name = REFINE_MODEL_NAMES[model];
+  return name ? `${name} (${model})` : model;
+}
+
+export function gaiaRefineFields(result: GaiaRefineResult): SolveField[] {
+  const entries: (SolveField | null)[] = [
+    {
+      key: "refine-matched",
+      label: "Matched",
+      value: `${result.n_used} used of ${result.n_matched} matched (${result.n_catalog} Gaia DR3 stars)`,
+    },
+    ((value) => (value ? { key: "refine-rms", label: "RMS", value } : null))(rmsText(result)),
+    ((value) => (value ? { key: "refine-shift", label: "Shift", value } : null))(shiftText(result)),
+    ((value) => (value ? { key: "refine-rotation", label: "Rotation", value } : null))(rotationText(result)),
+    ((value) => (value ? { key: "refine-scale", label: "Scale", value } : null))(scaleText(result)),
+    ((value) => (value ? { key: "refine-model", label: "Model", value } : null))(modelText(result.model)),
+    { key: "refine-epoch", label: "Epoch", value: epochText(result) },
+    ((term) =>
+      term === null ? null : { key: "refine-epoch-term", label: "Epoch term", value: `${term.toFixed(1)} mas for an epoch uncertain by ${ASSUMED_EPOCH_UNCERTAINTY_YR} yr` })(
+      finiteOrNull(result.epoch_systematic_mas),
+    ),
+    ((name) => (name ? { key: "refine-wcs", label: "Refined WCS", value: name } : null))(
+      result.wcs_kind ? (REFINED_WCS_NAMES[result.wcs_kind] ?? result.wcs_kind) : null,
+    ),
+    result.representation ? { key: "refine-representation", label: "WCS update", value: result.representation } : null,
+    { key: "refine-catalog", label: "Catalogue", value: `${result.catalog} (${result.catalog_source})` },
+  ];
+  return entries.filter((entry): entry is SolveField => entry !== null);
+}
+
+export interface EpochYearInput {
+  value: number | null;
+  error: string | null;
+}
+
+export function parseEpochYear(text: string): EpochYearInput {
+  const trimmed = text.trim();
+  if (trimmed === "") return { value: null, error: null };
+  const value = Number(trimmed.replace(",", "."));
+  if (!Number.isFinite(value) || value < MIN_EPOCH_YEAR || value > MAX_EPOCH_YEAR) return { value: null, error: EPOCH_ERROR };
+  return { value, error: null };
+}
+
 export interface SolveIdentity {
   regionKey: string | null;
   solvePath: string | null;
@@ -43,12 +194,28 @@ export function shouldResetSolve(prev: SolveIdentity, next: SolveIdentity, writt
 
 const solvedWcsByInput = new Map<string, string>();
 const solvedWcsListeners = new Set<() => void>();
+const wcsRevisions = new Map<string, number>();
 let solvedWcsWrites = 0;
+
+function notifySolvedWcs(): void {
+  for (const listener of solvedWcsListeners) listener();
+}
+
+function advanceWcsRevision(path: string): void {
+  const key = normalizeOutputPath(path);
+  wcsRevisions.set(key, (wcsRevisions.get(key) ?? 0) + 1);
+}
+
+export function wcsRevision(path: string | null): number {
+  return path === null ? 0 : (wcsRevisions.get(normalizeOutputPath(path)) ?? 0);
+}
 
 export function rememberSolvedWcs(inputPath: string, fitsPath: string): void {
   solvedWcsByInput.set(normalizeOutputPath(inputPath), fitsPath);
   solvedWcsWrites += 1;
-  for (const listener of solvedWcsListeners) listener();
+  advanceWcsRevision(inputPath);
+  advanceWcsRevision(fitsPath);
+  notifySolvedWcs();
 }
 
 export function solvedWcsFor(gridPath: string): string | null {

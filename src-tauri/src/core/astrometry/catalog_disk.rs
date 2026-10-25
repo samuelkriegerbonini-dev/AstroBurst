@@ -11,6 +11,8 @@ pub const ENV_CACHE_DIR: &str = "ASTROBURST_CATALOG_CACHE_DIR";
 
 const CACHE_FILE_VERSION: u32 = 1;
 const FILE_PREFIX: &str = "gaia-dr3_";
+const TIE_FILE_VERSION: u32 = 1;
+const TIE_FILE_PREFIX: &str = "gaia-dr3_tie_";
 const FILE_EXTENSION: &str = "json";
 const TEMP_EXTENSION: &str = "json.tmp";
 const MAG_NONE: &str = "none";
@@ -23,6 +25,14 @@ struct DiskFile {
     fetched_unix_s: u64,
     query: ConeQuery,
     rows: Vec<CatalogRow>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TieDiskFile {
+    version: u32,
+    fetched_unix_s: u64,
+    query: ConeQuery,
+    tsv: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -73,17 +83,25 @@ fn key_part(value: i64) -> String {
     }
 }
 
-pub fn file_name(key: &CatalogCacheKey) -> String {
+fn cone_file_name(prefix: &str, key: &CatalogCacheKey) -> String {
     let (ra, dec, radius, mag, rows) = key;
     let mag = mag.map_or_else(|| MAG_NONE.to_string(), key_part);
     format!(
-        "{FILE_PREFIX}{}_{}_{}_{}_{}.{FILE_EXTENSION}",
+        "{prefix}{}_{}_{}_{}_{}.{FILE_EXTENSION}",
         key_part(*ra),
         key_part(*dec),
         key_part(*radius),
         mag,
         rows
     )
+}
+
+pub fn file_name(key: &CatalogCacheKey) -> String {
+    cone_file_name(FILE_PREFIX, key)
+}
+
+pub fn tie_file_name(key: &CatalogCacheKey) -> String {
+    cone_file_name(TIE_FILE_PREFIX, key)
 }
 
 fn remove_unreadable(path: &Path, reason: &str) {
@@ -93,36 +111,42 @@ fn remove_unreadable(path: &Path, reason: &str) {
     }
 }
 
-pub fn load(dir: &Path, key: &CatalogCacheKey) -> Option<DiskEntry> {
-    let path = dir.join(file_name(key));
-    let bytes = fs::read(&path).ok()?;
-    match serde_json::from_slice::<DiskFile>(&bytes) {
-        Ok(file) if file.version == CACHE_FILE_VERSION => Some(DiskEntry {
-            fetched_unix_s: file.fetched_unix_s,
-            rows: file.rows,
-        }),
-        Ok(file) => {
-            remove_unreadable(&path, &format!("version {}", file.version));
-            None
-        }
-        Err(e) => {
-            remove_unreadable(&path, &e.to_string());
-            None
-        }
+fn read_entry<R>(path: &Path, decode: impl FnOnce(&[u8]) -> Result<R, String>) -> Option<R> {
+    let bytes = fs::read(path).ok()?;
+    decode(&bytes).map_err(|reason| remove_unreadable(path, &reason)).ok()
+}
+
+fn checked_version(found: u32, expected: u32) -> Result<(), String> {
+    if found == expected {
+        Ok(())
+    } else {
+        Err(format!("version {found}"))
     }
 }
 
-pub fn store(dir: &Path, key: &CatalogCacheKey, query: &ConeQuery, rows: &[CatalogRow], now_unix_s: u64) -> std::io::Result<()> {
+pub fn load(dir: &Path, key: &CatalogCacheKey) -> Option<DiskEntry> {
+    read_entry(&dir.join(file_name(key)), |bytes| {
+        let file = serde_json::from_slice::<DiskFile>(bytes).map_err(|e| e.to_string())?;
+        checked_version(file.version, CACHE_FILE_VERSION)?;
+        Ok(DiskEntry {
+            fetched_unix_s: file.fetched_unix_s,
+            rows: file.rows,
+        })
+    })
+}
+
+pub fn load_tie<R>(dir: &Path, key: &CatalogCacheKey, parse: impl FnOnce(&str) -> Result<R, String>) -> Option<R> {
+    read_entry(&dir.join(tie_file_name(key)), |bytes| {
+        let file = serde_json::from_slice::<TieDiskFile>(bytes).map_err(|e| e.to_string())?;
+        checked_version(file.version, TIE_FILE_VERSION)?;
+        parse(&file.tsv)
+    })
+}
+
+fn write_entry(dir: &Path, name: &str, content: &[u8]) -> std::io::Result<()> {
     fs::create_dir_all(dir)?;
-    let path = dir.join(file_name(key));
+    let path = dir.join(name);
     let temp = path.with_extension(TEMP_EXTENSION);
-    let file = DiskFile {
-        version: CACHE_FILE_VERSION,
-        fetched_unix_s: now_unix_s,
-        query: query.clone(),
-        rows: rows.to_vec(),
-    };
-    let content = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
     if let Err(e) = fs::write(&temp, content).and_then(|()| fs::rename(&temp, &path)) {
         let _ = fs::remove_file(&temp);
         return Err(e);
@@ -132,6 +156,26 @@ pub fn store(dir: &Path, key: &CatalogCacheKey, query: &ConeQuery, rows: &[Catal
         log::warn!("catalog cache: eviction in {} stopped ({})", dir.display(), e);
     }
     Ok(())
+}
+
+pub fn store(dir: &Path, key: &CatalogCacheKey, query: &ConeQuery, rows: &[CatalogRow], now_unix_s: u64) -> std::io::Result<()> {
+    let file = DiskFile {
+        version: CACHE_FILE_VERSION,
+        fetched_unix_s: now_unix_s,
+        query: query.clone(),
+        rows: rows.to_vec(),
+    };
+    write_entry(dir, &file_name(key), &serde_json::to_vec(&file).map_err(std::io::Error::other)?)
+}
+
+pub fn store_tie(dir: &Path, key: &CatalogCacheKey, query: &ConeQuery, tsv: &str, now_unix_s: u64) -> std::io::Result<()> {
+    let file = TieDiskFile {
+        version: TIE_FILE_VERSION,
+        fetched_unix_s: now_unix_s,
+        query: query.clone(),
+        tsv: tsv.to_string(),
+    };
+    write_entry(dir, &tie_file_name(key), &serde_json::to_vec(&file).map_err(std::io::Error::other)?)
 }
 
 type EvictionCandidate = (PathBuf, u64, Option<std::time::SystemTime>);
@@ -363,6 +407,54 @@ mod tests {
         assert!(!other_path.exists(), "a foreign version is a miss and is deleted");
 
         assert!(load(dir.path(), &catalog_cache_key(&query(214.0, 44.0))).is_none(), "an absent file is a plain miss");
+    }
+
+    #[test]
+    fn a_tie_cone_round_trips_through_a_temp_file_under_its_own_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = query(210.0, -20.5);
+        let key = catalog_cache_key(&q);
+        assert_eq!(tie_file_name(&key), "gaia-dr3_tie_2100000_m205000_500_1700_500.json");
+
+        store_tie(dir.path(), &key, &q, "#\nSource\tRA_ICRS\n", 1_700_000_000).unwrap();
+
+        let path = dir.path().join(tie_file_name(&key));
+        assert!(path.is_file(), "{}", path.display());
+        assert!(!path.with_extension(TEMP_EXTENSION).exists(), "the temp file was renamed away");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\":1") && text.contains("\"fetched_unix_s\":1700000000"), "{text}");
+        assert_eq!(load_tie(dir.path(), &key, |tsv| Ok(tsv.to_string())), Some("#\nSource\tRA_ICRS\n".to_string()));
+        assert!(load(dir.path(), &key).is_none(), "the tie cone and the photometric cone never share a file");
+    }
+
+    #[test]
+    fn a_tie_cone_the_caller_cannot_parse_is_a_miss_and_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = query(212.0, 30.0);
+        let key = catalog_cache_key(&q);
+        store_tie(dir.path(), &key, &q, "not a VizieR body", 1).unwrap();
+
+        assert_eq!(load_tie(dir.path(), &key, |_| Err::<(), _>("no column line".to_string())), None);
+
+        assert!(!dir.path().join(tie_file_name(&key)).exists(), "the unparseable cone is deleted");
+        let truncated = dir.path().join(tie_file_name(&key));
+        fs::write(&truncated, br#"{"version":1,"fetched_unix_s":1,"query":{"ra":212.0"#).unwrap();
+        assert_eq!(load_tie(dir.path(), &key, |tsv| Ok(tsv.to_string())), None);
+        assert!(!truncated.exists(), "a truncated file is a miss and is deleted");
+    }
+
+    #[test]
+    fn a_failed_tie_rename_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = query(218.0, 61.0);
+        let key = catalog_cache_key(&q);
+        let path = dir.path().join(tie_file_name(&key));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), b"").unwrap();
+
+        store_tie(dir.path(), &key, &q, "body", 1).expect_err("a file cannot replace a non-empty directory");
+
+        assert!(!path.with_extension(TEMP_EXTENSION).exists(), "the temp file is removed after a failed rename");
     }
 
     #[test]

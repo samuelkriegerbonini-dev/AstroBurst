@@ -51,6 +51,8 @@ const plateSolveMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<un
 const solveHintsMock = vi.hoisted(() => vi.fn<(path: string) => Promise<unknown>>());
 const apiKeyMock = vi.hoisted(() => vi.fn<() => Promise<{ key: string | null }>>(() => Promise.resolve({ key: "test-key" })));
 const cancelSolveMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Promise.resolve(true)));
+const refineMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
+const writeWcsMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -69,6 +71,8 @@ vi.mock("../../../services/astrometry", async (importOriginal) => ({
   getSolveHints: solveHintsMock,
   plateSolve: plateSolveMock,
   cancelPlateSolve: cancelSolveMock,
+  refineWithGaia: refineMock,
+  writeSolvedWcs: writeWcsMock,
 }));
 vi.mock("../../../services/config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/config")>()),
@@ -78,7 +82,8 @@ vi.mock("../../../services/config", async (importOriginal) => ({
 
 vi.stubGlobal("navigator", { clipboard: { writeText: clipboardWrite } });
 
-import PlateSolvePanel, { SolveActions, SolveCentreCards } from "../PlateSolvePanel";
+import PlateSolvePanel, { GaiaRefineBlock, SolveActions, SolveCentreCards } from "../PlateSolvePanel";
+import { GAIA_REFINE_CONSENT, NO_WCS_TO_REFINE } from "../../../utils/solvedWcs";
 import { solveSummaryLine } from "../../../utils/coordFormat";
 import { TauriCommandError } from "../../../shared/types/errors";
 
@@ -634,5 +639,303 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
     const tree = show();
     expect(fallbackBlock(tree)).toBeNull();
     expect(markupOf(tree)).toContain("the image has 3 planes");
+  });
+});
+
+const TIE_CARDS: [string, string][] = [
+  ["CTYPE1", "'RA---TAN-SIP'"],
+  ["CRVAL1", "274.7003"],
+];
+
+const APPLIED_TIE = {
+  decision: "applied",
+  reason: null,
+  wcs_cards: TIE_CARDS,
+  history: ["Gaia DR3 tie: rshift, 61 stars, RMS 38.2 mas", "Gaia DR3, ESA/Gaia/DPAC, via VizieR"],
+  model: "rshift",
+  wcs_kind: "header",
+  n_catalog: 412,
+  n_detected: 200,
+  n_matched: 64,
+  n_used: 61,
+  rms_before_mas: 512.4,
+  rms_after_mas: 38.2,
+  shift_east_mas: -412.5,
+  shift_north_mas: 230.1,
+  shift_err_east_mas: 4.9,
+  shift_err_north_mas: 5.1,
+  rotation_deg: -0.0021,
+  rotation_err_deg: 0.0006,
+  scale_ppm: null,
+  scale_err_ppm: null,
+  epoch_year: 2024.5,
+  epoch_source: "header",
+  catalog: "Gaia DR3 (I/355/gaiadr3) via VizieR, CDS",
+  catalog_source: "network",
+  attribution: "Gaia DR3, ESA/Gaia/DPAC, via VizieR",
+  citation: "Gaia DR3 (Gaia Collaboration, Vallenari et al. 2023, A&A 674, A1), ESA/Gaia/DPAC, CC BY-NC 3.0 IGO, via VizieR (CDS)",
+  warnings: ["2 saturated stars dropped"],
+};
+
+const REFUSED_TIE = {
+  ...APPLIED_TIE,
+  decision: "refused",
+  reason: "9 < 15 used pairs for rshift",
+  wcs_cards: [],
+  history: [],
+  n_matched: 9,
+  n_used: 9,
+  rms_after_mas: null,
+  shift_east_mas: null,
+  shift_north_mas: null,
+  rotation_deg: null,
+  warnings: [],
+};
+
+const WRITTEN = {
+  fits_path: "C:/out/m16_wcs.fits",
+  png_path: "C:/out/m16_wcs.png",
+  dimensions: [2000, 1500],
+  center_ra: 274.7,
+  center_dec: -13.82,
+  pixel_scale_arcsec: 2.4,
+  sip_present: true,
+  elapsed_ms: 12,
+};
+
+describe("PlateSolvePanel Gaia DR3 refinement (C21)", () => {
+  const panel = (PlateSolvePanel as unknown as { type: Component }).type;
+  const show = () => renderTree(panel, { filePath: "C:/data/m16.fits", solvePath: "C:/data/m16.fits" });
+  const solveActions = (tree: ReactNode) => findElement(tree, (props) => typeof props.onSolve === "function");
+  const refineBlock = (tree: ReactNode) => findElement(tree, (props) => typeof props.onRefine === "function");
+  const writeButton = (tree: ReactNode) => findElement(tree, (props) => props["data-write-wcs"] === true);
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    wcsInfoMock.mockReset().mockRejectedValue(new Error("no celestial WCS"));
+    solveHintsMock.mockReset().mockResolvedValue(OBJCT_HINTS);
+    plateSolveMock.mockReset().mockResolvedValue(LOCAL_RESULT);
+    refineMock.mockReset().mockResolvedValue(APPLIED_TIE);
+    writeWcsMock.mockReset().mockResolvedValue(WRITTEN);
+    apiKeyMock.mockReset().mockResolvedValue({ key: "test-key" });
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+  });
+
+  const solveOnce = async () => {
+    show();
+    await flush();
+    (solveActions(show())!.onSolve as () => void)();
+    await flush();
+    return show();
+  };
+
+  const refineOnce = async () => {
+    await solveOnce();
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    return show();
+  };
+
+  it("offers no refinement before there is a WCS to refine, and says why", async () => {
+    show();
+    await flush();
+    const block = refineBlock(show());
+    expect(block, "refine block").not.toBeNull();
+    expect(block!.blocker).toBe(NO_WCS_TO_REFINE);
+  });
+
+  it("offers the refinement after a successful solve, with the consent text in front of the button", async () => {
+    const tree = await solveOnce();
+    expect(refineBlock(tree)!.blocker).toBeNull();
+    const markup = markupOf(tree);
+    expect(markup).toContain(GAIA_REFINE_CONSENT);
+    expect(markup.indexOf(GAIA_REFINE_CONSENT)).toBeLessThan(markup.indexOf("Refine with Gaia DR3</button>"));
+    expect(markup).toMatch(/<button[^>]*data-gaia-refine="true"[^>]*>(?:(?!<\/button>)[\s\S])*Refine with Gaia DR3<\/button>/);
+  });
+
+  it("offers the refinement on a frame whose header already carries a WCS", async () => {
+    wcsInfoMock.mockResolvedValue(HEADER_WCS);
+    show();
+    await flush();
+    expect(refineBlock(show())!.blocker).toBeNull();
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    expect(refineMock).toHaveBeenCalledWith("C:/data/m16.fits", { wcsCards: null, epochYear: null });
+  });
+
+  it("refines the solve's own cards, not the header, with the header epoch unless one is typed", async () => {
+    await refineOnce();
+    expect(refineMock).toHaveBeenCalledTimes(1);
+    expect(refineMock).toHaveBeenCalledWith("C:/data/m16.fits", { wcsCards: LOCAL_RESULT.wcs_cards, epochYear: null });
+    (refineBlock(show())!.onEpochChange as (text: string) => void)("1990,5");
+    show();
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    expect(refineMock.mock.calls[1][1]).toEqual({ wcsCards: LOCAL_RESULT.wcs_cards, epochYear: 1990.5 });
+  });
+
+  it("shows matched, RMS in mas, shift and rotation and the Gaia DR3 attribution", async () => {
+    const markup = markupOf(await refineOnce());
+    expect(markup).toContain("Refined with Gaia DR3");
+    expect(markup).toContain("61 used of 64 matched (412 Gaia DR3 stars)");
+    expect(markup).toContain("512.4 mas before, 38.2 mas after");
+    expect(markup).toContain("-412.5 mas E, +230.1 mas N");
+    expect(markup).toContain("-0.00210°");
+    expect(markup).toContain("2 saturated stars dropped");
+    expect(markup).toMatch(/<div[^>]*data-gaia-attribution="true"[^>]*>Gaia DR3, ESA\/Gaia\/DPAC, via VizieR<\/div>/);
+  });
+
+  it("writes the refined WCS through Write WCS with the tie's HISTORY lines", async () => {
+    const onWcsWritten = vi.fn();
+    const props = { filePath: "C:/data/m16.fits", solvePath: "C:/data/m16.fits", onWcsWritten };
+    const view = () => renderTree(panel, props);
+    view();
+    await flush();
+    (solveActions(view())!.onSolve as () => void)();
+    await flush();
+    (refineBlock(view())!.onRefine as () => void)();
+    await flush();
+    const button = writeButton(view());
+    expect(button!.disabled).toBe(false);
+    (button!.onClick as () => void)();
+    await flush();
+    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", TIE_CARDS, undefined, APPLIED_TIE.history);
+    expect(onWcsWritten).toHaveBeenCalledWith(WRITTEN);
+  });
+
+  it("keeps Write WCS on the solve's cards after a refusal, which names its numbers", async () => {
+    refineMock.mockResolvedValue(REFUSED_TIE);
+    const markup = markupOf(await refineOnce());
+    expect(markup).toContain("Not refined");
+    expect(markup).toContain("9 &lt; 15 used pairs for rshift");
+    (writeButton(show())!.onClick as () => void)();
+    await flush();
+    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", LOCAL_RESULT.wcs_cards, undefined, null);
+  });
+
+  it("lets a header-WCS frame write its refined WCS without a solve", async () => {
+    wcsInfoMock.mockResolvedValue(HEADER_WCS);
+    show();
+    await flush();
+    expect(writeButton(show())!.disabled).toBe(true);
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    expect(writeButton(show())!.disabled).toBe(false);
+  });
+
+  it("shows a failed query as an error and keeps the solve", async () => {
+    refineMock.mockRejectedValue(new Error("VizieR request failed: connection refused for 127.0.0.1:9"));
+    const markup = markupOf(await refineOnce());
+    expect(markup).toContain("VizieR request failed: connection refused for 127.0.0.1:9");
+    expect(markup).toContain("293 of 410 predicted");
+  });
+
+  it("drops the refinement when a new solve starts", async () => {
+    await refineOnce();
+    expect(markupOf(show())).toContain("Refined with Gaia DR3");
+    (solveActions(show())!.onSolve as () => void)();
+    await flush();
+    expect(markupOf(show())).not.toContain("Refined with Gaia DR3");
+  });
+
+  it("refines the written copy's own tied header, not the solve's untied cards", async () => {
+    const onWcsWritten = vi.fn();
+    const at = (solvePath: string) => () => renderTree(panel, { filePath: "C:/data/m16.fits", solvePath, onWcsWritten });
+    const source = at("C:/data/m16.fits");
+    source();
+    await flush();
+    (solveActions(source())!.onSolve as () => void)();
+    await flush();
+    (refineBlock(source())!.onRefine as () => void)();
+    await flush();
+    (writeButton(source())!.onClick as () => void)();
+    await flush();
+    wcsInfoMock.mockResolvedValue(HEADER_WCS);
+    refineMock.mockResolvedValue({ ...APPLIED_TIE, decision: "no_significant_correction", wcs_cards: [], history: [] });
+    const copy = at(WRITTEN.fits_path);
+    copy();
+    await flush();
+    (refineBlock(copy())!.onRefine as () => void)();
+    await flush();
+    expect(refineMock).toHaveBeenLastCalledWith(WRITTEN.fits_path, { wcsCards: null, epochYear: null });
+    expect(writeButton(copy())!.disabled).toBe(true);
+  });
+
+  it("refines a JWST gWCS instead of the local solve, so its distortion model is kept", async () => {
+    wcsInfoMock.mockResolvedValue({ ...HEADER_WCS, wcs_kind: "gwcs" });
+    await refineOnce();
+    expect(refineMock).toHaveBeenCalledWith("C:/data/m16.fits", { wcsCards: null, epochYear: null });
+  });
+
+  it("names the WCS the tie refined in the result block", async () => {
+    refineMock.mockResolvedValue({ ...APPLIED_TIE, wcs_kind: "solve" });
+    const markup = markupOf(await refineOnce());
+    expect(markup).toMatch(/Refined WCS[\s\S]*Plate solve/);
+  });
+
+  it("keeps Write WCS off while a refinement runs, and leaves it usable once the refinement is applied", async () => {
+    let resolveRefine: (value: unknown) => void = () => {};
+    refineMock.mockImplementation(() => new Promise((resolve) => (resolveRefine = resolve)));
+    await solveOnce();
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    const during = writeButton(show());
+    expect(during!.disabled).toBe(true);
+    (during!.onClick as () => void)();
+    await flush();
+    expect(writeWcsMock).not.toHaveBeenCalled();
+    resolveRefine(APPLIED_TIE);
+    await flush();
+    const after = writeButton(show());
+    expect(after!.disabled).toBe(false);
+    (after!.onClick as () => void)();
+    await flush();
+    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", TIE_CARDS, undefined, APPLIED_TIE.history);
+    expect(markupOf(show())).not.toContain("Writing WCS...");
+  });
+
+  it("refuses a typed epoch outside 1900 to 2100 before anything goes online", async () => {
+    await solveOnce();
+    (refineBlock(show())!.onEpochChange as (text: string) => void)("1850");
+    const block = refineBlock(show());
+    expect(block!.epochError).toMatch(/^Epoch: type a decimal year between 1900 and 2100/);
+    (block!.onRefine as () => void)();
+    await flush();
+    expect(refineMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("GaiaRefineBlock", () => {
+  const base = {
+    blocker: null,
+    loading: false,
+    epochText: "",
+    epochError: null,
+    epochPlaceholder: "2024.500 (header)",
+    onEpochChange: () => {},
+    onRefine: () => {},
+    result: null,
+    error: null,
+  };
+
+  it("names the blocker on the disabled button", () => {
+    const markup = renderToStaticMarkup(createElement(GaiaRefineBlock, { ...base, blocker: NO_WCS_TO_REFINE }));
+    const button = markup.match(/<button[^>]*data-gaia-refine="true"[^>]*>/)?.[0] ?? "";
+    expect(button).toContain('disabled=""');
+    expect(unescapeHtml(button)).toContain(`title="${NO_WCS_TO_REFINE}"`);
+  });
+
+  it("puts the full citation and licence on the attribution line", () => {
+    const markup = unescapeHtml(renderToStaticMarkup(createElement(GaiaRefineBlock, { ...base, result: APPLIED_TIE as never })));
+    expect(markup).toContain(`title="${APPLIED_TIE.citation}"`);
+  });
+
+  it("shows the header epoch as the placeholder of the epoch field", () => {
+    const markup = renderToStaticMarkup(createElement(GaiaRefineBlock, base));
+    expect(markup).toContain('placeholder="2024.500 (header)"');
   });
 });

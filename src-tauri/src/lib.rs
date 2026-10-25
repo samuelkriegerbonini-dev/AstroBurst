@@ -245,6 +245,7 @@ pub fn run() {
             cmd::catalog_store::catalog_use_file_cmd,
             cmd::catalog_store::catalog_use_siril_dir_cmd,
             cmd::catalog_store::catalog_remove_cmd,
+            cmd::catalog_store::catalog_zenodo_offer_cmd,
             #[cfg(feature = "net")]
             cmd::sample_data::sample_sets_cmd,
             #[cfg(feature = "net")]
@@ -262,6 +263,7 @@ pub fn run() {
             cmd::astrometry::sky_separation_cmd,
             cmd::astrometry::check_pointing_overlap_cmd,
             cmd::astrometry::grid_lines_cmd,
+            cmd::astrometry::gaia_refine::gaia_refine_wcs_cmd,
             cmd::contours::contour_lines_cmd,
             cmd::psf::estimate_psf_cmd,
             cmd::spcc::spcc_calibrate_cmd,

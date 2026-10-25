@@ -7,11 +7,11 @@ use tauri::{Emitter, Manager};
 
 use crate::cmd::common::blocking_cmd;
 #[cfg(feature = "net")]
-use crate::infra::catalog_store::catalog_client;
+use crate::infra::catalog_store::{catalog_client, ZenodoSource};
 use crate::infra::catalog_store::{
     chosen_data_root_missing, CatalogStore, InstallObserver, InstallOutcome, InstallStage,
-    StoreError, StoreRoots, FIELD_EXTERNAL_CATALOGS, FIELD_SIRIL_CATALOG_DIR,
-    INSTALL_PROGRESS_EVENT,
+    StoreError, StoreRoots, ZenodoConsent, FIELD_EXTERNAL_CATALOGS, FIELD_SIRIL_CATALOG_DIR,
+    INSTALL_PROGRESS_EVENT, SIRIL_GAIA_ID,
 };
 use crate::infra::config;
 use crate::infra::net::paths::ENV_DATA_DIR;
@@ -111,24 +111,52 @@ pub(crate) fn status_json(store: &CatalogStore, config: &AppConfig) -> anyhow::R
 }
 
 #[cfg(feature = "net")]
+fn download_client() -> Result<reqwest::Client, String> {
+    catalog_client().map_err(|error| format!("the download client did not start: {error}"))
+}
+
+#[cfg(feature = "net")]
 pub(crate) async fn install_dataset(
     store: &CatalogStore,
     id: &str,
+    consent: Option<&ZenodoConsent>,
     observer: Arc<dyn InstallObserver>,
 ) -> Result<InstallOutcome, String> {
     store.spec(id).map_err(|error| error.to_string())?;
-    let client =
-        catalog_client().map_err(|error| format!("the download client did not start: {error}"))?;
-    store
-        .install(id, &client, observer)
+    let client = download_client()?;
+    let installed = if id == SIRIL_GAIA_ID {
+        store
+            .install_siril_from_zenodo(&client, &ZenodoSource::from_env(), consent, observer)
+            .await
+    } else {
+        store.install(id, &client, observer).await
+    };
+    installed.map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "net")]
+pub(crate) async fn zenodo_offer_json(store: &CatalogStore) -> Result<Value, String> {
+    let offer = store
+        .zenodo_offer(&download_client()?, &ZenodoSource::from_env())
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(offer).map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "net"))]
+pub(crate) async fn zenodo_offer_json(store: &CatalogStore) -> Result<Value, String> {
+    let offer = store
+        .zenodo_offer()
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(offer).map_err(|error| error.to_string())
 }
 
 #[cfg(not(feature = "net"))]
 pub(crate) async fn install_dataset(
     store: &CatalogStore,
     id: &str,
+    _consent: Option<&ZenodoConsent>,
     observer: Arc<dyn InstallObserver>,
 ) -> Result<InstallOutcome, String> {
     store
@@ -172,19 +200,43 @@ pub async fn catalog_status_cmd(app: tauri::AppHandle) -> Result<Value, String> 
     })
 }
 
-#[tauri::command]
-pub async fn catalog_install_cmd(app: tauri::AppHandle, id: String) -> Result<Value, String> {
-    let resource = resource_dir(&app);
-    let store = tokio::task::spawn_blocking(move || writable_store(resource))
+async fn off_thread<T: Send + 'static>(
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
         .await
         .map_err(|error| format!("Task join failed: {error}"))?
-        .map_err(|error| format!("{error:#}"))?;
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
+pub async fn catalog_install_cmd(
+    app: tauri::AppHandle,
+    id: String,
+    consent: Option<ZenodoConsent>,
+) -> Result<Value, String> {
+    let resource = resource_dir(&app);
+    let opened = resource.clone();
+    let store = off_thread(move || writable_store(opened)).await?;
     let observer = Arc::new(ProgressObserver {
         id: id.clone(),
         handle: ProgressHandle::new(&app, &install_cancel_key(&id), 1),
         app: app.clone(),
     });
-    let outcome = install_dataset(&store, &id, observer.clone()).await?;
+    let outcome = install_dataset(&store, &id, consent.as_ref(), observer.clone()).await?;
+    if outcome.id == SIRIL_GAIA_ID {
+        off_thread(move || {
+            let store = app_store(resource)?;
+            update_choices(|config| store.use_downloaded_siril(config))
+        })
+        .await
+        .map_err(|error| {
+            format!(
+                "the Siril Gaia extract is in {}, but it could not be set as the Siril folder: {error}",
+                outcome.path.display()
+            )
+        })?;
+    }
     observer.emit(COMPLETE_STAGE, outcome.bytes, outcome.bytes);
     serde_json::to_value(outcome).map_err(|error| error.to_string())
 }
@@ -226,6 +278,13 @@ pub async fn catalog_remove_cmd(app: tauri::AppHandle, id: String) -> Result<Val
     })
 }
 
+#[tauri::command]
+pub async fn catalog_zenodo_offer_cmd(app: tauri::AppHandle) -> Result<Value, String> {
+    let resource = resource_dir(&app);
+    let store = off_thread(move || app_store(resource)).await?;
+    zenodo_offer_json(&store).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -239,17 +298,18 @@ mod tests {
         install_cancel_key, install_dataset, install_progress_payload, percent_of, status_json,
     };
     use crate::infra::catalog_store::{
-        CatalogStore, InstallObserver, InstallStage, StoreRoots, SIRIL_GAIA_BZ2_BYTES,
-        SIRIL_GAIA_ID, TWOMASS_ID, TYCHO2_ID,
+        CatalogStore, InstallObserver, InstallStage, StoreRoots, ZenodoConsent,
+        SIRIL_GAIA_BZ2_BYTES, SIRIL_GAIA_ID, TWOMASS_ID, TYCHO2_ID, ZENODO_RECORD_ID,
     };
     use crate::types::config::AppConfig;
 
-    const CATALOG_COMMANDS: [&str; 5] = [
+    const CATALOG_COMMANDS: [&str; 6] = [
         "catalog_status_cmd",
         "catalog_install_cmd",
         "catalog_use_file_cmd",
         "catalog_use_siril_dir_cmd",
         "catalog_remove_cmd",
+        "catalog_zenodo_offer_cmd",
     ];
     const FREE_BYTES: u64 = 123_456_789;
 
@@ -289,7 +349,14 @@ mod tests {
         assert_eq!(siril["url_host"], host);
         assert_eq!(siril["free_space_bytes"], FREE_BYTES);
         assert_eq!(siril["installable"], false);
+        let record = if cfg!(feature = "net") {
+            json!(ZENODO_RECORD_ID)
+        } else {
+            Value::Null
+        };
+        assert_eq!(siril["zenodo_record"], record);
         assert_eq!(siril["status"]["state"], "missing");
+        assert_eq!(siril["folder_bytes"], 0);
         assert!(siril["credit"].as_str().unwrap().contains("ESA/Gaia/DPAC"));
         let siril_licence = siril["licence"].as_str().unwrap();
         assert!(
@@ -307,11 +374,13 @@ mod tests {
                 row["folder"].as_str().unwrap().contains("catalogs"),
                 "{row}"
             );
+            assert!(row["folder_bytes"].is_u64(), "{row}");
         }
         let tycho = rows.iter().find(|row| row["id"] == TYCHO2_ID).unwrap();
         assert_eq!(tycho["kind"], "tier0_bundled");
         assert_eq!(tycho["size_bytes"], 15_541_742);
         assert_eq!(tycho["installable"], false);
+        assert_eq!(tycho["zenodo_record"], Value::Null);
         let twomass = rows.iter().find(|row| row["id"] == TWOMASS_ID).unwrap();
         assert_eq!(twomass["kind"], "hosted");
         assert_eq!(twomass["size_bytes"], 154_140_794);
@@ -325,6 +394,7 @@ mod tests {
         let refused = install_dataset(
             &temp_store(dir.path()),
             "no-such-catalogue",
+            None,
             Arc::new(Silent),
         )
         .await
@@ -335,6 +405,42 @@ mod tests {
             "{refused}"
         );
         assert!(!dir.path().join("data").exists());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn catalog_install_cmd_refuses_the_zenodo_download_without_consent_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let unacknowledged = ZenodoConsent {
+            archive_bytes: SIRIL_GAIA_BZ2_BYTES,
+            archive_sha256: None,
+            licence_acknowledged: false,
+        };
+        for consent in [None, Some(unacknowledged)] {
+            let refused = install_dataset(
+                &temp_store(dir.path()),
+                SIRIL_GAIA_ID,
+                consent.as_ref(),
+                Arc::new(Silent),
+            )
+            .await
+            .unwrap_err();
+            assert!(refused.contains("consent"), "{refused}");
+            assert!(refused.contains("Settings > Catalogs"), "{refused}");
+        }
+        assert!(!dir.path().join("data").exists());
+    }
+
+    #[test]
+    fn a_zenodo_consent_arrives_from_the_settings_panel_in_snake_case() {
+        let consent: ZenodoConsent = serde_json::from_value(json!({
+            "archive_bytes": SIRIL_GAIA_BZ2_BYTES,
+            "archive_sha256": "846ad4b12c50865df0cb8c5b23453f22eec78bbe9969e17d669ae19eb49d421f",
+            "licence_acknowledged": true
+        }))
+        .unwrap();
+        assert_eq!(consent.archive_bytes, SIRIL_GAIA_BZ2_BYTES);
+        assert!(consent.licence_acknowledged);
     }
 
     #[test]

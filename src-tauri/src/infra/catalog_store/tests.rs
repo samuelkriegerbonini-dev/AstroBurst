@@ -1039,6 +1039,7 @@ async fn a_bzip2_dataset_is_decoded_to_disk_and_verified_against_the_decompresse
         CountingSink::default(),
         recorder().as_ref(),
         None,
+        u64::MAX,
     )
     .unwrap();
     assert_eq!(streamed.bytes, decoded.len() as u64);
@@ -1963,5 +1964,881 @@ fn the_real_tier0_file_verifies_against_its_pin_and_holds_the_pleiades() {
         "tier 0 verified against {TYCHO2_SHA256_HEX} in {:.0} ms; Pleiades cone {} rows",
         verified_in.as_secs_f64() * 1000.0,
         pleiades.len()
+    );
+}
+
+const ZENODO_RECORD_PATH: &str = "/api/records/14692304";
+
+struct ZenodoRig {
+    record: TestServer,
+    archive: TestServer,
+    sums: Vec<TestServer>,
+    compressed: Vec<u8>,
+    decoded: Vec<u8>,
+}
+
+impl ZenodoRig {
+    fn source(&self) -> ZenodoSource {
+        ZenodoSource {
+            record_url: self.record.url(ZENODO_RECORD_PATH).to_string(),
+            decoded_max_bytes: SIRIL_GAIA_DECODED_MAX_BYTES,
+        }
+    }
+
+    fn sum_requests(&self) -> usize {
+        self.sums.iter().map(|server| server.requests().len()).sum()
+    }
+}
+
+type PublishedSums = Option<([u8; 32], [u8; 32])>;
+
+fn zenodo_catalogue() -> Vec<u8> {
+    astrometric_catalogue(8, 4, (0..786_432u32).step_by(16))
+}
+
+fn sha256sum(digest: &[u8; 32], name: &str) -> Vec<u8> {
+    format!("{}  {name}\n", hex_of(digest)).into_bytes()
+}
+
+fn zenodo_file(key: &str, size: usize, link: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "5da2012c-8247-449f-a9aa-9508cfa5ba41",
+        "key": key,
+        "size": size,
+        "checksum": "md5:2e62f2365023e621afbd336c82980208",
+        "links": { "self": link }
+    })
+}
+
+fn zenodo_record(files: Vec<serde_json::Value>) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "id": 14692304,
+        "doi": "10.5281/zenodo.14692304",
+        "metadata": {
+            "title": "Siril Astrometry Catalogue extracted from Gaia DR3",
+            "license": { "id": "cc-by-4.0" }
+        },
+        "links": { "self_html": "https://zenodo.org/records/14692304" },
+        "files": files
+    }))
+    .unwrap()
+}
+
+fn content_link(server: &TestServer, key: &str) -> String {
+    server
+        .url(&format!("{ZENODO_RECORD_PATH}/files/{key}/content"))
+        .to_string()
+}
+
+fn zenodo_rig(
+    archive: impl FnOnce(Vec<u8>) -> Resource,
+    sums: impl FnOnce(&[u8], &[u8]) -> PublishedSums,
+) -> ZenodoRig {
+    let decoded = zenodo_catalogue();
+    let compressed = bzip2_compressed(&decoded);
+    let archive_server = serve(archive(compressed.clone()));
+    let mut files = vec![zenodo_file(
+        SIRIL_GAIA_ARCHIVE_KEY,
+        compressed.len(),
+        &content_link(&archive_server, SIRIL_GAIA_ARCHIVE_KEY),
+    )];
+    let mut sum_servers = Vec::new();
+    if let Some((archive_digest, decoded_digest)) = sums(&compressed, &decoded) {
+        for (key, body) in [
+            (
+                SIRIL_GAIA_DECODED_SUM_KEY,
+                sha256sum(&decoded_digest, SIRIL_ASTROMETRIC_FILE),
+            ),
+            (
+                SIRIL_GAIA_ARCHIVE_SUM_KEY,
+                sha256sum(&archive_digest, SIRIL_GAIA_ARCHIVE_KEY),
+            ),
+        ] {
+            let server = serve_body(&body);
+            files.push(zenodo_file(key, body.len(), &content_link(&server, key)));
+            sum_servers.push(server);
+        }
+    }
+    ZenodoRig {
+        record: serve_body(&zenodo_record(files)),
+        archive: archive_server,
+        sums: sum_servers,
+        compressed,
+        decoded,
+    }
+}
+
+fn true_sums(archive: &[u8], decoded: &[u8]) -> PublishedSums {
+    Some((digest(archive), digest(decoded)))
+}
+
+fn consent_for(offer: &ZenodoOffer) -> ZenodoConsent {
+    ZenodoConsent {
+        archive_bytes: offer.archive_bytes,
+        archive_sha256: offer.archive_sha256.clone(),
+        licence_acknowledged: true,
+    }
+}
+
+async fn zenodo_consent(rig: &Rig, zenodo: &ZenodoRig) -> ZenodoConsent {
+    consent_for(
+        &rig.store
+            .zenodo_offer(&client(), &zenodo.source())
+            .await
+            .unwrap(),
+    )
+}
+
+fn siril_dir(rig: &Rig) -> PathBuf {
+    rig.store
+        .dataset_dir(rig.store.spec(SIRIL_GAIA_ID).unwrap())
+}
+
+#[tokio::test]
+async fn the_zenodo_offer_lists_the_record_files_size_sha256_and_terms_without_the_archive() {
+    let zenodo = zenodo_rig(Resource::new, true_sums);
+    let rig = Rig::new();
+
+    let offer = rig
+        .store
+        .zenodo_offer(&client(), &zenodo.source())
+        .await
+        .unwrap();
+    let keys: Vec<&str> = offer.files.iter().map(|file| file.key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            SIRIL_GAIA_ARCHIVE_KEY,
+            SIRIL_GAIA_DECODED_SUM_KEY,
+            SIRIL_GAIA_ARCHIVE_SUM_KEY
+        ]
+    );
+    assert_eq!(
+        offer.files[0].checksum.as_deref(),
+        Some("md5:2e62f2365023e621afbd336c82980208")
+    );
+    assert_eq!(offer.id, SIRIL_GAIA_ID);
+    assert_eq!(offer.archive_key, SIRIL_GAIA_ARCHIVE_KEY);
+    assert_eq!(offer.archive_bytes, zenodo.compressed.len() as u64);
+    assert_eq!(
+        offer.archive_url,
+        content_link(&zenodo.archive, SIRIL_GAIA_ARCHIVE_KEY)
+    );
+    assert_eq!(
+        offer.archive_sha256.as_deref(),
+        Some(hex_of(&digest(&zenodo.compressed)).as_str())
+    );
+    assert_eq!(
+        offer.decoded_sha256.as_deref(),
+        Some(hex_of(&digest(&zenodo.decoded)).as_str())
+    );
+    assert_eq!(offer.doi.as_deref(), Some("10.5281/zenodo.14692304"));
+    assert_eq!(offer.record_licence.as_deref(), Some("cc-by-4.0"));
+    assert_eq!(
+        offer.record_page.as_deref(),
+        Some("https://zenodo.org/records/14692304")
+    );
+    assert_eq!(offer.host, "127.0.0.1");
+    for needle in [
+        "Gaia DR3",
+        "ESA/Gaia/DPAC",
+        "CC BY-NC 3.0 IGO",
+        "this computer",
+        "never redistributed",
+    ] {
+        assert!(
+            offer.gaia_terms.contains(needle),
+            "{needle}: {}",
+            offer.gaia_terms
+        );
+    }
+    assert_eq!(offer.decoded_max_bytes, SIRIL_GAIA_DECODED_MAX_BYTES);
+    assert_eq!(offer.resume_from, 0);
+    assert_eq!(
+        offer.need_bytes,
+        zenodo.compressed.len() as u64 + SIRIL_GAIA_DECODED_MAX_BYTES
+    );
+    assert_eq!(offer.free_space_bytes, Some(u64::MAX));
+    assert_eq!(offer.folder, siril_dir(&rig));
+    assert_eq!(zenodo.record.requests().len(), 1);
+    assert_eq!(
+        zenodo.record.requests()[0].header("accept"),
+        Some("application/json")
+    );
+    assert_eq!(zenodo.sum_requests(), 2);
+    assert!(
+        zenodo.archive.requests().is_empty(),
+        "the offer fetched catalogue bytes"
+    );
+    assert!(!siril_dir(&rig).exists());
+}
+
+#[tokio::test]
+async fn a_zenodo_install_without_consent_is_refused_before_any_request() {
+    let zenodo = zenodo_rig(Resource::new, true_sums);
+    let rig = Rig::new();
+    let unacknowledged = ZenodoConsent {
+        archive_bytes: zenodo.compressed.len() as u64,
+        archive_sha256: Some(hex_of(&digest(&zenodo.compressed))),
+        licence_acknowledged: false,
+    };
+
+    for consent in [None, Some(&unacknowledged)] {
+        let refused = rig
+            .store
+            .install_siril_from_zenodo(&client(), &zenodo.source(), consent, recorder())
+            .await
+            .unwrap_err();
+        let message = refused.to_string();
+        assert!(matches!(refused, StoreError::Refused { .. }), "{message}");
+        assert!(
+            message.contains(SIRIL_GAIA_ID) && message.contains("consent"),
+            "{message}"
+        );
+    }
+    assert!(zenodo.record.requests().is_empty());
+    assert_eq!(zenodo.sum_requests(), 0);
+    assert!(zenodo.archive.requests().is_empty());
+    assert!(!siril_dir(&rig).exists());
+}
+
+#[tokio::test]
+async fn a_zenodo_install_whose_record_changed_since_the_consent_is_refused_before_the_archive() {
+    let zenodo = zenodo_rig(Resource::new, true_sums);
+    let rig = Rig::new();
+    let shown = zenodo_consent(&rig, &zenodo).await;
+
+    for stale in [
+        ZenodoConsent {
+            archive_bytes: shown.archive_bytes + 1,
+            ..shown.clone()
+        },
+        ZenodoConsent {
+            archive_sha256: Some(hex_of(&digest(b"an older upload"))),
+            ..shown.clone()
+        },
+    ] {
+        let refused = rig
+            .store
+            .install_siril_from_zenodo(&client(), &zenodo.source(), Some(&stale), recorder())
+            .await
+            .unwrap_err();
+        let message = refused.to_string();
+        assert!(matches!(refused, StoreError::Refused { .. }), "{message}");
+        assert!(message.contains("changed"), "{message}");
+        assert!(
+            message.contains(&zenodo.compressed.len().to_string()),
+            "{message}"
+        );
+    }
+    assert_eq!(zenodo.record.requests().len(), 3);
+    assert!(zenodo.archive.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_zenodo_download_interrupted_midway_resumes_decodes_and_registers_the_siril_folder() {
+    let zenodo = zenodo_rig(
+        |body| {
+            let half = body.len() as u64 / 2;
+            Resource::new(body).drop_after(half)
+        },
+        true_sums,
+    );
+    let rig = Rig::new();
+    let consent = zenodo_consent(&rig, &zenodo).await;
+    let half = zenodo.compressed.len() as u64 / 2;
+    let total = zenodo.compressed.len() as u64;
+    let mut config = AppConfig::default();
+
+    let interrupted = rig
+        .store
+        .install_siril_from_zenodo(&client(), &zenodo.source(), Some(&consent), recorder())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(interrupted, StoreError::Download { .. }),
+        "{interrupted}"
+    );
+    assert_eq!(
+        rig.store.status(SIRIL_GAIA_ID, &config).unwrap(),
+        DatasetStatus::Partial {
+            received: half,
+            total: Some(total)
+        }
+    );
+    let resumable = rig
+        .store
+        .zenodo_offer(&client(), &zenodo.source())
+        .await
+        .unwrap();
+    assert_eq!(resumable.resume_from, half);
+    assert_eq!(
+        resumable.need_bytes,
+        total - half + SIRIL_GAIA_DECODED_MAX_BYTES
+    );
+
+    let observer = recorder();
+    let outcome = rig
+        .store
+        .install_siril_from_zenodo(
+            &client(),
+            &zenodo.source(),
+            Some(&consent),
+            observer.clone(),
+        )
+        .await
+        .unwrap();
+    let installed = rig.installed(SIRIL_GAIA_ID);
+    assert_eq!(outcome.id, SIRIL_GAIA_ID);
+    assert_eq!(outcome.path, installed);
+    assert_eq!(outcome.resumed_from, half);
+    assert_eq!(outcome.bytes, zenodo.decoded.len() as u64);
+    assert_eq!(outcome.sha256_hex, hex_of(&digest(&zenodo.decoded)));
+    assert!(outcome.sha256_verified);
+    assert!(!outcome.already_installed);
+    assert!(
+        fs::read(&installed).unwrap() == zenodo.decoded,
+        "the decoded catalogue differs"
+    );
+    for leftover in [
+        ".bz2",
+        ".bz2.done.json",
+        ".bz2.part",
+        ".bz2.part.json",
+        ".decoding",
+    ] {
+        assert!(
+            !sibling(&installed, leftover).exists(),
+            "{leftover} was left behind"
+        );
+    }
+    let archive_requests = zenodo.archive.requests();
+    assert_eq!(archive_requests.len(), 2);
+    assert_eq!(
+        archive_requests[1].header("range"),
+        Some(format!("bytes={half}-").as_str())
+    );
+    assert_eq!(
+        observer.stages().last().copied(),
+        Some((InstallStage::Decode, zenodo.decoded.len() as u64, None))
+    );
+
+    config
+        .external_catalogs
+        .insert(SIRIL_GAIA_ID.to_owned(), "D:/old/choice.dat".to_owned());
+    let registered = rig.store.use_downloaded_siril(&mut config).unwrap();
+    assert_eq!(registered, installed);
+    assert_eq!(
+        config.siril_catalog_dir.as_deref(),
+        installed.parent().and_then(Path::to_str)
+    );
+    assert!(config.external_catalogs.is_empty());
+    assert_eq!(
+        rig.store.status(SIRIL_GAIA_ID, &config).unwrap(),
+        DatasetStatus::External {
+            path: installed.clone(),
+            valid: true,
+            problem: None
+        }
+    );
+    let lease = rig.store.open(SIRIL_GAIA_ID, &config, PLATE_SOLVE).unwrap();
+    assert_eq!(lease.path(), installed);
+    drop(lease);
+
+    let again = rig
+        .store
+        .install_siril_from_zenodo(&client(), &zenodo.source(), Some(&consent), recorder())
+        .await
+        .unwrap();
+    assert!(again.already_installed);
+    assert_eq!(again.sha256_hex, hex_of(&digest(&zenodo.decoded)));
+    assert_eq!(
+        zenodo.archive.requests().len(),
+        2,
+        "a verified install was downloaded again"
+    );
+    println!(
+        "Zenodo resume: archive {total} bytes, dropped at {half}, resumed with {:?}, decoded {} bytes",
+        archive_requests[1].header("range"),
+        outcome.bytes
+    );
+}
+
+#[tokio::test]
+async fn a_zenodo_archive_that_differs_from_its_published_sha256_is_refused_naming_both() {
+    let published = digest(b"a different archive");
+    let zenodo = zenodo_rig(Resource::new, |_, decoded| {
+        Some((published, digest(decoded)))
+    });
+    let rig = Rig::new();
+    let consent = zenodo_consent(&rig, &zenodo).await;
+    assert_eq!(
+        consent.archive_sha256.as_deref(),
+        Some(hex_of(&published).as_str())
+    );
+
+    let refused = rig
+        .store
+        .install_siril_from_zenodo(&client(), &zenodo.source(), Some(&consent), recorder())
+        .await
+        .unwrap_err();
+    let message = refused.to_string();
+    assert!(matches!(refused, StoreError::Checksum { .. }), "{message}");
+    assert!(message.contains(&hex_of(&published)), "{message}");
+    assert!(
+        message.contains(&hex_of(&digest(&zenodo.compressed))),
+        "{message}"
+    );
+    let installed = rig.installed(SIRIL_GAIA_ID);
+    for leftover in ["", ".bz2", ".bz2.part", ".bz2.done.json"] {
+        assert!(
+            !sibling(&installed, leftover).exists(),
+            "{leftover} was left behind"
+        );
+    }
+    assert_eq!(
+        rig.store
+            .status(SIRIL_GAIA_ID, &AppConfig::default())
+            .unwrap(),
+        DatasetStatus::Missing
+    );
+    println!("Zenodo checksum mismatch: {message}");
+}
+
+#[tokio::test]
+async fn a_decoded_zenodo_catalogue_that_differs_from_its_published_sha256_is_refused() {
+    let published = digest(b"a different catalogue");
+    let zenodo = zenodo_rig(Resource::new, |archive, _| {
+        Some((digest(archive), published))
+    });
+    let rig = Rig::new();
+    let consent = zenodo_consent(&rig, &zenodo).await;
+
+    let refused = rig
+        .store
+        .install_siril_from_zenodo(&client(), &zenodo.source(), Some(&consent), recorder())
+        .await
+        .unwrap_err();
+    let message = refused.to_string();
+    assert!(matches!(refused, StoreError::Checksum { .. }), "{message}");
+    assert!(message.contains(&hex_of(&published)), "{message}");
+    assert!(
+        message.contains(&hex_of(&digest(&zenodo.decoded))),
+        "{message}"
+    );
+    let installed = rig.installed(SIRIL_GAIA_ID);
+    assert!(!installed.exists());
+    assert!(!sibling(&installed, ".decoding").exists());
+}
+
+#[tokio::test]
+async fn a_zenodo_download_cancelled_midway_keeps_its_part_and_reports_partial() {
+    let zenodo = zenodo_rig(
+        |body| {
+            let rate = body.len() as u64;
+            Resource::new(body).slow_steady(rate)
+        },
+        true_sums,
+    );
+    let rig = Rig::new();
+    let consent = zenodo_consent(&rig, &zenodo).await;
+    let total = zenodo.compressed.len() as u64;
+    let observer = Recorder::cancelling();
+
+    let cancelled = rig
+        .store
+        .install_siril_from_zenodo(
+            &client(),
+            &zenodo.source(),
+            Some(&consent),
+            observer.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(cancelled, StoreError::Cancelled { .. }),
+        "{cancelled}"
+    );
+    let flagged = observer
+        .cancelled_at
+        .lock()
+        .unwrap()
+        .expect("progress reported bytes");
+    assert!(flagged > 0 && flagged < total, "{flagged} of {total}");
+    assert_eq!(observer.calls_after_cancel.load(Ordering::SeqCst), 0);
+    let part = sibling(&rig.installed(SIRIL_GAIA_ID), ".bz2.part");
+    assert_eq!(fs::metadata(&part).unwrap().len(), flagged);
+    assert!(fs::read(&part).unwrap() == zenodo.compressed[..flagged as usize]);
+    assert_eq!(
+        rig.store
+            .status(SIRIL_GAIA_ID, &AppConfig::default())
+            .unwrap(),
+        DatasetStatus::Partial {
+            received: flagged,
+            total: Some(total)
+        }
+    );
+    assert!(observer
+        .stages()
+        .iter()
+        .all(|(stage, _, seen)| *stage == InstallStage::Download && *seen == Some(total)));
+    println!(
+        "Zenodo cancel: kept {flagged} of {total} bytes in {}",
+        part.display()
+    );
+}
+
+#[tokio::test]
+async fn a_zenodo_record_without_sums_installs_on_its_size_alone_and_says_so() {
+    let zenodo = zenodo_rig(Resource::new, |_, _| None);
+    let rig = Rig::new();
+    let consent = zenodo_consent(&rig, &zenodo).await;
+    assert_eq!(consent.archive_sha256, None);
+
+    let outcome = rig
+        .store
+        .install_siril_from_zenodo(&client(), &zenodo.source(), Some(&consent), recorder())
+        .await
+        .unwrap();
+    assert!(!outcome.sha256_verified);
+    assert_eq!(outcome.sha256_hex, hex_of(&digest(&zenodo.decoded)));
+    assert!(fs::read(&outcome.path).unwrap() == zenodo.decoded);
+
+    let truncated = zenodo_rig(
+        |body| {
+            let short = body[..body.len() - 1].to_vec();
+            Resource::new(short)
+        },
+        |_, _| None,
+    );
+    let other = Rig::new();
+    let consent = zenodo_consent(&other, &truncated).await;
+    let refused = other
+        .store
+        .install_siril_from_zenodo(&client(), &truncated.source(), Some(&consent), recorder())
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains(&truncated.compressed.len().to_string()),
+        "{refused}"
+    );
+    assert!(!other.installed(SIRIL_GAIA_ID).exists());
+}
+
+#[tokio::test]
+async fn an_archive_that_decodes_past_the_cap_is_refused_and_leaves_no_catalogue() {
+    let zenodo = zenodo_rig(Resource::new, true_sums);
+    let rig = Rig::new();
+    let consent = zenodo_consent(&rig, &zenodo).await;
+    let cap = zenodo.decoded.len() as u64 - 1;
+    let source = ZenodoSource {
+        decoded_max_bytes: cap,
+        ..zenodo.source()
+    };
+
+    let refused = rig
+        .store
+        .install_siril_from_zenodo(&client(), &source, Some(&consent), recorder())
+        .await
+        .unwrap_err();
+    let message = refused.to_string();
+    assert!(message.contains(&cap.to_string()), "{message}");
+    let installed = rig.installed(SIRIL_GAIA_ID);
+    assert!(!installed.exists());
+    assert!(!sibling(&installed, ".decoding").exists());
+}
+
+#[tokio::test]
+async fn a_zenodo_record_off_its_host_or_without_the_archive_is_refused() {
+    let record_url = Url::parse("http://127.0.0.1:9/api/records/14692304").unwrap();
+    let elsewhere = zenodo_record(vec![zenodo_file(
+        SIRIL_GAIA_ARCHIVE_KEY,
+        10,
+        "https://elsewhere.example/siril_cat_healpix8_astro.dat.bz2",
+    )]);
+    let refused = parse_zenodo_record(&record_url, &elsewhere).unwrap_err();
+    assert!(
+        refused.contains("elsewhere.example") && refused.contains("127.0.0.1"),
+        "{refused}"
+    );
+    let plain_http = zenodo_record(vec![zenodo_file(
+        SIRIL_GAIA_ARCHIVE_KEY,
+        10,
+        "http://zenodo.org/api/records/14692304/files/x/content",
+    )]);
+    let refused = parse_zenodo_record(&record_url, &plain_http).unwrap_err();
+    assert!(refused.contains("https"), "{refused}");
+    let without_archive = zenodo_record(vec![zenodo_file(
+        SIRIL_GAIA_DECODED_SUM_KEY,
+        95,
+        "http://127.0.0.1:9/api/records/14692304/files/uncompressed_files.sha256sum/content",
+    )]);
+    let refused = parse_zenodo_record(&record_url, &without_archive).unwrap_err();
+    assert!(
+        refused.contains(SIRIL_GAIA_ARCHIVE_KEY) && refused.contains(SIRIL_GAIA_DECODED_SUM_KEY),
+        "{refused}"
+    );
+    let refused = parse_zenodo_record(&record_url, b"<html>maintenance</html>").unwrap_err();
+    assert!(refused.contains("JSON"), "{refused}");
+
+    let rig = Rig::new();
+    let remote_http = ZenodoSource {
+        record_url: "http://zenodo.org/api/records/14692304".to_owned(),
+        decoded_max_bytes: SIRIL_GAIA_DECODED_MAX_BYTES,
+    };
+    let refused = rig
+        .store
+        .zenodo_offer(&client(), &remote_http)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("https"), "{refused}");
+}
+
+#[test]
+fn the_sha256sum_line_naming_the_file_gives_its_digest() {
+    let wanted = digest(b"siril");
+    let line = format!("{}  {SIRIL_ASTROMETRIC_FILE}\n", hex_of(&wanted));
+    assert_eq!(parse_sha256sum(&line, SIRIL_ASTROMETRIC_FILE), Some(wanted));
+    let binary = format!(
+        "{} *{SIRIL_GAIA_ARCHIVE_KEY}\r\n",
+        hex_of(&wanted).to_ascii_uppercase()
+    );
+    assert_eq!(
+        parse_sha256sum(&binary, SIRIL_GAIA_ARCHIVE_KEY),
+        Some(wanted)
+    );
+    let two = format!(
+        "{}  other.dat\n{}  {SIRIL_ASTROMETRIC_FILE}\n",
+        hex_of(&digest(b"other")),
+        hex_of(&wanted)
+    );
+    assert_eq!(parse_sha256sum(&two, SIRIL_ASTROMETRIC_FILE), Some(wanted));
+    assert_eq!(parse_sha256sum(&line, SIRIL_GAIA_ARCHIVE_KEY), None);
+    assert_eq!(
+        parse_sha256sum("abc  siril_cat_healpix8_astro.dat", SIRIL_ASTROMETRIC_FILE),
+        None
+    );
+    assert_eq!(parse_sha256sum("", SIRIL_ASTROMETRIC_FILE), None);
+}
+
+#[test]
+fn the_zenodo_record_comes_from_the_zenodo_api_unless_a_loopback_override_is_set() {
+    assert_eq!(
+        DEFAULT_ZENODO_RECORD_URL,
+        format!("https://zenodo.org/api/records/{ZENODO_RECORD_ID}")
+    );
+    assert_eq!(ENV_ZENODO_RECORD_URL, "ASTROBURST_ZENODO_RECORD_URL");
+    assert_eq!(zenodo_source(None).record_url, DEFAULT_ZENODO_RECORD_URL);
+    assert_eq!(
+        zenodo_source(Some(OsString::from("  "))).record_url,
+        DEFAULT_ZENODO_RECORD_URL
+    );
+    let loopback = zenodo_source(Some(OsString::from(
+        " http://127.0.0.1:8765/api/records/14692304 ",
+    )));
+    assert_eq!(
+        loopback.record_url,
+        "http://127.0.0.1:8765/api/records/14692304"
+    );
+    assert_eq!(loopback.decoded_max_bytes, SIRIL_GAIA_DECODED_MAX_BYTES);
+    assert_eq!(
+        CatType::Astrometric.record_len(),
+        Some(ASTROMETRIC_RECORD_BYTES as usize)
+    );
+    assert_eq!(SIRIL_GAIA_DECODED_MAX_BYTES, 1_601_175_680);
+    assert_eq!(SIRIL_GAIA_BZ2_BYTES, 1_142_276_749);
+}
+
+#[tokio::test]
+#[ignore]
+async fn the_real_zenodo_record_lists_the_siril_archive_and_its_published_sums() {
+    let rig = Rig::new();
+    let offer = rig
+        .store
+        .zenodo_offer(&client(), &zenodo_source(None))
+        .await
+        .unwrap();
+    assert_eq!(offer.host, "zenodo.org");
+    assert_eq!(offer.archive_bytes, SIRIL_GAIA_BZ2_BYTES);
+    assert_eq!(
+        offer.archive_sha256.as_deref(),
+        Some("846ad4b12c50865df0cb8c5b23453f22eec78bbe9969e17d669ae19eb49d421f")
+    );
+    assert_eq!(
+        offer.decoded_sha256.as_deref(),
+        Some("2fa40c93fe115235d35c5050757f2ef60a326a6f3030f87be1598c016fcb2388")
+    );
+    assert_eq!(offer.record_licence.as_deref(), Some("cc-by-4.0"));
+    assert_eq!(offer.doi.as_deref(), Some("10.5281/zenodo.14692304"));
+    assert!(!siril_dir(&rig).exists());
+    println!(
+        "real Zenodo record: {} files {:?}, archive {} bytes at {}, sha256 {:?}, decoded sha256 {:?}",
+        offer.files.len(),
+        offer.files.iter().map(|file| file.key.as_str()).collect::<Vec<_>>(),
+        offer.archive_bytes,
+        offer.archive_url,
+        offer.archive_sha256,
+        offer.decoded_sha256
+    );
+}
+
+fn siril_row(rig: &Rig, config: &AppConfig) -> DatasetReport {
+    rig.store
+        .report(config)
+        .into_iter()
+        .find(|row| row.id == SIRIL_GAIA_ID)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn forget_on_the_users_own_siril_choice_keeps_the_zenodo_download() {
+    let zenodo = zenodo_rig(Resource::new, true_sums);
+    let rig = Rig::new();
+    let consent = zenodo_consent(&rig, &zenodo).await;
+    rig.store
+        .install_siril_from_zenodo(&client(), &zenodo.source(), Some(&consent), recorder())
+        .await
+        .unwrap();
+    let mut config = AppConfig::default();
+    let downloaded = rig.store.use_downloaded_siril(&mut config).unwrap();
+    let folder = siril_dir(&rig);
+    let (kept_bytes, _) = dir_usage(&folder);
+    assert!(kept_bytes > zenodo.decoded.len() as u64);
+    assert_eq!(siril_row(&rig, &config).folder_bytes, kept_bytes);
+
+    let own = rig.path("own-siril");
+    let own_file = own.join(SIRIL_ASTROMETRIC_FILE);
+    write_file(&own_file, &siril_like_catalogue());
+    rig.store.use_siril_dir(&own, &mut config).unwrap();
+    let row = siril_row(&rig, &config);
+    assert_eq!(row.folder_bytes, kept_bytes);
+    assert_eq!(
+        row.status,
+        DatasetStatus::External {
+            path: own_file.clone(),
+            valid: true,
+            problem: None
+        }
+    );
+
+    let removed = rig.store.remove(SIRIL_GAIA_ID, &mut config).unwrap();
+    assert_eq!((removed.freed_bytes, removed.forgot_external), (0, true));
+    assert_eq!(config.siril_catalog_dir, None);
+    assert!(
+        downloaded.is_file() && fs::read(&downloaded).unwrap() == zenodo.decoded,
+        "Forget on the user's own folder deleted the Zenodo download"
+    );
+    assert_eq!(
+        rig.store.status(SIRIL_GAIA_ID, &config).unwrap(),
+        DatasetStatus::Installed {
+            path: downloaded.clone(),
+            verified: true
+        }
+    );
+
+    rig.store.use_downloaded_siril(&mut config).unwrap();
+    rig.store
+        .use_external_file(SIRIL_GAIA_ID, &own_file, &mut config)
+        .unwrap();
+    let removed = rig.store.remove(SIRIL_GAIA_ID, &mut config).unwrap();
+    assert_eq!((removed.freed_bytes, removed.forgot_external), (0, true));
+    assert!(config.external_catalogs.is_empty());
+    assert_eq!(config.siril_catalog_dir.as_deref(), folder.to_str());
+    assert_eq!(
+        rig.store.status(SIRIL_GAIA_ID, &config).unwrap(),
+        DatasetStatus::External {
+            path: downloaded.clone(),
+            valid: true,
+            problem: None
+        }
+    );
+
+    let removed = rig.store.remove(SIRIL_GAIA_ID, &mut config).unwrap();
+    assert_eq!(
+        (removed.freed_bytes, removed.forgot_external),
+        (kept_bytes, false)
+    );
+    assert_eq!(config.siril_catalog_dir, None);
+    assert!(!folder.exists());
+    assert!(own_file.is_file(), "the user's own file was deleted");
+    assert_eq!(
+        rig.store.status(SIRIL_GAIA_ID, &config).unwrap(),
+        DatasetStatus::Missing
+    );
+    println!(
+        "Forget kept the {kept_bytes}-byte Zenodo download twice, then Remove freed {} bytes",
+        removed.freed_bytes
+    );
+}
+
+#[test]
+fn forget_on_the_users_own_siril_folder_keeps_a_partial_zenodo_download() {
+    let rig = Rig::new();
+    let archive = sibling(&rig.installed(SIRIL_GAIA_ID), BZIP2_SUFFIX);
+    write_file(&sibling(&archive, ".part"), &[7; 1000]);
+    write_file(
+        &sibling(&archive, ".part.json"),
+        br#"{"version":1,"url":"https://zenodo.org/x","etag":null,"last_modified":null,"expected_size":4096,"received":1000,"started_unix_s":1}"#,
+    );
+    let own = rig.path("own-siril");
+    write_file(&own.join(SIRIL_ASTROMETRIC_FILE), &siril_like_catalogue());
+    let mut config = AppConfig::default();
+    rig.store.use_siril_dir(&own, &mut config).unwrap();
+    assert!(siril_row(&rig, &config).folder_bytes >= 1000);
+
+    let removed = rig.store.remove(SIRIL_GAIA_ID, &mut config).unwrap();
+    assert_eq!((removed.freed_bytes, removed.forgot_external), (0, true));
+    assert_eq!(
+        rig.store.status(SIRIL_GAIA_ID, &config).unwrap(),
+        DatasetStatus::Partial {
+            received: 1000,
+            total: Some(4096)
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_decode_left_by_a_crash_does_not_count_against_the_free_space_of_the_next_install() {
+    let zenodo = zenodo_rig(Resource::new, true_sums);
+    let Rig { dir, store } = Rig::new();
+    let folder = store.dataset_dir(store.spec(SIRIL_GAIA_ID).unwrap());
+    let stale = sibling(&folder.join(SIRIL_ASTROMETRIC_FILE), ".decoding");
+    write_file(&stale, &vec![0; MIB as usize]);
+    let need = zenodo.compressed.len() as u64 + SIRIL_GAIA_DECODED_MAX_BYTES;
+    let budget = need + MIB / 2;
+    let measured = folder.clone();
+    let store = store.with_free_space(Arc::new(move |_: &Path| {
+        Ok(budget.saturating_sub(dir_usage(&measured).0))
+    }));
+    let rig = Rig { dir, store };
+    let consent = zenodo_consent(&rig, &zenodo).await;
+
+    let outcome = rig
+        .store
+        .install_siril_from_zenodo(&client(), &zenodo.source(), Some(&consent), recorder())
+        .await
+        .unwrap();
+    assert_eq!(outcome.bytes, zenodo.decoded.len() as u64);
+    assert!(!stale.exists(), "the stale decode was left behind");
+}
+
+#[tokio::test]
+async fn the_zenodo_terms_name_only_the_gaia_dr3_terms_and_the_offer_carries_the_record_licence() {
+    let zenodo = zenodo_rig(Resource::new, true_sums);
+    let rig = Rig::new();
+    let offer = rig
+        .store
+        .zenodo_offer(&client(), &zenodo.source())
+        .await
+        .unwrap();
+    assert!(!GAIA_TERMS.contains("CC BY 4.0"), "{GAIA_TERMS}");
+    assert!(GAIA_TERMS.contains("CC BY-NC 3.0 IGO"), "{GAIA_TERMS}");
+    assert_eq!(offer.record_licence.as_deref(), Some("cc-by-4.0"));
+    assert_eq!(offer.host, "127.0.0.1");
+    assert_eq!(
+        url_host(&offer.archive_url).as_deref(),
+        Some(offer.host.as_str())
     );
 }

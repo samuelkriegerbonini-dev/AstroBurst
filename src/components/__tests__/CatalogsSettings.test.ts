@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { CatalogDatasetReport, CatalogInstallProgress } from "../../services/catalogStore";
-import type { InstallPhase } from "../../utils/catalogRows";
+import type { CatalogDatasetReport, CatalogInstallProgress, ZenodoOffer } from "../../services/catalogStore";
+import { USED_DOWNLOAD_NOTE, type InstallPhase } from "../../utils/catalogRows";
 
 const hooks = vi.hoisted(() => {
   type Cell = { value?: unknown; deps?: readonly unknown[]; set?: (next: unknown) => void; cleanup?: unknown };
@@ -48,7 +48,9 @@ const store = vi.hoisted(() => ({
   status: vi.fn<() => Promise<unknown[]>>(),
   remove: vi.fn<(id: string) => Promise<unknown>>(),
   cancel: vi.fn<(id: string) => Promise<boolean>>(),
-  install: vi.fn<(id: string) => Promise<unknown>>(),
+  install: vi.fn<(id: string, consent?: unknown) => Promise<unknown>>(),
+  offer: vi.fn<() => Promise<unknown>>(),
+  chooseDir: vi.fn<(dir: string) => Promise<unknown>>(),
   listener: { current: null as ((progress: CatalogInstallProgress) => void) | null },
 }));
 
@@ -69,6 +71,8 @@ vi.mock("../../services/catalogStore", async (importOriginal) => ({
   removeCatalog: store.remove,
   cancelCatalogInstall: store.cancel,
   installCatalog: store.install,
+  zenodoOffer: store.offer,
+  chooseSirilCatalogDir: store.chooseDir,
   onCatalogInstallProgress: (cb: (progress: CatalogInstallProgress) => void) => {
     store.listener.current = cb;
     return Promise.resolve(() => {});
@@ -92,6 +96,7 @@ const TIER0: CatalogDatasetReport = {
   credit: "Tycho-2 Catalogue, Høg et al. 2000, A&A 355, L27",
   url_host: null,
   folder: "C:/data/catalogs/tycho2-l6-v1",
+  folder_bytes: 0,
   free_space_bytes: 50_000 * MB,
 };
 
@@ -174,6 +179,41 @@ function autofocused(markup: string): string[] {
     .map((b) => b.replace(/<[^>]+>/g, ""));
 }
 
+const SIRIL_ZENODO: CatalogDatasetReport = { ...SIRIL, zenodo_record: "14692304" };
+
+const OFFER: ZenodoOffer = {
+  id: SIRIL.id,
+  record_url: "https://zenodo.org/api/records/14692304",
+  record_page: "https://zenodo.org/records/14692304",
+  doi: "10.5281/zenodo.14692304",
+  title: "Siril Astrometry Catalogue extracted from Gaia DR3",
+  record_licence: "cc-by-4.0",
+  gaia_terms: "Gaia-derived data: Gaia DR3 (ESA/Gaia/DPAC), whose terms are CC BY-NC 3.0 IGO.",
+  host: "zenodo.org",
+  files: [
+    { key: "uncompressed_files.sha256sum", size: 95, checksum: "md5:02e655b1d8b8db05fa561bc356dadfc8" },
+    { key: "siril_cat_healpix8_astro.dat.bz2", size: 1_142_276_749, checksum: "md5:2e62f2365023e621afbd336c82980208" },
+    { key: "siril_cat_healpix8_astro.dat.bz2.sha256sum", size: 99, checksum: "md5:ba889d7b455f857660096ea445a13953" },
+  ],
+  archive_key: "siril_cat_healpix8_astro.dat.bz2",
+  archive_url: "https://zenodo.org/api/records/14692304/files/siril_cat_healpix8_astro.dat.bz2/content",
+  archive_bytes: 1_142_276_749,
+  archive_sha256: "846ad4b12c50865df0cb8c5b23453f22eec78bbe9969e17d669ae19eb49d421f",
+  decoded_sha256: "2fa40c93fe115235d35c5050757f2ef60a326a6f3030f87be1598c016fcb2388",
+  decoded_max_bytes: 1_601_175_680,
+  resume_from: 0,
+  need_bytes: 2_743_452_429,
+  free_space_bytes: 50_000 * MB,
+  folder: "C:/data/catalogs/siril-gaia-astro-v1",
+};
+
+const INSTALLED_ZENODO: CatalogDatasetReport = {
+  ...SIRIL_ZENODO,
+  folder: OFFER.folder,
+  folder_bytes: 1_601_175_680,
+  status: { state: "installed", path: `${OFFER.folder}/siril_cat_healpix8_astro.dat`, verified: true },
+};
+
 const INSTALLED_TIER1: CatalogDatasetReport = { ...TIER1, status: { state: "installed", path: "C:/data/catalogs/2mass-l8-v1/x.abcat", verified: true } };
 
 describe("Settings > Catalogs", () => {
@@ -225,6 +265,29 @@ describe("Settings > Catalogs", () => {
 
   it("offers an existing Siril folder or file", () => {
     expect(buttons(rowMarkup(render(), SIRIL.id))).toEqual(["Use Siril folder", "Use file"]);
+  });
+
+  it("offers the Zenodo download of the Siril extract with its size, beside the folder and file", () => {
+    expect(buttons(rowMarkup(render({ reports: [SIRIL_ZENODO] }), SIRIL.id))).toEqual([
+      "Download the Siril Gaia extract (Zenodo, about 1.14 GB)",
+      "Use Siril folder",
+      "Use file",
+    ]);
+  });
+
+  it("keeps the Zenodo confirm closed until the record is read, then shows its files, the terms and the size", () => {
+    const reading = rowMarkup(render({ reports: [SIRIL_ZENODO], installs: { [SIRIL.id]: { phase: "consent" } } }), SIRIL.id);
+    expect(reading).toContain("Reading the file list from the Zenodo record...");
+    expect(reading).toMatch(/<button[^>]*disabled=""[^>]*>Accept the terms and download<\/button>/);
+    expect(autofocused(reading)).toEqual(["Not now"]);
+    const offered = rowMarkup(render({ reports: [SIRIL_ZENODO], installs: { [SIRIL.id]: { phase: "consent", offer: OFFER } } }), SIRIL.id);
+    expect(offered).toContain('aria-label="Files in the Zenodo record"');
+    expect(offered.match(/<li>/g) ?? []).toHaveLength(3);
+    expect(offered).toContain("siril_cat_healpix8_astro.dat.bz2 · 1.14 GB · md5:2e62f2365023e621afbd336c82980208");
+    expect(offered).toContain("CC BY-NC 3.0 IGO");
+    expect(offered).toContain("Zenodo publishes its SHA-256");
+    expect(buttons(offered)).toEqual(["Accept the terms and download 1.14 GB", "Not now", "Use Siril folder", "Use file"]);
+    expect(offered).not.toMatch(/disabled=""[^>]*>Accept/);
   });
 
   it("shows tier 2 online Gaia with the cache size and a Clear button", () => {
@@ -297,6 +360,16 @@ describe("Settings > Catalogs", () => {
     expect(autofocused(rowMarkup(render({ reports: [TIER1], installs: { [TIER1.id]: adopted } }), TIER1.id))).toEqual([]);
   });
 
+  it("labels the delete of a Zenodo download that is not the Siril folder Remove, with its size on disk", () => {
+    expect(buttons(rowMarkup(render({ reports: [INSTALLED_ZENODO] }), SIRIL.id))).toEqual([
+      "Use the Zenodo download",
+      "Use Siril folder",
+      "Use file",
+      "Remove",
+    ]);
+    expect(buttons(rowMarkup(render({ reports: [INSTALLED_ZENODO], armedRemove: SIRIL.id }), SIRIL.id))).toContain("Confirm: deletes 1.60 GB");
+  });
+
   it("arms Remove with what it deletes before deleting", () => {
     expect(buttons(rowMarkup(render({ reports: [INSTALLED_TIER1] }), TIER1.id))).toEqual(["Remove"]);
     expect(buttons(rowMarkup(render({ reports: [INSTALLED_TIER1], armedRemove: TIER1.id }), TIER1.id))).toEqual([
@@ -329,6 +402,7 @@ describe("Settings > Catalogs actions", () => {
     store.remove.mockReset().mockResolvedValue({ id: TIER1.id, freed_bytes: 154_140_794, forgot_external: false });
     store.cancel.mockReset().mockResolvedValue(true);
     store.install.mockReset();
+    store.offer.mockReset();
   });
 
   afterEach(() => {
@@ -384,6 +458,82 @@ describe("Settings > Catalogs actions", () => {
     expect(store.cancel).toHaveBeenCalledWith(TIER1.id);
     expect(renderSettings().installs[TIER1.id]).toEqual({ phase: "idle", note: CANCELLED_NOTE });
     expect(store.status.mock.calls.length).toBe(reads + 1);
+  });
+
+  it("reads the Zenodo record when its download is asked for and installs with the consent built from it", async () => {
+    store.status.mockResolvedValue([TIER0, SIRIL_ZENODO]);
+    store.offer.mockResolvedValue(OFFER);
+    store.install.mockResolvedValue({
+      id: SIRIL.id,
+      path: "C:/data/catalogs/siril-gaia-astro-v1/siril_cat_healpix8_astro.dat",
+      bytes: 1_450_000_000,
+      resumed_from: 0,
+      sha256_hex: "2fa4",
+      sha256_verified: true,
+      already_installed: false,
+    });
+    renderSettings();
+    await flush();
+    renderSettings().onConfirm(SIRIL.id);
+    await flush();
+    expect(store.install).not.toHaveBeenCalled();
+    renderSettings().onAsk(SIRIL.id);
+    await flush();
+    expect(store.offer).toHaveBeenCalledTimes(1);
+    expect(renderSettings().installs[SIRIL.id]).toEqual({ phase: "consent", offer: OFFER });
+    renderSettings().onConfirm(SIRIL.id);
+    await flush();
+    expect(store.install.mock.calls).toEqual([
+      [SIRIL.id, { archive_bytes: OFFER.archive_bytes, archive_sha256: OFFER.archive_sha256, licence_acknowledged: true }],
+    ]);
+    expect(renderSettings().installs[SIRIL.id]).toEqual({
+      phase: "idle",
+      note: "Installed 1.45 GB, SHA-256 verified. It is now your Siril catalogue folder.",
+    });
+  });
+
+  it("uses a verified Zenodo download already on disk without reading Zenodo, a consent or a download", async () => {
+    store.status.mockResolvedValue([TIER0, INSTALLED_ZENODO]);
+    store.chooseDir.mockReset().mockResolvedValue({ dir: OFFER.folder, path: INSTALLED_ZENODO.folder });
+    renderSettings();
+    await flush();
+    const reads = store.status.mock.calls.length;
+    renderSettings().onAsk(SIRIL.id);
+    await flush();
+    expect(store.offer).not.toHaveBeenCalled();
+    expect(store.install).not.toHaveBeenCalled();
+    expect(store.chooseDir.mock.calls).toEqual([[OFFER.folder]]);
+    expect(renderSettings().installs[SIRIL.id]).toEqual({ phase: "idle", note: USED_DOWNLOAD_NOTE });
+    expect(store.status.mock.calls.length).toBe(reads + 1);
+  });
+
+  it("does not start the Zenodo download when its record could not be read", async () => {
+    store.status.mockResolvedValue([TIER0, SIRIL_ZENODO]);
+    store.offer.mockRejectedValue(new Error("https://zenodo.org/api/records/14692304 could not be read: it answered HTTP 503"));
+    renderSettings();
+    await flush();
+    renderSettings().onAsk(SIRIL.id);
+    await flush();
+    expect(renderSettings().installs[SIRIL.id]).toEqual({
+      phase: "consent",
+      offerError: "https://zenodo.org/api/records/14692304 could not be read: it answered HTTP 503",
+    });
+    renderSettings().onConfirm(SIRIL.id);
+    await flush();
+    expect(store.install).not.toHaveBeenCalled();
+  });
+
+  it("installs the other catalogues without reading Zenodo or sending a consent", async () => {
+    store.status.mockResolvedValue([TIER0, TIER1]);
+    store.install.mockResolvedValue({ id: TIER1.id, path: "x", bytes: 154_140_794, resumed_from: 0, sha256_hex: "c9ab", sha256_verified: true, already_installed: false });
+    renderSettings();
+    await flush();
+    renderSettings().onAsk(TIER1.id);
+    await flush();
+    renderSettings().onConfirm(TIER1.id);
+    await flush();
+    expect(store.offer).not.toHaveBeenCalled();
+    expect(store.install.mock.calls).toEqual([[TIER1.id]]);
   });
 
   it("re-reads the rows when an install completes, also one this Settings did not start", async () => {

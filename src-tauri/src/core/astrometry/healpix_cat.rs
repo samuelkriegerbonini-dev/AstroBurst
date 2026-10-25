@@ -1273,7 +1273,7 @@ impl<S: ByteSource> HealpixCatalog<S> {
             g: star.mag,
             bp: None,
             rp: None,
-            bp_rp: None,
+            bp_rp: star.colour,
             parallax_mas: None,
             teff_k: star.teff_k,
         }

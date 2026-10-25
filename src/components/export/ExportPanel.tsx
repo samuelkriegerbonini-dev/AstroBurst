@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useId } from "react";
+import { useState, useCallback, useEffect, useMemo, useId, useSyncExternalStore } from "react";
 import { Save, FileDown, FolderOpen, Crosshair, Loader2, ImageIcon, Scissors, Archive } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, SectionHeader, ErrorAlert, DecimalField } from "../ui";
 import { getExportDir } from "../../infrastructure/tauri";
@@ -28,6 +28,7 @@ import {
   rgbExportPaths,
 } from "../../utils/exportSources";
 import { getWcsInfo } from "../../services/astrometry";
+import { subscribeSolvedWcs, wcsRevision } from "../../utils/solvedWcs";
 import {
   cutoutDefaultFileName,
   describeCutout,
@@ -188,6 +189,8 @@ export default function ExportPanel({
   const regionKey = useRegionKey();
   const regionDoc = useRegionDoc(regionKey);
   const selectedBox = selectedBoxRegion(regionDoc.regions, regionDoc.selectedId);
+  const readWcsRevision = () => wcsRevision(filePath);
+  const wcsRev = useSyncExternalStore(subscribeSolvedWcs, readWcsRevision, readWcsRevision);
 
   const showSaved = useCallback((section: ExportSection, path: string, onExpire?: () => void) => {
     const entry = { section, path };
@@ -222,7 +225,7 @@ export default function ExportPanel({
     return () => {
       cancelled = true;
     };
-  }, [filePath]);
+  }, [filePath, wcsRev]);
 
   const riceAvailable = riceSupportsBitpix(bitpix);
   const effectiveCompress: FitsCompression = riceEnabled && riceAvailable ? "rice" : "none";

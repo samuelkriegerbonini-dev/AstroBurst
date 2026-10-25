@@ -15,7 +15,7 @@ use super::synthetic::{
     at_most, destination, flat_frame, gradient_frame, hot_pixel_frame, noise_frame, wcs_from_cards,
     ARCSEC_PER_DEG,
 };
-use super::{healpix_provider, solve_local, CatalogProvider, LocalSolveParams};
+use super::{healpix_provider, solve_local, CatalogProvider, LocalSolveParams, RankingKey};
 use crate::core::alignment::affine::AffineAlignMethod;
 use crate::core::alignment::triangles::{ransac_affine, TriangleMatch, TriangleParams};
 use crate::core::astrometry::catalog::{observation_epoch_year, propagate_epoch, CatalogRow};
@@ -417,39 +417,42 @@ fn corpus_root() -> PathBuf {
 }
 
 fn tier_setup(tier: Tier) -> TierSetup {
-    let (env, label, depth, floor) = match tier {
+    let (env, label, depth, floor, ranking) = match tier {
         Tier::Zero => (
             ENV_TIER0,
             TIER0_LABEL,
             TIER0_DEPTH_MAG,
             TIER0_LOW_LATITUDE_FOV_DEG,
+            RankingKey::MAGNITUDE,
         ),
         Tier::One => {
             let siril = std::env::var(ENV_TIER1_KIND).is_ok_and(|kind| kind == "siril");
-            let (label, depth, default_floor) = if siril {
+            let (label, depth, default_floor, ranking) = if siril {
                 (
                     TIER1_SIRIL_LABEL,
                     TIER1_SIRIL_DEPTH_MAG,
                     TIER1_SIRIL_FLOOR_DEG,
+                    RankingKey::MAGNITUDE,
                 )
             } else {
                 (
                     TIER1_2MASS_LABEL,
                     TIER1_2MASS_DEPTH_MAG,
                     TIER1_2MASS_FLOOR_DEG,
+                    RankingKey::TWO_MASS_J_KS,
                 )
             };
             let floor = std::env::var(ENV_TIER1_FLOOR)
                 .ok()
                 .and_then(|value| value.parse::<f64>().ok())
                 .unwrap_or(default_floor);
-            (ENV_TIER1, label, depth, floor)
+            (ENV_TIER1, label, depth, floor, ranking)
         }
     };
     let path = std::env::var_os(env)
         .map(PathBuf::from)
         .unwrap_or_else(|| panic!("set {env} to the {label} catalogue file"));
-    let provider = healpix_provider(&path, label, depth)
+    let provider = healpix_provider(&path, label, depth, ranking)
         .unwrap_or_else(|error| panic!("{label} at {}: {error}", path.display()));
     TierSetup {
         label,
@@ -701,24 +704,28 @@ fn run_c1(root: &Path, setup: &TierSetup, out: &mut Vec<Outcome>) {
             entry.file.clone()
         };
         let meta = frame_meta(name, entry, truth, (width, height));
-        let scale = truth.pixel_scale_arcsec();
-        let seed = frame_seed("c1", index);
-        let mut rng = StdRng::seed_from_u64(seed);
-        let offset = C1_HINT_OFFSET_FIELDS * meta.fov_deg * rng.gen::<f64>();
-        let centre = destination(
-            truth_centre(truth, meta.region),
-            360.0 * rng.gen::<f64>(),
-            offset,
-        );
-        let hints = hints_around(
-            centre,
-            scale,
-            width.max(height),
-            observation_epoch_year(&loaded.header),
-            seed,
-        );
+        let hints = c1_hints(index, &loaded, truth, &meta);
         out.push(run_frame("c1", meta, &loaded, &hints, setup));
     }
+}
+
+fn c1_hints(index: usize, loaded: &LoadedFrame, truth: &WcsTransform, meta: &FrameMeta) -> SolveHints {
+    let (height, width) = loaded.image.dim();
+    let seed = frame_seed("c1", index);
+    let mut rng = StdRng::seed_from_u64(seed);
+    let offset = C1_HINT_OFFSET_FIELDS * meta.fov_deg * rng.gen::<f64>();
+    let centre = destination(
+        truth_centre(truth, meta.region),
+        360.0 * rng.gen::<f64>(),
+        offset,
+    );
+    hints_around(
+        centre,
+        truth.pixel_scale_arcsec(),
+        width.max(height),
+        observation_epoch_year(&loaded.header),
+        seed,
+    )
 }
 
 fn run_c2(root: &Path, setup: &TierSetup, out: &mut Vec<Outcome>) {
@@ -1197,6 +1204,56 @@ fn corpus_c1_to_c4_have_zero_false_positives() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
+const UNEVEN_MATCH_FRAME: &str = "fov30_low1.fits";
+
+#[test]
+#[ignore]
+fn corpus_fov30_low1_a_plane_field_with_an_uneven_match_fraction_solves_at_its_harness_hint() {
+    let dir = corpus_root().join("c1");
+    let manifest =
+        read_manifest(&dir).unwrap_or_else(|| panic!("{}: no manifest.json", dir.display()));
+    let (index, entry) = manifest
+        .frames
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.file == UNEVEN_MATCH_FRAME)
+        .unwrap_or_else(|| panic!("{UNEVEN_MATCH_FRAME} is not in the c1 manifest"));
+    let path = dir.join(&entry.file);
+    let loaded = load_frame(&path);
+    check_truth("c1", entry, &path, &loaded.header);
+    let truth = loaded
+        .truth
+        .as_ref()
+        .unwrap_or_else(|| panic!("c1 {}: the truth WCS does not parse", entry.file));
+    let (height, width) = loaded.image.dim();
+    let meta = frame_meta(entry.file.clone(), entry, truth, (width, height));
+    let hints = c1_hints(index, &loaded, truth, &meta);
+    let mut failures = Vec::new();
+    for tier in [Tier::Zero, Tier::One] {
+        let setup = tier_setup(tier);
+        let outcome = run_frame(
+            "c1",
+            frame_meta(entry.file.clone(), entry, truth, (width, height)),
+            &loaded,
+            &hints,
+            &setup,
+        );
+        match &outcome.solved {
+            Some(accuracy) if at_most(accuracy.worst_corner_arcsec, accuracy.tolerance_arcsec) => {}
+            Some(accuracy) => failures.push(format!(
+                "[{}] worst corner {:.3}\" outside the {:.3}\" tolerance",
+                setup.label, accuracy.worst_corner_arcsec, accuracy.tolerance_arcsec
+            )),
+            None => failures.push(format!(
+                "[{}] {}",
+                setup.label,
+                outcome.failure.as_deref().unwrap_or("unknown")
+            )),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 const ENV_FRAME: &str = "ASTROBURST_SOLVE_FRAME";
 const ENV_FRAME_OFFSET: &str = "ASTROBURST_SOLVE_HINT_OFFSET_DEG";
 const ENV_FRAME_BEARING: &str = "ASTROBURST_SOLVE_HINT_BEARING_DEG";
@@ -1363,7 +1420,12 @@ fn stage_report(
     if let Some(epoch) = epoch {
         propagate_epoch(&mut rows, epoch);
     }
-    let sky = super::ranked_sky(&rows, bright_skip, params.catalogue_stars);
+    let sky = super::ranked_sky(
+        &rows,
+        bright_skip,
+        params.catalogue_stars,
+        setup.provider.ranking_key(),
+    );
     let plane: Vec<(f64, f64)> = sky
         .iter()
         .filter_map(|&(ra, dec)| {
@@ -1415,7 +1477,7 @@ fn stage_report(
         usable.len(),
         side.stars.len()
     );
-    let deep = super::ranked_sky(&rows, 0, 300);
+    let deep = super::ranked_sky(&rows, 0, 300, setup.provider.ranking_key());
     let mags: Vec<f64> = {
         let mut sorted: Vec<f64> = rows.iter().filter_map(|row| row.g).collect();
         sorted.sort_by(f64::total_cmp);
@@ -1738,4 +1800,137 @@ fn corpus_single_frame_stage_diagnostics() {
             Err(failure) => eprintln!("[{}] open gate: {failure:?}", setup.label),
         }
     }
+}
+
+const ENV_MC_SET: &str = "ASTROBURST_SOLVE_MC_SET";
+const ENV_MC_OFFSET_DEG: &str = "ASTROBURST_SOLVE_MC_OFFSET_DEG";
+const ENV_MC_OFFSET_FIELDS: &str = "ASTROBURST_SOLVE_MC_OFFSET_FIELDS";
+const ENV_MC_BEARINGS: &str = "ASTROBURST_SOLVE_MC_BEARINGS";
+const ENV_MC_BIASES: &str = "ASTROBURST_SOLVE_MC_BIASES";
+const ENV_MC_ONLY: &str = "ASTROBURST_SOLVE_MC_ONLY";
+const MC_FIRST_BEARING_DEG: f64 = 17.0;
+
+fn hints_with_bias(
+    centre: (f64, f64),
+    scale_arcsec: f64,
+    long_side_px: usize,
+    epoch_year: Option<f64>,
+    bias: f64,
+) -> SolveHints {
+    let nominal = scale_arcsec * (1.0 + bias);
+    SolveHints {
+        centre: Some(Pointing {
+            ra: centre.0,
+            dec: centre.1,
+            source: "corpus".to_string(),
+        }),
+        scale: Some(ScaleRange {
+            low_arcsec: nominal * (1.0 - HINT_SCALE_MARGIN),
+            high_arcsec: nominal * (1.0 + HINT_SCALE_MARGIN),
+            source: "corpus".to_string(),
+        }),
+        fov_deg: Some(long_side_px as f64 * nominal / ARCSEC_PER_DEG),
+        epoch_year,
+        ..SolveHints::default()
+    }
+}
+
+#[test]
+#[ignore]
+fn corpus_hint_monte_carlo_counts_solves_and_false_positives() {
+    let root = corpus_root();
+    let set = std::env::var(ENV_MC_SET).unwrap_or_else(|_| "c2".to_string());
+    let set_name: &'static str = if set == "c1" { "c1" } else { "c2" };
+    let bearings = env_f64(ENV_MC_BEARINGS, 4.0).max(1.0) as usize;
+    let offset_fields = std::env::var(ENV_MC_OFFSET_FIELDS)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok());
+    let offset_deg = env_f64(ENV_MC_OFFSET_DEG, 2.0);
+    let biases: Vec<f64> = std::env::var(ENV_MC_BIASES)
+        .unwrap_or_else(|_| "-0.05,-0.025,0,0.025,0.05".to_string())
+        .split(',')
+        .filter_map(|value| value.trim().parse::<f64>().ok())
+        .collect();
+    let only: Option<Vec<String>> = std::env::var(ENV_MC_ONLY)
+        .ok()
+        .map(|list| list.split(',').map(|name| name.trim().to_string()).collect());
+    let tiers: Vec<TierSetup> = [(ENV_TIER0, Tier::Zero), (ENV_TIER1, Tier::One)]
+        .into_iter()
+        .filter(|(env, _)| std::env::var_os(env).is_some())
+        .map(|(_, tier)| tier_setup(tier))
+        .collect();
+    assert!(!tiers.is_empty(), "set {ENV_TIER0} and/or {ENV_TIER1}");
+    let dir = root.join(&set);
+    let manifest =
+        read_manifest(&dir).unwrap_or_else(|| panic!("{}: no manifest.json", dir.display()));
+    let mut totals = vec![(0usize, 0usize, 0usize, 0usize); tiers.len()];
+    for entry in &manifest.frames {
+        if only
+            .as_ref()
+            .is_some_and(|names| !names.iter().any(|name| *name == entry.file))
+        {
+            continue;
+        }
+        let path = dir.join(&entry.file);
+        let loaded = load_frame(&path);
+        let truth = loaded
+            .truth
+            .as_ref()
+            .unwrap_or_else(|| panic!("{set} {}: the truth WCS does not parse", entry.file));
+        let (height, width) = loaded.image.dim();
+        let probe = frame_meta(entry.file.clone(), entry, truth, (width, height));
+        let distance = offset_fields.map_or(offset_deg, |fields| fields * probe.fov_deg);
+        let centre = truth_centre(truth, probe.region);
+        for b in 0..bearings {
+            let bearing = 360.0 * b as f64 / bearings as f64 + MC_FIRST_BEARING_DEG;
+            let hint_centre = destination(centre, bearing, distance);
+            for &bias in &biases {
+                let hints = hints_with_bias(
+                    hint_centre,
+                    truth.pixel_scale_arcsec(),
+                    width.max(height),
+                    observation_epoch_year(&loaded.header),
+                    bias,
+                );
+                for (t, setup) in tiers.iter().enumerate() {
+                    let meta = frame_meta(entry.file.clone(), entry, truth, (width, height));
+                    let outcome = run_frame(set_name, meta, &loaded, &hints, setup);
+                    totals[t].0 += 1;
+                    if let Some(accuracy) = &outcome.solved {
+                        totals[t].1 += 1;
+                        let target = if set_name == "c2" {
+                            C2_MAX_CORNER_PX
+                        } else {
+                            accuracy.tolerance_arcsec / truth.pixel_scale_arcsec()
+                        };
+                        if accuracy.worst_corner_px <= target {
+                            totals[t].2 += 1;
+                        }
+                        if outcome.is_false_positive() {
+                            totals[t].3 += 1;
+                            eprintln!(
+                                "MC-FP [{}] {} bearing {bearing:.0} bias {bias:+.3}: {}",
+                                setup.label,
+                                entry.file,
+                                outcome.line()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (t, setup) in tiers.iter().enumerate() {
+        eprintln!(
+            "MC [{}] set {set} offset {}: {} runs, {} solved, {} within the corner target, {} false positives",
+            setup.label,
+            offset_fields.map_or(format!("{offset_deg} deg"), |fields| format!("{fields} fields")),
+            totals[t].0,
+            totals[t].1,
+            totals[t].2,
+            totals[t].3
+        );
+    }
+    let false_positives: usize = totals.iter().map(|t| t.3).sum();
+    assert_eq!(false_positives, 0, "wrong solutions were accepted");
 }

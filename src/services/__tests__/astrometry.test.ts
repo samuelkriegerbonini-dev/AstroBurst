@@ -10,6 +10,7 @@ import {
   cancelPlateSolve,
   getSolveHints,
   plateSolve,
+  refineWithGaia,
   skySeparation,
   worldToPixel,
   writeSolvedWcs,
@@ -115,6 +116,48 @@ describe("writeSolvedWcs", () => {
     withPreviewMock.mockResolvedValue({});
     await writeSolvedWcs("C:/d/light.fits", [], "D:/keep");
     expect(withPreviewMock).toHaveBeenCalledWith("write_solved_wcs_cmd", "D:/keep", { path: "C:/d/light.fits", wcsCards: [] });
+  });
+});
+
+describe("refineWithGaia", () => {
+  beforeEach(() => typedInvokeMock.mockReset().mockResolvedValue({}));
+
+  it("pins gaia_refine_wcs_cmd with the solve's cards, a typed epoch and the model", async () => {
+    await refineWithGaia("C:/d/light.fits", { wcsCards: [["CRVAL1", "80.65"]], epochYear: 1990.5, model: "rshift" });
+    expect(typedInvokeMock).toHaveBeenCalledWith("gaia_refine_wcs_cmd", {
+      path: "C:/d/light.fits",
+      wcsCards: [["CRVAL1", "80.65"]],
+      epochYear: 1990.5,
+      model: "rshift",
+    });
+  });
+
+  it("lets the command read the file's own WCS, the header epoch and the default model when nothing is given", async () => {
+    await refineWithGaia("C:/d/light.fits", { wcsCards: [] });
+    expect(typedInvokeMock).toHaveBeenCalledWith("gaia_refine_wcs_cmd", {
+      path: "C:/d/light.fits",
+      wcsCards: null,
+      epochYear: null,
+      model: null,
+    });
+  });
+});
+
+describe("writeSolvedWcs with a Gaia DR3 tie", () => {
+  beforeEach(() => withPreviewMock.mockReset().mockResolvedValue({}));
+
+  it("passes the tie's HISTORY lines for the written copy", async () => {
+    await writeSolvedWcs("C:/d/light.fits", [["CRVAL1", "80.65"]], undefined, ["Gaia DR3 tie: rshift"]);
+    expect(withPreviewMock).toHaveBeenCalledWith("write_solved_wcs_cmd", undefined, {
+      path: "C:/d/light.fits",
+      wcsCards: [["CRVAL1", "80.65"]],
+      gaiaHistory: ["Gaia DR3 tie: rshift"],
+    });
+  });
+
+  it("sends no HISTORY argument for a plain solve", async () => {
+    await writeSolvedWcs("C:/d/light.fits", [], undefined, []);
+    expect(withPreviewMock).toHaveBeenCalledWith("write_solved_wcs_cmd", undefined, { path: "C:/d/light.fits", wcsCards: [] });
   });
 });
 

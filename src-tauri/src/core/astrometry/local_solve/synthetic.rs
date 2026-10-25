@@ -2,7 +2,7 @@ use ndarray::Array2;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::{CatalogProvider, Detection, FieldSize, SkyPair};
+use super::{CatalogProvider, Detection, FieldSize, RankingKey, SkyPair};
 use crate::core::analysis::star_detection::DetectedStar;
 use crate::core::astrometry::catalog::CatalogRow;
 use crate::core::astrometry::solve_hints::{Pointing, ScaleRange, SolveHints};
@@ -26,12 +26,22 @@ pub(crate) struct SyntheticProvider {
     label: &'static str,
     rows: Vec<CatalogRow>,
     depth: f64,
+    ranking: RankingKey,
 }
 
 impl SyntheticProvider {
     pub(crate) fn new(label: &'static str, mut rows: Vec<CatalogRow>, depth: f64) -> Self {
         rows.sort_by(|a, b| a.dec.total_cmp(&b.dec));
-        Self { label, rows, depth }
+        Self {
+            label,
+            rows,
+            depth,
+            ranking: RankingKey::MAGNITUDE,
+        }
+    }
+
+    pub(crate) fn with_ranking(self, ranking: RankingKey) -> Self {
+        Self { ranking, ..self }
     }
 
     pub(crate) fn uniform(
@@ -97,6 +107,10 @@ impl CatalogProvider for SyntheticProvider {
     fn depth_mag(&self) -> f64 {
         self.depth
     }
+
+    fn ranking_key(&self) -> RankingKey {
+        self.ranking
+    }
 }
 
 pub(crate) fn at_most(value: f64, limit: f64) -> bool {
@@ -118,6 +132,46 @@ pub(crate) fn catalog_row(index: usize, ra: f64, dec: f64, mag: Option<f64>) -> 
         bp_rp: None,
         parallax_mas: None,
         teff_k: None,
+    }
+}
+
+pub(crate) struct ColouredField {
+    pub(crate) infrared: Vec<CatalogRow>,
+    pub(crate) optical: Vec<CatalogRow>,
+}
+
+pub(crate) struct ColourLocus {
+    pub(crate) intrinsic_colour: (f64, f64),
+    pub(crate) intrinsic_slope: f64,
+    pub(crate) intrinsic_offset: f64,
+    pub(crate) reddening: (f64, f64),
+    pub(crate) reddening_slope: f64,
+    pub(crate) scatter: f64,
+}
+
+pub(crate) fn coloured_rows(optical: &[CatalogRow], locus: &ColourLocus, seed: u64) -> ColouredField {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let uniform =
+        |rng: &mut StdRng, (low, high): (f64, f64)| low + (high - low) * rng.gen::<f64>();
+    let infrared = optical
+        .iter()
+        .map(|row| {
+            let intrinsic = uniform(&mut rng, locus.intrinsic_colour);
+            let reddening = uniform(&mut rng, locus.reddening);
+            let optical_minus_infrared = locus.intrinsic_offset
+                + locus.intrinsic_slope * intrinsic
+                + locus.reddening_slope * reddening
+                + locus.scatter * gaussian(&mut rng);
+            CatalogRow {
+                g: row.g.map(|r| r - optical_minus_infrared),
+                bp_rp: Some(intrinsic + reddening),
+                ..row.clone()
+            }
+        })
+        .collect();
+    ColouredField {
+        infrared,
+        optical: optical.to_vec(),
     }
 }
 

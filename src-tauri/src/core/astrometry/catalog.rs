@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::core::astrometry::catalog_disk;
+use crate::core::astrometry::gaia_tie::GaiaRow;
 use crate::core::astrometry::spectral::mid_exposure_jd;
 use crate::core::astrometry::time::JD_J2000;
 use crate::core::astrometry::wcs::angular_separation;
@@ -15,12 +16,15 @@ use crate::types::header::HduHeader;
 pub const GAIA_REFERENCE_EPOCH_YEAR: f64 = 2016.0;
 pub const DEFAULT_MAX_ROWS: usize = 5000;
 pub const CATALOG_CACHE_CAPACITY: usize = 16;
+pub const TIE_CACHE_CAPACITY: usize = 8;
 pub const ZERO_POINT_CLIP_SIGMA: f64 = 3.0;
 pub const ZERO_POINT_CLIP_ITERATIONS: usize = 5;
 pub const GAIA_VIZIER_TABLE: &str = "I/355/gaiadr3";
 pub const GAIA_TSV_COLUMNS: &str = "Source,RA_ICRS,DE_ICRS,pmRA,pmDE,Plx,Gmag,BPmag,RPmag,BP-RP";
+pub const GAIA_TIE_TSV_COLUMNS: &str = "Source,RA_ICRS,DE_ICRS,e_RA_ICRS,e_DE_ICRS,pmRA,e_pmRA,pmDE,e_pmDE,Plx,e_Plx,RApmRAcor,DEpmDEcor,RUWE,sepsi,Solved,Dup,IPDfmp,Gmag,BP-RP";
 pub const VIZIER_ASU_TSV_URL: &str = "https://vizier.cds.unistra.fr/viz-bin/asu-tsv";
 pub const VIZIER_TIMEOUT_SECS: u64 = 30;
+pub const VIZIER_TIE_TIMEOUT_SECS: u64 = 150;
 pub const MIN_CONE_RADIUS_DEG: f64 = 0.001;
 pub const MAX_CONE_RADIUS_DEG: f64 = 5.0;
 pub const ENV_VIZIER_URL: &str = "ASTROBURST_VIZIER_URL";
@@ -92,14 +96,26 @@ pub struct CatalogHit {
     pub source: CatalogSource,
 }
 
-impl CatalogHit {
-    pub fn source_name(&self) -> &'static str {
-        match self.source {
+impl CatalogSource {
+    pub fn name(self) -> &'static str {
+        match self {
             CatalogSource::Network => "network",
             CatalogSource::Memory => "memory",
             CatalogSource::Disk => "disk",
         }
     }
+}
+
+impl CatalogHit {
+    pub fn source_name(&self) -> &'static str {
+        self.source.name()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TieHit {
+    pub rows: Arc<Vec<GaiaRow>>,
+    pub source: CatalogSource,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -221,6 +237,62 @@ pub fn parse_gaia_tsv(body: &str) -> Result<Vec<CatalogRow>, String> {
             bp_rp,
             parallax_mas: cell_f64(&fields, map.parallax),
             teff_k: None,
+        });
+    }
+    Ok(rows)
+}
+
+pub fn parse_gaia_tie_tsv(body: &str) -> Result<Vec<GaiaRow>, String> {
+    let mut columns: Option<Vec<String>> = None;
+    let mut rows = Vec::new();
+    for raw in body.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = split_fields(line);
+        let Some(names) = &columns else {
+            column_map(&fields)?;
+            columns = Some(fields.iter().map(|f| f.to_string()).collect());
+            continue;
+        };
+        if is_rule_line(&fields) {
+            continue;
+        }
+        let col = |name: &str| names.iter().position(|n| n == name);
+        let value = |name: &str| cell_f64(&fields, col(name));
+        let (Some(ra), Some(dec)) = (value("RA_ICRS"), value("DE_ICRS")) else {
+            continue;
+        };
+        if !(0.0..360.0).contains(&ra) || !(-90.0..=90.0).contains(&dec) {
+            continue;
+        }
+        let id = col("Source")
+            .and_then(|c| fields.get(c))
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| fallback_id(ra, dec));
+        rows.push(GaiaRow {
+            id,
+            ra_deg: ra,
+            dec_deg: dec,
+            pm_ra_masyr: value("pmRA"),
+            pm_dec_masyr: value("pmDE"),
+            parallax_mas: value("Plx"),
+            e_ra_mas: value("e_RA_ICRS"),
+            e_dec_mas: value("e_DE_ICRS"),
+            e_pm_ra_masyr: value("e_pmRA"),
+            e_pm_dec_masyr: value("e_pmDE"),
+            e_parallax_mas: value("e_Plx"),
+            ra_pm_ra_corr: value("RApmRAcor"),
+            dec_pm_dec_corr: value("DEpmDEcor"),
+            ruwe: value("RUWE"),
+            solved: value("Solved").filter(|v| (0.0..=255.0).contains(v)).map(|v| v as u8),
+            dup: value("Dup").map(|v| v != 0.0),
+            ipd_frac_multi_peak: value("IPDfmp"),
+            sepsi: value("sepsi"),
+            g: value("Gmag"),
+            bp_rp: value("BP-RP"),
         });
     }
     Ok(rows)
@@ -477,8 +549,10 @@ pub fn fit_zero_point(
 
 pub type CatalogCacheKey = (i64, i64, i64, Option<i64>, usize);
 
-static CATALOG_CACHE: LazyLock<Mutex<Vec<(CatalogCacheKey, Arc<Vec<CatalogRow>>)>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
+type ConeEntries<T> = Mutex<Vec<(CatalogCacheKey, Arc<Vec<T>>)>>;
+
+static CATALOG_CACHE: LazyLock<ConeEntries<CatalogRow>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static TIE_CACHE: LazyLock<ConeEntries<GaiaRow>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 fn quantize(value: f64, quantum: f64) -> i64 {
     (value / quantum).round() as i64
@@ -494,8 +568,8 @@ pub fn catalog_cache_key(q: &ConeQuery) -> CatalogCacheKey {
     )
 }
 
-fn cached_rows(key: &CatalogCacheKey) -> Option<Arc<Vec<CatalogRow>>> {
-    let mut cache = CATALOG_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+fn remembered<T>(cache: &ConeEntries<T>, key: &CatalogCacheKey) -> Option<Arc<Vec<T>>> {
+    let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let pos = cache.iter().position(|(k, _)| k == key)?;
     let entry = cache.remove(pos);
     let rows = Arc::clone(&entry.1);
@@ -503,15 +577,53 @@ fn cached_rows(key: &CatalogCacheKey) -> Option<Arc<Vec<CatalogRow>>> {
     Some(rows)
 }
 
-fn store_rows(key: CatalogCacheKey, rows: Vec<CatalogRow>) -> Arc<Vec<CatalogRow>> {
+fn remember<T>(cache: &ConeEntries<T>, capacity: usize, key: CatalogCacheKey, rows: Vec<T>) -> Arc<Vec<T>> {
     let rows = Arc::new(rows);
-    let mut cache = CATALOG_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.retain(|(k, _)| *k != key);
-    while cache.len() >= CATALOG_CACHE_CAPACITY {
+    while cache.len() >= capacity {
         cache.remove(0);
     }
     cache.push((key, Arc::clone(&rows)));
     rows
+}
+
+fn cached_rows(key: &CatalogCacheKey) -> Option<Arc<Vec<CatalogRow>>> {
+    remembered(&CATALOG_CACHE, key)
+}
+
+fn store_rows(key: CatalogCacheKey, rows: Vec<CatalogRow>) -> Arc<Vec<CatalogRow>> {
+    remember(&CATALOG_CACHE, CATALOG_CACHE_CAPACITY, key, rows)
+}
+
+fn now_unix_s() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+pub fn query_gaia_tie_cached_in<F>(dir: Option<&Path>, q: &ConeQuery, fetch: F) -> Result<TieHit, String>
+where
+    F: FnOnce(&ConeQuery) -> Result<String, String>,
+{
+    let key = catalog_cache_key(q);
+    if let Some(rows) = remembered(&TIE_CACHE, &key) {
+        return Ok(TieHit { rows, source: CatalogSource::Memory });
+    }
+    if let Some(rows) = dir.and_then(|d| catalog_disk::load_tie(d, &key, parse_gaia_tie_tsv)) {
+        return Ok(TieHit { rows: remember(&TIE_CACHE, TIE_CACHE_CAPACITY, key, rows), source: CatalogSource::Disk });
+    }
+    let tsv = fetch(q)?;
+    let rows = parse_gaia_tie_tsv(&tsv)?;
+    if let Some(d) = dir.filter(|_| !rows.is_empty()) {
+        if let Err(e) = catalog_disk::store_tie(d, &key, q, &tsv, now_unix_s()) {
+            log::warn!("catalog cache: could not store {} in {} ({})", catalog_disk::tie_file_name(&key), d.display(), e);
+        }
+    }
+    Ok(TieHit { rows: remember(&TIE_CACHE, TIE_CACHE_CAPACITY, key, rows), source: CatalogSource::Network })
+}
+
+#[cfg(test)]
+pub fn forget_tie_cones() {
+    TIE_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
 }
 
 pub fn query_gaia_cached_in<F>(dir: Option<&Path>, q: &ConeQuery, fetch: F) -> Result<CatalogHit, String>
@@ -527,8 +639,7 @@ where
     }
     let rows = fetch(q)?;
     if let Some(d) = dir.filter(|_| !rows.is_empty()) {
-        let now_unix_s = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        if let Err(e) = catalog_disk::store(d, &key, q, &rows, now_unix_s) {
+        if let Err(e) = catalog_disk::store(d, &key, q, &rows, now_unix_s()) {
             log::warn!("catalog cache: could not store {} in {} ({})", catalog_disk::file_name(&key), d.display(), e);
         }
     }
@@ -587,13 +698,17 @@ pub fn vizier_url() -> &'static str {
 }
 
 pub fn vizier_query_params(q: &ConeQuery) -> Vec<(&'static str, String)> {
+    vizier_cone_params(q, GAIA_TSV_COLUMNS)
+}
+
+pub fn vizier_cone_params(q: &ConeQuery, columns: &str) -> Vec<(&'static str, String)> {
     let radius = q.radius_deg.clamp(MIN_CONE_RADIUS_DEG, MAX_CONE_RADIUS_DEG);
     let mut params = vec![
         ("-source", GAIA_VIZIER_TABLE.to_string()),
         ("-c", format!("{:.6} {:+.6}", q.ra, q.dec)),
         ("-c.r", format!("{:.4}", radius)),
         ("-c.u", "deg".to_string()),
-        ("-out", GAIA_TSV_COLUMNS.to_string()),
+        ("-out", columns.to_string()),
         ("-out.max", q.max_rows.max(1).to_string()),
         ("-sort", "Gmag".to_string()),
     ];
@@ -613,6 +728,16 @@ pub fn query_gaia(q: &ConeQuery) -> Result<Vec<CatalogRow>, String> {
     query_gaia_from(vizier_url(), q)
 }
 
+#[cfg(not(feature = "vizier"))]
+pub fn query_gaia_tie_tsv(_q: &ConeQuery) -> Result<String, String> {
+    Err("Gaia DR3 query requires the 'vizier' feature".into())
+}
+
+#[cfg(feature = "vizier")]
+pub fn query_gaia_tie_tsv(q: &ConeQuery) -> Result<String, String> {
+    vizier_tsv_from(vizier_url(), q, GAIA_TIE_TSV_COLUMNS, VIZIER_TIE_TIMEOUT_SECS)
+}
+
 #[cfg(feature = "vizier")]
 fn vizier_request_failure(error: reqwest::Error) -> String {
     let host = error.url().and_then(|url| {
@@ -630,13 +755,27 @@ fn vizier_request_failure(error: reqwest::Error) -> String {
 
 #[cfg(feature = "vizier")]
 fn query_gaia_from(url: &str, q: &ConeQuery) -> Result<Vec<CatalogRow>, String> {
+    let body = vizier_tsv_from(url, q, GAIA_TSV_COLUMNS, VIZIER_TIMEOUT_SECS)?;
+    let rows = parse_gaia_tsv(&body)?;
+    log::info!(
+        "Gaia DR3 via VizieR: {} rows within {:.3} deg of ({:.4}, {:+.4})",
+        rows.len(),
+        q.radius_deg,
+        q.ra,
+        q.dec
+    );
+    Ok(rows)
+}
+
+#[cfg(feature = "vizier")]
+fn vizier_tsv_from(url: &str, q: &ConeQuery, columns: &str, timeout_secs: u64) -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(VIZIER_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .user_agent(concat!("AstroBurst/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("HTTP client init failed: {}", e))?;
 
-    let params = vizier_query_params(q);
+    let params = vizier_cone_params(q, columns);
     let response = client
         .get(url)
         .query(&params)
@@ -647,18 +786,9 @@ fn query_gaia_from(url: &str, q: &ConeQuery) -> Result<Vec<CatalogRow>, String> 
         return Err(format!("VizieR returned HTTP {}", response.status()));
     }
 
-    let body = response
+    response
         .text()
-        .map_err(|e| format!("VizieR response read failed: {}", e))?;
-    let rows = parse_gaia_tsv(&body)?;
-    log::info!(
-        "Gaia DR3 via VizieR: {} rows within {:.3} deg of ({:.4}, {:+.4})",
-        rows.len(),
-        q.radius_deg,
-        q.ra,
-        q.dec
-    );
-    Ok(rows)
+        .map_err(|e| format!("VizieR response read failed: {}", e))
 }
 
 #[cfg(test)]
@@ -1161,5 +1291,91 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         let params = vizier_query_params(&open);
         assert!(params.iter().all(|(k, _)| *k != "Gmag"));
         assert_eq!(params.iter().find(|(k, _)| *k == "-c.r").unwrap().1, "5.0000");
+    }
+
+    const TIE_TSV: &str = "#\n#   synthetic cone in the VizieR asu-tsv layout\n\
+Source\tRA_ICRS\tDE_ICRS\te_RA_ICRS\te_DE_ICRS\tpmRA\te_pmRA\tpmDE\te_pmDE\tPlx\te_Plx\tRApmRAcor\tDEpmDEcor\tRUWE\tsepsi\tSolved\tDup\tIPDfmp\tGmag\tBP-RP\n\
+ \tdeg\tdeg\tmas\tmas\tmas/yr\tmas/yr\tmas/yr\tmas/yr\tmas\tmas\t \t \t \t \t \t \t \tmag\tmag\n\
+----\t------\t------\t----\t----\t----\t----\t----\t----\t----\t----\t----\t----\t----\t----\t--\t-\t---\t----\t----\n\
+1001\t080.10000000000\t-69.50000000000\t 0.2500\t 0.2400\t    1.500\t 0.300\t    1.700\t 0.350\t   0.9000\t 0.2800\t-0.0100\t-0.4500\t  1.200\t 6.000e+00\t95\t0\t  0\t19.000000\t\n\
+1002\t080.20000000000\t-69.60000000000\t 0.1000\t 0.1000\t\t\t\t\t\t\t\t\t  0.950\t 0.000e+00\t3\t1\t 12\t17.500000\t 1.200000\n\
+not a row\n";
+
+    #[test]
+    fn the_tie_cone_parses_every_quality_column_and_leaves_blank_cells_empty() {
+        let rows = parse_gaia_tie_tsv(TIE_TSV).unwrap();
+        assert_eq!(rows.len(), 2);
+        let full = &rows[0];
+        assert_eq!(full.id, "1001");
+        assert_eq!((full.ra_deg, full.dec_deg), (80.1, -69.5));
+        assert_eq!((full.e_ra_mas, full.e_dec_mas), (Some(0.25), Some(0.24)));
+        assert_eq!((full.pm_ra_masyr, full.pm_dec_masyr), (Some(1.5), Some(1.7)));
+        assert_eq!((full.e_pm_ra_masyr, full.e_pm_dec_masyr), (Some(0.3), Some(0.35)));
+        assert_eq!((full.parallax_mas, full.e_parallax_mas), (Some(0.9), Some(0.28)));
+        assert_eq!((full.ra_pm_ra_corr, full.dec_pm_dec_corr), (Some(-0.01), Some(-0.45)));
+        assert_eq!((full.ruwe, full.sepsi), (Some(1.2), Some(6.0)));
+        assert_eq!((full.solved, full.dup, full.ipd_frac_multi_peak), (Some(95), Some(false), Some(0.0)));
+        assert_eq!((full.g, full.bp_rp), (Some(19.0), None));
+        let two_parameter = &rows[1];
+        assert_eq!((two_parameter.pm_ra_masyr, two_parameter.e_pm_dec_masyr, two_parameter.parallax_mas), (None, None, None));
+        assert_eq!((two_parameter.solved, two_parameter.dup, two_parameter.ipd_frac_multi_peak), (Some(3), Some(true), Some(12.0)));
+        assert_eq!(two_parameter.bp_rp, Some(1.2));
+    }
+
+    #[test]
+    fn the_tie_cone_refuses_a_table_without_positions() {
+        let err = parse_gaia_tie_tsv("Source\tGmag\n1\t12.0\n").unwrap_err();
+        assert_eq!(err, "VizieR header line has no RA_ICRS column");
+    }
+
+    #[test]
+    fn the_tie_cone_asks_vizier_for_the_quality_columns() {
+        let q = ConeQuery { mag_limit: Some(21.0), max_rows: 1709, ..ConeQuery::new(80.657, -69.518, 0.029) };
+        let params = vizier_cone_params(&q, GAIA_TIE_TSV_COLUMNS);
+        let get = |k: &str| params.iter().find(|(key, _)| *key == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("-out"), Some(GAIA_TIE_TSV_COLUMNS));
+        assert_eq!(get("-sort"), Some("Gmag"));
+        assert_eq!(get("-out.max"), Some("1709"));
+        assert_eq!(get("Gmag"), Some("<21.00"));
+        for column in ["e_RA_ICRS", "e_pmRA", "e_pmDE", "e_Plx", "RUWE", "sepsi", "Solved", "Dup", "IPDfmp", "RApmRAcor", "DEpmDEcor"] {
+            assert!(GAIA_TIE_TSV_COLUMNS.split(',').any(|c| c == column), "{column} missing");
+        }
+        assert_eq!(vizier_query_params(&q), vizier_cone_params(&q, GAIA_TSV_COLUMNS));
+    }
+
+    #[cfg(feature = "vizier")]
+    #[test]
+    fn the_tie_cone_returns_the_vizier_body_for_the_disk_cache() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut chunk).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+            }
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/tab-separated-values\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                TIE_TSV.len(),
+                TIE_TSV
+            );
+            stream.write_all(reply.as_bytes()).unwrap();
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        let q = ConeQuery { mag_limit: Some(21.0), max_rows: 200, ..ConeQuery::new(80.1, -69.5, 0.03) };
+
+        let body =
+            vizier_tsv_from(&format!("http://127.0.0.1:{port}/viz-bin/asu-tsv"), &q, GAIA_TIE_TSV_COLUMNS, VIZIER_TIE_TIMEOUT_SECS).unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.contains("RUWE"), "{request}");
+        assert!(request.contains("IPDfmp"), "{request}");
+        assert_eq!(body, TIE_TSV);
     }
 }

@@ -4,6 +4,8 @@ import type {
   CatalogInstallProgress,
   CatalogKind,
   CatalogRemoved,
+  ZenodoFile,
+  ZenodoOffer,
 } from "../services/catalogStore";
 import { formatDecimalBytes } from "./format";
 
@@ -11,13 +13,15 @@ export type CatalogTier = 0 | 1 | 2;
 
 export type InstallPhase =
   | { phase: "idle"; note?: string; returnFocus?: boolean }
-  | { phase: "consent" }
+  | { phase: "consent"; offer?: ZenodoOffer; offerError?: string }
   | { phase: "running"; stage: string; current: number; total: number; percent: number; cancelling: boolean; adopted?: boolean }
   | { phase: "failed"; message: string };
 
 export type InstallAction =
   | { type: "ask"; id: string }
   | { type: "decline"; id: string }
+  | { type: "offer"; id: string; offer: ZenodoOffer }
+  | { type: "offerFailed"; id: string; message: string }
   | { type: "start"; id: string }
   | { type: "progress"; progress: CatalogInstallProgress }
   | { type: "cancel"; id: string }
@@ -37,6 +41,10 @@ const CANCELLED_NOTE = "Cancelled; what was downloaded is kept and the next down
 const NO_VALUE = "--";
 const VERSION_SUFFIX = /-(v\d+)$/;
 const SIRIL_FILE = "siril_cat_healpix8_astro.dat";
+
+export const SIRIL_GAIA_ID = "siril-gaia-astro-v1";
+export const ZENODO_READING_TEXT = "Reading the file list from the Zenodo record...";
+export const USED_DOWNLOAD_NOTE = "Using the verified Zenodo download; it is now your Siril catalogue folder.";
 
 const TIER_OF_KIND: Readonly<Record<CatalogKind, CatalogTier | null>> = {
   tier0_bundled: 0,
@@ -104,11 +112,46 @@ interface StateView {
   resume?: boolean;
 }
 
+function decodingWithoutTotal(phase: Extract<InstallPhase, { phase: "running" }>): boolean {
+  return phase.stage === "decode" && phase.total <= 0;
+}
+
 function runningView(phase: Extract<InstallPhase, { phase: "running" }>): StateView {
   const verb = phase.stage === "decode" ? "Decoding" : "Downloading";
   const amount = phase.total > 0 ? ` (${megabytes(phase.current)} of ${megabytes(phase.total)} MB)` : "";
-  const text = phase.cancelling ? "Cancelling..." : `${verb} ${phase.percent} %${amount}`;
+  const progress = decodingWithoutTotal(phase) ? `Decoding: ${megabytes(phase.current)} MB written` : `${verb} ${phase.percent} %${amount}`;
+  const text = phase.cancelling ? "Cancelling..." : progress;
   return { text, tone: "muted", actions: { cancel: !phase.cancelling } };
+}
+
+export function offersZenodo(report: CatalogDatasetReport): boolean {
+  return report.id === SIRIL_GAIA_ID && Boolean(report.zenodo_record);
+}
+
+function isInsideFolder(path: string, folder: string): boolean {
+  const normal = (text: string) => text.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const inside = normal(path);
+  const root = normal(folder);
+  return root.length > 0 && inside.startsWith(`${root}/`);
+}
+
+export function isZenodoDownload(report: CatalogDatasetReport): boolean {
+  return report.id === SIRIL_GAIA_ID && report.status.state === "external" && isInsideFolder(report.status.path, report.folder);
+}
+
+export function registersZenodoDownload(report: CatalogDatasetReport): boolean {
+  return offersZenodo(report) && report.status.state === "installed" && report.status.verified;
+}
+
+function keptDownloadText(report: CatalogDatasetReport): string {
+  const status = report.status;
+  if (status.state !== "external" || report.folder_bytes <= 0 || isInsideFolder(status.path, report.folder)) return "";
+  return `. The download in ${report.folder} (${bytesText(report.folder_bytes)}) stays on disk; Forget keeps it.`;
+}
+
+export function zenodoDownloadLabel(report: CatalogDatasetReport): string {
+  const size = report.size_bytes === null ? "" : `, about ${bytesText(report.size_bytes)}`;
+  return `Download the Siril Gaia extract (Zenodo${size})`;
 }
 
 function bundledView(report: CatalogDatasetReport): StateView {
@@ -139,20 +182,43 @@ function downloadView(report: CatalogDatasetReport): StateView {
 function externalView(report: CatalogDatasetReport): StateView {
   const status = report.status;
   const choose = { chooseFolder: true, chooseFile: true };
+  const zenodo = offersZenodo(report);
   if (status.state === "external") {
+    if (status.valid && isZenodoDownload(report)) {
+      return { text: `Using the Zenodo download in ${status.path}`, tone: "ok", actions: { ...choose, remove: true } };
+    }
+    const kept = keptDownloadText(report);
     return status.valid
-      ? { text: `Using ${status.path}`, tone: "ok", actions: { ...choose, remove: true } }
-      : { text: `Cannot use ${status.path}: ${status.problem ?? "the file is not a usable catalogue"}`, tone: "error", actions: { ...choose, remove: true } };
+      ? { text: `Using ${status.path}${kept}`, tone: "ok", actions: { ...choose, remove: true } }
+      : {
+          text: `Cannot use ${status.path}: ${status.problem ?? "the file is not a usable catalogue"}${kept}`,
+          tone: "error",
+          actions: { ...choose, remove: true, install: zenodo },
+        };
   }
   if (status.state === "installed" || status.state === "partial") {
     const view = downloadView(report);
-    return { ...view, actions: { ...view.actions, ...choose } };
+    return { ...view, actions: { ...view.actions, ...choose, install: view.actions.install || zenodo } };
   }
   return {
-    text: `Not set: choose your Siril catalogue folder or its ${SIRIL_FILE} file`,
+    text: zenodo
+      ? `Not set: download the Siril Gaia extract from Zenodo, or choose your Siril catalogue folder or its ${SIRIL_FILE} file`
+      : `Not set: choose your Siril catalogue folder or its ${SIRIL_FILE} file`,
     tone: "muted",
-    actions: { ...choose, install: report.installable },
+    actions: { ...choose, install: report.installable || zenodo },
   };
+}
+
+function installLabelOf(report: CatalogDatasetReport, view: StateView): string {
+  if (!offersZenodo(report)) return view.resume ? "Resume" : "Download";
+  if (view.resume) return "Resume the Zenodo download";
+  if (report.status.state === "installed") return "Use the Zenodo download";
+  return zenodoDownloadLabel(report);
+}
+
+function removeLabelOf(report: CatalogDatasetReport): string {
+  const deletesDownload = report.kind === "external" && report.status.state !== "external";
+  return deletesDownload || isZenodoDownload(report) ? "Remove" : REMOVE_LABELS[report.kind];
 }
 
 function cacheView(report: CatalogDatasetReport): StateView {
@@ -190,9 +256,9 @@ export function catalogRowView(report: CatalogDatasetReport, install: InstallPha
     sizeText: report.kind === "cache" ? NO_VALUE : bytesText(report.size_bytes),
     stateText: view.text,
     tone: view.tone,
-    percent: install.phase === "running" ? install.percent : null,
-    installLabel: view.resume ? "Resume" : "Download",
-    removeLabel: REMOVE_LABELS[report.kind],
+    percent: install.phase === "running" && !decodingWithoutTotal(install) ? install.percent : null,
+    installLabel: installLabelOf(report, view),
+    removeLabel: removeLabelOf(report),
     actions: { ...NO_ACTIONS, ...view.actions },
     licence: report.licence,
     credit: report.credit,
@@ -216,6 +282,41 @@ export function consentBlocker(report: CatalogDatasetReport): string | null {
   return `Needs ${bytesText(report.size_bytes)} free; ${bytesText(report.free_space_bytes)} available`;
 }
 
+export function zenodoConsentText(offer: ZenodoOffer): string {
+  const doi = offer.doi ? ` (DOI ${offer.doi})` : "";
+  const checked = offer.archive_sha256
+    ? "Zenodo publishes its SHA-256, which is checked after the download"
+    : "Zenodo publishes no SHA-256 for it, so only its size is checked";
+  const resume = offer.resume_from > 0 ? ` ${bytesText(offer.resume_from)} are already here and the download resumes from there.` : "";
+  const free = offer.free_space_bytes === null ? "unknown" : bytesText(offer.free_space_bytes);
+  const licence = offer.record_licence ? `lists its licence as ${offer.record_licence}` : "lists no licence";
+  return (
+    `Download ${offer.archive_key} (${bytesText(offer.archive_bytes)}, bzip2) from ${offer.host}, Zenodo record ${offer.record_page ?? offer.record_url}${doi}. ` +
+    `The Zenodo record ${licence}. ` +
+    `${checked}; it then unpacks to at most ${bytesText(offer.decoded_max_bytes)} in ${offer.folder}, the archive is deleted, ` +
+    `and the folder becomes your Siril catalogue folder.${resume} Needs ${bytesText(offer.need_bytes)} free; ${free} available. ` +
+    `Terms: ${offer.gaia_terms} Only the catalogue is downloaded; no image leaves this computer.`
+  );
+}
+
+export function zenodoFileText(file: ZenodoFile): string {
+  return `${file.key} · ${bytesText(file.size)}${file.checksum ? ` · ${file.checksum}` : ""}`;
+}
+
+export function zenodoConfirmLabel(install: InstallPhase): string {
+  const offer = install.phase === "consent" ? install.offer : undefined;
+  return offer ? `Accept the terms and download ${bytesText(offer.archive_bytes - offer.resume_from)}` : "Accept the terms and download";
+}
+
+export function zenodoBlocker(install: InstallPhase): string | null {
+  if (install.phase !== "consent") return null;
+  if (install.offerError) return `Cannot read the Zenodo record: ${install.offerError}`;
+  const offer = install.offer;
+  if (!offer) return ZENODO_READING_TEXT;
+  if (offer.free_space_bytes === null || offer.free_space_bytes >= offer.need_bytes) return null;
+  return `Needs ${bytesText(offer.need_bytes)} free; ${bytesText(offer.free_space_bytes)} available`;
+}
+
 function set(installs: InstallMap, id: string, phase: InstallPhase): InstallMap {
   return { ...installs, [id]: phase };
 }
@@ -228,6 +329,10 @@ export function installReducer(installs: InstallMap, action: InstallAction): Ins
       return current.phase === "idle" || current.phase === "failed" ? set(installs, id, { phase: "consent" }) : installs;
     case "decline":
       return current.phase === "consent" ? set(installs, id, { phase: "idle", returnFocus: true }) : installs;
+    case "offer":
+      return current.phase === "consent" ? set(installs, id, { phase: "consent", offer: action.offer }) : installs;
+    case "offerFailed":
+      return current.phase === "consent" ? set(installs, id, { phase: "consent", offerError: action.message }) : installs;
     case "start":
       return current.phase === "consent"
         ? set(installs, id, { phase: "running", stage: "download", current: 0, total: 0, percent: 0, cancelling: false })
@@ -259,11 +364,14 @@ function removableBytes(report: CatalogDatasetReport): number | null {
     case "registered":
       return status.bytes;
     default:
-      return report.size_bytes;
+      return report.folder_bytes > 0 ? report.folder_bytes : report.size_bytes;
   }
 }
 
 export function removeConfirmText(report: CatalogDatasetReport): string | null {
+  if (isZenodoDownload(report)) {
+    return report.folder_bytes > 0 ? `Confirm: deletes the Zenodo download (${bytesText(report.folder_bytes)})` : "Confirm: deletes the Zenodo download";
+  }
   if (report.status.state === "external") return null;
   const verb = report.kind === "cache" ? "clears" : "deletes";
   const bytes = removableBytes(report);
@@ -276,12 +384,17 @@ export function sortedCatalogRows(reports: readonly CatalogDatasetReport[]): Cat
 }
 
 export function installedNote(outcome: CatalogInstallOutcome): string {
-  if (outcome.already_installed) return "Already installed and verified.";
+  const folder = outcome.id === SIRIL_GAIA_ID ? " It is now your Siril catalogue folder." : "";
+  if (outcome.already_installed) return `Already installed and verified.${folder}`;
   const resumed = outcome.resumed_from > 0 ? `; resumed after ${bytesText(outcome.resumed_from)}` : "";
-  return `Installed ${bytesText(outcome.bytes)}, SHA-256 verified${resumed}.`;
+  const checked = outcome.sha256_verified ? "SHA-256 verified" : "size checked (Zenodo published no SHA-256)";
+  return `Installed ${bytesText(outcome.bytes)}, ${checked}${resumed}.${folder}`;
 }
 
 export function removedNote(removed: CatalogRemoved): string {
-  if (removed.forgot_external) return "Forgotten; the file itself is kept.";
-  return removed.freed_bytes > 0 ? `Removed ${bytesText(removed.freed_bytes)}.` : "Nothing to remove.";
+  if (removed.freed_bytes > 0) {
+    const forgot = removed.forgot_external ? "; your own file or folder is forgotten and kept on disk" : "";
+    return `Removed ${bytesText(removed.freed_bytes)}${forgot}.`;
+  }
+  return removed.forgot_external ? "Forgotten; the file itself is kept." : "Nothing to remove.";
 }

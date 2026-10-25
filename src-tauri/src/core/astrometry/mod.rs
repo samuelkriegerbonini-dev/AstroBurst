@@ -14,3 +14,4 @@ pub mod healpix_cat;
 pub mod object_names;
 pub mod solve_hints;
 pub mod local_solve;
+pub mod gaia_tie;

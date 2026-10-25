@@ -21,6 +21,7 @@ use crate::core::astrometry::solve_hints::{SolveHints, SCALE_HINT_MARGIN};
 use crate::core::imaging::cfa::luminance_bin;
 use crate::core::registration::poly::{self, PolyModel, TanParams};
 use crate::core::stacking::{CancelCheck, StageCallback};
+use crate::math::sigma_clipped_stats;
 
 #[cfg(test)]
 mod acceptance;
@@ -61,6 +62,38 @@ const SIP_PASS_MAX_RADIUS_FRACTION: f64 = 0.01;
 const RADIAL_RMS_PER_MEDIAN: f64 = 1.201_122_408_786_45;
 const MATCH_WINDOWS: usize = 4;
 const MATCH_WINDOW_FRACTION: f64 = 2.0 / 3.0;
+const SIP_RADIAL_BANDS: usize = 3;
+const COVERAGE_GRID: usize = 3;
+pub const COVERAGE_MIN_LOG10: f64 = -4.0;
+const BACKGROUND_TILE_MIN_PIXELS: usize = 8;
+const BACKGROUND_CLIP_SIGMA: f32 = 3.0;
+const BACKGROUND_CLIP_ROUNDS: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RankingKey {
+    pub colour_slope: f64,
+    pub colour_range: (f64, f64),
+}
+
+impl RankingKey {
+    pub const MAGNITUDE: RankingKey = RankingKey {
+        colour_slope: 0.0,
+        colour_range: (0.0, 0.0),
+    };
+    pub const TWO_MASS_J_KS: RankingKey = RankingKey {
+        colour_slope: 2.0,
+        colour_range: (-0.2, 1.5),
+    };
+
+    pub fn of(&self, row: &CatalogRow) -> Option<f64> {
+        let mag = row.g.filter(|g| g.is_finite())?;
+        let colour = row
+            .bp_rp
+            .filter(|c| c.is_finite())
+            .map_or(0.0, |c| c.clamp(self.colour_range.0, self.colour_range.1));
+        Some(mag + self.colour_slope * colour)
+    }
+}
 
 pub trait CatalogProvider: Send + Sync {
     fn cone(
@@ -72,6 +105,10 @@ pub trait CatalogProvider: Send + Sync {
     ) -> Result<(Vec<CatalogRow>, &'static str), String>;
 
     fn depth_mag(&self) -> f64;
+
+    fn ranking_key(&self) -> RankingKey {
+        RankingKey::MAGNITUDE
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +162,7 @@ struct HealpixProvider {
     catalog: HealpixCatalog<MmapSource>,
     label: &'static str,
     depth_mag: f64,
+    ranking: RankingKey,
 }
 
 impl CatalogProvider for HealpixProvider {
@@ -148,12 +186,17 @@ impl CatalogProvider for HealpixProvider {
     fn depth_mag(&self) -> f64 {
         self.depth_mag
     }
+
+    fn ranking_key(&self) -> RankingKey {
+        self.ranking
+    }
 }
 
 pub fn healpix_provider(
     path: &Path,
     label: &'static str,
     depth_mag: f64,
+    ranking: RankingKey,
 ) -> Result<Box<dyn CatalogProvider>, String> {
     let catalog = HealpixCatalog::open_file(path)
         .map_err(|error| format!("{label} at {}: {error}", path.display()))?;
@@ -161,6 +204,7 @@ pub fn healpix_provider(
         catalog,
         label,
         depth_mag,
+        ranking,
     }))
 }
 
@@ -200,9 +244,21 @@ pub struct Verification {
     pub lambda: f64,
     pub false_alarm_log10: f64,
     pub rms_px: f64,
+    pub coverage_log10: f64,
+    pub coverage_chance_log10: f64,
     pub corners_finite: bool,
     pub scale_in_range: bool,
     pub accepted: bool,
+}
+
+impl Verification {
+    pub fn covered(&self) -> bool {
+        cell_covered(self.coverage_log10, self.coverage_chance_log10)
+    }
+}
+
+pub fn cell_covered(coverage_log10: f64, chance_log10: f64) -> bool {
+    coverage_log10 >= COVERAGE_MIN_LOG10 || chance_log10 < COVERAGE_MIN_LOG10
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +276,7 @@ pub struct LocalSolveParams {
     pub near_radius_fields: f64,
     pub max_centres: usize,
     pub max_side_px: usize,
+    pub background_tile_px: usize,
     pub detect_sigma: f64,
     pub max_eccentricity: f64,
     pub compact_quantile: f64,
@@ -232,6 +289,7 @@ pub struct LocalSolveParams {
     pub footprint_min_stars: usize,
     pub cone_short_side_fraction: f64,
     pub spiral_spacing_fraction: f64,
+    pub spiral_projective_px: f64,
     pub min_matches: usize,
     pub max_false_alarm: f64,
     pub max_rms_px: f64,
@@ -242,6 +300,7 @@ pub struct LocalSolveParams {
     pub crval_iterations: usize,
     pub sip_min_inliers: usize,
     pub sip_min_quadrants: usize,
+    pub sip_stars_per_band: usize,
     pub sip_order_4_above_deg: f64,
 }
 
@@ -252,6 +311,7 @@ impl Default for LocalSolveParams {
             near_radius_fields: 0.5,
             max_centres: 600,
             max_side_px: 2048,
+            background_tile_px: 64,
             detect_sigma: 5.0,
             max_eccentricity: 0.6,
             compact_quantile: 0.75,
@@ -264,6 +324,7 @@ impl Default for LocalSolveParams {
             footprint_min_stars: 200,
             cone_short_side_fraction: 0.5,
             spiral_spacing_fraction: 0.5,
+            spiral_projective_px: TriangleParams::SOLVER.inlier_px / 2.0,
             min_matches: 8,
             max_false_alarm: 1e-9,
             max_rms_px: 1.0,
@@ -274,6 +335,7 @@ impl Default for LocalSolveParams {
             crval_iterations: 3,
             sip_min_inliers: 40,
             sip_min_quadrants: 3,
+            sip_stars_per_band: 300,
             sip_order_4_above_deg: 5.0,
         }
     }
@@ -315,6 +377,14 @@ pub struct CandidateNumbers {
     pub predicted: usize,
     pub rms_px: f64,
     pub false_alarm_log10: f64,
+    pub coverage_log10: f64,
+    pub coverage_chance_log10: f64,
+}
+
+impl CandidateNumbers {
+    pub fn covered(&self) -> bool {
+        cell_covered(self.coverage_log10, self.coverage_chance_log10)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -908,6 +978,8 @@ fn verify_with(
     let matched = nearest_pairs(&positions, detections, radius);
     let distances: Vec<f64> = matched.iter().map(|&(_, _, d)| d).collect();
     let rms = clipped_rms(&distances, params.clip_sigma);
+    let (coverage_log10, coverage_chance_log10) =
+        coverage_log10(&positions, detections, &matched, size, radius);
     let lambda =
         projected.len() as f64 * detections.len() as f64 * std::f64::consts::PI * radius * radius
             / (width as f64 * height as f64);
@@ -941,12 +1013,87 @@ fn verify_with(
             lambda,
             false_alarm_log10,
             rms_px: rms,
+            coverage_log10,
+            coverage_chance_log10,
             corners_finite: corners,
             scale_in_range,
             accepted,
         },
         pairs,
     )
+}
+
+fn coverage_cell((width, height): (usize, usize), (x, y): (f64, f64)) -> usize {
+    let last = (COVERAGE_GRID - 1) as f64;
+    let column = ((x + 0.5) * COVERAGE_GRID as f64 / width as f64)
+        .floor()
+        .clamp(0.0, last) as usize;
+    let row = ((y + 0.5) * COVERAGE_GRID as f64 / height as f64)
+        .floor()
+        .clamp(0.0, last) as usize;
+    row * COVERAGE_GRID + column
+}
+
+fn coverage_log10(
+    positions: &[(f64, f64)],
+    detections: &[Detection],
+    matched: &[(usize, usize, f64)],
+    size: (usize, usize),
+    radius: f64,
+) -> (f64, f64) {
+    const CELLS: usize = COVERAGE_GRID * COVERAGE_GRID;
+    if positions.is_empty() || detections.is_empty() || matched.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut predicted = [0usize; CELLS];
+    let mut detected = [0usize; CELLS];
+    let mut found = [0usize; CELLS];
+    for &position in positions {
+        predicted[coverage_cell(size, position)] += 1;
+    }
+    for detection in detections {
+        detected[coverage_cell(size, (detection.star.x, detection.star.y))] += 1;
+    }
+    for &(i, _, _) in matched {
+        found[coverage_cell(size, positions[i])] += 1;
+    }
+    let by_predicted = matched.len() as f64 / positions.len() as f64;
+    let by_detected = matched.len() as f64 / detections.len() as f64;
+    let cell_area = size.0 as f64 * size.1 as f64 / CELLS as f64;
+    let chance_per_pair = std::f64::consts::PI * radius * radius / cell_area;
+    let mut worst = (0.0, 0.0);
+    let mut worst_uncovered: Option<(f64, f64)> = None;
+    for cell in 0..CELLS {
+        let expected =
+            (predicted[cell] as f64 * by_predicted).min(detected[cell] as f64 * by_detected);
+        let chance = predicted[cell] as f64 * detected[cell] as f64 * chance_per_pair;
+        let deficit = poisson_lower_tail_log10(found[cell], expected);
+        let above_chance = poisson_tail_log10(found[cell], chance);
+        if deficit < worst.0 {
+            worst = (deficit, above_chance);
+        }
+        if !cell_covered(deficit, above_chance)
+            && worst_uncovered.is_none_or(|(d, _)| deficit < d)
+        {
+            worst_uncovered = Some((deficit, above_chance));
+        }
+    }
+    worst_uncovered.unwrap_or(worst)
+}
+
+pub fn poisson_lower_tail_log10(k: usize, lambda: f64) -> f64 {
+    if !is_positive(lambda) {
+        return 0.0;
+    }
+    let ln_lambda = lambda.ln();
+    let mut ln_term = -lambda;
+    let mut ln_sum = ln_term;
+    for i in 1..=k {
+        ln_term += ln_lambda - (i as f64).ln();
+        let peak = ln_sum.max(ln_term);
+        ln_sum = peak + ((ln_sum - peak).exp() + (ln_term - peak).exp()).ln();
+    }
+    (ln_sum / std::f64::consts::LN_10).min(0.0)
 }
 
 pub fn verify(
@@ -1035,7 +1182,7 @@ fn poly_pairs(pairs: &[SkyPair], tan: &TanParams) -> Vec<(f64, f64, f64, f64)> {
 
 fn max_sip_order(tan: &TanParams, size: (usize, usize), params: &LocalSolveParams) -> u8 {
     let long_side_deg = size.0.max(size.1) as f64 * scale_arcsec(&tan.cd) / ARCSEC_PER_DEG;
-    if long_side_deg > params.sip_order_4_above_deg {
+    if long_side_deg >= params.sip_order_4_above_deg {
         4
     } else {
         3
@@ -1218,6 +1365,95 @@ fn block_mean(image: &Array2<f32>, factor: usize) -> Array2<f32> {
     out
 }
 
+struct BackgroundMap {
+    tile: usize,
+    medians: Array2<f32>,
+    global: f32,
+}
+
+impl BackgroundMap {
+    fn estimate(image: &Array2<f32>, tile: usize) -> Option<Self> {
+        let tile = tile.max(1);
+        let (rows, cols) = image.dim();
+        let (tile_rows, tile_cols) = (rows.div_ceil(tile), cols.div_ceil(tile));
+        if tile_rows == 0 || tile_cols == 0 {
+            return None;
+        }
+        let cells: Vec<f32> = (0..tile_rows * tile_cols)
+            .into_par_iter()
+            .map(|index| {
+                let (ty, tx) = (index / tile_cols, index % tile_cols);
+                let block = image.slice(s![
+                    ty * tile..((ty + 1) * tile).min(rows),
+                    tx * tile..((tx + 1) * tile).min(cols)
+                ]);
+                let mut values: Vec<f32> = block.iter().copied().filter(|v| v.is_finite()).collect();
+                if values.len() < BACKGROUND_TILE_MIN_PIXELS {
+                    return f32::NAN;
+                }
+                sigma_clipped_stats(&mut values, BACKGROUND_CLIP_SIGMA, BACKGROUND_CLIP_ROUNDS).0 as f32
+            })
+            .collect();
+        let medians = Array2::from_shape_vec((tile_rows, tile_cols), cells).ok()?;
+        let mut finite: Vec<f32> = medians.iter().copied().filter(|v| v.is_finite()).collect();
+        if finite.is_empty() {
+            return None;
+        }
+        let middle = finite.len() / 2;
+        finite.select_nth_unstable_by(middle, f32::total_cmp);
+        Some(Self {
+            tile,
+            medians,
+            global: finite[middle],
+        })
+    }
+
+    fn cell(&self, ty: isize, tx: isize) -> f32 {
+        let (tile_rows, tile_cols) = self.medians.dim();
+        let value = self.medians[[
+            ty.clamp(0, tile_rows as isize - 1) as usize,
+            tx.clamp(0, tile_cols as isize - 1) as usize,
+        ]];
+        if value.is_finite() {
+            value
+        } else {
+            self.global
+        }
+    }
+
+    fn at(&self, x: f64, y: f64) -> f32 {
+        let fx = (x + 0.5) / self.tile as f64 - 0.5;
+        let fy = (y + 0.5) / self.tile as f64 - 0.5;
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (wx, wy) = ((fx - x0) as f32, (fy - y0) as f32);
+        let (tx, ty) = (x0 as isize, y0 as isize);
+        self.cell(ty, tx) * (1.0 - wy) * (1.0 - wx)
+            + self.cell(ty, tx + 1) * (1.0 - wy) * wx
+            + self.cell(ty + 1, tx) * wy * (1.0 - wx)
+            + self.cell(ty + 1, tx + 1) * wy * wx
+    }
+
+    fn excess_at(&self, x: f64, y: f64) -> f64 {
+        f64::from(self.at(x, y) - self.global)
+    }
+
+    fn flattened(&self, image: &Array2<f32>, keep_from: Option<f32>) -> Array2<f32> {
+        let mut out = image.clone();
+        out.axis_iter_mut(Axis(0))
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(row, mut line)| {
+                for (col, value) in line.iter_mut().enumerate() {
+                    if keep_from.is_some_and(|plateau| *value >= plateau) {
+                        continue;
+                    }
+                    *value = *value - self.at(col as f64, row as f64) + self.global;
+                }
+            });
+        out
+    }
+}
+
 fn saturation_level(image: &Array2<f32>) -> Option<f64> {
     let max = image
         .iter()
@@ -1255,6 +1491,12 @@ fn detect_for_solve(
     }
     let (rows, cols) = working.dim();
     let saturation = saturation_level(&working);
+    let background_map = BackgroundMap::estimate(&working, params.background_tile_px);
+    if let Some(map) = &background_map {
+        let plateau = saturation.map(|level| (SATURATION_FRACTION * level) as f32);
+        let flattened = map.flattened(&working, plateau);
+        working = Cow::Owned(flattened);
+    }
     let detected = detect_stars(&working, params.detect_sigma);
     let background = detected.background_median;
     detected
@@ -1268,8 +1510,11 @@ fn detect_for_solve(
                 && star.y <= rows as f64 - 1.0 - margin
         })
         .map(|star| {
-            let saturated = saturation
-                .is_some_and(|level| star.peak + background >= SATURATION_FRACTION * level);
+            let local_excess = background_map
+                .as_ref()
+                .map_or(0.0, |map| map.excess_at(star.x, star.y));
+            let raw_peak = star.peak + background + local_excess;
+            let saturated = saturation.is_some_and(|level| raw_peak >= SATURATION_FRACTION * level);
             Detection {
                 star: DetectedStar {
                     x: map_x.apply(star.x),
@@ -1357,6 +1602,30 @@ fn spread_detections(
         .iter()
         .filter_map(|&(x, y)| index.get(&(x.to_bits(), y.to_bits())))
         .map(|&i| usable[i].clone())
+        .collect()
+}
+
+fn radial_spread(
+    usable: &[Detection],
+    (width, height): (usize, usize),
+    per_band: usize,
+) -> Vec<Detection> {
+    let (xc, yc) = ((width as f64 - 1.0) / 2.0, (height as f64 - 1.0) / 2.0);
+    let half_diagonal = (width as f64 / 2.0).hypot(height as f64 / 2.0);
+    let mut counts = [0usize; SIP_RADIAL_BANDS];
+    usable
+        .iter()
+        .filter(|d| {
+            let r2 = ((d.star.x - xc).powi(2) + (d.star.y - yc).powi(2)) / (half_diagonal * half_diagonal);
+            let band = ((r2 * SIP_RADIAL_BANDS as f64).floor() as usize).min(SIP_RADIAL_BANDS - 1);
+            if counts[band] < per_band {
+                counts[band] += 1;
+                true
+            } else {
+                false
+            }
+        })
+        .cloned()
         .collect()
 }
 
@@ -1467,9 +1736,11 @@ fn inlier_pairs(
 
 struct SearchContext<'a> {
     detections: Vec<Detection>,
+    sip_detections: Vec<Detection>,
     saturated: usize,
     size: (usize, usize),
     catalog: &'a dyn CatalogProvider,
+    ranking: RankingKey,
     params: &'a LocalSolveParams,
     epoch_year: Option<f64>,
     scale_range: (f64, f64),
@@ -1504,7 +1775,7 @@ impl Hypothesis {
         let cone_area = std::f64::consts::PI * cone_radius_deg * cone_radius_deg;
         Self {
             scale_deg,
-            spacing_deg: params.spiral_spacing_fraction * field_w.min(field_h),
+            spacing_deg: spiral_spacing_deg(scale_deg, field_w.min(field_h), cone_radius_deg, params),
             cone_radius_deg,
             bright_skip: (saturated as f64 * cone_area / (field_w * field_h)).round() as usize,
             stage_rms_px: params
@@ -1524,6 +1795,23 @@ impl Hypothesis {
     }
 }
 
+fn spiral_spacing_deg(
+    scale_deg: f64,
+    short_side_deg: f64,
+    cone_radius_deg: f64,
+    params: &LocalSolveParams,
+) -> f64 {
+    let coarse = params.spiral_spacing_fraction * short_side_deg;
+    let cone_rad = cone_radius_deg.to_radians();
+    let worst_offset_rad = params.spiral_projective_px * scale_deg.to_radians() / (cone_rad * cone_rad);
+    let fine = (3f64.sqrt() * worst_offset_rad).to_degrees();
+    if is_positive(fine) {
+        coarse.min(fine)
+    } else {
+        coarse
+    }
+}
+
 struct Solved {
     verification: Verification,
     distortion: DistortionFit,
@@ -1537,11 +1825,16 @@ struct CentreOutcome {
     solved: Option<Solved>,
 }
 
-fn ranked_sky(rows: &[CatalogRow], skip: usize, limit: usize) -> Vec<(f64, f64)> {
+fn ranked_sky(
+    rows: &[CatalogRow],
+    skip: usize,
+    limit: usize,
+    ranking: RankingKey,
+) -> Vec<(f64, f64)> {
     let mut ranked: Vec<(f64, usize)> = rows
         .iter()
         .enumerate()
-        .filter_map(|(i, row)| row.g.filter(|g| g.is_finite()).map(|g| (g, i)))
+        .filter_map(|(i, row)| ranking.of(row).map(|key| (key, i)))
         .filter(|&(_, i)| rows[i].ra_epoch.is_finite() && rows[i].dec_epoch.is_finite())
         .collect();
     ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -1553,6 +1846,10 @@ fn ranked_sky(rows: &[CatalogRow], skip: usize, limit: usize) -> Vec<(f64, f64)>
         .collect()
 }
 
+fn footprint_limit(detections: usize, params: &LocalSolveParams) -> usize {
+    (params.footprint_stars_per_detection * detections).max(params.footprint_min_stars)
+}
+
 fn footprint_catalogue(tan: &TanParams, ctx: &SearchContext) -> Result<Vec<(f64, f64)>, String> {
     let (width, height) = ctx.size;
     let half_diagonal_deg =
@@ -1562,13 +1859,12 @@ fn footprint_catalogue(tan: &TanParams, ctx: &SearchContext) -> Result<Vec<(f64,
     if let Some(epoch) = ctx.epoch_year {
         propagate_epoch(&mut rows, epoch);
     }
-    let limit = (ctx.params.footprint_stars_per_detection * ctx.detections.len())
-        .max(ctx.params.footprint_min_stars);
-    Ok(ranked_sky(&rows, 0, usize::MAX)
+    let deepest = ctx.detections.len().max(ctx.sip_detections.len());
+    Ok(ranked_sky(&rows, 0, usize::MAX, ctx.ranking)
         .into_iter()
         .filter(|&(ra, dec)| sky_to_pixel(tan, ra, dec).is_some_and(|p| inside(ctx.size, p)))
         .skip(ctx.saturated)
-        .take(limit)
+        .take(footprint_limit(deepest, ctx.params))
         .collect())
 }
 
@@ -1655,7 +1951,7 @@ fn verify_through(
         &predict,
         radius,
         tan,
-        &ctx.detections,
+        &ctx.sip_detections,
         catalogue,
         ctx.size,
         Some(ctx.scale_range),
@@ -1734,7 +2030,12 @@ fn try_centre(
     if let Some(epoch) = ctx.epoch_year {
         propagate_epoch(&mut rows, epoch);
     }
-    let sky = ranked_sky(&rows, hypothesis.bright_skip, ctx.params.catalogue_stars);
+    let sky = ranked_sky(
+        &rows,
+        hypothesis.bright_skip,
+        ctx.params.catalogue_stars,
+        ctx.ranking,
+    );
     let plane: Vec<((f64, f64), (f64, f64))> = sky
         .iter()
         .filter_map(|&(ra, dec)| {
@@ -1786,6 +2087,8 @@ fn try_centre(
         predicted: v.predicted,
         rms_px,
         false_alarm_log10: v.false_alarm_log10,
+        coverage_log10: v.coverage_log10,
+        coverage_chance_log10: v.coverage_chance_log10,
     };
     if !coarse.accepted {
         return Ok(CentreOutcome {
@@ -1794,7 +2097,9 @@ fn try_centre(
         });
     }
     let footprint = footprint_catalogue(&coarse_tan, ctx)?;
-    let (tan, verification, pairs) = refine_on(coarse_tan, &footprint, ctx, gate);
+    let tan_footprint =
+        &footprint[..footprint.len().min(footprint_limit(ctx.detections.len(), ctx.params))];
+    let (tan, verification, pairs) = refine_on(coarse_tan, tan_footprint, ctx, gate);
     if !verification.accepted {
         return Ok(CentreOutcome {
             candidate: Some(numbers(&tan, &verification, verification.rms_px)),
@@ -1849,7 +2154,8 @@ fn try_centre(
         },
     };
     let candidate = numbers(&tan, &verification, rms_px);
-    let solved = (rms_px <= ctx.params.max_rms_px).then_some(Solved {
+    let covered = verification.covered();
+    let solved = (rms_px <= ctx.params.max_rms_px && covered).then_some(Solved {
         verification,
         distortion,
         rms_px,
@@ -2027,11 +2333,18 @@ fn solve_detections(
             ));
         }
     }
+    let sip_detections = if params.sip_stars_per_band == 0 {
+        selected.clone()
+    } else {
+        radial_spread(&usable, size, params.sip_stars_per_band)
+    };
     let ctx = SearchContext {
         detections: selected,
+        sip_detections,
         saturated,
         size,
         catalog,
+        ranking: catalog.ranking_key(),
         params,
         epoch_year: hints.epoch_year,
         scale_range: (scale.low_arcsec, scale.high_arcsec),
@@ -2119,8 +2432,13 @@ fn solve_detections(
         (best, _) => {
             let detail = match best {
                 Some(b) => format!(
-                    "best candidate matched {} of {} predicted stars, rms {:.2} px, log10 P {:.1}",
-                    b.matched, b.predicted, b.rms_px, b.false_alarm_log10
+                    "best candidate matched {} of {} predicted stars, rms {:.2} px, log10 P {:.1}, cell coverage log10 P {:.1}, cell matches above chance log10 P {:.1}",
+                    b.matched,
+                    b.predicted,
+                    b.rms_px,
+                    b.false_alarm_log10,
+                    b.coverage_log10,
+                    b.coverage_chance_log10
                 ),
                 None => format!(
                     "no centre produced {} consistent star matches (scale hint {}..{} arcsec/px from {})",

@@ -15,19 +15,36 @@ import {
   installCatalog,
   onCatalogInstallProgress,
   removeCatalog,
+  zenodoConsent,
+  zenodoOffer,
   type CatalogInstallProgress,
+  type ZenodoOffer,
 } from "../catalogStore";
 
 describe("catalogStore commands", () => {
   beforeEach(() => typedInvokeMock.mockReset().mockResolvedValue({}));
 
-  it("wraps the five catalog_store commands the backend registers", () => {
+  it("wraps the six catalog_store commands the backend registers", () => {
     expect(CATALOG_COMMANDS).toEqual([
       "catalog_status_cmd",
       "catalog_install_cmd",
       "catalog_use_file_cmd",
       "catalog_use_siril_dir_cmd",
       "catalog_remove_cmd",
+      "catalog_zenodo_offer_cmd",
+    ]);
+  });
+
+  it("reads the Zenodo offer and installs the Siril extract only with the consent built from it", async () => {
+    const offer = { archive_bytes: 1_142_276_749, archive_sha256: "846ad4b1", files: [] } as unknown as ZenodoOffer;
+    typedInvokeMock.mockResolvedValue(offer);
+    await expect(zenodoOffer()).resolves.toBe(offer);
+    const consent = zenodoConsent(offer);
+    expect(consent).toEqual({ archive_bytes: 1_142_276_749, archive_sha256: "846ad4b1", licence_acknowledged: true });
+    await installCatalog("siril-gaia-astro-v1", consent);
+    expect(typedInvokeMock.mock.calls).toEqual([
+      ["catalog_zenodo_offer_cmd", {}],
+      ["catalog_install_cmd", { id: "siril-gaia-astro-v1", consent }],
     ]);
   });
 

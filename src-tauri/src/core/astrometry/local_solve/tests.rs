@@ -8,10 +8,10 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
 use super::synthetic::{
-    at_most, destination, detection, detections_from, exact_pairs, flat_frame, gradient_frame,
-    hot_pixel_frame, image_centre_crpix, noise_frame, random_detections, random_in_cap,
-    render_field, wcs_from_cards, FrameStyle, PixelDistortion, SyntheticProvider, TruthField,
-    ARCSEC_PER_DEG, TIER1_CUT_STARS_PER_DEG2,
+    at_most, coloured_rows, destination, detection, detections_from, exact_pairs, flat_frame,
+    flux_for, gradient_frame, hot_pixel_frame, image_centre_crpix, noise_frame, random_detections,
+    random_in_cap, render_field, wcs_from_cards, ColourLocus, FrameStyle, PixelDistortion,
+    SyntheticProvider, TruthField, ARCSEC_PER_DEG, TIER1_CUT_STARS_PER_DEG2,
 };
 use super::*;
 use crate::core::astrometry::solve_hints::{ScaleRange, SCALE_HINT_MARGIN};
@@ -62,6 +62,31 @@ const COARSE_TAN_STARS: usize = 200;
 const COARSE_TAN_JITTER_PX: f64 = 0.1;
 const COARSE_TAN_SHIFT_PX: f64 = 1.5;
 const COARSE_TAN_ROTATION_DEG: f64 = 0.1;
+const COLOUR_FIELD_STARS_PER_DEG2: f64 = 1600.0;
+const COLOUR_FIELD_OPTICAL_MAGS: (f64, f64) = (7.0, 14.0);
+const COLOUR_LOCUS: ColourLocus = ColourLocus {
+    intrinsic_colour: (0.1, 0.9),
+    intrinsic_slope: 2.2,
+    intrinsic_offset: 0.0,
+    reddening: (0.0, 0.7),
+    reddening_slope: 2.7,
+    scatter: 0.15,
+};
+const COLOUR_FIELD_BLOATED_BRIGHTER_THAN: f64 = 11.5;
+const COLOUR_FIELD_DEPTH_R: f64 = 14.0;
+const TESS_LIKE_FRAME: (usize, usize) = (2136, 2078);
+const TESS_LIKE_SCALE_ARCSEC: f64 = 20.5;
+const TESS_LIKE_STARS_IN_FRAME: f64 = 3000.0;
+const TESS_LIKE_DISTORTION_PX: (f64, f64, f64) = (35.0, 30.0, 8.0);
+const GALAXY_SIGMA_PX: f64 = 400.0;
+const GALAXY_PEAK_ADU: f64 = 3000.0;
+const GALAXY_NUCLEUS_SIGMA_PX: f64 = 8.0;
+const GALAXY_NUCLEUS_PEAK_ADU: f64 = 60_000.0;
+const GALAXY_MIN_RECOVERED_FRACTION: f64 = 0.5;
+const PARTIAL_FIELD_STARS_IN_FRAME: f64 = 500.0;
+const PARTIAL_FIELD_DISC_FRACTION: f64 = 0.35;
+const PARTIAL_FIELD_SHIFT_PX: f64 = 40.0;
+const EXTINCTION_PATCH_SURVIVING_FRACTION: f64 = 0.15;
 const TIER0_LABEL: &str = "tier0-synthetic";
 const TIER1_LABEL: &str = "tier1-synthetic";
 const TIER2_LABEL: &str = "tier2-synthetic";
@@ -273,7 +298,7 @@ fn a_flipped_synthetic_field_solves_with_parity_flipped() {
 }
 
 fn refused_for_a_named_reason(best: &CandidateNumbers) -> bool {
-    best.matched < 8 || best.false_alarm_log10 >= -9.0 || best.rms_px > 1.0
+    best.matched < 8 || best.false_alarm_log10 >= -9.0 || best.rms_px > 1.0 || !best.covered()
 }
 
 fn random_list_outcome(
@@ -498,6 +523,32 @@ fn poisson_tail_log10_matches_a_direct_sum() {
     }
     if poisson_tail_log10(1, 0.0) != f64::NEG_INFINITY {
         failures.push("lambda 0 with k 1 must give log10 P = -inf".to_string());
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn poisson_lower_tail_log10_matches_a_direct_sum() {
+    let cases = [(0, 11.0), (1, 11.0), (2, 26.0), (5, 5.0), (30, 20.0), (0, 0.5)];
+    let mut failures = Vec::new();
+    for (k, lambda) in cases {
+        let got = poisson_lower_tail_log10(k, lambda);
+        let direct: f64 = (0..=k)
+            .map(|i| {
+                let ln_factorial: f64 = (1..=i).map(|j| (j as f64).ln()).sum();
+                (-lambda + i as f64 * lambda.ln() - ln_factorial).exp()
+            })
+            .sum();
+        let expected = direct.log10();
+        if !at_most((got - expected).abs(), 1e-9 * expected.abs().max(1.0)) {
+            failures.push(format!("k {k}, lambda {lambda}: {got} vs {expected}"));
+        }
+    }
+    if poisson_lower_tail_log10(3, 0.0) != 0.0 {
+        failures.push("lambda 0 must give log10 P = 0".to_string());
+    }
+    if poisson_lower_tail_log10(500, 3.0) != 0.0 {
+        failures.push("a count far above lambda must give log10 P = 0".to_string());
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -1963,9 +2014,11 @@ fn a_coarse_tan_above_the_rms_gate_is_refined_before_the_gate_applies() {
     );
     let ctx = SearchContext {
         detections: detections.clone(),
+        sip_detections: detections.clone(),
         saturated: 0,
         size: truth.size(),
         catalog: &provider,
+        ranking: RankingKey::MAGNITUDE,
         params: &params,
         epoch_year: None,
         scale_range: (1.8, 2.2),
@@ -2269,7 +2322,7 @@ fn c4_negatives_return_no_solution_with_the_best_numbers() {
                     ));
                 }
                 if let Some(best) = &failure.best {
-                    if best.matched >= 8 && best.false_alarm_log10 < -9.0 && best.rms_px <= 1.0 {
+                    if !refused_for_a_named_reason(best) {
                         failures.push(format!("{name}: best candidate passes the gates {best:?}"));
                     }
                 }
@@ -2279,6 +2332,461 @@ fn c4_negatives_return_no_solution_with_the_best_numbers() {
                         failure.detections, failure.centres_tried
                     ));
                 }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_solution_that_matches_only_the_inner_third_of_the_frame_is_refused() {
+    let params = LocalSolveParams::default();
+    let truth = TruthField::with_long_side((140.0, -12.0), 2.0, 20.0, false, FRAME.0, FRAME.1);
+    let field = truth.field();
+    let diagonal = field.width_deg.hypot(field.height_deg);
+    let provider = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        1.2 * diagonal,
+        truth.density_for(PARTIAL_FIELD_STARS_IN_FRAME),
+        (8.0, 13.0),
+        700,
+    );
+    let whole = detections_from(&truth, provider.rows(), 13.0, 0.05, 20, 701);
+    let hints = truth.hints(0.05, 10.0);
+    let control = solve_detections(&truth, &provider, &whole, &hints, &params)
+        .unwrap_or_else(|failure| panic!("the undisturbed frame must solve: {failure:?}"));
+    let control_corner = truth.worst_corner_px(&control.wcs_cards);
+    assert!(
+        at_most(control_corner, SOLVED_WORST_CORNER_PX),
+        "control worst corner {control_corner:.3} px"
+    );
+    let (xc, yc) = (
+        (truth.width as f64 - 1.0) / 2.0,
+        (truth.height as f64 - 1.0) / 2.0,
+    );
+    let disc = PARTIAL_FIELD_DISC_FRACTION * truth.width.min(truth.height) as f64;
+    let partial: Vec<Detection> = whole
+        .into_iter()
+        .map(|mut d| {
+            if (d.star.x - xc).hypot(d.star.y - yc) > disc {
+                d.star.x += PARTIAL_FIELD_SHIFT_PX;
+                d.star.y += PARTIAL_FIELD_SHIFT_PX;
+            }
+            d
+        })
+        .filter(|d| truth.inside(d.star.x, d.star.y))
+        .collect();
+    match solve_detections(&truth, &provider, &partial, &hints, &params) {
+        Ok(solution) => panic!(
+            "a solution right only inside {disc:.0} px of the centre was accepted: {} matched of {} predicted, log10 P {:.1}, rms {:.3} px, sip {:?}, worst corner {:.1} px",
+            solution.matched,
+            solution.predicted,
+            solution.false_alarm_log10,
+            solution.rms_px,
+            solution.sip_order,
+            truth.worst_corner_px(&solution.wcs_cards)
+        ),
+        Err(failure) => {
+            assert_eq!(failure.reason, FailureReason::NoSolution, "{failure:?}");
+            let best = failure
+                .best
+                .as_deref()
+                .unwrap_or_else(|| panic!("the refused candidate keeps its numbers: {failure:?}"));
+            assert!(
+                best.matched >= params.min_matches
+                    && best.false_alarm_log10 < params.max_false_alarm.log10()
+                    && best.rms_px <= params.max_rms_px,
+                "the partial solution must be refused for its coverage, not for its odds: {best:?}"
+            );
+            assert!(
+                !best.covered(),
+                "the refusal must name the empty cells: {best:?}"
+            );
+            assert!(
+                failure.message.contains("coverage"),
+                "the message must say why: {}",
+                failure.message
+            );
+        }
+    }
+}
+
+type CellCounts = (usize, usize, usize);
+
+fn coverage_of_cells(cells: &[CellCounts; 9], radius: f64) -> (f64, f64) {
+    let side = 300.0;
+    let size = (3 * side as usize, 3 * side as usize);
+    let mut positions: Vec<(f64, f64)> = Vec::new();
+    let mut detections: Vec<Detection> = Vec::new();
+    let mut matched: Vec<(usize, usize, f64)> = Vec::new();
+    for (cell, &(predicted, detected, found)) in cells.iter().enumerate() {
+        let origin = ((cell % 3) as f64 * side, (cell / 3) as f64 * side);
+        let columns = (predicted.max(detected) as f64).sqrt().ceil().max(1.0) as usize;
+        let step = side / (columns as f64 + 1.0);
+        let point = |i: usize, shift: f64| {
+            (
+                origin.0 + step * ((i % columns) as f64 + 1.0) + shift,
+                origin.1 + step * ((i / columns) as f64 + 1.0) + shift,
+            )
+        };
+        let first = positions.len();
+        positions.extend((0..predicted).map(|i| point(i, 0.0)));
+        for j in 0..detected {
+            let (x, y) = if j < found {
+                positions[first + j]
+            } else {
+                point(j, step / 2.0)
+            };
+            if j < found {
+                matched.push((first + j, detections.len(), 0.0));
+            }
+            detections.push(detection(x, y, 1000.0, 3.0));
+        }
+    }
+    coverage_log10(&positions, &detections, &matched, size, radius)
+}
+
+#[test]
+fn a_cell_is_uncovered_only_when_its_matches_are_both_deficient_and_at_chance_level() {
+    let clear = (100, 33, 30);
+    let dusty = coverage_of_cells(
+        &[clear, clear, clear, clear, (100, 33, 6), clear, clear, clear, clear],
+        1.5,
+    );
+    let dense = (300, 100, 60);
+    let at_chance = coverage_of_cells(
+        &[dense, dense, dense, dense, dense, dense, dense, dense, (300, 100, 13)],
+        2.5,
+    );
+    let thin = (50, 30, 28);
+    let empty = coverage_of_cells(&[(50, 30, 0), thin, thin, thin, thin, thin, thin, thin, thin], 1.5);
+    let sparse = coverage_of_cells(&[thin, thin, (3, 2, 1), thin, thin, thin, thin, thin, thin], 1.5);
+    let uniform = coverage_of_cells(&[clear; 9], 1.5);
+    eprintln!(
+        "(cell coverage, matches above chance) log10 P: dusty {dusty:?}, at chance {at_chance:?}, empty {empty:?}, sparse {sparse:?}, uniform {uniform:?}"
+    );
+    let mut failures = Vec::new();
+    if !(dusty.0 < COVERAGE_MIN_LOG10 && dusty.1 < COVERAGE_MIN_LOG10 && cell_covered(dusty.0, dusty.1)) {
+        failures.push(format!("a cell with 6 matches of 27 expected over a chance level of 0.26 must stay covered: {dusty:?}"));
+    }
+    if !(at_chance.0 < COVERAGE_MIN_LOG10 && at_chance.1 >= COVERAGE_MIN_LOG10 && !cell_covered(at_chance.0, at_chance.1)) {
+        failures.push(format!("a cell with 13 matches of 55 expected over a chance level of 6.5 must be uncovered: {at_chance:?}"));
+    }
+    if !(empty.0 < COVERAGE_MIN_LOG10 && empty.1 == 0.0 && !cell_covered(empty.0, empty.1)) {
+        failures.push(format!("a cell with no match of 25 expected must be uncovered: {empty:?}"));
+    }
+    if !(sparse.0 >= COVERAGE_MIN_LOG10 && cell_covered(sparse.0, sparse.1)) {
+        failures.push(format!("a cell with 1 match of 3 predicted stars carries no deficit: {sparse:?}"));
+    }
+    if !(uniform.0 > -1.0 && cell_covered(uniform.0, uniform.1)) {
+        failures.push(format!("a uniform match fraction must be covered with margin: {uniform:?}"));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_correct_solution_with_one_cell_behind_an_extinction_patch_is_accepted() {
+    let params = LocalSolveParams::default();
+    let truth = TruthField::with_long_side((140.0, -12.0), 2.0, 20.0, false, FRAME.0, FRAME.1);
+    let field = truth.field();
+    let diagonal = field.width_deg.hypot(field.height_deg);
+    let provider = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        1.2 * diagonal,
+        truth.density_for(PARTIAL_FIELD_STARS_IN_FRAME),
+        (8.0, 13.0),
+        700,
+    );
+    let whole = detections_from(&truth, provider.rows(), 13.0, 0.05, 20, 701);
+    let hints = truth.hints(0.05, 10.0);
+    let cell = (
+        truth.width as f64 / COVERAGE_GRID as f64,
+        truth.height as f64 / COVERAGE_GRID as f64,
+    );
+    let mut rng = StdRng::seed_from_u64(702);
+    let mut hidden = 0usize;
+    let mut patched: Vec<Detection> = whole
+        .into_iter()
+        .filter(|d| {
+            let behind_the_patch = d.star.x < cell.0 && d.star.y < cell.1;
+            if behind_the_patch && rng.gen::<f64>() >= EXTINCTION_PATCH_SURVIVING_FRACTION {
+                hidden += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    patched.extend(random_detections(hidden, cell.0 as usize, cell.1 as usize, 703));
+    let in_patch = |x: f64, y: f64| x < cell.0 && y < cell.1;
+    let spread = spread_detections(&usable_detections(&patched, &params), truth.size(), params.detection_stars);
+    let radius = match_radius(&spread, &params);
+    let predicted_in_patch: Vec<(f64, f64)> = provider
+        .rows()
+        .iter()
+        .map(|row| truth.to_pixel(row.ra, row.dec))
+        .filter(|&(x, y)| in_patch(x, y))
+        .collect();
+    let detected_in_patch = spread.iter().filter(|d| in_patch(d.star.x, d.star.y)).count();
+    let matched_in_patch = predicted_in_patch
+        .iter()
+        .filter(|&&(x, y)| spread.iter().any(|d| (d.star.x - x).hypot(d.star.y - y) <= radius))
+        .count();
+    let label = format!(
+        "{hidden} catalogue stars hidden behind an extinction patch over one of the {} cells and {hidden} uncatalogued stars detected in their place (patch cell: {} predicted, {detected_in_patch} of the {} verification detections, {matched_in_patch} within {radius:.1} px)",
+        COVERAGE_GRID * COVERAGE_GRID,
+        predicted_in_patch.len(),
+        spread.len()
+    );
+    match solve_detections(&truth, &provider, &patched, &hints, &params) {
+        Err(failure) => panic!(
+            "{label}: the correct solution was refused: {} (best {:?})",
+            failure.message, failure.best
+        ),
+        Ok(solution) => {
+            let corner = truth.worst_corner_px(&solution.wcs_cards);
+            eprintln!(
+                "{label}: {} matched of {} predicted, rms {:.3} px, worst corner {corner:.3} px, {} centres",
+                solution.matched, solution.predicted, solution.rms_px, solution.centres_tried
+            );
+            assert!(at_most(corner, SOLVED_WORST_CORNER_PX), "worst corner {corner:.3} px");
+        }
+    }
+}
+
+fn true_pairs_in_best_window(
+    truth: &TruthField,
+    side: &MatchSide,
+    rows: &[CatalogRow],
+    ranking: RankingKey,
+    params: &LocalSolveParams,
+) -> (usize, usize) {
+    let sky = ranked_sky(rows, 0, params.catalogue_stars, ranking);
+    let coincidence = 1.5;
+    let true_ranks: Vec<usize> = sky
+        .iter()
+        .enumerate()
+        .filter(|(_, &(ra, dec))| {
+            let (tx, ty) = truth.to_pixel(ra, dec);
+            side.stars
+                .iter()
+                .any(|&(x, y)| (x - tx).hypot(y - ty) <= coincidence)
+        })
+        .map(|(rank, _)| rank)
+        .collect();
+    let window = ((side.params.max_stars as f64 * MATCH_WINDOW_FRACTION).round() as usize)
+        .max(side.params.min_inliers);
+    let step = (window / 2).max(1);
+    let best = (0..MATCH_WINDOWS)
+        .map(|index| {
+            let start = index * step;
+            true_ranks
+                .iter()
+                .filter(|&&rank| rank >= start && rank < start + window)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    (true_ranks.len(), best)
+}
+
+#[test]
+fn a_2mass_tier_ranks_its_cone_by_the_optical_equivalent_of_j_and_j_ks() {
+    let params = LocalSolveParams::default();
+    let truth = TruthField::new((300.0, 40.0), 2.4, 0.0, false, FRAME.0, FRAME.1);
+    let field = truth.field();
+    let diagonal = field.width_deg.hypot(field.height_deg);
+    let optical = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        1.2 * diagonal,
+        COLOUR_FIELD_STARS_PER_DEG2,
+        COLOUR_FIELD_OPTICAL_MAGS,
+        720,
+    );
+    let coloured = coloured_rows(optical.rows(), &COLOUR_LOCUS, 721);
+    let by_j_alone = SyntheticProvider::new(TIER1_LABEL, coloured.infrared.clone(), 16.0);
+    let provider = SyntheticProvider::new(TIER1_LABEL, coloured.infrared.clone(), 16.0)
+        .with_ranking(RankingKey::TWO_MASS_J_KS);
+    let bloated_flux = flux_for(COLOUR_FIELD_BLOATED_BRIGHTER_THAN, COLOUR_FIELD_DEPTH_R, 1000.0);
+    let detections: Vec<Detection> =
+        detections_from(&truth, &coloured.optical, COLOUR_FIELD_DEPTH_R, 0.05, 30, 722)
+            .into_iter()
+            .filter(|d| d.star.flux < bloated_flux)
+            .collect();
+    let hints = truth.hints(0.3, 240.0);
+    let hint = hints.centre.as_ref().map(|c| (c.ra, c.dec)).expect("hint");
+    let usable = usable_detections(&detections, &params);
+    let disc_radius_px = params.cone_short_side_fraction * truth.width.min(truth.height) as f64;
+    let points = disc_points(&usable, truth.size(), disc_radius_px);
+    let inlier_px = ransac_inlier_px(truth.width.max(truth.height), truth.long_side_deg());
+    let side = MatchSide::new(&points, params.hinted_match_stars, inlier_px);
+    let cone_radius = params.cone_short_side_fraction * field.width_deg.min(field.height_deg);
+    let (rows, _) = provider.cone(hint.0, hint.1, cone_radius, None).expect("cone");
+    let by_j = true_pairs_in_best_window(&truth, &side, &rows, RankingKey::MAGNITUDE, &params);
+    let by_key = true_pairs_in_best_window(&truth, &side, &rows, RankingKey::TWO_MASS_J_KS, &params);
+    eprintln!(
+        "cone of {} 2MASS-like stars, {} compact image stars in the disc: true pairs (all / best window) by J {:?}, by J + 2 clip(J - Ks) {:?}",
+        rows.len(),
+        side.stars.len(),
+        by_j,
+        by_key
+    );
+    assert!(
+        by_j.1 < by_key.1,
+        "the fixture must rank the image stars better with the colour key: {by_j:?} vs {by_key:?}"
+    );
+    match solve_detections(&truth, &by_j_alone, &detections, &hints, &params) {
+        Ok(solution) => panic!(
+            "ranking by J alone must not reach the triangle stage on this cone: {} matched of {} predicted, worst corner {:.3} px",
+            solution.matched,
+            solution.predicted,
+            truth.worst_corner_px(&solution.wcs_cards)
+        ),
+        Err(failure) => {
+            eprintln!("by J alone: {}", failure.message);
+            assert_eq!(failure.reason, FailureReason::NoSolution, "{failure:?}");
+        }
+    }
+    let solution = solve_detections(&truth, &provider, &detections, &hints, &params)
+        .unwrap_or_else(|failure| panic!("the 2MASS-like cone must solve with the colour key: {failure:?}"));
+    let corner = truth.worst_corner_px(&solution.wcs_cards);
+    eprintln!(
+        "with the colour key: {} matched of {} predicted, rms {:.3} px, worst corner {corner:.3} px, {} centres",
+        solution.matched, solution.predicted, solution.rms_px, solution.centres_tried
+    );
+    assert!(at_most(corner, SOLVED_WORST_CORNER_PX), "worst corner {corner:.3} px");
+}
+
+fn add_galaxy(image: &mut Array2<f32>, centre: (f64, f64), sigma_px: f64, peak: f64) {
+    let (rows, cols) = image.dim();
+    for row in 0..rows {
+        for col in 0..cols {
+            let (dx, dy) = (col as f64 - centre.0, row as f64 - centre.1);
+            let r2 = dx * dx + dy * dy;
+            image[[row, col]] += (peak * (-r2 / (2.0 * sigma_px * sigma_px)).exp()) as f32;
+        }
+    }
+}
+
+#[test]
+fn stars_on_a_bright_extended_source_are_detected_and_the_frame_solves() {
+    let params = LocalSolveParams::default();
+    let truth = TruthField::new((10.68, 41.27), 3.2, 0.0, false, FRAME.0, FRAME.1);
+    let field = truth.field();
+    let diagonal = field.width_deg.hypot(field.height_deg);
+    let provider = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        1.2 * diagonal,
+        TIER1_CUT_STARS_PER_DEG2,
+        (6.0, 15.5),
+        730,
+    );
+    let mut image = render_field(
+        &truth,
+        provider.rows(),
+        15.5,
+        &FrameStyle {
+            seed: 731,
+            ..FrameStyle::default()
+        },
+    );
+    let galaxy_centre = (
+        (truth.width as f64 - 1.0) / 2.0 + 90.0,
+        (truth.height as f64 - 1.0) / 2.0 - 50.0,
+    );
+    add_galaxy(&mut image, galaxy_centre, GALAXY_SIGMA_PX, GALAXY_PEAK_ADU);
+    add_galaxy(
+        &mut image,
+        galaxy_centre,
+        GALAXY_NUCLEUS_SIGMA_PX,
+        GALAXY_NUCLEUS_PEAK_ADU,
+    );
+    let hints = truth.hints(0.05, 320.0);
+    let on_the_disc = |x: f64, y: f64| {
+        (x - galaxy_centre.0).hypot(y - galaxy_centre.1) <= GALAXY_SIGMA_PX
+    };
+    let catalogued: Vec<(f64, f64)> = provider
+        .rows()
+        .iter()
+        .map(|row| truth.to_pixel(row.ra, row.dec))
+        .filter(|&(x, y)| truth.inside(x, y))
+        .collect();
+    let recovered = |detections: &[Detection], region: &dyn Fn(f64, f64) -> bool| {
+        let stars: Vec<&(f64, f64)> = catalogued.iter().filter(|&&(x, y)| region(x, y)).collect();
+        let found = stars
+            .iter()
+            .filter(|&&&(x, y)| {
+                detections
+                    .iter()
+                    .any(|d| (d.star.x - x).hypot(d.star.y - y) <= params.match_radius_px)
+            })
+            .count();
+        (found, stars.len())
+    };
+    let global_background = LocalSolveParams {
+        background_tile_px: 0,
+        ..LocalSolveParams::default()
+    };
+    let with_global = detect_for_solve(&image, &hints, &global_background);
+    let control = recovered(&with_global, &on_the_disc);
+    let control_clear = recovered(&with_global, &|x, y| !on_the_disc(x, y));
+    eprintln!(
+        "one global background: {} detections, {} of the {} catalogue stars on the disc recovered within {} px, {} of {} off it",
+        with_global.len(),
+        control.0,
+        control.1,
+        params.match_radius_px,
+        control_clear.0,
+        control_clear.1
+    );
+    let detections = detect_for_solve(&image, &hints, &params);
+    let disc = recovered(&detections, &on_the_disc);
+    let clear = recovered(&detections, &|x, y| !on_the_disc(x, y));
+    let label = format!(
+        "{:.2} deg frame with a {GALAXY_PEAK_ADU} ADU, sigma {GALAXY_SIGMA_PX} px galaxy over a {} ADU sky: {} detections, {} of the {} catalogue stars on the disc recovered, {} of {} off it",
+        truth.long_side_deg(),
+        FrameStyle::default().background,
+        detections.len(),
+        disc.0,
+        disc.1,
+        clear.0,
+        clear.1
+    );
+    eprintln!("{label}");
+    let floor = GALAXY_MIN_RECOVERED_FRACTION * disc.1 as f64;
+    let mut failures = Vec::new();
+    if (control.0 as f64) >= floor {
+        failures.push(format!(
+            "{label}: the control with one global background recovers {} of {} stars on the disc, so this fixture does not show the defect",
+            control.0, control.1
+        ));
+    }
+    if (disc.0 as f64) < floor {
+        failures.push(format!(
+            "{label}: at least {GALAXY_MIN_RECOVERED_FRACTION} of the stars on the galaxy must survive detection"
+        ));
+    }
+    match solve_local(
+        &image,
+        &hints,
+        &provider,
+        &params,
+        &never_cancelled,
+        &no_stage,
+    ) {
+        Err(failure) => failures.push(format!("{label}: {failure:?}")),
+        Ok(solution) => {
+            let corner = truth.worst_corner_px(&solution.wcs_cards);
+            eprintln!(
+                "{label}: {} matched of {} predicted, rms {:.3} px, worst corner {corner:.3} px, {} centres",
+                solution.matched, solution.predicted, solution.rms_px, solution.centres_tried
+            );
+            if !at_most(corner, SOLVED_WORST_CORNER_PX) {
+                failures.push(format!("{label}: worst corner {corner:.3} px"));
             }
         }
     }
@@ -2532,6 +3040,274 @@ fn synthetic_fixtures_are_self_consistent() {
         if order != Some(expected_order) {
             failures.push(format!(
                 "poly::fit_select 1..={max_order} on SIP case {index}: {order:?}, expected {expected_order}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+fn tess_like(truth: &TruthField, quadratic_px: f64, cubic_px: f64, quartic_px: f64) -> impl Fn(f64, f64) -> (f64, f64) {
+    let (xc, yc) = (
+        (truth.width as f64 - 1.0) / 2.0,
+        (truth.height as f64 - 1.0) / 2.0,
+    );
+    let half_diagonal = (truth.width as f64 / 2.0).hypot(truth.height as f64 / 2.0);
+    move |x, y| {
+        let (u, v) = ((x - xc) / half_diagonal, (y - yc) / half_diagonal);
+        let r2 = u * u + v * v;
+        (
+            x + quadratic_px * (0.8 * u * u - 0.5 * u * v + 0.3 * v * v) + cubic_px * r2 * u + quartic_px * (u.powi(4) + 3.0 * u * u * v * v),
+            y + quadratic_px * (0.4 * v * v + 0.6 * u * v - 0.2 * u * u) + cubic_px * r2 * v + quartic_px * (v.powi(4) - 2.0 * u * u * v * v),
+        )
+    }
+}
+
+fn inverse_of(
+    forward: impl Fn(f64, f64) -> (f64, f64) + Send + Sync + 'static,
+) -> impl Fn(f64, f64) -> (f64, f64) + Send + Sync {
+    move |x, y| {
+        let (mut mx, mut my) = (x, y);
+        for _ in 0..INVERSE_CUBIC_NEWTON_STEPS {
+            let (fx, fy) = forward(mx, my);
+            let step = 0.5;
+            let (fxx, fyx) = forward(mx + step, my);
+            let (fxy, fyy) = forward(mx, my + step);
+            let j = [
+                [(fxx - fx) / step, (fxy - fx) / step],
+                [(fyx - fy) / step, (fyy - fy) / step],
+            ];
+            let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+            if det.abs() < 1e-12 {
+                break;
+            }
+            let (rx, ry) = (fx - x, fy - y);
+            mx -= (j[1][1] * rx - j[0][1] * ry) / det;
+            my -= (-j[1][0] * rx + j[0][0] * ry) / det;
+        }
+        (mx, my)
+    }
+}
+
+fn worst_error_by_radial_fifth(
+    truth: &TruthField,
+    undistort: &dyn Fn(f64, f64) -> (f64, f64),
+    cards: &[(String, String)],
+) -> [f64; 5] {
+    let wcs = wcs_from_cards(cards, truth.width, truth.height);
+    let scale_deg = truth.scale_arcsec() / ARCSEC_PER_DEG;
+    let half_diagonal = (truth.width as f64 / 2.0).hypot(truth.height as f64 / 2.0);
+    let (xc, yc) = (
+        (truth.width as f64 - 1.0) / 2.0,
+        (truth.height as f64 - 1.0) / 2.0,
+    );
+    let mut by_band = [0.0f64; 5];
+    for (mx, my) in grid(truth.width - 1, truth.height - 1, 17) {
+        let (mx, my) = (mx + 0.5, my + 0.5);
+        let (x, y) = undistort(mx, my);
+        let (ra, dec) = truth.to_sky(x, y);
+        let got = wcs.pixel_to_world(mx, my);
+        let error = angular_separation(ra, dec, got.ra, got.dec) / scale_deg;
+        let band = (((mx - xc).hypot(my - yc) / half_diagonal * 5.0).floor() as usize).min(4);
+        by_band[band] = worse(by_band[band], error);
+    }
+    by_band
+}
+
+#[test]
+fn a_tess_like_order_4_distortion_is_recovered_out_to_the_corners() {
+    let truth = TruthField::new(
+        (70.0, -60.0),
+        TESS_LIKE_SCALE_ARCSEC,
+        15.0,
+        false,
+        TESS_LIKE_FRAME.0,
+        TESS_LIKE_FRAME.1,
+    );
+    let field = truth.field();
+    let diagonal = field.width_deg.hypot(field.height_deg);
+    let provider = SyntheticProvider::uniform(
+        TIER1_LABEL,
+        truth.centre(),
+        1.2 * diagonal,
+        truth.density_for(TESS_LIKE_STARS_IN_FRAME),
+        (6.0, 12.0),
+        740,
+    );
+    let (quadratic, cubic, quartic) = TESS_LIKE_DISTORTION_PX;
+    let undistort = tess_like(&truth, quadratic, cubic, quartic);
+    let image = render_field(
+        &truth,
+        provider.rows(),
+        12.0,
+        &FrameStyle {
+            seed: 741,
+            uncatalogued: 2000,
+            distortion: Some(Box::new(inverse_of(tess_like(
+                &truth, quadratic, cubic, quartic,
+            )))),
+            ..FrameStyle::default()
+        },
+    );
+    let hints = truth.hints(2.0 / truth.long_side_deg(), 50.0);
+    let triangle_list_only = LocalSolveParams {
+        sip_stars_per_band: 0,
+        ..LocalSolveParams::default()
+    };
+    let params = LocalSolveParams::default();
+    let mut outcomes = Vec::new();
+    for (name, params) in [("triangle list", &triangle_list_only), ("radial bands", &params)] {
+        let solution = solve_local(
+            &image,
+            &hints,
+            &provider,
+            params,
+            &never_cancelled,
+            &no_stage,
+        )
+        .unwrap_or_else(|failure| panic!("the TESS-like frame must solve ({name}): {failure:?}"));
+        let by_band = worst_error_by_radial_fifth(&truth, &undistort, &solution.wcs_cards);
+        eprintln!(
+            "{:.1} deg frame with {quadratic} + {cubic} + {quartic} px of quadratic, cubic and quartic distortion at the corner, SIP stars from the {name}: sip {:?}, {} matched of {} predicted, rms {:.3} px, {} centres, worst error by radial fifth of the half diagonal {:?} px",
+            truth.long_side_deg(),
+            solution.sip_order,
+            solution.matched,
+            solution.predicted,
+            solution.rms_px,
+            solution.centres_tried,
+            by_band
+        );
+        outcomes.push((name, solution.sip_order, solution.centres_tried, by_band));
+    }
+    let mut failures = Vec::new();
+    for (name, order, centres, by_band) in &outcomes {
+        let worst = by_band.iter().copied().fold(0.0, worse);
+        if !at_most(worst, DISTORTED_MAX_ERROR_PX) {
+            failures.push(format!(
+                "{name}: the corners must be fitted, not extrapolated: {by_band:?}"
+            ));
+        }
+        if *order != Some(4) {
+            failures.push(format!("{name}: sip order {order:?}"));
+        }
+        if *centres != 1 {
+            failures.push(format!(
+                "{name}: the hint 2 deg off must solve at the first centre of the fine spiral, not after {centres}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn projective_residual_px(
+    centre: (f64, f64),
+    offset_deg: f64,
+    cone_radius_deg: f64,
+    scale_deg: f64,
+) -> f64 {
+    let candidate = destination(centre, 33.0, offset_deg);
+    let mut points = vec![centre];
+    for step in 0..12 {
+        points.push(destination(centre, 30.0 * step as f64, cone_radius_deg));
+    }
+    let pairs: Vec<(f64, f64, f64, f64)> = points
+        .iter()
+        .map(|&(ra, dec)| {
+            let (tx, ty) = tan_plane(centre, ra, dec).expect("inside the hemisphere");
+            let (cx, cy) = tan_plane(candidate, ra, dec).expect("inside the hemisphere");
+            (-cx / scale_deg, cy / scale_deg, -tx / scale_deg, ty / scale_deg)
+        })
+        .collect();
+    let fit = crate::core::alignment::triangles::fit_affine(&pairs).expect("affine");
+    pairs
+        .iter()
+        .map(|&(rx, ry, tx, ty)| {
+            let (px, py) = fit.map(rx, ry);
+            (px - tx).hypot(py - ty)
+        })
+        .fold(0.0, worse)
+}
+
+#[test]
+fn the_spiral_spacing_keeps_the_projective_residual_of_a_wrong_centre_under_half_the_pixel_tolerance(
+) {
+    let params = LocalSolveParams::default();
+    let shipped = LocalSolveParams {
+        spiral_projective_px: f64::INFINITY,
+        ..LocalSolveParams::default()
+    };
+    let budget = TriangleParams::SOLVER.inlier_px / 2.0;
+    assert_eq!(params.spiral_projective_px, budget);
+    let mut failures = Vec::new();
+    for &(label, width, height, scale_arcsec, wide) in &[
+        ("1 deg", 3000usize, 2000usize, 1.2f64, false),
+        ("2.5 deg", 3000, 2000, 3.0, false),
+        ("5 deg", 3000, 2000, 6.0, false),
+        (
+            "TESS 12 deg",
+            TESS_LIKE_FRAME.0,
+            TESS_LIKE_FRAME.1,
+            TESS_LIKE_SCALE_ARCSEC,
+            true,
+        ),
+        ("30 deg", 3000, 2000, 36.85, true),
+    ] {
+        let truth = TruthField::new((120.0, -30.0), scale_arcsec, 0.0, false, width, height);
+        let field = truth.field();
+        let short_deg = field.width_deg.min(field.height_deg);
+        let scale_deg = scale_arcsec / ARCSEC_PER_DEG;
+        let cone_radius_deg = params.cone_short_side_fraction * short_deg;
+        let coarse = spiral_spacing_deg(scale_deg, short_deg, cone_radius_deg, &shipped);
+        let spacing = spiral_spacing_deg(scale_deg, short_deg, cone_radius_deg, &params);
+        let worst_offset = spacing / 3f64.sqrt();
+        let residual =
+            projective_residual_px(truth.centre(), worst_offset, cone_radius_deg, scale_deg);
+        let coarse_residual = projective_residual_px(
+            truth.centre(),
+            coarse / 3f64.sqrt(),
+            cone_radius_deg,
+            scale_deg,
+        );
+        let radius = params
+            .near_radius_deg
+            .max(params.near_radius_fields * truth.long_side_deg())
+            .clamp(0.0, MAX_NEAR_RADIUS_DEG);
+        let plan = search_plan(truth.centre(), &[spacing], radius, params.max_centres);
+        eprintln!(
+            "{label}: coarse spacing {coarse:.3} deg leaves {coarse_residual:.2} px at its worst centre; spacing {spacing:.3} deg leaves {residual:.2} px; {} centres to {:.2} deg{}",
+            plan.centres,
+            plan.radius_reached_deg,
+            if plan.capped { " (capped)" } else { "" }
+        );
+        if coarse != params.spiral_spacing_fraction * short_deg {
+            failures.push(format!(
+                "{label}: the shipped spacing must be {} of the short side",
+                params.spiral_spacing_fraction
+            ));
+        }
+        if !at_most(residual, 1.05 * budget) {
+            failures.push(format!(
+                "{label}: {residual:.2} px of projective residual at the worst centre, budget {budget} px"
+            ));
+        }
+        if wide {
+            if !(spacing < coarse && residual >= 0.5 * budget) {
+                failures.push(format!(
+                    "{label}: a wide field must use a finer spacing that spends its budget: {spacing:.3} vs {coarse:.3} deg, {residual:.2} px"
+                ));
+            }
+            if coarse_residual <= budget {
+                failures.push(format!(
+                    "{label}: the fixture must show the coarse spacing over budget: {coarse_residual:.2} px"
+                ));
+            }
+        } else if spacing != coarse {
+            failures.push(format!(
+                "{label}: a narrow field must keep the coarse spacing: {spacing:.3} vs {coarse:.3} deg"
+            ));
+        }
+        if label == "TESS 12 deg" && plan.capped {
+            failures.push(format!(
+                "{label}: the finer spiral must still cover the search disc within {} centres",
+                params.max_centres
             ));
         }
     }

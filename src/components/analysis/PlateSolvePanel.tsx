@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "react";
 import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save, X, Copy, Check } from "lucide-react";
-import { cancelPlateSolve, plateSolve, getSolveHints, getWcsInfo, writeSolvedWcs } from "../../services/astrometry";
+import { cancelPlateSolve, plateSolve, getSolveHints, getWcsInfo, refineWithGaia, writeSolvedWcs } from "../../services/astrometry";
 import type {
+  GaiaRefineResult,
   PlateSolveAnnotation,
   PlateSolveResult,
   PlateSolver,
@@ -9,7 +10,20 @@ import type {
   WcsInfo,
   WriteSolvedWcsResult,
 } from "../../services/astrometry";
-import { shouldResetSolve, solvedWcsSummary, wcsRewriteBlocker, wcsWriteBlocker, type SolveIdentity } from "../../utils/solvedWcs";
+import {
+  GAIA_REFINE_CONSENT,
+  appliedRefinement,
+  gaiaRefineBlocker,
+  gaiaRefineFields,
+  gaiaRefineHeading,
+  parseEpochYear,
+  refineSolveCards,
+  shouldResetSolve,
+  solvedWcsSummary,
+  wcsRewriteBlocker,
+  wcsWriteBlocker,
+  type SolveIdentity,
+} from "../../utils/solvedWcs";
 import OutputNote from "./OutputNote";
 import { getApiKey, getConfig } from "../../services/config";
 import {
@@ -74,7 +88,19 @@ export interface Star {
 const EMPTY_ANNOTATIONS: PlateSolveAnnotation[] = [];
 const DEFAULT_SOLVER: PlateSolver = "auto";
 const FALLBACK_SOLVER: PlateSolver = "astrometry.net";
-const WIDE_SOLVE_FIELDS: ReadonlySet<string> = new Set(["solver", "catalog", "hint", "sip"]);
+const WIDE_SOLVE_FIELDS: ReadonlySet<string> = new Set([
+  "solver",
+  "catalog",
+  "hint",
+  "sip",
+  "refine-matched",
+  "refine-rms",
+  "refine-shift",
+  "refine-rotation",
+  "refine-catalog",
+  "refine-epoch-term",
+  "refine-representation",
+]);
 const ANNOTATIONS_OFF_VIEW_TITLE = "Object labels are in the solved file's pixel grid, so they are not drawn on the composite on screen";
 
 const SOLVE_TICK_MS = 250;
@@ -313,6 +339,115 @@ export function NoSolutionBlock({ failure, offer, notice = null, onFallback }: N
   );
 }
 
+const REFINE_TONES = {
+  applied: "text-emerald-300",
+  no_significant_correction: "text-zinc-300",
+  refused: "text-amber-300",
+} as const;
+
+export function GaiaRefineResultBlock({ result }: { result: GaiaRefineResult }) {
+  return (
+    <div data-gaia-refine-result={result.decision} className="grid grid-cols-2 gap-1.5 text-[10px]">
+      <div className={`col-span-2 font-medium ${REFINE_TONES[result.decision] ?? "text-zinc-300"}`}>{gaiaRefineHeading(result)}</div>
+      {result.reason && (
+        <div data-gaia-refine-reason className="col-span-2 text-amber-200 break-words">
+          {result.reason}
+        </div>
+      )}
+      <SolveResultFields fields={gaiaRefineFields(result)} />
+      {(result.warnings ?? []).map((warning) => (
+        <div key={warning} data-gaia-refine-warning className="col-span-2 text-amber-400/80 break-words">
+          {warning}
+        </div>
+      ))}
+      <div data-gaia-attribution title={result.citation ?? undefined} className="col-span-2 text-[9px] text-zinc-500 break-words">{result.attribution}</div>
+    </div>
+  );
+}
+
+interface GaiaRefineBlockProps {
+  blocker: string | null;
+  loading: boolean;
+  busy?: boolean;
+  epochText: string;
+  epochError: string | null;
+  epochPlaceholder: string;
+  onEpochChange: (text: string) => void;
+  onRefine: () => void;
+  result: GaiaRefineResult | null;
+  error: string | null;
+}
+
+export function GaiaRefineBlock({
+  blocker,
+  loading,
+  busy = false,
+  epochText,
+  epochError,
+  epochPlaceholder,
+  onEpochChange,
+  onRefine,
+  result,
+  error,
+}: GaiaRefineBlockProps) {
+  const epochId = useId();
+  return (
+    <div data-gaia-refine-block className="space-y-1.5 pt-2 border-t border-zinc-800/50">
+      <div className="flex items-end gap-2">
+        <div className="flex flex-col gap-0.5 w-32">
+          <label htmlFor={epochId} className="text-[9px] text-zinc-500 uppercase">
+            Epoch (year)
+          </label>
+          <input
+            id={epochId}
+            type="text"
+            inputMode="decimal"
+            value={epochText}
+            placeholder={epochPlaceholder}
+            aria-invalid={epochError !== null}
+            title="Epoch the Gaia DR3 positions are moved to with their proper motions; leave it empty to use the header date"
+            onChange={(e) => onEpochChange(e.target.value)}
+            className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
+          />
+        </div>
+      </div>
+      {epochError && (
+        <div role="alert" className="text-[10px] text-red-400">
+          {epochError}
+        </div>
+      )}
+      <div data-gaia-consent className="text-[9px] text-zinc-500 break-words">
+        {GAIA_REFINE_CONSENT}
+      </div>
+      <button
+        type="button"
+        data-gaia-refine
+        onClick={onRefine}
+        disabled={blocker !== null || loading || busy || epochError !== null}
+        title={blocker ?? undefined}
+        className="w-full flex items-center justify-center gap-2 bg-sky-600/10 hover:bg-sky-600/20 text-sky-300 border border-sky-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {loading ? (
+          <><Loader2 size={12} className="animate-spin" /> Refining with Gaia DR3...</>
+        ) : (
+          <><Globe size={12} /> Refine with Gaia DR3</>
+        )}
+      </button>
+      {error && (
+        <div role="alert" data-gaia-refine-error className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
+          {error}
+        </div>
+      )}
+      {result && <GaiaRefineResultBlock result={result} />}
+    </div>
+  );
+}
+
+function epochPlaceholder(hints: SolveHints | null): string {
+  const year = hints?.epoch_year;
+  return typeof year === "number" && Number.isFinite(year) ? `${year.toFixed(3)} (header)` : "no date in header";
+}
+
 function useLiveCanvas(ref: React.RefObject<HTMLCanvasElement | null> | undefined): HTMLCanvasElement | null {
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   useEffect(() => {
@@ -402,6 +537,7 @@ function PlateSolvePanel({
 
   const [solveLoading, setSolveLoading] = useState(false);
   const [solveResult, setSolveResult] = useState<PlateSolveResult | null>(null);
+  const [solvedPath, setSolvedPath] = useState<string | null>(null);
   const [solveError, setSolveError] = useState<string | null>(null);
   const [solveFailure, setSolveFailure] = useState<LocalFailure | null>(null);
   const [lastSolver, setLastSolver] = useState<PlateSolver | null>(null);
@@ -423,6 +559,11 @@ function PlateSolvePanel({
   const [wcsWritten, setWcsWritten] = useState<WriteSolvedWcsResult | null>(null);
   const wcsSeqRef = useRef(0);
   const writtenPathRef = useRef<string | null>(null);
+  const [refineLoading, setRefineLoading] = useState(false);
+  const [refineResult, setRefineResult] = useState<GaiaRefineResult | null>(null);
+  const [refineError, setRefineError] = useState<string | null>(null);
+  const [epochText, setEpochText] = useState("");
+  const refineSeqRef = useRef(0);
   const solveIdentityRef = useRef<SolveIdentity>({ regionKey: filePath ?? null, solvePath });
 
   useEffect(() => {
@@ -455,9 +596,18 @@ function PlateSolvePanel({
     setHintSources((current) => editedHintSources(current, field));
   }, []);
 
+  const clearRefinement = useCallback(() => {
+    refineSeqRef.current++;
+    setRefineLoading(false);
+    setRefineResult(null);
+    setRefineError(null);
+  }, []);
+
   useEffect(() => {
     solveSeqRef.current++;
     wcsSeqRef.current++;
+    clearRefinement();
+    setEpochText("");
     setWcsInfo(null);
     setSolveHints(null);
     setSolveResult(null);
@@ -474,7 +624,7 @@ function PlateSolvePanel({
     touchedHintsRef.current = new Set();
     setHintTexts(DEFAULT_HINT_TEXTS);
     setHintSources(NO_HINT_SOURCES);
-  }, [filePath]);
+  }, [filePath, clearRefinement]);
 
   useEffect(() => {
     const next: SolveIdentity = { regionKey: filePath ?? null, solvePath };
@@ -484,6 +634,7 @@ function PlateSolvePanel({
       if (solveLoadingRef.current) cancelPlateSolve().catch(() => {});
       solveSeqRef.current++;
       wcsSeqRef.current++;
+      clearRefinement();
       setSolveResult(null);
       setSolveError(null);
       setSolveFailure(null);
@@ -508,7 +659,7 @@ function PlateSolvePanel({
     return () => {
       cancelled = true;
     };
-  }, [filePath, solvePath, applyHeaderHints]);
+  }, [filePath, solvePath, applyHeaderHints, clearRefinement]);
 
   useEffect(() => {
     if (!solveLoading) return;
@@ -655,6 +806,7 @@ function PlateSolvePanel({
     if (hint.error !== null) return;
     const seq = ++solveSeqRef.current;
     const offline = solver !== FALLBACK_SOLVER;
+    clearRefinement();
     setSolveLoading(true);
     setSolveError(null);
     setSolveFailure(null);
@@ -689,6 +841,7 @@ function PlateSolvePanel({
       );
       if (solveSeqRef.current !== seq) return;
       setSolveResult(result);
+      setSolvedPath(solvePath);
       getWcsInfo(solvePath)
         .then((info) => {
           if (solveSeqRef.current === seq) setWcsInfo(info);
@@ -706,7 +859,7 @@ function PlateSolvePanel({
     } finally {
       if (solveSeqRef.current === seq) setSolveLoading(false);
     }
-  }, [solvePath, hintTexts, downsample]);
+  }, [solvePath, hintTexts, downsample, clearRefinement]);
 
   const handleSolve = useCallback(() => runSolve(DEFAULT_SOLVER), [runSolve]);
   const handleFallback = useCallback(async () => {
@@ -730,18 +883,52 @@ function PlateSolvePanel({
     cancelPlateSolve().catch(() => {});
   }, []);
 
-  const wcsBlocker = wcsWriteBlocker(solveResult) ?? wcsRewriteBlocker(wcsWritten?.fits_path ?? null, solvePath);
+  const refined = appliedRefinement(refineResult);
+  const wcsSource = refined ?? solveResult;
+  const wcsBlocker = wcsWriteBlocker(wcsSource) ?? wcsRewriteBlocker(wcsWritten?.fits_path ?? null, solvePath);
+  const epochInput = parseEpochYear(epochText);
+  const solveCards = useMemo(() => solveResult?.wcs_cards ?? [], [solveResult]);
+  const refineCards = solvePath ? refineSolveCards({ solveCards, solvedPath, path: solvePath, fileWcsKind: wcsInfo?.wcs_kind }) : null;
+  const refineBlocker = gaiaRefineBlocker(refineCards !== null || wcsInfo !== null);
+
+  const handleRefine = useCallback(async () => {
+    if (!solvePath || refineBlocker !== null || epochInput.error !== null || wcsWriting) return;
+    const seq = ++refineSeqRef.current;
+    setRefineLoading(true);
+    setRefineError(null);
+    setRefineResult(null);
+    try {
+      const result = await refineWithGaia(solvePath, {
+        wcsCards: refineCards,
+        epochYear: epochInput.value,
+      });
+      if (refineSeqRef.current !== seq) return;
+      setRefineResult(result);
+      if (appliedRefinement(result)) {
+        wcsSeqRef.current++;
+        setWcsWriting(false);
+        writtenPathRef.current = null;
+        setWcsWritten(null);
+        setWcsWriteError(null);
+      }
+    } catch (e: unknown) {
+      if (refineSeqRef.current === seq) setRefineError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (refineSeqRef.current === seq) setRefineLoading(false);
+    }
+  }, [solvePath, refineBlocker, epochInput.error, epochInput.value, wcsWriting, refineCards]);
 
   const handleWriteWcs = useCallback(async () => {
-    if (!solvePath || wcsWriteBlocker(solveResult) !== null) return;
-    const cards = solveResult?.wcs_cards ?? [];
+    if (!solvePath || refineLoading || wcsWriteBlocker(wcsSource) !== null) return;
+    const cards = wcsSource?.wcs_cards ?? [];
+    const history = refined?.history ?? null;
     const seq = ++wcsSeqRef.current;
     setWcsWriting(true);
     setWcsWriteError(null);
     writtenPathRef.current = null;
     setWcsWritten(null);
     try {
-      const res = await writeSolvedWcs(solvePath, cards);
+      const res = await writeSolvedWcs(solvePath, cards, undefined, history);
       if (wcsSeqRef.current !== seq) return;
       writtenPathRef.current = res.fits_path;
       onWcsWritten?.(res);
@@ -751,7 +938,7 @@ function PlateSolvePanel({
     } finally {
       if (wcsSeqRef.current === seq) setWcsWriting(false);
     }
-  }, [solvePath, solveResult, onWcsWritten]);
+  }, [solvePath, refineLoading, wcsSource, refined, onWcsWritten]);
 
   const medianFwhm = useMemo(() => {
     if (stars.length === 0) return null;
@@ -1147,10 +1334,24 @@ function PlateSolvePanel({
             </div>
           )}
 
+          <GaiaRefineBlock
+            blocker={refineBlocker}
+            loading={refineLoading}
+            busy={solveLoading || wcsWriting || !solvePath}
+            epochText={epochText}
+            epochError={epochInput.error}
+            epochPlaceholder={epochPlaceholder(solveHints)}
+            onEpochChange={setEpochText}
+            onRefine={() => void handleRefine()}
+            result={refineResult}
+            error={refineError}
+          />
+
           <button
             type="button"
+            data-write-wcs
             onClick={handleWriteWcs}
-            disabled={wcsBlocker !== null || wcsWriting || !solvePath}
+            disabled={wcsBlocker !== null || wcsWriting || refineLoading || !solvePath}
             title={wcsBlocker ?? undefined}
             className="w-full flex items-center justify-center gap-2 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >

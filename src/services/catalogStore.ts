@@ -22,7 +22,9 @@ export interface CatalogDatasetReport {
   licence: string;
   credit: string;
   url_host: string | null;
+  zenodo_record?: string | null;
   folder: string;
+  folder_bytes: number;
   free_space_bytes: number | null;
 }
 
@@ -32,7 +34,42 @@ export interface CatalogInstallOutcome {
   bytes: number;
   resumed_from: number;
   sha256_hex: string;
+  sha256_verified: boolean;
   already_installed: boolean;
+}
+
+export interface ZenodoFile {
+  key: string;
+  size: number;
+  checksum: string | null;
+}
+
+export interface ZenodoOffer {
+  id: string;
+  record_url: string;
+  record_page: string | null;
+  doi: string | null;
+  title: string | null;
+  record_licence: string | null;
+  gaia_terms: string;
+  host: string;
+  files: ZenodoFile[];
+  archive_key: string;
+  archive_url: string;
+  archive_bytes: number;
+  archive_sha256: string | null;
+  decoded_sha256: string | null;
+  decoded_max_bytes: number;
+  resume_from: number;
+  need_bytes: number;
+  free_space_bytes: number | null;
+  folder: string;
+}
+
+export interface ZenodoConsent {
+  archive_bytes: number;
+  archive_sha256: string | null;
+  licence_acknowledged: boolean;
 }
 
 export interface CatalogRemoved {
@@ -61,6 +98,7 @@ export const CATALOG_COMMANDS = [
   "catalog_use_file_cmd",
   "catalog_use_siril_dir_cmd",
   "catalog_remove_cmd",
+  "catalog_zenodo_offer_cmd",
 ] as const;
 
 export const CATALOG_INSTALL_PROGRESS_EVENT = "catalog-install-progress";
@@ -69,8 +107,16 @@ export function catalogStatus(): Promise<CatalogDatasetReport[]> {
   return typedInvoke<CatalogDatasetReport[]>("catalog_status_cmd", {});
 }
 
-export function installCatalog(id: string): Promise<CatalogInstallOutcome> {
-  return typedInvoke<CatalogInstallOutcome>("catalog_install_cmd", { id });
+export function installCatalog(id: string, consent?: ZenodoConsent): Promise<CatalogInstallOutcome> {
+  return typedInvoke<CatalogInstallOutcome>("catalog_install_cmd", consent ? { id, consent } : { id });
+}
+
+export function zenodoOffer(): Promise<ZenodoOffer> {
+  return typedInvoke<ZenodoOffer>("catalog_zenodo_offer_cmd", {});
+}
+
+export function zenodoConsent(offer: ZenodoOffer): ZenodoConsent {
+  return { archive_bytes: offer.archive_bytes, archive_sha256: offer.archive_sha256, licence_acknowledged: true };
 }
 
 export function chooseCatalogFile(id: string, path: string): Promise<CatalogChoice> {

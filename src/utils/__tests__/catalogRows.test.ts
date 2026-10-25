@@ -1,17 +1,26 @@
 import { describe, expect, it } from "vitest";
-import type { CatalogDatasetReport, CatalogInstallProgress } from "../../services/catalogStore";
+import type { CatalogDatasetReport, CatalogInstallOutcome, CatalogInstallProgress, ZenodoOffer } from "../../services/catalogStore";
 import {
   IDLE_INSTALL,
   TIER2_ONLINE_TEXT,
+  USED_DOWNLOAD_NOTE,
+  ZENODO_READING_TEXT,
   catalogRowView,
   catalogVersion,
   consentBlocker,
   consentText,
   installReducer,
   installedNote,
+  isZenodoDownload,
+  offersZenodo,
+  registersZenodoDownload,
   removeConfirmText,
   removedNote,
   sortedCatalogRows,
+  zenodoBlocker,
+  zenodoConfirmLabel,
+  zenodoConsentText,
+  zenodoFileText,
   type InstallPhase,
 } from "../catalogRows";
 
@@ -29,6 +38,7 @@ const TIER0: CatalogDatasetReport = {
   credit: "Tycho-2 Catalogue, Høg et al. 2000, A&A 355, L27",
   url_host: null,
   folder: "C:/Users/u/AppData/Local/astroburst/catalogs/tycho2-l6-v1",
+  folder_bytes: 0,
   free_space_bytes: 50_000 * MB,
 };
 
@@ -44,6 +54,7 @@ const TIER1: CatalogDatasetReport = {
   credit: "Two Micron All Sky Survey: University of Massachusetts and IPAC/Caltech, funded by NASA and NSF",
   url_host: "github.com",
   folder: "C:/Users/u/AppData/Local/astroburst/catalogs/2mass-l8-v1",
+  folder_bytes: 0,
   free_space_bytes: 50_000 * MB,
 };
 
@@ -59,6 +70,7 @@ const SIRIL: CatalogDatasetReport = {
   credit: "ESA/Gaia/DPAC; HEALPix extract published by the Siril project (Zenodo record 14692304)",
   url_host: "zenodo.org",
   folder: "C:/Users/u/AppData/Local/astroburst/catalogs/siril-gaia-astro-v1",
+  folder_bytes: 0,
   free_space_bytes: 50_000 * MB,
 };
 
@@ -74,6 +86,7 @@ const CACHE: CatalogDatasetReport = {
   credit: "ESA/Gaia/DPAC through VizieR (CDS, Strasbourg)",
   url_host: "vizier.cds.unistra.fr",
   folder: "C:/Users/u/AppData/Local/astroburst/cache/catalogs/gaia-dr3-vizier-cache",
+  folder_bytes: 3_250_000,
   free_space_bytes: 50_000 * MB,
 };
 
@@ -294,7 +307,7 @@ describe("TIER2_ONLINE_TEXT", () => {
 
 describe("install and remove notes", () => {
   it("states what was installed and whether it resumed", () => {
-    const outcome = { id: TIER1.id, path: "x", bytes: 154_140_794, resumed_from: 0, sha256_hex: "c9ab", already_installed: false };
+    const outcome = { id: TIER1.id, path: "x", bytes: 154_140_794, resumed_from: 0, sha256_hex: "c9ab", sha256_verified: true, already_installed: false };
     expect(installedNote(outcome)).toBe("Installed 154.1 MB, SHA-256 verified.");
     expect(installedNote({ ...outcome, resumed_from: 77_000_000 })).toBe("Installed 154.1 MB, SHA-256 verified; resumed after 77.0 MB.");
     expect(installedNote({ ...outcome, already_installed: true })).toBe("Already installed and verified.");
@@ -304,5 +317,194 @@ describe("install and remove notes", () => {
     expect(removedNote({ id: TIER1.id, freed_bytes: 154_140_794, forgot_external: false })).toBe("Removed 154.1 MB.");
     expect(removedNote({ id: SIRIL.id, freed_bytes: 0, forgot_external: true })).toBe("Forgotten; the file itself is kept.");
     expect(removedNote({ id: CACHE.id, freed_bytes: 0, forgot_external: false })).toBe("Nothing to remove.");
+  });
+});
+
+const SIRIL_ZENODO: CatalogDatasetReport = { ...SIRIL, zenodo_record: "14692304" };
+
+const OFFER: ZenodoOffer = {
+  id: SIRIL.id,
+  record_url: "https://zenodo.org/api/records/14692304",
+  record_page: "https://zenodo.org/records/14692304",
+  doi: "10.5281/zenodo.14692304",
+  title: "Siril Astrometry Catalogue extracted from Gaia DR3",
+  record_licence: "cc-by-4.0",
+  gaia_terms:
+    "Gaia-derived data: Gaia DR3 (ESA/Gaia/DPAC), whose terms are CC BY-NC 3.0 IGO; the Zenodo record labels this Siril extract CC BY 4.0.",
+  host: "zenodo.org",
+  files: [
+    { key: "uncompressed_files.sha256sum", size: 95, checksum: "md5:02e655b1d8b8db05fa561bc356dadfc8" },
+    { key: "siril_cat_healpix8_astro.dat.bz2", size: 1_142_276_749, checksum: "md5:2e62f2365023e621afbd336c82980208" },
+    { key: "siril_cat_healpix8_astro.dat.bz2.sha256sum", size: 99, checksum: "md5:ba889d7b455f857660096ea445a13953" },
+  ],
+  archive_key: "siril_cat_healpix8_astro.dat.bz2",
+  archive_url: "https://zenodo.org/api/records/14692304/files/siril_cat_healpix8_astro.dat.bz2/content",
+  archive_bytes: 1_142_276_749,
+  archive_sha256: "846ad4b12c50865df0cb8c5b23453f22eec78bbe9969e17d669ae19eb49d421f",
+  decoded_sha256: "2fa40c93fe115235d35c5050757f2ef60a326a6f3030f87be1598c016fcb2388",
+  decoded_max_bytes: 1_601_175_680,
+  resume_from: 0,
+  need_bytes: 2_743_452_429,
+  free_space_bytes: 50_000 * MB,
+  folder: SIRIL.folder,
+};
+
+describe("the Siril Gaia extract from Zenodo", () => {
+  it("offers the Zenodo download beside the Siril folder and file when this build can download", () => {
+    const row = catalogRowView(SIRIL_ZENODO);
+    expect(row.installLabel).toBe("Download the Siril Gaia extract (Zenodo, about 1.14 GB)");
+    expect(row.actions).toMatchObject({ install: true, chooseFolder: true, chooseFile: true, remove: false });
+    expect(row.stateText).toContain("download the Siril Gaia extract from Zenodo");
+    expect(offersZenodo(SIRIL_ZENODO)).toBe(true);
+    expect(offersZenodo(SIRIL)).toBe(false);
+    expect(offersZenodo({ ...TIER1, zenodo_record: "14692304" })).toBe(false);
+  });
+
+  it("resumes a partial Zenodo download and offers to use an unpacked one", () => {
+    const partial = catalogRowView({ ...SIRIL_ZENODO, status: { state: "partial", received: 571_138_374, total: 1_142_276_749 } });
+    expect(partial).toMatchObject({ installLabel: "Resume the Zenodo download" });
+    expect(partial.actions).toMatchObject({ install: true, remove: true, chooseFolder: true });
+    const unpacked = catalogRowView({ ...SIRIL_ZENODO, status: { state: "installed", path: `${SIRIL.folder}/siril_cat_healpix8_astro.dat`, verified: true } });
+    expect(unpacked.installLabel).toBe("Use the Zenodo download");
+    expect(unpacked.actions.install).toBe(true);
+  });
+
+  it("removes the Zenodo download with a confirm, but forgets a Siril folder of the user's own at once", () => {
+    const downloaded: CatalogDatasetReport = {
+      ...SIRIL_ZENODO,
+      folder: "C:\\Users\\u\\AppData\\Local\\astroburst\\catalogs\\siril-gaia-astro-v1",
+      status: {
+        state: "external",
+        path: "C:\\Users\\u\\AppData\\Local\\astroburst\\catalogs\\siril-gaia-astro-v1\\siril_cat_healpix8_astro.dat",
+        valid: true,
+        problem: null,
+      },
+    };
+    expect(isZenodoDownload(downloaded)).toBe(true);
+    const row = catalogRowView(downloaded);
+    expect(row.stateText).toContain("Using the Zenodo download in ");
+    expect(row).toMatchObject({ removeLabel: "Remove", tone: "ok" });
+    expect(row.actions).toMatchObject({ install: false, remove: true });
+    expect(removeConfirmText(downloaded)).toBe("Confirm: deletes the Zenodo download");
+    const own: CatalogDatasetReport = { ...SIRIL_ZENODO, status: { state: "external", path: "D:/siril/siril_cat_healpix8_astro.dat", valid: true, problem: null } };
+    expect(isZenodoDownload(own)).toBe(false);
+    expect(catalogRowView(own)).toMatchObject({ removeLabel: "Forget", actions: { install: false } });
+    expect(removeConfirmText(own)).toBeNull();
+    const sibling: CatalogDatasetReport = {
+      ...SIRIL_ZENODO,
+      status: { state: "external", path: `${SIRIL.folder}-old/siril_cat_healpix8_astro.dat`, valid: true, problem: null },
+    };
+    expect(isZenodoDownload(sibling)).toBe(false);
+    const broken: CatalogDatasetReport = { ...SIRIL_ZENODO, status: { state: "external", path: "D:/x.dat", valid: false, problem: "it is HEALPix level 7" } };
+    expect(catalogRowView(broken).actions).toMatchObject({ install: true, remove: true });
+  });
+
+  it("keeps the Zenodo consent open until the record is read, and records what it read", () => {
+    const id = SIRIL.id;
+    const asked = installReducer({}, { type: "ask", id });
+    expect(zenodoBlocker(asked[id])).toBe(ZENODO_READING_TEXT);
+    const offered = installReducer(asked, { type: "offer", id, offer: OFFER });
+    expect(offered[id]).toEqual({ phase: "consent", offer: OFFER });
+    expect(zenodoBlocker(offered[id])).toBeNull();
+    const failed = installReducer(asked, { type: "offerFailed", id, message: "HTTP 503" });
+    expect(zenodoBlocker(failed[id])).toBe("Cannot read the Zenodo record: HTTP 503");
+    expect(installReducer({}, { type: "offer", id, offer: OFFER })).toEqual({});
+    const tight = installReducer(asked, { type: "offer", id, offer: { ...OFFER, free_space_bytes: 2_000 * MB } });
+    expect(zenodoBlocker(tight[id])).toBe("Needs 2.74 GB free; 2.00 GB available");
+    expect(installReducer(offered, { type: "start", id })[id]).toMatchObject({ phase: "running", stage: "download" });
+  });
+
+  it("names the source, the size, the checksum, the unpacked size, the folder and the Gaia terms before the download", () => {
+    const text = zenodoConsentText(OFFER);
+    for (const needle of [
+      "siril_cat_healpix8_astro.dat.bz2 (1.14 GB, bzip2)",
+      "Zenodo record https://zenodo.org/records/14692304 (DOI 10.5281/zenodo.14692304)",
+      "Zenodo publishes its SHA-256, which is checked after the download",
+      "at most 1.60 GB in C:/Users/u/AppData/Local/astroburst/catalogs/siril-gaia-astro-v1",
+      "becomes your Siril catalogue folder",
+      "Needs 2.74 GB free; 50.00 GB available",
+      "CC BY-NC 3.0 IGO",
+      "no image leaves this computer",
+    ]) {
+      expect(text).toContain(needle);
+    }
+    expect(zenodoConsentText({ ...OFFER, archive_sha256: null })).toContain("Zenodo publishes no SHA-256 for it, so only its size is checked");
+    expect(zenodoConsentText({ ...OFFER, resume_from: 571_138_374 })).toContain("571.1 MB are already here and the download resumes from there.");
+    expect(zenodoFileText(OFFER.files[1])).toBe("siril_cat_healpix8_astro.dat.bz2 · 1.14 GB · md5:2e62f2365023e621afbd336c82980208");
+    expect(zenodoConfirmLabel({ phase: "consent" })).toBe("Accept the terms and download");
+    expect(zenodoConfirmLabel({ phase: "consent", offer: OFFER })).toBe("Accept the terms and download 1.14 GB");
+    expect(zenodoConfirmLabel({ phase: "consent", offer: { ...OFFER, resume_from: 571_138_374 } })).toBe("Accept the terms and download 571.1 MB");
+  });
+
+  it("shows the bytes written while decoding a catalogue of unknown decoded size", () => {
+    const decoding: InstallPhase = { phase: "running", stage: "decode", current: 12_300_000, total: 0, percent: 0, cancelling: false };
+    const row = catalogRowView(SIRIL_ZENODO, decoding);
+    expect(row.stateText).toBe("Decoding: 12.3 MB written");
+    expect(row.percent).toBeNull();
+    expect(row.actions.cancel).toBe(true);
+  });
+
+  it("says when only the size was checked and that the download is now the Siril folder", () => {
+    const outcome = { id: SIRIL.id, path: "x", bytes: 1_450_000_000, resumed_from: 0, sha256_hex: "2fa4", sha256_verified: false, already_installed: false };
+    expect(installedNote(outcome)).toBe("Installed 1.45 GB, size checked (Zenodo published no SHA-256). It is now your Siril catalogue folder.");
+    expect(installedNote({ ...outcome, sha256_verified: true })).toBe("Installed 1.45 GB, SHA-256 verified. It is now your Siril catalogue folder.");
+  });
+});
+
+describe("the Siril row after the review of the Zenodo download", () => {
+  const ON_DISK = 1_601_175_680;
+  const DOWNLOADED = `${SIRIL.folder}/siril_cat_healpix8_astro.dat`;
+  const installed: CatalogDatasetReport = { ...SIRIL_ZENODO, folder_bytes: ON_DISK, status: { state: "installed", path: DOWNLOADED, verified: true } };
+
+  it("shows a Zenodo download kept beside the user's own folder, and Forget deletes nothing", () => {
+    const own: CatalogDatasetReport = {
+      ...SIRIL_ZENODO,
+      folder_bytes: ON_DISK,
+      status: { state: "external", path: "D:/Siril/siril_cat_healpix8_astro.dat", valid: true, problem: null },
+    };
+    const row = catalogRowView(own);
+    expect(row.stateText).toBe(`Using D:/Siril/siril_cat_healpix8_astro.dat. The download in ${SIRIL.folder} (1.60 GB) stays on disk; Forget keeps it.`);
+    expect(row.removeLabel).toBe("Forget");
+    expect(removeConfirmText(own)).toBeNull();
+    expect(catalogRowView({ ...own, folder_bytes: 0 }).stateText).toBe("Using D:/Siril/siril_cat_healpix8_astro.dat");
+    const broken: CatalogDatasetReport = { ...own, status: { state: "external", path: "D:/gone.dat", valid: false, problem: "the file does not exist" } };
+    expect(catalogRowView(broken).stateText).toContain("stays on disk; Forget keeps it.");
+  });
+
+  it("labels the delete of a download that is not the Siril folder Remove and confirms its size on disk", () => {
+    expect(catalogRowView(installed).removeLabel).toBe("Remove");
+    expect(removeConfirmText(installed)).toBe("Confirm: deletes 1.60 GB");
+    const partial: CatalogDatasetReport = { ...installed, status: { state: "partial", received: 571_138_374, total: 1_142_276_749 } };
+    expect(catalogRowView(partial).removeLabel).toBe("Remove");
+    const registered: CatalogDatasetReport = { ...installed, status: { state: "external", path: DOWNLOADED, valid: true, problem: null } };
+    expect(removeConfirmText(registered)).toBe("Confirm: deletes the Zenodo download (1.60 GB)");
+  });
+
+  it("says what was deleted and what was forgotten, also when both happened", () => {
+    expect(removedNote({ id: SIRIL.id, freed_bytes: ON_DISK, forgot_external: true })).toBe(
+      "Removed 1.60 GB; your own file or folder is forgotten and kept on disk.",
+    );
+    expect(removedNote({ id: SIRIL.id, freed_bytes: ON_DISK, forgot_external: false })).toBe("Removed 1.60 GB.");
+  });
+
+  it("uses a verified download already on disk without a consent, and checks an unverified one against Zenodo first", () => {
+    expect(registersZenodoDownload(installed)).toBe(true);
+    expect(catalogRowView(installed)).toMatchObject({ installLabel: "Use the Zenodo download", actions: { install: true } });
+    expect(registersZenodoDownload({ ...installed, status: { state: "installed", path: DOWNLOADED, verified: false } })).toBe(false);
+    expect(registersZenodoDownload({ ...installed, status: { state: "partial", received: 1, total: 2 } })).toBe(false);
+    expect(registersZenodoDownload({ ...installed, zenodo_record: null })).toBe(false);
+    expect(USED_DOWNLOAD_NOTE).toBe("Using the verified Zenodo download; it is now your Siril catalogue folder.");
+  });
+
+  it("names the host every byte comes from and the licence the record lists", () => {
+    const text = zenodoConsentText({ ...OFFER, host: "127.0.0.1" });
+    expect(text).toContain("from 127.0.0.1, Zenodo record https://zenodo.org/records/14692304 (DOI 10.5281/zenodo.14692304)");
+    expect(text).toContain("The Zenodo record lists its licence as cc-by-4.0.");
+    expect(zenodoConsentText({ ...OFFER, record_licence: null })).toContain("The Zenodo record lists no licence.");
+  });
+
+  it("never reports an outcome without its checksum flag as SHA-256 verified", () => {
+    const outcome = { id: SIRIL.id, path: "x", bytes: 1_450_000_000, resumed_from: 0, sha256_hex: "2fa4", already_installed: false };
+    expect(installedNote(outcome as unknown as CatalogInstallOutcome)).not.toContain("SHA-256 verified");
   });
 });

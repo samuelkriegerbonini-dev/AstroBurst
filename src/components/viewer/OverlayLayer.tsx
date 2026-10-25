@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { useDisplayContext, useDisplayedImage } from "../../context/PreviewContext";
 import { useOverlayDoc } from "../../hooks/useOverlayStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
@@ -6,6 +6,7 @@ import { getWcsInfo, gridLines, isWcsGridError } from "../../services/astrometry
 import type { GridFrame } from "../../shared/types/display";
 import { horizontalPixelScaleArcsec, overlayWcsPath } from "../../utils/compass";
 import { overlayStore, type OverlayPaintContext } from "../../utils/overlayStore";
+import { subscribeSolvedWcs, wcsRevision } from "../../utils/solvedWcs";
 import { wcsOverlayStatus } from "../../utils/wcsOverlayStatus";
 import { screenPxPerImagePx, type ViewerTransform } from "../../utils/pixelMapping";
 import { isRegionMappingUsable, regionPointToScreen, resolveRegionHost, type RegionMapping } from "../../utils/regionCoords";
@@ -34,6 +35,7 @@ function useWcsGridLayer(
   grid: boolean,
   frame: GridFrame,
   density: number,
+  revision: number,
 ): void {
   useEffect(() => {
     if (!fileKey || !wcsPath || !grid) return;
@@ -64,10 +66,10 @@ function useWcsGridLayer(
       wcsOverlayStatus.set("grid", null);
       overlayStore.remove(fileKey, GRID_LAYER_ID);
     };
-  }, [fileKey, wcsPath, grid, frame, density]);
+  }, [fileKey, wcsPath, grid, frame, density, revision]);
 }
 
-function useCompassLayer(fileKey: string | null, wcsPath: string | null, compass: boolean): void {
+function useCompassLayer(fileKey: string | null, wcsPath: string | null, compass: boolean, revision: number): void {
   useEffect(() => {
     if (!fileKey || !wcsPath || !compass) return;
     let cancelled = false;
@@ -103,7 +105,7 @@ function useCompassLayer(fileKey: string | null, wcsPath: string | null, compass
       wcsOverlayStatus.set("compass", null);
       overlayStore.remove(fileKey, COMPASS_LAYER_ID);
     };
-  }, [fileKey, wcsPath, compass]);
+  }, [fileKey, wcsPath, compass, revision]);
 }
 
 function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH, enabled }: OverlayLayerProps) {
@@ -112,6 +114,8 @@ function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   const { display } = useDisplayContext();
   const displayed = useDisplayedImage();
   const wcsPath = overlayWcsPath(fileKey, displayed.path);
+  const readRevision = () => wcsRevision(wcsPath);
+  const revision = useSyncExternalStore(subscribeSolvedWcs, readRevision, readRevision);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hostEl, setHostEl] = useState<HTMLElement | null>(null);
@@ -121,8 +125,8 @@ function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   const mappingRef = useRef(mapping);
   mappingRef.current = mapping;
 
-  useWcsGridLayer(active ? fileKey : null, wcsPath, display.grid, display.gridFrame, display.gridDensity);
-  useCompassLayer(active ? fileKey : null, wcsPath, display.compass);
+  useWcsGridLayer(active ? fileKey : null, wcsPath, display.grid, display.gridFrame, display.gridDensity, revision);
+  useCompassLayer(active ? fileKey : null, wcsPath, display.compass, revision);
   const doc = useOverlayDoc(fileKey);
   const hasLayers = doc.layers.some((l) => l.visible);
 

@@ -8,20 +8,29 @@ import {
   installCatalog,
   onCatalogInstallProgress,
   removeCatalog,
+  zenodoConsent,
+  zenodoOffer,
   type CatalogDatasetReport,
 } from "../services/catalogStore";
 import {
   IDLE_INSTALL,
   INSTALL_COMPLETE_STAGE,
   TIER2_ONLINE_TEXT,
+  USED_DOWNLOAD_NOTE,
   catalogRowView,
   consentBlocker,
   consentText,
   installReducer,
   installedNote,
+  offersZenodo,
+  registersZenodoDownload,
   removeConfirmText,
   removedNote,
   sortedCatalogRows,
+  zenodoBlocker,
+  zenodoConfirmLabel,
+  zenodoConsentText,
+  zenodoFileText,
   type CatalogTone,
   type InstallAction,
   type InstallMap,
@@ -30,7 +39,8 @@ import {
 
 export const CATALOG_CREDITS =
   "Data credits: Tycho-2 (Høg et al. 2000, BSD-2), 2MASS (UMass and IPAC/Caltech for NASA and NSF, public domain), " +
-  "Siril HEALPix catalogue format (Team free-astro, CC BY 4.0), Gaia DR3 © ESA/Gaia/DPAC, online through VizieR (CDS, Strasbourg).";
+  "Siril HEALPix catalogue format (Team free-astro, CC BY 4.0), Gaia DR3 © ESA/Gaia/DPAC (Vallenari et al. 2023, CC BY-NC 3.0 IGO), " +
+  "online through VizieR (CDS, Strasbourg) or as the Siril extract downloaded from Zenodo.";
 
 const TIER2_ROW_ID = "tier2-online";
 const SIRIL_FILE_FILTER = { name: "Siril HEALPix catalogue", extensions: ["dat"] };
@@ -84,7 +94,14 @@ function CatalogRow({
   const consentTextId = useId();
   const view = catalogRowView(report, install);
   const consenting = install.phase === "consent";
-  const blocker = consenting ? consentBlocker(report) : null;
+  const zenodo = offersZenodo(report);
+  const offer = install.phase === "consent" ? install.offer : undefined;
+  const blocker = consenting ? (zenodo ? zenodoBlocker(install) : consentBlocker(report)) : null;
+  const consentBody = zenodo
+    ? offer
+      ? zenodoConsentText(offer)
+      : `${report.title}: the file list, sizes and checksums come from the Zenodo record before anything is downloaded.`
+    : consentText(report);
   const confirmRemove = armed ? removeConfirmText(report) : null;
   const meta = [view.version, view.sizeText].filter(Boolean).join(" · ");
   return (
@@ -124,8 +141,15 @@ function CatalogRow({
           className="rounded border border-teal-500/30 bg-teal-500/5 px-2.5 py-2 space-y-1.5"
         >
           <p id={consentTextId} className="text-[10px] text-zinc-300 break-words">
-            {consentText(report)}
+            {consentBody}
           </p>
+          {offer && (
+            <ul aria-label="Files in the Zenodo record" className="text-[9px] font-mono text-zinc-400 space-y-0.5 break-all">
+              {offer.files.map((file) => (
+                <li key={file.key}>{zenodoFileText(file)}</li>
+              ))}
+            </ul>
+          )}
           {blocker && (
             <p role="alert" className="text-[10px] text-amber-400">
               {blocker}
@@ -139,7 +163,7 @@ function CatalogRow({
               disabled={blocker !== null}
               className={CONFIRM_CLASS}
             >
-              Download {view.sizeText}
+              {zenodo ? zenodoConfirmLabel(install) : `Download ${view.sizeText}`}
             </button>
             <button type="button" autoFocus={blocker !== null} onClick={() => onDecline(view.id)} className={BUTTON_CLASS}>
               Not now
@@ -296,6 +320,8 @@ export default function CatalogsSettings() {
   const [armedRemove, setArmedRemove] = useState<string | null>(null);
   const installsRef = useRef(installs);
   installsRef.current = installs;
+  const reportsRef = useRef(reports);
+  reportsRef.current = reports;
 
   const dispatch = useCallback((action: InstallAction) => setInstalls((prev) => installReducer(prev, action)), []);
 
@@ -333,15 +359,42 @@ export default function CatalogsSettings() {
     };
   }, [dispatch, refresh]);
 
-  const onAsk = useCallback((id: string) => dispatch({ type: "ask", id }), [dispatch]);
+  const onAsk = useCallback(
+    async (id: string) => {
+      const report = reportsRef.current?.find((row) => row.id === id);
+      if (report && registersZenodoDownload(report)) {
+        try {
+          await chooseSirilCatalogDir(report.folder);
+          dispatch({ type: "finished", id, note: USED_DOWNLOAD_NOTE });
+        } catch (e: unknown) {
+          setError(errorText(e));
+        }
+        await refresh();
+        return;
+      }
+      dispatch({ type: "ask", id });
+      if (!report || !offersZenodo(report)) return;
+      try {
+        dispatch({ type: "offer", id, offer: await zenodoOffer() });
+      } catch (e: unknown) {
+        dispatch({ type: "offerFailed", id, message: errorText(e) });
+      }
+    },
+    [dispatch, refresh],
+  );
   const onDecline = useCallback((id: string) => dispatch({ type: "decline", id }), [dispatch]);
 
   const onConfirm = useCallback(
     async (id: string) => {
-      if (installsRef.current[id]?.phase !== "consent") return;
+      const install = installsRef.current[id];
+      if (install?.phase !== "consent") return;
+      const report = reportsRef.current?.find((row) => row.id === id);
+      const zenodo = report !== undefined && offersZenodo(report);
+      if (zenodo && !install.offer) return;
       dispatch({ type: "start", id });
       try {
-        dispatch({ type: "finished", id, note: installedNote(await installCatalog(id)) });
+        const outcome = zenodo && install.offer ? await installCatalog(id, zenodoConsent(install.offer)) : await installCatalog(id);
+        dispatch({ type: "finished", id, note: installedNote(outcome) });
       } catch (e: unknown) {
         dispatch({ type: "failed", id, message: errorText(e) });
       }
@@ -419,7 +472,7 @@ export default function CatalogsSettings() {
       loading={loading}
       error={error}
       armedRemove={armedRemove}
-      onAsk={onAsk}
+      onAsk={(id) => void onAsk(id)}
       onDecline={onDecline}
       onConfirm={(id) => void onConfirm(id)}
       onCancel={(id) => void onCancel(id)}

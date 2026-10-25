@@ -1,6 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  GAIA_REFINE_CONSENT,
   NO_SOLVE_YET,
+  NO_WCS_TO_REFINE,
+  appliedRefinement,
+  gaiaRefineBlocker,
+  gaiaRefineFields,
+  gaiaRefineHeading,
+  parseEpochYear,
+  refineSolveCards,
+  wcsRevision,
   NO_WCS_FILE,
   SOLVED_WCS_LABEL,
   WCS_ALREADY_WRITTEN,
@@ -17,6 +26,7 @@ import {
 } from "../solvedWcs";
 import { INITIAL_STATE, type WizardState } from "../wizard";
 import type { WriteSolvedWcsResult } from "../../shared/types/astrometry";
+import type { GaiaRefineResult } from "../../services/astrometry";
 
 function written(overrides: Partial<WriteSolvedWcsResult> = {}): WriteSolvedWcsResult {
   return {
@@ -224,5 +234,217 @@ describe("spccSolvedWcsPath", () => {
 
   it("gives no WCS when nothing was solved for R", () => {
     expect(spccSolvedWcsPath(rgbState({}, { r: ["/spcc/never_solved.fits"] }))).toBeNull();
+  });
+});
+
+describe("WCS revision", () => {
+  it("starts at zero and counts each write of a path, whatever its slashes or case", () => {
+    expect(wcsRevision("C:/out/rev_a_wcs.fits")).toBe(0);
+    rememberSolvedWcs("C:\\in\\rev_a.fits", "C:\\out\\REV_A_wcs.fits");
+    rememberSolvedWcs("c:/in/rev_a.fits", "c:/out/rev_a_wcs.fits");
+    expect(wcsRevision("C:/out/rev_a_wcs.fits")).toBe(2);
+    expect(wcsRevision("C:/in/rev_a.fits")).toBe(2);
+    expect(wcsRevision("C:/out/rev_b.fits")).toBe(0);
+    expect(wcsRevision(null)).toBe(0);
+  });
+
+  it("bumps the written copy and the solved input when a WCS is written, with one notification", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeSolvedWcs(listener);
+    const input = wcsRevision("/store/rev_d.fits");
+    const copy = wcsRevision("/out/rev_d_wcs.fits");
+    rememberSolvedWcs("/store/rev_d.fits", "/out/rev_d_wcs.fits");
+    expect(wcsRevision("/store/rev_d.fits")).toBe(input + 1);
+    expect(wcsRevision("/out/rev_d_wcs.fits")).toBe(copy + 1);
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+});
+
+const FGS_TIE: GaiaRefineResult = {
+  decision: "applied",
+  reason: null,
+  wcs_cards: [
+    ["CRVAL1", "80.6575"],
+    ["CRVAL2", "-69.5173"],
+  ],
+  history: ["Gaia DR3 tie: rshift"],
+  model: "rshift",
+  wcs_kind: "header",
+  n_catalog: 2378,
+  n_detected: 500,
+  n_matched: 104,
+  n_used: 97,
+  rms_before_mas: 1766.2,
+  rms_after_mas: 14.9,
+  shift_east_mas: 1029.4,
+  shift_north_mas: 1438.5,
+  shift_err_east_mas: 2.1,
+  shift_err_north_mas: 2.3,
+  rotation_deg: 0.00125,
+  rotation_err_deg: 0.0004,
+  scale_ppm: null,
+  scale_err_ppm: null,
+  epoch_year: 2022.8548,
+  epoch_source: "header",
+  catalog: "Gaia DR3 (I/355/gaiadr3) via VizieR, CDS",
+  catalog_source: "network",
+  attribution: "Gaia DR3, ESA/Gaia/DPAC, via VizieR",
+  warnings: [],
+};
+
+const REFUSED: GaiaRefineResult = {
+  ...FGS_TIE,
+  decision: "refused",
+  reason: "1 < 15 used pairs for rshift",
+  wcs_cards: [],
+  history: [],
+  n_catalog: 1,
+  n_matched: 1,
+  n_used: 0,
+  rms_before_mas: null,
+  rms_after_mas: null,
+  shift_east_mas: null,
+  shift_north_mas: null,
+  shift_err_east_mas: null,
+  shift_err_north_mas: null,
+  rotation_deg: null,
+  rotation_err_deg: null,
+  epoch_year: null,
+  epoch_source: "none",
+  catalog_source: "disk",
+};
+
+describe("Gaia DR3 refinement text", () => {
+  it("says before the click that a star list is fetched online and the image stays local", () => {
+    expect(GAIA_REFINE_CONSENT).toContain("VizieR");
+    expect(GAIA_REFINE_CONSENT).toContain("star list");
+    expect(GAIA_REFINE_CONSENT).toContain("the image stays on this computer");
+    expect(GAIA_REFINE_CONSENT).toContain("CC BY-NC 3.0 IGO");
+    expect(GAIA_REFINE_CONSENT).not.toContain(String.fromCharCode(0x2014));
+  });
+
+  it("needs a WCS to refine: a solve or the header's own", () => {
+    expect(gaiaRefineBlocker(false)).toBe(NO_WCS_TO_REFINE);
+    expect(gaiaRefineBlocker(true)).toBeNull();
+  });
+
+  it("hands Write WCS only an applied refinement that carries cards", () => {
+    expect(appliedRefinement(FGS_TIE)).toBe(FGS_TIE);
+    expect(appliedRefinement(REFUSED)).toBeNull();
+    expect(appliedRefinement({ ...FGS_TIE, decision: "no_significant_correction" })).toBeNull();
+    expect(appliedRefinement({ ...FGS_TIE, wcs_cards: [] })).toBeNull();
+    expect(appliedRefinement(null)).toBeNull();
+    expect(wcsWriteBlocker(appliedRefinement(FGS_TIE))).toBeNull();
+  });
+
+  it("heads the block with the decision", () => {
+    expect(gaiaRefineHeading(FGS_TIE)).toBe("Refined with Gaia DR3");
+    expect(gaiaRefineHeading({ ...FGS_TIE, decision: "no_significant_correction" })).toBe("No significant correction");
+    expect(gaiaRefineHeading(REFUSED)).toBe("Not refined");
+  });
+
+  it("prints matched, RMS in mas, shift and rotation with their 1 sigma, the model, the epoch and the catalogue", () => {
+    const fields = Object.fromEntries(gaiaRefineFields(FGS_TIE).map((f) => [f.key, f.value]));
+    expect(fields).toEqual({
+      "refine-matched": "97 used of 104 matched (2378 Gaia DR3 stars)",
+      "refine-rms": "1766.2 mas before, 14.9 mas after",
+      "refine-shift": "+1029.4 mas E, +1438.5 mas N (1σ 2.1, 2.3)",
+      "refine-rotation": "+0.00125° (+4.50\") (1σ 0.00040°)",
+      "refine-model": "Shift + rotation (rshift)",
+      "refine-epoch": "2022.855 (header)",
+      "refine-wcs": "Header WCS",
+      "refine-catalog": "Gaia DR3 (I/355/gaiadr3) via VizieR, CDS (network)",
+    });
+  });
+
+  it("prefers the hold-out RMS, which keeps the offset the tie removes", () => {
+    const fields = gaiaRefineFields({ ...FGS_TIE, holdout_rms_before_mas: 1772.0, holdout_rms_after_mas: 34.58 });
+    expect(fields.find((f) => f.key === "refine-rms")?.value).toBe("1772.0 mas before, 34.6 mas after (hold-out)");
+  });
+
+  it("adds the scale for the models that fit it", () => {
+    const fields = gaiaRefineFields({ ...FGS_TIE, model: "rscale", scale_ppm: 12.34, scale_err_ppm: 5 });
+    expect(fields.find((f) => f.key === "refine-scale")?.value).toBe("+12.3 ppm (1σ 5.0)");
+    expect(fields.find((f) => f.key === "refine-model")?.value).toBe("Shift + rotation + scale (rscale)");
+  });
+
+  it("keeps only what a refusal measured", () => {
+    const fields = Object.fromEntries(gaiaRefineFields(REFUSED).map((f) => [f.key, f.value]));
+    expect(fields).toEqual({
+      "refine-matched": "0 used of 1 matched (1 Gaia DR3 stars)",
+      "refine-model": "Shift + rotation (rshift)",
+      "refine-epoch": "J2016.0 (no date in the header)",
+      "refine-wcs": "Header WCS",
+      "refine-catalog": "Gaia DR3 (I/355/gaiadr3) via VizieR, CDS (disk)",
+    });
+  });
+
+  it("names how the WCS was updated and the epoch term of an undated frame", () => {
+    const fields = gaiaRefineFields({
+      ...FGS_TIE,
+      representation: "exact header update (CRVAL and CD)",
+      epoch_year: null,
+      epoch_source: "none",
+      epoch_systematic_mas: 67.4,
+    });
+    const byKey = Object.fromEntries(fields.map((f) => [f.key, f.value]));
+    expect(byKey["refine-representation"]).toBe("exact header update (CRVAL and CD)");
+    expect(byKey["refine-epoch-term"]).toBe("67.4 mas for an epoch uncertain by 10 yr");
+    expect(fields.map((f) => f.key).indexOf("refine-epoch-term")).toBe(fields.map((f) => f.key).indexOf("refine-epoch") + 1);
+  });
+
+  it("names the WCS the tie started from", () => {
+    const refined = (wcs_kind: string | null) => gaiaRefineFields({ ...FGS_TIE, wcs_kind }).find((f) => f.key === "refine-wcs");
+    expect(refined("solve")).toEqual({ key: "refine-wcs", label: "Refined WCS", value: "Plate solve" });
+    expect(refined("header")?.value).toBe("Header WCS");
+    expect(refined("gwcs")?.value).toBe("gWCS (JWST distortion model)");
+    expect(refined(null)).toBeUndefined();
+  });
+
+  it("names a typed epoch", () => {
+    const epoch = gaiaRefineFields({ ...FGS_TIE, epoch_year: 1990, epoch_source: "typed" }).find((f) => f.key === "refine-epoch");
+    expect(epoch?.value).toBe("1990.000 (typed)");
+  });
+});
+
+describe("parseEpochYear", () => {
+  it("leaves the epoch to the header when the field is empty", () => {
+    expect(parseEpochYear("")).toEqual({ value: null, error: null });
+    expect(parseEpochYear("  ")).toEqual({ value: null, error: null });
+  });
+
+  it("reads a decimal year with a point or a comma", () => {
+    expect(parseEpochYear("1990.5")).toEqual({ value: 1990.5, error: null });
+    expect(parseEpochYear("1990,5")).toEqual({ value: 1990.5, error: null });
+  });
+
+  it("refuses text and years outside 1900 to 2100", () => {
+    const error = "Epoch: type a decimal year between 1900 and 2100, or leave it empty to use the header date";
+    expect(parseEpochYear("abc")).toEqual({ value: null, error });
+    expect(parseEpochYear("1850")).toEqual({ value: null, error });
+    expect(parseEpochYear("2101")).toEqual({ value: null, error });
+  });
+});
+
+describe("refineSolveCards", () => {
+  const cards: [string, string][] = [["CRVAL1", "274.7"]];
+
+  it("hands the solve's cards to the tie only on the path that was solved", () => {
+    expect(refineSolveCards({ solveCards: cards, solvedPath: "C:\\data\\M16.fits", path: "c:/data/m16.fits", fileWcsKind: "header" })).toBe(cards);
+    expect(refineSolveCards({ solveCards: cards, solvedPath: "C:/data/m16.fits", path: "C:/data/m16.fits", fileWcsKind: null })).toBe(cards);
+  });
+
+  it("refines the file's own WCS on the written copy, where the header already holds the tie", () => {
+    expect(refineSolveCards({ solveCards: cards, solvedPath: "C:/data/m16.fits", path: "C:/out/m16_wcs.fits", fileWcsKind: "header" })).toBeNull();
+  });
+
+  it("keeps a gWCS and its distortion model instead of the solve", () => {
+    expect(refineSolveCards({ solveCards: cards, solvedPath: "C:/data/fgs_cal.fits", path: "C:/data/fgs_cal.fits", fileWcsKind: "gwcs" })).toBeNull();
+  });
+
+  it("sends nothing without a solve", () => {
+    expect(refineSolveCards({ solveCards: [], solvedPath: "C:/data/m16.fits", path: "C:/data/m16.fits", fileWcsKind: "header" })).toBeNull();
+    expect(refineSolveCards({ solveCards: cards, solvedPath: null, path: "C:/data/m16.fits", fileWcsKind: "header" })).toBeNull();
   });
 });

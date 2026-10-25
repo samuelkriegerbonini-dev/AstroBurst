@@ -108,8 +108,70 @@ export function cancelPlateSolve(): Promise<boolean> {
   return cancelProgress(PLATE_SOLVE_PROGRESS_EVENT);
 }
 
-export function writeSolvedWcs(path: string, wcsCards: readonly WcsCard[], outputDir?: string): Promise<WriteSolvedWcsResult> {
-  return withPreview<WriteSolvedWcsResult>("write_solved_wcs_cmd", outputDir, { path, wcsCards });
+export function writeSolvedWcs(
+  path: string,
+  wcsCards: readonly WcsCard[],
+  outputDir?: string,
+  gaiaHistory?: readonly string[] | null,
+): Promise<WriteSolvedWcsResult> {
+  const tie = gaiaHistory && gaiaHistory.length > 0 ? { gaiaHistory } : {};
+  return withPreview<WriteSolvedWcsResult>("write_solved_wcs_cmd", outputDir, { path, wcsCards, ...tie });
+}
+
+export type GaiaRefineDecision = "applied" | "no_significant_correction" | "refused";
+export type GaiaRefineModel = "auto" | "shift" | "rshift" | "rscale" | "general";
+export type GaiaRefineEpochSource = "header" | "typed" | "none";
+
+export interface GaiaRefineOptions {
+  wcsCards?: readonly WcsCard[] | null;
+  epochYear?: number | null;
+  model?: GaiaRefineModel;
+}
+
+export interface GaiaRefineResult {
+  decision: GaiaRefineDecision;
+  reason?: string | null;
+  wcs_cards: WcsCard[];
+  history?: string[];
+  model?: string | null;
+  wcs_kind?: string | null;
+  representation?: string | null;
+  n_catalog: number;
+  n_detected?: number | null;
+  n_matched: number;
+  n_used: number;
+  rms_before_mas?: number | null;
+  rms_after_mas?: number | null;
+  holdout_rms_before_mas?: number | null;
+  holdout_rms_after_mas?: number | null;
+  shift_east_mas?: number | null;
+  shift_north_mas?: number | null;
+  shift_err_east_mas?: number | null;
+  shift_err_north_mas?: number | null;
+  rotation_deg?: number | null;
+  rotation_err_deg?: number | null;
+  scale_ppm?: number | null;
+  scale_err_ppm?: number | null;
+  sigma_sys_mas?: number | null;
+  epoch_year?: number | null;
+  epoch_source: GaiaRefineEpochSource;
+  epoch_systematic_mas?: number | null;
+  catalog: string;
+  catalog_source: string;
+  attribution: string;
+  citation?: string | null;
+  warnings?: string[];
+  elapsed_ms?: number | null;
+  report?: Record<string, unknown>;
+}
+
+export function refineWithGaia(path: string, opts: GaiaRefineOptions = {}): Promise<GaiaRefineResult> {
+  return typedInvoke<GaiaRefineResult>("gaia_refine_wcs_cmd", {
+    path,
+    wcsCards: opts.wcsCards && opts.wcsCards.length > 0 ? opts.wcsCards : null,
+    epochYear: opts.epochYear ?? null,
+    model: opts.model ?? null,
+  });
 }
 
 export function getWcsInfo(path: string): Promise<WcsInfo> {
