@@ -193,7 +193,13 @@ pub(crate) fn export_cutout(
         }
     };
 
-    let area = area_companion(path, &entry).map(|a| (cut_plane(a.arr(), &rect), a.header().map(|h| shift_header(h, &rect))));
+    let area = match area_companion(path, &entry) {
+        Ok(area) => area.map(|a| (cut_plane(a.arr(), &rect), a.header().map(|h| shift_header(h, &rect)))),
+        Err(reason) => {
+            warnings.push(format!("AREA extension not carried: {reason}"));
+            None
+        }
+    };
 
     let primary = source_primary_header(path, entry.header());
     let mut hdus = vec![ImageHdu { data: HduData::F32(&sci), header: sci_header.as_ref(), extname: EXTNAME_SCI, extver: 1 }];
@@ -669,6 +675,30 @@ mod tests {
         let file = std::fs::File::open(path).unwrap();
         let sci = list_extensions(&file).unwrap().iter().position(|h| h.extname.as_deref() == Some("SCI")).expect("SCI HDU");
         extract_header_by_index(&file, sci).unwrap()
+    }
+
+    #[test]
+    fn a_cutout_reports_an_area_map_it_cannot_carry() {
+        use crate::cmd::analysis::area::test_fixtures::{area_hdu, cal_sci_cards, jwst_cal_mef, uniform_area, CalPlanes, CAL_SIZE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent = jwst_cal_mef(
+            &dir.path().join("cal.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(1.02), CAL_SIZE, Some(2))],
+        );
+        let out = dir.path().join("cal_cut.fits").to_str().unwrap().to_string();
+        let region = RegionShape::Box { x: 32.0, y: 32.0, width: 40.0, height: 40.0, angle: 0.0 };
+        let report = export_cutout(&parent.key, &out, None, &region, true, true, false).unwrap();
+        assert_eq!(report.hdus, vec!["SCI", "ERR", "DQ"]);
+        assert_eq!(
+            report.warnings,
+            vec!["AREA extension not carried: EXTVER 2 differs from SCI EXTVER 1".to_string()],
+            "{:?}",
+            report.warnings
+        );
     }
 
     #[test]

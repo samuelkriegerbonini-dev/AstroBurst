@@ -207,6 +207,9 @@ export default function ExportPanel({
 
   useEffect(() => {
     setCutoutResult(null);
+  }, [filePath]);
+
+  useEffect(() => {
     setCutoutPixelScale(null);
     if (!filePath) return;
     let cancelled = false;

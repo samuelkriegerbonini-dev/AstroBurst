@@ -164,7 +164,7 @@ describe("summaryView with object filters", () => {
 
   it("says when AstroBurst applied the level itself, in the words Rust sends with the page", () => {
     const targcatOnly: MastSearchPage["applied"] = { conditions: [{ targcat: "Galaxy" }], sortBy: [], sortDesc: [] };
-    const local = (text: string) => mergePage(null, page(TWO, { applied: targcatOnly, levelFilteredLocally: true, levelAppliedLocally: text }));
+    const local = (text: string) => mergePage(null, page(TWO, { applied: targcatOnly, levelAppliedLocally: text }));
     const combined = summaryView({ results: local("productLevel = 3"), resolved: null, query: objectQuery({ level: "combined", categories: ["galaxies"] }), missionLabel: "JWST", groups: JWST_GROUPS });
     expect(combined.text).toBe("274.68800 -13.79200 · Filters: Galaxies · r 3' · 2 datasets · 1.7 s · MAST applied: targcat = Galaxy · AstroBurst applied: productLevel = 3");
     expect(combined.unknownNote).toBe(`${UNKNOWN_TAIL} Category or Object type.`);
@@ -174,8 +174,8 @@ describe("summaryView with object filters", () => {
     expect(preset.text).toBe("274.68800 -13.79200 · Preset IFU cubes · Filters: Galaxies · r 3' · 2 datasets · 1.7 s · MAST applied: targcat = Galaxy · AstroBurst applied: productLevel = 3");
     const server = summaryView({ results: mergePage(null, page(TWO)), resolved: null, query: objectQuery({ level: "combined", categories: ["galaxies"] }), missionLabel: "JWST", groups: JWST_GROUPS });
     expect(server.text).not.toContain("AstroBurst applied");
-    const first = mergePage(null, page(TWO, { applied: targcatOnly, hasMore: true, levelFilteredLocally: true, levelAppliedLocally: "productLevel = 3" }));
-    const second = mergePage(first, page([row("c")], { offset: 200, applied: targcatOnly, levelFilteredLocally: true, levelAppliedLocally: null }));
+    const first = mergePage(null, page(TWO, { applied: targcatOnly, hasMore: true, levelAppliedLocally: "productLevel = 3" }));
+    const second = mergePage(first, page([row("c")], { offset: 200, applied: targcatOnly, levelAppliedLocally: null }));
     expect(second.rows).toHaveLength(3);
     expect(summaryView({ results: second, resolved: null, query: objectQuery({ level: "combined", categories: ["galaxies"] }), missionLabel: "JWST", groups: JWST_GROUPS }).text).toMatch(/ · AstroBurst applied: productLevel = 3$/);
   });
@@ -206,6 +206,13 @@ describe("elapsedText and filterSummary", () => {
 describe("searchProgress", () => {
   const base: RunLike = { phase: "resolving", kind: "name", text: "M16", name: "M16", resolved: null, startedAt: 0, searchStartedAt: 0 };
   const ctx = { missionLabel: "JWST", radiusText: "3", filters: { level: "combined" as const } };
+
+  it("leaves the user's level out of the search line when the preset fixes the level", () => {
+    const run: RunLike = { ...base, phase: "searching", resolved: null, kind: "coordinates", searchStartedAt: 0 };
+    expect(searchProgress(run, { ...ctx, filters: { level: "exposures" }, preset: IFU, now: 10 }).lines.at(-1)?.text).toBe("Searching JWST r 3'");
+    expect(searchProgress(run, { ...ctx, filters: { level: "exposures" }, preset: PURE_PARALLEL, now: 10 }).lines.at(-1)?.text).toBe("Searching JWST r 3' Exposures L1-2");
+    expect(filterSummary({ level: "exposures", instrument: "MIRI" }, [], IFU)).toBe("MIRI");
+  });
 
   it("shows the lookup line and adds the elapsed time only after 1 s", () => {
     expect(searchProgress(base, { ...ctx, now: 500 }).lines).toEqual([{ key: "resolve", text: 'Resolving "M16" with MAST name lookup', elapsed: null }]);
@@ -247,6 +254,17 @@ describe("emptyView", () => {
     expect(v.allLevels).toBe(true);
     expect(v.clearFilters).toBe(false);
     expect(v.tryOn).toEqual({ mission: "hst", label: "Try on HST" });
+  });
+
+  it("shows no level chip and no All levels when the preset fixes the level", () => {
+    const results = mergePage(null, page([], { radiusArcmin: 3 }));
+    const query = positionQuery(3, { filters: { level: "exposures", instrument: "MIRI" }, preset: "ifu_cubes" });
+    const v = emptyView({ query, results, missions: MISSIONS, mission: jwst, presets: [IFU] });
+    expect(v.chips).toEqual([{ id: "instrument", label: "MIRI" }]);
+    expect(v.allLevels).toBe(false);
+    const free = emptyView({ query: { ...query, preset: "pure_parallel" }, results, missions: MISSIONS, mission: jwst, presets: [PURE_PARALLEL] });
+    expect(free.chips.map((c) => c.label)).toEqual(["Exposures L1-2", "MIRI"]);
+    expect(free.allLevels).toBe(true);
   });
 
   it("widens through 3', 10' and 30' and stops at 30'", () => {
@@ -363,9 +381,9 @@ describe("level searches", () => {
     expect(isLevelSearch({ mission: "jwst", filters: { level: "combined" }, preset: "pure_parallel" }, [PURE_PARALLEL])).toBe(true);
   });
 
-  it("are not JWST searches with an object filter, whose first request to MAST carries no level", () => {
-    expect(isLevelSearch({ mission: "jwst", filters: { level: "combined", categories: ["ism"] }, preset: null }, [])).toBe(false);
-    expect(isLevelSearch({ mission: "jwst", filters: { level: "exposures", objectTypes: ["exoplanets"] }, preset: null }, [])).toBe(false);
+  it("include JWST searches with an object filter, whose fallback request to MAST carries the level when the object-only answer is full", () => {
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "combined", categories: ["ism"] }, preset: null }, [])).toBe(true);
+    expect(isLevelSearch({ mission: "jwst", filters: { level: "exposures", objectTypes: ["exoplanets"] }, preset: null }, [])).toBe(true);
     expect(isLevelSearch({ mission: "jwst", filters: { level: "combined", categories: [] }, preset: null }, [])).toBe(true);
   });
 });

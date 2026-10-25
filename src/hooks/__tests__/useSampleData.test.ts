@@ -9,33 +9,14 @@ const { typedInvokeMock, isTauriMock, listenMock, unlistenMock } = vi.hoisted(()
   unlistenMock: vi.fn(),
 }));
 
-const mounted = vi.hoisted(() => {
-  const run = { active: false, effects: [] as (() => unknown)[] };
-  const impl = {
-    useEffect: (effect: () => unknown) => void run.effects.push(effect),
-    useMemo: (compute: () => unknown) => compute(),
-    useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
-  };
-  return { run, impl };
-});
-
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  const fakes = mounted.impl as unknown as Record<string, (...args: unknown[]) => unknown>;
-  const switched = Object.fromEntries(
-    Object.entries(fakes).map(([name, fake]) => [
-      name,
-      (...args: unknown[]) => (mounted.run.active ? fake : (actual[name] as (...a: unknown[]) => unknown))(...args),
-    ]),
-  );
-  return { ...actual, ...switched };
-});
+vi.mock("react", async (importOriginal) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, isTauri: isTauriMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
-import { Download, Sparkles } from "lucide-react";
+import { hooks } from "../../test/hookRuntime";
 import EmptyState from "../../components/EmptyState";
 import { TauriCommandError } from "../../shared/types/errors";
+import { updateConfig } from "../../services/config";
 import type { SampleOpen, SampleProgress, SampleSetReport } from "../../services/sampleData";
 import {
   PRIMARY_SAMPLE_SET,
@@ -43,10 +24,8 @@ import {
   sampleActions,
   sampleControls,
   sampleDataStore,
-  samplePaletteAction,
   startSampleData,
   useSampleData,
-  type SampleControls,
   type SampleDataApi,
   type SampleDataStore,
 } from "../useSampleData";
@@ -68,7 +47,6 @@ function report(over: Partial<SampleSetReport> = {}): SampleSetReport {
     state: "absent",
     received_bytes: 0,
     folder: FOLDER,
-    newer_at_mast: false,
     ...over,
   };
 }
@@ -158,15 +136,9 @@ function SampleDataProbe({ onOpen }: { onOpen: (opened: SampleOpen) => void }) {
 }
 
 function mountSampleData(onOpen: (opened: SampleOpen) => void): () => void {
-  mounted.run.active = true;
-  mounted.run.effects = [];
-  try {
-    SampleDataProbe({ onOpen });
-  } finally {
-    mounted.run.active = false;
-  }
-  const cleanups = mounted.run.effects.map((effect) => effect());
-  return () => cleanups.forEach((cleanup) => typeof cleanup === "function" && cleanup());
+  hooks.mount();
+  hooks.render(SampleDataProbe, { onOpen });
+  return () => hooks.mount();
 }
 
 let consoleError: ReturnType<typeof vi.spyOn>;
@@ -297,7 +269,7 @@ describe("sample data store", () => {
 
     api.list.mockResolvedValueOnce([ifuReport({ state: "ready", received_bytes: IFU_TOTAL }), report()]);
     api.download.mockResolvedValueOnce(IFU_OPENED);
-    await ifu()!.retry();
+    await ifu()!.download();
     expect(ifu()).toMatchObject({ state: "ready", receivedBytes: IFU_TOTAL, error: null });
     expect(onOpen.mock.calls).toEqual([[IFU_OPENED]]);
   });
@@ -394,7 +366,7 @@ describe("sample data store", () => {
     expect(mainButton(html)).toContain("Retry sample download");
 
     api.list.mockResolvedValueOnce([report({ state: "ready", received_bytes: TOTAL })]);
-    await controlsOf(store, onOpen).retry();
+    await controlsOf(store, onOpen).download();
     expect(api.download).toHaveBeenCalledTimes(2);
     expect(onOpen).toHaveBeenCalledWith(OPENED);
     expect(controlsOf(store, onOpen)).toMatchObject({ state: "ready", error: null });
@@ -519,6 +491,35 @@ describe("a download this window did not start", () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
 
+  it("keeps following it after one status read fails", async () => {
+    vi.useFakeTimers();
+    const api = fakeApi([report({ state: "downloading", received_bytes: FRAME })]);
+    const store = createSampleDataStore(api);
+    await store.refresh();
+    api.list.mockRejectedValueOnce(new TauriCommandError("sample_sets_cmd", "busy"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controlsOf(store, vi.fn())).toMatchObject({ state: "downloading" });
+
+    api.list.mockResolvedValue([report({ state: "ready", received_bytes: TOTAL })]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controlsOf(store, vi.fn())).toMatchObject({ state: "ready", receivedBytes: TOTAL });
+  });
+
+  it("keeps the newest status when an older read answers last", async () => {
+    const api = fakeApi([report()]);
+    const older = deferred<SampleSetReport[]>();
+    const newer = deferred<SampleSetReport[]>();
+    api.list.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+    const store = createSampleDataStore(api);
+    const first = store.refresh();
+    const second = store.refresh();
+    newer.resolve([report({ state: "ready", received_bytes: TOTAL })]);
+    await second;
+    older.resolve([report({ state: "downloading", received_bytes: FRAME })]);
+    await first;
+    expect(controlsOf(store, vi.fn())).toMatchObject({ state: "ready", receivedBytes: TOTAL });
+  });
+
   it("does not poll the status for a download this window runs", async () => {
     vi.useFakeTimers();
     const api = fakeApi([report()]);
@@ -537,49 +538,6 @@ describe("a download this window did not start", () => {
     api.list.mockResolvedValue([report({ state: "ready", received_bytes: TOTAL })]);
     pending.resolve(OPENED);
     await run;
-  });
-});
-
-describe("samplePaletteAction", () => {
-  function source(over: Partial<SampleControls> = {}) {
-    return {
-      state: "absent" as SampleControls["state"],
-      totalBytes: TOTAL,
-      download: vi.fn(async () => {}),
-      open: vi.fn(async () => {}),
-      ...over,
-    };
-  }
-
-  it("lists nothing outside the desktop app", () => {
-    expect(samplePaletteAction(null, true, vi.fn())).toBeNull();
-    expect(samplePaletteAction(null, false, vi.fn())).toBeNull();
-  });
-
-  it.each([true, false])("offers Open sample data once the frames are kept (empty workspace: %s)", (workspaceEmpty) => {
-    const sample = source({ state: "ready" });
-    const showWorkspace = vi.fn();
-    const action = samplePaletteAction(sample, workspaceEmpty, showWorkspace);
-    expect(action).toMatchObject({ id: "open-sample", label: "Open sample data (HST narrowband frames of M16)", icon: Sparkles });
-    expect(action?.keywords).toEqual(["Sample", "Example", "M16", "Eagle", "Download"]);
-    action?.run();
-    expect(sample.open).toHaveBeenCalledTimes(1);
-    expect(sample.download).not.toHaveBeenCalled();
-  });
-
-  it.each(["absent", "partial", "downloading"] as const)("offers Download sample data on the empty workspace when the set is %s, showing the workspace first", (state) => {
-    const calls: string[] = [];
-    const sample = source({ state, download: vi.fn(async () => void calls.push("download")) });
-    const action = samplePaletteAction(sample, true, () => calls.push("showWorkspace"));
-    expect(action).toMatchObject({ id: "download-sample", label: "Download sample data (HST M16, 31 MB)", icon: Download });
-    expect(action?.keywords).toEqual(["Sample", "Example", "M16", "Eagle", "Download"]);
-    action?.run();
-    expect(calls).toEqual(["showWorkspace", "download"]);
-    expect(sample.open).not.toHaveBeenCalled();
-  });
-
-  it.each(["absent", "partial", "downloading"] as const)("lists no download once a batch is loaded, where its progress and errors would not show (%s)", (state) => {
-    expect(samplePaletteAction(source({ state }), false, vi.fn())).toBeNull();
   });
 });
 
@@ -613,6 +571,26 @@ describe("startSampleData", () => {
     await vi.waitFor(() => expect(unlistenMock).toHaveBeenCalledTimes(1));
     pending.resolve(OPENED);
     await run;
+  });
+
+  it("reads the sets again once the Data folder setting is saved, and only while started", async () => {
+    listenMock.mockResolvedValue(unlistenMock);
+    typedInvokeMock.mockReset().mockResolvedValue({});
+    const api = fakeApi([report({ state: "ready", received_bytes: TOTAL })]);
+    const store = createSampleDataStore(api);
+    const stop = startSampleData(store);
+    await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(1));
+    api.list.mockResolvedValueOnce([report()]);
+
+    await updateConfig("data_dir_override", "D:/AstroBurst");
+    await vi.waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    expect(controlsOf(store, vi.fn())).toMatchObject({ state: "absent" });
+
+    await updateConfig("mast_quota_gb", 10);
+    stop();
+    await updateConfig("data_dir_override", null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(api.list).toHaveBeenCalledTimes(2);
   });
 });
 

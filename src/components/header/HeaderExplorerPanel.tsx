@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useTimedFlag, useTimedNotice } from "../../hooks/useTimedNotice";
 import type { LucideIcon } from "lucide-react";
 import {
   FileSearch, ChevronRight, Search, Telescope,
@@ -8,6 +9,9 @@ import {
 import type { ProcessedFile, HeaderData } from "../../shared/types";
 import { assignableChannel } from "../../utils/channelMapping";
 import { groupHeaderCards, headerCardLine, isCommentaryKey } from "../../utils/headerCards";
+
+const COPIED_FEEDBACK_MS = 1500;
+const COPIED_ALL_FEEDBACK_MS = 2000;
 
 interface CategoryMeta {
   label: string;
@@ -69,8 +73,8 @@ export default function HeaderExplorerPanel({
     processing: false,
     other: false,
   });
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  const [copiedAll, setCopiedAll] = useState(false);
+  const [copiedIndex, showCopiedIndex] = useTimedNotice<number>(COPIED_FEEDBACK_MS);
+  const [copiedAll, flagCopiedAll] = useTimedFlag(COPIED_ALL_FEEDBACK_MS);
   const [loadError, setLoadError] = useState(false);
   const onLoadHeaderRef = useRef(onLoadHeader);
   onLoadHeaderRef.current = onLoadHeader;
@@ -107,9 +111,8 @@ export default function HeaderExplorerPanel({
 
   const handleCopy = useCallback((index: number, key: string, value: string) => {
     navigator.clipboard?.writeText(headerCardLine(key, value));
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex(null), 1500);
-  }, []);
+    showCopiedIndex(index);
+  }, [showCopiedIndex]);
 
   const handleCopyAll = useCallback(() => {
     if (!headerData?.cards) return;
@@ -117,9 +120,8 @@ export default function HeaderExplorerPanel({
       .map((c) => headerCardLine(c.key, c.value, COPY_ALL_KEY_WIDTH))
       .join("\n");
     navigator.clipboard?.writeText(text);
-    setCopiedAll(true);
-    setTimeout(() => setCopiedAll(false), 2000);
-  }, [headerData?.cards]);
+    flagCopiedAll();
+  }, [headerData?.cards, flagCopiedAll]);
 
   const groups = useMemo(
     () => groupHeaderCards(headerData?.cards ?? [], headerData?.categories ?? {}, CATEGORY_ORDER, search),

@@ -61,6 +61,11 @@ const COMPACT_NO_COLOUR: i8 = i8::MIN;
 const WIDE_NO_VALUE: i16 = i16::MIN;
 const WIDE_LIMIT: f64 = i16::MAX as f64;
 const COLOUR_LIMIT: f64 = i8::MAX as f64;
+pub const COMPACT_MAG_RANGE: (f64, f64) = (
+    -COMPACT_MAG_CODE_AT_ZERO / COMPACT_MAG_STEPS_PER_MAG,
+    (COMPACT_NO_MAGNITUDE as f64 - 1.0 - COMPACT_MAG_CODE_AT_ZERO) / COMPACT_MAG_STEPS_PER_MAG,
+);
+pub const COMPACT_COLOUR_LIMIT: f64 = COLOUR_LIMIT / COMPACT_COLOUR_STEPS_PER_MAG;
 #[cfg(feature = "vizier")]
 const RANGE_TIMEOUT_SECS: u64 = 60;
 #[cfg(feature = "vizier")]
@@ -1499,7 +1504,8 @@ pub fn compact_mag_code(mag: Option<f64>) -> Result<u8, String> {
         Ok(code as u8)
     } else {
         Err(format!(
-            "magnitude {mag} is outside the compact range -1.5..=23.9"
+            "magnitude {mag} is outside the compact range {}..={}",
+            COMPACT_MAG_RANGE.0, COMPACT_MAG_RANGE.1
         ))
     }
 }
@@ -1521,7 +1527,8 @@ fn compact_colour_code(colour: Option<f64>) -> Result<i8, String> {
         Ok(code as i8)
     } else {
         Err(format!(
-            "colour {colour} is outside the compact range -2.54..=2.54"
+            "colour {colour} is outside the compact range {}..={COMPACT_COLOUR_LIMIT}",
+            -COMPACT_COLOUR_LIMIT
         ))
     }
 }

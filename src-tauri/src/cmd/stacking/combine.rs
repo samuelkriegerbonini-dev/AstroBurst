@@ -19,7 +19,7 @@ use crate::core::stacking::drizzle::drizzle_wcs_updates;
 use crate::core::stacking::STAGE_CALIBRATE;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
-    EVENT_CALIBRATE_PROGRESS, EVENT_STACK_PROGRESS, KERNEL_GAUSSIAN, KERNEL_LANCZOS3, STAGE_RENDER, STAGE_SAVE,
+    EVENT_CALIBRATE_PROGRESS, EVENT_STACK_PROGRESS, STAGE_RENDER, STAGE_SAVE,
     RES_CONFIDENCE, RES_DARK_SCALE, RES_DIMENSIONS, RES_DX, RES_DY, RES_ELAPSED_MS, RES_FITS_PATH, RES_FRAME_COUNT,
     RES_HAS_BIAS, RES_HAS_DARK, RES_HAS_FLAT, RES_HAS_FLAT_DARK, RES_MAX, RES_MEAN, RES_METHOD_USED, RES_MIN,
     RES_OFFSETS, RES_PATH, RES_PNG_PATH, RES_REJECTED_PIXELS, RES_SCALE, RES_SIGMA, RES_STAR_MATCH_REJECTION,
@@ -28,10 +28,8 @@ use crate::types::constants::{
 use crate::types::header::HduHeader;
 use crate::types::image::ImageStats;
 use crate::types::stacking::{
-    CombineMethod, DrizzleConfig, DrizzleKernel, DrizzleResult, FrameAlignment, StackConfig, StackResult,
+    CombineMethod, DrizzleConfig, DrizzleResult, FrameAlignment, StackConfig, StackResult,
 };
-
-const KERNEL_SQUARE: &str = "square";
 
 const ABPROC_CALIBRATED: &str = "calibrated";
 pub(super) const ABPROC_STACKED: &str = "stacked";
@@ -116,14 +114,6 @@ fn included_paths<'a>(paths: &'a [String], alignment: &[FrameAlignment]) -> Vec<
         .collect()
 }
 
-fn kernel_name(kernel: DrizzleKernel) -> &'static str {
-    match kernel {
-        DrizzleKernel::Square => KERNEL_SQUARE,
-        DrizzleKernel::Gaussian => KERNEL_GAUSSIAN,
-        DrizzleKernel::Lanczos3 => KERNEL_LANCZOS3,
-    }
-}
-
 fn save_stack(
     result: &StackResult,
     paths: &[String],
@@ -183,7 +173,7 @@ fn save_drizzle(
             drizzle: Some(DrizzleCards {
                 scale: result.output_scale,
                 pixfrac: config.pixfrac.clamp(0.1, 1.0),
-                kernel: kernel_name(config.kernel),
+                kernel: config.kernel.name(),
             }),
         },
     );
@@ -411,7 +401,7 @@ pub async fn drizzle_stack(
         let config = DrizzleConfig {
             scale: scale.unwrap_or(2.0),
             pixfrac: pixfrac.unwrap_or(0.7),
-            kernel: helpers::parse_drizzle_kernel(kernel.as_deref()),
+            kernel: helpers::parse_drizzle_kernel(kernel.as_deref())?,
             align: align.unwrap_or(true),
             rejection: helpers::parse_rejection_method(rejection.as_deref())?,
             sigma_low: sigma_low.unwrap_or(defaults.sigma_low),

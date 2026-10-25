@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   cardAccessibleName,
@@ -8,6 +10,7 @@ import {
   filterRangeText,
   instrumentText,
   isPublic,
+  EXPOSURE_LEVELS,
   levelBadge,
 } from "../logic/cardLabel";
 import { row } from "./fixtures";
@@ -113,5 +116,13 @@ describe("card text helpers", () => {
     expect(exclusiveText(hst("2999-01-01T00:00:00"))).toBe("Exclusive until 2999-01-01");
     expect(cardAccessibleName(hst("2999-01-01T00:00:00"), "HST")).toMatch(/exclusive until 2999-01-01$/);
     expect(cardAccessibleName(hst("2007-05-18T18:56:50.210000"), "HST")).not.toMatch(/exclusive|public/);
+  });
+});
+
+describe("exposure levels", () => {
+  it("are the productLevel tokens Rust sends for Exposures L1-2", () => {
+    const rust = readFileSync(fileURLToPath(new URL("../../../../src-tauri/src/core/mast/object_filters.rs", import.meta.url)), "utf8");
+    const tokens = /const EXPOSURE_LEVELS: &str = "([^"]+)";/.exec(rust)?.[1].split(",").map((t) => t.trim());
+    expect(tokens).toEqual([...EXPOSURE_LEVELS]);
   });
 });

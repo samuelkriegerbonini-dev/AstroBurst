@@ -7,8 +7,6 @@ const repoPath = (path: string) => fileURLToPath(new URL(`../../${path}`, import
 
 const CREDITS_HEADING = "Credits and acknowledgements";
 
-const ALLOWED_MISSING_AT_VERSION: Record<string, string> = { "docs/server-api.md": "0.7.0" };
-
 const CREDITED: Record<string, string[]> = {
   people: [
     "[Jae-Joon Lee](https://github.com/leejjoon)",
@@ -112,7 +110,7 @@ const VERBATIM = [
   "AGPLv3. See [LICENSE](LICENSE).",
 ];
 
-const read = (document: string) => readFileSync(repoPath(document), "utf8");
+const read = (document: string) => readFileSync(repoPath(document), "utf8").replace(/\r\n/g, "\n");
 
 const normalised = (markdown: string) => markdown.replace(/\s+/g, " ");
 
@@ -146,8 +144,6 @@ const withoutFencedBlocks = (markdown: string) => markdown.replace(/^```[\s\S]*?
 const headingSlugs = (document: string) =>
   new Set([...withoutFencedBlocks(read(document)).matchAll(/^#{1,6}\s+(.+)$/gm)].map((match) => slug(match[1])));
 
-const packageVersion = () => (JSON.parse(read("package.json")) as { version: string }).version;
-
 function relativeLinks(markdown: string): string[] {
   return [...markdown.matchAll(/\]\(([^)\s]+)\)|(?:href|src)="([^"]+)"/g)]
     .map((match) => match[1] ?? match[2])
@@ -158,7 +154,7 @@ function brokenLinks(document: string): string[] {
   return relativeLinks(read(document)).filter((link) => {
     const [path, anchor] = link.split("#");
     const target = path === "" ? document : posix.join(posix.dirname(document), path);
-    if (!existsSync(repoPath(target))) return ALLOWED_MISSING_AT_VERSION[target] !== packageVersion();
+    if (!existsSync(repoPath(target))) return true;
     return anchor !== undefined && target.endsWith(".md") && !headingSlugs(target).has(anchor);
   });
 }

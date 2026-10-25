@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { niceTicks, linearScale, finiteExtent, formatLogTickLabel, formatTickLabels, tickLabels } from "../../utils/plotScale";
 import {
   clampDomain,
@@ -538,7 +539,7 @@ function ProfilePlot(props: ProfilePlotProps) {
   }
   const [logOverride, setLogOverride] = useState<boolean | null>(null);
   const [hover, setHover] = useState<PlotHit | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, flagCopied] = useTimedFlag(COPIED_FEEDBACK_MS);
   const [saving, setSaving] = useState(false);
   const [pngNotice, setPngNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -699,9 +700,8 @@ function ProfilePlot(props: ProfilePlotProps) {
 
   const handleCopy = useCallback(() => {
     navigator.clipboard?.writeText(seriesToCsv(series, xLabel));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
-  }, [series, xLabel]);
+    flagCopied();
+  }, [series, xLabel, flagCopied]);
 
   const handleSavePng = useCallback(async () => {
     const canvas = canvasRef.current;

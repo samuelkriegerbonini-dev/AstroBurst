@@ -8,7 +8,7 @@ describe("outputNote", () => {
   it("names the written file and warns that the output folder is cleared when the app starts", () => {
     const note = outputNote(WINDOWS_M0);
     expect(note.name).toBe("jw01266_s3d_moment0_5-39.fits");
-    expect(note.warning).toBe("In the output folder, which is cleared when AstroBurst starts: Export › FITS keeps a copy of the image on screen.");
+    expect(note.warning).toBe("In the output folder, which is cleared when AstroBurst starts: Export > FITS keeps a copy of the image on screen.");
     expect(note.warning).toBe(OUTPUT_FOLDER_WARNING);
   });
 

@@ -204,15 +204,16 @@ describe("EmptyState sample data entry", () => {
       id: "hst-m16-wfpc2",
       title: "HST/WFPC2 narrowband frames of M16 (Eagle Nebula)",
       credit: CREDIT,
+      licence: "Public-domain Hubble archive data; credit requested by STScI",
+      fileCount: 3,
       state: "absent",
       receivedBytes: 0,
       totalBytes: TOTAL,
       file: null,
       error: null,
-      download: vi.fn(async () => {}),
+      download: vi.fn(async () => null),
       cancel: vi.fn(async () => {}),
-      open: vi.fn(async () => {}),
-      retry: vi.fn(async () => {}),
+      open: vi.fn(async () => null),
       ...over,
     };
   }
@@ -232,7 +233,7 @@ describe("EmptyState sample data entry", () => {
     const html = renderToStaticMarkup(createElement(EmptyState, base));
     expect(html).not.toContain("sample data");
     expect(html).not.toContain('data-testid="empty-open-sample"');
-    expect(html).not.toContain("HST narrowband frames of M16");
+    expect(html).not.toContain("narrowband frames of M16");
   });
 
   it("offers Download sample data with the set size after the archive button when the frames are absent", () => {
@@ -247,10 +248,12 @@ describe("EmptyState sample data entry", () => {
     expect(html).not.toContain('data-testid="empty-sample-error"');
   });
 
-  it("says the frames are downloaded once and kept in the data folder, with the credit", () => {
+  it("says what the set holds from its title and file count, that it is kept in the data folder, and the credit", () => {
+    const hint = "HST/WFPC2 narrowband frames of M16 (Eagle Nebula): 3 files, downloaded once and kept in the data folder";
     const html = render();
-    expect(html).toContain("HST narrowband frames of M16");
-    expect(html).toContain("downloaded once and kept in the data folder");
+    expect(html).toContain(`<p class="text-zinc-500">${hint}</p>`);
+    expect(/<button[^>]*data-testid="empty-open-sample"[^>]*>/.exec(html)?.[0]).toContain(`title="${hint}"`);
+    expect(render({ fileCount: 4 })).toContain("(Eagle Nebula): 4 files,");
     expect(html).toContain(CREDIT);
   });
 
@@ -323,7 +326,7 @@ describe("EmptyState sample data entry", () => {
     ["absent", {}, "download"],
     ["partial", { state: "partial", receivedBytes: 10_298_880 }, "download"],
     ["ready", { state: "ready", receivedBytes: TOTAL }, "open"],
-    ["failed", { state: "partial", receivedBytes: 10_298_880, error: "network unreachable" }, "retry"],
+    ["failed", { state: "partial", receivedBytes: 10_298_880, error: "network unreachable" }, "download"],
     ["ready after a failed open", { state: "ready", receivedBytes: TOTAL, error: "not readable" }, "open"],
   ] as const)("runs the %s action without letting the click reach the drop zone", (_label, over, action) => {
     const onBrowseFiles = vi.fn();
@@ -332,7 +335,7 @@ describe("EmptyState sample data entry", () => {
     const main = buttons(tree).find((b) => b.props["data-testid"] === "empty-open-sample");
     const event = clickEvent();
     (main?.props.onClick as (e: ReturnType<typeof clickEvent>) => void)(event);
-    for (const name of ["download", "open", "retry", "cancel"] as const) {
+    for (const name of ["download", "open", "cancel"] as const) {
       expect(set[name]).toHaveBeenCalledTimes(name === action ? 1 : 0);
     }
     expect(onBrowseFiles).not.toHaveBeenCalled();

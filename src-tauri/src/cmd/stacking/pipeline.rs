@@ -387,6 +387,7 @@ fn pipeline_memory_check(
         masters,
         align: request.align.unwrap_or(true),
         normalize: request.normalize.unwrap_or(true),
+        threads: rayon::current_num_threads(),
     });
     let job = match peak {
         PipelinePeak::Channel(index) => MemoryJob::PipelineChannel(&request.channels[index].label),

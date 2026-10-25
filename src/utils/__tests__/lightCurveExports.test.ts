@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   defaultPointLabel,
@@ -12,8 +14,8 @@ import {
   formatPrintfG,
   isDefaultPointLabel,
   magToRelativeFlux,
-  relativeFluxToMag,
   withCurrentLabels,
+  AREA_MIXED_BLOCKER,
   NO_ROWS_BLOCKER,
   NO_TARGET_BLOCKER,
   type LightCurveExportSource,
@@ -120,6 +122,7 @@ function result(frames: TimeSeriesFrame[], targets: TimeSeriesTarget[] = TARGETS
     n_frames: frames.length,
     n_skipped: frames.filter((f) => f.skipped !== null).length,
     warnings: [],
+    area_mixed: false,
     geometry_target: null,
     geometry_notes: [],
     elapsed_ms: 5,
@@ -301,9 +304,8 @@ describe("magnitude and relative flux (C02)", () => {
         const flux = magToRelativeFlux(mag, err);
         expect(flux.flux).toBeCloseTo(10 ** (-0.4 * mag), 12);
         expect(flux.err).toBeCloseTo((flux.flux * err) / MAG_ERR_FACTOR, 12);
-        const back = relativeFluxToMag(flux.flux, flux.err);
-        expect(Math.abs(back.mag - mag)).toBeLessThan(1e-6);
-        expect(Math.abs(back.err - err) / err).toBeLessThan(1e-6);
+        expect(Math.abs(-2.5 * Math.log10(flux.flux) - mag)).toBeLessThan(1e-6);
+        expect(Math.abs((MAG_ERR_FACTOR * flux.err) / flux.flux - err) / err).toBeLessThan(1e-6);
       }
     }
   });
@@ -398,6 +400,23 @@ describe("named blockers (C02)", () => {
     for (const time of ["jd_utc", "bjd_tdb", "hjd_utc"] as const) expect(exoClockBlocker(source(frames), time)).toBe(expected);
   });
 
+  it("reads the date-only, exposure-start and half-exposure notes exactly as core/astrometry/spectral.rs writes them", () => {
+    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/core/astrometry/spectral.rs", import.meta.url)), "utf8");
+    const dateOnly = /if date_only \{\s*"([^"]+)"/.exec(rust)?.[1];
+    const startNote = /let exposure_note = match exposure \{[\s\S]*?None => "([^"]+)"\.to_string\(\)/.exec(rust)?.[1];
+    const halfNote = /Some\(\(s, key\)\) => format!\("([^"]+)", key, s\)/.exec(rust)?.[1];
+    expect(dateOnly, "date-only source").toBeDefined();
+    expect(startNote, "exposure-start note").toBeDefined();
+    expect(halfNote, "half-exposure note").toBeDefined();
+    const half = halfNote!.replace("{}", "EXPTIME").replace("{}", "60");
+    const dated = withFrame(1, { time_source: `${dateOnly} ${half}; UTC assumed (no TIMESYS)` });
+    expect(etdBlocker(source(dated))).toBe("no time of day for f1.fits (DATE-OBS is a date only)");
+    const started = withFrame(3, { exptime: null, time_source: `DATE-OBS ${startNote}; UTC assumed (no TIMESYS)` });
+    expect(etdBlocker(source(started))).toBe("no EXPTIME for f3.fits (the time is the exposure start, not mid-exposure)");
+    const mid = goldenFrames().map((f) => ({ ...f, exptime: null, time_source: `DATE-OBS ${half}; UTC assumed (no TIMESYS)` }));
+    expect(exoClockCsv(source(mid), "jd_utc").split("\n")).toContain("# exposure s: 60");
+  });
+
   it("refuses a measured frame without a magnitude error", () => {
     const frames = withFrame(1, { targets: [star(480, NaN), star(1000, NaN), star(1000, NaN)] });
     expect(etdBlocker(source(frames))).toBe("no errors for f1.fits (flux_err missing)");
@@ -409,6 +428,16 @@ describe("named blockers (C02)", () => {
     expect(etdBlocker(source(noTargetErr))).toBe("no errors for f1.fits (flux_err missing)");
     const noCompErr = withFrame(3, { targets: [star(490, 5), star(1000, 10), star(1000, NaN)] });
     expect(exoClockBlocker(source(noCompErr), "jd_utc")).toBe("no errors for f3.fits (flux_err missing)");
+  });
+
+  it("refuses a series whose frames disagree on the AREA pixel-area map", () => {
+    const mixed: LightCurveExportSource = { ...source(), result: { ...result(goldenFrames()), area_mixed: true } };
+    const expected = "AREA pixel-area map applied on some frames only (a step of a few hundredths of a magnitude in the light curve, see the series warning)";
+    expect(AREA_MIXED_BLOCKER).toBe(expected);
+    expect(etdBlocker(mixed)).toBe(expected);
+    for (const time of ["jd_utc", "bjd_tdb", "hjd_utc"] as const) expect(exoClockBlocker(mixed, time)).toBe(expected);
+    expect(() => etdText(mixed)).toThrow(expected);
+    expect(etdBlocker(source())).toBeNull();
   });
 
   it("ignores skipped frames when looking for blockers", () => {

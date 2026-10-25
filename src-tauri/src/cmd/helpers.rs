@@ -13,7 +13,6 @@ use crate::types::compose::{AlignMethod, WhiteBalance};
 use crate::types::constants::{
     ALIGN_METHOD_AFFINE, ALIGN_METHOD_PHASE,
     DEFAULT_SCNR_AMOUNT, DEFAULT_WB_VALUE,
-    KERNEL_GAUSSIAN, KERNEL_LANCZOS, KERNEL_LANCZOS3,
     SCNR_METHOD_MAXIMUM, WB_MODE_MANUAL, WB_MODE_NONE,
     COMPOSITE_KEY_R, COMPOSITE_KEY_G, COMPOSITE_KEY_B,
     COMPOSITE_ORIG_R, COMPOSITE_ORIG_G, COMPOSITE_ORIG_B,
@@ -81,11 +80,10 @@ pub(crate) fn align_method_str(method: AlignMethod) -> &'static str {
         AlignMethod::PhaseCorrelation => ALIGN_METHOD_PHASE,
     }
 }
-pub(crate) fn parse_drizzle_kernel(kernel: Option<&str>) -> DrizzleKernel {
+pub(crate) fn parse_drizzle_kernel(kernel: Option<&str>) -> anyhow::Result<DrizzleKernel> {
     match kernel {
-        Some(KERNEL_GAUSSIAN) => DrizzleKernel::Gaussian,
-        Some(KERNEL_LANCZOS3) | Some(KERNEL_LANCZOS) => DrizzleKernel::Lanczos3,
-        _ => DrizzleKernel::Square,
+        Some(name) => DrizzleKernel::from_name(name).map_err(anyhow::Error::msg),
+        None => Ok(DrizzleKernel::Square),
     }
 }
 
@@ -792,6 +790,23 @@ mod tests {
         assert_eq!(parse_align_method_checked(Some(ALIGN_METHOD_PHASE)).unwrap(), AlignMethod::PhaseCorrelation);
         assert_eq!(parse_align_method_checked(Some(ALIGN_METHOD_AFFINE)).unwrap(), AlignMethod::Affine);
         assert_eq!(parse_align_method_checked(Some(" Affine ")).unwrap(), AlignMethod::Affine);
+    }
+
+    #[test]
+    fn drizzle_kernel_names_are_read_like_the_other_stacking_names() {
+        assert_eq!(parse_drizzle_kernel(Some(" Gaussian ")).unwrap(), DrizzleKernel::Gaussian);
+        assert_eq!(parse_drizzle_kernel(None).unwrap(), DrizzleKernel::Square);
+        for (name, kernel) in [
+            ("square", DrizzleKernel::Square),
+            ("gaussian", DrizzleKernel::Gaussian),
+            ("lanczos3", DrizzleKernel::Lanczos3),
+            ("LANCZOS", DrizzleKernel::Lanczos3),
+        ] {
+            assert_eq!(parse_drizzle_kernel(Some(name)).unwrap(), kernel, "{name}");
+            assert_eq!(DrizzleKernel::from_name(kernel.name()), Ok(kernel));
+        }
+        let err = parse_drizzle_kernel(Some("turbo")).expect_err("an unknown kernel ran as square");
+        assert_eq!(err.to_string(), "unknown kernel 'turbo' (supported: square, gaussian, lanczos3, lanczos)");
     }
 }
 

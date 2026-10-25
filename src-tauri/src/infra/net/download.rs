@@ -68,6 +68,8 @@ pub enum DownloadError {
     Cancelled,
     #[error("transfer failed: {0}")]
     Transport(String),
+    #[error("transfer failed: {0}")]
+    RedirectRefused(String),
     #[error("server answered HTTP {status}")]
     Http { status: u16 },
     #[error("size mismatch: expected {expected} bytes, received {actual}")]
@@ -192,10 +194,11 @@ pub(crate) struct Files {
 }
 
 impl Files {
-    pub(crate) fn recorded_sha256_hex(&self, size: u64) -> Option<String> {
+    pub(crate) fn records_sha256(&self, size: u64, sha256: &[u8; 32]) -> bool {
         read_json::<Record>(&self.record)
             .filter(|record| record.version == FORMAT_VERSION && record.size == size)
             .and_then(|record| record.sha256_hex)
+            .is_some_and(|recorded| recorded.eq_ignore_ascii_case(&hex(sha256)))
     }
 
     pub(crate) fn resumable_bytes(&self, expected_size: u64) -> Option<u64> {
@@ -542,7 +545,7 @@ fn ranged(client: &Client, req: &DownloadRequest, resume: Option<&Resume>) -> Re
     }
 }
 
-pub(crate) async fn send(
+async fn send(
     builder: RequestBuilder,
     observer: &dyn DownloadObserver,
 ) -> Result<Response, DownloadError> {
@@ -552,7 +555,14 @@ pub(crate) async fn send(
     loop {
         tokio::select! {
             sent = &mut sending => {
-                return sent.map_err(|error| DownloadError::Transport(error_chain(&error)));
+                return sent.map_err(|error| {
+                    let text = error_chain(&error);
+                    if error.is_redirect() {
+                        DownloadError::RedirectRefused(text)
+                    } else {
+                        DownloadError::Transport(text)
+                    }
+                });
             }
             _ = poll.tick() => {
                 if observer.is_cancelled() {
@@ -1223,6 +1233,29 @@ mod tests {
 
     async fn fetch(req: &DownloadRequest) -> Result<DownloadOutcome, DownloadError> {
         download(&client(), req, &AtomicCancel::default()).await
+    }
+
+    #[tokio::test]
+    async fn a_redirect_the_profile_does_not_allow_is_a_refused_redirect() {
+        let target = serve(Resource::new(body(64 * KIB, 41)));
+        let origin = serve(Resource::redirect_to(&target.base, &["product.fits"]));
+        let spot = spot();
+        let req = DownloadRequest {
+            url: origin.url("/product.fits"),
+            ..request(&origin, &spot)
+        };
+        let error = fetch(&req).await.unwrap_err();
+        assert!(
+            matches!(&error, DownloadError::RedirectRefused(text) if text.contains("redirect refused")),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().starts_with("transfer failed: "),
+            "{error}"
+        );
+        assert_eq!(origin.requests().len(), 1);
+        assert!(target.requests().is_empty());
+        assert_eq!(left_behind(&spot.files), NOTHING);
     }
 
     #[tokio::test]

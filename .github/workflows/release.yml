@@ -13,12 +13,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the tag against the version fields and build the release notes
+        run: node scripts/release-notes.mjs "${GITHUB_REF_NAME}" release-notes.md
       - name: Create Draft Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: AstroBurst ${{ github.ref_name }}
-          body: See CHANGELOG for details.
+          body_path: release-notes.md
           draft: true
 
   build:
@@ -36,16 +44,18 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
       - name: Install Linux dependencies
@@ -59,25 +69,44 @@ jobs:
         run: node scripts/fetch-tier0.mjs
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tauriScript: pnpm tauri
           args: ${{ matrix.platform == 'macos-latest' && '--target universal-apple-darwin' || format('--target {0}', matrix.target) }}
-      - name: Create Flatpak tarball
+      - name: Collect the copyright files of the Ubuntu packages the AppImage takes files from
         if: matrix.platform == 'ubuntu-22.04'
         run: |
-          BIN=$(find src-tauri/target -name 'astroburst' -type f -executable -path '*/release/*' | head -1)
-          if [ -n "$BIN" ]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-            mkdir -p astroburst-${VERSION}/resources astroburst-${VERSION}/data
-            cp "$BIN" astroburst-${VERSION}/
-            cp -r src-tauri/licenses astroburst-${VERSION}/
-            cp -r src-tauri/resources/catalogs astroburst-${VERSION}/resources/
-            cp data/* astroburst-${VERSION}/data/
-            node scripts/fetch-tier0.mjs --verify astroburst-${VERSION}/resources/catalogs/tycho2-l6-v1.abcat
-            tar czf astroburst-${VERSION}-linux-x86_64.tar.gz astroburst-${VERSION}
-          fi
+          shopt -s nullglob
+          IMAGES=(src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          if [ ${#IMAGES[@]} -ne 1 ]; then echo "expected one AppImage, found ${#IMAGES[@]}"; exit 1; fi
+          chmod +x "${IMAGES[0]}"
+          rm -rf squashfs-root appimage-libraries
+          "${IMAGES[0]}" --appimage-extract > /dev/null
+          node scripts/appimage-licences.mjs collect squashfs-root appimage-libraries --skip usr/bin/astroburst --skip usr/lib/AstroBurst
+          rm -rf squashfs-root
+      - name: Rebuild the AppImage with those copyright files inside and check it
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          pnpm tauri bundle --bundles appimage --target x86_64-unknown-linux-gnu --config '{"bundle":{"resources":{"../appimage-libraries/":"licenses/appimage-libraries/"}}}'
+          shopt -s nullglob
+          IMAGES=(src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          if [ ${#IMAGES[@]} -ne 1 ]; then echo "expected one AppImage, found ${#IMAGES[@]}"; exit 1; fi
+          chmod +x "${IMAGES[0]}"
+          "${IMAGES[0]}" --appimage-extract > /dev/null
+          node scripts/appimage-licences.mjs check squashfs-root usr/lib/AstroBurst/licenses/appimage-libraries --skip usr/bin/astroburst --skip usr/lib/AstroBurst
+          rm -rf squashfs-root
+      - name: Create Linux tarball
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          BIN=src-tauri/target/x86_64-unknown-linux-gnu/release/astroburst
+          if [ ! -x "$BIN" ]; then echo "$BIN is missing"; exit 1; fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p astroburst-${VERSION}/bin astroburst-${VERSION}/lib/AstroBurst astroburst-${VERSION}/data
+          cp "$BIN" astroburst-${VERSION}/bin/
+          cp -r src-tauri/licenses astroburst-${VERSION}/
+          cp -r src-tauri/resources/catalogs astroburst-${VERSION}/lib/AstroBurst/
+          cp data/* astroburst-${VERSION}/data/
+          node scripts/fetch-tier0.mjs --verify astroburst-${VERSION}/lib/AstroBurst/catalogs
+          tar czf astroburst-${VERSION}-linux-x86_64.tar.gz astroburst-${VERSION}
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
         with:
@@ -97,6 +126,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:

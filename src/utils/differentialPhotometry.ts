@@ -1,4 +1,5 @@
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesRole, TimeSeriesTarget } from "../shared/types/analysis";
+import { fileBaseName } from "./values";
 
 export type TimeAxis = "jd" | "bjd" | "index";
 
@@ -375,10 +376,12 @@ export function lightCurveCsv(result: TimeSeriesResult, rows: LightCurvePoint[],
   return lines.join("\n") + "\n";
 }
 
+export function referenceStem(referencePath: string): string {
+  return fileBaseName(referencePath).replace(/#.*$/, "").replace(/\.[^.]+$/, "") || "frames";
+}
+
 export function lightCurveCsvFileName(referencePath: string): string {
-  const base = referencePath.split(/[\\/]/).pop() ?? "frames";
-  const stem = base.replace(/#.*$/, "").replace(/\.[^.]+$/, "") || "frames";
-  return `${stem}_lightcurve.csv`;
+  return `${referenceStem(referencePath)}_lightcurve.csv`;
 }
 
 export function resultCoversPath(result: Pick<TimeSeriesResult, "frames"> | null, path: string | null): boolean {

@@ -1,11 +1,11 @@
 {
   "productName": "AstroBurst",
-  "version": "0.8.0",
+  "version": "0.7.5",
   "identifier": "com.astroburst.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build && node scripts/fetch-tier0.mjs",
+    "beforeBuildCommand": "node scripts/fetch-tier0.mjs && npm run build",
     "frontendDist": "../dist"
   },
   "app": {

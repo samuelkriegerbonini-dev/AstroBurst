@@ -5,6 +5,8 @@ import { downloadCountsOf, openableDownload, type DownloadCounts } from "../logi
 export interface DownloadsState {
   items: MastDownloadItem[];
   settled: readonly string[];
+  showGroups: Readonly<Record<string, string>>;
+  shownGroups: readonly string[];
   drawerOpen: boolean;
   enqueueError: MastError | null;
   cancelError: MastError | null;
@@ -14,6 +16,8 @@ export type DownloadsAction =
   | { type: "snapshot"; items: readonly MastDownloadItem[] }
   | { type: "item"; item: MastDownloadItem }
   | { type: "settled"; ids: readonly string[] }
+  | { type: "showGroup"; group: string; ids: readonly string[] }
+  | { type: "shown"; group: string }
   | { type: "drawer"; open: boolean }
   | { type: "enqueueFailed"; error: MastError | null }
   | { type: "cancelFailed"; error: MastError | null };
@@ -21,7 +25,7 @@ export type DownloadsAction =
 const STAGE: Record<MastDownloadState, number> = { queued: 0, downloading: 1, done: 2, error: 2, cancelled: 2 };
 
 export function createDownloadsState(): DownloadsState {
-  return { items: [], settled: [], drawerOpen: false, enqueueError: null, cancelError: null };
+  return { items: [], settled: [], showGroups: {}, shownGroups: [], drawerOpen: false, enqueueError: null, cancelError: null };
 }
 
 function later(known: MastDownloadItem | undefined, incoming: MastDownloadItem): MastDownloadItem {
@@ -59,6 +63,10 @@ export function downloadsReducer(state: DownloadsState, action: DownloadsAction)
       const fresh = action.ids.filter((id) => !state.settled.includes(id));
       return fresh.length ? { ...state, settled: [...state.settled, ...fresh] } : state;
     }
+    case "showGroup":
+      return action.ids.length ? { ...state, showGroups: { ...state.showGroups, ...Object.fromEntries(action.ids.map((id) => [id, action.group])) } } : state;
+    case "shown":
+      return state.shownGroups.includes(action.group) ? state : { ...state, shownGroups: [...state.shownGroups, action.group] };
     case "drawer":
       return state.drawerOpen === action.open ? state : { ...state, drawerOpen: action.open };
     case "enqueueFailed":
@@ -78,6 +86,10 @@ export function unsettledDownloads(state: DownloadsState): MastDownloadItem[] {
 
 export function pendingOpens(state: DownloadsState): MastDownloadItem[] {
   return unsettledDownloads(state).filter((item) => item.open && openableDownload(item));
+}
+
+export function showGroupOf(state: DownloadsState, item: MastDownloadItem): string {
+  return Object.hasOwn(state.showGroups, item.id) ? state.showGroups[item.id] : item.requestId;
 }
 
 export interface DownloadsStore {

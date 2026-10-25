@@ -1,38 +1,21 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useId, useState } from "react";
 import { Database, FolderOpen, RefreshCw, Trash2, X, Download } from "lucide-react";
-import {
-  cancelCatalogInstall,
-  catalogStatus,
-  chooseCatalogFile,
-  chooseSirilCatalogDir,
-  installCatalog,
-  onCatalogInstallProgress,
-  removeCatalog,
-  zenodoConsent,
-  zenodoOffer,
-  type CatalogDatasetReport,
-} from "../services/catalogStore";
+import type { CatalogDatasetReport } from "../services/catalogStore";
+import { catalogStore, useCatalogStore, type CatalogStore } from "../hooks/useCatalogStore";
 import {
   IDLE_INSTALL,
-  INSTALL_COMPLETE_STAGE,
   TIER2_ONLINE_TEXT,
-  USED_DOWNLOAD_NOTE,
   catalogRowView,
   consentBlocker,
   consentText,
-  installReducer,
-  installedNote,
   offersZenodo,
-  registersZenodoDownload,
   removeConfirmText,
-  removedNote,
   sortedCatalogRows,
   zenodoBlocker,
   zenodoConfirmLabel,
   zenodoConsentText,
   zenodoFileText,
   type CatalogTone,
-  type InstallAction,
   type InstallMap,
   type InstallPhase,
 } from "../utils/catalogRows";
@@ -59,10 +42,6 @@ const CONFIRM_CLASS =
   "px-2 py-1 rounded border border-teal-500/40 bg-teal-500/10 text-[10px] text-teal-200 hover:bg-teal-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
 const ARMED_CLASS =
   "flex items-center gap-1 px-2 py-1 rounded border border-rose-500/50 bg-rose-500/20 text-[10px] text-rose-100 transition-colors";
-
-function errorText(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
 
 interface CatalogRowProps {
   report: CatalogDatasetReport;
@@ -312,175 +291,55 @@ async function pickPath(options: { directory: boolean; title: string }): Promise
   return path || null;
 }
 
-export default function CatalogsSettings() {
-  const [reports, setReports] = useState<CatalogDatasetReport[] | null>(null);
-  const [installs, setInstalls] = useState<InstallMap>({});
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+function removeClick(report: CatalogDatasetReport | undefined, armed: string | null, id: string): "arm" | "remove" {
+  return report && removeConfirmText(report) !== null && armed !== id ? "arm" : "remove";
+}
+
+export default function CatalogsSettings({ store = catalogStore }: { store?: CatalogStore }) {
+  const { reports, installs, loading, error } = useCatalogStore(store);
   const [armedRemove, setArmedRemove] = useState<string | null>(null);
-  const installsRef = useRef(installs);
-  installsRef.current = installs;
-  const reportsRef = useRef(reports);
-  reportsRef.current = reports;
-
-  const dispatch = useCallback((action: InstallAction) => setInstalls((prev) => installReducer(prev, action)), []);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      setReports(await catalogStatus());
-      setError(null);
-    } catch (e: unknown) {
-      setError(errorText(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    let stop: (() => void) | null = null;
-    let disposed = false;
-    onCatalogInstallProgress((progress) => {
-      dispatch({ type: "progress", progress });
-      if (progress.stage === INSTALL_COMPLETE_STAGE) void refresh();
-    })
-      .then((unlisten) => {
-        if (disposed) unlisten();
-        else stop = unlisten;
-      })
-      .catch(() => {});
-    return () => {
-      disposed = true;
-      stop?.();
-    };
-  }, [dispatch, refresh]);
-
-  const onAsk = useCallback(
-    async (id: string) => {
-      const report = reportsRef.current?.find((row) => row.id === id);
-      if (report && registersZenodoDownload(report)) {
-        try {
-          await chooseSirilCatalogDir(report.folder);
-          dispatch({ type: "finished", id, note: USED_DOWNLOAD_NOTE });
-        } catch (e: unknown) {
-          setError(errorText(e));
-        }
-        await refresh();
-        return;
-      }
-      dispatch({ type: "ask", id });
-      if (!report || !offersZenodo(report)) return;
-      try {
-        dispatch({ type: "offer", id, offer: await zenodoOffer() });
-      } catch (e: unknown) {
-        dispatch({ type: "offerFailed", id, message: errorText(e) });
-      }
-    },
-    [dispatch, refresh],
-  );
-  const onDecline = useCallback((id: string) => dispatch({ type: "decline", id }), [dispatch]);
-
-  const onConfirm = useCallback(
-    async (id: string) => {
-      const install = installsRef.current[id];
-      if (install?.phase !== "consent") return;
-      const report = reportsRef.current?.find((row) => row.id === id);
-      const zenodo = report !== undefined && offersZenodo(report);
-      if (zenodo && !install.offer) return;
-      dispatch({ type: "start", id });
-      try {
-        const outcome = zenodo && install.offer ? await installCatalog(id, zenodoConsent(install.offer)) : await installCatalog(id);
-        dispatch({ type: "finished", id, note: installedNote(outcome) });
-      } catch (e: unknown) {
-        dispatch({ type: "failed", id, message: errorText(e) });
-      }
-      await refresh();
-    },
-    [dispatch, refresh],
-  );
-
-  const onCancel = useCallback(
-    async (id: string) => {
-      const install = installsRef.current[id];
-      const adopted = install?.phase === "running" && install.adopted === true;
-      dispatch({ type: "cancel", id });
-      try {
-        await cancelCatalogInstall(id);
-      } catch (e: unknown) {
-        setError(errorText(e));
-      }
-      if (!adopted) return;
-      dispatch({ type: "failed", id, message: "cancelled" });
-      await refresh();
-    },
-    [dispatch, refresh],
-  );
+  const [pickError, setPickError] = useState<string | null>(null);
 
   const onRemove = useCallback(
-    async (id: string) => {
-      const report = reports?.find((row) => row.id === id);
-      if (report && removeConfirmText(report) !== null && armedRemove !== id) {
+    (id: string) => {
+      if (removeClick(reports?.find((row) => row.id === id), armedRemove, id) === "arm") {
         setArmedRemove(id);
         return;
       }
       setArmedRemove(null);
-      try {
-        dispatch({ type: "finished", id, note: removedNote(await removeCatalog(id)) });
-      } catch (e: unknown) {
-        setError(errorText(e));
-      }
-      await refresh();
+      void store.remove(id);
     },
-    [dispatch, refresh, reports, armedRemove],
+    [store, reports, armedRemove],
   );
 
   const onDisarm = useCallback(() => setArmedRemove(null), []);
 
-  const onChooseFolder = useCallback(async () => {
+  const pick = useCallback(async (options: { directory: boolean; title: string }, use: (path: string) => Promise<void>) => {
+    setPickError(null);
     try {
-      const dir = await pickPath({ directory: true, title: "Choose your Siril catalogue folder" });
-      if (!dir) return;
-      await chooseSirilCatalogDir(dir);
-      await refresh();
+      const path = await pickPath(options);
+      if (path) await use(path);
     } catch (e: unknown) {
-      setError(errorText(e));
+      setPickError(e instanceof Error ? e.message : String(e));
     }
-  }, [refresh]);
-
-  const onChooseFile = useCallback(
-    async (id: string) => {
-      try {
-        const path = await pickPath({ directory: false, title: "Choose an existing Siril catalogue file" });
-        if (!path) return;
-        await chooseCatalogFile(id, path);
-        await refresh();
-      } catch (e: unknown) {
-        setError(errorText(e));
-      }
-    },
-    [refresh],
-  );
+  }, []);
 
   return (
     <CatalogsSection
       reports={reports}
       installs={installs}
       loading={loading}
-      error={error}
+      error={pickError ?? error}
       armedRemove={armedRemove}
-      onAsk={(id) => void onAsk(id)}
-      onDecline={onDecline}
-      onConfirm={(id) => void onConfirm(id)}
-      onCancel={(id) => void onCancel(id)}
-      onRemove={(id) => void onRemove(id)}
+      onAsk={(id) => void store.ask(id)}
+      onDecline={(id) => store.decline(id)}
+      onConfirm={(id) => void store.confirm(id)}
+      onCancel={(id) => void store.cancel(id)}
+      onRemove={onRemove}
       onDisarm={onDisarm}
-      onChooseFolder={() => void onChooseFolder()}
-      onChooseFile={(id) => void onChooseFile(id)}
-      onRefresh={() => void refresh()}
+      onChooseFolder={() => void pick({ directory: true, title: "Choose your Siril catalogue folder" }, (dir) => store.useSirilDir(dir))}
+      onChooseFile={(id) => void pick({ directory: false, title: "Choose an existing Siril catalogue file" }, (path) => store.useFile(id, path))}
+      onRefresh={() => void store.refresh()}
     />
   );
 }

@@ -79,7 +79,7 @@ The binary is `target/release/astroburst-server` (`astroburst-server.exe` on Win
 Start-up log:
 
 ```
-[2026-10-23T12:00:00Z INFO  astroburst_server] AstroBurst Headless Server v0.7.1
+[2026-10-23T12:00:00Z INFO  astroburst_server] AstroBurst Headless Server v0.8.0
 [2026-10-23T12:00:00Z INFO  astroburst_server] Listening on 127.0.0.1:8080
 [2026-10-23T12:00:00Z INFO  astroburst_server] Session TTL: 900s, Max sessions: 8
 [2026-10-23T12:00:00Z INFO  astroburst_server] Per-session cache: 32 entries / 2048 MiB
@@ -283,7 +283,7 @@ Requests rejected before a handler runs get the framework's own plain-text answe
 No session needed (`server/router.rs`).
 
 ```json
-{ "status": "ok", "version": "0.7.1", "sessions_active": 2, "sessions_total": 17 }
+{ "status": "ok", "version": "0.8.0", "sessions_active": 2, "sessions_total": 17 }
 ```
 
 `sessions_total` counts every session created since start.
@@ -929,7 +929,7 @@ Not implemented yet; paths and bodies may change. Most planned routes call the e
 - **G0 Foundations:** `GET /v2/sessions/:sid/jobs/:jid/outcome` (result, warnings, error text and product refs); the three job routes under `/v2/sessions/:sid/jobs/:jid`; `GET /v2/sessions/:sid/planes` (FITS HDUs and ASDF arrays alike); `DELETE /v2/sessions/:sid/images/:ref`; `GET /v2/sessions/:sid/images/:ref/fits`; `GET /v2/fs`; `GET /v2/capabilities`; a bearer token on non-loopback binds, a `Host` allowlist, path roots and cancellable progress for every job.
 - **G9 Validation data:** `POST /v2/sessions/:sid/synth`, synthetic star fields and stacks with a truth catalogue, deterministic by seed.
 - **G1 Image measurement and photometry:** photometry (single, batch and gain model), star detection, empirical PSF, region statistics with a background annulus, radial, line and surface-brightness profiles, contours, pixel table, DQ flag table, batch noise evaluation, FFT power spectrum; `exclude_dq` on `/stats` and `/histogram`.
-- **G2 Astrometry, WCS and catalogues:** Gaia DR3 cone search, cross-match and CSV; observation geometry; DS9 `.reg` import and export; pointing overlap; plate solving of one frame or a list once offline solving ships; the image centre and field of view on `/wcs`, `frame` on `/wcs/sky2pix`, `position_angle_deg` on `/wcs/separation`.
+- **G2 Astrometry, WCS and catalogues:** Gaia DR3 cone search, cross-match and CSV; observation geometry; DS9 `.reg` import and export; pointing overlap; plate solving of one frame or a list with the desktop's offline catalogue tiers; the image centre and field of view on `/wcs`, `frame` on `/wcs/sky2pix`, `position_angle_deg` on `/wcs/separation`.
 - **G3 Spectroscopy and cubes:** cube description, channel, spaxel and region spectra, collapse, moments, line-fit maps, position-velocity diagrams, line measurement, spectral axis, barycentric correction, JWST x1d and 1D FITS spectra.
 - **G4 Time domain and detector-level data:** time-series photometry, JWST ramp inspection, slope fits and comparison with the official `_rate`.
 - **G5 MAST archive** (needs `mast`): status, missions, name resolution, search, products, previews and thumbnails, header peek, presets, downloads as jobs, cache and footprints; the MAST token from `ASTROBURST_MAST_TOKEN` only.

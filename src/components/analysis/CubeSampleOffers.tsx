@@ -3,7 +3,8 @@ import { X } from "lucide-react";
 import ProgressBar from "../file/ProgressBar";
 import { formatBytes } from "../archive/logic/productView";
 import { sampleActions, sampleControls, sampleDataStore } from "../../hooks/useSampleData";
-import { CUBE_SAMPLE_SETS, openSampleProducts, sampleOfferAction, samplePercent } from "../../utils/sampleOffers";
+import { CUBE_SAMPLE_SETS, jwstSampleTerms, openSampleProducts, sampleOfferAction, samplePercent } from "../../utils/sampleOffers";
+import { createFocusHandoff } from "../../utils/focusHandoff";
 
 const OFFER_STYLE = {
   background: "color-mix(in srgb, var(--ab-violet) 8%, transparent)",
@@ -14,12 +15,14 @@ const OFFER_STYLE = {
 function CubeSampleOffer({ id, idle }: { id: string; idle: boolean }) {
   const entries = useSyncExternalStore(sampleDataStore.subscribe, sampleDataStore.get, sampleDataStore.get);
   const actions = useMemo(() => sampleActions(sampleDataStore, id, openSampleProducts), [id]);
+  const focus = useMemo(() => createFocusHandoff(), []);
   const entry = entries.find((e) => e.id === id);
   const sample = sampleControls(entry, actions);
-  if (!entry || !sample || (!idle && sample.state !== "downloading")) return null;
+  if (!entry || !sample || (!idle && sample.state !== "downloading" && !sample.error)) return null;
   const action = sampleOfferAction(sample);
   const percent = samplePercent(sample);
   const ActionIcon = action?.icon;
+  const terms = jwstSampleTerms(id);
   return (
     <div data-cube-sample={id} data-sample-state={sample.state} className="w-full px-3 flex flex-col gap-1 text-[10px] text-zinc-500">
       <span className="text-zinc-300">{sample.title}</span>
@@ -28,6 +31,7 @@ function CubeSampleOffer({ id, idle }: { id: string; idle: boolean }) {
         <button
           type="button"
           data-cube-sample-action
+          ref={focus.arriving}
           onClick={action.run}
           className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[10px] font-medium transition-all"
           style={OFFER_STYLE}
@@ -55,6 +59,7 @@ function CubeSampleOffer({ id, idle }: { id: string; idle: boolean }) {
           <button
             type="button"
             data-cube-sample-cancel
+            ref={focus.leaving}
             onClick={() => void sample.cancel()}
             className="flex items-center gap-1 text-zinc-500 hover:text-zinc-300"
             aria-label={`Cancel the ${sample.title} download`}
@@ -70,7 +75,8 @@ function CubeSampleOffer({ id, idle }: { id: string; idle: boolean }) {
         </span>
       )}
       <span className="text-zinc-600 leading-snug">{sample.credit}</span>
-      {entry.licence && <span className="text-zinc-600 leading-snug">{entry.licence}</span>}
+      {terms && <span data-cube-sample-terms className="text-zinc-500 leading-snug">{terms}</span>}
+      {sample.licence && <span className="text-zinc-600 leading-snug">{sample.licence}</span>}
     </div>
   );
 }

@@ -166,7 +166,6 @@ export function page(rows: MastRow[], over: Partial<MastSearchPage> = {}): MastS
     unresolvedTargets: [],
     elapsedMs: 1700,
     fromCache: false,
-    levelFilteredLocally: false,
     levelAppliedLocally: null,
     unfilteredTotal: null,
     ...over,

@@ -5,16 +5,14 @@ use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    annulus_arg, aperture_radius_arg, apply_calibration, area_map, check_annulus_clears_aperture, photometry_planes,
-    processed_data_warning, resolve_dq_mask,
+    annulus_arg, aperture_radius_arg, apply_calibration, check_annulus_clears_aperture, photometry_planes,
+    processed_data_warning, resolve_dq_mask, AreaWeights,
 };
 use crate::cmd::common::{blocking_cmd, load_cached, load_cached_full};
 use crate::core::alignment::pair::offset_within_limits;
 use crate::core::alignment::phase_correlation::{is_low_confidence, phase_correlate};
 use crate::core::analysis::gain::{gain_model, photon_noise_warning};
-use crate::core::analysis::photometry::{
-    measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, StarPhotometry,
-};
+use crate::core::analysis::photometry::{measure_star_prepared, saturation_level, PhotometryConfig, StarPhotometry};
 use crate::core::astrometry::geometry::{
     frame_geometry, geometry_method_notes, header_time, resolve_series_target, resolve_site, FrameGeometry,
     GeometryOverrides, ResolvedTarget,
@@ -89,6 +87,7 @@ pub struct TimeSeriesResult {
     pub n_frames: usize,
     pub n_skipped: usize,
     pub warnings: Vec<String>,
+    pub area_mixed: bool,
     pub geometry_target: Option<ResolvedTarget>,
     pub geometry_notes: Vec<String>,
     pub elapsed_ms: u64,
@@ -294,7 +293,7 @@ fn measure_frame(
     let wcs = header.and_then(|h| load_wcs(path, h).ok());
     let mut photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
     let mut area_warnings = Vec::new();
-    let area = area_map(path, entry, photcal.as_mut(), &mut area_warnings);
+    let area = AreaWeights::resolve(path, entry, photcal.as_mut(), &mut area_warnings);
     for message in area_warnings {
         let message = format!("{file_name}: {message}");
         if !warnings.contains(&message) {
@@ -314,8 +313,7 @@ fn measure_frame(
         FrameShift { offset: None, dx: 0.0, dy: 0.0 }
     };
     let registered = index > 0 && shift.offset.as_ref().is_some_and(|o| o.registered);
-    let source = MaskedImage::new(entry.arr(), mask.as_ref().map(|m| &m.map))
-        .map(|s| s.with_area(area.as_ref().map(|a| a.arr())));
+    let source = area.masked_image(entry, mask.as_ref().map(|m| &m.map));
 
     let mut measured: Vec<Option<StarPhotometry>> = Vec::with_capacity(targets.len());
     let mut errors: Vec<Option<String>> = Vec::with_capacity(targets.len());
@@ -453,6 +451,8 @@ pub(crate) fn measure_time_series_with(
             config_base.search_radius
         ));
     }
+    let area_mixed = area_consistency_warning(&frames);
+    warnings.extend(area_mixed.iter().cloned());
     let usable_gain = config_base.gain.is_some_and(|g| g.is_finite() && g > 0.0);
     let err_used = frames.iter().flat_map(|f| f.targets.iter().flatten()).all(|t| t.err_used);
     let model = gain_model(reference.header(), super::has_err_extension(reference_path, reference.arr().dim()));
@@ -465,10 +465,43 @@ pub(crate) fn measure_time_series_with(
         n_skipped,
         frames,
         warnings,
+        area_mixed: area_mixed.is_some(),
         geometry_target: series.target,
         geometry_notes: series.notes,
         elapsed_ms: t0.elapsed().as_millis() as u64,
     })
+}
+
+const MAX_NAMED_FRAMES: usize = 5;
+
+fn named_frames(names: &[&str]) -> String {
+    let shown = names.iter().take(MAX_NAMED_FRAMES).copied().collect::<Vec<_>>().join(", ");
+    match names.len().saturating_sub(MAX_NAMED_FRAMES) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
+fn area_consistency_warning(frames: &[TimeSeriesFrame]) -> Option<String> {
+    let mut with: Vec<&str> = Vec::new();
+    let mut without: Vec<&str> = Vec::new();
+    for frame in frames.iter().filter(|f| f.skipped.is_none()) {
+        match frame.targets.iter().flatten().next().map(|t| t.area_applied) {
+            Some(true) => with.push(&frame.file_name),
+            Some(false) => without.push(&frame.file_name),
+            None => {}
+        }
+    }
+    if with.is_empty() || without.is_empty() {
+        return None;
+    }
+    let (group, names) = if with.len() <= without.len() { ("only on", &with) } else { ("not on", &without) };
+    Some(format!(
+        "AREA pixel-area map applied on {} of {} measured frames ({group} {}): fluxes with and without the map differ by the aperture mean AREA, a step of a few hundredths of a magnitude in the light curve",
+        with.len(),
+        with.len() + without.len(),
+        named_frames(names)
+    ))
 }
 
 pub(crate) fn validate_time_series_args(

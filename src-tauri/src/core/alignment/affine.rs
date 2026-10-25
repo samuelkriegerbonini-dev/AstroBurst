@@ -5,6 +5,7 @@ use crate::core::alignment::phase_correlation;
 use crate::core::alignment::triangles::{self, StarPair, TriangleParams};
 use crate::core::analysis::star_detection::detect_stars;
 use crate::core::imaging::sampling::bicubic_sample;
+use crate::math::median::exact_median_f64;
 
 const MIN_MATCHES_AFFINE: usize = 6;
 const MIN_MATCHES_RIGID: usize = 4;
@@ -13,11 +14,11 @@ const MAX_OFFSET_FRACTION: f64 = 0.40;
 const MIN_SCALE: f64 = 0.70;
 const MAX_SCALE: f64 = 1.40;
 const MIN_REFLECTION_INLIERS: usize = 5;
-const TRANSLATION_AGREE_ROTATION_DEG: f64 = 0.3;
-const TRANSLATION_AGREE_SCALE: f64 = 0.01;
-const TRANSLATION_AGREE_PX: f64 = 2.0;
-const TRANSLATION_AGREE_FRACTION: f64 = 0.02;
+const TRANSLATION_AGREE_PX: f64 = 1.0;
+const TRANSLATION_AGREE_FWHM_FRACTION: f64 = 0.5;
+const FIXED_SOURCE_RADIUS_PX: f64 = 0.5;
 
+#[derive(Debug)]
 pub enum TranslationCheck {
     Inconclusive,
     Agrees,
@@ -26,41 +27,139 @@ pub enum TranslationCheck {
     FitRejected(String),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AlignmentStars {
+    pub positions: Vec<(f64, f64)>,
+    pub median_fwhm_px: f64,
+}
+
+impl AlignmentStars {
+    pub fn agreement_tolerance_px(&self) -> f64 {
+        TRANSLATION_AGREE_PX.max(TRANSLATION_AGREE_FWHM_FRACTION * self.median_fwhm_px)
+    }
+}
+
+pub fn alignment_stars(image: &Array2<f32>) -> AlignmentStars {
+    let (rows, cols) = image.dim();
+    let detected = detect_stars(&normalize_for_detection(image), DETECTION_SIGMA);
+    let fwhm: Vec<f64> = detected.stars.iter().map(|star| star.fwhm).collect();
+    AlignmentStars {
+        positions: triangles::select_alignment_stars(&detected.stars, TriangleParams::ALIGNMENT.max_stars, rows, cols),
+        median_fwhm_px: exact_median_f64(&fwhm),
+    }
+}
+
 pub fn check_translation_against_stars(
-    reference: &Array2<f32>,
+    reference: &AlignmentStars,
     target: &Array2<f32>,
     dy: f64,
     dx: f64,
+    rows: usize,
+    cols: usize,
 ) -> TranslationCheck {
-    let (rows, cols) = reference.dim();
-    let ref_norm = normalize_for_detection(reference);
-    let tgt_norm = normalize_for_detection(target);
-    let ref_det = detect_stars(&ref_norm, DETECTION_SIGMA);
-    let tgt_det = detect_stars(&tgt_norm, DETECTION_SIGMA);
+    let target_stars = alignment_stars(target).positions;
+    check_translation_against_star_lists(reference, &target_stars, dy, dx, rows, cols)
+}
+
+fn check_translation_against_star_lists(
+    reference: &AlignmentStars,
+    target_stars: &[(f64, f64)],
+    dy: f64,
+    dx: f64,
+    rows: usize,
+    cols: usize,
+) -> TranslationCheck {
     let params = &TriangleParams::ALIGNMENT;
-    let ref_stars = triangles::select_alignment_stars(&ref_det.stars, params.max_stars, rows, cols);
-    let tgt_stars = triangles::select_alignment_stars(&tgt_det.stars, params.max_stars, rows, cols);
-    match register_star_lists(&ref_stars, &tgt_stars, rows, cols, params) {
+    let tolerance = reference.agreement_tolerance_px();
+    let judge = |fit| judge_against_translation(fit, dy, dx, rows, cols, tolerance, params);
+    let verdict = judge(register_star_lists(&reference.positions, target_stars, rows, cols, params));
+    if matches!(verdict, TranslationCheck::Agrees | TranslationCheck::Refused(_)) || dx.hypot(dy) <= tolerance {
+        return verdict;
+    }
+    let (moving_reference, moving_target) = without_fixed_sources(&reference.positions, target_stars, FIXED_SOURCE_RADIUS_PX);
+    let fixed = reference.positions.len() - moving_reference.len();
+    if fixed < params.min_inliers {
+        return verdict;
+    }
+    let contaminated = |without_them: String| {
+        TranslationCheck::FitRejected(format!(
+            "the star match is contaminated by {fixed} of {} reference sources that sit at the same pixels in both frames despite the ({dx:.1}, {dy:.1}) px shift; sources fixed on the sensor, such as hot pixels, are being matched as stars, and without them {without_them}",
+            reference.positions.len()
+        ))
+    };
+    match judge(register_star_lists(&moving_reference, &moving_target, rows, cols, params)) {
+        TranslationCheck::Inconclusive => contaminated("too few sources remain for a star match".to_string()),
+        TranslationCheck::FitRejected(reason) => contaminated(reason),
+        clean => clean,
+    }
+}
+
+fn judge_against_translation(
+    fit: Result<AffineAlignResult, Option<SanityRejection>>,
+    dy: f64,
+    dx: f64,
+    rows: usize,
+    cols: usize,
+    tolerance: f64,
+    params: &TriangleParams,
+) -> TranslationCheck {
+    match fit {
         Ok(result) if result.method == AffineAlignMethod::Identity => TranslationCheck::Refused(result),
-        Ok(result) if agrees_with_translation(&result.transform, dy, dx, rows, cols) => TranslationCheck::Agrees,
+        Ok(result) if agrees_with_translation(&result.transform, dy, dx, rows, cols, tolerance) => TranslationCheck::Agrees,
+        Ok(result) if !params.is_wide_rotation_fit(result.matched_stars, result.inliers, result.rms_px) => {
+            TranslationCheck::FitRejected(format!(
+                "the star match disagrees with the ({:.1}, {:.1}) px shift but is not decisive: {} of {} inliers at RMS {:.2} px, while overriding a confident shift needs at least {} inliers and RMS <= {:.1} px",
+                dx,
+                dy,
+                result.inliers,
+                result.matched_stars,
+                result.rms_px,
+                params.wide_rotation_inliers_needed(result.matched_stars),
+                params.wide_rotation_max_rms_px
+            ))
+        }
         Ok(result) => TranslationCheck::Prefer(result),
-        Err(Some(reason)) => TranslationCheck::FitRejected(reason),
+        Err(Some(rejected)) if rejected.kind == SanityKind::WideRotation => TranslationCheck::Refused(unregistered(Some(rejected.reason))),
+        Err(Some(rejected)) => TranslationCheck::FitRejected(rejected.reason),
         Err(None) => TranslationCheck::Inconclusive,
     }
 }
 
-fn agrees_with_translation(transform: &AffineTransform, dy: f64, dx: f64, rows: usize, cols: usize) -> bool {
-    if transform.rotation_deg().abs() > TRANSLATION_AGREE_ROTATION_DEG {
-        return false;
-    }
-    if (transform.scale_x() - 1.0).abs() > TRANSLATION_AGREE_SCALE || (transform.scale_y() - 1.0).abs() > TRANSLATION_AGREE_SCALE {
-        return false;
-    }
-    let (sy, sx) = center_displacement(transform, rows, cols);
-    let tolerance = TRANSLATION_AGREE_PX + TRANSLATION_AGREE_FRACTION * (dx * dx + dy * dy).sqrt();
-    let direct = ((sx - dx).powi(2) + (sy - dy).powi(2)).sqrt();
-    let inverse = ((sx + dx).powi(2) + (sy + dy).powi(2)).sqrt();
-    direct.min(inverse) <= tolerance
+fn without_fixed_sources(
+    reference_stars: &[(f64, f64)],
+    target_stars: &[(f64, f64)],
+    radius_px: f64,
+) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    let mut fixed_target = vec![false; target_stars.len()];
+    let moving_reference: Vec<(f64, f64)> = reference_stars
+        .iter()
+        .copied()
+        .filter(|&(x, y)| match target_stars.iter().position(|&(tx, ty)| (tx - x).hypot(ty - y) < radius_px) {
+            Some(j) => {
+                fixed_target[j] = true;
+                false
+            }
+            None => true,
+        })
+        .collect();
+    let moving_target = target_stars.iter().zip(&fixed_target).filter(|(_, fixed)| !**fixed).map(|(&star, _)| star).collect();
+    (moving_reference, moving_target)
+}
+
+fn agrees_with_translation(transform: &AffineTransform, dy: f64, dx: f64, rows: usize, cols: usize, tolerance_px: f64) -> bool {
+    largest_probe_displacement(transform, &AffineTransform::translation(dx, dy), rows, cols) <= tolerance_px
+}
+
+pub(crate) fn largest_probe_displacement(found: &AffineTransform, expected: &AffineTransform, rows: usize, cols: usize) -> f64 {
+    let (right, bottom) = (cols as f64 - 1.0, rows as f64 - 1.0);
+    [(0.0, 0.0), (right, 0.0), (0.0, bottom), (right, bottom), (right * 0.5, bottom * 0.5)]
+        .into_iter()
+        .map(|(x, y)| {
+            let (fx, fy) = found.map(x, y);
+            let (ex, ey) = expected.map(x, y);
+            (fx - ex).hypot(fy - ey)
+        })
+        .fold(0.0, f64::max)
 }
 
 fn normalize_for_detection(image: &Array2<f32>) -> Array2<f32> {
@@ -168,26 +267,25 @@ pub fn align_channel_affine(
     reference: &Array2<f32>,
     target: &Array2<f32>,
 ) -> AffineAlignResult {
+    align_channel_affine_with(reference, &alignment_stars(reference), target)
+}
+
+pub fn align_channel_affine_with(
+    reference: &Array2<f32>,
+    reference_stars: &AlignmentStars,
+    target: &Array2<f32>,
+) -> AffineAlignResult {
     let (rows, cols) = reference.dim();
-
-    let ref_norm = normalize_for_detection(reference);
-    let tgt_norm = normalize_for_detection(target);
-
-    let ref_det = detect_stars(&ref_norm, DETECTION_SIGMA);
-    let tgt_det = detect_stars(&tgt_norm, DETECTION_SIGMA);
+    let target_stars = alignment_stars(target).positions;
 
     log::info!(
-        "Affine: detected {} ref stars, {} tgt stars (image {}x{})",
-        ref_det.stars.len(), tgt_det.stars.len(), cols, rows
+        "Affine: {} ref stars, {} tgt stars selected (image {}x{})",
+        reference_stars.positions.len(), target_stars.len(), cols, rows
     );
 
-    let params = &TriangleParams::ALIGNMENT;
-    let ref_stars = triangles::select_alignment_stars(&ref_det.stars, params.max_stars, rows, cols);
-    let tgt_stars = triangles::select_alignment_stars(&tgt_det.stars, params.max_stars, rows, cols);
-
-    match register_star_lists(&ref_stars, &tgt_stars, rows, cols, params) {
+    match register_star_lists(&reference_stars.positions, &target_stars, rows, cols, &TriangleParams::ALIGNMENT) {
         Ok(result) => result,
-        Err(rejection) => fallback_phase_correlation(reference, target, rows, cols, rejection),
+        Err(rejection) => fallback_phase_correlation(reference, target, rows, cols, rejection.map(|rejected| rejected.reason)),
     }
 }
 
@@ -197,7 +295,7 @@ fn register_star_lists(
     rows: usize,
     cols: usize,
     params: &TriangleParams,
-) -> Result<AffineAlignResult, Option<String>> {
+) -> Result<AffineAlignResult, Option<SanityRejection>> {
     if ref_stars.len() < MIN_MATCHES_RIGID || tgt_stars.len() < MIN_MATCHES_RIGID {
         log::info!(
             "Affine: insufficient stars (ref={}, tgt={}), fallback to phase correlation",
@@ -235,7 +333,7 @@ fn fit_same_parity(
     rows: usize,
     cols: usize,
     params: &TriangleParams,
-) -> Result<AffineAlignResult, Option<String>> {
+) -> Result<AffineAlignResult, Option<SanityRejection>> {
     if matches.len() < MIN_MATCHES_RIGID {
         log::info!(
             "Affine: too few triangle matches ({}), fallback to phase correlation",
@@ -244,7 +342,7 @@ fn fit_same_parity(
         return Err(None);
     }
 
-    let mut rejection: Option<String> = None;
+    let mut rejection: Option<SanityRejection> = None;
 
     if matches.len() >= MIN_MATCHES_AFFINE {
         if let Some(result) = triangles::ransac_affine(matches, AffineAlignMethod::Affine, params) {
@@ -255,7 +353,7 @@ fn fit_same_parity(
                         "Affine transform rejected: {}. stars={}, inliers={}, residual={:.2}px, rms={:.2}px. Trying rigid.",
                         rejected.reason, result.matched_stars, result.inliers, result.residual_px, result.rms_px
                     );
-                    rejection = Some(rejected.reason);
+                    rejection = Some(rejected);
                 }
             }
         } else {
@@ -271,7 +369,7 @@ fn fit_same_parity(
                     "Rigid transform rejected: {}. stars={}, inliers={}, residual={:.2}px.",
                     rejected.reason, result.matched_stars, result.inliers, result.residual_px
                 );
-                rejection.get_or_insert(rejected.reason);
+                rejection.get_or_insert(rejected);
             }
         }
     } else {
@@ -292,7 +390,7 @@ fn reflection_refusal(
     }
     let fit = triangles::ransac_affine(mirrored_pairs, AffineAlignMethod::Affine, params)?;
     let rejected = check_transform_sanity(&fit, rows, cols, params).err()?;
-    if !rejected.reflection || !is_decisive_reflection(&fit) {
+    if rejected.kind != SanityKind::Reflection || !is_decisive_reflection(&fit) {
         return None;
     }
     log::warn!(
@@ -314,14 +412,22 @@ fn is_decisive_reflection(fit: &AffineAlignResult) -> bool {
     fit.inliers >= MIN_REFLECTION_INLIERS && det.abs() >= MIN_SCALE * MIN_SCALE
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SanityKind {
+    Other,
+    Reflection,
+    WideRotation,
+}
+
+#[derive(Debug)]
 struct SanityRejection {
     reason: String,
-    reflection: bool,
+    kind: SanityKind,
 }
 
 impl SanityRejection {
     fn other(reason: String) -> Self {
-        Self { reason, reflection: false }
+        Self { reason, kind: SanityKind::Other }
     }
 }
 
@@ -349,7 +455,7 @@ fn check_transform_sanity(
     if det <= 0.0 {
         return Err(SanityRejection {
             reason: format!("reflection (det={:.3}) rejected", det),
-            reflection: true,
+            kind: SanityKind::Reflection,
         });
     }
 
@@ -375,15 +481,18 @@ fn check_transform_sanity(
 
     let wide_fit = params.is_wide_rotation_fit(result.matched_stars, result.inliers, result.rms_px);
     if rotation.abs() > params.wide_rotation_above_deg && !wide_fit {
-        return Err(SanityRejection::other(format!(
-            "rotation {:.2} deg needs at least {} inliers and RMS <= {:.1} px, got {} of {} matches at RMS {:.2} px",
-            rotation,
-            params.wide_rotation_inliers_needed(result.matched_stars),
-            params.wide_rotation_max_rms_px,
-            result.inliers,
-            result.matched_stars,
-            result.rms_px
-        )));
+        return Err(SanityRejection {
+            reason: format!(
+                "rotation {:.2} deg needs at least {} inliers and RMS <= {:.1} px, got {} of {} matches at RMS {:.2} px",
+                rotation,
+                params.wide_rotation_inliers_needed(result.matched_stars),
+                params.wide_rotation_max_rms_px,
+                result.inliers,
+                result.matched_stars,
+                result.rms_px
+            ),
+            kind: SanityKind::WideRotation,
+        });
     }
 
     Ok(())
@@ -408,16 +517,7 @@ fn fallback_phase_correlation(
     let max_tx = cols as f64 * MAX_OFFSET_FRACTION;
     let max_ty = rows as f64 * MAX_OFFSET_FRACTION;
     if pc.dx.abs() > max_tx || pc.dy.abs() > max_ty || phase_correlation::is_low_confidence(pc.confidence) {
-        return AffineAlignResult {
-            transform: AffineTransform::identity(),
-            matched_stars: 0,
-            inliers: 0,
-            residual_px: 0.0,
-            rms_px: 0.0,
-            method: AffineAlignMethod::Identity,
-            confidence: 0.0,
-            rejection,
-        };
+        return unregistered(rejection);
     }
 
     AffineAlignResult {
@@ -428,6 +528,19 @@ fn fallback_phase_correlation(
         rms_px: 0.0,
         method: AffineAlignMethod::PhaseCorrelation,
         confidence: pc.confidence,
+        rejection,
+    }
+}
+
+fn unregistered(rejection: Option<String>) -> AffineAlignResult {
+    AffineAlignResult {
+        transform: AffineTransform::identity(),
+        matched_stars: 0,
+        inliers: 0,
+        residual_px: 0.0,
+        rms_px: 0.0,
+        method: AffineAlignMethod::Identity,
+        confidence: 0.0,
         rejection,
     }
 }
@@ -480,7 +593,7 @@ mod tests {
 
     fn named_reflection(result: &AffineAlignResult, rows: usize, cols: usize) -> bool {
         check_transform_sanity(result, rows, cols, &TriangleParams::ALIGNMENT)
-            .is_err_and(|rejected| rejected.reflection)
+            .is_err_and(|rejected| rejected.kind == SanityKind::Reflection)
     }
 
     fn rotation_about_centre(deg: f64, rows: usize, cols: usize) -> AffineTransform {
@@ -570,16 +683,11 @@ mod tests {
     }
 
     fn largest_corner_error(found: &AffineTransform, truth: &AffineTransform, size: usize) -> f64 {
-        let edge = size as f64 - 1.0;
-        let centre = edge * 0.5;
-        [(0.0, 0.0), (edge, 0.0), (0.0, edge), (edge, edge), (centre, centre)]
-            .iter()
-            .map(|&(x, y)| {
-                let (fx, fy) = found.map(x, y);
-                let (tx, ty) = truth.map(x, y);
-                (fx - tx).hypot(fy - ty)
-            })
-            .fold(0.0, f64::max)
+        largest_probe_displacement(found, truth, size, size)
+    }
+
+    fn sharp_tolerance() -> f64 {
+        AlignmentStars::default().agreement_tolerance_px()
     }
 
     const CHANCE_MIRROR_REFERENCE: [(f64, f64); 17] = [
@@ -621,6 +729,191 @@ mod tests {
         (203.01307463533382, 152.3018145547455),
         (395.326065192628, 155.2186058286517),
     ];
+
+    #[test]
+    fn a_fifth_of_a_degree_rotation_does_not_pass_as_a_translation() {
+        let turned = rotated_and_shifted(0.2, (12.25, -7.5), 2048);
+        let (dy, dx) = center_displacement(&turned, 2048, 2048);
+        assert!((dx - 12.25).abs() < 1e-9 && (dy + 7.5).abs() < 1e-9, "({dy}, {dx})");
+        let plain = AffineTransform::translation(12.25, -7.5);
+        let corners = largest_probe_displacement(&turned, &plain, 2048, 2048);
+        assert!((corners - 5.05).abs() < 0.05, "{corners}");
+        assert_eq!(sharp_tolerance(), 1.0);
+        assert!(!agrees_with_translation(&turned, dy, dx, 2048, 2048, sharp_tolerance()), "{turned:?}");
+        let seeing_limited = AlignmentStars { positions: Vec::new(), median_fwhm_px: 6.0 }.agreement_tolerance_px();
+        assert_eq!(seeing_limited, 3.0);
+        assert!(!agrees_with_translation(&turned, dy, dx, 2048, 2048, seeing_limited), "{turned:?}");
+        assert!(agrees_with_translation(&plain, -7.5, 12.25, 2048, 2048, sharp_tolerance()));
+        let stretched = AffineTransform { a: 1.001, b: 0.0, tx: 12.25 - 0.001 * 1023.5, c: 0.0, d: 1.001, ty: -7.5 - 0.001 * 1023.5 };
+        let (sy, sx) = center_displacement(&stretched, 2048, 2048);
+        assert!((sx - 12.25).abs() < 1e-9 && (sy + 7.5).abs() < 1e-9, "({sy}, {sx})");
+        assert!(
+            !agrees_with_translation(&stretched, -7.5, 12.25, 2048, 2048, sharp_tolerance()),
+            "a 0.1 % scale moves the corners by {} px",
+            largest_probe_displacement(&stretched, &plain, 2048, 2048)
+        );
+    }
+
+    #[test]
+    fn a_negated_shift_does_not_pass_as_agreement() {
+        let shift = AffineTransform::translation(12.25, -7.5);
+        assert!(agrees_with_translation(&shift, -7.5, 12.25, 2048, 2048, sharp_tolerance()));
+        assert!(!agrees_with_translation(&shift, 7.5, -12.25, 2048, 2048, sharp_tolerance()));
+    }
+
+    fn viewed(stars: &[(f64, f64)], deg: f64, shift: (f64, f64), size: usize) -> Vec<(f64, f64)> {
+        let truth = rotated_and_shifted(deg, shift, size);
+        stars.iter().map(|&(x, y)| truth.map(x, y)).collect()
+    }
+
+    const SPARSE_SKY: [(f64, f64); 5] = [(212.0, 305.0), (640.5, 180.25), (780.0, 690.0), (330.0, 760.5), (505.0, 450.0)];
+
+    #[test]
+    fn a_disagreeing_fit_with_too_few_inliers_keeps_the_shift_and_says_why() {
+        let reference = AlignmentStars { positions: SPARSE_SKY.to_vec(), median_fwhm_px: 2.5 };
+        let target = viewed(&SPARSE_SKY, 0.6, (6.0, -4.0), 1000);
+        match check_translation_against_star_lists(&reference, &target, -4.0, 6.0, 1000, 1000) {
+            TranslationCheck::FitRejected(reason) => {
+                assert!(
+                    reason.starts_with("the star match disagrees with the (6.0, -4.0) px shift but is not decisive: 5 of 5 inliers at RMS "),
+                    "{reason}"
+                );
+                assert!(reason.ends_with("needs at least 8 inliers and RMS <= 1.0 px"), "{reason}");
+            }
+            other => panic!("a five-star fit overrode the shift: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_decisive_disagreeing_fit_is_preferred_over_the_shift() {
+        let sky = ring_sky();
+        let reference = AlignmentStars { positions: sky.clone(), median_fwhm_px: 2.5 };
+        let target = viewed(&sky, 0.6, (6.0, -4.0), 1000);
+        match check_translation_against_star_lists(&reference, &target, -4.0, 6.0, 1000, 1000) {
+            TranslationCheck::Prefer(result) => {
+                assert!(result.inliers >= 8, "{result:?}");
+                let truth = rotated_and_shifted(0.6, (6.0, -4.0), 1000);
+                assert!(largest_probe_displacement(&result.transform, &truth, 1000, 1000) < 0.5, "{result:?}");
+            }
+            other => panic!("a decisive fit was not preferred: {other:?}"),
+        }
+    }
+
+    const HOT_CLUSTERS: [(f64, f64); 14] = [
+        (82.0, 93.0), (308.0, 72.0), (615.0, 113.0), (922.0, 62.0), (72.0, 410.0), (963.0, 359.0), (62.0, 666.0),
+        (953.0, 635.0), (123.0, 922.0), (390.0, 963.0), (666.0, 902.0), (932.0, 943.0), (205.0, 257.0), (820.0, 205.0),
+    ];
+
+    const MOVING_STARS: [(f64, f64); 10] = [
+        (350.3, 360.7), (480.2, 345.1), (640.6, 372.4), (372.9, 500.5), (520.4, 470.8),
+        (668.1, 530.2), (410.7, 640.3), (560.9, 610.6), (690.2, 680.9), (455.5, 700.4),
+    ];
+
+    fn with_hot_clusters(stars: &[(f64, f64)]) -> Vec<(f64, f64)> {
+        HOT_CLUSTERS.iter().chain(stars).copied().collect()
+    }
+
+    fn ring_sky() -> Vec<(f64, f64)> {
+        (0..12)
+            .map(|i| {
+                let angle = i as f64 * 0.5236 + 0.3;
+                (499.5 + 320.0 * angle.cos() + 17.0 * (i % 3) as f64, 499.5 + 320.0 * angle.sin() - 11.0 * (i % 4) as f64)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sources_fixed_on_the_sensor_are_dropped_and_the_moving_stars_decide() {
+        let (dx, dy) = (7.3, -4.1);
+        let moved: Vec<(f64, f64)> = MOVING_STARS.iter().map(|&(x, y)| (x + dx, y + dy)).collect();
+        let reference = AlignmentStars { positions: with_hot_clusters(&MOVING_STARS), median_fwhm_px: 2.5 };
+        let verdict = check_translation_against_star_lists(&reference, &with_hot_clusters(&moved), dy, dx, 1024, 1024);
+        assert!(matches!(verdict, TranslationCheck::Agrees), "the moving stars confirm the shift: {verdict:?}");
+
+        let sky = ring_sky();
+        let reference = AlignmentStars { positions: with_hot_clusters(&sky), median_fwhm_px: 2.5 };
+        let turned = viewed(&sky, 0.6, (6.0, -4.0), 1000);
+        match check_translation_against_star_lists(&reference, &with_hot_clusters(&turned), -4.0, 6.0, 1000, 1000) {
+            TranslationCheck::Prefer(result) => {
+                let truth = rotated_and_shifted(0.6, (6.0, -4.0), 1000);
+                assert!(largest_probe_displacement(&result.transform, &truth, 1000, 1000) < 0.5, "{result:?}");
+            }
+            other => panic!("the rotation of the moving stars was not registered: {other:?}"),
+        }
+
+        let reference = AlignmentStars { positions: with_hot_clusters(&MOVING_STARS[..3]), median_fwhm_px: 2.5 };
+        match check_translation_against_star_lists(&reference, &with_hot_clusters(&moved[..3]), dy, dx, 1024, 1024) {
+            TranslationCheck::FitRejected(reason) => assert_eq!(
+                reason,
+                "the star match is contaminated by 14 of 17 reference sources that sit at the same pixels in both frames despite the (7.3, -4.1) px shift; sources fixed on the sensor, such as hot pixels, are being matched as stars, and without them too few sources remain for a star match"
+            ),
+            other => panic!("the fixed pattern won: {other:?}"),
+        }
+    }
+
+    fn scattered_sky(count: usize, size: usize, mut state: u64) -> Vec<(f64, f64)> {
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let span = size as f64 - 120.0;
+        (0..count).map(|_| (60.0 + unit() * span, 60.0 + unit() * span)).collect()
+    }
+
+    #[test]
+    fn a_rotated_frame_with_a_small_dither_is_registered_through_the_star_transform() {
+        let sky = scattered_sky(60, 2048, 0x51A7_7E5B_D17E_0001);
+        let reference = AlignmentStars { positions: sky.clone(), median_fwhm_px: 2.5 };
+        for (deg, shift) in [(0.2, (4.0, 2.0)), (0.3, (4.0, 0.0)), (0.25, (-3.0, 4.0))] {
+            let target = viewed(&sky, deg, shift, 2048);
+            let truth = rotated_and_shifted(deg, shift, 2048);
+            match check_translation_against_star_lists(&reference, &target, shift.1, shift.0, 2048, 2048) {
+                TranslationCheck::Prefer(result) => assert!(
+                    largest_probe_displacement(&result.transform, &truth, 2048, 2048) < 0.5,
+                    "{deg} deg with a {shift:?} px dither: {result:?}"
+                ),
+                other => panic!("{deg} deg with a {shift:?} px dither was not registered through the stars: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_small_dither_with_centroid_noise_is_not_taken_for_fixed_sources() {
+        let sky = scattered_sky(60, 2048, 0x3D17_4E12_0C0F_FEE1);
+        let (dx, dy) = (2.9, 1.6);
+        let mut state = 0xC3A7_0B1D_5E5E_D001u64;
+        let mut jitter = move || {
+            let mut sum = 0.0;
+            for _ in 0..3 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                sum += (state >> 11) as f64 / (1u64 << 53) as f64;
+            }
+            (sum - 1.5) * 0.6
+        };
+        let positions: Vec<(f64, f64)> = sky.iter().map(|&(x, y)| (x + jitter(), y + jitter())).collect();
+        let reference = AlignmentStars { positions, median_fwhm_px: 2.5 };
+        let target: Vec<(f64, f64)> = sky.iter().map(|&(x, y)| (x + dx + jitter(), y + dy + jitter())).collect();
+        let verdict = check_translation_against_star_lists(&reference, &target, dy, dx, 2048, 2048);
+        assert!(matches!(verdict, TranslationCheck::Agrees), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_weak_wide_rotation_fit_leaves_the_frame_out_instead_of_keeping_the_shift() {
+        let reference = AlignmentStars { positions: SPARSE_SKY.to_vec(), median_fwhm_px: 2.5 };
+        let target = viewed(&SPARSE_SKY, 180.0, (6.0, -4.0), 1000);
+        match check_translation_against_star_lists(&reference, &target, -4.0, 6.0, 1000, 1000) {
+            TranslationCheck::Refused(result) => {
+                assert_eq!(result.method, AffineAlignMethod::Identity, "{result:?}");
+                let reason = result.rejection.as_deref().unwrap_or_default();
+                assert!(reason.starts_with("rotation ") && reason.contains("needs at least 8 inliers and RMS <= 1.0 px, got 5 of 5 matches"), "{reason}");
+            }
+            other => panic!("a frame turned by 180 deg was not left out: {other:?}"),
+        }
+    }
 
     #[test]
     fn a_four_inlier_mirrored_fit_does_not_leave_an_unmirrored_sparse_frame_out() {

@@ -677,16 +677,32 @@ pub fn run_batch_pipeline_cancellable(
             let (rows, cols) = calibrated[0].dim();
             let total = calibrated.len();
             let reference = calibrated[0].clone();
-            let rest: Vec<Result<Array2<f32>, String>> = calibrated[1..]
-                .par_iter()
-                .map(|target| (!cancelled()).then(|| align_to_reference(&reference, target, rows, cols)))
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(cancelled_error)?;
+            let rest: Vec<Result<(Array2<f32>, Option<String>), String>> = {
+                let align_reference = crate::core::alignment::pair::AlignReference::new(&reference);
+                calibrated[1..]
+                    .par_iter()
+                    .map(|target| (!cancelled()).then(|| align_to_reference(&align_reference, target, rows, cols)))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(cancelled_error)?
+            };
             let mut frames = Vec::with_capacity(total);
             frames.push(reference);
             for (index, outcome) in (1..).zip(rest) {
                 match outcome {
-                    Ok(aligned) => frames.push(aligned),
+                    Ok((aligned, refused_star_match)) => {
+                        if let Some(refused) = refused_star_match {
+                            let message = format!(
+                                "Channel '{}': frame {} of {} was stacked on a {}",
+                                channel.label,
+                                index + 1,
+                                total,
+                                refused
+                            );
+                            log::warn!("{}", message);
+                            warnings.push(message);
+                        }
+                        frames.push(aligned)
+                    }
                     Err(reason) => {
                         let message = format!(
                             "Channel '{}': frame {} of {} was left out of the stack: it could not be aligned to frame 1 ({})",
@@ -765,58 +781,34 @@ pub fn run_batch_pipeline_cancellable(
 }
 
 fn align_to_reference(
-    reference: &Array2<f32>,
+    reference: &crate::core::alignment::pair::AlignReference,
     target: &Array2<f32>,
     rows: usize,
     cols: usize,
-) -> Result<Array2<f32>, String> {
-    let pc = crate::core::alignment::pair::align_pair(
-        reference,
-        target,
-        crate::types::compose::AlignMethod::PhaseCorrelation,
-        rows,
-        cols,
-    );
-    match pc {
-        Ok(res) if res.method_used == "phase_correlation" => {
-            use crate::core::alignment::affine::{self, TranslationCheck};
-            match affine::check_translation_against_stars(reference, target, res.offset.0, res.offset.1) {
-                TranslationCheck::Prefer(result) => Ok(affine::warp_image(target, &result.transform, rows, cols)),
-                TranslationCheck::Refused(result) => Err(match result.rejection {
-                    Some(reason) => format!("{}, confidence {:.2}: {}", result.method, result.confidence, reason),
-                    None => format!("{}, confidence {:.2}", result.method, result.confidence),
-                }),
-                TranslationCheck::FitRejected(reason) => {
-                    log::warn!("Pipeline kept a phase-correlation shift after its star match was refused: {reason}");
-                    Ok(res.aligned)
-                }
-                TranslationCheck::Inconclusive | TranslationCheck::Agrees => {
-                    if res.offset.0.abs() < 0.05 && res.offset.1.abs() < 0.05 {
-                        Ok(target.clone())
-                    } else {
-                        Ok(res.aligned)
-                    }
-                }
-            }
+) -> Result<(Array2<f32>, Option<String>), String> {
+    use crate::core::alignment::affine::warp_image;
+    use crate::core::alignment::pair::{register_shift_or_stars, shift_image_subpixel, Registration};
+    match register_shift_or_stars(reference, target, rows, cols) {
+        Registration::Shift { dy, dx, confidence, rejection } => {
+            let aligned = if dy.abs() < 0.05 && dx.abs() < 0.05 { target.clone() } else { shift_image_subpixel(target, dy, dx) };
+            Ok((aligned, refused_star_match("phase_correlation", confidence, rejection)))
         }
-        _ => match crate::core::alignment::pair::align_pair(
-            reference,
-            target,
-            crate::types::compose::AlignMethod::Affine,
-            rows,
-            cols,
-        ) {
-            Ok(res) if res.registered => Ok(res.aligned),
-            Ok(res) => Err(unregistered_reason(&res)),
-            Err(e) => Err(format!("{:#}", e)),
-        },
+        Registration::Warp(result) => Ok((
+            warp_image(target, &result.transform, rows, cols),
+            refused_star_match(&result.method.to_string(), result.confidence, result.rejection),
+        )),
+        Registration::Failed(result) => Err(unregistered_reason(&result)),
     }
 }
 
-fn unregistered_reason(result: &crate::core::alignment::pair::AlignPairResult) -> String {
+fn refused_star_match(method: &str, confidence: f64, rejection: Option<String>) -> Option<String> {
+    rejection.map(|reason| format!("{method} shift (confidence {confidence:.2}) after its star match was refused: {reason}"))
+}
+
+fn unregistered_reason(result: &crate::core::alignment::affine::AffineAlignResult) -> String {
     match result.rejection.as_deref() {
-        Some(reason) => format!("{}, confidence {:.2}: {}", result.method_used, result.confidence, reason),
-        None => format!("{}, confidence {:.2}", result.method_used, result.confidence),
+        Some(reason) => format!("{}, confidence {:.2}: {}", result.method, result.confidence, reason),
+        None => format!("{}, confidence {:.2}", result.method, result.confidence),
     }
 }
 
@@ -1691,17 +1683,86 @@ mod tests {
     }
 
     #[test]
+    fn the_pipeline_leaves_out_a_frame_whose_wide_rotation_fit_is_too_weak_to_trust() {
+        use crate::core::alignment::triangles::{a1_frame, a1_jittered_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let channel = light_channel(vec![
+            a1_reference(A1_SIZE, A1_STARS),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(0.0)),
+            a1_jittered_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0), 1.2),
+        ]);
+        let res = run_batch_pipeline(vec![channel], &CalibrationMasters::default(), &aligned_mean_stack()).unwrap();
+        let stats = &res.stats.channels[0];
+        assert_eq!(stats.excluded_frames, vec![2], "{:?}", stats.warnings);
+        assert_eq!(stats.lights_after_rejection.len(), 2);
+        assert_eq!(stats.warnings.len(), 1, "{:?}", stats.warnings);
+        assert!(
+            stats.warnings[0].starts_with(
+                "Channel 'L': frame 3 of 3 was left out of the stack: it could not be aligned to frame 1 (identity, confidence 0.00: rotation "
+            ),
+            "{}",
+            stats.warnings[0]
+        );
+        assert!(stats.warnings[0].contains("needs at least"), "{}", stats.warnings[0]);
+    }
+
+    #[test]
+    fn the_pipeline_names_a_frame_that_kept_its_shift_after_the_star_match_was_refused() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView};
+        let channel = light_channel(vec![
+            a1_reference(1000, 6),
+            a1_frame(1000, 6, FrameView::Dithered { deg: 0.6, shift: (6.0, -4.0) }),
+        ]);
+        let res = run_batch_pipeline(vec![channel], &CalibrationMasters::default(), &aligned_mean_stack()).unwrap();
+        let stats = &res.stats.channels[0];
+        assert!(stats.excluded_frames.is_empty(), "{:?}", stats.warnings);
+        assert_eq!(stats.lights_after_rejection.len(), 2);
+        assert_eq!(stats.warnings.len(), 1, "{:?}", stats.warnings);
+        assert!(
+            stats.warnings[0].starts_with("Channel 'L': frame 2 of 2 was stacked on a phase_correlation shift (confidence "),
+            "{}",
+            stats.warnings[0]
+        );
+        assert!(
+            stats.warnings[0].contains(") after its star match was refused: the star match disagrees with the (")
+                && stats.warnings[0].contains(") px shift but is not decisive: 6 of 6 inliers at RMS "),
+            "{}",
+            stats.warnings[0]
+        );
+    }
+
+    #[test]
+    fn the_pipeline_registers_a_rotated_frame_with_a_small_dither_through_the_star_transform() {
+        use crate::core::alignment::triangles::{a1_brightest_outer_star, a1_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let reference = a1_reference(A1_SIZE, A1_STARS);
+        let corner_star = a1_brightest_outer_star(A1_SIZE, A1_STARS);
+        let channel = light_channel(vec![
+            reference.clone(),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Dithered { deg: 0.3, shift: (4.0, 0.0) }),
+        ]);
+        let res = run_batch_pipeline(vec![channel], &CalibrationMasters::default(), &aligned_mean_stack()).unwrap();
+        let stats = &res.stats.channels[0];
+        assert!(stats.excluded_frames.is_empty(), "{:?}", stats.warnings);
+        assert!(stats.warnings.is_empty(), "{:?}", stats.warnings);
+        let master = &res.master_channels[0].1;
+        assert!(
+            master[corner_star] >= reference[corner_star] * 0.75,
+            "the outer star at {corner_star:?} was diluted: {} vs {}",
+            master[corner_star],
+            reference[corner_star]
+        );
+    }
+
+    #[test]
     fn unregistered_reason_carries_the_star_match_rejection() {
-        let unregistered = |rejection: Option<&str>| crate::core::alignment::pair::AlignPairResult {
-            aligned: Array2::zeros((2, 2)),
-            offset: (0.0, 0.0),
-            center_offset: (0.0, 0.0),
-            registered: false,
-            confidence: 0.0,
-            method_used: "identity".into(),
+        use crate::core::alignment::affine::{AffineAlignMethod, AffineAlignResult, AffineTransform};
+        let unregistered = |rejection: Option<&str>| AffineAlignResult {
+            transform: AffineTransform::identity(),
             matched_stars: 60,
             inliers: 41,
             residual_px: 0.01,
+            rms_px: 0.01,
+            method: AffineAlignMethod::Identity,
+            confidence: 0.0,
             rejection: rejection.map(str::to_string),
         };
         assert_eq!(unregistered_reason(&unregistered(None)), "identity, confidence 0.00");

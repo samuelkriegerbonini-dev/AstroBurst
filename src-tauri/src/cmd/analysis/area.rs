@@ -1,12 +1,11 @@
-use std::fs::File;
-use std::path::Path;
+use ndarray::Array2;
 
 use crate::cmd::common::{load_cached, source_path};
-use crate::core::analysis::photometry::area_map_mean;
+use crate::core::analysis::photometry::{area_map_mean, MaskedImage};
 use crate::core::metadata::photcal::{is_relative_pixel_area, FluxConvention, PhotCal};
 use crate::infra::cache::ImageEntry;
-use crate::infra::fits::gzip::resolve_gzip;
-use crate::infra::fits::reader::{list_extensions, HduInfo};
+use crate::infra::fits::dispatcher::list_source_extensions;
+use crate::infra::fits::reader::HduInfo;
 use crate::types::image_ref::ImageRef;
 
 pub(crate) const AREA_EXTNAME: &str = "AREA";
@@ -35,10 +34,7 @@ fn area_lookup(path: &str, entry: &ImageEntry) -> AreaLookup {
     if !extname_is(info.extname.as_deref(), SCI_EXTNAME) {
         return AreaLookup::Absent;
     }
-    let Ok((readable, _decompressed)) = resolve_gzip(Path::new(&source_path(path))) else {
-        return AreaLookup::Absent;
-    };
-    let Ok(hdus) = File::open(readable).map_err(anyhow::Error::from).and_then(|file| list_extensions(&file)) else {
+    let Ok(hdus) = list_source_extensions(&source_path(path)) else {
         return AreaLookup::Absent;
     };
     let candidates: Vec<HduInfo> = hdus
@@ -55,8 +51,21 @@ fn area_lookup(path: &str, entry: &ImageEntry) -> AreaLookup {
     }
 }
 
-fn load_area(path: &str, hdu: &HduInfo) -> anyhow::Result<ImageEntry> {
+fn located_area(path: &str, entry: &ImageEntry) -> Result<Option<HduInfo>, String> {
+    match area_lookup(path, entry) {
+        AreaLookup::Found(hdu) if same_size(&hdu, entry) => Ok(Some(hdu)),
+        AreaLookup::Found(hdu) => {
+            let (rows, cols) = entry.arr().dim();
+            Err(format!("its size {} x {} differs from the image {cols} x {rows}", hdu.naxis1, hdu.naxis2))
+        }
+        AreaLookup::OtherExtver { area, sci } => Err(format!("EXTVER {area} differs from SCI EXTVER {sci}")),
+        AreaLookup::Absent => Ok(None),
+    }
+}
+
+fn load_area(path: &str, hdu: &HduInfo) -> Result<ImageEntry, String> {
     load_cached(&ImageRef::hdu(&source_path(path), hdu.index).cache_key())
+        .map_err(|e| format!("HDU {} failed to load: {e:#}", hdu.index))
 }
 
 fn same_size(hdu: &HduInfo, entry: &ImageEntry) -> bool {
@@ -64,16 +73,13 @@ fn same_size(hdu: &HduInfo, entry: &ImageEntry) -> bool {
     hdu.naxis1 == cols as i64 && hdu.naxis2 == rows as i64
 }
 
-pub(crate) fn area_companion(path: &str, entry: &ImageEntry) -> Option<ImageEntry> {
-    match area_lookup(path, entry) {
-        AreaLookup::Found(hdu) if same_size(&hdu, entry) => load_area(path, &hdu).ok(),
-        _ => None,
-    }
+pub(crate) fn area_companion(path: &str, entry: &ImageEntry) -> Result<Option<ImageEntry>, String> {
+    located_area(path, entry)?.map(|hdu| load_area(path, &hdu)).transpose()
 }
 
 fn calibration_refusal(photcal: Option<&PhotCal>, entry: &ImageEntry) -> Option<String> {
     let Some(cal) = photcal else {
-        return Some("AREA extension ignored: the header has no photometric calibration".into());
+        return Some("the header has no photometric calibration".into());
     };
     if cal.pixar_from_header() {
         return None;
@@ -84,53 +90,63 @@ fn calibration_refusal(photcal: Option<&PhotCal>, entry: &ImageEntry) -> Option<
         .is_some_and(|v| v.is_finite() && v > 0.0);
     Some(match &cal.convention {
         FluxConvention::JwstMjySr { .. } if has_pixar_card => {
-            "AREA extension ignored: PIXAR_SR was replaced by the WCS pixel area (resampled image)".into()
+            "PIXAR_SR was replaced by the WCS pixel area (resampled image)".into()
         }
-        FluxConvention::JwstMjySr { .. } => {
-            "AREA extension ignored: PIXAR_SR is missing, so the pixel area comes from the WCS".into()
-        }
-        _ => format!("AREA extension ignored: {} is not JWST MJy/sr", cal.label()),
+        FluxConvention::JwstMjySr { .. } => "PIXAR_SR is missing, so the pixel area comes from the WCS".into(),
+        _ => format!("{} is not JWST MJy/sr", cal.label()),
     })
 }
 
-pub(crate) fn area_map(
-    path: &str,
-    entry: &ImageEntry,
-    photcal: Option<&mut PhotCal>,
-    warnings: &mut Vec<String>,
-) -> Option<ImageEntry> {
-    let hdu = match area_lookup(path, entry) {
-        AreaLookup::Found(hdu) => hdu,
-        AreaLookup::OtherExtver { area, sci } => {
-            warnings.push(format!("AREA extension ignored: EXTVER {area} differs from SCI EXTVER {sci}"));
+fn ignored(reason: String) -> String {
+    format!("AREA extension ignored: {reason}")
+}
+
+pub(crate) struct AreaWeights {
+    map: Option<ImageEntry>,
+}
+
+impl AreaWeights {
+    pub(crate) fn resolve(path: &str, entry: &ImageEntry, photcal: Option<&mut PhotCal>, warnings: &mut Vec<String>) -> Self {
+        Self { map: area_map(path, entry, photcal, warnings) }
+    }
+
+    pub(crate) fn masked_image<'a>(
+        &'a self,
+        entry: &'a ImageEntry,
+        excluded: Option<&'a Array2<u8>>,
+    ) -> Result<MaskedImage<'a>, String> {
+        MaskedImage::new(entry.arr(), excluded).map(|source| source.with_area(self.map.as_ref().map(|a| a.arr())))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn map(&self) -> Option<&Array2<f32>> {
+        self.map.as_ref().map(|a| a.arr())
+    }
+}
+
+fn area_map(path: &str, entry: &ImageEntry, photcal: Option<&mut PhotCal>, warnings: &mut Vec<String>) -> Option<ImageEntry> {
+    let hdu = match located_area(path, entry) {
+        Ok(Some(hdu)) => hdu,
+        Ok(None) => return None,
+        Err(reason) => {
+            warnings.push(ignored(reason));
             return None;
         }
-        AreaLookup::Absent => return None,
     };
-    if !same_size(&hdu, entry) {
-        let (rows, cols) = entry.arr().dim();
-        warnings.push(format!(
-            "AREA extension ignored: its size {} x {} differs from the image {cols} x {rows}",
-            hdu.naxis1, hdu.naxis2
-        ));
-        return None;
-    }
     if let Some(reason) = calibration_refusal(photcal.as_deref(), entry) {
-        warnings.push(reason);
+        warnings.push(ignored(reason));
         return None;
     }
     let area = match load_area(path, &hdu) {
         Ok(entry) => entry,
-        Err(e) => {
-            warnings.push(format!("AREA extension ignored: HDU {} failed to load: {e:#}", hdu.index));
+        Err(reason) => {
+            warnings.push(ignored(reason));
             return None;
         }
     };
     let mean = area_map_mean(area.arr());
     if !is_relative_pixel_area(mean) {
-        warnings.push(format!(
-            "AREA extension ignored: map mean {mean:.2e} is not a relative pixel area (expected about 1)"
-        ));
+        warnings.push(ignored(format!("map mean {mean:.2e} is not a relative pixel area (expected about 1)")));
         return None;
     }
     if let Some(cal) = photcal {

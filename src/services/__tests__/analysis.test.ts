@@ -134,6 +134,7 @@ describe("timeSeriesPhotometry", () => {
     n_frames: 2,
     n_skipped: 0,
     warnings: [],
+    area_mixed: false,
     geometry_target: null,
     geometry_notes: [],
     elapsed_ms: 4,

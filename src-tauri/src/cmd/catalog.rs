@@ -4,11 +4,14 @@ use ndarray::Array2;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::cmd::analysis::area::AreaWeights;
 use crate::cmd::analysis::{photometry_planes, HEADER_PROCESSING_PROVENANCE};
 use crate::cmd::common::{blocking_cmd, load_cached_full, HEADER_DISPLAY_REFERRED};
 use crate::cmd::pixelmath::DEFAULT_PIXELMATH_SUFFIX;
 use crate::cmd::processing::{ABPROC_HDRMT, ABPROC_LHE};
-use crate::core::analysis::photometry::{measure_star_full, saturation_level, PhotometryConfig, DQ_SATURATION_SOURCE};
+use crate::core::analysis::photometry::{
+    measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, DQ_SATURATION_SOURCE,
+};
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::catalog::{
     cross_match, fit_zero_point, observation_epoch_year, propagate_epoch, query_gaia_cached, CatalogRow,
@@ -261,6 +264,7 @@ pub(crate) fn cone_search_for_path(
     let geometry = field_geometry(&wcs, cols, image_rows);
     let query = cone_query_for_field(&geometry, radius_arcmin, mag_limit, max_rows);
     let mut warnings: Vec<String> = Vec::new();
+    warnings.extend(wcs.pv_warning().map(str::to_string));
     let hit = query_gaia_cached(&query).map_err(|e| anyhow::anyhow!(e))?;
     if hit.rows.len() >= query.max_rows {
         warnings.push(format!(
@@ -301,7 +305,7 @@ fn band_magnitude(row: &CatalogRow, band: &str) -> Option<f64> {
 }
 
 fn measure_sources(
-    image: &Array2<f32>,
+    source: &MaskedImage,
     err: Option<&Array2<f32>>,
     saturated: Option<&Array2<u8>>,
     stars: &[DetectedStar],
@@ -311,7 +315,7 @@ fn measure_sources(
 ) -> Vec<MeasuredSource> {
     let mut sources: Vec<MeasuredSource> = Vec::with_capacity(stars.len());
     for star in stars {
-        let Ok(phot) = measure_star_full(image, err, None, saturated, star.x, star.y, config) else {
+        let Ok(phot) = measure_star_prepared(source, err, saturated, star.x, star.y, config) else {
             continue;
         };
         if !phot.net_flux.is_finite() || phot.net_flux <= 0.0 {
@@ -401,8 +405,11 @@ pub(crate) fn crossmatch_for_path(
     let dims = entry.arr().dim();
     let (image_rows, cols) = dims;
     let mut warnings: Vec<String> = Vec::new();
+    warnings.extend(wcs.pv_warning().map(str::to_string));
     let planes = photometry_planes(path, dims);
-    let photcal = trusted_photcal(header, &wcs, &mut warnings);
+    let mut photcal = trusted_photcal(header, &wcs, &mut warnings);
+    let area = AreaWeights::resolve(path, &entry, photcal.as_mut(), &mut warnings);
+    let source = area.masked_image(&entry, None).map_err(anyhow::Error::msg)?;
 
     let detection_sigma = sigma.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(DEFAULT_DETECTION_SIGMA);
     let mut stars = detect_stars(entry.arr(), detection_sigma).stars;
@@ -417,7 +424,7 @@ pub(crate) fn crossmatch_for_path(
         ..PhotometryConfig::default()
     };
     let sources = measure_sources(
-        entry.arr(),
+        &source,
         planes.err.as_ref().map(|e| e.arr()),
         planes.saturated.as_ref(),
         &stars,
@@ -1074,5 +1081,114 @@ mod tests {
             let mag_inst = m["star"]["mag_inst"].as_f64().unwrap();
             assert!((mag_ab - (mag_inst + 25.0)).abs() < 1e-6, "{m:?}");
         }
+    }
+
+    #[test]
+    fn crossmatch_measures_a_jwst_cal_through_its_area_map_like_the_photometry_panel() {
+        use crate::cmd::analysis::area::test_fixtures::{
+            area_hdu, cal_sci_cards, jwst_cal_mef, uniform_area, CalPlanes, AREA_BLOCK_VALUE, CAL_APERTURE_RADIUS, CAL_SIZE,
+        };
+        use crate::cmd::analysis::{photometry_for_path, RES_PHOTCAL};
+        use crate::types::constants::{RES_LABEL, RES_PHOTOMETRY};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cards = cal_sci_cards();
+        cards.extend(cal_tan_cards());
+        let fixture = jwst_cal_mef(
+            &dir.path().join("cal_area.fits"),
+            &[],
+            cards,
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(AREA_BLOCK_VALUE), CAL_SIZE, Some(1))],
+        );
+        let mut header = HduHeader::empty();
+        header.set("NAXIS1", CAL_SIZE.to_string());
+        header.set("NAXIS2", CAL_SIZE.to_string());
+        for (key, value) in cal_tan_cards() {
+            header.set(key, value);
+        }
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        let star = wcs.pixel_to_world(32.0, 32.0);
+        let geometry = field_geometry(&wcs, CAL_SIZE, CAL_SIZE);
+        let row = CatalogRow {
+            id: "centre".into(),
+            ra: star.ra,
+            dec: star.dec,
+            ra_epoch: star.ra,
+            dec_epoch: star.dec,
+            pm_ra_masyr: None,
+            pm_dec_masyr: None,
+            g: Some(18.0),
+            bp: None,
+            rp: None,
+            bp_rp: Some(0.8),
+            parallax_mas: None,
+            teff_k: None,
+        };
+        prime_cache(&cone_query_for_field(&geometry, None, None, None), vec![row]);
+
+        let out = crossmatch_for_path(&fixture.key, Some(5.0), Some(10), Some(2.0), None, Some(false), Some(CAL_APERTURE_RADIUS)).unwrap();
+        let panel = photometry_for_path(&fixture.key, 32.0, 32.0, Some(CAL_APERTURE_RADIUS), None, false, false, None).unwrap();
+        assert_eq!(panel[RES_PHOTOMETRY]["area_applied"], true, "{}", panel[RES_PHOTCAL]);
+        let panel_label = panel[RES_PHOTCAL][RES_LABEL].as_str().unwrap();
+        assert!(panel_label.contains("AREA pixel-area map applied"), "{panel_label}");
+
+        let matches = out["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1, "{matches:?}");
+        let star = &matches[0]["star"];
+        let (catalog_mag, panel_mag) = (star["mag_ab"].as_f64().unwrap(), panel[RES_PHOTOMETRY]["mag_ab"].as_f64().unwrap());
+        assert!(
+            (catalog_mag - panel_mag).abs() < 1e-9,
+            "the catalogue cross-match and the Photometry panel measure one star on one file: mag_ab {catalog_mag} vs {panel_mag} (gap {:+.4} mag, 2.5 log10 of the aperture mean AREA is {:.4})",
+            catalog_mag - panel_mag,
+            2.5 * f64::from(AREA_BLOCK_VALUE).log10()
+        );
+        let (catalog_flux, panel_flux) = (star["flux"].as_f64().unwrap(), panel[RES_PHOTOMETRY]["net_flux"].as_f64().unwrap());
+        assert!((catalog_flux - panel_flux).abs() <= 1e-9 * panel_flux.abs(), "flux {catalog_flux} vs {panel_flux}");
+        let warnings = warning_texts(&out);
+        assert!(
+            warnings.iter().any(|w| w == &format!("image is already flux-calibrated ({panel_label}); the Gaia zero point is informational")),
+            "{warnings:?}"
+        );
+    }
+
+    fn cal_tan_cards() -> Vec<(&'static str, String)> {
+        let deg = 0.0312 / 3600.0;
+        vec![
+            ("CTYPE1", "'RA---TAN'".into()),
+            ("CTYPE2", "'DEC--TAN'".into()),
+            ("CRPIX1", "32.5".into()),
+            ("CRPIX2", "32.5".into()),
+            ("CRVAL1", "150.0".into()),
+            ("CRVAL2", "2.0".into()),
+            ("CD1_1", format!("{:.12E}", -deg)),
+            ("CD1_2", "0.0".into()),
+            ("CD2_1", "0.0".into()),
+            ("CD2_2", format!("{:.12E}", deg)),
+        ]
+    }
+
+    #[test]
+    fn catalogue_tools_on_a_tan_pv_header_warn_that_the_pv_distortion_is_not_applied() {
+        use crate::infra::wcs_source::test_fixtures::PV_DISTORTION_CARDS;
+        const PV_WARNING: &str = "PV distortion not applied: PV1_0, PV1_1, PV1_2, PV1_4, PV2_0, PV2_2, PV2_10";
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut extra: Vec<(&str, &str)> = vec![("DATE-OBS", "2016-01-01T00:00:00")];
+        extra.extend(PV_DISTORTION_CARDS.iter().copied());
+        let distorted = write_star_field(&dir, "tanpv.fits", &extra);
+        let linear = write_star_field(&dir, "tan.fits", &[("DATE-OBS", "2016-01-01T00:00:00")]);
+        let wcs = WcsTransform::from_header(&wcs_header(&[])).unwrap();
+        let geometry = field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE);
+        prime_cache(&cone_query_for_field(&geometry, None, None, None), catalog_rows_for_field(&wcs));
+
+        let cone = cone_search_for_path(&distorted, None, None, None).unwrap();
+        assert!(warning_texts(&cone).contains(&PV_WARNING.to_string()), "{:?}", warning_texts(&cone));
+        let matched = crossmatch_for_path(&distorted, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        assert!(warning_texts(&matched).contains(&PV_WARNING.to_string()), "{:?}", warning_texts(&matched));
+        assert_eq!(matched["matches"].as_array().unwrap().len(), 5, "the linear TAN still matches the field");
+
+        let plain = crossmatch_for_path(&linear, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        assert!(!warning_texts(&plain).iter().any(|w| w.starts_with("PV distortion")), "{:?}", warning_texts(&plain));
     }
 }

@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { Activity, Plus, Loader2 } from "lucide-react";
 import type { RadialProfile, LineCut, RegionShape } from "../../shared/types";
 import type { SbProfile } from "../../shared/types/regions";
@@ -161,7 +162,7 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
   const [binWidthText, setBinWidthText] = useState(DEFAULT_BIN_WIDTH_TEXT);
   const [xUnit, setXUnit] = useState<SbXUnit>("px");
   const [yMode, setYMode] = useState<SbYMode>("mean");
-  const [copied, setCopied] = useState(false);
+  const [copied, flagCopied] = useTimedFlag(COPIED_FEEDBACK_MS);
   const seqRef = useRef(0);
 
   const selected = doc.regions.find((r) => r.id === doc.selectedId);
@@ -248,9 +249,8 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
   const handleCopyCsv = useCallback(() => {
     if (!sb) return;
     navigator.clipboard?.writeText(sbProfileCsv(sb));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
-  }, [sb]);
+    flagCopied();
+  }, [sb, flagCopied]);
 
   const logReady = profileLogReady(result, requestKey, excludeDq);
   const handleLog = useCallback(() => {

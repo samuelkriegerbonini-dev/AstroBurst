@@ -2,7 +2,7 @@ use ndarray::Array2;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use super::{CatalogProvider, Detection, FieldSize, RankingKey, SkyPair};
+use super::{destination, CatalogProvider, Detection, FieldSize, RankingKey, SkyPair};
 use crate::core::analysis::star_detection::DetectedStar;
 use crate::core::astrometry::catalog::CatalogRow;
 use crate::core::astrometry::solve_hints::{Pointing, ScaleRange, SolveHints};
@@ -183,10 +183,6 @@ fn power_law_mag(rng: &mut StdRng, (bright, faint): (f64, f64)) -> f64 {
     let floor = 10f64.powf(-MAG_SLOPE * (faint - bright));
     let u = floor + (1.0 - floor) * rng.gen::<f64>();
     faint + u.log10() / MAG_SLOPE
-}
-
-pub(crate) fn destination(centre: (f64, f64), bearing_deg: f64, distance_deg: f64) -> (f64, f64) {
-    super::destination(centre, bearing_deg, distance_deg)
 }
 
 pub(crate) fn random_in_cap(rng: &mut StdRng, centre: (f64, f64), radius_deg: f64) -> (f64, f64) {

@@ -5,46 +5,6 @@ import { Check } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { GainModel, PhotometryMeasurement } from "../../../services/analysis";
 
-const hooks = vi.hoisted(() => {
-  type Cell = { value?: unknown; deps?: readonly unknown[]; set?: (next: unknown) => void; cleanup?: unknown };
-  const run = { active: false, cells: [] as Cell[], cursor: 0, effects: [] as (() => void)[] };
-  const sameDeps = (a: readonly unknown[] | undefined, b: readonly unknown[] | undefined) =>
-    a !== undefined && b !== undefined && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
-  const cell = (): Cell => (run.cells[run.cursor++] ??= {});
-  const remember = (compute: () => unknown, deps?: readonly unknown[]) => {
-    const c = cell();
-    if (!("value" in c) || !sameDeps(c.deps, deps)) {
-      c.value = compute();
-      c.deps = deps;
-    }
-    return c.value;
-  };
-  const impl = {
-    useState(init: unknown) {
-      const c = cell();
-      if (!("value" in c)) c.value = typeof init === "function" ? (init as () => unknown)() : init;
-      c.set ??= (next: unknown) => {
-        c.value = typeof next === "function" ? (next as (prev: unknown) => unknown)(c.value) : next;
-      };
-      return [c.value, c.set];
-    },
-    useRef: (init: unknown) => remember(() => ({ current: init }), []),
-    useMemo: remember,
-    useCallback: (fn: unknown, deps?: readonly unknown[]) => remember(() => fn, deps),
-    useId: () => `id-${run.cursor++}`,
-    useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
-    useEffect(effect: () => unknown, deps?: readonly unknown[]) {
-      const c = cell();
-      if (sameDeps(c.deps, deps)) return;
-      c.deps = deps;
-      run.effects.push(() => {
-        if (typeof c.cleanup === "function") c.cleanup();
-        c.cleanup = effect();
-      });
-    },
-  };
-  return { run, impl };
-});
 
 const gainModelMock = vi.hoisted(() => vi.fn<(path: string) => Promise<GainModel>>());
 const measureMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
@@ -52,17 +12,7 @@ const batchMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown
 const pixelClick = vi.hoisted(() => ({ current: null as { seq: number; x: number; y: number } | null }));
 const clipboardWrite = vi.hoisted(() => vi.fn<(text: string) => Promise<void>>());
 
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  const fakes = hooks.impl as unknown as Record<string, (...args: unknown[]) => unknown>;
-  const switched = Object.fromEntries(
-    Object.entries(fakes).map(([name, fake]) => [
-      name,
-      (...args: unknown[]) => (hooks.run.active ? fake : (actual[name] as (...a: unknown[]) => unknown))(...args),
-    ]),
-  );
-  return { ...actual, ...switched };
-});
+vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../../services/analysis", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/analysis")>()),
   photometryGainModel: gainModelMock,
@@ -82,8 +32,10 @@ vi.mock("../../../hooks/useMeasurementLog", () => ({ useMeasurementProvenance: (
 vi.mock("../../../hooks/useAnalysisTarget", () => ({ useMeasurementSource: () => null }));
 vi.mock("../../../hooks/useMousePixelStore", () => ({ usePixelClick: () => pixelClick.current }));
 
+import { hooks } from "../../../test/hookRuntime";
 import PhotometryPanel from "../PhotometryPanel";
 import PhotometryTablePanel from "../PhotometryTablePanel";
+import { fluxCellText } from "../../../utils/photometryTable";
 
 const GAIN_TITLE_TEXT = "Gain in e-/ADU; prefilled from the header when known";
 
@@ -431,6 +383,80 @@ describe("PhotometryPanel sky position copy", () => {
     expect(showsCopied(show())).toBe(true);
     await vi.advanceTimersByTimeAsync(600);
     expect(showsCopied(show())).toBe(false);
+  });
+});
+
+function elementsWhere(node: ReactNode, match: (props: Props) => boolean): Props[] {
+  if (Array.isArray(node)) return node.flatMap((child) => elementsWhere(child, match));
+  if (!isValidElement<Props>(node)) return [];
+  return [...(match(node.props) ? [node.props] : []), ...elementsWhere(node.props.children as ReactNode, match)];
+}
+
+function measuredStar(over: Record<string, unknown>): Record<string, unknown> {
+  return {
+    x: 10.04, y: 12.06, peak: 900, net_flux: 1234.5678, flux_err: 12, mag_inst: -7.73, snr: 102.9, fwhm: 3.214,
+    aperture_radius: 5, aperture_pixels: 78, aperture_area: 78.5, bg_mean: 10.25, bg_sigma: 2, bg_pixels: 200,
+    saturated: false, saturation_source: "none", n_masked: 0, n_saturated: 0, err_used: true,
+    aperture_correction: 1.0421, flux_total: 1286.6, plateau_radius: 9, flux_jy: null, flux_err_jy: null,
+    mag_ab: 24.5123, mag_ab_err: 0.0314, mag_ab_total: null, st_mag: null, sky_inner: 10, sky_outer: 15, ee50_radius: 2.345,
+    ...over,
+  };
+}
+
+describe("PhotometryTablePanel result table", () => {
+  const STARS = [{ x: 10, y: 12, flux: 100, fwhm: 3, snr: 50 }, { x: 40, y: 42, flux: 60, fwhm: 3, snr: 30 }];
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    batchMock.mockReset().mockResolvedValue({
+      rows: [
+        { index: 0, photometry: measuredStar({}), sky: null, error: null },
+        { index: 1, photometry: measuredStar({ net_flux: 2.5e7, mag_ab: null, mag_ab_err: null }), sky: null, error: null },
+      ],
+      photcal: null,
+      warnings: [],
+      masked: false,
+      n_measured: 2,
+      n_failed: 0,
+      elapsed_ms: 8,
+    });
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+  });
+
+  async function measuredTable(): Promise<ReactNode> {
+    const show = () => renderTree(PhotometryTablePanel.type as unknown as Panel, { filePath: FIRST, overlayKey: null, stars: STARS });
+    (findElement(show(), (props) => props.label === "Measure 2")!.onClick as () => void)();
+    await flush();
+    return show();
+  }
+
+  const cells = (tree: ReactNode, column: string) => elementsWhere(tree, (props) => props["data-column"] === column);
+
+  it("tags every body cell with its column key, one cell per measured row", async () => {
+    const tree = await measuredTable();
+    for (const column of ["label", "x", "y", "net_flux", "snr", "mag_ab", "mag_inst", "fwhm", "ee50_radius", "aperture_correction"]) {
+      expect(cells(tree, column), column).toHaveLength(2);
+    }
+  });
+
+  it("writes the flux and AB cells with the shared cell formatters", async () => {
+    const tree = await measuredTable();
+    expect(cells(tree, "net_flux").map((cell) => cell.children)).toEqual([fluxCellText(1234.5678), fluxCellText(2.5e7)]);
+    expect(cells(tree, "mag_ab").map((cell) => cell.children)).toEqual(["24.512 ± 0.031", "--"]);
+    expect(cells(tree, "aperture_correction")[0].children).toBe("1.042");
+  });
+
+  it("keeps every body cell on one line, so an AB cell such as 24.512 ± 0.031 never wraps in the docked panel", async () => {
+    const tree = await measuredTable();
+    for (const cell of cells(tree, "label")) expect(String(cell.className).split(" ")).toContain("truncate");
+    for (const cell of [...cells(tree, "mag_ab"), ...cells(tree, "net_flux"), ...cells(tree, "x")]) {
+      expect(String(cell.className).split(" ")).toContain("whitespace-nowrap");
+    }
   });
 });
 

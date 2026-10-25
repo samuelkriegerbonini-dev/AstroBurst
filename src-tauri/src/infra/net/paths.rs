@@ -32,6 +32,18 @@ pub struct DataRoot {
     pub source: DataRootSource,
 }
 
+impl DataRoot {
+    pub fn require_present(&self) -> Result<&Path, String> {
+        if self.source.chosen_by_user() && !self.path.is_dir() {
+            return Err(format!(
+                "the Data folder {} does not exist; connect its drive or choose another folder in Settings",
+                self.path.display()
+            ));
+        }
+        Ok(&self.path)
+    }
+}
+
 pub fn data_root() -> PathBuf {
     try_data_root().unwrap_or_else(|error| {
         let fallback = resolve_data_root(
@@ -253,6 +265,31 @@ mod tests {
 
     fn root_of(env: Option<OsString>, configured: Option<&str>, platform: Option<PathBuf>) -> PathBuf {
         resolve_data_root(env, None, configured, platform).path
+    }
+
+    #[test]
+    fn a_chosen_data_folder_that_is_gone_is_refused_and_a_default_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("unplugged");
+        let root = |path: &Path, source| DataRoot {
+            path: path.to_path_buf(),
+            source,
+        };
+        assert_eq!(root(dir.path(), DataRootSource::Configured).require_present(), Ok(dir.path()));
+        for source in [DataRootSource::Platform, DataRootSource::TestData] {
+            assert_eq!(root(&gone, source).require_present(), Ok(gone.as_path()), "{source:?}");
+        }
+        for source in [DataRootSource::Configured, DataRootSource::Env] {
+            assert_eq!(
+                root(&gone, source).require_present(),
+                Err(format!(
+                    "the Data folder {} does not exist; connect its drive or choose another folder in Settings",
+                    gone.display()
+                )),
+                "{source:?}"
+            );
+        }
+        assert!(!gone.exists());
     }
 
     #[test]

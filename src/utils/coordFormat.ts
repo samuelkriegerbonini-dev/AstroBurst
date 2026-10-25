@@ -1,4 +1,5 @@
 import type { SkyFrame } from "../shared/types/astrometry";
+import { isFiniteNumber } from "./values";
 
 export type CoordFormat = "sexagesimal" | "decimal";
 
@@ -88,10 +89,6 @@ export interface SolveCentre {
 const DEGREE_SIGN = "°";
 const DECIMAL_UNIT_AND_FRAME = "deg ICRS";
 const SCALE_SIGNIFICANT_DIGITS = 4;
-
-function isFiniteNumber(value: number | null | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
 
 export function solveCentreText(raDeg: number, decDeg: number): CentreText {
   return {

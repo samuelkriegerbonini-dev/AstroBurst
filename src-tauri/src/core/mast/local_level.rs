@@ -44,8 +44,12 @@ pub fn matches(level: Option<&str>, tokens: &[String]) -> bool {
     level.is_some_and(|level| level_parts(level).any(|part| tokens.contains(&part.to_ascii_lowercase())))
 }
 
+pub fn is_complete(wide: &MastSearchPage) -> bool {
+    wide.rows.len() < MAX_ROWS as usize
+}
+
 pub fn page(wide: &MastSearchPage, valid: &ValidQuery, plan: &LocalLevel) -> Option<MastSearchPage> {
-    if wide.rows.len() >= MAX_ROWS as usize {
+    if !is_complete(wide) {
         return None;
     }
     let kept: Vec<&MastRow> = wide.rows.iter().filter(|row| matches(row.level.as_deref(), &plan.tokens)).collect();
@@ -79,7 +83,6 @@ pub fn page(wide: &MastSearchPage, valid: &ValidQuery, plan: &LocalLevel) -> Opt
         unresolved_targets: wide.unresolved_targets.clone(),
         elapsed_ms: wide.elapsed_ms,
         from_cache: wide.from_cache,
-        level_filtered_locally: true,
         level_applied_locally: Some(plan.text.clone()),
         unfiltered_total: None,
     })
@@ -207,7 +210,6 @@ mod tests {
         assert_eq!(kept, ["3", "2bs, 3"]);
         assert_eq!((combined.total_reported, combined.total_reliable, combined.has_more), (Some(2), true, false));
         assert_eq!((combined.offset, combined.limit), (0, PAGE_LIMIT));
-        assert!(combined.level_filtered_locally);
         assert_eq!(combined.level_applied_locally.as_deref(), Some("productLevel = 3"));
         assert_eq!(combined.dropped_conditions, Vec::<String>::new());
         assert_eq!(combined.applied, wide.applied);

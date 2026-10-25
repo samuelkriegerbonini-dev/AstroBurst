@@ -309,7 +309,7 @@ pub fn failure(
     let here = context(mission);
     match error {
         DownloadError::Cancelled => (cancelled(), Some(Resume)),
-        DownloadError::Transport(text) => (
+        DownloadError::Transport(text) | DownloadError::RedirectRefused(text) => (
             coded(MastErrorCode::Network, transport_message(&text), here),
             Some(Resume),
         ),
@@ -438,16 +438,10 @@ pub fn storage_in(
     reserved: &[PathBuf],
     quota_gb: Option<f64>,
 ) -> Result<Storage, MastCmdError> {
-    if data.source.chosen_by_user() && !data.path.is_dir() {
-        return Err(MastCmdError::new(
-            MastErrorCode::Cache,
-            format!(
-                "the Data folder {} does not exist; connect its drive or choose another folder in Settings",
-                data.path.display()
-            ),
-        ));
-    }
-    let root = data.path.join(settings.cache_dir_name());
+    let root = data
+        .require_present()
+        .map_err(|message| MastCmdError::new(MastErrorCode::Cache, message))?
+        .join(settings.cache_dir_name());
     check_root(&root, reserved)?;
     Ok(Storage {
         root,

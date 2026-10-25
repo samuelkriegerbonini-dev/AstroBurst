@@ -94,8 +94,14 @@ fn carried_planes(path: &str, entry: &ImageEntry, op: GeometryOp) -> anyhow::Res
     if !is_science_plane(entry.plane_info()) {
         return Ok(CarriedPlanes::default());
     }
-    let area = area_companion(path, entry).map(|a| (apply_geometry(a.arr(), op), copied_cards(a.header(), &[])));
-    let area_note = area.as_ref().map(|_| "geometry: AREA transformed with SCI".to_string());
+    let (area, area_note) = match area_companion(path, entry) {
+        Ok(Some(a)) => (
+            Some((apply_geometry(a.arr(), op), copied_cards(a.header(), &[]))),
+            Some("geometry: AREA transformed with SCI".to_string()),
+        ),
+        Ok(None) => (None, None),
+        Err(reason) => (None, Some(format!("geometry: AREA not transformed ({reason})"))),
+    };
     let refs = entry.companions().cloned().unwrap_or_default();
     if refs.err.is_none() && refs.dq.is_none() {
         return Ok(CarriedPlanes { area, notes: area_note.into_iter().collect(), ..CarriedPlanes::default() });
@@ -391,6 +397,33 @@ mod tests {
         let notes = history(&cached_header(&fits).unwrap());
         assert!(notes.iter().any(|h| h.contains("geometry: ERR and DQ transformed with SCI")), "{notes:?}");
         assert!(notes.iter().any(|h| h.contains("geometry: AREA transformed with SCI")), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn an_area_map_that_cannot_be_carried_is_named_in_the_history() {
+        use crate::cmd::analysis::area::test_fixtures::{area_hdu, cal_sci_cards, jwst_cal_mef, uniform_area, CalPlanes, CAL_SIZE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().to_string();
+        let src = jwst_cal_mef(
+            &dir.path().join("cal.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(1.02), CAL_SIZE, Some(2))],
+        );
+        let value = transform_geometry_cmd(src.path.clone(), out, "flip_v".to_string()).await.unwrap();
+        let fits = value[RES_FITS_PATH].as_str().unwrap().to_string();
+        assert_eq!(
+            extnames(&fits),
+            vec![None, Some("SCI".to_string()), Some("ERR".to_string()), Some("DQ".to_string())],
+            "an AREA map of another EXTVER does not belong to this SCI"
+        );
+        let notes = history(&cached_header(&fits).unwrap());
+        assert!(
+            notes.iter().any(|h| h.contains("geometry: AREA not transformed (EXTVER 2 differs from SCI EXTVER 1)")),
+            "{notes:?}"
+        );
     }
 
     #[tokio::test]

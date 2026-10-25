@@ -169,6 +169,7 @@ pub const DEFAULT_DRIZZLE_SCALE: f64 = 2.0;
 pub const DEFAULT_DRIZZLE_PIXFRAC: f64 = 0.7;
 pub const DEFAULT_DRIZZLE_SIGMA: f32 = 3.0;
 pub const DEFAULT_DRIZZLE_SIGMA_ITERS: usize = 5;
+pub const KERNEL_SQUARE: &str = "square";
 pub const KERNEL_GAUSSIAN: &str = "gaussian";
 pub const KERNEL_LANCZOS3: &str = "lanczos3";
 pub const KERNEL_LANCZOS: &str = "lanczos";

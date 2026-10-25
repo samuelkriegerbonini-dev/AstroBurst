@@ -12,10 +12,12 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::synthetic::{
-    at_most, destination, flat_frame, gradient_frame, hot_pixel_frame, noise_frame, wcs_from_cards,
+    at_most, flat_frame, gradient_frame, hot_pixel_frame, noise_frame, wcs_from_cards,
     ARCSEC_PER_DEG,
 };
-use super::{healpix_provider, solve_local, CatalogProvider, LocalSolveParams, RankingKey};
+use super::{
+    destination, healpix_provider, solve_local, CatalogProvider, LocalSolveParams, RankingKey,
+};
 use crate::core::alignment::affine::AffineAlignMethod;
 use crate::core::alignment::triangles::{ransac_affine, TriangleMatch, TriangleParams};
 use crate::core::astrometry::catalog::{observation_epoch_year, propagate_epoch, CatalogRow};

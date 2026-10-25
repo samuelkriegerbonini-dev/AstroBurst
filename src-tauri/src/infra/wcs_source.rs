@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::core::astrometry::gwcs::{
     classify_wcs_node, find_wcs_node, parse_gwcs, wcsinfo_sip_residuals, GwcsOrigin, GwcsSource, WcsNodeClass,
 };
-use crate::core::astrometry::wcs::WcsTransform;
+use crate::core::astrometry::wcs::{WcsKind, WcsTransform};
 use crate::infra::asdf::converter::is_asdf_file;
 use crate::infra::asdf::{AsdfFile, AsdfImage};
 use crate::infra::fits::asdf_hdu::{find_asdf_hdu, read_asdf_hdu_bytes};
@@ -98,23 +98,34 @@ pub fn invalidate_gwcs_cache(path: &str) {
 }
 
 pub fn load_wcs(path: &str, header: &HduHeader) -> Result<WcsTransform> {
-    let header = header_without_tan_pv(header);
-    let header = header.as_ref();
-    match gwcs_for_path(path) {
-        Ok(Some(source)) => match WcsTransform::from_gwcs(source, header) {
+    let linear = header_without_tan_pv(header);
+    let linear = linear.as_ref();
+    let wcs = match gwcs_for_path(path) {
+        Ok(Some(source)) => match WcsTransform::from_gwcs(source, linear) {
             Ok(wcs) => Ok(wcs),
-            Err(e) => match WcsTransform::from_header(header) {
+            Err(e) => match WcsTransform::from_header(linear) {
                 Ok(wcs) => Ok(wcs.with_gwcs_refusal(format!("{e:#}"))),
                 Err(_) => Err(e),
             },
         },
-        Ok(None) => WcsTransform::from_header(header),
-        Err(refusal) => WcsTransform::from_header(header).map(|wcs| wcs.with_gwcs_refusal(refusal)),
-    }
+        Ok(None) => WcsTransform::from_header(linear),
+        Err(refusal) => WcsTransform::from_header(linear).map(|wcs| wcs.with_gwcs_refusal(refusal)),
+    }?;
+    Ok(with_tan_pv_warning(wcs, header))
 }
 
 pub fn header_wcs(header: &HduHeader) -> Result<WcsTransform> {
-    WcsTransform::from_header(&header_without_tan_pv(header))
+    WcsTransform::from_header(&header_without_tan_pv(header)).map(|wcs| with_tan_pv_warning(wcs, header))
+}
+
+fn with_tan_pv_warning(wcs: WcsTransform, header: &HduHeader) -> WcsTransform {
+    if wcs.kind() != WcsKind::Header {
+        return wcs;
+    }
+    match tan_pv_warning(header) {
+        Some(warning) => wcs.with_pv_warning(warning),
+        None => wcs,
+    }
 }
 
 struct PvCard<'a> {
@@ -1029,8 +1040,25 @@ mod tests {
             assert_eq!((wcs.kind(), wcs.gwcs_refusal()), (WcsKind::Header, None), "{label}");
             assert_eq!(wcs.orientation(PV_IMAGE_SIDE, PV_IMAGE_SIDE).projection, "TAN", "{label}");
             assert_eq!(tan_pv_warning(&header).as_deref(), Some(PV_DISTORTION_WARNING), "{label}");
+            assert_eq!(wcs.pv_warning(), Some(PV_DISTORTION_WARNING), "{label}: the transform carries the warning for every consumer");
+            assert_eq!(header_wcs(&header).unwrap().pv_warning(), Some(PV_DISTORTION_WARNING), "{label}: header_wcs too");
             assert_eq!(tan_pv_warning(&header_of(&linear)), None, "{label}: no PV cards, no warning");
+            assert_eq!(load_wcs(&linear, &header_of(&linear)).unwrap().pv_warning(), None, "{label}: no PV cards, no warning");
         }
+    }
+
+    #[test]
+    fn a_gwcs_carries_no_pv_warning_because_it_holds_the_full_distortion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cards = tan_cards();
+        cards.extend(PV_DISTORTION_CARDS.iter().map(|&(key, value)| (key, value.to_string())));
+        let path = dir.path().join("nircam_cal_pv.fits");
+        write_fits_with_asdf_cell(&path, &cards, &fixture_bytes("wcs_jwst_nircam_cal300.asdf"));
+        let path = s(&path);
+        let header = header_of(&path);
+        assert_eq!(tan_pv_warning(&header).as_deref(), Some(PV_DISTORTION_WARNING));
+        let wcs = load_wcs(&path, &header).unwrap();
+        assert_eq!((wcs.kind(), wcs.pv_warning()), (WcsKind::Gwcs, None));
     }
 
     #[test]

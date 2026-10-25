@@ -185,10 +185,10 @@ fn object_type_phrases(mission: MastMissionId, row: &ObjectTypeRow) -> &'static 
 
 fn object_type_parts(mission: MastMissionId, row: &ObjectTypeRow) -> Vec<String> {
     let phrases = object_type_phrases(mission, row).iter();
-    if mission == MastMissionId::Jwst {
-        phrases.map(|phrase| format!("*{phrase}*")).collect()
-    } else {
-        phrases.map(|phrase| (*phrase).to_owned()).collect()
+    match mission {
+        MastMissionId::Jwst => phrases.map(|phrase| format!("*{phrase}*")).collect(),
+        MastMissionId::Hst => phrases.map(|phrase| (*phrase).to_owned()).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -243,7 +243,8 @@ fn category_title(mission: MastMissionId, column: &str, row: &CategoryRow) -> St
     match mission {
         MastMissionId::Jwst => format!("{column} = {}", row.jwst),
         MastMissionId::Hst => format!("{column} has {}", or_list(row.hst)),
-        _ => format!("{column} {}", category_parts(mission, row).join(", ")),
+        MastMissionId::Iue => format!("{column} {}", category_parts(mission, row).join(", ")),
+        _ => String::new(),
     }
 }
 
@@ -253,7 +254,8 @@ fn category_info(mission: MastMissionId) -> &'static str {
             "From the proposal: the target category chosen in APT (TARGCAT). Proposers choose it, so a field can be filed under another class (Orion programme 1256 is a star cluster). Datasets with no category never match."
         }
         MastMissionId::Hst => "From the proposal: SCI_BROAD_CATEGORY. Datasets with no category never match.",
-        _ => "IUE object class (IUE_CATEGORY).",
+        MastMissionId::Iue => "IUE object class (IUE_CATEGORY).",
+        _ => "",
     }
 }
 
@@ -262,7 +264,8 @@ fn object_type_info(mission: MastMissionId) -> &'static str {
         MastMissionId::Jwst => {
             "From the proposal's target description keywords (TARGDESC). Each type groups several keywords. Datasets with no description never match."
         }
-        _ => "From the proposal's target description (SCI_TARGET_DESCRIP). Each type groups several terms.",
+        MastMissionId::Hst => "From the proposal's target description (SCI_TARGET_DESCRIP). Each type groups several terms.",
+        _ => "",
     }
 }
 
@@ -320,7 +323,8 @@ pub fn row_categories(mission: MastMissionId, raw: &FieldMap) -> Vec<ObjectCateg
         .filter(|row| match mission {
             MastMissionId::Jwst => text.is_some_and(|value| value.eq_ignore_ascii_case(row.jwst)),
             MastMissionId::Hst => row.hst.iter().any(|known| tokens.iter().any(|token| token.eq_ignore_ascii_case(known))),
-            _ => class.is_some_and(|class| row.iue.iter().any(|&(low, high)| (low..=high).contains(&class))),
+            MastMissionId::Iue => class.is_some_and(|class| row.iue.iter().any(|&(low, high)| (low..=high).contains(&class))),
+            _ => false,
         })
         .map(|row| row.id)
         .collect()

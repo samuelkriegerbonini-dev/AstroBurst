@@ -1,8 +1,10 @@
-import { Telescope, Upload, FolderOpen, Archive, Sparkles, Download, RotateCcw, X, type LucideIcon } from "lucide-react";
+import { Telescope, Upload, FolderOpen, Archive, Sparkles, X } from "lucide-react";
 import { SUPPORTED_EXTENSIONS } from "../utils/validation";
 import { formatBytes } from "./archive/logic/productView";
 import ProgressBar from "./file/ProgressBar";
 import type { SampleControls } from "../hooks/useSampleData";
+import { sampleDataHint, sampleOfferAction, samplePercent } from "../utils/sampleOffers";
+import { createFocusHandoff } from "../utils/focusHandoff";
 
 interface EmptyStateProps {
   onBrowseFiles: () => void;
@@ -12,26 +14,7 @@ interface EmptyStateProps {
 }
 
 const FORMAT_BADGES = SUPPORTED_EXTENSIONS.map((ext) => `.${ext}`);
-export const SAMPLE_DATA_HINT = "Three HST narrowband frames of M16, downloaded once and kept in the data folder";
-
-function samplePercent(sample: SampleControls): number {
-  if (sample.totalBytes <= 0) return 0;
-  return Math.min(100, Math.max(0, Math.floor((sample.receivedBytes * 100) / sample.totalBytes)));
-}
-
-function receivedLabel(sample: SampleControls): string {
-  const received = formatBytes(sample.receivedBytes);
-  return received === formatBytes(sample.totalBytes) ? `${samplePercent(sample)}%` : received;
-}
-
-function sampleButton(sample: SampleControls): { label: string; icon: LucideIcon; run: () => void } {
-  if (sample.state === "ready") return { label: "Open sample data", icon: Sparkles, run: sample.open };
-  if (sample.error) return { label: "Retry sample download", icon: RotateCcw, run: sample.retry };
-  if (sample.state === "partial" && sample.receivedBytes > 0) {
-    return { label: `Resume sample download (${receivedLabel(sample)} of ${formatBytes(sample.totalBytes)})`, icon: Download, run: sample.download };
-  }
-  return { label: `Download sample data (${formatBytes(sample.totalBytes)})`, icon: Download, run: sample.download };
-}
+const sampleFocus = createFocusHandoff();
 
 export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArchive, sample }: EmptyStateProps) {
   const handleBrowse = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -52,7 +35,8 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
     onBrowseArchive?.();
   };
 
-  const sampleAction = sample && sample.state !== "downloading" ? sampleButton(sample) : null;
+  const sampleAction = sample ? sampleOfferAction(sample) : null;
+  const sampleHint = sample ? sampleDataHint(sample) : undefined;
   const SampleIcon = sampleAction?.icon ?? Sparkles;
   const percent = sample ? samplePercent(sample) : 0;
 
@@ -132,7 +116,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                 </button>
               )}
               {sampleAction && (
-                <button type="button" onClick={handleSampleData} className="ab-btn-secondary" data-testid="empty-open-sample" title={SAMPLE_DATA_HINT}>
+                <button type="button" ref={sampleFocus.arriving} onClick={handleSampleData} className="ab-btn-secondary" data-testid="empty-open-sample" title={sampleHint}>
                   <SampleIcon size={16} />
                   {sampleAction.label}
                 </button>
@@ -153,7 +137,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                     <ProgressBar value={percent} />
                   </div>
                   <span className="text-zinc-400 text-xs font-mono tabular-nums">{percent}%</span>
-                  <button type="button" onClick={handleSampleCancel} className="ab-btn-secondary" data-testid="empty-sample-cancel" aria-label="Cancel sample download">
+                  <button type="button" ref={sampleFocus.leaving} onClick={handleSampleCancel} className="ab-btn-secondary" data-testid="empty-sample-cancel" aria-label="Cancel sample download">
                     <X size={16} />
                     Cancel
                   </button>
@@ -165,7 +149,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                 {sample.error && (
                   <p className="text-red-400" role="alert" data-testid="empty-sample-error">{sample.error}</p>
                 )}
-                <p className="text-zinc-500">{SAMPLE_DATA_HINT}</p>
+                <p className="text-zinc-500">{sampleHint}</p>
                 <p className="text-zinc-600">{sample.credit}</p>
               </div>
             )}

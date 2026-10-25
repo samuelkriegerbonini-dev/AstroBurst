@@ -10,7 +10,7 @@ use super::api::MissionEndpoint;
 use super::auth::{AuthSession, TokenStore};
 use super::cache::{
     DiskBudget, MemoryLru, IMAGE_CAP_BYTES, IMAGE_SET_ENTRIES, LIST_CAP_BYTES, LIST_TTL, PRODUCT_LIST_ENTRIES, SEARCH_CACHE_ENTRIES,
-    SEARCH_CACHE_TTL,
+    SEARCH_CACHE_ROWS, SEARCH_CACHE_TTL,
 };
 use super::client::{MastClient, RedirectRules};
 use super::error::MastResult;
@@ -36,6 +36,21 @@ pub type StoredProducts = (MastProductList, SystemTime);
 type FlightSlot = Arc<tokio::sync::Mutex<Option<MastCmdError>>>;
 type Flights = Mutex<HashMap<String, FlightSlot>>;
 
+#[derive(Debug, Clone)]
+pub enum CachedSearch {
+    Page(Arc<MastSearchPage>),
+    FullWideAnswer,
+}
+
+impl CachedSearch {
+    fn rows(&self) -> usize {
+        match self {
+            CachedSearch::Page(page) => page.rows.len().max(1),
+            CachedSearch::FullWideAnswer => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeResult {
     pub availability: MastAvailability,
@@ -51,7 +66,7 @@ pub struct MastHub {
     cache_root: PathBuf,
     registry: Registry,
     limiter: RateLimiter,
-    searches: Mutex<MemoryLru<String, MastSearchPage>>,
+    searches: Mutex<MemoryLru<String, CachedSearch>>,
     names: NameCache,
     probes: Mutex<HashMap<MastMissionId, ProbeResult>>,
     image_sets: Mutex<MemoryLru<DatasetKey, MastImageSet>>,
@@ -135,7 +150,7 @@ impl MastHub {
             cache_root,
             registry: Registry::new(),
             limiter: RateLimiter::new(),
-            searches: Mutex::new(MemoryLru::new(SEARCH_CACHE_ENTRIES, SEARCH_CACHE_TTL)),
+            searches: Mutex::new(MemoryLru::weighed(SEARCH_CACHE_ENTRIES, SEARCH_CACHE_TTL, SEARCH_CACHE_ROWS, CachedSearch::rows)),
             names: NameCache::default(),
             probes: Mutex::new(HashMap::new()),
             image_sets: Mutex::new(MemoryLru::new(IMAGE_SET_ENTRIES, LIST_TTL)),
@@ -290,7 +305,7 @@ impl MastHub {
         &self.names
     }
 
-    pub fn searches(&self) -> MutexGuard<'_, MemoryLru<String, MastSearchPage>> {
+    pub fn searches(&self) -> MutexGuard<'_, MemoryLru<String, CachedSearch>> {
         guard(&self.searches)
     }
 

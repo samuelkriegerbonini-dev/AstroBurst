@@ -261,7 +261,6 @@ function offer(id: string, over: Record<string, unknown> = {}): Record<string, u
     state: "absent",
     received_bytes: 0,
     folder: `C:/Users/me/AstroBurst/samples/${id}`,
-    newer_at_mast: false,
     file: null,
     error: null,
     ...over,
@@ -289,12 +288,14 @@ describe("CubeTool sample sets (UX-34b)", () => {
     const ifu = offerBlock(html, IFU_ID);
     const lrs = offerBlock(html, LRS_ID);
     expect(ifu).toContain("JWST/NIRSpec IFU cube of the Galactic Center");
-    expect(ifu).toContain("Download sample (176 MB)");
+    expect(ifu).toContain("Download sample data (176 MB)");
     expect(ifu).toContain(IFU_CREDIT);
     expect(ifu).toContain(LICENCE);
     expect(ifu).toContain(IFU_SHOWS.replace("'", "&#x27;"));
-    expect(lrs).toContain("Download sample (35 MB)");
+    expect(lrs).toContain("Download sample data (35 MB)");
     expect(lrs).toContain(LRS_CREDIT);
+    expect(ifu).toMatch(/data-cube-sample-terms[^>]*>Used under the MAST data use terms \(https:\/\/archive\.stsci\.edu\/publishing\/data-use\); publications acknowledge JWST program #1266 and STScI\.</);
+    expect(lrs).toMatch(/data-cube-sample-terms[^>]*>Used under the MAST data use terms [^<]*JWST program #2072 and STScI\.</);
     expect(html.indexOf(`data-cube-sample="${IFU_ID}"`)).toBeLessThan(html.indexOf(`data-cube-sample="${LRS_ID}"`));
   });
 
@@ -302,7 +303,7 @@ describe("CubeTool sample sets (UX-34b)", () => {
     cubeState.isCube = false;
     listSets(offer(IFU_ID, { state: "ready", received_bytes: 175_680_000 }), offer(LRS_ID, { state: "partial", received_bytes: 12_000_000 }));
     const html = await render();
-    expect(offerBlock(html, IFU_ID)).toContain("Open sample");
+    expect(offerBlock(html, IFU_ID)).toContain("Open sample data");
     expect(offerBlock(html, LRS_ID)).toContain("Resume sample download (12 MB of 35 MB)");
   });
 
@@ -321,6 +322,15 @@ describe("CubeTool sample sets (UX-34b)", () => {
     const ifu = offerBlock(html, IFU_ID);
     expect(ifu).toMatch(/role="progressbar"[^>]*aria-valuenow="29"/);
     expect(ifu).toContain("Cancel");
+    expect(offerBlock(html, LRS_ID)).toBe("");
+  });
+
+  it("keeps a failed sample download visible with its error and Retry beside a cube", async () => {
+    listSets(offer(IFU_ID, { state: "partial", received_bytes: 1_000, error: "the sample host answered 404" }), offer(LRS_ID));
+    const html = await renderCubeTool(null);
+    const ifu = offerBlock(html, IFU_ID);
+    expect(ifu).toMatch(/role="alert"[^>]*>the sample host answered 404</);
+    expect(ifu).toContain("Retry sample download");
     expect(offerBlock(html, LRS_ID)).toBe("");
   });
 
@@ -347,8 +357,8 @@ describe("CubeTool sample sets (UX-34b)", () => {
     cubeState.isCube = false;
     listSets(offer(IFU_ID), offer(LRS_ID));
     const html = await render();
-    expect(offerBlock(html, IFU_ID)).toContain("Download sample (176 MB)");
-    expect(offerBlock(html, LRS_ID)).toContain("Download sample (35 MB)");
+    expect(offerBlock(html, IFU_ID)).toContain("Download sample data (176 MB)");
+    expect(offerBlock(html, LRS_ID)).toContain("Download sample data (35 MB)");
     expect(samples.started).toEqual([]);
   });
 });

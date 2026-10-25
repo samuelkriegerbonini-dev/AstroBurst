@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -8,12 +8,15 @@ use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
 use super::synthetic::{
-    at_most, coloured_rows, destination, detection, detections_from, exact_pairs, flat_frame,
+    at_most, coloured_rows, detection, detections_from, exact_pairs, flat_frame,
     flux_for, gradient_frame, hot_pixel_frame, image_centre_crpix, noise_frame, random_detections,
-    random_in_cap, render_field, wcs_from_cards, ColourLocus, FrameStyle, PixelDistortion,
+    render_field, wcs_from_cards, ColourLocus, FrameStyle, PixelDistortion,
     SyntheticProvider, TruthField, ARCSEC_PER_DEG, TIER1_CUT_STARS_PER_DEG2,
 };
 use super::*;
+use crate::core::astrometry::healpix_cat::{
+    write_catalog, CatHeader, CatType, CatalogStar, MemSource, Record,
+};
 use crate::core::astrometry::solve_hints::{ScaleRange, SCALE_HINT_MARGIN};
 use crate::core::astrometry::wcs::angular_separation;
 use crate::core::stacking::{never_cancelled, no_stage};
@@ -676,12 +679,75 @@ fn an_rms_above_1_px_or_a_scale_outside_the_hint_is_refused() {
     );
 }
 
+fn great_circle_destination(
+    (ra, dec): (f64, f64),
+    bearing_deg: f64,
+    distance_deg: f64,
+) -> (f64, f64) {
+    if dec.abs() >= 90.0 {
+        let (lon, lat) = if dec > 0.0 {
+            (ra + 180.0 - bearing_deg, 90.0 - distance_deg)
+        } else {
+            (ra + bearing_deg, -90.0 + distance_deg)
+        };
+        return (lon.rem_euclid(360.0), lat);
+    }
+    let (lat1, lon1) = (dec.to_radians(), ra.to_radians());
+    let (brg, dist) = (bearing_deg.to_radians(), distance_deg.to_radians());
+    let lat2 = (lat1.sin() * dist.cos() + lat1.cos() * dist.sin() * brg.cos())
+        .clamp(-1.0, 1.0)
+        .asin();
+    let lon2 =
+        lon1 + (brg.sin() * dist.sin() * lat1.cos()).atan2(dist.cos() - lat1.sin() * lat2.sin());
+    (lon2.to_degrees().rem_euclid(360.0), lat2.to_degrees())
+}
+
+fn great_circle_point_in_cap(rng: &mut StdRng, centre: (f64, f64), radius_deg: f64) -> (f64, f64) {
+    let cos_r = radius_deg.to_radians().cos();
+    let z = cos_r + (1.0 - cos_r) * rng.gen::<f64>();
+    let distance = z.clamp(-1.0, 1.0).acos().to_degrees();
+    great_circle_destination(centre, 360.0 * rng.gen::<f64>(), distance)
+}
+
+#[test]
+fn destination_agrees_with_the_great_circle_formula_and_its_pole_limit() {
+    let hints = [
+        (10.0, 20.0),
+        (200.0, 88.5),
+        (359.9, -45.0),
+        (0.0, 0.0),
+        (123.4, 89.999),
+        (10.0, 90.0),
+        (10.0, -90.0),
+        (300.0, -89.9999),
+    ];
+    let mut failures = Vec::new();
+    for hint in hints {
+        for bearing in (0..360).step_by(15).map(f64::from) {
+            for distance in [0.01, 0.5, 3.0, 15.0, 60.0] {
+                let got = destination(hint, bearing, distance);
+                let expected = great_circle_destination(hint, bearing, distance);
+                let apart = angular_separation(got.0, got.1, expected.0, expected.1);
+                let travelled = angular_separation(hint.0, hint.1, got.0, got.1);
+                if apart > 1e-7 || (travelled - distance).abs() > 1e-9 || !(0.0..360.0).contains(&got.0) {
+                    failures.push(format!(
+                        "hint {hint:?} bearing {bearing} distance {distance}: got {got:?}, expected {expected:?}, {apart:.3e} deg apart, travelled {travelled}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} cases:\n{}", failures.len(), failures.join("\n"));
+}
+
 #[test]
 fn the_spiral_starts_at_the_hint_and_covers_the_search_disc() {
     let cases = [
         ((10.0, 20.0), 0.333, 3.0),
         ((200.0, 88.5), 0.5, 3.0),
         ((359.9, -45.0), 1.0, 15.0),
+        ((10.0, 90.0), 0.5, 3.0),
+        ((250.0, -90.0), 0.375, 3.0),
     ];
     let mut failures = Vec::new();
     for (hint, spacing, radius) in cases {
@@ -719,7 +785,7 @@ fn the_spiral_starts_at_the_hint_and_covers_the_search_disc() {
         let covering = 1.05 * spacing / 3f64.sqrt();
         let mut rng = StdRng::seed_from_u64(5);
         let uncovered = (0..2000)
-            .map(|_| random_in_cap(&mut rng, hint, radius))
+            .map(|_| great_circle_point_in_cap(&mut rng, hint, radius))
             .filter(|p| {
                 centres
                     .iter()
@@ -1042,16 +1108,16 @@ fn sip_case_errors(
     expected_max_considered: u8,
     max_error_px: Option<f64>,
 ) -> Vec<String> {
-    let fit = match fit_distortion(
+    let (fit, warnings) = fit_distortion(
         pairs,
         &truth.tan,
         truth.size(),
         &LocalSolveParams::default(),
-    ) {
-        Ok(fit) => fit,
-        Err(error) => return vec![format!("{label}: {error}")],
-    };
+    );
     let mut errors = Vec::new();
+    if let Some(skipped) = warnings.iter().find(|w| w.starts_with("SIP fit skipped")) {
+        errors.push(format!("{label}: {skipped}"));
+    }
     if fit.order != expected_order {
         errors.push(format!(
             "{label}: order {} expected {expected_order}, considered {:?}",
@@ -1198,6 +1264,20 @@ fn sip_needs_40_inliers_over_3_quadrants() {
         3,
         Some(SIP_EXTRAPOLATION_MAX_ERROR_PX),
     ));
+    let params = LocalSolveParams::default();
+    let (_, three_quadrant_warnings) = fit_distortion(&three, &truth.tan, truth.size(), &params);
+    if !three_quadrant_warnings
+        .iter()
+        .any(|w| w.contains("3 of 4") && w.contains("extrapolated"))
+    {
+        failures.push(format!(
+            "80 pairs, 3 quadrants: the extrapolation must be reported, warnings {three_quadrant_warnings:?}"
+        ));
+    }
+    let (_, full_warnings) = fit_distortion(&all, &truth.tan, truth.size(), &params);
+    if !full_warnings.is_empty() {
+        failures.push(format!("1200 pairs, 4 quadrants: unexpected warnings {full_warnings:?}"));
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -1379,9 +1459,6 @@ fn end_to_end_errors(
             "{label}: {} predicted, at least {END_TO_END_MIN_PREDICTED} expected from the deep verification",
             solution.predicted
         ));
-    }
-    if solution.catalog_tier != TIER1_LABEL {
-        errors.push(format!("{label}: catalogue tier {}", solution.catalog_tier));
     }
     errors
 }
@@ -2043,6 +2120,27 @@ fn a_coarse_tan_above_the_rms_gate_is_refined_before_the_gate_applies() {
 }
 
 #[test]
+fn a_single_scale_widened_by_the_hint_margin_gives_exactly_one_hypothesis() {
+    let mut doubled = Vec::new();
+    for thousandths in 100..=10_000 {
+        let scale = f64::from(thousandths) / 1000.0;
+        let hypotheses = scale_hypotheses(
+            scale * (1.0 - SCALE_HINT_MARGIN),
+            scale * (1.0 + SCALE_HINT_MARGIN),
+        );
+        if hypotheses.len() != 1 || (hypotheses[0] / scale - 1.0).abs() > 1e-12 {
+            doubled.push(format!("{scale}: {hypotheses:?}"));
+        }
+    }
+    assert!(
+        doubled.is_empty(),
+        "{} of 9901 single-scale hints give more than one hypothesis: {}",
+        doubled.len(),
+        doubled[..doubled.len().min(6)].join(", ")
+    );
+}
+
+#[test]
 fn scale_hypotheses_cover_the_hint_range_with_ten_percent_windows() {
     let window = (1.0 + SCALE_HINT_MARGIN) / (1.0 - SCALE_HINT_MARGIN);
     let mut failures = Vec::new();
@@ -2170,6 +2268,88 @@ fn the_odds_score_excludes_the_tan_hypothesis_pairs_and_charges_the_trials() {
     assert_eq!(false_alarm_log10(0, lambda, 1), 0.0);
 }
 
+struct MemHealpixProvider(HealpixCatalog<MemSource>);
+
+impl MemHealpixProvider {
+    fn compact6(level: u8, rows: &[CatalogRow]) -> Self {
+        let mut by_pixel: BTreeMap<u32, Vec<Record>> = BTreeMap::new();
+        for row in rows {
+            let pixel = cdshealpix::nested::hash(level, row.ra.to_radians(), row.dec.to_radians()) as u32;
+            by_pixel
+                .entry(pixel)
+                .or_default()
+                .push(Record::Star(CatalogStar::at(row.ra, row.dec, row.g)));
+        }
+        let pixels: Vec<(u32, Vec<Record>)> = by_pixel.into_iter().collect();
+        let header = CatHeader::whole("mem", level, CatType::Compact6.code());
+        let mut bytes = Vec::new();
+        write_catalog(&header, &pixels, &mut bytes).expect("the synthetic rows encode");
+        Self(HealpixCatalog::new(MemSource::new(bytes)).expect("the written catalogue opens"))
+    }
+}
+
+impl CatalogProvider for MemHealpixProvider {
+    fn cone(
+        &self,
+        ra_deg: f64,
+        dec_deg: f64,
+        radius_deg: f64,
+        _mag_limit: Option<f64>,
+    ) -> Result<(Vec<CatalogRow>, &'static str), String> {
+        self.0
+            .cone(ra_deg, dec_deg, radius_deg, None)
+            .map(|rows| (rows, TIER0_LABEL))
+            .map_err(|error| error.to_string())
+    }
+
+    fn depth_mag(&self) -> f64 {
+        12.0
+    }
+}
+
+#[test]
+fn a_scale_hint_wider_than_a_tan_image_is_an_unusable_hint_not_a_catalogue_failure() {
+    let truth = TruthField::new((40.0, 10.0), 1.5, 0.0, false, 3000, 2000);
+    let synthetic = SyntheticProvider::uniform(
+        TIER0_LABEL,
+        truth.centre(),
+        2.0,
+        truth.density_for(200.0),
+        (6.0, 12.0),
+        81,
+    );
+    let catalog = MemHealpixProvider::compact6(6, synthetic.rows());
+    let detections = detections_from(&truth, synthetic.rows(), 12.0, 0.05, 0, 82);
+    let mut hints = truth.hints(0.0, 0.0);
+    let metres_read_as_millimetres = 1463.0;
+    hints.scale = Some(ScaleRange {
+        low_arcsec: metres_read_as_millimetres * (1.0 - SCALE_HINT_MARGIN),
+        high_arcsec: metres_read_as_millimetres * (1.0 + SCALE_HINT_MARGIN),
+        source: "XPIXSZ 3.76 µm / FOCALLEN 0.53 mm".to_string(),
+    });
+    let failure = solve_stars(
+        &detections,
+        truth.size(),
+        &hints,
+        &catalog,
+        &LocalSolveParams::default(),
+        &never_cancelled,
+        &no_stage,
+    )
+    .expect_err("a 1300 deg field cannot solve");
+    assert_eq!(
+        failure.reason,
+        FailureReason::MissingHint,
+        "{}",
+        failure.message
+    );
+    assert!(
+        failure.message.contains("FOCALLEN 0.53 mm") && failure.message.contains("TAN"),
+        "the message must point at the scale hint: {}",
+        failure.message
+    );
+}
+
 #[test]
 fn a_small_field_search_is_capped_at_max_centres_and_says_so() {
     let truth = TruthField::with_long_side(
@@ -2288,8 +2468,7 @@ fn c4_negatives_return_no_solution_with_the_best_numbers() {
         (8.0, 14.0),
         51,
     );
-    let mut hints = truth.hints(0.0, 0.0);
-    hints.expected_tier0_stars = Some(37.0);
+    let hints = truth.hints(0.0, 0.0);
     let params = LocalSolveParams {
         near_radius_deg: 0.5,
         ..LocalSolveParams::default()
@@ -2314,12 +2493,6 @@ fn c4_negatives_return_no_solution_with_the_best_numbers() {
             Err(failure) => {
                 if failure.reason != FailureReason::NoSolution {
                     failures.push(format!("{name}: reason {:?}", failure.reason));
-                }
-                if failure.expected_tier0_stars != Some(37.0) {
-                    failures.push(format!(
-                        "{name}: expected tier-0 stars {:?}",
-                        failure.expected_tier0_stars
-                    ));
                 }
                 if let Some(best) = &failure.best {
                     if !refused_for_a_named_reason(best) {

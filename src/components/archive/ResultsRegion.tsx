@@ -13,6 +13,7 @@ import { displayRows, isLevelSearch, searchProgress } from "./logic/resultsView"
 import type { AroundTarget } from "./logic/aroundQuery";
 import { missionLabelOf } from "./logic/missionLabels";
 import { useNow } from "./state/useNow";
+import { presetById } from "./logic/presetView";
 
 interface ResultsRegionProps {
   state: ArchiveState;
@@ -46,6 +47,7 @@ function SearchProgress({ state, ctl }: { state: ArchiveState; ctl: ArchiveContr
     filters: run.query?.filters ?? state.form.filters,
     now,
     groups: mission?.filterGroups ?? [],
+    preset: presetById(state.presets, run.query?.preset ?? state.form.preset),
   });
   return (
     <div className="ab-mast-progress" role="status">

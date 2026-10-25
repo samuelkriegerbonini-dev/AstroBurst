@@ -88,8 +88,8 @@ describe("a download that rewrites a file the Files list holds", () => {
     snapshotMock.mockResolvedValue([item({ id: "old:0" })]);
     const store = createDownloadsStore();
     const reload = vi.fn();
-    const ingest = vi.fn(() => true);
-    await watchDownloads(store, { ingest, setMode: vi.fn(), reload });
+    const show = vi.fn(() => true);
+    await watchDownloads(store, { show, load: vi.fn(), setMode: vi.fn(), reload });
     expect(reload).not.toHaveBeenCalled();
 
     push!(item({ id: "re:0" }));
@@ -98,8 +98,8 @@ describe("a download that rewrites a file the Files list holds", () => {
     push!(item({ id: "open:0", open: true, path: X1D, filename: "d_x1d.fits", opensAs: "spectrum" }));
 
     expect(reload.mock.calls).toEqual([[CAL], [X1D]]);
-    expect(ingest).toHaveBeenCalledTimes(1);
-    expect(openDownloaded(item({ id: "re:0" }), { ingest, setMode: vi.fn(), reload })).toBe(true);
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(openDownloaded(item({ id: "re:0" }), { show, load: vi.fn(), setMode: vi.fn(), reload })).toBe(true);
     expect(reload).toHaveBeenCalledTimes(2);
   });
 });

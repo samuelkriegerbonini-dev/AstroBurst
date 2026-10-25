@@ -43,13 +43,13 @@ import { getWcsInfo } from "../../../services/astrometry";
 import { getPreviewUrl } from "../../../infrastructure/tauri";
 import {
   DEFAULT_RADIUS_ARCMIN,
-  browserLevelStorage,
+  browserStorage,
   loadLevel,
   planSearch,
   saveLevel,
   switchMission as switchMissionForm,
   type ArchiveForm,
-  type LevelStorage,
+  type KeyValueStorage,
   type QuickFilterId,
   type SortKey,
 } from "../logic/buildQuery";
@@ -105,7 +105,7 @@ export interface ArchiveControllerDeps {
   store: ArchiveStore;
   services: ArchiveServices;
   clock: ArchiveClock;
-  storage: LevelStorage | null;
+  storage: KeyValueStorage | null;
   inflight: InflightCounter;
 }
 
@@ -1023,6 +1023,6 @@ export const archiveController: ArchiveController = createArchiveController({
   store: archiveStore,
   services: defaultArchiveServices(),
   clock: realClock,
-  storage: browserLevelStorage(),
+  storage: browserStorage(),
   inflight: archiveInflight,
 });

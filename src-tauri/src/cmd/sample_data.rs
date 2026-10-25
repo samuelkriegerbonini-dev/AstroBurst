@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::Emitter;
 
-use crate::infra::net::paths::{self, DataRoot};
+use crate::infra::net::paths;
 use crate::infra::samples::{
     download_set, find_set, local_status, ready_paths, sample_sets, set_dir, LocalState,
     LocalStatus, Origins, SampleObserver, SampleSet,
@@ -41,7 +41,6 @@ pub struct SampleSetReport {
     pub state: SampleState,
     pub received_bytes: u64,
     pub folder: PathBuf,
-    pub newer_at_mast: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -177,7 +176,6 @@ fn set_report(
         state,
         received_bytes: status.received_bytes,
         folder,
-        newer_at_mast: false,
     }
 }
 
@@ -200,16 +198,6 @@ fn unreadable_root(error: anyhow::Error) -> String {
     format!("the Data folder setting could not be read: {error:#}")
 }
 
-fn download_root(root: DataRoot) -> Result<PathBuf, String> {
-    if root.source.chosen_by_user() && !root.path.is_dir() {
-        return Err(format!(
-            "the Data folder {} does not exist; connect its drive or choose another folder in Settings",
-            root.path.display()
-        ));
-    }
-    Ok(root.path)
-}
-
 #[tauri::command]
 pub async fn sample_sets_cmd() -> Result<Vec<SampleSetReport>, String> {
     let root = paths::try_data_root().map_err(unreadable_root)?;
@@ -230,16 +218,15 @@ pub async fn sample_sets_cmd() -> Result<Vec<SampleSetReport>, String> {
 pub async fn sample_download_cmd(app: tauri::AppHandle, id: String) -> Result<SampleOpen, String> {
     let set = known_set(&id)?;
     let running = Running::claim(set.id)?;
-    let root = paths::resolved_data_root()
-        .map_err(unreadable_root)
-        .and_then(download_root)?;
+    let data = paths::resolved_data_root().map_err(unreadable_root)?;
+    let root = data.require_present()?;
     let origins = Origins::from_env();
     let emitter = ProgressEmitter::new(set.id, Arc::clone(&running.cancel), move |progress| {
         if let Err(error) = app.emit(SAMPLE_DOWNLOAD_EVENT, progress) {
             log::debug!("sample download progress was not delivered: {error}");
         }
     });
-    let frames = download_set(&origins, &root, set, &emitter)
+    let frames = download_set(&origins, root, set, &emitter)
         .await
         .map_err(|error| error.to_string())?;
     emitter.finish(set);
@@ -269,7 +256,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::infra::net::paths::{DataRoot, DataRootSource};
     use crate::infra::samples::{find_set, LocalState, LocalStatus, SampleObserver};
 
     const COMMANDS: [&str; 4] = [
@@ -349,16 +335,15 @@ mod tests {
             serde_json::to_value(&report).unwrap(),
             json!({
                 "id": "hst-m16-wfpc2",
-                "title": "HST/WFPC2 narrowband frames of M16 (Eagle Nebula)",
+                "title": set.title,
                 "credit": set.credit,
-                "licence": "Public-domain Hubble archive data; credit requested by STScI",
-                "demonstrates": "Compose (SHO and HOO narrowband palettes), photometry and masks",
+                "licence": set.licence,
+                "demonstrates": set.demonstrates,
                 "total_bytes": 30_896_640u64,
                 "file_count": 3,
                 "state": "downloading",
                 "received_bytes": 5,
                 "folder": "D:/data/samples/hst-m16-wfpc2",
-                "newer_at_mast": false,
             })
         );
         let ifu = find_set("jwst-gc-nirspec-ifu").expect("the IFU set is published");
@@ -380,19 +365,19 @@ mod tests {
                 &listed["state"],
                 &listed["file_count"],
                 &listed["total_bytes"],
-                &listed["newer_at_mast"],
                 &listed["licence"],
+                &listed["demonstrates"],
             ),
             (
                 &json!("jwst-gc-nirspec-ifu"),
                 &json!("absent"),
                 &json!(2),
                 &json!(175_680_000u64),
-                &json!(false),
-                &json!("Public JWST archive data; acknowledgement requested by STScI"),
+                &json!(ifu.licence),
+                &json!(ifu.demonstrates),
             )
         );
-        assert_eq!(listed["demonstrates"], json!(ifu.demonstrates));
+        assert_eq!(listed.get("newer_at_mast"), None);
         assert!(!ifu.demonstrates.is_empty());
         let states = [
             (LocalState::Absent, false, "absent"),
@@ -417,32 +402,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c4_a_chosen_data_folder_that_is_gone_is_refused_before_downloading() {
-        let dir = tempfile::tempdir().unwrap();
-        let present = dir.path().to_path_buf();
-        let gone = dir.path().join("unplugged");
-        let root = |path: &PathBuf, source| DataRoot {
-            path: path.clone(),
-            source,
-        };
-        assert_eq!(
-            download_root(root(&present, DataRootSource::Configured)),
-            Ok(present.clone())
-        );
-        assert_eq!(
-            download_root(root(&gone, DataRootSource::Platform)),
-            Ok(gone.clone())
-        );
-        for source in [DataRootSource::Configured, DataRootSource::Env] {
-            let refused = download_root(root(&gone, source)).unwrap_err();
-            assert!(refused.contains("does not exist"), "{refused}");
-        }
+    fn handler_list(lib: &str) -> &str {
+        let start = lib
+            .find("tauri::generate_handler![")
+            .expect("lib.rs registers its commands with generate_handler!");
+        let end = lib[start..]
+            .find("])")
+            .expect("the generate_handler! list is closed");
+        &lib[start..start + end]
     }
 
     #[test]
     fn c5_the_four_sample_commands_are_defined_and_registered_behind_the_net_feature() {
         let lib = include_str!("../lib.rs").replace("\r\n", "\n");
+        let handlers = handler_list(&lib);
         let defined: Vec<String> = Regex::new(r"#\[tauri::command\]\s*pub async fn (\w+)\(")
             .unwrap()
             .captures_iter(include_str!("sample_data.rs"))
@@ -452,11 +425,22 @@ mod tests {
         let registered: Vec<String> =
             Regex::new(r#"#\[cfg\(feature = "net"\)\]\s*cmd::sample_data::(\w+),"#)
                 .unwrap()
-                .captures_iter(&lib)
+                .captures_iter(handlers)
                 .map(|found| found[1].to_owned())
                 .collect();
         assert_eq!(registered, COMMANDS);
-        assert_eq!(lib.matches("cmd::sample_data::").count(), COMMANDS.len());
+        assert_eq!(
+            handlers.matches("cmd::sample_data::").count(),
+            COMMANDS.len()
+        );
+        let imported = format!("use crate::cmd::sample_data::SAMPLE_DOWNLOAD_EVENT;\n{lib}");
+        assert_eq!(
+            handler_list(&imported)
+                .matches("cmd::sample_data::")
+                .count(),
+            COMMANDS.len(),
+            "an import was counted as a registration"
+        );
         assert!(!lib.contains("sample_data_paths_cmd"));
         let cmd_mod = include_str!("mod.rs").replace("\r\n", "\n");
         assert!(cmd_mod.contains("#[cfg(feature = \"net\")]\npub mod sample_data;"));

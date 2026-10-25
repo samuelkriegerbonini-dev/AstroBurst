@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react";
+import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { Grid3X3, Copy, Check, Plus, Loader2 } from "lucide-react";
 import { computeStatistics, computeStatisticsComposite } from "../../services/statistics";
 import type {
@@ -75,7 +76,7 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PanelResult | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, flagCopied] = useTimedFlag(COPIED_FEEDBACK_MS);
   const requestSeqRef = useRef(0);
 
   const run = useCallback(async () => {
@@ -195,9 +196,8 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
     }
     lines.push(`unit,${unit}`);
     navigator.clipboard?.writeText(lines.join("\n"));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
-  }, [result, stale, converted, noiseSigmas, unit]);
+    flagCopied();
+  }, [result, stale, converted, noiseSigmas, unit, flagCopied]);
 
   const handleLog = useCallback(() => {
     if (!logReady || !result) return;

@@ -1,0 +1,14 @@
+Sample data downloaded on demand by AstroBurst: two JWST sets from programmes 1266 and 2072
+
+Files
+
+- JWST/NIRSpec IFU cube and 1-D spectrum of the Galactic Center (GC-NIRSPEC-1, G395H/F290LP), GTO programme 1266 (PI M. Garcia Marin): jw01266-o005_t001_nirspec_g395h-f290lp_s3d.fits and jw01266-o005_t001_nirspec_g395h-f290lp_x1d.fits, kept in the data folder's samples/jwst-gc-nirspec-ifu/.
+- JWST/MIRI LRS slit spectroscopy of the Type Ia supernova SN 2021aefx, GO programme 2072 (PI S. W. Jha): jw02072-o001_t010_miri_p750l_x1d.fits, jw02072-o001_t010_miri_p750l_s2d.fits and jw02072001001_06101_00001_mirimage_cal.fits, kept in the data folder's samples/jwst-miri-lrs/.
+
+The files are not shipped with the installers. The Download sample data entry downloads them on demand from the data-v1 release of the AstroBurst repository (https://github.com/samuelkriegerbonini-dev/AstroBurst/releases/tag/data-v1), checks each against its published SHA-256 and keeps them in the folders named above. They are JWST pipeline products retrieved from the Mikulski Archive for Space Telescopes (MAST) at the Space Telescope Science Institute (STScI), https://mast.stsci.edu/.
+
+Credit: NASA, ESA, CSA. Data obtained from MAST at STScI.
+
+Terms: MAST's data use page (https://archive.stsci.edu/publishing/data-use) states that most data hosted at MAST are in the public domain and have no restrictions on use, and that researchers are expected to acknowledge the originating mission and, usually, STScI in scholarly publications. For refereed publications based on JWST data, MAST asks for this acknowledgement (https://archive.stsci.edu/publishing/mission-acknowledgements), with program #1266 for the Galactic Center set and program #2072 for the SN 2021aefx set:
+
+This work is based [in part] on observations made with the NASA/ESA/CSA James Webb Space Telescope. The data were obtained from the Mikulski Archive for Space Telescopes at the Space Telescope Science Institute, which is operated by the Association of Universities for Research in Astronomy, Inc., under NASA contract NAS5-03127 for JWST. These observations are associated with program #____.

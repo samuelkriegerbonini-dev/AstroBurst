@@ -94,7 +94,7 @@ pub async fn drizzle_rgb_cmd(
         let t0 = Instant::now();
         resolve_output_dir(&output_dir)?;
 
-        let k = helpers::parse_drizzle_kernel(kernel.as_deref());
+        let k = helpers::parse_drizzle_kernel(kernel.as_deref())?;
         let rejection_method = helpers::parse_rejection_method(rejection.as_deref())?;
 
         let am = parse_alignment_method(alignment_method.as_deref());

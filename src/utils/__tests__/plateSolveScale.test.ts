@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_HINT_TEXTS,
@@ -434,12 +436,22 @@ describe("panelHints", () => {
     });
   });
 
-  it("keeps the header WCS fill, with its radius, when the file has a celestial WCS", () => {
-    const wcsHints = { ...OBJCT_HINTS, centre: { ...OBJCT_HINTS.centre!, source: WCS_HINT_SOURCE } };
+  it("keeps the header WCS centre and radius, and shows the scale range the solver uses, when the file has a celestial WCS", () => {
+    const wcsHints: SolveHints = {
+      ...OBJCT_HINTS,
+      centre: { ra: 190.029137, dec: -11.633133, source: WCS_HINT_SOURCE },
+      scale: { low_arcsec: 0.031 * 0.9, high_arcsec: 0.031 * 1.1, source: WCS_HINT_SOURCE },
+    };
     expect(panelHints(F200W_HEADER, wcsHints)).toEqual({
-      texts: F200W_HINTS,
+      texts: { ...F200W_HINTS, scaleLow: "0.0279", scaleHigh: "0.0341" },
       sources: { centre: WCS_HINT_SOURCE, scale: WCS_HINT_SOURCE },
     });
+    expect(panelHints(F200W_HEADER, null).texts).toEqual(F200W_HINTS);
+  });
+
+  it("names the header WCS source as the Rust hints do", () => {
+    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/core/astrometry/solve_hints.rs", import.meta.url)), "utf8");
+    expect(rust).toContain(`const WCS_SOURCE: &str = "${WCS_HINT_SOURCE}";`);
   });
 
   it("puts the default radius back with a header centre from the cards, so From header drops a typed radius", () => {
@@ -462,6 +474,7 @@ describe("panelHints", () => {
   it("takes each hint group from wherever the header gives it", () => {
     const noScale = { ...F200W_HEADER, pixel_scale_arcsec: 0 };
     expect(panelHints(noScale, OBJCT_HINTS).sources).toEqual({ centre: WCS_HINT_SOURCE, scale: OBJCT_SOURCES.scale });
+    expect(panelHints(F200W_HEADER, { ...OBJCT_HINTS, scale: null }).sources).toEqual({ centre: WCS_HINT_SOURCE, scale: WCS_HINT_SOURCE });
     expect(panelHints(null, null)).toEqual({ texts: {}, sources: NO_HINT_SOURCES });
   });
 });

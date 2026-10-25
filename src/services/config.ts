@@ -7,8 +7,21 @@ export function getConfig(): Promise<AppConfig> {
   return typedInvoke<AppConfig>("get_config");
 }
 
-export function updateConfig(field: string, value: unknown): Promise<AppConfig> {
-  return typedInvoke<AppConfig>("update_config", { field, value });
+export const DATA_FOLDER_FIELD = "data_dir_override";
+
+const dataFolderListeners = new Set<() => void>();
+
+export function onDataFolderChanged(listener: () => void): () => void {
+  dataFolderListeners.add(listener);
+  return () => {
+    dataFolderListeners.delete(listener);
+  };
+}
+
+export async function updateConfig(field: string, value: unknown): Promise<AppConfig> {
+  const updated = await typedInvoke<AppConfig>("update_config", { field, value });
+  if (field === DATA_FOLDER_FIELD) dataFolderListeners.forEach((listener) => listener());
+  return updated;
 }
 
 export function saveApiKey(key: string, service = "astrometry"): Promise<{ saved: boolean; service: string }> {

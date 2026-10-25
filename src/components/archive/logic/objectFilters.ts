@@ -12,11 +12,15 @@ export interface ObjectChip {
   label: string;
 }
 
-export const OBJECT_KEY: Record<ObjectGroupId, ObjectKey> = { category: "categories", object_type: "objectTypes" };
+const OBJECT_GROUPS = {
+  category: { key: "categories", prefix: "category" },
+  object_type: { key: "objectTypes", prefix: "objectType" },
+} as const satisfies Record<ObjectGroupId, { key: ObjectKey; prefix: string }>;
+
+export const OBJECT_KEY: Record<ObjectGroupId, ObjectKey> = { category: OBJECT_GROUPS.category.key, object_type: OBJECT_GROUPS.object_type.key };
 export const NO_OBJECT_FILTERS: ObjectFilters = { categories: undefined, objectTypes: undefined };
 
-const CHIP_PREFIX: Record<ObjectGroupId, "category" | "objectType"> = { category: "category", object_type: "objectType" };
-const KEY_OF_PREFIX: Record<string, ObjectKey> = { category: "categories", objectType: "objectTypes" };
+const GROUP_OF_PREFIX = new Map<string, (typeof OBJECT_GROUPS)[ObjectGroupId]>(Object.values(OBJECT_GROUPS).map((g) => [g.prefix, g]));
 
 export function offeredIds(ids: readonly string[] | undefined, group: MastFilterGroup | undefined): string[] {
   if (!ids?.length || !group) return [];
@@ -41,7 +45,7 @@ export function hasObjectFilters(filters: MastFilterValues | undefined): boolean
 export function objectChips(filters: MastFilterValues, groups: readonly MastFilterGroup[]): ObjectChip[] {
   return groups.flatMap((group) =>
     offeredIds(filters[OBJECT_KEY[group.id]], group).map((option) => ({
-      id: `${CHIP_PREFIX[group.id]}:${option}` as ObjectChipId,
+      id: `${OBJECT_GROUPS[group.id].prefix}:${option}` as ObjectChipId,
       group: group.id,
       option,
       label: group.options.find((o) => o.id === option)?.label ?? option,
@@ -54,8 +58,10 @@ export function objectLabels(filters: MastFilterValues, groups: readonly MastFil
 }
 
 export function parseObjectChip(id: string): { key: ObjectKey; option: string } | null {
-  const m = /^(category|objectType):(.+)$/.exec(id);
-  return m ? { key: KEY_OF_PREFIX[m[1]], option: m[2] } : null;
+  const at = id.indexOf(":");
+  const group = at > 0 ? GROUP_OF_PREFIX.get(id.slice(0, at)) : undefined;
+  const option = id.slice(at + 1);
+  return group && option ? { key: group.key, option } : null;
 }
 
 export function chipAfterRemoval<T>(chips: readonly T[], index: number): T | null {

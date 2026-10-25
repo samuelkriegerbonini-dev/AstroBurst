@@ -46,16 +46,16 @@ describe("watchDownloads", () => {
     });
     snapshotMock.mockResolvedValue([item({ id: "old:0" }), item({ id: "run:0", state: "downloading", received: 4 })]);
     const store = createDownloadsStore();
-    const ingest = vi.fn(() => true);
+    const show = vi.fn(() => true);
     const setMode = vi.fn();
-    await watchDownloads(store, { ingest, setMode, reload: vi.fn() });
+    await watchDownloads(store, { show, load: vi.fn(), setMode, reload: vi.fn() });
     expect(store.getState().items.map((i) => i.id)).toEqual(["old:0", "run:0"]);
-    expect(ingest).not.toHaveBeenCalled();
+    expect(show).not.toHaveBeenCalled();
     push!(item({ id: "run:0" }));
-    expect(ingest).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenCalledTimes(1);
     expect(setMode).toHaveBeenCalledWith("workspace");
     push!(item({ id: "run:0" }));
-    expect(ingest).toHaveBeenCalledTimes(1);
+    expect(show).toHaveBeenCalledTimes(1);
     expect(store.getState().enqueueError).toBeNull();
   });
 
@@ -77,7 +77,7 @@ describe("watchDownloads", () => {
     const fresh = await import("../state/downloadsController");
     const stores = await import("../state/downloadsStore");
     const store = stores.createDownloadsStore();
-    await fresh.watchDownloads(store, { ingest: vi.fn(() => true), setMode: vi.fn(), reload: vi.fn() });
+    await fresh.watchDownloads(store, { show: vi.fn(() => true), load: vi.fn(), setMode: vi.fn(), reload: vi.fn() });
     expect(store.getState().enqueueError).toBeNull();
     expect(store.getState().items).toEqual([]);
   });

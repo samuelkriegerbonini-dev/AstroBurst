@@ -27,6 +27,8 @@ import {
   type SampleSetReport,
 } from "../sampleData";
 import { TauriCommandError } from "../../shared/types/errors";
+import { PRIMARY_SAMPLE_SET } from "../../hooks/useSampleData";
+import { CUBE_SAMPLE_SETS, JWST_SAMPLE_PROGRAMS } from "../../utils/sampleOffers";
 
 const rustSource = (rel: string) => readFileSync(fileURLToPath(new URL(`../../../src-tauri/src/${rel}`, import.meta.url)), "utf8");
 
@@ -41,7 +43,6 @@ const M16: SampleSetReport = {
   state: "absent",
   received_bytes: 0,
   folder: "C:\\Users\\me\\AstroBurst\\samples\\hst-m16-wfpc2",
-  newer_at_mast: false,
 };
 
 const IFU: SampleSetReport = {
@@ -55,7 +56,6 @@ const IFU: SampleSetReport = {
   state: "ready",
   received_bytes: 175_680_000,
   folder: "C:\\Users\\me\\AstroBurst\\samples\\jwst-gc-nirspec-ifu",
-  newer_at_mast: false,
 };
 
 const LRS: SampleSetReport = {
@@ -69,7 +69,6 @@ const LRS: SampleSetReport = {
   state: "absent",
   received_bytes: 0,
   folder: "C:\\Users\\me\\AstroBurst\\samples\\jwst-miri-lrs",
-  newer_at_mast: false,
 };
 
 const NOT_PUBLISHED = "jw02072-o001_t010_miri_p750l_x1d.fits: not available on GitHub (HTTP 404); the sample release may not be published yet";
@@ -223,6 +222,30 @@ describe("sample data contract with the Rust boundary", () => {
     expect(rustSource("cmd/sample_data.rs")).toMatch(/download_set\([^)]*\)\s*\.await\s*\.map_err\(\|error\| error\.to_string\(\)\)\?/);
     expect(isSampleCancelled(new TauriCommandError("sample_download_cmd", cancelledText!))).toBe(true);
     expect(isSampleNotDownloaded(new TauriCommandError("sample_open_cmd", notDownloadedText!))).toBe(true);
+  });
+
+  const rustSets = () => {
+    const rust = rustSource("infra/samples.rs").replace(/\r\n/g, "\n");
+    const start = rust.indexOf("static SAMPLE_SETS");
+    expect(start, "static SAMPLE_SETS").toBeGreaterThanOrEqual(0);
+    const body = rust.slice(start, rust.indexOf("\n];", start));
+    return body.split(/\n {4}SampleSet \{/).slice(1).map((set) => ({
+      id: /\bid: "([^"]+)"/.exec(set)?.[1],
+      files: [...set.matchAll(/\bname: "([^"]+)"/g)].map((m) => m[1]),
+    }));
+  };
+
+  it("finds the empty-state set and the Cube tool sets under the ids infra/samples.rs defines", () => {
+    expect(rustSets().map((set) => set.id)).toEqual([PRIMARY_SAMPLE_SET, ...CUBE_SAMPLE_SETS]);
+  });
+
+  it("names the JWST program each Cube tool set's files come from", () => {
+    for (const set of rustSets().filter((s) => s.id !== PRIMARY_SAMPLE_SET)) {
+      const program = JWST_SAMPLE_PROGRAMS[set.id!];
+      expect(program, set.id).toMatch(/^\d{4,5}$/);
+      expect(set.files.length, set.id).toBeGreaterThan(0);
+      expect(set.files.every((name) => name.startsWith(`jw${program.padStart(5, "0")}`)), set.id).toBe(true);
+    }
   });
 
   it("mirrors the snake_case payloads of SampleSetReport, SampleOpen and SampleProgress", () => {

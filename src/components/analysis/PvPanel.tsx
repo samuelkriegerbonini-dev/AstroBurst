@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { Activity, Loader2 } from "lucide-react";
 import SpectralAxisControls from "./SpectralAxisControls";
 import OutputNote from "./OutputNote";
@@ -99,7 +100,7 @@ function PvPanel({ filePath, fileKey, cubeDims }: PvPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied, flagCopied] = useTimedFlag(COPIED_FEEDBACK_MS);
   const [ioError, setIoError] = useState<string | null>(null);
   const seqRef = useRef(0);
 
@@ -114,12 +115,6 @@ function PvPanel({ filePath, fileKey, cubeDims }: PvPanelProps) {
     setZ0Text("0");
     setZ1Text(String(Math.max(frames - 1, 0)));
   }, [filePath, frames]);
-
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), COPIED_FEEDBACK_MS);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
 
   const step = parseStep(stepText);
   const width = parseWidth(widthText);
@@ -195,11 +190,11 @@ function PvPanel({ filePath, fileKey, cubeDims }: PvPanelProps) {
     setIoError(null);
     try {
       await navigator.clipboard.writeText(pvRidgeCsv(run));
-      setCopied(true);
+      flagCopied();
     } catch (e) {
       setIoError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [run]);
+  }, [run, flagCopied]);
 
   const handleSaveCsv = useCallback(async () => {
     if (!run || busy) return;

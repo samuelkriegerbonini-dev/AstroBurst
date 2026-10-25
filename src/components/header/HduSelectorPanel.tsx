@@ -1,8 +1,11 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useTimedNotice } from "../../hooks/useTimedNotice";
 import { Database, ChevronRight, FileText, Search, X, Copy, Check, Eye, Loader2 } from "lucide-react";
 import { getFitsExtensions, getHeaderByHdu } from "../../services/header";
 import type { FitsExtension } from "../../services/header";
 import type { PlaneInfo } from "../../shared/types/fits.types";
+
+const COPIED_FEEDBACK_MS = 1500;
 
 interface HduSelectorPanelProps {
   filePath: string;
@@ -50,7 +53,7 @@ export default function HduSelectorPanel({
   const [hduHeader, setHduHeader] = useState<Record<string, string> | null>(null);
   const [headerLoading, setHeaderLoading] = useState(false);
   const [hduSearch, setHduSearch] = useState("");
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [copiedKey, showCopiedKey] = useTimedNotice<string>(COPIED_FEEDBACK_MS);
   const [extensionsError, setExtensionsError] = useState<string | null>(null);
   const [headerError, setHeaderError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -114,9 +117,8 @@ export default function HduSelectorPanel({
 
   const handleCopyKey = useCallback((key: string, val: string) => {
     navigator.clipboard?.writeText(`${key} = ${val}`);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 1500);
-  }, []);
+    showCopiedKey(key);
+  }, [showCopiedKey]);
 
   const filteredHduEntries = useMemo(() => {
     if (!hduHeader || typeof hduHeader !== "object") return [];

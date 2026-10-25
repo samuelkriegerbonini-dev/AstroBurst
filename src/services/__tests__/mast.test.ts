@@ -257,7 +257,7 @@ describe("MAST presets contract", () => {
       "supernovae_transients",
       "compact_substellar",
     ];
-    const page: Pick<MastSearchPage, "levelFilteredLocally" | "levelAppliedLocally" | "unfilteredTotal"> = { levelFilteredLocally: true, levelAppliedLocally: "productLevel = 3", unfilteredTotal: 1913 };
+    const page: Pick<MastSearchPage, "levelAppliedLocally" | "unfilteredTotal"> = { levelAppliedLocally: "productLevel = 3", unfilteredTotal: 1913 };
     expect(fields(rust, "MastFilterOption")).toEqual(Object.keys(option));
     expect(fields(rust, "MastFilterGroup")).toEqual(Object.keys(group));
     expect(fields(rust, "MastMission")).toContain("filterGroups");

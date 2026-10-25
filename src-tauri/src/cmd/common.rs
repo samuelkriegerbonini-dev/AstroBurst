@@ -698,12 +698,18 @@ pub(crate) fn try_extract_rgb_resolved(path: &str) -> Result<Option<ResolvedRgbI
     }
 }
 
+pub(crate) async fn off_thread<T: Send + 'static>(
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> std::result::Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("Task join failed: {error}"))?
+        .map_err(|error| format!("{error:#}"))
+}
+
 macro_rules! blocking_cmd {
     ($body:expr) => {
-        tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> { $body })
-            .await
-            .map_err(|e| format!("Task join failed: {}", e))?
-            .map_err(|e| format!("{:#}", e))
+        $crate::cmd::common::off_thread(move || -> anyhow::Result<serde_json::Value> { $body }).await
     };
 }
 

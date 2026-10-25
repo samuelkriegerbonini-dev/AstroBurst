@@ -33,7 +33,14 @@ impl Recorded {
 }
 
 #[derive(Debug, Clone)]
+struct Redirect {
+    location: String,
+    published: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Resource {
+    redirect: Option<Redirect>,
     bodies: [Vec<u8>; 2],
     change_after: Option<usize>,
     ignore_range: bool,
@@ -56,6 +63,7 @@ pub struct Resource {
 impl Resource {
     pub fn new(body: Vec<u8>) -> Self {
         Self {
+            redirect: None,
             bodies: [body.clone(), body],
             change_after: None,
             ignore_range: false,
@@ -73,6 +81,16 @@ impl Resource {
             segment_cap: None,
             hang_up: false,
             withhold_headers: false,
+        }
+    }
+
+    pub fn redirect_to(location: &str, published: &[&str]) -> Self {
+        Self {
+            redirect: Some(Redirect {
+                location: location.to_owned(),
+                published: published.iter().map(|name| (*name).to_owned()).collect(),
+            }),
+            ..Self::new(Vec::new())
         }
     }
 
@@ -338,6 +356,14 @@ fn opaque(tag: &str) -> &str {
 }
 
 fn plan(resource: &Resource, version: usize, request: &Recorded) -> Reply {
+    if let Some(redirect) = &resource.redirect {
+        let name = request.target.trim_start_matches('/');
+        if !redirect.published.iter().any(|published| published == name) {
+            return Reply::empty(404, Vec::new());
+        }
+        let location = format!("{}{}", redirect.location, request.target);
+        return Reply::empty(302, vec![("Location".to_owned(), location)]);
+    }
     if let Some(status) = resource.status {
         return Reply::empty(status, Vec::new());
     }

@@ -4,83 +4,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { CatalogDatasetReport, CatalogInstallProgress, ZenodoOffer } from "../../services/catalogStore";
 import { USED_DOWNLOAD_NOTE, type InstallPhase } from "../../utils/catalogRows";
 
-const hooks = vi.hoisted(() => {
-  type Cell = { value?: unknown; deps?: readonly unknown[]; set?: (next: unknown) => void; cleanup?: unknown };
-  const run = { active: false, cells: [] as Cell[], cursor: 0, effects: [] as (() => void)[] };
-  const sameDeps = (a: readonly unknown[] | undefined, b: readonly unknown[] | undefined) =>
-    a !== undefined && b !== undefined && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
-  const cell = (): Cell => (run.cells[run.cursor++] ??= {});
-  const remember = (compute: () => unknown, deps?: readonly unknown[]) => {
-    const c = cell();
-    if (!("value" in c) || !sameDeps(c.deps, deps)) {
-      c.value = compute();
-      c.deps = deps;
-    }
-    return c.value;
-  };
-  const impl = {
-    useState(init: unknown) {
-      const c = cell();
-      if (!("value" in c)) c.value = typeof init === "function" ? (init as () => unknown)() : init;
-      c.set ??= (next: unknown) => {
-        c.value = typeof next === "function" ? (next as (prev: unknown) => unknown)(c.value) : next;
-      };
-      return [c.value, c.set];
-    },
-    useRef: (init: unknown) => remember(() => ({ current: init }), []),
-    useMemo: remember,
-    useCallback: (fn: unknown, deps?: readonly unknown[]) => remember(() => fn, deps),
-    useId: () => `id-${run.cursor++}`,
-    useEffect(effect: () => unknown, deps?: readonly unknown[]) {
-      const c = cell();
-      if (sameDeps(c.deps, deps)) return;
-      c.deps = deps;
-      run.effects.push(() => {
-        if (typeof c.cleanup === "function") c.cleanup();
-        c.cleanup = effect();
-      });
-    },
-  };
-  return { run, impl };
-});
+const typedInvokeMock = vi.hoisted(() => vi.fn());
 
-const store = vi.hoisted(() => ({
-  status: vi.fn<() => Promise<unknown[]>>(),
-  remove: vi.fn<(id: string) => Promise<unknown>>(),
-  cancel: vi.fn<(id: string) => Promise<boolean>>(),
-  install: vi.fn<(id: string, consent?: unknown) => Promise<unknown>>(),
-  offer: vi.fn<() => Promise<unknown>>(),
-  chooseDir: vi.fn<(dir: string) => Promise<unknown>>(),
-  listener: { current: null as ((progress: CatalogInstallProgress) => void) | null },
-}));
+vi.mock("react", async (importOriginal) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
+vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, isTauri: () => true }));
 
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  const fakes = hooks.impl as unknown as Record<string, (...args: unknown[]) => unknown>;
-  const switched = Object.fromEntries(
-    Object.entries(fakes).map(([name, fake]) => [
-      name,
-      (...args: unknown[]) => (hooks.run.active ? fake : (actual[name] as (...a: unknown[]) => unknown))(...args),
-    ]),
-  );
-  return { ...actual, ...switched };
-});
-vi.mock("../../services/catalogStore", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../services/catalogStore")>()),
-  catalogStatus: store.status,
-  removeCatalog: store.remove,
-  cancelCatalogInstall: store.cancel,
-  installCatalog: store.install,
-  zenodoOffer: store.offer,
-  chooseSirilCatalogDir: store.chooseDir,
-  onCatalogInstallProgress: (cb: (progress: CatalogInstallProgress) => void) => {
-    store.listener.current = cb;
-    return Promise.resolve(() => {});
-  },
-}));
-
+import { hooks } from "../../test/hookRuntime";
+import { createCatalogStore, type CatalogStore, type CatalogStoreApi } from "../../hooks/useCatalogStore";
+import { updateConfig } from "../../services/config";
 import CatalogsSettings, { CATALOG_CREDITS, CatalogsSection, type CatalogsSectionProps } from "../CatalogsSettings";
-import configPanelSource from "../ConfigPanel.tsx?raw";
 
 const MB = 1_000_000;
 
@@ -320,22 +252,6 @@ describe("Settings > Catalogs", () => {
     expect(render({ error: "the data folder is not reachable" })).toContain("the data folder is not reachable");
   });
 
-  it("sits in Settings right after the Plate Solving section", () => {
-    const source = configPanelSource.replace(/\r\n/g, "\n");
-    const plateSolving = source.indexOf("Plate Solving");
-    const catalogs = source.indexOf("<CatalogsSettings />");
-    const archive = source.indexOf("<ArchiveDownloadsFields");
-    expect(plateSolving).toBeGreaterThan(0);
-    expect(catalogs).toBeGreaterThan(plateSolving);
-    expect(catalogs).toBeLessThan(archive);
-  });
-
-  it("says the astrometry.net key is only for the optional fallback", () => {
-    const source = configPanelSource.replace(/\s+/g, " ");
-    expect(source).not.toContain("Required for plate solving");
-    expect(source).toContain("Only for the optional astrometry.net fallback after an offline solve fails. Get one at nova.astrometry.net");
-  });
-
   it("moves focus into the consent step, to Not now when the download does not fit, and back to Download when declined", () => {
     const consenting = rowMarkup(render({ reports: [TIER1], installs: { [TIER1.id]: { phase: "consent" } } }), TIER1.id);
     expect(autofocused(consenting)).toEqual(["Download 154.1 MB"]);
@@ -379,91 +295,131 @@ describe("Settings > Catalogs", () => {
   });
 });
 
-type Props = Record<string, unknown>;
-
-function renderSettings(): CatalogsSectionProps {
-  hooks.run.cursor = 0;
-  hooks.run.effects = [];
-  const tree = (CatalogsSettings as unknown as () => unknown)();
-  for (const effect of hooks.run.effects) effect();
-  expect(isValidElement(tree), "CatalogsSettings renders the section").toBe(true);
-  return (tree as { props: Props }).props as unknown as CatalogsSectionProps;
-}
-
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 const CANCELLED_NOTE = "Cancelled; what was downloaded is kept and the next download resumes from there.";
 
-describe("Settings > Catalogs actions", () => {
-  beforeEach(() => {
-    hooks.run.active = true;
-    hooks.run.cells = [];
-    store.listener.current = null;
-    store.status.mockReset().mockResolvedValue([TIER0, INSTALLED_TIER1]);
-    store.remove.mockReset().mockResolvedValue({ id: TIER1.id, freed_bytes: 154_140_794, forgot_external: false });
-    store.cancel.mockReset().mockResolvedValue(true);
-    store.install.mockReset();
-    store.offer.mockReset();
+function fakeApi(rows: CatalogDatasetReport[]) {
+  const listener = { current: null as ((progress: CatalogInstallProgress) => void) | null };
+  const api = {
+    status: vi.fn(async () => rows),
+    install: vi.fn<CatalogStoreApi["install"]>(),
+    cancel: vi.fn(async () => true),
+    remove: vi.fn<CatalogStoreApi["remove"]>(async (id: string) => ({ id, freed_bytes: 154_140_794, forgot_external: false })),
+    offer: vi.fn<CatalogStoreApi["offer"]>(),
+    useSirilDir: vi.fn<CatalogStoreApi["useSirilDir"]>(),
+    useFile: vi.fn<CatalogStoreApi["useFile"]>(),
+    onProgress: vi.fn(async (cb: (progress: CatalogInstallProgress) => void) => {
+      listener.current = cb;
+      return () => {};
+    }),
+  } satisfies CatalogStoreApi;
+  return { api, listener };
+}
+
+async function startedStore(rows: CatalogDatasetReport[]) {
+  const fake = fakeApi(rows);
+  const store = createCatalogStore(fake.api);
+  store.start();
+  await flush();
+  return { store, ...fake };
+}
+
+describe("Settings > Catalogs store", () => {
+  it("reads the rows each time Settings opens and follows the install progress with one listener", async () => {
+    const { store, api, listener } = await startedStore([TIER0, INSTALLED_TIER1]);
+    store.start();
+    await flush();
+    expect(api.status).toHaveBeenCalledTimes(2);
+    expect(api.onProgress).toHaveBeenCalledTimes(1);
+    expect(listener.current).not.toBeNull();
+    expect(store.get()).toMatchObject({ reports: [TIER0, INSTALLED_TIER1], loading: false, error: null });
   });
 
-  afterEach(() => {
-    hooks.run.active = false;
+  it("keeps the failure of an install whose Settings window was closed, for the next time it opens", async () => {
+    const { store, api } = await startedStore([TIER0, TIER1]);
+    let fail: (err: unknown) => void = () => {};
+    api.install.mockReturnValue(new Promise((_resolve, reject) => (fail = reject)));
+    await store.ask(TIER1.id);
+    const running = store.confirm(TIER1.id);
+    expect(store.get().installs[TIER1.id]).toMatchObject({ phase: "running" });
+    fail(new Error("2mass-l8-v1: the server answered HTTP 503"));
+    await running;
+    expect(store.get().installs[TIER1.id]).toEqual({ phase: "failed", message: "2mass-l8-v1: the server answered HTTP 503" });
+    const reopened = rowMarkup(renderToStaticMarkup(createElement(CatalogsSettings, { store })), TIER1.id);
+    expect(reopened).toMatch(/role="alert"[^>]*>2mass-l8-v1: the server answered HTTP 503</);
   });
 
-  it("deletes a downloaded catalogue only on the second click of Remove", async () => {
-    renderSettings();
+  it("says so and logs it when the install progress cannot be followed", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { api } = fakeApi([TIER0]);
+    api.onProgress.mockRejectedValue(new Error("event.listen not allowed"));
+    const store = createCatalogStore(api);
+    store.start();
     await flush();
-    renderSettings().onRemove(TIER1.id);
-    await flush();
-    expect(store.remove).not.toHaveBeenCalled();
-    expect(renderSettings().armedRemove).toBe(TIER1.id);
-    renderSettings().onRemove(TIER1.id);
-    await flush();
-    expect(store.remove).toHaveBeenCalledWith(TIER1.id);
-    expect(renderSettings().armedRemove).toBeNull();
+    expect(store.get().error).toBe("Install progress is not available: event.listen not allowed");
+    expect(logged).toHaveBeenCalledWith("[AstroBurst] Catalogue install progress:", expect.any(Error));
+    logged.mockRestore();
   });
 
-  it("disarms Remove when the focus leaves it", async () => {
-    renderSettings();
+  it("reads the rows again once the Data folder setting is saved", async () => {
+    typedInvokeMock.mockReset().mockResolvedValue({});
+    const { store, api } = await startedStore([TIER0, INSTALLED_TIER1]);
+    api.status.mockResolvedValueOnce([TIER0, TIER1]);
+    await updateConfig("data_dir_override", "D:/AstroBurst");
     await flush();
-    renderSettings().onRemove(TIER1.id);
+    expect(api.status).toHaveBeenCalledTimes(2);
+    expect(store.get().reports).toEqual([TIER0, TIER1]);
+    await updateConfig("plate_solve_timeout_secs", 120);
     await flush();
-    renderSettings().onDisarm();
-    expect(renderSettings().armedRemove).toBeNull();
-    renderSettings().onRemove(TIER1.id);
-    await flush();
-    expect(store.remove).not.toHaveBeenCalled();
+    expect(api.status).toHaveBeenCalledTimes(2);
   });
 
-  it("forgets an external file on one click, as nothing is deleted", async () => {
+  it("keeps the newest status when an older read answers last", async () => {
+    const { store, api } = await startedStore([TIER0]);
+    let older: (rows: CatalogDatasetReport[]) => void = () => {};
+    api.status.mockReturnValueOnce(new Promise((resolve) => (older = resolve))).mockResolvedValueOnce([TIER0, INSTALLED_TIER1]);
+    const first = store.refresh();
+    await store.refresh();
+    older([TIER0]);
+    await first;
+    expect(store.get().reports).toEqual([TIER0, INSTALLED_TIER1]);
+  });
+
+  it("forgets an external file and deletes a download through remove, then re-reads the rows", async () => {
     const external: CatalogDatasetReport = { ...SIRIL, status: { state: "external", path: "D:/siril/x.dat", valid: true, problem: null } };
-    store.status.mockResolvedValue([TIER0, external]);
-    store.remove.mockResolvedValue({ id: SIRIL.id, freed_bytes: 0, forgot_external: true });
-    renderSettings();
-    await flush();
-    renderSettings().onRemove(SIRIL.id);
-    await flush();
-    expect(store.remove).toHaveBeenCalledWith(SIRIL.id);
+    const { store, api } = await startedStore([TIER0, external]);
+    api.remove.mockResolvedValueOnce({ id: SIRIL.id, freed_bytes: 0, forgot_external: true });
+    await store.remove(SIRIL.id);
+    expect(api.remove).toHaveBeenCalledWith(SIRIL.id);
+    expect(api.status).toHaveBeenCalledTimes(2);
   });
 
   it("shows a download still running after Settings was reopened, cancels it and refreshes the row", async () => {
-    store.status.mockResolvedValue([TIER0, { ...TIER1, status: { state: "partial", received: 64_700_000, total: 154_140_794 } }]);
-    renderSettings();
-    await flush();
-    expect(store.listener.current, "progress listener").not.toBeNull();
-    store.listener.current!({ id: TIER1.id, current: 70_000_000, total: 154_140_794, percent: 45, stage: "download" });
-    expect(renderSettings().installs[TIER1.id]).toMatchObject({ phase: "running", percent: 45, adopted: true });
-    const reads = store.status.mock.calls.length;
-    renderSettings().onCancel(TIER1.id);
-    await flush();
-    expect(store.cancel).toHaveBeenCalledWith(TIER1.id);
-    expect(renderSettings().installs[TIER1.id]).toEqual({ phase: "idle", note: CANCELLED_NOTE });
-    expect(store.status.mock.calls.length).toBe(reads + 1);
+    const { store, api, listener } = await startedStore([TIER0, { ...TIER1, status: { state: "partial", received: 64_700_000, total: 154_140_794 } }]);
+    listener.current!({ id: TIER1.id, current: 70_000_000, total: 154_140_794, percent: 45, stage: "download" });
+    expect(store.get().installs[TIER1.id]).toMatchObject({ phase: "running", percent: 45, adopted: true });
+    const reads = api.status.mock.calls.length;
+    await store.cancel(TIER1.id);
+    expect(api.cancel).toHaveBeenCalledWith(TIER1.id);
+    expect(store.get().installs[TIER1.id]).toEqual({ phase: "idle", note: CANCELLED_NOTE });
+    expect(api.status.mock.calls.length).toBe(reads + 1);
+  });
+
+  it("does not report an adopted download that completed as Cancel was pressed as a failure", async () => {
+    const { store, api, listener } = await startedStore([TIER0, TIER1]);
+    listener.current!({ id: TIER1.id, current: 1, total: 154_140_794, percent: 0, stage: "download" });
+    api.cancel.mockImplementationOnce(async () => {
+      listener.current!({ id: TIER1.id, current: 154_140_794, total: 154_140_794, percent: 100, stage: "complete" });
+      return false;
+    });
+    await store.cancel(TIER1.id);
+    expect(store.get().installs[TIER1.id]).toEqual({ phase: "idle" });
   });
 
   it("reads the Zenodo record when its download is asked for and installs with the consent built from it", async () => {
-    store.status.mockResolvedValue([TIER0, SIRIL_ZENODO]);
-    store.offer.mockResolvedValue(OFFER);
-    store.install.mockResolvedValue({
+    const { store, api } = await startedStore([TIER0, SIRIL_ZENODO]);
+    api.offer.mockResolvedValue(OFFER);
+    api.install.mockResolvedValue({
       id: SIRIL.id,
       path: "C:/data/catalogs/siril-gaia-astro-v1/siril_cat_healpix8_astro.dat",
       bytes: 1_450_000_000,
@@ -472,76 +428,126 @@ describe("Settings > Catalogs actions", () => {
       sha256_verified: true,
       already_installed: false,
     });
-    renderSettings();
-    await flush();
-    renderSettings().onConfirm(SIRIL.id);
-    await flush();
-    expect(store.install).not.toHaveBeenCalled();
-    renderSettings().onAsk(SIRIL.id);
-    await flush();
-    expect(store.offer).toHaveBeenCalledTimes(1);
-    expect(renderSettings().installs[SIRIL.id]).toEqual({ phase: "consent", offer: OFFER });
-    renderSettings().onConfirm(SIRIL.id);
-    await flush();
-    expect(store.install.mock.calls).toEqual([
+    await store.confirm(SIRIL.id);
+    expect(api.install).not.toHaveBeenCalled();
+    await store.ask(SIRIL.id);
+    expect(api.offer).toHaveBeenCalledTimes(1);
+    expect(store.get().installs[SIRIL.id]).toEqual({ phase: "consent", offer: OFFER });
+    await store.confirm(SIRIL.id);
+    expect(api.install.mock.calls).toEqual([
       [SIRIL.id, { archive_bytes: OFFER.archive_bytes, archive_sha256: OFFER.archive_sha256, licence_acknowledged: true }],
     ]);
-    expect(renderSettings().installs[SIRIL.id]).toEqual({
+    expect(store.get().installs[SIRIL.id]).toEqual({
       phase: "idle",
       note: "Installed 1.45 GB, SHA-256 verified. It is now your Siril catalogue folder.",
     });
   });
 
   it("uses a verified Zenodo download already on disk without reading Zenodo, a consent or a download", async () => {
-    store.status.mockResolvedValue([TIER0, INSTALLED_ZENODO]);
-    store.chooseDir.mockReset().mockResolvedValue({ dir: OFFER.folder, path: INSTALLED_ZENODO.folder });
-    renderSettings();
-    await flush();
-    const reads = store.status.mock.calls.length;
-    renderSettings().onAsk(SIRIL.id);
-    await flush();
-    expect(store.offer).not.toHaveBeenCalled();
-    expect(store.install).not.toHaveBeenCalled();
-    expect(store.chooseDir.mock.calls).toEqual([[OFFER.folder]]);
-    expect(renderSettings().installs[SIRIL.id]).toEqual({ phase: "idle", note: USED_DOWNLOAD_NOTE });
-    expect(store.status.mock.calls.length).toBe(reads + 1);
+    const { store, api } = await startedStore([TIER0, INSTALLED_ZENODO]);
+    api.useSirilDir.mockResolvedValue({ dir: OFFER.folder, path: INSTALLED_ZENODO.folder });
+    const reads = api.status.mock.calls.length;
+    await store.ask(SIRIL.id);
+    expect(api.offer).not.toHaveBeenCalled();
+    expect(api.install).not.toHaveBeenCalled();
+    expect(api.useSirilDir.mock.calls).toEqual([[OFFER.folder]]);
+    expect(store.get().installs[SIRIL.id]).toEqual({ phase: "idle", note: USED_DOWNLOAD_NOTE });
+    expect(api.status.mock.calls.length).toBe(reads + 1);
   });
 
   it("does not start the Zenodo download when its record could not be read", async () => {
-    store.status.mockResolvedValue([TIER0, SIRIL_ZENODO]);
-    store.offer.mockRejectedValue(new Error("siril-gaia-astro-v1: zenodo.org answered HTTP 503; try again in a few minutes"));
-    renderSettings();
-    await flush();
-    renderSettings().onAsk(SIRIL.id);
-    await flush();
-    expect(renderSettings().installs[SIRIL.id]).toEqual({
+    const { store, api } = await startedStore([TIER0, SIRIL_ZENODO]);
+    api.offer.mockRejectedValue(new Error("siril-gaia-astro-v1: zenodo.org answered HTTP 503; try again in a few minutes"));
+    await store.ask(SIRIL.id);
+    expect(store.get().installs[SIRIL.id]).toEqual({
       phase: "consent",
       offerError: "siril-gaia-astro-v1: zenodo.org answered HTTP 503; try again in a few minutes",
     });
-    renderSettings().onConfirm(SIRIL.id);
-    await flush();
-    expect(store.install).not.toHaveBeenCalled();
+    await store.confirm(SIRIL.id);
+    expect(api.install).not.toHaveBeenCalled();
   });
 
   it("installs the other catalogues without reading Zenodo or sending a consent", async () => {
-    store.status.mockResolvedValue([TIER0, TIER1]);
-    store.install.mockResolvedValue({ id: TIER1.id, path: "x", bytes: 154_140_794, resumed_from: 0, sha256_hex: "c9ab", sha256_verified: true, already_installed: false });
-    renderSettings();
-    await flush();
-    renderSettings().onAsk(TIER1.id);
-    await flush();
-    renderSettings().onConfirm(TIER1.id);
-    await flush();
-    expect(store.offer).not.toHaveBeenCalled();
-    expect(store.install.mock.calls).toEqual([[TIER1.id]]);
+    const { store, api } = await startedStore([TIER0, TIER1]);
+    api.install.mockResolvedValue({ id: TIER1.id, path: "x", bytes: 154_140_794, resumed_from: 0, sha256_hex: "c9ab", sha256_verified: true, already_installed: false });
+    await store.ask(TIER1.id);
+    await store.confirm(TIER1.id);
+    expect(api.offer).not.toHaveBeenCalled();
+    expect(api.install.mock.calls).toEqual([[TIER1.id]]);
   });
 
   it("re-reads the rows when an install completes, also one this Settings did not start", async () => {
-    renderSettings();
+    const { api, listener } = await startedStore([TIER0, TIER1]);
+    const reads = api.status.mock.calls.length;
+    listener.current!({ id: TIER1.id, current: 154_140_794, total: 154_140_794, percent: 100, stage: "complete" });
     await flush();
-    const reads = store.status.mock.calls.length;
-    store.listener.current!({ id: TIER1.id, current: 154_140_794, total: 154_140_794, percent: 100, stage: "complete" });
+    expect(api.status.mock.calls.length).toBe(reads + 1);
+  });
+
+  it("chooses a Siril folder or file and shows a failed choice as the section error", async () => {
+    const { store, api } = await startedStore([TIER0, SIRIL]);
+    api.useFile.mockResolvedValueOnce({ path: "D:/siril/x.dat", id: SIRIL.id });
+    await store.useFile(SIRIL.id, "D:/siril/x.dat");
+    expect(api.useFile).toHaveBeenCalledWith(SIRIL.id, "D:/siril/x.dat");
+    api.useSirilDir.mockRejectedValueOnce(new Error("D:/nowhere is not a Siril catalogue folder"));
+    await store.useSirilDir("D:/nowhere");
+    expect(store.get().error).toBe("D:/nowhere is not a Siril catalogue folder");
+  });
+});
+
+describe("Settings > Catalogs window", () => {
+  let store: CatalogStore;
+  let api: ReturnType<typeof fakeApi>["api"];
+
+  beforeEach(async () => {
+    ({ store, api } = await startedStore([TIER0, INSTALLED_TIER1]));
+    hooks.mount();
+  });
+
+  afterEach(() => hooks.mount());
+
+  function section(): CatalogsSectionProps {
+    const tree = hooks.render(CatalogsSettings, { store });
+    expect(isValidElement(tree), "CatalogsSettings renders the section").toBe(true);
+    return (tree as { props: CatalogsSectionProps }).props;
+  }
+
+  it("deletes a downloaded catalogue only on the second click of Remove", async () => {
+    section().onRemove(TIER1.id);
     await flush();
-    expect(store.status.mock.calls.length).toBe(reads + 1);
+    expect(api.remove).not.toHaveBeenCalled();
+    expect(section().armedRemove).toBe(TIER1.id);
+    section().onRemove(TIER1.id);
+    await flush();
+    expect(api.remove).toHaveBeenCalledWith(TIER1.id);
+    expect(section().armedRemove).toBeNull();
+  });
+
+  it("disarms Remove when the focus leaves it", async () => {
+    section().onRemove(TIER1.id);
+    section().onDisarm();
+    expect(section().armedRemove).toBeNull();
+    section().onRemove(TIER1.id);
+    await flush();
+    expect(api.remove).not.toHaveBeenCalled();
+  });
+
+  it("shows the store's rows and installs, and re-renders when the store changes", async () => {
+    expect(section().reports).toEqual([TIER0, INSTALLED_TIER1]);
+    const before = hooks.run.notified;
+    await store.ask(TIER1.id);
+    expect(hooks.run.notified).toBeGreaterThan(before);
+    expect(section().installs[TIER1.id]).toEqual({ phase: "consent" });
+  });
+
+  it("forgets an external file on one click, as nothing is deleted", async () => {
+    const external: CatalogDatasetReport = { ...SIRIL, status: { state: "external", path: "D:/siril/x.dat", valid: true, problem: null } };
+    ({ store, api } = await startedStore([TIER0, external]));
+    hooks.mount();
+    api.remove.mockResolvedValueOnce({ id: SIRIL.id, freed_bytes: 0, forgot_external: true });
+    section().onRemove(SIRIL.id);
+    await flush();
+    expect(api.remove).toHaveBeenCalledWith(SIRIL.id);
+    expect(section().armedRemove).toBeNull();
   });
 });

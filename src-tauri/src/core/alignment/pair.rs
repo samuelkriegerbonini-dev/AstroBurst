@@ -1,13 +1,76 @@
+use std::sync::OnceLock;
+
 use anyhow::Result;
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use crate::core::alignment::affine;
-use crate::core::alignment::phase_correlation;
+use crate::core::alignment::affine::{self, AffineAlignMethod, AffineAlignResult, AlignmentStars, TranslationCheck};
+use crate::core::alignment::phase_correlation::{self, PhaseCorrelationResult};
 use crate::core::imaging::sampling::bicubic_sample;
 use crate::types::compose::AlignMethod;
 
 const MAX_OFFSET_FRACTION: f64 = 0.40;
+const PHASE_CORRELATION: &str = "phase_correlation";
+const PHASE_CORRELATION_IDENTITY: &str = "phase_correlation_identity";
+
+pub struct AlignReference<'a> {
+    pub image: &'a Array2<f32>,
+    stars: OnceLock<AlignmentStars>,
+}
+
+impl<'a> AlignReference<'a> {
+    pub fn new(image: &'a Array2<f32>) -> Self {
+        Self { image, stars: OnceLock::new() }
+    }
+
+    pub fn stars(&self) -> &AlignmentStars {
+        self.stars.get_or_init(|| affine::alignment_stars(self.image))
+    }
+}
+
+pub enum Registration {
+    Shift { dy: f64, dx: f64, confidence: f64, rejection: Option<String> },
+    Warp(AffineAlignResult),
+    Failed(AffineAlignResult),
+}
+
+pub fn confident_translation(pc: &PhaseCorrelationResult, rows: usize, cols: usize) -> bool {
+    !phase_correlation::is_low_confidence(pc.confidence) && offset_within_limits(pc.dy, pc.dx, rows, cols)
+}
+
+pub fn register_translation(
+    reference: &AlignReference,
+    target: &Array2<f32>,
+    pc: &PhaseCorrelationResult,
+    rows: usize,
+    cols: usize,
+) -> Registration {
+    let shift = |rejection: Option<String>| Registration::Shift { dy: pc.dy, dx: pc.dx, confidence: pc.confidence, rejection };
+    match affine::check_translation_against_stars(reference.stars(), target, pc.dy, pc.dx, rows, cols) {
+        TranslationCheck::Inconclusive | TranslationCheck::Agrees => shift(None),
+        TranslationCheck::FitRejected(reason) => shift(Some(reason)),
+        TranslationCheck::Prefer(result) => Registration::Warp(result),
+        TranslationCheck::Refused(result) => Registration::Failed(result),
+    }
+}
+
+pub fn register_stars(reference: &AlignReference, target: &Array2<f32>) -> Registration {
+    let result = affine::align_channel_affine_with(reference.image, reference.stars(), target);
+    if result.method == AffineAlignMethod::Identity {
+        Registration::Failed(result)
+    } else {
+        Registration::Warp(result)
+    }
+}
+
+pub fn register_shift_or_stars(reference: &AlignReference, target: &Array2<f32>, rows: usize, cols: usize) -> Registration {
+    let pc = phase_correlation::phase_correlate(reference.image, target);
+    if confident_translation(&pc, rows, cols) {
+        register_translation(reference, target, &pc, rows, cols)
+    } else {
+        register_stars(reference, target)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AlignPairResult {
@@ -68,56 +131,70 @@ pub fn align_pair(
     rows: usize,
     cols: usize,
 ) -> Result<AlignPairResult> {
-    match method {
+    align_pair_to(&AlignReference::new(reference), target, method, rows, cols)
+}
+
+pub fn align_pair_to(
+    reference: &AlignReference,
+    target: &Array2<f32>,
+    method: AlignMethod,
+    rows: usize,
+    cols: usize,
+) -> Result<AlignPairResult> {
+    let registration = match method {
         AlignMethod::PhaseCorrelation => {
-            let pc = phase_correlation::phase_correlate(reference, target);
-            let reject = !offset_within_limits(pc.dy, pc.dx, rows, cols)
-                || phase_correlation::is_low_confidence(pc.confidence);
-            if reject {
-                Ok(AlignPairResult {
+            let pc = phase_correlation::phase_correlate(reference.image, target);
+            if !confident_translation(&pc, rows, cols) {
+                return Ok(AlignPairResult {
                     aligned: target.clone(),
                     offset: (0.0, 0.0),
                     center_offset: (0.0, 0.0),
                     registered: false,
                     confidence: pc.confidence,
-                    method_used: "phase_correlation_identity".into(),
+                    method_used: PHASE_CORRELATION_IDENTITY.into(),
                     matched_stars: 0,
                     inliers: 0,
                     residual_px: 0.0,
                     rejection: None,
-                })
-            } else {
-                let shifted = shift_image_subpixel(target, pc.dy, pc.dx);
-                Ok(AlignPairResult {
-                    aligned: shifted,
-                    offset: (pc.dy, pc.dx),
-                    center_offset: (pc.dy, pc.dx),
-                    registered: true,
-                    confidence: pc.confidence,
-                    method_used: "phase_correlation".into(),
-                    matched_stars: 0,
-                    inliers: 0,
-                    residual_px: 0.0,
-                    rejection: None,
-                })
+                });
             }
+            register_translation(reference, target, &pc, rows, cols)
         }
-        AlignMethod::Affine => {
-            let result = affine::align_channel_affine(reference, target);
+        AlignMethod::Affine => register_stars(reference, target),
+    };
+    Ok(match registration {
+        Registration::Shift { dy, dx, confidence, rejection } => AlignPairResult {
+            aligned: shift_image_subpixel(target, dy, dx),
+            offset: (dy, dx),
+            center_offset: (dy, dx),
+            registered: true,
+            confidence,
+            method_used: PHASE_CORRELATION.into(),
+            matched_stars: 0,
+            inliers: 0,
+            residual_px: 0.0,
+            rejection,
+        },
+        Registration::Warp(result) => {
             let warped = affine::warp_image(target, &result.transform, rows, cols);
-            Ok(AlignPairResult {
-                aligned: warped,
-                offset: (result.transform.ty, result.transform.tx),
-                center_offset: affine::center_displacement(&result.transform, rows, cols),
-                registered: result.method != affine::AffineAlignMethod::Identity,
-                confidence: result.confidence,
-                method_used: result.method.to_string(),
-                matched_stars: result.matched_stars,
-                inliers: result.inliers,
-                residual_px: result.residual_px,
-                rejection: result.rejection,
-            })
+            star_pair_result(warped, true, result, rows, cols)
         }
+        Registration::Failed(result) => star_pair_result(target.clone(), false, result, rows, cols),
+    })
+}
+
+fn star_pair_result(aligned: Array2<f32>, registered: bool, result: AffineAlignResult, rows: usize, cols: usize) -> AlignPairResult {
+    AlignPairResult {
+        aligned,
+        offset: (result.transform.ty, result.transform.tx),
+        center_offset: affine::center_displacement(&result.transform, rows, cols),
+        registered,
+        confidence: result.confidence,
+        method_used: result.method.to_string(),
+        matched_stars: result.matched_stars,
+        inliers: result.inliers,
+        residual_px: result.residual_px,
+        rejection: result.rejection,
     }
 }
 
@@ -130,11 +207,16 @@ pub fn align_pair_with_label(
     label: &str,
 ) -> Result<AlignPairResult> {
     let result = align_pair(reference, target, method, rows, cols)?;
+    log_alignment(label, method, &result);
+    Ok(result)
+}
+
+pub fn log_alignment(label: &str, method: AlignMethod, result: &AlignPairResult) {
     match method {
         AlignMethod::PhaseCorrelation => {
             log::info!(
-                "{} alignment: phase_correlation, offset=({:.2}, {:.2}), confidence={:.4}",
-                label, result.offset.0, result.offset.1, result.confidence,
+                "{} alignment: {}, offset=({:.2}, {:.2}), confidence={:.4}",
+                label, result.method_used, result.offset.0, result.offset.1, result.confidence,
             );
         }
         AlignMethod::Affine => {
@@ -145,7 +227,6 @@ pub fn align_pair_with_label(
             );
         }
     }
-    Ok(result)
 }
 
 #[cfg(test)]

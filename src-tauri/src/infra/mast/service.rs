@@ -17,9 +17,9 @@ use super::cache::{
 use super::client::ImageOp;
 use super::download::{fetch, Fetched, ProgressThrottle, HEAD_KEEP};
 use super::error::MastError;
-use super::hub::{MastHub, ProbeResult, StoredProducts};
+use super::hub::{CachedSearch, MastHub, ProbeResult, StoredProducts};
 use super::lookup::{self, NAMES_FILE};
-use super::models::{DatasetIds, DatasetProduct, FieldMap, ImageListResult};
+use super::models::{DatasetIds, DatasetProduct, FieldMap, ImageListResult, SearchParams};
 use super::ratelimit::is_rate_limit;
 use crate::core::mast::errors::{bad_input, classify, internal, io_cause, OpKind, Operation};
 use crate::core::mast::ids::validate_request_id;
@@ -160,15 +160,17 @@ async fn run_search(hub: &MastHub, request_id: &str, query: &MastQuery, refresh:
     validate_request_id(request_id)?;
     let valid = validate(query)?;
     let endpoint = hub.endpoint(valid.mission, OpKind::Search)?;
-    let unfiltered_total = unfiltered_total(hub, &valid);
+    let unfiltered_total = if refresh { None } else { unfiltered_total(hub, &valid) };
     if let Some(plan) = local_level::plan(&valid) {
-        let wide = search_page(hub, &endpoint, request_id, &plan.wide, refresh, started).await?;
-        if let Some(mut page) = local_level::page(&wide, &valid, &plan) {
-            page.request_id = request_id.to_owned();
-            page.elapsed_ms = elapsed_ms(started);
-            page.unfiltered_total = unfiltered_total;
-            hub.remember_row_filters(valid.mission, &page.rows);
-            return Ok(page);
+        if let Some((wide, from_cache)) = wide_answer(hub, &endpoint, request_id, &plan.wide, refresh, started).await? {
+            if let Some(mut page) = local_level::page(&wide, &valid, &plan) {
+                page.request_id = request_id.to_owned();
+                page.elapsed_ms = elapsed_ms(started);
+                page.from_cache = from_cache;
+                page.unfiltered_total = unfiltered_total;
+                hub.remember_row_filters(valid.mission, &page.rows);
+                return Ok(page);
+            }
         }
     }
     let mut page = search_page(hub, &endpoint, request_id, &valid, refresh, started).await?;
@@ -177,6 +179,34 @@ async fn run_search(hub: &MastHub, request_id: &str, query: &MastQuery, refresh:
     }
     page.unfiltered_total = unfiltered_total;
     Ok(page)
+}
+
+async fn wide_answer(
+    hub: &MastHub,
+    endpoint: &MissionEndpoint,
+    request_id: &str,
+    wide: &ValidQuery,
+    refresh: bool,
+    started: Instant,
+) -> Result<Option<(Arc<MastSearchPage>, bool)>, MastCmdError> {
+    let params = build_params(wide);
+    let key = canonical_key(wide.mission, &params);
+    if !refresh {
+        let cached = hub.searches().get(&key, Instant::now());
+        match cached {
+            Some(CachedSearch::Page(page)) => return Ok(Some((page, true))),
+            Some(CachedSearch::FullWideAnswer) => return Ok(None),
+            None => {}
+        }
+    }
+    let page = fetched_page(hub, endpoint, request_id, wide, &params, started).await?;
+    if !local_level::is_complete(&page) {
+        hub.searches().insert(key, CachedSearch::FullWideAnswer, Instant::now());
+        return Ok(None);
+    }
+    let page = Arc::new(page);
+    hub.searches().insert(key, CachedSearch::Page(Arc::clone(&page)), Instant::now());
+    Ok(Some((page, false)))
 }
 
 async fn search_page(
@@ -191,7 +221,8 @@ async fn search_page(
     let key = canonical_key(valid.mission, &params);
     if !refresh {
         let cached = hub.searches().get(&key, Instant::now());
-        if let Some(mut page) = cached {
+        if let Some(CachedSearch::Page(stored)) = cached {
+            let mut page = MastSearchPage::clone(&stored);
             page.request_id = request_id.to_owned();
             page.from_cache = true;
             page.elapsed_ms = elapsed_ms(started);
@@ -199,21 +230,32 @@ async fn search_page(
             return Ok(page);
         }
     }
+    let page = fetched_page(hub, endpoint, request_id, valid, &params, started).await?;
+    hub.searches().insert(key, CachedSearch::Page(Arc::new(page.clone())), Instant::now());
+    Ok(page)
+}
+
+async fn fetched_page(
+    hub: &MastHub,
+    endpoint: &MissionEndpoint,
+    request_id: &str,
+    valid: &ValidQuery,
+    params: &SearchParams,
+    started: Instant,
+) -> Result<MastSearchPage, MastCmdError> {
     let op = Operation::mission(valid.mission, OpKind::Search, "search");
     let sent = Instant::now();
-    let results = match endpoint.search::<FieldMap>(&params).await {
+    let results = match endpoint.search::<FieldMap>(params).await {
         Ok(results) => results,
         Err(error) => return Err(failure(hub, &error, &op, sent)),
     };
     hub.limiter().on_success();
-    let request_body = serde_json::to_value(&params).unwrap_or(Value::Null);
-    let page = normalize_page(
+    let request_body = serde_json::to_value(params).unwrap_or(Value::Null);
+    Ok(normalize_page(
         valid.mission,
         results,
         PageRequest { request_id, query: valid, request_body, elapsed_ms: elapsed_ms(started) },
-    );
-    hub.searches().insert(key, page.clone(), Instant::now());
-    Ok(page)
+    ))
 }
 
 fn unfiltered_total(hub: &MastHub, valid: &ValidQuery) -> Option<i64> {
@@ -229,7 +271,10 @@ fn unfiltered_total(hub: &MastHub, valid: &ValidQuery) -> Option<i64> {
     };
     let key = canonical_key(plain.mission, &build_params(&plain));
     let cached = hub.searches().get(&key, Instant::now());
-    cached.filter(|page| page.total_reliable).and_then(|page| page.total_reported)
+    match cached {
+        Some(CachedSearch::Page(page)) if page.total_reliable => page.total_reported,
+        _ => None,
+    }
 }
 
 pub type ProgressSink<'a> = dyn Fn(MastProgressEvent) + Send + Sync + 'a;
@@ -1040,7 +1085,7 @@ mod tests {
     use crate::core::mast::normalize::normalize_row;
     use crate::core::mast::types::MastProductClass;
     use crate::infra::mast::models::DatasetProducts;
-    use crate::core::mast::query::PAGE_LIMIT;
+    use crate::core::mast::query::{MAX_ROWS, PAGE_LIMIT};
     use crate::core::mast::types::{LevelFilter, MastFilterValues, MastWhere, ObjectCategory, ObjectType};
     use crate::infra::mast::api::MissionEndpoint;
     use crate::infra::mast::lookup::NAMES_FILE;
@@ -1321,7 +1366,6 @@ mod tests {
         assert_eq!(sent["conditions"], json!([{"targcat": "ISM"}]));
         assert_eq!((&sent["offset"], &sent["limit"]), (&json!(0), &json!(2000)));
         assert_eq!(sent["select_cols"].as_array().unwrap().len(), 19);
-        assert!(first.level_filtered_locally);
         assert_eq!(first.level_applied_locally.as_deref(), Some("productLevel in 1b, 2a, 2b, 2c"));
         assert!(!first.from_cache);
         assert_eq!(first.request_id, "g1:search");
@@ -1332,21 +1376,20 @@ mod tests {
         assert_eq!(first.dropped_conditions, Vec::<String>::new());
         assert_eq!(first.unfiltered_total, None);
         let second = search(&hub, "g1:page:200", &ism(LevelFilter::Exposures, 200), false).await.unwrap();
-        assert!(second.from_cache && second.level_filtered_locally);
+        assert!(second.from_cache && second.level_applied_locally.is_some());
         assert_eq!((second.rows.len(), second.offset, second.has_more), (200, 200, true));
         assert_ne!(second.rows[0].dataset_id, first.rows[0].dataset_id);
         let last = search(&hub, "g1:page:400", &ism(LevelFilter::Exposures, 400), false).await.unwrap();
         assert_eq!((last.rows.len(), last.has_more), (44, false));
         let combined = search(&hub, "g2:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
-        assert!(combined.from_cache && combined.level_filtered_locally);
+        assert!(combined.from_cache && combined.level_applied_locally.is_some());
         assert_eq!((combined.rows.len(), combined.total_reported, combined.has_more), (8, Some(8), false));
         assert_eq!(server.count("/search/jwst"), 1, "later pages and the other level come from the one wide answer");
         assert_eq!(hub.row_filter(MastMissionId::Jwst, "jw02739-o002_t001_miri_3").as_deref(), Some("F770W"));
         let refreshed = search(&hub, "g3:search", &ism(LevelFilter::Combined, 0), true).await.unwrap();
-        assert!(!refreshed.from_cache && refreshed.level_filtered_locally);
+        assert!(!refreshed.from_cache && refreshed.level_applied_locally.is_some());
         assert_eq!(server.count("/search/jwst"), 2);
         let all_levels = search(&hub, "g4:search", &ism(LevelFilter::All, 0), false).await.unwrap();
-        assert!(!all_levels.level_filtered_locally);
         assert_eq!(all_levels.level_applied_locally, None);
         assert_eq!(body_of(&server.requests()[2])["limit"], json!(200));
         let mut hst = m16(MastMissionId::Hst);
@@ -1355,7 +1398,7 @@ mod tests {
         let server_hst = serve_routes(vec![Route::post("/search/hst/").json(fixture("hst_m16_ism.json"))]).await;
         let hub_hst = hub_for(&server_hst, dir.path());
         let page = search(&hub_hst, "g1:search", &hst, false).await.unwrap();
-        assert!(!page.level_filtered_locally);
+        assert!(page.level_applied_locally.is_none());
         assert_eq!(body_of(&server_hst.requests()[0])["limit"], json!(200));
     }
 
@@ -1371,7 +1414,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub_for(&server, dir.path());
         let page = search(&hub, "g1:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
-        assert!(!page.level_filtered_locally);
         assert_eq!(page.level_applied_locally, None);
         assert_eq!(server.count("/search/jwst"), 2);
         let requests = server.requests();
@@ -1383,8 +1425,57 @@ mod tests {
         assert_eq!((page.rows.len(), page.total_reported), (2, Some(2)));
         assert_eq!(page.dropped_conditions, Vec::<String>::new());
         let again = search(&hub, "g2:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
-        assert!(again.from_cache && !again.level_filtered_locally);
+        assert!(again.from_cache && again.level_applied_locally.is_none());
         assert_eq!(server.count("/search/jwst"), 2);
+        let plan = local_level::plan(&validate(&ism(LevelFilter::Combined, 0)).unwrap()).unwrap();
+        let wide_key = canonical_key(MastMissionId::Jwst, &build_params(&plan.wide));
+        assert!(matches!(hub.searches().get(&wide_key, Instant::now()), Some(CachedSearch::FullWideAnswer)));
+        assert_eq!(hub.searches().weight(), 3, "the rows of the full wide answer stayed in memory");
+    }
+
+    fn chip(category: ObjectCategory) -> MastQuery {
+        let mut query = ism(LevelFilter::Combined, 0);
+        query.filters.categories = vec![category];
+        query
+    }
+
+    #[tokio::test]
+    async fn wide_answers_share_a_row_budget_and_the_least_recent_is_dropped() {
+        let server = serve_routes(vec![Route::post("/search/jwst/api/v0.1/search").json(ism_answer(18, MAX_ROWS as usize - 1))]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let chips = [ObjectCategory::Ism, ObjectCategory::Galaxies, ObjectCategory::Stars, ObjectCategory::StarClusters];
+        for (n, category) in chips.into_iter().enumerate() {
+            let page = search(&hub, &format!("g{n}:search"), &chip(category), false).await.unwrap();
+            assert!(page.level_applied_locally.is_some() && !page.from_cache, "{category:?}");
+        }
+        assert_eq!(server.count("/search/jwst"), 4);
+        let again = search(&hub, "g5:search", &chip(ObjectCategory::Ism), false).await.unwrap();
+        assert!(!again.from_cache, "four answers of 1,999 rows stayed in memory");
+        assert_eq!(server.count("/search/jwst"), 5);
+        let recent = search(&hub, "g6:search", &chip(ObjectCategory::StarClusters), false).await.unwrap();
+        assert!(recent.from_cache);
+        assert_eq!(server.count("/search/jwst"), 5);
+    }
+
+    #[tokio::test]
+    async fn a_refreshed_search_reports_no_cached_unfiltered_total() {
+        let server = serve_routes(vec![
+            Route::post("/search/jwst/api/v0.1/search").when(|r| r.body.contains("targcat\":")).json(ism_answer(1, usize::MAX)),
+            Route::post("/search/jwst/api/v0.1/search").json(fixture("jwst_m16_l3.json")),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub_for(&server, dir.path());
+        let mut plain = m16(MastMissionId::Jwst);
+        plain.filters.level = Some(LevelFilter::Combined);
+        assert_eq!(search(&hub, "g1:search", &plain, false).await.unwrap().total_reported, Some(2));
+        let cached = search(&hub, "g2:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
+        assert_eq!(cached.unfiltered_total, Some(2));
+        let refreshed = search(&hub, "g3:search", &ism(LevelFilter::Combined, 0), true).await.unwrap();
+        assert!(!refreshed.from_cache);
+        assert_eq!(refreshed.unfiltered_total, None, "a refresh showed the plain total cached before it");
+        assert_eq!(server.count("/search/jwst"), 3);
     }
 
     #[tokio::test]
@@ -1399,7 +1490,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub_for(&server, dir.path());
         let cold = search(&hub, "g1:search", &ism(LevelFilter::Combined, 0), false).await.unwrap();
-        assert!(cold.level_filtered_locally);
+        assert!(cold.level_applied_locally.is_some());
         assert_eq!(cold.unfiltered_total, None);
         assert_eq!(server.count("/search/jwst"), 1);
         let mut plain = m16(MastMissionId::Jwst);
@@ -1428,7 +1519,7 @@ mod tests {
         assert_eq!((filtered.unfiltered_total, filtered.total_reported), (Some(265), Some(37)));
         assert_eq!(server.count("/search/hst"), 2);
         let serialised = serde_json::to_value(&filtered).unwrap();
-        assert_eq!((&serialised["unfilteredTotal"], &serialised["levelFilteredLocally"]), (&json!(265), &json!(false)));
+        assert_eq!((&serialised["unfilteredTotal"], &serialised["levelAppliedLocally"]), (&json!(265), &json!(null)));
     }
 
     #[tokio::test]
@@ -3173,12 +3264,12 @@ mod tests {
             "L2 M16 Combined ISM: rows {} total {:?} local {} dropped {:?} {:.1} s levels {:?}",
             page.rows.len(),
             page.total_reported,
-            page.level_filtered_locally,
+            page.level_applied_locally.is_some(),
             page.dropped_conditions,
             seconds,
             page.rows.iter().map(|row| row.level.clone()).collect::<Vec<_>>()
         );
-        assert!(page.level_filtered_locally);
+        assert!(page.level_applied_locally.is_some());
         assert_eq!(page.rows.len(), 2);
         assert!(page.rows.iter().all(|row| row.categories == [ObjectCategory::Ism]));
         assert!(seconds < 15.0);
@@ -3192,8 +3283,8 @@ mod tests {
         let started = Instant::now();
         let planets = search(&hub, "live:3", &trappist, false).await.unwrap();
         let seconds = started.elapsed().as_secs_f64();
-        eprintln!("L8 TRAPPIST-1 Combined Exoplanets: rows {} local {} {:.1} s", planets.rows.len(), planets.level_filtered_locally, seconds);
-        assert!(planets.level_filtered_locally && seconds < 15.0);
+        eprintln!("L8 TRAPPIST-1 Combined Exoplanets: rows {} local {} {:.1} s", planets.rows.len(), planets.level_applied_locally.is_some(), seconds);
+        assert!(planets.level_applied_locally.is_some() && seconds < 15.0);
         assert!(planets.rows.iter().all(|row| row.target_description.as_deref().is_some_and(|text| text.contains("Exoplanet"))));
         let mut hst = live_cone(MastMissionId::Hst, 274.688, -13.792, LevelFilter::All);
         hst.filters.categories = vec![ObjectCategory::Ism];

@@ -356,6 +356,10 @@ class FileStore {
 
   selectFile(id: string) {
     this.selectOnLoad = null;
+    this.selectFallback(id);
+  }
+
+  selectFallback(id: string) {
     if (this.state.selected === id) return;
     this.state.selected = id;
     this.state.selectedVersion++;

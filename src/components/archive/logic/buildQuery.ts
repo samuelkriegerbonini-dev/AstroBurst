@@ -1,6 +1,7 @@
 import type { MastFilterGroup, MastFilterValues, MastLevel, MastMissionId, MastQuery, MastQuickFilter, MastResolved } from "../../../shared/types/mast";
 import { interpretQuery, type QueryKind } from "./interpretQuery";
 import { offeredObjectFilters } from "./objectFilters";
+import { levelOf } from "./levels";
 
 export interface ArchiveForm {
   mission: MastMissionId;
@@ -30,7 +31,7 @@ export interface PlanOptions {
   sort?: SortKey[];
 }
 
-export type LevelStorage = Partial<Pick<Storage, "getItem" | "setItem">>;
+export type KeyValueStorage = Partial<Pick<Storage, "getItem" | "setItem">>;
 
 export const PAGE_LIMIT = 200;
 export const DEFAULT_RADIUS_ARCMIN = 3;
@@ -38,8 +39,6 @@ export const EMPTY_QUERY_HINT = "Add a target, coordinates, programme or dataset
 export const RADIUS_HINT = "Radius: type a number of arcminutes, for example 3";
 export const LEVEL_STORAGE_KEY = "astroburst.mast.level";
 export const FILTERS_OPEN_STORAGE_KEY = "astroburst.mast.filtersOpen";
-
-const LEVELS: readonly MastLevel[] = ["combined", "exposures", "all"];
 
 export const DEFAULT_FORM: ArchiveForm = {
   mission: "jwst",
@@ -127,16 +126,16 @@ export function planSearch(form: ArchiveForm, available: readonly QuickFilterId[
   return { kind: "resolve", name };
 }
 
-export function loadLevel(storage: LevelStorage | null): MastLevel {
+export function loadLevel(storage: KeyValueStorage | null): MastLevel {
   try {
     const value = storage?.getItem?.(LEVEL_STORAGE_KEY);
-    return LEVELS.find((l) => l === value) ?? "combined";
+    return levelOf(value) ?? "combined";
   } catch {
     return "combined";
   }
 }
 
-export function saveLevel(storage: LevelStorage | null, level: MastLevel): void {
+export function saveLevel(storage: KeyValueStorage | null, level: MastLevel): void {
   try {
     storage?.setItem?.(LEVEL_STORAGE_KEY, level);
   } catch {
@@ -144,7 +143,7 @@ export function saveLevel(storage: LevelStorage | null, level: MastLevel): void 
   }
 }
 
-export function loadFiltersOpen(storage: LevelStorage | null): boolean {
+export function loadFiltersOpen(storage: KeyValueStorage | null): boolean {
   try {
     return storage?.getItem?.(FILTERS_OPEN_STORAGE_KEY) === "1";
   } catch {
@@ -152,7 +151,7 @@ export function loadFiltersOpen(storage: LevelStorage | null): boolean {
   }
 }
 
-export function saveFiltersOpen(storage: LevelStorage | null, open: boolean): void {
+export function saveFiltersOpen(storage: KeyValueStorage | null, open: boolean): void {
   try {
     storage?.setItem?.(FILTERS_OPEN_STORAGE_KEY, open ? "1" : "0");
   } catch {
@@ -160,7 +159,7 @@ export function saveFiltersOpen(storage: LevelStorage | null, open: boolean): vo
   }
 }
 
-export function browserLevelStorage(): LevelStorage | null {
+export function browserStorage(): KeyValueStorage | null {
   try {
     return globalThis.localStorage ?? null;
   } catch {
@@ -168,7 +167,7 @@ export function browserLevelStorage(): LevelStorage | null {
   }
 }
 
-export function switchMission(form: ArchiveForm, mission: MastMissionId, storage: LevelStorage | null, groups: readonly MastFilterGroup[] = []): ArchiveForm {
+export function switchMission(form: ArchiveForm, mission: MastMissionId, storage: KeyValueStorage | null, groups: readonly MastFilterGroup[] = []): ArchiveForm {
   const filters: MastFilterValues = {};
   if (form.filters.dateFrom) filters.dateFrom = form.filters.dateFrom;
   if (form.filters.dateTo) filters.dateTo = form.filters.dateTo;

@@ -363,7 +363,6 @@ pub fn normalize_page(mission: MastMissionId, results: SearchResults<FieldMap>, 
         messages: results.messages,
         elapsed_ms: request.elapsed_ms,
         from_cache: false,
-        level_filtered_locally: false,
         level_applied_locally: None,
         unfiltered_total: None,
     }
@@ -408,6 +407,24 @@ mod tests {
                 elapsed_ms: 1700,
             },
         )
+    }
+
+    #[test]
+    fn no_two_page_columns_share_a_label() {
+        for (mission, name) in [
+            (MastMissionId::Jwst, "jwst_m16_ism.json"),
+            (MastMissionId::Hst, "hst_m16_ism.json"),
+            (MastMissionId::Iue, "iue_m16_stars.json"),
+        ] {
+            let page = page_of(mission, name, &position_query(mission, 3.0));
+            let mut seen: Vec<(&str, &str)> = Vec::new();
+            for column in &page.columns {
+                if let Some((first, _)) = seen.iter().find(|(_, label)| *label == column.label) {
+                    panic!("{mission:?}: {first} and {} are both labelled {:?}", column.name, column.label);
+                }
+                seen.push((column.name.as_str(), column.label.as_str()));
+            }
+        }
     }
 
     #[test]

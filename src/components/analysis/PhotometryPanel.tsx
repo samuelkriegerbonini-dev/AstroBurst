@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useId, useMemo, memo } from "react";
+import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { Check, Copy, Crosshair, Loader2, Star as StarIcon } from "lucide-react";
 import { measurePhotometry, photometryGainModel } from "../../services/analysis";
 import type { GainModel, PhotometryMeasurement, StarPhotometry } from "../../services/analysis";
@@ -134,8 +135,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
   const [result, setResult] = useState<PhotometryMeasurement | null>(null);
   const [history, setHistory] = useState<PhotometryMeasurement[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [skyCopied, setSkyCopied] = useState(false);
-  const skyCopiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [skyCopied, flagSkyCopied, clearSkyCopied] = useTimedFlag(COPIED_FEEDBACK_MS);
   const click = usePixelClick();
   const { excludeDq } = useDqContext();
   const { active } = useToolHost();
@@ -269,26 +269,18 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
     void measure(click.x, click.y);
   }, [active, armed, click, measure]);
 
-  useEffect(() => {
-    return () => {
-      if (skyCopiedTimerRef.current) clearTimeout(skyCopiedTimerRef.current);
-    };
-  }, []);
-
   const sky = result?.sky ?? null;
   const copySky = useCallback(async () => {
     if (!sky) return;
     try {
       await navigator.clipboard.writeText(skyPositionLine(sky.ra, sky.dec));
       setError((current) => (current?.startsWith(CLIPBOARD_FAILED) ? null : current));
-      setSkyCopied(true);
-      if (skyCopiedTimerRef.current) clearTimeout(skyCopiedTimerRef.current);
-      skyCopiedTimerRef.current = setTimeout(() => setSkyCopied(false), COPIED_FEEDBACK_MS);
+      flagSkyCopied();
     } catch (e: unknown) {
-      setSkyCopied(false);
+      clearSkyCopied();
       setError(`${CLIPBOARD_FAILED}${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [sky]);
+  }, [sky, flagSkyCopied, clearSkyCopied]);
 
   const phot = result?.photometry;
   const photcal = result?.photcal ?? null;

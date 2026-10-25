@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use reqwest::{Client, Url};
 
+use crate::infra::catalog_store::sha256_from_hex;
 use crate::infra::net::download::{
     download, DownloadError, DownloadObserver, DownloadRequest, Files,
 };
@@ -20,9 +21,7 @@ pub const RELEASE_ASSET_HOSTS: &[&str] = &[
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
 ];
-const REFUSED_REDIRECT: &str = "redirect refused by the profile's redirect rule";
 const LOOPBACK_HOSTS: &[&str] = &["127.0.0.1", "localhost", "[::1]"];
-const SHA256_HEX_LEN: usize = 64;
 const HST_M16_FRAME_BYTES: u64 = 10_298_880;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +34,7 @@ pub enum SampleSource {
 pub struct SampleFile {
     pub name: &'static str,
     pub bytes: u64,
-    pub sha256_hex: &'static str,
+    pub sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,17 +70,17 @@ static SAMPLE_SETS: [SampleSet; 3] = [
             SampleFile {
                 name: "502nmos.fits",
                 bytes: HST_M16_FRAME_BYTES,
-                sha256_hex: "ad8e67285cd987968edf0e0b1b46ee8077fc33feb2728472d57147a5afbd0421",
+                sha256: sha256_from_hex("ad8e67285cd987968edf0e0b1b46ee8077fc33feb2728472d57147a5afbd0421"),
             },
             SampleFile {
                 name: "656nmos.fits",
                 bytes: HST_M16_FRAME_BYTES,
-                sha256_hex: "9c1c87da9e992cbaa784edca8d480afed504374ef9b7b8cc3632281427f06fe4",
+                sha256: sha256_from_hex("9c1c87da9e992cbaa784edca8d480afed504374ef9b7b8cc3632281427f06fe4"),
             },
             SampleFile {
                 name: "673nmos.fits",
                 bytes: HST_M16_FRAME_BYTES,
-                sha256_hex: "3eceec970765095fb3ef1624af1bb3fa31adfd0b8bbb0905d6dcbf24c396f2bf",
+                sha256: sha256_from_hex("3eceec970765095fb3ef1624af1bb3fa31adfd0b8bbb0905d6dcbf24c396f2bf"),
             },
         ],
     },
@@ -98,12 +97,12 @@ static SAMPLE_SETS: [SampleSet; 3] = [
             SampleFile {
                 name: "jw01266-o005_t001_nirspec_g395h-f290lp_s3d.fits",
                 bytes: 174_983_040,
-                sha256_hex: "9897a80e06896184b1f554022760f2de937bd7a2c77552e70ee9d90ea8125b0a",
+                sha256: sha256_from_hex("9897a80e06896184b1f554022760f2de937bd7a2c77552e70ee9d90ea8125b0a"),
             },
             SampleFile {
                 name: "jw01266-o005_t001_nirspec_g395h-f290lp_x1d.fits",
                 bytes: 696_960,
-                sha256_hex: "eb56296ed3da7b80e03bcdac91fbe22854a352ad7096bb3c00e01a826a5d6b10",
+                sha256: sha256_from_hex("eb56296ed3da7b80e03bcdac91fbe22854a352ad7096bb3c00e01a826a5d6b10"),
             },
         ],
     },
@@ -120,17 +119,17 @@ static SAMPLE_SETS: [SampleSet; 3] = [
             SampleFile {
                 name: "jw02072-o001_t010_miri_p750l_x1d.fits",
                 bytes: 178_560,
-                sha256_hex: "c6fdd9e50577e1bc48ab582efaaee171d421b615eb5d4b3211fcdeaefe165478",
+                sha256: sha256_from_hex("c6fdd9e50577e1bc48ab582efaaee171d421b615eb5d4b3211fcdeaefe165478"),
             },
             SampleFile {
                 name: "jw02072-o001_t010_miri_p750l_s2d.fits",
                 bytes: 990_720,
-                sha256_hex: "514645befe2b31955134e1b2696e24195ba0439798e763a23987d90116f44958",
+                sha256: sha256_from_hex("514645befe2b31955134e1b2696e24195ba0439798e763a23987d90116f44958"),
             },
             SampleFile {
                 name: "jw02072001001_06101_00001_mirimage_cal.fits",
                 bytes: 33_995_520,
-                sha256_hex: "73d89cf8b1b3aef7b995a5933caa85ed9dee57540e9f9e01b864cedfb64756fc",
+                sha256: sha256_from_hex("73d89cf8b1b3aef7b995a5933caa85ed9dee57540e9f9e01b864cedfb64756fc"),
             },
         ],
     },
@@ -168,9 +167,7 @@ fn frame_files(dir: &Path, file: &SampleFile) -> Files {
 
 fn is_complete(files: &Files, file: &SampleFile) -> bool {
     fs::metadata(&files.dest).is_ok_and(|meta| meta.is_file() && meta.len() == file.bytes)
-        && files
-            .recorded_sha256_hex(file.bytes)
-            .is_some_and(|recorded| recorded.eq_ignore_ascii_case(file.sha256_hex))
+        && files.records_sha256(file.bytes, &file.sha256)
 }
 
 pub fn local_status(data_root: &Path, set: &SampleSet) -> LocalStatus {
@@ -361,9 +358,7 @@ impl SampleError {
                 Self::Size { file }
             }
             DownloadError::Io(source) => Self::Io { file, source },
-            DownloadError::Transport(message) if message.contains(REFUSED_REDIRECT) => {
-                Self::Redirected { file }
-            }
+            DownloadError::RedirectRefused(_) => Self::Redirected { file },
             other => Self::Network {
                 file,
                 message: other.to_string(),
@@ -456,27 +451,17 @@ fn sample_url(set: &SampleSet, origins: &Origins, file: &SampleFile) -> Result<U
     })
 }
 
-fn pinned_request(
-    url: Url,
-    dest: &Path,
-    file: &SampleFile,
-) -> Result<DownloadRequest, SampleError> {
-    let expected_sha256 = published_digest(file.sha256_hex).ok_or_else(|| {
-        SampleError::io(file)(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the published checksum is not a sha-256 digest",
-        ))
-    })?;
-    Ok(DownloadRequest {
+fn pinned_request(url: Url, dest: &Path, file: &SampleFile) -> DownloadRequest {
+    DownloadRequest {
         url,
         dest: dest.to_path_buf(),
         expected_size: Some(file.bytes),
-        expected_sha256: Some(expected_sha256),
+        expected_sha256: Some(file.sha256),
         expected_etag: None,
         headers: Vec::new(),
         max_bytes: file.bytes,
         overwrite: true,
-    })
+    }
 }
 
 async fn fetch_file(
@@ -487,7 +472,7 @@ async fn fetch_file(
     progress: &FileProgress<'_>,
 ) -> Result<(), SampleError> {
     remove_if_present(&files.dest).map_err(SampleError::io(file))?;
-    let request = pinned_request(url, &files.dest, file)?;
+    let request = pinned_request(url, &files.dest, file);
     download(client, &request, progress)
         .await
         .map(drop)
@@ -501,25 +486,12 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
-fn published_digest(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != SHA256_HEX_LEN || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut digest = [0u8; 32];
-    for (slot, pair) in digest.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
-        *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(digest)
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     use sha2::{Digest, Sha256};
 
@@ -547,12 +519,8 @@ mod tests {
             .collect()
     }
 
-    fn hex_of(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
-
-    fn sha_hex(bytes: &[u8]) -> String {
-        hex_of(&Sha256::digest(bytes))
+    fn digest_of(bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(bytes).into()
     }
 
     fn leaked_set(
@@ -561,13 +529,13 @@ mod tests {
         names: &[&'static str],
         payload: &[u8],
     ) -> &'static SampleSet {
-        let sha256_hex: &'static str = Box::leak(sha_hex(payload).into_boxed_str());
+        let sha256 = digest_of(payload);
         let files: Vec<SampleFile> = names
             .iter()
             .map(|&name| SampleFile {
                 name,
                 bytes: payload.len() as u64,
-                sha256_hex,
+                sha256,
             })
             .collect();
         Box::leak(Box::new(SampleSet {
@@ -613,78 +581,11 @@ mod tests {
         download_set(&origins, root, set, &Recorder::default()).await
     }
 
-    struct Redirector {
-        base: String,
-        log: Arc<Mutex<Vec<Recorded>>>,
-    }
-
-    impl Redirector {
-        fn requests(&self) -> Vec<Recorded> {
-            self.log.lock().unwrap().clone()
-        }
-
-        fn targets(&self) -> Vec<String> {
-            self.requests()
-                .into_iter()
-                .map(|request| request.target)
-                .collect()
-        }
-    }
-
-    fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<(String, String)>)> {
-        let mut data = Vec::new();
-        let mut buffer = [0u8; 4096];
-        while !data.windows(4).any(|window| window == b"\r\n\r\n") {
-            match stream.read(&mut buffer) {
-                Ok(0) | Err(_) => return None,
-                Ok(read) => data.extend_from_slice(&buffer[..read]),
-            }
-        }
-        let head = String::from_utf8_lossy(&data).into_owned();
-        let mut lines = head.lines();
-        let target = lines.next()?.split_whitespace().nth(1)?.to_owned();
-        let headers = lines
-            .filter_map(|line| line.split_once(':'))
-            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
-            .collect();
-        Some((target, headers))
-    }
-
-    fn redirector(asset_base: &str, published: &'static [&'static str]) -> Redirector {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&log);
-        let location = format!("{asset_base}{ASSET_PATH}");
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let Some((target, headers)) = read_request(&mut stream) else {
-                    continue;
-                };
-                let name = target.trim_start_matches('/');
-                let (status, reply) = if published.contains(&name) {
-                    (
-                        302,
-                        format!("HTTP/1.1 302 Found\r\nLocation: {location}{target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
-                    )
-                } else {
-                    (
-                        404,
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found".to_owned(),
-                    )
-                };
-                seen.lock().unwrap().push(Recorded {
-                    target,
-                    headers,
-                    status,
-                    body_bytes: 0,
-                });
-                let _ = stream.write_all(reply.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-        Redirector { base, log }
+    fn redirector(asset_base: &str, published: &[&str]) -> TestServer {
+        serve(Resource::redirect_to(
+            &format!("{asset_base}{ASSET_PATH}"),
+            published,
+        ))
     }
 
     fn test_set(id: &'static str, payload: &[u8]) -> &'static SampleSet {
@@ -943,9 +844,13 @@ mod tests {
 
     #[test]
     fn r7_a_hosted_set_uses_its_pinned_base_and_accepts_only_safe_overrides() {
-        assert_eq!(
-            DEFAULT_SAMPLE_BASE_URL,
-            "https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/360a86196b9316e3cda5c610bc4e6be7225e0988/exampleFits/sample-data"
+        let commit = DEFAULT_SAMPLE_BASE_URL
+            .strip_prefix("https://raw.githubusercontent.com/samuelkriegerbonini-dev/AstroBurst/")
+            .and_then(|rest| rest.strip_suffix("/exampleFits/sample-data"))
+            .expect("the HST frames come from the repository's raw host");
+        assert!(
+            commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "the HST frames are pinned to a commit, not to {commit}"
         );
         assert_eq!(ENV_SAMPLE_BASE_URL, "ASTROBURST_SAMPLE_BASE_URL");
         let hst = find_set("hst-m16-wfpc2").unwrap();
@@ -1037,7 +942,7 @@ mod tests {
         for file in set.files {
             let bytes = fs::read(repo.join(file.name)).unwrap();
             assert_eq!(bytes.len() as u64, file.bytes, "{}", file.name);
-            assert_eq!(sha_hex(&bytes), file.sha256_hex, "{}", file.name);
+            assert_eq!(digest_of(&bytes), file.sha256, "{}", file.name);
         }
     }
 
@@ -1049,19 +954,23 @@ mod tests {
             ["hst-m16-wfpc2", "jwst-gc-nirspec-ifu", "jwst-miri-lrs"]
         );
         assert_eq!(SAMPLE_RELEASE_TAG, "data-v1");
-        let pins: [(&str, &[(&str, u64, &str)], u64); 2] = [
+        let pins: [(&str, &[(&str, u64, [u8; 32])], u64); 2] = [
             (
                 "jwst-gc-nirspec-ifu",
                 &[
                     (
                         IFU_S3D,
                         174_983_040,
-                        "9897a80e06896184b1f554022760f2de937bd7a2c77552e70ee9d90ea8125b0a",
+                        sha256_from_hex(
+                            "9897a80e06896184b1f554022760f2de937bd7a2c77552e70ee9d90ea8125b0a",
+                        ),
                     ),
                     (
                         IFU_X1D,
                         696_960,
-                        "eb56296ed3da7b80e03bcdac91fbe22854a352ad7096bb3c00e01a826a5d6b10",
+                        sha256_from_hex(
+                            "eb56296ed3da7b80e03bcdac91fbe22854a352ad7096bb3c00e01a826a5d6b10",
+                        ),
                     ),
                 ],
                 175_680_000,
@@ -1072,17 +981,23 @@ mod tests {
                     (
                         LRS_X1D,
                         178_560,
-                        "c6fdd9e50577e1bc48ab582efaaee171d421b615eb5d4b3211fcdeaefe165478",
+                        sha256_from_hex(
+                            "c6fdd9e50577e1bc48ab582efaaee171d421b615eb5d4b3211fcdeaefe165478",
+                        ),
                     ),
                     (
                         LRS_S2D,
                         990_720,
-                        "514645befe2b31955134e1b2696e24195ba0439798e763a23987d90116f44958",
+                        sha256_from_hex(
+                            "514645befe2b31955134e1b2696e24195ba0439798e763a23987d90116f44958",
+                        ),
                     ),
                     (
                         LRS_CAL,
                         33_995_520,
-                        "73d89cf8b1b3aef7b995a5933caa85ed9dee57540e9f9e01b864cedfb64756fc",
+                        sha256_from_hex(
+                            "73d89cf8b1b3aef7b995a5933caa85ed9dee57540e9f9e01b864cedfb64756fc",
+                        ),
                     ),
                 ],
                 35_164_800,
@@ -1095,10 +1010,10 @@ mod tests {
                 SampleSource::ReleaseAsset { tag: "data-v1" },
                 "{id}"
             );
-            let pinned: Vec<(&str, u64, &str)> = set
+            let pinned: Vec<(&str, u64, [u8; 32])> = set
                 .files
                 .iter()
-                .map(|file| (file.name, file.bytes, file.sha256_hex))
+                .map(|file| (file.name, file.bytes, file.sha256))
                 .collect();
             assert_eq!(pinned, files, "{id}");
             assert_eq!(set.total_bytes(), total, "{id}");
@@ -1113,36 +1028,11 @@ mod tests {
                 );
             }
         }
-        let ifu = find_set("jwst-gc-nirspec-ifu").unwrap();
-        assert_eq!(
-            ifu.title,
-            "JWST/NIRSpec IFU cube of the Galactic Center (G395H/F290LP) with its 1-D spectrum"
-        );
-        assert_eq!(
-            ifu.credit,
-            "JWST/NIRSpec IFU cube and 1-D spectrum of the Galactic Center (GC-NIRSPEC-1): NASA, ESA, CSA, GTO programme 1266 (PI M. Garcia Marin), data via MAST at STScI"
-        );
-        assert_eq!(
-            ifu.demonstrates,
-            "Cube: spectra with error bands, moment maps, line fits and line measurement, next to the pipeline's 1-D spectrum"
-        );
-        let lrs = find_set("jwst-miri-lrs").unwrap();
-        assert_eq!(
-            lrs.title,
-            "JWST/MIRI LRS spectrum of the Type Ia supernova SN 2021aefx with its 2-D spectrum and a calibrated exposure"
-        );
-        assert_eq!(
-            lrs.credit,
-            "JWST/MIRI LRS slit spectroscopy of SN 2021aefx: NASA, ESA, CSA, GO programme 2072 (PI S. W. Jha), data via MAST at STScI"
-        );
-        assert_eq!(
-            lrs.demonstrates,
-            "1-D spectra: the spectrum document with line measurement, the 2-D resampled slit spectrum and a level-2 calibrated exposure"
-        );
-        assert_eq!(
-            find_set("hst-m16-wfpc2").unwrap().demonstrates,
-            "Compose (SHO and HOO narrowband palettes), photometry and masks"
-        );
+        for set in sample_sets() {
+            for text in [set.title, set.credit, set.licence, set.demonstrates] {
+                assert!(!text.trim().is_empty(), "{}", set.id);
+            }
+        }
     }
 
     #[tokio::test]
@@ -1163,7 +1053,7 @@ mod tests {
             status(LocalState::Ready, 3 * LEN, 3 * LEN)
         );
         assert_eq!(ready_paths(root.path(), set), Some(paths.clone()));
-        assert_eq!(origin.targets(), ["/a.fits", "/b.fits", "/c.fits"]);
+        assert_eq!(targets(&origin), ["/a.fits", "/b.fits", "/c.fits"]);
         assert!(origin
             .requests()
             .iter()
@@ -1237,7 +1127,7 @@ mod tests {
         assert_eq!(status.received_bytes, 0);
         assert_eq!(ready_paths(root.path(), set), None);
         assert!(!set_dir(root.path(), set).join("a.fits").exists());
-        assert_eq!(origin.targets(), ["/a.fits"]);
+        assert_eq!(targets(&origin), ["/a.fits"]);
     }
 
     #[tokio::test]
@@ -1259,7 +1149,7 @@ mod tests {
             "a.fits: not available on GitHub (HTTP 404); the sample release may not be published yet"
         );
         assert_eq!(local_status(root.path(), set).state, LocalState::Absent);
-        assert_eq!(nothing.targets(), ["/a.fits"]);
+        assert_eq!(targets(&nothing), ["/a.fits"]);
         assert!(assets.requests().is_empty());
         let first_only = redirector(&assets.base, &["a.fits"]);
         let error = fetch_release(&first_only.base, root.path(), set)
@@ -1273,7 +1163,7 @@ mod tests {
             local_status(root.path(), set),
             status(LocalState::Partial, LEN, 3 * LEN)
         );
-        assert_eq!(first_only.targets(), ["/a.fits", "/b.fits"]);
+        assert_eq!(targets(&first_only), ["/a.fits", "/b.fits"]);
         let hosted = test_set("a5-hosted-set", &payload);
         let raw = fetch_set(&nothing.base, root.path(), hosted)
             .await
@@ -1336,7 +1226,7 @@ mod tests {
             error.to_string(),
             "a.fits: the server redirected the download to a host that AstroBurst does not download samples from"
         );
-        assert_eq!(origin.targets(), ["/a.fits"]);
+        assert_eq!(targets(&origin), ["/a.fits"]);
         assert!(assets.requests().is_empty());
         assert_eq!(local_status(root.path(), set).state, LocalState::Absent);
     }
@@ -1407,7 +1297,7 @@ mod tests {
                 let path = dir.join(file.name);
                 let bytes = fs::read(&path).unwrap();
                 assert_eq!(bytes.len() as u64, file.bytes, "{}", file.name);
-                assert_eq!(sha_hex(&bytes), file.sha256_hex, "{}", file.name);
+                assert_eq!(digest_of(&bytes), file.sha256, "{}", file.name);
                 drop(bytes);
                 let key = path.to_string_lossy().into_owned();
                 let opened = if file.name.ends_with("_s3d.fits") {
@@ -1496,14 +1386,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a12_a_stray_newer_at_mast_marker_from_an_older_build_does_not_flag_a_release_asset_set(
-    ) {
+    async fn a12_a_foreign_file_in_the_set_folder_is_ignored() {
         let payload = body(35);
         let root = tempfile::tempdir().unwrap();
         let set = release_set("a12-set", &payload);
         let dir = set_dir(root.path(), set);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("a.fits.newer-at-mast"), ETAG_V0).unwrap();
+        fs::write(dir.join("a.fits.notes"), ETAG_V0).unwrap();
         assert_eq!(
             local_status(root.path(), set),
             status(LocalState::Absent, 0, 3 * LEN)

@@ -1,11 +1,26 @@
-export function createTimedNotice<T>(onChange: (value: T | null) => void, durationMs: number): (value: T) => void {
+export interface TimedNotice<T> {
+  show: (value: T) => void;
+  clear: () => void;
+}
+
+export function createTimedNotice<T>(onChange: (value: T | null) => void, durationMs: number): TimedNotice<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  return (value) => {
+  const stop = () => {
     if (timer !== null) clearTimeout(timer);
-    onChange(value);
-    timer = setTimeout(() => {
-      timer = null;
+    timer = null;
+  };
+  return {
+    show: (value) => {
+      stop();
+      onChange(value);
+      timer = setTimeout(() => {
+        timer = null;
+        onChange(null);
+      }, durationMs);
+    },
+    clear: () => {
+      stop();
       onChange(null);
-    }, durationMs);
+    },
   };
 }

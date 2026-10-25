@@ -767,7 +767,7 @@ mod tests {
         query.filters.categories = vec![ObjectCategory::Ism];
         let page = search(Arc::clone(&rig.hub), "g1:search".to_owned(), query, false).await.unwrap();
         let value = serde_json::to_value(&page).unwrap();
-        assert_eq!((&value["levelFilteredLocally"], &value["unfilteredTotal"]), (&json!(true), &json!(null)));
+        assert_eq!((value.get("levelFilteredLocally"), &value["unfilteredTotal"]), (None, &json!(null)));
         assert_eq!(value["levelAppliedLocally"], json!("productLevel = 3"));
         assert_eq!(value["rows"].as_array().unwrap().len(), 2);
         assert_eq!(value["rows"][0]["categories"], json!(["ism"]));

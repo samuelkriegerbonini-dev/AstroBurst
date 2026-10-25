@@ -256,9 +256,7 @@ export function regionLabel(region: Region, ordinal: number): string {
   return text !== "" ? text : `R${ordinal}`;
 }
 
-export function fileBaseName(filePath: string): string {
-  return filePath.split(/[\\/]/).pop() ?? filePath;
-}
+export { fileBaseName } from "./values";
 
 function fileStem(filePath: string | null): string {
   const withoutFragment = (filePath ?? "").split("#")[0];

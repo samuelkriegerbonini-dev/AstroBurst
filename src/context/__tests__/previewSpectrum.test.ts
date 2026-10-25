@@ -17,44 +17,6 @@ vi.hoisted(() => {
   });
 });
 
-const hooks = vi.hoisted(() => {
-  type Cell = { value?: unknown; deps?: readonly unknown[]; set?: (next: unknown) => void; cleanup?: unknown };
-  const run = { active: false, cells: [] as Cell[], cursor: 0, effects: [] as (() => void)[] };
-  const sameDeps = (a: readonly unknown[] | undefined, b: readonly unknown[] | undefined) =>
-    a !== undefined && b !== undefined && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
-  const cell = (): Cell => (run.cells[run.cursor++] ??= {});
-  const remember = (compute: () => unknown, deps?: readonly unknown[]) => {
-    const c = cell();
-    if (!("value" in c) || !sameDeps(c.deps, deps)) {
-      c.value = compute();
-      c.deps = deps;
-    }
-    return c.value;
-  };
-  const impl = {
-    useState(init: unknown) {
-      const c = cell();
-      if (!("value" in c)) c.value = typeof init === "function" ? (init as () => unknown)() : init;
-      c.set ??= (next: unknown) => {
-        c.value = typeof next === "function" ? (next as (prev: unknown) => unknown)(c.value) : next;
-      };
-      return [c.value, c.set];
-    },
-    useRef: (init: unknown) => remember(() => ({ current: init }), []),
-    useMemo: remember,
-    useCallback: (fn: unknown, deps?: readonly unknown[]) => remember(() => fn, deps),
-    useEffect(effect: () => unknown, deps?: readonly unknown[]) {
-      const c = cell();
-      if (sameDeps(c.deps, deps)) return;
-      c.deps = deps;
-      run.effects.push(() => {
-        if (typeof c.cleanup === "function") c.cleanup();
-        c.cleanup = effect();
-      });
-    },
-  };
-  return { run, impl };
-});
 
 const invokeMock = vi.hoisted(() => vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>());
 const composite = vi.hoisted(() => ({
@@ -66,17 +28,7 @@ const composite = vi.hoisted(() => ({
   setCompositeStfLinked: vi.fn(),
 }));
 
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  const fakes = hooks.impl as unknown as Record<string, (...args: unknown[]) => unknown>;
-  const switched = Object.fromEntries(
-    Object.entries(fakes).map(([name, fake]) => [
-      name,
-      (...args: unknown[]) => (hooks.run.active ? fake : (actual[name] as (...a: unknown[]) => unknown))(...args),
-    ]),
-  );
-  return { ...actual, ...switched };
-});
+vi.mock("react", async (importOriginal) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../infrastructure/tauri/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../infrastructure/tauri/client")>()),
   typedInvoke: invokeMock,
@@ -88,6 +40,7 @@ vi.mock("../CompositeContext", () => ({
 }));
 vi.mock("../ComposeWizardContext", () => ({ useComposeWizardContext: () => ({ state: { compositeReady: false } }) }));
 
+import { hooks } from "../../test/hookRuntime";
 import { PreviewProvider, useCubeContext, useDisplayedImage } from "../PreviewContext";
 import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
 import { displayMemory } from "../../utils/displayMemoryStore";

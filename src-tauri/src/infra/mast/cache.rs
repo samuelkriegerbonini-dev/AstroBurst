@@ -11,9 +11,11 @@ use super::settings::MastSettings;
 use crate::core::mast::errors::bad_input;
 use crate::core::mast::ids::{validate_dataset_id, validate_filename};
 use crate::core::mast::jpeg::ImageKind;
+use crate::core::mast::query::PAGE_LIMIT;
 use crate::core::mast::types::{MastCacheInfo, MastCmdError, MastMissionId};
 
 pub const SEARCH_CACHE_ENTRIES: usize = 32;
+pub const SEARCH_CACHE_ROWS: usize = SEARCH_CACHE_ENTRIES * PAGE_LIMIT as usize;
 pub const SEARCH_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 pub const IMAGE_SET_ENTRIES: usize = 500;
 pub const PRODUCT_LIST_ENTRIES: usize = 64;
@@ -32,28 +34,41 @@ struct Slot<K, V> {
     value: V,
     stored: Instant,
     used: u64,
+    weight: usize,
 }
 
 pub struct MemoryLru<K, V> {
     capacity: usize,
     ttl: Duration,
+    budget: usize,
+    weigh: fn(&V) -> usize,
+    held: usize,
     slots: Vec<Slot<K, V>>,
     tick: u64,
 }
 
 impl<K: PartialEq, V: Clone> MemoryLru<K, V> {
     pub fn new(capacity: usize, ttl: Duration) -> Self {
-        Self { capacity, ttl, slots: Vec::new(), tick: 0 }
+        Self::weighed(capacity, ttl, capacity, |_| 1)
+    }
+
+    pub fn weighed(capacity: usize, ttl: Duration, budget: usize, weigh: fn(&V) -> usize) -> Self {
+        Self { capacity, ttl, budget, weigh, held: 0, slots: Vec::new(), tick: 0 }
     }
 
     fn expired(&self, stored: Instant, now: Instant) -> bool {
         now.saturating_duration_since(stored) >= self.ttl
     }
 
+    fn take(&mut self, index: usize) {
+        let slot = self.slots.swap_remove(index);
+        self.held -= slot.weight;
+    }
+
     pub fn get(&mut self, key: &K, now: Instant) -> Option<V> {
         let index = self.slots.iter().position(|slot| slot.key == *key)?;
         if self.expired(self.slots[index].stored, now) {
-            self.slots.swap_remove(index);
+            self.take(index);
             return None;
         }
         self.tick += 1;
@@ -62,28 +77,35 @@ impl<K: PartialEq, V: Clone> MemoryLru<K, V> {
     }
 
     pub fn insert(&mut self, key: K, value: V, now: Instant) {
-        if self.capacity == 0 {
+        if let Some(index) = self.slots.iter().position(|slot| slot.key == key) {
+            self.take(index);
+        }
+        let weight = (self.weigh)(&value);
+        if self.capacity == 0 || weight > self.budget {
             return;
         }
         self.tick += 1;
-        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.key == key) {
-            slot.value = value;
-            slot.stored = now;
-            slot.used = self.tick;
-            return;
-        }
         let ttl = self.ttl;
         self.slots.retain(|slot| now.saturating_duration_since(slot.stored) < ttl);
-        if self.slots.len() >= self.capacity {
-            if let Some(oldest) = self.slots.iter().enumerate().min_by_key(|(_, slot)| slot.used).map(|(i, _)| i) {
-                self.slots.swap_remove(oldest);
-            }
+        self.held = self.slots.iter().map(|slot| slot.weight).sum();
+        while self.slots.len() >= self.capacity || self.held + weight > self.budget {
+            let Some(oldest) = self.slots.iter().enumerate().min_by_key(|(_, slot)| slot.used).map(|(i, _)| i) else {
+                break;
+            };
+            self.take(oldest);
         }
-        self.slots.push(Slot { key, value, stored: now, used: self.tick });
+        self.held += weight;
+        self.slots.push(Slot { key, value, stored: now, used: self.tick, weight });
     }
 
     pub fn clear(&mut self) {
         self.slots.clear();
+        self.held = 0;
+    }
+
+    #[cfg(test)]
+    pub fn weight(&self) -> usize {
+        self.held
     }
 
     pub fn len(&self) -> usize {
@@ -460,6 +482,31 @@ mod tests {
         let mut zero = MemoryLru::new(0, Duration::from_secs(60));
         zero.insert("x", 1, start);
         assert_eq!(zero.get(&"x", start), None);
+    }
+
+    #[test]
+    fn a_weighed_lru_keeps_its_total_weight_within_the_budget() {
+        let start = Instant::now();
+        let mut cache: MemoryLru<&str, usize> = MemoryLru::weighed(8, Duration::from_secs(60), 10, |rows| *rows);
+        cache.insert("a", 4, start);
+        cache.insert("b", 4, start);
+        assert_eq!(cache.get(&"a", start), Some(4));
+        cache.insert("c", 4, start);
+        assert_eq!((cache.len(), cache.weight()), (2, 8));
+        assert_eq!(cache.get(&"b", start), None, "the least recently used slot stayed past the budget");
+        cache.insert("a", 6, start);
+        assert_eq!((cache.len(), cache.weight()), (2, 10));
+        cache.insert("d", 11, start);
+        assert_eq!(cache.get(&"d", start), None, "a value heavier than the whole budget was kept");
+        assert_eq!(cache.weight(), 10);
+        cache.insert("a", 11, start);
+        assert_eq!(cache.get(&"a", start), None, "a replaced value that no longer fits kept the old one");
+        assert_eq!((cache.len(), cache.weight()), (1, 4));
+        assert_eq!(cache.get(&"c", start + Duration::from_secs(61)), None);
+        assert_eq!((cache.len(), cache.weight()), (0, 0));
+        cache.insert("e", 1, start);
+        cache.clear();
+        assert_eq!((cache.len(), cache.weight()), (0, 0));
     }
 
     #[test]

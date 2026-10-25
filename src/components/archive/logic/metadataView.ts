@@ -1,6 +1,7 @@
 import type { MastColumn, MastResolved, MastRow } from "../../../shared/types/mast";
 import { coordinatesText } from "./copyBuilders";
 import { categoryText, dateText, isPublic } from "./cardLabel";
+import { CATEGORY_COLUMN } from "./missionLabels";
 
 export interface MetaRow {
   label: string;
@@ -96,7 +97,7 @@ function observation(row: MastRow, peek: MetaPeek | null): MetaRow[] {
   const add = (label: string, value: string | null | undefined) => {
     if (value) rows.push(metaRow(label, value));
   };
-  if ("_category" in row.values) add("Category", categoryText(row) ?? "unknown");
+  if (CATEGORY_COLUMN in row.values) add("Category", categoryText(row) ?? "unknown");
   add("Target description", row.targetDescription?.trim());
   add("Instrument", row.instrument?.trim());
   add("Exp type", row.expType);

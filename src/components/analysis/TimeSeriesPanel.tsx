@@ -65,7 +65,7 @@ import { GAIN_TITLE, gainCaption, loadGainPrefill, nextGainText } from "../../ut
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import { displaysFileGrid, otherGridHint } from "../../utils/stackingOutputs";
 import { abandonRun, beginRun, createRunTracker, isCurrentRun, settleRun } from "../../utils/runTracker";
-import { createTimedNotice } from "../../utils/timedNotice";
+import { useTimedNotice } from "../../hooks/useTimedNotice";
 import { DecimalField, ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
 
 interface TimeSeriesPanelProps {
@@ -134,6 +134,29 @@ function instrumentalMag(flux: number | null | undefined): number | null {
   return typeof flux === "number" && Number.isFinite(flux) && flux > 0 ? -2.5 * Math.log10(flux) : null;
 }
 
+interface PointTarget {
+  id: string;
+  target: TimeSeriesTarget;
+}
+
+function pointTargets(regions: ReturnType<typeof useRegionDoc>["regions"], roles: Record<string, TimeSeriesRole>): PointTarget[] {
+  const rows: PointTarget[] = [];
+  for (const region of regions) {
+    if (region.shape.shape !== "point") continue;
+    const index = rows.length;
+    rows.push({
+      id: region.id,
+      target: {
+        x: region.shape.x,
+        y: region.shape.y,
+        label: region.props.text || defaultPointLabel(index),
+        role: roles[region.id] ?? defaultRole(index),
+      },
+    });
+  }
+  return rows;
+}
+
 function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const apertureId = useId();
   const skyInId = useId();
@@ -161,8 +184,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const [result, setResult] = useState<TimeSeriesResult | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
-  const [showSavedPath] = useState(() => createTimedNotice<string>(setSavedPath, SAVED_NOTICE_MS));
+  const [savedPath, showSavedPath, clearSavedPath] = useTimedNotice<string>(SAVED_NOTICE_MS);
   const runRef = useRef(createRunTracker());
   const resultRef = useRef<TimeSeriesResult | null>(null);
   const gainTextRef = useRef(gainText);
@@ -184,10 +206,10 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     setResult(null);
     setError(null);
     setRunning(false);
-    setSavedPath(null);
+    clearSavedPath();
     setRoles({});
     setSeriesKey(SERIES_TARGET);
-  }, [filePath, abandon]);
+  }, [filePath, abandon, clearSavedPath]);
 
   useEffect(() => abandon, [abandon]);
 
@@ -211,24 +233,9 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const frames = useMemo(() => orderWithReferenceFirst(matching, filePath), [matching, filePath]);
   const referenceLoaded = frames.length > 0 && pathOf(frames[0]) === filePath;
 
-  const pointRegions = useMemo(() => regionDoc.regions.filter((r) => r.shape.shape === "point"), [regionDoc]);
-  const targets = useMemo((): { id: string; target: TimeSeriesTarget }[] => {
-    const rows: { id: string; target: TimeSeriesTarget }[] = [];
-    for (const region of pointRegions) {
-      if (region.shape.shape !== "point") continue;
-      const index = rows.length;
-      rows.push({
-        id: region.id,
-        target: {
-          x: region.shape.x,
-          y: region.shape.y,
-          label: region.props.text || defaultPointLabel(index),
-          role: roles[region.id] ?? defaultRole(index),
-        },
-      });
-    }
-    return rows;
-  }, [pointRegions, roles]);
+  const targets = useMemo(() => pointTargets(regionDoc.regions, roles), [regionDoc, roles]);
+  const referenceDoc = useRegionDoc(result?.reference_path ?? filePath);
+  const referenceTargets = useMemo(() => pointTargets(referenceDoc.regions, roles), [referenceDoc, roles]);
 
   const apertureField = decimalFieldState(apertureText, APERTURE_FIELD);
   const skyInField = decimalFieldState(skyInText, SKY_IN_FIELD);
@@ -272,7 +279,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     const storeOrder = matching.map(pathOf);
     setRunning(true);
     setError(null);
-    setSavedPath(null);
+    clearSavedPath();
     resetProgress();
     try {
       const site = loadSiteOverride(window.localStorage);
@@ -300,7 +307,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
         resetProgress();
       }
     }
-  }, [canMeasure, apertureRadius, matching, frames, sent, annulusInner, annulusOuter, gain, excludeDq, trackDrift, resetProgress]);
+  }, [canMeasure, apertureRadius, matching, frames, sent, annulusInner, annulusOuter, gain, excludeDq, trackDrift, resetProgress, clearSavedPath]);
 
   const cancel = useCallback(() => {
     cancelProgress(TIME_SERIES_PROGRESS_EVENT).catch(() => {});
@@ -435,9 +442,9 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
 
   const exportSource = useMemo((): LightCurveExportSource | null => {
     if (!result || !analysis) return null;
-    const labelled = withCurrentLabels(result, targets.map((t) => t.target));
+    const labelled = withCurrentLabels(result, referenceTargets.map((t) => t.target));
     return { result: labelled, targetIdx: analysis.targetIdx, compIdx: analysis.compIdx };
-  }, [result, analysis, targets]);
+  }, [result, analysis, referenceTargets]);
   const etdBlock = useMemo(() => (exportSource ? etdBlocker(exportSource) : null), [exportSource]);
   const exoClockBlock = useMemo(() => (exportSource ? exoClockBlocker(exportSource, exoClockTime) : null), [exportSource, exoClockTime]);
   const exportNotes = useMemo(() => exportBlockerNotes(etdBlock, exoClockBlock), [etdBlock, exoClockBlock]);

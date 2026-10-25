@@ -250,12 +250,12 @@ export function panelHints(
   const position = pickHints(centreFromWcs ? wcs : header, POSITION_HINT_FIELDS);
   return {
     texts: {
-      ...pickHints(scaleFromWcs ? wcs : header, SCALE_HINT_FIELDS),
+      ...pickHints(scaleFromHints ? header : wcs, SCALE_HINT_FIELDS),
       ...(position.centerRa === undefined ? position : { radius: DEFAULT_HINT_TEXTS.radius, ...position }),
     },
     sources: {
       centre: centreFromWcs ? WCS_HINT_SOURCE : centreFromHints ? (hints?.centre?.source ?? null) : null,
-      scale: scaleFromWcs ? WCS_HINT_SOURCE : scaleFromHints ? (hints?.scale?.source ?? null) : null,
+      scale: scaleFromHints ? (hints?.scale?.source ?? null) : scaleFromWcs ? WCS_HINT_SOURCE : null,
     },
   };
 }

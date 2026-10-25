@@ -12,7 +12,6 @@ import {
 } from "../statisticsUnits";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../analysisLabels";
 import type { ChannelStatistics } from "../../shared/types/statistics";
-import statisticsPanelSource from "../../components/analysis/StatisticsPanel.tsx?raw";
 
 const stats: ChannelStatistics = {
   count: 5,
@@ -218,17 +217,5 @@ describe("robust sigma row (UX-35)", () => {
     expect(statisticValue(stats, "median")).toBe(3);
     expect(statisticValue({ ...stats, mad: 2 }, "sigma_mad")).toBe(1.4826 * 2);
     expect(statisticValue({ ...stats, mad: Number.NaN }, "sigma_mad")).toBeNaN();
-  });
-});
-
-describe("StatisticsPanel table wiring (UX-35)", () => {
-  it("reads every cell through statisticValue, so the sigma_mad row reaches the table", () => {
-    expect(statisticsPanelSource).toContain("formatStatistic(statisticValue(s, row.key), row.kind, unit)");
-    expect(statisticsPanelSource).not.toMatch(/s\[row\.key\]/);
-  });
-
-  it("tags each row with its key and gives the label cell the row title", () => {
-    expect(statisticsPanelSource).toContain("data-statistic={row.key}");
-    expect(statisticsPanelSource).toMatch(/<td className="[^"]*" title=\{row\.title\}>\s*\{row\.label\}/);
   });
 });

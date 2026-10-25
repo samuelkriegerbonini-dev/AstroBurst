@@ -39,6 +39,12 @@ pnpm install
 pnpm tauri dev
 ```
 
+`pnpm tauri build` first runs `node scripts/fetch-tier0.mjs`, which downloads the bundled Tycho-2 catalogue (`src-tauri/resources/catalogs/tycho2-l6-v1.abcat`, 15.5 MB) from the `catalogs-v1` release and keeps it only when its size and SHA-256 match the pinned ones; `node scripts/fetch-tier0.mjs --verify <file or folder>` only checks a copy. Without network access, set `ASTROBURST_TIER0_SOURCE` to a copy you already have; `ASTROBURST_CATALOG_BASE_URL` replaces the download address. The release workflows pin Rust 1.96.0, and `node scripts/third-party-licenses/generate.js` stops unless it runs with that `rustc`.
+
+### Packaging the Linux tarball
+
+The release tarball `astroburst-<version>-linux-x86_64.tar.gz` holds `bin/astroburst`, the bundled catalogue in `lib/AstroBurst/catalogs/`, `licenses/` and the desktop entry, metainfo and MIME files in `data/`. On Linux the app looks for its bundled files in `../lib/AstroBurst` from the folder of its binary, as Tauri does, and otherwise in `/usr/lib/AstroBurst`, so keep `bin/` and `lib/` side by side under one prefix. A package that puts the catalogue anywhere else sets `ASTROBURST_TIER0_PATH` to the catalogue file or its folder.
+
 ## How to Contribute
 
 ### Reporting Bugs

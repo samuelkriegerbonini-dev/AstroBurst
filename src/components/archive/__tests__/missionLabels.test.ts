@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MISSION_LABELS, missionLabelOf } from "../logic/missionLabels";
+import { CATEGORY_COLUMN, MISSION_LABELS, missionLabelOf } from "../logic/missionLabels";
 import type { MastMissionId } from "../../../shared/types/mast";
 
 const rust = readFileSync(fileURLToPath(new URL("../../../../src-tauri/src/core/mast/missions.rs", import.meta.url)), "utf8");
@@ -17,6 +17,10 @@ describe("mission labels", () => {
   it("match the Rust labels entry for entry", () => {
     expect(Object.keys(rustLabels())).toHaveLength(10);
     expect(MISSION_LABELS).toEqual(rustLabels());
+  });
+
+  it("read the synthetic category column under the name Rust gives it", () => {
+    expect(rust).toContain(`pub const CATEGORY_COLUMN: &str = "${CATEGORY_COLUMN}";`);
   });
 
   it("name a mission by its label and an unknown id by the id itself", () => {

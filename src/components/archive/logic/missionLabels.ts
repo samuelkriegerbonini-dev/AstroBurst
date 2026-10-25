@@ -1,5 +1,7 @@
 import type { MastMissionId } from "../../../shared/types/mast";
 
+export const CATEGORY_COLUMN = "_category";
+
 export const MISSION_LABELS: Record<MastMissionId, string> = {
   jwst: "JWST",
   hst: "HST",

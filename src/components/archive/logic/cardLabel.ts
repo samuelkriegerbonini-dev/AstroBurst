@@ -1,4 +1,5 @@
 import type { MastRow } from "../../../shared/types/mast";
+import { CATEGORY_COLUMN } from "./missionLabels";
 
 const INSTRUMENT_NAMES: Record<string, string> = {
   NIRCAM: "NIRCam",
@@ -7,7 +8,7 @@ const INSTRUMENT_NAMES: Record<string, string> = {
 
 const WAVELENGTH_FILTER = /^F(\d{3,4})[A-Z]{1,2}$/i;
 const RANGE_MIN_FILTERS = 3;
-const EXPOSURE_LEVELS = new Set(["1b", "2a", "2b", "2c"]);
+export const EXPOSURE_LEVELS: ReadonlySet<string> = new Set(["1b", "2a", "2b", "2c"]);
 
 export function instrumentText(instrument: string | null): string {
   if (!instrument) return "";
@@ -25,7 +26,7 @@ export function levelBadge(row: Pick<MastRow, "level" | "levelClass">): string |
 }
 
 export function categoryText(row: Pick<MastRow, "values">): string | null {
-  const value = row.values._category;
+  const value = row.values[CATEGORY_COLUMN];
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
@@ -97,7 +98,7 @@ export function cardAccessibleName(row: MastRow, missionLabel: string): string {
   const parts: string[] = [row.target?.trim() || row.datasetId];
   parts.push([missionLabel, instrumentText(row.instrument)].filter(Boolean).join(" "));
   if (row.level) parts.push(`level ${row.level}`);
-  if ("_category" in row.values) parts.push(`category ${categoryText(row) ?? "unknown"}`);
+  if (CATEGORY_COLUMN in row.values) parts.push(`category ${categoryText(row) ?? "unknown"}`);
   const filters = filtersPart(row.filters);
   if (filters) parts.push(filters);
   const date = dateText(row.dateObs);

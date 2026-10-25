@@ -19,7 +19,8 @@ use xz2::write::XzEncoder;
 
 use astroburst_lib::core::astrometry::frames::icrs_to_galactic;
 use astroburst_lib::core::astrometry::healpix_cat::{
-    decode_star, write_catalog, CatHeader, CatType, CatalogStar, HealpixCatalog, Record, HEADER_LEN,
+    decode_star, write_catalog, CatHeader, CatType, CatalogStar, HealpixCatalog, Record,
+    COMPACT_COLOUR_LIMIT, COMPACT_MAG_RANGE, HEADER_LEN,
 };
 use astroburst_lib::core::astrometry::wcs::angular_separation;
 
@@ -48,8 +49,6 @@ const ARCMIN_PER_DEGREE: f64 = 60.0;
 const SKY_DEG2: f64 = 41_252.961_249_419_27;
 const COMPACT6_LIMIT_ARCSEC: f64 = i16::MAX as f64 / 10.0;
 const COMPACT6_MARGIN: f64 = 0.10;
-const COMPACT_MAG_RANGE: (f64, f64) = (-1.5, 23.9);
-const COMPACT_COLOUR_LIMIT: f64 = 2.54;
 const EDGE_SEGMENTS: u32 = 64;
 const ZSTD_LEVEL: i32 = 19;
 const XZ_LEVEL: u32 = 9;

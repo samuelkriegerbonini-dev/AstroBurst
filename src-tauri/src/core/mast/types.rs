@@ -310,8 +310,6 @@ pub struct MastSearchPage {
     pub elapsed_ms: u64,
     pub from_cache: bool,
     #[serde(default)]
-    pub level_filtered_locally: bool,
-    #[serde(default)]
     pub level_applied_locally: Option<String>,
     #[serde(default)]
     pub unfiltered_total: Option<i64>,
@@ -916,18 +914,17 @@ mod tests {
             unresolved_targets: Vec::new(),
             elapsed_ms: 0,
             from_cache: false,
-            level_filtered_locally: true,
             level_applied_locally: Some("productLevel = 3".into()),
             unfiltered_total: Some(1913),
         };
         let value = serde_json::to_value(&page).unwrap();
         assert_eq!(value["droppedConditions"], json!(["tsovisit"]));
-        assert_eq!((&value["levelFilteredLocally"], &value["unfilteredTotal"]), (&json!(true), &json!(1913)));
+        assert_eq!((value.get("levelFilteredLocally"), &value["unfilteredTotal"]), (None, &json!(1913)));
         assert_eq!(value["levelAppliedLocally"], json!("productLevel = 3"));
         let mut old = value;
         old.as_object_mut().unwrap().retain(|key, _| !["levelFilteredLocally", "levelAppliedLocally", "unfilteredTotal"].contains(&key.as_str()));
         let decoded: MastSearchPage = serde_json::from_value(old).unwrap();
-        assert_eq!((decoded.level_filtered_locally, decoded.level_applied_locally, decoded.unfiltered_total), (false, None, None));
+        assert_eq!((decoded.level_applied_locally, decoded.unfiltered_total), (None, None));
     }
 
     #[test]

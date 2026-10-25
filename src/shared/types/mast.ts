@@ -160,7 +160,6 @@ export interface MastSearchPage {
   unresolvedTargets: string[];
   elapsedMs: number;
   fromCache: boolean;
-  levelFilteredLocally: boolean;
   levelAppliedLocally: string | null;
   unfilteredTotal: number | null;
 }

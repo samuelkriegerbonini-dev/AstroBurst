@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
-import { Download, Sparkles } from "lucide-react";
 import { isTauri } from "../infrastructure/tauri";
-import type { PaletteAction } from "../components/CommandPalette";
-import { formatBytes } from "../components/archive/logic/productView";
+import { onDataFolderChanged } from "../services/config";
 import {
   cancelSampleDownload,
   downloadSampleSet,
@@ -39,22 +37,25 @@ export interface SampleDataStore {
   subscribe(cb: () => void): () => void;
   refresh(): Promise<void>;
   progress(update: SampleProgress): void;
-  download(id: string, onOpen: OpenSampleFrames): Promise<void>;
+  download(id: string, onOpen: OpenSampleFrames): Promise<SampleFailure>;
   cancel(id: string): Promise<void>;
-  open(id: string, onOpen: OpenSampleFrames): Promise<void>;
+  open(id: string, onOpen: OpenSampleFrames): Promise<SampleFailure>;
 }
 
+export type SampleFailure = string | null;
+
 export interface SampleActions {
-  download: () => Promise<void>;
+  download: () => Promise<SampleFailure>;
   cancel: () => Promise<void>;
-  open: () => Promise<void>;
-  retry: () => Promise<void>;
+  open: () => Promise<SampleFailure>;
 }
 
 export interface SampleControls extends SampleActions {
   id: string;
   title: string;
   credit: string;
+  licence: string;
+  fileCount: number;
   state: SampleState;
   receivedBytes: number;
   totalBytes: number;
@@ -72,11 +73,11 @@ const SERVICE_API: SampleDataApi = {
 const NO_ENTRIES: readonly SampleEntry[] = [];
 const UNOWNED_DOWNLOAD_POLL_MS = 1_000;
 const SAMPLE_FRAMES_GONE = "The sample frames are no longer in the data folder";
-const SAMPLE_KEYWORDS = ["Sample", "Example", "M16", "Eagle", "Download"];
 
 export function createSampleDataStore(api: SampleDataApi = SERVICE_API): SampleDataStore {
   let entries = NO_ENTRIES;
   let pollScheduled = false;
+  let listSeq = 0;
   const running = new Set<string>();
   const cancelRequested = new Set<string>();
   const listeners = new Set<() => void>();
@@ -97,13 +98,16 @@ export function createSampleDataStore(api: SampleDataApi = SERVICE_API): SampleD
   }
 
   async function refresh(): Promise<void> {
+    const seq = ++listSeq;
     let sets: SampleSetReport[];
     try {
       sets = await api.list();
     } catch (err) {
       console.error("[AstroBurst] Sample data:", err);
+      if (seq === listSeq) pollUnownedDownloads();
       return;
     }
+    if (seq !== listSeq) return;
     const before = new Map(entries.map((e) => [e.id, e]));
     entries = sets.map((set): SampleEntry => {
       const previous = before.get(set.id);
@@ -119,9 +123,9 @@ export function createSampleDataStore(api: SampleDataApi = SERVICE_API): SampleD
     patch(update.id, { received_bytes: update.received_bytes, total_bytes: update.total_bytes, file: update.file });
   }
 
-  async function download(id: string, onOpen: OpenSampleFrames): Promise<void> {
+  async function download(id: string, onOpen: OpenSampleFrames): Promise<SampleFailure> {
     const entry = entryOf(id);
-    if (!entry || entry.state === "downloading") return;
+    if (!entry || entry.state === "downloading") return null;
     running.add(id);
     cancelRequested.delete(id);
     patch(id, { state: "downloading", error: null });
@@ -134,15 +138,17 @@ export function createSampleDataStore(api: SampleDataApi = SERVICE_API): SampleD
       const cancelled = isSampleCancelled(err);
       if (!cancelled) console.error("[AstroBurst] Sample data download:", err);
       const received = entryOf(id)?.received_bytes ?? 0;
-      patch(id, { state: received > 0 ? "partial" : "absent", file: null, error: cancelled ? null : sampleErrorMessage(err) });
+      const error = cancelled ? null : sampleErrorMessage(err);
+      patch(id, { state: received > 0 ? "partial" : "absent", file: null, error });
       await refresh();
-      return;
+      return error;
     }
     running.delete(id);
     const userCancelled = cancelRequested.delete(id);
     patch(id, { state: "ready", received_bytes: entryOf(id)?.total_bytes ?? 0, file: null, error: null });
     if (!userCancelled) onOpen(opened);
     await refresh();
+    return null;
   }
 
   async function cancel(id: string): Promise<void> {
@@ -155,18 +161,20 @@ export function createSampleDataStore(api: SampleDataApi = SERVICE_API): SampleD
     }
   }
 
-  async function open(id: string, onOpen: OpenSampleFrames): Promise<void> {
-    if (running.has(id) || !entryOf(id)) return;
+  async function open(id: string, onOpen: OpenSampleFrames): Promise<SampleFailure> {
+    if (running.has(id) || !entryOf(id)) return null;
     let opened: SampleOpen;
     try {
       opened = await api.open(id);
     } catch (err) {
-      patch(id, { error: isSampleNotDownloaded(err) ? SAMPLE_FRAMES_GONE : sampleErrorMessage(err) });
+      const error = isSampleNotDownloaded(err) ? SAMPLE_FRAMES_GONE : sampleErrorMessage(err);
+      patch(id, { error });
       await refresh();
-      return;
+      return error;
     }
     patch(id, { error: null });
     onOpen(opened);
+    return null;
   }
 
   return {
@@ -192,7 +200,6 @@ export function sampleActions(store: SampleDataStore, id: string, onOpen: OpenSa
     download: () => store.download(id, onOpen),
     cancel: () => store.cancel(id),
     open: () => store.open(id, onOpen),
-    retry: () => store.download(id, onOpen),
   };
 }
 
@@ -202,6 +209,8 @@ export function sampleControls(entry: SampleEntry | undefined, actions: SampleAc
     id: entry.id,
     title: entry.title,
     credit: entry.credit,
+    licence: entry.licence,
+    fileCount: entry.file_count,
     state: entry.state,
     receivedBytes: entry.received_bytes,
     totalBytes: entry.total_bytes,
@@ -211,33 +220,15 @@ export function sampleControls(entry: SampleEntry | undefined, actions: SampleAc
   };
 }
 
-export type SamplePaletteSource = Pick<SampleControls, "state" | "totalBytes" | "download" | "open">;
-
-export function samplePaletteAction(sample: SamplePaletteSource | null, workspaceEmpty: boolean, showWorkspace: () => void): PaletteAction | null {
-  if (!sample) return null;
-  if (sample.state === "ready") {
-    return { id: "open-sample", label: "Open sample data (HST narrowband frames of M16)", keywords: SAMPLE_KEYWORDS, icon: Sparkles, run: () => void sample.open() };
-  }
-  if (!workspaceEmpty) return null;
-  return {
-    id: "download-sample",
-    label: `Download sample data (HST M16, ${formatBytes(sample.totalBytes)})`,
-    keywords: SAMPLE_KEYWORDS,
-    icon: Download,
-    run: () => {
-      showWorkspace();
-      void sample.download();
-    },
-  };
-}
-
 export function startSampleData(store: SampleDataStore): () => void {
   void store.refresh();
   const unlisten = onSampleDownloadProgress(store.progress).catch((err: unknown) => {
     console.error("[AstroBurst] Sample data progress:", err);
     return () => {};
   });
+  const offDataFolder = onDataFolderChanged(() => void store.refresh());
   return () => {
+    offDataFolder();
     void unlisten.then((off) => off());
   };
 }

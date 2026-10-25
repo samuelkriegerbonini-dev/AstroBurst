@@ -32,7 +32,7 @@ export function ingestFiles(files: AstroFile[], options?: IngestOptions): boolea
   return true;
 }
 
-function rowsHolding(path: string): ProcessedFile[] {
+export function rowsHolding(path: string): ProcessedFile[] {
   return overwrittenFileIds(fileStore.getFiles(), [path]).flatMap((id) => fileStore.getFile(id) ?? []);
 }
 
@@ -53,6 +53,10 @@ function revealInFiles(file: ProcessedFile): void {
 export function showFile(file: ProcessedFile): void {
   revealInFiles(file);
   fileStore.selectFile(file.id);
+}
+
+export function followFilteredSelection(id: string | null): void {
+  if (id !== null && id !== fileStore.getSelected()) fileStore.selectFallback(id);
 }
 
 export function openUnlessLoaded(path: string): boolean {

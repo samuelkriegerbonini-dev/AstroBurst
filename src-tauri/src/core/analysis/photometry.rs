@@ -291,19 +291,13 @@ pub fn area_map_mean(area: &Array2<f32>) -> f64 {
     }
 }
 
-fn pixel_weight(p: &AperturePixel, area: Option<&Array2<f32>>) -> f64 {
-    let weight = p.weight as f64;
-    match area {
-        Some(map) => weight * area_factor(map[[p.y, p.x]]),
-        None => weight,
-    }
+fn area_at(p: &AperturePixel, area: Option<&Array2<f32>>) -> f64 {
+    area.map_or(1.0, |map| area_factor(map[[p.y, p.x]]))
 }
 
 struct ApertureFlux {
     sum: f64,
     weight: f64,
-    noise_sum: f64,
-    noise_weight: f64,
     geometric_weight: f64,
     n_finite: u32,
     n_masked: u32,
@@ -314,8 +308,6 @@ impl ApertureFlux {
         Self {
             sum: ap.sum,
             weight: ap.weight,
-            noise_sum: ap.sum,
-            noise_weight: ap.weight,
             geometric_weight: ap.weight,
             n_finite: ap.n_finite,
             n_masked: ap.n_masked,
@@ -324,10 +316,6 @@ impl ApertureFlux {
 
     fn net(&self, sky_mean: f64) -> f64 {
         self.sum - sky_mean * self.weight
-    }
-
-    fn noise_net(&self, sky_mean: f64) -> f64 {
-        self.noise_sum - sky_mean * self.noise_weight
     }
 }
 
@@ -338,15 +326,7 @@ fn area_weighted_sum(
     excluded: Option<&Array2<u8>>,
 ) -> ApertureFlux {
     let mask = excluded.filter(|m| m.dim() == image.dim());
-    let mut flux = ApertureFlux {
-        sum: 0.0,
-        weight: 0.0,
-        noise_sum: 0.0,
-        noise_weight: 0.0,
-        geometric_weight: 0.0,
-        n_finite: 0,
-        n_masked: 0,
-    };
+    let mut flux = ApertureFlux { sum: 0.0, weight: 0.0, geometric_weight: 0.0, n_finite: 0, n_masked: 0 };
     for p in pixels {
         let Some(&value) = image.get((p.y, p.x)) else {
             continue;
@@ -359,13 +339,9 @@ fn area_weighted_sum(
             continue;
         }
         let geometric = p.weight as f64;
-        let a = area_factor(area[[p.y, p.x]]);
-        let w = geometric * a;
-        let v = value as f64;
-        flux.sum += w * v;
+        let w = geometric * area_factor(area[[p.y, p.x]]);
+        flux.sum += w * value as f64;
         flux.weight += w;
-        flux.noise_sum += w * a * v;
-        flux.noise_weight += w * a;
         flux.geometric_weight += geometric;
         flux.n_finite += 1;
     }
@@ -401,8 +377,9 @@ fn err_weighted_variance(
                 return None;
             }
             let e = err[[p.y, p.x]] as f64;
-            let pixel_variance = if e.is_finite() { e * e } else { model_variance(v) };
-            Some(pixel_weight(p, area).powi(2) * pixel_variance)
+            let geometric = p.weight as f64;
+            let a = area_at(p, area);
+            Some(if e.is_finite() { (geometric * a).powi(2) * e * e } else { geometric * geometric * a * model_variance(v) })
         })
         .sum()
 }
@@ -643,8 +620,8 @@ pub fn measure_star_prepared(
             (err_weighted_variance(image, err_plane, area, &pixels, excluded, model_variance) + sky_variance, true)
         }
         None => {
-            let poisson = gain.map_or(0.0, |g| ap.noise_net(sky.mean).max(0.0) / g);
-            (poisson + ap.noise_weight * sky.sigma * sky.sigma + sky_variance, false)
+            let poisson = gain.map_or(0.0, |g| net_flux.max(0.0) / g);
+            (poisson + n_ap * sky.sigma * sky.sigma + sky_variance, false)
         }
     };
     let flux_err = variance.max(0.0).sqrt();
@@ -1193,6 +1170,36 @@ mod tests {
             (partial.flux_err - expected).abs() < 1e-6,
             "flux_err={} expected={expected}: the pixel without ERR lost its variance",
             partial.flux_err
+        );
+    }
+
+    #[test]
+    fn an_area_map_enters_the_model_variance_of_a_pixel_without_err_once() {
+        let mut img = gaussian_scene(64, 64, 32.0, 32.0, 5000.0, 2.0, 100.0);
+        deterministic_noise(&mut img);
+        let scale = f64::from(1.02f32);
+        let area = Array2::from_elem((64, 64), 1.02f32);
+        let all_nan = Array2::from_elem((64, 64), f32::NAN);
+        let gain = 2.0;
+        let cfg = PhotometryConfig { gain: Some(gain), ..PhotometryConfig::default() };
+        let source = MaskedImage::new(&img, None).unwrap().with_area(Some(&area));
+        let res = measure_star_prepared(&source, Some(&all_nan), None, 32.0, 32.0, &cfg).unwrap();
+        assert!(res.err_used && res.area_applied);
+        let sky2 = res.bg_sigma * res.bg_sigma;
+        let model: f64 = circular_aperture(64, 64, res.x, res.y, res.aperture_radius, 5)
+            .iter()
+            .map(|p| {
+                let g = p.weight as f64;
+                let v = img[[p.y, p.x]] as f64;
+                g * g * scale * (sky2 + (v - res.bg_mean).max(0.0) / gain)
+            })
+            .sum();
+        let n_ap = scale * res.aperture_area;
+        let expected = (model + n_ap * n_ap * sky2 / res.bg_pixels as f64).sqrt();
+        assert!(
+            (res.flux_err - expected).abs() < 1e-9 * expected,
+            "flux_err={} expected={expected}: a pixel of relative area a carries a times the model variance of a unit pixel, not a^2",
+            res.flux_err
         );
     }
 

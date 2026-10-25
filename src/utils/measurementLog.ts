@@ -17,6 +17,7 @@ import { isExcludeRegion } from "./regionExclude";
 import { firstSurfaceBrightness } from "./sbProfile";
 import { hasDocumentEntry, type ComparisonCsvInput } from "./spectrumCompare";
 import { spectrumExportSummary, type SpectrumExportInput } from "./spectrumExport";
+import { finiteOrNull } from "./values";
 
 export const MAX_LOG_ENTRIES = 5000;
 export const MEASUREMENT_KINDS = [
@@ -192,9 +193,7 @@ export function fileNameOf(path: string | null): string | null {
   return name === "" ? null : name;
 }
 
-export function finiteOrNull(v: number | null | undefined): number | null {
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
+export { finiteOrNull } from "./values";
 
 export function positiveOrNull(v: number | null | undefined): number | null {
   const finite = finiteOrNull(v);

@@ -72,6 +72,7 @@ export function mergePage(prev: ResultSet | null, page: MastSearchPage): ResultS
     applied: prev.applied,
     droppedConditions: prev.droppedConditions,
     elapsedMs: prev.elapsedMs,
+    fromCache: prev.fromCache,
     levelAppliedLocally: prev.levelAppliedLocally,
     unfilteredTotal: prev.unfilteredTotal,
   };

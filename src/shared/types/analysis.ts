@@ -125,6 +125,7 @@ export interface TimeSeriesResult {
   n_frames: number;
   n_skipped: number;
   warnings: string[];
+  area_mixed: boolean;
   geometry_target: GeometryTarget | null;
   geometry_notes: string[];
   elapsed_ms: number;

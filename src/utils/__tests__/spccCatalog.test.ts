@@ -6,7 +6,7 @@ describe("spccSyntheticNotice", () => {
     const notice = spccSyntheticNotice("builtin");
     expect(notice).not.toMatch(/Gaia unavailable/);
     expect(notice).not.toMatch(/connection/);
-    expect(notice).toMatch(/built-in catalog/);
+    expect(notice).toMatch(/built-in catalogue/);
     expect(notice).toMatch(/not photometrically reliable/);
     expect(notice).toMatch(/Gaia DR3/);
   });

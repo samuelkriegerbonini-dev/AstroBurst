@@ -11,7 +11,7 @@ use astroburst_lib::infra::fits::reader::list_extensions;
 use astroburst_lib::infra::wcs_source::load_wcs;
 use astroburst_lib::types::constants::{
     RES_GWCS_FRAMES, RES_GWCS_REFUSAL, RES_GWCS_SOURCE, RES_GWCS_STEPS, RES_GWCS_VS_SIP_MAX_MAS, RES_GWCS_VS_SIP_MAX_PX,
-    RES_SIP_INV_ERR_PX, RES_SIP_MAX_ERR_PX, RES_WCS_KIND,
+    RES_SIP_INV_ERR_PX, RES_SIP_MAX_ERR_PX, RES_WCS_KIND, RES_WCS_WARNING,
 };
 use astroburst_lib::types::header::HduHeader;
 
@@ -247,5 +247,6 @@ pub async fn wcs(
         RES_GWCS_VS_SIP_MAX_MAS: gwcs.and_then(|g| g.vs_header_sip_max_mas),
         RES_GWCS_VS_SIP_MAX_PX: gwcs.and_then(|g| g.vs_header_sip_max_px),
         RES_GWCS_REFUSAL: wcs.gwcs_refusal(),
+        RES_WCS_WARNING: wcs.pv_warning(),
     })))
 }

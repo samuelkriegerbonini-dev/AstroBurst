@@ -158,6 +158,7 @@ pub struct WcsTransform {
     sip_inv_err_px: Option<f64>,
     gwcs_info: Option<GwcsInfo>,
     gwcs_refusal: Option<String>,
+    pv_warning: Option<String>,
 }
 
 fn is_projection_param_key(key: &str) -> bool {
@@ -422,6 +423,7 @@ impl WcsTransform {
             sip_inv_err_px: sip_residual_card(header, SIP_RESIDUAL_KEYS[1]),
             gwcs_info: None,
             gwcs_refusal: None,
+            pv_warning: None,
         })
     }
 
@@ -453,6 +455,7 @@ impl WcsTransform {
             sip_inv_err_px: source.wcsinfo_sip_inv_err_px.or_else(|| sip_residual_card(header, SIP_RESIDUAL_KEYS[1])),
             gwcs_info: None,
             gwcs_refusal: None,
+            pv_warning: None,
         };
         let vs_header_sip_max_mas = header_sip.and_then(|sip| wcs.separation_from_header_sip_mas(&sip, header));
         let vs_header_sip_max_px = vs_header_sip_max_mas.map(|mas| mas / (wcs.pixel_scale_arcsec() * 1000.0));
@@ -510,6 +513,15 @@ impl WcsTransform {
 
     pub fn gwcs_refusal(&self) -> Option<&str> {
         self.gwcs_refusal.as_deref()
+    }
+
+    pub fn with_pv_warning(mut self, warning: String) -> Self {
+        self.pv_warning = Some(warning);
+        self
+    }
+
+    pub fn pv_warning(&self) -> Option<&str> {
+        self.pv_warning.as_deref()
     }
 
     pub fn gwcs_pipeline(&self) -> Option<&GwcsPipeline> {

@@ -1,4 +1,5 @@
-import { memo, useCallback, useEffect, useId, useRef, useState } from "react";
+import { memo, useCallback, useId } from "react";
+import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { Activity, Copy } from "lucide-react";
 import type { LineMeasurement, LineModel } from "../../shared/types/spectral";
 import { LINE_MODEL_LABELS, LINE_MODELS } from "../../shared/types/spectral";
@@ -75,26 +76,17 @@ function LineMeasurementSection({
   errControls = null,
 }: LineMeasurementSectionProps) {
   const modelId = useId();
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-    };
-  }, []);
+  const [copied, flagCopied, clearCopied] = useTimedFlag(COPY_FEEDBACK_MS);
 
   const handleCopy = useCallback(async () => {
     if (!result) return;
     try {
       await navigator.clipboard.writeText(lineMeasurementCsv(result));
-      setCopied(true);
-      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-      copyTimerRef.current = setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
+      flagCopied();
     } catch {
-      setCopied(false);
+      clearCopied();
     }
-  }, [result]);
+  }, [result, flagCopied, clearCopied]);
 
   const rows = result ? lineMeasurementRows(result) : [];
   const fit = result?.fit ?? null;

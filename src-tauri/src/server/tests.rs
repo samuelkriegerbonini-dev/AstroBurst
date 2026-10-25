@@ -430,6 +430,21 @@ pub(crate) mod v2_fixtures {
         std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
     }
 
+    pub fn write_tan_pv_fits(path: &std::path::Path, w: usize, h: usize) {
+        let mut cards: Vec<(&str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "2".into()),
+            ("NAXIS1", w.to_string()),
+            ("NAXIS2", h.to_string()),
+        ];
+        cards.extend(wcs_cards());
+        cards.extend([("PV1_0", "4.0E-4".to_string()), ("PV1_1", "1.0".to_string()), ("PV2_10", "-4.0E-2".to_string())]);
+        let mut buf = header_block(&cards);
+        buf.extend_from_slice(&data_block(&ramp(w, h)));
+        std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+    }
+
     pub fn write_rotated_wcs_fits(path: &std::path::Path, w: usize, h: usize) {
         let cards: Vec<(&str, String)> = vec![
             ("SIMPLE", "T".into()),
@@ -1433,11 +1448,36 @@ async fn v2_wcs_summary_reports_the_header_wcs_kind() {
         "gwcs_vs_header_sip_max_mas",
         "gwcs_vs_header_sip_max_px",
         "gwcs_refusal",
+        "wcs_warning",
         "sip_max_err_px",
         "sip_inv_err_px",
     ] {
         assert_eq!(json.get(key), Some(&serde_json::Value::Null), "{key}: {json}");
     }
+}
+
+#[tokio::test]
+async fn v2_wcs_summary_names_the_pv_distortion_it_does_not_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("tanpv.fits");
+    v2_fixtures::write_tan_pv_fits(&fits, 8, 8);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-wcs-pv");
+    let resp = post_json(
+        build_router(state.clone()),
+        "/v2/sessions/s-wcs-pv/open",
+        &format!(r#"{{"path":{}}}"#, serde_json::to_string(fits.to_str().unwrap()).unwrap()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = get_uri(build_router(state), "/v2/sessions/s-wcs-pv/wcs").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["present"], true, "{json}");
+    assert_eq!(json["wcs_kind"], "header", "{json}");
+    assert_eq!(json["projection"], "TAN", "{json}");
+    assert_eq!(json["wcs_warning"], "PV distortion not applied: PV1_0, PV2_10", "{json}");
 }
 
 #[tokio::test]

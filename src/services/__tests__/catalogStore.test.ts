@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { typedInvokeMock, listenMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn(), listenMock: vi.fn() }));
@@ -24,15 +26,10 @@ import {
 describe("catalogStore commands", () => {
   beforeEach(() => typedInvokeMock.mockReset().mockResolvedValue({}));
 
-  it("wraps the six catalog_store commands the backend registers", () => {
-    expect(CATALOG_COMMANDS).toEqual([
-      "catalog_status_cmd",
-      "catalog_install_cmd",
-      "catalog_use_file_cmd",
-      "catalog_use_siril_dir_cmd",
-      "catalog_remove_cmd",
-      "catalog_zenodo_offer_cmd",
-    ]);
+  it("wraps the catalog_store commands lib.rs registers, and only those", () => {
+    const lib = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/lib.rs", import.meta.url)), "utf8");
+    const registered = [...lib.matchAll(/cmd::catalog_store::(\w+)/g)].map((m) => m[1]);
+    expect([...CATALOG_COMMANDS].sort()).toEqual([...registered].sort());
   });
 
   it("reads the Zenodo offer and installs the Siril extract only with the consent built from it", async () => {

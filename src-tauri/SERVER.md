@@ -204,7 +204,7 @@ Return the full header for a slot already in the cache. Returns `404` if the slo
 {
   "slot": "ha",
   "total_cards": 42,
-  "cards": [{ "key": "OBJECT", "value": "M51" }, ...],
+  "cards": [{ "key": "OBJECT", "value": "M51" }, "..."],
   "index": { "OBJECT": "M51", "FILTER": "Ha" }
 }
 ```
@@ -321,7 +321,7 @@ Sigma-clip stack a list of FITS files.
 
 All fields except `paths` are optional. `result_slot` defaults to `"stacked"`.
 
-Further optional fields: `align_method` (`"affine"`; any other value uses phase correlation), `rejection` (`none`, `sigma_clip`, `winsorized_sigma_clip`, `linear_fit_clip`, `percentile_clip`, `min_max`), `combine` (`mean`, `median`, `min`, `max`), `normalization` (`none`, `additive`, `multiplicative`, `additive_scaling`, `multiplicative_scaling`), `rejection_normalization` (`none`, `scale_offset`), `winsor_cutoff`, `percentile_low`, `percentile_high`, `minmax_low`, `minmax_high`, `rejection_maps`. An unknown method name is a `400` that lists the supported names.
+Further optional fields: `align_method` (`"phase_correlation"`, the default, or `"affine"`), `rejection` (`none`, `sigma_clip`, `winsorized_sigma_clip`, `linear_fit_clip`, `percentile_clip`, `min_max`), `combine` (`mean`, `median`, `min`, `max`), `normalization` (`none`, `additive`, `multiplicative`, `additive_scaling`, `multiplicative_scaling`), `rejection_normalization` (`none`, `scale_offset`), `winsor_cutoff`, `percentile_low`, `percentile_high`, `minmax_low`, `minmax_high`, `rejection_maps`. An unknown method name is a `400` that lists the supported names.
 
 Limits (each violation is a `400`):
 - `sigma_low` and `sigma_high` must be finite numbers greater than 0; `winsor_cutoff`, `percentile_low` and `percentile_high` must be finite.

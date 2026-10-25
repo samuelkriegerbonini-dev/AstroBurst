@@ -5,16 +5,16 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
 
-use crate::cmd::common::blocking_cmd;
+use crate::cmd::common::{blocking_cmd, off_thread};
 #[cfg(feature = "net")]
 use crate::infra::catalog_store::{catalog_client, ZenodoSource};
 use crate::infra::catalog_store::{
-    chosen_data_root_missing, CatalogStore, InstallObserver, InstallOutcome, InstallStage,
-    StoreError, StoreRoots, ZenodoConsent, FIELD_EXTERNAL_CATALOGS, FIELD_SIRIL_CATALOG_DIR,
-    INSTALL_PROGRESS_EVENT, SIRIL_GAIA_ID,
+    CatalogStore, InstallObserver, InstallOutcome, InstallStage, StoreError, StoreRoots,
+    ZenodoConsent, FIELD_EXTERNAL_CATALOGS, FIELD_SIRIL_CATALOG_DIR, INSTALL_PROGRESS_EVENT,
+    SIRIL_GAIA_ID,
 };
 use crate::infra::config;
-use crate::infra::net::paths::ENV_DATA_DIR;
+use crate::infra::net::paths;
 use crate::infra::progress::ProgressHandle;
 use crate::types::config::AppConfig;
 
@@ -94,16 +94,10 @@ fn app_store(resource_dir: Option<PathBuf>) -> anyhow::Result<CatalogStore> {
 }
 
 fn writable_store(resource_dir: Option<PathBuf>) -> anyhow::Result<CatalogStore> {
-    let store = app_store(resource_dir)?;
-    let config = config::load_config()?;
-    let data = &store.roots().data;
-    if chosen_data_root_missing(std::env::var_os(ENV_DATA_DIR), &config, data) {
-        anyhow::bail!(
-            "the data folder {} is not reachable; reconnect its drive or choose another data folder in Settings",
-            data.display()
-        );
-    }
-    Ok(store)
+    paths::resolved_data_root()?
+        .require_present()
+        .map_err(anyhow::Error::msg)?;
+    app_store(resource_dir)
 }
 
 pub(crate) fn status_json(store: &CatalogStore, config: &AppConfig) -> anyhow::Result<Value> {
@@ -198,15 +192,6 @@ pub async fn catalog_status_cmd(app: tauri::AppHandle) -> Result<Value, String> 
         let store = app_store(resource)?;
         status_json(&store, &config::load_config()?)
     })
-}
-
-async fn off_thread<T: Send + 'static>(
-    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
-) -> Result<T, String> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|error| format!("Task join failed: {error}"))?
-        .map_err(|error| format!("{error:#}"))
 }
 
 #[tauri::command]

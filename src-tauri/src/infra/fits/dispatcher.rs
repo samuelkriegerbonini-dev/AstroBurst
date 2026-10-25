@@ -8,6 +8,7 @@ use tempfile::TempDir;
 use super::gzip::{
     copy_capped, gunzip_or_copy, resolve_gzip, split_gz_suffix, temp_folder_cap, Cap, SharedTempDir,
 };
+use super::reader::{list_extensions, HduInfo};
 
 pub fn resolve_single_image(path: &str) -> Result<(PathBuf, Option<SharedTempDir>)> {
     let p = Path::new(path);
@@ -16,6 +17,12 @@ pub fn resolve_single_image(path: &str) -> Result<(PathBuf, Option<SharedTempDir
     }
     let (first, tmp) = extract_first_zip_image(p, &temp_folder_cap)?;
     Ok((first, Some(SharedTempDir::new(tmp))))
+}
+
+pub fn list_source_extensions(source: &str) -> Result<Vec<HduInfo>> {
+    let (readable, _tmp) = resolve_single_image(source)?;
+    let file = File::open(&readable).with_context(|| format!("Failed to open {}", readable.display()))?;
+    list_extensions(&file)
 }
 
 fn is_zip_path(p: &Path) -> bool {
@@ -97,8 +104,9 @@ impl ZipExtraction<'_> {
         let mut archive = zip::ZipArchive::new(file)
             .with_context(|| format!("Failed to read ZIP archive {:?}", zip_path))?;
 
+        let mut nested_zips: Vec<(usize, String, PathBuf)> = Vec::new();
         for i in 0..archive.len() {
-            let mut entry = archive
+            let entry = archive
                 .by_index(i)
                 .with_context(|| format!("Failed to read ZIP entry {}", i))?;
 
@@ -127,9 +135,18 @@ impl ZipExtraction<'_> {
                     relative: without_gz_suffix(relative),
                     out_dir: out_dir.to_path_buf(),
                 });
+            } else {
+                nested_zips.push((i, label, relative));
+            }
+        }
+
+        for (i, label, relative) in nested_zips {
+            if self.images.iter().any(|image| image.label < label) {
                 continue;
             }
-
+            let mut entry = archive
+                .by_index(i)
+                .with_context(|| format!("Failed to read ZIP entry {}", i))?;
             let (copy, mut out_file) = create_extracted_file(out_dir, &relative, i)?;
             let copied = copy_capped(&mut entry, &mut out_file, &(self.cap)(), &self.describe(&label));
             drop(out_file);
@@ -228,17 +245,12 @@ fn create_extracted_file(out_dir: &Path, relative: &Path, index: usize) -> Resul
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use std::fs::File;
     use std::io::Write;
+    use std::path::Path;
 
-    use crate::core::stacking::memory::{format_bytes, MEMORY_BUDGET_ENV};
-    use crate::infra::fits::gzip::test_support::{gzip_bytes, memory_budget};
-    use crate::infra::fits::reader::test_fixtures::{empty_primary_cards, plane_hdu, write_raw_hdus};
-    use crate::infra::image_source::load_plane;
-    use crate::types::ImageRef;
-
-    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+    pub(crate) fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
         let mut writer = zip::ZipWriter::new(File::create(path).unwrap());
         for (name, bytes) in entries {
             writer
@@ -248,6 +260,18 @@ mod tests {
         }
         writer.finish().unwrap();
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::write_zip;
+    use super::*;
+
+    use crate::core::stacking::memory::{format_bytes, MEMORY_BUDGET_ENV};
+    use crate::infra::fits::gzip::test_support::{gzip_bytes, memory_budget};
+    use crate::infra::fits::reader::test_fixtures::{empty_primary_cards, plane_hdu, write_raw_hdus};
+    use crate::infra::image_source::load_plane;
+    use crate::types::ImageRef;
 
     fn first_image(zip_path: &Path, cap: u64) -> Result<(PathBuf, TempDir)> {
         extract_first_zip_image(zip_path, &|| memory_budget(cap))
@@ -517,17 +541,27 @@ mod tests {
     }
 
     #[test]
-    fn an_image_whose_path_is_taken_by_a_nested_zip_folder_falls_back_on_any_filesystem() {
+    fn an_image_keeps_its_path_when_a_nested_zip_sits_under_it_and_survives_a_folder_collision() {
         let dir = tempfile::tempdir().unwrap();
         let inner = dir.path().join("inner_src.zip");
         write_zip(&inner, &[("deep.fits", b"inner")]);
+        let inner_bytes = fs::read(&inner).unwrap();
         let zip_path = dir.path().join("blocked.zip");
-        write_zip(&zip_path, &[("scan.fits", b"file"), ("scan.fits/inner.zip", &fs::read(&inner).unwrap())]);
+        write_zip(&zip_path, &[("scan.fits", b"file"), ("scan.fits/inner.zip", &inner_bytes)]);
 
         let (first, tmp) = first_image(&zip_path, u64::MAX).unwrap();
         assert_eq!(fs::read(&first).unwrap(), b"file");
-        assert_eq!(first, tmp.path().join(".entry_0").join("scan.fits"));
+        assert_eq!(first, tmp.path().join("scan.fits"), "the nested ZIP under the image sorts after it and is never extracted");
         assert_eq!(files_under(tmp.path()), [first]);
+
+        let imageless = dir.path().join("imageless_src.zip");
+        write_zip(&imageless, &[("notes.txt", b"skip")]);
+        let colliding = dir.path().join("colliding.zip");
+        write_zip(&colliding, &[("Scan.fits/inner.zip", &fs::read(&imageless).unwrap()), ("scan.fits", b"file")]);
+        let (first, tmp) = first_image(&colliding, u64::MAX).unwrap();
+        assert_eq!(fs::read(&first).unwrap(), b"file");
+        assert_eq!(first.file_name().unwrap(), "scan.fits");
+        assert_eq!(files_under(tmp.path()), [first], "the nested copy that sorted first is removed once the image is out");
     }
 
     #[test]
@@ -553,6 +587,34 @@ mod tests {
 
         let (first, _tmp) = resolve_single_image(outer.to_str().unwrap()).unwrap();
         assert_eq!(fs::read(&first).unwrap(), b"nested");
+    }
+
+    #[test]
+    fn a_nested_zip_that_cannot_hold_the_first_image_is_never_copied_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("inner_src.zip");
+        write_zip(&inner, &[("frame.fits", b"SIMPLE nested")]);
+        let inner_bytes = fs::read(&inner).unwrap();
+
+        for (name, entries) in [
+            ("image_first.zip", vec![("a_light.fits", b"SIMPLE light".as_slice()), ("z_night.zip", inner_bytes.as_slice())]),
+            ("zip_first.zip", vec![("z_night.zip", inner_bytes.as_slice()), ("a_light.fits", b"SIMPLE light".as_slice())]),
+        ] {
+            let zip_path = dir.path().join(name);
+            write_zip(&zip_path, &entries);
+            let (first, tmp) = first_image(&zip_path, u64::MAX).unwrap();
+            assert_eq!(fs::read(&first).unwrap(), b"SIMPLE light", "{name}");
+            assert!(
+                !tmp.path().join("z_night.zip.contents").exists(),
+                "{name}: z_night.zip sorts after a_light.fits, so none of its members can be the first image; it was still extracted: {:?}",
+                files_under(tmp.path())
+            );
+        }
+
+        let winning = dir.path().join("nested_wins.zip");
+        write_zip(&winning, &[("z_light.fits", b"SIMPLE light"), ("a_night.zip", &inner_bytes)]);
+        let (first, _tmp) = first_image(&winning, u64::MAX).unwrap();
+        assert_eq!(fs::read(&first).unwrap(), b"SIMPLE nested", "a nested ZIP that sorts first is still searched");
     }
 
     #[test]

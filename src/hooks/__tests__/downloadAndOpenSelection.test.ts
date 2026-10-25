@@ -2,21 +2,21 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { AstroFile } from "../../shared/types";
 import type { MastDownloadItem } from "../../shared/types/mast";
 
-const { snapshotMock, listenMock } = vi.hoisted(() => ({ snapshotMock: vi.fn(), listenMock: vi.fn() }));
+const { snapshotMock, listenMock, enqueueMock } = vi.hoisted(() => ({ snapshotMock: vi.fn(), listenMock: vi.fn(), enqueueMock: vi.fn() }));
 
 vi.mock("../../services/mast", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/mast")>();
-  return { ...actual, mastDownloads: snapshotMock, onMastDownload: listenMock };
+  return { ...actual, mastDownloads: snapshotMock, onMastDownload: listenMock, mastDownload: enqueueMock };
 });
 
 import { fileStore } from "../useFileStore";
-import { ingestUnlessLoaded, registerFileIngest, showWorkspaceUnlessKept } from "../useFileIngest";
+import { followFilteredSelection, ingestUnlessLoaded, registerFileIngest, showWorkspaceUnlessKept } from "../useFileIngest";
 import { appModeStore } from "../useAppMode";
 import { matchesActiveFilters, processedFilterable, productFilterStore } from "../useProductFilter";
 import { fallbackSelectionId } from "../../utils/fileSelection";
 import { FILE_STATUS } from "../../utils/constants";
 import { createDownloadsStore } from "../../components/archive/state/downloadsStore";
-import { openDownloaded, watchDownloads } from "../../components/archive/state/downloadsController";
+import { openDownloaded, startDownloads, watchDownloads } from "../../components/archive/state/downloadsController";
 
 const CAL = "C:\\data\\mast\\JWST\\2739\\jw02739001001_02105_00001_nrca1_cal.fits";
 const NEW = "C:\\data\\mast\\JWST\\2739\\jw54000-o001_t001_nircam_xc1_i2d.fits";
@@ -259,6 +259,22 @@ describe("Download and open of several products in one request", () => {
     expect(fileStore.getSelected()).toBe(rowOf(batchFile("b6", 0)));
   });
 
+  it("shows a file whose Download and open joined a download of a request that already showed another file", async () => {
+    loadedAndSelected(CAL);
+    push(batchItem("b7", 0));
+    fileStore.fileDone(rowOf(batchFile("b7", 0)), IMAGE);
+    const running = { ...batchItem("b7", 1), state: "downloading" as const, received: 10 };
+    push(running);
+    enqueueMock.mockResolvedValueOnce([batchItem("b7", 0), running]);
+    const input = { datasetId: running.datasetId, filename: running.filename, program: running.program, sizeBytes: running.sizeBytes, uri: running.uri, opensAs: running.opensAs, replace: false };
+
+    expect(await startDownloads("jwst", [input], true, store)).toBe(true);
+    push(batchItem("b7", 1));
+    fileStore.fileDone(rowOf(batchFile("b7", 1)), IMAGE);
+
+    expect(fileStore.getSelected()).toBe(rowOf(batchFile("b7", 1)));
+  });
+
   it("still shows a file the user opens from the queue, and the first file of the next request", () => {
     loadedAndSelected(CAL);
     push(batchItem("b3", 0));
@@ -321,6 +337,19 @@ describe("Download and open while a Files filter hides the opened file", () => {
     expect(openDownloaded(item(NEW))).toBe(true);
 
     expect(shownInViewer()).toBe(opened);
+  });
+
+  it("still shows the opened file when a filter change moved the selection while it loaded", () => {
+    loadedAndSelected(OTHER);
+    loadedAndSelected(C1);
+    expect(openDownloaded(item(NEW))).toBe(true);
+    productFilterStore.setActiveFilters(["i2d"]);
+    followFilteredSelection(shownInViewer());
+    expect(fileStore.getSelected()).toBe(rowOf(OTHER));
+
+    fileStore.fileDone(rowOf(NEW), IMAGE);
+
+    expect(fileStore.getSelected()).toBe(rowOf(NEW));
   });
 
   it("leaves the filter alone when the opened file is already visible", () => {

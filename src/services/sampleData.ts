@@ -13,7 +13,6 @@ export interface SampleSetReport {
   state: SampleState;
   received_bytes: number;
   folder: string;
-  newer_at_mast: boolean;
 }
 
 export interface SampleOpen {

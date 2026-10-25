@@ -154,16 +154,18 @@ describe("which downloads open in the workspace", () => {
   });
 
   it("loads a finished file into the workspace and switches to it", () => {
-    const ingest = vi.fn(() => true);
+    const show = vi.fn(() => true);
+    const load = vi.fn();
     const setMode = vi.fn();
-    expect(openDownloaded(item({ state: "done" }), { ingest, setMode, reload: vi.fn() })).toBe(true);
-    expect(ingest).toHaveBeenCalledWith([{ name: CAL, path: `C:\\data\\mast\\JWST\\2739\\${CAL}`, size: 0 }]);
+    expect(openDownloaded(item({ state: "done" }), { show, load, setMode, reload: vi.fn() })).toBe(true);
+    expect(show).toHaveBeenCalledWith(`C:\\data\\mast\\JWST\\2739\\${CAL}`);
     expect(setMode).toHaveBeenCalledWith("workspace");
-    expect(openDownloaded(item({ state: "downloading" }), { ingest, setMode, reload: vi.fn() })).toBe(false);
-    expect(openDownloaded(item({ state: "done", opensAs: "catalog", filename: "x_cat.ecsv" }), { ingest, setMode, reload: vi.fn() })).toBe(false);
-    expect(ingest).toHaveBeenCalledTimes(1);
+    expect(openDownloaded(item({ state: "downloading" }), { show, load, setMode, reload: vi.fn() })).toBe(false);
+    expect(openDownloaded(item({ state: "done", opensAs: "catalog", filename: "x_cat.ecsv" }), { show, load, setMode, reload: vi.fn() })).toBe(false);
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(load).not.toHaveBeenCalled();
     const notReady = vi.fn(() => false);
-    expect(openDownloaded(item({ state: "done" }), { ingest: notReady, setMode, reload: vi.fn() })).toBe(false);
+    expect(openDownloaded(item({ state: "done" }), { show: notReady, load, setMode, reload: vi.fn() })).toBe(false);
   });
 });
 

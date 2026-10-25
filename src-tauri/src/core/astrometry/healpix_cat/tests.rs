@@ -592,6 +592,58 @@ fn type1_decodes_ra_dec_scale_pm_teff_mag() {
 }
 
 #[test]
+fn compact_rows_carry_the_native_magnitude_and_colour_in_g_and_bp_rp_under_a_t_prefix() {
+    let level = 8;
+    let cases = [
+        (CatType::Compact6, 120.0, -20.0, Some(9.0), Some(0.62)),
+        (CatType::Compact6, 200.0, 60.0, None, None),
+        (CatType::Compact12, 0.0, -90.0, Some(15.5), Some(-0.25)),
+        (CatType::Compact12, 123.456_789, -12.345_678, Some(7.25), None),
+    ];
+    for (cat_type, ra, dec, mag, colour) in cases {
+        let pixel = pixel_of(level, ra, dec);
+        let star = CatalogStar {
+            colour,
+            ..CatalogStar::at(ra, dec, mag)
+        };
+        let catalog = mem_catalog(written(
+            &CatHeader::whole("tier", level, cat_type.code()),
+            &[(pixel, vec![Record::Star(star)])],
+        ));
+        let rows = catalog.cone(ra, dec, 0.01, None).unwrap();
+        assert_eq!(rows.len(), 1, "{cat_type:?} at ({ra}, {dec})");
+        let row = &rows[0];
+        assert_eq!(row.id, format!("T{pixel}-0"), "{cat_type:?}");
+        assert_eq!((row.g, row.bp_rp), (mag, colour), "{cat_type:?} at ({ra}, {dec})");
+        assert_eq!(
+            (row.bp, row.rp, row.parallax_mas, row.teff_k, row.pm_ra_masyr, row.pm_dec_masyr),
+            (None, None, None, None, None, None),
+            "{cat_type:?}"
+        );
+    }
+}
+
+#[test]
+fn the_compact_ranges_are_the_encoder_limits() {
+    assert_eq!(COMPACT_MAG_RANGE, (-1.5, 23.9));
+    assert_eq!(COMPACT_COLOUR_LIMIT, 2.54);
+    let (low, high) = COMPACT_MAG_RANGE;
+    assert_eq!(compact_mag_code(Some(low)).ok(), Some(0));
+    assert_eq!(
+        compact_mag_code(Some(high)).ok(),
+        Some(COMPACT_NO_MAGNITUDE - 1)
+    );
+    assert!(compact_mag_code(Some(high + 0.1)).is_err());
+    assert_eq!(compact_colour_code(Some(COMPACT_COLOUR_LIMIT)).ok(), Some(i8::MAX));
+    assert_eq!(
+        compact_colour_code(Some(-COMPACT_COLOUR_LIMIT)).ok(),
+        Some(-i8::MAX)
+    );
+    let message = compact_colour_code(Some(COMPACT_COLOUR_LIMIT + 0.02)).unwrap_err();
+    assert!(message.contains("-2.54..=2.54"), "{message}");
+}
+
+#[test]
 fn type128_offsets_reconstruct_sky_within_0_05_arcsec() {
     let level = 8;
     for &(ra, dec) in &[(15.0, 0.0), (200.0, 60.0), (10.0, 89.95), (359.99, -45.0)] {

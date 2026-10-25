@@ -131,6 +131,7 @@ function result(frames: TimeSeriesFrame[]): TimeSeriesResult {
     n_frames: frames.length,
     n_skipped: frames.filter((f) => f.skipped !== null).length,
     warnings: [],
+    area_mixed: false,
     geometry_target: null,
     geometry_notes: [],
     elapsed_ms: 5,

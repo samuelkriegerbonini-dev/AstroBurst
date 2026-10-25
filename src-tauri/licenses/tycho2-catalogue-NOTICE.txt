@@ -1,0 +1,46 @@
+Data bundled with AstroBurst: catalogs/tycho2-l6-v1.abcat, a star catalogue built from the Tycho-2 Catalogue
+
+What it is
+
+Every installer and the Linux tarball carry catalogs/tycho2-l6-v1.abcat (15541742 bytes, SHA-256 bf01b058e7c9babe03d38d367c98d6a0dbb0e9785741a9c842d053574fa17076), the tier 0 of the offline plate solver. It holds the positions, VT magnitudes and BT-VT colours of the 2,557,501 stars of the Tycho-2 main catalogue and its supplement 1, moved to epoch 2026.0 with their proper motions where they have one, in AstroBurst's compact record type of the Siril HEALPix catalogue format. catalogs/tycho2-l6-v1.PROVENANCE.md, shipped next to it, lists the input files with their SHA-256 and every processing step.
+
+Source
+
+The Tycho-2 Catalogue of the 2.5 Million Brightest Stars: Hog E., Fabricius C., Makarov V.V., Urban S., Corbin T., Wycoff G., Bastian U., Schwekendiek P., Wicenec A., Astron. Astrophys. 355, L27 (2000). CDS catalogue I/259, https://cdsarc.cds.unistra.fr/ftp/I/259/. The catalogue is based on observations by the star mapper of the ESA Hipparcos satellite.
+
+Acknowledgement
+
+Built from data obtained from the CDS, Strasbourg, France. Credit: ESA.
+
+Terms
+
+The sources give two different statements of terms for this catalogue. Both are reproduced here.
+
+1. CDS and ESA. The ReadMe of I/259 at the CDS (https://cdsarc.cds.unistra.fr/ftp/I/259/ReadMe, last modified on 17 August 2026, read on 25 October 2026) ends with the line "License: CC-BY-NC-3.0 IGO". ESA's page on the Hipparcos and Tycho Catalogues (https://www.cosmos.esa.int/web/hipparcos/catalogues) states that those catalogues are distributed under the CC BY-NC 3.0 IGO licence and that ESA's terms and conditions require users to acknowledge ESA with "Credit: ESA"; ESA's Tycho-2 page (https://www.cosmos.esa.int/web/hipparcos/tycho-2) names no licence. Licence: Creative Commons Attribution-NonCommercial 3.0 IGO, https://creativecommons.org/licenses/by-nc/3.0/igo/legalcode. ESA's terms and conditions (https://www.cosmos.esa.int/web/esdc/terms-and-conditions) ask for a request to data.licences@esa.int before any commercial use of the data.
+
+2. Debian. The copyright file of the Debian tycho2 package (https://tracker.debian.org/media/packages/t/tycho2/copyright-2-4) records the copyright line and the BSD-2-Clause terms below. Its comment says that the distribution itself carries no licence note, and that Erik Hog, an author of the catalogue, agreed in September 2015 to the BSD clause, which the request described as covering modified forms such as a conversion to other formats. The terms, as that file records them:
+
+Copyright: 2000 Hog E., Fabricius C., Makarov V.V., Urban S., Corbin T., Wycoff G., Bastian U., Schwekendiek P., Wicenec A.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

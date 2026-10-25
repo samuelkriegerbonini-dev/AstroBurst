@@ -2,6 +2,7 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::types::compose::AlignMethod;
+use crate::types::constants::{KERNEL_GAUSSIAN, KERNEL_LANCZOS, KERNEL_LANCZOS3, KERNEL_SQUARE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -337,6 +338,30 @@ pub enum DrizzleKernel {
     Square,
     Gaussian,
     Lanczos3,
+}
+
+impl DrizzleKernel {
+    pub const SUPPORTED: &'static str = "square, gaussian, lanczos3, lanczos";
+
+    pub fn from_name(name: &str) -> Result<Self, String> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            KERNEL_SQUARE => Ok(DrizzleKernel::Square),
+            KERNEL_GAUSSIAN => Ok(DrizzleKernel::Gaussian),
+            KERNEL_LANCZOS3 | KERNEL_LANCZOS => Ok(DrizzleKernel::Lanczos3),
+            other => Err(format!(
+                "unknown kernel '{other}' (supported: {})",
+                Self::SUPPORTED
+            )),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DrizzleKernel::Square => KERNEL_SQUARE,
+            DrizzleKernel::Gaussian => KERNEL_GAUSSIAN,
+            DrizzleKernel::Lanczos3 => KERNEL_LANCZOS3,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

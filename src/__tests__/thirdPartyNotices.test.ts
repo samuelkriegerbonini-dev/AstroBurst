@@ -171,6 +171,29 @@ function productionNpmPackages(): string[] {
   });
 }
 
+function bundledDataFiles(): string[] {
+  const config = JSON.parse(readFileSync(tauriPath("tauri.conf.json"), "utf8"));
+  return Object.entries(config.bundle.resources as Record<string, string>)
+    .filter(([source]) => source !== "licenses/")
+    .flatMap(([source, target]) => {
+      const names = readdirSync(tauriPath(source));
+      const provenances = names.filter((name) => name.endsWith(".PROVENANCE.md"));
+      expect(provenances, `${source} has no provenance file`).not.toHaveLength(0);
+      const pinned = provenances.map(
+        (name) => /^- File: `([^`]+)`$/m.exec(readFileSync(tauriPath(`${source}${name}`), "utf8").replace(/\r\n/g, "\n"))?.[1] ?? "",
+      );
+      const unexplained = names.filter((name) => !name.endsWith(".PROVENANCE.md") && !pinned.includes(name));
+      expect(unexplained, `${source} holds files that no provenance file names, and every bundle would ship them`).toEqual([]);
+      return pinned.map((file) => `${target}${file}`);
+    });
+}
+
+function sampleSetIds(): string[] {
+  const source = readFileSync(tauriPath("src/infra/samples.rs"), "utf8").replace(/\r\n/g, "\n");
+  const sets = /^static SAMPLE_SETS\b[\s\S]*?^\];$/m.exec(source)?.[0] ?? "";
+  return [...sets.matchAll(/^ {8}id: "([^"]+)",$/gm)].map((match) => match[1]);
+}
+
 function noticeRows(): NoticeRow[] {
   return readFileSync(tauriPath(`licenses/${NOTICES}`), "utf8")
     .split(/\r?\n/)
@@ -416,9 +439,44 @@ describe("third-party notices", () => {
     expect(config.bundle.resources).toMatchObject({ "licenses/": "licenses/" });
   });
 
+  it("gives every data file the bundle ships beside the licences a Data row, named in the release notes", () => {
+    const data = markdownSections(noticesText(), "##").get("Data") ?? "";
+    const notes = markdownSections(readFileSync(repoPath(RELEASE_NOTES), "utf8").replace(/\r\n/g, "\n"), "##");
+    const current = [...notes].find(([heading]) => /\band later\b/.test(heading))?.[1] ?? "";
+    const shipped = bundledDataFiles();
+    expect(shipped.length).toBeGreaterThan(0);
+    for (const file of shipped) {
+      const row = data.split("\n").find((line) => line.startsWith("|") && line.includes(`\`${file}\``));
+      expect(row, `${file} ships with every bundle but has no Data row`).toBeDefined();
+      const texts = [...(row ?? "").split("|").slice(1, -1)[4].matchAll(/`([^`]+)`/g)].map((match) => match[1]);
+      expect(texts, file).not.toHaveLength(0);
+      for (const text of texts) expect(current, `${file}: ${text}`).toContain(text);
+    }
+  });
+
+  it("gives every sample set the app downloads a Data row that names its folder", () => {
+    const data = markdownSections(noticesText(), "##").get("Data") ?? "";
+    const ids = sampleSetIds();
+    expect(ids.length).toBeGreaterThanOrEqual(3);
+    for (const id of ids) expect(data, id).toContain(`samples/${id}/`);
+  });
+
+  it("puts the copyright file of every Ubuntu package the AppImage takes a file from inside the AppImage", () => {
+    const workflow = releaseWorkflow();
+    const productName = JSON.parse(readFileSync(tauriPath("tauri.conf.json"), "utf8")).productName;
+    const collected = /node scripts\/appimage-licences\.mjs collect squashfs-root (\S+) /.exec(workflow);
+    const rebuilt = /pnpm tauri bundle --bundles appimage .*"\.\.\/([^"]+?)\/?":"(licenses\/[^"]+?)\/?"/.exec(workflow);
+    const checked = /node scripts\/appimage-licences\.mjs check squashfs-root (\S+) /.exec(workflow);
+    expect(collected && rebuilt && checked, "collect, rebuild and check steps").toBeTruthy();
+    expect(rebuilt?.[1]).toBe(collected?.[1]);
+    expect(checked?.[1]).toBe(`usr/lib/${productName}/${rebuilt?.[2]}`);
+    expect((collected?.index ?? 0) < (rebuilt?.index ?? 0) && (rebuilt?.index ?? 0) < (checked?.index ?? 0)).toBe(true);
+    expect(appImageSection()).toContain(`\`${rebuilt?.[2]}/\``);
+  });
+
   it("ships the licences folder in the Linux release tarball", () => {
     const steps = releaseWorkflow().split(/^\s*- name: /m);
-    const tarball = steps.find((step) => step.startsWith("Create Flatpak tarball")) ?? "";
+    const tarball = steps.find((step) => step.startsWith("Create Linux tarball")) ?? "";
     const copy = tarball.search(/cp -r src-tauri\/licenses astroburst-\$\{VERSION\}\//);
     expect(copy).toBeGreaterThan(-1);
     expect(copy).toBeLessThan(tarball.indexOf("tar czf"));

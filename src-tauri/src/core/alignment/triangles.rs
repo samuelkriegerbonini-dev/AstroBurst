@@ -662,6 +662,7 @@ const A1_MIN_SEPARATION_PX: f64 = 24.0;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FrameView {
     Rotated(f64),
+    Dithered { deg: f64, shift: (f64, f64) },
     Mirrored,
 }
 
@@ -676,18 +677,20 @@ fn fixture_unit(state: &mut u64) -> f64 {
 #[cfg(test)]
 pub(crate) fn a1_truth(view: FrameView, size: usize) -> AffineTransform {
     let centre = (size as f64 - 1.0) * 0.5;
-    match view {
-        FrameView::Rotated(deg) => {
-            let (sin, cos) = deg.to_radians().sin_cos();
-            AffineTransform {
-                a: cos,
-                b: -sin,
-                tx: centre - cos * centre + sin * centre + A1_SHIFT.0,
-                c: sin,
-                d: cos,
-                ty: centre - sin * centre - cos * centre + A1_SHIFT.1,
-            }
+    let turned = |deg: f64, shift: (f64, f64)| {
+        let (sin, cos) = deg.to_radians().sin_cos();
+        AffineTransform {
+            a: cos,
+            b: -sin,
+            tx: centre - cos * centre + sin * centre + shift.0,
+            c: sin,
+            d: cos,
+            ty: centre - sin * centre - cos * centre + shift.1,
         }
+    };
+    match view {
+        FrameView::Rotated(deg) => turned(deg, A1_SHIFT),
+        FrameView::Dithered { deg, shift } => turned(deg, shift),
         FrameView::Mirrored => AffineTransform {
             a: -1.0,
             b: 0.0,
@@ -754,6 +757,17 @@ pub(crate) fn render_sky(
 }
 
 #[cfg(test)]
+pub(crate) fn a1_brightest_outer_star(size: usize, count: usize) -> (usize, usize) {
+    let centre = (size as f64 - 1.0) * 0.5;
+    let (x, y, _) = a1_sky(size, count)
+        .into_iter()
+        .filter(|&(x, y, _)| (x - centre).hypot(y - centre) > size as f64 * 0.36)
+        .max_by(|a, b| a.2.total_cmp(&b.2))
+        .unwrap();
+    (y.round() as usize, x.round() as usize)
+}
+
+#[cfg(test)]
 pub(crate) fn a1_reference(size: usize, count: usize) -> ndarray::Array2<f32> {
     render_sky(&a1_sky(size, count), size, &AffineTransform::identity())
 }
@@ -781,6 +795,49 @@ pub(crate) fn a1_jittered_frame(
         })
         .collect();
     render_sky(&jittered, size, &a1_truth(view, size))
+}
+
+#[cfg(test)]
+pub(crate) const FIXED_PATTERN_SHIFT: (f64, f64) = (7.3, -4.1);
+
+#[cfg(test)]
+pub(crate) const FIXED_PATTERN_STARS: usize = 10;
+
+#[cfg(test)]
+pub(crate) const FIXED_PATTERN_HOT_CLUSTERS: usize = 14;
+
+#[cfg(test)]
+pub(crate) fn fixed_pattern_pair(size: usize) -> (ndarray::Array2<f32>, ndarray::Array2<f32>) {
+    let centre = (size as f64 - 1.0) * 0.5;
+    let sky: Vec<(f64, f64, f64)> = [
+        (-161.2, -150.8), (-31.3, -166.4), (129.1, -139.1), (-138.6, -11.0), (8.9, -40.7),
+        (156.6, 18.7), (-100.8, 128.8), (49.4, 99.1), (178.7, 169.4), (-56.0, 188.9),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, &(x, y))| (centre + x, centre + y, 6000.0 + 900.0 * i as f64))
+    .collect();
+    assert_eq!(sky.len(), FIXED_PATTERN_STARS);
+    let mut reference = render_sky(&sky, size, &AffineTransform::identity());
+    let mut target = render_sky(&sky, size, &AffineTransform::translation(FIXED_PATTERN_SHIFT.0, FIXED_PATTERN_SHIFT.1));
+    let mut noise = 0x5EED_F1E1_D0F7_A77Eu64;
+    for frame in [&mut reference, &mut target] {
+        frame.mapv_inplace(|v| v + 100.0 + ((fixture_unit(&mut noise) - 0.5) * 6.0) as f32);
+    }
+    let hot: [(f64, f64); FIXED_PATTERN_HOT_CLUSTERS] = [
+        (0.08, 0.09), (0.30, 0.07), (0.60, 0.11), (0.90, 0.06), (0.07, 0.40), (0.94, 0.35), (0.06, 0.65),
+        (0.93, 0.62), (0.12, 0.90), (0.38, 0.94), (0.65, 0.88), (0.91, 0.92), (0.20, 0.25), (0.80, 0.20),
+    ];
+    for &(fx, fy) in &hot {
+        let (x0, y0) = ((fx * size as f64) as usize, (fy * size as f64) as usize);
+        for y in y0..y0 + 3 {
+            for x in x0..x0 + 3 {
+                reference[[y, x]] = 1500.0;
+                target[[y, x]] = 1500.0;
+            }
+        }
+    }
+    (reference, target)
 }
 
 #[cfg(test)]

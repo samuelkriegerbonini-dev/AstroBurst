@@ -1,7 +1,27 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ArchiveDownloadsFields, QUOTA_POSITIVE_ERROR, type ArchiveDownloadsFieldsProps } from "../ConfigPanel";
+
+vi.mock("react", async (importOriginal) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
+vi.mock("../../services/config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../services/config")>()),
+  getConfig: async () => ({ astrometry_api_url: "https://nova.astrometry.net", plate_solve_timeout_secs: 120, data_dir_override: null, mast_quota_gb: null }),
+  getApiKey: async () => ({ key: null }),
+  getOutputDirInfo: async () => ({ output_dir: "C:/out", total_size: 0, file_count: 0 }),
+}));
+vi.mock("../../infrastructure/tauri", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infrastructure/tauri")>()),
+  getOutputDir: async () => "C:/out",
+  getHistoryDir: async () => "C:/history",
+  onCommandOutputs: () => () => {},
+}));
+vi.mock("../../context/PreviewContext", () => ({ listRenderRecords: () => [], useRenderActions: () => ({ forgetOutputs: () => {} }) }));
+vi.mock("../../context/CompositeContext", () => ({ useCompositePreview: () => ({ compositePreviewUrl: null }) }));
+vi.mock("../../context/ComposeWizardContext", () => ({ useComposeWizardContext: () => ({ state: {} }) }));
+
+import { hooks } from "../../test/hookRuntime";
+import ConfigPanel, { ArchiveDownloadsFields, QUOTA_POSITIVE_ERROR, type ArchiveDownloadsFieldsProps } from "../ConfigPanel";
+import CatalogsSettings from "../CatalogsSettings";
 
 type AnyProps = Record<string, unknown> & { children?: ReactNode };
 
@@ -53,6 +73,47 @@ function pressEnter(props: ArchiveDownloadsFieldsProps, id: string) {
 function blur(props: ArchiveDownloadsFieldsProps, id: string): void {
   (input(props, id).onBlur as () => void)();
 }
+
+function elementsInOrder(node: ReactNode): ReactElement<AnyProps>[] {
+  if (Array.isArray(node)) return node.flatMap(elementsInOrder);
+  if (!isValidElement<AnyProps>(node)) return [];
+  return [node, ...elementsInOrder(node.props.children)];
+}
+
+function textOf(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  return isValidElement<AnyProps>(node) ? textOf(node.props.children) : "";
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+async function renderedConfigPanel(): Promise<ReactNode> {
+  hooks.mount();
+  hooks.render(ConfigPanel, {});
+  await flush();
+  return hooks.render(ConfigPanel, {}) as ReactNode;
+}
+
+describe("Settings panel", () => {
+  afterEach(() => hooks.mount());
+
+  it("lists the catalogues right after the Plate Solving section and before the archive downloads", async () => {
+    const order = elementsInOrder(await renderedConfigPanel());
+    const plateSolving = order.findIndex((el) => el.type === "h4" && textOf(el).includes("Plate Solving"));
+    const catalogs = order.findIndex((el) => el.type === CatalogsSettings);
+    const archive = order.findIndex((el) => el.type === ArchiveDownloadsFields);
+    expect(plateSolving).toBeGreaterThan(0);
+    expect(catalogs).toBeGreaterThan(plateSolving);
+    expect(archive).toBeGreaterThan(catalogs);
+  });
+
+  it("says the astrometry.net key is only for the optional fallback", async () => {
+    const text = textOf(await renderedConfigPanel()).replace(/\s+/g, " ");
+    expect(text).not.toContain("Required for plate solving");
+    expect(text).toContain("Only for the optional astrometry.net fallback after an offline solve fails. Get one at nova.astrometry.net");
+  });
+});
 
 describe("Archive Downloads settings", () => {
   it("names the real default data folder for each platform instead of the app's own data folder", () => {

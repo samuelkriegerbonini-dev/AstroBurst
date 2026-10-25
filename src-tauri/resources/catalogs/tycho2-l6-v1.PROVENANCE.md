@@ -5,7 +5,7 @@
 - Size: 15541742 bytes
 - Container: Siril HEALPix catalogue format (zenodo record 14697486, CC BY 4.0), whole sky, HEALPix NESTED level 6, record type 128 (AstroBurst compact 6-byte), AstroBurst record kind 1, title `ASTROBURST-TYC2-V1`, epoch 2026.0 in the header.
 - Source: Tycho-2 Catalogue (Hog E. et al. 2000, A&A 355, L27), CDS catalogue I/259, https://cdsarc.cds.unistra.fr/ftp/I/259/
-- Licence: BSD-2-Clause as recorded in the Debian copyright file of the tycho2 package, https://tracker.debian.org/media/packages/t/tycho2/copyright-2-4
+- Licence: the sources give two statements. The CDS ReadMe of I/259 (https://cdsarc.cds.unistra.fr/ftp/I/259/ReadMe, last modified on 17 August 2026) states CC-BY-NC-3.0 IGO, as ESA states for the Hipparcos and Tycho Catalogues (https://www.cosmos.esa.int/web/hipparcos/catalogues, which asks for "Credit: ESA"); the Debian copyright file of the tycho2 package records BSD-2-Clause with an author's consent of 2015, https://tracker.debian.org/media/packages/t/tycho2/copyright-2-4. `licenses/tycho2-catalogue-NOTICE.txt` in the installed app reproduces both.
 - Acknowledgement: built from data obtained from the CDS, Strasbourg, France.
 
 ## Inputs

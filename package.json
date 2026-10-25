@@ -1,7 +1,7 @@
 {
   "name": "astroburst",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.7.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
+    "test:scripts": "node --test scripts/*.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

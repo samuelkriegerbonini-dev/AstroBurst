@@ -8,7 +8,7 @@ import { ActiveFilters, FilterPanel, FiltersToggle } from "./ObjectFilters";
 import { currentMission, resultsState, romanLockOf, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { interpretQuery, QUERY_KINDS, type QueryKind } from "./logic/interpretQuery";
-import { EMPTY_QUERY_HINT, browserLevelStorage, loadFiltersOpen, saveFiltersOpen } from "./logic/buildQuery";
+import { EMPTY_QUERY_HINT, browserStorage, loadFiltersOpen, saveFiltersOpen } from "./logic/buildQuery";
 import { ROMAN_SEARCH_DISABLED, resultsGate } from "./logic/missionState";
 import { ROMAN_SEARCH_HINT } from "./logic/romanPanel";
 
@@ -42,7 +42,7 @@ export default function QueryBar({ state, ctl, queryRef, onLeaveQuery }: QueryBa
   const [kindMenu, setKindMenu] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
   const [recentAt, setRecentAt] = useState(0);
-  const [filtersOpen, setFiltersOpen] = useState(() => loadFiltersOpen(browserLevelStorage()));
+  const [filtersOpen, setFiltersOpen] = useState(() => loadFiltersOpen(browserStorage()));
   const form = state.form;
   const running = !!state.run;
   const meaning = interpretQuery(form.text, form.kindOverride);
@@ -101,7 +101,7 @@ export default function QueryBar({ state, ctl, queryRef, onLeaveQuery }: QueryBa
 
   const toggleFilters = () => {
     const next = !filtersOpen;
-    saveFiltersOpen(browserLevelStorage(), next);
+    saveFiltersOpen(browserStorage(), next);
     setFiltersOpen(next);
   };
 

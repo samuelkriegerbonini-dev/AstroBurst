@@ -1,5 +1,6 @@
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesTarget } from "../shared/types/analysis";
-import { lightCurve, lightCurveExtras, MAG_ERR_FACTOR } from "./differentialPhotometry";
+import { lightCurve, lightCurveExtras, MAG_ERR_FACTOR, referenceStem } from "./differentialPhotometry";
+import { fileBaseName, isFiniteNumber } from "./values";
 
 export type ExoClockTime = "jd_utc" | "bjd_tdb" | "hjd_utc";
 
@@ -13,6 +14,8 @@ export interface LightCurveExportSource {
 
 export const NO_TARGET_BLOCKER = "no star has the target role";
 export const NO_ROWS_BLOCKER = "no frame has a differential magnitude";
+export const AREA_MIXED_BLOCKER =
+  "AREA pixel-area map applied on some frames only (a step of a few hundredths of a magnitude in the light curve, see the series warning)";
 
 const ETD_COLUMNS_LINE = "# JD_UT V-C err";
 const EXOCLOCK_COLUMNS = ["rel_flux", "rel_flux_err", "airmass", "fwhm_px", "sky", "dx_px", "dy_px"] as const;
@@ -31,10 +34,6 @@ interface ExportRow {
   mag: number;
   err: number;
   extraIndex: number;
-}
-
-function isFiniteNumber(v: number | null | undefined): v is number {
-  return typeof v === "number" && Number.isFinite(v);
 }
 
 export function defaultPointLabel(index: number): string {
@@ -58,9 +57,6 @@ export function magToRelativeFlux(mag: number, err: number): { flux: number; err
   return { flux, err: (flux * err) / MAG_ERR_FACTOR };
 }
 
-export function relativeFluxToMag(flux: number, err: number): { mag: number; err: number } {
-  return { mag: -2.5 * Math.log10(flux), err: (MAG_ERR_FACTOR * err) / flux };
-}
 
 export function formatPrintfF(value: number): string {
   return value.toFixed(PRINTF_PRECISION);
@@ -156,6 +152,7 @@ function exportBlocker(source: LightCurveExportSource, time: ExoClockTime): stri
   }
   const rows = exportRows(source);
   if (rows.length === 0) return NO_ROWS_BLOCKER;
+  if (source.result.area_mixed) return AREA_MIXED_BLOCKER;
   const stars = [source.targetIdx, ...comps(source)];
   for (const row of rows) {
     const blocker = frameBlocker(row, time, stars);
@@ -226,7 +223,7 @@ export function exoClockCsv(source: LightCurveExportSource, time: ExoClockTime):
     "# AstroBurst differential light curve for ExoClock",
     `# target: ${targetLabel(source)}`,
     `# comparison stars: ${comps(source).map((i) => result.targets[i]?.label ?? `#${i}`).join(", ")}`,
-    `# reference frame: ${result.reference_path.split(/[\\/]/).pop() ?? result.reference_path}`,
+    `# reference frame: ${fileBaseName(result.reference_path)}`,
     `# time: ${time} = ${TIME_NAMES[time]} at mid-exposure`,
     `# flux: target / sum of comparison fluxes, not normalised; rel_flux_err = rel_flux * diff_err / ${MAG_ERR_FACTOR}`,
     `# filter: ${distinct(measured.map((r) => r.frame.filter))}`,
@@ -255,8 +252,7 @@ export function exoClockCsv(source: LightCurveExportSource, time: ExoClockTime):
 }
 
 function fileStem(source: LightCurveExportSource): string {
-  const base = source.result.reference_path.split(/[\\/]/).pop() ?? "frames";
-  const stem = base.replace(/#.*$/, "").replace(/\.[^.]+$/, "") || "frames";
+  const stem = referenceStem(source.result.reference_path);
   const target = targetLabel(source).trim().replace(/[^A-Za-z0-9._-]+/g, "_") || "target";
   return `${target}_${stem}`;
 }

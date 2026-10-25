@@ -1,10 +1,10 @@
 import type { KeyboardEvent } from "react";
 import { LayoutGrid, Table } from "lucide-react";
-import type { MastLevel } from "../../shared/types/mast";
 import { currentMission, effectiveView, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { viewAvailability } from "./logic/missionState";
 import { levelLockText, presetById } from "./logic/presetView";
+import { LEVEL_CHOICES } from "./logic/levels";
 
 interface FiltersProps {
   state: ArchiveState;
@@ -12,12 +12,6 @@ interface FiltersProps {
 }
 
 const LEVEL_LOCK_ID = "mast-level-lock";
-
-const LEVELS: { value: MastLevel; label: string; title: string }[] = [
-  { value: "combined", label: "Combined L3", title: "Level 3: combined mosaics, cubes and spectra of several exposures, including source-based products (2bs, 3)" },
-  { value: "exposures", label: "Exposures L1-2", title: "Levels 1b to 2c: single exposures, from uncalibrated ramps to calibrated frames" },
-  { value: "all", label: "All levels", title: "Every level, including the source-based sets that carry only 2bs" },
-];
 
 export default function QuickFilters({ state, ctl }: FiltersProps) {
   const mission = currentMission(state);
@@ -43,7 +37,7 @@ export default function QuickFilters({ state, ctl }: FiltersProps) {
                   Level
                 </span>
                 <div data-testid="mast-filter-level" role="group" aria-labelledby="mast-filter-level-label" className="ab-mast-segment">
-                  {LEVELS.filter((l) => !q.options || q.options.includes(l.value)).map((l) => {
+                  {LEVEL_CHOICES.filter((l) => !q.options || q.options.includes(l.value)).map((l) => {
                     const active = (f.level ?? "all") === l.value;
                     return (
                       <button

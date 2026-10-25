@@ -738,6 +738,7 @@ pub fn stack_images_staged(
     }
 
     let ref_cropped = crop_to(&images[0], min_rows, min_cols);
+    let reference = pair::AlignReference::new(ref_cropped.as_ref());
 
     let mut aligned: Vec<Cow<Array2<f32>>> = Vec::with_capacity(n);
     let mut members: Vec<usize> = Vec::with_capacity(n);
@@ -759,14 +760,8 @@ pub fn stack_images_staged(
             continue;
         }
 
-        let result = pair::align_pair_with_label(
-            ref_cropped.as_ref(),
-            cropped.as_ref(),
-            config.align_method,
-            min_rows,
-            min_cols,
-            &format!("frame_{}", i),
-        )?;
+        let result = pair::align_pair_to(&reference, cropped.as_ref(), config.align_method, min_rows, min_cols)?;
+        pair::log_alignment(&format!("frame_{}", i), config.align_method, &result);
         on_stage(STAGE_ALIGN);
         alignment.push(FrameAlignment {
             method: result.method_used.clone(),
@@ -1747,6 +1742,57 @@ mod tests {
         assert!(!mirrored.included, "{mirrored:?}");
         assert!(mirrored.rejection.as_deref().unwrap_or_default().contains("reflection"), "{mirrored:?}");
         assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn the_default_stack_checks_a_confident_phase_shift_against_the_star_match() {
+        use crate::core::alignment::triangles::{a1_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let reference = a1_reference(A1_SIZE, A1_STARS);
+        let peak = reference.indexed_iter().max_by(|a, b| a.1.total_cmp(b.1)).map(|(idx, _)| idx).unwrap();
+        let images = vec![
+            reference.clone(),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(0.0)),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Rotated(180.0)),
+            a1_frame(A1_SIZE, A1_STARS, FrameView::Mirrored),
+        ];
+        let config = plain_stack_config();
+        assert_eq!(config.align_method, crate::types::compose::AlignMethod::PhaseCorrelation);
+        let result = stack_images(&images, &config).unwrap();
+        let summary: Vec<String> = result.alignment.iter().map(|a| format!("{a:?}")).collect();
+        assert_eq!(result.frame_count, 3, "{}", summary.join("\n"));
+        let plain = &result.alignment[1];
+        assert!(plain.included && plain.method == "phase_correlation" && plain.rejection.is_none(), "{plain:?}");
+        let rotated = &result.alignment[2];
+        assert!(rotated.included && (rotated.method == "affine" || rotated.method == "rigid"), "{rotated:?}");
+        let mirrored = &result.alignment[3];
+        assert!(!mirrored.included, "{mirrored:?}");
+        assert!(mirrored.rejection.as_deref().unwrap_or_default().contains("reflection"), "{mirrored:?}");
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert!(result.warnings[0].starts_with("Frame 4 of 4 was left out of the stack"), "{}", result.warnings[0]);
+        assert!(
+            result.image[peak] >= reference[peak] * 0.75,
+            "the rotated frame diluted the star: {} vs {}",
+            result.image[peak],
+            reference[peak]
+        );
+    }
+
+    #[test]
+    fn the_default_stack_registers_a_rotated_frame_with_a_small_dither_through_the_star_transform() {
+        use crate::core::alignment::triangles::{a1_brightest_outer_star, a1_frame, a1_reference, FrameView, A1_SIZE, A1_STARS};
+        let reference = a1_reference(A1_SIZE, A1_STARS);
+        let corner_star = a1_brightest_outer_star(A1_SIZE, A1_STARS);
+        let images = vec![reference.clone(), a1_frame(A1_SIZE, A1_STARS, FrameView::Dithered { deg: 0.3, shift: (4.0, 0.0) })];
+        let result = stack_images(&images, &plain_stack_config()).unwrap();
+        let rotated = &result.alignment[1];
+        assert!(rotated.included && (rotated.method == "affine" || rotated.method == "rigid"), "{rotated:?}");
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert!(
+            result.image[corner_star] >= reference[corner_star] * 0.75,
+            "the outer star at {corner_star:?} was diluted: {} vs {}",
+            result.image[corner_star],
+            reference[corner_star]
+        );
     }
 
     #[test]

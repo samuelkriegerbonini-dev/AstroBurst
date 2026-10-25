@@ -44,6 +44,13 @@ describe("mergePage", () => {
     expect(nextOffset(third)).toBeNull();
   });
 
+  it("keeps the first page's elapsed time and cache flag after a page served from the cached local-level answer", () => {
+    const first = mergePage(null, page(rows(200), { hasMore: true, elapsedMs: 2500, fromCache: false }));
+    const second = mergePage(first, page(rows(100, 200), { offset: 200, hasMore: false, elapsedMs: 4, fromCache: true }));
+    expect(second.elapsedMs).toBe(2500);
+    expect(second.fromCache).toBe(false);
+  });
+
   it("drops rows already loaded when MAST repeats a dataset across pages", () => {
     const first = mergePage(null, page(rows(200), { hasMore: true }));
     const second = mergePage(first, page([...rows(1, 199), ...rows(2, 200)], { offset: 200, hasMore: false }));

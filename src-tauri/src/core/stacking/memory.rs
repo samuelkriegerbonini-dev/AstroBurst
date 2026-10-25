@@ -20,6 +20,7 @@ const STACK_WORK_PLANES: u64 = 4;
 const PIPELINE_STATS_PLANES: u64 = 4;
 const DRIZZLE_MIN_SCALE: f64 = 1.0;
 const DRIZZLE_MAX_SCALE: f64 = 4.0;
+const STAR_MASK_PLANE_FRACTION: f64 = 0.25;
 
 const MEMORY_ADVICE: &str = "Stack fewer frames at a time and combine the partial stacks, turn alignment off if the frames are already registered, or close other applications. If the system can page this much, set ASTROBURST_MEMORY_BUDGET_MB to the memory to allow (in MB) and restart.";
 
@@ -214,6 +215,18 @@ pub fn drizzle_bytes(pixels: &[u64], align: bool, scale: f64) -> u64 {
     F32_BYTES.saturating_mul(frames.saturating_add(output))
 }
 
+pub fn registration_transient_planes(frames: usize, threads: usize) -> u64 {
+    (threads.min(frames.saturating_sub(1)) as f64 * STAR_MASK_PLANE_FRACTION).ceil() as u64
+}
+
+pub fn registration_transient_bytes(pixels: &[u64], align: bool, threads: usize) -> u64 {
+    if !align {
+        return 0;
+    }
+    let (_, max) = sum_and_max(pixels);
+    F32_BYTES.saturating_mul(max.saturating_mul(registration_transient_planes(pixels.len(), threads)))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineShape<'a> {
     pub channels: &'a [Vec<u64>],
@@ -222,6 +235,7 @@ pub struct PipelineShape<'a> {
     pub masters: usize,
     pub align: bool,
     pub normalize: bool,
+    pub threads: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +256,8 @@ pub fn pipeline_bytes(shape: &PipelineShape) -> (u64, PipelinePeak) {
         let frames = F32_BYTES.saturating_mul(sum.saturating_mul(copies));
         let work = plane.saturating_mul(PIPELINE_STATS_PLANES);
         let earlier = plane.saturating_mul(index as u64);
-        let total = masters.saturating_add(frames).saturating_add(work).saturating_add(earlier);
+        let transient = if shape.align { plane.saturating_mul(registration_transient_planes(channel.len(), shape.threads)) } else { 0 };
+        let total = masters.saturating_add(frames).saturating_add(work).saturating_add(earlier).saturating_add(transient);
         if total > peak.0 {
             peak = (total, PipelinePeak::Channel(index));
         }
@@ -310,9 +325,13 @@ pub fn drizzle_channels_memory_check(
     }
     let mut required = 0u64;
     let mut all: Vec<FrameSize> = Vec::new();
+    let threads = rayon::current_num_threads();
     for paths in channels {
         let sizes = frame_sizes(paths)?;
-        required = required.saturating_add(drizzle_bytes(&pixel_counts(&sizes), config.align, config.scale));
+        let pixels = pixel_counts(&sizes);
+        required = required
+            .saturating_add(drizzle_bytes(&pixels, config.align, config.scale))
+            .saturating_add(registration_transient_bytes(&pixels, config.align, threads));
         all.extend(sizes);
     }
     check_memory(required, info, &MemoryJob::Drizzle { frames: all.len(), largest: largest_frame(&all) })
@@ -416,6 +435,7 @@ mod tests {
             masters: 3,
             align: true,
             normalize: true,
+            threads: 1,
         };
         assert_eq!(pipeline_bytes(&masters_heavy), (4 * 100 * 53, PipelinePeak::Masters));
 
@@ -427,8 +447,10 @@ mod tests {
             masters: 2,
             align: true,
             normalize: false,
+            threads: 1,
         };
-        let channel_two = 4 * 100 * 2 + 4 * (1_000 * 3 + 4 * 100) + 4 * 100;
+        let star_mask_plane = 4 * 100;
+        let channel_two = 4 * 100 * 2 + 4 * (1_000 * 3 + 4 * 100) + 4 * 100 + star_mask_plane;
         assert_eq!(pipeline_bytes(&late_channel), (channel_two, PipelinePeak::Channel(1)));
 
         let mixed = vec![vec![100u64; 2], vec![400u64; 1]];
@@ -439,11 +461,43 @@ mod tests {
             masters: 0,
             align: false,
             normalize: false,
+            threads: 16,
         };
         let first = 4 * (200 * 2 + 4 * 400);
         let second = 4 * (400 * 2 + 4 * 400) + 4 * 400;
         assert!(second > first);
         assert_eq!(pipeline_bytes(&shape), (second, PipelinePeak::Channel(1)));
+    }
+
+    #[test]
+    fn registration_transient_is_a_quarter_plane_per_registration_in_flight() {
+        assert_eq!(registration_transient_planes(10, 16), 3);
+        assert_eq!(registration_transient_planes(2, 16), 1);
+        assert_eq!(registration_transient_planes(1, 16), 0);
+        assert_eq!(registration_transient_planes(33, 32), 8);
+        assert_eq!(registration_transient_planes(5, 0), 0);
+        assert_eq!(registration_transient_bytes(&[1_000, 2_000, 1_500], true, 8), 4 * 2_000);
+        assert_eq!(registration_transient_bytes(&[1_000, 2_000, 1_500], false, 8), 0);
+    }
+
+    #[test]
+    fn pipeline_estimate_counts_the_registration_transient_of_each_channel() {
+        let channels = vec![vec![100u64; 17]];
+        let shape = |threads: usize, align: bool| PipelineShape {
+            channels: &channels,
+            calibration_pixels: &[],
+            largest_calibration_set: 0,
+            masters: 0,
+            align,
+            normalize: false,
+            threads,
+        };
+        let unaligned = 4 * (1_700 * 2 + 4 * 100);
+        assert_eq!(pipeline_bytes(&shape(16, false)), (unaligned, PipelinePeak::Channel(0)));
+        let aligned = 4 * (1_700 * 3 + 4 * 100);
+        assert_eq!(pipeline_bytes(&shape(1, true)), (aligned + 4 * 100, PipelinePeak::Channel(0)));
+        assert_eq!(pipeline_bytes(&shape(16, true)), (aligned + 4 * 100 * 4, PipelinePeak::Channel(0)));
+        assert_eq!(pipeline_bytes(&shape(64, true)), (aligned + 4 * 100 * 4, PipelinePeak::Channel(0)));
     }
 
     #[test]
@@ -548,6 +602,23 @@ mod tests {
         let drizzle = DrizzleConfig { align: false, scale: 2.0, ..DrizzleConfig::default() };
         let err = drizzle_memory_check(&paths, &drizzle, tiny).unwrap_err().to_string();
         assert!(err.starts_with("Drizzling these 2 frames of 80x64 needs about"), "{err}");
+    }
+
+    #[test]
+    fn drizzle_check_counts_the_star_mask_of_the_registration_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<String> = (0..2).map(|i| truncated_frame(&dir, &format!("d{i}.fits"), 64, 80)).collect();
+        let exact = |bytes: u64| Some(MemoryInfo { physical_available: bytes, commit_available: bytes });
+        let aligned = DrizzleConfig { align: true, scale: 1.0, ..DrizzleConfig::default() };
+        let frames_and_output = drizzle_bytes(&[5_120, 5_120], true, 1.0);
+        let star_mask_plane = 4 * 5_120;
+        assert!(drizzle_memory_check(&paths, &aligned, exact(frames_and_output + star_mask_plane)).is_ok());
+        let err = drizzle_memory_check(&paths, &aligned, exact(frames_and_output + star_mask_plane - 1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Drizzling these 2 frames of 80x64 needs about"), "{err}");
+        let unaligned = DrizzleConfig { align: false, ..aligned };
+        assert!(drizzle_memory_check(&paths, &unaligned, exact(drizzle_bytes(&[5_120, 5_120], false, 1.0))).is_ok());
     }
 
     #[cfg(windows)]

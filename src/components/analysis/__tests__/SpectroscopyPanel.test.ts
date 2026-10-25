@@ -13,45 +13,6 @@ import type { SpectrumDocument } from "../../../utils/spectrumDocument";
 
 const cubeState = vi.hoisted(() => ({ ramp: null as unknown }));
 
-const hooks = vi.hoisted(() => {
-  type Cell = { value?: unknown; deps?: readonly unknown[]; set?: (next: unknown) => void; cleanup?: unknown };
-  const run = { active: false, cells: [] as Cell[], cursor: 0, effects: [] as (() => void)[] };
-  const sameDeps = (a: readonly unknown[] | undefined, b: readonly unknown[] | undefined) =>
-    a !== undefined && b !== undefined && a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
-  const cell = (): Cell => (run.cells[run.cursor++] ??= {});
-  const remember = (compute: () => unknown, deps?: readonly unknown[]) => {
-    const c = cell();
-    if (!("value" in c) || !sameDeps(c.deps, deps)) {
-      c.value = compute();
-      c.deps = deps;
-    }
-    return c.value;
-  };
-  const impl = {
-    useState(init: unknown) {
-      const c = cell();
-      if (!("value" in c)) c.value = typeof init === "function" ? (init as () => unknown)() : init;
-      c.set ??= (next: unknown) => {
-        c.value = typeof next === "function" ? (next as (prev: unknown) => unknown)(c.value) : next;
-      };
-      return [c.value, c.set];
-    },
-    useRef: (init: unknown) => remember(() => ({ current: init }), []),
-    useMemo: remember,
-    useCallback: (fn: unknown, deps?: readonly unknown[]) => remember(() => fn, deps),
-    useId: () => `id-${run.cursor++}`,
-    useEffect(effect: () => unknown, deps?: readonly unknown[]) {
-      const c = cell();
-      if (sameDeps(c.deps, deps)) return;
-      c.deps = deps;
-      run.effects.push(() => {
-        if (typeof c.cleanup === "function") c.cleanup();
-        c.cleanup = effect();
-      });
-    },
-  };
-  return { run, impl };
-});
 
 const spectralMock = vi.hoisted(() => ({
   measure: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
@@ -70,17 +31,7 @@ const spectrumState = vi.hoisted(() => ({ region: null as unknown, regionSource:
 const regionDocState = vi.hoisted(() => ({ regions: [] as unknown[] }));
 const bandCalls = vi.hoisted(() => ({ calls: [] as { y: readonly number[]; err: readonly number[] | null }[] }));
 
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  const fakes = hooks.impl as unknown as Record<string, (...args: unknown[]) => unknown>;
-  const switched = Object.fromEntries(
-    Object.entries(fakes).map(([name, fake]) => [
-      name,
-      (...args: unknown[]) => (hooks.run.active ? fake : (actual[name] as (...a: unknown[]) => unknown))(...args),
-    ]),
-  );
-  return { ...actual, ...switched };
-});
+vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../../services/spectral", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/spectral")>()),
   measureSpectralLine: spectralMock.measure,
@@ -158,6 +109,7 @@ vi.mock("../LineFitSection", () => ({ default: () => "[line-fit]" }));
 vi.mock("../LineMeasurementSection", () => ({ default: () => "[line-measure]" }));
 vi.mock("../../CubeFrameNav", () => ({ default: () => "[frame-nav]" }));
 
+import { hooks } from "../../../test/hookRuntime";
 import SpectroscopyPanel from "../SpectroscopyPanel";
 import OutputNote from "../OutputNote";
 

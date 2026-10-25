@@ -87,7 +87,7 @@ fn jwst_label(name: &str) -> Option<&'static str> {
         "targ_ra" => "RA",
         "targ_dec" => "Dec",
         "publicReleaseDate" => "Public release",
-        "targcat" => "Category",
+        "targcat" => "Proposal category",
         "targdesc" => "Target description",
         SEP_COLUMN => "Sep (MAST)",
         _ => return None,
@@ -108,7 +108,7 @@ fn hst_label(name: &str) -> Option<&'static str> {
         "sci_ra" => "RA",
         "sci_dec" => "Dec",
         "sci_release_date" => "Public release",
-        "sci_broad_category" => "Category",
+        "sci_broad_category" => "Proposal category",
         "sci_target_descrip" => "Target description",
         "ang_sep" => "Sep (MAST)",
         SEP_COLUMN => "Sep",
@@ -564,9 +564,9 @@ mod tests {
         let merged = merge_probe(mission(MastMissionId::Iue), MastAvailability::Open, "2026-11-02");
         assert_eq!(merged.filter_groups, all[3].filter_groups);
         for (mission, name, label) in [
-            (MastMissionId::Jwst, "targcat", "Category"),
+            (MastMissionId::Jwst, "targcat", "Proposal category"),
             (MastMissionId::Jwst, "targdesc", "Target description"),
-            (MastMissionId::Hst, "sci_broad_category", "Category"),
+            (MastMissionId::Hst, "sci_broad_category", "Proposal category"),
             (MastMissionId::Hst, "sci_target_descrip", "Target description"),
             (MastMissionId::Iue, "iue_category", "Object class"),
             (MastMissionId::Jwst, CATEGORY_COLUMN, "Category"),

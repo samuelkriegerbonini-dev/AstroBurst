@@ -288,7 +288,7 @@ export default function SynthPanel() {
         {vignette && (
           <Slider label="Vignette strength" value={vigStrength} min={0} max={1} step={0.05} disabled={loading} accent="rose" format={(v) => v.toFixed(2)} onChange={setVigStrength} />
         )}
-        <Toggle label="Save star catalog (.csv)" checked={saveCatalog} disabled={loading} onChange={setSaveCatalog} />
+        <Toggle label="Save star catalogue (.csv)" checked={saveCatalog} disabled={loading} onChange={setSaveCatalog} />
         <Toggle label="Save ground truth" checked={saveGt} disabled={loading} onChange={setSaveGt} />
         <Toggle label="Stack mode (multi-frame)" checked={stackMode} disabled={loading} onChange={setStackMode} />
         {stackMode && (

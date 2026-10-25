@@ -1,7 +1,7 @@
 pub(crate) mod area;
 mod time_series;
 pub use time_series::*;
-use area::{area_map, extname_is, holds_one_plane};
+use area::{extname_is, holds_one_plane, AreaWeights};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -47,8 +47,7 @@ use crate::core::imaging::stats::{
 use crate::core::imaging::stf::auto_stf;
 use crate::core::metadata::photcal::{missing_calibration_reason, PhotCal};
 use crate::infra::cache::ImageEntry;
-use crate::infra::fits::gzip::resolve_gzip;
-use crate::infra::fits::reader::list_extensions;
+use crate::infra::fits::dispatcher::list_source_extensions;
 use crate::types::header::HduHeader;
 use crate::types::image_ref::PlaneSelector;
 
@@ -488,7 +487,7 @@ pub(crate) struct PhotometryContext {
     pub entry: ImageEntry,
     pub mask: Option<DqMask>,
     pub planes: PhotometryPlanes,
-    pub area: Option<ImageEntry>,
+    pub area: AreaWeights,
     pub wcs: Option<WcsTransform>,
     pub photcal: Option<PhotCal>,
     pub gain_model: GainModel,
@@ -496,13 +495,7 @@ pub(crate) struct PhotometryContext {
 }
 
 pub(crate) fn has_err_extension(path: &str, dims: (usize, usize)) -> bool {
-    let Ok((readable, _decompressed)) = resolve_gzip(std::path::Path::new(&source_path(path))) else {
-        return false;
-    };
-    let Ok(file) = std::fs::File::open(readable) else {
-        return false;
-    };
-    let Ok(hdus) = list_extensions(&file) else {
+    let Ok(hdus) = list_source_extensions(&source_path(path)) else {
         return false;
     };
     let (rows, cols) = dims;
@@ -528,8 +521,9 @@ pub(crate) fn photometry_context(path: &str, exclude_dq: bool) -> anyhow::Result
         Some(cal) => warnings.extend(cal.warnings.iter().cloned()),
         None => warnings.push(missing_calibration_reason(header)),
     }
-    let area = area_map(path, &entry, photcal.as_mut(), &mut warnings);
+    let area = AreaWeights::resolve(path, &entry, photcal.as_mut(), &mut warnings);
     warnings.extend(processed_data_warning(header));
+    warnings.extend(wcs.as_ref().and_then(|w| w.pv_warning()).map(str::to_string));
     Ok(PhotometryContext { entry, mask, planes, area, wcs, photcal, gain_model, warnings })
 }
 
@@ -550,8 +544,7 @@ impl PhotometryContext {
     }
 
     fn masked_image(&self) -> Result<MaskedImage<'_>, String> {
-        MaskedImage::new(self.entry.arr(), self.mask.as_ref().map(|m| &m.map))
-            .map(|source| source.with_area(self.area.as_ref().map(|a| a.arr())))
+        self.area.masked_image(&self.entry, self.mask.as_ref().map(|m| &m.map))
     }
 
     fn measure(&self, source: &MaskedImage, x: f64, y: f64, config: &PhotometryConfig) -> Result<StarPhotometry, String> {
@@ -910,21 +903,22 @@ mod tests {
     };
     use crate::types::constants::RES_GAIN_USED;
 
-    const WFPC2_502NMOS: &str = r"C:\astrokit\exampleFits\sample-data\502nmos.fits";
+    fn wfpc2_502nmos() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../exampleFits/sample-data/502nmos.fits");
+        assert!(path.is_file(), "the repository sample {} is missing", path.display());
+        path.to_str().unwrap().to_string()
+    }
 
     #[test]
-    #[ignore]
     fn real_data_502nmos_gain_model() {
-        if !std::path::Path::new(WFPC2_502NMOS).exists() {
-            return;
-        }
-        let header = cached_header(WFPC2_502NMOS).unwrap();
+        let sample = wfpc2_502nmos();
+        let header = cached_header(&sample).unwrap();
         let dims = (
             header.get_i64("NAXIS2").unwrap() as usize,
             header.get_i64("NAXIS1").unwrap() as usize,
         );
         assert_eq!(dims, (1600, 1600));
-        let has_err = has_err_extension(WFPC2_502NMOS, dims);
+        let has_err = has_err_extension(&sample, dims);
         assert!(!has_err, "502nmos has a single HDU and no ERR extension");
         let model = gain_model(Some(&header), has_err);
         assert_eq!(model.gain_e_per_adu, Some(7.0), "{model:?}");
@@ -2145,8 +2139,8 @@ mod tests {
         cal_sci_cards().into_iter().filter(|(k, _)| *k != key).collect()
     }
 
-    fn sci_cards_replacing(key: &str, value: &str) -> Vec<(&'static str, String)> {
-        let mut cards = sci_cards_without(key);
+    fn sci_cards_with_pixar(value: &str) -> Vec<(&'static str, String)> {
+        let mut cards = sci_cards_without("PIXAR_SR");
         cards.push(("PIXAR_SR", value.to_string()));
         cards
     }
@@ -2318,7 +2312,7 @@ mod tests {
     }
 
     #[test]
-    fn without_an_err_plane_the_area_map_propagates_into_the_error_squared() {
+    fn without_an_err_plane_the_area_map_enters_the_variance_once_like_photon_counts() {
         let dir = tempfile::tempdir().unwrap();
         let scale = f64::from(AREA_BLOCK_VALUE);
         for (name, gain) in [("nogain", None), ("gain", Some(2.0))] {
@@ -2334,10 +2328,20 @@ mod tests {
             let (phot, plain) = (&out[RES_PHOTOMETRY], &reference[RES_PHOTOMETRY]);
             assert_eq!(phot["err_used"], false);
             assert_eq!(phot["area_applied"], true);
-            let (flux_err, expected) = (number(phot, "flux_err"), scale * number(plain, "flux_err"));
-            assert!(relative_gap(flux_err, expected) < 1e-12, "{name}: flux_err {flux_err} vs {scale} x {}", number(plain, "flux_err"));
+            for field in ["aperture_area", "bg_mean", "bg_sigma", "bg_pixels"] {
+                assert_eq!(phot[field], plain[field], "{name}: {field}");
+            }
+            let (n_ap, sigma, n_bg) = (number(plain, "aperture_area"), number(plain, "bg_sigma"), number(plain, "bg_pixels"));
+            let poisson = gain.map_or(0.0, |g| number(plain, "net_flux").max(0.0) / g);
+            let expected = (scale * (poisson + n_ap * sigma * sigma) + scale * scale * n_ap * n_ap * sigma * sigma / n_bg).sqrt();
+            let flux_err = number(phot, "flux_err");
+            assert!(
+                relative_gap(flux_err, expected) < 1e-9,
+                "{name}: flux_err {flux_err} vs {expected} (a uniform map of {scale} multiplies the photon and sky variance by {scale}, the sky-mean term by {scale}^2)"
+            );
             let (snr, plain_snr) = (number(phot, "snr"), number(plain, "snr"));
-            assert!(relative_gap(snr, plain_snr) < 1e-12, "{name}: snr {snr} vs {plain_snr}");
+            assert!(relative_gap(snr, number(phot, "net_flux") / flux_err) < 1e-12, "{name}: snr {snr}");
+            assert!(snr > plain_snr && snr < scale * plain_snr, "{name}: more collecting area gives more signal to noise, less than linearly: {snr} vs {plain_snr}");
         }
 
         let gain = 2.0;
@@ -2355,8 +2359,6 @@ mod tests {
         let (x, y, r) = (number(phot, "x"), number(phot, "y"), number(phot, "aperture_radius"));
         let (bg_mean, bg_sigma, bg_pixels) = (number(phot, "bg_mean"), number(phot, "bg_sigma"), number(phot, "bg_pixels"));
         let mut net = 0.0f64;
-        let mut noise_net = 0.0f64;
-        let mut noise_weight = 0.0f64;
         let mut area_weight = 0.0f64;
         for p in circular_aperture(CAL_SIZE, CAL_SIZE, x, y, r, 5) {
             if mask[[p.y, p.x]] != 0 {
@@ -2365,11 +2367,9 @@ mod tests {
             let (w, a) = (p.weight as f64, area[[p.y, p.x]] as f64);
             let signal = blocked.sci[[p.y, p.x]] as f64 - bg_mean;
             net += w * a * signal;
-            noise_net += w * a * a * signal;
-            noise_weight += w * a * a;
             area_weight += w * a;
         }
-        let variance = noise_net.max(0.0) / gain + noise_weight * bg_sigma * bg_sigma + area_weight * area_weight * bg_sigma * bg_sigma / bg_pixels;
+        let variance = net.max(0.0) / gain + area_weight * bg_sigma * bg_sigma + area_weight * area_weight * bg_sigma * bg_sigma / bg_pixels;
         let flux_err = number(phot, "flux_err");
         assert!(relative_gap(number(phot, "net_flux"), net) < 1e-9);
         assert!(relative_gap(flux_err, variance.sqrt()) < 1e-9, "flux_err {flux_err} vs hand sum {}", variance.sqrt());
@@ -2389,7 +2389,7 @@ mod tests {
         let mut no_pixar_cards = sci_cards_without("PIXAR_SR");
         no_pixar_cards.extend(tan_wcs_cards(0.0312));
         let no_pixar = jwst_cal_mef(&dir.path().join("nopixar.fits"), &[], no_pixar_cards, CalPlanes::ALL, map(1.02));
-        let mut zero_pixar_cards = sci_cards_replacing("PIXAR_SR", "0.0");
+        let mut zero_pixar_cards = sci_cards_with_pixar("0.0");
         zero_pixar_cards.extend(tan_wcs_cards(0.0312));
         let zero_pixar = jwst_cal_mef(&dir.path().join("zeropixar.fits"), &[], zero_pixar_cards, CalPlanes::ALL, map(1.02));
         let uncalibrated = jwst_cal_mef(&dir.path().join("uncal.fits"), &[], sci_cards_without("PIXAR_SR"), CalPlanes::ALL, map(1.02));
@@ -2507,24 +2507,74 @@ mod tests {
         let area_warnings: Vec<&String> = out.warnings.iter().filter(|w| w.contains("AREA")).collect();
         assert_eq!(
             area_warnings,
-            vec!["frame_sr.fits: AREA extension ignored: map mean 2.29e-14 is not a relative pixel area (expected about 1)"],
+            vec![
+                "frame_sr.fits: AREA extension ignored: map mean 2.29e-14 is not a relative pixel area (expected about 1)",
+                "AREA pixel-area map applied on 1 of 3 measured frames (only on frame_area.fits): fluxes with and without the map differ by the aperture mean AREA, a step of a few hundredths of a magnitude in the light curve",
+            ],
             "{:?}",
             out.warnings
         );
+        let sent = serde_json::to_value(&out).unwrap();
+        assert_eq!(sent["area_mixed"], true, "the exports need the flag, not only the warning text");
+
+        let consistent = measure_time_series(&[plain.key.clone(), refused.key.clone()], &targets, &config, false, false, None).unwrap();
+        assert!(
+            !consistent.warnings.iter().any(|w| w.contains("of 2 measured frames")),
+            "frames that agree on the map raise no series warning: {:?}",
+            consistent.warnings
+        );
+        assert_eq!(serde_json::to_value(&consistent).unwrap()["area_mixed"], false);
     }
 
     #[test]
-    #[ignore]
+    fn a_cal_opened_from_a_zip_gets_the_same_area_map_and_err_plane_as_the_plain_file() {
+        use crate::infra::fits::dispatcher::test_support::write_zip;
+        let dir = tempfile::tempdir().unwrap();
+        let plain = jwst_cal_mef(
+            &dir.path().join("cal.fits"),
+            &[],
+            cal_sci_cards(),
+            CalPlanes::ALL,
+            vec![area_hdu(uniform_area(AREA_BLOCK_VALUE), CAL_SIZE, Some(1))],
+        );
+        let zip = dir.path().join("bundle.zip");
+        write_zip(&zip, &[("cal.fits", &std::fs::read(&plain.path).unwrap())]);
+        let zipped = format!("{}#hdu=1", zip.display());
+
+        let from_zip = cal_photometry(&zipped, true);
+        let from_plain = cal_photometry(&plain.key, true);
+        assert_eq!(from_zip[RES_PHOTOMETRY]["area_applied"], true, "{}", from_zip[RES_WARNINGS]);
+        assert_eq!(from_zip[RES_PHOTCAL][RES_LABEL], AREA_LABEL);
+        assert_eq!(flux_bits(&from_zip[RES_PHOTOMETRY]), flux_bits(&from_plain[RES_PHOTOMETRY]));
+        assert_eq!(from_zip[RES_WARNINGS], from_plain[RES_WARNINGS]);
+        assert!(has_err_extension(&zipped, (CAL_SIZE, CAL_SIZE)), "the ERR plane of the zipped _cal feeds the gain model");
+    }
+
+    #[test]
+    fn photometry_on_a_tan_pv_header_warns_that_the_pv_distortion_is_not_applied() {
+        use crate::infra::wcs_source::test_fixtures::PV_DISTORTION_CARDS;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cards = sci_cards_with(tan_wcs_cards(0.0312));
+        cards.extend(PV_DISTORTION_CARDS.iter().map(|&(key, value)| (key, value.to_string())));
+        let fixture = jwst_cal_mef(&dir.path().join("tanpv.fits"), &[], cards, CalPlanes::ALL, vec![]);
+        let out = cal_photometry(&fixture.key, false);
+        let warnings = out[RES_WARNINGS].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w.as_str().unwrap() == "PV distortion not applied: PV1_0, PV1_1, PV1_2, PV1_4, PV2_0, PV2_2, PV2_10"),
+            "{warnings:?}"
+        );
+        assert!(out[RES_SKY][RES_RA].is_number(), "the linear TAN still gives a sky position: {}", out[RES_SKY]);
+    }
+
+    #[test]
+    #[ignore = "reads jw01475001001_02101_00001_nrca1_cal.fits (and the i2d and crf when present) from ASTROBURST_MAST_DIR"]
     fn real_jw01475_cal_flux_ratio_equals_the_flux_weighted_aperture_mean_area() {
-        use crate::core::astrometry::gwcs::test_support::mast_dir;
+        use crate::core::astrometry::gwcs::test_support::{mast_dir, MAST_DIR_VAR};
         let dir = mast_dir();
         let cal = dir.join("jw01475001001_02101_00001_nrca1_cal.fits");
-        if !cal.is_file() {
-            eprintln!("skipped: {} is missing", cal.display());
-            return;
-        }
+        assert!(cal.is_file(), "set {MAST_DIR_VAR} to the folder that holds the jw01475 products: {} is not a file", cal.display());
         let ctx = photometry_context(&format!("{}#hdu=1", cal.display()), true).unwrap();
-        let area = ctx.area.as_ref().expect("AREA map attached to the _cal frame").arr();
+        let area = ctx.area.map().expect("AREA map attached to the _cal frame");
         assert_eq!(ctx.photcal.as_ref().unwrap().label(), AREA_LABEL);
         assert!(!ctx.warnings.iter().any(|w| w.contains("AREA")), "{:?}", ctx.warnings);
         let (h, w) = ctx.entry.arr().dim();
@@ -2582,7 +2632,7 @@ mod tests {
         let i2d = dir.join("jw01475001001_02101_00001_nrca1_i2d.fits");
         if i2d.is_file() {
             let ctx = photometry_context(&format!("{}#hdu=1", i2d.display()), false).unwrap();
-            assert!(ctx.area.is_none(), "an i2d has no AREA extension");
+            assert!(ctx.area.map().is_none(), "an i2d has no AREA extension");
             assert!(!ctx.photcal.as_ref().unwrap().label().contains("AREA"));
             assert!(!ctx.warnings.iter().any(|w| w.contains("AREA")), "{:?}", ctx.warnings);
             eprintln!("i2d: {} ({:?})", ctx.photcal.as_ref().unwrap().label(), ctx.warnings);
@@ -2590,7 +2640,7 @@ mod tests {
         let crf = dir.join("jw01475001001_02101_00001_nrca1_o001_crf.fits");
         if crf.is_file() {
             let ctx = photometry_context(&format!("{}#hdu=1", crf.display()), false).unwrap();
-            assert!(ctx.area.is_some(), "the crf carries the same AREA extension as the cal");
+            assert!(ctx.area.map().is_some(), "the crf carries the same AREA extension as the cal");
             assert_eq!(ctx.photcal.as_ref().unwrap().label(), AREA_LABEL);
             eprintln!("crf: {}", ctx.photcal.as_ref().unwrap().notes.join(" | "));
         }

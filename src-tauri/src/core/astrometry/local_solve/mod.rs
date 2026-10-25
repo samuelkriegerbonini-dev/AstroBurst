@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -16,6 +17,7 @@ use crate::core::alignment::triangles::{
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::catalog::{propagate_epoch, CatalogRow};
 use crate::core::astrometry::gwcs::SipFitOptions;
+#[cfg(test)]
 use crate::core::astrometry::healpix_cat::{HealpixCatalog, MmapSource};
 use crate::core::astrometry::solve_hints::{SolveHints, SCALE_HINT_MARGIN};
 use crate::core::imaging::cfa::luminance_bin;
@@ -28,18 +30,18 @@ mod acceptance;
 #[cfg(test)]
 mod bench;
 #[cfg(test)]
-mod synthetic;
+pub(crate) mod synthetic;
 #[cfg(test)]
 mod tests;
 
-pub const STAGE_DETECT: &str = "detect";
-pub const STAGE_SEARCH: &str = "search";
-pub const STAGE_FIT: &str = "fit";
 pub const MAX_NEAR_RADIUS_DEG: f64 = 15.0;
 pub const TIER0_MEAN_STARS_PER_DEG2: f64 = 62.0;
-pub const TIER0_MIN_EXPECTED_STARS: f64 = 50.0;
-pub const TAN_HYPOTHESIS_PAIRS: usize = 3;
 
+const STAGE_DETECT: &str = "detect";
+const STAGE_SEARCH: &str = "search";
+const STAGE_FIT: &str = "fit";
+const TIER0_MIN_EXPECTED_STARS: f64 = 50.0;
+const TAN_HYPOTHESIS_PAIRS: usize = 3;
 const ARCSEC_PER_DEG: f64 = 3600.0;
 const TAN_LON_POLE: f64 = 180.0;
 const MIN_TAN_PAIRS: usize = 3;
@@ -64,10 +66,12 @@ const MATCH_WINDOWS: usize = 4;
 const MATCH_WINDOW_FRACTION: f64 = 2.0 / 3.0;
 const SIP_RADIAL_BANDS: usize = 3;
 const COVERAGE_GRID: usize = 3;
-pub const COVERAGE_MIN_LOG10: f64 = -4.0;
+const COVERAGE_MIN_LOG10: f64 = -4.0;
 const BACKGROUND_TILE_MIN_PIXELS: usize = 8;
 const BACKGROUND_CLIP_SIGMA: f32 = 3.0;
 const BACKGROUND_CLIP_ROUNDS: usize = 2;
+const SCALE_WINDOW_TOLERANCE: f64 = 1e-9;
+const MAX_TAN_FIELD_DEG: f64 = 120.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RankingKey {
@@ -129,14 +133,17 @@ pub struct TierChain {
     pub tiers: Vec<(CatalogTier, Box<dyn CatalogProvider>)>,
 }
 
+pub fn expected_tier0_stars(field: FieldSize) -> f64 {
+    TIER0_MEAN_STARS_PER_DEG2 * field.width_deg * field.height_deg
+}
+
 impl TierChain {
     pub fn choose(
         &self,
         field: FieldSize,
-        expected_tier0_stars: Option<f64>,
+        expected_hint: Option<f64>,
     ) -> Option<(CatalogTier, &dyn CatalogProvider)> {
-        let expected = expected_tier0_stars
-            .unwrap_or(TIER0_MEAN_STARS_PER_DEG2 * field.width_deg * field.height_deg);
+        let expected = expected_hint.unwrap_or_else(|| expected_tier0_stars(field));
         let tier0 = self.tier(CatalogTier::Tier0);
         if expected >= TIER0_MIN_EXPECTED_STARS {
             if let Some(provider) = tier0 {
@@ -158,6 +165,7 @@ impl TierChain {
     }
 }
 
+#[cfg(test)]
 struct HealpixProvider {
     catalog: HealpixCatalog<MmapSource>,
     label: &'static str,
@@ -165,6 +173,7 @@ struct HealpixProvider {
     ranking: RankingKey,
 }
 
+#[cfg(test)]
 impl CatalogProvider for HealpixProvider {
     fn cone(
         &self,
@@ -192,6 +201,7 @@ impl CatalogProvider for HealpixProvider {
     }
 }
 
+#[cfg(test)]
 pub fn healpix_provider(
     path: &Path,
     label: &'static str,
@@ -257,7 +267,7 @@ impl Verification {
     }
 }
 
-pub fn cell_covered(coverage_log10: f64, chance_log10: f64) -> bool {
+fn cell_covered(coverage_log10: f64, chance_log10: f64) -> bool {
     coverage_log10 >= COVERAGE_MIN_LOG10 || chance_log10 < COVERAGE_MIN_LOG10
 }
 
@@ -355,7 +365,6 @@ pub struct LocalSolution {
     pub false_alarm_log10: f64,
     pub sip_order: Option<u8>,
     pub sip_max_err_px: Option<f64>,
-    pub catalog_tier: &'static str,
     pub detections: usize,
     pub centres_tried: usize,
     pub elapsed: Duration,
@@ -394,7 +403,6 @@ pub struct SolveFailure {
     pub detections: usize,
     pub centres_tried: usize,
     pub best: Option<Box<CandidateNumbers>>,
-    pub expected_tier0_stars: Option<f64>,
     pub elapsed: Duration,
 }
 
@@ -472,7 +480,8 @@ fn spiral_ring(hint: (f64, f64), spacing_deg: f64, k: usize) -> Vec<(f64, f64)> 
     ring
 }
 
-pub fn spiral_centres(hint: (f64, f64), spacing_deg: f64, radius_deg: f64) -> Vec<Vec<(f64, f64)>> {
+#[cfg(test)]
+fn spiral_centres(hint: (f64, f64), spacing_deg: f64, radius_deg: f64) -> Vec<Vec<(f64, f64)>> {
     let mut rings = vec![vec![hint]];
     for k in 1..=last_ring(spacing_deg, radius_deg) {
         rings.push(spiral_ring(hint, spacing_deg, k));
@@ -481,14 +490,14 @@ pub fn spiral_centres(hint: (f64, f64), spacing_deg: f64, radius_deg: f64) -> Ve
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SearchPlan {
-    pub rings: Vec<Vec<(usize, (f64, f64))>>,
-    pub centres: usize,
-    pub radius_reached_deg: f64,
-    pub capped: bool,
+struct SearchPlan {
+    rings: Vec<Vec<(usize, (f64, f64))>>,
+    centres: usize,
+    radius_reached_deg: f64,
+    capped: bool,
 }
 
-pub fn search_plan(
+fn search_plan(
     hint: (f64, f64),
     spacings_deg: &[f64],
     radius_deg: f64,
@@ -532,10 +541,11 @@ pub fn search_plan(
     }
 }
 
-pub fn scale_hypotheses(low_arcsec: f64, high_arcsec: f64) -> Vec<f64> {
+fn scale_hypotheses(low_arcsec: f64, high_arcsec: f64) -> Vec<f64> {
     let (below, above) = (1.0 - SCALE_HINT_MARGIN, 1.0 + SCALE_HINT_MARGIN);
     let window = above / below;
-    if !is_positive(low_arcsec) || !is_positive(high_arcsec) || high_arcsec / low_arcsec <= window {
+    let single = high_arcsec / low_arcsec <= window * (1.0 + SCALE_WINDOW_TOLERANCE);
+    if !is_positive(low_arcsec) || !is_positive(high_arcsec) || single {
         return vec![(low_arcsec * high_arcsec / (below * above)).sqrt()];
     }
     let first = low_arcsec / below;
@@ -553,14 +563,28 @@ pub(crate) fn destination(
     bearing_deg: f64,
     distance_deg: f64,
 ) -> (f64, f64) {
-    let (lat1, lon1) = (dec.to_radians(), ra.to_radians());
-    let (brg, dist) = (bearing_deg.to_radians(), distance_deg.to_radians());
-    let lat2 = (lat1.sin() * dist.cos() + lat1.cos() * dist.sin() * brg.cos())
-        .clamp(-1.0, 1.0)
-        .asin();
-    let lon2 =
-        lon1 + (brg.sin() * dist.sin() * lat1.cos()).atan2(dist.cos() - lat1.sin() * lat2.sin());
-    (lon2.to_degrees().rem_euclid(360.0), lat2.to_degrees())
+    let (sin_ra, cos_ra) = ra.to_radians().sin_cos();
+    let (sin_dec, cos_dec) = dec.to_radians().sin_cos();
+    let (sin_bearing, cos_bearing) = bearing_deg.to_radians().sin_cos();
+    let (sin_dist, cos_dist) = distance_deg.to_radians().sin_cos();
+    let north = sin_dist * cos_bearing;
+    let east = sin_dist * sin_bearing;
+    let x = cos_dist * cos_dec * cos_ra - north * sin_dec * cos_ra - east * sin_ra;
+    let y = cos_dist * cos_dec * sin_ra - north * sin_dec * sin_ra + east * cos_ra;
+    let z = cos_dist * sin_dec + north * cos_dec;
+    (
+        wrap_longitude_deg(y.atan2(x).to_degrees()),
+        z.atan2(x.hypot(y)).to_degrees(),
+    )
+}
+
+fn wrap_longitude_deg(value: f64) -> f64 {
+    let wrapped = value.rem_euclid(360.0);
+    if wrapped >= 360.0 {
+        0.0
+    } else {
+        wrapped
+    }
 }
 
 fn is_positive(value: f64) -> bool {
@@ -634,13 +658,6 @@ fn parity_of(cd: &[[f64; 2]; 2]) -> ImageParity {
     } else {
         ImageParity::Normal
     }
-}
-
-fn tan_is_finite(tan: &TanParams) -> bool {
-    [tan.crval.0, tan.crval.1, tan.crpix.0, tan.crpix.1]
-        .iter()
-        .chain(tan.cd.iter().flatten())
-        .all(|value| value.is_finite())
 }
 
 fn tan_cards(tan: &TanParams) -> Vec<(String, String)> {
@@ -765,7 +782,7 @@ fn plain_rms(distances: &[f64]) -> f64 {
     }
 }
 
-pub fn clipped_rms(distances: &[f64], clip_sigma: f64) -> f64 {
+fn clipped_rms(distances: &[f64], clip_sigma: f64) -> f64 {
     if distances.is_empty() {
         return 0.0;
     }
@@ -815,7 +832,7 @@ fn masked_rms(residuals: &[f64], mask: &[bool]) -> f64 {
     }
 }
 
-pub fn fit_tan(
+fn fit_tan(
     pairs: &[SkyPair],
     size: (usize, usize),
     start: (f64, f64),
@@ -923,7 +940,7 @@ struct StageGate {
     trials: usize,
 }
 
-pub fn false_alarm_log10(matched: usize, lambda: f64, trials: usize) -> f64 {
+fn false_alarm_log10(matched: usize, lambda: f64, trials: usize) -> f64 {
     let scored = matched.saturating_sub(TAN_HYPOTHESIS_PAIRS);
     (poisson_tail_log10(scored, lambda) + (trials.max(1) as f64).log10()).min(0.0)
 }
@@ -1081,7 +1098,7 @@ fn coverage_log10(
     worst_uncovered.unwrap_or(worst)
 }
 
-pub fn poisson_lower_tail_log10(k: usize, lambda: f64) -> f64 {
+fn poisson_lower_tail_log10(k: usize, lambda: f64) -> f64 {
     if !is_positive(lambda) {
         return 0.0;
     }
@@ -1096,7 +1113,8 @@ pub fn poisson_lower_tail_log10(k: usize, lambda: f64) -> f64 {
     (ln_sum / std::f64::consts::LN_10).min(0.0)
 }
 
-pub fn verify(
+#[cfg(test)]
+fn verify(
     tan: &TanParams,
     detections: &[Detection],
     catalogue: &[(f64, f64)],
@@ -1120,7 +1138,7 @@ pub fn verify(
     .0
 }
 
-pub fn poisson_tail_log10(k: usize, lambda: f64) -> f64 {
+pub(crate) fn poisson_tail_log10(k: usize, lambda: f64) -> f64 {
     if k == 0 {
         return 0.0;
     }
@@ -1273,40 +1291,59 @@ fn sip_cards(
     })
 }
 
-fn distortion_with_model(
-    pairs: &[SkyPair],
-    tan: &TanParams,
-    size: (usize, usize),
-    params: &LocalSolveParams,
-) -> Result<(DistortionFit, Option<PolyModel>), String> {
-    if !tan_is_finite(tan) {
-        return Err("TAN parameters are not finite".to_string());
-    }
-    let plain = plain_tan(tan);
-    let Some(selection) = fit_sip_model(pairs, tan, size, params) else {
-        return Ok((plain, None));
-    };
-    let considered = selection.considered;
-    let Some(model) = selection.model else {
-        return Ok((
-            DistortionFit {
-                considered,
-                ..plain
-            },
-            None,
-        ));
-    };
-    let fit = sip_cards(&model.forward, considered, tan, size)?;
-    Ok((fit, Some(model.forward)))
+struct Distortion {
+    fit: DistortionFit,
+    model: Option<PolyModel>,
+    warnings: Vec<String>,
 }
 
-pub fn fit_distortion(
+fn distortion_from(
+    selection: Option<SipSelection>,
+    tan: &TanParams,
+    size: (usize, usize),
+) -> Distortion {
+    let plain = |considered: Vec<(u8, f64, f64)>| Distortion {
+        fit: DistortionFit {
+            considered,
+            ..plain_tan(tan)
+        },
+        model: None,
+        warnings: Vec::new(),
+    };
+    let Some(SipSelection { considered, model }) = selection else {
+        return plain(Vec::new());
+    };
+    let Some(model) = model else {
+        return plain(considered);
+    };
+    let populated = quadrants(&model.kept, size);
+    let extrapolated = (populated < 4).then(|| {
+        format!(
+            "SIP fitted on {populated} of 4 image quadrants: the WCS is extrapolated in the quadrant without matched stars"
+        )
+    });
+    match sip_cards(&model.forward, considered, tan, size) {
+        Ok(fit) => Distortion {
+            fit,
+            model: Some(model.forward),
+            warnings: extrapolated.into_iter().collect(),
+        },
+        Err(error) => Distortion {
+            warnings: vec![format!("SIP fit skipped: {error}")],
+            ..plain(Vec::new())
+        },
+    }
+}
+
+#[cfg(test)]
+fn fit_distortion(
     pairs: &[SkyPair],
     tan: &TanParams,
     size: (usize, usize),
     params: &LocalSolveParams,
-) -> Result<DistortionFit, String> {
-    distortion_with_model(pairs, tan, size, params).map(|(fit, _)| fit)
+) -> (DistortionFit, Vec<String>) {
+    let distortion = distortion_from(fit_sip_model(pairs, tan, size, params), tan, size);
+    (distortion.fit, distortion.warnings)
 }
 
 #[derive(Clone, Copy)]
@@ -1816,7 +1853,6 @@ struct Solved {
     verification: Verification,
     distortion: DistortionFit,
     rms_px: f64,
-    label: &'static str,
     warnings: Vec<String>,
 }
 
@@ -2024,9 +2060,9 @@ fn try_centre(
     side: &MatchSide,
     ctx: &SearchContext,
 ) -> Result<CentreOutcome, String> {
-    let (mut rows, label) =
-        ctx.catalog
-            .cone(centre.0, centre.1, hypothesis.cone_radius_deg, None)?;
+    let (mut rows, _) = ctx
+        .catalog
+        .cone(centre.0, centre.1, hypothesis.cone_radius_deg, None)?;
     if let Some(epoch) = ctx.epoch_year {
         propagate_epoch(&mut rows, epoch);
     }
@@ -2120,46 +2156,20 @@ fn try_centre(
         verification,
         pairs,
     } = matched;
-    let mut warnings = Vec::new();
-    let (distortion, rms_px) = match selection {
-        None => (plain_tan(&tan), verification.rms_px),
-        Some(SipSelection {
-            considered,
-            model: None,
-        }) => (
-            DistortionFit {
-                considered,
-                ..plain_tan(&tan)
-            },
-            verification.rms_px,
-        ),
-        Some(SipSelection {
-            considered,
-            model: Some(model),
-        }) => match sip_cards(&model.forward, considered, &tan, ctx.size) {
-            Ok(fit) => (
-                fit,
-                model_rms_px(
-                    &model.forward,
-                    &pairs,
-                    &tan,
-                    verification.rms_px,
-                    ctx.params,
-                ),
-            ),
-            Err(error) => {
-                warnings.push(format!("SIP fit skipped: {error}"));
-                (plain_tan(&tan), verification.rms_px)
-            }
-        },
-    };
+    let Distortion {
+        fit: distortion,
+        model,
+        warnings,
+    } = distortion_from(selection, &tan, ctx.size);
+    let rms_px = model.map_or(verification.rms_px, |model| {
+        model_rms_px(&model, &pairs, &tan, verification.rms_px, ctx.params)
+    });
     let candidate = numbers(&tan, &verification, rms_px);
     let covered = verification.covered();
     let solved = (rms_px <= ctx.params.max_rms_px && covered).then_some(Solved {
         verification,
         distortion,
         rms_px,
-        label,
         warnings,
     });
     Ok(CentreOutcome {
@@ -2210,7 +2220,6 @@ fn finish_solution(
         false_alarm_log10: solved.verification.false_alarm_log10,
         sip_order,
         sip_max_err_px: distortion.sip_max_err_px,
-        catalog_tier: solved.label,
         detections,
         centres_tried,
         elapsed: started.elapsed(),
@@ -2239,7 +2248,6 @@ fn solve_detections(
         detections,
         centres_tried,
         best: best.map(Box::new),
-        expected_tier0_stars: hints.expected_tier0_stars,
         elapsed: started.elapsed(),
     };
     let Some(centre) = hints.centre.as_ref() else {
@@ -2273,6 +2281,19 @@ fn solve_detections(
             format!(
                 "unusable hints: centre ({}, {}), scale {}..{} arcsec/px, size {width}x{height}",
                 centre.ra, centre.dec, scale.low_arcsec, scale.high_arcsec
+            ),
+            detections.len(),
+            0,
+            None,
+        ));
+    }
+    let hinted_long_side_deg = scale.high_arcsec * width.max(height) as f64 / ARCSEC_PER_DEG;
+    if hinted_long_side_deg > MAX_TAN_FIELD_DEG {
+        return Err(failure(
+            FailureReason::MissingHint,
+            format!(
+                "unusable scale hint: {}..{} arcsec/px from {} gives a {hinted_long_side_deg:.0} deg field, wider than a TAN image can be (at most {MAX_TAN_FIELD_DEG:.0} deg)",
+                scale.low_arcsec, scale.high_arcsec, scale.source
             ),
             detections.len(),
             0,

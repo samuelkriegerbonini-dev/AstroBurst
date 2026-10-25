@@ -22,7 +22,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { useFileQueue } from "./hooks/useFileQueue";
-import { registerFileIngest, showWorkspaceUnlessKept, type IngestOptions } from "./hooks/useFileIngest";
+import { followFilteredSelection, registerFileIngest, showWorkspaceUnlessKept, type IngestOptions } from "./hooks/useFileIngest";
 import { quietCompletion } from "./utils/quietCompletion";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
@@ -51,8 +51,8 @@ import GlobalProgress from "./components/file/GlobalProgress";
 import StatsBar from "./components/analysis/StatsBar";
 import { useLingeringVisibility } from "./hooks/useLingeringVisibility";
 import { isTauri } from "./infrastructure/tauri";
-import { sampleDataStore, samplePaletteAction, useSampleData } from "./hooks/useSampleData";
-import { openSampleProducts, paletteSampleSets, paletteSampleSetsKey, sampleSetPaletteActions, type SampleSetRun } from "./utils/sampleOffers";
+import { sampleDataStore, useSampleData } from "./hooks/useSampleData";
+import { openSampleProducts, paletteSampleSetsSelector, samplePaletteActions, sampleSetRun } from "./utils/sampleOffers";
 import type { SampleOpen } from "./services/sampleData";
 
 type ViewState = "empty" | "processing" | "complete";
@@ -67,16 +67,7 @@ const showCubeTool = () => {
   showWorkspace();
   dockStore.dispatch({ type: "open", tool: "cube" });
 };
-const SAMPLE_SET_RUN: SampleSetRun = {
-  download: (id) => {
-    showCubeTool();
-    void sampleDataStore.download(id, openSampleProducts);
-  },
-  open: (id) => {
-    showCubeTool();
-    void sampleDataStore.open(id, openSampleProducts);
-  },
-};
+const PALETTE_SAMPLE_SETS = paletteSampleSetsSelector(sampleDataStore);
 const IS_MAC = typeof navigator !== "undefined" && (navigator.platform?.toLowerCase().includes("mac") ?? false);
 const SHORTCUT_GROUPS = shortcutSheet(IS_MAC).filter((g) => g.rows.length > 0);
 
@@ -232,22 +223,14 @@ export default function App() {
     }
   }, [handleFilesAdded]);
 
-  const openSampleFrames = useCallback((opened: SampleOpen) => {
-    const partition = partitionIncoming(opened.paths);
-    setIngestReport(rejectionReport(partition));
-    handleFilesAdded(partition.accepted.map(astroFileFromPath));
-  }, [handleFilesAdded]);
-  const sampleData = useSampleData(openSampleFrames);
-  const sampleEntries = useSyncExternalStore(sampleDataStore.subscribe, sampleDataStore.get, sampleDataStore.get);
-  const sampleSetsKey = paletteSampleSetsKey(sampleEntries);
-  const sampleState = sampleData?.state;
-  const sampleTotalBytes = sampleData?.totalBytes ?? 0;
-  const downloadSample = sampleData?.download;
-  const openSample = sampleData?.open;
-  const samplePalette = useMemo(
-    () => (sampleState && downloadSample && openSample ? { state: sampleState, totalBytes: sampleTotalBytes, download: downloadSample, open: openSample } : null),
-    [sampleState, sampleTotalBytes, downloadSample, openSample],
+  const openSampleFrames = useCallback((opened: SampleOpen) => setIngestReport(openSampleProducts(opened)), []);
+  const reportSampleFailure = useCallback((message: string) => setIngestReport({ skipped: 0, calib: 0, message }), []);
+  const sampleRunners = useMemo(
+    () => ({ primary: sampleSetRun(sampleDataStore, showWorkspace, reportSampleFailure), cube: sampleSetRun(sampleDataStore, showCubeTool, reportSampleFailure) }),
+    [reportSampleFailure],
   );
+  const sampleData = useSampleData(openSampleFrames);
+  const paletteSampleSets = useSyncExternalStore(sampleDataStore.subscribe, PALETTE_SAMPLE_SETS, PALETTE_SAMPLE_SETS);
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const shortcutsRef = useRef<HTMLDivElement>(null);
@@ -424,9 +407,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (filteredSelectedId !== null && filteredSelectedId !== selectedId) {
-      fileStore.selectFile(filteredSelectedId);
-    }
+    if (filteredSelectedId !== selectedId) followFilteredSelection(filteredSelectedId);
   }, [filteredSelectedId, selectedId]);
 
   const visibleSelectedFile = useMemo(() => {
@@ -437,9 +418,9 @@ export default function App() {
 
   const hasVisibleFile = visibleSelectedFile !== null;
   const visibleFileKey = fileKeyOf(visibleSelectedFile);
-  const sampleSetActions = useMemo(
-    () => sampleSetPaletteActions(paletteSampleSets(sampleSetsKey), hasVisibleFile, SAMPLE_SET_RUN),
-    [sampleSetsKey, hasVisibleFile],
+  const sampleEntries = useMemo(
+    () => samplePaletteActions(paletteSampleSets, { workspaceEmpty: view === "empty", fileShown: hasVisibleFile }, sampleRunners),
+    [paletteSampleSets, view, hasVisibleFile, sampleRunners],
   );
 
   const selectedPath = selectedFile?.path ?? null;
@@ -460,9 +441,7 @@ export default function App() {
       { id: "open-files", label: "Open FITS Files...", hint: "Ctrl+O", icon: FolderOpen, run: handleBrowseFiles },
       { id: "open-folder", label: "Open Folder...", icon: FolderOpen, run: handleSelectFolder },
     ];
-    const sampleAction = samplePaletteAction(samplePalette, view === "empty", showWorkspace);
-    if (sampleAction) acts.push(sampleAction);
-    acts.push(...sampleSetActions);
+    acts.push(...sampleEntries);
     if (view !== "empty") {
       for (const { tool, label } of paletteToolEntries(dockLayout, hasVisibleFile)) {
         acts.push({
@@ -499,7 +478,7 @@ export default function App() {
     acts.push(...archivePaletteActions);
     acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
     return acts;
-  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, samplePalette, sampleSetActions, handleExportZip, handleNewBatchClick, archivePaletteActions]);
+  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, sampleEntries, handleExportZip, handleNewBatchClick, archivePaletteActions]);
 
   const handlePaletteSelectFile = useCallback((id: string) => {
     showWorkspace();
