@@ -3065,21 +3065,32 @@ mod tests {
             let nova = serve(Resource::new(b"{}".to_vec()));
             let env = FakeEnv::new(TierSet::default(), None, &nova);
             let cancel = Arc::clone(&env.cancel);
+            let cancel_requested = Arc::new(tokio::sync::Notify::new());
+            let fetch_started = Arc::clone(&cancel_requested);
+            let (release_fetch, fetch_released) = std::sync::mpsc::channel::<()>();
+            let fetch_released = Mutex::new(fetch_released);
             let slow: GaiaFetch = Arc::new(move |_: &ConeQuery| {
                 cancel.store(true, Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_secs(3));
+                fetch_started.notify_one();
+                let _ = fetch_released.lock().unwrap().recv();
                 Ok(Vec::new())
             });
             let flag = Arc::clone(&env.cancel);
             *env.tiers.lock().unwrap() = Some(online_tiers(slow, Arc::new(move || flag.load(Ordering::SeqCst))));
-            let started = std::time::Instant::now();
-            let refused = run_plate_solve(env.clone(), request(&sky)).await.unwrap_err();
-            let waited = started.elapsed();
+            let cancel_timeout = async {
+                cancel_requested.notified().await;
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            };
+            let result = tokio::select! {
+                result = run_plate_solve(env.clone(), request(&sky)) => Some(result),
+                _ = cancel_timeout => None,
+            };
+            drop(release_fetch);
+            let refused = result
+                .expect("the solve waited more than 1.5s for an online query that was cancelled")
+                .unwrap_err();
+            assert!(env.cancel.load(Ordering::SeqCst), "the online fetch must request cancellation");
             assert_eq!(code(&refused), "cancelled", "{refused}");
-            assert!(
-                waited < std::time::Duration::from_millis(1500),
-                "the solve waited {waited:?} for an online query that was cancelled"
-            );
         }
 
         fn compact_catalogue(level: u8, cat_type: u8, centre: (f64, f64), mag: f64) -> Vec<u8> {
