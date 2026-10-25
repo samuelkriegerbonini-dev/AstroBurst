@@ -13,9 +13,10 @@ use crate::cmd::common::{
     render_named_and_save, resolve_output_dir, source_path, OutputValues,
 };
 use crate::core::astrometry::catalog::{
-    query_gaia_cached, solver_cone_query, CatalogRow, ConeQuery, GAIA_MATCH_MAG_LIMIT,
+    query_gaia_cached, solver_cone_query, CatalogRow, ConeQuery, GAIA_MATCH_MAG_LIMIT, GAIA_VIZIER_TABLE,
 };
 use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
+use crate::core::astrometry::gaia_tie::{GAIA_DR3_ATTRIBUTION, GAIA_DR3_ATTRIBUTION_SIRIL, GAIA_ESA_ACKNOWLEDGEMENT};
 use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
 use crate::core::astrometry::local_solve::{
     solve_local, CatalogProvider, CatalogTier, FailureReason, FieldSize, ImageParity, LocalSolution,
@@ -29,7 +30,7 @@ use crate::core::astrometry::wcs::{
     angular_separation, pixel_center, pixel_edge_corners, position_angle_deg, WcsKind, WcsTransform,
 };
 use crate::infra::catalog_store::{
-    CatalogLease, CatalogStore, DatasetStatus, StoreRoots, SIRIL_GAIA_ID, TWOMASS_ID, TYCHO2_ID,
+    CatalogLease, CatalogStore, DatasetStatus, StoreRoots, SIRIL_GAIA_ID, TWOMASS_ID, TYCHO2_ID, ZENODO_RECORD_ID,
 };
 use crate::infra::config;
 use crate::infra::fits::dispatcher::resolve_single_image;
@@ -425,7 +426,7 @@ pub(crate) async fn run_plate_solve(
     request: PlateSolveRequest,
 ) -> Result<serde_json::Value, serde_json::Value> {
     let choice = SolverChoice::parse(request.solver.as_deref()).map_err(plain_error)?;
-    match choice {
+    let solved = match choice {
         SolverChoice::AstrometryNet => solve_with_nova(env, request).await,
         SolverChoice::Auto | SolverChoice::Local => {
             let online = choice == SolverChoice::Auto;
@@ -433,7 +434,8 @@ pub(crate) async fn run_plate_solve(
                 .await
                 .map_err(join_error)?
         }
-    }
+    }?;
+    Ok(with_solve_credit(solved))
 }
 
 struct NovaPrepared {
@@ -1243,14 +1245,67 @@ pub(crate) fn write_solved_wcs(
     write_wcs_copy(path, wcs_cards, output_dir, None)
 }
 
+#[cfg(test)]
 pub(crate) fn write_wcs_copy(
     path: &str,
     wcs_cards: &[(String, String)],
     output_dir: &str,
     gaia_history: Option<&[String]>,
 ) -> anyhow::Result<serde_json::Value> {
+    write_wcs_copy_with_credit(path, wcs_cards, output_dir, gaia_history, &[])
+}
+
+struct SolveCredit {
+    history: String,
+    text: String,
+    citation: &'static str,
+}
+
+fn solve_credit(catalog: Option<&str>) -> Option<SolveCredit> {
+    match catalog.map(str::trim) {
+        Some(TIER1_SIRIL_LABEL) => Some(SolveCredit {
+            history: format!("Plate solved against the Gaia DR3 astrometric extract from Siril ({TIER1_SIRIL_LABEL}, Zenodo {ZENODO_RECORD_ID})"),
+            text: format!("Gaia DR3, ESA/Gaia/DPAC, via the Siril extract (Zenodo {ZENODO_RECORD_ID})"),
+            citation: GAIA_DR3_ATTRIBUTION_SIRIL,
+        }),
+        Some(TIER2_LABEL) => Some(SolveCredit {
+            history: format!("Plate solved against Gaia DR3 online ({TIER2_LABEL}, VizieR {GAIA_VIZIER_TABLE})"),
+            text: gaia_refine::GAIA_TIE_SHORT_ATTRIBUTION.to_string(),
+            citation: GAIA_DR3_ATTRIBUTION,
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn solve_credit_history(catalog: Option<&str>) -> Vec<String> {
+    solve_credit(catalog).map_or_else(Vec::new, |credit| {
+        vec![credit.history, credit.citation.to_string(), GAIA_ESA_ACKNOWLEDGEMENT.to_string()]
+    })
+}
+
+fn solve_credit_value(catalog: Option<&str>) -> serde_json::Value {
+    solve_credit(catalog).map_or(serde_json::Value::Null, |credit| json!({ "text": credit.text, "citation": credit.citation }))
+}
+
+fn with_solve_credit(mut solved: serde_json::Value) -> serde_json::Value {
+    let credit = solve_credit_value(solved["catalog"].as_str());
+    if let Some(fields) = solved.as_object_mut() {
+        fields.insert("credit".to_string(), credit);
+    }
+    solved
+}
+
+pub(crate) fn write_wcs_copy_with_credit(
+    path: &str,
+    wcs_cards: &[(String, String)],
+    output_dir: &str,
+    gaia_history: Option<&[String]>,
+    credit: &[String],
+) -> anyhow::Result<serde_json::Value> {
     let started = std::time::Instant::now();
-    let gaia_history = gaia_history.filter(|lines| !lines.is_empty());
+    let tie = gaia_history.unwrap_or_default();
+    let mut history = tie.to_vec();
+    history.extend(credit.iter().filter(|line| !tie.contains(line)).cloned());
     let name = output_stem(path);
     let source_header = cached_header(path)?;
     let planes = source_header.get_i64("NAXIS3").unwrap_or(1);
@@ -1270,9 +1325,9 @@ pub(crate) fn write_wcs_copy(
             merged.set(key, value.clone());
         }
     }
-    let abproc = if gaia_history.is_some() { gaia_refine::ABPROC_GAIA_TIED } else { ABPROC_PLATE_SOLVED };
+    let abproc = if tie.is_empty() { ABPROC_PLATE_SOLVED } else { gaia_refine::ABPROC_GAIA_TIED };
     let mut header = derived_output_header(Some(&merged), abproc, OutputValues::Linear);
-    for line in gaia_refine::history_cards(gaia_history.unwrap_or_default()) {
+    for line in gaia_refine::history_cards(&history) {
         header.cards.push(("HISTORY".to_string(), line));
     }
 
@@ -1312,8 +1367,15 @@ pub async fn write_solved_wcs_cmd(
     wcs_cards: Vec<(String, String)>,
     output_dir: String,
     gaia_history: Option<Vec<String>>,
+    solve_catalog: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    blocking_cmd!(write_wcs_copy(&path, &wcs_cards, &output_dir, gaia_history.as_deref()))
+    blocking_cmd!(write_wcs_copy_with_credit(
+        &path,
+        &wcs_cards,
+        &output_dir,
+        gaia_history.as_deref(),
+        &solve_credit_history(solve_catalog.as_deref()),
+    ))
 }
 
 fn image_dims(header: &crate::types::header::HduHeader) -> (usize, usize) {
@@ -2714,6 +2776,45 @@ mod tests {
                 let seen = nova.requests();
                 assert_eq!(seen.first().map(|r| r.target.as_str()), Some("/api/login"), "{seen:?}");
                 assert!(answered.as_str().unwrap().contains("login"), "{answered}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_solve_on_the_siril_gaia_extract_carries_its_credit_and_a_tycho_2_solve_carries_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = sky_rows(3);
+            let sky = write_sky_frame(dir.path(), &rows);
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let mut siril = TierSet::default();
+            siril.push(
+                CatalogTier::Tier1,
+                TIER1_SIRIL_LABEL,
+                Box::new(MemoryProvider { rows: rows.clone(), label: TIER1_SIRIL_LABEL }),
+            );
+
+            let on_siril = run_plate_solve(FakeEnv::new(siril, None, &nova), request(&sky)).await.unwrap();
+            let on_tycho = run_plate_solve(FakeEnv::new(memory_tiers(&rows), None, &nova), request(&sky)).await.unwrap();
+
+            assert_eq!(on_siril["catalog"], TIER1_SIRIL_LABEL, "{on_siril}");
+            assert_eq!(
+                on_siril["credit"],
+                serde_json::json!({
+                    "text": "Gaia DR3, ESA/Gaia/DPAC, via the Siril extract (Zenodo 14692304)",
+                    "citation": crate::core::astrometry::gaia_tie::GAIA_DR3_ATTRIBUTION_SIRIL,
+                }),
+                "{on_siril}"
+            );
+            assert_eq!(on_tycho["catalog"], TIER0_LABEL, "{on_tycho}");
+            assert!(on_tycho.get("credit").is_some_and(Value::is_null), "{on_tycho}");
+            assert_eq!(
+                super::super::solve_credit_value(Some(TIER2_LABEL)),
+                serde_json::json!({
+                    "text": "Gaia DR3, ESA/Gaia/DPAC, via VizieR",
+                    "citation": crate::core::astrometry::gaia_tie::GAIA_DR3_ATTRIBUTION,
+                })
+            );
+            for other in [Some(TIER1_2MASS_LABEL), Some(""), None] {
+                assert!(super::super::solve_credit_value(other).is_null(), "{other:?}");
             }
         }
 

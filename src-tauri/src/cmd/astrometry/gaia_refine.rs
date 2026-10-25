@@ -1,14 +1,20 @@
-use std::path::Path;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::cell::RefCell;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rayon::prelude::*;
 use serde_json::{json, Value};
 
-use crate::cmd::analysis::{photometry_planes, resolve_dq_mask, PHOTOMETRY_SATURATED_FLAG};
-use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions};
+use crate::cmd::analysis::{photometry_planes, resolve_dq_mask, DqMask, PHOTOMETRY_SATURATED_FLAG};
+use crate::cmd::common::{load_cached_full, load_companions};
 use crate::core::analysis::photometry::{measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, StarPhotometry};
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::catalog::{
-    observation_epoch_year, query_gaia_tie_cached_in, query_gaia_tie_tsv, ConeQuery, MAX_CONE_RADIUS_DEG, MIN_CONE_RADIUS_DEG,
+    observation_epoch_year, query_gaia_tie_cached_in, query_gaia_tie_tsv, vizier_timeout_text, ConeQuery, TieHit,
+    MAX_CONE_RADIUS_DEG, MIN_CONE_RADIUS_DEG, VIZIER_TIE_TIMEOUT_SECS,
 };
 use crate::core::astrometry::catalog_disk;
 use crate::core::astrometry::gaia_tie::{
@@ -22,13 +28,14 @@ use crate::core::astrometry::time::gregorian_from_jd;
 use crate::core::astrometry::wcs::{pixel_center, WcsKind, WcsTransform};
 use crate::infra::cache::ImageEntry;
 use crate::infra::fits::writer::is_wcs_card;
+use crate::infra::progress::ProgressHandle;
 use crate::infra::wcs_source::load_wcs;
 use crate::types::constants::{HEADER_NAXIS1, HEADER_NAXIS2};
 use crate::types::header::HduHeader;
 
 pub(super) const ABPROC_GAIA_TIED: &str = "gaiatied";
 pub(super) const HISTORY_WIDTH: usize = 70;
-const GAIA_TIE_SHORT_ATTRIBUTION: &str = "Gaia DR3, ESA/Gaia/DPAC, via VizieR";
+pub(super) const GAIA_TIE_SHORT_ATTRIBUTION: &str = "Gaia DR3, ESA/Gaia/DPAC, via VizieR";
 const TIE_DETECTION_SIGMA: f64 = 5.0;
 const TIE_MAX_DETECTIONS: usize = 2000;
 const TIE_SCAN_LIMIT: usize = 5 * TIE_MAX_DETECTIONS;
@@ -52,6 +59,13 @@ const REFIT_TARGET_PX: f64 = 0.001;
 const REFIT_LIMIT_PX: f64 = 0.01;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 const UNIX_EPOCH_JD: f64 = 2_440_587.5;
+pub(super) const GAIA_REFINE_PROGRESS_EVENT: &str = "gaia-refine-progress";
+pub(super) const REFINE_CANCELLED_MESSAGE: &str = "Gaia DR3 refinement cancelled; the WCS is unchanged";
+const TIE_SCAN_CHUNK: usize = 128;
+const TIE_SOURCES_CACHE_CAPACITY: usize = 4;
+const CONE_POLL: Duration = Duration::from_millis(100);
+const CONE_DEADLINE_MARGIN: Duration = Duration::from_secs(2);
+const CONE_STOPPED: &str = "the Gaia DR3 star list request stopped without an answer";
 
 pub(super) fn history_cards(lines: &[String]) -> Vec<String> {
     let mut cards = Vec::new();
@@ -201,16 +215,22 @@ pub(super) fn tie_cone(wcs: &WcsTransform, (cols, rows): (usize, usize), detecti
     }
 }
 
+#[cfg(test)]
 pub(super) type TieFetch<'a> = &'a dyn Fn(&ConeQuery) -> Result<String, String>;
 
+#[cfg(test)]
 pub(super) fn tie_catalogue(query: &ConeQuery, dir: Option<&Path>, fetch: TieFetch<'_>) -> Result<GaiaCatalogue, String> {
-    let hit = query_gaia_tie_cached_in(dir, query, fetch)?;
-    Ok(GaiaCatalogue {
+    query_gaia_tie_cached_in(dir, query, fetch).map(|hit| gaia_catalogue(&hit, usize::MAX))
+}
+
+pub(super) fn gaia_catalogue(hit: &TieHit, max_rows: usize) -> GaiaCatalogue {
+    let rows: Vec<_> = hit.rows.iter().take(max_rows).cloned().collect();
+    GaiaCatalogue {
         kind: CatalogueKind::GaiaDr3Vizier,
-        quality_columns: hit.rows.iter().any(|r| r.ruwe.is_some() && r.e_ra_mas.is_some()),
-        rows: hit.rows.as_ref().clone(),
+        quality_columns: rows.iter().any(|r| r.ruwe.is_some() && r.e_ra_mas.is_some()),
+        rows,
         cache_source: hit.source.name().to_string(),
-    })
+    }
 }
 
 pub(super) fn unusable_saturation_map(bits: &ndarray::Array2<u32>, saturated: u32, unusable: u32) -> ndarray::Array2<u8> {
@@ -334,42 +354,9 @@ pub(super) fn source_warnings(sources: &TieSources) -> Vec<String> {
     warnings
 }
 
+#[cfg(test)]
 pub(super) fn tie_sources(path: &str, entry: &ImageEntry, header: &HduHeader) -> TieSources {
-    let image = entry.arr();
-    let dims = image.dim();
-    let planes = photometry_planes(path, dims);
-    let dq = resolve_dq_mask(path, true, dims);
-    let saturated = unusable_saturation(path, dims);
-    let stars = detect_stars(image, TIE_DETECTION_SIGMA).stars;
-    let n_detected = stars.len();
-    let (level, level_source) = saturation_level(Some(header), entry.stats().max);
-    let config = PhotometryConfig { saturation: Some((level, level_source)), ..PhotometryConfig::default() };
-    let excluded_at = |x: f64, y: f64| {
-        dq.as_ref().is_some_and(|mask| {
-            let (r, c) = (y.round(), x.round());
-            r >= 0.0 && c >= 0.0 && mask.map.get((r as usize, c as usize)).is_some_and(|&v| v != 0)
-        })
-    };
-    let masked = MaskedImage::new(image, dq.as_ref().map(|mask| &mask.map));
-    let dq_mask_error = masked.as_ref().err().cloned();
-    let prepared = masked.or_else(|_| MaskedImage::new(image, None));
-    let mut n_dq_rejected = 0;
-    let mut n_unmeasured = 0;
-    let measured = stars.iter().filter_map(|star| {
-        if excluded_at(star.x, star.y) {
-            n_dq_rejected += 1;
-            return Some(unusable_detection(star));
-        }
-        let phot = prepared
-            .as_ref()
-            .map_err(String::clone)
-            .and_then(|source| measure_star_prepared(source, planes.err.as_ref().map(|e| e.arr()), None, star.x, star.y, &config));
-        let detection = measured_detection(star, phot, |x, y| saturated.as_ref().is_some_and(|map| core_saturated(map, x, y)));
-        n_unmeasured += usize::from(detection.is_none());
-        detection
-    });
-    let (detections, fwhm_outliers) = flag_fwhm_outliers(collect_detections(measured, TIE_MAX_DETECTIONS, TIE_SCAN_LIMIT));
-    TieSources { detections, n_detected, n_dq_rejected, n_unmeasured, dq_mask_error, fwhm_outliers }
+    tie_sources_until(&RefineImage { path, entry, header }, TIE_SCAN_CHUNK, &NoProgress, &|| None).unwrap_or_default()
 }
 
 pub(super) fn merged_cards(input: &[(String, String)], updates: &[(String, String)], remove: &[String]) -> Vec<(String, String)> {
@@ -540,29 +527,420 @@ fn model_choice(model: Option<&str>) -> anyhow::Result<ModelChoice> {
     })
 }
 
-pub(super) fn gaia_refine_for_path(
-    path: &str,
-    solve_cards: Option<&[(String, String)]>,
-    typed_epoch: Option<f64>,
-    model: Option<&str>,
-    cache_dir: Option<&Path>,
-    fetch: TieFetch<'_>,
-) -> anyhow::Result<Value> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RefineStage {
+    Load,
+    Detect,
+    Measure,
+    Vizier,
+    Fit,
+    Represent,
+}
+
+impl RefineStage {
+    pub(super) fn code(self) -> &'static str {
+        match self {
+            Self::Load => "load",
+            Self::Detect => "detect",
+            Self::Measure => "measure",
+            Self::Vizier => "vizier",
+            Self::Fit => "fit",
+            Self::Represent => "represent",
+        }
+    }
+}
+
+pub(super) trait RefineProgress {
+    fn cancelled(&self) -> bool;
+    fn stage(&self, stage: RefineStage, current: u64, total: u64);
+}
+
+#[cfg(test)]
+pub(super) struct NoProgress;
+
+#[cfg(test)]
+impl RefineProgress for NoProgress {
+    fn cancelled(&self) -> bool {
+        false
+    }
+
+    fn stage(&self, _stage: RefineStage, _current: u64, _total: u64) {}
+}
+
+struct AppRefineProgress(ProgressHandle);
+
+impl RefineProgress for AppRefineProgress {
+    fn cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    fn stage(&self, stage: RefineStage, current: u64, total: u64) {
+        self.0.report(current, total, stage.code());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Interrupt {
+    Cancelled,
+    Cone(String),
+}
+
+#[derive(Debug)]
+pub(super) enum RefineFailure {
+    Cancelled,
+    Cone(String),
+    Failed(anyhow::Error),
+}
+
+impl From<anyhow::Error> for RefineFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<Interrupt> for RefineFailure {
+    fn from(stop: Interrupt) -> Self {
+        match stop {
+            Interrupt::Cancelled => Self::Cancelled,
+            Interrupt::Cone(text) => Self::Cone(text),
+        }
+    }
+}
+
+pub(super) fn refine_failure_value(failure: RefineFailure) -> Value {
+    match failure {
+        RefineFailure::Cancelled => super::coded_error(super::CODE_CANCELLED, REFINE_CANCELLED_MESSAGE, json!({})),
+        RefineFailure::Cone(text) => Value::String(text),
+        RefineFailure::Failed(error) => Value::String(format!("{error:#}")),
+    }
+}
+
+pub(super) type SharedTieFetch = Arc<dyn Fn(&ConeQuery) -> Result<String, String> + Send + Sync>;
+
+pub(super) struct ConeFetch {
+    receiver: Receiver<Result<TieHit, String>>,
+    started: Instant,
+    answer: RefCell<Option<Result<TieHit, String>>>,
+}
+
+impl ConeFetch {
+    pub(super) fn start(query: ConeQuery, dir: Option<PathBuf>, fetch: SharedTieFetch) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(query_gaia_tie_cached_in(dir.as_deref(), &query, |q| fetch(q)));
+        });
+        Self { receiver, started: Instant::now(), answer: RefCell::new(None) }
+    }
+
+    fn settled(&self, wait: Option<Duration>) -> bool {
+        if self.answer.borrow().is_some() {
+            return true;
+        }
+        let received = match wait {
+            None => self.receiver.try_recv().map_err(|e| e == TryRecvError::Disconnected),
+            Some(wait) => self.receiver.recv_timeout(wait).map_err(|e| e == RecvTimeoutError::Disconnected),
+        };
+        let answer = match received {
+            Ok(answer) => answer,
+            Err(false) => return false,
+            Err(true) => Err(CONE_STOPPED.to_string()),
+        };
+        *self.answer.borrow_mut() = Some(answer);
+        true
+    }
+
+    pub(super) fn failure(&self) -> Option<String> {
+        if !self.settled(None) {
+            return None;
+        }
+        self.answer.borrow().as_ref().and_then(|answer| answer.as_ref().err().cloned())
+    }
+
+    pub(super) fn wait(&self, progress: &dyn RefineProgress, timeout_secs: u64) -> Result<TieHit, RefineFailure> {
+        let deadline = Duration::from_secs(timeout_secs) + CONE_DEADLINE_MARGIN;
+        let mut reported = None;
+        while !self.settled(Some(CONE_POLL)) {
+            if progress.cancelled() {
+                return Err(RefineFailure::Cancelled);
+            }
+            let waited = self.started.elapsed();
+            if waited > deadline {
+                return Err(RefineFailure::Cone(vizier_timeout_text(timeout_secs)));
+            }
+            let seconds = waited.as_secs().min(timeout_secs);
+            if reported != Some(seconds) {
+                progress.stage(RefineStage::Vizier, seconds, timeout_secs);
+                reported = Some(seconds);
+            }
+        }
+        match self.answer.borrow_mut().take() {
+            Some(Ok(hit)) => Ok(hit),
+            Some(Err(text)) => Err(RefineFailure::Cone(text)),
+            None => Err(RefineFailure::Cone(CONE_STOPPED.to_string())),
+        }
+    }
+}
+
+pub(super) struct RefineImage<'a> {
+    pub path: &'a str,
+    pub entry: &'a ImageEntry,
+    pub header: &'a HduHeader,
+}
+
+pub(super) struct PassInputs<'a> {
+    image: &'a ndarray::Array2<f32>,
+    err: Option<ImageEntry>,
+    dq: Option<DqMask>,
+    saturated: Option<ndarray::Array2<u8>>,
+    level: (f64, &'static str),
+}
+
+impl<'a> PassInputs<'a> {
+    pub(super) fn load(frame: &RefineImage<'a>) -> Self {
+        let image = frame.entry.arr();
+        let dims = image.dim();
+        Self {
+            image,
+            err: photometry_planes(frame.path, dims).err,
+            dq: resolve_dq_mask(frame.path, true, dims),
+            saturated: unusable_saturation(frame.path, dims),
+            level: saturation_level(Some(frame.header), frame.entry.stats().max),
+        }
+    }
+}
+
+enum ScanOutcome {
+    Dq(TieDetection),
+    Measured(Option<TieDetection>),
+}
+
+fn measure_sources(
+    inputs: &PassInputs<'_>,
+    chunk: usize,
+    progress: &dyn RefineProgress,
+    interrupt: &dyn Fn() -> Option<Interrupt>,
+) -> Result<TieSources, Interrupt> {
+    if let Some(stop) = interrupt() {
+        return Err(stop);
+    }
+    progress.stage(RefineStage::Detect, 0, 0);
+    let stars = detect_stars(inputs.image, TIE_DETECTION_SIGMA).stars;
+    let n_detected = stars.len();
+    let total = n_detected.min(TIE_MAX_DETECTIONS) as u64;
+    let config = PhotometryConfig { saturation: Some(inputs.level), ..PhotometryConfig::default() };
+    let excluded_at = |x: f64, y: f64| {
+        inputs.dq.as_ref().is_some_and(|mask| {
+            let (r, c) = (y.round(), x.round());
+            r >= 0.0 && c >= 0.0 && mask.map.get((r as usize, c as usize)).is_some_and(|&v| v != 0)
+        })
+    };
+    let masked = MaskedImage::new(inputs.image, inputs.dq.as_ref().map(|mask| &mask.map));
+    let dq_mask_error = masked.as_ref().err().cloned();
+    let prepared = masked.or_else(|_| MaskedImage::new(inputs.image, None));
+    let err = inputs.err.as_ref().map(|plane| plane.arr());
+    let outcome = |star: &DetectedStar| {
+        if excluded_at(star.x, star.y) {
+            return ScanOutcome::Dq(unusable_detection(star));
+        }
+        let phot = prepared
+            .as_ref()
+            .map_err(String::clone)
+            .and_then(|source| measure_star_prepared(source, err, None, star.x, star.y, &config));
+        ScanOutcome::Measured(measured_detection(star, phot, |x, y| {
+            inputs.saturated.as_ref().is_some_and(|map| core_saturated(map, x, y))
+        }))
+    };
+    let mut stopped = None;
+    let mut next = 0;
+    let mut unsaturated = 0u64;
+    let mut buffer = Vec::new().into_iter();
+    let outcomes = std::iter::from_fn(|| {
+        if buffer.as_slice().is_empty() {
+            if next >= stars.len() {
+                return None;
+            }
+            if let Some(stop) = interrupt() {
+                stopped = Some(stop);
+                return None;
+            }
+            progress.stage(RefineStage::Measure, unsaturated, total);
+            let end = (next + chunk.max(1)).min(stars.len());
+            buffer = stars[next..end].par_iter().map(&outcome).collect::<Vec<_>>().into_iter();
+            next = end;
+        }
+        let item = buffer.next()?;
+        if let ScanOutcome::Measured(Some(detection)) = &item {
+            unsaturated += u64::from(!detection.saturated);
+        }
+        Some(item)
+    });
+    let mut n_dq_rejected = 0;
+    let mut n_unmeasured = 0;
+    let measured = outcomes.filter_map(|outcome| match outcome {
+        ScanOutcome::Dq(detection) => {
+            n_dq_rejected += 1;
+            Some(detection)
+        }
+        ScanOutcome::Measured(detection) => {
+            n_unmeasured += usize::from(detection.is_none());
+            detection
+        }
+    });
+    let collected = collect_detections(measured, TIE_MAX_DETECTIONS, TIE_SCAN_LIMIT);
+    if let Some(stop) = stopped {
+        return Err(stop);
+    }
+    progress.stage(RefineStage::Measure, collected.iter().filter(|d| !d.saturated).count() as u64, total);
+    let (detections, fwhm_outliers) = flag_fwhm_outliers(collected);
+    Ok(TieSources { detections, n_detected, n_dq_rejected, n_unmeasured, dq_mask_error, fwhm_outliers })
+}
+
+#[cfg(test)]
+pub(super) fn tie_sources_until(
+    frame: &RefineImage<'_>,
+    chunk: usize,
+    progress: &dyn RefineProgress,
+    interrupt: &dyn Fn() -> Option<Interrupt>,
+) -> Result<TieSources, Interrupt> {
+    measure_sources(&PassInputs::load(frame), chunk, progress, interrupt)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourcesOrigin {
+    Measured,
+    Memory,
+}
+
+impl SourcesOrigin {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::Memory => "memory",
+        }
+    }
+}
+
+fn hash_f32_plane(plane: Option<&ndarray::Array2<f32>>, bits: &mut Vec<u32>, hasher: &mut DefaultHasher) {
+    let Some(plane) = plane else {
+        hasher.write_u8(0);
+        return;
+    };
+    hasher.write_u8(1);
+    plane.dim().hash(hasher);
+    for row in plane.rows() {
+        bits.clear();
+        bits.extend(row.iter().map(|v| v.to_bits()));
+        u32::hash_slice(bits, hasher);
+    }
+}
+
+fn hash_u8_plane(plane: Option<&ndarray::Array2<u8>>, bytes: &mut Vec<u8>, hasher: &mut DefaultHasher) {
+    let Some(plane) = plane else {
+        hasher.write_u8(0);
+        return;
+    };
+    hasher.write_u8(1);
+    plane.dim().hash(hasher);
+    for row in plane.rows() {
+        bytes.clear();
+        bytes.extend(row.iter().copied());
+        hasher.write(bytes);
+    }
+}
+
+pub(super) fn sources_fingerprint(inputs: &PassInputs<'_>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let (mut bits, mut bytes) = (Vec::new(), Vec::new());
+    hash_f32_plane(Some(inputs.image), &mut bits, &mut hasher);
+    hash_u8_plane(inputs.dq.as_ref().map(|mask| &mask.map), &mut bytes, &mut hasher);
+    hash_u8_plane(inputs.saturated.as_ref(), &mut bytes, &mut hasher);
+    hash_f32_plane(inputs.err.as_ref().map(|plane| plane.arr()), &mut bits, &mut hasher);
+    hasher.write_u64(inputs.level.0.to_bits());
+    inputs.level.1.hash(&mut hasher);
+    hasher.finish()
+}
+
+static TIE_SOURCES_CACHE: Mutex<Vec<(u64, Arc<TieSources>)>> = Mutex::new(Vec::new());
+
+fn remembered_sources(key: u64) -> Option<Arc<TieSources>> {
+    let mut cache = TIE_SOURCES_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let position = cache.iter().position(|(k, _)| *k == key)?;
+    let entry = cache.remove(position);
+    let sources = Arc::clone(&entry.1);
+    cache.push(entry);
+    Some(sources)
+}
+
+fn remember_sources(key: u64, sources: Arc<TieSources>) {
+    let mut cache = TIE_SOURCES_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.retain(|(k, _)| *k != key);
+    while cache.len() >= TIE_SOURCES_CACHE_CAPACITY {
+        cache.remove(0);
+    }
+    cache.push((key, sources));
+}
+
+pub(super) fn cached_tie_sources(
+    frame: &RefineImage<'_>,
+    chunk: usize,
+    progress: &dyn RefineProgress,
+    interrupt: &dyn Fn() -> Option<Interrupt>,
+) -> Result<(Arc<TieSources>, SourcesOrigin), Interrupt> {
+    let inputs = PassInputs::load(frame);
+    let key = sources_fingerprint(&inputs);
+    if let Some(sources) = remembered_sources(key) {
+        return Ok((sources, SourcesOrigin::Memory));
+    }
+    let sources = Arc::new(measure_sources(&inputs, chunk, progress, interrupt)?);
+    remember_sources(key, Arc::clone(&sources));
+    Ok((sources, SourcesOrigin::Measured))
+}
+
+pub(super) struct RefineRequest<'a> {
+    pub path: &'a str,
+    pub solve_cards: Option<&'a [(String, String)]>,
+    pub typed_epoch: Option<f64>,
+    pub model: Option<&'a str>,
+}
+
+fn millis(duration: Duration) -> u64 {
+    duration.as_millis() as u64
+}
+
+pub(super) fn gaia_refine_run(
+    request: &RefineRequest<'_>,
+    cache_dir: Option<PathBuf>,
+    fetch: SharedTieFetch,
+    progress: &dyn RefineProgress,
+) -> Result<Value, RefineFailure> {
     let started = Instant::now();
-    let model = model_choice(model)?;
+    let check = || if progress.cancelled() { Err(RefineFailure::Cancelled) } else { Ok(()) };
+    check()?;
+    progress.stage(RefineStage::Load, 0, 0);
+    let path = request.path;
+    let model = model_choice(request.model)?;
     let entry = load_cached_full(path)?;
     let header = entry.header().cloned().ok_or_else(|| anyhow::anyhow!("no FITS header available for {path}"))?;
     let (rows, cols) = entry.arr().dim();
-    let input = input_wcs(path, &header, (cols, rows), solve_cards)?;
-    let epoch = tie_epoch(&header, typed_epoch)?;
-    let sources = tie_sources(path, &entry, &header);
+    let input = input_wcs(path, &header, (cols, rows), request.solve_cards)?;
+    let epoch = tie_epoch(&header, request.typed_epoch)?;
+    let loaded = Instant::now();
+    let cone = ConeFetch::start(tie_cone(&input.wcs, (cols, rows), TIE_MAX_DETECTIONS), cache_dir, fetch);
+    let interrupt = || if progress.cancelled() { Some(Interrupt::Cancelled) } else { cone.failure().map(Interrupt::Cone) };
+    let frame = RefineImage { path, entry: &entry, header: &header };
+    let (sources, origin) = cached_tie_sources(&frame, TIE_SCAN_CHUNK, progress, &interrupt)?;
+    let measured = Instant::now();
     let usable = sources.detections.iter().filter(|d| !d.saturated).count().min(TIE_MAX_DETECTIONS);
-    let query = tie_cone(&input.wcs, (cols, rows), usable);
-    let catalogue = tie_catalogue(&query, cache_dir, fetch).map_err(|e| anyhow::anyhow!(e))?;
+    let max_rows = tie_cone(&input.wcs, (cols, rows), usable).max_rows;
+    let hit = cone.wait(progress, VIZIER_TIE_TIMEOUT_SECS)?;
+    let fetched = Instant::now();
+    let catalogue = gaia_catalogue(&hit, max_rows);
     let mut warnings = source_warnings(&sources);
-    if catalogue.rows.len() >= query.max_rows {
-        warnings.push(format!("the Gaia DR3 cone reached its {}-row cap, so the faintest stars were left out", query.max_rows));
+    if catalogue.rows.len() >= max_rows {
+        warnings.push(format!("the Gaia DR3 cone reached its {max_rows}-row cap, so the faintest stars were left out"));
     }
+    check()?;
+    progress.stage(RefineStage::Fit, 0, 0);
     let options = TieOptions {
         model,
         max_detections: TIE_MAX_DETECTIONS,
@@ -580,7 +958,10 @@ pub(super) fn gaia_refine_for_path(
         space_telescope: space_telescope(&header),
     };
     let mut result = tie_to_gaia(&tie_input, &options);
+    let tied = Instant::now();
+    check()?;
     let refined = if result.decision == TieDecision::Applied {
+        progress.stage(RefineStage::Represent, 0, 0);
         match represent(&input, &result, (cols, rows)) {
             Ok(refined) => Some(refined),
             Err(reason) => {
@@ -592,26 +973,62 @@ pub(super) fn gaia_refine_for_path(
     } else {
         None
     };
+    check()?;
     let mut body = refine_json(&result, refined, input.kind, &epoch, sources.n_detected, &catalogue.cache_source, warnings);
-    body["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+    body["elapsed_ms"] = json!(millis(started.elapsed()));
+    body["sources_origin"] = json!(origin.name());
+    body["timings_ms"] = json!({
+        "load": millis(loaded - started),
+        "sources": millis(measured - loaded),
+        "cone_wait": millis(fetched - measured),
+        "fit": millis(tied - fetched),
+        "represent": millis(tied.elapsed()),
+    });
     Ok(body)
+}
+
+#[cfg(test)]
+pub(super) fn gaia_refine_for_path(
+    path: &str,
+    solve_cards: Option<&[(String, String)]>,
+    typed_epoch: Option<f64>,
+    model: Option<&str>,
+    cache_dir: Option<&Path>,
+    fetch: SharedTieFetch,
+) -> anyhow::Result<Value> {
+    let request = RefineRequest { path, solve_cards, typed_epoch, model };
+    gaia_refine_run(&request, cache_dir.map(Path::to_path_buf), fetch, &NoProgress).map_err(|failure| match failure {
+        RefineFailure::Failed(error) => error,
+        RefineFailure::Cancelled => anyhow::anyhow!(REFINE_CANCELLED_MESSAGE),
+        RefineFailure::Cone(text) => anyhow::anyhow!(text),
+    })
 }
 
 #[tauri::command]
 pub async fn gaia_refine_wcs_cmd(
+    app: tauri::AppHandle,
     path: String,
     wcs_cards: Option<Vec<(String, String)>>,
     epoch_year: Option<f64>,
     model: Option<String>,
-) -> Result<Value, String> {
-    blocking_cmd!(gaia_refine_for_path(
-        &path,
-        wcs_cards.as_deref(),
-        epoch_year,
-        model.as_deref(),
-        catalog_disk::cache_dir(),
-        &query_gaia_tie_tsv,
-    ))
+) -> Result<Value, Value> {
+    let progress = AppRefineProgress(ProgressHandle::new(&app, GAIA_REFINE_PROGRESS_EVENT, 1));
+    tokio::task::spawn_blocking(move || {
+        let request = RefineRequest {
+            path: &path,
+            solve_cards: wcs_cards.as_deref(),
+            typed_epoch: epoch_year,
+            model: model.as_deref(),
+        };
+        let fetch: SharedTieFetch = Arc::new(|q: &ConeQuery| query_gaia_tie_tsv(q));
+        let outcome = gaia_refine_run(&request, catalog_disk::cache_dir().map(Path::to_path_buf), fetch, &progress);
+        if !matches!(outcome, Err(RefineFailure::Cancelled)) {
+            progress.0.emit_complete();
+        }
+        outcome.map_err(refine_failure_value)
+    })
+    .await
+    .map_err(super::join_error)?
 }
 
 #[cfg(test)]
@@ -710,6 +1127,39 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_solved_on_the_siril_gaia_extract_carries_the_gaia_credit_and_stays_plate_solved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = source_fits(&dir, "siril_solved_src.fits");
+        let out = dir.path().join("out").to_string_lossy().to_string();
+        let credit = super::super::solve_credit_history(Some("tier1-gaia-siril"));
+
+        let header = written_header(&super::super::write_wcs_copy_with_credit(&path, &sky_cards(), &out, None, &credit).unwrap());
+
+        assert_eq!(header.get("ABPROC").map(str::trim), Some("platesolved"));
+        let lines = history_of(&header);
+        let joined = lines.join(" ");
+        for text in [
+            "Plate solved against the Gaia DR3 astrometric extract from Siril (tier1-gaia-siril, Zenodo 14692304)",
+            "CC BY-NC 3.0 IGO, via the Siril extract (Zenodo 14692304)",
+            "European Space Agency",
+        ] {
+            assert!(joined.contains(text), "{text} missing from {joined}");
+        }
+        assert!(lines.iter().all(|line| line.is_ascii() && line.len() <= super::HISTORY_WIDTH), "{lines:?}");
+        for other in [Some("tier0-tycho2"), Some("tier1-2mass"), None] {
+            assert!(super::super::solve_credit_history(other).is_empty(), "{other:?}");
+        }
+
+        let mut tie: Vec<String> = TIE_HISTORY.iter().map(|s| s.to_string()).collect();
+        tie.push(crate::core::astrometry::gaia_tie::GAIA_ESA_ACKNOWLEDGEMENT.to_string());
+        let header = written_header(&super::super::write_wcs_copy_with_credit(&path, &sky_cards(), &out, Some(&tie), &credit).unwrap());
+        assert_eq!(header.get("ABPROC").map(str::trim), Some(super::ABPROC_GAIA_TIED));
+        let joined = history_of(&header).join(" ");
+        assert_eq!(joined.matches("European Space Agency").count(), 1, "{joined}");
+        assert!(joined.contains("tier1-gaia-siril") && joined.contains(TIE_HISTORY[0]), "{joined}");
+    }
+
+    #[test]
     fn history_lines_wrap_at_word_boundaries_and_drop_non_ascii() {
         let wrapped = super::history_cards(&["Gaia DR3 tie: RMS 14.9 mas, 1\u{3c3} 2.1 mas, rotation +0.00125\u{b0}".to_string()]);
         assert_eq!(wrapped, vec!["Gaia DR3 tie: RMS 14.9 mas, 1 2.1 mas, rotation +0.00125".to_string()]);
@@ -720,12 +1170,432 @@ mod tests {
         assert_eq!(lines.join(" "), long.trim());
     }
 
-    use crate::core::astrometry::catalog::ConeQuery;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::time::{Duration, Instant};
+
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    use super::{
+        Interrupt, RefineFailure, RefineImage, RefineProgress, RefineRequest, RefineStage, SharedTieFetch, SourcesOrigin,
+    };
+    use crate::cmd::common::load_cached_full;
+    use crate::core::astrometry::catalog::{CatalogSource, ConeQuery, TieHit};
     use crate::core::astrometry::gaia_tie::{
-        header_update, unit_vector, ResidualSummary, SkyCorrection, TieDecision, TieReport, TieResult,
+        header_update, unit_vector, GaiaRow, ResidualSummary, SkyCorrection, TieDecision, TieReport, TieResult,
     };
     use crate::core::astrometry::wcs::WcsTransform;
     use crate::types::header::HduHeader;
+
+    static SOURCES_CACHE_TESTS: Mutex<()> = Mutex::new(());
+
+    fn sources_cache_lock() -> MutexGuard<'static, ()> {
+        SOURCES_CACHE_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn shared(fetch: impl Fn(&ConeQuery) -> Result<String, String> + Send + Sync + 'static) -> SharedTieFetch {
+        Arc::new(fetch)
+    }
+
+    fn request(path: &str) -> RefineRequest<'_> {
+        RefineRequest { path, solve_cards: None, typed_epoch: None, model: None }
+    }
+
+    #[derive(Default)]
+    struct Recorder {
+        stages: Mutex<Vec<(RefineStage, u64, u64)>>,
+        cancel_on: Option<RefineStage>,
+        cancelled: AtomicBool,
+        cancelled_at: Mutex<Option<Instant>>,
+        released: Option<Arc<AtomicBool>>,
+        awaited: Option<Arc<AtomicBool>>,
+        awaited_came: Mutex<Option<bool>>,
+    }
+
+    impl Recorder {
+        fn stages(&self) -> Vec<(RefineStage, u64, u64)> {
+            self.stages.lock().unwrap().clone()
+        }
+
+        fn saw(&self, stage: RefineStage) -> bool {
+            self.stages().iter().any(|(seen, ..)| *seen == stage)
+        }
+    }
+
+    impl RefineProgress for Recorder {
+        fn cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+
+        fn stage(&self, stage: RefineStage, current: u64, total: u64) {
+            let first_measure = stage == RefineStage::Measure && !self.saw(RefineStage::Measure);
+            self.stages.lock().unwrap().push((stage, current, total));
+            if let Some(flag) = self.awaited.as_ref().filter(|_| first_measure) {
+                let until = Instant::now() + Duration::from_secs(5);
+                while !flag.load(Ordering::SeqCst) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                *self.awaited_came.lock().unwrap() = Some(flag.load(Ordering::SeqCst));
+            }
+            if self.cancel_on == Some(stage) && !self.cancelled.swap(true, Ordering::SeqCst) {
+                *self.cancelled_at.lock().unwrap() = Some(Instant::now());
+                if let Some(released) = &self.released {
+                    released.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    fn frame_parts(path: &str) -> (crate::infra::cache::ImageEntry, HduHeader) {
+        let entry = load_cached_full(path).unwrap();
+        let header = entry.header().cloned().unwrap();
+        (entry, header)
+    }
+
+    type ScanSummary = (usize, usize, usize, Option<String>, Option<(usize, u64)>, Vec<(u64, u64, u64, u64, u64, bool)>);
+
+    fn scan_summary(sources: &super::TieSources) -> ScanSummary {
+        (
+            sources.n_detected,
+            sources.n_dq_rejected,
+            sources.n_unmeasured,
+            sources.dq_mask_error.clone(),
+            sources.fwhm_outliers.map(|o| (o.flagged, o.median_px.to_bits())),
+            sources
+                .detections
+                .iter()
+                .map(|d| (d.x.to_bits(), d.y.to_bits(), d.fwhm_px.to_bits(), d.snr.to_bits(), d.mag_inst.to_bits(), d.saturated))
+                .collect(),
+        )
+    }
+
+    fn origin_of(path: &str) -> Result<SourcesOrigin, Interrupt> {
+        let (entry, header) = frame_parts(path);
+        let frame = RefineImage { path, entry: &entry, header: &header };
+        super::cached_tie_sources(&frame, super::TIE_SCAN_CHUNK, &super::NoProgress, &|| None).map(|(_, origin)| origin)
+    }
+
+    fn fingerprint_of(path: &str) -> u64 {
+        let (entry, header) = frame_parts(path);
+        super::sources_fingerprint(&super::PassInputs::load(&RefineImage { path, entry: &entry, header: &header }))
+    }
+
+    const DEAD_VIZIER: &str = "VizieR (127.0.0.1:9) refused the connection; check the internet connection or a firewall, then try again";
+
+    #[test]
+    fn the_refine_progress_names_the_stages_the_panel_reads() {
+        assert_eq!(super::GAIA_REFINE_PROGRESS_EVENT, "gaia-refine-progress");
+        let stages = [RefineStage::Load, RefineStage::Detect, RefineStage::Measure, RefineStage::Vizier, RefineStage::Fit, RefineStage::Represent];
+        assert_eq!(stages.map(RefineStage::code), ["load", "detect", "measure", "vizier", "fit", "represent"]);
+        assert_eq!([SourcesOrigin::Measured, SourcesOrigin::Memory].map(SourcesOrigin::name), ["measured", "memory"]);
+    }
+
+    #[test]
+    fn the_cone_is_requested_before_the_source_pass_with_the_largest_row_cap() {
+        let _cache = sources_cache_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "prefetch.fits", (1.9, 1.1), 0x51E5_0001);
+        let body = tsv_of(&field.sky);
+        let requested = Arc::new(AtomicBool::new(false));
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let (flag, seen) = (Arc::clone(&requested), Arc::clone(&queries));
+        let fetch = shared(move |q| {
+            seen.lock().unwrap().push(q.clone());
+            flag.store(true, Ordering::SeqCst);
+            Ok(body.clone())
+        });
+        let progress = Recorder { awaited: Some(requested), ..Recorder::default() };
+
+        let json = super::gaia_refine_run(&request(&field.path), None, fetch, &progress).unwrap();
+
+        assert_eq!(*progress.awaited_came.lock().unwrap(), Some(true), "{:?}", progress.stages());
+        let (_, header) = frame_parts(&field.path);
+        let input = super::input_wcs(&field.path, &header, field.size, None).unwrap();
+        let queries = queries.lock().unwrap();
+        assert_eq!(queries.len(), 1, "{queries:?}");
+        assert_eq!(queries[0].max_rows, super::tie_cone(&input.wcs, field.size, super::TIE_MAX_DETECTIONS).max_rows);
+        assert_eq!(queries[0].max_rows, 5000);
+        assert_eq!(json["n_catalog"], 64);
+        assert_eq!(json["sources_origin"], "measured");
+    }
+
+    #[test]
+    fn a_dead_vizier_ends_the_refine_before_the_fit() {
+        let _cache = sources_cache_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "dead_vizier.fits", (-1.6, -1.5), 0x51E5_0002);
+        let progress = Recorder::default();
+
+        let failure = super::gaia_refine_run(&request(&field.path), None, shared(|_| Err(DEAD_VIZIER.to_string())), &progress).unwrap_err();
+
+        assert!(matches!(&failure, RefineFailure::Cone(text) if text == DEAD_VIZIER), "{failure:?}");
+        assert!(!progress.saw(RefineStage::Fit) && !progress.saw(RefineStage::Vizier), "{:?}", progress.stages());
+        assert_eq!(super::refine_failure_value(failure), serde_json::Value::String(DEAD_VIZIER.to_string()));
+    }
+
+    #[test]
+    fn the_source_pass_stops_between_chunks_when_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "stopped_pass.fits", (0.0, 0.0), 0x51E5_0003);
+        let (entry, header) = frame_parts(&field.path);
+        let calls = AtomicUsize::new(0);
+        let interrupt = || (calls.fetch_add(1, Ordering::SeqCst) >= 2).then(|| Interrupt::Cone("x".to_string()));
+        let progress = Recorder::default();
+
+        let outcome = super::tie_sources_until(&RefineImage { path: &field.path, entry: &entry, header: &header }, 8, &progress, &interrupt);
+
+        assert_eq!(outcome.err(), Some(Interrupt::Cone("x".to_string())));
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "asked before the detection, before chunk 1 and before chunk 2");
+        let measured: Vec<_> = progress.stages().into_iter().filter(|(stage, ..)| *stage == RefineStage::Measure).collect();
+        assert!(
+            matches!(measured.as_slice(), [(_, 0, total)] if *total > 8),
+            "one report before chunk 1 of a pass longer than one chunk, none after the stop: {measured:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_during_the_vizier_wait_returns_at_once_and_keeps_the_late_cone() {
+        let _cache = sources_cache_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "late_cone.fits", (2.6, -1.9), 0x51E5_0004);
+        let body = tsv_of(&field.sky);
+        let released = Arc::new(AtomicBool::new(false));
+        let gate = Arc::clone(&released);
+        let fetch = shared(move |_| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !gate.load(Ordering::SeqCst) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(body.clone())
+        });
+        let progress = Recorder { cancel_on: Some(RefineStage::Vizier), released: Some(released), ..Recorder::default() };
+
+        let failure = super::gaia_refine_run(&request(&field.path), Some(cache.path().to_path_buf()), fetch, &progress).unwrap_err();
+        let returned = Instant::now();
+
+        assert!(matches!(failure, RefineFailure::Cancelled), "{failure:?}");
+        let cancelled_at = progress.cancelled_at.lock().unwrap().expect("no Vizier stage was reported");
+        assert!(returned.duration_since(cancelled_at) < Duration::from_millis(500), "{:?} after the cancel", returned.duration_since(cancelled_at));
+        assert!(!progress.saw(RefineStage::Fit), "{:?}", progress.stages());
+        let until = Instant::now() + Duration::from_secs(10);
+        let kept = loop {
+            let found = std::fs::read_dir(cache.path()).unwrap().filter_map(Result::ok).any(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with("gaia-dr3_tie_") && name.ends_with(".json")
+            });
+            if found || Instant::now() >= until {
+                break found;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(kept, "the late cone was not kept in {}", cache.path().display());
+        assert_eq!(
+            super::refine_failure_value(failure),
+            serde_json::json!({ "message": "Gaia DR3 refinement cancelled; the WCS is unchanged", "code": "cancelled", "context": {} })
+        );
+    }
+
+    struct ReleaseOnVizier(Arc<AtomicBool>);
+
+    impl RefineProgress for ReleaseOnVizier {
+        fn cancelled(&self) -> bool {
+            false
+        }
+
+        fn stage(&self, stage: RefineStage, _current: u64, _total: u64) {
+            if stage == RefineStage::Vizier {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn a_refine_started_after_a_cancel_takes_the_cone_the_cancelled_run_is_still_receiving() {
+        let _cache = sources_cache_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "cancelled_then_again.fits", (-0.5, -2.6), 0x51E5_000A);
+        let body = tsv_of(&field.sky);
+        let released = Arc::new(AtomicBool::new(false));
+        let gate = Arc::clone(&released);
+        let first_fetch = shared(move |_| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !gate.load(Ordering::SeqCst) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(body.clone())
+        });
+        let cancelling = Recorder { cancel_on: Some(RefineStage::Vizier), ..Recorder::default() };
+        let failure = super::gaia_refine_run(&request(&field.path), Some(cache.path().to_path_buf()), first_fetch, &cancelling).unwrap_err();
+        assert!(matches!(failure, RefineFailure::Cancelled), "{failure:?}");
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&second_calls);
+        let late = tsv_of(&field.sky);
+        let second_fetch = shared(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(late.clone())
+        });
+        let started = Instant::now();
+
+        let json = super::gaia_refine_run(&request(&field.path), Some(cache.path().to_path_buf()), second_fetch, &ReleaseOnVizier(released)).unwrap();
+
+        let took = started.elapsed();
+        assert_eq!(second_calls.load(Ordering::SeqCst), 0, "the second refine sent its own VizieR request");
+        assert_eq!(json["catalog_source"], "memory", "{}", json["catalog_source"]);
+        assert!(took < Duration::from_secs(2), "the second refine waited {took:?}");
+        assert_eq!(json["decision"], "applied", "{}", json["reason"]);
+    }
+
+    #[test]
+    fn the_vizier_wait_ends_with_the_timeout_sentence_when_the_cone_thread_never_answers() {
+        let query = ConeQuery { ra: 77.7771, dec: -11.1111, radius_deg: 0.02, mag_limit: Some(21.0), max_rows: 321 };
+        let released = Arc::new(AtomicBool::new(false));
+        let gate = Arc::clone(&released);
+        let cone = super::ConeFetch::start(
+            query,
+            None,
+            shared(move |_| {
+                let until = Instant::now() + Duration::from_secs(8);
+                while !gate.load(Ordering::SeqCst) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err("the stalled fetch was released".to_string())
+            }),
+        );
+        let progress = Recorder::default();
+        let started = Instant::now();
+
+        let outcome = cone.wait(&progress, 1);
+
+        let took = started.elapsed();
+        released.store(true, Ordering::SeqCst);
+        let expected = "VizieR (vizier.cds.unistra.fr) did not finish answering within 1 s; it is slow or busy right now, try again in a few minutes";
+        assert!(matches!(&outcome, Err(RefineFailure::Cone(text)) if text == expected), "{:?}", outcome.err());
+        assert!(took < Duration::from_secs(5), "the wait lasted {took:?}");
+        let waits: Vec<_> = progress.stages().into_iter().filter(|(stage, ..)| *stage == RefineStage::Vizier).collect();
+        assert!(!waits.is_empty() && waits.iter().all(|(_, current, total)| current <= total), "{waits:?}");
+    }
+
+    #[test]
+    fn an_interrupted_source_pass_caches_nothing() {
+        let _cache = sources_cache_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "interrupted_cache.fits", (0.0, 0.0), 0x51E5_0005);
+        let (entry, header) = frame_parts(&field.path);
+        let frame = RefineImage { path: &field.path, entry: &entry, header: &header };
+        let calls = AtomicUsize::new(0);
+        let cancelled = || (calls.fetch_add(1, Ordering::SeqCst) >= 2).then_some(Interrupt::Cancelled);
+
+        let first = super::cached_tie_sources(&frame, 8, &Recorder::default(), &cancelled).map(|(_, origin)| origin);
+        let second = super::cached_tie_sources(&frame, 8, &super::NoProgress, &|| None).map(|(_, origin)| origin);
+        let third = super::cached_tie_sources(&frame, 8, &super::NoProgress, &|| None).map(|(_, origin)| origin);
+
+        assert_eq!(first, Err(Interrupt::Cancelled));
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "the pass stopped after its first chunk, not before it");
+        assert_eq!((second, third), (Ok(SourcesOrigin::Measured), Ok(SourcesOrigin::Memory)));
+    }
+
+    #[test]
+    fn a_second_refine_of_the_same_pixels_reuses_the_measured_sources() {
+        let _cache = sources_cache_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "refined_twice.fits", (-2.4, 2.2), 0x51E5_0006);
+        let body = tsv_of(&field.sky);
+        let fetch = shared(move |_| Ok(body.clone()));
+        let (first_log, second_log) = (Recorder::default(), Recorder::default());
+
+        let first = super::gaia_refine_run(&request(&field.path), None, Arc::clone(&fetch), &first_log).unwrap();
+        let second = super::gaia_refine_run(&request(&field.path), None, fetch, &second_log).unwrap();
+
+        assert_eq!((first["sources_origin"].as_str(), second["sources_origin"].as_str()), (Some("measured"), Some("memory")));
+        assert!(first_log.saw(RefineStage::Detect) && first_log.saw(RefineStage::Measure), "{:?}", first_log.stages());
+        assert!(!second_log.saw(RefineStage::Detect) && !second_log.saw(RefineStage::Measure), "{:?}", second_log.stages());
+        assert_eq!(first["decision"], "applied", "{}", first["reason"]);
+        for key in ["decision", "n_used", "n_matched", "shift_east_mas", "shift_north_mas", "wcs_cards"] {
+            assert_eq!(first[key], second[key], "{key}");
+        }
+        for json in [&first, &second] {
+            for key in ["load", "sources", "cone_wait", "fit", "represent"] {
+                assert!(json["timings_ms"][key].as_u64().is_some(), "{key}: {}", json["timings_ms"]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_written_copy_of_a_frame_without_dq_reuses_its_sources_and_a_dq_frame_does_not() {
+        let _cache = sources_cache_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "copied_src.fits", (0.0, 0.0), 0x51E5_0007);
+        assert_eq!(origin_of(&field.path), Ok(SourcesOrigin::Measured));
+        let (_, header) = frame_parts(&field.path);
+        let out = dir.path().join("out").to_string_lossy().to_string();
+        let written = super::super::write_wcs_copy(&field.path, &super::header_wcs_cards(&header), &out, None).unwrap();
+        let copy = written["fits_path"].as_str().unwrap().to_string();
+        assert_eq!(origin_of(&copy), Ok(SourcesOrigin::Memory), "{copy}");
+
+        let mef = dq_star_mef(&dir);
+        assert_eq!(origin_of(&mef), Ok(SourcesOrigin::Measured));
+        let (mef_entry, _) = frame_parts(&mef);
+        let mono = dir.path().join("dq_stars_mono.fits").to_string_lossy().to_string();
+        crate::infra::fits::writer::write_fits_mono(&mono, mef_entry.arr(), Some(&make_header(&[("SATURATE", "60000.0"), ("TELESCOP", "'JWST'")]))).unwrap();
+        assert_eq!(origin_of(&mono), Ok(SourcesOrigin::Measured));
+        assert_ne!(fingerprint_of(&mef), fingerprint_of(&mono));
+    }
+
+    #[test]
+    fn the_source_scan_is_the_same_for_every_chunk_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "chunked.fits", (0.0, 0.0), 0x51E5_0008);
+        for path in [dq_star_mef(&dir), field.path.clone()] {
+            let (entry, header) = frame_parts(&path);
+            let frame = RefineImage { path: &path, entry: &entry, header: &header };
+            let scans: Vec<ScanSummary> = [1usize, 7, 128]
+                .into_iter()
+                .map(|chunk| scan_summary(&super::tie_sources_until(&frame, chunk, &super::NoProgress, &|| None).unwrap()))
+                .collect();
+            assert!(scans[0].0 > 0 && !scans[0].5.is_empty(), "{path}: {:?}", scans[0]);
+            assert_eq!(scans[0], scans[1], "{path}: chunk 1 against chunk 7");
+            assert_eq!(scans[0], scans[2], "{path}: chunk 1 against chunk 128");
+        }
+    }
+
+    #[test]
+    fn the_prefetched_cone_is_cut_to_the_rows_the_detections_ask_for() {
+        let rows: Vec<GaiaRow> = (0..300).map(|i| GaiaRow { id: format!("{i}"), g: Some(10.0 + i as f64 * 0.01), ..GaiaRow::default() }).collect();
+        let catalogue = super::gaia_catalogue(&TieHit { rows: Arc::new(rows.clone()), source: CatalogSource::Network }, 200);
+        assert_eq!(catalogue.rows, rows[..200].to_vec());
+        assert_eq!(catalogue.cache_source, "network");
+
+        let _cache = sources_cache_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let field = synthetic_field_seeded(&dir, "capped_cone.fits", (0.3, 2.9), 0x51E5_0009);
+        let mut rng = StdRng::seed_from_u64(16);
+        let mut sky = field.sky.clone();
+        sky.sort_by(|a, b| a.2.total_cmp(&b.2));
+        let mut faint: Vec<(f64, f64, f64)> = (0..236)
+            .map(|_| {
+                let p = field.truth.pixel_to_world(rng.gen_range(0.0..400.0), rng.gen_range(0.0..300.0));
+                (p.ra, p.dec, rng.gen_range(15.0..20.0))
+            })
+            .collect();
+        faint.sort_by(|a, b| a.2.total_cmp(&b.2));
+        sky.extend(faint);
+        let body = tsv_of(&sky);
+
+        let json = super::gaia_refine_run(&request(&field.path), None, shared(move |_| Ok(body.clone())), &Recorder::default()).unwrap();
+
+        assert_eq!(json["n_catalog"], 220, "{}", json["reason"]);
+        let warnings: Vec<String> = serde_json::from_value(json["warnings"].clone()).unwrap();
+        assert!(
+            warnings.iter().any(|w| w == "the Gaia DR3 cone reached its 220-row cap, so the faintest stars were left out"),
+            "{warnings:?}"
+        );
+    }
 
     const TIE_COLUMNS_LINE: &str = "Source\tRA_ICRS\tDE_ICRS\te_RA_ICRS\te_DE_ICRS\tpmRA\te_pmRA\tpmDE\te_pmDE\tPlx\te_Plx\tRApmRAcor\tDEpmDEcor\tRUWE\tsepsi\tSolved\tDup\tIPDfmp\tGmag\tBP-RP";
 
@@ -773,11 +1643,21 @@ mod tests {
         size: (usize, usize),
     }
 
+    const DEFAULT_NOISE_SEED: u64 = 0x2545_F491_4F6C_DD1D;
+
     fn synthetic_field(dir: &tempfile::TempDir, name: &str, injected_arcsec: (f64, f64)) -> Field {
         synthetic_field_with(dir, name, injected_arcsec, &[])
     }
 
     fn synthetic_field_with(dir: &tempfile::TempDir, name: &str, injected_arcsec: (f64, f64), extra: &[(&str, &str)]) -> Field {
+        field_from(dir, name, injected_arcsec, extra, DEFAULT_NOISE_SEED)
+    }
+
+    fn synthetic_field_seeded(dir: &tempfile::TempDir, name: &str, injected_arcsec: (f64, f64), seed: u64) -> Field {
+        field_from(dir, name, injected_arcsec, &[], seed)
+    }
+
+    fn field_from(dir: &tempfile::TempDir, name: &str, injected_arcsec: (f64, f64), extra: &[(&str, &str)], seed: u64) -> Field {
         let size = (400usize, 300usize);
         let centre = (150.0, 2.0);
         let truth_cards = tan_cards(centre, 1.0, size);
@@ -786,7 +1666,7 @@ mod tests {
         let shifted = (centre.0 - injected_arcsec.0 / 3600.0 / cos_dec, centre.1 - injected_arcsec.1 / 3600.0);
         let file_cards = tan_cards(shifted, 1.0, size);
         let mut image = ndarray::Array2::<f32>::zeros((size.1, size.0));
-        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut seed = seed;
         let mut noise = || {
             seed ^= seed << 13;
             seed ^= seed >> 7;
@@ -968,15 +1848,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nowcs.fits").to_string_lossy().to_string();
         crate::infra::fits::writer::write_fits_mono(&path, &ndarray::Array2::<f32>::zeros((20, 30)), None).unwrap();
-        let calls = std::cell::Cell::new(0);
-        let fetch = |_: &ConeQuery| {
-            calls.set(calls.get() + 1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let fetch = shared(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
             Ok(String::new())
-        };
-        let err = format!("{:#}", super::gaia_refine_for_path(&path, None, None, None, None, &fetch).unwrap_err());
+        });
+        let err = format!("{:#}", super::gaia_refine_for_path(&path, None, None, None, None, fetch).unwrap_err());
         assert!(err.starts_with("no celestial WCS to refine"), "{err}");
         assert!(err.contains("plate solve the image first"), "{err}");
-        assert_eq!(calls.get(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1256,26 +2137,28 @@ mod tests {
     fn a_failed_query_names_vizier_and_caches_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let q = ConeQuery { ra: 12.3451, dec: 45.6781, radius_deg: 0.02, mag_limit: Some(21.0), max_rows: 200 };
-        let fetch = |_: &ConeQuery| Err("VizieR request failed: error sending request for 127.0.0.1:9".to_string());
+        let fetch = |_: &ConeQuery| Err(DEAD_VIZIER.to_string());
         let err = super::tie_catalogue(&q, Some(dir.path()), &fetch).unwrap_err();
-        assert_eq!(err, "VizieR request failed: error sending request for 127.0.0.1:9");
+        assert_eq!(err, DEAD_VIZIER);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
     fn the_command_sends_the_cone_and_returns_a_refined_wcs_that_puts_the_stars_on_gaia() {
+        let _cache = sources_cache_lock();
         let dir = tempfile::tempdir().unwrap();
         let field = synthetic_field(&dir, "tie_field.fits", (1.2, -0.7));
         let body = tsv_of(&field.sky);
-        let seen = std::cell::RefCell::new(Vec::new());
-        let fetch = |q: &ConeQuery| {
-            seen.borrow_mut().push(q.clone());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let fetch = shared(move |q| {
+            recorded.lock().unwrap().push(q.clone());
             Ok(body.clone())
-        };
+        });
 
-        let json = super::gaia_refine_for_path(&field.path, None, None, None, None, &fetch).unwrap();
+        let json = super::gaia_refine_for_path(&field.path, None, None, None, None, fetch).unwrap();
 
-        let queries = seen.borrow();
+        let queries = seen.lock().unwrap();
         assert_eq!(queries.len(), 1);
         assert_eq!(queries[0].mag_limit, Some(21.0));
         assert!((queries[0].radius_deg * 3600.0 - (250.0 + 6.0)).abs() < 1.0, "{:?}", queries[0]);
@@ -1299,13 +2182,14 @@ mod tests {
 
     #[test]
     fn a_typed_epoch_leaves_the_header_date_out_of_the_parallax() {
+        let _cache = sources_cache_lock();
         let dir = tempfile::tempdir().unwrap();
         let field = synthetic_field_with(&dir, "dated_field.fits", (-0.9, 0.8), &[("DATE-OBS", "'2024-03-20T00:00:00'")]);
         let body = tsv_of(&field.sky);
-        let fetch = |_: &ConeQuery| Ok(body.clone());
+        let fetch = shared(move |_| Ok(body.clone()));
 
-        let from_header = super::gaia_refine_for_path(&field.path, None, None, None, None, &fetch).unwrap();
-        let typed = super::gaia_refine_for_path(&field.path, None, Some(2015.5), None, None, &fetch).unwrap();
+        let from_header = super::gaia_refine_for_path(&field.path, None, None, None, None, Arc::clone(&fetch)).unwrap();
+        let typed = super::gaia_refine_for_path(&field.path, None, Some(2015.5), None, None, fetch).unwrap();
 
         assert_eq!(from_header["epoch_source"], "header");
         assert_eq!(from_header["report"]["parallax"], "applied from the observer's barycentric position");
@@ -1323,12 +2207,13 @@ mod tests {
     }
 
     fn live_refine(path: &str) -> serde_json::Value {
+        let _cache = sources_cache_lock();
         let temp = tempfile::tempdir().unwrap();
         let cache = std::env::var_os(crate::core::astrometry::catalog_disk::ENV_CACHE_DIR)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| temp.path().to_path_buf());
-        let fetch = |q: &ConeQuery| crate::core::astrometry::catalog::query_gaia_tie_tsv(q);
-        let json = super::gaia_refine_for_path(path, None, None, None, Some(&cache), &fetch).unwrap();
+        let fetch = shared(crate::core::astrometry::catalog::query_gaia_tie_tsv);
+        let json = super::gaia_refine_for_path(path, None, None, None, Some(&cache), fetch).unwrap();
         let mut summary = json.clone();
         let cuts = summary["report"]["cuts"].clone();
         let matching = ["histogram_peak", "histogram_random_per_bin", "match_radius_arcsec", "chance_radius_arcsec", "density_per_arcsec2", "sigma_res_arcsec", "peak_offset_arcsec"]
@@ -1384,12 +2269,13 @@ mod tests {
             return;
         }
         let path = path.to_string_lossy().into_owned();
+        let _cache = sources_cache_lock();
         let temp = tempfile::tempdir().unwrap();
         let cache = std::env::var_os(crate::core::astrometry::catalog_disk::ENV_CACHE_DIR)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| temp.path().to_path_buf());
-        let fetch = |q: &ConeQuery| crate::core::astrometry::catalog::query_gaia_tie_tsv(q);
-        let json = super::gaia_refine_for_path(&path, None, Some(1990.0), Some("shift"), Some(&cache), &fetch).unwrap();
+        let fetch = shared(crate::core::astrometry::catalog::query_gaia_tie_tsv);
+        let json = super::gaia_refine_for_path(&path, None, Some(1990.0), Some("shift"), Some(&cache), fetch).unwrap();
         let mut summary = json.clone();
         summary["report"] = serde_json::Value::Null;
         eprintln!("{path}: {summary:#}");
@@ -1399,6 +2285,57 @@ mod tests {
         assert_eq!(json["representation"], "exact header update (CRVAL and CD)");
         let (east, north) = (json["shift_east_mas"].as_f64().unwrap(), json["shift_north_mas"].as_f64().unwrap());
         assert!((east - 667.0).abs() < 50.0 && (north + 797.0).abs() < 50.0, "({east}, {north}) vs the science report's (+667, -797)");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_dss2_native_low1_rerefine_and_its_written_copy_reuse_the_measured_sources() {
+        let dir = std::env::var_os("ASTROBURST_PLATE_SOLVE_DIR").map(std::path::PathBuf::from).unwrap_or_default();
+        let path = dir.join("c1").join("native_low1.fits");
+        if !path.is_file() {
+            eprintln!("skipped: {} is absent (set ASTROBURST_PLATE_SOLVE_DIR)", path.display());
+            return;
+        }
+        let path = path.to_string_lossy().into_owned();
+        let _cache = sources_cache_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let cache = std::env::var_os(crate::core::astrometry::catalog_disk::ENV_CACHE_DIR)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| temp.path().to_path_buf());
+        let fetch = shared(crate::core::astrometry::catalog::query_gaia_tie_tsv);
+        let run = |label: &str, path: &str, typed: Option<f64>| {
+            let started = Instant::now();
+            let json = super::gaia_refine_for_path(path, None, typed, None, Some(&cache), Arc::clone(&fetch)).unwrap();
+            eprintln!(
+                "C21UX {}",
+                serde_json::json!({
+                    "run": label,
+                    "seconds": started.elapsed().as_secs_f64(),
+                    "sources_origin": json["sources_origin"],
+                    "timings_ms": json["timings_ms"],
+                    "catalog_source": json["catalog_source"],
+                    "n_catalog": json["n_catalog"],
+                    "decision": json["decision"],
+                    "model": json["model"],
+                    "n_used": json["n_used"],
+                    "n_matched": json["n_matched"],
+                    "shift_east_mas": json["shift_east_mas"],
+                    "shift_north_mas": json["shift_north_mas"],
+                })
+            );
+            json
+        };
+
+        let first = run("undated", &path, None);
+        let typed = run("typed 1990", &path, Some(1990.0));
+        let cards: Vec<(String, String)> = serde_json::from_value(first["wcs_cards"].clone()).unwrap();
+        let out = temp.path().join("out").to_string_lossy().to_string();
+        let written = super::super::write_wcs_copy(&path, &cards, &out, None).unwrap();
+        let copy = run("written copy", written["fits_path"].as_str().unwrap(), None);
+
+        assert_eq!(first["decision"], "applied", "{}", first["reason"]);
+        assert_eq!(typed["sources_origin"], "memory");
+        assert_eq!(copy["sources_origin"], "memory");
     }
 
     #[test]

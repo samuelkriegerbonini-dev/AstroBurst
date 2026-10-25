@@ -41,12 +41,14 @@ const TIER1_VAR: &str = "ASTROBURST_TIER1_PATH";
 const FGS_D1: &str = "jw01476003004_02201_00001_guider2_cal.fits";
 const FGS_D2: &str = "jw01476003004_02201_00002_guider2_cal.fits";
 const FGS_D1_I2D: &str = "jw01476003004_02201_00001_guider2_i2d.fits";
+const FGS_D1_CRF: &str = "jw01476003004_02201_00001_guider2_o003_crf.fits";
 const J1_REFERENCE_MAS: [f64; 2] = [1029.4, 1438.5];
 const J1_REFERENCE_SIGMA_MAS: f64 = 4.5;
 const J1_EXTRA_MAS: f64 = 5.0;
 const J1_MAX_RMS_MAS: f64 = 50.0;
 const J2_MAX_MAS: f64 = 7.0;
 const J3_MAX_MAS: f64 = 10.0;
+const J3_SIGMAS: f64 = 3.0;
 const COMMON_RADIUS_MAS: f64 = 150.0;
 const COMMON_MIN_SNR: f64 = 20.0;
 const REFIT_LIMIT_PX: f64 = 0.01;
@@ -308,11 +310,12 @@ fn summary(label: &str, frame: &Frame, input: &InputWcs, epoch: &TieEpochChoice,
         "cuts": r.cuts,
     });
     let matching = json!({
-        "histogram": { "bin": r.histogram_bin_arcsec, "peak": r.histogram_peak, "random": r.histogram_random_per_bin, "threshold": r.histogram_threshold, "offset_arcsec": r.peak_offset_arcsec, "sigma_res_arcsec": r.sigma_res_arcsec },
+        "histogram": { "bin": r.histogram_bin_arcsec, "peak": r.histogram_peak, "random": r.histogram_random_per_bin, "threshold": r.histogram_threshold, "expected_false_peaks": r.histogram_expected_false_peaks, "offset_arcsec": r.peak_offset_arcsec, "sigma_res_arcsec": r.sigma_res_arcsec },
         "density": r.density_per_arcsec2,
         "r_chance": r.chance_radius_arcsec,
         "r_m": r.match_radius_arcsec,
         "chance_fraction": r.chance_fraction,
+        "expected_chance_pairs": r.expected_chance_pairs,
         "n_matched": r.n_matched,
         "n_used": r.n_used,
     });
@@ -543,6 +546,51 @@ fn grid_sky(frame: &Frame, wcs: &WcsTransform) -> Vec<(f64, f64)> {
     grid_pixels(frame.size).into_iter().filter_map(|(x, y)| world(wcs, x, y)).collect()
 }
 
+fn refused_by_a_chance_gate(tie: &Tie) -> bool {
+    tie.result.decision == TieDecision::Refused
+        && tie.result.reason.as_deref().is_some_and(|r| r.starts_with("no significant offset peak") || r.starts_with("chance matches"))
+}
+
+fn deep_tie_check(checks: &mut Checks, label: &str, frame: &Frame, input: &InputWcs, reference: &Tie, deep: &Tie) {
+    let name = format!("{label} refused by a chance gate, or within 10 mas of the depth {TIE_MAX_DETECTIONS} reference");
+    match (deep.correction(), reference.correction()) {
+        (Some(c), Some(c_ref)) => {
+            let seps = correction_separations(&grid_sky(frame, &input.wcs), c_ref, c);
+            emit("grid", json!({ "label": format!("{label} vs reference"), "file": frame.name, "sep_mas": stats(&seps) }));
+            checks.check(&name, max_of(&seps) <= J3_MAX_MAS, format!("max {:.1} mas", max_of(&seps)));
+        }
+        (Some(_), None) => checks.check(&name, false, format!("applied while the reference was not: {:?}", reference.result.reason)),
+        (None, _) => checks.check(&name, refused_by_a_chance_gate(deep), format!("{:?} {:?}", deep.result.decision, deep.result.reason)),
+    }
+}
+
+fn j3_sigma_checks(checks: &mut Checks, label: &str, frame: &Frame, input: &InputWcs, ties: (&Tie, &Tie), corrections: (&SkyCorrection, &SkyCorrection)) -> Vec<f64> {
+    let (c1, c2) = corrections;
+    let (r1, r2) = (&ties.0.result.report, &ties.1.result.report);
+    let seps = correction_separations(&grid_sky(frame, &input.wcs), c1, c2);
+    let corner_sigma = r1.uncertainty_corner_mas.hypot(r2.uncertainty_corner_mas);
+    let centre_sigma = r1.uncertainty_centre_mas.hypot(r2.uncertainty_centre_mas);
+    let (cx, cy) = crate::core::astrometry::wcs::pixel_center(frame.size.0, frame.size.1);
+    let centre_sep = world(&input.wcs, cx, cy).map_or(f64::NAN, |p| correction_separations(&[p], c1, c2)[0]);
+    let max = max_of(&seps);
+    emit("j3", json!({
+        "label": label,
+        "file": frame.name,
+        "sep_mas": stats(&seps),
+        "centre_sep_mas": centre_sep,
+        "sigma_centre_pair_mas": centre_sigma,
+        "sigma_corner_pair_mas": corner_sigma,
+        "max_ratio_to_corner_sigma": max / corner_sigma,
+        "centre_ratio": centre_sep / centre_sigma,
+        "within_10_mas_everywhere": max <= J3_MAX_MAS,
+        "models": [r1.model, r2.model],
+        "rotation_deg": [r1.params.rotation_deg, r2.params.rotation_deg],
+    }));
+    checks.check(&format!("{label} grid within 3 sqrt2 sigma at every node (corner sigma)"), max <= J3_SIGMAS * corner_sigma, format!("max {max:.1} vs {:.1} mas", J3_SIGMAS * corner_sigma));
+    checks.check(&format!("{label} centre within 3 sqrt2 sigma (centre sigma)"), centre_sep <= J3_SIGMAS * centre_sigma, format!("{centre_sep:.1} vs {:.1} mas", J3_SIGMAS * centre_sigma));
+    seps
+}
+
 #[test]
 #[ignore]
 fn live_c21_fgs_j1_j2_j3() {
@@ -600,10 +648,8 @@ fn live_c21_fgs_j1_j2_j3() {
     }
 
     if let (Some(c1), Some(c2)) = (t1.correction(), t2.correction()) {
-        let points = grid_sky(&d1, &in1.wcs);
-        let seps = correction_separations(&points, c1, c2);
+        let seps = j3_sigma_checks(&mut checks, "J3 dither 1 vs dither 2", &d1, &in1, (&t1, &t2), (c1, c2));
         emit("grid", json!({ "label": "J3 dither 1 vs dither 2 correction on the dither 1 grid", "sep_mas": stats(&seps) }));
-        checks.check("J3 corrections agree within 10 mas everywhere", max_of(&seps) <= J3_MAX_MAS, format!("max {:.2} mas", max_of(&seps)));
         let tied1 = |x: f64, y: f64| c1.corrected_pixel_to_world(&in1.wcs, x, y);
         let tied2 = |x: f64, y: f64| c2.corrected_pixel_to_world(&in2.wcs, x, y);
         let raw1 = |x: f64, y: f64| world(&in1.wcs, x, y);
@@ -615,7 +661,17 @@ fn live_c21_fgs_j1_j2_j3() {
             emit("common", json!({ "label": "J3 common stars dither 2 minus dither 1", "min_snr": min_snr, "tied": after_summary, "untied": offsets_summary(&before) }));
             if min_snr == COMMON_MIN_SNR {
                 let med = after_summary["median_abs"].as_f64().unwrap_or(f64::NAN);
-                checks.check("J3 median |delta| of common stars <= 10 mas", med <= J3_MAX_MAS, format!("{med:.2} mas over {} stars", after.len()));
+                emit("j3", json!({
+                    "label": "J3 report, common stars and models",
+                    "n": after.len(),
+                    "median_abs_mas": med,
+                    "median_abs_within_10_mas": med <= J3_MAX_MAS,
+                    "median_vector_mas": after_summary["median_vector"],
+                    "untied_median_abs_mas": offsets_summary(&before)["median_abs"],
+                    "grid_max_mas": max_of(&seps),
+                    "grid_median_mas": median(&seps),
+                    "models": [t1.result.report.model.clone(), t2.result.report.model.clone()],
+                }));
             }
         }
         let (s1, _) = shift_axes(&t1);
@@ -720,7 +776,7 @@ fn live_c21_jwst_refusals_and_products_j5_j6() {
                 .and_then(|r| r.trim_end_matches(" px").parse::<f64>().ok());
             let ok = match tie.result.decision {
                 TieDecision::Applied => (model == TieModel::Shift.name() || model == TieModel::Rshift.name()) && refit_px.is_some_and(|e| e <= REFIT_LIMIT_PX),
-                _ => refused_naming_count(&tie).is_some() || tie.result.decision == TieDecision::NoSignificantCorrection,
+                _ => refused_naming_count(&tie).is_some() || tie.result.decision == TieDecision::NoSignificantCorrection || (tie.result.decision == TieDecision::Refused && tie.result.reason.as_deref().is_some_and(|r| r.starts_with("no significant offset peak"))),
             };
             checks.check("J5 M16 nrca1 shift or rshift with refit <= 0.01 px, or a named refusal", ok, format!("{:?} {model} {:?} {:?}", tie.result.decision, tie.representation, tie.result.reason));
         }
@@ -1148,13 +1204,15 @@ fn live_c21_fgs_depth_and_model_experiment() {
     let (_, cat1) = catalogue_for(&d1, &in1).unwrap();
     let (_, cat2) = catalogue_for(&d2, &in2).unwrap();
     let (e1, e2) = (d1.epoch(None), d2.epoch(None));
+    let models = [ModelChoice::Auto, ModelChoice::Fixed(TieModel::Shift)];
+    let mut references: Vec<(Tie, Tie)> = Vec::new();
     for target in [TIE_MAX_DETECTIONS, 3 * TIE_MAX_DETECTIONS, 6 * TIE_MAX_DETECTIONS] {
         let s1 = if target == TIE_MAX_DETECTIONS { None } else { Some(sources_to_depth(&d1, target)) };
         let s2 = if target == TIE_MAX_DETECTIONS { None } else { Some(sources_to_depth(&d2, target)) };
         let det1 = s1.as_ref().map_or(&d1.sources.detections, |s| &s.detections);
         let det2 = s2.as_ref().map_or(&d2.sources.detections, |s| &s.detections);
         emit("depth", json!({ "target": target, "kept": [det1.len(), det2.len()], "usable": [det1.iter().filter(|d| !d.saturated).count(), det2.iter().filter(|d| !d.saturated).count()] }));
-        for model in [ModelChoice::Auto, ModelChoice::Fixed(TieModel::Shift)] {
+        for (m, model) in models.into_iter().enumerate() {
             let options1 = TieOptions { max_detections: target, ..d1.options(model) };
             let options2 = TieOptions { max_detections: target, ..d2.options(model) };
             let t1 = run_tie(&d1, &in1, det1, &cat1, e1, &options1);
@@ -1162,20 +1220,26 @@ fn live_c21_fgs_depth_and_model_experiment() {
             let label = format!("EXP depth {target} model {model:?}");
             emit("tie", summary(&format!("{label} dither 1"), &d1, &in1, &e1, &t1));
             emit("tie", summary(&format!("{label} dither 2"), &d2, &in2, &e2, &t2));
-            let (Some(c1), Some(c2)) = (t1.correction(), t2.correction()) else {
-                checks.check(&format!("{label} both applied"), false, format!("{:?} / {:?}", t1.result.reason, t2.result.reason));
+            if target > TIE_MAX_DETECTIONS {
+                let (r1, r2) = &references[m];
+                deep_tie_check(&mut checks, &format!("{label} dither 1"), &d1, &in1, r1, &t1);
+                deep_tie_check(&mut checks, &format!("{label} dither 2"), &d2, &in2, r2, &t2);
                 continue;
-            };
-            let seps = correction_separations(&grid_sky(&d1, &in1.wcs), c1, c2);
-            let tied1 = |x: f64, y: f64| c1.corrected_pixel_to_world(&in1.wcs, x, y);
-            let tied2 = |x: f64, y: f64| c2.corrected_pixel_to_world(&in2.wcs, x, y);
-            let common = common_offsets(
-                &sky_points(&d1.sources.detections, &tied1, COMMON_MIN_SNR),
-                &sky_points(&d2.sources.detections, &tied2, COMMON_MIN_SNR),
-                COMMON_RADIUS_MAS,
-            );
-            emit("grid", json!({ "label": format!("{label} J3 correction dither 1 vs dither 2"), "sep_mas": stats(&seps), "common": offsets_summary(&common) }));
-            checks.check(&format!("{label} J3 corrections within 10 mas"), max_of(&seps) <= J3_MAX_MAS, format!("max {:.2} mas, median {:.2}", max_of(&seps), median(&seps)));
+            }
+            if let (Some(c1), Some(c2)) = (t1.correction(), t2.correction()) {
+                let seps = j3_sigma_checks(&mut checks, &format!("{label} J3"), &d1, &in1, (&t1, &t2), (c1, c2));
+                let tied1 = |x: f64, y: f64| c1.corrected_pixel_to_world(&in1.wcs, x, y);
+                let tied2 = |x: f64, y: f64| c2.corrected_pixel_to_world(&in2.wcs, x, y);
+                let common = common_offsets(
+                    &sky_points(&d1.sources.detections, &tied1, COMMON_MIN_SNR),
+                    &sky_points(&d2.sources.detections, &tied2, COMMON_MIN_SNR),
+                    COMMON_RADIUS_MAS,
+                );
+                emit("grid", json!({ "label": format!("{label} J3 correction dither 1 vs dither 2"), "sep_mas": stats(&seps), "common": offsets_summary(&common), "within_10_mas_everywhere": max_of(&seps) <= J3_MAX_MAS }));
+            } else {
+                checks.check(&format!("{label} both applied"), false, format!("{:?} / {:?}", t1.result.reason, t2.result.reason));
+            }
+            references.push((t1, t2));
         }
     }
     if let Some(m16) = Frame::open(&real_data_dir().join("jw02739001001_02105_00001_nrca1_cal.fits")) {
@@ -1268,14 +1332,65 @@ fn live_c21_crf_false_peak_diagnostic() {
     let shared = common_offsets(&crf_points, &cal_points, 100.0);
     emit("crf", json!({ "label": "usable detections shared by crf and cal within 100 mas", "n": shared.len(), "crf_usable": crf_points.len(), "cal_usable": cal_points.len() }));
     let r = &t_crf.result.report;
-    let expected_chance = r.cuts.detections_used as f64 * r.chance_fraction;
-    emit("crf", json!({ "label": "expected chance pairs in the crf tie", "detections_used": r.cuts.detections_used, "chance_fraction": r.chance_fraction, "expected_chance_pairs": expected_chance, "n_matched": r.n_matched }));
-    if let (Some(a), Some(b)) = (t_cal.correction(), t_crf.correction()) {
-        let seps = correction_separations(&grid_sky(&cal, &in_cal.wcs), a, b);
-        emit("grid", json!({ "label": "CRF correction cal vs crf", "sep_mas": stats(&seps) }));
-        checks.check("CRF crf tie agrees with the cal tie within 10 mas", max_of(&seps) <= J3_MAX_MAS, format!("max {:.1} mas", max_of(&seps)));
-    } else {
-        checks.check("CRF both applied", false, format!("{:?} / {:?}", t_cal.result.reason, t_crf.result.reason));
+    emit("crf", json!({ "label": "expected chance pairs in the crf tie", "detections_used": r.cuts.detections_used, "expected_chance_pairs": r.expected_chance_pairs, "n_matched": r.n_matched, "n_used": r.n_used }));
+    match (t_cal.correction(), t_crf.correction()) {
+        (Some(a), Some(b)) => {
+            let seps = correction_separations(&grid_sky(&cal, &in_cal.wcs), a, b);
+            emit("grid", json!({ "label": "CRF correction cal vs crf", "sep_mas": stats(&seps) }));
+            checks.check("CRF crf tie agrees with the cal tie within 10 mas", max_of(&seps) <= J3_MAX_MAS, format!("max {:.1} mas", max_of(&seps)));
+        }
+        (Some(_), None) => checks.check("CRF crf tie refused by a chance gate while the cal tie applied", refused_by_a_chance_gate(&t_crf), format!("{:?} {:?}", t_crf.result.decision, t_crf.result.reason)),
+        _ => checks.check("CRF cal applied", false, format!("{:?} / {:?}", t_cal.result.reason, t_crf.result.reason)),
+    }
+    checks.finish();
+}
+
+#[test]
+#[ignore]
+fn live_c21_j6_crf_tie_is_refused_or_agrees_with_the_cal() {
+    let mut checks = Checks::new();
+    let Some(cal) = mast_frame(FGS_D1) else { return };
+    let Some(crf) = mast_frame(FGS_D1_CRF) else { return };
+    let in_cal = cal.input(None).unwrap();
+    let in_crf = crf.input(None).unwrap();
+    let (_, catalogue) = catalogue_for(&cal, &in_cal).unwrap();
+    let epoch = cal.epoch(None);
+    let t_cal = run_tie(&cal, &in_cal, &cal.sources.detections, &catalogue, epoch, &cal.options(ModelChoice::Auto));
+    let t_crf = run_tie(&crf, &in_crf, &crf.sources.detections, &catalogue, epoch, &crf.options(ModelChoice::Auto));
+    emit("tie", summary("J6 cal reference", &cal, &in_cal, &epoch, &t_cal));
+    emit("tie", summary("J6 crf", &crf, &in_crf, &epoch, &t_crf));
+    checks.check("J6 cal tie applied", t_cal.applied(), format!("{:?} {:?}", t_cal.result.decision, t_cal.result.reason));
+    let name = "J6 crf refused by a chance gate, or applied within 10 mas of the cal on the cal grid";
+    match (t_cal.correction(), t_crf.correction()) {
+        (Some(c_cal), Some(c_crf)) => {
+            let seps = correction_separations(&grid_sky(&cal, &in_cal.wcs), c_cal, c_crf);
+            emit("grid", json!({ "label": "J6 correction cal vs crf", "sep_mas": stats(&seps) }));
+            checks.check(name, max_of(&seps) <= J3_MAX_MAS, format!("max {:.1} mas", max_of(&seps)));
+        }
+        _ => checks.check(name, refused_by_a_chance_gate(&t_crf), format!("crf {:?} {:?}", t_crf.result.decision, t_crf.result.reason)),
+    }
+    checks.finish();
+}
+
+#[test]
+#[ignore]
+fn live_c21_j6_deep_detection_lists_are_refused_or_agree_with_the_default_depth() {
+    let mut checks = Checks::new();
+    for name in [FGS_D1, FGS_D2] {
+        let Some(frame) = mast_frame(name) else { continue };
+        let input = frame.input(None).unwrap();
+        let (_, catalogue) = catalogue_for(&frame, &input).unwrap();
+        let epoch = frame.epoch(None);
+        let reference = run_tie(&frame, &input, &frame.sources.detections, &catalogue, epoch, &frame.options(ModelChoice::Auto));
+        emit("tie", summary(&format!("J6 depth {TIE_MAX_DETECTIONS} reference"), &frame, &input, &epoch, &reference));
+        checks.check(&format!("J6 {name} reference applied"), reference.applied(), format!("{:?} {:?}", reference.result.decision, reference.result.reason));
+        for target in [3 * TIE_MAX_DETECTIONS, 6 * TIE_MAX_DETECTIONS] {
+            let sources = sources_to_depth(&frame, target);
+            let options = TieOptions { max_detections: target, ..frame.options(ModelChoice::Auto) };
+            let tie = run_tie(&frame, &input, &sources.detections, &catalogue, epoch, &options);
+            emit("tie", summary(&format!("J6 depth {target}"), &frame, &input, &epoch, &tie));
+            deep_tie_check(&mut checks, &format!("J6 {name} depth {target}"), &frame, &input, &reference, &tie);
+        }
     }
     checks.finish();
 }

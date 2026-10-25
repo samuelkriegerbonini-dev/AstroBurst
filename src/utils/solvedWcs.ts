@@ -1,6 +1,6 @@
 import type { WcsCard, WriteSolvedWcsResult } from "../shared/types/astrometry";
-import type { GaiaRefineDecision, GaiaRefineResult } from "../services/astrometry";
-import type { SolveField } from "./plateSolveResult";
+import type { GaiaRefineDecision, GaiaRefineResult, SolveCredit } from "../services/astrometry";
+import { formatDuration, type SolveField } from "./plateSolveResult";
 import { effectiveBinFiles, spccInputs, type WizardState } from "./wizard";
 import { normalizeOutputPath } from "./processingChain";
 
@@ -42,6 +42,7 @@ const MIN_EPOCH_YEAR = 1900;
 const MAX_EPOCH_YEAR = 2100;
 const ARCSEC_PER_DEG = 3600;
 const ASSUMED_EPOCH_UNCERTAINTY_YR = 10;
+const MS_PER_S = 1000;
 
 const REFINE_HEADINGS: Readonly<Record<GaiaRefineDecision, string>> = {
   applied: "Refined with Gaia DR3",
@@ -68,6 +69,36 @@ function finiteOrNull(value: number | null | undefined): number | null {
 
 function signed(value: number, digits: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+export const GAIA_REFINE_CANCELLED_NOTE = "Gaia DR3 refinement cancelled; the WCS is unchanged";
+
+export interface GaiaRefineProgress {
+  stage: string;
+  current: number;
+  total: number;
+}
+
+const REFINE_STAGE_TEXTS: Readonly<Record<string, (progress: GaiaRefineProgress) => string>> = {
+  load: () => "Reading the image and its WCS",
+  detect: () => "Detecting stars; the Gaia DR3 star list is fetched at the same time",
+  measure: ({ current, total }) => (total > 0 ? `Measuring stars: ${current} of ${total}` : "Measuring stars"),
+  vizier: ({ current, total }) => `Waiting for VizieR: ${formatDuration(current * MS_PER_S)} / ${formatDuration(total * MS_PER_S)}`,
+  fit: () => "Fitting the tie to Gaia DR3",
+  represent: () => "Computing the refined WCS cards",
+};
+
+export function gaiaRefineProgressText(progress: GaiaRefineProgress | null): string | null {
+  if (progress === null || !Object.hasOwn(REFINE_STAGE_TEXTS, progress.stage)) return null;
+  return REFINE_STAGE_TEXTS[progress.stage](progress);
+}
+
+export function creditedSolveTier(
+  solve: { catalog?: string | null; credit?: SolveCredit | null } | null,
+  refined: GaiaRefineResult | null,
+): string | null {
+  if (!solve?.credit || !solve.catalog) return null;
+  return refined === null || refined.wcs_kind === "solve" ? solve.catalog : null;
 }
 
 export function gaiaRefineBlocker(hasWcs: boolean): string | null {

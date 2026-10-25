@@ -185,7 +185,7 @@ function externalView(report: CatalogDatasetReport): StateView {
   const zenodo = offersZenodo(report);
   if (status.state === "external") {
     if (status.valid && isZenodoDownload(report)) {
-      return { text: `Using the Zenodo download in ${status.path}`, tone: "ok", actions: { ...choose, remove: true } };
+      return { text: `Using the Zenodo download in ${report.folder}`, tone: "ok", actions: { ...choose, remove: true } };
     }
     const kept = keptDownloadText(report);
     return status.valid

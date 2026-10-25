@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::core::astrometry::catalog::GAIA_REFERENCE_EPOCH_YEAR;
 use crate::core::astrometry::gwcs::sip_fit::lu_solve;
+use crate::core::astrometry::local_solve::poisson_tail_log10;
 use crate::core::astrometry::wcs::{pixel_center, pixel_edge_corners, WcsKind, WcsTransform};
 use crate::math::exact_median_f64;
 use crate::types::constants::MAD_TO_SIGMA;
@@ -73,6 +74,8 @@ const ICRS: &str = "ICRS";
 const CARDS_REPLACED_BY_CD: [&str; 8] = ["PC1_1", "PC1_2", "PC2_1", "PC2_2", "CDELT1", "CDELT2", "CROTA1", "CROTA2"];
 const CARDS_REPLACED_BY_RADESYS: [&str; 2] = ["EQUINOX", "RADECSYS"];
 const PEAK_GRIDS: [[f64; 2]; 4] = [[0.0, 0.0], [0.5, 0.0], [0.0, 0.5], [0.5, 0.5]];
+const PEAK_FALSE_ALARM: f64 = 1e-3;
+const CHANCE_EXCESS_SIGMA: f64 = 5.0;
 const FLAG_CLIPPED: &str = "clipped";
 const FLAG_NO_PROPER_MOTION: &str = "no proper motion";
 const FLAG_PARALLAX_APPLIED: &str = "parallax applied";
@@ -399,6 +402,7 @@ pub struct TieReport {
     pub histogram_peak: usize,
     pub histogram_random_per_bin: f64,
     pub histogram_threshold: f64,
+    pub histogram_expected_false_peaks: Option<f64>,
     pub peak_offset_arcsec: [f64; 2],
     pub sigma_res_arcsec: f64,
     pub density_per_arcsec2: f64,
@@ -406,6 +410,7 @@ pub struct TieReport {
     pub match_radius_arcsec: f64,
     pub chance_fraction: f64,
     pub n_matched: usize,
+    pub expected_chance_pairs: Option<f64>,
     pub n_used: usize,
     pub model: Option<String>,
     pub model_notes: Vec<String>,
@@ -1147,9 +1152,32 @@ struct PeakSearch {
     peak: usize,
     random_per_bin: f64,
     threshold: f64,
+    expected_false_peaks: f64,
+    bins: usize,
     offset: [f64; 2],
     sigma_res: f64,
     bin: f64,
+}
+
+fn peak_threshold(random_per_bin: f64, bins: usize) -> f64 {
+    let gaussian = PEAK_MIN_COUNT.max(random_per_bin + PEAK_SIGMA * random_per_bin.sqrt());
+    let limit = PEAK_FALSE_ALARM.log10() - (bins as f64).log10();
+    let start = gaussian.ceil().max(1.0) as usize;
+    let k = (start..).find(|&k| poisson_tail_log10(k, random_per_bin) <= limit).unwrap_or(start);
+    gaussian.max(k as f64)
+}
+
+fn expected_false_peaks(peak: usize, random_per_bin: f64, bins: usize) -> f64 {
+    10f64.powf((bins as f64).log10() + poisson_tail_log10(peak, random_per_bin))
+}
+
+fn chance_needed(expected: f64) -> f64 {
+    expected + (CHANCE_EXCESS_SIGMA * expected.sqrt()).max(expected)
+}
+
+fn chance_excess(n_dets: usize, r_m: f64, density: f64) -> (f64, f64) {
+    let expected = n_dets as f64 * chance_fraction(r_m, density);
+    (expected, chance_needed(expected))
 }
 
 fn eta_sorted(stars: &[GaiaStar]) -> Vec<usize> {
@@ -1165,8 +1193,8 @@ fn window<'a>(stars: &'a [GaiaStar], order: &'a [usize], eta: f64, radius: f64) 
 
 fn find_offset_peak(dets: &[Det], stars: &[GaiaStar], order: &[usize], r_s: f64, bin: f64, density: f64) -> PeakSearch {
     let n_bins = ((2.0 * r_s / bin).ceil() as usize).max(1) + 1;
-    let cells = n_bins * n_bins;
-    let mut counts = vec![0usize; PEAK_GRIDS.len() * cells];
+    let grid_cells = n_bins * n_bins;
+    let mut counts = vec![0usize; PEAK_GRIDS.len() * grid_cells];
     let mut offsets: Vec<[f64; 2]> = Vec::new();
     let cell = |v: f64, shift: f64| (((v + r_s) / bin + shift).floor() as isize).clamp(0, n_bins as isize - 1) as usize;
     for det in dets {
@@ -1176,16 +1204,18 @@ fn find_offset_peak(dets: &[Det], stars: &[GaiaStar], order: &[usize], r_s: f64,
                 continue;
             }
             for (g, shift) in PEAK_GRIDS.iter().enumerate() {
-                counts[g * cells + cell(d[1], shift[1]) * n_bins + cell(d[0], shift[0])] += 1;
+                counts[g * grid_cells + cell(d[1], shift[1]) * n_bins + cell(d[0], shift[0])] += 1;
             }
             offsets.push(d);
         }
     }
     let (peak_index, &peak) = counts.iter().enumerate().max_by_key(|(_, &c)| c).unwrap_or((0, &0));
     let random_per_bin = dets.len() as f64 * density * bin * bin;
-    let threshold = PEAK_MIN_COUNT.max(random_per_bin + PEAK_SIGMA * random_per_bin.sqrt());
-    let shift = PEAK_GRIDS[peak_index / cells];
-    let cell_index = peak_index % cells;
+    let bins = counts.len();
+    let threshold = peak_threshold(random_per_bin, bins);
+    let expected_false_peaks = expected_false_peaks(peak, random_per_bin, bins);
+    let shift = PEAK_GRIDS[peak_index / grid_cells];
+    let cell_index = peak_index % grid_cells;
     let centre = [
         -r_s + (((cell_index % n_bins) as f64) + 0.5 - shift[0]) * bin,
         -r_s + (((cell_index / n_bins) as f64) + 0.5 - shift[1]) * bin,
@@ -1195,7 +1225,7 @@ fn find_offset_peak(dets: &[Det], stars: &[GaiaStar], order: &[usize], r_s: f64,
     let ys: Vec<f64> = near.iter().map(|d| d[1]).collect();
     let offset = if near.is_empty() { centre } else { [median_of(&xs), median_of(&ys)] };
     let sigma_res = if near.len() >= 3 { robust_sigma(&xs).max(robust_sigma(&ys)) } else { 0.0 };
-    PeakSearch { peak, random_per_bin, threshold, offset, sigma_res, bin }
+    PeakSearch { peak, random_per_bin, threshold, expected_false_peaks, bins, offset, sigma_res, bin }
 }
 
 struct Pair {
@@ -1868,13 +1898,14 @@ fn match_field(input: &TieInput, options: &TieOptions, frame: &TieFrame, report:
     report.histogram_peak = peak.peak;
     report.histogram_random_per_bin = peak.random_per_bin;
     report.histogram_threshold = peak.threshold;
+    report.histogram_expected_false_peaks = Some(peak.expected_false_peaks);
     report.peak_offset_arcsec = peak.offset;
     report.sigma_res_arcsec = peak.sigma_res;
     report.density_per_arcsec2 = density;
     if (peak.peak as f64) < peak.threshold {
         return Err(format!(
-            "no significant offset peak within {r_s:.1} arcsec (peak {}, random {:.1} per bin)",
-            peak.peak, peak.random_per_bin
+            "no significant offset peak within {r_s:.1} arcsec (peak {}, random {:.1} per bin, {} needed to keep the chance of a false peak below {} % over {} bins)",
+            peak.peak, peak.random_per_bin, peak.threshold.ceil(), PEAK_FALSE_ALARM * 100.0, peak.bins
         ));
     }
 
@@ -2111,6 +2142,21 @@ pub fn tie_to_gaia(input: &TieInput, options: &TieOptions) -> TieResult {
     report.cuts.clipped = pairs.len() - fit.n_used;
     report.sigma_sys_mas = fit.sigma_sys2.sqrt() * MAS_PER_ARCSEC;
     report.chi2_nu = fit.chi2_nu;
+
+    let inlier_radius = (0..p_final.len())
+        .filter(|&k| fit.inliers[k])
+        .map(|k| norm_v(fit.model.residual(p_final[k], q_final[k])))
+        .fold(0.0, f64::max)
+        .min(report.match_radius_arcsec);
+    let (expected_chance, needed) = chance_excess(report.cuts.detections_used, inlier_radius, report.density_per_arcsec2);
+    report.expected_chance_pairs = Some(expected_chance);
+    if (fit.n_used as f64) < needed {
+        let reason = format!(
+            "chance matches: {} of {} matched pairs used within {inlier_radius:.2} arcsec, {expected_chance:.1} expected by chance from {} detections at {:.3} Gaia stars per square arcsec; at least {} needed",
+            fit.n_used, pairs.len(), report.cuts.detections_used, report.density_per_arcsec2, needed.ceil()
+        );
+        return refused(report, reason);
+    }
 
     let centre_pixel = pixel_center(input.width, input.height);
     let Some(centre_shift) = centre_shift_mas(wcs, &correction, centre_pixel) else {
@@ -3300,5 +3346,346 @@ mod tests {
         eprintln!("undated no-op: {reason} (epoch term {term:.1} mas)");
         assert!(term > 10.0, "the LMC bulk motion over 10 yr is about 18.5 mas, got {term}");
         assert!(reason.contains("epoch term") && reason.contains(&format!("{term:.1} mas")), "{reason}");
+    }
+
+    const J6_INJECTED_SHIFT_ARCSEC: [f64; 2] = [1.04, 1.44];
+    const CLUSTER_HALF_WIDTH_ARCSEC: f64 = 0.04;
+    const CHANCE_FWHM_PX: f64 = 1.6;
+    const CHANCE_SNR: f64 = 40.0;
+    const GAIA_MARGIN_PX: f64 = 88.0;
+    const ROTATION_SIGMA: f64 = 3.0;
+    const POOLED_FGS_ROTATION_DEG: f64 = 0.0127;
+    const FEW_PAIRS: usize = 27;
+    const FEW_PAIRS_NOISE_MAS: f64 = 25.0;
+
+    fn offset_cluster(n: usize, offset: [f64; 2]) -> (Vec<Det>, Vec<GaiaStar>) {
+        let mut dets = Vec::new();
+        let mut stars = Vec::new();
+        for i in 0..n {
+            let base = [10.0 * i as f64, 10.0 * i as f64];
+            dets.push(Det { x: 0.0, y: 0.0, plane0: base, sigma2: 1e-10, mag_inst: -10.0, fwhm_arcsec: 0.17 });
+            stars.push(GaiaStar { index: i, v: [1.0, 0.0, 0.0], plane0: add_v(base, offset), sigma2: 1e-10, g: Some(15.0), bp_rp: None, pm: [0.0; 2], pm_known: true, parallax_known: false });
+        }
+        (dets, stars)
+    }
+
+    struct ChanceField {
+        seed: u64,
+        random_detections: usize,
+        gaia_density: f64,
+        true_pairs: usize,
+        true_noise_mas: f64,
+        cluster_pairs: usize,
+        cluster_offset_arcsec: [f64; 2],
+    }
+
+    fn chance_row(id: String, ra: f64, dec: f64, g: f64) -> GaiaRow {
+        GaiaRow {
+            id,
+            ra_deg: ra,
+            dec_deg: dec,
+            pm_ra_masyr: Some(0.0),
+            pm_dec_masyr: Some(0.0),
+            e_ra_mas: Some(0.02),
+            e_dec_mas: Some(0.02),
+            e_pm_ra_masyr: Some(0.02),
+            e_pm_dec_masyr: Some(0.02),
+            ruwe: Some(1.0),
+            solved: Some(SOLVED_FIVE_PARAMETER),
+            dup: Some(false),
+            sepsi: Some(0.5),
+            g: Some(g),
+            bp_rp: Some(0.8),
+            ..GaiaRow::default()
+        }
+    }
+
+    fn chance_field(truth: &WcsTransform, input: &WcsTransform, spec: &ChanceField) -> Synthetic {
+        let mut rng = StdRng::seed_from_u64(spec.seed);
+        let scale = truth.pixel_scale_arcsec();
+        let side = FGS_SIZE.0 as f64;
+        let uniform = |rng: &mut StdRng, lo: f64, hi: f64| (lo + (hi - lo) * rng.gen::<f64>(), lo + (hi - lo) * rng.gen::<f64>());
+        let detection = |x: f64, y: f64, mag_inst: f64| TieDetection { x, y, fwhm_px: CHANCE_FWHM_PX, snr: CHANCE_SNR, mag_inst, saturated: false };
+        let mut rows = Vec::new();
+        let mut detections = Vec::new();
+        let n_rows = (spec.gaia_density * ((side + 2.0 * GAIA_MARGIN_PX) * scale).powi(2)).round() as usize;
+        for i in 0..n_rows {
+            let (x, y) = uniform(&mut rng, -GAIA_MARGIN_PX, side + GAIA_MARGIN_PX);
+            let sky = truth.pixel_to_world(x, y);
+            rows.push(chance_row(format!("R{i}"), sky.ra, sky.dec, 18.0 + 2.5 * rng.gen::<f64>()));
+        }
+        for i in 0..spec.true_pairs {
+            let (x, y) = uniform(&mut rng, 40.0, side - 40.0);
+            let sky = truth.pixel_to_world(x, y);
+            let g = 18.0 + 2.5 * rng.gen::<f64>();
+            rows.push(chance_row(format!("T{i}"), sky.ra, sky.dec, g));
+            let noise_px = spec.true_noise_mas / MAS_PER_ARCSEC / scale;
+            detections.push(detection(x + noise_px * gaussian(&mut rng), y + noise_px * gaussian(&mut rng), g - 25.0 + 0.05 * gaussian(&mut rng)));
+        }
+        for i in 0..spec.cluster_pairs {
+            let (x, y) = uniform(&mut rng, 40.0, side - 40.0);
+            let sky = input.pixel_to_world(x, y);
+            let dx = spec.cluster_offset_arcsec[0] + CLUSTER_HALF_WIDTH_ARCSEC * (2.0 * rng.gen::<f64>() - 1.0);
+            let dy = spec.cluster_offset_arcsec[1] + CLUSTER_HALF_WIDTH_ARCSEC * (2.0 * rng.gen::<f64>() - 1.0);
+            let g = 18.0 + 2.5 * rng.gen::<f64>();
+            rows.push(chance_row(format!("C{i}"), sky.ra + dx / ARCSEC_PER_DEG / sky.dec.to_radians().cos(), sky.dec + dy / ARCSEC_PER_DEG, g));
+            detections.push(detection(x, y, g - 25.0 + 0.05 * gaussian(&mut rng)));
+        }
+        for _ in 0..spec.random_detections {
+            let (x, y) = uniform(&mut rng, 40.0, side - 40.0);
+            detections.push(detection(x, y, -7.0 + 2.5 * rng.gen::<f64>()));
+        }
+        Synthetic { detections, catalogue: GaiaCatalogue { kind: CatalogueKind::GaiaDr3Vizier, rows, quality_columns: true, cache_source: "test".into() }, pm: Vec::new() }
+    }
+
+    fn j6_input() -> (HduHeader, WcsTransform, WcsTransform, [f64; 2]) {
+        let truth_header = fgs_header(false);
+        let truth = wcs_of(&truth_header);
+        let input_header = injected_input(&truth_header, J6_INJECTED_SHIFT_ARCSEC, 0.0, 1.0);
+        let input = wcs_of(&input_header);
+        let expected = truth_centre_shift_mas(&truth, &input, FGS_SIZE);
+        (input_header, truth, input, expected)
+    }
+
+    fn three_sigma_t(dof: usize) -> f64 {
+        let z = ROTATION_SIGMA;
+        let nu = dof as f64;
+        let g1 = (z.powi(3) + z) / 4.0;
+        let g2 = (5.0 * z.powi(5) + 16.0 * z.powi(3) + 3.0 * z) / 96.0;
+        let g3 = (3.0 * z.powi(7) + 19.0 * z.powi(5) + 17.0 * z.powi(3) - 15.0 * z) / 384.0;
+        let g4 = (79.0 * z.powi(9) + 776.0 * z.powi(7) + 1482.0 * z.powi(5) - 1920.0 * z.powi(3) - 945.0 * z) / 92160.0;
+        z + g1 / nu + g2 / nu.powi(2) + g3 / nu.powi(3) + g4 / nu.powi(4)
+    }
+
+    fn describe(result: &TieResult, expected: [f64; 2]) -> String {
+        let r = &result.report;
+        let (e_pre_fit, needed_pre_fit) = chance_excess(r.cuts.detections_used, r.match_radius_arcsec, r.density_per_arcsec2);
+        let gate_b = match r.expected_chance_pairs {
+            Some(e) => format!("{e:.1} expected by chance at the inlier radius, {:.1} needed, margin {:+.1}", chance_needed(e), r.n_used as f64 - chance_needed(e)),
+            None => "gate B not reached".to_string(),
+        };
+        format!(
+            "{:?} {:?}; peak {} vs threshold {:.2} at b {:.3}; sigma_res {:.1} mas, r_m {:.3} arcsec; matched {} (pre-fit at r_m: {e_pre_fit:.1} expected by chance, {needed_pre_fit:.1} needed), used {} ({gate_b}); shift error {:.1} mas",
+            result.decision, result.reason, r.histogram_peak, r.histogram_threshold, r.histogram_random_per_bin, r.sigma_res_arcsec * MAS_PER_ARCSEC, r.match_radius_arcsec, r.n_matched, r.n_used, norm_v(sub_v(r.params.shift_mas, expected))
+        )
+    }
+
+    #[test]
+    fn j6_the_peak_threshold_counts_every_histogram_cell_searched() {
+        let (dets, stars) = offset_cluster(12, [-3.31, -0.93]);
+        let order = eta_sorted(&stars);
+        let crf = find_offset_peak(&dets, &stars, &order, DEFAULT_SEARCH_RADIUS_ARCSEC, HISTOGRAM_BIN_MIN_ARCSEC, 1.6 / (12.0 * 0.04));
+        eprintln!("J6 threshold, crf-like: peak {}, random {:.3} per bin, threshold {}", crf.peak, crf.random_per_bin, crf.threshold);
+        assert_eq!(crf.peak, 12);
+        assert!((crf.random_per_bin - 1.6).abs() < 1e-9, "random per bin {}", crf.random_per_bin);
+        assert_eq!(crf.threshold, 13.0, "the maximum of 14884 Poisson(1.6) bins needs 13 to keep the chance of a false peak below 0.1 %");
+        assert!((crf.peak as f64) < crf.threshold);
+        let (dets, stars) = offset_cluster(26, [1.029, 1.439]);
+        let order = eta_sorted(&stars);
+        let j1 = find_offset_peak(&dets, &stars, &order, DEFAULT_SEARCH_RADIUS_ARCSEC, HISTOGRAM_BIN_MIN_ARCSEC, 2.626 / (26.0 * 0.04));
+        eprintln!("J6 threshold, J1-like: peak {}, random {:.3} per bin, threshold {}", j1.peak, j1.random_per_bin, j1.threshold);
+        assert_eq!(j1.peak, 26);
+        assert_eq!(j1.threshold, 16.0);
+        assert!(j1.peak as f64 >= j1.threshold);
+    }
+
+    #[test]
+    fn j6_a_chance_cluster_at_a_wrong_offset_is_not_applied() {
+        let (input_header, truth, input, expected) = j6_input();
+        let spec = ChanceField { seed: 0xC21_0606, random_detections: 783, gaia_density: 0.05, true_pairs: 8, true_noise_mas: 100.0, cluster_pairs: 9, cluster_offset_arcsec: [-3.32, -0.94] };
+        let synth = chance_field(&truth, &input, &spec);
+        let result = tie(&input_header, &synth, Epoch::header(FGS_EPOCH), &TieOptions { max_detections: 5000, ..options(TieModel::Shift) }, None);
+        eprintln!("J6 crf analogue: {}", describe(&result, expected));
+        let r = &result.report;
+        assert!((1.3..2.0).contains(&r.histogram_random_per_bin), "random per bin {}", r.histogram_random_per_bin);
+        assert_eq!(result.decision, TieDecision::Refused, "a 9-pair chance cluster was applied {:.0} mas from the truth", norm_v(sub_v(r.params.shift_mas, expected)));
+        let reason = result.reason.as_deref().unwrap_or_default();
+        assert!(reason.starts_with("no significant offset peak") || reason.starts_with("chance matches"), "{reason}");
+    }
+
+    #[test]
+    fn j6_a_matched_set_dominated_by_chance_pairs_is_not_applied() {
+        let (input_header, truth, input, expected) = j6_input();
+        let spec = ChanceField { seed: 0xC21_0603, random_detections: 3000, gaia_density: 0.045, true_pairs: 30, true_noise_mas: 60.0, cluster_pairs: 0, cluster_offset_arcsec: [0.0; 2] };
+        let synth = chance_field(&truth, &input, &spec);
+        let result = tie(&input_header, &synth, Epoch::header(FGS_EPOCH), &TieOptions { max_detections: 5000, ..options(TieModel::Shift) }, None);
+        eprintln!("J6 depth 6000 analogue: {}", describe(&result, expected));
+        let r = &result.report;
+        assert!(r.histogram_peak >= 20, "peak {}", r.histogram_peak);
+        assert_eq!(
+            result.decision,
+            TieDecision::Refused,
+            "applied {:.0} mas from the truth with {} used of {} matched pairs against {:?} expected by chance",
+            norm_v(sub_v(r.params.shift_mas, expected)), r.n_used, r.n_matched, r.expected_chance_pairs
+        );
+    }
+
+    #[test]
+    fn j6_a_false_peak_in_a_deep_detection_list_is_not_applied() {
+        let (input_header, truth, input, expected) = j6_input();
+        let spec = ChanceField { seed: 0xC21_0602, random_detections: 4170, gaia_density: 0.052, true_pairs: 8, true_noise_mas: 100.0, cluster_pairs: 22, cluster_offset_arcsec: [0.23, 0.07] };
+        let synth = chance_field(&truth, &input, &spec);
+        let result = tie(&input_header, &synth, Epoch::header(FGS_EPOCH), &TieOptions { max_detections: 5000, ..options(TieModel::Shift) }, None);
+        eprintln!("J6 depth 12000 analogue: {}", describe(&result, expected));
+        let r = &result.report;
+        assert!((7.0..10.5).contains(&r.histogram_random_per_bin), "random per bin {}", r.histogram_random_per_bin);
+        assert_eq!(result.decision, TieDecision::Refused, "a 22-pair chance cluster was applied {:.0} mas from the truth", norm_v(sub_v(r.params.shift_mas, expected)));
+    }
+
+    #[test]
+    fn j6_a_true_tie_with_29_pairs_among_1200_detections_stays_applied() {
+        let (input_header, truth, input, expected) = j6_input();
+        let opts = TieOptions { max_detections: 2000, ..TieOptions::default() };
+        let tolerance = 4.0 * 2f64.sqrt() * FEW_PAIRS_NOISE_MAS / (29f64).sqrt();
+        let mut applied = 0;
+        let mut refusals = Vec::new();
+        for seed in 0..20u64 {
+            let spec = ChanceField { seed: 0xC21_0604 + seed, random_detections: 1165, gaia_density: 0.04, true_pairs: 29, true_noise_mas: FEW_PAIRS_NOISE_MAS, cluster_pairs: 0, cluster_offset_arcsec: [0.0; 2] };
+            let synth = chance_field(&truth, &input, &spec);
+            let result = tie(&input_header, &synth, Epoch::header(FGS_EPOCH), &opts, None);
+            let r = &result.report;
+            eprintln!("J1 analogue seed {seed}: {}", describe(&result, expected));
+            if result.decision != TieDecision::Applied {
+                refusals.push(format!("seed {seed}: {:?}", result.reason));
+                continue;
+            }
+            applied += 1;
+            let error = norm_v(sub_v(r.params.shift_mas, expected));
+            assert!(error <= tolerance, "seed {seed}: shift error {error:.1} mas exceeds {tolerance:.1} mas");
+            assert!(r.expected_chance_pairs.is_some(), "seed {seed}: an applied tie reports no expected chance pairs");
+        }
+        eprintln!("J1 analogue: {applied} of 20 applied; refusals {refusals:?}");
+        assert!(applied >= 19, "{applied} of 20 applied: {refusals:?}");
+    }
+
+    #[test]
+    fn j6_the_gate_sweep_applies_no_tie_more_than_100_mas_from_the_truth() {
+        let (input_header, truth, input, expected) = j6_input();
+        let density = 0.025;
+        let seeds = 20u64;
+        let bin2 = HISTOGRAM_BIN_MIN_ARCSEC * HISTOGRAM_BIN_MIN_ARCSEC;
+        let opts = TieOptions { max_detections: 5000, bootstrap_resamples: 20, ..TieOptions::default() };
+        eprintln!("J6 sweep at {density} Gaia stars per square arcsec, {FEW_PAIRS_NOISE_MAS} mas noise, {seeds} seeds per cell: true pairs, b, applied, wrong (> 100 mas) among applied, refused by peak, refused by chance matches, mean peak, mean threshold, median and max shift error of the applied ties");
+        for true_pairs in [10usize, 15, 20, 30] {
+            for b in [0.2f64, 0.5, 1.0, 2.0, 3.0] {
+                let total = (b / (density * bin2)).round() as usize;
+                let random_detections = total.saturating_sub(true_pairs);
+                let (mut wrong, mut by_peak, mut by_chance) = (0, 0, 0);
+                let (mut peaks, mut thresholds, mut bs) = (0.0, 0.0, 0.0);
+                let mut errors = Vec::new();
+                for seed in 0..seeds {
+                    let spec = ChanceField { seed: 0xC21_0700 + 1000 * true_pairs as u64 + (b * 100.0) as u64 + seed, random_detections, gaia_density: density, true_pairs, true_noise_mas: FEW_PAIRS_NOISE_MAS, cluster_pairs: 0, cluster_offset_arcsec: [0.0; 2] };
+                    let synth = chance_field(&truth, &input, &spec);
+                    let result = tie(&input_header, &synth, Epoch::header(FGS_EPOCH), &opts, None);
+                    let r = &result.report;
+                    peaks += r.histogram_peak as f64;
+                    thresholds += r.histogram_threshold;
+                    bs += r.histogram_random_per_bin;
+                    match result.decision {
+                        TieDecision::Applied => {
+                            let error = norm_v(sub_v(r.params.shift_mas, expected));
+                            errors.push(error);
+                            wrong += usize::from(error > 100.0);
+                        }
+                        _ => {
+                            let reason = result.reason.as_deref().unwrap_or_default();
+                            by_peak += usize::from(reason.starts_with("no significant offset peak"));
+                            by_chance += usize::from(reason.starts_with("chance matches"));
+                        }
+                    }
+                }
+                let n = seeds as f64;
+                eprintln!(
+                    "J6 sweep: true {true_pairs:2}, b {:.2} (target {b}), applied {:2}/{seeds}, wrong {wrong}, by peak {by_peak:2}, by chance {by_chance:2}, mean peak {:.1}, mean threshold {:.1}, shift error median {:.1} max {:.1} mas",
+                    bs / n, errors.len(), peaks / n, thresholds / n, median_of(&errors), errors.iter().cloned().fold(0.0, f64::max)
+                );
+                assert_eq!(wrong, 0, "J6 sweep: {wrong} applied ties more than 100 mas from the truth at {true_pairs} true pairs and b {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn j3_the_auto_model_keeps_a_rotation_that_27_pairs_resolve() {
+        let truth_header = fgs_header(false);
+        let truth = wcs_of(&truth_header);
+        let rotation = 0.05;
+        let input_header = injected_input(&truth_header, J6_INJECTED_SHIFT_ARCSEC, rotation, 1.0);
+        let opts = TieOptions { bootstrap_resamples: 100, ..TieOptions::default() };
+        let sigma_rot = 0.0050;
+        let mut rshift = 0;
+        let mut refusals = Vec::new();
+        for seed in 0..20u64 {
+            let synth = synthesize(&truth, FGS_SIZE, &SynthOptions::noisy(FEW_PAIRS, FEW_PAIRS_NOISE_MAS, 2800 + seed));
+            let result = tie(&input_header, &synth, Epoch::header(FGS_EPOCH), &opts, None);
+            if result.decision == TieDecision::Refused {
+                assert!(result.reason.as_deref().is_some_and(|m| m.starts_with("model inadequate")), "seed {seed}: {:?}", result.reason);
+                refusals.push(seed);
+                continue;
+            }
+            assert_eq!(result.decision, TieDecision::Applied, "seed {seed}: {:?}", result.reason);
+            let r = &result.report;
+            if r.model.as_deref() == Some("rshift") {
+                rshift += 1;
+                assert!((r.params.rotation_deg - rotation).abs() <= 4.0 * sigma_rot, "seed {seed}: rotation {:.5} deg vs {rotation} injected", r.params.rotation_deg);
+            }
+        }
+        eprintln!("J3 guard: {rshift} of 20 kept rshift at an injected {rotation} deg, refusals {refusals:?}");
+        assert!(refusals.len() <= 1, "{refusals:?}");
+        assert!(rshift >= 19, "rshift kept on {rshift} of 20");
+    }
+
+    #[test]
+    #[ignore]
+    fn j3_report_only_the_pooled_fgs_rotation_keep_rate_under_candidate_rules() {
+        let truth_header = fgs_header(false);
+        let truth = wcs_of(&truth_header);
+        let input_header = injected_input(&truth_header, J6_INJECTED_SHIFT_ARCSEC, POOLED_FGS_ROTATION_DEG, 1.0);
+        let opts = TieOptions { bootstrap_resamples: 100, ..TieOptions::default() };
+        let seeds = 40u64;
+        let (mut applied, mut kept_wald, mut kept_max_sigma) = (0usize, 0usize, 0usize);
+        let mut refusals = Vec::new();
+        let (mut thetas, mut formal, mut boot) = (Vec::new(), Vec::new(), Vec::new());
+        for seed in 0..seeds {
+            let synth = synthesize(&truth, FGS_SIZE, &SynthOptions::noisy(FEW_PAIRS, FEW_PAIRS_NOISE_MAS, 2700 + seed));
+            let result = tie(&input_header, &synth, Epoch::header(FGS_EPOCH), &opts, None);
+            if result.decision != TieDecision::Applied {
+                refusals.push(format!("seed {seed}: {:?}", result.reason));
+                continue;
+            }
+            let r = &result.report;
+            assert_eq!(r.model.as_deref(), Some("rshift"), "seed {seed}: {:?}", r.model_notes);
+            let theta = r.params.rotation_deg;
+            let sigma_formal = r.sigma_formal.rotation_deg;
+            let sigma_boot = r.sigma_bootstrap.map_or(0.0, |b| b.rotation_deg);
+            applied += 1;
+            thetas.push(theta);
+            formal.push(sigma_formal);
+            boot.push(sigma_boot);
+            kept_wald += usize::from(theta.abs() / sigma_formal >= three_sigma_t(2 * r.n_used - 3));
+            kept_max_sigma += usize::from(theta.abs() / sigma_formal.max(sigma_boot) >= three_sigma_t(r.n_used - 3));
+        }
+        eprintln!(
+            "J3 report only: injected {POOLED_FGS_ROTATION_DEG} deg (the pooled FGS value) on {FEW_PAIRS} pairs at {FEW_PAIRS_NOISE_MAS} mas; {applied} of {seeds} applied, refused {refusals:?}; fitted rotation mean {:.5} deg, sd {:.5}; mean sigma formal {:.5}, mean sigma bootstrap {:.5}; kept by the Wald t (sigma formal, nu 2N-3) {kept_wald}/{applied}; kept by max(sigma formal, sigma bootstrap) with nu N-3 {kept_max_sigma}/{applied}; today's automatic rshift keeps {applied}/{applied}",
+            mean(&thetas), sd(&thetas), mean(&formal), mean(&boot)
+        );
+        assert!(refusals.iter().all(|r| r.contains("model inadequate")), "{refusals:?}");
+    }
+
+    #[test]
+    fn j6_the_chance_gate_reproduces_the_logged_crf_and_fgs_numbers() {
+        let (expected, needed) = chance_excess(793, 0.35589927486375583, 0.05076980474492112);
+        assert!((expected - 15.860).abs() < 0.005, "crf expected {expected}");
+        assert!((needed - 35.772).abs() < 0.005, "crf needed {needed}");
+        let (expected, needed) = chance_excess(1194, 0.1865186558605832, 0.039951406753973163);
+        assert!((expected - 5.202).abs() < 0.005, "J1 expected {expected}");
+        assert!((needed - 16.606).abs() < 0.005, "J1 needed {needed}");
+    }
+
+    #[test]
+    fn j3_three_sigma_t_matches_student_t_quantiles() {
+        for (nu, expected) in [(12usize, 3.7643), (17, 3.5075), (24, 3.3448), (50, 3.1571), (51, 3.1539), (100, 3.0768), (1000, 3.0075)] {
+            let got = three_sigma_t(nu);
+            assert!((got - expected).abs() < 5e-4, "nu {nu}: {got} vs {expected}");
+        }
     }
 }

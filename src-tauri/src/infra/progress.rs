@@ -123,19 +123,23 @@ impl ProgressHandle {
         );
     }
 
+    fn claim_emit(&self, stage: &str, is_last: bool) -> bool {
+        let mut last = self.last_emit.lock().unwrap();
+        let now = Instant::now();
+        let elapsed = now.duration_since(last.0).as_millis();
+        if !should_emit(last.1.as_deref(), stage, elapsed, is_last) {
+            return false;
+        }
+        *last = (now, Some(stage.to_string()));
+        true
+    }
+
     pub fn tick_with_stage(&self, stage: &str) {
         let cur = self.current.fetch_add(1, Ordering::Relaxed) + 1;
         let tot = self.total.load(Ordering::Relaxed);
-        {
-            let mut last = self.last_emit.lock().unwrap();
-            let now = Instant::now();
-            let elapsed = now.duration_since(last.0).as_millis();
-            if !should_emit(last.1.as_deref(), stage, elapsed, cur >= tot) {
-                return;
-            }
-            *last = (now, Some(stage.to_string()));
+        if self.claim_emit(stage, cur >= tot) {
+            self.emit_payload(cur, tot, stage);
         }
-        self.emit_payload(cur, tot, stage);
     }
 
     pub fn emit_stage(&self, stage: &str) {
@@ -147,6 +151,14 @@ impl ProgressHandle {
 
     pub fn set_total(&self, total: u64) {
         self.total.store(total, Ordering::Relaxed);
+    }
+
+    pub fn report(&self, current: u64, total: u64, stage: &str) {
+        self.current.store(current, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+        if self.claim_emit(stage, current >= total) {
+            self.emit_payload(current, total, stage);
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -181,6 +193,7 @@ impl ProgressHandle {
     pub fn tick_with_stage(&self, _stage: &str) {}
     pub fn emit_stage(&self, _stage: &str) {}
     pub fn set_total(&self, _total: u64) {}
+    pub fn report(&self, _current: u64, _total: u64, _stage: &str) {}
     pub fn emit_complete(&self) {}
 }
 

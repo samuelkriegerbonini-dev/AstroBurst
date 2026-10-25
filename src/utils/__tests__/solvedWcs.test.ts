@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  GAIA_REFINE_CANCELLED_NOTE,
   GAIA_REFINE_CONSENT,
   NO_SOLVE_YET,
   NO_WCS_TO_REFINE,
@@ -7,6 +8,7 @@ import {
   gaiaRefineBlocker,
   gaiaRefineFields,
   gaiaRefineHeading,
+  gaiaRefineProgressText,
   parseEpochYear,
   refineSolveCards,
   wcsRevision,
@@ -18,6 +20,7 @@ import {
   solvedWcsFor,
   solvedWcsSummary,
   solvedWcsVersion,
+  creditedSolveTier,
   spccSolvedWcsPath,
   spccWcsSource,
   subscribeSolvedWcs,
@@ -446,5 +449,33 @@ describe("refineSolveCards", () => {
   it("sends nothing without a solve", () => {
     expect(refineSolveCards({ solveCards: [], solvedPath: "C:/data/m16.fits", path: "C:/data/m16.fits", fileWcsKind: "header" })).toBeNull();
     expect(refineSolveCards({ solveCards: cards, solvedPath: null, path: "C:/data/m16.fits", fileWcsKind: "header" })).toBeNull();
+  });
+});
+
+describe("Gaia DR3 refinement progress", () => {
+  it("words every refine stage the command reports", () => {
+    const cases: [Parameters<typeof gaiaRefineProgressText>[0], string | null][] = [
+      [{ stage: "load", current: 0, total: 0 }, "Reading the image and its WCS"],
+      [{ stage: "detect", current: 0, total: 0 }, "Detecting stars; the Gaia DR3 star list is fetched at the same time"],
+      [{ stage: "measure", current: 812, total: 2000 }, "Measuring stars: 812 of 2000"],
+      [{ stage: "measure", current: 0, total: 0 }, "Measuring stars"],
+      [{ stage: "vizier", current: 41, total: 150 }, "Waiting for VizieR: 0:41 / 2:30"],
+      [{ stage: "fit", current: 0, total: 0 }, "Fitting the tie to Gaia DR3"],
+      [{ stage: "represent", current: 0, total: 0 }, "Computing the refined WCS cards"],
+      [{ stage: "complete", current: 1, total: 1 }, null],
+      [null, null],
+    ];
+    for (const [input, output] of cases) expect(gaiaRefineProgressText(input), JSON.stringify(input)).toBe(output);
+    expect(GAIA_REFINE_CANCELLED_NOTE).toBe("Gaia DR3 refinement cancelled; the WCS is unchanged");
+  });
+
+  it("passes the solve's tier for a credited solve, and only when the written WCS derives from the solve", () => {
+    const credited = { catalog: "tier1-gaia-siril", credit: { text: "Gaia DR3 credit", citation: "Gaia DR3 citation" } };
+    expect(creditedSolveTier(credited, null)).toBe("tier1-gaia-siril");
+    expect(creditedSolveTier(credited, { ...FGS_TIE, wcs_kind: "solve" })).toBe("tier1-gaia-siril");
+    expect(creditedSolveTier(credited, { ...FGS_TIE, wcs_kind: "header" })).toBeNull();
+    expect(creditedSolveTier({ catalog: "tier1-gaia-siril", credit: null }, null)).toBeNull();
+    expect(creditedSolveTier({ catalog: "tier0-tycho2" }, null)).toBeNull();
+    expect(creditedSolveTier(null, null)).toBeNull();
   });
 });

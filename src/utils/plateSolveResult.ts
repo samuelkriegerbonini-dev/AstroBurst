@@ -48,6 +48,11 @@ function catalogueName(text: string): string | null {
   return CATALOGUE_NAMES.find(([pattern]) => pattern.test(text))?.[1] ?? text;
 }
 
+export function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / MS_PER_S));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 export function solveTierLabel(catalog: string | null | undefined, tier?: number | null): string | null {
   const label = catalog?.trim() ?? "";
   const fromLabel = TIER_LABEL.exec(label);

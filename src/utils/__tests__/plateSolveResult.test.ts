@@ -10,6 +10,7 @@ import {
   failureHeading,
   failureLines,
   fallbackOffer,
+  formatDuration,
   localFailure,
   orientationText,
   resultBlockFields,
@@ -349,5 +350,18 @@ describe("solver-aware running texts", () => {
     expect(deadlineText("astrometry.net", "2:00")).toBe(
       "Plate solve gave up after 2:00 (Settings > Timeout). astrometry.net may still finish the job; try again later.",
     );
+  });
+});
+
+describe("formatDuration", () => {
+  it("writes whole seconds as m:ss and never goes below zero", () => {
+    const cases: [number, string][] = [
+      [0, "0:00"],
+      [41_900, "0:41"],
+      [150_000, "2:30"],
+      [600_000, "10:00"],
+      [-5, "0:00"],
+    ];
+    for (const [ms, text] of cases) expect(formatDuration(ms), String(ms)).toBe(text);
   });
 });

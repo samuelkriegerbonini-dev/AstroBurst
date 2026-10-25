@@ -105,6 +105,108 @@ pub(crate) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     parts.join(": ")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetKind {
+    Refused,
+    Unresolved,
+    ConnectTimeout,
+    Unreachable,
+    Timeout,
+    Closed,
+    CutOff,
+    Tls,
+    Redirect,
+    Other,
+}
+
+const DNS_FAILURE: &str = "dns error";
+const CLOSED_EARLY: &str = "connection closed before message completed";
+const CHECK_CONNECTION: &str = "check the internet connection or a firewall, then try again";
+const TRY_LATER: &str = "try again in a few minutes";
+
+fn causes(error: &reqwest::Error) -> Vec<&(dyn std::error::Error + 'static)> {
+    std::iter::successors(std::error::Error::source(error), |cause| cause.source()).collect()
+}
+
+fn any_io_kind(causes: &[&(dyn std::error::Error + 'static)], kinds: &[std::io::ErrorKind]) -> bool {
+    causes
+        .iter()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| kinds.contains(&io.kind())))
+}
+
+fn any_text(causes: &[&(dyn std::error::Error + 'static)], text: &str) -> bool {
+    causes.iter().any(|cause| cause.to_string().starts_with(text))
+}
+
+pub(crate) fn net_kind(error: &reqwest::Error) -> NetKind {
+    use std::io::ErrorKind;
+    if error.is_redirect() {
+        return NetKind::Redirect;
+    }
+    if error.is_timeout() {
+        return if error.is_connect() { NetKind::ConnectTimeout } else { NetKind::Timeout };
+    }
+    let causes = causes(error);
+    if any_io_kind(&causes, &[ErrorKind::ConnectionRefused]) {
+        return NetKind::Refused;
+    }
+    if any_text(&causes, DNS_FAILURE) {
+        return NetKind::Unresolved;
+    }
+    if any_text(&causes, CLOSED_EARLY)
+        || any_io_kind(&causes, &[ErrorKind::ConnectionReset, ErrorKind::ConnectionAborted, ErrorKind::BrokenPipe])
+    {
+        return NetKind::Closed;
+    }
+    if error.is_decode() || error.is_body() {
+        return NetKind::CutOff;
+    }
+    if error.is_connect() {
+        return if any_io_kind(&causes, &[ErrorKind::InvalidData]) { NetKind::Tls } else { NetKind::Unreachable };
+    }
+    NetKind::Other
+}
+
+pub(crate) fn host_and_port(url: &reqwest::Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    }
+}
+
+pub(crate) fn net_predicate(kind: NetKind) -> &'static str {
+    match kind {
+        NetKind::Refused => "refused the connection",
+        NetKind::Unresolved => "could not be found",
+        NetKind::ConnectTimeout => "did not accept the connection in time",
+        NetKind::Unreachable => "could not be reached",
+        NetKind::Timeout => "did not finish answering in time",
+        NetKind::Closed => "closed the connection without answering",
+        NetKind::CutOff => "sent an incomplete answer",
+        NetKind::Tls => "could not set up a secure connection",
+        NetKind::Redirect => "redirected the request to an address that is not allowed",
+        NetKind::Other => "did not complete the request",
+    }
+}
+
+pub(crate) fn net_advice(kind: NetKind) -> &'static str {
+    match kind {
+        NetKind::Refused | NetKind::ConnectTimeout | NetKind::Unreachable => CHECK_CONNECTION,
+        NetKind::Unresolved => "check the internet connection, then try again",
+        NetKind::Tls => "check the computer's date and time and any proxy, then try again",
+        NetKind::Timeout | NetKind::Closed | NetKind::CutOff | NetKind::Redirect | NetKind::Other => TRY_LATER,
+    }
+}
+
+pub(crate) fn net_failure_text(kind: NetKind, host: &str) -> String {
+    format!("{host} {}; {}", net_predicate(kind), net_advice(kind))
+}
+
+pub(crate) fn status_failure_text(code: u16, host: &str) -> String {
+    format!("{host} answered HTTP {code}; {TRY_LATER}")
+}
+
 pub(crate) fn is_transient(error: &reqwest::Error) -> bool {
     error.is_connect() || error.is_request() || error.is_timeout() || error.is_body()
 }
@@ -178,13 +280,18 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use super::{build_client, get_with_retry, HttpProfile, RedirectRule};
+    use super::{
+        build_client, get_with_retry, net_failure_text, net_kind, status_failure_text, HttpProfile, NetKind,
+        RedirectRule,
+    };
 
     enum Reply {
         Status(u16, &'static str),
         HangUp,
         Redirect(String),
         Trickle(&'static [u8], Duration),
+        Stall(Duration),
+        Truncated,
     }
 
     struct Canned {
@@ -257,6 +364,13 @@ mod tests {
                                 break;
                             }
                         }
+                    }
+                    Reply::Stall(pause) => std::thread::sleep(pause),
+                    Reply::Truncated => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n0123456789",
+                        );
+                        let _ = stream.shutdown(Shutdown::Both);
                     }
                 }
             }
@@ -537,5 +651,111 @@ mod tests {
             .unwrap_err();
         assert!(err.is_redirect(), "{err:?}");
         assert_eq!(origin.heads().len(), 4);
+    }
+
+    const EVERY_KIND: [NetKind; 10] = [
+        NetKind::Refused,
+        NetKind::Unresolved,
+        NetKind::ConnectTimeout,
+        NetKind::Unreachable,
+        NetKind::Timeout,
+        NetKind::Closed,
+        NetKind::CutOff,
+        NetKind::Tls,
+        NetKind::Redirect,
+        NetKind::Other,
+    ];
+
+    struct NoSuchHost;
+
+    impl reqwest::dns::Resolve for NoSuchHost {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(async {
+                Err::<reqwest::dns::Addrs, Box<dyn std::error::Error + Send + Sync>>(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "this host is not known",
+                )))
+            })
+        }
+    }
+
+    fn closed_port_url() -> String {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        format!("http://127.0.0.1:{port}/x")
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_and_an_unknown_host_are_classified_without_the_os_text() {
+        let refused = reqwest::Client::new().get(closed_port_url()).send().await.unwrap_err();
+        assert_eq!(net_kind(&refused), NetKind::Refused, "{refused:?}");
+        let resolver = reqwest::Client::builder().dns_resolver(Arc::new(NoSuchHost)).build().unwrap();
+        let unknown = resolver.get("http://astroburst-no-such-host.invalid/x").send().await.unwrap_err();
+        assert_eq!(net_kind(&unknown), NetKind::Unresolved, "{unknown:?}");
+        assert_eq!(
+            net_failure_text(NetKind::Refused, "127.0.0.1:9"),
+            "127.0.0.1:9 refused the connection; check the internet connection or a firewall, then try again"
+        );
+    }
+
+    #[test]
+    fn every_failure_sentence_names_its_subject_once_and_ends_with_advice() {
+        for kind in EVERY_KIND {
+            let text = net_failure_text(kind, "zenodo.org");
+            assert!(text.starts_with("zenodo.org "), "{kind:?}: {text}");
+            assert_eq!(text.matches("zenodo.org").count(), 1, "{kind:?}: {text}");
+            assert!(text.contains("; "), "{kind:?}: {text}");
+            for banned in ["os error", "http://", "https://"] {
+                assert!(!text.contains(banned), "{kind:?}: {text}");
+            }
+        }
+        assert_eq!(status_failure_text(503, "zenodo.org"), "zenodo.org answered HTTP 503; try again in a few minutes");
+        assert_eq!(
+            net_failure_text(NetKind::Timeout, "zenodo.org"),
+            "zenodo.org did not finish answering in time; try again in a few minutes"
+        );
+    }
+
+    #[tokio::test]
+    async fn hang_ups_timeouts_and_cut_bodies_are_classified_by_kind() {
+        let hang_up = serve(|_, _| Reply::HangUp);
+        let err = reqwest::Client::new().get(format!("{}/x", hang_up.url)).send().await.unwrap_err();
+        assert_eq!(net_kind(&err), NetKind::Closed, "{err:?}");
+
+        let bounded = build_client(&HttpProfile {
+            total_timeout: Some(Duration::from_millis(300)),
+            ..HttpProfile::request()
+        })
+        .unwrap();
+        let silent = serve(|_, _| Reply::Stall(Duration::from_secs(2)));
+        let err = bounded.get(format!("{}/x", silent.url)).send().await.unwrap_err();
+        assert_eq!(net_kind(&err), NetKind::Timeout, "{err:?}");
+
+        let stalled_body = serve(|_, _| Reply::Trickle(b"x", Duration::from_secs(2)));
+        let err = async { bounded.get(format!("{}/x", stalled_body.url)).send().await?.bytes().await }
+            .await
+            .unwrap_err();
+        assert_eq!(net_kind(&err), NetKind::Timeout, "{err:?}");
+
+        let truncated = serve(|_, _| Reply::Truncated);
+        let err = async { reqwest::Client::new().get(format!("{}/x", truncated.url)).send().await?.bytes().await }
+            .await
+            .unwrap_err();
+        assert_eq!(net_kind(&err), NetKind::CutOff, "{err:?}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_connect_that_outlasts_the_connect_timeout_is_classified_connect_timeout_where_windows_refuses_a_loopback_port_after_two_seconds() {
+        let client = build_client(&HttpProfile {
+            connect_timeout: Duration::from_millis(300),
+            ..HttpProfile::request()
+        })
+        .unwrap();
+        let err = client.get(closed_port_url()).send().await.unwrap_err();
+        assert_eq!(
+            net_kind(&err),
+            NetKind::ConnectTimeout,
+            "Windows reports a refused loopback connect only after about 2 s, so the 300 ms connect timeout fires first: {err:?}"
+        );
     }
 }

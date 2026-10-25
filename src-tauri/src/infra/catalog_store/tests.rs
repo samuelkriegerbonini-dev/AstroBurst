@@ -2842,3 +2842,61 @@ async fn the_zenodo_terms_name_only_the_gaia_dr3_terms_and_the_offer_carries_the
         Some(offer.host.as_str())
     );
 }
+
+fn closed_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[tokio::test]
+async fn an_unreachable_zenodo_record_host_is_named_once_with_an_english_reason() {
+    let port = closed_port();
+    let rig = Rig::new();
+    let source = ZenodoSource {
+        record_url: format!("http://127.0.0.1:{port}{ZENODO_RECORD_PATH}"),
+        decoded_max_bytes: SIRIL_GAIA_DECODED_MAX_BYTES,
+    };
+
+    let err = rig
+        .store
+        .zenodo_offer(&client(), &source)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        err,
+        format!("siril-gaia-astro-v1: 127.0.0.1:{port} refused the connection; check the internet connection or a firewall, then try again")
+    );
+    assert!(!err.contains("http://") && !err.contains("os error"), "{err}");
+}
+
+#[tokio::test]
+async fn a_zenodo_sum_list_that_cannot_be_read_names_the_file_and_its_host() {
+    let closed = closed_port();
+    let link = |key: &str| format!("http://127.0.0.1:{closed}{ZENODO_RECORD_PATH}/files/{key}/content");
+    let record = serve_body(&zenodo_record(vec![
+        zenodo_file(SIRIL_GAIA_ARCHIVE_KEY, 1000, &link(SIRIL_GAIA_ARCHIVE_KEY)),
+        zenodo_file(SIRIL_GAIA_ARCHIVE_SUM_KEY, 100, &link(SIRIL_GAIA_ARCHIVE_SUM_KEY)),
+    ]));
+    let rig = Rig::new();
+    let source = ZenodoSource {
+        record_url: record.url(ZENODO_RECORD_PATH).to_string(),
+        decoded_max_bytes: SIRIL_GAIA_DECODED_MAX_BYTES,
+    };
+
+    let err = rig
+        .store
+        .zenodo_offer(&client(), &source)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        err,
+        format!("siril-gaia-astro-v1: {SIRIL_GAIA_ARCHIVE_SUM_KEY}: 127.0.0.1:{closed} refused the connection; check the internet connection or a firewall, then try again")
+    );
+}

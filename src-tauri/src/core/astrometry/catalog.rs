@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,8 @@ use crate::core::astrometry::gaia_tie::GaiaRow;
 use crate::core::astrometry::spectral::mid_exposure_jd;
 use crate::core::astrometry::time::JD_J2000;
 use crate::core::astrometry::wcs::angular_separation;
+#[cfg(feature = "vizier")]
+use crate::infra::net::http::{host_and_port, net_advice, net_kind, net_predicate, status_failure_text, NetKind};
 use crate::math::exact_median_f64;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::header::HduHeader;
@@ -553,6 +555,29 @@ type ConeEntries<T> = Mutex<Vec<(CatalogCacheKey, Arc<Vec<T>>)>>;
 
 static CATALOG_CACHE: LazyLock<ConeEntries<CatalogRow>> = LazyLock::new(|| Mutex::new(Vec::new()));
 static TIE_CACHE: LazyLock<ConeEntries<GaiaRow>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static TIE_IN_FLIGHT: LazyLock<(Mutex<Vec<CatalogCacheKey>>, Condvar)> = LazyLock::new(|| (Mutex::new(Vec::new()), Condvar::new()));
+
+struct TieFlight(CatalogCacheKey);
+
+impl TieFlight {
+    fn claim(key: CatalogCacheKey) -> Self {
+        let (keys, landed) = &*TIE_IN_FLIGHT;
+        let mut held = keys.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while held.contains(&key) {
+            held = landed.wait(held).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        held.push(key);
+        Self(key)
+    }
+}
+
+impl Drop for TieFlight {
+    fn drop(&mut self) {
+        let (keys, landed) = &*TIE_IN_FLIGHT;
+        keys.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|key| *key != self.0);
+        landed.notify_all();
+    }
+}
 
 fn quantize(value: f64, quantum: f64) -> i64 {
     (value / quantum).round() as i64
@@ -605,6 +630,10 @@ where
     F: FnOnce(&ConeQuery) -> Result<String, String>,
 {
     let key = catalog_cache_key(q);
+    if let Some(rows) = remembered(&TIE_CACHE, &key) {
+        return Ok(TieHit { rows, source: CatalogSource::Memory });
+    }
+    let _flight = TieFlight::claim(key);
     if let Some(rows) = remembered(&TIE_CACHE, &key) {
         return Ok(TieHit { rows, source: CatalogSource::Memory });
     }
@@ -739,18 +768,46 @@ pub fn query_gaia_tie_tsv(q: &ConeQuery) -> Result<String, String> {
 }
 
 #[cfg(feature = "vizier")]
-fn vizier_request_failure(error: reqwest::Error) -> String {
-    let host = error.url().and_then(|url| {
-        url.host_str().map(|host| match url.port() {
-            Some(port) => format!("{host}:{port}"),
-            None => host.to_string(),
-        })
-    });
-    let error = error.without_url();
-    match host {
-        Some(host) => format!("VizieR request failed: {error} for {host}"),
-        None => format!("VizieR request failed: {error}"),
+pub const VIZIER_CONNECT_TIMEOUT_SECS: u64 = 20;
+
+#[cfg(feature = "vizier")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VizierFault {
+    Net(NetKind),
+    Status(u16),
+}
+
+#[cfg(feature = "vizier")]
+fn vizier_connect_timeout_secs(timeout_secs: u64) -> u64 {
+    VIZIER_CONNECT_TIMEOUT_SECS.min(timeout_secs)
+}
+
+#[cfg(feature = "vizier")]
+pub(crate) fn vizier_failure_text(fault: VizierFault, host: &str, timeout_secs: u64) -> String {
+    match fault {
+        VizierFault::Net(NetKind::Timeout) => format!(
+            "VizieR ({host}) did not finish answering within {timeout_secs} s; it is slow or busy right now, {}",
+            net_advice(NetKind::Timeout)
+        ),
+        VizierFault::Net(NetKind::ConnectTimeout) => format!(
+            "VizieR ({host}) did not accept the connection within {} s; {}",
+            vizier_connect_timeout_secs(timeout_secs),
+            net_advice(NetKind::ConnectTimeout)
+        ),
+        VizierFault::Net(kind) => format!("VizieR ({host}) {}; {}", net_predicate(kind), net_advice(kind)),
+        VizierFault::Status(code) => status_failure_text(code, &format!("VizieR ({host})")),
     }
+}
+
+#[cfg(feature = "vizier")]
+pub fn vizier_timeout_text(timeout_secs: u64) -> String {
+    let host = reqwest::Url::parse(vizier_url()).map_or_else(|_| vizier_url().to_string(), |url| host_and_port(&url));
+    vizier_failure_text(VizierFault::Net(NetKind::Timeout), &host, timeout_secs)
+}
+
+#[cfg(not(feature = "vizier"))]
+pub fn vizier_timeout_text(timeout_secs: u64) -> String {
+    format!("VizieR did not finish answering within {timeout_secs} s")
 }
 
 #[cfg(feature = "vizier")]
@@ -769,26 +826,25 @@ fn query_gaia_from(url: &str, q: &ConeQuery) -> Result<Vec<CatalogRow>, String> 
 
 #[cfg(feature = "vizier")]
 fn vizier_tsv_from(url: &str, q: &ConeQuery, columns: &str, timeout_secs: u64) -> Result<String, String> {
+    let target = reqwest::Url::parse(url).map_err(|e| format!("the VizieR address {url} is not usable ({e})"))?;
+    let host = host_and_port(&target);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(vizier_connect_timeout_secs(timeout_secs)))
         .user_agent(concat!("AstroBurst/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("HTTP client init failed: {}", e))?;
+    let failed = |error: reqwest::Error| vizier_failure_text(VizierFault::Net(net_kind(&error)), &host, timeout_secs);
 
     let params = vizier_cone_params(q, columns);
-    let response = client
-        .get(url)
-        .query(&params)
-        .send()
-        .map_err(vizier_request_failure)?;
+    let response = client.get(target).query(&params).send().map_err(failed)?;
 
-    if !response.status().is_success() {
-        return Err(format!("VizieR returned HTTP {}", response.status()));
+    let status = response.status();
+    if !status.is_success() {
+        return Err(vizier_failure_text(VizierFault::Status(status.as_u16()), &host, timeout_secs));
     }
 
-    response
-        .text()
-        .map_err(|e| format!("VizieR response read failed: {}", e))
+    response.text().map_err(failed)
 }
 
 #[cfg(test)]
@@ -1206,7 +1262,7 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
 
     #[cfg(feature = "vizier")]
     #[test]
-    fn an_unreachable_vizier_is_named_by_its_host_without_the_request_url() {
+    fn a_vizier_that_hangs_up_is_named_by_its_host_without_the_request_url() {
         use std::io::Read;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1241,8 +1297,76 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         );
         assert_eq!(
             err,
-            format!("VizieR request failed: error sending request for 127.0.0.1:{port}")
+            format!("VizieR (127.0.0.1:{port}) closed the connection without answering; try again in a few minutes")
         );
+    }
+
+    #[cfg(feature = "vizier")]
+    #[test]
+    fn a_vizier_timeout_names_vizier_the_seconds_and_what_to_do() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/tab-separated-values\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n#");
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        });
+        let q = ConeQuery { mag_limit: Some(21.0), max_rows: 200, ..ConeQuery::new(80.1, -69.5, 0.03) };
+        let started = std::time::Instant::now();
+
+        let err = vizier_tsv_from(&format!("http://127.0.0.1:{port}/viz-bin/asu-tsv"), &q, GAIA_TIE_TSV_COLUMNS, 1).unwrap_err();
+
+        assert_eq!(
+            err,
+            format!("VizieR (127.0.0.1:{port}) did not finish answering within 1 s; it is slow or busy right now, try again in a few minutes")
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(2500), "{:?}", started.elapsed());
+    }
+
+    #[cfg(feature = "vizier")]
+    #[test]
+    fn a_vizier_that_will_not_connect_or_answers_an_error_status_is_worded_with_its_limit_or_code() {
+        assert_eq!(
+            vizier_failure_text(VizierFault::Net(NetKind::ConnectTimeout), "vizier.cds.unistra.fr", VIZIER_TIE_TIMEOUT_SECS),
+            "VizieR (vizier.cds.unistra.fr) did not accept the connection within 20 s; check the internet connection or a firewall, then try again"
+        );
+        assert_eq!(
+            vizier_failure_text(VizierFault::Net(NetKind::ConnectTimeout), "vizier.cds.unistra.fr", 5),
+            "VizieR (vizier.cds.unistra.fr) did not accept the connection within 5 s; check the internet connection or a firewall, then try again"
+        );
+        assert_eq!(
+            vizier_failure_text(VizierFault::Status(503), "vizier.cds.unistra.fr", VIZIER_TIE_TIMEOUT_SECS),
+            "VizieR (vizier.cds.unistra.fr) answered HTTP 503; try again in a few minutes"
+        );
+        assert_eq!(
+            vizier_failure_text(VizierFault::Net(NetKind::Timeout), "vizier.cds.unistra.fr", VIZIER_TIE_TIMEOUT_SECS),
+            "VizieR (vizier.cds.unistra.fr) did not finish answering within 150 s; it is slow or busy right now, try again in a few minutes"
+        );
+    }
+
+    #[cfg(feature = "vizier")]
+    #[test]
+    fn a_refused_vizier_is_named_without_the_os_message() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let q = ConeQuery { mag_limit: Some(21.0), max_rows: 200, ..ConeQuery::new(80.1, -69.5, 0.03) };
+
+        let err = vizier_tsv_from(&format!("http://127.0.0.1:{port}/viz-bin/asu-tsv"), &q, GAIA_TIE_TSV_COLUMNS, VIZIER_TIE_TIMEOUT_SECS)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            format!("VizieR (127.0.0.1:{port}) refused the connection; check the internet connection or a firewall, then try again")
+        );
+        assert!(!err.contains("os error"), "{err}");
     }
 
     #[test]

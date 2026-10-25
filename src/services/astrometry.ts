@@ -55,6 +55,11 @@ export interface PlateSolveAnnotation {
   radius?: number | null;
 }
 
+export interface SolveCredit {
+  text: string;
+  citation: string;
+}
+
 export interface PlateSolveResult {
   center_ra: number;
   center_dec: number;
@@ -76,6 +81,7 @@ export interface PlateSolveResult {
   elapsed_ms?: number | null;
   parity?: WcsParity | null;
   warnings?: string[];
+  credit?: SolveCredit | null;
 }
 
 export const LOCAL_NO_SOLUTION_CODE = "local_no_solution";
@@ -113,9 +119,11 @@ export function writeSolvedWcs(
   wcsCards: readonly WcsCard[],
   outputDir?: string,
   gaiaHistory?: readonly string[] | null,
+  solveCatalog?: string | null,
 ): Promise<WriteSolvedWcsResult> {
   const tie = gaiaHistory && gaiaHistory.length > 0 ? { gaiaHistory } : {};
-  return withPreview<WriteSolvedWcsResult>("write_solved_wcs_cmd", outputDir, { path, wcsCards, ...tie });
+  const credit = solveCatalog ? { solveCatalog } : {};
+  return withPreview<WriteSolvedWcsResult>("write_solved_wcs_cmd", outputDir, { path, wcsCards, ...tie, ...credit });
 }
 
 export type GaiaRefineDecision = "applied" | "no_significant_correction" | "refused";
@@ -162,7 +170,15 @@ export interface GaiaRefineResult {
   citation?: string | null;
   warnings?: string[];
   elapsed_ms?: number | null;
+  sources_origin?: "measured" | "memory" | null;
+  timings_ms?: { load: number; sources: number; cone_wait: number; fit: number; represent: number } | null;
   report?: Record<string, unknown>;
+}
+
+export const GAIA_REFINE_PROGRESS_EVENT = "gaia-refine-progress";
+
+export function cancelGaiaRefine(): Promise<boolean> {
+  return cancelProgress(GAIA_REFINE_PROGRESS_EVENT);
 }
 
 export function refineWithGaia(path: string, opts: GaiaRefineOptions = {}): Promise<GaiaRefineResult> {

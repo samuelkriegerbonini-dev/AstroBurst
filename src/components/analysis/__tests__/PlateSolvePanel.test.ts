@@ -52,6 +52,8 @@ const solveHintsMock = vi.hoisted(() => vi.fn<(path: string) => Promise<unknown>
 const apiKeyMock = vi.hoisted(() => vi.fn<() => Promise<{ key: string | null }>>(() => Promise.resolve({ key: "test-key" })));
 const cancelSolveMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Promise.resolve(true)));
 const refineMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
+const cancelRefineMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Promise.resolve(true)));
+const refineProgress = vi.hoisted(() => ({ active: false, percent: 0, stage: "", current: 0, total: 0, reset: vi.fn() }));
 const writeWcsMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 
 vi.mock("react", async (importOriginal) => {
@@ -72,8 +74,10 @@ vi.mock("../../../services/astrometry", async (importOriginal) => ({
   plateSolve: plateSolveMock,
   cancelPlateSolve: cancelSolveMock,
   refineWithGaia: refineMock,
+  cancelGaiaRefine: cancelRefineMock,
   writeSolvedWcs: writeWcsMock,
 }));
+vi.mock("../../../hooks/useProgress", () => ({ useProgress: () => refineProgress }));
 vi.mock("../../../services/config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/config")>()),
   getApiKey: apiKeyMock,
@@ -83,7 +87,7 @@ vi.mock("../../../services/config", async (importOriginal) => ({
 vi.stubGlobal("navigator", { clipboard: { writeText: clipboardWrite } });
 
 import PlateSolvePanel, { GaiaRefineBlock, SolveActions, SolveCentreCards } from "../PlateSolvePanel";
-import { GAIA_REFINE_CONSENT, NO_WCS_TO_REFINE } from "../../../utils/solvedWcs";
+import { GAIA_REFINE_CANCELLED_NOTE, GAIA_REFINE_CONSENT, NO_WCS_TO_REFINE } from "../../../utils/solvedWcs";
 import { solveSummaryLine } from "../../../utils/coordFormat";
 import { TauriCommandError } from "../../../shared/types/errors";
 
@@ -398,6 +402,14 @@ const LOCAL_RESULT = {
   elapsed_ms: 778,
   parity: "normal",
   warnings: ["SIP order 4 was not tried: the field is under 5 degrees"],
+  credit: null,
+};
+
+const DEAD_VIZIER = "VizieR (127.0.0.1:9) refused the connection; check the internet connection or a firewall, then try again";
+
+const REVIEWED_SIRIL_CREDIT = {
+  text: "Gaia DR3, ESA/Gaia/DPAC, CC BY-NC 3.0 IGO, via the Siril HEALPix extract (Zenodo 14692304)",
+  citation: "Gaia DR3 (Gaia Collaboration, Vallenari et al. 2023, A&A 674, A1), ESA/Gaia/DPAC, CC BY-NC 3.0 IGO, via the Siril HEALPix extract (Zenodo 14692304)",
 };
 
 const NO_SOLUTION_TEXT = "No solution: the best candidate matched 14 stars with an RMS of 6.27 px";
@@ -719,6 +731,8 @@ describe("PlateSolvePanel Gaia DR3 refinement (C21)", () => {
     refineMock.mockReset().mockResolvedValue(APPLIED_TIE);
     writeWcsMock.mockReset().mockResolvedValue(WRITTEN);
     apiKeyMock.mockReset().mockResolvedValue({ key: "test-key" });
+    Object.assign(refineProgress, { active: false, percent: 0, stage: "", current: 0, total: 0 });
+    refineProgress.reset.mockClear();
   });
 
   afterEach(() => {
@@ -803,7 +817,7 @@ describe("PlateSolvePanel Gaia DR3 refinement (C21)", () => {
     expect(button!.disabled).toBe(false);
     (button!.onClick as () => void)();
     await flush();
-    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", TIE_CARDS, undefined, APPLIED_TIE.history);
+    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", TIE_CARDS, undefined, APPLIED_TIE.history, null);
     expect(onWcsWritten).toHaveBeenCalledWith(WRITTEN);
   });
 
@@ -814,7 +828,7 @@ describe("PlateSolvePanel Gaia DR3 refinement (C21)", () => {
     expect(markup).toContain("9 &lt; 15 used pairs for rshift");
     (writeButton(show())!.onClick as () => void)();
     await flush();
-    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", LOCAL_RESULT.wcs_cards, undefined, null);
+    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", LOCAL_RESULT.wcs_cards, undefined, null, null);
   });
 
   it("lets a header-WCS frame write its refined WCS without a solve", async () => {
@@ -828,9 +842,9 @@ describe("PlateSolvePanel Gaia DR3 refinement (C21)", () => {
   });
 
   it("shows a failed query as an error and keeps the solve", async () => {
-    refineMock.mockRejectedValue(new Error("VizieR request failed: connection refused for 127.0.0.1:9"));
+    refineMock.mockRejectedValue(new Error(DEAD_VIZIER));
     const markup = markupOf(await refineOnce());
-    expect(markup).toContain("VizieR request failed: connection refused for 127.0.0.1:9");
+    expect(markup).toContain(DEAD_VIZIER);
     expect(markup).toContain("293 of 410 predicted");
   });
 
@@ -894,8 +908,85 @@ describe("PlateSolvePanel Gaia DR3 refinement (C21)", () => {
     expect(after!.disabled).toBe(false);
     (after!.onClick as () => void)();
     await flush();
-    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", TIE_CARDS, undefined, APPLIED_TIE.history);
+    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", TIE_CARDS, undefined, APPLIED_TIE.history, null);
     expect(markupOf(show())).not.toContain("Writing WCS...");
+  });
+
+  it("cancels a running refinement, keeps the WCS as it was and ignores the late answer", async () => {
+    let resolveRefine: (value: unknown) => void = () => {};
+    refineMock.mockImplementation(() => new Promise((resolve) => (resolveRefine = resolve)));
+    cancelRefineMock.mockClear();
+    await solveOnce();
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    expect(refineBlock(show())!.loading).toBe(true);
+    (refineBlock(show())!.onCancel as () => void)();
+    await flush();
+    const block = refineBlock(show());
+    expect(cancelRefineMock).toHaveBeenCalledTimes(1);
+    expect(block!.loading).toBe(false);
+    expect(block!.note).toBe(GAIA_REFINE_CANCELLED_NOTE);
+    resolveRefine(APPLIED_TIE);
+    await flush();
+    expect(markupOf(show())).not.toContain("Refined with Gaia DR3");
+    (writeButton(show())!.onClick as () => void)();
+    await flush();
+    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", LOCAL_RESULT.wcs_cards, undefined, null, null);
+  });
+
+  it("shows the stage the refine reports while it runs and resets the progress once per refine", async () => {
+    let resolveRefine: (value: unknown) => void = () => {};
+    refineMock.mockImplementation(() => new Promise((resolve) => (resolveRefine = resolve)));
+    await solveOnce();
+    expect(refineProgress.reset).not.toHaveBeenCalled();
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    expect(refineProgress.reset).toHaveBeenCalledTimes(1);
+    Object.assign(refineProgress, { active: true, percent: 40.6, stage: "measure", current: 812, total: 2000 });
+    expect(refineBlock(show())!.progressText).toBe("Measuring stars: 812 of 2000");
+    Object.assign(refineProgress, { percent: 27.3, stage: "vizier", current: 41, total: 150 });
+    expect(refineBlock(show())!.progressText).toBe("Waiting for VizieR: 0:41 / 2:30");
+    resolveRefine(APPLIED_TIE);
+    await flush();
+    expect(refineBlock(show())!.progressText).toBeNull();
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    expect(refineProgress.reset).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a running refinement when another file is selected", async () => {
+    refineMock.mockImplementation(() => new Promise(() => {}));
+    cancelRefineMock.mockClear();
+    await solveOnce();
+    (refineBlock(show())!.onRefine as () => void)();
+    await flush();
+    expect(refineBlock(show())!.loading).toBe(true);
+    renderTree(panel, { filePath: "C:/data/other.fits", solvePath: "C:/data/other.fits" });
+    await flush();
+    expect(cancelRefineMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the credit the solve result carries, as the backend words it, and passes the tier to Write WCS", async () => {
+    plateSolveMock.mockResolvedValue({ ...LOCAL_RESULT, catalog: "tier1-gaia-siril", credit: REVIEWED_SIRIL_CREDIT });
+    const tree = await solveOnce();
+    expect(markupOf(tree)).toMatch(
+      /<div[^>]*data-gaia-attribution="true"[^>]*data-solve-credit="true"[^>]*title="Gaia DR3 \(Gaia Collaboration, Vallenari et al\. 2023, A&A 674, A1\), ESA\/Gaia\/DPAC, CC BY-NC 3\.0 IGO, via the Siril HEALPix extract \(Zenodo 14692304\)"[^>]*>Gaia DR3, ESA\/Gaia\/DPAC, CC BY-NC 3\.0 IGO, via the Siril HEALPix extract \(Zenodo 14692304\)<\/div>/,
+    );
+    (writeButton(show())!.onClick as () => void)();
+    await flush();
+    expect(writeWcsMock).toHaveBeenCalledWith("C:/data/m16.fits", LOCAL_RESULT.wcs_cards, undefined, null, "tier1-gaia-siril");
+  });
+
+  it("credits nothing and passes no tier to Write WCS when the solve result carries no credit", async () => {
+    for (const catalog of ["tier1-gaia-siril", "tier0-tycho2"]) {
+      hooks.run.cells = [];
+      writeWcsMock.mockClear();
+      plateSolveMock.mockResolvedValue({ ...LOCAL_RESULT, catalog, credit: null });
+      expect(markupOf(await solveOnce()), catalog).not.toContain("data-solve-credit");
+      (writeButton(show())!.onClick as () => void)();
+      await flush();
+      expect(writeWcsMock, catalog).toHaveBeenCalledWith("C:/data/m16.fits", LOCAL_RESULT.wcs_cards, undefined, null, null);
+    }
   });
 
   it("refuses a typed epoch outside 1900 to 2100 before anything goes online", async () => {
@@ -937,5 +1028,26 @@ describe("GaiaRefineBlock", () => {
   it("shows the header epoch as the placeholder of the epoch field", () => {
     const markup = renderToStaticMarkup(createElement(GaiaRefineBlock, base));
     expect(markup).toContain('placeholder="2024.500 (header)"');
+  });
+
+  it("shows the refine stage and a Cancel button while it runs, and neither when idle", () => {
+    const running = renderToStaticMarkup(
+      createElement(GaiaRefineBlock, { ...base, loading: true, progressText: "Measuring stars: 812 of 2000", onCancel: () => {} }),
+    );
+    const cancel = buttonEndingWith(running, "Cancel");
+    expect(cancel).toContain('aria-label="Cancel the Gaia DR3 refinement"');
+    expect(cancel).not.toMatch(/^<button[^>]*\sdisabled=""/);
+    expect(running).toMatch(/<div[^>]*role="status"[^>]*data-gaia-refine-progress="true"[^>]*>Measuring stars: 812 of 2000<\/div>/);
+    const idle = renderToStaticMarkup(createElement(GaiaRefineBlock, { ...base, progressText: "Measuring stars: 812 of 2000", onCancel: () => {} }));
+    expect(idle).not.toContain("Cancel</button>");
+    expect(idle).not.toContain("data-gaia-refine-progress");
+  });
+
+  it("gives the epoch field room for its longest placeholder", () => {
+    const markup = renderToStaticMarkup(createElement(GaiaRefineBlock, base));
+    const wrapper = markup.match(/<div class="([^"]*)"><label[^>]*>Epoch \(year\)<\/label>/);
+    expect(wrapper, "epoch field wrapper").not.toBeNull();
+    expect(wrapper![1].split(" ")).toContain("w-40");
+    expect(wrapper![1].split(" ")).not.toContain("w-32");
   });
 });

@@ -383,6 +383,7 @@ describe("the Siril Gaia extract from Zenodo", () => {
     expect(isZenodoDownload(downloaded)).toBe(true);
     const row = catalogRowView(downloaded);
     expect(row.stateText).toContain("Using the Zenodo download in ");
+    expect(row.stateText).toBe("Using the Zenodo download in C:\\Users\\u\\AppData\\Local\\astroburst\\catalogs\\siril-gaia-astro-v1");
     expect(row).toMatchObject({ removeLabel: "Remove", tone: "ok" });
     expect(row.actions).toMatchObject({ install: false, remove: true });
     expect(removeConfirmText(downloaded)).toBe("Confirm: deletes the Zenodo download");

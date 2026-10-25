@@ -6,7 +6,7 @@ use super::{
     SIRIL_GAIA_ARCHIVE_KEY, SIRIL_GAIA_ARCHIVE_SUM_KEY, SIRIL_GAIA_DECODED_SUM_KEY,
 };
 use crate::core::astrometry::healpix_cat::SIRIL_ASTROMETRIC_FILE;
-use crate::infra::net::http::error_chain;
+use crate::infra::net::http::{host_and_port, net_failure_text, net_kind, status_failure_text};
 
 const ZENODO_RECORD_MAX_BYTES: u64 = 1 << 20;
 const ZENODO_SUM_MAX_BYTES: u64 = 64 << 10;
@@ -180,6 +180,7 @@ pub(super) async fn fetch_zenodo_record(
         &record_url,
         Some(JSON_MEDIA_TYPE),
         ZENODO_RECORD_MAX_BYTES,
+        None,
     )
     .await?;
     let listing = parse_zenodo_record(&record_url, &body).map_err(|reason| refused(id, reason))?;
@@ -238,7 +239,7 @@ async fn published_sum(
             ),
         ));
     }
-    let body = fetch_small(id, client, url, None, ZENODO_SUM_MAX_BYTES).await?;
+    let body = fetch_small(id, client, url, None, ZENODO_SUM_MAX_BYTES, Some(sum_key)).await?;
     if body.len() as u64 != file.size {
         return Err(refused(
             id,
@@ -267,31 +268,32 @@ async fn fetch_small(
     url: &Url,
     accept: Option<&str>,
     cap: u64,
+    what: Option<&str>,
 ) -> Result<Vec<u8>, StoreError> {
-    let unreadable = |detail: String| refused(id, format!("{url} could not be read: {detail}"));
-    let too_large = || unreadable(format!("it holds more than {cap} bytes"));
+    let host = host_and_port(url);
+    let what = what.map_or_else(String::new, |what| format!("{what}: "));
+    let unreadable = |error: reqwest::Error| {
+        refused(id, format!("{what}{}", net_failure_text(net_kind(&error), &host)))
+    };
+    let too_large = || refused(id, format!("{what}{host} sent more than {cap} bytes"));
     let request = client.get(url.clone());
     let request = match accept {
         Some(media_type) => request.header(ACCEPT, media_type),
         None => request,
     };
-    let mut response = request
-        .send()
-        .await
-        .map_err(|error| unreadable(error_chain(&error)))?;
+    let mut response = request.send().await.map_err(unreadable)?;
     let status = response.status();
     if !status.is_success() {
-        return Err(unreadable(format!("it answered HTTP {}", status.as_u16())));
+        return Err(refused(
+            id,
+            format!("{what}{}", status_failure_text(status.as_u16(), &host)),
+        ));
     }
     if response.content_length().is_some_and(|len| len > cap) {
         return Err(too_large());
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| unreadable(error_chain(&error)))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(unreadable)? {
         body.extend_from_slice(&chunk);
         if body.len() as u64 > cap {
             return Err(too_large());

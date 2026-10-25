@@ -5,8 +5,10 @@ const { typedInvokeMock, withPreviewMock } = vi.hoisted(() => ({ typedInvokeMock
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, withPreview: withPreviewMock }));
 
 import {
+  GAIA_REFINE_PROGRESS_EVENT,
   LOCAL_NO_SOLUTION_CODE,
   PLATE_SOLVE_PROGRESS_EVENT,
+  cancelGaiaRefine,
   cancelPlateSolve,
   getSolveHints,
   plateSolve,
@@ -18,7 +20,7 @@ import {
 } from "../astrometry";
 
 describe("PlateSolveResult", () => {
-  it("declares the SolveResult fields plate_solve_cmd serializes, the local solver's with serde(default)", () => {
+  it("declares the SolveResult fields plate_solve_cmd serializes, the local solver's with serde(default), and the credit it adds", () => {
     expectTypeOf<keyof PlateSolveResult>().toEqualTypeOf<
       | "center_ra"
       | "center_dec"
@@ -40,7 +42,9 @@ describe("PlateSolveResult", () => {
       | "elapsed_ms"
       | "parity"
       | "warnings"
+      | "credit"
     >();
+    expectTypeOf<PlateSolveResult["credit"]>().toEqualTypeOf<{ text: string; citation: string } | null | undefined>();
     expectTypeOf<PlateSolveResult["wcs_cards"]>().toEqualTypeOf<[string, string][]>();
     expectTypeOf<PlateSolveResult["orientation"]>().toEqualTypeOf<number | null | undefined>();
   });
@@ -158,6 +162,29 @@ describe("writeSolvedWcs with a Gaia DR3 tie", () => {
   it("sends no HISTORY argument for a plain solve", async () => {
     await writeSolvedWcs("C:/d/light.fits", [], undefined, []);
     expect(withPreviewMock).toHaveBeenCalledWith("write_solved_wcs_cmd", undefined, { path: "C:/d/light.fits", wcsCards: [] });
+  });
+
+  it("passes the solve's catalogue so a Gaia-tier solve is credited in HISTORY", async () => {
+    await writeSolvedWcs("C:/d/light.fits", [["CRVAL1", "80.65"]], undefined, null, "tier1-gaia-siril");
+    expect(withPreviewMock).toHaveBeenCalledWith("write_solved_wcs_cmd", undefined, {
+      path: "C:/d/light.fits",
+      wcsCards: [["CRVAL1", "80.65"]],
+      solveCatalog: "tier1-gaia-siril",
+    });
+    withPreviewMock.mockClear();
+    await writeSolvedWcs("C:/d/light.fits", [["CRVAL1", "80.65"]], undefined, null, null);
+    expect(withPreviewMock.mock.calls[0][2]).not.toHaveProperty("solveCatalog");
+  });
+});
+
+describe("cancelGaiaRefine", () => {
+  beforeEach(() => typedInvokeMock.mockReset());
+
+  it("cancels a running refinement through the gaia-refine-progress event gaia_refine_wcs_cmd registers", async () => {
+    typedInvokeMock.mockResolvedValueOnce(true);
+    expect(GAIA_REFINE_PROGRESS_EVENT).toBe("gaia-refine-progress");
+    await expect(cancelGaiaRefine()).resolves.toBe(true);
+    expect(typedInvokeMock).toHaveBeenCalledWith("cancel_progress_cmd", { event: "gaia-refine-progress" });
   });
 });
 

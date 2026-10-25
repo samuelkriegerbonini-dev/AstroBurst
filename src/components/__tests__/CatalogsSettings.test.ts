@@ -509,14 +509,14 @@ describe("Settings > Catalogs actions", () => {
 
   it("does not start the Zenodo download when its record could not be read", async () => {
     store.status.mockResolvedValue([TIER0, SIRIL_ZENODO]);
-    store.offer.mockRejectedValue(new Error("https://zenodo.org/api/records/14692304 could not be read: it answered HTTP 503"));
+    store.offer.mockRejectedValue(new Error("siril-gaia-astro-v1: zenodo.org answered HTTP 503; try again in a few minutes"));
     renderSettings();
     await flush();
     renderSettings().onAsk(SIRIL.id);
     await flush();
     expect(renderSettings().installs[SIRIL.id]).toEqual({
       phase: "consent",
-      offerError: "https://zenodo.org/api/records/14692304 could not be read: it answered HTTP 503",
+      offerError: "siril-gaia-astro-v1: zenodo.org answered HTTP 503; try again in a few minutes",
     });
     renderSettings().onConfirm(SIRIL.id);
     await flush();

@@ -1,6 +1,15 @@
 import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "react";
 import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save, X, Copy, Check } from "lucide-react";
-import { cancelPlateSolve, plateSolve, getSolveHints, getWcsInfo, refineWithGaia, writeSolvedWcs } from "../../services/astrometry";
+import {
+  GAIA_REFINE_PROGRESS_EVENT,
+  cancelGaiaRefine,
+  cancelPlateSolve,
+  plateSolve,
+  getSolveHints,
+  getWcsInfo,
+  refineWithGaia,
+  writeSolvedWcs,
+} from "../../services/astrometry";
 import type {
   GaiaRefineResult,
   PlateSolveAnnotation,
@@ -11,20 +20,24 @@ import type {
   WriteSolvedWcsResult,
 } from "../../services/astrometry";
 import {
+  GAIA_REFINE_CANCELLED_NOTE,
   GAIA_REFINE_CONSENT,
   appliedRefinement,
   gaiaRefineBlocker,
   gaiaRefineFields,
   gaiaRefineHeading,
+  gaiaRefineProgressText,
   parseEpochYear,
   refineSolveCards,
   shouldResetSolve,
+  creditedSolveTier,
   solvedWcsSummary,
   wcsRewriteBlocker,
   wcsWriteBlocker,
   type SolveIdentity,
 } from "../../utils/solvedWcs";
 import OutputNote from "./OutputNote";
+import { useProgress } from "../../hooks/useProgress";
 import { getApiKey, getConfig } from "../../services/config";
 import {
   VIEW_SCALE_ATTRIBUTE,
@@ -62,6 +75,7 @@ import {
   fallbackOffer,
   localFailure,
   resultBlockFields,
+  formatDuration,
   solvingText,
   type FallbackOffer,
   type LocalFailure,
@@ -105,11 +119,6 @@ const ANNOTATIONS_OFF_VIEW_TITLE = "Object labels are in the solved file's pixel
 
 const SOLVE_TICK_MS = 250;
 const DEFAULT_SOLVE_TIMEOUT_SECS = 120;
-
-function formatDuration(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
-}
 
 const CARD_CLASS = "bg-zinc-900/80 rounded px-2 py-1.5";
 const CENTRE_TONES = { solve: "text-emerald-300", header: "text-zinc-300" } as const;
@@ -376,6 +385,9 @@ interface GaiaRefineBlockProps {
   onRefine: () => void;
   result: GaiaRefineResult | null;
   error: string | null;
+  progressText?: string | null;
+  onCancel?: () => void;
+  note?: string | null;
 }
 
 export function GaiaRefineBlock({
@@ -389,12 +401,26 @@ export function GaiaRefineBlock({
   onRefine,
   result,
   error,
+  progressText = null,
+  onCancel,
+  note = null,
 }: GaiaRefineBlockProps) {
   const epochId = useId();
+  const refineButtonRef = useRef<HTMLButtonElement>(null);
+  const focusRefineRef = useRef(false);
+  useEffect(() => {
+    if (loading || !focusRefineRef.current) return;
+    focusRefineRef.current = false;
+    refineButtonRef.current?.focus();
+  }, [loading]);
+  const handleCancel = () => {
+    focusRefineRef.current = true;
+    onCancel?.();
+  };
   return (
     <div data-gaia-refine-block className="space-y-1.5 pt-2 border-t border-zinc-800/50">
       <div className="flex items-end gap-2">
-        <div className="flex flex-col gap-0.5 w-32">
+        <div className="flex flex-col gap-0.5 w-40">
           <label htmlFor={epochId} className="text-[9px] text-zinc-500 uppercase">
             Epoch (year)
           </label>
@@ -419,20 +445,44 @@ export function GaiaRefineBlock({
       <div data-gaia-consent className="text-[9px] text-zinc-500 break-words">
         {GAIA_REFINE_CONSENT}
       </div>
-      <button
-        type="button"
-        data-gaia-refine
-        onClick={onRefine}
-        disabled={blocker !== null || loading || busy || epochError !== null}
-        title={blocker ?? undefined}
-        className="w-full flex items-center justify-center gap-2 bg-sky-600/10 hover:bg-sky-600/20 text-sky-300 border border-sky-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        {loading ? (
-          <><Loader2 size={12} className="animate-spin" /> Refining with Gaia DR3...</>
-        ) : (
-          <><Globe size={12} /> Refine with Gaia DR3</>
+      <div className="flex gap-2">
+        <button
+          ref={refineButtonRef}
+          type="button"
+          data-gaia-refine
+          onClick={onRefine}
+          disabled={blocker !== null || loading || busy || epochError !== null}
+          title={blocker ?? undefined}
+          className="flex-1 flex items-center justify-center gap-2 bg-sky-600/10 hover:bg-sky-600/20 text-sky-300 border border-sky-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loading ? (
+            <><Loader2 size={12} className="animate-spin" /> Refining with Gaia DR3...</>
+          ) : (
+            <><Globe size={12} /> Refine with Gaia DR3</>
+          )}
+        </button>
+        {loading && onCancel && (
+          <button
+            type="button"
+            onClick={handleCancel}
+            aria-label="Cancel the Gaia DR3 refinement"
+            title="Stop the refinement; the WCS stays as it is"
+            className="flex items-center justify-center gap-1 rounded border border-zinc-700/60 px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
+          >
+            <X size={12} /> Cancel
+          </button>
         )}
-      </button>
+      </div>
+      {loading && (
+        <div role="status" data-gaia-refine-progress className="text-[10px] text-zinc-400 break-words">
+          {progressText ?? ""}
+        </div>
+      )}
+      {note && (
+        <div data-gaia-refine-note className="text-[10px] text-zinc-400 break-words">
+          {note}
+        </div>
+      )}
       {error && (
         <div role="alert" data-gaia-refine-error className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
           {error}
@@ -562,8 +612,12 @@ function PlateSolvePanel({
   const [refineLoading, setRefineLoading] = useState(false);
   const [refineResult, setRefineResult] = useState<GaiaRefineResult | null>(null);
   const [refineError, setRefineError] = useState<string | null>(null);
+  const [refineNote, setRefineNote] = useState<string | null>(null);
   const [epochText, setEpochText] = useState("");
   const refineSeqRef = useRef(0);
+  const refineLoadingRef = useRef(false);
+  const refineProgress = useProgress(GAIA_REFINE_PROGRESS_EVENT);
+  const resetRefineProgress = refineProgress.reset;
   const solveIdentityRef = useRef<SolveIdentity>({ regionKey: filePath ?? null, solvePath });
 
   useEffect(() => {
@@ -597,10 +651,15 @@ function PlateSolvePanel({
   }, []);
 
   const clearRefinement = useCallback(() => {
+    if (refineLoadingRef.current) {
+      refineLoadingRef.current = false;
+      cancelGaiaRefine().catch(() => {});
+    }
     refineSeqRef.current++;
     setRefineLoading(false);
     setRefineResult(null);
     setRefineError(null);
+    setRefineNote(null);
   }, []);
 
   useEffect(() => {
@@ -894,9 +953,12 @@ function PlateSolvePanel({
   const handleRefine = useCallback(async () => {
     if (!solvePath || refineBlocker !== null || epochInput.error !== null || wcsWriting) return;
     const seq = ++refineSeqRef.current;
+    resetRefineProgress();
+    refineLoadingRef.current = true;
     setRefineLoading(true);
     setRefineError(null);
     setRefineResult(null);
+    setRefineNote(null);
     try {
       const result = await refineWithGaia(solvePath, {
         wcsCards: refineCards,
@@ -914,9 +976,20 @@ function PlateSolvePanel({
     } catch (e: unknown) {
       if (refineSeqRef.current === seq) setRefineError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (refineSeqRef.current === seq) setRefineLoading(false);
+      if (refineSeqRef.current === seq) {
+        refineLoadingRef.current = false;
+        setRefineLoading(false);
+      }
     }
-  }, [solvePath, refineBlocker, epochInput.error, epochInput.value, wcsWriting, refineCards]);
+  }, [solvePath, refineBlocker, epochInput.error, epochInput.value, wcsWriting, refineCards, resetRefineProgress]);
+
+  const handleCancelRefine = useCallback(() => {
+    refineSeqRef.current++;
+    refineLoadingRef.current = false;
+    setRefineLoading(false);
+    setRefineNote(GAIA_REFINE_CANCELLED_NOTE);
+    cancelGaiaRefine().catch(() => {});
+  }, []);
 
   const handleWriteWcs = useCallback(async () => {
     if (!solvePath || refineLoading || wcsWriteBlocker(wcsSource) !== null) return;
@@ -928,7 +1001,7 @@ function PlateSolvePanel({
     writtenPathRef.current = null;
     setWcsWritten(null);
     try {
-      const res = await writeSolvedWcs(solvePath, cards, undefined, history);
+      const res = await writeSolvedWcs(solvePath, cards, undefined, history, creditedSolveTier(solveResult, refined));
       if (wcsSeqRef.current !== seq) return;
       writtenPathRef.current = res.fits_path;
       onWcsWritten?.(res);
@@ -938,7 +1011,7 @@ function PlateSolvePanel({
     } finally {
       if (wcsSeqRef.current === seq) setWcsWriting(false);
     }
-  }, [solvePath, refineLoading, wcsSource, refined, onWcsWritten]);
+  }, [solvePath, refineLoading, wcsSource, refined, solveResult, onWcsWritten]);
 
   const medianFwhm = useMemo(() => {
     if (stars.length === 0) return null;
@@ -954,6 +1027,10 @@ function PlateSolvePanel({
   const headerHintsAvailable = wcsInfo !== null || Boolean(solveHints?.centre || solveHints?.scale);
   const offer = fallbackOffer(solveFailure, lastSolver, hasApiKey, apiUrl);
   const resultFields = solveResult ? resultBlockFields(solveResult) : [];
+  const solveCredit = solveResult?.credit ?? null;
+  const refineProgressText = refineLoading
+    ? gaiaRefineProgressText({ stage: refineProgress.stage, current: refineProgress.current, total: refineProgress.total })
+    : null;
 
   return (
     <div className="flex flex-col gap-3">
@@ -1323,6 +1400,16 @@ function PlateSolvePanel({
                   {warning}
                 </div>
               ))}
+              {solveCredit && (
+                <div
+                  data-gaia-attribution
+                  data-solve-credit
+                  title={solveCredit.citation}
+                  className="col-span-2 text-[9px] text-zinc-500 break-words"
+                >
+                  {solveCredit.text}
+                </div>
+              )}
               {annotations.length > 0 && (
                 <div className="bg-zinc-900/80 rounded px-2 py-1.5 col-span-2">
                   <div className="text-zinc-500">Objects Identified</div>
@@ -1345,6 +1432,9 @@ function PlateSolvePanel({
             onRefine={() => void handleRefine()}
             result={refineResult}
             error={refineError}
+            progressText={refineProgressText}
+            onCancel={handleCancelRefine}
+            note={refineNote}
           />
 
           <button
