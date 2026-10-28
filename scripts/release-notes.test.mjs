@@ -12,7 +12,7 @@ const REPO_ROOT = join(dirname(SCRIPT), "..");
 
 const CHANGELOG = `# Changelog
 
-## [0.7.5.1] - 2028-10-25
+## [0.7.6] - 2028-10-25
 
 ### Added
 - Something not released yet
