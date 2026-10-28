@@ -79,7 +79,7 @@ The binary is `target/release/astroburst-server` (`astroburst-server.exe` on Win
 Start-up log:
 
 ```
-[2026-10-23T12:00:00Z INFO  astroburst_server] AstroBurst Headless Server v0.8.0
+[2026-10-23T12:00:00Z INFO  astroburst_server] AstroBurst Headless Server v0.7.5
 [2026-10-23T12:00:00Z INFO  astroburst_server] Listening on 127.0.0.1:8080
 [2026-10-23T12:00:00Z INFO  astroburst_server] Session TTL: 900s, Max sessions: 8
 [2026-10-23T12:00:00Z INFO  astroburst_server] Per-session cache: 32 entries / 2048 MiB
@@ -283,7 +283,7 @@ Requests rejected before a handler runs get the framework's own plain-text answe
 No session needed (`server/router.rs`).
 
 ```json
-{ "status": "ok", "version": "0.8.0", "sessions_active": 2, "sessions_total": 17 }
+{ "status": "ok", "version": "0.7.5", "sessions_active": 2, "sessions_total": 17 }
 ```
 
 `sessions_total` counts every session created since start.
