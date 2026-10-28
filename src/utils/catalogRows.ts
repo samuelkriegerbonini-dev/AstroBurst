@@ -36,6 +36,8 @@ export const TIER2_ONLINE_TEXT =
   "Gaia DR3 online through VizieR, used when no offline tier is enough: only the star list of the field is downloaded and kept in a disk cache; the image never leaves this computer.";
 
 export const INSTALL_COMPLETE_STAGE = "complete";
+export const INSTALL_FAILED_STAGE = "failed";
+const INSTALL_FAILED_FALLBACK = "The install failed.";
 
 const CANCELLED_NOTE = "Cancelled; what was downloaded is kept and the next download resumes from there.";
 const NO_VALUE = "--";
@@ -340,6 +342,12 @@ export function installReducer(installs: InstallMap, action: InstallAction): Ins
     case "progress": {
       const { current: done, total, percent, stage } = action.progress;
       if (stage === INSTALL_COMPLETE_STAGE) return current.phase === "running" ? set(installs, id, IDLE_INSTALL) : installs;
+      if (stage === INSTALL_FAILED_STAGE) {
+        if (current.phase !== "running") return installs;
+        return current.cancelling
+          ? set(installs, id, { phase: "idle", note: CANCELLED_NOTE })
+          : set(installs, id, { phase: "failed", message: action.progress.message ?? INSTALL_FAILED_FALLBACK });
+      }
       if (current.phase === "running") return set(installs, id, { ...current, current: done, total, percent, stage });
       if (current.phase === "consent") return installs;
       return set(installs, id, { phase: "running", stage, current: done, total, percent, cancelling: false, adopted: true });
@@ -349,6 +357,7 @@ export function installReducer(installs: InstallMap, action: InstallAction): Ins
     case "finished":
       return set(installs, id, { phase: "idle", note: action.note });
     case "failed":
+      if (current.phase === "idle" && current.note === CANCELLED_NOTE) return installs;
       return current.phase === "running" && current.cancelling
         ? set(installs, id, { phase: "idle", note: CANCELLED_NOTE })
         : set(installs, id, { phase: "failed", message: action.message });

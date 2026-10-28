@@ -474,6 +474,7 @@ struct WcsReprojection {
     image: Array2<f32>,
     coverage: f64,
     geometry: WcsGeometry,
+    pv_warning: Option<String>,
 }
 
 struct RegisteredChannel {
@@ -513,7 +514,13 @@ fn reproject_channel(
             prefilter_k: reduced.map_or(1, |(_, _, k)| k),
             wcs_kind: report.wcs_kind,
         },
+        pv_warning: target_wcs.pv_warning().map(str::to_string),
     })
+}
+
+fn reference_pv_warning(path: &str, header: Option<&HduHeader>) -> Option<String> {
+    let wcs = load_wcs(path, header?).ok()?;
+    wcs.pv_warning().map(|warning| format!("{}: {warning}", output_stem(path)))
 }
 
 fn wcs_only_result(image: Array2<f32>, registered: bool, confidence: f64) -> AlignPairResult {
@@ -576,7 +583,7 @@ fn register_channel(
     };
     let geometry = reprojection.geometry;
     let header = registered_channel_header(target_header, reference_header, (tr, tc), (rows, cols), true, Some(geometry.area_ratio));
-    let mut warnings = Vec::new();
+    let mut warnings: Vec<String> = reprojection.pv_warning.iter().map(|warning| format!("{label}: {warning}")).collect();
     let overlaps = reprojection.coverage > 0.0;
     if !overlaps {
         warnings.push(no_overlap_warning(label));
@@ -677,6 +684,7 @@ pub async fn align_channels_cmd(
 
         let mut channel_results = Vec::with_capacity(entries.len());
         let mut warnings: Vec<String> = Vec::new();
+        let mut reprojected = false;
 
         let ref_header = headers[ref_idx].as_ref();
         let header0 = derived_output_header(ref_header, ABPROC_ALIGNED, OutputValues::Linear);
@@ -712,6 +720,7 @@ pub async fn align_channels_cmd(
             let channel =
                 register_channel(ref_arr, &paths[ref_idx], ref_header, entry.arr(), &paths[i], headers[i].as_ref(), method, &label)?;
             let mut entry_json = channel_json(&channel, &cache_key);
+            reprojected |= channel.geometry.is_some();
             let RegisteredChannel { result, header, warnings: channel_warnings, .. } = channel;
             warnings.extend(channel_warnings);
             let aligned = std::sync::Arc::new(result.aligned);
@@ -733,6 +742,10 @@ pub async fn align_channels_cmd(
         if wizard_token.is_some() {
             before_run_settles();
             settle_wizard_run(wizard_token);
+        }
+
+        if let Some(note) = reprojected.then(|| reference_pv_warning(&paths[ref_idx], ref_header)).flatten() {
+            warnings.insert(0, note);
         }
 
         let elapsed = t0.elapsed().as_millis() as u64;
@@ -1905,6 +1918,24 @@ mod tests {
         assert_eq!(with_pv.geometry.prefilter_k, linear.geometry.prefilter_k, "the TAN+PV channel skipped the prefilter");
         let differing = with_pv.image.iter().zip(linear.image.iter()).filter(|(a, b)| !(a == b || (a.is_nan() && b.is_nan()))).count();
         assert_eq!(differing, 0, "TAN+PV vs linear TAN reprojection: {differing} of {} pixels differ, coverage {} vs {}", linear.image.len(), with_pv.coverage, linear.coverage);
+    }
+
+    #[tokio::test]
+    async fn reprojected_tan_pv_channels_name_the_pv_distortion_the_linear_tan_leaves_out() {
+        use crate::infra::wcs_source::test_fixtures::PV_DISTORTION_CARDS;
+        let dir = tempfile::tempdir().unwrap();
+        let mut header = tan_header(64, (32.5, 32.5), (83.0, 22.0), rotated_cd(0.2, 0.0));
+        for (key, value) in PV_DISTORTION_CARDS {
+            header.set(key, value.to_string());
+        }
+        let reference = write_channel(dir.path(), "ref.fits", &star_field(0.0, 0.0), &header);
+        let target = write_channel(dir.path(), "pv.fits", &star_field(0.0, 0.0), &header);
+        let linear = write_channel(dir.path(), "linear.fits", &star_field(0.0, 0.0), &tan_header(64, (32.5, 32.5), (83.0, 22.0), rotated_cd(0.2, 0.0)));
+
+        let res = align_to_disk(vec![reference, target, linear], &dir.path().join("out"), None).await;
+
+        let note = "PV distortion not applied: PV1_0, PV1_1, PV1_2, PV1_4, PV2_0, PV2_2, PV2_10";
+        assert_eq!(res[RES_WARNINGS], json!([format!("ref: {note}"), format!("pv: {note}")]), "{res}");
     }
 
     #[tokio::test]

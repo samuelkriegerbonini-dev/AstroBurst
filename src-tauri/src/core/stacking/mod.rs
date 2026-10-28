@@ -32,7 +32,7 @@ pub(crate) fn stop_if_cancelled(cancelled: CancelCheck) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "tauri"))]
 pub(crate) fn is_cancellation(err: &anyhow::Error) -> bool {
     matches!(err.downcast_ref::<AppError>(), Some(AppError::Cancelled))
 }

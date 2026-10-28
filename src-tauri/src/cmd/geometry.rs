@@ -22,8 +22,6 @@ const SITE_LON_MAX: f64 = 360.0;
 const SITE_HEIGHT_MIN_M: f64 = -500.0;
 const SITE_HEIGHT_MAX_M: f64 = 10000.0;
 const AIRMASS_KEY: &str = "AIRMASS";
-const NO_TIME_REASON: &str =
-    "no observation time in the header (MJD-AVG, EXPMID, DATE-AVG, DATE-OBS, MJD-OBS or BJDREF with TSTART/TSTOP)";
 
 pub(crate) fn validate_geometry_overrides(overrides: &GeometryOverrides) -> anyhow::Result<()> {
     if let Some(ra) = overrides.target_ra {
@@ -69,15 +67,15 @@ pub(crate) fn observation_geometry_json(path: &str, overrides: &GeometryOverride
         let site = resolve_site(header, overrides);
         let time = header_time(header);
         let geometry = match &time {
-            Some(time) => frame_geometry(header, time, target.as_ref(), site.as_ref()),
-            None => FrameGeometry::without_time(NO_TIME_REASON),
+            Ok(time) => frame_geometry(header, time, target.as_ref(), site.as_ref()),
+            Err(reason) => FrameGeometry::without_time(reason),
         };
         let notes = geometry_method_notes(header, target.as_ref(), site.as_ref());
         Ok(json!({
             RES_GEOMETRY: geometry,
             RES_TARGET: target,
             RES_SITE: site,
-            RES_TIME_SOURCE: time.as_ref().map(|t| t.source.clone()),
+            RES_TIME_SOURCE: time.as_ref().ok().map(|t| t.source.clone()),
             RES_AIRMASS_HEADER: header.get_f64(AIRMASS_KEY).filter(|v| v.is_finite()),
             RES_NOTES: notes,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,

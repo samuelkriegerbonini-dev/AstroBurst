@@ -23,7 +23,9 @@ use crate::core::astrometry::gaia_tie::{
     SOLVED_SIX_PARAMETER,
 };
 use crate::core::astrometry::gwcs::test_support::{mast_dir, real_data_dir};
-use crate::core::astrometry::local_solve::{healpix_provider, solve_local, LocalSolveParams, RankingKey};
+use crate::core::astrometry::local_solve::{
+    healpix_provider, solve_local, CatalogProvider, LocalSolveParams, TierSpec, TWOMASS_TIER, TYCHO2_TIER,
+};
 use crate::core::astrometry::solve_hints::{Pointing, ScaleRange, SolveHints};
 use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
 use crate::core::stacking::{never_cancelled, no_stage};
@@ -75,10 +77,8 @@ const D2_ORACLE: [(&str, [f64; 2], [f64; 2]); 7] = [
     ("fov0.5_high1", [-303.0, 573.0], [78.0, 94.0]),
     ("native_mid1", [-362.0, 531.0], [132.0, 149.0]),
 ];
-const TIER0_LABEL: &str = "tier0-tycho2";
-const TIER0_DEPTH_MAG: f64 = 12.0;
-const TIER1_LABEL: &str = "tier1-2mass";
-const TIER1_DEPTH_MAG: f64 = 16.0;
+const TIER0_LABEL: &str = TYCHO2_TIER.label;
+const TIER1_LABEL: &str = TWOMASS_TIER.label;
 const TIER1_MAX_FOV_DEG: f64 = 2.0;
 const SOLVE_SCALE_MARGIN: f64 = 0.10;
 
@@ -874,9 +874,9 @@ fn live_c21_dss2_d1_header_control() {
     checks.finish();
 }
 
-fn tier_provider(var: &str, label: &'static str, depth: f64, ranking: RankingKey) -> Option<Box<dyn crate::core::astrometry::local_solve::CatalogProvider>> {
+fn tier_provider(var: &str, spec: TierSpec) -> Option<Box<dyn CatalogProvider>> {
     let path = std::env::var_os(var).map(PathBuf::from)?;
-    healpix_provider(&path, label, depth, ranking).ok()
+    healpix_provider(&path, spec).ok()
 }
 
 #[test]
@@ -887,8 +887,8 @@ fn live_c21_dss2_d1_local_solve_then_tie() {
         eprintln!("skipped: set {PLATE_SOLVE_DIR_VAR}");
         return;
     }
-    let tier0 = tier_provider(TIER0_VAR, TIER0_LABEL, TIER0_DEPTH_MAG, RankingKey::MAGNITUDE);
-    let tier1 = tier_provider(TIER1_VAR, TIER1_LABEL, TIER1_DEPTH_MAG, RankingKey::TWO_MASS_J_KS);
+    let tier0 = tier_provider(TIER0_VAR, TYCHO2_TIER);
+    let tier1 = tier_provider(TIER1_VAR, TWOMASS_TIER);
     assert!(tier0.is_some() || tier1.is_some(), "set {TIER0_VAR} and/or {TIER1_VAR}");
     for name in c1_names() {
         let Some(case) = c1_case(&mut checks, &name) else { continue };
@@ -904,7 +904,7 @@ fn live_c21_dss2_d1_local_solve_then_tie() {
             ..SolveHints::default()
         };
         let entry = load_cached_full(&case.frame.path).unwrap();
-        let order: Vec<(&str, &Option<Box<dyn crate::core::astrometry::local_solve::CatalogProvider>>)> =
+        let order: Vec<(&str, &Option<Box<dyn CatalogProvider>>)> =
             if fov < TIER1_MAX_FOV_DEG { vec![(TIER1_LABEL, &tier1), (TIER0_LABEL, &tier0)] } else { vec![(TIER0_LABEL, &tier0), (TIER1_LABEL, &tier1)] };
         let mut solution = None;
         let mut failures = Vec::new();

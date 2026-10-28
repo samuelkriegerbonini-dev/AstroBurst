@@ -16,7 +16,8 @@ use super::synthetic::{
     ARCSEC_PER_DEG,
 };
 use super::{
-    destination, healpix_provider, solve_local, CatalogProvider, LocalSolveParams, RankingKey,
+    destination, healpix_provider, solve_local, CatalogProvider, LocalSolveParams, SIRIL_GAIA_TIER, TWOMASS_TIER,
+    TYCHO2_TIER,
 };
 use crate::core::alignment::affine::AffineAlignMethod;
 use crate::core::alignment::triangles::{ransac_affine, TriangleMatch, TriangleParams};
@@ -32,13 +33,7 @@ const ENV_TIER0: &str = "ASTROBURST_TIER0_PATH";
 const ENV_TIER1: &str = "ASTROBURST_TIER1_PATH";
 const ENV_TIER1_KIND: &str = "ASTROBURST_TIER1_KIND";
 const ENV_TIER1_FLOOR: &str = "ASTROBURST_TIER1_FOV_FLOOR_DEG";
-const TIER0_LABEL: &str = "tier0-tycho2";
-const TIER0_DEPTH_MAG: f64 = 12.0;
-const TIER1_2MASS_LABEL: &str = "tier1-2mass";
-const TIER1_2MASS_DEPTH_MAG: f64 = 16.0;
 const TIER1_2MASS_FLOOR_DEG: f64 = 0.4;
-const TIER1_SIRIL_LABEL: &str = "tier1-gaia-siril";
-const TIER1_SIRIL_DEPTH_MAG: f64 = 17.0;
 const TIER1_SIRIL_FLOOR_DEG: f64 = 0.25;
 const C1_SOLVED_FRACTION: f64 = 0.95;
 const C1_TOLERANCE_ARCSEC: f64 = 2.0;
@@ -419,42 +414,27 @@ fn corpus_root() -> PathBuf {
 }
 
 fn tier_setup(tier: Tier) -> TierSetup {
-    let (env, label, depth, floor, ranking) = match tier {
-        Tier::Zero => (
-            ENV_TIER0,
-            TIER0_LABEL,
-            TIER0_DEPTH_MAG,
-            TIER0_LOW_LATITUDE_FOV_DEG,
-            RankingKey::MAGNITUDE,
-        ),
+    let (env, spec, floor) = match tier {
+        Tier::Zero => (ENV_TIER0, TYCHO2_TIER, TIER0_LOW_LATITUDE_FOV_DEG),
         Tier::One => {
             let siril = std::env::var(ENV_TIER1_KIND).is_ok_and(|kind| kind == "siril");
-            let (label, depth, default_floor, ranking) = if siril {
-                (
-                    TIER1_SIRIL_LABEL,
-                    TIER1_SIRIL_DEPTH_MAG,
-                    TIER1_SIRIL_FLOOR_DEG,
-                    RankingKey::MAGNITUDE,
-                )
+            let (spec, default_floor) = if siril {
+                (SIRIL_GAIA_TIER, TIER1_SIRIL_FLOOR_DEG)
             } else {
-                (
-                    TIER1_2MASS_LABEL,
-                    TIER1_2MASS_DEPTH_MAG,
-                    TIER1_2MASS_FLOOR_DEG,
-                    RankingKey::TWO_MASS_J_KS,
-                )
+                (TWOMASS_TIER, TIER1_2MASS_FLOOR_DEG)
             };
             let floor = std::env::var(ENV_TIER1_FLOOR)
                 .ok()
                 .and_then(|value| value.parse::<f64>().ok())
                 .unwrap_or(default_floor);
-            (ENV_TIER1, label, depth, floor, ranking)
+            (ENV_TIER1, spec, floor)
         }
     };
+    let label = spec.label;
     let path = std::env::var_os(env)
         .map(PathBuf::from)
         .unwrap_or_else(|| panic!("set {env} to the {label} catalogue file"));
-    let provider = healpix_provider(&path, label, depth, ranking)
+    let provider = healpix_provider(&path, spec)
         .unwrap_or_else(|error| panic!("{label} at {}: {error}", path.display()));
     TierSetup {
         label,
@@ -971,9 +951,9 @@ fn catalogue_window(
     skip: usize,
     limit: usize,
 ) -> String {
-    let (rows, _) = setup
+    let rows = setup
         .provider
-        .cone(centre.0, centre.1, radius_deg, None)
+        .cone(centre.0, centre.1, radius_deg)
         .unwrap_or_else(|error| panic!("{}: {error}", setup.label));
     let mut mags: Vec<f64> = rows.iter().filter_map(|row| row.g).collect();
     mags.sort_by(f64::total_cmp);
@@ -1415,9 +1395,9 @@ fn stage_report(
     let cone_area = std::f64::consts::PI * cone_radius_deg * cone_radius_deg;
     let bright_skip = (saturated as f64 * cone_area / (field_w * field_h)).round() as usize;
     let side = super::MatchSide::new(&points, params.hinted_match_stars, inlier_px);
-    let (mut rows, _) = setup
+    let mut rows = setup
         .provider
-        .cone(hint_centre.0, hint_centre.1, cone_radius_deg, None)
+        .cone(hint_centre.0, hint_centre.1, cone_radius_deg)
         .unwrap_or_else(|error| panic!("{}: {error}", setup.label));
     if let Some(epoch) = epoch {
         propagate_epoch(&mut rows, epoch);
@@ -1743,9 +1723,9 @@ fn corpus_single_frame_stage_diagnostics() {
         );
         let half_diagonal_deg =
             0.5 * (width as f64).hypot(height as f64) * scale / ARCSEC_PER_DEG;
-        let (mut rows, _) = setup
+        let mut rows = setup
             .provider
-            .cone(centre.0, centre.1, 1.2 * half_diagonal_deg, None)
+            .cone(centre.0, centre.1, 1.2 * half_diagonal_deg)
             .unwrap_or_else(|error| panic!("{}: {error}", setup.label));
         if let Some(epoch) = epoch {
             propagate_epoch(&mut rows, epoch);

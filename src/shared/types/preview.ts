@@ -1,4 +1,5 @@
 import type { DisplaySettings } from "./display";
+import type { OutputDomain } from "./ops";
 
 export type DisplayHint = Partial<Pick<DisplaySettings, "colormap" | "invert" | "symmetric" | "centre" | "stretch" | "limits">>;
 
@@ -38,6 +39,8 @@ export interface ProcessedResult {
   inputPreviewUrl?: string | null;
   frameIndex?: number;
   displayHint?: DisplayHint;
+  planes?: number;
+  domain?: OutputDomain;
 }
 
 export interface FileRenderState {

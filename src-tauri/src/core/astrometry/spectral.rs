@@ -953,6 +953,25 @@ pub fn mid_exposure_jd(header: &HduHeader) -> Option<(f64, String)> {
     None
 }
 
+const DATE_TIME_CARDS: [(&str, Option<&str>); 3] = [("DATE-AVG", None), ("DATE-OBS", Some("TIME-OBS")), ("DATE-END", Some("TIME-END"))];
+
+pub fn invalid_time_cards(header: &HduHeader) -> Vec<String> {
+    DATE_TIME_CARDS
+        .iter()
+        .filter_map(|&(date_key, time_key)| {
+            let date = card_string(header, date_key)?;
+            let time = time_key.and_then(|key| card_string(header, key));
+            let error = parse_fits_date_and_time(&date, time.as_deref()).err()?;
+            let joined = time.is_some() && !date.contains(|c| c == 'T' || c == ' ');
+            let cards = match time_key {
+                Some(time_key) if joined => format!("{date_key}/{time_key}"),
+                _ => date_key.to_string(),
+            };
+            Some(format!("{cards} ignored: {error}"))
+        })
+        .collect()
+}
+
 const EXPOSURE_UNIT_SECONDS: [(&str, f64); 4] = [("s", 1.0), ("min", 60.0), ("h", 3600.0), ("d", SECONDS_PER_DAY)];
 
 fn exposure_seconds(header: &HduHeader) -> Option<(f64, &'static str)> {
@@ -1987,6 +2006,28 @@ mod tests {
         let h = axis_header(&[("DATE-OBS", "2026-03-21T10:00:00"), ("DATE-END", "2026-03-21T09:00:00"), ("EXPTIME", "600")]);
         let (jd, _) = mid_exposure_jd(&h).unwrap();
         assert!(((jd - start) * SECONDS_PER_DAY - 300.0).abs() < 0.01, "an end before the start is ignored");
+    }
+
+    #[test]
+    fn invalid_time_cards_name_each_impossible_date_card_and_leave_valid_ones_alone() {
+        let h = axis_header(&[
+            ("DATE-AVG", "2025-02-29T00:10:00"),
+            ("DATE-OBS", "2026-03-21T10:00:00"),
+            ("DATE-END", "2026-03-21"),
+            ("TIME-END", "24:30:00"),
+        ]);
+        assert_eq!(
+            invalid_time_cards(&h),
+            vec![
+                "DATE-AVG ignored: date '2025-02-29T00:10:00' has day 29, but February 2025 has 28 days".to_string(),
+                "DATE-END/TIME-END ignored: time part of '2026-03-21T24:30:00' is out of range".to_string(),
+            ]
+        );
+        let (jd, source) = mid_exposure_jd(&h).unwrap();
+        assert!(source.starts_with("DATE-OBS"), "{source}");
+        assert!((jd - jd_from_gregorian(2026, 3, 21.0 + 10.0 / 24.0)).abs() < 1e-9);
+        let valid = axis_header(&[("DATE-OBS", "2024-02-29"), ("TIME-OBS", "23:59:60.5"), ("DATE-END", "2024-03-01T00:00:00")]);
+        assert!(invalid_time_cards(&valid).is_empty());
     }
 
     #[test]

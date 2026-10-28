@@ -112,11 +112,13 @@ function exportTime(frame: TimeSeriesFrame, time: ExoClockTime): number | null {
 function timeBlocker(frame: TimeSeriesFrame, time: ExoClockTime): string | null {
   if (exportTime(frame, time) !== null) return null;
   const name = TIME_NAMES[time];
+  const refusal = frame.geometry && !isFiniteNumber(frame.geometry.jd_utc) ? frame.geometry.time_scale_notes[0] : undefined;
+  if (refusal) return `no ${name} for ${frame.file_name} (${refusal})`;
   if (time !== "bjd_tdb" && frame.geometry?.bjd_source === "header") {
-    return `no ${name} for ${frame.file_name} (the header time is barycentric: TIMEREF/BJDREF)`;
+    return `no ${name} for ${frame.file_name} (the header time is barycentric: TREFPOS/TIMEREF/BJDREF)`;
   }
   if (time !== "jd_utc") return `no ${name} for ${frame.file_name} (needs DATE-OBS and the target RA/Dec)`;
-  return `no ${name} for ${frame.file_name} (DATE-OBS missing)`;
+  return `no ${name} for ${frame.file_name} (DATE-OBS missing or not a valid date)`;
 }
 
 function hasFluxErrors(frame: TimeSeriesFrame, stars: number[]): boolean {

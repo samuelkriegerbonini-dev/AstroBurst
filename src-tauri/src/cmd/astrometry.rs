@@ -13,22 +13,24 @@ use crate::cmd::common::{
     render_named_and_save, resolve_output_dir, source_path, OutputValues,
 };
 use crate::core::astrometry::catalog::{
-    query_gaia_cached, solver_cone_query, CatalogRow, ConeQuery, GAIA_MATCH_MAG_LIMIT, GAIA_VIZIER_TABLE,
+    query_gaia_cached, solver_cone_query, CatalogRow, ConeQuery, GAIA_VIZIER_TABLE,
 };
 use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
 use crate::core::astrometry::gaia_tie::{GAIA_DR3_ATTRIBUTION, GAIA_DR3_ATTRIBUTION_SIRIL, GAIA_ESA_ACKNOWLEDGEMENT};
 use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
 use crate::core::astrometry::local_solve::{
-    solve_local, CatalogProvider, CatalogTier, FailureReason, FieldSize, ImageParity, LocalSolution,
-    LocalSolveParams, RankingKey, SolveFailure, TierChain, MAX_NEAR_RADIUS_DEG, TIER0_MEAN_STARS_PER_DEG2,
+    detect_for_solve, expected_tier0_stars, solve_stars, CatalogProvider, CatalogTier, FailureReason, FieldSize,
+    ImageParity, LocalSolution, LocalSolveParams, RankingKey, SolveFailure, TierChain, TierSpec, GAIA_ONLINE_TIER,
+    MAX_NEAR_RADIUS_DEG, SIRIL_GAIA_TIER, STAGE_DETECT, TIER0_MIN_EXPECTED_STARS, TWOMASS_TIER, TYCHO2_TIER,
 };
 use crate::core::astrometry::plate_solve::{
     orientation_east_of_north_deg, parity_name, SolveConfig, SolveResult, SOLVER_ASTROMETRY_NET, SOLVER_LOCAL,
 };
 use crate::core::astrometry::solve_hints::{solve_hints, Pointing, ScaleRange, SolveHints};
 use crate::core::astrometry::wcs::{
-    angular_separation, pixel_center, pixel_edge_corners, position_angle_deg, WcsKind, WcsTransform,
+    angular_separation, pixel_center, pixel_edge_corners, position_angle_deg, WcsTransform,
 };
+use crate::core::stacking::is_cancellation;
 use crate::infra::catalog_store::{
     CatalogLease, CatalogStore, DatasetStatus, StoreRoots, SIRIL_GAIA_ID, TWOMASS_ID, TYCHO2_ID, ZENODO_RECORD_ID,
 };
@@ -37,7 +39,7 @@ use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::writer::{filter_header, is_wcs_card};
 use crate::infra::image_source::{load_plane, load_plane_header};
 use crate::infra::progress::ProgressHandle;
-use crate::infra::wcs_source::{load_wcs, tan_pv_warning};
+use crate::infra::wcs_source::load_wcs;
 use crate::types::constants::{
     DEFAULT_API_KEY_SERVICE, HEADER_NAXIS1, HEADER_NAXIS2, RES_A_SKY, RES_B_SKY, RES_CENTER_DEC,
     RES_CENTER_RA, RES_DIMENSIONS, RES_EAST_VEC, RES_ELAPSED_MS, RES_FITS_PATH, RES_FLIPPED,
@@ -57,8 +59,6 @@ pub(crate) mod gaia_refine;
 const MAX_UPLOAD_DIM: usize = 2048;
 const MAX_SKY_POINTS: usize = 20_000;
 const MAX_LATITUDE_DEG: f64 = 90.0;
-const PARITY_NORMAL: &str = "normal";
-const PARITY_FLIPPED: &str = "flipped";
 const ABPROC_PLATE_SOLVED: &str = "platesolved";
 const RADESYS_KEY: &str = "RADESYS";
 const DEPRECATED_RADESYS_KEY: &str = "RADECSYS";
@@ -171,7 +171,7 @@ fn plate_solve_timeout(loaded: anyhow::Result<AppConfig>) -> anyhow::Result<u64>
         }
     };
     if secs == 0 {
-        anyhow::bail!("the plate-solve timeout is 0 seconds; set it to at least 1 second in Settings");
+        anyhow::bail!("The plate-solve timeout is 0 seconds; set it to at least 1 second in Settings");
     }
     Ok(secs)
 }
@@ -194,22 +194,23 @@ const CODE_NO_API_KEY: &str = "astrometry_net_no_key";
 const CODE_CANCELLED: &str = "cancelled";
 const CANCELLED_MESSAGE: &str = "Plate solve cancelled";
 const NO_API_KEY_MESSAGE: &str = "astrometry.net needs an API key: save it in Settings; nothing was uploaded";
-const NO_NOVA_MESSAGE: &str = "this build has no astrometry.net support (cargo feature \"astrometry-net\")";
+const NO_NOVA_MESSAGE: &str = "This build cannot use astrometry.net";
 const PLATE_SOLVE_HOLDER: &str = "a running plate solve";
 const PANEL_HINT_SOURCE: &str = "typed in the panel";
 const SAME_CENTRE_DEG: f64 = 1e-5;
+const SCALE_UNITS_PER_PIXEL: &str = "pix";
+const SCALE_UNITS_ARCSEC_PER_PIXEL: &str = "arcsecperpix";
 const SCALE_UNITS_ARCMIN_WIDTH: &str = "arcminwidth";
 const SCALE_UNITS_DEG_WIDTH: &str = "degwidth";
 const ARCSEC_PER_DEG: f64 = 3600.0;
 const ARCSEC_PER_ARCMIN: f64 = 60.0;
 const STAGE_LOAD: &str = "load";
-pub(crate) const TIER0_LABEL: &str = "tier0-tycho2";
-const TIER0_DEPTH_MAG: f64 = 12.0;
-pub(crate) const TIER1_SIRIL_LABEL: &str = "tier1-gaia-siril";
-const TIER1_SIRIL_DEPTH_MAG: f64 = 17.0;
-pub(crate) const TIER1_2MASS_LABEL: &str = "tier1-2mass";
-const TIER1_2MASS_DEPTH_MAG: f64 = 16.0;
-pub(crate) const TIER2_LABEL: &str = "tier2-gaia-vizier";
+#[cfg(test)]
+pub(crate) const TIER0_LABEL: &str = TYCHO2_TIER.label;
+pub(crate) const TIER1_SIRIL_LABEL: &str = SIRIL_GAIA_TIER.label;
+#[cfg(test)]
+pub(crate) const TIER1_2MASS_LABEL: &str = TWOMASS_TIER.label;
+pub(crate) const TIER2_LABEL: &str = GAIA_ONLINE_TIER.label;
 const TIER2_FIELD_STARS: f64 = 900.0;
 const TIER2_MIN_ROWS: usize = 1_000;
 const TIER2_MAX_ROWS: usize = 20_000;
@@ -231,7 +232,7 @@ impl SolverChoice {
             Some(t) if t.eq_ignore_ascii_case(SOLVER_AUTO) => Ok(Self::Auto),
             Some(t) if t.eq_ignore_ascii_case(SOLVER_LOCAL) => Ok(Self::Local),
             Some(t) if t.eq_ignore_ascii_case(SOLVER_ASTROMETRY_NET) => Ok(Self::AstrometryNet),
-            Some(t) => Err(format!("unknown solver {t:?}; use one of {}", SOLVER_CHOICES.join(", "))),
+            Some(t) => Err(format!("Unknown solver {t:?}; use one of {}", SOLVER_CHOICES.join(", "))),
         }
     }
 }
@@ -275,73 +276,63 @@ pub(crate) struct TierRequest<'a> {
 #[derive(Default)]
 pub(crate) struct TierSet {
     pub chain: TierChain,
-    pub labels: Vec<&'static str>,
     pub notes: Vec<String>,
 }
 
 impl TierSet {
-    pub fn push(&mut self, tier: CatalogTier, label: &'static str, provider: Box<dyn CatalogProvider>) {
+    pub fn push(&mut self, tier: CatalogTier, provider: Box<dyn CatalogProvider>) {
         self.chain.tiers.push((tier, provider));
-        self.labels.push(label);
+    }
+
+    fn label(&self, index: usize) -> &'static str {
+        self.chain.tiers[index].1.label()
     }
 }
+
+pub(crate) type NovaSolve = Box<dyn FnOnce(NovaUpload) -> NovaFuture + Send>;
 
 pub(crate) trait SolveEnv: Send + Sync {
     fn tiers(&self, request: &TierRequest<'_>) -> TierSet;
     fn stored_api_key(&self) -> Option<String>;
     fn nova_settings(&self) -> anyhow::Result<NovaSettings>;
-    fn has_nova(&self) -> bool;
-    fn nova(&self, upload: NovaUpload) -> Option<NovaFuture>;
+    fn nova(&self) -> Option<NovaSolve>;
     fn cancelled(&self) -> bool;
     fn stage(&self, stage: &str);
 }
 
 struct StoreProvider {
     lease: CatalogLease,
-    label: &'static str,
-    depth_mag: f64,
-    ranking: RankingKey,
+    spec: TierSpec,
 }
 
 impl CatalogProvider for StoreProvider {
-    fn cone(
-        &self,
-        ra_deg: f64,
-        dec_deg: f64,
-        radius_deg: f64,
-        mag_limit: Option<f64>,
-    ) -> Result<(Vec<CatalogRow>, &'static str), String> {
-        let mut rows = self
-            .lease
-            .cone(ra_deg, dec_deg, radius_deg, None)
-            .map_err(|error| error.to_string())?;
-        if let Some(limit) = mag_limit {
-            rows.retain(|row| row.g.is_some_and(|mag| mag <= limit));
-        }
-        Ok((rows, self.label))
+    fn label(&self) -> &'static str {
+        self.spec.label
     }
 
-    fn depth_mag(&self) -> f64 {
-        self.depth_mag
+    fn cone(&self, ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Result<Vec<CatalogRow>, String> {
+        self.lease
+            .cone(ra_deg, dec_deg, radius_deg, None)
+            .map_err(|error| error.to_string())
     }
 
     fn ranking_key(&self) -> RankingKey {
-        self.ranking
+        self.spec.ranking
     }
 }
 
 pub(crate) type GaiaFetch = Arc<dyn Fn(&ConeQuery) -> Result<Vec<CatalogRow>, String> + Send + Sync>;
-pub(crate) type CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+pub(crate) type SharedCancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
 pub(crate) struct GaiaRegionProvider {
     query: ConeQuery,
     fetch: GaiaFetch,
-    cancelled: CancelCheck,
+    cancelled: SharedCancelCheck,
     rows: OnceLock<Result<Arc<Vec<CatalogRow>>, String>>,
 }
 
 impl GaiaRegionProvider {
-    pub(crate) fn new(query: ConeQuery, fetch: GaiaFetch, cancelled: CancelCheck) -> Self {
+    pub(crate) fn new(query: ConeQuery, fetch: GaiaFetch, cancelled: SharedCancelCheck) -> Self {
         Self {
             query,
             fetch,
@@ -375,25 +366,17 @@ impl GaiaRegionProvider {
 }
 
 impl CatalogProvider for GaiaRegionProvider {
-    fn cone(
-        &self,
-        ra_deg: f64,
-        dec_deg: f64,
-        radius_deg: f64,
-        mag_limit: Option<f64>,
-    ) -> Result<(Vec<CatalogRow>, &'static str), String> {
-        let region = self.region()?;
-        let rows = region
-            .iter()
-            .filter(|row| angular_separation(ra_deg, dec_deg, row.ra, row.dec) <= radius_deg)
-            .filter(|row| mag_limit.is_none_or(|limit| row.g.is_some_and(|mag| mag <= limit)))
-            .cloned()
-            .collect();
-        Ok((rows, TIER2_LABEL))
+    fn label(&self) -> &'static str {
+        GAIA_ONLINE_TIER.label
     }
 
-    fn depth_mag(&self) -> f64 {
-        self.query.mag_limit.unwrap_or(GAIA_MATCH_MAG_LIMIT)
+    fn cone(&self, ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Result<Vec<CatalogRow>, String> {
+        let region = self.region()?;
+        Ok(region
+            .iter()
+            .filter(|row| angular_separation(ra_deg, dec_deg, row.ra, row.dec) <= radius_deg)
+            .cloned()
+            .collect())
     }
 }
 
@@ -489,7 +472,7 @@ fn prepare_nova_upload(
         (tmp_path, Some(tmp_file), None, (naxis1, naxis2))
     };
 
-    let is_pixel_scale = request.scale_units.as_deref().is_none_or(|u| u.contains("pix"));
+    let is_pixel_scale = ScaleUnits::parse(request.scale_units.as_deref()) == Ok(ScaleUnits::ArcsecPerPixel);
     let hint_scale = if is_pixel_scale {
         ds_factor.map_or(1.0, |(fx, fy)| (fx * fy).sqrt())
     } else {
@@ -504,7 +487,12 @@ fn prepare_nova_upload(
         radius_hint: request.radius,
         scale_low: request.scale_lower.map(|v| v * hint_scale),
         scale_high: request.scale_upper.map(|v| v * hint_scale),
-        scale_units: request.scale_units.clone(),
+        scale_units: request
+            .scale_units
+            .as_deref()
+            .map(|units| ScaleUnits::parse(Some(units)).map(|parsed| parsed.nova_name().to_string()))
+            .transpose()
+            .map_err(anyhow::Error::msg)?,
         timeout_secs: settings.timeout_secs,
     };
 
@@ -558,9 +546,9 @@ async fn solve_with_nova(
     env: Arc<dyn SolveEnv>,
     request: PlateSolveRequest,
 ) -> Result<serde_json::Value, serde_json::Value> {
-    if !env.has_nova() {
+    let Some(nova) = env.nova() else {
         return Err(plain_error(NO_NOVA_MESSAGE));
-    }
+    };
     let blocking_env = Arc::clone(&env);
     let prepared = tokio::task::spawn_blocking(move || -> Result<NovaPrepared, serde_json::Value> {
         let api_key = request
@@ -588,8 +576,13 @@ async fn solve_with_nova(
         upload.height,
         upload.config.api_url
     );
-    let solve = env.nova(upload).ok_or_else(|| plain_error(NO_NOVA_MESSAGE))?;
-    let mut result = solve.await.map_err(|e| plain_error(e.to_string()))?;
+    let mut result = nova(upload).await.map_err(|error| {
+        if is_cancellation(&error) {
+            cancelled_error()
+        } else {
+            plain_error(error.to_string())
+        }
+    })?;
     finish_nova_result(&mut result, &prepared);
     serde_json::to_value(&result).map_err(|e| plain_error(e.to_string()))
 }
@@ -599,30 +592,50 @@ fn checked_near_radius(value: Option<f64>) -> Result<Option<f64>, String> {
         None => Ok(None),
         Some(r) if r.is_finite() && (0.0..=MAX_NEAR_RADIUS_DEG).contains(&r) => Ok(Some(r)),
         Some(r) => Err(format!(
-            "the near-search radius must be 0 to {MAX_NEAR_RADIUS_DEG} degrees, got {r}"
+            "The near-search radius must be 0 to {MAX_NEAR_RADIUS_DEG} degrees, got {r}"
         )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScaleUnits {
+    ArcsecPerPixel,
+    ArcminWidth,
+    DegWidth,
+}
+
+impl ScaleUnits {
+    fn parse(text: Option<&str>) -> Result<Self, String> {
+        match text.map(str::trim).filter(|u| !u.is_empty()) {
+            None => Ok(Self::ArcsecPerPixel),
+            Some(u) if u.to_ascii_lowercase().contains(SCALE_UNITS_PER_PIXEL) => Ok(Self::ArcsecPerPixel),
+            Some(u) if u.eq_ignore_ascii_case(SCALE_UNITS_ARCMIN_WIDTH) => Ok(Self::ArcminWidth),
+            Some(u) if u.eq_ignore_ascii_case(SCALE_UNITS_DEG_WIDTH) => Ok(Self::DegWidth),
+            Some(u) => Err(format!(
+                "Unknown scale units {u:?}; use {SCALE_UNITS_ARCSEC_PER_PIXEL}, {SCALE_UNITS_ARCMIN_WIDTH} or {SCALE_UNITS_DEG_WIDTH}"
+            )),
+        }
+    }
+
+    fn nova_name(self) -> &'static str {
+        match self {
+            Self::ArcsecPerPixel => SCALE_UNITS_ARCSEC_PER_PIXEL,
+            Self::ArcminWidth => SCALE_UNITS_ARCMIN_WIDTH,
+            Self::DegWidth => SCALE_UNITS_DEG_WIDTH,
+        }
     }
 }
 
 fn scale_to_arcsec_per_px(value: f64, units: Option<&str>, width: usize) -> Result<f64, String> {
     if !value.is_finite() || value <= 0.0 {
-        return Err(format!("a scale bound must be a number above 0, got {value}"));
+        return Err(format!("A scale bound must be a number above 0, got {value}"));
     }
-    let units = units.map(str::trim).filter(|u| !u.is_empty());
-    let per_px = match units {
-        None => value,
-        Some(u) if u.contains("pix") => value,
-        Some(u) if u.eq_ignore_ascii_case(SCALE_UNITS_ARCMIN_WIDTH) => {
-            value * ARCSEC_PER_ARCMIN / width.max(1) as f64
-        }
-        Some(u) if u.eq_ignore_ascii_case(SCALE_UNITS_DEG_WIDTH) => value * ARCSEC_PER_DEG / width.max(1) as f64,
-        Some(u) => {
-            return Err(format!(
-                "unknown scale units {u:?}; use arcsecperpix, {SCALE_UNITS_ARCMIN_WIDTH} or {SCALE_UNITS_DEG_WIDTH}"
-            ))
-        }
-    };
-    Ok(per_px)
+    let width = width.max(1) as f64;
+    Ok(match ScaleUnits::parse(units)? {
+        ScaleUnits::ArcsecPerPixel => value,
+        ScaleUnits::ArcminWidth => value * ARCSEC_PER_ARCMIN / width,
+        ScaleUnits::DegWidth => value * ARCSEC_PER_DEG / width,
+    })
 }
 
 fn panel_centre(request: &PlateSolveRequest) -> Result<Option<(f64, f64)>, String> {
@@ -632,9 +645,9 @@ fn panel_centre(request: &PlateSolveRequest) -> Result<Option<(f64, f64)>, Strin
             Ok(Some((ra.rem_euclid(360.0), dec)))
         }
         (Some(ra), Some(dec)) => Err(format!(
-            "the centre hint ({ra}, {dec}) is not a sky position: RA in degrees and Dec from -90 to 90"
+            "The centre hint ({ra}, {dec}) is not a sky position: RA in degrees and Dec from -90 to 90"
         )),
-        _ => Err("the centre hint needs both RA and Dec".to_string()),
+        _ => Err("The centre hint needs both RA and Dec".to_string()),
     }
 }
 
@@ -646,11 +659,11 @@ fn panel_scale(request: &PlateSolveRequest, width: usize) -> Result<Option<(f64,
             let low = scale_to_arcsec_per_px(low, units, width)?;
             let high = scale_to_arcsec_per_px(high, units, width)?;
             if low >= high {
-                return Err(format!("the scale hint {low}..{high} arcsec/px must have low below high"));
+                return Err(format!("The scale hint {low}..{high} arcsec/px must have low below high"));
             }
             Ok(Some((low, high)))
         }
-        _ => Err("the scale hint needs both a lower and an upper bound".to_string()),
+        _ => Err("The scale hint needs both a lower and an upper bound".to_string()),
     }
 }
 
@@ -708,8 +721,8 @@ fn field_of(hints: &SolveHints, width: usize, height: usize) -> FieldSize {
     }
 }
 
-pub(crate) fn attempt_order(chain: &TierChain, field: FieldSize, expected_tier0_stars: Option<f64>) -> Vec<usize> {
-    let Some((chosen, _)) = chain.choose(field, expected_tier0_stars) else {
+pub(crate) fn attempt_order(chain: &TierChain, field: FieldSize) -> Vec<usize> {
+    let Some((chosen, _)) = chain.choose(field) else {
         return Vec::new();
     };
     let is_tier0 = |tier: CatalogTier| tier == CatalogTier::Tier0;
@@ -759,66 +772,31 @@ pub(crate) fn tier2_query(hints: &SolveHints, width: usize, height: usize) -> Op
     Some(ConeQuery { max_rows, ..query })
 }
 
-struct OfflineTier {
-    tier: CatalogTier,
-    id: &'static str,
-    label: &'static str,
-    depth_mag: f64,
-    ranking: RankingKey,
-}
-
-const OFFLINE_TIERS: [OfflineTier; 3] = [
-    OfflineTier {
-        tier: CatalogTier::Tier0,
-        id: TYCHO2_ID,
-        label: TIER0_LABEL,
-        depth_mag: TIER0_DEPTH_MAG,
-        ranking: RankingKey::MAGNITUDE,
-    },
-    OfflineTier {
-        tier: CatalogTier::Tier1,
-        id: SIRIL_GAIA_ID,
-        label: TIER1_SIRIL_LABEL,
-        depth_mag: TIER1_SIRIL_DEPTH_MAG,
-        ranking: RankingKey::MAGNITUDE,
-    },
-    OfflineTier {
-        tier: CatalogTier::Tier1,
-        id: TWOMASS_ID,
-        label: TIER1_2MASS_LABEL,
-        depth_mag: TIER1_2MASS_DEPTH_MAG,
-        ranking: RankingKey::TWO_MASS_J_KS,
-    },
+const OFFLINE_TIERS: [(&str, TierSpec); 3] = [
+    (TYCHO2_ID, TYCHO2_TIER),
+    (SIRIL_GAIA_ID, SIRIL_GAIA_TIER),
+    (TWOMASS_ID, TWOMASS_TIER),
 ];
 
 pub(crate) fn offline_tiers(store: &CatalogStore, config: &AppConfig) -> TierSet {
     let mut set = TierSet::default();
-    for offline in &OFFLINE_TIERS {
+    for (id, spec) in OFFLINE_TIERS {
         let installed = matches!(
-            store.status(offline.id, config),
+            store.status(id, config),
             Ok(DatasetStatus::Installed { .. } | DatasetStatus::External { .. })
         );
         if !installed {
-            if offline.tier == CatalogTier::Tier0 {
+            if spec.tier == CatalogTier::Tier0 {
                 set.notes.push(format!(
                     "{}: the bundled Tycho-2 catalogue was not found in this installation",
-                    offline.label
+                    spec.label
                 ));
             }
             continue;
         }
-        match store.open(offline.id, config, PLATE_SOLVE_HOLDER) {
-            Ok(lease) => set.push(
-                offline.tier,
-                offline.label,
-                Box::new(StoreProvider {
-                    lease,
-                    label: offline.label,
-                    depth_mag: offline.depth_mag,
-                    ranking: offline.ranking,
-                }),
-            ),
-            Err(error) => set.notes.push(format!("{}: skipped, {error}", offline.label)),
+        match store.open(id, config, PLATE_SOLVE_HOLDER) {
+            Ok(lease) => set.push(spec.tier, Box::new(StoreProvider { lease, spec })),
+            Err(error) => set.notes.push(format!("{}: skipped, {error}", spec.label)),
         }
     }
     set
@@ -828,15 +806,14 @@ pub(crate) fn add_online_tier(
     set: &mut TierSet,
     request: &TierRequest<'_>,
     online: Option<GaiaFetch>,
-    cancelled: CancelCheck,
+    cancelled: SharedCancelCheck,
 ) {
     if !request.online {
         return;
     }
     if let (Some(fetch), Some(query)) = (online, tier2_query(request.hints, request.width, request.height)) {
         set.push(
-            CatalogTier::Tier2,
-            TIER2_LABEL,
+            GAIA_ONLINE_TIER.tier,
             Box::new(GaiaRegionProvider::new(query, fetch, cancelled)),
         );
     }
@@ -855,8 +832,9 @@ fn missing_hints(hints: &SolveHints) -> Vec<&'static str> {
 
 fn fallback_context(env: &dyn SolveEnv) -> serde_json::Map<String, serde_json::Value> {
     let mut context = serde_json::Map::new();
-    context.insert("canFallback".into(), json!(env.has_nova()));
-    context.insert("apiKeyStored".into(), json!(env.has_nova() && env.stored_api_key().is_some()));
+    let can_fallback = env.nova().is_some();
+    context.insert("canFallback".into(), json!(can_fallback));
+    context.insert("apiKeyStored".into(), json!(can_fallback && env.stored_api_key().is_some()));
     context
 }
 
@@ -869,6 +847,20 @@ fn missing_hint_error(env: &dyn SolveEnv, missing: &[&str], hints: &SolveHints) 
         format!(
             "The offline solver needs an approximate {} and none was found in the header or the panel; type it in the hint fields, or try astrometry.net, which can solve without hints",
             missing.join(" and a pixel ")
+        ),
+        serde_json::Value::Object(context),
+    )
+}
+
+fn unusable_hint_error(env: &dyn SolveEnv, failure: &SolveFailure, hints: &SolveHints) -> serde_json::Value {
+    let mut context = fallback_context(env);
+    context.insert("missing".into(), json!([]));
+    context.insert("warnings".into(), json!(hints.warnings));
+    coded_error(
+        CODE_LOCAL_MISSING_HINT,
+        format!(
+            "The offline solver cannot use the hints: {}; correct them in the hint fields, or try astrometry.net, which can solve without hints",
+            failure.message
         ),
         serde_json::Value::Object(context),
     )
@@ -907,7 +899,7 @@ fn no_solution_error(
         "best".into(),
         best.map_or(serde_json::Value::Null, |(index, best)| {
             json!({
-                "catalog": tiers.labels[index],
+                "catalog": tiers.label(index),
                 "centre": [best.centre.0, best.centre.1],
                 "matched": best.matched,
                 "predicted": best.predicted,
@@ -918,6 +910,10 @@ fn no_solution_error(
         }),
     );
     context.insert("expectedTier0Stars".into(), json!(expected));
+    context.insert("tier0MinExpectedStars".into(), json!(TIER0_MIN_EXPECTED_STARS));
+    let acceptance = LocalSolveParams::default();
+    context.insert("minMatches".into(), json!(acceptance.min_matches));
+    context.insert("maxRmsPx".into(), json!(acceptance.max_rms_px));
     context.insert(
         "centresTried".into(),
         json!(tried.iter().map(|(_, f)| f.centres_tried).sum::<usize>()),
@@ -931,7 +927,7 @@ fn no_solution_error(
         json!(tried
             .iter()
             .map(|(index, failure)| json!({
-                "catalog": tiers.labels[*index],
+                "catalog": tiers.label(*index),
                 "tier": tier_number(tiers.chain.tiers[*index].0),
                 "message": failure.message,
                 "centresTried": failure.centres_tried,
@@ -941,7 +937,10 @@ fn no_solution_error(
     context.insert("notes".into(), json!(tiers.notes));
     let attempts: Vec<String> = tried
         .iter()
-        .map(|(index, failure)| format!("{}: {}", tiers.labels[*index], failure.message))
+        .map(|(index, failure)| match failure.reason {
+            FailureReason::TooFewStars => failure.message.clone(),
+            _ => format!("{}: {}", tiers.label(*index), failure.message),
+        })
         .collect();
     coded_error(
         CODE_LOCAL_NO_SOLUTION,
@@ -1009,10 +1008,8 @@ fn solve_locally(
         online,
     });
     let field = field_of(&hints, width, height);
-    let expected = hints
-        .expected_tier0_stars
-        .unwrap_or(TIER0_MEAN_STARS_PER_DEG2 * field.width_deg * field.height_deg);
-    let order = attempt_order(&tiers.chain, field, hints.expected_tier0_stars);
+    let expected = expected_tier0_stars(field);
+    let order = attempt_order(&tiers.chain, field);
     if order.is_empty() {
         return Err(no_catalogue_error(env, &tiers.notes, expected));
     }
@@ -1021,20 +1018,22 @@ fn solve_locally(
         .scale
         .as_ref()
         .map_or(0.0, |scale| tier2_reach_deg(scale, width, height));
+    env.stage(STAGE_DETECT);
+    let detections = detect_for_solve(&loaded.arr, &hints, &LocalSolveParams::default());
     let mut tried: Vec<(usize, SolveFailure)> = Vec::new();
     for index in order {
         let (tier, provider) = &tiers.chain.tiers[index];
-        let label = tiers.labels[index];
+        let label = provider.label();
         let params = tier_params(*tier, near_radius, tier2_reach);
         let stage = |text: &str| env.stage(&format!("{label}: {text}"));
         let cancel = || env.cancelled();
-        match solve_local(&loaded.arr, &hints, provider.as_ref(), &params, &cancel, &stage) {
+        match solve_stars(&detections, (width, height), &hints, provider.as_ref(), &params, &cancel, &stage) {
             Ok(solution) => {
                 let mut warnings = tiers.notes.clone();
                 warnings.extend(
                     tried
                         .iter()
-                        .map(|(i, failure)| format!("{}: {}", tiers.labels[*i], failure.message)),
+                        .map(|(i, failure)| format!("{}: {}", tiers.label(*i), failure.message)),
                 );
                 warnings.extend(solution.warnings.iter().cloned());
                 let result = SolveResult {
@@ -1047,6 +1046,13 @@ fn solve_locally(
             }
             Err(failure) if failure.reason == FailureReason::Cancelled || env.cancelled() => {
                 return Err(cancelled_error())
+            }
+            Err(failure) if failure.reason == FailureReason::MissingHint => {
+                return Err(unusable_hint_error(env, &failure, &hints))
+            }
+            Err(failure) if failure.reason == FailureReason::TooFewStars => {
+                tried.push((index, failure));
+                break;
             }
             Err(failure) if *tier == CatalogTier::Tier2 => {
                 tried.push((index, with_search_note(failure, requested_radius, tier2_reach)))
@@ -1094,29 +1100,26 @@ impl SolveEnv for AppSolveEnv {
         })
     }
 
-    fn has_nova(&self) -> bool {
-        cfg!(feature = "astrometry-net")
-    }
-
     #[cfg(feature = "astrometry-net")]
-    fn nova(&self, upload: NovaUpload) -> Option<NovaFuture> {
+    fn nova(&self) -> Option<NovaSolve> {
         let progress = self.progress.clone();
-        Some(Box::pin(async move {
-            let cancelled = move || progress.is_cancelled();
-            crate::infra::astrometry::plate_solve::solve_astrometry_net(
-                &upload.path,
-                upload.width,
-                upload.height,
-                &upload.config,
-                &cancelled,
-            )
-            .await
+        Some(Box::new(move |upload: NovaUpload| -> NovaFuture {
+            Box::pin(async move {
+                let cancelled = move || progress.is_cancelled();
+                crate::infra::astrometry::plate_solve::solve_astrometry_net(
+                    &upload.path,
+                    upload.width,
+                    upload.height,
+                    &upload.config,
+                    &cancelled,
+                )
+                .await
+            })
         }))
     }
 
     #[cfg(not(feature = "astrometry-net"))]
-    fn nova(&self, upload: NovaUpload) -> Option<NovaFuture> {
-        drop(upload);
+    fn nova(&self) -> Option<NovaSolve> {
         None
     }
 
@@ -1182,7 +1185,6 @@ pub(crate) fn solve_hints_json(hints: &SolveHints) -> serde_json::Value {
             "ra": o.ra,
             "dec": o.dec,
         })),
-        "expected_tier0_stars": hints.expected_tier0_stars,
         "warnings": hints.warnings,
     })
 }
@@ -1420,7 +1422,7 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
             RES_NAXIS2: naxis2,
             RES_ROTATION_DEG: orientation.rotation_deg,
             RES_FLIPPED: orientation.flipped,
-            RES_PARITY: if orientation.flipped { PARITY_FLIPPED } else { PARITY_NORMAL },
+            RES_PARITY: parity_name(orientation.flipped),
             RES_PIXEL_SCALE_X_ARCSEC: orientation.pixel_scale_x_arcsec,
             RES_PIXEL_SCALE_Y_ARCSEC: orientation.pixel_scale_y_arcsec,
             RES_PROJECTION: orientation.projection,
@@ -1436,7 +1438,7 @@ pub async fn get_wcs_info(path: String) -> Result<serde_json::Value, String> {
             RES_GWCS_VS_SIP_MAX_MAS: gwcs.and_then(|g| g.vs_header_sip_max_mas),
             RES_GWCS_VS_SIP_MAX_PX: gwcs.and_then(|g| g.vs_header_sip_max_px),
             RES_GWCS_REFUSAL: wcs.gwcs_refusal(),
-            RES_WCS_WARNING: (wcs.kind() == WcsKind::Header).then(|| tan_pv_warning(&header)).flatten(),
+            RES_WCS_WARNING: wcs.pv_warning(),
         }))
     })
 }
@@ -2408,12 +2410,13 @@ mod tests {
 
         use super::super::{
             add_online_tier, attempt_order, header_solve_hints, offline_tiers, run_plate_solve, tier2_query,
-            with_panel_hints, CancelCheck, GaiaFetch, GaiaRegionProvider, NovaFuture, NovaSettings, NovaUpload,
-            PlateSolveRequest,
-            SolveEnv, TierRequest, TierSet, TIER0_LABEL, TIER1_2MASS_LABEL, TIER1_SIRIL_LABEL, TIER2_LABEL,
+            with_panel_hints, GaiaFetch, GaiaRegionProvider, NovaFuture, NovaSettings, NovaSolve, NovaUpload,
+            PlateSolveRequest, SharedCancelCheck, SolveEnv, TierRequest, TierSet, TIER0_LABEL, TIER1_2MASS_LABEL,
+            TIER1_SIRIL_LABEL, TIER2_LABEL,
         };
         use crate::core::astrometry::catalog::{CatalogRow, ConeQuery, GAIA_MATCH_MAG_LIMIT, MAX_CONE_RADIUS_DEG};
         use crate::core::astrometry::healpix_cat::{write_catalog, CatHeader, CatalogStar, Record};
+        use crate::core::astrometry::local_solve::synthetic::{add_noise, catalog_row, random_in_cap, SyntheticProvider};
         use crate::core::astrometry::local_solve::{CatalogProvider, CatalogTier, FieldSize, TierChain};
         use crate::core::astrometry::solve_hints::{Pointing, ScaleRange, SolveHints};
         use crate::core::astrometry::wcs::{angular_separation, WcsTransform};
@@ -2439,39 +2442,11 @@ mod tests {
         const FWHM_PX: f64 = 3.0;
         const ARCSEC_PER_RADIAN: f64 = 206_264.806;
 
-        struct MemoryProvider {
-            rows: Vec<CatalogRow>,
-            label: &'static str,
-        }
-
-        impl CatalogProvider for MemoryProvider {
-            fn cone(
-                &self,
-                ra_deg: f64,
-                dec_deg: f64,
-                radius_deg: f64,
-                mag_limit: Option<f64>,
-            ) -> Result<(Vec<CatalogRow>, &'static str), String> {
-                let rows = self
-                    .rows
-                    .iter()
-                    .filter(|row| angular_separation(ra_deg, dec_deg, row.ra, row.dec) <= radius_deg)
-                    .filter(|row| mag_limit.is_none_or(|limit| row.g.is_some_and(|mag| mag <= limit)))
-                    .cloned()
-                    .collect();
-                Ok((rows, self.label))
-            }
-
-            fn depth_mag(&self) -> f64 {
-                SKY_DEPTH_MAG
-            }
-        }
-
         struct FakeEnv {
             tiers: Mutex<Option<TierSet>>,
             stored_key: Option<String>,
             nova_url: String,
-            nova_calls: AtomicUsize,
+            nova_calls: Arc<AtomicUsize>,
             stages: Mutex<Vec<String>>,
             cancel: Arc<AtomicBool>,
         }
@@ -2482,7 +2457,7 @@ mod tests {
                     tiers: Mutex::new(Some(tiers)),
                     stored_key: stored_key.map(str::to_string),
                     nova_url: nova.base.clone(),
-                    nova_calls: AtomicUsize::new(0),
+                    nova_calls: Arc::new(AtomicUsize::new(0)),
                     stages: Mutex::new(Vec::new()),
                     cancel: Arc::new(AtomicBool::new(false)),
                 })
@@ -2509,30 +2484,27 @@ mod tests {
                 })
             }
 
-            fn has_nova(&self) -> bool {
-                cfg!(feature = "astrometry-net")
-            }
-
             #[cfg(feature = "astrometry-net")]
-            fn nova(&self, upload: NovaUpload) -> Option<NovaFuture> {
-                self.nova_calls.fetch_add(1, Ordering::SeqCst);
-                Some(Box::pin(async move {
-                    let never = || false;
-                    crate::infra::astrometry::plate_solve::solve_astrometry_net(
-                        &upload.path,
-                        upload.width,
-                        upload.height,
-                        &upload.config,
-                        &never,
-                    )
-                    .await
+            fn nova(&self) -> Option<NovaSolve> {
+                let calls = Arc::clone(&self.nova_calls);
+                Some(Box::new(move |upload: NovaUpload| -> NovaFuture {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        let never = || false;
+                        crate::infra::astrometry::plate_solve::solve_astrometry_net(
+                            &upload.path,
+                            upload.width,
+                            upload.height,
+                            &upload.config,
+                            &never,
+                        )
+                        .await
+                    })
                 }))
             }
 
             #[cfg(not(feature = "astrometry-net"))]
-            fn nova(&self, upload: NovaUpload) -> Option<NovaFuture> {
-                self.nova_calls.fetch_add(1, Ordering::SeqCst);
-                drop(upload);
+            fn nova(&self) -> Option<NovaSolve> {
                 None
             }
 
@@ -2545,33 +2517,6 @@ mod tests {
             }
         }
 
-        fn catalog_row(index: usize, ra: f64, dec: f64, mag: f64) -> CatalogRow {
-            CatalogRow {
-                id: format!("syn{index}"),
-                ra,
-                dec,
-                ra_epoch: ra,
-                dec_epoch: dec,
-                pm_ra_masyr: None,
-                pm_dec_masyr: None,
-                g: Some(mag),
-                bp: None,
-                rp: None,
-                bp_rp: None,
-                parallax_mas: None,
-                teff_k: None,
-            }
-        }
-
-        fn destination((ra, dec): (f64, f64), bearing_deg: f64, distance_deg: f64) -> (f64, f64) {
-            let (ra1, dec1) = (ra.to_radians(), dec.to_radians());
-            let (bearing, distance) = (bearing_deg.to_radians(), distance_deg.to_radians());
-            let dec2 = (dec1.sin() * distance.cos() + dec1.cos() * distance.sin() * bearing.cos()).asin();
-            let ra2 = ra1
-                + (bearing.sin() * distance.sin() * dec1.cos()).atan2(distance.cos() - dec1.sin() * dec2.sin());
-            (ra2.to_degrees().rem_euclid(360.0), dec2.to_degrees())
-        }
-
         fn sky_rows(seed: u64) -> Vec<CatalogRow> {
             let mut rng = StdRng::seed_from_u64(seed);
             let cap_area = 2.0 * std::f64::consts::PI * (1.0 - SKY_CAP_DEG.to_radians().cos())
@@ -2580,12 +2525,9 @@ mod tests {
             let (bright, faint) = (10f64.powf(0.4 * SKY_BRIGHT_MAG), 10f64.powf(0.4 * SKY_DEPTH_MAG));
             (0..count)
                 .map(|index| {
-                    let cos_min = SKY_CAP_DEG.to_radians().cos();
-                    let cos_theta = cos_min + (1.0 - cos_min) * rng.gen::<f64>();
-                    let distance = cos_theta.acos().to_degrees();
-                    let (ra, dec) = destination(SKY_CENTRE, 360.0 * rng.gen::<f64>(), distance);
+                    let (ra, dec) = random_in_cap(&mut rng, SKY_CENTRE, SKY_CAP_DEG);
                     let mag = (bright + rng.gen::<f64>() * (faint - bright)).log10() / 0.4;
-                    catalog_row(index, ra, dec, mag)
+                    catalog_row(index, ra, dec, Some(mag))
                 })
                 .collect()
         }
@@ -2612,13 +2554,8 @@ mod tests {
             WcsTransform::from_header(&make_header(&pairs)).unwrap()
         }
 
-        fn add_noise(image: &mut ndarray::Array2<f32>, seed: u64) {
-            let mut rng = StdRng::seed_from_u64(seed);
-            for value in image.iter_mut() {
-                let (u1, u2): (f64, f64) = (rng.gen::<f64>().max(1e-12), rng.gen());
-                let gauss = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-                *value += (BACKGROUND + NOISE_SIGMA * gauss) as f32;
-            }
+        fn noisy(image: &mut ndarray::Array2<f32>, seed: u64) {
+            add_noise(image, BACKGROUND, NOISE_SIGMA, &mut StdRng::seed_from_u64(seed));
         }
 
         fn header_without_wcs(pointing: bool) -> crate::types::header::HduHeader {
@@ -2654,7 +2591,7 @@ mod tests {
                 })
                 .collect();
             let mut image = render_stars(&stars, &GaussianPsf::from_fwhm(FWHM_PX), w as u32, h as u32);
-            add_noise(&mut image, 7);
+            noisy(&mut image, 7);
             let path = dir.join("sky.fits").to_string_lossy().to_string();
             crate::infra::fits::writer::write_fits_mono(&path, &image, Some(&header_without_wcs(true))).unwrap();
             path
@@ -2663,7 +2600,7 @@ mod tests {
         fn write_noise_frame(dir: &Path, name: &str, pointing: bool) -> String {
             let (w, h) = SKY_FRAME;
             let mut image = ndarray::Array2::<f32>::zeros((h, w));
-            add_noise(&mut image, 11);
+            noisy(&mut image, 11);
             let path = dir.join(name).to_string_lossy().to_string();
             crate::infra::fits::writer::write_fits_mono(&path, &image, Some(&header_without_wcs(pointing))).unwrap();
             path
@@ -2671,15 +2608,12 @@ mod tests {
 
         fn memory_tiers(rows: &[CatalogRow]) -> TierSet {
             let mut set = TierSet::default();
-            set.push(
-                CatalogTier::Tier0,
-                TIER0_LABEL,
-                Box::new(MemoryProvider {
-                    rows: rows.to_vec(),
-                    label: TIER0_LABEL,
-                }),
-            );
+            set.push(CatalogTier::Tier0, Box::new(SyntheticProvider::new(TIER0_LABEL, rows.to_vec())));
             set
+        }
+
+        fn labels(set: &TierSet) -> Vec<&'static str> {
+            set.chain.tiers.iter().map(|(_, provider)| provider.label()).collect()
         }
 
         fn request(path: &str) -> PlateSolveRequest {
@@ -2694,7 +2628,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn plate_solve_cmd_routes_local_first_and_never_uploads_without_a_key() {
+        async fn auto_solves_on_the_offline_tier_and_reports_the_solution_without_uploading() {
             let dir = tempfile::tempdir().unwrap();
             let rows = sky_rows(3);
             let sky = write_sky_frame(dir.path(), &rows);
@@ -2724,6 +2658,16 @@ mod tests {
             assert!(env.stages.lock().unwrap().iter().any(|s| s.starts_with(TIER0_LABEL)), "{:?}", env.stages);
             assert_eq!(env.nova_calls(), 0);
             assert!(nova.requests().is_empty(), "{:?}", nova.requests());
+        }
+
+        #[tokio::test]
+        async fn write_wcs_of_an_offline_solution_reads_back_the_solved_centre() {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = sky_rows(3);
+            let sky = write_sky_frame(dir.path(), &rows);
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let solved = run_plate_solve(FakeEnv::new(memory_tiers(&rows), None, &nova), request(&sky)).await.unwrap();
+            let (ra, dec) = (solved["center_ra"].as_f64().unwrap(), solved["center_dec"].as_f64().unwrap());
 
             let cards: Vec<(String, String)> = serde_json::from_value(solved["wcs_cards"].clone()).unwrap();
             let out = dir.path().join("out").to_string_lossy().to_string();
@@ -2731,7 +2675,13 @@ mod tests {
             let info = super::super::get_wcs_info(written["fits_path"].as_str().unwrap().to_string()).await.unwrap();
             let round_trip = angular_separation(ra, dec, info["center_ra"].as_f64().unwrap(), info["center_dec"].as_f64().unwrap()) * 3600.0;
             assert!(round_trip <= 0.01, "Write WCS round trip moved the centre by {round_trip} arcsec");
+        }
 
+        #[tokio::test]
+        async fn an_offline_failure_never_falls_back_to_astrometry_net_on_its_own() {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = sky_rows(3);
+            let nova = serve(Resource::new(b"{}".to_vec()));
             let noise = write_noise_frame(dir.path(), "noise.fits", true);
             let keyed = FakeEnv::new(memory_tiers(&rows), Some("stored-key"), &nova);
             let refused = run_plate_solve(keyed.clone(), request(&noise)).await.unwrap_err();
@@ -2742,41 +2692,61 @@ mod tests {
             assert!(refused["message"].as_str().unwrap().starts_with("No offline solution"), "{refused}");
             assert_eq!(keyed.nova_calls(), 0, "a local failure fell back to astrometry.net on its own");
             assert!(nova.requests().is_empty(), "{:?}", nova.requests());
+        }
 
-            let keyless = FakeEnv::new(TierSet::default(), None, &nova);
-            let explicit = PlateSolveRequest {
+        fn explicit_nova(path: &str) -> PlateSolveRequest {
+            PlateSolveRequest {
                 solver: Some("astrometry.net".into()),
-                ..request(&sky)
-            };
-            let refused = run_plate_solve(keyless.clone(), explicit.clone()).await.unwrap_err();
+                ..request(path)
+            }
+        }
+
+        #[tokio::test]
+        async fn astrometry_net_without_a_key_is_refused_before_any_upload() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_noise_frame(dir.path(), "keyless.fits", true);
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let keyless = FakeEnv::new(TierSet::default(), None, &nova);
+            let refused = run_plate_solve(keyless.clone(), explicit_nova(&path)).await.unwrap_err();
             if cfg!(feature = "astrometry-net") {
                 assert_eq!(code(&refused), "astrometry_net_no_key", "{refused}");
                 let message = refused["message"].as_str().unwrap();
                 assert!(message.contains("save it in Settings") && !message.contains("panel"), "{message}");
             } else {
-                assert!(refused.as_str().unwrap().contains("astrometry-net"), "{refused}");
+                assert_eq!(refused.as_str(), Some("This build cannot use astrometry.net"), "{refused}");
             }
             assert_eq!(keyless.nova_calls(), 0);
             assert!(nova.requests().is_empty(), "{:?}", nova.requests());
+        }
 
-            let unknown = run_plate_solve(keyless.clone(), PlateSolveRequest { solver: Some("blind".into()), ..request(&sky) })
+        #[tokio::test]
+        async fn an_unknown_solver_is_refused_naming_the_choices() {
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let env = FakeEnv::new(TierSet::default(), None, &nova);
+            let unknown = run_plate_solve(env, PlateSolveRequest { solver: Some("blind".into()), ..request("unused.fits") })
                 .await
                 .unwrap_err();
             let unknown = unknown.as_str().unwrap();
-            assert!(unknown.contains("\"blind\"") && unknown.contains("auto, local, astrometry.net"), "{unknown}");
+            assert!(unknown.starts_with("Unknown solver \"blind\""), "{unknown}");
+            assert!(unknown.contains("auto, local, astrometry.net"), "{unknown}");
+        }
 
-            if cfg!(feature = "astrometry-net") {
-                let typed = FakeEnv::new(TierSet::default(), None, &nova);
-                let with_key = PlateSolveRequest {
-                    api_key: Some("typed-key".into()),
-                    ..explicit
-                };
-                let answered = run_plate_solve(typed.clone(), with_key).await.unwrap_err();
-                assert_eq!(typed.nova_calls(), 1);
-                let seen = nova.requests();
-                assert_eq!(seen.first().map(|r| r.target.as_str()), Some("/api/login"), "{seen:?}");
-                assert!(answered.as_str().unwrap().contains("login"), "{answered}");
-            }
+        #[cfg(feature = "astrometry-net")]
+        #[tokio::test]
+        async fn a_typed_key_sends_the_image_to_astrometry_net() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_noise_frame(dir.path(), "typed.fits", true);
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let typed = FakeEnv::new(TierSet::default(), None, &nova);
+            let with_key = PlateSolveRequest {
+                api_key: Some("typed-key".into()),
+                ..explicit_nova(&path)
+            };
+            let answered = run_plate_solve(typed.clone(), with_key).await.unwrap_err();
+            assert_eq!(typed.nova_calls(), 1);
+            let seen = nova.requests();
+            assert_eq!(seen.first().map(|r| r.target.as_str()), Some("/api/login"), "{seen:?}");
+            assert!(answered.as_str().unwrap().contains("login"), "{answered}");
         }
 
         #[tokio::test]
@@ -2786,11 +2756,7 @@ mod tests {
             let sky = write_sky_frame(dir.path(), &rows);
             let nova = serve(Resource::new(b"{}".to_vec()));
             let mut siril = TierSet::default();
-            siril.push(
-                CatalogTier::Tier1,
-                TIER1_SIRIL_LABEL,
-                Box::new(MemoryProvider { rows: rows.clone(), label: TIER1_SIRIL_LABEL }),
-            );
+            siril.push(CatalogTier::Tier1, Box::new(SyntheticProvider::new(TIER1_SIRIL_LABEL, rows.clone())));
 
             let on_siril = run_plate_solve(FakeEnv::new(siril, None, &nova), request(&sky)).await.unwrap();
             let on_tycho = run_plate_solve(FakeEnv::new(memory_tiers(&rows), None, &nova), request(&sky)).await.unwrap();
@@ -2848,12 +2814,12 @@ mod tests {
         struct NamedProvider(&'static str);
 
         impl CatalogProvider for NamedProvider {
-            fn cone(&self, _: f64, _: f64, _: f64, _: Option<f64>) -> Result<(Vec<CatalogRow>, &'static str), String> {
-                Ok((Vec::new(), self.0))
+            fn label(&self) -> &'static str {
+                self.0
             }
 
-            fn depth_mag(&self) -> f64 {
-                12.0
+            fn cone(&self, _: f64, _: f64, _: f64) -> Result<Vec<CatalogRow>, String> {
+                Ok(Vec::new())
             }
         }
 
@@ -2872,13 +2838,12 @@ mod tests {
             let small = FieldSize { width_deg: 0.3, height_deg: 0.2 };
             let wide = FieldSize { width_deg: 3.0, height_deg: 2.0 };
             let full = chain(&[Tier0, Tier1, Tier1, Tier2]);
-            assert_eq!(attempt_order(&full, small, None), [1, 2, 3, 0]);
-            assert_eq!(attempt_order(&full, wide, None), [0, 1, 2, 3]);
-            assert_eq!(attempt_order(&full, small, Some(80.0)), [0, 1, 2, 3]);
-            assert_eq!(attempt_order(&chain(&[Tier0, Tier2]), small, None), [1, 0]);
-            assert_eq!(attempt_order(&chain(&[Tier0]), small, None), [0]);
-            assert_eq!(attempt_order(&chain(&[Tier1]), wide, None), [0]);
-            assert!(attempt_order(&chain(&[]), wide, None).is_empty());
+            assert_eq!(attempt_order(&full, small), [1, 2, 3, 0]);
+            assert_eq!(attempt_order(&full, wide), [0, 1, 2, 3]);
+            assert_eq!(attempt_order(&chain(&[Tier0, Tier2]), small), [1, 0]);
+            assert_eq!(attempt_order(&chain(&[Tier0]), small), [0]);
+            assert_eq!(attempt_order(&chain(&[Tier1]), wide), [0]);
+            assert!(attempt_order(&chain(&[]), wide).is_empty());
         }
 
         fn hints(centre: (f64, f64), scale: (f64, f64)) -> SolveHints {
@@ -2939,9 +2904,9 @@ mod tests {
         fn the_online_tier_fetches_one_region_and_serves_every_solver_cone_from_it() {
             let calls = Arc::new(AtomicUsize::new(0));
             let rows = vec![
-                catalog_row(0, 10.0, 20.0, 9.0),
-                catalog_row(1, 10.3, 20.0, 15.0),
-                catalog_row(2, 12.0, 20.0, 10.0),
+                catalog_row(0, 10.0, 20.0, Some(9.0)),
+                catalog_row(1, 10.3, 20.0, Some(15.0)),
+                catalog_row(2, 12.0, 20.0, Some(10.0)),
             ];
             let counted = Arc::clone(&calls);
             let served = rows.clone();
@@ -2952,12 +2917,10 @@ mod tests {
             });
             let query = tier2_query(&hints((10.0, 20.0), (1.0, 1.2)), 2000, 1500).unwrap();
             let provider = GaiaRegionProvider::new(query, fetch, never_cancelled());
-            let (near, label) = provider.cone(10.0, 20.0, 0.5, None).unwrap();
-            assert_eq!(label, TIER2_LABEL);
-            assert_eq!(near.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["syn0", "syn1"]);
-            let (bright, _) = provider.cone(10.0, 20.0, 0.5, Some(12.0)).unwrap();
-            assert_eq!(bright.len(), 1);
-            let (far, _) = provider.cone(12.0, 20.0, 0.1, None).unwrap();
+            assert_eq!(provider.label(), TIER2_LABEL);
+            let near = provider.cone(10.0, 20.0, 0.5).unwrap();
+            assert_eq!(near.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["S0", "S1"]);
+            let far = provider.cone(12.0, 20.0, 0.1).unwrap();
             assert_eq!(far.len(), 1);
             assert_eq!(calls.load(Ordering::SeqCst), 1, "every cone must come from the one region query");
 
@@ -2967,11 +2930,11 @@ mod tests {
                 failing,
                 never_cancelled(),
             );
-            let error = offline.cone(10.0, 20.0, 0.5, None).unwrap_err();
+            let error = offline.cone(10.0, 20.0, 0.5).unwrap_err();
             assert!(!error.contains(TIER2_LABEL) && error.contains("connection refused"), "{error}");
         }
 
-        fn never_cancelled() -> CancelCheck {
+        fn never_cancelled() -> SharedCancelCheck {
             Arc::new(|| false)
         }
 
@@ -2994,24 +2957,20 @@ mod tests {
             let solve_hints = hints((10.0, 20.0), (1.0, 1.2));
             let offline_only = TierRequest { hints: &solve_hints, width: 2000, height: 1500, online: false };
             add_online_tier(&mut set, &offline_only, Some(Arc::clone(&fetch)), never_cancelled());
-            assert!(set.labels.is_empty(), "solver \"local\" never goes online");
+            assert!(labels(&set).is_empty(), "solver \"local\" never goes online");
             let auto = TierRequest { online: true, ..offline_only };
             add_online_tier(&mut set, &auto, None, never_cancelled());
-            assert!(set.labels.is_empty(), "a build without VizieR has no online tier");
+            assert!(labels(&set).is_empty(), "a build without VizieR has no online tier");
             add_online_tier(&mut set, &auto, Some(fetch), never_cancelled());
-            assert_eq!(set.labels, [TIER2_LABEL]);
+            assert_eq!(labels(&set), [TIER2_LABEL]);
             assert_eq!(set.chain.tiers[0].0, CatalogTier::Tier2);
         }
 
-        fn online_tiers(fetch: GaiaFetch, cancelled: CancelCheck) -> TierSet {
+        fn online_tiers(fetch: GaiaFetch, cancelled: SharedCancelCheck) -> TierSet {
             let region = hints(SKY_CENTRE, (0.9 * SKY_SCALE_ARCSEC, 1.1 * SKY_SCALE_ARCSEC));
             let query = tier2_query(&region, SKY_FRAME.0, SKY_FRAME.1).unwrap();
             let mut set = TierSet::default();
-            set.push(
-                CatalogTier::Tier2,
-                TIER2_LABEL,
-                Box::new(GaiaRegionProvider::new(query, fetch, cancelled)),
-            );
+            set.push(CatalogTier::Tier2, Box::new(GaiaRegionProvider::new(query, fetch, cancelled)));
             set
         }
 
@@ -3093,6 +3052,158 @@ mod tests {
             assert_eq!(code(&refused), "cancelled", "{refused}");
         }
 
+        fn write_few_star_frame(dir: &Path, count: usize) -> String {
+            let (w, h) = SKY_FRAME;
+            let stars: Vec<Star> = (0..count)
+                .map(|i| Star {
+                    x: 150.0 + 160.0 * i as f64,
+                    y: 120.0 + 110.0 * i as f64,
+                    z: 0.0,
+                    flux: 40.0 * FLUX_AT_DEPTH,
+                    temperature: 5800.0,
+                })
+                .collect();
+            let mut image = render_stars(&stars, &GaussianPsf::from_fwhm(FWHM_PX), w as u32, h as u32);
+            noisy(&mut image, 13);
+            let path = dir.join("few.fits").to_string_lossy().to_string();
+            crate::infra::fits::writer::write_fits_mono(&path, &image, Some(&header_without_wcs(true))).unwrap();
+            path
+        }
+
+        fn three_tiers(rows: &[CatalogRow]) -> TierSet {
+            let mut set = online_tiers(Arc::new(|_: &ConeQuery| Ok(Vec::new())), never_cancelled());
+            set.push(CatalogTier::Tier0, Box::new(SyntheticProvider::new(TIER0_LABEL, rows.to_vec())));
+            set.push(CatalogTier::Tier1, Box::new(SyntheticProvider::new(TIER1_2MASS_LABEL, rows.to_vec())));
+            set
+        }
+
+        #[tokio::test]
+        async fn too_few_stars_are_detected_once_and_reported_once_however_many_tiers_are_installed() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_few_star_frame(dir.path(), 5);
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let env = FakeEnv::new(three_tiers(&sky_rows(3)), None, &nova);
+
+            let refused = run_plate_solve(env.clone(), request(&path)).await.unwrap_err();
+
+            assert_eq!(code(&refused), "local_no_solution", "{refused}");
+            let message = refused["message"].as_str().unwrap();
+            assert_eq!(message.matches("usable stars detected").count(), 1, "{message}");
+            assert!(!message.contains("not the requested"), "a star count is not a search-radius problem: {message}");
+            let stages = env.stages.lock().unwrap().clone();
+            assert_eq!(stages.iter().filter(|stage| stage.ends_with("detect")).count(), 1, "{stages:?}");
+        }
+
+        #[tokio::test]
+        async fn an_unusable_scale_hint_is_a_hint_problem_named_once_not_a_failure_per_tier() {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = sky_rows(3);
+            let sky = write_sky_frame(dir.path(), &rows);
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let env = FakeEnv::new(three_tiers(&rows), None, &nova);
+            let too_wide = PlateSolveRequest {
+                scale_lower: Some(600.0),
+                scale_upper: Some(700.0),
+                ..request(&sky)
+            };
+
+            let refused = run_plate_solve(env, too_wide).await.unwrap_err();
+
+            assert_eq!(code(&refused), "local_missing_hint", "{refused}");
+            let message = refused["message"].as_str().unwrap();
+            assert_eq!(message.matches("unusable scale hint").count(), 1, "{message}");
+            assert!(message.contains("600..700 arcsec/px") && message.contains("typed in the panel"), "{message}");
+        }
+
+        #[tokio::test]
+        async fn a_local_failure_carries_the_acceptance_thresholds_the_panel_quotes() {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = sky_rows(3);
+            let noise = write_noise_frame(dir.path(), "noise.fits", true);
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let refused = run_plate_solve(FakeEnv::new(memory_tiers(&rows), None, &nova), request(&noise)).await.unwrap_err();
+            assert_eq!(code(&refused), "local_no_solution", "{refused}");
+            let defaults = crate::core::astrometry::local_solve::LocalSolveParams::default();
+            let context = &refused["context"];
+            assert_eq!(context["minMatches"].as_u64(), Some(defaults.min_matches as u64), "{refused}");
+            assert_eq!(context["maxRmsPx"].as_f64(), Some(defaults.max_rms_px), "{refused}");
+            assert_eq!(
+                context["tier0MinExpectedStars"].as_f64(),
+                Some(crate::core::astrometry::local_solve::TIER0_MIN_EXPECTED_STARS),
+                "{refused}"
+            );
+        }
+
+        struct CancelledNovaEnv;
+
+        impl SolveEnv for CancelledNovaEnv {
+            fn tiers(&self, _request: &TierRequest<'_>) -> TierSet {
+                TierSet::default()
+            }
+
+            fn stored_api_key(&self) -> Option<String> {
+                Some("stored-key".to_string())
+            }
+
+            fn nova_settings(&self) -> anyhow::Result<NovaSettings> {
+                Ok(NovaSettings { api_url: "http://127.0.0.1:9/api".to_string(), timeout_secs: 5 })
+            }
+
+            fn nova(&self) -> Option<NovaSolve> {
+                Some(Box::new(|_upload: NovaUpload| -> NovaFuture {
+                    Box::pin(async {
+                        Err::<crate::core::astrometry::plate_solve::SolveResult, _>(
+                            anyhow::Error::new(crate::types::error::AppError::Cancelled).context("Plate solve cancelled"),
+                        )
+                    })
+                }))
+            }
+
+            fn cancelled(&self) -> bool {
+                true
+            }
+
+            fn stage(&self, _stage: &str) {}
+        }
+
+        #[tokio::test]
+        async fn a_cancelled_astrometry_net_solve_returns_the_cancelled_code_like_the_offline_solver() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_noise_frame(dir.path(), "nova.fits", true);
+            let request = PlateSolveRequest { solver: Some("astrometry.net".into()), ..request(&path) };
+
+            let refused = run_plate_solve(Arc::new(CancelledNovaEnv), request).await.unwrap_err();
+
+            assert_eq!(code(&refused), "cancelled", "{refused}");
+            assert_eq!(refused["message"], "Plate solve cancelled", "{refused}");
+        }
+
+        #[test]
+        fn scale_units_are_read_without_regard_to_case_for_both_solvers() {
+            assert_eq!(super::super::scale_to_arcsec_per_px(1.5, Some("ArcSecPerPix"), 1024), Ok(1.5));
+            assert_eq!(super::super::scale_to_arcsec_per_px(30.0, Some("ArcMinWidth"), 1000), Ok(1.8));
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_noise_frame(dir.path(), "units.fits", true);
+            let downsampled = PlateSolveRequest {
+                scale_lower: Some(1.5),
+                scale_upper: Some(2.0),
+                scale_units: Some("ArcSecPerPix".into()),
+                downsample_factor: Some(2),
+                ..request(&path)
+            };
+            let settings = NovaSettings { api_url: "http://127.0.0.1:9/api".to_string(), timeout_secs: 5 };
+            let prepared = super::super::prepare_nova_upload(&downsampled, "key".to_string(), settings).unwrap();
+            assert_eq!(
+                (prepared.config.scale_low, prepared.config.scale_high),
+                (Some(3.0), Some(4.0)),
+                "a per-pixel scale is doubled for an upload downsampled 2 times"
+            );
+            assert_eq!(prepared.config.scale_units.as_deref(), Some("arcsecperpix"), "astrometry.net gets its own spelling");
+            let width = PlateSolveRequest { scale_units: Some("DegWidth".into()), ..request(&path) };
+            let prepared = super::super::prepare_nova_upload(&width, "key".to_string(), NovaSettings { api_url: "http://127.0.0.1:9/api".to_string(), timeout_secs: 5 }).unwrap();
+            assert_eq!(prepared.config.scale_units.as_deref(), Some("degwidth"));
+        }
+
         fn compact_catalogue(level: u8, cat_type: u8, centre: (f64, f64), mag: f64) -> Vec<u8> {
             let pixel = cdshealpix::nested::hash(level, centre.0.to_radians(), centre.1.to_radians()) as u32;
             let (lon, lat) = cdshealpix::nested::center(level, u64::from(pixel));
@@ -3118,13 +3229,13 @@ mod tests {
 
             let pinned = CatalogStore::new(roots.clone());
             let set = offline_tiers(&pinned, &config);
-            assert_eq!(set.labels, [TIER1_SIRIL_LABEL], "{:?}", set.notes);
+            assert_eq!(labels(&set), [TIER1_SIRIL_LABEL], "{:?}", set.notes);
             assert_eq!(set.chain.tiers[0].0, CatalogTier::Tier1);
             let actual: String = Sha256::digest(&tier0).iter().map(|b| format!("{b:02x}")).collect();
             let note = set.notes.iter().find(|n| n.starts_with(TIER0_LABEL)).expect("a note for the refused tier 0");
             assert!(note.contains("bf01b058e7c9babe03d38d367c98d6a0dbb0e9785741a9c842d053574fa17076") && note.contains(&actual), "{note}");
             assert!(!set.notes.iter().any(|n| n.contains(TIER1_2MASS_LABEL)), "a missing tier 1 is not a problem: {:?}", set.notes);
-            let (rows, label) = set.chain.tiers[0].1.cone(56.75, 24.12, 1.0, None).unwrap();
+            let (rows, label) = (set.chain.tiers[0].1.cone(56.75, 24.12, 1.0).unwrap(), set.chain.tiers[0].1.label());
             assert_eq!((rows.len(), label), (1, TIER1_SIRIL_LABEL));
             drop(set);
 
@@ -3132,14 +3243,14 @@ mod tests {
             spec.sha256 = Some(Sha256::digest(&tier0).into());
             let verified = CatalogStore::new(roots).with_dataset(spec);
             let set = offline_tiers(&verified, &config);
-            assert_eq!(set.labels, [TIER0_LABEL, TIER1_SIRIL_LABEL], "{:?}", set.notes);
+            assert_eq!(labels(&set), [TIER0_LABEL, TIER1_SIRIL_LABEL], "{:?}", set.notes);
             assert!(set.notes.is_empty(), "{:?}", set.notes);
-            let (rows, label) = set.chain.tiers[0].1.cone(56.75, 24.12, 1.0, None).unwrap();
+            let (rows, label) = (set.chain.tiers[0].1.cone(56.75, 24.12, 1.0).unwrap(), set.chain.tiers[0].1.label());
             assert_eq!((rows.len(), label), (1, TIER0_LABEL));
 
             let bare = CatalogStore::new(StoreRoots::under(&dir.path().join("bare"), &dir.path().join("bare-cache")));
             let set = offline_tiers(&bare, &AppConfig::default());
-            assert!(set.labels.is_empty());
+            assert!(labels(&set).is_empty());
             assert_eq!(set.notes.len(), 1, "{:?}", set.notes);
             assert!(set.notes[0].contains("bundled Tycho-2"), "{:?}", set.notes);
         }
@@ -3157,9 +3268,10 @@ mod tests {
             assert!(hints["scale"]["source"].as_str().unwrap().contains("XPIXSZ"), "{hints}");
             assert!(hints["fov_deg"].as_f64().unwrap() > 0.9, "{hints}");
             assert!((hints["epoch_year"].as_f64().unwrap() - 2026.04).abs() < 0.01, "{hints}");
-            for key in ["cfa", "object", "expected_tier0_stars"] {
+            for key in ["cfa", "object"] {
                 assert_eq!(hints.get(key), Some(&Value::Null), "{key}: {hints}");
             }
+            assert_eq!(hints.get("expected_tier0_stars"), None, "{hints}");
             assert_eq!(hints["warnings"], serde_json::json!([]));
 
             let blind = write_noise_frame(dir.path(), "blind.fits", false);
@@ -3185,11 +3297,7 @@ mod tests {
                 anyhow::bail!("this test never reaches astrometry.net")
             }
 
-            fn has_nova(&self) -> bool {
-                false
-            }
-
-            fn nova(&self, _upload: NovaUpload) -> Option<NovaFuture> {
+            fn nova(&self) -> Option<NovaSolve> {
                 None
             }
 
@@ -3219,12 +3327,11 @@ mod tests {
         }
 
         #[tokio::test]
-        #[ignore]
+        #[ignore = "reads the WCS-less frames named by ASTROBURST_SOLVE_CORPUS and the tier 0 named by ASTROBURST_TIER0_PATH"]
         async fn real_wcs_less_frames_solve_offline_through_the_shipped_tier_chain() {
-            let (Some(corpus), Some(tier0)) = (std::env::var_os("ASTROBURST_SOLVE_CORPUS"), std::env::var_os("ASTROBURST_TIER0_PATH")) else {
-                eprintln!("skipped: set ASTROBURST_SOLVE_CORPUS and ASTROBURST_TIER0_PATH (ASTROBURST_TIER1_PATH optional)");
-                return;
-            };
+            let corpus = std::env::var_os("ASTROBURST_SOLVE_CORPUS")
+                .expect("set ASTROBURST_SOLVE_CORPUS to the folder holding c1/ and mosaic-v3/ (ASTROBURST_TIER1_PATH optional)");
+            let tier0 = std::env::var_os("ASTROBURST_TIER0_PATH").expect("set ASTROBURST_TIER0_PATH to the tycho2-l6-v1.abcat file or its folder");
             let corpus = std::path::PathBuf::from(corpus);
             let dir = tempfile::tempdir().unwrap();
             let roots = StoreRoots::under(&dir.path().join("data"), &dir.path().join("cache")).with_tier0_dir(tier0.into());
@@ -3235,8 +3342,8 @@ mod tests {
             }
             let env = Arc::new(StoreEnv { store: CatalogStore::new(roots) });
             let set = offline_tiers(&env.store, &AppConfig::default());
-            println!("tiers {:?}, notes {:?}", set.labels, set.notes);
-            assert!(set.labels.contains(&TIER0_LABEL), "the real tier 0 must verify against its pin: {:?}", set.notes);
+            println!("tiers {:?}, notes {:?}", labels(&set), set.notes);
+            assert!(labels(&set).contains(&TIER0_LABEL), "the real tier 0 must verify against its pin: {:?}", set.notes);
             drop(set);
 
             let mut failures = Vec::new();

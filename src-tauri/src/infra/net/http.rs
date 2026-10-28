@@ -38,7 +38,7 @@ impl RedirectRule {
         })
     }
 
-    fn policy(self) -> redirect::Policy {
+    pub(crate) fn policy(self) -> redirect::Policy {
         redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() > self.max_hops || !self.allows(attempt.url()) {
                 attempt.error("redirect refused by the profile's redirect rule")

@@ -26,6 +26,9 @@ import {
   mefHduSummary,
   rgbCubeUnavailableReason,
   rgbExportPaths,
+  rgbFilePngNote,
+  rgbFileSourceTitle,
+  type RgbResultSource,
 } from "../../utils/exportSources";
 import { getWcsInfo } from "../../services/astrometry";
 import { subscribeSolvedWcs, wcsRevision } from "../../utils/solvedWcs";
@@ -118,6 +121,7 @@ interface ExportPanelProps {
   rgbChannels?: RgbChannels | null;
   headerChannels?: RgbChannels | null;
   rgbFilePath?: string | null;
+  rgbResult?: RgbResultSource | null;
   compositeStf?: CompositeStf | null;
   alignMethod?: string;
   isLoading?: boolean;
@@ -147,6 +151,7 @@ export default function ExportPanel({
                                       rgbChannels,
                                       headerChannels = null,
                                       rgbFilePath = null,
+                                      rgbResult = null,
                                       compositeStf,
                                       alignMethod,
                                       isLoading = false,
@@ -580,7 +585,7 @@ export default function ExportPanel({
         <button
           onClick={handleExportRgb}
           disabled={isLoading || !!rgbCubeBlocked || quantizeError !== null}
-          title={rgbCubeBlocked ?? channelLabel ?? (rgbFilePath ? "Source: this RGB file's own planes and header" : undefined)}
+          title={rgbCubeBlocked ?? channelLabel ?? (rgbFilePath ? rgbFileSourceTitle(rgbResult) : undefined)}
           className="w-full flex items-center justify-center gap-2 bg-pink-600/15 hover:bg-pink-600/25 text-pink-300 border border-pink-600/25 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
         >
           <FileDown size={12} />
@@ -634,11 +639,7 @@ export default function ExportPanel({
               Export RGB as PNG ({pngBitDepth}-bit)
             </button>
             {rgbFilePath ? (
-              <p className="text-[10px] text-sky-400/60 px-1">
-                {compositeStf
-                  ? `Source: this RGB file with the ${compositeStf.linked ? "linked" : "per-channel"} STF on screen`
-                  : "Source: this RGB file with a per-channel auto STF"}
-              </p>
+              <p className="text-[10px] text-sky-400/60 px-1">{rgbFilePngNote(rgbResult, compositeStf ?? null)}</p>
             ) : channelLabel ? (
               <p className="text-[10px] text-sky-400/60 px-1">{channelLabel}</p>
             ) : compositeStf && (

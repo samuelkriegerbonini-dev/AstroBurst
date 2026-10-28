@@ -1,9 +1,10 @@
 // astroburst headless server — contributed by Jae-Joon Lee <https://github.com/leejjoon>
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use dashmap::DashMap;
+use ndarray::Array2;
 use serde::Serialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -28,6 +29,8 @@ pub struct ImageMeta {
     pub height: usize,
     pub wcs_present: bool,
     pub extname: Option<String>,
+    #[serde(skip)]
+    pub data: Weak<Array2<f32>>,
 }
 
 impl ImageMeta {
@@ -103,11 +106,16 @@ impl Session {
     }
 
     pub fn prune_evicted_meta(&self) {
-        self.v2.meta.retain(|k, _| self.cache.contains(k));
+        self.v2.meta.retain(|k, m| self.cache.holds(k, &m.data) == Some(true));
     }
 
     pub fn wcs_source_path(&self, image_ref: &str) -> String {
-        self.v2.meta.get(image_ref).map(|m| m.wcs_source_path()).unwrap_or_default()
+        self.v2
+            .meta
+            .get(image_ref)
+            .filter(|m| self.cache.holds(image_ref, &m.data) != Some(false))
+            .map(|m| m.wcs_source_path())
+            .unwrap_or_default()
     }
 
     pub async fn reconcile_active_ref(&self) -> Option<String> {
@@ -196,16 +204,38 @@ mod tests {
             height: 4,
             wcs_present: false,
             extname: None,
+            data: Weak::new(),
         }
     }
 
     fn insert(session: &Session, image_ref: &str) {
-        session.cache.insert_synthetic(
-            image_ref,
-            Arc::new(Array2::<f32>::zeros((4, 4))),
-            ImageStats::default(),
-        );
-        session.v2.meta.insert(image_ref.to_string(), meta_for(image_ref));
+        let pixels = Arc::new(Array2::<f32>::zeros((4, 4)));
+        session.cache.insert_synthetic(image_ref, Arc::clone(&pixels), ImageStats::default());
+        session
+            .v2
+            .meta
+            .insert(image_ref.to_string(), ImageMeta { data: Arc::downgrade(&pixels), ..meta_for(image_ref) });
+    }
+
+    #[tokio::test]
+    async fn a_ref_whose_pixels_were_replaced_outside_v2_loses_its_metadata() {
+        let cfg = ServerConfig::default();
+        let session = Session::new("s".into(), &cfg);
+        insert(&session, "shared");
+        let opened = ImageMeta {
+            source: Some("C:/data/a.fits".into()),
+            plane_ref: "C:/data/a.fits".into(),
+            ..session.v2.meta.get("shared").unwrap().clone()
+        };
+        session.v2.meta.insert("shared".into(), opened);
+        *session.v2.active_ref.write().await = Some("shared".into());
+        assert_eq!(session.wcs_source_path("shared"), "C:/data/a.fits");
+
+        session.cache.insert_synthetic("shared", Arc::new(Array2::<f32>::zeros((8, 8))), ImageStats::default());
+
+        assert_eq!(session.wcs_source_path("shared"), "", "the replaced pixels must not get the old file's WCS");
+        assert_eq!(session.reconcile_active_ref().await, None);
+        assert!(!session.v2.meta.contains_key("shared"));
     }
 
     #[test]

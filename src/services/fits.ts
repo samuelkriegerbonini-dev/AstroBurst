@@ -27,9 +27,10 @@ export async function getRawPixelsPreview(path: string, maxDim = 2048): Promise<
 export async function getRawRgbPixelsPreview(
   path: string | null,
   maxDim = 2048,
+  displayReferred = false,
 ): Promise<RawRgbPixelData> {
   const buffer = await typedInvoke<ArrayBuffer>("get_raw_rgb_pixels_preview", { path, maxDim });
-  return parseRawRgbPixelBuffer(buffer);
+  return parseRawRgbPixelBuffer(buffer, displayReferred);
 }
 
 export function resampleFits(

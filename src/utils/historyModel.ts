@@ -235,6 +235,8 @@ export function nodeRecord(doc: HistoryDoc, id: string, root: RecordRoot): Proce
     label: opLabel(node.op),
     kind: node.op.op === "pixelmath" ? "pixelmath" : "processing",
     inputPath,
+    planes: node.output.planes,
+    domain: node.output.domain,
   };
   if (node.op.op !== "pixelmath") return record;
   const inputPreviewUrl = parent ? previewOf(nodeFile(root.dir, parent.output.png)) : root.rootPreviewUrl;

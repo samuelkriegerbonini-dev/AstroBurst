@@ -25,17 +25,15 @@ const DETECTION_ECCENTRICITY: f64 = 0.05;
 pub(crate) struct SyntheticProvider {
     label: &'static str,
     rows: Vec<CatalogRow>,
-    depth: f64,
     ranking: RankingKey,
 }
 
 impl SyntheticProvider {
-    pub(crate) fn new(label: &'static str, mut rows: Vec<CatalogRow>, depth: f64) -> Self {
+    pub(crate) fn new(label: &'static str, mut rows: Vec<CatalogRow>) -> Self {
         rows.sort_by(|a, b| a.dec.total_cmp(&b.dec));
         Self {
             label,
             rows,
-            depth,
             ranking: RankingKey::MAGNITUDE,
         }
     }
@@ -60,7 +58,7 @@ impl SyntheticProvider {
                 catalog_row(index, ra, dec, Some(power_law_mag(&mut rng, mags)))
             })
             .collect();
-        Self::new(label, rows, mags.1)
+        Self::new(label, rows)
     }
 
     pub(crate) fn rows(&self) -> &[CatalogRow] {
@@ -69,13 +67,11 @@ impl SyntheticProvider {
 }
 
 impl CatalogProvider for SyntheticProvider {
-    fn cone(
-        &self,
-        ra_deg: f64,
-        dec_deg: f64,
-        radius_deg: f64,
-        mag_limit: Option<f64>,
-    ) -> Result<(Vec<CatalogRow>, &'static str), String> {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn cone(&self, ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Result<Vec<CatalogRow>, String> {
         if !(ra_deg.is_finite() && dec_deg.is_finite() && radius_deg.is_finite()) {
             return Err(format!(
                 "cone ({ra_deg}, {dec_deg}) radius {radius_deg} is not finite"
@@ -90,22 +86,13 @@ impl CatalogProvider for SyntheticProvider {
         let mut rows: Vec<CatalogRow> = self.rows[low..high]
             .iter()
             .filter(|row| angular_separation(ra_deg, dec_deg, row.ra, row.dec) <= radius_deg)
-            .filter(|row| match (mag_limit, row.g) {
-                (Some(limit), Some(mag)) => mag <= limit,
-                (Some(_), None) => false,
-                (None, _) => true,
-            })
             .cloned()
             .collect();
         rows.sort_by(|a, b| {
             a.g.unwrap_or(f64::INFINITY)
                 .total_cmp(&b.g.unwrap_or(f64::INFINITY))
         });
-        Ok((rows, self.label))
-    }
-
-    fn depth_mag(&self) -> f64 {
-        self.depth
+        Ok(rows)
     }
 
     fn ranking_key(&self) -> RankingKey {

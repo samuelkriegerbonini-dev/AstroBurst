@@ -38,6 +38,7 @@ import { pixelSourceVersion } from "../utils/pixelSource";
 import { afterGpuLoss, gpuLossToggleView } from "../utils/gpuLoss";
 import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { parseImageRef, planeLabel } from "../utils/imageRef";
+import { rgbProductPath, rgbViewOf } from "../utils/rgbProduct";
 import { gpuDisplayStore } from "../hooks/useGpuDisplay";
 import DqControls from "./preview/DqControls";
 import DqOverlayCanvas from "./preview/DqOverlayCanvas";
@@ -111,10 +112,11 @@ export default function PreviewPanel() {
   const lastRampIntegrationRef = useRef(rampIntegration);
 
   const fileKey = fileKeyOf(file);
+  const filePath = file?.path ?? null;
   const isRgbFile = !!file?.result?.is_rgb;
   const isFileRgbView = compositePreviewUrl !== null && isRgbFile && compositePreviewUrl === (file?.result?.previewUrl ?? null);
-  const monoOverRgb = isFileRgbView && processed !== null;
-  const isRgbView = compositePreviewUrl !== null && !monoOverRgb;
+  const rgbView = rgbViewOf({ compositePreviewUrl, fileIsRgb: isRgbFile, filePath, filePreviewUrl: file?.result?.previewUrl ?? null, processed });
+  const isRgbView = rgbView !== null && (rgbView.kind !== "result" || useGpu);
   const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
   const gpuLoadError = useGpu && !isRgbView && !rawPixelsLoading ? rawPixelsError : null;
 
@@ -197,11 +199,12 @@ export default function PreviewPanel() {
   }, [isRgbFile, processed, isFileRgbView, compositePreviewUrl, resetComposite, showRgbFileView]);
 
   const wantGpu = !!gpuAvailable && useGpu;
-  const filePath = file?.path ?? null;
   const monoLoadKey = fileKey ? `${fileKey}|${processedSourcePath ?? filePath}|${sourceVersion}` : null;
   const pngOnlyRecord = displayed.previewOnly;
-  const rgbSource = isFileRgbView ? filePath : null;
-  const rgbLoadKey = fileKey && isRgbView ? `${fileKey}|${rgbSource ?? ""}|${compositeVersion}` : null;
+  const rgbSource = isRgbView ? rgbProductPath(rgbView) : null;
+  const rgbDisplayReferred = rgbView?.kind === "result" && rgbView.displayReferred;
+  const rgbVersion = rgbView?.kind === "result" ? sourceVersion : compositeVersion;
+  const rgbLoadKey = fileKey && isRgbView ? `${fileKey}|${rgbSource ?? ""}|${rgbVersion}` : null;
   const rgbFileViewPending = isRgbFile && processed === null && compositePreviewUrl === null && !!file?.result?.previewUrl;
   const compositeOwnerRef = useRef<{ key: string | null; version: number } | null>(null);
 
@@ -214,7 +217,7 @@ export default function PreviewPanel() {
       if (!rgbLoadKey || rgbLoadKeyRef.current === rgbLoadKey) return;
       rgbLoadKeyRef.current = rgbLoadKey;
       queueMicrotask(() => {
-        if (rgbLoadKeyRef.current === rgbLoadKey) loadRgbRawPixels(rgbSource, true);
+        if (rgbLoadKeyRef.current === rgbLoadKey) loadRgbRawPixels(rgbSource, true, rgbDisplayReferred);
       });
       return;
     }
@@ -234,7 +237,7 @@ export default function PreviewPanel() {
     queueMicrotask(() => {
       if (gpuLoadKeyRef.current === monoLoadKey) loadRawPixels(true);
     });
-  }, [wantGpu, fileKey, compositeVersion, rgbFileViewPending, isRgbView, rgbLoadKey, rgbSource, monoLoadKey, pngOnlyRecord, isCube, loadRawPixels, clearRawPixels, loadRgbRawPixels, clearRgbRawPixels]);
+  }, [wantGpu, fileKey, compositeVersion, rgbFileViewPending, isRgbView, rgbLoadKey, rgbSource, rgbDisplayReferred, monoLoadKey, pngOnlyRecord, isCube, loadRawPixels, clearRawPixels, loadRgbRawPixels, clearRgbRawPixels]);
 
   const enableGpu = useCallback(() => {
     setUseGpu(true);

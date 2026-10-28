@@ -862,12 +862,9 @@ async fn a_tier1_install_before_the_release_is_published_says_not_published_yet(
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "reads the real 2MASS cut named by ASTROBURST_TIER1_PATH"]
 async fn ac11_the_real_2mass_cut_resumes_after_an_interruption_and_a_flipped_byte_is_refused() {
-    let Some(path) = std::env::var_os("ASTROBURST_TIER1_PATH") else {
-        eprintln!("skipped: set ASTROBURST_TIER1_PATH to the 2mass-l8-v1.dat file");
-        return;
-    };
+    let path = std::env::var_os("ASTROBURST_TIER1_PATH").expect("set ASTROBURST_TIER1_PATH to the 2mass-l8-v1.dat file");
     let bytes = fs::read(&path).unwrap();
     assert_eq!(bytes.len() as u64, TWOMASS_BYTES);
     let half = TWOMASS_BYTES / 2;
@@ -1925,12 +1922,9 @@ fn register_refuses_a_file_name_that_leaves_the_dataset_folder() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "reads the real tier-0 file named by ASTROBURST_TIER0_PATH"]
 fn the_real_tier0_file_verifies_against_its_pin_and_holds_the_pleiades() {
-    let Some(path) = std::env::var_os("ASTROBURST_TIER0_PATH") else {
-        eprintln!("skipped: set ASTROBURST_TIER0_PATH to the tycho2-l6-v1.abcat file");
-        return;
-    };
+    let path = std::env::var_os("ASTROBURST_TIER0_PATH").expect("set ASTROBURST_TIER0_PATH to the tycho2-l6-v1.abcat file");
     let path = PathBuf::from(path);
     let rig = Rig::new();
     let roots = rig.store.roots().clone().with_tier0_dir(path.clone());
@@ -2525,6 +2519,85 @@ async fn a_zenodo_record_without_sums_installs_on_its_size_alone_and_says_so() {
         "{refused}"
     );
     assert!(!other.installed(SIRIL_GAIA_ID).exists());
+}
+
+#[tokio::test]
+async fn a_zenodo_decode_with_no_published_sum_to_check_is_reported_unverified() {
+    let unchecked = zenodo_rig(Resource::new, |_, _| None);
+    let rig = Rig::new();
+    let consent = zenodo_consent(&rig, &unchecked).await;
+    let outcome = rig
+        .store
+        .install_siril_from_zenodo(&client(), &unchecked.source(), Some(&consent), recorder())
+        .await
+        .unwrap();
+    assert!(!outcome.sha256_verified);
+    assert_eq!(
+        rig.store.status(SIRIL_GAIA_ID, &AppConfig::default()).unwrap(),
+        DatasetStatus::Installed {
+            path: outcome.path.clone(),
+            verified: false
+        },
+        "nothing published was compared with the decoded file"
+    );
+
+    let checked = zenodo_rig(Resource::new, true_sums);
+    let other = Rig::new();
+    let consent = zenodo_consent(&other, &checked).await;
+    let outcome = other
+        .store
+        .install_siril_from_zenodo(&client(), &checked.source(), Some(&consent), recorder())
+        .await
+        .unwrap();
+    assert!(outcome.sha256_verified);
+    let verified = DatasetStatus::Installed {
+        path: outcome.path.clone(),
+        verified: true,
+    };
+    assert_eq!(other.store.status(SIRIL_GAIA_ID, &AppConfig::default()).unwrap(), verified);
+
+    let marker = siril_dir(&other).join(format!("{SIRIL_GAIA_ID}{VERIFIED_MARKER_SUFFIX}"));
+    let mut written: serde_json::Value = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+    assert_eq!(written["checked"], true, "{written}");
+    written.as_object_mut().unwrap().remove("checked");
+    fs::write(&marker, serde_json::to_vec(&written).unwrap()).unwrap();
+    assert_eq!(
+        other.store.status(SIRIL_GAIA_ID, &AppConfig::default()).unwrap(),
+        verified,
+        "a marker written before the flag existed came from a checked install"
+    );
+}
+
+#[tokio::test]
+async fn a_zenodo_record_with_an_absurd_archive_size_is_refused_for_space_without_overflow() {
+    const TIB: u64 = 1 << 40;
+    let absurd = u64::MAX - 5;
+    let archive = serve_body(b"never requested");
+    let record = serve_body(&zenodo_record(vec![zenodo_file(
+        SIRIL_GAIA_ARCHIVE_KEY,
+        absurd as usize,
+        &content_link(&archive, SIRIL_GAIA_ARCHIVE_KEY),
+    )]));
+    let source = ZenodoSource {
+        record_url: record.url(ZENODO_RECORD_PATH).to_string(),
+        decoded_max_bytes: SIRIL_GAIA_DECODED_MAX_BYTES,
+    };
+    let rig = Rig::new();
+    let store = rig.store.with_free_space(Arc::new(|_: &Path| Ok(TIB)));
+
+    let offer = store.zenodo_offer(&client(), &source).await.unwrap();
+    assert_eq!(offer.archive_bytes, absurd);
+    assert_eq!(offer.need_bytes, u64::MAX, "the need saturates instead of wrapping to a small number");
+
+    let refused = store
+        .install_siril_from_zenodo(&client(), &source, Some(&consent_for(&offer)), recorder())
+        .await
+        .unwrap_err();
+    match &refused {
+        StoreError::NoSpace { need, available, .. } => assert_eq!((*need, *available), (u64::MAX, TIB)),
+        other => panic!("expected a free-space refusal, got {other}"),
+    }
+    assert!(archive.requests().is_empty(), "the archive was requested: {:?}", archive.requests());
 }
 
 #[tokio::test]

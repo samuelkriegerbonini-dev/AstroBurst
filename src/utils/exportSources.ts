@@ -1,5 +1,6 @@
 import type { StfParams } from "../shared/types";
 import { exportStem, parseImageRef } from "./imageRef";
+import type { RgbProduct } from "./rgbProduct";
 
 export function exportTimestamp(date: Date): string {
   return date.toISOString().replace(/[-:]/g, "").replace("T", "-").replace(".", "-").slice(0, 19);
@@ -44,19 +45,36 @@ export type RgbExportSource =
 
 export interface RgbExportInput {
   rgbChannels: RgbChannelPaths | null;
-  compositePreviewUrl: string | null;
-  filePath: string | null;
-  fileIsRgb: boolean;
-  filePreviewUrl: string | null;
+  product: RgbProduct | null;
 }
 
-export function resolveRgbExportSource(input: RgbExportInput): RgbExportSource | null {
-  const showsFileRgb = input.compositePreviewUrl === null || input.compositePreviewUrl === input.filePreviewUrl;
-  if (input.fileIsRgb && input.filePath && showsFileRgb) return { kind: "file", path: input.filePath };
-  if (input.compositePreviewUrl !== null) return { kind: "composite" };
-  const ch = input.rgbChannels;
-  if (ch && (ch.r || ch.g || ch.b)) return { kind: "channels", channels: ch };
+export function resolveRgbExportSource({ rgbChannels, product }: RgbExportInput): RgbExportSource | null {
+  if (product?.kind === "composite") return { kind: "composite" };
+  if (product) return { kind: "file", path: product.path };
+  if (rgbChannels && (rgbChannels.r || rgbChannels.g || rgbChannels.b)) return { kind: "channels", channels: rgbChannels };
   return null;
+}
+
+export interface RgbResultSource {
+  label: string;
+  displayReferred: boolean;
+}
+
+export function rgbFileSourceTitle(result: RgbResultSource | null): string {
+  return result
+    ? `Source: the R, G and B planes and header of the processed result (${result.label})`
+    : "Source: this RGB file's own planes and header";
+}
+
+export function rgbFilePngNote(result: RgbResultSource | null, onScreenStf: { linked: boolean } | null): string {
+  if (result) {
+    return result.displayReferred
+      ? `Source: the processed result (${result.label}) as shown; its stretch is baked in, so no STF is applied`
+      : `Source: the processed result (${result.label}) with a per-channel auto STF`;
+  }
+  return onScreenStf
+    ? `Source: this RGB file with the ${onScreenStf.linked ? "linked" : "per-channel"} STF on screen`
+    : "Source: this RGB file with a per-channel auto STF";
 }
 
 function baseName(path: string): string {

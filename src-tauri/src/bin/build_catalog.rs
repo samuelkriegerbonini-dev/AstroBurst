@@ -1075,7 +1075,7 @@ fn tier0_provenance(
     );
     let _ = writeln!(
         text,
-        "- Licence: BSD-2-Clause as recorded in the Debian copyright file of the tycho2 package, https://tracker.debian.org/media/packages/t/tycho2/copyright-2-4"
+        "- Licence: the sources give two statements. The CDS ReadMe of I/259 (https://cdsarc.cds.unistra.fr/ftp/I/259/ReadMe, last modified on 17 August 2026) states CC-BY-NC-3.0 IGO, as ESA states for the Hipparcos and Tycho Catalogues (https://www.cosmos.esa.int/web/hipparcos/catalogues, which asks for \"Credit: ESA\"); the Debian copyright file of the tycho2 package records BSD-2-Clause with an author's consent of 2015, https://tracker.debian.org/media/packages/t/tycho2/copyright-2-4. `licenses/tycho2-catalogue-NOTICE.txt` in the installed app reproduces both."
     );
     let _ = writeln!(
         text,

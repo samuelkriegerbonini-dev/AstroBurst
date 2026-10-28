@@ -349,17 +349,45 @@ describe("named blockers (C02)", () => {
 
   it("refuses a measured frame without a UTC mid-exposure time and names DATE-OBS", () => {
     const frames = withFrame(3, { jd_mid: null, geometry: geometry(NaN, { jd_utc: null, bjd_tdb: null, hjd_utc: null }) });
-    expect(etdBlocker(source(frames))).toBe("no JD_UTC for f3.fits (DATE-OBS missing)");
-    expect(exoClockBlocker(source(frames), "jd_utc")).toBe("no JD_UTC for f3.fits (DATE-OBS missing)");
+    expect(etdBlocker(source(frames))).toBe("no JD_UTC for f3.fits (DATE-OBS missing or not a valid date)");
+    expect(exoClockBlocker(source(frames), "jd_utc")).toBe("no JD_UTC for f3.fits (DATE-OBS missing or not a valid date)");
+  });
+
+  it("quotes the refusal note of a frame whose header time was not used, instead of blaming DATE-OBS", () => {
+    const reason =
+      "time reference keywords disagree (TREFPOS TOPOCENTER at the observer, TIMEREF SOLARSYSTEM at the barycentre): the header time is not used, so no light-time correction is added or assumed";
+    const refused = geometry(NaN, { jd_utc: null, bjd_tdb: null, hjd_utc: null, time_scale_notes: [reason] });
+    const frames = withFrame(3, { jd_mid: null, geometry: refused });
+    expect(etdBlocker(source(frames))).toBe(`no JD_UTC for f3.fits (${reason})`);
+    expect(exoClockBlocker(source(frames), "bjd_tdb")).toBe(`no BJD_TDB for f3.fits (${reason})`);
+    expect(exoClockBlocker(source(frames), "hjd_utc")).toBe(`no HJD_UTC for f3.fits (${reason})`);
   });
 
   it("refuses JD_UTC for a barycentric header time and leaves BJD_TDB open", () => {
     const frames = withFrame(1, { geometry: geometry(2460310.6020838, { bjd_source: "header", hjd_utc: null }) });
-    const expected = "no JD_UTC for f1.fits (the header time is barycentric: TIMEREF/BJDREF)";
+    const expected = "no JD_UTC for f1.fits (the header time is barycentric: TREFPOS/TIMEREF/BJDREF)";
     expect(etdBlocker(source(frames))).toBe(expected);
     expect(exoClockBlocker(source(frames), "jd_utc")).toBe(expected);
     expect(exoClockBlocker(source(frames), "bjd_tdb")).toBeNull();
-    expect(exoClockBlocker(source(frames), "hjd_utc")).toBe("no HJD_UTC for f1.fits (the header time is barycentric: TIMEREF/BJDREF)");
+    expect(exoClockBlocker(source(frames), "hjd_utc")).toBe("no HJD_UTC for f1.fits (the header time is barycentric: TREFPOS/TIMEREF/BJDREF)");
+  });
+
+  it("writes the header BJD_TDB of a TDB barycentric series within 1e-8 d and refuses the UTC columns", () => {
+    const headerBjd = (i: number) => 2400000.5 + 60310.25 + (i * 60) / 86400;
+    const utcOf = (i: number) => headerBjd(i) - 69.184 / 86400;
+    const frames = [0, 1, 2].map((i) =>
+      frame(i, utcOf(i), 500 - 10 * i, {
+        jd_mid: headerBjd(i),
+        time_source: "mid-exposure from MJD-AVG; time scale TDB (TIMESYS), not converted to UTC",
+        geometry: geometry(utcOf(i), { bjd_tdb: headerBjd(i), hjd_utc: null, bjd_source: "header" }),
+      }),
+    );
+    expect(exoClockBlocker(source(frames), "bjd_tdb")).toBeNull();
+    const times = exoClockCsv(source(frames), "bjd_tdb").trimEnd().split("\n").slice(-3).map((l) => Number(l.split(",")[0]));
+    times.forEach((t, i) => expect(Math.abs(t - headerBjd(i))).toBeLessThanOrEqual(1e-8));
+    const barycentric = "(the header time is barycentric: TREFPOS/TIMEREF/BJDREF)";
+    expect(etdBlocker(source(frames))).toBe(`no JD_UTC for f0.fits ${barycentric}`);
+    expect(exoClockBlocker(source(frames), "hjd_utc")).toBe(`no HJD_UTC for f0.fits ${barycentric}`);
   });
 
   it("refuses BJD_TDB and HJD_UTC exports without the barycentric or heliocentric time and leaves ETD open", () => {

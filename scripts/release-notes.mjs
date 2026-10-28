@@ -7,6 +7,7 @@ const CHANGELOG = "CHANGELOG.md";
 const LICENCE_NOTES = "docs/release-notes-licences.md";
 const LICENCE_SECTION = /^## \S+ and later\n([\s\S]*?)(?=^## |(?![\s\S]))/m;
 const USAGE = "usage: node scripts/release-notes.mjs <tag> <output file>";
+const MAINTENANCE_VERSION = /^(\d+\.\d+\.\d+)\.\d+$/;
 
 class Refused extends Error {}
 
@@ -38,10 +39,11 @@ function changelogSection(changelog, version) {
 
 export function releaseNotes(tag, root = REPO_ROOT) {
   const version = tag.replace(/^v/, "");
-  const mismatched = Object.entries(versionFields(root)).filter(([, value]) => value !== version);
+  const fieldVersion = MAINTENANCE_VERSION.exec(version)?.[1] ?? version;
+  const mismatched = Object.entries(versionFields(root)).filter(([, value]) => value !== fieldVersion);
   if (mismatched.length > 0) {
     const fields = mismatched.map(([file, value]) => `${file} says ${value ?? "nothing"}`).join(", ");
-    throw new Refused(`the tag ${tag} names version ${version}, but ${fields}`);
+    throw new Refused(`the tag ${tag} names version ${fieldVersion}, but ${fields}`);
   }
   const changes = changelogSection(read(root, CHANGELOG), version);
   if (!/^\s*[-*] \S/m.test(changes)) {

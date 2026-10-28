@@ -26,6 +26,7 @@ import { useRegionKey } from "../../hooks/useRegionKey";
 import { STF_LOCK_RGB_CPU } from "../../utils/analysisTarget";
 import { IDENTITY_STF, RGB_LINEAR_BAKED, rememberRgbEdit, rgbLinearTitle, rgbLinearToggle, setRgbLinear } from "../../utils/displayMemory";
 import { displayMemory, useFileDisplayEntry } from "../../utils/displayMemoryStore";
+import { rgbViewOf } from "../../utils/rgbProduct";
 
 interface PreviewTabProps {
   useGpu: boolean;
@@ -61,16 +62,26 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
   const { display, limits, lut, limitsLoading } = useDisplayContext();
   const regionKey = useRegionKey();
 
-  const isFileRgbView =
-    compositePreviewUrl !== null && !!file?.result?.is_rgb && compositePreviewUrl === (file?.result?.previewUrl ?? null);
-  const showComposite = compositePreviewUrl !== null && !(isFileRgbView && processed !== null);
+  const rgbView = rgbViewOf({
+    compositePreviewUrl,
+    fileIsRgb: !!file?.result?.is_rgb,
+    filePath: file?.path ?? null,
+    filePreviewUrl: file?.result?.previewUrl ?? null,
+    processed,
+  });
+  const isFileRgbView = rgbView?.kind === "file";
+  const isRgbResult = rgbView?.kind === "result";
+  const showComposite = rgbView !== null;
 
   const fileDims = file?.result?.dimensions ?? null;
   const wizardCompositeDims = useWizardCompositeDims();
-  const compositeDims = isFileRgbView ? fileDims : wizardCompositeDims;
   const displayedDims = displayed.dimensions;
+  const compositeDims = isRgbResult ? displayedDims : isFileRgbView ? fileDims : wizardCompositeDims;
   const regionsOnDisplayed = !!displayedDims && regionKey !== null;
   const regionsOnRgbFile = isFileRgbView && !!fileDims && regionKey !== null;
+  const rgbRegions = isRgbResult ? regionsOnDisplayed : regionsOnRgbFile;
+  const rgbPixelReadout = isFileRgbView || isRgbResult;
+  const cpuPreviewUrl = isRgbResult ? displayed.previewUrl : compositePreviewUrl;
 
   const histForDisplayed = histogramOnPath(histData, histDataPath, displayed.path);
 
@@ -115,10 +126,10 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
     (e: React.MouseEvent<HTMLDivElement>) => {
       const img = e.currentTarget.querySelector("img");
       if (!img) return;
-      const coord = pixelFromRect(e.clientX, e.clientY, img.getBoundingClientRect(), fileDims);
+      const coord = pixelFromRect(e.clientX, e.clientY, img.getBoundingClientRect(), compositeDims);
       if (coord) setMousePixel(coord);
     },
-    [fileDims],
+    [compositeDims],
   );
 
   const handleViewerMousePixel = useCallback((x: number, y: number) => {
@@ -186,11 +197,11 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
     return (
       <div className="flex flex-col h-full">
         <div className="flex items-center gap-2 px-3 py-1.5 bg-violet-900/30 border-b border-violet-600/20">
-          <span className="text-[10px] text-violet-300">{isFileRgbView ? "RGB" : "RGB Composite"}{rgbOnGpu ? " · GPU" : ""}</span>
+          <span className="text-[10px] text-violet-300">{rgbView?.kind === "composite" ? "RGB Composite" : "RGB"}{rgbOnGpu ? " · GPU" : ""}</span>
           {rgbOnGpu && displayReferred && (
             <span
               className="text-[9px] px-1.5 py-0.5 rounded text-emerald-300/90 bg-emerald-600/15"
-              title="Showing the processed composite (stretch/curves applied). STF is baked in."
+              title={`Showing the processed ${isRgbResult ? "result" : "composite"} (stretch/curves applied). STF is baked in.`}
             >
               processed
             </span>
@@ -218,7 +229,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
               Linear
             </button>
           )}
-          {!isFileRgbView && (
+          {rgbView?.kind === "composite" && (
             <button
               onClick={onBackToFile}
               className="ml-auto flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors"
@@ -266,12 +277,14 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
               fitsW={compositeDims?.[0]}
               fitsH={compositeDims?.[1]}
               deepZoomOffered={isFileRgbView}
-              regionsEnabled={regionsOnRgbFile}
-              crosshairEnabled={isFileRgbView}
-              onMousePixel={isFileRgbView ? handleViewerMousePixel : undefined}
-              onPixelClick={isFileRgbView ? emitPixelClick : undefined}
+              regionsEnabled={rgbRegions}
+              crosshairEnabled={rgbPixelReadout}
+              onMousePixel={rgbPixelReadout ? handleViewerMousePixel : undefined}
+              onPixelClick={rgbPixelReadout ? emitPixelClick : undefined}
               onMouseLeave={clearMousePixel}
               overlayCanvasRef={starOverlayRef}
+              original={isRgbResult ? heldOriginal : null}
+              label={isRgbResult ? displayed.label : null}
             >
               <GpuRgbRenderer
                 rgb={rgbRawPixels}
@@ -285,15 +298,17 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
         ) : (
           <div
             className="flex-1 min-h-0 flex flex-col"
-            onMouseMove={isFileRgbView ? handleRgbFileMouseMove : undefined}
+            onMouseMove={rgbPixelReadout ? handleRgbFileMouseMove : undefined}
             onMouseLeave={clearMousePixel}
           >
-            <ZoomPanView
-              src={compositePreviewUrl}
-              alt="RGB composite"
-              className="flex-1 min-h-0"
-              overlayCanvasRef={starOverlayRef}
-            />
+            {cpuPreviewUrl && (
+              <ZoomPanView
+                src={cpuPreviewUrl}
+                alt="RGB composite"
+                className="flex-1 min-h-0"
+                overlayCanvasRef={starOverlayRef}
+              />
+            )}
           </div>
         )}
       </div>

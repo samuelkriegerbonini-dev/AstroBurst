@@ -90,6 +90,7 @@ export interface CatalogInstallProgress {
   total: number;
   percent: number;
   stage: string;
+  message?: string;
 }
 
 export const CATALOG_COMMANDS = [

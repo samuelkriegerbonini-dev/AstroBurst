@@ -231,20 +231,22 @@ fn png_stf_for<'a>(headers: impl IntoIterator<Item = Option<&'a HduHeader>>, stf
     (display_referred && stf.explicit().is_none()).then_some(IDENTITY_STF)
 }
 
+fn planes_as_shown(planes: [&Array2<f32>; 3], params: &StfParams) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
+    let unit = ImageStats { min: 0.0, max: 1.0, ..ImageStats::default() };
+    (
+        apply_stf_f32(planes[0], params, &unit),
+        apply_stf_f32(planes[1], params, &unit),
+        apply_stf_f32(planes[2], params, &unit),
+    )
+}
+
 fn png_planes_for(
     planes: [&Array2<f32>; 3],
     identity: Option<StfParams>,
     stf: &PngStf,
 ) -> (Array2<f32>, Array2<f32>, Array2<f32>) {
     match identity {
-        Some(params) => {
-            let unit = ImageStats { min: 0.0, max: 1.0, ..ImageStats::default() };
-            (
-                apply_stf_f32(planes[0], &params, &unit),
-                apply_stf_f32(planes[1], &params, &unit),
-                apply_stf_f32(planes[2], &params, &unit),
-            )
-        }
+        Some(params) => planes_as_shown(planes, &params),
         None => {
             let stats = planes.map(compute_image_stats);
             png_rgb_planes(planes, [&stats[0], &stats[1], &stats[2]], stf)
@@ -457,29 +459,27 @@ pub async fn export_png(
         let do_stf = apply_stf_stretch.unwrap_or(false);
 
         if let Some(rgb) = try_extract_rgb_resolved(&path)? {
-            let sr = compute_image_stats(&rgb.r);
-            let sg = compute_image_stats(&rgb.g);
-            let sb = compute_image_stats(&rgb.b);
-
-            let combined = crate::core::imaging::stats::combine_channel_stats(&sr, &sg, &sb);
-            let (r_out, g_out, b_out) = if do_stf {
-                let stf = StfParams {
-                    shadow: shadow.unwrap_or(0.0),
-                    midtone: midtone.unwrap_or(0.5),
-                    highlight: highlight.unwrap_or(1.0),
+            let shown_as_is = !do_stf && is_display_referred(Some(&rgb.header));
+            let (r_out, g_out, b_out) = if shown_as_is {
+                planes_as_shown([&rgb.r, &rgb.g, &rgb.b], &IDENTITY_STF)
+            } else {
+                let sr = compute_image_stats(&rgb.r);
+                let sg = compute_image_stats(&rgb.g);
+                let sb = compute_image_stats(&rgb.b);
+                let combined = crate::core::imaging::stats::combine_channel_stats(&sr, &sg, &sb);
+                let stf = if do_stf {
+                    StfParams {
+                        shadow: shadow.unwrap_or(0.0),
+                        midtone: midtone.unwrap_or(0.5),
+                        highlight: highlight.unwrap_or(1.0),
+                    }
+                } else {
+                    helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &AutoStfConfig::default()).0
                 };
                 (
                     apply_stf_f32(&rgb.r, &stf, &combined),
                     apply_stf_f32(&rgb.g, &stf, &combined),
                     apply_stf_f32(&rgb.b, &stf, &combined),
-                )
-            } else {
-                let stf_config = AutoStfConfig::default();
-                let (linked, _) = helpers::compute_linked_stf_with_stats(&sr, &sg, &sb, &stf_config);
-                (
-                    apply_stf_f32(&rgb.r, &linked, &combined),
-                    apply_stf_f32(&rgb.g, &linked, &combined),
-                    apply_stf_f32(&rgb.b, &linked, &combined),
                 )
             };
 
@@ -495,7 +495,7 @@ pub async fn export_png(
             return Ok(json!({
                 RES_OUTPUT_PATH: output_path,
                 RES_BIT_DEPTH: depth,
-                RES_APPLY_STF: true,
+                RES_APPLY_STF: !shown_as_is,
                 RES_FILE_SIZE_BYTES: file_size,
                 RES_DIMENSIONS: [cols, rows],
                 RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
@@ -1502,5 +1502,40 @@ mod tests {
         let (res, background) = export(&linear, "linear_rgb.png").await;
         assert_eq!(res[RES_APPLY_STF], json!(true), "{res}");
         assert!((background[0] as f32 - 0.1 * 255.0).abs() > 5.0, "a linear RGB file must still get the auto STF");
+    }
+
+    #[tokio::test]
+    async fn export_as_png_of_a_display_referred_rgb_fits_writes_it_as_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let plane = |level: f32| {
+            Array2::from_shape_fn((16, 16), |(y, x)| {
+                if (y * 16 + x) % 37 == 5 { 0.9 } else { level + ((y * 31 + x * 17) % 13) as f32 * 0.001 }
+            })
+        };
+        let levels = [0.1f32, 0.2, 0.3];
+        let [r, g, b] = levels.map(plane);
+        let flagged = tmp_path(&dir, "curves_rgb.fits");
+        let linear = tmp_path(&dir, "linear_rgb.fits");
+        let display_referred = header_with(&[(crate::cmd::common::HEADER_DISPLAY_REFERRED, "T")]);
+        crate::infra::fits::writer::write_fits_rgb(&flagged, &r, &g, &b, Some(&display_referred)).unwrap();
+        crate::infra::fits::writer::write_fits_rgb(&linear, &r, &g, &b, None).unwrap();
+
+        let export = |path: &str, name: &str| {
+            let out = tmp_path(&dir, name);
+            let path = path.to_string();
+            async move {
+                let res = export_png(path, out.clone(), Some(8), None, None, None, None).await.unwrap();
+                let background = image::open(&out).unwrap().to_rgb8().get_pixel(0, 0).0;
+                (res, background)
+            }
+        };
+        let (res, background) = export(&flagged, "curves_rgb.png").await;
+        assert_eq!(res[RES_APPLY_STF], json!(false), "{res}");
+        for (v, level) in background.into_iter().zip(levels) {
+            assert!((v as f32 - level * 255.0).abs() <= 1.0, "the display-referred background {level} was re-stretched to {v}");
+        }
+        let (res, background) = export(&linear, "linear_rgb.png").await;
+        assert_eq!(res[RES_APPLY_STF], json!(true), "{res}");
+        assert!((background[0] as f32 - 0.1 * 255.0).abs() > 5.0, "a linear RGB file must still get the linked auto STF");
     }
 }

@@ -95,6 +95,22 @@ test("a tag whose version one of the version fields does not carry is refused", 
   });
 });
 
+test("a four-part maintenance tag takes its changelog section and needs the three-part version in the version fields", () => {
+  const changelog = CHANGELOG.replace("## [1.2.0] - 2026-11-01", "## [1.2.0.1] - 2026-11-05\n\n### Fixed\n- A maintenance fix\n\n## [1.2.0] - 2026-11-01");
+  withWork((work) => {
+    assert.equal(
+      releaseNotes("v1.2.0.1", fixture(work, { changelog })),
+      "### Fixed\n- A maintenance fix\n\n### Licences\n\nEvery installer carries the licences folder.\n",
+    );
+  });
+  withWork((work) => {
+    assert.throws(() => releaseNotes("v1.2.1.1", fixture(work, { changelog })), /the tag v1\.2\.1\.1 names version 1\.2\.1/);
+  });
+  withWork((work) => {
+    assert.throws(() => releaseNotes("v1.2.0.2", fixture(work, { changelog })), /no "## \[1\.2\.0\.2\]" section/);
+  });
+});
+
 test("a version without changelog entries is refused, and the Unreleased section never stands in for it", () => {
   withWork((work) => {
     const changelog = CHANGELOG.replace("## [1.2.0] - 2026-11-01", "## [1.2.0-draft] - 2026-11-01");

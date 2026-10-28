@@ -41,7 +41,6 @@ pub struct SolveHints {
     pub epoch_year: Option<f64>,
     pub cfa: Option<CfaPattern>,
     pub object: Option<NamedObject>,
-    pub expected_tier0_stars: Option<f64>,
     pub warnings: Vec<String>,
 }
 
@@ -81,7 +80,6 @@ pub fn solve_hints(header: &HduHeader, width: usize, height: usize) -> SolveHint
         epoch_year: observation_epoch_year(header),
         cfa: CfaPattern::detect(header),
         object,
-        expected_tier0_stars: None,
         warnings,
     }
 }
@@ -766,7 +764,6 @@ mod tests {
         let epoch = hints.epoch_year.expect("epoch");
         assert!((epoch - 2026.22).abs() < 0.01, "{epoch}");
         assert_eq!(hints.cfa, Some(CfaPattern::Bayer(BayerPattern::Rggb)));
-        assert_eq!(hints.expected_tier0_stars, None);
         assert!(hints.warnings.is_empty(), "{:?}", hints.warnings);
 
         let bare = solve_hints(&HduHeader::empty(), 100, 100);

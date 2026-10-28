@@ -34,7 +34,7 @@ const TIER0: CatalogDatasetReport = {
   size_bytes: 15_541_742,
   installable: false,
   compressed: "none",
-  licence: "BSD-2-Clause (Tycho-2 as packaged by Debian)",
+  licence: "CC BY-NC 3.0 IGO (CDS ReadMe of I/259, ESA) or BSD-2-Clause (Debian tycho2 package); licenses/tycho2-catalogue-NOTICE.txt gives both",
   credit: "Tycho-2 Catalogue, Høg et al. 2000, A&A 355, L27",
   url_host: null,
   folder: "C:/Users/u/AppData/Local/astroburst/catalogs/tycho2-l6-v1",
@@ -245,6 +245,22 @@ describe("installReducer", () => {
     const row = catalogRowView({ ...TIER1, status: { state: "partial", received: 12_300_000, total: 154_140_794 } }, adopted);
     expect(row.stateText).toBe("Downloading 41 % (64.7 of 154.1 MB)");
     expect(row.actions).toEqual({ install: false, cancel: true, remove: false, chooseFolder: false, chooseFile: false });
+  });
+
+  it("fails an adopted install on the failed event, with the backend message, or notes a cancel it asked for", () => {
+    const failed = { type: "progress", progress: { ...running(10, 200, "failed"), message: "2mass-l8-v1: disk full" } } as const;
+    const adopted = installReducer({}, { type: "progress", progress: running(10, 200) });
+    expect(installReducer(adopted, failed)[id]).toEqual({ phase: "failed", message: "2mass-l8-v1: disk full" });
+    const cancelling = installReducer(adopted, { type: "cancel", id });
+    const cancelled = installReducer(cancelling, failed);
+    expect(cancelled[id]).toMatchObject({ phase: "idle" });
+    expect(installReducer(cancelled, { type: "failed", id, message: "cancelled" })).toBe(cancelled);
+    const started = installReducer(at({ phase: "consent" }), { type: "start", id });
+    const failedFirst = installReducer(started, failed);
+    expect(installReducer(failedFirst, { type: "failed", id, message: "2mass-l8-v1: disk full" })[id]).toEqual(failedFirst[id]);
+    const alreadyFailed = at({ phase: "failed", message: "x" });
+    expect(installReducer(alreadyFailed, failed)).toBe(alreadyFailed);
+    expect(installReducer({}, failed)).toEqual({});
   });
 
   it("ends a running install on the complete event and leaves a finished one as it is", () => {

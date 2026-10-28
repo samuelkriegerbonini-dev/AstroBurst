@@ -149,6 +149,7 @@ pub(crate) fn register_plane_and_respond(
         height: rows,
         wcs_present: false,
         extname: extname.clone(),
+        data: std::sync::Arc::downgrade(&entry.data_arc()),
     };
     let wcs_present = header
         .map(|h| load_wcs(&meta.wcs_source_path(), h).is_ok())
@@ -216,7 +217,7 @@ pub async fn switch_hdu(
 ) -> Result<Json<Value>> {
     let plane = plane_selection(params.hdu, params.array)?
         .ok_or_else(|| AppError::BadRequest("provide exactly one of hdu or array".into()))?;
-    let active = session.v2.active_ref.read().await.clone();
+    let active = session.reconcile_active_ref().await;
     let active = active.ok_or_else(|| {
         AppError::BadRequest("no active image in this session; open a file first".into())
     })?;

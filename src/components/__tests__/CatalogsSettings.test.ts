@@ -24,7 +24,7 @@ const TIER0: CatalogDatasetReport = {
   size_bytes: 15_541_742,
   installable: false,
   compressed: "none",
-  licence: "BSD-2-Clause (Tycho-2 as packaged by Debian)",
+  licence: "CC BY-NC 3.0 IGO (CDS ReadMe of I/259, ESA) or BSD-2-Clause (Debian tycho2 package); licenses/tycho2-catalogue-NOTICE.txt gives both",
   credit: "Tycho-2 Catalogue, Høg et al. 2000, A&A 355, L27",
   url_host: null,
   folder: "C:/data/catalogs/tycho2-l6-v1",

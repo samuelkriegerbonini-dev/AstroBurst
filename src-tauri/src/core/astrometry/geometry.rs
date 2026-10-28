@@ -4,9 +4,10 @@ use crate::core::astrometry::frames::{
     cartesian_to_spherical, mat_apply, mat_mul, rot_x, rot_y, rot_z, spherical_to_cartesian, Mat3,
 };
 use crate::core::astrometry::spectral::{
-    earth_heliocentric_position_au, header_target_coordinates, is_spacecraft, longitude_sign_is_ambiguous,
-    mid_exposure_jd, moon_geocentric_ecliptic_au, no_site_in_header_message, site_location, sun_barycentric_position_au,
-    sun_geometric_longitude_deg, target_unit_vector, SiteLocation, AU_KM, SPEED_OF_LIGHT_KMS, WGS84_A_M, WGS84_F,
+    earth_heliocentric_position_au, header_target_coordinates, invalid_time_cards, is_spacecraft,
+    longitude_sign_is_ambiguous, mid_exposure_jd, moon_geocentric_ecliptic_au, no_site_in_header_message, site_location,
+    sun_barycentric_position_au, sun_geometric_longitude_deg, target_unit_vector, SiteLocation, AU_KM, SPEED_OF_LIGHT_KMS,
+    WGS84_A_M, WGS84_F,
 };
 use crate::core::astrometry::time::{gmst_deg, jd_from_gregorian, julian_centuries_j2000, JD_J2000, SECONDS_PER_DAY};
 use crate::core::astrometry::wcs::{angular_separation, pixel_center};
@@ -52,16 +53,31 @@ pub const SOURCE_USER: &str = "user";
 pub const BARYCENTRIC_TIME_SOURCE: &str = "mid-exposure from BJDREFI + BJDREFF + (TSTART + TSTOP)/2";
 
 const TAI_MINUS_UTC_BEFORE_TABLE_SECONDS: f64 = 10.0;
+const TAI_MINUS_GPS_SECONDS: f64 = 19.0;
+const IAU_L_G: f64 = 6.969290134e-10;
+const IAU_L_B: f64 = 1.550519768e-8;
+const IAU_TDB0_SECONDS: f64 = -6.55e-5;
+const IAU_T0_JD: f64 = 2443144.5003725;
 const BEFORE_TABLE_NOTE: &str = "before 1972-01-01: TAI-UTC taken as 10 s (leap-second table starts there)";
-const BARYCENTRIC_HEADER_NOTE: &str = "header time is barycentric (TIMEREF/BJDREF): reported as BJD_TDB, no light-time term added; JD_UTC derived from it without removing the light-time term (up to 8.3 min)";
+const NO_TIME_REASON: &str =
+    "no observation time in the header (MJD-AVG, EXPMID, DATE-AVG, DATE-OBS, MJD-OBS or BJDREF with TSTART/TSTOP)";
 const TDB_MINUS_TT_METHOD: &str = "TDB - TT from the two-term Fairhead & Bretagnon series (Astronomical Almanac, 30 us)";
 const SCALE_UTC: &str = "UTC";
 const SCALE_TT: &str = "TT";
 const SCALE_TAI: &str = "TAI";
+const SCALE_GPS: &str = "GPS";
+const SCALE_TCG: &str = "TCG";
 const SCALE_TDB: &str = "TDB";
+const SCALE_TCB: &str = "TCB";
+const BARYCENTRIC_SCALES: [&str; 2] = [SCALE_TDB, SCALE_TCB];
 const TIMESYS_KEY: &str = "TIMESYS";
+const TREFPOS_KEY: &str = "TREFPOS";
+const SUPPORTED_TIME_REFERENCES: &str = "TREFPOS TOPOCENTER, GEOCENTER or BARYCENTER; TIMEREF LOCAL, GEOCENTRIC or SOLARSYSTEM";
 const TIMEREF_KEY: &str = "TIMEREF";
 const TIMEREF_BARYCENTRIC_PREFIX: &str = "SOLARSYSTEM";
+const TREFPOS_SIGNIFICANT_CHARS: usize = 3;
+const TCB_AT_OBSERVER: &str = "TIMESYS TCB is a barycentric time scale (FITS 4.0 Table 32 pairs it with BARYCENTER), but no TREFPOS, TIMEREF or BJDREFI places the time at the barycentre: the header time is not used, so no light-time correction is added or assumed";
+const TDB_AT_OBSERVER_NOTE: &str = "TIMESYS TDB with no barycentric TREFPOS, TIMEREF or BJDREFI: read as TDB at the observer (FITS 4.0 Table 32 pairs TDB with BARYCENTER), so the light-time term is added";
 const BJD_REFERENCE_INTEGER_KEY: &str = "BJDREFI";
 const BJD_REFERENCE_FRACTION_KEY: &str = "BJDREFF";
 const TIME_START_KEY: &str = "TSTART";
@@ -144,6 +160,14 @@ pub fn tdb_minus_tt_seconds(jd_tt: f64) -> f64 {
 
 pub fn jd_tdb_from_tt(jd_tt: f64) -> f64 {
     jd_tt + tdb_minus_tt_seconds(jd_tt) / SECONDS_PER_DAY
+}
+
+fn jd_tt_from_tcg(jd_tcg: f64) -> f64 {
+    jd_tcg - IAU_L_G * (jd_tcg - IAU_T0_JD)
+}
+
+fn jd_tdb_from_tcb(jd_tcb: f64) -> f64 {
+    jd_tcb - IAU_L_B * (jd_tcb - IAU_T0_JD) + IAU_TDB0_SECONDS / SECONDS_PER_DAY
 }
 
 pub fn mean_obliquity_deg(jd_tt: f64) -> f64 {
@@ -261,9 +285,61 @@ pub struct HeaderTime {
     pub notes: Vec<String>,
 }
 
-pub fn is_barycentric_header(header: &HduHeader) -> bool {
-    card_string_upper(header, TIMEREF_KEY).is_some_and(|v| v.starts_with(TIMEREF_BARYCENTRIC_PREFIX))
-        || header.get(BJD_REFERENCE_INTEGER_KEY).is_some()
+fn trefpos_is_barycentric(value: &str) -> Option<bool> {
+    match value.get(..TREFPOS_SIGNIFICANT_CHARS)? {
+        "TOP" | "GEO" => Some(false),
+        "BAR" => Some(true),
+        _ => None,
+    }
+}
+
+fn timeref_is_barycentric(value: &str) -> Option<bool> {
+    match value {
+        "LOCAL" | "GEOCENTRIC" => Some(false),
+        _ => value.starts_with(TIMEREF_BARYCENTRIC_PREFIX).then_some(true),
+    }
+}
+
+fn reference_claim(header: &HduHeader, key: &str, is_barycentric: fn(&str) -> Option<bool>) -> Result<Option<(String, bool)>, String> {
+    let Some(value) = card_string_upper(header, key) else {
+        return Ok(None);
+    };
+    let barycentric = is_barycentric(&value).ok_or_else(|| {
+        format!("{key} {value} is not a supported time reference ({SUPPORTED_TIME_REFERENCES}): the header time is not used, so no light-time correction is added or assumed")
+    })?;
+    Ok(Some((format!("{key} {value}"), barycentric)))
+}
+
+fn barycentric_reference(header: &HduHeader) -> Result<Option<String>, String> {
+    let bjd_reference = header.get(BJD_REFERENCE_INTEGER_KEY).is_some().then(|| (BJD_REFERENCE_INTEGER_KEY.to_string(), true));
+    let claims: Vec<(String, bool)> = [
+        reference_claim(header, TREFPOS_KEY, trefpos_is_barycentric)?,
+        reference_claim(header, TIMEREF_KEY, timeref_is_barycentric)?,
+        bjd_reference,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let barycentric = claims.iter().filter(|(_, barycentric)| *barycentric).count();
+    if barycentric > 0 && barycentric < claims.len() {
+        let described: Vec<String> = claims
+            .iter()
+            .map(|(claim, barycentric)| format!("{claim} {}", if *barycentric { "at the barycentre" } else { "at the observer" }))
+            .collect();
+        return Err(format!(
+            "time reference keywords disagree ({}): the header time is not used, so no light-time correction is added or assumed",
+            described.join(", ")
+        ));
+    }
+    Ok((barycentric > 0).then(|| claims.into_iter().map(|(claim, _)| claim).collect::<Vec<_>>().join(", ")))
+}
+
+fn barycentric_header_note(reference: &str) -> String {
+    format!("header time is barycentric ({reference}): reported as BJD_TDB, no light-time term added; JD_UTC derived from it without removing the light-time term (up to 8.3 min)")
+}
+
+fn no_time_reason(problems: &[String]) -> String {
+    std::iter::once(NO_TIME_REASON.to_string()).chain(problems.iter().cloned()).collect::<Vec<_>>().join("; ")
 }
 
 fn barycentric_reference_mid_jd(header: &HduHeader) -> Option<f64> {
@@ -274,7 +350,7 @@ fn barycentric_reference_mid_jd(header: &HduHeader) -> Option<f64> {
     Some(integer + fraction + (start + stop) / 2.0)
 }
 
-fn scale_rule_note(timesys: Option<&str>, scale: &str, jd_utc: f64, jd_tt: f64) -> String {
+fn scale_rule_note(timesys: Option<&str>, scale: &str, jd_header: f64, jd_utc: f64, jd_tt: f64) -> String {
     let (tai_minus_utc, _) = tai_minus_utc_seconds(jd_utc);
     let tdb_minus_tt = tdb_minus_tt_seconds(jd_tt);
     let label = match timesys {
@@ -282,72 +358,107 @@ fn scale_rule_note(timesys: Option<&str>, scale: &str, jd_utc: f64, jd_tt: f64) 
         Some(name) if scale == SCALE_UTC => format!("TIMESYS {name}: UTC"),
         Some(name) => format!("TIMESYS {name}: header time is {scale}"),
     };
+    let utc_from_tt = format!("UTC = TT - {TT_MINUS_TAI_SECONDS:.3} s - {tai_minus_utc:.3} s");
     match scale {
-        SCALE_TT => format!("{label}; UTC = TT - {TT_MINUS_TAI_SECONDS:.3} s - {tai_minus_utc:.3} s; TDB - TT = {tdb_minus_tt:+.4} s"),
+        SCALE_TT => format!("{label}; {utc_from_tt}; TDB - TT = {tdb_minus_tt:+.4} s"),
         SCALE_TAI => format!("{label}; TT = TAI + {TT_MINUS_TAI_SECONDS:.3} s; UTC = TAI - {tai_minus_utc:.3} s; TDB - TT = {tdb_minus_tt:+.4} s"),
-        SCALE_TDB => format!("{label}; TT = TDB - ({tdb_minus_tt:+.4} s); UTC = TT - {TT_MINUS_TAI_SECONDS:.3} s - {tai_minus_utc:.3} s"),
+        SCALE_GPS => format!("{label}; TT = GPS + {TAI_MINUS_GPS_SECONDS:.3} s + {TT_MINUS_TAI_SECONDS:.3} s; {utc_from_tt}; TDB - TT = {tdb_minus_tt:+.4} s"),
+        SCALE_TCG => {
+            let offset = (jd_header - jd_tt) * SECONDS_PER_DAY;
+            format!("{label}; TT = TCG - L_G (JD - T0) = TCG - {offset:.4} s (IAU 2000 B1.9); {utc_from_tt}; TDB - TT = {tdb_minus_tt:+.4} s")
+        }
+        SCALE_TDB => format!("{label}; TT = TDB - ({tdb_minus_tt:+.4} s); {utc_from_tt}"),
+        SCALE_TCB => {
+            let offset = (jd_header - jd_tdb_from_tcb(jd_header)) * SECONDS_PER_DAY;
+            format!("{label}; TDB = TCB - L_B (JD - T0) + TDB0 = TCB - {offset:.4} s (IAU 2006 B3); TT = TDB - ({tdb_minus_tt:+.4} s); {utc_from_tt}")
+        }
         _ => format!("{label}; TT = UTC + {tai_minus_utc:.3} s + {TT_MINUS_TAI_SECONDS:.3} s; TDB - TT = {tdb_minus_tt:+.4} s"),
     }
 }
 
-pub fn header_time(header: &HduHeader) -> Option<HeaderTime> {
-    let barycentric = is_barycentric_header(header);
+pub fn header_time(header: &HduHeader) -> Result<HeaderTime, String> {
+    let mut notes = invalid_time_cards(header);
+    let mid_exposure = mid_exposure_jd(header).filter(|(jd, _)| jd.is_finite());
     let barycentric_mid = barycentric_reference_mid_jd(header);
+    if mid_exposure.is_none() && barycentric_mid.is_none() {
+        return Err(no_time_reason(&notes));
+    }
+    let barycentric = barycentric_reference(header)?;
     let timesys = card_string_upper(header, TIMESYS_KEY);
-    let mut notes = Vec::new();
-    match mid_exposure_jd(header) {
-        Some((jd, source)) if jd.is_finite() => {
-            let (scale, jd_tt) = match timesys.as_deref() {
-                None | Some("UTC") | Some("UT") | Some("UT1") => (SCALE_UTC, jd_tt_from_utc(jd)),
-                Some(SCALE_TT) => (SCALE_TT, jd),
-                Some(SCALE_TAI) => (SCALE_TAI, jd + TT_MINUS_TAI_SECONDS / SECONDS_PER_DAY),
-                Some(SCALE_TDB) => (SCALE_TDB, jd - tdb_minus_tt_seconds(jd) / SECONDS_PER_DAY),
-                Some(other) => {
-                    notes.push(format!("TIMESYS {other} unknown: treated as UTC"));
-                    (SCALE_UTC, jd_tt_from_utc(jd))
-                }
-            };
-            let jd_utc = if scale == SCALE_UTC { jd } else { jd_utc_from_tt(jd_tt) };
-            notes.push(scale_rule_note(timesys.as_deref(), scale, jd_utc, jd_tt));
-            if tai_minus_utc_seconds(jd_utc).1 {
-                notes.push(BEFORE_TABLE_NOTE.to_string());
-            }
-            let bjd_header = barycentric.then(|| barycentric_mid.unwrap_or(jd));
-            if barycentric {
-                notes.push(BARYCENTRIC_HEADER_NOTE.to_string());
-            }
-            Some(HeaderTime {
-                jd_header: jd,
-                scale: scale.to_string(),
-                jd_utc,
-                jd_tt,
-                jd_tdb: jd_tdb_from_tt(jd_tt),
-                bjd_header,
-                source,
-                notes,
-            })
+    let Some((jd, source)) = mid_exposure else {
+        let (Some(bjd), Some(reference)) = (barycentric_mid, barycentric.as_deref()) else {
+            return Err(no_time_reason(&notes));
+        };
+        let jd_tt = bjd - tdb_minus_tt_seconds(bjd) / SECONDS_PER_DAY;
+        let jd_utc = jd_utc_from_tt(jd_tt);
+        notes.push(scale_rule_note(Some(SCALE_TDB), SCALE_TDB, bjd, jd_utc, jd_tt));
+        if let Some(name) = timesys.as_deref().filter(|name| *name != SCALE_TDB) {
+            notes.push(format!("TIMESYS {name} ignored: a BJDREF time is TDB by definition"));
         }
-        _ => {
-            let bjd = barycentric_mid.filter(|_| barycentric)?;
-            let jd_tt = bjd - tdb_minus_tt_seconds(bjd) / SECONDS_PER_DAY;
-            let jd_utc = jd_utc_from_tt(jd_tt);
-            notes.push(scale_rule_note(Some(SCALE_TDB), SCALE_TDB, jd_utc, jd_tt));
-            if let Some(name) = timesys.as_deref().filter(|name| *name != SCALE_TDB) {
-                notes.push(format!("TIMESYS {name} ignored: a BJDREF time is TDB by definition"));
-            }
-            notes.push(BARYCENTRIC_HEADER_NOTE.to_string());
-            Some(HeaderTime {
-                jd_header: bjd,
-                scale: SCALE_TDB.to_string(),
-                jd_utc,
-                jd_tt,
-                jd_tdb: bjd,
-                bjd_header: Some(bjd),
-                source: BARYCENTRIC_TIME_SOURCE.to_string(),
-                notes,
-            })
+        notes.push(barycentric_header_note(reference));
+        return Ok(HeaderTime {
+            jd_header: bjd,
+            scale: SCALE_TDB.to_string(),
+            jd_utc,
+            jd_tt,
+            jd_tdb: bjd,
+            bjd_header: Some(bjd),
+            source: BARYCENTRIC_TIME_SOURCE.to_string(),
+            notes,
+        });
+    };
+    let (scale, jd_tt) = match timesys.as_deref() {
+        None | Some(SCALE_UTC | "UT" | "UT1" | "GMT") => (SCALE_UTC, jd_tt_from_utc(jd)),
+        Some(SCALE_TT | "TDT" | "ET") => (SCALE_TT, jd),
+        Some(SCALE_TAI | "IAT") => (SCALE_TAI, jd + TT_MINUS_TAI_SECONDS / SECONDS_PER_DAY),
+        Some(SCALE_GPS) => (SCALE_GPS, jd + (TAI_MINUS_GPS_SECONDS + TT_MINUS_TAI_SECONDS) / SECONDS_PER_DAY),
+        Some(SCALE_TCG) => (SCALE_TCG, jd_tt_from_tcg(jd)),
+        Some(SCALE_TDB) => (SCALE_TDB, jd - tdb_minus_tt_seconds(jd) / SECONDS_PER_DAY),
+        Some(SCALE_TCB) => {
+            let jd_tdb = jd_tdb_from_tcb(jd);
+            (SCALE_TCB, jd_tdb - tdb_minus_tt_seconds(jd_tdb) / SECONDS_PER_DAY)
+        }
+        Some(other) => {
+            notes.push(format!("TIMESYS {other} unknown: treated as UTC"));
+            (SCALE_UTC, jd_tt_from_utc(jd))
+        }
+    };
+    if barycentric.is_none() {
+        match scale {
+            SCALE_TCB => return Err(TCB_AT_OBSERVER.to_string()),
+            SCALE_TDB => notes.push(TDB_AT_OBSERVER_NOTE.to_string()),
+            _ => {}
         }
     }
+    let jd_tdb = match scale {
+        SCALE_TDB => jd,
+        SCALE_TCB => jd_tdb_from_tcb(jd),
+        _ => jd_tdb_from_tt(jd_tt),
+    };
+    let jd_utc = if scale == SCALE_UTC { jd } else { jd_utc_from_tt(jd_tt) };
+    notes.push(scale_rule_note(timesys.as_deref(), scale, jd, jd_utc, jd_tt));
+    if tai_minus_utc_seconds(jd_utc).1 {
+        notes.push(BEFORE_TABLE_NOTE.to_string());
+    }
+    if let Some(reference) = barycentric.as_deref() {
+        if barycentric_mid.is_none() && !BARYCENTRIC_SCALES.contains(&scale) {
+            let named = timesys.as_deref().map_or_else(|| "TIMESYS absent".to_string(), |name| format!("TIMESYS {name}"));
+            notes.push(format!(
+                "{named} is not a barycentric time scale (FITS 4.0 Table 32 pairs BARYCENTER with TDB or TCB): the header time is read as BJD in {scale} and converted to BJD_TDB"
+            ));
+        }
+        notes.push(barycentric_header_note(reference));
+    }
+    Ok(HeaderTime {
+        jd_header: jd,
+        scale: scale.to_string(),
+        jd_utc,
+        jd_tt,
+        jd_tdb,
+        bjd_header: barycentric.is_some().then(|| barycentric_mid.unwrap_or(jd_tdb)),
+        source,
+        notes,
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -943,6 +1054,175 @@ mod tests {
             "{:?}",
             sited.time_scale_notes
         );
+    }
+
+    const BJD_TOLERANCE_DAYS: f64 = 1e-9;
+
+    fn equator_target() -> ResolvedTarget {
+        ResolvedTarget { ra_deg: 0.0, dec_deg: 0.0, source: "audit".to_string() }
+    }
+
+    #[test]
+    fn audit_probe_a_tdb_header_at_the_barycentre_keeps_its_bjd() {
+        let h = make_header(&[("MJD-AVG", "60000"), ("TIMESYS", "TDB"), ("TREFPOS", "BARYCENTER")]);
+        let time = header_time(&h).unwrap();
+        let g = frame_geometry(&h, &time, Some(&equator_target()), None);
+        assert!(barycentric_reference(&h).unwrap().is_some());
+        let bjd = g.bjd_tdb.expect("BJD_TDB from the header");
+        assert!((bjd - 2460000.5).abs() <= BJD_TOLERANCE_DAYS, "extra correction {} s", seconds(bjd - 2460000.5));
+        assert_eq!(g.bjd_source.as_deref(), Some(BJD_SOURCE_HEADER));
+        assert_eq!(g.hjd_utc, None);
+        assert!(g.time_scale_notes.iter().any(|n| n.contains("barycentric (TREFPOS BARYCENTER)")), "{:?}", g.time_scale_notes);
+        assert!(!g.time_scale_notes.iter().any(|n| n.contains("Roemer")), "{:?}", g.time_scale_notes);
+    }
+
+    #[test]
+    fn an_explicit_topocentre_or_geocentre_gets_the_same_light_time_as_the_default() {
+        let cards = [("DATE-OBS", "2026-03-21T10:00:00"), ("EXPTIME", "600"), ("RA_TARG", "180.0"), ("DEC_TARG", "0.0")];
+        let geometry_of = |extra: &[(&str, &str)]| {
+            let h = make_header(&[&cards[..], extra].concat());
+            let target = resolve_target("", &h, None, &GeometryOverrides::default()).unwrap();
+            frame_geometry(&h, &header_time(&h).unwrap(), Some(&target), None)
+        };
+        let default = geometry_of(&[]);
+        let jd_utc = jd_from_gregorian(2026, 3, 21.0) + (10.0 * 3600.0 + 300.0) / SECONDS_PER_DAY;
+        let jd_tt = jd_tt_from_utc(jd_utc);
+        let roemer = romer_delay_seconds(jd_tt, 180.0, 0.0, LightTimeCentre::Barycentre);
+        let expected = jd_utc + (37.0 + TT_MINUS_TAI_SECONDS + tdb_minus_tt_seconds(jd_tt) + roemer) / SECONDS_PER_DAY;
+        assert!((default.bjd_tdb.unwrap() - expected).abs() <= BJD_TOLERANCE_DAYS, "{} s", seconds(default.bjd_tdb.unwrap() - expected));
+        assert_eq!(default.bjd_source.as_deref(), Some(BJD_SOURCE_COMPUTED));
+        for extra in [
+            [("TREFPOS", "TOPOCENTER")],
+            [("TREFPOS", "GEOCENTER")],
+            [("TREFPOS", "TOPOCENT")],
+            [("TREFPOS", "GEOCENTR")],
+            [("TREFPOS", "TOPOCENTRIC")],
+            [("TIMEREF", "LOCAL")],
+            [("TIMEREF", "GEOCENTRIC")],
+        ] {
+            let g = geometry_of(&extra);
+            assert_eq!((g.bjd_tdb, g.hjd_utc, g.jd_utc), (default.bjd_tdb, default.hjd_utc, default.jd_utc), "{extra:?}");
+            assert_eq!(g.bjd_source.as_deref(), Some(BJD_SOURCE_COMPUTED), "{extra:?}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_barycent_reference_keeps_the_header_bjd_like_the_full_spelling() {
+        for spelling in ["BARYCENT", "barycentre"] {
+            let h = make_header(&[("MJD-AVG", "60000"), ("TIMESYS", "TDB"), ("TREFPOS", spelling)]);
+            let g = frame_geometry(&h, &header_time(&h).unwrap(), Some(&equator_target()), None);
+            assert!((g.bjd_tdb.unwrap() - 2460000.5).abs() <= BJD_TOLERANCE_DAYS, "{spelling}");
+            assert_eq!(g.bjd_source.as_deref(), Some(BJD_SOURCE_HEADER), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_coordinate_time_scale_at_the_observer_is_refused_and_tdb_there_is_named() {
+        for extra in [&[][..], &[("TREFPOS", "TOPOCENTER")][..]] {
+            let h = make_header(&[&[("MJD-AVG", "60000"), ("TIMESYS", "TCB")][..], extra].concat());
+            let err = header_time(&h).unwrap_err();
+            assert!(err.starts_with("TIMESYS TCB is a barycentric time scale") && err.ends_with("no light-time correction is added or assumed"), "{err}");
+        }
+        let tdb = make_header(&[("MJD-AVG", "60000"), ("TIMESYS", "TDB")]);
+        let time = header_time(&tdb).unwrap();
+        assert!(time.notes.iter().any(|n| n.starts_with("TIMESYS TDB with no barycentric TREFPOS, TIMEREF or BJDREFI")), "{:?}", time.notes);
+        let g = frame_geometry(&tdb, &time, Some(&equator_target()), None);
+        assert_eq!(g.bjd_source.as_deref(), Some(BJD_SOURCE_COMPUTED));
+    }
+
+    #[test]
+    fn a_legacy_solarsystem_tdb_header_without_bjdref_keeps_its_header_time_as_bjd() {
+        let h = make_header(&[("MJD-AVG", "61120.25"), ("TIMESYS", "TDB"), ("TIMEREF", "SOLARSYSTEM")]);
+        let time = header_time(&h).unwrap();
+        let g = frame_geometry(&h, &time, Some(&equator_target()), None);
+        assert!(barycentric_reference(&h).unwrap().is_some());
+        assert!((g.bjd_tdb.unwrap() - 2461120.75).abs() <= BJD_TOLERANCE_DAYS);
+        assert_eq!(g.bjd_source.as_deref(), Some(BJD_SOURCE_HEADER));
+    }
+
+    #[test]
+    fn unsupported_or_contradictory_time_references_are_refused_with_the_keywords_named() {
+        let base = [("MJD-AVG", "60000"), ("TIMESYS", "TDB")];
+        for (cards, named) in [
+            (&[("TREFPOS", "HELIOCENTER")][..], "TREFPOS HELIOCENTER is not a supported time reference"),
+            (&[("TREFPOS", "RELOCATABLE")][..], "TREFPOS RELOCATABLE is not a supported time reference"),
+            (&[("TREFPOS", "'MARS'")][..], "TREFPOS MARS is not a supported time reference"),
+            (&[("TIMEREF", "HELIOCENTRIC")][..], "TIMEREF HELIOCENTRIC is not a supported time reference"),
+            (&[("TREFPOS", "TOPOCENTER"), ("TIMEREF", "SOLARSYSTEM")][..], "(TREFPOS TOPOCENTER at the observer, TIMEREF SOLARSYSTEM at the barycentre)"),
+            (&[("TREFPOS", "BARYCENTER"), ("TIMEREF", "LOCAL")][..], "(TREFPOS BARYCENTER at the barycentre, TIMEREF LOCAL at the observer)"),
+            (&[("TREFPOS", "GEOCENTER"), ("BJDREFI", "2457000")][..], "(TREFPOS GEOCENTER at the observer, BJDREFI at the barycentre)"),
+        ] {
+            let h = make_header(&[&base[..], cards].concat());
+            let err = header_time(&h).unwrap_err();
+            assert!(err.contains(named) && err.ends_with("no light-time correction is added or assumed"), "{err}");
+            assert!(barycentric_reference(&h).is_err(), "{cards:?}");
+        }
+        let agreeing = make_header(&[
+            ("TIMESYS", "TDB"),
+            ("TREFPOS", "barycenter"),
+            ("TIMEREF", "SOLARSYSTEM"),
+            ("BJDREFI", "2457000"),
+            ("BJDREFF", "0.5"),
+            ("TSTART", "100.0"),
+            ("TSTOP", "100.2"),
+        ]);
+        let time = header_time(&agreeing).unwrap();
+        assert!((time.bjd_header.unwrap() - 2457100.6).abs() <= BJD_TOLERANCE_DAYS, "{:?}", time.bjd_header);
+        assert!(time.notes.iter().any(|n| n.contains("barycentric (TREFPOS BARYCENTER, TIMEREF SOLARSYSTEM, BJDREFI)")), "{:?}", time.notes);
+    }
+
+    #[test]
+    fn a_barycentric_time_in_an_earth_time_scale_is_converted_to_tdb_and_reported() {
+        let utc = make_header(&[("MJD-AVG", "60000"), ("TREFPOS", "BARYCENTER")]);
+        let time = header_time(&utc).unwrap();
+        let g = frame_geometry(&utc, &time, Some(&equator_target()), None);
+        let bjd = g.bjd_tdb.unwrap();
+        assert!((bjd - jd_tdb_from_tt(jd_tt_from_utc(2460000.5))).abs() <= BJD_TOLERANCE_DAYS);
+        assert!((seconds(bjd - 2460000.5) - 69.184).abs() < 0.0018, "{} s", seconds(bjd - 2460000.5));
+        assert_eq!(g.bjd_source.as_deref(), Some(BJD_SOURCE_HEADER));
+        let reported = "TIMESYS absent is not a barycentric time scale (FITS 4.0 Table 32 pairs BARYCENTER with TDB or TCB)";
+        assert!(time.notes.iter().any(|n| n.starts_with(reported) && n.contains("BJD in UTC")), "{:?}", time.notes);
+        let tt = make_header(&[("MJD-AVG", "60000"), ("TIMESYS", "TT"), ("TIMEREF", "SOLARSYSTEM")]);
+        let time = header_time(&tt).unwrap();
+        assert!((time.bjd_header.unwrap() - jd_tdb_from_tt(2460000.5)).abs() <= BJD_TOLERANCE_DAYS);
+        assert!(time.notes.iter().any(|n| n.starts_with("TIMESYS TT is not a barycentric time scale")), "{:?}", time.notes);
+        let tdb = make_header(&[("MJD-AVG", "60000"), ("TIMESYS", "TDB"), ("TREFPOS", "BARYCENTER")]);
+        assert!(!header_time(&tdb).unwrap().notes.iter().any(|n| n.contains("Table 32")));
+    }
+
+    #[test]
+    fn tcb_tcg_gps_and_the_deprecated_scale_names_follow_their_definitions() {
+        let at = |timesys: &str, extra: &[(&str, &str)]| {
+            header_time(&make_header(&[&[("MJD-AVG", "51544.5"), ("TIMESYS", timesys)][..], extra].concat())).unwrap()
+        };
+        let tcb = at("TCB", &[("TREFPOS", "BARYCENTER")]);
+        assert!((seconds(2451545.0 - tcb.bjd_header.unwrap()) - 11.25379).abs() < 1e-3, "{}", seconds(2451545.0 - tcb.jd_tdb));
+        assert_eq!(tcb.bjd_header, Some(tcb.jd_tdb));
+        assert!(tcb.notes.iter().any(|n| n.contains("TDB = TCB - L_B (JD - T0) + TDB0 = TCB - 11.2538 s")), "{:?}", tcb.notes);
+        assert!(!tcb.notes.iter().any(|n| n.contains("Table 32")), "{:?}", tcb.notes);
+        let tcg = at("TCG", &[]);
+        assert!((seconds(2451545.0 - tcg.jd_tt) - 0.50583).abs() < 1e-3, "{}", seconds(2451545.0 - tcg.jd_tt));
+        let gps = at("GPS", &[]);
+        assert!((seconds(gps.jd_tt - 2451545.0) - 51.184).abs() < 1e-4);
+        assert!((seconds(2451545.0 - gps.jd_utc) - 13.0).abs() < 1e-4, "GPS - UTC was 13 s in 2000");
+        for (alias, scale) in [("TDT", "TT"), ("ET", "TT"), ("IAT", "TAI"), ("GMT", "UTC")] {
+            let (aliased, named) = (at(alias, &[]), at(scale, &[]));
+            assert_eq!((aliased.scale.as_str(), aliased.jd_tt, aliased.jd_utc), (scale, named.jd_tt, named.jd_utc), "{alias}");
+        }
+    }
+
+    #[test]
+    fn an_impossible_date_card_is_named_in_the_notes_or_in_the_refusal() {
+        let err = header_time(&make_header(&[("DATE-OBS", "2026-02-30T12:00:00"), ("EXPTIME", "60")])).unwrap_err();
+        assert_eq!(
+            err,
+            format!("{NO_TIME_REASON}; DATE-OBS ignored: date '2026-02-30T12:00:00' has day 30, but February 2026 has 28 days")
+        );
+        let time = header_time(&make_header(&[("DATE-OBS", "2026-04-31"), ("TIME-OBS", "06:00:00"), ("MJD-OBS", "61160.25")])).unwrap();
+        assert!(time.source.starts_with("MJD-OBS"), "{}", time.source);
+        assert_eq!(time.jd_header, 2461160.75);
+        let named = "DATE-OBS/TIME-OBS ignored: date '2026-04-31T06:00:00' has day 31, but April 2026 has 30 days";
+        assert!(time.notes.iter().any(|n| n == named), "{:?}", time.notes);
     }
 
     #[test]

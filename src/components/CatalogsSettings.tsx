@@ -21,7 +21,7 @@ import {
 } from "../utils/catalogRows";
 
 export const CATALOG_CREDITS =
-  "Data credits: Tycho-2 (Høg et al. 2000, BSD-2), 2MASS (UMass and IPAC/Caltech for NASA and NSF, public domain), " +
+  "Data credits: Tycho-2 (Høg et al. 2000; CC BY-NC 3.0 IGO per CDS and ESA, BSD-2-Clause per Debian; Credit: ESA), 2MASS (UMass and IPAC/Caltech for NASA and NSF, public domain), " +
   "Siril HEALPix catalogue format (Team free-astro, CC BY 4.0), Gaia DR3 © ESA/Gaia/DPAC (Vallenari et al. 2023, CC BY-NC 3.0 IGO), " +
   "online through VizieR (CDS, Strasbourg) or as the Siril extract downloaded from Zenodo.";
 

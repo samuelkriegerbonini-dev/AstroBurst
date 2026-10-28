@@ -19,6 +19,7 @@ use crate::infra::progress::ProgressHandle;
 use crate::types::config::AppConfig;
 
 const COMPLETE_STAGE: &str = "complete";
+const FAILED_STAGE: &str = "failed";
 
 static CATALOG_CHOICES: Mutex<()> = Mutex::new(());
 
@@ -29,6 +30,8 @@ pub(crate) struct InstallProgress {
     total: u64,
     percent: u32,
     stage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 pub(crate) fn install_progress_payload(
@@ -43,7 +46,12 @@ pub(crate) fn install_progress_payload(
         total,
         percent: percent_of(done, total),
         stage: stage.to_owned(),
+        message: None,
     }
+}
+
+pub(crate) fn install_failure_payload(id: &str, message: &str) -> InstallProgress {
+    InstallProgress { message: Some(message.to_owned()), ..install_progress_payload(id, FAILED_STAGE, 0, 0) }
 }
 
 pub(crate) fn install_cancel_key(id: &str) -> String {
@@ -58,7 +66,14 @@ struct ProgressObserver {
 
 impl ProgressObserver {
     fn emit(&self, stage: &str, done: u64, total: u64) {
-        let payload = install_progress_payload(&self.id, stage, done, total);
+        self.send(install_progress_payload(&self.id, stage, done, total));
+    }
+
+    fn emit_failure(&self, message: &str) {
+        self.send(install_failure_payload(&self.id, message));
+    }
+
+    fn send(&self, payload: InstallProgress) {
         if let Err(error) = self.app.emit(INSTALL_PROGRESS_EVENT, payload) {
             log::debug!("catalogue install progress was not delivered: {error}");
         }
@@ -208,20 +223,31 @@ pub async fn catalog_install_cmd(
         handle: ProgressHandle::new(&app, &install_cancel_key(&id), 1),
         app: app.clone(),
     });
-    let outcome = install_dataset(&store, &id, consent.as_ref(), observer.clone()).await?;
-    if outcome.id == SIRIL_GAIA_ID {
-        off_thread(move || {
-            let store = app_store(resource)?;
-            update_choices(|config| store.use_downloaded_siril(config))
-        })
-        .await
-        .map_err(|error| {
-            format!(
-                "the Siril Gaia extract is in {}, but it could not be set as the Siril folder: {error}",
-                outcome.path.display()
-            )
-        })?;
+    let installed = async {
+        let outcome = install_dataset(&store, &id, consent.as_ref(), observer.clone()).await?;
+        if outcome.id == SIRIL_GAIA_ID {
+            off_thread(move || {
+                let store = app_store(resource)?;
+                update_choices(|config| store.use_downloaded_siril(config))
+            })
+            .await
+            .map_err(|error| {
+                format!(
+                    "the Siril Gaia extract is in {}, but it could not be set as the Siril folder: {error}",
+                    outcome.path.display()
+                )
+            })?;
+        }
+        Ok::<_, String>(outcome)
     }
+    .await;
+    let outcome = match installed {
+        Ok(outcome) => outcome,
+        Err(message) => {
+            observer.emit_failure(&message);
+            return Err(message);
+        }
+    };
     observer.emit(COMPLETE_STAGE, outcome.bytes, outcome.bytes);
     serde_json::to_value(outcome).map_err(|error| error.to_string())
 }
@@ -280,7 +306,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        install_cancel_key, install_dataset, install_progress_payload, percent_of, status_json,
+        install_cancel_key, install_dataset, install_failure_payload, install_progress_payload, percent_of,
+        status_json,
     };
     use crate::infra::catalog_store::{
         CatalogStore, InstallObserver, InstallStage, StoreRoots, ZenodoConsent,
@@ -426,6 +453,16 @@ mod tests {
         .unwrap();
         assert_eq!(consent.archive_bytes, SIRIL_GAIA_BZ2_BYTES);
         assert!(consent.licence_acknowledged);
+    }
+
+    #[test]
+    fn a_failed_install_reports_the_failed_stage_with_its_message_and_progress_omits_it() {
+        let failed = serde_json::to_value(install_failure_payload(TWOMASS_ID, "2mass-l8-v1: disk full")).unwrap();
+        assert_eq!(failed["stage"], "failed");
+        assert_eq!(failed["message"], "2mass-l8-v1: disk full");
+        assert_eq!(failed["id"], TWOMASS_ID);
+        let running = serde_json::to_value(install_progress_payload(TWOMASS_ID, "download", 5, 10)).unwrap();
+        assert!(running.get("message").is_none(), "{running}");
     }
 
     #[test]

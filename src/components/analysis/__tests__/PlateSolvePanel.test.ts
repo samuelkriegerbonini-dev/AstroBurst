@@ -421,7 +421,6 @@ const OBJCT_HINTS = {
   epoch_year: 2024.5,
   cfa: null,
   object: null,
-  expected_tier0_stars: 20.4,
   warnings: ["XBINNING 2 read as both binnings"],
 };
 

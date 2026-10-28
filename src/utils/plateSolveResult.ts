@@ -126,6 +126,9 @@ export interface LocalFailure {
   detections: number | null;
   canFallback: boolean;
   apiKeyStored: boolean | null;
+  minMatches: number | null;
+  maxRmsPx: number | null;
+  tier0MinExpectedStars: number | null;
 }
 
 const FAILURE_KINDS: Readonly<Record<string, LocalFailureKind>> = {
@@ -184,6 +187,9 @@ export function localFailure(error: unknown): LocalFailure | null {
     detections: firstNumber(context, "detections"),
     canFallback: firstBoolean(context, "canFallback", "can_fallback") ?? true,
     apiKeyStored: firstBoolean(context, "apiKeyStored", "api_key_stored"),
+    minMatches: firstNumber(context, "minMatches", "min_matches"),
+    maxRmsPx: firstNumber(context, "maxRmsPx", "max_rms_px"),
+    tier0MinExpectedStars: firstNumber(context, "tier0MinExpectedStars", "tier0_min_expected_stars"),
   };
 }
 
@@ -197,6 +203,9 @@ export function deadlineFailure(message: string): LocalFailure {
     detections: null,
     canFallback: true,
     apiKeyStored: null,
+    minMatches: null,
+    maxRmsPx: null,
+    tier0MinExpectedStars: null,
   };
 }
 
@@ -227,11 +236,14 @@ function reasonLine(failure: LocalFailure): string | null {
   return SENTENCE_END.test(text) ? text : `${text}.`;
 }
 
-function bestLine(best: FailureCandidate | null): string | null {
+function bestLine(failure: LocalFailure): string | null {
+  const best = failure.best;
   if (!best || best.matched === null) return null;
   const predicted = best.predicted === null ? "" : ` of ${best.predicted} predicted`;
   const rms = best.rmsPx === null ? "" : `, RMS ${best.rmsPx.toFixed(2)} px`;
-  return `Best candidate: ${best.matched}${predicted} stars matched${rms}; a solution needs ${MIN_MATCHES} matches and an RMS of ${MAX_RMS_PX} px or less.`;
+  const minMatches = failure.minMatches ?? MIN_MATCHES;
+  const maxRmsPx = failure.maxRmsPx ?? MAX_RMS_PX;
+  return `Best candidate: ${best.matched}${predicted} stars matched${rms}; a solution needs ${minMatches} matches and an RMS of ${maxRmsPx} px or less.`;
 }
 
 function searchLine(centres: number | null, detections: number | null): string | null {
@@ -242,12 +254,13 @@ function searchLine(centres: number | null, detections: number | null): string |
 
 function tierLine(failure: LocalFailure): string | null {
   const expected = failure.expectedTier0Stars;
-  if (failure.kind !== "no_solution" || expected === null || expected >= TIER0_MIN_EXPECTED_STARS) return null;
+  const needed = failure.tier0MinExpectedStars ?? TIER0_MIN_EXPECTED_STARS;
+  if (failure.kind !== "no_solution" || expected === null || expected >= needed) return null;
   return `About ${Math.round(expected)} Tycho-2 stars are expected in this field, fewer than tier 0 needs; add a deeper catalogue in Settings > Catalogs, such as a Siril Gaia DR3 extract.`;
 }
 
 export function failureLines(failure: LocalFailure): string[] {
-  return [searchLine(failure.centresTried, failure.detections), bestLine(failure.best), reasonLine(failure), tierLine(failure)].filter(
+  return [searchLine(failure.centresTried, failure.detections), bestLine(failure), reasonLine(failure), tierLine(failure)].filter(
     (line): line is string => line !== null && line !== "",
   );
 }

@@ -166,11 +166,12 @@ pub async fn bin(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?;
 
+    session.prune_evicted_meta();
+    let source = session.v2.meta.get(&target).and_then(|m| m.source.clone());
+    let binned = Arc::new(binned);
     session
         .cache
-        .insert_synthetic(&out_ref, Arc::new(binned), stats);
-
-    let source = session.v2.meta.get(&target).and_then(|m| m.source.clone());
+        .insert_synthetic(&out_ref, Arc::clone(&binned), stats);
     session.v2.meta.insert(
         out_ref.clone(),
         ImageMeta {
@@ -184,6 +185,7 @@ pub async fn bin(
             height: out_rows,
             wcs_present: false,
             extname: None,
+            data: Arc::downgrade(&binned),
         },
     );
     session.prune_evicted_meta();

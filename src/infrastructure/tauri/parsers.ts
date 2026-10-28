@@ -25,7 +25,7 @@ export function parseRawPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
   return { width, height, dataMin, dataMax, pixels };
 }
 
-export function parseRawRgbPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
+export function parseRawRgbPixelBuffer(raw: ArrayBuffer | ArrayBufferView, displayReferredSource = false) {
   const bytes = toUint8Array(raw);
   if (bytes.length < 32) {
     throw new Error(`raw rgb pixels: response too small (${bytes.length} bytes)`);
@@ -46,7 +46,7 @@ export function parseRawRgbPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
   if (bytes.length < expected) {
     throw new Error(`raw rgb pixels: expected ${expected} bytes, got ${bytes.length}`);
   }
-  const displayReferred = bytes.length > expected && bytes[expected] === 1;
+  const displayReferred = displayReferredSource || (bytes.length > expected && bytes[expected] === 1);
 
   const channel = (blockIndex: number, min: number, max: number) => {
     const start = bytes.byteOffset + 32 + blockIndex * blockBytes;

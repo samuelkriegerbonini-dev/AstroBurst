@@ -9,16 +9,41 @@ import {
   resolveRgbExportSource,
   rgbCubeUnavailableReason,
   rgbExportPaths,
+  rgbFilePngNote,
+  rgbFileSourceTitle,
   zipCandidates,
   zipEntryName,
 } from "../exportSources";
+import { rgbProductOf, type RgbProductInput } from "../rgbProduct";
+import type { ProcessedResult } from "../../shared/types/preview";
 
 const A = "C:/data/A.fits";
 const A_PREVIEW = "http://asset.localhost/C%3A%2Fcache%2FA.png";
+const A_CURVES = "C:/history/3f9c0a1e5b7d2c44/n0001.fits";
+
+const CURVES_ON_A: ProcessedResult = {
+  fitsPath: A_CURVES,
+  previewUrl: "http://asset.localhost/n0001.png?v=3",
+  dimensions: [128, 128],
+  label: "Curves",
+  kind: "processing",
+  inputPath: A,
+  planes: 3,
+  domain: "display_referred",
+};
+
+type ScreenInput = Omit<RgbProductInput, "processed"> & {
+  rgbChannels: { r: string | null; g: string | null; b: string | null } | null;
+  processed?: RgbProductInput["processed"];
+};
+
+function exportSourceOf({ rgbChannels, processed = null, ...screen }: ScreenInput) {
+  return resolveRgbExportSource({ rgbChannels, product: rgbProductOf({ ...screen, processed }) });
+}
 
 describe("resolveRgbExportSource", () => {
   it("uses the RGB file path, not null channels, when the screen shows that file's RGB view", () => {
-    const src = resolveRgbExportSource({
+    const src = exportSourceOf({
       rgbChannels: null,
       compositePreviewUrl: A_PREVIEW,
       filePath: A,
@@ -29,7 +54,7 @@ describe("resolveRgbExportSource", () => {
   });
 
   it("treats all-null channels on an RGB file as the file, not the global composite", () => {
-    const src = resolveRgbExportSource({
+    const src = exportSourceOf({
       rgbChannels: { r: null, g: null, b: null },
       compositePreviewUrl: A_PREVIEW,
       filePath: A,
@@ -41,7 +66,7 @@ describe("resolveRgbExportSource", () => {
 
   it("uses Headers-tab channels when no RGB image is on screen", () => {
     const channels = { r: "r.fits", g: "g.fits", b: null };
-    const src = resolveRgbExportSource({
+    const src = exportSourceOf({
       rgbChannels: channels,
       compositePreviewUrl: null,
       filePath: "C:/data/L.fits",
@@ -53,14 +78,14 @@ describe("resolveRgbExportSource", () => {
 
   it("prefers the RGB file on screen over channels assigned on other files", () => {
     const channels = { r: "C:/data/L1.fits", g: "C:/data/L2.fits", b: "C:/data/L3.fits" };
-    const ownView = resolveRgbExportSource({
+    const ownView = exportSourceOf({
       rgbChannels: channels,
       compositePreviewUrl: A_PREVIEW,
       filePath: A,
       fileIsRgb: true,
       filePreviewUrl: A_PREVIEW,
     });
-    const compositeReset = resolveRgbExportSource({
+    const compositeReset = exportSourceOf({
       rgbChannels: channels,
       compositePreviewUrl: null,
       filePath: A,
@@ -71,8 +96,24 @@ describe("resolveRgbExportSource", () => {
     expect(compositeReset).toEqual({ kind: "file", path: A });
   });
 
+  it("exports the planes of a processed RGB result instead of the original file, whether or not the file view was reset yet", () => {
+    for (const compositePreviewUrl of [null, A_PREVIEW]) {
+      const src = exportSourceOf({ rgbChannels: null, compositePreviewUrl, filePath: A, fileIsRgb: true, filePreviewUrl: A_PREVIEW, processed: CURVES_ON_A });
+      expect(src).toEqual({ kind: "file", path: A_CURVES });
+    }
+  });
+
+  it("offers no RGB file export when a mono or PNG-only result is shown over an RGB file", () => {
+    const base = { rgbChannels: null, compositePreviewUrl: null, filePath: A, fileIsRgb: true, filePreviewUrl: A_PREVIEW };
+    expect(exportSourceOf({ ...base, processed: { ...CURVES_ON_A, planes: 1 } })).toBeNull();
+    expect(exportSourceOf({ ...base, processed: { ...CURVES_ON_A, planes: undefined } })).toBeNull();
+    expect(exportSourceOf({ ...base, processed: { ...CURVES_ON_A, fitsPath: null } })).toBeNull();
+    const channels = { r: "C:/data/L1.fits", g: "C:/data/L2.fits", b: "C:/data/L3.fits" };
+    expect(exportSourceOf({ ...base, rgbChannels: channels, processed: { ...CURVES_ON_A, planes: 1 } })).toEqual({ kind: "channels", channels });
+  });
+
   it("prefers a composite on screen over channels assigned on other files", () => {
-    const src = resolveRgbExportSource({
+    const src = exportSourceOf({
       rgbChannels: { r: "C:/data/L1.fits", g: "C:/data/L2.fits", b: "C:/data/L3.fits" },
       compositePreviewUrl: "http://asset.localhost/blend.png",
       filePath: "C:/data/L3.fits",
@@ -83,27 +124,36 @@ describe("resolveRgbExportSource", () => {
   });
 
   it("uses the composite cache when a wizard or composite result is on screen", () => {
-    const onRgbFile = resolveRgbExportSource({
+    const onRgbFile = exportSourceOf({
       rgbChannels: null,
       compositePreviewUrl: "http://asset.localhost/blend.png",
       filePath: A,
       fileIsRgb: true,
       filePreviewUrl: A_PREVIEW,
     });
-    const onMonoFile = resolveRgbExportSource({
+    const onMonoFile = exportSourceOf({
       rgbChannels: null,
       compositePreviewUrl: "http://asset.localhost/blend.png",
       filePath: "C:/data/L.fits",
       fileIsRgb: false,
       filePreviewUrl: "http://asset.localhost/L.png",
     });
+    const overCurves = exportSourceOf({
+      rgbChannels: null,
+      compositePreviewUrl: "http://asset.localhost/blend.png",
+      filePath: A,
+      fileIsRgb: true,
+      filePreviewUrl: A_PREVIEW,
+      processed: CURVES_ON_A,
+    });
     expect(onRgbFile).toEqual({ kind: "composite" });
     expect(onMonoFile).toEqual({ kind: "composite" });
+    expect(overCurves).toEqual({ kind: "composite" });
   });
 
   it("returns null for a mono file with no composite and no channels", () => {
     expect(
-      resolveRgbExportSource({
+      exportSourceOf({
         rgbChannels: null,
         compositePreviewUrl: null,
         filePath: "C:/data/L.fits",
@@ -111,6 +161,23 @@ describe("resolveRgbExportSource", () => {
         filePreviewUrl: null,
       }),
     ).toBeNull();
+  });
+});
+
+describe("RGB file source notes", () => {
+  const curves = { label: "Curves", displayReferred: true };
+
+  it("names the processed result when its planes are exported, and the file otherwise", () => {
+    expect(rgbFileSourceTitle(curves)).toBe("Source: the R, G and B planes and header of the processed result (Curves)");
+    expect(rgbFileSourceTitle(null)).toBe("Source: this RGB file's own planes and header");
+  });
+
+  it("says a display-referred result is written as shown and a file follows the STF on screen", () => {
+    expect(rgbFilePngNote(curves, null)).toBe("Source: the processed result (Curves) as shown; its stretch is baked in, so no STF is applied");
+    expect(rgbFilePngNote({ ...curves, displayReferred: false }, null)).toBe("Source: the processed result (Curves) with a per-channel auto STF");
+    expect(rgbFilePngNote(null, { linked: true })).toBe("Source: this RGB file with the linked STF on screen");
+    expect(rgbFilePngNote(null, { linked: false })).toBe("Source: this RGB file with the per-channel STF on screen");
+    expect(rgbFilePngNote(null, null)).toBe("Source: this RGB file with a per-channel auto STF");
   });
 });
 

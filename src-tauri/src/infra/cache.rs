@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, LazyLock};
+use std::sync::{Arc, RwLock, LazyLock, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
@@ -231,6 +231,10 @@ impl ImageCache {
 
     pub fn contains(&self, key: &str) -> bool {
         self.inner.read().unwrap().map.contains_key(key)
+    }
+
+    pub fn holds(&self, key: &str, data: &Weak<Array2<f32>>) -> Option<bool> {
+        self.inner.read().unwrap().map.get(key).map(|entry| std::ptr::eq(Arc::as_ptr(&entry.value.arr), data.as_ptr()))
     }
 
     pub fn get_or_load<F>(&self, path: &str, loader: F) -> Result<ImageEntry>

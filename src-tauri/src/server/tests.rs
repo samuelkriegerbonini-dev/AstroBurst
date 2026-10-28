@@ -3793,6 +3793,63 @@ async fn v1_fits_open_loads_the_given_path_into_a_reused_slot() {
 }
 
 #[tokio::test]
+async fn a_v1_open_into_a_v2_ref_leaves_no_metadata_of_the_replaced_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("probe-a.fits");
+    let b = dir.path().join("probe-b.fits");
+    v2_fixtures::write_wcs_fits(&a, 4, 4);
+    v2_fixtures::write_wcs_fits(&b, 8, 8);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-mix");
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-mix/open", &path_body(&a, r#","name":"shared""#)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["dims"], serde_json::json!([4, 4]));
+
+    let resp = post_json(build_router(state.clone()), "/sessions/s-mix/fits/open", &path_body(&b, r#","slot":"shared""#)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["dims"], serde_json::json!([8, 8]));
+
+    let listed = body_json(get_uri(build_router(state.clone()), "/v2/sessions/s-mix/images").await).await;
+    let stale = listed["images"].as_array().unwrap().iter().any(|m| {
+        m["image_ref"] == "shared" && (m["width"] != 8 || m["height"] != 8 || m["source"] == a.to_str().unwrap())
+    });
+    assert!(!stale, "the v2 listing still describes the replaced image: {listed}");
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-mix/hdu", r#"{"hdu":0}"#).await;
+    let status = resp.status();
+    let switched = body_json(resp).await;
+    assert!(
+        status == StatusCode::BAD_REQUEST || (status == StatusCode::OK && switched["dims"] == serde_json::json!([8, 8])),
+        "the v2 HDU switch re-opened the replaced image: {status} {switched}"
+    );
+
+    let session = state.sessions.get("s-mix").unwrap().clone();
+    assert_eq!(session.cache.get("shared").unwrap().arr().dim(), (8, 8));
+    assert_eq!(session.wcs_source_path("shared"), "", "the replaced image's WCS source must not describe the new pixels");
+}
+
+#[tokio::test]
+async fn binning_a_ref_into_its_own_name_keeps_its_source_for_the_next_hdu_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let fits = dir.path().join("own.fits");
+    v2_fixtures::write_wcs_fits(&fits, 8, 8);
+    let state = AppState::new(cfg());
+    seed_session(&state, "s-bin-own");
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-bin-own/open", &path_body(&fits, r#","name":"img""#)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-bin-own/bin", r#"{"factor":2,"ref":"img","name":"img"}"#).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = post_json(build_router(state.clone()), "/v2/sessions/s-bin-own/hdu", r#"{"hdu":0}"#).await;
+    let status = resp.status();
+    let body = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["dims"], serde_json::json!([8, 8]), "{body}");
+}
+
+#[tokio::test]
 async fn load_errors_caused_by_the_request_are_client_errors_not_500() {
     let dir = tempfile::tempdir().unwrap();
     let fits = dir.path().join("one.fits");

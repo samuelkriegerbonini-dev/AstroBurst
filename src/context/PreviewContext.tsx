@@ -156,7 +156,7 @@ interface RawPixelsContextValue {
   clearRawPixels: () => void;
   rgbRawPixels: RawRgbPixelData | null;
   rgbRawPixelsLoading: boolean;
-  loadRgbRawPixels: (source: string | null, force?: boolean) => void;
+  loadRgbRawPixels: (source: string | null, force?: boolean, displayReferred?: boolean) => void;
   clearRgbRawPixels: () => void;
 }
 
@@ -469,7 +469,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const rawPixelsAbortRef = useRef(0);
   const rgbRawPixelsAbortRef = useRef(0);
   const lastFetchMaxDimRef = useRef(0);
-  const rgbSourceRef = useRef<string | null>(null);
+  const rgbSourceRef = useRef<{ path: string | null; displayReferred: boolean }>({ path: null, displayReferred: false });
   const narrowbandKeyRef = useRef("");
   const narrowbandSeqRef = useRef(0);
   const starOverlayRef = useRef<HTMLCanvasElement>(null);
@@ -818,14 +818,14 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setRawPixelsError(null);
   }, []);
 
-  const loadRgbRawPixels = useCallback((source: string | null, force = false) => {
+  const loadRgbRawPixels = useCallback((source: string | null, force = false, displayReferred = false) => {
     if (!force && (rgbRawPixelsRef.current || rgbRawPixelsLoadingRef.current)) return;
     setRgbRawPixelsLoading(true);
     const seq = ++rgbRawPixelsAbortRef.current;
     const maxDim = computePreviewMaxDim();
     lastFetchMaxDimRef.current = maxDim;
-    rgbSourceRef.current = source;
-    getRawRgbPixelsPreview(source, maxDim)
+    rgbSourceRef.current = { path: source, displayReferred };
+    getRawRgbPixelsPreview(source, maxDim, displayReferred)
       .then((result) => {
         if (rgbRawPixelsAbortRef.current !== seq) return;
         setRgbRawPixels(result);
@@ -859,7 +859,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
           loadRawPixels(true);
           setDqMaskRefetch((c) => c + 1);
         }
-        if (rgbRawPixelsRef.current) loadRgbRawPixels(rgbSourceRef.current, true);
+        if (rgbRawPixelsRef.current) loadRgbRawPixels(rgbSourceRef.current.path, true, rgbSourceRef.current.displayReferred);
       }, 300);
     };
     window.addEventListener("resize", onResize);

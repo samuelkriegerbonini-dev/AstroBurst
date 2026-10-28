@@ -174,6 +174,9 @@ describe("localFailure", () => {
       detections: 286,
       canFallback: true,
       apiKeyStored: null,
+      minMatches: null,
+      maxRmsPx: null,
+      tier0MinExpectedStars: null,
     });
     expect(
       localFailure(noSolution({ best: { matched: 3, predicted: 50, rmsPx: 2 }, expected_tier0_stars: 75, centres_tried: 1, can_fallback: false })),
@@ -198,6 +201,9 @@ describe("localFailure", () => {
       detections: null,
       canFallback: true,
       apiKeyStored: null,
+      minMatches: null,
+      maxRmsPx: null,
+      tier0MinExpectedStars: null,
     });
     expect(localFailure(new TauriCommandError("plate_solve_cmd", NO_SOLUTION, "local_no_solution"))?.canFallback).toBe(true);
   });
@@ -253,6 +259,22 @@ describe("failureHeading and failureLines", () => {
     expect(lines[1]).toBe(
       "Tier 2: Gaia DR3 online (VizieR): catalogue read failed: VizieR request failed: error sending request for 127.0.0.1:9; Tier 0: Tycho-2 (bundled): no solution within 3.00 deg of the hint after 397 centres: no centre produced 8 consistent star matches.",
     );
+  });
+
+  it("quotes the acceptance thresholds the backend sends instead of its own copies", () => {
+    const failure = localFailure(
+      noSolution({
+        best: { matched: 5, predicted: 40, rms_px: 1.2 },
+        expectedTier0Stars: 45,
+        minMatches: 6,
+        maxRmsPx: 1.5,
+        tier0MinExpectedStars: 40,
+      }),
+    )!;
+    expect(failureLines(failure)).toEqual([
+      "Best candidate: 5 of 40 predicted stars matched, RMS 1.20 px; a solution needs 6 matches and an RMS of 1.5 px or less.",
+      `${NO_SOLUTION}.`,
+    ]);
   });
 
   it("leaves out what the error does not carry and does not suggest a deeper catalogue for a rich field", () => {

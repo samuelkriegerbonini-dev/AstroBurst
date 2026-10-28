@@ -2,6 +2,9 @@ pub const JD_J2000: f64 = 2451545.0;
 pub const MJD_EPOCH_JD: f64 = 2400000.5;
 pub const DAYS_PER_JULIAN_CENTURY: f64 = 36525.0;
 pub const SECONDS_PER_DAY: f64 = 86400.0;
+const MONTH_NAMES: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December",
+];
 
 pub fn jd_from_mjd(mjd: f64) -> f64 {
     mjd + MJD_EPOCH_JD
@@ -87,7 +90,7 @@ fn parse_iso_date(date: &str, source: &str) -> Result<(i32, u32, u32), String> {
     let year: i32 = parse_component(parts[0], "year", source)?;
     let month: u32 = parse_component(parts[1], "month", source)?;
     let day: u32 = parse_component(parts[2], "day", source)?;
-    validate_month_day(month, day, source)?;
+    validate_calendar_date(year, month, day, source)?;
     Ok((year, month, day))
 }
 
@@ -102,13 +105,32 @@ fn parse_old_fits_date(date: &str, source: &str) -> Result<(i32, u32, u32), Stri
     if !(0..=99).contains(&year_two_digits) {
         return Err(format!("two-digit year in '{}' is out of range", source));
     }
-    validate_month_day(month, day, source)?;
-    Ok((1900 + year_two_digits, month, day))
+    let year = 1900 + year_two_digits;
+    validate_calendar_date(year, month, day, source)?;
+    Ok((year, month, day))
 }
 
-fn validate_month_day(month: u32, day: u32, source: &str) -> Result<(), String> {
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return Err(format!("date '{}' has an invalid month or day", source));
+fn is_gregorian_leap_year(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        2 if is_gregorian_leap_year(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn validate_calendar_date(year: i32, month: u32, day: u32, source: &str) -> Result<(), String> {
+    if !(1..=12).contains(&month) {
+        return Err(format!("date '{source}' has month {month}, outside 1 to 12"));
+    }
+    let last_day = days_in_month(year, month);
+    if !(1..=last_day).contains(&day) {
+        let month_name = MONTH_NAMES[month as usize - 1];
+        return Err(format!("date '{source}' has day {day}, but {month_name} {year} has {last_day} days"));
     }
     Ok(())
 }
@@ -137,12 +159,13 @@ pub fn parse_fits_datetime(s: &str) -> Result<f64, String> {
 pub fn parse_fits_date_and_time(date: &str, time: Option<&str>) -> Result<f64, String> {
     let date_text = clean_card(date);
     let has_time = date_text.contains('T') || date_text.contains(' ');
-    match time {
-        Some(t) if !has_time && !clean_card(t).is_empty() => {
-            let combined = format!("{}T{}", date_text, clean_card(t));
-            parse_fits_datetime(&combined)
+    match time.map(clean_card).filter(|t| !has_time && !t.is_empty()) {
+        Some(t) if date_text.contains('/') => {
+            let (y, m, d) = parse_old_fits_date(date_text, date)?;
+            Ok(jd_from_gregorian(y, m, d as f64 + day_fraction_from_time(t, t)?))
         }
-        _ => parse_fits_datetime(date_text),
+        Some(t) => parse_fits_datetime(&format!("{date_text}T{t}")),
+        None => parse_fits_datetime(date_text),
     }
 }
 
@@ -178,10 +201,68 @@ mod tests {
     }
 
     #[test]
+    fn an_old_dd_mm_yy_date_takes_its_time_of_day_from_time_obs() {
+        assert_eq!(parse_fits_date_and_time("19/09/96", Some("06:00:00")).unwrap(), jd_from_gregorian(1996, 9, 19.25));
+        assert_eq!(parse_fits_date_and_time("'19/09/96'", Some("'18:00:00'")).unwrap(), jd_from_gregorian(1996, 9, 19.75));
+        assert_eq!(parse_fits_date_and_time("19/09/96", None).unwrap(), jd_from_gregorian(1996, 9, 19.0));
+        let err = parse_fits_date_and_time("30/02/96", Some("06:00:00")).unwrap_err();
+        assert!(err.contains("has day 30, but February 1996 has 29 days"), "{err}");
+    }
+
+    #[test]
     fn malformed_strings_are_rejected_with_the_input_named() {
         for bad in ["", "2026-13-01", "2026-09-19T25:00:00", "yesterday", "2026/09/19", "2026-09"] {
             let err = parse_fits_datetime(bad).unwrap_err();
             assert!(err.contains(bad) || bad.is_empty(), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn audit_probe_february_30_is_refused_instead_of_becoming_march_2() {
+        let err = parse_fits_datetime("2026-02-30T12:00:00").unwrap_err();
+        assert!(err.contains("'2026-02-30T12:00:00'") && err.contains("day 30, but February 2026 has 28 days"), "{err}");
+        assert_eq!(parse_fits_datetime("2026-03-02T12:00:00"), Ok(2461102.0));
+    }
+
+    #[test]
+    fn impossible_calendar_dates_are_refused_in_both_syntaxes_with_the_bad_value_named() {
+        for (bad, reason) in [
+            ("2026-02-30", "day 30, but February 2026 has 28 days"),
+            ("2026-04-31T00:00:00", "day 31, but April 2026 has 30 days"),
+            ("2025-02-29", "day 29, but February 2025 has 28 days"),
+            ("1900-02-29T12:00:00", "day 29, but February 1900 has 28 days"),
+            ("2100-02-29", "day 29, but February 2100 has 28 days"),
+            ("2026-06-00", "day 0, but June 2026 has 30 days"),
+            ("2026-13-01", "month 13, outside 1 to 12"),
+            ("30/02/96", "day 30, but February 1996 has 29 days"),
+            ("29/02/97", "day 29, but February 1997 has 28 days"),
+            ("29/02/00", "day 29, but February 1900 has 28 days"),
+            ("31/09/26", "day 31, but September 1926 has 30 days"),
+        ] {
+            let err = parse_fits_datetime(bad).unwrap_err();
+            assert!(err.contains(&format!("'{bad}'")) && err.contains(reason), "{bad}: {err}");
+        }
+        let err = parse_fits_date_and_time("2026-02-30", Some("06:00:00")).unwrap_err();
+        assert!(err.contains("'2026-02-30T06:00:00'") && err.contains("February 2026 has 28 days"), "{err}");
+    }
+
+    #[test]
+    fn leap_days_follow_the_gregorian_century_rule_in_both_syntaxes() {
+        assert_eq!(parse_fits_datetime("2024-02-29").unwrap(), jd_from_gregorian(2024, 2, 29.0));
+        assert_eq!(parse_fits_datetime("2000-02-29T12:00:00").unwrap(), 2451604.0);
+        assert_eq!(parse_fits_datetime("2400-02-29").unwrap(), jd_from_gregorian(2400, 2, 29.0));
+        assert_eq!(parse_fits_datetime("29/02/96").unwrap(), jd_from_gregorian(1996, 2, 29.0));
+        assert_eq!(parse_fits_datetime("2024-02-29").unwrap() + 1.0, parse_fits_datetime("2024-03-01").unwrap());
+        assert_eq!(parse_fits_datetime("2000-02-29").unwrap() + 1.0, parse_fits_datetime("2000-03-01").unwrap());
+        for (last_day, next_day) in [
+            ("2026-01-31", "2026-02-01"),
+            ("2026-02-28", "2026-03-01"),
+            ("2026-04-30", "2026-05-01"),
+            ("2026-12-31", "2027-01-01"),
+            ("28/02/97", "01/03/97"),
+            ("31/12/98", "01/01/99"),
+        ] {
+            assert_eq!(parse_fits_datetime(last_day).unwrap() + 1.0, parse_fits_datetime(next_day).unwrap(), "{last_day}");
         }
     }
 

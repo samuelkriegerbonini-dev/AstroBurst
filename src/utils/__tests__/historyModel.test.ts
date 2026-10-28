@@ -224,6 +224,14 @@ describe("node mapping", () => {
     expect(rootMath?.inputPreviewUrl).toBe("asset://source.png");
     expect(nodeRecord(LINEAR, "n0099", root)).toBeNull();
   });
+
+  it("keeps the plane count and value domain of the node, so a Curves result on an RGB file stays a 3-plane display-referred product", () => {
+    const root = { dir: DIR, rootPath: "C:/data/runtime-rgb.fits", rootPreviewUrl: "asset://rgb.png" };
+    const rgbNode = node("n0001", null, { op: "tone", v: 1, levels: { black: 0, gamma: 1.5, white: 1 } });
+    const rgbDoc = doc([{ ...rgbNode, output: { ...rgbNode.output, dims: [128, 128], planes: 3, domain: "display_referred" } }], "n0001");
+    expect(nodeRecord(rgbDoc, "n0001", root)).toMatchObject({ fitsPath: `${DIR}\\n0001.fits`, label: "Curves", planes: 3, domain: "display_referred" });
+    expect(nodeRecord(LINEAR, "n0001", root)).toMatchObject({ planes: 1, domain: "linear" });
+  });
 });
 
 describe("opSummary", () => {

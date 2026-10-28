@@ -36,11 +36,11 @@ mod tests;
 
 pub const MAX_NEAR_RADIUS_DEG: f64 = 15.0;
 pub const TIER0_MEAN_STARS_PER_DEG2: f64 = 62.0;
+pub const TIER0_MIN_EXPECTED_STARS: f64 = 50.0;
 
-const STAGE_DETECT: &str = "detect";
+pub const STAGE_DETECT: &str = "detect";
 const STAGE_SEARCH: &str = "search";
 const STAGE_FIT: &str = "fit";
-const TIER0_MIN_EXPECTED_STARS: f64 = 50.0;
 const TAN_HYPOTHESIS_PAIRS: usize = 3;
 const ARCSEC_PER_DEG: f64 = 3600.0;
 const TAN_LON_POLE: f64 = 180.0;
@@ -100,15 +100,9 @@ impl RankingKey {
 }
 
 pub trait CatalogProvider: Send + Sync {
-    fn cone(
-        &self,
-        ra_deg: f64,
-        dec_deg: f64,
-        radius_deg: f64,
-        mag_limit: Option<f64>,
-    ) -> Result<(Vec<CatalogRow>, &'static str), String>;
+    fn label(&self) -> &'static str;
 
-    fn depth_mag(&self) -> f64;
+    fn cone(&self, ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Result<Vec<CatalogRow>, String>;
 
     fn ranking_key(&self) -> RankingKey {
         RankingKey::MAGNITUDE
@@ -121,6 +115,34 @@ pub enum CatalogTier {
     Tier1,
     Tier2,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TierSpec {
+    pub tier: CatalogTier,
+    pub label: &'static str,
+    pub ranking: RankingKey,
+}
+
+pub const TYCHO2_TIER: TierSpec = TierSpec {
+    tier: CatalogTier::Tier0,
+    label: "tier0-tycho2",
+    ranking: RankingKey::MAGNITUDE,
+};
+pub const SIRIL_GAIA_TIER: TierSpec = TierSpec {
+    tier: CatalogTier::Tier1,
+    label: "tier1-gaia-siril",
+    ranking: RankingKey::MAGNITUDE,
+};
+pub const TWOMASS_TIER: TierSpec = TierSpec {
+    tier: CatalogTier::Tier1,
+    label: "tier1-2mass",
+    ranking: RankingKey::TWO_MASS_J_KS,
+};
+pub const GAIA_ONLINE_TIER: TierSpec = TierSpec {
+    tier: CatalogTier::Tier2,
+    label: "tier2-gaia-vizier",
+    ranking: RankingKey::MAGNITUDE,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FieldSize {
@@ -138,14 +160,9 @@ pub fn expected_tier0_stars(field: FieldSize) -> f64 {
 }
 
 impl TierChain {
-    pub fn choose(
-        &self,
-        field: FieldSize,
-        expected_hint: Option<f64>,
-    ) -> Option<(CatalogTier, &dyn CatalogProvider)> {
-        let expected = expected_hint.unwrap_or_else(|| expected_tier0_stars(field));
+    pub fn choose(&self, field: FieldSize) -> Option<(CatalogTier, &dyn CatalogProvider)> {
         let tier0 = self.tier(CatalogTier::Tier0);
-        if expected >= TIER0_MIN_EXPECTED_STARS {
+        if expected_tier0_stars(field) >= TIER0_MIN_EXPECTED_STARS {
             if let Some(provider) = tier0 {
                 return Some((CatalogTier::Tier0, provider));
             }
@@ -168,54 +185,31 @@ impl TierChain {
 #[cfg(test)]
 struct HealpixProvider {
     catalog: HealpixCatalog<MmapSource>,
-    label: &'static str,
-    depth_mag: f64,
-    ranking: RankingKey,
+    spec: TierSpec,
 }
 
 #[cfg(test)]
 impl CatalogProvider for HealpixProvider {
-    fn cone(
-        &self,
-        ra_deg: f64,
-        dec_deg: f64,
-        radius_deg: f64,
-        mag_limit: Option<f64>,
-    ) -> Result<(Vec<CatalogRow>, &'static str), String> {
-        let mut rows = self
-            .catalog
-            .cone(ra_deg, dec_deg, radius_deg, None)
-            .map_err(|error| format!("{}: {error}", self.label))?;
-        if let Some(limit) = mag_limit {
-            rows.retain(|row| row.g.is_some_and(|mag| mag <= limit));
-        }
-        Ok((rows, self.label))
+    fn label(&self) -> &'static str {
+        self.spec.label
     }
 
-    fn depth_mag(&self) -> f64 {
-        self.depth_mag
+    fn cone(&self, ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Result<Vec<CatalogRow>, String> {
+        self.catalog
+            .cone(ra_deg, dec_deg, radius_deg, None)
+            .map_err(|error| error.to_string())
     }
 
     fn ranking_key(&self) -> RankingKey {
-        self.ranking
+        self.spec.ranking
     }
 }
 
 #[cfg(test)]
-pub fn healpix_provider(
-    path: &Path,
-    label: &'static str,
-    depth_mag: f64,
-    ranking: RankingKey,
-) -> Result<Box<dyn CatalogProvider>, String> {
+pub fn healpix_provider(path: &Path, spec: TierSpec) -> Result<Box<dyn CatalogProvider>, String> {
     let catalog = HealpixCatalog::open_file(path)
-        .map_err(|error| format!("{label} at {}: {error}", path.display()))?;
-    Ok(Box::new(HealpixProvider {
-        catalog,
-        label,
-        depth_mag,
-        ranking,
-    }))
+        .map_err(|error| format!("{} at {}: {error}", spec.label, path.display()))?;
+    Ok(Box::new(HealpixProvider { catalog, spec }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +368,7 @@ pub struct LocalSolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureReason {
     MissingHint,
+    TooFewStars,
     NoSolution,
     Cancelled,
     Catalog,
@@ -1504,7 +1499,7 @@ fn saturation_level(image: &Array2<f32>) -> Option<f64> {
     (plateau >= SATURATION_PLATEAU_PIXELS).then_some(f64::from(max))
 }
 
-fn detect_for_solve(
+pub fn detect_for_solve(
     image: &Array2<f32>,
     hints: &SolveHints,
     params: &LocalSolveParams,
@@ -1891,7 +1886,7 @@ fn footprint_catalogue(tan: &TanParams, ctx: &SearchContext) -> Result<Vec<(f64,
     let half_diagonal_deg =
         0.5 * (width as f64).hypot(height as f64) * scale_arcsec(&tan.cd) / ARCSEC_PER_DEG;
     let radius = ctx.params.footprint_margin * half_diagonal_deg;
-    let (mut rows, _) = ctx.catalog.cone(tan.crval.0, tan.crval.1, radius, None)?;
+    let mut rows = ctx.catalog.cone(tan.crval.0, tan.crval.1, radius)?;
     if let Some(epoch) = ctx.epoch_year {
         propagate_epoch(&mut rows, epoch);
     }
@@ -2060,9 +2055,9 @@ fn try_centre(
     side: &MatchSide,
     ctx: &SearchContext,
 ) -> Result<CentreOutcome, String> {
-    let (mut rows, _) = ctx
+    let mut rows = ctx
         .catalog
-        .cone(centre.0, centre.1, hypothesis.cone_radius_deg, None)?;
+        .cone(centre.0, centre.1, hypothesis.cone_radius_deg)?;
     if let Some(epoch) = ctx.epoch_year {
         propagate_epoch(&mut rows, epoch);
     }
@@ -2305,7 +2300,7 @@ fn solve_detections(
     let n_det = selected.len();
     if n_det < params.min_matches {
         return Err(failure(
-            FailureReason::NoSolution,
+            FailureReason::TooFewStars,
             format!(
                 "{n_det} usable stars detected, at least {} needed",
                 params.min_matches

@@ -403,7 +403,6 @@ const OBJCT_HINTS: SolveHints = {
   epoch_year: 2024.5,
   cfa: null,
   object: null,
-  expected_tier0_stars: null,
   warnings: [],
 };
 const OBJCT_SOURCES = { centre: "OBJCTRA/OBJCTDEC", scale: "XPIXSZ 2.9 µm / FOCALLEN 250 mm" };

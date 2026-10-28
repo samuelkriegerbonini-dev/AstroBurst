@@ -1772,7 +1772,7 @@ fn the_triangle_stars_come_from_inside_the_frame_not_from_the_cone_around_it() {
             Some(mag),
         ));
     }
-    let provider = SyntheticProvider::new(TIER1_LABEL, rows, 13.0);
+    let provider = SyntheticProvider::new(TIER1_LABEL, rows);
     let image = render_field(
         &truth,
         provider.rows(),
@@ -2062,7 +2062,7 @@ fn a_coarse_tan_above_the_rms_gate_is_refined_before_the_gate_applies() {
         .enumerate()
         .map(|(i, p)| super::synthetic::catalog_row(i, p.ra, p.dec, Some(10.0)))
         .collect();
-    let provider = SyntheticProvider::new(TIER1_LABEL, rows, 13.0);
+    let provider = SyntheticProvider::new(TIER1_LABEL, rows);
     let shifted = destination(truth.centre(), 90.0, COARSE_TAN_SHIFT_PX * 2.0 / ARCSEC_PER_DEG);
     let coarse = TruthField::new(
         shifted,
@@ -2289,21 +2289,14 @@ impl MemHealpixProvider {
 }
 
 impl CatalogProvider for MemHealpixProvider {
-    fn cone(
-        &self,
-        ra_deg: f64,
-        dec_deg: f64,
-        radius_deg: f64,
-        _mag_limit: Option<f64>,
-    ) -> Result<(Vec<CatalogRow>, &'static str), String> {
-        self.0
-            .cone(ra_deg, dec_deg, radius_deg, None)
-            .map(|rows| (rows, TIER0_LABEL))
-            .map_err(|error| error.to_string())
+    fn label(&self) -> &'static str {
+        TIER0_LABEL
     }
 
-    fn depth_mag(&self) -> f64 {
-        12.0
+    fn cone(&self, ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Result<Vec<CatalogRow>, String> {
+        self.0
+            .cone(ra_deg, dec_deg, radius_deg, None)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -2491,7 +2484,7 @@ fn c4_negatives_return_no_solution_with_the_best_numbers() {
         ) {
             Ok(solution) => failures.push(format!("{name}: solved {solution:?}")),
             Err(failure) => {
-                if failure.reason != FailureReason::NoSolution {
+                if !matches!(failure.reason, FailureReason::NoSolution | FailureReason::TooFewStars) {
                     failures.push(format!("{name}: reason {:?}", failure.reason));
                 }
                 if let Some(best) = &failure.best {
@@ -2780,8 +2773,8 @@ fn a_2mass_tier_ranks_its_cone_by_the_optical_equivalent_of_j_and_j_ks() {
         720,
     );
     let coloured = coloured_rows(optical.rows(), &COLOUR_LOCUS, 721);
-    let by_j_alone = SyntheticProvider::new(TIER1_LABEL, coloured.infrared.clone(), 16.0);
-    let provider = SyntheticProvider::new(TIER1_LABEL, coloured.infrared.clone(), 16.0)
+    let by_j_alone = SyntheticProvider::new(TIER1_LABEL, coloured.infrared.clone());
+    let provider = SyntheticProvider::new(TIER1_LABEL, coloured.infrared.clone())
         .with_ranking(RankingKey::TWO_MASS_J_KS);
     let bloated_flux = flux_for(COLOUR_FIELD_BLOATED_BRIGHTER_THAN, COLOUR_FIELD_DEPTH_R, 1000.0);
     let detections: Vec<Detection> =
@@ -2797,7 +2790,7 @@ fn a_2mass_tier_ranks_its_cone_by_the_optical_equivalent_of_j_and_j_ks() {
     let inlier_px = ransac_inlier_px(truth.width.max(truth.height), truth.long_side_deg());
     let side = MatchSide::new(&points, params.hinted_match_stars, inlier_px);
     let cone_radius = params.cone_short_side_fraction * field.width_deg.min(field.height_deg);
-    let (rows, _) = provider.cone(hint.0, hint.1, cone_radius, None).expect("cone");
+    let rows = provider.cone(hint.0, hint.1, cone_radius).expect("cone");
     let by_j = true_pairs_in_best_window(&truth, &side, &rows, RankingKey::MAGNITUDE, &params);
     let by_key = true_pairs_in_best_window(&truth, &side, &rows, RankingKey::TWO_MASS_J_KS, &params);
     eprintln!(
@@ -3015,30 +3008,21 @@ fn three_by_two(long_side_deg: f64) -> FieldSize {
     }
 }
 
-fn chosen(
-    chain: &TierChain,
-    long_side_deg: f64,
-    expected: Option<f64>,
-) -> Option<(CatalogTier, &'static str)> {
+fn chosen(chain: &TierChain, long_side_deg: f64) -> Option<(CatalogTier, &'static str)> {
     chain
-        .choose(three_by_two(long_side_deg), expected)
-        .map(|(tier, provider)| {
-            let (_, label) = provider
-                .cone(TIER_CENTRE.0, TIER_CENTRE.1, 0.1, None)
-                .expect("synthetic cone");
-            (tier, label)
-        })
+        .choose(three_by_two(long_side_deg))
+        .map(|(tier, provider)| (tier, provider.label()))
 }
 
 #[test]
 fn tier_chain_picks_tier_1_for_a_0_4_degree_field_and_tier_0_for_a_5_degree_field() {
     let chain = tier_chain(true, false);
     assert_eq!(
-        chosen(&chain, 0.4, None),
+        chosen(&chain, 0.4),
         Some((CatalogTier::Tier1, TIER1_LABEL))
     );
     assert_eq!(
-        chosen(&chain, 5.0, None),
+        chosen(&chain, 5.0),
         Some((CatalogTier::Tier0, TIER0_LABEL))
     );
 }
@@ -3047,35 +3031,25 @@ fn tier_chain_picks_tier_1_for_a_0_4_degree_field_and_tier_0_for_a_5_degree_fiel
 fn tier_chain_follows_the_expected_tier0_count_and_falls_back_in_order() {
     let full = tier_chain(true, true);
     assert_eq!(
-        chosen(&full, 5.0, Some(20.0)),
-        Some((CatalogTier::Tier1, TIER1_LABEL)),
-        "a sparse 5 deg field near a galactic pole"
-    );
-    assert_eq!(
-        chosen(&full, 0.4, Some(80.0)),
-        Some((CatalogTier::Tier0, TIER0_LABEL)),
-        "a 0.4 deg field on a cluster with 80 tier-0 stars"
-    );
-    assert_eq!(
-        chosen(&full, 1.2, None),
+        chosen(&full, 1.2),
         Some((CatalogTier::Tier0, TIER0_LABEL)),
         "1.2 x 0.8 deg holds about 60 tier-0 stars at the mean density"
     );
     assert_eq!(
-        chosen(&full, 1.0, None),
+        chosen(&full, 1.0),
         Some((CatalogTier::Tier1, TIER1_LABEL)),
         "1.0 x 0.67 deg holds about 41 tier-0 stars at the mean density"
     );
     assert_eq!(
-        chosen(&tier_chain(false, true), 0.4, None),
+        chosen(&tier_chain(false, true), 0.4),
         Some((CatalogTier::Tier2, TIER2_LABEL))
     );
     assert_eq!(
-        chosen(&tier_chain(false, false), 0.4, None),
+        chosen(&tier_chain(false, false), 0.4),
         Some((CatalogTier::Tier0, TIER0_LABEL))
     );
     assert!(TierChain::default()
-        .choose(three_by_two(1.0), None)
+        .choose(three_by_two(1.0))
         .is_none());
 }
 

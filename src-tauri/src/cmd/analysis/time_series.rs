@@ -42,7 +42,6 @@ const AIRMASS_KEY: &str = "AIRMASS";
 const TIMESYS_KEY: &str = "TIMESYS";
 const FILTER_KEY: &str = "FILTER";
 const UTC_SCALE: &str = "UTC";
-const FRAME_WITHOUT_TIME_REASON: &str = "no observation time in the header";
 const NO_SERIES_TARGET_NOTE: &str = "no target coordinates: BJD_TDB and HJD_UTC need a WCS, RA/DEC keywords or a target override";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -199,8 +198,8 @@ fn series_geometry(
 
 fn frame_geometry_of(header: Option<&HduHeader>, series: &SeriesGeometry) -> Option<FrameGeometry> {
     header.map(|h| match header_time(h) {
-        Some(time) => frame_geometry(h, &time, series.target.as_ref(), resolve_site(h, &series.overrides).as_ref()),
-        None => FrameGeometry::without_time(FRAME_WITHOUT_TIME_REASON),
+        Ok(time) => frame_geometry(h, &time, series.target.as_ref(), resolve_site(h, &series.overrides).as_ref()),
+        Err(reason) => FrameGeometry::without_time(&reason),
     })
 }
 
@@ -1158,6 +1157,105 @@ mod tests {
         assert!((target.ra_deg - 150.0).abs() < 0.05 && (target.dec_deg - 2.0).abs() < 0.05, "{target:?}");
         assert!(!out.geometry_notes.is_empty());
         assert!(out.geometry_notes.iter().any(|n| n.contains("held constant")), "{:?}", out.geometry_notes);
+    }
+
+    const SERIES_BJD_TOLERANCE_DAYS: f64 = 1e-9;
+    const BARYCENTRIC_MJD: f64 = 60310.25;
+
+    fn barycentric_mjd(i: usize) -> f64 {
+        BARYCENTRIC_MJD + i as f64 * CADENCE_SECONDS / 86400.0
+    }
+
+    #[test]
+    fn a_tdb_barycentric_series_hands_the_header_bjd_to_the_exports_unchanged() {
+        use crate::core::astrometry::time::jd_from_mjd;
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "bary", 3, |i, header| {
+            sited_wcs_cards(header);
+            header.set("MJD-AVG", format!("{}", barycentric_mjd(i)));
+            header.set(TIMESYS_KEY, "TDB".to_string());
+            header.set("TREFPOS", "BARYCENTER".to_string());
+        });
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        let json = serde_json::to_value(&out).unwrap();
+        for (i, frame) in json["frames"].as_array().unwrap().iter().enumerate() {
+            let header_bjd = jd_from_mjd(barycentric_mjd(i));
+            let geometry = &frame["geometry"];
+            let bjd = geometry["bjd_tdb"].as_f64().expect("BJD_TDB");
+            assert!((bjd - header_bjd).abs() <= SERIES_BJD_TOLERANCE_DAYS, "frame {i}: {} s off the header", (bjd - header_bjd) * 86400.0);
+            assert!((frame["jd_mid"].as_f64().unwrap() - header_bjd).abs() <= SERIES_BJD_TOLERANCE_DAYS);
+            assert_eq!(geometry["bjd_source"], "header", "{geometry}");
+            assert!(geometry["hjd_utc"].is_null() && geometry["altitude_deg"].is_null(), "{geometry}");
+        }
+    }
+
+    #[test]
+    fn a_utc_topocentric_series_gets_only_the_leap_second_tt_tdb_and_roemer_terms() {
+        use crate::core::astrometry::geometry::{
+            jd_tt_from_utc, romer_delay_seconds, tai_minus_utc_seconds, tdb_minus_tt_seconds, LightTimeCentre, TT_MINUS_TAI_SECONDS,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (implicit, targets) = write_headed_stack(dir.path(), "utc", 3, |_, header| sited_wcs_cards(header));
+        let (explicit, _) = write_headed_stack(dir.path(), "topo", 3, |_, header| {
+            sited_wcs_cards(header);
+            header.set("TREFPOS", "TOPOCENTER".to_string());
+        });
+        let run = |paths: &[String]| measure_time_series(paths, &targets, &base_config(), false, true, None).unwrap();
+        let (implicit, explicit) = (run(&implicit), run(&explicit));
+        let target = implicit.geometry_target.clone().expect("series target");
+        for (a, b) in implicit.frames.iter().zip(&explicit.frames) {
+            let (ga, gb) = (a.geometry.as_ref().unwrap(), b.geometry.as_ref().unwrap());
+            let jd_utc = ga.jd_utc.unwrap();
+            assert_eq!(a.jd_mid, Some(jd_utc));
+            let jd_tt = jd_tt_from_utc(jd_utc);
+            let roemer = romer_delay_seconds(jd_tt, target.ra_deg, target.dec_deg, LightTimeCentre::Barycentre);
+            let terms = tai_minus_utc_seconds(jd_utc).0 + TT_MINUS_TAI_SECONDS + tdb_minus_tt_seconds(jd_tt) + roemer;
+            let bjd = ga.bjd_tdb.unwrap();
+            assert!((bjd - (jd_utc + terms / 86400.0)).abs() <= SERIES_BJD_TOLERANCE_DAYS, "{} s", (bjd - jd_utc) * 86400.0 - terms);
+            assert_eq!((ga.bjd_tdb, ga.hjd_utc, ga.bjd_source.as_deref()), (gb.bjd_tdb, gb.hjd_utc, Some("computed")));
+        }
+    }
+
+    #[test]
+    fn an_unsupported_or_contradictory_time_reference_gets_no_light_time_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        for (prefix, cards, named) in [
+            ("helio", &[("TREFPOS", "HELIOCENTER")][..], "TREFPOS HELIOCENTER"),
+            ("mixed", &[("TREFPOS", "TOPOCENTER"), ("TIMEREF", "SOLARSYSTEM")][..], "TIMEREF SOLARSYSTEM"),
+        ] {
+            let (paths, targets) = write_headed_stack(dir.path(), prefix, 2, |_, header| {
+                sited_wcs_cards(header);
+                for (key, value) in cards {
+                    header.set(key, value.to_string());
+                }
+            });
+            let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+            for frame in &out.frames {
+                let geometry = frame.geometry.as_ref().expect("geometry block");
+                assert_eq!((geometry.bjd_tdb, geometry.hjd_utc, geometry.jd_utc), (None, None, None), "{prefix}: {geometry:?}");
+                assert!(geometry.time_scale_notes.iter().any(|n| n.contains(named)), "{prefix}: {:?}", geometry.time_scale_notes);
+            }
+        }
+    }
+
+    #[test]
+    fn an_impossible_date_obs_is_not_turned_into_another_date_and_the_card_is_named() {
+        use crate::core::astrometry::time::jd_from_mjd;
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "feb30", 2, |_, header| header.set("DATE-OBS", "2024-02-30T00:00:00".to_string()));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        let config = isolated_stack_config();
+        for frame in &out.frames {
+            let mjd_obs = 60310.0 + frame.index as f64 * CADENCE_SECONDS / 86400.0;
+            let expected = jd_from_mjd(mjd_obs) + config.noise.exposure_time / 2.0 / 86400.0;
+            assert!((frame.jd_mid.unwrap() - expected).abs() < 1e-8, "frame {}: {:?}", frame.index, frame.jd_mid);
+            assert!(frame.time_source.as_deref().unwrap().starts_with("MJD-OBS"), "{:?}", frame.time_source);
+            let notes = &frame.geometry.as_ref().unwrap().time_scale_notes;
+            assert!(
+                notes.iter().any(|n| n.starts_with("DATE-OBS ignored") && n.contains("'2024-02-30T00:00:00'") && n.contains("February 2024 has 29 days")),
+                "{notes:?}"
+            );
+        }
     }
 
     #[test]

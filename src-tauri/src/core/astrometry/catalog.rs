@@ -10,7 +10,9 @@ use crate::core::astrometry::spectral::mid_exposure_jd;
 use crate::core::astrometry::time::JD_J2000;
 use crate::core::astrometry::wcs::angular_separation;
 #[cfg(feature = "vizier")]
-use crate::infra::net::http::{host_and_port, net_advice, net_kind, net_predicate, status_failure_text, NetKind};
+use crate::infra::net::http::{
+    host_and_port, net_advice, net_kind, net_predicate, status_failure_text, NetKind, RedirectRule,
+};
 use crate::math::exact_median_f64;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::header::HduHeader;
@@ -191,14 +193,21 @@ fn fallback_id(ra: f64, dec: f64) -> String {
     format!("J{:.5}{:+.5}", ra, dec)
 }
 
+fn table_lines(body: &str) -> Result<impl Iterator<Item = &str>, String> {
+    let lines = || body.lines().map(|raw| raw.trim_end_matches('\r'));
+    if let Some(error) = lines().find_map(|line| line.strip_prefix("#INFO")?.trim_start().strip_prefix("Error=")) {
+        return Err(format!(
+            "VizieR answered with an error instead of the star list: {}; try again in a few minutes",
+            error.trim()
+        ));
+    }
+    Ok(lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#')))
+}
+
 pub fn parse_gaia_tsv(body: &str) -> Result<Vec<CatalogRow>, String> {
     let mut columns: Option<ColumnMap> = None;
     let mut rows = Vec::new();
-    for raw in body.lines() {
-        let line = raw.trim_end_matches('\r');
-        if line.trim().is_empty() || line.starts_with('#') {
-            continue;
-        }
+    for line in table_lines(body)? {
         let fields = split_fields(line);
         let Some(map) = &columns else {
             columns = Some(column_map(&fields)?);
@@ -247,11 +256,7 @@ pub fn parse_gaia_tsv(body: &str) -> Result<Vec<CatalogRow>, String> {
 pub fn parse_gaia_tie_tsv(body: &str) -> Result<Vec<GaiaRow>, String> {
     let mut columns: Option<Vec<String>> = None;
     let mut rows = Vec::new();
-    for raw in body.lines() {
-        let line = raw.trim_end_matches('\r');
-        if line.trim().is_empty() || line.starts_with('#') {
-            continue;
-        }
+    for line in table_lines(body)? {
         let fields = split_fields(line);
         let Some(names) = &columns else {
             column_map(&fields)?;
@@ -642,7 +647,10 @@ where
     }
     let tsv = fetch(q)?;
     let rows = parse_gaia_tie_tsv(&tsv)?;
-    if let Some(d) = dir.filter(|_| !rows.is_empty()) {
+    if rows.is_empty() {
+        return Ok(TieHit { rows: Arc::new(rows), source: CatalogSource::Network });
+    }
+    if let Some(d) = dir {
         if let Err(e) = catalog_disk::store_tie(d, &key, q, &tsv, now_unix_s()) {
             log::warn!("catalog cache: could not store {} in {} ({})", catalog_disk::tie_file_name(&key), d.display(), e);
         }
@@ -667,7 +675,10 @@ where
         return Ok(CatalogHit { rows: store_rows(key, entry.rows), source: CatalogSource::Disk });
     }
     let rows = fetch(q)?;
-    if let Some(d) = dir.filter(|_| !rows.is_empty()) {
+    if rows.is_empty() {
+        return Ok(CatalogHit { rows: Arc::new(rows), source: CatalogSource::Network });
+    }
+    if let Some(d) = dir {
         if let Err(e) = catalog_disk::store(d, &key, q, &rows, now_unix_s()) {
             log::warn!("catalog cache: could not store {} in {} ({})", catalog_disk::file_name(&key), d.display(), e);
         }
@@ -771,6 +782,23 @@ pub fn query_gaia_tie_tsv(q: &ConeQuery) -> Result<String, String> {
 pub const VIZIER_CONNECT_TIMEOUT_SECS: u64 = 20;
 
 #[cfg(feature = "vizier")]
+const VIZIER_REDIRECT: RedirectRule = RedirectRule::https(&["vizier.cds.unistra.fr"]);
+
+#[cfg(feature = "vizier")]
+const VIZIER_BODY_BASE_BYTES: u64 = 256 * 1024;
+
+#[cfg(feature = "vizier")]
+const VIZIER_BYTES_PER_ROW: u64 = 1024;
+
+#[cfg(feature = "vizier")]
+const VIZIER_READ_BLOCK_BYTES: usize = 64 * 1024;
+
+#[cfg(feature = "vizier")]
+fn vizier_body_cap(max_rows: usize) -> u64 {
+    VIZIER_BODY_BASE_BYTES.saturating_add((max_rows.max(1) as u64).saturating_mul(VIZIER_BYTES_PER_ROW))
+}
+
+#[cfg(feature = "vizier")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VizierFault {
     Net(NetKind),
@@ -826,25 +854,62 @@ fn query_gaia_from(url: &str, q: &ConeQuery) -> Result<Vec<CatalogRow>, String> 
 
 #[cfg(feature = "vizier")]
 fn vizier_tsv_from(url: &str, q: &ConeQuery, columns: &str, timeout_secs: u64) -> Result<String, String> {
+    use std::io::Read;
+
     let target = reqwest::Url::parse(url).map_err(|e| format!("the VizieR address {url} is not usable ({e})"))?;
     let host = host_and_port(&target);
+    let timeout = std::time::Duration::from_secs(timeout_secs);
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .timeout(timeout)
         .connect_timeout(std::time::Duration::from_secs(vizier_connect_timeout_secs(timeout_secs)))
         .user_agent(concat!("AstroBurst/", env!("CARGO_PKG_VERSION")))
+        .redirect(VIZIER_REDIRECT.policy())
         .build()
         .map_err(|e| format!("HTTP client init failed: {}", e))?;
     let failed = |error: reqwest::Error| vizier_failure_text(VizierFault::Net(net_kind(&error)), &host, timeout_secs);
 
     let params = vizier_cone_params(q, columns);
-    let response = client.get(target).query(&params).send().map_err(failed)?;
+    let mut response = client.get(target).query(&params).send().map_err(failed)?;
 
     let status = response.status();
     if !status.is_success() {
         return Err(vizier_failure_text(VizierFault::Status(status.as_u16()), &host, timeout_secs));
     }
 
-    response.text().map_err(failed)
+    let cap = vizier_body_cap(q.max_rows);
+    let too_large = || {
+        format!(
+            "VizieR ({host}) sent more than {cap} bytes for a cone of at most {} stars; try again in a few minutes",
+            q.max_rows.max(1)
+        )
+    };
+    if response.content_length().is_some_and(|len| len > cap) {
+        return Err(too_large());
+    }
+    let unread = |error: std::io::Error| {
+        let kind = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .map_or(NetKind::CutOff, net_kind);
+        vizier_failure_text(VizierFault::Net(kind), &host, timeout_secs)
+    };
+    let reading = std::time::Instant::now();
+    let mut body = Vec::new();
+    let mut block = vec![0u8; VIZIER_READ_BLOCK_BYTES];
+    loop {
+        let read = response.read(&mut block).map_err(unread)?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(block.get(..read).unwrap_or_default());
+        if body.len() as u64 > cap {
+            return Err(too_large());
+        }
+        if reading.elapsed() > timeout {
+            return Err(vizier_failure_text(VizierFault::Net(NetKind::Timeout), &host, timeout_secs));
+        }
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 #[cfg(test)]
@@ -1241,10 +1306,118 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         assert!(!dir.path().join(catalog_disk::file_name(&key)).exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 
-        let second = query_gaia_cached_in(Some(dir.path()), &q, |_| panic!("fetch must not run")).unwrap();
-        assert_eq!(second.source, CatalogSource::Memory);
+        let second = query_gaia_cached_in(Some(dir.path()), &q, |_| {
+            fetches.set(fetches.get() + 1);
+            Ok(vec![])
+        })
+        .unwrap();
+        assert_eq!(second.source, CatalogSource::Network, "an empty answer is not remembered either");
         assert!(second.rows.is_empty());
-        assert_eq!(fetches.get(), 1);
+        assert_eq!(fetches.get(), 2);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    const VIZIER_ERROR_TSV: &str = "#\n#   VizieR Astronomical Server vizier.cds.unistra.fr\n#INFO\trequest=https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=I%2f355%2fnope&-c=83.633083+%2b22.014472&-c.r=0.0100&-c.u=deg\n#INFO\tError=Table 'nope' does not exist in catalog: I/355\n";
+
+    const EMPTY_CONE_TSV: &str = "#\n#   VizieR Astronomical Server vizier.cds.unistra.fr\n#INFO\tstatus=OK\n#RESOURCE=yCat_1355\n#Name: I/355\n#Table\tI_355_gaiadr3:\n#Name: I/355/gaiadr3\n#Column\tSource\t(I19)\tUnique source identifier\n#Column\tRA_ICRS\t(F15.11)\tRight ascension (ICRS) at Ep=2016.0\n#Column\tDE_ICRS\t(F15.11)\tDeclination (ICRS) at Ep=2016.0\n";
+
+    #[test]
+    fn a_vizier_error_answered_with_http_200_is_an_error_not_an_empty_cone() {
+        let photometric = parse_gaia_tsv(VIZIER_ERROR_TSV).unwrap_err();
+        let tie = parse_gaia_tie_tsv(VIZIER_ERROR_TSV).unwrap_err();
+        for error in [photometric, tie] {
+            assert_eq!(
+                error,
+                "VizieR answered with an error instead of the star list: Table 'nope' does not exist in catalog: I/355; try again in a few minutes"
+            );
+        }
+        assert_eq!(parse_gaia_tsv(EMPTY_CONE_TSV).unwrap(), Vec::<CatalogRow>::new(), "a real empty cone stays empty");
+        assert!(parse_gaia_tie_tsv(EMPTY_CONE_TSV).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_empty_answer_is_not_remembered_so_the_next_query_asks_vizier_again() {
+        let q = disk_query(203.0, -33.5);
+        let fetches = std::cell::Cell::new(0usize);
+        let empty = |_: &ConeQuery| {
+            fetches.set(fetches.get() + 1);
+            Ok(Vec::new())
+        };
+        query_gaia_cached_in(None, &q, empty).unwrap();
+        let again = query_gaia_cached_in(None, &q, empty).unwrap();
+        assert_eq!(fetches.get(), 2, "the second query must reach VizieR");
+        assert_eq!(again.source, CatalogSource::Network);
+        assert!(again.rows.is_empty());
+
+        let tie = ConeQuery { mag_limit: Some(21.0), max_rows: 321, ..ConeQuery::new(204.0, -34.5, 0.03) };
+        let tie_fetches = std::cell::Cell::new(0usize);
+        let empty_tie = |_: &ConeQuery| {
+            tie_fetches.set(tie_fetches.get() + 1);
+            Ok(EMPTY_CONE_TSV.to_string())
+        };
+        query_gaia_tie_cached_in(None, &tie, empty_tie).unwrap();
+        let again = query_gaia_tie_cached_in(None, &tie, empty_tie).unwrap();
+        assert_eq!(tie_fetches.get(), 2, "the second tie cone must reach VizieR");
+        assert_eq!(again.source, CatalogSource::Network);
+        assert!(again.rows.is_empty());
+    }
+
+    #[cfg(feature = "vizier")]
+    #[test]
+    fn vizier_does_not_follow_a_redirect_to_another_host_or_to_plain_http() {
+        use crate::infra::net::test_server::{serve, Resource};
+        use std::io::{Read, Write};
+        let elsewhere = serve(Resource::new(TIE_TSV.as_bytes().to_vec()));
+        let location = format!("{}/viz-bin/asu-tsv", elsewhere.base);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let reply = format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(reply.as_bytes());
+        });
+        let q = ConeQuery { mag_limit: Some(21.0), max_rows: 200, ..ConeQuery::new(80.1, -69.5, 0.03) };
+
+        let err = vizier_tsv_from(&format!("http://127.0.0.1:{port}/viz-bin/asu-tsv"), &q, GAIA_TIE_TSV_COLUMNS, 5).unwrap_err();
+
+        assert_eq!(
+            err,
+            format!("VizieR (127.0.0.1:{port}) redirected the request to an address that is not allowed; try again in a few minutes")
+        );
+        assert!(elsewhere.requests().is_empty(), "the redirect target was asked: {:?}", elsewhere.requests());
+        assert_eq!(
+            reqwest::Url::parse(VIZIER_ASU_TSV_URL).unwrap().host_str(),
+            VIZIER_REDIRECT.hosts.first().copied(),
+            "VizieR may redirect within its own host"
+        );
+    }
+
+    #[cfg(feature = "vizier")]
+    #[test]
+    fn vizier_refuses_a_body_far_larger_than_the_rows_it_asked_for() {
+        use crate::infra::net::test_server::{serve, Resource};
+        let padding = "#INFO\tpadding line of an answer that never ends\n".repeat(20_000);
+        let server = serve(Resource::new(padding.into_bytes()));
+        let q = ConeQuery { mag_limit: Some(21.0), max_rows: 10, ..ConeQuery::new(80.1, -69.5, 0.03) };
+
+        let err = match vizier_tsv_from(&format!("{}/viz-bin/asu-tsv", server.base), &q, GAIA_TIE_TSV_COLUMNS, 5) {
+            Ok(body) => panic!("a {} byte answer was read in full for a cone of at most 10 stars", body.len()),
+            Err(err) => err,
+        };
+
+        let host = server.base.trim_start_matches("http://").to_string();
+        assert_eq!(
+            err,
+            format!("VizieR ({host}) sent more than {} bytes for a cone of at most 10 stars; try again in a few minutes", vizier_body_cap(10))
+        );
     }
 
     #[test]

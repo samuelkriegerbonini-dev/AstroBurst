@@ -115,7 +115,6 @@ export interface SolveHints {
   epoch_year?: number | null;
   cfa?: string | null;
   object?: SolveHintObject | null;
-  expected_tier0_stars?: number | null;
   warnings?: string[];
 }
 

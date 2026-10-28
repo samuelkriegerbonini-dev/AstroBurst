@@ -104,6 +104,19 @@ describe("parseRawRgbPixelBuffer", () => {
     expect([parsed.r.min, parsed.r.max]).toEqual([0, 10]);
   });
 
+  it("reads a file the caller knows is display-referred on 0..1 even though the file loader sends no flag byte", () => {
+    const payload = rawRgbPayload(1, 1, [0.1, 0.9, 0.2, 0.8, 0.3, 0.7], [[0.5], [0.25], [0.75]]);
+    const parsed = parseRawRgbPixelBuffer(payload, true);
+    expect(parsed.displayReferred).toBe(true);
+    for (const ch of [parsed.r, parsed.g, parsed.b]) expect([ch.min, ch.max]).toEqual([0, 1]);
+    expect(Array.from(parsed.b.data)).toEqual([0.75]);
+    expect(parseRawRgbPixelBuffer(payload, false).displayReferred).toBe(false);
+    expect([parseRawRgbPixelBuffer(payload, false).g.min, parseRawRgbPixelBuffer(payload, false).g.max]).toEqual([
+      Math.fround(0.2),
+      Math.fround(0.8),
+    ]);
+  });
+
   it("throws on a buffer shorter than the 32-byte header", () => {
     expect(() => parseRawRgbPixelBuffer(new ArrayBuffer(31))).toThrow(/too small \(31 bytes\)/);
   });

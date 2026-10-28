@@ -479,8 +479,8 @@ pub fn built_in_datasets() -> Vec<DatasetSpec> {
                 level: 6,
                 whole_sky: true,
             }),
-            licence: "BSD-2-Clause (Tycho-2 as packaged by Debian)",
-            credit: "Tycho-2 Catalogue, Høg et al. 2000, A&A 355, L27",
+            licence: "CC BY-NC 3.0 IGO (CDS ReadMe of I/259, ESA) or BSD-2-Clause (Debian tycho2 package); licenses/tycho2-catalogue-NOTICE.txt gives both",
+            credit: "Tycho-2 Catalogue, Høg et al. 2000, A&A 355, L27; data from the CDS, Strasbourg; Credit: ESA",
         },
         DatasetSpec {
             id: TWOMASS_ID,
@@ -903,6 +903,12 @@ struct VerifiedMarker {
     size: u64,
     modified_unix_ms: Option<u64>,
     sha256: String,
+    #[serde(default = "checked_before_the_flag_existed")]
+    checked: bool,
+}
+
+fn checked_before_the_flag_existed() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -1183,17 +1189,17 @@ impl CatalogStore {
         })
     }
 
+    fn current_marker(&self, spec: &DatasetSpec, path: &Path) -> Option<VerifiedMarker> {
+        let stored = read_json::<VerifiedMarker>(&self.marker_path(spec))?;
+        let current = marker_for(path, &stored.sha256, stored.checked).ok()?;
+        let published = self
+            .expected_digest(spec, path)
+            .is_none_or(|expected| hex(&expected) == stored.sha256);
+        (stored == current && published).then_some(stored)
+    }
+
     fn is_verified(&self, spec: &DatasetSpec, path: &Path) -> bool {
-        let Some(stored) = read_json::<VerifiedMarker>(&self.marker_path(spec)) else {
-            return false;
-        };
-        let Ok(current) = marker_for(path, &stored.sha256) else {
-            return false;
-        };
-        stored == current
-            && self
-                .expected_digest(spec, path)
-                .is_none_or(|expected| hex(&expected) == stored.sha256)
+        self.current_marker(spec, path).is_some_and(|marker| marker.checked)
     }
 
     fn write_marker(
@@ -1201,9 +1207,10 @@ impl CatalogStore {
         spec: &DatasetSpec,
         path: &Path,
         sha256_hex: &str,
+        checked: bool,
     ) -> Result<(), StoreError> {
         let marker_path = self.marker_path(spec);
-        let marker = marker_for(path, sha256_hex)
+        let marker = marker_for(path, sha256_hex, checked)
             .map_err(|error| io_error(spec.id, "cannot read", path, error))?;
         let bytes = serde_json::to_vec_pretty(&marker).map_err(|error| {
             io_error(
@@ -1236,7 +1243,7 @@ impl CatalogStore {
                 actual_hex: hex(&actual),
             });
         }
-        if let Err(error) = self.write_marker(spec, path, &hex(&actual)) {
+        if let Err(error) = self.write_marker(spec, path, &hex(&actual), true) {
             log::warn!(
                 "{}: {} matches its sha-256, but the check could not be recorded, so it runs again at the next open: {error}",
                 spec.id,
@@ -1418,8 +1425,10 @@ impl CatalogStore {
                 &[dest.clone(), sibling(&dest, ENGINE_RECORD_SUFFIX)],
             )?;
         }
-        let need = plan.size.saturating_sub(already_downloaded(&dest))
-            + plan.decode.map_or(0, |decode| decode.cap);
+        let need = plan
+            .size
+            .saturating_sub(already_downloaded(&dest))
+            .saturating_add(plan.decode.map_or(0, |decode| decode.cap));
         let available = (self.free_space)(&dir)
             .map_err(|error| io_error(spec.id, "cannot measure the free space of", &dir, error))?;
         if available < need {
@@ -1483,7 +1492,7 @@ impl CatalogStore {
                     })??
             }
         };
-        self.seal(&spec, &installed, &sha256_hex)?;
+        self.seal(&spec, &installed, &sha256_hex, sha256_verified)?;
         let bytes = file_len(spec.id, &installed)?;
         Ok(InstallOutcome {
             id: spec.id,
@@ -1504,10 +1513,8 @@ impl CatalogStore {
         size: Option<u64>,
         digest: Option<[u8; 32]>,
     ) -> Result<Option<String>, StoreError> {
-        if self.is_verified(spec, installed) {
-            let marked =
-                read_json::<VerifiedMarker>(&self.marker_path(spec)).map(|marker| marker.sha256);
-            return Ok(marked.or_else(|| digest.map(|expected| hex(&expected))));
+        if let Some(marker) = self.current_marker(spec, installed) {
+            return Ok(Some(marker.sha256));
         }
         let Some(expected) = digest else {
             return Ok(None);
@@ -1516,7 +1523,7 @@ impl CatalogStore {
             return Ok(None);
         }
         let sha256_hex = hex(&expected);
-        self.seal(spec, installed, &sha256_hex)?;
+        self.seal(spec, installed, &sha256_hex, true)?;
         Ok(Some(sha256_hex))
     }
 
@@ -1561,7 +1568,7 @@ impl CatalogStore {
             decoded_sha256: record.decoded_sha256.map(|digest| hex(&digest)),
             decoded_max_bytes: source.decoded_max_bytes,
             resume_from,
-            need_bytes: record.archive_bytes - resume_from + source.decoded_max_bytes,
+            need_bytes: (record.archive_bytes - resume_from).saturating_add(source.decoded_max_bytes),
             free_space_bytes: (self.free_space)(&folder).ok(),
             folder,
         })
@@ -1614,14 +1621,20 @@ impl CatalogStore {
     }
 
     #[cfg(feature = "net")]
-    fn seal(&self, spec: &DatasetSpec, path: &Path, sha256_hex: &str) -> Result<(), StoreError> {
+    fn seal(
+        &self,
+        spec: &DatasetSpec,
+        path: &Path,
+        sha256_hex: &str,
+        checked: bool,
+    ) -> Result<(), StoreError> {
         if let Some(rule) = spec.header {
             let catalog = HealpixCatalog::open_file(path)
                 .map_err(|error| invalid_file(spec.id, path, error.to_string()))?;
             rule.check(catalog.header())
                 .map_err(|detail| invalid_file(spec.id, path, detail))?;
         }
-        self.write_marker(spec, path, sha256_hex)
+        self.write_marker(spec, path, sha256_hex, checked)
     }
 
     fn refuse_while_installing(&self, spec: &DatasetSpec) -> Result<(), StoreError> {
@@ -1903,7 +1916,7 @@ fn dir_usage(dir: &Path) -> (u64, u64) {
     (bytes, files)
 }
 
-fn marker_for(path: &Path, sha256_hex: &str) -> io::Result<VerifiedMarker> {
+fn marker_for(path: &Path, sha256_hex: &str, checked: bool) -> io::Result<VerifiedMarker> {
     let meta = fs::metadata(path)?;
     Ok(VerifiedMarker {
         path: path.to_string_lossy().into_owned(),
@@ -1914,6 +1927,7 @@ fn marker_for(path: &Path, sha256_hex: &str) -> io::Result<VerifiedMarker> {
             .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
             .and_then(|since| u64::try_from(since.as_millis()).ok()),
         sha256: sha256_hex.to_owned(),
+        checked,
     })
 }
 
