@@ -4,7 +4,7 @@ All notable changes to AstroBurst will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.5.1] - 2028-10-25
+## [0.7.6] - 2028-10-25
 
 ### Changed
 - Time scales: TIMESYS `TCB`, `TCG` and `GPS` are converted by their definitions (TCB and TCG with the IAU rates L_B and L_G, GPS as TAI - 19 s) instead of being treated as UTC, and the deprecated `TDT`, `ET`, `IAT` and `GMT` are read as TT, TT, TAI and UTC.

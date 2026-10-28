@@ -1,6 +1,6 @@
 [package]
 name = "astroburst"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2021"
 default-run = "astroburst"
 description = "AstroBurst -- High-Performance JWST FITS Processing"
