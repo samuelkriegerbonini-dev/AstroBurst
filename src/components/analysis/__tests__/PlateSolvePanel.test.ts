@@ -54,6 +54,7 @@ const cancelSolveMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Pro
 const refineMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 const cancelRefineMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Promise.resolve(true)));
 const refineProgress = vi.hoisted(() => ({ active: false, percent: 0, stage: "", current: 0, total: 0, reset: vi.fn() }));
+const solveProgress = vi.hoisted(() => ({ active: false, percent: 0, stage: "", current: 0, total: 0, reset: vi.fn() }));
 const writeWcsMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 
 vi.mock("react", async (importOriginal) => {
@@ -77,7 +78,9 @@ vi.mock("../../../services/astrometry", async (importOriginal) => ({
   cancelGaiaRefine: cancelRefineMock,
   writeSolvedWcs: writeWcsMock,
 }));
-vi.mock("../../../hooks/useProgress", () => ({ useProgress: () => refineProgress }));
+vi.mock("../../../hooks/useProgress", () => ({
+  useProgress: (event: string) => (event === "plate-solve-progress" ? solveProgress : refineProgress),
+}));
 vi.mock("../../../services/config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/config")>()),
   getApiKey: apiKeyMock,
@@ -650,6 +653,90 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
     const tree = show();
     expect(fallbackBlock(tree)).toBeNull();
     expect(markupOf(tree)).toContain("the image has 3 planes");
+  });
+
+  const failOfflineFirst = () =>
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", { canFallback: true, apiKeyStored: true }),
+    );
+  const byData = (tree: ReactNode, attribute: string) => findElement(tree, (props) => props[attribute] === true);
+  const PENDING_TEXT = "Plate solve timed out after 120 s; astrometry.net is still solving job 42";
+
+  it("keeps a pending astrometry.net job and checks the same job again without a new upload", async () => {
+    failOfflineFirst();
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", PENDING_TEXT, "astrometry_net_pending", {
+        submissionId: 7,
+        jobId: 42,
+        statusUrl: "https://nova.astrometry.net/status/7",
+      }),
+    );
+    const failed = await solveOnce();
+    (fallbackBlock(failed)!.onFallback as () => void)();
+    await flush();
+    const waiting = show();
+    const markup = markupOf(waiting);
+    expect(markup).toContain(PENDING_TEXT);
+    expect(markup).not.toContain("Plate solve gave up");
+    expect(findElement(waiting, (props) => props.url === "https://nova.astrometry.net/status/7")).not.toBeNull();
+    plateSolveMock.mockResolvedValueOnce(SOLVE_RESULT);
+    (byData(waiting, "data-nova-check-again")!.onClick as () => void)();
+    await flush();
+    expect(plateSolveMock).toHaveBeenCalledTimes(3);
+    expect(plateSolveMock.mock.calls[2][1]).toMatchObject({ solver: "astrometry.net", resumeSubmissionId: 7, resumeJobId: 42 });
+    expect(byData(show(), "data-nova-pending")).toBeNull();
+  });
+
+  it("offers astrometry.net again after an astrometry.net error", async () => {
+    failOfflineFirst();
+    plateSolveMock.mockRejectedValueOnce(new Error("Plate solve failed on astrometry.net (job 42)"));
+    const failed = await solveOnce();
+    (fallbackBlock(failed)!.onFallback as () => void)();
+    await flush();
+    const after = show();
+    expect(markupOf(after)).toContain("Plate solve failed on astrometry.net (job 42)");
+    plateSolveMock.mockResolvedValueOnce(SOLVE_RESULT);
+    (byData(after, "data-nova-retry")!.onClick as () => void)();
+    await flush();
+    expect(plateSolveMock).toHaveBeenCalledTimes(3);
+    expect(plateSolveMock.mock.calls[2][1]).toMatchObject({ solver: "astrometry.net", resumeSubmissionId: undefined });
+  });
+
+  it("waits 30 s past the setting for astrometry.net, so the backend can name the pending job", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    failOfflineFirst();
+    let answer: (result: typeof SOLVE_RESULT) => void = () => {};
+    plateSolveMock.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    show();
+    await vi.advanceTimersByTimeAsync(0);
+    (solveActions(show())!.onSolve as () => void)();
+    await vi.advanceTimersByTimeAsync(0);
+    (fallbackBlock(show())!.onFallback as () => void)();
+    await vi.advanceTimersByTimeAsync(125_000);
+    answer(SOLVE_RESULT);
+    await vi.advanceTimersByTimeAsync(0);
+    const markup = markupOf(show());
+    expect(markup).not.toContain("Plate solve gave up");
+    expect(markup).toContain('data-centre-source="solve"');
+  });
+
+  it("shows where astrometry.net is while it works, with its status page", async () => {
+    const scope = globalThis as { window?: unknown };
+    scope.window = { setInterval: () => 0, clearInterval: () => undefined };
+    failOfflineFirst();
+    plateSolveMock.mockReturnValueOnce(new Promise(() => {}));
+    solveProgress.stage = "astrometry.net:solving:7:42";
+    try {
+      const failed = await solveOnce();
+      (fallbackBlock(failed)!.onFallback as () => void)();
+      await flush();
+      const working = show();
+      expect(markupOf(working)).toContain("astrometry.net is solving job 42 (submission 7)");
+      expect(findElement(working, (props) => props.url === "https://nova.astrometry.net/status/7")).not.toBeNull();
+    } finally {
+      solveProgress.stage = "";
+      delete scope.window;
+    }
   });
 });
 

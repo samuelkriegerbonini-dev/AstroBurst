@@ -87,6 +87,7 @@ export interface PlateSolveResult {
 export const LOCAL_NO_SOLUTION_CODE = "local_no_solution";
 export const LOCAL_MISSING_HINT_CODE = "local_missing_hint";
 export const LOCAL_NO_CATALOGUE_CODE = "local_no_catalogue";
+export const NOVA_PENDING_CODE = "astrometry_net_pending";
 
 export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<PlateSolveResult> {
   return typedInvoke<PlateSolveResult>("plate_solve_cmd", {
@@ -101,6 +102,8 @@ export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<
     radius: opts.radius ?? null,
     solver: opts.solver ?? null,
     nearRadiusDeg: opts.nearRadiusDeg ?? null,
+    resumeSubmissionId: opts.resumeSubmissionId ?? null,
+    resumeJobId: opts.resumeJobId ?? null,
   });
 }
 

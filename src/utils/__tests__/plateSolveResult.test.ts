@@ -12,6 +12,10 @@ import {
   fallbackOffer,
   formatDuration,
   localFailure,
+  novaPending,
+  novaProgress,
+  novaProgressText,
+  novaStatusUrl,
   orientationText,
   resultBlockFields,
   solveTierLabel,
@@ -385,5 +389,56 @@ describe("formatDuration", () => {
       [-5, "0:00"],
     ];
     for (const [ms, text] of cases) expect(formatDuration(ms), String(ms)).toBe(text);
+  });
+});
+
+describe("astrometry.net progress and pending jobs", () => {
+  const pendingError = (context: Record<string, unknown>) =>
+    new TauriCommandError(
+      "plate_solve_cmd",
+      "Plate solve timed out after 600 s; astrometry.net is still solving job 42",
+      "astrometry_net_pending",
+      context,
+    );
+
+  it("reads the submission, the job and the status page of a pending astrometry.net solve", () => {
+    expect(novaPending(pendingError({ submissionId: 7, jobId: 42, statusUrl: "https://nova.astrometry.net/status/7" }))).toEqual({
+      message: "Plate solve timed out after 600 s; astrometry.net is still solving job 42",
+      submissionId: 7,
+      jobId: 42,
+      statusUrl: "https://nova.astrometry.net/status/7",
+    });
+    expect(novaPending(pendingError({ submissionId: 7, jobId: null }))).toMatchObject({ submissionId: 7, jobId: null, statusUrl: null });
+  });
+
+  it("is not pending without a submission or with another code", () => {
+    expect(novaPending(pendingError({ jobId: 42 }))).toBeNull();
+    expect(novaPending(new TauriCommandError("plate_solve_cmd", "no", "local_no_solution", { submissionId: 7 }))).toBeNull();
+    expect(novaPending(new Error("Plate solve failed on astrometry.net (job 42)"))).toBeNull();
+    expect(novaPending("text")).toBeNull();
+  });
+
+  it("parses the stage text the backend sends while astrometry.net works", () => {
+    expect(novaProgress("astrometry.net:uploading")).toEqual({ kind: "uploading", submissionId: null, jobId: null });
+    expect(novaProgress("astrometry.net:queued:7")).toEqual({ kind: "queued", submissionId: 7, jobId: null });
+    expect(novaProgress("astrometry.net:solving:7:42")).toEqual({ kind: "solving", submissionId: 7, jobId: 42 });
+    for (const stage of ["", "complete", "load", "astrometry.net:queued:x", "astrometry.net:solving:7", "astrometry.net:done:7"]) {
+      expect(novaProgress(stage), stage).toBeNull();
+    }
+    expect(novaProgress(null)).toBeNull();
+  });
+
+  it("says where astrometry.net is in plain words", () => {
+    expect(novaProgressText({ kind: "uploading", submissionId: null, jobId: null })).toBe("Uploading the image to astrometry.net");
+    expect(novaProgressText({ kind: "queued", submissionId: 7, jobId: null })).toBe(
+      "Queued on astrometry.net as submission 7; waiting for a job",
+    );
+    expect(novaProgressText({ kind: "solving", submissionId: 7, jobId: 42 })).toBe("astrometry.net is solving job 42 (submission 7)");
+  });
+
+  it("builds the status page of a submission on the configured server", () => {
+    expect(novaStatusUrl(null, 7)).toBe("https://nova.astrometry.net/status/7");
+    expect(novaStatusUrl("https://nova.astrometry.net/", 7)).toBe("https://nova.astrometry.net/status/7");
+    expect(novaStatusUrl("http://localhost:8080", 16375523)).toBe("http://localhost:8080/status/16375523");
   });
 });

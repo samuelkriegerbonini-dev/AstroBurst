@@ -72,6 +72,43 @@ pub struct SolveConfig {
     pub timeout_secs: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NovaJob {
+    pub submission: u64,
+    pub job: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NovaStage {
+    Uploading,
+    Queued { submission: u64 },
+    Solving { submission: u64, job: u64 },
+}
+
+impl NovaStage {
+    pub fn reached(self) -> Option<NovaJob> {
+        match self {
+            NovaStage::Uploading => None,
+            NovaStage::Queued { submission } => Some(NovaJob { submission, job: None }),
+            NovaStage::Solving { submission, job } => Some(NovaJob { submission, job: Some(job) }),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct NovaPending {
+    pub job: NovaJob,
+    pub reason: String,
+}
+
+impl std::fmt::Display for NovaPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for NovaPending {}
+
 pub fn parity_name(flipped: bool) -> &'static str {
     if flipped {
         PARITY_FLIPPED

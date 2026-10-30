@@ -24,7 +24,8 @@ use crate::core::astrometry::local_solve::{
     MAX_NEAR_RADIUS_DEG, SIRIL_GAIA_TIER, STAGE_DETECT, TIER0_MIN_EXPECTED_STARS, TWOMASS_TIER, TYCHO2_TIER,
 };
 use crate::core::astrometry::plate_solve::{
-    orientation_east_of_north_deg, parity_name, SolveConfig, SolveResult, SOLVER_ASTROMETRY_NET, SOLVER_LOCAL,
+    orientation_east_of_north_deg, parity_name, NovaJob, NovaPending, NovaStage, SolveConfig, SolveResult,
+    SOLVER_ASTROMETRY_NET, SOLVER_LOCAL,
 };
 use crate::core::astrometry::solve_hints::{solve_hints, Pointing, ScaleRange, SolveHints};
 use crate::core::astrometry::wcs::{
@@ -191,6 +192,8 @@ const CODE_LOCAL_NO_SOLUTION: &str = "local_no_solution";
 const CODE_LOCAL_MISSING_HINT: &str = "local_missing_hint";
 const CODE_LOCAL_NO_CATALOGUE: &str = "local_no_catalogue";
 const CODE_NO_API_KEY: &str = "astrometry_net_no_key";
+const CODE_NOVA_PENDING: &str = "astrometry_net_pending";
+const NOVA_STAGE_PREFIX: &str = "astrometry.net";
 const CODE_CANCELLED: &str = "cancelled";
 const CANCELLED_MESSAGE: &str = "Plate solve cancelled";
 const NO_API_KEY_MESSAGE: &str = "astrometry.net needs an API key: save it in Settings; nothing was uploaded";
@@ -250,6 +253,8 @@ pub(crate) struct PlateSolveRequest {
     pub center_dec: Option<f64>,
     pub radius: Option<f64>,
     pub near_radius_deg: Option<f64>,
+    pub resume_submission: Option<u64>,
+    pub resume_job: Option<u64>,
 }
 
 pub(crate) struct NovaSettings {
@@ -262,6 +267,7 @@ pub(crate) struct NovaUpload {
     pub width: usize,
     pub height: usize,
     pub config: SolveConfig,
+    pub resume: Option<NovaJob>,
 }
 
 pub(crate) type NovaFuture = Pin<Box<dyn Future<Output = anyhow::Result<SolveResult>> + Send>>;
@@ -394,6 +400,32 @@ fn cancelled_error() -> serde_json::Value {
 
 fn join_error(error: tokio::task::JoinError) -> serde_json::Value {
     plain_error(format!("Task join failed: {error}"))
+}
+
+fn nova_stage_text(stage: NovaStage) -> String {
+    match stage {
+        NovaStage::Uploading => format!("{NOVA_STAGE_PREFIX}:uploading"),
+        NovaStage::Queued { submission } => format!("{NOVA_STAGE_PREFIX}:queued:{submission}"),
+        NovaStage::Solving { submission, job } => format!("{NOVA_STAGE_PREFIX}:solving:{submission}:{job}"),
+    }
+}
+
+fn nova_error(error: anyhow::Error, api_url: &str) -> serde_json::Value {
+    if is_cancellation(&error) {
+        return cancelled_error();
+    }
+    match error.downcast_ref::<NovaPending>() {
+        Some(pending) => coded_error(
+            CODE_NOVA_PENDING,
+            pending.reason.clone(),
+            json!({
+                "submissionId": pending.job.submission,
+                "jobId": pending.job.job,
+                "statusUrl": format!("{}/status/{}", api_url.trim_end_matches('/'), pending.job.submission),
+            }),
+        ),
+        None => plain_error(error.to_string()),
+    }
 }
 
 fn tier_number(tier: CatalogTier) -> u8 {
@@ -549,6 +581,9 @@ async fn solve_with_nova(
     let Some(nova) = env.nova() else {
         return Err(plain_error(NO_NOVA_MESSAGE));
     };
+    let resume = request
+        .resume_submission
+        .map(|submission| NovaJob { submission, job: request.resume_job });
     let blocking_env = Arc::clone(&env);
     let prepared = tokio::task::spawn_blocking(move || -> Result<NovaPrepared, serde_json::Value> {
         let api_key = request
@@ -568,6 +603,7 @@ async fn solve_with_nova(
         width: prepared.upload_dims.0,
         height: prepared.upload_dims.1,
         config: prepared.config.clone(),
+        resume,
     };
     log::info!(
         "Plate solve: sending {} ({}x{}) to {}",
@@ -576,13 +612,9 @@ async fn solve_with_nova(
         upload.height,
         upload.config.api_url
     );
-    let mut result = nova(upload).await.map_err(|error| {
-        if is_cancellation(&error) {
-            cancelled_error()
-        } else {
-            plain_error(error.to_string())
-        }
-    })?;
+    let mut result = nova(upload)
+        .await
+        .map_err(|error| nova_error(error, &prepared.config.api_url))?;
     finish_nova_result(&mut result, &prepared);
     serde_json::to_value(&result).map_err(|e| plain_error(e.to_string()))
 }
@@ -1105,13 +1137,17 @@ impl SolveEnv for AppSolveEnv {
         let progress = self.progress.clone();
         Some(Box::new(move |upload: NovaUpload| -> NovaFuture {
             Box::pin(async move {
+                let stages = progress.clone();
                 let cancelled = move || progress.is_cancelled();
+                let on_stage = move |stage: NovaStage| stages.emit_stage(&nova_stage_text(stage));
                 crate::infra::astrometry::plate_solve::solve_astrometry_net(
                     &upload.path,
                     upload.width,
                     upload.height,
                     &upload.config,
+                    upload.resume,
                     &cancelled,
+                    &on_stage,
                 )
                 .await
             })
@@ -1147,6 +1183,8 @@ pub async fn plate_solve_cmd(
     radius: Option<f64>,
     solver: Option<String>,
     near_radius_deg: Option<f64>,
+    resume_submission_id: Option<u64>,
+    resume_job_id: Option<u64>,
 ) -> Result<serde_json::Value, serde_json::Value> {
     let env: Arc<dyn SolveEnv> = Arc::new(AppSolveEnv {
         progress: ProgressHandle::new(&app, PLATE_SOLVE_PROGRESS_EVENT, 1),
@@ -1164,6 +1202,8 @@ pub async fn plate_solve_cmd(
         center_dec,
         radius,
         near_radius_deg,
+        resume_submission: resume_submission_id,
+        resume_job: resume_job_id,
     };
     run_plate_solve(env, request).await
 }
@@ -1756,10 +1796,41 @@ pub async fn check_pointing_overlap_cmd(
 #[cfg(test)]
 mod tests {
     use super::{
-        footprint_overlap_fraction, image_dims, load_grid_cached, load_wcs_with_dims_cached, plate_solve_timeout,
-        sky_footprint, wrap180, SkyFootprint, PLATE_SOLVE_PROGRESS_EVENT,
+        footprint_overlap_fraction, image_dims, load_grid_cached, load_wcs_with_dims_cached, nova_error, nova_stage_text,
+        plate_solve_timeout, sky_footprint, wrap180, SkyFootprint, PLATE_SOLVE_PROGRESS_EVENT,
     };
+    use crate::core::astrometry::plate_solve::{NovaJob, NovaPending, NovaStage};
     use crate::types::config::AppConfig;
+    use crate::types::error::AppError;
+
+    #[test]
+    fn nova_stages_go_out_as_text_the_panel_parses() {
+        assert_eq!(nova_stage_text(NovaStage::Uploading), "astrometry.net:uploading");
+        assert_eq!(nova_stage_text(NovaStage::Queued { submission: 7 }), "astrometry.net:queued:7");
+        assert_eq!(nova_stage_text(NovaStage::Solving { submission: 7, job: 42 }), "astrometry.net:solving:7:42");
+    }
+
+    #[test]
+    fn a_pending_nova_solve_is_a_coded_error_with_its_ids_and_status_page() {
+        let solving = NovaPending {
+            job: NovaJob { submission: 7, job: Some(42) },
+            reason: "Plate solve timed out after 5 s; astrometry.net is still solving job 42".to_string(),
+        };
+        let value = nova_error(anyhow::Error::new(solving), "https://nova.astrometry.net/");
+        assert_eq!(value["code"], "astrometry_net_pending");
+        assert_eq!(value["message"], "Plate solve timed out after 5 s; astrometry.net is still solving job 42");
+        assert_eq!(value["context"]["submissionId"], 7);
+        assert_eq!(value["context"]["jobId"], 42);
+        assert_eq!(value["context"]["statusUrl"], "https://nova.astrometry.net/status/7");
+
+        let queued = NovaPending { job: NovaJob { submission: 7, job: None }, reason: "queued".to_string() };
+        assert!(nova_error(anyhow::Error::new(queued), "https://nova.astrometry.net")["context"]["jobId"].is_null());
+
+        let failed = nova_error(anyhow::anyhow!("Plate solve failed on astrometry.net (job 42)"), "https://nova.astrometry.net");
+        assert_eq!(failed, serde_json::json!("Plate solve failed on astrometry.net (job 42)"));
+        let cancelled = anyhow::Error::new(AppError::Cancelled).context("Plate solve cancelled");
+        assert_eq!(nova_error(cancelled, "https://nova.astrometry.net")["code"], "cancelled");
+    }
     use crate::core::astrometry::frames::SkyFrame;
     use crate::core::astrometry::grid::{DEFAULT_DENSITY, MAX_DENSITY};
     use crate::core::imaging::region::test_support::{make_header, north_up_cd, wcs_cards};
@@ -2496,7 +2567,9 @@ mod tests {
                             upload.width,
                             upload.height,
                             &upload.config,
+                            upload.resume,
                             &never,
+                            &|_: crate::core::astrometry::plate_solve::NovaStage| {},
                         )
                         .await
                     })

@@ -1,3 +1,5 @@
+#[cfg(feature = "tauri")]
+pub mod app_log;
 pub mod cache;
 pub mod config;
 pub mod fits;

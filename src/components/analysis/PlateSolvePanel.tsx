@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useId, useMemo, useRef, memo } from "
 import { Crosshair, Star as StarIcon, Loader2, Eye, EyeOff, Globe, Compass, Tag, Save, X, Copy, Check } from "lucide-react";
 import {
   GAIA_REFINE_PROGRESS_EVENT,
+  PLATE_SOLVE_PROGRESS_EVENT,
   cancelGaiaRefine,
   cancelPlateSolve,
   plateSolve,
@@ -67,6 +68,7 @@ import {
   type ScaleUnits,
 } from "../../utils/plateSolveScale";
 import {
+  NOVA_CHECK_AGAIN_NOTE,
   NO_API_KEY_NOTICE,
   deadlineFailure,
   deadlineText,
@@ -74,11 +76,16 @@ import {
   failureLines,
   fallbackOffer,
   localFailure,
+  novaPending,
+  novaProgress,
+  novaProgressText,
+  novaStatusUrl,
   resultBlockFields,
   formatDuration,
   solvingText,
   type FallbackOffer,
   type LocalFailure,
+  type NovaPending,
   type SolveField,
 } from "../../utils/plateSolveResult";
 import { starCountLabel } from "../../utils/analysisLabels";
@@ -119,6 +126,18 @@ const ANNOTATIONS_OFF_VIEW_TITLE = "Object labels are in the solved file's pixel
 
 const SOLVE_TICK_MS = 250;
 const DEFAULT_SOLVE_TIMEOUT_SECS = 120;
+const NOVA_DEADLINE_GRACE_SECS = 30;
+
+interface NovaWait {
+  pending: NovaPending;
+  downsample: number;
+}
+
+function openExternal(url: string): void {
+  import("@tauri-apps/plugin-opener")
+    .then(({ openUrl }) => openUrl(url))
+    .catch(() => {});
+}
 
 const CARD_CLASS = "bg-zinc-900/80 rounded px-2 py-1.5";
 const CENTRE_TONES = { solve: "text-emerald-300", header: "text-zinc-300" } as const;
@@ -304,6 +323,19 @@ export function SolveResultFields({ fields }: { fields: readonly SolveField[] })
         </div>
       ))}
     </>
+  );
+}
+
+function StatusPageLink({ url }: { url: string }) {
+  return (
+    <button
+      type="button"
+      title={url}
+      onClick={() => openExternal(url)}
+      className="text-violet-300 hover:text-violet-200 underline underline-offset-2"
+    >
+      status page
+    </button>
   );
 }
 
@@ -592,6 +624,7 @@ function PlateSolvePanel({
   const [solveFailure, setSolveFailure] = useState<LocalFailure | null>(null);
   const [lastSolver, setLastSolver] = useState<PlateSolver | null>(null);
   const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
+  const [novaWait, setNovaWait] = useState<NovaWait | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
   const [apiUrl, setApiUrl] = useState<string | null>(null);
   const [hintTexts, setHintTexts] = useState<HintTexts>(DEFAULT_HINT_TEXTS);
@@ -618,6 +651,8 @@ function PlateSolvePanel({
   const refineLoadingRef = useRef(false);
   const refineProgress = useProgress(GAIA_REFINE_PROGRESS_EVENT);
   const resetRefineProgress = refineProgress.reset;
+  const solveProgress = useProgress(PLATE_SOLVE_PROGRESS_EVENT);
+  const resetSolveProgress = solveProgress.reset;
   const solveIdentityRef = useRef<SolveIdentity>({ regionKey: filePath ?? null, solvePath });
 
   useEffect(() => {
@@ -674,6 +709,7 @@ function PlateSolvePanel({
     setSolveFailure(null);
     setLastSolver(null);
     setFallbackNotice(null);
+    setNovaWait(null);
     setSolveLoading(false);
     setWcsWriting(false);
     setWcsWriteError(null);
@@ -699,6 +735,7 @@ function PlateSolvePanel({
       setSolveFailure(null);
       setLastSolver(null);
       setFallbackNotice(null);
+      setNovaWait(null);
       setSolveLoading(false);
       setWcsWriting(false);
       setWcsWriteError(null);
@@ -857,7 +894,7 @@ function PlateSolvePanel({
 
   const scaleRange = parseScaleRange(hintTexts.scaleLow, hintTexts.scaleHigh);
 
-  const runSolve = useCallback(async (solver: PlateSolver) => {
+  const runSolve = useCallback(async (solver: PlateSolver, resume: NovaWait | null = null) => {
     if (!solvePath) return;
     const scale = parseScaleRange(hintTexts.scaleLow, hintTexts.scaleHigh);
     if (scale.error !== null) return;
@@ -865,7 +902,10 @@ function PlateSolvePanel({
     if (hint.error !== null) return;
     const seq = ++solveSeqRef.current;
     const offline = solver !== FALLBACK_SOLVER;
+    const factor = resume?.downsample ?? downsample;
     clearRefinement();
+    resetSolveProgress();
+    setNovaWait(null);
     setSolveLoading(true);
     setSolveError(null);
     setSolveFailure(null);
@@ -888,14 +928,16 @@ function PlateSolvePanel({
           scaleLower: scale.low,
           scaleUpper: scale.high,
           scaleUnits: hintTexts.scaleUnits,
-          downsampleFactor: downsample > 1 ? downsample : undefined,
+          downsampleFactor: factor > 1 ? factor : undefined,
           centerRa: hint.centerRa ?? undefined,
           centerDec: hint.centerDec ?? undefined,
           radius: hint.radius ?? undefined,
           solver,
           nearRadiusDeg: offline ? offlineNearRadius(hint.radius) : undefined,
+          resumeSubmissionId: resume?.pending.submissionId,
+          resumeJobId: resume?.pending.jobId ?? undefined,
         }),
-        limitSecs * 1000,
+        (limitSecs + (offline ? 0 : NOVA_DEADLINE_GRACE_SECS)) * 1000,
         deadline,
       );
       if (solveSeqRef.current !== seq) return;
@@ -907,7 +949,10 @@ function PlateSolvePanel({
         })
         .catch(() => {});
     } catch (e: unknown) {
-      if (solveSeqRef.current === seq) {
+      const pending = offline ? null : novaPending(e);
+      if (solveSeqRef.current === seq && pending) {
+        setNovaWait({ pending, downsample: factor });
+      } else if (solveSeqRef.current === seq) {
         const timedOut = offline && e instanceof Error && e.message === deadline ? e.message : null;
         if (timedOut !== null) cancelPlateSolve().catch(() => {});
         const failure = timedOut !== null ? deadlineFailure(timedOut) : offline ? localFailure(e) : null;
@@ -918,7 +963,7 @@ function PlateSolvePanel({
     } finally {
       if (solveSeqRef.current === seq) setSolveLoading(false);
     }
-  }, [solvePath, hintTexts, downsample, clearRefinement]);
+  }, [solvePath, hintTexts, downsample, clearRefinement, resetSolveProgress]);
 
   const handleSolve = useCallback(() => runSolve(DEFAULT_SOLVER), [runSolve]);
   const handleFallback = useCallback(async () => {
@@ -1026,6 +1071,7 @@ function PlateSolvePanel({
   const hintWarnings = solveHints?.warnings ?? [];
   const headerHintsAvailable = wcsInfo !== null || Boolean(solveHints?.centre || solveHints?.scale);
   const offer = fallbackOffer(solveFailure, lastSolver, hasApiKey, apiUrl);
+  const liveNova = lastSolver === FALLBACK_SOLVER ? novaProgress(solveProgress.stage) : null;
   const resultFields = solveResult ? resultBlockFields(solveResult) : [];
   const solveCredit = solveResult?.credit ?? null;
   const refineProgressText = refineLoading
@@ -1376,6 +1422,40 @@ function PlateSolvePanel({
             </div>
           )}
 
+          {solveLoading && liveNova && (
+            <div data-nova-progress className="text-[9px] text-violet-300/80 break-words">
+              {novaProgressText(liveNova)}
+              {liveNova.submissionId !== null && (
+                <>
+                  {" "}
+                  <StatusPageLink url={novaStatusUrl(apiUrl, liveNova.submissionId)} />
+                </>
+              )}
+            </div>
+          )}
+
+          {novaWait && !solveLoading && (
+            <div
+              role="status"
+              data-nova-pending
+              className="text-[10px] bg-amber-900/10 border border-amber-800/30 rounded px-2.5 py-1.5 space-y-1 break-words"
+            >
+              <div className="text-amber-200">{novaWait.pending.message}</div>
+              <div className="text-zinc-500">{NOVA_CHECK_AGAIN_NOTE}</div>
+              <div className="flex items-center gap-3 pt-0.5">
+                <button
+                  type="button"
+                  data-nova-check-again
+                  onClick={() => void runSolve(FALLBACK_SOLVER, novaWait)}
+                  className="flex items-center gap-1.5 bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-200 border border-zinc-600/50 rounded px-2.5 py-1 text-xs font-medium transition-colors"
+                >
+                  <Globe size={12} /> Check again
+                </button>
+                <StatusPageLink url={novaWait.pending.statusUrl ?? novaStatusUrl(apiUrl, novaWait.pending.submissionId)} />
+              </div>
+            </div>
+          )}
+
           {solveFailure && (
             <NoSolutionBlock
               failure={solveFailure}
@@ -1389,6 +1469,17 @@ function PlateSolvePanel({
             <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
               {solveError}
             </div>
+          )}
+
+          {solveError && !solveFailure && !solveLoading && lastSolver === FALLBACK_SOLVER && (
+            <button
+              type="button"
+              data-nova-retry
+              onClick={() => void handleFallback()}
+              className="w-full flex items-center justify-center gap-2 bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-200 border border-zinc-600/50 rounded px-3 py-1.5 text-xs font-medium transition-colors"
+            >
+              <Globe size={12} /> Try astrometry.net again
+            </button>
           )}
 
           {solveResult && (

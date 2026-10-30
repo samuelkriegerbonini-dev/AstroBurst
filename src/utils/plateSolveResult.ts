@@ -2,6 +2,7 @@ import {
   LOCAL_MISSING_HINT_CODE,
   LOCAL_NO_CATALOGUE_CODE,
   LOCAL_NO_SOLUTION_CODE,
+  NOVA_PENDING_CODE,
   type PlateSolveResult,
   type PlateSolver,
 } from "../services/astrometry";
@@ -306,6 +307,62 @@ export function solvingText(solver: PlateSolver, limit: string): string {
     return `Solving on this computer with the offline catalogues; nothing is uploaded. Gives up after ${limit}.`;
   }
   return `Solving on this computer; the image is not uploaded. When the offline catalogues are not deep enough, the Gaia DR3 star list of the field is fetched from VizieR. Gives up after ${limit}.`;
+}
+
+const DEFAULT_NOVA_URL = `https://${DEFAULT_NOVA_HOST}`;
+
+export const NOVA_CHECK_AGAIN_NOTE = "Check again follows this job on astrometry.net without uploading the image again.";
+const NOVA_STAGE = /^astrometry\.net:(?:(uploading)|queued:(\d+)|solving:(\d+):(\d+))$/;
+
+export interface NovaPending {
+  message: string;
+  submissionId: number;
+  jobId: number | null;
+  statusUrl: string | null;
+}
+
+export function novaPending(error: unknown): NovaPending | null {
+  const raised = record(error);
+  if (!raised || raised.code !== NOVA_PENDING_CODE) return null;
+  const context = record(raised.context) ?? {};
+  const submissionId = finite(context.submissionId);
+  if (submissionId === null) return null;
+  return {
+    message: typeof raised.message === "string" ? raised.message : String(raised.message ?? ""),
+    submissionId,
+    jobId: finite(context.jobId),
+    statusUrl: typeof context.statusUrl === "string" ? context.statusUrl : null,
+  };
+}
+
+export interface NovaProgress {
+  kind: "uploading" | "queued" | "solving";
+  submissionId: number | null;
+  jobId: number | null;
+}
+
+export function novaProgress(stage: string | null | undefined): NovaProgress | null {
+  const match = NOVA_STAGE.exec(stage ?? "");
+  if (!match) return null;
+  if (match[1] !== undefined) return { kind: "uploading", submissionId: null, jobId: null };
+  if (match[2] !== undefined) return { kind: "queued", submissionId: Number(match[2]), jobId: null };
+  return { kind: "solving", submissionId: Number(match[3]), jobId: Number(match[4]) };
+}
+
+export function novaProgressText(progress: NovaProgress): string {
+  switch (progress.kind) {
+    case "uploading":
+      return "Uploading the image to astrometry.net";
+    case "queued":
+      return `Queued on astrometry.net as submission ${progress.submissionId}; waiting for a job`;
+    case "solving":
+      return `astrometry.net is solving job ${progress.jobId} (submission ${progress.submissionId})`;
+  }
+}
+
+export function novaStatusUrl(apiUrl: string | null | undefined, submissionId: number): string {
+  const base = (apiUrl?.trim() || DEFAULT_NOVA_URL).replace(/\/+$/, "");
+  return `${base}/status/${submissionId}`;
 }
 
 export function deadlineText(solver: PlateSolver, limit: string): string {

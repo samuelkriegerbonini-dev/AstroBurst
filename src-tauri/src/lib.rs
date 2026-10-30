@@ -109,6 +109,11 @@ pub fn run() {
             });
         })
         .setup(|app| {
+            if let Ok(log_dir) = app.path().app_log_dir() {
+                if let Err(error) = crate::infra::app_log::install(&log_dir) {
+                    eprintln!("the log file in {} could not be opened: {error:#}", log_dir.display());
+                }
+            }
             if let Ok(data_dir) = app.path().app_data_dir() {
                 cmd::output::clear_output_dir(&data_dir);
             }

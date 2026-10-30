@@ -1,5 +1,5 @@
 pub use crate::core::astrometry::plate_solve::{
-    FieldAnnotation, SolveConfig, SolveResult,
+    FieldAnnotation, NovaJob, NovaPending, NovaStage, SolveConfig, SolveResult,
 };
 
 #[cfg(feature = "astrometry-net")]
@@ -8,7 +8,7 @@ pub use self::astrometry_net_impl::solve_astrometry_net;
 #[cfg(feature = "astrometry-net")]
 mod astrometry_net_impl {
     use anyhow::{bail, Context, Result};
-    use super::{FieldAnnotation, SolveResult, SolveConfig};
+    use super::{FieldAnnotation, NovaJob, NovaPending, NovaStage, SolveConfig, SolveResult};
     use crate::core::astrometry::plate_solve::{parity_name, SOLVER_ASTROMETRY_NET};
     use crate::infra::net::http::get_with_retry;
     use crate::types::error::AppError;
@@ -20,21 +20,41 @@ mod astrometry_net_impl {
     const POLLS_PER_LOG: u64 = 10;
     const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
     const CANCEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+    const POLL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const UPLOAD_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    const JOB_ENDED_WITHOUT_VERDICT: &str = "?";
 
-    async fn get_json(client: &reqwest::Client, url: &str, label: &str, subject: &str) -> Result<serde_json::Value> {
-        let (status, body) = get_with_retry(client, url, label, subject, None).await?;
+    async fn poll_json(
+        client: &reqwest::Client,
+        url: &str,
+        label: &str,
+        subject: &str,
+        reached: NovaJob,
+    ) -> Result<serde_json::Value> {
+        let pending = |reason: String| anyhow::Error::new(NovaPending { job: reached, reason });
+        let (status, body) = get_with_retry(client, url, label, subject, None)
+            .await
+            .map_err(|error| pending(format!("{error:#}")))?;
         let body = String::from_utf8_lossy(&body);
-        if !status.is_success() {
-            bail!("{}: HTTP {} -- {}", label, status, char_prefix(&body, ERROR_SNIPPET_CHARS));
+        let failure = format!("{}: HTTP {} -- {}", label, status, char_prefix(&body, ERROR_SNIPPET_CHARS));
+        if status.is_client_error() {
+            bail!("{failure}");
         }
-        parse_json_body(&body, label)
+        if !status.is_success() {
+            return Err(pending(failure));
+        }
+        parse_json_body(&body, label).map_err(|error| pending(format!("{error:#}")))
+    }
+
+    fn client_with_timeout(timeout: std::time::Duration) -> Result<reqwest::Client> {
+        Ok(reqwest::Client::builder().timeout(timeout).pool_idle_timeout(POOL_IDLE_TIMEOUT).build()?)
     }
 
     pub(super) fn char_prefix(text: &str, max_chars: usize) -> &str {
         text.char_indices().nth(max_chars).map_or(text, |(end, _)| &text[..end])
     }
 
-    fn parse_annotations(json: &serde_json::Value) -> Vec<FieldAnnotation> {
+    pub(super) fn parse_annotations(json: &serde_json::Value) -> Vec<FieldAnnotation> {
         let mut result = Vec::new();
         let annotations = match json["annotations"].as_array() {
             Some(a) => a,
@@ -46,7 +66,7 @@ mod astrometry_net_impl {
                 .as_array()
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
+                        .filter_map(|v| v.as_str().map(str::trim).filter(|name| !name.is_empty()).map(String::from))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -144,10 +164,22 @@ mod astrometry_net_impl {
         image_width: usize,
         image_height: usize,
         config: &SolveConfig,
+        resume: Option<NovaJob>,
         cancelled: &(dyn Fn() -> bool + Send + Sync),
+        on_stage: &(dyn Fn(NovaStage) + Send + Sync),
     ) -> Result<SolveResult> {
         let limit = std::time::Duration::from_secs(config.timeout_secs);
-        let solve = tokio::time::timeout(limit, solve_before_deadline(fits_path, image_width, image_height, config));
+        let reached = std::sync::Mutex::new(resume);
+        let report = |stage: NovaStage| {
+            if let Some(job) = stage.reached() {
+                *reached.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
+            }
+            on_stage(stage);
+        };
+        let solve = tokio::time::timeout(
+            limit,
+            solve_before_deadline(fits_path, image_width, image_height, config, resume, &report),
+        );
         tokio::select! {
             biased;
             () = wait_for_cancel(cancelled) => {
@@ -155,12 +187,25 @@ mod astrometry_net_impl {
             }
             outcome = solve => match outcome {
                 Ok(result) => result,
-                Err(_) => bail!(
-                    "Plate solve timed out after {} s; raise the plate-solve timeout in Settings",
-                    config.timeout_secs
-                ),
+                Err(_) => Err(timed_out(
+                    config.timeout_secs,
+                    *reached.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                )),
             },
         }
+    }
+
+    fn timed_out(timeout_secs: u64, reached: Option<NovaJob>) -> anyhow::Error {
+        let Some(job) = reached else {
+            return anyhow::anyhow!(
+                "Plate solve timed out after {timeout_secs} s; raise the plate-solve timeout in Settings"
+            );
+        };
+        let waiting = match job.job {
+            Some(id) => format!("astrometry.net is still solving job {id}"),
+            None => format!("astrometry.net has not started a job for submission {} yet", job.submission),
+        };
+        anyhow::Error::new(NovaPending { job, reason: format!("Plate solve timed out after {timeout_secs} s; {waiting}") })
     }
 
     async fn wait_for_cancel(cancelled: &(dyn Fn() -> bool + Send + Sync)) {
@@ -174,20 +219,95 @@ mod astrometry_net_impl {
         image_width: usize,
         image_height: usize,
         config: &SolveConfig,
+        resume: Option<NovaJob>,
+        report: &(dyn Fn(NovaStage) + Send + Sync),
     ) -> Result<SolveResult> {
-        use reqwest::Client;
-        use reqwest::multipart;
-
         if config.api_key.is_empty() {
             bail!("No API key configured. Set your astrometry.net key in Settings.");
         }
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-            .build()?;
+        let client = client_with_timeout(POLL_REQUEST_TIMEOUT)?;
         let base_url = &config.api_url;
 
+        let (subid, known_job) = match resume {
+            Some(job) => (job.submission, job.job),
+            None => {
+                report(NovaStage::Uploading);
+                (upload_image(&client, fits_path, config).await?, None)
+            }
+        };
+        report(NovaStage::Queued { submission: subid });
+        let jid = match known_job {
+            Some(id) => id,
+            None => wait_for_job(&client, base_url, subid).await?,
+        };
+        report(NovaStage::Solving { submission: subid, job: jid });
+        let reached = NovaJob { submission: subid, job: Some(jid) };
+        let job_subject = format!("job {jid}");
+        wait_for_verdict(&client, base_url, jid, reached).await?;
+
+        let cal = poll_json(
+            &client,
+            &format!("{}/api/jobs/{}/calibration", base_url, jid),
+            "Calibration",
+            &job_subject,
+            reached,
+        )
+        .await?;
+
+        let Calibration { ra: ra_center, dec: dec_center, orientation, parity, pixscale: pixel_scale } =
+            parse_calibration(&cal, jid)?;
+        let field_w = pixel_scale * image_width as f64 / 60.0;
+        let field_h = pixel_scale * image_height as f64 / 60.0;
+
+        log::info!(
+            "Solved: RA={:.4} Dec={:.4} scale={:.3}\"/px orient={:?}deg FOV={:.1}'x{:.1}'",
+            ra_center, dec_center, pixel_scale, orientation, field_w, field_h
+        );
+
+        let annotations_url = format!("{}/api/jobs/{}/annotations", base_url, jid);
+        let annotations = match get_with_retry(&client, &annotations_url, "Annotations", &job_subject, Some(REFERER)).await {
+            Ok((status, body)) if status.is_success() => {
+                match parse_json_body(&String::from_utf8_lossy(&body), "Annotations") {
+                    Ok(json) => parse_annotations(&json),
+                    Err(e) => {
+                        log::warn!("Failed to parse annotations: {:#}", e);
+                        Vec::new()
+                    }
+                }
+            }
+            Ok((status, _)) => {
+                log::warn!("Annotations request for job {}: HTTP {}", jid, status);
+                Vec::new()
+            }
+            Err(e) => {
+                log::warn!("Annotations request failed: {:#}", e);
+                Vec::new()
+            }
+        };
+
+        let wcs_cards = fetch_wcs_cards(&client, base_url, jid).await.unwrap_or_else(|e| {
+            log::warn!("WCS file for job {} unavailable: {:#}", jid, e);
+            Vec::new()
+        });
+
+        Ok(SolveResult {
+            ra_center,
+            dec_center,
+            orientation,
+            pixel_scale,
+            field_w_arcmin: field_w,
+            field_h_arcmin: field_h,
+            annotations,
+            wcs_cards,
+            solver: SOLVER_ASTROMETRY_NET.to_string(),
+            parity: parity.map(|p| parity_name(p > 0.0).to_string()),
+            ..SolveResult::default()
+        })
+    }
+
+    async fn upload_image(client: &reqwest::Client, fits_path: &str, config: &SolveConfig) -> Result<u64> {
+        let base_url = &config.api_url;
         let login_body = serde_json::json!({ "apikey": config.api_key });
         let login_resp = client
             .post(format!("{}/api/login", base_url))
@@ -242,15 +362,15 @@ mod astrometry_net_impl {
 
         log::info!("Uploading {} ({} bytes) to astrometry.net", file_name, file_bytes.len());
 
-        let file_part = multipart::Part::bytes(file_bytes)
+        let file_part = reqwest::multipart::Part::bytes(file_bytes)
             .file_name(file_name)
             .mime_str("application/fits")?;
 
-        let form = multipart::Form::new()
+        let form = reqwest::multipart::Form::new()
             .text("request-json", serde_json::to_string(&upload_json)?)
             .part("file", file_part);
 
-        let upload_resp = client
+        let upload_resp = client_with_timeout(UPLOAD_REQUEST_TIMEOUT)?
             .post(format!("{}/api/upload", base_url))
             .multipart(form)
             .send()
@@ -271,35 +391,51 @@ mod astrometry_net_impl {
             .context("No subid in upload response")?;
 
         log::info!("Submission {}, waiting for job...", subid);
+        Ok(subid)
+    }
 
+    async fn wait_for_job(client: &reqwest::Client, base_url: &str, subid: u64) -> Result<u64> {
+        let reached = NovaJob { submission: subid, job: None };
+        let subject = format!("submission {subid}");
         let mut polls: u64 = 0;
-        let jid = loop {
+        loop {
             tokio::time::sleep(POLL_INTERVAL).await;
             polls += 1;
-            let sub_status = get_json(
-                &client,
+            let sub_status = poll_json(
+                client,
                 &format!("{}/api/submissions/{}", base_url, subid),
                 "Submission status",
-                &format!("submission {subid}"),
+                &subject,
+                reached,
             )
             .await?;
             if let Some(id) = first_job_id(&sub_status) {
-                break id;
+                log::info!("Job {} started, polling for solution...", id);
+                return Ok(id);
+            }
+            if let Some(message) = sub_status["error_message"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
+                bail!(
+                    "astrometry.net could not process submission {}: {}",
+                    subid,
+                    char_prefix(message, ERROR_SNIPPET_CHARS)
+                );
             }
             if polls % POLLS_PER_LOG == 0 {
                 log::info!("Still waiting for job after {}s...", polls * POLL_INTERVAL.as_secs());
             }
-        };
-        log::info!("Job {} started, polling for solution...", jid);
+        }
+    }
 
+    async fn wait_for_verdict(client: &reqwest::Client, base_url: &str, jid: u64, reached: NovaJob) -> Result<()> {
+        let subject = format!("job {jid}");
         let mut polls: u64 = 0;
-        let job_subject = format!("job {jid}");
         loop {
             let job_data =
-                get_json(&client, &format!("{}/api/jobs/{}", base_url, jid), "Job status", &job_subject).await?;
+                poll_json(client, &format!("{}/api/jobs/{}", base_url, jid), "Job status", &subject, reached).await?;
             match job_data["status"].as_str().unwrap_or("") {
-                "success" => break,
+                "success" => return Ok(()),
                 "failure" => bail!("Plate solve failed on astrometry.net (job {})", jid),
+                JOB_ENDED_WITHOUT_VERDICT => bail!("Plate solve ended on astrometry.net without a result (job {})", jid),
                 _ => {}
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -308,64 +444,6 @@ mod astrometry_net_impl {
                 log::info!("Job {} still solving after {}s...", jid, polls * POLL_INTERVAL.as_secs());
             }
         }
-
-        let cal = get_json(
-            &client,
-            &format!("{}/api/jobs/{}/calibration", base_url, jid),
-            "Calibration",
-            &job_subject,
-        )
-        .await?;
-
-        let Calibration { ra: ra_center, dec: dec_center, orientation, parity, pixscale: pixel_scale } =
-            parse_calibration(&cal, jid)?;
-        let field_w = pixel_scale * image_width as f64 / 60.0;
-        let field_h = pixel_scale * image_height as f64 / 60.0;
-
-        log::info!(
-            "Solved: RA={:.4} Dec={:.4} scale={:.3}\"/px orient={:?}deg FOV={:.1}'x{:.1}'",
-            ra_center, dec_center, pixel_scale, orientation, field_w, field_h
-        );
-
-        let annotations_url = format!("{}/api/jobs/{}/annotations", base_url, jid);
-        let annotations = match get_with_retry(&client, &annotations_url, "Annotations", &job_subject, Some(REFERER)).await {
-            Ok((status, body)) if status.is_success() => {
-                match parse_json_body(&String::from_utf8_lossy(&body), "Annotations") {
-                    Ok(json) => parse_annotations(&json),
-                    Err(e) => {
-                        log::warn!("Failed to parse annotations: {:#}", e);
-                        Vec::new()
-                    }
-                }
-            }
-            Ok((status, _)) => {
-                log::warn!("Annotations request for job {}: HTTP {}", jid, status);
-                Vec::new()
-            }
-            Err(e) => {
-                log::warn!("Annotations request failed: {:#}", e);
-                Vec::new()
-            }
-        };
-
-        let wcs_cards = fetch_wcs_cards(&client, base_url, jid).await.unwrap_or_else(|e| {
-            log::warn!("WCS file for job {} unavailable: {:#}", jid, e);
-            Vec::new()
-        });
-
-        Ok(SolveResult {
-            ra_center,
-            dec_center,
-            orientation,
-            pixel_scale,
-            field_w_arcmin: field_w,
-            field_h_arcmin: field_h,
-            annotations,
-            wcs_cards,
-            solver: SOLVER_ASTROMETRY_NET.to_string(),
-            parity: parity.map(|p| parity_name(p > 0.0).to_string()),
-            ..SolveResult::default()
-        })
     }
 }
 
@@ -460,10 +538,16 @@ mod tests {
     use crate::types::error::AppError;
 
     use super::astrometry_net_impl::{
-        char_prefix, first_job_id, parse_calibration, parse_json_body, wcs_cards_from_wcs_file,
+        char_prefix, first_job_id, parse_annotations, parse_calibration, parse_json_body, wcs_cards_from_wcs_file,
     };
     use super::test_support::{nova_wcs_cards, nova_wcs_file, nova_wcs_file_from};
-    use super::{solve_astrometry_net, SolveConfig};
+    use super::{solve_astrometry_net, NovaJob, NovaPending, NovaStage, SolveConfig};
+
+    fn ignore_stage(_: NovaStage) {}
+
+    fn pending_of(err: &anyhow::Error) -> NovaJob {
+        err.downcast_ref::<NovaPending>().unwrap_or_else(|| panic!("the error is not pending: {err:#}")).job
+    }
 
     const FULL_CALIBRATION: &str =
         r#"{"ra":83.822,"dec":-5.391,"orientation":91.2,"pixscale":2.0,"parity":1.0,"radius":0.4}"#;
@@ -495,7 +579,19 @@ mod tests {
         let _ = stream.write_all(body);
     }
 
+    const STARTED_SUBMISSION: &str = r#"{"jobs":[42]}"#;
+    const SOLVED_JOB: &str = r#"{"status":"success"}"#;
+
     fn serve_a_solved_job(calibration: &'static str, wcs_file: Option<Vec<u8>>) -> String {
+        serve_a_job(STARTED_SUBMISSION, SOLVED_JOB, calibration, wcs_file)
+    }
+
+    fn serve_a_job(
+        submission: &'static str,
+        job: &'static str,
+        calibration: &'static str,
+        wcs_file: Option<Vec<u8>>,
+    ) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         std::thread::spawn(move || {
@@ -507,8 +603,8 @@ mod tests {
                 match path.as_str() {
                     "/api/login" => respond(&mut stream, "200 OK", json, br#"{"status":"success","session":"test-session"}"#),
                     "/api/upload" => respond(&mut stream, "200 OK", json, br#"{"status":"success","subid":7}"#),
-                    "/api/submissions/7" => respond(&mut stream, "200 OK", json, br#"{"jobs":[42]}"#),
-                    "/api/jobs/42" => respond(&mut stream, "200 OK", json, br#"{"status":"success"}"#),
+                    "/api/submissions/7" => respond(&mut stream, "200 OK", json, submission.as_bytes()),
+                    "/api/jobs/42" => respond(&mut stream, "200 OK", json, job.as_bytes()),
                     "/api/jobs/42/calibration" => respond(&mut stream, "200 OK", json, calibration.as_bytes()),
                     "/api/jobs/42/annotations" => respond(&mut stream, "200 OK", json, br#"{"annotations":[]}"#),
                     "/wcs_file/42" => match &wcs_file {
@@ -580,7 +676,7 @@ mod tests {
     async fn a_successful_solve_returns_the_wcs_cards_of_the_job() {
         let api_url = serve_a_solved_job(FULL_CALIBRATION, Some(nova_wcs_file()));
         let dir = tempfile::tempdir().unwrap();
-        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled)
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), None, &never_cancelled, &ignore_stage)
             .await
             .unwrap();
         assert_eq!(result.ra_center, 83.822);
@@ -598,11 +694,39 @@ mod tests {
     async fn a_missing_wcs_file_keeps_the_solve_with_no_cards() {
         let api_url = serve_a_solved_job(FULL_CALIBRATION, None);
         let dir = tempfile::tempdir().unwrap();
-        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled)
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), None, &never_cancelled, &ignore_stage)
             .await
             .unwrap();
         assert_eq!(result.ra_center, 83.822);
         assert!(result.wcs_cards.is_empty(), "{:?}", result.wcs_cards);
+    }
+
+    async fn solve_error(api_url: String) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SolveConfig { timeout_secs: 8, ..solve_config(api_url) };
+        solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &config, None, &never_cancelled, &ignore_stage)
+            .await
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_submission_nova_could_not_process_fails_with_its_message() {
+        let api_url = serve_a_job(
+            r#"{"jobs":[],"processing_finished":"2026-10-30 12:00:00","error_message":"Failed to load image: not a FITS file"}"#,
+            SOLVED_JOB,
+            FULL_CALIBRATION,
+            None,
+        );
+        let err = solve_error(api_url).await;
+        assert!(err.contains("submission 7") && err.contains("Failed to load image: not a FITS file"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_job_nova_ends_without_a_verdict_fails() {
+        let api_url = serve_a_job(STARTED_SUBMISSION, r#"{"status":"?"}"#, FULL_CALIBRATION, None);
+        let err = solve_error(api_url).await;
+        assert!(err.contains("job 42") && err.contains("without a result"), "{err}");
     }
 
     #[tokio::test]
@@ -610,7 +734,7 @@ mod tests {
         let api_url =
             serve_a_solved_job(r#"{"dec":-5.391,"orientation":91.2,"pixscale":2.0}"#, Some(nova_wcs_file()));
         let dir = tempfile::tempdir().unwrap();
-        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled)
+        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), None, &never_cancelled, &ignore_stage)
             .await
             .unwrap_err()
             .to_string();
@@ -692,7 +816,7 @@ mod tests {
         };
 
         let started = std::time::Instant::now();
-        let err = solve_astrometry_net(fits.to_str().unwrap(), 10, 10, &config, &never_cancelled)
+        let err = solve_astrometry_net(fits.to_str().unwrap(), 10, 10, &config, None, &never_cancelled, &ignore_stage)
             .await
             .unwrap_err()
             .to_string();
@@ -726,7 +850,7 @@ mod tests {
         let started = Instant::now();
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
-            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &config, cancelled),
+            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &config, None, cancelled, &ignore_stage),
         )
         .await;
         let elapsed = started.elapsed();
@@ -813,7 +937,7 @@ mod tests {
         let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), 1, 0);
         let dir = tempfile::tempdir().unwrap();
         let result =
-            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled).await;
+            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), None, &never_cancelled, &ignore_stage).await;
         let result = result.unwrap_or_else(|e| panic!("the solve failed on one dropped connection: {e:#}"));
         assert_eq!(result.ra_center, 83.822);
         assert_eq!(result.wcs_cards, nova_wcs_cards());
@@ -826,7 +950,7 @@ mod tests {
         let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), 0, 1);
         let dir = tempfile::tempdir().unwrap();
         let result =
-            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled).await;
+            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), None, &never_cancelled, &ignore_stage).await;
         let result = result.unwrap_or_else(|e| panic!("the solve failed on one HTTP 503: {e:#}"));
         assert_eq!(result.dec_center, -5.391);
         assert_eq!(count(&seen, "/api/jobs/42"), 2);
@@ -837,7 +961,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), usize::MAX, 0);
         let dir = tempfile::tempdir().unwrap();
-        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), &never_cancelled)
+        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), None, &never_cancelled, &ignore_stage)
             .await
             .unwrap_err();
         let text = format!("{err:#}");
@@ -845,6 +969,72 @@ mod tests {
         assert!(text.contains("job 42"), "{text}");
         assert!(text.matches(": ").count() >= 2, "the transport cause is missing: {text}");
         assert_eq!(count(&seen, "/api/jobs/42/calibration"), 3);
+        assert_eq!(pending_of(&err), NovaJob { submission: 7, job: Some(42) });
+    }
+
+    #[tokio::test]
+    async fn a_solve_reports_its_stages_in_order() {
+        let api_url = serve_a_solved_job(FULL_CALIBRATION, Some(nova_wcs_file()));
+        let dir = tempfile::tempdir().unwrap();
+        let stages = Mutex::new(Vec::new());
+        let record = |stage: NovaStage| stages.lock().unwrap().push(stage);
+        solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), None, &never_cancelled, &record)
+            .await
+            .unwrap();
+        assert_eq!(
+            *stages.lock().unwrap(),
+            vec![NovaStage::Uploading, NovaStage::Queued { submission: 7 }, NovaStage::Solving { submission: 7, job: 42 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_timeout_after_the_upload_keeps_the_submission_to_check_again() {
+        let api_url = serve_a_submission_that_never_starts(Arc::new(Mutex::new(Vec::new())));
+        let dir = tempfile::tempdir().unwrap();
+        let config = SolveConfig { timeout_secs: 1, ..solve_config(api_url) };
+        let err = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &config, None, &never_cancelled, &ignore_stage)
+            .await
+            .unwrap_err();
+        assert_eq!(pending_of(&err), NovaJob { submission: 7, job: None });
+        assert!(err.to_string().contains("timed out after 1 s"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_resumed_solve_skips_the_login_and_the_upload() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let api_url = serve_a_flaky_solved_job(Arc::clone(&seen), 0, 0);
+        let dir = tempfile::tempdir().unwrap();
+        let resume = Some(NovaJob { submission: 7, job: Some(42) });
+        let result =
+            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), resume, &never_cancelled, &ignore_stage)
+                .await
+                .unwrap();
+        assert_eq!(result.ra_center, 83.822);
+        assert_eq!((count(&seen, "/api/login"), count(&seen, "/api/upload")), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_submission_is_refused_and_not_pending() {
+        let api_url = serve_a_solved_job(FULL_CALIBRATION, Some(nova_wcs_file()));
+        let dir = tempfile::tempdir().unwrap();
+        let resume = Some(NovaJob { submission: 8, job: None });
+        let err =
+            solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), resume, &never_cancelled, &ignore_stage)
+                .await
+                .unwrap_err();
+        assert!(err.downcast_ref::<NovaPending>().is_none(), "{err:#}");
+        assert!(format!("{err:#}").contains("HTTP 404"), "{err:#}");
+    }
+
+    #[test]
+    fn an_annotation_with_an_empty_name_keeps_no_name() {
+        let parsed = parse_annotations(&json!({"annotations": [
+            {"type": "HIP", "names": [""], "pixelx": 899.9, "pixely": 485.7, "radius": 0},
+            {"type": "tycho2", "names": ["Tycho-2 5689-251-1", " "], "pixelx": 94.3, "pixely": 1065.0, "radius": 0},
+        ]}));
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].names.is_empty(), "{:?}", parsed[0].names);
+        assert_eq!(parsed[1].names, vec!["Tycho-2 5689-251-1".to_string()]);
     }
 
     #[test]

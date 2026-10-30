@@ -67,12 +67,23 @@ describe("plateSolve", () => {
       radius: 2.5,
       solver: "local",
       nearRadiusDeg: 2.5,
+      resumeSubmissionId: null,
+      resumeJobId: null,
     });
   });
 
   it("leaves the solver and the near radius to the command's defaults when they are not given", async () => {
     await plateSolve("C:/d/light.fits");
     expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ solver: null, nearRadiusDeg: null });
+  });
+
+  it("passes the astrometry.net submission and job to follow when the panel checks a pending job again", async () => {
+    await plateSolve("C:/d/light.fits", { solver: "astrometry.net", resumeSubmissionId: 16375523, resumeJobId: 17211197 });
+    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({
+      solver: "astrometry.net",
+      resumeSubmissionId: 16375523,
+      resumeJobId: 17211197,
+    });
   });
 
   it("names the error code of a local no-solution", () => {

@@ -62,7 +62,7 @@ tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = ["tauri", "astrometry-net", "asdf-full", "vizier", "mast"]
-tauri = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs", "dep:tauri-plugin-shell", "dep:tauri-plugin-opener"]
+tauri = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-fs", "dep:tauri-plugin-shell", "dep:tauri-plugin-opener", "dep:env_logger"]
 # Headless HTTP server — contributed by Jae-Joon Lee (https://github.com/leejjoon).
 # Build: cargo build --no-default-features --features server,astrometry-net,asdf-full,vizier
 server = ["dep:axum", "dep:dashmap", "dep:uuid", "dep:tokio-stream", "dep:tokio-util", "dep:env_logger"]

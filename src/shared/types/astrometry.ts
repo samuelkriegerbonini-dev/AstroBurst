@@ -87,6 +87,8 @@ export interface PlateSolveOptions {
   radius?: number;
   solver?: PlateSolver;
   nearRadiusDeg?: number;
+  resumeSubmissionId?: number;
+  resumeJobId?: number;
 }
 
 export interface SolveHintPointing {
