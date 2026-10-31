@@ -1,3 +1,4 @@
+import type { PhotometricPlane } from "../shared/types/cube";
 import type { ProcessedResult } from "../shared/types/preview";
 import type { SpectralAxisInfo } from "../shared/types/spectral";
 import { measurementAxisValues } from "./lineMeasure";
@@ -59,6 +60,16 @@ export function formatFrameLabel(idx: number, total: number, axisValue: number |
   const channel = `ch ${idx} (0–${Math.max(total - 1, 0)})`;
   if (axisValue === null || !Number.isFinite(axisValue) || !unit || unit === "ch") return channel;
   return `${channel} - ${formatAxisValue(axisValue, unit)} ${unit}`;
+}
+
+const PIVOT_LABEL_DECIMALS = 3;
+
+export function filterFrameLabel(idx: number, total: number, planes: readonly PhotometricPlane[] | null | undefined): string | null {
+  const plane = planes?.[idx];
+  if (!plane) return null;
+  const channel = `ch ${idx} (0–${Math.max(total - 1, 0)})`;
+  const pivot = typeof plane.pivot_um === "number" && Number.isFinite(plane.pivot_um) ? ` ${plane.pivot_um.toFixed(PIVOT_LABEL_DECIMALS)} um` : "";
+  return `${channel} - ${plane.filter}${pivot}`;
 }
 
 export function frameRecordLabel(idx: number, total: number, axis: SpectralAxisInfo | null): string {

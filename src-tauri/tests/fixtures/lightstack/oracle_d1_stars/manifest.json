@@ -1,0 +1,291 @@
+{
+  "manifest_version": 1,
+  "kind": "lightstack_oracle",
+  "created_by": "scripts/oracle/lightstack_oracle.py",
+  "recipe": {
+    "file": "recipe_d1_stars.json",
+    "sha256": "ada461141fdc57836d1098b17396d98bf9e15028585d4fa40b8931ec98e7c936",
+    "content": {
+      "recipe_version": 1,
+      "name": "d1_stars",
+      "inputs": [
+        {
+          "path": "d1_stars_JWST_F444W.fits",
+          "dataset": "JWST",
+          "filter": "F444W"
+        }
+      ],
+      "steps": [
+        {
+          "step": "psfs",
+          "source": "empirical",
+          "dataset": "JWST",
+          "filters": [
+            "F444W"
+          ],
+          "cutout_size": 31,
+          "background_border": 5,
+          "normalization_radius": 0.46,
+          "normalization_radius_unit": "arcsec",
+          "psf_size": 21
+        }
+      ]
+    }
+  },
+  "versions": {
+    "python": "3.13.17",
+    "lightstack": "0.4.0",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "astropy": "8.0.2",
+    "reproject": "0.21.0",
+    "photutils": "3.1.1",
+    "regions": "0.13",
+    "matplotlib": "3.11.2",
+    "pandas": "3.1.0"
+  },
+  "lightstack_source": {
+    "kind": "index"
+  },
+  "platform": "Windows-11-10.0.26300-SP0",
+  "inputs": [
+    {
+      "path": "d1_stars_JWST_F444W.fits",
+      "bytes": 31680,
+      "sha256": "cbe2f310a942a0c29209f3ed5be7f6cacc53c13afcd6c485637ddec5c1e6a899"
+    }
+  ],
+  "steps": [
+    {
+      "index": 1,
+      "step": "psfs",
+      "parameters": {
+        "step": "psfs",
+        "source": "empirical",
+        "dataset": "JWST",
+        "filters": [
+          "F444W"
+        ],
+        "cutout_size": 31,
+        "background_border": 5,
+        "normalization_radius": 0.46,
+        "normalization_radius_unit": "arcsec",
+        "psf_size": 21
+      },
+      "directory": "01_psfs",
+      "calls": [
+        {
+          "function": "lightstack.psf.build_empirical_psf",
+          "arguments": {
+            "data_dir": "<data>",
+            "dataset": "JWST",
+            "filter_name": "F444W",
+            "cutout_size": 31,
+            "background_border": 5,
+            "background_sigma": 4,
+            "clip_negative": true,
+            "noise_threshold": 0.5,
+            "radial_cleaning": false,
+            "cleaning_sigma": 1.0,
+            "cleaning_consecutive_bins": 3,
+            "normalization_radius": 0.46,
+            "normalization_radius_unit": "arcsec",
+            "psf_size": 21,
+            "oversampling": null,
+            "oversampling_order": 3,
+            "save": true,
+            "output_dir": "<out>\\01_psfs",
+            "plot_stars": false,
+            "plot_diagnostics": false,
+            "save_figures": false,
+            "show_figures": false,
+            "figure_dir": null
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_stars_JWST_F444W.fits",
+              "bytes": 31680,
+              "sha256": "cbe2f310a942a0c29209f3ed5be7f6cacc53c13afcd6c485637ddec5c1e6a899"
+            },
+            {
+              "root": "data",
+              "path": "stars_f444w.reg",
+              "bytes": 392,
+              "sha256": "a334f4d533f18fcedac3e4bd98a7af973264a5f72fc7bb3404825b9d8dfb3214"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_psfs/empirical_psf_jwst_f444w.fits",
+              "bytes": 8640,
+              "sha256": "d004e3bbe4cff011ebc7bff351ed415846b27c96f5278ca30ee0c0a31458393b"
+            }
+          ],
+          "metrics": {
+            "filter": "F444W",
+            "pixel_scale_arcsec": 0.04,
+            "nstars": 5,
+            "centers": {
+              "s1": {
+                "x": 14.17695834082525,
+                "y": 13.721343037257657,
+                "method": "quadratic"
+              },
+              "s2": {
+                "x": 14.418992662848758,
+                "y": 13.879425820078831,
+                "method": "quadratic"
+              },
+              "s3": {
+                "x": 13.771509789534802,
+                "y": 14.27155773155475,
+                "method": "quadratic"
+              },
+              "s4": {
+                "x": 13.95240446495707,
+                "y": 14.096126156052383,
+                "method": "quadratic"
+              },
+              "s5": {
+                "x": 14.318988375459956,
+                "y": 13.599851513443362,
+                "method": "quadratic"
+              }
+            },
+            "backgrounds": {
+              "s1": 5.116908674551723e-09,
+              "s2": 5.123289792408059e-09,
+              "s3": 5.073927056287175e-09,
+              "s4": 5.140731174080315e-09,
+              "s5": 5.010633685742505e-09
+            },
+            "background_stds": {
+              "s1": 6.656673770027252e-10,
+              "s2": 6.839073745680727e-10,
+              "s3": 7.55513827981988e-10,
+              "s4": 6.094559465043517e-10,
+              "s5": 6.715571387357876e-10
+            },
+            "cleaning_radii": {},
+            "fluxes": {
+              "s1": 1.9902835673490832e-05,
+              "s2": 1.0957112352414307e-05,
+              "s3": 1.592744656825021e-05,
+              "s4": 8.927256631068116e-06,
+              "s5": 2.9912732813775994e-05
+            }
+          },
+          "stdout": "",
+          "warnings": [
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered",
+            "RuntimeWarning: All-NaN slice encountered"
+          ],
+          "wall_time_s": 0.02007709999452345
+        },
+        {
+          "function": "lightstack.psf.measure_psf_fwhm",
+          "arguments": {
+            "psf": "<array float64 [21, 21]>"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_psfs/empirical_psf_jwst_f444w.fits",
+              "bytes": 8640,
+              "sha256": "d004e3bbe4cff011ebc7bff351ed415846b27c96f5278ca30ee0c0a31458393b"
+            }
+          ],
+          "outputs": [],
+          "metrics": {
+            "filter": "F444W",
+            "fwhm_px": null,
+            "pixel_scale_arcsec": 0.0399999999999996
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.00032919999648584053,
+          "error": "IndexError: index 21 is out of bounds for axis 0 with size 21"
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "01_psfs/empirical_psf_jwst_f444w.fits",
+          "bytes": 8640,
+          "sha256": "d004e3bbe4cff011ebc7bff351ed415846b27c96f5278ca30ee0c0a31458393b"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "01_psfs/empirical_psf_jwst_f444w.fits",
+      "bytes": 8640,
+      "sha256": "d004e3bbe4cff011ebc7bff351ed415846b27c96f5278ca30ee0c0a31458393b"
+    }
+  ],
+  "wall_time_s": 2.2754575999933877
+}

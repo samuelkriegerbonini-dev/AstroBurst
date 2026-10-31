@@ -19,7 +19,6 @@ use astroburst_lib::core::imaging::scale::{
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::session::Session;
 
 use super::super::bin::padding_area_downsample;
 use super::super::region::{resolve_region_clamped, RegionSpec, ResolvedRegion};
@@ -64,21 +63,6 @@ pub struct ScaleSpec {
     pub symmetric: Option<bool>,
     #[serde(default, alias = "center")]
     pub centre: Option<f64>,
-}
-
-async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
-    match explicit {
-        Some(r) => Ok(r),
-        None => session
-            .v2
-            .active_ref
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::BadRequest("no active image in this session; open a file first".into())
-            }),
-    }
 }
 
 enum DrawOp {
@@ -241,7 +225,7 @@ pub async fn render(
     SessionExtractor(session): SessionExtractor,
     Json(params): Json<RenderParams>,
 ) -> Result<Response> {
-    let target = target_ref(&session, params.image_ref).await?;
+    let target = session.target_ref(params.image_ref).await?;
     let entry = session
         .cache
         .get(&target)
@@ -363,6 +347,7 @@ pub async fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Session;
 
     fn bad_request_parts(err: AppError) -> (&'static str, String, Option<String>) {
         match err {

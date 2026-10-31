@@ -1,0 +1,39 @@
+SIMPLE  =                    T / FITS standard
+BITPIX  =                  -32 / 32-bit float
+NAXIS   =                    2 / 2D image
+NAXIS1  =                   16 / width
+NAXIS2  =                   16 / height
+BZERO   =       0.0000000000E0
+BSCALE  =       1.0000000000E0
+CTYPE1  = 'RA---TAN'
+CTYPE2  = 'DEC--TAN'
+CRVAL1  =                 83.8
+CRVAL2  =                 -5.4
+CRPIX1  =   6.50000000000000E0
+CRPIX2  =   8.50000000000000E0
+CD1_1   = -5.00000000000000E-5
+CD1_2   =   0.00000000000000E0
+CD2_1   =   0.00000000000000E0
+CD2_2   =  5.00000000000000E-5
+EXPTIME =   3.00000000000000E2
+BUNIT   = 'MJy/sr  '
+PIXAR_SR= 5.00000000000000E-14
+WCSAXES =                    2
+PV2_1   =                 45.0
+TELESCOP= 'JWST    '
+FILTER  = 'F200W   '
+PHOTMJSR=                  1.5
+ZP      =   2.65051499783199E1
+ZPTMAG  =   2.55051499783199E1
+EGAIN   =                 0.25
+NCOMBINE=                    3
+HISTORY flat-fielded
+PROGRAM = 'AstroBurst {version}'
+HISTORY Processed with AstroBurst {version}
+ABPROC  = 'drizzled'
+TOTEXP  =   9.00000000000000E2
+ABCOMB  = 'mean    '
+ABREJECT= 'sigma_clip'
+ABDRZSCL=   2.00000000000000E0
+HISTORY AstroBurst drizzle: 3 frames, scale 2, pixfrac 0.7, square
+HISTORY Processed with AstroBurst {version}

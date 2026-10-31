@@ -57,6 +57,34 @@ pub fn bicubic_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -
     bilinear_finite(slice, rows, cols, iy, ix, fx, fy)
 }
 
+#[inline]
+pub fn bilinear_sample(slice: &[f32], rows: usize, cols: usize, y: f64, x: f64) -> f32 {
+    if rows == 0 || cols == 0 || slice.is_empty() {
+        return f32::NAN;
+    }
+    let ix = x.floor() as i64;
+    let iy = y.floor() as i64;
+    let fx = x - ix as f64;
+    let fy = y - iy as f64;
+    let r0 = clamp_index(iy, rows);
+    let r1 = clamp_index(iy + 1, rows);
+    let c0 = clamp_index(ix, cols);
+    let c1 = clamp_index(ix + 1, cols);
+    let taps = [
+        (r0 * cols + c0, (1.0 - fx) * (1.0 - fy)),
+        (r0 * cols + c1, fx * (1.0 - fy)),
+        (r1 * cols + c0, (1.0 - fx) * fy),
+        (r1 * cols + c1, fx * fy),
+    ];
+    let mut value = 0.0f64;
+    for (index, weight) in taps {
+        if weight != 0.0 {
+            value += slice[index] as f64 * weight;
+        }
+    }
+    value as f32
+}
+
 pub fn preview_dims(rows: usize, cols: usize, max_dim: usize) -> (usize, usize) {
     if rows <= max_dim && cols <= max_dim {
         return (rows, cols);
@@ -217,6 +245,25 @@ mod tests {
         for (r, c, m) in [(4096, 4096, 1024), (12345, 6789, 2048), (7, 9000, 512), (2049, 2048, 2048), (2048, 2048, 2048)] {
             assert_eq!(preview_dims(r, c, m), legacy_dims(r, c, m), "{r}x{c}@{m}");
         }
+    }
+
+    #[test]
+    fn bilinear_sample_weights_four_taps_and_lets_a_weighted_nan_through() {
+        let data: Vec<f32> = (0..20).map(|i| (3 * (i % 5) + 7 * (i / 5)) as f32).collect();
+        let plane = |y: f64, x: f64| (3.0 * x + 7.0 * y) as f32;
+        for (y, x) in [(1.25, 2.5), (0.0, 0.0), (2.9, 3.1), (3.0, 4.0), (0.5, 3.75)] {
+            assert!((bilinear_sample(&data, 4, 5, y, x) - plane(y, x)).abs() < 1e-5, "({y}, {x})");
+        }
+        assert_eq!(bilinear_sample(&data, 4, 5, -0.4, -0.3), data[0]);
+        assert_eq!(bilinear_sample(&data, 4, 5, 3.45, 4.2), data[19]);
+
+        let mut holed = data.clone();
+        holed[5 + 2] = f32::NAN;
+        assert!(bilinear_sample(&holed, 4, 5, 1.5, 2.5).is_nan());
+        assert!(bilinear_sample(&holed, 4, 5, 1.0, 1.5).is_nan());
+        assert_eq!(bilinear_sample(&holed, 4, 5, 1.0, 1.0), data[5 + 1]);
+        assert!((bilinear_sample(&holed, 4, 5, 2.0, 2.5) - plane(2.0, 2.5)).abs() < 1e-5);
+        assert!(bilinear_sample(&[], 0, 0, 0.0, 0.0).is_nan());
     }
 
     #[test]

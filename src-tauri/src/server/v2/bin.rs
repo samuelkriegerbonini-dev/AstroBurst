@@ -11,7 +11,7 @@ use astroburst_lib::core::imaging::stats::{compute_image_stats, is_valid_pixel};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::session::{ImageMeta, Session};
+use crate::session::ImageMeta;
 
 use super::images::finite_stats_json;
 
@@ -90,21 +90,6 @@ fn default_method() -> String {
     "mean".to_string()
 }
 
-async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
-    match explicit {
-        Some(r) => Ok(r),
-        None => session
-            .v2
-            .active_ref
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::BadRequest("no active image in this session; open a file first".into())
-            }),
-    }
-}
-
 pub async fn bin(
     SessionExtractor(session): SessionExtractor,
     Json(params): Json<BinParams>,
@@ -130,7 +115,7 @@ pub async fn bin(
         ));
     }
 
-    let target = target_ref(&session, params.image_ref).await?;
+    let target = session.target_ref(params.image_ref).await?;
 
     let entry = session.cache.get(&target).ok_or_else(|| {
         AppError::NotFound(format!("image ref {target} not found in session"))

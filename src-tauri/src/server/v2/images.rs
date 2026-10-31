@@ -13,6 +13,7 @@ use ndarray::Array2;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
+use crate::science::guard::ConfinedJson;
 use crate::session::{ImageMeta, Session};
 use crate::state::AppState;
 
@@ -199,7 +200,7 @@ async fn open_ref(session: &Session, image_ref: String, source: String, r: Image
 pub async fn open(
     SessionExtractor(session): SessionExtractor,
     State(_state): State<AppState>,
-    Json(params): Json<OpenParams>,
+    ConfinedJson(params): ConfinedJson<OpenParams>,
 ) -> Result<Json<Value>> {
     let image_ref = params
         .name

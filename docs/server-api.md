@@ -2,7 +2,7 @@
 
 The headless server (`astroburst-server`), its v1 and v2 APIs and the async Python client were contributed by [Jae-Joon Lee](https://github.com/leejjoon) (@leejjoon). His files carry his attribution line and keep it.
 
-This file is the reference for every route the server registers today, v1 and v2. [`src-tauri/SERVER.md`](../src-tauri/SERVER.md) is the contributor's original v1 guide and stays as he wrote it; where the two differ, this file follows the current code. A test, `src-tauri/src/server/route_docs.rs`, fails when this file and `src-tauri/src/server/router.rs` disagree: a registered route without a `METHOD /path` heading or a row in the route index, a heading or row for a route that is not registered, or a wrong route count. It also checks a few limits stated here (the drizzle clamps, the body limit, `HEAD` on the job stream) against the code. Example values in the JSON blocks are illustrative, not measurements.
+This file is the reference for every route the server registers today, v1 and v2. [`src-tauri/SERVER.md`](../src-tauri/SERVER.md) is the contributor's original v1 guide and stays as he wrote it; where the two differ, this file follows the current code. A test, `src-tauri/src/server/route_docs.rs`, fails when this file and the routers disagree (`src-tauri/src/server/router.rs` and the science router it merges, `src-tauri/src/server/science/mod.rs`; any other merged, nested or service router is reported as unreadable): a registered route without a `METHOD /path` heading or a row in the route index, a heading or row for a route that is not registered, or a wrong route count. It also checks a few limits stated here (the drizzle clamps, the body limit, `HEAD` on the job stream) against the code. Example values in the JSON blocks are illustrative, not measurements.
 
 ## Contents
 
@@ -14,7 +14,7 @@ This file is the reference for every route the server registers today, v1 and v2
 6. [Jobs](#6-jobs)
 7. [Errors](#7-errors)
 8. [Route index](#8-route-index)
-9. [Service route](#9-service-route)
+9. [Service routes](#9-service-routes)
 10. [v1 routes](#10-v1-routes)
 11. [v2 routes](#11-v2-routes)
 12. [Region specifications](#12-region-specifications)
@@ -29,7 +29,7 @@ This file is the reference for every route the server registers today, v1 and v2
 One process serves two API generations:
 
 - **v1** (paths without a version prefix): sessions, open and header by *slot*, STF renders, and three background jobs (stack, drizzle and the calibration pipeline) with status, cancel and server-sent events.
-- **v2** (paths under `/v2`): session lifecycle with keepalive, image *references* with HDU or ASDF-array selection, structure, header and WCS inspection, coordinate transforms and a coordinate grid, cutouts, block binning, a pixel probe, exact statistics with noise evaluation, histograms and a render that takes the desktop display settings.
+- **v2** (paths under `/v2`): session lifecycle with keepalive, image *references* with HDU or ASDF-array selection, structure, header and WCS inspection, coordinate transforms and a coordinate grid, cutouts, block binning, a pixel probe, exact statistics with noise evaluation, histograms and a render that takes the desktop display settings; also the job routes with each job's outcome, the plane list of FITS and ASDF files, deleting a ref and downloading it as FITS, a folder listing under the path roots, the server's capabilities and seeded synthetic star fields with their truth catalogue.
 
 Both generations use the same sessions and the same per-session image cache, so a v1 slot can be read by a v2 route through its `ref`, and a v2 ref can be rendered by a v1 route through its `slot`.
 
@@ -48,16 +48,16 @@ Conventions:
 
 Both feature sets below build the same routes (section 8).
 
-The recommended build is the full feature set, the desktop's default features without `tauri`:
+The recommended build is the full feature set, the desktop's default features without `tauri`, with the server's own release profile:
 
 ```bash
 cd src-tauri
-cargo build --release \
+cargo build --profile release-server \
   --no-default-features \
   --features server,astrometry-net,asdf-full,vizier,mast
 ```
 
-The contributor's original command (`src-tauri/SERVER.md`) stays valid; it leaves out `mast`:
+The contributor's original command (`src-tauri/SERVER.md`) stays valid; it leaves out `mast` and uses `--release`:
 
 ```bash
 cd src-tauri
@@ -66,7 +66,7 @@ cargo build --release \
   --features server,astrometry-net,asdf-full,vizier
 ```
 
-The binary is `target/release/astroburst-server` (`astroburst-server.exe` on Windows). For development: `cargo run --bin astroburst-server --no-default-features --features server,astrometry-net,asdf-full,vizier,mast`.
+The binary is `target/release-server/astroburst-server` (`target/release/` with `--release`; `astroburst-server.exe` on Windows). For development: `cargo run --bin astroburst-server --no-default-features --features server,astrometry-net,asdf-full,vizier,mast`.
 
 | Feature | Effect on the server |
 |---|---|
@@ -74,7 +74,7 @@ The binary is `target/release/astroburst-server` (`astroburst-server.exe` on Win
 | `asdf-full` | Reads bzip2 and lz4 compressed ASDF blocks (zlib is always available) |
 | `vizier` | Gaia DR3 cone queries through VizieR in the library; no server route queries a catalogue yet |
 | `astrometry-net` | The astrometry.net client is desktop-only today; the feature changes nothing on the server |
-| `mast` | MAST archive engine; the server reads the MAST settings from the environment at start-up (section 3); no server route uses MAST yet |
+| `mast` | MAST archive engine; the server reads the MAST settings from the environment at start-up (section 3); no server route uses MAST yet, and `GET /v2/capabilities` reports only whether `ASTROBURST_MAST_TOKEN` is set |
 
 Start-up log:
 
@@ -90,7 +90,7 @@ Remote use: keep the default loopback bind on the machine that holds the data an
 
 Notes:
 
-- The release profile sets `panic = "abort"` (`src-tauri/Cargo.toml`). A panic inside a job worker therefore ends the whole server process in a release build; the job runner's panic guard (section 6) only works in debug builds.
+- The `release-server` profile (`src-tauri/Cargo.toml`) is the desktop's `release` profile with `panic = "unwind"`, so the job runner's panic guard (section 6) works in that build: a panicking job ends with an `error` event and the server keeps running. The `release` profile, which the desktop app ships with, sets `panic = "abort"`; a server built with `--release` ends the whole process on a panic inside a job.
 - At start-up the server creates the Gaia catalogue cache folder (`ASTROBURST_CATALOG_CACHE_DIR`, section 3) if it does not exist.
 
 ## 3. Configuration
@@ -107,6 +107,17 @@ All settings are environment variables. An invalid server setting prints `WARN: 
 | `ASTROBURST_CACHE_MAX_BYTES` | `2147483648` | Bytes per session cache; also the cap for one cutout |
 | `ASTROBURST_CLEANUP_INTERVAL` | `60` | Seconds between idle-session sweeps; values below 1 become 1 |
 | `ASTROBURST_LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error`; `RUST_LOG` wins when set |
+
+Guard and path roots (section 4). The token, the `Host` check and the roots of the file paths that requests send (`fits/open`, `/v2/open` and the v1 stack, drizzle and pipeline jobs) take effect when `ASTROBURST_BIND` is not a loopback address; on a loopback bind those stay open as before and the server only logs a warning when `ASTROBURST_TOKEN` is set. `GET /v2/fs` and `GET /v2/sessions/:sid/planes` keep to the roots on every bind. An empty value counts as unset.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ASTROBURST_TOKEN` | none | Bearer token every request must carry (`Authorization: Bearer <token>`); without it a non-loopback bind answers every request with `503 guard_unconfigured` |
+| `ASTROBURST_ALLOWED_HOSTS` | none | Comma-separated host names or addresses (a port is ignored, IPv6 in brackets or bare) that the `Host` header may name, besides `localhost`, `127.0.0.1`, `[::1]` and the bind address; an entry that is not a host name is logged and ignored |
+| `ASTROBURST_SERVER_ROOT` | the working directory | Path root: on a non-loopback bind `fits/open`, `/v2/open` and the v1 stack, drizzle and pipeline jobs accept only files under a root; on every bind `GET /v2/fs` lists only folders under a root (this one by default) and `GET /v2/sessions/:sid/planes` reads only source files under a root. A value that is not an existing folder is logged at start-up and is then not a root, with no fallback to the working directory: until it is fixed, paths are accepted only under `ASTROBURST_OUTPUT_ROOT` or `ASTROBURST_MAST_DOWNLOAD_DIR` when those name existing folders, and nowhere when they do not. Not to be confused with `ASTROBURST_DATA_DIR`, the app data folder |
+| `ASTROBURST_OUTPUT_ROOT` | `<ASTROBURST_SERVER_ROOT>/out` | Second path root, for the products of the planned routes; a root only once the folder exists |
+| `ASTROBURST_MAST_DOWNLOAD_DIR` | `<ASTROBURST_SERVER_ROOT>/mast` | Third path root, for the planned MAST downloads (`mast` builds only); a root only once the folder exists |
+| `ASTROBURST_MAST_TOKEN` | none | Read by `mast` builds for the planned MAST routes (section 13); no route uses it yet, `GET /v2/capabilities` reports only whether it is set, and it is never printed |
 
 Engine variables that the server process also reads:
 
@@ -135,15 +146,21 @@ ASTROBURST_SESSION_MAX=2 ASTROBURST_SESSION_TTL=300 ASTROBURST_LOG_LEVEL=debug .
 
 ## 4. Security
 
-Read this before exposing the server to anything but your own machine.
+Read this before exposing the server to anything but your own machine. The guard is one layer in front of every route, v1 and v2 (`server/science/guard.rs`).
 
-- There is no authentication and no `Host` header check; the router has only the request-id layer (`server/router.rs`).
-- The default bind is loopback (`127.0.0.1:8080`).
-- `path` fields are not confined to a directory: any file the server process can read can be opened (`POST /sessions/:sid/fits/open`, `POST /v2/sessions/:sid/open`), and the stack, drizzle and pipeline jobs read any path they are given.
-- Keep the loopback bind and use an SSH tunnel for remote work. Do not bind to a public interface.
+- **Loopback bind** (the default, `127.0.0.1:8080`, or any `127.x` or `::1` address): open as before. No token, no `Host` check, and the `path` and `paths` fields are not confined: any file the server process can read can be opened or stacked. Without the `Host` check a web page that rebinds its own DNS name to `127.0.0.1` can reach a loopback server from the browser of the same machine; do not keep the server running while browsing untrusted sites.
+- **Any other bind** (for example `0.0.0.0:8080`), checked in this order for every route, `/health` included:
+  1. `ASTROBURST_TOKEN` must be set, else every request answers `503 guard_unconfigured`.
+  2. The `Host` header (and the authority of an absolute request URI) must name `localhost`, `127.0.0.1`, `[::1]`, the bind address or an entry of `ASTROBURST_ALLOWED_HOSTS`; a missing or foreign `Host` is `421 host_not_allowed`. This also blocks DNS rebinding.
+  3. `Authorization: Bearer <token>` must match `ASTROBURST_TOKEN` (the scheme is case-insensitive; both tokens are compared as SHA-256 digests in constant time, so the timing reveals neither the token nor its length), else `401 unauthorized` with `WWW-Authenticate: Bearer`.
+  4. Every file path a request sends must resolve inside a path root: `ASTROBURST_SERVER_ROOT`, `ASTROBURST_OUTPUT_ROOT` and, in `mast` builds, `ASTROBURST_MAST_DOWNLOAD_DIR`. That is the `path` of `POST /sessions/:sid/fits/open` and `POST /v2/sessions/:sid/open`, the `paths` of `POST /sessions/:sid/stacking/stack` and `.../stacking/drizzle`, and each channel's `paths` and the `bias_paths`, `dark_paths`, `flat_paths` and `flat_dark_paths` of `.../pipeline/run`. One path outside refuses the whole request before any other field is checked and before a job slot is taken. The path is resolved by the file system before the comparison, so `..`, symbolic links, Windows junctions, `\\?\` drive prefixes and drive-relative forms all end where the file really is; a path that resolves outside every root, or cannot be resolved, is `403 path_outside_root`. A missing file inside a root keeps its `404`. The message names the path that was sent, never a root. On Windows a path that names another machine or a device is refused before the file system is asked, so the server never contacts the host it names: `\\server\share` and `//server/share`, `\\?\UNC\...`, `\\.\...`, `\??\...`, a `\\?\` form other than a drive letter, and any other path that starts with two separators. The one exception is a path on the network share (`\\server\share`, compared without regard to case) of a root that itself lies on that share; a UNC path to a folder that is also a local root is refused.
+- **Every bind, loopback included:** `GET /v2/fs` lists only a folder that resolves inside a path root, and `GET /v2/sessions/:sid/planes` reads only a ref whose source file resolves inside one; anything else is `403 path_outside_root`, checked the same way as above. On a loopback bind a file outside the roots can still be opened, but `/planes` refuses it.
+- Not checked again on any bind: `POST /v2/sessions/:sid/hdu`, which re-opens the source file of a ref that was already opened, and `GET /v2/sessions/:sid/images/:ref/fits`, which writes the pixels the session already holds and reads the ERR and DQ planes from that same source file. On a non-loopback bind that file passed the check above when it was opened, and v1 job results come only from checked paths.
+- Error bodies and logs never contain a token.
+- Python client: pass an `httpx.AsyncClient` that carries the header, `AstroBurstClient(base_url, client=httpx.AsyncClient(base_url=..., headers={"Authorization": "Bearer <token>"}))`.
+- `GET /v2/fs` answers with the full path of the folder it lists, so an authorised client learns where the path roots are; refusals never name a root.
+- Prefer the loopback bind and an SSH tunnel for remote work; if you bind to another interface, set `ASTROBURST_TOKEN`, `ASTROBURST_ALLOWED_HOSTS` and `ASTROBURST_SERVER_ROOT`.
 - AstroBurst is AGPLv3. The network clause (section 13 of the licence) applies when a modified server is offered to others over a network.
-
-Planned (group G0 in section 13): a bearer token required on non-loopback binds, a `Host` allowlist and path roots for every path-taking route.
 
 ## 5. Sessions, images and references
 
@@ -154,7 +171,7 @@ Planned (group G0 in section 13): a bearer token required on non-loopback binds,
 - A sweep every `ASTROBURST_CLEANUP_INTERVAL` seconds removes sessions idle for longer than `ASTROBURST_SESSION_TTL`. A session with an active job is never evicted, including a cancelled job whose worker has not exited yet (`server/session.rs`, `server/job.rs`).
 - `DELETE /v2/sessions/:sid` removes the session at once and cancels its jobs. There is no v1 delete route.
 
-**Image cache.** Each session has an LRU cache bounded by `ASTROBURST_CACHE_MAX_ENTRIES` and `ASTROBURST_CACHE_MAX_BYTES`. An evicted image is gone; the v2 metadata of evicted refs is dropped the next time the session or its image list is read.
+**Image cache.** Each session has an LRU cache bounded by `ASTROBURST_CACHE_MAX_ENTRIES` and `ASTROBURST_CACHE_MAX_BYTES`. An evicted image is gone; the v2 metadata of evicted refs is dropped the next time the session or its image list is read. `DELETE /v2/sessions/:sid/images/:ref` frees one image at once.
 
 **Slots and refs.** v1 calls a cache key a *slot*, v2 calls it a *ref*; both are keys of the same cache.
 
@@ -163,17 +180,17 @@ Planned (group G0 in section 13): a bearer token required on non-loopback binds,
 
 **Active ref.** `open`, `hdu`, `cutout` and `bin` make their result the active ref. Routes with an optional `ref` use the active ref when it is omitted; without one they answer `400 bad_request` with `no active image in this session; open a file first`.
 
-**Names.** Default ref names are `img_N` (open, hdu), `cutout_N` and `bin_N`, with `N` a per-session counter that skips names in use; a `name` field chooses one. Reusing a name replaces that image.
+**Names.** Default ref names are `img_N` (open, hdu), `cutout_N`, `bin_N` and `synth_N`, with `N` a per-session counter that skips names in use; a `name` field chooses one. Reusing a name replaces that image.
 
 **Planes.** A FITS file can be opened at any extension (`hdu`, the 0-based HDU index) and an ASDF file at any array (`array`, a dotted key such as `roman.dq`); give at most one of the two. The plane that was loaded is reported as `plane_ref`, `path#hdu=<n>` or `path#array=<key>`, the same reference form the desktop app accepts. Without either field the science plane is picked automatically.
 
-**Derived refs.** Cutouts, binned images and v1 job results are computed in memory. Their WCS comes only from their own header: a cutout keeps a shifted copy of the parent's header WCS, a binned image has no header and no WCS, a v1 job result has no header. A gWCS (JWST `_cal`, Roman ASDF) is evaluated only for refs opened from the file itself. A cutout records no source file, so `/structure` and `/hdu` refuse it; a binned ref records its parent's source file, so `/structure` lists that file and `/hdu` re-opens it.
+**Derived refs.** Cutouts, binned images, v1 job results and the products of v2 jobs (section 6) are computed in memory. Their WCS comes only from their own header: a cutout keeps a shifted copy of the parent's header WCS, a binned image has no header and no WCS, a v1 job result has no header, a v2 job product carries the header its route wrote. A gWCS (JWST `_cal`, Roman ASDF) is evaluated only for refs opened from the file itself. A cutout records no source file, so `/structure` and `/hdu` refuse it; a binned ref records its parent's source file, so `/structure` lists that file and `/hdu` re-opens it. `/planes` takes only a ref opened from a file (`open` or `hdu`) and answers `400 derived_ref_unsupported` for any derived ref, binned ones included.
 
 ## 6. Jobs
 
-Stack, drizzle and pipeline run as background jobs. The request is validated first (names, numbers, weights and the one-shot-colour check where it applies); then a slot of the server-wide job pool (`ASTROBURST_JOBS_MAX`) is taken, and if none is free the answer is `429 too_many_requests` (`job queue full (max N concurrent)`). The pipeline inspects its frames after taking the slot, so a full pool answers `429` before the frames are read, and a refused frame set releases the slot at once. An accepted job answers `202` with its `job_id`.
+Stack, drizzle and pipeline (v1) and synthetic data (`POST /v2/sessions/:sid/synth`, section 11.9) run as background jobs. The request is validated first (names, numbers, weights and the one-shot-colour check where it applies); then a slot of the server-wide job pool (`ASTROBURST_JOBS_MAX`) is taken, and if none is free the answer is `429 too_many_requests` (`job queue full (max N concurrent)`). The pipeline inspects its frames after taking the slot, so a full pool answers `429` before the frames are read, and a refused frame set releases the slot at once. An accepted job answers `202` with its `job_id`.
 
-The three routes below serve every job of the session, whichever route started it. Job records stay in the session until the session ends. An unknown job is `404 not_found`.
+The routes below serve every job of the session, whichever route started it, and each of the three v1 job routes has a v2 alias under `/v2/sessions/:sid/jobs/:jid` with the same handler. An unknown job is `404 not_found` with the message `job <jid> not found`. Job records end with their session, and a session keeps at most 256 finished jobs: when a v2 job finishes, and on every `GET .../outcome`, the server drops the oldest finished jobs of each session beyond the newest 256 (by completion time) together with their outcomes. A running job is never dropped. Without v2 jobs or outcome reads nothing is dropped.
 
 ### GET /sessions/:sid/jobs/:jid
 
@@ -183,7 +200,7 @@ Status snapshot (`server/handlers/jobs.rs`):
 { "id": "6f0c2a8e-3d1b-4f5e-9a7c-1b2d3e4f5a6b", "action": "stack", "status": "running", "pct": 42, "started_at": 1792769423186, "completed_at": null }
 ```
 
-`action` is `stack`, `drizzle` or `pipeline`. `status` is `running`, `done`, `error` or `cancelled`. `pct` stays at 99 or below until the job is `done`, which sets it to 100. Times are milliseconds since the Unix epoch.
+`action` is `stack`, `drizzle`, `pipeline` or `synth`. `status` is `running`, `done`, `error` or `cancelled`. `pct` stays at 99 or below until the job is `done`, which sets it to 100. Times are milliseconds since the Unix epoch.
 
 ### DELETE /sessions/:sid/jobs/:jid
 
@@ -209,7 +226,41 @@ data: {"type":"cancelled"}
 
 Every job ends with exactly one terminal event (`complete`, `error` or `cancelled`), after which the stream closes; progress events can be dropped when the client reads slowly, the terminal event never is. A `: keep-alive` comment is sent every 30 seconds. A worker that panics in a debug build ends with an `error` event whose message starts with `job worker panicked:`; a worker that returns without a result ends with `job worker ended without a result`.
 
-**Results.** A finished job leaves its image in the session cache under the slot names returned in the `202` body. The status route carries no result payload, no warnings and no error text; the error text is only in the SSE `error` event. Planned (G0): `GET /v2/sessions/:sid/jobs/:jid/outcome` and the three job routes under `/v2`.
+**Results.** A finished v1 job leaves its image in the session cache under the slot names returned in the `202` body. The status route carries no result payload, no warnings and no error text; for a v1 job the error text is only in the SSE `error` event. A v2 job records its result, warnings, products and error text, read with `GET /v2/sessions/:sid/jobs/:jid/outcome`.
+
+### GET /v2/sessions/:sid/jobs/:jid
+
+Same handler as `GET /sessions/:sid/jobs/:jid`, the same status snapshot (`server/science/mod.rs` registers the alias).
+
+### DELETE /v2/sessions/:sid/jobs/:jid
+
+Same handler as `DELETE /sessions/:sid/jobs/:jid`. A v2 job cancelled before it stores its products publishes nothing and records no outcome, even when its worker finishes later; a `synth` stack stops between frames.
+
+### GET /v2/sessions/:sid/jobs/:jid/stream
+
+Same handler as `GET /sessions/:sid/jobs/:jid/stream`, with the same events. The one subscription per job is shared by both paths: after a subscription on either path, `GET` on the other answers `409 conflict`. `HEAD` takes the subscription here too.
+
+### GET /v2/sessions/:sid/jobs/:jid/outcome
+
+What a v2 job produced (`server/science/outcome.rs`). Example for a finished `synth` job:
+
+```json
+{
+  "job": { "id": "6f0c2a8e-3d1b-4f5e-9a7c-1b2d3e4f5a6b", "action": "synth", "status": "done", "pct": 100, "started_at": 1792769423186, "completed_at": 1792769423911 },
+  "outcome": {
+    "result": { "width": 512, "height": 512, "star_count": 200, "frames": 1, "catalog_csv": "id,x,y,z,flux_e,flux_adu,temperature\n0,103.6182,12.0496,0.0000,4210.7795,2807.1863,8137.4\n", "manifest_csv": null },
+    "warnings": [],
+    "products": [ { "ref": "synth_0", "present": true }, { "ref": "synth_0_truth", "present": false } ],
+    "error": null
+  }
+}
+```
+
+- `job` is the status snapshot of `GET /sessions/:sid/jobs/:jid`.
+- `outcome` is `null` until the job has stored its result, after a cancel, for a v1 job (stack, drizzle, pipeline) and for a job whose worker panicked (its message is only in the SSE `error` event). A v2 job records its outcome just before its status turns `done` or `error`: a v2 job that reads `done` always has one, and for a moment an outcome can show while `status` still reads `running`.
+- `result` is the route's own result object (each route documents it). A failed job has `result: null`, no warnings, no products, and `error` set to the same text as the SSE `error` event.
+- `products` lists the refs the job published, in order. They are listed by `GET /v2/sessions/:sid/images` with `source: null` and read by every route that takes a `ref`. `present` says whether the session cache still holds an image under that name: products can be evicted by the per-session cache (section 5) or deleted.
+- An unknown job, or one dropped by the 256-job limit above, is `404 not_found` (`job <jid> not found`).
 
 ## 7. Errors
 
@@ -226,19 +277,24 @@ Every error from a handler uses one envelope (`server/error.rs`); successful res
 | 400 | `region_out_of_bounds` | A region outside the image, a cutout larger than the cache budget, pixel points that do not project onto the sky |
 | 400 | `pixel_out_of_bounds` | `/v2/sessions/:sid/pixel` outside the image |
 | 400 | `not_implemented` | `render_png: true` on `/v2/sessions/:sid/histogram` |
-| 404 | `not_found` | Session, slot, ref, job or file does not exist |
+| 400 | `derived_ref_unsupported` | `/planes` on a ref that was not opened from a file (a cutout, binned image, job product or v1 slot) |
+| 401 | `unauthorized` | Non-loopback bind: missing or wrong `Authorization: Bearer` token (section 4); the answer carries `WWW-Authenticate: Bearer` |
+| 403 | `path_outside_root` | Non-loopback bind: a `path` of `fits/open` or `/v2/open`, or a path of a v1 stack, drizzle or pipeline body, that resolves outside every path root; any bind: a `dir` of `/v2/fs`, or the source file of a ref given to `/planes`, outside every root; on Windows also a path that names another machine or a device (section 4) |
+| 404 | `not_found` | Session, slot, ref, job, folder or file does not exist |
 | 409 | `conflict` | Second SSE subscriber for a job |
+| 421 | `host_not_allowed` | Non-loopback bind: missing or foreign `Host` header (section 4) |
 | 429 | `too_many_requests` | Job pool full |
 | 503 | `service_unavailable` | Session cap reached |
+| 503 | `guard_unconfigured` | Non-loopback bind without `ASTROBURST_TOKEN` (section 4) |
 | 500 | `internal_error` | Unexpected failure; the message carries the error chain |
 
 `hint` appears only where a handler sets one: with `region_out_of_bounds`, `pixel_out_of_bounds` and `not_implemented`; usually with `wcs_required` (not when the image's WCS has a degenerate pixel scale); and with some `bad_request` answers of the v2 routes (an unknown sky frame, stretch, colormap or scale algorithm, a bin `method` other than `mean`, a bin `factor` larger than the image, and out-of-range parameters such as `density`, `bins`, `range`, `box` or `sigma_clip`). Treat `hint` as optional.
 
-Requests rejected before a handler runs get the framework's own plain-text answer, not the envelope: a body larger than 2 MiB (2,097,152 bytes, axum's default limit; the router sets no other) (`413`), a body that is not valid JSON (`400`), a missing `Content-Type: application/json` (`415`), JSON of the wrong shape, such as a string where a number is expected, a negative number for an unsigned field or an unknown region `type` (`422`), a malformed query string (`400`), an unknown path (`404`, empty body) and a wrong method (`405`, empty body). Clients should handle both forms.
+The guard's refusals (`401`, `403`, `421` and `503 guard_unconfigured`, section 4) come before the handler too, and they use the envelope. Other requests rejected before a handler runs get the framework's own plain-text answer, not the envelope: a body larger than 2 MiB (2,097,152 bytes, axum's default limit; the router sets no other) (`413`), a body that is not valid JSON (`400`), a missing `Content-Type: application/json` (`415`), JSON of the wrong shape, such as a string where a number is expected, a negative number for an unsigned field or an unknown region `type` (`422`), a malformed query string (`400`), an unknown path (`404`, empty body) and a wrong method (`405`, empty body). Clients should handle both forms.
 
 ## 8. Route index
 
-33 method and path pairs (`server/router.rs`).
+43 method and path pairs (`server/router.rs` and the science router it merges, `server/science/mod.rs`). `GET /v2/capabilities` lists the same pairs in the same order.
 
 | # | Method | Path | Answer | Section |
 |---|---|---|---|---|
@@ -275,8 +331,18 @@ Requests rejected before a handler runs get the framework's own plain-text answe
 | 31 | POST | [`/v2/sessions/:sid/stats`](#post-v2sessionssidstats) | JSON | 11.6 |
 | 32 | POST | [`/v2/sessions/:sid/histogram`](#post-v2sessionssidhistogram) | JSON | 11.6 |
 | 33 | POST | [`/v2/sessions/:sid/render`](#post-v2sessionssidrender) | PNG | 11.7 |
+| 34 | GET | [`/v2/sessions/:sid/jobs/:jid`](#get-v2sessionssidjobsjid) | JSON | 6 |
+| 35 | DELETE | [`/v2/sessions/:sid/jobs/:jid`](#delete-v2sessionssidjobsjid) | JSON | 6 |
+| 36 | GET | [`/v2/sessions/:sid/jobs/:jid/stream`](#get-v2sessionssidjobsjidstream) | SSE | 6 |
+| 37 | GET | [`/v2/sessions/:sid/jobs/:jid/outcome`](#get-v2sessionssidjobsjidoutcome) | JSON | 6 |
+| 38 | GET | [`/v2/sessions/:sid/planes`](#get-v2sessionssidplanes) | JSON | 11.3 |
+| 39 | DELETE | [`/v2/sessions/:sid/images/:ref`](#delete-v2sessionssidimagesref) | 204 | 11.2 |
+| 40 | GET | [`/v2/sessions/:sid/images/:ref/fits`](#get-v2sessionssidimagesreffits) | FITS | 11.2 |
+| 41 | GET | [`/v2/fs`](#get-v2fs) | JSON | 11.8 |
+| 42 | GET | [`/v2/capabilities`](#get-v2capabilities) | JSON | 9 |
+| 43 | POST | [`/v2/sessions/:sid/synth`](#post-v2sessionssidsynth) | 202 job | 11.9 |
 
-## 9. Service route
+## 9. Service routes
 
 ### GET /health
 
@@ -287,6 +353,26 @@ No session needed (`server/router.rs`).
 ```
 
 `sessions_total` counts every session created since start.
+
+### GET /v2/capabilities
+
+What this server offers (`server/science/capabilities.rs`). No session needed.
+
+```json
+{
+  "version": "0.7.6",
+  "features": { "mast": true, "astrometry_net": true, "vizier": true, "asdf_full": true },
+  "limits": { "session_max": 8, "session_ttl_seconds": 900, "jobs_max": 4, "cache_max_entries": 32, "cache_max_bytes": 2147483648 },
+  "routes": [ { "method": "GET", "path": "/health" }, { "method": "POST", "path": "/sessions" } ],
+  "mast_token": { "present": false }
+}
+```
+
+- `features` are the Cargo features the binary was built with (section 2).
+- `limits` are the values in force of `ASTROBURST_SESSION_MAX`, `ASTROBURST_SESSION_TTL`, `ASTROBURST_JOBS_MAX`, `ASTROBURST_CACHE_MAX_ENTRIES` and `ASTROBURST_CACHE_MAX_BYTES` (section 3).
+- `routes` lists every method and path pair of the route index (section 8), in its order; a test checks the list against the router.
+- `mast_token` is present only in a build with `mast`. It says whether `ASTROBURST_MAST_TOKEN` is set; the token itself is never returned. Whether MAST accepts it is not checked yet.
+- The offline catalogue status is not reported: no route reads a catalogue yet.
 
 ## 10. v1 routes
 
@@ -314,7 +400,7 @@ Loads a FITS or ASDF file from the server's file system into the session cache (
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `path` | string | required | Path on the server: `.fits`, `.fit`, `.fts`, their `.gz` forms or `.asdf`; a `.zip` opens its first supported image |
+| `path` | string | required | Path on the server: `.fits`, `.fit`, `.fts`, their `.gz` forms or `.asdf`; a `.zip` opens its first supported image. On a non-loopback bind it must resolve inside a path root, else `403 path_outside_root` (section 4) |
 | `slot` | string | the path | Cache key; opening an existing slot again reloads it |
 
 `200`:
@@ -381,7 +467,7 @@ Render a pixel crop.
 
 ### 10.4 Stacking and pipeline
 
-These three routes start a job (section 6) and answer `202`. Their inputs are FITS files on the server (`.gz` accepted, `path#hdu=<n>` selects an extension); ASDF and ZIP inputs are not read by the job routes. Their results are stored in the session cache without a FITS header and without the per-frame alignment report; the planned v2 routes of group G6 return both.
+These three routes start a job (section 6) and answer `202`. Their inputs are FITS files on the server (`.gz` accepted, `path#hdu=<n>` selects an extension); ASDF and ZIP inputs are not read by the job routes. On a non-loopback bind every path of the body must resolve inside a path root; one path outside answers `403 path_outside_root` before any other field is checked (section 4). Their results are stored in the session cache without a FITS header and without the per-frame alignment report; the planned v2 routes of group G6 return both.
 
 #### POST /sessions/:sid/stacking/stack
 
@@ -523,7 +609,7 @@ Opens a plane of a file as a new ref and makes it active (`server/v2/images.rs`)
 
 | Field | Default | Notes |
 |---|---|---|
-| `path` | required | FITS (also `.gz`) or ASDF on the server; a `.zip` opens its first supported image |
+| `path` | required | FITS (also `.gz`) or ASDF on the server; a `.zip` opens its first supported image. On a non-loopback bind it must resolve inside a path root, else `403 path_outside_root` (section 4) |
 | `hdu` | auto | FITS extension index; exclusive with `array` |
 | `array` | auto | ASDF array key, for example `roman.dq`; exclusive with `hdu` |
 | `name` | `img_N` | Ref name; an existing ref of that name is replaced |
@@ -567,9 +653,23 @@ Lists the refs v2 knows about, sorted by name (`server/v2/images.rs`).
 }
 ```
 
+#### DELETE /v2/sessions/:sid/images/:ref
+
+Frees one image of the session (`server/science/images.rs`): its cache entry and its v2 metadata, and the active ref when it was this one, so the session then has no active ref. Any cache key can be freed, a v1 slot included (percent-encode a `/` in the name). `204`, no body; `404 not_found` (`image ref <ref> not found in session`) when the session holds no image of that name. A deleted job product reports `present: false` in its job's outcome.
+
+#### GET /v2/sessions/:sid/images/:ref/fits
+
+Downloads a ref as a FITS file (`server/science/images.rs`): `Content-Type: application/fits`, `Content-Length`, and `Content-Disposition: attachment; filename="<name>.fits"`. The name is built from the ref: every character other than an ASCII letter, a digit or `-` becomes `_`, a run of `_` becomes one, `_` at either end is dropped, the result is cut to 64 characters, and an empty result becomes `plane` (ref `a__b` downloads as `a_b.fits`). Float pixels are the 32-bit floats the session holds, written with `BITPIX = -32`, so the file reads back bit for bit, NaN and negative zero included.
+
+- A ref opened from a file whose plane has ERR or DQ companions (the planes `pixel` reports, section 11.6) downloads as a multi-extension file: an empty primary HDU, then `SCI` (the ref's pixels and header), `ERR` and `DQ` (the companion planes and their headers), each with `EXTVER = 1`. DQ keeps its integer values: unsigned 32-bit (`BITPIX = 32`, `BZERO = 2147483648`) or signed as in the source. The companions are read from the ref's source file into the session cache, as `pixel` does.
+- A DQ plane opened by itself downloads as an empty primary HDU and one `DQ` extension (`EXTVER = 1`) with the plane's header and its integer values, written as in the multi-extension case, so every flag bit is kept (DQ 2147483649 stays 2147483649).
+- Any other ref (a plane without companions, an ERR plane opened by itself, a derived ref, a v1 slot) downloads as one image HDU with the ref's header when it has one. That file also gets `PROGRAM = 'AstroBurst <version>'`, unless the header names a `PROGRAM`, and one `HISTORY Processed with AstroBurst <version>` card.
+
+The layout cards of the stored header (`BITPIX`, `NAXISn`, `BZERO`, `BSCALE` and the like) are written anew for the new file. Each extension of a multi-extension download gets its own `EXTNAME` and `EXTVER`; a one-HDU download keeps the `EXTNAME` and `EXTVER` of the ref's header, when it has them, in its primary header as they were. The file is written to a temporary file that is deleted once the download ends. `404 not_found` for an unknown ref.
+
 ### 11.3 Inspection
 
-The three routes take the query parameter `ref` (alias `image`), defaulting to the active ref.
+The four routes take the query parameter `ref` (alias `image`), defaulting to the active ref.
 
 #### GET /v2/sessions/:sid/structure
 
@@ -587,7 +687,31 @@ HDU list of the ref's source FITS file (`server/v2/inspect.rs`). Example: `GET /
 }
 ```
 
-`shape` is in numpy order (rows first) and lists at most three axes. `dtype` is `uint8`, `int16`, `int32`, `int64`, `float32`, `float64` or `unknown`. FITS only: a ref opened from an ASDF file is `400`, and so is a ref with no source file (a cutout, a v1 slot or a name v2 does not know).
+`shape` is in numpy order (rows first) and lists at most three axes. `dtype` is `uint8`, `int16`, `int32`, `int64`, `float32`, `float64` or `unknown`. FITS only: a ref opened from an ASDF file is `400`, and so is a ref with no source file (a cutout, a v1 slot or a name v2 does not know). `GET /v2/sessions/:sid/planes` lists ASDF arrays too.
+
+#### GET /v2/sessions/:sid/planes
+
+Every HDU of the FITS file, or every array of the ASDF file, that holds the ref's plane (`server/science/inspect.rs`), as the engine's plane list (`list_planes`, the one the desktop's extension list reads) reports them. Example: `GET /v2/sessions/<sid>/planes?ref=f444w`.
+
+```json
+{
+  "ref": "f444w",
+  "format": "fits",
+  "count": 4,
+  "planes": [
+    { "index": 0, "extname": "PRIMARY", "extver": null, "naxis": 0, "shape": [], "bitpix": 8, "has_data": false, "plane_ref": "/data/jw02739/..._i2d.fits#hdu=0", "is_dq": false, "is_err": false },
+    { "index": 1, "extname": "SCI", "extver": 1, "naxis": 2, "shape": [4177, 7065], "bitpix": -32, "has_data": true, "plane_ref": "/data/jw02739/..._i2d.fits#hdu=1", "is_dq": false, "is_err": false },
+    { "index": 2, "extname": "ERR", "extver": 1, "naxis": 2, "shape": [4177, 7065], "bitpix": -32, "has_data": true, "plane_ref": "/data/jw02739/..._i2d.fits#hdu=2", "is_dq": false, "is_err": true },
+    { "index": 3, "extname": "DQ", "extver": 1, "naxis": 2, "shape": [4177, 7065], "bitpix": 32, "has_data": true, "plane_ref": "/data/jw02739/..._i2d.fits#hdu=3", "is_dq": true, "is_err": false }
+  ]
+}
+```
+
+- `format` is `fits` or `asdf`. For an ASDF file, `extname` is the array's dotted key and `plane_ref` uses `#array=<key>`; the list is the engine's, so a Roman file also lists its `roman` group key next to `roman.data` and `roman.dq`.
+- `plane_ref` opens that plane with `POST /v2/sessions/:sid/open` (`path` and `hdu` or `array`) or anywhere the desktop accepts a reference.
+- `is_dq` and `is_err` follow the names the engine treats as DQ and ERR planes, in any case: `DQ` or `MASK`, or a key whose last dotted part is `dq`; `ERR`, or a key whose last dotted part is `err`.
+- `shape` is in numpy order and lists at most four axes. `bitpix` is the FITS `BITPIX`; for an ASDF array it is the `BITPIX` of its data type, the same for a signed and an unsigned type, so no `dtype` is derived from it.
+- The ref must be opened from a file (`open` or `hdu`): any derived ref is `400 derived_ref_unsupported`, and a source file outside every path root is `403 path_outside_root`, on any bind (section 4). A source file deleted since it was opened is `404`.
 
 #### GET /v2/sessions/:sid/header
 
@@ -726,7 +850,7 @@ Cuts a region into a new ref that becomes active (`server/v2/cutout.rs`).
 | `preserve_wcs` | `true` | Keep the parent header with `CRPIX` shifted and `LTV1`/`LTV2` recorded; `false` gives an empty header and no WCS |
 | `mask_outside` | `false` | With a shape region, pixels outside the shape become NaN |
 
-The response is the image description of `open` (with `hdu` and `array` `null` and `plane_ref` equal to the ref name) plus `fraction_on_image`, `region` (`{x, y, width, height}` and, for a shape, `shape`), `ltv1` and `ltv2`. A pixel box may run past the edges or lie wholly outside: pixels outside the parent are NaN (a cutout wholly outside reports `fraction_on_image: 0` and `valid_count: 0`) and `clip` is not used. A sky box wholly outside the image, or whose centre does not project, is `400 region_out_of_bounds`; a cutout larger than `ASTROBURST_CACHE_MAX_BYTES` is `400 region_out_of_bounds`; a sky region without WCS is `400 wcs_required`. The cutout is in memory only: the science cutout file with ERR and DQ planes is desktop-only today.
+The response is the image description of `open` (with `hdu` and `array` `null` and `plane_ref` equal to the ref name) plus `fraction_on_image`, `region` (`{x, y, width, height}` and, for a shape, `shape`), `ltv1` and `ltv2`. A pixel box may run past the edges or lie wholly outside: pixels outside the parent are NaN (a cutout wholly outside reports `fraction_on_image: 0` and `valid_count: 0`) and `clip` is not used. A sky box wholly outside the image, or whose centre does not project, is `400 region_out_of_bounds`; a cutout larger than `ASTROBURST_CACHE_MAX_BYTES` is `400 region_out_of_bounds`; a sky region without WCS is `400 wcs_required`. The cutout is in memory only; `GET /v2/sessions/:sid/images/:ref/fits` downloads its pixels and header as one image HDU, while the science cutout file with ERR and DQ planes is desktop-only today.
 
 #### POST /v2/sessions/:sid/bin
 
@@ -882,6 +1006,72 @@ The PNG comes with an `X-Render-Resolved` header holding the parameters actually
 
 `png_scale_arcsec_per_px` is `null` without a WCS; `notes` explains a degenerate symmetric range or a symmetric range under a non-linear stretch.
 
+### 11.8 Files
+
+#### GET /v2/fs
+
+Lists one folder under the path roots, not recursively (`server/science/fs.rs`). Query parameters: `dir` (default: `ASTROBURST_SERVER_ROOT`) and `glob`. Example: `GET /v2/fs?dir=/data/m16&glob=*.fits`.
+
+```json
+{
+  "dir": "/data/m16",
+  "count": 3,
+  "truncated": false,
+  "entries": [
+    { "name": "656nmos.fits", "kind": "fits", "bytes": 10535040, "modified_ms": 1792769423186 },
+    { "name": "night2", "kind": "dir", "bytes": null, "modified_ms": 1792769400000 },
+    { "name": "roman_wfi.asdf", "kind": "asdf", "bytes": 67239424, "modified_ms": 1792769411000 }
+  ]
+}
+```
+
+- `dir` is the folder actually listed, with links and `..` resolved (on Windows in the `\\?\C:\...` form); join it with an entry's `name` to get a path for `open`.
+- `kind` comes from the name: `dir`; `fits` for `.fits`, `.fit`, `.fts`, `.fz` and `.fits.gz`, `.fit.gz`, `.fts.gz`; `asdf` for `.asdf`; anything else is `other`, `.zip` included. Case is ignored.
+- `bytes` is the file size (`null` for a folder); `modified_ms` is the last change in milliseconds since the Unix epoch, `null` when the file system has none. Links are not followed: a link is reported as itself (never `dir`, with the link's own size and time) and its `kind` comes from its name; list the folder it points to by that folder's own path.
+- `glob` filters files by name, with `*` (any run of characters) and `?` (one character), in any case; folders are always listed. Names that start with `.`, and names that are not valid UTF-8, are left out.
+- Entries are sorted by name (byte order). A listing stops at 5000 entries, with `truncated: true`.
+- A `dir` that resolves outside every path root is `403 path_outside_root` on any bind (section 4); a missing folder is `404 not_found`; a file is `400 bad_request`.
+
+### 11.9 Synthetic data
+
+#### POST /v2/sessions/:sid/synth
+
+Renders a seeded synthetic star field, or a stack of dithered frames of it, as refs with the truth catalogue in the job's outcome (`server/science/synth.rs`), through the same `core::synth::pipeline` the desktop's Synthetic Generator uses: the same `config` gives the same pixels and catalogue, bit for bit. It runs as a job (section 6) and answers `202 {"job_id": "...", "status": "running"}`.
+
+```json
+{
+  "config": {
+    "field": { "width": 512, "height": 512, "n_stars": 200, "flux_min": 2000.0, "flux_max": 500000.0, "seed": 42 },
+    "field_type": "Uniform",
+    "psf_type": { "Gaussian": { "fwhm": 3.0 } },
+    "noise": { "gain": 1.5, "readout_noise": 8.0, "sky_background": 200.0, "dark_current": 0.05, "exposure_time": 300.0, "bias_level": 1000.0, "seed": 1001 },
+    "apply_vignette": false,
+    "vignette_strength": 0.3,
+    "n_frames": 1
+  },
+  "stack": false,
+  "save_ground_truth": true
+}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `config` | required | The Synthetic Generator's settings, in the form the desktop sends them. `field_type` is `"Uniform"`, `{"KingCluster": {"core_radius", "tidal_radius"}}` or `{"ExponentialDisk": {"scale_length", "inclination_deg"}}`; `psf_type` is `{"Gaussian": {"fwhm"}}`, `{"Moffat": {"fwhm", "beta"}}` or `{"Airy": {"lambda_over_d"}}`; `field.seed` places the stars and `noise.seed` (optional) changes the noise. Optional: `cadence_seconds` (default `exposure_time` + 10), `frame_variation` (`enabled`, `dither_px`, `fwhm_jitter`, `sky_jitter`, `transparency_jitter`, `cosmic_rays_per_megapixel`; used by a stack of more than one frame) |
+| `stack` | `false` | `false`: one frame, `n_frames` is ignored. `true`: `n_frames` frames, the first undithered |
+| `name` | `synth_N` | The ref of the frame; with `stack`, the prefix of the frame refs |
+| `save_ground_truth` | `false` | Also publish the noise-free star image, in the units of the frames, as `<name>_truth`. Nothing is written to disk |
+
+Products: one frame is `<name>`; a stack is `<name>_0000`, `<name>_0001`, ... (four digits, as the desktop names its files); then `<name>_truth` when asked. Each carries the desktop's header cards: `EXPTIME`, `GAIN`, `EGAIN`, `RDNOISE`, `BUNIT = 'ADU'`, `DATE-OBS`, `MJD-OBS`, `SYNSEED`, `SYNFIELD`, `SYNPSF` and `SYNFWHM`, plus `SYNFRAME`, `SYNDX`, `SYNDY` and `SYNOFFS` on stack frames, and `SYNTHGT` on the ground truth. The outcome's `result`:
+
+```json
+{ "width": 512, "height": 512, "star_count": 200, "frames": 1, "catalog_csv": "id,x,y,z,flux_e,flux_adu,temperature\n0,103.6182,12.0496,0.0000,4210.7795,2807.1863,8137.4\n", "manifest_csv": null }
+```
+
+- `catalog_csv` is the truth catalogue, one row per star after the header row: `x` and `y` in 0-based pixels of the undithered frame, the flux in electrons and in the ADU of the frames (`flux_e / gain`), the temperature in kelvin.
+- `manifest_csv` is the per-frame table of a stack (`frame,dx,dy,fwhm_factor,sky_factor,transparency,n_cosmic_rays,date_obs`; a star of frame `i` sits at its catalogue position plus `dx`, `dy`); `null` for one frame.
+- Refused with `400 bad_request` before a job slot is taken: a `config` the desktop refuses (the message names the field, for example `Field size 0x512 is outside 1..16384 pixels`), a stack over the desktop's pixel budget (2^30 pixels in all), and products that do not fit one session cache, more images than `ASTROBURST_CACHE_MAX_ENTRIES` or more bytes (4 per pixel) than `ASTROBURST_CACHE_MAX_BYTES`, with that variable in `hint`. The engine's frame-count check (1 to 1024 frames) runs inside the job, so a stack of 0 frames ends the job in `error`.
+- A stack stops between frames when the job is cancelled. Generating a frame replaces any ref of the same name, and adding the products can evict older refs from the session cache.
+
 ## 12. Region specifications
 
 Used by `cutout`, `stats`, `histogram` and `render` (`server/v2/region.rs`). The form is chosen by `type`.
@@ -924,10 +1114,8 @@ Radii, widths and heights must be positive, `r_inner` at least 0 and below `r_ou
 
 ## 13. Planned routes
 
-Not implemented yet; paths and bodies may change. Most planned routes call the engine function the desktop command already uses, so a route and the desktop return the same numbers, and their bodies use the desktop command's argument names. Groups in planned order:
+Not implemented yet; paths and bodies may change. Most planned routes call the engine function the desktop command already uses, so a route and the desktop return the same numbers, and their bodies use the desktop command's argument names. The foundation routes (G0: job outcome, v2 job routes, planes, ref delete and FITS download, file listing, capabilities), the G0 guard (token, `Host` allowlist and path roots for every route that takes a file path, section 4) and the synthetic data route (G9) are in place (sections 6, 9 and 11). Groups in planned order:
 
-- **G0 Foundations:** `GET /v2/sessions/:sid/jobs/:jid/outcome` (result, warnings, error text and product refs); the three job routes under `/v2/sessions/:sid/jobs/:jid`; `GET /v2/sessions/:sid/planes` (FITS HDUs and ASDF arrays alike); `DELETE /v2/sessions/:sid/images/:ref`; `GET /v2/sessions/:sid/images/:ref/fits`; `GET /v2/fs`; `GET /v2/capabilities`; a bearer token on non-loopback binds, a `Host` allowlist, path roots and cancellable progress for every job.
-- **G9 Validation data:** `POST /v2/sessions/:sid/synth`, synthetic star fields and stacks with a truth catalogue, deterministic by seed.
 - **G1 Image measurement and photometry:** photometry (single, batch and gain model), star detection, empirical PSF, region statistics with a background annulus, radial, line and surface-brightness profiles, contours, pixel table, DQ flag table, batch noise evaluation, FFT power spectrum; `exclude_dq` on `/stats` and `/histogram`.
 - **G2 Astrometry, WCS and catalogues:** Gaia DR3 cone search, cross-match and CSV; observation geometry; DS9 `.reg` import and export; pointing overlap; plate solving of one frame or a list with the desktop's offline catalogue tiers; the image centre and field of view on `/wcs`, `frame` on `/wcs/sky2pix`, `position_angle_deg` on `/wcs/separation`.
 - **G3 Spectroscopy and cubes:** cube description, channel, spaxel and region spectra, collapse, moments, line-fit maps, position-velocity diagrams, line measurement, spectral axis, barycentric correction, JWST x1d and 1D FITS spectra.

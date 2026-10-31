@@ -32,21 +32,6 @@ pub struct HeaderQuery {
     pub keys: Option<String>,
 }
 
-async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
-    match explicit {
-        Some(r) => Ok(r),
-        None => session
-            .v2
-            .active_ref
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::BadRequest("no active image in this session; open a file first".into())
-            }),
-    }
-}
-
 fn cached_header(session: &Session, image_ref: &str) -> Result<HduHeader> {
     let entry = session
         .cache
@@ -110,7 +95,7 @@ pub async fn structure(
     SessionExtractor(session): SessionExtractor,
     Query(q): Query<RefQuery>,
 ) -> Result<Json<Value>> {
-    let target = target_ref(&session, q.r#ref).await?;
+    let target = session.target_ref(q.r#ref).await?;
     let source = session
         .v2
         .meta
@@ -163,7 +148,7 @@ pub async fn header(
     SessionExtractor(session): SessionExtractor,
     Query(q): Query<HeaderQuery>,
 ) -> Result<Json<Value>> {
-    let target = target_ref(&session, q.r#ref).await?;
+    let target = session.target_ref(q.r#ref).await?;
     let hdr = cached_header(&session, &target)?;
 
     let ordered: Vec<(String, String)> = if !hdr.cards.is_empty() {
@@ -202,7 +187,7 @@ pub async fn wcs(
     SessionExtractor(session): SessionExtractor,
     Query(q): Query<RefQuery>,
 ) -> Result<Json<Value>> {
-    let target = target_ref(&session, q.r#ref).await?;
+    let target = session.target_ref(q.r#ref).await?;
 
     let entry = session
         .cache

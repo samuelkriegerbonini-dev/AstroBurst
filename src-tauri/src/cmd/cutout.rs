@@ -13,7 +13,7 @@ use crate::core::astrometry::wcs::{header_has_sip, WcsTransform, SIP_RESIDUAL_KE
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::imaging::cutout::{
     cut_int_plane, cut_plane, fraction_on_image, padding_plane, rect_from_region, reported_ltv, resolve_cutout_rect,
-    shift_header, CutoutRect, CutoutRequest,
+    shift_header, CutoutRect, CutoutRequest, RegionRect,
 };
 use crate::core::imaging::dq_flags::DqTable;
 use crate::core::imaging::region::{RegionShape, RegionSystem};
@@ -74,13 +74,16 @@ pub(crate) fn resolve_target_path(
     output_dir: Option<&str>,
     rect: &CutoutRect,
 ) -> Result<String> {
-    let file_name = cutout_file_name(&output_stem(path), rect);
+    resolve_output_target(path, output_path, output_dir, &cutout_file_name(&output_stem(path), rect))
+}
+
+pub(crate) fn resolve_output_target(path: &str, output_path: &str, output_dir: Option<&str>, file_name: &str) -> Result<String> {
     let requested = output_path.trim();
     let target = if requested.is_empty() {
         let dir = output_dir
             .map(str::trim)
             .filter(|d| !d.is_empty())
-            .context("no output path or output directory given for the cutout")?;
+            .context("no output path or output directory given")?;
         std::fs::create_dir_all(dir).with_context(|| format!("Failed to create output directory: {dir}"))?;
         format!("{}/{}", dir.trim_end_matches(['/', '\\']), file_name)
     } else if Path::new(requested).is_dir() {
@@ -139,12 +142,38 @@ pub(crate) fn export_cutout(
     include_dq: bool,
     sky: bool,
 ) -> Result<CutoutExport> {
+    let system = if sky { RegionSystem::Icrs } else { RegionSystem::Image };
+    export_resolved(path, output_path, output_dir, include_err, include_dq, |dims, wcs| {
+        rect_from_region(region, system, wcs, dims).map_err(|e| anyhow!(e))
+    })
+}
+
+pub(crate) fn export_cutout_rect(
+    path: &str,
+    output_path: &str,
+    output_dir: Option<&str>,
+    rect: CutoutRect,
+    include_err: bool,
+    include_dq: bool,
+) -> Result<CutoutExport> {
+    export_resolved(path, output_path, output_dir, include_err, include_dq, |_, _| {
+        Ok(RegionRect { rect, rotated_box_used_bounds: false })
+    })
+}
+
+fn export_resolved(
+    path: &str,
+    output_path: &str,
+    output_dir: Option<&str>,
+    include_err: bool,
+    include_dq: bool,
+    resolve: impl FnOnce((usize, usize), Option<&WcsTransform>) -> Result<RegionRect>,
+) -> Result<CutoutExport> {
     let started = Instant::now();
     let entry = load_cached_full(path)?;
     let (img_h, img_w) = entry.arr().dim();
     let wcs = entry.header().and_then(|h| load_wcs(path, h).ok());
-    let system = if sky { RegionSystem::Icrs } else { RegionSystem::Image };
-    let region_rect = rect_from_region(region, system, wcs.as_ref(), (img_w, img_h)).map_err(|e| anyhow!(e))?;
+    let region_rect = resolve((img_w, img_h), wcs.as_ref())?;
     let budget_request = CutoutRequest::Pixel {
         x0: region_rect.rect.x0,
         y0: region_rect.rect.y0,

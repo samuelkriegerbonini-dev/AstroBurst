@@ -4,11 +4,13 @@ use rayon::prelude::*;
 use crate::core::analysis::star_detection::detect_stars;
 use crate::core::astrometry::wcs::{WcsKind, WcsTransform};
 use crate::core::imaging::resample::{box_reduce, compute_wcs_updates};
-use crate::core::imaging::sampling::bicubic_sample;
+use crate::core::imaging::sampling::{bicubic_sample, bilinear_sample};
 use crate::math::exact_median_f64;
+use crate::math::polygon::{Point, SmallPolygon};
 use crate::types::header::HduHeader;
 
 pub const MAP_STEP_PX: usize = 8;
+pub const MAP_TOLERANCE_PX: f64 = 1e-3;
 pub const REF_TIE_TOLERANCE: f64 = 0.005;
 pub const PREFILTER_MIN_RATIO: f64 = 1.5;
 const RESIDUAL_MIN_STARS: usize = 4;
@@ -29,18 +31,20 @@ pub struct ReprojectReport {
     pub wcs_kind: WcsKind,
 }
 
-struct CoarseMap {
+pub(crate) struct CoarseMap {
+    origin: (f64, f64),
+    step: f64,
     nodes_x: usize,
     nodes_y: usize,
     sx: Vec<f64>,
     sy: Vec<f64>,
 }
 
-fn node_count(len: usize) -> usize {
+fn node_count(len: usize, step: usize) -> usize {
     if len == 0 {
         1
     } else {
-        (len - 1).div_ceil(MAP_STEP_PX) + 1
+        (len - 1).div_ceil(step) + 1
     }
 }
 
@@ -53,26 +57,78 @@ fn weighted(value: f64, weight: f64) -> f64 {
     }
 }
 
+fn mapped(target_wcs: &WcsTransform, reference_wcs: &WcsTransform, points: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let sky: Vec<(f64, f64)> = reference_wcs
+        .pixel_to_world_batch(points)
+        .into_iter()
+        .map(|c| (c.ra, c.dec))
+        .collect();
+    target_wcs.world_to_pixel_batch(&sky)
+}
+
 impl CoarseMap {
     fn build(target_wcs: &WcsTransform, reference_wcs: &WcsTransform, out_rows: usize, out_cols: usize) -> CoarseMap {
-        let nodes_x = node_count(out_cols);
-        let nodes_y = node_count(out_rows);
-        let nodes: Vec<(f64, f64)> = (0..nodes_y)
-            .flat_map(|j| (0..nodes_x).map(move |i| ((i * MAP_STEP_PX) as f64, (j * MAP_STEP_PX) as f64)))
-            .collect();
-        let sky: Vec<(f64, f64)> = reference_wcs
-            .pixel_to_world_batch(&nodes)
-            .into_iter()
-            .map(|c| (c.ra, c.dec))
-            .collect();
-        let (sx, sy) = target_wcs.world_to_pixel_batch(&sky).into_iter().unzip();
-        CoarseMap { nodes_x, nodes_y, sx, sy }
+        Self::build_at(target_wcs, reference_wcs, (0.0, 0.0), out_rows, out_cols, MAP_STEP_PX)
     }
 
-    fn sample(&self, x: f64, y: f64) -> (f64, f64) {
-        let step = MAP_STEP_PX as f64;
-        let gx = x / step;
-        let gy = y / step;
+    fn build_at(
+        target_wcs: &WcsTransform,
+        reference_wcs: &WcsTransform,
+        origin: (f64, f64),
+        rows: usize,
+        cols: usize,
+        step: usize,
+    ) -> CoarseMap {
+        let nodes_x = node_count(cols, step);
+        let nodes_y = node_count(rows, step);
+        let nodes: Vec<(f64, f64)> = (0..nodes_y)
+            .flat_map(|j| (0..nodes_x).map(move |i| (origin.0 + (i * step) as f64, origin.1 + (j * step) as f64)))
+            .collect();
+        let (sx, sy) = mapped(target_wcs, reference_wcs, &nodes).into_iter().unzip();
+        CoarseMap { origin, step: step as f64, nodes_x, nodes_y, sx, sy }
+    }
+
+    pub(crate) fn within(
+        target_wcs: &WcsTransform,
+        reference_wcs: &WcsTransform,
+        origin: (f64, f64),
+        rows: usize,
+        cols: usize,
+        tolerance_px: f64,
+    ) -> CoarseMap {
+        let mut step = MAP_STEP_PX;
+        loop {
+            let map = Self::build_at(target_wcs, reference_wcs, origin, rows, cols, step);
+            if step == 1 || map.midpoint_error(target_wcs, reference_wcs) <= tolerance_px {
+                return map;
+            }
+            step /= 2;
+        }
+    }
+
+    fn midpoint_error(&self, target_wcs: &WcsTransform, reference_wcs: &WcsTransform) -> f64 {
+        let (origin, step) = (self.origin, self.step);
+        let midpoints: Vec<(f64, f64)> = (0..self.nodes_y.saturating_sub(1))
+            .flat_map(|j| {
+                (0..self.nodes_x.saturating_sub(1))
+                    .map(move |i| (origin.0 + (i as f64 + 0.5) * step, origin.1 + (j as f64 + 0.5) * step))
+            })
+            .collect();
+        midpoints
+            .iter()
+            .zip(mapped(target_wcs, reference_wcs, &midpoints))
+            .map(|(&(x, y), (ex, ey))| {
+                let (ix, iy) = self.sample(x, y);
+                (ix - ex).hypot(iy - ey)
+            })
+            .filter(|error| error.is_finite())
+            .fold(0.0, f64::max)
+    }
+
+    pub(crate) fn sample(&self, x: f64, y: f64) -> (f64, f64) {
+        let step = self.step;
+        let gx = (x - self.origin.0) / step;
+        let gy = (y - self.origin.1) / step;
         let i0 = (gx.floor().max(0.0) as usize).min(self.nodes_x - 1);
         let j0 = (gy.floor().max(0.0) as usize).min(self.nodes_y - 1);
         let i1 = (i0 + 1).min(self.nodes_x - 1);
@@ -94,12 +150,27 @@ impl CoarseMap {
     }
 }
 
-pub fn reproject_to_grid(
+fn grid_report(target_wcs: &WcsTransform, reference_wcs: &WcsTransform, finite: usize, total: usize) -> ReprojectReport {
+    ReprojectReport {
+        scale_ratio: target_wcs.pixel_scale_arcsec() / reference_wcs.pixel_scale_arcsec(),
+        rotation_deg: relative_rotation_deg(target_wcs, reference_wcs),
+        area_ratio: pixel_area_ratio(reference_wcs, target_wcs),
+        coverage: if total == 0 { 0.0 } else { finite as f64 / total as f64 },
+        prefilter_k: 1,
+        wcs_kind: target_wcs.kind(),
+    }
+}
+
+type Sampler = fn(&[f32], usize, usize, f64, f64) -> f32;
+
+fn resample_through(
     target: &Array2<f32>,
     target_wcs: &WcsTransform,
     reference_wcs: &WcsTransform,
     out_rows: usize,
     out_cols: usize,
+    build_map: impl FnOnce() -> CoarseMap,
+    sampler: Sampler,
 ) -> (Array2<f32>, ReprojectReport) {
     let (rows, cols) = target.dim();
     let total = out_rows * out_cols;
@@ -108,7 +179,7 @@ pub fn reproject_to_grid(
     if rows > 0 && cols > 0 && total > 0 {
         let standard = target.as_standard_layout();
         let slice = standard.as_slice().expect("standard layout is contiguous");
-        let map = CoarseMap::build(target_wcs, reference_wcs, out_rows, out_cols);
+        let map = build_map();
         let max_x = cols as f64 - 0.5;
         let max_y = rows as f64 - 0.5;
         finite = buf
@@ -119,7 +190,7 @@ pub fn reproject_to_grid(
                 for (x, px) in row.iter_mut().enumerate() {
                     let (sx, sy) = map.sample(x as f64, y as f64);
                     if sx >= -0.5 && sy >= -0.5 && sx <= max_x && sy <= max_y {
-                        let v = bicubic_sample(slice, rows, cols, sy, sx);
+                        let v = sampler(slice, rows, cols, sy, sx);
                         *px = v;
                         if v.is_finite() {
                             count += 1;
@@ -131,16 +202,123 @@ pub fn reproject_to_grid(
             .sum();
     }
     let image = Array2::from_shape_vec((out_rows, out_cols), buf).expect("buffer matches the output shape");
-    let coverage = if total == 0 { 0.0 } else { finite as f64 / total as f64 };
-    let report = ReprojectReport {
-        scale_ratio: target_wcs.pixel_scale_arcsec() / reference_wcs.pixel_scale_arcsec(),
-        rotation_deg: relative_rotation_deg(target_wcs, reference_wcs),
-        area_ratio: pixel_area_ratio(reference_wcs, target_wcs),
-        coverage,
-        prefilter_k: 1,
-        wcs_kind: target_wcs.kind(),
+    (image, grid_report(target_wcs, reference_wcs, finite, total))
+}
+
+pub fn reproject_to_grid(
+    target: &Array2<f32>,
+    target_wcs: &WcsTransform,
+    reference_wcs: &WcsTransform,
+    out_rows: usize,
+    out_cols: usize,
+) -> (Array2<f32>, ReprojectReport) {
+    let build_map = || CoarseMap::build(target_wcs, reference_wcs, out_rows, out_cols);
+    resample_through(target, target_wcs, reference_wcs, out_rows, out_cols, build_map, bicubic_sample)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interpolation {
+    Bilinear,
+    Bicubic,
+}
+
+pub fn reproject_to_grid_with(
+    target: &Array2<f32>,
+    target_wcs: &WcsTransform,
+    reference_wcs: &WcsTransform,
+    out_rows: usize,
+    out_cols: usize,
+    interpolation: Interpolation,
+) -> (Array2<f32>, ReprojectReport) {
+    let build_map = || CoarseMap::within(target_wcs, reference_wcs, (0.0, 0.0), out_rows, out_cols, MAP_TOLERANCE_PX);
+    let sampler: Sampler = match interpolation {
+        Interpolation::Bilinear => bilinear_sample,
+        Interpolation::Bicubic => bicubic_sample,
     };
-    (image, report)
+    resample_through(target, target_wcs, reference_wcs, out_rows, out_cols, build_map, sampler)
+}
+
+fn overlap_mean(slice: &[f32], rows: usize, cols: usize, quad: &[Point; 4]) -> Option<(f32, f32)> {
+    if quad.iter().any(|p| !p[0].is_finite() || !p[1].is_finite()) {
+        return None;
+    }
+    let polygon = SmallPolygon::new(quad);
+    let full = polygon.area();
+    if !(full > 0.0) {
+        return None;
+    }
+    let span = |axis: usize| {
+        let low = quad.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min);
+        let high = quad.iter().map(|p| p[axis]).fold(f64::NEG_INFINITY, f64::max);
+        ((low + 0.5).floor() as i64, (high + 0.5).ceil() as i64 - 1)
+    };
+    let ((x0, x1), (y0, y1)) = (span(0), span(1));
+    let (x0, x1) = (x0.max(0), x1.min(cols as i64 - 1));
+    let (y0, y1) = (y0.max(0), y1.min(rows as i64 - 1));
+    let (mut weighted, mut covered) = (0.0f64, 0.0f64);
+    for iy in y0..=y1 {
+        let band = polygon.clip_band(1, iy as f64 - 0.5, iy as f64 + 0.5);
+        if band.is_empty() {
+            continue;
+        }
+        for ix in x0..=x1 {
+            let piece = band.clip_band(0, ix as f64 - 0.5, ix as f64 + 0.5).area();
+            let value = slice[iy as usize * cols + ix as usize];
+            if piece > 0.0 && value.is_finite() {
+                weighted += piece * value as f64;
+                covered += piece;
+            }
+        }
+    }
+    (covered > 0.0).then(|| ((weighted / covered) as f32, (covered / full) as f32))
+}
+
+pub fn reproject_exact_to_grid(
+    target: &Array2<f32>,
+    target_wcs: &WcsTransform,
+    reference_wcs: &WcsTransform,
+    out_rows: usize,
+    out_cols: usize,
+) -> (Array2<f32>, Array2<f32>, ReprojectReport) {
+    let (rows, cols) = target.dim();
+    let total = out_rows * out_cols;
+    let mut values = vec![f32::NAN; total];
+    let mut footprint = vec![0.0f32; total];
+    let mut finite = 0usize;
+    if rows > 0 && cols > 0 && total > 0 {
+        let standard = target.as_standard_layout();
+        let slice = standard.as_slice().expect("standard layout is contiguous");
+        let corners = CoarseMap::within(target_wcs, reference_wcs, (-0.5, -0.5), out_rows + 1, out_cols + 1, MAP_TOLERANCE_PX);
+        let corner_row = |j: usize| -> Vec<Point> {
+            (0..=out_cols)
+                .map(|i| {
+                    let (x, y) = corners.sample(i as f64 - 0.5, j as f64 - 0.5);
+                    [x, y]
+                })
+                .collect()
+        };
+        finite = values
+            .par_chunks_mut(out_cols)
+            .zip(footprint.par_chunks_mut(out_cols))
+            .enumerate()
+            .map(|(y, (row, cover))| {
+                let (lower, upper) = (corner_row(y), corner_row(y + 1));
+                let mut count = 0usize;
+                for x in 0..out_cols {
+                    let quad = [lower[x], lower[x + 1], upper[x + 1], upper[x]];
+                    if let Some((value, fraction)) = overlap_mean(slice, rows, cols, &quad) {
+                        row[x] = value;
+                        cover[x] = fraction;
+                        count += usize::from(value.is_finite());
+                    }
+                }
+                count
+            })
+            .sum();
+    }
+    let image = Array2::from_shape_vec((out_rows, out_cols), values).expect("buffer matches the output shape");
+    let footprint = Array2::from_shape_vec((out_rows, out_cols), footprint).expect("buffer matches the output shape");
+    (image, footprint, grid_report(target_wcs, reference_wcs, finite, total))
 }
 
 pub fn prefilter_coarse_target(

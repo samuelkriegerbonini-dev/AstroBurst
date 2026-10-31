@@ -3,7 +3,8 @@ use serde_json::json;
 
 use super::cards::{stack_output_cards, StackCards};
 use super::combine::{output_name, reference_header, ABPROC_STACKED};
-use crate::cmd::common::{derived_output_header, render_named_and_save, resolve_output_dir, OutputValues};
+use crate::cmd::common::{render_named_and_save, resolve_output_dir, OutputValues};
+use crate::service::common::derived_output_header;
 use crate::core::imaging::calibration_pipeline::{
     lights_with_dq_planes, run_batch_pipeline, validate_cosmetic_config, BatchPipelineConfig,
     BatchPipelineResult, BatchPipelineStats, BatchStackConfig, CalibrationMasters, ChannelInput,

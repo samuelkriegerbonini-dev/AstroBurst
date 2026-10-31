@@ -3,7 +3,7 @@ import { FileText, X } from "lucide-react";
 import { getPreviewUrl } from "../../infrastructure/tauri";
 import { fileKeyOf, useFileContext, useCubeContext, useRenderActions } from "../../context/PreviewContext";
 import { ANALYSIS_SECTION, CUBE_TOOL_EMPTY_TITLE } from "../../utils/analysisSections";
-import { frameRecordLabel } from "../../utils/cubeNavigation";
+import { filterFrameLabel, frameRecordLabel } from "../../utils/cubeNavigation";
 import { cubePanelGates, formatRampFrameLabel } from "../../utils/rampLabels";
 import { useSpectrum } from "../../hooks/useSpectrumStore";
 import { openSpectrumCsv, spectrumCsvStore, useOpenSpectrumCsv, useSpectrum1dDoc } from "../../hooks/useSpectrum1dStore";
@@ -12,6 +12,7 @@ import { fileBaseName } from "../../utils/spectrumExport";
 import type { CubeResult } from "./SpectroscopyPanel";
 import TabSpinner from "./TabSpinner";
 import CubeSampleOffers from "./CubeSampleOffers";
+import SedPanel from "./SedPanel";
 
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
 const PvPanel = lazy(() => import("./PvPanel"));
@@ -53,6 +54,8 @@ function CubeTool() {
     [publishProcessed, fileKey, filePath],
   );
 
+  const photometricPlanes = cubeDims?.photometric_planes?.length ? cubeDims.photometric_planes : null;
+
   const frameSeqRef = useRef(0);
   const handleFramePreview = useCallback(
     async (outputPath: string, frameIndex: number, fitsPath?: string) => {
@@ -60,9 +63,11 @@ function CubeTool() {
       try {
         const url = await getPreviewUrl(outputPath);
         if (frameSeqRef.current !== seq) return;
+        const frames = cubeDims?.frames ?? 0;
         const label = ramp
           ? formatRampFrameLabel(frameIndex, ramp)
-          : frameRecordLabel(frameIndex, cubeDims?.frames ?? 0, cubeDims?.spectral_axis ?? null);
+          : (filterFrameLabel(frameIndex, frames, cubeDims?.photometric_planes) ??
+            frameRecordLabel(frameIndex, frames, cubeDims?.spectral_axis ?? null));
         const dimensions: [number, number] | null = fitsPath && cubeDims ? [cubeDims.width, cubeDims.height] : null;
         publishCube({ label, previewUrl: url, fitsPath: fitsPath ?? null, dimensions, frameIndex });
       } catch (e) {
@@ -155,6 +160,9 @@ function CubeTool() {
               publishGate={cubeGates.spectrum}
             />
           </section>
+        )}
+        {content === "cube" && isCube && photometricPlanes && (
+          <SedPanel planes={photometricPlanes} bunit={cubeDims?.bunit ?? null} source={spec} />
         )}
         {content === "cube" && isCube && !ramp && (
           <section id={ANALYSIS_SECTION.pv.id}>

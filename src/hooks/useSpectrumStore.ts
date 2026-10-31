@@ -4,6 +4,7 @@ import type { SpectrumSource } from "../shared/types/spectral";
 
 export interface SpectrumState {
   spectrum: number[];
+  err: number[] | null;
   wavelengths: number[] | null;
   coord: { x: number; y: number } | null;
   loading: boolean;
@@ -18,6 +19,7 @@ export interface SpectrumState {
 
 const EMPTY: SpectrumState = {
   spectrum: [],
+  err: null,
   wavelengths: null,
   coord: null,
   loading: false,
@@ -58,6 +60,7 @@ export class SpectrumStore {
     this.emit({
       ...this.value,
       spectrum: result.values ?? [],
+      err: result.err ?? null,
       wavelengths: result.wavelengths?.length ? result.wavelengths : null,
       coord: { x: result.x, y: result.y },
       loading: false,

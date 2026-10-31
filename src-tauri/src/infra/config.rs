@@ -1,9 +1,11 @@
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use crate::types::config::AppConfig;
+use crate::core::metadata::filter_wavelengths::FilterRegistry;
+use crate::types::config::{AppConfig, CustomFilter};
 use crate::types::constants::DEFAULT_ASTROMETRY_API_URL;
 
 pub const FIELD_ASTROMETRY_API_URL: &str = "astrometry_api_url";
@@ -11,6 +13,7 @@ pub const FIELD_MAST_TOKEN_TRANSPORT: &str = "mast_token_transport";
 pub const MAST_TOKEN_TRANSPORTS: [&str; 2] = ["header", "cookie"];
 pub const FIELD_DATA_DIR_OVERRIDE: &str = "data_dir_override";
 pub const FIELD_MAST_QUOTA_GB: &str = "mast_quota_gb";
+pub const FIELD_FILTER_DATASETS: &str = "filter_datasets";
 const API_KEY_SERVICE_MAX_LEN: usize = 32;
 const API_KEY_FILE_SUFFIX: &str = "_api_key.txt";
 
@@ -241,8 +244,17 @@ fn validated_value(
     match field {
         FIELD_DATA_DIR_OVERRIDE => validated_data_dir(value, reserved),
         FIELD_MAST_QUOTA_GB => validated_mast_quota(value),
+        FIELD_FILTER_DATASETS => validated_filter_datasets(value),
         _ => Ok(value),
     }
+}
+
+fn validated_filter_datasets(value: serde_json::Value) -> Result<serde_json::Value> {
+    let datasets: BTreeMap<String, BTreeMap<String, CustomFilter>> = serde_json::from_value(value.clone()).map_err(|error| {
+        anyhow!("{FIELD_FILTER_DATASETS} must map dataset names to filters with lambda, instrument and group: {error}")
+    })?;
+    FilterRegistry::with_datasets(&datasets).map_err(|error| anyhow!("{FIELD_FILTER_DATASETS} is refused: {error}"))?;
+    Ok(value)
 }
 
 fn validated_update(
@@ -737,6 +749,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn filter_datasets_in_the_config_extend_the_registry_and_bad_ones_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(&dir);
+        let euclid = json!({"EUCLID": {"VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}}});
+        let updated = update_config_field_at(&path, "filter_datasets", euclid.clone()).unwrap();
+        let registry = crate::core::metadata::filter_wavelengths::FilterRegistry::with_datasets(&updated.filter_datasets).unwrap();
+        assert_eq!(registry.entry("euclid", "vis").map(|found| found.pivot_angstrom), Some(7180.0));
+        assert_eq!(stored_json(&path)["filter_datasets"], euclid);
+        for refused in [
+            json!({"JWST": {"VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}}}),
+            json!({"EUCLID": {"VIS": {"lambda": "7180", "instrument": "VIS", "group": "optical"}}}),
+            json!({"EUCLID": {"H": {"lambda": 17700.0, "instrument": "NISP", "group": "nir", "aliases": ["vis"]}, "VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}}}),
+            json!(["EUCLID"]),
+        ] {
+            let err = update_config_field_at(&path, "filter_datasets", refused.clone()).unwrap_err().to_string();
+            assert!(err.contains("filter_datasets"), "{refused}: {err}");
+            assert_eq!(stored_json(&path)["filter_datasets"], euclid, "{refused} replaced the stored datasets");
+        }
+        assert!(load_config_at(&path).unwrap().filter_datasets.contains_key("EUCLID"));
     }
 
     #[test]

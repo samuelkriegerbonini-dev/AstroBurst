@@ -277,6 +277,9 @@ const VALUE_START: usize = 10;
 const FIXED_VALUE_END: usize = 30;
 const MIN_QUOTED_LEN: usize = 9;
 const MAX_STRING_CONTENT: usize = 68;
+const LONG_STRING_CHUNK: usize = 67;
+const HIERARCH_PREFIX: &str = "HIERARCH ";
+const CONTINUE_HEAD: &str = "CONTINUE  ";
 
 fn is_fits_number(text: &str, allow_zero_padding: bool) -> bool {
     let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
@@ -362,7 +365,98 @@ fn push_source_card(out: &mut Vec<u8>, key: &str, value: &str, source: &HduHeade
     push_typed_card(out, key, value, source_value_type(source, key));
 }
 
+fn literal_of(value: &str, value_type: ValueType) -> Option<String> {
+    match value_type {
+        ValueType::Text => None,
+        ValueType::Inferred => fits_literal_text(value, false),
+        ValueType::Literal => fits_literal_text(value, true),
+    }
+}
+
+fn push_padded_card(out: &mut Vec<u8>, text: &str) {
+    let bytes = truncate_str_bytes(text, CARD_LEN);
+    out.extend_from_slice(bytes);
+    out.resize(out.len() + CARD_LEN - bytes.len(), b' ');
+}
+
+fn is_hierarch_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| (b' '..=b'~').contains(&b) && b != b'=')
+}
+
+fn hierarch_card_text(name: &str, value: &str, value_type: ValueType) -> Option<String> {
+    if !is_hierarch_name(name) {
+        return None;
+    }
+    let field = literal_of(value, value_type).unwrap_or_else(|| String::from_utf8_lossy(&quoted_fits_string(value)).into_owned());
+    let mut text = format!("{HIERARCH_PREFIX}{name} = {field}");
+    if text.len() == CARD_LEN + 1 {
+        text = format!("{HIERARCH_PREFIX}{name}= {field}");
+    }
+    (text.len() <= CARD_LEN).then_some(text)
+}
+
+fn push_hierarch_card(out: &mut Vec<u8>, name: &str, value: &str, value_type: ValueType) {
+    if let Some(text) = hierarch_card_text(name, value, value_type) {
+        push_padded_card(out, &text);
+    }
+}
+
+pub(crate) fn hierarch_card_fits(header: &HduHeader, key: &str) -> bool {
+    match (key.strip_prefix(HIERARCH_PREFIX), header.get(key)) {
+        (Some(name), Some(value)) => hierarch_card_text(name.trim(), value, source_value_type(header, key)).is_some(),
+        _ => true,
+    }
+}
+
+fn escaped_len(value: &str) -> usize {
+    value.len() + value.matches('\'').count()
+}
+
+fn splits_a_doubled_quote(text: &str, start: usize, end: usize) -> bool {
+    let run = text.as_bytes()[start..end].iter().rev().take_while(|&&b| b == b'\'').count();
+    end < text.len() && run % 2 == 1
+}
+
+fn long_string_groups(text: &str, width: usize) -> Vec<&str> {
+    let len = text.len();
+    let blanks: Vec<usize> = text.bytes().enumerate().filter(|&(_, b)| b == b' ').map(|(i, _)| i).chain([len]).collect();
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < len {
+        let limit = start + width;
+        let after_blank = blanks.iter().take_while(|&&b| b < limit).last().map(|&b| (b + 1).min(len));
+        let mut end = match after_blank {
+            Some(end) if end > start => end,
+            _ => limit.min(len),
+        };
+        while end > start + 1 && (!text.is_char_boundary(end) || splits_a_doubled_quote(text, start, end)) {
+            end -= 1;
+        }
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        groups.push(&text[start..end]);
+        start = end;
+    }
+    groups
+}
+
+fn push_long_string_cards(out: &mut Vec<u8>, key: &str, value: &str) {
+    let escaped = value.replace('\'', "''");
+    let groups = long_string_groups(&escaped, LONG_STRING_CHUNK);
+    let last = groups.len().saturating_sub(1);
+    for (i, group) in groups.iter().enumerate() {
+        let head = if i == 0 { format!("{key:<8}= ") } else { CONTINUE_HEAD.to_string() };
+        let close = if i == last { "'" } else { "&'" };
+        push_padded_card(out, &format!("{head}'{group}{close}"));
+    }
+}
+
 fn push_typed_card(out: &mut Vec<u8>, key: &str, value: &str, value_type: ValueType) {
+    if let Some(name) = key.strip_prefix(HIERARCH_PREFIX) {
+        push_hierarch_card(out, name.trim(), value, value_type);
+        return;
+    }
     if !is_fits_keyword(key) {
         return;
     }
@@ -377,11 +471,11 @@ fn push_typed_card(out: &mut Vec<u8>, key: &str, value: &str, value_type: ValueT
     }
 
     card[8] = b'=';
-    let literal = match value_type {
-        ValueType::Text => None,
-        ValueType::Inferred => fits_literal_text(value, false),
-        ValueType::Literal => fits_literal_text(value, true),
-    };
+    let literal = literal_of(value, value_type);
+    if literal.is_none() && escaped_len(value) > MAX_STRING_CONTENT {
+        push_long_string_cards(out, key, value);
+        return;
+    }
     let field: Vec<u8> = match literal {
         Some(number) if number.len() <= FIXED_VALUE_END - VALUE_START => {
             let mut right_justified = vec![b' '; FIXED_VALUE_END - VALUE_START - number.len()];
@@ -1011,6 +1105,26 @@ pub enum HduData<'a> {
     F32(&'a Array2<f32>),
     I32(&'a Array2<i32>),
     U32(&'a Array2<u32>),
+    F32Cube(&'a [Array2<f32>]),
+    I32Cube(&'a [Array2<i32>]),
+    U32Cube(&'a [Array2<u32>]),
+}
+
+pub enum TableValues<'a> {
+    Text(&'a [String]),
+    F64(&'a [f64]),
+}
+
+pub struct TableColumn<'a> {
+    pub name: &'a str,
+    pub unit: Option<&'a str>,
+    pub values: TableValues<'a>,
+}
+
+pub struct BinTableHdu<'a> {
+    pub columns: &'a [TableColumn<'a>],
+    pub extname: &'a str,
+    pub extver: u32,
 }
 
 pub struct ImageHdu<'a> {
@@ -1043,23 +1157,62 @@ fn u32_to_bzero_shifted_be(val: u32) -> [u8; 4] {
     ((val as i64 - U32_BZERO) as i32).to_be_bytes()
 }
 
+struct ImageLayout {
+    rows: usize,
+    cols: usize,
+    planes: Option<usize>,
+    bitpix: &'static str,
+}
+
+fn cube_dims<T>(planes: &[Array2<T>]) -> Result<(usize, usize)> {
+    let first = planes.first().context("a cube needs at least one plane")?;
+    let dims = first.dim();
+    if let Some(other) = planes.iter().find(|plane| plane.dim() != dims) {
+        bail!("cube planes differ in size: {}x{} and {}x{}", dims.1, dims.0, other.dim().1, other.dim().0);
+    }
+    Ok(dims)
+}
+
+fn image_layout(data: &HduData) -> Result<ImageLayout> {
+    let plane = |(rows, cols): (usize, usize), bitpix| ImageLayout { rows, cols, planes: None, bitpix };
+    let cube = |planes: usize, (rows, cols): (usize, usize), bitpix| ImageLayout { rows, cols, planes: Some(planes), bitpix };
+    Ok(match data {
+        HduData::F32(a) => plane(a.dim(), "-32"),
+        HduData::I32(a) => plane(a.dim(), "32"),
+        HduData::U32(a) => plane(a.dim(), "32"),
+        HduData::F32Cube(p) => cube(p.len(), cube_dims(p)?, "-32"),
+        HduData::I32Cube(p) => cube(p.len(), cube_dims(p)?, "32"),
+        HduData::U32Cube(p) => cube(p.len(), cube_dims(p)?, "32"),
+    })
+}
+
+fn write_plane<T: Copy>(writer: &mut BufWriter<File>, plane: &Array2<T>, encode: impl Fn(T) -> [u8; 4]) -> Result<usize> {
+    let owned = plane.as_standard_layout();
+    let slice = owned.as_slice().context("image plane not contiguous")?;
+    write_be_slice(writer, slice, encode)?;
+    Ok(slice.len() * 4)
+}
+
+fn write_planes<T: Copy>(writer: &mut BufWriter<File>, planes: &[Array2<T>], encode: impl Fn(T) -> [u8; 4] + Copy) -> Result<usize> {
+    planes.iter().map(|plane| write_plane(writer, plane, encode)).sum()
+}
+
 fn write_image_extension(writer: &mut BufWriter<File>, hdu: &ImageHdu) -> Result<()> {
-    let (rows, cols, bitpix) = match hdu.data {
-        HduData::F32(a) => (a.dim().0, a.dim().1, "-32"),
-        HduData::I32(a) => (a.dim().0, a.dim().1, "32"),
-        HduData::U32(a) => (a.dim().0, a.dim().1, "32"),
-    };
+    let layout = image_layout(&hdu.data)?;
     let mut buf: Vec<u8> = Vec::new();
     push_header_card(&mut buf, "XTENSION", "IMAGE");
-    push_header_card(&mut buf, "BITPIX", bitpix);
-    push_header_card(&mut buf, "NAXIS", "2");
-    push_header_card(&mut buf, "NAXIS1", &cols.to_string());
-    push_header_card(&mut buf, "NAXIS2", &rows.to_string());
+    push_header_card(&mut buf, "BITPIX", layout.bitpix);
+    push_header_card(&mut buf, "NAXIS", if layout.planes.is_some() { "3" } else { "2" });
+    push_header_card(&mut buf, "NAXIS1", &layout.cols.to_string());
+    push_header_card(&mut buf, "NAXIS2", &layout.rows.to_string());
+    if let Some(planes) = layout.planes {
+        push_header_card(&mut buf, "NAXIS3", &planes.to_string());
+    }
     push_header_card(&mut buf, "PCOUNT", "0");
     push_header_card(&mut buf, "GCOUNT", "1");
     push_header_card(&mut buf, "EXTNAME", hdu.extname);
     push_header_card(&mut buf, "EXTVER", &hdu.extver.to_string());
-    if matches!(hdu.data, HduData::U32(_)) {
+    if matches!(hdu.data, HduData::U32(_) | HduData::U32Cube(_)) {
         push_header_card(&mut buf, "BZERO", &U32_BZERO.to_string());
         push_header_card(&mut buf, "BSCALE", "1");
     }
@@ -1075,35 +1228,166 @@ fn write_image_extension(writer: &mut BufWriter<File>, hdu: &ImageHdu) -> Result
     write_header_end(writer, buf.len())?;
 
     let data_bytes = match hdu.data {
-        HduData::F32(a) => {
-            let owned = a.as_standard_layout();
-            let slice = owned.as_slice().context("F32 plane not contiguous")?;
-            write_f32_slice_as_be(writer, slice)?;
-            slice.len() * 4
-        }
-        HduData::I32(a) => {
-            let owned = a.as_standard_layout();
-            let slice = owned.as_slice().context("I32 plane not contiguous")?;
-            write_be_slice(writer, slice, i32::to_be_bytes)?;
-            slice.len() * 4
-        }
-        HduData::U32(a) => {
-            let owned = a.as_standard_layout();
-            let slice = owned.as_slice().context("U32 plane not contiguous")?;
-            write_be_slice(writer, slice, u32_to_bzero_shifted_be)?;
-            slice.len() * 4
-        }
+        HduData::F32(a) => write_plane(writer, a, f32::to_be_bytes)?,
+        HduData::I32(a) => write_plane(writer, a, i32::to_be_bytes)?,
+        HduData::U32(a) => write_plane(writer, a, u32_to_bzero_shifted_be)?,
+        HduData::F32Cube(planes) => write_planes(writer, planes, f32::to_be_bytes)?,
+        HduData::I32Cube(planes) => write_planes(writer, planes, i32::to_be_bytes)?,
+        HduData::U32Cube(planes) => write_planes(writer, planes, u32_to_bzero_shifted_be)?,
     };
     pad_to_block(writer, data_bytes, 0u8)
 }
 
-pub fn write_mef_images(
+pub fn write_fits_cube(path: &str, planes: &[Array2<f32>], header: Option<&HduHeader>) -> Result<()> {
+    let (rows, cols) = cube_dims(planes)?;
+    let file = File::create(path).context("Failed to create FITS file")?;
+    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
+    let mut bytes = 0;
+    bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
+    bytes += write_header_card(&mut writer, "BITPIX", "-32", "32-bit float")?;
+    bytes += write_header_card(&mut writer, "NAXIS", "3", "3D cube")?;
+    bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
+    bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
+    bytes += write_header_card(&mut writer, "NAXIS3", &planes.len().to_string(), "planes")?;
+    bytes += write_header_card(&mut writer, "EXTEND", "T", "")?;
+    if let Some(hdr) = header {
+        bytes += write_extra_header_cards(&mut writer, hdr, is_layout_card)?;
+    }
+    bytes += write_provenance(&mut writer, header)?;
+    write_header_end(&mut writer, bytes)?;
+    let data_bytes = write_planes(&mut writer, planes, f32::to_be_bytes)?;
+    pad_to_block(&mut writer, data_bytes, 0u8)?;
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn write_fits_f64(path: &str, data: &Array2<f64>, header: Option<&HduHeader>) -> Result<()> {
+    write_fits_f64_with_tables(path, data, header, &[])
+}
+
+pub fn write_fits_f64_with_tables(path: &str, data: &Array2<f64>, header: Option<&HduHeader>, tables: &[BinTableHdu]) -> Result<()> {
+    for table in tables {
+        table_rows(table)?;
+    }
+    let (rows, cols) = data.dim();
+    let file = File::create(path).context("Failed to create FITS file")?;
+    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
+    let mut bytes = 0;
+    bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
+    bytes += write_header_card(&mut writer, "BITPIX", "-64", "64-bit double")?;
+    bytes += write_header_card(&mut writer, "NAXIS", "2", "2D image")?;
+    bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
+    bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
+    if !tables.is_empty() {
+        bytes += write_header_card(&mut writer, "EXTEND", "T", "")?;
+    }
+    if let Some(hdr) = header {
+        bytes += write_extra_header_cards(&mut writer, hdr, is_layout_card)?;
+    }
+    bytes += write_provenance(&mut writer, header)?;
+    write_header_end(&mut writer, bytes)?;
+    for value in data.iter() {
+        writer.write_all(&value.to_be_bytes())?;
+    }
+    pad_to_block(&mut writer, data.len() * 8, 0u8)?;
+    for table in tables {
+        write_bintable_extension(&mut writer, table)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn column_rows(column: &TableColumn) -> usize {
+    match column.values {
+        TableValues::Text(values) => values.len(),
+        TableValues::F64(values) => values.len(),
+    }
+}
+
+fn column_width(column: &TableColumn) -> usize {
+    match column.values {
+        TableValues::Text(values) => values.iter().map(String::len).max().unwrap_or(0).max(1),
+        TableValues::F64(_) => 8,
+    }
+}
+
+fn table_rows(table: &BinTableHdu) -> Result<usize> {
+    let first = table.columns.first().with_context(|| format!("table {} has no column", table.extname))?;
+    let rows = column_rows(first);
+    if let Some(other) = table.columns.iter().find(|column| column_rows(column) != rows) {
+        bail!(
+            "table {} columns differ in length: {} has {} rows, {} has {}",
+            table.extname,
+            first.name,
+            rows,
+            other.name,
+            column_rows(other)
+        );
+    }
+    Ok(rows)
+}
+
+fn write_bintable_extension(writer: &mut BufWriter<File>, table: &BinTableHdu) -> Result<()> {
+    let rows = table_rows(table)?;
+    let widths: Vec<usize> = table.columns.iter().map(column_width).collect();
+    let row_width: usize = widths.iter().sum();
+    let mut buf: Vec<u8> = Vec::new();
+    push_header_card(&mut buf, "XTENSION", "BINTABLE");
+    push_header_card(&mut buf, "BITPIX", "8");
+    push_header_card(&mut buf, "NAXIS", "2");
+    push_header_card(&mut buf, "NAXIS1", &row_width.to_string());
+    push_header_card(&mut buf, "NAXIS2", &rows.to_string());
+    push_header_card(&mut buf, "PCOUNT", "0");
+    push_header_card(&mut buf, "GCOUNT", "1");
+    push_header_card(&mut buf, "TFIELDS", &table.columns.len().to_string());
+    for (n, (column, width)) in table.columns.iter().zip(&widths).enumerate().map(|(i, c)| (i + 1, c)) {
+        let form = match column.values {
+            TableValues::Text(_) => format!("{width}A"),
+            TableValues::F64(_) => "D".to_string(),
+        };
+        push_typed_card(&mut buf, &format!("TTYPE{n}"), column.name, ValueType::Text);
+        push_typed_card(&mut buf, &format!("TFORM{n}"), &form, ValueType::Text);
+        if let Some(unit) = column.unit {
+            push_typed_card(&mut buf, &format!("TUNIT{n}"), unit, ValueType::Text);
+        }
+    }
+    push_header_card(&mut buf, "EXTNAME", table.extname);
+    push_header_card(&mut buf, "EXTVER", &table.extver.to_string());
+    writer.write_all(&buf)?;
+    write_header_end(writer, buf.len())?;
+
+    let mut row = Vec::with_capacity(row_width);
+    for r in 0..rows {
+        row.clear();
+        for (column, &width) in table.columns.iter().zip(&widths) {
+            match column.values {
+                TableValues::Text(values) => {
+                    let text = values[r].as_bytes();
+                    row.extend_from_slice(text);
+                    row.resize(row.len() + width - text.len(), b' ');
+                }
+                TableValues::F64(values) => row.extend_from_slice(&values[r].to_be_bytes()),
+            }
+        }
+        writer.write_all(&row)?;
+    }
+    pad_to_block(writer, row_width * rows, 0u8)
+}
+
+pub fn write_mef_with_tables(
     path: &str,
     primary_header: Option<&HduHeader>,
     hdus: &[ImageHdu],
+    tables: &[BinTableHdu],
 ) -> Result<()> {
     if hdus.is_empty() {
         bail!("a multi-extension FITS file needs at least one image HDU");
+    }
+    for hdu in hdus {
+        image_layout(&hdu.data).with_context(|| format!("{} extension", hdu.extname))?;
+    }
+    for table in tables {
+        table_rows(table)?;
     }
     let file = File::create(path).context("Failed to create FITS file")?;
     let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
@@ -1114,8 +1398,19 @@ pub fn write_mef_images(
     for hdu in hdus {
         write_image_extension(&mut writer, hdu)?;
     }
+    for table in tables {
+        write_bintable_extension(&mut writer, table)?;
+    }
     writer.flush().context("Failed to flush FITS file")?;
     Ok(())
+}
+
+pub fn write_mef_images(
+    path: &str,
+    primary_header: Option<&HduHeader>,
+    hdus: &[ImageHdu],
+) -> Result<()> {
+    write_mef_with_tables(path, primary_header, hdus, &[])
 }
 
 #[cfg(test)]
@@ -1204,13 +1499,11 @@ mod tests {
 
     #[test]
     fn header_card_no_panic_on_long_and_multibyte() {
+        let value = "\u{00b5} Cephei \u{00c5}\u{00c5}\u{00c5}\u{00c5} a long value beyond eighty bytes \u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5} extra tail";
         let mut buf = Vec::new();
-        push_header_card(
-            &mut buf,
-            "OBJECT",
-            "\u{00b5} Cephei \u{00c5}\u{00c5}\u{00c5}\u{00c5} a long value beyond eighty bytes \u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5}\u{00c5} extra tail",
-        );
-        assert_eq!(buf.len(), 80);
+        push_header_card(&mut buf, "OBJECT", value);
+        assert_eq!(buf.len(), 160, "the value continues on a second card");
+        assert_eq!(reparsed(&[("OBJECT", value)]).get("OBJECT"), Some(value));
     }
 
     #[test]
@@ -1768,17 +2061,19 @@ mod tests {
         assert!(card.starts_with("OBJECT  = 'Hubble''s Variable Nebula'"), "{card:?}");
 
         let long_quotes = "'".repeat(40);
-        let long_card = card_of("OBSERVER", &long_quotes);
-        assert_eq!(long_card.as_bytes()[10], b'\'');
-        assert_eq!(long_card.as_bytes()[79], b'\'');
-        assert_eq!(long_card[11..79].matches("''").count(), 34);
+        let long_cards = cards_of("OBSERVER", &long_quotes);
+        assert_eq!(long_cards.len(), 2, "{long_cards:?}");
+        assert_eq!(long_cards[0].trim_end(), format!("OBSERVER= '{}&'", "''".repeat(33)), "a doubled quote is never split");
+        assert_eq!(long_cards[1].trim_end(), format!("CONTINUE  '{}'", "''".repeat(7)));
 
         let fits = format!("{}'", "x".repeat(66));
         let fits_card = card_of("TARGNAME", &fits);
         assert!(fits_card.ends_with("x'''"), "{fits_card:?}");
         let overflows = format!("{}'", "x".repeat(67));
-        let overflow_card = card_of("TARGNAM2", &overflows);
-        assert!(overflow_card.ends_with("x' "), "a doubled quote is never split: {overflow_card:?}");
+        let overflow_cards = cards_of("TARGNAM2", &overflows);
+        assert_eq!(overflow_cards.len(), 2, "{overflow_cards:?}");
+        assert_eq!(overflow_cards[0], format!("TARGNAM2= '{}&'", "x".repeat(67)));
+        assert_eq!(overflow_cards[1].trim_end(), "CONTINUE  ''''");
 
         let back = reparsed(&[
             ("OBJECT", "Hubble's Variable Nebula"),
@@ -1789,9 +2084,245 @@ mod tests {
         ]);
         assert_eq!(back.get("OBJECT"), Some("Hubble's Variable Nebula"));
         assert_eq!(back.get("OBSERVER"), Some("O'Brien"));
-        assert_eq!(back.get("OBSERVE2"), Some("'".repeat(34).as_str()));
+        assert_eq!(back.get("OBSERVE2"), Some(long_quotes.as_str()));
         assert_eq!(back.get("TARGNAME"), Some(fits.as_str()));
-        assert_eq!(back.get("TARGNAM2"), Some("x".repeat(67).as_str()));
+        assert_eq!(back.get("TARGNAM2"), Some(overflows.as_str()));
+    }
+
+    fn cards_of(key: &str, value: &str) -> Vec<String> {
+        let mut buf = Vec::new();
+        push_header_card(&mut buf, key, value);
+        assert_eq!(buf.len() % 80, 0, "{key} = {value:?}");
+        buf.chunks(80).map(|card| String::from_utf8(card.to_vec()).unwrap()).collect()
+    }
+
+    #[test]
+    fn long_string_values_continue_like_astropy() {
+        let filters = "F070W,F090W,F115W,F140M,F150W,F162M,F182M,F200W,F210M,F250M,F277W,F300M,F335M,F356W,F360M,F410M,F430M,F444W,F460M,F480M";
+        assert_eq!(
+            cards_of("FILTERS", filters),
+            [
+                "FILTERS = 'F070W,F090W,F115W,F140M,F150W,F162M,F182M,F200W,F210M,F250M,F277W,F&'".to_string(),
+                format!("{:<80}", "CONTINUE  '300M,F335M,F356W,F360M,F410M,F430M,F444W,F460M,F480M'"),
+            ]
+        );
+        let sentence = "the quick brown fox ".repeat(5).trim_end().to_string();
+        assert_eq!(
+            cards_of("OBJECT", &sentence),
+            [
+                format!("{:<80}", "OBJECT  = 'the quick brown fox the quick brown fox the quick brown fox the &'"),
+                format!("{:<80}", "CONTINUE  'quick brown fox the quick brown fox'"),
+            ],
+            "a long value breaks after the last blank that fits, as astropy's _words_group does"
+        );
+        let edge = "y".repeat(68);
+        assert_eq!(cards_of("EDGE", &edge).len(), 1, "68 characters still fit one card");
+        let back = reparsed(&[("FILTERS", filters), ("OBJECT", &sentence), ("EDGE", &edge)]);
+        assert_eq!(back.get("FILTERS"), Some(filters));
+        assert_eq!(back.get("OBJECT"), Some(sentence.as_str()));
+        assert_eq!(back.get("EDGE"), Some(edge.as_str()));
+    }
+
+    #[test]
+    fn hierarch_cards_follow_the_astropy_layout() {
+        assert_eq!(card_of("HIERARCH DATASET10", "JWST"), format!("{:<80}", "HIERARCH DATASET10 = 'JWST    '"));
+        assert_eq!(card_of("HIERARCH ESO DET DIT", "10.0"), format!("{:<80}", "HIERARCH ESO DET DIT = 10.0"));
+        assert_eq!(
+            card_of("HIERARCH DATASET10", &"x".repeat(58)),
+            format!("HIERARCH DATASET10= '{}'", "x".repeat(58)),
+            "one character too long: astropy drops the blank before the equals sign"
+        );
+        assert!(cards_of("HIERARCH DATASET10", &"x".repeat(59)).is_empty(), "a HIERARCH card that cannot fit is left out");
+        assert!(cards_of("HIERARCH BAD=NAME", "JWST").is_empty());
+        let back = reparsed(&[("HIERARCH DATASET10", "JWST"), ("HIERARCH ESO DET DIT", "10.0"), ("FILTER10", "F444W")]);
+        assert_eq!(back.get("HIERARCH DATASET10"), Some("JWST"));
+        assert_eq!(back.get_f64("HIERARCH ESO DET DIT"), Some(10.0));
+        assert_eq!(back.get("FILTER10"), Some("F444W"));
+        let mut typed = mk_header(&[("HIERARCH ESO DET CHIP", "12")]);
+        typed.string_keys = Some(["HIERARCH ESO DET CHIP".to_string()].into_iter().collect());
+        let mut chip = Vec::new();
+        push_source_card(&mut chip, "HIERARCH ESO DET CHIP", "12", &typed);
+        assert_eq!(String::from_utf8(chip).unwrap(), format!("{:<80}", "HIERARCH ESO DET CHIP = '12      '"));
+    }
+
+    #[test]
+    fn bintable_writer_round_trips() {
+        use crate::infra::fits::table::{describe_table, find_bintable, load_bintable, ColumnValues};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("filters_table.fits");
+        let p = path.to_str().unwrap();
+        let image = smooth_test_image(3, 4);
+        let filters = vec!["F444W".to_string(), "F150W".to_string(), "u".to_string()];
+        let datasets = vec!["JWST".to_string(), "JWST".to_string(), "LSST".to_string()];
+        let kernels = vec![String::new(), "kernel_f150w_to_f444w.fits".to_string(), String::new()];
+        let pivots = vec![4.404315, 1.501186, f64::NAN];
+        let fluxconv = vec![1.0, 2.5e-7, -3.0];
+        let columns = [
+            TableColumn { name: "FILTER", unit: None, values: TableValues::Text(&filters) },
+            TableColumn { name: "DATASET", unit: None, values: TableValues::Text(&datasets) },
+            TableColumn { name: "PIVOT_UM", unit: Some("um"), values: TableValues::F64(&pivots) },
+            TableColumn { name: "FLUXCONV", unit: None, values: TableValues::F64(&fluxconv) },
+            TableColumn { name: "KERNEL", unit: None, values: TableValues::Text(&kernels) },
+        ];
+        write_mef_with_tables(
+            p,
+            Some(&mk_header(&[("TELESCOP", "JWST")])),
+            &[ImageHdu { data: HduData::F32(&image), header: None, extname: "SCI", extver: 1 }],
+            &[BinTableHdu { columns: &columns, extname: "FILTERS", extver: 1 }],
+        )
+        .unwrap();
+        assert_eq!(std::fs::metadata(p).unwrap().len() % FITS_BLOCK_SIZE as u64, 0);
+
+        let index = find_bintable(p, "FILTERS", 1).unwrap();
+        assert_eq!(index, 2);
+        let table = load_bintable(p, index).unwrap();
+        assert_eq!(table.text_column("FILTER").unwrap(), filters);
+        assert_eq!(table.text_column("dataset").unwrap(), datasets);
+        assert_eq!(table.text_column("KERNEL").unwrap(), kernels);
+        assert!(table.text_column("PIVOT_UM").is_err(), "a float column is not text");
+        assert!(table.text_column("PSF_FWHM").is_err());
+        let pivot = table.flattened_column("PIVOT_UM").unwrap();
+        assert_eq!(pivot.unit.as_deref(), Some("um"));
+        let ColumnValues::F64(values) = pivot.values else { panic!("PIVOT_UM is not a float column") };
+        assert_eq!(values[..2], pivots[..2]);
+        assert!(values[2].is_nan());
+        let ColumnValues::F64(conv) = table.flattened_column("FLUXCONV").unwrap().values else { panic!("FLUXCONV is not a float column") };
+        assert_eq!(conv, fluxconv);
+
+        let file = File::open(p).unwrap();
+        let described = describe_table(&extract_header_by_index(&file, index).unwrap(), index).unwrap();
+        assert_eq!(described.n_rows, 3);
+        let forms: Vec<&str> = described.columns.iter().map(|c| c.tform.as_str()).collect();
+        assert_eq!(forms, ["5A", "4A", "D", "D", "26A"]);
+        assert_eq!(extract_header_by_index(&file, 0).unwrap().get("TELESCOP"), Some("JWST"));
+        assert_eq!(extract_image_mmap_by_index(&file, 1).unwrap().image, image);
+
+        let ragged = [
+            TableColumn { name: "FILTER", unit: None, values: TableValues::Text(&filters) },
+            TableColumn { name: "PIVOT_UM", unit: None, values: TableValues::F64(&pivots[..2]) },
+        ];
+        let refused = dir.path().join("ragged.fits");
+        assert!(write_mef_with_tables(
+            refused.to_str().unwrap(),
+            None,
+            &[ImageHdu { data: HduData::F32(&image), header: None, extname: "SCI", extver: 1 }],
+            &[BinTableHdu { columns: &ragged, extname: "FILTERS", extver: 1 }],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cube_extensions_write_naxis3_and_read_back_plane_by_plane() {
+        use crate::infra::fits::reader::{extract_image_planes_by_index, extract_int_planes_by_index};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cube_mef.fits");
+        let p = path.to_str().unwrap();
+        let mut sci: Vec<Array2<f32>> =
+            (0..3).map(|z| Array2::from_shape_fn((4, 5), |(y, x)| (z * 100 + y * 10 + x) as f32 + 0.25)).collect();
+        sci[1][[2, 3]] = f32::NAN;
+        let dq: Vec<Array2<u32>> = (0..3).map(|z| Array2::from_shape_fn((4, 5), |(y, x)| ((z + y + x) as u32 % 4) << 30 | 5)).collect();
+        let signed: Vec<Array2<i32>> = (0..3).map(|z| Array2::from_elem((4, 5), -(z as i32) - 1)).collect();
+        let header = mk_header(&[("CTYPE3", "FILTER"), ("NAXIS3", "999"), ("BUNIT", "Jy")]);
+        write_mef_images(
+            p,
+            None,
+            &[
+                ImageHdu { data: HduData::F32Cube(&sci), header: Some(&header), extname: "SCI", extver: 1 },
+                ImageHdu { data: HduData::U32Cube(&dq), header: None, extname: "DQ", extver: 1 },
+                ImageHdu { data: HduData::I32Cube(&signed), header: None, extname: "MASK", extver: 1 },
+            ],
+        )
+        .unwrap();
+        assert_eq!(std::fs::metadata(p).unwrap().len() % FITS_BLOCK_SIZE as u64, 0);
+
+        let file = File::open(p).unwrap();
+        let exts = list_extensions(&file).unwrap();
+        assert_eq!((exts[1].naxis, exts[1].naxis1, exts[1].naxis2, exts[1].naxis3), (3, 5, 4, 3));
+        assert_eq!((exts[2].naxis3, exts[3].naxis3), (3, 3));
+        let sci_header = extract_header_by_index(&file, 1).unwrap();
+        assert_eq!((sci_header.get("CTYPE3"), sci_header.get_i64("NAXIS3")), (Some("FILTER"), Some(3)));
+        let back = extract_image_planes_by_index(&file, 1).unwrap();
+        assert_eq!(back.len(), 3);
+        for (written, read) in sci.iter().zip(&back) {
+            assert!(written.iter().zip(read.iter()).all(|(a, b)| a.to_bits() == b.to_bits()));
+        }
+        let dq_back = extract_int_planes_by_index(&file, 2).unwrap();
+        assert_eq!(dq_back.len(), 3);
+        for (written, read) in dq.iter().zip(&dq_back) {
+            assert!(!read.signed);
+            assert_eq!(&read.bits, written);
+        }
+        let signed_back = extract_int_planes_by_index(&file, 3).unwrap();
+        for (written, read) in signed.iter().zip(&signed_back) {
+            assert!(read.signed);
+            assert!(written.iter().zip(read.bits.iter()).all(|(&a, &b)| a == b as i32));
+        }
+        assert!(extract_int_planes_by_index(&file, 1).is_err(), "a float cube is not an integer cube");
+
+        let empty = dir.path().join("empty_cube.fits");
+        let no_planes: [Array2<f32>; 0] = [];
+        let refused = write_mef_images(
+            empty.to_str().unwrap(),
+            None,
+            &[ImageHdu { data: HduData::F32Cube(&no_planes), header: None, extname: "SCI", extver: 1 }],
+        );
+        assert!(refused.is_err());
+        let ragged = [Array2::<f32>::zeros((4, 5)), Array2::<f32>::zeros((5, 4))];
+        let ragged_path = dir.path().join("ragged_cube.fits");
+        let refused = write_mef_images(
+            ragged_path.to_str().unwrap(),
+            None,
+            &[ImageHdu { data: HduData::F32Cube(&ragged), header: None, extname: "SCI", extver: 1 }],
+        );
+        let message = format!("{:#}", refused.unwrap_err());
+        assert!(message.contains("SCI") && message.contains("5x4"), "{message}");
+        assert!(!ragged_path.exists(), "a refused cube writes no file");
+    }
+
+    #[test]
+    fn a_primary_cube_holds_every_plane_after_the_extend_card() {
+        use crate::infra::fits::reader::extract_image_planes_by_index;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("primary_cube.fits");
+        let p = path.to_str().unwrap();
+        let planes: Vec<Array2<f32>> = (0..4).map(|z| Array2::from_shape_fn((3, 6), |(y, x)| (z * 7 + y * 3 + x) as f32 * 0.5)).collect();
+        let header = mk_header(&[("CTYPE3", "FILTER"), ("NAXIS3", "999"), ("BITPIX", "16"), ("FILTER1", "F444W"), ("HIERARCH DATASET10", "JWST")]);
+        write_fits_cube(p, &planes, Some(&header)).unwrap();
+        let bytes = std::fs::read(p).unwrap();
+        assert_eq!(bytes.len() % FITS_BLOCK_SIZE, 0);
+        let keys = hdu_keys(&bytes);
+        assert_eq!(keys[..7], ["SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3", "EXTEND"]);
+        let parsed = parse_header_at(&bytes, 0).unwrap();
+        assert_eq!(parsed.header.get_i64("BITPIX"), Some(-32));
+        assert_eq!(parsed.header.get_i64("NAXIS3"), Some(4));
+        assert_eq!(parsed.header.get("CTYPE3"), Some("FILTER"));
+        assert_eq!(parsed.header.get("HIERARCH DATASET10"), Some("JWST"));
+        assert!(parsed.header.get("PROGRAM").unwrap().starts_with("AstroBurst"));
+        assert_eq!(extract_image_planes_by_index(&File::open(p).unwrap(), 0).unwrap(), planes);
+
+        let empty = dir.path().join("empty_primary_cube.fits");
+        assert!(write_fits_cube(empty.to_str().unwrap(), &[], None).is_err());
+        let ragged = [Array2::<f32>::zeros((3, 6)), Array2::<f32>::zeros((6, 3))];
+        assert!(write_fits_cube(empty.to_str().unwrap(), &ragged, None).is_err());
+    }
+
+    #[test]
+    fn a_float64_primary_image_keeps_every_bit() {
+        use crate::core::cubeprep::psf_io::{decode_planes_f64, image_hdus};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("psf64.fits");
+        let p = path.to_str().unwrap();
+        let data = Array2::from_shape_fn((5, 7), |(y, x)| ((y * 7 + x) as f64 + 0.1).recip() / 3.0);
+        let header = mk_header(&[("PIXSCALE", "0.04"), ("BITPIX", "-32"), ("NAXIS1", "99"), ("FILTER", "F150W")]);
+        write_fits_f64(p, &data, Some(&header)).unwrap();
+        let bytes = std::fs::read(p).unwrap();
+        assert_eq!(bytes.len() % FITS_BLOCK_SIZE, 0);
+        assert_eq!(hdu_keys(&bytes)[..5], ["SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2"]);
+        let hdus = image_hdus(&bytes, p).unwrap();
+        let parsed = &hdus[0].1;
+        assert_eq!((parsed.header.get_i64("BITPIX"), parsed.header.get_i64("NAXIS1")), (Some(-64), Some(7)));
+        assert_eq!(parsed.header.get_f64("PIXSCALE"), Some(0.04));
+        assert_eq!(decode_planes_f64(&bytes, parsed, p).unwrap(), vec![data]);
     }
 
     #[test]

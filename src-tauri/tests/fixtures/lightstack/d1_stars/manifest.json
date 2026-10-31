@@ -1,0 +1,134 @@
+{
+  "files": [
+    {
+      "bytes": 31680,
+      "path": "d1_stars_JWST_F444W.fits",
+      "sha256": "cbe2f310a942a0c29209f3ed5be7f6cacc53c13afcd6c485637ddec5c1e6a899"
+    },
+    {
+      "bytes": 377,
+      "path": "recipe_d1_stars.json",
+      "sha256": "ada461141fdc57836d1098b17396d98bf9e15028585d4fa40b8931ec98e7c936"
+    },
+    {
+      "bytes": 392,
+      "path": "stars_f444w.reg",
+      "sha256": "a334f4d533f18fcedac3e4bd98a7af973264a5f72fc7bb3404825b9d8dfb3214"
+    }
+  ],
+  "generator": "src-tauri/tests/lightstack_oracle/d1.rs",
+  "kind": "d1_star_field",
+  "manifest_version": 1,
+  "regenerate": "ASTROBURST_WRITE_LIGHTSTACK_FIXTURES=1 cargo test --test lightstack_oracle regenerate_d1_star_field_fixture -- --ignored",
+  "truth": {
+    "bunit": "Jy",
+    "dataset": "JWST",
+    "extension": "SCI",
+    "file": "d1_stars_JWST_F444W.fits",
+    "filter": "F444W",
+    "holes": [
+      {
+        "x": [
+          87,
+          89
+        ],
+        "y": [
+          59,
+          61
+        ]
+      }
+    ],
+    "left_out": {
+      "reason": "its LIGHTSTACK cutout holds the NaN hole in the background border; recenter_cutouts spreads the NaN over the whole cutout and build_empirical_psf (LIGHTSTACK 0.4.0) raises ValueError: Invalid normalization flux for star 's6': 0.0, so the region file leaves the star out as a user would",
+      "star": "s6"
+    },
+    "nan_border_px": 2,
+    "noise_stream": 17,
+    "pixel_scale_arcsec": 0.04,
+    "positions": "0-based pixel centres; the region file lists them 1-based, as DS9 physical coordinates",
+    "psf": {
+      "fwhm_arcsec": 0.145,
+      "lambda_over_d_arcsec": 0.1409143340318391,
+      "model": "airy",
+      "side": 21,
+      "subsampling": 5,
+      "truncation_arcsec": 0.4
+    },
+    "region_file": "stars_f444w.reg",
+    "seed": 20261030,
+    "shape": [
+      67,
+      96
+    ],
+    "sigma_jy": 6e-10,
+    "sky_jy": 5e-9,
+    "stars": [
+      {
+        "flux_jy": 0.00002,
+        "in_region_file": true,
+        "name": "s1",
+        "x": 18.21,
+        "y": 18.67
+      },
+      {
+        "flux_jy": 0.000011,
+        "in_region_file": true,
+        "name": "s2",
+        "x": 46.48,
+        "y": 17.86
+      },
+      {
+        "flux_jy": 0.000016,
+        "in_region_file": true,
+        "name": "s3",
+        "x": 74.73,
+        "y": 18.32
+      },
+      {
+        "flux_jy": 9e-6,
+        "in_region_file": true,
+        "name": "s4",
+        "x": 17.94,
+        "y": 46.12
+      },
+      {
+        "flux_jy": 0.00003,
+        "in_region_file": true,
+        "name": "s5",
+        "x": 46.36,
+        "y": 46.55
+      },
+      {
+        "flux_jy": 0.000013,
+        "in_region_file": false,
+        "name": "s6",
+        "x": 74.09,
+        "y": 45.71
+      }
+    ],
+    "wcs": {
+      "cd_deg": [
+        [
+          -0.000011111111111111112,
+          0.0
+        ],
+        [
+          0.0,
+          0.000011111111111111112
+        ]
+      ],
+      "crpix": [
+        48.5,
+        34.0
+      ],
+      "crval_deg": [
+        53.1625,
+        -27.7914
+      ],
+      "ctype": [
+        "RA---TAN",
+        "DEC--TAN"
+      ]
+    }
+  }
+}

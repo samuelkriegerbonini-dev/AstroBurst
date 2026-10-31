@@ -189,10 +189,14 @@ pub fn shift_header(parent: &HduHeader, rect: &CutoutRect) -> HduHeader {
 }
 
 fn pixel_extent_rect(cx: f64, cy: f64, width: f64, height: f64) -> CutoutRect {
-    let x0 = (cx - width / 2.0 - PIXEL_EDGE_TOLERANCE).ceil() as i64;
-    let x1 = (cx + width / 2.0 - PIXEL_EDGE_TOLERANCE).ceil() as i64 - 1;
-    let y0 = (cy - height / 2.0 - PIXEL_EDGE_TOLERANCE).ceil() as i64;
-    let y1 = (cy + height / 2.0 - PIXEL_EDGE_TOLERANCE).ceil() as i64 - 1;
+    pixel_bounds_rect(cx - width / 2.0, cx + width / 2.0, cy - height / 2.0, cy + height / 2.0)
+}
+
+pub fn pixel_bounds_rect(x_min: f64, x_max: f64, y_min: f64, y_max: f64) -> CutoutRect {
+    let x0 = (x_min - PIXEL_EDGE_TOLERANCE).ceil() as i64;
+    let x1 = (x_max - PIXEL_EDGE_TOLERANCE).ceil() as i64 - 1;
+    let y0 = (y_min - PIXEL_EDGE_TOLERANCE).ceil() as i64;
+    let y1 = (y_max - PIXEL_EDGE_TOLERANCE).ceil() as i64 - 1;
     CutoutRect { x0, y0, width: (x1 - x0 + 1).max(1) as usize, height: (y1 - y0 + 1).max(1) as usize }
 }
 

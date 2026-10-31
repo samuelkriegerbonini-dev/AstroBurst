@@ -8,6 +8,9 @@ import type {
   ArcsinhResult,
   MaskedStretchResult,
   SpccResult,
+  EmpiricalPsfOptions,
+  EmpiricalPsfReport,
+  PsfStarSource,
 } from "../shared/types/processing";
 import type {
   CompositeChainCall,
@@ -319,6 +322,32 @@ export function estimatePsf(
     saturationThreshold: options.saturationThreshold ?? 0.95,
     maxEllipticity: options.maxEllipticity ?? 0.3,
   });
+}
+
+export async function buildEmpiricalPsf(
+  path: string,
+  source: PsfStarSource,
+  options: {
+    recipe?: EmpiricalPsfOptions;
+    dataset?: string | null;
+    filter?: string | null;
+    pixelScaleArcsec?: number | null;
+    outputDir?: string | null;
+  } = {},
+): Promise<EmpiricalPsfReport> {
+  const report = await typedInvoke<EmpiricalPsfReport>("build_empirical_psf_cmd", {
+    path,
+    source,
+    options: options.recipe ?? null,
+    dataset: options.dataset ?? null,
+    filter: options.filter ?? null,
+    pixelScaleArcsec: options.pixelScaleArcsec ?? null,
+    outputDir: options.outputDir ?? null,
+  });
+  for (const written of [report.output_path, report.oversampled_path]) {
+    if (written) announceCommandOutputs({ output_path: written });
+  }
+  return report;
 }
 
 export function applyArcsinhStretch(path: string, outputDir?: string, factor = 50.0): Promise<ArcsinhResult> {

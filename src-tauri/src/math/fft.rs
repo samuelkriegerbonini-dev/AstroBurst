@@ -20,6 +20,8 @@ pub trait FftFloat: FftNum + PartialOrd + Send + Sync + 'static {
     fn half() -> Self;
     fn two() -> Self;
     fn pi() -> Self;
+    fn machine_epsilon() -> Self;
+    fn as_f64(self) -> f64;
 }
 
 impl FftFloat for f32 {
@@ -39,6 +41,8 @@ impl FftFloat for f32 {
     #[inline] fn half() -> Self { 0.5 }
     #[inline] fn two() -> Self { 2.0 }
     #[inline] fn pi() -> Self { std::f32::consts::PI }
+    #[inline] fn machine_epsilon() -> Self { f32::EPSILON }
+    #[inline] fn as_f64(self) -> f64 { self as f64 }
 }
 
 impl FftFloat for f64 {
@@ -58,6 +62,8 @@ impl FftFloat for f64 {
     #[inline] fn half() -> Self { 0.5 }
     #[inline] fn two() -> Self { 2.0 }
     #[inline] fn pi() -> Self { std::f64::consts::PI }
+    #[inline] fn machine_epsilon() -> Self { f64::EPSILON }
+    #[inline] fn as_f64(self) -> f64 { self }
 }
 
 #[inline]

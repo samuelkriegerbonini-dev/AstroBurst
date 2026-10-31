@@ -3,7 +3,8 @@ use std::sync::Arc;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir, save_auto_stf_preview_png, write_derived_fits, OutputValues};
+use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, output_stem, resolve_output_dir, save_auto_stf_preview_png, write_derived_fits, OutputValues};
+use crate::service::common::derived_output_header;
 use crate::cmd::compose::rescale_header_to_grid;
 use crate::cmd::processing::local_contrast::source_header;
 use crate::core::imaging::background::{extract_background_linked, neutralize_background, deband, detect_band_axis, DebandAxis, DebandConfig, BackgroundConfig};

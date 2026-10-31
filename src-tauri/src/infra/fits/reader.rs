@@ -235,13 +235,12 @@ pub fn int_pixels_to_plane(px: IntPixels, rows: usize, cols: usize) -> Result<In
     Ok(IntPlane { bits, signed })
 }
 
-pub fn extract_int_plane_by_index(file: &File, hdu_index: usize) -> Result<IntPlane> {
-    let mmap = read_file_bytes(file)?;
-    let hdus = scan_all_hdus(&mmap)?;
-    if hdu_index >= hdus.len() {
-        bail!("HDU index {} out of range (file has {} HDUs)", hdu_index, hdus.len());
-    }
-    let hdu = &hdus[hdu_index];
+fn indexed_hdu(hdus: &[ScannedHdu], hdu_index: usize) -> Result<&ScannedHdu> {
+    hdus.get(hdu_index)
+        .with_context(|| format!("HDU index {} out of range (file has {} HDUs)", hdu_index, hdus.len()))
+}
+
+fn int_planes_of(mmap: &[u8], hdu: &ScannedHdu, hdu_index: usize, single: bool) -> Result<Vec<IntPlane>> {
     if hdu.is_compressed {
         bail!("HDU {} is a compressed image; lossless integer read is not supported", hdu_index);
     }
@@ -253,12 +252,13 @@ pub fn extract_int_plane_by_index(file: &File, hdu_index: usize) -> Result<IntPl
         bail!("HDU {} is not a 2D image (NAXIS={})", hdu_index, naxis);
     }
     let planes = declared_plane_count(h, naxis);
-    if planes != 1 {
+    if single && planes != 1 {
         bail!(
             "HDU {} is a {}D cube of {} planes, not a 2D integer plane",
             hdu_index, naxis, planes
         );
     }
+    let planes = usize::try_from(planes).with_context(|| format!("HDU {} declares {} planes", hdu_index, planes))?;
     let bitpix = h.get_i64("BITPIX").context("Missing BITPIX")?;
     if !matches!(bitpix, 8 | 16 | 32) {
         bail!("not an integer plane (BITPIX={})", bitpix);
@@ -269,17 +269,48 @@ pub fn extract_int_plane_by_index(file: &File, hdu_index: usize) -> Result<IntPl
         .checked_mul(naxis2)
         .and_then(|v| v.checked_mul(bytes_per_pixel))
         .context("Image size overflow")?;
-    let data_end = hdu
-        .info
-        .data_start
-        .checked_add(slice_bytes)
+    let data_end = slice_bytes
+        .checked_mul(planes)
+        .and_then(|bytes| hdu.info.data_start.checked_add(bytes))
         .context("Image data end overflow")?;
     if data_end > mmap.len() {
         bail!("Image data exceeds file size");
     }
     let (bzero, bscale) = scaling(h)?;
-    let px = decode_pixels_int(&mmap[hdu.info.data_start..data_end], bitpix, bscale, bzero)?;
-    int_pixels_to_plane(px, naxis2, naxis1)
+    (0..planes)
+        .map(|z| {
+            let start = hdu.info.data_start + z * slice_bytes;
+            let px = decode_pixels_int(&mmap[start..start + slice_bytes], bitpix, bscale, bzero)?;
+            int_pixels_to_plane(px, naxis2, naxis1)
+        })
+        .collect()
+}
+
+pub fn extract_int_planes_by_index(file: &File, hdu_index: usize) -> Result<Vec<IntPlane>> {
+    let mmap = read_file_bytes(file)?;
+    let hdus = scan_all_hdus(&mmap)?;
+    int_planes_of(&mmap, indexed_hdu(&hdus, hdu_index)?, hdu_index, false)
+}
+
+pub fn extract_image_planes_by_index(file: &File, hdu_index: usize) -> Result<Vec<Array2<f32>>> {
+    let mmap = read_file_bytes(file)?;
+    let hdus = scan_all_hdus(&mmap)?;
+    let hdu = indexed_hdu(&hdus, hdu_index)?;
+    if !hdu.info.has_data {
+        bail!("HDU {} holds no image planes: {}", hdu_index, hdu_usability_reason(hdu));
+    }
+    if hdu.is_compressed {
+        return compressed_guard::decode_planes(&mmap, &hdu.header, hdu.info.data_start);
+    }
+    let planes = usize::try_from(hdu.plane_count).with_context(|| format!("HDU {} declares {} planes", hdu_index, hdu.plane_count))?;
+    (0..planes).map(|z| decode_hdu_plane(&mmap, hdu, z)).collect()
+}
+
+pub fn extract_int_plane_by_index(file: &File, hdu_index: usize) -> Result<IntPlane> {
+    let mmap = read_file_bytes(file)?;
+    let hdus = scan_all_hdus(&mmap)?;
+    let mut planes = int_planes_of(&mmap, indexed_hdu(&hdus, hdu_index)?, hdu_index, true)?;
+    Ok(planes.swap_remove(0))
 }
 
 pub fn auto_hdu_index(file: &File) -> Result<usize> {
@@ -1157,7 +1188,7 @@ pub fn read_primary_header(path: &str) -> Result<HduHeader> {
     Ok(read_header_blocks(&file, 0)?.header)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_fixtures {
     use std::io::Write;
 

@@ -126,6 +126,7 @@ import {
   channelRequestNeeded,
   clampFrame,
   displayedChannel,
+  filterFrameLabel,
   formatFrameDelta,
   formatFrameLabel,
   frameAxisValue,
@@ -586,12 +587,20 @@ function SpectroscopyPanel({
     return { values: null, label: "Channel", unit: "ch" };
   }, [formatted, n, mode, correction, correctionResult, wavelengths, cubeDims]);
 
+  const photometricPlanes = cubeDims?.photometric_planes ?? null;
   const frameLabel = useMemo(() => {
     if (!frameLinked) return null;
     if (ramp) return formatRampFrameLabel(frame, ramp);
-    return formatFrameLabel(frame, totalFrames, frameAxisValue(frame, axisX.values), axisX.unit);
-  }, [frameLinked, frame, totalFrames, axisX, ramp]);
-  const rampLabelFor = useMemo(() => (ramp ? (idx: number) => formatRampFrameLabel(idx, ramp) : undefined), [ramp]);
+    return (
+      filterFrameLabel(frame, totalFrames, photometricPlanes) ??
+      formatFrameLabel(frame, totalFrames, frameAxisValue(frame, axisX.values), axisX.unit)
+    );
+  }, [frameLinked, frame, totalFrames, axisX, ramp, photometricPlanes]);
+  const navLabelFor = useMemo(() => {
+    if (ramp) return (idx: number) => formatRampFrameLabel(idx, ramp);
+    if (!photometricPlanes?.length) return undefined;
+    return (idx: number) => filterFrameLabel(idx, totalFrames, photometricPlanes) ?? formatFrameLabel(idx, totalFrames, null, "");
+  }, [ramp, photometricPlanes, totalFrames]);
 
   const shownPngOnly = processed !== null && processed.fitsPath === null;
   const requestFrame = useCallback(
@@ -2089,7 +2098,7 @@ function SpectroscopyPanel({
             requestSeq={requestSeq}
             onFrameRequest={requestFrame}
             frameLabel={frameLabel}
-            labelFor={rampLabelFor}
+            labelFor={navLabelFor}
             loop={loopPlayback}
             onLoopChange={setLoopPlayback}
             onFrameChange={onFramePreview}

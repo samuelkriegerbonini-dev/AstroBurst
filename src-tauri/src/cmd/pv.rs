@@ -5,9 +5,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, output_stem, render_named_and_save, resolve_output_dir, write_derived_fits,
+    blocking_cmd, output_stem, render_named_and_save, resolve_output_dir, write_derived_fits,
     OutputValues,
 };
+use crate::service::common::derived_output_header;
 use crate::core::astrometry::spectral::VelocityConvention;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cube::lazy::LazyCube;

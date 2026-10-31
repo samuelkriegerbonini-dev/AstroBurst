@@ -61,21 +61,6 @@ pub enum SeparationParams {
     },
 }
 
-async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
-    match explicit {
-        Some(r) => Ok(r),
-        None => session
-            .v2
-            .active_ref
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::BadRequest("no active image in this session; open a file first".into())
-            }),
-    }
-}
-
 fn load_wcs(session: &Session, image_ref: &str) -> Result<(WcsTransform, usize, usize)> {
     let entry = session
         .cache
@@ -112,7 +97,7 @@ pub async fn pix2sky(
     Json(params): Json<Pix2SkyParams>,
 ) -> Result<Json<Value>> {
     let frame = parse_frame(params.frame.as_deref())?;
-    let target = target_ref(&session, params.image_ref).await?;
+    let target = session.target_ref(params.image_ref).await?;
     let (wcs, w, h) = load_wcs(&session, &target)?;
 
     let coords: Vec<(f64, f64)> = params.points.iter().map(|p| (p[0], p[1])).collect();
@@ -145,7 +130,7 @@ pub async fn sky2pix(
     SessionExtractor(session): SessionExtractor,
     Json(params): Json<Sky2PixParams>,
 ) -> Result<Json<Value>> {
-    let target = target_ref(&session, params.image_ref).await?;
+    let target = session.target_ref(params.image_ref).await?;
     let (wcs, w, h) = load_wcs(&session, &target)?;
 
     let coords: Vec<(f64, f64)> = params.points.iter().map(|p| (p[0], p[1])).collect();
@@ -185,7 +170,7 @@ pub async fn grid(
             hint: Some(format!("density must be between {MIN_DENSITY} and {MAX_DENSITY}")),
         });
     }
-    let target = target_ref(&session, params.image).await?;
+    let target = session.target_ref(params.image).await?;
     let (wcs, w, h) = load_wcs(&session, &target)?;
     let grid = wcs_grid(&wcs, w, h, frame, density).map_err(AppError::BadRequest)?;
     let mut body = serde_json::to_value(&grid).map_err(|e| AppError::Internal(e.into()))?;
@@ -203,7 +188,7 @@ pub async fn separation(
             Ok(Json(separation_body(deg)))
         }
         SeparationParams::Pixel { a, b, image_ref } => {
-            let target = target_ref(&session, image_ref).await?;
+            let target = session.target_ref(image_ref).await?;
             let (wcs, _, _) = load_wcs(&session, &target)?;
             let ca = wcs.pixel_to_world(a[0], a[1]);
             let cb = wcs.pixel_to_world(b[0], b[1]);

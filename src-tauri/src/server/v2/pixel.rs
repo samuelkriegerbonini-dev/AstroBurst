@@ -34,21 +34,6 @@ pub struct PixelParams {
     pub image_ref: Option<String>,
 }
 
-async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
-    match explicit {
-        Some(r) => Ok(r),
-        None => session
-            .v2
-            .active_ref
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::BadRequest("no active image in this session; open a file first".into())
-            }),
-    }
-}
-
 fn nearest_pixel_centre(v: f64) -> f64 {
     (v + 0.5).floor()
 }
@@ -76,7 +61,7 @@ pub async fn pixel(
     SessionExtractor(session): SessionExtractor,
     Json(params): Json<PixelParams>,
 ) -> Result<Json<Value>> {
-    let target = target_ref(&session, params.image_ref).await?;
+    let target = session.target_ref(params.image_ref).await?;
 
     let entry = session
         .cache

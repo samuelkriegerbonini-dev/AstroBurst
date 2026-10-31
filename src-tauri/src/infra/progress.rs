@@ -8,7 +8,6 @@ use tauri::Emitter;
 
 const MIN_EMIT_INTERVAL_MS: u128 = 50;
 
-#[cfg(feature = "tauri")]
 fn should_emit(last_stage: Option<&str>, stage: &str, elapsed_ms: u128, is_last: bool) -> bool {
     match last_stage {
         None => true,
@@ -26,22 +25,19 @@ pub struct ProgressPayload {
 
 // Headless build support (tauri-gated ProgressHandle + no-op stub below) — contributed by
 // Jae-Joon Lee (https://github.com/leejjoon).
-#[cfg(feature = "tauri")]
 #[derive(Clone)]
 pub struct ProgressHandle {
     current: Arc<AtomicU64>,
     total: Arc<AtomicU64>,
     cancelled: Arc<AtomicBool>,
-    app_handle: tauri::AppHandle,
-    event_name: String,
+    cancel_source: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    sink: ProgressSink,
     last_emit: Arc<Mutex<(Instant, Option<String>)>>,
     part_index: u64,
     part_count: u64,
 }
 
-#[cfg(not(feature = "tauri"))]
-#[derive(Clone)]
-pub struct ProgressHandle;
+pub type ProgressSink = Arc<dyn Fn(&ProgressPayload) + Send + Sync>;
 
 #[cfg(feature = "tauri")]
 static CANCEL_FLAGS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Vec<std::sync::Weak<AtomicBool>>>>> =
@@ -67,26 +63,40 @@ pub fn cancel_event(event: &str) -> bool {
     }
 }
 
-#[cfg(feature = "tauri")]
 impl ProgressHandle {
+    #[cfg(feature = "tauri")]
     pub fn new(app: &tauri::AppHandle, event: &str, total: u64) -> Self {
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let (app, event_name) = (app.clone(), event.to_string());
+        let progress = Self::with_sink(
+            Arc::new(move |payload: &ProgressPayload| {
+                let _ = app.emit(&event_name, payload.clone());
+            }),
+            total,
+        );
         {
             let mut flags = CANCEL_FLAGS.lock().unwrap();
             let list = flags.entry(event.to_string()).or_default();
             list.retain(|w| w.strong_count() > 0);
-            list.push(Arc::downgrade(&cancelled));
+            list.push(Arc::downgrade(&progress.cancelled));
         }
+        progress
+    }
+
+    pub fn with_sink(sink: ProgressSink, total: u64) -> Self {
         Self {
             current: Arc::new(AtomicU64::new(0)),
             total: Arc::new(AtomicU64::new(total)),
-            cancelled,
-            app_handle: app.clone(),
-            event_name: event.to_string(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_source: None,
+            sink,
             last_emit: Arc::new(Mutex::new((Instant::now(), None))),
             part_index: 0,
             part_count: 1,
         }
+    }
+
+    pub fn with_cancel_source(self, source: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        Self { cancel_source: Some(source), ..self }
     }
 
     pub fn part(&self, index: u64, count: u64) -> Self {
@@ -94,8 +104,8 @@ impl ProgressHandle {
             current: Arc::new(AtomicU64::new(0)),
             total: Arc::new(AtomicU64::new(self.total.load(Ordering::Relaxed))),
             cancelled: Arc::clone(&self.cancelled),
-            app_handle: self.app_handle.clone(),
-            event_name: self.event_name.clone(),
+            cancel_source: self.cancel_source.clone(),
+            sink: self.sink.clone(),
             last_emit: Arc::clone(&self.last_emit),
             part_index: index,
             part_count: count.max(1),
@@ -112,15 +122,12 @@ impl ProgressHandle {
 
     fn emit_payload(&self, cur: u64, tot: u64, stage: &str) {
         let percent = self.percent(cur, tot);
-        let _ = self.app_handle.emit(
-            &self.event_name,
-            ProgressPayload {
-                current: cur,
-                total: tot,
-                percent,
-                stage: stage.to_string(),
-            },
-        );
+        (self.sink)(&ProgressPayload {
+            current: cur,
+            total: tot,
+            percent,
+            stage: stage.to_string(),
+        });
     }
 
     fn claim_emit(&self, stage: &str, is_last: bool) -> bool {
@@ -162,7 +169,7 @@ impl ProgressHandle {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.cancelled.load(Ordering::Relaxed) || self.cancel_source.as_ref().is_some_and(|source| source())
     }
 
     pub fn emit_complete(&self) {
@@ -170,36 +177,80 @@ impl ProgressHandle {
             return;
         }
         let tot = self.total.load(Ordering::Relaxed);
-        let _ = self.app_handle.emit(
-            &self.event_name,
-            ProgressPayload {
-                current: tot,
-                total: tot,
-                percent: 100,
-                stage: "complete".to_string(),
-            },
-        );
+        (self.sink)(&ProgressPayload {
+            current: tot,
+            total: tot,
+            percent: 100,
+            stage: "complete".to_string(),
+        });
     }
 }
 
-#[cfg(not(feature = "tauri"))]
-impl ProgressHandle {
-    pub fn part(&self, _index: u64, _count: u64) -> Self {
-        ProgressHandle
-    }
-    pub fn is_cancelled(&self) -> bool {
-        false
-    }
-    pub fn tick_with_stage(&self, _stage: &str) {}
-    pub fn emit_stage(&self, _stage: &str) {}
-    pub fn set_total(&self, _total: u64) {}
-    pub fn report(&self, _current: u64, _total: u64, _stage: &str) {}
-    pub fn emit_complete(&self) {}
-}
-
-#[cfg(all(test, feature = "tauri"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    type Seen = Arc<Mutex<Vec<(u64, u64, u32, String)>>>;
+
+    fn recorder() -> (ProgressSink, Seen) {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let sink: ProgressSink = {
+            let seen = Arc::clone(&seen);
+            Arc::new(move |p: &ProgressPayload| seen.lock().unwrap().push((p.current, p.total, p.percent, p.stage.clone())))
+        };
+        (sink, seen)
+    }
+
+    fn payload(current: u64, total: u64, percent: u32, stage: &str) -> (u64, u64, u32, String) {
+        (current, total, percent, stage.to_string())
+    }
+
+    #[test]
+    fn a_callback_sink_receives_the_first_tick_each_new_stage_the_last_tick_and_completion() {
+        let (sink, seen) = recorder();
+        let progress = ProgressHandle::with_sink(sink, 4);
+        for stage in ["load_frame", "load_frame", "combine", "combine"] {
+            progress.tick_with_stage(stage);
+        }
+        progress.emit_complete();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.first(), Some(&payload(1, 4, 25, "load_frame")), "{seen:?}");
+        assert!(seen.contains(&payload(3, 4, 75, "combine")), "{seen:?}");
+        assert!(seen.contains(&payload(4, 4, 100, "combine")), "{seen:?}");
+        assert_eq!(seen.last(), Some(&payload(4, 4, 100, "complete")), "{seen:?}");
+    }
+
+    #[test]
+    fn parts_share_the_sink_and_only_the_last_part_reports_completion() {
+        let (sink, seen) = recorder();
+        let progress = ProgressHandle::with_sink(sink, 2);
+        let first = progress.part(0, 2);
+        first.report(2, 2, "ha");
+        first.emit_complete();
+        let second = progress.part(1, 2);
+        second.report(1, 2, "oiii");
+        second.emit_complete();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![payload(2, 2, 50, "ha"), payload(1, 2, 75, "oiii"), payload(2, 2, 100, "complete")]
+        );
+    }
+
+    #[test]
+    fn the_cancel_source_is_read_on_every_poll_by_the_handle_its_clones_and_its_parts() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let source = {
+            let flag = Arc::clone(&flag);
+            Arc::new(move || flag.load(Ordering::SeqCst))
+        };
+        let (sink, _) = recorder();
+        let progress = ProgressHandle::with_sink(sink, 2).with_cancel_source(source);
+        let clone = progress.clone();
+        let part = progress.part(1, 2);
+        assert!(!progress.is_cancelled() && !clone.is_cancelled() && !part.is_cancelled());
+        flag.store(true, Ordering::SeqCst);
+        assert!(progress.is_cancelled() && clone.is_cancelled() && part.is_cancelled());
+    }
 
     #[test]
     fn stage_changes_are_never_throttled() {

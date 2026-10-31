@@ -4,9 +4,10 @@ use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, load_cached, load_cached_full, output_stem, render_and_save_as,
+    blocking_cmd, load_cached, load_cached_full, output_stem, render_and_save_as,
     resolve_output_dir, write_derived_fits, OutputValues, RenderOutput, MAX_PREVIEW_DIM,
 };
+use crate::service::common::derived_output_header;
 use crate::cmd::compose::composite_chain::{contrast_planes, run_chain_step, toned_state, ChainCall, ChainStep, DisplayStf, StepOutput};
 use crate::cmd::helpers;
 use crate::core::imaging::local_contrast::{lhe_rgb, LheConfig};

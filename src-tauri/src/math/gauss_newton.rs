@@ -16,7 +16,7 @@ pub struct FitResult {
     pub converged: bool,
 }
 
-fn solve_linear(matrix: &mut [Vec<f64>], rhs: &mut [f64]) -> Option<Vec<f64>> {
+pub(crate) fn solve_linear(matrix: &mut [Vec<f64>], rhs: &mut [f64]) -> Option<Vec<f64>> {
     let n = rhs.len();
     for col in 0..n {
         let pivot_row = (col..n)

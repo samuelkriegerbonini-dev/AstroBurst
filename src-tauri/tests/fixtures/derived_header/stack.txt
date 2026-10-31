@@ -1,0 +1,40 @@
+SIMPLE  =                    T / FITS standard
+BITPIX  =                  -32 / 32-bit float
+NAXIS   =                    2 / 2D image
+NAXIS1  =                    8 / width
+NAXIS2  =                    8 / height
+BZERO   =       0.0000000000E0
+BSCALE  =       1.0000000000E0
+CTYPE1  = 'RA---TAN'
+CTYPE2  = 'DEC--TAN'
+CRVAL1  =                 83.8
+CRVAL2  =                 -5.4
+CRPIX1  =                  3.5
+CRPIX2  =                  4.5
+CD1_1   =              -0.0001
+CD1_2   =                  0.0
+CD2_1   =                  0.0
+CD2_2   =               0.0001
+EXPTIME =   3.00000000000000E2
+BUNIT   = 'MJy/sr  '
+PIXAR_SR=              2.0E-13
+SATURATE=                60000
+WCSAXES =                    2
+PV2_1   =                 45.0
+TELESCOP= 'JWST    '
+FILTER  = 'F200W   '
+PHOTMJSR=                  1.5
+ZP      =                 25.0
+ZPTMAG  =                 24.0
+EGAIN   =                 0.25
+NCOMBINE=                    3
+HISTORY flat-fielded
+PROGRAM = 'AstroBurst {version}'
+HISTORY Processed with AstroBurst {version}
+ABPROC  = 'stacked '
+TOTEXP  =   9.00000000000000E2
+ABCOMB  = 'mean    '
+ABREJECT= 'sigma_clip'
+ABNORM  = 'additive_scaling'
+HISTORY AstroBurst stack: 3 frames, sigma_clip, mean, additive_scaling
+HISTORY Processed with AstroBurst {version}

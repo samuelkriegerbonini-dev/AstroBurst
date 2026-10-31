@@ -12,7 +12,6 @@ use astroburst_lib::types::image::Histogram;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::session::Session;
 
 use super::region::{region_values, RegionSpec};
 
@@ -98,21 +97,6 @@ fn default_bins() -> usize {
     256
 }
 
-async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
-    match explicit {
-        Some(r) => Ok(r),
-        None => session
-            .v2
-            .active_ref
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::BadRequest("no active image in this session; open a file first".into())
-            }),
-    }
-}
-
 fn check_range(range: Option<[f64; 2]>) -> Result<()> {
     match range {
         Some([lo, hi]) if !(lo.is_finite() && hi.is_finite() && lo < hi) => Err(AppError::BadRequestWithHint {
@@ -138,7 +122,7 @@ pub async fn histogram(
     check_bins(params.bins)?;
     check_range(params.range)?;
 
-    let target = target_ref(&session, params.image_ref.take()).await?;
+    let target = session.target_ref(params.image_ref.take()).await?;
     let entry = session
         .cache
         .get(&target)

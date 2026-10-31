@@ -16,6 +16,8 @@ use crate::session::Session;
 use crate::state::AppState;
 
 const ROUTER_SOURCE: &str = include_str!("router.rs");
+const SCIENCE_ROUTER_SOURCE: &str = include_str!("science/mod.rs");
+const MERGED_ROUTERS: [(&str, &str); 1] = [("science::router()", SCIENCE_ROUTER_SOURCE)];
 const ROUTE_REFERENCE: &str = include_str!("../../../docs/server-api.md");
 
 const ROUTING_METHODS: [&str; 8] = [
@@ -175,25 +177,48 @@ fn route_pair(text: &str) -> Option<String> {
         .then(|| format!("{method} {path}"))
 }
 
-fn route_reference_problems(router: &str, reference: &str) -> Vec<String> {
+pub(crate) fn registered_routes() -> Vec<String> {
+    registrations(ROUTER_SOURCE, &MERGED_ROUTERS).0
+}
+
+fn registrations<'a>(router: &'a str, merged: &[(&str, &'a str)]) -> (Vec<String>, Vec<String>) {
     let mut problems = Vec::new();
     let mut registered = Vec::new();
-    for call in calls(router, ".route(") {
-        let methods = called_methods(call);
-        match quoted_path(call) {
-            Some(path) if !methods.is_empty() => {
-                registered.extend(methods.into_iter().map(|method| format!("{method} {path}")))
+    let mut sources = vec![router];
+    let mut index = 0;
+    while let Some(source) = sources.get(index).copied() {
+        for call in calls(source, ".route(") {
+            let methods = called_methods(call);
+            match quoted_path(call) {
+                Some(path) if !methods.is_empty() => {
+                    registered.extend(methods.into_iter().map(|method| format!("{method} {path}")))
+                }
+                _ => problems.push(format!("unreadable registration .route({})", call.trim())),
             }
-            _ => problems.push(format!("unreadable registration .route({})", call.trim())),
         }
+        for opener in UNREADABLE_REGISTRATIONS {
+            for call in calls(source, opener) {
+                let known = merged
+                    .iter()
+                    .find(|(name, _)| opener == ".merge(" && *name == call.trim());
+                match known {
+                    Some((_, merged_source)) if sources.contains(merged_source) => {}
+                    Some((_, merged_source)) => sources.push(merged_source),
+                    None => problems.push(format!("unreadable registration {opener}{})", call.trim())),
+                }
+            }
+        }
+        index += 1;
     }
-    for opener in UNREADABLE_REGISTRATIONS {
-        problems.extend(
-            calls(router, opener)
-                .into_iter()
-                .map(|call| format!("unreadable registration {opener}{})", call.trim())),
-        );
-    }
+    (registered, problems)
+}
+
+fn route_reference_problems<'a>(
+    router: &'a str,
+    merged: &[(&str, &'a str)],
+    reference: &str,
+) -> Vec<String> {
+    let (registered, mut problems) = registrations(router, merged);
     let titled: Vec<String> = headings(reference)
         .into_iter()
         .filter_map(|(_, _, text)| route_pair(text))
@@ -297,7 +322,7 @@ fn drizzled(
 
 #[test]
 fn the_route_reference_matches_the_router() {
-    let problems = route_reference_problems(ROUTER_SOURCE, ROUTE_REFERENCE);
+    let problems = route_reference_problems(ROUTER_SOURCE, &MERGED_ROUTERS, ROUTE_REFERENCE);
     assert!(
         problems.is_empty(),
         "docs/server-api.md is out of step with src-tauri/src/server/router.rs ({} problem(s)):\n{}",
@@ -317,7 +342,7 @@ fn every_method_of_a_registration_is_read_and_each_missing_heading_is_named() {
         .route("/c", routing::post(c::create))"#;
     let reference = "# Title\n\n4 method and path pairs.\n\n| 1 | GET | [`/a`](#get-a) |\n| 2 | GET | `/b/:id` |\n| 3 | DELETE | `/b/:id` |\n| 4 | POST | `/c` |\n\n#### GET /a\n\n```\n# DELETE /b/:id\n```\n\n### POST /c\n";
     assert_eq!(
-        route_reference_problems(router, reference),
+        route_reference_problems(router, &[], reference),
         ["no heading: GET /b/:id", "no heading: DELETE /b/:id"]
     );
 }
@@ -327,7 +352,7 @@ fn stale_headings_stale_index_rows_and_a_wrong_count_are_named() {
     let router = r#".route("/a", get(a)).route("/c", routing::post(c))"#;
     let reference = "3 method and path pairs.\n\n| 1 | GET | `/a` |\n| 2 | POST | `/c` |\n| 3 | GET | `/gone` |\n\n### GET /a\n\n### POST /c?x=\n\n### DELETE /gone\n";
     assert_eq!(
-        route_reference_problems(router, reference),
+        route_reference_problems(router, &[], reference),
         [
             "no heading: POST /c",
             "heading for an unregistered route: POST /c?x=",
@@ -348,7 +373,7 @@ fn nested_merged_and_service_registrations_are_reported_as_unreadable() {
         .fallback_service(fallback())"#;
     let reference = "1 method and path pairs.\n\n| 1 | GET | `/a` |\n\n### GET /a\n";
     assert_eq!(
-        route_reference_problems(router, reference),
+        route_reference_problems(router, &[], reference),
         [
             r#"unreadable registration .nest("/v2/science", science::router())"#,
             "unreadable registration .merge(other())",
@@ -359,11 +384,31 @@ fn nested_merged_and_service_registrations_are_reported_as_unreadable() {
 }
 
 #[test]
+fn a_merged_router_the_reader_knows_documents_its_own_routes() {
+    let router = r#"Router::new()
+        .route("/a", get(a))
+        .merge(science::router())
+        .merge(other())"#;
+    let science = r#"Router::new()
+        .route("/v2/x", get(x).delete(y))
+        .nest("/v2/n", nested())"#;
+    let reference = "3 method and path pairs.\n\n| 1 | GET | `/a` |\n| 2 | GET | `/v2/x` |\n| 3 | DELETE | `/v2/x` |\n\n### GET /a\n\n### GET /v2/x\n";
+    assert_eq!(
+        route_reference_problems(router, &[("science::router()", science)], reference),
+        [
+            "unreadable registration .merge(other())",
+            r#"unreadable registration .nest("/v2/n", nested())"#,
+            "no heading: DELETE /v2/x",
+        ]
+    );
+}
+
+#[test]
 fn only_lines_markdown_renders_as_headings_document_a_route() {
     let router = r#".route("/a", get(a)).route("/b", get(b))"#;
     let reference = "2 method and path pairs.\n\n| 1 | GET | `/a` |\n| 2 | GET | `/b` |\n\n   ### GET /b\n\n    # GET /a\n\n#GET /a\n\n~~~\n### GET /a\n~~~\n\n```text\n~~~\n### GET /a\n```\n";
     assert_eq!(
-        route_reference_problems(router, reference),
+        route_reference_problems(router, &[], reference),
         ["no heading: GET /a"]
     );
 }

@@ -6,9 +6,10 @@ use ndarray::Array2;
 use serde_json::{json, Value};
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, load_cached_full, output_stem, resolve_output_dir,
+    blocking_cmd, load_cached_full, output_stem, resolve_output_dir,
     save_auto_stf_preview_png, source_path, write_derived_fits, OutputValues,
 };
+use crate::service::common::derived_output_header;
 use crate::core::imaging::stats::is_padding;
 use crate::core::ops::pixelmath::{self as ops, entry_warnings, pixelmath_error, slot_names_with_target, SlotLoader};
 use crate::core::ops::{run_op, OpCompanions, OpInput, OpSpec, OpVersion};

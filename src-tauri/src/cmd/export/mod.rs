@@ -6,9 +6,10 @@ use serde_json::json;
 
 use crate::cmd::catalog::uncalibrated_reason;
 use crate::cmd::common::{
-    blocking_cmd, cached_header, derived_output_header, extract_image_resolved, image_ref, invalidate_written,
+    blocking_cmd, cached_header, extract_image_resolved, image_ref, invalidate_written,
     try_extract_rgb_resolved, OutputValues,
 };
+use crate::service::common::derived_output_header;
 use crate::cmd::compose::rescale_header_to_grid;
 use crate::cmd::cutout::refuse_source_as_target;
 use crate::cmd::helpers;

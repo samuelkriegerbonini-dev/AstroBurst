@@ -11,6 +11,7 @@ import {
   drainFrameRequest,
   formatFrameDelta,
   formatFrameLabel,
+  filterFrameLabel,
   frameAxisValue,
   frameFromKey,
   frameLoadPlan,
@@ -124,6 +125,24 @@ describe("formatFrameLabel", () => {
     expect(formatFrameLabel(0, 40, 1.0, "ch")).toBe("ch 0 (0–39)");
     expect(formatFrameLabel(0, 40, NaN, "um")).toBe("ch 0 (0–39)");
     expect(formatFrameLabel(0, 0, null, "")).toBe("ch 0 (0–0)");
+  });
+});
+
+describe("filterFrameLabel", () => {
+  const planes = [
+    { filter: "F814W", dataset: "HST", instrument: "ACS", pivot_um: 0.804553, pixscale_arcsec: null, bunit_in: "", fluxconv: null, psf_fwhm_arcsec: null, kernel: "" },
+    { filter: "CUSTOM", dataset: "", instrument: "", pivot_um: null, pixscale_arcsec: null, bunit_in: "", fluxconv: null, psf_fwhm_arcsec: null, kernel: "" },
+  ];
+
+  it("names the filter and its pivot wavelength of a photometric plane", () => {
+    expect(filterFrameLabel(0, 2, planes)).toBe("ch 0 (0–1) - F814W 0.805 um");
+    expect(filterFrameLabel(1, 2, planes)).toBe("ch 1 (0–1) - CUSTOM");
+  });
+
+  it("gives no label without plane metadata or past the last plane", () => {
+    expect(filterFrameLabel(2, 2, planes)).toBeNull();
+    expect(filterFrameLabel(0, 2, null)).toBeNull();
+    expect(filterFrameLabel(0, 2, undefined)).toBeNull();
   });
 });
 

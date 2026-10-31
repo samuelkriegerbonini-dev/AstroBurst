@@ -10,12 +10,14 @@ const SPECTRAL_UNITS: [&str; 19] = [
     "GHZ", "THZ", "M/S", "KM/S", "EV", "KEV",
 ];
 const INTEGRATION_CARDS: [&str; 2] = ["NINTS", "INTSTART"];
+const FILTER_AXIS_TYPE: &str = "FILTER";
 const NORMALIZED_VALID_FLOOR: f32 = 1e-6;
 pub(crate) const DISPLAY_ASINH_ALPHA: f32 = 10.0;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpectralClassification {
     pub is_spectral: bool,
+    pub is_photometric: bool,
     pub reason: String,
     pub axis_type: Option<String>,
     pub axis_unit: Option<String>,
@@ -31,7 +33,11 @@ fn assumed_axis_unit(header: &HduHeader, naxis3: usize) -> Option<String> {
 }
 
 pub fn classify_spectral_cube(header: &HduHeader, naxis3: usize) -> SpectralClassification {
-    let mut classification = classify_spectral_cube_from_cards(header, naxis3);
+    classify_cube(header, naxis3, false)
+}
+
+pub fn classify_cube(header: &HduHeader, naxis3: usize, has_filters_table: bool) -> SpectralClassification {
+    let mut classification = classify_spectral_cube_from_cards(header, naxis3, has_filters_table);
     if classification.is_spectral && classification.axis_unit.is_none() {
         if let Some(unit) = assumed_axis_unit(header, naxis3) {
             classification.axis_unit = Some(unit);
@@ -57,6 +63,7 @@ pub(crate) fn ctype_is_spectral(header: &HduHeader) -> bool {
 pub fn ramp_classification(r: &RampInfo, naxis3: usize) -> SpectralClassification {
     SpectralClassification {
         is_spectral: false,
+        is_photometric: false,
         reason: format!(
             "ramp: {} groups x {} integrations ({})",
             r.ngroups,
@@ -70,8 +77,9 @@ pub fn ramp_classification(r: &RampInfo, naxis3: usize) -> SpectralClassificatio
     }
 }
 
-fn classify_spectral_cube_from_cards(header: &HduHeader, naxis3: usize) -> SpectralClassification {
+fn classify_spectral_cube_from_cards(header: &HduHeader, naxis3: usize, has_filters_table: bool) -> SpectralClassification {
     let ctype3 = card_upper(header, "CTYPE3");
+    let filter_axis = ctype3.as_deref() == Some(FILTER_AXIS_TYPE);
     let cunit3 = card_upper(header, "CUNIT3");
     let has_cdelt3 = header.get_f64("CDELT3").is_some();
     let has_crval3 = header.get_f64("CRVAL3").is_some();
@@ -89,6 +97,17 @@ fn classify_spectral_cube_from_cards(header: &HduHeader, naxis3: usize) -> Spect
         (true, format!("CUNIT3 indicates spectral data: {}", cunit3.as_deref().unwrap_or("")))
     } else if naxis3 <= 4 {
         (false, format!("NAXIS3={} with no spectral keywords: likely RGB/RGBA composition", naxis3))
+    } else if filter_axis || has_filters_table {
+        let source = if filter_axis { "CTYPE3 FILTER" } else { "FILTERS table" };
+        return SpectralClassification {
+            is_spectral: false,
+            is_photometric: true,
+            reason: format!("{source}: photometric cube of {naxis3} filter planes"),
+            axis_type: ctype3,
+            axis_unit: cunit3,
+            axis_unit_assumed: false,
+            channel_count: naxis3,
+        };
     } else if has_cdelt3 && has_crval3 {
         (true, format!("NAXIS3={} with CRVAL3/CDELT3 present: likely spectral cube", naxis3))
     } else {
@@ -97,6 +116,7 @@ fn classify_spectral_cube_from_cards(header: &HduHeader, naxis3: usize) -> Spect
 
     SpectralClassification {
         is_spectral,
+        is_photometric: false,
         reason,
         axis_type: ctype3,
         axis_unit: cunit3,
@@ -261,6 +281,32 @@ mod tests {
         assert!(classify_spectral_cube(&freq, 3).is_spectral);
         let ramp = make_header(&[("CRVAL3", "1.0"), ("CDELT3", "1.0")]);
         assert!(classify_spectral_cube(&ramp, 30).is_spectral);
+    }
+
+    #[test]
+    fn filter_axis_cube_with_five_planes_is_photometric_not_spectral() {
+        let lightstack = make_header(&[("CTYPE3", "FILTER"), ("CRPIX3", "1.0"), ("CRVAL3", "0.0"), ("CDELT3", "1.0"), ("NAXIS3", "5")]);
+        let c = classify_spectral_cube(&lightstack, 5);
+        assert!(!c.is_spectral, "{}", c.reason);
+        assert!(c.is_photometric, "{}", c.reason);
+        assert!(c.reason.contains("FILTER") && c.reason.contains('5'), "{}", c.reason);
+        assert_eq!((c.axis_type.as_deref(), c.channel_count), (Some("FILTER"), 5));
+        let quoted_cd_form = make_header(&[("CTYPE3", "'filter  '"), ("CRVAL3", "0.0"), ("CD3_3", "1.0")]);
+        assert!(classify_spectral_cube(&quoted_cd_form, 20).is_photometric);
+
+        let table_only = make_header(&[("CRVAL3", "0.0"), ("CDELT3", "1.0")]);
+        assert!(classify_spectral_cube(&table_only, 6).is_spectral, "without filter metadata the CRVAL3/CDELT3 heuristic still applies");
+        let c = classify_cube(&table_only, 6, true);
+        assert!(c.is_photometric && !c.is_spectral, "{}", c.reason);
+        assert!(c.reason.contains("FILTERS table"), "{}", c.reason);
+
+        for planes in [3, 4] {
+            let small = classify_spectral_cube(&lightstack, planes);
+            assert!(!small.is_spectral && !small.is_photometric, "{}", small.reason);
+            assert!(small.reason.contains("likely RGB/RGBA composition"), "the NAXIS3 of 4 or fewer RGB heuristic is unchanged: {}", small.reason);
+        }
+        let wave = make_header(&[("CTYPE3", "WAVE"), ("CDELT3", "1.0")]);
+        assert!(!classify_cube(&wave, 30, true).is_photometric, "a spectral CTYPE3 wins over a FILTERS table");
     }
 
     #[test]

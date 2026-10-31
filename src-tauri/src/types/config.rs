@@ -19,6 +19,18 @@ pub struct AppConfig {
     pub external_catalogs: BTreeMap<String, String>,
     #[serde(default)]
     pub siril_catalog_dir: Option<String>,
+    #[serde(default)]
+    pub filter_datasets: BTreeMap<String, BTreeMap<String, CustomFilter>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomFilter {
+    #[serde(rename = "lambda")]
+    pub pivot_angstrom: f64,
+    pub instrument: String,
+    pub group: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -33,6 +45,7 @@ impl Default for AppConfig {
             mast_quota_gb: None,
             external_catalogs: BTreeMap::new(),
             siril_catalog_dir: None,
+            filter_datasets: BTreeMap::new(),
         }
     }
 }

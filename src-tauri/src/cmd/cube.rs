@@ -5,20 +5,24 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, output_stem, render_named_and_save, resolve_output_dir, write_derived_fits,
+    blocking_cmd, output_stem, render_named_and_save, resolve_output_dir, write_derived_fits,
     write_derived_mef, OutputValues,
 };
+use crate::service::common::derived_output_header;
 use crate::infra::wcs_source::load_wcs;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cube::companions::{open_cube_set, CubeSet};
-use crate::core::cube::eager::{build_wavelength_axis, classify_spectral_cube, ramp_classification};
+use crate::cmd::cubeprep::filter_registry;
+use crate::core::cube::eager::{build_wavelength_axis, classify_cube, classify_spectral_cube, ramp_classification};
 use crate::core::cube::lazy::{ApertureSpectrum, CollapseMode, LazyCube};
 use crate::core::cube::moments::{moment_maps_set, ContinuumWindows, MomentConfig, DQ_NOT_APPLIED_NOTE};
 use crate::core::cube::noise_factor::{noise_factor, NoiseFactor};
+use crate::core::cubeprep::cube::{plane_text, planes_from_header, planes_from_table, remove_plane_keys, CubePlane, CTYPE_FILTER, FILTERS_EXTNAME};
 use crate::core::imaging::push_history;
 use crate::core::imaging::region::RegionShape;
 use crate::core::imaging::stats::percentile;
 use crate::core::metadata::photcal::{FluxConvention, PhotCal, JY_PER_MJY};
+use crate::infra::fits::table::{find_bintable, load_bintable};
 use crate::infra::fits::writer::{HduData, ImageHdu};
 use crate::infra::render::grayscale::render_grayscale;
 use crate::types::constants::{
@@ -36,6 +40,7 @@ pub const APERTURE_SUBSAMPLES: u8 = 5;
 const KEY_AXIS_UNIT_ASSUMED: &str = "axis_unit_assumed";
 const CARD_BUNIT: &str = "BUNIT";
 const CARD_CHANNEL: &str = "CHANNEL";
+const CARD_FILTER: &str = "FILTER";
 const CARD_SPECTRAL_TYPE: &str = "SPECTYPE";
 const CARD_SPECTRAL_VALUE: &str = "SPECVAL";
 const CARD_SPECTRAL_UNIT: &str = "SPECUNIT";
@@ -108,9 +113,32 @@ fn moment_header(cube: &LazyCube, order: u8, unit: &str) -> HduHeader {
     header
 }
 
+fn has_filter_axis(header: &HduHeader) -> bool {
+    card_text(header, "CTYPE3").is_some_and(|ctype| ctype.eq_ignore_ascii_case(CTYPE_FILTER))
+}
+
+fn filters_table_planes(cube: &LazyCube) -> Option<Vec<CubePlane>> {
+    let index = find_bintable(&cube.source_path, FILTERS_EXTNAME, 1).ok()?;
+    let planes = planes_from_table(&load_bintable(&cube.source_path, index).ok()?).ok()?;
+    (planes.len() == cube.geometry.naxis3).then_some(planes)
+}
+
+fn keyword_planes(cube: &LazyCube) -> Option<Vec<CubePlane>> {
+    has_filter_axis(&cube.header)
+        .then(|| planes_from_header(&cube.header, cube.geometry.naxis3, &filter_registry()).ok())
+        .flatten()
+}
+
 pub(crate) fn frame_header(cube: &LazyCube, z: usize) -> HduHeader {
     let mut header = plane_header(cube, ABPROC_CUBE_FRAME, OutputValues::Linear);
     header.set(CARD_CHANNEL, z.to_string());
+    if has_filter_axis(&cube.header) {
+        let filter = plane_text(&cube.header, "FILTER", z + 1);
+        remove_plane_keys(&mut header);
+        if let Some(filter) = filter {
+            header.set(CARD_FILTER, filter);
+        }
+    }
     if let Some(ramp) = cube.ramp() {
         header.set(CARD_GROUP, (z % ramp.ngroups).to_string());
         header.set(CARD_INTEGRATION, (z / ramp.ngroups).to_string());
@@ -476,15 +504,18 @@ fn cube_info_json(path: &str) -> anyhow::Result<serde_json::Value> {
     let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
     let geo = &cube.geometry;
     let ramp = cube.ramp();
+    let table = filters_table_planes(&cube);
     let classification = match &ramp {
         Some(r) => ramp_classification(r, geo.naxis3),
-        None => classify_spectral_cube(&cube.header, geo.naxis3),
+        None => classify_cube(&cube.header, geo.naxis3, table.is_some()),
     };
+    let planes = table.or_else(|| keyword_planes(&cube));
     Ok(json!({
         RES_WIDTH: geo.naxis1,
         RES_HEIGHT: geo.naxis2,
         RES_FRAMES: geo.depth,
         RES_BITPIX: geo.bitpix,
+        KEY_BUNIT: card_text(&cube.header, CARD_BUNIT),
         RES_RAMP: ramp,
         RES_SPECTRAL_CLASSIFICATION: {
             RES_IS_SPECTRAL: classification.is_spectral,
@@ -493,9 +524,11 @@ fn cube_info_json(path: &str) -> anyhow::Result<serde_json::Value> {
             RES_AXIS_UNIT: classification.axis_unit,
             KEY_AXIS_UNIT_ASSUMED: classification.axis_unit_assumed,
             RES_CHANNEL_COUNT: classification.channel_count,
+            KEY_IS_PHOTOMETRIC: classification.is_photometric,
         },
         RES_WAVELENGTHS: build_wavelength_axis(&cube.header),
         KEY_SPECTRAL_AXIS: cube.spectral_axis().ok(),
+        KEY_PHOTOMETRIC_PLANES: planes,
     }))
 }
 
@@ -519,15 +552,21 @@ pub(crate) fn cube_frame_json(
 }
 
 const KEY_FLUX_JY: &str = "flux_jy";
+const KEY_ERR: &str = "err";
+const KEY_IS_PHOTOMETRIC: &str = "is_photometric";
+const KEY_PHOTOMETRIC_PLANES: &str = "photometric_planes";
+const KEY_BUNIT: &str = "bunit";
 
 fn cube_spectrum_json(path: &str, x: usize, y: usize) -> anyhow::Result<serde_json::Value> {
     let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
     let spectrum = cube.extract_spectrum_at(y, x)?;
+    let err = open_cube_set(path).ok().and_then(|set| set.err).map(|err| err.extract_spectrum_at(y, x)).transpose()?;
     let axis = cube.spectral_axis().ok();
     let classification = classify_spectral_cube(&cube.header, cube.geometry.naxis3);
     let flux_jy = mjy_per_sr_to_jy_factor(&cube).map(|f| spectrum.iter().map(|&v| v as f64 * f).collect::<Vec<f64>>());
     Ok(json!({
         RES_SPECTRUM: spectrum,
+        KEY_ERR: err,
         RES_WAVELENGTHS: axis.as_ref().map(|a| a.header_values()),
         RES_UNIT: axis.map(|a| a.header_unit),
         RES_IS_SPECTRAL: classification.is_spectral,
@@ -1442,6 +1481,120 @@ mod tests {
         let header = frame_header(&plain_cube, 3);
         assert!(header.get("ABGROUP").is_none() && header.get("ABINTEG").is_none());
         GLOBAL_CUBE_CACHE.invalidate(&key);
+    }
+
+    fn lightstack_cube_bytes(filters: &[&str], cols: usize, rows: usize, value: impl Fn(usize, usize, usize) -> f64) -> Vec<u8> {
+        let mut cards: Vec<(String, String)> = [
+            ("EXTEND", "T"),
+            ("WCSAXES", "3"),
+            ("CRPIX1", "3.0"),
+            ("CRPIX2", "2.5"),
+            ("CRPIX3", "1.0"),
+            ("CD1_1", "-1.1111111111111E-05"),
+            ("CD2_2", "1.1111111111111E-05"),
+            ("CD3_3", "1.0"),
+            ("CUNIT1", "'deg'"),
+            ("CUNIT2", "'deg'"),
+            ("CTYPE1", "'RA---TAN'"),
+            ("CTYPE2", "'DEC--TAN'"),
+            ("CTYPE3", "'FILTER'"),
+            ("CRVAL1", "3.58"),
+            ("CRVAL2", "-30.4"),
+            ("CRVAL3", "0.0"),
+            ("LONPOLE", "180.0"),
+            ("LATPOLE", "-30.4"),
+            ("MJDREF", "0.0"),
+            ("RADESYS", "'ICRS'"),
+            ("BUNIT", "'Jy'"),
+        ]
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        for (i, filter) in filters.iter().enumerate() {
+            let n = i + 1;
+            cards.push((format!("FILTER{n}"), format!("'{filter}'")));
+            let dataset_key = if n >= 10 { format!("HIERARCH DATASET{n}") } else { format!("DATASET{n}") };
+            cards.push((dataset_key, "'JWST'".to_string()));
+        }
+        cards.push(("NFILTERS".to_string(), filters.len().to_string()));
+        cards.push(("FILTERS".to_string(), format!("'{}'", filters.join(","))));
+        let card_refs: Vec<(&str, &str)> = cards.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+        let mut data = Vec::with_capacity(cols * rows * filters.len() * 8);
+        for z in 0..filters.len() {
+            for y in 0..rows {
+                for x in 0..cols {
+                    data.extend_from_slice(&value(z, y, x).to_be_bytes());
+                }
+            }
+        }
+        image_hdu("SIMPLE", &[cols, rows, filters.len()], -64, &card_refs, data)
+    }
+
+    #[test]
+    fn a_lightstack_cube_opens_as_a_photometric_cube_with_filter_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("datacube_nircam.fits");
+        let filters = ["F070W", "F090W", "F115W", "F150W", "F200W", "F277W", "F356W", "F410M", "F444W", "F480M"];
+        write_bytes(&path, &lightstack_cube_bytes(&filters, 6, 5, |z, y, x| (z * 100 + y * 6 + x) as f64 + 0.5));
+        let key = path.to_str().unwrap();
+
+        let info = cube_info_json(key).unwrap();
+        let classification = &info[RES_SPECTRAL_CLASSIFICATION];
+        assert_eq!(classification[RES_IS_SPECTRAL], false, "{classification}");
+        assert_eq!(classification[KEY_IS_PHOTOMETRIC], true, "{classification}");
+        assert_eq!(classification[RES_CHANNEL_COUNT], 10);
+        assert_eq!(info[KEY_BUNIT], "Jy", "the SED labels its flux axis with the cube unit");
+        let planes = info[KEY_PHOTOMETRIC_PLANES].as_array().expect("plane labels");
+        let names: Vec<&str> = planes.iter().map(|plane| plane["filter"].as_str().unwrap()).collect();
+        assert_eq!(names, filters);
+        assert_eq!(planes[9]["dataset"], "JWST", "HIERARCH DATASET10 names the dataset of plane 10");
+        assert_eq!(planes[9]["instrument"], "NIRCam");
+        assert!((planes[9]["pivot_um"].as_f64().unwrap() - 4.818195).abs() < 1e-9, "{}", planes[9]);
+
+        let spectrum = cube_spectrum_json(key, 2, 3).unwrap();
+        assert_eq!(spectrum[RES_IS_SPECTRAL], false);
+        let values: Vec<f64> = spectrum[RES_SPECTRUM].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!(values, (0..10).map(|z| (z * 100 + 3 * 6 + 2) as f64 + 0.5).collect::<Vec<_>>());
+        assert!(spectrum[KEY_ERR].is_null(), "a LIGHTSTACK cube has no ERR plane");
+
+        let png = dir.path().join("plane9.png");
+        let fits = dir.path().join("plane9.fits");
+        cube_frame_json(key, 9, png.to_str().unwrap(), Some(fits.to_str().unwrap())).unwrap();
+        let exported = reopen(fits.to_str().unwrap());
+        assert_eq!(exported.header.get("FILTER"), Some("F480M"), "an exported plane names its filter");
+        assert_eq!(exported.image[[3, 2]], (900 + 3 * 6 + 2) as f32 + 0.5);
+        GLOBAL_CUBE_CACHE.invalidate(key);
+
+        let small = dir.path().join("datacube_acs.fits");
+        write_bytes(&small, &lightstack_cube_bytes(&filters[..4], 6, 5, |z, _, _| z as f64));
+        let small_key = small.to_str().unwrap();
+        let info = cube_info_json(small_key).unwrap();
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][KEY_IS_PHOTOMETRIC], false);
+        assert!(info[RES_SPECTRAL_CLASSIFICATION][RES_SPECTRAL_REASON].as_str().unwrap().contains("likely RGB"));
+        assert_eq!(info[KEY_PHOTOMETRIC_PLANES].as_array().map(Vec::len), Some(4), "four labelled planes keep their labels");
+        GLOBAL_CUBE_CACHE.invalidate(small_key);
+
+        let plain = dir.path().join("plain_line.fits");
+        write_line_cube(&plain, 0.0);
+        let plain_key = plain.to_str().unwrap();
+        assert!(cube_info_json(plain_key).unwrap()[KEY_PHOTOMETRIC_PLANES].is_null());
+        GLOBAL_CUBE_CACHE.invalidate(plain_key);
+    }
+
+    #[test]
+    fn a_point_spectrum_carries_the_err_cube_at_that_pixel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sci_err_s3d.fits");
+        write_mef_cube(&path, 4, 3, 6, &[("SCI", 1.0), ("ERR", 0.5), ("DQ", 0.0)]);
+        let key = path.to_str().unwrap();
+        let spectrum = cube_spectrum_json(key, 1, 2).unwrap();
+        let err: Vec<f64> = spectrum[KEY_ERR].as_array().expect("ERR at the pixel").iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!(err, (0..6).map(|z| 0.5 + z as f64).collect::<Vec<_>>(), "the ERR fixture holds 0.5 + plane index");
+        let err_key = format!("{key}#hdu=2");
+        assert!(cube_spectrum_json(&err_key, 1, 2).unwrap()[KEY_ERR].is_null(), "the ERR extension itself has no ERR companion");
+        for hdu in ["", "#hdu=2"] {
+            GLOBAL_CUBE_CACHE.invalidate(&format!("{key}{hdu}"));
+        }
     }
 
     #[test]

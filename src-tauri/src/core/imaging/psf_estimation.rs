@@ -3,9 +3,18 @@ use std::f64::consts::{LN_2, PI};
 use ndarray::{Array2, s};
 use serde::{Deserialize, Serialize};
 
+use crate::core::cubeprep::cube::set_text;
+use crate::core::cubeprep::psf_io::{normalize_psf, psf_header_base, set_local_psf_wcs};
+use crate::core::imaging::push_history;
+use crate::core::imaging::region::RegionSystem;
+use crate::core::imaging::region_file::{parse_lat, parse_lon, Region};
 use crate::core::imaging::stats::is_valid_pixel;
-use crate::math::median::{exact_mad_mut, exact_median_mut};
+use crate::math::bspline::{shift, zoom, SplineMode};
+use crate::math::gauss_newton::solve_linear;
+use crate::math::median::{exact_mad_mut, exact_median_f64, exact_median_mut};
+use crate::math::sigma_clip::std_clipped_stats;
 use crate::types::constants::MAD_TO_SIGMA;
+use crate::types::header::HduHeader;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StarCandidate {
@@ -55,10 +64,11 @@ pub struct PsfResult {
     pub spread_pixels: f64,
 }
 
-pub fn estimate_psf(
-    image: &Array2<f32>,
-    config: &PsfEstimationConfig,
-) -> Result<PsfResult, String> {
+pub fn propose_psf_stars(image: &Array2<f32>, config: &PsfEstimationConfig) -> Result<Vec<StarCandidate>, String> {
+    select_psf_stars(image, config).map(|(selected, _)| selected)
+}
+
+fn select_psf_stars(image: &Array2<f32>, config: &PsfEstimationConfig) -> Result<(Vec<StarCandidate>, usize), String> {
     let (h, w) = image.dim();
     let cx = w as f64 / 2.0;
     let cy = h as f64 / 2.0;
@@ -103,8 +113,15 @@ pub fn estimate_psf(
     }
 
     candidates.sort_by(|a, b| score_star(b).total_cmp(&score_star(a)));
+    candidates.truncate(config.num_stars);
+    Ok((candidates, detected_total))
+}
 
-    let selected: Vec<&StarCandidate> = candidates.iter().take(config.num_stars).collect();
+pub fn estimate_psf(
+    image: &Array2<f32>,
+    config: &PsfEstimationConfig,
+) -> Result<PsfResult, String> {
+    let (selected, detected_total) = select_psf_stars(image, config)?;
 
     let cutout_size = config.cutout_radius * 2 + 1;
     let mut psf_sum = Array2::<f64>::zeros((cutout_size, cutout_size));
@@ -144,7 +161,7 @@ pub fn estimate_psf(
         kernel_size: cutout_size,
         average_fwhm: avg_fwhm,
         average_ellipticity: avg_ellip,
-        stars_used: selected.into_iter().cloned().collect(),
+        stars_used: selected,
         stars_rejected: detected_total.saturating_sub(count),
         spread_pixels: spread,
     })
@@ -833,6 +850,572 @@ fn compute_spread_radius(psf: &Array2<f64>) -> f64 {
     }
 }
 
+pub const QUADRATIC_FIT_BOXSIZE: usize = 5;
+const BACKGROUND_CLIP_ITERATIONS: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PsfStack {
+    Median,
+    Mean,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RadiusUnit {
+    Pixel,
+    Arcsec,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmpiricalPsfOptions {
+    pub cutout_size: usize,
+    pub background_border: usize,
+    pub background_sigma: f64,
+    pub clip_negative: bool,
+    pub noise_threshold: Option<f64>,
+    pub radial_cleaning: bool,
+    pub cleaning_sigma: f64,
+    pub cleaning_consecutive_bins: usize,
+    pub normalization_radius: f64,
+    pub normalization_radius_unit: RadiusUnit,
+    pub psf_size: usize,
+    pub oversampling: Option<usize>,
+    pub stack: PsfStack,
+}
+
+impl Default for EmpiricalPsfOptions {
+    fn default() -> Self {
+        Self {
+            cutout_size: 61,
+            background_border: 10,
+            background_sigma: 4.0,
+            clip_negative: true,
+            noise_threshold: Some(0.5),
+            radial_cleaning: false,
+            cleaning_sigma: 1.0,
+            cleaning_consecutive_bins: 3,
+            normalization_radius: 20.0,
+            normalization_radius_unit: RadiusUnit::Pixel,
+            psf_size: 51,
+            oversampling: None,
+            stack: PsfStack::Median,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PsfStar {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CentroidMethod {
+    Quadratic,
+    Peak,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StarReport {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub used: bool,
+    pub rejected: Option<String>,
+    pub centroid: Option<CentroidMethod>,
+    pub centre_x: Option<f64>,
+    pub centre_y: Option<f64>,
+    pub background: Option<f64>,
+    pub background_std: Option<f64>,
+    pub cleaning_radius: Option<f64>,
+    pub aperture_flux: Option<f64>,
+    pub profile: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmpiricalPsf {
+    pub psf: Array2<f64>,
+    pub oversampled: Option<Array2<f64>>,
+    pub stars: Vec<StarReport>,
+    pub normalization_radius_px: f64,
+    pub profile: Vec<f64>,
+}
+
+impl EmpiricalPsf {
+    pub fn stars_used(&self) -> usize {
+        self.stars.iter().filter(|star| star.used).count()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PsfHeaderLabels<'a> {
+    pub filter: Option<&'a str>,
+    pub dataset: Option<&'a str>,
+    pub pixel_scale_arcsec: Option<f64>,
+    pub stars_used: usize,
+}
+
+pub fn build_empirical_psf(
+    image: &Array2<f32>,
+    stars: &[PsfStar],
+    pixel_scale_arcsec: Option<f64>,
+    options: &EmpiricalPsfOptions,
+) -> Result<EmpiricalPsf, String> {
+    validate_recipe(options)?;
+    let radius = normalization_radius_px(options, pixel_scale_arcsec)?;
+    if stars.is_empty() {
+        return Err("no star given; list stars from regions, coordinates or the automatic finder".into());
+    }
+    let measured: Vec<(StarReport, Option<Array2<f64>>)> = stars.iter().map(|star| measure_star(image, star, radius, options)).collect();
+    let cutouts: Vec<&Array2<f64>> = measured.iter().filter_map(|(_, cutout)| cutout.as_ref()).collect();
+    if cutouts.is_empty() {
+        let reasons: Vec<String> = measured
+            .iter()
+            .map(|(report, _)| format!("{}: {}", report.name, report.rejected.as_deref().unwrap_or_default()))
+            .collect();
+        return Err(format!("no star could be used ({})", reasons.join("; ")));
+    }
+    let stacked = stack_cutouts(&cutouts, options.stack);
+    let psf = normalize_psf(&centre_crop(&stacked, options.psf_size)).map_err(|error| error.to_string())?;
+    let oversampled = options
+        .oversampling
+        .map(|factor| normalize_psf(&zoom(&psf, [factor as f64, factor as f64], SplineMode::Nearest)).map_err(|error| error.to_string()))
+        .transpose()?;
+    Ok(EmpiricalPsf {
+        profile: radial_profile(&psf),
+        psf,
+        oversampled,
+        stars: measured.into_iter().map(|(report, _)| report).collect(),
+        normalization_radius_px: radius,
+    })
+}
+
+fn validate_recipe(options: &EmpiricalPsfOptions) -> Result<(), String> {
+    for (name, value) in [("cutout_size", options.cutout_size), ("psf_size", options.psf_size)] {
+        if value % 2 == 0 {
+            return Err(format!("{name} must be a positive odd number of pixels, got {value}"));
+        }
+    }
+    if options.psf_size > options.cutout_size {
+        return Err(format!("psf_size ({}) cannot be larger than cutout_size ({})", options.psf_size, options.cutout_size));
+    }
+    if options.oversampling == Some(0) {
+        return Err("oversampling must be a positive integer".into());
+    }
+    if options.background_border == 0 {
+        return Err("background_border must be at least 1 pixel".into());
+    }
+    if !(options.background_sigma.is_finite() && options.background_sigma > 0.0) {
+        return Err(format!("background_sigma must be a positive number, got {}", options.background_sigma));
+    }
+    if options.radial_cleaning && options.cleaning_consecutive_bins == 0 {
+        return Err("cleaning_consecutive_bins must be at least 1".into());
+    }
+    Ok(())
+}
+
+fn normalization_radius_px(options: &EmpiricalPsfOptions, pixel_scale_arcsec: Option<f64>) -> Result<f64, String> {
+    let radius = match options.normalization_radius_unit {
+        RadiusUnit::Pixel => options.normalization_radius,
+        RadiusUnit::Arcsec => {
+            let scale = pixel_scale_arcsec
+                .filter(|scale| scale.is_finite() && *scale > 0.0)
+                .ok_or("an aperture radius in arcsec needs the pixel scale; the image has no celestial WCS, so give pixel_scale_arcsec")?;
+            options.normalization_radius / scale
+        }
+    };
+    if radius.is_finite() && radius > 0.0 {
+        Ok(radius)
+    } else {
+        Err(format!("normalization_radius must be positive, got {radius} px"))
+    }
+}
+
+fn measure_star(image: &Array2<f32>, star: &PsfStar, radius: f64, options: &EmpiricalPsfOptions) -> (StarReport, Option<Array2<f64>>) {
+    let mut report = StarReport {
+        name: star.name.clone(),
+        x: star.x,
+        y: star.y,
+        used: false,
+        rejected: None,
+        centroid: None,
+        centre_x: None,
+        centre_y: None,
+        background: None,
+        background_std: None,
+        cleaning_radius: None,
+        aperture_flux: None,
+        profile: Vec::new(),
+    };
+    match normalized_cutout(image, star, radius, options, &mut report) {
+        Ok(cutout) => {
+            report.used = true;
+            report.profile = radial_profile(&cutout);
+            (report, Some(cutout))
+        }
+        Err(reason) => {
+            report.rejected = Some(reason);
+            (report, None)
+        }
+    }
+}
+
+fn normalized_cutout(
+    image: &Array2<f32>,
+    star: &PsfStar,
+    radius: f64,
+    options: &EmpiricalPsfOptions,
+    report: &mut StarReport,
+) -> Result<Array2<f64>, String> {
+    let size = options.cutout_size;
+    let cutout = partial_cutout(image, star.x, star.y, size).ok_or("the cutout lies outside the image")?;
+    let (corrected, background, background_std) =
+        subtract_border_background(&cutout, options.background_border, options.background_sigma, options.clip_negative, options.noise_threshold)
+            .ok_or("no finite pixel in the background border")?;
+    report.background = Some(background);
+    report.background_std = Some(background_std);
+    let (x, y, method) = measure_centre(&corrected).ok_or("no finite pixel in the cutout")?;
+    let (x0, y0) = cutout_origin(star.x, star.y, size);
+    report.centroid = Some(method);
+    report.centre_x = Some(x0 as f64 + x);
+    report.centre_y = Some(y0 as f64 + y);
+    let (centred, missing) = recentre(&corrected, x, y);
+    let cleaned = if options.radial_cleaning {
+        let (cleaned, cleaning_radius) = clean_radially(&centred, background_std, options.cleaning_sigma, options.cleaning_consecutive_bins);
+        report.cleaning_radius = cleaning_radius.map(|bin| bin as f64);
+        cleaned
+    } else {
+        centred
+    };
+    let (rows, cols) = cleaned.dim();
+    let inside = |r: usize, c: usize| radius_at(rows, cols, r, c) <= radius;
+    if cleaned.indexed_iter().any(|((r, c), v)| v.is_nan() && missing[[r, c]] && inside(r, c)) {
+        return Err(format!("missing or off-image pixels fall inside the {radius} px normalization aperture"));
+    }
+    let flux: f64 = cleaned.indexed_iter().filter(|((r, c), v)| !v.is_nan() && inside(*r, *c)).map(|(_, v)| *v).sum();
+    report.aperture_flux = Some(flux);
+    if !(flux.is_finite() && flux > 0.0) {
+        return Err(format!("the aperture flux {flux} is not positive"));
+    }
+    Ok(cleaned.mapv(|v| v / flux))
+}
+
+fn radius_at(rows: usize, cols: usize, r: usize, c: usize) -> f64 {
+    (c as f64 - (cols as f64 - 1.0) / 2.0).hypot(r as f64 - (rows as f64 - 1.0) / 2.0)
+}
+
+fn cutout_origin(x: f64, y: f64, size: usize) -> (i64, i64) {
+    let half = size as f64 / 2.0;
+    ((x - half).ceil() as i64, (y - half).ceil() as i64)
+}
+
+fn partial_cutout(image: &Array2<f32>, x: f64, y: f64, size: usize) -> Option<Array2<f64>> {
+    if !(x.is_finite() && y.is_finite()) {
+        return None;
+    }
+    let (rows, cols) = image.dim();
+    let (x0, y0) = cutout_origin(x, y, size);
+    let reach = size as i64;
+    if x0 >= cols as i64 || y0 >= rows as i64 || x0 + reach <= 0 || y0 + reach <= 0 {
+        return None;
+    }
+    Some(Array2::from_shape_fn((size, size), |(r, c)| {
+        let (row, col) = (y0 + r as i64, x0 + c as i64);
+        if row >= 0 && col >= 0 && row < rows as i64 && col < cols as i64 {
+            image[[row as usize, col as usize]] as f64
+        } else {
+            f64::NAN
+        }
+    }))
+}
+
+fn subtract_border_background(
+    cutout: &Array2<f64>,
+    border: usize,
+    sigma: f64,
+    clip_negative: bool,
+    noise_threshold: Option<f64>,
+) -> Option<(Array2<f64>, f64, f64)> {
+    let (rows, cols) = cutout.dim();
+    let values: Vec<f64> = cutout
+        .indexed_iter()
+        .filter(|((r, c), _)| *r < border || *c < border || *r + border >= rows || *c + border >= cols)
+        .map(|(_, v)| *v)
+        .collect();
+    let stats = std_clipped_stats(&values, sigma, BACKGROUND_CLIP_ITERATIONS);
+    if stats.count == 0 {
+        return None;
+    }
+    let corrected = cutout.mapv(|v| {
+        let difference = v - stats.median;
+        let difference = if clip_negative && difference < 0.0 { 0.0 } else { difference };
+        match noise_threshold {
+            Some(threshold) if difference < threshold * stats.std => 0.0,
+            _ => difference,
+        }
+    });
+    Some((corrected, stats.median, stats.std))
+}
+
+fn finite_argmax(data: &Array2<f64>) -> Option<(usize, usize)> {
+    let mut best: Option<((usize, usize), f64)> = None;
+    for (at, &value) in data.indexed_iter() {
+        if value.is_finite() && best.is_none_or(|(_, top)| value > top) {
+            best = Some((at, value));
+        }
+    }
+    best.map(|(at, _)| at)
+}
+
+fn fit_window(peak: usize, size: usize, len: usize) -> (usize, usize) {
+    let mut start = peak.saturating_sub(size / 2);
+    let mut end = (peak + size / 2 + 1).min(len);
+    if end - start < size {
+        if start == 0 {
+            end = size.min(len);
+        }
+        if end == len {
+            start = len.saturating_sub(size);
+        }
+    }
+    (start, end)
+}
+
+pub fn centroid_quadratic(data: &Array2<f64>, fit_boxsize: usize) -> Option<(f64, f64)> {
+    let (rows, cols) = data.dim();
+    let (peak_row, peak_col) = finite_argmax(data)?;
+    if peak_row == 0 || peak_col == 0 || peak_row + 1 == rows || peak_col + 1 == cols {
+        return Some((peak_col as f64, peak_row as f64));
+    }
+    let odd = |len: usize| {
+        let clamped = fit_boxsize.min(len);
+        if clamped % 2 == 0 { clamped.saturating_sub(1) } else { clamped }
+    };
+    let (row_start, row_end) = fit_window(peak_row, odd(rows), rows);
+    let (col_start, col_end) = fit_window(peak_col, odd(cols), cols);
+    let mut normal = vec![vec![0.0; 6]; 6];
+    let mut rhs = vec![0.0; 6];
+    let mut points = 0usize;
+    let (mut fitted_rows, mut fitted_cols) = (Vec::new(), Vec::new());
+    for r in row_start..row_end {
+        for c in col_start..col_end {
+            let value = data[[r, c]];
+            if !value.is_finite() {
+                continue;
+            }
+            let (x, y) = (c as f64 - peak_col as f64, r as f64 - peak_row as f64);
+            let basis = [1.0, x, y, x * y, x * x, y * y];
+            for (i, row) in normal.iter_mut().enumerate() {
+                rhs[i] += basis[i] * value;
+                for (j, cell) in row.iter_mut().enumerate() {
+                    *cell += basis[i] * basis[j];
+                }
+            }
+            points += 1;
+            if !fitted_rows.contains(&r) {
+                fitted_rows.push(r);
+            }
+            if !fitted_cols.contains(&c) {
+                fitted_cols.push(c);
+            }
+        }
+    }
+    if points < 6 || fitted_rows.len() < 3 || fitted_cols.len() < 3 {
+        return None;
+    }
+    let coefficients = solve_linear(&mut normal, &mut rhs)?;
+    let [_, c10, c01, c11, c20, c02] = coefficients[..] else {
+        return None;
+    };
+    let det = 4.0 * c20 * c02 - c11 * c11;
+    if det <= 0.0 || c20 > 0.0 {
+        return None;
+    }
+    let x = (c01 * c11 - 2.0 * c02 * c10) / det + peak_col as f64;
+    let y = (c10 * c11 - 2.0 * c20 * c01) / det + peak_row as f64;
+    let inside = |v: f64, len: usize| v > 0.0 && v < (len - 1) as f64;
+    (inside(x, cols) && inside(y, rows)).then_some((x, y))
+}
+
+fn measure_centre(data: &Array2<f64>) -> Option<(f64, f64, CentroidMethod)> {
+    if let Some((x, y)) = centroid_quadratic(data, QUADRATIC_FIT_BOXSIZE) {
+        return Some((x, y, CentroidMethod::Quadratic));
+    }
+    finite_argmax(data).map(|(r, c)| (c as f64, r as f64, CentroidMethod::Peak))
+}
+
+fn support_has_missing(data: &Array2<f64>, y: f64, x: f64) -> bool {
+    let (rows, cols) = data.dim();
+    let span = |coordinate: f64, len: usize| {
+        let floor = coordinate.floor() as i64;
+        ((floor - 1).max(0) as usize)..=((floor + 2).min(len as i64 - 1) as usize)
+    };
+    span(y, rows).any(|r| span(x, cols).any(|c| !data[[r, c]].is_finite()))
+}
+
+fn recentre(data: &Array2<f64>, x: f64, y: f64) -> (Array2<f64>, Array2<bool>) {
+    let (rows, cols) = data.dim();
+    let offset = [(rows as f64 - 1.0) / 2.0 - y, (cols as f64 - 1.0) / 2.0 - x];
+    let mut missing = Array2::from_elem((rows, cols), false);
+    if data.iter().all(|v| v.is_finite()) {
+        return (shift(data, offset, SplineMode::Constant(f64::NAN)), missing);
+    }
+    let filled = data.mapv(|v| if v.is_finite() { v } else { 0.0 });
+    let mut shifted = shift(&filled, offset, SplineMode::Constant(f64::NAN));
+    for ((r, c), value) in shifted.indexed_iter_mut() {
+        if !value.is_nan() && support_has_missing(data, r as f64 - offset[0], c as f64 - offset[1]) {
+            *value = f64::NAN;
+            missing[[r, c]] = true;
+        }
+    }
+    (shifted, missing)
+}
+
+fn radial_profile(image: &Array2<f64>) -> Vec<f64> {
+    let (rows, cols) = image.dim();
+    let (mut sums, mut counts): (Vec<f64>, Vec<usize>) = (Vec::new(), Vec::new());
+    for ((r, c), &value) in image.indexed_iter() {
+        let bin = radius_at(rows, cols, r, c) as usize;
+        if bin >= sums.len() {
+            sums.resize(bin + 1, 0.0);
+            counts.resize(bin + 1, 0);
+        }
+        if !value.is_nan() {
+            sums[bin] += value;
+            counts[bin] += 1;
+        }
+    }
+    sums.iter().zip(&counts).map(|(sum, &count)| if count > 0 { sum / count as f64 } else { f64::NAN }).collect()
+}
+
+fn clean_radially(image: &Array2<f64>, background_std: f64, sigma: f64, consecutive: usize) -> (Array2<f64>, Option<usize>) {
+    let threshold = sigma * background_std;
+    let below: Vec<bool> = radial_profile(image).iter().map(|v| v.is_finite() && *v < threshold).collect();
+    let Some(radius) = (0..(below.len() + 1).saturating_sub(consecutive)).find(|&i| below[i..i + consecutive].iter().all(|b| *b)) else {
+        return (image.clone(), None);
+    };
+    let (rows, cols) = image.dim();
+    let cleaned = Array2::from_shape_fn((rows, cols), |(r, c)| if radius_at(rows, cols, r, c) > radius as f64 { 0.0 } else { image[[r, c]] });
+    (cleaned, Some(radius))
+}
+
+fn stack_cutouts(cutouts: &[&Array2<f64>], method: PsfStack) -> Array2<f64> {
+    let mut values = Vec::with_capacity(cutouts.len());
+    Array2::from_shape_fn(cutouts[0].dim(), |at| {
+        values.clear();
+        values.extend(cutouts.iter().map(|cutout| cutout[at]).filter(|v| !v.is_nan()));
+        if values.is_empty() {
+            return f64::NAN;
+        }
+        match method {
+            PsfStack::Median => exact_median_f64(&values),
+            PsfStack::Mean => values.iter().sum::<f64>() / values.len() as f64,
+        }
+    })
+}
+
+fn centre_crop(image: &Array2<f64>, size: usize) -> Array2<f64> {
+    let (rows, cols) = image.dim();
+    let (r0, c0) = ((rows - size) / 2, (cols - size) / 2);
+    image.slice(s![r0..r0 + size, c0..c0 + size]).to_owned()
+}
+
+pub fn stars_from_regions(regions: &[Region]) -> Vec<PsfStar> {
+    regions
+        .iter()
+        .filter(|region| region.props.include)
+        .enumerate()
+        .map(|(index, region)| {
+            let (x, y) = region.shape.centre();
+            let name = region
+                .props
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map_or_else(|| format!("region{}", index + 1), str::to_string);
+            PsfStar { name, x, y }
+        })
+        .collect()
+}
+
+pub fn parse_radec_list(text: &str) -> Result<Vec<(String, f64, f64)>, String> {
+    let mut stars = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split(|c: char| c == ',' || c.is_whitespace()).filter(|token| !token.is_empty()).collect();
+        let at = |message: String| format!("line {}: {message}", index + 1);
+        if tokens.len() < 2 {
+            return Err(at(format!("expected RA and Dec, got '{line}'")));
+        }
+        let ra = parse_lon(tokens[0], RegionSystem::Icrs).map_err(|error| at(error.to_string()))?;
+        let dec = parse_lat(tokens[1]).map_err(|error| at(error.to_string()))?;
+        if !(ra.is_finite() && dec.is_finite() && dec.abs() <= 90.0) {
+            return Err(at(format!("RA {ra} and Dec {dec} are not sky coordinates in degrees")));
+        }
+        let name = if tokens.len() > 2 { tokens[2..].join(" ") } else { format!("star{}", stars.len() + 1) };
+        stars.push((name, ra, dec));
+    }
+    if stars.is_empty() {
+        return Err("the list holds no star; give one RA and Dec per line".into());
+    }
+    Ok(stars)
+}
+
+pub fn empirical_psf_header(
+    data: &Array2<f64>,
+    labels: &PsfHeaderLabels,
+    options: &EmpiricalPsfOptions,
+    oversampling: Option<usize>,
+) -> HduHeader {
+    let (rows, cols) = data.dim();
+    let scale = labels.pixel_scale_arcsec.map(|scale| scale / oversampling.unwrap_or(1) as f64);
+    let mut header = psf_header_base();
+    if let Some(scale) = scale {
+        set_local_psf_wcs(&mut header, rows, cols, scale);
+    }
+    set_text(&mut header, "BUNIT", "normalized");
+    if let Some(filter) = labels.filter {
+        set_text(&mut header, "FILTER", &filter.to_uppercase());
+    }
+    if let Some(dataset) = labels.dataset {
+        set_text(&mut header, "DATASET", &dataset.to_uppercase());
+    }
+    header.set("NSTARS", labels.stars_used.to_string());
+    header.set("CUTSIZE", options.cutout_size.to_string());
+    header.set("PSFSIZE", oversampling.map_or(options.psf_size, |_| rows).to_string());
+    header.set_f64("APRAD", options.normalization_radius);
+    let unit = match options.normalization_radius_unit {
+        RadiusUnit::Pixel => "pixel",
+        RadiusUnit::Arcsec => "arcsec",
+    };
+    set_text(&mut header, "APRUNIT", unit);
+    if let Some(scale) = scale {
+        header.set_f64("PIXSCALE", scale);
+    }
+    let method = match options.stack {
+        PsfStack::Median => "median",
+        PsfStack::Mean => "mean",
+    };
+    set_text(&mut header, "METHOD", method);
+    if let Some(factor) = oversampling {
+        header.set("OVERSAMP", factor.to_string());
+    }
+    push_history(&mut header, "Empirical PSF constructed from stellar cutouts.");
+    push_history(&mut header, "PSF WCS is local and independent of the science-image WCS.");
+    if let Some(factor) = oversampling {
+        push_history(&mut header, &format!("PSF oversampled by {factor} with a cubic B-spline zoom (scipy.ndimage.zoom semantics, nearest mode)."));
+    }
+    header
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1108,6 +1691,17 @@ mod tests {
     }
 
     #[test]
+    fn proposed_stars_are_the_stars_the_automatic_estimate_uses() {
+        let (image, _) = star_field_with_nan_rings();
+        let config = PsfEstimationConfig { num_stars: 12, ..PsfEstimationConfig::default() };
+        let proposed = propose_psf_stars(&image, &config).expect("proposals");
+        let used = estimate_psf(&image, &config).expect("psf").stars_used;
+        assert_eq!(proposed.len(), 12);
+        let positions = |stars: &[StarCandidate]| stars.iter().map(|s| (s.x, s.y)).collect::<Vec<_>>();
+        assert_eq!(positions(&proposed), positions(&used));
+    }
+
+    #[test]
     fn flat_topped_star_is_rejected_as_saturated() {
         let mut image = noisy_background(256, 256, 100.0, 0.5, 99);
         add_star(&mut image, 100, 128, 30000.0, 1.7);
@@ -1116,5 +1710,495 @@ mod tests {
         let psf = estimate_psf(&image, &PsfEstimationConfig::default()).expect("psf");
         assert!(has_star_near(&psf, 156.0, 128.0, 1.0), "unsaturated star rejected: {:?}", psf.stars_used);
         assert!(!has_star_near(&psf, 100.0, 128.0, 3.0), "clipped star used: {:?}", psf.stars_used);
+    }
+}
+
+#[cfg(test)]
+mod empirical_tests {
+    use super::*;
+    use crate::core::cubeprep::psf_io::normalize_psf;
+    use crate::core::imaging::region::RegionShape;
+    use crate::core::imaging::region_file::RegionProperties;
+    use crate::math::bspline::{shift, zoom, SplineMode};
+    use crate::math::sigma_clip::std_clipped_stats;
+
+    const STAMP: usize = 41;
+    const STAMP_CENTRE: (f64, f64) = (20.3, 20.6);
+
+    fn gaussian_stamp(side: usize, x: f64, y: f64, flux: f64, sigma: f64) -> Array2<f32> {
+        let norm = flux / (2.0 * PI * sigma * sigma);
+        Array2::from_shape_fn((side, side), |(r, c)| {
+            let d2 = (c as f64 - x).powi(2) + (r as f64 - y).powi(2);
+            (norm * (-0.5 * d2 / (sigma * sigma)).exp()) as f32
+        })
+    }
+
+    fn paste(image: &mut Array2<f32>, stamp: &Array2<f32>, row: usize, col: usize) {
+        let (h, w) = stamp.dim();
+        let mut target = image.slice_mut(s![row..row + h, col..col + w]);
+        target += stamp;
+    }
+
+    fn add_gaussian(image: &mut Array2<f32>, x: f64, y: f64, flux: f64, sigma: f64) {
+        let norm = flux / (2.0 * PI * sigma * sigma);
+        for ((r, c), value) in image.indexed_iter_mut() {
+            let d2 = (c as f64 - x).powi(2) + (r as f64 - y).powi(2);
+            if d2 < (8.0 * sigma).powi(2) {
+                *value += (norm * (-0.5 * d2 / (sigma * sigma)).exp()) as f32;
+            }
+        }
+    }
+
+    const CORNERS: [(usize, usize); 5] = [(20, 20), (20, 110), (20, 200), (120, 20), (120, 110)];
+
+    fn field_of(stamps: &[Array2<f32>]) -> (Array2<f32>, Vec<PsfStar>) {
+        let mut image = Array2::<f32>::from_elem((220, 300), 5.0);
+        let stars = stamps
+            .iter()
+            .zip(CORNERS)
+            .enumerate()
+            .map(|(i, (stamp, (row, col)))| {
+                paste(&mut image, stamp, row, col);
+                PsfStar { name: format!("s{}", i + 1), x: col as f64 + STAMP_CENTRE.0, y: row as f64 + STAMP_CENTRE.1 }
+            })
+            .collect();
+        (image, stars)
+    }
+
+    fn identical_star_field() -> (Array2<f32>, Vec<PsfStar>) {
+        let stamp = gaussian_stamp(STAMP, STAMP_CENTRE.0, STAMP_CENTRE.1, 5000.0, 1.8);
+        field_of(&vec![stamp; CORNERS.len()])
+    }
+
+    fn astropy_gaussian(shape: (usize, usize), amplitude: f64, xc: f64, yc: f64, xstd: f64, ystd: f64, theta: f64) -> Array2<f64> {
+        let (cos2, sin2, sin2t) = (theta.cos().powi(2), theta.sin().powi(2), (2.0 * theta).sin());
+        let (xs2, ys2) = (xstd * xstd, ystd * ystd);
+        let a = 0.5 * (cos2 / xs2 + sin2 / ys2);
+        let b = 0.5 * (sin2t / xs2 - sin2t / ys2);
+        let c = 0.5 * (sin2 / xs2 + cos2 / ys2);
+        Array2::from_shape_fn(shape, |(r, col)| {
+            let (dx, dy) = (col as f64 - xc, r as f64 - yc);
+            amplitude * (-(a * dx * dx + b * dx * dy + c * dy * dy)).exp()
+        })
+    }
+
+    fn radius_from_centre(rows: usize, cols: usize, r: usize, c: usize) -> f64 {
+        (c as f64 - (cols as f64 - 1.0) / 2.0).hypot(r as f64 - (rows as f64 - 1.0) / 2.0)
+    }
+
+    #[test]
+    fn median_stack_of_identical_stars_returns_that_star() {
+        let (image, stars) = identical_star_field();
+        let options = EmpiricalPsfOptions::default();
+        let one = build_empirical_psf(&image, &stars[..1], None, &options).expect("one star");
+        let all = build_empirical_psf(&image, &stars, None, &options).expect("all stars");
+        assert_eq!(all.stars_used(), stars.len(), "{:?}", all.stars);
+        assert_eq!(all.psf.dim(), (51, 51));
+        assert_eq!(all.psf, one.psf);
+        assert!((all.psf.sum() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn border_background_is_sigma_clipped() {
+        let size = 21;
+        let mut cutout = Array2::<f64>::from_shape_fn((size, size), |(r, c)| 10.0 + 0.1 * (((r * 7 + c * 13) % 11) as f64 - 5.0));
+        cutout[[0, 3]] = 900.0;
+        cutout[[1, 4]] = 700.0;
+        cutout[[20, 20]] = -500.0;
+        cutout[[10, 10]] = 60.0;
+        let border = 3;
+        let values: Vec<f64> = cutout
+            .indexed_iter()
+            .filter(|((r, c), _)| *r < border || *c < border || *r >= size - border || *c >= size - border)
+            .map(|(_, v)| *v)
+            .collect();
+        let expected = std_clipped_stats(&values, 4.0, 5);
+        assert_eq!(expected.count, values.len() - 3);
+        let (corrected, background, std) = subtract_border_background(&cutout, border, 4.0, true, Some(0.5)).expect("a background");
+        assert_eq!((background, std), (expected.median, expected.std));
+        let unclipped_mean = values.iter().sum::<f64>() / values.len() as f64;
+        assert!((unclipped_mean - background).abs() > 1.0, "the outliers would bias an unclipped mean: {unclipped_mean}");
+        for ((r, c), value) in cutout.indexed_iter() {
+            let difference = value - background;
+            let want = if difference < 0.0 || difference < 0.5 * std { 0.0 } else { difference };
+            assert_eq!(corrected[[r, c]], want, "pixel ({r}, {c})");
+        }
+        assert_eq!(corrected[[10, 10]], 60.0 - background);
+        let (kept, _, _) = subtract_border_background(&cutout, border, 4.0, false, None).unwrap();
+        assert_eq!(kept[[20, 20]], -500.0 - background);
+    }
+
+    #[test]
+    fn aperture_radius_in_arcsec_uses_pixel_scale() {
+        let (image, stars) = identical_star_field();
+        let in_pixels = EmpiricalPsfOptions { normalization_radius: 16.0, ..EmpiricalPsfOptions::default() };
+        let in_arcsec = EmpiricalPsfOptions {
+            normalization_radius: 0.5,
+            normalization_radius_unit: RadiusUnit::Arcsec,
+            ..EmpiricalPsfOptions::default()
+        };
+        let fluxes = |psf: &EmpiricalPsf| psf.stars.iter().map(|s| s.aperture_flux.expect("a flux")).collect::<Vec<_>>();
+        let by_pixels = build_empirical_psf(&image, &stars, None, &in_pixels).unwrap();
+        let by_arcsec = build_empirical_psf(&image, &stars, Some(0.03125), &in_arcsec).unwrap();
+        assert_eq!(by_arcsec.normalization_radius_px, 16.0);
+        assert_eq!(fluxes(&by_arcsec), fluxes(&by_pixels));
+        let coarse = build_empirical_psf(&image, &stars, Some(0.0625), &in_arcsec).unwrap();
+        assert_eq!(coarse.normalization_radius_px, 8.0);
+        assert!(fluxes(&coarse)[0] < fluxes(&by_pixels)[0]);
+        let missing = build_empirical_psf(&image, &stars, None, &in_arcsec).unwrap_err();
+        assert!(missing.contains("pixel scale"), "{missing}");
+    }
+
+    #[test]
+    fn quadratic_centroid_matches_photutils_reference() {
+        let near = |got: Option<(f64, f64)>, want: (f64, f64), tol: f64| {
+            let (x, y) = got.unwrap_or_else(|| panic!("no centroid, want {want:?}"));
+            assert!((x - want.0).abs() <= tol && (y - want.1).abs() <= tol, "got ({x}, {y}), want {want:?} within {tol}");
+        };
+        let mut spikes = Array2::<f64>::zeros((11, 11));
+        spikes[[5, 5]] = 100.0;
+        spikes[[7, 7]] = 110.0;
+        spikes[[9, 9]] = 120.0;
+        near(centroid_quadratic(&spikes, 3), (9.0, 9.0), 1e-9);
+
+        let mut edge = Array2::<f64>::zeros((11, 11));
+        edge[[1, 1]] = 100.0;
+        edge[[9, 9]] = 100.0;
+        near(centroid_quadratic(&edge, 5), (0.923077, 0.923077), 1e-6);
+
+        let mut corner = Array2::<f64>::zeros((5, 5));
+        corner[[0, 0]] = 100.0;
+        assert_eq!(centroid_quadratic(&corner, 5), Some((0.0, 0.0)));
+
+        for (xstd, ystd) in [(3.2, 5.7), (3.2, 4.1), (4.0, 5.7), (4.0, 4.1)] {
+            for theta in [30f64.to_radians(), 45f64.to_radians()] {
+                let mut data = astropy_gaussian((50, 47), 2.4, 25.7, 26.2, xstd, ystd, theta);
+                near(centroid_quadratic(&data, 5), (25.7, 26.2), 0.015);
+                data[[15, 11]] = f64::NAN;
+                near(centroid_quadratic(&data, 5), (25.7, 26.2), 0.015);
+            }
+        }
+
+        let wide = astropy_gaussian((51, 51), 2.4, 24.7, 25.2, 5.0, 5.0, 0.0).mapv(|v| if v < 1.0 { f64::NAN } else { v });
+        near(centroid_quadratic(&wide, 5), (24.7, 25.2), 0.01);
+
+        let mut holed = astropy_gaussian((11, 11), 100.0, 5.0, 5.0, 2.0, 2.0, 0.0);
+        holed[[5, 4]] = f64::NAN;
+        near(centroid_quadratic(&holed, 5), (5.0, 5.0), 0.01);
+
+        near(centroid_quadratic(&astropy_gaussian((4, 4), 10.0, 2.0, 2.0, 1.0, 1.0, 0.0), 5), (2.0, 2.0), 0.1);
+        near(centroid_quadratic(&astropy_gaussian((5, 5), 10.0, 2.0, 2.0, 1.0, 1.0, 0.0), 7), (2.0, 2.0), 0.1);
+        near(centroid_quadratic(&astropy_gaussian((16000, 31), 2.4, 15.7, 15980.2, 2.5, 2.5, 0.0), 5), (15.7, 15980.2), 0.03);
+
+        let mut sparse = Array2::<f64>::zeros((3, 3));
+        sparse[[1, 1]] = 1.0;
+        sparse.row_mut(0).fill(f64::NAN);
+        sparse.row_mut(2).fill(f64::NAN);
+        assert_eq!(centroid_quadratic(&sparse, 3), None);
+        assert_eq!(centroid_quadratic(&Array2::from_elem((11, 11), f64::NAN), 5), None);
+    }
+
+    fn binned_image(size: usize, bins: &[f64]) -> Array2<f64> {
+        Array2::from_shape_fn((size, size), |(r, c)| bins[radius_from_centre(size, size, r, c) as usize])
+    }
+
+    #[test]
+    fn radial_cleaning_radius_matches_lightstack() {
+        let bins = [50.0, 40.0, 30.0, 20.0, 10.0, 5.0, 3.0, 1.0, 1.5, 2.5, 1.0, 0.5, 0.2, 0.1, 0.1];
+        let mut image = binned_image(21, &bins);
+        image[[10, 13]] = f64::NAN;
+        image[[0, 0]] = f64::NAN;
+        let (cleaned, radius) = clean_radially(&image, 2.0, 1.0, 3);
+        assert_eq!(radius, Some(10), "bins 7 and 8 fall below 2.0 but bin 9 rises again, so the first run of three starts at bin 10");
+        for ((r, c), value) in image.indexed_iter() {
+            let got = cleaned[[r, c]];
+            if radius_from_centre(21, 21, r, c) > 10.0 {
+                assert_eq!(got, 0.0, "pixel ({r}, {c}) beyond the radius, NaN included");
+            } else {
+                assert!(got == *value || (got.is_nan() && value.is_nan()), "pixel ({r}, {c}) inside the radius changed");
+            }
+        }
+        assert_eq!(clean_radially(&image, 2.0, 1.0, 2).1, Some(7));
+        let (unchanged, none) = clean_radially(&image, 0.01, 1.0, 3);
+        assert_eq!(none, None);
+        assert!(unchanged.iter().zip(image.iter()).all(|(a, b)| a == b || (a.is_nan() && b.is_nan())));
+    }
+
+    #[test]
+    fn cutout_window_follows_cutout2d_partial_rounding() {
+        let image = Array2::<f32>::from_shape_fn((40, 50), |(r, c)| (r * 100 + c) as f32);
+        let at = |x: f64, y: f64| partial_cutout(&image, x, y, 5).expect("an overlapping cutout");
+        assert_eq!(at(10.3, 20.0)[[2, 2]], 2010.0);
+        assert_eq!(at(10.5, 20.5)[[2, 2]], 2010.0);
+        assert_eq!(at(10.51, 20.6)[[2, 2]], 2111.0);
+        let corner = at(0.2, 1.0);
+        assert!(corner[[0, 0]].is_nan() && corner[[1, 1]].is_nan() && corner[[0, 2]].is_nan());
+        assert_eq!((corner[[1, 2]], corner[[2, 2]]), (0.0, 100.0));
+        assert!(partial_cutout(&image, -10.0, 5.0, 5).is_none());
+        assert!(partial_cutout(&image, 60.0, 5.0, 5).is_none());
+        assert!(partial_cutout(&image, f64::NAN, 5.0, 5).is_none());
+    }
+
+    #[test]
+    fn peak_fallback_when_the_quadratic_fit_fails() {
+        let mut saddle = Array2::<f64>::zeros((11, 11));
+        for r in 3..8 {
+            for c in 3..8 {
+                let (x, y) = (c as f64 - 5.0, r as f64 - 5.0);
+                saddle[[r, c]] = 50.0 + 3.0 * x * x - 3.0 * y * y;
+            }
+        }
+        saddle[[5, 5]] = 100.0;
+        assert_eq!(centroid_quadratic(&saddle, QUADRATIC_FIT_BOXSIZE), None);
+        assert_eq!(measure_centre(&saddle), Some((5.0, 5.0, CentroidMethod::Peak)));
+        let smooth = astropy_gaussian((21, 21), 10.0, 10.3, 9.6, 2.0, 2.0, 0.0);
+        let (x, y, method) = measure_centre(&smooth).expect("a centre");
+        assert_eq!(method, CentroidMethod::Quadratic);
+        assert!((x - 10.272681150452682).abs() < 1e-9 && (y - 9.635425345767288).abs() < 1e-9, "numpy lstsq gives the same biased fit: ({x}, {y})");
+        assert_eq!(measure_centre(&Array2::from_elem((7, 7), f64::NAN)), None);
+    }
+
+    #[test]
+    fn recentring_without_missing_pixels_is_the_scipy_cubic_shift() {
+        let data = astropy_gaussian((15, 15), 10.0, 7.3, 6.8, 1.7, 1.7, 0.0);
+        let (shifted, missing) = recentre(&data, 7.3, 6.8);
+        let bits = |array: &Array2<f64>| array.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&shifted), bits(&shift(&data, [7.0 - 6.8, 7.0 - 7.3], SplineMode::Constant(f64::NAN))));
+        assert!(shifted.iter().any(|v| v.is_nan()) && missing.iter().all(|m| !m));
+    }
+
+    #[test]
+    fn missing_pixels_stay_local_when_recentring() {
+        let clean = astropy_gaussian((31, 31), 10.0, 15.4, 14.7, 1.8, 1.8, 0.0);
+        let mut holed = clean.clone();
+        holed[[15, 27]] = f64::NAN;
+        let (reference, _) = recentre(&clean, 15.4, 14.7);
+        let (shifted, missing) = recentre(&holed, 15.4, 14.7);
+        let masked: Vec<(usize, usize)> = missing.indexed_iter().filter(|(_, m)| **m).map(|(at, _)| at).collect();
+        assert!(!masked.is_empty() && masked.len() <= 16, "{masked:?}");
+        assert!(masked.iter().all(|&(r, c)| (r as i64 - 15).abs() <= 2 && (c as i64 - 27).abs() <= 2), "{masked:?}");
+        for ((r, c), value) in shifted.indexed_iter() {
+            if missing[[r, c]] {
+                assert!(value.is_nan());
+            } else if reference[[r, c]].is_finite() {
+                assert!((value - reference[[r, c]]).abs() < 2e-3, "pixel ({r}, {c}): {value} against {}", reference[[r, c]]);
+            }
+        }
+    }
+
+    #[test]
+    fn nan_inside_the_aperture_or_off_image_rejects_only_that_star() {
+        let (mut image, stars) = identical_star_field();
+        let (hole_x, hole_y) = (stars[0].x.round() as usize + 25, stars[0].y.round() as usize);
+        image[[hole_y, hole_x]] = f32::NAN;
+        let (core_x, core_y) = (stars[2].x.round() as usize + 5, stars[2].y.round() as usize);
+        image[[core_y, core_x]] = f32::NAN;
+        let options = EmpiricalPsfOptions::default();
+        let result = build_empirical_psf(&image, &stars, None, &options).expect("psf");
+        let used: Vec<bool> = result.stars.iter().map(|s| s.used).collect();
+        assert_eq!(used, vec![true, true, false, true, true]);
+        let reason = result.stars[2].rejected.as_deref().unwrap();
+        assert!(reason.contains("aperture"), "{reason}");
+        let (clean_image, clean_stars) = identical_star_field();
+        let clean = build_empirical_psf(&clean_image, &clean_stars, None, &options).unwrap();
+        assert_eq!(result.psf, clean.psf);
+
+        let mut edge = Array2::<f32>::from_elem((120, 150), 5.0);
+        add_gaussian(&mut edge, 22.3, 60.6, 5000.0, 1.8);
+        add_gaussian(&mut edge, 12.3, 20.6, 5000.0, 1.8);
+        add_gaussian(&mut edge, 90.3, 60.6, 5000.0, 1.8);
+        let edge_stars = [
+            PsfStar { name: "partial".into(), x: 22.3, y: 60.6 },
+            PsfStar { name: "clipped".into(), x: 12.3, y: 20.6 },
+            PsfStar { name: "inside".into(), x: 90.3, y: 60.6 },
+            PsfStar { name: "away".into(), x: -200.0, y: 60.0 },
+        ];
+        let result = build_empirical_psf(&edge, &edge_stars, None, &options).expect("psf");
+        let used: Vec<bool> = result.stars.iter().map(|s| s.used).collect();
+        assert_eq!(used, vec![true, false, true, false], "{:?}", result.stars);
+        assert!(result.stars[1].rejected.as_deref().unwrap().contains("aperture"));
+        assert!(result.stars[3].rejected.as_deref().unwrap().contains("outside the image"));
+        assert!(result.psf.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn stars_without_a_usable_cutout_are_rejected_with_reasons() {
+        let mut image = Array2::<f32>::from_elem((200, 200), 5.0);
+        image.slice_mut(s![100..200, 100..200]).fill(f32::NAN);
+        add_gaussian(&mut image, 50.3, 50.6, 5000.0, 1.8);
+        let stars = [
+            PsfStar { name: "star".into(), x: 50.3, y: 50.6 },
+            PsfStar { name: "blank".into(), x: 60.0, y: 150.0 },
+            PsfStar { name: "masked".into(), x: 150.0, y: 150.0 },
+            PsfStar { name: "gone".into(), x: 500.0, y: 50.0 },
+        ];
+        let options = EmpiricalPsfOptions::default();
+        let result = build_empirical_psf(&image, &stars, None, &options).expect("one usable star");
+        let reasons: Vec<Option<&str>> = result.stars.iter().map(|s| s.rejected.as_deref()).collect();
+        assert_eq!(reasons[0], None);
+        assert!(reasons[1].unwrap().contains("aperture flux"), "{reasons:?}");
+        assert!(reasons[2].unwrap().contains("no finite pixel"), "{reasons:?}");
+        assert!(reasons[3].unwrap().contains("outside the image"), "{reasons:?}");
+        let error = build_empirical_psf(&image, &stars[1..], None, &options).unwrap_err();
+        for name in ["blank", "masked", "gone"] {
+            assert!(error.contains(name), "{error}");
+        }
+    }
+
+    #[test]
+    fn mean_stack_is_kept_as_an_option() {
+        let narrow = gaussian_stamp(STAMP, STAMP_CENTRE.0, STAMP_CENTRE.1, 5000.0, 1.8);
+        let broad = gaussian_stamp(STAMP, STAMP_CENTRE.0, STAMP_CENTRE.1, 5000.0, 2.4);
+        let (image, stars) = field_of(&[narrow.clone(), narrow, broad]);
+        let median = EmpiricalPsfOptions::default();
+        let mean = EmpiricalPsfOptions { stack: PsfStack::Mean, ..EmpiricalPsfOptions::default() };
+        let only_narrow = build_empirical_psf(&image, &stars[..1], None, &median).unwrap().psf;
+        let only_broad = build_empirical_psf(&image, &stars[2..], None, &median).unwrap().psf;
+        assert_eq!(build_empirical_psf(&image, &stars, None, &median).unwrap().psf, only_narrow);
+        let averaged = build_empirical_psf(&image, &stars, None, &mean).unwrap().psf;
+        let expected = (&only_narrow * 2.0 + &only_broad) / 3.0;
+        let peak = expected.iter().copied().fold(0.0, f64::max);
+        let worst = averaged.iter().zip(expected.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        assert!(worst < 1e-5 * peak, "mean stack differs from the average by {worst}");
+    }
+
+    #[test]
+    fn oversampling_zooms_by_the_integer_factor_and_renormalises() {
+        let (image, stars) = identical_star_field();
+        let options = EmpiricalPsfOptions { oversampling: Some(2), ..EmpiricalPsfOptions::default() };
+        let result = build_empirical_psf(&image, &stars, None, &options).unwrap();
+        let oversampled = result.oversampled.as_ref().expect("an oversampled PSF");
+        assert_eq!(oversampled.dim(), (102, 102));
+        assert_eq!(oversampled, &normalize_psf(&zoom(&result.psf, [2.0, 2.0], SplineMode::Nearest)).unwrap());
+        assert!((oversampled.sum() - 1.0).abs() < 1e-12);
+        assert!(build_empirical_psf(&image, &stars, None, &EmpiricalPsfOptions::default()).unwrap().oversampled.is_none());
+    }
+
+    #[test]
+    fn recipe_options_are_validated() {
+        let (image, stars) = identical_star_field();
+        let check = |options: EmpiricalPsfOptions, needle: &str| {
+            let error = build_empirical_psf(&image, &stars, Some(0.04), &options).unwrap_err();
+            assert!(error.contains(needle), "{needle}: {error}");
+        };
+        let base = EmpiricalPsfOptions::default;
+        check(EmpiricalPsfOptions { cutout_size: 60, ..base() }, "cutout_size");
+        check(EmpiricalPsfOptions { psf_size: 50, ..base() }, "psf_size");
+        check(EmpiricalPsfOptions { psf_size: 63, ..base() }, "psf_size");
+        check(EmpiricalPsfOptions { oversampling: Some(0), ..base() }, "oversampling");
+        check(EmpiricalPsfOptions { normalization_radius: 0.0, ..base() }, "normalization_radius");
+        check(EmpiricalPsfOptions { background_border: 0, ..base() }, "background_border");
+        check(EmpiricalPsfOptions { background_sigma: -1.0, ..base() }, "background_sigma");
+        check(EmpiricalPsfOptions { radial_cleaning: true, cleaning_consecutive_bins: 0, ..base() }, "cleaning_consecutive_bins");
+        let none = build_empirical_psf(&image, &[], None, &base()).unwrap_err();
+        assert!(none.contains("no star"), "{none}");
+    }
+
+    #[test]
+    fn stars_come_from_included_regions_named_by_their_text() {
+        let region = |shape: RegionShape, text: Option<&str>, include: bool| Region {
+            shape,
+            props: RegionProperties { text: text.map(String::from), include, ..RegionProperties::default() },
+        };
+        let regions = [
+            region(RegionShape::Box { x: 10.0, y: 20.0, width: 5.0, height: 5.0, angle: 0.0 }, None, true),
+            region(RegionShape::Circle { x: 30.5, y: 40.25, r: 3.0 }, Some("bright"), true),
+            region(RegionShape::Point { x: 1.0, y: 2.0 }, None, false),
+            region(RegionShape::Point { x: 7.0, y: 8.0 }, None, true),
+        ];
+        assert_eq!(
+            stars_from_regions(&regions),
+            vec![
+                PsfStar { name: "region1".into(), x: 10.0, y: 20.0 },
+                PsfStar { name: "bright".into(), x: 30.5, y: 40.25 },
+                PsfStar { name: "region3".into(), x: 7.0, y: 8.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn radec_list_accepts_degrees_sexagesimal_and_names() {
+        let parsed = parse_radec_list("# ra dec name\n53.1625 -27.7914 alpha\n03:32:39.0, -27:47:29.04\n\n  53.16\t-27.79  gamma ray\n").unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], ("alpha".to_string(), 53.1625, -27.7914));
+        assert_eq!(parsed[1].0, "star2");
+        assert!((parsed[1].1 - 53.1625).abs() < 1e-9 && (parsed[1].2 + 27.7914).abs() < 1e-9, "{:?}", parsed[1]);
+        assert_eq!(parsed[2], ("gamma ray".to_string(), 53.16, -27.79));
+        let error = parse_radec_list("53.1\n12.0 abc\n").unwrap_err();
+        assert!(error.contains("line 1"), "{error}");
+        assert!(parse_radec_list("# nothing\n").unwrap_err().contains("no star"));
+    }
+
+    #[test]
+    fn empirical_psf_header_carries_the_lightstack_keywords() {
+        let psf = Array2::<f64>::from_elem((51, 51), 1.0 / 2601.0);
+        let labels = PsfHeaderLabels { filter: Some("f444w"), dataset: Some("jwst"), pixel_scale_arcsec: Some(0.04), stars_used: 7 };
+        let header = empirical_psf_header(&psf, &labels, &EmpiricalPsfOptions::default(), None);
+        for (key, value) in [
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+            ("CUNIT1", "deg"),
+            ("CUNIT2", "deg"),
+            ("BUNIT", "normalized"),
+            ("FILTER", "F444W"),
+            ("DATASET", "JWST"),
+            ("APRUNIT", "pixel"),
+            ("METHOD", "median"),
+        ] {
+            assert_eq!(header.get(key), Some(value), "{key}");
+            assert_eq!(header.is_string_value(key), Some(true), "{key}");
+        }
+        let close = |header: &HduHeader, key: &str, want: f64| {
+            let got = header.get_f64(key).unwrap_or_else(|| panic!("{key} is missing"));
+            assert!((got - want).abs() <= 1e-13 * want.abs(), "{key}: {got} against {want}");
+        };
+        for (key, value) in [
+            ("CRVAL1", 0.0),
+            ("CRVAL2", 0.0),
+            ("CRPIX1", 26.0),
+            ("CRPIX2", 26.0),
+            ("CD1_1", -0.04 / 3600.0),
+            ("CD1_2", 0.0),
+            ("CD2_1", 0.0),
+            ("CD2_2", 0.04 / 3600.0),
+            ("APRAD", 20.0),
+            ("PIXSCALE", 0.04),
+        ] {
+            close(&header, key, value);
+        }
+        for (key, value) in [("NSTARS", 7), ("CUTSIZE", 61), ("PSFSIZE", 51)] {
+            assert_eq!(header.get_i64(key), Some(value), "{key}");
+        }
+        assert!(header.get("OVERSAMP").is_none());
+        let history: Vec<&str> = header.cards.iter().filter(|(k, _)| k == "HISTORY").map(|(_, v)| v.as_str()).collect();
+        let joined = history.join(" ");
+        assert!(joined.contains("Empirical PSF constructed from stellar cutouts."), "{history:?}");
+        assert!(joined.contains("PSF WCS is local and independent of the science-image WCS."), "{history:?}");
+
+        let oversampled = Array2::<f64>::from_elem((102, 102), 1.0 / 10404.0);
+        let mean = EmpiricalPsfOptions {
+            stack: PsfStack::Mean,
+            normalization_radius: 0.8,
+            normalization_radius_unit: RadiusUnit::Arcsec,
+            ..EmpiricalPsfOptions::default()
+        };
+        let header = empirical_psf_header(&oversampled, &labels, &mean, Some(2));
+        close(&header, "PIXSCALE", 0.02);
+        close(&header, "CRPIX1", 51.5);
+        close(&header, "CD2_2", 0.02 / 3600.0);
+        assert_eq!(header.get_i64("PSFSIZE"), Some(102));
+        assert_eq!(header.get_i64("OVERSAMP"), Some(2));
+        assert_eq!(header.get_f64("APRAD"), Some(0.8));
+        assert_eq!(header.get("APRUNIT"), Some("arcsec"));
+        assert_eq!(header.get("METHOD"), Some("mean"));
+        assert!(header.cards.iter().any(|(k, v)| k == "HISTORY" && v.contains("oversampled")));
+
+        let bare = PsfHeaderLabels { filter: None, dataset: None, pixel_scale_arcsec: None, stars_used: 3 };
+        let header = empirical_psf_header(&psf, &bare, &EmpiricalPsfOptions::default(), None);
+        for key in ["CTYPE1", "CD1_1", "PIXSCALE", "FILTER", "DATASET"] {
+            assert!(header.get(key).is_none(), "{key}");
+        }
+        assert_eq!(header.get("BUNIT"), Some("normalized"));
+        assert_eq!(header.get_i64("NSTARS"), Some(3));
     }
 }

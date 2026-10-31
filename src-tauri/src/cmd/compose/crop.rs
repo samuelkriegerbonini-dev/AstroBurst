@@ -5,9 +5,10 @@ use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, output_stem, resolve_output_dir, write_derived_fits,
+    blocking_cmd, output_stem, resolve_output_dir, write_derived_fits,
     OutputValues,
 };
+use crate::service::common::derived_output_header;
 use crate::cmd::compose::overlay_preview::load_channel_entry;
 use crate::cmd::processing::source_header;
 use crate::core::imaging::cutout::{shift_header, CutoutRect};

@@ -1,71 +1,44 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
-use std::sync::{LazyLock, Mutex, MutexGuard};
+#[cfg(not(test))]
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result};
 use ndarray::Array2;
 use rayon::prelude::*;
 use serde_json::json;
 
-use crate::core::analysis::gain::{CAMERA_GAIN_KEYWORD, GAIN_KEYWORDS};
-use crate::core::analysis::photometry::SATURATION_KEYWORDS;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
-use crate::core::history::stamp::{file_stamp, FileStamp};
 use crate::core::imaging::dq_flags::DqTable;
 use crate::core::imaging::push_history;
 use crate::core::imaging::sampling::{cell_range, preview_dims};
 use crate::core::imaging::stats::{compute_image_stats, is_valid_pixel};
 use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig, ImageStats, StfParams};
-use crate::core::metadata::photcal::{
-    GENERIC_ZERO_POINT_KEYS, ROMAN_CONVERSION_MJY_KEYS, ROMAN_PIXEL_AREA_SR_KEYS,
-};
 use crate::infra::asdf::converter::is_asdf_file;
-use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry, PlaneLoad};
+use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry};
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::gzip::SharedTempDir;
 use crate::infra::fits::reader::extract_header_by_index;
-use crate::infra::fits::writer::{filter_header, is_layout_card, write_mef_images, HduData, ImageHdu};
-use crate::infra::image_source::{
-    load_companions_into, load_plane, load_plane_header, resolve_plane_info, LoadedPlane,
-};
+use crate::infra::fits::writer::{filter_header, write_mef_with_tables, BinTableHdu, HduData, ImageHdu};
+use crate::infra::image_source::{load_plane, resolve_plane_info};
 use crate::infra::render::grayscale::save_stf_png;
+use crate::service::common::derived_output_header;
 use crate::types::constants::{
-    HEADER_COMBINE_METHOD, HEADER_DISPLAY_REFERRED_CARD, HEADER_DRIZZLE_SCALE, HEADER_NCOMBINE, PLANE_KIND_ARRAY,
-    PLANE_KIND_HDU, RES_DQ_REF, RES_DQ_TABLE, RES_ERR_REF, RES_EXTNAME, RES_EXTVER, RES_INDEX, RES_IS_DQ, RES_IS_ERR,
-    RES_KEY, RES_KIND, RES_SOURCE_PATH, WIZARD_CACHE_PREFIX,
+    PLANE_KIND_ARRAY, PLANE_KIND_HDU, RES_DQ_REF, RES_DQ_TABLE, RES_ERR_REF, RES_EXTNAME, RES_EXTVER, RES_INDEX,
+    RES_IS_DQ, RES_IS_ERR, RES_KEY, RES_KIND, RES_SOURCE_PATH, WIZARD_CACHE_PREFIX,
 };
 use crate::types::header::{is_commentary_key, HduHeader};
 use crate::types::image_ref::{sanitize_fragment, ImageRef, OutputStems, PlaneSelector};
 
 pub(crate) use crate::infra::image_source::LoadedCompanions;
+pub(crate) use crate::service::common::{HEADER_ABPROC, HEADER_DISPLAY_REFERRED};
 
 pub(crate) const MAX_PREVIEW_DIM: usize = 4096;
-pub(crate) const HEADER_ABPROC: &str = "ABPROC";
-pub(crate) const HEADER_DISPLAY_REFERRED: &str = HEADER_DISPLAY_REFERRED_CARD;
 
-const DEFAULT_ABPROC: &str = "processed";
 const HEADER_PROGRAM: &str = "PROGRAM";
-const MAX_TRACKED_STAMPS: usize = 1024;
 const PREVIEW_PEAK_SIGNIFICANCE: f32 = 3.0;
 const READABLE_WIZARD_STEM_PREFIX: &str = "wizard_";
 
-const DERIVED_STRUCTURAL_CARDS: &[&str] = &["EXTNAME", "EXTVER", "EXTLEVEL", "INHERIT", "DATAMIN", "DATAMAX"];
-const AXIS_INDEXED_PREFIXES: &[&str] = &["NAXIS", "CTYPE", "CRVAL", "CRPIX", "CDELT", "CUNIT", "CROTA"];
-const AXIS_MATRIX_PREFIXES: &[&str] = &["CD", "PC"];
-const AXIS_PARAMETER_PREFIXES: &[&str] = &["PV", "PS"];
-const CALIBRATION_CARDS: &[&str] = &[
-    "BUNIT",
-    "PIXAR_SR",
-    "PIXAR_A2",
-    "ZP",
-    "ZPTMAG",
-    CAMERA_GAIN_KEYWORD,
-    HEADER_NCOMBINE,
-    HEADER_COMBINE_METHOD,
-    HEADER_DRIZZLE_SCALE,
-];
-const CALIBRATION_PREFIXES: &[&str] = &["PHOT", "ROMAN_META_PHOTOMETRY"];
 const PLANE_ONLY_KEYS: &[&str] = &[
     "BUNIT", "EXTNAME", "EXTVER", "LTV1", "LTV2", "LTM1_1", "LTM2_2", "BZERO", "BSCALE", "BLANK", "DATAMIN", "DATAMAX",
 ];
@@ -224,47 +197,12 @@ pub(crate) fn extract_image_resolved(path: &str) -> Result<ResolvedImage> {
     })
 }
 
-fn plane_load(r: &ImageRef) -> Result<PlaneLoad> {
-    load_plane(r).map(LoadedPlane::into_plane_load)
-}
-
-fn load_plane_entry(key: &str) -> Result<ImageEntry> {
-    GLOBAL_IMAGE_CACHE.get_or_load_plane(key, || plane_load(&image_ref(key)))
-}
-
-fn load_cached_with(
-    path: &str,
-    load: impl FnOnce(&str) -> Result<ImageEntry>,
-) -> Result<(ImageEntry, Option<FileStamp>)> {
-    let before = revalidate_source(path);
-    if let Some(entry) = GLOBAL_IMAGE_CACHE.get(path) {
-        return Ok((entry, before));
-    }
-    let entry = load(path)?;
-    forget_if_rewritten(path, before);
-    Ok((entry, before))
-}
-
 pub(crate) fn load_cached(path: &str) -> Result<ImageEntry> {
-    load_cached_with(path, load_plane_entry).map(|(entry, _)| entry)
+    crate::service::common::load_cached(&GLOBAL_IMAGE_CACHE, path)
 }
 
 pub(crate) fn load_cached_full(path: &str) -> Result<ImageEntry> {
-    let before = revalidate_source(path);
-    if let Some(entry) = GLOBAL_IMAGE_CACHE.get(path) {
-        if entry.header().is_some() {
-            return Ok(entry);
-        }
-        if let Ok(upgraded) =
-            GLOBAL_IMAGE_CACHE.upgrade_header(path, || load_plane_header(&image_ref(path)))
-        {
-            forget_if_rewritten(path, before);
-            return Ok(upgraded);
-        }
-    }
-    let entry = load_plane_entry(path)?;
-    forget_if_rewritten(path, before);
-    Ok(entry)
+    crate::service::common::load_cached_full(&GLOBAL_IMAGE_CACHE, path)
 }
 
 pub(crate) fn load_from_cache_or_disk(path: &str) -> Result<ImageEntry> {
@@ -276,10 +214,7 @@ pub(crate) fn load_preview_validated(path: &str) -> Result<ImageEntry> {
 }
 
 pub(crate) fn load_companions(path: &str) -> Result<LoadedCompanions> {
-    let (active, before) = load_cached_with(path, load_plane_entry)?;
-    let companions = load_companions_into(&GLOBAL_IMAGE_CACHE, &active, plane_load);
-    forget_if_rewritten(path, before);
-    Ok(companions)
+    crate::service::common::load_companions(&GLOBAL_IMAGE_CACHE, path)
 }
 
 #[cfg(test)]
@@ -328,84 +263,8 @@ pub(crate) fn plane_info_json(path: &str, entry: &ImageEntry) -> Result<serde_js
     }))
 }
 
-static SOURCE_STAMPS: LazyLock<Mutex<HashMap<String, FileStamp>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn lock_stamps() -> MutexGuard<'static, HashMap<String, FileStamp>> {
-    SOURCE_STAMPS.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn is_key_of_source(key: &str, source: &str) -> bool {
-    let r = ImageRef::parse(key);
-    !r.is_synthetic() && r.path == source
-}
-
-fn invalidate_source(source: &str) {
-    GLOBAL_IMAGE_CACHE.remove_where(|key| is_key_of_source(key, source));
-}
-
-fn revalidate_source(key: &str) -> Option<FileStamp> {
-    let r = ImageRef::parse(key);
-    if r.is_synthetic() {
-        return None;
-    }
-    let source = r.path;
-    let meta = std::fs::metadata(&source);
-    let mut stamps = lock_stamps();
-    match meta {
-        Ok(meta) => {
-            let current = file_stamp(&meta);
-            match stamps.get(&source) {
-                Some(known) if *known == current => {}
-                Some(_) => {
-                    invalidate_source(&source);
-                    stamps.insert(source, current);
-                }
-                None => {
-                    if GLOBAL_IMAGE_CACHE.any_key(|k| is_key_of_source(k, &source)) {
-                        invalidate_source(&source);
-                    }
-                    if stamps.len() >= MAX_TRACKED_STAMPS {
-                        stamps.clear();
-                    }
-                    stamps.insert(source, current);
-                }
-            }
-            Some(current)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            invalidate_source(&source);
-            stamps.remove(&source);
-            None
-        }
-        Err(_) => None,
-    }
-}
-
-fn forget_if_rewritten(key: &str, before: Option<FileStamp>) {
-    let r = ImageRef::parse(key);
-    if r.is_synthetic() {
-        return;
-    }
-    let now = std::fs::metadata(&r.path).ok().map(|meta| file_stamp(&meta));
-    if now != before {
-        invalidate_source(&r.path);
-    }
-}
-
 pub(crate) fn invalidate_written(path: &str) {
-    let source = source_path(path);
-    let meta = std::fs::metadata(&source);
-    let mut stamps = lock_stamps();
-    invalidate_source(&source);
-    match meta {
-        Ok(meta) => {
-            stamps.insert(source, file_stamp(&meta));
-        }
-        Err(_) => {
-            stamps.remove(&source);
-        }
-    }
+    GLOBAL_IMAGE_CACHE.invalidate_written(path);
 }
 
 pub(crate) fn write_derived_fits(path: &str, arr: &Array2<f32>, header: Option<&HduHeader>) -> Result<()> {
@@ -434,10 +293,22 @@ fn same_data<'a>(data: &HduData<'a>) -> HduData<'a> {
         HduData::F32(a) => HduData::F32(a),
         HduData::I32(a) => HduData::I32(a),
         HduData::U32(a) => HduData::U32(a),
+        HduData::F32Cube(planes) => HduData::F32Cube(planes),
+        HduData::I32Cube(planes) => HduData::I32Cube(planes),
+        HduData::U32Cube(planes) => HduData::U32Cube(planes),
     }
 }
 
 pub(crate) fn write_derived_mef(path: &str, primary_header: Option<&HduHeader>, hdus: &[ImageHdu]) -> Result<()> {
+    write_derived_mef_with_tables(path, primary_header, hdus, &[])
+}
+
+pub(crate) fn write_derived_mef_with_tables(
+    path: &str,
+    primary_header: Option<&HduHeader>,
+    hdus: &[ImageHdu],
+    tables: &[BinTableHdu],
+) -> Result<()> {
     let stamped = hdus.first().map(|first| with_software_stamp(first.header, primary_header));
     let hdus: Vec<ImageHdu> = hdus
         .iter()
@@ -450,7 +321,7 @@ pub(crate) fn write_derived_mef(path: &str, primary_header: Option<&HduHeader>, 
         })
         .collect();
     GLOBAL_CUBE_CACHE.invalidate(path);
-    let written = write_mef_images(path, primary_header, &hdus);
+    let written = write_mef_with_tables(path, primary_header, &hdus, tables);
     invalidate_written(path);
     written
 }
@@ -481,76 +352,6 @@ pub(crate) fn source_primary_header(path: &str, merged: Option<&HduHeader>) -> H
     from_disk.as_ref().or(merged).map(provenance_only).unwrap_or_else(HduHeader::empty)
 }
 
-fn indexed_number(digits: &str) -> Option<usize> {
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    digits.parse().ok()
-}
-
-fn indexed(key: &str, prefix: &str) -> Option<usize> {
-    key.strip_prefix(prefix).and_then(indexed_number)
-}
-
-fn axis_pair(key: &str, prefix: &str) -> Option<(usize, usize)> {
-    let (i, j) = key.strip_prefix(prefix)?.split_once('_')?;
-    Some((indexed_number(i)?, indexed_number(j)?))
-}
-
-fn describes_a_higher_axis(key: &str) -> bool {
-    AXIS_INDEXED_PREFIXES.iter().any(|p| indexed(key, p).is_some_and(|n| n >= 3))
-        || AXIS_MATRIX_PREFIXES
-            .iter()
-            .any(|p| axis_pair(key, p).is_some_and(|(i, j)| i >= 3 || j >= 3))
-        || AXIS_PARAMETER_PREFIXES
-            .iter()
-            .any(|p| axis_pair(key, p).is_some_and(|(i, _)| i >= 3))
-}
-
-fn is_structural_card(key: &str) -> bool {
-    is_layout_card(key) || DERIVED_STRUCTURAL_CARDS.contains(&key) || describes_a_higher_axis(key)
-}
-
-fn is_calibration_card(key: &str) -> bool {
-    CALIBRATION_CARDS.contains(&key)
-        || GAIN_KEYWORDS.contains(&key)
-        || CALIBRATION_PREFIXES.iter().any(|p| key.starts_with(p))
-        || GENERIC_ZERO_POINT_KEYS.contains(&key)
-        || SATURATION_KEYWORDS.contains(&key)
-        || ROMAN_CONVERSION_MJY_KEYS.contains(&key)
-        || ROMAN_PIXEL_AREA_SR_KEYS.contains(&key)
-}
-
-fn dropped_from_derived_output(key: &str, values: OutputValues) -> bool {
-    is_structural_card(key) || (values != OutputValues::Linear && is_calibration_card(key))
-}
-
-pub(crate) fn derived_output_header(source: Option<&HduHeader>, abproc: &str, values: OutputValues) -> HduHeader {
-    let mut header = source.cloned().unwrap_or_else(HduHeader::empty);
-    let doomed: Vec<String> = header
-        .cards
-        .iter()
-        .map(|(k, _)| k)
-        .chain(header.index.keys())
-        .filter(|k| dropped_from_derived_output(k.trim(), values))
-        .cloned()
-        .collect();
-    for key in doomed {
-        header.remove(&key);
-    }
-    if header.get("WCSAXES").is_some() {
-        header.set("WCSAXES", "2".to_string());
-    }
-    let abproc = if abproc.trim().is_empty() { DEFAULT_ABPROC } else { abproc };
-    header.set(HEADER_ABPROC, abproc.to_string());
-    match values {
-        OutputValues::DisplayReferred => header.set(HEADER_DISPLAY_REFERRED, "T".to_string()),
-        OutputValues::Rescaled => header.remove(HEADER_DISPLAY_REFERRED),
-        OutputValues::Linear => {}
-    }
-    header
-}
-
 fn make_filename(stem: &str, suffix: &str, ext: &str) -> String {
     if suffix.is_empty() {
         format!("{}.{}", stem, ext)
@@ -566,11 +367,7 @@ pub(crate) struct RenderOutput {
 }
 
 pub(crate) fn cached_header(path: &str) -> Result<HduHeader> {
-    revalidate_source(path);
-    match GLOBAL_IMAGE_CACHE.get(path).and_then(|entry| entry.header().cloned()) {
-        Some(header) => Ok(header),
-        None => load_plane_header(&image_ref(path)),
-    }
+    crate::service::common::cached_header(&GLOBAL_IMAGE_CACHE, path)
 }
 
 fn source_header_of(path: &str) -> Option<HduHeader> {
@@ -780,10 +577,11 @@ mod tests {
 
     use super::test_support::{assert_png_matches, gpu_reduced, gpu_view_with_auto_stf, wide_textured_sky};
     use super::*;
-    use crate::core::analysis::gain::{gain_model, PoissonRoute};
     use crate::core::cube::lazy::test_support::write_line_cube;
     use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef_with_dq_cards;
     use crate::infra::fits::writer::write_fits_mono;
+    use crate::infra::image_source::load_companions_into;
+    use crate::service::common::{load_cached_with, plane_load};
 
     fn mef_with_dq(dir: &tempfile::TempDir, name: &str, center_bits: u32) -> String {
         let path = dir.path().join(name);
@@ -999,7 +797,7 @@ mod tests {
         let p = dir.path().join("overtaken.fits").to_str().unwrap().to_string();
         write_fits_mono(&p, &Array2::from_elem((4, 4), 1.0), None).unwrap();
 
-        let (served, _) = load_cached_with(&p, |key| {
+        let (served, _) = load_cached_with(&GLOBAL_IMAGE_CACHE, &p, |key| {
             let stale = plane_load(&image_ref(key))?;
             write_derived_fits(key, &Array2::from_elem((40, 40), 2.0), None)?;
             GLOBAL_IMAGE_CACHE.get_or_load_plane(key, || Ok(stale))
@@ -1115,120 +913,6 @@ mod tests {
         );
         assert!(primary.index.get("HISTORY").is_none() && primary.index.get("COMMENT").is_none());
         assert_eq!(primary.get("TELESCOP"), Some("JWST"));
-    }
-
-    #[test]
-    fn derived_output_header_removes_structure_and_keeps_calibration_only_for_linear_values() {
-        let source = header_with(&[
-            ("XTENSION", "IMAGE"),
-            ("EXTNAME", "SCI"),
-            ("PCOUNT", "0"),
-            ("ZIMAGE", "T"),
-            ("ZTILE1", "64"),
-            ("ZCMPTYPE", "RICE_1"),
-            ("TFIELDS", "1"),
-            ("TTYPE1", "COMPRESSED_DATA"),
-            ("TFORM1", "1PB"),
-            ("TBCOL1", "1"),
-            ("THEAP", "0"),
-            ("CHECKSUM", "abc"),
-            ("DATASUM", "1"),
-            ("DATAMIN", "0"),
-            ("DATAMAX", "1"),
-            ("NAXIS3", "5"),
-            ("WCSAXES", "3"),
-            ("CTYPE3", "WAVE"),
-            ("CD3_3", "0.1"),
-            ("PC1_3", "0"),
-            ("PV3_1", "0"),
-            ("CRVAL1", "10.5"),
-            ("CD1_1", "-0.0001"),
-            ("PV2_1", "45.0"),
-            ("TELESCOP", "JWST"),
-            ("BUNIT", "MJy/sr"),
-            ("PHOTMJSR", "1.5"),
-            ("PIXAR_SR", "2.1E-13"),
-            ("ZPT", "25.0"),
-            ("ZEROPT", "25.0"),
-            ("PHOTZP", "25.0"),
-            ("MAGZERO", "30.0"),
-            ("SATURATE", "60000"),
-        ]);
-
-        let linear = derived_output_header(Some(&source), "deconv", OutputValues::Linear);
-        for dropped in [
-            "XTENSION", "EXTNAME", "PCOUNT", "ZIMAGE", "ZTILE1", "ZCMPTYPE", "TFIELDS", "TTYPE1", "TFORM1",
-            "TBCOL1", "THEAP", "CHECKSUM", "DATASUM", "DATAMIN", "DATAMAX", "NAXIS3", "CTYPE3", "CD3_3", "PC1_3", "PV3_1",
-        ] {
-            assert!(linear.get(dropped).is_none(), "{dropped} survived");
-            assert!(!linear.cards.iter().any(|(k, _)| k == dropped), "{dropped} card survived");
-        }
-        for kept in ["CRVAL1", "CD1_1", "PV2_1", "TELESCOP", "BUNIT", "PHOTMJSR", "PIXAR_SR", "ZPT", "SATURATE"] {
-            assert!(linear.get(kept).is_some(), "{kept} dropped from a flux-preserving output");
-        }
-        assert_eq!(linear.get("WCSAXES"), Some("2"));
-        assert_eq!(linear.get(HEADER_ABPROC), Some("deconv"));
-        assert!(linear.get(HEADER_DISPLAY_REFERRED).is_none());
-
-        let rescaled = derived_output_header(Some(&source), "pixelmath", OutputValues::Rescaled);
-        for dropped in ["BUNIT", "PHOTMJSR", "PIXAR_SR", "ZPT", "ZEROPT", "PHOTZP", "MAGZERO", "SATURATE"] {
-            assert!(rescaled.get(dropped).is_none(), "{dropped} survived a rescaling");
-        }
-        assert_eq!(rescaled.get("CRVAL1"), Some("10.5"));
-        assert_eq!(rescaled.get("TELESCOP"), Some("JWST"));
-
-        let stretched = derived_output_header(Some(&source), "arcsinh", OutputValues::DisplayReferred);
-        assert_eq!(stretched.get(HEADER_DISPLAY_REFERRED), Some("T"));
-        assert!(stretched.get("BUNIT").is_none());
-        let denoised = derived_output_header(Some(&stretched), "denoised", OutputValues::Linear);
-        assert_eq!(denoised.get(HEADER_DISPLAY_REFERRED), Some("T"), "a linear step keeps display-referred values");
-        let remapped = derived_output_header(Some(&stretched), "pixelmath", OutputValues::Rescaled);
-        assert!(remapped.get(HEADER_DISPLAY_REFERRED).is_none());
-
-        let bare = derived_output_header(None, "  ", OutputValues::Rescaled);
-        assert_eq!(bare.get(HEADER_ABPROC), Some("processed"));
-    }
-
-    #[test]
-    fn a_stack_processed_by_background_keeps_its_combine_scaling() {
-        let stack = header_with(&[("NCOMBINE", "16"), ("ABCOMB", "mean"), ("EGAIN", "0.25"), ("ABPROC", "stacked")]);
-        let out = derived_output_header(Some(&stack), "bg_corrected", OutputValues::Linear);
-        assert_eq!(out.get(HEADER_ABPROC), Some("bg_corrected"));
-        for kept in ["NCOMBINE", "ABCOMB", "EGAIN"] {
-            assert!(out.get(kept).is_some(), "{kept} dropped from a flux-preserving output");
-        }
-        let model = gain_model(Some(&out), false);
-        assert_eq!(model.effective_gain, Some(4.0), "{model:?}");
-        assert!(model.combine_scaled);
-        assert_eq!(model.poisson_route, PoissonRoute::HeaderGain);
-    }
-
-    #[test]
-    fn rescaled_and_display_referred_outputs_lose_gain_and_combine_cards() {
-        let source = header_with(&[
-            ("EGAIN", "0.25"),
-            ("GAIN", "120"),
-            ("NCOMBINE", "16"),
-            ("ABCOMB", "mean"),
-            ("ABDRZSCL", "2"),
-            ("ATODGAIN", "7"),
-            ("CCDGAIN", "2"),
-            ("ADCGAIN", "5"),
-        ]);
-        let cards = ["EGAIN", "GAIN", "NCOMBINE", "ABCOMB", "ABDRZSCL", "ATODGAIN", "CCDGAIN", "ADCGAIN"];
-        for values in [OutputValues::Rescaled, OutputValues::DisplayReferred] {
-            let out = derived_output_header(Some(&source), "pixelmath", values);
-            for card in cards {
-                assert!(out.get(card).is_none(), "{card} survived a {values:?} output");
-                assert!(!out.cards.iter().any(|(k, _)| k == card), "{card} card survived a {values:?} output");
-            }
-            assert_eq!(gain_model(Some(&out), false).effective_gain, None, "{values:?}");
-        }
-        let linear = derived_output_header(Some(&source), "deconv", OutputValues::Linear);
-        for card in cards {
-            assert!(linear.get(card).is_some(), "{card} dropped from a flux-preserving output");
-        }
-        assert_eq!(gain_model(Some(&linear), false).effective_gain, Some(1.0));
     }
 
     #[test]

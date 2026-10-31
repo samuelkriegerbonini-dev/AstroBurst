@@ -18,7 +18,6 @@ use super::images::{finite_stats_json, load_replacing, register_and_respond};
 use super::region::{pixel_shape, RegionSpec};
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::session::Session;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -150,7 +149,7 @@ pub async fn cutout(
     State(state): State<AppState>,
     Json(params): Json<CutoutParams>,
 ) -> Result<Json<Value>> {
-    let target = target_ref(&session, params.image_ref).await?;
+    let target = session.target_ref(params.image_ref).await?;
 
     let entry = session
         .cache
@@ -209,21 +208,6 @@ pub async fn cutout(
     attach_cutout_fields(&mut body, &rect, fraction, shape.as_ref(), ltv);
     *session.v2.active_ref.write().await = Some(image_ref);
     Ok(Json(body))
-}
-
-async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
-    match explicit {
-        Some(r) => Ok(r),
-        None => session
-            .v2
-            .active_ref
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::BadRequest("no active image in this session; open a file first".into())
-            }),
-    }
 }
 
 #[cfg(test)]

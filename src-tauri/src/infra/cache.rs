@@ -1,16 +1,20 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, LazyLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, LazyLock, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use ndarray::Array2;
 
+use crate::core::history::stamp::{file_stamp, FileStamp};
 use crate::infra::image_source::{Companions, PlaneInfo};
 #[cfg(test)]
 use crate::types::constants::WIZARD_CACHE_PREFIX;
 use crate::types::ImageStats;
 use crate::types::header::HduHeader;
 use crate::types::image::IntPlane;
+use crate::types::image_ref::ImageRef;
+
+const MAX_TRACKED_STAMPS: usize = 1024;
 
 pub struct PlaneLoad {
     pub arr: Array2<f32>,
@@ -211,6 +215,12 @@ impl LruInner {
 
 pub struct ImageCache {
     inner: RwLock<LruInner>,
+    stamps: Mutex<HashMap<String, FileStamp>>,
+}
+
+fn is_key_of_source(key: &str, source: &str) -> bool {
+    let r = ImageRef::parse(key);
+    !r.is_synthetic() && r.path == source
 }
 
 impl ImageCache {
@@ -221,6 +231,79 @@ impl ImageCache {
     pub fn with_pinned_prefixes(max_entries: usize, max_bytes: usize, pinned_prefixes: &'static [&'static str]) -> Self {
         Self {
             inner: RwLock::new(LruInner::new(max_entries, max_bytes, pinned_prefixes)),
+            stamps: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock_stamps(&self) -> MutexGuard<'_, HashMap<String, FileStamp>> {
+        self.stamps.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn invalidate_source(&self, source: &str) {
+        self.remove_where(|key| is_key_of_source(key, source));
+    }
+
+    pub fn revalidate_source(&self, key: &str) -> Option<FileStamp> {
+        let r = ImageRef::parse(key);
+        if r.is_synthetic() {
+            return None;
+        }
+        let source = r.path;
+        let meta = std::fs::metadata(&source);
+        let mut stamps = self.lock_stamps();
+        match meta {
+            Ok(meta) => {
+                let current = file_stamp(&meta);
+                match stamps.get(&source) {
+                    Some(known) if *known == current => {}
+                    Some(_) => {
+                        self.invalidate_source(&source);
+                        stamps.insert(source, current);
+                    }
+                    None => {
+                        if self.any_key(|k| is_key_of_source(k, &source)) {
+                            self.invalidate_source(&source);
+                        }
+                        if stamps.len() >= MAX_TRACKED_STAMPS {
+                            stamps.clear();
+                        }
+                        stamps.insert(source, current);
+                    }
+                }
+                Some(current)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.invalidate_source(&source);
+                stamps.remove(&source);
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
+    pub fn forget_if_rewritten(&self, key: &str, before: Option<FileStamp>) {
+        let r = ImageRef::parse(key);
+        if r.is_synthetic() {
+            return;
+        }
+        let now = std::fs::metadata(&r.path).ok().map(|meta| file_stamp(&meta));
+        if now != before {
+            self.invalidate_source(&r.path);
+        }
+    }
+
+    pub fn invalidate_written(&self, path: &str) {
+        let source = ImageRef::parse(path).path;
+        let meta = std::fs::metadata(&source);
+        let mut stamps = self.lock_stamps();
+        self.invalidate_source(&source);
+        match meta {
+            Ok(meta) => {
+                stamps.insert(source, file_stamp(&meta));
+            }
+            Err(_) => {
+                stamps.remove(&source);
+            }
         }
     }
 

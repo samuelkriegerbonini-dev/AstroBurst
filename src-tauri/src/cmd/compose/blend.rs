@@ -4,7 +4,8 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::common::{blocking_cmd, cached_header, derived_output_header, load_from_cache_or_disk, output_stem, resolve_output_dir, write_derived_fits, OutputValues, MAX_PREVIEW_DIM};
+use crate::cmd::common::{blocking_cmd, cached_header, load_from_cache_or_disk, output_stem, resolve_output_dir, write_derived_fits, OutputValues, MAX_PREVIEW_DIM};
+use crate::service::common::derived_output_header;
 use crate::core::imaging::stf::{auto_stf, make_stf_u8_fn, AutoStfConfig};
 use crate::cmd::helpers;
 use crate::cmd::processing::source_header;
@@ -12,11 +13,10 @@ use crate::core::alignment::pair::{align_pair_with_label, shift_image_subpixel, 
 use crate::core::alignment::wcs_reproject::{pixel_area_ratio, point_source_residual, prefilter_coarse_target, reproject_to_grid, REF_TIE_TOLERANCE};
 use crate::core::astrometry::wcs::WcsKind;
 use crate::core::compose::rgb::{harmonize_dimensions, align_channels};
-use crate::core::analysis::photometry::SATURATION_KEYWORDS;
 use crate::core::compose::channel_blend::{blend_channels, BlendWeight};
 use crate::core::imaging::resample::{compute_wcs_updates, resample_image};
 use crate::core::imaging::stats::compute_image_stats;
-use crate::core::metadata::photcal::{GENERIC_ZERO_POINT_KEYS, ROMAN_PIXEL_AREA_SR_KEYS};
+use crate::core::metadata::units::rescale_per_pixel_calibration;
 use crate::infra::fits::writer::filter_header;
 use crate::infra::cache::GLOBAL_IMAGE_CACHE;
 use crate::infra::wcs_source::{header_wcs, load_wcs};
@@ -61,9 +61,6 @@ pub(crate) fn stf_should_unlink(stats: [&ImageStats; 3]) -> bool {
     let ratio_hit = lo > 0.0 && hi / lo > LEVEL_RATIO_LIMIT;
     spread_hit || ratio_hit
 }
-const PIXEL_AREA_CARDS: [&str; 2] = ["PIXAR_SR", "PIXAR_A2"];
-const PER_PIXEL_FLUX_CARDS: [&str; 2] = ["PHOTFLAM", "PHOTFNU"];
-const CALIBRATION_ZERO_POINT_CARDS: [&str; 2] = ["ZP", "ZPTMAG"];
 const PHYSICAL_CARDS: [&str; 6] = ["LTV1", "LTV2", "LTM1_1", "LTM1_2", "LTM2_1", "LTM2_2"];
 
 fn update_wcs_for_offset(header: &mut HduHeader, dy: f64, dx: f64) {
@@ -75,27 +72,6 @@ fn update_wcs_for_offset(header: &mut HduHeader, dy: f64, dx: f64) {
     }
     if let Some(crpix2) = header.get_f64("CRPIX2") {
         header.set_f64("CRPIX2", crpix2 - dy);
-    }
-}
-
-pub(crate) fn rescale_per_pixel_calibration(header: &mut HduHeader, area_ratio: f64) {
-    if !area_ratio.is_finite() || area_ratio <= 0.0 {
-        return;
-    }
-    let per_pixel = PIXEL_AREA_CARDS.iter().chain(ROMAN_PIXEL_AREA_SR_KEYS.iter()).chain(PER_PIXEL_FLUX_CARDS.iter());
-    for &key in per_pixel {
-        if let Some(v) = header.get_f64(key) {
-            header.set_f64(key, v * area_ratio);
-        }
-    }
-    let zero_point_shift = 2.5 * area_ratio.log10();
-    for key in GENERIC_ZERO_POINT_KEYS.into_iter().chain(CALIBRATION_ZERO_POINT_CARDS) {
-        if let Some(v) = header.get_f64(key) {
-            header.set_f64(key, v - zero_point_shift);
-        }
-    }
-    for key in SATURATION_KEYWORDS {
-        header.remove(key);
     }
 }
 
@@ -768,6 +744,7 @@ mod tests {
     use super::*;
     use crate::cmd::common::load_cached_full;
     use crate::core::astrometry::wcs::WcsTransform;
+    use crate::core::metadata::photcal::ROMAN_PIXEL_AREA_SR_KEYS;
     use crate::infra::fits::writer::write_fits_mono;
     use crate::types::constants::ALIGN_METHOD_AFFINE;
 

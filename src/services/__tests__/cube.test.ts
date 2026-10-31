@@ -105,6 +105,14 @@ describe("cube spectrum services", () => {
     typedInvokeMock.mockResolvedValueOnce({ spectrum: [2], wavelengths: [1.02], is_spectral: true });
     const plain = await getCubeSpectrum("C:/d/cube.fits", 3, 4);
     expect(plain.flux_jy).toBeNull();
+    expect(plain.err).toBeNull();
+  });
+
+  it("getCubeSpectrum keeps the ERR cube values at the pixel and reads a JSON null as NaN", async () => {
+    typedInvokeMock.mockResolvedValueOnce({ spectrum: [2, 3], wavelengths: null, is_spectral: false, err: [0.2, null] });
+    const withErr = await getCubeSpectrum("C:/d/cube.fits", 1, 1);
+    expect(withErr.err?.[0]).toBe(0.2);
+    expect(Number.isNaN(withErr.err?.[1])).toBe(true);
   });
 
   it("getCubeSpectrumRegion invokes get_cube_spectrum_region_cmd with path, shape, background and no continuum by default", async () => {

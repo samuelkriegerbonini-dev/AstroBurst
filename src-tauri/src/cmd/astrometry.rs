@@ -9,9 +9,10 @@ use serde_json::json;
 use tauri::Manager;
 
 use crate::cmd::common::{
-    blocking_cmd, cached_header, derived_output_header, image_ref, load_cached_full, output_stem,
+    blocking_cmd, cached_header, image_ref, load_cached_full, output_stem,
     render_named_and_save, resolve_output_dir, source_path, OutputValues,
 };
+use crate::service::common::derived_output_header;
 use crate::core::astrometry::catalog::{
     query_gaia_cached, solver_cone_query, CatalogRow, ConeQuery, GAIA_VIZIER_TABLE,
 };

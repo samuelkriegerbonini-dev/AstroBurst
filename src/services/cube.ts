@@ -23,6 +23,7 @@ interface RawCubeSpectrum {
   wavelengths?: number[] | null;
   is_spectral?: boolean;
   flux_jy?: number[] | null;
+  err?: NullableSeries | null;
 }
 
 export async function releaseCubes(paths: readonly string[]): Promise<void> {
@@ -61,6 +62,7 @@ export function toCubeSpectrum(raw: RawCubeSpectrum, x: number, y: number): Cube
     y,
     is_spectral: raw.is_spectral,
     flux_jy: raw.flux_jy ?? null,
+    err: raw.err ? nanForNull(raw.err) : null,
   };
 }
 

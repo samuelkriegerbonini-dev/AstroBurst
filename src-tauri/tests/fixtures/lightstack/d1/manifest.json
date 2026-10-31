@@ -1,0 +1,1287 @@
+{
+  "files": [
+    {
+      "bytes": 63360,
+      "path": "d1_HST_F814W.fits",
+      "sha256": "d4b2eb6aafc7482bebddb13db9abe497f0f80757002cb56e252f5a10c4f5def9"
+    },
+    {
+      "bytes": 210240,
+      "path": "d1_JWST_F150W.fits",
+      "sha256": "2f4a5bd980fbe0744c94e42bcad2a61bd91641e261d6ef6e417a1f08832e92fd"
+    },
+    {
+      "bytes": 210240,
+      "path": "d1_JWST_F200W.fits",
+      "sha256": "326a3e4444bfaa527f0f88f89d790d31bb46c003e039f4f08eeaca85acc01a27"
+    },
+    {
+      "bytes": 63360,
+      "path": "d1_JWST_F277W.fits",
+      "sha256": "25a37c3293f5a4310395267f7c0e92c57a0dbde222ebf401ea1592e1e34507c1"
+    },
+    {
+      "bytes": 63360,
+      "path": "d1_JWST_F356W.fits",
+      "sha256": "0f184ae8b142d19b978615bc99077a415c8b092464f4a40917acad2e9e8c63a9"
+    },
+    {
+      "bytes": 63360,
+      "path": "d1_JWST_F444W.fits",
+      "sha256": "a9fdfb979211ede10936c66a5bea680230bb0a06580d3bdb2b4d964daf181080"
+    },
+    {
+      "bytes": 8640,
+      "path": "psf/d1_psf_HST_F814W_40mas.fits",
+      "sha256": "a48e71b3ebb271ba63c129698d797881be8bd9e43efa71c014a0bdc339090b67"
+    },
+    {
+      "bytes": 17280,
+      "path": "psf/d1_psf_JWST_F150W_20mas.fits",
+      "sha256": "b8f1354652b937d5a2161937ed12e71610a4b94537d977aa9adba2711b5f3e95"
+    },
+    {
+      "bytes": 8640,
+      "path": "psf/d1_psf_JWST_F150W_40mas.fits",
+      "sha256": "5321418ff692c42e4fc63c22589f981f0c5dc8eda170adae2adeebebe1f5d9eb"
+    },
+    {
+      "bytes": 17280,
+      "path": "psf/d1_psf_JWST_F200W_20mas.fits",
+      "sha256": "8287602e242e89ac123fba0b72ba5b52a9f8c154a1c39d8a77666ef4c6124a02"
+    },
+    {
+      "bytes": 8640,
+      "path": "psf/d1_psf_JWST_F200W_40mas.fits",
+      "sha256": "d0b0859b28293f8ec94bb62cd9bd43ee2c8cf5c5684da79506350242b33176f3"
+    },
+    {
+      "bytes": 8640,
+      "path": "psf/d1_psf_JWST_F277W_40mas.fits",
+      "sha256": "9dc1c3255f46c6b43b625adfb56bc2cde0ee39765a20a5a1d7718f587020a1fa"
+    },
+    {
+      "bytes": 8640,
+      "path": "psf/d1_psf_JWST_F356W_40mas.fits",
+      "sha256": "08dcb481c4cc158e23c3cf73d005edd58c7a7a7d17e9b063fbf7b843fdaa6676"
+    },
+    {
+      "bytes": 8640,
+      "path": "psf/d1_psf_JWST_F444W_40mas.fits",
+      "sha256": "ac870e2d584f97dfed46f128ce2c4829d9b55e697934b6bd47427bc1dcbaa66b"
+    },
+    {
+      "bytes": 1607,
+      "path": "recipe_d1.json",
+      "sha256": "fce0797dc6c214e0b4ea2eb6127c05e5a03990137455d4a6ae3b573d9efb51f0"
+    }
+  ],
+  "generator": "src-tauri/tests/lightstack_oracle/d1.rs",
+  "kind": "d1_synthetic",
+  "manifest_version": 1,
+  "regenerate": "ASTROBURST_WRITE_LIGHTSTACK_FIXTURES=1 cargo test --test lightstack_oracle regenerate_d1_fixtures -- --ignored",
+  "truth": {
+    "aperture_radius_fwhm": 2.0,
+    "cube_pixel_scale_arcsec": 0.04,
+    "field_centre_deg": [
+      53.1625,
+      -27.7914
+    ],
+    "galaxy": {
+      "centre_deg": [
+        53.1625125598822,
+        -27.791408333332768
+      ],
+      "clumps": [
+        {
+          "offset_arcsec": [
+            0.14,
+            0.09
+          ],
+          "sigma_arcsec": 0.025
+        },
+        {
+          "offset_arcsec": [
+            -0.11,
+            0.12
+          ],
+          "sigma_arcsec": 0.03
+        },
+        {
+          "offset_arcsec": [
+            0.05,
+            -0.17
+          ],
+          "sigma_arcsec": 0.02
+        },
+        {
+          "offset_arcsec": [
+            -0.19,
+            -0.05
+          ],
+          "sigma_arcsec": 0.035
+        }
+      ],
+      "disc": {
+        "axis_ratio": 0.55,
+        "position_angle_deg": 35.0,
+        "profile": "exponential",
+        "scale_length_arcsec": 0.08,
+        "truncation_arcsec": 0.4
+      },
+      "offset_arcsec": [
+        0.04,
+        -0.03
+      ]
+    },
+    "planes": [
+      {
+        "border_dq": 513,
+        "dataset": "HST",
+        "extensions": [
+          "SCI",
+          "ERR",
+          "DQ"
+        ],
+        "file": "d1_HST_F814W.fits",
+        "filter": "F814W",
+        "flagged": [
+          {
+            "dq": 4,
+            "x": 36,
+            "y": 8
+          },
+          {
+            "dq": 4,
+            "x": 55,
+            "y": 36
+          }
+        ],
+        "galaxy": {
+          "centre_px": [
+            30.804030159627313,
+            30.284562243358998
+          ],
+          "clump_flux_jy": [
+            7e-6,
+            4.9e-6,
+            5.6e-6,
+            3.5e-6
+          ],
+          "disc_flux_jy": 0.0000105,
+          "model_jy": 0.00003137987150586839
+        },
+        "holes": [
+          {
+            "dq": 1,
+            "model_jy": 1.792254123834945e-6,
+            "x": [
+              31,
+              34
+            ],
+            "y": [
+              32,
+              34
+            ]
+          },
+          {
+            "dq": 1,
+            "model_jy": 1.9633868996393803e-49,
+            "x": [
+              27,
+              29
+            ],
+            "y": [
+              54,
+              56
+            ]
+          }
+        ],
+        "instrument": "ACS",
+        "model_jy": 0.00009550537161729775,
+        "nan_border_px": 2,
+        "noise": {
+          "sigma0_jy": 8e-10,
+          "sigma_jy": "sigma0_jy * (0.85 + 0.30 * x / (nx - 1)), x the 0-based column"
+        },
+        "pixel_scale_arcsec": 0.04,
+        "psf": {
+          "alpha_arcsec": 0.09316931089327943,
+          "beta": 3.0,
+          "files": [
+            {
+              "path": "psf/d1_psf_HST_F814W_40mas.fits",
+              "pixel_scale_arcsec": 0.04,
+              "side": 21
+            }
+          ],
+          "fwhm_arcsec": 0.095,
+          "model": "moffat"
+        },
+        "shape": [
+          64,
+          64
+        ],
+        "stars": [
+          {
+            "aperture_model_jy": 0.00001545580792010057,
+            "aperture_radius_px": 4.75,
+            "aperture_sigma_jy": 6.161220540505983e-9,
+            "aperture_star_jy": 0.000015446268689372998,
+            "flux_jy": 0.000016000000000000003,
+            "id": "s1",
+            "x": 16.2444969514583,
+            "y": 40.76200417021532
+          },
+          {
+            "aperture_model_jy": 6.08431547725821e-6,
+            "aperture_radius_px": 4.75,
+            "aperture_sigma_jy": 7.099298806038168e-9,
+            "aperture_star_jy": 6.083816175199695e-6,
+            "flux_jy": 6.4e-6,
+            "id": "s2",
+            "x": 41.104394680938626,
+            "y": 46.441343493310946
+          },
+          {
+            "aperture_model_jy": 9.292398795485318e-6,
+            "aperture_radius_px": 4.75,
+            "aperture_sigma_jy": 6.442730087087049e-9,
+            "aperture_star_jy": 9.288124336456793e-6,
+            "flux_jy": 9.600000000000001e-6,
+            "id": "s3",
+            "x": 22.148490909441986,
+            "y": 15.644475887374217
+          },
+          {
+            "aperture_model_jy": 7.592147867421617e-6,
+            "aperture_radius_px": 4.75,
+            "aperture_sigma_jy": 7.136167788312425e-9,
+            "aperture_star_jy": 7.590734939499163e-6,
+            "flux_jy": 8.000000000000001e-6,
+            "id": "s4",
+            "x": 47.018490467484554,
+            "y": 22.0735811966735
+          },
+          {
+            "aperture_model_jy": 0.00002333210363299957,
+            "aperture_radius_px": 4.75,
+            "aperture_sigma_jy": 6.2109002272338155e-9,
+            "aperture_star_jy": 0.00002332382767461141,
+            "flux_jy": 0.000024,
+            "id": "s5",
+            "x": 13.52678819876928,
+            "y": 28.44000154261233
+          }
+        ],
+        "telescope": "HST",
+        "unit": {
+          "bunit": "ELECTRONS/S",
+          "cards": {
+            "PHOTFLAM": 7.0723e-20,
+            "PHOTFNU": 1.527036046539967e-7,
+            "PHOTPLAM": 8045.53
+          },
+          "jy_per_unit": 1.527036046539967e-7
+        },
+        "wcs": {
+          "cd_deg": [
+            [
+              -0.000010868306674820063,
+              -2.310129897975104e-6
+            ],
+            [
+              -2.310129897975104e-6,
+              0.000010868306674820063
+            ]
+          ],
+          "crpix": [
+            27.29624316282443,
+            27.262501837125882
+          ],
+          "crval_deg": [
+            53.16257849928784,
+            -27.791441666644488
+          ],
+          "ctype": [
+            "RA---TAN-SIP",
+            "DEC--TAN-SIP"
+          ],
+          "rotation_deg": 12.0,
+          "sip": {
+            "a": [
+              [
+                2,
+                0,
+                0.00024
+              ],
+              [
+                1,
+                1,
+                -0.00016
+              ],
+              [
+                0,
+                2,
+                0.00011
+              ]
+            ],
+            "b": [
+              [
+                2,
+                0,
+                -0.00013
+              ],
+              [
+                1,
+                1,
+                0.00021
+              ],
+              [
+                0,
+                2,
+                0.00017
+              ]
+            ]
+          }
+        }
+      },
+      {
+        "border_dq": 513,
+        "dataset": "JWST",
+        "extensions": [
+          "SCI",
+          "ERR",
+          "DQ"
+        ],
+        "file": "d1_JWST_F150W.fits",
+        "filter": "F150W",
+        "flagged": [
+          {
+            "dq": 4,
+            "x": 80,
+            "y": 18
+          },
+          {
+            "dq": 4,
+            "x": 108,
+            "y": 79
+          }
+        ],
+        "galaxy": {
+          "centre_px": [
+            62.38364497389132,
+            61.00642078192019
+          ],
+          "clump_flux_jy": [
+            5.500000000000001e-6,
+            3.85e-6,
+            4.4e-6,
+            2.7500000000000004e-6
+          ],
+          "disc_flux_jy": 0.0000195,
+          "model_jy": 0.00003599909707529114
+        },
+        "holes": [
+          {
+            "dq": 1,
+            "model_jy": 4.898340448835811e-7,
+            "x": [
+              64,
+              67
+            ],
+            "y": [
+              65,
+              67
+            ]
+          },
+          {
+            "dq": 1,
+            "model_jy": 0.0,
+            "x": [
+              48,
+              50
+            ],
+            "y": [
+              108,
+              110
+            ]
+          }
+        ],
+        "instrument": "NIRCAM",
+        "model_jy": 0.00011599909707529168,
+        "nan_border_px": 2,
+        "noise": {
+          "sigma0_jy": 3e-10,
+          "sigma_jy": "sigma0_jy * (0.85 + 0.30 * x / (nx - 1)), x the 0-based column"
+        },
+        "pixel_scale_arcsec": 0.02,
+        "psf": {
+          "files": [
+            {
+              "path": "psf/d1_psf_JWST_F150W_20mas.fits",
+              "pixel_scale_arcsec": 0.02,
+              "side": 41
+            },
+            {
+              "path": "psf/d1_psf_JWST_F150W_40mas.fits",
+              "pixel_scale_arcsec": 0.04,
+              "side": 21
+            }
+          ],
+          "fwhm_arcsec": 0.05,
+          "lambda_over_d_arcsec": 0.04859114966615142,
+          "model": "airy"
+        },
+        "shape": [
+          128,
+          128
+        ],
+        "stars": [
+          {
+            "aperture_model_jy": 0.000018527238578344635,
+            "aperture_radius_px": 5.0,
+            "aperture_sigma_jy": 2.4446445793763634e-9,
+            "aperture_star_jy": 0.000018526430163521846,
+            "flux_jy": 0.00002,
+            "id": "s1",
+            "x": 30.76748827682387,
+            "y": 77.69979179240357
+          },
+          {
+            "aperture_model_jy": 7.411401363999196e-6,
+            "aperture_radius_px": 5.0,
+            "aperture_sigma_jy": 2.7427319242785677e-9,
+            "aperture_star_jy": 7.411393223917927e-6,
+            "flux_jy": 8e-6,
+            "id": "s2",
+            "x": 78.34979179324077,
+            "y": 96.08251172276026
+          },
+          {
+            "aperture_model_jy": 0.000011135899895702078,
+            "aperture_radius_px": 5.0,
+            "aperture_sigma_jy": 2.609932004754173e-9,
+            "aperture_star_jy": 0.000011133598395918313,
+            "flux_jy": 0.000012,
+            "id": "s3",
+            "x": 49.32121827851357,
+            "y": 29.647641965311017
+          },
+          {
+            "aperture_model_jy": 9.253920392097693e-6,
+            "aperture_radius_px": 5.0,
+            "aperture_sigma_jy": 2.8412521562116985e-9,
+            "aperture_star_jy": 9.253657286142483e-6,
+            "flux_jy": 0.00001,
+            "id": "s4",
+            "x": 97.03134796188604,
+            "y": 49.14106458938253
+          },
+          {
+            "aperture_model_jy": 0.000027820092697513275,
+            "aperture_radius_px": 5.0,
+            "aperture_sigma_jy": 2.462756251669399e-9,
+            "aperture_star_jy": 0.000027819266025136136,
+            "flux_jy": 0.00003,
+            "id": "s5",
+            "x": 28.767179054947313,
+            "y": 52.49565001045867
+          }
+        ],
+        "telescope": "JWST",
+        "unit": {
+          "bunit": "MJy/sr",
+          "cards": {
+            "PIXAR_A2": 0.0004,
+            "PIXAR_SR": 9.401772215639154e-15
+          },
+          "jy_per_unit": 9.401772215639154e-9
+        },
+        "wcs": {
+          "cd_deg": [
+            [
+              -5.2205145599217135e-6,
+              -1.9001119073648263e-6
+            ],
+            [
+              -1.9001119073648263e-6,
+              5.2205145599217135e-6
+            ]
+          ],
+          "crpix": [
+            64.75,
+            64.1
+          ],
+          "crval_deg": [
+            53.1625,
+            -27.791400000000003
+          ],
+          "ctype": [
+            "RA---TAN",
+            "DEC--TAN"
+          ],
+          "rotation_deg": 20.0,
+          "sip": null
+        }
+      },
+      {
+        "border_dq": 513,
+        "dataset": "JWST",
+        "extensions": [
+          "SCI",
+          "ERR",
+          "DQ"
+        ],
+        "file": "d1_JWST_F200W.fits",
+        "filter": "F200W",
+        "flagged": [
+          {
+            "dq": 4,
+            "x": 80,
+            "y": 18
+          },
+          {
+            "dq": 4,
+            "x": 108,
+            "y": 79
+          }
+        ],
+        "galaxy": {
+          "centre_px": [
+            62.38364497389132,
+            61.00642078192019
+          ],
+          "clump_flux_jy": [
+            5e-6,
+            3.5e-6,
+            4e-6,
+            2.5e-6
+          ],
+          "disc_flux_jy": 0.000024,
+          "model_jy": 0.00003899888870808973
+        },
+        "holes": [
+          {
+            "dq": 1,
+            "model_jy": 5.386168667494068e-7,
+            "x": [
+              64,
+              67
+            ],
+            "y": [
+              65,
+              67
+            ]
+          },
+          {
+            "dq": 1,
+            "model_jy": 0.0,
+            "x": [
+              48,
+              50
+            ],
+            "y": [
+              108,
+              110
+            ]
+          }
+        ],
+        "instrument": "NIRCAM",
+        "model_jy": 0.00011899888870809004,
+        "nan_border_px": 2,
+        "noise": {
+          "sigma0_jy": 3e-10,
+          "sigma_jy": "sigma0_jy * (0.85 + 0.30 * x / (nx - 1)), x the 0-based column"
+        },
+        "pixel_scale_arcsec": 0.02,
+        "psf": {
+          "files": [
+            {
+              "path": "psf/d1_psf_JWST_F200W_20mas.fits",
+              "pixel_scale_arcsec": 0.02,
+              "side": 41
+            },
+            {
+              "path": "psf/d1_psf_JWST_F200W_40mas.fits",
+              "pixel_scale_arcsec": 0.04,
+              "side": 21
+            }
+          ],
+          "fwhm_arcsec": 0.066,
+          "lambda_over_d_arcsec": 0.06414031755931987,
+          "model": "airy"
+        },
+        "shape": [
+          128,
+          128
+        ],
+        "stars": [
+          {
+            "aperture_model_jy": 0.000018682613106901662,
+            "aperture_radius_px": 6.6000000000000005,
+            "aperture_sigma_jy": 3.228695878919871e-9,
+            "aperture_star_jy": 0.000018678650849376533,
+            "flux_jy": 0.00002,
+            "id": "s1",
+            "x": 30.76748827682387,
+            "y": 77.69979179240357
+          },
+          {
+            "aperture_model_jy": 7.4697669298929165e-6,
+            "aperture_radius_px": 6.6000000000000005,
+            "aperture_sigma_jy": 3.6076761251952826e-9,
+            "aperture_star_jy": 7.4696671480246915e-6,
+            "flux_jy": 8e-6,
+            "id": "s2",
+            "x": 78.34979179324077,
+            "y": 96.08251172276026
+          },
+          {
+            "aperture_model_jy": 0.000011216976595571673,
+            "aperture_radius_px": 6.6000000000000005,
+            "aperture_sigma_jy": 3.4056539886574184e-9,
+            "aperture_star_jy": 0.00001121047656998709,
+            "flux_jy": 0.000012,
+            "id": "s3",
+            "x": 49.32121827851357,
+            "y": 29.647641965311017
+          },
+          {
+            "aperture_model_jy": 9.34971996225092e-6,
+            "aperture_radius_px": 6.6000000000000005,
+            "aperture_sigma_jy": 3.816939371892397e-9,
+            "aperture_star_jy": 9.348602061803091e-6,
+            "flux_jy": 0.00001,
+            "id": "s4",
+            "x": 97.03134796188604,
+            "y": 49.14106458938253
+          },
+          {
+            "aperture_model_jy": 0.000028016319251908967,
+            "aperture_radius_px": 6.6000000000000005,
+            "aperture_sigma_jy": 3.2121073790998375e-9,
+            "aperture_star_jy": 0.000028011923912775523,
+            "flux_jy": 0.00003,
+            "id": "s5",
+            "x": 28.767179054947313,
+            "y": 52.49565001045867
+          }
+        ],
+        "telescope": "JWST",
+        "unit": {
+          "bunit": "MJy/sr",
+          "cards": {
+            "PIXAR_A2": 0.0004,
+            "PIXAR_SR": 9.401772215639154e-15
+          },
+          "jy_per_unit": 9.401772215639154e-9
+        },
+        "wcs": {
+          "cd_deg": [
+            [
+              -5.2205145599217135e-6,
+              -1.9001119073648263e-6
+            ],
+            [
+              -1.9001119073648263e-6,
+              5.2205145599217135e-6
+            ]
+          ],
+          "crpix": [
+            64.75,
+            64.1
+          ],
+          "crval_deg": [
+            53.1625,
+            -27.791400000000003
+          ],
+          "ctype": [
+            "RA---TAN",
+            "DEC--TAN"
+          ],
+          "rotation_deg": 20.0,
+          "sip": null
+        }
+      },
+      {
+        "border_dq": 513,
+        "dataset": "JWST",
+        "extensions": [
+          "SCI",
+          "ERR",
+          "DQ"
+        ],
+        "file": "d1_JWST_F277W.fits",
+        "filter": "F277W",
+        "flagged": [
+          {
+            "dq": 4,
+            "x": 32,
+            "y": 8
+          },
+          {
+            "dq": 4,
+            "x": 55,
+            "y": 31
+          }
+        ],
+        "galaxy": {
+          "centre_px": [
+            30.50000000018032,
+            30.74999999980156
+          ],
+          "clump_flux_jy": [
+            4.000000000000001e-6,
+            2.8000000000000003e-6,
+            3.2e-6,
+            2.0000000000000003e-6
+          ],
+          "disc_flux_jy": 0.00003,
+          "model_jy": 0.000041994695454623893
+        },
+        "holes": [
+          {
+            "dq": 1,
+            "model_jy": 2.9929622815271355e-6,
+            "x": [
+              31,
+              34
+            ],
+            "y": [
+              32,
+              34
+            ]
+          },
+          {
+            "dq": 1,
+            "model_jy": 5.342468772161667e-75,
+            "x": [
+              32,
+              34
+            ],
+            "y": [
+              55,
+              57
+            ]
+          }
+        ],
+        "instrument": "NIRCAM",
+        "model_jy": 0.00010999469545462376,
+        "nan_border_px": 2,
+        "noise": {
+          "sigma0_jy": 6e-10,
+          "sigma_jy": "sigma0_jy * (0.85 + 0.30 * x / (nx - 1)), x the 0-based column"
+        },
+        "pixel_scale_arcsec": 0.04,
+        "psf": {
+          "files": [
+            {
+              "path": "psf/d1_psf_JWST_F277W_40mas.fits",
+              "pixel_scale_arcsec": 0.04,
+              "side": 21
+            }
+          ],
+          "fwhm_arcsec": 0.092,
+          "model": "gaussian",
+          "sigma_arcsec": 0.03906880281324888
+        },
+        "shape": [
+          64,
+          64
+        ],
+        "stars": [
+          {
+            "aperture_model_jy": 0.000016998937422295664,
+            "aperture_radius_px": 4.6,
+            "aperture_sigma_jy": 4.432213709575266e-9,
+            "aperture_star_jy": 0.000016998936021400978,
+            "flux_jy": 0.000017,
+            "id": "s1",
+            "x": 18.500000000054733,
+            "y": 43.99999999956678
+          },
+          {
+            "aperture_model_jy": 6.799574408560388e-6,
+            "aperture_radius_px": 4.6,
+            "aperture_sigma_jy": 5.005876954304075e-9,
+            "aperture_star_jy": 6.799574408560388e-6,
+            "flux_jy": 6.799999999999999e-6,
+            "id": "s2",
+            "x": 43.99999999988901,
+            "y": 44.4999999996067
+          },
+          {
+            "aperture_model_jy": 0.000010199726459994355,
+            "aperture_radius_px": 4.6,
+            "aperture_sigma_jy": 4.619202820171198e-9,
+            "aperture_star_jy": 0.000010199726459994238,
+            "flux_jy": 0.0000102,
+            "id": "s3",
+            "x": 18.999999999891344,
+            "y": 18.249999999656076
+          },
+          {
+            "aperture_model_jy": 8.499741493256277e-6,
+            "aperture_radius_px": 4.6,
+            "aperture_sigma_jy": 5.22511575889736e-9,
+            "aperture_star_jy": 8.499741425467007e-6,
+            "flux_jy": 8.5e-6,
+            "id": "s4",
+            "x": 44.74999999988965,
+            "y": 19.250000000309967
+          },
+          {
+            "aperture_model_jy": 0.00002549927446332286,
+            "aperture_radius_px": 4.6,
+            "aperture_sigma_jy": 4.517728343731513e-9,
+            "aperture_star_jy": 0.000025499274463260724,
+            "flux_jy": 0.0000255,
+            "id": "s5",
+            "x": 13.2500000001804,
+            "y": 32.50000000008001
+          }
+        ],
+        "telescope": "JWST",
+        "unit": {
+          "bunit": "Jy",
+          "cards": {},
+          "jy_per_unit": 1.0
+        },
+        "wcs": {
+          "cd_deg": [
+            [
+              -0.000011111111111111112,
+              0.0
+            ],
+            [
+              0.0,
+              0.000011111111111111112
+            ]
+          ],
+          "crpix": [
+            32.5,
+            32.5
+          ],
+          "crval_deg": [
+            53.1625,
+            -27.791400000000003
+          ],
+          "ctype": [
+            "RA---TAN",
+            "DEC--TAN"
+          ],
+          "rotation_deg": 0.0,
+          "sip": null
+        }
+      },
+      {
+        "border_dq": 513,
+        "dataset": "JWST",
+        "extensions": [
+          "SCI",
+          "ERR",
+          "DQ"
+        ],
+        "file": "d1_JWST_F356W.fits",
+        "filter": "F356W",
+        "flagged": [
+          {
+            "dq": 4,
+            "x": 33,
+            "y": 8
+          },
+          {
+            "dq": 4,
+            "x": 56,
+            "y": 33
+          }
+        ],
+        "galaxy": {
+          "centre_px": [
+            30.91062243261809,
+            30.48869189250239
+          ],
+          "clump_flux_jy": [
+            3.1000000000000004e-6,
+            2.17e-6,
+            2.48e-6,
+            1.5500000000000002e-6
+          ],
+          "disc_flux_jy": 0.000033,
+          "model_jy": 0.00004230176237284755
+        },
+        "holes": [
+          {
+            "dq": 1,
+            "model_jy": 2.1910978002862126e-6,
+            "x": [
+              32,
+              35
+            ],
+            "y": [
+              32,
+              34
+            ]
+          },
+          {
+            "dq": 1,
+            "model_jy": 0.0,
+            "x": [
+              31,
+              33
+            ],
+            "y": [
+              55,
+              57
+            ]
+          }
+        ],
+        "instrument": "NIRCAM",
+        "model_jy": 0.00009830176237284761,
+        "nan_border_px": 2,
+        "noise": {
+          "sigma0_jy": 6e-10,
+          "sigma_jy": "sigma0_jy * (0.85 + 0.30 * x / (nx - 1)), x the 0-based column"
+        },
+        "pixel_scale_arcsec": 0.04,
+        "psf": {
+          "alpha_arcsec": 0.10260940891490468,
+          "beta": 2.5,
+          "files": [
+            {
+              "path": "psf/d1_psf_JWST_F356W_40mas.fits",
+              "pixel_scale_arcsec": 0.04,
+              "side": 21
+            }
+          ],
+          "fwhm_arcsec": 0.116,
+          "model": "moffat"
+        },
+        "shape": [
+          64,
+          64
+        ],
+        "stars": [
+          {
+            "aperture_model_jy": 0.000013298933513379747,
+            "aperture_radius_px": 5.8,
+            "aperture_sigma_jy": 5.76081219472195e-9,
+            "aperture_star_jy": 0.000013189116452318898,
+            "flux_jy": 0.000014,
+            "id": "s1",
+            "x": 18.23361659523107,
+            "y": 43.09250175284414
+          },
+          {
+            "aperture_model_jy": 5.284969564949546e-6,
+            "aperture_radius_px": 5.8,
+            "aperture_sigma_jy": 6.534009301418268e-9,
+            "aperture_star_jy": 5.280463199448264e-6,
+            "flux_jy": 5.6e-6,
+            "id": "s2",
+            "x": 43.67250175318365,
+            "y": 44.92638340444769
+          },
+          {
+            "aperture_model_jy": 7.956870383049693e-6,
+            "aperture_radius_px": 5.8,
+            "aperture_sigma_jy": 5.8396858316389665e-9,
+            "aperture_star_jy": 7.920943036294301e-6,
+            "flux_jy": 8.4e-6,
+            "id": "s3",
+            "x": 20.080582235696323,
+            "y": 17.40395921111596
+          },
+          {
+            "aperture_model_jy": 6.634522713258811e-6,
+            "aperture_radius_px": 5.8,
+            "aperture_sigma_jy": 6.659067165166914e-9,
+            "aperture_star_jy": 6.6108762928053586e-6,
+            "flux_jy": 7e-6,
+            "id": "s4",
+            "x": 45.74295679934775,
+            "y": 19.750239619779244
+          },
+          {
+            "aperture_model_jy": 0.000019889340729230853,
+            "aperture_radius_px": 5.8,
+            "aperture_sigma_jy": 5.6788621668609e-9,
+            "aperture_star_jy": 0.00001981464984052184,
+            "flux_jy": 0.000021,
+            "id": "s5",
+            "x": 13.592675034662044,
+            "y": 31.33349833341019
+          }
+        ],
+        "telescope": "JWST",
+        "unit": {
+          "bunit": "Jy",
+          "cards": {},
+          "jy_per_unit": 1.0
+        },
+        "wcs": {
+          "cd_deg": [
+            [
+              -0.000011095883719495266,
+              -5.815106249215982e-7
+            ],
+            [
+              -5.815106249215982e-7,
+              0.000011095883719495266
+            ]
+          ],
+          "crpix": [
+            32.87,
+            32.29
+          ],
+          "crval_deg": [
+            53.1625,
+            -27.791400000000003
+          ],
+          "ctype": [
+            "RA---TAN",
+            "DEC--TAN"
+          ],
+          "rotation_deg": 3.0,
+          "sip": null
+        }
+      },
+      {
+        "border_dq": 513,
+        "dataset": "JWST",
+        "extensions": [
+          "SCI",
+          "ERR",
+          "DQ"
+        ],
+        "file": "d1_JWST_F444W.fits",
+        "filter": "F444W",
+        "flagged": [
+          {
+            "dq": 4,
+            "x": 32,
+            "y": 8
+          },
+          {
+            "dq": 4,
+            "x": 55,
+            "y": 31
+          }
+        ],
+        "galaxy": {
+          "centre_px": [
+            30.50000000018032,
+            30.74999999980156
+          ],
+          "clump_flux_jy": [
+            2.5e-6,
+            1.75e-6,
+            2e-6,
+            1.25e-6
+          ],
+          "disc_flux_jy": 0.0000345,
+          "model_jy": 0.000041993899773089344
+        },
+        "holes": [
+          {
+            "dq": 1,
+            "model_jy": 2.813874895033927e-6,
+            "x": [
+              31,
+              34
+            ],
+            "y": [
+              32,
+              34
+            ]
+          },
+          {
+            "dq": 1,
+            "model_jy": 2.682475004056727e-56,
+            "x": [
+              32,
+              34
+            ],
+            "y": [
+              55,
+              57
+            ]
+          }
+        ],
+        "instrument": "NIRCAM",
+        "model_jy": 0.00008999389977308936,
+        "nan_border_px": 2,
+        "noise": {
+          "sigma0_jy": 6e-10,
+          "sigma_jy": "sigma0_jy * (0.85 + 0.30 * x / (nx - 1)), x the 0-based column"
+        },
+        "pixel_scale_arcsec": 0.04,
+        "psf": {
+          "files": [
+            {
+              "path": "psf/d1_psf_JWST_F444W_40mas.fits",
+              "pixel_scale_arcsec": 0.04,
+              "side": 21
+            }
+          ],
+          "fwhm_arcsec": 0.145,
+          "lambda_over_d_arcsec": 0.1409143340318391,
+          "model": "airy"
+        },
+        "shape": [
+          64,
+          64
+        ],
+        "stars": [
+          {
+            "aperture_model_jy": 0.000011954532622697694,
+            "aperture_radius_px": 7.249999999999999,
+            "aperture_sigma_jy": 7.253109959295575e-9,
+            "aperture_star_jy": 0.000011592908432678613,
+            "flux_jy": 0.000012,
+            "id": "s1",
+            "x": 18.500000000054733,
+            "y": 43.99999999956678
+          },
+          {
+            "aperture_model_jy": 4.665313918629405e-6,
+            "aperture_radius_px": 7.249999999999999,
+            "aperture_sigma_jy": 8.191723797559962e-9,
+            "aperture_star_jy": 4.637163373069632e-6,
+            "flux_jy": 4.8e-6,
+            "id": "s2",
+            "x": 43.99999999988901,
+            "y": 44.4999999996067
+          },
+          {
+            "aperture_model_jy": 7.109025831795395e-6,
+            "aperture_radius_px": 7.249999999999999,
+            "aperture_sigma_jy": 7.293452333344991e-9,
+            "aperture_star_jy": 6.953678568301824e-6,
+            "flux_jy": 7.2e-6,
+            "id": "s3",
+            "x": 18.999999999891344,
+            "y": 18.249999999656076
+          },
+          {
+            "aperture_model_jy": 5.870724270123284e-6,
+            "aperture_radius_px": 7.249999999999999,
+            "aperture_sigma_jy": 8.117064162136758e-9,
+            "aperture_star_jy": 5.789540639854452e-6,
+            "flux_jy": 6e-6,
+            "id": "s4",
+            "x": 44.74999999988965,
+            "y": 19.250000000309967
+          },
+          {
+            "aperture_model_jy": 0.000017614919298998475,
+            "aperture_radius_px": 7.249999999999999,
+            "aperture_sigma_jy": 6.9760034754718956e-9,
+            "aperture_star_jy": 0.000017374049407142575,
+            "flux_jy": 0.000018,
+            "id": "s5",
+            "x": 13.2500000001804,
+            "y": 32.50000000008001
+          }
+        ],
+        "telescope": "JWST",
+        "unit": {
+          "bunit": "MJy/sr",
+          "cards": {
+            "PIXAR_A2": 0.0016,
+            "PIXAR_SR": 3.7607088862556617e-14
+          },
+          "jy_per_unit": 3.7607088862556615e-8
+        },
+        "wcs": {
+          "cd_deg": [
+            [
+              -0.000011111111111111112,
+              0.0
+            ],
+            [
+              0.0,
+              0.000011111111111111112
+            ]
+          ],
+          "crpix": [
+            32.5,
+            32.5
+          ],
+          "crval_deg": [
+            53.1625,
+            -27.791400000000003
+          ],
+          "ctype": [
+            "RA---TAN",
+            "DEC--TAN"
+          ],
+          "rotation_deg": 0.0,
+          "sip": null
+        }
+      }
+    ],
+    "psf_truncation_arcsec": 0.4,
+    "reference_filter": "F444W",
+    "seed": 20261030,
+    "stars": [
+      {
+        "id": "s1",
+        "offset_arcsec": [
+          0.52,
+          0.5
+        ],
+        "position_deg": [
+          53.16266327824752,
+          -27.791261111015153
+        ]
+      },
+      {
+        "id": "s2",
+        "offset_arcsec": [
+          -0.5,
+          0.52
+        ],
+        "position_deg": [
+          53.1623430016931,
+          -27.79125555546684
+        ]
+      },
+      {
+        "id": "s3",
+        "offset_arcsec": [
+          0.5,
+          -0.53
+        ],
+        "position_deg": [
+          53.162656998728124,
+          -27.791547222133502
+        ]
+      },
+      {
+        "id": "s4",
+        "offset_arcsec": [
+          -0.53,
+          -0.49
+        ],
+        "position_deg": [
+          53.1623335813652,
+          -27.79153611101142
+        ]
+      },
+      {
+        "id": "s5",
+        "offset_arcsec": [
+          0.73,
+          0.04
+        ],
+        "position_deg": [
+          53.16272921780921,
+          -27.79138888869977
+        ]
+      }
+    ],
+    "subsampling": 5
+  }
+}

@@ -9,13 +9,20 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::handlers::{io, jobs, pipeline, render, sessions, stacking};
+use super::science::{self, ScienceState};
 use super::state::AppState;
 use super::v2;
 
 pub fn build_router(state: AppState) -> Router {
+    let science_state = ScienceState::from_env(&state);
+    build_router_with(state, science_state)
+}
+
+pub(crate) fn build_router_with(state: AppState, science_state: Arc<ScienceState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/sessions", routing::post(sessions::create))
@@ -54,7 +61,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v2/sessions/:sid/stats", routing::post(v2::stats::stats))
         .route("/v2/sessions/:sid/histogram", routing::post(v2::histogram::histogram))
         .route("/v2/sessions/:sid/render", routing::post(v2::render::handler::render))
+        .merge(science::router())
         .with_state(state)
+        .layer(middleware::from_fn_with_state(science_state, science::guard::guard))
         .layer(middleware::from_fn(request_id))
 }
 

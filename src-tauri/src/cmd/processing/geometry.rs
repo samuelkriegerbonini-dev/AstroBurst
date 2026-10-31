@@ -5,10 +5,11 @@ use serde_json::json;
 
 use crate::cmd::analysis::area::{area_companion, AREA_EXTNAME};
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, image_ref, invalidate_written, load_companions, load_from_cache_or_disk,
+    blocking_cmd, image_ref, invalidate_written, load_companions, load_from_cache_or_disk,
     output_stem, render_and_save_as, resolve_output_dir, source_primary_header, try_extract_rgb_resolved,
     write_derived_fits, write_derived_mef, OutputValues, ResolvedRgbImage, MAX_PREVIEW_DIM,
 };
+use crate::service::common::derived_output_header;
 use crate::cmd::helpers;
 use crate::cmd::processing::local_contrast::{is_display_referred, output_values_for, source_header};
 use crate::cmd::processing::tone::{has_only_cube_planes, is_cube_header};

@@ -16,6 +16,7 @@ use astroburst_lib::infra::fits::reader::extract_image_mmap;
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
+use crate::science::guard::ConfinedJson;
 use crate::state::AppState;
 use crate::v2::images::{finite_stats_json, load_replacing, plane_load_error};
 
@@ -47,7 +48,7 @@ fn load_image_stats_header(path: &str) -> anyhow::Result<PlaneLoad> {
 pub async fn fits_open(
     SessionExtractor(session): SessionExtractor,
     State(_state): State<AppState>,
-    Json(params): Json<OpenParams>,
+    ConfinedJson(params): ConfinedJson<OpenParams>,
 ) -> Result<Json<Value>> {
     let path = params.path.clone();
     let slot = params.slot.unwrap_or_else(|| path.clone());

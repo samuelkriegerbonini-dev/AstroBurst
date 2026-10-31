@@ -16,7 +16,6 @@ use ndarray::{s, Array2};
 
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
-use crate::session::Session;
 
 use super::region::{region_values, RegionSpec};
 
@@ -89,21 +88,6 @@ fn rect_pixel_count(region: &Value) -> Option<u64> {
     Some(width * height)
 }
 
-async fn target_ref(session: &Session, explicit: Option<String>) -> Result<String> {
-    match explicit {
-        Some(r) => Ok(r),
-        None => session
-            .v2
-            .active_ref
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::BadRequest("no active image in this session; open a file first".into())
-            }),
-    }
-}
-
 fn bad_param(message: String, hint: &str) -> AppError {
     AppError::BadRequestWithHint { code: "bad_request", message, hint: Some(hint.into()) }
 }
@@ -140,7 +124,7 @@ pub async fn stats(
     Json(mut params): Json<StatsParams>,
 ) -> Result<Json<Value>> {
     validate_stats_params(&params)?;
-    let target = target_ref(&session, params.image_ref.take()).await?;
+    let target = session.target_ref(params.image_ref.take()).await?;
     let entry = session
         .cache
         .get(&target)

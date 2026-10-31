@@ -87,3 +87,16 @@ describe("SpectrumStore region source", () => {
     expect(store.getSnapshot().regionSource).toEqual(smallCircle);
   });
 });
+
+describe("SpectrumStore pixel errors", () => {
+  it("keeps the ERR values of a committed pixel spectrum and drops them on reset", () => {
+    const store = new SpectrumStore();
+    store.commit({ x: 1, y: 2, values: [1, 2], wavelengths: [], err: [0.1, 0.2] }, 3);
+    expect(store.getSnapshot().err).toEqual([0.1, 0.2]);
+    store.commit({ x: 1, y: 2, values: [1, 2], wavelengths: [] }, 3);
+    expect(store.getSnapshot().err).toBeNull();
+    store.commit({ x: 1, y: 2, values: [1, 2], wavelengths: [], err: [0.1, 0.2] }, 3);
+    store.reset();
+    expect(store.getSnapshot().err).toBeNull();
+  });
+});

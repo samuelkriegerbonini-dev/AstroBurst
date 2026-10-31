@@ -8,6 +8,8 @@ pub mod complex;
 pub mod normalization;
 pub mod window;
 pub mod subpixel;
+pub mod polygon;
+pub mod bspline;
 
 pub use median::{exact_median_mut, exact_median_f64, median_f32_mut, exact_mad_mut, f32_cmp, f64_cmp};
 pub use sigma_clip::sigma_clipped_stats;

@@ -1173,7 +1173,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data = ndarray::Array2::from_shape_fn((32, 32), |(y, x)| 0.2 + 0.4 * ((y * 32 + x) as f32 / 1024.0));
         let stretched = dir.path().join("m31_arcsinh.fits").to_str().unwrap().to_string();
-        let header = crate::cmd::common::derived_output_header(
+        let header = crate::service::common::derived_output_header(
             None,
             "arcsinh",
             crate::cmd::common::OutputValues::DisplayReferred,

@@ -429,6 +429,36 @@ impl BintableData {
     pub fn flattened_columns(&self, names: &[&str]) -> Result<Vec<Column>> {
         read_columns_in(&self.bytes, &self.header, names, &self.label, true)
     }
+
+    pub fn text_column(&self, name: &str) -> Result<Vec<String>> {
+        let wanted = name.trim().to_uppercase();
+        let infos = column_infos(&self.header, &self.label)?;
+        let matches: Vec<&ColumnInfo> = infos.iter().filter(|c| c.name == wanted).collect();
+        let info = match matches[..] {
+            [info] => info,
+            [] => bail!(
+                "column '{wanted}' not in {}; columns: {}",
+                self.label,
+                infos.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            _ => bail!("column '{wanted}' appears {} times in {}; refusing the ambiguous name", matches.len(), self.label),
+        };
+        let layout = build_bintable_layout(&self.header)?;
+        let Some(ColumnSpan::Fixed { offset, type_code: 'A', repeat }) = layout.columns.get(&info.name).copied() else {
+            bail!("column '{}' of {} is not a character column (TFORM '{}')", info.name, self.label, info.tform);
+        };
+        (0..layout.n_rows)
+            .map(|row| {
+                let start = row * layout.row_width + offset;
+                let field = self
+                    .bytes
+                    .get(start..start + repeat)
+                    .with_context(|| format!("{}: row {row} of column '{}' lies beyond the table data", self.label, info.name))?;
+                let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+                Ok(String::from_utf8_lossy(&field[..end]).trim_end().to_string())
+            })
+            .collect()
+    }
 }
 
 pub fn load_bintable(path: &str, hdu: usize) -> Result<BintableData> {

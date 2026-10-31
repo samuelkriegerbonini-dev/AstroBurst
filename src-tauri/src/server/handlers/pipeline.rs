@@ -29,6 +29,7 @@ use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
 use crate::handlers::stacking::{refuse_cfa_lights, require_positive, stop_if_cancelled};
 use crate::job::{new_job, spawn_job, Job};
+use crate::science::guard::ConfinedJson;
 use crate::state::AppState;
 
 const STACKING_PCT: u32 = 25;
@@ -210,7 +211,7 @@ fn run_pipeline(
 pub async fn run(
     SessionExtractor(session): SessionExtractor,
     State(state): State<AppState>,
-    Json(params): Json<PipelineParams>,
+    ConfinedJson(params): ConfinedJson<PipelineParams>,
 ) -> Result<(StatusCode, Json<Value>)> {
     if params.channels.is_empty() {
         return Err(AppError::BadRequest("channels must not be empty".into()));

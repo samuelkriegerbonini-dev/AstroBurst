@@ -1,19 +1,34 @@
 import type { SpectralAxisInfo, VelocityConvention } from "./spectral";
 
+export interface PhotometricPlane {
+  filter: string;
+  dataset: string;
+  instrument: string;
+  pivot_um: number | null;
+  pixscale_arcsec: number | null;
+  bunit_in: string;
+  fluxconv: number | null;
+  psf_fwhm_arcsec: number | null;
+  kernel: string;
+}
+
 export interface CubeDims {
   width: number;
   height: number;
   frames: number;
   bitpix?: number;
+  bunit?: string | null;
   wavelengths?: number[];
   spectral_classification?: {
     is_spectral: boolean;
+    is_photometric?: boolean;
     reason: string | null;
     axis_type?: string | null;
     axis_unit?: string | null;
     channel_count?: number;
   };
   spectral_axis?: SpectralAxisInfo | null;
+  photometric_planes?: PhotometricPlane[] | null;
 }
 
 export interface CubeSpectrum {
@@ -23,6 +38,7 @@ export interface CubeSpectrum {
   y: number;
   is_spectral?: boolean;
   flux_jy?: number[] | null;
+  err?: number[] | null;
 }
 
 export interface NoiseFactor {

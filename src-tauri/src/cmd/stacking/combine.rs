@@ -4,11 +4,12 @@ use ndarray::Array2;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, cached_header, derived_output_header, output_stem, render_named_and_save, resolve_output_dir,
+    blocking_cmd, cached_header, output_stem, render_named_and_save, resolve_output_dir,
     write_derived_fits, OutputValues,
 };
+use crate::service::common::derived_output_header;
 use super::cards::{stack_output_cards, DrizzleCards, StackCards};
-use crate::cmd::compose::rescale_per_pixel_calibration;
+use crate::core::metadata::units::rescale_per_pixel_calibration;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::cmd::helpers;
 use crate::core::stacking::calibration::calibrate_from_paths;
@@ -939,5 +940,87 @@ mod tests {
         assert!(err.contains("needs more than 3 frames"), "{err}");
         let err = stack_from_paths(&paths, &minmax(1, 1), None).unwrap_err().to_string();
         assert!(!err.contains("Min/max"), "{err}");
+    }
+
+    const RECORD_DERIVED_HEADER_FIXTURES: &str = "ASTROBURST_WRITE_DERIVED_HEADER_FIXTURES";
+
+    fn golden_frame_header() -> HduHeader {
+        let mut header = exposure_header("300");
+        for (key, value) in [
+            ("EXTNAME", "SCI"),
+            ("DATAMIN", "0"),
+            ("WCSAXES", "3"),
+            ("CTYPE3", "WAVE"),
+            ("CD3_3", "1.0E-09"),
+            ("PC1_3", "0.0"),
+            ("PV2_1", "45.0"),
+            ("TELESCOP", "JWST"),
+            ("FILTER", "F200W"),
+            ("PHOTMJSR", "1.5"),
+            ("ZP", "25.0"),
+            ("ZPTMAG", "24.0"),
+            ("EGAIN", "0.25"),
+            ("NCOMBINE", "2"),
+            ("CHECKSUM", "abc"),
+        ] {
+            header.set(key, value.to_string());
+        }
+        header.cards.push(("HISTORY".to_string(), "flat-fielded".to_string()));
+        header
+    }
+
+    fn fits_cards(path: Option<&str>) -> Vec<String> {
+        let version = format!("AstroBurst {}", env!("CARGO_PKG_VERSION"));
+        std::fs::read(path.expect("a FITS path"))
+            .unwrap()
+            .chunks(80)
+            .map(|card| String::from_utf8_lossy(card).trim_end().replace(&version, "AstroBurst {version}"))
+            .take_while(|card| card != "END")
+            .collect()
+    }
+
+    #[test]
+    fn stack_and_drizzle_fits_cards_equal_the_cards_captured_before_the_derived_header_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().to_str().unwrap().replace('\\', "/");
+        let paths = vec![
+            write_frame(&dir, "a.fits", 100.0, &golden_frame_header()),
+            write_frame(&dir, "b.fits", 102.0, &golden_frame_header()),
+            write_frame(&dir, "c.fits", 101.0, &golden_frame_header()),
+        ];
+        let config = StackConfig { align: false, rejection_maps: true, ..StackConfig::default() };
+        let stacked = stack_from_paths(&paths, &config, None).unwrap();
+        let saved = save_stack(&stacked, &paths, &out, "stacked", &config).unwrap();
+        let drizzle = DrizzleConfig { scale: 2.0, align: false, ..DrizzleConfig::default() };
+        let drizzled = drizzle_from_paths(&paths, &drizzle, None).unwrap();
+        let (_, drizzled_fits) = save_drizzle(&drizzled, &paths, &out, "drizzled", &drizzle).unwrap();
+
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/derived_header");
+        let record = std::env::var_os(RECORD_DERIVED_HEADER_FIXTURES).is_some_and(|value| value == "1");
+        let mut missing = Vec::new();
+        for (name, fits) in [
+            ("stack.txt", saved.fits_path),
+            ("stack_rejection_low.txt", saved.rejection_low_fits),
+            ("drizzle.txt", drizzled_fits),
+        ] {
+            let actual = fits_cards(fits.as_deref());
+            let path = fixtures.join(name);
+            match std::fs::read_to_string(&path) {
+                Ok(expected) => assert_eq!(expected.lines().collect::<Vec<_>>(), actual, "{name}"),
+                Err(_) => {
+                    if record {
+                        std::fs::create_dir_all(&fixtures).unwrap();
+                        std::fs::write(&path, actual.join("\n") + "\n").unwrap();
+                    }
+                    missing.push(name);
+                }
+            }
+        }
+        let next_step = if record {
+            "wrote the cards of this run, run again to compare".to_owned()
+        } else {
+            format!("restore it from version control, or record the cards of this run with {RECORD_DERIVED_HEADER_FIXTURES}=1")
+        };
+        assert!(missing.is_empty(), "no fixture for {missing:?}: {next_step}");
     }
 }

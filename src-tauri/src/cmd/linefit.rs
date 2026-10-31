@@ -6,8 +6,9 @@ use ndarray::Array2;
 use serde::Serialize;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, output_stem, resolve_output_dir, write_derived_fits, OutputValues,
+    blocking_cmd, output_stem, resolve_output_dir, write_derived_fits, OutputValues,
 };
+use crate::service::common::derived_output_header;
 use crate::cmd::cube::{linear_preview, strip_spectral_axis, MapFiles};
 use crate::core::astrometry::spectral::VelocityConvention;
 pub(crate) use crate::core::cube::companions::{open_cube_set, CubeSet};

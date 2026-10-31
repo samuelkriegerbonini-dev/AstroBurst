@@ -6,6 +6,7 @@ pub mod calibration_pipeline;
 pub mod cfa;
 pub mod colormap;
 pub mod contour;
+pub mod convolve;
 pub mod cosmetic;
 pub mod curves;
 pub mod dbe;

@@ -25,6 +25,7 @@ pub mod visualization;
 pub mod pixelmath;
 pub mod statistics;
 pub mod cutout;
+pub mod cubeprep;
 pub mod spectral;
 pub mod spectrum1d;
 pub mod catalog;

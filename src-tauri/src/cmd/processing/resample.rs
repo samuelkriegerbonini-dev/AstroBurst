@@ -1,10 +1,11 @@
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, extract_image_resolved, output_stem, render_named_and_save,
+    blocking_cmd, extract_image_resolved, output_stem, render_named_and_save,
     resolve_output_dir, write_derived_fits, OutputValues,
 };
-use crate::cmd::compose::rescale_per_pixel_calibration;
+use crate::core::metadata::units::rescale_per_pixel_calibration;
+use crate::service::common::derived_output_header;
 use crate::core::imaging::resample::resample_with_wcs;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::types::constants::{

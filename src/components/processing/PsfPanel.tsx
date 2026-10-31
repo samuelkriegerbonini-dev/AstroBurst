@@ -1,12 +1,16 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { estimatePsf } from "../../services/processing";
+import { useState, useRef, useEffect, useCallback, useId } from "react";
+import { buildEmpiricalPsf, estimatePsf } from "../../services/processing";
 import { compositeChainState, compositeEstimatePsf } from "../../services/compositeChain";
+import { getOutputDir } from "../../infrastructure/tauri";
 import { useProcessingRun } from "../../hooks/useProcessingRun";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { COMPOSITE_RUN_KEY } from "../../utils/compositeChain";
-import { Slider, RunButton, ErrorAlert, SectionHeader } from "../ui";
+import { paintKernel } from "../../utils/psfProfile";
+import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader } from "../ui";
+import EmpiricalPsfResult from "./EmpiricalPsfResult";
 import { compositeModeNotice } from "./compositeProps";
 import type { CompositePanelProps } from "./compositeProps";
+import type { EmpiricalPsfReport, PsfRadiusUnit, PsfStackMethod, PsfStarSource } from "../../shared/types/processing";
 
 interface PsfResult {
   kernel: number[][];
@@ -47,6 +51,22 @@ export default function PsfPanel({ selectedFile, onPsfReady, onCompositePsfReady
   const [maxEllipticity, setMaxEllipticity] = useState(0.3);
   const [satThreshold, setSatThreshold] = useState(0.95);
 
+  const { running: recipeRunning, blocked: recipeBlocked, busyTitle: recipeBusyTitle, result: recipeResult, error: recipeError, run: runRecipe } = useProcessingRun<EmpiricalPsfReport>("psfRecipe", compositeMode ? null : fileKey ?? null);
+  const sourceId = useId();
+  const unitId = useId();
+  const stackId = useId();
+  const [starSource, setStarSource] = useState<PsfStarSource["kind"]>("auto");
+  const [regionPath, setRegionPath] = useState("");
+  const [radecText, setRadecText] = useState("");
+  const [cutoutSize, setCutoutSize] = useState(61);
+  const [psfSize, setPsfSize] = useState(51);
+  const [normalizationRadius, setNormalizationRadius] = useState(20);
+  const [radiusUnit, setRadiusUnit] = useState<PsfRadiusUnit>("pixel");
+  const [oversampling, setOversampling] = useState(1);
+  const [stack, setStack] = useState<PsfStackMethod>("median");
+  const [radialCleaning, setRadialCleaning] = useState(false);
+  const [saveFits, setSaveFits] = useState(true);
+
   const handleFileEstimate = useCallback(() => {
     if (!selectedFile?.path) return;
     const path = selectedFile.path;
@@ -85,31 +105,45 @@ export default function PsfPanel({ selectedFile, onPsfReady, onCompositePsfReady
 
   useEffect(() => {
     if (!result || !canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const size = result.kernel_size;
-    canvas.width = size;
-    canvas.height = size;
-
-    const flat = result.kernel.flat();
-    const maxVal = Math.max(...flat);
-    if (maxVal === 0) return;
-
-    const imgData = ctx.createImageData(size, size);
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const v = Math.floor((result.kernel[y][x] / maxVal) * 255);
-        const idx = (y * size + x) * 4;
-        imgData.data[idx] = v;
-        imgData.data[idx + 1] = v;
-        imgData.data[idx + 2] = v;
-        imgData.data[idx + 3] = 255;
-      }
-    }
-    ctx.putImageData(imgData, 0, 0);
+    paintKernel(canvasRef.current, result.kernel);
   }, [result]);
+
+  const handleRecipe = useCallback(() => {
+    if (!selectedFile?.path) return;
+    const path = selectedFile.path;
+    const source: PsfStarSource = starSource === "regions"
+      ? { kind: "regions", path: regionPath.trim() }
+      : starSource === "ra_dec"
+        ? { kind: "ra_dec", text: radecText }
+        : { kind: "auto", num_stars: numStars };
+    void runRecipe(async () => {
+      const outputDir = saveFits ? await getOutputDir() : null;
+      const report = await buildEmpiricalPsf(path, source, {
+        recipe: {
+          cutout_size: cutoutSize,
+          psf_size: psfSize,
+          normalization_radius: normalizationRadius,
+          normalization_radius_unit: radiusUnit,
+          oversampling: oversampling > 1 ? oversampling : null,
+          stack,
+          radial_cleaning: radialCleaning,
+        },
+        outputDir,
+      });
+      onPsfReady?.(report.kernel);
+      return report;
+    });
+  }, [selectedFile, starSource, regionPath, radecText, numStars, saveFits, cutoutSize, psfSize, normalizationRadius, radiusUnit, oversampling, stack, radialCleaning, onPsfReady, runRecipe]);
+
+  const handlePickRegions = useCallback(async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ multiple: false, filters: [{ name: "DS9 regions", extensions: ["reg"] }], title: "Stars for the empirical PSF" });
+    const chosen = Array.isArray(picked) ? picked[0] : picked;
+    if (chosen) setRegionPath(chosen);
+  }, []);
+
+  const recipeSourceMissing = (starSource === "regions" && regionPath.trim() === "") || (starSource === "ra_dec" && radecText.trim() === "");
+  const recipeSizesInvalid = cutoutSize % 2 === 0 || psfSize % 2 === 0 || psfSize > cutoutSize;
 
   return (
     <div className="flex flex-col gap-3 p-4">
@@ -169,6 +203,112 @@ export default function PsfPanel({ selectedFile, onPsfReady, onCompositePsfReady
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {!compositeMode && (
+        <div className="flex flex-col gap-3 border-t border-zinc-800 pt-3">
+          <div className="flex items-baseline justify-between">
+            <span className="text-xs font-semibold text-zinc-200">LIGHTSTACK recipe</span>
+            <span className="text-[10px] text-zinc-500">median stack of chosen stars</span>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <label htmlFor={sourceId} className="text-xs text-zinc-400">Stars</label>
+            <select id={sourceId} value={starSource} onChange={(e) => setStarSource(e.target.value as PsfStarSource["kind"])} disabled={recipeRunning} className="ab-select">
+              <option value="auto">Automatic finder</option>
+              <option value="regions">DS9 region file</option>
+              <option value="ra_dec">RA/Dec list</option>
+            </select>
+          </div>
+          {starSource === "auto" && (
+            <div className="text-[10px] text-zinc-500 px-1">{`The finder above proposes up to ${numStars} stars.`}</div>
+          )}
+          {starSource === "regions" && (
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={regionPath}
+                onChange={(e) => setRegionPath(e.target.value)}
+                placeholder="stars_f444w.reg"
+                spellCheck={false}
+                disabled={recipeRunning}
+                aria-label="DS9 region file (physical, image or sky frame)"
+                className="flex-1 min-w-0 bg-zinc-900/80 border border-zinc-700/50 rounded px-2 py-1 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 focus:border-violet-400"
+              />
+              <button
+                type="button"
+                onClick={() => void handlePickRegions().catch((e: unknown) => console.warn("[AstroBurst] The region file dialog failed:", e))}
+                disabled={recipeRunning}
+                className="px-3 py-1.5 rounded text-[10px] text-zinc-400 hover:text-zinc-200 border border-zinc-700/50 hover:border-zinc-600 transition-all disabled:opacity-40"
+              >
+                Choose
+              </button>
+            </div>
+          )}
+          {starSource === "ra_dec" && (
+            <textarea
+              value={radecText}
+              onChange={(e) => setRadecText(e.target.value)}
+              placeholder={"RA Dec [name] per line, degrees or sexagesimal\n53.16250 -27.79140 star1"}
+              spellCheck={false}
+              disabled={recipeRunning}
+              aria-label="RA/Dec star list"
+              className="w-full h-20 resize-y bg-zinc-900/80 border border-zinc-700/50 rounded px-2 py-1 text-[11px] font-mono text-zinc-200 placeholder:text-zinc-600 focus:border-violet-400"
+            />
+          )}
+
+          <Slider label="Cutout size" value={cutoutSize} min={11} max={151} step={2} disabled={recipeRunning} accent="violet" format={(v) => `${v}px`} onChange={setCutoutSize} />
+          <Slider label="PSF size" value={psfSize} min={5} max={151} step={2} disabled={recipeRunning} accent="violet" format={(v) => `${v}px`} onChange={setPsfSize} />
+          <div className="flex items-center justify-between">
+            <label htmlFor={unitId} className="text-xs text-zinc-400">Radius unit</label>
+            <select
+              id={unitId}
+              value={radiusUnit}
+              onChange={(e) => {
+                const unit = e.target.value as PsfRadiusUnit;
+                setRadiusUnit(unit);
+                setNormalizationRadius(unit === "arcsec" ? 1 : 20);
+              }}
+              disabled={recipeRunning}
+              className="ab-select"
+            >
+              <option value="pixel">Pixels</option>
+              <option value="arcsec">Arcsec</option>
+            </select>
+          </div>
+          {radiusUnit === "pixel" ? (
+            <Slider label="Normalization radius" value={normalizationRadius} min={1} max={75} step={1} disabled={recipeRunning} accent="violet" format={(v) => `${v}px`} onChange={setNormalizationRadius} />
+          ) : (
+            <Slider label="Normalization radius" value={normalizationRadius} min={0.1} max={30} step={0.1} disabled={recipeRunning} accent="violet" format={(v) => `${v.toFixed(1)}"`} onChange={setNormalizationRadius} />
+          )}
+          <Slider label="Oversampling" value={oversampling} min={1} max={4} step={1} disabled={recipeRunning} accent="violet" format={(v) => (v === 1 ? "None" : `x${v}`)} onChange={setOversampling} />
+          <div className="flex items-center justify-between">
+            <label htmlFor={stackId} className="text-xs text-zinc-400">Stack</label>
+            <select id={stackId} value={stack} onChange={(e) => setStack(e.target.value as PsfStackMethod)} disabled={recipeRunning} className="ab-select">
+              <option value="median">Median</option>
+              <option value="mean">Mean</option>
+            </select>
+          </div>
+          <Toggle label="Radial cleaning" checked={radialCleaning} disabled={recipeRunning} accent="violet" onChange={setRadialCleaning} />
+          <Toggle label="Save PSF FITS" checked={saveFits} disabled={recipeRunning} accent="violet" onChange={setSaveFits} />
+          {recipeSizesInvalid && (
+            <div className="text-[10px] text-amber-300 px-1">The cutout and PSF sizes must be odd, and the PSF cannot be larger than the cutout.</div>
+          )}
+
+          <div title={disabledReason ?? recipeBusyTitle}>
+            <RunButton
+              label="Build empirical PSF"
+              runningLabel="Building..."
+              running={recipeRunning}
+              disabled={!selectedFile || recipeBlocked || recipeSourceMissing || recipeSizesInvalid || !!disabledReason}
+              describedBy={disabledReason ? disabledReasonId : undefined}
+              accent="violet"
+              onClick={handleRecipe}
+            />
+          </div>
+          <ErrorAlert message={recipeError} />
+          {recipeResult && <EmpiricalPsfResult report={recipeResult} />}
         </div>
       )}
     </div>

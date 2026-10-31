@@ -1,0 +1,10 @@
+{
+  "recipe_version": 1,
+  "name": "d1_stars",
+  "inputs": [
+    {"path": "d1_stars_JWST_F444W.fits", "dataset": "JWST", "filter": "F444W"}
+  ],
+  "steps": [
+    {"step": "psfs", "source": "empirical", "dataset": "JWST", "filters": ["F444W"], "cutout_size": 31, "background_border": 5, "normalization_radius": 0.46, "normalization_radius_unit": "arcsec", "psf_size": 21}
+  ]
+}

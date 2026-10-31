@@ -5,6 +5,7 @@ mod extractors;
 mod handlers;
 mod job;
 mod router;
+mod science;
 mod session;
 mod state;
 mod v2;

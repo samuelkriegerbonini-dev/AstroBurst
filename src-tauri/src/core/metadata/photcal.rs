@@ -73,7 +73,7 @@ pub struct CalibratedFlux {
     pub st_mag: Option<f64>,
 }
 
-fn card_text(header: &HduHeader, key: &str) -> Option<String> {
+pub(crate) fn card_text(header: &HduHeader, key: &str) -> Option<String> {
     let cleaned = header.get(key)?.trim().trim_matches('\'').trim();
     (!cleaned.is_empty()).then(|| cleaned.to_string())
 }
@@ -98,7 +98,7 @@ fn is_dn_per_second(unit: &str) -> bool {
     unit.starts_with("DN/S")
 }
 
-fn is_rate_unit(unit: &str) -> bool {
+pub(crate) fn is_rate_unit(unit: &str) -> bool {
     unit.contains("/S")
 }
 
@@ -123,13 +123,13 @@ pub(crate) fn is_relative_pixel_area(mean: f64) -> bool {
     mean.is_finite() && !areas_disagree(mean, 1.0)
 }
 
-struct PixelArea {
-    steradians: f64,
-    derived: bool,
+pub(crate) struct PixelArea {
+    pub(crate) steradians: f64,
+    pub(crate) derived: bool,
     replaced_card: bool,
 }
 
-fn pixel_area_sr(
+pub(crate) fn pixel_area_sr(
     header: &HduHeader,
     keys: &[&str],
     wcs: Option<&WcsTransform>,

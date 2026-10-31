@@ -11,6 +11,12 @@ const cubeState = vi.hoisted(() => ({
   isSpectrum: false,
   ramp: null as unknown,
   file: { id: "f1", path: "C:/data/cube.fits" } as Record<string, unknown> | null,
+  cubeDims: null as unknown,
+}));
+const specState = vi.hoisted(() => ({
+  spectrum: [] as number[],
+  err: null as number[] | null,
+  coord: null as { x: number; y: number } | null,
 }));
 const docState = vi.hoisted(() => ({
   doc: { loading: false, spectrum: null as unknown, error: null as string | null },
@@ -30,14 +36,23 @@ vi.mock("../../../context/PreviewContext", () => ({
   useCubeContext: () => ({
     isCube: cubeState.isCube,
     isSpectrum: cubeState.isSpectrum,
-    cubeDims: null,
+    cubeDims: cubeState.cubeDims,
     ramp: cubeState.ramp,
     rampSource: cubeState.ramp ? "fits" : null,
   }),
   useRenderActions: () => ({ publishProcessed: () => {} }),
 }));
 vi.mock("../../../hooks/useSpectrumStore", () => ({
-  useSpectrum: () => ({ spectrum: [], wavelengths: null, coord: null, loading: false, elapsed: 0, error: null }),
+  useSpectrum: () => ({
+    spectrum: specState.spectrum,
+    err: specState.err,
+    wavelengths: null,
+    coord: specState.coord,
+    loading: false,
+    elapsed: 0,
+    error: null,
+    region: null,
+  }),
 }));
 vi.mock("../../../hooks/useSpectrum1dStore", () => ({
   useSpectrum1dDoc: (path: string | null, hdu: number | null) => {
@@ -121,6 +136,10 @@ beforeEach(() => {
   cubeState.isSpectrum = false;
   cubeState.ramp = null;
   cubeState.file = { id: "f1", path: "C:/data/cube.fits" };
+  cubeState.cubeDims = null;
+  specState.spectrum = [];
+  specState.err = null;
+  specState.coord = null;
   docState.doc = { loading: false, spectrum: null, error: null };
   docState.requests = [];
   docState.csv = null;
@@ -146,6 +165,61 @@ describe("CubeTool sections", () => {
     expect(html).toContain(sectionMarkup(ANALYSIS_SECTION.pv.id));
     expect(html).toContain("[pv-panel]");
     expect(html).not.toContain(sectionMarkup(ANALYSIS_SECTION.ramp.id));
+  });
+});
+
+describe("CubeTool SED", () => {
+  const plane = (filter: string, pivot_um: number) => ({
+    filter,
+    dataset: "JWST",
+    instrument: "NIRCam",
+    pivot_um,
+    pixscale_arcsec: 0.04,
+    bunit_in: "Jy",
+    fluxconv: 1,
+    psf_fwhm_arcsec: null,
+    kernel: "",
+  });
+  const photometricDims = {
+    width: 6,
+    height: 5,
+    frames: 3,
+    bunit: "Jy",
+    photometric_planes: [plane("F444W", 4.404315), plane("F150W", 1.500744), plane("F277W", 2.761)],
+    spectral_classification: { is_spectral: false, is_photometric: false, reason: "NAXIS3=3 with no spectral keywords: likely RGB/RGBA composition" },
+  };
+  const count = (html: string, attribute: string) => html.split(attribute).length - 1;
+
+  it("plots the picked pixel and its error against the pivot wavelengths of a filter cube", async () => {
+    cubeState.cubeDims = photometricDims;
+    specState.spectrum = [3, 1, 2];
+    specState.err = [0.3, 0.1, 0.2];
+    specState.coord = { x: 2, y: 3 };
+    const html = await renderCubeTool(null);
+    expect(html).toContain("data-sed-panel");
+    expect(html).toContain("pixel (2, 3)");
+    expect(html).toContain("Pivot wavelength (um)");
+    expect(html).toContain("Flux (Jy)");
+    expect(count(html, "data-sed-point")).toBe(3);
+    expect(count(html, "data-sed-err")).toBe(3);
+    expect(html.indexOf("F150W")).toBeLessThan(html.indexOf("F277W"));
+    expect(html.indexOf("F277W")).toBeLessThan(html.indexOf("F444W"));
+  });
+
+  it("asks for a pixel or a region before it has values to plot", async () => {
+    cubeState.cubeDims = photometricDims;
+    const html = await renderCubeTool(null);
+    expect(html).toContain("data-sed-panel");
+    expect(html).toContain("Click a pixel or extract a region spectrum");
+    expect(count(html, "data-sed-point")).toBe(0);
+  });
+
+  it("leaves the SED out of a cube without filter planes", async () => {
+    cubeState.cubeDims = { width: 6, height: 5, frames: 3, photometric_planes: null };
+    specState.spectrum = [1, 2, 3];
+    specState.coord = { x: 1, y: 1 };
+    const html = await renderCubeTool(null);
+    expect(html).not.toContain("data-sed-panel");
   });
 });
 

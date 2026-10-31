@@ -3,10 +3,11 @@ use std::time::Instant;
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, image_ref, invalidate_written, load_from_cache_or_disk, output_stem,
+    blocking_cmd, image_ref, invalidate_written, load_from_cache_or_disk, output_stem,
     render_and_save_as, resolve_output_dir, try_extract_rgb_resolved, write_derived_fits, OutputValues,
     ResolvedRgbImage, MAX_PREVIEW_DIM,
 };
+use crate::service::common::derived_output_header;
 use crate::cmd::helpers;
 use crate::cmd::processing::curves::{ToneCurveInput, ToneLevelsInput};
 use crate::cmd::processing::local_contrast::source_header;

@@ -13,6 +13,7 @@ use astroburst_lib::infra::cache::ImageCache;
 use astroburst_lib::types::image_ref::ImageRef;
 
 use super::config::{ServerConfig, MIN_CLEANUP_INTERVAL};
+use super::error::{AppError, Result};
 use super::job::{Job, JobId};
 
 pub type SessionId = String;
@@ -116,6 +117,21 @@ impl Session {
             .filter(|m| self.cache.holds(image_ref, &m.data) != Some(false))
             .map(|m| m.wcs_source_path())
             .unwrap_or_default()
+    }
+
+    pub async fn target_ref(&self, explicit: Option<String>) -> Result<String> {
+        match explicit {
+            Some(r) => Ok(r),
+            None => self
+                .v2
+                .active_ref
+                .read()
+                .await
+                .clone()
+                .ok_or_else(|| {
+                    AppError::BadRequest("no active image in this session; open a file first".into())
+                }),
+        }
     }
 
     pub async fn reconcile_active_ref(&self) -> Option<String> {

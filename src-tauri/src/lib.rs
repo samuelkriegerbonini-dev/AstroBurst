@@ -2,6 +2,7 @@ pub mod types;
 pub mod math;
 pub mod infra;
 pub mod core;
+pub mod service;
 
 #[cfg(feature = "tauri")]
 mod cmd;
@@ -242,6 +243,14 @@ pub fn run() {
             cmd::spectrum1d::probe_spectrum1d_cmd,
             cmd::spectrum1d::read_spectrum_csv_cmd,
             cmd::cutout::export_cutout_cmd,
+            cmd::cubeprep::convert_units_cmd,
+            cmd::cubeprep::crop_set_cmd,
+            cmd::cubeprep::align_set_cmd,
+            cmd::cubeprep::build_cube_cmd,
+            cmd::cubeprep::edit_cube_cmd,
+            cmd::cubeprep::load_psfs_cmd,
+            cmd::cubeprep::build_kernels_cmd,
+            cmd::cubeprep::psf_match_cube_cmd,
             cmd::catalog::catalog_cone_search_cmd,
             cmd::catalog::catalog_crossmatch_cmd,
             cmd::catalog::catalog_export_csv_cmd,
@@ -271,6 +280,7 @@ pub fn run() {
             cmd::astrometry::gaia_refine::gaia_refine_wcs_cmd,
             cmd::contours::contour_lines_cmd,
             cmd::psf::estimate_psf_cmd,
+            cmd::psf::build_empirical_psf_cmd,
             cmd::spcc::spcc_calibrate_cmd,
             cmd::config::get_config,
             cmd::config::update_config,

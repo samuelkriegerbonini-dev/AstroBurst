@@ -10,10 +10,11 @@ use serde_json::{json, Map, Value};
 use tauri::Manager;
 
 use crate::cmd::common::{
-    blocking_cmd, cached_header, derived_output_header, image_ref, invalidate_written, load_cached_full,
+    blocking_cmd, cached_header, image_ref, invalidate_written, load_cached_full,
     load_from_cache_or_disk, output_stem, resolve_output_dir, save_auto_stf_preview_png, save_output_preview, source_path,
     try_extract_rgb_resolved, write_derived_fits, OutputValues, ResolvedRgbImage, MAX_PREVIEW_DIM,
 };
+use crate::service::common::derived_output_header;
 use crate::cmd::helpers;
 use crate::cmd::output::dir_info;
 use crate::cmd::pixelmath::output_header as pixelmath_header;

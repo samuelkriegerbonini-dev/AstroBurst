@@ -27,6 +27,7 @@ use astroburst_lib::types::stacking::{
 use crate::error::{AppError, Result};
 use crate::extractors::SessionExtractor;
 use crate::job::{new_job, spawn_job, Job};
+use crate::science::guard::ConfinedJson;
 use crate::state::AppState;
 
 const LOAD_PCT: usize = 60;
@@ -220,7 +221,7 @@ pub struct DrizzleParams {
 pub async fn stack(
     SessionExtractor(session): SessionExtractor,
     State(state): State<AppState>,
-    Json(params): Json<StackParams>,
+    ConfinedJson(params): ConfinedJson<StackParams>,
 ) -> Result<(StatusCode, Json<Value>)> {
     if params.paths.is_empty() {
         return Err(AppError::BadRequest("paths must not be empty".into()));
@@ -293,7 +294,7 @@ pub async fn stack(
 pub async fn drizzle(
     SessionExtractor(session): SessionExtractor,
     State(state): State<AppState>,
-    Json(params): Json<DrizzleParams>,
+    ConfinedJson(params): ConfinedJson<DrizzleParams>,
 ) -> Result<(StatusCode, Json<Value>)> {
     if params.paths.is_empty() {
         return Err(AppError::BadRequest("paths must not be empty".into()));

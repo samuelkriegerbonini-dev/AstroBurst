@@ -4,9 +4,10 @@ use anyhow::{anyhow, Result};
 use serde_json::json;
 
 use crate::cmd::common::{
-    blocking_cmd, derived_output_header, load_cached_full, output_stem, resolve_output_dir,
+    blocking_cmd, load_cached_full, output_stem, resolve_output_dir,
     save_output_preview, write_derived_fits,
 };
+use crate::service::common::derived_output_header;
 use crate::core::imaging::cfa::{
     extract_cfa, extraction_pattern, scaled_header, CfaExtract, CfaExtracted, CfaPattern, CfaPlane,
 };

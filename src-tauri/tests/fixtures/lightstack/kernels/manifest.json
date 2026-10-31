@@ -1,0 +1,52 @@
+{
+  "manifest_version": 1,
+  "kind": "scipy_reference",
+  "created_by": "scripts/oracle/kernel_goldens.py",
+  "regenerate": "docs\\notCommit\\oracle\\.venv313\\Scripts\\python.exe -I scripts\\oracle\\kernel_goldens.py",
+  "versions": {
+    "python": "3.13.17",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "photutils": "3.1.1"
+  },
+  "platform": "Windows-11-10.0.26300-SP0",
+  "inputs": [
+    {
+      "path": "d1/psf/d1_psf_JWST_F444W_40mas.fits",
+      "bytes": 8640,
+      "sha256": "ac870e2d584f97dfed46f128ce2c4829d9b55e697934b6bd47427bc1dcbaa66b"
+    },
+    {
+      "path": "d1/psf/d1_psf_HST_F814W_40mas.fits",
+      "bytes": 8640,
+      "sha256": "a48e71b3ebb271ba63c129698d797881be8bd9e43efa71c014a0bdc339090b67"
+    },
+    {
+      "path": "d1/psf/d1_psf_JWST_F150W_40mas.fits",
+      "bytes": 8640,
+      "sha256": "5321418ff692c42e4fc63c22589f981f0c5dc8eda170adae2adeebebe1f5d9eb"
+    },
+    {
+      "path": "d1/psf/d1_psf_JWST_F200W_40mas.fits",
+      "bytes": 8640,
+      "sha256": "d0b0859b28293f8ec94bb62cd9bd43ee2c8cf5c5684da79506350242b33176f3"
+    },
+    {
+      "path": "d1/psf/d1_psf_JWST_F277W_40mas.fits",
+      "bytes": 8640,
+      "sha256": "9dc1c3255f46c6b43b625adfb56bc2cde0ee39765a20a5a1d7718f587020a1fa"
+    },
+    {
+      "path": "d1/psf/d1_psf_JWST_F356W_40mas.fits",
+      "bytes": 8640,
+      "sha256": "08dcb481c4cc158e23c3cf73d005edd58c7a7a7d17e9b063fbf7b843fdaa6676"
+    }
+  ],
+  "files": [
+    {
+      "path": "kernel_goldens.json",
+      "bytes": 214560,
+      "sha256": "515df372f70114edff87b316874ed90e403061a978ab0ee51a21fc7a46d54557"
+    }
+  ]
+}
