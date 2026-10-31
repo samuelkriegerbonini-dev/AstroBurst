@@ -294,14 +294,18 @@ pub fn drizzle_wcs_updates(header: &HduHeader, scale: f64) -> Vec<(String, f64)>
         }
     }
     let cd_keys = ["CD1_1", "CD1_2", "CD2_1", "CD2_2"];
-    let linear_keys = ["CDELT1", "CDELT2", "PC1_1", "PC1_2", "PC2_1", "PC2_2", "CROTA2"];
-    if cd_keys.iter().any(|k| header.get_f64(k).is_some()) {
+    let pc_keys = ["PC1_1", "PC1_2", "PC2_1", "PC2_2"];
+    let linear_keys = ["CDELT1", "CDELT2", "CROTA2"];
+    let present = |keys: &[&str]| keys.iter().any(|k| header.get_f64(k).is_some());
+    let has_cd = present(&cd_keys);
+    if has_cd {
         for key in cd_keys {
             if let Some(v) = header.get_f64(key) {
                 updates.push((key.to_string(), v / scale));
             }
         }
-    } else if linear_keys.iter().any(|k| header.get_f64(k).is_some()) {
+    }
+    if present(&pc_keys) || (!has_cd && present(&linear_keys)) {
         for key in ["CDELT1", "CDELT2"] {
             updates.push((key.to_string(), header.get_f64(key).unwrap_or(1.0) / scale));
         }
@@ -597,6 +601,7 @@ pub fn drizzle_stack_staged(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::astrometry::wcs::read_effective_cd;
 
     fn config(scale: f64) -> DrizzleConfig {
         DrizzleConfig {
@@ -1055,6 +1060,32 @@ mod tests {
         assert_eq!(updates["CDELT2"], 0.5);
         assert!(!updates.contains_key("PC1_2"));
         assert!(drizzle_wcs_updates(&HduHeader::empty(), 2.0).is_empty());
+    }
+
+    #[test]
+    fn drizzle_wcs_scales_cdelt_next_to_pc_even_with_a_cd_matrix() {
+        let mut header = HduHeader::empty();
+        for (key, value) in [
+            ("CRPIX1", "10.5"),
+            ("CRPIX2", "20.5"),
+            ("CD1_1", "-1.1111111111111E-05"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "1.1111111111111E-05"),
+            ("CDELT1", "-2.0E-05"),
+            ("CDELT2", "2.0E-05"),
+            ("PC1_1", "0.8660254037844386"),
+            ("PC1_2", "-0.5"),
+            ("PC2_1", "0.5"),
+            ("PC2_2", "0.8660254037844386"),
+        ] {
+            header.set(key, value.to_string());
+        }
+        let drizzled = apply(&header, drizzle_wcs_updates(&header, 2.0));
+        let halved = read_effective_cd(&header).unwrap().map(|row| row.map(|v| v / 2.0));
+        assert_eq!(read_effective_cd(&drizzled).unwrap(), halved);
+        assert_eq!(card(&drizzled, "CD1_1"), -1.1111111111111E-05 / 2.0);
+        assert_eq!(card(&drizzled, "CD2_2"), 1.1111111111111E-05 / 2.0);
     }
 
     #[test]

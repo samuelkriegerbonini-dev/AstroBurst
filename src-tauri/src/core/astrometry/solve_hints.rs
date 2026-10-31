@@ -186,10 +186,10 @@ fn object_pointing(object: &NamedObject) -> Pointing {
 
 fn matrix_source(header: &HduHeader) -> &'static str {
     let present = |keys: &[&str]| keys.iter().any(|key| header.get(key).is_some());
-    if present(&CD_KEYS) {
-        "CD matrix"
-    } else if present(&PC_KEYS) {
+    if present(&PC_KEYS) {
         "PC matrix with CDELT1/CDELT2"
+    } else if present(&CD_KEYS) {
+        "CD matrix"
     } else {
         "CDELT1/CDELT2"
     }
@@ -699,6 +699,31 @@ mod tests {
             "{centre:?} vs {expected:?}"
         );
         assert_eq!(scale_of(&hints), scale_of(&reference));
+    }
+
+    #[test]
+    fn a_header_with_both_cd_and_pc_hints_the_pc_scale_and_names_it() {
+        let h = header(&[
+            ("CTYPE1", "'RA---TAN'"),
+            ("CTYPE2", "'DEC--TAN'"),
+            ("CD1_1", "-1.1111111111111E-05"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "1.1111111111111E-05"),
+            ("CDELT1", "-2.0E-05"),
+            ("CDELT2", "2.0E-05"),
+            ("PC1_1", "0.8660254037844386"),
+            ("PC1_2", "-0.5"),
+            ("PC2_1", "0.5"),
+            ("PC2_2", "0.8660254037844386"),
+        ]);
+        let hints = solve_hints(&h, 64, 64);
+        let scale = scale_of(&hints);
+        assert!(
+            close(scale.low_arcsec, 0.072 * (1.0 - SCALE_HINT_MARGIN), 1e-9),
+            "{scale:?}"
+        );
+        assert_eq!(scale.source, "PC matrix with CDELT1/CDELT2");
     }
 
     #[test]

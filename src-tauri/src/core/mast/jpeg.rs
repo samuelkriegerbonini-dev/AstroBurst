@@ -186,6 +186,16 @@ pub fn quick_wcs(bytes: &[u8]) -> Option<QuickWcs> {
     let crpix = [number(&cards, "CRPIX1")?, number(&cards, "CRPIX2")?];
     let crval = [number(&cards, "CRVAL1")?, number(&cards, "CRVAL2")?];
     let ctype = cards.get("CTYPE1").cloned().unwrap_or_default();
+    let pc_keys = ["PC1_1", "PC1_2", "PC2_1", "PC2_2"];
+    if pc_keys.iter().any(|key| number(&cards, key).is_some()) {
+        let [a, b, c, d] = pc_keys.map(|key| number(&cards, key));
+        let [cdelt1, cdelt2] = ["CDELT1", "CDELT2"].map(|key| number(&cards, key).unwrap_or(1.0));
+        let cd = [
+            [cdelt1 * a.unwrap_or(1.0), cdelt1 * b.unwrap_or(0.0)],
+            [cdelt2 * c.unwrap_or(0.0), cdelt2 * d.unwrap_or(1.0)],
+        ];
+        return Some(QuickWcs { ctype, crpix, crval, cd, from_cd: true });
+    }
     let cd_keys = ["CD1_1", "CD1_2", "CD2_1", "CD2_2"];
     if cd_keys.iter().any(|key| number(&cards, key).is_some()) {
         let [a, b, c, d] = cd_keys.map(|key| number(&cards, key).unwrap_or(0.0));
@@ -393,6 +403,40 @@ mod tests {
         assert!(quick_wcs(&fixture("t_bad.bin")).is_none());
         let degenerate = QuickWcs { cd: [[0.0, 0.0], [0.0, 0.0]], ..wcs };
         assert!(degenerate.summary(10, 10).is_none());
+    }
+
+    #[test]
+    fn quick_wcs_reads_the_pc_matrix_and_prefers_it_over_cd_like_astropy() {
+        let pc = [
+            "CTYPE1  = 'RA---TAN'",
+            "CTYPE2  = 'DEC--TAN'",
+            "CRPIX1  =                 32.5",
+            "CRPIX2  =                 32.5",
+            "CRVAL1  =              53.1625",
+            "CRVAL2  =             -27.7914",
+            "CDELT1  =             -2.0E-05",
+            "CDELT2  =              2.0E-05",
+            "PC1_1   =   0.8660254037844386",
+            "PC1_2   =                 -0.5",
+            "PC2_1   =                  0.5",
+            "PC2_2   =   0.8660254037844386",
+        ];
+        let cd = [
+            "CD1_1   = -1.1111111111111E-05",
+            "CD1_2   =                  0.0",
+            "CD2_1   =                  0.0",
+            "CD2_2   =  1.1111111111111E-05",
+        ];
+        for cards in [pc.to_vec(), [&pc[..], &cd[..]].concat()] {
+            let text = cards.iter().map(|card| format!("{card:<80}")).collect::<String>();
+            let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xFE];
+            jpeg.extend_from_slice(&((text.len() + 2) as u16).to_be_bytes());
+            jpeg.extend_from_slice(text.as_bytes());
+            let wcs = quick_wcs(&jpeg).unwrap();
+            assert_eq!(wcs.cd, [[-1.7320508075688774e-05, 1e-05], [1e-05, 1.7320508075688774e-05]], "{} cards", cards.len());
+            assert!(wcs.from_cd, "{} cards", cards.len());
+            assert_eq!(wcs.summary(64, 64).unwrap().orientation, WcsOrientation::CdMatrix);
+        }
     }
 
     #[test]

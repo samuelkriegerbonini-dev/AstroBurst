@@ -146,25 +146,25 @@ pub fn compute_wcs_updates(
                 updates.push((key.to_string(), v * factor));
             }
         }
-    } else {
-        let pc11 = header.get_f64("PC1_1");
-        let pc12 = header.get_f64("PC1_2");
-        let pc21 = header.get_f64("PC2_1");
-        let pc22 = header.get_f64("PC2_2");
-        let has_pc = pc11.is_some() || pc12.is_some() || pc21.is_some() || pc22.is_some();
+    }
 
-        if has_pc {
-            updates.push(("PC1_1".to_string(), pc11.unwrap_or(1.0) * scale_x));
-            updates.push(("PC1_2".to_string(), pc12.unwrap_or(0.0) * scale_y));
-            updates.push(("PC2_1".to_string(), pc21.unwrap_or(0.0) * scale_x));
-            updates.push(("PC2_2".to_string(), pc22.unwrap_or(1.0) * scale_y));
-        } else {
-            if let Some(cdelt1) = header.get_f64("CDELT1") {
-                updates.push(("CDELT1".to_string(), cdelt1 * scale_x));
-            }
-            if let Some(cdelt2) = header.get_f64("CDELT2") {
-                updates.push(("CDELT2".to_string(), cdelt2 * scale_y));
-            }
+    let pc11 = header.get_f64("PC1_1");
+    let pc12 = header.get_f64("PC1_2");
+    let pc21 = header.get_f64("PC2_1");
+    let pc22 = header.get_f64("PC2_2");
+    let has_pc = pc11.is_some() || pc12.is_some() || pc21.is_some() || pc22.is_some();
+
+    if has_pc {
+        updates.push(("PC1_1".to_string(), pc11.unwrap_or(1.0) * scale_x));
+        updates.push(("PC1_2".to_string(), pc12.unwrap_or(0.0) * scale_y));
+        updates.push(("PC2_1".to_string(), pc21.unwrap_or(0.0) * scale_x));
+        updates.push(("PC2_2".to_string(), pc22.unwrap_or(1.0) * scale_y));
+    } else if !has_cd {
+        if let Some(cdelt1) = header.get_f64("CDELT1") {
+            updates.push(("CDELT1".to_string(), cdelt1 * scale_x));
+        }
+        if let Some(cdelt2) = header.get_f64("CDELT2") {
+            updates.push(("CDELT2".to_string(), cdelt2 * scale_y));
         }
     }
 
@@ -270,6 +270,7 @@ pub fn resample_with_wcs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::astrometry::wcs::read_effective_cd;
 
     fn header_with(cards: &[(&str, &str)]) -> HduHeader {
         let mut h = HduHeader::empty();
@@ -324,6 +325,37 @@ mod tests {
         assert!((update(&u, "CD2_1").unwrap() + 4.0e-4).abs() < 1e-15);
         assert!(update(&u, "CD1_1").is_none() && update(&u, "CD2_2").is_none());
         assert!(update(&u, "CDELT1").is_none() && update(&u, "PC1_1").is_none());
+    }
+
+    #[test]
+    fn pc_matrix_next_to_a_cd_matrix_is_scaled_too() {
+        let h = header_with(&[
+            ("CRPIX1", "100.5"),
+            ("CRPIX2", "100.5"),
+            ("CD1_1", "-1.1111111111111E-05"),
+            ("CD1_2", "0.0"),
+            ("CD2_1", "0.0"),
+            ("CD2_2", "1.1111111111111E-05"),
+            ("CDELT1", "-2.0E-05"),
+            ("CDELT2", "2.0E-05"),
+            ("PC1_1", "0.8660254037844386"),
+            ("PC1_2", "-0.5"),
+            ("PC2_1", "0.5"),
+            ("PC2_2", "0.8660254037844386"),
+        ]);
+        let (sx, sy) = (2.0, 4.0);
+        let u = compute_wcs_updates(&h, (400, 400), (100, 200));
+        let mut resampled = h.clone();
+        for (key, value) in &u {
+            resampled.set_f64(key, *value);
+        }
+        let [[a, b], [c, d]] = read_effective_cd(&h).unwrap();
+        let after = read_effective_cd(&resampled).unwrap();
+        for (got, want) in after.iter().flatten().zip([a * sx, b * sy, c * sx, d * sy]) {
+            assert!((got - want).abs() <= 1e-14 * want.abs(), "{after:?}");
+        }
+        assert_eq!(update(&u, "CD1_1"), Some(-1.1111111111111E-05 * sx));
+        assert_eq!(update(&u, "CD2_2"), Some(1.1111111111111E-05 * sy));
     }
 
     #[test]

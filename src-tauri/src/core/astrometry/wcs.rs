@@ -183,17 +183,6 @@ fn number(value: f64) -> Result<Value> {
 }
 
 pub fn read_effective_cd(header: &HduHeader) -> Result<[[f64; 2]; 2]> {
-    let cd11 = header.get_f64("CD1_1");
-    let cd12 = header.get_f64("CD1_2");
-    let cd21 = header.get_f64("CD2_1");
-    let cd22 = header.get_f64("CD2_2");
-    if cd11.is_some() || cd12.is_some() || cd21.is_some() || cd22.is_some() {
-        return Ok([
-            [cd11.unwrap_or(1.0), cd12.unwrap_or(0.0)],
-            [cd21.unwrap_or(0.0), cd22.unwrap_or(1.0)],
-        ]);
-    }
-
     let pc11 = header.get_f64("PC1_1");
     let pc12 = header.get_f64("PC1_2");
     let pc21 = header.get_f64("PC2_1");
@@ -204,6 +193,25 @@ pub fn read_effective_cd(header: &HduHeader) -> Result<[[f64; 2]; 2]> {
         return Ok([
             [cdelt1 * pc11.unwrap_or(1.0), cdelt1 * pc12.unwrap_or(0.0)],
             [cdelt2 * pc21.unwrap_or(0.0), cdelt2 * pc22.unwrap_or(1.0)],
+        ]);
+    }
+
+    let cd11 = header.get_f64("CD1_1");
+    let cd12 = header.get_f64("CD1_2");
+    let cd21 = header.get_f64("CD2_1");
+    let cd22 = header.get_f64("CD2_2");
+    if cd11.is_some() || cd12.is_some() || cd21.is_some() || cd22.is_some() {
+        let (cd12, cd21) = (cd12.unwrap_or(0.0), cd21.unwrap_or(0.0));
+        let unit_if_axis_empty = |value: f64| {
+            if value == 0.0 && cd12 == 0.0 && cd21 == 0.0 {
+                1.0
+            } else {
+                value
+            }
+        };
+        return Ok([
+            [unit_if_axis_empty(cd11.unwrap_or(0.0)), cd12],
+            [cd21, unit_if_axis_empty(cd22.unwrap_or(0.0))],
         ]);
     }
 
@@ -1780,6 +1788,139 @@ mod tests {
                 let (px, py) = wcs.world_to_pixel(ra, dec);
                 assert!((px - x).abs() < ROUND_TRIP_TOL_PX && (py - y).abs() < ROUND_TRIP_TOL_PX);
             }
+        }
+    }
+
+    fn astropy_cd_case(cards: &[(&str, &str)]) -> HduHeader {
+        let mut pairs = vec![
+            ("NAXIS1", "64"),
+            ("NAXIS2", "64"),
+            ("CTYPE1", "RA---TAN"),
+            ("CTYPE2", "DEC--TAN"),
+            ("CRPIX1", "32.5"),
+            ("CRPIX2", "32.5"),
+            ("CRVAL1", "53.1625"),
+            ("CRVAL2", "-27.7914"),
+        ];
+        pairs.extend_from_slice(cards);
+        make_header(&pairs)
+    }
+
+    fn assert_matches_astropy(
+        cards: &[(&str, &str)],
+        matrix: [[f64; 2]; 2],
+        sky: &[(f64, f64, f64, f64)],
+    ) {
+        let header = astropy_cd_case(cards);
+        assert_eq!(read_effective_cd(&header).unwrap(), matrix);
+        let wcs = WcsTransform::from_header(&header).unwrap();
+        for &(x, y, ra, dec) in sky {
+            let got = wcs.pixel_to_world(x, y);
+            assert!(
+                (got.ra - ra).abs() < ORACLE_TOL_DEG && (got.dec - dec).abs() < ORACLE_TOL_DEG,
+                "({x},{y}): got ({},{}) want ({ra},{dec})",
+                got.ra,
+                got.dec
+            );
+        }
+    }
+
+    #[test]
+    fn cd_with_only_off_diagonal_terms_keeps_a_zero_diagonal_like_astropy() {
+        let cards = [("CD1_2", "-1.1111111111111E-05"), ("CD2_1", "-1.1111111111111E-05")];
+        assert_matches_astropy(
+            &cards,
+            [[0.0, -1.1111111111111e-05], [-1.1111111111111e-05, 0.0]],
+            &[
+                (0.0, 0.0, 53.1628956349853, -27.79104999943658),
+                (63.0, 0.0, 53.16289563753284, -27.791749999436558),
+                (10.0, 50.0, 53.162267642707654, -27.79116111091676),
+            ],
+        );
+        let scale = WcsTransform::from_header(&astropy_cd_case(&cards)).unwrap().pixel_scale_arcsec();
+        assert!((scale - 0.04).abs() < 1e-12, "pixel scale {scale} arcsec");
+    }
+
+    #[test]
+    fn a_missing_cd_diagonal_term_defaults_to_zero_like_astropy() {
+        assert_matches_astropy(
+            &[("CD1_1", "-1.0E-05"), ("CD1_2", "4.0E-06"), ("CD2_1", "3.0E-06")],
+            [[-1e-05, 4e-06], [3e-06, 0.0]],
+            &[
+                (0.0, 0.0, 53.16271364376561, -27.79149449983569),
+                (63.0, 0.0, 53.162001498746925, -27.791305499105505),
+                (10.0, 50.0, 53.16282668270488, -27.79146449961584),
+            ],
+        );
+        let singular = astropy_cd_case(&[("CD1_1", "-1.0E-05"), ("CD1_2", "4.0E-06")]);
+        assert_eq!(read_effective_cd(&singular).unwrap(), [[-1e-05, 4e-06], [0.0, 0.0]]);
+        let error = WcsTransform::from_header(&singular).unwrap_err();
+        assert!(error.to_string().contains("Singular"), "{error:#}");
+    }
+
+    #[test]
+    fn pc_with_cdelt_wins_over_cd_like_astropy() {
+        assert_matches_astropy(
+            &[
+                ("CD1_1", "-1.1111111111111E-05"),
+                ("CD1_2", "0.0"),
+                ("CD2_1", "0.0"),
+                ("CD2_2", "1.1111111111111E-05"),
+                ("CDELT1", "-2.0E-05"),
+                ("CDELT2", "2.0E-05"),
+                ("PC1_1", "0.8660254037844386"),
+                ("PC1_2", "-0.5"),
+                ("PC2_1", "0.5"),
+                ("PC2_2", "0.8660254037844386"),
+            ],
+            [[-1.7320508075688774e-05, 1e-05], [1e-05, 1.7320508075688774e-05]],
+            &[
+                (0.0, 0.0, 53.16276066532219, -27.792260595759736),
+                (63.0, 0.0, 53.16152718941158, -27.791630592597933),
+                (10.0, 50.0, 53.16313006813138, -27.791294569171644),
+            ],
+        );
+    }
+
+    #[test]
+    fn an_axis_without_any_cd_term_keeps_a_unit_diagonal_like_astropy_cdfix() {
+        for (cards, matrix) in [
+            (&[("CD1_1", "-1.0E-05"), ("CD1_2", "0.0"), ("CD2_1", "0.0")][..], [[-1e-05, 0.0], [0.0, 1.0]]),
+            (&[("CD1_1", "-1.0E-05")][..], [[-1e-05, 0.0], [0.0, 1.0]]),
+            (&[("CD2_2", "1.0E-05")][..], [[1.0, 0.0], [0.0, 1e-05]]),
+        ] {
+            assert_eq!(read_effective_cd(&astropy_cd_case(cards)).unwrap(), matrix, "{cards:?}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_zero_cd_diagonal_with_a_zero_row_and_column_becomes_one_like_astropy_cdfix() {
+        assert_matches_astropy(
+            &[("CD1_1", "0.0"), ("CD1_2", "0.0"), ("CD2_1", "0.0"), ("CD2_2", "1.0E-05")],
+            [[1.0, 0.0], [0.0, 1e-05]],
+            &[
+                (0.0, 0.0, 21.302963029010563, -24.115756975427615),
+                (63.0, 0.0, 85.02203697098943, -24.115756975427615),
+                (10.0, 50.0, 30.177149061157934, -25.88263507406554),
+            ],
+        );
+        assert_matches_astropy(
+            &[("CD1_1", "0.0"), ("CD1_2", "0.0"), ("CD2_1", "0.0"), ("CD2_2", "0.0")],
+            [[1.0, 0.0], [0.0, 1.0]],
+            &[
+                (0.0, 0.0, 11.9763936230855, -48.76820241895484),
+                (63.0, 0.0, 94.3486063769145, -48.76820241895483),
+                (10.0, 50.0, 33.237575019841515, -9.315141442776081),
+            ],
+        );
+        for (cards, matrix) in [
+            (&[("CD1_1", "-1.0E-05"), ("CD2_2", "-0.0")][..], [[-1e-05, 0.0], [0.0, 1.0]]),
+            (
+                &[("CD1_1", "0.0"), ("CD1_2", "-1.1111111111111E-05"), ("CD2_1", "-1.1111111111111E-05"), ("CD2_2", "0.0")][..],
+                [[0.0, -1.1111111111111e-05], [-1.1111111111111e-05, 0.0]],
+            ),
+        ] {
+            assert_eq!(read_effective_cd(&astropy_cd_case(cards)).unwrap(), matrix, "{cards:?}");
         }
     }
 

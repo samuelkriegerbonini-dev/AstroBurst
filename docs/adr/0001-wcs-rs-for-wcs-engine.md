@@ -7,4 +7,4 @@ We do **not** use wcs-rs's own SIP distortion support, even though it exists: `m
 ## Consequences
 
 - If a future `wcs`/`mapproj` upgrade fixes the SIP bug, the `-SIP`-suffix-stripping workaround and the hand-rolled `sip_forward`/`sip_inverse` methods become optional, not mandatory — worth revisiting then, not before.
-- `pixel_scale_arcsec`/`field_of_view` still compute from a CD matrix synthesized directly from the header (mirroring wcs-rs's own CD > PC×CDELT > CDELT+CROTA2 priority) rather than asking the engine, so these numbers stay bit-identical for CD-based files while becoming correct for PC-only ones.
+- `pixel_scale_arcsec`/`field_of_view` still compute from a CD matrix synthesized directly from the header rather than asking the engine, with astropy's precedence: PC×CDELT when any PC card is present, then CD with missing cards as 0 (a zero diagonal term becomes 1 when CD1_2 and CD2_1 are both 0, as wcslib's cdfix does), then CDELT+CROTA2. Files with a full CD matrix and no PC keep bit-identical numbers; files with both CD and PC, or with a partial CD matrix, now match astropy.

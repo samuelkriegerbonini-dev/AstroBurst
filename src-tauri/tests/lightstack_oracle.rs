@@ -1242,6 +1242,101 @@ fn d1_lightstack_crop_bounds_follow_crop_from_radec() {
     eprintln!("crop edges judged as ties: {ties:#?}");
 }
 
+fn f277w_crop_matches_crop_from_radec(
+    name: &str,
+    edit: impl FnOnce(&mut HduHeader),
+    astropy_scale: f64,
+    [x_min, x_max, y_min, y_max]: [i64; 4],
+) {
+    let (center, size) = recipe_crop();
+    let f277w = d1_planes()
+        .into_iter()
+        .find(|plane| plane.filter == "F277W")
+        .unwrap();
+    let mut header = f277w.header;
+    edit(&mut header);
+    let wcs = lightstack_wcs(&header).unwrap();
+    let rect = lightstack_square_rect(&wcs, (f277w.side, f277w.side), center, size).unwrap();
+    let (x, y) = astroburst_crop_centre(&wcs, center);
+    let scale = wcs.pixel_scale_arcsec();
+    let half = size / scale / 2.0;
+    let edges = [
+        CropEdge {
+            name: "x_min",
+            position: x - half,
+            ours: rect.x0,
+            theirs: x_min,
+            upper: false,
+        },
+        CropEdge {
+            name: "x_max",
+            position: x + half,
+            ours: rect.x0 + rect.width as i64,
+            theirs: x_max,
+            upper: true,
+        },
+        CropEdge {
+            name: "y_min",
+            position: y - half,
+            ours: rect.y0,
+            theirs: y_min,
+            upper: false,
+        },
+        CropEdge {
+            name: "y_max",
+            position: y + half,
+            ours: rect.y0 + rect.height as i64,
+            theirs: y_max,
+            upper: true,
+        },
+    ];
+    let ties: Vec<String> = edges
+        .iter()
+        .filter_map(|edge| check_crop_edge(name, edge, f277w.side, "crop_from_radec"))
+        .collect();
+    assert!(
+        (scale - astropy_scale).abs() < 1e-12,
+        "{name}: AstroBurst reads {scale} arcsec/px, astropy {astropy_scale}"
+    );
+    eprintln!("{name}: crop edges judged as ties: {ties:#?}");
+}
+
+#[test]
+fn d1_crop_on_a_cd_matrix_without_its_diagonal_follows_crop_from_radec() {
+    f277w_crop_matches_crop_from_radec(
+        "F277W with only CD1_2 and CD2_1",
+        |header| {
+            header.remove("CD1_1");
+            header.remove("CD2_2");
+            header.set("CD1_2", "-1.1111111111111E-05".to_string());
+            header.set("CD2_1", "-1.1111111111111E-05".to_string());
+        },
+        0.0399999999999996,
+        [8, 54, 8, 55],
+    );
+}
+
+#[test]
+fn d1_crop_on_cd_next_to_pc_and_cdelt_follows_crop_from_radec() {
+    f277w_crop_matches_crop_from_radec(
+        "F277W with CD and PC/CDELT",
+        |header| {
+            for (key, value) in [
+                ("PC1_1", "-1.0"),
+                ("PC1_2", "0.0"),
+                ("PC2_1", "0.0"),
+                ("PC2_2", "1.0"),
+                ("CDELT1", "2.22222222222222E-05"),
+                ("CDELT2", "2.22222222222222E-05"),
+            ] {
+                header.set(key, value.to_string());
+            }
+        },
+        0.07999999999999992,
+        [20, 43, 20, 43],
+    );
+}
+
 #[test]
 fn d1_common_footprint_holds_every_star_and_fits_inside_each_file() {
     let truth = read_json(&d1_dir().join(MANIFEST))["truth"].clone();
