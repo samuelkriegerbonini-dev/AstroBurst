@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   displaysFileGrid,
+  drizzleOutputName,
   drizzleViewOutput,
   frameStem,
   framesLabel,
@@ -14,6 +15,7 @@ import {
   sourceLabel,
   stackedLights,
   stackOutputName,
+  stackViewOutput,
   toDims,
 } from "../stackingOutputs";
 import type { ProcessedResult } from "../../shared/types/preview";
@@ -53,6 +55,20 @@ describe("stackOutputName", () => {
     const oiii = stackOutputName("/subs/OIII_001.fits", 20, t1);
     const rerun = stackOutputName("/subs/Ha_001.fits", 20, t2);
     expect(new Set([ha, oiii, rerun]).size).toBe(3);
+  });
+});
+
+describe("drizzleOutputName", () => {
+  const t1 = new Date(2026, 9, 30, 10, 15, 0, 7);
+  const t2 = new Date(2026, 9, 30, 10, 15, 0, 8);
+
+  it("names a mono drizzle after its first frame, the frame count and the run time, never the backend's fixed 'drizzled'", () => {
+    expect(drizzleOutputName("C:/sx13/frame_0001.fits", 6, t1)).toBe("frame_0001_drizzle6_20261030-101500-007");
+    expect(drizzleOutputName("C:/sx13/frame_0001.fits", 6, t1)).not.toBe("drizzled");
+  });
+
+  it("gives a rerun of the same frames a new name", () => {
+    expect(drizzleOutputName("C:/sx13/frame_0001.fits", 6, t2)).not.toBe(drizzleOutputName("C:/sx13/frame_0001.fits", 6, t1));
   });
 });
 
@@ -267,9 +283,47 @@ describe("pipelineViewOutput", () => {
     expect(pipelineViewOutput(run(undefined), "RGB")?.output.dimensions).toBeNull();
   });
 
-  it("references the RGB to the first master's light when there is no R channel", () => {
-    const run = pipelineRun({ masters: [master("G", "/subs/656nmos.fits"), master("B", "/subs/502nmos.fits")] });
-    expect(pipelineViewOutput(run, "RGB")?.output.inputPath).toBe("/subs/656nmos.fits");
+  it("names a narrowband composite after its palette, on its red plane's first light, never on a lane it left out", () => {
+    const sized = (label: string, dims: [number, number]) => ({ ...master(label, `/subs/${label.toLowerCase()}_1.fits`), dimensions: dims });
+    const run = pipelineRun({
+      rgb_palette: "SHO",
+      stats: { darks_combined: 0, flats_combined: 0, bias_combined: 0, channels: [channelStats("L", 5), channelStats("Ha", 4), channelStats("OIII", 3), channelStats("SII", 2)] },
+      masters: [sized("L", [2000, 1800]), sized("Ha", [1600, 1500]), sized("OIII", [1590, 1500]), sized("SII", [1600, 1490])],
+    });
+    expect(pipelineViewOutput(run, "RGB")).toEqual({
+      output: { fitsPath: null, previewUrl: "asset://out/run_rgb.png", dimensions: [1590, 1490], kind: "stacking", inputPath: "/subs/sii_1.fits" },
+      label: "Pipeline SHO · 9 frames",
+    });
+  });
+
+  it("counts the OIII lane of an HOO composite once", () => {
+    const run = pipelineRun({
+      rgb_palette: "HOO",
+      stats: { darks_combined: 0, flats_combined: 0, bias_combined: 0, channels: [channelStats("Ha", 3), channelStats("OIII", 5)] },
+      masters: [master("Ha", "/subs/ha_1.fits"), master("OIII", "/subs/oiii_1.fits")],
+    });
+    expect(pipelineViewOutput(run, "RGB")?.label).toBe("Pipeline HOO · 8 frames");
+    expect(pipelineViewOutput(run, "RGB")?.output.inputPath).toBe("/subs/ha_1.fits");
+  });
+
+  it("counts the lanes of an RGB composite and the L lane only when the run applied it as luminance", () => {
+    const channels = [channelStats("L", 5), channelStats("R", 1), channelStats("G", 2), channelStats("B", 3), channelStats("Ha", 4)];
+    const rgbMasters = [master("R", "/subs/r_1.fits"), master("G", "/subs/g_1.fits"), master("B", "/subs/b_1.fits"), master("Ha", "/subs/ha_1.fits")];
+    const run = (lumDims: [number, number] | null) =>
+      pipelineRun({
+        rgb_palette: "RGB",
+        stats: { darks_combined: 0, flats_combined: 0, bias_combined: 0, channels },
+        masters: lumDims ? [{ ...master("L", "/subs/l_1.fits"), dimensions: lumDims }, ...rgbMasters] : rgbMasters,
+      });
+    expect(pipelineViewOutput(run(null), "RGB")?.label).toBe("Pipeline RGB · 6 frames");
+    expect(pipelineViewOutput(run([1600, 1500]), "RGB")?.label).toBe("Pipeline RGB · 11 frames");
+    expect(pipelineViewOutput(run([3200, 3000]), "RGB")?.label).toBe("Pipeline RGB · 6 frames");
+    expect(pipelineViewOutput(run([1600, 1500]), "RGB")?.output.inputPath).toBe("/subs/r_1.fits");
+  });
+
+  it("has nothing to show when no plane of the composite has a master, rather than the first master's light", () => {
+    const run = pipelineRun({ rgb_palette: "SHO", masters: [master("L", "/subs/l_1.fits")] });
+    expect(pipelineViewOutput(run, "RGB")).toBeNull();
   });
 
   it("shows a channel as its master FITS, with the master's full size and the channel's first light", () => {
@@ -347,6 +401,23 @@ describe("drizzleViewOutput", () => {
 
   it("publishes no size when the output size is not a positive pair", () => {
     expect(drizzleViewOutput(drizzleRun({ output_dims: [0, 0] }), inputs, "/x.fits").output.dimensions).toBeNull();
+  });
+});
+
+describe("stackViewOutput", () => {
+  it("publishes a mono drizzle as a stack does: its FITS at its own size on the first input, named after the filter", () => {
+    const reply = { png_path: "/out/ha_drizzle3.png", fits_path: "/out/ha_drizzle3.fits", previewUrl: "asset://out/ha_drizzle3.png", dimensions: [3200, 3000] as [number, number], frame_count: 3, scale: 2, elapsed_ms: 5 };
+    expect(stackViewOutput(reply, ["/subs/ha_1.fits", "/subs/ha_2.fits", "/subs/ha_3.fits"], "/subs/r_1.fits", "Drizzle Ha (mono)")).toEqual({
+      output: { fitsPath: "/out/ha_drizzle3.fits", previewUrl: "asset://out/ha_drizzle3.png", dimensions: [3200, 3000], kind: "stacking", inputPath: "/subs/ha_1.fits" },
+      label: "Drizzle Ha (mono) · 3 frames",
+    });
+  });
+
+  it("falls back to the run target for the reference and to the input count for the label", () => {
+    expect(stackViewOutput({ png_path: "/out/s.png", dimensions: [0, 0], elapsed_ms: 1 }, [], "/subs/r_1.fits", "Stack")).toEqual({
+      output: { fitsPath: null, previewUrl: null, dimensions: null, kind: "stacking", inputPath: "/subs/r_1.fits" },
+      label: "Stack · 0 frames",
+    });
   });
 });
 

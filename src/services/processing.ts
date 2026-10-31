@@ -22,6 +22,7 @@ import type { CompositeStfFields } from "../shared/types/compose";
 import { CHAIN_PREVIEWS, chainArgs } from "./compositeChain";
 import { recordOp } from "./ops";
 import type { HistoryScope, OpSpec, PsfSpec, RunOpResult } from "../shared/types/ops";
+import type { MaskChoice } from "../shared/types/masks";
 import type { DbeConfig } from "../shared/types/dbe";
 
 export interface DeconvolveRunResult extends DeconvolveResult {
@@ -98,10 +99,10 @@ export function deconvolveOptionsOf(op: OpSpec): DeconvolveSettings | null {
 
 export type RecordedResult<T> = T & RunOpResult;
 
-export async function recordDeconvolveRL(scope: HistoryScope, path: string, options: DeconvolveOptions = {}): Promise<RecordedResult<DeconvolveRunResult>> {
+export async function recordDeconvolveRL(scope: HistoryScope, path: string, options: DeconvolveOptions = {}, mask: MaskChoice | null = null): Promise<RecordedResult<DeconvolveRunResult>> {
   const op = deconvolveOp(options);
   const psfKernel = op.op === "rl_deconv" && op.psf.kind === "kernel" ? options.psfKernel ?? null : null;
-  return (await recordOp(scope, path, op, { psfKernel })) as RecordedResult<DeconvolveRunResult>;
+  return (await recordOp(scope, path, op, { psfKernel, mask })) as RecordedResult<DeconvolveRunResult>;
 }
 
 export function deconvolveRL(
@@ -288,8 +289,8 @@ export function waveletOptionsOf(op: OpSpec): WaveletSettings | null {
   };
 }
 
-export async function recordWaveletDenoise(scope: HistoryScope, path: string, options: WaveletOptions = {}): Promise<RecordedResult<WaveletResult>> {
-  return (await recordOp(scope, path, waveletOp(options))) as RecordedResult<WaveletResult>;
+export async function recordWaveletDenoise(scope: HistoryScope, path: string, options: WaveletOptions = {}, mask: MaskChoice | null = null): Promise<RecordedResult<WaveletResult>> {
+  return (await recordOp(scope, path, waveletOp(options), { mask })) as RecordedResult<WaveletResult>;
 }
 
 export function waveletDenoise(
@@ -358,8 +359,8 @@ export function arcsinhOptionsOf(op: OpSpec): { factor: number } | null {
   return op.op === "arcsinh" ? { factor: op.factor } : null;
 }
 
-export async function recordArcsinhStretch(scope: HistoryScope, path: string, factor = 50.0): Promise<RecordedResult<ArcsinhResult>> {
-  return (await recordOp(scope, path, { op: "arcsinh", v: 1, factor })) as RecordedResult<ArcsinhResult>;
+export async function recordArcsinhStretch(scope: HistoryScope, path: string, factor = 50.0, mask: MaskChoice | null = null): Promise<RecordedResult<ArcsinhResult>> {
+  return (await recordOp(scope, path, { op: "arcsinh", v: 1, factor }, { mask })) as RecordedResult<ArcsinhResult>;
 }
 
 export interface DebayerResult {
@@ -503,55 +504,86 @@ export interface GhsOptions {
   highlightProtect?: number;
 }
 
-export function ghsOp(options: GhsOptions): OpSpec {
+export type GhsSettings = Required<GhsOptions>;
+
+export const GHS_DEFAULTS: GhsSettings = {
+  stretchFactor: 2.0,
+  localIntensity: 0.0,
+  symmetryPoint: 0.01,
+  shadowProtect: 0.0,
+  highlightProtect: 1.0,
+};
+
+export const GHS_LIMITS = {
+  stretchFactor: { min: 0, max: 50, step: 0.05 },
+  localIntensity: { min: -5, max: 15, step: 0.1 },
+  symmetryPoint: { min: 0, max: 1, step: 0.001 },
+  shadowProtect: { min: 0, max: 1, step: 0.001 },
+  highlightProtect: { min: 0, max: 1, step: 0.001 },
+} as const;
+
+export interface GhsStretchResult extends ArcsinhResult {
+  local_intensity?: number;
+  symmetry_point?: number;
+  shadow_protect?: number;
+  highlight_protect?: number;
+}
+
+function ghsSettingsOf(options: GhsOptions): GhsSettings {
   return {
-    op: "ghs",
-    v: 1,
-    d: options.stretchFactor,
-    b: options.localIntensity ?? 0.0,
-    sp: options.symmetryPoint ?? 0.05,
-    lp: options.shadowProtect ?? 0.0,
-    hp: options.highlightProtect ?? 1.0,
+    stretchFactor: options.stretchFactor,
+    localIntensity: options.localIntensity ?? GHS_DEFAULTS.localIntensity,
+    symmetryPoint: options.symmetryPoint ?? GHS_DEFAULTS.symmetryPoint,
+    shadowProtect: options.shadowProtect ?? GHS_DEFAULTS.shadowProtect,
+    highlightProtect: options.highlightProtect ?? GHS_DEFAULTS.highlightProtect,
   };
 }
 
-export function ghsOptionsOf(op: OpSpec): Required<GhsOptions> | null {
+export function ghsOp(options: GhsOptions): OpSpec {
+  const settings = ghsSettingsOf(options);
+  return {
+    op: "ghs",
+    v: 1,
+    d: settings.stretchFactor,
+    b: settings.localIntensity,
+    sp: settings.symmetryPoint,
+    lp: settings.shadowProtect,
+    hp: settings.highlightProtect,
+  };
+}
+
+export function ghsOptionsOf(op: OpSpec): GhsSettings | null {
   if (op.op !== "ghs") return null;
   return { stretchFactor: op.d, localIntensity: op.b, symmetryPoint: op.sp, shadowProtect: op.lp, highlightProtect: op.hp };
 }
 
-export async function recordGhsStretch(scope: HistoryScope, path: string, options: GhsOptions = { stretchFactor: 2.0 }): Promise<RecordedResult<ArcsinhResult>> {
-  return (await recordOp(scope, path, ghsOp(options))) as RecordedResult<ArcsinhResult>;
+export type StretchSettings = { method: "arcsinh"; factor: number } | { method: "ghs"; ghs: GhsSettings };
+
+export function stretchOptionsOf(op: OpSpec): StretchSettings | null {
+  const arcsinh = arcsinhOptionsOf(op);
+  if (arcsinh) return { method: "arcsinh", factor: arcsinh.factor };
+  const ghs = ghsOptionsOf(op);
+  return ghs ? { method: "ghs", ghs } : null;
+}
+
+export async function recordGhsStretch(scope: HistoryScope, path: string, options: GhsOptions = GHS_DEFAULTS, mask: MaskChoice | null = null): Promise<RecordedResult<GhsStretchResult>> {
+  return (await recordOp(scope, path, ghsOp(options), { mask })) as RecordedResult<GhsStretchResult>;
 }
 
 export function applyGhsStretch(
   path: string,
   outputDir?: string,
-  options: GhsOptions = { stretchFactor: 2.0 },
+  options: GhsOptions = GHS_DEFAULTS,
 ): Promise<ArcsinhResult> {
-  return withPreview<ArcsinhResult>("apply_ghs_stretch_cmd", outputDir, {
-    path,
-    stretchFactor: options.stretchFactor,
-    localIntensity: options.localIntensity ?? 0.0,
-    symmetryPoint: options.symmetryPoint ?? 0.05,
-    shadowProtect: options.shadowProtect ?? 0.0,
-    highlightProtect: options.highlightProtect ?? 1.0,
-  });
+  return withPreview<ArcsinhResult>("apply_ghs_stretch_cmd", outputDir, { path, ...ghsSettingsOf(options) });
 }
 
 export async function ghsStretchComposite(
   outputDir?: string,
-  options: GhsOptions = { stretchFactor: 2.0 },
+  options: GhsOptions = GHS_DEFAULTS,
 ): Promise<ArcsinhResult> {
   const dir = outputDir ?? await getOutputDir();
-  return typedInvoke<ArcsinhResult>("ghs_stretch_composite_cmd", {
-    outputDir: dir,
-    stretchFactor: options.stretchFactor,
-    localIntensity: options.localIntensity ?? 0.0,
-    symmetryPoint: options.symmetryPoint ?? 0.05,
-    shadowProtect: options.shadowProtect ?? 0.0,
-    highlightProtect: options.highlightProtect ?? 1.0,
-  });
+  return typedInvoke<ArcsinhResult>("ghs_stretch_composite_cmd", { outputDir: dir, ...ghsSettingsOf(options) });
 }
 
 export interface MaskedStretchOptions {

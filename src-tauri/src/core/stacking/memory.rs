@@ -23,6 +23,7 @@ const DRIZZLE_MAX_SCALE: f64 = 4.0;
 const STAR_MASK_PLANE_FRACTION: f64 = 0.25;
 
 const MEMORY_ADVICE: &str = "Stack fewer frames at a time and combine the partial stacks, turn alignment off if the frames are already registered, or close other applications. If the system can page this much, set ASTROBURST_MEMORY_BUDGET_MB to the memory to allow (in MB) and restart.";
+const MOSAIC_MEMORY_ADVICE: &str = "Build the mosaic from fewer or smaller panels, or close other applications. If the system can page this much, set ASTROBURST_MEMORY_BUDGET_MB to the memory to allow (in MB) and restart.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryInfo {
@@ -48,6 +49,7 @@ pub enum MemoryJob<'a> {
     Drizzle { frames: usize, largest: FrameSize },
     PipelineChannel(&'a str),
     PipelineMasters,
+    Mosaic { cols: usize, rows: usize },
 }
 
 impl MemoryJob<'_> {
@@ -61,13 +63,22 @@ impl MemoryJob<'_> {
             }
             MemoryJob::PipelineChannel(label) => format!("Channel '{}' of the Pipeline needs", label),
             MemoryJob::PipelineMasters => "Building the calibration masters of the Pipeline needs".to_string(),
+            MemoryJob::Mosaic { cols, rows } => format!("A mosaic canvas of {}x{} needs", cols, rows),
         }
     }
 
     fn contents(&self) -> &'static str {
         match self {
             MemoryJob::PipelineMasters => "the calibration frames and the masters",
+            MemoryJob::Mosaic { .. } => "the canvas planes and one tile in flight",
             _ => "the frames, their aligned copies and the result",
+        }
+    }
+
+    fn advice(&self) -> &'static str {
+        match self {
+            MemoryJob::Mosaic { .. } => MOSAIC_MEMORY_ADVICE,
+            _ => MEMORY_ADVICE,
         }
     }
 }
@@ -285,7 +296,7 @@ pub fn check_memory(required: u64, info: Option<MemoryInfo>, what: &MemoryJob) -
             format_bytes(required),
             what.contents(),
             format_bytes(info.commit_available),
-            MEMORY_ADVICE
+            what.advice()
         ));
     }
     if required as f64 > WARN_FRACTION * info.physical_available as f64 {

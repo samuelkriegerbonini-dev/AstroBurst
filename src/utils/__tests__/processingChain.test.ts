@@ -23,6 +23,10 @@ import {
   pixelMathInputPreview,
   sectionInputName,
   gridSourceOf,
+  stageOf,
+  stepsReplacedBy,
+  replacedStepsNote,
+  type StepLabel,
 } from "../processingChain";
 import { displaysFileGrid } from "../stackingOutputs";
 import type { ChainBase, ChainEntry, ChainStep, FileRenderState, ProcessedResult, ProcessingChain } from "../../shared/types/preview";
@@ -602,5 +606,89 @@ describe("PixelMath compare base on a chain base", () => {
     expect(pixelMathInputPreview({ ...pixelMathShown(PV, "asset://out/pv.png?v=3"), fitsPath: PM }, "asset://raw.png")).toBe("asset://out/pv.png?v=3");
     expect(pixelMathInputPreview({ ...pvShown, kind: "debayer", fitsPath: null }, "asset://raw.png")).toBe("asset://raw.png");
     expect(pixelMathInputPreview(null, "asset://raw.png")).toBe("asset://raw.png");
+  });
+});
+
+describe("stageOf", () => {
+  it("gives Stretch and Masked one stage and keeps CHAIN_ORDER", () => {
+    const stages = CHAIN_ORDER.map(stageOf);
+    expect(stageOf("stretch")).toBe(stageOf("maskedStretch"));
+    expect(stages).toEqual([...stages].sort((a, b) => a - b));
+    expect(new Set(stages).size).toBe(CHAIN_ORDER.length - 1);
+  });
+
+  it("is the rule withStep applies: a run keeps only the earlier stages", () => {
+    for (const step of CHAIN_ORDER) {
+      const kept = presentSteps(withStep(chainOf(...CHAIN_ORDER), step, entry("/out/new.fits"))).filter((s) => s !== step);
+      expect(kept).toEqual(CHAIN_ORDER.filter((s) => stageOf(s) < stageOf(step)));
+    }
+  });
+});
+
+const BACKGROUND_RUN: StepLabel = { step: "background", label: "Background Extraction" };
+const DBE_RUN: StepLabel = { step: "background", label: "DBE" };
+const DENOISE_RUN: StepLabel = { step: "denoise", label: "Wavelet Denoise" };
+const DECONV_RUN: StepLabel = { step: "deconv", label: "Deconvolution" };
+const STRETCH_RUN: StepLabel = { step: "stretch", label: "Arcsinh Stretch" };
+const MASKED_RUN: StepLabel = { step: "maskedStretch", label: "Masked Stretch" };
+const LHE_RUN: StepLabel = { step: "localContrast", label: "LHE" };
+const HDRMT_RUN: StepLabel = { step: "localContrast", label: "HDRMT" };
+
+describe("stepsReplacedBy", () => {
+  const cases: [string, StepLabel[], StepLabel, string[]][] = [
+    ["a Background re-run lists Denoise and Stretch", [BACKGROUND_RUN, DENOISE_RUN, STRETCH_RUN], BACKGROUND_RUN, ["Wavelet Denoise", "Arcsinh Stretch"]],
+    ["LHE after HDRMT lists HDRMT", [STRETCH_RUN, HDRMT_RUN], LHE_RUN, ["HDRMT"]],
+    ["LHE after LHE lists nothing", [STRETCH_RUN, LHE_RUN], LHE_RUN, []],
+    ["Masked after Stretch lists Stretch", [STRETCH_RUN], MASKED_RUN, ["Arcsinh Stretch"]],
+    ["DBE after the polynomial model lists it", [BACKGROUND_RUN], DBE_RUN, ["Background Extraction"]],
+    ["Denoise after Background lists nothing", [BACKGROUND_RUN], DENOISE_RUN, []],
+  ];
+
+  it.each(cases)("%s", (_, entries, running, replaced) => {
+    expect(stepsReplacedBy(entries, running)).toEqual(replaced);
+  });
+});
+
+describe("replacedStepsNote", () => {
+  it("on a file, names the later steps and how History brings them back", () => {
+    expect(replacedStepsNote([BACKGROUND_RUN, DENOISE_RUN, STRETCH_RUN], BACKGROUND_RUN, false)).toBe(
+      "Running Background Extraction again starts a new branch from the original. Wavelet Denoise and Arcsinh Stretch stay in History: Go to on the earlier branch brings them back.",
+    );
+  });
+
+  it("on the composite, says the replaced steps cannot be brought back", () => {
+    expect(replacedStepsNote([BACKGROUND_RUN, DENOISE_RUN, STRETCH_RUN], BACKGROUND_RUN, true)).toBe(
+      "Running Background Extraction again replaces Wavelet Denoise and Arcsinh Stretch on the composite; the composite has no step history yet, so they cannot be brought back.",
+    );
+  });
+
+  it("names the shared slot, the step the run starts from and the tool it replaces", () => {
+    expect(replacedStepsNote([STRETCH_RUN, HDRMT_RUN], LHE_RUN, false)).toBe(
+      "LHE and HDRMT share one slot: this run starts from Arcsinh Stretch and replaces HDRMT. HDRMT stays in History: Go to on the earlier branch brings it back.",
+    );
+    expect(replacedStepsNote([STRETCH_RUN, HDRMT_RUN], LHE_RUN, true)).toBe(
+      "LHE and HDRMT share one slot: this run starts from Arcsinh Stretch and replaces HDRMT; the composite has no step history yet, so it cannot be brought back.",
+    );
+    expect(replacedStepsNote([STRETCH_RUN], MASKED_RUN, false)).toBe(
+      "Masked Stretch and Arcsinh Stretch share one slot: this run starts from the original and replaces Arcsinh Stretch. Arcsinh Stretch stays in History: Go to on the earlier branch brings it back.",
+    );
+    expect(replacedStepsNote([STRETCH_RUN], MASKED_RUN, true)).toBe(
+      "Masked Stretch and Arcsinh Stretch share one slot: this run starts from the composite and replaces Arcsinh Stretch; the composite has no step history yet, so it cannot be brought back.",
+    );
+  });
+
+  it("branches from the step before the running one and drops 'again' on a first run", () => {
+    expect(replacedStepsNote([BACKGROUND_RUN, DENOISE_RUN, STRETCH_RUN], DECONV_RUN, false)).toBe(
+      "Running Deconvolution starts a new branch from Wavelet Denoise. Arcsinh Stretch stays in History: Go to on the earlier branch brings it back.",
+    );
+    expect(replacedStepsNote([BACKGROUND_RUN, DENOISE_RUN, DECONV_RUN, STRETCH_RUN], BACKGROUND_RUN, false)).toBe(
+      "Running Background Extraction again starts a new branch from the original. Wavelet Denoise, Deconvolution and Arcsinh Stretch stay in History: Go to on the earlier branch brings them back.",
+    );
+  });
+
+  it("is null when the run replaces only its own result", () => {
+    expect(replacedStepsNote([STRETCH_RUN, LHE_RUN], LHE_RUN, false)).toBeNull();
+    expect(replacedStepsNote([BACKGROUND_RUN, DENOISE_RUN, STRETCH_RUN], STRETCH_RUN, true)).toBeNull();
+    expect(replacedStepsNote([], BACKGROUND_RUN, false)).toBeNull();
   });
 });

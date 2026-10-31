@@ -309,6 +309,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
             bPath={bPath}
             wcsPath={spccSolvedWcsPath(state, wcsSource)}
             wcsReason={wcsSource.reason}
+            headerWcs={wcsSource.header}
             wavelengthsNm={wavelengths.nm}
             onFactorsReady={handleSpccFactors}
           />

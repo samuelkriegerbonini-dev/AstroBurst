@@ -221,6 +221,11 @@ function pickHints(hints: Partial<HintTexts>, fields: readonly HintField[]): Par
   return picked;
 }
 
+export function keptHintTexts(texts: HintTexts, touched: ReadonlySet<HintField>): Partial<HintTexts> {
+  const scaleTyped = SCALE_HINT_FIELDS.some((field) => touched.has(field));
+  return pickHints(texts, [...(scaleTyped ? SCALE_HINT_FIELDS : []), ...POSITION_HINT_FIELDS.filter((field) => touched.has(field))]);
+}
+
 export function solveHintTexts(hints: SolveHints): Partial<HintTexts> {
   const texts: Partial<HintTexts> = {};
   const scale = hints.scale;
@@ -266,6 +271,10 @@ export function editedHintSources(current: HintSources, field: HintField): HintS
   if (CENTRE_HINT_FIELDS.includes(field)) return { ...current, centre: TYPED_HINT_SOURCE };
   if (SCALE_HINT_FIELDS.includes(field)) return { ...current, scale: TYPED_HINT_SOURCE };
   return current;
+}
+
+export function typedHintSources(typed: Partial<HintTexts>): HintSources {
+  return (Object.keys(typed) as HintField[]).reduce(editedHintSources, NO_HINT_SOURCES);
 }
 
 export function mergeHintSources(current: HintSources, next: HintSources, touched: ReadonlySet<HintField>): HintSources {

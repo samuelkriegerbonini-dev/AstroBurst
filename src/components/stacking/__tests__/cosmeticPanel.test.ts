@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ProcessedFile } from "../../../shared/types/fits.types";
 
+const loaded = vi.hoisted(() => ({ files: [] as ProcessedFile[] }));
+
 vi.mock("../../../context/PreviewContext", () => ({
-  useDoneFilesContext: () => ({ doneFiles: [] }),
+  useDoneFilesContext: () => ({ doneFiles: loaded.files }),
 }));
 vi.mock("../../../services/cosmetic", () => ({ cosmeticCorrect: vi.fn(), cosmeticCorrectBatch: vi.fn(), cosmeticDryRun: vi.fn() }));
 
@@ -57,6 +59,35 @@ describe("CosmeticPanel CFA toggle", () => {
     const html = render(null);
     expect(badgeText(html)).toBe("no Bayer card");
     expect(cfaToggleChecked(html)).toBe("false");
+  });
+});
+
+describe("CosmeticPanel batch and IMAGETYP", () => {
+  afterEach(() => {
+    loaded.files = [];
+  });
+
+  it("counts only the lights in Apply to All Loaded Lights and names the frames it leaves out", () => {
+    loaded.files = [
+      frame("light_1.fits", { IMAGETYP: "LIGHT", FILTER: "R" }),
+      frame("flat_1.fits", { IMAGETYP: "FLAT", FILTER: "R" }),
+      frame("light_2.fits", { IMAGETYP: "Light Frame" }),
+      frame("dark_1.fits", { IMAGETYP: "DARK" }),
+      frame("bias_1.fits", { IMAGETYP: "Bias" }),
+      frame("light_3.fits", { FILTER: "R" }),
+    ];
+    const html = render(loaded.files[0]);
+    expect(html).toContain("Apply to All Loaded Lights (3)");
+    const line = /<p id="([^"]+)"[^>]*data-testid="cosmetic-batch-left-out"[^>]*>([^<]*)<\/p>/.exec(html);
+    expect(line?.[2]).toBe("3 frames left out by IMAGETYP: 1 dark, 1 flat, 1 bias");
+    expect(html).toMatch(new RegExp(`<button[^>]*aria-describedby="${line?.[1]}"[^>]*>(?:(?!</button>).)*Apply to All Loaded Lights`));
+  });
+
+  it("says nothing about IMAGETYP when every loaded frame is a light", () => {
+    loaded.files = [frame("light_1.fits", { IMAGETYP: "LIGHT" }), frame("light_2.fits", {})];
+    const html = render(loaded.files[0]);
+    expect(html).toContain("Apply to All Loaded Lights (2)");
+    expect(html).not.toContain("cosmetic-batch-left-out");
   });
 });
 

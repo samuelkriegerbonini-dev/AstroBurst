@@ -306,6 +306,7 @@ pub struct LocalSolveParams {
     pub sip_min_quadrants: usize,
     pub sip_stars_per_band: usize,
     pub sip_order_4_above_deg: f64,
+    pub sip_max_order: Option<u8>,
 }
 
 impl Default for LocalSolveParams {
@@ -341,6 +342,7 @@ impl Default for LocalSolveParams {
             sip_min_quadrants: 3,
             sip_stars_per_band: 300,
             sip_order_4_above_deg: 5.0,
+            sip_max_order: None,
         }
     }
 }
@@ -1194,6 +1196,9 @@ fn poly_pairs(pairs: &[SkyPair], tan: &TanParams) -> Vec<(f64, f64, f64, f64)> {
 }
 
 fn max_sip_order(tan: &TanParams, size: (usize, usize), params: &LocalSolveParams) -> u8 {
+    if let Some(cap) = params.sip_max_order {
+        return cap;
+    }
     let long_side_deg = size.0.max(size.1) as f64 * scale_arcsec(&tan.cd) / ARCSEC_PER_DEG;
     if long_side_deg >= params.sip_order_4_above_deg {
         4

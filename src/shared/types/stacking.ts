@@ -87,6 +87,12 @@ export interface PipelineRequest {
   flat_dark_paths?: string[];
   sigma_low?: number;
   sigma_high?: number;
+  max_iterations?: number;
+  winsor_cutoff?: number;
+  percentile_low?: number;
+  percentile_high?: number;
+  minmax_low?: number;
+  minmax_high?: number;
   normalize?: boolean;
   align?: boolean;
   rejection?: RejectionMethod;
@@ -141,10 +147,13 @@ export interface PipelineMasterOutput {
   previewUrl?: string;
 }
 
+export type PipelineRgbPalette = "RGB" | "SHO" | "HOO";
+
 export interface PipelineResult {
   stats: PipelineStats;
   channel_previews: PipelineChannelPreview[];
   rgb_preview?: string;
+  rgb_palette?: PipelineRgbPalette | null;
   elapsed_ms?: number;
   warnings?: string[];
   masters?: PipelineMasterOutput[];
@@ -226,3 +235,143 @@ export interface DrizzleRgbResult {
 export const STACK_PROGRESS_EVENT = "stack-progress";
 export const CALIBRATE_PROGRESS_EVENT = "calibrate-progress";
 export const DRIZZLE_RGB_PROGRESS_EVENT = "drizzle-rgb-progress";
+export const PIPELINE_PROGRESS_EVENT = "pipeline-progress";
+export const MOSAIC_PROGRESS_EVENT = "mosaic-progress";
+
+export type MosaicLevelModel = "offset" | "offset_scale";
+
+export type MosaicCanvasRequest =
+  | { mode: "auto"; north_up: boolean; reference: number | null }
+  | { mode: "like"; path: string };
+
+export type MosaicRejectRequest = { mode: "auto" } | { mode: "off" } | { mode: "on"; snr: number; scale: number };
+
+export interface MosaicSolveRequest {
+  online: boolean;
+  use_twomass: boolean;
+  max_sip_order: number | null;
+}
+
+export interface MosaicRequest {
+  canvas: MosaicCanvasRequest;
+  levels: MosaicLevelModel;
+  references: (number | null)[];
+  feather_px: number;
+  dq_mask: boolean;
+  reject: MosaicRejectRequest;
+  solve: MosaicSolveRequest;
+}
+
+export interface MosaicRejectSpec {
+  snr: number;
+  scale: number;
+}
+
+export interface MosaicCanvasWindow {
+  x0: number;
+  y0: number;
+  cols: number;
+  rows: number;
+}
+
+export type MosaicWcsKind = "header" | "gwcs";
+
+export interface MosaicTileSolve {
+  solver: string;
+  tier?: number | null;
+  catalog?: string | null;
+  matched?: number | null;
+  predicted?: number | null;
+  rms_px?: number | null;
+  sip_order?: number | null;
+  hint_source?: string | null;
+  wcs_cards?: [string, string][];
+}
+
+export interface MosaicTileRow {
+  name: string;
+  path: string;
+  width: number;
+  height: number;
+  planes: number;
+  bunit: string | null;
+  single_exposure: boolean;
+  solve: MosaicTileSolve | null;
+  coverage_frac?: number;
+  scale_ratio?: number;
+  rotation_deg?: number | null;
+  wcs_kind?: MosaicWcsKind;
+  window?: MosaicCanvasWindow;
+}
+
+export interface MosaicOverlapPair {
+  i: number;
+  j: number;
+  frac: number;
+}
+
+export interface MosaicComponent {
+  tiles: number[];
+  reference: number;
+}
+
+export interface MosaicEstimate {
+  cols: number;
+  rows: number;
+  megapixels: number;
+  ram_bytes: number;
+  canvas_cards: [string, string][];
+  tiles: MosaicTileRow[];
+  pairs: MosaicOverlapPair[];
+  components: MosaicComponent[];
+  isolated: number[];
+  warnings: string[];
+  refusal: string | null;
+  default_reject: MosaicRejectSpec | null;
+  reject: MosaicRejectSpec | null;
+  planes: number;
+}
+
+export interface MosaicLevels {
+  offsets: number[];
+  scales: number[];
+  unmatched: number[];
+  unscaled: number[];
+}
+
+export interface MosaicPairResidual {
+  i: number;
+  j: number;
+  dx: number | null;
+  dy: number | null;
+  matched: number;
+  rms_px: number | null;
+}
+
+export interface MosaicTileRejection {
+  tested_px: number;
+  rejected_px: number;
+  sigma: number | null;
+}
+
+export interface MosaicResult {
+  fits_path: string;
+  png_path: string;
+  coverage_path: string | null;
+  written: string[];
+  dimensions: number[];
+  planes: number;
+  canvas: { cols: number; rows: number; megapixels: number; cards: [string, string][] };
+  tiles: MosaicTileRow[];
+  pairs: MosaicOverlapPair[];
+  components: MosaicComponent[];
+  isolated: number[];
+  levels: MosaicLevels[];
+  pair_residuals: MosaicPairResidual[];
+  reject: MosaicRejectSpec | null;
+  rejected_px: number;
+  rejections: MosaicTileRejection[];
+  warnings: string[];
+  elapsed_ms: number;
+  previewUrl?: string;
+}

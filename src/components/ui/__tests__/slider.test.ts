@@ -83,16 +83,16 @@ describe("Wavelet per-scale sliders", () => {
     const names = rangeTags(html).map((range) => accessibleName(html, range));
     expect(names).toEqual([
       "Scales",
-      "Fine detail threshold",
-      "Small structures threshold",
-      "Medium structures threshold",
-      "Large structures threshold",
-      "Very large threshold",
-      "Fine detail bias",
-      "Small structures bias",
-      "Medium structures bias",
-      "Large structures bias",
-      "Very large bias",
+      "Fine (1-2 px) threshold",
+      "Small (2-4 px) threshold",
+      "Medium (4-8 px) threshold",
+      "Large (8-16 px) threshold",
+      "Very large (16-32 px) threshold",
+      "Fine (1-2 px) bias",
+      "Small (2-4 px) bias",
+      "Medium (4-8 px) bias",
+      "Large (8-16 px) bias",
+      "Very large (16-32 px) bias",
     ]);
   });
 });

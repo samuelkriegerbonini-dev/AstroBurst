@@ -38,6 +38,8 @@ import {
   type SolveIdentity,
 } from "../../utils/solvedWcs";
 import OutputNote from "./OutputNote";
+import { DecimalField, Toggle } from "../ui";
+import { useCatalogStore } from "../../hooks/useCatalogStore";
 import { useProgress } from "../../hooks/useProgress";
 import { getApiKey, getConfig } from "../../services/config";
 import {
@@ -55,18 +57,38 @@ import {
   NO_HINT_SOURCES,
   editedHintSources,
   hintSourceLine,
+  keptHintTexts,
   mergeHintSources,
   mergeHintTexts,
-  offlineNearRadius,
   panelHints,
   parsePositionHint,
   parseScaleRange,
   positionHintStatus,
+  typedHintSources,
   type HintField,
   type HintSources,
   type HintTexts,
   type ScaleUnits,
 } from "../../utils/plateSolveScale";
+import {
+  DEFAULT_SEARCH_RADIUS_TEXT,
+  SEARCH_RADIUS_FIELD,
+  SIP_ORDER_CHOICES,
+  loadSolveOptions,
+  offlineCatalogueNames,
+  offlineSearchRadius,
+  optionsSolver,
+  saveSolveOptions,
+  searchRadiusError,
+  searchRadiusPlaceholder,
+  sipOrderCap,
+  sipOrderChoice,
+  solveOptionsStorage,
+  solveOptionsSummary,
+  twomassMissing,
+  type HintPolicy,
+  type SolveOptions,
+} from "../../utils/plateSolveOptions";
 import {
   NOVA_CHECK_AGAIN_NOTE,
   NO_API_KEY_NOTICE,
@@ -107,7 +129,6 @@ export interface Star {
 }
 
 const EMPTY_ANNOTATIONS: PlateSolveAnnotation[] = [];
-const DEFAULT_SOLVER: PlateSolver = "auto";
 const FALLBACK_SOLVER: PlateSolver = "astrometry.net";
 const WIDE_SOLVE_FIELDS: ReadonlySet<string> = new Set([
   "solver",
@@ -262,9 +283,11 @@ interface SolveActionsProps {
   timeoutSecs: number;
   onSolve: () => void;
   onCancel: () => void;
+  summary?: string | null;
 }
 
-export function SolveActions({ loading, disabled, elapsedMs, timeoutSecs, onSolve, onCancel }: SolveActionsProps) {
+export function SolveActions({ loading, disabled, elapsedMs, timeoutSecs, onSolve, onCancel, summary = null }: SolveActionsProps) {
+  const summaryId = useId();
   const solveButtonRef = useRef<HTMLButtonElement>(null);
   const focusSolveRef = useRef(false);
   useEffect(() => {
@@ -277,32 +300,158 @@ export function SolveActions({ loading, disabled, elapsedMs, timeoutSecs, onSolv
     onCancel();
   };
   return (
-    <div className="flex gap-2">
-      <button
-        ref={solveButtonRef}
-        onClick={onSolve}
-        disabled={disabled}
-        className="flex-1 flex items-center justify-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
-      >
-        {loading ? (
-          <>
-            <Loader2 size={12} className="animate-spin" /> Solving... {formatDuration(elapsedMs)} /{" "}
-            {formatDuration(timeoutSecs * 1000)}
-          </>
-        ) : (
-          <><Compass size={12} /> Plate Solve</>
-        )}
-      </button>
-      {loading && (
+    <div className="space-y-1">
+      <div className="flex gap-2">
         <button
-          type="button"
-          onClick={handleCancel}
-          aria-label="Cancel plate solve"
-          title="Stop waiting for this solve"
-          className="flex items-center justify-center gap-1 rounded border border-zinc-700/60 px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
+          ref={solveButtonRef}
+          onClick={onSolve}
+          disabled={disabled}
+          aria-describedby={summary ? summaryId : undefined}
+          className="flex-1 flex items-center justify-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
         >
-          <X size={12} /> Cancel
+          {loading ? (
+            <>
+              <Loader2 size={12} className="animate-spin" /> Solving... {formatDuration(elapsedMs)} /{" "}
+              {formatDuration(timeoutSecs * 1000)}
+            </>
+          ) : (
+            <><Compass size={12} /> Plate Solve</>
+          )}
         </button>
+        {loading && (
+          <button
+            type="button"
+            onClick={handleCancel}
+            aria-label="Cancel plate solve"
+            title="Stop waiting for this solve"
+            className="flex items-center justify-center gap-1 rounded border border-zinc-700/60 px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
+          >
+            <X size={12} /> Cancel
+          </button>
+        )}
+      </div>
+      {summary && (
+        <div id={summaryId} data-solve-summary className="text-[9px] text-zinc-500 break-words">
+          {summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const SOLVE_OPTION_NOTE_CLASS = "text-[9px] text-zinc-500 break-words";
+const SOLVE_OPTION_LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
+const SOLVE_OPTION_SELECT_CLASS = "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 focus:border-emerald-500/50 w-full";
+const SOLVE_OPTION_FIELD_CLASS = `${SOLVE_OPTION_SELECT_CLASS} font-mono`;
+const ONLINE_GAIA_ON_NOTE =
+  "When the offline catalogues are not deep enough, tier 2 fetches the field's Gaia DR3 stars from VizieR; the image is not uploaded.";
+const ONLINE_GAIA_OFF_NOTE = "Offline catalogues only: the solve never goes online.";
+const TYPED_HINTS_NOTE =
+  "Typed hint fields stay for every image and after a restart; the others still come from each header, and From header forgets the typed ones.";
+const OPTIONS_RADIUS_TITLE =
+  "Offline search radius around the centre in degrees, 0 to 15; blank uses 3, or half the field when that is wider. A radius typed in the hint fields wins for that image.";
+const TWOMASS_MISSING_NOTE = "2MASS is not installed: add the 2MASS star cut in Settings > Catalogs.";
+const SIP_ORDER_TITLE =
+  "Highest SIP distortion order the solve on this computer may fit, on every tier; it keeps the order that cross-validates best up to this cap. Auto allows 3, or 4 when the field's long side is 5 degrees or more. astrometry.net does not use it.";
+
+interface SolveOptionsBlockProps {
+  options: SolveOptions;
+  onOptionsChange: (change: Partial<SolveOptions>) => void;
+  twomassMissing?: boolean;
+}
+
+export function SolveOptionsBlock({ options, onOptionsChange, twomassMissing = false }: SolveOptionsBlockProps) {
+  const twomassNoteId = useId();
+  const radiusId = useId();
+  const sipOrderId = useId();
+  const hintsId = useId();
+  const radiusError = searchRadiusError(options);
+  return (
+    <div className="space-y-1">
+      <details data-solve-options className="rounded border border-zinc-800/60 px-2 py-1">
+        <summary className="cursor-pointer select-none text-[9px] text-zinc-400 uppercase">Solve options</summary>
+        <div className="pt-1.5 space-y-1.5">
+          <Toggle
+            label="Use 2MASS (tier 1)"
+            checked={options.useTwomass}
+            disabled={twomassMissing}
+            describedBy={twomassMissing ? twomassNoteId : undefined}
+            accent="emerald"
+            onChange={(useTwomass) => onOptionsChange({ useTwomass })}
+          />
+          {twomassMissing && (
+            <div id={twomassNoteId} className={SOLVE_OPTION_NOTE_CLASS}>
+              {TWOMASS_MISSING_NOTE}
+            </div>
+          )}
+          <Toggle
+            label="Use online Gaia (tier 2)"
+            checked={options.onlineGaia}
+            accent="emerald"
+            onChange={(onlineGaia) => onOptionsChange({ onlineGaia })}
+          />
+          <div className={SOLVE_OPTION_NOTE_CLASS}>{options.onlineGaia ? ONLINE_GAIA_ON_NOTE : ONLINE_GAIA_OFF_NOTE}</div>
+          <Toggle
+            label="Offer astrometry.net after a failure"
+            checked={options.offerNova}
+            accent="emerald"
+            onChange={(offerNova) => onOptionsChange({ offerNova })}
+          />
+          <div className="flex gap-2">
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label htmlFor={radiusId} className={SOLVE_OPTION_LABEL_CLASS}>
+                Search radius (deg)
+              </label>
+              <DecimalField
+                id={radiusId}
+                value={options.searchRadius}
+                {...SEARCH_RADIUS_FIELD}
+                placeholder={DEFAULT_SEARCH_RADIUS_TEXT}
+                title={OPTIONS_RADIUS_TITLE}
+                onChange={(searchRadius) => onOptionsChange({ searchRadius })}
+                className={SOLVE_OPTION_FIELD_CLASS}
+              />
+            </div>
+            <div className="flex-1 flex flex-col gap-0.5">
+              <label htmlFor={sipOrderId} className={SOLVE_OPTION_LABEL_CLASS}>
+                Max SIP order
+              </label>
+              <select
+                id={sipOrderId}
+                value={String(options.maxSipOrder)}
+                title={SIP_ORDER_TITLE}
+                onChange={(e) => onOptionsChange({ maxSipOrder: sipOrderChoice(e.target.value) })}
+                className={SOLVE_OPTION_SELECT_CLASS}
+              >
+                {SIP_ORDER_CHOICES.map((choice) => (
+                  <option key={choice} value={String(choice)}>
+                    {choice === "auto" ? "Auto" : choice}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <label htmlFor={hintsId} className={SOLVE_OPTION_LABEL_CLASS}>
+              Hints
+            </label>
+            <select
+              id={hintsId}
+              value={options.hints}
+              onChange={(e) => onOptionsChange({ hints: e.target.value as HintPolicy })}
+              className={SOLVE_OPTION_SELECT_CLASS}
+            >
+              <option value="header">From each header</option>
+              <option value="typed">Keep typed values</option>
+            </select>
+          </div>
+          {options.hints === "typed" && <div className={SOLVE_OPTION_NOTE_CLASS}>{TYPED_HINTS_NOTE}</div>}
+        </div>
+      </details>
+      {radiusError && (
+        <div role="alert" className="text-[10px] text-red-400">
+          {`Search radius: ${radiusError}`}
+        </div>
       )}
     </div>
   );
@@ -374,6 +523,11 @@ export function NoSolutionBlock({ failure, offer, notice = null, onFallback }: N
               {notice}
             </div>
           )}
+        </div>
+      )}
+      {!offer.offered && offer.note && (
+        <div data-fallback-off className="pt-1 text-zinc-500">
+          {offer.note}
         </div>
       )}
     </div>
@@ -627,9 +781,13 @@ function PlateSolvePanel({
   const [novaWait, setNovaWait] = useState<NovaWait | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
   const [apiUrl, setApiUrl] = useState<string | null>(null);
-  const [hintTexts, setHintTexts] = useState<HintTexts>(DEFAULT_HINT_TEXTS);
-  const [hintSources, setHintSources] = useState<HintSources>(NO_HINT_SOURCES);
-  const touchedHintsRef = useRef<Set<HintField>>(new Set());
+  const [storedOptions] = useState(() => loadSolveOptions(solveOptionsStorage()));
+  const [solveOptions, setSolveOptions] = useState<SolveOptions>(storedOptions.options);
+  const hintPolicyRef = useRef<HintPolicy>(storedOptions.options.hints);
+  const { reports: catalogReports } = useCatalogStore();
+  const [hintTexts, setHintTexts] = useState<HintTexts>(() => ({ ...DEFAULT_HINT_TEXTS, ...storedOptions.typedHints }));
+  const [hintSources, setHintSources] = useState<HintSources>(() => typedHintSources(storedOptions.typedHints));
+  const touchedHintsRef = useRef<Set<HintField>>(new Set(Object.keys(storedOptions.typedHints) as HintField[]));
   const [downsample, setDownsample] = useState(0);
   const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
   const [solveHints, setSolveHints] = useState<SolveHints | null>(null);
@@ -685,6 +843,16 @@ function PlateSolvePanel({
     setHintSources((current) => editedHintSources(current, field));
   }, []);
 
+  const changeSolveOptions = useCallback((change: Partial<SolveOptions>) => {
+    setSolveOptions((current) => ({ ...current, ...change }));
+  }, []);
+
+  useEffect(() => {
+    hintPolicyRef.current = solveOptions.hints;
+    const typed = solveOptions.hints === "typed" ? keptHintTexts(hintTexts, touchedHintsRef.current) : {};
+    saveSolveOptions(solveOptionsStorage(), solveOptions, typed);
+  }, [solveOptions, hintTexts]);
+
   const clearRefinement = useCallback(() => {
     if (refineLoadingRef.current) {
       refineLoadingRef.current = false;
@@ -716,9 +884,10 @@ function PlateSolvePanel({
     writtenPathRef.current = null;
     setWcsWritten(null);
     setSelectedStar(null);
-    touchedHintsRef.current = new Set();
-    setHintTexts(DEFAULT_HINT_TEXTS);
-    setHintSources(NO_HINT_SOURCES);
+    const kept: ReadonlySet<HintField> = hintPolicyRef.current === "typed" ? new Set(touchedHintsRef.current) : new Set();
+    touchedHintsRef.current = new Set(kept);
+    setHintTexts((current) => mergeHintTexts(current, DEFAULT_HINT_TEXTS, kept));
+    setHintSources((current) => mergeHintSources(current, NO_HINT_SOURCES, kept));
   }, [filePath, clearRefinement]);
 
   useEffect(() => {
@@ -933,7 +1102,9 @@ function PlateSolvePanel({
           centerDec: hint.centerDec ?? undefined,
           radius: hint.radius ?? undefined,
           solver,
-          nearRadiusDeg: offline ? offlineNearRadius(hint.radius) : undefined,
+          nearRadiusDeg: offline ? offlineSearchRadius(hint.radius, solveOptions) : undefined,
+          useTwomass: offline ? solveOptions.useTwomass : undefined,
+          maxSipOrder: offline ? sipOrderCap(solveOptions) : undefined,
           resumeSubmissionId: resume?.pending.submissionId,
           resumeJobId: resume?.pending.jobId ?? undefined,
         }),
@@ -963,9 +1134,9 @@ function PlateSolvePanel({
     } finally {
       if (solveSeqRef.current === seq) setSolveLoading(false);
     }
-  }, [solvePath, hintTexts, downsample, clearRefinement, resetSolveProgress]);
+  }, [solvePath, hintTexts, downsample, solveOptions, clearRefinement, resetSolveProgress]);
 
-  const handleSolve = useCallback(() => runSolve(DEFAULT_SOLVER), [runSolve]);
+  const handleSolve = useCallback(() => runSolve(optionsSolver(solveOptions)), [runSolve, solveOptions]);
   const handleFallback = useCallback(async () => {
     const seq = solveSeqRef.current;
     const stored = await getApiKey("astrometry").then(
@@ -1070,7 +1241,10 @@ function PlateSolvePanel({
   const sourceLine = hintSourceLine(hintSources);
   const hintWarnings = solveHints?.warnings ?? [];
   const headerHintsAvailable = wcsInfo !== null || Boolean(solveHints?.centre || solveHints?.scale);
-  const offer = fallbackOffer(solveFailure, lastSolver, hasApiKey, apiUrl);
+  const offer = fallbackOffer(solveFailure, lastSolver, hasApiKey, apiUrl, solveOptions.offerNova);
+  const optionsRadiusError = searchRadiusError(solveOptions);
+  const offlineCatalogues = offlineCatalogueNames(catalogReports);
+  const optionsSummary = solveOptionsSummary(solveOptions, offlineCatalogues);
   const liveNova = lastSolver === FALLBACK_SOLVER ? novaProgress(solveProgress.stage) : null;
   const resultFields = solveResult ? resultBlockFields(solveResult) : [];
   const solveCredit = solveResult?.credit ?? null;
@@ -1368,8 +1542,8 @@ function PlateSolvePanel({
                 inputMode="decimal"
                 value={hintTexts.radius}
                 aria-invalid={positionHint.radiusInvalid}
-                placeholder="3"
-                title="Search radius around the centre in degrees: the offline solver searches up to 15 and caps a larger radius there (default 3, or half the field when wider); astrometry.net takes the radius as typed and defaults to 10"
+                placeholder={searchRadiusPlaceholder(solveOptions)}
+                title="Search radius around the centre in degrees: the offline solver searches up to 15 and caps a larger radius there (blank uses the Solve options radius, 3 unless set there, or half the field when wider); astrometry.net takes the radius as typed and defaults to 10"
                 onChange={(e) => editHint("radius", e.target.value)}
                 className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-emerald-500/50 w-full"
               />
@@ -1407,13 +1581,22 @@ function PlateSolvePanel({
             </div>
           ))}
 
+          <SolveOptionsBlock
+            options={solveOptions}
+            onOptionsChange={changeSolveOptions}
+            twomassMissing={twomassMissing(offlineCatalogues)}
+          />
+
           <SolveActions
             loading={solveLoading}
-            disabled={solveLoading || !solvePath || scaleRange.error !== null || positionHint.error !== null}
+            disabled={
+              solveLoading || !solvePath || scaleRange.error !== null || positionHint.error !== null || optionsRadiusError !== null
+            }
             elapsedMs={solveElapsedMs}
             timeoutSecs={timeoutSecs}
             onSolve={handleSolve}
             onCancel={handleCancelSolve}
+            summary={optionsSummary}
           />
 
           {solveLoading && lastSolver && (
@@ -1471,7 +1654,7 @@ function PlateSolvePanel({
             </div>
           )}
 
-          {solveError && !solveFailure && !solveLoading && lastSolver === FALLBACK_SOLVER && (
+          {solveError && !solveFailure && !solveLoading && lastSolver === FALLBACK_SOLVER && solveOptions.offerNova && (
             <button
               type="button"
               data-nova-retry

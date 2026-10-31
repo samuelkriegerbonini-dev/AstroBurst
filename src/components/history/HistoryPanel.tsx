@@ -5,7 +5,7 @@ import { CONFIRM_DELETE_LABEL, useArmedConfirm } from "../../hooks/useArmedConfi
 import { loadHistory, useHistoryController, useHistoryRender, useHistorySnapshot } from "../../hooks/useHistory";
 import { estimateNextNode } from "../../services/ops";
 import type { HistoryDoc, HistoryNode, NodeEstimate } from "../../shared/types/ops";
-import { activePath, branchMarkers, nodeFile, opLabel, opSummary, redoTail } from "../../utils/historyModel";
+import { activePath, branchMarkers, nodeFile, opSummary, redoTail, stepLabel, type HistoryMasks } from "../../utils/historyModel";
 import { sectionForOp } from "../../utils/historyRerunStore";
 import type { HistorySnapshot } from "../../utils/historyStore";
 import { useFileContext } from "../../context/PreviewContext";
@@ -15,6 +15,7 @@ export interface HistoryPanelViewProps {
   snapshot: HistorySnapshot;
   estimate: NodeEstimate | null;
   fileName: string;
+  blockedReason: string | null;
   onGoTo: (node: string | null) => void;
   onRerun: (node: HistoryNode, downstream: boolean) => void;
   onDelete: (node: string) => void;
@@ -34,6 +35,7 @@ function statusOf(node: HistoryNode): string | null {
 
 interface RowActions {
   onGoTo: (node: string | null) => void;
+  blocked: boolean;
   onRerun: (node: HistoryNode, downstream: boolean) => void;
   armedKey: string | null;
   pressDelete: (node: string) => void;
@@ -42,6 +44,7 @@ interface RowActions {
 
 interface NodeRowProps {
   node: HistoryNode;
+  masks: HistoryMasks;
   current: boolean;
   undone: boolean;
   nested: boolean;
@@ -49,7 +52,8 @@ interface NodeRowProps {
   actions: RowActions;
 }
 
-function NodeRow({ node, current, undone, nested, hasDownstream, actions }: NodeRowProps) {
+function NodeRow({ node, masks, current, undone, nested, hasDownstream, actions }: NodeRowProps) {
+  const label = stepLabel(masks, node);
   const status = statusOf(node);
   const rerunnable = sectionForOp(node.op) !== null;
   const armed = actions.armedKey === node.id;
@@ -60,22 +64,29 @@ function NodeRow({ node, current, undone, nested, hasDownstream, actions }: Node
       data-undone={undone ? "true" : undefined}
       className={`group flex items-start gap-2 px-2 py-1.5 rounded ${current ? "bg-amber-500/10 ring-1 ring-amber-500/30" : "hover:bg-zinc-800/40"} ${undone ? "opacity-50" : ""} ${nested ? "ml-4" : ""}`}
     >
-      <button type="button" className="flex-1 min-w-0 text-left" onClick={() => actions.onGoTo(node.id)} aria-label={`Go to ${node.id}`} title={`Show ${opLabel(node.op)} (${node.id})`}>
+      <button
+        type="button"
+        className="flex-1 min-w-0 text-left disabled:cursor-not-allowed"
+        onClick={() => actions.onGoTo(node.id)}
+        disabled={actions.blocked}
+        aria-label={`Go to ${node.id}`}
+        title={`Show ${label} (${node.id})`}
+      >
         <span className="flex items-center gap-1.5">
           <span className="font-mono text-[9px] text-zinc-600">{node.id}</span>
-          <span className="text-[11px] text-zinc-200 truncate">{opLabel(node.op)}</span>
+          <span className="text-[11px] text-zinc-200 truncate">{label}</span>
         </span>
         <span className="block text-[10px] font-mono text-zinc-500 truncate">{opSummary(node.op)}</span>
         {status && <span className="block text-[9px] text-amber-400/80">{status}</span>}
       </button>
       <span className="flex items-center gap-0.5 shrink-0">
         {rerunnable && (
-          <button type="button" className={ICON_BUTTON} onClick={() => actions.onRerun(node, false)} aria-label={`Re-run ${node.id} with other settings`} title="Re-run with… (opens the step pre-filled)">
+          <button type="button" className={ICON_BUTTON} onClick={() => actions.onRerun(node, false)} disabled={actions.blocked} aria-label={`Re-run ${node.id} with other settings`} title="Re-run with… (opens the step pre-filled)">
             <Pencil size={11} />
           </button>
         )}
         {rerunnable && hasDownstream && (
-          <button type="button" className={ICON_BUTTON} onClick={() => actions.onRerun(node, true)} aria-label={`Re-run ${node.id} and re-apply the steps after it`} title="Re-run downstream: change this step, then re-apply the later steps on a new branch">
+          <button type="button" className={ICON_BUTTON} onClick={() => actions.onRerun(node, true)} disabled={actions.blocked} aria-label={`Re-run ${node.id} and re-apply the steps after it`} title="Re-run downstream: change this step, then re-apply the later steps on a new branch">
             <CornerDownRight size={11} />
           </button>
         )}
@@ -118,7 +129,7 @@ function HistoryList({ doc, actions }: { doc: HistoryDoc; actions: RowActions })
           <ol className="flex flex-col gap-0.5 mt-0.5">
             {branches.flatMap((branch) =>
               branch.map((node, i) => (
-                <NodeRow key={node.id} node={node} current={false} undone={false} nested hasDownstream={i < branch.length - 1} actions={actions} />
+                <NodeRow key={node.id} node={node} masks={doc} current={false} undone={false} nested hasDownstream={i < branch.length - 1} actions={actions} />
               )),
             )}
           </ol>
@@ -133,14 +144,20 @@ function HistoryList({ doc, actions }: { doc: HistoryDoc; actions: RowActions })
         aria-current={doc.head === null ? "step" : undefined}
         className={`flex items-center gap-2 px-2 py-1.5 rounded ${doc.head === null ? "bg-amber-500/10 ring-1 ring-amber-500/30" : "hover:bg-zinc-800/40"}`}
       >
-        <button type="button" className="flex-1 text-left text-[11px] text-zinc-300" onClick={() => actions.onGoTo(null)} aria-label="Go to the original image">
+        <button
+          type="button"
+          className="flex-1 text-left text-[11px] text-zinc-300 disabled:cursor-not-allowed"
+          onClick={() => actions.onGoTo(null)}
+          disabled={actions.blocked}
+          aria-label="Go to the original image"
+        >
           Original
         </button>
       </li>
       {rootBranches.length > 0 && forkLine(null)}
       {shown.map((node, i) => (
         <Fragment key={node.id}>
-          <NodeRow node={node} current={node.id === doc.head} undone={i >= done.length} nested={false} hasDownstream={i < shown.length - 1} actions={actions} />
+          <NodeRow node={node} masks={doc} current={node.id === doc.head} undone={i >= done.length} nested={false} hasDownstream={i < shown.length - 1} actions={actions} />
           {forkLine(node.id)}
         </Fragment>
       ))}
@@ -157,14 +174,15 @@ function StorageLine({ estimate }: { estimate: NodeEstimate | null }) {
   );
 }
 
-export function HistoryPanelView({ snapshot, estimate, fileName, onGoTo, onRerun, onDelete, onUndo, onRedo, onExport, onRefresh }: HistoryPanelViewProps) {
+export function HistoryPanelView({ snapshot, estimate, fileName, blockedReason, onGoTo, onRerun, onDelete, onUndo, onRedo, onExport, onRefresh }: HistoryPanelViewProps) {
   const { armedKey, press, blur } = useArmedConfirm();
   const state = snapshot.state;
   const readOnly = state?.read_only ?? null;
   const doc = readOnly === null ? state?.doc ?? null : null;
+  const blocked = blockedReason !== null;
   const actions: RowActions = useMemo(
-    () => ({ onGoTo, onRerun, armedKey, pressDelete: (node: string) => press(node, () => onDelete(node)), blurDelete: blur }),
-    [onGoTo, onRerun, armedKey, press, blur, onDelete],
+    () => ({ onGoTo, blocked, onRerun, armedKey, pressDelete: (node: string) => press(node, () => onDelete(node)), blurDelete: blur }),
+    [onGoTo, blocked, onRerun, armedKey, press, blur, onDelete],
   );
   if (!snapshot.fileKey) {
     return <div className="p-4 text-xs text-zinc-500 italic">Select an image to see its processing history.</div>;
@@ -177,11 +195,11 @@ export function HistoryPanelView({ snapshot, estimate, fileName, onGoTo, onRerun
         <span className="text-sm font-semibold text-zinc-200 tracking-wide">History</span>
         <span className="text-[10px] text-zinc-500 truncate" title={fileName}>{fileName}</span>
         <span className="ml-auto flex items-center gap-1">
-          <button type="button" data-history-undo="" className={HEADER_BUTTON} onClick={onUndo} disabled={!doc || doc.head === null} title="Undo (Ctrl+Z)">
+          <button type="button" data-history-undo="" className={HEADER_BUTTON} onClick={onUndo} disabled={blocked || !doc || doc.head === null} title="Undo (Ctrl+Z)">
             <Undo2 size={11} />
             Undo
           </button>
-          <button type="button" data-history-redo="" className={HEADER_BUTTON} onClick={onRedo} disabled={!doc || !canRedo(doc)} title="Redo (Ctrl+Shift+Z or Ctrl+Y)">
+          <button type="button" data-history-redo="" className={HEADER_BUTTON} onClick={onRedo} disabled={blocked || !doc || !canRedo(doc)} title="Redo (Ctrl+Shift+Z or Ctrl+Y)">
             <Redo2 size={11} />
             Redo
           </button>
@@ -190,6 +208,11 @@ export function HistoryPanelView({ snapshot, estimate, fileName, onGoTo, onRerun
           </button>
         </span>
       </div>
+      {blockedReason && (
+        <div role="note" className="text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
+          {blockedReason}
+        </div>
+      )}
       <StorageLine estimate={estimate} />
       {readOnly && (
         <div role="note" className="text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
@@ -218,7 +241,14 @@ export function HistoryPanelView({ snapshot, estimate, fileName, onGoTo, onRerun
           Export history JSON
         </button>
         {doc && doc.head !== null && (
-          <button type="button" className={HEADER_BUTTON} onClick={() => onGoTo(null)} style={{ border: "1px solid var(--ab-border)" }} title="Show the original image; the history keeps every step">
+          <button
+            type="button"
+            className={HEADER_BUTTON}
+            onClick={() => onGoTo(null)}
+            disabled={blocked}
+            style={{ border: "1px solid var(--ab-border)" }}
+            title="Show the original image; the history keeps every step"
+          >
             <RotateCcw size={11} />
             Revert to original
           </button>
@@ -300,6 +330,7 @@ function HistoryPanel() {
       snapshot={shown}
       estimate={estimate}
       fileName={fileName}
+      blockedReason={controller.blockedReason}
       onGoTo={(node) => void controller.goTo(node)}
       onRerun={(node, downstream) => void controller.rerunWith(node, downstream)}
       onDelete={(node) => void controller.deleteBranch(node)}

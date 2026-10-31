@@ -110,10 +110,11 @@ describe("rerun_opens_the_panel_prefilled", () => {
   });
 
   it("Wavelet takes the scales, thresholds, layer bias and threshold kind", () => {
-    renderPrefilled("denoise", { op: "wavelet_denoise", v: 1, numScales: 4, thresholds: [4, 3, 2, 1.5], linearDenoise: false, layerBias: [0.5, 0, 0, -0.25] }, WaveletPanel);
+    const html = renderPrefilled("denoise", { op: "wavelet_denoise", v: 1, numScales: 4, thresholds: [4, 3, 2, 1.5], linearDenoise: false, layerBias: [0.5, 0, 0, -0.25] }, WaveletPanel);
     expect(slider("Scales").value).toBe(4);
-    expect(sliders.filter((s) => s.label === "").map((s) => s.value)).toEqual([4, 3, 2, 1.5, 0.5, 0, 0, -0.25]);
-    expect(toggle("Soft threshold (linear)")).toBe(false);
+    expect(sliders.filter((s) => s.label !== "Scales").map((s) => s.value)).toEqual([4, 3, 2, 1.5, 0.5, 0, 0, -0.25]);
+    const radios = [...html.matchAll(/<input[^>]*type="radio"[^>]*>/g)].map((m) => m[0]);
+    expect(radios.filter((tag) => tag.includes('checked=""')).map((tag) => /value="([^"]*)"/.exec(tag)?.[1])).toEqual(["hard"]);
   });
 
   it("Deconvolution takes the iterations, PSF and regularisation", () => {
@@ -131,7 +132,7 @@ describe("rerun_opens_the_panel_prefilled", () => {
 
   it("Arcsinh takes the stretch factor", () => {
     renderPrefilled("stretch", { op: "arcsinh", v: 1, factor: 120 }, ArcsinhStretchPanel);
-    expect(slider("Stretch Factor (S)").format?.(0)).toBe("120.0");
+    expect(slider("Stretch Factor (S)").value).toBe(120);
   });
 
   it("Masked stretch takes its targets and protection", () => {
@@ -183,6 +184,8 @@ describe("rerun_opens_the_panel_prefilled", () => {
   });
 
   it("Background takes the polynomial settings, a deband mode or the DBE settings", () => {
+    const checkedRadios = (html: string) =>
+      [...html.matchAll(/<input[^>]*type="radio"[^>]*>/g)].map((m) => m[0]).filter((tag) => tag.includes('checked=""')).map((tag) => /value="([^"]*)"/.exec(tag)?.[1]);
     const polynomial = renderPrefilled(
       "background",
       { op: "background", v: 1, model: "polynomial", config: { gridSize: 6, polyDegree: 2, sigmaClip: 2, iterations: 4, mode: "divide" } },
@@ -192,15 +195,16 @@ describe("rerun_opens_the_panel_prefilled", () => {
     expect(slider("Polynomial Degree").value).toBe(2);
     expect(slider("Sigma Clip").value).toBe(2);
     expect(slider("Iterations").value).toBe(4);
-    expect(polynomial).toMatch(/<option value="divide" selected="">/);
+    expect(checkedRadios(polynomial)).toEqual(["gradient", "divide"]);
 
     const deband = renderPrefilled(
       "background",
       { op: "background", v: 1, model: "deband_rows", config: { sigmaClip: 3, iterations: 2 } },
       BackgroundPanel,
     );
-    expect(deband).toMatch(/<option value="deband_rows" selected="">/);
+    expect(checkedRadios(deband)).toEqual(["deband", "deband_rows"]);
     expect(slider("Sigma Clip").value).toBe(3);
+    expect(slider("Iterations").value).toBe(2);
 
     const spline = renderPrefilled(
       "background",
@@ -213,6 +217,7 @@ describe("rerun_opens_the_panel_prefilled", () => {
       BackgroundPanel,
     );
     expect(spline).toMatch(/<option value="spline" selected="">/);
+    expect(checkedRadios(spline)).toEqual(["gradient", "subtract"]);
     expect(slider("Sample Radius (px)").value).toBe(7);
     expect(slider("Tolerance (sigma)").value).toBe(1.5);
     expect(toggle("Reject stars")).toBe(false);

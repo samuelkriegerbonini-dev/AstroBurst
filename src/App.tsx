@@ -470,8 +470,8 @@ export default function App() {
         icon: Activity,
       });
       acts.push({ id: "dock-tips", label: "Show tool window tips", keywords: ["Layout", "Drag", "Dock", "Onboarding"], icon: Sparkles, run: inWorkspace(() => dockOnboardingStore.show()) });
-      acts.push({ id: "history-undo", label: "Undo processing step", hint: "Ctrl+Z", keywords: ["History", "Undo"], icon: Undo2, run: inWorkspace(() => historyStore.undo()) });
-      acts.push({ id: "history-redo", label: "Redo processing step", hint: "Ctrl+Shift+Z", keywords: ["History", "Redo"], icon: Redo2, run: inWorkspace(() => historyStore.redo()) });
+      acts.push({ id: "history-undo", label: "Undo processing step", hint: "Ctrl+Z · single files", keywords: ["History", "Undo"], icon: Undo2, run: inWorkspace(() => historyStore.undo()) });
+      acts.push({ id: "history-redo", label: "Redo processing step", hint: "Ctrl+Shift+Z · single files", keywords: ["History", "Redo"], icon: Redo2, run: inWorkspace(() => historyStore.redo()) });
       if (stats.done > 0) acts.push({ id: "export-zip", label: "Download ZIP of Processed Files", icon: Download, run: inWorkspace(handleExportZip) });
       if (isComplete) acts.push({ id: "new-batch", label: "New Batch (discard processed files)", hint: "confirm in footer", icon: RotateCcw, run: inWorkspace(handleNewBatchClick) });
     }

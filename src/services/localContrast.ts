@@ -3,6 +3,7 @@ import type { HdrConfig, LheConfig, LocalContrastResult } from "../shared/types/
 import type { CompositeChainCall, CompositeLocalContrastResult } from "../shared/types/compositeChain";
 import { CHAIN_PREVIEWS, chainArgs } from "./compositeChain";
 import type { HistoryScope, OpSpec } from "../shared/types/ops";
+import type { MaskChoice } from "../shared/types/masks";
 import { recordOp } from "./ops";
 import type { RecordedResult } from "./processing";
 
@@ -24,12 +25,12 @@ export function hdrmtConfigOf(op: OpSpec): HdrConfig | null {
   };
 }
 
-export async function recordLhe(scope: HistoryScope, path: string, config: LheConfig): Promise<RecordedResult<LocalContrastResult>> {
-  return (await recordOp(scope, path, { op: "lhe", v: 1, ...config })) as RecordedResult<LocalContrastResult>;
+export async function recordLhe(scope: HistoryScope, path: string, config: LheConfig, mask: MaskChoice | null = null): Promise<RecordedResult<LocalContrastResult>> {
+  return (await recordOp(scope, path, { op: "lhe", v: 1, ...config }, { mask })) as RecordedResult<LocalContrastResult>;
 }
 
-export async function recordHdrmt(scope: HistoryScope, path: string, config: HdrConfig): Promise<RecordedResult<LocalContrastResult>> {
-  return (await recordOp(scope, path, { op: "hdrmt", v: 1, ...config })) as RecordedResult<LocalContrastResult>;
+export async function recordHdrmt(scope: HistoryScope, path: string, config: HdrConfig, mask: MaskChoice | null = null): Promise<RecordedResult<LocalContrastResult>> {
+  return (await recordOp(scope, path, { op: "hdrmt", v: 1, ...config }, { mask })) as RecordedResult<LocalContrastResult>;
 }
 
 export function applyLhe(

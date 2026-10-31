@@ -6,6 +6,7 @@ import { useDoneFilesContext } from "../../context/PreviewContext";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
 import { withVersionParam } from "../../utils/processingChain";
 import { cfaPatternFromHeader, cosmeticCfaValue } from "../../utils/cfaPattern";
+import { imagetypLeftOutLine, sortByFrameKind } from "../../utils/frameKind";
 import type { ProcessedFile } from "../../shared/types/fits.types";
 import type {
   CosmeticBatchResult,
@@ -105,6 +106,7 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
 
   const masterDarkId = useId();
   const replacementId = useId();
+  const batchLeftOutId = useId();
 
   const parsedList = useMemo(() => parseDefectList(defectText), [defectText]);
   const detectedCfa = cfaPatternFromHeader(selectedFile?.result?.header);
@@ -116,10 +118,12 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
   }, []);
   const listErrors = listEnabled ? parsedList.errors : [];
 
-  const lights = useMemo(
-    () => doneFiles.filter((f) => f.path && f.path !== masterDarkPath),
+  const batchFrames = useMemo(
+    () => sortByFrameKind(doneFiles.filter((f) => f.path && f.path !== masterDarkPath)),
     [doneFiles, masterDarkPath],
   );
+  const lights = batchFrames.lights;
+  const batchLeftOut = useMemo(() => imagetypLeftOutLine(batchFrames.calibration), [batchFrames]);
 
   const darkReady = !useMasterDark || masterDarkPath !== "";
   const darkActive = useMasterDark && (darkHotEnabled || darkColdEnabled);
@@ -343,8 +347,12 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
         accent={ACCENT}
         small
         icon={<Layers size={12} />}
+        describedBy={batchLeftOut ? batchLeftOutId : undefined}
         onClick={handleBatch}
       />
+      {batchLeftOut && (
+        <p id={batchLeftOutId} data-testid="cosmetic-batch-left-out" className="-mt-3 text-[10px] text-zinc-500 leading-snug">{batchLeftOut}</p>
+      )}
       <ErrorAlert message={error} />
 
       {dryRun && <DryRunPreview result={dryRun} />}
@@ -394,7 +402,7 @@ export default function CosmeticPanel({ selectedFile, outputDir = "./output", ru
             </div>
           ))}
           <div className="text-[9px] text-zinc-600">
-            Corrected FITS files were written to the output folder as &lt;frame&gt;_cosmetic.fits.
+            Corrected FITS files were written to the output folder as &lt;frame&gt;_cosmetic.fits; Stack lists them under From Cosmetic.
           </div>
         </div>
       )}

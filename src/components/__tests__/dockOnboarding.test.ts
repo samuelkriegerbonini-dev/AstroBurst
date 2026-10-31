@@ -2,13 +2,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DockOnboardingCard, type DockOnboardingCardProps } from "../dock/DockOnboarding";
+import { DockTipCard, type DockTipCardProps } from "../dock/DockTip";
 import { createDockOnboardingStore, dockOnboardingStore, type OnboardingStorage } from "../dock/dockOnboardingStore";
+import { onboardingAnchorReady } from "../dock/dockGeometry";
 import { commitDockMove } from "../dock/useDockDrag";
 import { dockStore } from "../../hooks/useDockLayout";
 import { DEFAULT_DOCK_LAYOUT, dockReducer } from "../../utils/dockLayout";
-import { onboardingPlacement, viewerToolbarBottom, type OnboardingToolbarHost } from "../../utils/dockOnboarding";
+import { DOCK_TIPS, onboardingPlacement, viewerToolbarBottom, type OnboardingToolbarHost } from "../../utils/dockOnboarding";
 
 const KEY = "ab.onboarding.dock.v1";
+const TOGGLE_KEY = "ab.onboarding.dockToggle.v1";
+const SETTINGS_KEY = "ab.onboarding.settings.v1";
+const TOGGLE_BODY = "Click any tool in this bar to open it, and click it again to close it.";
+const SETTINGS_BODY =
+  "Click Config for the settings: astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close them.";
 const TITLE = "Arrange your tool windows";
 const STEP_ONE_BODY =
   "Drag any tool icon from a side strip and drop it on the top half of either strip. The tool opens as a full-height column beside the viewer.";
@@ -230,37 +237,37 @@ describe("dock onboarding session store", () => {
     const storage = memoryStorage();
     const store = createDockOnboardingStore(() => storage);
     store.autoShow();
-    expect(store.get()).toEqual({ open: true, step: 0 });
+    expect(store.get()).toEqual({ card: "tour", step: 0 });
     store.setStep(1);
-    expect(store.get()).toEqual({ open: true, step: 1 });
+    expect(store.get()).toEqual({ card: "tour", step: 1 });
     store.dismiss();
-    expect(store.get().open).toBe(false);
+    expect(store.get().card).toBeNull();
     expect(storage.data.get(KEY)).toBe("done");
     store.autoShow();
-    expect(store.get().open).toBe(false);
+    expect(store.get().card).toBeNull();
   });
 
   it("stays closed once done, but the re-open command shows step 1 again", () => {
     const storage = memoryStorage({ [KEY]: "done" });
     const store = createDockOnboardingStore(() => storage);
     store.autoShow();
-    expect(store.get().open).toBe(false);
+    expect(store.get().card).toBeNull();
     store.show();
-    expect(store.get()).toEqual({ open: true, step: 0 });
+    expect(store.get()).toEqual({ card: "tour", step: 0 });
     store.setStep(1);
     store.show();
-    expect(store.get()).toEqual({ open: true, step: 0 });
+    expect(store.get()).toEqual({ card: "tour", step: 0 });
     expect(storage.setItem).not.toHaveBeenCalled();
   });
 
   it("shows once per session when storage throws, and never throws", () => {
     const store = createDockOnboardingStore(throwingStorage);
     expect(() => store.autoShow()).not.toThrow();
-    expect(store.get().open).toBe(true);
+    expect(store.get().card).toBe("tour");
     expect(() => store.dismiss()).not.toThrow();
-    expect(store.get().open).toBe(false);
+    expect(store.get().card).toBeNull();
     store.autoShow();
-    expect(store.get().open).toBe(false);
+    expect(store.get().card).toBeNull();
   });
 
   it("notifies subscribers only on a change", () => {
@@ -278,11 +285,11 @@ describe("dock onboarding session store", () => {
     store.autoShow();
     const reordered = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "right-top", index: 0 });
     store.afterMove(DEFAULT_DOCK_LAYOUT, reordered, "image");
-    expect(store.get().open).toBe(true);
+    expect(store.get().card).toBe("tour");
     expect(storage.setItem).not.toHaveBeenCalled();
     const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-bottom" });
     store.afterMove(DEFAULT_DOCK_LAYOUT, moved, "image");
-    expect(store.get().open).toBe(false);
+    expect(store.get().card).toBeNull();
     expect(storage.data.get(KEY)).toBe("done");
   });
 
@@ -291,7 +298,383 @@ describe("dock onboarding session store", () => {
     const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "config", anchor: "left-top" });
     store.afterMove(DEFAULT_DOCK_LAYOUT, moved, "config");
     store.autoShow();
-    expect(store.get().open).toBe(false);
+    expect(store.get().card).toBeNull();
+  });
+});
+
+function manualSchedule() {
+  const pending = new Map<number, { run: () => void; ms: number }>();
+  let seq = 0;
+  return {
+    schedule(run: () => void, ms: number): () => void {
+      seq += 1;
+      const id = seq;
+      pending.set(id, { run, ms });
+      return () => {
+        pending.delete(id);
+      };
+    },
+    delays: () => [...pending.values()].map((p) => p.ms),
+    flush() {
+      const due = [...pending.values()];
+      pending.clear();
+      for (const p of due) p.run();
+    },
+  };
+}
+
+function queueStore(storage: OnboardingStorage = memoryStorage()) {
+  const timers = manualSchedule();
+  const store = createDockOnboardingStore(() => storage, timers.schedule);
+  return { store, timers };
+}
+
+describe("dock onboarding queue", () => {
+  it("gives a new user without a file the settings tip, then the drag tour, then the toggle tip once a file loads", () => {
+    const storage = memoryStorage();
+    const { store, timers } = queueStore(storage);
+    store.setReady("settings", true);
+    expect(store.get().card).toBeNull();
+    store.autoShow();
+    expect(store.get()).toEqual({ card: "settings", step: 0 });
+    store.dismiss();
+    expect(store.get().card).toBeNull();
+    expect(storage.data.get(SETTINGS_KEY)).toBe("done");
+    expect(timers.delays()).toEqual([600]);
+    timers.flush();
+    expect(store.get()).toEqual({ card: "tour", step: 0 });
+    store.setStep(1);
+    store.dismiss();
+    expect(storage.data.get(KEY)).toBe("done");
+    timers.flush();
+    expect(store.get().card).toBeNull();
+    store.setReady("toggle", true);
+    expect(store.get()).toEqual({ card: "toggle", step: 0 });
+    store.dismiss();
+    expect(storage.data.get(TOGGLE_KEY)).toBe("done");
+    timers.flush();
+    expect(store.get().card).toBeNull();
+  });
+
+  it("shows the toggle tip, the settings tip and the drag tour in that order when all are ready", () => {
+    const { store, timers } = queueStore();
+    store.setReady("toggle", true);
+    store.setReady("settings", true);
+    store.autoShow();
+    const seen: (string | null)[] = [];
+    for (let i = 0; i < 4; i++) {
+      seen.push(store.get().card);
+      store.dismiss();
+      timers.flush();
+    }
+    expect(seen).toEqual(["toggle", "settings", "tour", null]);
+  });
+
+  it("keeps the open card when another becomes ready, and shows that one after the delay", () => {
+    const { store, timers } = queueStore();
+    store.autoShow();
+    expect(store.get().card).toBe("tour");
+    store.setReady("toggle", true);
+    expect(store.get().card).toBe("tour");
+    store.dismiss();
+    expect(store.get().card).toBeNull();
+    timers.flush();
+    expect(store.get().card).toBe("toggle");
+  });
+
+  it("gives users who finished the drag tour the two new tips once", () => {
+    const storage = memoryStorage({ [KEY]: "done" });
+    const { store, timers } = queueStore(storage);
+    store.setReady("toggle", true);
+    store.setReady("settings", true);
+    store.autoShow();
+    expect(store.get().card).toBe("toggle");
+    store.dismiss();
+    timers.flush();
+    expect(store.get().card).toBe("settings");
+    store.dismiss();
+    timers.flush();
+    expect(store.get().card).toBeNull();
+    const next = queueStore(storage).store;
+    next.setReady("toggle", true);
+    next.setReady("settings", true);
+    next.autoShow();
+    expect(next.get().card).toBeNull();
+  });
+
+  it("shows nothing before the first auto-show, and nothing new while a dock drag is in progress", () => {
+    const { store, timers } = queueStore();
+    store.setReady("toggle", true);
+    store.setReady("settings", true);
+    expect(store.get().card).toBeNull();
+    store.setDragging(true);
+    store.autoShow();
+    expect(store.get().card).toBeNull();
+    store.setDragging(false);
+    expect(store.get().card).toBe("toggle");
+    store.setDragging(true);
+    expect(store.get().card).toBe("toggle");
+    store.dismiss();
+    timers.flush();
+    expect(store.get().card).toBeNull();
+    store.setDragging(false);
+    expect(store.get().card).toBe("settings");
+  });
+
+  it("Skip tips closes the card and marks every tip and the drag tour done", () => {
+    const storage = memoryStorage();
+    const { store, timers } = queueStore(storage);
+    store.setReady("toggle", true);
+    store.setReady("settings", true);
+    store.autoShow();
+    store.skipAll();
+    expect(store.get().card).toBeNull();
+    expect(storage.data.get(TOGGLE_KEY)).toBe("done");
+    expect(storage.data.get(SETTINGS_KEY)).toBe("done");
+    expect(storage.data.get(KEY)).toBe("done");
+    timers.flush();
+    store.setReady("toggle", false);
+    store.setReady("toggle", true);
+    expect(store.get().card).toBeNull();
+  });
+
+  it("marks the toggle tip done when any strip tool is toggled while it is shown", () => {
+    const storage = memoryStorage();
+    const { store, timers } = queueStore(storage);
+    store.setReady("toggle", true);
+    store.setReady("settings", true);
+    store.autoShow();
+    store.stripToggled("files");
+    expect(store.get().card).toBeNull();
+    expect(storage.data.get(TOGGLE_KEY)).toBe("done");
+    timers.flush();
+    expect(store.get().card).toBe("settings");
+  });
+
+  it("marks the settings tip done only when Config is toggled from the strip or Settings opens while it is shown", () => {
+    const storage = memoryStorage();
+    const { store, timers } = queueStore(storage);
+    store.setReady("settings", true);
+    store.autoShow();
+    store.stripToggled("files");
+    expect(store.get().card).toBe("settings");
+    store.stripToggled("config");
+    expect(store.get().card).toBeNull();
+    expect(storage.data.get(SETTINGS_KEY)).toBe("done");
+    store.show();
+    expect(store.get().card).toBe("settings");
+    store.setSettingsOpen(true);
+    expect(store.get().card).toBeNull();
+    timers.flush();
+    expect(store.get().card).toBe("tour");
+  });
+
+  it("does not count Settings opened under another card, nor Settings still open when its tip shows", () => {
+    const { store, timers } = queueStore();
+    store.setReady("toggle", true);
+    store.setReady("settings", true);
+    store.autoShow();
+    store.setSettingsOpen(true);
+    expect(store.get().card).toBe("toggle");
+    store.dismiss();
+    timers.flush();
+    expect(store.get().card).toBe("settings");
+    store.setSettingsOpen(true);
+    expect(store.get().card).toBe("settings");
+    store.setSettingsOpen(false);
+    expect(store.get().card).toBe("settings");
+    store.setSettingsOpen(true);
+    expect(store.get().card).toBeNull();
+  });
+
+  it("hides a tip whose button is gone without marking it done, and shows it again when it is back", () => {
+    const storage = memoryStorage({ [KEY]: "done" });
+    const { store, timers } = queueStore(storage);
+    store.setReady("toggle", true);
+    store.autoShow();
+    expect(store.get().card).toBe("toggle");
+    store.setReady("toggle", false);
+    expect(store.get().card).toBeNull();
+    expect(storage.data.has(TOGGLE_KEY)).toBe(false);
+    timers.flush();
+    expect(store.get().card).toBeNull();
+    store.setReady("toggle", true);
+    expect(store.get().card).toBe("toggle");
+  });
+
+  it("hides the drag tour while the viewer is hidden and brings it back", () => {
+    const { store, timers } = queueStore();
+    store.autoShow();
+    store.setReady("tour", false);
+    expect(store.get().card).toBeNull();
+    timers.flush();
+    store.setReady("tour", true);
+    expect(store.get()).toEqual({ card: "tour", step: 0 });
+  });
+
+  it("replays the whole sequence from the first card that is ready", () => {
+    const storage = memoryStorage({ [KEY]: "done", [TOGGLE_KEY]: "done", [SETTINGS_KEY]: "done" });
+    const { store, timers } = queueStore(storage);
+    store.setReady("settings", true);
+    store.autoShow();
+    expect(store.get().card).toBeNull();
+    store.show();
+    expect(store.get().card).toBe("settings");
+    store.dismiss();
+    timers.flush();
+    expect(store.get().card).toBe("tour");
+    store.dismiss();
+    timers.flush();
+    expect(store.get().card).toBeNull();
+    store.setReady("toggle", true);
+    expect(store.get().card).toBe("toggle");
+    store.show();
+    expect(store.get().card).toBe("toggle");
+    store.dismiss();
+    store.show();
+    expect(store.get().card).toBe("toggle");
+    expect(timers.delays()).toEqual([]);
+  });
+
+  it("keeps the tip steps at zero and an open tip through a real move", () => {
+    const storage = memoryStorage();
+    const { store } = queueStore(storage);
+    store.setReady("toggle", true);
+    store.autoShow();
+    store.setStep(1);
+    expect(store.get()).toEqual({ card: "toggle", step: 0 });
+    const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "compose", anchor: "right-bottom" });
+    store.afterMove(DEFAULT_DOCK_LAYOUT, moved, "compose");
+    expect(store.get().card).toBe("toggle");
+    expect(storage.data.get(KEY)).toBe("done");
+  });
+
+  it("shows every card once per session when storage throws", () => {
+    const { store, timers } = queueStore(throwingStorage());
+    store.setReady("toggle", true);
+    store.setReady("settings", true);
+    store.autoShow();
+    const seen: (string | null)[] = [];
+    for (let i = 0; i < 4; i++) {
+      seen.push(store.get().card);
+      expect(() => store.dismiss()).not.toThrow();
+      timers.flush();
+    }
+    expect(seen).toEqual(["toggle", "settings", "tour", null]);
+    store.autoShow();
+    expect(store.get().card).toBeNull();
+  });
+});
+
+type TipProps = DockTipCardProps & {
+  onGotIt: ReturnType<typeof vi.fn<() => void>>;
+  onSkip: ReturnType<typeof vi.fn<() => void>>;
+};
+
+function tipProps(over: Partial<DockTipCardProps> = {}): TipProps {
+  return {
+    tip: DOCK_TIPS.toggle,
+    titleId: "tip-title",
+    bodyId: "tip-body",
+    placement: null,
+    onGotIt: vi.fn<() => void>(),
+    onSkip: vi.fn<() => void>(),
+    ...over,
+  } as TipProps;
+}
+
+function renderTip(props: DockTipCardProps): string {
+  return renderToStaticMarkup(createElement(DockTipCard, props));
+}
+
+function tipTree(props: DockTipCardProps): ReactElement<AnyProps> {
+  return DockTipCard(props) as ReactElement<AnyProps>;
+}
+
+describe("DockTipCard", () => {
+  it("is a non-modal dialog labelled by its title and described by its body", () => {
+    const html = renderTip(tipProps());
+    expect(html).toMatch(/^<div[^>]*role="dialog"/);
+    expect(html).toMatch(/^<div[^>]*aria-modal="false"/);
+    expect(html).toMatch(/^<div[^>]*aria-labelledby="tip-title"/);
+    expect(html).toMatch(/^<div[^>]*aria-describedby="tip-body"/);
+    expect(html).toMatch(/^<div[^>]*data-dock-tip="toggle"/);
+    expect(html).toMatch(/^<div[^>]*class="ab-dock-onboarding ab-dock-tip"/);
+    expect(html).toMatch(/<h2[^>]*id="tip-title"[^>]*>Open and close tools<\/h2>/);
+    expect(html).toMatch(new RegExp(`<p[^>]*id="tip-body"[^>]*>${TOGGLE_BODY}</p>`));
+  });
+
+  it("shows the settings tip texts", () => {
+    const html = renderTip(tipProps({ tip: DOCK_TIPS.settings }));
+    expect(html).toMatch(/^<div[^>]*data-dock-tip="settings"/);
+    expect(html).toMatch(/<h2[^>]*id="tip-title"[^>]*>Settings<\/h2>/);
+    expect(html).toMatch(new RegExp(`<p[^>]*id="tip-body"[^>]*>${SETTINGS_BODY}</p>`));
+  });
+
+  it("offers Skip tips and Got it, with Got it as the primary button", () => {
+    const html = renderTip(tipProps());
+    expect(buttonTexts(html)).toEqual(["Skip tips", "Got it"]);
+    expect(html).toMatch(/<button[^>]*class="ab-dock-onboarding-btn ab-dock-onboarding-btn-primary"[^>]*>Got it<\/button>/);
+    expect(html).toMatch(/<button[^>]*class="ab-dock-onboarding-btn"[^>]*>Skip tips<\/button>/);
+    expect(html).not.toMatch(/aria-label="Close"/);
+  });
+
+  it("applies the placement and points its arrow at the anchor side", () => {
+    const left = renderTip(tipProps({ placement: { left: 51, top: 764, width: 280, maxHeight: 868, arrow: "left", arrowY: 74 } }));
+    expect(left).toMatch(/^<div[^>]*style="left:51px;top:764px;width:280px;max-height:868px;--ab-tip-arrow-y:74px"/);
+    expect(left).toMatch(/^<div[^>]*data-arrow="left"/);
+    const right = renderTip(tipProps({ tip: DOCK_TIPS.settings, placement: { left: 1269, top: 658, width: 280, maxHeight: 868, arrow: "right", arrowY: 60 } }));
+    expect(right).toMatch(/^<div[^>]*data-arrow="right"/);
+    expect(right).toMatch(/^<div[^>]*style="[^"]*--ab-tip-arrow-y:60px"/);
+  });
+
+  it("stays hidden with no arrow until it has been placed", () => {
+    const html = renderTip(tipProps());
+    expect(html).toMatch(/^<div[^>]*data-arrow="none"/);
+    expect(html).toMatch(/^<div[^>]*style="[^"]*visibility:hidden"/);
+  });
+
+  it("wires Got it and Skip tips", () => {
+    const props = tipProps();
+    (findElement(tipTree(props), byText("Got it")).props.onClick as () => void)();
+    expect(props.onGotIt).toHaveBeenCalledTimes(1);
+    expect(props.onSkip).not.toHaveBeenCalled();
+    (findElement(tipTree(props), byText("Skip tips")).props.onClick as () => void)();
+    expect(props.onSkip).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes as done on Escape pressed inside the card and leaves other keys alone", () => {
+    const props = tipProps();
+    const onKeyDown = findElement(tipTree(props), (p) => p.role === "dialog").props.onKeyDown as (e: unknown) => void;
+    const other = { key: "Tab", preventDefault: vi.fn(), stopPropagation: vi.fn() };
+    onKeyDown(other);
+    expect(props.onGotIt).not.toHaveBeenCalled();
+    expect(other.preventDefault).not.toHaveBeenCalled();
+    const escape = { key: "Escape", preventDefault: vi.fn(), stopPropagation: vi.fn() };
+    onKeyDown(escape);
+    expect(props.onGotIt).toHaveBeenCalledTimes(1);
+    expect(escape.preventDefault).toHaveBeenCalled();
+    expect(escape.stopPropagation).toHaveBeenCalled();
+  });
+});
+
+describe("onboardingAnchorReady", () => {
+  function anchor({ disabled = false, inert = false }: { disabled?: boolean; inert?: boolean } = {}) {
+    return {
+      getAttribute: (name: string) => (name === "aria-disabled" && disabled ? "true" : null),
+      closest: (selector: string) => (selector === "[inert]" && inert ? {} : null),
+    };
+  }
+
+  it("is ready for an enabled anchor on screen", () => {
+    expect(onboardingAnchorReady(anchor())).toBe(true);
+  });
+
+  it("is not ready when the anchor is missing, disabled or inside a hidden inert layer", () => {
+    expect(onboardingAnchorReady(null)).toBe(false);
+    expect(onboardingAnchorReady(undefined)).toBe(false);
+    expect(onboardingAnchorReady(anchor({ disabled: true }))).toBe(false);
+    expect(onboardingAnchorReady(anchor({ inert: true }))).toBe(false);
   });
 });
 
@@ -312,17 +695,17 @@ describe("dock move path", () => {
   });
 
   it("marks onboarding done and hides the card when a tool changes anchor", () => {
-    expect(dockOnboardingStore.get().open).toBe(true);
+    expect(dockOnboardingStore.get().card).toBe("tour");
     expect(commitDockMove("image", "right-bottom")).toBe(true);
     expect(dockStore.get().anchors["right-bottom"]).toContain("image");
     expect(storage.data.get(KEY)).toBe("done");
-    expect(dockOnboardingStore.get().open).toBe(false);
+    expect(dockOnboardingStore.get().card).toBeNull();
   });
 
   it("keeps the card for a reorder inside the same anchor and for a no-op move", () => {
     expect(commitDockMove("image", "right-top", 0)).toBe(true);
     expect(commitDockMove("image", "right-top", 0)).toBe(false);
     expect(storage.setItem.mock.calls.some(([key]) => key === KEY)).toBe(false);
-    expect(dockOnboardingStore.get().open).toBe(true);
+    expect(dockOnboardingStore.get().card).toBe("tour");
   });
 });

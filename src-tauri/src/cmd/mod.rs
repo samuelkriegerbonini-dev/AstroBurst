@@ -13,6 +13,7 @@ pub mod line_measure;
 pub mod linefit;
 pub mod metadata;
 pub mod ops;
+pub mod masks;
 pub mod output;
 pub mod processing;
 pub mod ramp;

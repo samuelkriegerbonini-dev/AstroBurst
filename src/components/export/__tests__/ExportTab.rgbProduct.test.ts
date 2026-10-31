@@ -46,6 +46,7 @@ vi.mock("../../../context/PreviewContext", () => ({
   getRenderRecord: () => null,
   useFileContext: () => ({ file: screen.file }),
   useHistContext: () => ({ stfParams: { shadow: 0, midtone: 0.5, highlight: 1 } }),
+  useDisplayContext: () => ({ display: { stretch: "mtf", limits: "minmax", symmetric: false, colormap: "gray", invert: false } }),
   useRgbContext: () => ({ rgbChannels: screen.channels }),
   useCubeContext: () => ({ isCube: false, cubeDims: null }),
   useRenderContext: () => ({ processed: screen.processed, processedVersion: 1, chain: { steps: {}, psfKernel: null, base: null }, stfPreviewUrl: null }),

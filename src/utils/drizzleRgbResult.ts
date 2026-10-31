@@ -1,4 +1,4 @@
-import type { DrizzleRgbResult } from "../shared/types/stacking";
+import type { DrizzleRgbResult, StackResult } from "../shared/types/stacking";
 import { formatCount } from "./formatCount";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "./decimalText";
 import { WB_APPLY_MAX, WB_APPLY_MIN } from "./whiteBalanceRange";
@@ -16,6 +16,16 @@ export function drizzleResultItems(result: DrizzleRgbResult, kernelAtRun: string
     { label: "R frames", value: result.frame_count_r },
     { label: "G frames", value: result.frame_count_g },
     { label: "B frames", value: result.frame_count_b },
+    { label: "Rejected", value: result.rejected_pixels ? formatCount(result.rejected_pixels) : "0" },
+  ];
+}
+
+export function monoDrizzleResultItems(result: StackResult, channelLabel: string, kernelAtRun: string): DrizzleResultItem[] {
+  return [
+    { label: "Output", value: result.dimensions ? `${result.dimensions[0]}×${result.dimensions[1]}` : "--" },
+    { label: "Scale", value: result.scale ? `${result.scale.toFixed(1)}x` : "--" },
+    { label: "Kernel", value: kernelAtRun },
+    { label: `${channelLabel} frames`, value: result.frame_count ?? "--" },
     { label: "Rejected", value: result.rejected_pixels ? formatCount(result.rejected_pixels) : "0" },
   ];
 }

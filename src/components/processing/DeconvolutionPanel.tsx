@@ -1,6 +1,6 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useId, useRef } from "react";
 import { X } from "lucide-react";
-import { deconvolveOptionsOf, recordDeconvolveRL, type DeconvolveSettings } from "../../services/processing";
+import { recordDeconvolveRL } from "../../services/processing";
 import { compositeDeconvolveRL } from "../../services/compositeChain";
 import { cancelProgress } from "../../services/progress";
 import { useProgress } from "../../hooks/useProgress";
@@ -9,16 +9,31 @@ import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { useHistoryScope } from "../../hooks/useHistory";
 import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+import MaskSelect from "../masks/MaskSelect";
+import { useRunMask } from "../masks/runMask";
 import type { ProcessedFile } from "../../shared/types";
 import { useRenderContext } from "../../context/PreviewContext";
 import { useCompositeStf } from "../../context/CompositeContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { DECONV_PROGRESS_EVENT } from "../../shared/types/processing";
-import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice } from "./compositeProps";
+import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice, describedByIds } from "./compositeProps";
 import type { ChannelTriple, CompositeDeconvolveResult, CompositePanelProps } from "./compositeProps";
 import type { PsfSource } from "../../shared/types/compositeChain";
-import { empiricalPsfHint, psfSourceLabel, requestedPsfKernel } from "./deconvPsf";
+import {
+  MEASURED_PSF_CHIP,
+  PSF_CHOICES,
+  deconvPanelSettingsOf,
+  effectivePsfChoice,
+  measuredPsfNote,
+  offersMeasuredPsf,
+  psfChoiceAvailable,
+  psfChoiceHint,
+  psfChoiceLabel,
+  psfRequest,
+  psfSourceLabel,
+  type DeconvPanelSettings,
+} from "./deconvPsf";
 
 const RESULT_LABEL = "Deconvolved";
 
@@ -48,7 +63,7 @@ interface DeconvResult {
   psf_source?: PsfSource;
 }
 
-type DeconvParams = DeconvolveSettings;
+type DeconvParams = DeconvPanelSettings;
 
 interface DeconvFileRun {
   composite: false;
@@ -105,10 +120,11 @@ export default function DeconvolutionPanel({
   fileName,
   disabledReason,
   disabledReasonId,
+  runNoteId,
 }: DeconvolutionPanelProps) {
   const progress = useProgress(DECONV_PROGRESS_EVENT);
   const resetProgress = progress.reset;
-  const initial = useRerunInitial("deconvolution", deconvolveOptionsOf);
+  const initial = useRerunInitial("deconvolution", deconvPanelSettingsOf);
   const [params, setParams] = useState<DeconvParams>(
     () =>
       initial?.params ?? {
@@ -118,11 +134,16 @@ export default function DeconvolutionPanel({
         regularization: 0.001,
         deringing: true,
         deringThreshold: 0.1,
-        useEmpiricalPsf: false,
+        psf: "gaussian",
       },
   );
-  useRerunUpdates("deconvolution", initial, deconvolveOptionsOf, setParams);
+  useRerunUpdates("deconvolution", initial, deconvPanelSettingsOf, setParams);
+  const psfGroupId = useId();
+  const activePsf = effectivePsfChoice(params.psf, psfKernel);
+  const psfNote = measuredPsfNote(params.psf, psfKernel);
   const scope = useHistoryScope();
+  const runMask = useRunMask("deconvolution", scope, compositeMode);
+  const maskReason = runMask.blockedReason;
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<DeconvRun>("deconv", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -143,6 +164,12 @@ export default function DeconvolutionPanel({
     setParams((prev) => ({ ...prev, [key]: value }));
   }, []);
 
+  const measuredRadio = useRef<HTMLInputElement>(null);
+  const chooseMeasuredPsf = useCallback(() => {
+    update("psf", "measured");
+    measuredRadio.current?.focus();
+  }, [update]);
+
   const handleFileRun = useCallback(() => {
     if (!selectedFile?.path || !scope) return;
     const path = selectedFile.path;
@@ -150,6 +177,7 @@ export default function DeconvolutionPanel({
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     const requestedIterations = params.iterations;
+    const mask = runMask.value;
     resetProgress();
     void run(async (ctx) => {
       const res = await recordDeconvolveRL(runScope, path, {
@@ -159,18 +187,17 @@ export default function DeconvolutionPanel({
         regularization: params.regularization,
         deringing: params.deringing,
         deringThreshold: params.deringThreshold,
-        useEmpiricalPsf: params.useEmpiricalPsf,
-        psfKernel: requestedPsfKernel(params.useEmpiricalPsf, psfKernel),
-      });
+        ...psfRequest(params.psf, psfKernel),
+      }, mask);
       if (!ctx.inputUnchanged("deconv")) throw new Error(INPUT_CHANGED_MESSAGE);
       await onProcessingDone?.(res);
       return { composite: false as const, res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel, requestedIterations };
     }, isCancelMessage).finally(resetProgress);
-  }, [selectedFile, scope, params, psfKernel, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+  }, [selectedFile, scope, params, psfKernel, runMask.value, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
 
   const handleCompositeRun = useCallback(() => {
     if (!compositeInput) return;
-    const chainCall = { chainInput: compositeInput.input, displayStf };
+    const chainCall = { chainInput: compositeInput.input, displayStf, mask: runMask.value };
     const inputUrl = compositeInput.previewUrl;
     const inputLabelAtRun = compositeInput.label;
     const requestedIterations = params.iterations;
@@ -183,8 +210,7 @@ export default function DeconvolutionPanel({
         regularization: params.regularization,
         deringing: params.deringing,
         deringThreshold: params.deringThreshold,
-        useEmpiricalPsf: params.useEmpiricalPsf,
-        psfKernel: requestedPsfKernel(params.useEmpiricalPsf, psfKernel),
+        ...psfRequest(params.psf, psfKernel),
       });
       onCompositeDone("deconv", RESULT_LABEL, res, chainCall.displayStf);
       return {
@@ -196,7 +222,7 @@ export default function DeconvolutionPanel({
         requestedIterations,
       };
     }, isCancelMessage).finally(resetProgress);
-  }, [compositeInput, displayStf, outputDir, params, psfKernel, resetProgress, run, onCompositeDone]);
+  }, [compositeInput, displayStf, runMask.value, outputDir, params, psfKernel, resetProgress, run, onCompositeDone]);
 
   const handleRun = compositeMode ? handleCompositeRun : handleFileRun;
 
@@ -223,7 +249,59 @@ export default function DeconvolutionPanel({
       <div className="flex flex-col gap-3">
         <Slider label="Iterations" value={params.iterations} min={1} max={200} step={1} disabled={isRunning} accent="indigo" onChange={(v) => update("iterations", v)} />
 
-        {!params.useEmpiricalPsf && (
+        <div className="flex flex-col gap-1.5">
+          <span id={`${psfGroupId}-label`} className="text-xs text-zinc-400">PSF</span>
+          <div
+            role="radiogroup"
+            aria-labelledby={`${psfGroupId}-label`}
+            aria-describedby={psfNote ? `${psfGroupId}-hint ${psfGroupId}-note` : `${psfGroupId}-hint`}
+            data-testid="deconv-psf"
+            className="flex flex-col gap-1"
+          >
+            {PSF_CHOICES.map((choice) => {
+              const selectable = !isRunning && psfChoiceAvailable(choice, psfKernel);
+              return (
+                <label key={choice} className={`flex items-center gap-2 text-xs ${selectable ? "text-zinc-300 cursor-pointer" : "text-zinc-600"}`}>
+                  <input
+                    ref={choice === "measured" ? measuredRadio : undefined}
+                    type="radio"
+                    name={psfGroupId}
+                    value={choice}
+                    checked={activePsf === choice}
+                    disabled={!selectable}
+                    data-testid={`deconv-psf-${choice}`}
+                    onChange={() => update("psf", choice)}
+                    className="accent-indigo-400"
+                  />
+                  {psfChoiceLabel(choice, psfKernel)}
+                </label>
+              );
+            })}
+          </div>
+          <div id={`${psfGroupId}-hint`} className="text-[10px] text-zinc-500 px-0.5">{psfChoiceHint(activePsf)}</div>
+          {offersMeasuredPsf(params.psf, psfKernel) && (
+            <button
+              type="button"
+              data-testid="deconv-psf-chip"
+              disabled={isRunning}
+              onClick={chooseMeasuredPsf}
+              className="self-start text-[10px] text-violet-200 bg-violet-900/30 border border-violet-700/40 rounded-full px-2.5 py-0.5 hover:bg-violet-900/50 disabled:opacity-40 transition-colors"
+            >
+              {MEASURED_PSF_CHIP}
+            </button>
+          )}
+          {psfNote && (
+            <div
+              id={`${psfGroupId}-note`}
+              role="note"
+              className={activePsf === params.psf ? "text-[10px] text-zinc-500 px-0.5" : "text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded-lg px-3 py-1.5"}
+            >
+              {psfNote}
+            </div>
+          )}
+        </div>
+
+        {activePsf === "gaussian" && (
           <>
             <Slider label="PSF Sigma" value={params.psfSigma} min={0.5} max={10} step={0.1} disabled={isRunning} accent="indigo" format={(v) => v.toFixed(1)} onChange={(v) => update("psfSigma", v)} />
             <Slider label="PSF Size" value={params.psfSize} min={3} max={31} step={2} disabled={isRunning} accent="indigo" onChange={(v) => update("psfSize", v)} />
@@ -237,15 +315,11 @@ export default function DeconvolutionPanel({
         {params.deringing && (
           <Slider label="Dering Threshold" value={params.deringThreshold} min={0} max={1} step={0.01} disabled={isRunning} accent="indigo" format={(v) => v.toFixed(2)} onChange={(v) => update("deringThreshold", v)} />
         )}
-
-        <div className="flex flex-col gap-1">
-          <Toggle label="Empirical PSF" checked={params.useEmpiricalPsf} disabled={isRunning} accent="violet" onChange={(v) => update("useEmpiricalPsf", v)} />
-          <div className="text-[10px] text-zinc-500 px-0.5">{empiricalPsfHint(psfKernel)}</div>
-        </div>
       </div>
 
-      <div title={disabledReason ?? busyTitle}>
-        <RunButton label="Run Deconvolution" runningLabel="Deconvolving..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="indigo" onClick={handleRun} />
+      <MaskSelect {...runMask.select} busy={isRunning} />
+      <div title={disabledReason ?? maskReason ?? busyTitle}>
+        <RunButton label="Run Deconvolution" runningLabel="Deconvolving..." running={isRunning} disabled={!canRun || blocked || !!disabledReason || !!maskReason} describedBy={describedByIds(disabledReason ? disabledReasonId : null, runNoteId, maskReason ? runMask.select.noteId : null)} accent="indigo" onClick={handleRun} />
       </div>
 
       {isRunning && progress.active && (

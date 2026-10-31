@@ -405,6 +405,71 @@ pub struct RLResult {
     pub elapsed_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CanvasSpec {
+    Auto { north_up: bool, reference: Option<usize> },
+    Like { cards: Vec<(String, String)> },
+}
+
+impl Default for CanvasSpec {
+    fn default() -> Self {
+        CanvasSpec::Auto { north_up: false, reference: None }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LevelModel {
+    #[default]
+    Offset,
+    OffsetScale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RejectSpec {
+    pub snr: f32,
+    pub scale: f32,
+}
+
+impl Default for RejectSpec {
+    fn default() -> Self {
+        Self { snr: 3.5, scale: 1.2 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MosaicConfig {
+    pub canvas: CanvasSpec,
+    pub levels: LevelModel,
+    pub references: Vec<Option<usize>>,
+    pub feather_px: f32,
+    pub min_overlap_frac: f64,
+    pub dq_mask: bool,
+    pub reject: Option<RejectSpec>,
+    pub max_tiles: usize,
+    pub max_side_px: usize,
+    pub max_area_ratio: f64,
+    pub max_ram_bytes: u64,
+}
+
+impl Default for MosaicConfig {
+    fn default() -> Self {
+        Self {
+            canvas: CanvasSpec::default(),
+            levels: LevelModel::default(),
+            references: Vec::new(),
+            feather_px: 64.0,
+            min_overlap_frac: 0.02,
+            dq_mask: true,
+            reject: None,
+            max_tiles: 50,
+            max_side_px: 40_000,
+            max_area_ratio: 3.0,
+            max_ram_bytes: 4 << 30,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +528,25 @@ mod tests {
         assert!(!c.rejection_maps);
         let p = c.rejection_params();
         assert_eq!(p, RejectionParams::default());
+    }
+
+    #[test]
+    fn mosaic_config_defaults_follow_the_plan() {
+        let c = MosaicConfig::default();
+        assert_eq!(c.canvas, CanvasSpec::Auto { north_up: false, reference: None });
+        assert_eq!(c.levels, LevelModel::Offset);
+        assert!(c.references.is_empty());
+        assert_eq!(c.feather_px, 64.0);
+        assert_eq!(c.min_overlap_frac, 0.02);
+        assert!(c.dq_mask);
+        assert_eq!(c.reject, None);
+        assert_eq!(RejectSpec::default(), RejectSpec { snr: 3.5, scale: 1.2 });
+        let reject = serde_json::to_value(RejectSpec::default()).unwrap();
+        assert_eq!((reject["snr"].as_f64(), reject["scale"].as_f64()), (Some(3.5), Some(f64::from(1.2f32))));
+        assert_eq!(serde_json::from_value::<RejectSpec>(serde_json::json!({ "snr": 4.0, "scale": 0.7 })).unwrap(), RejectSpec { snr: 4.0, scale: 0.7 });
+        assert_eq!((c.max_tiles, c.max_side_px, c.max_area_ratio), (50, 40_000, 3.0));
+        assert_eq!(c.max_ram_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(serde_json::to_value(LevelModel::OffsetScale).unwrap(), serde_json::json!("offset_scale"));
+        assert_eq!(serde_json::from_value::<LevelModel>(serde_json::json!("offset")).unwrap(), LevelModel::Offset);
     }
 }

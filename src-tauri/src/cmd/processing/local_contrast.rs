@@ -8,9 +8,13 @@ use crate::cmd::common::{
     resolve_output_dir, write_derived_fits, OutputValues, RenderOutput, MAX_PREVIEW_DIM,
 };
 use crate::service::common::derived_output_header;
-use crate::cmd::compose::composite_chain::{contrast_planes, run_chain_step, toned_state, ChainCall, ChainStep, DisplayStf, StepOutput};
+use crate::cmd::compose::composite_chain::{
+    contrast_planes, refuse_unchained_mask, run_chain_step, toned_state, ChainCall, ChainStep, DisplayStf, StepOutput,
+};
 use crate::cmd::helpers;
+use crate::cmd::masks::composite_spec;
 use crate::core::imaging::local_contrast::{lhe_rgb, LheConfig};
+use crate::core::mask::MaskSpec;
 use crate::core::ops::{run_op, OpInput, OpSpec, OpVersion};
 use crate::infra::cache::ImageEntry;
 use crate::infra::progress::ProgressHandle;
@@ -255,13 +259,14 @@ pub(crate) fn run_composite_contrast_chain(
     output_dir: String,
     chain_input: String,
     display_stf: Option<DisplayStf>,
+    mask: Option<MaskSpec>,
     apply: impl FnOnce(&Array2<f32>, &Array2<f32>, &Array2<f32>) -> anyhow::Result<Triplet>,
 ) -> anyhow::Result<serde_json::Value> {
-    let call = ChainCall { output_dir, chain_input, display_stf };
+    let call = ChainCall { output_dir, chain_input, display_stf, mask };
     run_chain_step(ChainStep::LocalContrast, &call, |input, _| {
         let [r, g, b] = contrast_planes(input)?;
         let (r, g, b) = apply(r, g, b)?;
-        Ok(StepOutput { state: toned_state(input, [r, g, b]), extras: json!({}) })
+        Ok(StepOutput { state: toned_state(input, [r, g, b]), extras: json!({}), blend_base: None })
     })
 }
 
@@ -271,11 +276,14 @@ pub async fn lhe_composite_cmd(
     config: LheConfig,
     chain_input: Option<String>,
     display_stf: Option<DisplayStf>,
+    mask: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let mask = composite_spec(mask)?;
         if let Some(chain_input) = chain_input {
-            return run_composite_contrast_chain(output_dir, chain_input, display_stf, |r, g, b| lhe_rgb(r, g, b, &config));
+            return run_composite_contrast_chain(output_dir, chain_input, display_stf, mask, |r, g, b| lhe_rgb(r, g, b, &config));
         }
+        refuse_unchained_mask(ChainStep::LocalContrast, mask.as_ref())?;
         let output_dir = resolve_output_dir(&output_dir)?;
         run_composite_contrast(SUFFIX_LHE, &output_dir, move |r, g, b| lhe_rgb(r, g, b, &config))
     })
@@ -366,7 +374,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let planes = [composite_plane(4), composite_plane(5), composite_plane(6)];
         helpers::insert_composite_stretched(planes[0].clone(), planes[1].clone(), planes[2].clone());
-        let run = lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), LheConfig { kernel_radius: 3, ..LheConfig::default() }, None, None).await;
+        let run = lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), LheConfig { kernel_radius: 3, ..LheConfig::default() }, None, None, None).await;
         let held = lock_last_run().is_some();
         forget_composite_contrast();
         let released = lock_last_run().is_none();
@@ -402,12 +410,12 @@ mod tests {
         let second = LheConfig { kernel_radius: 5, amount: 0.5, ..LheConfig::default() };
         let hdr = HdrConfig { layers: 2, ..HdrConfig::default() };
 
-        let run_first = lhe_composite_cmd(out.clone(), first.clone(), None, None).await;
+        let run_first = lhe_composite_cmd(out.clone(), first.clone(), None, None, None).await;
         let after_first = load_tier(CompositeTier::Toned);
         let stretched_after = load_tier(CompositeTier::Stretched);
-        let run_second = lhe_composite_cmd(out.clone(), second.clone(), None, None).await;
+        let run_second = lhe_composite_cmd(out.clone(), second.clone(), None, None, None).await;
         let after_second = load_tier(CompositeTier::Toned);
-        let run_hdr = hdrmt_composite_cmd(out, hdr.clone(), None, None).await;
+        let run_hdr = hdrmt_composite_cmd(out, hdr.clone(), None, None, None).await;
         let after_hdr = toned_tier();
         helpers::clear_composite_derived();
         run_first.unwrap();

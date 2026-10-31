@@ -19,6 +19,7 @@ use crate::core::imaging::masked_stretch::{masked_stretch, MaskedStretchConfig};
 use crate::core::imaging::stats::finite_output_stats;
 use crate::core::imaging::stretch::{arcsinh_stretch, arcsinh_stretch_rgb, ghs_stretch, ghs_stretch_rgb, GhsParams};
 use crate::core::imaging::wavelet::{check_layer_bias, wavelet_denoise, WaveletConfig};
+use crate::core::mask::{blend, MaskError};
 use crate::core::ops::background::{
     checked_background_config, checked_deband_settings, deband_axis_token, deband_guard, deband_history, deband_single,
     BackgroundModel, DebandRequest,
@@ -160,6 +161,8 @@ impl OpSpec {
 pub enum OpError {
     #[error("{0} does not take a mask")]
     MaskNotSupported(&'static str),
+    #[error(transparent)]
+    Mask(#[from] MaskError),
     #[error("{op} cannot run on {planes} planes")]
     PlaneCount { op: &'static str, planes: usize },
     #[error("{op} needs planes of one size; got {dims:?}")]
@@ -178,19 +181,24 @@ pub struct OpInput<'a> {
     pub planes: Vec<&'a Array2<f32>>,
     pub header: Option<&'a HduHeader>,
     pub companions: OpCompanions<'a>,
+    pub mask: Option<&'a Array2<f32>>,
 }
 
 impl<'a> OpInput<'a> {
     pub fn mono(plane: &'a Array2<f32>, header: Option<&'a HduHeader>) -> Self {
-        Self { planes: vec![plane], header, companions: OpCompanions::default() }
+        Self { planes: vec![plane], header, companions: OpCompanions::default(), mask: None }
     }
 
     pub fn rgb(planes: [&'a Array2<f32>; 3], header: Option<&'a HduHeader>) -> Self {
-        Self { planes: planes.to_vec(), header, companions: OpCompanions::default() }
+        Self { planes: planes.to_vec(), header, companions: OpCompanions::default(), mask: None }
     }
 
     pub fn with_companions(self, companions: OpCompanions<'a>) -> Self {
         Self { companions, ..self }
+    }
+
+    pub fn with_mask(self, mask: Option<&'a Array2<f32>>) -> Self {
+        Self { mask, ..self }
     }
 
     fn display_referred(&self) -> bool {
@@ -228,6 +236,40 @@ fn check_planes(spec: &OpSpec, input: &OpInput) -> Result<(), OpError> {
 
 pub fn run_op(spec: &OpSpec, input: &OpInput, progress: Option<&ProgressHandle>) -> Result<OpOutput, OpError> {
     check_planes(spec, input)?;
+    let Some(mask) = input.mask else {
+        return dispatch(spec, input, progress);
+    };
+    check_mask(spec, input, mask)?;
+    if matches!(spec, OpSpec::Pixelmath { .. }) {
+        return dispatch(spec, input, progress);
+    }
+    let base = blend_base(spec, input)?;
+    let mut out = dispatch(spec, input, progress)?;
+    out.planes = base
+        .iter()
+        .zip(&out.planes)
+        .map(|(base, processed)| blend(base, processed, mask))
+        .collect::<Result<_, _>>()?;
+    Ok(out)
+}
+
+pub fn refuse_mask(spec: &OpSpec) -> Result<(), OpError> {
+    if matches!(spec, OpSpec::Background { .. } | OpSpec::MaskedStretch { .. }) {
+        return Err(OpError::MaskNotSupported(spec.name()));
+    }
+    Ok(())
+}
+
+fn check_mask(spec: &OpSpec, input: &OpInput, mask: &Array2<f32>) -> Result<(), OpError> {
+    refuse_mask(spec)?;
+    let image = input.planes[0].dim();
+    if mask.dim() != image {
+        return Err(MaskError::BlendDims { base: image, processed: image, mask: mask.dim() }.into());
+    }
+    Ok(())
+}
+
+fn dispatch(spec: &OpSpec, input: &OpInput, progress: Option<&ProgressHandle>) -> Result<OpOutput, OpError> {
     match spec {
         OpSpec::Background { model, .. } => run_background(model, input, progress),
         OpSpec::WaveletDenoise { config, .. } => run_wavelet(config, input, progress),
@@ -245,9 +287,7 @@ pub fn run_op(spec: &OpSpec, input: &OpInput, progress: Option<&ProgressHandle>)
 }
 
 pub fn blend_base(spec: &OpSpec, input: &OpInput) -> Result<Vec<Array2<f32>>, OpError> {
-    if matches!(spec, OpSpec::Background { .. } | OpSpec::MaskedStretch { .. }) {
-        return Err(OpError::MaskNotSupported(spec.name()));
-    }
+    refuse_mask(spec)?;
     check_planes(spec, input)?;
     let planes = &input.planes;
     Ok(match spec {
@@ -395,7 +435,7 @@ fn run_pixelmath(expression: &str, slots: &[PixelMathSlot], opts: OutputOptions,
     let load = input.companions.load_slot.unwrap_or(&unsupplied);
     let (planes, extras) = match input.planes[..] {
         [r, g, b] => {
-            let evaluated = evaluate_per_channel(expression, slots, &opts, [r, g, b], load)?;
+            let evaluated = evaluate_per_channel(expression, slots, &opts, [r, g, b], load, input.mask)?;
             let extras = json!({
                 RES_STATS: evaluated.stats,
                 RES_NON_FINITE_COUNT: evaluated.non_finite,
@@ -404,7 +444,7 @@ fn run_pixelmath(expression: &str, slots: &[PixelMathSlot], opts: OutputOptions,
             (Vec::from(evaluated.results), extras)
         }
         _ => {
-            let evaluated = evaluate_target(expression, slots, &opts, input.planes[0], load)?;
+            let evaluated = evaluate_target(expression, slots, &opts, input.planes[0], load, input.mask)?;
             let (stats, non_finite) = finite_output_stats(&evaluated.result);
             let extras = json!({ RES_STATS: stats, RES_NON_FINITE_COUNT: non_finite, RES_WARNINGS: evaluated.warnings });
             (vec![evaluated.result], extras)
@@ -482,6 +522,8 @@ mod tests {
 
     use std::sync::Arc;
 
+    use ndarray::Zip;
+
     use crate::core::analysis::deconvolution::{generate_gaussian_psf, provided_psf_kernel, richardson_lucy};
     use crate::core::imaging::background::{deband, detect_band_axis, extract_background, BackgroundConfig, DebandAxis, DebandConfig};
     use crate::core::imaging::dbe::{extract_background_dbe, DbeConfig};
@@ -491,8 +533,9 @@ mod tests {
     use crate::core::imaging::stats::compute_image_stats;
     use crate::core::imaging::stretch::{arcsinh_stretch, arcsinh_stretch_rgb, ghs_stretch, ghs_stretch_rgb};
     use crate::core::imaging::wavelet::wavelet_denoise;
+    use crate::core::mask::blend;
     use crate::core::ops::background::DebandSettings;
-    use crate::core::pixelmath::{compile, evaluate, OutputOptions};
+    use crate::core::pixelmath::{compile, evaluate, evaluate_unfinished, finish_plane, OutputOptions};
     use crate::infra::cache::ImageCache;
     use crate::types::constants::{
         RES_AXIS, RES_CONVERGENCE, RES_ITERATIONS_RUN, RES_NOISE_ESTIMATE, RES_PSF_SOURCE, RES_SAMPLE_COUNT,
@@ -890,5 +933,266 @@ mod tests {
         let display = frame.mapv(|v| v / 3000.0);
         let base = blend_base(&spec, &OpInput::mono(&display, Some(&header))).unwrap().remove(0);
         assert_bitwise(&base, &display, "tone base on display-referred input");
+    }
+
+    const LINEAR_PEAK: f32 = 3.2e4;
+
+    fn linear_frame(seed: u64) -> Array2<f32> {
+        let frame = seeded_frame(seed, 1.0);
+        let peak = frame.iter().copied().fold(f32::MIN, f32::max);
+        frame.mapv(|v| v / peak * LINEAR_PEAK)
+    }
+
+    fn banded_mask(dims: (usize, usize)) -> Array2<f32> {
+        let third = dims.1 / 3;
+        Array2::from_shape_fn(dims, |(_, x)| match x / third {
+            0 => 0.0,
+            1 => 0.5,
+            _ => 1.0,
+        })
+    }
+
+    fn run_masked(spec: &OpSpec, input: OpInput, mask: &Array2<f32>) -> OpOutput {
+        run_op(spec, &input.with_mask(Some(mask)), None).unwrap_or_else(|e| panic!("masked {}: {e:#}", spec.name()))
+    }
+
+    fn assert_in_unit_range(planes: &[Array2<f32>], what: &str) {
+        for (index, plane) in planes.iter().enumerate() {
+            let outside = plane.iter().filter(|v| !(0.0..=1.0).contains(*v)).count();
+            assert_eq!(outside, 0, "{what} plane {index}: {outside} pixels outside [0, 1]");
+        }
+    }
+
+    fn assert_banded_blend(masked: &Array2<f32>, base: &Array2<f32>, unmasked: &Array2<f32>, mask: &Array2<f32>, what: &str) {
+        Zip::from(masked).and(base).and(unmasked).and(mask).for_each(|&out, &b, &u, &m| {
+            if m == 0.0 {
+                assert_eq!(out.to_bits(), b.to_bits(), "{what}: m 0 gives the blend base {b}, got {out}");
+            } else if m == 1.0 {
+                assert_eq!(out.to_bits(), u.to_bits(), "{what}: m 1 gives the unmasked output {u}, got {out}");
+            } else {
+                assert!(b.min(u) <= out && out <= b.max(u), "{what}: m {m}: {out} is outside [{b}, {u}]");
+            }
+        });
+    }
+
+    #[test]
+    fn masked_tone_on_linear_input_stays_in_0_1_and_keeps_abdisp() {
+        let frame = linear_frame(31);
+        let mask = banded_mask(frame.dim());
+        let spec = OpSpec::Tone { v: OpVersion, levels: Some(ToneLevelsInput { black: 0.05, gamma: 1.4, white: 0.8 }), curve: None };
+        assert!(frame.iter().any(|&v| v > 1000.0), "precondition: the input is linear");
+
+        let masked = run_masked(&spec, OpInput::mono(&frame, None), &mask);
+        let unmasked = run_mono(&spec, &frame);
+        let base = blend_base(&spec, &OpInput::mono(&frame, None)).unwrap();
+        assert_eq!(masked.values, OutputValues::DisplayReferred, "a masked tone writes a display-referred file (ABDISP = T)");
+        assert_in_unit_range(&masked.planes, "masked tone mono");
+        assert_banded_blend(&masked.planes[0], &base[0], &unmasked.planes[0], &mask, "tone mono");
+        assert_eq!(masked.history_lines, unmasked.history_lines);
+
+        let [r, g, b] = rgb_frames();
+        let masked = run_masked(&spec, OpInput::rgb([&r, &g, &b], None), &mask);
+        let unmasked = run_rgb(&spec, [&r, &g, &b]);
+        let base = blend_base(&spec, &OpInput::rgb([&r, &g, &b], None)).unwrap();
+        assert_eq!(masked.values, OutputValues::DisplayReferred);
+        assert_in_unit_range(&masked.planes, "masked tone rgb");
+        for c in 0..3 {
+            assert_banded_blend(&masked.planes[c], &base[c], &unmasked.planes[c], &mask, &format!("tone rgb channel {c}"));
+        }
+    }
+
+    #[test]
+    fn masked_arcsinh_m0_region_equals_the_normalisation_not_the_raw_value() {
+        let frame = linear_frame(32);
+        let mask = banded_mask(frame.dim());
+        let spec = OpSpec::Arcsinh { v: OpVersion, factor: 80.0 };
+
+        let masked = run_masked(&spec, OpInput::mono(&frame, None), &mask);
+        let unmasked = run_mono(&spec, &frame);
+        let (lo, hi) = finite_range(&[&frame]);
+        let inv = 1.0 / (hi - lo);
+        let normalised = frame.mapv(|v| ((v - lo) * inv).clamp(0.0, 1.0));
+        assert_eq!(masked.values, OutputValues::DisplayReferred);
+        assert_in_unit_range(&masked.planes, "masked arcsinh");
+        assert_banded_blend(&masked.planes[0], &normalised, &unmasked.planes[0], &mask, "arcsinh");
+        let protected_raw = Zip::from(&frame).and(&mask).fold(0usize, |n, &v, &m| n + usize::from(m == 0.0 && v > 1.0));
+        assert!(protected_raw > 1000, "precondition: the m = 0 band holds raw linear values above 1 ({protected_raw})");
+        assert_eq!(masked.extras, unmasked.extras);
+    }
+
+    #[test]
+    fn masked_pixelmath_with_rescale_on_linear_input_stays_in_0_1() {
+        let frame = linear_frame(33);
+        let mask = banded_mask(frame.dim());
+        let expression = "$T * 2 - med($T)";
+        let spec = OpSpec::Pixelmath { v: OpVersion, expression: expression.into(), slots: vec![], truncate: false, rescale: true };
+        let opts = OutputOptions { truncate: false, rescale: true };
+        let program = compile(expression, &["$T".to_string()]).unwrap();
+        let blended_then_finished = |target: &Array2<f32>| {
+            let mut plane = blend(target, &evaluate_unfinished(&program, &[target]).unwrap(), &mask).unwrap();
+            finish_plane(&mut plane, &opts);
+            plane
+        };
+
+        let masked = run_masked(&spec, OpInput::mono(&frame, None), &mask);
+        assert_eq!(masked.values, OutputValues::Rescaled);
+        assert_in_unit_range(&masked.planes, "masked pixelmath mono");
+        assert_bitwise(&masked.planes[0], &blended_then_finished(&frame), "rescale acts on the blended plane");
+        let finished_then_blended = blend(&frame, &evaluate(&program, &[&frame], &opts).unwrap(), &mask).unwrap();
+        let leaked = finished_then_blended.iter().copied().fold(f32::MIN, f32::max);
+        assert!(leaked > 1000.0, "precondition: blending after the rescale would leak linear values ({leaked})");
+        let (stats, non_finite) = finite_output_stats(&masked.planes[0]);
+        assert_eq!(masked.extras[RES_STATS], json!(stats), "the stats describe the blended output");
+        assert_eq!(masked.extras[RES_NON_FINITE_COUNT], json!(non_finite));
+
+        let [r, g, b] = rgb_frames().map(|p| p.mapv(|v| v * 20.0));
+        let masked = run_masked(&spec, OpInput::rgb([&r, &g, &b], None), &mask);
+        assert_in_unit_range(&masked.planes, "masked pixelmath rgb");
+        for (plane, channel) in masked.planes.iter().zip([&r, &g, &b]) {
+            assert_bitwise(plane, &blended_then_finished(channel), "pixelmath rgb channel");
+        }
+    }
+
+    #[test]
+    fn background_and_masked_stretch_refuse_a_mask_by_name() {
+        let frame = seeded_frame(34, 1000.0);
+        let full = Array2::from_elem(frame.dim(), 1.0f32);
+        let small = Array2::from_elem((8, 8), 1.0f32);
+        let refused: Vec<OpSpec> = golden_specs()
+            .into_iter()
+            .filter(|s| matches!(s, OpSpec::Background { .. } | OpSpec::MaskedStretch { .. }))
+            .collect();
+        assert_eq!(refused.len(), 7, "six background models and one masked stretch");
+        for spec in &refused {
+            for mask in [&full, &small] {
+                let err = run_op(spec, &OpInput::mono(&frame, None).with_mask(Some(mask)), None).expect_err(spec.name());
+                assert!(matches!(err, OpError::MaskNotSupported(name) if name == spec.name()), "{err}");
+                assert_eq!(err.to_string(), format!("{} does not take a mask", spec.name()));
+            }
+        }
+
+        let lhe = OpSpec::Lhe { v: OpVersion, config: LheConfig { kernel_radius: 16, ..LheConfig::default() } };
+        let err = run_op(&lhe, &OpInput::mono(&frame, None).with_mask(Some(&small)), None).expect_err("a mask of another size");
+        assert!(matches!(err, OpError::Mask(MaskError::BlendDims { .. })), "{err}");
+        assert_eq!(err.to_string(), "a blend needs base, processed and mask of one size; got base 256×256, processed 256×256, mask 8×8");
+    }
+
+    const A6_SIDE: usize = 128;
+
+    fn a6_frame(seed: u64, scale: f32, holes: [(usize, usize); 3]) -> Array2<f32> {
+        let mut frame = seeded_frame(seed, scale).slice(ndarray::s![..A6_SIDE, ..A6_SIDE]).to_owned();
+        for (cell, value) in holes.into_iter().zip([f32::NAN, f32::INFINITY, f32::NEG_INFINITY]) {
+            frame[cell] = value;
+        }
+        frame
+    }
+
+    fn a6_planes(scale: f32) -> [Array2<f32>; 3] {
+        [
+            a6_frame(51, scale, [(7, 9), (60, 3), (101, 77)]),
+            a6_frame(52, scale * 1.6, [(20, 40), (61, 3), (90, 90)]),
+            a6_frame(53, scale * 0.4, [(7, 10), (5, 120), (127, 0)]),
+        ]
+    }
+
+    fn ulps_apart(a: f32, b: f32) -> u64 {
+        let ordered = |v: f32| {
+            let magnitude = i64::from(v.to_bits() & 0x7fff_ffff);
+            if v.is_sign_negative() {
+                -magnitude
+            } else {
+                magnitude
+            }
+        };
+        ordered(a).abs_diff(ordered(b))
+    }
+
+    fn mask_capable_specs() -> Vec<(OpSpec, f32)> {
+        let lhe = LheConfig { kernel_radius: 16, ..LheConfig::default() };
+        let rl = RLConfig { iterations: 5, ..RLConfig::default() };
+        vec![
+            (OpSpec::WaveletDenoise { v: OpVersion, config: WaveletConfig::default() }, 1000.0),
+            (OpSpec::RlDeconv { v: OpVersion, config: rl, psf: PsfSpec::Gaussian { sigma: 2.0, size: 15 } }, 1000.0),
+            (OpSpec::Arcsinh { v: OpVersion, factor: 50.0 }, 1000.0),
+            (OpSpec::Ghs { v: OpVersion, params: GhsParams { d: 5.0, b: 2.0, sp: 0.05, lp: 0.0, hp: 1.0 } }, 1000.0),
+            (OpSpec::Lhe { v: OpVersion, config: lhe }, 1.0),
+            (OpSpec::Hdrmt { v: OpVersion, config: HdrConfig { layers: 3, ..HdrConfig::default() } }, 1.0),
+            (OpSpec::Tone { v: OpVersion, levels: Some(ToneLevelsInput { black: 0.1, gamma: 1.2, white: 0.9 }), curve: None }, 1000.0),
+            (OpSpec::Pixelmath { v: OpVersion, expression: "$T * 2 - 0.1".into(), slots: vec![], truncate: false, rescale: false }, 1000.0),
+        ]
+    }
+
+    fn assert_a6(spec: &OpSpec, planes: &[&Array2<f32>]) {
+        let input = || match planes {
+            [r, g, b] => OpInput::rgb([*r, *g, *b], None),
+            _ => OpInput::mono(planes[0], None),
+        };
+        let what = format!("{} on {} plane(s)", spec.name(), planes.len());
+        let unmasked = run_op(spec, &input(), None).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+        let base = blend_base(spec, &input()).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+        let dims = planes[0].dim();
+        for m in [0.0f32, 1.0, 0.5] {
+            let masked = run_masked(spec, input(), &Array2::from_elem(dims, m));
+            assert_eq!(masked.planes.len(), planes.len(), "{what}");
+            assert_eq!(masked.values, unmasked.values, "{what}: a mask keeps the output domain");
+            for (c, ((out, b), u)) in masked.planes.iter().zip(&base).zip(&unmasked.planes).enumerate() {
+                Zip::indexed(out).and(b).and(u).and(planes[c]).for_each(|ix, &o, &b, &u, &v| {
+                    let at = format!("{what}, channel {c}, pixel {ix:?}, m {m}");
+                    if !v.is_finite() || m == 1.0 || (m > 0.0 && !u.is_finite()) {
+                        assert_eq!(o.to_bits(), u.to_bits(), "{at}: the unmasked result {u} was not kept, got {o}");
+                    } else if m == 0.0 {
+                        assert_eq!(o.to_bits(), b.to_bits(), "{at}: the blend base {b} was not kept, got {o}");
+                    } else {
+                        let midpoint = ((f64::from(b) + f64::from(u)) / 2.0) as f32;
+                        assert!(ulps_apart(o, midpoint) <= 1, "{at}: {o:e} is not the midpoint {midpoint:e} of {b:e} and {u:e}");
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn blend_exact_for_every_mask_capable_file_op() {
+        let specs = mask_capable_specs();
+        assert_eq!(specs.len(), 8);
+        for (spec, scale) in &specs {
+            let planes = a6_planes(*scale);
+            assert_a6(spec, &[&planes[0]]);
+            if !spec.runs_on_one_plane_only() {
+                assert_a6(spec, &[&planes[0], &planes[1], &planes[2]]);
+            }
+        }
+    }
+
+    fn timed_blend(dims: (usize, usize), planes: usize) -> std::time::Duration {
+        let base = Array2::from_shape_fn(dims, |(y, x)| ((y * 7 + x * 13) % 4093) as f32);
+        let processed = Array2::from_shape_fn(dims, |(y, x)| ((y * 11 + x * 3) % 4091) as f32 * 0.5);
+        let mask = Array2::from_shape_fn(dims, |(y, x)| ((y + x) % 257) as f32 / 256.0);
+        (0..5)
+            .map(|_| {
+                let t0 = std::time::Instant::now();
+                for _ in 0..planes {
+                    std::hint::black_box(blend(&base, &processed, &mask).unwrap());
+                }
+                t0.elapsed()
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    #[ignore]
+    fn blend_24mp_mono_under_80_ms() {
+        let best = timed_blend((4000, 6000), 1);
+        println!("blend 6000x4000 mono: best of 5 = {} ms", best.as_millis());
+        assert!(best.as_millis() <= 80, "blend of a 24 MP plane took {} ms", best.as_millis());
+    }
+
+    #[test]
+    #[ignore]
+    fn blend_lw_rgb_under_250_ms() {
+        let best = timed_blend((4177, 7065), 3);
+        println!("blend 7065x4177 x 3 planes: best of 5 = {} ms", best.as_millis());
+        assert!(best.as_millis() <= 250, "blend of the LW composite took {} ms", best.as_millis());
     }
 }

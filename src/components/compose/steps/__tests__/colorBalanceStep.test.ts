@@ -147,4 +147,11 @@ describe("Color Balance SPCC WCS source", () => {
     expect(props.wcsPath).toBeNull();
     expect(props.wcsReason).toMatch(/^SPCC can use a plate-solved WCS only on the R channel's own grid; R was aligned onto G\./);
   });
+
+  it("passes the header SPCC reads when the R channel carries no plate-solved WCS", async () => {
+    const state = { ...spccState(), bins: stateWith({ r: ["/c/r_unsolved.fits"], g: ["/c/g.fits"], b: ["/c/b.fits"] }).bins };
+    const props = (await renderSpcc(state)) as { wcsPath?: string | null; headerWcs?: unknown };
+    expect(props.wcsPath).toBeNull();
+    expect(props.headerWcs).toEqual({ path: "/c/r_unsolved.fits", alignedOnto: null, solvePath: "/c/r_unsolved.fits" });
+  });
 });

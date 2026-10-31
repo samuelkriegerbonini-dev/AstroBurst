@@ -1,4 +1,6 @@
 import { detectChannel, headerFilterValues, resolveFileFilter, resolveFilterFromName, shortName, type ChannelSource } from "./channelMapping";
+import type { CompositeStfTriple } from "./compositeStfResponse";
+import type { SubframeThresholds } from "./subframeSettings";
 
 export interface FrequencyBin {
   id: string;
@@ -38,6 +40,7 @@ export interface SubframeAnalysisResult {
   accepted: number;
   rejected: number;
   elapsed_ms: number;
+  analysedWith?: SubframeThresholds;
 }
 
 export interface ChannelStage {
@@ -115,6 +118,7 @@ export interface WizardState {
   alignRefChoice: string | null;
   alignRefBinId: string | null;
   alignRunToken: string | null;
+  bakedStf: CompositeStfTriple | null;
 }
 
 export const DEFAULT_BINS: FrequencyBin[] = [
@@ -165,7 +169,7 @@ export const BLEND_PRESETS: Record<string, { label: string; desc: string; weight
   },
   dynamic_hoo: {
     label: "Dynamic HOO",
-    desc: "Blended Hα/OIII with warm tones",
+    desc: "Hα/OIII blend with fixed weights",
     weights: [
       { channelId: "ha", r: 0.9, g: 0.4, b: 0.0 },
       { channelId: "oiii", r: 0.1, g: 0.6, b: 1.0 },
@@ -173,7 +177,7 @@ export const BLEND_PRESETS: Record<string, { label: string; desc: string; weight
   },
   foraxx: {
     label: "Foraxx",
-    desc: "Popular narrowband blend",
+    desc: "SII/Hα/OIII blend with fixed weights",
     weights: [
       { channelId: "sii", r: 0.8, g: 0.2, b: 0.0 },
       { channelId: "ha", r: 0.2, g: 0.7, b: 0.1 },
@@ -219,6 +223,7 @@ export const INITIAL_STATE: WizardState = {
   alignRefChoice: null,
   alignRefBinId: null,
   alignRunToken: null,
+  bakedStf: null,
 };
 
 export interface StepDef {

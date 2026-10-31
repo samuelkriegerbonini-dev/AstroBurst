@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use serde::Deserialize;
 use serde_json::json;
 
@@ -6,9 +8,9 @@ use super::combine::{output_name, reference_header, ABPROC_STACKED};
 use crate::cmd::common::{render_named_and_save, resolve_output_dir, OutputValues};
 use crate::service::common::derived_output_header;
 use crate::core::imaging::calibration_pipeline::{
-    lights_with_dq_planes, run_batch_pipeline, validate_cosmetic_config, BatchPipelineConfig,
-    BatchPipelineResult, BatchPipelineStats, BatchStackConfig, CalibrationMasters, ChannelInput,
-    DQ_COSMETIC_WARNING,
+    lights_with_dq_planes, rgb_preview_palette, run_batch_pipeline, run_batch_pipeline_with_rejection,
+    validate_cosmetic_config, BatchPipelineConfig, BatchPipelineResult, BatchPipelineStats, BatchStackConfig,
+    CalibrationMasters, ChannelInput, DQ_COSMETIC_WARNING,
 };
 use crate::core::imaging::cosmetic::{refuse_xtrans_cosmetic, CosmeticConfig};
 use crate::core::stacking::calibration::load_fits_image;
@@ -22,14 +24,25 @@ use crate::core::stacking::memory::{
     check_memory, effective_memory, frame_sizes, pipeline_bytes, pixel_counts, MemoryInfo, MemoryJob, PipelinePeak,
     PipelineShape,
 };
-use crate::core::stacking::never_cancelled;
+use crate::core::stacking::{stop_if_cancelled, CancelCheck};
+use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
-    RES_CHANNEL_PREVIEWS, RES_DIMENSIONS, RES_FITS_PATH, RES_HEIGHT, RES_INPUT_PATH, RES_LABEL, RES_MASTERS,
-    RES_PIXELS_B64, RES_PNG_PATH, RES_RGB_DIMENSIONS, RES_RGB_PNG_PATH, RES_RGB_PREVIEW, RES_STATS, RES_WARNINGS,
-    RES_WIDTH,
+    EVENT_PIPELINE_PROGRESS, RES_CHANNEL_PREVIEWS, RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_HEIGHT,
+    RES_INPUT_PATH, RES_LABEL, RES_MASTERS, RES_PIXELS_B64, RES_PNG_PATH, RES_RGB_DIMENSIONS, RES_RGB_PALETTE,
+    RES_RGB_PNG_PATH, RES_RGB_PREVIEW, RES_STATS, RES_WARNINGS, RES_WIDTH,
 };
+use crate::types::stacking::{CombineMethod, RejectionMethod, RejectionParams};
 
 const PIPELINE_PREVIEW_DIM: usize = 2048;
+
+const STAGE_MASTERS: &str = "masters";
+const STAGE_LOADING: &str = "loading";
+const STAGE_STACKING: &str = "stacking";
+const STAGE_SAVING: &str = "saving";
+
+fn pipeline_steps(channels: usize) -> u64 {
+    2 * channels as u64 + 2
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ChannelFilesInput {
@@ -37,7 +50,7 @@ pub struct ChannelFilesInput {
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct PipelineRequest {
     pub channels: Vec<ChannelFilesInput>,
     pub dark_paths: Vec<String>,
@@ -47,6 +60,18 @@ pub struct PipelineRequest {
     pub flat_dark_paths: Vec<String>,
     pub sigma_low: Option<f32>,
     pub sigma_high: Option<f32>,
+    #[serde(default)]
+    pub max_iterations: Option<usize>,
+    #[serde(default)]
+    pub winsor_cutoff: Option<f32>,
+    #[serde(default)]
+    pub percentile_low: Option<f32>,
+    #[serde(default)]
+    pub percentile_high: Option<f32>,
+    #[serde(default)]
+    pub minmax_low: Option<usize>,
+    #[serde(default)]
+    pub minmax_high: Option<usize>,
     pub normalize: Option<bool>,
     pub align: Option<bool>,
     pub rejection: Option<String>,
@@ -55,6 +80,31 @@ pub struct PipelineRequest {
     pub cosmetic: Option<CosmeticConfig>,
     #[serde(default)]
     pub dark_optimize: bool,
+}
+
+fn stack_settings(
+    request: &PipelineRequest,
+    rejection: RejectionMethod,
+    combine: CombineMethod,
+) -> (BatchStackConfig, RejectionParams) {
+    let stack = BatchStackConfig {
+        sigma_low: request.sigma_low.unwrap_or(2.5),
+        sigma_high: request.sigma_high.unwrap_or(3.0),
+        max_iterations: request.max_iterations.unwrap_or(5),
+        normalize_before_stack: request.normalize.unwrap_or(true),
+        rejection,
+        combine,
+    };
+    let defaults = stack.rejection_params();
+    let params = RejectionParams {
+        winsor_cutoff: request.winsor_cutoff.unwrap_or(defaults.winsor_cutoff),
+        percentile_low: request.percentile_low.unwrap_or(defaults.percentile_low),
+        percentile_high: request.percentile_high.unwrap_or(defaults.percentile_high),
+        minmax_low: request.minmax_low.unwrap_or(defaults.minmax_low),
+        minmax_high: request.minmax_high.unwrap_or(defaults.minmax_high),
+        ..defaults
+    };
+    (stack, params)
 }
 
 fn load_batch(paths: &[String]) -> Result<Vec<ndarray::Array2<f32>>, anyhow::Error> {
@@ -289,12 +339,16 @@ impl MasterFrameCounts {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stack_channels_one_at_a_time<F>(
     specs: &[ChannelFilesInput],
     mut load_channel: F,
     masters: &CalibrationMasters,
     counts: MasterFrameCounts,
     config: &BatchPipelineConfig,
+    rejection: &RejectionParams,
+    cancelled: CancelCheck,
+    on_channel_stage: &dyn Fn(&str, usize),
 ) -> Result<BatchPipelineResult, String>
 where
     F: FnMut(usize, &ChannelFilesInput) -> Result<ChannelInput, String>,
@@ -307,8 +361,12 @@ where
     let mut channel_stats = Vec::with_capacity(specs.len());
     let mut dark_groups = Vec::new();
     for (index, spec) in specs.iter().enumerate() {
+        stop_if_cancelled(cancelled).map_err(|e| format!("{:#}", e))?;
+        on_channel_stage(STAGE_LOADING, index);
         let channel = load_channel(index, spec)?;
-        let mut single = run_batch_pipeline(vec![channel], masters, config)?;
+        stop_if_cancelled(cancelled).map_err(|e| format!("{:#}", e))?;
+        on_channel_stage(STAGE_STACKING, index);
+        let mut single = run_batch_pipeline_with_rejection(vec![channel], masters, config, rejection, cancelled)?;
         master_channels.append(&mut single.master_channels);
         channel_stats.append(&mut single.stats.channels);
         dark_groups = single.stats.dark_groups;
@@ -333,21 +391,22 @@ where
 
 #[tauri::command]
 pub async fn run_pipeline_cmd(
+    app: tauri::AppHandle,
     request: PipelineRequest,
     output_dir: String,
     name: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    tokio::task::spawn_blocking(move || run_pipeline_request(request, &output_dir, name.as_deref()))
-        .await
-        .map_err(|e| format!("Task panic: {e}"))?
-}
-
-fn run_pipeline_request(
-    request: PipelineRequest,
-    output_dir: &str,
-    name: Option<&str>,
-) -> Result<serde_json::Value, String> {
-    run_pipeline_request_with_memory(request, output_dir, name, effective_memory())
+    let progress = ProgressHandle::new(&app, EVENT_PIPELINE_PROGRESS, pipeline_steps(request.channels.len()));
+    tokio::task::spawn_blocking(move || {
+        let cancelled = || progress.is_cancelled();
+        let report = |current: u64, total: u64, stage: &str| progress.report(current, total, stage);
+        let response =
+            run_pipeline_request_cancellable(request, &output_dir, name.as_deref(), effective_memory(), &cancelled, &report)?;
+        progress.emit_complete();
+        Ok(response)
+    })
+    .await
+    .map_err(|e| format!("Task panic: {e}"))?
 }
 
 fn pipeline_memory_check(
@@ -397,12 +456,16 @@ fn pipeline_memory_check(
     check_memory(required, info, &job)
 }
 
-fn run_pipeline_request_with_memory(
+fn run_pipeline_request_cancellable(
     request: PipelineRequest,
     output_dir: &str,
     name: Option<&str>,
     info: Option<MemoryInfo>,
+    cancelled: CancelCheck,
+    on_step: &dyn Fn(u64, u64, &str),
 ) -> Result<serde_json::Value, String> {
+    let started = Instant::now();
+    let total = pipeline_steps(request.channels.len());
     let rejection = crate::cmd::helpers::parse_rejection_method(request.rejection.as_deref())
         .map_err(|e| format!("{:#}", e))?;
     let combine = crate::cmd::helpers::parse_combine_method(request.combine.as_deref())
@@ -442,7 +505,8 @@ fn run_pipeline_request_with_memory(
     }
     warnings.extend(pipeline_memory_check(&request, &master_frames, info).map_err(|e| format!("{:#}", e))?);
 
-    let (masters, report) = build_masters_from_frames(&master_request, &master_frames, &never_cancelled)
+    on_step(0, total, &format!("{STAGE_MASTERS}:{}", started.elapsed().as_millis()));
+    let (masters, report) = build_masters_from_frames(&master_request, &master_frames, cancelled)
         .map_err(|e| format!("{:#}", e))?;
     warnings.extend(report.warnings);
     let dark_exposure = report.dark_exposure_s.filter(|_| masters.bias.is_some());
@@ -487,25 +551,38 @@ fn run_pipeline_request_with_memory(
         })
     };
 
+    let (stack, rejection_params) = stack_settings(&request, rejection, combine);
     let config = BatchPipelineConfig {
-        stack: BatchStackConfig {
-            sigma_low: request.sigma_low.unwrap_or(2.5),
-            sigma_high: request.sigma_high.unwrap_or(3.0),
-            max_iterations: 5,
-            normalize_before_stack: request.normalize.unwrap_or(true),
-            rejection,
-            combine,
-        },
+        stack,
         align: request.align.unwrap_or(true),
         cosmetic: request.cosmetic.clone(),
         dark_optimize: request.dark_optimize,
     };
 
+    let on_channel_stage = |stage: &str, index: usize| {
+        let spec = &request.channels[index];
+        let step = 1 + 2 * index as u64 + u64::from(stage == STAGE_STACKING);
+        let elapsed = started.elapsed().as_millis();
+        let lane = format!("{}/{}:{}:{}", index + 1, request.channels.len(), spec.paths.len(), spec.label);
+        on_step(step, total, &format!("{stage}:{elapsed}:{lane}"));
+    };
+
     let counts = MasterFrameCounts::of(&request);
-    let result = stack_channels_one_at_a_time(&request.channels, load_channel, &masters, counts, &config)?;
+    let result = stack_channels_one_at_a_time(
+        &request.channels,
+        load_channel,
+        &masters,
+        counts,
+        &config,
+        &rejection_params,
+        cancelled,
+        &on_channel_stage,
+    )?;
     warnings.extend(channel_warnings);
     warnings.extend(result.stats.channels.iter().flat_map(|c| c.warnings.iter().cloned()));
 
+    stop_if_cancelled(cancelled).map_err(|e| format!("{:#}", e))?;
+    on_step(total - 1, total, &format!("{STAGE_SAVING}:{}", started.elapsed().as_millis()));
     let output_dir = resolve_output_dir(output_dir).map_err(|e| format!("{:#}", e))?;
     let stem = output_name(name, "pipeline");
     let outputs = save_pipeline_outputs(&result, &request.channels, &output_dir, &stem, &config.stack)
@@ -548,15 +625,45 @@ fn run_pipeline_request_with_memory(
         RES_MASTERS: masters_json,
         RES_RGB_PNG_PATH: rgb.map(|o| &o.png_path),
         RES_RGB_DIMENSIONS: rgb.map(|o| [o.width, o.height]),
+        RES_RGB_PALETTE: rgb.and(rgb_preview_palette(&result.master_channels)),
+        RES_ELAPSED_MS: started.elapsed().as_millis() as u64,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::stacking::never_cancelled;
     use base64::Engine;
     use ndarray::{Array2, Array3};
     use std::cell::Cell;
+
+    fn run_pipeline_request_with_memory(
+        request: PipelineRequest,
+        output_dir: &str,
+        name: Option<&str>,
+        info: Option<MemoryInfo>,
+    ) -> Result<serde_json::Value, String> {
+        run_pipeline_request_cancellable(request, output_dir, name, info, &never_cancelled, &|_: u64, _: u64, _: &str| {})
+    }
+
+    fn run_pipeline_request(request: PipelineRequest, output_dir: &str, name: Option<&str>) -> Result<serde_json::Value, String> {
+        run_pipeline_request_with_memory(request, output_dir, name, effective_memory())
+    }
+
+    fn stack_without_progress<F>(
+        specs: &[ChannelFilesInput],
+        load_channel: F,
+        masters: &CalibrationMasters,
+        counts: MasterFrameCounts,
+        config: &BatchPipelineConfig,
+    ) -> Result<BatchPipelineResult, String>
+    where
+        F: FnMut(usize, &ChannelFilesInput) -> Result<ChannelInput, String>,
+    {
+        let rejection = config.stack.rejection_params();
+        stack_channels_one_at_a_time(specs, load_channel, masters, counts, config, &rejection, &never_cancelled, &|_: &str, _: usize| {})
+    }
 
     fn spec(label: &str, n: usize) -> ChannelFilesInput {
         ChannelFilesInput {
@@ -619,6 +726,95 @@ mod tests {
         assert!(!without.dark_optimize);
     }
 
+    const NO_LANES: &str = r#""channels":[],"dark_paths":[],"flat_paths":[],"bias_paths":[]"#;
+
+    #[test]
+    fn pipeline_request_carries_each_rejection_parameter_and_keeps_todays_values_without_them() {
+        let without: PipelineRequest =
+            serde_json::from_str(&format!(r#"{{{NO_LANES},"minmax_low":null,"winsor_cutoff":null}}"#)).unwrap();
+        let (stack, today) = stack_settings(&without, RejectionMethod::MinMax, CombineMethod::Median);
+        assert_eq!(today, stack.rejection_params());
+        assert_eq!(
+            today,
+            RejectionParams {
+                rejection: RejectionMethod::MinMax,
+                combine: CombineMethod::Median,
+                sigma_low: 2.5,
+                sigma_high: 3.0,
+                max_iterations: 5,
+                winsor_cutoff: 5.0,
+                percentile_low: 0.2,
+                percentile_high: 0.1,
+                minmax_low: 1,
+                minmax_high: 1,
+            }
+        );
+
+        let with: PipelineRequest = serde_json::from_str(&format!(
+            r#"{{{NO_LANES},"sigma_low":4.0,"max_iterations":9,"winsor_cutoff":2.5,"percentile_low":0.05,"percentile_high":0.3,"minmax_low":2,"minmax_high":3}}"#
+        ))
+        .unwrap();
+        let (stack, params) = stack_settings(&with, RejectionMethod::MinMax, CombineMethod::Median);
+        assert_eq!(stack.max_iterations, 9);
+        assert_eq!(
+            params,
+            RejectionParams {
+                sigma_low: 4.0,
+                max_iterations: 9,
+                winsor_cutoff: 2.5,
+                percentile_low: 0.05,
+                percentile_high: 0.3,
+                minmax_low: 2,
+                minmax_high: 3,
+                ..today
+            }
+        );
+    }
+
+    fn sx02_lights(dir: &tempfile::TempDir) -> Vec<String> {
+        [100.0f32, 101.0, 102.0, 103.0, 104.0, 1000.0, 2000.0]
+            .iter()
+            .enumerate()
+            .map(|(i, &level)| {
+                let path = dir.path().join(format!("sx02_{i}.fits")).to_str().unwrap().to_string();
+                crate::infra::fits::writer::write_fits_mono(&path, &Array2::from_elem((8, 8), level), None).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    fn sx02_request(lights: &[String], minmax: Option<usize>) -> PipelineRequest {
+        let mut request = json!({
+            "channels": [{ "label": "R", "paths": lights }],
+            "dark_paths": [],
+            "flat_paths": [],
+            "bias_paths": [],
+            "normalize": false,
+            "align": false,
+            "rejection": "min_max",
+        });
+        if let Some(count) = minmax {
+            request["minmax_low"] = json!(count);
+            request["minmax_high"] = json!(count);
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    #[test]
+    fn minmax_counts_from_the_request_reach_the_combine() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let lights = sx02_lights(&dir);
+
+        let trimmed = run_pipeline_request(sx02_request(&lights, Some(2)), &out, Some("two")).unwrap();
+        assert!((master_pixel(&trimmed, 4, 4) - 103.0).abs() < 1e-6, "2/2 keeps 102, 103, 104: {}", master_pixel(&trimmed, 4, 4));
+        assert_eq!(trimmed[RES_STATS]["channels"][0]["lights_after_rejection"], json!([64, 64, 0, 0, 0, 64, 64]));
+
+        let today = run_pipeline_request(sx02_request(&lights, None), &out, Some("one")).unwrap();
+        assert!((master_pixel(&today, 4, 4) - 282.0).abs() < 1e-6, "1/1 keeps 101 to 1000: {}", master_pixel(&today, 4, 4));
+        assert_eq!(today[RES_STATS]["channels"][0]["lights_after_rejection"], json!([64, 0, 0, 0, 0, 0, 64]));
+    }
+
     #[test]
     fn pipeline_request_accepts_flat_dark_paths_and_defaults_to_empty() {
         let with: PipelineRequest = serde_json::from_str(
@@ -669,6 +865,7 @@ mod tests {
             combine: None,
             cosmetic: None,
             dark_optimize: false,
+            ..Default::default()
         }
     }
 
@@ -735,6 +932,7 @@ mod tests {
             combine: None,
             cosmetic: Some(CosmeticConfig { amount: 1.5, ..Default::default() }),
             dark_optimize: false,
+            ..Default::default()
         };
 
         let out = out_dir(&dir);
@@ -789,7 +987,7 @@ mod tests {
         let config = test_config();
 
         let counts = MasterFrameCounts { darks: 0, flats: 0, bias: 7, flat_darks: 0 };
-        let sequential = stack_channels_one_at_a_time(&specs, |_, s| Ok(synthetic_channel(s)), &masters, counts, &config)
+        let sequential = stack_without_progress(&specs, |_, s| Ok(synthetic_channel(s)), &masters, counts, &config)
             .expect("sequential run");
         let batch = run_batch_pipeline(specs.iter().map(synthetic_channel).collect(), &masters, &config)
             .expect("batch run");
@@ -824,7 +1022,7 @@ mod tests {
     fn per_channel_stacking_loads_one_channel_per_call_and_stops_on_error() {
         let specs = vec![spec("R", 2), spec("G", 2), spec("B", 2)];
         let calls = Cell::new(0usize);
-        let err = stack_channels_one_at_a_time(
+        let err = stack_without_progress(
             &specs,
             |_, s| {
                 calls.set(calls.get() + 1);
@@ -845,7 +1043,7 @@ mod tests {
 
     #[test]
     fn per_channel_stacking_rejects_empty_request() {
-        let err = stack_channels_one_at_a_time(
+        let err = stack_without_progress(
             &[],
             |_, s| Ok(synthetic_channel(s)),
             &test_masters(),
@@ -894,6 +1092,7 @@ mod tests {
             combine: None,
             cosmetic: None,
             dark_optimize: false,
+            ..Default::default()
         }
     }
 
@@ -929,6 +1128,7 @@ mod tests {
             combine: None,
             cosmetic: None,
             dark_optimize: false,
+            ..Default::default()
         }
     }
 
@@ -957,6 +1157,7 @@ mod tests {
             combine: None,
             cosmetic: None,
             dark_optimize: false,
+            ..Default::default()
         };
         let out = out_dir(&dir);
         let load_error = run_pipeline_request_with_memory(request(), &out, Some("budget"), None).unwrap_err();
@@ -986,6 +1187,7 @@ mod tests {
             combine: None,
             cosmetic: None,
             dark_optimize: false,
+            ..Default::default()
         };
         let tiny = Some(MemoryInfo { physical_available: 1024, commit_available: 1024 });
         let err = run_pipeline_request_with_memory(request, &out_dir(&dir), None, tiny).unwrap_err();
@@ -1061,6 +1263,7 @@ mod tests {
             combine: None,
             cosmetic: Some(cosmetic(cfa)),
             dark_optimize: false,
+            ..Default::default()
         };
 
         let auto = run_pipeline_request(request(None), &out_dir(&dir), Some("auto")).unwrap();
@@ -1103,6 +1306,7 @@ mod tests {
                 ..Default::default()
             }),
             dark_optimize: false,
+            ..Default::default()
         };
 
         for cfa in [None, Some(true)] {
@@ -1145,6 +1349,7 @@ mod tests {
             combine: None,
             cosmetic: None,
             dark_optimize: false,
+            ..Default::default()
         };
 
         let response = run_pipeline_request(request, &out_dir(&dir), None).unwrap();
@@ -1260,6 +1465,7 @@ mod tests {
             combine: None,
             cosmetic: None,
             dark_optimize: false,
+            ..Default::default()
         }
     }
 
@@ -1316,7 +1522,7 @@ mod tests {
     fn per_channel_stacking_keeps_alignment_exclusions_in_their_own_channel() {
         let specs = vec![spec("R", 3), spec("L", 2)];
         let centers = |label: &str| -> Vec<f32> { if label == "R" { vec![50.0, 50.0, 250.0] } else { vec![50.0, 50.0] } };
-        let result = stack_channels_one_at_a_time(
+        let result = stack_without_progress(
             &specs,
             |_, s| Ok(blob_channel(&s.label, &centers(&s.label))),
             &CalibrationMasters::default(),
@@ -1331,7 +1537,7 @@ mod tests {
         assert!(r.warnings[0].starts_with("Channel 'R': frame 3 of 3 was left out"), "{}", r.warnings[0]);
         assert!(l.excluded_frames.is_empty() && l.warnings.is_empty(), "{l:?}");
 
-        let err = stack_channels_one_at_a_time(
+        let err = stack_without_progress(
             &[spec("L", 2), spec("R", 2)],
             |_, s| Ok(blob_channel(&s.label, if s.label == "R" { &[50.0, 250.0] } else { &[50.0, 50.0] })),
             &CalibrationMasters::default(),
@@ -1463,5 +1669,147 @@ mod tests {
         assert_eq!((rw, rh), (pw, ph));
         assert_eq!(bytes.len(), pw * ph * 3);
         assert!(bytes.iter().step_by(3).all(|&r| r == 255));
+    }
+
+    fn lanes_request(dir: &tempfile::TempDir, lanes: &[(&str, Option<&str>)]) -> PipelineRequest {
+        let mut request = rgb_request(dir, [12, 12, 12]);
+        request.channels = lanes
+            .iter()
+            .zip([500.0, 300.0, 200.0])
+            .map(|((label, filter), level)| {
+                let cards: Vec<(&str, &str)> = filter.iter().map(|f| ("FILTER", *f)).collect();
+                ChannelFilesInput { label: label.to_string(), paths: write_exposure_frames(dir, &format!("{label}_light"), 2, level, &cards) }
+            })
+            .collect();
+        request
+    }
+
+    #[test]
+    fn narrowband_lanes_keep_their_filter_names_and_an_sho_or_hoo_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let request = lanes_request(&dir, &[("Ha", Some("Ha")), ("OIII", Some("OIII")), ("SII", Some("SII"))]);
+
+        let sho = run_pipeline_request(request, &out, Some("nb")).unwrap();
+
+        let masters = sho[RES_MASTERS].as_array().unwrap();
+        assert_eq!(masters.len(), 3);
+        for (master, label) in masters.iter().zip(["Ha", "OIII", "SII"]) {
+            assert_eq!(master[RES_LABEL], label);
+            assert_eq!(master[RES_PNG_PATH], format!("{out}/nb_{label}.png"));
+            let fits = master[RES_FITS_PATH].as_str().unwrap();
+            assert_eq!(fits, format!("{out}/nb_{label}.fits"));
+            let header = crate::infra::fits::reader::read_primary_header(fits).unwrap();
+            assert_eq!(header.get("FILTER").map(str::trim), Some(label));
+        }
+        assert_eq!(sho[RES_RGB_PALETTE], "SHO");
+        assert_eq!(sho[RES_RGB_PNG_PATH], format!("{out}/nb_rgb.png"));
+        assert_eq!(decode_b64(&sho[RES_RGB_PREVIEW]).len(), 12 * 12 * 3);
+
+        let hoo = run_pipeline_request(lanes_request(&dir, &[("Ha", Some("Ha")), ("OIII", Some("OIII"))]), &out, Some("hoo")).unwrap();
+        assert_eq!(hoo[RES_RGB_PALETTE], "HOO");
+        assert_eq!(hoo[RES_RGB_PNG_PATH], format!("{out}/hoo_rgb.png"));
+
+        let mono = run_pipeline_request(lanes_request(&dir, &[("Mono", None)]), &out, Some("mono")).unwrap();
+        let mono_fits = mono[RES_MASTERS][0][RES_FITS_PATH].as_str().unwrap();
+        assert_eq!(mono_fits, format!("{out}/mono_Mono.fits"));
+        assert_eq!(crate::infra::fits::reader::read_primary_header(mono_fits).unwrap().get("FILTER"), None);
+        assert!(mono[RES_RGB_PALETTE].is_null() && mono[RES_RGB_PREVIEW].is_null() && mono[RES_RGB_PNG_PATH].is_null());
+
+        let rgb = run_pipeline_request(rgb_request(&dir, [12, 12, 12]), &out, Some("rgb")).unwrap();
+        assert_eq!(rgb[RES_RGB_PALETTE], "RGB");
+    }
+
+    type RecordedSteps = Vec<(u64, u64, String)>;
+
+    fn without_elapsed(stage: &str) -> (String, u64) {
+        let mut parts: Vec<&str> = stage.split(':').collect();
+        let elapsed = parts.remove(1).parse().unwrap_or_else(|_| panic!("no elapsed ms in {stage}"));
+        (parts.join(":"), elapsed)
+    }
+
+    fn recorded_run(request: PipelineRequest, out: &str, cancel_at: &str) -> (Result<serde_json::Value, String>, RecordedSteps) {
+        let steps = std::sync::Mutex::new(Vec::new());
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+        let last_elapsed = std::sync::atomic::AtomicU64::new(0);
+        let on_step = |current: u64, total: u64, stage: &str| {
+            let (stage, elapsed) = without_elapsed(stage);
+            assert!(elapsed >= last_elapsed.swap(elapsed, std::sync::atomic::Ordering::Relaxed), "elapsed went back at {stage}");
+            if stage == cancel_at {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            steps.lock().unwrap().push((current, total, stage));
+        };
+        let result = run_pipeline_request_cancellable(request, out, Some("cut"), None, &cancelled, &on_step);
+        (result, steps.into_inner().unwrap())
+    }
+
+    fn darks_and_three_lanes(dir: &tempfile::TempDir) -> PipelineRequest {
+        let mut request = rgb_request(dir, [12, 12, 12]);
+        request.dark_paths = write_frames(dir, "dark", 2, 10.0);
+        request
+    }
+
+    fn step(current: u64, stage: &str) -> (u64, u64, String) {
+        (current, 8, stage.to_string())
+    }
+
+    #[test]
+    fn pipeline_progress_names_each_stage_with_k_of_n_and_the_elapsed_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (result, steps) = recorded_run(darks_and_three_lanes(&dir), &out_dir(&dir), "");
+        let response = result.unwrap();
+        assert_eq!(response[RES_MASTERS].as_array().map(|m| m.len()), Some(3));
+        assert!(response[RES_ELAPSED_MS].is_u64(), "{}", response[RES_ELAPSED_MS]);
+        assert_eq!(
+            steps,
+            vec![
+                step(0, "masters"),
+                step(1, "loading:1/3:2:R"),
+                step(2, "stacking:1/3:2:R"),
+                step(3, "loading:2/3:1:G"),
+                step(4, "stacking:2/3:1:G"),
+                step(5, "loading:3/3:1:B"),
+                step(6, "stacking:3/3:1:B"),
+                step(7, "saving"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cancel_between_channels_returns_cancelled_and_writes_no_master() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+
+        let (result, steps) = recorded_run(darks_and_three_lanes(&dir), &out, "loading:2/3:1:G");
+        assert_eq!(result.unwrap_err(), "Operation cancelled");
+        assert_eq!(steps.last(), Some(&step(3, "loading:2/3:1:G")));
+        assert_eq!(steps.len(), 4);
+        assert!(!std::path::Path::new(&out).exists(), "a cancelled run wrote into the output dir");
+
+        let (result, steps) = recorded_run(darks_and_three_lanes(&dir), &out, "stacking:2/3:1:G");
+        assert_eq!(result.unwrap_err(), "Operation cancelled");
+        assert_eq!(steps.last(), Some(&step(4, "stacking:2/3:1:G")));
+        assert!(!std::path::Path::new(&out).exists(), "a run cancelled while stacking wrote into the output dir");
+
+        let (result, steps) = recorded_run(darks_and_three_lanes(&dir), &out, "masters");
+        assert!(result.unwrap_err().ends_with("Operation cancelled"));
+        assert_eq!(steps, vec![step(0, "masters")]);
+        assert!(!std::path::Path::new(&out).exists());
+    }
+
+    #[test]
+    fn a_cancel_while_saving_still_writes_every_master_and_its_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let (result, steps) = recorded_run(darks_and_three_lanes(&dir), &out, "saving");
+        assert_eq!(steps.last(), Some(&step(7, "saving")));
+        let response = result.unwrap();
+        for master in response[RES_MASTERS].as_array().unwrap() {
+            assert!(std::path::Path::new(master[RES_FITS_PATH].as_str().unwrap()).is_file());
+            assert!(std::path::Path::new(master[RES_PNG_PATH].as_str().unwrap()).is_file());
+        }
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 7);
     }
 }

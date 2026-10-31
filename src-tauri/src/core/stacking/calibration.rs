@@ -920,4 +920,25 @@ mod tests {
         let leaked = combine_master_frames(&load_matching_frames(&paths, &never_cancelled).unwrap(), &plain_mean, &never_cancelled).unwrap();
         assert!(leaked[[2, 1]] > 8000.0);
     }
+
+    #[test]
+    fn a_flat_chosen_as_the_science_light_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let typed = |name: &str, imagetyp: &str| {
+            let mut header = crate::types::header::HduHeader::empty();
+            header.set("IMAGETYP", imagetyp.to_string());
+            header.set("FILTER", "R".to_string());
+            let path = dir.path().join(name).to_str().unwrap().to_string();
+            crate::infra::fits::writer::write_fits_mono(&path, &Array2::from_elem((4, 4), 1000.0f32), Some(&header)).unwrap();
+            path
+        };
+        let flat = typed("r_flat_001.fits", "FLAT");
+        let darks = vec![typed("dark_001.fits", "DARK"), typed("dark_002.fits", "DARK")];
+        let err = calibrate_from_paths(&flat, None, Some(&darks), None, None, None).unwrap_err();
+        assert_eq!(format!("{err:#}"), "r_flat_001.fits has IMAGETYP='FLAT' but was given as a light frame.");
+
+        let light = typed("r_light_001.fits", "LIGHT");
+        let calibrated = calibrate_from_paths(&light, None, Some(&darks), None, None, None).unwrap();
+        assert_eq!(calibrated.image, Array2::from_elem((4, 4), 0.0f32));
+    }
 }

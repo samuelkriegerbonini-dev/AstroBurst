@@ -11,6 +11,7 @@ import type { HistogramRange } from "../../utils/histogramWindow";
 import { ANALYSIS_SECTION, deepZoomAvailable, toolSections, type AnalysisSectionsInput } from "../../utils/analysisSections";
 import { useAnalysisMeasure } from "../../hooks/useAnalysisMeasure";
 import { histogramChannelLabel, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
+import { IDENTITY_STF } from "../../utils/displayMemory";
 import type { HistogramData } from "../../shared/types";
 import TabSpinner from "./TabSpinner";
 
@@ -52,7 +53,7 @@ function ImageTool() {
   }, [histData, setStfParams]);
 
   const handleResetStf = useCallback(() => {
-    setStfParams({ shadow: 0, midtone: 0.5, highlight: 1 });
+    setStfParams(IDENTITY_STF);
   }, [setStfParams]);
 
   const histPath = processed?.fitsPath ?? filePath ?? null;

@@ -8,6 +8,7 @@ import {
   displayFilterValue,
   exclusivelyAssignedPaths,
   filenameChannelSlot,
+  filterCardValue,
   groupByWavelength,
   headerFilterValues,
   resolveFileFilter,
@@ -164,6 +165,19 @@ describe("numeric FILTER values", () => {
     const result = mapFilesByWavelength(DEFAULT_BINS, [file], new Set());
     expect(result.bins.find((b) => b.id === "ha")?.files).toEqual([file.path]);
     expect(result.headerMapped).toBe(1);
+  });
+});
+
+describe("filterCardValue", () => {
+  it("returns the first filter card that is not blank, wheel positions included", () => {
+    expect(filterCardValue(fileWithHeader("light_0001.fits", { FILTER: "3" }))).toBe("3");
+    expect(filterCardValue(fileWithHeader("light_0001.fits", { FILTER: "  ", FILTER2: "F656N" }))).toBe("F656N");
+    expect(filterCardValue(fileWithHeader("light_0001.fits", { FILTER: " NII " }))).toBe("NII");
+  });
+
+  it("returns null for a light without any filter card", () => {
+    expect(filterCardValue(fileWithHeader("light_0001.fits", { IMAGETYP: "LIGHT", FILTER: "" }))).toBeNull();
+    expect(filterCardValue(fileWithHeader("light_0001.fits", null))).toBeNull();
   });
 });
 
@@ -432,6 +446,66 @@ describe("runAutoMap", () => {
     expect(result.mappedCount).toBe(0);
     expect(result.sources).toEqual([]);
     expect(assignedPaths(result.bins).size).toBe(0);
+  });
+
+  describe("on a session folder loaded whole", () => {
+    const sessionFrame = (name: string, imagetyp: string) =>
+      ({ name, path: `/session/${name}`, result: { header: { IMAGETYP: imagetyp, FILTER: "R" } } });
+    const lights = [1, 2, 3, 4, 5, 6].map((n) => sessionFrame(`frame_000${n}.fits`, "LIGHT"));
+    const flats = [7, 8, 9].map((n) => sessionFrame(`frame_000${n}.fits`, "FLAT")).concat(sessionFrame("frame_0010.fits", "FLAT"));
+    const darks = [11, 12, 13, 14].map((n) => sessionFrame(`frame_00${n}.fits`, "DARK"));
+    const session = [...lights.slice(0, 3), ...flats, ...darks, ...lights.slice(3)];
+    const paths = (files: { path: string }[]) => files.map((f) => f.path);
+
+    it("fills R with the lights only and reports the flats and darks it left out", () => {
+      const result = runAutoMap({ bins: emptyBins(), files: session, assigned: new Set() });
+      expect(binFiles(result, "r")).toEqual(paths(lights));
+      expect(result.mappedCount).toBe(6);
+      expect(result.sources).toEqual(["FITS Headers"]);
+      expect(result.leftOut).toEqual({ dark: paths(darks), flat: paths(flats), flatdark: [], bias: [] });
+    });
+
+    it("skips the calibration frames that the Rust filter detections name", () => {
+      const result = runAutoMap({
+        bins: emptyBins(),
+        files: session,
+        assigned: new Set(),
+        detections: session.map((f) => ({ path: f.path, filter: "R" })),
+      });
+      expect(binFiles(result, "r")).toEqual(paths(lights));
+      expect(result.sources).toEqual(["FITS Headers (Rust)"]);
+      expect(result.leftOut.flat).toEqual(paths(flats));
+    });
+
+    it("skips a calibration frame that a complete narrowband palette picked", () => {
+      const result = runAutoMap({
+        bins: emptyBins(),
+        files: session,
+        assigned: new Set(),
+        palette: {
+          palette_name: "SHO",
+          is_complete: true,
+          r_file: { file_path: flats[0].path },
+          g_file: { file_path: lights[0].path },
+          b_file: { file_path: darks[0].path },
+        },
+      });
+      expect(assignedPaths(result.bins).has(flats[0].path)).toBe(false);
+      expect(assignedPaths(result.bins).has(darks[0].path)).toBe(false);
+      expect(binFiles(result, "g")).toEqual([lights[0].path]);
+    });
+
+    it("leaves a calibration frame that is already in a bin where it is and does not count it as left out", () => {
+      const bins = emptyBins().map((b) => (b.id === "r" ? { ...b, files: [flats[0].path] } : b));
+      const result = runAutoMap({ bins, files: session, assigned: new Set([flats[0].path]) });
+      expect(binFiles(result, "r")).toEqual([flats[0].path, ...paths(lights)]);
+      expect(result.leftOut.flat).toEqual(paths(flats.slice(1)));
+    });
+
+    it("reports nothing left out when every frame is a light", () => {
+      const result = runAutoMap({ bins: emptyBins(), files: lights, assigned: new Set() });
+      expect(result.leftOut).toEqual({ dark: [], flat: [], flatdark: [], bias: [] });
+    });
   });
 
   it("returns early once the colour bins are filled", () => {

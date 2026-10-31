@@ -1,6 +1,7 @@
 import { typedInvoke, withPreview } from "../infrastructure/tauri";
 import type { PixelMathResult, PixelMathSlot, PixelMathValidation } from "../shared/types/pixelmath";
 import type { HistoryScope, OpSpec } from "../shared/types/ops";
+import type { MaskChoice } from "../shared/types/masks";
 import { recordOp } from "./ops";
 import type { RecordedResult } from "./processing";
 
@@ -56,8 +57,9 @@ export async function recordPixelMath(
   path: string,
   expression: string,
   options: PixelMathOptions = {},
+  mask: MaskChoice | null = null,
 ): Promise<RecordedResult<PixelMathResult>> {
-  return (await recordOp(scope, path, pixelMathOp(expression, options))) as RecordedResult<PixelMathResult>;
+  return (await recordOp(scope, path, pixelMathOp(expression, options), { mask })) as RecordedResult<PixelMathResult>;
 }
 
 export function validatePixelMath(expression: string, slotNames: string[]): Promise<PixelMathValidation> {

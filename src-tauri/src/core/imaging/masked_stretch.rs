@@ -327,7 +327,7 @@ fn valid_min_max(image: &Array2<f32>, dmin: f32, dmax: f32) -> (f32, f32) {
     }
 }
 
-fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
+pub(crate) fn normalize_to_01(image: &Array2<f32>) -> Array2<f32> {
     let (dmin, dmax) = valid_min_max(image, f32::INFINITY, f32::NEG_INFINITY);
     let range = dmax - dmin;
     if !range.is_finite() || range < 1e-10 {

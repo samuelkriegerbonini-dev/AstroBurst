@@ -38,6 +38,8 @@ import {
 import {
   blendMatrixError,
   blendWeightsCoverAllColumns,
+  presetBinNames,
+  presetPlan,
   resolvePresetWeights,
   type ColorAxes,
   unequalColumnTotalsNote,
@@ -121,6 +123,11 @@ export default function BlendStep({
   const [presetError, setPresetError] = useState("");
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
+  const binNames = useMemo(() => presetBinNames(state, files), [state, files]);
+  const presetPlans = useMemo(
+    () => Object.entries(BLEND_PRESETS).map(([id, preset]) => ({ id, preset, plan: presetPlan(preset, filledBins, binNames) })),
+    [filledBins, binNames],
+  );
 
   const handlePreset = useCallback((presetId: string) => {
     const preset = BLEND_PRESETS[presetId];
@@ -338,17 +345,20 @@ export default function BlendStep({
           <div className="font-semibold">Balanced (λ)</div>
           <div className="text-[8px] opacity-60">Wavelength spread, equal weight per R/G/B</div>
         </button>
-        {Object.entries(BLEND_PRESETS).map(([id, preset]) => {
+        {presetPlans.map(({ id, preset, plan }) => {
           const isActive = state.blendPreset === id;
           return (
             <button key={id} onClick={() => handlePreset(id)}
-                    className={`px-2.5 py-1.5 rounded-md text-[10px] font-medium transition-all ${
+                    disabled={!plan.available}
+                    title={plan.available ? plan.title : plan.reason}
+                    className={`px-2.5 py-1.5 rounded-md text-[10px] font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                       isActive
                         ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30"
-                        : "bg-zinc-800/50 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800"
+                        : "bg-zinc-800/50 text-zinc-500 enabled:hover:text-zinc-300 enabled:hover:bg-zinc-800"
                     }`}>
               <div className="font-semibold">{preset.label}</div>
               <div className="text-[8px] opacity-60">{preset.desc}</div>
+              {plan.available && <div className="text-[8px] text-zinc-400" data-testid="blend-preset-mapping">{plan.mapping}</div>}
             </button>
           );
         })}

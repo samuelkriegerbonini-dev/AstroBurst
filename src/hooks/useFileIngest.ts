@@ -37,6 +37,7 @@ export function rowsHolding(path: string): ProcessedFile[] {
 }
 
 const notFailed = (row: ProcessedFile) => row.status !== FILE_STATUS.ERROR;
+const isLoading = (row: ProcessedFile) => row.status === FILE_STATUS.QUEUED || row.status === FILE_STATUS.PROCESSING;
 
 export function ingestUnlessLoaded(path: string, options: IngestOptions = {}): boolean {
   if (!ingestFn) return false;
@@ -69,5 +70,17 @@ export function showOrOpen(path: string): boolean {
   const loaded = rowsHolding(path).find(notFailed);
   if (!loaded) return openUnlessLoaded(path);
   showFile(loaded);
+  return true;
+}
+
+export function showWhenLoaded(path: string): boolean {
+  const rows = rowsHolding(path);
+  const loaded = rows.find((row) => notFailed(row) && !isLoading(row));
+  if (loaded) {
+    showFile(loaded);
+    return true;
+  }
+  if (!rows.some(isLoading)) return openUnlessLoaded(path);
+  fileStore.selectWhenLoaded(path, revealInFiles);
   return true;
 }

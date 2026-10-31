@@ -6,6 +6,7 @@ pub mod drizzle;
 pub mod frame_cards;
 pub mod masters;
 pub mod memory;
+pub mod mosaic;
 
 use crate::types::error::AppError;
 

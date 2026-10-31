@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useId, useMemo, useRef, type KeyboardEvent } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, SectionHeader } from "../ui";
 import { useDisplayedImage, useDoneFilesContext, useRenderContext } from "../../context/PreviewContext";
@@ -20,10 +20,13 @@ import {
   COMPOSITE_RESTARTED_NOTICE,
   channelTriple,
   compositeModeNotice,
+  describedByIds,
   fileOnlyNotice,
   type CompositePanelProps,
   type CompositePixelMathResult,
 } from "./compositeProps";
+import MaskSelect from "../masks/MaskSelect";
+import { useRunMask } from "../masks/runMask";
 import {
   chainOutputs,
   markSlotsTouched,
@@ -37,6 +40,7 @@ import {
 import {
   EXAMPLE_EXPRESSIONS,
   MAX_SLOTS,
+  RESERVED_NAMES,
   TARGET_SYMBOL,
   bindMissingSlots,
   caretLines,
@@ -79,10 +83,29 @@ type PixelMathRun = PixelMathFileRun | PixelMathCompositeRun;
 
 export type PixelMathTarget = "file" | "composite";
 
-const TARGET_OPTIONS: { value: PixelMathTarget; label: string }[] = [
-  { value: "file", label: "File" },
-  { value: "composite", label: "Composite (per channel)" },
-];
+const PIXELMATH_TARGETS: readonly PixelMathTarget[] = ["composite", "file"];
+const ARROW_STEPS: ReadonlyMap<string, number> = new Map([
+  ["ArrowDown", 1],
+  ["ArrowRight", 1],
+  ["ArrowUp", -1],
+  ["ArrowLeft", -1],
+]);
+
+export function initialPixelMathTarget(compositeMode: boolean): PixelMathTarget {
+  return compositeMode ? "composite" : "file";
+}
+
+export function pixelMathTargetAfterKey(current: PixelMathTarget, key: string): PixelMathTarget | null {
+  const step = ARROW_STEPS.get(key);
+  if (step === undefined) return null;
+  const count = PIXELMATH_TARGETS.length;
+  return PIXELMATH_TARGETS[(PIXELMATH_TARGETS.indexOf(current) + step + count) % count];
+}
+
+function pixelMathTargetLabel(target: PixelMathTarget, fileName: string): string {
+  if (target === "composite") return "Composite on screen (per channel)";
+  return fileName ? `File ${fileName}` : "File";
+}
 
 const VALIDATION_DEBOUNCE_MS = 300;
 const ACCENT = "violet";
@@ -99,6 +122,63 @@ const INPUT_CLASS =
   "rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1 font-mono text-xs text-zinc-200 focus:ring-1 focus:ring-violet-500/40";
 const AMBER_NOTICE_CLASS = "rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300";
 const COMPOSITE_NOTICE_CLASS = "rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-300";
+const RADIO_CLASS = "flex min-w-0 items-center gap-2 rounded-md border px-2 py-1 text-left text-xs transition-colors disabled:opacity-40";
+const RADIO_CHECKED_CLASS = `${RADIO_CLASS} border-violet-500/40 bg-violet-600/15 text-violet-200`;
+const RADIO_UNCHECKED_CLASS = `${RADIO_CLASS} border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800`;
+const RADIO_DOT_CLASS = "h-2.5 w-2.5 shrink-0 rounded-full border";
+const RADIO_DOT_CHECKED_CLASS = `${RADIO_DOT_CLASS} border-violet-400 bg-violet-400`;
+const RADIO_DOT_UNCHECKED_CLASS = `${RADIO_DOT_CLASS} border-zinc-500`;
+
+interface PixelMathRunOnProps {
+  target: PixelMathTarget;
+  fileName: string;
+  disabled: boolean;
+  onChange: (target: PixelMathTarget) => void;
+}
+
+export function PixelMathRunOn({ target, fileName, disabled, onChange }: PixelMathRunOnProps) {
+  const id = useId();
+  const labelId = `${id}-label`;
+  const noteId = `${id}-note`;
+  const perChannel = target === "composite";
+  const moveWithArrows = (e: KeyboardEvent<HTMLDivElement>) => {
+    const next = pixelMathTargetAfterKey(target, e.key);
+    if (!next) return;
+    e.preventDefault();
+    onChange(next);
+    e.currentTarget.querySelector<HTMLButtonElement>(`[data-pixelmath-target="${next}"]`)?.focus();
+  };
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span id={labelId} className="text-xs text-zinc-400">Run on</span>
+      <div role="radiogroup" aria-labelledby={labelId} aria-describedby={noteId} className="flex flex-col gap-1" onKeyDown={moveWithArrows}>
+        {PIXELMATH_TARGETS.map((option) => {
+          const checked = option === target;
+          const label = pixelMathTargetLabel(option, fileName);
+          return (
+            <button
+              key={option}
+              type="button"
+              role="radio"
+              aria-checked={checked}
+              tabIndex={checked ? 0 : -1}
+              disabled={disabled}
+              data-pixelmath-target={option}
+              className={checked ? RADIO_CHECKED_CLASS : RADIO_UNCHECKED_CLASS}
+              onClick={() => onChange(option)}
+            >
+              <span aria-hidden="true" className={checked ? RADIO_DOT_CHECKED_CLASS : RADIO_DOT_UNCHECKED_CLASS} />
+              <span className="truncate" title={label}>{label}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div id={noteId} role="note" className={perChannel ? COMPOSITE_NOTICE_CLASS : AMBER_NOTICE_CLASS}>
+        {perChannel ? compositeModeNotice(fileName) : fileOnlyNotice("Runs on", fileName)}
+      </div>
+    </div>
+  );
+}
 
 function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
@@ -170,8 +250,15 @@ export default function PixelMathPanel({
   const [rescale, setRescale] = useState(initial?.rescale ?? false);
   const scope = useHistoryScope();
   const [validation, setValidation] = useState<PixelMathValidation | null>(null);
-  const [target, setTarget] = useState<PixelMathTarget>("file");
+  const [target, setTarget] = useState<PixelMathTarget>(() => initialPixelMathTarget(compositeMode));
+  const [targetCompositeMode, setTargetCompositeMode] = useState(compositeMode);
+  if (targetCompositeMode !== compositeMode) {
+    setTargetCompositeMode(compositeMode);
+    setTarget(initialPixelMathTarget(compositeMode));
+  }
   const perChannel = compositeMode && target === "composite";
+  const runMask = useRunMask("pixelmath", scope, perChannel);
+  const maskReason = runMask.blockedReason;
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<PixelMathRun>("pixelmath", perChannel ? COMPOSITE_RUN_KEY : retainKey);
   const compositeChain = useCompositeChain();
   const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
@@ -179,7 +266,6 @@ export default function PixelMathPanel({
   const compositeResult = runResult?.mode === "composite" && compositeChainHolds(compositeChain, "pixelMath", runResult.afterUrl) ? runResult : null;
   const validationSeq = useRef(0);
   const expressionId = useId();
-  const targetId = useId();
 
   const slotsTouchedRef = useRef(initial?.slotsTouched ?? false);
   const restoredForRef = useRef(retainKey);
@@ -295,6 +381,7 @@ export default function PixelMathPanel({
     const referenced = referencedSymbols(expression);
     const baseUrl = targetBaseUrl;
     const baseLabel = targetBaseLabel;
+    const mask = runMask.value;
     void run(async (ctx) => {
       const res = await recordPixelMath(runScope, ranOn, expression, {
         slots: slots
@@ -302,22 +389,23 @@ export default function PixelMathPanel({
           .filter((s) => referenced.includes(s.name)),
         truncate,
         rescale,
-      });
+      }, mask);
       if (!ctx.displayedUnchanged()) throw new Error(INPUT_CHANGED_MESSAGE);
       await onProcessingDone?.(res);
       markSlotsTouched(ctx.key);
       await listInFiles(runScope, res, outputDir);
       return { mode: "file", res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel };
     });
-  }, [targetPath, scope, targetBaseUrl, targetBaseLabel, outputDir, expression, slots, truncate, rescale, run, onProcessingDone]);
+  }, [targetPath, scope, targetBaseUrl, targetBaseLabel, outputDir, expression, slots, truncate, rescale, runMask.value, run, onProcessingDone]);
 
   const handleRunComposite = useCallback(() => {
     if (!compositeInput) return;
     const input = compositeInput;
     const referenced = referencedSymbols(expression);
     const displayStf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
+    const mask = runMask.value;
     void run(async () => {
-      const res = await compositePixelMath(outputDir, { chainInput: input.input, displayStf }, expression, {
+      const res = await compositePixelMath(outputDir, { chainInput: input.input, displayStf, mask }, expression, {
         slots: slots.filter((s) => referenced.includes(s.name.trim())),
         truncate,
         rescale,
@@ -331,7 +419,7 @@ export default function PixelMathPanel({
         afterUrl: res.previewUrl ?? null,
       };
     });
-  }, [compositeInput, outputDir, expression, slots, truncate, rescale, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, run, onCompositeDone]);
+  }, [compositeInput, outputDir, expression, slots, truncate, rescale, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, runMask.value, run, onCompositeDone]);
 
   const validationError = validation && !validation.ok ? validation : null;
   const caret =
@@ -350,28 +438,7 @@ export default function PixelMathPanel({
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
       <SectionHeader icon={ICON} title="PixelMath" subtitle="Per-pixel expressions over loaded images" />
 
-      {compositeMode && (
-        <div className="flex items-center justify-between gap-2">
-          <label htmlFor={targetId} className="text-xs text-zinc-400">Target</label>
-          <select
-            id={targetId}
-            className="ab-select"
-            value={target}
-            disabled={isRunning}
-            onChange={(e) => setTarget(e.target.value as PixelMathTarget)}
-          >
-            {TARGET_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </div>
-      )}
-      {compositeMode && !perChannel && (
-        <div className={AMBER_NOTICE_CLASS}>{fileOnlyNotice("Runs on", fileName)}</div>
-      )}
-      {perChannel && (
-        <div className={COMPOSITE_NOTICE_CLASS}>{compositeModeNotice(fileName)}</div>
-      )}
+      {compositeMode && <PixelMathRunOn target={target} fileName={fileName} disabled={isRunning} onChange={setTarget} />}
 
       {perChannel && (
         <div className="text-[10px] text-zinc-500">
@@ -390,7 +457,7 @@ export default function PixelMathPanel({
         <div className={AMBER_NOTICE_CLASS}>
           {TARGET_SYMBOL} is the displayed image, not the latest processing output, so the
           <span className="font-medium"> {chainedFrom} </span>
-          result is not part of this expression — bind it to a slot if you want it.
+          result is not part of this expression: bind it to a slot if you want it.
         </div>
       )}
 
@@ -444,6 +511,14 @@ export default function PixelMathPanel({
           <div className="text-[11px] text-red-300">{validationError.message}</div>
         )}
         {validation?.ok && <div className="text-[10px] text-emerald-400">Expression is valid</div>}
+        <details className="text-[10px] text-zinc-500">
+          <summary className="cursor-pointer select-none text-zinc-400">Functions</summary>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {RESERVED_NAMES.map((name) => (
+              <code key={name} className="rounded bg-zinc-800/60 px-1 font-mono text-zinc-300">{name}</code>
+            ))}
+          </div>
+        </details>
       </div>
 
       <div className="flex flex-col gap-1.5">
@@ -509,15 +584,17 @@ export default function PixelMathPanel({
       <div className="flex flex-col gap-2">
         <Toggle label="Truncate result to [0, 1]" checked={truncate} disabled={isRunning} accent={ACCENT} onChange={setTruncate} />
         <Toggle label="Rescale result to [0, 1]" checked={rescale} disabled={isRunning} accent={ACCENT} onChange={setRescale} />
+        <div className="text-[10px] text-zinc-500">Both on: rescale first; Truncate then only maps infinities to 0 or 1</div>
       </div>
 
-      <div title={disabledReason ?? busyTitle}>
+      <MaskSelect {...runMask.select} busy={isRunning} />
+      <div title={disabledReason ?? maskReason ?? busyTitle}>
         <RunButton
           label="Run PixelMath"
           runningLabel="Evaluating..."
           running={isRunning}
-          disabled={!canRun || blocked || !!disabledReason}
-          describedBy={disabledReason ? disabledReasonId : undefined}
+          disabled={!canRun || blocked || !!disabledReason || !!maskReason}
+          describedBy={describedByIds(disabledReason ? disabledReasonId : null, maskReason ? runMask.select.noteId : null)}
           accent={ACCENT}
           onClick={perChannel ? handleRunComposite : handleRun}
         />

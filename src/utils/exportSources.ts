@@ -1,4 +1,6 @@
 import type { StfParams } from "../shared/types";
+import { COLORMAP_LABELS, type DisplaySettings } from "../shared/types/display";
+import { STF_STATE_LABEL, type StfState } from "./analysisTarget";
 import { exportStem, parseImageRef } from "./imageRef";
 import type { RgbProduct } from "./rgbProduct";
 
@@ -137,6 +139,39 @@ export function compositeRgbPngStf(
     midtoneB: stf.b.midtone,
     highlightB: stf.b.highlight,
   };
+}
+
+export type PngDisplay = Pick<DisplaySettings, "stretch" | "limits" | "symmetric" | "colormap" | "invert">;
+
+export interface PngStfNote {
+  source: string;
+  mismatch: string | null;
+}
+
+const PNG_COLORMAP = "gray";
+
+function andList(items: readonly string[]): string {
+  if (items.length < 2) return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+function viewerCurveIsPngStf(display: PngDisplay, stfState: StfState): boolean {
+  if (display.stretch === "mtf") return true;
+  return display.stretch === "linear" && display.limits === "minmax" && !display.symmetric && stfState === "linear";
+}
+
+export function pngStfNote(display: PngDisplay, stfState: StfState): PngStfNote {
+  const source =
+    `Mono: the Image tool's STF (${STF_STATE_LABEL[stfState]}). RGB exports ignore the switch and use an automatic linked STF or the STF on screen. ` +
+    "Off maps a mono image's data range linearly; linear data come out almost black.";
+  const differences: [viewer: string, png: string][] = [];
+  if (!viewerCurveIsPngStf(display, stfState)) differences.push([`the ${display.stretch} stretch`, "the MTF STF"]);
+  if (display.colormap !== PNG_COLORMAP) differences.push([`the ${COLORMAP_LABELS[display.colormap]} colormap`, "grayscale"]);
+  if (display.invert) differences.push(["an inverted scale", "the normal scale"]);
+  if (differences.length === 0) return { source, mismatch: null };
+  const viewer = andList(differences.map(([shown]) => shown));
+  const png = andList(differences.map(([, written]) => written));
+  return { source, mismatch: `The viewer shows ${viewer}; the PNG uses ${png} instead.` };
 }
 
 export interface MefHduReport {

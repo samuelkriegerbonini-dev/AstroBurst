@@ -49,6 +49,10 @@ vi.mock("../../../../context/CompositeContext", () => ({
     compositeAutoStfR: context.autoStf.r,
     compositeAutoStfG: context.autoStf.g,
     compositeAutoStfB: context.autoStf.b,
+    wizardStfR: context.stf.r,
+    wizardStfG: context.stf.g,
+    wizardStfB: context.stf.b,
+    wizardStfLinked: context.linked,
   }),
   useCompositeActions: () => ({ setCompositeStfLinked: setLinkedMock, setCompositeStf: setStfMock }),
 }));
@@ -95,7 +99,7 @@ function linkToggle() {
 }
 
 async function runRestretch(): Promise<unknown[]> {
-  const run = captured.runs.get("Re-stretch Composite");
+  const run = captured.runs.get("Apply stretch");
   if (!run) throw new Error("run button not rendered");
   run();
   await vi.waitFor(() => expect(restretchMock).toHaveBeenCalledTimes(1));
@@ -139,19 +143,21 @@ describe("wizard Stretch Link channels", () => {
     expect(setStfMock).not.toHaveBeenCalled();
   });
 
-  it("runs Auto STF unlinked with the three per-channel STFs", async () => {
+  it("Apply stretch bakes unlinked with the three per-channel STFs on screen, not the auto STF", async () => {
     context.linked = false;
     render();
     const args = await runRestretch();
-    expect(args.slice(1, 4)).toEqual([context.autoStf.r, context.autoStf.g, context.autoStf.b]);
+    expect(args.slice(1, 4)).toEqual([context.stf.r, context.stf.g, context.stf.b]);
+    expect(args[5]).toBe(true);
     expect(args[6]).toBe(false);
   });
 
-  it("runs Auto STF linked with the R STF on all three channels even when the wizard's G and B differ", async () => {
+  it("Apply stretch bakes linked with the R STF on screen on all three channels even when G and B differ", async () => {
     context.linked = true;
     render();
     const args = await runRestretch();
-    expect(args.slice(1, 4)).toEqual([context.autoStf.r, context.autoStf.r, context.autoStf.r]);
+    expect(args.slice(1, 4)).toEqual([context.stf.r, context.stf.r, context.stf.r]);
+    expect(args[5]).toBe(true);
     expect(args[6]).toBe(true);
   });
 });

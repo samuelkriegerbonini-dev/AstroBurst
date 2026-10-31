@@ -589,6 +589,54 @@ pub fn write_fits_mono_bitpix(
     Ok(())
 }
 
+pub fn write_fits_mono_int(
+    path: &str,
+    data: &Array2<i32>,
+    header: Option<&HduHeader>,
+    bitpix: i32,
+) -> Result<()> {
+    let bitpix_comment = match bitpix {
+        16 => "16-bit signed integer",
+        32 => "32-bit signed integer",
+        other => bail!("an integer image is written with BITPIX 16 or 32, not {other}"),
+    };
+    if bitpix == 16 && data.iter().any(|&v| i16::try_from(v).is_err()) {
+        bail!("a value does not fit BITPIX 16; write this image with BITPIX 32");
+    }
+    let (rows, cols) = data.dim();
+    let file = File::create(path).context("Failed to create FITS file")?;
+    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
+    let mut bytes = 0;
+
+    bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
+    bytes += write_header_card(&mut writer, "BITPIX", &bitpix.to_string(), bitpix_comment)?;
+    bytes += write_header_card(&mut writer, "NAXIS", "2", "2D image")?;
+    bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
+    bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
+    if let Some(hdr) = header {
+        bytes += write_extra_header_cards(&mut writer, hdr, is_layout_card)?;
+    }
+    bytes += write_provenance(&mut writer, header)?;
+    write_header_end(&mut writer, bytes)?;
+
+    let values = data.as_standard_layout();
+    let slice = values.as_slice().context("integer plane not contiguous")?;
+    let data_bytes = if bitpix == 16 {
+        for chunk in slice.chunks(16384) {
+            let encoded: Vec<u8> = chunk.iter().flat_map(|&v| (v as i16).to_be_bytes()).collect();
+            writer.write_all(&encoded)?;
+        }
+        slice.len() * 2
+    } else {
+        write_be_slice(&mut writer, slice, i32::to_be_bytes)?;
+        slice.len() * 4
+    };
+    pad_to_block(&mut writer, data_bytes, 0u8)?;
+
+    writer.flush()?;
+    Ok(())
+}
+
 pub fn write_fits_rgb(
     path: &str,
     r: &Array2<f32>,

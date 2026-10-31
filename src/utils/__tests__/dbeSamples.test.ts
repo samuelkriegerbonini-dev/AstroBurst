@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_DBE_CONFIG, pointSamplesFromDoc, validateDbeParams } from "../dbeSamples";
+import { DEFAULT_DBE_CONFIG, dbeRunBlock, pointSamplesFromDoc, validateDbeParams } from "../dbeSamples";
 import type { RegionDoc } from "../regionStore";
 import type { Region, RegionShape } from "../../shared/types/regions";
 
@@ -89,5 +89,53 @@ describe("validateDbeParams", () => {
 
     const sparse = validateDbeParams({ ...DEFAULT_DBE_CONFIG, autoGrid: 12 }, size);
     expect(sparse.ok).toBe(true);
+  });
+});
+
+describe("dbeRunBlock", () => {
+  const size = { width: 100, height: 50 };
+  const two: [number, number][] = [[10, 10], [20, 20]];
+  const four: [number, number][] = [[10, 10], [20, 20], [30, 30], [40, 40]];
+  const gridOff = { ...DEFAULT_DBE_CONFIG, autoGrid: null };
+
+  it("is null for the defaults, on a file and on the composite", () => {
+    expect(dbeRunBlock(DEFAULT_DBE_CONFIG, true, false, null)).toBeNull();
+    expect(dbeRunBlock(DEFAULT_DBE_CONFIG, true, false, size)).toBeNull();
+    expect(dbeRunBlock(DEFAULT_DBE_CONFIG, false, false, size)).toBeNull();
+    expect(dbeRunBlock(DEFAULT_DBE_CONFIG, true, true, null)).toBeNull();
+  });
+
+  it("gives the grid message for an automatic grid of 1", () => {
+    expect(dbeRunBlock({ ...DEFAULT_DBE_CONFIG, autoGrid: 1 }, true, false, null)).toBe("Automatic grid must be an integer between 2 and 40");
+  });
+
+  it("counts the point regions the run would use when the grid is off", () => {
+    expect(dbeRunBlock({ ...gridOff, manualSamples: two }, true, false, size)).toBe("4 point regions needed, 2 used");
+    expect(dbeRunBlock({ ...gridOff, manualSamples: [] }, true, false, size)).toBe("4 point regions needed, 0 used");
+    expect(dbeRunBlock({ ...gridOff, manualSamples: four }, true, false, size)).toBeNull();
+  });
+
+  it("says the point regions are not used when their toggle is off", () => {
+    expect(dbeRunBlock({ ...gridOff, manualSamples: four }, false, false, size)).toBe(
+      "Point regions are not used: turn on 'Use point regions as samples' or Auto Grid",
+    );
+  });
+
+  it("says the composite never uses point regions", () => {
+    const composite = "Point regions are not used on the composite: turn Auto Grid on";
+    expect(dbeRunBlock({ ...gridOff, manualSamples: four }, true, true, null)).toBe(composite);
+    expect(dbeRunBlock({ ...gridOff, manualSamples: [] }, false, true, null)).toBe(composite);
+  });
+
+  it("checks only the point regions the run would send", () => {
+    const outside: [number, number][] = [[10, 10], [120, 10]];
+    expect(dbeRunBlock({ ...DEFAULT_DBE_CONFIG, manualSamples: outside }, true, false, size)).toBe("Point sample 2 at (120, 10) is outside the image");
+    expect(dbeRunBlock({ ...DEFAULT_DBE_CONFIG, manualSamples: outside }, false, false, size)).toBeNull();
+    expect(dbeRunBlock({ ...DEFAULT_DBE_CONFIG, manualSamples: outside }, true, true, size)).toBeNull();
+  });
+
+  it("gives the first message when several settings fail", () => {
+    expect(dbeRunBlock({ ...gridOff, sampleRadius: 0 }, true, false, null)).toBe("Sample radius must be an integer between 1 and 64");
+    expect(dbeRunBlock({ ...DEFAULT_DBE_CONFIG, autoGrid: 20 }, true, false, size)).toBe("Automatic grid of 20 leaves cells under 4 px on a 100x50 image");
   });
 });

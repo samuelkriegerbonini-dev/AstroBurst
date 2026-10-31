@@ -2,6 +2,7 @@ import { withPreview, typedInvoke, getOutputDir, getPreviewUrl } from "../infras
 import type { StfParams } from "../shared/types";
 import type {
   BlendResult,
+  AlignPlan,
   AlignResult,
   RestretchResult,
   AutoWbResult,
@@ -118,6 +119,10 @@ export async function alignChannels(
     referenceIndex,
     runToken,
   });
+}
+
+export function alignPlan(paths: readonly string[], referenceIndex: number | null): Promise<AlignPlan> {
+  return typedInvoke<AlignPlan>("align_plan_cmd", { paths, referenceIndex });
 }
 
 export async function cropChannels(

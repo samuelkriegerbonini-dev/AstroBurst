@@ -5,10 +5,12 @@ import { getPreviewUrl } from "../infrastructure/tauri";
 import { deleteBranch, getHistory, getKernel, redo, rehydrate, setHead, undo } from "../services/ops";
 import type { HeadView, HistoryNode, HistoryScope, HistoryState, KernelRef } from "../shared/types/ops";
 import type { ChainBase, ProcessedResult, ProcessingChain } from "../shared/types/preview";
-import { ancestry, headKernelRef, nodeFile, nodePreviewVersion, nodeRecord, opLabel, projectChain, type PreviewLookup } from "../utils/historyModel";
+import { ancestry, headKernelRef, nodeFile, nodeMaskView, nodePreviewVersion, nodeRecord, opLabel, projectChain, type PreviewLookup } from "../utils/historyModel";
 import { EMPTY_HISTORY_SNAPSHOT, historyStore, type HistorySnapshot } from "../utils/historyStore";
+import { historyMoveBlock } from "../utils/historyKeys";
 import { putCapped, withVersionParam } from "../utils/processingChain";
 import { historyRerunStore, sectionForOp } from "../utils/historyRerunStore";
+import { useCompositeMode } from "./useCompositeMode";
 import { dockStore } from "./useDockLayout";
 import { runExclusive } from "./useProcessingRun";
 
@@ -161,6 +163,14 @@ export function moveHead(target: HistoryTarget, render: HistoryRender, request: 
   return queued(target.fileKey, () => moveHeadNow(target, render, request));
 }
 
+export async function guardMove(block: string | null, move: () => Promise<unknown>): Promise<void> {
+  if (block !== null) {
+    announce(block);
+    return;
+  }
+  await move();
+}
+
 function idleMoveMessage(request: HeadMoveRequest, state: HistoryState | null): string | null {
   if (!state || state.read_only !== null || request.kind === "to") return null;
   const doc = state.doc;
@@ -265,8 +275,11 @@ export async function revertToOriginal(target: HistoryTarget, render: HistoryRen
 export async function requestRerun(target: HistoryTarget, render: HistoryRender, node: HistoryNode, downstream: boolean): Promise<boolean> {
   const section = sectionForOp(node.op);
   if (!section) return false;
-  if (!downstream && !(await moveHead(target, render, { kind: "to", node: node.id }))) return false;
-  historyRerunStore.request({ section, op: node.op, node: node.id, downstream, scope: target.scope });
+  const recorded = nodeMaskView(knownState(target)?.doc ?? null, node.mask);
+  const shown = downstream ? null : await moveHead(target, render, { kind: "to", node: node.id });
+  if (!downstream && !shown) return false;
+  const viewed = shown?.node?.mask;
+  historyRerunStore.request({ section, op: node.op, node: node.id, downstream, scope: target.scope, mask: viewed === undefined ? recorded : viewed });
   dockStore.dispatch({ type: "open", tool: "processing" });
   return true;
 }
@@ -319,8 +332,15 @@ export function useHistorySnapshot(): HistorySnapshot {
   return useSyncExternalStore(historyStore.subscribe, historyStore.get, historyStore.get);
 }
 
+function useHistoryMoveBlock(): string | null {
+  const { file } = useFileContext();
+  const compositeMode = useCompositeMode();
+  return historyMoveBlock({ compositeMode, fileName: file?.name ?? "" });
+}
+
 export interface HistoryController {
   target: HistoryTarget | null;
+  blockedReason: string | null;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   goTo: (node: string | null) => Promise<void>;
@@ -332,14 +352,17 @@ export interface HistoryController {
 export function useHistoryController(): HistoryController {
   const target = useHistoryTarget();
   const render = useHistoryRender();
+  const blockedReason = useHistoryMoveBlock();
   const targetRef = useRef(target);
   targetRef.current = target;
+  const blockedRef = useRef(blockedReason);
+  blockedRef.current = blockedReason;
 
   const move = useCallback(
     async (request: HeadMoveRequest) => {
       const current = targetRef.current;
       if (!current) return;
-      await moveHead(current, render, request);
+      await guardMove(blockedRef.current, () => moveHead(current, render, request));
     },
     [render],
   );
@@ -347,7 +370,8 @@ export function useHistoryController(): HistoryController {
   const rerunWith = useCallback(
     async (node: HistoryNode, downstream: boolean) => {
       const current = targetRef.current;
-      if (current) await requestRerun(current, render, node, downstream);
+      if (!current) return;
+      await guardMove(blockedRef.current, () => requestRerun(current, render, node, downstream));
     },
     [render],
   );
@@ -368,6 +392,7 @@ export function useHistoryController(): HistoryController {
   return useMemo(
     () => ({
       target,
+      blockedReason,
       undo: () => move({ kind: "undo" }),
       redo: () => move({ kind: "redo" }),
       goTo: (node: string | null) => move({ kind: "to", node }),
@@ -375,7 +400,7 @@ export function useHistoryController(): HistoryController {
       deleteBranch: removeNode,
       rerunWith,
     }),
-    [target, move, revert, removeNode, rerunWith],
+    [target, blockedReason, move, revert, removeNode, rerunWith],
   );
 }
 

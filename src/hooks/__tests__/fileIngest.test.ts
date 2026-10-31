@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { fileStore } from "../useFileStore";
-import { ingestFiles, ingestUnlessLoaded, registerFileIngest, showOrOpen, type IngestOptions } from "../useFileIngest";
+import { ingestFiles, ingestUnlessLoaded, registerFileIngest, showOrOpen, showWhenLoaded, type IngestOptions } from "../useFileIngest";
 import type { AstroFile } from "../../shared/types";
 
 const SOURCE = "C:/data/673nmos.fits";
 const OUTPUT = "C:/out/673nmos_pixelmath.fits";
+const ROTATED = "C:/out/673nmos_rot90.fits";
 
 describe("file ingest", () => {
   let ingested: AstroFile[][];
@@ -155,5 +156,112 @@ describe("showOrOpen", () => {
     expect(added).toHaveLength(1);
     fileStore.fileDone(rowOf(OUTPUT), null);
     expect(fileStore.getSelected()).toBe(rowOf(OUTPUT));
+  });
+});
+
+describe("showWhenLoaded", () => {
+  let added: AstroFile[][];
+  let unregister: () => void;
+
+  beforeEach(() => {
+    fileStore.reset();
+    added = [];
+    unregister = registerFileIngest((files) => {
+      added.push(files);
+      fileStore.addFiles(files);
+    });
+  });
+
+  afterEach(() => unregister());
+
+  const rowOf = (path: string) => fileStore.getFiles().find((f) => f.path === path)?.id as string;
+
+  function showSource(): string {
+    fileStore.addFiles([{ name: "673nmos.fits", path: SOURCE, size: 0 }]);
+    fileStore.fileDone(rowOf(SOURCE), null);
+    fileStore.selectFile(rowOf(SOURCE));
+    return rowOf(SOURCE);
+  }
+
+  it("selects a row that has loaded at once and adds nothing", () => {
+    showSource();
+    fileStore.addFiles([{ name: "673nmos_rot90.fits", path: ROTATED, size: 0 }]);
+    fileStore.fileDone(rowOf(ROTATED), null);
+
+    expect(showWhenLoaded("c:\\OUT\\673NMOS_rot90.fits")).toBe(true);
+
+    expect(fileStore.getSelected()).toBe(rowOf(ROTATED));
+    expect(fileStore.getSelectOnLoadPath()).toBeNull();
+    expect(added).toEqual([]);
+  });
+
+  it("does not select a queued or loading row at once and selects it once it has loaded", () => {
+    const sourceId = showSource();
+    expect(ingestUnlessLoaded(ROTATED)).toBe(true);
+
+    expect(showWhenLoaded(ROTATED)).toBe(true);
+
+    expect(fileStore.getSelected()).toBe(sourceId);
+    expect(fileStore.getSelectOnLoadPath()).toBe(ROTATED);
+    fileStore.fileStarted(rowOf(ROTATED));
+    expect(showWhenLoaded(ROTATED)).toBe(true);
+    expect(fileStore.getSelected()).toBe(sourceId);
+    fileStore.fileDone(rowOf(ROTATED), null);
+    expect(fileStore.getSelected()).toBe(rowOf(ROTATED));
+    expect(fileStore.getSelectOnLoadPath()).toBeNull();
+    expect(added).toHaveLength(1);
+  });
+
+  it("adds a path the Files list does not hold and selects it once it has loaded", () => {
+    const sourceId = showSource();
+
+    expect(showWhenLoaded(ROTATED)).toBe(true);
+
+    expect(added).toEqual([[{ name: "673nmos_rot90.fits", path: ROTATED, size: 0 }]]);
+    expect(fileStore.getSelected()).toBe(sourceId);
+    fileStore.fileDone(rowOf(ROTATED), null);
+    expect(fileStore.getSelected()).toBe(rowOf(ROTATED));
+  });
+
+  it("retries a row that failed to load, without a second row, and selects it once it has loaded", () => {
+    const sourceId = showSource();
+    fileStore.addFiles([{ name: "673nmos_rot90.fits", path: ROTATED, size: 0 }]);
+    fileStore.fileError(rowOf(ROTATED), "No such file");
+
+    expect(showWhenLoaded(ROTATED)).toBe(true);
+
+    expect(fileStore.getFile(rowOf(ROTATED))?.status).toBe("queued");
+    expect(fileStore.getFiles().map((f) => f.path)).toEqual([SOURCE, ROTATED]);
+    expect(fileStore.getSelected()).toBe(sourceId);
+    fileStore.fileDone(rowOf(ROTATED), null);
+    expect(fileStore.getSelected()).toBe(rowOf(ROTATED));
+  });
+
+  it("keeps the file the user picks while the row is loading", () => {
+    const sourceId = showSource();
+    ingestUnlessLoaded(ROTATED);
+    showWhenLoaded(ROTATED);
+
+    fileStore.selectFile(sourceId);
+
+    expect(fileStore.getSelectOnLoadPath()).toBeNull();
+    fileStore.fileDone(rowOf(ROTATED), null);
+    expect(fileStore.getSelected()).toBe(sourceId);
+  });
+
+  it("tells the store's listeners when a row starts and stops waiting to be shown", async () => {
+    const sourceId = showSource();
+    ingestUnlessLoaded(ROTATED);
+    await Promise.resolve();
+    const heard: (string | null)[] = [];
+    const stop = fileStore.subscribe(() => heard.push(fileStore.getSelectOnLoadPath()));
+
+    showWhenLoaded(ROTATED);
+    await Promise.resolve();
+    fileStore.selectFile(sourceId);
+    await Promise.resolve();
+    stop();
+
+    expect(heard).toEqual([ROTATED, null]);
   });
 });

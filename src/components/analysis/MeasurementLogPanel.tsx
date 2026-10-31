@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useId, useMemo, useState } from "react";
 import { ClipboardCopy, FileText, Download, Trash2 } from "lucide-react";
 import { useFileContext } from "../../context/PreviewContext";
 import { useMeasurementLog } from "../../hooks/useMeasurementLog";
+import { useTimedNotice } from "../../hooks/useTimedNotice";
 import {
   LOG_SESSION_NOTE,
   MEASUREMENT_KINDS,
@@ -56,7 +57,7 @@ function MeasurementLogPanel() {
   const [thisFileOnly, setThisFileOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [savedPath, showSavedPath, clearSavedPath] = useTimedNotice<string>(SAVED_NOTICE_MS);
   const [confirmingClear, setConfirmingClear] = useState(false);
 
   useEffect(() => {
@@ -100,20 +101,19 @@ function MeasurementLogPanel() {
       if (!target) return;
       const { writeTextFile } = await import("@tauri-apps/plugin-fs");
       await writeTextFile(target, measurementLogCsv(shown));
-      setSavedPath(target);
-      setTimeout(() => setSavedPath(null), SAVED_NOTICE_MS);
+      showSavedPath(target);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [shown, busy, thisFileOnly, filePath]);
+  }, [shown, busy, thisFileOnly, filePath, showSavedPath]);
 
   const clear = useCallback(() => {
     setConfirmingClear(false);
     measurementLog.clear();
-    setSavedPath(null);
-  }, []);
+    clearSavedPath();
+  }, [clearSavedPath]);
 
   const showClearConfirm = confirmingClear && entries.length > 0;
 

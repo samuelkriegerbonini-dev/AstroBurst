@@ -22,10 +22,12 @@ import {
   pixelMathCompareBase,
   pngOnlyInputNotice,
   psfUseOf,
+  replacedStepsNote,
   sectionInputName,
   samePath,
   showsPsfCrumb,
   type PsfUse,
+  type StepLabel,
 } from "../../utils/processingChain";
 import {
   compositeChainHolds,
@@ -39,15 +41,16 @@ import {
   withCompositeStep,
 } from "../../utils/compositeChain";
 import { compositeChainStore } from "../../utils/compositeChainStore";
+import { compositeInputDisplayed, nonLinearInputNote, upstreamSteps, type NonLinearInput } from "../../utils/nonLinearInput";
 import { wizardStepStaleAfterCompositeWrite } from "../../utils/compositeSync";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
 import { useCompositeMode } from "../../hooks/useCompositeMode";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { beginCompositeCheck } from "../../hooks/useProcessingRun";
 import { adoptRun, useHistoryController, useHistoryRender, useHistorySnapshot } from "../../hooks/useHistory";
-import { nodeAtPath, opLabel } from "../../utils/historyModel";
+import { compareLabelsFor, compositeCrumbLabelFor, crumbLabelFor, nodeAtPath, opLabel, opNameLabel } from "../../utils/historyModel";
 import { historyRerunStore, type PendingRerun } from "../../utils/historyRerunStore";
-import type { HistoryState } from "../../shared/types/ops";
+import type { HistoryNode, HistoryState, OpName } from "../../shared/types/ops";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { CompositeInputView } from "./compositeProps";
 import { rgbFitsDisabledReason } from "./rgbFitsNotice";
@@ -79,20 +82,61 @@ type ProcessingSection =
   | "pixelmath"
   | "geometry";
 
-const SECTIONS: { id: ProcessingSection; label: string; color: string }[] = [
-  { id: "debayer", label: "Debayer", color: "orange" },
-  { id: "background", label: "Background", color: "emerald" },
-  { id: "denoise", label: "Denoise", color: "sky" },
-  { id: "psf", label: "PSF", color: "violet" },
-  { id: "deconvolution", label: "Deconv", color: "indigo" },
-  { id: "stretch", label: "Stretch", color: "amber" },
-  { id: "masked_stretch", label: "Masked", color: "rose" },
-  { id: "local_contrast", label: "LHE", color: "teal" },
-  { id: "hdr", label: "HDRMT", color: "violet" },
-  { id: "curves", label: "Curves", color: "purple" },
-  { id: "pixelmath", label: "PixelMath", color: "violet" },
-  { id: "geometry", label: "Geometry", color: "orange" },
+interface SectionPill {
+  id: ProcessingSection;
+  label: string;
+  color: string;
+  title: string;
+}
+
+const SECTION_GROUPS: { caption: string; sections: SectionPill[] }[] = [
+  {
+    caption: "Linear",
+    sections: [
+      { id: "background", label: "Background", color: "emerald", title: "Remove gradients and vignetting; on linear data, first" },
+      { id: "denoise", label: "Denoise", color: "sky", title: "Wavelet noise reduction; on linear data" },
+      { id: "psf", label: "PSF", color: "violet", title: "Measure the PSF from stars for Deconv" },
+      { id: "deconvolution", label: "Deconv", color: "indigo", title: "Sharpen with Richardson-Lucy; on linear data" },
+    ],
+  },
+  {
+    caption: "Stretch",
+    sections: [
+      { id: "stretch", label: "Stretch", color: "amber", title: "Stretch from linear to non-linear; after the linear tools" },
+      { id: "masked_stretch", label: "Masked", color: "rose", title: "Stretch with the stars protected; instead of Stretch" },
+    ],
+  },
+  {
+    caption: "Non-linear",
+    sections: [
+      { id: "local_contrast", label: "LHE", color: "teal", title: "Local contrast on a stretched image" },
+      { id: "hdr", label: "HDRMT", color: "violet", title: "Compress bright cores on a stretched image" },
+      { id: "curves", label: "Curves", color: "purple", title: "Levels and curves on a stretched image; a linear input gets an auto STF first" },
+    ],
+  },
+  {
+    caption: "Tools",
+    sections: [
+      { id: "pixelmath", label: "PixelMath", color: "violet", title: "Per-pixel expressions over the loaded images" },
+      { id: "geometry", label: "Geometry", color: "orange", title: "Exact rotations and flips, written as a new file" },
+      { id: "debayer", label: "Debayer", color: "orange", title: "Colour-camera frames: debayer or extract CFA planes" },
+    ],
+  },
 ];
+
+const SECTION_OP: Partial<Record<ProcessingSection, OpName>> = {
+  background: "background",
+  denoise: "wavelet_denoise",
+  deconvolution: "rl_deconv",
+  stretch: "arcsinh",
+  masked_stretch: "masked_stretch",
+  local_contrast: "lhe",
+  hdr: "hdrmt",
+  curves: "tone",
+  pixelmath: "pixelmath",
+};
+
+const FILE_ONLY_SECTIONS: ReadonlySet<ProcessingSection> = new Set(["curves"]);
 
 const SECTION_STEP: Partial<Record<ProcessingSection, ChainStep>> = {
   background: "background",
@@ -115,28 +159,6 @@ type CompositePsfEntry = CompositeChainEntry & PsfUse;
 function psfSourceOf(result: CompositeStepResult | CompositeDeconvolveResult): PsfSource | undefined {
   return "psf_source" in result ? result.psf_source : undefined;
 }
-
-const STEP_LABELS: Record<ChainStep, string> = {
-  background: "Background",
-  denoise: "Denoise",
-  deconv: "Deconvolution",
-  stretch: "Stretch",
-  maskedStretch: "Masked stretch",
-  localContrast: "LHE / HDRMT",
-  tone: "Curves",
-  pixelMath: "PixelMath",
-};
-
-const INDICATOR_LABELS: Record<ChainStep, string> = {
-  background: "BG",
-  denoise: "Denoise",
-  deconv: "Deconv",
-  stretch: "Stretch",
-  maskedStretch: "Masked",
-  localContrast: "LHE/HDRMT",
-  tone: "Curves",
-  pixelMath: "PixelMath",
-};
 
 const BANNER_LABELS: Record<ChainStep, string> = {
   background: "Background Extraction",
@@ -175,18 +197,12 @@ function baseStillIs(key: string, filePath: string, basePath: string): boolean {
   return samePath(chainBasePath(getRenderRecord(key)?.chain ?? EMPTY_CHAIN, filePath), basePath);
 }
 
-function chainCrumbs(
-  first: Crumb,
-  showPsf: boolean,
-  currentOf: (step: ChainStep) => boolean | null,
-  targetOf: (step: ChainStep) => Crumb["target"] = () => undefined,
-): Crumb[] {
+function chainCrumbs(first: Crumb, showPsf: boolean, crumbOf: (step: ChainStep) => Crumb | null): Crumb[] {
   const crumbs: Crumb[] = [first];
   for (const s of CHAIN_ORDER) {
     if (s === "deconv" && showPsf) crumbs.push({ label: "PSF", current: false });
-    const current = currentOf(s);
-    if (current === null) continue;
-    crumbs.push({ label: INDICATOR_LABELS[s], current, target: targetOf(s) });
+    const crumb = crumbOf(s);
+    if (crumb) crumbs.push(crumb);
   }
   return crumbs;
 }
@@ -196,22 +212,60 @@ function historyNodeOf(history: HistoryState | null, fitsPath: string | undefine
   return doc && history && fitsPath ? nodeAtPath(doc, history.history_dir, fitsPath) : null;
 }
 
+type StepSource = HistoryNode | ChainEntry;
+
+function stepSourcesOf(chain: ProcessingChain, history: HistoryState | null): Partial<Record<ChainStep, StepSource>> {
+  const sources: Partial<Record<ChainStep, StepSource>> = {};
+  for (const s of CHAIN_ORDER) {
+    const entry = chain.steps[s];
+    if (entry) sources[s] = historyNodeOf(history, entry.fitsPath) ?? entry;
+  }
+  return sources;
+}
+
+function fileStepLabels(chain: ProcessingChain, history: HistoryState | null): StepLabel[] | null {
+  const labels: StepLabel[] = [];
+  for (const step of CHAIN_ORDER) {
+    const entry = chain.steps[step];
+    if (!entry) continue;
+    const node = historyNodeOf(history, entry.fitsPath);
+    if (!node) return null;
+    labels.push({ step, label: opLabel(node.op) });
+  }
+  return labels;
+}
+
+function compositeToolLabel(step: ChainStep, entry: CompositeChainEntry): string {
+  return step === "localContrast" ? entry.label : BANNER_LABELS[step];
+}
+
+function compositeStepLabels(chain: CompositeChain): StepLabel[] {
+  return CHAIN_ORDER.flatMap((step) => {
+    const entry = chain.steps[step];
+    return entry ? [{ step, label: compositeToolLabel(step, entry) }] : [];
+  });
+}
+
+function runningStepLabel(section: ProcessingSection, reported: string | undefined, compositeMode: boolean): StepLabel | null {
+  const step = SECTION_STEP[section];
+  const op = SECTION_OP[section];
+  if (!step || !op) return null;
+  return { step, label: (!compositeMode && reported) || opNameLabel(op) };
+}
+
 function fileCrumbs(chain: ProcessingChain, displayedFits: string | null, originalName: string, history: HistoryState | null): Crumb[] {
   const hasHistory = (history?.doc?.nodes.length ?? 0) > 0 && history?.read_only === null;
   const first: Crumb = { label: originalName, current: false, target: hasHistory ? { node: null } : undefined };
-  return chainCrumbs(
-    first,
-    showsPsfCrumb(chain.psfKernel, chain.steps.deconv),
-    (s) => {
-      const entry = chain.steps[s];
-      if (!entry) return null;
-      return displayedFits !== null && samePath(entry.fitsPath, displayedFits);
-    },
-    (s) => {
-      const node = historyNodeOf(history, chain.steps[s]?.fitsPath);
-      return node ? { node: node.id } : undefined;
-    },
-  );
+  return chainCrumbs(first, showsPsfCrumb(chain.psfKernel, chain.steps.deconv), (s) => {
+    const entry = chain.steps[s];
+    if (!entry) return null;
+    const node = historyNodeOf(history, entry.fitsPath);
+    return {
+      label: crumbLabelFor(s, node ?? entry),
+      current: displayedFits !== null && samePath(entry.fitsPath, displayedFits),
+      target: node ? { node: node.id } : undefined,
+    };
+  });
 }
 
 function compositeCrumbs(chain: CompositeChain, compositePreviewUrl: string | null): Crumb[] {
@@ -219,7 +273,10 @@ function compositeCrumbs(chain: CompositeChain, compositePreviewUrl: string | nu
   return chainCrumbs({ label: "Composite", current: false }, showsPsfCrumb(chain.psfKernel, deconv), (s) => {
     const entry = chain.steps[s];
     if (!entry) return null;
-    return compositePreviewUrl !== null && samePreview(entry.previewUrl, compositePreviewUrl);
+    return {
+      label: compositeCrumbLabelFor(s, entry.label),
+      current: compositePreviewUrl !== null && samePreview(entry.previewUrl, compositePreviewUrl),
+    };
   });
 }
 
@@ -332,6 +389,13 @@ function ProcessingTabInner() {
       : null;
   const disabledReason = rgbFitsDisabledReason({ fileIsRgb: !!file?.result?.is_rgb, compositeMode });
   const disabledReasonId = useId();
+  const replacedNoteId = useId();
+  const [reportedRunLabels, setReportedRunLabels] = useState<Partial<Record<ProcessingSection, string>>>({});
+  const runLabelReporters = useMemo(() => {
+    const reporter = (section: ProcessingSection) => (label: string) =>
+      setReportedRunLabels((prev) => (prev[section] === label ? prev : { ...prev, [section]: label }));
+    return { background: reporter("background"), stretch: reporter("stretch") };
+  }, []);
 
   const [resolvedDir, setResolvedDir] = useState("./output");
   useEffect(() => { getOutputDir().then(setResolvedDir); }, []);
@@ -434,12 +498,18 @@ function ProcessingTabInner() {
 
   const originalPreviewUrl = chainBase ? chainBase.previewUrl : filePreviewUrl;
   const originalLabel = chainBase?.label ?? "Original";
+  const stepSources = useMemo(() => stepSourcesOf(chain, historyState), [chain, historyState]);
+  const compareLabels = useMemo(() => compareLabelsFor(stepSources), [stepSources]);
+  const stepToolLabel = (step: ChainStep): string => {
+    const op = stepSources[step]?.op;
+    return op ? opLabel(op) : BANNER_LABELS[step];
+  };
   const inputPreviewOf = (input: ChainInput): string | null => input.entry?.previewUrl ?? (input.from ? null : originalPreviewUrl);
-  const inputLabelOf = (input: ChainInput): string => (input.from ? STEP_LABELS[input.from] : originalLabel);
-  const bannerOf = (input: ChainInput): string | undefined => (input.from ? BANNER_LABELS[input.from] : chainBase?.label);
+  const inputLabelOf = (input: ChainInput): string => (input.from ? compareLabels[input.from] : originalLabel);
+  const bannerOf = (input: ChainInput): string | undefined => (input.from ? stepToolLabel(input.from) : chainBase?.label);
   const bannerFor = (fileInput: ChainInput, compositeInput: CompositeInputView | undefined): string | undefined =>
     compositeInput ? compositeBannerOf(compositeInput) : bannerOf(fileInput);
-  const pixelMathBase = pixelMathCompareBase(chain, processed, { path: runPath ?? "", previewUrl: filePreviewUrl }, STEP_LABELS);
+  const pixelMathBase = pixelMathCompareBase(chain, processed, { path: runPath ?? "", previewUrl: filePreviewUrl }, compareLabels);
   const inputNotice = compositeMode ? null : pngOnlyInputNotice(processed, sectionInputName(active, chainBase, fileName));
 
   const backgroundInput = useMemo(() => backgroundInputFor(file, chainBase), [file, chainBase]);
@@ -457,7 +527,7 @@ function ProcessingTabInner() {
   const latestEntry = latest ? chain.steps[latest] : undefined;
   const pixelMathChainNotice =
     latest && latestEntry && !(processed?.fitsPath && samePath(processed.fitsPath, latestEntry.fitsPath))
-      ? BANNER_LABELS[latest].toLowerCase()
+      ? stepToolLabel(latest)
       : undefined;
 
   const displayedFits = processed?.fitsPath ?? null;
@@ -473,36 +543,61 @@ function ProcessingTabInner() {
   }, [chain, historyState]);
   const activeSteps: Partial<Record<ChainStep, unknown>> = compositeMode ? compositeChain.steps : presentSteps;
   const activePsfKernel = compositeMode ? compositeChain.psfKernel : chain.psfKernel;
+  const stepLabels = useMemo(
+    () => (compositeMode ? compositeStepLabels(compositeChain) : fileStepLabels(chain, historyState)),
+    [compositeMode, compositeChain, chain, historyState],
+  );
+  const running = runningStepLabel(active, reportedRunLabels[active], compositeMode);
+  const replayedByArmedRerun = !compositeMode && armedHere?.section === active;
+  const runsHere = !(compositeMode && FILE_ONLY_SECTIONS.has(active));
+  const replacedNote = running && stepLabels && runsHere && !replayedByArmedRerun ? replacedStepsNote(stepLabels, running, compositeMode) : null;
+  const runNoteIdFor = (section: ProcessingSection) => (replacedNote && section === active ? replacedNoteId : undefined);
+  const nonLinearInputOf = (step: ChainStep): NonLinearInput =>
+    compositeMode
+      ? { kind: "composite", displayed: compositeInputDisplayed(compositeChain, compositeInputFor(compositeChain, step)) }
+      : { kind: "file", upstream: upstreamSteps(chain, step) };
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-1.5 px-3 pt-3 pb-1.5">
-        <div className="flex gap-1 flex-1 flex-wrap">
-          {SECTIONS.map((s) => {
-            const isActive = active === s.id;
-            const step = SECTION_STEP[s.id];
-            const hasResult = s.id === "psf" ? activePsfKernel !== null : step ? activeSteps[step] !== undefined : false;
-            const colors = COLOR_MAP[s.color];
-            return (
-              <button
-                key={s.id}
-                onClick={() => setActive(s.id)}
-                className={`ab-processing-pill ${isActive ? colors.active : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"}`}
-                title={`${s.label} processing step`}
-              >
-                {s.label}
-                {hasResult && (
-                  <span className={`ab-processing-pill-dot ${colors.dot}`} />
-                )}
-              </button>
-            );
-          })}
-        </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1.5 px-3 pt-3 pb-1.5">
+        {SECTION_GROUPS.map((group) => (
+          <div key={group.caption} role="group" aria-label={group.caption} className="flex flex-col gap-0.5">
+            <span aria-hidden="true" className="px-1 text-[9px] text-zinc-500 uppercase tracking-wider">{group.caption}</span>
+            <div className="flex flex-wrap gap-1">
+              {group.sections.map((s) => {
+                const isActive = active === s.id;
+                const step = SECTION_STEP[s.id];
+                const hasResult = s.id === "psf" ? activePsfKernel !== null : step ? activeSteps[step] !== undefined : false;
+                const colors = COLOR_MAP[s.color];
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => setActive(s.id)}
+                    className={`ab-processing-pill ${isActive ? colors.active : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"}`}
+                    title={s.title}
+                    data-processing-section={s.id}
+                  >
+                    {s.label}
+                    {hasResult && (
+                      <span className={`ab-processing-pill-dot ${colors.dot}`} title="Has a result in this chain" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
 
       <ChainIndicator crumbs={crumbs} onSelect={(node) => void history.goTo(node)} />
 
       {!compositeMode && armedHere && <RerunNotice armed={armedHere} onCancel={historyRerunStore.disarm} />}
+
+      {replacedNote && (
+        <div id={replacedNoteId} role="note" data-replaced-steps="" className="mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
+          {replacedNote}
+        </div>
+      )}
 
       {disabledReason && active !== "curves" && active !== "geometry" && (
         <div id={disabledReasonId} role="note" className="mx-3 mb-1 px-2 py-1.5 rounded text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25">
@@ -542,6 +637,7 @@ function ProcessingTabInner() {
               outputDir={resolvedDir}
               onProcessingDone={handleStepDone}
               chainedFrom={bannerFor(inputs.background, compositeInputs?.background)}
+              inputLabel={inputLabelOf(inputs.background)}
               fileKey={runKey}
               compositeMode={compositeMode}
               compositeInput={compositeInputs?.background ?? null}
@@ -549,6 +645,8 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+              runNoteId={runNoteIdFor("background")}
+              onRunLabelChange={runLabelReporters.background}
             />
           </div>
           <div style={{ display: active === "denoise" ? "block" : "none" }}>
@@ -566,6 +664,7 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+              runNoteId={runNoteIdFor("denoise")}
             />
           </div>
           <div style={{ display: active === "psf" ? "block" : "none" }}>
@@ -597,6 +696,7 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+              runNoteId={runNoteIdFor("deconvolution")}
             />
           </div>
           <div style={{ display: active === "stretch" ? "block" : "none" }}>
@@ -614,6 +714,8 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+              runNoteId={runNoteIdFor("stretch")}
+              onRunLabelChange={runLabelReporters.stretch}
             />
           </div>
           <div style={{ display: active === "masked_stretch" ? "block" : "none" }}>
@@ -631,6 +733,7 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+              runNoteId={runNoteIdFor("masked_stretch")}
             />
           </div>
           <div style={{ display: active === "local_contrast" ? "block" : "none" }}>
@@ -648,6 +751,8 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+              runNoteId={runNoteIdFor("local_contrast")}
+              nonLinearNote={nonLinearInputNote("local_contrast", nonLinearInputOf("localContrast"))}
             />
           </div>
           <div style={{ display: active === "hdr" ? "block" : "none" }}>
@@ -665,6 +770,8 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+              runNoteId={runNoteIdFor("hdr")}
+              nonLinearNote={nonLinearInputNote("hdr", nonLinearInputOf("localContrast"))}
             />
           </div>
           <div style={{ display: active === "curves" ? "block" : "none" }}>
@@ -680,6 +787,8 @@ function ProcessingTabInner() {
               fileName={fileName}
               disabledReason={disabledReason}
               disabledReasonId={disabledReasonId}
+              runNoteId={runNoteIdFor("curves")}
+              nonLinearNote={nonLinearInputNote("curves", nonLinearInputOf("tone"))}
             />
           </div>
           <div style={{ display: active === "pixelmath" ? "block" : "none" }}>

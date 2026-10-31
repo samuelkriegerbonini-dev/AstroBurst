@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseDqMaskBuffer, parseFftBuffer, parseRawPixelBuffer, parseRawRgbPixelBuffer, toUint8Array } from "../parsers";
+import { parseDqMaskBuffer, parseFftBuffer, parseMaskPreviewBuffer, parseRawPixelBuffer, parseRawRgbPixelBuffer, toUint8Array } from "../parsers";
 
 function rawPixelPayload(width: number, height: number, min: number, max: number, pixels: number[]): ArrayBuffer {
   const buf = new ArrayBuffer(16 + pixels.length * 4);
@@ -243,6 +243,38 @@ describe("parseDqMaskBuffer", () => {
   it("accepts exactly 16 + w*h bytes", () => {
     const parsed = parseDqMaskBuffer(dqPayload(4, 4, 1, 1, new Array(16).fill(0)));
     expect(parsed.cells.length).toBe(16);
+  });
+});
+
+describe("parseMaskPreviewBuffer", () => {
+  function maskPreviewPayload(width: number, height: number, cells: number[]): ArrayBuffer {
+    const buf = new ArrayBuffer(16 + cells.length);
+    const view = new DataView(buf);
+    view.setUint32(0, width, true);
+    view.setUint32(4, height, true);
+    new Uint8Array(buf, 16).set(cells);
+    return buf;
+  }
+
+  it("parseMaskPreviewBuffer_reads_the_dq_layout", () => {
+    const parsed = parseMaskPreviewBuffer(maskPreviewPayload(3, 2, [0, 64, 128, 255, 1, 0]));
+    expect(Object.keys(parsed).sort()).toEqual(["cells", "height", "width"]);
+    expect([parsed.width, parsed.height]).toEqual([3, 2]);
+    expect(parsed.cells).toBeInstanceOf(Uint8Array);
+    expect(Array.from(parsed.cells)).toEqual([0, 64, 128, 255, 1, 0]);
+    expect(parsed.cells.byteOffset).toBe(16);
+
+    const longSide = parseMaskPreviewBuffer(maskPreviewPayload(2048, 2, new Array(4096).fill(255)));
+    expect([longSide.width, longSide.height, longSide.cells.length]).toEqual([2048, 2, 4096]);
+
+    const src = new Uint8Array(maskPreviewPayload(2, 1, [7, 9]));
+    const padded = new Uint8Array(src.length + 3);
+    padded.set(src, 3);
+    expect(Array.from(parseMaskPreviewBuffer(new Uint8Array(padded.buffer, 3, src.length)).cells)).toEqual([7, 9]);
+
+    expect(() => parseMaskPreviewBuffer(new ArrayBuffer(15))).toThrow("mask preview: response too small (15 bytes)");
+    expect(() => parseMaskPreviewBuffer(maskPreviewPayload(3, 2, [0, 1, 2, 3, 4]))).toThrow("mask preview: expected 22 bytes, got 21");
+    expect(() => parseDqMaskBuffer(maskPreviewPayload(3, 2, [0, 1, 2, 3, 4]))).toThrow("DQ mask: expected 22 bytes, got 21");
   });
 });
 

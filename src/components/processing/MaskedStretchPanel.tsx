@@ -12,7 +12,7 @@ import { useCompositeStf } from "../../context/CompositeContext";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { chainHoldsOutput } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
-import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice } from "./compositeProps";
+import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice, describedByIds } from "./compositeProps";
 import type { CompositePanelProps } from "./compositeProps";
 import { ITERATIONS_HINT, ITERATIONS_LABEL, stretchPassesSummary } from "./stretchPasses";
 
@@ -94,7 +94,7 @@ function percent(v: number): string {
   return `${(v * 100).toFixed(1)}%`;
 }
 
-export default function MaskedStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: MaskedStretchPanelProps) {
+export default function MaskedStretchPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId, runNoteId }: MaskedStretchPanelProps) {
   const initial = useRerunInitial("masked_stretch", paramsOf);
   const [params, setParams] = useState<MaskedStretchParams>(
     () =>
@@ -215,7 +215,7 @@ export default function MaskedStretchPanel({ selectedFile, outputDir = "./output
       </div>
 
       <div title={disabledReason ?? busyTitle}>
-        <RunButton label="Run Masked Stretch" runningLabel="Stretching..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="rose" onClick={handleRun} />
+        <RunButton label="Run Masked Stretch" runningLabel="Stretching..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={describedByIds(disabledReason ? disabledReasonId : null, runNoteId)} accent="rose" onClick={handleRun} />
       </div>
       <ErrorAlert message={error} />
 

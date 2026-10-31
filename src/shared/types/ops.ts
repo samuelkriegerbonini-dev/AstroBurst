@@ -1,5 +1,6 @@
 import type { DbeConfig } from "./dbe";
 import type { HdrConfig, LheConfig } from "./localContrast";
+import type { MaskSpec } from "./masks";
 
 export type OutputDomain = "linear" | "rescaled" | "display_referred";
 
@@ -128,6 +129,7 @@ export interface HistoryDoc {
   app: string;
   threads: number;
   masks: Record<string, unknown>;
+  deleted_masks?: string[];
   nodes: HistoryNode[];
 }
 
@@ -146,10 +148,17 @@ export interface HistoryState {
   busy: boolean;
 }
 
+export interface NodeMaskView {
+  id: string | null;
+  recipe: MaskSpec | null;
+  deleted: boolean;
+}
+
 export interface NodeView {
   id: string;
   parent: string | null;
   op: OpSpec;
+  mask?: NodeMaskView | null;
   fits_path: string;
   png_path: string;
   extras: string[];

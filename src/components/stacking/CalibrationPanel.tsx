@@ -11,6 +11,7 @@ import SmartChannelMapper from "../compose/SmartChannelMapper";
 import type { ChannelFile, CalibAssignment } from "../compose/SmartChannelMapper";
 import type { ProcessedFile } from "../../shared/types";
 import { displayFilterValue } from "../../utils/channelMapping";
+import { frameKindOf } from "../../utils/frameKind";
 import type { RunTarget } from "./StackingTab";
 
 export interface CalibrationMasters {
@@ -24,7 +25,12 @@ interface CalibrationPanelProps {
   files: ProcessedFile[];
   runTarget?: RunTarget | null;
   onCalibrationDone?: (result: CalibrateResult, masters: CalibrationMasters, sciencePath: string, target: RunTarget | null) => void;
+  onUseInPipeline?: (masters: CalibrationMasters) => void;
 }
+
+export const CALIBRATE_SCOPE_NOTE = "Calibrates one light; for a whole session use Pipeline";
+
+const NO_CALIB_FRAMES: CalibAssignment = { science: null, bias: [], dark: [], flat: [], flatdark: [] };
 
 function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
   return files.map((f) => ({
@@ -35,7 +41,41 @@ function toChannelFiles(files: ProcessedFile[]): ChannelFile[] {
     instrument: f.result?.header?.INSTRUME as string | undefined,
     exptime: f.result?.header?.EXPTIME as number | undefined,
     previewUrl: f.result?.previewUrl,
+    frameKind: frameKindOf(f.result?.header),
   }));
+}
+
+function calibrationMastersOf(assignment: CalibAssignment): CalibrationMasters {
+  return {
+    darkPaths: assignment.dark.map((f) => f.path),
+    flatPaths: assignment.flat.map((f) => f.path),
+    biasPaths: assignment.bias.map((f) => f.path),
+    flatDarkPaths: assignment.flatdark.map((f) => f.path),
+  };
+}
+
+function hasCalibrationFrames(masters: CalibrationMasters): boolean {
+  return masters.darkPaths.length + masters.flatPaths.length + masters.biasPaths.length + masters.flatDarkPaths.length > 0;
+}
+
+export function PipelineHandoff({ masters, onUse }: { masters: CalibrationMasters; onUse?: (masters: CalibrationMasters) => void }) {
+  const empty = !hasCalibrationFrames(masters);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-zinc-500 leading-snug">
+      <span>{CALIBRATE_SCOPE_NOTE}</span>
+      {onUse && (
+        <button
+          type="button"
+          onClick={() => onUse(masters)}
+          disabled={empty}
+          title={empty ? "Add bias, dark or flat frames first" : undefined}
+          className="px-2 py-0.5 rounded bg-cyan-600/15 text-cyan-300 hover:bg-cyan-600/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-cyan-600/15"
+        >
+          Use these frames in Pipeline
+        </button>
+      )}
+    </div>
+  );
 }
 
 export function CalibrationResultLines({ result }: { result: CalibrateResult }) {
@@ -56,14 +96,20 @@ export function CalibrationResultLines({ result }: { result: CalibrateResult }) 
   );
 }
 
-export default function CalibrationPanel({ files = [], runTarget = null, onCalibrationDone }: CalibrationPanelProps) {
+export default function CalibrationPanel({ files = [], runTarget = null, onCalibrationDone, onUseInPipeline }: CalibrationPanelProps) {
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [result, setResult] = useState<CalibrateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [assignment, setAssignment] = useState<CalibAssignment>(NO_CALIB_FRAMES);
   const progress = useProgress(CALIBRATE_PROGRESS_EVENT);
   const resetProgress = progress.reset;
 
   const channelFiles = useMemo(() => toChannelFiles(files), [files]);
+  const assignedMasters = useMemo(() => calibrationMastersOf(assignment), [assignment]);
+  const handoff = useMemo(
+    () => <PipelineHandoff masters={assignedMasters} onUse={onUseInPipeline} />,
+    [assignedMasters, onUseInPipeline],
+  );
 
   const handleCalibrate = useCallback(async (assignments: CalibAssignment) => {
     if (!assignments.science) return;
@@ -73,12 +119,7 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
     setError(null);
     setResult(null);
     resetProgress();
-    const masters: CalibrationMasters = {
-      darkPaths: assignments.dark.map((f) => f.path),
-      flatPaths: assignments.flat.map((f) => f.path),
-      biasPaths: assignments.bias.map((f) => f.path),
-      flatDarkPaths: assignments.flatdark.map((f) => f.path),
-    };
+    const masters = calibrationMastersOf(assignments);
     try {
       const res = await calibrate(sciencePath, await getOutputDir(), {
         biasPaths: masters.biasPaths.length > 0 ? masters.biasPaths : undefined,
@@ -101,6 +142,9 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
       <SmartChannelMapper
         mode="calibration"
         files={channelFiles}
+        calibAssignment={assignment}
+        onCalibAssignmentChange={setAssignment}
+        note={handoff}
         onCalibrate={handleCalibrate}
         isLoading={isCalibrating}
       />

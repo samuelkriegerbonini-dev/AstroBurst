@@ -13,10 +13,12 @@ import type {
   RunOpResult,
   StepCopyResult,
 } from "../shared/types/ops";
+import type { MaskChoice } from "../shared/types/masks";
 import { historyRerunStore } from "../utils/historyRerunStore";
 
 export interface RunOpOptions {
   psfKernel?: number[][] | null;
+  mask?: MaskChoice | null;
 }
 
 export interface RerunOptions {
@@ -40,7 +42,8 @@ async function withNodePreview<T extends { node: NodeView | null }>(view: T): Pr
 }
 
 export function runOp(scope: HistoryScope, inputPath: string, op: OpSpec, options: RunOpOptions = {}): Promise<RunOpResult> {
-  const args = { ...scopeArgs(scope), inputPath, op, psfKernel: options.psfKernel ?? null };
+  const mask = options.mask ?? null;
+  const args = { ...scopeArgs(scope), inputPath, op, psfKernel: options.psfKernel ?? null, ...(mask === null ? {} : { mask }) };
   return withPreview<RunOpResult>("run_op_cmd", undefined, args, RUN_PREVIEWS);
 }
 

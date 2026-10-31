@@ -32,3 +32,14 @@ export function historyKeyAction(e: HistoryKeyEvent, ctx: HistoryKeyContext): Hi
 export function isMacPlatform(platform: string): boolean {
   return /^mac/i.test(platform);
 }
+
+export interface HistoryMoveContext {
+  compositeMode: boolean;
+  fileName: string;
+}
+
+export function historyMoveBlock(ctx: HistoryMoveContext): string | null {
+  if (!ctx.compositeMode) return null;
+  const file = ctx.fileName || "the file";
+  return `A colour composite is on screen. Undo, Redo and Go to apply to single files: show ${file} to use its history. Revert to original in the viewer header undoes the composite's processing.`;
+}

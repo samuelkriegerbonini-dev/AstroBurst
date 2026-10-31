@@ -1,4 +1,4 @@
-import { useState, useCallback, useId, useMemo } from "react";
+import { useState, useCallback, useEffect, useId, useMemo } from "react";
 import type { WizardState } from "../wizard";
 import {
   ALIGN_OFFSET_TITLE,
@@ -13,16 +13,52 @@ import {
   nextAlignedRunState,
   rerunDiscards,
 } from "../../../utils/wizard";
-import { alignChannels } from "../../../services/compose";
-import type { AlignResult } from "../../../shared/types/compose";
+import { alignChannels, alignPlan } from "../../../services/compose";
+import type { AlignPlan, AlignResult } from "../../../shared/types/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useComposeWizardContext, type WizardAlignRun } from "../../../context/ComposeWizardContext";
 import { RunButton } from "../../ui";
 import AlignPreview from "../AlignPreview";
-import { ALIGN_REF_AUTO, ALIGN_REF_AUTO_LABEL, alignChannelNote, alignReferenceIndex } from "../../../utils/alignNotes";
+import {
+  ALIGN_METHODS,
+  ALIGN_REF_AUTO,
+  ALIGN_REF_AUTO_LABEL,
+  alignChannelNote,
+  alignMethodSelectLabel,
+  alignPlanChips,
+  alignReferenceIndex,
+  type AlignPlanChip,
+} from "../../../utils/alignNotes";
 
 function newAlignRunToken(): string {
   return `${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
+}
+
+const ALIGN_PLAN_CHIP_STYLES: Record<AlignPlanChip["kind"], string> = {
+  reference: "text-sky-400/80 bg-sky-500/10",
+  wcs: "text-emerald-400/80 bg-emerald-500/10",
+  fallback: "text-amber-400/90 bg-amber-500/10",
+};
+
+function useAlignPlan(paths: readonly string[], referenceIndex: number | null): AlignPlan | null {
+  const request = JSON.stringify({ paths, referenceIndex });
+  const [read, setRead] = useState<{ request: string; plan: AlignPlan | null } | null>(null);
+  useEffect(() => {
+    const inputs = JSON.parse(request) as { paths: string[]; referenceIndex: number | null };
+    if (inputs.paths.length < 2) return;
+    let cancelled = false;
+    alignPlan(inputs.paths, inputs.referenceIndex)
+      .then((plan) => {
+        if (!cancelled) setRead({ request, plan });
+      })
+      .catch(() => {
+        if (!cancelled) setRead({ request, plan: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [request]);
+  return read?.request === request ? read.plan : null;
 }
 
 interface AlignStepProps {
@@ -54,6 +90,7 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
   const alignedRun = nextRunState.run;
 
   const inputPaths = useMemo(() => channelPaths.map((c) => c.path), [channelPaths]);
+  const plan = useAlignPlan(inputPaths, referenceIndex);
   const { result, error } = alignRunOutcome(alignRun, inputPaths, alignedRun !== null);
   const refIndex = result ? result.reference_index ?? 0 : referenceIndex;
   const warnings = result?.warnings ?? [];
@@ -64,6 +101,8 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
   );
   const refBinId = refIndex === null ? undefined : channelPaths[refIndex]?.binId;
   const refLabel = refBinId === undefined ? undefined : binLabels[refBinId] ?? refBinId;
+  const planChips = alignPlanChips(plan, channelPaths.map((c) => binLabels[c.binId] ?? c.binId), method);
+  const rowChips = result ? null : planChips;
 
   const handleRefChange = useCallback(
     (value: string) => {
@@ -115,17 +154,19 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
   return (
     <div className="flex flex-wrap items-stretch gap-3 p-3 min-h-full">
       <div className="flex flex-col gap-3 flex-1 basis-[260px] min-w-[240px] max-w-[420px]">
-        <div className="flex items-center justify-between">
-          <label htmlFor={methodId} className="text-xs text-zinc-400">Method</label>
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor={methodId} className="text-xs text-zinc-400">{alignMethodSelectLabel(planChips)}</label>
           <select
             id={methodId}
+            data-testid="align-method-select"
             value={method}
             onChange={(e) => setMethod(e.target.value)}
             disabled={loading}
             className="ab-select"
           >
-            <option value="phase_correlation">Phase Correlation (sub-pixel)</option>
-            <option value="affine">Star-based Affine (rotation)</option>
+            {ALIGN_METHODS.map((m) => (
+              <option key={m.value} value={m.value}>{`${m.label} (${m.detail})`}</option>
+            ))}
           </select>
         </div>
 
@@ -157,13 +198,24 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
             const outcome = alignChannelOutcome(ch, requested, isReference);
             const note = alignChannelNote(ch, bin?.shortLabel ?? c.binId, requested, isReference, result?.reference_rule, refLabel);
             const match = alignMatchSummary(ch);
+            const chip = rowChips?.[i];
             return (
               <div key={c.binId} data-bin={c.binId} className="flex flex-col py-1">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full" style={{ background: bin?.color }} />
                     <span className="text-[10px] text-zinc-300">{bin?.shortLabel}</span>
-                    {isReference && <span data-testid="align-ref-tag" className="text-[8px] text-sky-400/60 ml-1">REF</span>}
+                    {isReference && !rowChips && <span data-testid="align-ref-tag" className="text-[8px] text-sky-400/60 ml-1">REF</span>}
+                    {chip && (
+                      <span
+                        data-testid={chip.kind === "reference" ? "align-ref-tag" : undefined}
+                        data-align-plan={chip.kind}
+                        title={chip.title}
+                        className={`text-[8px] px-1 py-px rounded ml-1 ${ALIGN_PLAN_CHIP_STYLES[chip.kind]}`}
+                      >
+                        {chip.text}
+                      </span>
+                    )}
                     {outcome.usedMethod && <span className="text-[8px] text-zinc-500">via {outcome.usedMethod}</span>}
                   </div>
                   <div className="flex items-center gap-2">

@@ -1,5 +1,5 @@
-import { getPreviewUrl, withPreview } from "../infrastructure/tauri";
-import type { CalibrateResult, StackResult, PipelineRequest, PipelineResult, CalibrateOptions, StackOptions, DrizzleRgbOptions, DrizzleRgbResult } from "../shared/types/stacking";
+import { getPreviewUrl, typedInvoke, withPreview } from "../infrastructure/tauri";
+import type { CalibrateResult, StackResult, PipelineRequest, PipelineResult, CalibrateOptions, StackOptions, DrizzleRgbOptions, DrizzleRgbResult, MosaicEstimate, MosaicRequest, MosaicResult } from "../shared/types/stacking";
 import { evaluateNoiseBatch } from "./statistics";
 import { noiseWeightsFromSigmas, type NoiseWeightSummary } from "../utils/noiseWeights";
 
@@ -54,6 +54,14 @@ export async function runCalibrationPipeline(
     (res.masters ?? []).map(async (master) => ({ ...master, previewUrl: await getPreviewUrl(master.png_path) })),
   );
   return { ...res, masters };
+}
+
+export function estimateMosaic(paths: string[], config: MosaicRequest): Promise<MosaicEstimate> {
+  return typedInvoke<MosaicEstimate>("mosaic_estimate_cmd", { paths, config });
+}
+
+export function runMosaic(paths: string[], outputDir: string | undefined, name: string | null, config: MosaicRequest): Promise<MosaicResult> {
+  return withPreview<MosaicResult>("mosaic_cmd", outputDir, { paths, name, config });
 }
 
 export const MIN_DRIZZLE_FRAMES_PER_CHANNEL = 2;

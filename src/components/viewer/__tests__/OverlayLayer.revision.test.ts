@@ -5,6 +5,7 @@ const WCS_COPY = "C:\\out\\m16_wcs.fits";
 
 const gridLinesMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 const wcsInfoMock = vi.hoisted(() => vi.fn<(path: string) => Promise<unknown>>());
+const host = vi.hoisted(() => ({ layerKey: null as string | null }));
 
 vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../../context/PreviewContext", () => ({
@@ -13,6 +14,10 @@ vi.mock("../../../context/PreviewContext", () => ({
 }));
 vi.mock("../../../hooks/useRegionKey", () => ({ useRegionKey: () => FILE }));
 vi.mock("../../../hooks/useOverlayStore", () => ({ useOverlayDoc: () => ({ layers: [] }) }));
+vi.mock("../../../context/OverlayLayerKeyContext", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../context/OverlayLayerKeyContext")>()),
+  useOverlayLayerKey: () => host.layerKey,
+}));
 vi.mock("../../../services/astrometry", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/astrometry")>()),
   gridLines: gridLinesMock,
@@ -49,7 +54,10 @@ describe("viewer overlay after Write WCS rewrites the displayed copy", () => {
     wcsInfoMock.mockReset().mockResolvedValue(INFO);
   });
 
-  afterEach(() => hooks.mount());
+  afterEach(() => {
+    host.layerKey = null;
+    hooks.mount();
+  });
 
   it("re-requests the grid and the compass of the displayed file when its WCS is rewritten in place", () => {
     render();
@@ -70,5 +78,12 @@ describe("viewer overlay after Write WCS rewrites the displayed copy", () => {
     rememberSolvedWcs("C:\\data\\other.fits", "C:\\out\\other_wcs.fits");
     render();
     expect(gridLinesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("composite_overlay_host_requests_no_wcs_grid_or_compass", () => {
+    host.layerKey = "__composite__";
+    render();
+    expect(gridLinesMock).not.toHaveBeenCalled();
+    expect(wcsInfoMock).not.toHaveBeenCalled();
   });
 });

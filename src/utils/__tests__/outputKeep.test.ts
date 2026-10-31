@@ -147,6 +147,25 @@ describe("outputKeepList", () => {
     expect(outputKeepList({ files: [], records: [record] })).toContain(node("n0001.fits"));
   });
 
+  it("output_keep_list_keeps_the_exported_mask_fits", () => {
+    const keep = outputKeepList({
+      files: [file("A")],
+      records: [],
+      maskExports: [`${OUT}/A_m01_mask.fits`, `${OUT}/A_m02_labels.fits`, `${OUT}\\A_m01_mask.fits`],
+    });
+    expect(keep).toEqual(expect.arrayContaining([`${OUT}/A_m01_mask.fits`, `${OUT}/A_m02_labels.fits`]));
+    expect(keep.filter((p) => p.toLowerCase().replace(/\\/g, "/").endsWith("/a_m01_mask.fits"))).toHaveLength(1);
+    expect(outputKeepList({ files: [file("A")], records: [] })).not.toContain(`${OUT}/A_m01_mask.fits`);
+  });
+
+  it("output_keep_list_keeps_every_file_written_by_a_session_mosaic", () => {
+    const written = [`${OUT}/m42_p1_Ha_mosaic3_20261031-090507-042.fits`, `${OUT}/m42_rgb_mosaic3_coverage.fits`, `${OUT}/m42_p1_Ha_mosaic3_20261031-090507-042.png`];
+    const keep = outputKeepList({ files: [file("A")], records: [], mosaicOutputs: [...written, written[0].replace(/\//g, "\\")] });
+    expect(keep).toEqual(expect.arrayContaining(written));
+    expect(keep.filter((p) => p.toLowerCase().replace(/\\/g, "/").endsWith("_mosaic3_20261031-090507-042.fits"))).toHaveLength(1);
+    expect(outputKeepList({ files: [file("A")], records: [] })).not.toContain(written[1]);
+  });
+
   it("strips plane fragments and collapses duplicates that differ only by case or slashes", () => {
     const f: KeepFile = { path: "D:/data/X.fits#hdu=2", sourcePath: "D:\\data\\X.fits", result: null };
     const keep = outputKeepList({ files: [f], records: [], previewUrls: [asset(`${OUT}/composite.png`)] });

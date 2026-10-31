@@ -27,7 +27,7 @@ vi.mock("../useDockLayout", () => ({ dockStore: { dispatch: dockOpen } }));
 import { EMPTY_CHAIN } from "../../utils/processingChain";
 import { EMPTY_HISTORY_SNAPSHOT, historyStore } from "../../utils/historyStore";
 import { runExclusive } from "../useProcessingRun";
-import { adoptRun, loadHistory, moveHead, removeBranch, requestRerun, revertToOriginal, type HistoryRender, type HistoryTarget } from "../useHistory";
+import { adoptRun, guardMove, loadHistory, moveHead, removeBranch, requestRerun, revertToOriginal, type HistoryRender, type HistoryTarget } from "../useHistory";
 import { historyRerunStore } from "../../utils/historyRerunStore";
 
 const DIR = "C:/app/history/3f9c0a1e5b7d2c44";
@@ -353,6 +353,38 @@ describe("undo and redo", () => {
   });
 });
 
+describe("guardMove", () => {
+  const REASON = "A colour composite is on screen. Undo, Redo and Go to apply to single files: show nrca1_i2d.fits to use its history.";
+
+  it("announces the reason and never starts a blocked head move", async () => {
+    const { render, target } = harness();
+    historyStore.set({ ...EMPTY_HISTORY_SNAPSHOT, fileKey: KEY, scope: target.scope, state: state("n0004") });
+    const move = vi.fn(() => moveHead(target, render, { kind: "undo" }));
+
+    await guardMove(REASON, move);
+
+    expect(move).not.toHaveBeenCalled();
+    expect(ops.undo).not.toHaveBeenCalled();
+    expect(render.publishProcessed).not.toHaveBeenCalled();
+    expect(announceMock.mock.calls).toEqual([[REASON]]);
+    expect(historyStore.get().state?.doc?.head).toBe("n0004");
+  });
+
+  it("runs the move unannounced when nothing blocks it", async () => {
+    const { render, target } = harness();
+    historyStore.set({ ...EMPTY_HISTORY_SNAPSHOT, fileKey: KEY, scope: target.scope, state: state("n0004") });
+    ops.undo.mockResolvedValue(view("n0003"));
+    ops.getHistory.mockResolvedValue(state("n0003"));
+    const move = vi.fn(() => moveHead(target, render, { kind: "undo" }));
+
+    await guardMove(null, move);
+
+    expect(move).toHaveBeenCalledTimes(1);
+    expect(ops.undo).toHaveBeenCalledWith(target.scope);
+    expect(announceMock.mock.calls).toEqual([["Undo: Curves"]]);
+  });
+});
+
 describe("loading and recorded runs", () => {
   it("restores the head of a saved history when the file has no result yet", async () => {
     const { render, target, published } = harness();
@@ -516,12 +548,50 @@ describe("loading and recorded runs", () => {
     expect(historyRerunStore.armed()?.node).toBe("n0002");
   });
 
-  it("a GHS step has no file panel to re-run in", async () => {
+  it("Re-run with restores the mask the step used from its node view", async () => {
+    const { render, target } = harness();
+    const recipe = { kind: "luminance", auto_stf: true, feather_px: 0, invert: false };
+    const masked = { ...NODES[1], mask: "m01" };
+    historyStore.set({ ...EMPTY_HISTORY_SNAPSHOT, fileKey: KEY, scope: target.scope, state: state("n0004") });
+    const shown = view("n0002");
+    ops.setHead.mockResolvedValue({ ...shown, node: shown.node ? { ...shown.node, mask: { id: "m01", recipe, deleted: true } } : null });
+    ops.getHistory.mockResolvedValue(state("n0002"));
+
+    expect(await requestRerun(target, render, masked, false)).toBe(true);
+
+    expect(historyRerunStore.peek("denoise")).toMatchObject({ node: "n0002", mask: { id: "m01", recipe, deleted: true } });
+  });
+
+  it("a downstream re-run restores the mask from the history and names a deleted one", async () => {
+    const { render, target } = harness();
+    const recipe = { kind: "range", lo: 0.2, hi: 0.8, feather_px: 0, invert: false };
+    const masked = { ...NODES[1], mask: "m02" };
+    const nodes = [NODES[0], masked, NODES[2], NODES[3]];
+    const known = state("n0004", nodes);
+    const withMasks = { ...known, doc: known.doc ? { ...known.doc, masks: { m02: recipe }, deleted_masks: ["m02"] } : null };
+    historyStore.set({ ...EMPTY_HISTORY_SNAPSHOT, fileKey: KEY, scope: target.scope, state: withMasks });
+
+    expect(await requestRerun(target, render, masked, true)).toBe(true);
+
+    expect(ops.setHead).not.toHaveBeenCalled();
+    expect(historyRerunStore.armed()).toMatchObject({ node: "n0002", mask: { id: "m02", recipe, deleted: true } });
+  });
+
+  it("an unmasked step re-runs with no mask", async () => {
+    const { render, target } = harness();
+    historyStore.set({ ...EMPTY_HISTORY_SNAPSHOT, fileKey: KEY, scope: target.scope, state: state("n0004") });
+
+    expect(await requestRerun(target, render, NODES[1], true)).toBe(true);
+
+    expect(historyRerunStore.armed()?.mask).toBeNull();
+  });
+
+  it("a GHS step re-runs in the Stretch section", async () => {
     const { render, target } = harness();
     const ghs = node("n0009", null, { op: "ghs", v: 1, d: 5, b: 2, sp: 0.05, lp: 0, hp: 1 });
-    expect(await requestRerun(target, render, ghs, false)).toBe(false);
+    expect(await requestRerun(target, render, ghs, true)).toBe(true);
     expect(ops.setHead).not.toHaveBeenCalled();
-    expect(historyRerunStore.get()).toBeNull();
+    expect(historyRerunStore.armed()).toMatchObject({ section: "stretch", node: "n0009", op: ghs.op, downstream: true });
   });
 
   it("deleting a branch shows the head that remains", async () => {

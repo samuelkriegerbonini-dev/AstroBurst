@@ -15,6 +15,7 @@ import {
   GripVertical,
   Wand2,
   ChevronDown,
+  Check,
 } from "lucide-react";
 import { RunButton, SectionHeader } from "../ui";
 import { filterCodeAndWavelengthNm } from "../../utils/filterWavelengths";
@@ -24,6 +25,7 @@ import {
   resolveFilterFromName,
   splitSpectralThirds,
 } from "../../utils/channelMapping";
+import { FRAME_KIND_NAMES, isCalibrationKind, type FrameKind } from "../../utils/frameKind";
 
 export interface ChannelFile {
   id: string;
@@ -33,10 +35,12 @@ export interface ChannelFile {
   instrument?: string;
   exptime?: number;
   previewUrl?: string;
+  frameKind?: FrameKind;
 }
 
 export type ChannelSlot = "L" | "R" | "G" | "B";
 export type CalibSlot = "science" | "bias" | "dark" | "flat" | "flatdark";
+export type CalibFrameSlot = Exclude<CalibSlot, "science">;
 export type MapperMode = "rgb" | "calibration";
 
 export interface ChannelAssignment {
@@ -75,6 +79,25 @@ interface SmartChannelMapperProps {
   } | null;
   selectedPalette?: string;
   onPaletteChange?: (palette: string) => void;
+  calibAssignment?: CalibAssignment;
+  onCalibAssignmentChange?: React.Dispatch<React.SetStateAction<CalibAssignment>>;
+  note?: React.ReactNode;
+}
+
+const NO_CALIB_FRAMES: CalibAssignment = { science: null, bias: [], dark: [], flat: [], flatdark: [] };
+const CALIB_FRAME_SLOTS: readonly CalibFrameSlot[] = ["bias", "dark", "flat", "flatdark"];
+const VISIBLE_FRAMES = 5;
+
+export function toggleCalibFrame(assignment: CalibAssignment, slot: CalibFrameSlot, file: ChannelFile): CalibAssignment {
+  const frames = assignment[slot];
+  const next = frames.some((f) => f.id === file.id) ? frames.filter((f) => f.id !== file.id) : [...frames, file];
+  return { ...assignment, [slot]: next };
+}
+
+export function withAllFramesOfKind(assignment: CalibAssignment, slot: CalibFrameSlot, files: readonly ChannelFile[]): CalibAssignment {
+  const present = new Set(assignment[slot].map((f) => f.id));
+  const missing = files.filter((f) => f.frameKind === slot && !present.has(f.id));
+  return missing.length === 0 ? assignment : { ...assignment, [slot]: [...assignment[slot], ...missing] };
 }
 
 const CHANNEL_META: Record<ChannelSlot, { color: string; label: string; bg: string; border: string }> = {
@@ -84,12 +107,12 @@ const CHANNEL_META: Record<ChannelSlot, { color: string; label: string; bg: stri
   B: { color: "#3b82f6", label: "Blue", bg: "rgba(59,130,246,0.06)", border: "rgba(59,130,246,0.25)" },
 };
 
-const CALIB_META: Record<CalibSlot, { color: string; label: string; bg: string; border: string; multi: boolean }> = {
-  science: { color: "#f59e0b", label: "Science", bg: "rgba(245,158,11,0.06)", border: "rgba(245,158,11,0.25)", multi: false },
-  bias: { color: "#a78bfa", label: "Bias", bg: "rgba(167,139,250,0.06)", border: "rgba(167,139,250,0.2)", multi: true },
-  dark: { color: "#60a5fa", label: "Dark", bg: "rgba(96,165,250,0.06)", border: "rgba(96,165,250,0.2)", multi: true },
-  flat: { color: "#fbbf24", label: "Flat", bg: "rgba(251,191,36,0.06)", border: "rgba(251,191,36,0.2)", multi: true },
-  flatdark: { color: "#f472b6", label: "Flat dark", bg: "rgba(244,114,182,0.06)", border: "rgba(244,114,182,0.2)", multi: true },
+const CALIB_META: Record<CalibSlot, { color: string; label: string; bg: string; border: string }> = {
+  science: { color: "#f59e0b", label: "Science", bg: "rgba(245,158,11,0.06)", border: "rgba(245,158,11,0.25)" },
+  bias: { color: "#a78bfa", label: "Bias", bg: "rgba(167,139,250,0.06)", border: "rgba(167,139,250,0.2)" },
+  dark: { color: "#60a5fa", label: "Dark", bg: "rgba(96,165,250,0.06)", border: "rgba(96,165,250,0.2)" },
+  flat: { color: "#fbbf24", label: "Flat", bg: "rgba(251,191,36,0.06)", border: "rgba(251,191,36,0.2)" },
+  flatdark: { color: "#f472b6", label: "Flat dark", bg: "rgba(244,114,182,0.06)", border: "rgba(244,114,182,0.2)" },
 };
 
 const PALETTE_PRESETS = [
@@ -157,6 +180,31 @@ interface DropZoneSlotProps {
   allFiles: ChannelFile[];
   multi?: boolean;
   count?: number;
+  frames?: ChannelFile[];
+  onToggle?: (slot: string, file: ChannelFile) => void;
+  children?: React.ReactNode;
+}
+
+function CalibFrameList({ frames, label, onRemove }: { frames: ChannelFile[]; label: string; onRemove: (file: ChannelFile) => void }) {
+  return (
+    <ul className="flex flex-col">
+      {frames.map((f) => (
+        <li key={f.id} className="flex items-center gap-1.5 py-0.5">
+          <span className="ab-channel-filename min-w-0 flex-1" title={f.name}>{f.name}</span>
+          {f.exptime != null && <span className="ab-channel-exptime shrink-0">{f.exptime}s</span>}
+          <button
+            type="button"
+            className="ab-channel-clear"
+            aria-label={`Remove ${f.name} from ${label}`}
+            title={`Remove ${f.name}`}
+            onClick={() => onRemove(f)}
+          >
+            <X size={10} />
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 function DropZoneSlot({
@@ -171,10 +219,32 @@ function DropZoneSlot({
   allFiles,
   multi = false,
   count = 0,
+  frames = [],
+  onToggle,
+  children,
 }: DropZoneSlotProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const togglesFrames = multi && onToggle !== undefined;
+  const rowIds = useMemo(() => new Set(frames.map((f) => f.id)), [frames]);
+
+  const pick = (picked: ChannelFile) => {
+    if (togglesFrames && onToggle) {
+      onToggle(slot, picked);
+      return;
+    }
+    onDrop(slot, picked);
+    setShowDropdown(false);
+  };
+
+  const closeOnEscape = (e: React.KeyboardEvent) => {
+    if (e.key !== "Escape" || !showDropdown) return;
+    e.stopPropagation();
+    setShowDropdown(false);
+    toggleRef.current?.focus();
+  };
 
   useEffect(() => {
     if (!showDropdown) return;
@@ -208,95 +278,123 @@ function DropZoneSlot({
   );
 
   return (
-    <div className="ab-channel-slot-wrapper" ref={dropdownRef}>
-      <div
-        className={`ab-channel-slot ${isDragOver ? "ab-channel-slot-dragover" : ""} ${file ? "ab-channel-slot-filled" : ""}`}
-        style={{
-          borderColor: isDragOver ? color : file ? border : "rgba(63,63,70,0.3)",
-          background: isDragOver ? `${color}12` : file ? bg : "rgba(24,24,32,0.5)",
-        }}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-      >
-        <div className="ab-channel-indicator" style={{ background: color }} />
+    <div className="ab-channel-slot-wrapper" ref={dropdownRef} onKeyDown={closeOnEscape}>
+      <div className="relative">
+        <div
+          className={`ab-channel-slot ${isDragOver ? "ab-channel-slot-dragover" : ""} ${file ? "ab-channel-slot-filled" : ""}`}
+          style={{
+            borderColor: isDragOver ? color : file ? border : "rgba(63,63,70,0.3)",
+            background: isDragOver ? `${color}12` : file ? bg : "rgba(24,24,32,0.5)",
+          }}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          <div className="ab-channel-indicator" style={{ background: color }} />
 
-        <div className="ab-channel-label">
-          <span className="ab-channel-letter" style={{ color }}>{slot}</span>
-          <span className="ab-channel-name">{label}</span>
-        </div>
+          <div className="ab-channel-label">
+            <span className="ab-channel-letter" style={{ color }}>{slot}</span>
+            <span className="ab-channel-name">{label}</span>
+          </div>
 
-        {file ? (
-          <div className="ab-channel-file-info">
-            {file.previewUrl && (
-              <img src={file.previewUrl} alt="" className="ab-channel-thumb" />
-            )}
-            <div className="ab-channel-file-detail">
-              <span className="ab-channel-filename" title={file.name}>{file.name}</span>
-              <div className="ab-channel-meta-row">
-                {multi && count > 1 && (
-                  <span className="ab-channel-exptime" style={{ color }}>{count} frames</span>
-                )}
-                {file.filter && <FilterChip filter={file.filter} color={color} />}
-                {file.exptime != null && (
-                  <span className="ab-channel-exptime">{file.exptime}s</span>
+          {file ? (
+            <div className="ab-channel-file-info">
+              {!togglesFrames && file.previewUrl && (
+                <img src={file.previewUrl} alt="" className="ab-channel-thumb" />
+              )}
+              <div className="ab-channel-file-detail">
+                {togglesFrames ? (
+                  <span className="text-[11px] font-medium text-zinc-300">{`${count} frame${count === 1 ? "" : "s"}`}</span>
+                ) : (
+                  <>
+                    <span className="ab-channel-filename" title={file.name}>{file.name}</span>
+                    <div className="ab-channel-meta-row">
+                      {file.filter && <FilterChip filter={file.filter} color={color} />}
+                      {file.exptime != null && (
+                        <span className="ab-channel-exptime">{file.exptime}s</span>
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
-            </div>
-            {multi && (
+              {multi && (
+                <button
+                  ref={toggleRef}
+                  className="ab-channel-browse"
+                  style={{ flex: "0 0 auto", width: "auto", padding: "2px 6px" }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowDropdown((v) => !v);
+                  }}
+                  title={togglesFrames ? `Pick ${label.toLowerCase()} frames` : "Add another frame"}
+                  aria-expanded={togglesFrames ? showDropdown : undefined}
+                >
+                  <ChevronDown size={12} />
+                  <span>+</span>
+                </button>
+              )}
               <button
-                className="ab-channel-browse"
-                style={{ flex: "0 0 auto", width: "auto", padding: "2px 6px" }}
+                className="ab-channel-clear"
                 onClick={(e) => {
                   e.stopPropagation();
-                  setShowDropdown((v) => !v);
+                  onClear(slot);
                 }}
-                title="Add another frame"
+                title={multi && count > 1 ? `Clear all ${count} frames` : "Remove"}
               >
-                <ChevronDown size={12} />
-                <span>+</span>
+                <X size={12} />
               </button>
-            )}
+            </div>
+          ) : (
             <button
-              className="ab-channel-clear"
-              onClick={(e) => {
-                e.stopPropagation();
-                onClear(slot);
-              }}
-              title={multi && count > 1 ? `Clear all ${count} frames` : "Remove"}
+              ref={toggleRef}
+              className="ab-channel-browse"
+              onClick={() => setShowDropdown((v) => !v)}
+              aria-expanded={togglesFrames ? showDropdown : undefined}
             >
-              <X size={12} />
+              <ChevronDown size={12} />
+              <span>Drop file or select</span>
             </button>
+          )}
+        </div>
+
+        {showDropdown && (
+          <div className="ab-channel-dropdown">
+            {allFiles.length === 0 ? (
+              <div className="ab-channel-dropdown-empty">No files available</div>
+            ) : (
+              allFiles.map((f) => (
+                <button
+                  key={f.id}
+                  className="ab-channel-dropdown-item"
+                  aria-pressed={togglesFrames ? rowIds.has(f.id) : undefined}
+                  onClick={() => pick(f)}
+                >
+                  <span className="truncate">{f.name}</span>
+                  {togglesFrames ? (
+                    <span className="flex items-center gap-1 shrink-0">
+                      {f.filter && <FilterChip filter={f.filter} color={color} />}
+                      <Check size={11} aria-hidden="true" className={rowIds.has(f.id) ? "" : "invisible"} style={{ color }} />
+                    </span>
+                  ) : (
+                    f.filter && <FilterChip filter={f.filter} color={color} />
+                  )}
+                </button>
+              ))
+            )}
           </div>
-        ) : (
-          <button
-            className="ab-channel-browse"
-            onClick={() => setShowDropdown((v) => !v)}
-          >
-            <ChevronDown size={12} />
-            <span>Drop file or select</span>
-          </button>
         )}
       </div>
 
-      {showDropdown && (
-        <div className="ab-channel-dropdown">
-          {allFiles.length === 0 ? (
-            <div className="ab-channel-dropdown-empty">No files available</div>
-          ) : (
-            allFiles.map((f) => (
-              <button
-                key={f.id}
-                className="ab-channel-dropdown-item"
-                onClick={() => {
-                  onDrop(slot, f);
-                  setShowDropdown(false);
-                }}
-              >
-                <span className="truncate">{f.name}</span>
-                {f.filter && <FilterChip filter={f.filter} color={color} />}
-              </button>
-            ))
+      {children}
+
+      {togglesFrames && frames.length > 0 && (
+        <div className="mt-1 ml-3 flex flex-col">
+          <CalibFrameList frames={frames.slice(0, VISIBLE_FRAMES)} label={label} onRemove={pick} />
+          {frames.length > VISIBLE_FRAMES && (
+            <details>
+              <summary className="cursor-pointer text-[10px] text-zinc-500 hover:text-zinc-300">{`${frames.length - VISIBLE_FRAMES} more`}</summary>
+              <CalibFrameList frames={frames.slice(VISIBLE_FRAMES)} label={label} onRemove={pick} />
+            </details>
           )}
         </div>
       )}
@@ -316,13 +414,16 @@ function SmartChannelMapper({
   paletteSuggestion,
   selectedPalette = "SHO",
   onPaletteChange,
+  calibAssignment,
+  onCalibAssignmentChange,
+  note,
 }: SmartChannelMapperProps) {
   const [channels, setChannels] = useState<ChannelAssignment>({
     L: null, R: null, G: null, B: null,
   });
-  const [calibFrames, setCalibFrames] = useState<CalibAssignment>({
-    science: null, bias: [], dark: [], flat: [], flatdark: [],
-  });
+  const [ownCalibFrames, setOwnCalibFrames] = useState<CalibAssignment>(NO_CALIB_FRAMES);
+  const calibFrames = calibAssignment ?? ownCalibFrames;
+  const setCalibFrames = onCalibAssignmentChange ?? setOwnCalibFrames;
   const [autoMapSource, setAutoMapSource] = useState<"metadata" | "filename" | "palette" | null>(null);
 
   const onAssignmentChangeRef = useRef(onAssignmentChange);
@@ -345,7 +446,7 @@ function SmartChannelMapper({
         return { ...prev, [s]: [...existing, file] };
       });
     }
-  }, [mode]);
+  }, [mode, setCalibFrames]);
 
   const clearChannel = useCallback((slot: string) => {
     if (mode === "rgb") {
@@ -356,7 +457,23 @@ function SmartChannelMapper({
         s === "science" ? { ...prev, science: null } : { ...prev, [s]: [] },
       );
     }
-  }, [mode]);
+  }, [mode, setCalibFrames]);
+
+  const toggleCalibSlotFrame = useCallback((slot: string, file: ChannelFile) => {
+    setCalibFrames((prev) => toggleCalibFrame(prev, slot as CalibFrameSlot, file));
+  }, [setCalibFrames]);
+
+  const addAllFramesOfKind = useCallback((slot: CalibFrameSlot) => {
+    setCalibFrames((prev) => withAllFramesOfKind(prev, slot, files));
+  }, [files, setCalibFrames]);
+
+  const framesOfKind = useMemo(() => {
+    const counts: Record<CalibFrameSlot, number> = { bias: 0, dark: 0, flat: 0, flatdark: 0 };
+    for (const f of files) {
+      if (f.frameKind && isCalibrationKind(f.frameKind)) counts[f.frameKind] += 1;
+    }
+    return counts;
+  }, [files]);
 
   const swapChannels = useCallback((a: ChannelSlot, b: ChannelSlot) => {
     setChannels((prev) => ({ ...prev, [a]: prev[b], [b]: prev[a] }));
@@ -488,6 +605,8 @@ function SmartChannelMapper({
         )}
       </div>
 
+      {note}
+
       {mode === "rgb" && (
         <div className="ab-palette-selector">
           {PALETTE_PRESETS.map((p) => (
@@ -541,22 +660,52 @@ function SmartChannelMapper({
         </div>
       ) : (
         <div className="ab-mapper-slots">
-          {(["science", "bias", "dark", "flat", "flatdark"] as CalibSlot[]).map((slot) => (
-            <DropZoneSlot
-              key={slot}
-              slot={slot}
-              label={CALIB_META[slot].label}
-              color={CALIB_META[slot].color}
-              bg={CALIB_META[slot].bg}
-              border={CALIB_META[slot].border}
-              file={slot === "science" ? calibFrames.science : (calibFrames[slot] as ChannelFile[])[0] ?? null}
-              onDrop={assignChannel}
-              onClear={clearChannel}
-              allFiles={files}
-              multi={CALIB_META[slot].multi}
-              count={slot === "science" ? (calibFrames.science ? 1 : 0) : (calibFrames[slot] as ChannelFile[]).length}
-            />
-          ))}
+          <DropZoneSlot
+            slot="science"
+            label={CALIB_META.science.label}
+            color={CALIB_META.science.color}
+            bg={CALIB_META.science.bg}
+            border={CALIB_META.science.border}
+            file={calibFrames.science}
+            onDrop={assignChannel}
+            onClear={clearChannel}
+            allFiles={files}
+            count={calibFrames.science ? 1 : 0}
+          />
+          {CALIB_FRAME_SLOTS.map((slot) => {
+            const frames = calibFrames[slot];
+            const ofKind = framesOfKind[slot];
+            const allIn = withAllFramesOfKind(calibFrames, slot, files) === calibFrames;
+            return (
+              <DropZoneSlot
+                key={slot}
+                slot={slot}
+                label={CALIB_META[slot].label}
+                color={CALIB_META[slot].color}
+                bg={CALIB_META[slot].bg}
+                border={CALIB_META[slot].border}
+                file={frames[0] ?? null}
+                onDrop={assignChannel}
+                onClear={clearChannel}
+                allFiles={files}
+                multi
+                count={frames.length}
+                frames={frames}
+                onToggle={toggleCalibSlotFrame}
+              >
+                {ofKind > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => addAllFramesOfKind(slot)}
+                    disabled={allIn}
+                    className="mt-1 ml-3 text-[10px] text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400"
+                  >
+                    {`Add all ${FRAME_KIND_NAMES[slot]} frames (${ofKind})`}
+                  </button>
+                )}
+              </DropZoneSlot>
+            );
+          })}
         </div>
       )}
 

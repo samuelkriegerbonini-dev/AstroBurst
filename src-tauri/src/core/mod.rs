@@ -12,6 +12,7 @@ pub mod pixelmath;
 pub mod ramp;
 pub mod ops;
 pub mod history;
+pub mod mask;
 pub mod registration;
 #[cfg(feature = "mast")]
 pub mod mast;

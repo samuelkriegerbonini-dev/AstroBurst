@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ClipboardCopy, Crosshair, Database, Download, Loader2, Shapes } from "lucide-react";
 import { catalogConeSearch, catalogCrossMatch, catalogExportCsv, type CatalogExportItems } from "../../services/catalog";
+import { useTimedNotice } from "../../hooks/useTimedNotice";
 import { GAIA_BANDS } from "../../shared/types/catalog";
 import type { CatalogCsvKind, ConeSearchResult, CrossMatchResult, GaiaBand, PlacedCatalogRow } from "../../shared/types/catalog";
 import { overlayStore } from "../../utils/overlayStore";
@@ -64,7 +65,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
   const [matching, setMatching] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [savedPath, showSavedPath] = useTimedNotice<string>(SAVED_NOTICE_MS);
   const [overlay, setOverlay] = useState(false);
   const [labels, setLabels] = useState(false);
   const [hoverId, setHoverId] = useState<string | null>(null);
@@ -195,15 +196,14 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
         });
         if (!target) return;
         const result = await catalogExportCsv(wcsPath, target, items);
-        setSavedPath(result.output_path);
-        setTimeout(() => setSavedPath(null), SAVED_NOTICE_MS);
+        showSavedPath(result.output_path);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
         setExporting(false);
       }
     },
-    [wcsPath, exportItems, exporting],
+    [wcsPath, exportItems, exporting, showSavedPath],
   );
 
   const copyCsv = useCallback(

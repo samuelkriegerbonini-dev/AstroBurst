@@ -62,6 +62,16 @@ export function focusStripButton(button: StripButton | null | undefined): void {
   if (button.closest(".ab-dock-strip")) button.scrollIntoView({ block: "nearest" });
 }
 
+interface OnboardingAnchor {
+  getAttribute(name: string): string | null;
+  closest(selector: string): unknown;
+}
+
+export function onboardingAnchorReady(anchor: OnboardingAnchor | null | undefined): boolean {
+  if (!anchor) return false;
+  return anchor.getAttribute("aria-disabled") !== "true" && anchor.closest("[inert]") === null;
+}
+
 export type AnchorTools = Record<DockAnchor, DockToolId | null>;
 
 function isBottom(anchor: DockAnchor): anchor is BottomAnchor {

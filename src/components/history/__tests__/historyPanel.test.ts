@@ -68,6 +68,7 @@ function render(props: Partial<HistoryPanelViewProps>): string {
       snapshot: snapshot(null),
       estimate: null,
       fileName: "nrca1_i2d.fits",
+      blockedReason: null,
       onGoTo: noop,
       onRerun: noop,
       onDelete: noop,
@@ -82,6 +83,12 @@ function render(props: Partial<HistoryPanelViewProps>): string {
 
 function rowOrder(html: string): string[] {
   return [...html.matchAll(/data-history-row="([^"]+)"/g)].map((m) => m[1]);
+}
+
+function buttonTag(html: string, label: string): string {
+  const tag = [...html.matchAll(/<button[^>]*>/g)].map((m) => m[0]).find((t) => t.includes(`aria-label="${label}"`));
+  if (!tag) throw new Error(`no button labelled ${label}`);
+  return tag;
 }
 
 const BRANCHED = doc(
@@ -128,6 +135,21 @@ describe("HistoryPanelView", () => {
     expect(html).toContain("Export history JSON");
   });
 
+  it("names the mask of a masked step in its row, and says when that mask was deleted", () => {
+    const luma = { kind: "luminance", auto_stf: false, feather_px: 0, invert: false };
+    const range = { kind: "range", lo: 0.1, hi: 0.9, feather_px: 0, invert: false };
+    const masked = {
+      ...doc([node("n0001", null, BACKGROUND), { ...node("n0002", "n0001", DENOISE), mask: "m01" }, { ...node("n0003", "n0002", ARCSINH), mask: "m02" }], "n0003"),
+      masks: { m01: luma, m02: range },
+      deleted_masks: ["m02"],
+    };
+    const html = render({ snapshot: snapshot(masked) });
+    expect(html).toMatch(/data-history-row="n0002"[\s\S]*?>Wavelet Denoise · mask m01</);
+    expect(html).toContain('title="Show Wavelet Denoise · mask m01 (n0002)"');
+    expect(html).toMatch(/data-history-row="n0003"[\s\S]*?>Arcsinh Stretch · mask m02 \(deleted\)</);
+    expect(html).toMatch(/data-history-row="n0001"[\s\S]*?>Background Extraction</);
+  });
+
   it("enables undo and redo from the head position", () => {
     const atHead = render({ snapshot: snapshot(doc(BRANCHED.nodes, "n0007")) });
     expect(atHead).toMatch(/<button[^>]*data-history-undo=""(?![^>]*disabled="")/);
@@ -137,6 +159,35 @@ describe("HistoryPanelView", () => {
     expect(rowOrder(atRoot)).toEqual(["root", "n0001", "n0002", "n0003", "n0004", "n0005", "n0006", "n0007"]);
     expect(atRoot).toMatch(/data-history-row="n0005"[^>]*data-undone="true"/);
     expect(atRoot).toMatch(/data-history-row="root"[^>]*aria-current="step"/);
+  });
+
+  it("with a colour composite on screen, disables Undo, Redo, every Go to and both Re-run buttons and says why in a note", () => {
+    const reason =
+      "A colour composite is on screen. Undo, Redo and Go to apply to single files: show 673nmos.fits to use its history. Revert to original in the viewer header undoes the composite's processing.";
+    const html = render({ snapshot: snapshot(doc(BRANCHED.nodes, "n0006")), blockedReason: reason });
+    expect(html).toMatch(/<button[^>]*data-history-undo=""[^>]*disabled=""/);
+    expect(html).toMatch(/<button[^>]*data-history-redo=""[^>]*disabled=""/);
+    for (const label of ["Go to n0001", "Go to n0002", "Go to n0007", "Go to the original image"]) {
+      expect(buttonTag(html, label), label).toContain('disabled=""');
+    }
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*Revert to original/);
+    expect(html).toMatch(/<div role="note"[^>]*>A colour composite is on screen\. Undo, Redo and Go to apply to single files: show 673nmos\.fits/);
+    expect(html.indexOf('role="note"')).toBeLessThan(html.indexOf('data-history-row="root"'));
+    for (const label of ["Re-run n0005 with other settings", "Re-run n0005 and re-apply the steps after it", "Re-run n0001 with other settings"]) {
+      expect(buttonTag(html, label), label).toContain('disabled=""');
+    }
+    expect(buttonTag(html, "Delete n0005 and the steps after it")).not.toContain('disabled=""');
+  });
+
+  it("keeps Undo, Redo and Go to enabled and shows no composite note on a single file", () => {
+    const html = render({ snapshot: snapshot(doc(BRANCHED.nodes, "n0006")) });
+    expect(html).toMatch(/<button[^>]*data-history-undo=""(?![^>]*disabled="")/);
+    expect(html).toMatch(/<button[^>]*data-history-redo=""(?![^>]*disabled="")/);
+    for (const label of ["Go to n0001", "Go to n0007", "Go to the original image", "Re-run n0005 with other settings", "Re-run n0005 and re-apply the steps after it"]) {
+      expect(buttonTag(html, label), label).not.toContain('disabled=""');
+    }
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*Revert to original/);
+    expect(html).not.toContain("colour composite");
   });
 
   it("says why a history is read-only, why a changed source cannot replay, and what is empty", () => {

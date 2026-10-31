@@ -203,3 +203,56 @@ describe("CurvesPanel in composite mode", () => {
     expect(html).not.toContain("Curve applied");
   });
 });
+
+describe("CurvesPanel on a linear input", () => {
+  const LINEAR_NOTE = "No stretch step in this chain: if the input is linear, Curves applies an automatic STF first, then your levels and curve.";
+
+  function inputNote(html: string): { id: string; text: string } | null {
+    const match = /<div id="([^"]+)" role="note" data-non-linear-input=""[^>]*>([^<]*)<\/div>/.exec(html);
+    return match ? { id: match[1], text: match[2] } : null;
+  }
+
+  it("says before Run that a linear input gets an automatic STF and describes Apply Curves with it", () => {
+    const html = renderStateful(fileOf("linear-note", false), { nonLinearNote: LINEAR_NOTE });
+    const note = inputNote(html);
+    expect(note?.text).toBe(LINEAR_NOTE);
+    expect(String(runButton()["aria-describedby"]).split(" ")).toContain(note?.id);
+  });
+
+  it("keeps the note on an RGB FITS, which Curves handles", () => {
+    const html = renderView(fileOf("linear-rgb", true), { points: MOVED_CURVE }, { nonLinearNote: LINEAR_NOTE, disabledReason: RGB_FITS_NOTICE });
+    expect(inputNote(html)?.text).toBe(LINEAR_NOTE);
+  });
+
+  it("shows no note on the composite, where Curves does not run", () => {
+    const html = renderStateful(fileOf("linear-composite", false), { nonLinearNote: LINEAR_NOTE, compositeMode: true });
+    expect(inputNote(html)).toBeNull();
+    expect(runButton()["aria-describedby"]).toBeUndefined();
+  });
+
+  it("says after the run that the auto-STF ran before the curve when the backend normalized the input", async () => {
+    const file = fileOf("linear-result", false);
+    const out = "C:/out/linear-result_tone.fits";
+    const onProcessingDone = vi.fn();
+    applyToneFileMock.mockResolvedValue({ ...toneResult(out, false), input_normalized: { min: 0, max: 812.5 } });
+    renderView(file, { points: MOVED_CURVE }, { onProcessingDone });
+    (runButton().onClick as () => void)();
+    await vi.waitFor(() => expect(onProcessingDone).toHaveBeenCalledTimes(1));
+    showToneOutput(file, out);
+    await vi.waitFor(() => expect(renderView(file, { points: MOVED_CURVE })).toContain("Curve applied"));
+    expect(renderView(file, { points: MOVED_CURVE })).toContain("Auto-STF applied before the curve");
+  });
+
+  it("says nothing about an auto-STF after a run on a display-referred input", async () => {
+    const file = fileOf("display-result", false);
+    const out = "C:/out/display-result_tone.fits";
+    const onProcessingDone = vi.fn();
+    applyToneFileMock.mockResolvedValue(toneResult(out, false));
+    renderView(file, { points: MOVED_CURVE }, { onProcessingDone });
+    (runButton().onClick as () => void)();
+    await vi.waitFor(() => expect(onProcessingDone).toHaveBeenCalledTimes(1));
+    showToneOutput(file, out);
+    await vi.waitFor(() => expect(renderView(file, { points: MOVED_CURVE })).toContain("Curve applied"));
+    expect(renderView(file, { points: MOVED_CURVE })).not.toContain("Auto-STF");
+  });
+});

@@ -114,3 +114,53 @@ describe("HistogramPanel manual prefill of the current STF (followups-9 repair)"
     expect(stfDraftFields(draft).error).toBe("M: Use a value from 0.0001 to 0.9999");
   });
 });
+
+describe("HistogramPanel STF state readout (SF-01)", () => {
+  const AUTO = { shadow: 0.004321, midtone: 0.008467, highlight: 1 };
+  const LOCK = "STF applies only to the mtf stretch";
+
+  function buttonWith(markup: string, inner: string): string {
+    return markup.split("<button").find((chunk) => chunk.includes(inner)) ?? "";
+  }
+
+  it("starts the readout with 'Auto STF' and presses Auto in its active colour when the STF is the auto STF", () => {
+    const markup = render({ autoStf: AUTO, ...AUTO });
+    expect(markup).toContain('data-stf-state="auto"');
+    expect(markup).toContain(">Auto STF</div>");
+    expect(markup.indexOf("Auto STF")).toBeLessThan(markup.indexOf("S: "));
+    const auto = buttonWith(markup, "<span>Auto</span>");
+    expect(auto).toContain('aria-pressed="true"');
+    expect(auto).toContain("color:var(--ab-blue)");
+  });
+
+  it("says 'Linear' for 0 / 0.5 / 1 and leaves Auto unpressed", () => {
+    const markup = render({ autoStf: AUTO, shadow: 0, midtone: 0.5, highlight: 1 });
+    expect(markup).toContain('data-stf-state="linear"');
+    expect(markup).toContain(">Linear</div>");
+    expect(markup).not.toContain("Auto STF");
+    const auto = buttonWith(markup, "<span>Auto</span>");
+    expect(auto).toContain('aria-pressed="false"');
+    expect(auto).toContain("color:var(--ab-text-3)");
+  });
+
+  it("says 'Manual STF' once a marker moved off the auto STF", () => {
+    const markup = render({ autoStf: AUTO, ...AUTO, midtone: 0.0121 });
+    expect(markup).toContain('data-stf-state="manual"');
+    expect(markup).toContain(">Manual STF</div>");
+    expect(buttonWith(markup, "<span>Auto</span>")).toContain('aria-pressed="false"');
+  });
+
+  it("names the icon buttons and titles Reset 'Linear (no stretch)' instead of 'Reset to linear'", () => {
+    const markup = render({ autoStf: AUTO, ...AUTO });
+    expect(buttonWith(markup, 'aria-label="Linear (no stretch)"')).toContain('title="Linear (no stretch)"');
+    expect(buttonWith(markup, 'aria-label="Manual input"')).toContain('title="Manual input"');
+    expect(markup).not.toContain("Reset to linear");
+  });
+
+  it("keeps the icon buttons' names and the state word while the lock hint takes the titles", () => {
+    const markup = render({ autoStf: AUTO, ...AUTO, disabled: true, disabledHint: LOCK });
+    expect(buttonWith(markup, 'aria-label="Linear (no stretch)"')).toContain(`title="${LOCK}"`);
+    expect(buttonWith(markup, 'aria-label="Manual input"')).toContain(`title="${LOCK}"`);
+    expect(markup).toContain('data-stf-state="auto"');
+  });
+});

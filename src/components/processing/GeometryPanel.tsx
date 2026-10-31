@@ -3,8 +3,10 @@ import { ArrowLeftRight, RefreshCw, RotateCcw } from "lucide-react";
 import { ResultGrid, ErrorAlert, SectionHeader } from "../ui";
 import { useDisplayedImage, type DisplayedImage } from "../../context/PreviewContext";
 import { bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
-import { ingestUnlessLoaded } from "../../hooks/useFileIngest";
+import { ingestUnlessLoaded, showWhenLoaded } from "../../hooks/useFileIngest";
+import { useSelectOnLoadPath } from "../../hooks/useFileStore";
 import { GEOMETRY_OPS, transformGeometry, type GeometryOp, type GeometryResult } from "../../services/imageGeometry";
+import { samePath } from "../../utils/processingChain";
 import { fileOnlyNotice, type CompositeNoticeProps } from "./compositeProps";
 
 interface GeometryPanelProps extends CompositeNoticeProps {
@@ -19,15 +21,21 @@ interface GeometryRun {
   afterUrl: string | undefined;
 }
 
-const OP_LABELS: Record<GeometryOp, { short: string; title: string; icon: ReactNode }> = {
-  rot90: { short: "90° CW", title: "Rotate 90° clockwise", icon: <RotateCcw size={12} className="-scale-x-100" /> },
-  rot180: { short: "180°", title: "Rotate 180°", icon: <RefreshCw size={12} /> },
-  rot270: { short: "90° CCW", title: "Rotate 90° counter-clockwise (270° clockwise)", icon: <RotateCcw size={12} /> },
-  flip_h: { short: "Flip H", title: "Mirror left-right", icon: <ArrowLeftRight size={12} /> },
-  flip_v: { short: "Flip V", title: "Mirror top-bottom", icon: <ArrowLeftRight size={12} className="rotate-90" /> },
+const OP_LABELS: Record<GeometryOp, { short: string; title: string; outcome: "rotated" | "flipped"; icon: ReactNode }> = {
+  rot90: { short: "90° CW", title: "Rotate 90° clockwise", outcome: "rotated", icon: <RotateCcw size={12} className="-scale-x-100" /> },
+  rot180: { short: "180°", title: "Rotate 180°", outcome: "rotated", icon: <RefreshCw size={12} /> },
+  rot270: { short: "90° CCW", title: "Rotate 90° counter-clockwise (270° clockwise)", outcome: "rotated", icon: <RotateCcw size={12} /> },
+  flip_h: { short: "Flip H", title: "Mirror left-right", outcome: "flipped", icon: <ArrowLeftRight size={12} /> },
+  flip_v: { short: "Flip V", title: "Mirror top-bottom", outcome: "flipped", icon: <ArrowLeftRight size={12} className="rotate-90" /> },
 };
 
 const ICON = <RotateCcw size={14} className="text-orange-400 -scale-x-100" />;
+
+const OPENING_LABEL = "Opening...";
+
+export function geometryShowLabel(op: GeometryOp): string {
+  return `Show the ${OP_LABELS[op].outcome} image`;
+}
 
 function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
@@ -38,7 +46,7 @@ function geometryInputLabel(displayed: Pick<DisplayedImage, "previewOnly" | "lab
 }
 
 function geometryResultLine(res: Pick<GeometryResult, "fits_path" | "dimensions">): string {
-  return `Written ${baseName(res.fits_path)} (${res.dimensions[0]}x${res.dimensions[1]}); select it in Files to continue.`;
+  return `Written ${baseName(res.fits_path)} (${res.dimensions[0]}x${res.dimensions[1]}).`;
 }
 
 export default function GeometryPanel({ selectedFile, outputDir, fileKey, compositeMode, fileName }: GeometryPanelProps) {
@@ -47,6 +55,8 @@ export default function GeometryPanel({ selectedFile, outputDir, fileKey, compos
   const inputPath = selectedFile ? displayed.path : null;
   const inputLabel = inputPath ? geometryInputLabel(displayed, inputPath) : null;
   const canRun = inputPath !== null;
+  const awaitedPath = useSelectOnLoadPath();
+  const opening = result !== null && awaitedPath !== null && samePath(awaitedPath, result.res.fits_path);
 
   const handleOp = useCallback(
     (op: GeometryOp) => {
@@ -100,6 +110,14 @@ export default function GeometryPanel({ selectedFile, outputDir, fileKey, compos
       {result && (
         <div className="flex flex-col gap-2 animate-fade-in">
           <div data-testid="geometry-result" className="text-[11px] text-emerald-300">{geometryResultLine(result.res)}</div>
+          <button
+            type="button"
+            data-testid="geometry-show"
+            onClick={() => showWhenLoaded(result.res.fits_path)}
+            className="self-start rounded-md bg-orange-600/20 px-2 py-1 text-[11px] text-orange-200 transition-colors hover:bg-orange-600/30"
+          >
+            {opening ? OPENING_LABEL : geometryShowLabel(result.res.op)}
+          </button>
           <ResultGrid items={[
             { label: "Operation", value: OP_LABELS[result.res.op]?.title ?? result.res.op },
             { label: "WCS", value: result.res.wcs_updated ? "updated" : "none" },

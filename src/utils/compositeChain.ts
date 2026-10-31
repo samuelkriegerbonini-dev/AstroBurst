@@ -80,7 +80,7 @@ export function compositeInputLabel(input: CompositeChainInput): string {
 }
 
 function capturedBase(result: CompositeStepMeta, callStf: DisplayStf): CompositeChainBase | null {
-  return result.basePreviewUrl === undefined ? null : { previewUrl: result.basePreviewUrl, stf: callStf };
+  return result.basePreviewUrl === undefined ? null : { previewUrl: result.basePreviewUrl, stf: callStf, displayed: result.base_displayed };
 }
 
 export function withCompositeStep(

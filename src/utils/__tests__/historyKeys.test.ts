@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { historyKeyAction, isMacPlatform, type HistoryKeyContext, type HistoryKeyEvent } from "../historyKeys";
+import { historyKeyAction, historyMoveBlock, isMacPlatform, type HistoryKeyContext, type HistoryKeyEvent } from "../historyKeys";
 
 const WORKSPACE: HistoryKeyContext = { inInput: false, menuOpen: false, mode: "workspace", compositeMode: false, mac: false };
 const MAC: HistoryKeyContext = { ...WORKSPACE, mac: true };
@@ -55,5 +55,19 @@ describe("historyKeyAction", () => {
     expect(isMacPlatform("macOS")).toBe(true);
     expect(isMacPlatform("Win32")).toBe(false);
     expect(isMacPlatform("Linux x86_64")).toBe(false);
+  });
+});
+
+describe("historyMoveBlock", () => {
+  const COMPOSITE_REASON =
+    "A colour composite is on screen. Undo, Redo and Go to apply to single files: show 673nmos.fits to use its history. Revert to original in the viewer header undoes the composite's processing.";
+
+  it.each([
+    { compositeMode: false, fileName: "673nmos.fits", reason: null },
+    { compositeMode: false, fileName: "", reason: null },
+    { compositeMode: true, fileName: "673nmos.fits", reason: COMPOSITE_REASON },
+    { compositeMode: true, fileName: "", reason: COMPOSITE_REASON.replace("673nmos.fits", "the file") },
+  ])("composite $compositeMode, file '$fileName'", ({ compositeMode, fileName, reason }) => {
+    expect(historyMoveBlock({ compositeMode, fileName })).toBe(reason);
   });
 });

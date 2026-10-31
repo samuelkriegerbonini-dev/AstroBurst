@@ -7,6 +7,7 @@ import { focusStripButton, nextShown, settleBottom, settleSide, startResizeDrag,
 import type { ResizeSession } from "../dock/ResizeHandle";
 import { dockStore } from "../../hooks/useDockLayout";
 import { measurementLog } from "../../utils/measurementLog";
+import { stripButtonHint } from "../../utils/dockOnboarding";
 import {
   DEFAULT_DOCK_LAYOUT,
   DOCK_TOOL_META,
@@ -81,7 +82,7 @@ describe("Stripe", () => {
     let layout = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-bottom", index: 0 });
     layout = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 0, to: 2 });
     expect(order(render("left", layout), "left-bottom")).toEqual(["image", "compose"]);
-    expect(order(render("right", layout), "right-top")).toEqual(["astrometry", "photometry", "headers", "cube", "processing", "history", "stacking"]);
+    expect(order(render("right", layout), "right-top")).toEqual(["astrometry", "photometry", "headers", "cube", "processing", "history", "masks", "stacking"]);
   });
 
   it("presses exactly the active tool of each group and nothing in a closed group", () => {
@@ -115,7 +116,7 @@ describe("Stripe", () => {
     }
   });
 
-  it("marks every button with its tool, anchor, label and menu popup", () => {
+  it("marks every button with its tool, anchor, label, open or close hint and menu popup", () => {
     for (const side of ["left", "right"] as const) {
       const html = render(side);
       for (const anchor of GROUPS[side]) {
@@ -124,13 +125,34 @@ describe("Stripe", () => {
           expect(b.type).toBe("button");
           expect(b["data-anchor"]).toBe(anchor);
           expect(b["aria-haspopup"]).toBe("menu");
-          expect(b.title).toBe(meta.label);
+          expect(b.title).toBe(stripButtonHint(meta.label, { open: b["aria-pressed"] === "true", disabled: false }));
           expect(b["aria-label"]).toBe(meta.label);
         }
       }
     }
     expect(render("left")).toContain(">Comp</span>");
     expect(render("right")).toContain(">Config</span>");
+  });
+
+  it("titles each button with what a click does while its name stays the tool label", () => {
+    const leftBottom = group(render("left"), "left-bottom");
+    expect(leftBottom[0]).toMatchObject({ "data-tool-id": "compose", "aria-label": "Compose", title: "Compose is open: click to close" });
+    expect(group(render("left"), "left-top")[0]).toMatchObject({ "data-tool-id": "files", title: "Files is open: click to close" });
+    const right = Object.fromEntries(group(render("right"), "right-bottom").map((b) => [b["data-tool-id"], b]));
+    expect(right.config).toMatchObject({ "aria-label": "Settings", title: "Settings: click to open, click again to close" });
+    expect(right.export.title).toBe("Export: click to open, click again to close");
+    const opened = Object.fromEntries(group(render("right", dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "config" })), "right-bottom").map((b) => [b["data-tool-id"], b]));
+    expect(opened.config.title).toBe("Settings is open: click to close");
+  });
+
+  it("asks for a file first on the tools that need one and keeps Settings usable without a file", () => {
+    const compose = group(render("left", DEFAULT_DOCK_LAYOUT, false), "left-bottom")[0];
+    expect(compose).toMatchObject({ "data-tool-id": "compose", "aria-disabled": "true", "aria-label": "Compose", title: "Compose: open a file first" });
+    const right = Object.fromEntries(group(render("right", DEFAULT_DOCK_LAYOUT, false), "right-bottom").map((b) => [b["data-tool-id"], b]));
+    expect(right.config["aria-disabled"]).toBeUndefined();
+    expect(right.config.title).toBe("Settings: click to open, click again to close");
+    expect(right.export).toMatchObject({ "aria-disabled": "true", title: "Export: open a file first" });
+    expect(right.log.title).toBe("Log: click to open, click again to close");
   });
 
   it("renders both group wrappers even when a group is empty", () => {
@@ -143,7 +165,7 @@ describe("Stripe", () => {
 
   it("shows the five analysis tools on the right strip in the default order", () => {
     const html = render("right");
-    expect(order(html, "right-top")).toEqual(["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "stacking"]);
+    expect(order(html, "right-top")).toEqual(["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking"]);
     expect(order(html, "right-bottom")).toEqual(["synth", "export", "config", "log"]);
     for (const id of ["image", "astrometry", "photometry", "cube", "log"]) expect(html).toContain(`data-tool-id="${id}"`);
     expect(html).not.toContain('data-tool-id="analysis"');
@@ -156,6 +178,17 @@ describe("Stripe", () => {
     expect(byId.photometry).toBe("Photometry");
     expect(byId.image).toBe("Image");
     expect(byId.cube).toBe("Cube");
+  });
+
+  it("shows the Masks button right after History, labelled Masks and off without a file", () => {
+    const withFile = group(render("right"), "right-top");
+    const ids = withFile.map((b) => b["data-tool-id"]);
+    expect(ids.indexOf("masks")).toBe(ids.indexOf("history") + 1);
+    const masks = withFile.find((b) => b["data-tool-id"] === "masks");
+    expect(masks?.["aria-label"]).toBe("Masks");
+    expect(masks?.["aria-disabled"]).toBeUndefined();
+    const noFile = group(render("right", DEFAULT_DOCK_LAYOUT, false), "right-top").find((b) => b["data-tool-id"] === "masks");
+    expect(noFile?.["aria-disabled"]).toBe("true");
   });
 
   it("keeps Log enabled without a file while the other analysis tools are disabled", () => {
@@ -184,7 +217,7 @@ describe("Log strip count", () => {
   it("shows no badge and the plain label while the log is empty", () => {
     measurementLog.clear();
     const { attrs: a, inner } = logButton(render("right"));
-    expect(a.title).toBe("Log");
+    expect(a.title).toBe("Log: click to open, click again to close");
     expect(a["aria-label"]).toBe("Log");
     expect(inner).not.toMatch(/data-log-count/);
   });
@@ -193,7 +226,7 @@ describe("Log strip count", () => {
     measurementLog.clear();
     for (let i = 0; i < 3; i++) addEntry(i);
     const { attrs: a, inner } = logButton(render("right"));
-    expect(a.title).toBe("Log (3 entries)");
+    expect(a.title).toBe("Log (3 entries): click to open, click again to close");
     expect(a["aria-label"]).toBe("Log (3 entries)");
     expect(inner).toMatch(/<span[^>]*data-log-count=""[^>]*aria-hidden="true"[^>]*>3<\/span>|<span[^>]*aria-hidden="true"[^>]*data-log-count=""[^>]*>3<\/span>/);
     expect(inner).toContain(">Log</span>");
@@ -203,7 +236,7 @@ describe("Log strip count", () => {
     measurementLog.clear();
     addEntry(0);
     const { attrs: a } = logButton(render("right"));
-    expect(a.title).toBe("Log (1 entry)");
+    expect(a.title).toBe("Log (1 entry): click to open, click again to close");
     expect(a["aria-label"]).toBe("Log (1 entry)");
   });
 
@@ -222,7 +255,7 @@ describe("Log strip count", () => {
     for (const b of [...group(html, "right-top"), ...group(html, "right-bottom")]) {
       if (b["data-tool-id"] === "log") continue;
       const meta = DOCK_TOOL_META[b["data-tool-id"] as DockToolId];
-      expect(b.title).toBe(meta.label);
+      expect(b.title).toBe(stripButtonHint(meta.label, { open: false, disabled: false }));
       expect(b["aria-label"]).toBe(meta.label);
     }
     expect(html.match(/data-log-count/g)).toHaveLength(1);

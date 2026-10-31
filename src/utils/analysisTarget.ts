@@ -2,6 +2,7 @@ import { sameGrid } from "./previewShell";
 import { samePath } from "./processingChain";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions, type DecimalFieldState } from "./decimalText";
 import { APERTURE_RANGE_HINT, apertureRadiusInRange } from "./photometryTable";
+import { IDENTITY_STF } from "./displayMemory";
 import type { StfParams } from "../shared/types";
 
 export interface CompositeViewInput {
@@ -200,6 +201,25 @@ export function stfDraftFields(draft: StfDraft): StfDraftFields {
     ["H", fields.highlight],
   ]);
   return { fields, error };
+}
+
+export type StfState = "auto" | "linear" | "manual";
+
+export const STF_STATE_LABEL: Record<StfState, string> = { auto: "Auto STF", manual: "Manual STF", linear: "Linear" };
+
+const STF_STATE_TOLERANCE = 1e-6;
+
+function stfWithin(a: StfParams, b: StfParams): boolean {
+  return (
+    Math.abs(a.shadow - b.shadow) <= STF_STATE_TOLERANCE &&
+    Math.abs(a.midtone - b.midtone) <= STF_STATE_TOLERANCE &&
+    Math.abs(a.highlight - b.highlight) <= STF_STATE_TOLERANCE
+  );
+}
+
+export function stfStateOf(stf: StfParams, auto: StfParams | null | undefined): StfState {
+  if (auto && stfWithin(stf, auto)) return "auto";
+  return stfWithin(stf, IDENTITY_STF) ? "linear" : "manual";
 }
 
 export function apertureRangeHint(field: DecimalFieldState): string | null {

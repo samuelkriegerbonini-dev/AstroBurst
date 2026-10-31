@@ -12,12 +12,14 @@ function keysOf(sheet: readonly ShortcutGroup[], id: string): string[] {
 }
 
 describe("shortcutSheet", () => {
-  it("lists Ctrl+Z for undo and Ctrl+Shift+Z or Ctrl+Y for redo under History", () => {
+  it("lists Ctrl+Z for undo and Ctrl+Shift+Z or Ctrl+Y for redo under History, for single files", () => {
     const sheet = shortcutSheet(false);
     expect(rowsOf(sheet, "history")).toEqual([
-      { keys: "Ctrl+Z", desc: "Undo processing step" },
-      { keys: "Ctrl+Shift+Z / Ctrl+Y", desc: "Redo processing step" },
+      { keys: "Ctrl+Z", desc: "Undo processing step (single files)" },
+      { keys: "Ctrl+Shift+Z / Ctrl+Y", desc: "Redo processing step (single files)" },
     ]);
+    expect(rowsOf(sheet, "history").every((r) => r.desc.includes("single files"))).toBe(true);
+    expect(rowsOf(shortcutSheet(true), "history").every((r) => r.desc.includes("single files"))).toBe(true);
     expect(sheet.find((g) => g.id === "history")?.title).toBe("History");
   });
 

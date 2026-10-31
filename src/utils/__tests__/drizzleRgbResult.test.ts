@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DRIZZLE_GAIN_FIELD, drizzleResultItems, isCancelledRun, manualGains } from "../drizzleRgbResult";
-import type { DrizzleRgbResult } from "../../shared/types/stacking";
+import { DRIZZLE_GAIN_FIELD, drizzleResultItems, isCancelledRun, manualGains, monoDrizzleResultItems } from "../drizzleRgbResult";
+import type { DrizzleRgbResult, StackResult } from "../../shared/types/stacking";
 
 const result: DrizzleRgbResult = {
   png_path: "C:/out/drizzle_rgb_1.png",
@@ -32,6 +32,39 @@ describe("drizzleResultItems", () => {
     expect(item("Scale", "square")).toBe("2.0x");
     expect([item("R frames", "square"), item("G frames", "square"), item("B frames", "square")]).toEqual([3, 3, 2]);
     expect(item("Rejected", "square")).toBe("12,345");
+  });
+});
+
+describe("monoDrizzleResultItems", () => {
+  const mono: StackResult = {
+    png_path: "C:/out/frame_0001_drizzle6.png",
+    fits_path: "C:/out/frame_0001_drizzle6.fits",
+    dimensions: [2048, 1536],
+    frame_count: 6,
+    rejected_pixels: 12345,
+    scale: 2,
+    elapsed_ms: 10,
+  };
+
+  it("lists the one drizzled channel and the kernel the run used, with no other channel", () => {
+    expect(monoDrizzleResultItems(mono, "R", "lanczos3")).toEqual([
+      { label: "Output", value: "2048×1536" },
+      { label: "Scale", value: "2.0x" },
+      { label: "Kernel", value: "lanczos3" },
+      { label: "R frames", value: 6 },
+      { label: "Rejected", value: "12,345" },
+    ]);
+  });
+
+  it("shows dashes for a reply without a scale or a frame count", () => {
+    const bare = monoDrizzleResultItems({ png_path: "x.png", dimensions: [16, 16], elapsed_ms: 1 }, "G", "square");
+    expect(bare).toEqual([
+      { label: "Output", value: "16×16" },
+      { label: "Scale", value: "--" },
+      { label: "Kernel", value: "square" },
+      { label: "G frames", value: "--" },
+      { label: "Rejected", value: "0" },
+    ]);
   });
 });
 

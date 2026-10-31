@@ -5,7 +5,16 @@ import { constrainStf, dragStfMarker, pickStfMarker, stfMarkerPositions } from "
 import type { HistogramRange } from "../../utils/histogramWindow";
 import { MEAN_LABEL, SIGMA_MAD_LABEL, SIGMA_MAD_TITLE, skyRangeLabel } from "../../utils/analysisLabels";
 import type { DecimalFieldOptions } from "../../utils/decimalText";
-import { STF_HIGHLIGHT_FIELD, STF_MIDTONE_FIELD, STF_SHADOW_FIELD, stfDraft, stfDraftFields, type StfDraft } from "../../utils/analysisTarget";
+import {
+  STF_HIGHLIGHT_FIELD,
+  STF_MIDTONE_FIELD,
+  STF_SHADOW_FIELD,
+  STF_STATE_LABEL,
+  stfDraft,
+  stfDraftFields,
+  stfStateOf,
+  type StfDraft,
+} from "../../utils/analysisTarget";
 import { DecimalField } from "../ui";
 
 const CANVAS_H = 110;
@@ -43,6 +52,8 @@ interface HistogramPanelProps {
 }
 
 const DISABLED_HINT = "STF applies only to the mtf stretch";
+const MANUAL_TITLE = "Manual input";
+const LINEAR_TITLE = "Linear (no stretch)";
 const SKY_TITLE = "Zoom on the sky: median − 5 σ(MAD) to median + 50 σ(MAD); markers outside it sit on the edge";
 
 function pinnedLabel(label: string, pos: { x: number; pinned: boolean }): string {
@@ -54,6 +65,7 @@ function HistogramPanel({
                           bins = [],
                           dataMin = 0,
                           dataMax = 1,
+                          autoStf,
                           shadow = 0,
                           midtone = 0.5,
                           highlight = 1,
@@ -283,6 +295,7 @@ function HistogramPanel({
     () => (dataMin + highlight * (dataMax - dataMin)).toFixed(1),
     [highlight, dataMin, dataMax],
   );
+  const stfState = stfStateOf({ shadow, midtone, highlight }, autoStf);
 
   if (bins.length === 0) return null;
 
@@ -331,14 +344,35 @@ function HistogramPanel({
               </button>
             </div>
           )}
-          <ToolbarBtn onClick={onAutoStf} title={disabled ? disabledHint : "Auto Stretch (STF)"} active={false} color="var(--ab-blue)" disabled={disabled}>
+          <ToolbarBtn
+            onClick={onAutoStf}
+            title={disabled ? disabledHint : "Auto Stretch (STF)"}
+            active={stfState === "auto"}
+            pressed={stfState === "auto"}
+            color="var(--ab-blue)"
+            disabled={disabled}
+          >
             <Wand2 size={11} />
             <span>Auto</span>
           </ToolbarBtn>
-          <ToolbarBtn onClick={openManual} title={disabled ? disabledHint : "Manual input"} active={manualMode} color="var(--ab-teal)" disabled={disabled}>
+          <ToolbarBtn
+            onClick={openManual}
+            title={disabled ? disabledHint : MANUAL_TITLE}
+            ariaLabel={MANUAL_TITLE}
+            active={manualMode}
+            color="var(--ab-teal)"
+            disabled={disabled}
+          >
             <SlidersHorizontal size={11} />
           </ToolbarBtn>
-          <ToolbarBtn onClick={onReset} title={disabled ? disabledHint : "Reset to linear"} active={false} color={OFF_COLOR} disabled={disabled}>
+          <ToolbarBtn
+            onClick={onReset}
+            title={disabled ? disabledHint : LINEAR_TITLE}
+            ariaLabel={LINEAR_TITLE}
+            active={false}
+            color={OFF_COLOR}
+            disabled={disabled}
+          >
             <RotateCcw size={11} />
           </ToolbarBtn>
         </div>
@@ -395,14 +429,17 @@ function HistogramPanel({
           </button>
         </div>
       ) : (
-        <div className="flex items-center justify-between px-3 py-1.5 text-[10px] font-mono">
-          <span style={{ color: "#ef4444" }}>
-            S: {shadow.toFixed(4)} <span className="text-zinc-600">({shadowVal})</span>
-          </span>
-          <span style={{ color: "#eab308" }}>M: {midtone.toFixed(4)}</span>
-          <span style={{ color: "#22c55e" }}>
-            H: {highlight.toFixed(4)} <span className="text-zinc-600">({highlightVal})</span>
-          </span>
+        <div className="px-3 py-1.5 text-[10px] font-mono">
+          <div className="font-semibold text-zinc-300" data-stf-state={stfState}>{STF_STATE_LABEL[stfState]}</div>
+          <div className="flex items-center justify-between">
+            <span style={{ color: "#ef4444" }}>
+              S: {shadow.toFixed(4)} <span className="text-zinc-600">({shadowVal})</span>
+            </span>
+            <span style={{ color: "#eab308" }}>M: {midtone.toFixed(4)}</span>
+            <span style={{ color: "#22c55e" }}>
+              H: {highlight.toFixed(4)} <span className="text-zinc-600">({highlightVal})</span>
+            </span>
+          </div>
         </div>
       )}
 
@@ -428,14 +465,18 @@ function HistogramPanel({
 function ToolbarBtn({
                       onClick,
                       title,
+                      ariaLabel,
                       active,
+                      pressed,
                       color,
                       disabled = false,
                       children,
                     }: {
   onClick?: () => void;
   title: string;
+  ariaLabel?: string;
   active: boolean;
+  pressed?: boolean;
   color: string;
   disabled?: boolean;
   children: React.ReactNode;
@@ -444,6 +485,8 @@ function ToolbarBtn({
     <button
       onClick={onClick}
       title={title}
+      aria-label={ariaLabel}
+      aria-pressed={pressed}
       disabled={disabled}
       className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
       style={{

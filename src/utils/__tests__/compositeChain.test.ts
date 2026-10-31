@@ -126,6 +126,19 @@ describe("withCompositeStep", () => {
     expect(presentSteps(next)).toEqual(["background"]);
   });
 
+  it("keeps the tier the backend reports for the chain base with the captured base", () => {
+    const captured = withCompositeStep(
+      EMPTY_COMPOSITE_CHAIN,
+      "denoise",
+      entry("denoise"),
+      meta({ base_png_path: "C:/out/composite_chain_base_1.png", basePreviewUrl: "http://asset.localhost/out/composite_chain_base_1.png", base_displayed: "linear" }),
+      CALL_STF,
+    );
+    expect(captured.base).toEqual({ previewUrl: "http://asset.localhost/out/composite_chain_base_1.png", stf: CALL_STF, displayed: "linear" });
+    const kept = withCompositeStep(captured, "stretch", entry("stretch", "stretched"), meta({ chain_input: "denoise", base_displayed: "linear" }), CALL_STF);
+    expect(kept.base?.displayed).toBe("linear");
+  });
+
   it("drops downstream steps when an upstream step re-runs and keeps the base", () => {
     const full = chainOf("background", "denoise", "deconv", "stretch", "localContrast", "pixelMath");
     const next = withCompositeStep(full, "denoise", entry("denoise"), meta({ chain_generation: 9 }), OTHER_STF);

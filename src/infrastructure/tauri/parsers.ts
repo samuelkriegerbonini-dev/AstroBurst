@@ -1,3 +1,4 @@
+import type { MaskPreview } from "../../shared/types/masks";
 import { makePixelHolder } from "../../utils/pixelHolder";
 
 export function parseRawPixelBuffer(raw: ArrayBuffer | ArrayBufferView) {
@@ -78,10 +79,10 @@ export function toUint8Array(raw: unknown): Uint8Array {
 
 const DQ_MASK_HEADER_SIZE = 16;
 
-export function parseDqMaskBuffer(raw: ArrayBuffer | ArrayBufferView) {
+export function parseDqMaskBuffer(raw: ArrayBuffer | ArrayBufferView, label = "DQ mask") {
   const bytes = toUint8Array(raw);
   if (bytes.length < DQ_MASK_HEADER_SIZE) {
-    throw new Error(`DQ mask: response too small (${bytes.length} bytes)`);
+    throw new Error(`${label}: response too small (${bytes.length} bytes)`);
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const width = view.getUint32(0, true);
@@ -92,7 +93,7 @@ export function parseDqMaskBuffer(raw: ArrayBuffer | ArrayBufferView) {
   const ncells = width * height;
   const expected = DQ_MASK_HEADER_SIZE + ncells;
   if (bytes.length < expected) {
-    throw new Error(`DQ mask: expected ${expected} bytes, got ${bytes.length}`);
+    throw new Error(`${label}: expected ${expected} bytes, got ${bytes.length}`);
   }
 
   return {
@@ -102,6 +103,11 @@ export function parseDqMaskBuffer(raw: ArrayBuffer | ArrayBufferView) {
     tableId,
     cells: new Uint8Array(bytes.buffer, bytes.byteOffset + DQ_MASK_HEADER_SIZE, ncells),
   };
+}
+
+export function parseMaskPreviewBuffer(raw: ArrayBuffer | ArrayBufferView): MaskPreview {
+  const { width, height, cells } = parseDqMaskBuffer(raw, "mask preview");
+  return { width, height, cells };
 }
 
 const FFT_HEADER_SIZE = 40;

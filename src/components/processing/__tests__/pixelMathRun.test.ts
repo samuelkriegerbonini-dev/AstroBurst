@@ -206,7 +206,7 @@ describe("PixelMathPanel file-mode run and the Files list", () => {
     renderPanel(file, vi.fn());
     captured.onClick?.();
     await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(1));
-    expect(runPixelMathMock).toHaveBeenCalledWith(SCOPE, SOURCE, expression, expect.objectContaining({ slots }));
+    expect(runPixelMathMock).toHaveBeenCalledWith(SCOPE, SOURCE, expression, expect.objectContaining({ slots }), null);
 
     const loadedAfterRun = fileStore.getFiles().map((f) => ({ path: f.path }));
     expect(loadedAfterRun.map((f) => f.path)).toEqual([SOURCE, ...others, OUTPUT]);

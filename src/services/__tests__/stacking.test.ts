@@ -18,8 +18,8 @@ vi.mock("../../infrastructure/tauri", () => ({
   getPreviewUrl: getPreviewUrlMock,
 }));
 
-import { channelOrNull, drizzleRgbStack, runCalibrationPipeline } from "../stacking";
-import type { PipelineRequest } from "../../shared/types/stacking";
+import { channelOrNull, drizzleRgbStack, estimateMosaic, runCalibrationPipeline, runMosaic } from "../stacking";
+import type { MosaicRequest, PipelineRequest } from "../../shared/types/stacking";
 
 describe("channelOrNull", () => {
   it("passes a channel with enough frames through", () => {
@@ -115,6 +115,38 @@ describe("runCalibrationPipeline", () => {
     expect(res.masters?.map((m) => m.previewUrl)).toEqual(["asset://localhost//out/run_R.png", "asset://localhost//out/run_G.png"]);
     expect(res.masters?.[1].fits_path).toBe("/out/run_G.fits");
     expect(res.rgbPreviewUrl).toBe("asset://localhost//out/run_rgb.png");
+  });
+});
+
+describe("mosaic commands", () => {
+  const config: MosaicRequest = {
+    canvas: { mode: "like", path: "/out/m42_ha_mosaic3.fits" },
+    levels: "offset",
+    references: [],
+    feather_px: 64,
+    dq_mask: true,
+    reject: { mode: "auto" },
+    solve: { online: false, use_twomass: true, max_sip_order: null },
+  };
+  const paths = ["/panels/m42_p1_OIII.fits", "/panels/m42_p2_OIII.fits"];
+
+  beforeEach(() => {
+    withPreviewMock.mockReset();
+    typedInvokeMock.mockReset();
+  });
+
+  it("estimates through mosaic_estimate_cmd with the panels and the request, writing nothing", async () => {
+    typedInvokeMock.mockResolvedValue({ cols: 10, rows: 10 });
+    await expect(estimateMosaic(paths, config)).resolves.toEqual({ cols: 10, rows: 10 });
+    expect(typedInvokeMock).toHaveBeenCalledWith("mosaic_estimate_cmd", { paths, config });
+    expect(withPreviewMock).not.toHaveBeenCalled();
+  });
+
+  it("runs mosaic_cmd under the run name in the output folder and resolves its preview", async () => {
+    withPreviewMock.mockResolvedValue({ fits_path: "/out/m42_p1_OIII_mosaic2.fits", previewUrl: "asset://m42.png" });
+    const res = await runMosaic(paths, "/out", "m42_p1_OIII_mosaic2_20261031-090507-042", config);
+    expect(withPreviewMock).toHaveBeenCalledWith("mosaic_cmd", "/out", { paths, name: "m42_p1_OIII_mosaic2_20261031-090507-042", config });
+    expect(res.previewUrl).toBe("asset://m42.png");
   });
 });
 

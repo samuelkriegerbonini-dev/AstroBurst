@@ -182,8 +182,9 @@ pub(crate) fn evaluate_per_channel(
     slots: &[PixelMathSlot],
     opts: &OutputOptions,
     channels: [&Array2<f32>; 3],
+    mask: Option<&Array2<f32>>,
 ) -> anyhow::Result<ChannelPixelMath> {
-    ops::evaluate_per_channel(expression, slots, opts, channels, &load_cached_full)
+    ops::evaluate_per_channel(expression, slots, opts, channels, &load_cached_full, mask)
 }
 
 fn ensure_outputs_are_not_inputs(outputs: &[&str], inputs: &[(&str, &str)]) -> anyhow::Result<()> {

@@ -4,6 +4,7 @@ import { measurePhotometryBatch, photometryGainModel } from "../../services/anal
 import type { BatchPhotometryResult, GainModel } from "../../services/analysis";
 import { useDqContext } from "../../context/PreviewContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { useTimedNotice } from "../../hooks/useTimedNotice";
 import { batchPhotometryEntry, measurementLog } from "../../utils/measurementLog";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { overlayStore } from "../../utils/overlayStore";
@@ -164,7 +165,7 @@ function PhotometryTablePanel({
   const [run, setRun] = useState<BatchRun | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [savedPath, showSavedPath, clearSavedPath] = useTimedNotice<string>(SAVED_NOTICE_MS);
   const [sortKey, setSortKey] = useState<PhotometryColumnKey>("index");
   const [sortDir, setSortDir] = useState<SortDirection>("asc");
   const [highlightIndex, setHighlightIndex] = useState<number | null>(null);
@@ -185,8 +186,8 @@ function PhotometryTablePanel({
     setError(null);
     setRunning(false);
     setHighlightIndex(null);
-    setSavedPath(null);
-  }, [filePath, measureKey]);
+    clearSavedPath();
+  }, [filePath, measureKey, clearSavedPath]);
 
   useEffect(() => {
     const seq = ++gainSeqRef.current;
@@ -312,8 +313,8 @@ function PhotometryTablePanel({
     setError(null);
     setRunning(false);
     setHighlightIndex(null);
-    setSavedPath(null);
-  }, []);
+    clearSavedPath();
+  }, [clearSavedPath]);
 
   const toggleSort = useCallback(
     (key: PhotometryColumnKey) => {
@@ -347,12 +348,11 @@ function PhotometryTablePanel({
       if (!target) return;
       const { writeTextFile } = await import("@tauri-apps/plugin-fs");
       await writeTextFile(target, photometryTableCsv(rows));
-      setSavedPath(target);
-      setTimeout(() => setSavedPath(null), SAVED_NOTICE_MS);
+      showSavedPath(target);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [filePath, rows]);
+  }, [filePath, rows, showSavedPath]);
 
   const addAsRegions = useCallback(() => {
     if (!overlayKey) return;

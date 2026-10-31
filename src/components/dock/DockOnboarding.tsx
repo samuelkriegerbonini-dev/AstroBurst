@@ -1,11 +1,15 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
+import { anchorOf, anchorOpenTool, type DockLayout } from "../../utils/dockLayout";
 import {
   DOCK_ONBOARDING_DELAY_MS,
   DOCK_ONBOARDING_STEPS,
   DOCK_ONBOARDING_TIP,
   DOCK_ONBOARDING_TITLE,
+  DOCK_TIP_IDS,
+  DOCK_TIPS,
+  ONBOARDING_ORDER,
   onboardingPlacement,
   viewerToolbarBottom,
   type DockOnboardingDemo,
@@ -13,7 +17,9 @@ import {
   type OnboardingPlacement,
 } from "../../utils/dockOnboarding";
 import { dockOnboardingStore, useDockOnboarding } from "./dockOnboardingStore";
-import { focusStripButton } from "./dockGeometry";
+import { focusStripButton, onboardingAnchorReady } from "./dockGeometry";
+import { DockTipPopup, tipAnchorSelector } from "./DockTip";
+import { dragStore } from "./useDockDrag";
 import "./dock.css";
 
 export interface DockOnboardingCardProps {
@@ -182,15 +188,16 @@ export function DockOnboardingCard({ step, titleId, bodyId, placement, onNext, o
   );
 }
 
-interface DockOnboardingProps {
+interface DockOnboardingPopupProps {
   rootRef: React.RefObject<HTMLElement | null>;
+  step: number;
 }
 
 function samePlacement(a: OnboardingPlacement, b: OnboardingPlacement): boolean {
   return a.left === b.left && a.top === b.top && a.width === b.width && a.maxHeight === b.maxHeight && a.arrow === b.arrow;
 }
 
-function DockOnboardingPopup({ rootRef, step }: DockOnboardingProps & { step: number }): React.ReactNode {
+function DockOnboardingPopup({ rootRef, step }: DockOnboardingPopupProps): React.ReactNode {
   const titleId = useId();
   const bodyId = useId();
   const cardRef = useRef<HTMLDivElement>(null);
@@ -265,14 +272,50 @@ function DockOnboardingPopup({ rootRef, step }: DockOnboardingProps & { step: nu
   );
 }
 
-export default function DockOnboarding({ rootRef }: DockOnboardingProps): React.ReactNode {
-  const { open, step } = useDockOnboarding();
+export interface DockOnboardingProps {
+  rootRef: React.RefObject<HTMLElement | null>;
+  layout: DockLayout;
+  hasFile: boolean;
+}
+
+function useDockDragging(): boolean {
+  return useSyncExternalStore(dragStore.subscribe, () => dragStore.get() !== null, () => false);
+}
+
+export default function DockOnboarding({ rootRef, layout, hasFile }: DockOnboardingProps): React.ReactNode {
+  const { card, step } = useDockOnboarding();
+  const dragging = useDockDragging();
+  const settingsOpen = anchorOpenTool(layout, anchorOf(layout, "config"), hasFile) === "config";
 
   useEffect(() => {
     const timer = window.setTimeout(() => dockOnboardingStore.autoShow(), DOCK_ONBOARDING_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, []);
 
-  if (!open) return null;
-  return <DockOnboardingPopup rootRef={rootRef} step={step} />;
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    dockOnboardingStore.setReady("tour", onboardingAnchorReady(root?.querySelector("[data-dock-viewer]")));
+    for (const id of DOCK_TIP_IDS) {
+      dockOnboardingStore.setReady(id, onboardingAnchorReady(root?.querySelector(tipAnchorSelector(DOCK_TIPS[id].tool))));
+    }
+  });
+
+  useEffect(
+    () => () => {
+      for (const id of ONBOARDING_ORDER) dockOnboardingStore.setReady(id, false);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    dockOnboardingStore.setDragging(dragging);
+  }, [dragging]);
+
+  useEffect(() => {
+    dockOnboardingStore.setSettingsOpen(settingsOpen);
+  }, [settingsOpen]);
+
+  if (card === null) return null;
+  if (card === "tour") return <DockOnboardingPopup rootRef={rootRef} step={step} />;
+  return <DockTipPopup key={card} rootRef={rootRef} tip={DOCK_TIPS[card]} layout={layout} />;
 }

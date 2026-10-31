@@ -24,6 +24,7 @@ use crate::types::compose::AlignMethod;
 use crate::types::header::HduHeader;
 use crate::types::ImageStats;
 use crate::types::constants::{MAX_DIMENSION_RATIO, RES_DIMENSIONS, RES_ELAPSED_MS, RES_MAX, RES_MEAN, RES_MEDIAN, RES_MIN, RES_PNG_PATH, RES_STATS_B, RES_STATS_G, RES_STATS_R, ALIGN_METHOD, DIMENSIONS, CHANNELS, RES_CHANNEL, RES_PATH, RES_FILE_SIZE_BYTES, RES_OFFSET, RES_BLEND_PRESET, RES_CHANNEL_COUNT, RES_AUTO_STF, RES_CACHE_KEY, RES_CONFIDENCE, RES_METHOD_USED, RES_MATCHED_STARS, RES_INLIERS, RES_RESIDUAL_PX, RES_REGISTERED, RES_STF_LINKED, RES_STF_NOTE, STF_B, STF_G, STF_R, RES_REFERENCE_INDEX, RES_REFERENCE_RULE, RES_RUN_TOKEN, RES_REPROJECTED, RES_WCS_SCALE_RATIO, RES_WCS_ROTATION_DEG, RES_PREFILTER_K, RES_WCS_KIND, RES_RESIDUAL_MEASURED, RES_STAR_MATCH_REJECTION, RES_WARNINGS, ALIGN_METHOD_PHASE};
+use crate::types::constants::RES_HAS_WCS;
 
 use super::rgb::{composite_png_path, load_entry};
 
@@ -735,6 +736,37 @@ pub async fn align_channels_cmd(
             RES_RUN_TOKEN: token,
             RES_WARNINGS: warnings,
             RES_ELAPSED_MS: elapsed,
+        }))
+    })
+}
+
+fn channel_has_wcs(path: &str, header: Option<&HduHeader>) -> bool {
+    header.is_some_and(|h| load_wcs(path, h).is_ok())
+}
+
+#[tauri::command]
+pub async fn align_plan_cmd(paths: Vec<String>, reference_index: Option<usize>) -> Result<serde_json::Value, String> {
+    blocking_cmd!({
+        if paths.len() < 2 {
+            anyhow::bail!("Need at least 2 channels to align");
+        }
+        let headers: Vec<Option<HduHeader>> = paths.iter().map(|p| cached_header(p).ok()).collect();
+        let (ref_idx, reference_rule) = choose_reference(&paths, &headers, reference_index)?;
+        let has_wcs: Vec<bool> = paths.iter().zip(&headers).map(|(p, h)| channel_has_wcs(p, h.as_ref())).collect();
+        let channels: Vec<serde_json::Value> = has_wcs
+            .iter()
+            .enumerate()
+            .map(|(i, &own)| {
+                json!({
+                    RES_HAS_WCS: own,
+                    RES_REPROJECTED: i != ref_idx && own && has_wcs[ref_idx],
+                })
+            })
+            .collect();
+        Ok(json!({
+            CHANNELS: channels,
+            RES_REFERENCE_INDEX: ref_idx,
+            RES_REFERENCE_RULE: reference_rule,
         }))
     })
 }
@@ -1987,6 +2019,67 @@ mod tests {
         assert_eq!(ch[RES_REPROJECTED], true, "{res}");
         assert_eq!(ch[RES_PREFILTER_K], 3, "{res}");
         assert_eq!(ch[RES_WCS_KIND], "header", "the box-reduced channel is reprojected through its rebuilt header: {res}");
+    }
+
+    fn flags(res: &serde_json::Value, key: &str) -> Vec<bool> {
+        res[CHANNELS].as_array().unwrap().iter().map(|ch| ch[key].as_bool().unwrap()).collect()
+    }
+
+    async fn plan_then_run(paths: &[String], reference_index: Option<usize>) -> serde_json::Value {
+        let plan = align_plan_cmd(paths.to_vec(), reference_index).await.unwrap();
+        let run = align(paths.to_vec(), None, reference_index, None).await;
+        assert_eq!(plan[RES_REFERENCE_INDEX], run[RES_REFERENCE_INDEX], "plan {plan} run {run}");
+        assert_eq!(plan[RES_REFERENCE_RULE], run[RES_REFERENCE_RULE], "plan {plan} run {run}");
+        assert_eq!(flags(&plan, RES_REPROJECTED), flags(&run, RES_REPROJECTED), "plan {plan} run {run}");
+        plan
+    }
+
+    #[tokio::test]
+    async fn align_plan_matches_the_reference_and_pairs_of_the_run() {
+        use crate::core::astrometry::gwcs::test_support::{fixture_pipeline, fixtures_dir};
+        use crate::infra::fits::asdf_hdu::test_fixtures::write_fits_with_asdf_cell;
+
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, data: &Array2<f32>, header: Option<&HduHeader>| {
+            let path = dir.path().join(name).to_str().unwrap().to_string();
+            write_fits_mono(&path, data, header).unwrap();
+            path
+        };
+        let coarse = write("coarse.fits", &blobs(32, 0.5), Some(&arcsec_header(16.0, 0.2)));
+        let fine = write("fine.fits", &blobs(64, 1.0), Some(&arcsec_header(32.0, 0.1)));
+        let plain = write("plain.fits", &blobs(64, 1.0), None);
+        let other_plain = write("other_plain.fits", &star_field(2.0, -3.0), None);
+        let mixed = [coarse.clone(), fine.clone(), plain.clone()];
+
+        let plan = plan_then_run(&mixed, None).await;
+        assert_eq!(plan[RES_REFERENCE_INDEX], 1, "{plan}");
+        assert_eq!(plan[RES_REFERENCE_RULE], "finest_wcs", "{plan}");
+        assert_eq!(flags(&plan, RES_REPROJECTED), [true, false, false], "{plan}");
+        assert_eq!(flags(&plan, RES_HAS_WCS), [true, true, false], "{plan}");
+
+        let plan = plan_then_run(&mixed, Some(2)).await;
+        assert_eq!(plan[RES_REFERENCE_RULE], "selected", "{plan}");
+        assert_eq!(flags(&plan, RES_REPROJECTED), [false, false, false], "a reference without a WCS leaves no pair: {plan}");
+        assert_eq!(flags(&plan, RES_HAS_WCS), [true, true, false], "{plan}");
+
+        let plan = plan_then_run(&[plain, other_plain], None).await;
+        assert_eq!(plan[RES_REFERENCE_INDEX], 0, "{plan}");
+        assert_eq!(plan[RES_REFERENCE_RULE], "first", "{plan}");
+        assert_eq!(flags(&plan, RES_REPROJECTED), [false, false], "{plan}");
+
+        let gwcs_only = dir.path().join("nircam_gwcs_only.fits");
+        write_fits_with_asdf_cell(&gwcs_only, &[], &std::fs::read(fixtures_dir().join("wcs_jwst_nircam_cal300.asdf")).unwrap());
+        let centre = fixture_pipeline("wcs_jwst_nircam_cal300.asdf").forward(1.5, 1.5, false);
+        let tan = tan_header(4, (2.5, 2.5), (centre[0], centre[1]), rotated_cd(0.0312, 0.0));
+        let tan_reference = write("tan_reference.fits", &Array2::<f32>::ones((4, 4)), Some(&tan));
+        let plan = plan_then_run(&[tan_reference, gwcs_only.to_str().unwrap().to_string()], Some(0)).await;
+        assert_eq!(flags(&plan, RES_HAS_WCS), [true, true], "a channel whose only WCS is its gWCS has a WCS: {plan}");
+        assert_eq!(flags(&plan, RES_REPROJECTED), [false, true], "{plan}");
+
+        let err = align_plan_cmd(vec![coarse.clone(), fine], Some(7)).await.unwrap_err();
+        assert_eq!(err, "Reference index 7 is out of range for 2 channels");
+        let err = align_plan_cmd(vec![coarse], None).await.unwrap_err();
+        assert_eq!(err, "Need at least 2 channels to align");
     }
 
     #[tokio::test]

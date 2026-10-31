@@ -76,6 +76,8 @@ export interface PointingOverlapResult {
 
 export type PlateSolver = "auto" | "local" | "astrometry.net";
 
+export type MaxSipOrder = 2 | 3 | 4;
+
 export interface PlateSolveOptions {
   apiKey?: string;
   scaleLower?: number;
@@ -89,6 +91,8 @@ export interface PlateSolveOptions {
   nearRadiusDeg?: number;
   resumeSubmissionId?: number;
   resumeJobId?: number;
+  useTwomass?: boolean;
+  maxSipOrder?: MaxSipOrder;
 }
 
 export interface SolveHintPointing {

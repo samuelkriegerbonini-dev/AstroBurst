@@ -33,6 +33,8 @@ export interface KeepInput {
   compositeChain?: CompositeChain | null;
   previewUrls?: readonly (string | null | undefined)[];
   historyDir?: string | null;
+  maskExports?: readonly string[];
+  mosaicOutputs?: readonly string[];
 }
 
 function underDir(dir: string | null | undefined): (key: string) => boolean {
@@ -107,6 +109,10 @@ export function outputKeepList(input: KeepInput): string[] {
   }
 
   for (const url of input.previewUrls ?? []) addUrl(url);
+
+  for (const path of input.maskExports ?? []) add(path);
+
+  for (const path of input.mosaicOutputs ?? []) add(path);
 
   return [...kept.values()];
 }

@@ -1220,6 +1220,29 @@ fn order_3_distortion_is_recovered_and_order_4_is_chosen_only_above_5_degrees() 
 }
 
 #[test]
+fn a_requested_sip_order_cap_bounds_the_orders_considered_below_5_degrees() {
+    let truth = TruthField::with_long_side((150.0, 15.0), 3.0, 12.0, false, 1500, 1000);
+    let distortion = with_quartic(&truth, 4.0, 2.0);
+    let pairs = distorted_pairs(&truth, &distortion, SIP_PAIRS, 61);
+    let fit_with = |cap: Option<u8>| {
+        let params = LocalSolveParams { sip_max_order: cap, ..LocalSolveParams::default() };
+        fit_distortion(&pairs, &truth.tan, truth.size(), &params).0
+    };
+    let highest = |fit: &DistortionFit| fit.considered.iter().map(|c| c.0).max();
+
+    let automatic = fit_with(None);
+    assert_eq!((automatic.order, highest(&automatic)), (3, Some(3)), "automatic: {:?}", automatic.considered);
+    let quartic = fit_with(Some(4));
+    assert_eq!((quartic.order, highest(&quartic)), (4, Some(4)), "cap 4: {:?}", quartic.considered);
+    let (forward, inverse) = distortion_error_px(&truth, &distortion, &quartic.wcs_cards);
+    assert!(forward <= SIP_MAX_ERROR_PX && inverse <= SIP_MAX_ERROR_PX, "cap 4: forward {forward:.4} px, inverse {inverse:.4} px");
+    let quadratic = fit_with(Some(2));
+    assert_eq!(highest(&quadratic), Some(2), "cap 2: {:?}", quadratic.considered);
+    assert!(quadratic.order <= 2, "cap 2 chose order {}", quadratic.order);
+    assert_eq!(fit_with(Some(3)).wcs_cards, automatic.wcs_cards, "cap 3 is the automatic choice below 5 degrees");
+}
+
+#[test]
 fn sip_needs_40_inliers_over_3_quadrants() {
     let truth = TruthField::with_long_side((300.0, -20.0), 2.0, 0.0, false, 1500, 1000);
     let distortion = radial_cubic(&truth, 4.0);

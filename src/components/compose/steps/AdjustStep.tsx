@@ -7,6 +7,7 @@ import { RunButton } from "../../ui";
 import CurveEditor from "../CurveEditor";
 import { useCompositeStf } from "../../../context/CompositeContext";
 import { toneRunSummary } from "../../../utils/wizard";
+import { curvesInputLine, hasStretchBake } from "../../../utils/stretchCommitState";
 
 interface AdjustStepProps {
   state: WizardState;
@@ -107,6 +108,10 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
         <div className="text-[10px] text-amber-400/70 bg-amber-500/5 border border-amber-500/10 rounded-md px-2 py-1.5">
           Run Blend first to create a composite before applying adjustments.
         </div>
+      )}
+
+      {state.compositeReady && (
+        <div className="text-[10px] text-zinc-400">{curvesInputLine(hasStretchBake(state))}</div>
       )}
 
       <div className="bg-zinc-950/50 rounded-lg border border-zinc-800/50 overflow-hidden">

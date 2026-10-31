@@ -1,13 +1,17 @@
-import { useCallback, useState } from "react";
+import { useCallback, useId, useState } from "react";
 import type { CurvePoint, LevelsParams } from "../../services/tone";
 import { IDENTITY_CURVE, IDENTITY_LEVELS, TONE_IDENTITY_MESSAGE, isToneIdentity, recordToneFile, toneOptionsOf, type ToneFileResult, type ToneSettings } from "../../services/toneFile";
 import { useRenderContext } from "../../context/PreviewContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
+import { curvesAutoStfNote } from "../../utils/nonLinearInput";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { useHistoryScope } from "../../hooks/useHistory";
 import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
 import CurveEditor from "../compose/CurveEditor";
+import MaskSelect from "../masks/MaskSelect";
+import { useRunMask } from "../masks/runMask";
 import { Slider, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+import { describedByIds } from "./compositeProps";
 
 export const RGB_PLANES_SENTENCE = "Levels and the curve apply to all three planes.";
 export const COMPOSITE_CURVES_NOTICE = "Curves on the composite live in Compose › Adjust.";
@@ -24,6 +28,8 @@ export interface CurvesPanelProps {
   fileName: string;
   disabledReason?: string | null;
   disabledReasonId?: string;
+  runNoteId?: string;
+  nonLinearNote?: string | null;
 }
 
 export interface CurvesPanelViewProps extends CurvesPanelProps {
@@ -70,22 +76,29 @@ export function CurvesPanelView({
   compositeMode,
   disabledReason,
   disabledReasonId,
+  runNoteId,
+  nonLinearNote,
   levels,
   points,
   onLevelsChange,
   onPointsChange,
 }: CurvesPanelViewProps) {
+  const inputNoteId = useId();
   const { running, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<CurvesRun>("tone", fileKey ?? null);
   const { chain } = useRenderContext();
   const scope = useHistoryScope();
+  const runMask = useRunMask("curves", scope, false);
   const result = !compositeMode && runResult !== null && chainHoldsOutput(chain, "tone", runResult.res.fits_path) ? runResult : null;
   const isRgb = !!selectedFile?.result?.is_rgb;
   const externalReason = compositeMode || isRgb ? null : disabledReason ?? null;
   const reason = compositeMode ? COMPOSITE_CURVES_NOTICE : externalReason;
+  const maskReason = compositeMode ? null : runMask.blockedReason;
   const identity = isToneIdentity({ levels, curve: points });
-  const canRun = !!selectedFile?.path && !!scope && !identity && !reason;
-  const title = reason ?? (identity ? TONE_IDENTITY_MESSAGE : busyTitle);
+  const canRun = !!selectedFile?.path && !!scope && !identity && !reason && !maskReason;
+  const title = reason ?? maskReason ?? (identity ? TONE_IDENTITY_MESSAGE : busyTitle);
   const disabled = !canRun || blocked;
+  const inputNote = reason || !selectedFile?.path ? null : nonLinearNote ?? null;
+  const autoStfNote = result ? curvesAutoStfNote(result.res) : null;
 
   const handleRun = useCallback(() => {
     if (!selectedFile?.path || compositeMode || !scope) return;
@@ -94,13 +107,14 @@ export function CurvesPanelView({
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
     const options = { levels, curve: points };
+    const mask = runMask.value;
     void run(async (ctx) => {
-      const res = await recordToneFile(runScope, path, options);
+      const res = await recordToneFile(runScope, path, options, mask);
       if (!ctx.inputUnchanged("tone")) throw new Error(INPUT_CHANGED_MESSAGE);
       await onProcessingDone?.(res);
       return { res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel };
     });
-  }, [selectedFile?.path, compositeMode, scope, inputPreviewUrl, inputLabel, levels, points, run, onProcessingDone]);
+  }, [selectedFile?.path, compositeMode, scope, inputPreviewUrl, inputLabel, levels, points, runMask.value, run, onProcessingDone]);
 
   const setLevel = (key: keyof LevelsParams) => (value: number) => onLevelsChange({ ...levels, [key]: value });
 
@@ -120,6 +134,11 @@ export function CurvesPanelView({
       {!compositeMode && isRgb && (
         <div className="text-[10px] text-purple-300 bg-purple-900/20 border border-purple-800/30 rounded-lg px-3 py-1.5">
           {RGB_PLANES_SENTENCE}
+        </div>
+      )}
+      {inputNote && (
+        <div id={inputNoteId} role="note" data-non-linear-input="" className="text-[10px] text-amber-300 bg-amber-900/20 border border-amber-800/30 rounded-lg px-3 py-1.5">
+          {inputNote}
         </div>
       )}
 
@@ -147,13 +166,14 @@ export function CurvesPanelView({
         </div>
       </div>
 
+      {!compositeMode && <MaskSelect {...runMask.select} busy={running} />}
       <button
         type="button"
         data-testid="curves-run"
         onClick={handleRun}
         disabled={running || disabled}
         title={title}
-        aria-describedby={externalReason ? disabledReasonId : undefined}
+        aria-describedby={describedByIds(externalReason ? disabledReasonId : null, runNoteId, inputNote ? inputNoteId : null, maskReason ? runMask.select.noteId : null)}
         className="ab-run-btn"
         data-accent={ACCENT}
         data-running={running}
@@ -170,6 +190,11 @@ export function CurvesPanelView({
             { label: "Time", value: `${(result.res.elapsed_ms / 1000).toFixed(2)}s` },
             { label: "Size", value: `${result.res.dimensions[0]}x${result.res.dimensions[1]}` },
           ]} />
+          {autoStfNote && (
+            <div data-curves-auto-stf="" className="text-[10px] text-purple-300 bg-purple-900/20 border border-purple-800/30 rounded-lg px-3 py-1.5">
+              {autoStfNote}
+            </div>
+          )}
           {result.baseUrl && result.resultUrl && (
             <CompareView originalUrl={result.baseUrl} resultUrl={result.resultUrl} originalLabel={result.baseLabel} resultLabel="Curves" accent={SLIDER_ACCENT} height={180} />
           )}

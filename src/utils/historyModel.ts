@@ -1,6 +1,7 @@
 import type { ChainBase, ChainEntry, ChainStep, ProcessedResult, ProcessingChain } from "../shared/types/preview";
-import type { HistoryDoc, HistoryNode, KernelRef, OpName, OpSpec } from "../shared/types/ops";
-import { samePath, withStep } from "./processingChain";
+import type { BackgroundModel, HistoryDoc, HistoryNode, KernelRef, MaskRef, NodeMaskView, OpName, OpSpec } from "../shared/types/ops";
+import type { MaskSpec } from "../shared/types/masks";
+import { CHAIN_ORDER, samePath, withStep } from "./processingChain";
 
 const OP_STEPS: Record<OpName, ChainStep> = {
   background: "background",
@@ -32,16 +33,93 @@ export function opToStep(op: OpSpec): ChainStep {
   return OP_STEPS[op.op];
 }
 
+export function opNameLabel(name: OpName): string {
+  return OP_LABELS[name];
+}
+
+export function backgroundModelLabel(model: BackgroundModel["model"]): string {
+  if (model === "spline") return "DBE";
+  return model === "polynomial" ? OP_LABELS.background : "De-band";
+}
+
 export function opLabel(op: OpSpec): string {
-  if (op.op !== "background") return OP_LABELS[op.op];
-  if (op.model === "spline") return "DBE";
-  return op.model === "polynomial" ? OP_LABELS.background : "Deband";
+  return op.op === "background" ? backgroundModelLabel(op.model) : OP_LABELS[op.op];
+}
+
+export type HistoryMasks = Pick<HistoryDoc, "masks" | "deleted_masks">;
+
+export function nodeMaskView(doc: HistoryMasks | null, mask: MaskRef | null): NodeMaskView | null {
+  if (mask === null) return null;
+  if (typeof mask !== "string") return { id: null, recipe: mask as unknown as MaskSpec, deleted: false };
+  const recipe = (doc?.masks[mask] as MaskSpec | undefined) ?? null;
+  return { id: mask, recipe, deleted: doc?.deleted_masks?.includes(mask) ?? false };
+}
+
+function maskName(mask: NodeMaskView): string {
+  if (mask.id === null) return mask.recipe ? `${mask.recipe.kind} mask` : "inline mask";
+  return mask.deleted ? `mask ${mask.id} (deleted)` : `mask ${mask.id}`;
+}
+
+export function stepLabel(doc: HistoryMasks | null, node: Pick<HistoryNode, "op" | "mask">): string {
+  const mask = nodeMaskView(doc, node.mask);
+  return mask ? `${opLabel(node.op)} · ${maskName(mask)}` : opLabel(node.op);
+}
+
+const CRUMB_LABELS: Record<ChainStep, string> = {
+  background: "BG",
+  denoise: "Denoise",
+  deconv: "Deconv",
+  stretch: "Stretch",
+  maskedStretch: "Masked",
+  localContrast: "LHE/HDRMT",
+  tone: "Curves",
+  pixelMath: "PixelMath",
+};
+
+const COMPARE_LABELS: Record<ChainStep, string> = {
+  background: "Background",
+  denoise: "Denoise",
+  deconv: "Deconvolution",
+  stretch: "Stretch",
+  maskedStretch: "Masked stretch",
+  localContrast: "LHE / HDRMT",
+  tone: "Curves",
+  pixelMath: "PixelMath",
+};
+
+const SHARED_SLOT_TOOLS: Partial<Record<OpName, string>> = { ghs: "GHS", lhe: "LHE", hdrmt: "HDRMT" };
+
+export type OpSource = { op?: OpSpec } | null | undefined;
+
+function sharedSlotTool(source: OpSource): string | null {
+  const op = source?.op;
+  if (!op) return null;
+  if (op.op === "background") return op.model === "polynomial" ? null : backgroundModelLabel(op.model);
+  return SHARED_SLOT_TOOLS[op.op] ?? null;
+}
+
+export function crumbLabelFor(step: ChainStep, source: OpSource): string {
+  return sharedSlotTool(source) ?? CRUMB_LABELS[step];
+}
+
+export function compositeCrumbLabelFor(step: ChainStep, entryLabel: string): string {
+  return step === "localContrast" || entryLabel === backgroundModelLabel("spline") ? entryLabel : CRUMB_LABELS[step];
+}
+
+export function compareLabelsFor(sources: Partial<Record<ChainStep, OpSource>>): Record<ChainStep, string> {
+  const labels = { ...COMPARE_LABELS };
+  for (const step of CHAIN_ORDER) labels[step] = sharedSlotTool(sources[step]) ?? COMPARE_LABELS[step];
+  return labels;
 }
 
 const SUMMARY_MAX = 40;
 
 function num(n: number): string {
   return String(Number(n.toPrecision(4)));
+}
+
+function percent(fraction: number): string {
+  return `${num(fraction * 100)} %`;
 }
 
 function clip(text: string): string {
@@ -66,7 +144,7 @@ export function opSummary(op: OpSpec): string {
     case "background":
       return backgroundSummary(op);
     case "wavelet_denoise":
-      return `thresholds ${op.thresholds.map(num).join(" / ")}${op.linearDenoise ? "" : " · non-linear"}`;
+      return `thresholds ${op.thresholds.map(num).join(" / ")}${op.linearDenoise ? "" : " · hard threshold"}`;
     case "rl_deconv":
       return `${op.iterations} iterations · ${deconvPsf(op)}`;
     case "arcsinh":
@@ -74,9 +152,9 @@ export function opSummary(op: OpSpec): string {
     case "ghs":
       return `D ${num(op.d)} · b ${num(op.b)} · SP ${num(op.sp)}`;
     case "masked_stretch":
-      return `${op.iterations} iterations · target ${num(op.targetBackground)}`;
+      return `${op.iterations} iterations · target ${percent(op.targetBackground)}`;
     case "lhe":
-      return `radius ${op.kernelRadius} · limit ${num(op.contrastLimit)} · amount ${num(op.amount)}`;
+      return `radius ${op.kernelRadius} px · limit ${num(op.contrastLimit)} · amount ${percent(op.amount)}`;
     case "hdrmt":
       return `${op.layers} layers · ${op.iterations} ${op.iterations === 1 ? "iteration" : "iterations"}`;
     case "tone": {
@@ -201,6 +279,7 @@ function entryOf(node: HistoryNode, dir: string, previewOf: PreviewLookup): Chai
     previewUrl: previewOf(nodeFile(dir, node.output.png)),
     dimensions: [node.output.dims[0], node.output.dims[1]],
     ...(op.op === "rl_deconv" ? { psfUsed: op.psf.kind === "kernel" } : {}),
+    op,
   };
 }
 

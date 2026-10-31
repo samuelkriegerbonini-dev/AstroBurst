@@ -154,7 +154,7 @@ export function DockMenuList({ tool, anchor, index, count, onMove, onReorder, on
       </button>
       <button type="button" role="menuitem" tabIndex={-1} onClick={onShowTips} className={ITEM_CLASS}>
         <span className="w-3" />
-        Show layout tips
+        Show tool window tips
       </button>
     </div>
   );

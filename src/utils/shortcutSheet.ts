@@ -31,8 +31,8 @@ export function shortcutSheet(mac: boolean): readonly ShortcutGroup[] {
       id: "history",
       title: "History",
       rows: [
-        { keys: `${mod}Z`, desc: "Undo processing step" },
-        { keys: mac ? "⇧⌘Z" : "Ctrl+Shift+Z / Ctrl+Y", desc: "Redo processing step" },
+        { keys: `${mod}Z`, desc: "Undo processing step (single files)" },
+        { keys: mac ? "⇧⌘Z" : "Ctrl+Shift+Z / Ctrl+Y", desc: "Redo processing step (single files)" },
       ],
     },
     {

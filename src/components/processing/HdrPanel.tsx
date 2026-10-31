@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useId } from "react";
 import { X } from "lucide-react";
 import { applyHdrmtComposite, hdrmtConfigOf, recordHdrmt } from "../../services/localContrast";
 import { useHistoryScope } from "../../hooks/useHistory";
@@ -11,9 +11,12 @@ import { useRenderContext } from "../../context/PreviewContext";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { chainHoldsOutput } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
-import { COMPOSITE_RESTARTED_NOTICE, unchangedFileClause } from "./compositeProps";
+import { hdrLinearInputHint } from "../../utils/nonLinearInput";
+import { COMPOSITE_RESTARTED_NOTICE, describedByIds, unchangedFileClause } from "./compositeProps";
 import type { CompositePanelProps } from "./compositeProps";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+import MaskSelect from "../masks/MaskSelect";
+import { useRunMask } from "../masks/runMask";
 import type { ProcessedFile } from "../../shared/types/fits.types";
 import { DEFAULT_HDR_CONFIG, HDR_LIMITS, HDR_PROGRESS_EVENT } from "../../shared/types/localContrast";
 import type { HdrConfig, LocalContrastResult } from "../../shared/types/localContrast";
@@ -38,6 +41,7 @@ interface HdrPanelProps extends CompositePanelProps {
   fileKey?: string | null;
   disabledReason?: string | null;
   disabledReasonId?: string;
+  nonLinearNote?: string | null;
 }
 
 const ACCENT = "violet";
@@ -55,13 +59,16 @@ function isLinearInputError(message: string | null): boolean {
   return !!message && message.includes(LINEAR_INPUT_MARKER);
 }
 
-export default function HdrPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: HdrPanelProps) {
+export default function HdrPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId, runNoteId, nonLinearNote }: HdrPanelProps) {
+  const inputNoteId = useId();
   const progress = useProgress(HDR_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const initial = useRerunInitial("hdr", hdrmtConfigOf);
   const [config, setConfig] = useState<HdrConfig>(initial?.params ?? DEFAULT_HDR_CONFIG);
   useRerunUpdates("hdr", initial, hdrmtConfigOf, setConfig);
   const scope = useHistoryScope();
+  const runMask = useRunMask("hdr", scope, compositeMode);
+  const maskReason = runMask.blockedReason;
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<HdrRun>("hdr", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -76,9 +83,11 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
   }, []);
 
   const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path && !!scope;
+  const inputNote = canRun && !disabledReason ? nonLinearNote ?? null : null;
 
   const handleRun = useCallback(() => {
     const runConfig = config;
+    const mask = runMask.value;
     const snapshot = { layers: runConfig.layers, iterations: runConfig.iterations };
     if (compositeMode) {
       if (!compositeInput) return;
@@ -86,7 +95,7 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
       const displayStf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
       resetProgress();
       void run(async () => {
-        const res = await applyHdrmtComposite(outputDir, runConfig, { chainInput: input.input, displayStf });
+        const res = await applyHdrmtComposite(outputDir, runConfig, { chainInput: input.input, displayStf, mask });
         onCompositeDone("localContrast", "HDRMT", res, displayStf);
         return {
           ...snapshot,
@@ -106,12 +115,12 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
     const baseLabel = inputLabel ?? "Original";
     resetProgress();
     void run(async (ctx) => {
-      const res = await recordHdrmt(runScope, path, runConfig);
+      const res = await recordHdrmt(runScope, path, runConfig, mask);
       if (!ctx.inputUnchanged("localContrast")) throw new Error(INPUT_CHANGED_MESSAGE);
       await onProcessingDone?.(res);
       return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     }, isCancelMessage).finally(resetProgress);
-  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, scope, outputDir, config, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, scope, outputDir, config, runMask.value, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -124,6 +133,11 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
       {compositeMode && (
         <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
           Composite mode: compresses the stretched RGB composite{config.toLightness ? " on its luminance, preserving hue" : " channel by channel"}{unchangedFileClause(fileName)}
+        </div>
+      )}
+      {inputNote && (
+        <div id={inputNoteId} role="note" data-non-linear-input="" className="text-[10px] text-amber-300 bg-amber-900/20 border border-amber-800/30 rounded-lg px-3 py-1.5">
+          {inputNote}
         </div>
       )}
 
@@ -142,8 +156,9 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
         )}
       </div>
 
-      <div title={disabledReason ?? busyTitle}>
-        <RunButton label="Run HDRMT" runningLabel="Compressing..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent={ACCENT} onClick={handleRun} />
+      <MaskSelect {...runMask.select} busy={isRunning} />
+      <div title={disabledReason ?? maskReason ?? busyTitle}>
+        <RunButton label="Run HDRMT" runningLabel="Compressing..." running={isRunning} disabled={!canRun || blocked || !!disabledReason || !!maskReason} describedBy={describedByIds(disabledReason ? disabledReasonId : null, runNoteId, inputNote ? inputNoteId : null, maskReason ? runMask.select.noteId : null)} accent={ACCENT} onClick={handleRun} />
       </div>
 
       {isRunning && progress.active && (
@@ -171,7 +186,7 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
       <ErrorAlert message={error} />
       {isLinearInputError(error) && (
         <div className="text-[10px] text-amber-300 bg-amber-900/20 border border-amber-800/30 rounded-lg px-3 py-1.5">
-          HDRMT works on stretched data. Apply a stretch (Arcsinh, GHS or Masked) first, then run HDRMT on its output.
+          {hdrLinearInputHint(compositeMode)}
         </div>
       )}
 

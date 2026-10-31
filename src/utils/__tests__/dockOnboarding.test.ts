@@ -4,15 +4,26 @@ import {
   DOCK_ONBOARDING_STEPS,
   DOCK_ONBOARDING_TIP,
   DOCK_ONBOARDING_TITLE,
+  DOCK_SETTINGS_TIP_KEY,
+  DOCK_TIP_IDS,
+  DOCK_TIPS,
+  DOCK_TOGGLE_TIP_KEY,
   markDockOnboardingDone,
   movedToAnotherAnchor,
+  nextOnboardingCard,
+  ONBOARDING_INSET_PX,
+  ONBOARDING_KEYS,
   ONBOARDING_MIN_HEIGHT_PX,
+  ONBOARDING_ORDER,
   onboardingPlacement,
   shouldShowDockOnboarding,
+  stripButtonHint,
+  tipPlacement,
   viewerToolbarBottom,
+  type OnboardingCardId,
   type OnboardingToolbarHost,
 } from "../dockOnboarding";
-import { ANCHOR_LABELS, DEFAULT_DOCK_LAYOUT, dockReducer } from "../dockLayout";
+import { ANCHOR_LABELS, DEFAULT_DOCK_LAYOUT, DOCK_TOOL_META, anchorOf, anchorSide, dockReducer } from "../dockLayout";
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const data = new Map(Object.entries(initial));
@@ -194,5 +205,151 @@ describe("viewerToolbarBottom", () => {
   it("is the viewer top before the preview has rendered, and ignores a hidden toolbar", () => {
     expect(viewerToolbarBottom(host({ top: 60, viewportTop: null, toolbars: [] }))).toBe(60);
     expect(viewerToolbarBottom(host({ top: 60, viewportTop: 92, toolbars: [box(0, 0)] }))).toBe(92);
+  });
+});
+
+describe("strip button hints", () => {
+  it("tells how a closed tool opens and closes", () => {
+    expect(stripButtonHint("Compose", { open: false, disabled: false })).toBe("Compose: click to open, click again to close");
+    expect(stripButtonHint("Settings", { open: false, disabled: false })).toBe("Settings: click to open, click again to close");
+  });
+
+  it("tells that a click closes an open tool", () => {
+    expect(stripButtonHint("Compose", { open: true, disabled: false })).toBe("Compose is open: click to close");
+  });
+
+  it("asks for a file first on a disabled tool, open or not", () => {
+    expect(stripButtonHint("Compose", { open: false, disabled: true })).toBe("Compose: open a file first");
+    expect(stripButtonHint("Compose", { open: true, disabled: true })).toBe("Compose: open a file first");
+  });
+
+  it("keeps the label it is given, such as the Log entry count", () => {
+    expect(stripButtonHint("Log (3 entries)", { open: false, disabled: false })).toBe("Log (3 entries): click to open, click again to close");
+  });
+});
+
+describe("dock tips content and keys", () => {
+  it("has the toggle tip on Compose with the owner's wording", () => {
+    expect(DOCK_TIPS.toggle).toEqual({
+      id: "toggle",
+      tool: "compose",
+      title: "Open and close tools",
+      body: "Click any tool in this bar to open it, and click it again to close it.",
+    });
+  });
+
+  it("has the settings tip on Config naming the Settings sections", () => {
+    expect(DOCK_TIPS.settings).toEqual({
+      id: "settings",
+      tool: "config",
+      title: "Settings",
+      body: "Click Config for the settings: astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close them.",
+    });
+    expect(DOCK_TIPS.settings.body).toContain(`Click ${DOCK_TOOL_META.config.shortLabel} `);
+  });
+
+  it("anchors the toggle tip on the left strip and the settings tip on the right strip by default", () => {
+    expect(anchorSide(anchorOf(DEFAULT_DOCK_LAYOUT, DOCK_TIPS.toggle.tool))).toBe("left");
+    expect(anchorSide(anchorOf(DEFAULT_DOCK_LAYOUT, DOCK_TIPS.settings.tool))).toBe("right");
+  });
+
+  it("queues the toggle tip, the settings tip, then the drag tour, each under its own versioned key", () => {
+    expect(DOCK_TIP_IDS).toEqual(["toggle", "settings"]);
+    expect(ONBOARDING_ORDER).toEqual(["toggle", "settings", "tour"]);
+    expect(DOCK_TOGGLE_TIP_KEY).toBe("ab.onboarding.dockToggle.v1");
+    expect(DOCK_SETTINGS_TIP_KEY).toBe("ab.onboarding.settings.v1");
+    expect(ONBOARDING_KEYS).toEqual({ toggle: DOCK_TOGGLE_TIP_KEY, settings: DOCK_SETTINGS_TIP_KEY, tour: DOCK_ONBOARDING_KEY });
+  });
+
+  it("reads and writes the key it is given, the drag tour key by default", () => {
+    const storage = memoryStorage({ [DOCK_ONBOARDING_KEY]: "done" });
+    expect(shouldShowDockOnboarding(storage, DOCK_TOGGLE_TIP_KEY)).toBe(true);
+    expect(storage.getItem).toHaveBeenLastCalledWith(DOCK_TOGGLE_TIP_KEY);
+    markDockOnboardingDone(storage, DOCK_SETTINGS_TIP_KEY);
+    expect(storage.setItem).toHaveBeenCalledWith(DOCK_SETTINGS_TIP_KEY, "done");
+    expect(shouldShowDockOnboarding(storage, DOCK_SETTINGS_TIP_KEY)).toBe(false);
+    expect(shouldShowDockOnboarding(storage, DOCK_TOGGLE_TIP_KEY)).toBe(true);
+    expect(shouldShowDockOnboarding(storage)).toBe(false);
+    const throwing = throwingStorage();
+    expect(shouldShowDockOnboarding(throwing, DOCK_TOGGLE_TIP_KEY)).toBe(true);
+    expect(() => markDockOnboardingDone(throwing, DOCK_TOGGLE_TIP_KEY)).not.toThrow();
+  });
+});
+
+describe("nextOnboardingCard", () => {
+  const ALL_READY = { toggle: true, settings: true, tour: true };
+  const done = (...cards: OnboardingCardId[]) => new Set<OnboardingCardId>(cards);
+
+  it("follows the queue order while every card is ready", () => {
+    expect(nextOnboardingCard(done(), ALL_READY)).toBe("toggle");
+    expect(nextOnboardingCard(done("toggle"), ALL_READY)).toBe("settings");
+    expect(nextOnboardingCard(done("toggle", "settings"), ALL_READY)).toBe("tour");
+    expect(nextOnboardingCard(done("toggle", "settings", "tour"), ALL_READY)).toBeNull();
+  });
+
+  it("skips a card that is not ready without dropping it", () => {
+    expect(nextOnboardingCard(done(), { toggle: false, settings: true, tour: true })).toBe("settings");
+    expect(nextOnboardingCard(done(), { toggle: false, settings: false, tour: true })).toBe("tour");
+    expect(nextOnboardingCard(done("settings", "tour"), { toggle: false, settings: true, tour: true })).toBeNull();
+    expect(nextOnboardingCard(done("settings", "tour"), ALL_READY)).toBe("toggle");
+  });
+
+  it("shows nothing when nothing is ready", () => {
+    expect(nextOnboardingCard(done(), { toggle: false, settings: false, tour: false })).toBeNull();
+  });
+});
+
+describe("tipPlacement", () => {
+  const LEFT_BUTTON = { left: 3, top: 820, width: 38, height: 36 };
+  const RIGHT_BUTTON = { left: 1559, top: 700, width: 38, height: 36 };
+
+  it("sits to the right of a left-strip button, centred on it, with the arrow on its left edge", () => {
+    const button = { left: 3, top: 400, width: 38, height: 36 };
+    expect(tipPlacement(button, "left", VIEWPORT, 120)).toEqual({ left: 51, top: 358, width: 280, maxHeight: 868, arrow: "left", arrowY: 60 });
+  });
+
+  it("sits to the left of a right-strip button, centred on it, with the arrow on its right edge", () => {
+    expect(tipPlacement(RIGHT_BUTTON, "right", VIEWPORT, 120)).toEqual({ left: 1269, top: 658, width: 280, maxHeight: 868, arrow: "right", arrowY: 60 });
+  });
+
+  it("stays an inset inside the window and moves the arrow to keep pointing at the button", () => {
+    const low = tipPlacement(LEFT_BUTTON, "left", VIEWPORT, 120);
+    expect(low).toEqual({ left: 51, top: 764, width: 280, maxHeight: 868, arrow: "left", arrowY: 74 });
+    expect(low.top + 120).toBe(VIEWPORT.height - ONBOARDING_INSET_PX);
+    const high = tipPlacement({ left: 1559, top: 30, width: 38, height: 36 }, "right", VIEWPORT, 120);
+    expect(high.top).toBe(ONBOARDING_INSET_PX);
+    expect(high.arrowY).toBe(32);
+  });
+
+  it("keeps the arrow off the rounded corners when the button sits past the card", () => {
+    expect(tipPlacement({ left: 1559, top: 0, width: 38, height: 10 }, "right", VIEWPORT, 120).arrowY).toBe(14);
+    expect(tipPlacement({ left: 3, top: 895, width: 38, height: 10 }, "left", VIEWPORT, 120).arrowY).toBe(106);
+  });
+
+  it("caps a tall card at the window height less the insets", () => {
+    expect(tipPlacement(LEFT_BUTTON, "left", VIEWPORT, 2000)).toEqual({ left: 51, top: 16, width: 280, maxHeight: 868, arrow: "left", arrowY: 822 });
+  });
+
+  it("narrows rather than covering its button in a small window", () => {
+    const narrow = { width: 300, height: 400 };
+    const left = tipPlacement({ left: 3, top: 200, width: 38, height: 36 }, "left", narrow, 120);
+    expect(left.left).toBe(51);
+    expect(left.width).toBe(233);
+    const right = tipPlacement({ left: 259, top: 200, width: 38, height: 36 }, "right", narrow, 120);
+    expect(right).toMatchObject({ left: 16, width: 233, arrow: "right" });
+    expect(right.left + right.width).toBeLessThanOrEqual(259);
+    const tiny = tipPlacement({ left: 3, top: 20, width: 38, height: 36 }, "left", { width: 60, height: 100 }, 120);
+    expect(tiny.width).toBe(0);
+    expect(tiny.left).toBeGreaterThanOrEqual(41);
+  });
+
+  it("never overlaps its anchor button horizontally", () => {
+    for (const viewport of [VIEWPORT, { width: 900, height: 500 }, { width: 120, height: 300 }]) {
+      const left = { left: 3, top: 100, width: 38, height: 36 };
+      const right = { left: viewport.width - 41, top: 100, width: 38, height: 36 };
+      expect(tipPlacement(left, "left", viewport, 120).left).toBeGreaterThanOrEqual(left.left + left.width);
+      const placed = tipPlacement(right, "right", viewport, 120);
+      expect(placed.left + placed.width).toBeLessThanOrEqual(right.left);
+    }
   });
 });

@@ -1,4 +1,4 @@
-import type { HistoryScope, OpName, OpSpec } from "../shared/types/ops";
+import type { HistoryScope, NodeMaskView, OpName, OpSpec } from "../shared/types/ops";
 
 export type RerunSection =
   | "background"
@@ -17,6 +17,7 @@ export interface RerunRequest {
   node: string;
   downstream: boolean;
   scope: HistoryScope;
+  mask?: NodeMaskView | null;
 }
 
 export interface PendingRerun extends RerunRequest {
@@ -28,7 +29,7 @@ const SECTIONS: Record<OpName, RerunSection | null> = {
   wavelet_denoise: "denoise",
   rl_deconv: "deconvolution",
   arcsinh: "stretch",
-  ghs: null,
+  ghs: "stretch",
   masked_stretch: "masked_stretch",
   lhe: "local_contrast",
   hdrmt: "hdr",

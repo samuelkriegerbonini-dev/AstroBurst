@@ -151,11 +151,13 @@ function takeOnProcessingDone(): (res: ToneDone) => void | Promise<void> {
 }
 
 function activePill(html: string): string | null {
-  return /class="ab-processing-pill bg-[a-z]+-600\/20[^"]*" title="([^"]+) processing step"/.exec(html)?.[1] ?? null;
+  return /<button[^>]*class="ab-processing-pill bg-[a-z]+-600\/20[^"]*"[^>]*>([^<]+)/.exec(html)?.[1] ?? null;
 }
 
 function tabNote(html: string): string | null {
-  return /<div id="[^"]+" role="note"[^>]*>([^<]*)<\/div>/.exec(html)?.[1] ?? null;
+  const panels = html.indexOf('<div class="flex-1 overflow-y-auto">');
+  const tabLevel = panels < 0 ? html : html.slice(0, panels);
+  return /<div id="[^"]+" role="note"[^>]*>([^<]*)<\/div>/.exec(tabLevel)?.[1] ?? null;
 }
 
 beforeEach(() => {

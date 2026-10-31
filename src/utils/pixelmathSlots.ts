@@ -26,7 +26,7 @@ export const EXAMPLE_EXPRESSIONS: readonly ExampleExpression[] = [
   { label: "Average three images", expression: "(A + B + C) / 3" },
   { label: "Invert", expression: "~$T" },
   { label: "Normalize to [0, 1]", expression: "rescale($T, min($T), max($T), 0, 1)" },
-  { label: "Flat-field by A", expression: "$T * (A / med(A))" },
+  { label: "Flat-field (divide by the normalized flat A)", expression: "$T / (A / med(A))" },
 ];
 
 export function isValidSlotIdentifier(name: string): boolean {

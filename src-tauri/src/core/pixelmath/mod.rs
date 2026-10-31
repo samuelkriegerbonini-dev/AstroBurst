@@ -2,7 +2,7 @@ pub mod eval;
 pub mod lexer;
 pub mod parser;
 
-pub use eval::{compile, evaluate, validate, OutputOptions, Program};
+pub use eval::{compile, evaluate, evaluate_unfinished, finish_plane, validate, OutputOptions, Program};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {

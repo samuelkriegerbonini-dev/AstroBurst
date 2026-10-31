@@ -276,6 +276,9 @@ export const NO_API_KEY_NOTICE =
 
 const NOT_OFFERED: FallbackOffer = { offered: false, note: "" };
 
+export const NOVA_OFF_NOTE = "Offer astrometry.net after a failure is off in Solve options, so this image is not uploaded.";
+const NOVA_OFF: FallbackOffer = { offered: false, note: NOVA_OFF_NOTE };
+
 function hostOf(apiUrl: string | null | undefined): string {
   if (!apiUrl) return DEFAULT_NOVA_HOST;
   try {
@@ -290,8 +293,10 @@ export function fallbackOffer(
   lastSolver: PlateSolver | null,
   hasApiKey: boolean,
   apiUrl?: string | null,
+  allowed = true,
 ): FallbackOffer {
   if (!failure || !failure.canFallback || lastSolver === null || lastSolver === NOVA_SOLVER) return NOT_OFFERED;
+  if (!allowed) return NOVA_OFF;
   const host = hostOf(apiUrl);
   return hasApiKey
     ? { offered: true, note: `Uploads this image to ${host} with your API key; the solve runs there.` }

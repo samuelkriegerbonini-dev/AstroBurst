@@ -1,5 +1,6 @@
 import { typedInvoke, withPreview } from "../infrastructure/tauri";
 import type { DbeConfig } from "../shared/types/dbe";
+import type { MaskChoice } from "../shared/types/masks";
 import type { PixelMathSlot } from "../shared/types/pixelmath";
 import type { PsfEstimate } from "../shared/types/processing";
 import type {
@@ -20,8 +21,8 @@ export const CHAIN_PREVIEWS: [string, string][] = [
 
 const BACKGROUND_PREVIEWS: [string, string][] = [...CHAIN_PREVIEWS, ["model_png_path", "modelPreviewUrl"]];
 
-export function chainArgs(chain: CompositeChainCall): { chainInput: CompositeChainInput; displayStf: CompositeChainCall["displayStf"] } {
-  return { chainInput: chain.chainInput, displayStf: chain.displayStf };
+export function chainArgs(chain: CompositeChainCall): { chainInput: CompositeChainInput; displayStf: CompositeChainCall["displayStf"]; mask: MaskChoice | null } {
+  return { chainInput: chain.chainInput, displayStf: chain.displayStf, mask: chain.mask ?? null };
 }
 
 export type CompositeBackgroundModel = "polynomial" | "spline";

@@ -51,7 +51,7 @@ describe("DEFAULT_DOCK_LAYOUT", () => {
     expect(DEFAULT_DOCK_LAYOUT.anchors).toEqual({
       "left-top": ["files", "info"],
       "left-bottom": ["compose"],
-      "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "stacking"],
+      "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking"],
       "right-bottom": ["synth", "export", "config", "log"],
     });
     expect(anchorOf(DEFAULT_DOCK_LAYOUT, "log")).toBe("right-bottom");
@@ -120,17 +120,33 @@ describe("DOCK_TOOL_META", () => {
 
   it("keeps today's strip labels and panel labels", () => {
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].shortLabel)).toEqual([
-      "Files", "Info", "Comp", "Headers", "Image", "Astro", "Phot", "Cube", "Proc", "Hist", "Stack", "Synth", "Export", "Config", "Log",
+      "Files", "Info", "Comp", "Headers", "Image", "Astro", "Phot", "Cube", "Proc", "Hist", "Masks", "Stack", "Synth", "Export", "Config", "Log",
     ]);
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].label)).toEqual([
-      "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Cube", "Processing", "History", "Stacking", "Synth", "Export", "Settings", "Log",
+      "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Cube", "Processing", "History", "Masks", "Stacking", "Synth", "Export", "Settings", "Log",
     ]);
     expect(DOCK_TOOL_META.config.keywords).toEqual(["Config"]);
   });
 
+  it("registers Masks right after History as a per-image tool mounted while open", () => {
+    expect(DOCK_TOOL_IDS.indexOf("masks")).toBe(DOCK_TOOL_IDS.indexOf("history") + 1);
+    expect(DOCK_TOOL_META.masks).toEqual({
+      id: "masks",
+      label: "Masks",
+      shortLabel: "Masks",
+      accent: "var(--ab-amber)",
+      keywords: ["Mask", "Luminance mask", "Range mask", "Star mask", "Region mask", "Mask file", "Mark mode"],
+      needsFile: true,
+      mount: "whileOpen",
+      minWidth: 280,
+    });
+    expect(anchorOf(DEFAULT_DOCK_LAYOUT, "masks")).toBe("right-top");
+    expect(indexOf(DEFAULT_DOCK_LAYOUT, "masks")).toBe(indexOf(DEFAULT_DOCK_LAYOUT, "history") + 1);
+  });
+
   it("lists the tools in strip order with the analysis tools in the slot Analysis had", () => {
     expect(DOCK_TOOL_IDS).toEqual([
-      "files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "stacking", "synth", "export", "config", "log",
+      "files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking", "synth", "export", "config", "log",
     ]);
     expect((DOCK_TOOL_IDS as readonly string[]).includes("analysis")).toBe(false);
   });
@@ -162,12 +178,12 @@ describe("DOCK_TOOL_META", () => {
     }
   });
 
-  it("lets only Files, Info and Log work without a file", () => {
-    expect(DOCK_TOOL_IDS.filter((id) => !DOCK_TOOL_META[id].needsFile)).toEqual(["files", "info", "log"]);
+  it("lets only Files, Info, Settings and Log work without a file", () => {
+    expect(DOCK_TOOL_IDS.filter((id) => !DOCK_TOOL_META[id].needsFile)).toEqual(["files", "info", "config", "log"]);
   });
 
   it("gives Files and Info the sidebar minimum and every other tool the right-column minimum", () => {
-    expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].minWidth)).toEqual([180, 180, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280]);
+    expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].minWidth)).toEqual([180, 180, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280]);
   });
 });
 
@@ -175,7 +191,7 @@ describe("dockReducer move to another anchor", () => {
   it("appends to the target, opens the tool there and leaves the source's open tool alone", () => {
     const next = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-bottom" });
     expect(next.anchors["left-bottom"]).toEqual(["compose", "image"]);
-    expect(next.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "processing", "history", "stacking"]);
+    expect(next.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking"]);
     expect(next.active).toEqual({ "left-top": "files", "left-bottom": "image", "right-top": null, "right-bottom": null });
     expect(dockLayoutErrors(next)).toEqual([]);
   });
@@ -221,14 +237,14 @@ describe("dockReducer move inside the same anchor", () => {
 
   it("never changes the open tool and equals reorder", () => {
     const moved = dockReducer(open, { type: "move", tool: "headers", anchor: "right-top", index: 3 });
-    expect(moved.anchors["right-top"]).toEqual(["image", "astrometry", "photometry", "headers", "cube", "processing", "history", "stacking"]);
+    expect(moved.anchors["right-top"]).toEqual(["image", "astrometry", "photometry", "headers", "cube", "processing", "history", "masks", "stacking"]);
     expect(moved.active).toEqual(open.active);
     expect(moved).toEqual(dockReducer(open, { type: "reorder", anchor: "right-top", from: 0, to: 3 }));
   });
 
   it("does not open a closed dragged tool", () => {
     const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "stacking", anchor: "right-top", index: 0 });
-    expect(moved.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history"]);
+    expect(moved.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks"]);
     expect(moved.active["right-top"]).toBeNull();
   });
 
@@ -242,20 +258,20 @@ describe("dockReducer move inside the same anchor", () => {
 
   it("clamps the index to the last position", () => {
     expect(dockReducer(open, { type: "move", tool: "headers", anchor: "right-top", index: 99 }).anchors["right-top"])
-      .toEqual(["image", "astrometry", "photometry", "cube", "processing", "history", "stacking", "headers"]);
+      .toEqual(["image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking", "headers"]);
   });
 });
 
 describe("dockReducer reorder", () => {
   it("moves an item inside one anchor without touching the open tools", () => {
     const layout = withActive({ "right-top": "image" });
-    const next = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 7, to: 0 });
-    expect(next.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history"]);
+    const next = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 8, to: 0 });
+    expect(next.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks"]);
     expect(next.active).toEqual(layout.active);
   });
 
   it("returns the same object out of bounds and when from equals to", () => {
-    for (const [from, to] of [[-1, 0], [0, 8], [8, 0], [1, 1], [0.5, 2]]) {
+    for (const [from, to] of [[-1, 0], [0, 9], [9, 0], [1, 1], [0.5, 2]]) {
       expect(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from, to })).toBe(DEFAULT_DOCK_LAYOUT);
     }
   });
@@ -367,6 +383,10 @@ describe("layout queries", () => {
     expect(anchorOpenTool(DEFAULT_DOCK_LAYOUT, "left-bottom", true)).toBe("compose");
     expect(anchorOpenTool(DEFAULT_DOCK_LAYOUT, "right-top", true)).toBeNull();
     expect(anchorOpenTool(withActive({ "left-top": "info" }), "left-top", false)).toBe("info");
+  });
+
+  it("opens Settings without a file", () => {
+    expect(anchorOpenTool(withActive({ "right-bottom": "config" }), "right-bottom", false)).toBe("config");
   });
 });
 
@@ -530,6 +550,11 @@ describe("toolMountState", () => {
     expect(mountState({ tool: "files", hasFile: false, fileKey: null })).toEqual({ mounted: true, visible: false, active: false });
   });
 
+  it("shows Settings without a file", () => {
+    expect(mountState({ tool: "config", activeTool: "config", shownTool: "config", anchorMounted: true, hasFile: false, fileKey: null }))
+      .toEqual({ mounted: true, visible: true, active: true });
+  });
+
   it("shows Info without a file", () => {
     expect(mountState({ tool: "info", activeTool: "info", shownTool: "info", anchorMounted: true, hasFile: false, fileKey: null }))
       .toEqual({ mounted: true, visible: true, active: true });
@@ -614,8 +639,9 @@ describe("paletteToolEntries", () => {
   }
 
   it("lists only the tools that open without a file when no file is visible", () => {
-    expect(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false).map((entry) => entry.tool)).toEqual(["files", "info", "log"]);
-    expect(DOCK_TOOL_IDS.filter((tool) => !DOCK_TOOL_META[tool].needsFile)).toEqual(["files", "info", "log"]);
+    expect(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false).map((entry) => entry.tool)).toEqual(["files", "info", "config", "log"]);
+    expect(DOCK_TOOL_IDS.filter((tool) => !DOCK_TOOL_META[tool].needsFile)).toEqual(["files", "info", "config", "log"]);
+    expect(labelOf(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false), "config")).toBe("Open Settings Panel");
   });
 
   it("lists every tool in order once a file is visible", () => {
@@ -635,12 +661,12 @@ describe("paletteToolEntries", () => {
     expect(labelOf(paletteToolEntries(withActive({ "right-bottom": "log" }), false), "log")).toBe("Hide Log Panel");
   });
 
-  it("no entry listed without a file closes an open Log", () => {
+  it("an entry listed without a file keeps an open Log, or replaces it with its own panel in the same group", () => {
     const logOpen = withActive({ "right-bottom": "log" });
     for (const { tool } of paletteToolEntries(logOpen, false)) {
       if (tool === "log") continue;
       const next = dockReducer(logOpen, { type: "toggle", tool });
-      expect(anchorOpenTool(next, "right-bottom", false)).toBe("log");
+      expect(anchorOpenTool(next, "right-bottom", false)).toBe(anchorOf(next, tool) === "right-bottom" ? tool : "log");
     }
   });
 });

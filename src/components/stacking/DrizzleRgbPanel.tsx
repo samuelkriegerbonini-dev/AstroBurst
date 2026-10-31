@@ -2,29 +2,49 @@ import { useState, useCallback, useId, useMemo } from "react";
 import { Grid3X3, CheckCircle2, Wand2, X } from "lucide-react";
 import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader, WarningList, DecimalField } from "../ui";
 import { useProgress } from "../../hooks/useProgress";
-import { drizzleRgbStack } from "../../services/stacking";
+import { drizzleFrames, drizzleRgbStack } from "../../services/stacking";
 import { cancelProgress } from "../../services/progress";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
-import type { DrizzleAlignmentMethod, DrizzleRgbResult, RejectionMethod } from "../../shared/types/stacking";
-import { DRIZZLE_ALIGNMENT_METHODS, DRIZZLE_RGB_PROGRESS_EVENT } from "../../shared/types/stacking";
-import { REJECTION_OPTIONS, rejectionUsesSigma, stackProgressText } from "../../utils/stackingRejection";
-import { DRIZZLE_GAIN_FIELD, drizzleResultItems, isCancelledRun, manualGains } from "../../utils/drizzleRgbResult";
+import type { DrizzleAlignmentMethod, DrizzleRgbResult, StackResult } from "../../shared/types/stacking";
+import { DRIZZLE_ALIGNMENT_METHODS, DRIZZLE_RGB_PROGRESS_EVENT, STACK_PROGRESS_EVENT } from "../../shared/types/stacking";
+import { rejectionUsesSigma, stackProgressText, type RejectionSettings } from "../../utils/stackingRejection";
+import { DRIZZLE_GAIN_FIELD, drizzleResultItems, isCancelledRun, manualGains, monoDrizzleResultItems } from "../../utils/drizzleRgbResult";
 import { cullDrizzleChannels, subframeExclusionNotice } from "../../utils/subframeCull";
-import { autoDetectChannel, type DrizzleChannel } from "../../utils/drizzleChannel";
+import { DRIZZLE_CHANNELS, monoDrizzleFilterLabel, unassignedFilterLine, withAutoChannels, type DrizzleChannel } from "../../utils/drizzleChannel";
+import {
+  DEFAULT_DRIZZLE_KERNEL,
+  DRIZZLE_FIXED_REJECTION,
+  DRIZZLE_KERNELS,
+  DRIZZLE_PIXFRAC,
+  DRIZZLE_REJECTION_DEFAULTS,
+  DRIZZLE_SCALE,
+  type DrizzleKernel,
+} from "../../utils/drizzleParams";
+import { imagetypLeftOutLine, sortByFrameKind } from "../../utils/frameKind";
+import { drizzleOutputName } from "../../utils/stackingOutputs";
+import { claimStackProgress, releaseStackProgress, stackProgressBusyLine, useStackProgressHolder } from "../../utils/stackProgressLock";
+import { openInFiles } from "./resultHandoff";
+import RejectionControls from "./RejectionControls";
 import type { RunTarget } from "./StackingTab";
 
 type Channel = DrizzleChannel;
+
+type FinishedDrizzle =
+  | { mode: "rgb"; result: DrizzleRgbResult; kernel: string }
+  | { mode: "mono"; label: string; result: StackResult; kernel: string };
 
 interface DrizzleRgbPanelProps {
   files: ProcessedFile[];
   runTarget?: RunTarget | null;
   onResult?: (result: DrizzleRgbResult, inputs: string[], target: RunTarget | null) => void;
+  onMonoResult?: (result: StackResult, inputs: string[], target: RunTarget | null, filterLabel: string) => void;
   rejectedPaths?: readonly string[];
   onUseAllFrames?: () => void;
 }
 
 const NO_PATHS: readonly string[] = [];
+const OPEN_IN_FILES_CLASS = "shrink-0 rounded-md bg-emerald-600/20 px-2 py-1 text-[11px] text-emerald-200 transition-colors hover:bg-emerald-600/30";
 
 const ICON = <Grid3X3 size={14} className="text-rose-400" />;
 
@@ -34,22 +54,16 @@ const CHANNEL_STYLES: Record<Channel, { active: string; idle: string }> = {
   b: { active: "bg-blue-500/25 text-blue-300 ring-1 ring-blue-500/50", idle: "text-zinc-600 hover:text-blue-400" },
 };
 
-const KERNELS = [
-  { value: "square", label: "Square" },
-  { value: "gaussian", label: "Gaussian" },
-  { value: "lanczos3", label: "Lanczos3" },
-] as const;
+const NOTE_CLASS = "-mt-3 text-[10px] text-amber-400/90 leading-snug";
 
-export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult, rejectedPaths = NO_PATHS, onUseAllFrames }: DrizzleRgbPanelProps) {
+export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult, onMonoResult, rejectedPaths = NO_PATHS, onUseAllFrames }: DrizzleRgbPanelProps) {
   const [assignments, setAssignments] = useState<Record<string, Channel>>({});
-  const [scale, setScale] = useState(2.0);
-  const [pixfrac, setPixfrac] = useState(0.7);
-  const [kernel, setKernel] = useState<"square" | "gaussian" | "lanczos3">("square");
+  const [scale, setScale] = useState(DRIZZLE_SCALE.initial);
+  const [pixfrac, setPixfrac] = useState(DRIZZLE_PIXFRAC.initial);
+  const [kernel, setKernel] = useState<DrizzleKernel>(DEFAULT_DRIZZLE_KERNEL);
   const [align, setAlign] = useState(true);
   const [alignmentMethod, setAlignmentMethod] = useState<DrizzleAlignmentMethod>("phase_correlation");
-  const [rejection, setRejection] = useState<RejectionMethod>("sigma_clip");
-  const [sigmaLow, setSigmaLow] = useState(3.0);
-  const [sigmaHigh, setSigmaHigh] = useState(3.0);
+  const [rejectionSettings, setRejectionSettings] = useState<RejectionSettings>(DRIZZLE_REJECTION_DEFAULTS);
   const [wbMode, setWbMode] = useState<"auto" | "manual" | "none">("auto");
   const [wbRText, setWbRText] = useState("1");
   const [wbGText, setWbGText] = useState("1");
@@ -59,17 +73,24 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
   const [scnrMethod, setScnrMethod] = useState<"average" | "maximum">("average");
   const [saveFits, setSaveFits] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
-  const [finished, setFinished] = useState<{ result: DrizzleRgbResult; kernel: string } | null>(null);
+  const [finished, setFinished] = useState<FinishedDrizzle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cancelled, setCancelled] = useState(false);
-  const progress = useProgress(DRIZZLE_RGB_PROGRESS_EVENT);
-  const resetProgress = progress.reset;
+  const [runEvent, setRunEvent] = useState<string>(DRIZZLE_RGB_PROGRESS_EVENT);
+  const rgbProgress = useProgress(DRIZZLE_RGB_PROGRESS_EVENT);
+  const monoProgress = useProgress(STACK_PROGRESS_EVENT);
+  const progress = runEvent === STACK_PROGRESS_EVENT ? monoProgress : rgbProgress;
+  const resetRgbProgress = rgbProgress.reset;
+  const resetMonoProgress = monoProgress.reset;
+  const progressHolder = useStackProgressHolder();
   const kernelId = useId();
   const alignmentId = useId();
-  const rejectionId = useId();
   const whiteBalanceId = useId();
   const gainId = useId();
   const scnrMethodId = useId();
+  const leftOutId = useId();
+  const unassignedId = useId();
+  const busyId = useId();
 
   const channelPaths = useMemo(() => {
     const out: Record<Channel, string[]> = { r: [], g: [], b: [] };
@@ -84,12 +105,22 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
   const culledPaths = culled.channels;
   const rejectedSet = useMemo(() => new Set(rejectedPaths), [rejectedPaths]);
   const exclusionNotice = subframeExclusionNotice(culled.excluded);
+  const leftOutLine = useMemo(() => imagetypLeftOutLine(sortByFrameKind(files).calibration), [files]);
+  const unassignedLine = useMemo(() => unassignedFilterLine(files, assignments), [files, assignments]);
+  const autoNoteIds = [leftOutLine ? leftOutId : null, unassignedLine ? unassignedId : null].filter(Boolean).join(" ") || undefined;
 
-  const readyChannels = (["r", "g", "b"] as Channel[]).filter((ch) => culledPaths[ch].length >= 2);
-  const shortChannels = (["r", "g", "b"] as Channel[]).filter((ch) => culledPaths[ch].length === 1);
-  const canRun = readyChannels.length >= 2;
+  const readyChannels = DRIZZLE_CHANNELS.filter((ch) => culledPaths[ch].length >= 2);
+  const shortChannels = DRIZZLE_CHANNELS.filter((ch) => culledPaths[ch].length === 1);
+  const monoChannel = readyChannels.length === 1 ? readyChannels[0] : null;
+  const monoLabel = useMemo(() => {
+    if (!monoChannel) return null;
+    const inChannel = new Set(culledPaths[monoChannel]);
+    return monoDrizzleFilterLabel(files.filter((f) => inChannel.has(f.path)), monoChannel);
+  }, [files, culledPaths, monoChannel]);
+  const canRun = readyChannels.length >= 1;
+  const busyLine = monoChannel ? stackProgressBusyLine(progressHolder, isRunning ? "drizzle" : null) : null;
   const manual = useMemo(() => manualGains({ r: wbRText, g: wbGText, b: wbBText }), [wbRText, wbGText, wbBText]);
-  const gainError = wbMode === "manual" ? manual.error : null;
+  const gainError = wbMode === "manual" && !monoChannel ? manual.error : null;
 
   const toggleAssignment = useCallback((path: string, ch: Channel) => {
     setAssignments((prev) => {
@@ -104,57 +135,68 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
   }, []);
 
   const autoAssign = useCallback(() => {
-    setAssignments((prev) => {
-      const next = { ...prev };
-      for (const f of files) {
-        if (next[f.path]) continue;
-        const detected = autoDetectChannel(f.name);
-        if (detected) next[f.path] = detected;
-      }
-      return next;
-    });
+    setAssignments((prev) => withAutoChannels(prev, files));
   }, [files]);
 
   const clearAssignments = useCallback(() => setAssignments({}), []);
 
   const handleRun = useCallback(async () => {
     const gains = wbMode === "manual" ? manual.gains : null;
-    if (!canRun || (wbMode === "manual" && gains === null)) return;
+    if (!canRun || (!monoChannel && wbMode === "manual" && gains === null)) return;
+    if (monoChannel && !claimStackProgress("drizzle")) return;
     const target = runTarget;
-    const inputs = [...culledPaths.r, ...culledPaths.g, ...culledPaths.b];
+    const inputs = monoChannel ? [...culledPaths[monoChannel]] : [...culledPaths.r, ...culledPaths.g, ...culledPaths.b];
     const kernelAtRun = kernel;
+    const resetRunProgress = monoChannel ? resetMonoProgress : resetRgbProgress;
+    const { rejection, sigmaLow, sigmaHigh } = rejectionSettings;
+    const sigmas = rejectionUsesSigma(rejection) ? { sigmaLow, sigmaHigh } : { sigmaLow: undefined, sigmaHigh: undefined };
+    setRunEvent(monoChannel ? STACK_PROGRESS_EVENT : DRIZZLE_RGB_PROGRESS_EVENT);
     setIsRunning(true);
     setError(null);
     setCancelled(false);
     setFinished(null);
-    resetProgress();
+    resetRunProgress();
     try {
-      const res = await drizzleRgbStack(
-        culledPaths.r,
-        culledPaths.g,
-        culledPaths.b,
-        await getOutputDir(),
-        {
+      if (monoChannel) {
+        const res = await drizzleFrames(inputs, await getOutputDir(), {
           scale,
           pixfrac,
           kernel,
           align,
-          alignmentMethod: align ? alignmentMethod : undefined,
+          name: drizzleOutputName(inputs[0], inputs.length, new Date()),
           rejection,
-          sigmaLow: rejectionUsesSigma(rejection) ? sigmaLow : undefined,
-          sigmaHigh: rejectionUsesSigma(rejection) ? sigmaHigh : undefined,
-          wbMode,
-          wbR: gains?.wbR,
-          wbG: gains?.wbG,
-          wbB: gains?.wbB,
-          scnrEnabled,
-          scnrAmount: scnrEnabled ? scnrAmount : undefined,
-          scnrMethod: scnrEnabled ? scnrMethod : undefined,
-          saveFits,
-        },
-      );
-      setFinished({ result: res, kernel: kernelAtRun });
-      onResult?.(res, inputs, target);
+          ...sigmas,
+        });
+        const label = monoLabel ?? monoChannel.toUpperCase();
+        setFinished({ mode: "mono", label, result: res, kernel: kernelAtRun });
+        onMonoResult?.(res, inputs, target, label);
+      } else {
+        const res = await drizzleRgbStack(
+          culledPaths.r,
+          culledPaths.g,
+          culledPaths.b,
+          await getOutputDir(),
+          {
+            scale,
+            pixfrac,
+            kernel,
+            align,
+            alignmentMethod: align ? alignmentMethod : undefined,
+            rejection,
+            ...sigmas,
+            wbMode,
+            wbR: gains?.wbR,
+            wbG: gains?.wbG,
+            wbB: gains?.wbB,
+            scnrEnabled,
+            scnrAmount: scnrEnabled ? scnrAmount : undefined,
+            scnrMethod: scnrEnabled ? scnrMethod : undefined,
+            saveFits,
+          },
+        );
+        setFinished({ mode: "rgb", result: res, kernel: kernelAtRun });
+        onResult?.(res, inputs, target);
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       if (isCancelledRun(message)) {
@@ -164,11 +206,13 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
       }
     } finally {
       setIsRunning(false);
-      resetProgress();
+      resetRunProgress();
+      if (monoChannel) releaseStackProgress("drizzle");
     }
-  }, [canRun, culledPaths, scale, pixfrac, kernel, align, alignmentMethod, rejection, sigmaLow, sigmaHigh, wbMode, manual, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetProgress, runTarget, onResult]);
+  }, [canRun, monoChannel, monoLabel, culledPaths, scale, pixfrac, kernel, align, alignmentMethod, rejectionSettings, wbMode, manual, scnrEnabled, scnrAmount, scnrMethod, saveFits, resetRgbProgress, resetMonoProgress, runTarget, onResult, onMonoResult]);
 
   const totalAssigned = channelPaths.r.length + channelPaths.g.length + channelPaths.b.length;
+  const runLabel = monoLabel ? `Drizzle ${monoLabel} (mono)` : `Drizzle ${readyChannels.map((c) => c.toUpperCase()).join("+") || "RGB"}`;
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -179,13 +223,16 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
           subtitle={totalAssigned > 0 ? `${totalAssigned} frames assigned` : "Assign frames to channels"}
         />
         <div className="flex gap-2 items-center">
-          <button onClick={autoAssign} className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors" title="Detect R/G/B from filenames">
+          <button onClick={autoAssign} aria-describedby={autoNoteIds} className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors" title="Assign lights to R, G and B from the FITS filter, else the file name">
             <Wand2 size={10} />
             Auto
           </button>
           <button onClick={clearAssignments} className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors">Clear</button>
         </div>
       </div>
+
+      {leftOutLine && <p id={leftOutId} data-testid="drizzle-left-out" className={NOTE_CLASS}>{leftOutLine}</p>}
+      {unassignedLine && <p id={unassignedId} data-testid="drizzle-unassigned" className={NOTE_CLASS}>{unassignedLine}</p>}
 
       {files.length === 0 && (
         <div className="text-[11px] text-zinc-500 italic">Load FITS frames first, then assign each one to R, G or B.</div>
@@ -245,24 +292,30 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
 
       <div className="flex flex-col gap-3 border-t border-zinc-800/50 pt-3">
         <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Drizzle Parameters</span>
-        <Slider label="Scale" value={scale} min={1.0} max={3.0} step={0.5} accent="rose" format={(v) => `${v.toFixed(1)}x`} onChange={setScale} />
-        <Slider label="Pixfrac" value={pixfrac} min={0.1} max={1.0} step={0.05} accent="rose" format={(v) => v.toFixed(2)} onChange={setPixfrac} />
+        <Slider label="Scale" value={scale} min={DRIZZLE_SCALE.min} max={DRIZZLE_SCALE.max} step={DRIZZLE_SCALE.step} accent="rose" format={(v) => `${v.toFixed(1)}x`} onChange={setScale} />
+        <Slider label="Pixfrac" value={pixfrac} min={DRIZZLE_PIXFRAC.min} max={DRIZZLE_PIXFRAC.max} step={DRIZZLE_PIXFRAC.step} accent="rose" format={(v) => v.toFixed(2)} onChange={setPixfrac} />
         <div className="flex items-center justify-between">
           <label htmlFor={kernelId} className="text-xs text-zinc-400">Kernel</label>
           <select
             id={kernelId}
             value={kernel}
-            onChange={(e) => setKernel(e.target.value as typeof kernel)}
+            onChange={(e) => setKernel(e.target.value as DrizzleKernel)}
             className="ab-select"
             disabled={isRunning}
           >
-            {KERNELS.map((k) => (
+            {DRIZZLE_KERNELS.map((k) => (
               <option key={k.value} value={k.value}>{k.label}</option>
             ))}
           </select>
         </div>
         <Toggle label="Align frames and channels" checked={align} accent="rose" onChange={setAlign} />
-        {align && (
+        {align && monoChannel && (
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-zinc-400">Alignment</span>
+            <span data-testid="drizzle-mono-alignment" className="text-[11px] text-zinc-500">Phase Correlation, fixed in mono</span>
+          </div>
+        )}
+        {align && !monoChannel && (
           <div className="flex items-center justify-between">
             <label htmlFor={alignmentId} className="text-xs text-zinc-400">Alignment</label>
             <select
@@ -278,85 +331,78 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
             </select>
           </div>
         )}
-        <div className="flex items-center justify-between">
-          <label htmlFor={rejectionId} className="text-xs text-zinc-400">Pixel rejection</label>
-          <select
-            id={rejectionId}
-            value={rejection}
-            onChange={(e) => setRejection(e.target.value as RejectionMethod)}
-            className="ab-select"
-            disabled={isRunning}
-          >
-            {REJECTION_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </div>
-        {rejectionUsesSigma(rejection) && (
+        <RejectionControls
+          settings={rejectionSettings}
+          onChange={(change) => setRejectionSettings((prev) => ({ ...prev, ...change }))}
+          frameCount={readyChannels.length > 0 ? Math.min(...readyChannels.map((ch) => culledPaths[ch].length)) : null}
+          accent="rose"
+          label="Pixel rejection"
+          fixed={DRIZZLE_FIXED_REJECTION}
+          disabled={isRunning}
+        />
+        {!monoChannel && (
           <>
-            <Slider label="Sigma Low" value={sigmaLow} min={1.0} max={6.0} step={0.1} accent="rose" format={(v) => v.toFixed(1)} onChange={setSigmaLow} />
-            <Slider label="Sigma High" value={sigmaHigh} min={1.0} max={6.0} step={0.1} accent="rose" format={(v) => v.toFixed(1)} onChange={setSigmaHigh} />
-          </>
-        )}
-        <div className="flex items-center justify-between">
-          <label htmlFor={whiteBalanceId} className="text-xs text-zinc-400">White balance</label>
-          <select
-            id={whiteBalanceId}
-            value={wbMode}
-            onChange={(e) => setWbMode(e.target.value as typeof wbMode)}
-            className="ab-select"
-            disabled={isRunning}
-          >
-            <option value="auto">Auto</option>
-            <option value="manual">Manual</option>
-            <option value="none">None</option>
-          </select>
-        </div>
-        {wbMode === "manual" && (
-          <>
-            <div className="grid grid-cols-3 gap-2">
-              {[
-                { label: "R", text: wbRText, set: setWbRText },
-                { label: "G", text: wbGText, set: setWbGText },
-                { label: "B", text: wbBText, set: setWbBText },
-              ].map(({ label, text, set }) => (
-                <div key={label} className="flex flex-col gap-0.5">
-                  <label htmlFor={`${gainId}-${label}`} className="text-[9px] text-zinc-500 uppercase">{label} gain</label>
-                  <DecimalField
-                    id={`${gainId}-${label}`}
-                    {...DRIZZLE_GAIN_FIELD}
-                    value={text}
-                    onChange={set}
-                    disabled={isRunning}
-                    className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-rose-500/50 w-full"
-                  />
-                </div>
-              ))}
-            </div>
-            {gainError && <div className="text-[9px] text-amber-400/90" data-field-error>{gainError}</div>}
-          </>
-        )}
-        <Toggle label="SCNR green removal" checked={scnrEnabled} accent="rose" onChange={setScnrEnabled} />
-        {scnrEnabled && (
-          <>
-            <Slider label="SCNR amount" value={scnrAmount} min={0} max={1} step={0.05} accent="rose"
-                    format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setScnrAmount} />
             <div className="flex items-center justify-between">
-              <label htmlFor={scnrMethodId} className="text-xs text-zinc-400">SCNR method</label>
+              <label htmlFor={whiteBalanceId} className="text-xs text-zinc-400">White balance</label>
               <select
-                id={scnrMethodId}
-                value={scnrMethod}
-                onChange={(e) => setScnrMethod(e.target.value as "average" | "maximum")}
+                id={whiteBalanceId}
+                value={wbMode}
+                onChange={(e) => setWbMode(e.target.value as typeof wbMode)}
                 className="ab-select"
                 disabled={isRunning}
               >
-                <option value="average">Average neutral</option>
-                <option value="maximum">Maximum neutral</option>
+                <option value="auto">Auto</option>
+                <option value="manual">Manual</option>
+                <option value="none">None</option>
               </select>
             </div>
+            {wbMode === "manual" && (
+              <>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { label: "R", text: wbRText, set: setWbRText },
+                    { label: "G", text: wbGText, set: setWbGText },
+                    { label: "B", text: wbBText, set: setWbBText },
+                  ].map(({ label, text, set }) => (
+                    <div key={label} className="flex flex-col gap-0.5">
+                      <label htmlFor={`${gainId}-${label}`} className="text-[9px] text-zinc-500 uppercase">{label} gain</label>
+                      <DecimalField
+                        id={`${gainId}-${label}`}
+                        {...DRIZZLE_GAIN_FIELD}
+                        value={text}
+                        onChange={set}
+                        disabled={isRunning}
+                        className="bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-rose-500/50 w-full"
+                      />
+                    </div>
+                  ))}
+                </div>
+                {gainError && <div className="text-[9px] text-amber-400/90" data-field-error>{gainError}</div>}
+              </>
+            )}
+            <Toggle label="SCNR green removal" checked={scnrEnabled} accent="rose" onChange={setScnrEnabled} />
+            {scnrEnabled && (
+              <>
+                <Slider label="SCNR amount" value={scnrAmount} min={0} max={1} step={0.05} accent="rose"
+                        format={(v) => `${(v * 100).toFixed(0)}%`} onChange={setScnrAmount} />
+                <div className="flex items-center justify-between">
+                  <label htmlFor={scnrMethodId} className="text-xs text-zinc-400">SCNR method</label>
+                  <select
+                    id={scnrMethodId}
+                    value={scnrMethod}
+                    onChange={(e) => setScnrMethod(e.target.value as "average" | "maximum")}
+                    className="ab-select"
+                    disabled={isRunning}
+                  >
+                    <option value="average">Average neutral</option>
+                    <option value="maximum">Maximum neutral</option>
+                  </select>
+                </div>
+              </>
+            )}
+            <Toggle label="Save FITS alongside PNG" checked={saveFits} accent="rose" onChange={setSaveFits} />
           </>
         )}
-        <Toggle label="Save FITS alongside PNG" checked={saveFits} accent="rose" onChange={setSaveFits} />
       </div>
 
       {exclusionNotice && (
@@ -371,13 +417,15 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
       )}
 
       <RunButton
-        label={`Drizzle ${readyChannels.map((c) => c.toUpperCase()).join("+") || "RGB"}`}
+        label={runLabel}
         runningLabel="Drizzling..."
         running={isRunning}
-        disabled={!canRun || gainError !== null}
+        disabled={!canRun || gainError !== null || busyLine !== null}
+        describedBy={busyLine ? busyId : undefined}
         accent="rose"
         onClick={handleRun}
       />
+      {busyLine && <p id={busyId} data-testid="drizzle-progress-busy" className={NOTE_CLASS}>{busyLine}</p>}
 
       {isRunning && (
         <div className="flex flex-col gap-1.5 animate-fade-in">
@@ -391,7 +439,7 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
               <button
                 type="button"
                 data-testid="drizzle-rgb-cancel"
-                onClick={() => { cancelProgress(DRIZZLE_RGB_PROGRESS_EVENT).catch(() => {}); }}
+                onClick={() => { cancelProgress(runEvent).catch(() => {}); }}
                 title="Cancel drizzle"
                 aria-label="Cancel drizzle"
                 className="text-zinc-500 hover:text-red-400 transition-colors"
@@ -411,13 +459,21 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
         <div className="flex flex-col gap-2 animate-fade-in bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5">
           <div className="flex items-center gap-1.5 text-xs text-emerald-300 font-medium">
             <CheckCircle2 size={12} />
-            Drizzle RGB Complete
+            {finished.mode === "mono" ? `Drizzle ${finished.label} (mono) Complete` : "Drizzle RGB Complete"}
           </div>
-          <ResultGrid columns={3} items={drizzleResultItems(finished.result, finished.kernel)} />
+          <ResultGrid
+            columns={3}
+            items={finished.mode === "mono"
+              ? monoDrizzleResultItems(finished.result, finished.label, finished.kernel)
+              : drizzleResultItems(finished.result, finished.kernel)}
+          />
           <WarningList warnings={finished.result.warnings} />
           {finished.result.fits_path && (
-            <div className="text-[10px] text-zinc-500 truncate" title={finished.result.fits_path}>
-              FITS: {finished.result.fits_path}
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0 text-[10px] text-zinc-500 truncate" title={finished.result.fits_path}>
+                FITS: {finished.result.fits_path}
+              </div>
+              <button type="button" onClick={() => { if (finished.result.fits_path) openInFiles([finished.result.fits_path]); }} className={OPEN_IN_FILES_CLASS}>Open in Files</button>
             </div>
           )}
         </div>

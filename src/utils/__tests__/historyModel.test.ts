@@ -1,20 +1,28 @@
 import { describe, expect, it } from "vitest";
 import type { HistoryDoc, HistoryNode, OpSpec } from "../../shared/types/ops";
-import type { ChainBase } from "../../shared/types/preview";
+import type { ChainBase, ChainEntry } from "../../shared/types/preview";
+import { maskedStretchOp, waveletOp } from "../../services/processing";
 import { inputFor } from "../processingChain";
 import {
   activePath,
+  backgroundModelLabel,
   branchMarkers,
+  compareLabelsFor,
+  compositeCrumbLabelFor,
+  crumbLabelFor,
   headKernelRef,
   nodeAtPath,
   nodeFile,
+  nodeMaskView,
   nodePreviewVersion,
   nodeRecord,
   opLabel,
+  opNameLabel,
   opSummary,
   opToStep,
   projectChain,
   redoTail,
+  stepLabel,
 } from "../historyModel";
 
 const DIR = "C:\\Users\\me\\AppData\\Roaming\\astroburst\\history\\3f9c0a1e5b7d2c44";
@@ -41,6 +49,16 @@ const DECONV_KERNEL: OpSpec = {
 };
 const DECONV_GAUSSIAN: OpSpec = { ...DECONV_KERNEL, psf: { kind: "gaussian", sigma: 2, size: 15 } } as OpSpec;
 const PIXELMATH: OpSpec = { op: "pixelmath", v: 1, expression: "$T * 2", slots: [], truncate: true, rescale: false };
+const GHS: OpSpec = { op: "ghs", v: 1, d: 3, b: 0, sp: 0.05, lp: 0, hp: 1 };
+const LHE: OpSpec = { op: "lhe", v: 1, kernelRadius: 64, contrastLimit: 2, amount: 1, histBits: 8, circular: true };
+const HDRMT: OpSpec = { op: "hdrmt", v: 1, layers: 6, iterations: 1, overdrive: 0, inverted: false, toLightness: true, deringing: false, deringingAmount: 0.5 };
+const DBE: OpSpec = {
+  op: "background",
+  v: 1,
+  model: "spline",
+  config: { sampleRadius: 5, tolerance: 1, smoothing: 0.5, autoGrid: 8, manualSamples: [], rejectStars: true, mode: "subtract", normalize: true, maxSamples: 400 },
+};
+const DEBAND: OpSpec = { op: "background", v: 1, model: "deband_rows", config: { sigmaClip: 3, iterations: 3 } };
 
 function node(id: string, parent: string | null, op: OpSpec, present = true): HistoryNode {
   return {
@@ -158,6 +176,19 @@ describe("projectChain", () => {
     expect(chain.steps.denoise?.previewUrl).toBe(`asset://${DIR}\\n0002.png`);
     expect(projectChain(LINEAR, "n0002", { dir: DIR, base: null }).steps.denoise?.previewUrl).toBeNull();
   });
+
+  it("keeps the op of each step on its entry, so crumbs and compare bases name the tool without a node", () => {
+    const toned = doc([node("n0001", null, DBE), node("n0002", "n0001", GHS), node("n0003", "n0002", HDRMT)], "n0003");
+    const chain = projectChain(toned, "n0003", { dir: DIR, base: null });
+    expect(chain.steps.background?.op).toEqual(DBE);
+    expect(chain.steps.stretch?.op).toEqual(GHS);
+    expect(crumbLabelFor("background", chain.steps.background)).toBe("DBE");
+    expect(crumbLabelFor("stretch", chain.steps.stretch)).toBe("GHS");
+    expect(crumbLabelFor("localContrast", chain.steps.localContrast)).toBe("HDRMT");
+    expect(compareLabelsFor(chain.steps)).toMatchObject({ background: "DBE", stretch: "GHS", localContrast: "HDRMT" });
+    const recordedBefore: ChainEntry = { fitsPath: `${DIR}\\n0002.fits`, previewUrl: null, dimensions: null };
+    expect(crumbLabelFor("stretch", recordedBefore)).toBe("Stretch");
+  });
 });
 
 describe("history paths", () => {
@@ -200,6 +231,68 @@ describe("node mapping", () => {
     expect(opLabel(TONE)).toBe("Curves");
   });
 
+  it("names a tool before it runs with the label History will record", () => {
+    expect(backgroundModelLabel("polynomial")).toBe(opLabel(BACKGROUND));
+    expect(backgroundModelLabel("spline")).toBe("DBE");
+    expect(backgroundModelLabel("deband_rows")).toBe(opLabel({ op: "background", v: 1, model: "deband_rows", config: { sigmaClip: 3, iterations: 3 } }));
+    expect(opNameLabel("arcsinh")).toBe(opLabel(ARCSINH));
+    expect(opNameLabel("ghs")).toBe("GHS Stretch");
+    expect(opNameLabel("lhe")).toBe("LHE");
+    expect(opNameLabel("hdrmt")).toBe("HDRMT");
+    expect(opNameLabel("background")).toBe("Background Extraction");
+  });
+
+  it("names a crumb by the tool that made its step, and by the step when no node says which", () => {
+    expect(crumbLabelFor("localContrast", node("n0004", "n0003", HDRMT))).toBe("HDRMT");
+    expect(crumbLabelFor("localContrast", node("n0004", "n0003", LHE))).toBe("LHE");
+    expect(crumbLabelFor("localContrast", null)).toBe("LHE/HDRMT");
+    expect(crumbLabelFor("stretch", node("n0003", "n0002", GHS))).toBe("GHS");
+    expect(crumbLabelFor("stretch", node("n0003", "n0002", ARCSINH))).toBe("Stretch");
+    expect(crumbLabelFor("background", node("n0001", null, BACKGROUND))).toBe("BG");
+    expect(crumbLabelFor("background", node("n0001", null, DBE))).toBe("DBE");
+    expect(crumbLabelFor("background", node("n0001", null, DEBAND))).toBe("De-band");
+    expect(crumbLabelFor("denoise", node("n0002", "n0001", DENOISE))).toBe("Denoise");
+    expect(crumbLabelFor("deconv", node("n0002", "n0001", DECONV_KERNEL))).toBe("Deconv");
+    expect(crumbLabelFor("tone", node("n0005", "n0004", TONE))).toBe("Curves");
+    expect(crumbLabelFor("pixelMath", node("n0006", "n0005", PIXELMATH))).toBe("PixelMath");
+  });
+
+  it("names a compare base by the tool that made its step", () => {
+    expect(compareLabelsFor({ background: node("n0001", null, DBE), stretch: node("n0003", "n0002", GHS), localContrast: node("n0004", "n0003", HDRMT) })).toEqual({
+      background: "DBE",
+      denoise: "Denoise",
+      deconv: "Deconvolution",
+      stretch: "GHS",
+      maskedStretch: "Masked stretch",
+      localContrast: "HDRMT",
+      tone: "Curves",
+      pixelMath: "PixelMath",
+    });
+    expect(compareLabelsFor({ background: node("n0001", null, BACKGROUND), stretch: node("n0002", "n0001", ARCSINH), localContrast: node("n0003", "n0002", LHE) })).toMatchObject({
+      background: "Background",
+      stretch: "Stretch",
+      localContrast: "LHE",
+    });
+    expect(compareLabelsFor({})).toMatchObject({ background: "Background", stretch: "Stretch", localContrast: "LHE / HDRMT" });
+  });
+
+  it("spells De-band in History as the Background panel does", () => {
+    expect(opLabel(DEBAND)).toBe("De-band");
+    expect(backgroundModelLabel("deband_auto")).toBe("De-band");
+    expect(compareLabelsFor({ background: node("n0001", null, DEBAND) }).background).toBe("De-band");
+  });
+
+  it("names a composite crumb by the tool its entry label records, and by the step otherwise", () => {
+    expect(compositeCrumbLabelFor("background", "DBE")).toBe("DBE");
+    expect(compositeCrumbLabelFor("background", "Background Removed")).toBe("BG");
+    expect(compositeCrumbLabelFor("localContrast", "HDRMT")).toBe("HDRMT");
+    expect(compositeCrumbLabelFor("localContrast", "LHE")).toBe("LHE");
+    expect(compositeCrumbLabelFor("stretch", "Stretch")).toBe("Stretch");
+    expect(compositeCrumbLabelFor("denoise", "Denoised")).toBe("Denoise");
+    expect(compositeCrumbLabelFor("deconv", "Deconvolved")).toBe("Deconv");
+    expect(compositeCrumbLabelFor("maskedStretch", "Masked stretch")).toBe("Masked");
+  });
+
   it("joins node files with the separator of the history folder", () => {
     expect(nodeFile(DIR, "n0001.fits")).toBe(`${DIR}\\n0001.fits`);
     expect(nodeFile("/home/me/.local/share/astroburst/history/abc", "n0001.fits")).toBe("/home/me/.local/share/astroburst/history/abc/n0001.fits");
@@ -234,12 +327,39 @@ describe("node mapping", () => {
   });
 });
 
+describe("masked steps", () => {
+  const LUMA_RECIPE = { kind: "luminance", auto_stf: true, feather_px: 0, invert: false };
+  const RANGE_RECIPE = { kind: "range", lo: 0.2, hi: 0.8, feather_px: 0, invert: false };
+  const STARS_INLINE = { kind: "stars", sigma: 4, feather_px: 0, invert: false };
+  const MASKS = { masks: { m01: LUMA_RECIPE, m02: RANGE_RECIPE }, deleted_masks: ["m02"] };
+
+  function masked(mask: HistoryNode["mask"]): HistoryNode {
+    return { ...node("n0003", "n0002", LHE), mask };
+  }
+
+  it("names the mask of a masked step in its History label", () => {
+    expect(stepLabel(MASKS, masked(null))).toBe("LHE");
+    expect(stepLabel(MASKS, masked("m01"))).toBe("LHE · mask m01");
+    expect(stepLabel(MASKS, masked("m02"))).toBe("LHE · mask m02 (deleted)");
+    expect(stepLabel(MASKS, masked(STARS_INLINE))).toBe("LHE · stars mask");
+    expect(stepLabel(null, { ...node("n0002", "n0001", DENOISE), mask: "m01" })).toBe("Wavelet Denoise · mask m01");
+  });
+
+  it("reads a step's mask as the backend node view does", () => {
+    expect(nodeMaskView(MASKS, null)).toBeNull();
+    expect(nodeMaskView(MASKS, "m01")).toEqual({ id: "m01", recipe: LUMA_RECIPE, deleted: false });
+    expect(nodeMaskView(MASKS, "m02")).toEqual({ id: "m02", recipe: RANGE_RECIPE, deleted: true });
+    expect(nodeMaskView({ masks: {} }, "m09")).toEqual({ id: "m09", recipe: null, deleted: false });
+    expect(nodeMaskView(null, STARS_INLINE)).toEqual({ id: null, recipe: STARS_INLINE, deleted: false });
+  });
+});
+
 describe("opSummary", () => {
   it("names the settings a user would change", () => {
     expect(opSummary(BACKGROUND)).toBe("grid 8 · degree 3 · subtract");
     expect(opSummary({ op: "background", v: 1, model: "deband_auto", config: { sigmaClip: 3, iterations: 3 } })).toBe("auto axis · σ 3");
     expect(opSummary(DENOISE_STRONG)).toBe("thresholds 4 / 3 / 2 / 1.5 / 1");
-    expect(opSummary({ ...DENOISE, linearDenoise: false } as OpSpec)).toBe("thresholds 3 / 2.5 / 2 / 1.5 / 1 · non-linear");
+    expect(opSummary({ ...DENOISE, linearDenoise: false } as OpSpec)).toBe("thresholds 3 / 2.5 / 2 / 1.5 / 1 · hard threshold");
     expect(opSummary(DECONV_KERNEL)).toBe("20 iterations · provided PSF 31×31");
     expect(opSummary(DECONV_GAUSSIAN)).toBe("20 iterations · Gaussian PSF σ 2");
     expect(opSummary(ARCSINH)).toBe("factor 50");
@@ -247,6 +367,20 @@ describe("opSummary", () => {
     expect(opSummary({ op: "tone", v: 1, curve: { points: [[0, 0], [0.5, 0.7], [1, 1]] } })).toBe("curve 3 points");
     expect(opSummary(PIXELMATH)).toBe("$T * 2");
     expect(opSummary({ ...PIXELMATH, expression: "x".repeat(60) } as OpSpec)).toBe(`${"x".repeat(39)}…`);
+  });
+
+  it("calls a hard-threshold Denoise run a hard threshold, not non-linear", () => {
+    const hard = opSummary(waveletOp({ linear: false }));
+    expect(hard).toContain("hard threshold");
+    expect(hard).not.toContain("non-linear");
+    expect(opSummary(waveletOp({ linear: true }))).toBe("thresholds 3 / 2.5 / 2 / 1.5 / 1");
+  });
+
+  it("gives the Masked target and the LHE amount in percent, as their panels do", () => {
+    expect(opSummary(maskedStretchOp({ targetBackground: 0.25 }))).toBe("10 iterations · target 25 %");
+    expect(opSummary(maskedStretchOp({ iterations: 12, targetBackground: 0.07 }))).toBe("12 iterations · target 7 %");
+    expect(opSummary(LHE)).toBe("radius 64 px · limit 2 · amount 100 %");
+    expect(opSummary({ ...LHE, amount: 0.7 } as OpSpec)).toBe("radius 64 px · limit 2 · amount 70 %");
   });
 });
 

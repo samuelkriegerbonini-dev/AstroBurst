@@ -182,6 +182,7 @@ describe("ProcessingTab with a stack on screen", () => {
     expect(bg.selectedFile?.result?.previewUrl).toMatch(/^asset:\/\/out\/stack\.png\?v=\d+$/);
     expect(bg.selectedFile?.result?.dimensions).toEqual([66, 50]);
     expect(bg.chainedFrom).toBe(STACK_LABEL);
+    expect(bg.inputLabel).toBe(STACK_LABEL);
   });
 
   it("records a Background run as read from the stack and keeps the stack as the base", async () => {

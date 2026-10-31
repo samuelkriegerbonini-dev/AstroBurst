@@ -114,6 +114,7 @@ declare module "lucide-react" {
   export const Unlink: Icon;
   export const Undo2: Icon;
   export const Upload: Icon;
+  export const VenetianMask: Icon;
   export const Wand2: Icon;
   export const X: Icon;
   export const XCircle: Icon;

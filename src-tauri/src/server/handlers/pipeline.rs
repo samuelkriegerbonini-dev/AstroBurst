@@ -463,4 +463,45 @@ mod tests {
         let stacked = run_pipeline(&fresh, &inputs, &channels, &plain_config(), &|| false).unwrap();
         assert_eq!(stacked.len(), 1);
     }
+
+    #[tokio::test]
+    async fn pipeline_route_refuses_a_flat_in_a_light_channel_with_400() {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let typed = |name: &str, imagetyp: &str| {
+            let mut header = astroburst_lib::types::header::HduHeader::empty();
+            header.set("IMAGETYP", imagetyp.to_string());
+            header.set("FILTER", "R".to_string());
+            let path = dir.path().join(name).to_str().unwrap().to_string();
+            astroburst_lib::infra::fits::writer::write_fits_mono(&path, &Array2::from_elem((4, 4), 100.0f32), Some(&header))
+                .unwrap();
+            path
+        };
+        let paths = vec![typed("r_light_001.fits", "LIGHT"), typed("r_light_002.fits", "LIGHT"), typed("r_flat_001.fits", "FLAT")];
+        let config = crate::config::ServerConfig::default();
+        let state = AppState::new(Arc::new(crate::config::ServerConfig::default()));
+        state.sessions.insert("s-pipe-flat".into(), crate::session::Session::new("s-pipe-flat".into(), &config));
+        let body = json!({ "channels": [{ "label": "R", "paths": paths }], "result_prefix": "flat_" }).to_string();
+
+        let resp = crate::router::build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/s-pipe-flat/pipeline/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"]["message"], "Channel 'R': r_flat_001.fits has IMAGETYP='FLAT' but was given as a light frame.");
+        assert!(state.sessions.get("s-pipe-flat").unwrap().jobs.is_empty(), "a job was queued despite the refusal");
+    }
 }

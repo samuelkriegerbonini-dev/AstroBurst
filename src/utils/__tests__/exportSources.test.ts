@@ -2,10 +2,12 @@ import { describe, it, expect } from "vitest";
 import {
   assetUrlToPath,
   channelSourceLabel,
+  compositeRgbPngStf,
   cubeFrameExportName,
   exportSourceLabel,
   exportTimestamp,
   manifestLine,
+  pngStfNote,
   resolveRgbExportSource,
   rgbCubeUnavailableReason,
   rgbExportPaths,
@@ -16,6 +18,7 @@ import {
 } from "../exportSources";
 import { rgbProductOf, type RgbProductInput } from "../rgbProduct";
 import type { ProcessedResult } from "../../shared/types/preview";
+import { DEFAULT_DISPLAY_SETTINGS } from "../../shared/types/display";
 
 const A = "C:/data/A.fits";
 const A_PREVIEW = "http://asset.localhost/C%3A%2Fcache%2FA.png";
@@ -178,6 +181,58 @@ describe("RGB file source notes", () => {
     expect(rgbFilePngNote(null, { linked: true })).toBe("Source: this RGB file with the linked STF on screen");
     expect(rgbFilePngNote(null, { linked: false })).toBe("Source: this RGB file with the per-channel STF on screen");
     expect(rgbFilePngNote(null, null)).toBe("Source: this RGB file with a per-channel auto STF");
+  });
+});
+
+describe("pngStfNote (EX-01)", () => {
+  const display = DEFAULT_DISPLAY_SETTINGS;
+
+  it("says what the PNG switch applies, with the Image tool's STF state word", () => {
+    expect(pngStfNote(display, "auto").source).toBe(
+      "Mono: the Image tool's STF (Auto STF). RGB exports ignore the switch and use an automatic linked STF or the STF on screen. Off maps a mono image's data range linearly; linear data come out almost black.",
+    );
+    expect(pngStfNote(display, "manual").source).toContain("Mono: the Image tool's STF (Manual STF).");
+    expect(pngStfNote(display, "linear").source).toContain("Mono: the Image tool's STF (Linear).");
+  });
+
+  it("names the display stretch when the viewer shows another curve than the MTF STF", () => {
+    expect(pngStfNote({ ...display, stretch: "asinh" }, "auto").mismatch).toBe(
+      "The viewer shows the asinh stretch; the PNG uses the MTF STF instead.",
+    );
+    expect(pngStfNote({ ...display, stretch: "linear" }, "auto").mismatch).toBe(
+      "The viewer shows the linear stretch; the PNG uses the MTF STF instead.",
+    );
+  });
+
+  it("adds no line for the MTF STF with the default colormap and invert, whatever the STF and the unused limits", () => {
+    for (const state of ["auto", "manual", "linear"] as const) {
+      expect(pngStfNote(display, state).mismatch).toBeNull();
+    }
+    expect(pngStfNote({ ...display, limits: "zscale" }, "auto").mismatch).toBeNull();
+  });
+
+  it("adds no line under the viewer's Linear button, whose linear min-max view is the PNG's linear STF", () => {
+    expect(pngStfNote({ ...display, stretch: "linear", limits: "minmax" }, "linear").mismatch).toBeNull();
+    expect(pngStfNote({ ...display, stretch: "linear", limits: "zscale" }, "linear").mismatch).toContain("the linear stretch");
+    expect(pngStfNote({ ...display, stretch: "linear", symmetric: true }, "linear").mismatch).toContain("the linear stretch");
+  });
+
+  it("names a colormap or an inverted scale the PNG does not carry", () => {
+    expect(pngStfNote({ ...display, colormap: "viridis" }, "auto").mismatch).toBe(
+      "The viewer shows the viridis colormap; the PNG uses grayscale instead.",
+    );
+    expect(pngStfNote({ ...display, invert: true }, "auto").mismatch).toBe(
+      "The viewer shows an inverted scale; the PNG uses the normal scale instead.",
+    );
+    expect(pngStfNote({ ...display, stretch: "power", colormap: "rdbu", invert: true }, "manual").mismatch).toBe(
+      "The viewer shows the power stretch, the RdBu colormap and an inverted scale; the PNG uses the MTF STF, grayscale and the normal scale instead.",
+    );
+  });
+});
+
+describe("compositeRgbPngStf under the PNG default (EX-01)", () => {
+  it("sends the Headers-tab channels with the switch on and no S, M, H, so the backend takes an automatic linked STF", () => {
+    expect(compositeRgbPngStf(null, true, true)).toEqual({ applyStfStretch: true, linked: true });
   });
 });
 

@@ -104,6 +104,8 @@ export function plateSolve(path: string, opts: PlateSolveOptions = {}): Promise<
     nearRadiusDeg: opts.nearRadiusDeg ?? null,
     resumeSubmissionId: opts.resumeSubmissionId ?? null,
     resumeJobId: opts.resumeJobId ?? null,
+    useTwomass: opts.useTwomass ?? null,
+    maxSipOrder: opts.maxSipOrder ?? null,
   });
 }
 

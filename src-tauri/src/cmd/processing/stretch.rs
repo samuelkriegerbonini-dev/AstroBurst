@@ -3,11 +3,14 @@ use serde_json::json;
 use ndarray::Array2;
 
 use crate::cmd::common::{blocking_cmd, load_from_cache_or_disk, render_and_save_as, resolve_output_dir, OutputValues, MAX_PREVIEW_DIM};
-use crate::cmd::compose::composite_chain::{key_planes, run_chain_step, stretched_state, ChainCall, ChainStep, DisplayStf, StepOutput};
+use crate::cmd::compose::composite_chain::{
+    key_planes, refuse_unchained_mask, run_chain_step, stretched_state, three_planes, ChainCall, ChainStep, DisplayStf, StepOutput,
+};
 use crate::cmd::helpers;
+use crate::cmd::masks::composite_spec;
 use crate::core::imaging::stretch::{arcsinh_stretch_rgb, ghs_stretch_rgb};
 use crate::core::imaging::masked_stretch::{masked_stretch, masked_stretch_rgb_shared, MaskedStretchConfig};
-use crate::core::ops::stretch::{arcsinh_factor, ghs_params_from_args, masked_stretch_config};
+use crate::core::ops::stretch::{arcsinh_blend_base, arcsinh_factor, ghs_params_from_args, masked_stretch_config};
 use crate::core::ops::{run_op, OpInput, OpSpec, OpVersion};
 use crate::types::constants::{
     RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH,
@@ -198,21 +201,27 @@ pub async fn arcsinh_stretch_composite_cmd(
     factor: f64,
     chain_input: Option<String>,
     display_stf: Option<DisplayStf>,
+    mask: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let mask = composite_spec(mask)?;
         let clamped_factor = arcsinh_factor(factor);
 
         if let Some(chain_input) = chain_input {
-            let call = ChainCall { output_dir, chain_input, display_stf };
+            let call = ChainCall { output_dir, chain_input, display_stf, mask };
             return run_chain_step(ChainStep::Stretch, &call, |input, _| {
-                let [r, g, b] = key_planes(input);
+                let key = key_planes(input);
+                let blend_base = call.mask.as_ref().map(|_| three_planes(arcsinh_blend_base(&key))).transpose()?;
+                let [r, g, b] = key;
                 let (r, g, b) = arcsinh_stretch_rgb(r, g, b, clamped_factor);
                 Ok(StepOutput {
                     state: stretched_state(input, [r, g, b]),
                     extras: json!({ RES_STRETCH_FACTOR: clamped_factor }),
+                    blend_base,
                 })
             });
         }
+        refuse_unchained_mask(ChainStep::Stretch, mask.as_ref())?;
 
         let output_dir = resolve_output_dir(&output_dir)?;
 
@@ -325,8 +334,10 @@ pub async fn masked_stretch_composite_cmd(
     max_eccentricity: Option<f64>,
     chain_input: Option<String>,
     display_stf: Option<DisplayStf>,
+    mask: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let mask = composite_spec(mask)?;
         let config = masked_stretch_config(
             iterations,
             target_background,
@@ -340,7 +351,7 @@ pub async fn masked_stretch_composite_cmd(
         let use_shared = shared_mask.unwrap_or(true);
 
         if let Some(chain_input) = chain_input {
-            let call = ChainCall { output_dir, chain_input, display_stf };
+            let call = ChainCall { output_dir, chain_input, display_stf, mask };
             return run_chain_step(ChainStep::MaskedStretch, &call, |input, _| {
                 let [r, g, b] = key_planes(input);
                 let out = masked_stretch_rgb(r, g, b, &config, use_shared)?;
@@ -352,9 +363,11 @@ pub async fn masked_stretch_composite_cmd(
                         CHANNELS: out.per_channel,
                         RES_MASK_MODE: out.mask_mode,
                     }),
+                    blend_base: None,
                 })
             });
         }
+        refuse_unchained_mask(ChainStep::MaskedStretch, mask.as_ref())?;
 
         let output_dir = resolve_output_dir(&output_dir)?;
 

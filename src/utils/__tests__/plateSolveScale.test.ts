@@ -12,6 +12,7 @@ import {
   headerHintTexts,
   headerPositionHintTexts,
   hintSourceLine,
+  keptHintTexts,
   mergeHintSources,
   mergeHintTexts,
   offlineNearRadius,
@@ -22,6 +23,7 @@ import {
   positionHintStatus,
   scaleHintFromPixelScale,
   solveHintTexts,
+  typedHintSources,
   type HintField,
   type HintTexts,
 } from "../plateSolveScale";
@@ -393,6 +395,29 @@ describe("mergeHintTexts", () => {
     const current: HintTexts = { ...DEFAULT_HINT_TEXTS };
     mergeHintTexts(current, F200W_HINTS, NOTHING_TOUCHED);
     expect(current).toEqual(DEFAULT_HINT_TEXTS);
+  });
+});
+
+describe("keptHintTexts", () => {
+  const typed: HintTexts = { scaleLow: "1", scaleHigh: "2", scaleUnits: "arcminwidth", centerRa: "10.5", centerDec: "-20.25", radius: "4" };
+
+  it("picks the fields mergeHintTexts keeps, with the whole scale range when one scale field was typed", () => {
+    expect(keptHintTexts(typed, NOTHING_TOUCHED)).toEqual({});
+    expect(keptHintTexts(typed, new Set<HintField>(["centerRa", "radius"]))).toEqual({ centerRa: "10.5", radius: "4" });
+    expect(keptHintTexts(typed, new Set<HintField>(["scaleUnits"]))).toEqual({ scaleLow: "1", scaleHigh: "2", scaleUnits: "arcminwidth" });
+  });
+
+  it("restores through mergeHintTexts the same texts a header would leave alone", () => {
+    const touched = new Set<HintField>(["scaleLow", "centerDec"]);
+    const kept = keptHintTexts(typed, touched);
+    expect(mergeHintTexts({ ...DEFAULT_HINT_TEXTS, ...kept }, F200W_HINTS, touched)).toEqual(mergeHintTexts(typed, F200W_HINTS, touched));
+  });
+
+  it("marks the restored groups as typed", () => {
+    expect(typedHintSources({})).toEqual(NO_HINT_SOURCES);
+    expect(typedHintSources({ radius: "4" })).toEqual(NO_HINT_SOURCES);
+    expect(typedHintSources({ centerRa: "10.5" })).toEqual({ centre: TYPED_HINT_SOURCE, scale: null });
+    expect(typedHintSources(keptHintTexts(typed, new Set<HintField>(["scaleHigh"])))).toEqual({ centre: null, scale: TYPED_HINT_SOURCE });
   });
 });
 

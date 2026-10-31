@@ -34,6 +34,8 @@ pub mod hdr;
 pub mod local_contrast;
 pub mod luminance;
 pub mod cutout;
+#[cfg(test)]
+mod bench_mask_inputs;
 
 pub const HISTORY_TEXT_BYTES: usize = 72;
 

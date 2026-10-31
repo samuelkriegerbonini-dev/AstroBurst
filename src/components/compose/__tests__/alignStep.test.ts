@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createElement, type FunctionComponent } from "react";
+import { createElement, isValidElement, type FunctionComponent, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { exportMappingBanner, INITIAL_STATE, type WizardState } from "../../../utils/wizard";
-import type { AlignedChannel, AlignResult } from "../../../shared/types/compose";
+import type { AlignedChannel, AlignPlan, AlignResult } from "../../../shared/types/compose";
 import type { WizardAlignRun } from "../../../context/ComposeWizardContext";
 import { STACK_INPUTS_CHANGED } from "../../../utils/stackRun";
 
@@ -11,12 +11,15 @@ const { current, captured, mocks } = vi.hoisted(() => ({
   captured: { clicks: {} as Record<string, () => unknown>, previewRun: undefined as unknown },
   mocks: {
     alignChannels: vi.fn(),
+    alignPlan: vi.fn(),
     cropChannels: vi.fn(),
     dispatch: vi.fn(),
     stackFrames: vi.fn(),
     recordStackOutcome: vi.fn(),
   },
 }));
+
+vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 
 vi.mock("../../../context/ComposeWizardContext", () => ({
   useComposeWizardContext: () => ({
@@ -64,6 +67,7 @@ vi.mock("../CropEditor", () => ({ default: () => null }));
 vi.mock("../../../services/compose", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/compose")>()),
   alignChannels: mocks.alignChannels,
+  alignPlan: mocks.alignPlan,
   cropChannels: mocks.cropChannels,
 }));
 
@@ -72,6 +76,7 @@ vi.mock("../../../infrastructure/tauri", async (importOriginal) => ({
   getOutputDir: () => Promise.resolve("C:/out"),
 }));
 
+import { hooks } from "../../../test/hookRuntime";
 import AlignStep from "../steps/AlignStep";
 import CropStep from "../steps/CropStep";
 import ExportStep from "../steps/ExportStep";
@@ -79,6 +84,7 @@ import StackStep from "../steps/StackStep";
 
 const HA = "/data/f444w.fits";
 const OIII = "/data/f200w.fits";
+const SII = "/data/f150w.fits";
 
 function stateWith(files: Record<string, string[]>, extra: Partial<WizardState> = {}): WizardState {
   return {
@@ -139,6 +145,7 @@ beforeEach(() => {
   captured.clicks = {};
   captured.previewRun = undefined;
   mocks.alignChannels.mockReset();
+  mocks.alignPlan.mockReset();
   mocks.cropChannels.mockReset();
   mocks.dispatch.mockReset();
   mocks.stackFrames.mockReset();
@@ -265,6 +272,165 @@ describe("AlignStep result rows", () => {
   it("hands the overlay the reference bin of the stored run", () => {
     renderFinished(alignResult({ channels: [reprojected, reference], reference_index: 1 }));
     expect(captured.previewRun).toMatchObject({ referenceBinId: "oiii" });
+  });
+});
+
+function planOf(referenceIndex: number, rule: AlignPlan["reference_rule"], channels: [boolean, boolean][]): AlignPlan {
+  return {
+    channels: channels.map(([has_wcs, reprojected]) => ({ has_wcs, reprojected })),
+    reference_index: referenceIndex,
+    reference_rule: rule,
+  };
+}
+
+interface PlanChip {
+  kind: string;
+  text: string;
+  title: string | null;
+  refTag: boolean;
+}
+
+function planChips(html: string, binId?: string): PlanChip[] {
+  const scope = binId === undefined ? html : row(html, binId);
+  return [...scope.matchAll(/<span([^>]*data-align-plan="([^"]+)"[^>]*)>([^<]*)<\/span>/g)].map(([, attrs, kind, text]) => ({
+    kind,
+    text,
+    title: /title="([^"]*)"/.exec(attrs)?.[1] ?? null,
+    refTag: attrs.includes('data-testid="align-ref-tag"'),
+  }));
+}
+
+function methodLabel(html: string): string | undefined {
+  return /<label[^>]*>([^<]*)<\/label>/.exec(html)?.[1];
+}
+
+interface TreeNode {
+  type: unknown;
+  props: Record<string, unknown> & { children?: ReactNode };
+}
+
+function nodes(node: ReactNode): TreeNode[] {
+  if (Array.isArray(node)) return node.flatMap(nodes);
+  if (!isValidElement<TreeNode["props"]>(node)) return [];
+  return [{ type: node.type, props: node.props }, ...nodes(node.props.children)];
+}
+
+function renderLive(state: WizardState, alignRun: WizardAlignRun | null = null): ReactElement {
+  current.state = state;
+  current.alignRun = alignRun;
+  return hooks.render(AlignStep, { state, onAligned: vi.fn() }) as ReactElement;
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe("AlignStep plan before the run", () => {
+  beforeEach(() => hooks.mount());
+
+  it("with two WCS channels the select is labelled Fallback and each row shows its chip before the run", async () => {
+    mocks.alignPlan.mockResolvedValue(planOf(1, "finest_wcs", [[true, true], [true, false]]));
+    const state = stateWith({ ha: [HA], oiii: [OIII] });
+    const pending = renderToStaticMarkup(renderLive(state));
+    expect(mocks.alignPlan).toHaveBeenCalledWith([HA, OIII], null);
+    expect(methodLabel(pending)).toBe("Method");
+    expect(planChips(pending)).toEqual([]);
+    await settle();
+    const shown = renderToStaticMarkup(renderLive(state));
+    expect(methodLabel(shown)).toBe("Fallback (channels without a WCS pair)");
+    expect(planChips(shown, "ha").map((c) => [c.kind, c.text])).toEqual([["wcs", "WCS"]]);
+    expect(planChips(shown, "oiii")).toEqual([
+      { kind: "reference", text: "reference", title: "Reference: the finest WCS pixel scale (Auto)", refTag: true },
+    ]);
+    expect(row(shown, "ha")).not.toContain('data-testid="align-ref-tag"');
+    expect(mocks.alignPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the fallback method on every row that a selected reference without a WCS leaves without a pair", async () => {
+    mocks.alignPlan.mockResolvedValue(planOf(2, "selected", [[true, false], [true, false], [false, false]]));
+    const state = stateWith({ ha: [HA], oiii: [OIII], sii: [SII] }, { alignRefChoice: "sii" });
+    renderLive(state);
+    await settle();
+    const tree = renderLive(state);
+    const shown = renderToStaticMarkup(tree);
+    expect(mocks.alignPlan).toHaveBeenCalledWith([HA, OIII, SII], 2);
+    expect(methodLabel(shown)).toBe("Method");
+    expect(planChips(shown, "ha").map((c) => c.text)).toEqual(["no WCS pair: Phase Correlation"]);
+    expect(planChips(shown, "oiii").map((c) => c.title)).toEqual([
+      "No celestial WCS in the reference SII; resampled by array size and registered by Phase Correlation",
+    ]);
+    expect(planChips(shown, "sii").map((c) => [c.text, c.refTag])).toEqual([["reference", true]]);
+    expect(row(shown, "sii")).not.toContain(">REF<");
+    const methodSelect = nodes(tree).find((n) => n.type === "select");
+    expect(methodSelect, "method select").toBeDefined();
+    expect(methodSelect!.props["data-testid"]).toBe("align-method-select");
+    (methodSelect!.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: "affine" } });
+    const affine = renderToStaticMarkup(renderLive(state));
+    expect(planChips(affine, "oiii").map((c) => c.text)).toEqual(["no WCS pair: Star-based Affine"]);
+    expect(mocks.alignPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reads the plan when the reference or the channels change and never shows a read made for other inputs", async () => {
+    let answerAuto: (plan: AlignPlan) => void = () => {};
+    mocks.alignPlan
+      .mockImplementationOnce(() => new Promise<AlignPlan>((resolve) => { answerAuto = resolve; }))
+      .mockResolvedValueOnce(planOf(1, "selected", [[true, true], [true, false]]))
+      .mockImplementationOnce(() => new Promise<AlignPlan>(() => {}));
+    const selected = stateWith({ ha: [HA], oiii: [OIII] }, { alignRefChoice: "oiii" });
+    renderLive(stateWith({ ha: [HA], oiii: [OIII] }));
+    renderLive(selected);
+    answerAuto(planOf(0, "finest_wcs", [[true, false], [true, true]]));
+    await settle();
+    const shown = renderToStaticMarkup(renderLive({ ...selected, wbR: 1.2 }));
+    expect(planChips(shown, "oiii").map((c) => c.text)).toEqual(["reference"]);
+    expect(planChips(shown, "ha").map((c) => c.text)).toEqual(["WCS"]);
+    const three = renderToStaticMarkup(renderLive(stateWith({ ha: [HA], oiii: [OIII], sii: [SII] }, { alignRefChoice: "oiii" })));
+    expect(planChips(three)).toEqual([]);
+    expect(methodLabel(three)).toBe("Method");
+    expect(mocks.alignPlan.mock.calls).toEqual([
+      [[HA, OIII], null],
+      [[HA, OIII], 1],
+      [[HA, OIII, SII], 1],
+    ]);
+  });
+
+  it("shows no chip and keeps the plain label when the plan cannot be read", async () => {
+    mocks.alignPlan.mockRejectedValue(new Error("Need at least 2 channels to align"));
+    const state = stateWith({ ha: [HA], oiii: [OIII] });
+    renderLive(state);
+    await settle();
+    const shown = renderToStaticMarkup(renderLive(state));
+    expect(planChips(shown)).toEqual([]);
+    expect(methodLabel(shown)).toBe("Method");
+    expect(shown).not.toContain("no WCS pair");
+  });
+
+  it("shows the run's notes instead of the chips once Align ran, and keeps the Fallback label", async () => {
+    const reprojectedHa: AlignedChannel = {
+      offset: [-0.24, 0.31],
+      cache_key: ALIGNED.ha,
+      method_used: "phase_correlation",
+      registered: true,
+      reprojected: true,
+      wcs_scale_ratio: 2.014553,
+      wcs_rotation_deg: 0.486,
+      prefilter_k: null,
+      residual_measured: true,
+    };
+    const referenceOiii: AlignedChannel = { offset: [0, 0], cache_key: ALIGNED.oiii, registered: true, reprojected: false };
+    mocks.alignPlan.mockResolvedValue(planOf(1, "finest_wcs", [[true, true], [true, false]]));
+    const state = stateWith({ ha: [HA], oiii: [OIII] }, { alignedPaths: ALIGNED, alignRefBinId: "oiii", alignRunToken: "k3x9" });
+    const run = finishedRun(alignResult({ channels: [reprojectedHa, referenceOiii], reference_index: 1, reference_rule: "finest_wcs" }));
+    renderLive(state, run);
+    await settle();
+    const shown = renderToStaticMarkup(renderLive(state, run));
+    expect(planChips(shown)).toEqual([]);
+    expect(row(shown, "ha")).toContain("reprojected through WCS (scale x2.0146, rotation +0.49°)");
+    expect(row(shown, "oiii")).toContain(">REF<");
+    expect(methodLabel(shown)).toBe("Fallback (channels without a WCS pair)");
+  });
+
+  it("asks nothing with fewer than two channels", () => {
+    renderLive(stateWith({ ha: [HA] }));
+    expect(mocks.alignPlan).not.toHaveBeenCalled();
   });
 });
 

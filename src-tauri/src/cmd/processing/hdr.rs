@@ -1,7 +1,8 @@
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, load_cached, resolve_output_dir};
-use crate::cmd::compose::composite_chain::DisplayStf;
+use crate::cmd::compose::composite_chain::{refuse_unchained_mask, ChainStep, DisplayStf};
+use crate::cmd::masks::composite_spec;
 use crate::cmd::processing::local_contrast::{run_composite_contrast, run_composite_contrast_chain, save_contrast_output, source_header};
 use crate::core::imaging::hdr::{hdrmt_rgb, HdrConfig};
 use crate::core::ops::{run_op, OpInput, OpSpec, OpVersion};
@@ -51,11 +52,14 @@ pub async fn hdrmt_composite_cmd(
     config: HdrConfig,
     chain_input: Option<String>,
     display_stf: Option<DisplayStf>,
+    mask: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let mask = composite_spec(mask)?;
         if let Some(chain_input) = chain_input {
-            return run_composite_contrast_chain(output_dir, chain_input, display_stf, |r, g, b| hdrmt_rgb(r, g, b, &config));
+            return run_composite_contrast_chain(output_dir, chain_input, display_stf, mask, |r, g, b| hdrmt_rgb(r, g, b, &config));
         }
+        refuse_unchained_mask(ChainStep::LocalContrast, mask.as_ref())?;
         let output_dir = resolve_output_dir(&output_dir)?;
         run_composite_contrast(SUFFIX_HDR, &output_dir, move |r, g, b| hdrmt_rgb(r, g, b, &config))
     })

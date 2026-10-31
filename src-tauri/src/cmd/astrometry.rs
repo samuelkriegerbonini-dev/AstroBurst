@@ -221,6 +221,8 @@ const TIER2_MAX_ROWS: usize = 20_000;
 const TIER2_NEAR_FIELDS: f64 = 0.5;
 const ONLINE_CANCEL_POLL: Duration = Duration::from_millis(100);
 const ONLINE_QUERY_STOPPED: &str = "the online catalogue query stopped without an answer";
+const MIN_SIP_ORDER_CAP: u8 = 2;
+const MAX_SIP_ORDER_CAP: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SolverChoice {
@@ -256,6 +258,8 @@ pub(crate) struct PlateSolveRequest {
     pub near_radius_deg: Option<f64>,
     pub resume_submission: Option<u64>,
     pub resume_job: Option<u64>,
+    pub use_twomass: Option<bool>,
+    pub max_sip_order: Option<u8>,
 }
 
 pub(crate) struct NovaSettings {
@@ -278,6 +282,7 @@ pub(crate) struct TierRequest<'a> {
     pub width: usize,
     pub height: usize,
     pub online: bool,
+    pub use_twomass: bool,
 }
 
 #[derive(Default)]
@@ -630,6 +635,15 @@ fn checked_near_radius(value: Option<f64>) -> Result<Option<f64>, String> {
     }
 }
 
+fn checked_max_sip_order(value: Option<u8>) -> Result<Option<u8>, String> {
+    match value {
+        Some(order) if !(MIN_SIP_ORDER_CAP..=MAX_SIP_ORDER_CAP).contains(&order) => {
+            Err(format!("The maximum SIP order must be 2, 3 or 4, got {order}"))
+        }
+        accepted => Ok(accepted),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScaleUnits {
     ArcsecPerPixel,
@@ -776,8 +790,8 @@ fn tier2_reach_deg(scale: &ScaleRange, width: usize, height: usize) -> f64 {
     TIER2_NEAR_FIELDS * scale.high_arcsec * width.max(height) as f64 / ARCSEC_PER_DEG
 }
 
-fn tier_params(tier: CatalogTier, near_radius_deg: Option<f64>, tier2_reach_deg: f64) -> LocalSolveParams {
-    let mut params = LocalSolveParams::default();
+fn tier_params(tier: CatalogTier, near_radius_deg: Option<f64>, tier2_reach_deg: f64, sip_max_order: Option<u8>) -> LocalSolveParams {
+    let mut params = LocalSolveParams { sip_max_order, ..LocalSolveParams::default() };
     if let Some(radius) = near_radius_deg {
         params.near_radius_deg = radius;
     }
@@ -811,7 +825,7 @@ const OFFLINE_TIERS: [(&str, TierSpec); 3] = [
     (TWOMASS_ID, TWOMASS_TIER),
 ];
 
-pub(crate) fn offline_tiers(store: &CatalogStore, config: &AppConfig) -> TierSet {
+pub(crate) fn offline_tiers(store: &CatalogStore, config: &AppConfig, use_twomass: bool) -> TierSet {
     let mut set = TierSet::default();
     for (id, spec) in OFFLINE_TIERS {
         let installed = matches!(
@@ -825,6 +839,10 @@ pub(crate) fn offline_tiers(store: &CatalogStore, config: &AppConfig) -> TierSet
                     spec.label
                 ));
             }
+            continue;
+        }
+        if id == TWOMASS_ID && !use_twomass {
+            set.notes.push(format!("{}: off in Solve options", spec.label));
             continue;
         }
         match store.open(id, config, PLATE_SOLVE_HOLDER) {
@@ -1025,6 +1043,7 @@ fn solve_locally(
 ) -> Result<serde_json::Value, serde_json::Value> {
     let started = Instant::now();
     let near_radius = checked_near_radius(request.near_radius_deg).map_err(plain_error)?;
+    let sip_max_order = checked_max_sip_order(request.max_sip_order).map_err(plain_error)?;
     env.stage(STAGE_LOAD);
     let loaded = load_plane(&image_ref(&request.path)).map_err(|e| plain_error(format!("{e:#}")))?;
     let (height, width) = loaded.arr.dim();
@@ -1039,6 +1058,7 @@ fn solve_locally(
         width,
         height,
         online,
+        use_twomass: request.use_twomass.unwrap_or(true),
     });
     let field = field_of(&hints, width, height);
     let expected = expected_tier0_stars(field);
@@ -1057,7 +1077,7 @@ fn solve_locally(
     for index in order {
         let (tier, provider) = &tiers.chain.tiers[index];
         let label = provider.label();
-        let params = tier_params(*tier, near_radius, tier2_reach);
+        let params = tier_params(*tier, near_radius, tier2_reach, sip_max_order);
         let stage = |text: &str| env.stage(&format!("{label}: {text}"));
         let cancel = || env.cancelled();
         match solve_stars(&detections, (width, height), &hints, provider.as_ref(), &params, &cancel, &stage) {
@@ -1096,6 +1116,23 @@ fn solve_locally(
     Err(no_solution_error(env, &tiers, &tried, expected))
 }
 
+pub(crate) fn solve_from_header_hints(
+    env: &dyn SolveEnv,
+    path: &str,
+    online: bool,
+    use_twomass: bool,
+    max_sip_order: Option<u8>,
+) -> Result<serde_json::Value, serde_json::Value> {
+    let request = PlateSolveRequest {
+        path: path.to_string(),
+        solver: Some(SOLVER_LOCAL.to_string()),
+        use_twomass: Some(use_twomass),
+        max_sip_order,
+        ..PlateSolveRequest::default()
+    };
+    solve_locally(env, &request, online)
+}
+
 struct AppSolveEnv {
     progress: ProgressHandle,
     resource_dir: Option<PathBuf>,
@@ -1108,7 +1145,7 @@ impl SolveEnv for AppSolveEnv {
             AppConfig::default()
         });
         let mut set = match StoreRoots::from_app(self.resource_dir.as_deref()) {
-            Ok(roots) => offline_tiers(&CatalogStore::new(roots), &config),
+            Ok(roots) => offline_tiers(&CatalogStore::new(roots), &config, request.use_twomass),
             Err(error) => TierSet {
                 notes: vec![format!("the catalogue folders are not reachable: {error:#}")],
                 ..TierSet::default()
@@ -1186,6 +1223,8 @@ pub async fn plate_solve_cmd(
     near_radius_deg: Option<f64>,
     resume_submission_id: Option<u64>,
     resume_job_id: Option<u64>,
+    use_twomass: Option<bool>,
+    max_sip_order: Option<u8>,
 ) -> Result<serde_json::Value, serde_json::Value> {
     let env: Arc<dyn SolveEnv> = Arc::new(AppSolveEnv {
         progress: ProgressHandle::new(&app, PLATE_SOLVE_PROGRESS_EVENT, 1),
@@ -1205,6 +1244,8 @@ pub async fn plate_solve_cmd(
         near_radius_deg,
         resume_submission: resume_submission_id,
         resume_job: resume_job_id,
+        use_twomass,
+        max_sip_order,
     };
     run_plate_solve(env, request).await
 }
@@ -2495,7 +2536,7 @@ mod tests {
         use crate::core::imaging::region::test_support::make_header;
         use crate::core::synth::psf::{render_stars, GaussianPsf};
         use crate::core::synth::star_field::Star;
-        use crate::infra::catalog_store::{CatalogStore, StoreRoots, SIRIL_GAIA_ID, TYCHO2_FILE, TYCHO2_ID};
+        use crate::infra::catalog_store::{CatalogStore, StoreRoots, SIRIL_GAIA_ID, TWOMASS_ID, TYCHO2_FILE, TYCHO2_ID};
         use crate::infra::net::test_server::{serve, Resource, TestServer};
         use crate::types::config::AppConfig;
 
@@ -2521,6 +2562,7 @@ mod tests {
             nova_calls: Arc<AtomicUsize>,
             stages: Mutex<Vec<String>>,
             cancel: Arc<AtomicBool>,
+            requested_twomass: Mutex<Vec<bool>>,
         }
 
         impl FakeEnv {
@@ -2532,6 +2574,7 @@ mod tests {
                     nova_calls: Arc::new(AtomicUsize::new(0)),
                     stages: Mutex::new(Vec::new()),
                     cancel: Arc::new(AtomicBool::new(false)),
+                    requested_twomass: Mutex::new(Vec::new()),
                 })
             }
 
@@ -2541,7 +2584,8 @@ mod tests {
         }
 
         impl SolveEnv for FakeEnv {
-            fn tiers(&self, _request: &TierRequest<'_>) -> TierSet {
+            fn tiers(&self, request: &TierRequest<'_>) -> TierSet {
+                self.requested_twomass.lock().unwrap().push(request.use_twomass);
                 self.tiers.lock().unwrap().take().unwrap_or_default()
             }
 
@@ -3029,7 +3073,7 @@ mod tests {
             let mut set = TierSet::default();
             let fetch: GaiaFetch = Arc::new(|_: &ConeQuery| Ok(Vec::new()));
             let solve_hints = hints((10.0, 20.0), (1.0, 1.2));
-            let offline_only = TierRequest { hints: &solve_hints, width: 2000, height: 1500, online: false };
+            let offline_only = TierRequest { hints: &solve_hints, width: 2000, height: 1500, online: false, use_twomass: true };
             add_online_tier(&mut set, &offline_only, Some(Arc::clone(&fetch)), never_cancelled());
             assert!(labels(&set).is_empty(), "solver \"local\" never goes online");
             let auto = TierRequest { online: true, ..offline_only };
@@ -3302,7 +3346,7 @@ mod tests {
             let roots = StoreRoots::under(&dir.path().join("data"), &dir.path().join("cache")).with_tier0_dir(resources.clone());
 
             let pinned = CatalogStore::new(roots.clone());
-            let set = offline_tiers(&pinned, &config);
+            let set = offline_tiers(&pinned, &config, true);
             assert_eq!(labels(&set), [TIER1_SIRIL_LABEL], "{:?}", set.notes);
             assert_eq!(set.chain.tiers[0].0, CatalogTier::Tier1);
             let actual: String = Sha256::digest(&tier0).iter().map(|b| format!("{b:02x}")).collect();
@@ -3316,17 +3360,79 @@ mod tests {
             let mut spec = pinned.spec(TYCHO2_ID).unwrap().clone();
             spec.sha256 = Some(Sha256::digest(&tier0).into());
             let verified = CatalogStore::new(roots).with_dataset(spec);
-            let set = offline_tiers(&verified, &config);
+            let set = offline_tiers(&verified, &config, true);
             assert_eq!(labels(&set), [TIER0_LABEL, TIER1_SIRIL_LABEL], "{:?}", set.notes);
             assert!(set.notes.is_empty(), "{:?}", set.notes);
             let (rows, label) = (set.chain.tiers[0].1.cone(56.75, 24.12, 1.0).unwrap(), set.chain.tiers[0].1.label());
             assert_eq!((rows.len(), label), (1, TIER0_LABEL));
 
             let bare = CatalogStore::new(StoreRoots::under(&dir.path().join("bare"), &dir.path().join("bare-cache")));
-            let set = offline_tiers(&bare, &AppConfig::default());
+            let set = offline_tiers(&bare, &AppConfig::default(), true);
             assert!(labels(&set).is_empty());
             assert_eq!(set.notes.len(), 1, "{:?}", set.notes);
             assert!(set.notes[0].contains("bundled Tycho-2"), "{:?}", set.notes);
+        }
+
+        #[test]
+        fn offline_tiers_skip_2mass_when_the_request_turns_it_off() {
+            let dir = tempfile::tempdir().unwrap();
+            let installed = dir.path().join("data").join("catalogs").join(TWOMASS_ID).join(format!("{TWOMASS_ID}.dat"));
+            std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+            let catalogue = compact_catalogue(8, 128, (56.75, 24.12), 9.0);
+            std::fs::write(&installed, &catalogue).unwrap();
+            let roots = StoreRoots::under(&dir.path().join("data"), &dir.path().join("cache"));
+            let mut spec = CatalogStore::new(roots.clone()).spec(TWOMASS_ID).unwrap().clone();
+            spec.sha256 = Some(Sha256::digest(&catalogue).into());
+            let store = CatalogStore::new(roots).with_dataset(spec);
+            let tycho_missing = |notes: &[String]| notes.iter().any(|n| n.starts_with(TIER0_LABEL) && n.contains("bundled Tycho-2"));
+
+            let used = offline_tiers(&store, &AppConfig::default(), true);
+            assert_eq!(labels(&used), [TIER1_2MASS_LABEL], "{:?}", used.notes);
+            assert_eq!(used.chain.tiers[0].0, CatalogTier::Tier1);
+            assert_eq!(used.chain.tiers[0].1.cone(56.75, 24.12, 1.0).unwrap().len(), 1);
+            assert!(tycho_missing(&used.notes) && used.notes.len() == 1, "{:?}", used.notes);
+            drop(used);
+
+            let off = offline_tiers(&store, &AppConfig::default(), false);
+            assert!(labels(&off).is_empty(), "2MASS was opened although the request turned it off: {:?}", labels(&off));
+            assert!(tycho_missing(&off.notes), "{:?}", off.notes);
+            assert_eq!(off.notes.iter().filter(|n| n.contains(TIER1_2MASS_LABEL)).collect::<Vec<_>>(), [&format!("{TIER1_2MASS_LABEL}: off in Solve options")]);
+        }
+
+        #[tokio::test]
+        async fn run_plate_solve_passes_use_twomass_to_the_tier_set() {
+            let dir = tempfile::tempdir().unwrap();
+            let sky = write_noise_frame(dir.path(), "pointed.fits", true);
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            for (requested, passed) in [(None, true), (Some(true), true), (Some(false), false)] {
+                let env = FakeEnv::new(TierSet::default(), None, &nova);
+                let solve = PlateSolveRequest { use_twomass: requested, ..request(&sky) };
+                let refused = run_plate_solve(env.clone(), solve).await.unwrap_err();
+                assert_eq!(code(&refused), "local_no_catalogue", "{requested:?}: {refused}");
+                assert_eq!(*env.requested_twomass.lock().unwrap(), [passed], "use_twomass {requested:?}");
+            }
+            assert!(nova.requests().is_empty(), "{:?}", nova.requests());
+        }
+
+        #[tokio::test]
+        async fn a_max_sip_order_outside_2_to_4_is_refused_before_loading_and_reaches_every_tier() {
+            for accepted in [None, Some(2), Some(3), Some(4)] {
+                assert_eq!(super::super::checked_max_sip_order(accepted), Ok(accepted));
+            }
+            for refused in [0u8, 1, 5, 9] {
+                let expected = format!("The maximum SIP order must be 2, 3 or 4, got {refused}");
+                assert_eq!(super::super::checked_max_sip_order(Some(refused)), Err(expected));
+            }
+            let nova = serve(Resource::new(b"{}".to_vec()));
+            let env = FakeEnv::new(TierSet::default(), None, &nova);
+            let solve = PlateSolveRequest { max_sip_order: Some(5), ..request("never-loaded.fits") };
+            let refused = run_plate_solve(env.clone(), solve).await.unwrap_err();
+            assert_eq!(refused.as_str(), Some("The maximum SIP order must be 2, 3 or 4, got 5"), "{refused}");
+            assert!(env.stages.lock().unwrap().is_empty(), "the image was loaded before the refusal: {:?}", env.stages);
+            for tier in [CatalogTier::Tier0, CatalogTier::Tier1, CatalogTier::Tier2] {
+                assert_eq!(super::super::tier_params(tier, None, 2.0, Some(4)).sip_max_order, Some(4), "{tier:?}");
+                assert_eq!(super::super::tier_params(tier, Some(1.0), 2.0, None).sip_max_order, None, "{tier:?}");
+            }
         }
 
         #[test]
@@ -3359,8 +3465,8 @@ mod tests {
         }
 
         impl SolveEnv for StoreEnv {
-            fn tiers(&self, _request: &TierRequest<'_>) -> TierSet {
-                offline_tiers(&self.store, &AppConfig::default())
+            fn tiers(&self, request: &TierRequest<'_>) -> TierSet {
+                offline_tiers(&self.store, &AppConfig::default(), request.use_twomass)
             }
 
             fn stored_api_key(&self) -> Option<String> {
@@ -3415,7 +3521,7 @@ mod tests {
                 std::fs::copy(&tier1, &installed).unwrap();
             }
             let env = Arc::new(StoreEnv { store: CatalogStore::new(roots) });
-            let set = offline_tiers(&env.store, &AppConfig::default());
+            let set = offline_tiers(&env.store, &AppConfig::default(), true);
             println!("tiers {:?}, notes {:?}", labels(&set), set.notes);
             assert!(labels(&set).contains(&TIER0_LABEL), "the real tier 0 must verify against its pin: {:?}", set.notes);
             drop(set);

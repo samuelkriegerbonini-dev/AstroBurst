@@ -1,7 +1,8 @@
-import type { WcsCard, WriteSolvedWcsResult } from "../shared/types/astrometry";
+import type { WcsCard, WcsInfo, WriteSolvedWcsResult } from "../shared/types/astrometry";
 import type { GaiaRefineDecision, GaiaRefineResult, SolveCredit } from "../services/astrometry";
 import { formatDuration, type SolveField } from "./plateSolveResult";
-import { effectiveBinFiles, spccInputs, type WizardState } from "./wizard";
+import { formatSignificant } from "./formatSignificant";
+import { effectiveBinFiles, resolveChannelPath, spccInputs, type WizardState } from "./wizard";
 import { normalizeOutputPath } from "./processingChain";
 
 export const SOLVED_WCS_LABEL = "Plate-solved WCS";
@@ -264,9 +265,16 @@ export function solvedWcsVersion(): number {
   return solvedWcsWrites;
 }
 
+export interface SpccHeaderWcs {
+  path: string;
+  alignedOnto: string | null;
+  solvePath: string | null;
+}
+
 export interface SpccWcsSource {
   gridPath: string | null;
   reason: string | null;
+  header: SpccHeaderWcs | null;
 }
 
 function alignedOntoReason(binLabel: string): string {
@@ -278,20 +286,85 @@ function solvedOnRGrid(state: WizardState, binId: string, gridPath: string | nul
   return (stacked ? solvedWcsFor(stacked) : null) ?? (gridPath ? solvedWcsFor(gridPath) : null);
 }
 
+function headerWcsOf(state: WizardState, binId: string, alignedOnto: string | null, solvePath: string | null): SpccHeaderWcs | null {
+  const path = resolveChannelPath(state, binId, "stacked");
+  return path ? { path, alignedOnto, solvePath } : null;
+}
+
 export function spccWcsSource(state: WizardState): SpccWcsSource {
   const r = spccInputs(state).r;
   const bin = r ? state.bins.find((b) => b.id === r.binId) : undefined;
-  if (!bin) return { gridPath: null, reason: null };
+  if (!bin) return { gridPath: null, reason: null, header: null };
   const gridPath = effectiveBinFiles(state, bin)[0] ?? null;
+  const solved = solvedOnRGrid(state, bin.id, gridPath) !== null;
   if (Object.keys(state.alignedPaths).length > 0) {
     const active = state.bins.filter((b) => b.files.length > 0);
     const reference = active.find((b) => b.id === state.alignRefBinId) ?? active[0];
     if (reference && reference.id !== bin.id) {
-      const solved = solvedOnRGrid(state, bin.id, gridPath) !== null;
-      return { gridPath: null, reason: solved ? alignedOntoReason(reference.shortLabel) : null };
+      return {
+        gridPath: null,
+        reason: solved ? alignedOntoReason(reference.shortLabel) : null,
+        header: headerWcsOf(state, reference.id, reference.shortLabel, solved ? null : gridPath),
+      };
     }
   }
-  return { gridPath, reason: null };
+  return { gridPath, reason: null, header: solved ? null : headerWcsOf(state, bin.id, null, gridPath) };
+}
+
+export interface HeaderWcsProbe {
+  path: string;
+  found: boolean;
+  pixelScaleArcsec: number | null;
+}
+
+export function headerWcsProbe(path: string, info: Pick<WcsInfo, "pixel_scale_arcsec"> | null): HeaderWcsProbe {
+  const scale = info?.pixel_scale_arcsec;
+  const usable = typeof scale === "number" && Number.isFinite(scale) && scale > 0;
+  return { path, found: info !== null, pixelScaleArcsec: usable ? scale : null };
+}
+
+export interface SpccWcsStatus {
+  line: string | null;
+  warning: boolean;
+  title: string | null;
+  note: string | null;
+  runBlocked: boolean;
+  solvePath: string | null;
+}
+
+const SCALE_DIGITS = 3;
+
+function headerWcsLine(header: SpccHeaderWcs, pixelScaleArcsec: number | null): string {
+  const reference = header.alignedOnto ? ` (alignment reference ${header.alignedOnto})` : "";
+  const scale = pixelScaleArcsec === null ? "" : `, ${formatSignificant(pixelScaleArcsec, SCALE_DIGITS)}″/px`;
+  return `WCS: header of ${baseName(header.path)}${reference}${scale}`;
+}
+
+function noSkySolution(header: SpccHeaderWcs): string {
+  const name = baseName(header.path);
+  return header.alignedOnto
+    ? `No sky solution on the R channel: R was aligned onto ${header.alignedOnto}, and ${name} has no celestial WCS in its header. Plate solve R, then make R the alignment reference and run Align again.`
+    : `No sky solution on the R channel: ${name} has no celestial WCS in its header and was not plate solved.`;
+}
+
+export function spccWcsStatus(
+  source: Pick<SpccWcsSource, "reason" | "header">,
+  solvedPath: string | null,
+  probe: HeaderWcsProbe | null,
+): SpccWcsStatus {
+  const quiet = { warning: false, note: null, runBlocked: false, solvePath: null };
+  if (solvedPath) return { ...quiet, line: wcsSourceLabel(solvedPath), title: solvedPath };
+  const { reason, header } = source;
+  if (!header) return { ...quiet, line: reason, warning: reason !== null, title: null };
+  if (!probe || probe.path !== header.path) {
+    return { ...quiet, line: `Reading the header WCS of ${baseName(header.path)}`, title: header.path, note: reason, runBlocked: true };
+  }
+  if (probe.found) return { ...quiet, line: headerWcsLine(header, probe.pixelScaleArcsec), title: header.path, note: reason };
+  return { line: reason ?? noSkySolution(header), warning: true, title: header.path, note: null, runBlocked: true, solvePath: header.solvePath };
+}
+
+export function solveTargetMissing(path: string): string {
+  return `${baseName(path)} is not in Files: open it, then plate solve it in Astrometry and click Write WCS.`;
 }
 
 export function spccSolvedWcsPath(state: WizardState, source: SpccWcsSource = spccWcsSource(state)): string | null {

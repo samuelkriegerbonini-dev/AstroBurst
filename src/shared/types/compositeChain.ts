@@ -3,6 +3,7 @@ import type { ChainStep } from "./preview";
 import type { PixelMathStats } from "./pixelmath";
 import type { ArcsinhResult, MaskedStretchResult } from "./processing";
 import type { LocalContrastResult } from "./localContrast";
+import type { MaskChoice } from "./masks";
 
 export type CompositeChainInput = "base" | ChainStep;
 
@@ -25,6 +26,7 @@ export interface CompositeChainEntry {
 export interface CompositeChainBase {
   previewUrl: string;
   stf: DisplayStf;
+  displayed?: CompositeDisplayed;
 }
 
 export interface CompositeChain {
@@ -37,6 +39,7 @@ export interface CompositeChain {
 export interface CompositeChainCall {
   chainInput: CompositeChainInput;
   displayStf: DisplayStf;
+  mask?: MaskChoice | null;
 }
 
 export type ChannelTriple = [number, number, number];
@@ -50,6 +53,7 @@ export interface CompositeStepMeta {
   chain_restarted: boolean;
   chain_input: string;
   displayed: CompositeDisplayed;
+  base_displayed?: CompositeDisplayed;
   stf: DisplayStf | null;
   previewUrl?: string;
   basePreviewUrl?: string;
@@ -100,4 +104,5 @@ export interface CompositeChainStateResult {
   chain_generation: number | null;
   live_generation: number;
   steps: string[];
+  live_displayed?: CompositeDisplayed | null;
 }

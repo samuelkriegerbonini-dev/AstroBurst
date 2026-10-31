@@ -8,8 +8,8 @@ use crate::core::stacking::calibration::{
     create_master_flat_dark_cancellable,
 };
 use crate::core::stacking::consistency::{
-    channel_prefix, check_flat_darks_vs_flats, check_light_binning, check_lights, check_master_set, file_label,
-    format_sig4, median_exposure, MasterKind,
+    channel_prefix, check_flat_darks_vs_flats, check_light_binning, check_light_imagetyp, check_lights,
+    check_master_set, file_label, format_sig4, median_exposure, MasterKind,
 };
 use crate::core::stacking::frame_cards::{read_frame_cards, FrameCards};
 use crate::core::stacking::CancelCheck;
@@ -212,6 +212,7 @@ pub fn check_channel_lights(
     lights: &[FrameCards],
     cosmetic_enabled: bool,
 ) -> Result<Vec<String>> {
+    check_light_imagetyp(channel, lights)?;
     check_light_binning(
         channel,
         lights,
@@ -732,5 +733,39 @@ mod tests {
         );
         assert!(check_channel_lights(&MasterFrames::default(), "R", &lights, false).unwrap().is_empty());
         assert!(check_channel_lights(&MasterFrames::default(), "R", &lights[..1], true).unwrap().is_empty());
+    }
+
+    fn typed_frame(path: &str, cards: &[(&str, &str)]) -> FrameCards {
+        let mut header = HduHeader::empty();
+        for (key, value) in cards {
+            header.set(key, (*value).to_string());
+        }
+        frame_cards_from_header(path, &header)
+    }
+
+    #[test]
+    fn a_flat_in_a_light_lane_is_refused_by_imagetyp() {
+        let light = typed_frame("C:/session/r_light_001.fits", &[("IMAGETYP", "LIGHT"), ("FILTER", "R")]);
+        let flat = typed_frame("C:/session/r_flat_001.fits", &[("IMAGETYP", "FLAT"), ("FILTER", "R")]);
+        let err = check_channel_lights(&MasterFrames::default(), "R", &[light.clone(), flat], false).unwrap_err().to_string();
+        assert_eq!(err, "Channel 'R': r_flat_001.fits has IMAGETYP='FLAT' but was given as a light frame.");
+
+        for (file, value) in [("bias.fits", "Bias"), ("dark.fits", "Dark Frame"), ("flatdark.fits", "Flat Dark"), ("ff.fits", "Flat Field")] {
+            let err = check_channel_lights(&MasterFrames::default(), "Ha", &[typed_frame(file, &[("IMAGETYP", value)])], false)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, format!("Channel 'Ha': {file} has IMAGETYP='{value}' but was given as a light frame."));
+        }
+        let by_frametyp = typed_frame("dark_by_frametyp.fits", &[("FRAMETYP", "Dark")]);
+        let err = check_channel_lights(&MasterFrames::default(), "L", &[by_frametyp], false).unwrap_err().to_string();
+        assert_eq!(err, "Channel 'L': dark_by_frametyp.fits has FRAMETYP='Dark' but was given as a light frame.");
+
+        let kept = [
+            light,
+            typed_frame("object.fits", &[("IMAGETYP", "object")]),
+            typed_frame("wfpc2.fits", &[("IMAGETYP", "EXT")]),
+            typed_frame("jwst_i2d.fits", &[]),
+        ];
+        assert!(check_channel_lights(&MasterFrames::default(), "R", &kept, false).unwrap().is_empty());
     }
 }

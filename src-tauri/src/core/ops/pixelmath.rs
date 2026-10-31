@@ -3,7 +3,8 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::core::imaging::stats::finite_output_stats;
-use crate::core::pixelmath::{compile, evaluate, OutputOptions, PixelMathError};
+use crate::core::mask::blend;
+use crate::core::pixelmath::{compile, evaluate, evaluate_unfinished, finish_plane, OutputOptions, PixelMathError, Program};
 use crate::infra::cache::ImageEntry;
 use crate::types::image::ImageStats;
 
@@ -89,6 +90,22 @@ pub fn padding_warning(label: &str, arr: &Array2<f32>, reduced: bool) -> Option<
     ))
 }
 
+fn evaluate_onto_target(
+    program: &Program,
+    target: &Array2<f32>,
+    arrays: &[&Array2<f32>],
+    opts: &OutputOptions,
+    mask: Option<&Array2<f32>>,
+) -> anyhow::Result<Array2<f32>> {
+    let Some(mask) = mask else {
+        return evaluate(program, arrays, opts).map_err(pixelmath_error);
+    };
+    let unfinished = evaluate_unfinished(program, arrays).map_err(pixelmath_error)?;
+    let mut blended = blend(target, &unfinished, mask)?;
+    finish_plane(&mut blended, opts);
+    Ok(blended)
+}
+
 pub struct ChannelPixelMath {
     pub results: [Array2<f32>; 3],
     pub stats: [Option<ImageStats>; 3],
@@ -102,6 +119,7 @@ pub fn evaluate_per_channel(
     opts: &OutputOptions,
     channels: [&Array2<f32>; 3],
     load: SlotLoader<'_>,
+    mask: Option<&Array2<f32>>,
 ) -> anyhow::Result<ChannelPixelMath> {
     let user_names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
     let slot_names = slot_names_with_target(&user_names);
@@ -143,7 +161,7 @@ pub fn evaluate_per_channel(
         let arrays: Vec<&Array2<f32>> = std::iter::once(channel)
             .chain(entries.iter().map(|e| e.as_ref().map(|e| e.arr()).unwrap_or(channel)))
             .collect();
-        let result = evaluate(&program, &arrays, opts).map_err(pixelmath_error)?;
+        let result = evaluate_onto_target(&program, channel, &arrays, opts, mask)?;
         let (channel_stats, channel_non_finite) = finite_output_stats(&result);
         results.push(result);
         stats.push(channel_stats);
@@ -185,6 +203,7 @@ pub fn evaluate_target(
     opts: &OutputOptions,
     target: &Array2<f32>,
     load: SlotLoader<'_>,
+    mask: Option<&Array2<f32>>,
 ) -> anyhow::Result<TargetPixelMath> {
     let user_names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
     let slot_names = slot_names_with_target(&user_names);
@@ -214,6 +233,6 @@ pub fn evaluate_target(
     let arrays: Vec<&Array2<f32>> = std::iter::once(target)
         .chain(entries.iter().map(|e| e.as_ref().map(|e| e.arr()).unwrap_or(target)))
         .collect();
-    let result = evaluate(&program, &arrays, opts).map_err(pixelmath_error)?;
+    let result = evaluate_onto_target(&program, target, &arrays, opts, mask)?;
     Ok(TargetPixelMath { result, referenced, slots: entries, warnings })
 }

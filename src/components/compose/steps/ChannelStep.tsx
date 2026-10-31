@@ -22,6 +22,7 @@ import {
   runAutoMap,
   shortName,
 } from "../../../utils/channelMapping";
+import { FRAME_KIND_NAMES, frameKindOf, imagetypLeftOutLine, isCalibrationKind } from "../../../utils/frameKind";
 import { usePointingOverlap } from "../../../hooks/usePointingOverlap";
 import type { NarrowbandFilterDetection } from "../../../services/header";
 import { DecimalField } from "../../ui";
@@ -233,6 +234,7 @@ export default function ChannelStep({
   const [customWl, setCustomWl] = useState("");
   const [autoMapSource, setAutoMapSource] = useState<string | null>(null);
   const [unmappedFiles, setUnmappedFiles] = useState<UnmappedFile[]>([]);
+  const [leftOutLine, setLeftOutLine] = useState<string | null>(null);
   const [armedAction, setArmedAction] = useState<string | null>(null);
   const armedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -276,6 +278,7 @@ export default function ChannelStep({
       detections: filterDetections,
     });
     setUnmappedFiles(result.unmapped);
+    setLeftOutLine(imagetypLeftOutLine(result.leftOut));
     if (result.mappedCount === 0) {
       setAutoMapSource(null);
       return;
@@ -331,6 +334,7 @@ export default function ChannelStep({
     onBinsChange(state.bins.map((b) => ({ ...b, files: [] })));
     setAutoMapSource(null);
     setUnmappedFiles([]);
+    setLeftOutLine(null);
   }, [state.bins, onBinsChange, armedAction, armAction, disarm]);
 
   const handleOpenFolder = useCallback(async () => {
@@ -548,6 +552,10 @@ export default function ChannelStep({
         </div>
       )}
 
+      {leftOutLine && (
+        <p data-testid="automap-left-out" className="text-[10px] text-zinc-500 leading-snug px-2">{leftOutLine}</p>
+      )}
+
       <div className="flex items-center gap-1.5 pt-1 border-t border-zinc-800/30">
         <input value={customLabel} onChange={(e) => setCustomLabel(e.target.value)}
                aria-label="Custom channel name"
@@ -570,7 +578,9 @@ export default function ChannelStep({
           <div className="flex flex-wrap gap-1">
             {unassigned.map((f) => {
               const filterInfo = getFilterInfo(f);
-              const detected = detectChannel(f);
+              const kind = frameKindOf(f.result?.header);
+              const calibrationKind = isCalibrationKind(kind) ? FRAME_KIND_NAMES[kind] : null;
+              const detected = calibrationKind ? null : detectChannel(f);
               return (
                 <span key={f.path}
                       draggable
@@ -581,13 +591,16 @@ export default function ChannelStep({
                         }));
                       }}
                       className="flex items-center gap-1 text-[9px] font-mono text-zinc-500 bg-zinc-800/50 rounded px-1.5 py-0.5 cursor-grab hover:text-zinc-300 hover:bg-zinc-800 transition-all"
-                      title={`${f.path}${filterInfo ? ` [${filterInfo}]` : ""}${detected ? ` → ${detected}` : ""}`}
+                      title={`${f.path}${filterInfo ? ` [${filterInfo}]` : ""}${calibrationKind ? ` (${calibrationKind})` : ""}${detected ? ` → ${detected}` : ""}`}
                 >
                   {shortName(f.path)}
                   {filterInfo && (
                     <span className="text-[7px] text-violet-400/70 bg-violet-500/10 px-1 rounded">
                       {filterInfo}
                     </span>
+                  )}
+                  {calibrationKind && (
+                    <span className="text-[7px] text-zinc-500">{calibrationKind}</span>
                   )}
                   {detected && (
                     <span className="text-[7px] text-amber-400/70">→{detected}</span>

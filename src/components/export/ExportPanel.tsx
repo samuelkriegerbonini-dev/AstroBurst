@@ -24,12 +24,17 @@ import {
   exportTimestamp,
   fileRgbPngStf,
   mefHduSummary,
+  pngStfNote,
   rgbCubeUnavailableReason,
   rgbExportPaths,
   rgbFilePngNote,
   rgbFileSourceTitle,
+  type PngDisplay,
   type RgbResultSource,
 } from "../../utils/exportSources";
+import { stfStateOf } from "../../utils/analysisTarget";
+import { IDENTITY_STF } from "../../utils/displayMemory";
+import { DEFAULT_DISPLAY_SETTINGS } from "../../shared/types/display";
 import { getWcsInfo } from "../../services/astrometry";
 import { subscribeSolvedWcs, wcsRevision } from "../../utils/solvedWcs";
 import {
@@ -116,6 +121,9 @@ interface ExportPanelProps {
   exportPath: string | null;
   sourceLabel?: string;
   stfParams: StfParams | null;
+  autoStf?: StfParams | null;
+  display?: PngDisplay;
+  pngSourceRgb?: boolean;
   onExport: (filePath: string, outputPath: string, options: ExportOptions) => Promise<void>;
   onExportRgb?: (r: string | null, g: string | null, b: string | null, outputPath: string, options: RgbExportOptions) => Promise<void>;
   rgbChannels?: RgbChannels | null;
@@ -146,6 +154,9 @@ export default function ExportPanel({
                                       exportPath,
                                       sourceLabel,
                                       stfParams,
+                                      autoStf = null,
+                                      display = DEFAULT_DISPLAY_SETTINGS,
+                                      pngSourceRgb = false,
                                       onExport,
                                       onExportRgb,
                                       rgbChannels,
@@ -176,7 +187,7 @@ export default function ExportPanel({
   const [alignedResult, setAlignedResult] = useState<AlignedExportState | null>(null);
   const [alignedMethod, setAlignedMethod] = useState(alignMethod ?? "phase_correlation");
   const [pngBitDepth, setPngBitDepth] = useState(16);
-  const [pngApplyStf, setPngApplyStf] = useState(false);
+  const [pngApplyStf, setPngApplyStf] = useState(true);
   const [pngExporting, setPngExporting] = useState(false);
   const [pngExported, setPngExported] = useState(false);
   const [error, setError] = useState<{ section: ExportSection; message: string } | null>(null);
@@ -368,11 +379,12 @@ export default function ExportPanel({
     setPngExporting(true);
     try {
       const dir = await getExportDir();
-      const suffix = pngApplyStf ? "_stf" : "";
+      const applyMonoStf = pngApplyStf && !pngSourceRgb;
+      const suffix = applyMonoStf ? "_stf" : "";
       const outputPath = `${dir}/${exportFileName(exportPath, suffix, "png", exportTimestamp(new Date()))}`;
       await exportPng(exportPath, outputPath, {
         bitDepth: pngBitDepth,
-        applyStfStretch: pngApplyStf,
+        applyStfStretch: applyMonoStf,
         shadow: stfParams?.shadow,
         midtone: stfParams?.midtone,
         highlight: stfParams?.highlight,
@@ -385,7 +397,7 @@ export default function ExportPanel({
     } finally {
       setPngExporting(false);
     }
-  }, [exportPath, pngBitDepth, pngApplyStf, stfParams, showSaved]);
+  }, [exportPath, pngBitDepth, pngApplyStf, pngSourceRgb, stfParams, showSaved]);
 
   const handleExportRgbPng = useCallback(async () => {
     if (!rgbFilePath && !rgbChannels && !compositeStf) return;
@@ -514,6 +526,8 @@ export default function ExportPanel({
     ? channelSourceLabel(rgbChannels)
     : null;
   const hasHeaderChannels = !!headerChannels && !!(headerChannels.r || headerChannels.g || headerChannels.b);
+  const pngNoteId = `${fieldId}-png-stf-note`;
+  const pngNote = pngStfNote(display, stfStateOf(stfParams ?? IDENTITY_STF, autoStf));
 
   const exportLabel = exportDone ? "Saved!" : "Export as FITS";
   const valuesCell = lastResult ? exportValuesCell(lastResult) : null;
@@ -619,7 +633,13 @@ export default function ExportPanel({
             <option value={8}>8-bit</option>
           </select>
         </div>
-        <Toggle label="Apply current STF stretch" checked={pngApplyStf} accent="sky" onChange={setPngApplyStf} />
+        <Toggle label="Apply STF stretch" checked={pngApplyStf} accent="sky" describedBy={pngNoteId} onChange={setPngApplyStf} />
+        <div id={pngNoteId} role="note" className="flex flex-col gap-0.5 px-1">
+          <p className="text-[10px] text-zinc-500">{pngNote.source}</p>
+          {pngApplyStf && !pngSourceRgb && pngNote.mismatch && (
+            <p className="text-[10px] text-amber-300/80" data-png-stf-mismatch="">{pngNote.mismatch}</p>
+          )}
+        </div>
         <RunButton
           label={pngExported ? "Saved!" : "Export as PNG"}
           runningLabel="Exporting..."

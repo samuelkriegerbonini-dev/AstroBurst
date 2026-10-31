@@ -1,4 +1,5 @@
 import { filterCodeAndWavelengthNm } from "./filterWavelengths";
+import { calibrationPaths, sortByFrameKind, type CalibrationFrames } from "./frameKind";
 import type { FrequencyBin } from "./wizard";
 
 export interface ChannelSource {
@@ -85,6 +86,16 @@ export function displayFilterValue(file: ChannelSource): string | null {
   if (values.length === 0) return null;
   const resolvable = values.find((v) => filterCodeAndWavelengthNm(v) !== null);
   return resolvable ?? values[0];
+}
+
+export function filterCardValue(file: ChannelSource): string | null {
+  const header = file.result?.header;
+  if (!header) return null;
+  for (const key of FILTER_HEADER_KEYS) {
+    const value = header[key] == null ? "" : String(header[key]).trim();
+    if (value) return value;
+  }
+  return null;
 }
 
 export function resolveFilterFromName(name: string): { code: string; nm: number } | null {
@@ -326,6 +337,7 @@ export interface AutoMapResult {
   sources: string[];
   unmapped: UnmappedFile[];
   mappedCount: number;
+  leftOut: CalibrationFrames<string>;
 }
 
 export type RgbChannelLetter = "R" | "G" | "B";
@@ -354,17 +366,20 @@ export function runAutoMap({ bins, files, assigned, palette, detections }: AutoM
   const mappedNow = new Set(assigned);
   const sources: string[] = [];
   let mappedCount = 0;
+  const { lights, calibration } = sortByFrameKind(files.filter((file) => !assigned.has(file.path)));
+  const leftOut = calibrationPaths(calibration);
+  const leftOutPaths = new Set(Object.values(leftOut).flat());
 
   const addToBin = (binId: string, path: string): boolean => {
     const bin = next.find((b) => b.id === binId);
-    if (!bin || bin.files.includes(path)) return false;
+    if (!bin || bin.files.includes(path) || leftOutPaths.has(path)) return false;
     bin.files.push(path);
     mappedNow.add(path);
     return true;
   };
 
   const stageIsSufficient = (mapped: number) =>
-    mapped > 0 && (!colorBinsEmpty(next) || files.every((f) => mappedNow.has(f.path)));
+    mapped > 0 && (!colorBinsEmpty(next) || lights.every((f) => mappedNow.has(f.path)));
 
   if (palette?.is_complete) {
     const paletteMap: Record<string, string> = {};
@@ -373,14 +388,14 @@ export function runAutoMap({ bins, files, assigned, palette, detections }: AutoM
     if (palette.b_file?.file_path) paletteMap[palette.b_file.file_path] = "b";
 
     let mapped = 0;
-    for (const file of files) {
+    for (const file of lights) {
       if (mappedNow.has(file.path)) continue;
       const target = paletteMap[file.path];
       if (target && addToBin(target, file.path)) mapped++;
     }
     if (mapped > 0) sources.push(palette.palette_name ?? "Palette");
     mappedCount += mapped;
-    if (stageIsSufficient(mapped)) return { bins: next, sources, unmapped: [], mappedCount };
+    if (stageIsSufficient(mapped)) return { bins: next, sources, unmapped: [], mappedCount, leftOut };
   }
 
   if (detections && detections.length > 0) {
@@ -392,15 +407,15 @@ export function runAutoMap({ bins, files, assigned, palette, detections }: AutoM
     }
     if (mapped > 0) sources.push("FITS Headers (Rust)");
     mappedCount += mapped;
-    if (stageIsSufficient(mapped)) return { bins: next, sources, unmapped: [], mappedCount };
+    if (stageIsSufficient(mapped)) return { bins: next, sources, unmapped: [], mappedCount, leftOut };
   }
 
-  const result = mapFilesByWavelength(next, files, mappedNow);
+  const result = mapFilesByWavelength(next, lights, mappedNow);
   if (result.headerMapped > 0) sources.push("FITS Headers");
   if (result.wavelengthMapped > 0) sources.push("Wavelength");
   if (result.spectralMapped > 0) sources.push("Spectral RGB");
   if (result.filenameMapped > 0) sources.push("Filename");
   mappedCount += result.headerMapped + result.wavelengthMapped + result.filenameMapped + result.spectralMapped;
 
-  return { bins: result.bins, sources, unmapped: result.unmapped, mappedCount };
+  return { bins: result.bins, sources, unmapped: result.unmapped, mappedCount, leftOut };
 }

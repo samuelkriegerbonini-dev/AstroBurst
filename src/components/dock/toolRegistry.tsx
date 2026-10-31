@@ -15,6 +15,7 @@ import {
   Settings,
   Sparkles,
   Telescope,
+  VenetianMask,
   type LucideIcon,
 } from "lucide-react";
 import type { DockToolId } from "../../utils/dockLayout";
@@ -24,6 +25,7 @@ const ComposeWizard = lazy(() => import("../compose/ComposeWizard"));
 const HeadersTab = lazy(() => import("../header/HeadersTab"));
 const ProcessingTab = lazy(() => import("../processing/ProcessingTab"));
 const HistoryPanel = lazy(() => import("../history/HistoryPanel"));
+const MasksPanel = lazy(() => import("../masks/MasksPanel"));
 const StackingTab = lazy(() => import("../stacking/StackingTab"));
 const SynthPanel = lazy(() => import("../synth/SynthPanel"));
 const ExportTab = lazy(() => import("../export/ExportTab"));
@@ -51,6 +53,7 @@ export const DOCK_TOOLS: Record<DockToolId, DockToolDef> = {
   cube: { id: "cube", icon: Box, render: () => <CubeTool /> },
   processing: { id: "processing", icon: Sparkles, render: () => <ProcessingTab /> },
   history: { id: "history", icon: History, render: () => <HistoryPanel /> },
+  masks: { id: "masks", icon: VenetianMask, render: () => <MasksPanel /> },
   stacking: { id: "stacking", icon: Layers2, render: () => <StackingTab /> },
   synth: { id: "synth", icon: FlaskConical, render: () => <SynthPanel /> },
   export: { id: "export", icon: Download, render: () => <ExportTab /> },

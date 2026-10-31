@@ -1,5 +1,5 @@
 import type { ProcessedResult } from "../shared/types/preview";
-import type { DrizzleRgbResult, PipelineChannelStats, PipelineMasterOutput, PipelineResult } from "../shared/types/stacking";
+import type { DrizzleRgbResult, PipelineChannelStats, PipelineMasterOutput, PipelineResult, PipelineRgbPalette, StackResult } from "../shared/types/stacking";
 import { samePath } from "./processingChain";
 
 function baseName(path: string): string {
@@ -33,13 +33,27 @@ export function pipelineOutputName(firstFramePath: string, frameCount: number, a
   return `${frameStem(firstFramePath)}_pipeline${frameCount}_${runTimestamp(at)}`;
 }
 
+export function drizzleOutputName(firstFramePath: string, frameCount: number, at: Date): string {
+  return `${frameStem(firstFramePath)}_drizzle${frameCount}_${runTimestamp(at)}`;
+}
+
 export function framesLabel(prefix: string, frameCount: number): string {
   return `${prefix} · ${frameCount} frame${frameCount === 1 ? "" : "s"}`;
 }
 
 export const PIPELINE_RGB_CHOICE = "RGB";
-const PIPELINE_RGB_REFERENCE_CHANNEL = "R";
-const PIPELINE_RGB_CHANNELS = ["R", "G", "B"];
+const LUMINANCE_LANE = "L";
+
+interface CompositePalette {
+  planes: readonly [string, string, string];
+  luminance: boolean;
+}
+
+const PIPELINE_PALETTES: Record<PipelineRgbPalette, CompositePalette> = {
+  RGB: { planes: ["R", "G", "B"], luminance: true },
+  SHO: { planes: ["SII", "Ha", "OIII"], luminance: false },
+  HOO: { planes: ["Ha", "OIII", "OIII"], luminance: false },
+};
 
 export interface StackViewOutput {
   output: Omit<ProcessedResult, "label">;
@@ -55,23 +69,43 @@ function channelLights(result: PipelineResult, label: string): number {
   return channel ? stackedLights(channel) : 0;
 }
 
-function composedRgbDims(result: PipelineResult, masters: readonly PipelineMasterOutput[]): [number, number] | null {
-  const channels = PIPELINE_RGB_CHANNELS.map((label) => masters.find((m) => m.label.toUpperCase() === label));
-  if (!channels.every((m): m is PipelineMasterOutput => m !== undefined)) return toDims(result.rgb_dimensions);
-  return toDims([Math.min(...channels.map((m) => m.dimensions[0])), Math.min(...channels.map((m) => m.dimensions[1]))]);
+function masterNamed(masters: readonly PipelineMasterOutput[], label: string): PipelineMasterOutput | undefined {
+  return masters.find((m) => m.label.toUpperCase() === label.toUpperCase());
+}
+
+function sameDims(a: PipelineMasterOutput, b: PipelineMasterOutput): boolean {
+  return a.dimensions[0] === b.dimensions[0] && a.dimensions[1] === b.dimensions[1];
+}
+
+function compositeLanes(palette: CompositePalette, planes: readonly PipelineMasterOutput[] | null, luminance: PipelineMasterOutput | undefined): Set<string> {
+  const lanes = new Set(palette.planes.map((label) => label.toUpperCase()));
+  if (palette.luminance && planes && luminance && planes.every((plane) => sameDims(plane, luminance))) lanes.add(LUMINANCE_LANE);
+  return lanes;
+}
+
+function composedDims(result: PipelineResult, planes: readonly PipelineMasterOutput[] | null): [number, number] | null {
+  if (!planes) return toDims(result.rgb_dimensions);
+  return toDims([Math.min(...planes.map((m) => m.dimensions[0])), Math.min(...planes.map((m) => m.dimensions[1]))]);
+}
+
+function compositeViewOutput(result: PipelineResult, masters: readonly PipelineMasterOutput[]): StackViewOutput | null {
+  const name = result.rgb_palette ?? PIPELINE_RGB_CHOICE;
+  const palette = PIPELINE_PALETTES[name];
+  const found = palette.planes.map((label) => masterNamed(masters, label));
+  const reference = found.find((m) => m !== undefined);
+  if (!result.rgbPreviewUrl || !reference) return null;
+  const planes = found.every((m): m is PipelineMasterOutput => m !== undefined) ? found : null;
+  const lanes = compositeLanes(palette, planes, masterNamed(masters, LUMINANCE_LANE));
+  const lights = result.stats.channels.filter((c) => lanes.has(c.label.toUpperCase())).reduce((sum, c) => sum + stackedLights(c), 0);
+  return {
+    output: { fitsPath: null, previewUrl: result.rgbPreviewUrl, dimensions: composedDims(result, planes), kind: "stacking", inputPath: reference.input_path },
+    label: framesLabel(`Pipeline ${name}`, lights),
+  };
 }
 
 export function pipelineViewOutput(result: PipelineResult, choice: string): StackViewOutput | null {
   const masters = result.masters ?? [];
-  if (choice === PIPELINE_RGB_CHOICE) {
-    const reference = masters.find((m) => m.label === PIPELINE_RGB_REFERENCE_CHANNEL) ?? masters[0];
-    if (!result.rgbPreviewUrl || !reference) return null;
-    const lights = result.stats.channels.reduce((sum, c) => sum + stackedLights(c), 0);
-    return {
-      output: { fitsPath: null, previewUrl: result.rgbPreviewUrl, dimensions: composedRgbDims(result, masters), kind: "stacking", inputPath: reference.input_path },
-      label: framesLabel("Pipeline RGB", lights),
-    };
-  }
+  if (choice === PIPELINE_RGB_CHOICE) return compositeViewOutput(result, masters);
   const master = masters.find((m) => m.label === choice);
   if (!master) return null;
   return {
@@ -83,6 +117,13 @@ export function pipelineViewOutput(result: PipelineResult, choice: string): Stac
       inputPath: master.input_path,
     },
     label: framesLabel(`Pipeline ${choice}`, channelLights(result, choice)),
+  };
+}
+
+export function stackViewOutput(result: StackResult, inputs: readonly string[], targetPath: string, prefix: string): StackViewOutput {
+  return {
+    output: { fitsPath: result.fits_path ?? null, previewUrl: result.previewUrl ?? null, dimensions: toDims(result.dimensions), kind: "stacking", inputPath: inputs[0] ?? targetPath },
+    label: framesLabel(prefix, result.frame_count ?? inputs.length),
   };
 }
 

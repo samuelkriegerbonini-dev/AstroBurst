@@ -5,7 +5,8 @@ import { resolveChannelPath as resolveWizardPath } from "../wizard";
 import { backgroundAlignNotice, backgroundRunSummary, type BackgroundRunSummaryInput } from "../../../utils/wizard";
 import { extractBackground, extractBackgroundBatch } from "../../../services/processing";
 import { getOutputDir } from "../../../infrastructure/tauri";
-import { RunButton, Slider } from "../../ui";
+import { bustPreviewUrl } from "../../../hooks/useProcessingRun";
+import { CompareView, RunButton, Slider } from "../../ui";
 
 interface BackgroundStepProps {
   state: WizardState;
@@ -14,7 +15,13 @@ interface BackgroundStepProps {
 
 interface BgExtractResult extends BackgroundRunSummaryInput {
   axis?: string | null;
+  previewUrl?: string;
+  modelUrl?: string;
 }
+
+const BATCH_PREVIEW_NOTE = "Preview in per-channel mode only";
+
+const PREVIEW_SIZE_CLASS = { thumbnail: "w-36", large: "w-full max-w-[420px]" } as const;
 
 function resolveChannelPath(state: WizardState, binId: string): string | null {
   return resolveWizardPath(state, binId, "cropped");
@@ -29,6 +36,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
   const [loading, setLoading] = useState<Record<string, boolean>>({});
   const [results, setResults] = useState<Record<string, BgExtractResult>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [enlargedBin, setEnlargedBin] = useState<string | null>(null);
 
   const activeBins = useMemo(
     () => state.bins.filter((b) => b.files.length > 0),
@@ -52,7 +60,11 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
         mode: "subtract",
         binId,
       });
-      setResults((prev) => ({ ...prev, [binId]: result }));
+      const stamp = Date.now();
+      setResults((prev) => ({
+        ...prev,
+        [binId]: { ...result, previewUrl: bustPreviewUrl(result.previewUrl, stamp), modelUrl: bustPreviewUrl(result.modelUrl, stamp) },
+      }));
       const key = result.cache_key || result.corrected_fits;
       if (key) {
         onBackground(binId, key);
@@ -178,6 +190,9 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
         {mode === "independent" && "Fits and removes a separate gradient per channel."}
         {mode.startsWith("deband") && "Removes row/column striping (JWST 1/f noise) by equalizing per-line sigma-clipped background. Preserves overall level and color. Sigma Clip controls source rejection; grid/poly ignored."}
       </div>
+      {mode !== "independent" && (
+        <div data-testid="bg-preview-note" className="text-[9px] text-[var(--ab-text-4)]">{BATCH_PREVIEW_NOTE}</div>
+      )}
 
       <div className="flex items-center justify-between pt-1">
         <span className="text-xs text-zinc-400">{activeBins.length} channel(s)</span>
@@ -204,8 +219,11 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
             : state.stackedPaths[bin.id]
               ? "stacked"
               : "raw";
+        const preview = result?.modelUrl && result.previewUrl ? { model: result.modelUrl, corrected: result.previewUrl } : null;
+        const enlarged = enlargedBin === bin.id;
+        const previewSize = enlarged ? "large" : "thumbnail";
         return (
-          <div key={bin.id} className="flex flex-col gap-1 p-2 rounded-lg border"
+          <div key={bin.id} data-bin={bin.id} className="flex flex-col gap-1 p-2 rounded-lg border"
                style={{
                  borderColor: done ? `${bin.color}40` : "rgba(63,63,70,0.3)",
                  background: done ? `${bin.color}08` : "rgba(24,24,27,0.3)",
@@ -238,6 +256,21 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
               <div className="text-[9px] text-zinc-500">
                 {backgroundRunSummary(result)}
                 {result.axis && <span className="text-emerald-400/70"> · axis: {result.axis}</span>}
+              </div>
+            )}
+            {preview && (
+              <div className="flex flex-col gap-1">
+                <div data-testid="bg-preview" data-size={previewSize} className={PREVIEW_SIZE_CLASS[previewSize]}>
+                  <CompareView originalUrl={preview.model} resultUrl={preview.corrected} originalLabel="Model" resultLabel="Corrected" accent="emerald" />
+                </div>
+                <button
+                  type="button"
+                  aria-pressed={enlarged}
+                  onClick={() => setEnlargedBin(enlarged ? null : bin.id)}
+                  className="self-start px-1.5 py-0.5 rounded text-[9px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors"
+                >
+                  {enlarged ? "Shrink" : "Enlarge"}
+                </button>
               </div>
             )}
             {error && <div className="text-[9px] text-red-400">{error}</div>}

@@ -748,6 +748,21 @@ pub fn evaluate(
     slots: &[&Array2<f32>],
     opts: &OutputOptions,
 ) -> Result<Array2<f32>, PixelMathError> {
+    let mut out = evaluate_unfinished(program, slots)?;
+    finish_plane(&mut out, opts);
+    Ok(out)
+}
+
+pub fn finish_plane(plane: &mut Array2<f32>, opts: &OutputOptions) {
+    if plane.as_slice_memory_order().is_none() {
+        *plane = plane.as_standard_layout().into_owned();
+    }
+    if let Some(values) = plane.as_slice_memory_order_mut() {
+        finish_output(values, opts);
+    }
+}
+
+pub fn evaluate_unfinished(program: &Program, slots: &[&Array2<f32>]) -> Result<Array2<f32>, PixelMathError> {
     if slots.len() != program.slot_names.len() {
         return Err(PixelMathError::new(format!(
             "expected {} image(s) for slots [{}] but got {}",
@@ -802,7 +817,6 @@ pub fn evaluate(
                 *pixel = run_pixel(&ops, &inputs, base + offset, width, &mut stack);
             }
         });
-    finish_output(&mut out, opts);
     Array2::from_shape_vec(dims, out).map_err(|e| PixelMathError::new(e.to_string()))
 }
 

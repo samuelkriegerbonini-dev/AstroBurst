@@ -9,12 +9,13 @@ export const DBE_MIN_AUTO_GRID = 2;
 export const DBE_MAX_AUTO_GRID = 40;
 export const DBE_MIN_AUTO_CELL_PX = 4;
 export const DBE_MIN_SAMPLES = 4;
+export const DBE_DEFAULT_AUTO_GRID = 10;
 
 export const DEFAULT_DBE_CONFIG: DbeConfig = {
   sampleRadius: 5,
   tolerance: 1.0,
   smoothing: 0.25,
-  autoGrid: 10,
+  autoGrid: DBE_DEFAULT_AUTO_GRID,
   manualSamples: [],
   rejectStars: true,
   mode: "subtract",
@@ -47,7 +48,7 @@ function inRange(v: number, lo: number, hi: number): boolean {
   return Number.isFinite(v) && v >= lo && v <= hi;
 }
 
-export function validateDbeParams(config: DbeConfig, imageSize?: ImageSize | null): DbeValidation {
+function settingErrors(config: DbeConfig, imageSize?: ImageSize | null): string[] {
   const errors: string[] = [];
 
   if (!Number.isInteger(config.sampleRadius) || !inRange(config.sampleRadius, DBE_MIN_SAMPLE_RADIUS, DBE_MAX_SAMPLE_RADIUS)) {
@@ -84,9 +85,34 @@ export function validateDbeParams(config: DbeConfig, imageSize?: ImageSize | nul
     }
   });
 
-  if (config.autoGrid === null && config.manualSamples.length < DBE_MIN_SAMPLES) {
+  return errors;
+}
+
+function needsMorePointRegions(config: DbeConfig): boolean {
+  return config.autoGrid === null && config.manualSamples.length < DBE_MIN_SAMPLES;
+}
+
+export function validateDbeParams(config: DbeConfig, imageSize?: ImageSize | null): DbeValidation {
+  const errors = settingErrors(config, imageSize);
+  if (needsMorePointRegions(config)) {
     errors.push(`Without an automatic grid the spline needs at least ${DBE_MIN_SAMPLES} point regions`);
   }
-
   return { ok: errors.length === 0, errors };
+}
+
+export function pointSamplesSent(points: [number, number][], usePointRegions: boolean, compositeMode: boolean): [number, number][] {
+  return usePointRegions && !compositeMode ? points : [];
+}
+
+function pointRegionShortfall(used: number, usePointRegions: boolean, compositeMode: boolean): string {
+  if (compositeMode) return "Point regions are not used on the composite: turn Auto Grid on";
+  if (!usePointRegions) return "Point regions are not used: turn on 'Use point regions as samples' or Auto Grid";
+  return `${DBE_MIN_SAMPLES} point regions needed, ${used} used`;
+}
+
+export function dbeRunBlock(config: DbeConfig, usePointRegions: boolean, compositeMode: boolean, imageSize?: ImageSize | null): string | null {
+  const sent: DbeConfig = { ...config, manualSamples: pointSamplesSent(config.manualSamples, usePointRegions, compositeMode) };
+  const [first] = settingErrors(sent, imageSize);
+  if (first !== undefined) return first;
+  return needsMorePointRegions(sent) ? pointRegionShortfall(sent.manualSamples.length, usePointRegions, compositeMode) : null;
 }

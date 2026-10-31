@@ -6,10 +6,11 @@ interface ToggleProps {
   disabled?: boolean;
   accent?: string;
   badge?: string | null;
+  describedBy?: string;
   onChange: (v: boolean) => void;
 }
 
-function Toggle({ label, checked, disabled = false, accent = "teal", badge, onChange }: ToggleProps) {
+function Toggle({ label, checked, disabled = false, accent = "teal", badge, describedBy, onChange }: ToggleProps) {
   const handleClick = useCallback(() => {
     if (!disabled) onChange(!checked);
   }, [disabled, checked, onChange]);
@@ -32,6 +33,7 @@ function Toggle({ label, checked, disabled = false, accent = "teal", badge, onCh
         role="switch"
         aria-checked={checked}
         aria-label={label}
+        aria-describedby={describedBy}
         onClick={(e) => { e.stopPropagation(); handleClick(); }}
         disabled={disabled}
         className="ab-toggle"

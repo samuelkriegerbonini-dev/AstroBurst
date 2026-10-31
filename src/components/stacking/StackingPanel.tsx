@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect, useId, useRef, useMemo } from "react";
 import { Layers, GripVertical, ArrowDown, CheckCircle2, X } from "lucide-react";
-import { Slider, Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader, WarningList } from "../ui";
+import { Toggle, RunButton, ResultGrid, ErrorAlert, SectionHeader, WarningList } from "../ui";
 import { noiseWeightsFor, stackFrames } from "../../services/stacking";
-import type { CombineMethod, NormalizationMethod, RejectionMethod, StackResult } from "../../shared/types/stacking";
+import type { CombineMethod, NormalizationMethod, StackResult } from "../../shared/types/stacking";
 import { STACK_PROGRESS_EVENT } from "../../shared/types/stacking";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { ProcessedFile } from "../../shared/types";
@@ -14,14 +14,16 @@ import { useProgress } from "../../hooks/useProgress";
 import { useTimer } from "../../hooks/useTimer";
 import { combineFrameWeights, effectiveWeightsOf, noiseWeightHint, weightedFrameCount, type EffectiveWeights, type NoiseWeightSummary } from "../../utils/noiseWeights";
 import { formatCount } from "../../utils/formatCount";
+import { FRAME_KIND_CHIPS, FRAME_KIND_NAMES, frameKindOf, imagetypLeftOutLine, isCalibrationKind, isStackedProduct, sortByFrameKind, stackedLeftOutLine, type FrameKind } from "../../utils/frameKind";
+import { correctedCopySwap, listedCosmeticCopies, type CosmeticCopy } from "../../utils/cosmeticCopies";
+import { openInFiles } from "./resultHandoff";
+import RejectionControls from "./RejectionControls";
+import { claimStackProgress, releaseStackProgress, stackProgressBusyLine, useStackProgressHolder } from "../../utils/stackProgressLock";
 import {
   appendMissingPaths,
   COMBINE_OPTIONS,
   DEFAULT_STACK_SETTINGS,
   NORMALIZATION_OPTIONS,
-  REJECTION_OPTIONS,
-  rejectionFrameHint,
-  rejectionUsesSigma,
   selectableStackPaths,
   stackProgressText,
   subframeWeightsFor,
@@ -37,19 +39,35 @@ interface StackingPanelProps {
   onStackConfigChange?: (config: Partial<StackConfig>) => void;
   rejectedPaths?: string[];
   subframeWeights?: Record<string, number>;
+  cosmeticCopies?: CosmeticCopy[];
 }
 
 const ICON = <Layers size={14} className="text-amber-400" />;
 const ITEM_HEIGHT = 28;
 const OVERSCAN = 6;
+const NO_COSMETIC_COPIES: CosmeticCopy[] = [];
+const OPEN_IN_FILES_CLASS = "shrink-0 rounded-md bg-emerald-600/20 px-2 py-1 text-[11px] text-emerald-200 transition-colors hover:bg-emerald-600/30";
 
 type FrameRow =
-  | { kind: "header"; key: string }
-  | { kind: "injected"; key: string; path: string; label: string }
-  | { kind: "file"; key: string; path: string; label: string };
+  | { kind: "header"; key: string; label: string }
+  | { kind: "injected"; key: string; path: string; label: string; tag: string }
+  | { kind: "file"; key: string; path: string; label: string; frameKind: FrameKind };
 
 function fileName(path: string): string {
   return path.split(/[/\\]/).pop() || path;
+}
+
+function FrameKindChip({ kind }: { kind: FrameKind }) {
+  const chip = FRAME_KIND_CHIPS[kind];
+  if (!chip) return null;
+  const name = `${FRAME_KIND_NAMES[kind]} frame`;
+  const tone = isCalibrationKind(kind) ? "text-sky-300/90 bg-sky-500/10" : "text-zinc-400 bg-zinc-800";
+  return (
+    <span data-testid="stack-frame-kind" title={`${name} (IMAGETYP)`} className={`shrink-0 rounded px-1 text-[9px] font-mono leading-tight ${tone}`}>
+      <span aria-hidden="true">{chip}</span>
+      <span className="sr-only">{name}</span>
+    </span>
+  );
 }
 
 export function NoiseWeightHintLine({ effective }: { effective: EffectiveWeights | null }) {
@@ -70,6 +88,7 @@ export default function StackingPanel({
   onStackConfigChange,
   rejectedPaths = [],
   subframeWeights,
+  cosmeticCopies = NO_COSMETIC_COPIES,
 }: StackingPanelProps) {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [isStacking, setIsStacking] = useState(false);
@@ -84,10 +103,13 @@ export default function StackingPanel({
   const [listHeight, setListHeight] = useState(240);
   const progress = useProgress(STACK_PROGRESS_EVENT);
   const resetProgress = progress.reset;
-  const rejectionId = useId();
   const combineId = useId();
   const normalizationId = useId();
   const alignMethodId = useId();
+  const leftOutId = useId();
+  const stackedLineId = useId();
+  const busyId = useId();
+  const busyLine = stackProgressBusyLine(useStackProgressHolder(), isStacking ? "stack" : null);
   const timer = useTimer();
   const startTimer = timer.start;
   const stopTimer = timer.stop;
@@ -152,12 +174,30 @@ export default function StackingPanel({
     );
   }, [replaceSelection]);
 
+  const framesByKind = useMemo(() => sortByFrameKind(files), [files]);
+  const leftOutLine = useMemo(() => imagetypLeftOutLine(framesByKind.calibration), [framesByKind]);
+  const stackedPaths = useMemo(
+    () => new Set(framesByKind.lights.filter((f) => isStackedProduct(f.result?.header)).map((f) => f.path)),
+    [framesByKind],
+  );
+  const stackedLine = stackedLeftOutLine(stackedPaths.size, "All");
+  const selectAllNotes = [leftOutLine ? leftOutId : null, stackedLine ? stackedLineId : null].filter(Boolean).join(" ") || undefined;
+
   const selectAll = useCallback(() => {
-    const allPaths = selectableStackPaths(files.map((f) => f.path), injectedPaths, rejectedPaths);
-    replaceSelection(() => allPaths);
-  }, [files, injectedPaths, rejectedPaths, replaceSelection]);
+    const lights = framesByKind.lights.filter((f) => !stackedPaths.has(f.path)).map((f) => f.path);
+    replaceSelection(() => selectableStackPaths(lights, injectedPaths, rejectedPaths));
+  }, [framesByKind, stackedPaths, injectedPaths, rejectedPaths, replaceSelection]);
 
   const selectNone = useCallback(() => replaceSelection(() => []), [replaceSelection]);
+
+  const loadedPaths = useMemo(() => files.map((f) => f.path), [files]);
+  const copySwap = useMemo(
+    () => correctedCopySwap(selectedPaths, cosmeticCopies, rejectedPaths, loadedPaths),
+    [selectedPaths, cosmeticCopies, rejectedPaths, loadedPaths],
+  );
+  const swapInCorrectedCopies = useCallback(() => {
+    replaceSelection((prev) => correctedCopySwap(prev, cosmeticCopies, rejectedPaths, loadedPaths).paths);
+  }, [cosmeticCopies, rejectedPaths, loadedPaths, replaceSelection]);
 
   useEffect(() => {
     const el = listRef.current;
@@ -182,12 +222,11 @@ export default function StackingPanel({
   const weights = useMemo(() => subframeWeightsFor(selectedPaths, subframeWeights), [selectedPaths, subframeWeights]);
   useEffect(() => setEffectiveWeights(null), [weights]);
   const weightedCount = weightedFrameCount(weights);
-  const hint = rejectionFrameHint(rejection, selectedPaths.length, minmaxLow, minmaxHigh);
 
   const stackProgressLabel = stackProgressText(progress.stage, progress.current, progress.total);
 
   const handleStack = useCallback(async () => {
-    if (selectedPaths.length < 2) return;
+    if (selectedPaths.length < 2 || !claimStackProgress("stack")) return;
     const target = runTarget;
     const inputs = [...selectedPaths];
     const name = stackOutputName(inputs[0], inputs.length, new Date());
@@ -234,6 +273,7 @@ export default function StackingPanel({
       setIsStacking(false);
       stopTimer();
       resetProgress();
+      releaseStackProgress("stack");
     }
   }, [
     selectedPaths,
@@ -262,20 +302,27 @@ export default function StackingPanel({
   ]);
 
   const rows = useMemo<FrameRow[]>(() => {
-    const filePaths = new Set(files.map((f) => f.path));
+    const filePaths = new Set(loadedPaths);
     const injectedOnly = injectedPaths.filter((p) => !filePaths.has(p));
+    const copies = listedCosmeticCopies(cosmeticCopies, loadedPaths);
     const list: FrameRow[] = [];
     if (injectedOnly.length > 0) {
-      list.push({ kind: "header", key: "__calibration_header" });
+      list.push({ kind: "header", key: "__calibration_header", label: "From Calibration" });
       for (const path of injectedOnly) {
-        list.push({ kind: "injected", key: `inj:${path}`, path, label: fileName(path) });
+        list.push({ kind: "injected", key: `inj:${path}`, path, label: fileName(path), tag: "calibrated" });
+      }
+    }
+    if (copies.length > 0) {
+      list.push({ kind: "header", key: "__cosmetic_header", label: "From Cosmetic" });
+      for (const copy of copies) {
+        list.push({ kind: "injected", key: `cos:${copy.corrected}`, path: copy.corrected, label: fileName(copy.corrected), tag: "corrected" });
       }
     }
     for (const f of files) {
-      list.push({ kind: "file", key: f.id, path: f.path, label: f.name });
+      list.push({ kind: "file", key: f.id, path: f.path, label: f.name, frameKind: frameKindOf(f.result?.header) });
     }
     return list;
-  }, [files, injectedPaths]);
+  }, [files, loadedPaths, injectedPaths, cosmeticCopies]);
 
   const startIdx = Math.max(0, Math.floor(listScrollTop / ITEM_HEIGHT) - OVERSCAN);
   const endIdx = Math.min(rows.length, Math.ceil((listScrollTop + listHeight) / ITEM_HEIGHT) + OVERSCAN);
@@ -286,10 +333,30 @@ export default function StackingPanel({
       <div className="flex items-center justify-between">
         <SectionHeader icon={ICON} title="Frames to Stack" subtitle={selectedPaths.length > 0 ? `${selectedPaths.length} selected` : undefined} />
         <div className="flex gap-2">
-          <button data-testid="stack-select-all" onClick={selectAll} disabled={isStacking} className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">All</button>
+          <button data-testid="stack-select-all" onClick={selectAll} disabled={isStacking} aria-describedby={selectAllNotes} className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">All</button>
           <button data-testid="stack-select-none" onClick={selectNone} disabled={isStacking} className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">None</button>
         </div>
       </div>
+      {leftOutLine && (
+        <p id={leftOutId} data-testid="stack-left-out" className="-mt-3 text-[10px] text-zinc-500 leading-snug">{leftOutLine}</p>
+      )}
+      {stackedLine && (
+        <p id={stackedLineId} data-testid="stack-stacked-left-out" className="-mt-3 text-[10px] text-zinc-500 leading-snug">{stackedLine}</p>
+      )}
+      {cosmeticCopies.length > 0 && (
+        <div className="-mt-2 flex justify-end">
+          <button
+            type="button"
+            data-testid="stack-use-corrected"
+            onClick={swapInCorrectedCopies}
+            disabled={isStacking || copySwap.count === 0}
+            title={copySwap.count === 0 ? "The corrected copies are already selected" : "Select the corrected copies in place of their originals"}
+            className="text-[10px] text-emerald-400/80 hover:text-emerald-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {`Use corrected copies (${copySwap.count})`}
+          </button>
+        </div>
+      )}
 
       <div ref={listRef} onScroll={handleListScroll} className="flex-1 min-h-[160px] overflow-y-auto">
         <div style={{ height: rows.length * ITEM_HEIGHT, position: "relative" }}>
@@ -297,9 +364,9 @@ export default function StackingPanel({
             {visibleRows.map((row) => {
               if (row.kind === "header") {
                 return (
-                  <div key={row.key} style={{ height: ITEM_HEIGHT }} className="flex items-center gap-1.5 px-2 text-[10px] text-emerald-400/80">
+                  <div key={row.key} data-testid="stack-frame-group" style={{ height: ITEM_HEIGHT }} className="flex items-center gap-1.5 px-2 text-[10px] text-emerald-400/80">
                     <ArrowDown size={10} />
-                    From Calibration
+                    {row.label}
                   </div>
                 );
               }
@@ -312,7 +379,7 @@ export default function StackingPanel({
                       {isSelected && <CheckCircle2 size={10} className="text-emerald-400" />}
                     </span>
                     <span className="truncate">{row.label}</span>
-                    <span className="ml-auto text-[9px] text-emerald-500/60 shrink-0">calibrated</span>
+                    <span className="ml-auto text-[9px] text-emerald-500/60 shrink-0">{row.tag}</span>
                   </button>
                 );
               }
@@ -325,7 +392,10 @@ export default function StackingPanel({
                     {isSelected && <CheckCircle2 size={10} className="text-amber-400" />}
                   </span>
                   <span className="truncate">{row.label}</span>
-                  {isRejected ? (
+                  <FrameKindChip kind={row.frameKind} />
+                  {stackedPaths.has(row.path) ? (
+                    <span data-testid="stack-frame-stacked" className="ml-auto text-[9px] text-sky-300/70 shrink-0" title="Already a stacked result: All leaves it out; select it by hand to stack it again">stacked</span>
+                  ) : isRejected ? (
                     <span className="ml-auto text-[9px] text-red-400/70 shrink-0" title="Rejected by subframe quality analysis">rejected</span>
                   ) : weight !== undefined ? (
                     <span className="ml-auto text-[9px] text-teal-400/70 shrink-0 font-mono" title="Subframe quality weight">{(weight * 100).toFixed(0)}%</span>
@@ -339,36 +409,7 @@ export default function StackingPanel({
 
       <div className="flex flex-col gap-3 border-t border-zinc-800/50 pt-3">
         <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Pixel Rejection</span>
-        <div className="flex items-center justify-between">
-          <label htmlFor={rejectionId} className="text-xs text-zinc-400">Rejection</label>
-          <select id={rejectionId} value={rejection} onChange={(e) => onStackConfigChange?.({ rejection: e.target.value as RejectionMethod })} className="ab-select">
-            {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </div>
-        <p className={`text-[10px] leading-snug ${hint.severity === "warn" ? "text-amber-400/80" : "text-zinc-500"}`}>{hint.text}</p>
-
-        {rejectionUsesSigma(rejection) && (
-          <>
-            <Slider label="Sigma Low" value={sigmaLow} min={1.0} max={6.0} step={0.1} accent="amber" format={(v) => v.toFixed(1)} onChange={(v) => onStackConfigChange?.({ sigmaLow: v })} />
-            <Slider label="Sigma High" value={sigmaHigh} min={1.0} max={6.0} step={0.1} accent="amber" format={(v) => v.toFixed(1)} onChange={(v) => onStackConfigChange?.({ sigmaHigh: v })} />
-            <Slider label="Max Iterations" value={maxIterations} min={1} max={20} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ maxIterations: v })} />
-          </>
-        )}
-        {rejection === "winsorized_sigma_clip" && (
-          <Slider label="Winsorization Cutoff" value={winsorCutoff} min={1.0} max={10.0} step={0.1} accent="amber" format={(v) => `${v.toFixed(1)}σ`} onChange={(v) => onStackConfigChange?.({ winsorCutoff: v })} />
-        )}
-        {rejection === "percentile_clip" && (
-          <>
-            <Slider label="Percentile Low" value={percentileLow} min={0.0} max={1.0} step={0.01} accent="amber" format={(v) => v.toFixed(2)} onChange={(v) => onStackConfigChange?.({ percentileLow: v })} />
-            <Slider label="Percentile High" value={percentileHigh} min={0.0} max={1.0} step={0.01} accent="amber" format={(v) => v.toFixed(2)} onChange={(v) => onStackConfigChange?.({ percentileHigh: v })} />
-          </>
-        )}
-        {rejection === "min_max" && (
-          <>
-            <Slider label="Reject Low" value={minmaxLow} min={0} max={10} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ minmaxLow: v })} />
-            <Slider label="Reject High" value={minmaxHigh} min={0} max={10} step={1} accent="amber" onChange={(v) => onStackConfigChange?.({ minmaxHigh: v })} />
-          </>
-        )}
+        <RejectionControls settings={config} onChange={(change) => onStackConfigChange?.(change)} frameCount={selectedPaths.length} accent="amber" />
 
         <div className="flex items-center justify-between">
           <label htmlFor={combineId} className="text-xs text-zinc-400">Combine</label>
@@ -408,7 +449,8 @@ export default function StackingPanel({
         )}
       </div>
 
-      <RunButton label={`Stack ${selectedPaths.length} Frames`} runningLabel="Stacking..." running={isStacking} disabled={selectedPaths.length < 2} accent="amber" onClick={handleStack} />
+      <RunButton label={`Stack ${selectedPaths.length} Frames`} runningLabel="Stacking..." running={isStacking} disabled={selectedPaths.length < 2 || busyLine !== null} describedBy={busyLine ? busyId : undefined} accent="amber" onClick={handleStack} />
+      {busyLine && <p id={busyId} data-testid="stack-progress-busy" className="-mt-3 text-[10px] text-amber-400/90 leading-snug">{busyLine}</p>}
 
       {isStacking && (
         <div className="flex flex-col gap-1.5 animate-fade-in">
@@ -450,8 +492,11 @@ export default function StackingPanel({
           ]} />
           <WarningList warnings={result.warnings} />
           {result.fits_path && (
-            <div className="text-[10px] text-zinc-500 truncate" title={result.fits_path}>
-              FITS: <span className="text-zinc-300">{fileName(result.fits_path)}</span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0 text-[10px] text-zinc-500 truncate" title={result.fits_path}>
+                FITS: <span className="text-zinc-300">{fileName(result.fits_path)}</span>
+              </div>
+              <button type="button" onClick={() => { if (result.fits_path) openInFiles([result.fits_path]); }} className={OPEN_IN_FILES_CLASS}>Open in Files</button>
             </div>
           )}
           {(result.rejection_low_fits || result.rejection_high_fits) && (

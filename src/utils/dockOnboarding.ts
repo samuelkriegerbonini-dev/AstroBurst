@@ -1,6 +1,8 @@
-import { anchorOf, moveLabel, type DockAnchor, type DockLayout, type DockToolId } from "./dockLayout";
+import { anchorOf, moveLabel, type DockAnchor, type DockLayout, type DockSide, type DockToolId } from "./dockLayout";
 
 export const DOCK_ONBOARDING_KEY = "ab.onboarding.dock.v1";
+export const DOCK_TOGGLE_TIP_KEY = "ab.onboarding.dockToggle.v1";
+export const DOCK_SETTINGS_TIP_KEY = "ab.onboarding.settings.v1";
 export const DOCK_ONBOARDING_DONE = "done";
 export const DOCK_ONBOARDING_DELAY_MS = 600;
 export const DOCK_ONBOARDING_TITLE = "Arrange your tool windows";
@@ -10,6 +12,52 @@ export const ONBOARDING_INSET_PX = 16;
 export const ONBOARDING_MAX_WIDTH_PX = 360;
 export const ONBOARDING_NARROW_VIEWER_PX = 420;
 export const ONBOARDING_MIN_HEIGHT_PX = 120;
+export const TIP_MAX_WIDTH_PX = 280;
+export const TIP_GAP_PX = 10;
+export const TIP_ARROW_EDGE_PX = 14;
+
+export type DockTipId = "toggle" | "settings";
+export type OnboardingCardId = DockTipId | "tour";
+
+export interface DockTip {
+  id: DockTipId;
+  tool: DockToolId;
+  title: string;
+  body: string;
+}
+
+export const DOCK_TIPS: Readonly<Record<DockTipId, DockTip>> = {
+  toggle: {
+    id: "toggle",
+    tool: "compose",
+    title: "Open and close tools",
+    body: "Click any tool in this bar to open it, and click it again to close it.",
+  },
+  settings: {
+    id: "settings",
+    tool: "config",
+    title: "Settings",
+    body: "Click Config for the settings: astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close them.",
+  },
+};
+
+export const DOCK_TIP_IDS: readonly DockTipId[] = ["toggle", "settings"];
+export const ONBOARDING_ORDER: readonly OnboardingCardId[] = ["toggle", "settings", "tour"];
+
+export const ONBOARDING_KEYS: Readonly<Record<OnboardingCardId, string>> = {
+  toggle: DOCK_TOGGLE_TIP_KEY,
+  settings: DOCK_SETTINGS_TIP_KEY,
+  tour: DOCK_ONBOARDING_KEY,
+};
+
+export function nextOnboardingCard(done: ReadonlySet<OnboardingCardId>, ready: Readonly<Record<OnboardingCardId, boolean>>): OnboardingCardId | null {
+  return ONBOARDING_ORDER.find((card) => !done.has(card) && ready[card]) ?? null;
+}
+
+export function stripButtonHint(label: string, { open, disabled }: { open: boolean; disabled: boolean }): string {
+  if (disabled) return `${label}: open a file first`;
+  return open ? `${label} is open: click to close` : `${label}: click to open, click again to close`;
+}
 
 export type DockOnboardingDemo = "vertical" | "horizontal";
 
@@ -38,7 +86,7 @@ export const DOCK_ONBOARDING_STEPS: readonly DockOnboardingStep[] = [
   },
 ];
 
-export interface OnboardingViewerRect {
+export interface OnboardingRect {
   left: number;
   top: number;
   width: number;
@@ -58,19 +106,28 @@ export interface OnboardingPlacement {
   arrow: "right" | "none";
 }
 
-export function shouldShowDockOnboarding(storage: Pick<Storage, "getItem"> | null): boolean {
+export interface TipPlacement {
+  left: number;
+  top: number;
+  width: number;
+  maxHeight: number;
+  arrow: "left" | "right";
+  arrowY: number;
+}
+
+export function shouldShowDockOnboarding(storage: Pick<Storage, "getItem"> | null, key = DOCK_ONBOARDING_KEY): boolean {
   if (storage === null) return true;
   try {
-    return storage.getItem(DOCK_ONBOARDING_KEY) === null;
+    return storage.getItem(key) === null;
   } catch {
     return true;
   }
 }
 
-export function markDockOnboardingDone(storage: Pick<Storage, "setItem"> | null): void {
+export function markDockOnboardingDone(storage: Pick<Storage, "setItem"> | null, key = DOCK_ONBOARDING_KEY): void {
   if (storage === null) return;
   try {
-    storage.setItem(DOCK_ONBOARDING_KEY, DOCK_ONBOARDING_DONE);
+    storage.setItem(key, DOCK_ONBOARDING_DONE);
   } catch { }
 }
 
@@ -98,7 +155,7 @@ export function viewerToolbarBottom(viewer: OnboardingToolbarHost): number {
   return bottom;
 }
 
-export function onboardingPlacement(viewer: OnboardingViewerRect, viewport: OnboardingViewport, toolbarBottom: number): OnboardingPlacement {
+export function onboardingPlacement(viewer: OnboardingRect, viewport: OnboardingViewport, toolbarBottom: number): OnboardingPlacement {
   const width = Math.round(Math.min(ONBOARDING_MAX_WIDTH_PX, Math.max(0, viewer.width - 2 * ONBOARDING_INSET_PX)));
   const narrow = viewer.width < ONBOARDING_NARROW_VIEWER_PX;
   const preferredLeft = narrow ? viewer.left + ONBOARDING_INSET_PX : viewer.left + viewer.width - ONBOARDING_INSET_PX - width;
@@ -107,4 +164,24 @@ export function onboardingPlacement(viewer: OnboardingViewerRect, viewport: Onbo
   const top = Math.round(clamp(below, 0, Math.max(0, viewport.height - ONBOARDING_MIN_HEIGHT_PX)));
   const room = Math.min(viewer.top + viewer.height - ONBOARDING_INSET_PX - top, viewport.height - top);
   return { left, top, width, maxHeight: Math.round(Math.max(ONBOARDING_MIN_HEIGHT_PX, room)), arrow: narrow ? "none" : "right" };
+}
+
+export function tipPlacement(anchor: OnboardingRect, side: DockSide, viewport: OnboardingViewport, cardHeight: number): TipPlacement {
+  const anchorRight = anchor.left + anchor.width;
+  const room = side === "left" ? viewport.width - ONBOARDING_INSET_PX - anchorRight - TIP_GAP_PX : anchor.left - TIP_GAP_PX - ONBOARDING_INSET_PX;
+  const width = Math.max(0, Math.min(TIP_MAX_WIDTH_PX, room));
+  const left = side === "left" ? anchorRight + TIP_GAP_PX : anchor.left - TIP_GAP_PX - width;
+  const maxHeight = Math.max(0, viewport.height - 2 * ONBOARDING_INSET_PX);
+  const height = Math.min(Math.max(0, cardHeight), maxHeight);
+  const centre = anchor.top + anchor.height / 2;
+  const top = clamp(centre - height / 2, ONBOARDING_INSET_PX, viewport.height - ONBOARDING_INSET_PX - height);
+  const arrowY = clamp(centre - top, TIP_ARROW_EDGE_PX, height - TIP_ARROW_EDGE_PX);
+  return {
+    left: Math.round(left),
+    top: Math.round(top),
+    width: Math.round(width),
+    maxHeight: Math.round(maxHeight),
+    arrow: side,
+    arrowY: Math.round(arrowY),
+  };
 }

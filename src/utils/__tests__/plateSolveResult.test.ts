@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TauriCommandError } from "../../shared/types/errors";
 import type { PlateSolveResult } from "../../services/astrometry";
 import {
+  NOVA_OFF_NOTE,
   NO_API_KEY_NOTICE,
   ORIENTATION_TITLE,
   SIP_RESIDUAL_TITLE,
@@ -355,6 +356,15 @@ describe("fallbackOffer", () => {
 
   it("offers nothing and says nothing when it is not offered", () => {
     expect(fallbackOffer(null, "auto", false)).toEqual({ offered: false, note: "" });
+  });
+
+  it("offers no upload when Solve options turn the offer off, and says so only where it would have been offered", () => {
+    expect(NOVA_OFF_NOTE).toBe("Offer astrometry.net after a failure is off in Solve options, so this image is not uploaded.");
+    expect(fallbackOffer(failure, "auto", true, null, false)).toEqual({ offered: false, note: NOVA_OFF_NOTE });
+    expect(fallbackOffer(failure, "local", false, null, false)).toEqual({ offered: false, note: NOVA_OFF_NOTE });
+    expect(fallbackOffer(failure, "astrometry.net", true, null, false)).toEqual({ offered: false, note: "" });
+    expect(fallbackOffer(localFailure(new Error("disk full")), "auto", true, null, false)).toEqual({ offered: false, note: "" });
+    expect(fallbackOffer(failure, "auto", true, null, true).offered).toBe(true);
   });
 });
 

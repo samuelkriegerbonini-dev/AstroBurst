@@ -1,13 +1,31 @@
 import { useState, useCallback, useId, useRef, useEffect, useMemo } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { X } from "lucide-react";
 import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader, WarningList } from "../ui";
 import { runCalibrationPipeline } from "../../services/stacking";
+import { cancelProgress } from "../../services/progress";
+import { useProgress } from "../../hooks/useProgress";
+import { useTimer } from "../../hooks/useTimer";
 import { getOutputDir } from "../../infrastructure/tauri";
-import type { CombineMethod, PipelineDarkGroup, PipelineResult, PipelineStats, RejectionMethod } from "../../shared/types/stacking";
+import { PIPELINE_PROGRESS_EVENT, type CombineMethod, type NormalizationMethod, type PipelineDarkGroup, type PipelineMasterOutput, type PipelineResult, type PipelineStats } from "../../shared/types/stacking";
+import { isCancelledRun } from "../../utils/drizzleRgbResult";
+import { pipelineProgressText } from "../../utils/pipelineProgress";
+import { formatTime } from "../../utils/format";
 import type { CosmeticConfig } from "../../shared/types/cosmetic";
-import { COMBINE_OPTIONS, REJECTION_OPTIONS, rejectionFrameHint, rejectionUsesSigma } from "../../utils/stackingRejection";
+import {
+  boundRejectionSettings,
+  COMBINE_OPTIONS,
+  DEFAULT_STACK_SETTINGS,
+  NORMALIZATION_OPTIONS,
+  pipelineRejectionFields,
+  type RejectionSettings,
+} from "../../utils/stackingRejection";
 import { parseDefectList, formatDefectError } from "../../utils/defectList";
-import { detectChannel } from "../../utils/channelMapping";
+import { detectChannel, displayFilterValue, filterCardValue } from "../../utils/channelMapping";
+import { laneForBin, MONO_LANE, PIPELINE_LANES, type PipelineLane } from "../../utils/pipelineToCompose";
+import { openInFiles } from "./resultHandoff";
+import RejectionControls from "./RejectionControls";
+import { calibrationPaths, isStackedProduct, sortByFrameKind, stackedLeftOutLine, type CalibrationFrameKind, type CalibrationFrames } from "../../utils/frameKind";
 import { formatCount } from "../../utils/formatCount";
 import { PIPELINE_RGB_CHOICE, pipelineInitialChoice, pipelineOutputName, stackedLights, toDims } from "../../utils/stackingOutputs";
 import { cullChannelGroups, pipelineChannelInputs, subframeExclusionNotice } from "../../utils/subframeCull";
@@ -21,10 +39,31 @@ interface FileGroup {
 }
 
 const NO_PATHS: readonly string[] = [];
-const CHANNEL_LABELS = ["R", "G", "B"];
-const CHANNEL_COLORS: Record<string, string> = { R: "#ef4444", G: "#22c55e", B: "#3b82f6" };
+const NO_FILTER_KEY = "no filter";
+const LANE_COLORS: Record<PipelineLane, string> = {
+  L: "#a1a1aa",
+  R: "#ef4444",
+  G: "#22c55e",
+  B: "#3b82f6",
+  Ha: "#fb7185",
+  OIII: "#2dd4bf",
+  SII: "#f97316",
+  Mono: "#d4d4d8",
+};
+const LANE_BUTTON_CLASS = "text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded";
+const HANDOFF_BUTTON_CLASS = "rounded-md bg-sky-600/20 px-2 py-1 text-[11px] text-sky-200 transition-colors hover:bg-sky-600/30";
+const ARMED_HANDOFF_BUTTON_CLASS = "rounded-md bg-amber-500/15 px-2 py-1 text-[11px] text-amber-300 ring-1 ring-amber-500/30";
+const COMPOSE_CONFIRM_KEY = "compose";
 const MAX_DEFECT_ERRORS = 3;
 const DEFECT_PLACEHOLDER = "Point x y\nCol x [y0 y1]\nRow y [x0 x1]\n# 0-based, one entry per line";
+const PIPELINE_REJECTION_DEFAULTS: RejectionSettings = { ...boundRejectionSettings(DEFAULT_STACK_SETTINGS), sigmaLow: 2.5, sigmaHigh: 3.0 };
+
+function normalizeNoteText(stackNormalization: NormalizationMethod | undefined, normalize: boolean): string | null {
+  if (stackNormalization === undefined || (!normalize && stackNormalization === "none")) return null;
+  const method = NORMALIZATION_OPTIONS.find((option) => option.value === stackNormalization)?.label ?? stackNormalization;
+  const pipeline = normalize ? "this divides each light by its own sky background instead." : "the Pipeline stacks these lights without normalization.";
+  return `The Stack tab normalization is ${method}; ${pipeline}`;
+}
 
 const ICON = (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-blue-400">
@@ -33,45 +72,156 @@ const ICON = (
   </svg>
 );
 
-const CHANNEL_SLOT_FOR_BIN: Record<string, string> = {
-  r: "R",
-  g: "G",
-  b: "B",
-  ha: "R",
-  oiii: "G",
-  sii: "B",
-};
-
-function channelsFromFiles(files: ProcessedFile[]): FileGroup[] {
-  const groups: FileGroup[] = CHANNEL_LABELS.map((l) => ({ label: l, paths: [] }));
-  for (const file of files) {
-    if (!file.path) continue;
-    const bin = detectChannel(file);
-    const slot = bin ? CHANNEL_SLOT_FOR_BIN[bin] : undefined;
-    if (!slot) continue;
-    const group = groups.find((g) => g.label === slot);
-    if (group) group.paths.push(file.path);
-  }
-  return groups;
+interface KeyedPath {
+  path: string;
+  key: string;
 }
 
-function withMissingPaths(current: string[], incoming: string[]): string[] {
+interface SeededLight extends KeyedPath {
+  home: PipelineLane | null;
+}
+
+interface FilterGroup {
+  key: string;
+  paths: string[];
+}
+
+interface LaneSeed {
+  lanes: FileGroup[];
+  lights: SeededLight[];
+  stacked: string[];
+}
+
+interface LaneAddition {
+  added: string[];
+  refused: KeyedPath[];
+}
+
+type FilterKeys = ReadonlyMap<string, string>;
+
+function inLaneOrder(groups: FileGroup[]): FileGroup[] {
+  const rank = (label: string) => PIPELINE_LANES.indexOf(label as PipelineLane);
+  return [...groups].sort((a, b) => rank(a.label) - rank(b.label));
+}
+
+function placeLight(file: ProcessedFile): Omit<SeededLight, "path"> {
+  const lane = laneForBin(detectChannel(file));
+  if (lane) return { key: lane, home: lane };
+  const card = filterCardValue(file);
+  if (card === null) return { key: NO_FILTER_KEY, home: MONO_LANE };
+  return { key: displayFilterValue(file) ?? `wheel position ${card}`, home: null };
+}
+
+function laneTakes(lane: FileGroup, key: string, keys: FilterKeys): boolean {
+  return lane.paths.every((path) => {
+    const held = keys.get(path);
+    return held === undefined || held === key;
+  });
+}
+
+function isLeftOut(light: SeededLight, lanes: readonly FileGroup[], keys: FilterKeys): boolean {
+  if (light.home === null) return true;
+  const home = lanes.find((lane) => lane.label === light.home);
+  return home !== undefined && !laneTakes(home, light.key, keys);
+}
+
+function byFilter(lights: readonly KeyedPath[]): FilterGroup[] {
+  const groups = new Map<string, string[]>();
+  for (const light of lights) {
+    const paths = groups.get(light.key);
+    if (paths) paths.push(light.path);
+    else groups.set(light.key, [light.path]);
+  }
+  return [...groups].map(([key, paths]) => ({ key, paths }));
+}
+
+function lightsCounted(groups: readonly FilterGroup[]): string {
+  const total = groups.reduce((sum, group) => sum + group.paths.length, 0);
+  return `${total} light${total === 1 ? "" : "s"}`;
+}
+
+function filterCounts(groups: readonly FilterGroup[]): string {
+  return groups.map((group) => `${group.key} (${group.paths.length})`).join(", ");
+}
+
+function filterLeftOutLine(groups: readonly FilterGroup[]): string | null {
+  if (groups.length === 0) return null;
+  return `${lightsCounted(groups)} left out by filter: ${filterCounts(groups)}`;
+}
+
+function laneRefusalNote(label: string, refused: readonly KeyedPath[]): string | null {
+  if (refused.length === 0) return null;
+  const groups = byFilter(refused);
+  return `${lightsCounted(groups)} not added to the ${label} lane: ${filterCounts(groups)}; a lane holds one filter`;
+}
+
+function seedLanes(files: ProcessedFile[]): LaneSeed {
+  const lanePaths = new Map<string, string[]>();
+  const lights: SeededLight[] = [];
+  const stacked: string[] = [];
+  for (const file of sortByFrameKind(files).lights) {
+    if (!file.path) continue;
+    if (isStackedProduct(file.result?.header)) {
+      stacked.push(file.path);
+      continue;
+    }
+    const light: SeededLight = { path: file.path, ...placeLight(file) };
+    lights.push(light);
+    if (light.home === null) continue;
+    const paths = lanePaths.get(light.home);
+    if (paths) paths.push(light.path);
+    else lanePaths.set(light.home, [light.path]);
+  }
+  const lanes = PIPELINE_LANES.flatMap((label) => {
+    const paths = lanePaths.get(label);
+    return paths ? [{ label, paths }] : [];
+  });
+  return { lanes, lights, stacked };
+}
+
+function laneAddition(current: readonly FileGroup[], label: string, picked: readonly string[], keys: FilterKeys): LaneAddition {
+  const held = new Set(current.flatMap((group) => group.paths));
+  let laneKey = current.find((group) => group.label === label)?.paths.map((path) => keys.get(path)).find((key) => key !== undefined);
+  const added: string[] = [];
+  const refused: KeyedPath[] = [];
+  for (const path of picked) {
+    if (held.has(path)) continue;
+    held.add(path);
+    const key = keys.get(path);
+    if (key !== undefined && laneKey !== undefined && key !== laneKey) {
+      refused.push({ path, key });
+      continue;
+    }
+    if (laneKey === undefined) laneKey = key;
+    added.push(path);
+  }
+  return { added, refused };
+}
+
+function calibrationFromFiles(files: ProcessedFile[]): CalibrationFrames<string> {
+  return calibrationPaths(sortByFrameKind(files.filter((file) => file.path)).calibration);
+}
+
+function withMissingPaths(current: string[], incoming: readonly string[]): string[] {
   const present = new Set(current);
   const missing = incoming.filter((p) => !present.has(p));
   return missing.length === 0 ? current : [...current, ...missing];
 }
 
-function mergeChannelSeed(current: FileGroup[], seed: FileGroup[]): FileGroup[] {
+function mergeChannelSeed(current: FileGroup[], seed: FileGroup[], keys: FilterKeys): FileGroup[] {
   let changed = false;
   const merged = current.map((group) => {
     const incoming = seed.find((s) => s.label === group.label);
-    if (!incoming) return group;
+    const incomingKey = incoming && keys.get(incoming.paths[0]);
+    if (!incoming || incomingKey === undefined || !laneTakes(group, incomingKey, keys)) return group;
     const paths = withMissingPaths(group.paths, incoming.paths);
     if (paths === group.paths) return group;
     changed = true;
     return { ...group, paths };
   });
-  return changed ? merged : current;
+  const added = seed.filter((s) => !current.some((group) => group.label === s.label));
+  if (!changed && added.length === 0) return current;
+  return inLaneOrder([...merged, ...added]);
 }
 
 const CLEAR_BUTTON_CLASS = "text-[10px] text-red-400 hover:text-red-300 bg-zinc-800 px-2 py-0.5 rounded";
@@ -84,23 +234,21 @@ function ClearButton({ armed, onPress, onBlur }: { armed: boolean; onPress: () =
   );
 }
 
-const CalibRow = ({ label, count, onAdd, clearArmed, onClear, onClearBlur, testId }: { label: string; count: number; onAdd: () => void; clearArmed: boolean; onClear: () => void; onClearBlur: () => void; testId?: string }) => (
+const CalibRow = ({ label, addLabel, count, onAdd, clearArmed, onClear, onClearBlur, testId }: { label: string; addLabel: string; count: number; onAdd: () => void; clearArmed: boolean; onClear: () => void; onClearBlur: () => void; testId?: string }) => (
   <div className="flex items-center justify-between" data-testid={testId}>
     <span className="text-xs text-zinc-400">{label}: {count}</span>
     <div className="flex gap-1">
-      <button onClick={onAdd} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
+      <button aria-label={addLabel} onClick={onAdd} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
       {count > 0 && <ClearButton armed={clearArmed} onPress={onClear} onBlur={onClearBlur} />}
     </div>
   </div>
 );
 
-type CalibrationKind = "dark" | "flat" | "flatdark" | "bias";
-
-const CALIBRATION_PICK_TITLE: Record<CalibrationKind, string> = {
-  dark: "Select dark frames",
-  flat: "Select flat frames",
-  flatdark: "Select flat-dark frames",
-  bias: "Select bias frames",
+const CALIBRATION_FRAMES: Record<CalibrationFrameKind, string> = {
+  dark: "dark frames",
+  flat: "flat frames",
+  flatdark: "flat-dark frames",
+  bias: "bias frames",
 };
 
 function darkGroupsLine(groups: readonly PipelineDarkGroup[] | undefined): string | null {
@@ -138,22 +286,43 @@ interface PipelinePanelProps {
   onShow?: (result: PipelineResult, choice: string, target: RunTarget | null) => void;
   rejectedPaths?: readonly string[];
   onUseAllFrames?: () => void;
+  composeHasProgress?: boolean;
+  onComposeMasters?: (masters: PipelineMasterOutput[]) => void;
 }
 
-export default function PipelinePanel({ files = [], calibration, stackConfig, runTarget = null, onShow, rejectedPaths = NO_PATHS, onUseAllFrames }: PipelinePanelProps) {
+export default function PipelinePanel({ files = [], calibration, stackConfig, runTarget = null, onShow, rejectedPaths = NO_PATHS, onUseAllFrames, composeHasProgress = false, onComposeMasters }: PipelinePanelProps) {
   const [result, setResult] = useState<PipelineResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState("");
+  const [cancelled, setCancelled] = useState(false);
+  const progress = useProgress(PIPELINE_PROGRESS_EVENT);
+  const timer = useTimer();
 
-  const [channels, setChannels] = useState<FileGroup[]>(() => channelsFromFiles(files));
-  const [darks, setDarks] = useState<string[]>(() => calibration?.darkPaths ?? []);
-  const [flats, setFlats] = useState<string[]>(() => calibration?.flatPaths ?? []);
-  const [flatDarks, setFlatDarks] = useState<string[]>(() => calibration?.flatDarkPaths ?? []);
-  const [bias, setBias] = useState<string[]>(() => calibration?.biasPaths ?? []);
-  const [sigmaLow, setSigmaLow] = useState(() => stackConfig?.sigmaLow ?? 2.5);
-  const [sigmaHigh, setSigmaHigh] = useState(() => stackConfig?.sigmaHigh ?? 3.0);
-  const [rejection, setRejection] = useState<RejectionMethod>(() => stackConfig?.rejection ?? "sigma_clip");
+  const seed = useMemo(() => seedLanes(files), [files]);
+  const keyOfPath = useMemo<FilterKeys>(() => new Map(seed.lights.map((light) => [light.path, light.key])), [seed]);
+  const [channels, setChannels] = useState<FileGroup[]>(() => seed.lanes);
+  const channelsRef = useRef(channels);
+  channelsRef.current = channels;
+  const keyOfPathRef = useRef(keyOfPath);
+  keyOfPathRef.current = keyOfPath;
+  const { leftOutGroups, stackedLine } = useMemo(() => {
+    const inLanes = new Set(channels.flatMap((group) => group.paths));
+    const leftOut = seed.lights.filter((light) => !inLanes.has(light.path) && isLeftOut(light, channels, keyOfPath));
+    return {
+      leftOutGroups: byFilter(leftOut),
+      stackedLine: stackedLeftOutLine(seed.stacked.filter((path) => !inLanes.has(path)).length, "the lanes"),
+    };
+  }, [seed, channels, keyOfPath]);
+  const leftOutLine = filterLeftOutLine(leftOutGroups);
+  const [putChoices, setPutChoices] = useState<Record<string, string>>({});
+  const [laneNote, setLaneNote] = useState<string | null>(null);
+  const [laneChoice, setLaneChoice] = useState("");
+  const [loadedCalibration] = useState(() => calibrationFromFiles(files));
+  const [darks, setDarks] = useState<string[]>(() => withMissingPaths(calibration?.darkPaths ?? [], loadedCalibration.dark));
+  const [flats, setFlats] = useState<string[]>(() => withMissingPaths(calibration?.flatPaths ?? [], loadedCalibration.flat));
+  const [flatDarks, setFlatDarks] = useState<string[]>(() => withMissingPaths(calibration?.flatDarkPaths ?? [], loadedCalibration.flatdark));
+  const [bias, setBias] = useState<string[]>(() => withMissingPaths(calibration?.biasPaths ?? [], loadedCalibration.bias));
+  const [rejectionSettings, setRejectionSettings] = useState<RejectionSettings>(() => (stackConfig ? boundRejectionSettings(stackConfig) : PIPELINE_REJECTION_DEFAULTS));
   const [combine, setCombine] = useState<CombineMethod>(() => stackConfig?.combine ?? "mean");
   const [normalize, setNormalize] = useState(true);
   const [align, setAlign] = useState(true);
@@ -170,9 +339,10 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
   const [defectText, setDefectText] = useState("");
 
   const clearConfirm = useArmedConfirm();
+  const composeConfirm = useArmedConfirm();
   const defectListId = useId();
-  const rejectionId = useId();
   const combineId = useId();
+  const normalizeNoteId = useId();
 
   const culled = useMemo(() => cullChannelGroups(channels, rejectedPaths), [channels, rejectedPaths]);
   const exclusionNotice = subframeExclusionNotice(culled.excluded);
@@ -185,10 +355,20 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
 
   const seededFilesRef = useRef(files);
   useEffect(() => {
-    if (seededFilesRef.current === files) return;
+    const seeded = seededFilesRef.current;
+    if (seeded === files) return;
     seededFilesRef.current = files;
-    setChannels((prev) => mergeChannelSeed(prev, channelsFromFiles(files)));
-  }, [files]);
+    const known = new Set(seeded.map((file) => file.path));
+    const fresh = files.filter((file) => !known.has(file.path));
+    if (fresh.length === 0) return;
+    const lanes = seedLanes(fresh).lanes;
+    setChannels((prev) => mergeChannelSeed(prev, lanes, keyOfPath));
+    const loaded = calibrationFromFiles(fresh);
+    setDarks((prev) => withMissingPaths(prev, loaded.dark));
+    setFlats((prev) => withMissingPaths(prev, loaded.flat));
+    setFlatDarks((prev) => withMissingPaths(prev, loaded.flatdark));
+    setBias((prev) => withMissingPaths(prev, loaded.bias));
+  }, [files, keyOfPath]);
 
   const seededCalibrationRef = useRef(calibration);
   useEffect(() => {
@@ -207,11 +387,14 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
     if (seededConfigRef.current === stackConfig) return;
     seededConfigRef.current = stackConfig;
     if (!stackConfig || configTouchedRef.current) return;
-    setSigmaLow(stackConfig.sigmaLow);
-    setSigmaHigh(stackConfig.sigmaHigh);
-    setRejection(stackConfig.rejection);
+    setRejectionSettings(boundRejectionSettings(stackConfig));
     setCombine(stackConfig.combine);
   }, [stackConfig]);
+
+  const changeRejection = useCallback((change: Partial<RejectionSettings>) => {
+    configTouchedRef.current = true;
+    setRejectionSettings((prev) => ({ ...prev, ...change }));
+  }, []);
 
   const buildCosmetic = useCallback((): CosmeticConfig | null => {
     if (!cosmeticEnabled) return null;
@@ -240,27 +423,62 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
   }, []);
 
   const addToChannel = useCallback(
-    async (index: number) => {
-      const paths = await pickFiles(`Select ${CHANNEL_LABELS[index]} lights`);
+    async (label: string) => {
+      const paths = await pickFiles(`Select ${label} lights`);
       if (paths.length === 0) return;
-      setChannels((prev) => {
-        const next = [...prev];
-        next[index] = { ...next[index], paths: [...next[index].paths, ...paths] };
-        return next;
-      });
+      const { added, refused } = laneAddition(channelsRef.current, label, paths, keyOfPathRef.current);
+      setLaneNote(laneRefusalNote(label, refused));
+      if (added.length === 0) return;
+      setChannels((prev) => prev.map((group) => (group.label === label ? { ...group, paths: withMissingPaths(group.paths, added) } : group)));
     },
     [pickFiles]
   );
 
+  const missingLanes = PIPELINE_LANES.filter((label) => !channels.some((group) => group.label === label));
+  const laneToAdd = missingLanes.find((label) => label === laneChoice) ?? missingLanes[0];
+
+  const laneCandidates = (key: string) =>
+    PIPELINE_LANES.filter((label) => {
+      const lane = channels.find((group) => group.label === label);
+      return lane === undefined || laneTakes(lane, key, keyOfPath);
+    });
+
+  const putLane = (key: string, candidates: readonly PipelineLane[]): PipelineLane =>
+    candidates.find((label) => label === putChoices[key]) ?? (candidates.includes(MONO_LANE) ? MONO_LANE : candidates[0]);
+
+  const putInLane = (group: FilterGroup, label: PipelineLane) => {
+    setChannels((prev) => {
+      const lane = prev.find((g) => g.label === label);
+      if (!lane) return inLaneOrder([...prev, { label, paths: [...group.paths] }]);
+      if (!laneTakes(lane, group.key, keyOfPath)) return prev;
+      const paths = withMissingPaths(lane.paths, group.paths);
+      return paths === lane.paths ? prev : prev.map((g) => (g === lane ? { ...g, paths } : g));
+    });
+    setLaneNote(null);
+  };
+
+  const addLane = () => {
+    if (!laneToAdd) return;
+    setChannels((prev) => (prev.some((group) => group.label === laneToAdd) ? prev : inLaneOrder([...prev, { label: laneToAdd, paths: [] }])));
+  };
+
+  const removeLane = (label: string) => {
+    setChannels((prev) => prev.filter((group) => group.label !== label || group.paths.length > 0));
+  };
+
+  const clearLane = (label: string) => {
+    setChannels((prev) => prev.map((group) => (group.label === label ? { ...group, paths: [] } : group)));
+  };
+
   const addCalibration = useCallback(
-    async (type: CalibrationKind) => {
-      const paths = await pickFiles(CALIBRATION_PICK_TITLE[type]);
+    async (type: CalibrationFrameKind) => {
+      const paths = await pickFiles(`Select ${CALIBRATION_FRAMES[type]}`);
       if (paths.length === 0) return;
       switch (type) {
-        case "dark": setDarks((p) => [...p, ...paths]); break;
-        case "flat": setFlats((p) => [...p, ...paths]); break;
-        case "flatdark": setFlatDarks((p) => [...p, ...paths]); break;
-        case "bias": setBias((p) => [...p, ...paths]); break;
+        case "dark": setDarks((p) => withMissingPaths(p, paths)); break;
+        case "flat": setFlats((p) => withMissingPaths(p, paths)); break;
+        case "flatdark": setFlatDarks((p) => withMissingPaths(p, paths)); break;
+        case "bias": setBias((p) => withMissingPaths(p, paths)); break;
       }
     },
     [pickFiles]
@@ -276,9 +494,12 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
     const name = pipelineOutputName(channelInputs[0].paths[0], lightCount, new Date());
     setLoading(true);
     setError(null);
+    setCancelled(false);
     setResult(null);
     setActivePreview(null);
-    setProgress("Building calibration masters...");
+    progress.reset();
+    timer.reset();
+    timer.start();
     try {
       const res = await runCalibrationPipeline({
         channels: channelInputs,
@@ -286,11 +507,9 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
         flat_paths: flats,
         bias_paths: bias,
         flat_dark_paths: flatDarks,
-        sigma_low: sigmaLow,
-        sigma_high: sigmaHigh,
+        ...pipelineRejectionFields(rejectionSettings),
         normalize,
         align,
-        rejection,
         combine,
         cosmetic: buildCosmetic(),
         dark_optimize: darkOptimize && darks.length > 0,
@@ -298,14 +517,15 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
       const choice = pipelineInitialChoice(res);
       setResult(res);
       setActivePreview(choice);
-      setProgress("");
       if (choice) onShow?.(res, choice, target);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
-      setProgress("");
+      if (isCancelledRun(msg)) setCancelled(true);
+      else setError(msg);
     } finally {
       setLoading(false);
+      timer.stop();
+      progress.reset();
     }
   };
 
@@ -374,7 +594,20 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
   const smallestChannel = culled.groups
     .filter((c) => c.paths.length > 0)
     .reduce((min, c) => Math.min(min, c.paths.length), Number.POSITIVE_INFINITY);
-  const hint = rejectionFrameHint(rejection, Number.isFinite(smallestChannel) ? smallestChannel : 0);
+  const normalizeNote = normalizeNoteText(stackConfig?.normalization, normalize);
+
+  const masters = (result?.masters ?? []).filter((master) => master.fits_path);
+  const composeArmed = composeConfirm.armedKey === COMPOSE_CONFIRM_KEY;
+  const composeTheseMasters = () => {
+    if (!onComposeMasters) return;
+    const handOff = () => onComposeMasters(masters);
+    if (composeHasProgress) {
+      composeConfirm.press(COMPOSE_CONFIRM_KEY, handOff);
+      return;
+    }
+    composeConfirm.blur(COMPOSE_CONFIRM_KEY);
+    handOff();
+  };
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -384,34 +617,69 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
         {channels.map((ch, i) => {
           const kept = culled.groups[i].paths.length;
           const lost = ch.paths.length - kept;
+          const clearKey = `channel:${ch.label}`;
           return (
-            <div key={ch.label} className="flex items-center justify-between rounded border border-zinc-800/50 px-2 py-1.5">
+            <div key={ch.label} data-testid="pipeline-lane" className="flex items-center justify-between rounded border border-zinc-800/50 px-2 py-1.5">
               <div className="flex items-center gap-2">
-                <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: CHANNEL_COLORS[ch.label] }} />
+                <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: LANE_COLORS[ch.label as PipelineLane] }} />
                 <span className="text-xs text-zinc-300">{ch.label}</span>
                 <span className="text-[10px] text-zinc-500">{kept} files{lost > 0 && ` (${lost} excluded)`}</span>
               </div>
               <div className="flex gap-1">
-                <button onClick={() => addToChannel(i)} className="text-[10px] text-zinc-500 hover:text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded">+ Add</button>
-                {ch.paths.length > 0 && (
+                <button aria-label={`Add ${ch.label} lights`} onClick={() => addToChannel(ch.label)} className={LANE_BUTTON_CLASS}>+ Add</button>
+                {ch.paths.length > 0 ? (
                   <ClearButton
-                    armed={clearConfirm.armedKey === `channel:${ch.label}`}
-                    onPress={() => clearConfirm.press(`channel:${ch.label}`, () => setChannels((prev) => { const next = [...prev]; next[i] = { ...next[i], paths: [] }; return next; }))}
-                    onBlur={() => clearConfirm.blur(`channel:${ch.label}`)}
+                    armed={clearConfirm.armedKey === clearKey}
+                    onPress={() => clearConfirm.press(clearKey, () => clearLane(ch.label))}
+                    onBlur={() => clearConfirm.blur(clearKey)}
                   />
+                ) : (
+                  <button type="button" onClick={() => removeLane(ch.label)} className={LANE_BUTTON_CLASS}>Remove</button>
                 )}
               </div>
             </div>
           );
         })}
+        {channels.length === 0 && (
+          <p className="text-[10px] text-zinc-500 leading-snug">No lanes yet. Add a lane and pick its lights.</p>
+        )}
+        <p data-testid="pipeline-lane-note" role="status" className="text-[10px] text-amber-400/80 leading-snug empty:hidden">{laneNote ?? ""}</p>
+        {leftOutLine && (
+          <p data-testid="pipeline-filter-left-out" className="text-[10px] text-zinc-500 leading-snug">{leftOutLine}</p>
+        )}
+        {leftOutGroups.map((group) => {
+          const candidates = laneCandidates(group.key);
+          if (candidates.length === 0) return null;
+          const lane = putLane(group.key, candidates);
+          return (
+            <div key={group.key} data-testid="pipeline-put-in-lane" className="flex items-center justify-end gap-1">
+              <span className="min-w-0 truncate text-[10px] text-zinc-500">{group.key}</span>
+              <select aria-label={`Lane for the ${group.key} lights`} value={lane} onChange={(e) => setPutChoices((prev) => ({ ...prev, [group.key]: e.target.value }))} className="ab-select">
+                {candidates.map((label) => <option key={label} value={label}>{label}</option>)}
+              </select>
+              <button type="button" aria-label={`Put the ${group.key} lights in the ${lane} lane`} onClick={() => putInLane(group, lane)} className={LANE_BUTTON_CLASS}>Put in lane</button>
+            </div>
+          );
+        })}
+        {stackedLine && (
+          <p data-testid="pipeline-stacked-left-out" className="text-[10px] text-zinc-500 leading-snug">{stackedLine}</p>
+        )}
+        {laneToAdd && (
+          <div className="flex items-center justify-end gap-1">
+            <select aria-label="Lane to add" value={laneToAdd} onChange={(e) => setLaneChoice(e.target.value)} className="ab-select">
+              {missingLanes.map((label) => <option key={label} value={label}>{label}</option>)}
+            </select>
+            <button type="button" onClick={addLane} className={LANE_BUTTON_CLASS}>+ Lane</button>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
         <span className="text-xs text-zinc-500 uppercase tracking-wider">Calibration (optional)</span>
-        <CalibRow label="Darks" count={darks.length} onAdd={() => addCalibration("dark")} clearArmed={clearConfirm.armedKey === "calib:dark"} onClear={() => clearConfirm.press("calib:dark", () => setDarks([]))} onClearBlur={() => clearConfirm.blur("calib:dark")} />
-        <CalibRow label="Flats" count={flats.length} onAdd={() => addCalibration("flat")} clearArmed={clearConfirm.armedKey === "calib:flat"} onClear={() => clearConfirm.press("calib:flat", () => setFlats([]))} onClearBlur={() => clearConfirm.blur("calib:flat")} />
-        <CalibRow label="Flat darks" testId="pipeline-flatdark-row" count={flatDarks.length} onAdd={() => addCalibration("flatdark")} clearArmed={clearConfirm.armedKey === "calib:flatdark"} onClear={() => clearConfirm.press("calib:flatdark", () => setFlatDarks([]))} onClearBlur={() => clearConfirm.blur("calib:flatdark")} />
-        <CalibRow label="Bias" count={bias.length} onAdd={() => addCalibration("bias")} clearArmed={clearConfirm.armedKey === "calib:bias"} onClear={() => clearConfirm.press("calib:bias", () => setBias([]))} onClearBlur={() => clearConfirm.blur("calib:bias")} />
+        <CalibRow label="Darks" addLabel={`Add ${CALIBRATION_FRAMES.dark}`} count={darks.length} onAdd={() => addCalibration("dark")} clearArmed={clearConfirm.armedKey === "calib:dark"} onClear={() => clearConfirm.press("calib:dark", () => setDarks([]))} onClearBlur={() => clearConfirm.blur("calib:dark")} />
+        <CalibRow label="Flats" addLabel={`Add ${CALIBRATION_FRAMES.flat}`} count={flats.length} onAdd={() => addCalibration("flat")} clearArmed={clearConfirm.armedKey === "calib:flat"} onClear={() => clearConfirm.press("calib:flat", () => setFlats([]))} onClearBlur={() => clearConfirm.blur("calib:flat")} />
+        <CalibRow label="Flat darks" addLabel={`Add ${CALIBRATION_FRAMES.flatdark}`} testId="pipeline-flatdark-row" count={flatDarks.length} onAdd={() => addCalibration("flatdark")} clearArmed={clearConfirm.armedKey === "calib:flatdark"} onClear={() => clearConfirm.press("calib:flatdark", () => setFlatDarks([]))} onClearBlur={() => clearConfirm.blur("calib:flatdark")} />
+        <CalibRow label="Bias" addLabel={`Add ${CALIBRATION_FRAMES.bias}`} count={bias.length} onAdd={() => addCalibration("bias")} clearArmed={clearConfirm.armedKey === "calib:bias"} onClear={() => clearConfirm.press("calib:bias", () => setBias([]))} onClearBlur={() => clearConfirm.blur("calib:bias")} />
         {darks.length > 0 && (
           <>
             <Toggle label="Optimize dark scale per light (minimise noise)" checked={darkOptimize} accent="sky" onChange={setDarkOptimize} />
@@ -468,28 +736,17 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
 
       <div className="flex flex-col gap-3 border-t border-zinc-800/50 pt-3">
         <span className="text-xs text-zinc-500 uppercase tracking-wider">Stacking</span>
-        <div className="flex items-center justify-between">
-          <label htmlFor={rejectionId} className="text-xs text-zinc-400">Rejection</label>
-          <select id={rejectionId} value={rejection} onChange={(e) => { configTouchedRef.current = true; setRejection(e.target.value as RejectionMethod); }} className="ab-select">
-            {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </div>
-        {totalLights > 0 && (
-          <p className={`text-[10px] leading-snug ${hint.severity === "warn" ? "text-amber-400/80" : "text-zinc-500"}`}>{hint.text}</p>
-        )}
-        {rejectionUsesSigma(rejection) && (
-          <>
-            <Slider label="Sigma Low" value={sigmaLow} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={(v) => { configTouchedRef.current = true; setSigmaLow(v); }} />
-            <Slider label="Sigma High" value={sigmaHigh} min={1} max={5} step={0.1} accent="sky" format={(v) => v.toFixed(1)} onChange={(v) => { configTouchedRef.current = true; setSigmaHigh(v); }} />
-          </>
-        )}
+        <RejectionControls settings={rejectionSettings} onChange={changeRejection} frameCount={totalLights > 0 ? smallestChannel : null} accent="sky" />
         <div className="flex items-center justify-between">
           <label htmlFor={combineId} className="text-xs text-zinc-400">Combine</label>
           <select id={combineId} value={combine} onChange={(e) => { configTouchedRef.current = true; setCombine(e.target.value as CombineMethod); }} className="ab-select">
             {COMBINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
-        <Toggle label="Normalize before stack" checked={normalize} accent="sky" onChange={setNormalize} />
+        <Toggle label="Normalize to sky background (divide)" checked={normalize} accent="sky" onChange={setNormalize} describedBy={normalizeNote ? normalizeNoteId : undefined} />
+        {normalizeNote && (
+          <p id={normalizeNoteId} data-testid="pipeline-normalize-note" className="text-[10px] text-zinc-500 leading-snug">{normalizeNote}</p>
+        )}
         <Toggle label="Align frames before stack" checked={align} accent="sky" onChange={setAlign} />
       </div>
 
@@ -506,12 +763,36 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
 
       <RunButton
         label={`Run Pipeline (${totalLights} lights)`}
-        runningLabel={progress || "Processing..."}
+        runningLabel="Running pipeline..."
         running={loading}
         disabled={totalLights === 0 || defectErrors.length > 0}
         accent="sky"
         onClick={handleRun}
       />
+      {loading && (
+        <div className="flex flex-col gap-1.5 animate-fade-in">
+          <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+            <div data-testid="pipeline-progress-bar" className="h-full rounded-full transition-all duration-300" style={{ width: `${progress.percent}%`, background: "linear-gradient(90deg, var(--ab-sky), #7dd3fc)" }} />
+          </div>
+          <div className="flex justify-between items-center gap-2 text-[10px] text-zinc-500">
+            <span data-testid="pipeline-progress-label" className="truncate">{pipelineProgressText(progress.stage)}</span>
+            <span className="flex shrink-0 items-center gap-2">
+              <span data-testid="pipeline-elapsed" className="font-mono">{timer.formatted}</span>
+              <button
+                type="button"
+                data-testid="pipeline-cancel"
+                onClick={() => { cancelProgress(PIPELINE_PROGRESS_EVENT).catch(() => {}); }}
+                title="Cancel pipeline"
+                aria-label="Cancel pipeline"
+                className="text-zinc-500 hover:text-red-400 transition-colors"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          </div>
+        </div>
+      )}
+      {cancelled && <div className="text-[10px] text-zinc-500">Pipeline cancelled</div>}
       <ErrorAlert message={error} />
 
       {result && (
@@ -538,7 +819,7 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
                 className={`ab-pill ${activePreview === PIPELINE_RGB_CHOICE ? "data-active" : ""}`}
                 data-active={activePreview === PIPELINE_RGB_CHOICE || undefined}
               >
-                {PIPELINE_RGB_CHOICE}
+                {result.rgb_palette ?? PIPELINE_RGB_CHOICE}
               </button>
             )}
           </div>
@@ -560,7 +841,28 @@ export default function PipelinePanel({ files = [], calibration, stackConfig, ru
               </div>
             ))}
             <PipelineMasterLines stats={result.stats} />
+            {typeof result.elapsed_ms === "number" && <div>{`Finished in ${formatTime(result.elapsed_ms)}`}</div>}
           </div>
+
+          {masters.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => openInFiles(masters.map((master) => master.fits_path))} className={HANDOFF_BUTTON_CLASS}>Open masters</button>
+              {onComposeMasters && (
+                <button
+                  type="button"
+                  data-testid="pipeline-compose-masters"
+                  aria-live="polite"
+                  aria-label={composeArmed ? "Confirm replacing the Compose channels with these masters" : undefined}
+                  title={composeArmed ? "Click again to replace the Compose channels with these masters; the Compose step results are discarded" : "Open the masters and put each in its filter's Compose channel"}
+                  onClick={composeTheseMasters}
+                  onBlur={() => composeConfirm.blur(COMPOSE_CONFIRM_KEY)}
+                  className={composeArmed ? ARMED_HANDOFF_BUTTON_CLASS : HANDOFF_BUTTON_CLASS}
+                >
+                  {composeArmed ? "Replace Compose channels?" : "Compose these masters"}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

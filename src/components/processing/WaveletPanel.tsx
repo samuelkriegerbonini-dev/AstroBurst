@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useId, useMemo } from "react";
 import { X } from "lucide-react";
 import { recordWaveletDenoise, waveletOptionsOf, type WaveletSettings } from "../../services/processing";
 import { compositeWaveletDenoise } from "../../services/compositeChain";
@@ -8,14 +8,16 @@ import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, isCancelMessage, useProcessingRu
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { useHistoryScope } from "../../hooks/useHistory";
 import { useRerunInitial, useRerunUpdates } from "../../hooks/useRerunParams";
-import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+import { Slider, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+import MaskSelect from "../masks/MaskSelect";
+import { useRunMask } from "../masks/runMask";
 import type { ProcessedFile } from "../../shared/types";
 import { useRenderContext } from "../../context/PreviewContext";
 import { useCompositeStf } from "../../context/CompositeContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
 import { WAVELET_PROGRESS_EVENT } from "../../shared/types/processing";
-import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice } from "./compositeProps";
+import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice, describedByIds } from "./compositeProps";
 import type { CompositePanelProps, CompositeWaveletResult } from "./compositeProps";
 
 const DEFAULT_THRESHOLDS = [3.0, 2.5, 2.0, 1.5, 1.0];
@@ -23,7 +25,15 @@ const DEFAULT_BIAS = 0;
 const BIAS_MIN = -1;
 const BIAS_MAX = 3;
 const BIAS_STEP = 0.05;
-const SCALE_LABELS = ["Fine detail", "Small structures", "Medium structures", "Large structures", "Very large"];
+const SCALE_NAMES = ["Fine", "Small", "Medium", "Large", "Very large"];
+const ZERO_THRESHOLD_NOTE = "A threshold of 0 leaves its scale untouched.";
+const SCALE_SIZE_NOTE = "Each label is a range of structure sizes (FWHM), not one exact size; a structure on a boundary spreads over both scales.";
+const THRESHOLDINGS = [
+  { value: "soft", label: "Soft", soft: true },
+  { value: "hard", label: "Hard", soft: false },
+] as const;
+const THRESHOLDING_HINT =
+  "Soft shrinks every coefficient toward zero (smoother); Hard keeps coefficients above the threshold unchanged (sharper, can leave speckles).";
 const RESULT_LABEL = "Denoised";
 
 interface WaveletResult {
@@ -81,7 +91,7 @@ function fitToScales(prev: number[], numScales: number, defaults: readonly numbe
 }
 
 function scaleLabel(idx: number): string {
-  return SCALE_LABELS[idx] || `Scale ${idx + 1}`;
+  return `${SCALE_NAMES[idx] ?? `Scale ${idx + 1}`} (${2 ** idx}-${2 ** (idx + 1)} px)`;
 }
 
 function formatBias(v: number): string {
@@ -106,6 +116,7 @@ export default function WaveletPanel({
   fileName,
   disabledReason,
   disabledReasonId,
+  runNoteId,
 }: WaveletPanelProps) {
   const progress = useProgress(WAVELET_PROGRESS_EVENT);
   const resetProgress = progress.reset;
@@ -113,15 +124,18 @@ export default function WaveletPanel({
   const [numScales, setNumScales] = useState(initial?.params.numScales ?? 5);
   const [thresholds, setThresholds] = useState<number[]>(() => initial?.params.thresholds ?? [...DEFAULT_THRESHOLDS]);
   const [layerBias, setLayerBias] = useState<number[]>(() => initial?.params.layerBias ?? Array(5).fill(DEFAULT_BIAS));
-  const [linear, setLinear] = useState(initial?.params.linear ?? true);
+  const [softThreshold, setSoftThreshold] = useState(initial?.params.linear ?? true);
+  const thresholdingId = useId();
   const applyRerun = useCallback((settings: WaveletSettings) => {
     setNumScales(settings.numScales);
     setThresholds(settings.thresholds);
     setLayerBias(settings.layerBias);
-    setLinear(settings.linear);
+    setSoftThreshold(settings.linear);
   }, []);
   useRerunUpdates("denoise", initial, waveletOptionsOf, applyRerun);
   const scope = useHistoryScope();
+  const runMask = useRunMask("denoise", scope, compositeMode);
+  const maskReason = runMask.blockedReason;
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<WaveletRun>("denoise", compositeMode ? COMPOSITE_RUN_KEY : fileKey ?? null);
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -171,23 +185,24 @@ export default function WaveletPanel({
     const runScope = scope;
     const baseUrl = inputPreviewUrl ?? null;
     const baseLabel = inputLabel ?? "Original";
+    const mask = runMask.value;
     resetProgress();
     void run(async (ctx) => {
       const res = await recordWaveletDenoise(runScope, path, {
         numScales,
         thresholds: thresholds.slice(0, numScales),
-        linear,
+        linear: softThreshold,
         layerBias: layerBias.slice(0, numScales),
-      });
+      }, mask);
       if (!ctx.inputUnchanged("denoise")) throw new Error(INPUT_CHANGED_MESSAGE);
       await onProcessingDone?.(res);
       return { composite: false as const, res, resultUrl: bustPreviewUrl(res?.previewUrl, Date.now()), baseUrl, baseLabel };
     }, isCancelMessage).finally(resetProgress);
-  }, [selectedFile, scope, numScales, thresholds, linear, layerBias, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
+  }, [selectedFile, scope, numScales, thresholds, softThreshold, layerBias, runMask.value, resetProgress, run, inputPreviewUrl, inputLabel, onProcessingDone]);
 
   const handleCompositeRun = useCallback(() => {
     if (!compositeInput) return;
-    const chainCall = { chainInput: compositeInput.input, displayStf };
+    const chainCall = { chainInput: compositeInput.input, displayStf, mask: runMask.value };
     const inputUrl = compositeInput.previewUrl;
     const inputLabelAtRun = compositeInput.label;
     resetProgress();
@@ -195,7 +210,7 @@ export default function WaveletPanel({
       const res = await compositeWaveletDenoise(outputDir, chainCall, {
         numScales,
         thresholds: thresholds.slice(0, numScales),
-        linear,
+        linear: softThreshold,
         layerBias: layerBias.slice(0, numScales),
       });
       onCompositeDone("denoise", RESULT_LABEL, res, chainCall.displayStf);
@@ -207,7 +222,7 @@ export default function WaveletPanel({
         baseLabel: res.chain_restarted ? "Composite" : inputLabelAtRun,
       };
     }, isCancelMessage).finally(resetProgress);
-  }, [compositeInput, displayStf, outputDir, numScales, thresholds, linear, layerBias, resetProgress, run, onCompositeDone]);
+  }, [compositeInput, displayStf, runMask.value, outputDir, numScales, thresholds, softThreshold, layerBias, resetProgress, run, onCompositeDone]);
 
   const handleRun = compositeMode ? handleCompositeRun : handleFileRun;
 
@@ -231,27 +246,22 @@ export default function WaveletPanel({
         <div className="flex flex-col gap-1.5">
           <label className="text-xs text-zinc-400">Threshold per scale (sigma)</label>
           {thresholds.slice(0, numScales).map((val, idx) => (
-            <div key={idx} className="flex items-center gap-2">
-              <span className="text-[10px] text-zinc-500 w-24 truncate">
-                {scaleLabel(idx)}
-              </span>
-              <div className="flex-1">
-                <Slider
-                  label=""
-                  ariaLabel={`${scaleLabel(idx)} threshold`}
-                  value={val}
-                  min={0}
-                  max={5}
-                  step={0.1}
-                  disabled={isRunning}
-                  accent="sky"
-                  format={(v) => v.toFixed(1)}
-                  onChange={(v) => updateThreshold(idx, v)}
-                />
-              </div>
-              <span className="text-[10px] font-mono text-zinc-300 w-6 text-right">{val.toFixed(1)}</span>
-            </div>
+            <Slider
+              key={idx}
+              label={scaleLabel(idx)}
+              ariaLabel={`${scaleLabel(idx)} threshold`}
+              value={val}
+              min={0}
+              max={5}
+              step={0.1}
+              disabled={isRunning}
+              accent="sky"
+              format={(v) => v.toFixed(1)}
+              onChange={(v) => updateThreshold(idx, v)}
+            />
           ))}
+          <span className="text-[10px] text-zinc-500">{ZERO_THRESHOLD_NOTE}</span>
+          <span className="text-[10px] text-zinc-500">{SCALE_SIZE_NOTE}</span>
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -269,35 +279,55 @@ export default function WaveletPanel({
             )}
           </div>
           {layerBias.slice(0, numScales).map((val, idx) => (
-            <div key={idx} className="flex items-center gap-2">
-              <span className="text-[10px] text-zinc-500 w-24 truncate">
-                {scaleLabel(idx)}
-              </span>
-              <div className="flex-1">
-                <Slider
-                  label=""
-                  ariaLabel={`${scaleLabel(idx)} bias`}
-                  value={val}
-                  min={BIAS_MIN}
-                  max={BIAS_MAX}
-                  step={BIAS_STEP}
-                  disabled={isRunning}
-                  accent="sky"
-                  format={formatBias}
-                  onChange={(v) => updateBias(idx, v)}
-                />
-              </div>
-              <span className="text-[10px] font-mono text-zinc-300 w-10 text-right">{formatBias(val)}</span>
-            </div>
+            <Slider
+              key={idx}
+              label={scaleLabel(idx)}
+              ariaLabel={`${scaleLabel(idx)} bias`}
+              value={val}
+              min={BIAS_MIN}
+              max={BIAS_MAX}
+              step={BIAS_STEP}
+              disabled={isRunning}
+              accent="sky"
+              format={formatBias}
+              onChange={(v) => updateBias(idx, v)}
+            />
           ))}
           <span className="text-[10px] text-zinc-600">0 keeps the layer, positive sharpens, negative softens (-1 removes it).</span>
         </div>
 
-        <Toggle label="Soft threshold (linear)" checked={linear} disabled={isRunning} accent="sky" onChange={setLinear} />
+        <div className="flex flex-col gap-1.5">
+          <span id={`${thresholdingId}-label`} className="text-xs text-zinc-400">Thresholding</span>
+          <div
+            role="radiogroup"
+            aria-labelledby={`${thresholdingId}-label`}
+            aria-describedby={`${thresholdingId}-hint`}
+            data-testid="wavelet-thresholding"
+            className="flex items-center gap-4"
+          >
+            {THRESHOLDINGS.map((option) => (
+              <label key={option.value} className="flex items-center gap-1.5 text-xs text-zinc-300">
+                <input
+                  type="radio"
+                  name={thresholdingId}
+                  value={option.value}
+                  checked={softThreshold === option.soft}
+                  disabled={isRunning}
+                  data-testid={`wavelet-thresholding-${option.value}`}
+                  onChange={() => setSoftThreshold(option.soft)}
+                  className="accent-sky-400"
+                />
+                {option.label}
+              </label>
+            ))}
+          </div>
+          <div id={`${thresholdingId}-hint`} className="text-[10px] text-zinc-500 px-0.5">{THRESHOLDING_HINT}</div>
+        </div>
       </div>
 
-      <div title={disabledReason ?? busyTitle}>
-        <RunButton label="Run Noise Reduction" runningLabel="Denoising..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent="sky" onClick={handleRun} />
+      <MaskSelect {...runMask.select} busy={isRunning} />
+      <div title={disabledReason ?? maskReason ?? busyTitle}>
+        <RunButton label="Run Noise Reduction" runningLabel="Denoising..." running={isRunning} disabled={!canRun || blocked || !!disabledReason || !!maskReason} describedBy={describedByIds(disabledReason ? disabledReasonId : null, runNoteId, maskReason ? runMask.select.noteId : null)} accent="sky" onClick={handleRun} />
       </div>
 
       {isRunning && progress.active && (

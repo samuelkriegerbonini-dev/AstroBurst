@@ -28,9 +28,16 @@ export interface CompositePanelProps {
   compositeInput: CompositeInputView | null;
   onCompositeDone: (step: ChainStep, label: string, result: CompositeStepResult, callStf: DisplayStf) => void;
   fileName: string;
+  runNoteId?: string;
+  onRunLabelChange?: (label: string) => void;
 }
 
 export type CompositeNoticeProps = Pick<CompositePanelProps, "compositeMode" | "fileName">;
+
+export function describedByIds(...ids: (string | null | undefined)[]): string | undefined {
+  const present = ids.filter((id): id is string => !!id);
+  return present.length > 0 ? present.join(" ") : undefined;
+}
 
 export const COMPOSITE_RESTARTED_NOTICE =
   "The composite changed since the last step, so the processing chain restarted from the composite on screen.";

@@ -10,6 +10,8 @@ import {
 } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf, useCompositeActions } from "../../context/CompositeContext";
 import { useWizardCompositeDims } from "../../context/ComposeWizardContext";
+import { OverlayLayerKeyContext } from "../../context/OverlayLayerKeyContext";
+import { COMPOSITE_RUN_KEY } from "../../utils/compositeChain";
 import type { RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
 import { GRAY_LUT_RGBA, resolveTransferLimits, toDisplayTransfer } from "../../utils/displayTransfer";
 import { CANVAS_HINT_CLASS, CUBE_SPECTRUM_HINT, cubeSpectrumHintShown, histogramOnPath, sameGrid } from "../../utils/previewShell";
@@ -72,6 +74,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
   const isFileRgbView = rgbView?.kind === "file";
   const isRgbResult = rgbView?.kind === "result";
   const showComposite = rgbView !== null;
+  const overlayLayerKey = rgbView?.kind === "composite" ? COMPOSITE_RUN_KEY : null;
 
   const fileDims = file?.result?.dimensions ?? null;
   const wizardCompositeDims = useWizardCompositeDims();
@@ -271,29 +274,31 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
         )}
         {useGpu && rgbRawPixels ? (
           <div className="relative flex-1 min-h-0">
-            <GpuViewport
-              renderW={rgbRawPixels.width}
-              renderH={rgbRawPixels.height}
-              fitsW={compositeDims?.[0]}
-              fitsH={compositeDims?.[1]}
-              deepZoomOffered={isFileRgbView}
-              regionsEnabled={rgbRegions}
-              crosshairEnabled={rgbPixelReadout}
-              onMousePixel={rgbPixelReadout ? handleViewerMousePixel : undefined}
-              onPixelClick={rgbPixelReadout ? emitPixelClick : undefined}
-              onMouseLeave={clearMousePixel}
-              overlayCanvasRef={starOverlayRef}
-              original={isRgbResult ? heldOriginal : null}
-              label={isRgbResult ? displayed.label : null}
-            >
-              <GpuRgbRenderer
-                rgb={rgbRawPixels}
-                stfR={displayReferred ? IDENTITY_STF : compositeStfR}
-                stfG={displayReferred ? IDENTITY_STF : compositeStfG}
-                stfB={displayReferred ? IDENTITY_STF : compositeStfB}
-                linked={displayReferred ? true : compositeStfLinked}
-              />
-            </GpuViewport>
+            <OverlayLayerKeyContext.Provider value={overlayLayerKey}>
+              <GpuViewport
+                renderW={rgbRawPixels.width}
+                renderH={rgbRawPixels.height}
+                fitsW={compositeDims?.[0]}
+                fitsH={compositeDims?.[1]}
+                deepZoomOffered={isFileRgbView}
+                regionsEnabled={rgbRegions}
+                crosshairEnabled={rgbPixelReadout}
+                onMousePixel={rgbPixelReadout ? handleViewerMousePixel : undefined}
+                onPixelClick={rgbPixelReadout ? emitPixelClick : undefined}
+                onMouseLeave={clearMousePixel}
+                overlayCanvasRef={starOverlayRef}
+                original={isRgbResult ? heldOriginal : null}
+                label={isRgbResult ? displayed.label : null}
+              >
+                <GpuRgbRenderer
+                  rgb={rgbRawPixels}
+                  stfR={displayReferred ? IDENTITY_STF : compositeStfR}
+                  stfG={displayReferred ? IDENTITY_STF : compositeStfG}
+                  stfB={displayReferred ? IDENTITY_STF : compositeStfB}
+                  linked={displayReferred ? true : compositeStfLinked}
+                />
+              </GpuViewport>
+            </OverlayLayerKeyContext.Provider>
           </div>
         ) : (
           <div

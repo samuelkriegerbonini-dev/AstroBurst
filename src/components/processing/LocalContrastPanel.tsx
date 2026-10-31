@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useId } from "react";
 import { X } from "lucide-react";
 import { applyLheComposite, lheConfigOf, recordLhe } from "../../services/localContrast";
 import { useHistoryScope } from "../../hooks/useHistory";
@@ -11,9 +11,11 @@ import { useRenderContext } from "../../context/PreviewContext";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { chainHoldsOutput } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
-import { COMPOSITE_RESTARTED_NOTICE, unchangedFileClause } from "./compositeProps";
+import { COMPOSITE_RESTARTED_NOTICE, describedByIds, unchangedFileClause } from "./compositeProps";
 import type { CompositePanelProps } from "./compositeProps";
 import { Slider, Toggle, RunButton, ResultGrid, CompareView, ChainBanner, ErrorAlert, SectionHeader } from "../ui";
+import MaskSelect from "../masks/MaskSelect";
+import { useRunMask } from "../masks/runMask";
 import type { ProcessedFile } from "../../shared/types/fits.types";
 import { DEFAULT_LHE_CONFIG, LHE_LIMITS, LHE_PROGRESS_EVENT } from "../../shared/types/localContrast";
 import type { LheConfig, LheHistogramBits, LocalContrastResult } from "../../shared/types/localContrast";
@@ -38,6 +40,7 @@ interface LocalContrastPanelProps extends CompositePanelProps {
   fileKey?: string | null;
   disabledReason?: string | null;
   disabledReasonId?: string;
+  nonLinearNote?: string | null;
 }
 
 const ACCENT = "teal";
@@ -50,13 +53,16 @@ const ICON = (
   </svg>
 );
 
-export default function LocalContrastPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId }: LocalContrastPanelProps) {
+export default function LocalContrastPanel({ selectedFile, outputDir = "./output", onProcessingDone, chainedFrom, inputPreviewUrl, inputLabel, fileKey, compositeMode, compositeInput, onCompositeDone, fileName, disabledReason, disabledReasonId, runNoteId, nonLinearNote }: LocalContrastPanelProps) {
+  const inputNoteId = useId();
   const progress = useProgress(LHE_PROGRESS_EVENT);
   const resetProgress = progress.reset;
   const initial = useRerunInitial("local_contrast", lheConfigOf);
   const [config, setConfig] = useState<LheConfig>(initial?.params ?? DEFAULT_LHE_CONFIG);
   useRerunUpdates("local_contrast", initial, lheConfigOf, setConfig);
   const scope = useHistoryScope();
+  const runMask = useRunMask("local_contrast", scope, compositeMode);
+  const maskReason = runMask.blockedReason;
   const { running: isRunning, blocked, busyTitle, result: runResult, error, run } = useProcessingRun<LheRun>("lhe", compositeMode ? COMPOSITE_RUN_KEY : (fileKey ?? null));
   const { chain } = useRenderContext();
   const compositeChain = useCompositeChain();
@@ -71,9 +77,11 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
   }, []);
 
   const canRun = compositeMode ? compositeInput !== null : !!selectedFile?.path && !!scope;
+  const inputNote = canRun && !disabledReason ? nonLinearNote ?? null : null;
 
   const handleRun = useCallback(() => {
     const runConfig = config;
+    const mask = runMask.value;
     const snapshot = { kernelRadius: runConfig.kernelRadius, contrastLimit: runConfig.contrastLimit };
     if (compositeMode) {
       if (!compositeInput) return;
@@ -81,7 +89,7 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
       const displayStf = { r: compositeStfR, g: compositeStfG, b: compositeStfB, linked: compositeStfLinked };
       resetProgress();
       void run(async () => {
-        const res = await applyLheComposite(outputDir, runConfig, { chainInput: input.input, displayStf });
+        const res = await applyLheComposite(outputDir, runConfig, { chainInput: input.input, displayStf, mask });
         onCompositeDone("localContrast", "LHE", res, displayStf);
         return {
           ...snapshot,
@@ -101,12 +109,12 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
     const baseLabel = inputLabel ?? "Original";
     resetProgress();
     void run(async (ctx) => {
-      const res = await recordLhe(runScope, path, runConfig);
+      const res = await recordLhe(runScope, path, runConfig, mask);
       if (!ctx.inputUnchanged("localContrast")) throw new Error(INPUT_CHANGED_MESSAGE);
       await onProcessingDone?.(res);
       return { ...snapshot, res, resultUrl: bustPreviewUrl(res.previewUrl, Date.now()), baseUrl, baseLabel, chainRestarted: false };
     }, isCancelMessage).finally(resetProgress);
-  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, scope, outputDir, config, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
+  }, [compositeMode, compositeInput, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, selectedFile?.path, scope, outputDir, config, runMask.value, inputPreviewUrl, inputLabel, resetProgress, run, onProcessingDone, onCompositeDone]);
 
   return (
     <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
@@ -119,6 +127,11 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
       {compositeMode && (
         <div className="text-[10px] text-teal-300 bg-teal-900/20 border border-teal-800/30 rounded-lg px-3 py-1.5">
           Composite mode: equalizes the luminance of the stretched RGB composite and preserves hue{unchangedFileClause(fileName)}
+        </div>
+      )}
+      {inputNote && (
+        <div id={inputNoteId} role="note" data-non-linear-input="" className="text-[10px] text-amber-300 bg-amber-900/20 border border-amber-800/30 rounded-lg px-3 py-1.5">
+          {inputNote}
         </div>
       )}
 
@@ -150,8 +163,9 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
         <Toggle label="Circular Kernel" checked={config.circular} disabled={isRunning} accent={ACCENT} onChange={(v) => update("circular", v)} />
       </div>
 
-      <div title={disabledReason ?? busyTitle}>
-        <RunButton label="Run Local Contrast" runningLabel="Equalizing..." running={isRunning} disabled={!canRun || blocked || !!disabledReason} describedBy={disabledReason ? disabledReasonId : undefined} accent={ACCENT} onClick={handleRun} />
+      <MaskSelect {...runMask.select} busy={isRunning} />
+      <div title={disabledReason ?? maskReason ?? busyTitle}>
+        <RunButton label="Run Local Contrast" runningLabel="Equalizing..." running={isRunning} disabled={!canRun || blocked || !!disabledReason || !!maskReason} describedBy={describedByIds(disabledReason ? disabledReasonId : null, runNoteId, inputNote ? inputNoteId : null, maskReason ? runMask.select.noteId : null)} accent={ACCENT} onClick={handleRun} />
       </div>
 
       {isRunning && progress.active && (

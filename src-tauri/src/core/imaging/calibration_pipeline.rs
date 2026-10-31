@@ -586,6 +586,16 @@ pub fn run_batch_pipeline_cancellable(
     config: &BatchPipelineConfig,
     cancelled: CancelCheck,
 ) -> Result<BatchPipelineResult, String> {
+    run_batch_pipeline_with_rejection(channels, masters, config, &config.stack.rejection_params(), cancelled)
+}
+
+pub fn run_batch_pipeline_with_rejection(
+    channels: Vec<ChannelInput>,
+    masters: &CalibrationMasters,
+    config: &BatchPipelineConfig,
+    rejection: &RejectionParams,
+    cancelled: CancelCheck,
+) -> Result<BatchPipelineResult, String> {
     if channels.is_empty() {
         return Err("No channels provided".into());
     }
@@ -739,10 +749,10 @@ pub fn run_batch_pipeline_cancellable(
             registered
         };
 
-        check_percentile_window(normalized[0].view(), normalized.len(), &config.stack.rejection_params())
+        check_percentile_window(normalized[0].view(), normalized.len(), rejection)
             .map_err(|e| format!("Channel '{}': {:#}", channel.label, e))?;
         let (mut stacked, rejection_counts) =
-            reject_and_combine_stack(&normalized, &config.stack, cancelled).ok_or_else(cancelled_error)?;
+            reject_and_combine_stack(&normalized, rejection, cancelled).ok_or_else(cancelled_error)?;
         stacked.par_mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
 
         let mean_val = stacked.iter().map(|&v| v as f64).sum::<f64>() / stacked.len() as f64;
@@ -812,14 +822,35 @@ fn unregistered_reason(result: &crate::core::alignment::affine::AffineAlignResul
     }
 }
 
-fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<f32>> {
-    let find = |label: &str| -> Option<&Array2<f32>> {
-        masters.iter().find(|(l, _)| l.eq_ignore_ascii_case(label)).map(|(_, arr)| arr)
-    };
+struct PreviewPalette {
+    name: &'static str,
+    sources: [&'static str; 3],
+    luminance: bool,
+}
 
-    let r = find("R")?;
-    let g = find("G")?;
-    let b = find("B")?;
+static PREVIEW_PALETTES: [PreviewPalette; 3] = [
+    PreviewPalette { name: "RGB", sources: ["R", "G", "B"], luminance: true },
+    PreviewPalette { name: "SHO", sources: ["SII", "Ha", "OIII"], luminance: false },
+    PreviewPalette { name: "HOO", sources: ["Ha", "OIII", "OIII"], luminance: false },
+];
+
+fn find_master<'a>(masters: &'a [(String, Array2<f32>)], label: &str) -> Option<&'a Array2<f32>> {
+    masters.iter().find(|(l, _)| l.eq_ignore_ascii_case(label)).map(|(_, arr)| arr)
+}
+
+fn preview_sources(masters: &[(String, Array2<f32>)]) -> Option<(&'static PreviewPalette, [&Array2<f32>; 3])> {
+    PREVIEW_PALETTES.iter().find_map(|palette| {
+        let [r, g, b] = palette.sources.map(|label| find_master(masters, label));
+        Some((palette, [r?, g?, b?]))
+    })
+}
+
+pub fn rgb_preview_palette(masters: &[(String, Array2<f32>)]) -> Option<&'static str> {
+    preview_sources(masters).map(|(palette, _)| palette.name)
+}
+
+fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<f32>> {
+    let (palette, [r, g, b]) = preview_sources(masters)?;
     let (h, w) = r.dim();
 
     if g.dim() != (h, w) || b.dim() != (h, w) {
@@ -849,7 +880,8 @@ fn compose_rgb_from_masters(masters: &[(String, Array2<f32>)]) -> Option<Array3<
         return Some(Array3::from_shape_vec((min_h, min_w, 3), pixels).unwrap());
     }
 
-    let (r_norm, g_norm, b_norm) = match find("L") {
+    let luminance = if palette.luminance { find_master(masters, "L") } else { None };
+    let (r_norm, g_norm, b_norm) = match luminance {
         Some(lum) if lum.dim() == (h, w) => {
             let (r_n, g_n, b_n) = stretch_rgb_shared(r, g, b);
             let l_n = stretch_mono_robust(lum);
@@ -1016,14 +1048,13 @@ fn normalize_frames(frames: &[Array2<f32>], input_index: &[usize], label: &str) 
 
 fn reject_and_combine_stack(
     frames: &[Array2<f32>],
-    config: &BatchStackConfig,
+    params: &RejectionParams,
     cancelled: CancelCheck,
 ) -> Option<(Array2<f32>, Vec<usize>)> {
     let (h, w) = frames[0].dim();
     let n = frames.len();
     let mut result = Array2::<f32>::zeros((h, w));
     let mut rejection_counts = vec![0usize; n];
-    let params = config.rejection_params();
 
     let frame_slices: Vec<&[f32]> = frames.iter()
         .map(|f| f.as_slice().expect("contiguous"))
@@ -1051,7 +1082,7 @@ fn reject_and_combine_stack(
                 }
             }
 
-            let out = reject_and_combine_with(&mut samples, None, &params, &mut scratch);
+            let out = reject_and_combine_with(&mut samples, None, params, &mut scratch);
             for rejected in &samples[out.kept..] {
                 local_rejected[rejected.frame as usize] += 1;
             }
@@ -1127,6 +1158,67 @@ mod tests {
         assert!(rgb[[30, 30, 0]] >= nr, "star not at or above nebula");
     }
 
+    fn lanes(masters: &[(&str, &Array2<f32>)]) -> Vec<(String, Array2<f32>)> {
+        masters.iter().map(|(label, master)| (label.to_string(), (*master).clone())).collect()
+    }
+
+    fn interleaved_bits(channels: (Array2<f32>, Array2<f32>, Array2<f32>)) -> Option<Array3<u32>> {
+        let (r, g, b) = channels;
+        Some(Array3::from_shape_fn((r.nrows(), r.ncols(), 3), |(y, x, c)| [&r, &g, &b][c][[y, x]].to_bits()))
+    }
+
+    fn composed_bits(masters: &[(String, Array2<f32>)]) -> Option<Array3<u32>> {
+        compose_rgb_from_masters(masters).map(|rgb| rgb.mapv(f32::to_bits))
+    }
+
+    fn ramp(slope: f32) -> Array2<f32> {
+        Array2::from_shape_fn((40, 40), |(y, x)| 1.0 + slope * (x as f32 + 0.5 * y as f32))
+    }
+
+    #[test]
+    fn narrowband_lanes_give_an_sho_preview() {
+        let sii = ramp(0.05);
+        let ha = ramp(0.2);
+        let oiii = ramp(0.1);
+
+        let sho = interleaved_bits(stretch_rgb_shared(&sii, &ha, &oiii));
+        assert_eq!(composed_bits(&lanes(&[("Ha", &ha), ("OIII", &oiii), ("SII", &sii)])), sho);
+        assert_eq!(composed_bits(&lanes(&[("sii", &sii), ("HA", &ha), ("oiii", &oiii)])), sho);
+        assert_eq!(composed_bits(&lanes(&[("L", &ha), ("Ha", &ha), ("OIII", &oiii), ("SII", &sii)])), sho);
+
+        let hoo = interleaved_bits(stretch_rgb_shared(&ha, &oiii, &oiii));
+        assert_eq!(composed_bits(&lanes(&[("Ha", &ha), ("OIII", &oiii)])), hoo);
+        assert_ne!(hoo, sho);
+
+        for partial in [lanes(&[("Ha", &ha)]), lanes(&[("SII", &sii), ("OIII", &oiii)]), lanes(&[("Mono", &ha)])] {
+            assert_eq!(composed_bits(&partial), None);
+        }
+    }
+
+    #[test]
+    fn rgb_lane_preview_is_bit_identical() {
+        let r = master_with_nebula(1.0, 2.0, 131.0);
+        let g = master_with_nebula(1.0, 2.0, 262.0);
+        let b = master_with_nebula(1.0, 2.0, 50.0);
+        let l = ramp(0.1);
+        let (rn, gn, bn) = stretch_rgb_shared(&r, &g, &b);
+
+        let rgb = interleaved_bits((rn.clone(), gn.clone(), bn.clone()));
+        assert_eq!(composed_bits(&lanes(&[("R", &r), ("G", &g), ("B", &b)])), rgb);
+        assert_eq!(composed_bits(&lanes(&[("R", &r), ("G", &g), ("B", &b), ("Ha", &l), ("OIII", &b), ("SII", &r)])), rgb);
+        let small_l = l.slice(ndarray::s![..20, ..20]).to_owned();
+        assert_eq!(composed_bits(&lanes(&[("L", &small_l), ("R", &r), ("G", &g), ("B", &b)])), rgb);
+
+        let lrgb = interleaved_bits(apply_luminance_rgb(&rn, &gn, &bn, &stretch_mono_robust(&l)));
+        assert_ne!(lrgb, rgb);
+        assert_eq!(composed_bits(&lanes(&[("L", &l), ("R", &r), ("G", &g), ("B", &b)])), lrgb);
+        assert_eq!(composed_bits(&lanes(&[("l", &l), ("r", &r), ("g", &g), ("b", &b), ("Ha", &l), ("OIII", &b), ("SII", &r)])), lrgb);
+
+        let crop = |master: &Array2<f32>| master.slice(ndarray::s![..30, ..36]).to_owned();
+        let cropped = interleaved_bits(stretch_rgb_shared(&crop(&r), &crop(&g), &crop(&b)));
+        assert_eq!(composed_bits(&lanes(&[("R", &r), ("G", &crop(&g)), ("B", &b), ("L", &l)])), cropped);
+    }
+
     fn frames_1x1(values: &[f32]) -> Vec<Array2<f32>> {
         values.iter().map(|&v| Array2::from_elem((1, 1), v)).collect()
     }
@@ -1135,7 +1227,7 @@ mod tests {
     fn sigma_clip_rejects_lone_outlier_over_tied_background() {
         let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 1000.0, 60000.0]);
         let config = BatchStackConfig { normalize_before_stack: false, ..Default::default() };
-        let (stacked, rejections) = reject_and_combine_stack(&frames, &config, &|| false).unwrap();
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config.rejection_params(), &|| false).unwrap();
         assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3, "outlier leaked: {}", stacked[[0, 0]]);
         assert_eq!(rejections, vec![0, 0, 0, 0, 1]);
     }
@@ -1144,7 +1236,7 @@ mod tests {
     fn sigma_clip_keeps_quantized_noise_around_tied_background() {
         let frames = frames_1x1(&[1000.0, 1000.0, 1000.0, 999.0, 1001.0]);
         let config = BatchStackConfig { normalize_before_stack: false, ..Default::default() };
-        let (stacked, rejections) = reject_and_combine_stack(&frames, &config, &|| false).unwrap();
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config.rejection_params(), &|| false).unwrap();
         assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3);
         assert_eq!(rejections, vec![0, 0, 0, 0, 0]);
     }
@@ -1166,7 +1258,7 @@ mod tests {
             combine: CombineMethod::Median,
             ..Default::default()
         };
-        let (stacked, rejections) = reject_and_combine_stack(&frames, &config, &|| false).unwrap();
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config.rejection_params(), &|| false).unwrap();
         assert!((stacked[[0, 0]] - 1000.0).abs() < 1e-3, "outlier leaked: {}", stacked[[0, 0]]);
         assert_eq!(rejections, vec![0, 0, 0, 0, 1]);
 
@@ -1177,7 +1269,7 @@ mod tests {
             combine: CombineMethod::Median,
             ..Default::default()
         };
-        let (stacked, rejections) = reject_and_combine_stack(&frames, &config, &|| false).unwrap();
+        let (stacked, rejections) = reject_and_combine_stack(&frames, &config.rejection_params(), &|| false).unwrap();
         assert_eq!(stacked[[0, 0]], 3.0);
         assert_eq!(rejections, vec![0; 5]);
     }
@@ -1602,6 +1694,75 @@ mod tests {
 
         let err = run_batch_pipeline_cancellable(vec![three_frame_channel()], &masters, &config, &|| true).unwrap_err();
         assert!(err.to_lowercase().contains("cancel"), "{err}");
+    }
+
+    type ResultBits = (Vec<(String, Array2<u32>)>, Option<Array3<u32>>, serde_json::Value);
+
+    fn result_bits(result: &BatchPipelineResult) -> ResultBits {
+        let masters = result.master_channels.iter().map(|(label, master)| (label.clone(), master.mapv(f32::to_bits))).collect();
+        (masters, result.rgb.as_ref().map(|rgb| rgb.mapv(f32::to_bits)), serde_json::to_value(&result.stats).unwrap())
+    }
+
+    fn outlier_channel(label: &str, seed: u64) -> ChannelInput {
+        let lights: Vec<Array2<f32>> = (0..7u64)
+            .map(|i| {
+                let mut light = seeded_gaussian(24, 24, 3.0, seed + i) + (1000.0 + 4.0 * i as f32);
+                if i == 2 {
+                    light[[3, 4]] = 60000.0;
+                }
+                if i == 5 {
+                    light[[10, 10]] = 0.0;
+                }
+                light
+            })
+            .collect();
+        ChannelInput { label: label.into(), ..light_channel(lights) }
+    }
+
+    fn sx02_levels() -> ChannelInput {
+        light_channel([100.0f32, 101.0, 102.0, 103.0, 104.0, 1000.0, 2000.0].iter().map(|&v| Array2::from_elem((8, 8), v)).collect())
+    }
+
+    #[test]
+    fn cancellable_entry_equals_the_rejection_entry_with_default_params() {
+        let none = CalibrationMasters::default();
+        let rgb = || vec![outlier_channel("R", 10), outlier_channel("G", 20), outlier_channel("B", 30)];
+        let methods = [
+            RejectionMethod::None,
+            RejectionMethod::SigmaClip,
+            RejectionMethod::WinsorizedSigmaClip,
+            RejectionMethod::LinearFitClip,
+            RejectionMethod::PercentileClip,
+            RejectionMethod::MinMax,
+        ];
+        for rejection in methods {
+            for combine in [CombineMethod::Mean, CombineMethod::Median] {
+                let config = BatchPipelineConfig {
+                    stack: BatchStackConfig { rejection, combine, ..Default::default() },
+                    align: false,
+                    ..Default::default()
+                };
+                let cancellable = run_batch_pipeline_cancellable(rgb(), &none, &config, &never_cancelled).unwrap();
+                let defaults = config.stack.rejection_params();
+                let with_rejection = run_batch_pipeline_with_rejection(rgb(), &none, &config, &defaults, &never_cancelled).unwrap();
+                assert_eq!(result_bits(&cancellable), result_bits(&with_rejection), "{rejection:?} {combine:?}");
+            }
+        }
+
+        let min_max = plain_stack(RejectionMethod::MinMax, false);
+        let one_one = run_batch_pipeline_cancellable(vec![sx02_levels()], &none, &min_max, &never_cancelled).unwrap();
+        assert!(one_one.master_channels[0].1.iter().all(|&v| v == 282.0), "{:?}", one_one.master_channels[0].1);
+        let two_two = RejectionParams { minmax_low: 2, minmax_high: 2, ..min_max.stack.rejection_params() };
+        let trimmed = run_batch_pipeline_with_rejection(vec![sx02_levels()], &none, &min_max, &two_two, &never_cancelled).unwrap();
+        assert!(trimmed.master_channels[0].1.iter().all(|&v| v == 103.0), "{:?}", trimmed.master_channels[0].1);
+        assert_eq!(trimmed.stats.channels[0].lights_after_rejection, vec![64, 64, 0, 0, 0, 64, 64]);
+
+        let percentile = plain_stack(RejectionMethod::PercentileClip, false);
+        let pedestal = || light_channel((0..5).map(|i| seeded_gaussian(64, 64, 1.0, 90 + i) + 1000.0).collect());
+        assert!(run_batch_pipeline_cancellable(vec![pedestal()], &none, &percentile, &never_cancelled).is_ok());
+        let narrow = RejectionParams { percentile_low: 0.0001, percentile_high: 0.0001, ..percentile.stack.rejection_params() };
+        let err = run_batch_pipeline_with_rejection(vec![pedestal()], &none, &percentile, &narrow, &never_cancelled).unwrap_err();
+        assert!(err.starts_with("Channel 'L': Percentile clipping keeps samples within 0.01% below and 0.01% above"), "{err}");
     }
 
     fn blob_light(cy: f32, cx: f32) -> Array2<f32> {

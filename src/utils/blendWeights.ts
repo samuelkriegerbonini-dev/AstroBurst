@@ -1,5 +1,5 @@
-import type { BlendWeight, FrequencyBin } from "./wizard";
-import { REUSABLE_BIN_IDS } from "./channelMapping";
+import { effectiveBinFiles, fileFilterBand, type BlendWeight, type FrequencyBin, type WizardState } from "./wizard";
+import { COLOR_BIN_IDS, REUSABLE_BIN_IDS, type ChannelSource } from "./channelMapping";
 
 export const CANONICAL_WAVELENGTH: Record<string, number> = {
   sii: 673, ha: 656, nii: 658, oiii: 501,
@@ -128,17 +128,106 @@ function remapPresetByWavelength(presetWeights: BlendWeight[], filledBins: Frequ
     .map((pw, i) => ({ channelId: sortedBins[i].id, r: pw.r, g: pw.g, b: pw.b }));
 }
 
+interface PresetAttempt {
+  rows: BlendWeight[];
+  resolved: boolean;
+}
+
+function presetAttempt(preset: { weights: BlendWeight[] }, filledBins: FrequencyBin[]): PresetAttempt {
+  const exact = weightsForFilledBins(preset.weights, filledBins);
+  if (blendWeightsCoverAllColumns(exact)) return { rows: exact, resolved: true };
+
+  const spectral = spectralBins(filledBins);
+  if (spectral.length < 2) return { rows: exact, resolved: false };
+
+  const remapped = remapPresetByWavelength(preset.weights, spectral);
+  return { rows: remapped, resolved: remapped.length >= 2 && blendWeightsCoverAllColumns(remapped) };
+}
+
 export function resolvePresetWeights(
   preset: { weights: BlendWeight[] },
   filledBins: FrequencyBin[],
 ): BlendWeight[] | null {
-  const exact = weightsForFilledBins(preset.weights, filledBins);
-  if (blendWeightsCoverAllColumns(exact)) return exact;
+  const attempt = presetAttempt(preset, filledBins);
+  return attempt.resolved ? attempt.rows : null;
+}
 
-  const spectral = spectralBins(filledBins);
-  if (spectral.length < 2) return null;
+export type PresetPlan =
+  | { available: true; weights: BlendWeight[]; mapping: string; title: string }
+  | { available: false; reason: string };
 
-  const remapped = remapPresetByWavelength(preset.weights, spectral);
-  if (remapped.length < 2 || !blendWeightsCoverAllColumns(remapped)) return null;
-  return remapped;
+const AXIS_COLUMNS: readonly (readonly [keyof ColorAxes, BlendColumn])[] = [["r", "R"], ["g", "G"], ["b", "B"]];
+
+function joinWithAnd(names: readonly string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+function fedAxes(row: ColorAxes): (readonly [keyof ColorAxes, BlendColumn])[] {
+  return AXIS_COLUMNS.filter(([axis]) => row[axis] > 0);
+}
+
+function binLabel(filledBins: FrequencyBin[], channelId: string): string {
+  return filledBins.find((b) => b.id === channelId)?.shortLabel ?? channelId;
+}
+
+export type PresetBinNames = Readonly<Record<string, string>>;
+
+const COLOR_BINS: ReadonlySet<string> = new Set(COLOR_BIN_IDS);
+
+function sharedFilterCode(state: WizardState, bin: FrequencyBin, files: ReadonlyMap<string, ChannelSource>): string | null {
+  const codes = new Set(effectiveBinFiles(state, bin).map((path) => fileFilterBand(files.get(path), path)?.code ?? null));
+  if (codes.size !== 1) return null;
+  const [code] = codes;
+  return code;
+}
+
+export function presetBinNames(state: WizardState, files: readonly (ChannelSource & { path: string })[]): PresetBinNames {
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  return Object.fromEntries(
+    state.bins
+      .filter((bin) => bin.files.length > 0)
+      .map((bin) => [bin.id, (COLOR_BINS.has(bin.id) ? sharedFilterCode(state, bin, byPath) : null) ?? bin.shortLabel]),
+  );
+}
+
+function presetMapping(rows: BlendWeight[], filledBins: FrequencyBin[], nameOf: (channelId: string) => string): string {
+  const fed = rows.filter((row) => fedAxes(row).length > 0);
+  const used = new Set(fed.map((row) => row.channelId));
+  const applied = fed.map((row) => `${nameOf(row.channelId)}→${fedAxes(row).map(([, column]) => column).join("+")}`);
+  const unused = spectralBins(filledBins).filter((b) => !used.has(b.id)).map((b) => `${nameOf(b.id)} unused`);
+  return [...applied, ...unused].join(", ");
+}
+
+function presetWeightsTitle(rows: BlendWeight[], nameOf: (channelId: string) => string): string {
+  const terms = rows
+    .filter((row) => fedAxes(row).length > 0)
+    .map((row) => `${nameOf(row.channelId)} ${fedAxes(row).map(([axis, column]) => `${row[axis].toFixed(2)} ${column}`).join(" + ")}`);
+  return `Fixed weights: ${terms.join("; ")}`;
+}
+
+function presetBlockReason(filledBins: FrequencyBin[], rows: BlendWeight[], nameOf: (channelId: string) => string): string {
+  const names = spectralBins(filledBins)
+    .sort((a, b) => binWavelength(b) - binWavelength(a))
+    .map((b) => nameOf(b.id));
+  const gap = `${joinWithAnd(names)} cannot fill ${joinWithAnd(emptyBlendColumns(rows))}`;
+  if (names.length === 1) return `needs a second channel: ${gap}`;
+  if (names.length === 2) return `needs a third channel: ${gap}`;
+  return gap;
+}
+
+export function presetPlan(
+  preset: { weights: BlendWeight[] },
+  filledBins: FrequencyBin[],
+  binNames: PresetBinNames = {},
+): PresetPlan {
+  const nameOf = (channelId: string) => binNames[channelId] ?? binLabel(filledBins, channelId);
+  const attempt = presetAttempt(preset, filledBins);
+  if (!attempt.resolved) return { available: false, reason: presetBlockReason(filledBins, attempt.rows, nameOf) };
+  return {
+    available: true,
+    weights: attempt.rows,
+    mapping: presetMapping(attempt.rows, filledBins, nameOf),
+    title: presetWeightsTitle(attempt.rows, nameOf),
+  };
 }

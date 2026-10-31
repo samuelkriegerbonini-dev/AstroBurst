@@ -759,7 +759,7 @@ mod tests {
             kernel_radius: 3,
             ..crate::core::imaging::local_contrast::LheConfig::default()
         };
-        let run = crate::cmd::processing::lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), config, None, None).await;
+        let run = crate::cmd::processing::lhe_composite_cmd(dir.path().to_str().unwrap().to_string(), config, None, None, None).await;
         let held_after_run = input.as_ref().is_some_and(|w| w.upgrade().is_some());
         clear_composite();
         let held_after_clear = input.as_ref().is_some_and(|w| w.upgrade().is_some());

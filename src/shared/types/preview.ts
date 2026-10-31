@@ -1,5 +1,5 @@
 import type { DisplaySettings } from "./display";
-import type { OutputDomain } from "./ops";
+import type { OpSpec, OutputDomain } from "./ops";
 
 export type DisplayHint = Partial<Pick<DisplaySettings, "colormap" | "invert" | "symmetric" | "centre" | "stretch" | "limits">>;
 
@@ -12,6 +12,7 @@ export interface ChainEntry {
   previewUrl: string | null;
   dimensions: [number, number] | null;
   psfUsed?: boolean;
+  op?: OpSpec;
 }
 
 export interface ChainBase {

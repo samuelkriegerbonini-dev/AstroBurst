@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use crate::cmd::common::{blocking_cmd, resolve_output_dir, MAX_PREVIEW_DIM};
 use crate::cmd::helpers::{self, CompositeSnapshot, CompositeTriplet};
+use crate::cmd::masks::composite_spec;
 use crate::cmd::pixelmath::{evaluate_per_channel, PixelMathSlot, RES_NON_FINITE_COUNT};
 use crate::cmd::processing::{background_config, estimated_kernel, DeconvPsf, COMPOSITE_STRETCH_REQUIRED, RES_DBE_REJECTED_COUNT};
 use crate::cmd::psf::{psf_config, psf_result_json};
@@ -18,15 +19,18 @@ use crate::core::imaging::psf_estimation::estimate_psf;
 use crate::core::imaging::stats::{combine_channel_stats, compute_image_stats, is_valid_pixel};
 use crate::core::imaging::stf::{auto_stf, make_stf_u8_fn, AutoStfConfig};
 use crate::core::imaging::wavelet::{check_layer_bias, wavelet_denoise, WaveletConfig};
+use crate::core::mask::{blend, check_dims, MaskSpec};
+use crate::core::ops::OpError;
 use crate::core::pixelmath::OutputOptions;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{
     BACKGROUND_MODEL_POLYNOMIAL, BACKGROUND_MODEL_SPLINE, CHAIN_INPUT_BASE, CHAIN_STEP_BACKGROUND,
     CHAIN_STEP_DECONV, CHAIN_STEP_DENOISE, CHAIN_STEP_LOCAL_CONTRAST, CHAIN_STEP_MASKED_STRETCH,
     CHAIN_STEP_PIXEL_MATH, CHAIN_STEP_STRETCH, DISPLAYED_LINEAR, DISPLAYED_STRETCHED, DISPLAYED_TONED,
-    EVENT_DECONV_PROGRESS, EVENT_WAVELET_PROGRESS, PROGRESS_EVENT, PROGRESS_STEPS, RES_B, RES_BASE_PNG_PATH,
-    RES_CHAIN_GENERATION, RES_CHAIN_INPUT, RES_CHAIN_RESTARTED, RES_CONVERGENCE, RES_DIMENSIONS, RES_DISPLAYED,
-    RES_ELAPSED_MS, RES_G, RES_ITERATIONS_RUN, RES_LINKED, RES_LIVE_GENERATION, RES_MODEL_PNG_PATH,
+    EVENT_DECONV_PROGRESS, EVENT_WAVELET_PROGRESS, PROGRESS_EVENT, PROGRESS_STEPS, RES_B, RES_BASE_DISPLAYED,
+    RES_BASE_PNG_PATH, RES_CHAIN_GENERATION, RES_CHAIN_INPUT, RES_CHAIN_RESTARTED, RES_CONVERGENCE, RES_DIMENSIONS,
+    RES_DISPLAYED, RES_ELAPSED_MS, RES_G, RES_ITERATIONS_RUN, RES_LINKED, RES_LIVE_DISPLAYED, RES_LIVE_GENERATION,
+    RES_MODEL_PNG_PATH,
     RES_NOISE_ESTIMATE, RES_PNG_PATH, RES_PSF_SOURCE, RES_R, RES_RESTORED, RES_RMS_RESIDUAL, RES_SAMPLE_COUNT,
     RES_SCALES_PROCESSED, RES_STATS, RES_STEPS, RES_STF, RES_WARNINGS,
 };
@@ -219,6 +223,63 @@ pub(crate) fn key_luminance(key: &CompositeTriplet) -> anyhow::Result<Array2<f32
     Ok(out)
 }
 
+fn refuse_step_mask(step: ChainStep, mask: Option<&MaskSpec>) -> Result<(), OpError> {
+    match (step, mask) {
+        (ChainStep::Background | ChainStep::MaskedStretch, Some(_)) => Err(OpError::MaskNotSupported(step.name())),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn refuse_unchained_mask(step: ChainStep, mask: Option<&MaskSpec>) -> anyhow::Result<()> {
+    refuse_step_mask(step, mask)?;
+    if mask.is_some() {
+        bail!("{} takes a mask only as a composite chain step", step.name());
+    }
+    Ok(())
+}
+
+fn composite_mask(state: &CompositeSnapshot, mask: &MaskSpec) -> anyhow::Result<Array2<f32>> {
+    let luminance = key_luminance(&state.key)?;
+    let raster = mask.rasterize(&[&luminance])?;
+    check_dims(mask.recipe.kind(), raster.dim(), luminance.dim())?;
+    Ok(raster)
+}
+
+pub(crate) fn three_planes(planes: Vec<Array2<f32>>) -> anyhow::Result<[Array2<f32>; 3]> {
+    <[Array2<f32>; 3]>::try_from(planes).map_err(|planes| anyhow!("expected three channels, got {}", planes.len()))
+}
+
+fn blended(base: [&Array2<f32>; 3], processed: [&Array2<f32>; 3], mask: &Array2<f32>) -> anyhow::Result<[Array2<f32>; 3]> {
+    let [r, g, b] = [0, 1, 2].map(|c| blend(base[c], processed[c], mask));
+    Ok([r?, g?, b?])
+}
+
+fn masked_state(
+    step: ChainStep,
+    input: &CompositeSnapshot,
+    output: &CompositeSnapshot,
+    blend_base: Option<&[Array2<f32>; 3]>,
+    mask: &Array2<f32>,
+) -> anyhow::Result<CompositeSnapshot> {
+    let given = blend_base.map(<[Array2<f32>; 3]>::each_ref);
+    let tier = displayed_tier(output);
+    let processed = plane_refs(tier_planes(output, tier));
+    Ok(match tier {
+        DisplayedTier::Linear => linear_state(input, blended(given.unwrap_or_else(|| key_planes(input)), processed, mask)?),
+        DisplayedTier::Stretched => {
+            let base = given.ok_or_else(|| anyhow!("{} gave no blend base for its mask", step.name()))?;
+            stretched_state(input, blended(base, processed, mask)?)
+        }
+        DisplayedTier::Toned => {
+            let base = match given {
+                Some(base) => base,
+                None => contrast_planes(input)?,
+            };
+            toned_state(input, blended(base, processed, mask)?)
+        }
+    })
+}
+
 #[derive(Default)]
 struct ChainState {
     generation: Option<u64>,
@@ -290,11 +351,13 @@ pub(crate) struct ChainCall {
     pub output_dir: String,
     pub chain_input: String,
     pub display_stf: Option<DisplayStf>,
+    pub mask: Option<MaskSpec>,
 }
 
 pub(crate) struct StepOutput {
     pub state: CompositeSnapshot,
     pub extras: Value,
+    pub blend_base: Option<[Array2<f32>; 3]>,
 }
 
 fn now_ms() -> u128 {
@@ -419,17 +482,23 @@ struct Committed {
     generation: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_step(
     step: ChainStep,
     input: &CompositeSnapshot,
+    mask: Option<&Array2<f32>>,
     expected: Option<u64>,
     linked: bool,
     output_dir: &str,
     run: impl FnOnce(&CompositeSnapshot, &str) -> anyhow::Result<StepOutput>,
     produced: &mut Vec<String>,
 ) -> anyhow::Result<Committed> {
-    let StepOutput { state, extras } = run(input, output_dir)?;
+    let StepOutput { state, extras, blend_base } = run(input, output_dir)?;
     produced.extend(extras[RES_MODEL_PNG_PATH].as_str().map(str::to_string));
+    let state = match mask {
+        Some(mask) => masked_state(step, input, &state, blend_base.as_ref(), mask)?,
+        None => state,
+    };
     let (png_path, displayed, stf) = render_step(&state, step, linked, output_dir)?;
     produced.push(png_path.clone());
     let generation = helpers::commit_composite(&state, expected)?;
@@ -444,6 +513,7 @@ pub(crate) fn run_chain_step(
     let t0 = Instant::now();
     let output_dir = resolve_output_dir(&call.output_dir)?;
     let requested = ChainInput::parse(&call.chain_input, step)?;
+    refuse_step_mask(step, call.mask.as_ref())?;
     let mut chain = lock_chain();
     let live = helpers::composite_generation();
     let held = if chain.is_valid(live) { chain.snapshot(requested).cloned() } else { None };
@@ -455,6 +525,7 @@ pub(crate) fn run_chain_step(
             (base.clone(), ChainInput::Base, Some(generation), Some((base, restarted)))
         }
     };
+    let mask = call.mask.as_ref().map(|mask| composite_mask(&input, mask)).transpose()?;
     let base_png = captured
         .as_ref()
         .map(|(base, _)| render_base(base, call.display_stf.as_ref(), &output_dir))
@@ -463,7 +534,7 @@ pub(crate) fn run_chain_step(
     let linked = call.display_stf.map_or(true, |d| d.linked);
 
     let mut produced: Vec<String> = base_png.iter().cloned().collect();
-    let committed = commit_step(step, &input, expected, linked, &output_dir, run, &mut produced);
+    let committed = commit_step(step, &input, mask.as_ref(), expected, linked, &output_dir, run, &mut produced);
     let Committed { state, extras, png_path, displayed, stf, generation } = match committed {
         Ok(committed) => committed,
         Err(e) => {
@@ -483,6 +554,7 @@ pub(crate) fn run_chain_step(
     let common = json!({
         RES_PNG_PATH: png_path,
         RES_BASE_PNG_PATH: base_png,
+        RES_BASE_DISPLAYED: chain.base.as_ref().map(|base| displayed_tier(base).name()),
         RES_DIMENSIONS: [cols, rows],
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         RES_CHAIN_GENERATION: generation,
@@ -595,7 +667,7 @@ fn background_step(
         RES_RMS_RESIDUAL: [r.rms_residual, g.rms_residual, b.rms_residual],
         RES_DBE_REJECTED_COUNT: rejected,
     });
-    Ok(StepOutput { state: linear_state(input, [r.corrected, g.corrected, b.corrected]), extras })
+    Ok(StepOutput { state: linear_state(input, [r.corrected, g.corrected, b.corrected]), extras, blend_base: None })
 }
 
 #[tauri::command]
@@ -611,13 +683,15 @@ pub async fn composite_background_cmd(
     iterations: usize,
     mode: String,
     dbe: Option<DbeConfig>,
+    mask: Option<Value>,
 ) -> Result<Value, String> {
     let progress = ProgressHandle::new(&app, PROGRESS_EVENT, PROGRESS_STEPS as u64);
 
     blocking_cmd!({
+        let mask = composite_spec(mask)?;
         let model = background_model(&model, grid_size, poly_degree, sigma_clip, iterations, &mode, dbe)?;
         let parts = channel_parts(&progress);
-        let call = ChainCall { output_dir, chain_input, display_stf: Some(display_stf) };
+        let call = ChainCall { output_dir, chain_input, display_stf: Some(display_stf), mask };
         run_chain_step(ChainStep::Background, &call, |input, dir| {
             background_step(input, &model, parts.each_ref().map(Some), dir)
         })
@@ -634,7 +708,7 @@ fn denoise_step(
         RES_SCALES_PROCESSED: r.scales_processed,
         RES_NOISE_ESTIMATE: [r.noise_estimate, g.noise_estimate, b.noise_estimate],
     });
-    Ok(StepOutput { state: linear_state(input, [r.denoised, g.denoised, b.denoised]), extras })
+    Ok(StepOutput { state: linear_state(input, [r.denoised, g.denoised, b.denoised]), extras, blend_base: None })
 }
 
 #[tauri::command]
@@ -647,11 +721,13 @@ pub async fn composite_wavelet_denoise_cmd(
     thresholds: Vec<f64>,
     linear: bool,
     layer_bias: Option<Vec<f32>>,
+    mask: Option<Value>,
 ) -> Result<Value, String> {
     let n_scales = num_scales.clamp(1, 8);
     let progress = ProgressHandle::new(&app, EVENT_WAVELET_PROGRESS, (n_scales * 2 + 1) as u64);
 
     blocking_cmd!({
+        let mask = composite_spec(mask)?;
         check_layer_bias(layer_bias.as_deref())?;
         let config = WaveletConfig {
             num_scales: n_scales,
@@ -660,7 +736,7 @@ pub async fn composite_wavelet_denoise_cmd(
             layer_bias,
         };
         let parts = channel_parts(&progress);
-        let call = ChainCall { output_dir, chain_input, display_stf: Some(display_stf) };
+        let call = ChainCall { output_dir, chain_input, display_stf: Some(display_stf), mask };
         run_chain_step(ChainStep::Denoise, &call, |input, _| denoise_step(input, &config, parts.each_ref().map(Some)))
     })
 }
@@ -678,7 +754,7 @@ fn deconv_step(
         RES_CONVERGENCE: [r.convergence, g.convergence, b.convergence],
         RES_PSF_SOURCE: psf.source(),
     });
-    Ok(StepOutput { state: linear_state(input, [r.image, g.image, b.image]), extras })
+    Ok(StepOutput { state: linear_state(input, [r.image, g.image, b.image]), extras, blend_base: None })
 }
 
 #[tauri::command]
@@ -697,10 +773,12 @@ pub async fn composite_deconvolve_rl_cmd(
     psf_num_stars: Option<usize>,
     psf_cutout_radius: Option<usize>,
     psf_kernel: Option<Vec<Vec<f32>>>,
+    mask: Option<Value>,
 ) -> Result<Value, String> {
     let progress = ProgressHandle::new(&app, EVENT_DECONV_PROGRESS, iterations as u64);
 
     blocking_cmd!({
+        let mask = composite_spec(mask)?;
         let psf = DeconvPsf::choose(use_empirical_psf, psf_kernel, psf_size, psf_sigma, psf_num_stars, psf_cutout_radius)?;
         let config = RLConfig {
             iterations,
@@ -710,7 +788,7 @@ pub async fn composite_deconvolve_rl_cmd(
             ..RLConfig::default()
         };
         let parts = channel_parts(&progress);
-        let call = ChainCall { output_dir, chain_input, display_stf: Some(display_stf) };
+        let call = ChainCall { output_dir, chain_input, display_stf: Some(display_stf), mask };
         let result = run_chain_step(ChainStep::Deconv, &call, |input, _| {
             deconv_step(input, &psf, &config, parts.each_ref().map(Some))
         })?;
@@ -754,9 +832,11 @@ fn pixelmath_step(
     expression: &str,
     slots: &[PixelMathSlot],
     opts: OutputOptions,
+    mask: Option<&MaskSpec>,
 ) -> anyhow::Result<StepOutput> {
     let tier = displayed_tier(input);
-    let evaluated = evaluate_per_channel(expression, slots, &opts, plane_refs(tier_planes(input, tier)))?;
+    let raster = mask.map(|mask| composite_mask(input, mask)).transpose()?;
+    let evaluated = evaluate_per_channel(expression, slots, &opts, plane_refs(tier_planes(input, tier)), raster.as_ref())?;
     let state = match tier {
         DisplayedTier::Linear => linear_state(input, evaluated.results),
         DisplayedTier::Stretched => stretched_state(input, evaluated.results),
@@ -768,7 +848,7 @@ fn pixelmath_step(
         RES_NON_FINITE_COUNT: evaluated.non_finite,
         RES_WARNINGS: evaluated.warnings,
     });
-    Ok(StepOutput { state, extras })
+    Ok(StepOutput { state, extras, blend_base: None })
 }
 
 #[tauri::command]
@@ -780,14 +860,16 @@ pub async fn pixelmath_composite_cmd(
     slots: Vec<PixelMathSlot>,
     truncate: Option<bool>,
     rescale: Option<bool>,
+    mask: Option<Value>,
 ) -> Result<Value, String> {
     blocking_cmd!({
+        let mask = composite_spec(mask)?;
         let opts = OutputOptions {
             truncate: truncate.unwrap_or(false),
             rescale: rescale.unwrap_or(false),
         };
-        let call = ChainCall { output_dir, chain_input, display_stf: Some(display_stf) };
-        run_chain_step(ChainStep::PixelMath, &call, |input, _| pixelmath_step(input, &expression, &slots, opts))
+        let call = ChainCall { output_dir, chain_input, display_stf: Some(display_stf), mask: None };
+        run_chain_step(ChainStep::PixelMath, &call, |input, _| pixelmath_step(input, &expression, &slots, opts, mask.as_ref()))
     })
 }
 
@@ -819,9 +901,11 @@ pub async fn composite_chain_state_cmd() -> Result<Value, String> {
         if !chain.is_valid(live) {
             chain.clear();
         }
+        let live_displayed = helpers::snapshot_composite().ok().map(|(state, _)| displayed_tier(&state).name());
         Ok(json!({
             RES_CHAIN_GENERATION: chain.generation,
             RES_LIVE_GENERATION: live,
+            RES_LIVE_DISPLAYED: live_displayed,
             RES_STEPS: chain.step_names(),
         }))
     })
@@ -839,11 +923,15 @@ mod tests {
     use std::sync::Weak;
 
     use crate::cmd::compose::clear_composite_cache_cmd;
+    use crate::cmd::masks::{self, stored_recipe, MaskAt, COMPOSITE_RUN_KEY};
     use crate::cmd::processing::{arcsinh_stretch_composite_cmd, hdrmt_composite_cmd, lhe_composite_cmd, masked_stretch_composite_cmd};
     use crate::core::analysis::deconvolution::{generate_gaussian_psf, provided_psf_kernel};
     use crate::core::imaging::hdr::{hdrmt_rgb, HdrConfig};
     use crate::core::imaging::local_contrast::{lhe_rgb, LheConfig};
     use crate::core::imaging::stretch::arcsinh_stretch_rgb;
+    use crate::core::mask::{blend, MaskMods, MaskRecipe};
+    use crate::core::ops::stretch::arcsinh_blend_base;
+    use crate::core::pixelmath::finish_plane;
     use crate::infra::cache::ImageEntry;
     use crate::infra::fits::writer::write_fits_mono;
     use crate::types::constants::{RES_KERNEL_SIZE, RES_MAX, RES_STRETCH_FACTOR};
@@ -923,7 +1011,7 @@ mod tests {
 
     fn doubled_key(input: &CompositeSnapshot) -> anyhow::Result<StepOutput> {
         let key = key_planes(input).map(|p| p.mapv(|v| v * 2.0));
-        Ok(StepOutput { state: linear_state(input, key), extras: json!({}) })
+        Ok(StepOutput { state: linear_state(input, key), extras: json!({}), blend_base: None })
     }
 
     fn file_count(dir: &tempfile::TempDir) -> usize {
@@ -992,7 +1080,7 @@ mod tests {
         let k = planes();
         install_composite(&k);
 
-        let value = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("base".into()), Some(display_stf(true))).await;
+        let value = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
         let stretched = live(helpers::load_composite_stretched);
         let key = live_key();
         let state = state().await;
@@ -1025,7 +1113,7 @@ mod tests {
         let _guard = helpers::composite_test_lock().await;
         let dir = tempfile::tempdir().unwrap();
         install_composite(&planes());
-        let err = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("localContrast".into()), Some(display_stf(true))).await;
+        let err = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("localContrast".into()), Some(display_stf(true)), None).await;
         let state = state().await;
         helpers::clear_composite();
         assert_eq!(err.unwrap_err(), "Invalid composite chain input localContrast for step stretch");
@@ -1040,11 +1128,11 @@ mod tests {
         install_composite(&planes());
         let lhe = LheConfig { kernel_radius: 3, ..LheConfig::default() };
 
-        let first = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true))).await;
-        let contrast = lhe_composite_cmd(out.clone(), lhe, Some("stretch".into()), Some(display_stf(true))).await;
+        let first = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
+        let contrast = lhe_composite_cmd(out.clone(), lhe, Some("stretch".into()), Some(display_stf(true)), None).await;
         let after_contrast = state().await;
         let toned_after_contrast = live(helpers::load_composite_toned);
-        let again = arcsinh_stretch_composite_cmd(out, 20.0, Some("base".into()), Some(display_stf(true))).await;
+        let again = arcsinh_stretch_composite_cmd(out, 20.0, Some("base".into()), Some(display_stf(true)), None).await;
         let after_again = state().await;
         let toned_after_again = live(helpers::load_composite_toned);
         helpers::clear_composite();
@@ -1076,7 +1164,7 @@ mod tests {
         helpers::insert_composite_toned(toned[0].clone(), toned[1].clone(), toned[2].clone());
         forget_chain();
 
-        let call = ChainCall { output_dir: out.clone(), chain_input: "base".into(), display_stf: Some(display_stf(true)) };
+        let call = ChainCall { output_dir: out.clone(), chain_input: "base".into(), display_stf: Some(display_stf(true)), mask: None };
         let linear = run_chain_step(ChainStep::Denoise, &call, |input, _| doubled_key(input));
         let key_after_linear = live_key();
         let orig_after_linear = live_orig();
@@ -1091,7 +1179,7 @@ mod tests {
         let state_after_reset = state().await;
 
         install_composite(&k);
-        let stretch = arcsinh_stretch_composite_cmd(out, 50.0, Some("base".into()), Some(display_stf(true))).await;
+        let stretch = arcsinh_stretch_composite_cmd(out, 50.0, Some("base".into()), Some(display_stf(true)), None).await;
         let reset_linear = composite_chain_reset_cmd().await;
         let stretched_after_linear_reset = live(helpers::load_composite_stretched);
         let key_after_linear_reset = live_key();
@@ -1124,7 +1212,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let k = planes();
         install_composite(&k);
-        let stretch = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("base".into()), Some(display_stf(true))).await;
+        let stretch = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
         let k2 = [plane(7), plane(8), plane(9)];
         helpers::insert_composite_and_orig(k2[0].clone(), k2[1].clone(), k2[2].clone(), compute_image_stats(&k2[0]), compute_image_stats(&k2[1]), compute_image_stats(&k2[2]));
         let reset = composite_chain_reset_cmd().await;
@@ -1143,14 +1231,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = out_dir(&dir);
         install_composite(&planes());
-        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true))).await;
+        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
         let before_write = state().await;
 
         let k2 = [plane(7), plane(8), plane(9)];
         outside_write(&k2);
         let live_after_write = helpers::composite_generation();
 
-        let pixelmath = pixelmath_composite_cmd(out, "stretch".into(), display_stf(true), "$T * 2".into(), vec![], None, None).await;
+        let pixelmath = pixelmath_composite_cmd(out, "stretch".into(), display_stf(true), "$T * 2".into(), vec![], None, None, None).await;
         let key = live_key();
         let after_restart = state().await;
         helpers::clear_composite();
@@ -1182,7 +1270,7 @@ mod tests {
         let accepted = helpers::commit_composite(&snapshot, Some(helpers::composite_generation()));
         let stretched_after_commit = live(helpers::load_composite_stretched);
 
-        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)) };
+        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)), mask: None };
         let raced = run_chain_step(ChainStep::Background, &call, |input, dir| {
             let model_png = chain_png_path(dir, MODEL_SUFFIX);
             std::fs::write(&model_png, b"model").unwrap();
@@ -1191,6 +1279,7 @@ mod tests {
             Ok(StepOutput {
                 state: linear_state(input, [r.clone(), g.clone(), b.clone()]),
                 extras: json!({ RES_MODEL_PNG_PATH: model_png }),
+                blend_base: None,
             })
         });
         let stretched_after_race = live(helpers::load_composite_stretched);
@@ -1215,16 +1304,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = out_dir(&dir);
         install_composite(&planes());
-        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true))).await;
+        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
         let held = live_key_r_weak();
         let files_before_race = file_count(&dir);
         let k2 = [plane(7), plane(8), plane(9)];
 
-        let call = ChainCall { output_dir: out, chain_input: "stretch".into(), display_stf: Some(display_stf(true)) };
+        let call = ChainCall { output_dir: out, chain_input: "stretch".into(), display_stf: Some(display_stf(true)), mask: None };
         let raced = run_chain_step(ChainStep::LocalContrast, &call, |input, _| {
             outside_write(&k2);
             let [r, g, b] = contrast_planes(input)?;
-            Ok(StepOutput { state: toned_state(input, [r.clone(), g.clone(), b.clone()]), extras: json!({}) })
+            Ok(StepOutput { state: toned_state(input, [r.clone(), g.clone(), b.clone()]), extras: json!({}), blend_base: None })
         });
         let released = held.upgrade().is_none();
         let files_after_race = file_count(&dir);
@@ -1244,7 +1333,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         install_composite(&planes());
         let lhe = LheConfig { kernel_radius: 3, ..LheConfig::default() };
-        let failed = lhe_composite_cmd(out_dir(&dir), lhe, Some("base".into()), Some(display_stf(true))).await;
+        let failed = lhe_composite_cmd(out_dir(&dir), lhe, Some("base".into()), Some(display_stf(true)), None).await;
         let leftovers = file_count(&dir);
         let state = state().await;
         helpers::clear_composite();
@@ -1259,7 +1348,7 @@ mod tests {
         let _guard = helpers::composite_test_lock().await;
         let dir = tempfile::tempdir().unwrap();
         install_composite(&planes());
-        let stretch = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("base".into()), Some(display_stf(true))).await;
+        let stretch = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
         let held = live_key_r_weak();
         let held_before_clear = held.upgrade().is_some();
         let cleared = clear_composite_cache_cmd().await;
@@ -1280,14 +1369,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = out_dir(&dir);
         install_composite(&planes());
-        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true))).await;
+        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
         let held = live_key_r_weak();
         let k2 = [plane(7), plane(8), plane(9)];
         outside_write(&k2);
         let pinned_by_chain = held.upgrade().is_some();
         let stale = state().await;
         let released = held.upgrade().is_none();
-        let next = arcsinh_stretch_composite_cmd(out, 20.0, Some("base".into()), Some(display_stf(true))).await;
+        let next = arcsinh_stretch_composite_cmd(out, 20.0, Some("base".into()), Some(display_stf(true)), None).await;
         let key = live_key();
         let fresh = state().await;
         helpers::clear_composite();
@@ -1312,8 +1401,8 @@ mod tests {
         let out = out_dir(&dir);
         let k = planes();
         install_composite(&k);
-        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true))).await;
-        let masked = masked_stretch_composite_cmd(out, Some(2), None, None, None, None, None, None, None, None, Some("deconv".into()), Some(display_stf(true))).await;
+        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
+        let masked = masked_stretch_composite_cmd(out, Some(2), None, None, None, None, None, None, None, None, Some("deconv".into()), Some(display_stf(true)), None).await;
         let key = live_key();
         let state = state().await;
         helpers::clear_composite();
@@ -1341,7 +1430,7 @@ mod tests {
         forget_chain();
         let config = WaveletConfig { num_scales: 2, thresholds: vec![1.0], linear_denoise: true, layer_bias: None };
 
-        let linked = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)) };
+        let linked = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)), mask: None };
         let value = run_chain_step(ChainStep::Denoise, &linked, |input, _| denoise_step(input, &config, [None; 3]));
         let key = live_key();
         let orig = live_orig();
@@ -1350,7 +1439,7 @@ mod tests {
         let toned_after = live(helpers::load_composite_toned);
         let state = state().await;
 
-        let unlinked = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(false)) };
+        let unlinked = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(false)), mask: None };
         let value_unlinked = run_chain_step(ChainStep::Denoise, &unlinked, |input, _| denoise_step(input, &config, [None; 3]));
         helpers::clear_composite();
 
@@ -1384,15 +1473,15 @@ mod tests {
         let lhe = LheConfig { kernel_radius: 3, ..LheConfig::default() };
         let hdr = HdrConfig { layers: 2, ..HdrConfig::default() };
 
-        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true))).await;
+        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
         let s1 = live(helpers::load_composite_stretched);
-        let lhe_run = lhe_composite_cmd(out.clone(), lhe.clone(), Some("stretch".into()), Some(display_stf(true))).await;
+        let lhe_run = lhe_composite_cmd(out.clone(), lhe.clone(), Some("stretch".into()), Some(display_stf(true)), None).await;
         let l1 = live(helpers::load_composite_toned);
-        let hdr_run = hdrmt_composite_cmd(out.clone(), hdr.clone(), Some("stretch".into()), Some(display_stf(true))).await;
+        let hdr_run = hdrmt_composite_cmd(out.clone(), hdr.clone(), Some("stretch".into()), Some(display_stf(true)), None).await;
         let after_hdr = live(helpers::load_composite_toned);
         let stretched_after_hdr = live(helpers::load_composite_stretched);
         let state = state().await;
-        let on_linear = lhe_composite_cmd(out, lhe.clone(), Some("base".into()), Some(display_stf(true))).await;
+        let on_linear = lhe_composite_cmd(out, lhe.clone(), Some("base".into()), Some(display_stf(true)), None).await;
         helpers::clear_composite();
 
         stretch.unwrap();
@@ -1422,11 +1511,11 @@ mod tests {
         let ones = dir.path().join("ones.fits").to_str().unwrap().to_string();
         write_fits_mono(&ones, &Array2::from_elem((16, 16), 1.0f32), None).unwrap();
 
-        let doubled = pixelmath_composite_cmd(out.clone(), "base".into(), display_stf(false), "$T * 2".into(), vec![], None, None).await;
+        let doubled = pixelmath_composite_cmd(out.clone(), "base".into(), display_stf(false), "$T * 2".into(), vec![], None, None, None).await;
         let key_doubled = live_key();
-        let refused = pixelmath_composite_cmd(out.clone(), "pixelMath".into(), display_stf(false), "$T + A".into(), vec![slot("A", &small)], None, None).await;
+        let refused = pixelmath_composite_cmd(out.clone(), "pixelMath".into(), display_stf(false), "$T + A".into(), vec![slot("A", &small)], None, None, None).await;
         let key_after_refusal = live_key();
-        let added = pixelmath_composite_cmd(out, "pixelMath".into(), display_stf(false), "$T + A".into(), vec![slot("A", &ones)], None, None).await;
+        let added = pixelmath_composite_cmd(out, "pixelMath".into(), display_stf(false), "$T + A".into(), vec![slot("A", &ones)], None, None, None).await;
         let key_added = live_key();
         let state = state().await;
         helpers::clear_composite();
@@ -1451,6 +1540,293 @@ mod tests {
         assert_eq!(steps(&state), vec!["pixelMath"]);
     }
 
+    const LINEAR_PEAK: f32 = 3.2e4;
+
+    fn middle_band(key: &[Array2<f32>; 3]) -> MaskSpec {
+        let luminance = key_luminance(&triplet_from(key.clone())).unwrap();
+        let (lo, hi) = luminance.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        let span = hi - lo;
+        MaskSpec { mods: MaskMods::default(), recipe: MaskRecipe::Range { lo: lo + 0.3 * span, hi: lo + 0.6 * span, fuzz: 0.08 * span } }
+    }
+
+    fn inline(spec: &MaskSpec) -> Value {
+        stored_recipe(spec).unwrap()
+    }
+
+    fn key_raster(key: &[Array2<f32>; 3], spec: &MaskSpec) -> Array2<f32> {
+        let raster = spec.rasterize(&[&key_luminance(&triplet_from(key.clone())).unwrap()]).unwrap();
+        let soft = raster.iter().any(|&m| m > 0.0 && m < 1.0);
+        assert!(raster.iter().any(|&m| m == 0.0) && raster.iter().any(|&m| m == 1.0) && soft, "precondition: m 0, m 1 and a soft edge");
+        raster
+    }
+
+    fn m0_pixels(raster: &Array2<f32>) -> Vec<(usize, usize)> {
+        raster.indexed_iter().filter(|(_, &m)| m == 0.0).map(|(ix, _)| ix).collect()
+    }
+
+    fn blended_channels(base: [&Array2<f32>; 3], processed: [&Array2<f32>; 3], raster: &Array2<f32>) -> [Array2<f32>; 3] {
+        [0, 1, 2].map(|c| blend(base[c], processed[c], raster).unwrap())
+    }
+
+    fn stats_json(stats: &ImageStats) -> Value {
+        serde_json::to_value(stats).unwrap()
+    }
+
+    #[tokio::test]
+    async fn composite_blend_recomputes_stats_and_orig() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let balanced = install_balanced_composite(&planes());
+        let spec = middle_band(&balanced);
+        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)), mask: Some(spec.clone()) };
+        let value = run_chain_step(ChainStep::Denoise, &call, |input, _| doubled_key(input));
+        let key = live_key();
+        let orig = live_orig();
+        let (er, eg, eb) = helpers::load_composite_rgb().expect("key tier");
+        let stats = [er.stats(), eg.stats(), eb.stats()].map(stats_json);
+        helpers::clear_composite();
+
+        value.unwrap();
+        let doubled = balanced.each_ref().map(|p| p.mapv(|v| v * 2.0));
+        let expected = blended_channels(balanced.each_ref(), doubled.each_ref(), &key_raster(&balanced, &spec));
+        assert_ne!(expected, doubled, "precondition: the mask changes the step output");
+        assert_eq!(key, expected, "the key tier must be the input key blended with the step output");
+        let expected_orig = [0, 1, 2].map(|i| expected[i].mapv(|v| v * (1.0 / WB[i])));
+        assert_eq!(orig, expected_orig, "ORIG must be the blended KEY divided by the white balance");
+        assert_eq!(stats, expected.each_ref().map(|p| stats_json(&compute_image_stats(p))), "the stats must describe the blended planes");
+    }
+
+    #[tokio::test]
+    async fn composite_background_and_masked_stretch_refuse_a_mask_by_name() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let k = planes();
+        install_composite(&k);
+        let spec = middle_band(&k);
+        let small = elsewhere.path().join("mask8.fits").to_str().unwrap().to_string();
+        write_fits_mono(&small, &Array2::from_elem((8, 8), 1.0f32), None).unwrap();
+        let file_mask = MaskSpec { mods: MaskMods::default(), recipe: MaskRecipe::File { path: small, mark: Default::default(), lo: None, hi: None } };
+        let masked_call = |mask: &MaskSpec| ChainCall {
+            output_dir: out.clone(),
+            chain_input: "base".into(),
+            display_stf: Some(display_stf(true)),
+            mask: Some(mask.clone()),
+        };
+
+        let polynomial = background_model("polynomial", 4, 1, 3.0, 3, "subtract", None).unwrap();
+        let background = run_chain_step(ChainStep::Background, &masked_call(&spec), |input, dir| background_step(input, &polynomial, [None; 3], dir));
+        let chained = masked_stretch_composite_cmd(out.clone(), Some(2), None, None, None, None, None, None, None, None, Some("base".into()), Some(display_stf(true)), Some(inline(&spec))).await;
+        let unchained_masked = masked_stretch_composite_cmd(out.clone(), Some(2), None, None, None, None, None, None, None, None, None, None, Some(inline(&spec))).await;
+        let unchained = arcsinh_stretch_composite_cmd(out.clone(), 50.0, None, None, Some(inline(&spec))).await;
+        let wrong_size = run_chain_step(ChainStep::Denoise, &masked_call(&file_mask), |input, _| doubled_key(input));
+        let key = live_key();
+        let stretched = live(helpers::load_composite_stretched);
+        let state = state().await;
+        helpers::clear_composite();
+
+        assert_eq!(background.unwrap_err().to_string(), "background does not take a mask");
+        assert_eq!(chained.unwrap_err(), "maskedStretch does not take a mask");
+        assert_eq!(unchained_masked.unwrap_err(), "maskedStretch does not take a mask");
+        assert_eq!(unchained.unwrap_err(), "stretch takes a mask only as a composite chain step");
+        assert_eq!(wrong_size.unwrap_err().to_string(), "mask file is 8×8, image is 16×16");
+        assert_eq!(key, k, "a refused masked step changed the composite");
+        assert!(stretched.is_none(), "a refused masked stretch wrote the stretched tier");
+        assert!(steps(&state).is_empty(), "a refused masked step was recorded");
+        assert_eq!(file_count(&dir), 0, "a refused masked step left files behind");
+    }
+
+    #[tokio::test]
+    async fn composite_arcsinh_with_mask_blends_in_the_normalised_domain() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let k = planes().map(|p| p.mapv(|v| v * LINEAR_PEAK));
+        install_composite(&k);
+        let spec = middle_band(&k);
+        let value = arcsinh_stretch_composite_cmd(out_dir(&dir), 50.0, Some("base".into()), Some(display_stf(true)), Some(inline(&spec))).await;
+        let stretched = live(helpers::load_composite_stretched);
+        let key = live_key();
+        helpers::clear_composite();
+
+        value.unwrap();
+        let stretched = stretched.expect("the stretch step writes the stretched tier");
+        let raster = key_raster(&k, &spec);
+        let normalised = arcsinh_blend_base(&k.each_ref());
+        let full = triplet(arcsinh_stretch_rgb(&k[0], &k[1], &k[2], 50.0));
+        let expected = blended_channels([&normalised[0], &normalised[1], &normalised[2]], full.each_ref(), &raster);
+        assert_eq!(stretched, expected, "a masked arcsinh must blend its output with the normalised key");
+        for (c, plane) in stretched.iter().enumerate() {
+            for ix in m0_pixels(&raster) {
+                assert_eq!(plane[ix].to_bits(), normalised[c][ix].to_bits(), "channel {c} at {ix:?}: m 0 must keep the normalisation");
+                assert_ne!(plane[ix], k[c][ix], "channel {c} at {ix:?}: m 0 wrote the raw linear value");
+            }
+            assert!(plane.iter().all(|v| (0.0..=1.0).contains(v)), "channel {c}: a masked stretch left the display range");
+        }
+        assert_eq!(key, k, "a masked stretch must keep the key tier");
+    }
+
+    #[tokio::test]
+    async fn composite_arcsinh_mask_base_uses_shared_range() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let k = [plane(1).mapv(|v| v * 100.0), plane(2).mapv(|v| v * 1000.0), plane(3).mapv(|v| v * 10.0)];
+        install_composite(&k);
+        let spec = middle_band(&k);
+        let value = arcsinh_stretch_composite_cmd(out_dir(&dir), 20.0, Some("base".into()), Some(display_stf(true)), Some(inline(&spec))).await;
+        let stretched = live(helpers::load_composite_stretched);
+        helpers::clear_composite();
+
+        value.unwrap();
+        let stretched = stretched.expect("stretched tier");
+        let (lo, hi) = k.iter().flat_map(|p| p.iter().copied()).fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)));
+        let inv = 1.0 / (hi - lo);
+        let m0 = m0_pixels(&key_raster(&k, &spec));
+        for (c, (plane, source)) in stretched.iter().zip(&k).enumerate() {
+            for &ix in &m0 {
+                let shared = ((source[ix] - lo) * inv).clamp(0.0, 1.0);
+                assert_eq!(plane[ix].to_bits(), shared.to_bits(), "channel {c} at {ix:?}: m 0 is not the shared-range normalisation");
+            }
+        }
+        let peak_at_m0 = |c: usize| m0.iter().map(|&ix| stretched[c][ix]).fold(0.0f32, f32::max);
+        assert!(peak_at_m0(0) <= 95.0 * inv + f32::EPSILON, "r was normalised by its own range");
+        assert!(peak_at_m0(2) <= 9.5 * inv + f32::EPSILON, "b was normalised by its own range");
+    }
+
+    #[tokio::test]
+    async fn composite_lhe_with_mask_leaves_m0_pixels_unchanged_on_all_channels() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let k = planes();
+        install_composite(&k);
+        let lhe = LheConfig { kernel_radius: 3, ..LheConfig::default() };
+        let spec = middle_band(&k);
+
+        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
+        let stretched = live(helpers::load_composite_stretched);
+        let contrast = lhe_composite_cmd(out, lhe.clone(), Some("stretch".into()), Some(display_stf(true)), Some(inline(&spec))).await;
+        let toned = live(helpers::load_composite_toned);
+        let stretched_after = live(helpers::load_composite_stretched);
+        helpers::clear_composite();
+
+        stretch.unwrap();
+        assert_eq!(contrast.unwrap()[RES_DISPLAYED], "toned");
+        let stretched = stretched.expect("stretched tier");
+        let toned = toned.expect("the masked LHE writes the toned tier");
+        let raster = key_raster(&k, &spec);
+        let m0 = m0_pixels(&raster);
+        let full = triplet(lhe_rgb(&stretched[0], &stretched[1], &stretched[2], &lhe).unwrap());
+        for (c, plane) in toned.iter().enumerate() {
+            assert!(m0.iter().any(|&ix| full[c][ix] != stretched[c][ix]), "precondition: LHE changes channel {c} under m 0");
+            for &ix in &m0 {
+                assert_eq!(plane[ix].to_bits(), stretched[c][ix].to_bits(), "channel {c} at {ix:?}: an m 0 pixel changed");
+            }
+        }
+        assert_eq!(toned, blended_channels(stretched.each_ref(), full.each_ref(), &raster));
+        assert_eq!(stretched_after, Some(stretched), "a masked LHE must keep the stretched tier");
+    }
+
+    #[tokio::test]
+    async fn composite_pixelmath_with_mask_blends_before_rescale() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let k = planes().map(|p| p.mapv(|v| v * LINEAR_PEAK));
+        install_composite(&k);
+        let spec = middle_band(&k);
+        let value = pixelmath_composite_cmd(out_dir(&dir), "base".into(), display_stf(false), "$T * 2".into(), vec![], None, Some(true), Some(inline(&spec))).await;
+        let key = live_key();
+        helpers::clear_composite();
+
+        value.unwrap();
+        let raster = key_raster(&k, &spec);
+        let rescale = OutputOptions { truncate: false, rescale: true };
+        for (c, (plane, source)) in key.iter().zip(&k).enumerate() {
+            let doubled = source.mapv(|v| v * 2.0);
+            let mut expected = blend(source, &doubled, &raster).unwrap();
+            finish_plane(&mut expected, &rescale);
+            assert_eq!(plane, &expected, "channel {c}: the mask must blend before the rescale");
+            assert!(plane.iter().all(|v| (0.0..=1.0).contains(v)), "channel {c}: a masked rescale left [0, 1]");
+            let mut finished = doubled;
+            finish_plane(&mut finished, &rescale);
+            assert_ne!(plane, &blend(source, &finished, &raster).unwrap(), "precondition: blending after the rescale differs");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_composite_step_takes_a_session_mask_by_id_and_refuses_the_id_once_deleted() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let history_root = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        let k = planes().map(|p| p.mapv(|v| v * LINEAR_PEAK));
+        install_composite(&k);
+        let spec = middle_band(&k);
+        let composite = MaskAt { image_key: COMPOSITE_RUN_KEY, base_path: None, input_path: None };
+        let created = masks::create(history_root.path(), &composite, &stored_recipe(&spec).unwrap(), None, None).unwrap();
+        let id = created["mask_id"].as_str().unwrap().to_string();
+        let stretch = |mask: Option<Value>| arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), mask);
+
+        let by_id = stretch(Some(json!(id))).await;
+        let stretched_by_id = live(helpers::load_composite_stretched);
+        install_composite(&k);
+        let by_recipe = stretch(Some(inline(&spec))).await;
+        let stretched_by_recipe = live(helpers::load_composite_stretched);
+        let deleted = masks::delete(history_root.path(), &composite, &id);
+        install_composite(&k);
+        let refused = stretch(Some(json!(id))).await;
+        let malformed = stretch(Some(json!({"kind": "range", "lo": 0.2}))).await;
+        let stretched_after = live(helpers::load_composite_stretched);
+        let after = state().await;
+        helpers::clear_composite();
+
+        by_id.unwrap();
+        by_recipe.unwrap();
+        assert_eq!(deleted.unwrap()["kept_for_replay"], false);
+        let stretched_by_id = stretched_by_id.expect("the stretch by id writes the stretched tier");
+        assert_ne!(stretched_by_id, triplet(arcsinh_stretch_rgb(&k[0], &k[1], &k[2], 50.0)), "precondition: the mask changes the stretch");
+        assert_eq!(Some(stretched_by_id), stretched_by_recipe, "a mask named by id must blend like its recipe sent inline");
+        assert_eq!(refused.unwrap_err(), format!("mask {id} is not in this image's history"));
+        let malformed = malformed.unwrap_err();
+        assert!(malformed.starts_with("inline mask: "), "{malformed}");
+        assert!(stretched_after.is_none(), "a refused masked stretch wrote the stretched tier");
+        assert!(steps(&after).is_empty(), "a refused masked step was recorded");
+    }
+
+    #[tokio::test]
+    async fn step_meta_and_state_report_the_tier_of_the_chain_base_and_of_the_live_composite() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = out_dir(&dir);
+        install_composite(&planes());
+        let lhe = LheConfig { kernel_radius: 3, ..LheConfig::default() };
+
+        let linear = state().await;
+        let stretch = arcsinh_stretch_composite_cmd(out.clone(), 50.0, Some("base".into()), Some(display_stf(true)), None).await;
+        let stretched = state().await;
+        let contrast = lhe_composite_cmd(out.clone(), lhe.clone(), Some("stretch".into()), Some(display_stf(true)), None).await;
+        let toned = state().await;
+        forget_chain();
+        let recaptured = lhe_composite_cmd(out, lhe, Some("base".into()), Some(display_stf(true)), None).await;
+        helpers::clear_composite();
+        let gone = state().await;
+
+        assert_eq!(linear[RES_LIVE_DISPLAYED], "linear", "{linear}");
+        let stretch = stretch.unwrap();
+        assert_eq!(stretch[RES_BASE_DISPLAYED], "linear", "{stretch}");
+        assert_eq!(stretch[RES_DISPLAYED], "stretched");
+        assert_eq!(stretched[RES_LIVE_DISPLAYED], "stretched", "{stretched}");
+        let contrast = contrast.unwrap();
+        assert!(contrast[RES_BASE_PNG_PATH].is_null(), "precondition: the second step keeps the captured base");
+        assert_eq!(contrast[RES_BASE_DISPLAYED], "linear", "every step reports the tier of the chain base");
+        assert_eq!(contrast[RES_DISPLAYED], "toned");
+        assert_eq!(toned[RES_LIVE_DISPLAYED], "toned", "{toned}");
+        let recaptured = recaptured.unwrap();
+        assert!(recaptured[RES_BASE_PNG_PATH].is_string(), "precondition: a new chain captures the live composite as its base");
+        assert_eq!(recaptured[RES_BASE_DISPLAYED], "toned", "the captured base is the toned live composite");
+        assert!(gone[RES_LIVE_DISPLAYED].is_null(), "no composite, no live tier: {gone}");
+    }
+
     fn sky(seed: usize) -> Array2<f32> {
         Array2::from_shape_fn((64, 64), |(y, x)| {
             let noise = ((y * 31 + x * 17 + seed * 7) % 23) as f32 - 11.0;
@@ -1464,7 +1840,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let k = [sky(1), sky(2), sky(3)];
         install_composite(&k);
-        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)) };
+        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)), mask: None };
 
         let polynomial = background_model("polynomial", 8, 2, 3.0, 3, "subtract", None).unwrap();
         let poly = run_chain_step(ChainStep::Background, &call, |input, dir| background_step(input, &polynomial, [None; 3], dir));
@@ -1530,7 +1906,7 @@ mod tests {
         let _guard = helpers::composite_test_lock().await;
         let dir = tempfile::tempdir().unwrap();
         install_composite(&[tilted_sky(1000.0, 1), tilted_sky(50.0, 2), tilted_sky(5.0, 3)]);
-        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)) };
+        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)), mask: None };
         let polynomial = background_model("polynomial", 8, 2, 3.0, 3, "subtract", None).unwrap();
         let value = run_chain_step(ChainStep::Background, &call, |input, dir| background_step(input, &polynomial, [None; 3], dir));
         helpers::clear_composite();
@@ -1561,7 +1937,7 @@ mod tests {
         install_composite(&k);
         let rows = vec![vec![1.0f32, 2.0, 1.0], vec![2.0, 4.0, 2.0], vec![1.0, 2.0, 1.0]];
         let config = RLConfig { iterations: 3, ..RLConfig::default() };
-        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)) };
+        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)), mask: None };
 
         let provided = DeconvPsf::choose(Some(true), Some(rows.clone()), 15, 2.0, None, None).unwrap();
         let value = run_chain_step(ChainStep::Deconv, &call, |input, _| deconv_step(input, &provided, &config, [None; 3]));

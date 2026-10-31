@@ -56,6 +56,7 @@ const cancelRefineMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Pr
 const refineProgress = vi.hoisted(() => ({ active: false, percent: 0, stage: "", current: 0, total: 0, reset: vi.fn() }));
 const solveProgress = vi.hoisted(() => ({ active: false, percent: 0, stage: "", current: 0, total: 0, reset: vi.fn() }));
 const writeWcsMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
+const catalogState = vi.hoisted(() => ({ reports: null as unknown[] | null, installs: {}, loading: false, error: null }));
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -81,6 +82,7 @@ vi.mock("../../../services/astrometry", async (importOriginal) => ({
 vi.mock("../../../hooks/useProgress", () => ({
   useProgress: (event: string) => (event === "plate-solve-progress" ? solveProgress : refineProgress),
 }));
+vi.mock("../../../hooks/useCatalogStore", () => ({ useCatalogStore: () => catalogState }));
 vi.mock("../../../services/config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/config")>()),
   getApiKey: apiKeyMock,
@@ -89,8 +91,10 @@ vi.mock("../../../services/config", async (importOriginal) => ({
 
 vi.stubGlobal("navigator", { clipboard: { writeText: clipboardWrite } });
 
-import PlateSolvePanel, { GaiaRefineBlock, SolveActions, SolveCentreCards } from "../PlateSolvePanel";
+import PlateSolvePanel, { GaiaRefineBlock, SolveActions, SolveCentreCards, SolveOptionsBlock } from "../PlateSolvePanel";
 import { GAIA_REFINE_CANCELLED_NOTE, GAIA_REFINE_CONSENT, NO_WCS_TO_REFINE } from "../../../utils/solvedWcs";
+import { NOVA_OFF_NOTE } from "../../../utils/plateSolveResult";
+import { DEFAULT_SOLVE_OPTIONS, SOLVE_OPTIONS_KEY } from "../../../utils/plateSolveOptions";
 import { solveSummaryLine } from "../../../utils/coordFormat";
 import { TauriCommandError } from "../../../shared/types/errors";
 
@@ -737,6 +741,316 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
       solveProgress.stage = "";
       delete scope.window;
     }
+  });
+});
+
+const TYCHO2_REPORT = { id: "tycho2-l6-v1", status: { state: "installed", path: "C:/res/tycho2.bin", verified: true } };
+const TWOMASS_REPORT = { id: "2mass-l8-v1", status: { state: "installed", path: "C:/catalogs/2mass.bin", verified: true } };
+
+describe("PlateSolvePanel Solve options (wave 1)", () => {
+  const panel = (PlateSolvePanel as unknown as { type: Component }).type;
+  const at = (path: string) => () => renderTree(panel, { filePath: path, solvePath: path });
+  const show = at("C:/data/m16.fits");
+  const solveActions = (tree: ReactNode) => findElement(tree, (props) => typeof props.onSolve === "function");
+  const optionsBlock = (tree: ReactNode) => findElement(tree, (props) => typeof props.onOptionsChange === "function");
+  const fallbackBlock = (tree: ReactNode) => findElement(tree, (props) => typeof props.onFallback === "function");
+  const titled = (tree: ReactNode, titleStart: string) =>
+    findElement(tree, (props) => typeof props.title === "string" && props.title.startsWith(titleStart));
+  const type = (view: () => ReactNode, titleStart: string, value: string) =>
+    (titled(view(), titleStart)!.onChange as (e: { target: { value: string } }) => void)({ target: { value } });
+  const change = (options: Record<string, unknown>) =>
+    (optionsBlock(show())!.onOptionsChange as (change: Record<string, unknown>) => void)(options);
+  const sent = (index: number) => plateSolveMock.mock.calls[index][1] as Record<string, unknown>;
+  const scope = globalThis as { window?: unknown };
+  let stored: Map<string, string>;
+
+  const solveOnce = async (view: () => ReactNode = show) => {
+    (solveActions(view())!.onSolve as () => void)();
+    await flush();
+    return view();
+  };
+
+  const restart = async (view: () => ReactNode = show) => {
+    hooks.run.cells = [];
+    view();
+    await flush();
+  };
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    stored = new Map();
+    scope.window = {
+      setInterval: () => 0,
+      clearInterval: () => undefined,
+      localStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => void stored.set(key, value) },
+    };
+    catalogState.reports = [TYCHO2_REPORT, TWOMASS_REPORT];
+    wcsInfoMock.mockReset().mockRejectedValue(new Error("no celestial WCS"));
+    solveHintsMock.mockReset().mockResolvedValue(OBJCT_HINTS);
+    plateSolveMock.mockReset().mockResolvedValue(LOCAL_RESULT);
+    apiKeyMock.mockReset().mockResolvedValue({ key: "test-key" });
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    catalogState.reports = null;
+    delete scope.window;
+  });
+
+  it("solves with the offline catalogues only when online Gaia is off, and keeps the choice for the next session", async () => {
+    show();
+    await flush();
+    change({ onlineGaia: false });
+    await solveOnce();
+    expect(sent(0)).toMatchObject({ solver: "local", centerRa: 274.7, centerDec: -13.816667 });
+    expect(JSON.parse(stored.get(SOLVE_OPTIONS_KEY)!)).toMatchObject({ onlineGaia: false, offerNova: true, hints: "header" });
+    await restart();
+    expect(optionsBlock(show())!.options).toMatchObject({ onlineGaia: false });
+    await solveOnce();
+    expect(sent(1)).toMatchObject({ solver: "local" });
+  });
+
+  it("hides Try astrometry.net when the offer is off, and says why under the failure", async () => {
+    show();
+    await flush();
+    change({ offerNova: false });
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", { canFallback: true, apiKeyStored: true }),
+    );
+    const failed = await solveOnce();
+    expect(fallbackBlock(failed)).toBeNull();
+    const markup = markupOf(failed);
+    expect(markup).toContain(NO_SOLUTION_TEXT);
+    expect(markup).toContain(NOVA_OFF_NOTE);
+    expect(markup).not.toContain("Try astrometry.net</button>");
+  });
+
+  it("hides the astrometry.net retry once the offer is turned off", async () => {
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", { canFallback: true, apiKeyStored: true }),
+    );
+    plateSolveMock.mockRejectedValueOnce(new Error("Plate solve failed on astrometry.net (job 42)"));
+    show();
+    await flush();
+    const failed = await solveOnce();
+    (fallbackBlock(failed)!.onFallback as () => void)();
+    await flush();
+    expect(findElement(show(), (props) => props["data-nova-retry"] === true)).not.toBeNull();
+    change({ offerNova: false });
+    expect(findElement(show(), (props) => props["data-nova-retry"] === true)).toBeNull();
+  });
+
+  it("sends the options search radius while the hint radius is blank, and a typed hint radius instead", async () => {
+    show();
+    await flush();
+    change({ searchRadius: "5" });
+    expect(titled(show(), "Search radius around")!.placeholder).toBe("5");
+    await solveOnce();
+    expect(sent(0)).toMatchObject({ solver: "auto", nearRadiusDeg: 5, radius: undefined });
+    type(show, "Search radius around", "2");
+    await solveOnce();
+    expect(sent(1)).toMatchObject({ nearRadiusDeg: 2, radius: 2 });
+  });
+
+  it("keeps Plate Solve off while the options search radius is out of range", async () => {
+    show();
+    await flush();
+    change({ searchRadius: "20" });
+    expect(solveActions(show())!.disabled).toBe(true);
+    change({ searchRadius: "15" });
+    expect(solveActions(show())!.disabled).toBe(false);
+  });
+
+  it("keeps typed hints for the next image and the next session when Hints is typed", async () => {
+    show();
+    await flush();
+    change({ hints: "typed" });
+    type(show, "Right ascension", "10.5");
+    type(show, "Declination", "-20.25");
+    const next = at("C:/data/m17.fits");
+    next();
+    await flush();
+    const moved = next();
+    expect(titled(moved, "Right ascension")!.value).toBe("10.5");
+    expect(titled(moved, "Declination")!.value).toBe("-20.25");
+    expect(markupOf(moved)).toContain('value="2.15"');
+    await solveOnce(next);
+    expect(sent(0)).toMatchObject({ centerRa: 10.5, centerDec: -20.25 });
+    await restart(next);
+    const reopened = next();
+    expect(titled(reopened, "Right ascension")!.value).toBe("10.5");
+    expect(markupOf(reopened)).toContain("Hints: centre typed; scale from XPIXSZ 2.9 µm / FOCALLEN 250 mm");
+  });
+
+  it("drops typed hints on the next image while Hints come from each header", async () => {
+    show();
+    await flush();
+    type(show, "Right ascension", "10.5");
+    const next = at("C:/data/m17.fits");
+    next();
+    await flush();
+    expect(titled(next(), "Right ascension")!.value).toBe("274.700000");
+  });
+
+  it("forgets the typed hints when From header refills the fields", async () => {
+    show();
+    await flush();
+    change({ hints: "typed" });
+    type(show, "Right ascension", "10.5");
+    show();
+    expect(JSON.parse(stored.get(SOLVE_OPTIONS_KEY)!).typedHints).toEqual({ centerRa: "10.5" });
+    (titled(show(), "Refill the hints from the header")!.onClick as () => void)();
+    expect(titled(show(), "Right ascension")!.value).toBe("274.700000");
+    show();
+    expect(JSON.parse(stored.get(SOLVE_OPTIONS_KEY)!).typedHints).toEqual({});
+  });
+
+  it("names the installed offline catalogues, the online state and the astrometry.net offer next to Plate Solve", async () => {
+    show();
+    await flush();
+    expect(solveActions(show())!.summary).toBe("Offline: Tycho-2 + 2MASS, then online Gaia DR3, astrometry.net offered after a failure");
+    change({ onlineGaia: false, offerNova: false });
+    expect(solveActions(show())!.summary).toBe("Offline: Tycho-2 + 2MASS, online off, no astrometry.net");
+  });
+
+  it("sends the 2MASS switch and the SIP order cap with every offline solve, and keeps them for the next session", async () => {
+    show();
+    await flush();
+    await solveOnce();
+    expect(sent(0)).toMatchObject({ solver: "auto", useTwomass: true, maxSipOrder: undefined });
+    change({ useTwomass: false, maxSipOrder: 2 });
+    await solveOnce();
+    expect(sent(1)).toMatchObject({ solver: "auto", useTwomass: false, maxSipOrder: 2 });
+    expect(JSON.parse(stored.get(SOLVE_OPTIONS_KEY)!)).toMatchObject({ useTwomass: false, maxSipOrder: 2 });
+    await restart();
+    expect(optionsBlock(show())!.options).toMatchObject({ useTwomass: false, maxSipOrder: 2 });
+    change({ onlineGaia: false });
+    await solveOnce();
+    expect(sent(2)).toMatchObject({ solver: "local", useTwomass: false, maxSipOrder: 2 });
+  });
+
+  it("leaves the 2MASS switch and the SIP order cap out of the astrometry.net upload", async () => {
+    show();
+    await flush();
+    change({ useTwomass: false, maxSipOrder: 4 });
+    plateSolveMock.mockRejectedValueOnce(
+      new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", { canFallback: true, apiKeyStored: true }),
+    );
+    plateSolveMock.mockResolvedValueOnce(SOLVE_RESULT);
+    const failed = await solveOnce();
+    expect(sent(0)).toMatchObject({ solver: "auto", useTwomass: false, maxSipOrder: 4 });
+    (fallbackBlock(failed)!.onFallback as () => void)();
+    await flush();
+    expect(sent(1)).toMatchObject({ solver: "astrometry.net", useTwomass: undefined, maxSipOrder: undefined });
+  });
+
+  it("names 2MASS off and the SIP order cap next to Plate Solve", async () => {
+    show();
+    await flush();
+    change({ useTwomass: false, maxSipOrder: 3 });
+    expect(solveActions(show())!.summary).toBe(
+      "Offline: Tycho-2, 2MASS off, then online Gaia DR3, SIP up to 3, astrometry.net offered after a failure",
+    );
+  });
+
+  it("tells the block that 2MASS is missing only while the catalogue list lacks it", async () => {
+    show();
+    await flush();
+    expect(optionsBlock(show())!.twomassMissing).toBe(false);
+    catalogState.reports = [TYCHO2_REPORT];
+    expect(optionsBlock(show())!.twomassMissing).toBe(true);
+    catalogState.reports = null;
+    expect(optionsBlock(show())!.twomassMissing).toBe(false);
+  });
+});
+
+describe("Solve options block and summary line", () => {
+  const noop = () => {};
+  const TWOMASS_MISSING_TEXT = "2MASS is not installed: add the 2MASS star cut in Settings > Catalogs.";
+  const TWOMASS_MISSING_PATTERN = TWOMASS_MISSING_TEXT.replace(/[.()]/g, "\\$&");
+
+  it("describes the Plate Solve button with the summary line", () => {
+    const summary = "Offline: Tycho-2, online off, no astrometry.net";
+    const props = { loading: false, disabled: false, elapsedMs: 0, timeoutSecs: 120, onSolve: noop, onCancel: noop };
+    const markup = renderToStaticMarkup(createElement(SolveActions, { ...props, summary }));
+    const id = markup.match(/<div id="([^"]+)"[^>]*data-solve-summary="true"[^>]*>([^<]*)<\/div>/);
+    expect(id, "summary line").not.toBeNull();
+    expect(id![2]).toBe(summary);
+    expect(buttonEndingWith(markup, "Plate Solve")).toContain(`aria-describedby="${id![1]}"`);
+    expect(renderToStaticMarkup(createElement(SolveActions, props))).not.toContain("aria-describedby");
+  });
+
+  it("keeps the options folded under a Solve options summary, with the toggles, radius and hints labelled in English", () => {
+    const markup = unescapeHtml(renderToStaticMarkup(createElement(SolveOptionsBlock, { options: DEFAULT_SOLVE_OPTIONS, onOptionsChange: noop })));
+    expect(markup).toMatch(/<details[^>]*data-solve-options="true"[^>]*><summary[^>]*>Solve options<\/summary>/);
+    expect(markup).not.toMatch(/<details[^>]*\sopen=""/);
+    expect(markup).toContain('aria-label="Use online Gaia (tier 2)"');
+    expect(markup).toContain('aria-label="Offer astrometry.net after a failure"');
+    expect(markup).toContain("the image is not uploaded");
+    expect(markup).toMatch(/<label[^>]*>Search radius \(deg\)<\/label>/);
+    expect(markup).toContain('placeholder="3"');
+    expect(markup).toMatch(/<label[^>]*>Hints<\/label>/);
+    expect(markup).toMatch(/<option value="header" selected="">From each header<\/option>/);
+    expect(markup).toMatch(/<option value="typed">Keep typed values<\/option>/);
+    expect(markup).not.toContain('role="alert"');
+  });
+
+  it("says the solve stays offline, explains typed hints and names a bad radius", () => {
+    const options = { ...DEFAULT_SOLVE_OPTIONS, onlineGaia: false, hints: "typed", searchRadius: "20" };
+    const markup = unescapeHtml(renderToStaticMarkup(createElement(SolveOptionsBlock, { options, onOptionsChange: noop } as never)));
+    expect(markup).toContain("Offline catalogues only: the solve never goes online.");
+    expect(markup).toContain("Typed hint fields stay for every image and after a restart");
+    expect(markup).toMatch(/<div role="alert"[^>]*>Search radius: Use a value from 0 to 15<\/div>/);
+  });
+
+  const twomassSwitch = (markup: string) => {
+    const button = markup.match(/<button[^>]*aria-label="Use 2MASS \(tier 1\)"[^>]*>/);
+    expect(button, "Use 2MASS (tier 1) switch").not.toBeNull();
+    return button![0];
+  };
+
+  it("offers the 2MASS switch and the SIP order cap, on and Auto by default, with what Auto does", () => {
+    const markup = unescapeHtml(renderToStaticMarkup(createElement(SolveOptionsBlock, { options: DEFAULT_SOLVE_OPTIONS, onOptionsChange: noop })));
+    expect(twomassSwitch(markup)).toContain('aria-checked="true"');
+    expect(twomassSwitch(markup)).not.toMatch(/\sdisabled=""/);
+    expect(markup).not.toContain(TWOMASS_MISSING_TEXT);
+    expect(markup).toMatch(/<label[^>]*>Max SIP order<\/label>/);
+    expect(markup).toMatch(
+      /<option value="auto" selected="">Auto<\/option><option value="2">2<\/option><option value="3">3<\/option><option value="4">4<\/option>/,
+    );
+    expect(markup).toContain("Auto allows 3, or 4 when the field's long side is 5 degrees or more");
+  });
+
+  it("keeps the 2MASS switch still and says how to add 2MASS while it is not installed", () => {
+    const options = { ...DEFAULT_SOLVE_OPTIONS, maxSipOrder: 3 };
+    const markup = unescapeHtml(renderToStaticMarkup(createElement(SolveOptionsBlock, { options, onOptionsChange: noop, twomassMissing: true } as never)));
+    const button = twomassSwitch(markup);
+    expect(button).toMatch(/\sdisabled=""/);
+    const note = markup.match(new RegExp(`<div id="([^"]+)"[^>]*>${TWOMASS_MISSING_PATTERN}</div>`));
+    expect(note, "missing 2MASS note").not.toBeNull();
+    expect(button).toContain(`aria-describedby="${note![1]}"`);
+    expect(markup).toMatch(/<option value="3" selected="">3<\/option>/);
+  });
+
+  it("sends the 2MASS switch and the SIP order the block changes", () => {
+    const changes: unknown[] = [];
+    const wasActive = hooks.run.active;
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    try {
+      const block = renderTree(SolveOptionsBlock as unknown as Component, {
+        options: DEFAULT_SOLVE_OPTIONS,
+        onOptionsChange: (change: unknown) => void changes.push(change),
+      });
+      (findElement(block, (props) => props.label === "Use 2MASS (tier 1)")!.onChange as (on: boolean) => void)(false);
+      const select = findElement(block, (props) => typeof props.title === "string" && props.title.startsWith("Highest SIP"))!;
+      expect(select.value).toBe("auto");
+      for (const value of ["4", "2", "auto"]) (select.onChange as (e: { target: { value: string } }) => void)({ target: { value } });
+    } finally {
+      hooks.run.active = wasActive;
+    }
+    expect(changes).toEqual([{ useTwomass: false }, { maxSipOrder: 4 }, { maxSipOrder: 2 }, { maxSipOrder: "auto" }]);
   });
 });
 

@@ -8,7 +8,9 @@ import {
 } from "../../utils/dockLayout";
 import { dockStore } from "../../hooks/useDockLayout";
 import { useMeasurementLog } from "../../hooks/useMeasurementLog";
+import { stripButtonHint } from "../../utils/dockOnboarding";
 import { DOCK_TOOLS } from "./toolRegistry";
+import { dockOnboardingStore } from "./dockOnboardingStore";
 import { useDockDragState, type StripButtonDragProps } from "./useDockDrag";
 
 export interface StripeProps {
@@ -78,7 +80,7 @@ export default function Stripe({ side, layout, hasFile, buttonProps, onContextMe
         aria-pressed={isActive}
         aria-haspopup="menu"
         aria-disabled={disabled ? true : undefined}
-        title={label}
+        title={stripButtonHint(label, { open: isActive, disabled })}
         aria-label={label}
         className={`ab-dock-strip-btn${isActive ? " ab-dock-strip-btn-active" : ""}${badge ? " relative" : ""}`}
         style={isActive ? ({ "--strip-accent": meta.accent } as React.CSSProperties) : undefined}
@@ -86,6 +88,7 @@ export default function Stripe({ side, layout, hasFile, buttonProps, onContextMe
         onClick={() => {
           if (disabled) return;
           dockStore.dispatch({ type: "toggle", tool });
+          dockOnboardingStore.stripToggled(tool);
         }}
         onContextMenu={(e) => {
           e.preventDefault();

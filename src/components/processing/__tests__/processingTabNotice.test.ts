@@ -68,6 +68,11 @@ function runButtons(html: string): { label: string; describedBy: string | null; 
   return buttons;
 }
 
+function tabLevel(html: string): string {
+  const panels = html.indexOf('<div class="flex-1 overflow-y-auto">');
+  return panels < 0 ? html : html.slice(0, panels);
+}
+
 function panelRunButtons(html: string) {
   const buttons = runButtons(html);
   return PANEL_RUN_LABELS.map((prefix) => {
@@ -88,10 +93,14 @@ describe("ProcessingTab RGB FITS notice", () => {
     }
   });
 
-  it("renders no notice and no aria-describedby for a mono file", async () => {
+  it("renders no notice for a mono file and describes only LHE and HDRMT, by their own non-linear input notes", async () => {
     const html = await renderTab(false);
-    expect(html).not.toContain('role="note"');
-    expect(html).not.toContain("aria-describedby");
-    expect(panelRunButtons(html)).toHaveLength(PANEL_RUN_LABELS.length);
+    expect(tabLevel(html)).not.toContain('role="note"');
+    expect(html).not.toContain(RGB_FITS_NOTICE);
+    const [lheNote, hdrNote] = [...html.matchAll(/<div id="([^"]+)" role="note" data-non-linear-input=""/g)].map((m) => m[1]);
+    expect(lheNote).toBeTruthy();
+    expect(hdrNote).toBeTruthy();
+    const described: Record<string, string> = { "Run Local Contrast": lheNote, "Run HDRMT": hdrNote };
+    expect(panelRunButtons(html).map((b) => b.describedBy)).toEqual(PANEL_RUN_LABELS.map((label) => described[label] ?? null));
   });
 });

@@ -1,15 +1,21 @@
 import { describe, it, expect } from "vitest";
 import {
+  ALIGN_FALLBACK_LABEL,
+  ALIGN_METHOD_LABEL,
+  ALIGN_METHODS,
   ALIGN_REF_AUTO,
   ALIGN_REF_AUTO_LABEL,
   alignChannelNote,
+  alignMethodChoiceLabel,
+  alignMethodSelectLabel,
   alignNoWcsNote,
   alignNoWcsPairNote,
+  alignPlanChips,
   alignReferenceIndex,
   alignWcsNote,
 } from "../alignNotes";
 import { formatAlignOffset } from "../wizard";
-import type { AlignedChannel } from "../../shared/types/compose";
+import type { AlignedChannel, AlignPlan } from "../../shared/types/compose";
 
 const CDP_AUTO_NOTE =
   /reprojected through WCS \(scale x2\.01\d\d, rotation \+0\.4\d°\); residual Δx [+−-]?\d\.\d px\s+Δy [+−-]?\d\.\d px/;
@@ -177,5 +183,74 @@ describe("alignReferenceIndex", () => {
   it("labels the automatic option", () => {
     expect(ALIGN_REF_AUTO).toBe("auto");
     expect(ALIGN_REF_AUTO_LABEL).toBe("Auto (finest pixel scale)");
+  });
+});
+
+function planOf(referenceIndex: number, rule: AlignPlan["reference_rule"], channels: [boolean, boolean][]): AlignPlan {
+  return {
+    channels: channels.map(([has_wcs, reprojected]) => ({ has_wcs, reprojected })),
+    reference_index: referenceIndex,
+    reference_rule: rule,
+  };
+}
+
+describe("align methods", () => {
+  it("lists the two registration methods with the select's labels", () => {
+    expect(ALIGN_METHODS.map((m) => `${m.label} (${m.detail})`)).toEqual(["Phase Correlation (sub-pixel)", "Star-based Affine (rotation)"]);
+    expect(ALIGN_METHODS.map((m) => m.value)).toEqual(["phase_correlation", "affine"]);
+  });
+
+  it("names a method by its select label and passes an unknown one through", () => {
+    expect(alignMethodChoiceLabel("phase_correlation")).toBe("Phase Correlation");
+    expect(alignMethodChoiceLabel("affine")).toBe("Star-based Affine");
+    expect(alignMethodChoiceLabel("rigid")).toBe("rigid");
+  });
+});
+
+describe("alignPlanChips", () => {
+  const M16 = ["SII", "Hα", "OIII"];
+
+  it("marks the reference Auto chose and the channels reprojected through their WCS pair", () => {
+    const chips = alignPlanChips(planOf(1, "finest_wcs", [[true, true], [true, false], [true, true]]), M16, "phase_correlation");
+    expect(chips?.map((c) => [c.kind, c.text])).toEqual([["wcs", "WCS"], ["reference", "reference"], ["wcs", "WCS"]]);
+    expect(chips?.[1].title).toBe("Reference: the finest WCS pixel scale (Auto)");
+    expect(chips?.[0].title).toBe("Reprojected onto Hα through the celestial WCS of both");
+  });
+
+  it("names the fallback method on every row a reference without a WCS leaves without a pair", () => {
+    const plan = planOf(0, "selected", [[false, false], [true, false], [true, false]]);
+    const chips = alignPlanChips(plan, M16, "phase_correlation");
+    expect(chips?.map((c) => c.text)).toEqual(["reference", "no WCS pair: Phase Correlation", "no WCS pair: Phase Correlation"]);
+    expect(chips?.[0].title).toBe("Reference you selected");
+    expect(chips?.[1].title).toBe("No celestial WCS in the reference SII; resampled by array size and registered by Phase Correlation");
+    expect(alignPlanChips(plan, M16, "affine")?.[2].text).toBe("no WCS pair: Star-based Affine");
+  });
+
+  it("says which side of the pair lacks the WCS", () => {
+    const own = alignPlanChips(planOf(0, "finest_wcs", [[true, false], [false, false], [true, true]]), M16, "affine");
+    expect(own?.[1].title).toBe("No celestial WCS in Hα; resampled by array size and registered by Star-based Affine");
+    const neither = alignPlanChips(planOf(0, "first", [[false, false], [false, false]]), ["R", "G"], "phase_correlation");
+    expect(neither?.[0].title).toBe("Reference: the first channel, since no channel has a celestial WCS (Auto)");
+    expect(neither?.[1].title).toBe("No celestial WCS in G or the reference R; resampled by array size and registered by Phase Correlation");
+  });
+
+  it("shows nothing for a missing plan or one that does not describe these channels", () => {
+    expect(alignPlanChips(null, M16, "phase_correlation")).toBeNull();
+    expect(alignPlanChips(planOf(0, "finest_wcs", [[true, false], [true, true]]), M16, "phase_correlation")).toBeNull();
+    expect(alignPlanChips(planOf(3, "selected", [[true, false], [true, true], [true, true]]), M16, "phase_correlation")).toBeNull();
+    expect(alignPlanChips(planOf(-1, "selected", [[true, false], [true, true], [true, true]]), M16, "phase_correlation")).toBeNull();
+  });
+});
+
+describe("alignMethodSelectLabel", () => {
+  it("calls the method select the fallback once a channel will be reprojected through WCS", () => {
+    expect(ALIGN_FALLBACK_LABEL).toBe("Fallback (channels without a WCS pair)");
+    expect(alignMethodSelectLabel(alignPlanChips(planOf(1, "finest_wcs", [[true, true], [true, false]]), ["Hα", "OIII"], "affine"))).toBe(ALIGN_FALLBACK_LABEL);
+  });
+
+  it("keeps the plain label when no pair has a WCS or no plan is known", () => {
+    expect(ALIGN_METHOD_LABEL).toBe("Method");
+    expect(alignMethodSelectLabel(alignPlanChips(planOf(1, "selected", [[true, false], [false, false]]), ["Hα", "OIII"], "affine"))).toBe("Method");
+    expect(alignMethodSelectLabel(null)).toBe("Method");
   });
 });

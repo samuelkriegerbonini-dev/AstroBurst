@@ -126,8 +126,14 @@ describe("EXAMPLE_EXPRESSIONS", () => {
       "(A + B + C) / 3",
       "~$T",
       "rescale($T, min($T), max($T), 0, 1)",
-      "$T * (A / med(A))",
+      "$T / (A / med(A))",
     ]);
+  });
+
+  it("flat-fields by dividing by the median-normalized flat A, as calibration does", () => {
+    const flat = EXAMPLE_EXPRESSIONS.find((e) => e.label.startsWith("Flat-field"));
+    expect(flat?.expression).toBe("$T / (A / med(A))");
+    expect(flat?.label).toBe("Flat-field (divide by the normalized flat A)");
   });
 });
 

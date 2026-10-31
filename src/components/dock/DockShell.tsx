@@ -309,7 +309,7 @@ export default function DockShell({ tools, children }: DockShellProps) {
       <Stripe side="right" layout={layout} hasFile={hasFile} buttonProps={buttonProps} onContextMenu={openMenu} />
       <ToolHostRoot tools={tools} containers={containers} layout={layout} open={open} shown={shown} hasFile={hasFile} fileKey={fileKey} />
       <DragOverlay />
-      <DockOnboarding rootRef={rootRef} />
+      <DockOnboarding rootRef={rootRef} layout={layout} hasFile={hasFile} />
       <DockContextMenu request={menu} onClose={closeMenu} />
       <LiveRegion />
     </div>

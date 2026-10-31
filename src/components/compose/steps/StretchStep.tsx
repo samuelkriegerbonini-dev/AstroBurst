@@ -3,6 +3,8 @@ import type { WizardState } from "../wizard";
 import {
   autoStfBlockedReason,
   channelStretchInput,
+  discardsNotice,
+  rerunDiscards,
   resolveChannelPath,
   singleChannelBinId,
   starRemovalNote,
@@ -11,9 +13,10 @@ import {
   type CompositeOp,
   type StretchRunSummaryInput,
 } from "../../../utils/wizard";
+import { hasStretchBake, sameStfParams, STRETCH_COMMIT_LINE, stretchCommitState } from "../../../utils/stretchCommitState";
 import { Slider, RunButton, Toggle } from "../../ui";
 import { restretchComposite, renderLinearCompositePreview } from "../../../services/compose";
-import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStretchComposite, applyGhsStretch, ghsStretchComposite, removeStars, removeStarsComposite } from "../../../services/processing";
+import { maskedStretch, applyArcsinhStretch, maskedStretchComposite, arcsinhStretchComposite, applyGhsStretch, ghsStretchComposite, removeStars, removeStarsComposite, GHS_DEFAULTS, GHS_LIMITS } from "../../../services/processing";
 import type { StarRemovalResult } from "../../../services/processing";
 import { getPreviewUrl } from "../../../infrastructure/tauri";
 import { getOutputDir } from "../../../infrastructure/tauri";
@@ -33,7 +36,7 @@ interface StretchStepProps {
   onStretchChange: (mode: WizardState["stretchMode"], factor?: number, target?: number) => void;
   onMaskParams: (growth: number, protection: number) => void;
   onMask: (path: string | null) => void;
-  onResult: (png: string | null, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }) => void;
+  onResult: (png: string | null, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }, bakedStf?: CompositeStfTriple | null) => void;
   onChannelOutput: (binId: string, stage: "starless" | "stretched", value: ChannelStage) => void;
   onCompositeOp: (op: CompositeOp) => void;
   onPreview?: (url: string, stf?: { r: ChannelStf; g: ChannelStf; b: ChannelStf }) => void;
@@ -65,6 +68,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   const {
     compositeAutoStfR, compositeAutoStfG, compositeAutoStfB,
     compositeStfR, compositeStfG, compositeStfB, compositeStfLinked,
+    wizardStfR, wizardStfG, wizardStfB, wizardStfLinked,
   } = useCompositeStf();
   const { setCompositeStf, setCompositeStfLinked } = useCompositeActions();
   const linked = compositeStfLinked;
@@ -86,31 +90,29 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
   const [srLoading, setSrLoading] = useState(false);
   const [srResult, setSrResult] = useState<StarRemovalResult | null>(null);
   const [srError, setSrError] = useState("");
-  const [ghsD, setGhsD] = useState(2.0);
-  const [ghsB, setGhsB] = useState(0.0);
-  const [ghsSp, setGhsSp] = useState(0.01);
-  const [ghsLp, setGhsLp] = useState(0.0);
-  const [ghsHp, setGhsHp] = useState(1.0);
-  const [stfR, setStfR] = useState<ChannelStf>(() => ({ ...(compositeAutoStfR ?? DEFAULT_STF) }));
-  const [stfG, setStfG] = useState<ChannelStf>(() => ({ ...(compositeAutoStfG ?? compositeAutoStfR ?? DEFAULT_STF) }));
-  const [stfB, setStfB] = useState<ChannelStf>(() => ({ ...(compositeAutoStfB ?? compositeAutoStfR ?? DEFAULT_STF) }));
-  const prevAutoStf = useRef<ChannelStf | null>(compositeAutoStfR);
+  const [ghsD, setGhsD] = useState(GHS_DEFAULTS.stretchFactor);
+  const [ghsB, setGhsB] = useState(GHS_DEFAULTS.localIntensity);
+  const [ghsSp, setGhsSp] = useState(GHS_DEFAULTS.symmetryPoint);
+  const [ghsLp, setGhsLp] = useState(GHS_DEFAULTS.shadowProtect);
+  const [ghsHp, setGhsHp] = useState(GHS_DEFAULTS.highlightProtect);
+  const [stfR, setStfR] = useState<ChannelStf>(() => ({ ...wizardStfR }));
+  const [stfG, setStfG] = useState<ChannelStf>(() => ({ ...wizardStfG }));
+  const [stfB, setStfB] = useState<ChannelStf>(() => ({ ...wizardStfB }));
+  const seededStf = useRef({ r: wizardStfR, g: wizardStfG, b: wizardStfB });
 
   useEffect(() => {
-    if (!compositeAutoStfR) return;
-    if (prevAutoStf.current === compositeAutoStfR) return;
-    prevAutoStf.current = compositeAutoStfR;
-    const r = compositeAutoStfR as ChannelStf;
-    const g = (compositeAutoStfG ?? compositeAutoStfR) as ChannelStf;
-    const b = (compositeAutoStfB ?? compositeAutoStfR) as ChannelStf;
-    setStfR({ ...r });
-    setStfG({ ...g });
-    setStfB({ ...b });
-  }, [compositeAutoStfR, compositeAutoStfG, compositeAutoStfB]);
+    const seeded = seededStf.current;
+    if (sameStfParams(seeded.r, wizardStfR) && sameStfParams(seeded.g, wizardStfG) && sameStfParams(seeded.b, wizardStfB)) return;
+    seededStf.current = { r: wizardStfR, g: wizardStfG, b: wizardStfB };
+    setStfR({ ...wizardStfR });
+    setStfG({ ...wizardStfG });
+    setStfB({ ...wizardStfB });
+  }, [wizardStfR, wizardStfG, wizardStfB]);
 
   const handleLinkedChange = useCallback((v: boolean) => {
     setCompositeStfLinked(v);
     if (v) {
+      seededStf.current = { r: compositeStfR, g: compositeStfR, b: compositeStfR };
       setCompositeStf(compositeStfR, compositeStfR, compositeStfR);
       setStfG({ ...stfR });
       setStfB({ ...stfR });
@@ -236,7 +238,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
       if (state.compositeReady) {
         const url = res?.png_path ? await getPreviewUrl(res.png_path) : res?.previewUrl ?? null;
-        if (url) onResult(url, stfBundle);
+        if (url) onResult(url, stfBundle, state.stretchMode === "auto_stf" ? { ...stfBundle, linked } : null);
       } else if (binId && input && res) {
         await publishChannelOutput(runKey, binId, "stretched", input, res, note, title);
       }
@@ -296,6 +298,20 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
   const isSaturated = state.compositeReady && (state.wbR > 1.3 || state.wbG > 1.3 || state.wbB > 1.3);
 
+  const hasBake = hasStretchBake(state);
+  const committedStf = hasBake ? state.bakedStf : { r: wizardStfR, g: wizardStfG, b: wizardStfB, linked: wizardStfLinked };
+  const sliderStf = linked ? { r: stfR, g: stfR, b: stfR, linked } : { r: stfR, g: stfG, b: stfB, linked };
+  const commitState = stretchCommitState(committedStf, sliderStf, hasBake, !!state.completedSteps.adjust);
+  const commitLine = state.stretchMode === "auto_stf" && state.compositeReady ? STRETCH_COMMIT_LINE[commitState] : null;
+  const discards = discardsNotice("Apply stretch", rerunDiscards(state, "stretch"));
+
+  const ghsInput = channelBinId ? channelStretchInput(state, channelBinId) : null;
+  const ghsHistogramChannels = state.compositeReady
+    ? HIST_RGB
+    : ghsInput
+      ? [{ key: ghsInput, color: state.bins.find((b) => b.id === channelBinId)?.color ?? "#f59e0b" }]
+      : [];
+
   const channelSuffix = channelLabel ? ` · ${channelLabel}` : "";
   const runLabel =
     state.stretchMode === "masked"
@@ -305,7 +321,7 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
         : state.stretchMode === "ghs"
           ? `Apply GHS Stretch${channelSuffix}`
           : state.compositeReady
-            ? "Re-stretch Composite"
+            ? "Apply stretch"
             : "Apply Auto STF";
 
   return (
@@ -418,25 +434,26 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
 
       {state.stretchMode === "ghs" && (
         <div className="flex flex-col gap-2">
-          <Slider label="Stretch (D)" value={ghsD} min={0} max={50} step={0.05} accent="amber"
+          {ghsHistogramChannels.length > 0 && <StfHistogram channels={ghsHistogramChannels} symmetryPoint={ghsSp} />}
+          <Slider label="Stretch (D)" value={ghsD} {...GHS_LIMITS.stretchFactor} accent="amber"
                   format={(v) => v.toFixed(2)} onChange={setGhsD} />
-          <Slider label="Local Intensity (b)" value={ghsB} min={-5} max={15} step={0.1} accent="amber"
+          <Slider label="Local Intensity (b)" value={ghsB} {...GHS_LIMITS.localIntensity} accent="amber"
                   format={(v) => v.toFixed(1)} onChange={setGhsB} />
-          <Slider label="Symmetry Point (SP)" value={ghsSp} min={0} max={1} step={0.001} accent="amber"
+          <Slider label="Symmetry Point (SP)" value={ghsSp} {...GHS_LIMITS.symmetryPoint} accent="amber"
                   format={(v) => v.toFixed(3)}
                   onChange={(v) => {
                     setGhsSp(v);
                     if (ghsLp > v) setGhsLp(v);
                     if (ghsHp < v) setGhsHp(v);
                   }} />
-          <Slider label="Shadow Protect (LP)" value={ghsLp} min={0} max={1} step={0.001} accent="amber"
+          <Slider label="Shadow Protect (LP)" value={ghsLp} {...GHS_LIMITS.shadowProtect} accent="amber"
                   format={(v) => v.toFixed(3)} onChange={(v) => setGhsLp(Math.min(v, ghsSp))} />
-          <Slider label="Highlight Protect (HP)" value={ghsHp} min={0} max={1} step={0.001} accent="amber"
+          <Slider label="Highlight Protect (HP)" value={ghsHp} {...GHS_LIMITS.highlightProtect} accent="amber"
                   format={(v) => v.toFixed(3)} onChange={(v) => setGhsHp(Math.max(v, ghsSp))} />
           <div className="text-[9px] text-zinc-600">
-            On linear data set SP near the background (~0.005&ndash;0.02) then raise D; an SP above the faint signal leaves it black.
-            b&lt;0 super-stretches faint signal (b=-1 log), b=0 exponential, b&gt;0 focuses contrast near SP.
-            LP/HP keep shadows/highlights linear.
+            On linear data set SP near the background (often 0.002 to 0.02), then raise D; an SP above the faint signal leaves it black.
+            b below 0 lifts faint signal hardest (b = -1 is logarithmic), b = 0 is exponential, b above 0 focuses contrast near SP.
+            LP and HP keep shadows and highlights linear.
           </div>
         </div>
       )}
@@ -497,6 +514,11 @@ export default function StretchStep({ state, onStretchChange, onMaskParams, onMa
           {autoStfBlocked}
         </div>
       )}
+
+      {commitLine && (
+        <div className={`text-[10px] ${commitState === "changed" ? "text-amber-400/90" : "text-zinc-400"}`}>{commitLine}</div>
+      )}
+      {discards && !loading && <div className="text-[9px] text-amber-400/80">{discards}</div>}
 
       <div className="flex items-center gap-2">
         <div className="flex-1">

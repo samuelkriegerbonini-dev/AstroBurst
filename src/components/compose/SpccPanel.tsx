@@ -3,8 +3,10 @@ import { spccCalibrate } from "../../services/processing";
 import { RunButton, ResultGrid, ErrorAlert, SectionHeader, DecimalField } from "../ui";
 import { spccResultWavelengths, spccWavelengthsLine, type SpccTriplet } from "../../utils/spccWavelengths";
 import { decimalFieldState, type DecimalFieldOptions } from "../../utils/decimalText";
-import { wcsSourceLabel } from "../../utils/solvedWcs";
+import { solveTargetMissing, spccWcsStatus, type SpccHeaderWcs } from "../../utils/solvedWcs";
 import { spccSyntheticNotice, type SpccCatalogChoice } from "../../utils/spccCatalog";
+import { useHeaderWcs } from "../../hooks/useHeaderWcs";
+import { solveInAstrometry } from "./solveInAstrometry";
 
 interface SpccResult {
   r_factor?: number;
@@ -27,6 +29,7 @@ interface SpccPanelProps {
   bPath: string | null;
   wcsPath?: string | null;
   wcsReason?: string | null;
+  headerWcs?: SpccHeaderWcs | null;
   wavelengthsNm: SpccTriplet | null;
   onFactorsReady?: (r: number, g: number, b: number) => void;
 }
@@ -39,7 +42,6 @@ const WHITE_REFS = [
 
 const CATALOGS = [
   { value: "gaia", label: "Gaia DR3 (VizieR, online)" },
-  { value: "builtin", label: "Built-in (synthetic)" },
 ] as const;
 
 const MIN_SNR_FIELD: DecimalFieldOptions = { min: 5, max: 100 };
@@ -51,7 +53,7 @@ const ICON = (
   </svg>
 );
 
-export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, wavelengthsNm, onFactorsReady }: SpccPanelProps) {
+export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, headerWcs, wavelengthsNm, onFactorsReady }: SpccPanelProps) {
   const whiteRefId = useId();
   const catalogId = useId();
   const minSnrId = useId();
@@ -62,9 +64,17 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, wav
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<SpccResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [solveNote, setSolveNote] = useState<string | null>(null);
 
   const minSnr = decimalFieldState(minSnrText, MIN_SNR_FIELD).value;
-  const canRun = rPath && gPath && bPath;
+  const probe = useHeaderWcs(wcsPath ? null : headerWcs?.path ?? null);
+  const wcs = spccWcsStatus({ reason: wcsReason ?? null, header: headerWcs ?? null }, wcsPath ?? null, probe);
+  const channelsReady = rPath && gPath && bPath;
+  const canRun = channelsReady && !wcs.runBlocked;
+
+  const handleSolve = useCallback((path: string) => {
+    setSolveNote(solveInAstrometry(path) ? null : solveTargetMissing(path));
+  }, []);
 
   const handleRun = useCallback(async () => {
     if (!rPath || !gPath || !bPath || minSnr === null) return;
@@ -95,19 +105,29 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, wav
     <div className="flex flex-col gap-3 p-3 border border-cyan-800/20 bg-cyan-900/5 rounded-lg">
       <SectionHeader icon={ICON} title="SPCC" subtitle="Color calibration (blackbody approximation)" />
 
-      {!canRun && (
+      {!channelsReady && (
         <div className="text-[10px] text-zinc-500 italic">
-          Assign R, G, B channels above. Plate Solve required for WCS.
+          Assign R, G, B channels above.
         </div>
       )}
 
       <div data-testid="spcc-wavelengths" className="text-[10px] text-zinc-500">{spccWavelengthsLine(wavelengthsNm)}</div>
 
-      {wcsReason ? (
-        <div data-testid="spcc-wcs" className="text-[10px] text-amber-400/90">{wcsReason}</div>
-      ) : wcsPath ? (
-        <div data-testid="spcc-wcs" className="text-[10px] text-zinc-500" title={wcsPath}>{wcsSourceLabel(wcsPath)}</div>
-      ) : null}
+      {wcs.line && (
+        <div data-testid="spcc-wcs" className={`text-[10px] ${wcs.warning ? "text-amber-400/90" : "text-zinc-500"}`} title={wcs.title ?? undefined}>{wcs.line}</div>
+      )}
+      {wcs.note && <div data-testid="spcc-wcs-note" className="text-[10px] text-amber-400/90">{wcs.note}</div>}
+      {wcs.solvePath && (
+        <div className="flex flex-col items-start gap-1">
+          <button
+            type="button"
+            onClick={() => wcs.solvePath && handleSolve(wcs.solvePath)}
+            title={`Select ${wcs.solvePath} in Files and open the Astrometry tool to plate solve it, then click Write WCS`}
+            className="px-2 py-0.5 rounded text-[10px] font-medium bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25"
+          >Solve R channel</button>
+          {solveNote && <div className="text-[10px] text-amber-400/90">{solveNote}</div>}
+        </div>
+      )}
 
       <div className="flex items-center justify-between">
         <label htmlFor={whiteRefId} className="text-xs text-zinc-400">White Reference</label>

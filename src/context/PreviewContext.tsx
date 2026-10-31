@@ -16,6 +16,7 @@ import { detectNarrowbandFilters } from "../services/header";
 import type { NarrowbandDetection, NarrowbandFilterDetection } from "../services/header";
 import { fileStore } from "../hooks/useFileStore";
 import { FILE_STATUS } from "../utils/constants";
+import { sortByFrameKind } from "../utils/frameKind";
 import { resetRampIntegration } from "../hooks/useRampStore";
 import { rampOpenPlan } from "../utils/rampLabels";
 import type { CubeInfoWithRamp, RampInfo, RampSource } from "../shared/types/ramp";
@@ -762,8 +763,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, [displayColormap]);
 
   useEffect(() => {
-    if (doneFiles.length < 2) return;
-    const paths = doneFiles.map((f) => f.path);
+    const lights = sortByFrameKind(doneFiles).lights;
+    if (lights.length < 2) return;
+    const paths = lights.map((f) => f.path);
     const key = paths.join("|") + "|" + selectedPalette;
     if (key === narrowbandKeyRef.current) return;
     let timer = 0;

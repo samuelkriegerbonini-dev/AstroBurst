@@ -137,7 +137,7 @@ describe("services_call_run_op_with_image_key_and_input_path", () => {
     await recordArcsinhStretch(SCOPE, INPUT, 50);
     expectRecorded(INPUT, { op: "arcsinh", v: 1, factor: 50 });
     await recordGhsStretch(SCOPE, INPUT, { stretchFactor: 5, localIntensity: 2 });
-    expectRecorded(INPUT, { op: "ghs", v: 1, d: 5, b: 2, sp: 0.05, lp: 0, hp: 1 });
+    expectRecorded(INPUT, { op: "ghs", v: 1, d: 5, b: 2, sp: 0.01, lp: 0, hp: 1 });
   });
 
   it("recordMaskedStretch sends masked_stretch with the engine defaults for the fields the panel does not set", async () => {
@@ -191,6 +191,29 @@ describe("services_call_run_op_with_image_key_and_input_path", () => {
     expect(res.levels_applied).toBe(true);
     await recordToneFile(SCOPE, INPUT, { curve: [{ x: 0, y: 0 }, { x: 0.5, y: 0.7 }, { x: 1, y: 1 }] });
     expectRecorded(INPUT, { op: "tone", v: 1, curve: { points: [[0, 0], [0.5, 0.7], [1, 1]] } });
+  });
+
+  it("the masked steps send the chosen mask to run_op_cmd, by id or as a recipe", async () => {
+    const recipe = { kind: "range" as const, lo: 0.2, hi: 0.8, feather_px: 0, invert: false };
+    withPreviewMock.mockResolvedValue(runResponse("n0006"));
+    const masked: [string, () => Promise<unknown>][] = [
+      ["tone", () => recordToneFile(SCOPE, INPUT, { levels: { black: 0.1, gamma: 1, white: 0.9 } }, "m01")],
+      ["lhe", () => recordLhe(SCOPE, INPUT, { kernelRadius: 64, contrastLimit: 2, amount: 1, histBits: 8, circular: true }, "m01")],
+      ["hdrmt", () => recordHdrmt(SCOPE, INPUT, { layers: 6, iterations: 1, overdrive: 0, inverted: false, toLightness: true, deringing: false, deringingAmount: 0.5 }, "m01")],
+      ["wavelet_denoise", () => recordWaveletDenoise(SCOPE, INPUT, {}, "m01")],
+      ["rl_deconv", () => recordDeconvolveRL(SCOPE, INPUT, {}, "m01")],
+      ["arcsinh", () => recordArcsinhStretch(SCOPE, INPUT, 50, "m01")],
+      ["ghs", () => recordGhsStretch(SCOPE, INPUT, { stretchFactor: 5 }, "m01")],
+      ["pixelmath", () => recordPixelMath(SCOPE, INPUT, "$T * 2", {}, "m01")],
+    ];
+    for (const [op, send] of masked) {
+      await send();
+      expect(lastRun().args).toMatchObject({ op: { op }, mask: "m01" });
+    }
+    await recordLhe(SCOPE, INPUT, { kernelRadius: 64, contrastLimit: 2, amount: 1, histBits: 8, circular: true }, recipe);
+    expect(lastRun().args.mask).toEqual(recipe);
+    await recordLhe(SCOPE, INPUT, { kernelRadius: 64, contrastLimit: 2, amount: 1, histBits: 8, circular: true }, null);
+    expect(lastRun().args).not.toHaveProperty("mask");
   });
 });
 

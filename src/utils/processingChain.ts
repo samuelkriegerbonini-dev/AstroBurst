@@ -28,6 +28,44 @@ const STAGE: Record<ChainStep, number> = {
   pixelMath: 6,
 };
 
+export function stageOf(step: ChainStep): number {
+  return STAGE[step];
+}
+
+export interface StepLabel {
+  step: ChainStep;
+  label: string;
+}
+
+export function stepsReplacedBy(entries: readonly StepLabel[], running: StepLabel): string[] {
+  const stage = stageOf(running.step);
+  return entries.filter((e) => stageOf(e.step) >= stage && e.label !== running.label).map((e) => e.label);
+}
+
+function joinLabels(labels: readonly string[]): string {
+  if (labels.length <= 1) return labels.join("");
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
+
+export function replacedStepsNote(entries: readonly StepLabel[], running: StepLabel, composite: boolean): string | null {
+  const replaced = stepsReplacedBy(entries, running);
+  if (replaced.length === 0) return null;
+  const stage = stageOf(running.step);
+  const earlier = entries.filter((e) => stageOf(e.step) < stage);
+  const from = earlier[earlier.length - 1]?.label ?? (composite ? "the composite" : "the original");
+  const shared = entries.filter((e) => stageOf(e.step) === stage && e.label !== running.label).map((e) => e.label);
+  const again = entries.some((e) => e.label === running.label) ? " again" : "";
+  const list = joinLabels(replaced);
+  const one = replaced.length === 1;
+  const lead = shared.length > 0 ? `${running.label} and ${joinLabels(shared)} share one slot: this run starts from ${from} and replaces ${list}` : null;
+  if (composite) {
+    const what = lead ?? `Running ${running.label}${again} replaces ${list} on the composite`;
+    return `${what}; the composite has no step history yet, so ${one ? "it" : "they"} cannot be brought back.`;
+  }
+  const what = lead ?? `Running ${running.label}${again} starts a new branch from ${from}`;
+  return `${what}. ${list} ${one ? "stays" : "stay"} in History: Go to on the earlier branch brings ${one ? "it" : "them"} back.`;
+}
+
 export const EMPTY_CHAIN: ProcessingChain = Object.freeze({ steps: Object.freeze({}), psfKernel: null, base: null });
 
 export function normalizeOutputPath(path: string): string {

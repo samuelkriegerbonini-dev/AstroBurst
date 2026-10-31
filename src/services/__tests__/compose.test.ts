@@ -14,7 +14,7 @@ vi.mock("../../infrastructure/tauri", () => ({
   getPreviewUrl: getPreviewUrlMock,
 }));
 
-import { alignChannels, blendChannels, calibrateAndScnr, channelOverlayPreview, cropChannels, detectCropBounds, lrgbCombineComposite, resetWb } from "../compose";
+import { alignChannels, alignPlan, blendChannels, calibrateAndScnr, channelOverlayPreview, cropChannels, detectCropBounds, lrgbCombineComposite, resetWb } from "../compose";
 import { measureChannelLevels } from "../channelLevels";
 import { extractBackgroundBatch, removeStarsComposite, spccCalibrate } from "../processing";
 
@@ -144,8 +144,37 @@ describe("alignChannels", () => {
   });
 });
 
+describe("alignPlan", () => {
+  const plan = {
+    channels: [
+      { has_wcs: true, reprojected: true },
+      { has_wcs: true, reprojected: false },
+      { has_wcs: false, reprojected: false },
+    ],
+    reference_index: 1,
+    reference_rule: "finest_wcs",
+  };
+
+  beforeEach(() => {
+    typedInvokeMock.mockReset();
+    getOutputDirMock.mockReset();
+    typedInvokeMock.mockResolvedValue(plan);
+  });
+
+  it("asks align_plan_cmd about the Align inputs with a null reference index for Auto and returns the plan as sent", async () => {
+    await expect(alignPlan(["/a.fits", "/b.fits", "/c.fits"], null)).resolves.toEqual(plan);
+    expect(typedInvokeMock).toHaveBeenCalledWith("align_plan_cmd", { paths: ["/a.fits", "/b.fits", "/c.fits"], referenceIndex: null });
+    expect(getOutputDirMock).not.toHaveBeenCalled();
+  });
+
+  it("sends the chosen reference index", async () => {
+    await alignPlan(["/a.fits", "/b.fits"], 1);
+    expect(typedInvokeMock).toHaveBeenCalledWith("align_plan_cmd", { paths: ["/a.fits", "/b.fits"], referenceIndex: 1 });
+  });
+});
+
 describe("cropChannels", () => {
-  const cropped = { paths: [], dimensions: [1, 1], crop_top: 0, crop_bottom: 0, crop_left: 0, crop_right: 0, elapsed_ms: 1 };
+  const cropped ={ paths: [], dimensions: [1, 1], crop_top: 0, crop_bottom: 0, crop_left: 0, crop_right: 0, elapsed_ms: 1 };
 
   beforeEach(() => {
     typedInvokeMock.mockReset();

@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { overlayHostKey, useOverlayLayerKey } from "../../context/OverlayLayerKeyContext";
 import { useDisplayContext, useDisplayedImage } from "../../context/PreviewContext";
 import { useOverlayDoc } from "../../hooks/useOverlayStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
@@ -23,6 +24,7 @@ interface OverlayLayerProps {
   fitsW: number;
   fitsH: number;
   enabled: boolean;
+  layerKey?: string | null;
 }
 
 function errorText(err: unknown): string {
@@ -108,12 +110,15 @@ function useCompassLayer(fileKey: string | null, wcsPath: string | null, compass
   }, [fileKey, wcsPath, compass, revision]);
 }
 
-function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH, enabled }: OverlayLayerProps) {
+function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH, enabled, layerKey }: OverlayLayerProps) {
   const regionKey = useRegionKey();
-  const fileKey = enabled ? regionKey : null;
+  const inheritedLayerKey = useOverlayLayerKey();
+  const shownLayerKey = layerKey ?? inheritedLayerKey;
+  const fileKey = overlayHostKey({ enabled, regionKey, layerKey: shownLayerKey });
+  const wcsKey = shownLayerKey === null ? fileKey : null;
   const { display } = useDisplayContext();
   const displayed = useDisplayedImage();
-  const wcsPath = overlayWcsPath(fileKey, displayed.path);
+  const wcsPath = overlayWcsPath(wcsKey, displayed.path);
   const readRevision = () => wcsRevision(wcsPath);
   const revision = useSyncExternalStore(subscribeSolvedWcs, readRevision, readRevision);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -121,12 +126,12 @@ function OverlayLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   const [hostEl, setHostEl] = useState<HTMLElement | null>(null);
 
   const mapping: RegionMapping = { transform, renderW, renderH, fitsW, fitsH };
-  const active = enabled && fileKey !== null && isRegionMappingUsable(mapping);
+  const active = fileKey !== null && isRegionMappingUsable(mapping);
   const mappingRef = useRef(mapping);
   mappingRef.current = mapping;
 
-  useWcsGridLayer(active ? fileKey : null, wcsPath, display.grid, display.gridFrame, display.gridDensity, revision);
-  useCompassLayer(active ? fileKey : null, wcsPath, display.compass, revision);
+  useWcsGridLayer(active ? wcsKey : null, wcsPath, display.grid, display.gridFrame, display.gridDensity, revision);
+  useCompassLayer(active ? wcsKey : null, wcsPath, display.compass, revision);
   const doc = useOverlayDoc(fileKey);
   const hasLayers = doc.layers.some((l) => l.visible);
 

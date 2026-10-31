@@ -55,6 +55,17 @@ export interface AlignResult {
   warnings?: string[];
 }
 
+export interface AlignPlanChannel {
+  has_wcs: boolean;
+  reprojected: boolean;
+}
+
+export interface AlignPlan {
+  channels: AlignPlanChannel[];
+  reference_index: number;
+  reference_rule: NonNullable<AlignResult["reference_rule"]>;
+}
+
 export interface ChannelOverlayPreview {
   png_path: string;
   previewUrl: string;

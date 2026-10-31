@@ -10,6 +10,8 @@ import { fileStore } from "../hooks/useFileStore";
 import { compositeChainStore } from "../utils/compositeChainStore";
 import { outputKeepList } from "../utils/outputKeep";
 import { historyStore } from "../utils/historyStore";
+import { maskStore } from "../utils/maskStore";
+import { mosaicOutputPaths } from "../utils/mosaicStore";
 import { watchStorage } from "../utils/storageRefresh";
 import { decimalDraftText, decimalFieldState } from "../utils/decimalText";
 import CatalogsSettings from "./CatalogsSettings";
@@ -256,6 +258,8 @@ export default function ConfigPanel() {
         compositeChain: compositeChainStore.get(),
         previewUrls: [live.compositePreviewUrl],
         historyDir,
+        maskExports: maskStore.exportedPaths(),
+        mosaicOutputs: mosaicOutputPaths(),
       });
       const result = await cleanupStorage(dir, historyDir, keep);
       const summary = summarizeCleanup(result);

@@ -3,17 +3,18 @@ import { Loader2, Box, Film } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export";
 import type { ExportResult, ExportFitsOptions, ExportFitsRgbOptions } from "../../services/export";
 import { getCubeFrame } from "../../services/cube";
-import { useFileContext, useHistContext, useRgbContext, useCubeContext, useDisplayedImage, useRenderContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useRgbContext, useCubeContext, useDisplayedImage, useRenderContext, useDisplayContext } from "../../context/PreviewContext";
 import { useCompositePreview, useCompositeStf } from "../../context/CompositeContext";
 import { getExportDir } from "../../infrastructure/tauri";
 import { cubeFrameExportName, exportSourceLabel, exportTimestamp, resolveRgbExportSource } from "../../utils/exportSources";
-import { rgbProductOf } from "../../utils/rgbProduct";
+import { RGB_PLANES, rgbProductOf } from "../../utils/rgbProduct";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
 
 function ExportTabInner() {
   const { file } = useFileContext();
-  const { stfParams } = useHistContext();
+  const { stfParams, histData } = useHistContext();
+  const { display } = useDisplayContext();
   const { rgbChannels } = useRgbContext();
   const { compositePreviewUrl } = useCompositePreview();
   const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
@@ -137,6 +138,7 @@ function ExportTabInner() {
   }, [rgbSource]);
 
   const sourceLabel = exportSourceLabel(displayed);
+  const pngSourceRgb = processed?.fitsPath ? processed.planes === RGB_PLANES : file?.result?.is_rgb === true;
 
   return (
     <Suspense
@@ -152,6 +154,9 @@ function ExportTabInner() {
           exportPath={displayed.path}
           sourceLabel={sourceLabel}
           stfParams={stfParams}
+          autoStf={histData?.auto_stf ?? null}
+          display={display}
+          pngSourceRgb={pngSourceRgb}
           onExport={handleExportFits}
           onExportRgb={handleExportFitsRgb}
           rgbChannels={effectiveRgbChannels}

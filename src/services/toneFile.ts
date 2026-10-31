@@ -1,6 +1,7 @@
 import { withPreview } from "../infrastructure/tauri";
 import { isCurveIdentity, isLevelsIdentity, toCurveInput, type CurvePoint, type LevelsParams } from "./tone";
 import type { HistoryScope, OpSpec } from "../shared/types/ops";
+import type { MaskChoice } from "../shared/types/masks";
 import { recordOp } from "./ops";
 import type { RecordedResult } from "./processing";
 
@@ -71,6 +72,6 @@ export function toneOptionsOf(op: OpSpec): ToneSettings | null {
   };
 }
 
-export async function recordToneFile(scope: HistoryScope, path: string, options: ToneFileOptions): Promise<RecordedResult<ToneFileResult>> {
-  return (await recordOp(scope, path, toneOp(options))) as RecordedResult<ToneFileResult>;
+export async function recordToneFile(scope: HistoryScope, path: string, options: ToneFileOptions, mask: MaskChoice | null = null): Promise<RecordedResult<ToneFileResult>> {
+  return (await recordOp(scope, path, toneOp(options), { mask })) as RecordedResult<ToneFileResult>;
 }

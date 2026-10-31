@@ -123,9 +123,29 @@ pub fn imagetyp_verdict(kind: MasterKind, frame: FrameKind) -> Verdict {
     }
 }
 
+fn imagetyp_card(frame: &FrameCards) -> (&'static str, &str) {
+    frame.imagetyp.as_ref().map_or(("IMAGETYP", ""), |(text, key)| (*key, text.as_str()))
+}
+
+pub fn check_light_imagetyp(channel: &str, lights: &[FrameCards]) -> Result<()> {
+    let Some(frame) = lights.iter().find(|light| {
+        matches!(light.frame_kind, FrameKind::Bias | FrameKind::Dark | FrameKind::Flat | FrameKind::FlatDark)
+    }) else {
+        return Ok(());
+    };
+    let (key, value) = imagetyp_card(frame);
+    bail!(
+        "{}{} has {}='{}' but was given as a light frame.",
+        channel_prefix(channel),
+        file_label(&frame.path),
+        key,
+        value
+    )
+}
+
 fn check_imagetyp(kind: MasterKind, frames: &[FrameCards], warnings: &mut Vec<String>) -> Result<()> {
     for frame in frames {
-        let (key, value) = frame.imagetyp.as_ref().map_or(("IMAGETYP", ""), |(text, key)| (*key, text.as_str()));
+        let (key, value) = imagetyp_card(frame);
         match imagetyp_verdict(kind, frame.frame_kind) {
             Verdict::Accept => {}
             Verdict::Warn => warnings.push(format!(

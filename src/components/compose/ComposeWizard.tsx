@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from "react";
-import { Loader2, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
 import { useDoneFilesContext, useNarrowbandContext, useFileContext, useHistContext, useRenderActions } from "../../context/PreviewContext";
 import { useCompositeActions } from "../../context/CompositeContext";
 import { useComposeWizardContext } from "../../context/ComposeWizardContext";
@@ -9,7 +9,9 @@ import {
   wizardHasProgress,
   type ChannelStage,
   type CompositeOp,
+  type WizardState,
 } from "../../utils/wizard";
+import { stepNavLabel, wizardStepNav } from "../../utils/wizardStepNav";
 import type { StfParams } from "../../shared/types";
 import type { CompositeStfTriple } from "../../utils/compositeStfResponse";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
@@ -84,6 +86,52 @@ export function MiniInfoBar() {
         </>
       )}
     </div>
+  );
+}
+
+interface StepNavFooterProps {
+  activeStep: string;
+  state: WizardState;
+  onNavigate: (stepId: string) => void;
+}
+
+export function StepNavFooter({ activeStep, state, onNavigate }: StepNavFooterProps) {
+  const { previous, next } = wizardStepNav(activeStep, state);
+  if (!previous && !next) return null;
+
+  return (
+    <nav
+      aria-label="Wizard step navigation"
+      data-testid="wizard-step-nav"
+      className="flex items-start gap-2 px-2 py-1 shrink-0"
+      style={{ borderTop: "1px solid var(--ab-border)", background: "rgba(255,255,255,0.02)" }}
+    >
+      {previous && (
+        <button
+          type="button"
+          data-testid="wizard-step-prev"
+          onClick={() => onNavigate(previous.id)}
+          className="flex items-center gap-1 px-1.5 py-1 rounded text-[10px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors"
+        >
+          <ChevronLeft size={10} className="shrink-0" />
+          {stepNavLabel("Previous", previous)}
+        </button>
+      )}
+      {next && (
+        <button
+          type="button"
+          data-testid="wizard-step-next"
+          aria-disabled={next.reason !== null}
+          onClick={() => {
+            if (next.reason === null) onNavigate(next.id);
+          }}
+          className="ml-auto flex items-center gap-1 px-1.5 py-1 rounded text-left text-[10px] text-teal-300 hover:bg-teal-500/10 aria-disabled:text-zinc-500 aria-disabled:cursor-not-allowed aria-disabled:hover:bg-transparent transition-colors"
+        >
+          {stepNavLabel("Next", next)}
+          <ChevronRight size={10} className="shrink-0" />
+        </button>
+      )}
+    </nav>
   );
 }
 
@@ -301,7 +349,8 @@ export default function ComposeWizard() {
             onStretchChange={(mode, factor, target) => dispatch({ type: "SET_STRETCH", mode, factor, target })}
             onMask={(path) => dispatch({ type: "SET_MASK", path })}
             onMaskParams={(growth, protection) => dispatch({ type: "SET_MASK_PARAMS", growth, protection })}
-            onResult={(url, stf) => {
+            onResult={(url, stf, bakedStf) => {
+              dispatch({ type: "UPDATE", partial: { bakedStf: bakedStf ?? null } });
               handleRestretchPreview(url, stf);
               completeStep("stretch");
             }}
@@ -423,6 +472,8 @@ export default function ComposeWizard() {
           {stepContent}
         </Suspense>
       </div>
+
+      <StepNavFooter activeStep={activeStep} state={state} onNavigate={handleStepClick} />
     </div>
   );
 }

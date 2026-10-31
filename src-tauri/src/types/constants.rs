@@ -21,6 +21,7 @@ pub const EVENT_DRIZZLE_RGB_PROGRESS: &str = "drizzle-rgb-progress";
 pub const EVENT_CALIBRATE_PROGRESS: &str = "calibrate-progress";
 pub const EVENT_STACK_PROGRESS: &str = "stack-progress";
 pub const EVENT_WAVELET_PROGRESS: &str = "wavelet-progress";
+pub const EVENT_PIPELINE_PROGRESS: &str = "pipeline-progress";
 
 pub const PROGRESS_STEPS: usize = 4;
 
@@ -226,6 +227,7 @@ pub const RES_RGB_PREVIEW: &str = "rgb_preview";
 pub const RES_MASTERS: &str = "masters";
 pub const RES_RGB_PNG_PATH: &str = "rgb_png_path";
 pub const RES_RGB_DIMENSIONS: &str = "rgb_dimensions";
+pub const RES_RGB_PALETTE: &str = "rgb_palette";
 pub const RES_INPUT_PATH: &str = "input_path";
 pub const RES_CHANNEL: &str = "channel";
 pub const RES_OFFSET: &str = "offset";
@@ -565,6 +567,7 @@ pub const RES_WCS_WRITTEN: &str = "wcs_written";
 pub const RES_N_DETECTED: &str = "n_detected";
 
 pub const RES_BASE_PNG_PATH: &str = "base_png_path";
+pub const RES_BASE_DISPLAYED: &str = "base_displayed";
 pub const RES_MODEL_PNG_PATH: &str = "model_png_path";
 pub const RES_CHAIN_GENERATION: &str = "chain_generation";
 pub const RES_CHAIN_RESTARTED: &str = "chain_restarted";
@@ -572,6 +575,7 @@ pub const RES_CHAIN_INPUT: &str = "chain_input";
 pub const RES_DISPLAYED: &str = "displayed";
 pub const RES_LINKED: &str = "linked";
 pub const RES_LIVE_GENERATION: &str = "live_generation";
+pub const RES_LIVE_DISPLAYED: &str = "live_displayed";
 pub const RES_RESTORED: &str = "restored";
 pub const RES_STEPS: &str = "steps";
 

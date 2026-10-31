@@ -156,9 +156,9 @@ describe("DockMenuList markup", () => {
     expect(byText(lone, "Move down").attrs).toContain('aria-disabled="true"');
   });
 
-  it("ends with Reset layout and Show layout tips after separators", () => {
+  it("ends with Reset layout and Show tool window tips after separators", () => {
     const html = render(menuProps());
-    expect(buttons(html, "menuitem").map((b) => b.text)).toEqual(["Move up", "Move down", "Reset layout", "Show layout tips"]);
+    expect(buttons(html, "menuitem").map((b) => b.text)).toEqual(["Move up", "Move down", "Reset layout", "Show tool window tips"]);
     expect(html.match(/role="separator"/g)?.length).toBe(2);
   });
 
@@ -211,9 +211,9 @@ describe("DockMenuList activation", () => {
     expect(props.onShowTips).not.toHaveBeenCalled();
   });
 
-  it("shows the layout tips", () => {
+  it("shows the tool window tips, named as in the command palette", () => {
     const props = menuProps();
-    activate(props, "menuitem", "Show layout tips");
+    activate(props, "menuitem", "Show tool window tips");
     expect(props.onShowTips).toHaveBeenCalledTimes(1);
     expect(props.onReset).not.toHaveBeenCalled();
   });

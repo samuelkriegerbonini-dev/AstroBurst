@@ -85,6 +85,7 @@ class FileStore {
   getSelectedVersion = () => this.state.selectedVersion;
   getVersion = () => this.state.version;
   getIsProcessing = () => this.state.isProcessing;
+  getSelectOnLoadPath = (): string | null => this.selectOnLoad?.path ?? null;
 
   getFile = (id: string): ProcessedFile | undefined => this.state.fileMap.get(id);
   getSelectedFile = (): ProcessedFile | null => {
@@ -154,6 +155,7 @@ class FileStore {
 
   selectWhenLoaded(path: string, onSelected: (file: ProcessedFile) => void) {
     this.selectOnLoad = { path, onSelected };
+    this.scheduleFlush(NotifyChannel.All);
   }
 
   addFiles(fileList: AstroFile[]) {
@@ -355,7 +357,10 @@ class FileStore {
   }
 
   selectFile(id: string) {
-    this.selectOnLoad = null;
+    if (this.selectOnLoad) {
+      this.selectOnLoad = null;
+      this.scheduleFlush(NotifyChannel.All);
+    }
     this.selectFallback(id);
   }
 
@@ -406,6 +411,10 @@ export function useSelectedFile(): ProcessedFile | null {
 
 export function useSelectedId(): string | null {
   return useSyncExternalStore(fileStore.subscribeToSelected, fileStore.getSelected);
+}
+
+export function useSelectOnLoadPath(): string | null {
+  return useSyncExternalStore(fileStore.subscribe, fileStore.getSelectOnLoadPath, fileStore.getSelectOnLoadPath);
 }
 
 export function useFileStats() {

@@ -1,4 +1,4 @@
-import type { CombineMethod, NormalizationMethod, RejectionMethod } from "../shared/types/stacking";
+import type { CombineMethod, NormalizationMethod, PipelineRequest, RejectionMethod } from "../shared/types/stacking";
 
 export interface SelectOption<T extends string> {
   value: T;
@@ -77,6 +77,75 @@ export interface FrameCountHint {
 
 export function rejectionUsesSigma(method: RejectionMethod): boolean {
   return method === "sigma_clip" || method === "winsorized_sigma_clip" || method === "linear_fit_clip";
+}
+
+export type RejectionSettings = Pick<
+  StackSettings,
+  "rejection" | "sigmaLow" | "sigmaHigh" | "maxIterations" | "winsorCutoff" | "percentileLow" | "percentileHigh" | "minmaxLow" | "minmaxHigh"
+>;
+
+export type RejectionParameter = Exclude<keyof RejectionSettings, "rejection">;
+
+export interface RejectionLimit {
+  min: number;
+  max: number;
+  step: number;
+  integer: boolean;
+}
+
+export const REJECTION_LIMITS: Record<RejectionParameter, RejectionLimit> = {
+  sigmaLow: { min: 1, max: 6, step: 0.1, integer: false },
+  sigmaHigh: { min: 1, max: 6, step: 0.1, integer: false },
+  maxIterations: { min: 1, max: 20, step: 1, integer: true },
+  winsorCutoff: { min: 1, max: 10, step: 0.1, integer: false },
+  percentileLow: { min: 0, max: 1, step: 0.01, integer: false },
+  percentileHigh: { min: 0, max: 1, step: 0.01, integer: false },
+  minmaxLow: { min: 0, max: 10, step: 1, integer: true },
+  minmaxHigh: { min: 0, max: 10, step: 1, integer: true },
+};
+
+export interface FixedRejection {
+  note: string;
+  values: Partial<Record<RejectionParameter, number>>;
+}
+
+export function boundRejectionValue(parameter: RejectionParameter, value: number): number {
+  const { min, max, integer } = REJECTION_LIMITS[parameter];
+  const bounded = Math.min(max, Math.max(min, value));
+  return integer ? Math.round(bounded) : bounded;
+}
+
+export function boundRejectionSettings(settings: RejectionSettings): RejectionSettings {
+  return {
+    rejection: settings.rejection,
+    sigmaLow: boundRejectionValue("sigmaLow", settings.sigmaLow),
+    sigmaHigh: boundRejectionValue("sigmaHigh", settings.sigmaHigh),
+    maxIterations: boundRejectionValue("maxIterations", settings.maxIterations),
+    winsorCutoff: boundRejectionValue("winsorCutoff", settings.winsorCutoff),
+    percentileLow: boundRejectionValue("percentileLow", settings.percentileLow),
+    percentileHigh: boundRejectionValue("percentileHigh", settings.percentileHigh),
+    minmaxLow: boundRejectionValue("minmaxLow", settings.minmaxLow),
+    minmaxHigh: boundRejectionValue("minmaxHigh", settings.minmaxHigh),
+  };
+}
+
+export type PipelineRejectionFields = Required<
+  Pick<PipelineRequest, "rejection" | "sigma_low" | "sigma_high" | "max_iterations" | "winsor_cutoff" | "percentile_low" | "percentile_high" | "minmax_low" | "minmax_high">
+>;
+
+export function pipelineRejectionFields(settings: RejectionSettings): PipelineRejectionFields {
+  const bounded = boundRejectionSettings(settings);
+  return {
+    rejection: bounded.rejection,
+    sigma_low: bounded.sigmaLow,
+    sigma_high: bounded.sigmaHigh,
+    max_iterations: bounded.maxIterations,
+    winsor_cutoff: bounded.winsorCutoff,
+    percentile_low: bounded.percentileLow,
+    percentile_high: bounded.percentileHigh,
+    minmax_low: bounded.minmaxLow,
+    minmax_high: bounded.minmaxHigh,
+  };
 }
 
 export function rejectionFrameHint(

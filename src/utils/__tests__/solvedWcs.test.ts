@@ -21,8 +21,11 @@ import {
   solvedWcsSummary,
   solvedWcsVersion,
   creditedSolveTier,
+  headerWcsProbe,
+  solveTargetMissing,
   spccSolvedWcsPath,
   spccWcsSource,
+  spccWcsStatus,
   subscribeSolvedWcs,
   wcsRewriteBlocker,
   wcsWriteBlocker,
@@ -165,7 +168,11 @@ const ALIGNED = { r: "__wizard_aligned_r", g: "__wizard_aligned_g", b: "__wizard
 
 describe("spccWcsSource", () => {
   it("uses the single R file as the grid of the plate-solved WCS", () => {
-    expect(spccWcsSource(rgbState())).toEqual({ gridPath: "/grid/r.fits", reason: null });
+    expect(spccWcsSource(rgbState())).toEqual({
+      gridPath: "/grid/r.fits",
+      reason: null,
+      header: { path: "/grid/r.fits", alignedOnto: null, solvePath: "/grid/r.fits" },
+    });
   });
 
   it("uses the first effective frame of a stacked R bin, on whose grid the stack sits", () => {
@@ -173,7 +180,11 @@ describe("spccWcsSource", () => {
       { stackedPaths: { r: "/out/stack_r.fits" }, excludedFiles: { r: ["/grid/r1.fits"] } },
       { r: ["/grid/r1.fits", "/grid/r2.fits", "/grid/r3.fits"] },
     );
-    expect(spccWcsSource(state)).toEqual({ gridPath: "/grid/r2.fits", reason: null });
+    expect(spccWcsSource(state)).toEqual({
+      gridPath: "/grid/r2.fits",
+      reason: null,
+      header: { path: "/out/stack_r.fits", alignedOnto: null, solvePath: "/grid/r2.fits" },
+    });
   });
 
   it("refuses a solved WCS when Align warped R onto another bin", () => {
@@ -181,6 +192,7 @@ describe("spccWcsSource", () => {
     expect(spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: "g" }, { r: ["/grid/r_solved.fits"] }))).toEqual({
       gridPath: null,
       reason: "SPCC can use a plate-solved WCS only on the R channel's own grid; R was aligned onto G. Make R the alignment reference and run Align again.",
+      header: { path: "/grid/g.fits", alignedOnto: "G", solvePath: null },
     });
   });
 
@@ -193,20 +205,170 @@ describe("spccWcsSource", () => {
     expect(spccWcsSource(state).reason).toMatch(/^SPCC can use a plate-solved WCS only on the R channel's own grid/);
   });
 
-  it("gives no advice after Align when R was never plate-solved, since SPCC reads R's own header", () => {
+  it("reads the alignment reference's header after Align onto another bin when R was never plate-solved, since the aligned R carries that WCS", () => {
     expect(spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: "g" }, { r: ["/grid/r_never_solved.fits"] }))).toEqual({
       gridPath: null,
       reason: null,
+      header: { path: "/grid/g.fits", alignedOnto: "G", solvePath: "/grid/r_never_solved.fits" },
     });
   });
 
+  it("reads the reference's stacked master, whose header the aligned channels inherit", () => {
+    const state = rgbState(
+      { alignedPaths: ALIGNED, alignRefBinId: "b", stackedPaths: { b: "/out/stack_b.fits" } },
+      { r: ["/grid/r_never_solved.fits"], b: ["/grid/b1.fits", "/grid/b2.fits"] },
+    );
+    expect(spccWcsSource(state).header).toEqual({ path: "/out/stack_b.fits", alignedOnto: "B", solvePath: "/grid/r_never_solved.fits" });
+  });
+
   it("keeps R's own grid when R was the alignment reference", () => {
-    expect(spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: "r" }))).toEqual({ gridPath: "/grid/r.fits", reason: null });
-    expect(spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: null }))).toEqual({ gridPath: "/grid/r.fits", reason: null });
+    const own = { gridPath: "/grid/r.fits", reason: null, header: { path: "/grid/r.fits", alignedOnto: null, solvePath: "/grid/r.fits" } };
+    expect(spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: "r" }))).toEqual(own);
+    expect(spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: null }))).toEqual(own);
+  });
+
+  it("reads no header once a plate-solved WCS sits on the R grid", () => {
+    rememberSolvedWcs("/grid/r_with_sidecar.fits", "/out/r_with_sidecar_wcs.fits");
+    expect(spccWcsSource(rgbState({}, { r: ["/grid/r_with_sidecar.fits"] }))).toEqual({
+      gridPath: "/grid/r_with_sidecar.fits",
+      reason: null,
+      header: null,
+    });
   });
 
   it("has no grid without an R channel", () => {
-    expect(spccWcsSource(rgbState({}, { r: [] }))).toEqual({ gridPath: null, reason: null });
+    expect(spccWcsSource(rgbState({}, { r: [] }))).toEqual({ gridPath: null, reason: null, header: null });
+  });
+});
+
+describe("headerWcsProbe", () => {
+  it("keeps a finite positive pixel scale from get_wcs_info", () => {
+    expect(headerWcsProbe("/grid/r.fits", { pixel_scale_arcsec: 0.0996 })).toEqual({ path: "/grid/r.fits", found: true, pixelScaleArcsec: 0.0996 });
+  });
+
+  it("marks a header without a celestial WCS as not found", () => {
+    expect(headerWcsProbe("/grid/r.fits", null)).toEqual({ path: "/grid/r.fits", found: false, pixelScaleArcsec: null });
+  });
+
+  it("drops a scale that is not a finite positive number", () => {
+    expect(headerWcsProbe("/grid/r.fits", { pixel_scale_arcsec: Number.NaN }).pixelScaleArcsec).toBeNull();
+    expect(headerWcsProbe("/grid/r.fits", { pixel_scale_arcsec: 0 }).pixelScaleArcsec).toBeNull();
+  });
+});
+
+describe("spccWcsStatus", () => {
+  it("a header WCS on the R grid is a source", () => {
+    const source = spccWcsSource(rgbState({}, { r: ["/grid/r_header.fits"] }));
+    expect(spccWcsStatus(source, null, headerWcsProbe("/grid/r_header.fits", { pixel_scale_arcsec: 0.0996 }))).toEqual({
+      line: "WCS: header of r_header.fits, 0.0996″/px",
+      warning: false,
+      title: "/grid/r_header.fits",
+      note: null,
+      runBlocked: false,
+      solvePath: null,
+    });
+  });
+
+  it("no WCS gives the reason, blocks Run and offers to solve the R file", () => {
+    const source = spccWcsSource(rgbState({}, { r: ["/grid/r_bare.fits"] }));
+    expect(spccWcsStatus(source, null, headerWcsProbe("/grid/r_bare.fits", null))).toEqual({
+      line: "No sky solution on the R channel: r_bare.fits has no celestial WCS in its header and was not plate solved.",
+      warning: true,
+      title: "/grid/r_bare.fits",
+      note: null,
+      runBlocked: true,
+      solvePath: "/grid/r_bare.fits",
+    });
+  });
+
+  it("offers the first frame of a stacked R bin for solving when the master's header has no WCS", () => {
+    const source = spccWcsSource(rgbState({ stackedPaths: { r: "/out/stack_r_bare.fits" } }, { r: ["/grid/r_bare_1.fits", "/grid/r_bare_2.fits"] }));
+    const status = spccWcsStatus(source, null, headerWcsProbe("/out/stack_r_bare.fits", null));
+    expect(status.line).toBe("No sky solution on the R channel: stack_r_bare.fits has no celestial WCS in its header and was not plate solved.");
+    expect(status.solvePath).toBe("/grid/r_bare_1.fits");
+  });
+
+  it("omits the scale when get_wcs_info gave none", () => {
+    const source = spccWcsSource(rgbState({}, { r: ["/grid/r_header.fits"] }));
+    expect(spccWcsStatus(source, null, headerWcsProbe("/grid/r_header.fits", { pixel_scale_arcsec: Number.NaN })).line).toBe("WCS: header of r_header.fits");
+  });
+
+  it("names the plate-solved WCS without reading a header", () => {
+    expect(spccWcsStatus({ reason: null, header: null }, "/out/r_wcs.fits", null)).toEqual({
+      line: "WCS from r_wcs.fits",
+      warning: false,
+      title: "/out/r_wcs.fits",
+      note: null,
+      runBlocked: false,
+      solvePath: null,
+    });
+  });
+
+  it("waits for the header read before Run, and ignores a read of another file", () => {
+    const source = spccWcsSource(rgbState({}, { r: ["/grid/r_header.fits"] }));
+    const waiting = {
+      line: "Reading the header WCS of r_header.fits",
+      warning: false,
+      title: "/grid/r_header.fits",
+      note: null,
+      runBlocked: true,
+      solvePath: null,
+    };
+    expect(spccWcsStatus(source, null, null)).toEqual(waiting);
+    expect(spccWcsStatus(source, null, headerWcsProbe("/grid/other.fits", { pixel_scale_arcsec: 1 }))).toEqual(waiting);
+  });
+
+  it("names the alignment reference's header as the WCS of an R channel aligned onto it", () => {
+    const source = spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: "g" }, { r: ["/grid/r_never_solved.fits"] }));
+    const status = spccWcsStatus(source, null, headerWcsProbe("/grid/g.fits", { pixel_scale_arcsec: 1.08 }));
+    expect(status.line).toBe("WCS: header of g.fits (alignment reference G), 1.08″/px");
+    expect(status.runBlocked).toBe(false);
+  });
+
+  it("keeps the aligned-onto reason as a note when the reference's header WCS is used instead of R's plate solve", () => {
+    rememberSolvedWcs("/grid/r_solved_note.fits", "/out/r_solved_note_wcs.fits");
+    const source = spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: "g" }, { r: ["/grid/r_solved_note.fits"] }));
+    const status = spccWcsStatus(source, null, headerWcsProbe("/grid/g.fits", { pixel_scale_arcsec: 1.08 }));
+    expect(status.line).toBe("WCS: header of g.fits (alignment reference G), 1.08″/px");
+    expect(status.note).toMatch(/^SPCC can use a plate-solved WCS only on the R channel's own grid; R was aligned onto G\./);
+    expect(status.runBlocked).toBe(false);
+  });
+
+  it("blocks Run with the aligned-onto reason when R was solved but the reference's header has no WCS", () => {
+    rememberSolvedWcs("/grid/r_solved_block.fits", "/out/r_solved_block_wcs.fits");
+    const source = spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: "g" }, { r: ["/grid/r_solved_block.fits"] }));
+    const status = spccWcsStatus(source, null, headerWcsProbe("/grid/g.fits", null));
+    expect(status).toMatchObject({ warning: true, note: null, runBlocked: true, solvePath: null });
+    expect(status.line).toMatch(/^SPCC can use a plate-solved WCS only on the R channel's own grid/);
+  });
+
+  it("explains the way back when neither R nor the alignment reference has a sky solution", () => {
+    const source = spccWcsSource(rgbState({ alignedPaths: ALIGNED, alignRefBinId: "g" }, { r: ["/grid/r_never_solved.fits"] }));
+    expect(spccWcsStatus(source, null, headerWcsProbe("/grid/g.fits", null))).toEqual({
+      line: "No sky solution on the R channel: R was aligned onto G, and g.fits has no celestial WCS in its header. Plate solve R, then make R the alignment reference and run Align again.",
+      warning: true,
+      title: "/grid/g.fits",
+      note: null,
+      runBlocked: true,
+      solvePath: "/grid/r_never_solved.fits",
+    });
+  });
+
+  it("shows the aligned-onto reason alone when no header is given", () => {
+    expect(spccWcsStatus({ reason: "R was aligned onto G.", header: null }, null, null)).toEqual({
+      line: "R was aligned onto G.",
+      warning: true,
+      title: null,
+      note: null,
+      runBlocked: false,
+      solvePath: null,
+    });
+  });
+
+  it("names the R file that is missing from Files instead of opening Astrometry on another image", () => {
+    expect(solveTargetMissing("C:\\data\\frame_0001.fits")).toBe(
+      "frame_0001.fits is not in Files: open it, then plate solve it in Astrometry and click Write WCS.",
+    );
   });
 });
 

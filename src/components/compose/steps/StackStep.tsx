@@ -9,13 +9,46 @@ import { getOutputDir } from "../../../infrastructure/tauri";
 import { RunButton, Slider, Toggle, WarningList } from "../../ui";
 import { useComposeWizardContext, type WizardAction, type WizardStackRun } from "../../../context/ComposeWizardContext";
 import { resolveEffectivePath } from "../../../hooks/useFileStore";
-import { STACK_PROGRESS_EVENT, type CombineMethod, type RejectionMethod } from "../../../shared/types/stacking";
-import { COMBINE_OPTIONS, REJECTION_OPTIONS, stackProgressText } from "../../../utils/stackingRejection";
+import { STACK_PROGRESS_EVENT, type CombineMethod, type NormalizationMethod } from "../../../shared/types/stacking";
+import {
+  boundRejectionSettings,
+  COMBINE_OPTIONS,
+  DEFAULT_STACK_SETTINGS,
+  NORMALIZATION_OPTIONS,
+  rejectionUsesSigma,
+  stackProgressText,
+  type RejectionSettings,
+} from "../../../utils/stackingRejection";
+import { formatCount } from "../../../utils/formatCount";
+import RejectionControls from "../../stacking/RejectionControls";
 import { cancelProgress } from "../../../services/progress";
 import { useProgress } from "../../../hooks/useProgress";
 import { formatTime } from "../../../utils/format";
+import {
+  DEFAULT_SUBFRAME_THRESHOLDS,
+  SUBFRAME_STALE_NOTE,
+  analysedThresholdsOf,
+  subframeResultStale,
+  type SubframeThresholds,
+} from "../../../utils/subframeSettings";
+import {
+  DEFAULT_DRIZZLE_KERNEL,
+  DRIZZLE_FIXED_REJECTION,
+  DRIZZLE_KERNELS,
+  DRIZZLE_PIXFRAC,
+  DRIZZLE_SCALE,
+  type DrizzleKernel,
+} from "../../../utils/drizzleParams";
+import {
+  claimStackProgress,
+  releaseStackProgress,
+  stackProgressBusyLine,
+  stackProgressHolder,
+  useStackProgressHolder,
+} from "../../../utils/stackProgressLock";
 
 const ELAPSED_TICK_MS = 100;
+const COMPOSE_REJECTION_DEFAULTS: RejectionSettings = { ...boundRejectionSettings(DEFAULT_STACK_SETTINGS), sigmaLow: 3.0, sigmaHigh: 3.0 };
 
 let lastStackToken = 0;
 
@@ -52,16 +85,30 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
   const [analyzing, setAnalyzing] = useState<Record<string, boolean>>({});
   const [analyzeErrors, setAnalyzeErrors] = useState<Record<string, string>>({});
   const [overrides, setOverrides] = useState<Record<string, Record<string, boolean>>>({});
-  const [maxFwhm, setMaxFwhm] = useState(8.0);
-  const [maxEcc, setMaxEcc] = useState(0.7);
-  const [minSnr, setMinSnr] = useState(5.0);
-  const [minStars, setMinStars] = useState(5);
+  const [initialThresholds] = useState<SubframeThresholds>(
+    () => analysedThresholdsOf(state.bins, state.subframeResults) ?? DEFAULT_SUBFRAME_THRESHOLDS,
+  );
+  const [maxFwhm, setMaxFwhm] = useState(initialThresholds.maxFwhm);
+  const [maxEcc, setMaxEcc] = useState(initialThresholds.maxEccentricity);
+  const [minSnr, setMinSnr] = useState(initialThresholds.minSnr);
+  const [minStars, setMinStars] = useState(initialThresholds.minStars);
+  const thresholds = useMemo<SubframeThresholds>(
+    () => ({ maxFwhm, maxEccentricity: maxEcc, minSnr, minStars }),
+    [maxFwhm, maxEcc, minSnr, minStars],
+  );
   const [useDrizzle, setUseDrizzle] = useState(false);
-  const [drizzleScale, setDrizzleScale] = useState(2.0);
-  const rejectionId = useId();
+  const [drizzleScale, setDrizzleScale] = useState(DRIZZLE_SCALE.initial);
+  const [drizzlePixfrac, setDrizzlePixfrac] = useState(DRIZZLE_PIXFRAC.initial);
+  const [drizzleKernel, setDrizzleKernel] = useState<DrizzleKernel>(DEFAULT_DRIZZLE_KERNEL);
   const combineId = useId();
-  const [rejection, setRejection] = useState<RejectionMethod>("sigma_clip");
+  const normalizationId = useId();
+  const subframeStaleId = useId();
+  const kernelId = useId();
+  const busyId = useId();
+  const busyLine = stackProgressBusyLine(useStackProgressHolder(), stackRun ? "compose" : null);
+  const [rejectionSettings, setRejectionSettings] = useState<RejectionSettings>(COMPOSE_REJECTION_DEFAULTS);
   const [combine, setCombine] = useState<CombineMethod>("mean");
+  const [normalization, setNormalization] = useState<NormalizationMethod>(DEFAULT_STACK_SETTINGS.normalization);
 
   const stackableBins = useMemo(
     () => state.bins.filter((b) => b.files.length > 1),
@@ -79,14 +126,14 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     setAnalyzeErrors((prev) => ({ ...prev, [binId]: "" }));
     setOverrides((prev) => ({ ...prev, [binId]: {} }));
     try {
-      const res = await analyzeSubframes(files, { maxFwhm, maxEccentricity: maxEcc, minSnr, minStars });
-      dispatch({ type: "SET_SUBFRAME_RESULT", binId, result: res });
+      const res = await analyzeSubframes(files, thresholds);
+      dispatch({ type: "SET_SUBFRAME_RESULT", binId, result: { ...res, analysedWith: thresholds } });
     } catch (e) {
       setAnalyzeErrors((prev) => ({ ...prev, [binId]: e instanceof Error ? e.message : String(e) }));
     } finally {
       setAnalyzing((prev) => ({ ...prev, [binId]: false }));
     }
-  }, [maxFwhm, maxEcc, minSnr, minStars, dispatch]);
+  }, [thresholds, dispatch]);
 
   const toggleOverride = useCallback((binId: string, filePath: string) => {
     setOverrides((prev) => {
@@ -104,7 +151,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
 
   const applySelection = useCallback((binId: string) => {
     const result = state.subframeResults[binId];
-    if (!result) return;
+    if (!result || subframeResultStale(result, thresholds)) return;
     const binOv = overrides[binId] ?? {};
     const rejected = result.subframes
       .filter((s) => {
@@ -113,7 +160,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       })
       .map((s) => s.file_path);
     dispatch({ type: "SET_EXCLUDED_FILES", binId, files: rejected });
-  }, [state.subframeResults, overrides, dispatch]);
+  }, [state.subframeResults, overrides, dispatch, thresholds]);
 
   const handleStack = useCallback(async (
     binId: string,
@@ -124,6 +171,11 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     const files = latestBin ? effectiveBinFiles(latest, latestBin).map(resolveEffectivePath) : [];
     if (files.length < 2) {
       setErrors((prev) => ({ ...prev, [binId]: `Need at least 2 files after exclusions, got ${files.length}` }));
+      return "failed";
+    }
+    if (!claimStackProgress("compose")) {
+      const line = stackProgressBusyLine(stackProgressHolder(), null);
+      if (line) setErrors((prev) => ({ ...prev, [binId]: line }));
       return "failed";
     }
     lastStackToken += 1;
@@ -149,20 +201,24 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         weights = files.map((f) => byPath.get(f) ?? 1.0);
       }
       const name = wizardStackName(binId, useDrizzle, Date.now());
+      const { rejection, sigmaLow, sigmaHigh } = rejectionSettings;
       const result = useDrizzle
         ? await drizzleFrames(files, await getOutputDir(), {
             scale: drizzleScale,
+            pixfrac: drizzlePixfrac,
+            kernel: drizzleKernel,
             align: true,
             name,
+            rejection,
+            ...(rejectionUsesSigma(rejection) ? { sigmaLow, sigmaHigh } : { sigmaLow: undefined, sigmaHigh: undefined }),
           })
         : await stackFrames(files, await getOutputDir(), {
-            sigmaLow: 3.0,
-            sigmaHigh: 3.0,
+            ...rejectionSettings,
             align: true,
             name,
             weights,
-            rejection,
             combine,
+            normalization,
           });
       if (discarded()) return "discarded";
       setResults((prev) => ({ ...prev, [binId]: result }));
@@ -184,8 +240,9 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     } finally {
       finishStackRun(started.token);
       resetProgress();
+      releaseStackProgress("compose");
     }
-  }, [onStacked, useDrizzle, drizzleScale, rejection, combine, resetProgress, setStackRun, finishStackRun, getStackGeneration, getState, recordStackOutcome]);
+  }, [onStacked, useDrizzle, drizzleScale, drizzlePixfrac, drizzleKernel, rejectionSettings, combine, normalization, resetProgress, setStackRun, finishStackRun, getStackGeneration, getState, recordStackOutcome]);
 
   const handleStackAll = useCallback(async () => {
     const bins = stackableBins.slice();
@@ -219,6 +276,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
     );
   }
 
+  const smallestBinCount = Math.min(...stackableBins.map((bin) => effectiveBinFiles(state, bin).length));
+
   return (
     <div className="flex flex-col gap-3 p-3">
       <div className="flex items-center justify-between">
@@ -229,11 +288,15 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
           label="Stack All"
           runningLabel={stackRun?.batch ? `Stacking ${stackRun.batch.label} — ${stackRun.batch.current}/${stackRun.batch.total}` : "Stacking..."}
           running={anyLoading}
+          disabled={busyLine !== null}
+          describedBy={busyLine ? busyId : undefined}
           accent="blue"
           onClick={handleStackAll}
           small
         />
       </div>
+
+      {busyLine && <p id={busyId} data-testid="compose-stack-progress-busy" className="text-[9px] text-amber-400/70">{busyLine}</p>}
 
       {anyLoading && (
         <div className="flex flex-col gap-1.5">
@@ -261,24 +324,50 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         <Toggle label="Drizzle" checked={useDrizzle} accent="blue" onChange={setUseDrizzle} />
         {useDrizzle && (
           <div className="flex-1">
-            <Slider label="Scale" value={drizzleScale} min={1.5} max={3.0} step={0.5} accent="blue"
+            <Slider label="Scale" value={drizzleScale} min={DRIZZLE_SCALE.min} max={DRIZZLE_SCALE.max} step={DRIZZLE_SCALE.step} accent="blue"
                     format={(v) => `${v.toFixed(1)}x`} onChange={setDrizzleScale} />
           </div>
         )}
       </div>
 
-      {!useDrizzle && (
-        <div className="flex items-center gap-2">
-          <label htmlFor={rejectionId} className="text-[10px] text-zinc-400 shrink-0">Rejection</label>
-          <select id={rejectionId} value={rejection} onChange={(e) => setRejection(e.target.value as RejectionMethod)} className="ab-select flex-1">
-            {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-          <label htmlFor={combineId} className="text-[10px] text-zinc-400 shrink-0">Combine</label>
-          <select id={combineId} value={combine} onChange={(e) => setCombine(e.target.value as CombineMethod)} className="ab-select flex-1">
-            {COMBINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      {useDrizzle && (
+        <div className="flex items-center gap-3">
+          <div className="flex-1">
+            <Slider label="Pixfrac" value={drizzlePixfrac} min={DRIZZLE_PIXFRAC.min} max={DRIZZLE_PIXFRAC.max} step={DRIZZLE_PIXFRAC.step} accent="blue"
+                    format={(v) => v.toFixed(2)} onChange={setDrizzlePixfrac} />
+          </div>
+          <label htmlFor={kernelId} className="text-[10px] text-zinc-400 shrink-0">Kernel</label>
+          <select id={kernelId} data-testid="stack-drizzle-kernel" value={drizzleKernel} onChange={(e) => setDrizzleKernel(e.target.value as DrizzleKernel)} className="ab-select">
+            {DRIZZLE_KERNELS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
           </select>
         </div>
       )}
+
+      <div className="flex flex-col gap-2">
+        <RejectionControls
+          settings={rejectionSettings}
+          onChange={(change) => setRejectionSettings((prev) => ({ ...prev, ...change }))}
+          frameCount={smallestBinCount}
+          accent="blue"
+          fixed={useDrizzle ? DRIZZLE_FIXED_REJECTION : undefined}
+        />
+        {!useDrizzle && (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor={combineId} className="text-xs text-zinc-400">Combine</label>
+              <select id={combineId} value={combine} onChange={(e) => setCombine(e.target.value as CombineMethod)} className="ab-select">
+                {COMBINE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor={normalizationId} className="text-xs text-zinc-400">Normalization</label>
+              <select id={normalizationId} data-testid="stack-normalization" value={normalization} onChange={(e) => setNormalization(e.target.value as NormalizationMethod)} className="ab-select">
+                {NORMALIZATION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+          </>
+        )}
+      </div>
 
       <div className="flex flex-col gap-1.5 p-2 rounded-lg border border-zinc-800/40 bg-zinc-900/30">
         <span className="text-[9px] text-zinc-500 uppercase tracking-wider">
@@ -319,6 +408,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         const isAnalyzing = analyzing[bin.id];
         const analyzeError = analyzeErrors[bin.id];
         const subResult = state.subframeResults[bin.id];
+        const subStale = subResult ? subframeResultStale(subResult, thresholds) : false;
+        const staleLineId = `${subframeStaleId}-${bin.id}`;
         const binOv = overrides[bin.id] ?? {};
         const excluded = state.excludedFiles[bin.id] ?? [];
         const effectiveCount = effectiveBinFiles(state, bin).length;
@@ -346,7 +437,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
                 </button>
                 <button
                   onClick={() => { void handleStack(bin.id); }}
-                  disabled={anyLoading}
+                  disabled={anyLoading || busyLine !== null}
+                  aria-describedby={busyLine ? busyId : undefined}
                   className="flex items-center gap-1 px-2 py-0.5 rounded text-[9px] bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 disabled:opacity-40 transition-all"
                 >
                   {isLoading ? <Loader2 size={9} className="animate-spin" /> : null}
@@ -362,13 +454,20 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
                 <div className="flex items-center justify-between text-[9px] text-zinc-500">
                   <span>{subResult.elapsed_ms}ms | {subResult.accepted} accepted, {subResult.rejected} rejected</span>
                   <button
+                    type="button"
+                    data-testid="stack-subframe-apply"
                     onClick={() => applySelection(bin.id)}
-                    className="px-1.5 py-0.5 rounded text-[8px] bg-teal-600/20 text-teal-300 hover:bg-teal-600/30 transition-colors"
+                    disabled={subStale}
+                    aria-describedby={subStale ? staleLineId : undefined}
+                    className="px-1.5 py-0.5 rounded text-[8px] bg-teal-600/20 text-teal-300 hover:bg-teal-600/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-teal-600/20"
                   >
                     Apply
                   </button>
                 </div>
-                <div className="overflow-x-auto rounded border border-zinc-800/50 max-h-32 overflow-y-auto">
+                <div id={staleLineId} role="status" data-testid="stack-subframe-stale" className="text-[9px] text-amber-300 empty:hidden">
+                  {subStale ? SUBFRAME_STALE_NOTE : ""}
+                </div>
+                <div className={`overflow-x-auto rounded border border-zinc-800/50 max-h-32 overflow-y-auto transition-opacity ${subStale ? "opacity-60" : ""}`}>
                   <table className="w-full text-[8px]">
                     <thead>
                     <tr className="bg-zinc-900/50 text-zinc-500 uppercase tracking-wider sticky top-0">
@@ -415,7 +514,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
 
             {result && (
               <div className="text-[9px] text-zinc-500">
-                {result.frame_count} frames, {result.rejected_pixels ?? 0} rejected px, {result.elapsed_ms ?? "?"}ms
+                {result.frame_count} frames, {formatCount(result.rejected_pixels ?? 0)} rejected px, {result.elapsed_ms ?? "?"}ms
               </div>
             )}
             {result && <WarningList warnings={result.warnings} />}

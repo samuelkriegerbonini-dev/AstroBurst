@@ -33,7 +33,7 @@ import { PreviewProvider, fileKeyOf, useRenderActions } from "../../../context/P
 import { registerFileIngest } from "../../../hooks/useFileIngest";
 import { fileStore } from "../../../hooks/useFileStore";
 import { withStep } from "../../../utils/processingChain";
-import GeometryPanel from "../GeometryPanel";
+import GeometryPanel, { geometryShowLabel } from "../GeometryPanel";
 import { GEOMETRY_OPS, type GeometryResult } from "../../../services/imageGeometry";
 import type { AstroFile, ProcessedFile } from "../../../shared/types";
 
@@ -105,6 +105,10 @@ function beforeSrc(html: string): string | null {
   return /<img src="([^"]*)" alt="Before"/.exec(html)?.[1] ?? null;
 }
 
+function showLabel(html: string): string | null {
+  return /data-testid="geometry-show"[^>]*>([^<]*)</.exec(html)?.[1] ?? null;
+}
+
 function render(file: ProcessedFile, compositeMode = false): string {
   const panel = createElement(GeometryPanel, {
     selectedFile: file,
@@ -153,7 +157,9 @@ describe("GeometryPanel", () => {
     expect(withPreviewMock).toHaveBeenCalledWith("transform_geometry_cmd", "C:/out", { path: BG, op: "rot90" });
     expect(ingest).toHaveBeenCalledWith([{ name: "jw02739_f444w_i2d_bg_rot90.fits", path: "C:/out/jw02739_f444w_i2d_bg_rot90.fits", size: 0 }], { quiet: true });
     const html = render(file);
-    expect(html).toMatch(/data-testid="geometry-result"[^>]*>Written jw02739_f444w_i2d_bg_rot90\.fits \(4177x7065\); select it in Files to continue\.</);
+    expect(html).toMatch(/data-testid="geometry-result"[^>]*>Written jw02739_f444w_i2d_bg_rot90\.fits \(4177x7065\)\.</);
+    expect(html).not.toContain("select it in Files");
+    expect(showLabel(html)).toBe("Show the rotated image");
   });
 
   it("uses the loaded file when nothing processed is displayed", async () => {
@@ -163,7 +169,42 @@ describe("GeometryPanel", () => {
     click("geometry-op-flip_h");
     await vi.waitFor(() => expect(withPreviewMock).toHaveBeenCalledTimes(1));
     expect(withPreviewMock).toHaveBeenCalledWith("transform_geometry_cmd", "C:/out", { path: RAW, op: "flip_h" });
-    await vi.waitFor(() => expect(render(file)).toContain("Written jw02739_f444w_i2d_flip_h.fits (7065x4177); select it in Files to continue."));
+    await vi.waitFor(() => expect(render(file)).toContain("Written jw02739_f444w_i2d_flip_h.fits (7065x4177)."));
+    expect(showLabel(render(file))).toBe("Show the flipped image");
+  });
+
+  it("names the rotated or the flipped image on the Show button", () => {
+    expect(GEOMETRY_OPS.map(geometryShowLabel)).toEqual([
+      "Show the rotated image",
+      "Show the rotated image",
+      "Show the rotated image",
+      "Show the flipped image",
+      "Show the flipped image",
+    ]);
+  });
+
+  it("Show reads Opening... until the written file has loaded, then selects it", async () => {
+    const rotated = "C:/out/jw02739_f444w_i2d_rot90.fits";
+    const file = fileOf("geom-show");
+    fileStore.addFiles([{ name: file.name, path: RAW, size: 1 }]);
+    const sourceRow = fileStore.getFileIds()[0];
+    fileStore.fileDone(sourceRow, null);
+    fileStore.selectFile(sourceRow);
+    withPreviewMock.mockResolvedValue(geometryResult(rotated));
+    render(file);
+    click("geometry-op-rot90");
+    await vi.waitFor(() => expect(showLabel(render(file))).toBe("Show the rotated image"));
+    const rotatedRow = fileStore.getFiles().find((f) => f.path === rotated)?.id as string;
+    expect(fileStore.getFile(rotatedRow)?.status).toBe("queued");
+
+    click("geometry-show");
+
+    expect(showLabel(render(file))).toBe("Opening...");
+    expect(fileStore.getSelected()).toBe(sourceRow);
+    fileStore.fileDone(rotatedRow, null);
+    expect(fileStore.getSelected()).toBe(rotatedRow);
+    expect(showLabel(render(file))).toBe("Show the rotated image");
+    expect(ingest).toHaveBeenCalledTimes(1);
   });
 
   it("after a Debayer preview, names the loaded file as its input and compares with the file preview", async () => {

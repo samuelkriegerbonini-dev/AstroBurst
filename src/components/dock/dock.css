@@ -123,6 +123,28 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
+.ab-dock-tip {
+  width: 280px;
+}
+
+.ab-dock-onboarding.ab-dock-tip[data-arrow]::after {
+  top: calc(var(--ab-tip-arrow-y, 24px) - 6px);
+}
+
+.ab-dock-onboarding.ab-dock-tip[data-arrow="left"]::after {
+  content: "";
+  position: absolute;
+  left: -6px;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--ab-border-strong);
+  border-left: 1px solid var(--ab-border-strong);
+  background: rgba(8, 8, 18, 0.97);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
 .ab-dock-onboarding-head {
   display: flex;
   align-items: center;

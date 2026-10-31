@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect, expectTypeOf, beforeEach, vi } from "vitest";
 
 const { typedInvokeMock, withPreviewMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn(), withPreviewMock: vi.fn() }));
@@ -69,12 +71,30 @@ describe("plateSolve", () => {
       nearRadiusDeg: 2.5,
       resumeSubmissionId: null,
       resumeJobId: null,
+      useTwomass: null,
+      maxSipOrder: null,
     });
   });
 
-  it("leaves the solver and the near radius to the command's defaults when they are not given", async () => {
+  it("leaves the solver, the near radius, the 2MASS tier and the SIP order cap to the command's defaults when they are not given", async () => {
     await plateSolve("C:/d/light.fits");
-    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ solver: null, nearRadiusDeg: null });
+    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ solver: null, nearRadiusDeg: null, useTwomass: null, maxSipOrder: null });
+  });
+
+  it("passes the Solve options 2MASS switch and SIP order cap to the offline tiers", async () => {
+    await plateSolve("C:/d/light.fits", { solver: "auto", useTwomass: false, maxSipOrder: 2 });
+    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ solver: "auto", useTwomass: false, maxSipOrder: 2 });
+  });
+
+  it("sends exactly the arguments plate_solve_cmd declares, so a renamed one is not dropped without a word", async () => {
+    await plateSolve("C:/d/light.fits");
+    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/cmd/astrometry.rs", import.meta.url)), "utf8");
+    const start = rust.indexOf("pub async fn plate_solve_cmd(");
+    expect(start).toBeGreaterThan(-1);
+    const signature = rust.slice(start, rust.indexOf(") -> Result", start));
+    const declared = [...signature.matchAll(/^\s+(\w+): /gm)].map((match) => match[1]).filter((name) => name !== "app");
+    const sent = Object.keys(typedInvokeMock.mock.calls[0][1] as object).map((name) => name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`));
+    expect(sent.sort()).toEqual(declared.sort());
   });
 
   it("passes the astrometry.net submission and job to follow when the panel checks a pending job again", async () => {

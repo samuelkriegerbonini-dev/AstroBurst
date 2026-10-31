@@ -2,16 +2,18 @@ pub mod id;
 pub mod kernels;
 pub mod stamp;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::mask::{check_dims, MaskError, MaskSpec};
 use crate::core::ops::{OpSpec, OutputValues};
 use crate::types::image_ref::ImageRef;
 
@@ -98,6 +100,15 @@ pub enum MaskRef {
     Recipe(Value),
 }
 
+impl MaskRef {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Id(id) => id,
+            Self::Recipe(recipe) => recipe.get("kind").and_then(Value::as_str).unwrap_or("inline"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeOutput {
     pub path: String,
@@ -152,6 +163,8 @@ pub struct HistoryDoc {
     pub app: String,
     pub threads: usize,
     pub masks: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub deleted_masks: BTreeSet<String>,
     pub nodes: Vec<Node>,
 }
 
@@ -309,12 +322,35 @@ impl HistoryDoc {
             app: APP_VERSION.to_string(),
             threads: rayon::current_num_threads(),
             masks: BTreeMap::new(),
+            deleted_masks: BTreeSet::new(),
             nodes: Vec::new(),
         }
     }
 
     pub fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    pub fn mask_spec(&self, mask: &MaskRef) -> Result<MaskSpec, MaskError> {
+        let (label, stored) = match mask {
+            MaskRef::Id(id) => (format!("mask {id}"), self.masks.get(id).ok_or_else(|| MaskError::Unknown(id.clone()))?),
+            MaskRef::Recipe(recipe) => ("inline mask".to_string(), recipe),
+        };
+        MaskSpec::deserialize(stored).map_err(|e| MaskError::Invalid(format!("{label}: {e}")))
+    }
+
+    pub fn listed_mask_spec(&self, mask: &MaskRef) -> Result<MaskSpec, MaskError> {
+        match mask {
+            MaskRef::Id(id) if self.deleted_masks.contains(id) => Err(MaskError::Deleted(id.clone())),
+            _ => self.mask_spec(mask),
+        }
+    }
+
+    pub fn mask_raster(&self, mask: &MaskRef, planes: &[&Array2<f32>]) -> Result<Array2<f32>, MaskError> {
+        let raster = self.mask_spec(mask)?.rasterize(planes)?;
+        let image = planes.first().map_or((0, 0), |plane| plane.dim());
+        check_dims(mask.label(), raster.dim(), image)?;
+        Ok(raster)
     }
 
     pub fn read_only_reason(&self) -> Option<String> {
@@ -765,6 +801,55 @@ mod tests {
         assert_eq!(doc.nodes[0].output.extras, ["n0001_model.png"]);
         assert!(!doc.nodes[1].present);
         assert_eq!(serde_json::to_string_pretty(&doc).unwrap(), golden, "the v1 sidecar did not re-serialise byte-identically");
+    }
+
+    #[test]
+    fn a_node_mask_resolves_through_the_masks_map_or_inline() {
+        let mut doc = new_doc("/data/m42.fits");
+        doc.masks.insert("m02".to_string(), serde_json::json!({"kind": "range", "lo": 0.1, "hi": 0.9, "invert": true}));
+        let stored = doc.mask_spec(&MaskRef::Id("m02".to_string())).unwrap();
+        assert_eq!(stored.recipe.kind(), "range");
+        assert!(stored.mods.invert);
+        let inline = doc.mask_spec(&MaskRef::Recipe(serde_json::json!({"kind": "luminance", "feather_px": 2}))).unwrap();
+        assert_eq!((inline.recipe.kind(), inline.mods.feather_px), ("luminance", 2.0));
+
+        let missing = doc.mask_spec(&MaskRef::Id("m09".to_string())).unwrap_err().to_string();
+        assert_eq!(missing, "mask m09 is not in this image's history");
+        let unknown_kind = doc.mask_spec(&MaskRef::Recipe(serde_json::json!({"kind": "blur"}))).unwrap_err().to_string();
+        assert!(unknown_kind.starts_with("inline mask: unknown variant `blur`"), "{unknown_kind}");
+
+        let golden: HistoryDoc = serde_json::from_str(&unix(GOLDEN_V1)).unwrap();
+        let inline_on_n0005 = golden.nodes[4].mask.as_ref().unwrap();
+        assert_eq!(golden.mask_spec(inline_on_n0005).unwrap().recipe.kind(), "luminance");
+        let m01 = golden.mask_spec(golden.nodes[3].mask.as_ref().unwrap()).unwrap_err().to_string();
+        assert!(m01.starts_with("mask m01: unknown field `growth`"), "{m01}");
+    }
+
+    #[test]
+    fn a_node_mask_is_rasterised_from_the_op_input_and_refused_at_another_size() {
+        use crate::core::mask::rasterize;
+        use crate::infra::fits::writer::write_fits_mono;
+
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("mask8.fits").to_string_lossy().replace('\\', "/");
+        write_fits_mono(&small, &Array2::from_elem((8, 8), 1.0f32), None).unwrap();
+        let mut doc = new_doc("/data/m42.fits");
+        doc.masks.insert("m03".to_string(), serde_json::json!({"kind": "file", "path": small}));
+        let plane = Array2::from_shape_fn((12, 16), |(y, x)| (y * 16 + x) as f32);
+
+        let stored = MaskRef::Id("m03".to_string());
+        assert_eq!(stored.label(), "m03");
+        assert_eq!(doc.mask_raster(&stored, &[&plane]).unwrap_err().to_string(), "mask m03 is 8×8, image is 16×12");
+        let inline_file = MaskRef::Recipe(serde_json::json!({"kind": "file", "path": small}));
+        assert_eq!(inline_file.label(), "file");
+        assert_eq!(doc.mask_raster(&inline_file, &[&plane]).unwrap_err().to_string(), "mask file is 8×8, image is 16×12");
+        assert_eq!(MaskRef::Recipe(serde_json::json!({"feather_px": 1})).label(), "inline");
+
+        let inline = MaskRef::Recipe(serde_json::json!({"kind": "range", "lo": 40.0, "hi": 120.0, "fuzz": 8.0, "invert": true}));
+        let spec = doc.mask_spec(&inline).unwrap();
+        let expected = rasterize(&spec.recipe, &spec.mods, &[&plane]).unwrap();
+        assert_eq!(doc.mask_raster(&inline, &[&plane]).unwrap(), expected);
+        assert!(expected.iter().any(|&m| m > 0.0 && m < 1.0), "precondition: the range mask has a soft edge");
     }
 
     #[test]

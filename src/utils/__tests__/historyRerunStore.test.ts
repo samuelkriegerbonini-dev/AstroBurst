@@ -49,7 +49,7 @@ describe("historyRerunStore", () => {
     expect(sectionForOp(DENOISE)).toBe("denoise");
     expect(sectionForOp(TONE)).toBe("curves");
     expect(sectionForOp({ op: "arcsinh", v: 1, factor: 10 })).toBe("stretch");
-    expect(sectionForOp({ op: "ghs", v: 1, d: 5, b: 2, sp: 0.05, lp: 0, hp: 1 })).toBeNull();
+    expect(sectionForOp({ op: "ghs", v: 1, d: 5, b: 2, sp: 0.05, lp: 0, hp: 1 })).toBe("stretch");
     expect(sectionForOp({ op: "lhe", v: 1, kernelRadius: 64, contrastLimit: 2, amount: 1, histBits: 8, circular: true })).toBe("local_contrast");
     expect(sectionForOp({ op: "pixelmath", v: 1, expression: "$T", slots: [], truncate: true, rescale: false })).toBe("pixelmath");
   });

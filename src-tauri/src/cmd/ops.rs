@@ -16,6 +16,7 @@ use crate::cmd::common::{
 };
 use crate::service::common::derived_output_header;
 use crate::cmd::helpers;
+use crate::cmd::masks;
 use crate::cmd::output::dir_info;
 use crate::cmd::pixelmath::output_header as pixelmath_header;
 use crate::cmd::processing::{
@@ -25,14 +26,16 @@ use crate::cmd::processing::{
 use crate::core::analysis::deconvolution::provided_psf_kernel;
 use crate::core::history::id::{canonical_ref, image_id, rebase_ref};
 use crate::core::history::kernels::{read_kernel, write_kernel};
-use crate::core::history::{self, HistoryDoc, HistoryError, ImageInfo, NewNode, Node, NodeOutput};
+use crate::core::history::{self, HistoryDoc, HistoryError, ImageInfo, MaskRef, NewNode, Node, NodeOutput};
 use crate::core::imaging::push_history;
 use crate::core::imaging::stats::compute_image_stats;
 use crate::core::imaging::stf::{compute_linked_stf_with_stats, make_stf_u8_fn, AutoStfConfig};
+use crate::core::mask::cache::file_source;
+use crate::core::mask::{MaskRecipe, MaskSpec};
 use crate::core::ops::background::BackgroundModel;
 use crate::core::ops::pixelmath::SlotLoader;
 use crate::core::ops::psf::PsfSpec;
-use crate::core::ops::{run_op, OpCompanions, OpInput, OpOutput, OpSpec};
+use crate::core::ops::{refuse_mask, run_op, OpCompanions, OpInput, OpOutput, OpSpec};
 use crate::infra::cache::ImageEntry;
 use crate::infra::fits::writer::write_fits_rgb;
 use crate::infra::progress::ProgressHandle;
@@ -111,15 +114,15 @@ impl Drop for RunGuard {
     }
 }
 
-struct Scope {
+pub(crate) struct Scope {
     image_key: String,
     base_path: Option<String>,
     id: String,
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
 }
 
 impl Scope {
-    fn new(root: &Path, image_key: &str, base_path: Option<&str>) -> Self {
+    pub(crate) fn new(root: &Path, image_key: &str, base_path: Option<&str>) -> Self {
         let base_path = base_path.map(str::trim).filter(|b| !b.is_empty()).map(str::to_string);
         let id = image_id(image_key, base_path.as_deref());
         Self { dir: history::image_dir(root, &id), image_key: image_key.to_string(), base_path, id }
@@ -129,7 +132,7 @@ impl Scope {
         rebase_ref(&self.image_key, self.base_path.as_deref()).and(self.base_path.as_deref())
     }
 
-    fn root_input(&self) -> &str {
+    pub(crate) fn root_input(&self) -> &str {
         self.rebased_base().unwrap_or(&self.image_key)
     }
 
@@ -153,7 +156,7 @@ impl Scope {
         history::load(&self.dir)?.ok_or_else(|| anyhow!(NO_HISTORY))
     }
 
-    fn load_or_new(&self) -> anyhow::Result<HistoryDoc> {
+    pub(crate) fn load_or_new(&self) -> anyhow::Result<HistoryDoc> {
         if let Some(doc) = history::load(&self.dir)? {
             return Ok(doc);
         }
@@ -168,7 +171,7 @@ impl Scope {
     }
 }
 
-fn resolve_parent(scope: &Scope, doc: &HistoryDoc, input_path: &str) -> anyhow::Result<Option<String>> {
+pub(crate) fn resolve_parent(scope: &Scope, doc: &HistoryDoc, input_path: &str) -> anyhow::Result<Option<String>> {
     let input = path_key(&image_ref(input_path).path);
     let dir = path_key(&scope.dir.to_string_lossy());
     match input.strip_prefix(dir.as_str()).and_then(|rest| rest.strip_prefix('/')) {
@@ -281,12 +284,24 @@ fn with_stored_kernel(scope: &Scope, op: OpSpec, supplied: Option<Vec<Vec<f32>>>
     Ok(OpSpec::RlDeconv { v: *v, config: config.clone(), psf: PsfSpec::Kernel { hash, rows: size, cols: size } })
 }
 
-fn compute(scope: &Scope, op: &OpSpec, input_path: &str, progress: Option<&ProgressHandle>) -> anyhow::Result<(OpOutput, HduHeader)> {
+fn compute(
+    scope: &Scope,
+    doc: &HistoryDoc,
+    op: &OpSpec,
+    mask: Option<&MaskRef>,
+    input_path: &str,
+    progress: Option<&ProgressHandle>,
+) -> anyhow::Result<(OpOutput, HduHeader)> {
+    let mask_source = mask.and_then(|_| file_source(input_path));
     let loaded = LoadedInput::load(input_path, op)?;
     let kernel = stored_kernel(scope, op)?;
     let load: SlotLoader = &load_cached_full;
     let companions = OpCompanions { psf_kernel: kernel.as_ref(), load_slot: Some(load) };
-    let out = run_op(op, &loaded.input().with_companions(companions), progress)?;
+    let input = loaded.input().with_companions(companions);
+    let raster = mask
+        .map(|mask| masks::guarded_raster(doc, mask, &input.planes, scope.root_input(), mask_source.as_deref()))
+        .transpose()?;
+    let out = run_op(op, &input.with_mask(raster.as_deref()), progress)?;
     let header = node_header(op, loaded.header(), &out, input_path);
     Ok((out, header))
 }
@@ -349,13 +364,17 @@ struct Recorded {
     out: OpOutput,
 }
 
-fn replayable(scope: &Scope, doc: &HistoryDoc, parent: Option<&str>, op: &OpSpec) -> bool {
+fn replayable(scope: &Scope, doc: &HistoryDoc, parent: Option<&str>, op: &OpSpec, mask: Option<&MaskRef>) -> bool {
     let root_is_kept = parent.is_some() || (scope.rebased_base().is_none() && scope.source_unchanged(doc));
     let slots_are_kept = match op {
         OpSpec::Pixelmath { slots, .. } => slots.iter().all(|slot| scope.is_source_file(&slot.path)),
         _ => true,
     };
-    root_is_kept && slots_are_kept
+    let mask_is_kept = match mask.map(|mask| doc.mask_spec(mask)) {
+        Some(Ok(MaskSpec { recipe: MaskRecipe::File { path, .. }, .. })) => scope.is_source_file(&path),
+        _ => true,
+    };
+    root_is_kept && slots_are_kept && mask_is_kept
 }
 
 fn chain_stage(op: &OpSpec) -> Option<u8> {
@@ -390,6 +409,7 @@ fn record_node(
     doc: &mut HistoryDoc,
     parent: Option<String>,
     op: OpSpec,
+    mask: Option<MaskRef>,
     input_path: &str,
     progress: Option<&ProgressHandle>,
 ) -> anyhow::Result<Recorded> {
@@ -397,7 +417,7 @@ fn record_node(
     if parent.is_none() && !scope.source_unchanged(doc) {
         history::restamp(doc, ImageInfo::of(&scope.image_key, scope.base_path.as_deref())?);
     }
-    let (out, mut header) = compute(scope, &op, input_path, progress)?;
+    let (out, mut header) = compute(scope, doc, &op, mask.as_ref(), input_path, progress)?;
     let id = history::next_node_id(&scope.dir, doc);
     stamp(&mut header, &scope.id, &id);
     let output = node_output(&id, &out);
@@ -405,9 +425,9 @@ fn record_node(
         remove_node_files(scope, &output);
         return Err(e);
     }
-    let replayable = replayable(scope, doc, parent.as_deref(), &op);
+    let replayable = replayable(scope, doc, parent.as_deref(), &op, mask.as_ref());
     let elapsed_ms = t0.elapsed().as_millis() as u64;
-    let new = NewNode { id: id.clone(), parent, op, mask: None, output: output.clone(), elapsed_ms, replayable };
+    let new = NewNode { id: id.clone(), parent, op, mask, output: output.clone(), elapsed_ms, replayable };
     if let Err(e) = history::append(&scope.dir, doc, new) {
         remove_node_files(scope, &output);
         return Err(e.into());
@@ -431,7 +451,7 @@ fn rebuild(scope: &Scope, doc: &mut HistoryDoc, target: &str) -> anyhow::Result<
     };
     for id in &plan.steps {
         let node = doc.node(id).cloned().ok_or_else(|| HistoryError::UnknownNode(id.clone()))?;
-        let (out, mut header) = compute(scope, &node.op, &input, None).with_context(|| format!("replaying {id}"))?;
+        let (out, mut header) = compute(scope, doc, &node.op, node.mask.as_ref(), &input, None).with_context(|| format!("replaying {id}"))?;
         let replayed = node_output(id, &out);
         if (replayed.dims, replayed.planes) != (node.output.dims, node.output.planes) {
             bail!(
@@ -467,11 +487,19 @@ fn node_present(scope: &Scope, node: &Node) -> bool {
     node.present && node.output.files().all(|file| scope.dir.join(file).exists())
 }
 
-fn node_view(scope: &Scope, node: &Node) -> Value {
+fn mask_view(doc: &HistoryDoc, mask: &MaskRef) -> Value {
+    match mask {
+        MaskRef::Id(id) => json!({ "id": id, "recipe": doc.masks.get(id), "deleted": doc.deleted_masks.contains(id) }),
+        MaskRef::Recipe(recipe) => json!({ "id": null, "recipe": recipe, "deleted": false }),
+    }
+}
+
+fn node_view(scope: &Scope, doc: &HistoryDoc, node: &Node) -> Value {
     json!({
         "id": node.id,
         KEY_PARENT: node.parent,
         "op": node.op,
+        "mask": node.mask.as_ref().map(|mask| mask_view(doc, mask)),
         RES_FITS_PATH: scope.file(&node.output.path),
         RES_PNG_PATH: scope.file(&node.output.png),
         "extras": node.output.extras.iter().map(|e| scope.file(e)).collect::<Vec<_>>(),
@@ -488,7 +516,7 @@ fn head_view(scope: &Scope, doc: &HistoryDoc) -> Value {
         KEY_IMAGE_ID: scope.id,
         KEY_HISTORY_DIR: scope.dir,
         KEY_HEAD: doc.head,
-        KEY_NODE: head.map(|n| node_view(scope, n)),
+        KEY_NODE: head.map(|n| node_view(scope, doc, n)),
         "root_path": scope.root_input(),
         "can_undo": doc.head.is_some(),
         "can_redo": doc.redo_target().is_some(),
@@ -527,6 +555,7 @@ pub(crate) struct RunRequest<'a> {
     pub input_path: &'a str,
     pub op: OpSpec,
     pub psf_kernel: Option<Vec<Vec<f32>>>,
+    pub mask: Option<MaskRef>,
 }
 
 pub(crate) fn run_recorded(root: &Path, request: RunRequest, progress: Option<&ProgressHandle>) -> anyhow::Result<Value> {
@@ -535,11 +564,15 @@ pub(crate) fn run_recorded(root: &Path, request: RunRequest, progress: Option<&P
     let mut doc = scope.load_or_new()?;
     let parent = resolve_parent(&scope, &doc, request.input_path)?;
     check_stage_order(&doc, parent.as_deref(), &request.op)?;
+    if let Some(mask) = &request.mask {
+        refuse_mask(&request.op)?;
+        doc.listed_mask_spec(mask)?;
+    }
     if let Some(parent) = parent.as_deref() {
         rebuild(&scope, &mut doc, parent)?;
     }
     let op = with_stored_kernel(&scope, request.op, request.psf_kernel)?;
-    let recorded = record_node(&scope, &mut doc, parent, op, request.input_path, progress)?;
+    let recorded = record_node(&scope, &mut doc, parent, op, request.mask, request.input_path, progress)?;
     Ok(run_response(&scope, &recorded))
 }
 
@@ -574,7 +607,7 @@ pub(crate) fn rehydrate(root: &Path, image_key: &str, base_path: Option<&str>, n
     Ok(json!({
         KEY_IMAGE_ID: scope.id,
         KEY_HEAD: doc.head,
-        KEY_NODE: node_view(&scope, target),
+        KEY_NODE: node_view(&scope, &doc, target),
         "rebuilt": rebuilt,
     }))
 }
@@ -619,9 +652,10 @@ pub(crate) fn rerun(root: &Path, request: RerunRequest, progress: Option<&Progre
     let mut parent = original.parent;
     let mut created = Vec::new();
     let mut first_run = Value::Null;
-    for (index, op) in std::iter::once(first).chain(downstream.into_iter().map(|n| n.op)).enumerate() {
+    let steps = std::iter::once((first, original.mask)).chain(downstream.into_iter().map(|n| (n.op, n.mask)));
+    for (index, (op, mask)) in steps.enumerate() {
         let step_progress = if index == 0 { progress } else { None };
-        let recorded = match record_node(&scope, &mut doc, parent.take(), op, &input, step_progress) {
+        let recorded = match record_node(&scope, &mut doc, parent.take(), op, mask, &input, step_progress) {
             Ok(recorded) => recorded,
             Err(e) => {
                 if !created.is_empty() {
@@ -759,7 +793,7 @@ fn progress_for(app: &tauri::AppHandle, op: &OpSpec) -> Option<ProgressHandle> {
     Some(ProgressHandle::new(app, event, total))
 }
 
-fn history_root_of(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn history_root_of(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|dir| history::history_root(&dir))
@@ -774,11 +808,12 @@ pub async fn run_op_cmd(
     input_path: String,
     op: OpSpec,
     psf_kernel: Option<Vec<Vec<f32>>>,
+    mask: Option<MaskRef>,
 ) -> Result<Value, String> {
     let root = history_root_of(&app)?;
     let progress = progress_for(&app, &op);
     blocking_cmd!({
-        let request = RunRequest { image_key: &image_key, base_path: base_path.as_deref(), input_path: &input_path, op, psf_kernel };
+        let request = RunRequest { image_key: &image_key, base_path: base_path.as_deref(), input_path: &input_path, op, psf_kernel, mask };
         run_recorded(&root, request, progress.as_ref())
     })
 }
@@ -958,7 +993,11 @@ mod tests {
         }
 
         fn run(&self, key: &str, input: &str, op: OpSpec) -> anyhow::Result<serde_json::Value> {
-            run_recorded(&self.root(), RunRequest { image_key: key, base_path: None, input_path: input, op, psf_kernel: None }, None)
+            self.run_masked(key, input, op, None)
+        }
+
+        fn run_masked(&self, key: &str, input: &str, op: OpSpec, mask: Option<MaskRef>) -> anyhow::Result<serde_json::Value> {
+            run_recorded(&self.root(), RunRequest { image_key: key, base_path: None, input_path: input, op, psf_kernel: None, mask }, None)
         }
     }
 
@@ -1316,6 +1355,75 @@ mod tests {
     }
 
     #[test]
+    fn run_op_cmd_records_a_masked_node_and_replays_it_with_its_mask() {
+        let fx = Fixture::new();
+        let input = sky(21, 1.0);
+        let key = fx.mono("m42.fits", &input);
+        let dir = fx.image_dir(&key);
+        let inline = MaskRef::Recipe(serde_json::json!({"kind": "range", "lo": 112.0, "hi": 124.0, "fuzz": 4.0, "feather_px": 1.0}));
+        let plain = |op: &OpSpec, mask: Option<&Array2<f32>>| run_op(op, &OpInput::mono(&input, None).with_mask(mask), None).unwrap().planes.remove(0);
+
+        let first = fx.run_masked(&key, &key, tone(), Some(inline.clone())).unwrap();
+        let first_fits = path_of(&first, RES_FITS_PATH);
+        let mut doc = fx.doc(&key);
+        assert_eq!(doc.nodes[0].mask.as_ref(), Some(&inline), "the node did not record its mask");
+        let raster = doc.mask_raster(&inline, &[&input]).unwrap();
+        let soft = raster.iter().any(|&m| m > 0.0 && m < 1.0);
+        assert!(raster.iter().any(|&m| m == 0.0) && raster.iter().any(|&m| m == 1.0) && soft, "precondition: m 0, m 1 and a soft edge");
+        let expected_tone = plain(&tone(), Some(&raster));
+        let written = extract_image_resolved(&first_fits).unwrap().arr;
+        assert_bitwise(&written, &expected_tone, "masked tone node");
+        assert!(written.iter().zip(plain(&tone(), None).iter()).any(|(w, u)| w != u), "the mask changed nothing");
+        assert!(written.iter().all(|v| (0.0..=1.0).contains(v)), "a masked tone wrote linear values into a display-referred node");
+        assert_eq!(text(&cached_header(&first_fits).unwrap(), HEADER_DISPLAY_REFERRED).as_deref(), Some("T"));
+
+        doc.masks.insert("m01".to_string(), serde_json::json!({"kind": "range", "lo": 112.0, "hi": 124.0, "fuzz": 4.0, "invert": true}));
+        history::save(&dir, &doc).unwrap();
+        let stored = MaskRef::Id("m01".to_string());
+        let second = fx.run_masked(&key, &key, arcsinh(30.0), Some(stored.clone())).unwrap();
+        let second_fits = path_of(&second, RES_FITS_PATH);
+        assert_eq!(fx.doc(&key).node("n0002").unwrap().mask.as_ref(), Some(&stored));
+        let expected_arcsinh = plain(&arcsinh(30.0), Some(&doc.mask_raster(&stored, &[&input]).unwrap()));
+        assert_bitwise(&extract_image_resolved(&second_fits).unwrap().arr, &expected_arcsinh, "a mask from the masks map");
+
+        evict(&dir, &["n0001", "n0002"]);
+        assert_eq!(rehydrate(&fx.root(), &key, None, "n0001").unwrap()["rebuilt"], serde_json::json!(["n0001"]));
+        assert_eq!(rehydrate(&fx.root(), &key, None, "n0002").unwrap()["rebuilt"], serde_json::json!(["n0002"]));
+        assert_within_range(&extract_image_resolved(&first_fits).unwrap().arr, &expected_tone, "rebuilt inline-masked node");
+        assert_within_range(&extract_image_resolved(&second_fits).unwrap().arr, &expected_arcsinh, "rebuilt node with a stored mask");
+
+        let request = RerunRequest { image_key: &key, base_path: None, node: "n0001", op: None, replay_downstream: false, psf_kernel: None };
+        assert_eq!(rerun(&fx.root(), request, None).unwrap()["created"], serde_json::json!(["n0003"]));
+        assert_eq!(fx.doc(&key).node("n0003").unwrap().mask.as_ref(), Some(&inline), "a re-run dropped the mask");
+        assert_bitwise(&extract_image_resolved(&dir.join("n0003.fits").to_string_lossy()).unwrap().arr, &expected_tone, "re-run pixels");
+
+        let recorded = fx.doc(&key).nodes.len();
+        let missing = fx.run_masked(&key, &key, tone(), Some(MaskRef::Id("m09".to_string()))).unwrap_err().to_string();
+        assert_eq!(missing, "mask m09 is not in this image's history");
+        let malformed = fx.run_masked(&key, &key, tone(), Some(MaskRef::Recipe(serde_json::json!({"kind": "blur"})))).unwrap_err().to_string();
+        assert!(malformed.starts_with("inline mask: unknown variant `blur`"), "{malformed}");
+        let refused = fx.run_masked(&key, &key, background(), Some(inline.clone())).unwrap_err().to_string();
+        assert_eq!(refused, "background does not take a mask");
+        assert_eq!(fx.doc(&key).nodes.len(), recorded, "a refused masked run was recorded");
+    }
+
+    #[test]
+    fn a_node_whose_mask_reads_another_file_is_kept_like_a_pixelmath_slot() {
+        let fx = Fixture::new();
+        let input = sky(22, 1.0);
+        let key = fx.mono("m42.fits", &input);
+        let mask_file = fx.mono("stars.fits", &input.mapv(|v| if v > 300.0 { 1.0 } else { 0.0 }));
+        let file_mask = |path: &str| MaskRef::Recipe(serde_json::json!({"kind": "file", "path": path}));
+        let range = MaskRef::Recipe(serde_json::json!({"kind": "range", "lo": 112.0, "hi": 124.0}));
+
+        for mask in [file_mask(&mask_file), file_mask(&key), range] {
+            fx.run_masked(&key, &key, tone(), Some(mask)).unwrap();
+        }
+        let replayable: Vec<bool> = fx.doc(&key).nodes.iter().map(|n| n.replayable).collect();
+        assert_eq!(replayable, [false, true, true], "a node whose mask reads a file the history does not keep was marked replayable");
+    }
+
+    #[test]
     fn rerun_with_replay_downstream_creates_a_branch() {
         use crate::types::constants::HEADER_DISPLAY_REFERRED_CARD;
 
@@ -1464,7 +1572,7 @@ mod tests {
             config: RLConfig { iterations: 4, ..RLConfig::default() },
             psf: PsfSpec::Kernel { hash: String::new(), rows: 0, cols: 0 },
         };
-        let request = RunRequest { image_key: &key, base_path: None, input_path: &key, op, psf_kernel: Some(rows.clone()) };
+        let request = RunRequest { image_key: &key, base_path: None, input_path: &key, op, psf_kernel: Some(rows.clone()), mask: None };
         let value = run_recorded(&fx.root(), request, None).unwrap();
         assert_eq!(value["psf_source"], "provided");
 
@@ -1607,7 +1715,7 @@ mod tests {
         let base = output.join("m42_stack.fits").to_string_lossy().to_string();
         write_fits_mono(&base, &sky(25, 1.0), None).unwrap();
         let run = |input: &str, op: OpSpec| {
-            run_recorded(&fx.root(), RunRequest { image_key: &key, base_path: Some(&base), input_path: input, op, psf_kernel: None }, None)
+            run_recorded(&fx.root(), RunRequest { image_key: &key, base_path: Some(&base), input_path: input, op, psf_kernel: None, mask: None }, None)
         };
         let first = path_of(&run(&base, wavelet([3.0, 2.5, 2.0, 1.5, 1.0])).unwrap(), RES_FITS_PATH);
         let second = path_of(&run(&first, arcsinh(30.0)).unwrap(), RES_FITS_PATH);

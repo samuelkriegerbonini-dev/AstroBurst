@@ -7,10 +7,17 @@ import { useCompositeMode } from "../../hooks/useCompositeMode";
 import { fileStore } from "../../hooks/useFileStore";
 import { getOutputDir, getPreviewUrl } from "../../infrastructure/tauri";
 import { DEFAULT_STACK_SETTINGS, type StackSettings } from "../../utils/stackingRejection";
+import { subframeLights } from "../../utils/frameKind";
 import { fileSetKey, liveSubframeSelection, panelRejectedPaths, withAllFramesIn, type SubframeSelection } from "../../utils/subframeCull";
-import { drizzleViewOutput, framesLabel, parksWizardComposite, pipelineViewOutput, resultsForRecipients, showsOutput, sourceLabel, toDims } from "../../utils/stackingOutputs";
+import { drizzleViewOutput, parksWizardComposite, pipelineViewOutput, resultsForRecipients, showsOutput, sourceLabel, stackViewOutput, toDims } from "../../utils/stackingOutputs";
+import { cosmeticCopiesOf, withCosmeticCopies, type CosmeticCopy } from "../../utils/cosmeticCopies";
+import { withCalibrationFrames } from "../../utils/calibrationHandoff";
+import { wizardHasProgress } from "../../utils/wizard";
+import { mosaicViewOutput } from "../../utils/mosaicView";
+import type { ComposeMaster } from "../../utils/pipelineToCompose";
+import { composeMasters } from "./resultHandoff";
 import type { CalibrateResult } from "../../shared/types";
-import type { DrizzleRgbResult, PipelineResult, StackResult } from "../../shared/types/stacking";
+import type { DrizzleRgbResult, MosaicResult, PipelineResult, StackResult } from "../../shared/types/stacking";
 import type { CosmeticBatchResult, CosmeticResult } from "../../shared/types/cosmetic";
 import type { ProcessedResult } from "../../shared/types/preview";
 import type { CalibrationMasters } from "./CalibrationPanel";
@@ -21,8 +28,9 @@ const StackingPanel = lazy(() => import("./StackingPanel"));
 const PipelinePanel = lazy(() => import("./PipelinePanel"));
 const SubframeSelectorPanel = lazy(() => import("./SubframeSelectorPanel"));
 const DrizzleRgbPanel = lazy(() => import("./DrizzleRgbPanel"));
+const MosaicPanel = lazy(() => import("./MosaicPanel"));
 
-type StackSection = "calibrate" | "cosmetic" | "subframe" | "stack" | "pipeline" | "drizzle_rgb";
+type StackSection = "calibrate" | "cosmetic" | "subframe" | "stack" | "pipeline" | "drizzle_rgb" | "mosaic";
 
 const SECTIONS: { id: StackSection; label: string; color: string }[] = [
   { id: "calibrate", label: "Calibrate", color: "violet" },
@@ -31,6 +39,7 @@ const SECTIONS: { id: StackSection; label: string; color: string }[] = [
   { id: "stack", label: "Stack", color: "amber" },
   { id: "pipeline", label: "Pipeline", color: "cyan" },
   { id: "drizzle_rgb", label: "Drizzle RGB", color: "rose" },
+  { id: "mosaic", label: "Mosaic", color: "indigo" },
 ];
 
 const SECTION_ACTIVE_CLASS: Record<string, string> = {
@@ -40,6 +49,7 @@ const SECTION_ACTIVE_CLASS: Record<string, string> = {
   amber: "bg-amber-600/20 text-amber-400 ring-1 ring-amber-500/30",
   cyan: "bg-cyan-600/20 text-cyan-400 ring-1 ring-cyan-500/30",
   rose: "bg-rose-600/20 text-rose-400 ring-1 ring-rose-500/30",
+  indigo: "bg-indigo-600/20 text-indigo-400 ring-1 ring-indigo-500/30",
 };
 
 export type StackConfig = StackSettings;
@@ -78,7 +88,7 @@ function StackingTabInner() {
   const { publishProcessed, currentFileKey } = useRenderActions();
   const { park } = useCompositeActions();
   const wizardCompositeOnScreen = useCompositeMode();
-  const { state: wizardState } = useComposeWizardContext();
+  const { state: wizardState, dispatch: wizardDispatch, getState: getWizardState, setActiveStep: setWizardStep } = useComposeWizardContext();
   const wizardViewRef = useRef({ onScreen: wizardCompositeOnScreen, ready: wizardState.compositeReady });
   wizardViewRef.current = { onScreen: wizardCompositeOnScreen, ready: wizardState.compositeReady };
   const { file } = useFileContext();
@@ -100,8 +110,10 @@ function StackingTabInner() {
 
   const [stackConfig, setStackConfig] = useState<StackConfig>(DEFAULT_STACK_SETTINGS);
   const [injectedPaths, setInjectedPaths] = useState<string[]>([]);
+  const [cosmeticCopies, setCosmeticCopies] = useState<CosmeticCopy[]>([]);
   const [selection, setSelection] = useState<SubframeSelection | null>(null);
   const filePaths = useMemo(() => doneFiles.map((f) => f.path), [doneFiles]);
+  const subframeList = useMemo(() => subframeLights(doneFiles), [doneFiles]);
 
   const handleSubframeSelection = useCallback(
     (accepted: string[], rejected: string[], weights?: Record<string, number>) => {
@@ -181,8 +193,14 @@ function StackingTabInner() {
     [publishOutput],
   );
 
+  const handleUseInPipeline = useCallback((masters: CalibrationMasters) => {
+    setCalibration((prev) => withCalibrationFrames(prev, masters));
+    setActive("pipeline");
+  }, []);
+
   const handleCosmeticDone = useCallback(
     (result: CosmeticResult, target: RunTarget | null) => {
+      setCosmeticCopies((prev) => withCosmeticCopies(prev, cosmeticCopiesOf([result])));
       if (!target) return;
       publishOutput(target, {
         fitsPath: result.fits_path ?? null,
@@ -197,6 +215,7 @@ function StackingTabInner() {
 
   const handleCosmeticBatchDone = useCallback(
     async (batch: CosmeticBatchResult) => {
+      setCosmeticCopies((prev) => withCosmeticCopies(prev, cosmeticCopiesOf(batch.results)));
       for (const item of batch.results) {
         const fitsPath = item.fits_path;
         if (item.error || !fitsPath) continue;
@@ -219,13 +238,26 @@ function StackingTabInner() {
   const handleStackResult = useCallback(
     (result: StackResult, inputs: string[], target: RunTarget | null) => {
       if (!target) return;
-      publishOutput(target, {
-        fitsPath: result.fits_path ?? null,
-        previewUrl: result.previewUrl ?? null,
-        dimensions: toDims(result.dimensions),
-        kind: "stacking",
-        inputPath: inputs[0] ?? target.path,
-      }, () => framesLabel("Stack", result.frame_count ?? inputs.length));
+      const view = stackViewOutput(result, inputs, target.path, "Stack");
+      publishOutput(target, view.output, () => view.label);
+    },
+    [publishOutput],
+  );
+
+  const handleMosaicResult = useCallback(
+    (result: MosaicResult, target: RunTarget | null) => {
+      if (!target) return;
+      const view = mosaicViewOutput(result, result.tiles.length);
+      publishOutput(target, view.output, () => view.label);
+    },
+    [publishOutput],
+  );
+
+  const handleMonoDrizzleResult = useCallback(
+    (result: StackResult, inputs: string[], target: RunTarget | null, filterLabel: string) => {
+      if (!target) return;
+      const view = stackViewOutput(result, inputs, target.path, `Drizzle ${filterLabel} (mono)`);
+      publishOutput(target, view.output, () => view.label);
     },
     [publishOutput],
   );
@@ -256,6 +288,13 @@ function StackingTabInner() {
   const handleStackConfigChange = useCallback((config: Partial<StackConfig>) => {
     setStackConfig((prev) => ({ ...prev, ...config }));
   }, []);
+
+  const handleComposeMasters = useCallback(
+    (masters: readonly ComposeMaster[]) => {
+      composeMasters(masters, { getState: getWizardState, dispatch: wizardDispatch, setActiveStep: setWizardStep });
+    },
+    [getWizardState, wizardDispatch, setWizardStep],
+  );
 
   return (
     <div className="flex flex-col h-full">
@@ -293,6 +332,7 @@ function StackingTabInner() {
               files={doneFiles}
               runTarget={runTarget}
               onCalibrationDone={handleCalibrationDone}
+              onUseInPipeline={handleUseInPipeline}
             />
           </div>
           <div style={{ display: active === "cosmetic" ? "block" : "none" }}>
@@ -305,7 +345,7 @@ function StackingTabInner() {
             />
           </div>
           <div style={{ display: active === "subframe" ? "block" : "none" }}>
-            <SubframeSelectorPanel files={filePaths} onSelectionChange={handleSubframeSelection} />
+            <SubframeSelectorPanel files={subframeList.paths} leftOutLine={subframeList.leftOutLine} onSelectionChange={handleSubframeSelection} />
           </div>
           <div style={{ display: active === "stack" ? "block" : "none" }}>
             <StackingPanel
@@ -318,6 +358,7 @@ function StackingTabInner() {
               onStackConfigChange={handleStackConfigChange}
               rejectedPaths={live?.rejected ?? NO_PATHS}
               subframeWeights={live?.weights}
+              cosmeticCopies={cosmeticCopies}
             />
           </div>
           <div style={{ display: active === "pipeline" ? "block" : "none" }}>
@@ -329,6 +370,8 @@ function StackingTabInner() {
               onShow={handlePipelineShow}
               rejectedPaths={panelRejectedPaths(live, "pipeline")}
               onUseAllFrames={allFramesInPipeline}
+              composeHasProgress={wizardHasProgress(wizardState)}
+              onComposeMasters={handleComposeMasters}
             />
           </div>
           <div style={{ display: active === "drizzle_rgb" ? "block" : "none" }}>
@@ -336,8 +379,18 @@ function StackingTabInner() {
               files={doneFiles}
               runTarget={runTarget}
               onResult={handleDrizzleResult}
+              onMonoResult={handleMonoDrizzleResult}
               rejectedPaths={panelRejectedPaths(live, "drizzle")}
               onUseAllFrames={allFramesInDrizzle}
+            />
+          </div>
+          <div style={{ display: active === "mosaic" ? "block" : "none" }}>
+            <MosaicPanel
+              files={doneFiles}
+              runTarget={runTarget}
+              onResult={handleMosaicResult}
+              composeHasProgress={wizardHasProgress(wizardState)}
+              onComposeMosaics={handleComposeMasters}
             />
           </div>
         </div>
