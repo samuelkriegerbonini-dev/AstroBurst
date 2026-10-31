@@ -4,7 +4,7 @@ All notable changes to AstroBurst will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.7] - 2026-10-31
 
 ### Added
 - Masks: a Masks tool after History makes a mask for the image on screen from its luminance (optionally after the Auto STF), a value range with a soft edge (Low, High, Fuzz), its stars (Detection Sigma, Mask Growth, Mask Softness, Luminance Protection and the Star filters), the regions drawn on it, where excluded regions cut holes, or another FITS file with a mark mode (Nonzero, Zero, NaN, Not NaN, Range); Feather (a Gaussian sigma in px) and Invert apply to every kind. Each mask lists its id, kind, coverage and size, and a stars mask its star count; Measure fills these in for a mask listed from the history after a restart. The mask shown from the list is tinted over the image on the GPU and CPU viewers, with the Opacity, Tint and Display Invert settings under Display, and stays shown when the tool is closed; on the Compose wizard's composite the tool makes the composite's own masks.
