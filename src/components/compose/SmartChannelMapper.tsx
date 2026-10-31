@@ -1,3 +1,4 @@
+import { toggleCalibFrame, withAllFramesOfKind } from "./calibFrames";
 import {
   useState,
   useCallback,
@@ -88,17 +89,7 @@ const NO_CALIB_FRAMES: CalibAssignment = { science: null, bias: [], dark: [], fl
 const CALIB_FRAME_SLOTS: readonly CalibFrameSlot[] = ["bias", "dark", "flat", "flatdark"];
 const VISIBLE_FRAMES = 5;
 
-export function toggleCalibFrame(assignment: CalibAssignment, slot: CalibFrameSlot, file: ChannelFile): CalibAssignment {
-  const frames = assignment[slot];
-  const next = frames.some((f) => f.id === file.id) ? frames.filter((f) => f.id !== file.id) : [...frames, file];
-  return { ...assignment, [slot]: next };
-}
 
-export function withAllFramesOfKind(assignment: CalibAssignment, slot: CalibFrameSlot, files: readonly ChannelFile[]): CalibAssignment {
-  const present = new Set(assignment[slot].map((f) => f.id));
-  const missing = files.filter((f) => f.frameKind === slot && !present.has(f.id));
-  return missing.length === 0 ? assignment : { ...assignment, [slot]: [...assignment[slot], ...missing] };
-}
 
 const CHANNEL_META: Record<ChannelSlot, { color: string; label: string; bg: string; border: string }> = {
   L: { color: "#e4e4e7", label: "Luminance", bg: "rgba(228,228,231,0.06)", border: "rgba(228,228,231,0.2)" },

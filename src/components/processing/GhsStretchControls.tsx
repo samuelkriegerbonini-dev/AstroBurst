@@ -1,3 +1,4 @@
+import { withSymmetryPoint, withShadowProtect, withHighlightProtect } from "./ghsSettings";
 import { GHS_LIMITS, type GhsSettings } from "../../services/processing";
 import { Slider } from "../ui";
 
@@ -11,22 +12,8 @@ interface GhsStretchControlsProps {
 
 const ACCENT = "amber";
 
-export function withSymmetryPoint(settings: GhsSettings, symmetryPoint: number): GhsSettings {
-  return {
-    ...settings,
-    symmetryPoint,
-    shadowProtect: Math.min(settings.shadowProtect, symmetryPoint),
-    highlightProtect: Math.max(settings.highlightProtect, symmetryPoint),
-  };
-}
 
-export function withShadowProtect(settings: GhsSettings, shadowProtect: number): GhsSettings {
-  return { ...settings, shadowProtect: Math.min(shadowProtect, settings.symmetryPoint) };
-}
 
-export function withHighlightProtect(settings: GhsSettings, highlightProtect: number): GhsSettings {
-  return { ...settings, highlightProtect: Math.max(highlightProtect, settings.symmetryPoint) };
-}
 
 function threeDecimals(v: number): string {
   return v.toFixed(3);

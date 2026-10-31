@@ -1,3 +1,4 @@
+import { geometryShowLabel } from "./geometryLabels";
 import { useCallback, type ReactNode } from "react";
 import { ArrowLeftRight, RefreshCw, RotateCcw } from "lucide-react";
 import { ResultGrid, ErrorAlert, SectionHeader } from "../ui";
@@ -33,9 +34,6 @@ const ICON = <RotateCcw size={14} className="text-orange-400 -scale-x-100" />;
 
 const OPENING_LABEL = "Opening...";
 
-export function geometryShowLabel(op: GeometryOp): string {
-  return `Show the ${OP_LABELS[op].outcome} image`;
-}
 
 function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;

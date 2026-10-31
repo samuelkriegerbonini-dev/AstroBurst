@@ -48,7 +48,7 @@ import { PreviewProvider, fileKeyOf } from "../../../context/PreviewContext";
 import { historyRerunStore, sectionForOp } from "../../../utils/historyRerunStore";
 import { GHS_DEFAULTS, ghsOp, ghsOptionsOf, stretchOptionsOf, type GhsSettings } from "../../../services/processing";
 import ArcsinhStretchPanel, { GHS_COMPOSITE_NOTICE } from "../ArcsinhStretchPanel";
-import { withHighlightProtect, withShadowProtect, withSymmetryPoint } from "../GhsStretchControls";
+import { withHighlightProtect, withShadowProtect, withSymmetryPoint } from "../ghsSettings";
 import type { OpSpec } from "../../../shared/types/ops";
 import type { ProcessedFile } from "../../../shared/types";
 

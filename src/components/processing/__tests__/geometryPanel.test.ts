@@ -33,7 +33,8 @@ import { PreviewProvider, fileKeyOf, useRenderActions } from "../../../context/P
 import { registerFileIngest } from "../../../hooks/useFileIngest";
 import { fileStore } from "../../../hooks/useFileStore";
 import { withStep } from "../../../utils/processingChain";
-import GeometryPanel, { geometryShowLabel } from "../GeometryPanel";
+import GeometryPanel from "../GeometryPanel";
+import { geometryShowLabel } from "../geometryLabels";
 import { GEOMETRY_OPS, type GeometryResult } from "../../../services/imageGeometry";
 import type { AstroFile, ProcessedFile } from "../../../shared/types";
 

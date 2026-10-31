@@ -6,7 +6,8 @@ import { PreviewProvider, fileKeyOf, useRenderActions } from "../../../context/P
 import { EMPTY_CHAIN, withStep } from "../../../utils/processingChain";
 import type { ChainStep, ProcessedResult } from "../../../shared/types/preview";
 import type { ProcessedFile } from "../../../shared/types/fits.types";
-import PixelMathPanel, { PixelMathRunOn, initialPixelMathTarget, pixelMathTargetAfterKey } from "../PixelMathPanel";
+import PixelMathPanel, { PixelMathRunOn } from "../PixelMathPanel";
+import { initialPixelMathTarget, pixelMathTargetAfterKey } from "../pixelMathTarget";
 import DebayerPanel from "../DebayerPanel";
 import { chainOutputs, pixelMathFileOptions, retain } from "../pixelMathPanelState";
 import { RESERVED_NAMES } from "../../../utils/pixelmathSlots";

@@ -18,7 +18,8 @@ import {
 } from "../../utils/dockOnboarding";
 import { dockOnboardingStore, useDockOnboarding } from "./dockOnboardingStore";
 import { focusStripButton, onboardingAnchorReady } from "./dockGeometry";
-import { DockTipPopup, tipAnchorSelector } from "./DockTip";
+import { DockTipPopup } from "./DockTip";
+import { tipAnchorSelector } from "./tipAnchor";
 import { dragStore } from "./useDockDrag";
 import "./dock.css";
 

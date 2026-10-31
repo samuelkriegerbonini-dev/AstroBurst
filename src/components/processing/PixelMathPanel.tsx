@@ -1,3 +1,4 @@
+import { initialPixelMathTarget, pixelMathTargetAfterKey, PIXELMATH_TARGETS, type PixelMathTarget } from "./pixelMathTarget";
 import { useState, useCallback, useEffect, useId, useMemo, useRef, type KeyboardEvent } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Toggle, RunButton, ResultGrid, CompareView, ErrorAlert, SectionHeader } from "../ui";
@@ -80,27 +81,6 @@ interface PixelMathCompositeRun {
 }
 
 type PixelMathRun = PixelMathFileRun | PixelMathCompositeRun;
-
-export type PixelMathTarget = "file" | "composite";
-
-const PIXELMATH_TARGETS: readonly PixelMathTarget[] = ["composite", "file"];
-const ARROW_STEPS: ReadonlyMap<string, number> = new Map([
-  ["ArrowDown", 1],
-  ["ArrowRight", 1],
-  ["ArrowUp", -1],
-  ["ArrowLeft", -1],
-]);
-
-export function initialPixelMathTarget(compositeMode: boolean): PixelMathTarget {
-  return compositeMode ? "composite" : "file";
-}
-
-export function pixelMathTargetAfterKey(current: PixelMathTarget, key: string): PixelMathTarget | null {
-  const step = ARROW_STEPS.get(key);
-  if (step === undefined) return null;
-  const count = PIXELMATH_TARGETS.length;
-  return PIXELMATH_TARGETS[(PIXELMATH_TARGETS.indexOf(current) + step + count) % count];
-}
 
 function pixelMathTargetLabel(target: PixelMathTarget, fileName: string): string {
   if (target === "composite") return "Composite on screen (per channel)";

@@ -1,6 +1,7 @@
+import { tipAnchorSelector } from "./tipAnchor";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { anchorOf, anchorSide, type DockLayout, type DockToolId } from "../../utils/dockLayout";
+import { anchorOf, anchorSide, type DockLayout } from "../../utils/dockLayout";
 import { tipPlacement, type DockTip, type TipPlacement } from "../../utils/dockOnboarding";
 import { dockOnboardingStore } from "./dockOnboardingStore";
 import { focusStripButton } from "./dockGeometry";
@@ -68,9 +69,6 @@ export function DockTipCard({ tip, titleId, bodyId, placement, onGotIt, onSkip, 
   );
 }
 
-export function tipAnchorSelector(tool: DockToolId): string {
-  return `[data-dock-strip] [data-tool-id="${tool}"]`;
-}
 
 function samePlacement(a: TipPlacement, b: TipPlacement): boolean {
   return a.left === b.left && a.top === b.top && a.width === b.width && a.maxHeight === b.maxHeight && a.arrow === b.arrow && a.arrowY === b.arrowY;

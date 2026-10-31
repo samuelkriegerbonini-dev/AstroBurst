@@ -1,3 +1,4 @@
+import { withAllFramesOfKind, toggleCalibFrame } from "../../compose/calibFrames";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -200,10 +201,10 @@ describe("Calibration mapper frame lists", () => {
       { label: "Add all dark frames (10)", disabled: false },
       { label: "Add all flat frames (5)", disabled: false },
     ]);
-    const withDarks = mapper.withAllFramesOfKind(NO_FRAMES, "dark", files);
+    const withDarks = withAllFramesOfKind(NO_FRAMES, "dark", files);
     expect(withDarks.dark.map((f) => f.path)).toEqual(SX12_DARKS.map((f) => f.path));
     expect({ ...withDarks, dark: [] }).toEqual(NO_FRAMES);
-    expect(mapper.withAllFramesOfKind(withDarks, "dark", files)).toBe(withDarks);
+    expect(withAllFramesOfKind(withDarks, "dark", files)).toBe(withDarks);
     const after = renderToStaticMarkup(
       createElement(mapper.default, { mode: "calibration", files, calibAssignment: withDarks, onCalibAssignmentChange: vi.fn() }),
     );
@@ -228,12 +229,11 @@ describe("Calibration mapper frame lists", () => {
   });
 
   it("toggles a frame picked from the menu in and out of its row", async () => {
-    const mapper = await actualMapper();
     const dark = sessionChannelFiles().find((f) => f.frameKind === "dark");
     if (!dark) throw new Error("no dark frame");
-    const picked = mapper.toggleCalibFrame(NO_FRAMES, "dark", dark);
+    const picked = toggleCalibFrame(NO_FRAMES, "dark", dark);
     expect(picked).toEqual({ ...NO_FRAMES, dark: [dark] });
-    expect(mapper.toggleCalibFrame(picked, "dark", dark)).toEqual(NO_FRAMES);
+    expect(toggleCalibFrame(picked, "dark", dark)).toEqual(NO_FRAMES);
   });
 });
 
