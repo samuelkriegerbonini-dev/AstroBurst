@@ -1140,7 +1140,9 @@ Steps, their keys and defaults; a filter value names the `filter` of an input:
 | `match` | `reference` (required, the filter the kernels lead to); `mode`: `lightstack` (default) or `astroburst`; `allow_unmatched`: default `false` |
 | `export` | `output`: a `.fits` file name; copies the current cube under that name |
 
-Rules, checked in the oracle's order: a `cube` needs a `reference` or an earlier `align`; `edit`, `match` and `export` need an earlier `cube`; `kernels` needs a PSF for its `reference`, and `match` needs kernels to its `reference`; PSFs name input filters, one PSF per filter; sizes and scales must be positive; every file and folder the recipe names must exist, and an empirical PSF needs, in `data_dir`, one FITS file named for each of its filters and that filter's `stars_<filter>.reg`.
+Inputs must name a dataset and its canonical filter from the registry; matching is case-insensitive, and aliases are refused with the canonical name in the error. Separate `psfs` steps accumulate filters; a later PSF for the same filter replaces the earlier one. Empirical PSF options and kernel window parameters are checked before accepting the job.
+
+Rules, checked in the oracle's order: a `cube` needs a `reference` or an earlier `align`; `edit`, `match` and `export` need an earlier `cube`; `kernels` needs a PSF for its `reference`, and `match` needs kernels to its `reference`; PSFs name input filters, one PSF per filter in each step; sizes and scales must be positive; every file and folder the recipe names must exist, and an empirical PSF needs, in `data_dir`, one FITS file named for each of its filters and that filter's `stars_<filter>.reg`.
 
 Refusals come before a job slot is taken and before anything is written:
 
@@ -1162,11 +1164,11 @@ An accepted recipe answers `202`:
 
 The job writes into `output_dir`, a new folder `cubeprep-<job_id>` under `ASTROBURST_OUTPUT_ROOT`:
 
-- `recipe.json`: the recipe as run, with every default filled in and every path resolved; sending it again repeats the run.
+- `recipe.json`: the recipe as run, with every default filled in and every path resolved; sending it again to this API repeats the run. This saved form includes engine extension keys; remove those keys before passing it to the Python oracle.
 - `01_crop`, `02_units`, ...: one folder per step, numbered in recipe order, with that step's files. Their names follow the desktop's (`d1_HST_F814W_cutout_9_8_46x46_Jy_aligned_bilinear.fits`); a server process that already wrote a file of the same name in an earlier job adds a number to the new one (`d1_cube_3_valid_psfmatched.fits`), so read the names from the outcome.
 - `result.json`: the outcome's `result`, written once every step has finished.
 
-The job's progress `stage` is the folder of the step being run (`03_align`), and `pct` advances one step at a time. A cancel stops the job before its next step, or between the files of a `units` step, a `pixel` crop or an empirical `psfs` step; a file being written is finished first. After a cancel or an error the folder keeps what was written, so the steps that ran can be inspected; the server never deletes it. No route runs one step on an earlier job's folder: to change a later step, send a new recipe whose inputs are the files of the step before it.
+The job's progress `stage` is the folder of the step being run (`03_align`), and `pct` advances one step at a time; the final stage is `done`. A cancel stops the job before its next step, or between the files of a `units` step, a `pixel` crop or an empirical `psfs` step; a file being written is finished first. After a cancel or an error the folder keeps what was written, so the steps that ran can be inspected; the server never deletes it. No route runs one step on an earlier job's folder: image outputs from crop, units or align can be inputs of a new recipe. An existing cube cannot be used to resume directly at edit or match; those steps require a cube built in the new recipe.
 
 The outcome's `result` (section 6):
 

@@ -302,10 +302,9 @@ fn refuse_unknown(place: &str, given: &Value, canonical: &Value) -> Result<(), C
     match found.first() {
         None => Ok(()),
         Some(first) => {
-            let names: Vec<&str> = found.iter().map(|key| key.path.as_str()).collect();
             Err(coded(
                 UNKNOWN_PARAMETER,
-                format!("{place}: unknown {}", names.join(", ")),
+                format!("{place}: unknown {}", first.path),
                 Some(format!("accepted keys: {}", first.accepted.join(", "))),
             ))
         }
@@ -387,7 +386,7 @@ impl Recipe {
             return Err(coded(UNKNOWN_PARAMETER, format!("recipe: unknown {}", unknown.join(", ")), Some(format!("accepted keys: {}", known.join(", ")))));
         }
         let version = object.get("recipe_version").ok_or_else(|| invalid("recipe: missing recipe_version"))?;
-        if version.as_u64() != Some(RECIPE_VERSION) {
+        if version.as_f64() != Some(RECIPE_VERSION as f64) {
             return Err(coded(
                 RECIPE_VERSION_UNSUPPORTED,
                 format!("recipe_version {version} is not {RECIPE_VERSION}"),
@@ -478,6 +477,21 @@ impl Recipe {
             }
             require_file(&place, &input.path)?;
             filters.push(&input.filter);
+        }
+        let registry = filter_registry();
+        let datasets = registry.datasets();
+        for (index, input) in self.inputs.iter().enumerate() {
+            let place = format!("inputs[{index}]");
+            if !datasets.iter().any(|dataset| same(dataset, &input.dataset)) {
+                return Err(coded(RECIPE_INVALID, format!("{place}: dataset {} is not in the filter registry", input.dataset), Some(format!("known datasets: {}", datasets.join(", ")))));
+            }
+            let entry = registry.entry(&input.dataset, &input.filter).ok_or_else(|| coded(RECIPE_INVALID,
+                format!("{place}: the filter registry has no {} filter {}", input.dataset, input.filter),
+                Some("choose a filter from the dataset's filter registry".into())))?;
+            if !same(&entry.filter, &input.filter) {
+                return Err(coded(RECIPE_INVALID, format!("{place}: {} is an alias of {} {}; write {}", input.filter, entry.dataset, entry.filter, entry.filter),
+                    Some(format!("use {} consistently in inputs and step references", entry.filter))));
+            }
         }
         let mut planned = Planned::default();
         for (index, step) in self.steps.iter().enumerate() {
@@ -570,6 +584,8 @@ fn validate_step<'a>(place: &str, step: &'a RecipeStep, filters: &[&'a str], pla
                     files.iter().map(|file| file.filter.clone()).collect()
                 }
                 PsfSource::Empirical(empirical) => {
+                    crate::core::imaging::psf_estimation::validate_recipe(&empirical.options)
+                        .map_err(|error| invalid(format!("{place}: {error}")))?;
                     if empirical.filters.is_empty() {
                         return Err(invalid(format!("{place}: filters must be a non-empty list")));
                     }
@@ -600,9 +616,17 @@ fn validate_step<'a>(place: &str, step: &'a RecipeStep, filters: &[&'a str], pla
                     return Err(invalid(format!("{place}: resampling needs a reference filter among the PSFs")));
                 }
             }
-            planned.psfs = names;
+            for name in names {
+                if !planned.psfs.iter().any(|known| same(known, &name)) {
+                    planned.psfs.push(name);
+                }
+            }
         }
         RecipeStep::Kernels(kernels) => {
+            if let KernelMethod::Window { window, regularization } = kernels.options.method {
+                crate::core::cubeprep::kernel::validate_window_options(window, regularization)
+                    .map_err(|error| invalid(format!("{place}: {error}")))?;
+            }
             if let KernelMethod::Wiener { eps, shape, .. } = kernels.options.method {
                 if !positive(eps) {
                     return Err(invalid(format!("{place}: eps must be positive")));
@@ -866,11 +890,15 @@ impl Run {
         };
         let set = load_psfs(&specs, &options, Some(dir))?;
         warnings.extend(set.warnings.iter().cloned());
-        self.psfs = sources
+        let prepared = sources
             .iter()
             .zip(&set.psfs)
             .map(|((filter, _), prepared)| Ok((filter.clone(), prepared.output_path.clone().context("the prepared PSF was not written")?)))
-            .collect::<Result<_>>()?;
+            .collect::<Result<Vec<_>>>()?;
+        for (filter, path) in prepared {
+            self.psfs.retain(|(known, _)| !same(known, &filter));
+            self.psfs.push((filter, path));
+        }
         report.insert("prepared".into(), serde_json::to_value(&set)?);
         Ok(StepDone { report: Value::Object(report), warnings })
     }

@@ -189,6 +189,13 @@ fn checked_psf(which: &'static str, psf: &Array2<f64>) -> Result<f64, KernelErro
     Ok(sum)
 }
 
+pub(crate) fn validate_window_options(window: TaperWindow, regularization: f64) -> Result<(), KernelError> {
+    if !(0.0..1.0).contains(&regularization) {
+        return Err(KernelError::InvalidRegularization(regularization));
+    }
+    check_window(window)
+}
+
 fn check_window(window: TaperWindow) -> Result<(), KernelError> {
     let (alpha, beta) = window.alpha_beta();
     let unit = |value: f64| (0.0..=1.0).contains(&value);
@@ -267,10 +274,7 @@ pub fn ratio_window(source: &Array2<f64>, target: &Array2<f64>, window: TaperWin
         let ((source_rows, source_cols), (target_rows, target_cols)) = (source.dim(), target.dim());
         return Err(KernelError::ShapeMismatch { source_rows, source_cols, target_rows, target_cols });
     }
-    if !(0.0..1.0).contains(&regularization) {
-        return Err(KernelError::InvalidRegularization(regularization));
-    }
-    check_window(window)?;
+    validate_window_options(window, regularization)?;
     let (rows, cols) = source.dim();
     let engine = FftEngine2D::<f64>::new(rows, cols);
     let source_otf = spectrum(&(source / source_sum), &engine, false);

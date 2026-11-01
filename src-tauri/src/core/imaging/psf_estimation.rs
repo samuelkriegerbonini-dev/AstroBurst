@@ -994,7 +994,7 @@ pub fn build_empirical_psf(
     })
 }
 
-fn validate_recipe(options: &EmpiricalPsfOptions) -> Result<(), String> {
+pub(crate) fn validate_recipe(options: &EmpiricalPsfOptions) -> Result<(), String> {
     for (name, value) in [("cutout_size", options.cutout_size), ("psf_size", options.psf_size)] {
         if value % 2 == 0 {
             return Err(format!("{name} must be a positive odd number of pixels, got {value}"));
