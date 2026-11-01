@@ -4,7 +4,7 @@ All notable changes to AstroBurst will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.8] - 2026-11-01
 
 ### Added
 - Cube preparation recipes on the server: `POST /v2/sessions/:sid/cubeprep/jobs` runs a recipe of the LIGHTSTACK workflow (crop, unit conversion, alignment, cube assembly, cube edits, PSFs, matching kernels, PSF matching, export) as a job. The recipe is the JSON the LIGHTSTACK oracle reads, and its defaults are LIGHTSTACK 0.4.0's. Each step calls the engine of the desktop's cube preparation commands and writes a numbered folder (`01_crop`, `02_units`, ...) in a `cubeprep-<job>` folder under `ASTROBURST_OUTPUT_ROOT`, beside `recipe.json` (the recipe as run, every default filled in) and `result.json`. `GET /v2/cubeprep/filters` lists the filter registry that names the planes.

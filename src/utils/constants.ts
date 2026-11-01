@@ -6,4 +6,4 @@ export const FILE_STATUS = {
   SPECTRUM: "spectrum",
 } as const;
 
-export const APP_VERSION = "v0.7.7";
+export const APP_VERSION = "v0.7.8";
