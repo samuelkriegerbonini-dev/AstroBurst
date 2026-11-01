@@ -24,12 +24,14 @@ class AstroBurstError(Exception):
         code: str = "unknown",
         status: int = 0,
         request_id: Optional[str] = None,
+        hint: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.status = status
         self.request_id = request_id
+        self.hint = hint
 
     def __repr__(self) -> str:
         rid = f", request_id={self.request_id!r}" if self.request_id else ""
@@ -72,6 +74,15 @@ _CODE_MAP: Dict[str, type] = {
     "internal_error": InternalServerError,
 }
 
+_STATUS_MAP: Dict[int, type] = {
+    400: BadRequestError,
+    404: NotFoundError,
+    409: ConflictError,
+    429: TooManyRequestsError,
+    500: InternalServerError,
+    503: ServiceUnavailableError,
+}
+
 
 def error_from_response(
     status: int,
@@ -87,12 +98,14 @@ def error_from_response(
     """
     code = "unknown"
     message = f"HTTP {status}"
+    hint = None
 
     if isinstance(body, dict):
         err = body.get("error") or {}
         if isinstance(err, dict):
             code = err.get("code", "unknown")
             message = err.get("message", message)
+            hint = err.get("hint")
 
-    cls = _CODE_MAP.get(code, AstroBurstError)
-    return cls(message, code=code, status=status, request_id=request_id)
+    cls = _CODE_MAP.get(code) or _STATUS_MAP.get(status, AstroBurstError)
+    return cls(message, code=code, status=status, request_id=request_id, hint=hint)

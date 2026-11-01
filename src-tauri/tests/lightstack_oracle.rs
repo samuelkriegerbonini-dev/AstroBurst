@@ -4,6 +4,7 @@ mod d1;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use astroburst_lib::core::alignment::wcs_reproject::{prefilter_coarse_target, reproject_to_grid};
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
@@ -50,8 +51,10 @@ use astroburst_lib::infra::fits::reader::{
     extract_int_plane_by_index, parse_header_at,
 };
 use astroburst_lib::infra::fits::writer::write_fits_cube;
+use astroburst_lib::infra::progress::ProgressHandle;
 use astroburst_lib::infra::wcs_source::header_wcs;
 use astroburst_lib::math::window::TaperWindow;
+use astroburst_lib::service::cubeprep_recipe::{run_recipe, Recipe};
 use astroburst_lib::types::header::HduHeader;
 use ndarray::Array2;
 use serde_json::Value;
@@ -4017,5 +4020,123 @@ fn oracle_d1_astroburst_kernels_through_match_cube_reproduce_psf_match_datacube(
             plane.filter
         );
         assert!(error <= 2e-6, "{}: {error:e} (F-class)", plane.filter);
+    }
+}
+
+struct PlaneAgreement {
+    one_sided: usize,
+    interior_one_sided: usize,
+    worst_of_max: f64,
+    interior_worst_of_range: f64,
+}
+
+fn plane_agreement(got: &Array2<f64>, expected: &Array2<f64>, border: usize) -> PlaneAgreement {
+    assert_eq!(got.dim(), expected.dim());
+    let (rows, cols) = expected.dim();
+    let finite: Vec<f64> = expected
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect();
+    let scale = finite
+        .iter()
+        .fold(0.0f64, |acc, value| acc.max(value.abs()));
+    let mut sorted = finite.clone();
+    sorted.sort_by(f64::total_cmp);
+    let at = |fraction: f64| sorted[((sorted.len() - 1) as f64 * fraction).round() as usize];
+    let range = at(0.999) - at(0.001);
+    let mut agreement = PlaneAgreement {
+        one_sided: 0,
+        interior_one_sided: 0,
+        worst_of_max: 0.0,
+        interior_worst_of_range: 0.0,
+    };
+    for (((row, col), ours), theirs) in got.indexed_iter().zip(expected.iter()) {
+        let interior =
+            (border..rows - border).contains(&row) && (border..cols - border).contains(&col);
+        if ours.is_finite() != theirs.is_finite() {
+            agreement.one_sided += 1;
+            agreement.interior_one_sided += usize::from(interior);
+        } else if ours.is_finite() {
+            let difference = (ours - theirs).abs();
+            agreement.worst_of_max = agreement.worst_of_max.max(difference / scale);
+            if interior {
+                agreement.interior_worst_of_range =
+                    agreement.interior_worst_of_range.max(difference / range);
+            }
+        }
+    }
+    agreement
+}
+
+#[test]
+fn the_d1_recipe_from_lightstacks_crops_reproduces_its_psf_matched_cube() {
+    let mut value = read_json(&d1_dir().join(RECIPE));
+    for input in value["inputs"].as_array_mut().unwrap() {
+        let cropped = oracle_d1_dir()
+            .join("01_crop")
+            .join(input["path"].as_str().unwrap());
+        input["path"] = Value::from(cropped.to_string_lossy().into_owned());
+    }
+    assert_eq!(
+        value["steps"].as_array_mut().unwrap().remove(0)["step"],
+        "crop"
+    );
+    let recipe = Recipe::from_value(&value).unwrap().resolved(&d1_dir());
+    recipe.validate().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let report = run_recipe(
+        &recipe,
+        &out.path().join("d1"),
+        &ProgressHandle::with_sink(Arc::new(|_| {}), 1),
+    )
+    .unwrap();
+    let manifest = read_json(&oracle_d1_dir().join(MANIFEST));
+    let calls = oracle_calls(&manifest, "match");
+    let (header, expected) = f64_planes(&oracle_entry_path(&calls[0]["outputs"][0]));
+    let (_, got) = f64_planes(Path::new(report.cube.as_deref().unwrap()));
+    assert_eq!(got.len(), expected.len());
+    let planes = planes_from_header(&header, expected.len(), &FilterRegistry::builtin()).unwrap();
+    let distorted: Vec<&str> = recipe
+        .inputs
+        .iter()
+        .filter(|input| {
+            extract_header_by_index(
+                &open(&d1_dir().join(Path::new(&input.path).file_name().unwrap())),
+                SCI,
+            )
+            .unwrap()
+            .get("A_ORDER")
+            .is_some()
+        })
+        .map(|input| input.filter.as_str())
+        .collect();
+    assert_eq!(distorted, ["F814W"], "D1 holds one SIP plane");
+    for ((plane, ours), theirs) in planes.iter().zip(&got).zip(&expected) {
+        let agreement = plane_agreement(ours, theirs, 2);
+        eprintln!(
+            "{}: one-sided NaN {} (interior {}), max difference {:.2e} of the max abs value, interior {:.2e} of the 0.1 to 99.9 percentile range",
+            plane.filter, agreement.one_sided, agreement.interior_one_sided, agreement.worst_of_max, agreement.interior_worst_of_range
+        );
+        assert_eq!(
+            agreement.one_sided, 0,
+            "{}: the NaN masks differ",
+            plane.filter
+        );
+        if distorted.contains(&plane.filter.as_str()) {
+            assert!(
+                agreement.interior_worst_of_range <= 1e-3,
+                "{}: {:e} (I class)",
+                plane.filter,
+                agreement.interior_worst_of_range
+            );
+        } else {
+            assert!(
+                agreement.worst_of_max <= 2e-6,
+                "{}: {:e} (F class)",
+                plane.filter,
+                agreement.worst_of_max
+            );
+        }
     }
 }

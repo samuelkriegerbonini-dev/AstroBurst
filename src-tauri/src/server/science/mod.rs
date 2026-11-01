@@ -1,6 +1,7 @@
 pub(crate) mod capabilities;
 pub(crate) mod codes;
 pub(crate) mod config;
+pub(crate) mod cubeprep;
 pub(crate) mod error;
 pub(crate) mod fs;
 pub(crate) mod guard;
@@ -37,4 +38,6 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/v2/fs", get(fs::list))
         .route("/v2/capabilities", get(capabilities::capabilities))
         .route("/v2/sessions/:sid/synth", post(synth::synth))
+        .route("/v2/cubeprep/filters", get(cubeprep::filters))
+        .route("/v2/sessions/:sid/cubeprep/jobs", post(cubeprep::run))
 }

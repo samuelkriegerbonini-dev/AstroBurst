@@ -1085,7 +1085,7 @@ mod tests {
 
     #[test]
     fn crossmatch_measures_a_jwst_cal_through_its_area_map_like_the_photometry_panel() {
-        use crate::cmd::analysis::area::test_fixtures::{
+        use crate::service::area::test_fixtures::{
             area_hdu, cal_sci_cards, jwst_cal_mef, uniform_area, CalPlanes, AREA_BLOCK_VALUE, CAL_APERTURE_RADIUS, CAL_SIZE,
         };
         use crate::cmd::analysis::{photometry_for_path, RES_PHOTCAL};

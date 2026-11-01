@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use astroburst_lib::core::imaging::stats::compute_image_stats;
 use astroburst_lib::infra::progress::ProgressHandle;
+use astroburst_lib::types::error::CodedError;
 use astroburst_lib::types::header::HduHeader;
 
 use super::error::ScienceError;
@@ -109,14 +110,21 @@ fn settle(
                 warnings,
                 products,
                 error: None,
+                error_code: None,
+                error_hint: None,
             }
         }
-        Err(e) => JobOutcome {
-            result: Value::Null,
-            warnings: Vec::new(),
-            products: Vec::new(),
-            error: Some(format!("{e:#}")),
-        },
+        Err(e) => {
+            let coded = e.downcast_ref::<CodedError>();
+            JobOutcome {
+                result: Value::Null,
+                warnings: Vec::new(),
+                products: Vec::new(),
+                error: Some(format!("{e:#}")),
+                error_code: coded.map(|coded| coded.code),
+                error_hint: coded.and_then(|coded| coded.hint.clone()),
+            }
+        }
     };
     let error = outcome.error.clone();
     science

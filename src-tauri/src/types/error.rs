@@ -6,6 +6,14 @@ pub enum AppError {
     Cancelled,
 }
 
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[error("{message}")]
+pub struct CodedError {
+    pub code: &'static str,
+    pub message: String,
+    pub hint: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

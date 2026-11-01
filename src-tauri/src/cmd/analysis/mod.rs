@@ -1,7 +1,8 @@
 pub(crate) mod area;
 mod time_series;
 pub use time_series::*;
-use area::{extname_is, holds_one_plane, AreaWeights};
+use area::AreaWeights;
+use crate::service::area::{extname_is, holds_one_plane};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -892,7 +893,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use super::area::test_fixtures::*;
+    use crate::service::area::test_fixtures::*;
     use crate::core::analysis::gain::{PoissonRoute, UnitClass, SKY_ONLY_ERRORS_WARNING};
     use crate::cmd::common::dq_exclusion;
     use crate::core::analysis::aperture::circular_aperture;

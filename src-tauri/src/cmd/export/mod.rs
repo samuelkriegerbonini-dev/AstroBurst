@@ -11,7 +11,7 @@ use crate::cmd::common::{
 };
 use crate::service::common::derived_output_header;
 use crate::cmd::compose::rescale_header_to_grid;
-use crate::cmd::cutout::refuse_source_as_target;
+use crate::service::cutout::refuse_source_as_target;
 use crate::cmd::helpers;
 use crate::cmd::processing::is_display_referred;
 use crate::core::imaging::stats::{combine_channel_stats, compute_image_stats};

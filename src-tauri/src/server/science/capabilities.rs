@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use super::state::ScienceState;
 use crate::state::AppState;
 
-const ROUTES: [(&str, &str); 43] = [
+const ROUTES: [(&str, &str); 45] = [
     ("GET", "/health"),
     ("POST", "/sessions"),
     ("POST", "/sessions/:sid/fits/open"),
@@ -55,6 +55,8 @@ const ROUTES: [(&str, &str); 43] = [
     ("GET", "/v2/fs"),
     ("GET", "/v2/capabilities"),
     ("POST", "/v2/sessions/:sid/synth"),
+    ("GET", "/v2/cubeprep/filters"),
+    ("POST", "/v2/sessions/:sid/cubeprep/jobs"),
 ];
 
 pub(crate) async fn capabilities(

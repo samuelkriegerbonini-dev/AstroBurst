@@ -14,7 +14,7 @@ use crate::cmd::common::{
     resolve_output_dir, try_extract_rgb_resolved, write_derived_fits, ResolvedRgbImage, HEADER_ABPROC,
 };
 use crate::cmd::compose::composite_chain::key_luminance;
-use crate::cmd::cutout::refuse_source_as_target;
+use crate::service::cutout::refuse_source_as_target;
 use crate::cmd::helpers;
 use crate::cmd::ops::{history_root_of, resolve_parent, RunGuard, Scope};
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;

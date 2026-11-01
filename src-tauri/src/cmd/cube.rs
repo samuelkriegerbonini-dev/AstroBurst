@@ -12,7 +12,7 @@ use crate::service::common::derived_output_header;
 use crate::infra::wcs_source::load_wcs;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cube::companions::{open_cube_set, CubeSet};
-use crate::cmd::cubeprep::filter_registry;
+use crate::service::cubeprep::filter_registry;
 use crate::core::cube::eager::{build_wavelength_axis, classify_cube, classify_spectral_cube, ramp_classification};
 use crate::core::cube::lazy::{ApertureSpectrum, CollapseMode, LazyCube};
 use crate::core::cube::moments::{moment_maps_set, ContinuumWindows, MomentConfig, DQ_NOT_APPLIED_NOTE};

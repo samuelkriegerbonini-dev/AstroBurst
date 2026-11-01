@@ -59,12 +59,14 @@ class Job:
         *,
         slot: Optional[str] = None,
         slots: Optional[List[str]] = None,
+        output_dir: Optional[str] = None,
     ) -> None:
         self._client = client
         self._sid = sid
         self.job_id = job_id
         self.slot = slot
         self.slots = slots or (([slot] if slot else []))
+        self.output_dir = output_dir
 
     async def poll(self) -> JobStatus:
         """Fetch the current job status (single HTTP round-trip)."""
@@ -86,6 +88,11 @@ class Job:
             "DELETE", f"/sessions/{self._sid}/jobs/{self.job_id}"
         )
         return JobStatus.from_dict(data)
+
+    async def outcome(self) -> Dict[str, Any]:
+        return await self._client._request_json(
+            "GET", f"/v2/sessions/{self._sid}/jobs/{self.job_id}/outcome"
+        )
 
     async def wait(
         self,
@@ -477,6 +484,17 @@ class Session:
             slots=data.get("slots"),
         )
 
+    async def cubeprep(self, recipe: Dict[str, Any]) -> Job:
+        data = await self._client._request_json(
+            "POST", f"/v2/sessions/{self.sid}/cubeprep/jobs", json=recipe
+        )
+        return Job(
+            self._client,
+            self.sid,
+            data["job_id"],
+            output_dir=data.get("output_dir"),
+        )
+
     async def get_job(self, job_id: str) -> JobStatus:
         """Poll an existing job by ID."""
         data = await self._client._request_json(
@@ -591,6 +609,9 @@ class AstroBurstClient:
         """
         data = await self._request_json("GET", "/health")
         return HealthResult.from_dict(data)
+
+    async def cubeprep_filters(self) -> Dict[str, Any]:
+        return await self._request_json("GET", "/v2/cubeprep/filters")
 
     async def create_session(self) -> Session:
         """

@@ -21,6 +21,8 @@ pub(crate) struct JobOutcome {
     pub(crate) warnings: Vec<String>,
     pub(crate) products: Vec<String>,
     pub(crate) error: Option<String>,
+    pub(crate) error_code: Option<&'static str>,
+    pub(crate) error_hint: Option<String>,
 }
 
 #[derive(Default)]
@@ -71,7 +73,7 @@ pub(crate) async fn outcome(
     )
     .await?;
     let outcome = science.outcomes.get(&session.id, &jid).map(|recorded| {
-        json!({
+        let mut outcome = json!({
             "result": recorded.result,
             "warnings": recorded.warnings,
             "products": recorded
@@ -80,7 +82,14 @@ pub(crate) async fn outcome(
                 .map(|name| json!({ "ref": name, "present": session.cache.contains(name) }))
                 .collect::<Vec<_>>(),
             "error": recorded.error,
-        })
+        });
+        if let Some(code) = recorded.error_code {
+            outcome["error_code"] = json!(code);
+        }
+        if let Some(hint) = &recorded.error_hint {
+            outcome["error_hint"] = json!(hint);
+        }
+        outcome
     });
     Ok(Json(json!({ "job": job, "outcome": outcome })))
 }

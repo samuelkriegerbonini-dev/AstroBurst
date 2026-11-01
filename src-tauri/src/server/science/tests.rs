@@ -15,6 +15,7 @@ use astroburst_lib::infra::image_source::{
     is_dq_name, is_err_name, list_planes, load_plane, plane_ref,
 };
 use astroburst_lib::infra::progress::{ProgressHandle, ProgressPayload};
+use astroburst_lib::service::cubeprep::filter_registry;
 use astroburst_lib::types::constants::STAGE_LOAD_FRAME;
 use astroburst_lib::types::error::AppError as CoreError;
 use astroburst_lib::types::header::HduHeader;
@@ -187,6 +188,17 @@ fn link_dir(target: &Path, link: &Path) {
 
 #[cfg(unix)]
 fn link_dir(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(windows)]
+fn link_file(target: &Path, link: &Path) {
+    std::os::windows::fs::symlink_file(target, link)
+        .unwrap_or_else(|e| panic!("cannot link {}: {e}", link.display()));
+}
+
+#[cfg(unix)]
+fn link_file(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
 }
 
@@ -1124,6 +1136,8 @@ fn outcome(result: Value) -> JobOutcome {
         warnings: Vec::new(),
         products: Vec::new(),
         error: None,
+        error_code: None,
+        error_hint: None,
     }
 }
 
@@ -2379,5 +2393,365 @@ async fn synth_refuses_an_invalid_field_or_products_larger_than_the_session_cach
     wait_for_workers(&small).await;
     assert!(
         small_session.cache.contains("synth_0") && small_session.cache.contains("synth_0_truth")
+    );
+}
+
+fn lightstack_fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack")
+}
+
+fn d1_recipe() -> Value {
+    let text = std::fs::read_to_string(lightstack_fixtures().join("d1/recipe_d1.json")).unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+fn cubeprep_cfg(bind: &str, out: &Path) -> ScienceConfig {
+    let data = lightstack_fixtures().join("d1");
+    cfg_with(
+        bind,
+        &[
+            ("ASTROBURST_TOKEN", TOKEN),
+            ("ASTROBURST_SERVER_ROOT", data.to_str().unwrap()),
+            ("ASTROBURST_OUTPUT_ROOT", out.to_str().unwrap()),
+        ],
+    )
+}
+
+fn cubeprep_uri(session: &Session) -> String {
+    format!("/v2/sessions/{}/cubeprep/jobs", session.id)
+}
+
+async fn post_authorized(app: &Router, uri: &str, body: Value) -> Response {
+    send(
+        app,
+        authorized(Method::POST, uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+}
+
+async fn accepted_cubeprep(app: &Router, session: &Session, recipe: Value) -> (Arc<Job>, PathBuf) {
+    let response = post_authorized(app, &cubeprep_uri(session), recipe).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted = body_json(response).await;
+    assert_eq!(accepted["status"], "running");
+    let output_dir = PathBuf::from(accepted["output_dir"].as_str().expect("an output folder"));
+    (job_of(session, &accepted), output_dir)
+}
+
+#[tokio::test]
+async fn a_cubeprep_job_runs_the_d1_recipe_from_the_data_root_and_lists_its_files_in_the_outcome() {
+    let out = tempfile::tempdir().unwrap();
+    let state = test_state();
+    let session = state.create_session().unwrap();
+    let app = science_app(cubeprep_cfg("127.0.0.1:8080", out.path()), &state);
+
+    let (job, output_dir) = accepted_cubeprep(&app, &session, d1_recipe()).await;
+    assert_eq!(output_dir, out.path().join(format!("cubeprep-{}", job.id)));
+    wait_for_workers(&state).await;
+    let outcome = get(&app, &outcome_uri(&session, &job.id)).await;
+    assert_eq!(job.current_status(), JobStatus::Done, "{outcome}");
+
+    let recorded = &outcome["outcome"];
+    let result = &recorded["result"];
+    assert_eq!(result["output_dir"], json!(output_dir.to_str().unwrap()));
+    let cube = PathBuf::from(result["cube"].as_str().unwrap());
+    assert!(
+        cube.starts_with(output_dir.join("08_match")) && cube.is_file(),
+        "{result}"
+    );
+    let folders: Vec<&str> = result["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["directory"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        folders,
+        [
+            "01_crop",
+            "02_units",
+            "03_align",
+            "04_cube",
+            "05_edit",
+            "06_psfs",
+            "07_kernels",
+            "08_match"
+        ]
+    );
+    let files: Vec<&str> = result["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        files.contains(&"recipe.json") && files.contains(&"07_kernels/kernel_f150w_to_f444w.fits"),
+        "{files:?}"
+    );
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(output_dir.join("result.json")).unwrap())
+            .unwrap();
+    assert_eq!(&written, result);
+    assert!(!recorded["warnings"].as_array().unwrap().is_empty());
+    assert_eq!(recorded["warnings"], result["warnings"]);
+    assert_eq!(recorded["products"], json!([]));
+    assert_eq!(recorded["error"], Value::Null);
+    assert!(recorded.get("error_code").is_none() && recorded.get("error_hint").is_none());
+}
+
+#[tokio::test]
+async fn cubeprep_refuses_a_bad_recipe_with_its_code_and_hint_before_taking_a_job_slot() {
+    let out = tempfile::tempdir().unwrap();
+    let state = test_state();
+    let session = state.create_session().unwrap();
+    let app = science_app(cubeprep_cfg("127.0.0.1:8080", out.path()), &state);
+    let changed = |change: &dyn Fn(&mut Value)| {
+        let mut recipe = d1_recipe();
+        change(&mut recipe);
+        recipe
+    };
+    let cases = [
+        (
+            changed(&|r| r["steps"][1] = json!({ "step": "stretch" })),
+            StatusCode::BAD_REQUEST,
+            "unknown_step",
+            "known steps are units, crop, align, cube, edit, psfs, kernels, match, export",
+        ),
+        (
+            changed(&|r| r["steps"][2]["methd"] = json!("bilinear")),
+            StatusCode::BAD_REQUEST,
+            "unknown_parameter",
+            "accepted keys: area_rule, border_crop, method, reference",
+        ),
+        (
+            changed(&|r| r["recipe_version"] = json!(2)),
+            StatusCode::BAD_REQUEST,
+            "recipe_version_unsupported",
+            "this AstroBurst reads recipe_version 1",
+        ),
+        (
+            changed(&|r| r["inputs"][1]["filter"] = json!("f814w")),
+            StatusCode::BAD_REQUEST,
+            "filter_duplicate",
+            "each input holds one filter; a cube takes one plane per filter",
+        ),
+        (
+            changed(&|r| r["inputs"][0]["path"] = json!("missing.fits")),
+            StatusCode::NOT_FOUND,
+            "file_not_found",
+            "recipe paths are relative to the data folder unless absolute",
+        ),
+    ];
+    for (recipe, status, code, hint) in cases {
+        let response = post(&app, &cubeprep_uri(&session), recipe).await;
+        assert_eq!(response.status(), status, "{code}");
+        let body = body_json(response).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["error"]["code"], code, "{body}");
+        assert_eq!(body["error"]["hint"], hint, "{body}");
+    }
+    let invalid = post(
+        &app,
+        &cubeprep_uri(&session),
+        changed(&|r| r["steps"][0]["size_arcsec"] = json!(0)),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(invalid).await["error"],
+        json!({ "code": "recipe_invalid", "message": "steps[0] (crop): size_arcsec must be positive" })
+    );
+    assert!(session.jobs.is_empty());
+    assert_eq!(
+        state.job_semaphore.available_permits(),
+        state.config.jobs_max
+    );
+    assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn a_cubeprep_job_without_a_kernel_for_a_plane_fails_with_kernel_missing_and_keeps_its_earlier_steps(
+) {
+    let out = tempfile::tempdir().unwrap();
+    let state = test_state();
+    let session = state.create_session().unwrap();
+    let app = science_app(cubeprep_cfg("127.0.0.1:8080", out.path()), &state);
+    let mut recipe = d1_recipe();
+    recipe["steps"][5]["files"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+
+    let (job, output_dir) = accepted_cubeprep(&app, &session, recipe).await;
+    wait_for_workers(&state).await;
+    assert_eq!(job.current_status(), JobStatus::Error);
+    let outcome = get(&app, &outcome_uri(&session, &job.id)).await;
+    let recorded = &outcome["outcome"];
+    assert_eq!(recorded["result"], Value::Null);
+    assert_eq!(recorded["error_code"], "kernel_missing", "{recorded}");
+    let message = recorded["error"].as_str().unwrap();
+    assert!(
+        message.starts_with("08_match: ") && message.contains("F150W"),
+        "{message}"
+    );
+    assert!(
+        recorded["error_hint"]
+            .as_str()
+            .unwrap()
+            .contains("allow_unmatched"),
+        "{recorded}"
+    );
+    assert!(output_dir.join("07_kernels").is_dir());
+    assert!(!output_dir.join("result.json").exists());
+}
+
+#[tokio::test]
+async fn a_guarded_cubeprep_refuses_a_path_outside_the_roots_and_resolves_relative_ones_under_the_root(
+) {
+    let out = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let foreign = fixture(outside.path(), "outside.fits");
+    let state = test_state();
+    let session = state.create_session().unwrap();
+    let app = science_app(cubeprep_cfg("0.0.0.0:8080", out.path()), &state);
+
+    for path in [
+        json!(foreign),
+        json!("../d1_stars/d1_stars_JWST_F444W.fits"),
+    ] {
+        let mut recipe = d1_recipe();
+        recipe["inputs"][0]["path"] = path;
+        let response = post_authorized(&app, &cubeprep_uri(&session), recipe).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            body_json(response).await["error"]["code"],
+            "path_outside_root"
+        );
+    }
+    assert!(session.jobs.is_empty());
+
+    let (job, _) = accepted_cubeprep(&app, &session, d1_recipe()).await;
+    wait_for_workers(&state).await;
+    assert_eq!(job.current_status(), JobStatus::Done);
+}
+
+#[tokio::test]
+async fn a_guarded_cubeprep_refuses_an_empirical_psf_image_that_links_outside_the_roots() {
+    let root = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let stars = lightstack_fixtures().join("d1_stars");
+    let image = stars.join("d1_stars_JWST_F444W.fits");
+    let data_dir = root.path().join("stars");
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::copy(&image, root.path().join("input.fits")).unwrap();
+    std::fs::copy(&image, outside.path().join("elsewhere.fits")).unwrap();
+    std::fs::copy(
+        stars.join("stars_f444w.reg"),
+        data_dir.join("stars_f444w.reg"),
+    )
+    .unwrap();
+    let linked = data_dir.join("x_JWST_F444W.fits");
+    link_file(&outside.path().join("elsewhere.fits"), &linked);
+    let state = test_state();
+    let session = state.create_session().unwrap();
+    let cfg = cfg_with(
+        "0.0.0.0:8080",
+        &[
+            ("ASTROBURST_TOKEN", TOKEN),
+            ("ASTROBURST_SERVER_ROOT", root.path().to_str().unwrap()),
+            ("ASTROBURST_OUTPUT_ROOT", out.path().to_str().unwrap()),
+        ],
+    );
+    let app = science_app(cfg, &state);
+    let text = std::fs::read_to_string(stars.join("recipe_d1_stars.json")).unwrap();
+    let mut recipe: Value = serde_json::from_str(&text).unwrap();
+    recipe["inputs"][0]["path"] = json!("input.fits");
+    recipe["steps"][0]["data_dir"] = json!("stars");
+
+    let response = post_authorized(&app, &cubeprep_uri(&session), recipe.clone()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        body_json(response).await["error"]["code"],
+        "path_outside_root"
+    );
+    assert!(session.jobs.is_empty());
+
+    std::fs::remove_file(&linked).unwrap();
+    std::fs::copy(&image, &linked).unwrap();
+    let (job, output_dir) = accepted_cubeprep(&app, &session, recipe).await;
+    wait_for_workers(&state).await;
+    assert_eq!(job.current_status(), JobStatus::Done);
+    assert!(output_dir.join("01_psfs").is_dir());
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_tree(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_cubeprep_job_writes_under_the_default_output_root_of_the_server_root() {
+    let root = tempfile::tempdir().unwrap();
+    copy_tree(&lightstack_fixtures().join("d1"), root.path());
+    let state = test_state();
+    let session = state.create_session().unwrap();
+    let cfg = cfg_with(
+        "127.0.0.1:8080",
+        &[("ASTROBURST_SERVER_ROOT", root.path().to_str().unwrap())],
+    );
+    let app = science_app(cfg, &state);
+    let (job, output_dir) = accepted_cubeprep(&app, &session, d1_recipe()).await;
+    wait_for_workers(&state).await;
+    let outcome = get(&app, &outcome_uri(&session, &job.id)).await;
+    assert_eq!(
+        job.current_status(),
+        JobStatus::Done,
+        "{}",
+        outcome["outcome"]["error"]
+    );
+    let out = std::fs::canonicalize(root.path().join("out")).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(&output_dir).unwrap().parent(),
+        Some(out.as_path())
+    );
+    assert!(output_dir.join("08_match").is_dir());
+}
+
+#[tokio::test]
+async fn cubeprep_filters_lists_the_datasets_and_filters_a_recipe_can_name() {
+    let app = science_app(cfg_with("127.0.0.1:8080", &[]), &test_state());
+    let listed = get(&app, "/v2/cubeprep/filters").await;
+    let registry = filter_registry();
+    assert_eq!(
+        listed,
+        json!({ "datasets": registry.datasets(), "filters": registry.entries() })
+    );
+    for dataset in ["HST", "JWST"] {
+        assert!(listed["datasets"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(dataset)));
+    }
+    let f444w = listed["filters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["dataset"] == "JWST" && entry["filter"] == "F444W")
+        .expect("JWST F444W is listed");
+    assert!(
+        f444w["pivot_angstrom"].as_f64().unwrap() > 40_000.0,
+        "{f444w}"
     );
 }

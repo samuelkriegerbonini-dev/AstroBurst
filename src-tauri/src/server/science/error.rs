@@ -41,6 +41,14 @@ impl ScienceError {
         Self::coded(StatusCode::BAD_REQUEST, code, message, hint)
     }
 
+    pub(crate) fn not_found(
+        code: &'static str,
+        message: impl Into<String>,
+        hint: Option<String>,
+    ) -> Self {
+        Self::coded(StatusCode::NOT_FOUND, code, message, hint)
+    }
+
     pub(crate) fn unauthorized(
         code: &'static str,
         message: impl Into<String>,

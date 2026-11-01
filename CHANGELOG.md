@@ -4,6 +4,18 @@ All notable changes to AstroBurst will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Cube preparation recipes on the server: `POST /v2/sessions/:sid/cubeprep/jobs` runs a recipe of the LIGHTSTACK workflow (crop, unit conversion, alignment, cube assembly, cube edits, PSFs, matching kernels, PSF matching, export) as a job. The recipe is the JSON the LIGHTSTACK oracle reads, and its defaults are LIGHTSTACK 0.4.0's. Each step calls the engine of the desktop's cube preparation commands and writes a numbered folder (`01_crop`, `02_units`, ...) in a `cubeprep-<job>` folder under `ASTROBURST_OUTPUT_ROOT`, beside `recipe.json` (the recipe as run, every default filled in) and `result.json`. `GET /v2/cubeprep/filters` lists the filter registry that names the planes.
+  - A recipe is checked before it takes a job slot. An unknown step or key, a duplicate filter, a broken rule (a match without kernels, a cube without a reference) or a missing file is refused with a code and a hint (`unknown_step`, `unknown_parameter`, `filter_duplicate`, `recipe_invalid`, `file_not_found`). On a non-loopback bind every path the recipe reads must lie under a path root.
+  - A step that fails ends the job with its folder named in the error. A missing kernel, a kernel at another pixel scale and a failed convolution also set `error_code` and `error_hint` in the job outcome (`GET /v2/sessions/:sid/jobs/:jid/outcome`).
+  - From LIGHTSTACK's own crops of the D1 test field, the PSF-matched cube agrees with LIGHTSTACK's: the NaN masks are identical, the planes without SIP distortion agree within 2e-6 of their peak and the SIP plane within 1e-3 of its range. From the raw D1 images two crop edges fall on a tie within 1e-8 px, so the cube is 44 by 44 pixels here and 44 by 43 in LIGHTSTACK.
+- Python client (`agent/`): `Session.cubeprep(recipe)` returns a `Job` with its `output_dir`, `AstroBurstClient.cubeprep_filters()` reads the registry, `Job.outcome()` reads a job's outcome and `AstroBurstError.hint` carries the server's advice. The example `04_cubeprep.py` runs a recipe file and prints its steps, warnings and cube.
+
+### Changed
+- Python client: an error code without a class of its own (a v2 code such as `unknown_step` or `file_not_found`) raises the class of its HTTP status (`BadRequestError`, `NotFoundError`, ...) instead of the base `AstroBurstError`.
+
 ## [0.7.7] - 2026-10-31
 
 ### Added

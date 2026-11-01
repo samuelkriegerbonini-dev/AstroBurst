@@ -3,7 +3,7 @@ use std::time::Instant;
 use ndarray::Array2;
 use serde_json::json;
 
-use crate::cmd::analysis::area::{area_companion, AREA_EXTNAME};
+use crate::service::area::{area_companion, AREA_EXTNAME};
 use crate::cmd::common::{
     blocking_cmd, image_ref, invalidate_written, load_companions, load_from_cache_or_disk,
     output_stem, render_and_save_as, resolve_output_dir, source_primary_header, try_extract_rgb_resolved,
@@ -402,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_area_map_that_cannot_be_carried_is_named_in_the_history() {
-        use crate::cmd::analysis::area::test_fixtures::{area_hdu, cal_sci_cards, jwst_cal_mef, uniform_area, CalPlanes, CAL_SIZE};
+        use crate::service::area::test_fixtures::{area_hdu, cal_sci_cards, jwst_cal_mef, uniform_area, CalPlanes, CAL_SIZE};
 
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().to_str().unwrap().to_string();
@@ -429,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn rot180_of_a_synthetic_cal_with_an_area_map_keeps_the_aperture_flux() {
-        use crate::cmd::analysis::area::test_fixtures::{
+        use crate::service::area::test_fixtures::{
             area_hdu, blocked_area, cal_sci_cards, jwst_cal_mef, CalPlanes, CAL_APERTURE_RADIUS, CAL_SIZE,
         };
         use crate::cmd::analysis::{photometry_for_path, RES_PHOTCAL};

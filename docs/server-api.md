@@ -29,7 +29,7 @@ This file is the reference for every route the server registers today, v1 and v2
 One process serves two API generations:
 
 - **v1** (paths without a version prefix): sessions, open and header by *slot*, STF renders, and three background jobs (stack, drizzle and the calibration pipeline) with status, cancel and server-sent events.
-- **v2** (paths under `/v2`): session lifecycle with keepalive, image *references* with HDU or ASDF-array selection, structure, header and WCS inspection, coordinate transforms and a coordinate grid, cutouts, block binning, a pixel probe, exact statistics with noise evaluation, histograms and a render that takes the desktop display settings; also the job routes with each job's outcome, the plane list of FITS and ASDF files, deleting a ref and downloading it as FITS, a folder listing under the path roots, the server's capabilities and seeded synthetic star fields with their truth catalogue.
+- **v2** (paths under `/v2`): session lifecycle with keepalive, image *references* with HDU or ASDF-array selection, structure, header and WCS inspection, coordinate transforms and a coordinate grid, cutouts, block binning, a pixel probe, exact statistics with noise evaluation, histograms and a render that takes the desktop display settings; also the job routes with each job's outcome, the plane list of FITS and ASDF files, deleting a ref and downloading it as FITS, a folder listing under the path roots, the server's capabilities, seeded synthetic star fields with their truth catalogue, and cube preparation recipes (the LIGHTSTACK workflow, from crops to a PSF-matched cube) with the filter registry they name planes by.
 
 Both generations use the same sessions and the same per-session image cache, so a v1 slot can be read by a v2 route through its `ref`, and a v2 ref can be rendered by a v1 route through its `slot`.
 
@@ -108,14 +108,14 @@ All settings are environment variables. An invalid server setting prints `WARN: 
 | `ASTROBURST_CLEANUP_INTERVAL` | `60` | Seconds between idle-session sweeps; values below 1 become 1 |
 | `ASTROBURST_LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error`; `RUST_LOG` wins when set |
 
-Guard and path roots (section 4). The token, the `Host` check and the roots of the file paths that requests send (`fits/open`, `/v2/open` and the v1 stack, drizzle and pipeline jobs) take effect when `ASTROBURST_BIND` is not a loopback address; on a loopback bind those stay open as before and the server only logs a warning when `ASTROBURST_TOKEN` is set. `GET /v2/fs` and `GET /v2/sessions/:sid/planes` keep to the roots on every bind. An empty value counts as unset.
+Guard and path roots (section 4). The token, the `Host` check and the roots of the file paths that requests send (`fits/open`, `/v2/open`, the v1 stack, drizzle and pipeline jobs and cube preparation recipes) take effect when `ASTROBURST_BIND` is not a loopback address; on a loopback bind those stay open as before and the server only logs a warning when `ASTROBURST_TOKEN` is set. `GET /v2/fs` and `GET /v2/sessions/:sid/planes` keep to the roots on every bind. An empty value counts as unset.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `ASTROBURST_TOKEN` | none | Bearer token every request must carry (`Authorization: Bearer <token>`); without it a non-loopback bind answers every request with `503 guard_unconfigured` |
 | `ASTROBURST_ALLOWED_HOSTS` | none | Comma-separated host names or addresses (a port is ignored, IPv6 in brackets or bare) that the `Host` header may name, besides `localhost`, `127.0.0.1`, `[::1]` and the bind address; an entry that is not a host name is logged and ignored |
-| `ASTROBURST_SERVER_ROOT` | the working directory | Path root: on a non-loopback bind `fits/open`, `/v2/open` and the v1 stack, drizzle and pipeline jobs accept only files under a root; on every bind `GET /v2/fs` lists only folders under a root (this one by default) and `GET /v2/sessions/:sid/planes` reads only source files under a root. A value that is not an existing folder is logged at start-up and is then not a root, with no fallback to the working directory: until it is fixed, paths are accepted only under `ASTROBURST_OUTPUT_ROOT` or `ASTROBURST_MAST_DOWNLOAD_DIR` when those name existing folders, and nowhere when they do not. Not to be confused with `ASTROBURST_DATA_DIR`, the app data folder |
-| `ASTROBURST_OUTPUT_ROOT` | `<ASTROBURST_SERVER_ROOT>/out` | Second path root, for the products of the planned routes; a root only once the folder exists |
+| `ASTROBURST_SERVER_ROOT` | the working directory | Path root: on a non-loopback bind `fits/open`, `/v2/open`, the v1 stack, drizzle and pipeline jobs and cube preparation recipes accept only files under a root; the relative paths of a cube preparation recipe are read from this folder; on every bind `GET /v2/fs` lists only folders under a root (this one by default) and `GET /v2/sessions/:sid/planes` reads only source files under a root. A value that is not an existing folder is logged at start-up and is then not a root, with no fallback to the working directory: until it is fixed, paths are accepted only under `ASTROBURST_OUTPUT_ROOT` or `ASTROBURST_MAST_DOWNLOAD_DIR` when those name existing folders, and nowhere when they do not. Not to be confused with `ASTROBURST_DATA_DIR`, the app data folder |
+| `ASTROBURST_OUTPUT_ROOT` | `<ASTROBURST_SERVER_ROOT>/out` | Second path root: each cube preparation job writes its folder here (the first job creates it), and the planned routes will write their products here; a root only once the folder exists |
 | `ASTROBURST_MAST_DOWNLOAD_DIR` | `<ASTROBURST_SERVER_ROOT>/mast` | Third path root, for the planned MAST downloads (`mast` builds only); a root only once the folder exists |
 | `ASTROBURST_MAST_TOKEN` | none | Read by `mast` builds for the planned MAST routes (section 13); no route uses it yet, `GET /v2/capabilities` reports only whether it is set, and it is never printed |
 
@@ -153,7 +153,7 @@ Read this before exposing the server to anything but your own machine. The guard
   1. `ASTROBURST_TOKEN` must be set, else every request answers `503 guard_unconfigured`.
   2. The `Host` header (and the authority of an absolute request URI) must name `localhost`, `127.0.0.1`, `[::1]`, the bind address or an entry of `ASTROBURST_ALLOWED_HOSTS`; a missing or foreign `Host` is `421 host_not_allowed`. This also blocks DNS rebinding.
   3. `Authorization: Bearer <token>` must match `ASTROBURST_TOKEN` (the scheme is case-insensitive; both tokens are compared as SHA-256 digests in constant time, so the timing reveals neither the token nor its length), else `401 unauthorized` with `WWW-Authenticate: Bearer`.
-  4. Every file path a request sends must resolve inside a path root: `ASTROBURST_SERVER_ROOT`, `ASTROBURST_OUTPUT_ROOT` and, in `mast` builds, `ASTROBURST_MAST_DOWNLOAD_DIR`. That is the `path` of `POST /sessions/:sid/fits/open` and `POST /v2/sessions/:sid/open`, the `paths` of `POST /sessions/:sid/stacking/stack` and `.../stacking/drizzle`, and each channel's `paths` and the `bias_paths`, `dark_paths`, `flat_paths` and `flat_dark_paths` of `.../pipeline/run`. One path outside refuses the whole request before any other field is checked and before a job slot is taken. The path is resolved by the file system before the comparison, so `..`, symbolic links, Windows junctions, `\\?\` drive prefixes and drive-relative forms all end where the file really is; a path that resolves outside every root, or cannot be resolved, is `403 path_outside_root`. A missing file inside a root keeps its `404`. The message names the path that was sent, never a root. On Windows a path that names another machine or a device is refused before the file system is asked, so the server never contacts the host it names: `\\server\share` and `//server/share`, `\\?\UNC\...`, `\\.\...`, `\??\...`, a `\\?\` form other than a drive letter, and any other path that starts with two separators. The one exception is a path on the network share (`\\server\share`, compared without regard to case) of a root that itself lies on that share; a UNC path to a folder that is also a local root is refused.
+  4. Every file path a request sends must resolve inside a path root: `ASTROBURST_SERVER_ROOT`, `ASTROBURST_OUTPUT_ROOT` and, in `mast` builds, `ASTROBURST_MAST_DOWNLOAD_DIR`. That is the `path` of `POST /sessions/:sid/fits/open` and `POST /v2/sessions/:sid/open`, the `paths` of `POST /sessions/:sid/stacking/stack` and `.../stacking/drizzle`, each channel's `paths` and the `bias_paths`, `dark_paths`, `flat_paths` and `flat_dark_paths` of `.../pipeline/run`, and every path of a cube preparation recipe (each input `path`, a crop `region_file`, the PSF `files` and an empirical `data_dir`, then the image and star file an empirical PSF finds in that folder) once its relative paths are read from `ASTROBURST_SERVER_ROOT`. One path outside refuses the whole request before any other field is checked and before a job slot is taken. The path is resolved by the file system before the comparison, so `..`, symbolic links, Windows junctions, `\\?\` drive prefixes and drive-relative forms all end where the file really is; a path that resolves outside every root, or cannot be resolved, is `403 path_outside_root`. A missing file inside a root keeps its `404`. The message names the path that was sent, never a root. On Windows a path that names another machine or a device is refused before the file system is asked, so the server never contacts the host it names: `\\server\share` and `//server/share`, `\\?\UNC\...`, `\\.\...`, `\??\...`, a `\\?\` form other than a drive letter, and any other path that starts with two separators. The one exception is a path on the network share (`\\server\share`, compared without regard to case) of a root that itself lies on that share; a UNC path to a folder that is also a local root is refused.
 - **Every bind, loopback included:** `GET /v2/fs` lists only a folder that resolves inside a path root, and `GET /v2/sessions/:sid/planes` reads only a ref whose source file resolves inside one; anything else is `403 path_outside_root`, checked the same way as above. On a loopback bind a file outside the roots can still be opened, but `/planes` refuses it.
 - Not checked again on any bind: `POST /v2/sessions/:sid/hdu`, which re-opens the source file of a ref that was already opened, and `GET /v2/sessions/:sid/images/:ref/fits`, which writes the pixels the session already holds and reads the ERR and DQ planes from that same source file. On a non-loopback bind that file passed the check above when it was opened, and v1 job results come only from checked paths.
 - Error bodies and logs never contain a token.
@@ -188,7 +188,7 @@ Read this before exposing the server to anything but your own machine. The guard
 
 ## 6. Jobs
 
-Stack, drizzle and pipeline (v1) and synthetic data (`POST /v2/sessions/:sid/synth`, section 11.9) run as background jobs. The request is validated first (names, numbers, weights and the one-shot-colour check where it applies); then a slot of the server-wide job pool (`ASTROBURST_JOBS_MAX`) is taken, and if none is free the answer is `429 too_many_requests` (`job queue full (max N concurrent)`). The pipeline inspects its frames after taking the slot, so a full pool answers `429` before the frames are read, and a refused frame set releases the slot at once. An accepted job answers `202` with its `job_id`.
+Stack, drizzle and pipeline (v1), synthetic data (`POST /v2/sessions/:sid/synth`, section 11.9) and cube preparation (`POST /v2/sessions/:sid/cubeprep/jobs`, section 11.10) run as background jobs. The request is validated first (names, numbers, weights and the one-shot-colour check where it applies); then a slot of the server-wide job pool (`ASTROBURST_JOBS_MAX`) is taken, and if none is free the answer is `429 too_many_requests` (`job queue full (max N concurrent)`). The pipeline inspects its frames after taking the slot, so a full pool answers `429` before the frames are read, and a refused frame set releases the slot at once. An accepted job answers `202` with its `job_id`.
 
 The routes below serve every job of the session, whichever route started it, and each of the three v1 job routes has a v2 alias under `/v2/sessions/:sid/jobs/:jid` with the same handler. An unknown job is `404 not_found` with the message `job <jid> not found`. Job records end with their session, and a session keeps at most 256 finished jobs: when a v2 job finishes, and on every `GET .../outcome`, the server drops the oldest finished jobs of each session beyond the newest 256 (by completion time) together with their outcomes. A running job is never dropped. Without v2 jobs or outcome reads nothing is dropped.
 
@@ -200,7 +200,7 @@ Status snapshot (`server/handlers/jobs.rs`):
 { "id": "6f0c2a8e-3d1b-4f5e-9a7c-1b2d3e4f5a6b", "action": "stack", "status": "running", "pct": 42, "started_at": 1792769423186, "completed_at": null }
 ```
 
-`action` is `stack`, `drizzle`, `pipeline` or `synth`. `status` is `running`, `done`, `error` or `cancelled`. `pct` stays at 99 or below until the job is `done`, which sets it to 100. Times are milliseconds since the Unix epoch.
+`action` is `stack`, `drizzle`, `pipeline`, `synth` or `cubeprep`. `status` is `running`, `done`, `error` or `cancelled`. `pct` stays at 99 or below until the job is `done`, which sets it to 100. Times are milliseconds since the Unix epoch.
 
 ### DELETE /sessions/:sid/jobs/:jid
 
@@ -258,7 +258,7 @@ What a v2 job produced (`server/science/outcome.rs`). Example for a finished `sy
 
 - `job` is the status snapshot of `GET /sessions/:sid/jobs/:jid`.
 - `outcome` is `null` until the job has stored its result, after a cancel, for a v1 job (stack, drizzle, pipeline) and for a job whose worker panicked (its message is only in the SSE `error` event). A v2 job records its outcome just before its status turns `done` or `error`: a v2 job that reads `done` always has one, and for a moment an outcome can show while `status` still reads `running`.
-- `result` is the route's own result object (each route documents it). A failed job has `result: null`, no warnings, no products, and `error` set to the same text as the SSE `error` event.
+- `result` is the route's own result object (each route documents it). A failed job has `result: null`, no warnings, no products, and `error` set to the same text as the SSE `error` event. When the failure has a code, `error_code` holds it, with `error_hint` when there is advice to give (cube preparation, section 11.10); both keys are absent otherwise.
 - `products` lists the refs the job published, in order. They are listed by `GET /v2/sessions/:sid/images` with `source: null` and read by every route that takes a `ref`. `present` says whether the session cache still holds an image under that name: products can be evicted by the per-session cache (section 5) or deleted.
 - An unknown job, or one dropped by the 256-job limit above, is `404 not_found` (`job <jid> not found`).
 
@@ -279,8 +279,10 @@ Every error from a handler uses one envelope (`server/error.rs`); successful res
 | 400 | `not_implemented` | `render_png: true` on `/v2/sessions/:sid/histogram` |
 | 400 | `derived_ref_unsupported` | `/planes` on a ref that was not opened from a file (a cutout, binned image, job product or v1 slot) |
 | 401 | `unauthorized` | Non-loopback bind: missing or wrong `Authorization: Bearer` token (section 4); the answer carries `WWW-Authenticate: Bearer` |
-| 403 | `path_outside_root` | Non-loopback bind: a `path` of `fits/open` or `/v2/open`, or a path of a v1 stack, drizzle or pipeline body, that resolves outside every path root; any bind: a `dir` of `/v2/fs`, or the source file of a ref given to `/planes`, outside every root; on Windows also a path that names another machine or a device (section 4) |
+| 403 | `path_outside_root` | Non-loopback bind: a `path` of `fits/open` or `/v2/open`, or a path of a v1 stack, drizzle or pipeline body or of a cube preparation recipe, that resolves outside every path root; any bind: a `dir` of `/v2/fs`, or the source file of a ref given to `/planes`, outside every root; on Windows also a path that names another machine or a device (section 4) |
+| 400 | `recipe_version_unsupported`, `unknown_step`, `unknown_parameter`, `filter_duplicate`, `recipe_invalid` | A cube preparation recipe refused (section 11.10) |
 | 404 | `not_found` | Session, slot, ref, job, folder or file does not exist |
+| 404 | `file_not_found` | A file or folder that a cube preparation recipe names does not exist |
 | 409 | `conflict` | Second SSE subscriber for a job |
 | 421 | `host_not_allowed` | Non-loopback bind: missing or foreign `Host` header (section 4) |
 | 429 | `too_many_requests` | Job pool full |
@@ -288,13 +290,13 @@ Every error from a handler uses one envelope (`server/error.rs`); successful res
 | 503 | `guard_unconfigured` | Non-loopback bind without `ASTROBURST_TOKEN` (section 4) |
 | 500 | `internal_error` | Unexpected failure; the message carries the error chain |
 
-`hint` appears only where a handler sets one: with `region_out_of_bounds`, `pixel_out_of_bounds` and `not_implemented`; usually with `wcs_required` (not when the image's WCS has a degenerate pixel scale); and with some `bad_request` answers of the v2 routes (an unknown sky frame, stretch, colormap or scale algorithm, a bin `method` other than `mean`, a bin `factor` larger than the image, and out-of-range parameters such as `density`, `bins`, `range`, `box` or `sigma_clip`). Treat `hint` as optional.
+`hint` appears only where a handler sets one: with `region_out_of_bounds`, `pixel_out_of_bounds` and `not_implemented`; usually with `wcs_required` (not when the image's WCS has a degenerate pixel scale); and with some `bad_request` answers of the v2 routes (an unknown sky frame, stretch, colormap or scale algorithm, a bin `method` other than `mean`, a bin `factor` larger than the image, and out-of-range parameters such as `density`, `bins`, `range`, `box` or `sigma_clip`); and with every cube preparation refusal but `recipe_invalid`. Treat `hint` as optional. A job that fails after it was accepted answers no error envelope: its code, when it has one, is the outcome's `error_code` (section 6).
 
 The guard's refusals (`401`, `403`, `421` and `503 guard_unconfigured`, section 4) come before the handler too, and they use the envelope. Other requests rejected before a handler runs get the framework's own plain-text answer, not the envelope: a body larger than 2 MiB (2,097,152 bytes, axum's default limit; the router sets no other) (`413`), a body that is not valid JSON (`400`), a missing `Content-Type: application/json` (`415`), JSON of the wrong shape, such as a string where a number is expected, a negative number for an unsigned field or an unknown region `type` (`422`), a malformed query string (`400`), an unknown path (`404`, empty body) and a wrong method (`405`, empty body). Clients should handle both forms.
 
 ## 8. Route index
 
-43 method and path pairs (`server/router.rs` and the science router it merges, `server/science/mod.rs`). `GET /v2/capabilities` lists the same pairs in the same order.
+45 method and path pairs (`server/router.rs` and the science router it merges, `server/science/mod.rs`). `GET /v2/capabilities` lists the same pairs in the same order.
 
 | # | Method | Path | Answer | Section |
 |---|---|---|---|---|
@@ -341,6 +343,8 @@ The guard's refusals (`401`, `403`, `421` and `503 guard_unconfigured`, section 
 | 41 | GET | [`/v2/fs`](#get-v2fs) | JSON | 11.8 |
 | 42 | GET | [`/v2/capabilities`](#get-v2capabilities) | JSON | 9 |
 | 43 | POST | [`/v2/sessions/:sid/synth`](#post-v2sessionssidsynth) | 202 job | 11.9 |
+| 44 | GET | [`/v2/cubeprep/filters`](#get-v2cubeprepfilters) | JSON | 11.10 |
+| 45 | POST | [`/v2/sessions/:sid/cubeprep/jobs`](#post-v2sessionssidcubeprepjobs) | 202 job | 11.10 |
 
 ## 9. Service routes
 
@@ -1072,6 +1076,133 @@ Products: one frame is `<name>`; a stack is `<name>_0000`, `<name>_0001`, ... (f
 - Refused with `400 bad_request` before a job slot is taken: a `config` the desktop refuses (the message names the field, for example `Field size 0x512 is outside 1..16384 pixels`), a stack over the desktop's pixel budget (2^30 pixels in all), and products that do not fit one session cache, more images than `ASTROBURST_CACHE_MAX_ENTRIES` or more bytes (4 per pixel) than `ASTROBURST_CACHE_MAX_BYTES`, with that variable in `hint`. The engine's frame-count check (1 to 1024 frames) runs inside the job, so a stack of 0 frames ends the job in `error`.
 - A stack stops between frames when the job is cancelled. Generating a frame replaces any ref of the same name, and adding the products can evict older refs from the session cache.
 
+### 11.10 Cube preparation
+
+Runs a cube preparation recipe as a job: the LIGHTSTACK workflow of crop, unit conversion, alignment, cube assembly, cube edits, PSF preparation, matching kernels and PSF matching (`server/science/cubeprep.rs`, `service/cubeprep_recipe.rs`). Each step calls the engine function of the desktop's cube preparation command for that step. A recipe is the JSON file the LIGHTSTACK oracle reads (`scripts/oracle/lightstack_oracle.py`; example: `src-tauri/tests/fixtures/lightstack/d1/recipe_d1.json`), and with its defaults it follows LIGHTSTACK 0.4.0 (crop rounding, area rule, cube layout and matching mode) except for the differences listed at the end of this section. A test runs the D1 recipe from LIGHTSTACK's own crops and compares the cube with the one LIGHTSTACK wrote: the NaN masks are identical, the planes without SIP distortion agree within 2e-6 of their peak (measured 5e-8) and the SIP plane within 1e-3 of its 0.1 to 99.9 percentile range (measured 8e-5).
+
+#### GET /v2/cubeprep/filters
+
+The filter registry that names the planes of a cube: the built-in filters and the custom datasets of the AstroBurst configuration file (`filter_datasets`). A recipe's `dataset` and `filter` values and the image names of an empirical PSF are looked up in it, and `pivot_angstrom` orders the planes. No session needed.
+
+```json
+{
+  "datasets": ["JWST", "HST", "LSST", "JPAS", "JPLUS", "SWIFT", "FDS", "ROMAN"],
+  "filters": [
+    { "dataset": "JWST", "filter": "F444W", "instrument": "NIRCam", "group": "LW", "pivot_angstrom": 44043.15, "aliases": [] },
+    { "dataset": "HST", "filter": "F814W", "instrument": "ACS", "group": "ACS", "pivot_angstrom": 8045.53, "aliases": [] }
+  ]
+}
+```
+
+#### POST /v2/sessions/:sid/cubeprep/jobs
+
+The body is the recipe:
+
+```json
+{
+  "recipe_version": 1,
+  "name": "d1",
+  "inputs": [
+    { "path": "d1/d1_HST_F814W.fits", "dataset": "HST", "filter": "F814W" },
+    { "path": "d1/d1_JWST_F444W.fits", "dataset": "JWST", "filter": "F444W" }
+  ],
+  "steps": [
+    { "step": "crop", "mode": "radec", "ra": 53.1625, "dec": -27.7914, "size_arcsec": 1.8 },
+    { "step": "units", "to": "Jy/pixel" },
+    { "step": "align", "reference": "F444W", "method": "bilinear", "border_crop": 1 },
+    { "step": "cube", "reference": "F444W", "order": "wavelength", "output": "d1_cube.fits" },
+    { "step": "edit", "action": "drop_invalid", "threshold": 0.0, "frac_valid": 0.01 },
+    { "step": "psfs", "source": "files", "reference": "F444W", "pixel_scale_arcsec": 0.04, "files": [
+      { "filter": "F814W", "path": "d1/psf/d1_psf_HST_F814W_40mas.fits" },
+      { "filter": "F444W", "path": "d1/psf/d1_psf_JWST_F444W_40mas.fits" }
+    ] },
+    { "step": "kernels", "reference": "F444W", "method": "wiener", "eps": 0.05, "shape": "reference" },
+    { "step": "match", "reference": "F444W" }
+  ]
+}
+```
+
+- `recipe_version` (required) must be `1`; `name` is optional; `inputs` (at least one) gives each image's `path`, `dataset` and `filter`, all required, one input per filter (compared without regard to case); `steps` (at least one) run in order, each named by `step`.
+- Paths are files on the server: absolute, or relative to `ASTROBURST_SERVER_ROOT`. The oracle reads them relative to its `--data` folder, so a recipe written for the oracle runs unchanged when the server root is that folder.
+- A key the recipe format does not know is refused wherever it appears (top level, input or step), so a misspelt parameter never falls back to its default.
+
+Steps, their keys and defaults; a filter value names the `filter` of an input:
+
+| `step` | Keys |
+|---|---|
+| `units` | `to`: `"Jy/pixel"`, or `"MJy/sr"` (AstroBurst only; LIGHTSTACK converts to Jy/pixel) |
+| `crop` | `mode` and its keys: `radec` (`ra` and `dec` in degrees, `size_arcsec`), `reference` (`reference`, the filter whose footprint the others are cut to), `common` (the footprint every input covers), `region` (`region_file`, a DS9 file of boxes, and `index`, the box to use, default `0`), `region_common` (`region_file`; the box every box of the file covers) or `pixel` (`x_start`, `x_end`, `y_start`, `y_end`; 0-based, the ends excluded). `rounding`: `lightstack` (default) or `astroburst` |
+| `align` | `reference` (required, a filter: the grid every image is resampled onto); `method`: `bilinear` (default), `bicubic` or `exact`; `border_crop`: pixels cut from each side, default `1`; `area_rule`: `lightstack` (default), `scale` or `keep` |
+| `cube` | `reference`: a filter, default the `align` reference; `order`: `wavelength` (default, by pivot) or `given`; `output`: a `.fits` file name, default `cube.fits`; `layout`: `lightstack` (default, the planes in the primary HDU) or `mef` (SCI, with ERR and DQ cubes when the inputs carry them; `align` writes SCI only) |
+| `edit` | `action` and its keys: `drop_invalid` (`threshold`, default `0`; `frac_valid`, default `0.01`; `use_dq`, default `false`), `remove_filter` (`filter`), `cut` (`x_start`, `x_end`, `y_start`, `y_end`), `cut_sky` (`ra`, `dec`, `size_arcsec`, `rounding`), `header` (`redshift`, `ra_center`, `dec_center`, `use_brightest_pixel`) or `reference_nan_mask` (`reference_slice`, `mode`) |
+| `psfs` | `source` and its keys: `files` (`files`, a list of `filter` and `path`) or `empirical` (`dataset`; `filters`; `data_dir`, default the server root; the keys of the desktop's empirical PSF options: `cutout_size`, `background_border`, `background_sigma`, `clip_negative`, `noise_threshold`, `radial_cleaning`, `cleaning_sigma`, `cleaning_consecutive_bins`, `normalization_radius`, `normalization_radius_unit`, `psf_size`, `oversampling`, `stack`; `oversampling_order` may only be `3`). An empirical PSF is built from the one FITS file in `data_dir` whose name the registry reads as that filter, with the stars of `stars_<filter>.reg` (lower case) beside it. `pixel_scale_arcsec` resamples every PSF to that scale and then needs `reference`, the filter whose PSF sets the size |
+| `kernels` | `reference` (required, a filter with a PSF); `method` (required): `wiener` (`eps`, default `0.001`; `eps_mode`: `absolute` (default) or `relative`; `shape`: `reference` (default) or `[rows, cols]`, both odd) or `window` (the desktop's taper window keys and `regularization`); `auto`: let the desktop's automatic search choose `eps` or the window, default `false` |
+| `match` | `reference` (required, the filter the kernels lead to); `mode`: `lightstack` (default) or `astroburst`; `allow_unmatched`: default `false` |
+| `export` | `output`: a `.fits` file name; copies the current cube under that name |
+
+Rules, checked in the oracle's order: a `cube` needs a `reference` or an earlier `align`; `edit`, `match` and `export` need an earlier `cube`; `kernels` needs a PSF for its `reference`, and `match` needs kernels to its `reference`; PSFs name input filters, one PSF per filter; sizes and scales must be positive; every file and folder the recipe names must exist, and an empirical PSF needs, in `data_dir`, one FITS file named for each of its filters and that filter's `stars_<filter>.reg`.
+
+Refusals come before a job slot is taken and before anything is written:
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `recipe_version_unsupported` | `recipe_version` is not `1` |
+| 400 | `unknown_step` | A `step` name that is not one of the nine above; `hint` lists them |
+| 400 | `unknown_parameter` | A key the recipe format does not know; `hint` lists the keys accepted in that place |
+| 400 | `filter_duplicate` | Two inputs with the same filter |
+| 400 | `recipe_invalid` | A missing key, a value of the wrong type, a broken rule, or two FITS files in `data_dir` named for one filter of an empirical PSF; the message names the place, for example `steps[0] (crop): size_arcsec must be positive` |
+| 403 | `path_outside_root` | Non-loopback bind: a path of the recipe, or the image or star file an empirical PSF finds in `data_dir`, resolves outside the path roots (section 4) |
+| 404 | `file_not_found` | A file or folder of the recipe does not exist, or `data_dir` lacks an empirical PSF's image or star file |
+
+An accepted recipe answers `202`:
+
+```json
+{ "job_id": "066490f5-e5d8-417e-8d46-8761798d0ca1", "status": "running", "output_dir": "/data/out/cubeprep-066490f5-e5d8-417e-8d46-8761798d0ca1" }
+```
+
+The job writes into `output_dir`, a new folder `cubeprep-<job_id>` under `ASTROBURST_OUTPUT_ROOT`:
+
+- `recipe.json`: the recipe as run, with every default filled in and every path resolved; sending it again repeats the run.
+- `01_crop`, `02_units`, ...: one folder per step, numbered in recipe order, with that step's files. Their names follow the desktop's (`d1_HST_F814W_cutout_9_8_46x46_Jy_aligned_bilinear.fits`); a server process that already wrote a file of the same name in an earlier job adds a number to the new one (`d1_cube_3_valid_psfmatched.fits`), so read the names from the outcome.
+- `result.json`: the outcome's `result`, written once every step has finished.
+
+The job's progress `stage` is the folder of the step being run (`03_align`), and `pct` advances one step at a time. A cancel stops the job before its next step, or between the files of a `units` step, a `pixel` crop or an empirical `psfs` step; a file being written is finished first. After a cancel or an error the folder keeps what was written, so the steps that ran can be inspected; the server never deletes it. No route runs one step on an earlier job's folder: to change a later step, send a new recipe whose inputs are the files of the step before it.
+
+The outcome's `result` (section 6):
+
+```json
+{
+  "recipe_version": 1,
+  "name": "d1",
+  "output_dir": "/data/out/cubeprep-066490f5-e5d8-417e-8d46-8761798d0ca1",
+  "cube": "/data/out/cubeprep-066490f5-e5d8-417e-8d46-8761798d0ca1/08_match/d1_cube_valid_psfmatched.fits",
+  "steps": [
+    { "index": 1, "step": "crop", "directory": "01_crop", "parameters": { "step": "crop", "mode": "radec", "ra": 53.1625, "dec": -27.7914, "size_arcsec": 1.8, "rounding": "lightstack" }, "report": { "...": "..." }, "warnings": [], "elapsed_ms": 69 }
+  ],
+  "files": [ { "path": "01_crop/d1_HST_F814W_cutout_9_8_46x46.fits", "bytes": 46080 }, { "path": "recipe.json", "bytes": 3182 } ],
+  "warnings": [ "07_kernels: F356W: the matched FWHM 4.210 px differs from the target FWHM 3.471 px by +21.28 percent" ],
+  "elapsed_ms": 291
+}
+```
+
+- `cube` is the cube after the last step that wrote one (`cube`, `edit`, `match` or `export`); `null` without a `cube` step.
+- `steps[].parameters` are the step's keys as run, defaults included; `report` is the report of the desktop command the step called (crop rectangles, conversion factors, alignment geometry, PSF preparation, kernel diagnostics, matched planes).
+- `files` lists every file under `output_dir` except `result.json`, by path relative to it with `/`, in name order.
+- `warnings` collects the steps' warnings, each prefixed with its step folder, and the outcome's `warnings` repeat them. The kernel and matching warnings judge the PSF match (residuals, FWHM, encircled energy, negative kernel lobes, values near NaN holes); read them before using a cube.
+- `products` stays empty: the files are on disk, not refs. `output_dir` lies under a path root, so `POST /v2/sessions/:sid/open` opens a file of it and `GET /v2/fs?dir=<output_dir>` lists it.
+
+The job checks the recipe again before its first step, so a file removed after the request ends the job in `error` with the refusal's code in `error_code`. A step that fails ends the job in `error`, and the `error` text starts with its folder (`08_match: kernel_missing: no matching kernel to F444W for F150W; ...`). A failure of the matching engine also sets the outcome's `error_code`: `kernel_missing` (a plane of the cube has no kernel to the reference; `error_hint` says how to change the recipe), `kernel_scale` (a kernel sampled at another pixel scale than the cube) or `convolution_failed`.
+
+Differences from LIGHTSTACK 0.4.0 under the defaults:
+
+- `match`: LIGHTSTACK copies a plane without a kernel unmatched and goes on; here the job stops with `kernel_missing` unless `allow_unmatched` is `true`.
+- An empirical PSF reads the DS9 star positions as 1-based, as DS9 writes them; LIGHTSTACK reads them one pixel off.
+- A `pixel` crop that runs past the edge keeps its size: the outside is NaN and flagged in DQ, with a warning.
+- `area_rule` `lightstack` multiplies by the pixel-area ratio as LIGHTSTACK does, which conserves the flux of an image in Jy/pixel but not the surface brightness of an image in MJy/sr; the step warns in that case. `scale` treats both correctly.
+- A crop edge within 1e-8 px of a pixel boundary can round to either side, and AstroBurst and LIGHTSTACK compute it with different WCS libraries. The D1 test data puts two crop edges on such ties: the D1 cube is 44 by 44 pixels here and 44 by 43 in LIGHTSTACK, while from the same crops the results agree as stated above.
+
+The engine reads the files through the library's own image cache (up to 32 images and 2 GiB for the whole process), apart from the session caches (section 5); that memory stays in use after the job until later reads replace it.
+
 ## 12. Region specifications
 
 Used by `cutout`, `stats`, `histogram` and `render` (`server/v2/region.rs`). The form is chosen by `type`.
@@ -1114,7 +1245,7 @@ Radii, widths and heights must be positive, `r_inner` at least 0 and below `r_ou
 
 ## 13. Planned routes
 
-Not implemented yet; paths and bodies may change. Most planned routes call the engine function the desktop command already uses, so a route and the desktop return the same numbers, and their bodies use the desktop command's argument names. The foundation routes (G0: job outcome, v2 job routes, planes, ref delete and FITS download, file listing, capabilities), the G0 guard (token, `Host` allowlist and path roots for every route that takes a file path, section 4) and the synthetic data route (G9) are in place (sections 6, 9 and 11). Groups in planned order:
+Not implemented yet; paths and bodies may change. Most planned routes call the engine function the desktop command already uses, so a route and the desktop return the same numbers, and their bodies use the desktop command's argument names. The foundation routes (G0: job outcome, v2 job routes, planes, ref delete and FITS download, file listing, capabilities), the G0 guard (token, `Host` allowlist and path roots for every route that takes a file path, section 4) the synthetic data route (G9) and the cube preparation recipes are in place (sections 6, 9 and 11). Groups in planned order:
 
 - **G1 Image measurement and photometry:** photometry (single, batch and gain model), star detection, empirical PSF, region statistics with a background annulus, radial, line and surface-brightness profiles, contours, pixel table, DQ flag table, batch noise evaluation, FFT power spectrum; `exclude_dq` on `/stats` and `/histogram`.
 - **G2 Astrometry, WCS and catalogues:** Gaia DR3 cone search, cross-match and CSV; observation geometry; DS9 `.reg` import and export; pointing overlap; plate solving of one frame or a list with the desktop's offline catalogue tiers; the image centre and field of view on `/wcs`, `frame` on `/wcs/sky2pix`, `position_angle_deg` on `/wcs/separation`.
@@ -1127,7 +1258,7 @@ Not implemented yet; paths and bodies may change. Most planned routes call the e
 
 ## 14. Python client
 
-The async client in `agent/` (package `astroburst-client`, contributed by Jae-Joon Lee) wraps the v1 routes: sessions, `fits/open` and `fits/header`, the three renders, stack, drizzle, pipeline and jobs with polling, cancel and SSE streaming. The v2 routes have no Python method yet; call them with any HTTP client. Installation, examples and the client reference are in [`agent/README.md`](../agent/README.md).
+The async client in `agent/` (package `astroburst-client`, contributed by Jae-Joon Lee) wraps the v1 routes: sessions, `fits/open` and `fits/header`, the three renders, stack, drizzle, pipeline and jobs with polling, cancel and SSE streaming. Of the v2 routes it wraps cube preparation (`Session.cubeprep(recipe)`, which returns a `Job` with `output_dir`, and `AstroBurstClient.cubeprep_filters()`) and the job outcome (`Job.outcome()`); an `AstroBurstError` carries the server's `hint`. The other v2 routes have no Python method yet; call them with any HTTP client. Installation, examples and the client reference are in [`agent/README.md`](../agent/README.md).
 
 Install with `pip install -e ./agent` (add `[image]` for the Pillow helper). A first session:
 
@@ -1146,10 +1277,11 @@ async def main():
 asyncio.run(main())
 ```
 
-Runnable examples: [`agent/examples/`](../agent/examples).
+Runnable examples: [`agent/examples/`](../agent/examples); `04_cubeprep.py` runs a recipe file and prints its steps, warnings and cube, or the error code and hint.
 
 ## 15. Credits and licence
 
 - The headless server (`src-tauri/src/server/`), the v1 and v2 APIs, the Python client (`agent/`), `src-tauri/SERVER.md` and `src-tauri/SERVER_TESTING.md` were contributed by [Jae-Joon Lee](https://github.com/leejjoon). He also contributed the WCS engine migration, FITS tile compression, zscale and the first colormaps (gray and viridis).
 - `src-tauri/SERVER.md` remains the contributor's original v1 guide; this document is the complete reference for the v1 and v2 routes and lists the planned ones.
 - AstroBurst is free software under the AGPLv3; see [LICENSE](../LICENSE). Third-party notices: [src-tauri/licenses/THIRD-PARTY-NOTICES.md](../src-tauri/licenses/THIRD-PARTY-NOTICES.md).
+

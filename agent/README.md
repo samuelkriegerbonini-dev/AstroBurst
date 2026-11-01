@@ -80,6 +80,7 @@ asyncio.run(main())
 |---|---|
 | `health()` | `GET /health` — server status, version, session counters |
 | `create_session()` | `POST /sessions` — returns a `Session` |
+| `cubeprep_filters()` | `GET /v2/cubeprep/filters`: the filter registry (datasets and filters with their pivot wavelengths) that cube preparation recipes name planes by → `dict` |
 
 ### `Session`
 
@@ -93,6 +94,7 @@ asyncio.run(main())
 | `stack(paths, ...)` | Sigma-clip stack → `Job` (202) |
 | `drizzle(paths, ...)` | Drizzle combine → `Job` (202) |
 | `pipeline(channels, ...)` | Calibrate + stack pipeline → `Job` (202) |
+| `cubeprep(recipe)` | Run a cube preparation recipe (the LIGHTSTACK workflow, from crops to a PSF-matched cube) → `Job` (202) with `output_dir` |
 | `get_job(job_id)` | Poll any job by ID → `JobStatus` |
 | `cancel_job(job_id)` | Cancel any job by ID → `JobStatus` |
 
@@ -106,6 +108,8 @@ asyncio.run(main())
 | `stream()` | SSE iterator → `AsyncIterator[dict]` |
 | `slot` | Result cache key (stack / drizzle) |
 | `slots` | Result cache keys (pipeline) |
+| `outcome()` | `GET /v2/sessions/:sid/jobs/:jid/outcome`: the job status with the result, warnings and error of a v2 job (`error_code` and `error_hint` when the failure has a code) → `dict` |
+| `output_dir` | Folder on the server the cube preparation job writes to |
 
 ### Render methods → images
 
@@ -145,7 +149,10 @@ Full error hierarchy:
 | `InternalServerError` | 500 | `internal_error` |
 
 All inherit from `AstroBurstError` which carries `.code`, `.message`,
-`.status`, and `.request_id` (for correlating with server logs).
+`.status`, `.hint` (the server's advice, when it gives one) and `.request_id`
+(for correlating with server logs). A code without a class of its own, such
+as `unknown_step` or `file_not_found` from a refused recipe, raises the class
+of its HTTP status, or `AstroBurstError` when the status has none (403).
 
 ## Examples
 
@@ -164,7 +171,13 @@ python agent/examples/03_pipeline.py \
     --dark /data/dark.fits \
     --flat /data/flat.fits \
     --prefix "pipe/"
+
+# Example 04: run a cube preparation recipe and print its steps, warnings and cube
+python agent/examples/04_cubeprep.py recipe.json http://localhost:8080
 ```
+
+The recipe format, its steps and its errors are in
+[docs/server-api.md](../docs/server-api.md), section 11.10.
 
 ## Full API reference
 
