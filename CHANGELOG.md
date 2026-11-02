@@ -4,6 +4,23 @@ All notable changes to AstroBurst will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.9] - 2026-11-02
+
+### Added
+- Desktop Cube Prep runs the shared LIGHTSTACK recipe workflow with validation, progress, cancellation, intermediate products, reports and a hand-off to SAGUI.
+- Desktop SAGUI runs the pinned official R implementation with a private CPU library, managed installation, exact Ward or explicit sparse clustering, starlet support masks, region selection, SEDs and FITS/CSV exports. Saved results can be reopened after their products and manifest are verified.
+- Scientific manifests identify inputs and products with SHA-256 hashes. Spectral maps, Collapse and RAMP products check their input contents before reading and before publishing; the desktop exposes the manifest alongside the results.
+- Synthetic Brγ regression fixtures compare spectral measurements with an independent SciPy reference. Desktop products have independent numerical checks; observational Brγ/JADES validation remains pending.
+
+### Fixed
+- Preserve SCI/ERR/DQ through cube preparation, alignment and PSF matching, including effective interpolation weights, repeated edge contributors and integer DQ flags. Correct the D1 WCS projection so the LIGHTSTACK compatibility result is 44 by 43 without trimming arrays.
+- Share an explicit DO_NOT_USE policy across Fit Lines, Moment Maps and Collapse, preserve high DQ bits and invalidate results when their inputs or calculation parameters change. Display metadata for the active product.
+- Weight spectral moments and their uncertainties by channel widths, use the accepted sample population for S/N and distinguish measured zeros from legacy Collapse padding. Reject incompatible ERR units and preserve the distinction between mJy and MJy.
+- Compare RAMP and RATE on the same finite, DQ-filtered population, reject incompatible units and export signed differences with bias, MAE, RMSE and MAD.
+
+### Limitations
+- Reprojection and PSF matching introduce covariance that is not stored. Synthetic validation does not certify real-data PSF matching, clean-machine Windows installation or Linux distribution. SHA-256 checkpoints do not provide an immutable input snapshot; interactive gzip inspectors retain their documented cache limitations.
+
 ## [0.7.8] - 2026-11-01
 
 ### Added
