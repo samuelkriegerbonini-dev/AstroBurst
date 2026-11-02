@@ -47,11 +47,11 @@ function withSizes(sizes: Partial<DockSizes>, base: DockLayout = DEFAULT_DOCK_LA
 }
 
 describe("DEFAULT_DOCK_LAYOUT", () => {
-  it("is the owner's default: Files and Info left top, Compose bottom left, the seven right tools split top/bottom", () => {
+  it("places preparation and segmentation beside the cube analysis tools", () => {
     expect(DEFAULT_DOCK_LAYOUT.anchors).toEqual({
       "left-top": ["files", "info"],
       "left-bottom": ["compose"],
-      "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking"],
+      "right-top": ["headers", "image", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking"],
       "right-bottom": ["synth", "export", "config", "log"],
     });
     expect(anchorOf(DEFAULT_DOCK_LAYOUT, "log")).toBe("right-bottom");
@@ -120,10 +120,10 @@ describe("DOCK_TOOL_META", () => {
 
   it("keeps today's strip labels and panel labels", () => {
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].shortLabel)).toEqual([
-      "Files", "Info", "Comp", "Headers", "Image", "Astro", "Phot", "Cube", "Proc", "Hist", "Masks", "Stack", "Synth", "Export", "Config", "Log",
+      "Files", "Info", "Comp", "Headers", "Image", "Astro", "Phot", "Cube", "Prep", "SAGUI", "Proc", "Hist", "Masks", "Stack", "Synth", "Export", "Config", "Log",
     ]);
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].label)).toEqual([
-      "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Cube", "Processing", "History", "Masks", "Stacking", "Synth", "Export", "Settings", "Log",
+      "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Cube", "Cube Prep", "SAGUI", "Processing", "History", "Masks", "Stacking", "Synth", "Export", "Settings", "Log",
     ]);
     expect(DOCK_TOOL_META.config.keywords).toEqual(["Config"]);
   });
@@ -146,7 +146,7 @@ describe("DOCK_TOOL_META", () => {
 
   it("lists the tools in strip order with the analysis tools in the slot Analysis had", () => {
     expect(DOCK_TOOL_IDS).toEqual([
-      "files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking", "synth", "export", "config", "log",
+      "files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking", "synth", "export", "config", "log",
     ]);
     expect((DOCK_TOOL_IDS as readonly string[]).includes("analysis")).toBe(false);
   });
@@ -178,12 +178,12 @@ describe("DOCK_TOOL_META", () => {
     }
   });
 
-  it("lets only Files, Info, Settings and Log work without a file", () => {
-    expect(DOCK_TOOL_IDS.filter((id) => !DOCK_TOOL_META[id].needsFile)).toEqual(["files", "info", "config", "log"]);
+  it("lets preparation and segmentation select their inputs without an open file", () => {
+    expect(DOCK_TOOL_IDS.filter((id) => !DOCK_TOOL_META[id].needsFile)).toEqual(["files", "info", "cubeprep", "sagui", "config", "log"]);
   });
 
-  it("gives Files and Info the sidebar minimum and every other tool the right-column minimum", () => {
-    expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].minWidth)).toEqual([180, 180, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280, 280]);
+  it("reserves a wider minimum for the preparation and segmentation forms", () => {
+    expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].minWidth)).toEqual([180, 180, 280, 280, 280, 280, 280, 280, 320, 320, 280, 280, 280, 280, 280, 280, 280, 280]);
   });
 });
 
@@ -191,7 +191,7 @@ describe("dockReducer move to another anchor", () => {
   it("appends to the target, opens the tool there and leaves the source's open tool alone", () => {
     const next = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-bottom" });
     expect(next.anchors["left-bottom"]).toEqual(["compose", "image"]);
-    expect(next.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking"]);
+    expect(next.anchors["right-top"]).toEqual(["headers", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking"]);
     expect(next.active).toEqual({ "left-top": "files", "left-bottom": "image", "right-top": null, "right-bottom": null });
     expect(dockLayoutErrors(next)).toEqual([]);
   });
@@ -237,14 +237,14 @@ describe("dockReducer move inside the same anchor", () => {
 
   it("never changes the open tool and equals reorder", () => {
     const moved = dockReducer(open, { type: "move", tool: "headers", anchor: "right-top", index: 3 });
-    expect(moved.anchors["right-top"]).toEqual(["image", "astrometry", "photometry", "headers", "cube", "processing", "history", "masks", "stacking"]);
+    expect(moved.anchors["right-top"]).toEqual(["image", "astrometry", "photometry", "headers", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking"]);
     expect(moved.active).toEqual(open.active);
     expect(moved).toEqual(dockReducer(open, { type: "reorder", anchor: "right-top", from: 0, to: 3 }));
   });
 
   it("does not open a closed dragged tool", () => {
     const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "stacking", anchor: "right-top", index: 0 });
-    expect(moved.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks"]);
+    expect(moved.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks"]);
     expect(moved.active["right-top"]).toBeNull();
   });
 
@@ -258,20 +258,20 @@ describe("dockReducer move inside the same anchor", () => {
 
   it("clamps the index to the last position", () => {
     expect(dockReducer(open, { type: "move", tool: "headers", anchor: "right-top", index: 99 }).anchors["right-top"])
-      .toEqual(["image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking", "headers"]);
+      .toEqual(["image", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking", "headers"]);
   });
 });
 
 describe("dockReducer reorder", () => {
   it("moves an item inside one anchor without touching the open tools", () => {
     const layout = withActive({ "right-top": "image" });
-    const next = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 8, to: 0 });
-    expect(next.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks"]);
+    const next = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 10, to: 0 });
+    expect(next.anchors["right-top"]).toEqual(["stacking", "headers", "image", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks"]);
     expect(next.active).toEqual(layout.active);
   });
 
   it("returns the same object out of bounds and when from equals to", () => {
-    for (const [from, to] of [[-1, 0], [0, 9], [9, 0], [1, 1], [0.5, 2]]) {
+    for (const [from, to] of [[-1, 0], [0, 11], [11, 0], [1, 1], [0.5, 2]]) {
       expect(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from, to })).toBe(DEFAULT_DOCK_LAYOUT);
     }
   });
@@ -348,7 +348,7 @@ describe("dockReducer resize and reset", () => {
 describe("layout queries", () => {
   it("finds a tool's anchor and index", () => {
     expect(anchorOf(DEFAULT_DOCK_LAYOUT, "processing")).toBe("right-top");
-    expect(indexOf(DEFAULT_DOCK_LAYOUT, "processing")).toBe(5);
+    expect(indexOf(DEFAULT_DOCK_LAYOUT, "processing")).toBe(7);
     expect(anchorOf(DEFAULT_DOCK_LAYOUT, "config")).toBe("right-bottom");
     expect(indexOf(DEFAULT_DOCK_LAYOUT, "config")).toBe(2);
     const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "info", anchor: "right-top", index: 0 });
@@ -639,8 +639,8 @@ describe("paletteToolEntries", () => {
   }
 
   it("lists only the tools that open without a file when no file is visible", () => {
-    expect(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false).map((entry) => entry.tool)).toEqual(["files", "info", "config", "log"]);
-    expect(DOCK_TOOL_IDS.filter((tool) => !DOCK_TOOL_META[tool].needsFile)).toEqual(["files", "info", "config", "log"]);
+    expect(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false).map((entry) => entry.tool)).toEqual(["files", "info", "cubeprep", "sagui", "config", "log"]);
+    expect(DOCK_TOOL_IDS.filter((tool) => !DOCK_TOOL_META[tool].needsFile)).toEqual(["files", "info", "cubeprep", "sagui", "config", "log"]);
     expect(labelOf(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false), "config")).toBe("Open Settings Panel");
   });
 

@@ -1,0 +1,8 @@
+args <- commandArgs(trailingOnly = TRUE)
+.libPaths(c(normalizePath(args[[1]]), .Library), include.site = FALSE)
+setwd(args[[2]])
+cube <- array(c(1, 2, 3, 10, 20, 30, 101, 102, 103, 110, 120, 130), c(3L, 2L, 2L))
+fit <- sagui::segment_regions(cube, Ncomp = 2L, use_starlet_mask = FALSE)
+writeBin(as.integer(fit$cluster_map), "reference-labels.bin", size = 4L, endian = "little")
+sed <- sagui::extract_region_sed(cube, fit$cluster_map, var_cube = array(4, dim(cube)), band_values = c(1.5, 2), error_fallback = "none")
+utils::write.table(sed$flux_long[, c("region", "lambda", "flux", "flux_err", "n_pix")], "reference-sed.tsv", sep = "\t", row.names = FALSE, quote = FALSE)

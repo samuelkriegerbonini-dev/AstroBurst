@@ -28,6 +28,8 @@ pub mod pixelmath;
 pub mod statistics;
 pub mod cutout;
 pub mod cubeprep;
+pub mod sagui;
+pub mod sagui_install;
 pub mod spectral;
 pub mod spectrum1d;
 pub mod catalog;

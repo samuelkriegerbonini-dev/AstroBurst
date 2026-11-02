@@ -82,7 +82,7 @@ describe("Stripe", () => {
     let layout = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "image", anchor: "left-bottom", index: 0 });
     layout = dockReducer(layout, { type: "reorder", anchor: "right-top", from: 0, to: 2 });
     expect(order(render("left", layout), "left-bottom")).toEqual(["image", "compose"]);
-    expect(order(render("right", layout), "right-top")).toEqual(["astrometry", "photometry", "headers", "cube", "processing", "history", "masks", "stacking"]);
+    expect(order(render("right", layout), "right-top")).toEqual(["astrometry", "photometry", "headers", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking"]);
   });
 
   it("presses exactly the active tool of each group and nothing in a closed group", () => {
@@ -165,7 +165,7 @@ describe("Stripe", () => {
 
   it("shows the five analysis tools on the right strip in the default order", () => {
     const html = render("right");
-    expect(order(html, "right-top")).toEqual(["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking"]);
+    expect(order(html, "right-top")).toEqual(["headers", "image", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking"]);
     expect(order(html, "right-bottom")).toEqual(["synth", "export", "config", "log"]);
     for (const id of ["image", "astrometry", "photometry", "cube", "log"]) expect(html).toContain(`data-tool-id="${id}"`);
     expect(html).not.toContain('data-tool-id="analysis"');

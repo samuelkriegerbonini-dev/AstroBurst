@@ -34,6 +34,8 @@ const ImageTool = lazy(() => import("../analysis/ImageTool"));
 const AstrometryTool = lazy(() => import("../analysis/AstrometryTool"));
 const PhotometryTool = lazy(() => import("../analysis/PhotometryTool"));
 const CubeTool = lazy(() => import("../analysis/CubeTool"));
+const CubePrepPanel = lazy(() => import("../cubeprep/CubePrepPanel"));
+const SaguiPanel = lazy(() => import("../sagui/SaguiPanel"));
 const LogTool = lazy(() => import("../analysis/LogTool"));
 
 export interface DockToolDef {
@@ -51,6 +53,8 @@ export const DOCK_TOOLS: Record<DockToolId, DockToolDef> = {
   astrometry: { id: "astrometry", icon: Telescope, render: () => <AstrometryTool /> },
   photometry: { id: "photometry", icon: Aperture, render: () => <PhotometryTool /> },
   cube: { id: "cube", icon: Box, render: () => <CubeTool /> },
+  cubeprep: { id: "cubeprep", icon: Layers2, render: () => <CubePrepPanel /> },
+  sagui: { id: "sagui", icon: FlaskConical, render: () => <SaguiPanel /> },
   processing: { id: "processing", icon: Sparkles, render: () => <ProcessingTab /> },
   history: { id: "history", icon: History, render: () => <HistoryPanel /> },
   masks: { id: "masks", icon: VenetianMask, render: () => <MasksPanel /> },

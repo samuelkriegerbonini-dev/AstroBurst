@@ -4,4 +4,5 @@ pub(crate) mod area;
 pub(crate) mod cutout;
 pub mod cubeprep;
 pub mod cubeprep_recipe;
+pub mod sagui;
 pub(crate) mod empirical_psf;

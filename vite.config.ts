@@ -10,7 +10,7 @@ export default defineConfig({
     strictPort: true,
     allowedHosts: true,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/src-tauri/**", "**/docs/**", "**/entregas/**", "**/__tests__/**", "**/*.test.*", "**/ROADMAP.md"],
     },
   },
 });

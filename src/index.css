@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import "tailwindcss" source(".");
 @import "./advanced-viewer.css";
 @plugin "tailwindcss-animate";
 

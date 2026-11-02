@@ -1,4 +1,4 @@
-export const DOCK_TOOL_IDS = ["files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking", "synth", "export", "config", "log"] as const;
+export const DOCK_TOOL_IDS = ["files", "info", "compose", "headers", "image", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking", "synth", "export", "config", "log"] as const;
 export type DockToolId = (typeof DOCK_TOOL_IDS)[number];
 export const DOCK_ANCHORS = ["left-top", "left-bottom", "right-top", "right-bottom"] as const;
 export type DockAnchor = (typeof DOCK_ANCHORS)[number];
@@ -97,6 +97,8 @@ export const DOCK_TOOL_META: Record<DockToolId, DockToolMeta> = {
     minWidth: 280,
     keepGroup: "analysis",
   },
+  cubeprep: { id: "cubeprep", label: "Cube Prep", shortLabel: "Prep", accent: "var(--ab-cyan)", keywords: ["LIGHTSTACK", "Multiband", "PSF", "Kernel", "Recipe", "Preparation", "SAGUI"], needsFile: false, mount: "whileOpen", minWidth: 320 },
+  sagui: { id: "sagui", label: "SAGUI", shortLabel: "SAGUI", accent: "var(--ab-violet)", keywords: ["Segmentation", "Regions", "SED", "Starlet", "Ward", "Multiband"], needsFile: false, mount: "whileOpen", minWidth: 320 },
   processing: { id: "processing", label: "Processing", shortLabel: "Proc", accent: "var(--ab-amber)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   history: {
     id: "history",
@@ -179,7 +181,7 @@ export const DEFAULT_DOCK_LAYOUT: DockLayout = freezeLayout({
   anchors: {
     "left-top": ["files", "info"],
     "left-bottom": ["compose"],
-    "right-top": ["headers", "image", "astrometry", "photometry", "cube", "processing", "history", "masks", "stacking"],
+    "right-top": ["headers", "image", "astrometry", "photometry", "cube", "cubeprep", "sagui", "processing", "history", "masks", "stacking"],
     "right-bottom": ["synth", "export", "config", "log"],
   },
   active: { "left-top": "files", "left-bottom": "compose", "right-top": null, "right-bottom": null },

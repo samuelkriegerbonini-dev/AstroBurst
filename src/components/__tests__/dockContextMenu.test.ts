@@ -315,7 +315,7 @@ describe("moveAnnouncement", () => {
   });
 
   it("says up or down for a reorder inside the anchor", () => {
-    const up = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from: 5, to: 0 });
+    const up = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from: 7, to: 0 });
     expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, up, "processing")).toBe("Processing moved up");
     const down = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "reorder", anchor: "right-top", from: 0, to: 3 });
     expect(moveAnnouncement(DEFAULT_DOCK_LAYOUT, down, "headers")).toBe("Headers moved down");
