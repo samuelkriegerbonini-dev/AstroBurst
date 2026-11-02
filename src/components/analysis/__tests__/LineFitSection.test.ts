@@ -98,6 +98,18 @@ function render(run: LineFitRun | null, shownPlane: LineFitPlane | null): string
 }
 
 describe("LineFitSection output note", () => {
+  it("exposes the completed map manifest and its source hash without requiring a selected plane", () => {
+    const run = { ...RUN, result: { ...result(), provenance_path: "C:/out/fit/provenance.json", provenance: {
+      source: { input_ref: "C:/data/cube.fits", sha256: "abcdef0123456789".repeat(4) },
+      integrity: "sha256_before_open_and_before_publication",
+    } } };
+    const html = render(run, null);
+    expect(html).toContain('data-output-path="C:/out/fit/provenance.json"');
+    expect(html).toContain("Show manifest");
+    expect(html).toContain("Input SHA-256: abcdef012345…");
+    expect(render(null, null)).not.toContain("Show manifest");
+  });
+
   it("names the map on screen as an output-folder file that is cleared at launch, with Show in folder", () => {
     const html = render(RUN, "flux");
     expect(html).toContain(`data-output-path="${fitsOf("flux")}"`);

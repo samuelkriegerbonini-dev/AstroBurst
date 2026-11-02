@@ -22,7 +22,8 @@ const PIXEL_AREA_CARDS: [&str; 2] = ["PIXAR_SR", "PIXAR_A2"];
 const PER_PIXEL_FLUX_CARDS: [&str; 2] = ["PHOTFLAM", "PHOTFNU"];
 const CALIBRATION_ZERO_POINT_CARDS: [&str; 2] = ["ZP", "ZPTMAG"];
 const COUNT_CALIBRATION_CARDS: [&str; 3] = ["PHOTFNU", "PHOTFLAM", "PHOTMJSR"];
-const JY_PER_ARCSEC2_UNITS: [&str; 5] = ["JY/ARCSEC2", "JY/ARCSEC**2", "JY/ARCSEC^2", "JY.ARCSEC-2", "JY.ARCSEC**-2"];
+const PER_STERADIAN_SUFFIXES: [&str; 6] = ["/sr", "/steradian", ".sr**-1", "sr**-1", ".sr-1", "sr-1"];
+const PER_ARCSEC2_SUFFIXES: [&str; 5] = ["/arcsec2", "/arcsec**2", "/arcsec^2", ".arcsec-2", ".arcsec**-2"];
 const PER_PIXEL_SUFFIXES: [&str; 4] = ["/pixel", "/pix", ".pixel**-1", ".pix**-1"];
 const JANSKY_NAMES: [&str; 2] = ["jansky", "jy"];
 const LIGHTSTACK_SCALE_RTOL: f64 = 1e-6;
@@ -157,14 +158,17 @@ pub struct AreaCorrection {
 }
 
 fn surface_brightness_scale(bunit: &str) -> Option<f64> {
-    let unit = normalized_unit(bunit);
+    let unit: String = bunit.chars().filter(|c| !c.is_whitespace()).collect();
     if is_mjy_per_sr(&unit) {
-        Some(JY_PER_MJY)
-    } else if JY_PER_ARCSEC2_UNITS.contains(&unit.as_str()) {
-        Some(ARCSEC_PER_RADIAN * ARCSEC_PER_RADIAN)
-    } else {
-        None
+        return Some(JY_PER_MJY);
     }
+    [(PER_STERADIAN_SUFFIXES.as_slice(), 1.0), (PER_ARCSEC2_SUFFIXES.as_slice(), ARCSEC_PER_RADIAN * ARCSEC_PER_RADIAN)]
+        .into_iter()
+        .find_map(|(suffixes, area)| suffixes.iter().find_map(|suffix| {
+            let start = unit.len().checked_sub(suffix.len())?;
+            unit.get(start..).filter(|tail| tail.eq_ignore_ascii_case(suffix))?;
+            Some(jansky_scale(&unit[..start])? * area)
+        }))
 }
 
 fn strip_per_pixel(unit: &str) -> &str {
@@ -538,6 +542,26 @@ mod tests {
         assert_eq!(with_photfnu.get_f64("PHOTPLAM"), Some(photplam));
         assert_eq!(card_text(&with_photfnu, CARD_BUNIT_IN).as_deref(), Some("ELECTRONS/S"));
         assert!(PhotCal::from_header(&with_photfnu, None).is_none(), "a Jy/pixel image must not be calibrated as counts again");
+    }
+
+    #[test]
+    fn p0_surface_brightness_prefix_case_controls_the_physical_scale() {
+        for (unit, jy_per_sr) in [("MJy/sr", 1e6), ("mJy/sr", 1e-3), ("Jy/sr", 1.0), ("uJy/sr", 1e-6), ("nJy/sr", 1e-9), (" mJy / SR ", 1e-3)] {
+            let header = make_header(&[("BUNIT", unit), ("PIXAR_SR", "2e-12")]);
+            let info = classify_unit(&header);
+            assert_eq!(info.class, UnitClass::SurfaceBrightness { jy_per_sr_per_unit: jy_per_sr }, "{unit}");
+            let converted = unit_conversion(&header, None, TargetUnit::JyPerPixel).unwrap();
+            assert!((converted.factor / (jy_per_sr * 2e-12) - 1.0).abs() < 1e-12, "{unit}: {}", converted.factor);
+            let target = unit_conversion(&header, None, TargetUnit::MjyPerSr).unwrap();
+            assert!((target.factor / (jy_per_sr / 1e6) - 1.0).abs() < 1e-12, "{unit}: {}", target.factor);
+        }
+        for (unit, scale) in [("mJy sr-1", 1e-3), ("mJy.sr**-1", 1e-3), ("mJy/STERADIAN", 1e-3), ("µJy/sr", 1e-6), ("mJy/arcsec2", 1e-3 * ARCSEC_PER_RADIAN.powi(2))] {
+            assert_eq!(classify_unit(&make_header(&[("BUNIT", unit)])).class,
+                UnitClass::SurfaceBrightness { jy_per_sr_per_unit: scale }, "{unit}");
+        }
+        for unit in ["mJy/sr km/s", "mJy/sr x channels", "mJy/beam", "mJy/sr2"] {
+            assert_eq!(classify_unit(&make_header(&[("BUNIT", unit)])).class, UnitClass::Unknown, "{unit}");
+        }
     }
 
     #[test]

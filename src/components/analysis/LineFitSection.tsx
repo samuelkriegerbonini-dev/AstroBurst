@@ -5,6 +5,7 @@ import { LINE_FIT_COMPONENTS } from "../../shared/types/cube";
 import LineFitInspectPlot from "./LineFitInspectPlot";
 import OutputNote from "./OutputNote";
 import { DecimalField } from "../ui";
+import { scienceDqSummary } from "../../utils/analysisLabels";
 import {
   RESOLVING_POWER_HINT,
   lineFitSpaxelNotes,
@@ -145,9 +146,9 @@ function LineFitSection({
           Weight by ERR
         </label>
         {errText && <span className="text-zinc-600">{errText}</span>}
-        <label className="flex items-center gap-1 text-zinc-500 cursor-pointer">
-          <input type="checkbox" aria-label="Mask DQ channels" checked={useDq} onChange={(e) => onUseDq(e.target.checked)} disabled={loading} />
-          Mask DQ channels
+        <label className="flex items-center gap-1 text-zinc-500 cursor-pointer" title="Shared with Moment Maps and Collapse: only DO_NOT_USE (bit 0) excludes samples">
+          <input type="checkbox" aria-label="Exclude DO_NOT_USE samples" checked={useDq} onChange={(e) => onUseDq(e.target.checked)} disabled={loading} />
+          Exclude DO_NOT_USE (bit 0)
         </label>
         {dqText && <span className="text-zinc-600">{dqText}</span>}
         <label className="flex items-center gap-1 text-zinc-500 cursor-pointer">
@@ -219,6 +220,7 @@ function LineFitSection({
 
       {run && result && (
         <>
+          <p className="text-[10px] text-zinc-500" data-dq-policy="fit">{scienceDqSummary(result)}</p>
           <div className="flex items-center gap-1 flex-wrap text-[10px] font-mono">
             {result.plane_order.map((plane) => {
               const pressed = plane === shownPlane;
@@ -263,6 +265,7 @@ function LineFitSection({
             <span data-linefit-frame>{frameNote}</span>
           </div>
           {outputPath && <OutputNote path={outputPath} />}
+          {result.provenance_path && <OutputNote path={result.provenance_path} kind="manifest" provenance={result.provenance} />}
           {result.notes.length > 0 && (
             <details data-linefit-notes className="text-[10px] font-mono text-zinc-600">
               <summary className="cursor-pointer select-none">notes ({result.notes.length})</summary>

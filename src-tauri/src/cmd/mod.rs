@@ -6,6 +6,7 @@ pub mod config;
 pub mod contours;
 pub mod cosmetic;
 pub mod cube;
+pub(crate) mod science_provenance;
 pub mod export;
 pub(crate) mod helpers;
 pub mod io;

@@ -106,7 +106,7 @@ describe("quick slope services", () => {
       "ramp_compare_rate_cmd",
       "D:/cmp",
       { qslopePath: "C:/out/x_qslope.fits", ratePath: "C:/fits/x_rate.fits", uncalRows: [1300, 1500] },
-      [["ratio_png_path", "ratioPreviewUrl"]],
+      [["ratio_png_path", "ratioPreviewUrl"], ["difference_png_path", "differencePreviewUrl"]],
     );
     await compareWithRate("C:/out/x_qslope.fits", "C:/fits/x_rate.fits", undefined, null);
     const args = withPreviewMock.mock.calls[1][2];

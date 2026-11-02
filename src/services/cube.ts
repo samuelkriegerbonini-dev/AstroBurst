@@ -2,6 +2,7 @@ import { typedInvoke, withPreview, getOutputDir, getPreviewUrl } from "../infras
 import type {
   CollapseRangeMode,
   CollapseRangeResult,
+  CollapseZeroPolicy,
   ContinuumWindows,
   CubeDims,
   CubeSpectrum,
@@ -13,6 +14,7 @@ import type {
   NullableSeries,
   RegionSpectrum,
   RegionSpectrumWire,
+  ScienceDqPolicy,
 } from "../shared/types/cube";
 import type { RegionShape } from "../shared/types/regions";
 import { parseImageRef } from "../utils/imageRef";
@@ -110,8 +112,10 @@ export function collapseCubeRange(
   z0: number,
   z1: number,
   mode: CollapseRangeMode,
+  zeroPolicy?: CollapseZeroPolicy,
+  dqPolicy?: ScienceDqPolicy,
 ): Promise<CollapseRangeResult> {
-  return withPreview<CollapseRangeResult>("collapse_cube_range_cmd", outputDir, { path, z0, z1, mode });
+  return withPreview<CollapseRangeResult>("collapse_cube_range_cmd", outputDir, { path, z0, z1, mode, ...(zeroPolicy ? { zeroPolicy } : {}), ...(dqPolicy ? { dqPolicy } : {}) });
 }
 
 export async function computeMomentMaps(

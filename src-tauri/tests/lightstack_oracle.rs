@@ -2116,6 +2116,27 @@ fn oracle_d1_crop_bounds_match_crop_from_radec() {
 }
 
 #[test]
+fn oracle_d1_tan_reference_meridian_crops_match_without_a_tie_exception() {
+    let manifest = read_json(&oracle_d1_dir().join(MANIFEST));
+    let (center, size) = recipe_crop();
+    let planes = d1_planes();
+    for filter in ["F277W", "F444W"] {
+        let plane = planes.iter().find(|plane| plane.filter == filter).unwrap();
+        let call = oracle_calls(&manifest, "crop").into_iter().find(|call| call["metrics"]["filter"] == filter).unwrap();
+        let metrics = &call["metrics"];
+        let wcs = lightstack_wcs(&plane.header).unwrap();
+        let rect = lightstack_square_rect(&wcs, (plane.side, plane.side), center, size).unwrap();
+        assert_eq!((rect.x0, rect.y0, rect.width, rect.height), (
+            metrics["x_min"].as_f64().unwrap() as i64,
+            metrics["y_min"].as_f64().unwrap() as i64,
+            metrics["shape"][1].as_u64().unwrap() as usize,
+            metrics["shape"][0].as_u64().unwrap() as usize,
+        ), "{filter}: exact D1 reference-meridian crop");
+        assert_eq!((rect.width, rect.height), (45, 46));
+    }
+}
+
+#[test]
 fn oracle_d1_units_match_counts_s_to_jy_and_mjy_sr_to_jy() {
     let manifest = read_json(&oracle_d1_dir().join(MANIFEST));
     let units = oracle_step(&manifest, "units");
@@ -4082,6 +4103,15 @@ fn the_d1_recipe_from_lightstacks_crops_reproduces_its_psf_matched_cube() {
         value["steps"].as_array_mut().unwrap().remove(0)["step"],
         "crop"
     );
+    assert_d1_recipe_reproduces_psf_matched_cube(value);
+}
+
+#[test]
+fn the_complete_d1_recipe_reproduces_the_lightstack_psf_matched_cube() {
+    assert_d1_recipe_reproduces_psf_matched_cube(read_json(&d1_dir().join(RECIPE)));
+}
+
+fn assert_d1_recipe_reproduces_psf_matched_cube(value: Value) {
     let recipe = Recipe::from_value(&value).unwrap().resolved(&d1_dir());
     recipe.validate().unwrap();
     let out = tempfile::tempdir().unwrap();

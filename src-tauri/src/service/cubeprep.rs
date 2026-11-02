@@ -15,7 +15,7 @@ use crate::service::cutout::{export_cutout_rect, padded_dq_bits, refuse_source_a
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cubeprep::align::{
-    align_image, choose_reference, plan_alignment, AlignGrid, AlignInput, AlignOptions, AlignReport, ReferenceCandidate,
+    align_image_with_companions, choose_reference, plan_alignment, same_grid, AlignCompanions, AlignGrid, AlignInput, AlignOptions, AlignReport, ReferenceCandidate,
     ReferencePolicy, ResampleMethod,
 };
 use crate::core::cubeprep::cube::{
@@ -36,7 +36,7 @@ use crate::core::cubeprep::footprint::{
 use crate::core::imaging::dq_flags::DqTable;
 use crate::core::metadata::filter_wavelengths::{FilterEntry, FilterRegistry, FilterSource};
 use crate::core::metadata::photcal::card_text;
-use crate::core::metadata::units::{apply_conversion, unit_conversion, TargetUnit};
+use crate::core::metadata::units::{apply_conversion, classify_unit, unit_conversion, TargetUnit, UnitClass};
 use crate::infra::cache::ImageEntry;
 use crate::infra::config::load_config;
 use crate::infra::fits::dispatcher::resolve_single_image;
@@ -44,8 +44,9 @@ use crate::infra::fits::reader::{
     extract_header_by_index, extract_image_planes_by_index, extract_int_planes_by_index, list_extensions, HduInfo,
 };
 use crate::infra::fits::table::{find_bintable, load_bintable};
-use crate::infra::fits::writer::{write_fits_cube, write_fits_f64, BinTableHdu, HduData, ImageHdu};
-use crate::infra::wcs_source::load_wcs;
+use crate::infra::fits::writer::{is_wcs_card, write_fits_cube, write_fits_f64, BinTableHdu, HduData, ImageHdu};
+use crate::infra::image_source::LoadedCompanions;
+use crate::infra::wcs_source::{header_wcs, load_wcs};
 use crate::service::common::derived_output_header;
 use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, EXTNAME_SCI};
 use crate::types::header::HduHeader;
@@ -68,6 +69,47 @@ enum DqPixels {
     Signed(Array2<i32>),
 }
 
+fn load_preparation_companions(path: &str, sci: &ImageEntry) -> Result<(LoadedCompanions, Vec<String>)> {
+    let loaded = load_companions(path)?;
+    let mut warnings = Vec::new();
+    let header = sci.header().context("SCI has no header for companion validation")?;
+    let declared = sci.companions();
+    for (name, expected, companion) in [
+        ("ERR", declared.is_some_and(|planes| planes.err.is_some()), loaded.err.as_ref()),
+        ("DQ", declared.is_some_and(|planes| planes.dq.is_some()), loaded.dq.as_ref().map(|(plane, _)| plane)),
+    ] {
+        let Some(companion) = companion else {
+            if expected { bail!("{}: {name} companion could not be loaded with the SCI dimensions", output_stem(path)); }
+            continue;
+        };
+        if companion.arr().dim() != sci.arr().dim() { bail!("{}: {name} dimensions differ from SCI", output_stem(path)); }
+        let companion_header = companion.header().context("companion has no header")?;
+        if name == "ERR" {
+            let sci_unit = classify_unit(header);
+            let err_unit = classify_unit(companion_header);
+            match &err_unit.bunit {
+                None => warnings.push(format!("ERR has no BUNIT: the SCI unit {} is assumed", sci_unit.bunit.as_deref().unwrap_or("(unspecified)"))),
+                Some(unit) => {
+                    let same_physical_scale = matches!(sci_unit.class, UnitClass::SurfaceBrightness { .. } | UnitClass::PerPixelPhysical { .. }) && sci_unit.class == err_unit.class;
+                    if sci_unit.bunit.as_ref() != Some(unit) && !same_physical_scale {
+                        bail!("{}: ERR BUNIT {unit} differs from SCI BUNIT {}; convert or correct the input units before preparation", output_stem(path), sci_unit.bunit.as_deref().unwrap_or("(missing)"));
+                    }
+                }
+            }
+        }
+        if companion_header.cards.iter().any(|(key, _)| is_wcs_card(key)) {
+            let companion_wcs = header_wcs(companion_header).with_context(|| format!("{}: {name} has an incomplete celestial WCS", output_stem(path)))?;
+            let sci_wcs = load_wcs(path, header).with_context(|| format!("{}: SCI has no usable WCS to validate {name}", output_stem(path)))?;
+            if !same_grid(&sci_wcs, sci.arr().dim(), &companion_wcs, companion.arr().dim()) {
+                bail!("{}: {name} WCS differs from SCI", output_stem(path));
+            }
+        } else {
+            warnings.push(format!("{name} has no celestial WCS: same-index alignment to SCI is assumed from matching dimensions"));
+        }
+    }
+    Ok((loaded, warnings))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct UnitsExport {
     pub output_path: String,
@@ -86,10 +128,11 @@ pub(crate) fn convert_units_file(path: &str, target: TargetUnit, output_path: &s
     let source_header = entry.header().context("the image has no header, so its unit is unknown")?;
     let wcs = load_wcs(path, source_header).ok();
     let conversion = unit_conversion(source_header, wcs.as_ref(), target)?;
+    let (companions, companion_warnings) = load_preparation_companions(path, &entry)?;
     let destination =
         resolve_output_target(path, output_path, output_dir, &format!("{}_{}.fits", output_stem(path), target.file_suffix()))?;
-    let companions = load_companions(path)?;
     let mut warnings = conversion.warnings.clone();
+    warnings.extend(companion_warnings);
 
     let mut sci = entry.arr().to_owned();
     let mut sci_header = derived_output_header(Some(source_header), ABPROC_UNITS, OutputValues::Linear);
@@ -298,6 +341,7 @@ fn identified_filters(paths: &[String], images: &[LoadedImage], policy: &Referen
 pub(crate) fn align_set(paths: &[String], output_dir: &str, options: &AlignOptions) -> Result<AlignSetReport> {
     let started = Instant::now();
     let images = load_all(paths, "align")?;
+    let companions = paths.iter().zip(&images).map(|(path, image)| load_preparation_companions(path, &image.entry)).collect::<Result<Vec<_>>>()?;
     let filters = identified_filters(paths, &images, &options.reference);
     let candidates: Vec<ReferenceCandidate> = paths
         .iter()
@@ -324,15 +368,31 @@ pub(crate) fn align_set(paths: &[String], output_dir: &str, options: &AlignOptio
     std::fs::create_dir_all(output_dir).with_context(|| format!("Failed to create output directory: {output_dir}"))?;
     let mut files = Vec::with_capacity(paths.len());
     let mut warnings = Vec::new();
-    for ((path, input), plan) in paths.iter().zip(&inputs).zip(&plans) {
+    for (((path, input), plan), (companions, companion_warnings)) in paths.iter().zip(&inputs).zip(&plans).zip(&companions) {
         let stem = output_stem(path);
         let destination =
             format!("{}/{stem}_aligned_{}.fits", output_dir.trim_end_matches(['/', '\\']), options.method.label());
         refuse_source_as_target(&destination, path)?;
-        let aligned = align_image(input, &grid, options, plan);
+        let table = companions.dq.as_ref().map_or_else(|| DqTable::select(input.header), |(_, table)| *table);
+        let data = AlignCompanions {
+            err: companions.err.as_ref().map(ImageEntry::arr),
+            dq: companions.dq.as_ref().and_then(|(plane, _)| plane.int_plane()),
+            no_data_dq: padded_dq_bits(table)?,
+        };
+        let result = align_image_with_companions(input, &grid, options, plan, data)?;
+        let mut aligned = result.aligned;
+        aligned.report.warnings.extend(companion_warnings.iter().cloned());
         let header = derived_output_header(Some(&aligned.header), ABPROC_ALIGNED, OutputValues::Linear);
         let primary = source_primary_header(path, Some(input.header));
-        let hdus = [ImageHdu { data: HduData::F32(&aligned.image), header: Some(&header), extname: EXTNAME_SCI, extver: 1 }];
+        let err_header = companion_header(&header, true);
+        let dq_header = companion_header(&header, false);
+        let signed_dq = result.dq.signed.then(|| result.dq.bits.mapv(|bits| bits as i32));
+        let mut hdus = vec![ImageHdu { data: HduData::F32(&aligned.image), header: Some(&header), extname: EXTNAME_SCI, extver: 1 }];
+        if let Some(err) = result.err.as_ref() {
+            hdus.push(ImageHdu { data: HduData::F32(err), header: Some(&err_header), extname: EXTNAME_ERR, extver: 1 });
+        }
+        let dq_data = signed_dq.as_ref().map_or_else(|| HduData::U32(&result.dq.bits), HduData::I32);
+        hdus.push(ImageHdu { data: dq_data, header: Some(&dq_header), extname: EXTNAME_DQ, extver: 1 });
         write_derived_mef(&destination, Some(&primary), &hdus)?;
         warnings.extend(aligned.report.warnings.iter().map(|warning| format!("{stem}: {warning}")));
         files.push(AlignedFile { path: path.clone(), output_path: destination, report: aligned.report });
@@ -537,8 +597,9 @@ struct LoadedCubeInput {
 
 fn load_cube_input(spec: &CubeInputSpec, registry: &FilterRegistry) -> Result<LoadedCubeInput> {
     let image = LoadedImage::load(&spec.path)?;
-    let (entry, identified_by, warnings) = identify_input(spec, &image.header, registry)?;
-    let companions = load_companions(&spec.path)?;
+    let (entry, identified_by, mut warnings) = identify_input(spec, &image.header, registry)?;
+    let (companions, companion_warnings) = load_preparation_companions(&spec.path, &image.entry)?;
+    warnings.extend(companion_warnings);
     let err = companions.err.as_ref().map(|plane| plane.arr().to_owned());
     let dq = match companions.dq.as_ref() {
         Some((plane, _)) => Some(plane.int_plane().context("DQ companion has no integer plane")?.clone()),
@@ -1078,7 +1139,10 @@ mod tests {
         assert!(report.output_path.ends_with("jw_f444w_i2d_Jy.fits"), "{}", report.output_path);
         assert_eq!(report.hdus, ["SCI", "ERR", "DQ"]);
         assert_eq!((report.bunit_in.as_deref(), report.bunit_out.as_str(), report.factor), (Some("MJy/sr"), "Jy", factor));
-        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.warnings, [
+            "ERR has no celestial WCS: same-index alignment to SCI is assumed from matching dimensions",
+            "DQ has no celestial WCS: same-index alignment to SCI is assumed from matching dimensions",
+        ]);
 
         let file = std::fs::File::open(&report.output_path).unwrap();
         let sci = extract_image_mmap_by_index(&file, 1).unwrap();
@@ -1248,6 +1312,138 @@ mod tests {
     }
 
     const CUBE_COLS: usize = 6;
+
+    fn alignment_companion_fixture(dir: &tempfile::TempDir, name: &str, scale: f64) -> String {
+        let path = dir.path().join(name);
+        let mut cards = wcs_cards((4.5, 4.5), scale, 0.0);
+        cards.push(("BUNIT", "'Jy'".to_string()));
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'JWST'".to_string())],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols: 8, rows: 8, data: TestData::F32((0..64).map(|i| i as f32 - 20.0).collect()), extra_cards: cards },
+                TestHdu { extname: Some("ERR"), extver: Some(1), cols: 8, rows: 8, data: TestData::F32(vec![2.0; 64]), extra_cards: vec![("BUNIT", "'Jy'".to_string())] },
+                TestHdu { extname: Some("DQ"), extver: Some(1), cols: 8, rows: 8, data: TestData::I32(vec![0x8000_0001u32 as i32; 64]), extra_cards: vec![] },
+            ],
+        );
+        path.to_string_lossy().into_owned()
+    }
+
+    fn companion_contract_fixture(dir: &tempfile::TempDir, case: &str) -> String {
+        let path = dir.path().join(format!("{case}.fits"));
+        let mut sci = wcs_cards((4.5, 4.5), 0.04, 0.0);
+        sci.push(("BUNIT", "'Jy'".into()));
+        let mut err = match case {
+            "missing" => Vec::new(),
+            "mjy" => vec![("BUNIT", "'mJy'".into())],
+            "brightness" => vec![("BUNIT", "'MJy/sr'".into())],
+            _ => vec![("BUNIT", "'Jy/pixel'".into())],
+        };
+        let dq = match case {
+            "dq_shift" => wcs_cards((5.5, 4.5), 0.04, 0.0),
+            "dq_partial" => vec![("CRPIX1", "4.5".into())],
+            "same" => wcs_cards((4.5, 4.5), 0.04, 0.0),
+            _ => Vec::new(),
+        };
+        if case == "err_shift" { err.extend(wcs_cards((5.5, 4.5), 0.04, 0.0)); }
+        if case == "same" { err.extend(wcs_cards((4.5, 4.5), 0.04, 0.0)); }
+        let err_rows = if case == "err_shape" { 7 } else { 8 };
+        let dq_rows = if case == "dq_shape" { 7 } else { 8 };
+        write_test_mef(&path, &[("TELESCOP", "'JWST'".into()), ("INSTRUME", "'NIRCAM'".into()), ("FILTER", "'F200W'".into())], &[
+            TestHdu { extname: Some("SCI"), extver: Some(1), cols: 8, rows: 8, data: TestData::F32(vec![10.0; 64]), extra_cards: sci },
+            TestHdu { extname: Some("ERR"), extver: Some(1), cols: 8, rows: err_rows, data: TestData::F32(vec![2.0; 8 * err_rows]), extra_cards: err },
+            TestHdu { extname: Some("DQ"), extver: Some(1), cols: 8, rows: dq_rows, data: TestData::I32(vec![0; 8 * dq_rows]), extra_cards: dq },
+        ]);
+        path.to_string_lossy().into_owned()
+    }
+
+    fn run_companion_contract_stage(path: &str, output: &std::path::Path, stage: &str) -> Result<Vec<String>> {
+        match stage {
+            "units" => convert_units_file(path, TargetUnit::JyPerPixel, "", output.to_str()).map(|report| report.warnings),
+            "align" => align_set(&[path.to_string()], output.to_str().unwrap(), &AlignOptions::default()).map(|report| report.warnings),
+            "cube" => build_cube(&specs_for(&[path.to_string()]), "", output.to_str(), CubeOptions { layout: CubeLayout::Mef, order: PlaneOrder::Wavelength }, None).map(|report| report.warnings),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn companion_contract_refuses_conflicting_units_geometry_and_unreadable_planes_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut failures = Vec::new();
+        for case in ["mjy", "brightness", "err_shift", "dq_shift", "dq_partial", "err_shape", "dq_shape"] {
+            let path = companion_contract_fixture(&dir, case);
+            for stage in ["units", "align", "cube"] {
+                let output = dir.path().join(format!("{case}-{stage}"));
+                let result = run_companion_contract_stage(&path, &output, stage);
+                if result.is_ok() || output.exists() { failures.push(format!("{case}/{stage}: {result:?}, output exists={}", output.exists())); }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn companion_contract_reports_assumptions_and_accepts_equivalent_physical_units_on_the_same_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        for case in ["missing", "same"] {
+            let path = companion_contract_fixture(&dir, case);
+            for stage in ["units", "align", "cube"] {
+                let warnings = run_companion_contract_stage(&path, &dir.path().join(format!("{case}-{stage}")), stage).unwrap();
+                if case == "missing" {
+                    for text in ["ERR has no BUNIT", "ERR has no celestial WCS", "DQ has no celestial WCS"] {
+                        assert!(warnings.iter().any(|warning| warning.contains(text)), "{stage}: missing assumption {text}: {warnings:?}");
+                    }
+                } else {
+                    assert!(!warnings.iter().any(|warning| warning.contains("is assumed")), "{stage}: {warnings:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn align_companions_survive_copy_crop_and_fits_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = alignment_companion_fixture(&dir, "same.fits", 0.04);
+        let options = AlignOptions { border_crop: 1, ..AlignOptions::default() };
+        let report = align_set(&[source], dir.path().join("out").to_str().unwrap(), &options).unwrap();
+        let file = File::open(&report.files[0].output_path).unwrap();
+        let extensions = list_extensions(&file).unwrap();
+        for name in [EXTNAME_SCI, EXTNAME_ERR, EXTNAME_DQ] {
+            assert!(extensions.iter().any(|hdu| hdu.extname.as_deref() == Some(name)), "alignment lost {name}");
+        }
+        let science = extract_image_mmap_by_index(&file, 1).unwrap();
+        let error = extract_image_mmap_by_index(&file, 2).unwrap();
+        let dq = extract_int_plane_by_index(&file, 3).unwrap();
+        assert_eq!(science.image.dim(), (6, 6));
+        assert_eq!(science.image[[0, 0]], -11.0);
+        assert!(error.image.iter().all(|&value| value == 2.0));
+        assert!(dq.bits.iter().all(|&bits| bits == 0x8000_0001));
+        assert_eq!(card_text(&error.header, "BUNIT").as_deref(), Some("Jy"));
+        assert_eq!(error.header.get_f64("CRPIX1"), science.header.get_f64("CRPIX1"));
+    }
+
+    #[test]
+    fn align_companions_propagate_variance_and_dq_for_all_resamplers() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = alignment_companion_fixture(&dir, "fine.fits", 0.04);
+        let reference = alignment_companion_fixture(&dir, "reference.fits", 0.08);
+        for method in [ResampleMethod::Bilinear, ResampleMethod::Bicubic, ResampleMethod::Exact] {
+            let options = AlignOptions { method, border_crop: 0, ..AlignOptions::default() };
+            let report = align_set(&[source.clone(), reference.clone()], dir.path().join(method.label()).to_str().unwrap(), &options).unwrap();
+            let file = File::open(&report.files[0].output_path).unwrap();
+            let extensions = list_extensions(&file).unwrap();
+            assert!(extensions.iter().any(|hdu| hdu.extname.as_deref() == Some(EXTNAME_ERR)), "{} alignment lost ERR", method.label());
+            assert!(extensions.iter().any(|hdu| hdu.extname.as_deref() == Some(EXTNAME_DQ)), "{} alignment lost DQ", method.label());
+            let science = extract_image_mmap_by_index(&file, 1).unwrap();
+            let error = extract_image_mmap_by_index(&file, 2).unwrap();
+            let dq = extract_int_plane_by_index(&file, 3).unwrap();
+            assert!((science.image[[3, 3]] - 10.0).abs() < 1e-3, "{method:?}: {}", science.image[[3, 3]]);
+            assert!((error.image[[3, 3]] - 4.0).abs() < 1e-4, "{method:?}: {}", error.image[[3, 3]]);
+            assert_eq!(dq.bits[[3, 3]], 0x8000_0001, "{method:?}");
+            assert!(error.image[[0, 0]].is_nan(), "{method:?}");
+            assert_eq!(dq.bits[[0, 0]] & 513, 513, "{method:?}");
+            assert!(report.files[0].report.warnings.iter().any(|note| note.contains("covariance")), "{method:?}");
+        }
+    }
     const CUBE_ROWS: usize = 5;
 
     fn plane_value(filter: &str, x: usize, y: usize) -> f32 {
@@ -1327,7 +1523,8 @@ mod tests {
         assert_eq!(order, ["F150W", "F277W", "F444W"]);
         assert_eq!(report.planes[0].identified_by, "header FILTER");
         assert_eq!((report.planes[1].has_err, report.planes[1].has_dq), (false, false));
-        assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+        assert_eq!(report.warnings.len(), 6, "{:?}", report.warnings);
+        assert_eq!(report.warnings.iter().filter(|warning| warning.contains("has no celestial WCS")).count(), 4);
 
         let file = File::open(&report.output_path).unwrap();
         let exts = list_extensions(&file).unwrap();

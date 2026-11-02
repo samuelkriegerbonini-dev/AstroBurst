@@ -66,6 +66,7 @@ export function compareWithRate(
 ): Promise<RateComparison> {
   return withPreview<RateComparison>("ramp_compare_rate_cmd", outputDir, { qslopePath, ratePath, uncalRows }, [
     ["ratio_png_path", "ratioPreviewUrl"],
+    ["difference_png_path", "differencePreviewUrl"],
   ]);
 }
 

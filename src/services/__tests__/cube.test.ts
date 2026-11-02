@@ -1,19 +1,20 @@
 import { describe, it, expect, expectTypeOf, beforeEach, vi } from "vitest";
 
-const { typedInvokeMock, getOutputDirMock, getPreviewUrlMock } = vi.hoisted(() => ({
+const { typedInvokeMock, withPreviewMock, getOutputDirMock, getPreviewUrlMock } = vi.hoisted(() => ({
   typedInvokeMock: vi.fn(),
+  withPreviewMock: vi.fn(),
   getOutputDirMock: vi.fn(),
   getPreviewUrlMock: vi.fn(),
 }));
 
 vi.mock("../../infrastructure/tauri", () => ({
   typedInvoke: typedInvokeMock,
-  withPreview: vi.fn(),
+  withPreview: withPreviewMock,
   getOutputDir: getOutputDirMock,
   getPreviewUrl: getPreviewUrlMock,
 }));
 
-import { fitCubeLines, getCubeSpectrum, getCubeSpectrumRegion, inspectLineFitSpaxel, releaseCubes } from "../cube";
+import { collapseCubeRange, fitCubeLines, getCubeSpectrum, getCubeSpectrumRegion, inspectLineFitSpaxel, releaseCubes } from "../cube";
 import type {
   CollapseRangeResult,
   ContinuumWindows,
@@ -25,6 +26,17 @@ import type {
 } from "../../shared/types/cube";
 
 describe("cube error product types", () => {
+  it("passes an explicit collapse zero policy and preserves the omitted legacy contract", async () => {
+    withPreviewMock.mockClear();
+    await collapseCubeRange("cube.fits", "/out", 0, 4, "mean", "include_physical_zeros");
+    expect(withPreviewMock).toHaveBeenLastCalledWith("collapse_cube_range_cmd", "/out", { path: "cube.fits", z0: 0, z1: 4, mode: "mean", zeroPolicy: "include_physical_zeros" });
+    await collapseCubeRange("cube.fits", "/out", 0, 4, "median", "exclude_zero_padding");
+    expect(withPreviewMock).toHaveBeenLastCalledWith("collapse_cube_range_cmd", "/out", { path: "cube.fits", z0: 0, z1: 4, mode: "median", zeroPolicy: "exclude_zero_padding" });
+    await collapseCubeRange("cube.fits", "/out", 0, 4, "sum");
+    expect(withPreviewMock).toHaveBeenLastCalledWith("collapse_cube_range_cmd", "/out", { path: "cube.fits", z0: 0, z1: 4, mode: "sum" });
+    await collapseCubeRange("cube.fits", "/out", 0, 4, "mean", "include_physical_zeros", "do_not_use");
+    expect(withPreviewMock).toHaveBeenLastCalledWith("collapse_cube_range_cmd", "/out", { path: "cube.fits", z0: 0, z1: 4, mode: "mean", zeroPolicy: "include_physical_zeros", dqPolicy: "do_not_use" });
+  });
   it("carries the propagated error, DQ counts and noise factor of a region spectrum", () => {
     expectTypeOf<NoiseFactor>().toEqualTypeOf<{
       factor: number;

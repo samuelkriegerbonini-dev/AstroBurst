@@ -2,8 +2,9 @@ use ndarray::{s, Array2};
 use serde::{Deserialize, Serialize};
 
 use crate::core::alignment::wcs_reproject::{
-    prefilter_coarse_target, relative_rotation_deg, reproject_exact_to_grid, reproject_to_grid_with, CoarseMap,
-    Interpolation, MAP_TOLERANCE_PX, PREFILTER_MIN_RATIO, REF_TIE_TOLERANCE,
+    prefilter_coarse_target, prefilter_companions, relative_rotation_deg, reproject_exact_companions,
+    reproject_exact_to_grid, reproject_interpolated_companions, reproject_to_grid_with, CoarseMap,
+    CompanionInput, CompanionMaps, Interpolation, MAP_TOLERANCE_PX, PREFILTER_MIN_RATIO, REF_TIE_TOLERANCE,
 };
 use crate::core::astrometry::wcs::{WcsKind, WcsTransform};
 use crate::core::cubeprep::footprint::without_sip;
@@ -16,6 +17,7 @@ use crate::infra::fits::writer::filter_header;
 use crate::infra::wcs_source::header_wcs;
 use crate::math::polygon::{self, Point};
 use crate::types::header::HduHeader;
+use crate::types::image::IntPlane;
 
 const DEFAULT_BORDER_CROP: usize = 1;
 const SAME_GRID_TOLERANCE_PX: f64 = 1e-6;
@@ -25,6 +27,8 @@ const PHYSICAL_CARDS: [&str; 6] = ["LTV1", "LTV2", "LTM1_1", "LTM1_2", "LTM2_1",
 const LIGHTSTACK_SURFACE_BRIGHTNESS_WARNING: &str = "area rule lightstack multiplies surface brightness by the pixel-area ratio, as LIGHTSTACK 0.4.0 does; the aligned image does not conserve flux";
 const NO_OVERLAP_WARNING: &str = "the input footprint does not overlap the reference grid; the aligned image is empty";
 const PIXEL_AREA_HISTORY: &str = "Per-pixel values divided by the relative pixel area of a distorted input grid before resampling and multiplied by that of a distorted reference grid after it";
+const ALIGN_ERROR_HISTORY: &str = "ERR propagated with squared effective resampling weights assuming independent input pixels; input covariance is unknown and output covariance is not stored";
+const ALIGN_DQ_HISTORY: &str = "DQ propagated by bitwise OR of nonzero effective contributors; DQ flags do not exclude SCI samples";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +106,8 @@ pub enum AlignError {
     AmbiguousReference { filter: String, count: usize },
     #[error("border_crop {border_crop} leaves nothing of the {cols}x{rows} reference grid")]
     BorderCrop { border_crop: usize, rows: usize, cols: usize },
+    #[error("{plane} shape {actual:?} does not match SCI shape {expected:?}")]
+    CompanionShape { plane: &'static str, actual: (usize, usize), expected: (usize, usize) },
 }
 
 fn usable_scale(candidate: &ReferenceCandidate) -> bool {
@@ -245,6 +251,19 @@ pub struct AlignedImage {
     pub image: Array2<f32>,
     pub header: HduHeader,
     pub report: AlignReport,
+}
+
+#[derive(Clone, Copy)]
+pub struct AlignCompanions<'a> {
+    pub err: Option<&'a Array2<f32>>,
+    pub dq: Option<&'a IntPlane>,
+    pub no_data_dq: u32,
+}
+
+pub struct AlignedScience {
+    pub aligned: AlignedImage,
+    pub err: Option<Array2<f32>>,
+    pub dq: IntPlane,
 }
 
 fn resample(input: &AlignInput, grid: &AlignGrid, method: ResampleMethod) -> (Array2<f32>, Option<Array2<f32>>, usize, Option<String>) {
@@ -398,11 +417,16 @@ fn crop_border(image: Array2<f32>, mut header: HduHeader, crop: usize) -> (Array
     (cropped, header)
 }
 
-pub fn align_image(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions, plan: &AlignPlan) -> AlignedImage {
+fn alignment_areas(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions, plan: &AlignPlan) -> (Option<Array2<f32>>, Option<Array2<f32>>) {
     let per_pixel = options.per_actual_pixel && plan.reprojected && holds_per_pixel_values(input.header, plan.area.as_ref());
     let (in_rows, in_cols) = input.image.dim();
     let input_area = per_pixel.then(|| relative_pixel_area(input.header, input.wcs, in_rows, in_cols)).flatten();
     let grid_area = per_pixel.then(|| relative_pixel_area(grid.header, grid.wcs, grid.rows, grid.cols)).flatten();
+    (input_area, grid_area)
+}
+
+pub fn align_image(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions, plan: &AlignPlan) -> AlignedImage {
+    let (input_area, grid_area) = alignment_areas(input, grid, options, plan);
     let flattened = input_area.as_ref().map(|area| input.image / area);
     let source = AlignInput { image: flattened.as_ref().unwrap_or(input.image), ..*input };
     let (mut image, footprint, prefilter_k, resample_warning) =
@@ -452,6 +476,89 @@ pub fn align_image(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions,
     AlignedImage { image, header, report }
 }
 
+pub fn align_image_with_companions(
+    input: &AlignInput,
+    grid: &AlignGrid,
+    options: &AlignOptions,
+    plan: &AlignPlan,
+    companions: AlignCompanions<'_>,
+) -> Result<AlignedScience, AlignError> {
+    for (plane, dims) in [("ERR", companions.err.map(Array2::dim)), ("DQ", companions.dq.map(|dq| dq.bits.dim()))] {
+        if let Some(actual) = dims.filter(|dims| *dims != input.image.dim()) {
+            return Err(AlignError::CompanionShape { plane, actual, expected: input.image.dim() });
+        }
+    }
+    let mut aligned = align_image(input, grid, options, plan);
+    let (input_area, grid_area) = alignment_areas(input, grid, options, plan);
+    let flattened = input_area.as_ref().map(|area| input.image / area);
+    let source = flattened.as_ref().unwrap_or(input.image);
+    let mut variance = companions.err.map(|plane| plane.mapv(|err| {
+        if err.is_finite() && err >= 0.0 { f64::from(err).powi(2) } else { f64::NAN }
+    }));
+    if let (Some(variance), Some(area)) = (variance.as_mut(), input_area.as_ref()) {
+        for (value, &factor) in variance.iter_mut().zip(area) {
+            *value /= f64::from(factor).powi(2);
+        }
+    }
+    let data = CompanionInput { variance: variance.as_ref(), dq: companions.dq.map(|plane| &plane.bits), no_data_dq: companions.no_data_dq };
+    let dims = (grid.rows, grid.cols);
+    let mut maps = if !plan.reprojected {
+        CompanionMaps { variance: variance.clone(), dq: companions.dq.map_or_else(|| Array2::zeros(input.image.dim()), |plane| plane.bits.clone()) }
+    } else {
+        match options.method {
+            ResampleMethod::Bilinear => reproject_interpolated_companions(source, data, input.wcs, grid.wcs, dims, Interpolation::Bilinear),
+            ResampleMethod::Exact => reproject_exact_companions(source, data, input.wcs, grid.wcs, dims),
+            ResampleMethod::Bicubic => {
+                let ratio = grid.wcs.pixel_scale_arcsec() / input.wcs.pixel_scale_arcsec();
+                let reduced = prefilter_coarse_target(source, input.header, ratio)
+                    .and_then(|(image, header, k)| header_wcs(&header).ok().map(|wcs| (image, wcs, k)));
+                match reduced {
+                    Some((image, wcs, k)) => {
+                        let reduced = prefilter_companions(source, data, k);
+                        let data = CompanionInput { variance: reduced.variance.as_ref(), dq: Some(&reduced.dq), no_data_dq: companions.no_data_dq };
+                        reproject_interpolated_companions(&image, data, &wcs, grid.wcs, dims, Interpolation::Bicubic)
+                    }
+                    None => reproject_interpolated_companions(source, data, input.wcs, grid.wcs, dims, Interpolation::Bicubic),
+                }
+            }
+        }
+    };
+    if let Some(variance) = maps.variance.as_mut() {
+        if let Some(area) = grid_area.as_ref() {
+            for (value, &factor) in variance.iter_mut().zip(area) {
+                *value *= f64::from(factor).powi(2);
+            }
+        }
+        if let Some(area) = &plan.area {
+            *variance *= area.data_factor.powi(2);
+        }
+    }
+    let crop = options.border_crop;
+    let (rows, cols) = maps.dq.dim();
+    let mut err = maps.variance.map(|variance| variance.slice(s![crop..rows - crop, crop..cols - crop]).mapv(|value| {
+        let sigma = value.sqrt() as f32;
+        if sigma.is_finite() { sigma } else { f32::NAN }
+    }));
+    let mut dq = maps.dq.slice(s![crop..rows - crop, crop..cols - crop]).to_owned();
+    for ((y, x), &value) in aligned.image.indexed_iter() {
+        if !value.is_finite() {
+            dq[[y, x]] |= companions.no_data_dq;
+            if let Some(err) = err.as_mut() {
+                err[[y, x]] = f32::NAN;
+            }
+        }
+    }
+    if plan.reprojected && companions.err.is_some() {
+        aligned.report.warnings.push(ALIGN_ERROR_HISTORY.to_string());
+        push_history(&mut aligned.header, ALIGN_ERROR_HISTORY);
+    }
+    if companions.dq.is_some() {
+        aligned.report.warnings.push(ALIGN_DQ_HISTORY.to_string());
+        push_history(&mut aligned.header, ALIGN_DQ_HISTORY);
+    }
+    Ok(AlignedScience { aligned, err, dq: IntPlane { bits: dq, signed: companions.dq.is_some_and(|plane| plane.signed) } })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,6 +601,73 @@ mod tests {
 
     fn history(header: &HduHeader) -> String {
         header.cards.iter().filter(|(key, _)| key == "HISTORY").map(|(_, value)| value.as_str()).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn align_companions_match_the_science_transfer_for_interpolation_prefilter_and_pixel_areas() {
+        for (method, ratio, distorted) in [
+            (ResampleMethod::Bilinear, 1.0, false),
+            (ResampleMethod::Bicubic, 1.0, false),
+            (ResampleMethod::Exact, 2.0, false),
+            (ResampleMethod::Bicubic, 2.0, false),
+            (ResampleMethod::Exact, 2.0, true),
+        ] {
+            let header = grid_header((8, 8), (4.5, 4.5), (150.0, 2.0), 0.04, 0.0, "Jy");
+            let header = if distorted { with_sip(header) } else { header };
+            let target = grid_header((8, 8), (4.0, 4.0), (150.0, 2.0), 0.04 * ratio, 0.0, "Jy");
+            let target = if distorted { with_sip(target) } else { target };
+            let (source_wcs, target_wcs) = (wcs_of(&header), wcs_of(&target));
+            let grid = AlignGrid { label: "reference", header: &target, wcs: &target_wcs, rows: 8, cols: 8 };
+            let science = Array2::from_shape_fn((8, 8), |(y, x)| (y * 8 + x) as f32 - 20.0);
+            let error = Array2::from_shape_fn((8, 8), |(y, x)| 0.5 + (y + x) as f32 / 8.0);
+            let input = AlignInput { image: &science, header: &header, wcs: &source_wcs };
+            let opts = AlignOptions { per_actual_pixel: distorted, ..options(method, 1, None) };
+            let plan = plan_alignment(&input, &grid, &opts).unwrap();
+            let result = align_image_with_companions(&input, &grid, &opts, &plan, AlignCompanions { err: Some(&error), dq: None, no_data_dq: 513 }).unwrap();
+            let original = align_image(&input, &grid, &opts, &plan);
+            assert!(result.aligned.image.iter().zip(&original.image).all(|(a, b)| a.to_bits() == b.to_bits()), "{method:?} SCI changed");
+            let mut expected = Array2::<f64>::zeros(original.image.dim());
+            for ((sy, sx), &sigma) in error.indexed_iter() {
+                let mut impulse = Array2::zeros(science.dim());
+                impulse[[sy, sx]] = 1.0;
+                let response = align_image(&AlignInput { image: &impulse, ..input }, &grid, &opts, &plan);
+                for (sum, &weight) in expected.iter_mut().zip(&response.image) {
+                    *sum += f64::from(weight).powi(2) * f64::from(sigma).powi(2);
+                }
+            }
+            for ((actual, expected), &value) in result.err.as_ref().unwrap().iter().zip(&expected).zip(&original.image) {
+                if value.is_finite() {
+                    let tolerance = 128.0 * f64::from(f32::EPSILON) * expected.max(1.0);
+                    assert!((f64::from(*actual).powi(2) - expected).abs() <= tolerance, "{method:?} ratio {ratio} distorted {distorted}: {} vs {expected}", f64::from(*actual).powi(2));
+                } else {
+                    assert!(actual.is_nan());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn align_companions_do_not_turn_invalid_err_into_valid_uncertainty_or_mask_science() {
+        let header = grid_header((8, 8), (4.5, 4.5), (150.0, 2.0), 0.04, 0.0, "Jy");
+        let target = grid_header((8, 8), (4.0, 4.0), (150.0, 2.0), 0.08, 0.0, "Jy");
+        let (source_wcs, target_wcs) = (wcs_of(&header), wcs_of(&target));
+        let grid = AlignGrid { label: "reference", header: &target, wcs: &target_wcs, rows: 8, cols: 8 };
+        let science = Array2::from_elem((8, 8), 3.0);
+        let input = AlignInput { image: &science, header: &header, wcs: &source_wcs };
+        for method in [ResampleMethod::Bilinear, ResampleMethod::Bicubic, ResampleMethod::Exact] {
+            let opts = options(method, 0, None);
+            let plan = plan_alignment(&input, &grid, &opts).unwrap();
+            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -2.0] {
+                let error = Array2::from_elem((8, 8), invalid);
+                let result = align_image_with_companions(&input, &grid, &opts, &plan, AlignCompanions { err: Some(&error), dq: None, no_data_dq: 513 }).unwrap();
+                assert!(result.err.unwrap().iter().all(|value| value.is_nan()), "{method:?}: {invalid}");
+                assert!(result.aligned.image[[3, 3]].is_finite(), "ERR must not mask SCI");
+            }
+            let result = align_image_with_companions(&input, &grid, &opts, &plan, AlignCompanions { err: None, dq: None, no_data_dq: 513 }).unwrap();
+            assert!(result.err.is_none());
+            let wrong_shape = Array2::from_elem((1, 1), 1.0);
+            assert!(matches!(align_image_with_companions(&input, &grid, &opts, &plan, AlignCompanions { err: Some(&wrong_shape), dq: None, no_data_dq: 513 }), Err(AlignError::CompanionShape { plane: "ERR", .. })));
+        }
     }
 
     fn textured(rows: usize, cols: usize, seed: u64) -> Array2<f32> {

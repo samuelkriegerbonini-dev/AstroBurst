@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use crate::core::analysis::star_detection::detect_stars;
 use crate::core::astrometry::wcs::{WcsKind, WcsTransform};
 use crate::core::imaging::resample::{box_reduce, compute_wcs_updates};
-use crate::core::imaging::sampling::{bicubic_sample, bilinear_sample};
+use crate::core::imaging::sampling::{bicubic_sample, bicubic_with_weights, bilinear_sample, bilinear_with_weights};
 use crate::math::exact_median_f64;
 use crate::math::polygon::{Point, SmallPolygon};
 use crate::types::header::HduHeader;
@@ -239,6 +239,10 @@ pub fn reproject_to_grid_with(
 }
 
 fn overlap_mean(slice: &[f32], rows: usize, cols: usize, quad: &[Point; 4]) -> Option<(f32, f32)> {
+    overlap_mean_with(slice, rows, cols, quad, |_, _| {})
+}
+
+fn overlap_mean_with(slice: &[f32], rows: usize, cols: usize, quad: &[Point; 4], mut include: impl FnMut(usize, f64)) -> Option<(f32, f32)> {
     if quad.iter().any(|p| !p[0].is_finite() || !p[1].is_finite()) {
         return None;
     }
@@ -267,10 +271,141 @@ fn overlap_mean(slice: &[f32], rows: usize, cols: usize, quad: &[Point; 4]) -> O
             if piece > 0.0 && value.is_finite() {
                 weighted += piece * value as f64;
                 covered += piece;
+                include(iy as usize * cols + ix as usize, piece);
             }
         }
     }
     (covered > 0.0).then(|| ((weighted / covered) as f32, (covered / full) as f32))
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CompanionInput<'a> {
+    pub variance: Option<&'a Array2<f64>>,
+    pub dq: Option<&'a Array2<u32>>,
+    pub no_data_dq: u32,
+}
+
+pub(crate) struct CompanionMaps {
+    pub variance: Option<Array2<f64>>,
+    pub dq: Array2<u32>,
+}
+
+impl CompanionInput<'_> {
+    fn variance_at(&self, index: usize, cols: usize) -> f64 {
+        self.variance.map_or(0.0, |plane| {
+            let value = plane[[index / cols, index % cols]];
+            if value.is_finite() && value >= 0.0 { value } else { f64::NAN }
+        })
+    }
+
+    fn dq_at(&self, index: usize, cols: usize) -> u32 {
+        self.dq.map_or(0, |plane| plane[[index / cols, index % cols]])
+    }
+}
+
+fn companion_maps(dims: (usize, usize), input: CompanionInput<'_>, sample: impl Fn(usize, usize) -> (f64, u32) + Sync) -> CompanionMaps {
+    let (rows, cols) = dims;
+    let mut variance = input.variance.map(|_| vec![f64::NAN; rows * cols]);
+    let mut dq = vec![input.no_data_dq; rows * cols];
+    if rows > 0 && cols > 0 {
+        let variance_rows: Vec<Option<&mut [f64]>> = match variance.as_mut() {
+            Some(values) => values.chunks_mut(cols).map(Some).collect(),
+            None => (0..rows).map(|_| None).collect(),
+        };
+        dq.par_chunks_mut(cols).zip(variance_rows.into_par_iter()).enumerate().for_each(|(y, (bits, mut variance))| {
+            for (x, output) in bits.iter_mut().enumerate() {
+                let (value, flags) = sample(y, x);
+                *output = flags;
+                if let Some(row) = variance.as_mut() {
+                    row[x] = value;
+                }
+            }
+        });
+    }
+    CompanionMaps {
+        variance: variance.map(|values| Array2::from_shape_vec(dims, values).expect("variance matches the output shape")),
+        dq: Array2::from_shape_vec(dims, dq).expect("DQ matches the output shape"),
+    }
+}
+
+pub(crate) fn reproject_interpolated_companions(
+    science: &Array2<f32>,
+    input: CompanionInput<'_>,
+    source_wcs: &WcsTransform,
+    reference_wcs: &WcsTransform,
+    dims: (usize, usize),
+    interpolation: Interpolation,
+) -> CompanionMaps {
+    let (rows, cols) = science.dim();
+    let standard = science.as_standard_layout();
+    let slice = standard.as_slice().expect("standard layout is contiguous");
+    let map = CoarseMap::within(source_wcs, reference_wcs, (0.0, 0.0), dims.0, dims.1, MAP_TOLERANCE_PX);
+    companion_maps(dims, input, |y, x| {
+        let (sx, sy) = map.sample(x as f64, y as f64);
+        if rows == 0 || cols == 0 || !(sx >= -0.5 && sy >= -0.5 && sx <= cols as f64 - 0.5 && sy <= rows as f64 - 0.5) {
+            return (f64::NAN, input.no_data_dq);
+        }
+        let sampled = match interpolation {
+            Interpolation::Bilinear => bilinear_with_weights(slice, rows, cols, sy, sx),
+            Interpolation::Bicubic => bicubic_with_weights(slice, rows, cols, sy, sx),
+        };
+        let mut variance = 0.0;
+        let mut dq = 0;
+        for (index, weight) in sampled.weights() {
+            variance += weight * weight * input.variance_at(index, cols);
+            dq |= input.dq_at(index, cols);
+        }
+        if sampled.value.is_finite() { (variance, dq) } else { (f64::NAN, dq | input.no_data_dq) }
+    })
+}
+
+pub(crate) fn reproject_exact_companions(
+    science: &Array2<f32>,
+    input: CompanionInput<'_>,
+    source_wcs: &WcsTransform,
+    reference_wcs: &WcsTransform,
+    dims: (usize, usize),
+) -> CompanionMaps {
+    let (rows, cols) = science.dim();
+    let standard = science.as_standard_layout();
+    let slice = standard.as_slice().expect("standard layout is contiguous");
+    let corners = CoarseMap::within(source_wcs, reference_wcs, (-0.5, -0.5), dims.0 + 1, dims.1 + 1, MAP_TOLERANCE_PX);
+    companion_maps(dims, input, |y, x| {
+        let point = |dx: usize, dy: usize| {
+            let (sx, sy) = corners.sample((x + dx) as f64 - 0.5, (y + dy) as f64 - 0.5);
+            [sx, sy]
+        };
+        let quad = [point(0, 0), point(1, 0), point(1, 1), point(0, 1)];
+        let (mut variance, mut weight, mut dq) = (0.0, 0.0, 0);
+        let value = overlap_mean_with(slice, rows, cols, &quad, |index, area| {
+            variance += area * area * input.variance_at(index, cols);
+            weight += area;
+            dq |= input.dq_at(index, cols);
+        });
+        if value.is_some_and(|(value, _)| value.is_finite()) {
+            (variance / (weight * weight), dq)
+        } else {
+            (f64::NAN, dq | input.no_data_dq)
+        }
+    })
+}
+
+pub(crate) fn prefilter_companions(science: &Array2<f32>, input: CompanionInput<'_>, k: usize) -> CompanionMaps {
+    let (rows, cols) = science.dim();
+    companion_maps((rows / k, cols / k), input, |y, x| {
+        let (mut variance, mut count, mut dq) = (0.0, 0usize, 0);
+        for sy in y * k..(y + 1) * k {
+            for sx in x * k..(x + 1) * k {
+                if science[[sy, sx]].is_finite() {
+                    let index = sy * cols + sx;
+                    variance += input.variance_at(index, cols);
+                    count += 1;
+                    dq |= input.dq_at(index, cols);
+                }
+            }
+        }
+        if count > 0 { (variance / (count as f64).powi(2), dq) } else { (f64::NAN, input.no_data_dq) }
+    })
 }
 
 pub fn reproject_exact_to_grid(
@@ -460,6 +595,49 @@ pub fn relative_rotation_deg(target: &WcsTransform, reference: &WcsTransform) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scientific_prefilter_uses_only_finite_science_and_keeps_unknown_variance() {
+        let mut science = Array2::from_elem((5, 5), 2.0);
+        let mut variance = Array2::from_elem((5, 5), 4.0);
+        let dq = Array2::from_shape_fn((5, 5), |(y, x)| 1u32 << (y * 5 + x));
+        science[[0, 0]] = f32::NAN;
+        variance[[0, 0]] = f64::NAN;
+        variance[[0, 2]] = f64::NAN;
+        for y in 2..4 {
+            for x in 0..2 {
+                science[[y, x]] = f32::NAN;
+            }
+        }
+        let maps = prefilter_companions(&science, CompanionInput { variance: Some(&variance), dq: Some(&dq), no_data_dq: 513 }, 2);
+        let errors = maps.variance.unwrap();
+        assert_eq!(errors.dim(), (2, 2));
+        assert_eq!(errors[[0, 0]], 4.0 / 3.0);
+        assert!(errors[[0, 1]].is_nan());
+        assert!(errors[[1, 0]].is_nan());
+        assert_eq!(errors[[1, 1]], 1.0);
+        assert_eq!(maps.dq[[0, 0]], (1 << 1) | (1 << 5) | (1 << 6));
+        assert_eq!(maps.dq[[1, 0]], 513);
+        let absent = prefilter_companions(&science, CompanionInput { variance: None, dq: None, no_data_dq: 513 }, 3);
+        assert!(absent.variance.is_none());
+        assert_eq!(absent.dq.dim(), (1, 1));
+    }
+
+    #[test]
+    fn scientific_exact_support_normalizes_partial_overlap_before_squaring() {
+        let science = [2.0, 6.0];
+        let quad = [[0.0, -0.5], [1.0, -0.5], [1.0, 0.5], [0.0, 0.5]];
+        let mut weights = Vec::new();
+        let (value, coverage) = overlap_mean_with(&science, 1, 2, &quad, |index, area| weights.push((index, area))).unwrap();
+        assert_eq!((value, coverage), (4.0, 1.0));
+        assert_eq!(weights, [(0, 0.5), (1, 0.5)]);
+        assert_eq!(weights.iter().map(|(_, weight)| weight * weight * 4.0).sum::<f64>(), 2.0);
+        let mut partial = Vec::new();
+        let (value, coverage) = overlap_mean_with(&[f32::NAN, 6.0], 1, 2, &quad, |index, area| partial.push((index, area))).unwrap();
+        assert_eq!((value, coverage), (6.0, 0.5));
+        assert_eq!(partial, [(1, 0.5)]);
+        assert_eq!(partial[0].1.powi(2) * 4.0 / 0.5f64.powi(2), 4.0);
+    }
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 

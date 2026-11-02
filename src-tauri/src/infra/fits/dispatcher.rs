@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use tempfile::TempDir;
 
 use super::gzip::{
-    copy_capped, gunzip_or_copy, resolve_gzip, split_gz_suffix, temp_folder_cap, Cap, SharedTempDir,
+    copy_capped, gunzip_or_copy, resolve_gzip, resolve_gzip_fresh, split_gz_suffix, temp_folder_cap, Cap, SharedTempDir,
 };
 use super::reader::{list_extensions, HduInfo};
 
@@ -14,6 +14,15 @@ pub fn resolve_single_image(path: &str) -> Result<(PathBuf, Option<SharedTempDir
     let p = Path::new(path);
     if !is_zip_path(p) {
         return resolve_gzip(p);
+    }
+    let (first, tmp) = extract_first_zip_image(p, &temp_folder_cap)?;
+    Ok((first, Some(SharedTempDir::new(tmp))))
+}
+
+pub fn resolve_single_image_fresh(path: &str) -> Result<(PathBuf, Option<SharedTempDir>)> {
+    let p = Path::new(path);
+    if !is_zip_path(p) {
+        return resolve_gzip_fresh(p);
     }
     let (first, tmp) = extract_first_zip_image(p, &temp_folder_cap)?;
     Ok((first, Some(SharedTempDir::new(tmp))))

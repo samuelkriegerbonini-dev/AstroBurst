@@ -299,6 +299,28 @@ describe("frameLoadPlan", () => {
 });
 
 describe("createFramePublishGate", () => {
+  it("blocks older frames and calculations when a new calculation is reserved", () => {
+    const gate = createFramePublishGate();
+    gate.commit();
+    const first = gate.reserve();
+    expect(gate.isCurrent()).toBe(false);
+    expect(gate.isLatest(first)).toBe(true);
+    const second = gate.reserve();
+    expect(gate.isLatest(first)).toBe(false);
+    expect(gate.isLatest(second)).toBe(true);
+    gate.supersede();
+    expect(gate.isLatest(second)).toBe(false);
+    expect(gate.isCurrent()).toBe(false);
+  });
+
+  it("invalidates pending calculations when a newer frame is selected", () => {
+    const gate = createFramePublishGate();
+    const calculation = gate.reserve();
+    gate.commit();
+    expect(gate.isCurrent()).toBe(true);
+    expect(gate.isLatest(calculation)).toBe(false);
+  });
+
   it("drops the deferred channel FITS publish when a moment map is shown or the preview is reset after the commit", () => {
     vi.useFakeTimers();
     try {

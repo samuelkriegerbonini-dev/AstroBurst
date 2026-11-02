@@ -32,6 +32,7 @@ import { rgbViewOf } from "../../utils/rgbProduct";
 
 interface PreviewTabProps {
   useGpu: boolean;
+  activeBunit?: string | null;
   rawPixels: RawPixelData | null;
   rgbRawPixels?: RawRgbPixelData | null;
   onCubePixelClick?: (x: number, y: number) => void;
@@ -48,7 +49,7 @@ function clearMousePixel() {
   setMousePixel(null);
 }
 
-function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, onBackToFile, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
+function PreviewTabInner({ useGpu, activeBunit, rawPixels, rgbRawPixels, onCubePixelClick, onBackToFile, starOverlayRef, dqCanvasRef }: PreviewTabProps) {
   const { file } = useFileContext();
   const { stfParams, histData, histDataPath } = useHistContext();
   const { isSpectralCube } = useCubeContext();
@@ -356,7 +357,7 @@ function PreviewTabInner({ useGpu, rawPixels, rgbRawPixels, onCubePixelClick, on
         <Colorbar
           transfer={transfer}
           lut={lutBytes}
-          unit={colorbarUnit(file?.result?.header?.BUNIT, displayed.isProcessed)}
+          unit={activeBunit === undefined ? colorbarUnit(file?.result?.header?.BUNIT, displayed.isProcessed) : activeBunit}
           pending={limitsLoading && display.stretch !== "mtf"}
           centre={colorbarCentre(display.symmetric, limits)}
         />

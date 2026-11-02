@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::core::analysis::aperture::{annulus, circular_aperture, total_weight, AperturePixel};
 use crate::core::astrometry::spectral::SpectralAxis;
-use crate::core::cube::companions::check_companion;
+use crate::core::cube::companions::{check_companion, conservative_float_dq, DqPolicy};
 use crate::core::cube::eager::DISPLAY_ASINH_ALPHA;
 use crate::core::cube::linefit::dq_flagged;
 use crate::core::imaging::region::RegionShape;
@@ -20,7 +20,7 @@ use crate::infra::fits::compress::is_compressed_image_hdu;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::gzip::SharedTempDir;
 use crate::infra::fits::file_bytes::{io_mode, prefer_mmap, IoMode};
-use crate::infra::fits::reader::{create_mmap_random, decode_pixels_blank, parse_header_at, read_header_blocks, ParsedHdu};
+use crate::infra::fits::reader::{create_mmap_random, decode_pixels_blank, decode_pixels_int, parse_header_at, read_header_blocks, IntPixels, ParsedHdu};
 use crate::infra::fits::table::FileTabTables;
 use crate::infra::render::grayscale::render_stretched_8bit;
 use crate::math::median::f32_cmp;
@@ -209,6 +209,35 @@ impl ApertureDropouts {
 pub struct RangeCollapse {
     pub value: Array2<f32>,
     pub err: Option<Array2<f32>>,
+    pub dq_excluded_samples: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollapseZeroPolicy {
+    IncludePhysicalZeros,
+    #[default]
+    ExcludeZeroPadding,
+}
+
+impl CollapseZeroPolicy {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::IncludePhysicalZeros => "include_physical_zeros",
+            Self::ExcludeZeroPadding => "exclude_zero_padding",
+        }
+    }
+
+    pub fn note(self) -> &'static str {
+        match self {
+            Self::IncludePhysicalZeros => "Finite zero samples contribute to values, sample counts and propagated ERR; nonfinite samples are excluded.",
+            Self::ExcludeZeroPadding => "Legacy zero-padding policy: exact-zero and nonfinite SCI samples are excluded from values, sample counts and propagated ERR.",
+        }
+    }
+
+    fn accepts(self, value: f32) -> bool {
+        value.is_finite() && (self == Self::IncludePhysicalZeros || value != 0.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -777,6 +806,46 @@ impl LazyCube {
         Ok(self.decode(&raw))
     }
 
+    pub fn decode_dq_rows(&self, z: usize, row_start: usize, row_count: usize) -> Result<Vec<Option<u32>>> {
+        let g = &self.geometry;
+        self.check_frame(z)?;
+        if row_start.checked_add(row_count).is_none_or(|end| end > g.naxis2) {
+            bail!("rows {}..+{} exceed the DQ frame height {}", row_start, row_count, g.naxis2);
+        }
+        let row_bytes = g.naxis1 * g.bytes_per_pixel;
+        let start = g.data_offset + z * g.frame_bytes + row_start * row_bytes;
+        let raw = self.data.bytes(start, row_count * row_bytes)?;
+        if g.bitpix < 0 {
+            return raw.chunks_exact(g.bytes_per_pixel).map(|bytes| {
+                let stored = match g.bitpix {
+                    -32 => f64::from(f32::from_be_bytes(bytes.try_into().unwrap())),
+                    -64 => f64::from_be_bytes(bytes.try_into().unwrap()),
+                    _ => bail!("unsupported floating-point DQ BITPIX {}", g.bitpix),
+                };
+                Ok(conservative_float_dq(stored * g.bscale + g.bzero))
+            }).collect();
+        }
+        let pixels = decode_pixels_int(&raw, g.bitpix, g.bscale, g.bzero)?;
+        let bits: Vec<u32> = match pixels {
+            IntPixels::U32(values) => values,
+            IntPixels::I32(values) => values.into_iter().map(|value| value as u32).collect(),
+        };
+        Ok(bits.into_iter().zip(raw.chunks_exact(g.bytes_per_pixel)).map(|(bits, bytes)| {
+            let stored = match g.bitpix {
+                8 => i64::from(bytes[0]),
+                16 => i64::from(i16::from_be_bytes(bytes.try_into().unwrap())),
+                32 => i64::from(i32::from_be_bytes(bytes.try_into().unwrap())),
+                _ => unreachable!(),
+            };
+            (g.blank != Some(stored)).then_some(bits)
+        }).collect())
+    }
+
+    pub fn extract_dq_spectrum_at(&self, y: usize, x: usize) -> Result<Vec<Option<u32>>> {
+        self.pixel_offset_in_frame(y, x)?;
+        (0..self.geometry.depth).map(|z| Ok(self.decode_dq_rows(z, y, 1)?[x])).collect()
+    }
+
     pub fn decode_row_band_batch(
         &self,
         z_start: usize,
@@ -936,14 +1005,38 @@ impl LazyCube {
         mode: CollapseMode,
         err: Option<&LazyCube>,
     ) -> Result<RangeCollapse> {
+        self.collapse_range_with_policy(z0, z1, mode, err, CollapseZeroPolicy::default())
+    }
+
+    pub fn collapse_range_with_policy(
+        &self,
+        z0: usize,
+        z1: usize,
+        mode: CollapseMode,
+        err: Option<&LazyCube>,
+        zero_policy: CollapseZeroPolicy,
+    ) -> Result<RangeCollapse> {
+        self.collapse_range_with_dq(z0, z1, mode, err, None, zero_policy)
+    }
+
+    pub fn collapse_range_with_dq(
+        &self,
+        z0: usize,
+        z1: usize,
+        mode: CollapseMode,
+        err: Option<&LazyCube>,
+        dq: Option<&LazyCube>,
+        zero_policy: CollapseZeroPolicy,
+    ) -> Result<RangeCollapse> {
         self.check_channel_range(z0, z1)?;
         check_companion(EXTNAME_ERR, self, err)?;
+        check_companion(EXTNAME_DQ, self, dq)?;
         match mode {
-            CollapseMode::Sum | CollapseMode::Mean => self.collapse_range_linear(z0, z1, mode, err),
+            CollapseMode::Sum | CollapseMode::Mean => self.collapse_range_linear(z0, z1, mode, err, dq, zero_policy),
             CollapseMode::Median => {
                 let g = &self.geometry;
-                let band_rows = median_band_rows(z1 - z0 + 1, g.naxis1, g.naxis2, RANGE_MEDIAN_SINGLE_PASS_BYTES);
-                self.collapse_range_median_banded_with(z0, z1, band_rows, err)
+                let band_rows = median_band_rows(z1 - z0 + 1 + 4 * usize::from(dq.is_some()), g.naxis1, g.naxis2, RANGE_MEDIAN_SINGLE_PASS_BYTES);
+                self.collapse_range_median_banded_with(z0, z1, band_rows, err, dq, zero_policy)
             }
         }
     }
@@ -958,6 +1051,8 @@ impl LazyCube {
         z1: usize,
         mode: CollapseMode,
         err: Option<&LazyCube>,
+        dq: Option<&LazyCube>,
+        zero_policy: CollapseZeroPolicy,
     ) -> Result<RangeCollapse> {
         let g = &self.geometry;
         let (rows, cols) = (g.naxis2, g.naxis1);
@@ -965,7 +1060,8 @@ impl LazyCube {
         let mut sum = vec![0.0f64; npix];
         let mut count = vec![0u32; npix];
         let mut variance = err.map(|_| vec![0.0f64; npix]);
-        let batch_channels = companion_batch_channels(usize::from(err.is_some()));
+        let batch_channels = companion_batch_channels(usize::from(err.is_some()) + 4 * usize::from(dq.is_some()));
+        let mut dq_excluded_samples = 0;
 
         for batch_start in (z0..=z1).step_by(batch_channels) {
             let batch_end = (batch_start + batch_channels).min(z1 + 1);
@@ -973,8 +1069,13 @@ impl LazyCube {
             let err_frames = err.map(|c| c.decode_frames(batch_start, batch_end)).transpose()?;
             for (k, pixels) in frames.iter().enumerate() {
                 let sigma = err_frames.as_ref().map(|f| &f[k]);
+                let flags = dq.map(|cube| cube.decode_dq_rows(batch_start + k, 0, rows)).transpose()?;
                 for (i, &v) in pixels.iter().enumerate().take(npix) {
-                    if is_valid_pixel(v) {
+                    if v.is_finite() && flags.as_ref().is_some_and(|f| DqPolicy::DoNotUse.excludes(f[i])) {
+                        dq_excluded_samples += 1;
+                        continue;
+                    }
+                    if zero_policy.accepts(v) {
                         sum[i] += v as f64;
                         count[i] += 1;
                         if let (Some(variance), Some(sigma)) = (variance.as_mut(), sigma) {
@@ -1005,11 +1106,11 @@ impl LazyCube {
                 Array2::from_shape_vec((rows, cols), data).context("Failed to reshape the collapsed range error")
             })
             .transpose()?;
-        Ok(RangeCollapse { value, err })
+        Ok(RangeCollapse { value, err, dq_excluded_samples })
     }
 
     pub fn collapse_range_median_banded(&self, z0: usize, z1: usize, band_rows: usize) -> Result<Array2<f32>> {
-        Ok(self.collapse_range_median_banded_with(z0, z1, band_rows, None)?.value)
+        Ok(self.collapse_range_median_banded_with(z0, z1, band_rows, None, None, CollapseZeroPolicy::default())?.value)
     }
 
     fn collapse_range_median_banded_with(
@@ -1018,6 +1119,8 @@ impl LazyCube {
         z1: usize,
         band_rows: usize,
         err: Option<&LazyCube>,
+        dq: Option<&LazyCube>,
+        zero_policy: CollapseZeroPolicy,
     ) -> Result<RangeCollapse> {
         self.check_channel_range(z0, z1)?;
         let g = &self.geometry;
@@ -1025,7 +1128,8 @@ impl LazyCube {
         let band_rows = band_rows.clamp(1, rows.max(1));
         let mut data: Vec<f32> = Vec::with_capacity(rows * cols);
         let mut errors: Option<Vec<f32>> = err.map(|_| Vec::with_capacity(rows * cols));
-        let batch_channels = companion_batch_channels(usize::from(err.is_some()));
+        let batch_channels = companion_batch_channels(usize::from(err.is_some()) + 4 * usize::from(dq.is_some()));
+        let mut dq_excluded_samples = 0;
 
         for band_start in (0..rows).step_by(band_rows) {
             let band_end = (band_start + band_rows).min(rows);
@@ -1040,8 +1144,13 @@ impl LazyCube {
                 let err_bands = err.map(|c| c.decode_row_band_batch(batch_start, batch_end, band_start, row_count)).transpose()?;
                 for (k, pixels) in bands.iter().enumerate() {
                     let sigma = err_bands.as_ref().map(|b| &b[k]);
+                    let flags = dq.map(|cube| cube.decode_dq_rows(batch_start + k, band_start, row_count)).transpose()?;
                     for (i, (slot, &v)) in samples.iter_mut().zip(pixels.iter()).enumerate() {
-                        if is_valid_pixel(v) {
+                        if v.is_finite() && flags.as_ref().is_some_and(|f| DqPolicy::DoNotUse.excludes(f[i])) {
+                            dq_excluded_samples += 1;
+                            continue;
+                        }
+                        if zero_policy.accepts(v) {
                             slot.push(v);
                             if let Some(sigma) = sigma {
                                 variance[i] += err_variance(sigma[i]);
@@ -1062,7 +1171,7 @@ impl LazyCube {
         let err = errors
             .map(|e| Array2::from_shape_vec((rows, cols), e).context("Failed to reshape the collapsed median error"))
             .transpose()?;
-        Ok(RangeCollapse { value, err })
+        Ok(RangeCollapse { value, err, dq_excluded_samples })
     }
 
     pub fn compute_global_stats_streaming(&self) -> Result<GlobalCubeStats> {
@@ -2470,6 +2579,85 @@ mod tests {
     }
 
     #[test]
+    fn p0_physical_zero_collapse_distinguishes_measured_zero_from_nonfinite_padding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("physical-zero.fits");
+        write_cube(&path, 4, 2, 3, &[], |z, _, x| match x {
+            0 => [0.0, 2.0, 4.0][z],
+            1 => [f32::NAN, 2.0, 4.0][z],
+            2 => 0.0,
+            _ => f32::NAN,
+        });
+        let err_path = dir.path().join("physical-zero-err.fits");
+        write_cube(&err_path, 4, 2, 3, &[], |_, _, _| 1.0);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let err = LazyCube::open(err_path.to_str().unwrap()).unwrap();
+        let sum = cube.collapse_range_with_policy(0, 2, CollapseMode::Sum, Some(&err), CollapseZeroPolicy::IncludePhysicalZeros).unwrap();
+        let mean = cube.collapse_range_with_policy(0, 2, CollapseMode::Mean, Some(&err), CollapseZeroPolicy::IncludePhysicalZeros).unwrap();
+        let median = cube.collapse_range_with_policy(0, 2, CollapseMode::Median, Some(&err), CollapseZeroPolicy::IncludePhysicalZeros).unwrap();
+        eprintln!("physical zero: mean {:?}, median {:?}, sum ERR {:?}, mean ERR {:?}", mean.value.row(0), median.value.row(0), sum.err.as_ref().unwrap().row(0), mean.err.as_ref().unwrap().row(0));
+        assert_eq!(sum.value[(0, 0)], 6.0);
+        assert_eq!(mean.value[(0, 1)], 3.0);
+        assert!(mean.value[(0, 3)].is_nan());
+        assert!(mean.value[(0, 0)] == 2.0 && median.value[(0, 0)] == 2.0
+            && mean.value[(0, 2)] == 0.0 && sum.value[(0, 2)] == 0.0
+            && (sum.err.as_ref().unwrap()[(0, 0)] - 3.0_f32.sqrt()).abs() < 1e-6
+            && (mean.err.as_ref().unwrap()[(0, 0)] - 1.0 / 3.0_f32.sqrt()).abs() < 1e-6,
+            "a measured zero must contribute to sample counts and propagated uncertainty; NaN remains missing");
+        for mode in [CollapseMode::Sum, CollapseMode::Mean, CollapseMode::Median] {
+            let legacy = cube.collapse_range_with_err(0, 2, mode, Some(&err)).unwrap();
+            let explicit = cube.collapse_range_with_policy(0, 2, mode, Some(&err), CollapseZeroPolicy::ExcludeZeroPadding).unwrap();
+            assert_eq!(bits_of(&legacy.value), bits_of(&explicit.value));
+            assert_eq!(bits_of(legacy.err.as_ref().unwrap()), bits_of(explicit.err.as_ref().unwrap()));
+            assert!(legacy.value[(0, 2)].is_nan());
+            let legacy_error = if mode == CollapseMode::Sum { 2.0_f32.sqrt() } else { 1.0 / 2.0_f32.sqrt() };
+            assert!((legacy.err.as_ref().unwrap()[(0, 0)] - legacy_error).abs() < 1e-6);
+        }
+        for band_rows in [1, 2] {
+            let banded = cube.collapse_range_median_banded_with(0, 2, band_rows, Some(&err), None, CollapseZeroPolicy::IncludePhysicalZeros).unwrap();
+            assert_eq!(bits_of(&banded.value), bits_of(&median.value));
+            assert_eq!(bits_of(banded.err.as_ref().unwrap()), bits_of(median.err.as_ref().unwrap()));
+        }
+    }
+
+    #[test]
+    fn physical_zero_collapse_propagates_invalid_err_only_from_included_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-err-sci.fits");
+        write_cube(&path, 5, 2, 4, &[], |z, _, x| match (z, x) {
+            (0, _) => 10.0,
+            (1, 4) => f32::NAN,
+            (1, _) => -0.0,
+            _ => 2.0,
+        });
+        let err_path = dir.path().join("zero-err.fits");
+        write_cube(&err_path, 5, 2, 4, &[], |z, _, x| match z {
+            0 => f32::NAN,
+            1 => [f32::NAN, f32::INFINITY, -1.0, 0.0, f32::NAN][x],
+            _ => 1.0,
+        });
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let err = LazyCube::open(err_path.to_str().unwrap()).unwrap();
+        for mode in [CollapseMode::Sum, CollapseMode::Mean, CollapseMode::Median] {
+            let physical = cube.collapse_range_with_policy(1, 3, mode, Some(&err), CollapseZeroPolicy::IncludePhysicalZeros).unwrap();
+            let legacy = cube.collapse_range_with_err(1, 3, mode, Some(&err)).unwrap();
+            let error = physical.err.as_ref().unwrap();
+            for x in 0..3 {
+                assert!(physical.value[(0, x)].is_finite());
+                assert!(error[(0, x)].is_nan(), "{} ERR at measured zero column {}", mode.name(), x);
+                assert!(legacy.err.as_ref().unwrap()[(0, x)].is_finite());
+            }
+            let expected = match mode {
+                CollapseMode::Sum => 2.0_f64.sqrt(),
+                CollapseMode::Mean => 2.0_f64.sqrt() / 3.0,
+                CollapseMode::Median => (2.0 * MEDIAN_VARIANCE_FACTOR).sqrt() / 3.0,
+            };
+            assert!((error[(0, 3)] as f64 - expected).abs() < 1e-6);
+            assert_eq!(error[(0, 4)].to_bits(), legacy.err.as_ref().unwrap()[(0, 4)].to_bits());
+        }
+    }
+
+    #[test]
     fn a_full_range_collapse_skips_padded_channels_and_keeps_negative_data() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("padded_channels.fits");
@@ -2926,6 +3114,92 @@ mod tests {
         assert!(sky.iter().collect::<std::collections::HashSet<_>>().len() > 3);
         assert_eq!(&quiet.as_raw()[1..], sky, "the same sky rendered with a different scale in another frame");
         assert_eq!(hot.as_raw()[0], 255);
+    }
+
+    #[test]
+    fn integer_dq_rows_preserve_unsigned_high_bits_and_blank_in_both_io_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let values = [0_u32, 1, 512, 513, 1 << 24, (1 << 24) | 1, 1 << 31, (1 << 31) | 1];
+        for blank in [false, true] {
+            let path = dir.path().join(format!("integer-dq-{blank}.fits"));
+            let mut data = Vec::new();
+            for _ in 0..4 {
+                for value in values { data.extend_from_slice(&((i64::from(value) - 2_147_483_648) as i32).to_be_bytes()); }
+            }
+            let mut cards = vec![("BZERO", "2147483648")];
+            if blank { cards.push(("BLANK", "0")); }
+            write_bytes(&path, &image_hdu("SIMPLE", &[8, 2, 2], 32, &cards, data));
+            let expected: Vec<Option<u32>> = values.into_iter().map(|value| if blank && value == 1 << 31 { None } else { Some(value) }).collect();
+            for mode in [IoMode::Mmap, IoMode::Read] {
+                let cube = LazyCube::open_with_mode(path.to_str().unwrap(), mode).unwrap();
+                assert_eq!(cube.decode_dq_rows(1, 1, 1).unwrap(), expected);
+                assert_eq!(cube.extract_dq_spectrum_at(1, 5).unwrap(), [Some((1 << 24) | 1); 2]);
+                assert!(cube.decode_dq_rows(2, 0, 1).is_err());
+                assert!(cube.decode_dq_rows(0, 1, 2).is_err());
+                assert!(cube.extract_dq_spectrum_at(0, 8).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn integer_dq_reader_refuses_scaled_integer_flags_and_treats_float_flags_conservatively() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scaled-dq.fits");
+        write_bytes(&path, &image_hdu("SIMPLE", &[2, 2, 2], 16, &[("BSCALE", "0.5")], vec![0; 16]));
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert!(cube.decode_dq_rows(0, 0, 1).unwrap_err().to_string().contains("scaled integer"));
+        let path = dir.path().join("floating-dq.fits");
+        let values = [0.0, 1.0, 512.0, 513.0, 1.5, 16_777_216.0, f32::NAN, -1.0];
+        write_cube(&path, 8, 2, 2, &[], |_, _, x| values[x]);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(cube.decode_dq_rows(0, 0, 1).unwrap(), [Some(0), Some(1), Some(512), Some(513), None, None, None, None]);
+    }
+
+    #[test]
+    fn integer_dq_float64_validates_flags_before_narrowing_or_scaling_roundoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("float64-dq.fits");
+        let values = [2.00000001_f64, -1e-80, 2.0, 3.0];
+        let data = (0..4).flat_map(|_| values.into_iter().flat_map(f64::to_be_bytes)).collect::<Vec<_>>();
+        write_bytes(&path, &image_hdu("SIMPLE", &[4, 2, 2], -64, &[], data));
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(cube.decode_dq_rows(0, 0, 1).unwrap(), [None, None, Some(2), Some(3)]);
+        let scaled = dir.path().join("scaled-float-dq.fits");
+        write_cube(&scaled, 2, 2, 2, &[("BZERO", "0.00000001")], |_, _, _| 2.0);
+        let cube = LazyCube::open(scaled.to_str().unwrap()).unwrap();
+        assert_eq!(cube.decode_dq_rows(0, 0, 1).unwrap(), [None, None]);
+    }
+
+    #[test]
+    fn dq_policy_collapse_uses_identical_samples_for_values_counts_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq-collapse.fits");
+        write_sci_err_dq_mef(&path, 3, 2, 4, |z, _, _| [0.0, 2.0, 100.0, 4.0][z],
+            |z, _, _| if z == 2 { f32::NAN } else { 1.0 },
+            |z, _, x| match x { 1 => 1 << 24, 2 => 1, _ if z == 2 => (1 << 24) | 1, _ => 0 });
+        let cube = LazyCube::open(&format!("{}#hdu=1", path.display())).unwrap();
+        let err = LazyCube::open(&format!("{}#hdu=2", path.display())).unwrap();
+        let dq = LazyCube::open(&format!("{}#hdu=3", path.display())).unwrap();
+        for mode in [CollapseMode::Sum, CollapseMode::Mean, CollapseMode::Median] {
+            let result = cube.collapse_range_with_dq(0, 3, mode, Some(&err), Some(&dq), CollapseZeroPolicy::IncludePhysicalZeros).unwrap();
+            assert_eq!(result.value[(0,0)], if mode == CollapseMode::Sum { 6.0 } else { 2.0 });
+            let expected_error = match mode {
+                CollapseMode::Sum => 3.0_f64.sqrt(),
+                CollapseMode::Mean => 1.0 / 3.0_f64.sqrt(),
+                CollapseMode::Median => (std::f64::consts::PI / 6.0).sqrt(),
+            };
+            assert!((f64::from(result.err.as_ref().unwrap()[(0,0)]) - expected_error).abs() < 1e-6);
+            assert_eq!(result.value[(0,1)], match mode { CollapseMode::Sum => 106.0, CollapseMode::Mean => 26.5, CollapseMode::Median => 3.0 });
+            assert!(result.err.as_ref().unwrap()[(0,1)].is_nan());
+            assert!(result.value[(0,2)].is_nan() && result.err.as_ref().unwrap()[(0,2)].is_nan());
+            assert_eq!(result.dq_excluded_samples, 10);
+            if mode == CollapseMode::Median {
+                let banded = cube.collapse_range_median_banded_with(0, 3, 1, Some(&err), Some(&dq), CollapseZeroPolicy::IncludePhysicalZeros).unwrap();
+                assert_eq!(bits_of(&result.value), bits_of(&banded.value));
+                assert_eq!(bits_of(result.err.as_ref().unwrap()), bits_of(banded.err.as_ref().unwrap()));
+            }
+        }
+        assert_eq!(cube.collapse_range(0, 3, CollapseMode::Sum).unwrap()[(0,0)], 106.0);
     }
 
     fn modal_value(z: usize, y: usize, x: usize) -> f32 {

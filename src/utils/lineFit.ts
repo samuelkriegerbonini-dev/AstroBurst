@@ -162,6 +162,7 @@ export function lineFitConfig(input: LineFitConfigInput): LineFitConfig | { erro
     emission_only: input.emissionOnly,
     use_err: input.useErr,
     use_dq: input.useDq,
+    dq_policy: input.useDq ? "do_not_use" : "ignore",
     resolving_power: resolvingPower,
     components: input.components,
   };

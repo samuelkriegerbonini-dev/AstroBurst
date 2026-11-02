@@ -1,8 +1,9 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, CheckCircle2, XCircle } from "lucide-react";
 import ProfilePlot, { type ProfileSeries } from "../regions/ProfilePlot";
-import { ErrorAlert, RunButton } from "../ui";
+import { ErrorAlert, RunButton, WarningList } from "../ui";
 import { compareWithRate } from "../../services/ramp";
+import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import {
   ampFaintRows,
   compareVerdict,
@@ -17,12 +18,14 @@ import {
 } from "../../utils/rampLabels";
 import type { Histogram, RateComparison } from "../../shared/types/ramp";
 import type { CubeResult } from "./SpectroscopyPanel";
+import OutputNote from "./OutputNote";
 
 interface RampComparePanelProps {
   qslopePath: string;
   ratePath: string;
   dimensions: [number, number] | null;
   onCubeResult?: (result: CubeResult) => void;
+  onInvalidateCubeResult?: (fitsPaths: string[]) => void;
 }
 
 const INPUT_CLASS =
@@ -52,13 +55,25 @@ function histogramPlot(h: Histogram, color: string, label: string): ProfileSerie
   return x.length > 0 ? [{ x, y, color, label, mode: "line" }] : [];
 }
 
-function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult }: RampComparePanelProps) {
+function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult, onInvalidateCubeResult }: RampComparePanelProps) {
   const [y0Text, setY0Text] = useState("");
   const [y1Text, setY1Text] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cmp, setCmp] = useState<RateComparison | null>(null);
   const seqRef = useRef(0);
+  const outputRef = useRef<string[]>([]);
+  const invalidateRef = useRef(onInvalidateCubeResult);
+  invalidateRef.current = onInvalidateCubeResult;
+
+  useLayoutEffect(() => {
+    seqRef.current++;
+    setCmp(null);
+    setError(null);
+    setRunning(false);
+    if (outputRef.current.length) invalidateRef.current?.(outputRef.current);
+    outputRef.current = [];
+  }, [qslopePath, ratePath, y0Text, y1Text]);
 
   useEffect(() => {
     const seq = seqRef;
@@ -75,9 +90,14 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult }: Ra
     setRunning(true);
     setError(null);
     setCmp(null);
+    if (outputRef.current.length) invalidateRef.current?.(outputRef.current);
+    outputRef.current = [];
     try {
       const res = await compareWithRate(qslopePath, ratePath, undefined, rows.rows);
-      if (seq === seqRef.current) setCmp(res);
+      if (seq === seqRef.current) {
+        outputRef.current = [res.ratio_fits_path, res.difference_fits_path];
+        setCmp(res);
+      }
     } catch (e) {
       if (seq === seqRef.current) {
         setCmp(null);
@@ -96,6 +116,11 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult }: Ra
   const publishRatio = useCallback(() => {
     if (!cmp?.ratioPreviewUrl) return;
     onCubeResult?.({ label: RATIO_LABEL, previewUrl: cmp.ratioPreviewUrl, fitsPath: cmp.ratio_fits_path, dimensions });
+  }, [cmp, dimensions, onCubeResult]);
+
+  const publishDifference = useCallback(() => {
+    if (!cmp?.differencePreviewUrl) return;
+    onCubeResult?.({ label: "Quick − rate (DN/s)", previewUrl: cmp.differencePreviewUrl, fitsPath: cmp.difference_fits_path, dimensions });
   }, [cmp, dimensions, onCubeResult]);
 
   return (
@@ -149,6 +174,15 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult }: Ra
             good pixels {cmp.good_pixels}, quick-flagged among them {quickFlaggedShare(cmp)}
             {cmp.science_rows ? `, science rows ${cmp.science_rows[0]}..${cmp.science_rows[1]}` : ", full frame"}
             {`, ${cmp.elapsed_ms} ms`}
+          </div>
+
+          <WarningList warnings={cmp.warnings} />
+          <div className="space-y-1">
+            <div className={LABEL_CLASS}>Signed difference: quick − official (DN/s)</div>
+            <div className="grid grid-cols-3 gap-2 text-[10px] font-mono">
+              {([["Bias", cmp.difference_metrics.bias], ["MAE", cmp.difference_metrics.mae], ["RMSE", cmp.difference_metrics.rmse], ["Median Δ", cmp.difference_metrics.median_delta], [SIGMA_MAD_LABEL, cmp.difference_metrics.mad_sigma]] as const).map(([label, value]) => <div key={label}><span className="text-zinc-500">{label}</span><div className="text-zinc-300">{value === null || !Number.isFinite(value) ? "n/a" : value.toPrecision(4)}</div></div>)}
+            </div>
+            <p className="text-[9px] text-zinc-500">{cmp.difference_metrics.n} finite pairs; quick DQ exclusion mask {cmp.quick_exclude_bits}, official mask {cmp.official_exclude_bits}. {SIGMA_MAD_LABEL} = {SIGMA_MAD_TITLE}. The ratio additionally requires |official| ≥ {cmp.ratio_min_abs_rate} DN/s. Both images use the selected science rows.</p>
           </div>
 
           <div>
@@ -222,6 +256,8 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult }: Ra
           <button type="button" className={SMALL_BUTTON_CLASS} disabled={!cmp.ratioPreviewUrl || !onCubeResult} onClick={publishRatio}>
             Show ratio image
           </button>
+          <button type="button" className={`${SMALL_BUTTON_CLASS} ml-2`} disabled={!cmp.differencePreviewUrl || !onCubeResult} onClick={publishDifference}>Show signed difference</button>
+          {cmp.provenance_path && <OutputNote path={cmp.provenance_path} kind="manifest" />}
         </div>
       )}
     </div>

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useId, useMemo, useRef, useState } from "react";
 import { Activity, FileText, FolderOpen, X } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import ProfilePlot, { type ProfileSeries } from "../regions/ProfilePlot";
@@ -70,6 +70,7 @@ interface RampPanelProps {
   rampSource: RampSource | null;
   cubeDims: CubeDims | null;
   onCubeResult?: (result: CubeResult) => void;
+  onInvalidateCubeResult?: (fitsPaths: string[]) => void;
   publishGate?: FramePublishGate;
 }
 
@@ -97,7 +98,7 @@ const EXCLUDED_COLOR = "rgba(82,82,91,0.9)";
 const JUMP_K_MIN = 3;
 const JUMP_K_MAX = 10;
 const JUMP_K_STEP = 0.5;
-const INSPECTOR_PARAMS_NOTE = "fit with the parameters of the last quick slope run (defaults before the first run)";
+const INSPECTOR_PARAMS_NOTE = "fit with the current quick slope parameters";
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -168,7 +169,7 @@ function TablePreviewView({ title, table }: { title: string; table: TablePreview
   );
 }
 
-function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publishGate }: RampPanelProps) {
+function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, onInvalidateCubeResult, publishGate }: RampPanelProps) {
   const integrationId = useId();
   const refCorrectionId = useId();
   const slopeBlockerId = useId();
@@ -200,10 +201,13 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
   const [ownGate] = useState(createFramePublishGate);
   const gate = publishGate ?? ownGate;
   const inspectSeqRef = useRef(0);
-  const lastInspectKeyRef = useRef<string | null>(null);
   const runSeqRef = useRef(0);
   const runningRef = useRef(false);
+  const mountedRef = useRef(true);
   const asdfPublishSeqRef = useRef(0);
+  const outputPathsRef = useRef<string[]>([]);
+  const invalidateRef = useRef(onInvalidateCubeResult);
+  invalidateRef.current = onInvalidateCubeResult;
 
   const params = useMemo(() => paramsFromDraft(draft), [draft]);
   const paramErrors = useMemo(() => validateQuickSlopeParams(params), [params]);
@@ -216,12 +220,40 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
     () => framePublishers<CubeResult>(gate, (record) => onCubeResult?.(record)),
     [gate, onCubeResult],
   );
-  const inspectParams: QuickSlopeParams = result?.params ?? DEFAULT_QUICK_SLOPE_PARAMS;
+  const inspectParams: QuickSlopeParams = params;
   const totalFrames = ramp.ngroups * Math.max(ramp.nints, 1);
   const badge = irs2Badge(ramp);
   const ratePath = pickedRate ?? result?.rate_sibling ?? null;
 
+  useLayoutEffect(() => {
+    runSeqRef.current++;
+    setResult(null);
+    setRunError(null);
+    setPickedRate(null);
+    invalidateRef.current?.(outputPathsRef.current);
+    outputPathsRef.current = [];
+  }, [filePath, source, integration, draft]);
+
+  const invalidateComparison = useCallback((paths: string[]) => {
+    invalidateRef.current?.(paths);
+    outputPathsRef.current = outputPathsRef.current.filter((path) => !paths.includes(path));
+  }, []);
+
+  const publishComparison = useCallback((record: CubeResult) => {
+    if (record.fitsPath) outputPathsRef.current.push(record.fitsPath);
+    publishers.result(record);
+  }, [publishers]);
+
+  const slopePath = result?.fits_path ?? null;
+  useLayoutEffect(() => {
+    const comparisonPaths = outputPathsRef.current.filter((path) => path !== slopePath);
+    invalidateComparison(comparisonPaths);
+  }, [ratePath, slopePath, invalidateComparison]);
+
   useEffect(() => {
+    setTables(null);
+    setTablesError(null);
+    setDqFlags(null);
     if (!filePath || source !== "fits") return;
     let cancelled = false;
     getRampTables(filePath)
@@ -243,11 +275,15 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
     };
   }, [filePath, source]);
 
-  useEffect(() => {
-    if (!active || !filePath || coordX === null || coordY === null) return;
-    const key = [filePath, coordX, coordY, integration, slopeBlocker ?? "", JSON.stringify(inspectParams)].join("|");
-    if (key === lastInspectKeyRef.current) return;
-    lastInspectKeyRef.current = key;
+  useLayoutEffect(() => {
+    const inspectSeq = inspectSeqRef;
+    inspectSeqRef.current++;
+    setInspect(null);
+    setInspectError(null);
+    setInspectLoading(false);
+    if (!active || !filePath || coordX === null || coordY === null || paramErrors.length > 0) {
+      return;
+    }
     const seq = ++inspectSeqRef.current;
     const x = coordX;
     const y = coordY;
@@ -271,13 +307,16 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
       .finally(() => {
         if (seq === inspectSeqRef.current) setInspectLoading(false);
       });
-  }, [active, filePath, coordX, coordY, integration, inspectParams, slopeBlocker]);
+    return () => { inspectSeq.current++; };
+  }, [active, filePath, coordX, coordY, integration, inspectParams, slopeBlocker, paramErrors.length]);
 
   useEffect(() => {
+    mountedRef.current = true;
     const inspectSeq = inspectSeqRef;
     const runSeq = runSeqRef;
     const publishSeq = asdfPublishSeqRef;
     return () => {
+      mountedRef.current = false;
       inspectSeq.current++;
       publishSeq.current++;
       runSeq.current++;
@@ -291,8 +330,9 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
   const patchDraft = useCallback((patch: Partial<QuickSlopeDraft>) => setDraft((d) => ({ ...d, ...patch })), []);
 
   const handleRun = useCallback(async () => {
-    if (!filePath || slopeBlocker !== null || paramErrors.length > 0) return;
+    if (!filePath || slopeBlocker !== null || paramErrors.length > 0 || runningRef.current) return;
     const seq = ++runSeqRef.current;
+    const publication = gate.reserve();
     runningRef.current = true;
     setRunning(true);
     setRunError(null);
@@ -300,22 +340,23 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
     try {
       const res = await runQuickSlope(filePath, undefined, integration, params);
       if (seq !== runSeqRef.current) return;
+      outputPathsRef.current = [res.fits_path];
       setResult(res);
       setRunId((n) => n + 1);
       setPickedRate(null);
-      if (res.previewUrl) {
+      if (res.previewUrl && gate.isLatest(publication)) {
         publishers.result({ label: QSLOPE_LABEL, previewUrl: res.previewUrl, fitsPath: res.fits_path, dimensions: res.dimensions });
       }
     } catch (e) {
       if (seq === runSeqRef.current) setRunError(errorText(e));
     } finally {
-      if (seq === runSeqRef.current) {
+      if (mountedRef.current) {
         runningRef.current = false;
         setRunning(false);
         resetProgress();
       }
     }
-  }, [filePath, slopeBlocker, paramErrors.length, integration, params, publishers, resetProgress]);
+  }, [filePath, slopeBlocker, paramErrors.length, integration, params, publishers, resetProgress, gate]);
 
   const handleCancel = useCallback(() => {
     cancelQuickSlope().catch(() => {});
@@ -323,10 +364,11 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
 
   const pickRate = useCallback(async () => {
     if (!isTauri()) return;
+    const seq = runSeqRef.current;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const picked = await open({ multiple: false, title: "Official rate file", filters: [{ name: "FITS", extensions: ["fits"] }] });
-      if (typeof picked === "string") setPickedRate(picked);
+      if (typeof picked === "string" && seq === runSeqRef.current) setPickedRate(picked);
     } catch (e) {
       console.error("[AstroBurst] Rate file dialog error:", e);
     }
@@ -607,6 +649,7 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
           <ErrorAlert message={runError} />
           {result && (
             <div className="space-y-1.5">
+              <div className="text-[9px] text-zinc-500">{running ? "Previous result; recalculation in progress" : "Last completed result"}</div>
               <WarningList warnings={result.warnings} />
               <div className="text-[9px] font-mono text-zinc-400 space-y-0.5">
                 <div className="break-all" title={result.fits_path}>
@@ -623,6 +666,7 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
                 <div>band scales {result.band_scales_dn.map((s) => s.toFixed(1)).join(", ")} DN</div>
               </div>
               {result.fits_path && <OutputNote path={result.fits_path} />}
+              {result.provenance_path && <OutputNote path={result.provenance_path} kind="manifest" />}
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" onClick={pickRate} className={SMALL_BUTTON_CLASS} disabled={!isTauri()}>
                   <FolderOpen size={9} />
@@ -636,7 +680,8 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, publish
                   qslopePath={result.fits_path}
                   ratePath={ratePath}
                   dimensions={result.dimensions}
-                  onCubeResult={onCubeResult ? publishers.result : undefined}
+                  onCubeResult={onCubeResult ? publishComparison : undefined}
+                  onInvalidateCubeResult={invalidateComparison}
                 />
               )}
             </div>

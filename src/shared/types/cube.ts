@@ -92,15 +92,33 @@ export type RegionSpectrumWire = Omit<RegionSpectrum, RegionSeriesKey | RegionOp
 };
 
 export type CollapseRangeMode = "sum" | "mean" | "median";
+export type CollapseZeroPolicy = "include_physical_zeros" | "exclude_zero_padding";
+export type ScienceDqPolicy = "do_not_use" | "ignore";
+
+export interface ScienceDqMetadata {
+  dq_policy?: ScienceDqPolicy;
+  dq_applied?: boolean;
+  dq_hdu?: number | null;
+  dq_excluded_samples?: number;
+}
+
+export interface ScientificProvenance {
+  source?: { input_ref: string; sha256?: string };
+  integrity?: string;
+  integrity_limit?: string;
+}
 
 export const COLLAPSE_RANGE_MODES: readonly CollapseRangeMode[] = ["sum", "mean", "median"];
 
-export interface CollapseRangeResult {
+export interface CollapseRangeResult extends ScienceDqMetadata {
+  provenance_path?: string;
+  provenance?: ScientificProvenance;
   png_path: string;
   fits_path: string;
   z0: number;
   z1: number;
   mode: CollapseRangeMode;
+  zero_policy: CollapseZeroPolicy;
   dimensions: [number, number];
   has_err: boolean;
   err_source: string;
@@ -119,6 +137,7 @@ export interface MomentConfig {
   continuum: ContinuumWindows | null;
   snr_threshold: number;
   mask_below_threshold: boolean;
+  dq_policy?: ScienceDqPolicy;
 }
 
 export interface MomentMapFiles {
@@ -131,7 +150,9 @@ export type MomentKind = "m0" | "m1" | "m2";
 
 export const MOMENT_KINDS: readonly MomentKind[] = ["m0", "m1", "m2"];
 
-export interface MomentMapsResult {
+export interface MomentMapsResult extends ScienceDqMetadata {
+  provenance_path?: string;
+  provenance?: ScientificProvenance;
   m0: MomentMapFiles;
   m1: MomentMapFiles;
   m2: MomentMapFiles;
@@ -163,6 +184,7 @@ export interface LineFitConfig {
   emission_only: boolean;
   use_err: boolean;
   use_dq: boolean;
+  dq_policy?: ScienceDqPolicy;
   resolving_power: number | null;
   components: LineFitComponents;
 }
@@ -190,7 +212,9 @@ export interface LineFitUnits {
   sigma: string;
 }
 
-export interface LineFitResult {
+export interface LineFitResult extends ScienceDqMetadata {
+  provenance_path?: string;
+  provenance?: ScientificProvenance;
   planes: Record<string, MomentMapFiles>;
   plane_order: LineFitPlane[];
   units: LineFitUnits;
@@ -250,7 +274,7 @@ export interface LineFitSpaxelModel {
   components: number[][];
 }
 
-export interface LineFitSpaxel {
+export interface LineFitSpaxel extends ScienceDqMetadata {
   x: number;
   y: number;
   z0: number;

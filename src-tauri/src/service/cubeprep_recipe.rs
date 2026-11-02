@@ -1,10 +1,14 @@
-use std::path::Path;
-use std::time::Instant;
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::core::cubeprep::align::{AlignOptions, ReferencePolicy, ResampleMethod};
 use crate::core::cubeprep::cube::{CubeEdit, CubeLayout, CubeOptions, PlaneOrder};
@@ -14,6 +18,8 @@ use crate::core::cubeprep::match_cube::{MatchError, MatchMode, MatchOptions};
 use crate::core::cubeprep::psf_io::{PsfResampleMethod, PsfSetOptions};
 use crate::core::imaging::cutout::CutoutRect;
 use crate::core::imaging::psf_estimation::EmpiricalPsfOptions;
+use crate::core::history::stamp::{file_stamp, utc_timestamp};
+use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::metadata::units::{AreaRule, TargetUnit};
 use crate::infra::progress::ProgressHandle;
 use crate::service::cubeprep::{
@@ -28,6 +34,7 @@ use crate::types::error::{AppError, CodedError};
 pub const RECIPE_VERSION: u64 = 1;
 pub const RECIPE_FILE: &str = "recipe.json";
 pub const RESULT_FILE: &str = "result.json";
+const RUN_LOCK: &str = ".cubeprep.lock";
 pub const STEPS: [&str; 9] = ["units", "crop", "align", "cube", "edit", "psfs", "kernels", "match", "export"];
 
 pub const UNKNOWN_STEP: &str = "unknown_step";
@@ -210,6 +217,29 @@ pub struct RecipeReport {
     pub files: Vec<RecipeFile>,
     pub warnings: Vec<String>,
     pub elapsed_ms: u64,
+    pub provenance: RecipeProvenance,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecipeProvenance {
+    pub schema_version: u8,
+    pub software_version: String,
+    pub operating_system: String,
+    pub architecture: String,
+    pub started_at_utc: String,
+    pub recipe_sha256: String,
+    pub dependencies: Vec<RecipeDependency>,
+    pub filter_registry: Value,
+    pub integrity: &'static str,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecipeDependency {
+    pub path: String,
+    pub roles: Vec<String>,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,6 +257,7 @@ pub struct StepReport {
 pub struct RecipeFile {
     pub path: String,
     pub bytes: u64,
+    pub sha256: String,
 }
 
 impl RecipeStep {
@@ -956,13 +987,93 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     std::fs::write(path, text + "\n").with_context(|| format!("Failed to write {}", path.display()))
 }
 
-fn files_under(root: &Path) -> Result<Vec<RecipeFile>> {
+fn file_digest(path: &Path, progress: &ProgressHandle) -> Result<(u64, String)> {
+    check_cancelled(progress)?;
+    let mut file = File::open(path).with_context(|| format!("Cannot hash {}", path.display()))?;
+    let before = file_stamp(&file.metadata()?);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut bytes = 0u64;
+    loop {
+        check_cancelled(progress)?;
+        let read = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        bytes += read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    if before != file_stamp(&file.metadata()?) || before.0 != bytes {
+        return Err(coded("input_changed", format!("File changed while hashing {}", path.display()), Some("Keep inputs unchanged and run again in a new output folder".into())).into());
+    }
+    let digest = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok((bytes, digest))
+}
+
+fn dependency_paths(recipe: &Recipe) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut add = |path: &str, role: String| -> Result<()> {
+        let canonical = Path::new(path).canonicalize().with_context(|| format!("Cannot resolve dependency {path}"))?;
+        let key = canonical.to_string_lossy().into_owned();
+        let roles = paths.entry(key).or_default();
+        if !roles.contains(&role) { roles.push(role); }
+        Ok(())
+    };
+    for input in &recipe.inputs {
+        add(&input.path, format!("science:{}:{}", input.dataset, input.filter))?;
+    }
+    for (index, step) in recipe.steps.iter().enumerate() {
+        match step {
+            RecipeStep::Crop(CropStep { region: CropMode::Region { region_file, .. } | CropMode::RegionCommon { region_file }, .. }) => add(region_file, format!("region:step{}", index + 1))?,
+            RecipeStep::Psfs(PsfsStep { source: PsfSource::Files { files }, .. }) => {
+                for file in files { add(&file.path, format!("psf:{}:step{}", file.filter, index + 1))?; }
+            }
+            RecipeStep::Psfs(PsfsStep { source: PsfSource::Empirical(empirical), .. }) => {
+                for filter in &empirical.filters {
+                    let (image, region) = empirical_inputs(empirical, filter)?;
+                    add(&image, format!("empirical_image:{filter}:step{}", index + 1))?;
+                    add(&region, format!("empirical_region:{filter}:step{}", index + 1))?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(paths)
+}
+
+fn dependencies(recipe: &Recipe, progress: &ProgressHandle) -> Result<Vec<RecipeDependency>> {
+    dependency_paths(recipe)?.into_iter().map(|(path, roles)| {
+        let (bytes, sha256) = file_digest(Path::new(&path), progress)?;
+        Ok(RecipeDependency { path, roles, bytes, sha256 })
+    }).collect()
+}
+
+struct RecipeLock(PathBuf);
+
+impl Drop for RecipeLock {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
+fn atomic_result(path: &Path, report: &RecipeReport) -> Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().context("The result has no parent folder")?)?;
+    serde_json::to_writer_pretty(&mut file, report)?;
+    file.write_all(b"\n")?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn files_under(root: &Path, progress: &ProgressHandle) -> Result<Vec<RecipeFile>> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).with_context(|| format!("Failed to list {}", dir.display()))? {
             let entry = entry?;
             let path = entry.path();
+            if path.file_name().is_some_and(|name| name == RUN_LOCK) { continue; }
+            anyhow::ensure!(!entry.file_type()?.is_symlink(), "Unexpected symbolic link in output: {}", path.display());
             let metadata = entry.metadata()?;
             if metadata.is_dir() {
                 pending.push(path);
@@ -970,7 +1081,8 @@ fn files_under(root: &Path) -> Result<Vec<RecipeFile>> {
             }
             let relative = path.strip_prefix(root).unwrap_or(&path);
             let text = relative.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
-            files.push(RecipeFile { path: text, bytes: metadata.len() });
+            let (bytes, sha256) = file_digest(&path, progress)?;
+            files.push(RecipeFile { path: text, bytes, sha256 });
         }
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -979,9 +1091,23 @@ fn files_under(root: &Path) -> Result<Vec<RecipeFile>> {
 
 pub fn run_recipe(recipe: &Recipe, out_dir: &Path, progress: &ProgressHandle) -> Result<RecipeReport> {
     let started = Instant::now();
+    let started_at_utc = utc_timestamp(SystemTime::now());
     recipe.validate()?;
     check_cancelled(progress)?;
     prepare_output_dir(out_dir)?;
+    let lock = out_dir.join(RUN_LOCK);
+    OpenOptions::new().write(true).create_new(true).open(&lock).context("Another preparation is using this output folder")?;
+    let _lock = RecipeLock(lock);
+    progress.emit_stage("hashing_inputs");
+    let initial_dependencies = dependencies(recipe, progress)?;
+    let initial_registry = serde_json::to_value(filter_registry().entries())?;
+    let mut input_paths: Vec<String> = recipe.paths().into_iter().filter(|p| Path::new(p).is_file()).map(str::to_string).collect();
+    input_paths.extend(recipe.empirical_files()?);
+    input_paths.extend(initial_dependencies.iter().map(|d| d.path.clone()));
+    for input in input_paths {
+        invalidate_written(&input);
+        GLOBAL_CUBE_CACHE.invalidate(&input);
+    }
     write_json(&out_dir.join(RECIPE_FILE), recipe)?;
     let total = recipe.steps.len() as u64;
     let mut run = Run::new(recipe);
@@ -1007,18 +1133,42 @@ pub fn run_recipe(recipe: &Recipe, out_dir: &Path, progress: &ProgressHandle) ->
             elapsed_ms: step_started.elapsed().as_millis() as u64,
         });
     }
-    progress.report(total, total, "done");
+    progress.emit_stage("verifying_inputs");
+    if dependencies(recipe, progress)? != initial_dependencies || serde_json::to_value(filter_registry().entries())? != initial_registry {
+        return Err(coded("input_changed", "A recipe dependency or filter registry changed during execution", Some("Keep inputs unchanged and run again in a new output folder".into())).into());
+    }
+    progress.emit_stage("hashing_products");
+    let files = files_under(out_dir, progress)?;
+    let recipe_sha256 = files.iter().find(|file| file.path == RECIPE_FILE).context("The saved recipe is missing")?.sha256.clone();
     let report = RecipeReport {
         recipe_version: recipe.recipe_version,
         name: recipe.name.clone(),
         output_dir: out_dir.to_string_lossy().into_owned(),
         cube: run.cube.clone(),
         steps,
-        files: files_under(out_dir)?,
+        files,
         warnings,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        provenance: RecipeProvenance {
+            schema_version: 1,
+            software_version: env!("CARGO_PKG_VERSION").to_string(),
+            operating_system: std::env::consts::OS.to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            started_at_utc,
+            recipe_sha256,
+            dependencies: initial_dependencies,
+            filter_registry: initial_registry,
+            integrity: "sha256_before_after",
+            limitations: vec![
+                "Input hashes are verified before and after execution, not an atomic snapshot; do not modify inputs while a run is active".into(),
+                "The saved recipe contains resolved paths; its SHA-256 identifies the exact recipe.json bytes, not a location-independent recipe".into(),
+                "SCI/ERR/DQ availability and propagation follow each step report and the selected output layout; hashes do not certify scientific accuracy".into(),
+            ],
+        },
     };
-    write_json(&out_dir.join(RESULT_FILE), &report)?;
+    check_cancelled(progress)?;
+    atomic_result(&out_dir.join(RESULT_FILE), &report)?;
+    progress.report(total, total, "done");
     Ok(report)
 }
 
@@ -1058,6 +1208,163 @@ mod tests {
         let mut recipe = d1_recipe();
         recipe["steps"][index] = step;
         recipe
+    }
+
+    #[test]
+    fn provenance_manifest_hashes_recipe_dependencies_and_every_product() {
+        use sha2::{Digest, Sha256};
+        let out = tempfile::tempdir().unwrap();
+        let target = out.path().join("run");
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let report = run_recipe(&recipe, &target, &quiet()).unwrap();
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["provenance"]["schema_version"], 1);
+        assert_eq!(value["provenance"]["software_version"], env!("CARGO_PKG_VERSION"));
+        let digest = |path: &Path| Sha256::digest(std::fs::read(path).unwrap()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(value["provenance"]["recipe_sha256"], digest(&target.join(RECIPE_FILE)));
+        let sources = value["provenance"]["dependencies"].as_array().unwrap();
+        assert_eq!(sources.len(), 12);
+        for source in sources {
+            assert_eq!(source["sha256"], digest(Path::new(source["path"].as_str().unwrap())));
+            assert!(!source["roles"].as_array().unwrap().is_empty());
+        }
+        for file in value["files"].as_array().unwrap() {
+            assert_eq!(file["sha256"], digest(&target.join(file["path"].as_str().unwrap())));
+        }
+        assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(target.join(RESULT_FILE)).unwrap()).unwrap(), value);
+        assert!(!target.join("result.json.tmp").exists());
+    }
+
+    #[test]
+    fn provenance_manifest_resolves_empirical_images_and_regions_instead_of_hashing_a_folder() {
+        let out = tempfile::tempdir().unwrap();
+        let recipe = Recipe::from_value(&fixture_recipe("d1_stars", "recipe_d1_stars.json")).unwrap().resolved(&fixtures().join("d1_stars"));
+        let report = run_recipe(&recipe, &out.path().join("run"), &quiet()).unwrap();
+        let value = serde_json::to_value(&report).unwrap();
+        let deps = value["provenance"]["dependencies"].as_array().unwrap();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d["path"].as_str().unwrap().ends_with("stars_f444w.reg")));
+        assert!(deps.iter().all(|d| Path::new(d["path"].as_str().unwrap()).is_file()));
+    }
+
+    #[test]
+    fn provenance_refuses_input_changes_even_when_size_and_mtime_are_preserved() {
+        let out = tempfile::tempdir().unwrap();
+        let source = out.path().join("source.fits");
+        let mut value = d1_recipe();
+        let original = fixtures().join("d1").join(value["inputs"][0]["path"].as_str().unwrap());
+        std::fs::copy(original, &source).unwrap();
+        value["inputs"] = json!([value["inputs"][0].clone()]);
+        value["inputs"][0]["path"] = json!(source);
+        value["steps"] = json!([{ "step": "units", "to": "Jy/pixel" }, { "step": "units", "to": "Jy/pixel" }]);
+        let recipe = Recipe::from_value(&value).unwrap();
+        let progress = ProgressHandle::with_sink(Arc::new(move |event| {
+            if event.stage == "02_units" {
+                let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+                let mut bytes = std::fs::read(&source).unwrap();
+                *bytes.last_mut().unwrap() ^= 1;
+                std::fs::write(&source, bytes).unwrap();
+                std::fs::File::options().write(true).open(&source).unwrap().set_modified(modified).unwrap();
+            }
+        }), 2);
+        let target = out.path().join("run");
+        let failure = run_recipe(&recipe, &target, &progress).unwrap_err();
+        assert_eq!(failure.downcast_ref::<CodedError>().unwrap().code, "input_changed");
+        assert!(!target.join(RESULT_FILE).exists());
+    }
+
+    #[test]
+    fn provenance_hashes_file_bytes_with_sha256_and_obeys_cancellation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abc");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(file_digest(&path, &quiet()).unwrap(), (3, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()));
+        let flag = Arc::new(AtomicBool::new(true));
+        let progress = quiet().with_cancel_source(Arc::new(move || flag.load(Ordering::SeqCst)));
+        assert!(file_digest(&path, &progress).unwrap_err().downcast_ref::<AppError>().is_some());
+    }
+
+    #[test]
+    fn provenance_run_invalidates_pixels_cached_before_a_same_stamp_rewrite() {
+        use ndarray::Array2;
+        use crate::infra::fits::writer::write_fits_mono;
+        use crate::infra::fits::reader::extract_image_mmap_by_index;
+        use crate::service::image_files::load_cached_full;
+        use crate::types::header::HduHeader;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.fits");
+        let source = path.to_str().unwrap();
+        let mut header = HduHeader::empty();
+        header.set("BUNIT", "Jy".into());
+        write_fits_mono(source, &Array2::from_elem((3, 4), 1.0), Some(&header)).unwrap();
+        let cached = load_cached_full(source).unwrap();
+        assert_eq!(cached.arr()[[0, 0]], 1.0);
+        let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+        write_fits_mono(source, &Array2::from_elem((3, 4), 7.0), Some(&header)).unwrap();
+        File::options().write(true).open(&path).unwrap().set_modified(stamp).unwrap();
+        assert_eq!(load_cached_full(source).unwrap().arr()[[0, 0]], 1.0);
+        let recipe = Recipe::from_value(&json!({ "recipe_version": 1, "inputs": [{ "path": source, "dataset": "JWST", "filter": "F444W" }], "steps": [{ "step": "units", "to": "Jy/pixel" }] })).unwrap();
+        let target = dir.path().join("run");
+        let report = run_recipe(&recipe, &target, &quiet()).unwrap();
+        let result = report.steps[0].report["files"][0]["output_path"].as_str().unwrap();
+        let image = extract_image_mmap_by_index(&File::open(result).unwrap(), 1).unwrap();
+        assert!(image.image.iter().all(|value| *value == 7.0));
+        let written = std::fs::read(target.join(RESULT_FILE)).unwrap();
+        assert!(atomic_result(&target.join(RESULT_FILE), &report).is_err());
+        assert_eq!(std::fs::read(target.join(RESULT_FILE)).unwrap(), written);
+    }
+
+    #[test]
+    fn provenance_cancelled_product_hashing_never_publishes_success_and_releases_the_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let progress = ProgressHandle::with_sink(Arc::new(move |event| {
+            if event.stage == "hashing_products" { signal.store(true, Ordering::SeqCst); }
+        }), 1).with_cancel_source(Arc::new(move || cancelled.load(Ordering::SeqCst)));
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let target = dir.path().join("run");
+        assert!(run_recipe(&recipe, &target, &progress).unwrap_err().downcast_ref::<AppError>().is_some());
+        assert!(!target.join(RESULT_FILE).exists());
+        assert!(!target.join(RUN_LOCK).exists());
+        assert!(target.join(RECIPE_FILE).is_file());
+    }
+
+    #[test]
+    fn the_complete_mef_recipe_keeps_science_error_quality_and_filter_products() {
+        use crate::infra::fits::reader::{extract_image_planes_by_index, extract_int_planes_by_index, list_extensions};
+        let dir = tempfile::tempdir().unwrap();
+        let mut value = d1_recipe();
+        value["steps"][3]["layout"] = json!("mef");
+        value["steps"].as_array_mut().unwrap().push(json!({ "step": "export", "output": "complete.fits" }));
+        let recipe = Recipe::from_value(&value).unwrap().resolved(&fixtures().join("d1"));
+        let target = dir.path().join("run");
+        let report = run_recipe(&recipe, &target, &quiet()).unwrap();
+        for product in report.files.iter().filter(|file| file.path.ends_with(".fits") && ["03_align/", "04_cube/", "08_match/", "09_export/"].iter().any(|prefix| file.path.starts_with(prefix))) {
+            let file = File::open(target.join(&product.path)).unwrap();
+            let extensions = list_extensions(&file).unwrap();
+            for name in ["SCI", "ERR", "DQ"] {
+                assert!(extensions.iter().any(|hdu| hdu.extname.as_deref() == Some(name)), "{} lost {name}", product.path);
+            }
+        }
+        let file = File::open(report.cube.as_ref().unwrap()).unwrap();
+        let extensions = list_extensions(&file).unwrap();
+        let index = |name: &str| extensions.iter().find(|hdu| hdu.extname.as_deref() == Some(name)).unwrap().index;
+        assert!(extensions.iter().any(|hdu| hdu.extname.as_deref() == Some("FILTERS")));
+        let sci = extract_image_planes_by_index(&file, index("SCI")).unwrap();
+        let err = extract_image_planes_by_index(&file, index("ERR")).unwrap();
+        let dq = extract_int_planes_by_index(&file, index("DQ")).unwrap();
+        assert_eq!((sci.len(), err.len(), dq.len()), (6, 6, 6));
+        assert_eq!(sci[0].dim(), (44, 43));
+        for ((sci, err), dq) in sci.iter().zip(&err).zip(&dq) {
+            assert_eq!(sci.dim(), err.dim());
+            assert_eq!(sci.dim(), dq.bits.dim());
+            assert!(err.iter().any(|value| value.is_finite() && *value > 0.0));
+            assert!(err.iter().all(|value| value.is_nan() || *value >= 0.0));
+        }
+        assert_eq!(extract_header_by_index(&file, index("SCI")).unwrap().get("BUNIT"), extract_header_by_index(&file, index("ERR")).unwrap().get("BUNIT"));
     }
 
     #[test]

@@ -50,6 +50,14 @@ pub fn resolve_gzip(path: &Path) -> Result<(PathBuf, Option<SharedTempDir>)> {
     Ok((copy, Some(dir)))
 }
 
+pub fn resolve_gzip_fresh(path: &Path) -> Result<(PathBuf, Option<SharedTempDir>)> {
+    if !is_gzip_file(path) {
+        return Ok((path.to_path_buf(), None));
+    }
+    let (copy, dir) = CopyCache::new().resolve(path, &std::env::temp_dir(), &temp_folder_cap)?;
+    Ok((copy, Some(dir)))
+}
+
 pub(crate) fn temp_folder_cap() -> Cap {
     let root = std::env::temp_dir();
     decompression_cap(effective_memory(), temp_volume_free(&root), &root)
@@ -1105,7 +1113,7 @@ mod tests {
         let (err, dq) = (set.err.expect("ERR cube"), set.dq.expect("DQ cube"));
         assert!(err.get_frame(0).unwrap().iter().all(|&v| v == 0.5));
         assert!(dq.get_frame(2).unwrap().iter().all(|&v| v == 1.0));
-        assert!(set.notes.is_empty(), "{:?}", set.notes);
+        assert_eq!(set.notes, ["ERR has no BUNIT: when ERR is used, the SCI unit (unspecified) is assumed"]);
     }
 
     #[test]

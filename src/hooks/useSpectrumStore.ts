@@ -37,6 +37,7 @@ type Listener = () => void;
 export class SpectrumStore {
   private value: SpectrumState = EMPTY;
   private listeners = new Set<Listener>();
+  private request = 0;
 
   getSnapshot = (): SpectrumState => this.value;
 
@@ -53,12 +54,15 @@ export class SpectrumStore {
   }
 
   begin(coord: { x: number; y: number }) {
-    this.emit({ ...this.value, coord, loading: true, error: null, region: null, regionSource: null, regionContinuum: null, regionError: null });
+    const request = ++this.request;
+    this.emit({ ...EMPTY, coord, loading: true });
+    return request;
   }
 
-  commit(result: CubeSpectrum, elapsed: number) {
+  commit(result: CubeSpectrum, elapsed: number, request: number = this.request) {
+    if (request !== this.request) return;
     this.emit({
-      ...this.value,
+      ...EMPTY,
       spectrum: result.values ?? [],
       err: result.err ?? null,
       wavelengths: result.wavelengths?.length ? result.wavelengths : null,
@@ -72,17 +76,21 @@ export class SpectrumStore {
     });
   }
 
-  fail(error: string) {
+  fail(error: string, request: number = this.request) {
+    if (request !== this.request) return;
     this.emit({ ...this.value, loading: false, error });
   }
 
   beginRegion() {
-    this.emit({ ...this.value, regionLoading: true, regionError: null });
+    const request = ++this.request;
+    this.emit({ ...EMPTY, regionLoading: true });
+    return request;
   }
 
-  commitRegion(result: RegionSpectrum, source: SpectrumSource, continuum: ContinuumWindows | null = null) {
+  commitRegion(result: RegionSpectrum, source: SpectrumSource, continuum: ContinuumWindows | null = null, request: number = this.request) {
+    if (request !== this.request) return;
     this.emit({
-      ...this.value,
+      ...EMPTY,
       region: result,
       regionSource: source,
       regionContinuum: continuum,
@@ -92,16 +100,19 @@ export class SpectrumStore {
     });
   }
 
-  failRegion(error: string) {
+  failRegion(error: string, request: number = this.request) {
+    if (request !== this.request) return;
     this.emit({ ...this.value, regionLoading: false, regionError: error });
   }
 
   clearRegion() {
     if (!this.value.region && !this.value.regionError && !this.value.regionLoading) return;
+    this.request++;
     this.emit({ ...this.value, region: null, regionSource: null, regionContinuum: null, regionError: null, regionLoading: false });
   }
 
   reset() {
+    this.request++;
     if (this.value === EMPTY) return;
     this.emit(EMPTY);
   }
@@ -110,27 +121,27 @@ export class SpectrumStore {
 const store = new SpectrumStore();
 
 export function beginSpectrum(coord: { x: number; y: number }) {
-  store.begin(coord);
+  return store.begin(coord);
 }
 
-export function commitSpectrum(result: CubeSpectrum, elapsed: number) {
-  store.commit(result, elapsed);
+export function commitSpectrum(result: CubeSpectrum, elapsed: number, request: number) {
+  store.commit(result, elapsed, request);
 }
 
-export function failSpectrum(error: string) {
-  store.fail(error);
+export function failSpectrum(error: string, request: number) {
+  store.fail(error, request);
 }
 
 export function beginRegionSpectrum() {
-  store.beginRegion();
+  return store.beginRegion();
 }
 
-export function commitRegionSpectrum(result: RegionSpectrum, source: SpectrumSource, continuum: ContinuumWindows | null = null) {
-  store.commitRegion(result, source, continuum);
+export function commitRegionSpectrum(result: RegionSpectrum, source: SpectrumSource, continuum: ContinuumWindows | null, request: number) {
+  store.commitRegion(result, source, continuum, request);
 }
 
-export function failRegionSpectrum(error: string) {
-  store.failRegion(error);
+export function failRegionSpectrum(error: string, request: number) {
+  store.failRegion(error, request);
 }
 
 export function clearRegionSpectrum() {

@@ -8,13 +8,15 @@ use crate::cmd::common::{
     blocking_cmd, output_stem, render_named_and_save, resolve_output_dir, write_derived_fits,
     write_derived_mef, OutputValues,
 };
+use crate::cmd::science_provenance::{ScientificProvenance, ScientificRun, VerifiedCubeSet};
 use crate::service::common::derived_output_header;
 use crate::infra::wcs_source::load_wcs;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cube::companions::{open_cube_set, CubeSet};
 use crate::service::cubeprep::filter_registry;
 use crate::core::cube::eager::{build_wavelength_axis, classify_cube, classify_spectral_cube, ramp_classification};
-use crate::core::cube::lazy::{ApertureSpectrum, CollapseMode, LazyCube};
+use crate::core::cube::lazy::{ApertureSpectrum, CollapseMode, CollapseZeroPolicy, LazyCube};
+use crate::core::cube::companions::{DqPolicy, FLOAT_DQ_NOTE};
 use crate::core::cube::moments::{moment_maps_set, ContinuumWindows, MomentConfig, DQ_NOT_APPLIED_NOTE};
 use crate::core::cube::noise_factor::{noise_factor, NoiseFactor};
 use crate::core::cubeprep::cube::{plane_text, planes_from_header, planes_from_table, remove_plane_keys, CubePlane, CTYPE_FILTER, FILTERS_EXTNAME};
@@ -105,6 +107,16 @@ pub(crate) fn collapse_header(cube: &LazyCube, mode: CollapseMode) -> HduHeader 
         header.set(CARD_BUNIT, format!("{}{}", unit, SUMMED_UNIT_SUFFIX));
     }
     header
+}
+
+pub(crate) fn stamp_dq_header(header: &mut HduHeader, policy: DqPolicy, hdu: Option<usize>, excluded: u64) {
+    header.set("ABDQPOL", policy.name().into());
+    header.set("ABDQBIT", "1".into());
+    header.set("ABDQAPP", if hdu.is_some() { "T" } else { "F" }.into());
+    header.set("ABDQNUM", excluded.to_string());
+    header.remove("ABDQHDU");
+    if let Some(hdu) = hdu { header.set("ABDQHDU", hdu.to_string()); }
+    push_history(header, &format!("AstroBurst DQ policy: {}; applied={}", policy.name(), hdu.is_some()));
 }
 
 fn moment_header(cube: &LazyCube, order: u8, unit: &str) -> HduHeader {
@@ -361,11 +373,18 @@ fn write_value_with_error(
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CollapseRangeResponse {
+    pub provenance: ScientificProvenance,
+    pub provenance_path: String,
     pub png_path: String,
     pub fits_path: String,
     pub z0: usize,
     pub z1: usize,
     pub mode: &'static str,
+    pub zero_policy: CollapseZeroPolicy,
+    pub dq_policy: DqPolicy,
+    pub dq_applied: bool,
+    pub dq_hdu: Option<usize>,
+    pub dq_excluded_samples: u64,
     pub dimensions: [usize; 2],
     pub has_err: bool,
     pub err_source: String,
@@ -374,7 +393,7 @@ pub struct CollapseRangeResponse {
 }
 
 pub(crate) fn collapse_range_files(
-    set: &CubeSet,
+    input: &VerifiedCubeSet,
     path: &str,
     output_dir: &str,
     z0: usize,
@@ -382,15 +401,40 @@ pub(crate) fn collapse_range_files(
     mode: CollapseMode,
     t0: Instant,
 ) -> anyhow::Result<CollapseRangeResponse> {
+    collapse_range_files_with_policy(input, path, output_dir, z0, z1, mode, CollapseZeroPolicy::default(), None, t0)
+}
+
+fn collapse_range_files_with_policy(
+    input: &VerifiedCubeSet,
+    path: &str,
+    output_dir: &str,
+    z0: usize,
+    z1: usize,
+    mode: CollapseMode,
+    zero_policy: CollapseZeroPolicy,
+    dq_policy: Option<DqPolicy>,
+    t0: Instant,
+) -> anyhow::Result<CollapseRangeResponse> {
+    let set = &input.set;
+    let mut run = ScientificRun::new(path, output_dir, "collapse", input, json!({ "z0": z0, "z1": z1, "mode": mode.name(), "zero_policy": zero_policy, "dq_policy": dq_policy }))?;
+    let dq_policy = dq_policy.unwrap_or_default();
+    let dq = set.dq.as_deref().filter(|_| dq_policy == DqPolicy::DoNotUse);
+    let dq_hdu = dq.map(|cube| cube.hdu_index);
+    let output_dir = run.output_dir.clone();
     let cube = &set.sci;
-    let collapsed = cube.collapse_range_with_err(z0, z1, mode, set.err.as_deref())?;
+    let collapsed = cube.collapse_range_with_dq(z0, z1, mode, set.err.as_deref(), dq, zero_policy)?;
     let arr = &collapsed.value;
     let name = format!("{}_collapse_{}_{}-{}", output_stem(path), mode.name(), z0, z1);
-    let (png_path, _) = render_named_and_save(arr, output_dir, &name, false, None)?;
+    let (png_path, _) = render_named_and_save(arr, &output_dir, &name, false, None)?;
     let fits_path = format!("{}/{}.fits", output_dir, name);
-    let header = collapse_header(cube, mode);
+    let mut header = collapse_header(cube, mode);
+    header.set("ABZERO", zero_policy.name().to_string());
+    push_history(&mut header, &format!("AstroBurst collapse zero policy: {}", zero_policy.name()));
+    stamp_dq_header(&mut header, dq_policy, dq_hdu, collapsed.dq_excluded_samples);
+    run.stamp_header(&mut header);
     let mut err_header = header.clone();
     let mut notes = set.notes.clone();
+    notes.push(zero_policy.note().to_string());
     if let (Some(err), Some(_)) = (&set.err, &collapsed.err) {
         notes.push(format!("ERR extension propagated from the ERR cube (HDU {})", err.hdu_index));
         if mode == CollapseMode::Median {
@@ -398,17 +442,34 @@ pub(crate) fn collapse_range_files(
             push_history(&mut err_header, MEDIAN_ERROR_NOTE);
         }
     }
-    if set.dq.is_some() {
+    if let Some(dq) = dq {
+        notes.push(format!("DQ HDU {}: DO_NOT_USE (bit 0) and invalid flags excluded {} finite samples", dq.hdu_index, collapsed.dq_excluded_samples));
+        if dq.geometry.bitpix < 0 { notes.push(FLOAT_DQ_NOTE.into()); }
+    } else if set.dq.is_some() {
         notes.push(DQ_NOT_APPLIED_NOTE.to_string());
+    } else {
+        notes.push("No DQ cube is available: no DQ samples excluded".into());
     }
     write_value_with_error(&fits_path, arr, &header, collapsed.err.as_ref().map(|e| (e, &err_header)))?;
     let (rows, cols) = arr.dim();
+    let provenance_path = run.finish(
+        json!({ "z0": z0, "z1": z1, "mode": mode.name(), "zero_policy": zero_policy, "err_hdu": set.err.as_ref().map(|cube| cube.hdu_index), "dq_policy": dq_policy, "dq_hdu": dq_hdu, "dq_applied": dq_hdu.is_some(), "dq_excluded_samples": collapsed.dq_excluded_samples, "unit": header.get(CARD_BUNIT), "median_error_approximation": mode == CollapseMode::Median && collapsed.err.is_some() }),
+        json!({ "fits_path": fits_path, "png_path": png_path }),
+        &notes,
+    )?;
     Ok(CollapseRangeResponse {
+        provenance: run.provenance,
+        provenance_path,
         png_path,
         fits_path,
         z0,
         z1,
         mode: mode.name(),
+        zero_policy,
+        dq_policy,
+        dq_applied: dq_hdu.is_some(),
+        dq_hdu,
+        dq_excluded_samples: collapsed.dq_excluded_samples,
         dimensions: [cols, rows],
         has_err: collapsed.err.is_some(),
         err_source: err_source(set.err.as_deref()),
@@ -425,6 +486,8 @@ pub struct MapFiles {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MomentMapsResponse {
+    pub provenance: ScientificProvenance,
+    pub provenance_path: String,
     pub m0: MapFiles,
     pub m1: MapFiles,
     pub m2: MapFiles,
@@ -437,6 +500,10 @@ pub struct MomentMapsResponse {
     pub has_err: bool,
     pub err_source: String,
     pub noise_factor: Option<f64>,
+    pub dq_policy: DqPolicy,
+    pub dq_applied: bool,
+    pub dq_hdu: Option<usize>,
+    pub dq_excluded_samples: u64,
     pub elapsed_ms: u64,
 }
 
@@ -465,25 +532,46 @@ fn save_map(
 }
 
 pub(crate) fn moment_map_files(
-    set: &CubeSet,
+    input: &VerifiedCubeSet,
     path: &str,
     output_dir: &str,
     cfg: &MomentConfig,
     t0: Instant,
 ) -> anyhow::Result<MomentMapsResponse> {
+    let set = &input.set;
+    let mut run = ScientificRun::new(path, output_dir, "moments", input, json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": cfg.rest_um, "convention": cfg.convention, "continuum": cfg.continuum, "snr_threshold": cfg.snr_threshold, "mask_below_threshold": cfg.mask_below_threshold, "dq_policy": cfg.dq_policy }))?;
+    let dq_policy = cfg.dq_policy.unwrap_or_default();
+    let output_dir = run.output_dir.clone();
     let cube = &set.sci;
     let maps = moment_maps_set(set, cfg)?;
     let stem = output_stem(path);
     let range = format!("{}-{}", cfg.z0, cfg.z1);
     let factor = maps.noise_factor;
-    let m0_header = moment_header(cube, 0, &maps.m0_unit);
-    let velocity_header = |order: u8| moment_header(cube, order, maps.velocity_unit);
+    let mut m0_header = moment_header(cube, 0, &maps.m0_unit);
+    stamp_dq_header(&mut m0_header, dq_policy, maps.dq_hdu, maps.dq_excluded_samples);
+    run.stamp_header(&mut m0_header);
+    let velocity_header = |order: u8| {
+        let mut header = moment_header(cube, order, maps.velocity_unit);
+        stamp_dq_header(&mut header, dq_policy, maps.dq_hdu, maps.dq_excluded_samples);
+        run.stamp_header(&mut header);
+        header
+    };
     let name = |order: u8| format!("{}_m{}_{}", stem, order, range);
-    let m0 = save_map(&maps.m0, maps.m0_err.as_ref(), &m0_header, factor, output_dir, &name(0))?;
-    let m1 = save_map(&maps.m1, maps.m1_err.as_ref(), &velocity_header(1), factor, output_dir, &name(1))?;
-    let m2 = save_map(&maps.m2, maps.m2_err.as_ref(), &velocity_header(2), factor, output_dir, &name(2))?;
+    let m0 = save_map(&maps.m0, maps.m0_err.as_ref(), &m0_header, factor, &output_dir, &name(0))?;
+    let m1 = save_map(&maps.m1, maps.m1_err.as_ref(), &velocity_header(1), factor, &output_dir, &name(1))?;
+    let m2 = save_map(&maps.m2, maps.m2_err.as_ref(), &velocity_header(2), factor, &output_dir, &name(2))?;
     let (rows, cols) = maps.m0.dim();
+    let axis = cube.spectral_axis().map_err(anyhow::Error::msg)?;
+    let rest_um = if axis.kind.is_velocity() { None } else { cfg.rest_um.filter(|rest| rest.is_finite() && *rest > 0.0).or(axis.rest_wavelength_um) };
+    let notes: Vec<String> = set.notes.iter().cloned().chain(maps.notes).collect();
+    let provenance_path = run.finish(
+        json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": rest_um, "convention": if axis.kind.is_velocity() { None } else { Some(cfg.convention) }, "velocity_axis_as_stored": axis.kind.is_velocity(), "spectral_frame": axis.specsys, "velocity_shift_kms": 0.0, "continuum": cfg.continuum, "snr_threshold": cfg.snr_threshold, "mask_below_threshold": cfg.mask_below_threshold, "err_hdu": maps.err_hdu, "dq_policy": dq_policy, "dq_hdu": maps.dq_hdu, "dq_applied": maps.dq_hdu.is_some(), "dq_excluded_samples": maps.dq_excluded_samples, "noise_factor": factor, "m0_unit": maps.m0_unit, "velocity_unit": maps.velocity_unit }),
+        json!({ "m0": m0, "m1": m1, "m2": m2 }),
+        &notes,
+    )?;
     Ok(MomentMapsResponse {
+        provenance: run.provenance,
+        provenance_path,
         m0,
         m1,
         m2,
@@ -491,11 +579,15 @@ pub(crate) fn moment_map_files(
         velocity_unit: maps.velocity_unit,
         noise_per_channel: maps.noise_per_channel,
         n_channels: maps.n_channels,
-        notes: set.notes.iter().cloned().chain(maps.notes).collect(),
+        notes,
         dimensions: [cols, rows],
         has_err: maps.m0_err.is_some(),
         err_source: err_source(set.err.as_deref()),
         noise_factor: factor,
+        dq_policy,
+        dq_applied: maps.dq_hdu.is_some(),
+        dq_hdu: maps.dq_hdu,
+        dq_excluded_samples: maps.dq_excluded_samples,
         elapsed_ms: t0.elapsed().as_millis() as u64,
     })
 }
@@ -586,20 +678,23 @@ fn region_spectrum_json(
     Ok(serde_json::to_value(&response)?)
 }
 
-fn collapse_range_json(path: &str, output_dir: &str, z0: usize, z1: usize, mode: &str) -> anyhow::Result<serde_json::Value> {
+fn collapse_range_json(path: &str, output_dir: &str, z0: usize, z1: usize, mode: &str, zero_policy: Option<CollapseZeroPolicy>, dq_policy: Option<DqPolicy>) -> anyhow::Result<serde_json::Value> {
     let t0 = Instant::now();
     let mode = CollapseMode::parse(mode)?;
     let out_dir = resolve_output_dir(output_dir)?;
-    let set = open_cube_set(path)?;
-    let response = collapse_range_files(&set, path, &out_dir, z0, z1, mode, t0)?;
+    let input = VerifiedCubeSet::open(path)?;
+    let response = match (zero_policy, dq_policy) {
+        (None, None) => collapse_range_files(&input, path, &out_dir, z0, z1, mode, t0)?,
+        _ => collapse_range_files_with_policy(&input, path, &out_dir, z0, z1, mode, zero_policy.unwrap_or_default(), dq_policy, t0)?,
+    };
     Ok(serde_json::to_value(&response)?)
 }
 
 fn moment_maps_json(path: &str, output_dir: &str, config: &MomentConfig) -> anyhow::Result<serde_json::Value> {
     let t0 = Instant::now();
     let out_dir = resolve_output_dir(output_dir)?;
-    let set = open_cube_set(path)?;
-    let response = moment_map_files(&set, path, &out_dir, config, t0)?;
+    let input = VerifiedCubeSet::open(path)?;
+    let response = moment_map_files(&input, path, &out_dir, config, t0)?;
     Ok(serde_json::to_value(&response)?)
 }
 
@@ -644,8 +739,10 @@ pub async fn collapse_cube_range_cmd(
     z0: usize,
     z1: usize,
     mode: String,
+    zero_policy: Option<CollapseZeroPolicy>,
+    dq_policy: Option<DqPolicy>,
 ) -> Result<serde_json::Value, String> {
-    blocking_cmd!(collapse_range_json(&path, &output_dir, z0, z1, &mode))
+    blocking_cmd!(collapse_range_json(&path, &output_dir, z0, z1, &mode, zero_policy, dq_policy))
 }
 
 #[tauri::command]
@@ -699,6 +796,7 @@ mod tests {
             continuum: Some(((0, 5), (34, 39))),
             snr_threshold: DEFAULT_SNR_THRESHOLD,
             mask_below_threshold: true,
+            dq_policy: None,
         }
     }
 
@@ -743,7 +841,29 @@ mod tests {
     }
 
     fn fits_sha256(path: &str) -> String {
-        sha256_hex(&without_version_stamp(&std::fs::read(path).unwrap()))
+        sha256_hex(&without_version_stamp(&without_scientific_run_cards(&std::fs::read(path).unwrap())))
+    }
+
+    fn without_scientific_run_cards(bytes: &[u8]) -> Vec<u8> {
+        let block_size = crate::types::constants::BLOCK_SIZE;
+        let mut output = Vec::new();
+        let mut skip = false;
+        for (i, card) in bytes.chunks_exact(FITS_CARD_BYTES).enumerate() {
+            let key = std::str::from_utf8(&card[..8]).unwrap().trim();
+            skip = ["ABRUNID", "ABPROV", "ABSRC", "ABSCIHDU", "ABZERO", "ABDQPOL", "ABDQBIT", "ABDQAPP", "ABDQNUM", "ABDQHDU"].contains(&key)
+                || (key == "HISTORY" && ["AstroBurst collapse zero policy:", "AstroBurst DQ policy:"].iter().any(|marker| String::from_utf8_lossy(card).contains(marker)))
+                || (key == "CONTINUE" && skip);
+            if !skip {
+                output.extend_from_slice(card);
+            }
+            if key == "END" {
+                let data_start = ((i + 1) * FITS_CARD_BYTES).div_ceil(block_size) * block_size;
+                output.resize(output.len().div_ceil(block_size) * block_size, b' ');
+                output.extend_from_slice(&bytes[data_start..]);
+                return output;
+            }
+        }
+        panic!("FITS header has no END card");
     }
 
     fn pre_err_region_sha256(response: &RegionSpectrumResponse) -> String {
@@ -771,11 +891,11 @@ mod tests {
         ];
         let (z0, z1) = GOLDEN_COLLAPSE_RANGE;
         for mode in [CollapseMode::Sum, CollapseMode::Mean, CollapseMode::Median] {
-            let files = collapse_range_files(&set, &path, out, z0, z1, mode, Instant::now()).unwrap();
+            let files = collapse_range_files(&VerifiedCubeSet::open(&path).unwrap(), &path, out, z0, z1, mode, Instant::now()).unwrap();
             assert!(!files.has_err);
             hashes.push((mode.name(), fits_sha256(&files.fits_path)));
         }
-        let maps = moment_map_files(&set, &path, out, &line_moment_config(), Instant::now()).unwrap();
+        let maps = moment_map_files(&VerifiedCubeSet::open(&path).unwrap(), &path, out, &line_moment_config(), Instant::now()).unwrap();
         assert!(!maps.has_err && maps.noise_factor.is_none());
         for (name, files) in [("m0", &maps.m0), ("m1", &maps.m1), ("m2", &maps.m2)] {
             hashes.push((name, fits_sha256(&files.fits_path)));
@@ -792,6 +912,114 @@ mod tests {
     }
 
     #[test]
+    fn collapse_and_moment_runs_keep_distinct_products_linked_to_their_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = open_cube(&dir, "source.fits", GOLDEN_NOISE);
+        let output = dir.path().to_str().unwrap();
+        let first = collapse_range_files(&VerifiedCubeSet::open(&path).unwrap(), &path, output, 15, 25, CollapseMode::Sum, Instant::now()).unwrap();
+        let before = std::fs::read(&first.fits_path).unwrap();
+        let second = collapse_range_files(&VerifiedCubeSet::open(&path).unwrap(), &path, output, 15, 25, CollapseMode::Mean, Instant::now()).unwrap();
+        assert_ne!(first.provenance.run_id, second.provenance.run_id);
+        assert_ne!(first.fits_path, second.fits_path);
+        assert_eq!(std::fs::read(&first.fits_path).unwrap(), before);
+        for result in [&first, &second] {
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&result.provenance_path).unwrap()).unwrap();
+            assert_eq!(saved["products"]["fits_path"], result.fits_path);
+            assert_eq!(saved["provenance"], serde_json::to_value(&result.provenance).unwrap());
+            let reopened = reopen(&result.fits_path);
+            assert_eq!(reopened.header.get("ABRUNID"), Some(result.provenance.run_id.as_str()));
+            assert_eq!(reopened.header.get("ABPROV"), Some("provenance.json"));
+            assert_eq!(reopened.header.get("ABSRC"), Some(path.as_str()));
+        }
+        let cfg = line_moment_config();
+        let first = moment_map_files(&VerifiedCubeSet::open(&path).unwrap(), &path, output, &cfg, Instant::now()).unwrap();
+        let before = std::fs::read(&first.m0.fits_path).unwrap();
+        let second = moment_map_files(&VerifiedCubeSet::open(&path).unwrap(), &path, output, &MomentConfig { mask_below_threshold: false, ..cfg }, Instant::now()).unwrap();
+        assert_ne!(first.provenance.run_id, second.provenance.run_id);
+        assert_ne!(first.m0.fits_path, second.m0.fits_path);
+        assert_eq!(std::fs::read(&first.m0.fits_path).unwrap(), before);
+        for result in [&first, &second] {
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&result.provenance_path).unwrap()).unwrap();
+            assert_eq!(saved["products"]["m0"]["fits_path"], result.m0.fits_path);
+            assert_eq!(saved["provenance"], serde_json::to_value(&result.provenance).unwrap());
+            for map in [&result.m0, &result.m1, &result.m2] {
+                assert_eq!(reopen(&map.fits_path).header.get("ABRUNID"), Some(result.provenance.run_id.as_str()));
+            }
+        }
+    }
+
+    #[test]
+    fn collapse_zero_policy_is_explicit_in_products_and_manifests_and_omission_preserves_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-policy.fits");
+        write_cube(&path, 4, 2, 3, &[("BUNIT", "'Jy'")], |z, _, x| match x {
+            0 => [0.0, 2.0, 4.0][z],
+            1 => [f32::NAN, 2.0, 4.0][z],
+            2 => 0.0,
+            _ => -2.0,
+        });
+        let key = path.to_str().unwrap();
+        for requested in [None, Some(CollapseZeroPolicy::ExcludeZeroPadding), Some(CollapseZeroPolicy::IncludePhysicalZeros)] {
+            let policy = requested.unwrap_or_default();
+            for mode in [CollapseMode::Sum, CollapseMode::Mean, CollapseMode::Median] {
+                let response = collapse_range_json(key, dir.path().to_str().unwrap(), 0, 2, mode.name(), requested, None).unwrap();
+                assert_eq!(response["zero_policy"], policy.name());
+                assert!(response["notes"].as_array().unwrap().iter().any(|n| n.as_str() == Some(policy.note())));
+                let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(response["provenance_path"].as_str().unwrap()).unwrap()).unwrap();
+                assert_eq!(saved["provenance"]["parameters"]["zero_policy"], policy.name());
+                assert_eq!(saved["provenance"]["effective"]["zero_policy"], policy.name());
+                assert_eq!(saved["provenance"]["effective"]["dq_applied"], false);
+                let product = reopen(response["fits_path"].as_str().unwrap());
+                assert_eq!(product.header.get("ABZERO"), Some(policy.name()));
+                assert_eq!(product.header.get_i64("BITPIX"), Some(-32));
+                assert_eq!(product.header.get("BUNIT"), Some(if mode == CollapseMode::Sum { "Jy x channels" } else { "Jy" }));
+                assert!(product.header.cards.iter().any(|(k, v)| k == "HISTORY" && v == &format!("AstroBurst collapse zero policy: {}", policy.name())));
+                assert_eq!(product.image[(0, 0)], if mode == CollapseMode::Sum { 6.0 } else if policy == CollapseZeroPolicy::IncludePhysicalZeros { 2.0 } else { 3.0 });
+                if policy == CollapseZeroPolicy::IncludePhysicalZeros {
+                    assert_eq!(product.image[(0, 2)], 0.0);
+                } else {
+                    assert!(product.image[(0, 2)].is_nan());
+                }
+                assert_eq!(product.image[(0, 1)], if mode == CollapseMode::Sum { 6.0 } else { 3.0 });
+            }
+        }
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn dq_policy_is_recorded_consistently_for_collapse_and_moment_products() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq-products.fits");
+        write_line_cube_mef(&path, 0.01, |_, _, _| 0.5, |z, _, _| if z == 20 { (1 << 24) | 1 } else { 1 << 24 });
+        let key = path.to_str().unwrap();
+        let expected_count = (LINE_CUBE_SIZE * LINE_CUBE_SIZE) as u64;
+        for requested in [None, Some(DqPolicy::Ignore), Some(DqPolicy::DoNotUse)] {
+            let policy = requested.unwrap_or_default();
+            let applied = policy == DqPolicy::DoNotUse;
+            let collapse = collapse_range_json(key, dir.path().to_str().unwrap(), 8, 32, "mean", Some(CollapseZeroPolicy::IncludePhysicalZeros), requested).unwrap();
+            let cfg = MomentConfig { dq_policy: requested, ..line_moment_config() };
+            let moments = moment_maps_json(key, dir.path().to_str().unwrap(), &cfg).unwrap();
+            for (response, fits) in [(&collapse, collapse["fits_path"].as_str().unwrap()), (&moments, moments["m0"]["fits_path"].as_str().unwrap())] {
+                assert_eq!(response["dq_policy"], policy.name());
+                assert_eq!(response["dq_applied"], applied);
+                assert_eq!(response["dq_hdu"], json!(applied.then_some(3)));
+                assert_eq!(response["dq_excluded_samples"], if applied { expected_count } else { 0 });
+                let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(response["provenance_path"].as_str().unwrap()).unwrap()).unwrap();
+                assert_eq!(saved["provenance"]["parameters"]["dq_policy"], json!(requested));
+                assert_eq!(saved["provenance"]["effective"]["dq_policy"], policy.name());
+                assert_eq!(saved["provenance"]["effective"]["dq_applied"], applied);
+                for hdu in [1, 2] {
+                    let header = crate::infra::fits::reader::extract_header_by_index(&File::open(fits).unwrap(), hdu).unwrap();
+                    assert_eq!(header.get("ABDQPOL"), Some(policy.name()));
+                    assert_eq!(header.get("ABDQAPP"), Some(if applied { "T" } else { "F" }));
+                    assert_eq!(header.get_i64("ABDQNUM"), Some(if applied { expected_count as i64 } else { 0 }));
+                }
+            }
+        }
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
     fn the_golden_hash_ignores_only_the_version_stamp_cards() {
         let stamp = format!("AstroBurst {}", env!("CARGO_PKG_VERSION"));
         let card = |text: &str| format!("{:<width$}", text, width = FITS_CARD_BYTES).into_bytes();
@@ -802,6 +1030,31 @@ mod tests {
         assert_eq!(&normalised[..FITS_CARD_BYTES], card("PROGRAM = 'AstroBurst'").as_slice());
         assert_eq!(&normalised[FITS_CARD_BYTES..], &stamped[FITS_CARD_BYTES..]);
         assert_eq!(without_version_stamp(&other), other);
+    }
+
+    #[test]
+    fn the_golden_hash_removes_only_run_cards_and_their_continuations_before_the_data() {
+        let block_size = crate::types::constants::BLOCK_SIZE;
+        let card = |text: &str| format!("{:<width$}", text, width = FITS_CARD_BYTES).into_bytes();
+        let mut science = card("SIMPLE  = T");
+        for i in 0..30 {
+            science.extend(card(&format!("HISTORY unchanged {i}")));
+        }
+        science.extend(card("BUNIT   = 'Jy/beam'"));
+        science.extend(card("ABPROC  = 'collapse_sum'"));
+        science.extend(card("OBSERVER= 'a long retained&'"));
+        science.extend(card("CONTINUE  'observer name'"));
+        let mut stamped = science.clone();
+        for text in ["ABRUNID = 'collapse-random'", "ABPROV  = 'provenance.json'", "ABSRC   = 'long path&'", "CONTINUE  'source.fits'", "ABSCIHDU= 1"] {
+            stamped.extend(card(text));
+        }
+        let data = b"ABRUNID scientific pixel bytes";
+        for bytes in [&mut science, &mut stamped] {
+            bytes.extend(card("END"));
+            bytes.resize(bytes.len().div_ceil(block_size) * block_size, b' ');
+            bytes.extend(data);
+        }
+        assert_eq!(without_scientific_run_cards(&stamped), science);
     }
 
     #[test]
@@ -872,7 +1125,7 @@ mod tests {
             (CollapseMode::Mean, sum_err / n),
             (CollapseMode::Median, std::f64::consts::FRAC_PI_2.sqrt() * sum_err / n),
         ] {
-            let value = collapse_range_json(&key, &out, z0, z1, mode.name()).unwrap();
+            let value = collapse_range_json(&key, &out, z0, z1, mode.name(), None, None).unwrap();
             assert_eq!(value["has_err"], true, "{}", value);
             assert_eq!(value["err_source"], SET_ERR_SOURCE, "{}", value);
             let fits = value["fits_path"].as_str().unwrap();
@@ -1073,7 +1326,7 @@ mod tests {
         assert!(region["err"].is_null() && region["noise_factor"].is_null(), "{}", region);
         assert!(reason(&notes_of(&region)), "{:?}", notes_of(&region));
         let out = out_dir(&dir);
-        let collapse = collapse_range_json(&key, &out, 15, 25, "sum").unwrap();
+        let collapse = collapse_range_json(&key, &out, 15, 25, "sum", None, None).unwrap();
         assert_eq!(collapse["has_err"], false);
         assert!(reason(&notes_of(&collapse)), "{:?}", notes_of(&collapse));
         let moments = moment_maps_json(&key, &out, &line_moment_config()).unwrap();
@@ -1109,7 +1362,7 @@ mod tests {
         let (path, set) = open_cube(&dir, "line.fits", 0.0);
         let out_dir = dir.path().join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let out = collapse_range_files(&set, &path, out_dir.to_str().unwrap(), 15, 25, CollapseMode::Sum, Instant::now()).unwrap();
+        let out = collapse_range_files(&VerifiedCubeSet::open(&path).unwrap(), &path, out_dir.to_str().unwrap(), 15, 25, CollapseMode::Sum, Instant::now()).unwrap();
         assert_eq!(out.mode, "sum");
         assert_eq!(out.dimensions, [LINE_CUBE_SIZE, LINE_CUBE_SIZE]);
         assert!(out.fits_path.ends_with("line_collapse_sum_15-25.fits"));
@@ -1146,12 +1399,11 @@ mod tests {
             &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "1.0E-13"), ("PIXAR_A2", "0.0042"), ("SATURATE", "5000.0"), ("DATAMAX", "3.0")],
         );
         let key = path.to_str().unwrap();
-        let set = alone(LazyCube::open(key).unwrap());
         let out = dir.path().join("out");
         let out = out.to_str().unwrap();
         std::fs::create_dir_all(out).unwrap();
 
-        let sum = collapse_range_files(&set, key, out, 0, 39, CollapseMode::Sum, Instant::now()).unwrap();
+        let sum = collapse_range_files(&VerifiedCubeSet::open(key).unwrap(), key, out, 0, 39, CollapseMode::Sum, Instant::now()).unwrap();
         let header = reopen(&sum.fits_path).header;
         assert_eq!(header.get("BUNIT"), Some("MJy/sr x channels"));
         for dropped in ["PIXAR_SR", "PIXAR_A2", "SATURATE", "DATAMAX"] {
@@ -1160,7 +1412,7 @@ mod tests {
         assert_eq!(header.get(HEADER_ABPROC), Some("collapse-sum"));
         assert!(PhotCal::from_header(&header, None).is_none(), "a channel sum was calibrated as a flux density");
 
-        let mean = collapse_range_files(&set, key, out, 0, 39, CollapseMode::Mean, Instant::now()).unwrap();
+        let mean = collapse_range_files(&VerifiedCubeSet::open(key).unwrap(), key, out, 0, 39, CollapseMode::Mean, Instant::now()).unwrap();
         let header = reopen(&mean.fits_path).header;
         assert_eq!(header.get("BUNIT"), Some("MJy/sr"));
         assert!(header.get("PIXAR_SR").is_some());
@@ -1210,10 +1462,10 @@ mod tests {
     #[test]
     fn moment_map_files_write_three_2d_fits_with_their_units() {
         let dir = tempfile::tempdir().unwrap();
-        let (path, set) = open_cube(&dir, "line.fits", 0.01);
+        let (path, _) = open_cube(&dir, "line.fits", 0.01);
         let out_dir = dir.path().join("maps");
         std::fs::create_dir_all(&out_dir).unwrap();
-        let out = moment_map_files(&set, &path, out_dir.to_str().unwrap(), &line_moment_config(), Instant::now()).unwrap();
+        let out = moment_map_files(&VerifiedCubeSet::open(&path).unwrap(), &path, out_dir.to_str().unwrap(), &line_moment_config(), Instant::now()).unwrap();
         assert_eq!(out.m0_unit, "Jy/beam km/s");
         assert_eq!(out.velocity_unit, "km/s");
         assert_eq!(out.n_channels, 25);
@@ -1241,10 +1493,9 @@ mod tests {
         let path = dir.path().join("mjy_line.fits");
         write_line_cube_with_cards(&path, &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "1.0E-13"), ("SATURATE", "5000.0")]);
         let key = path.to_str().unwrap();
-        let set = alone(LazyCube::open(key).unwrap());
         let out = dir.path().join("maps");
         std::fs::create_dir_all(&out).unwrap();
-        let maps = moment_map_files(&set, key, out.to_str().unwrap(), &line_moment_config(), Instant::now()).unwrap();
+        let maps = moment_map_files(&VerifiedCubeSet::open(key).unwrap(), key, out.to_str().unwrap(), &line_moment_config(), Instant::now()).unwrap();
         assert_eq!(maps.m0_unit, "MJy/sr km/s");
         let header = reopen(&maps.m0.fits_path).header;
         assert_eq!(header.get("BUNIT"), Some("MJy/sr km/s"));
@@ -1274,7 +1525,7 @@ mod tests {
         let png = format!("{}/frame.png", out);
         let frame = cube_frame_json(&key, 3, &png, None).unwrap();
         assert_eq!(frame[RES_OUTPUT_PATH], png);
-        let collapsed = collapse_range_json(&key, out, 15, 25, "mean").unwrap();
+        let collapsed = collapse_range_json(&key, out, 15, 25, "mean", None, None).unwrap();
         assert!(collapsed["fits_path"].as_str().unwrap().ends_with("refcube_hdu0_collapse_mean_15-25.fits"));
         let moments = moment_maps_json(&key, out, &line_moment_config()).unwrap();
         assert!(moments["m0"]["fits_path"].as_str().unwrap().contains("refcube_hdu0_m0_8-32"));
@@ -1293,7 +1544,7 @@ mod tests {
         let cube = LazyCube::open(key).unwrap();
         for mode in [CollapseMode::Mean, CollapseMode::Median] {
             let collapsed = cube.collapse_range(0, last, mode).unwrap();
-            let response = collapse_range_json(key, out, 0, last, mode.name()).unwrap();
+            let response = collapse_range_json(key, out, 0, last, mode.name(), None, None).unwrap();
             let png = response["png_path"].as_str().unwrap();
             let written = image::open(png).unwrap().to_luma8();
             assert_eq!(written.dimensions(), (LINE_CUBE_SIZE as u32, LINE_CUBE_SIZE as u32));

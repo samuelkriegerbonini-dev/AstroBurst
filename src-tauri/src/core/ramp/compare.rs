@@ -8,9 +8,12 @@ use serde::Serialize;
 
 use crate::core::ramp::irs2::Irs2Layout;
 use crate::core::ramp::quick_slope::{DQ_DO_NOT_USE, DQ_JUMP_DET, DQ_SATURATED};
+use crate::core::metadata::photcal::card_text;
 use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::reader::{extract_image_mmap_by_index, extract_int_plane_by_index, list_extensions, read_primary_header, HduInfo};
-use crate::math::median::{f32_cmp, f64_cmp};
+use crate::math::median::{exact_median_f64, f32_cmp, f64_cmp};
+use crate::types::constants::MAD_TO_SIGMA;
+use crate::types::header::HduHeader;
 
 pub const RATE_BIN_EDGES: [f64; 8] = [f64::NEG_INFINITY, 0.05, 0.3, 1.0, 3.0, 10.0, 30.0, f64::INFINITY];
 pub const FAINT_BIN_COUNT: usize = 2;
@@ -26,6 +29,18 @@ pub const REL_HIST_MIN_RATE: f32 = 1.0;
 pub const DELTA_HIST_RANGE: f64 = 0.5;
 pub const DELTA_HIST_MAX_RATE: f32 = 0.05;
 pub const PEARSON_MIN_ROWS: usize = 3;
+pub const QUICK_EXCLUDE_BITS: u32 = DQ_DO_NOT_USE;
+pub const OFFICIAL_EXCLUDE_BITS: u32 = u32::MAX;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DifferenceMetrics {
+    pub n: usize,
+    pub bias: f64,
+    pub mae: f64,
+    pub rmse: f64,
+    pub median_delta: f64,
+    pub mad_sigma: f64,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CompareBin {
@@ -87,9 +102,15 @@ pub struct RateComparison {
     pub rel_hist: Histogram,
     pub delta_hist: Histogram,
     pub science_rows: Option<(usize, usize)>,
+    pub quick_exclude_bits: u32,
+    pub official_exclude_bits: u32,
+    pub ratio_min_abs_rate: f32,
+    pub difference_metrics: DifferenceMetrics,
+    pub warnings: Vec<String>,
 }
 
 pub struct OfficialRate {
+    pub header: HduHeader,
     pub sci: Array2<f32>,
     pub err: Option<Array2<f32>>,
     pub dq: Array2<u32>,
@@ -97,6 +118,7 @@ pub struct OfficialRate {
 }
 
 pub struct QuickSlopePlanes {
+    pub header: HduHeader,
     pub sci: Array2<f32>,
     pub dq: Array2<u32>,
     pub ngood: Array2<i32>,
@@ -119,11 +141,22 @@ fn check_plane_shape(name: &str, shape: (usize, usize), reference: (usize, usize
     Ok(())
 }
 
+fn read_rate_science(file: &File, hdus: &[HduInfo], path: &str) -> Result<(Array2<f32>, HduHeader)> {
+    let image = extract_image_mmap_by_index(file, required_hdu(hdus, "SCI", path)?)?;
+    if let Some(unit) = card_text(&image.header, "BUNIT") {
+        let compact = unit.to_ascii_uppercase().replace(' ', "");
+        if !matches!(compact.as_str(), "DN/S" | "DN*S^-1" | "DN*S**-1" | "DN.S-1") {
+            bail!("{path}: SCI BUNIT {unit} is not DN/s; compare slopes in the same detector count-rate units");
+        }
+    }
+    Ok((image.image, image.header))
+}
+
 pub fn read_official_rate(path: &str) -> Result<OfficialRate> {
     let (readable, _decompressed) = resolve_gzip(Path::new(path))?;
     let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
     let hdus = list_extensions(&file)?;
-    let sci = extract_image_mmap_by_index(&file, required_hdu(&hdus, "SCI", path)?)?.image;
+    let (sci, header) = read_rate_science(&file, &hdus, path)?;
     let err = match hdu_named(&hdus, "ERR") {
         Some(index) => Some(extract_image_mmap_by_index(&file, index)?.image),
         None => None,
@@ -137,19 +170,19 @@ pub fn read_official_rate(path: &str) -> Result<OfficialRate> {
         .get("DETECTOR")
         .map(|d| d.trim().trim_matches('\'').trim().to_string())
         .filter(|d| !d.is_empty());
-    Ok(OfficialRate { sci, err, dq, detector })
+    Ok(OfficialRate { header, sci, err, dq, detector })
 }
 
 pub fn read_qslope(path: &str) -> Result<QuickSlopePlanes> {
     let (readable, _decompressed) = resolve_gzip(Path::new(path))?;
     let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
     let hdus = list_extensions(&file)?;
-    let sci = extract_image_mmap_by_index(&file, required_hdu(&hdus, "SCI", path)?)?.image;
+    let (sci, header) = read_rate_science(&file, &hdus, path)?;
     let dq = extract_int_plane_by_index(&file, required_hdu(&hdus, "DQ", path)?)?.bits;
     let ngood = extract_int_plane_by_index(&file, required_hdu(&hdus, "NGOOD", path)?)?.bits.mapv(|v| v as i32);
     check_plane_shape("DQ", dq.dim(), sci.dim(), path)?;
     check_plane_shape("NGOOD", ngood.dim(), sci.dim(), path)?;
-    Ok(QuickSlopePlanes { sci, dq, ngood })
+    Ok(QuickSlopePlanes { header, sci, dq, ngood })
 }
 
 fn nearest_rank(sorted: &[f64], p: f64) -> f64 {
@@ -209,13 +242,9 @@ pub fn row_profile(img: ArrayView2<f32>, good: ArrayView2<bool>) -> Vec<f64> {
         .collect()
 }
 
-pub fn zero_shift_check(quick: ArrayView2<f32>, official: ArrayView2<f32>, official_dq: ArrayView2<u32>, max_dy: usize) -> ShiftCheck {
-    let good = Zip::from(&quick)
-        .and(&official)
-        .and(&official_dq)
-        .map_collect(|q, o, d| *d == 0 && q.is_finite() && o.is_finite());
-    let quick_profile = row_profile(quick, good.view());
-    let official_profile = row_profile(official, good.view());
+pub fn zero_shift_check(quick: ArrayView2<f32>, official: ArrayView2<f32>, good: ArrayView2<bool>, max_dy: usize) -> ShiftCheck {
+    let quick_profile = row_profile(quick, good);
+    let official_profile = row_profile(official, good);
     let rows = quick_profile.len() as i64;
     let max_dy = max_dy as i64;
     let correlations: Vec<(i64, f64)> = (-max_dy..=max_dy)
@@ -375,29 +404,50 @@ fn histogram(values: impl Iterator<Item = f64>, half_range: f64, bins: usize) ->
     Histogram { edges, counts }
 }
 
+fn valid_pair(quick: f32, quick_dq: u32, official: f32, official_dq: u32) -> bool {
+    quick.is_finite() && official.is_finite() && quick_dq & QUICK_EXCLUDE_BITS == 0 && official_dq & OFFICIAL_EXCLUDE_BITS == 0
+}
+
+fn comparison_window(quick: &QuickSlopePlanes, official: &OfficialRate, science_rows: Option<(usize, usize)>) -> Result<(usize, usize)> {
+    let (rows, cols) = quick.sci.dim();
+    if official.sci.dim() != (rows, cols) {
+        bail!("quick slope is {rows} x {cols} but the official rate is {} x {}: the two products do not describe the same frame", official.sci.nrows(), official.sci.ncols());
+    }
+    for (name, dim) in [("quick DQ", quick.dq.dim()), ("quick NGOOD", quick.ngood.dim()), ("official DQ", official.dq.dim())] {
+        if dim != (rows, cols) { bail!("{name} is {} x {} but SCI is {rows} x {cols}", dim.0, dim.1); }
+    }
+    if official.err.as_ref().is_some_and(|err| err.dim() != (rows, cols)) { bail!("official ERR dimensions differ from SCI"); }
+    let (r0, r1) = science_rows.unwrap_or((0, rows));
+    if r0 >= r1 || r1 > rows { bail!("science row window {r0}..{r1} is empty or exceeds the {rows} stripped rows"); }
+    Ok((r0, r1))
+}
+
+fn difference_metrics<'a>(pair: &'a WindowedPair<'a>) -> DifferenceMetrics {
+    let deltas: Vec<f64> = good_pairs(pair, pair.quick_sci.nrows(), pair.quick_sci.ncols(), |_| true).map(|(q, o)| q - o).collect();
+    let n = deltas.len();
+    if n == 0 {
+        return DifferenceMetrics { n, bias: f64::NAN, mae: f64::NAN, rmse: f64::NAN, median_delta: f64::NAN, mad_sigma: f64::NAN };
+    }
+    let median_delta = exact_median_f64(&deltas);
+    let deviations: Vec<f64> = deltas.iter().map(|delta| (delta - median_delta).abs()).collect();
+    DifferenceMetrics {
+        n,
+        bias: deltas.iter().sum::<f64>() / n as f64,
+        mae: deltas.iter().map(|delta| delta.abs()).sum::<f64>() / n as f64,
+        rmse: (deltas.iter().map(|delta| delta * delta).sum::<f64>() / n as f64).sqrt(),
+        median_delta,
+        mad_sigma: MAD_TO_SIGMA * exact_median_f64(&deviations),
+    }
+}
+
 pub fn compare_with_rate(
     quick: &QuickSlopePlanes,
     official: &OfficialRate,
     science_rows: Option<(usize, usize)>,
     layout: Option<&Irs2Layout>,
 ) -> Result<RateComparison> {
-    let (rows, cols) = quick.sci.dim();
-    if official.sci.dim() != (rows, cols) {
-        bail!(
-            "quick slope is {rows} x {cols} but the official rate is {} x {}: the two products do not describe the same frame",
-            official.sci.nrows(),
-            official.sci.ncols()
-        );
-    }
-    for (name, dim) in [("quick DQ", quick.dq.dim()), ("quick NGOOD", quick.ngood.dim()), ("official DQ", official.dq.dim())] {
-        if dim != (rows, cols) {
-            bail!("{name} is {} x {} but SCI is {rows} x {cols}", dim.0, dim.1);
-        }
-    }
-    let (r0, r1) = science_rows.unwrap_or((0, rows));
-    if r0 >= r1 || r1 > rows {
-        bail!("science row window {r0}..{r1} is empty or exceeds the {rows} stripped rows");
-    }
+    let (r0, r1) = comparison_window(quick, official, science_rows)?;
+    let cols = quick.sci.ncols();
     let window = s![r0..r1, ..];
     let quick_sci = quick.sci.slice(window);
     let quick_dq = quick.dq.slice(window);
@@ -407,7 +457,7 @@ pub fn compare_with_rate(
         .and(&quick_dq)
         .and(&official_sci)
         .and(&official_dq)
-        .map_collect(|q, qd, o, od| *od == 0 && q.is_finite() && o.is_finite() && qd & DQ_DO_NOT_USE == 0);
+        .map_collect(|q, qd, o, od| valid_pair(*q, *qd, *o, *od));
     let pair = WindowedPair {
         quick_sci,
         quick_dq,
@@ -433,7 +483,7 @@ pub fn compare_with_rate(
             })
             .collect()
     });
-    let zero_shift = zero_shift_check(pair.quick_sci, pair.official_sci, pair.official_dq, ZERO_SHIFT_MAX_DY);
+    let zero_shift = zero_shift_check(pair.quick_sci, pair.official_sci, pair.good.view(), ZERO_SHIFT_MAX_DY);
     let both_finite = |y: usize, x: usize| pair.quick_sci[[y, x]].is_finite() && pair.official_sci[[y, x]].is_finite();
     let flags = |quick_rule: &dyn Fn(u32, i32) -> bool, official_bit: u32, finite_only: bool| {
         confusion(
@@ -462,14 +512,39 @@ pub fn compare_with_rate(
         rel_hist,
         delta_hist,
         science_rows,
+        quick_exclude_bits: QUICK_EXCLUDE_BITS,
+        official_exclude_bits: OFFICIAL_EXCLUDE_BITS,
+        ratio_min_abs_rate: RATIO_MIN_RATE,
+        difference_metrics: difference_metrics(&pair),
+        warnings: [("quick slope", &quick.header), ("official rate", &official.header)].into_iter()
+            .filter(|(_, header)| card_text(header, "BUNIT").is_none())
+            .map(|(name, _)| format!("{name} SCI has no BUNIT: DN/s is assumed from the rate-product contract")).collect(),
     })
 }
 
-pub fn ratio_image(quick_sci: &Array2<f32>, official: &OfficialRate) -> Array2<f32> {
-    Zip::from(quick_sci)
-        .and(&official.sci)
-        .and(&official.dq)
-        .map_collect(|q, o, d| if *d != 0 || o.abs() < RATIO_MIN_RATE { f32::NAN } else { q / o })
+pub struct ComparisonImages {
+    pub ratio: Array2<f32>,
+    pub difference: Array2<f32>,
+}
+
+pub fn comparison_images(quick: &QuickSlopePlanes, official: &OfficialRate, science_rows: Option<(usize, usize)>) -> Result<ComparisonImages> {
+    let (r0, r1) = comparison_window(quick, official, science_rows)?;
+    let mut ratio = Array2::from_elem(quick.sci.dim(), f32::NAN);
+    let mut difference = Array2::from_elem(quick.sci.dim(), f32::NAN);
+    for y in r0..r1 {
+        for x in 0..quick.sci.ncols() {
+            let p = (y, x);
+            let (q, o) = (quick.sci[p], official.sci[p]);
+            if !valid_pair(q, quick.dq[p], o, official.dq[p]) { continue; }
+            let delta = (f64::from(q) - f64::from(o)) as f32;
+            if delta.is_finite() { difference[p] = delta; }
+            if o.abs() >= RATIO_MIN_RATE {
+                let value = (f64::from(q) / f64::from(o)) as f32;
+                if value.is_finite() { ratio[p] = value; }
+            }
+        }
+    }
+    Ok(ComparisonImages { ratio, difference })
 }
 
 #[cfg(test)]
@@ -493,8 +568,8 @@ mod tests {
     }
 
     fn planes(rows: usize, cols: usize, pixel: impl Fn(usize, usize) -> Pixel) -> (QuickSlopePlanes, OfficialRate) {
-        let mut quick = QuickSlopePlanes { sci: Array2::zeros((rows, cols)), dq: Array2::zeros((rows, cols)), ngood: Array2::zeros((rows, cols)) };
-        let mut official = OfficialRate { sci: Array2::zeros((rows, cols)), err: Some(Array2::from_elem((rows, cols), 0.06)), dq: Array2::zeros((rows, cols)), detector: Some("NRS1".into()) };
+        let mut quick = QuickSlopePlanes { header: HduHeader::empty(), sci: Array2::zeros((rows, cols)), dq: Array2::zeros((rows, cols)), ngood: Array2::zeros((rows, cols)) };
+        let mut official = OfficialRate { header: HduHeader::empty(), sci: Array2::zeros((rows, cols)), err: Some(Array2::from_elem((rows, cols), 0.06)), dq: Array2::zeros((rows, cols)), detector: Some("NRS1".into()) };
         for y in 0..rows {
             for x in 0..cols {
                 let p = pixel(y, x);
@@ -512,8 +587,8 @@ mod tests {
         Array2::from_shape_fn((rows, cols), |(y, x)| irs2_truth_slope(y, x) + 0.01 * ((y * 7 + x * 3) % 5) as f32)
     }
 
-    fn all_good(rows: usize, cols: usize) -> Array2<u32> {
-        Array2::zeros((rows, cols))
+    fn all_good(rows: usize, cols: usize) -> Array2<bool> {
+        Array2::from_elem((rows, cols), true)
     }
 
     fn bin_for(bins: &[CompareBin], lo: f64) -> &CompareBin {
@@ -721,11 +796,94 @@ mod tests {
             (1, 1) => clean(0.6, 0.3),
             _ => clean(1.0, -1.0),
         });
-        let ratio = ratio_image(&quick.sci, &official);
+        let ratio = comparison_images(&quick, &official, None).unwrap().ratio;
         assert!(ratio[[0, 0]].is_nan() && ratio[[0, 1]].is_nan() && ratio[[0, 2]].is_nan());
         assert_eq!(ratio[[1, 0]], 1.5);
         assert_eq!(ratio[[1, 1]], 2.0);
         assert_eq!(ratio[[1, 2]], -1.0);
+    }
+
+    #[test]
+    fn comparison_products_reject_nonfinite_inputs_overflow_and_quick_do_not_use() {
+        let (quick, official) = planes(1, 8, |_, x| match x {
+            0 => clean(1.0, f32::INFINITY),
+            1 => clean(f32::INFINITY, 1.0),
+            2 => clean(f32::NAN, 1.0),
+            3 => clean(1.0, f32::NEG_INFINITY),
+            4 => Pixel { quick: 1.0, rate: 1.0, quick_dq: DQ_DO_NOT_USE, rate_dq: 0, ngood: 2 },
+            5 => clean(f32::MAX, 0.3),
+            6 => Pixel { quick: 2.0, rate: 1.0, quick_dq: DQ_JUMP_DET, rate_dq: 0, ngood: 8 },
+            _ => clean(-2.0, -1.0),
+        });
+        let ratio = comparison_images(&quick, &official, None).unwrap().ratio;
+        for x in 0..6 { assert!(ratio[[0, x]].is_nan(), "pixel {x}: {}", ratio[[0, x]]); }
+        assert_eq!(ratio[[0, 6]], 2.0);
+        assert_eq!(ratio[[0, 7]], 2.0);
+    }
+
+    #[test]
+    fn comparison_zero_shift_uses_the_same_quick_dq_population_as_statistics() {
+        let truth = truth_image(200, 32);
+        let (quick, official) = planes(200, 32, |y, x| {
+            if x < 16 { clean(truth[[y, x]], truth[[y, x]]) }
+            else { Pixel { quick: 100.0 * truth[[(y + 3).min(199), x]], rate: truth[[y, x]], quick_dq: DQ_DO_NOT_USE, rate_dq: 0, ngood: 2 } }
+        });
+        let comparison = compare_with_rate(&quick, &official, None, None).unwrap();
+        assert_eq!(comparison.good_pixels, 200 * 16);
+        assert!(comparison.zero_shift.passed, "{:?}", comparison.zero_shift);
+    }
+
+    #[test]
+    fn comparison_metrics_and_signed_difference_share_the_selected_population() {
+        let deltas = [-2.0, -1.0, 0.0, 1.0, 100.0];
+        let (quick, official) = planes(2, 7, |y, x| match (y, x) {
+            (0, _) => clean(1000.0, 10.0),
+            (1, 5) => Pixel { quick: 1000.0, rate: 10.0, quick_dq: DQ_DO_NOT_USE, rate_dq: 0, ngood: 2 },
+            (1, 6) => Pixel { quick: 1000.0, rate: 10.0, quick_dq: 0, rate_dq: DQ_JUMP_DET, ngood: 10 },
+            (_, x) => clean(10.0 + deltas[x], 10.0),
+        });
+        let comparison = compare_with_rate(&quick, &official, Some((1, 2)), None).unwrap();
+        let metrics = &comparison.difference_metrics;
+        assert_eq!((comparison.good_pixels, metrics.n), (5, 5));
+        assert!((metrics.bias - 19.6).abs() < 1e-12);
+        assert!((metrics.mae - 20.8).abs() < 1e-12);
+        assert!((metrics.rmse - (10006.0_f64 / 5.0).sqrt()).abs() < 1e-12);
+        assert_eq!(metrics.median_delta, 0.0);
+        assert_eq!(metrics.mad_sigma, MAD_TO_SIGMA);
+        assert_eq!((comparison.quick_exclude_bits, comparison.official_exclude_bits), (1, u32::MAX));
+        let images = comparison_images(&quick, &official, Some((1, 2))).unwrap();
+        assert!(images.ratio.row(0).iter().all(|value| value.is_nan()));
+        assert!(images.difference.row(0).iter().all(|value| value.is_nan()));
+        assert_eq!(images.difference.slice(s![1, ..5]).to_vec(), deltas);
+        assert!(images.difference[[1, 5]].is_nan() && images.difference[[1, 6]].is_nan());
+        assert_eq!(images.ratio.iter().filter(|value| value.is_finite()).count(), metrics.n);
+    }
+
+    #[test]
+    fn comparison_empty_population_is_unknown_and_bad_error_geometry_is_rejected() {
+        let (quick, mut official) = planes(2, 3, |_, _| Pixel { quick: 1.0, rate: 1.0, quick_dq: DQ_DO_NOT_USE, rate_dq: 0, ngood: 2 });
+        let comparison = compare_with_rate(&quick, &official, None, None).unwrap();
+        assert_eq!(comparison.difference_metrics.n, 0);
+        for value in [comparison.difference_metrics.bias, comparison.difference_metrics.mae, comparison.difference_metrics.rmse, comparison.difference_metrics.mad_sigma] { assert!(value.is_nan()); }
+        assert!(serde_json::to_value(&comparison).unwrap()["difference_metrics"]["rmse"].is_null());
+        assert!(comparison_images(&quick, &official, None).unwrap().difference.iter().all(|value| value.is_nan()));
+        official.err = Some(Array2::zeros((1, 3)));
+        assert!(compare_with_rate(&quick, &official, None, None).unwrap_err().to_string().contains("ERR dimensions"));
+        assert!(comparison_images(&quick, &official, None).is_err());
+    }
+
+    #[test]
+    fn comparison_rate_readers_refuse_units_that_cannot_be_labelled_dn_per_second() {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, unit) in ["MJy/sr", "electron/s", "DN"].into_iter().enumerate() {
+            let path = dir.path().join(format!("wrong-unit-{i}.fits"));
+            write_test_mef(&path, &[], &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols: 2, rows: 2, data: HduData::F32(vec![1.0; 4]), extra_cards: vec![("BUNIT", format!("'{unit}'"))] },
+            ]);
+            for error in [read_official_rate(path.to_str().unwrap()).err().unwrap(), read_qslope(path.to_str().unwrap()).err().unwrap()] {
+                assert!(error.to_string().contains("not DN/s"), "{error}");
+            }
+        }
     }
 
     #[test]

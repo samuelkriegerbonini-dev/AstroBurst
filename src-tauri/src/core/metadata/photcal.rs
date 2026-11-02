@@ -91,7 +91,8 @@ pub(crate) fn normalized_unit(bunit: &str) -> String {
 }
 
 pub(crate) fn is_mjy_per_sr(unit: &str) -> bool {
-    MJY_PER_SR_UNITS.contains(&unit)
+    let compact: String = unit.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.starts_with('M') && MJY_PER_SR_UNITS.contains(&compact.to_ascii_uppercase().as_str())
 }
 
 fn is_dn_per_second(unit: &str) -> bool {
@@ -161,10 +162,13 @@ impl PhotCal {
     pub fn from_header(header: &HduHeader, wcs: Option<&WcsTransform>) -> Option<PhotCal> {
         let bunit = card_text(header, "BUNIT");
         let unit = bunit.as_deref().map(normalized_unit).unwrap_or_default();
+        if is_mjy_per_sr(&unit) && !bunit.as_deref().is_some_and(is_mjy_per_sr) {
+            return None;
+        }
         let mut notes = Vec::new();
         let mut warnings = Vec::new();
 
-        let convention = if is_mjy_per_sr(&unit) {
+        let convention = if bunit.as_deref().is_some_and(is_mjy_per_sr) {
             let area = pixel_area_sr(header, &["PIXAR_SR"], wcs, &mut warnings)?;
             let pixar_a2 = match card_f64(header, "PIXAR_A2").filter(|v| *v > 0.0) {
                 Some(a2) if !area.replaced_card => Some(a2),
@@ -339,8 +343,11 @@ pub fn missing_calibration_reason(header: Option<&HduHeader>) -> String {
     };
     let bunit = card_text(header, "BUNIT");
     let unit = bunit.as_deref().map(normalized_unit).unwrap_or_default();
-    if is_mjy_per_sr(&unit) {
+    if bunit.as_deref().is_some_and(is_mjy_per_sr) {
         return "BUNIT is MJy/sr but PIXAR_SR is missing and no WCS pixel scale is available".into();
+    }
+    if is_mjy_per_sr(&unit) {
+        return "BUNIT has a milli prefix (m), not mega (M); convert this surface brightness with Cube Prep before using this photometry calibration".into();
     }
     if is_dn_per_second(&unit) {
         return format!(
@@ -757,8 +764,20 @@ mod tests {
     }
 
     #[test]
+    fn p0_millijansky_must_not_use_megajansky_photometry() {
+        for unit in ["mJy/sr", " mjy/SR ", "mJy sr-1"] {
+            let header = make_header(&[("BUNIT", unit), ("PIXAR_SR", "2.1E-13")]);
+            let cal = PhotCal::from_header(&header, None);
+            assert!(cal.is_none(), "{unit} must not use the megajansky multiplier: {cal:?}");
+            assert!(!missing_calibration_reason(Some(&header)).contains("BUNIT is MJy/sr"));
+            let with_count_calibration = make_header(&[("BUNIT", unit), ("PIXAR_SR", "2.1E-13"), ("PHOTFLAM", "1e-19"), ("PHOTPLAM", "15000")]);
+            assert!(PhotCal::from_header(&with_count_calibration, None).is_none());
+        }
+    }
+
+    #[test]
     fn only_a_plain_mjy_per_sr_unit_is_calibrated_as_a_flux_density() {
-        for unit in ["MJy/sr", "MJy / sr", "MJy sr-1", "MJy.sr**-1", " mjy/SR "] {
+        for unit in ["MJy/sr", "MJy / sr", "MJy sr-1", "MJy.sr**-1", " MJY/SR "] {
             let header = make_header(&[("BUNIT", unit), ("PIXAR_SR", "2.1E-13")]);
             assert!(
                 matches!(PhotCal::from_header(&header, None).map(|c| c.convention), Some(FluxConvention::JwstMjySr { .. })),

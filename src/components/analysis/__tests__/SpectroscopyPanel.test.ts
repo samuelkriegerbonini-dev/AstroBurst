@@ -3,7 +3,8 @@ import { createElement, isValidElement } from "react";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createFramePublishGate } from "../../../utils/cubeNavigation";
-import type { CollapseRangeResult, CubeDims, MomentMapsResult, NoiseFactor, RegionSpectrum } from "../../../shared/types/cube";
+import { framePublishers } from "../../../utils/rampLabels";
+import type { CollapseRangeResult, CubeDims, LineFitResult, MomentMapsResult, NoiseFactor, RegionSpectrum } from "../../../shared/types/cube";
 import type { Region, RegionShape } from "../../../shared/types/regions";
 import { defaultContinuumWindows } from "../../../utils/spectrumRange";
 import type { RampInfo } from "../../../shared/types/ramp";
@@ -12,6 +13,7 @@ import type { Spectrum1d } from "../../../shared/types/spectrum1d";
 import type { SpectrumDocument } from "../../../utils/spectrumDocument";
 
 const cubeState = vi.hoisted(() => ({ ramp: null as unknown }));
+const fileState = vi.hoisted(() => ({ id: "cube-1", imageRef: "C:/data/cube.fits", reloads: 0, finishedAt: 1 }));
 
 
 const spectralMock = vi.hoisted(() => ({
@@ -26,8 +28,11 @@ const backend = vi.hoisted(() => ({
   regionSpectrum: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   moments: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   collapseRange: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+  fit: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+  inspect: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
 }));
 const spectrumState = vi.hoisted(() => ({ region: null as unknown, regionSource: null as unknown, regionContinuum: null as unknown }));
+const spectrumActions = vi.hoisted(() => ({ begin: vi.fn(() => 41), commit: vi.fn(), fail: vi.fn(), clear: vi.fn() }));
 const regionDocState = vi.hoisted(() => ({ regions: [] as unknown[] }));
 const bandCalls = vi.hoisted(() => ({ calls: [] as { y: readonly number[]; err: readonly number[] | null }[] }));
 
@@ -43,6 +48,8 @@ vi.mock("../../../services/cube", async (importOriginal) => ({
   getCubeSpectrumRegion: backend.regionSpectrum,
   computeMomentMaps: backend.moments,
   collapseCubeRange: backend.collapseRange,
+  fitCubeLines: backend.fit,
+  inspectLineFitSpaxel: backend.inspect,
 }));
 vi.mock("../../../infrastructure/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../infrastructure/tauri")>()),
@@ -79,7 +86,7 @@ vi.mock("../../../utils/lineMeasure", async (importOriginal) => {
 
 vi.mock("../../../context/PreviewContext", () => ({
   useCubeContext: () => ({ isCube: true, ramp: cubeState.ramp, rampSource: cubeState.ramp ? "fits" : null }),
-  useFileContext: () => ({ file: { path: "C:/data/cube.fits", result: { header: { BUNIT: "DN" } } } }),
+  useFileContext: () => ({ file: { ...fileState, path: "C:/data/cube.fits", result: { header: { BUNIT: "DN" } } } }),
   useRenderContext: () => ({ processed: null }),
 }));
 vi.mock("../../../hooks/useSpectrumStore", () => ({
@@ -90,14 +97,15 @@ vi.mock("../../../hooks/useSpectrumStore", () => ({
     regionLoading: false,
     regionError: null,
   }),
-  beginRegionSpectrum: () => {},
-  clearRegionSpectrum: () => {},
-  commitRegionSpectrum: (region: unknown, source: unknown, continuum: unknown = null) => {
+  beginRegionSpectrum: spectrumActions.begin,
+  clearRegionSpectrum: spectrumActions.clear,
+  commitRegionSpectrum: (region: unknown, source: unknown, continuum: unknown = null, request: unknown = undefined) => {
+    spectrumActions.commit(region, source, continuum, request);
     spectrumState.region = region;
     spectrumState.regionSource = source;
     spectrumState.regionContinuum = continuum;
   },
-  failRegionSpectrum: () => {},
+  failRegionSpectrum: spectrumActions.fail,
 }));
 vi.mock("../../../hooks/useRampStore", () => ({ useRampIntegration: () => 0, setIntegration: () => {} }));
 vi.mock("../../../hooks/useRegionKey", () => ({ useRegionKey: () => null }));
@@ -997,6 +1005,7 @@ function collapseResult(extra: Partial<CollapseRangeResult> = {}): CollapseRange
     z0: 5,
     z1: 39,
     mode: "median",
+    zero_policy: "include_physical_zeros",
     dimensions: [8, 8],
     has_err: true,
     err_source: "ERR HDU 2",
@@ -1041,6 +1050,22 @@ describe("SpectroscopyPanel moment and collapse error planes", () => {
 
   const outputNoteFor = (tree: ReactNode, path: string, what: string) => mustFind(tree, (p, type) => type === OutputNote && p.path === path, what);
 
+  it.each(["Moments", "Collapse range", "Collapse Mean"])("exposes the current %s manifest and clears it after a source change", async (label) => {
+    const provenance = { source: { input_ref: "C:/data/cube.fits", sha256: "1234567890abcdef".repeat(4) }, integrity: "sha256_before_open_and_before_publication" };
+    const trace = { provenance_path: "C:/out/run/provenance.json", provenance };
+    backend.moments.mockResolvedValue(momentResult(trace));
+    backend.collapseRange.mockResolvedValue(collapseResult(trace));
+    const props = cubeProps(restDims);
+    pass(props);
+    commitRangeStart(pass(props), 5);
+    await (mustFind(pass(props), (p) => p.label === label, label).onClick as () => Promise<void>)();
+    const note = outputNoteFor(pass(props), trace.provenance_path, "result manifest");
+    expect(note.kind).toBe("manifest");
+    expect(note.provenance).toBe(provenance);
+    const next = settledPanel({ ...props, filePath: "C:/data/other.fits" });
+    expect(findProps(next, (p) => p.path === trace.provenance_path)).toBeNull();
+  });
+
   it("names the moment map on screen as a file of the output folder, which is cleared at launch", async () => {
     const m0 = { png_path: "C:/out/cube_moment0_5-39.png", fits_path: "C:/out/cube_moment0_5-39.fits" };
     const m1 = { png_path: "C:/out/cube_moment1_5-39.png", fits_path: "C:/out/cube_moment1_5-39.fits" };
@@ -1076,5 +1101,511 @@ describe("SpectroscopyPanel moment and collapse error planes", () => {
     const tree = pass(props);
     expect(errPlane(tree, "collapse").children).toBe("ERR written (ERR HDU 2)");
     mustFind(tree, (p) => p.children === MEDIAN_NOTE, "median error note");
+  });
+});
+
+function fitResult(): LineFitResult {
+  return {
+    planes: { velocity: { png_path: "C:/out/fit.png", fits_path: "C:/out/fit.fits", previewUrl: "asset://fit.png" } },
+    plane_order: ["velocity"],
+    units: { flux: "MJy/sr km/s", velocity: "km/s", sigma: "km/s" },
+    sigma_label: "observed",
+    weighting: "err",
+    err_hdu: 2,
+    dq_hdu: 3,
+    z0: 5,
+    z1: 39,
+    n_channels: 35,
+    rest_um: 2.16612,
+    convention: "optical",
+    components: "one",
+    continuum_windows: [[0, 4], [35, 39]],
+    resolving_power: null,
+    snr_threshold: 3,
+    n_fit: 64,
+    n_masked: 0,
+    n_const_continuum: 0,
+    n_two_components: 0,
+    median_chi2_red: 1,
+    notes: [],
+    dimensions: [8, 8],
+    elapsed_ms: 3,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function settledPanel(props: Props): ReactNode {
+  pass(props);
+  return pass(props);
+}
+
+function fitSection(tree: ReactNode): Props {
+  return mustFind(tree, (p) => typeof p.onFit === "function", "fit section");
+}
+
+function axisSection(tree: ReactNode): Props {
+  return mustFind(tree, (p) => typeof p.onRestChange === "function", "spectral axis section");
+}
+
+function clickCalculation(tree: ReactNode, label: string): Promise<void> {
+  return (mustFind(tree, (p) => p.label === label, `${label} button`).onClick as () => Promise<void>)();
+}
+
+type PanelEdit = (tree: ReactNode) => void;
+
+const commonCalculationEdits: [string, PanelEdit][] = [
+  ["range", (tree) => commitRangeStart(tree, 6)],
+  ["continuum", (tree) => (mustFind(tree, (p) => p.label === "Continuum A first channel", "continuum A").onCommit as (n: number) => void)(1)],
+  ["rest wavelength", (tree) => (axisSection(tree).onRestChange as (v: number) => void)(2.16612)],
+  ["velocity convention", (tree) => (axisSection(tree).onConventionChange as (v: string) => void)("radio")],
+];
+
+const fitCalculationEdits: [string, PanelEdit][] = [
+  ...commonCalculationEdits,
+  ["fit S/N", (tree) => (fitSection(tree).onSnrText as (v: string) => void)("5")],
+  ["emission only", (tree) => (fitSection(tree).onEmissionOnly as (v: boolean) => void)(false)],
+  ["ERR weighting", (tree) => (fitSection(tree).onUseErr as (v: boolean) => void)(false)],
+  ["DQ masking", (tree) => (fitSection(tree).onUseDq as (v: boolean) => void)(false)],
+  ["resolving power", (tree) => (fitSection(tree).onResolvingPowerText as (v: string) => void)("2700")],
+  ["components", (tree) => (fitSection(tree).onComponents as (v: string) => void)("two")],
+];
+
+const momentCalculationEdits: [string, PanelEdit][] = [
+  ...commonCalculationEdits,
+  ["moment S/N", (tree) => (mustFind(tree, (p) => p.min === 0 && typeof p.onChange === "function", "moment S/N").onChange as (v: string) => void)("5")],
+  ["moment masking", (tree) => (mustFind(tree, (p) => p.type === "checkbox", "moment mask").onChange as (e: unknown) => void)({ target: { checked: false } })],
+];
+
+describe("SpectroscopyPanel result validity", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    regionDocState.regions = [];
+    fileState.id = "cube-1";
+    fileState.imageRef = "C:/data/cube.fits";
+    fileState.reloads = 0;
+    fileState.finishedAt = 1;
+    spectrumActions.begin.mockClear();
+    spectrumActions.commit.mockClear();
+    spectrumActions.fail.mockClear();
+    spectrumActions.clear.mockClear();
+    backend.regionSpectrum.mockReset();
+    backend.fit.mockReset().mockResolvedValue(fitResult());
+    backend.inspect.mockReset();
+    backend.moments.mockReset().mockResolvedValue(momentResult({ m0: { png_path: "m.png", fits_path: "m.fits", previewUrl: "asset://m.png" } }));
+    backend.collapseRange.mockReset();
+    spectralMock.measure.mockReset().mockImplementation(async (_path, source) => measured(source as LineMeasurement["source"]));
+    spectralMock.axis.mockReset();
+    logMock.append.mockReset();
+  });
+
+  const prepared = () => {
+    const props = { ...cubeProps(), publishGate: createFramePublishGate(), onCubeResult: vi.fn() };
+    settledPanel(props);
+    commitRangeStart(pass(props), 5);
+    settledPanel(props);
+    return props;
+  };
+
+  const calculateWithDq = (tree: ReactNode, label: string) => label === "Fit lines" ? (fitSection(tree).onFit as () => Promise<void>)() : clickCalculation(tree, label);
+  const requestedDq = (label: string) => {
+    if (label !== "Fit lines" && label !== "Moments") return backend.collapseRange.mock.calls.at(-1)?.[6];
+    const config = (label === "Fit lines" ? backend.fit.mock.calls.at(-1)?.[2] : backend.moments.mock.calls.at(-1)?.[2]) as { dq_policy?: string } | undefined;
+    return config?.dq_policy;
+  };
+
+  it.each(["Collapse Mean", "Collapse range", "Moments", "Fit lines"])("sends the shared explicit DO_NOT_USE policy to %s and invalidates its result when ignored", async (label) => {
+    backend.collapseRange.mockResolvedValue(collapseResult({ previewUrl: "asset://collapse.png" }));
+    const props = { ...prepared(), onInvalidateCubeResult: vi.fn() };
+    await calculateWithDq(pass(props), label);
+    expect(requestedDq(label)).toBe("do_not_use");
+    const select = mustFind(pass(props), (p) => p["aria-label"] === "Science DQ policy", "shared DQ policy");
+    (select.onChange as (e: unknown) => void)({ target: { value: "ignore" } });
+    settledPanel(props);
+    expect(props.onInvalidateCubeResult).toHaveBeenCalled();
+    await calculateWithDq(pass(props), label);
+    expect(requestedDq(label)).toBe("ignore");
+  });
+
+  it.each(["Collapse Mean", "Collapse range", "Moments", "Fit lines"])("rejects a pending %s after the common DQ policy changes", async (label) => {
+    const pending = deferred<unknown>();
+    if (label === "Fit lines") backend.fit.mockReturnValue(pending.promise);
+    else if (label === "Moments") backend.moments.mockReturnValue(pending.promise);
+    else backend.collapseRange.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = calculateWithDq(pass(props), label);
+    await Promise.resolve();
+    const select = mustFind(pass(props), (p) => p["aria-label"] === "Science DQ policy", "shared DQ policy");
+    (select.onChange as (e: unknown) => void)({ target: { value: "ignore" } });
+    settledPanel(props);
+    pending.resolve(label === "Fit lines" ? fitResult() : label === "Moments" ? momentResult() : collapseResult({ previewUrl: "asset://collapse.png" }));
+    await running;
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+  });
+
+  it.each(["Collapse Mean", "Collapse Median", "Collapse range"])("includes physical zeros by default and invalidates %s when the policy changes", async (label) => {
+    backend.collapseRange.mockResolvedValue(collapseResult({ previewUrl: "asset://collapse.png" }));
+    const props = { ...prepared(), onInvalidateCubeResult: vi.fn() };
+    await clickCalculation(pass(props), label);
+    expect(backend.collapseRange.mock.calls.at(-1)?.[5]).toBe("include_physical_zeros");
+    const select = mustFind(pass(props), (p) => p["aria-label"] === "Collapse zero handling", "zero policy");
+    (select.onChange as (e: unknown) => void)({ target: { value: "exclude_zero_padding" } });
+    settledPanel(props);
+    expect(props.onInvalidateCubeResult).toHaveBeenCalledWith(["C:/out/c.fits"]);
+    await clickCalculation(pass(props), label);
+    expect(backend.collapseRange.mock.calls.at(-1)?.[5]).toBe("exclude_zero_padding");
+  });
+
+  it.each(["Collapse Mean", "Collapse range"])("rejects a pending %s after changing zero handling", async (label) => {
+    const pending = deferred<CollapseRangeResult>();
+    backend.collapseRange.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = clickCalculation(pass(props), label);
+    await Promise.resolve();
+    const select = mustFind(pass(props), (p) => p["aria-label"] === "Collapse zero handling", "zero policy");
+    (select.onChange as (e: unknown) => void)({ target: { value: "exclude_zero_padding" } });
+    settledPanel(props);
+    pending.resolve(collapseResult({ previewUrl: "asset://collapse.png" }));
+    await running;
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+  });
+
+  it.each(fitCalculationEdits)("clears a completed fit after changing %s", async (_name, edit) => {
+    const props = prepared();
+    await (fitSection(pass(props)).onFit as () => Promise<void>)();
+    expect(fitSection(pass(props)).run).not.toBeNull();
+    edit(pass(props));
+    const after = fitSection(settledPanel(props));
+    expect(after.run).toBeNull();
+    expect(after.inspect).toBeNull();
+    expect(after.error).toBeNull();
+  });
+
+  it.each(fitCalculationEdits)("rejects a late fit after changing %s", async (_name, edit) => {
+    const pending = deferred<LineFitResult>();
+    backend.fit.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    await Promise.resolve();
+    expect(backend.fit).toHaveBeenCalledTimes(1);
+    edit(pass(props));
+    settledPanel(props);
+    pending.resolve(fitResult());
+    await running;
+    expect(fitSection(settledPanel(props)).run).toBeNull();
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+    expect(logMock.append).not.toHaveBeenCalled();
+  });
+
+  it.each(momentCalculationEdits)("clears completed moment maps after changing %s", async (_name, edit) => {
+    const props = prepared();
+    await clickCalculation(pass(props), "Moments");
+    expect(findProps(pass(props), (p) => p["data-err-plane"] === "moments")).not.toBeNull();
+    edit(pass(props));
+    expect(findProps(settledPanel(props), (p) => p["data-err-plane"] === "moments")).toBeNull();
+  });
+
+  it.each(momentCalculationEdits)("rejects late moment maps after changing %s", async (_name, edit) => {
+    const pending = deferred<MomentMapsResult>();
+    backend.moments.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = clickCalculation(pass(props), "Moments");
+    await Promise.resolve();
+    expect(backend.moments).toHaveBeenCalledTimes(1);
+    edit(pass(props));
+    settledPanel(props);
+    pending.resolve(momentResult({ m0: { png_path: "m.png", fits_path: "m.fits", previewUrl: "asset://m.png" } }));
+    await running;
+    expect(findProps(settledPanel(props), (p) => p["data-err-plane"] === "moments")).toBeNull();
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ...commonCalculationEdits,
+    ["line model", (tree: ReactNode) => (lineSection(tree).onModelChange as (v: string) => void)("lorentzian")],
+  ] as [string, PanelEdit][])("clears a line measurement after changing %s", async (_name, edit) => {
+    const props = prepared();
+    await (lineSection(pass(props)).onMeasure as () => Promise<void>)();
+    expect(lineSection(pass(props)).result).not.toBeNull();
+    edit(pass(props));
+    expect(lineSection(settledPanel(props)).result).toBeNull();
+  });
+
+  it("does not revive a measurement after moving from spaxel A to B and back to A", async () => {
+    const props = prepared();
+    await (lineSection(pass(props)).onMeasure as () => Promise<void>)();
+    expect(lineSection(pass(props)).result).not.toBeNull();
+    expect(lineSection(settledPanel({ ...props, pixelCoord: { x: 4, y: 4 } })).result).toBeNull();
+    expect(lineSection(settledPanel(props)).result).toBeNull();
+  });
+
+  it("does not publish a pending measurement after the selected spaxel changes", async () => {
+    const pending = deferred<LineMeasurement>();
+    spectralMock.measure.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = (lineSection(pass(props)).onMeasure as () => Promise<void>)();
+    const next = { ...props, pixelCoord: { x: 4, y: 4 } };
+    settledPanel(next);
+    pending.resolve(measured({ kind: "pixel", x: 3, y: 4 }));
+    await running;
+    expect(lineSection(settledPanel(next)).result).toBeNull();
+    expect(logMock.append).not.toHaveBeenCalled();
+    expect(lineSection(settledPanel(props)).result).toBeNull();
+  });
+
+  it.each(["fit", "moments", "collapse"])("does not publish a pending %s after unmount", async (kind) => {
+    const pending = deferred<unknown>();
+    const props = prepared();
+    let result: unknown;
+    let running: Promise<void>;
+    if (kind === "fit") {
+      backend.fit.mockReturnValue(pending.promise);
+      result = fitResult();
+      running = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    } else if (kind === "moments") {
+      backend.moments.mockReturnValue(pending.promise);
+      result = momentResult({ m0: { png_path: "m.png", fits_path: "m.fits", previewUrl: "asset://m.png" } });
+      running = clickCalculation(pass(props), "Moments");
+    } else {
+      backend.collapseRange.mockReturnValue(pending.promise);
+      result = collapseResult({ previewUrl: "asset://c.png" });
+      running = clickCalculation(pass(props), "Collapse range");
+    }
+    await Promise.resolve();
+    hooks.mount();
+    pending.resolve(result);
+    await running;
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+    expect(logMock.append).not.toHaveBeenCalled();
+  });
+
+  it.each(["Collapse Mean", "Collapse range"])("keeps a newer %s running when an older request finishes", async (label) => {
+    const old = deferred<CollapseRangeResult>();
+    const current = deferred<CollapseRangeResult>();
+    backend.collapseRange.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+    const props = prepared();
+    const first = clickCalculation(pass(props), label);
+    await Promise.resolve();
+    const next = { ...props, filePath: "C:/data/other.fits" };
+    settledPanel(next);
+    commitRangeStart(pass(next), 5);
+    settledPanel(next);
+    const second = clickCalculation(pass(next), label);
+    await Promise.resolve();
+    expect(backend.collapseRange).toHaveBeenCalledTimes(2);
+    old.resolve(collapseResult());
+    await first;
+    expect(mustFind(settledPanel(next), (p) => p.label === label, label).loading).toBe(true);
+    current.resolve(collapseResult());
+    await second;
+    expect(mustFind(settledPanel(next), (p) => p.label === label, label).loading).toBe(false);
+  });
+
+  it("clears the range collapse when its reduction mode changes", async () => {
+    backend.collapseRange.mockResolvedValue(collapseResult());
+    const props = prepared();
+    await clickCalculation(pass(props), "Collapse range");
+    expect(findProps(pass(props), (p) => p["data-err-plane"] === "collapse")).not.toBeNull();
+    const select = mustFind(pass(props), (p) => p["aria-label"] === "Range collapse mode", "collapse mode");
+    (select.onChange as (e: unknown) => void)({ target: { value: "mean" } });
+    expect(findProps(settledPanel(props), (p) => p["data-err-plane"] === "collapse")).toBeNull();
+  });
+
+  it.each(["reload", "HDU", "file identity"])("rejects a pending fit after changing the input %s at the same path", async (change) => {
+    const pending = deferred<LineFitResult>();
+    backend.fit.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    await Promise.resolve();
+    if (change === "reload") fileState.reloads++;
+    else if (change === "HDU") fileState.imageRef = "C:/data/cube.fits#hdu=2";
+    else fileState.id = "cube-2";
+    settledPanel(props);
+    pending.resolve(fitResult());
+    await running;
+    expect(fitSection(settledPanel(props)).run).toBeNull();
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+    expect(logMock.append).not.toHaveBeenCalled();
+  });
+
+  it("ignores an older fit failure while a new fit is running", async () => {
+    const old = deferred<LineFitResult>();
+    const current = deferred<LineFitResult>();
+    backend.fit.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+    const props = prepared();
+    const first = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    await Promise.resolve();
+    (fitSection(pass(props)).onSnrText as (v: string) => void)("5");
+    settledPanel(props);
+    const second = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    await Promise.resolve();
+    old.reject(new Error("old fit failed"));
+    await first;
+    expect(fitSection(settledPanel(props)).loading).toBe(true);
+    expect(fitSection(pass(props)).error).toBeNull();
+    current.resolve(fitResult());
+    await second;
+    expect(fitSection(settledPanel(props)).loading).toBe(false);
+    expect(fitSection(pass(props)).run).not.toBeNull();
+  });
+
+  it("does not revive a fit after its parameters change and return to their original values", async () => {
+    const pending = deferred<LineFitResult>();
+    backend.fit.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    await Promise.resolve();
+    (fitSection(pass(props)).onSnrText as (v: string) => void)("5");
+    settledPanel(props);
+    (fitSection(pass(props)).onSnrText as (v: string) => void)("3");
+    settledPanel(props);
+    pending.resolve(fitResult());
+    await running;
+    expect(fitSection(settledPanel(props)).run).toBeNull();
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+  });
+
+  it("invalidates all fit products after an input edit but preserves snapshots on unmount", async () => {
+    const invalidated = vi.fn();
+    const props = { ...prepared(), onInvalidateCubeResult: invalidated };
+    await (fitSection(pass(props)).onFit as () => Promise<void>)();
+    settledPanel(props);
+    (fitSection(pass(props)).onSnrText as (v: string) => void)("5");
+    settledPanel(props);
+    expect(invalidated).toHaveBeenCalledExactlyOnceWith(["C:/out/fit.fits"]);
+    invalidated.mockClear();
+    await (fitSection(pass(props)).onFit as () => Promise<void>)();
+    settledPanel(props);
+    hooks.mount();
+    expect(invalidated).not.toHaveBeenCalled();
+  });
+
+  it("keeps a completed fit when only the plot display mode changes", async () => {
+    const props = prepared();
+    await (fitSection(pass(props)).onFit as () => Promise<void>)();
+    const before = fitSection(pass(props)).run;
+    (axisSection(pass(props)).onModeChange as (v: string) => void)("frequency");
+    expect(fitSection(settledPanel(props)).run).toBe(before);
+  });
+
+  it("does not let an older fit replace a more recently requested moment map", async () => {
+    const pending = deferred<LineFitResult>();
+    backend.fit.mockReturnValue(pending.promise);
+    const props = prepared();
+    const fitting = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    await Promise.resolve();
+    await clickCalculation(pass(props), "Moments");
+    expect(props.onCubeResult).toHaveBeenCalledTimes(1);
+    pending.resolve(fitResult());
+    await fitting;
+    expect(props.onCubeResult).toHaveBeenCalledTimes(1);
+    expect(fitSection(settledPanel(props)).run).not.toBeNull();
+  });
+
+  it("does not let pending moments replace a manually selected fit plane", async () => {
+    const props = prepared();
+    await (fitSection(pass(props)).onFit as () => Promise<void>)();
+    const pending = deferred<MomentMapsResult>();
+    backend.moments.mockReturnValue(pending.promise);
+    const running = clickCalculation(pass(props), "Moments");
+    await Promise.resolve();
+    (fitSection(pass(props)).onShowPlane as (plane: string) => void)("velocity");
+    expect(props.onCubeResult).toHaveBeenCalledTimes(2);
+    pending.resolve(momentResult({ m0: { png_path: "m.png", fits_path: "m.fits", previewUrl: "asset://m.png" } }));
+    await running;
+    expect(props.onCubeResult).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an older collapse replace a newer result from the RAMP panel", async () => {
+    const pending = deferred<CollapseRangeResult>();
+    backend.collapseRange.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = clickCalculation(pass(props), "Collapse Mean");
+    await Promise.resolve();
+    const ramp = framePublishers(props.publishGate, props.onCubeResult);
+    ramp.result({ fitsPath: "slope.fits", previewUrl: "slope.png", label: "Quick slope", dimensions: [8, 8] });
+    pending.resolve(collapseResult({ previewUrl: "asset://collapse.png" }));
+    await running;
+    expect(props.onCubeResult).toHaveBeenCalledTimes(1);
+    expect(props.onCubeResult).toHaveBeenCalledWith(expect.objectContaining({ fitsPath: "slope.fits" }));
+  });
+
+  it("does not let a pending fit replace a newer committed frame", async () => {
+    const pending = deferred<LineFitResult>();
+    backend.fit.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    await Promise.resolve();
+    props.publishGate.commit();
+    pending.resolve(fitResult());
+    await running;
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+    expect(fitSection(settledPanel(props)).run).not.toBeNull();
+  });
+
+  it("keeps an older fit from publishing while a newer RAMP calculation is pending", async () => {
+    const pending = deferred<LineFitResult>();
+    backend.fit.mockReturnValue(pending.promise);
+    const props = prepared();
+    const running = (fitSection(pass(props)).onFit as () => Promise<void>)();
+    await Promise.resolve();
+    const gate = props.publishGate;
+    const rampTicket = gate.reserve();
+    pending.resolve(fitResult());
+    await running;
+    expect(props.onCubeResult).not.toHaveBeenCalled();
+    expect(gate.isLatest(rampTicket)).toBe(true);
+    expect(fitSection(settledPanel(props)).run).not.toBeNull();
+  });
+
+  const pickCircle = () => {
+    regionDocState.regions = [
+      { id: "r1", shape: REGION_CIRCLE, props: { color: null, width: null, text: null, dash: null, include: true }, backgroundId: null } as Region,
+    ];
+  };
+
+  const pressRegion = (tree: ReactNode) => (mustFind(
+    tree,
+    (p) => typeof p.title === "string" && p.title.startsWith("circle region") && typeof p.onClick === "function",
+    "region spectrum button",
+  ).onClick as () => Promise<void>)();
+
+  it("carries the region request token through success and failure", async () => {
+    pickCircle();
+    const props = prepared();
+    const result = regionWithErrors();
+    backend.regionSpectrum.mockResolvedValueOnce(result).mockRejectedValueOnce(new Error("region failed"));
+    await pressRegion(pass(props));
+    expect(spectrumActions.commit).toHaveBeenCalledWith(result, expect.objectContaining({ kind: "region" }), null, 41);
+    await pressRegion(pass(props));
+    expect(spectrumActions.fail).toHaveBeenCalledExactlyOnceWith("region failed", 41);
+  });
+
+  it.each(["resolve", "reject"])("discards a pending region %s after its geometry changes", async (outcome) => {
+    pickCircle();
+    const props = prepared();
+    const pending = deferred<RegionSpectrum>();
+    backend.regionSpectrum.mockReturnValue(pending.promise);
+    const running = pressRegion(pass(props));
+    regionDocState.regions = [
+      { ...(regionDocState.regions[0] as Region), shape: { shape: "circle", x: 5, y: 4, r: 2 } },
+    ];
+    settledPanel(props);
+    if (outcome === "resolve") pending.resolve(regionWithErrors());
+    else pending.reject(new Error("old geometry failed"));
+    await running;
+    expect(spectrumActions.clear).toHaveBeenCalled();
+    expect(spectrumActions.commit).not.toHaveBeenCalled();
+    expect(spectrumActions.fail).not.toHaveBeenCalled();
   });
 });

@@ -128,6 +128,8 @@ export function frameLoadPlan(committed: boolean, fitsCached: boolean): { withFi
 
 export interface FramePublishGate {
   commit(): void;
+  reserve(): number;
+  isLatest(ticket: number): boolean;
   supersede(): void;
   isCurrent(): boolean;
 }
@@ -137,8 +139,10 @@ export function createFramePublishGate(): FramePublishGate {
   let committed = 0;
   return {
     commit: () => {
-      committed = epoch;
+      committed = ++epoch;
     },
+    reserve: () => ++epoch,
+    isLatest: (ticket) => ticket === epoch,
     supersede: () => {
       epoch++;
     },

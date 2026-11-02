@@ -190,6 +190,7 @@ describe("lineFitConfig", () => {
       emission_only: true,
       use_err: true,
       use_dq: true,
+      dq_policy: "do_not_use",
       resolving_power: null,
       components: "one",
     });
@@ -224,6 +225,7 @@ describe("lineFitConfig", () => {
       components: "auto",
       use_err: false,
       use_dq: false,
+      dq_policy: "ignore",
       emission_only: false,
       snr_threshold: 0,
       rest_um: null,

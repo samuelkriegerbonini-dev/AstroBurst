@@ -41,7 +41,9 @@ vi.mock("../CompositeContext", () => ({
 vi.mock("../ComposeWizardContext", () => ({ useComposeWizardContext: () => ({ state: { compositeReady: false } }) }));
 
 import { hooks } from "../../test/hookRuntime";
-import { PreviewProvider, useCubeContext, useDisplayedImage } from "../PreviewContext";
+import { PreviewProvider, fileKeyOf, getRenderRecord, useCubeContext, useDisplayedImage, useRenderActions } from "../PreviewContext";
+import { scientificInputRevisionOf } from "../../utils/pixelSource";
+import type { ProcessedResult } from "../../shared/types/preview";
 import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
 import { displayMemory } from "../../utils/displayMemoryStore";
 import { emptyDisplayMemory, setDefaults } from "../../utils/displayMemory";
@@ -198,6 +200,26 @@ function requestedPaths(): unknown[] {
   return invokeMock.mock.calls.filter(([command]) => command !== COLORMAP_LUT_COMMAND).map(([, args]) => args?.path);
 }
 
+function publishScientificProduct(file: ProcessedFile, patch: Partial<ProcessedResult> = {}): void {
+  const tree = mount(file);
+  const actions = contextWith<ReturnType<typeof useRenderActions>>(tree, "publishProcessed");
+  actions.publishProcessed(fileKeyOf(file) as string, {
+    fitsPath: "C:/out/moment.fits",
+    previewUrl: null,
+    dimensions: [8, 8],
+    label: "Moment 0",
+    kind: "cube",
+    inputPath: file.path,
+    inputRevision: scientificInputRevisionOf(file),
+    ...patch,
+  });
+  renderPasses(file);
+}
+
+function shownProduct(tree: ReactNode): ProcessedResult | null {
+  return contextWith<{ processed: ProcessedResult | null }>(tree, "processed").processed;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   invokeMock.mockReset();
@@ -214,6 +236,164 @@ afterEach(() => {
 
 afterAll(() => {
   vi.unstubAllGlobals();
+});
+
+describe("DQ belongs to the displayed product", () => {
+  const table = (path: string) => ({ table: "jwst", label: "JWST", flags: [], default_mask: 1, exclusion_mask: 1, dq_ref: `${path}#hdu=3`, err_ref: null, bits_present: 1 });
+
+  it("discovers the derived product companions and requests its mask", async () => {
+    invokeMock.mockImplementation((command, args) => command === "get_dq_flag_table_cmd"
+      ? Promise.resolve(table(String(args?.path))) : new Promise(() => {}));
+    const file = { ...IMAGE_ROW, id: "dq-derived" };
+    publishScientificProduct(file, { dimensions: [4, 6] });
+    await flushMicrotasks();
+    const tree = renderPasses(file);
+    const dq = contextWith<{ flagTable: { dq_ref: string }; setOverlay: (patch: Partial<DqOverlaySettings>) => void }>(tree, "flagTable");
+    expect(dq.flagTable.dq_ref).toBe("C:/out/moment.fits#hdu=3");
+    dq.setOverlay({ enabled: true });
+    renderPasses(file);
+    expect(invokeMock).toHaveBeenCalledWith("get_dq_mask_preview", expect.objectContaining({ path: "C:/out/moment.fits" }));
+  });
+
+  it("rejects a delayed source table after changing to a product without DQ", async () => {
+    const answers: { path: string; resolve: (value: unknown) => void }[] = [];
+    invokeMock.mockImplementation((command, args) => command === "get_dq_flag_table_cmd"
+      ? new Promise((resolve) => { answers.push({ path: String(args?.path), resolve }); }) : new Promise(() => {}));
+    const file = { ...IMAGE_ROW, id: "dq-late" };
+    publishScientificProduct(file);
+    expect(answers.map((a) => a.path)).toEqual([IMAGE_PATH, "C:/out/moment.fits"]);
+    answers[1].resolve({ ...table("C:/out/moment.fits"), dq_ref: null });
+    answers[0].resolve(table(IMAGE_PATH));
+    await flushMicrotasks();
+    const dq = contextWith<{ flagTable: { dq_ref: string | null }; dqMask: unknown }>(renderPasses(file), "flagTable");
+    expect(dq.flagTable.dq_ref).toBeNull();
+    expect(dq.dqMask).toBeNull();
+  });
+
+  it.each(["png", "composite"])("does not inherit DQ for a %s preview", async (kind) => {
+    invokeMock.mockImplementation((command, args) => command === "get_dq_flag_table_cmd"
+      ? Promise.resolve(table(String(args?.path))) : new Promise(() => {}));
+    const file = { ...IMAGE_ROW, id: `dq-${kind}` };
+    publishScientificProduct(file, kind === "png" ? { fitsPath: null, previewUrl: "asset://result.png" } : {});
+    if (kind === "composite") compositePreview.compositePreviewUrl = "asset://composite.png";
+    await flushMicrotasks();
+    const dq = contextWith<{ flagTable: unknown; dqMask: unknown }>(renderPasses(file), "flagTable");
+    expect(dq.flagTable).toBeNull();
+    expect(dq.dqMask).toBeNull();
+  });
+
+  it("discards a late mask on product change and reloads the source after revert", async () => {
+    const pending: { path: string; resolve: (value: unknown) => void }[] = [];
+    invokeMock.mockImplementation((command, args) => command === "get_dq_flag_table_cmd"
+      ? Promise.resolve(table(String(args?.path))) : command === "get_dq_mask_preview"
+        ? new Promise((resolve) => { pending.push({ path: String(args?.path), resolve }); }) : new Promise(() => {}));
+    const file = { ...IMAGE_ROW, id: "dq-mask-late" };
+    let tree = mount(file);
+    await flushMicrotasks();
+    tree = renderPasses(file);
+    contextWith<{ setOverlay: (patch: Partial<DqOverlaySettings>) => void }>(tree, "setOverlay").setOverlay({ enabled: true });
+    tree = renderPasses(file);
+    const actions = contextWith<ReturnType<typeof useRenderActions>>(tree, "publishProcessed");
+    actions.publishProcessed(fileKeyOf(file) as string, { fitsPath: "C:/out/crop.fits", previewUrl: null, dimensions: [2, 3], label: "crop", kind: "cube", inputPath: file.path, inputRevision: scientificInputRevisionOf(file) });
+    renderPasses(file);
+    const bytes = new ArrayBuffer(20);
+    const view = new DataView(bytes);
+    view.setUint32(0, 2, true);
+    view.setUint32(4, 2, true);
+    view.setUint32(8, 1, true);
+    pending[0].resolve(bytes);
+    await flushMicrotasks();
+    tree = renderPasses(file);
+    expect(contextWith<{ dqMask: unknown }>(tree, "dqMask").dqMask).toBeNull();
+    actions.resetProcessed();
+    renderPasses(file);
+    await flushMicrotasks();
+    tree = renderPasses(file);
+    expect(contextWith<{ flagTable: { dq_ref: string } }>(tree, "flagTable").flagTable.dq_ref).toBe(`${IMAGE_PATH}#hdu=3`);
+  });
+
+  it("clears the pending indicator when the overlay is disabled", () => {
+    const file = { ...IMAGE_ROW, id: "dq-disabled-pending" };
+    const tree = exercise(file);
+    const dq = contextWith<{ dqMaskLoading: boolean; setOverlay: (patch: Partial<DqOverlaySettings>) => void }>(tree, "dqMaskLoading");
+    expect(dq.dqMaskLoading).toBe(true);
+    dq.setOverlay({ enabled: false });
+    expect(contextWith<{ dqMaskLoading: boolean }>(renderPasses(file), "dqMaskLoading").dqMaskLoading).toBe(false);
+  });
+});
+
+describe("PreviewProvider scientific cache validity without the Cube tool", () => {
+  it("reloads cube metadata and rejects the previous probe after a same-path reload", async () => {
+    const answers: ((value: unknown) => void)[] = [];
+    invokeMock.mockImplementation((command) => command === "get_cube_info"
+      ? new Promise((resolve) => { answers.push(resolve); })
+      : new Promise(() => {}));
+    const file = { ...IMAGE_ROW, id: "science-metadata" };
+    mount(file);
+    const reloaded = { ...file, reloads: 1 };
+    renderPasses(reloaded);
+    expect(answers).toHaveLength(2);
+    answers[0](LATE_CUBE_INFO);
+    await flushMicrotasks();
+    expect(contextWith<{ cubeDims: unknown }>(renderPasses(reloaded), "cubeDims").cubeDims).toBeNull();
+    answers[1]({ ...LATE_CUBE_INFO, width: 12 });
+    await flushMicrotasks();
+    expect(contextWith<{ cubeDims: { width: number } }>(renderPasses(reloaded), "cubeDims").cubeDims.width).toBe(12);
+  });
+
+  it("removes the stale product before rendering a reloaded input", () => {
+    const file = { ...IMAGE_ROW, id: "science-reload" };
+    publishScientificProduct(file);
+    expect(shownProduct(renderPasses(file))?.fitsPath).toBe("C:/out/moment.fits");
+    const tree = hooks.render(PreviewProvider, { file: { ...file, reloads: 1 }, doneFiles: [], children: null }) as ReactNode;
+    expect(shownProduct(tree)).toBeNull();
+    expect(getRenderRecord(fileKeyOf(file) as string)?.processed ?? null).toBeNull();
+  });
+
+  it("rejects a cached product after its input changed while another file was shown", () => {
+    const file = { ...IMAGE_ROW, id: "science-away" };
+    publishScientificProduct(file);
+    renderPasses({ ...IMAGE_ROW, id: "other-file" });
+    const tree = renderPasses({ ...file, reloads: 1 });
+    expect(shownProduct(tree)).toBeNull();
+    expect(getRenderRecord(fileKeyOf(file) as string)?.processed ?? null).toBeNull();
+  });
+
+  it("rejects an outdated cached product when the viewer mounts again", () => {
+    const file = { ...IMAGE_ROW, id: "science-reopen" };
+    publishScientificProduct(file);
+    const tree = mount({ ...file, finishedAt: 100 });
+    expect(shownProduct(tree)).toBeNull();
+  });
+
+  it("preserves a cached product for the unchanged scientific input", () => {
+    const file = { ...IMAGE_ROW, id: "science-current" };
+    publishScientificProduct(file);
+    expect(shownProduct(mount(file))?.fitsPath).toBe("C:/out/moment.fits");
+  });
+
+  it("preserves processing products without a scientific revision", () => {
+    const file = { ...IMAGE_ROW, id: "science-processing" };
+    publishScientificProduct(file, { kind: "processing", inputRevision: undefined });
+    expect(shownProduct(renderPasses({ ...file, reloads: 1 }))?.fitsPath).toBe("C:/out/moment.fits");
+  });
+
+  it("rejects an unversioned scientific snapshot", () => {
+    const file = { ...IMAGE_ROW, id: "science-unversioned" };
+    publishScientificProduct(file, { inputRevision: undefined });
+    expect(shownProduct(renderPasses(file))).toBeNull();
+  });
+
+  it("keeps the history binding when invalidating a scientific product", () => {
+    const file = { ...IMAGE_ROW, id: "science-history" };
+    publishScientificProduct(file);
+    const actions = contextWith<ReturnType<typeof useRenderActions>>(renderPasses(file), "publishProcessed");
+    actions.setHistoryId(fileKeyOf(file) as string, "history-science");
+    const tree = renderPasses({ ...file, reloads: 1 });
+    expect(shownProduct(tree)).toBeNull();
+    expect(getRenderRecord(fileKeyOf(file) as string)?.historyId).toBe("history-science");
+    expect(contextWith<{ chain: { base: unknown } }>(tree, "chain").chain.base).toBeNull();
+  });
 });
 
 describe("PreviewProvider with an image file (control)", () => {

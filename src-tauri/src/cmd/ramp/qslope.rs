@@ -6,8 +6,11 @@ use serde::{Deserialize, Deserializer};
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, invalidate_written, resolve_output_dir, save_auto_stf_preview_png, write_derived_fits};
+use crate::cmd::science_provenance::{publish_source_manifest, VerifiedSource};
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
-use crate::core::ramp::compare::{compare_with_rate, ratio_image, read_official_rate, read_qslope};
+use crate::core::cube::lazy::LazyCube;
+use crate::core::ramp::compare::{compare_with_rate, comparison_images, read_official_rate, read_qslope, OFFICIAL_EXCLUDE_BITS, QUICK_EXCLUDE_BITS, RATIO_MIN_RATE};
+use crate::core::imaging::push_history;
 use crate::core::ramp::irs2::{Irs2Layout, Irs2Sample};
 use crate::core::ramp::product::{
     qslope_output_path, qslope_primary_header, sibling_rate_path, write_qslope, CARD_ABPROC, CARD_BUNIT, QSLOPE_SUFFIX,
@@ -17,6 +20,7 @@ use crate::core::ramp::quick_slope::{
     RefCorrection, ReferenceOffsets, ERR_TGROUP_MISSING,
 };
 use crate::infra::fits::reader::read_primary_header;
+use crate::infra::fits::writer::filter_header;
 use crate::infra::progress::ProgressHandle;
 use crate::types::constants::{RES_DIMENSIONS, RES_ELAPSED_MS, RES_FITS_PATH, RES_PNG_PATH};
 use crate::types::header::HduHeader;
@@ -26,7 +30,7 @@ use crate::types::ImageRef;
 pub const EVENT_QSLOPE_PROGRESS: &str = "qslope-progress";
 pub const ABPROC_QSLOPE_RATIO: &str = "qslope-ratio";
 pub const RATIO_SUFFIX: &str = "_ratio";
-pub const BUNIT_RATIO: &str = "ratio";
+pub const BUNIT_RATIO: &str = "1";
 pub const CARD_RATIO_QSLOPE: &str = "ABQSLOPE";
 pub const CARD_RATIO_RATE: &str = "ABRATE";
 pub const STAGE_WRITING: &str = "writing";
@@ -130,7 +134,22 @@ pub(crate) fn quick_slope_files(
     progress: Option<&ProgressHandle>,
 ) -> Result<serde_json::Value> {
     let started = Instant::now();
-    let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
+    let source = VerifiedSource::open(path, &|| progress.is_some_and(ProgressHandle::is_cancelled))?;
+    let mut result = quick_slope_files_from_source(path, output_dir, integration, params, progress, &source)?;
+    result[RES_ELAPSED_MS] = json!(started.elapsed().as_millis() as u64);
+    Ok(result)
+}
+
+fn quick_slope_files_from_source(
+    path: &str,
+    output_dir: &str,
+    integration: usize,
+    params: &QuickSlopeParams,
+    progress: Option<&ProgressHandle>,
+    source: &VerifiedSource,
+) -> Result<serde_json::Value> {
+    let started = Instant::now();
+    let cube = LazyCube::open(&source.image_ref())?;
     let info = cube.ramp().context(ERR_NOT_A_RAMP)?;
     params.validate()?;
     let plan = plan_slope(&info, params)?;
@@ -148,9 +167,12 @@ pub(crate) fn quick_slope_files(
     let product = quick_slope(&cube, &info, integration, params, &on_band_done, &cancelled)?;
 
     let out_dir = resolve_output_dir(output_dir)?;
+    let run_dir = tempfile::Builder::new().prefix("qslope-").tempdir_in(&out_dir)?;
+    let out_dir = run_dir.path().to_string_lossy().into_owned();
     let fits_path = qslope_output_path(path, &out_dir, info.nints, integration);
     let png_path = with_extension(&fits_path, "png");
-    let primary = qslope_primary_header(&uncal_primary(path, &cube)?, &info, params, &product, &file_name(&fits_path));
+    let mut primary = qslope_primary_header(&uncal_primary(&source.readable, &cube)?, &info, params, &product, &file_name(&fits_path));
+    primary.set("ABPROV", "provenance.json".into());
     tick(STAGE_WRITING);
     GLOBAL_CUBE_CACHE.invalidate(&fits_path);
     invalidate_written(&fits_path);
@@ -158,6 +180,10 @@ pub(crate) fn quick_slope_files(
     invalidate_written(&fits_path);
     written?;
     save_auto_stf_preview_png(&product.sci, &png_path)?;
+    let provenance_path = publish_source_manifest(&out_dir, "quick_slope", &[("ramp", &source.identity)],
+        json!({ "integration": integration, "requested": params, "tgroup_s": product.tgroup_s, "tgroup_source": info.tgroup_source, "warnings": product.warnings }),
+        json!({ "fits_path": fits_path, "png_path": png_path }), &cancelled)?;
+    let _ = run_dir.keep();
     let rate_sibling = sibling_rate_path(&ImageRef::parse(path).path);
     if let Some(progress) = progress {
         progress.emit_complete();
@@ -166,6 +192,7 @@ pub(crate) fn quick_slope_files(
     Ok(json!({
         RES_FITS_PATH: fits_path,
         RES_PNG_PATH: png_path,
+        "provenance_path": provenance_path,
         RES_DIMENSIONS: [width, height],
         KEY_INTEGRATION: integration,
         KEY_NINTS: info.nints,
@@ -186,7 +213,7 @@ pub(crate) fn quick_slope_files(
 }
 
 pub(crate) fn pixel_fit_json(path: &str, x: usize, y: usize, integration: usize, params: &QuickSlopeParams) -> Result<serde_json::Value> {
-    let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
+    let cube = LazyCube::open(path)?;
     let info = cube.ramp().context(ERR_NOT_A_RAMP)?;
     let tgroup_s = info.tgroup_s.context(ERR_TGROUP_MISSING)?;
     if integration >= info.nints {
@@ -257,8 +284,24 @@ pub(crate) fn compare_rate_files(
     uncal_rows: Option<[usize; 2]>,
 ) -> Result<serde_json::Value> {
     let started = Instant::now();
-    let qslope_primary = read_primary_header(qslope_path)?;
-    if let (Some(quick_detector), Some(rate_detector)) = (detector_card(&qslope_primary), detector_card(&read_primary_header(rate_path)?)) {
+    let quick = VerifiedSource::open(qslope_path, &|| false)?;
+    let official = VerifiedSource::open(rate_path, &|| false)?;
+    let mut result = compare_rate_files_from_sources(qslope_path, rate_path, output_dir, uncal_rows, &quick, &official)?;
+    result[RES_ELAPSED_MS] = json!(started.elapsed().as_millis() as u64);
+    Ok(result)
+}
+
+fn compare_rate_files_from_sources(
+    qslope_path: &str,
+    rate_path: &str,
+    output_dir: &str,
+    uncal_rows: Option<[usize; 2]>,
+    quick_source: &VerifiedSource,
+    official_source: &VerifiedSource,
+) -> Result<serde_json::Value> {
+    let started = Instant::now();
+    let qslope_primary = read_primary_header(&quick_source.readable)?;
+    if let (Some(quick_detector), Some(rate_detector)) = (detector_card(&qslope_primary), detector_card(&read_primary_header(&official_source.readable)?)) {
         if !quick_detector.eq_ignore_ascii_case(&rate_detector) {
             bail!(
                 "the quick slope {} is DETECTOR {quick_detector} but the rate {} is DETECTOR {rate_detector}: compare products of the same detector",
@@ -267,8 +310,8 @@ pub(crate) fn compare_rate_files(
             );
         }
     }
-    let quick = read_qslope(qslope_path)?;
-    let official = read_official_rate(rate_path)?;
+    let quick = read_qslope(&quick_source.readable)?;
+    let official = read_official_rate(&official_source.readable)?;
     let layout = Irs2Layout::from_product_header(&qslope_primary)?;
     let science_rows = match (uncal_rows, &layout) {
         (None, _) => None,
@@ -280,25 +323,55 @@ pub(crate) fn compare_rate_files(
         (Some([y0, y1]), None) => Some((y0, y1)),
     };
     let comparison = compare_with_rate(&quick, &official, science_rows, layout.as_ref())?;
-    let ratio = ratio_image(&quick.sci, &official);
+    let images = comparison_images(&quick, &official, science_rows)?;
     let out_dir = resolve_output_dir(output_dir)?;
+    let run_dir = tempfile::Builder::new().prefix("rate-compare-").tempdir_in(&out_dir)?;
+    let out_dir = run_dir.path().to_string_lossy().into_owned();
     let base = format!("{}/{}{RATIO_SUFFIX}", out_dir.trim_end_matches(['/', '\\']), ratio_stem(qslope_path));
     let ratio_fits_path = format!("{base}.fits");
     let ratio_png_path = format!("{base}.png");
-    let mut header = HduHeader::empty();
+    let difference_base = format!("{}/{}_difference", out_dir.trim_end_matches(['/', '\\']), ratio_stem(qslope_path));
+    let difference_fits_path = format!("{difference_base}.fits");
+    let difference_png_path = format!("{difference_base}.png");
+    let mut header = filter_header(&official.header, true, false).unwrap_or_else(HduHeader::empty);
     header.set(CARD_ABPROC, ABPROC_QSLOPE_RATIO.to_string());
     header.set(CARD_BUNIT, BUNIT_RATIO.to_string());
     header.set(CARD_RATIO_QSLOPE, file_name(qslope_path));
     header.set(CARD_RATIO_RATE, file_name(rate_path));
-    write_derived_fits(&ratio_fits_path, &ratio, Some(&header))?;
-    save_auto_stf_preview_png(&ratio, &ratio_png_path)?;
+    header.set("ABQMASK", QUICK_EXCLUDE_BITS.to_string());
+    header.set("ABOMASK", OFFICIAL_EXCLUDE_BITS.to_string());
+    header.set("ABRMIN", RATIO_MIN_RATE.to_string());
+    header.set("ABPROV", "provenance.json".into());
+    if let Some((r0, r1)) = science_rows {
+        header.set("ABROW0", r0.to_string());
+        header.set("ABROW1", r1.to_string());
+    }
+    push_history(&mut header, &format!("Quick slope input: {qslope_path}"));
+    push_history(&mut header, &format!("Official rate input: {rate_path}"));
+    push_history(&mut header, "Only finite pairs with quick DO_NOT_USE clear and official DQ zero; pixels outside selected science rows are NaN");
+    for warning in &comparison.warnings { push_history(&mut header, warning); }
+    write_derived_fits(&ratio_fits_path, &images.ratio, Some(&header))?;
+    save_auto_stf_preview_png(&images.ratio, &ratio_png_path)?;
+    header.set(CARD_ABPROC, "qslope-difference".into());
+    header.set(CARD_BUNIT, "DN/s".into());
+    header.remove("ABRMIN");
+    push_history(&mut header, "Signed difference = quick slope minus official rate; no minimum absolute rate is applied");
+    write_derived_fits(&difference_fits_path, &images.difference, Some(&header))?;
+    save_auto_stf_preview_png(&images.difference, &difference_png_path)?;
     let mut value = serde_json::to_value(&comparison)?;
     let object = value.as_object_mut().context("the comparison serialises to an object")?;
     object.insert(KEY_QSLOPE_PATH.to_string(), json!(qslope_path));
     object.insert(KEY_RATE_PATH.to_string(), json!(rate_path));
     object.insert(KEY_RATIO_PNG_PATH.to_string(), json!(ratio_png_path));
     object.insert(KEY_RATIO_FITS_PATH.to_string(), json!(ratio_fits_path));
+    object.insert("difference_png_path".into(), json!(difference_png_path));
+    object.insert("difference_fits_path".into(), json!(difference_fits_path));
+    let provenance_path = publish_source_manifest(&out_dir, "compare_rate", &[("quick_slope", &quick_source.identity), ("official_rate", &official_source.identity)],
+        json!({ "uncal_rows": uncal_rows, "science_rows": science_rows, "quick_exclude_bits": QUICK_EXCLUDE_BITS, "official_exclude_bits": OFFICIAL_EXCLUDE_BITS, "ratio_min_abs_rate": RATIO_MIN_RATE, "warnings": comparison.warnings }),
+        json!({ "ratio_fits_path": ratio_fits_path, "ratio_png_path": ratio_png_path, "difference_fits_path": difference_fits_path, "difference_png_path": difference_png_path }), &|| false)?;
+    object.insert("provenance_path".into(), json!(provenance_path));
     object.insert(RES_ELAPSED_MS.to_string(), json!(started.elapsed().as_millis() as u64));
+    let _ = run_dir.keep();
     Ok(value)
 }
 
@@ -352,6 +425,78 @@ mod tests {
     const NRS1_NAME: &str = "jw01266005001_02103_00001_nrs1_uncal.fits";
     const NRS2_NAME: &str = "jw01266005001_02103_00001_nrs2_uncal.fits";
 
+    fn rewrite_same_stamp(path: &str, offset: u64, bytes: &[u8]) {
+        use std::io::{Seek, SeekFrom, Write};
+        let stamp = std::fs::metadata(path).unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(bytes).unwrap();
+        file.flush().unwrap();
+        file.set_modified(stamp.modified().unwrap()).unwrap();
+        let after = std::fs::metadata(path).unwrap();
+        assert_eq!(after.len(), stamp.len());
+        assert_eq!(after.modified().unwrap(), stamp.modified().unwrap());
+    }
+
+    fn change_tgroup(path: &str) {
+        let bytes = std::fs::read(path).unwrap();
+        let card = bytes.chunks_exact(80).position(|card| card.starts_with(b"TGROUP  ")).unwrap();
+        let mut replacement = [b' '; 80];
+        let text = b"TGROUP  =                 20.0";
+        replacement[..text.len()].copy_from_slice(text);
+        rewrite_same_stamp(path, (card * 80) as u64, &replacement);
+    }
+
+    #[test]
+    fn identity_proof_quick_slope_reopens_calibration_and_rejects_changed_acquisition() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let (uncal, _) = write_irs2(&data, NRS1_NAME, 8, false, "NRS1", true);
+        let old = GLOBAL_CUBE_CACHE.get_or_open(&uncal).unwrap();
+        assert_eq!(old.ramp().unwrap().tgroup_s, Some(10.0));
+        let acquired = VerifiedSource::open(&uncal, &|| false).unwrap();
+        change_tgroup(&uncal);
+        let rejected_dir = out_dir(&out, "rejected");
+        let error = quick_slope_files_from_source(&uncal, &rejected_dir, 0, &QuickSlopeParams::default(), None, &acquired).unwrap_err();
+        assert!(error.to_string().contains("Science input changed during calculation"), "{error:#}");
+        assert_eq!(std::fs::read_dir(&rejected_dir).unwrap().count(), 0);
+        let result = quick_slope_files(&uncal, &out_dir(&out, "fresh"), 0, &QuickSlopeParams::default(), None).unwrap();
+        assert_eq!(result["tgroup_s"], 20.0);
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(result["provenance_path"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(manifest["sources"][0]["identity"]["sha256"], crate::cmd::science_provenance::SourceIdentity::capture(&uncal, &|| false).unwrap().sha256);
+        let fit = pixel_fit_json(&uncal, 3, 700, 0, &QuickSlopeParams::default()).unwrap();
+        assert_eq!(fit["group_times_s"][1], 20.0);
+        GLOBAL_CUBE_CACHE.invalidate(&uncal);
+    }
+
+    #[test]
+    fn identity_proof_rate_comparison_checks_both_sources_before_publication() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let (uncal, layout) = write_irs2(&data, NRS1_NAME, 8, false, "NRS1", true);
+        let (sci, err, dq) = truth_rate_planes(&layout, 8);
+        let rate = write_synthetic_rate(&data.path().join("rate.fits"), &sci, &err, &dq, "NRS1");
+        let slope = quick_slope_files(&uncal, &out_dir(&out, "products"), 0, &QuickSlopeParams::default(), None).unwrap();
+        let quick = slope["fits_path"].as_str().unwrap();
+        for changed in [quick, rate.as_str()] {
+            let quick_source = VerifiedSource::open(quick, &|| false).unwrap();
+            let official_source = VerifiedSource::open(&rate, &|| false).unwrap();
+            let before = std::fs::read(changed).unwrap();
+            let offset = before.len() as u64 - 1;
+            rewrite_same_stamp(changed, offset, &[before[before.len() - 1] ^ 1]);
+            let directory = out_dir(&out, "rejected");
+            let error = compare_rate_files_from_sources(quick, &rate, &directory, None, &quick_source, &official_source).unwrap_err();
+            assert!(error.to_string().contains("Science input changed during calculation"), "{error:#}");
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        }
+        let result = compare_rate_files(quick, &rate, &out_dir(&out, "accepted"), None).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(result["provenance_path"].as_str().unwrap()).unwrap()).unwrap();
+        for (index, path) in [quick, rate.as_str()].into_iter().enumerate() {
+            assert_eq!(manifest["sources"][index]["identity"]["input_ref"], path);
+            assert_eq!(manifest["sources"][index]["identity"]["sha256"], crate::cmd::science_provenance::SourceIdentity::capture(path, &|| false).unwrap().sha256);
+        }
+    }
+
     fn write_irs2(dir: &tempfile::TempDir, name: &str, cols: usize, data_reversed: bool, detector: &'static str, write_fastaxis: bool) -> (String, Irs2Layout) {
         let layout = Irs2Layout::new(3200, 16, 4, 5, data_reversed).unwrap();
         let mut spec: SyntheticUncal = owner_like_irs2(cols, data_reversed);
@@ -386,7 +531,7 @@ mod tests {
         let result = quick_slope_files(&uncal, &out_dir(&out, "products"), 0, &QuickSlopeParams::default(), None).unwrap();
         let expected = [
             "fits_path", "png_path", "dimensions", "integration", "nints", "ngroups", "tgroup_s", "tgroup_source", "detector", "readpatt",
-            "ref_corrected", "stripped", "params", "band_scales_dn", "counts", "rate_sibling", "warnings", "elapsed_ms",
+            "ref_corrected", "stripped", "params", "band_scales_dn", "counts", "rate_sibling", "warnings", "elapsed_ms", "provenance_path",
         ];
         assert_eq!(sorted_keys(&result), sorted(&expected));
         assert!(result["rate_sibling"].is_null());
@@ -425,6 +570,50 @@ mod tests {
     }
 
     #[test]
+    fn repeated_quick_slope_runs_preserve_the_previous_product_and_preview() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let (uncal, _) = write_irs2(&data, NRS1_NAME, 8, false, "NRS1", true);
+        let products = out_dir(&out, "products");
+        let first = quick_slope_files(&uncal, &products, 0, &QuickSlopeParams::default(), None).unwrap();
+        let first_fits = first["fits_path"].as_str().unwrap();
+        let first_png = first["png_path"].as_str().unwrap();
+        let fits_before = std::fs::read(first_fits).unwrap();
+        let png_before = std::fs::read(first_png).unwrap();
+        let params = QuickSlopeParams { ref_correction: RefCorrection::Off, ..Default::default() };
+        let second = quick_slope_files(&uncal, &products, 0, &params, None).unwrap();
+        assert_ne!(first["fits_path"], second["fits_path"]);
+        assert_ne!(first["png_path"], second["png_path"]);
+        assert_eq!(std::fs::read(first_fits).unwrap(), fits_before);
+        assert_eq!(std::fs::read(first_png).unwrap(), png_before);
+        assert_ne!(fits_before, std::fs::read(second["fits_path"].as_str().unwrap()).unwrap());
+    }
+
+    #[test]
+    fn changing_the_rate_reference_preserves_the_previous_comparison_files() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let (uncal, layout) = write_irs2(&data, NRS1_NAME, 8, false, "NRS1", true);
+        let (sci, err, dq) = truth_rate_planes(&layout, 8);
+        let first_rate = write_synthetic_rate(&data.path().join("first_rate.fits"), &sci, &err, &dq, "NRS1");
+        let second_rate = write_synthetic_rate(&data.path().join("second_rate.fits"), &(&sci * 2.0), &err, &dq, "NRS1");
+        let slope = quick_slope_files(&uncal, &out_dir(&out, "products"), 0, &QuickSlopeParams::default(), None).unwrap();
+        let qslope = slope["fits_path"].as_str().unwrap();
+        let comparisons = out_dir(&out, "comparisons");
+        let first = compare_rate_files(qslope, &first_rate, &comparisons, None).unwrap();
+        let first_fits = first["ratio_fits_path"].as_str().unwrap();
+        let first_png = first["ratio_png_path"].as_str().unwrap();
+        let fits_before = std::fs::read(first_fits).unwrap();
+        let png_before = std::fs::read(first_png).unwrap();
+        let second = compare_rate_files(qslope, &second_rate, &comparisons, None).unwrap();
+        assert_ne!(first["ratio_fits_path"], second["ratio_fits_path"]);
+        assert_ne!(first["ratio_png_path"], second["ratio_png_path"]);
+        assert_eq!(std::fs::read(first_fits).unwrap(), fits_before);
+        assert_eq!(std::fs::read(first_png).unwrap(), png_before);
+        assert_ne!(fits_before, std::fs::read(second["ratio_fits_path"].as_str().unwrap()).unwrap());
+    }
+
+    #[test]
     fn compare_rate_files_returns_the_contract_keys_and_maps_uncal_rows() {
         let data = tempfile::tempdir().unwrap();
         let products = tempfile::tempdir().unwrap();
@@ -441,7 +630,7 @@ mod tests {
         let expected = [
             "detector", "good_pixels", "quick_flagged_in_good", "bins", "amp_bins", "zero_shift", "jump", "saturated", "saturated_rule",
             "saturated_any_group", "rel_hist", "delta_hist", "science_rows", "qslope_path", "rate_path", "ratio_png_path", "ratio_fits_path",
-            "elapsed_ms",
+            "elapsed_ms", "difference_metrics", "quick_exclude_bits", "official_exclude_bits", "ratio_min_abs_rate", "warnings", "difference_png_path", "difference_fits_path", "provenance_path",
         ];
         assert_eq!(sorted_keys(&windowed), sorted(&expected));
         assert_eq!(windowed["science_rows"], json!([1040, 1200]));
@@ -459,6 +648,17 @@ mod tests {
         let ratio_fits = windowed["ratio_fits_path"].as_str().unwrap();
         assert!(ratio_fits.ends_with("jw01266005001_02103_00001_nrs2_ratio.fits"), "{ratio_fits}");
         assert!(Path::new(ratio_fits).exists());
+        let ratio_image = crate::infra::fits::reader::extract_image_mmap(&std::fs::File::open(ratio_fits).unwrap()).unwrap();
+        assert_eq!(crate::core::metadata::photcal::card_text(&ratio_image.header, "BUNIT").as_deref(), Some("1"));
+        assert!(ratio_image.image.row(0).iter().all(|value| value.is_nan()));
+        let difference_file = windowed["difference_fits_path"].as_str().unwrap();
+        let difference = crate::infra::fits::reader::extract_image_mmap(&std::fs::File::open(difference_file).unwrap()).unwrap();
+        assert_eq!(crate::core::metadata::photcal::card_text(&difference.header, "BUNIT").as_deref(), Some("DN/s"));
+        assert!(difference.image.row(0).iter().all(|value| value.is_nan()));
+        assert_eq!(difference.image.iter().filter(|value| value.is_finite()).count(), 160 * 32);
+        assert_eq!(windowed["difference_metrics"]["n"], json!(160 * 32));
+        assert!(windowed["difference_metrics"]["rmse"].as_f64().unwrap() < 1e-3);
+        assert!(Path::new(windowed["difference_png_path"].as_str().unwrap()).exists());
 
         let full = compare_rate_files(qslope, &rate, &out_dir(&compare, "cmp"), None).unwrap();
         assert!(full["science_rows"].is_null());

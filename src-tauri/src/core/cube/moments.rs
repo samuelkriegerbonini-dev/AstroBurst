@@ -3,8 +3,8 @@ use ndarray::Array2;
 use rayon::prelude::*;
 use serde::Deserialize;
 
-use crate::core::astrometry::spectral::{velocity_axis, SpectralAxis, VelocityConvention};
-use crate::core::cube::companions::{check_companion, CubeSet};
+use crate::core::astrometry::spectral::{velocity_axis, AxisKind, SpectralAxis, VelocityConvention};
+use crate::core::cube::companions::{check_companion, CubeSet, DqPolicy, FLOAT_DQ_NOTE};
 use crate::core::cube::lazy::{err_variance, median_band_rows, LazyCube};
 use crate::core::cube::noise_factor::{residual_dof_correction, EXPECTED_FACTOR_RANGE};
 use crate::core::stacking::memory::{effective_memory, format_bytes, MemoryInfo, MEMORY_BUDGET_ENV};
@@ -15,7 +15,7 @@ pub const DEFAULT_SNR_THRESHOLD: f64 = 3.0;
 pub const VELOCITY_UNIT: &str = "km/s";
 pub const REST_REQUIRED_MESSAGE: &str = "rest wavelength required for velocity moments";
 pub const DQ_NOT_APPLIED_NOTE: &str =
-    "DQ is not applied to moment maps or range collapses: flagged spaxels with finite values are included";
+    "DQ is ignored for this result: flagged samples with finite SCI values remain included";
 
 const CONTINUUM_BAND_BYTES: usize = 256 << 20;
 const MOMENT_BATCH_SIZE: usize = 16;
@@ -39,6 +39,8 @@ struct MomentConfigWire {
     snr_threshold: Option<f64>,
     #[serde(default)]
     mask_below_threshold: Option<bool>,
+    #[serde(default)]
+    dq_policy: Option<DqPolicy>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,6 +53,7 @@ pub struct MomentConfig {
     pub continuum: Option<ContinuumWindows>,
     pub snr_threshold: f64,
     pub mask_below_threshold: bool,
+    pub dq_policy: Option<DqPolicy>,
 }
 
 impl TryFrom<MomentConfigWire> for MomentConfig {
@@ -73,6 +76,7 @@ impl TryFrom<MomentConfigWire> for MomentConfig {
             continuum: wire.continuum,
             snr_threshold,
             mask_below_threshold: wire.mask_below_threshold.unwrap_or(true),
+            dq_policy: wire.dq_policy,
         })
     }
 }
@@ -92,6 +96,8 @@ pub struct MomentMaps {
     pub m2_err: Option<Array2<f32>>,
     pub noise_factor: Option<f64>,
     pub err_hdu: Option<usize>,
+    pub dq_hdu: Option<usize>,
+    pub dq_excluded_samples: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -325,6 +331,7 @@ struct ContinuumFit {
     linear: bool,
     covariance: Option<Vec<BaselineCovariance>>,
     noise_factor: Option<MapNoiseFactor>,
+    dq_excluded_outside_line: u64,
 }
 
 fn decode_window_rows(cube: &LazyCube, channels: &[usize], band_start: usize, row_count: usize) -> Result<Vec<Vec<f32>>> {
@@ -362,6 +369,8 @@ fn pooled_noise_factor(mut pool: Vec<f32>, pixels: usize, stride: usize) -> Opti
 fn fit_continuum(
     cube: &LazyCube,
     err: Option<&LazyCube>,
+    dq: Option<&LazyCube>,
+    line_range: (usize, usize),
     windows: ContinuumWindows,
     channels: &[usize],
     notes: &mut Vec<String>,
@@ -377,11 +386,23 @@ fn fit_continuum(
     let mut covariance = err.map(|_| vec![BaselineCovariance::UNKNOWN; npix]);
     let mut pool: Vec<f32> = Vec::new();
     let mut pooled_pixels = 0usize;
+    let mut dq_excluded_outside_line = 0;
 
     for band_start in (0..rows).step_by(band_rows) {
         let band_end = (band_start + band_rows).min(rows);
         let row_count = band_end - band_start;
-        let planes = decode_window_rows(cube, channels, band_start, row_count)?;
+        let mut planes = decode_window_rows(cube, channels, band_start, row_count)?;
+        if let Some(dq) = dq {
+            for (&z, plane) in channels.iter().zip(&mut planes) {
+                let flags = dq.decode_dq_rows(z, band_start, row_count)?;
+                for (value, flag) in plane.iter_mut().zip(flags) {
+                    if value.is_finite() && DqPolicy::DoNotUse.excludes(flag) {
+                        if z < line_range.0 || z > line_range.1 { dq_excluded_outside_line += 1; }
+                        *value = f32::NAN;
+                    }
+                }
+            }
+        }
         let err_planes = err.map(|c| decode_window_rows(c, channels, band_start, row_count)).transpose()?;
         let offset = band_start * cols;
         let band = offset..offset + row_count * cols;
@@ -422,7 +443,7 @@ fn fit_continuum(
         windows.1 .1
     ));
     let noise_factor = pooled_noise_factor(pool, pooled_pixels, stride);
-    Ok(ContinuumFit { pixels, linear, covariance, noise_factor })
+    Ok(ContinuumFit { pixels, linear, covariance, noise_factor, dq_excluded_outside_line })
 }
 
 fn median_finite(values: impl Iterator<Item = f32>) -> Option<f64> {
@@ -444,13 +465,15 @@ fn line_free_channel(cfg: &MomentConfig, depth: usize) -> Option<usize> {
     }
 }
 
-fn global_noise_from_channel(cube: &LazyCube, cfg: &MomentConfig, notes: &mut Vec<String>) -> Result<Option<f64>> {
+fn global_noise_from_channel(cube: &LazyCube, dq: Option<&LazyCube>, cfg: &MomentConfig, notes: &mut Vec<String>) -> Result<Option<f64>> {
     let Some(z) = line_free_channel(cfg, cube.geometry.naxis3) else {
         notes.push("no line-free channel outside the range: noise unknown, SNR mask not applied".to_string());
         return Ok(None);
     };
     let plane = cube.decode_rows(z, 0, cube.geometry.naxis2)?;
-    let mut finite: Vec<f32> = plane.iter().copied().filter(|v| v.is_finite()).collect();
+    let flags = dq.map(|cube| cube.decode_dq_rows(z, 0, cube.geometry.naxis2)).transpose()?;
+    let mut finite: Vec<f32> = plane.iter().enumerate().filter(|(i, value)| value.is_finite() && !flags.as_ref().is_some_and(|f| DqPolicy::DoNotUse.excludes(f[*i]))).map(|(_, value)| *value).collect();
+    if flags.is_some() { notes.push(format!("DQ applied to noise channel {z}: {} finite samples retained", finite.len())); }
     if finite.len() < 2 {
         notes.push(format!("channel {} has no finite pixels: noise unknown, SNR mask not applied", z));
         return Ok(None);
@@ -471,16 +494,19 @@ struct PixelAccumulator {
     weighted_v: f64,
     weighted_v2: f64,
     count: u32,
+    used_width_squared: f64,
 }
 
 impl PixelAccumulator {
-    fn add(&mut self, value: f64, v: f64, dv: f64) {
+    fn add(&mut self, value: f64, v: f64, dv: f64, shape_width: f64) {
         self.count += 1;
+        self.used_width_squared += dv * dv;
         self.m0 += value * dv;
         if value > 0.0 {
-            self.weight += value;
-            self.weighted_v += value * v;
-            self.weighted_v2 += value * v * v;
+            let weight = value * shape_width;
+            self.weight += weight;
+            self.weighted_v += weight * v;
+            self.weighted_v2 += weight * v * v;
         }
     }
 }
@@ -504,13 +530,13 @@ struct OverlapAccumulator {
 }
 
 impl OverlapAccumulator {
-    fn add(&mut self, value: f64, variance: f64, u: f64, dv: f64, x: f64) {
+    fn add(&mut self, value: f64, variance: f64, u: f64, dv: f64, shape_width: f64, x: f64) {
         self.m0 += dv * variance;
         self.m0_x += dv * variance * x;
         if value > 0.0 {
             for ((plain, by_x), power) in self.u.iter_mut().zip(self.x_u.iter_mut()).zip([1.0, u, u * u]) {
-                *plain += variance * power;
-                *by_x += variance * x * power;
+                *plain += variance * shape_width * power;
+                *by_x += variance * shape_width * x * power;
             }
         }
     }
@@ -534,18 +560,18 @@ impl PixelBaseline<'_> {
 }
 
 impl ErrorAccumulator {
-    fn add(&mut self, value: f64, variance: f64, u: f64, dv: f64, x: f64) {
+    fn add(&mut self, value: f64, variance: f64, u: f64, dv: f64, shape_width: f64, x: f64) {
         self.m0_variance += dv * dv * variance;
         self.dv += dv;
         self.dv_x += dv * x;
         if value > 0.0 {
             let powers = [1.0, u, u * u, u * u * u, u * u * u * u];
             for (slot, power) in self.variance_u.iter_mut().zip(powers) {
-                *slot += variance * power;
+                *slot += variance * shape_width * shape_width * power;
             }
             for ((plain, by_x), power) in self.u.iter_mut().zip(self.x_u.iter_mut()).zip(powers) {
-                *plain += power;
-                *by_x += x * power;
+                *plain += shape_width * power;
+                *by_x += shape_width * x * power;
             }
         }
     }
@@ -578,7 +604,11 @@ impl ErrorAccumulator {
 }
 
 fn error_from_variance(variance: f64) -> f32 {
-    variance.max(0.0).sqrt() as f32
+    if variance.is_finite() {
+        variance.max(0.0).sqrt() as f32
+    } else {
+        f32::NAN
+    }
 }
 
 fn error_notes(err_hdu: usize, continuum: Option<&ContinuumFit>, notes: &mut Vec<String>) {
@@ -663,9 +693,16 @@ pub fn moment_maps(cube: &LazyCube, cfg: &MomentConfig) -> Result<MomentMaps> {
 }
 
 pub fn moment_maps_set(set: &CubeSet, cfg: &MomentConfig) -> Result<MomentMaps> {
-    let mut maps = moment_maps_within(&set.sci, set.err.as_deref(), cfg, effective_memory())?;
-    if set.dq.is_some() {
+    let policy = cfg.dq_policy.unwrap_or_default();
+    let dq = set.dq.as_deref().filter(|_| policy == DqPolicy::DoNotUse);
+    let mut maps = moment_maps_with_dq(&set.sci, set.err.as_deref(), dq, cfg, effective_memory())?;
+    if let Some(dq) = dq {
+        maps.notes.push(format!("DQ HDU {}: DO_NOT_USE (bit 0) and invalid flags exclude {} finite samples across the measurement and continuum channels", dq.hdu_index, maps.dq_excluded_samples));
+        if dq.geometry.bitpix < 0 { maps.notes.push(FLOAT_DQ_NOTE.into()); }
+    } else if set.dq.is_some() {
         maps.notes.push(DQ_NOT_APPLIED_NOTE.to_string());
+    } else if cfg.dq_policy.is_some() {
+        maps.notes.push("No DQ cube is available: no DQ samples excluded".into());
     }
     Ok(maps)
 }
@@ -676,10 +713,21 @@ fn moment_maps_within(
     cfg: &MomentConfig,
     memory: Option<MemoryInfo>,
 ) -> Result<MomentMaps> {
+    moment_maps_with_dq(cube, err, None, cfg, memory)
+}
+
+fn moment_maps_with_dq(
+    cube: &LazyCube,
+    err: Option<&LazyCube>,
+    dq: Option<&LazyCube>,
+    cfg: &MomentConfig,
+    memory: Option<MemoryInfo>,
+) -> Result<MomentMaps> {
     let g = &cube.geometry;
     let (rows, cols, depth) = (g.naxis2, g.naxis1, g.naxis3);
     cube.check_channel_range(cfg.z0, cfg.z1)?;
     check_companion(EXTNAME_ERR, cube, err)?;
+    check_companion("DQ", cube, dq)?;
     let n_channels = cfg.z1 - cfg.z0 + 1;
     if n_channels < 2 {
         bail!("moment maps need at least two channels in the range, got {}", n_channels);
@@ -695,17 +743,24 @@ fn moment_maps_within(
     if !(dv_mean > 0.0) {
         bail!("channel velocity width is zero: the spectral axis has no usable step");
     }
+    let uniform_velocity_widths = !axis.tabulated
+        && (axis.kind.is_velocity()
+            || matches!((axis.kind, cfg.convention), (AxisKind::Wave | AxisKind::Zopt, VelocityConvention::Optical) | (AxisKind::Freq, VelocityConvention::Radio)));
+    if !uniform_velocity_widths {
+        notes.push("Channel-width weighting: M1 and M2 use positive intensity times absolute channel width; their ERR Jacobians use the same widths and the S/N mask uses their quadrature sum".to_string());
+    }
     let windows = cfg.continuum.map(|w| window_channels(w, depth).map(|channels| (w, channels))).transpose()?;
     let mut in_windows = vec![false; depth];
     for &z in windows.iter().flat_map(|(_, channels)| channels) {
         in_windows[z] = true;
     }
     let overlap = err.is_some() && in_windows[cfg.z0..=cfg.z1].iter().any(|&w| w);
-    let required = moment_memory_bytes(rows, cols, windows.as_ref().map(|(_, c)| c.len()), err.is_some(), overlap);
+    let required = moment_memory_bytes(rows, cols, windows.as_ref().map(|(_, c)| c.len()), err.is_some(), overlap)
+        .saturating_add(if dq.is_some() { (rows as u64).saturating_mul(cols as u64).saturating_mul(16) } else { 0 });
     check_moment_memory(required, rows, cols, err.is_some(), memory)?;
 
     let continuum = match &windows {
-        Some((w, channels)) => Some(fit_continuum(cube, err, *w, channels, &mut notes)?),
+        Some((w, channels)) => Some(fit_continuum(cube, err, dq, (cfg.z0, cfg.z1), *w, channels, &mut notes)?),
         None => None,
     };
     let global_noise = match &continuum {
@@ -721,13 +776,14 @@ fn moment_maps_within(
             }
             level
         }
-        None => global_noise_from_channel(cube, cfg, &mut notes)?,
+        None => global_noise_from_channel(cube, dq, cfg, &mut notes)?,
     };
 
     let npix = rows * cols;
     let mut acc = vec![PixelAccumulator::default(); npix];
     let mut err_acc = err.map(|_| vec![ErrorAccumulator::default(); npix]);
     let mut overlap_acc = overlap.then(|| vec![OverlapAccumulator::default(); npix]);
+    let mut dq_excluded_samples = continuum.as_ref().map_or(0, |fit| fit.dq_excluded_outside_line);
     let v_ref = velocities[(cfg.z0 + cfg.z1) / 2];
     let batch_size = moment_batch_size(err.is_some());
     for batch_start in (cfg.z0..=cfg.z1).step_by(batch_size) {
@@ -738,10 +794,15 @@ fn moment_maps_within(
             let z = batch_start + k;
             let v = velocities[z];
             let dv = widths[z];
+            let shape_width = if uniform_velocity_widths { 1.0 } else { dv / dv_mean };
             let xz = z as f64;
+            let flags = dq.map(|cube| cube.decode_dq_rows(z, 0, rows)).transpose()?;
+            if let Some(flags) = &flags {
+                dq_excluded_samples += frame.iter().zip(flags).filter(|(value, flag)| value.is_finite() && DqPolicy::DoNotUse.excludes(**flag)).count() as u64;
+            }
             let value_at = |i: usize| -> Option<f64> {
                 let raw = frame[i];
-                if !raw.is_finite() {
+                if !raw.is_finite() || flags.as_ref().is_some_and(|f| DqPolicy::DoNotUse.excludes(f[i])) {
                     return None;
                 }
                 match &continuum {
@@ -766,29 +827,28 @@ fn moment_maps_within(
                             .for_each(|(i, ((a, e), o))| {
                                 if let Some(value) = value_at(i) {
                                     let variance = err_variance(sigma[i]);
-                                    a.add(value, v, dv);
-                                    e.add(value, variance, u, dv, xz);
-                                    o.add(value, variance, u, dv, xz);
+                                    a.add(value, v, dv, shape_width);
+                                    e.add(value, variance, u, dv, shape_width, xz);
+                                    o.add(value, variance, u, dv, shape_width, xz);
                                 }
                             }),
                         None => acc.par_iter_mut().zip(err_acc.par_iter_mut()).enumerate().for_each(|(i, (a, e))| {
                             if let Some(value) = value_at(i) {
-                                a.add(value, v, dv);
-                                e.add(value, err_variance(sigma[i]), u, dv, xz);
+                                a.add(value, v, dv, shape_width);
+                                e.add(value, err_variance(sigma[i]), u, dv, shape_width, xz);
                             }
                         }),
                     }
                 }
                 _ => acc.par_iter_mut().enumerate().for_each(|(i, a)| {
                     if let Some(value) = value_at(i) {
-                        a.add(value, v, dv);
+                        a.add(value, v, dv, shape_width);
                     }
                 }),
             }
         }
     }
 
-    let sqrt_n = (n_channels as f64).sqrt();
     let threshold = cfg.snr_threshold;
     let mut m0 = vec![f32::NAN; npix];
     let mut m1 = vec![f32::NAN; npix];
@@ -810,7 +870,10 @@ fn moment_maps_within(
             (local, floor) => local.or(floor),
         };
         let passes = match noise {
-            Some(sigma) => a.m0 / (sigma * sqrt_n * dv_mean) >= threshold,
+            Some(sigma) => {
+                let integrated_noise = if uniform_velocity_widths { sigma * (a.count as f64).sqrt() * dv_mean } else { sigma * a.used_width_squared.sqrt() };
+                a.m0 / integrated_noise >= threshold
+            }
             None => {
                 unmaskable += 1;
                 true
@@ -886,6 +949,8 @@ fn moment_maps_within(
         m2_err,
         noise_factor: continuum.as_ref().and_then(|fit| fit.noise_factor).map(|f| f.factor),
         err_hdu: err.map(|e| e.hdu_index),
+        dq_hdu: dq.map(|dq| dq.hdu_index),
+        dq_excluded_samples,
     })
 }
 
@@ -917,6 +982,7 @@ mod tests {
             continuum: Some(((0, 5), (34, 39))),
             snr_threshold: DEFAULT_SNR_THRESHOLD,
             mask_below_threshold: true,
+            dq_policy: None,
         }
     }
 
@@ -1035,6 +1101,7 @@ mod tests {
             continuum: None,
             snr_threshold: DEFAULT_SNR_THRESHOLD,
             mask_below_threshold: true,
+            dq_policy: None,
         };
         let maps = moment_maps(&cube, &cfg).unwrap();
         assert_eq!(maps.m0_unit, "K km/s");
@@ -1144,6 +1211,169 @@ mod tests {
         assert!(channel_widths(&[]).is_empty());
     }
 
+    fn p0_nonuniform_moment_set(dir: &tempfile::TempDir, descending: bool) -> CubeSet {
+        let path = dir.path().join(if descending { "nonuniform-descending.fits" } else { "nonuniform-ascending.fits" });
+        let mut coordinates = [1.0_f32, 1.0009765625, 1.0029296875, 1.005859375];
+        if descending { coordinates.reverse(); }
+        write_cube_with_wcs_table(&path, 2, 2, &tab_cube_cards(), &coordinates, |_, _, _| 1.0);
+        let error_path = dir.path().join("nonuniform-err.fits");
+        write_cube(&error_path, 2, 2, 4, &[], |_, _, _| 0.5);
+        CubeSet { sci: open_arc(&path), err: Some(open_arc(&error_path)), dq: None, notes: Vec::new() }
+    }
+
+    #[test]
+    fn dq_policy_masks_moment_samples_and_their_errors_without_rejecting_other_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq-moments.fits");
+        write_cube(&path, 4, 2, 4, &[("CTYPE3", "'VRAD'"), ("CUNIT3", "'km/s'"), ("CRVAL3", "0"), ("CDELT3", "1"), ("CRPIX3", "1")], |z, _, _| [0.0, 2.0, 100.0, 4.0][z]);
+        let err_path = dir.path().join("dq-moments-err.fits");
+        write_cube(&err_path, 4, 2, 4, &[], |z, _, _| if z == 2 { f32::NAN } else { 1.0 });
+        let dq_path = dir.path().join("dq-moments-mask.fits");
+        let data: Vec<u8> = (0..4).flat_map(|z| (0..2).flat_map(move |_| (0..4).flat_map(move |x| {
+            let bits: u32 = match x { 2 => 1, 3 => 1 << 24, _ if z == 2 => 1 | (1 << 24), _ => 0 };
+            bits.to_be_bytes()
+        }))).collect();
+        write_bytes(&dq_path, &image_hdu("SIMPLE", &[4, 2, 4], 32, &[], data));
+        let set = CubeSet { sci: open_arc(&path), err: Some(open_arc(&err_path)), dq: Some(open_arc(&dq_path)), notes: vec![] };
+        let cfg = MomentConfig { dq_policy: Some(DqPolicy::DoNotUse), ..p0_nonuniform_config() };
+        let maps = moment_maps_set(&set, &cfg).unwrap();
+        let expected = [6.0, 7.0/3.0, (8.0_f64/9.0).sqrt(), 3.0_f64.sqrt(), 5.0_f64.sqrt()/9.0, 10.0_f64.sqrt()/36.0];
+        for x in 0..2 {
+            let actual = [maps.m0[(0,x)], maps.m1[(0,x)], maps.m2[(0,x)], maps.m0_err.as_ref().unwrap()[(0,x)], maps.m1_err.as_ref().unwrap()[(0,x)], maps.m2_err.as_ref().unwrap()[(0,x)]];
+            for (got, want) in actual.into_iter().zip(expected) { assert!((f64::from(got)-want).abs() < 1e-6, "column{x}: {got} vs {want}"); }
+        }
+        assert!(maps.m0[(0,2)].is_nan() && maps.m1[(0,2)].is_nan() && maps.m0_err.as_ref().unwrap()[(0,2)].is_nan());
+        assert_eq!(maps.m0[(0,3)], 106.0);
+        for policy in [None, Some(DqPolicy::Ignore)] {
+            let legacy = moment_maps_set(&set, &MomentConfig { dq_policy: policy, ..cfg.clone() }).unwrap();
+            assert_eq!(legacy.m0[(0,0)], 106.0);
+            assert!(legacy.m0_err.as_ref().unwrap()[(0,0)].is_nan());
+        }
+    }
+
+    #[test]
+    fn dq_policy_does_not_change_snr_population_when_sci_channels_are_nonfinite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-sci-snr.fits");
+        write_cube(&path, 2, 2, 5, &[("CTYPE3", "'VRAD'"), ("CUNIT3", "'km/s'"), ("CRVAL3", "0"), ("CDELT3", "1"), ("CRPIX3", "1")], |z, y, x| if z == 2 { f32::NAN } else { (1 + 2*y + x) as f32 });
+        let dq_path = dir.path().join("missing-sci-snr-dq.fits");
+        write_bytes(&dq_path, &image_hdu("SIMPLE", &[2, 2, 5], 32, &[], vec![0; 80]));
+        for (policy, has_dq) in [(None, false), (Some(DqPolicy::Ignore), true), (Some(DqPolicy::DoNotUse), true)] {
+            let set = CubeSet { sci: open_arc(&path), err: None, dq: has_dq.then(|| open_arc(&dq_path)), notes: vec![] };
+            let cfg = MomentConfig { dq_policy: policy, snr_threshold: 1.1, mask_below_threshold: true, ..p0_nonuniform_config() };
+            let maps = moment_maps_set(&set, &cfg).unwrap();
+            assert_eq!(maps.m0[(0,0)], 3.0, "policy {policy:?}: accepted-channel S/N must pass");
+            assert!((f64::from(maps.m1[(0,0)]) - 4.0/3.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn dq_policy_masks_continuum_and_overlap_with_the_same_samples_as_explicit_missing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = |z: usize| [2, 4, 20, 37].contains(&z);
+        let source = dir.path().join("dq-continuum.fits");
+        let reference = dir.path().join("dq-continuum-reference.fits");
+        for (path, missing) in [(&source, false), (&reference, true)] {
+            write_cube(path, 2, 2, LINE_CUBE_DEPTH, &line_cube_cards(), |z, _, _| {
+                if bad(z) { if missing { f32::NAN } else { 100.0 } } else { 2.0 + 20.0 * line_profile(z) }
+            });
+        }
+        let err = dir.path().join("dq-continuum-err.fits");
+        write_cube(&err, 2, 2, LINE_CUBE_DEPTH, &[], |z, _, _| if bad(z) { f32::NAN } else { 0.2 + z as f32 * 0.01 });
+        let dq = dir.path().join("dq-continuum-mask.fits");
+        let flags = (0..LINE_CUBE_DEPTH).flat_map(|z| (0..4).flat_map(move |_| u32::from(bad(z)).to_be_bytes())).collect::<Vec<_>>();
+        write_bytes(&dq, &image_hdu("SIMPLE", &[2, 2, LINE_CUBE_DEPTH], 32, &[], flags));
+        let set = CubeSet { sci: open_arc(&source), err: Some(open_arc(&err)), dq: Some(open_arc(&dq)), notes: vec![] };
+        let clean = CubeSet { sci: open_arc(&reference), err: Some(open_arc(&err)), dq: None, notes: vec![] };
+        for windows in [((0, 5), (34, 39)), ((0, 5), (0, 5))] {
+            let cfg = MomentConfig { z0: 4, z1: 35, continuum: Some(windows), dq_policy: Some(DqPolicy::DoNotUse), snr_threshold: 0.0, ..line_config() };
+            let actual = moment_maps_set(&set, &cfg).unwrap();
+            let expected = moment_maps_set(&clean, &cfg).unwrap();
+            assert_same_maps(&actual, &expected);
+            for (a, b) in [&actual.m0_err, &actual.m1_err, &actual.m2_err].into_iter().zip([&expected.m0_err, &expected.m1_err, &expected.m2_err]) {
+                assert_eq!(a.as_ref().unwrap().mapv(f32::to_bits), b.as_ref().unwrap().mapv(f32::to_bits));
+            }
+            assert_eq!(actual.noise_factor, expected.noise_factor);
+            assert_eq!(actual.dq_excluded_samples, if windows.0 == windows.1 { 12 } else { 16 });
+        }
+    }
+
+    fn p0_nonuniform_config() -> MomentConfig {
+        MomentConfig { z0: 0, z1: 3, rest_um: Some(1.0), convention: VelocityConvention::Optical,
+            continuum: None, snr_threshold: 0.0, mask_below_threshold: false, dq_policy: None }
+    }
+
+    #[test]
+    fn p0_nonuniform_m1_m2_use_integrated_channel_weights_in_both_axis_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let scale = SPEED_OF_LIGHT_KMS / 1024.0;
+        let expected = [8.0 * scale, 3.375 * scale, 5.109375_f64.sqrt() * scale];
+        let mut correct = true;
+        for descending in [false, true] {
+            let set = p0_nonuniform_moment_set(&dir, descending);
+            let maps = moment_maps_set(&set, &p0_nonuniform_config()).unwrap();
+            let actual = [maps.m0[(0, 0)], maps.m1[(0, 0)], maps.m2[(0, 0)]].map(f64::from);
+            eprintln!("nonuniform descending={descending}: actual M0/M1/M2={actual:?}; integrated expectation={expected:?}");
+            correct &= actual.iter().zip(expected).all(|(got, want)| (got - want).abs() <= 1e-6 * want.abs());
+        }
+        assert!(correct, "M1/M2 must use the same channel widths as M0");
+    }
+
+    #[test]
+    fn p0_nonuniform_moment_errors_follow_derivatives_of_integrated_moments() {
+        let dir = tempfile::tempdir().unwrap();
+        let set = p0_nonuniform_moment_set(&dir, false);
+        let maps = moment_maps_set(&set, &p0_nonuniform_config()).unwrap();
+        let scale = SPEED_OF_LIGHT_KMS / 1024.0;
+        let velocities = [0.0_f64, 1.0, 3.0, 6.0];
+        let widths = [1.0_f64, 1.5, 2.5, 3.0];
+        let m1 = 3.375_f64;
+        let variance = 5.109375_f64;
+        let e0 = 0.5 * scale * 18.5_f64.sqrt();
+        let e1 = 0.5 * scale * velocities.iter().zip(widths).map(|(v, w)| w * w * (v - m1).powi(2)).sum::<f64>().sqrt() / 8.0;
+        let e2 = 0.5 * scale * velocities.iter().zip(widths).map(|(v, w)| w * w * ((v - m1).powi(2) - variance).powi(2)).sum::<f64>().sqrt() / (16.0 * variance.sqrt());
+        let expected = [e0, e1, e2];
+        let actual = [maps.m0_err.as_ref().unwrap()[(0, 0)], maps.m1_err.as_ref().unwrap()[(0, 0)], maps.m2_err.as_ref().unwrap()[(0, 0)]].map(f64::from);
+        eprintln!("nonuniform moment ERR: actual={actual:?}; analytic={expected:?}");
+        assert!(actual.iter().zip(expected).all(|(got, want)| (got - want).abs() <= 1e-6 * want.abs()), "moment uncertainty must propagate each channel's width");
+    }
+
+    #[test]
+    fn p0_nonuniform_snr_mask_uses_quadrature_of_the_velocity_widths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonuniform-threshold.fits");
+        let coordinates = [1.0_f32, 1.0009765625, 1.0029296875, 1.005859375, 1.0087890625];
+        write_cube_with_wcs_table(&path, 2, 2, &tab_cube_cards(), &coordinates, |_, y, x| (1 + 2*y + x) as f32);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let expected_snr = 8.0 / (MAD_TO_SIGMA * 18.5_f64.sqrt());
+        assert!(expected_snr < 1.3 && 8.0 / (MAD_TO_SIGMA * 4.0) > 1.3);
+        for mask_below_threshold in [false, true] {
+            let cfg = MomentConfig { snr_threshold: 1.3, mask_below_threshold, ..p0_nonuniform_config() };
+            let maps = moment_maps(&cube, &cfg).unwrap();
+            eprintln!("nonuniform masking={mask_below_threshold}: M0/M1/M2={:?}; expected S/N={expected_snr}", [maps.m0[(0, 0)], maps.m1[(0, 0)], maps.m2[(0, 0)]]);
+            assert!(maps.m1[(0, 0)].is_nan() && maps.m2[(0, 0)].is_nan(), "below-threshold integrated noise must mask the velocity moments");
+            assert_eq!(maps.m0[(0, 0)].is_nan(), mask_below_threshold);
+            assert!(maps.m1[(0, 1)].is_finite() && maps.m2[(0, 1)].is_finite());
+        }
+    }
+
+    #[test]
+    fn p0_nonuniform_radio_velocity_widths_are_used_even_for_linear_wavelength_sampling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("radio-widths.fits");
+        write_cube(&path, 2, 2, 4, &[("CTYPE3", "'WAVE'"), ("CUNIT3", "'um'"), ("CRVAL3", "1.0"), ("CDELT3", "1.0"), ("CRPIX3", "1.0")], |_, _, _| 1.0);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let cfg = MomentConfig { convention: VelocityConvention::Radio, ..p0_nonuniform_config() };
+        let maps = moment_maps(&cube, &cfg).unwrap();
+        let coordinates = [0.0_f64, 0.5, 2.0/3.0, 0.75];
+        let widths = [0.5_f64, 1.0/3.0, 0.125, 1.0/12.0];
+        let sum: f64 = widths.iter().sum();
+        let mean = coordinates.iter().zip(widths).map(|(&v, w)| v*w).sum::<f64>() / sum;
+        let spread = (coordinates.iter().zip(widths).map(|(&v, w)| (v-mean).powi(2)*w).sum::<f64>() / sum).sqrt();
+        assert!((f64::from(maps.m1[(0, 0)]) / SPEED_OF_LIGHT_KMS - mean).abs() < 1e-7);
+        assert!((f64::from(maps.m2[(0, 0)]) / SPEED_OF_LIGHT_KMS - spread).abs() < 1e-7);
+    }
+
     const GOLDEN_MOMENT_NOISE: f32 = 0.01;
     const GOLDEN_MOMENT_SHA256: [(&str, &str); 2] = [
         ("windows", "18371255802c383e4c3361bec9a0fc9e5ea1cdcc062e7e6a4d40fbf916d489e9"),
@@ -1236,6 +1466,75 @@ mod tests {
     }
 
     const LINE_ERR_SIGMA: f32 = 0.005_773_5;
+
+    #[test]
+    fn invalid_err_keeps_moment_uncertainty_unknown_only_for_used_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid_err_sci.fits");
+        let invalid = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.5];
+        let cols = invalid.len() + 2;
+        write_cube(&path, cols, 4, LINE_CUBE_DEPTH, &line_cube_cards(), |z, y, _| match (z, y) {
+            (20, 1) => f32::NAN,
+            (20, 3) => -1.0,
+            _ => 2.0,
+        });
+        let err_path = dir.path().join("invalid_err.fits");
+        write_cube(&err_path, cols, 4, LINE_CUBE_DEPTH, &[], |z, y, x| {
+            if x == cols - 1 {
+                0.0
+            } else if x < invalid.len() && z == if y == 2 { 2 } else { 20 } {
+                invalid[x]
+            } else {
+                0.5
+            }
+        });
+        let cfg = MomentConfig { continuum: None, snr_threshold: 0.0, mask_below_threshold: false, ..line_config() };
+        let set = CubeSet { sci: open_arc(&path), err: Some(open_arc(&err_path)), dq: None, notes: Vec::new() };
+        let maps = moment_maps_set(&set, &cfg).unwrap();
+        assert_same_maps(&maps, &moment_maps(&set.sci, &cfg).unwrap());
+        for (order, plane) in [&maps.m0_err, &maps.m1_err, &maps.m2_err].into_iter().enumerate() {
+            let plane = plane.as_ref().unwrap();
+            for y in 0..4 {
+                for x in 0..cols {
+                    let sigma = plane[[y, x]];
+                    if x == cols - 1 {
+                        assert_eq!(sigma, 0.0, "M{order} ERR at ({x}, {y})");
+                    } else if x < invalid.len() && (y == 0 || (y == 3 && order == 0)) {
+                        assert!(sigma.is_nan(), "M{order} ERR at ({x}, {y}) must stay unknown, got {sigma}");
+                    } else {
+                        assert!(sigma.is_finite() && sigma > 0.0, "M{order} ERR at ({x}, {y}) must remain valid, got {sigma}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_err_in_used_continuum_samples_keeps_moment_uncertainty_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid_continuum_err_sci.fits");
+        let invalid = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.5];
+        write_cube(&path, invalid.len(), 2, LINE_CUBE_DEPTH, &line_cube_cards(), |z, y, _| {
+            if z == 2 && y == 1 {
+                f32::NAN
+            } else {
+                (2.0 + 10.0 * (-0.5 * ((z as f64 - 20.0) / 3.0).powi(2)).exp()) as f32
+            }
+        });
+        let err_path = dir.path().join("invalid_continuum_err.fits");
+        write_cube(&err_path, invalid.len(), 2, LINE_CUBE_DEPTH, &[], |z, _, x| if z == 2 { invalid[x] } else { 0.5 });
+        let cfg = MomentConfig { snr_threshold: 0.0, mask_below_threshold: false, ..line_config() };
+        let set = CubeSet { sci: open_arc(&path), err: Some(open_arc(&err_path)), dq: None, notes: Vec::new() };
+        let maps = moment_maps_set(&set, &cfg).unwrap();
+        assert_same_maps(&maps, &moment_maps(&set.sci, &cfg).unwrap());
+        for (order, plane) in [&maps.m0_err, &maps.m1_err, &maps.m2_err].into_iter().enumerate() {
+            let plane = plane.as_ref().unwrap();
+            for x in 0..invalid.len() {
+                assert!(plane[[0, x]].is_nan(), "M{order} ERR at ({x}, 0) must stay unknown, got {}", plane[[0, x]]);
+                assert!(plane[[1, x]].is_finite() && plane[[1, x]] > 0.0, "M{order} ERR at ({x}, 1) must remain valid, got {}", plane[[1, x]]);
+            }
+        }
+    }
 
     #[test]
     fn with_an_err_cube_the_maps_keep_their_bits_and_the_error_planes_follow_their_masks() {
@@ -1602,17 +1901,17 @@ mod tests {
             (cfg.z0..=cfg.z1).map(|z| (z, values[z] - mean_y - slope * (z as f64 - mean_x))).collect();
         assert!(line.iter().all(|(_, s)| s.abs() > SIGN_MARGIN), "a channel sits on the sign boundary: {:?}", line);
         let positive: Vec<(usize, f64)> = line.iter().copied().filter(|(_, s)| *s > 0.0).collect();
-        let weight: f64 = positive.iter().map(|p| p.1).sum();
-        let m1 = positive.iter().map(|&(z, s)| s * velocities[z]).sum::<f64>() / weight;
-        let m2 = (positive.iter().map(|&(z, s)| s * velocities[z] * velocities[z]).sum::<f64>() / weight - m1 * m1).sqrt();
         let widths = channel_widths(velocities);
+        let weight: f64 = positive.iter().map(|&(z, s)| s * widths[z]).sum();
+        let m1 = positive.iter().map(|&(z, s)| s * widths[z] * velocities[z]).sum::<f64>() / weight;
+        let m2 = (positive.iter().map(|&(z, s)| s * widths[z] * velocities[z] * velocities[z]).sum::<f64>() / weight - m1 * m1).sqrt();
         let mut weights = [vec![0.0; values.len()], vec![0.0; values.len()], vec![0.0; values.len()]];
         for &(z, _) in &line {
             weights[0][z] = widths[z];
         }
         for &(z, _) in &positive {
-            weights[1][z] = (velocities[z] - m1) / weight;
-            weights[2][z] = ((velocities[z] - m1).powi(2) - m2 * m2) / (2.0 * m2 * weight);
+            weights[1][z] = widths[z] * (velocities[z] - m1) / weight;
+            weights[2][z] = widths[z] * ((velocities[z] - m1).powi(2) - m2 * m2) / (2.0 * m2 * weight);
         }
         weights
     }
@@ -1621,7 +1920,7 @@ mod tests {
         let maps = moment_maps_set(set, cfg).unwrap();
         let windows = cfg.continuum.unwrap();
         let linear = windows.0 != windows.1;
-        let fitted = window_channels(windows, LINE_CUBE_DEPTH).unwrap();
+        let fitted = window_channels(windows, set.sci.geometry.naxis3).unwrap();
         let values: Vec<f64> = set.sci.extract_spectrum_at(0, 0).unwrap().iter().map(|&v| v as f64).collect();
         let errs: Vec<f64> = set.err.as_ref().unwrap().extract_spectrum_at(0, 0).unwrap().iter().map(|&e| e as f64).collect();
         let velocities = velocities_of(&set.sci, cfg);
@@ -1649,6 +1948,24 @@ mod tests {
         for (name, e) in ["M0", "M1", "M2"].iter().zip(&exact) {
             assert_eq!(e.overlap, 0.0, "{}", name);
             assert!(e.cross.abs() >= MIN_TERM_SHARE * e.total, "{}: the cross term {} must matter against {}", name, e.cross, e.total);
+        }
+    }
+
+    #[test]
+    fn p0_nonuniform_errors_include_full_continuum_and_shared_channel_jacobians() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordinates = [0.0_f32, 1.0, 3.0, 6.0, 10.0, 15.0, 21.0, 28.0].map(|v| 1.0 + v / 1024.0);
+        let values = [2.0_f32, 3.0, 10.0, 14.0, 12.0, 6.0, 4.0, 5.0];
+        let errors = [0.15_f32, 0.22, 0.38, 0.42, 0.31, 0.23, 0.5, 0.6];
+        let path = dir.path().join("nonuniform-overlap.fits");
+        write_cube_with_wcs_table(&path, 2, 2, &tab_cube_cards(), &coordinates, |z, _, _| values[z]);
+        let error_path = dir.path().join("nonuniform-overlap-err.fits");
+        write_cube(&error_path, 2, 2, 8, &[], |z, _, _| errors[z]);
+        let set = CubeSet { sci: open_arc(&path), err: Some(open_arc(&error_path)), dq: None, notes: Vec::new() };
+        for (label, windows) in [("nonuniform linear overlap", ((0, 2), (6, 7))), ("nonuniform constant overlap", ((0, 2), (0, 2)))] {
+            let cfg = MomentConfig { z0: 1, z1: 6, continuum: Some(windows), ..p0_nonuniform_config() };
+            let exact = assert_errors_follow_the_full_jacobian(label, &set, &cfg);
+            assert!(exact.iter().all(|e| e.overlap != 0.0), "{label}: the shared-channel term must be exercised");
         }
     }
 

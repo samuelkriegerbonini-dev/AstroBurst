@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useId, useMemo, memo } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useId, useMemo, memo } from "react";
 import { Activity, BarChart3, CircleDot, Crosshair, FileText, Layers } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import LineMeasurementSection from "./LineMeasurementSection";
@@ -8,6 +8,7 @@ import LineListControls from "./LineListControls";
 import SpectralAxisControls from "./SpectralAxisControls";
 import SpectrumComparisonSection from "./SpectrumComparisonSection";
 import DecimalField from "../ui/DecimalField";
+import { scienceDqSummary } from "../../utils/analysisLabels";
 import {
   collapseCubeRange,
   computeMomentMaps,
@@ -52,6 +53,7 @@ import {
 import type {
   CollapseRangeMode,
   CollapseRangeResult,
+  CollapseZeroPolicy,
   ContinuumWindows,
   CubeDims,
   LineFitComponents,
@@ -59,6 +61,7 @@ import type {
   LineFitSpaxel,
   MomentKind,
   MomentMapsResult,
+  ScienceDqPolicy,
 } from "../../shared/types/cube";
 import { COLLAPSE_RANGE_MODES, MOMENT_KINDS } from "../../shared/types/cube";
 import type { DisplayHint } from "../../shared/types/preview";
@@ -192,6 +195,7 @@ interface SpectroscopyPanelProps {
   filePath?: string;
   onFramePreview?: (previewUrl: string, frameIndex: number, fitsPath?: string) => void;
   onCubeResult?: (result: CubeResult) => void;
+  onInvalidateCubeResult?: (fitsPaths: string[]) => void;
   publishGate: FramePublishGate;
   documentMode?: boolean;
   spectrumDocument?: SpectrumDocument | null;
@@ -364,6 +368,7 @@ function SpectroscopyPanel({
   filePath,
   onFramePreview,
   onCubeResult,
+  onInvalidateCubeResult,
   publishGate: framePublishGate,
   documentMode = false,
   spectrumDocument = null,
@@ -376,9 +381,10 @@ function SpectroscopyPanel({
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const [collapseLoading, setCollapseLoading] = useState(false);
-  const [collapseResult, setCollapseResult] = useState<{ elapsed_ms: number; fits_path: string } | null>(null);
+  const [collapseResult, setCollapseResult] = useState<CollapseRangeResult | null>(null);
   const [collapseError, setCollapseError] = useState<string | null>(null);
   const [collapseMode, setCollapseMode] = useState<FullCollapseMode>("mean");
+  const [collapseZeroPolicy, setCollapseZeroPolicy] = useState<CollapseZeroPolicy>("include_physical_zeros");
   const regionSeqRef = useRef(0);
   const collapseSeqRef = useRef(0);
   const rangeSeqRef = useRef(0);
@@ -388,6 +394,12 @@ function SpectroscopyPanel({
   const inspectSeqRef = useRef(0);
   const inspectKeyRef = useRef<string | null>(null);
   const previousFileRef = useRef<string | undefined>(filePath);
+  const invalidateCubeResultRef = useRef(onInvalidateCubeResult);
+  const collapseProductsRef = useRef<string[]>([]);
+  const rangeProductsRef = useRef<string[]>([]);
+  const momentProductsRef = useRef<string[]>([]);
+  const fitProductsRef = useRef<string[]>([]);
+  const regionPendingRef = useRef(false);
 
   const spectrumStore = useSpectrum();
   const region = documentMode ? null : spectrumStore.region;
@@ -397,6 +409,7 @@ function SpectroscopyPanel({
   const regionError = documentMode ? null : spectrumStore.regionError;
   const { processed } = useRenderContext();
   const { file } = useFileContext();
+  const inputKey = JSON.stringify([filePath, documentMode, file?.id, file?.imageRef, file?.reloads, file?.finishedAt]);
   const { ramp: cubeRamp } = useCubeContext();
   const ramp = documentMode ? null : cubeRamp;
   const spectral = spectralSectionsVisible(ramp);
@@ -460,6 +473,7 @@ function SpectroscopyPanel({
   const [lineError, setLineError] = useState<string | null>(null);
   const [useErr, setUseErr] = useState(true);
   const [useDq, setUseDq] = useState(true);
+  const scienceDqPolicy: ScienceDqPolicy = useDq ? "do_not_use" : "ignore";
   const chooseFrame = useCallback(
     (choice: WavelengthFrameChoice) => {
       if (choice === frameChoice) return;
@@ -607,10 +621,11 @@ function SpectroscopyPanel({
     (idx: number) => {
       const target = clampFrame(idx, totalFrames);
       if (!channelRequestNeeded(target, frame, shownFrame, shownPngOnly)) return;
+      framePublishGate.supersede();
       setFrame(target);
       setRequestSeq((seq) => seq + 1);
     },
-    [totalFrames, frame, shownFrame, shownPngOnly],
+    [totalFrames, frame, shownFrame, shownPngOnly, framePublishGate],
   );
 
   useEffect(() => {
@@ -660,6 +675,101 @@ function SpectroscopyPanel({
     () => (correction !== "none" && correctionResult ? applyCorrectionKms([0], correctionResult, correction)[0] : null),
     [correction, correctionResult],
   );
+  const measureSourceKey = measureSource ? spectrumSourceKey(measureSource, MEASURED_SERIES_VIEW) : null;
+  const continuumKey = JSON.stringify(windows);
+  const pickedRegionKey = JSON.stringify([picked.target?.shape, picked.background?.shape]);
+  const previousRegionKeyRef = useRef(pickedRegionKey);
+  const previousRegionInputRef = useRef(inputKey);
+
+  useLayoutEffect(() => {
+    invalidateCubeResultRef.current = onInvalidateCubeResult;
+  });
+
+  useLayoutEffect(() => {
+    const collapseSeq = collapseSeqRef;
+    collapseSeqRef.current++;
+    if (collapseProductsRef.current.length) invalidateCubeResultRef.current?.(collapseProductsRef.current);
+    collapseProductsRef.current = [];
+    setCollapseResult(null);
+    setCollapseError(null);
+    setCollapseLoading(false);
+    return () => { collapseSeq.current++; };
+  }, [inputKey, totalFrames, collapseZeroPolicy, useDq]);
+
+  useLayoutEffect(() => {
+    const rangeSeq = rangeSeqRef;
+    rangeSeqRef.current++;
+    if (rangeProductsRef.current.length) invalidateCubeResultRef.current?.(rangeProductsRef.current);
+    rangeProductsRef.current = [];
+    setRangeResult(null);
+    setRangeError(null);
+    setRangeLoading(false);
+    return () => { rangeSeq.current++; };
+  }, [inputKey, range?.z0, range?.z1, rangeMode, collapseZeroPolicy, useDq]);
+
+  useLayoutEffect(() => {
+    const momentSeq = momentSeqRef;
+    momentSeqRef.current++;
+    if (momentProductsRef.current.length) invalidateCubeResultRef.current?.(momentProductsRef.current);
+    momentProductsRef.current = [];
+    setMomentResult(null);
+    setMomentError(null);
+    setMomentLoading(false);
+    return () => { momentSeq.current++; };
+  }, [inputKey, range?.z0, range?.z1, continuumKey, restUm, convention, snrText, maskBelow, useDq]);
+
+  useLayoutEffect(() => {
+    const lineSeq = lineSeqRef;
+    lineSeqRef.current++;
+    setLineResult(null);
+    setLineError(null);
+    setLineLoading(false);
+    return () => { lineSeq.current++; };
+  }, [inputKey, docSpectrum, measureSourceKey, range?.z0, range?.z1, continuumKey, restUm, convention, lineModel, lineShiftKms, frameChoice, useErr, useDq]);
+
+  useLayoutEffect(() => {
+    const lineFitSeq = lineFitSeqRef;
+    const inspectSeq = inspectSeqRef;
+    lineFitSeqRef.current++;
+    if (fitProductsRef.current.length) invalidateCubeResultRef.current?.(fitProductsRef.current);
+    fitProductsRef.current = [];
+    inspectSeqRef.current++;
+    inspectKeyRef.current = null;
+    setLineFitRun(null);
+    setLineFitError(null);
+    setLineFitLoading(false);
+    setInspect(null);
+    setInspectError(null);
+    setInspectLoading(false);
+    return () => {
+      lineFitSeq.current++;
+      inspectSeq.current++;
+    };
+  }, [inputKey, range?.z0, range?.z1, continuumKey, restUm, convention, lineFitSnrText, emissionOnly, useErr, useDq, resolvingPowerText, lineFitComponents]);
+
+  useLayoutEffect(() => {
+    const regionSeq = regionSeqRef;
+    regionSeqRef.current++;
+    if (previousRegionKeyRef.current !== pickedRegionKey || previousRegionInputRef.current !== inputKey) clearRegionSpectrum();
+    previousRegionKeyRef.current = pickedRegionKey;
+    previousRegionInputRef.current = inputKey;
+    return () => {
+      regionSeq.current++;
+      if (regionPendingRef.current) clearRegionSpectrum();
+      regionPendingRef.current = false;
+    };
+  }, [inputKey, pickedRegionKey]);
+
+  useLayoutEffect(() => {
+    const exportSeq = exportSeqRef;
+    exportSeqRef.current++;
+    setExportBusy(false);
+    setExportNotice(null);
+    return () => {
+      exportSeq.current++;
+      if (exportNoticeTimerRef.current !== null) window.clearTimeout(exportNoticeTimerRef.current);
+    };
+  }, [inputKey, measureSourceKey]);
 
   const lineConvention = displayConvention(axis, convention);
   const lineAvailability = useMemo(
@@ -1052,16 +1162,18 @@ function SpectroscopyPanel({
       const request = fullCubeCollapse(totalFrames, mode);
       if (!filePath || !request) return;
       const seq = ++collapseSeqRef.current;
+      const publication = framePublishGate.reserve();
       setCollapseLoading(true);
       setCollapseMode(mode);
       setCollapseResult(null);
       setCollapseError(null);
       try {
         const dir = await getOutputDir();
-        const result = await collapseCubeRange(filePath, dir, request.z0, request.z1, request.mode);
+        const result = await collapseCubeRange(filePath, dir, request.z0, request.z1, request.mode, collapseZeroPolicy, scienceDqPolicy);
         if (collapseSeqRef.current !== seq) return;
+        collapseProductsRef.current = result.fits_path ? [result.fits_path] : [];
         setCollapseResult(result);
-        if (result.previewUrl) {
+        if (result.previewUrl && framePublishGate.isLatest(publication)) {
           publishCubeResult({
             label: mode === "median" ? "Collapse median" : "Collapse mean",
             previewUrl: result.previewUrl,
@@ -1072,24 +1184,27 @@ function SpectroscopyPanel({
       } catch (e) {
         if (collapseSeqRef.current === seq) setCollapseError(e instanceof Error ? e.message : String(e));
       } finally {
-        setCollapseLoading(false);
+        if (collapseSeqRef.current === seq) setCollapseLoading(false);
       }
     },
-    [filePath, totalFrames, publishCubeResult],
+    [filePath, totalFrames, collapseZeroPolicy, scienceDqPolicy, publishCubeResult, framePublishGate],
   );
 
   const handleRegionSpectrum = useCallback(async () => {
     if (!filePath || !picked.target) return;
     const seq = ++regionSeqRef.current;
     const source: SpectrumSource = { kind: "region", shape: picked.target.shape, background: picked.background?.shape ?? null };
-    beginRegionSpectrum();
+    const request = beginRegionSpectrum();
+    regionPendingRef.current = true;
     try {
       const result = await getCubeSpectrumRegion(filePath, source.shape, source.background, continuumToSend);
       if (regionSeqRef.current !== seq) return;
-      commitRegionSpectrum(result, source, continuumToSend);
+      commitRegionSpectrum(result, source, continuumToSend, request);
       setRegionView((view) => (view === "jy" && !result.flux_jy ? "sum" : view));
     } catch (e) {
-      if (regionSeqRef.current === seq) failRegionSpectrum(e instanceof Error ? e.message : String(e));
+      if (regionSeqRef.current === seq) failRegionSpectrum(e instanceof Error ? e.message : String(e), request);
+    } finally {
+      if (regionSeqRef.current === seq) regionPendingRef.current = false;
     }
   }, [filePath, picked, continuumToSend]);
 
@@ -1173,15 +1288,17 @@ function SpectroscopyPanel({
   const handleCollapseRange = useCallback(async () => {
     if (!filePath || !range) return;
     const seq = ++rangeSeqRef.current;
+    const publication = framePublishGate.reserve();
     setRangeLoading(true);
     setRangeError(null);
     setRangeResult(null);
     try {
       const dir = await getOutputDir();
-      const result = await collapseCubeRange(filePath, dir, range.z0, range.z1, rangeMode);
+      const result = await collapseCubeRange(filePath, dir, range.z0, range.z1, rangeMode, collapseZeroPolicy, scienceDqPolicy);
       if (rangeSeqRef.current !== seq) return;
+      rangeProductsRef.current = result.fits_path ? [result.fits_path] : [];
       setRangeResult(result);
-      if (result.previewUrl) {
+      if (result.previewUrl && framePublishGate.isLatest(publication)) {
         publishCubeResult({
           label: `Collapse ${result.mode} · ch ${result.z0}-${result.z1}`,
           previewUrl: result.previewUrl,
@@ -1192,9 +1309,9 @@ function SpectroscopyPanel({
     } catch (e) {
       if (rangeSeqRef.current === seq) setRangeError(e instanceof Error ? e.message : String(e));
     } finally {
-      setRangeLoading(false);
+      if (rangeSeqRef.current === seq) setRangeLoading(false);
     }
-  }, [filePath, range, rangeMode, publishCubeResult]);
+  }, [filePath, range, rangeMode, collapseZeroPolicy, scienceDqPolicy, publishCubeResult, framePublishGate]);
 
   const showMoment = useCallback(
     (result: MomentMapsResult, kind: MomentKind) => {
@@ -1224,8 +1341,10 @@ function SpectroscopyPanel({
       return;
     }
     const seq = ++momentSeqRef.current;
+    const publication = framePublishGate.reserve();
     setMomentLoading(true);
     setMomentError(null);
+    setMomentResult(null);
     try {
       const dir = await getOutputDir();
       const result = await computeMomentMaps(filePath, dir, {
@@ -1236,16 +1355,18 @@ function SpectroscopyPanel({
         continuum: windows,
         snr_threshold: snr.value,
         mask_below_threshold: maskBelow,
+        dq_policy: scienceDqPolicy,
       });
       if (momentSeqRef.current !== seq) return;
+      momentProductsRef.current = MOMENT_KINDS.map((kind) => result[kind].fits_path).filter(Boolean);
       setMomentResult(result);
-      showMoment(result, "m0");
+      if (framePublishGate.isLatest(publication)) showMoment(result, "m0");
     } catch (e) {
       if (momentSeqRef.current === seq) setMomentError(e instanceof Error ? e.message : String(e));
     } finally {
       if (momentSeqRef.current === seq) setMomentLoading(false);
     }
-  }, [filePath, range, snrText, restUm, convention, windows, channelCount, maskBelow, showMoment]);
+  }, [filePath, range, snrText, restUm, convention, windows, channelCount, maskBelow, scienceDqPolicy, showMoment, framePublishGate]);
 
   const handleMeasureLine = useCallback(async () => {
     if (!filePath || !range || !measureSource) return;
@@ -1261,6 +1382,7 @@ function SpectroscopyPanel({
     const seq = ++lineSeqRef.current;
     setLineLoading(true);
     setLineError(null);
+    setLineResult(null);
     try {
       const documentOptions = documentMode ? { useErr, useDq, wavelengthFrame: frameChoice } : {};
       const result = await measureSpectralLine(filePath, measureSource, {
@@ -1326,15 +1448,23 @@ function SpectroscopyPanel({
       return;
     }
     const seq = ++lineFitSeqRef.current;
+    const publication = framePublishGate.reserve();
     setLineFitLoading(true);
     setLineFitError(null);
+    setLineFitRun(null);
+    inspectSeqRef.current++;
+    inspectKeyRef.current = null;
+    setInspect(null);
+    setInspectError(null);
+    setInspectLoading(false);
     try {
       const result = await fitCubeLines(filePath, await getOutputDir(), config);
       if (lineFitSeqRef.current !== seq) return;
+      fitProductsRef.current = Object.values(result.planes).flatMap((plane) => plane?.fits_path ? [plane.fits_path] : []);
       const run: LineFitRun = { key: `${filePath}#run${seq}`, filePath, config, result, lineLabel: pickedShown?.label ?? null };
       setLineFitRun(run);
       measurementLog.append(lineFitEntry(run));
-      showLineFitPlane(run, "velocity");
+      if (framePublishGate.isLatest(publication)) showLineFitPlane(run, "velocity");
     } catch (e) {
       if (lineFitSeqRef.current === seq) setLineFitError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1355,6 +1485,7 @@ function SpectroscopyPanel({
     lineFitComponents,
     pickedShown,
     showLineFitPlane,
+    framePublishGate,
   ]);
 
   const handleShowLineFitPlane = useCallback(
@@ -1364,7 +1495,7 @@ function SpectroscopyPanel({
     [lineFitRun, showLineFitPlane],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const shownPlane = lineFitRun ? displayedLineFitPlane(processed, lineFitRun.result) : null;
     if (!lineFitRun || !pixelCoord || region || shownPlane === null) {
       inspectSeqRef.current++;
@@ -1773,6 +1904,10 @@ function SpectroscopyPanel({
 
       {filePath && cubeDims && totalFrames > 1 && (
         <div className="px-3 pb-2 flex items-center gap-2 flex-wrap" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
+          <label className="w-full flex items-center gap-2 text-[10px] text-zinc-400">Science DQ<select aria-label="Science DQ policy" className={SELECT_CLASS} value={scienceDqPolicy} onChange={(e) => setUseDq(e.target.value === "do_not_use")}><option value="do_not_use">Exclude DO_NOT_USE (bit 0)</option><option value="ignore">Ignore DQ flags</option></select></label>
+          <p className="w-full text-[10px] text-zinc-500">Shared by Fit lines, Moment Maps and Collapse. Only DO_NOT_USE (bit 0) excludes samples; other valid flag bits do not. Results report whether DQ was applied and warn when it is unavailable.</p>
+          <label className="w-full flex items-center gap-2 text-[10px] text-zinc-400">Collapse zeros<select aria-label="Collapse zero handling" className={SELECT_CLASS} value={collapseZeroPolicy} onChange={(e) => setCollapseZeroPolicy(e.target.value as CollapseZeroPolicy)}><option value="include_physical_zeros">Include measured zeros</option><option value="exclude_zero_padding">Exclude zero padding (legacy)</option></select></label>
+          <p className="w-full text-[10px] text-zinc-500">Applies to full-cube and range Collapse. Exclude zeros only when they represent known padding. Non-finite values are always excluded.</p>
           <CollapseBtn
             label="Collapse Mean"
             loading={collapseLoading && collapseMode === "mean"}
@@ -1800,7 +1935,11 @@ function SpectroscopyPanel({
           )}
           {collapseResult?.fits_path && !collapseLoading && (
             <div className="w-full">
+              <p className="text-[10px] text-zinc-500">Zero handling: {collapseResult.zero_policy === "include_physical_zeros" ? "measured zeros included" : "exact zero padding excluded (legacy)"}</p>
+              <p className="text-[10px] text-zinc-500" data-dq-policy="full-collapse">{scienceDqSummary(collapseResult)}</p>
+              {collapseResult.notes.length > 0 && <ul className="list-disc pl-4 text-[10px] text-zinc-500">{collapseResult.notes.map((note, index) => <li key={index}>{note}</li>)}</ul>}
               <OutputNote path={collapseResult.fits_path} />
+              {collapseResult.provenance_path && <OutputNote path={collapseResult.provenance_path} kind="manifest" provenance={collapseResult.provenance} />}
             </div>
           )}
         </div>
@@ -1876,7 +2015,10 @@ function SpectroscopyPanel({
             <div className="text-[10px] font-mono text-zinc-500">
               <span>{`${rangeResult.mode} collapse, ch ${rangeResult.z0}–${rangeResult.z1}: `}</span>
               <span data-err-plane="collapse">{errPlaneLabel(rangeResult.has_err, rangeResult.err_source, null)}</span>
+              <p>Zero handling: {rangeResult.zero_policy === "include_physical_zeros" ? "measured zeros included" : "exact zero padding excluded (legacy)"}</p>
+              <p data-dq-policy="collapse">{scienceDqSummary(rangeResult)}</p>
               {rangeResult.fits_path && <OutputNote path={rangeResult.fits_path} />}
+              {rangeResult.provenance_path && <OutputNote path={rangeResult.provenance_path} kind="manifest" provenance={rangeResult.provenance} />}
               {rangeResult.notes.length > 0 && (
                 <details className="mt-0.5 text-zinc-600">
                   <summary className="cursor-pointer select-none">notes ({rangeResult.notes.length})</summary>
@@ -1991,7 +2133,9 @@ function SpectroscopyPanel({
                       <span className="block" data-err-plane="moments">
                         {errPlaneLabel(momentResult.has_err, momentResult.err_source, momentResult.noise_factor)}
                       </span>
+                      <p data-dq-policy="moments">{scienceDqSummary(momentResult)}</p>
                       {momentResult[momentKind].fits_path && <OutputNote path={momentResult[momentKind].fits_path} />}
+                      {momentResult.provenance_path && <OutputNote path={momentResult.provenance_path} kind="manifest" provenance={momentResult.provenance} />}
                       {momentResult.notes.length > 0 && (
                         <details className="mt-0.5 text-zinc-600">
                           <summary className="cursor-pointer select-none">notes ({momentResult.notes.length})</summary>

@@ -1,7 +1,18 @@
+import type { ScienceDqMetadata } from "../shared/types/cube";
+
 export const FFT_FREQUENCY_UNIT = "cyc/px";
 export const MEAN_LABEL = "μ";
 export const SIGMA_MAD_LABEL = "σ(MAD)";
 export const SIGMA_MAD_TITLE = "1.4826 × MAD (robust)";
+
+export function scienceDqSummary(result: ScienceDqMetadata): string | null {
+  if (!result.dq_policy) return null;
+  if (result.dq_policy === "ignore") return "DQ ignored by choice.";
+  if (result.dq_applied === false) return "DO_NOT_USE masking was requested but not applied; see notes.";
+  if (result.dq_applied !== true) return "DO_NOT_USE masking was requested; application was not reported.";
+  const count = result.dq_excluded_samples === undefined ? "excluded sample count unavailable" : `${result.dq_excluded_samples} samples excluded`;
+  return `DQ: DO_NOT_USE (bit 0), HDU ${result.dq_hdu ?? "unknown"}, ${count}.`;
+}
 
 export function skyRangeLabel(range: { lo: number; hi: number }): string {
   return `sky ${range.lo.toPrecision(4)}–${range.hi.toPrecision(4)}`;

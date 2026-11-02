@@ -4,6 +4,7 @@ import {
   MEAN_LABEL,
   SIGMA_MAD_LABEL,
   SIGMA_MAD_TITLE,
+  scienceDqSummary,
   fftFrequencyReadout,
   fftGridTitle,
   fftSizeLabel,
@@ -12,6 +13,12 @@ import {
 } from "../analysisLabels";
 
 describe("histogram footer labels", () => {
+  it("reports the effective DQ policy without claiming unavailable masking was applied", () => {
+    expect(scienceDqSummary({})).toBeNull();
+    expect(scienceDqSummary({ dq_policy: "do_not_use", dq_applied: false, dq_hdu: null, dq_excluded_samples: 0 })).toBe("DO_NOT_USE masking was requested but not applied; see notes.");
+    expect(scienceDqSummary({ dq_policy: "do_not_use", dq_applied: true, dq_hdu: 3, dq_excluded_samples: 12 })).toBe("DQ: DO_NOT_USE (bit 0), HDU 3, 12 samples excluded.");
+    expect(scienceDqSummary({ dq_policy: "ignore", dq_applied: false })).toBe("DQ ignored by choice.");
+  });
   it("names the robust sigma and explains it", () => {
     expect(SIGMA_MAD_LABEL).toBe("σ(MAD)");
     expect(SIGMA_MAD_TITLE).toBe("1.4826 × MAD (robust)");

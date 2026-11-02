@@ -68,7 +68,7 @@ vi.mock("../../render/GpuViewport", () => ({
 vi.mock("../../render/GpuRenderer", () => ({ default: () => null }));
 vi.mock("../../render/GpuRgbRenderer", () => ({ default: () => null }));
 vi.mock("../DisplayControls", () => ({ default: () => null }));
-vi.mock("../Colorbar", () => ({ default: () => null }));
+vi.mock("../Colorbar", () => ({ default: ({ unit }: { unit: string | null }) => createElement("span", { "data-colorbar-unit": unit ?? "" }) }));
 vi.mock("../../ui/ZoomPanView", () => ({ default: () => null }));
 
 import PreviewTab from "../PreviewTab";
@@ -105,6 +105,20 @@ describe("PreviewTab hold-to-compare original", () => {
   it("lets the viewer hold the original over a result on the file grid and blocks it on another grid", () => {
     expect(render({ label: "Moment m1 · 25 ch" })).toContain('data-original="usable"');
     expect(render({ label: "PV diagram", displayedDims: [44, 3814] })).toContain('data-original="The original is 53×55 and the result 44×3814 px; hold-to-compare needs the same pixel grid"');
+  });
+});
+
+describe("PreviewTab active product units", () => {
+  it.each(["DN/s", "km/s", "ratio", null])("uses the verified active product unit %s", (unit) => {
+    render({ label: "Quick slope" });
+    const html = renderToStaticMarkup(createElement(PreviewTab, {
+      useGpu: true,
+      rawPixels: { data: new Float32Array(4), width: 2, height: 2, min: 0, max: 1 },
+      onBackToFile: () => {},
+      starOverlayRef: { current: null },
+      activeBunit: unit,
+    }));
+    expect(html).toContain(`data-colorbar-unit="${unit ?? ""}"`);
   });
 });
 

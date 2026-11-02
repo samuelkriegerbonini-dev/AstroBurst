@@ -9,9 +9,12 @@ use crate::cmd::common::{
     blocking_cmd, output_stem, resolve_output_dir, write_derived_fits, OutputValues,
 };
 use crate::service::common::derived_output_header;
-use crate::cmd::cube::{linear_preview, strip_spectral_axis, MapFiles};
+use crate::cmd::cube::{linear_preview, stamp_dq_header, strip_spectral_axis, MapFiles};
+use crate::cmd::science_provenance::{ScientificProvenance, ScientificRun, VerifiedCubeSet};
 use crate::core::astrometry::spectral::VelocityConvention;
-pub(crate) use crate::core::cube::companions::{open_cube_set, CubeSet};
+#[cfg(test)]
+use crate::core::cube::companions::open_cube_set;
+use crate::core::cube::companions::{open_cube_set_fresh, DqPolicy};
 use crate::core::cube::lazy::LazyCube;
 use crate::core::cube::linefit::{
     fit_cube_lines, fit_spaxel, plane_names, Components, LineFitConfig, LineFitMaps, Weighting,
@@ -82,6 +85,7 @@ pub(crate) fn line_fit_header(
 ) -> HduHeader {
     let abproc = format!("{}{}", ABPROC_PREFIX, plane);
     let mut header = derived_output_header(Some(&strip_spectral_axis(&cube.header)), &abproc, OutputValues::Rescaled);
+    stamp_dq_header(&mut header, cfg.effective_dq_policy(), maps.dq_hdu, maps.dq_excluded_samples);
     header.set(CARD_LINEFIT, plane.to_string());
     if let Some(rest) = maps.rest_um {
         header.set_f64(CARD_REST, rest);
@@ -168,6 +172,8 @@ pub struct LineFitUnits {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LineFitResponse {
+    pub provenance: ScientificProvenance,
+    pub provenance_path: String,
     pub planes: BTreeMap<String, MapFiles>,
     pub plane_order: Vec<String>,
     pub units: LineFitUnits,
@@ -175,6 +181,9 @@ pub struct LineFitResponse {
     pub weighting: Weighting,
     pub err_hdu: Option<usize>,
     pub dq_hdu: Option<usize>,
+    pub dq_policy: DqPolicy,
+    pub dq_applied: bool,
+    pub dq_excluded_samples: u64,
     pub z0: usize,
     pub z1: usize,
     pub n_channels: usize,
@@ -195,12 +204,15 @@ pub struct LineFitResponse {
 }
 
 pub(crate) fn line_fit_files(
-    set: &CubeSet,
+    input: &VerifiedCubeSet,
     path: &str,
     output_dir: &str,
     cfg: &LineFitConfig,
     t0: Instant,
 ) -> Result<LineFitResponse> {
+    let set = &input.set;
+    let mut run = ScientificRun::new(path, output_dir, "linefit", input, serde_json::json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": cfg.rest_um, "convention": cfg.convention, "continuum": cfg.continuum, "snr_threshold": cfg.snr_threshold, "emission_only": cfg.emission_only, "use_err": cfg.use_err, "use_dq": cfg.use_dq, "dq_policy": cfg.dq_policy, "resolving_power": cfg.resolving_power, "components": cfg.components }))?;
+    let output_dir = run.output_dir.clone();
     let maps = fit_cube_lines(&set.inputs(), cfg)?;
     let stem = output_stem(path);
     let range = format!("{}-{}", cfg.z0, cfg.z1);
@@ -209,13 +221,22 @@ pub(crate) fn line_fit_files(
     for plane in plane_names(cfg, &maps) {
         let arr = plane_array(&maps, plane).ok_or_else(|| anyhow!("line-fit plane '{}' was not produced", plane))?;
         let unit = plane_unit(plane, &maps);
-        let header = line_fit_header(&set.sci, plane, unit.as_deref(), cfg, &maps);
+        let mut header = line_fit_header(&set.sci, plane, unit.as_deref(), cfg, &maps);
+        run.stamp_header(&mut header);
         let name = format!("{}_{}_{}_{}", stem, FILE_TAG, plane, range);
-        planes.insert(plane.to_string(), save_plane(arr, &header, output_dir, &name)?);
+        planes.insert(plane.to_string(), save_plane(arr, &header, &output_dir, &name)?);
         plane_order.push(plane.to_string());
     }
     let (rows, cols) = maps.flux.dim();
+    let notes: Vec<String> = set.notes.iter().cloned().chain(maps.notes).collect();
+    let provenance_path = run.finish(
+        serde_json::json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": maps.rest_um, "convention": cfg.convention, "continuum": maps.continuum_windows, "snr_threshold": cfg.snr_threshold, "emission_only": cfg.emission_only, "weighting": maps.weighting, "err_hdu": maps.err_hdu, "dq_hdu": maps.dq_hdu, "dq_policy": cfg.effective_dq_policy(), "dq_applied": maps.dq_hdu.is_some(), "dq_excluded_samples": maps.dq_excluded_samples, "resolving_power": cfg.resolving_power, "components": cfg.components, "flux_unit": maps.flux_unit, "velocity_unit": maps.velocity_unit, "velocity_shift_kms": 0.0 }),
+        serde_json::json!({ "planes": planes, "plane_order": plane_order }),
+        &notes,
+    )?;
     Ok(LineFitResponse {
+        provenance: run.provenance,
+        provenance_path,
         planes,
         plane_order,
         units: LineFitUnits { flux: maps.flux_unit.clone(), velocity: maps.velocity_unit, sigma: VELOCITY_UNIT },
@@ -223,6 +244,9 @@ pub(crate) fn line_fit_files(
         weighting: maps.weighting,
         err_hdu: maps.err_hdu,
         dq_hdu: maps.dq_hdu,
+        dq_policy: cfg.effective_dq_policy(),
+        dq_applied: maps.dq_hdu.is_some(),
+        dq_excluded_samples: maps.dq_excluded_samples,
         z0: cfg.z0,
         z1: cfg.z1,
         n_channels: maps.n_channels,
@@ -237,7 +261,7 @@ pub(crate) fn line_fit_files(
         n_const_continuum: maps.n_const_continuum,
         n_two_components: maps.n_two_components,
         median_chi2_red: maps.median_chi2_red,
-        notes: set.notes.iter().cloned().chain(maps.notes).collect(),
+        notes,
         dimensions: [cols, rows],
         elapsed_ms: t0.elapsed().as_millis() as u64,
     })
@@ -246,15 +270,16 @@ pub(crate) fn line_fit_files(
 fn line_fit_json(path: &str, output_dir: &str, cfg: &LineFitConfig) -> Result<serde_json::Value> {
     let t0 = Instant::now();
     let out_dir = resolve_output_dir(output_dir)?;
-    let set = open_cube_set(path)?;
-    let response = line_fit_files(&set, path, &out_dir, cfg, t0)?;
+    let input = VerifiedCubeSet::open(path)?;
+    let response = line_fit_files(&input, path, &out_dir, cfg, t0)?;
     Ok(serde_json::to_value(&response)?)
 }
 
 fn spaxel_json(path: &str, cfg: &LineFitConfig, x: usize, y: usize) -> Result<serde_json::Value> {
-    let set = open_cube_set(path)?;
+    let set = open_cube_set_fresh(path)?;
     let mut spaxel = fit_spaxel(&set.inputs(), cfg, x, y)?;
     spaxel.notes.splice(0..0, set.notes.iter().cloned());
+    spaxel.notes.push("Interactive spaxel inspection reopens the cube without a full content hash; exported maps carry the verified scientific provenance".into());
     Ok(serde_json::to_value(&spaxel)?)
 }
 
@@ -345,7 +370,7 @@ mod tests {
         assert_eq!(set.sci.hdu_index, 1);
         assert_eq!(set.err.as_ref().map(|c| c.hdu_index), Some(2));
         assert_eq!(set.dq.as_ref().map(|c| c.hdu_index), Some(3));
-        let response = line_fit_files(&set, &key, &out, &line_cfg(), Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &line_cfg(), Instant::now()).unwrap();
         assert_eq!(response.err_hdu, Some(2));
         assert_eq!(response.dq_hdu, Some(3));
         assert_eq!(response.weighting, Weighting::Err);
@@ -360,14 +385,14 @@ mod tests {
         let no_err = LineFitConfig { use_err: false, ..line_cfg() };
         let set = open_cube_set(&key).unwrap();
         assert!(set.err.is_some());
-        let response = line_fit_files(&set, &key, &out, &no_err, Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &no_err, Instant::now()).unwrap();
         assert_eq!(response.weighting, Weighting::Continuum);
         assert_eq!(response.err_hdu, None);
         assert_eq!(response.dq_hdu, Some(3));
         assert!(response.notes.iter().any(|n| n.starts_with("weights: 1/scatter^2")), "{:?}", response.notes);
 
         let no_dq = LineFitConfig { use_dq: false, ..line_cfg() };
-        let response = line_fit_files(&set, &key, &out, &no_dq, Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &no_dq, Instant::now()).unwrap();
         assert_eq!(response.dq_hdu, None);
         assert!(
             response.notes.iter().any(|n| n == "DQ HDU 3 present: channel masking off (use_dq = false)"),
@@ -380,12 +405,67 @@ mod tests {
         let plain = plain.to_str().unwrap().to_string();
         let set = open_cube_set(&plain).unwrap();
         assert!(set.err.is_none() && set.dq.is_none());
-        let response = line_fit_files(&set, &plain, &out, &line_cfg(), Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&plain).unwrap(), &plain, &out, &line_cfg(), Instant::now()).unwrap();
         assert_eq!((response.err_hdu, response.dq_hdu), (None, None));
         assert_eq!(response.weighting, Weighting::Continuum);
         assert!(response.notes.iter().any(|n| n == "no DQ cube: no channel masking"), "{:?}", response.notes);
         GLOBAL_CUBE_CACHE.invalidate(&key);
         GLOBAL_CUBE_CACHE.invalidate(&plain);
+    }
+
+    #[test]
+    fn line_fit_runs_preserve_previous_planes_and_link_each_plane_to_its_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_mef(&dir, "source.fits");
+        let output = out_dir(&dir);
+        let first = line_fit_files(&VerifiedCubeSet::open(&path).unwrap(), &path, &output, &line_cfg(), Instant::now()).unwrap();
+        let before = std::fs::read(&first.planes["flux"].fits_path).unwrap();
+        let cfg = LineFitConfig { use_dq: false, ..line_cfg() };
+        let second = line_fit_files(&VerifiedCubeSet::open(&path).unwrap(), &path, &output, &cfg, Instant::now()).unwrap();
+        assert_ne!(first.provenance.run_id, second.provenance.run_id);
+        assert_ne!(first.planes["flux"].fits_path, second.planes["flux"].fits_path);
+        assert_eq!(std::fs::read(&first.planes["flux"].fits_path).unwrap(), before);
+        assert_eq!(first.provenance.effective["dq_applied"], true);
+        assert_eq!(second.provenance.effective["dq_applied"], false);
+        for result in [&first, &second] {
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&result.provenance_path).unwrap()).unwrap();
+            assert_eq!(saved["products"]["planes"]["flux"]["fits_path"], result.planes["flux"].fits_path);
+            assert_eq!(saved["provenance"], serde_json::to_value(&result.provenance).unwrap());
+            for plane in result.planes.values() {
+                let reopened = reopen(&plane.fits_path);
+                assert_eq!(reopened.header.get("ABRUNID"), Some(result.provenance.run_id.as_str()));
+                assert_eq!(reopened.header.get("ABPROV"), Some("provenance.json"));
+                assert_eq!(reopened.header.get("ABSRC"), Some(path.as_str()));
+            }
+        }
+        GLOBAL_CUBE_CACHE.invalidate(&path);
+    }
+
+    #[test]
+    fn dq_policy_overrides_use_dq_and_is_recorded_for_maps_and_spaxels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_mef(&dir, "dq-policy.fits");
+        let output = out_dir(&dir);
+        for (policy, legacy, applied) in [(DqPolicy::Ignore, true, false), (DqPolicy::DoNotUse, false, true)] {
+            let cfg = LineFitConfig { dq_policy: Some(policy), use_dq: legacy, ..line_cfg() };
+            let result = line_fit_files(&VerifiedCubeSet::open(&path).unwrap(), &path, &output, &cfg, Instant::now()).unwrap();
+            assert_eq!(result.dq_policy, policy);
+            assert_eq!(result.dq_applied, applied);
+            assert_eq!(result.dq_hdu, applied.then_some(3));
+            assert_eq!(result.provenance.parameters["use_dq"], legacy);
+            assert_eq!(result.provenance.parameters["dq_policy"], policy.name());
+            assert_eq!(result.provenance.effective["dq_policy"], policy.name());
+            assert_eq!(result.provenance.effective["dq_applied"], applied);
+            assert!(result.notes.iter().any(|note| note.contains("precedence")));
+            assert!(!result.notes.iter().any(|note| note.contains("use_dq = false")));
+            let header = reopen(&result.planes["flux"].fits_path).header;
+            assert_eq!(header.get("ABDQPOL"), Some(policy.name()));
+            assert_eq!(header.get("ABDQAPP"), Some(if applied { "T" } else { "F" }));
+            let spaxel = spaxel_json(&path, &cfg, LINE_DISK_CENTRE as usize, LINE_DISK_CENTRE as usize).unwrap();
+            assert_eq!(spaxel["dq_policy"], policy.name());
+            assert_eq!(spaxel["dq_applied"], applied);
+            assert_eq!(spaxel["dq_hdu"], serde_json::json!(applied.then_some(3)));
+        }
     }
 
     #[test]
@@ -395,8 +475,7 @@ mod tests {
         write_line_cube(&path, 0.01);
         let key = path.to_str().unwrap().to_string();
         let out = out_dir(&dir);
-        let set = open_cube_set(&key).unwrap();
-        let response = line_fit_files(&set, &key, &out, &line_cfg(), Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &line_cfg(), Instant::now()).unwrap();
         assert_eq!(
             response.plane_order,
             ["flux", "velocity", "sigma_obs", "flux_err", "v_err", "sigma_err", "chi2_red", "snr", "mask", "ncomp"]
@@ -453,7 +532,7 @@ mod tests {
         assert_eq!(ncomp[centre], 1.0);
 
         let automatic = LineFitConfig { continuum: None, ..line_cfg() };
-        let response = line_fit_files(&set, &key, &out, &automatic, Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &automatic, Instant::now()).unwrap();
         assert_eq!(response.continuum_windows, ((0, 7), (33, 39)));
         let header = reopen(&response.planes["flux"].fits_path).header;
         assert_eq!(header.get(CARD_CONT_A), Some("0-7"));
@@ -498,6 +577,7 @@ mod tests {
         let mut expected = vec![
             "x", "y", "z0", "z1", "continuum_windows", "span", "axis", "axis_unit", "flux", "err", "channels",
             "dropped_dq", "dropped_err", "continuum", "weighting", "single", "chi2", "dof", "chi2_red", "converged",
+            "dq_policy", "dq_applied", "dq_hdu", "dq_excluded_samples",
             "iterations", "components", "ncomp", "delta_bic", "mask", "model", "notes",
         ];
         expected.sort_unstable();
@@ -508,6 +588,10 @@ mod tests {
         assert_eq!(json["flux"].as_array().unwrap().len(), 40);
         assert_eq!(json["err"].as_array().unwrap().len(), 40);
         assert_eq!(json["weighting"], "err");
+        assert_eq!(json["dq_policy"], "do_not_use");
+        assert_eq!(json["dq_applied"], true);
+        assert_eq!(json["dq_hdu"], 3);
+        assert_eq!(json["dq_excluded_samples"], 0);
         assert_eq!(json["ncomp"], 1);
         assert_eq!(json["converged"], true);
         assert_eq!(json["delta_bic"], serde_json::Value::Null);
@@ -546,7 +630,7 @@ mod tests {
         };
 
         let with_r = LineFitConfig { resolving_power: Some(2700.0), ..line_cfg() };
-        let response = line_fit_files(&set, &key, &out, &with_r, Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &with_r, Instant::now()).unwrap();
         let mut expected = base.to_vec();
         expected.insert(3, "sigma_corr");
         assert_eq!(response.plane_order, expected);
@@ -558,7 +642,7 @@ mod tests {
         assert!((header.get_f64(CARD_RPOW).unwrap() - 2700.0).abs() < 1e-9);
 
         let two = LineFitConfig { components: Components::Two, ..line_cfg() };
-        let response = line_fit_files(&set, &key, &out, &two, Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &two, Instant::now()).unwrap();
         let mut expected = base.to_vec();
         expected.extend(component_planes);
         assert_eq!(response.plane_order, expected);
@@ -580,7 +664,7 @@ mod tests {
         assert_eq!(plane_unit("c1_flux_err", &fit_cube_lines(&set.inputs(), &two).unwrap()).as_deref(), Some("Jy/beam km/s"));
 
         let both = LineFitConfig { resolving_power: Some(2700.0), components: Components::Auto, ..line_cfg() };
-        let response = line_fit_files(&set, &key, &out, &both, Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &both, Instant::now()).unwrap();
         assert_eq!(response.plane_order.len(), 23);
         assert_eq!(response.plane_order[3], "sigma_corr");
         assert_eq!(response.plane_order[10], "ncomp");
@@ -611,6 +695,7 @@ mod tests {
             continuum: cfg.continuum,
             snr_threshold: cfg.snr_threshold,
             mask_below_threshold: false,
+            dq_policy: None,
         }
     }
 
@@ -682,7 +767,7 @@ mod tests {
 
         let cfg = nirspec_cfg(PA_ALPHA_WINDOW, PA_ALPHA_CONTINUUM, PA_ALPHA_UM);
         let set = open_cube_set(&key).unwrap();
-        let response = line_fit_files(&set, &key, &out, &cfg, Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &cfg, Instant::now()).unwrap();
         println!("Pa alpha response: {}", serde_json::to_string(&serde_json::json!({
             "n_fit": response.n_fit, "n_masked": response.n_masked, "n_const_continuum": response.n_const_continuum,
             "median_chi2_red": response.median_chi2_red, "elapsed_ms": response.elapsed_ms, "weighting": response.weighting,
@@ -766,7 +851,7 @@ mod tests {
         let out = out_dir(&dir);
         let cfg = nirspec_cfg(BR_ALPHA_WINDOW, BR_ALPHA_CONTINUUM, BR_ALPHA_UM);
         let set = open_cube_set(&key).unwrap();
-        let response = line_fit_files(&set, &key, &out, &cfg, Instant::now()).unwrap();
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &cfg, Instant::now()).unwrap();
         let maps = fit_cube_lines(&set.inputs(), &cfg).unwrap();
         let counts = count_map(&maps, 10.0);
         println!(
@@ -812,7 +897,7 @@ mod tests {
         assert!(constant_fitted as f64 >= 0.8 * constant as f64, "{} of {}", constant_fitted, constant);
 
         let auto_cfg = LineFitConfig { components: Components::Auto, ..cfg.clone() };
-        let auto_response = line_fit_files(&set, &key, &out, &auto_cfg, Instant::now()).unwrap();
+        let auto_response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &auto_cfg, Instant::now()).unwrap();
         assert_eq!(auto_response.plane_order.len(), 22);
         assert_eq!(auto_response.components, Components::Auto);
         let auto_maps = fit_cube_lines(&set.inputs(), &auto_cfg).unwrap();

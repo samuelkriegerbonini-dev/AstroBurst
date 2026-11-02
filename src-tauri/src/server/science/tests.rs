@@ -2456,6 +2456,10 @@ async fn a_cubeprep_job_runs_the_d1_recipe_from_the_data_root_and_lists_its_file
 
     let recorded = &outcome["outcome"];
     let result = &recorded["result"];
+    assert_eq!(result["provenance"]["schema_version"], 1);
+    assert_eq!(result["provenance"]["integrity"], "sha256_before_after");
+    assert_eq!(result["provenance"]["dependencies"].as_array().unwrap().len(), 12);
+    assert!(result["files"].as_array().unwrap().iter().all(|file| file["sha256"].as_str().is_some_and(|hash| hash.len() == 64)));
     assert_eq!(result["output_dir"], json!(output_dir.to_str().unwrap()));
     let cube = PathBuf::from(result["cube"].as_str().unwrap());
     assert!(

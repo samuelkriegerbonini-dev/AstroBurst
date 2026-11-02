@@ -43,6 +43,7 @@ import {
 interface PvPanelProps {
   filePath: string | undefined;
   fileKey: string | null;
+  inputRevision: string;
   cubeDims: CubeDims | null;
 }
 
@@ -78,7 +79,7 @@ function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
 }
 
-function PvPanel({ filePath, fileKey, cubeDims }: PvPanelProps) {
+function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
   const regionDoc = useRegionDoc(useRegionKey());
   const { publishProcessed, resetProcessed } = useRenderActions();
   const { processed } = useRenderContext();
@@ -105,7 +106,8 @@ function PvPanel({ filePath, fileKey, cubeDims }: PvPanelProps) {
   const seqRef = useRef(0);
 
   useEffect(() => {
-    seqRef.current++;
+    const seq = seqRef;
+    seq.current++;
     setRun(null);
     setError(null);
     setIoError(null);
@@ -114,6 +116,7 @@ function PvPanel({ filePath, fileKey, cubeDims }: PvPanelProps) {
     setWidthText(DEFAULT_WIDTH_TEXT);
     setZ0Text("0");
     setZ1Text(String(Math.max(frames - 1, 0)));
+    return () => { seq.current++; };
   }, [filePath, frames]);
 
   const step = parseStep(stepText);
@@ -134,9 +137,10 @@ function PvPanel({ filePath, fileKey, cubeDims }: PvPanelProps) {
         label: pvRecordLabel(params, res),
         kind: "cube",
         inputPath: params.filePath,
+        inputRevision,
       });
     },
-    [fileKey, publishProcessed],
+    [fileKey, inputRevision, publishProcessed],
   );
 
   const handleRun = useCallback(async () => {

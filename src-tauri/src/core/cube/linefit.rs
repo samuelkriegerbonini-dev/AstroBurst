@@ -7,7 +7,7 @@ use crate::core::astrometry::spectral::{
     air_formula_applies, air_to_vacuum_um, velocity_kms, wavelength_um_from_frequency_ghz, AxisKind, SpectralAxis,
     VelocityConvention, AIR_FORMULA_MIN_UM, AIR_VACUUM_FORMULA, SPEED_OF_LIGHT_KMS,
 };
-use crate::core::cube::companions::{check_companion, CubeSet};
+use crate::core::cube::companions::{check_companion, CubeSet, DqPolicy, FLOAT_DQ_NOTE};
 use crate::core::cube::lazy::{median_band_rows, LazyCube};
 use crate::core::cube::moments::{channel_widths, ContinuumWindows, DEFAULT_SNR_THRESHOLD, VELOCITY_UNIT};
 use crate::math::gauss_newton::{fit_least_squares, FitResult};
@@ -121,6 +121,8 @@ struct LineFitConfigWire {
     #[serde(default)]
     use_dq: Option<bool>,
     #[serde(default)]
+    dq_policy: Option<DqPolicy>,
+    #[serde(default)]
     resolving_power: Option<f64>,
     #[serde(default)]
     components: Option<String>,
@@ -138,6 +140,7 @@ pub struct LineFitConfig {
     pub emission_only: bool,
     pub use_err: bool,
     pub use_dq: bool,
+    pub dq_policy: Option<DqPolicy>,
     pub resolving_power: Option<f64>,
     pub components: Components,
 }
@@ -173,9 +176,16 @@ impl TryFrom<LineFitConfigWire> for LineFitConfig {
             emission_only: wire.emission_only.unwrap_or(true),
             use_err: wire.use_err.unwrap_or(true),
             use_dq: wire.use_dq.unwrap_or(true),
+            dq_policy: wire.dq_policy,
             resolving_power: wire.resolving_power,
             components,
         })
+    }
+}
+
+impl LineFitConfig {
+    pub fn effective_dq_policy(&self) -> DqPolicy {
+        self.dq_policy.unwrap_or(if self.use_dq { DqPolicy::DoNotUse } else { DqPolicy::Ignore })
     }
 }
 
@@ -241,6 +251,10 @@ pub struct SpaxelFit {
     pub err: Option<Vec<f32>>,
     pub channels: Vec<usize>,
     pub dropped_dq: Vec<usize>,
+    pub dq_policy: DqPolicy,
+    pub dq_applied: bool,
+    pub dq_hdu: Option<usize>,
+    pub dq_excluded_samples: u64,
     pub dropped_err: Vec<usize>,
     pub continuum: Option<ContinuumParams>,
     pub weighting: Weighting,
@@ -289,6 +303,7 @@ pub struct LineFitMaps {
     pub weighting: Weighting,
     pub err_hdu: Option<usize>,
     pub dq_hdu: Option<usize>,
+    pub dq_excluded_samples: u64,
     pub rest_um: Option<f64>,
     pub n_channels: usize,
     pub n_fit: usize,
@@ -1005,7 +1020,7 @@ fn start_values(samples: &[LineSample], mean_dx: f64, x_bounds: (f64, f64), emis
     [peak_excess.max(0.0), x0, sigma0]
 }
 
-fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[f32]>) -> SpaxelOutcome {
+fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[Option<u32>]>) -> SpaxelOutcome {
     let n = ctx.channels.len();
     let mut usable = vec![false; n];
     let mut dropped_dq = Vec::new();
@@ -1022,7 +1037,7 @@ fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[f
             }
         }
         if let Some(d) = dq {
-            if dq_flagged(d[k]) {
+            if DqPolicy::DoNotUse.excludes(d[k]) {
                 ok = false;
                 dropped_dq.push(ctx.channels[k]);
             }
@@ -1202,10 +1217,10 @@ struct ResolvedInputs<'a> {
 }
 
 fn resolve_inputs<'a>(inputs: &LineFitInputs<'a>, cfg: &LineFitConfig) -> Result<ResolvedInputs<'a>> {
-    check_companion("ERR", inputs.sci, inputs.err)?;
-    check_companion("DQ", inputs.sci, inputs.dq)?;
     let err = inputs.err.filter(|_| cfg.use_err);
-    let dq = inputs.dq.filter(|_| cfg.use_dq);
+    let dq = inputs.dq.filter(|_| cfg.effective_dq_policy() == DqPolicy::DoNotUse);
+    check_companion("ERR", inputs.sci, err)?;
+    check_companion("DQ", inputs.sci, dq)?;
     let weighting = if err.is_some() { Weighting::Err } else { Weighting::Continuum };
     Ok(ResolvedInputs { err, dq, weighting })
 }
@@ -1291,7 +1306,7 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     let g = &sci.geometry;
     let (rows, cols) = (g.naxis2, g.naxis1);
     let npix = rows * cols;
-    let n_cubes = 1 + resolved.err.is_some() as usize + resolved.dq.is_some() as usize;
+    let n_cubes = 1 + resolved.err.is_some() as usize + 4 * resolved.dq.is_some() as usize;
     let band_rows = median_band_rows(ctx.channels.len() * n_cubes, cols, rows, BAND_BYTES);
 
     let mut flux = vec![f32::NAN; npix];
@@ -1311,6 +1326,7 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     let mut n_masked = 0usize;
     let mut n_const_continuum = 0usize;
     let mut n_dq_spaxels = 0usize;
+    let mut dq_excluded_samples = 0_u64;
     let mut n_unit_weights = 0usize;
     let mut n_unresolved = 0usize;
     let mut n_two_components = 0usize;
@@ -1327,7 +1343,7 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
             None => None,
         };
         let dq_planes = match resolved.dq {
-            Some(cube) => Some(decode_band(cube, band_start, row_count)?),
+            Some(cube) => Some(ctx.channels.par_iter().map(|&z| cube.decode_dq_rows(z, band_start, row_count)).collect::<Result<Vec<_>>>()?),
             None => None,
         };
         let band_npix = row_count * cols;
@@ -1336,13 +1352,14 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
             .map(|i| {
                 let s: Vec<f32> = sci_planes.iter().map(|p| p[i]).collect();
                 let e: Option<Vec<f32>> = err_planes.as_ref().map(|planes| planes.iter().map(|p| p[i]).collect());
-                let d: Option<Vec<f32>> = dq_planes.as_ref().map(|planes| planes.iter().map(|p| p[i]).collect());
+                let d: Option<Vec<Option<u32>>> = dq_planes.as_ref().map(|planes| planes.iter().map(|p| p[i]).collect());
                 fit_one(&ctx, &s, e.as_deref(), d.as_deref())
             })
             .collect();
         let offset = band_start * cols;
         for (i, o) in outcomes.into_iter().enumerate() {
             let p = offset + i;
+            dq_excluded_samples += o.dropped_dq.len() as u64;
             if !o.dropped_dq.is_empty() {
                 n_dq_spaxels += 1;
             }
@@ -1390,13 +1407,17 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     }
 
     notes.insert(0, weighting_note(resolved.weighting, resolved.err));
+    if resolved.dq.is_some_and(|cube| cube.geometry.bitpix < 0) { notes.push(FLOAT_DQ_NOTE.into()); }
+    if cfg.dq_policy.is_some() { notes.push(format!("Explicit DQ policy {} takes precedence over use_dq", cfg.effective_dq_policy().name())); }
     match (resolved.dq, inputs.dq) {
         (Some(cube), _) => notes.push(format!(
             "DQ HDU {}: channels with DO_NOT_USE (bit 0) dropped in {} spaxels",
             cube.hdu_index, n_dq_spaxels
         )),
         (None, Some(cube)) => {
-            notes.push(format!("DQ HDU {} present: channel masking off (use_dq = false)", cube.hdu_index))
+            notes.push(if cfg.dq_policy.is_some() {
+                format!("DQ HDU {} present: channel masking off (dq_policy = ignore; explicit policy takes precedence over use_dq)", cube.hdu_index)
+            } else { format!("DQ HDU {} present: channel masking off (use_dq = false)", cube.hdu_index) })
         }
         (None, None) => notes.push("no DQ cube: no channel masking".to_string()),
     }
@@ -1469,6 +1490,7 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
         weighting: resolved.weighting,
         err_hdu: resolved.err.map(|c| c.hdu_index),
         dq_hdu: resolved.dq.map(|c| c.hdu_index),
+        dq_excluded_samples,
         rest_um: ctx.rest_um,
         n_channels: cfg.z1 - cfg.z0 + 1,
         n_fit,
@@ -1529,13 +1551,13 @@ pub fn fit_spaxel(inputs: &LineFitInputs, cfg: &LineFitConfig, x: usize, y: usiz
         None => None,
     };
     let dq_spectrum = match resolved.dq {
-        Some(cube) => Some(cube.extract_spectrum_at(y, x)?),
+        Some(cube) => Some(cube.extract_dq_spectrum_at(y, x)?),
         None => None,
     };
     let gather = |spectrum: &Vec<f32>| -> Vec<f32> { ctx.channels.iter().map(|&z| spectrum[z]).collect() };
     let s = gather(&sci_spectrum);
     let e = err_spectrum.as_ref().map(gather);
-    let d = dq_spectrum.as_ref().map(gather);
+    let d: Option<Vec<Option<u32>>> = dq_spectrum.as_ref().map(|values| ctx.channels.iter().map(|&z| values[z]).collect());
     let outcome = fit_one(&ctx, &s, e.as_deref(), d.as_deref());
 
     let span = (
@@ -1543,7 +1565,14 @@ pub fn fit_spaxel(inputs: &LineFitInputs, cfg: &LineFitConfig, x: usize, y: usiz
         cfg.z1.max(ctx.windows.0 .1).max(ctx.windows.1 .1),
     );
     notes.insert(0, weighting_note(resolved.weighting, resolved.err));
+    if resolved.dq.is_some_and(|cube| cube.geometry.bitpix < 0) { notes.push(FLOAT_DQ_NOTE.into()); }
     notes.extend(outcome.notes.iter().cloned());
+    if cfg.dq_policy.is_some() { notes.push(format!("Explicit DQ policy {} takes precedence over use_dq", cfg.effective_dq_policy().name())); }
+    match (resolved.dq, inputs.dq) {
+        (Some(cube), _) => notes.push(format!("DQ HDU {}: DO_NOT_USE (bit 0) and invalid flags excluded {} finite samples", cube.hdu_index, outcome.dropped_dq.len())),
+        (None, Some(cube)) => notes.push(format!("DQ HDU {} present: channel masking off (effective DQ policy ignore)", cube.hdu_index)),
+        (None, None) => notes.push("No DQ cube is available: no DQ samples excluded".into()),
+    }
     let model = match (&outcome.continuum, &outcome.single, &outcome.pair) {
         (Some(c), _, Some(pair)) => Some(spaxel_model(&ctx, c, &[&pair[0], &pair[1]], span)),
         (Some(c), Some(single), None) => Some(spaxel_model(&ctx, c, &[single], span)),
@@ -1570,6 +1599,10 @@ pub fn fit_spaxel(inputs: &LineFitInputs, cfg: &LineFitConfig, x: usize, y: usiz
         err: err_spectrum.as_ref().map(|e| e[span.0..=span.1].to_vec()),
         channels: outcome.line_channels.clone(),
         dropped_dq: outcome.dropped_dq.clone(),
+        dq_policy: cfg.effective_dq_policy(),
+        dq_applied: resolved.dq.is_some(),
+        dq_hdu: resolved.dq.map(|cube| cube.hdu_index),
+        dq_excluded_samples: outcome.dropped_dq.len() as u64,
         dropped_err: outcome.dropped_err.clone(),
         continuum,
         weighting: resolved.weighting,
@@ -1669,6 +1702,7 @@ pub(crate) mod test_support {
             emission_only: true,
             use_err: true,
             use_dq: true,
+            dq_policy: None,
             resolving_power: None,
             components: Components::One,
         }
@@ -1962,6 +1996,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn integer_dq_high_bits_preserve_do_not_use_for_maps_and_spaxels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("integer-dq-high-bits.fits");
+        write_linefit_mef(&path, 2, 2, LINE_CUBE_DEPTH, |z, _, _| 1.0 + 10.0 * line_profile(z),
+            Some(|_, _, _| 0.05), Some(|z, y, x| match (y, x) {
+                (0, 0) => 1 << 24,
+                (0, 1) => i32::MIN,
+                (1, 0) => (1 << 24) | 1,
+                _ if (19..=21).contains(&z) => i32::MIN | 1,
+                _ => 0,
+            }));
+        let sci = open_hdu(&path, 1);
+        let err = open_hdu(&path, 2);
+        let dq = open_hdu(&path, 3);
+        let inputs = LineFitInputs { sci: &sci, err: Some(&err), dq: Some(&dq) };
+        let cfg = line_cfg();
+        let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+        let reference = fit_cube_lines(&inputs, &LineFitConfig { use_dq: false, ..cfg.clone() }).unwrap();
+        assert_eq!(maps.n_fit, 3, "only the spaxel with DO_NOT_USE in every channel must be unavailable");
+        for x in 0..2 {
+            assert_eq!(maps.flux[(0, x)].to_bits(), reference.flux[(0, x)].to_bits());
+            let pixel = fit_spaxel(&inputs, &cfg, x, 0).unwrap();
+            assert!(pixel.dropped_dq.is_empty());
+        }
+        assert!(maps.flux[(1, 0)].is_nan());
+        assert_eq!(fit_spaxel(&inputs, &cfg, 1, 1).unwrap().dropped_dq, [19, 20, 21]);
     }
 
     #[test]

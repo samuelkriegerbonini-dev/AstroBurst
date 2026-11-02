@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } fr
 import { Image, Cpu, Zap, Loader2, SkipBack, Palette } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
+import { getHeader } from "../services/header";
 import { getRampPixelSeries, rampSpectrumFromSeries } from "../services/ramp";
 import { useRampIntegration } from "../hooks/useRampStore";
 import { rampPixelTarget } from "../utils/rampLabels";
@@ -34,7 +35,8 @@ import { COMPOSITE_RUN_KEY, compositeResultTarget, hasCompositeReset, lastCompos
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
 import { monoPixelsAction } from "../utils/gpuMonoPixels";
-import { pixelSourceVersion } from "../utils/pixelSource";
+import { pixelSourceVersion, scientificInputRevisionOf } from "../utils/pixelSource";
+import { colorbarUnit } from "../utils/colorbar";
 import { afterGpuLoss, gpuLossToggleView } from "../utils/gpuLoss";
 import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { parseImageRef, planeLabel } from "../utils/imageRef";
@@ -103,7 +105,7 @@ export default function PreviewPanel() {
   const [gpuReason, setGpuReason] = useState<string | null>(null);
   const [gpuLost, setGpuLost] = useState(false);
 
-  const prevFileKeyRef = useRef<string | null>(null);
+  const previousInputRef = useRef<string | null>(null);
   const rgbLoadKeyRef = useRef<string | null>(null);
   const gpuLoadKeyRef = useRef<string | null>(null);
   const dqCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -112,11 +114,34 @@ export default function PreviewPanel() {
   const lastRampIntegrationRef = useRef(rampIntegration);
 
   const fileKey = fileKeyOf(file);
+  const inputRevision = scientificInputRevisionOf(file);
   const filePath = file?.path ?? null;
   const isRgbFile = !!file?.result?.is_rgb;
   const isFileRgbView = compositePreviewUrl !== null && isRgbFile && compositePreviewUrl === (file?.result?.previewUrl ?? null);
   const rgbView = rgbViewOf({ compositePreviewUrl, fileIsRgb: isRgbFile, filePath, filePreviewUrl: file?.result?.previewUrl ?? null, processed });
   const isRgbView = rgbView !== null && (rgbView.kind !== "result" || useGpu);
+  const isCompositeView = rgbView?.kind === "composite";
+  const metadataProductPath = !isCompositeView && !displayed.previewOnly ? processedSourcePath : null;
+  const metadataKey = JSON.stringify([metadataProductPath, processedVersion, inputRevision]);
+  const [productMetadata, setProductMetadata] = useState<{ key: string; header: Record<string, string> | null; error: string | null } | null>(null);
+
+  useEffect(() => {
+    if (metadataProductPath === null) return;
+    let current = true;
+    getHeader(metadataProductPath).then(
+      (header) => { if (current) setProductMetadata({ key: metadataKey, header, error: null }); },
+      (error: unknown) => { if (current) setProductMetadata({ key: metadataKey, header: null, error: error instanceof Error ? error.message : String(error) }); },
+    );
+    return () => { current = false; };
+  }, [metadataProductPath, metadataKey]);
+
+  const currentProductMetadata = metadataProductPath !== null && productMetadata?.key === metadataKey ? productMetadata : null;
+  const activeHeader = isCompositeView || displayed.previewOnly ? null : displayed.isProcessed ? currentProductMetadata?.header : file?.result?.header;
+  const activeBunit = colorbarUnit(activeHeader?.BUNIT, false);
+  const activeDimensions = isCompositeView || (displayed.isProcessed && processed?.dimensions == null) ? null : displayed.dimensions;
+  const metadataLoading = metadataProductPath !== null && currentProductMetadata === null;
+  const metadataLabel = isCompositeView ? "Composite" : displayed.isProcessed ? displayed.label : file?.name;
+  const metadataPath = isCompositeView || displayed.previewOnly ? undefined : metadataProductPath ?? file?.path;
   const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
   const gpuLoadError = useGpu && !isRgbView && !rawPixelsLoading ? rawPixelsError : null;
 
@@ -170,17 +195,18 @@ export default function PreviewPanel() {
     if (gpuLost && !gpuDisplay) setGpuLost(false);
   }, [gpuLost, gpuDisplay]);
 
-  useEffect(() => {
-    if (fileKey === prevFileKeyRef.current) return;
-    prevFileKeyRef.current = fileKey;
+  useLayoutEffect(() => {
+    if (inputRevision === previousInputRef.current) return;
+    previousInputRef.current = inputRevision;
     specAbortRef.current++;
+    rampPixelRef.current = null;
     resetSpectrum();
     resetMouse();
     rgbLoadKeyRef.current = null;
     gpuLoadKeyRef.current = null;
     clearRawPixels();
     clearRgbRawPixels();
-  }, [fileKey, clearRawPixels, clearRgbRawPixels, resetMouse]);
+  }, [inputRevision, clearRawPixels, clearRgbRawPixels, resetMouse]);
 
   const showRgbFileView = useCallback(() => {
     const r = file?.result;
@@ -317,17 +343,17 @@ export default function PreviewPanel() {
 
   const loadSpectrum = useCallback(async (path: string, x: number, y: number, integration: number | null) => {
     const seq = ++specAbortRef.current;
-    beginSpectrum({ x, y });
+    const request = beginSpectrum({ x, y });
     const t0 = performance.now();
     try {
       const result = integration !== null
         ? rampSpectrumFromSeries(await getRampPixelSeries(path, x, y, integration))
         : await getCubeSpectrum(path, x, y);
       if (specAbortRef.current !== seq) return;
-      commitSpectrum(result, Math.round(performance.now() - t0));
+      commitSpectrum(result, Math.round(performance.now() - t0), request);
     } catch (err) {
       if (specAbortRef.current !== seq) return;
-      failSpectrum(err instanceof Error ? err.message : String(err));
+      failSpectrum(err instanceof Error ? err.message : String(err), request);
     }
   }, []);
 
@@ -343,7 +369,8 @@ export default function PreviewPanel() {
     const target = rampPixelTarget(x, y, ramp, displayedDims);
     if (!target.ok) {
       specAbortRef.current++;
-      failSpectrum(target.reason);
+      const request = beginSpectrum({ x, y });
+      failSpectrum(target.reason, request);
       return;
     }
     rampPixelRef.current = { path, x: target.x, y: target.y };
@@ -419,7 +446,9 @@ export default function PreviewPanel() {
   }), gpuLost && gpuDisplay);
   const gpuToggleBusy = gpuToggle.state === "probing" || gpuToggle.state === "loading";
 
-  const planeBadge = file ? planeLabel(parseImageRef(file.path), file.result?.plane?.extname) : null;
+  const planeBadge = isCompositeView || displayed.previewOnly ? null : displayed.isProcessed
+    ? activeHeader?.EXTNAME?.trim().replace(/^'(.*)'$/, "$1").trim()
+    : file ? planeLabel(parseImageRef(file.path), file.result?.plane?.extname) : null;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -429,23 +458,30 @@ export default function PreviewPanel() {
           <span className="text-[11px] font-medium text-zinc-300">Preview</span>
         </div>
         <div className="flex items-center gap-2 justify-center flex-1 min-w-0">
-          {file && <span className="text-[10px] font-mono text-zinc-400 truncate max-w-[200px]" title={file.name}>{file.name}</span>}
+          {metadataLabel && <span className="text-[10px] font-mono text-zinc-400 truncate max-w-[200px]" title={metadataPath}>{metadataLabel}</span>}
+          {!isCompositeView && displayed.isProcessed && file && (
+            <span className="text-[9px] font-mono text-zinc-500 truncate max-w-[200px]" title={file.path}>Source: {file.name}</span>
+          )}
+          {!isCompositeView && displayed.previewOnly && <span className="text-[9px] text-zinc-500">PNG</span>}
           {planeBadge && (
             <span
               className="text-[9px] font-mono px-1.5 py-px rounded shrink-0"
               style={{ background: "rgba(20,184,166,0.12)", color: "var(--ab-teal)", border: "1px solid rgba(20,184,166,0.3)" }}
-              title={file?.path}
+              title={metadataPath}
             >
               {planeBadge}
             </span>
           )}
-          {file?.result?.dimensions && (
+          {activeDimensions && (
             <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1.5 shrink-0">
-              <span className="text-zinc-400">{file.result.dimensions[0]}&times;{file.result.dimensions[1]}</span>
-              {file.result.header?.BITPIX && <span className="text-zinc-500">BITPIX {file.result.header.BITPIX}</span>}
-              <span className="text-zinc-500">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>
+              <span className="text-zinc-400">{activeDimensions[0]}&times;{activeDimensions[1]}</span>
+              {activeHeader?.BITPIX && <span className="text-zinc-500">BITPIX {activeHeader.BITPIX}</span>}
+              {activeBunit && <span className="text-zinc-500">{activeBunit}</span>}
+              {!displayed.isProcessed && file?.result && <span className="text-zinc-500">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>}
             </span>
           )}
+          {metadataLoading && <span className="text-[9px] text-zinc-500">Loading metadata...</span>}
+          {currentProductMetadata?.error && <span className="text-[9px] text-amber-400" title={currentProductMetadata.error}>Metadata unavailable</span>}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {file && !spectrumShown && <DqControls />}
@@ -524,6 +560,7 @@ export default function PreviewPanel() {
           <div className="h-full" onMouseLeave={handleLeave}>
             <PreviewTab
               useGpu={useGpu}
+              activeBunit={activeBunit}
               rawPixels={rawPixels}
               rgbRawPixels={rgbRawPixels}
               onCubePixelClick={spectrumClickHandler}

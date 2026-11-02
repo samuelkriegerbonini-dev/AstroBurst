@@ -103,10 +103,10 @@ export function DqFlagMenu({ flagTable, overlay, setOverlay, excludeDq, setExclu
 }
 
 function DqControlsInner() {
-  const { plane, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMaskLoading, dqMaskError } = useDqContext();
+  const { dqRef, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMaskLoading, dqMaskError } = useDqContext();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const hasDq = !!plane?.dq_ref;
+  const hasDq = !!dqRef;
 
   useEffect(() => {
     if (!open) return;

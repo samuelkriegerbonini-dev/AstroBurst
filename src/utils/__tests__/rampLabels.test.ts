@@ -152,6 +152,10 @@ function comparison(overrides: Partial<RateComparison> = {}): RateComparison {
     science_rows: null,
     ratio_png_path: "C:/out/x_ratio.png",
     ratio_fits_path: "C:/out/x_ratio.fits",
+    difference_png_path: "C:/out/x_difference.png",
+    difference_fits_path: "C:/out/x_difference.fits",
+    quick_exclude_bits: 1, official_exclude_bits: 4294967295, ratio_min_abs_rate: 0.3, warnings: [],
+    difference_metrics: { n: 4_000_000, bias: 0.01, mae: 0.02, rmse: 0.03, median_delta: 0.01, mad_sigma: 0.02 },
     elapsed_ms: 1200,
     ...overrides,
   };

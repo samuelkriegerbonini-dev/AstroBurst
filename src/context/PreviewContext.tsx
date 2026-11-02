@@ -24,7 +24,7 @@ import { useCompositeActions, useCompositePreview } from "./CompositeContext";
 import { useComposeWizardContext } from "./ComposeWizardContext";
 import { fileSwitchCompositeAction, reseedsRgbFileView } from "../utils/previewShell";
 import { rawPixelsHolder } from "../utils/pixelHolder";
-import { pixelSourceVersion } from "../utils/pixelSource";
+import { pixelSourceVersion, scientificInputRevisionOf } from "../utils/pixelSource";
 import type {
   ProcessedFile,
   ProcessResult,
@@ -79,6 +79,7 @@ import {
 import { displayMemory } from "../utils/displayMemoryStore";
 import { PNG_ONLY_TITLE } from "../utils/previewShell";
 import { EMPTY_CHAIN, chainForPublish, pruneRecord, putCapped, withVersionParam } from "../utils/processingChain";
+import { rgbViewOf } from "../utils/rgbProduct";
 
 export type PaletteSuggestion = NarrowbandDetection["palette"];
 
@@ -186,6 +187,7 @@ interface DisplayContextValue {
 
 interface DqContextValue {
   plane: PlaneInfo | null;
+  dqRef: string | null;
   flagTable: DqFlagTableResult | null;
   overlay: DqOverlaySettings;
   setOverlay: (patch: Partial<DqOverlaySettings>) => void;
@@ -413,6 +415,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [limitsError, setLimitsError] = useState<string | null>(null);
   const [lut, setLut] = useState<Uint8Array | null>(GRAY_LUT_RGBA);
   const [flagTable, setFlagTable] = useState<DqFlagTableResult | null>(null);
+  const [flagTableSource, setFlagTableSource] = useState<string | null>(null);
+  const [dqMaskSource, setDqMaskSource] = useState<string | null>(null);
   const [overlay, setOverlayRaw] = useState<DqOverlaySettings>(DEFAULT_DQ_OVERLAY);
   const [excludeDq, setExcludeDq] = useState(false);
   const [dqMask, setDqMask] = useState<DqMaskData | null>(null);
@@ -421,11 +425,22 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [dqMaskRefetch, setDqMaskRefetch] = useState(0);
 
   const fileKey = fileKeyOf(file);
-  if (view.key !== fileKey) {
-    setView(fileKey ? viewFor(fileKey) : EMPTY_VIEW);
+  const inputRevision = scientificInputRevisionOf(file);
+  const selected = view.key === fileKey ? view : fileKey ? viewFor(fileKey) : EMPTY_VIEW;
+  let current = view.key === fileKey ? view : EMPTY_VIEW;
+  if (selected.processed?.kind === "cube" && selected.processed.inputRevision !== inputRevision) {
+    const record: FileRenderState = { processed: null, chain: EMPTY_CHAIN, version: nextRenderVersion(), historyId: selected.historyId };
+    current = { ...record, key: fileKey };
+    if (fileKey) {
+      if (record.historyId === null) renderRecords.delete(fileKey);
+      else putCapped(renderRecords, fileKey, record, RENDER_CACHE_MAX);
+    }
+    setView(current);
+    setStfPreview(NO_STF_PREVIEW);
+  } else if (view.key !== fileKey) {
+    setView(selected);
     setStfPreview(NO_STF_PREVIEW);
   }
-  const current = view.key === fileKey ? view : EMPTY_VIEW;
   const processed = current.processed;
   const processedVersion = current.version;
   const processedPath = processed?.fitsPath ?? null;
@@ -453,12 +468,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }
   const chain = current.chain;
   const sourceVersion = pixelSourceVersion(file, processedPath, processedVersion);
-  const fileVersion = pixelSourceVersion(file, null, 0);
   const processedPreviewOnly = processed !== null && processed.fitsPath === null && processed.previewUrl !== null;
   const stfPreviewUrl =
     !processedPreviewOnly && stfPreview.key === fileKey && stfPreview.version === processedVersion ? stfPreview.url : null;
 
-  const prevFileIdRef = useRef<string | null>(null);
+  const previousFileRevisionRef = useRef<string | null>(null);
   const histSeqRef = useRef(0);
   const flagTableSeqRef = useRef(0);
   const dqMaskSeqRef = useRef(0);
@@ -872,8 +886,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, [loadRawPixels, loadRgbRawPixels]);
 
   useEffect(() => {
-    if (!file?.path || fileKey === prevFileIdRef.current) return;
-    prevFileIdRef.current = fileKey;
+    if (!file?.path || inputRevision === previousFileRevisionRef.current) return;
+    previousFileRevisionRef.current = inputRevision;
 
     setHistData(null);
     setHistDataPath(null);
@@ -966,7 +980,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       probeRamp();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileKey]);
+  }, [inputRevision]);
 
   const fileResult = file?.result ?? null;
 
@@ -1018,39 +1032,63 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, [fileKey, imagePath, processedPath, sourceVersion, excludeDq, precomputedHist]);
 
   const plane = file?.result?.plane ?? null;
-  const dqRef = plane?.dq_ref ?? null;
+  const dqRgbView = rgbViewOf({ compositePreviewUrl, fileIsRgb: !!file?.result?.is_rgb, filePath: imagePath, filePreviewUrl: file?.result?.previewUrl ?? null, processed });
+  const dqPath = processedPreviewOnly || dqRgbView !== null ? null : processedPath ?? imagePath;
+  const dqSource = dqPath ? `${dqPath}|${sourceVersion}` : null;
+  const hasProcessedResult = processed !== null;
+  const activeFlagTable = dqSource !== null && flagTableSource === dqSource ? flagTable : null;
+  const dqRef = dqPath === null ? null : activeFlagTable ? activeFlagTable.dq_ref : processed === null ? plane?.dq_ref ?? null : null;
+  const activeDqMask = dqSource !== null && dqMaskSource === `${dqSource}|${overlay.mask}` ? dqMask : null;
 
   useEffect(() => {
-    if (!imagePath || !dqRef) return;
+    const flagTableSeq = flagTableSeqRef;
+    const dqMaskSeq = dqMaskSeqRef;
     const seq = ++flagTableSeqRef.current;
-    getDqFlagTable(imagePath)
+    ++dqMaskSeqRef.current;
+    dqMaskKeyRef.current = "";
+    setFlagTable(null);
+    setFlagTableSource(null);
+    setDqMask(null);
+    setDqMaskSource(null);
+    setDqMaskLoading(false);
+    setDqMaskError(null);
+    setOverlayRaw(DEFAULT_DQ_OVERLAY);
+    if (!dqPath || (!hasProcessedResult && !plane?.dq_ref)) return;
+    getDqFlagTable(dqPath)
       .then((table) => {
         if (flagTableSeqRef.current !== seq) return;
         setFlagTable(table);
+        setFlagTableSource(dqSource);
         setOverlayRaw({ enabled: false, mask: table.default_mask });
       })
       .catch((err) => {
         if (flagTableSeqRef.current !== seq) return;
         console.error("[AstroBurst] DQ flag table fetch failed:", err);
       });
-  }, [fileKey, imagePath, dqRef]);
+    return () => { ++flagTableSeq.current; ++dqMaskSeq.current; };
+  }, [dqSource, dqPath, hasProcessedResult, plane?.dq_ref]);
 
   const overlayEnabled = overlay.enabled;
   const overlayMask = overlay.mask;
 
   useEffect(() => {
-    if (!imagePath || !dqRef || !overlayEnabled) return;
+    const dqMaskSeq = dqMaskSeqRef;
+    if (!dqPath || !dqRef || !overlayEnabled) {
+      setDqMaskLoading(false);
+      return;
+    }
     const maxDim = computePreviewMaxDim();
-    const key = `${fileKey}|${fileVersion}|${overlayMask}|${maxDim}`;
+    const key = `${dqSource}|${overlayMask}|${maxDim}`;
     if (dqMaskKeyRef.current === key) return;
     dqMaskKeyRef.current = key;
     const seq = ++dqMaskSeqRef.current;
     setDqMaskLoading(true);
     setDqMask(null);
-    getDqMaskPreview(imagePath, overlayMask, maxDim)
+    getDqMaskPreview(dqPath, overlayMask, maxDim)
       .then((mask) => {
         if (dqMaskSeqRef.current !== seq) return;
         setDqMask(mask);
+        setDqMaskSource(`${dqSource}|${overlayMask}`);
         setDqMaskError(null);
       })
       .catch((err) => {
@@ -1063,7 +1101,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (dqMaskSeqRef.current !== seq) return;
         setDqMaskLoading(false);
       });
-  }, [fileKey, fileVersion, imagePath, dqRef, overlayEnabled, overlayMask, dqMaskRefetch]);
+    return () => { ++dqMaskSeq.current; dqMaskKeyRef.current = ""; };
+  }, [dqSource, dqPath, dqRef, overlayEnabled, overlayMask, dqMaskRefetch]);
 
   const fileValue = useMemo<FileContextValue>(
     () => ({ file }),
@@ -1134,8 +1173,8 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const dqValue = useMemo<DqContextValue>(
-    () => ({ plane, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMask, dqMaskLoading, dqMaskError }),
-    [plane, flagTable, overlay, setOverlay, excludeDq, dqMask, dqMaskLoading, dqMaskError],
+    () => ({ plane, dqRef, flagTable: activeFlagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMask: activeDqMask, dqMaskLoading, dqMaskError }),
+    [plane, dqRef, activeFlagTable, overlay, setOverlay, excludeDq, activeDqMask, dqMaskLoading, dqMaskError],
   );
 
   return (

@@ -1,7 +1,7 @@
-import { useState, useCallback, useMemo, useRef, lazy, Suspense, memo } from "react";
+import { useState, useCallback, useLayoutEffect, useMemo, useRef, lazy, Suspense, memo } from "react";
 import { FileText, X } from "lucide-react";
 import { getPreviewUrl } from "../../infrastructure/tauri";
-import { fileKeyOf, useFileContext, useCubeContext, useRenderActions } from "../../context/PreviewContext";
+import { fileKeyOf, getRenderRecord, useFileContext, useCubeContext, useRenderActions } from "../../context/PreviewContext";
 import { ANALYSIS_SECTION, CUBE_TOOL_EMPTY_TITLE } from "../../utils/analysisSections";
 import { filterFrameLabel, frameRecordLabel } from "../../utils/cubeNavigation";
 import { cubePanelGates, formatRampFrameLabel } from "../../utils/rampLabels";
@@ -9,6 +9,7 @@ import { useSpectrum } from "../../hooks/useSpectrumStore";
 import { openSpectrumCsv, spectrumCsvStore, useOpenSpectrumCsv, useSpectrum1dDoc } from "../../hooks/useSpectrum1dStore";
 import { OPEN_SPECTRUM_CSV_LABEL, cubeToolContent, type SpectrumDocument } from "../../utils/spectrumDocument";
 import { fileBaseName } from "../../utils/spectrumExport";
+import { scientificInputRevisionOf } from "../../utils/pixelSource";
 import type { CubeResult } from "./SpectroscopyPanel";
 import TabSpinner from "./TabSpinner";
 import CubeSampleOffers from "./CubeSampleOffers";
@@ -21,12 +22,15 @@ const RampPanel = lazy(() => import("./RampPanel"));
 function CubeTool() {
   const { file } = useFileContext();
   const { isCube, isSpectrum, cubeDims, ramp, rampSource } = useCubeContext();
-  const { publishProcessed } = useRenderActions();
+  const { currentFileKey, publishProcessed, resetProcessed } = useRenderActions();
   const spec = useSpectrum();
   const csv = useOpenSpectrumCsv();
 
   const filePath = file?.path;
   const fileKey = fileKeyOf(file);
+  const panelKey = scientificInputRevisionOf(file);
+  const panelKeyRef = useRef(panelKey);
+  panelKeyRef.current = panelKey;
   const content = cubeToolContent({ isCube, isRamp: ramp !== null, isSpectrum, fileKey, csv });
   const docPath = content === "spectrum" ? (filePath ?? null) : content === "csv" && csv ? csv.path : null;
   const docHdu = content === "spectrum" ? (file?.spectrum?.hdu ?? null) : null;
@@ -37,9 +41,19 @@ function CubeTool() {
     [docSpectrum, docHdu],
   );
   const [cubeGates] = useState(cubePanelGates);
+  const frameSeqRef = useRef(0);
+  useLayoutEffect(() => {
+    const frameSeq = frameSeqRef;
+    if (fileKey && currentFileKey() === fileKey) {
+      const processed = getRenderRecord(fileKey)?.processed;
+      if (processed?.kind === "cube" && processed.inputRevision !== panelKey) resetProcessed();
+    }
+    return () => { frameSeq.current++; };
+  }, [fileKey, panelKey, currentFileKey, resetProcessed]);
   const publishCube = useCallback(
     (result: CubeResult) => {
-      if (!fileKey || !filePath) return;
+      if (!fileKey || !filePath || currentFileKey() !== fileKey || panelKeyRef.current !== panelKey) return;
+      frameSeqRef.current++;
       publishProcessed(fileKey, {
         previewUrl: result.previewUrl,
         fitsPath: result.fitsPath,
@@ -47,22 +61,32 @@ function CubeTool() {
         label: result.label,
         kind: "cube",
         inputPath: filePath,
+        inputRevision: panelKey,
         frameIndex: result.frameIndex,
         displayHint: result.displayHint,
       });
     },
-    [publishProcessed, fileKey, filePath],
+    [currentFileKey, publishProcessed, fileKey, filePath, panelKey],
+  );
+  const invalidateCubeResult = useCallback(
+    (fitsPaths: string[]) => {
+      if (!fileKey || currentFileKey() !== fileKey) return;
+      const processed = getRenderRecord(fileKey)?.processed;
+      if (processed?.kind !== "cube" || processed.fitsPath === null || !fitsPaths.includes(processed.fitsPath)) return;
+      frameSeqRef.current++;
+      resetProcessed();
+    },
+    [currentFileKey, fileKey, resetProcessed],
   );
 
   const photometricPlanes = cubeDims?.photometric_planes?.length ? cubeDims.photometric_planes : null;
 
-  const frameSeqRef = useRef(0);
   const handleFramePreview = useCallback(
     async (outputPath: string, frameIndex: number, fitsPath?: string) => {
       const seq = ++frameSeqRef.current;
       try {
         const url = await getPreviewUrl(outputPath);
-        if (frameSeqRef.current !== seq) return;
+        if (frameSeqRef.current !== seq || currentFileKey() !== fileKey || !cubeGates.spectrum.isCurrent()) return;
         const frames = cubeDims?.frames ?? 0;
         const label = ramp
           ? formatRampFrameLabel(frameIndex, ramp)
@@ -74,7 +98,7 @@ function CubeTool() {
         console.error("Frame preview failed:", e);
       }
     },
-    [publishCube, cubeDims, ramp],
+    [publishCube, cubeDims, ramp, currentFileKey, fileKey, cubeGates],
   );
 
   return (
@@ -119,7 +143,7 @@ function CubeTool() {
               </div>
             )}
             <SpectroscopyPanel
-              key={`${content}|${docHdu ?? ""}|${docPath}`}
+              key={`${panelKey}|${content}|${docHdu ?? ""}|${docPath}`}
               documentMode
               spectrumDocument={spectrumDocument}
               isLoading={docSpectrum === null && doc.error === null}
@@ -133,12 +157,13 @@ function CubeTool() {
         {content === "cube" && ramp && (
           <section id={ANALYSIS_SECTION.ramp.id}>
             <RampPanel
-              key={filePath ?? ""}
+              key={panelKey}
               filePath={filePath}
               ramp={ramp}
               rampSource={rampSource}
               cubeDims={cubeDims}
               onCubeResult={publishCube}
+              onInvalidateCubeResult={invalidateCubeResult}
               publishGate={cubeGates.ramp}
             />
           </section>
@@ -147,6 +172,7 @@ function CubeTool() {
         {content === "cube" && isCube && (
           <section id={ANALYSIS_SECTION.spectrum.id}>
             <SpectroscopyPanel
+              key={panelKey}
               spectrum={spec.spectrum}
               wavelengths={spec.wavelengths}
               pixelCoord={spec.coord}
@@ -156,6 +182,7 @@ function CubeTool() {
               error={spec.error}
               filePath={filePath}
               onCubeResult={publishCube}
+              onInvalidateCubeResult={invalidateCubeResult}
               onFramePreview={handleFramePreview}
               publishGate={cubeGates.spectrum}
             />
@@ -166,7 +193,7 @@ function CubeTool() {
         )}
         {content === "cube" && isCube && !ramp && (
           <section id={ANALYSIS_SECTION.pv.id}>
-            <PvPanel filePath={filePath} fileKey={fileKey} cubeDims={cubeDims} />
+            <PvPanel key={panelKey} filePath={filePath} fileKey={fileKey} inputRevision={panelKey} cubeDims={cubeDims} />
           </section>
         )}
       </div>

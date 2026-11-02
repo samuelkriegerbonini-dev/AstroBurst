@@ -111,6 +111,7 @@ export interface FlagCounts {
 }
 
 export interface QuickSlopeResult {
+  provenance_path?: string;
   fits_path: string;
   png_path: string;
   previewUrl?: string;
@@ -197,6 +198,7 @@ export interface Histogram {
 }
 
 export interface RateComparison {
+  provenance_path?: string;
   qslope_path: string;
   rate_path: string;
   detector: string | null;
@@ -215,5 +217,20 @@ export interface RateComparison {
   ratio_png_path: string;
   ratio_fits_path: string;
   ratioPreviewUrl?: string;
+  difference_png_path: string;
+  difference_fits_path: string;
+  differencePreviewUrl?: string;
+  quick_exclude_bits: number;
+  official_exclude_bits: number;
+  ratio_min_abs_rate: number;
+  difference_metrics: {
+    n: number;
+    bias: number | null;
+    mae: number | null;
+    rmse: number | null;
+    median_delta: number | null;
+    mad_sigma: number | null;
+  };
+  warnings: string[];
   elapsed_ms: number;
 }

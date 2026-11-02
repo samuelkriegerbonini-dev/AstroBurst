@@ -131,6 +131,7 @@ pub const SIP_RESIDUAL_KEYS: [&str; 2] = ["SIPMXERR", "SIPIVERR"];
 #[derive(Debug)]
 struct HeaderBackend {
     engine: wcs::WCS,
+    differential_tan: bool,
     sip_a: Option<SipPoly>,
     sip_b: Option<SipPoly>,
     sip_ap: Option<SipPoly>,
@@ -414,6 +415,9 @@ impl WcsTransform {
         Ok(WcsTransform {
             backend: Backend::Header(HeaderBackend {
                 engine,
+                differential_tan: projection == "TAN"
+                    && crval2.abs() < 90.0
+                    && !header.cards.iter().any(|(key, _)| is_projection_param_key(&key.to_ascii_uppercase())),
                 sip_a: SipPoly::parse(header, "A"),
                 sip_b: SipPoly::parse(header, "B"),
                 sip_ap: SipPoly::parse(header, "AP"),
@@ -653,14 +657,36 @@ impl WcsTransform {
             SkyFrame::Icrs => (ra, dec),
             frame => convert_from_icrs(frame, ra, dec),
         };
-        match header.engine.proj(&LonLat::new(lon.to_radians(), lat.to_radians())) {
-            Some(xy) => {
-                let (u_lin, v_lin) = apply_linear(&self.cd_inv, xy.x(), xy.y());
+        let plane = if header.differential_tan {
+            self.tan_plane_from_world(lon, lat)
+        } else {
+            header.engine.proj(&LonLat::new(lon.to_radians(), lat.to_radians())).map(|xy| (xy.x(), xy.y()))
+        };
+        match plane {
+            Some((x, y)) => {
+                let (u_lin, v_lin) = apply_linear(&self.cd_inv, x, y);
                 let (dx, dy) = header.sip_inverse(u_lin, v_lin);
                 (dx + self.crpix1 - 1.0, dy + self.crpix2 - 1.0)
             }
             None => (f64::NAN, f64::NAN),
         }
+    }
+
+    fn tan_plane_from_world(&self, lon: f64, lat: f64) -> Option<(f64, f64)> {
+        if lat.abs() > 90.0 { return None; }
+        let mut delta_lon = (lon - self.crval1) % 360.0;
+        if delta_lon > 180.0 { delta_lon -= 360.0; }
+        if delta_lon < -180.0 { delta_lon += 360.0; }
+        let delta_lon = delta_lon.to_radians();
+        let delta_lat = (lat - self.crval2).to_radians();
+        let (sin_origin, cos_origin) = self.crval2.to_radians().sin_cos();
+        let cos_lat = lat.to_radians().cos();
+        let one_minus_cos = 2.0 * (0.5 * delta_lon).sin().powi(2);
+        let denominator = delta_lat.cos() - cos_lat * cos_origin * one_minus_cos;
+        if denominator <= 0.0 || !denominator.is_finite() { return None; }
+        let x = (cos_lat * delta_lon.sin() / denominator).to_degrees();
+        let y = ((delta_lat.sin() + sin_origin * cos_lat * one_minus_cos) / denominator).to_degrees();
+        (x.is_finite() && y.is_finite()).then_some((x, y))
     }
 
     pub fn pixel_scale_arcsec(&self) -> f64 {
@@ -968,6 +994,54 @@ mod tests {
             assert!((by - single_y).abs() < 1e-9);
             assert!((bx - sx).abs() < 1e-3, "x round-trip {bx} vs {sx}");
             assert!((by - sy).abs() < 1e-3, "y round-trip {by} vs {sy}");
+        }
+    }
+
+    #[test]
+    fn tan_differential_projection_preserves_reference_meridian_and_one_ulp_latitude() {
+        let h = make_header(&[
+            ("NAXIS1", "64"), ("NAXIS2", "64"),
+            ("CRPIX1", "32.5"), ("CRPIX2", "32.5"),
+            ("CRVAL1", "53.1625"), ("CRVAL2", "-27.791400000000003"),
+            ("CD1_1", "-1.1111111111111112E-05"), ("CD1_2", "0"),
+            ("CD2_1", "0"), ("CD2_2", "1.1111111111111112E-05"),
+            ("CTYPE1", "RA---TAN"), ("CTYPE2", "DEC--TAN"),
+        ]);
+        let wcs = WcsTransform::from_header(&h).unwrap();
+        let dec = -27.7914_f64;
+        let expected_y = 31.5 + (dec - h.get_f64("CRVAL2").unwrap()) / h.get_f64("CD2_2").unwrap();
+        let (x, y) = wcs.world_to_pixel(53.1625, dec);
+        assert_eq!(x, 31.5, "the reference meridian must not acquire a transverse offset");
+        assert!((y - expected_y).abs() < 1e-13, "one stored latitude ulp: {y} vs {expected_y}");
+        assert!(y > 31.5, "a positive latitude offset must survive the projection");
+        assert_eq!(wcs.world_to_pixel(53.1625, h.get_f64("CRVAL2").unwrap()), (31.5, 31.5));
+    }
+
+    #[test]
+    fn tan_projection_at_longitude_wrap_near_a_pole_preserves_explicit_projection_options() {
+        let mut h = make_header(&[
+            ("NAXIS1", "64"), ("NAXIS2", "64"),
+            ("CRPIX1", "32.5"), ("CRPIX2", "32.5"),
+            ("CRVAL1", "359.9999"), ("CRVAL2", "89.999"),
+            ("CD1_1", "-1.1111111111111112E-05"), ("CD1_2", "0"),
+            ("CD2_1", "0"), ("CD2_2", "1.1111111111111112E-05"),
+            ("CTYPE1", "RA---TAN"), ("CTYPE2", "DEC--TAN"),
+        ]);
+        for (key, value, expected) in [
+            (None, "", [(31.499717256661263, 40.500000000554614), (31.50012566370617, 49.50000000013231)]),
+            (Some("LONPOLE"), "170", [(29.936887953069206, 40.363220679790544), (28.374456556564354, 49.22656137562362)]),
+            (Some("LATPOLE"), "89.999", [(31.499717256661263, 40.500000000554614), (31.50012566370617, 49.50000000013231)]),
+            (Some("PV1_1"), "0", [(31.499717256661263, 40.500000000554614), (31.50012566370617, 49.50000000013231)]),
+        ] {
+            if let Some(key) = key { h.set(key, value.into()); }
+            let wcs = WcsTransform::from_header(&h).unwrap();
+            for ((ra, dec), (ex, ey)) in [(0.0001, 89.9991), (359.9998, 89.9992)].into_iter().zip(expected) {
+                let (x, y) = wcs.world_to_pixel(ra, dec);
+                assert!((x - ex).abs() < 1e-6 && (y - ey).abs() < 1e-6, "Astropy TAN {key:?}: ({x}, {y}) vs ({ex}, {ey})");
+            }
+            let (x, y) = wcs.world_to_pixel(179.9999, -89.999);
+            assert!(x.is_nan() && y.is_nan(), "the opposite hemisphere must be rejected");
+            if let Some(key) = key { h.remove(key); }
         }
     }
 

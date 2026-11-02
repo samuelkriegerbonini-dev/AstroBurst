@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CUBE_SPECTRUM_HINT } from "../../utils/previewShell";
@@ -13,6 +13,15 @@ interface ViewState {
   displayedDims: [number, number];
   gpu: boolean;
   spectrum: boolean;
+  reloads?: number;
+  finishedAt?: number;
+  imageRef?: string;
+  fileHeader?: Record<string, string>;
+  filePath?: string;
+  productPath?: string | null;
+  productVersion?: number;
+  previewOnly?: boolean;
+  compositeUrl?: string | null;
 }
 
 const S3D_GRID: [number, number] = [53, 55];
@@ -21,6 +30,11 @@ const X1D_NAME = "jw01266-o005_t001_nirspec_g395h-f290lp_x1d.fits";
 const X1D_PATH = `/data/${X1D_NAME}`;
 
 const state: ViewState = { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false };
+
+const getHeaderMock = vi.hoisted(() => vi.fn<() => Promise<Record<string, string>>>());
+vi.mock("../../services/header", () => ({ getHeader: getHeaderMock }));
+
+vi.mock("react", async (original) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await original()));
 
 const { hostProps, captureHost, revertMock, resetProcessedMock } = vi.hoisted(() => {
   const hostProps = new Map<string, Record<string, unknown>>();
@@ -52,18 +66,21 @@ vi.mock("../../context/PreviewContext", () => ({
       ? { id: "spec", path: X1D_PATH, name: X1D_NAME, status: "spectrum", spectrum: { kind: "x1d", hdu: 1 }, result: null }
       : {
           id: "1",
-          path: "/data/cube_s3d.fits",
+          path: state.filePath ?? "/data/cube_s3d.fits",
           name: "cube_s3d.fits",
-          result: { dimensions: state.fileDims, previewUrl: "asset://cube.png", header: {}, elapsed_ms: 10 },
+          reloads: state.reloads,
+          finishedAt: state.finishedAt,
+          imageRef: state.imageRef,
+          result: { dimensions: state.fileDims, previewUrl: "asset://cube.png", header: state.fileHeader ?? {}, elapsed_ms: 10 },
         },
   }),
   useCubeContext: () => ({ isCube: state.isCube, isSpectralCube: state.isSpectralCube, isSpectrum: state.spectrum, ramp: null }),
   useDisplayedImage: () => ({
-    path: state.spectrum ? null : state.label ? "/out/result.fits" : "/data/cube_s3d.fits",
+    path: state.spectrum ? null : state.label && state.productPath !== null ? state.productPath ?? "/out/result.fits" : state.filePath ?? "/data/cube_s3d.fits",
     dimensions: state.spectrum ? null : state.displayedDims,
     isProcessed: state.label !== null,
     label: state.label,
-    previewOnly: false,
+    previewOnly: state.previewOnly ?? false,
     previewUrl: state.spectrum ? null : "asset://shown.png",
   }),
   useRawPixelsContext: () => ({
@@ -78,8 +95,8 @@ vi.mock("../../context/PreviewContext", () => ({
     clearRgbRawPixels: () => {},
   }),
   useRenderContext: () => ({
-    processed: state.label ? { label: state.label, previewUrl: "asset://result.png", fitsPath: "/out/result.fits" } : null,
-    processedVersion: 0,
+    processed: state.label ? { label: state.label, previewUrl: "asset://result.png", fitsPath: state.productPath === undefined ? "/out/result.fits" : state.productPath, dimensions: state.displayedDims } : null,
+    processedVersion: state.productVersion ?? 0,
     stfPreviewUrl: null,
     chain: { psfKernel: null },
   }),
@@ -89,7 +106,7 @@ vi.mock("../../context/PreviewContext", () => ({
   useStarOverlayContext: () => ({ starOverlayRef: { current: null } }),
 }));
 vi.mock("../../context/CompositeContext", () => ({
-  useCompositePreview: () => ({ compositePreviewUrl: null, compositeVersion: 0, canShowParked: false }),
+  useCompositePreview: () => ({ compositePreviewUrl: state.compositeUrl ?? null, compositeVersion: 0, canShowParked: false }),
   useCompositeActions: () => ({
     initRgb: () => {},
     setCompositePreviewUrl: () => {},
@@ -143,11 +160,208 @@ vi.mock("../preview/PreviewTab", () => ({
 }));
 
 import PreviewPanel from "../PreviewPanel";
+import { hooks } from "../../test/hookRuntime";
+import { beginSpectrum, commitSpectrum, resetSpectrum, useSpectrum, type SpectrumState } from "../../hooks/useSpectrumStore";
 
 function render(view: Partial<ViewState>): string {
-  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false }, view);
+  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false, reloads: undefined, finishedAt: undefined, imageRef: undefined, fileHeader: undefined, filePath: undefined, productPath: undefined, productVersion: undefined, previewOnly: undefined, compositeUrl: undefined }, view);
   return renderToStaticMarkup(createElement(PreviewPanel));
 }
+
+function renderCurrent(): string {
+  return renderToStaticMarkup(hooks.render(PreviewPanel, {}) as ReturnType<typeof createElement>);
+}
+
+function pendingHeader() {
+  let resolve!: (header: Record<string, string>) => void;
+  const promise = new Promise<Record<string, string>>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+beforeEach(() => {
+  getHeaderMock.mockReset();
+  getHeaderMock.mockResolvedValue({});
+});
+
+function spectrumSnapshot(): SpectrumState {
+  const savedCells = hooks.run.cells;
+  const savedCursor = hooks.run.cursor;
+  hooks.run.cells = [];
+  try {
+    return hooks.render(useSpectrum, {}) as SpectrumState;
+  } finally {
+    hooks.mount();
+    hooks.run.cells = savedCells;
+    hooks.run.cursor = savedCursor;
+  }
+}
+
+afterEach(() => {
+  hooks.mount();
+  resetSpectrum();
+});
+
+describe("PreviewPanel active product metadata", () => {
+  const SOURCE_HEADER = { BITPIX: "16", BUNIT: "DN", EXTNAME: "RAW" };
+  const PRODUCT_HEADER = { BITPIX: "-32", BUNIT: "DN/s", EXTNAME: "SCI" };
+  const QUICK_SLOPE: Partial<ViewState> = { label: "Quick slope", fileDims: UNCAL_GRID, displayedDims: [2048, 2048], fileHeader: SOURCE_HEADER, filePath: "/data/uncal.fits#hdu=1" };
+
+  it("shows the active Quick Slope dimensions before its header arrives without borrowing the UNCAL type, unit, HDU or time", () => {
+    render(QUICK_SLOPE);
+    const html = renderCurrent();
+    expect(html).toContain("2048×2048");
+    expect(html).not.toContain("2048×3200");
+    expect(html).not.toContain("BITPIX 16");
+    expect(html).not.toContain("HDU 1");
+    expect(html).not.toContain("0.01s");
+    expect(html).toContain("Loading metadata");
+    expect(getHeaderMock).toHaveBeenCalledWith("/out/result.fits");
+  });
+
+  it("shows the product BITPIX and BUNIT and identifies its source after reading the active FITS", async () => {
+    getHeaderMock.mockResolvedValue(PRODUCT_HEADER);
+    render(QUICK_SLOPE);
+    renderCurrent();
+    await Promise.resolve();
+    const html = renderCurrent();
+    expect(html).toContain("BITPIX -32");
+    expect(html).toContain("DN/s");
+    expect(html).toContain("SCI");
+    expect(html).toContain("Source: cube_s3d.fits");
+    expect(html).not.toContain("BITPIX 16");
+  });
+
+  it("does not show another product's metadata when requests finish out of order", async () => {
+    const first = pendingHeader();
+    const second = pendingHeader();
+    getHeaderMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    render(QUICK_SLOPE);
+    renderCurrent();
+    Object.assign(state, { productPath: "/out/ratio.fits", label: "Quick / rate ratio" });
+    renderCurrent();
+    second.resolve({ BITPIX: "-32", BUNIT: "ratio" });
+    await Promise.resolve();
+    expect(renderCurrent()).toContain("ratio");
+    first.resolve(PRODUCT_HEADER);
+    await Promise.resolve();
+    expect(renderCurrent()).not.toContain("DN/s");
+  });
+
+  it.each([{ productVersion: 1 }, { reloads: 1 }, { finishedAt: 123 }, { imageRef: "updated.fits" }])("reloads product metadata for a changed revision %o", async (revision) => {
+    const replacement = pendingHeader();
+    getHeaderMock.mockResolvedValueOnce(PRODUCT_HEADER).mockReturnValueOnce(replacement.promise);
+    render(QUICK_SLOPE);
+    renderCurrent();
+    await Promise.resolve();
+    expect(renderCurrent()).toContain("DN/s");
+    Object.assign(state, revision);
+    const html = renderCurrent();
+    expect(html).not.toContain("DN/s");
+    expect(html).toContain("Loading metadata");
+    expect(getHeaderMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores source metadata after reverting while a product header is pending", async () => {
+    const product = pendingHeader();
+    getHeaderMock.mockReturnValue(product.promise);
+    render(QUICK_SLOPE);
+    renderCurrent();
+    Object.assign(state, { label: null, displayedDims: UNCAL_GRID });
+    const html = renderCurrent();
+    expect(html).toContain("2048×3200");
+    expect(html).toContain("BITPIX 16");
+    expect(html).toContain("HDU 1");
+    product.resolve(PRODUCT_HEADER);
+    await Promise.resolve();
+    expect(renderCurrent()).not.toContain("DN/s");
+  });
+
+  it("reports a failed product header without displaying the source metadata", async () => {
+    getHeaderMock.mockRejectedValue(new Error("Product is unreadable"));
+    render(QUICK_SLOPE);
+    renderCurrent();
+    await Promise.resolve();
+    const html = renderCurrent();
+    expect(html).toContain("Metadata unavailable");
+    expect(html).toContain("Product is unreadable");
+    expect(html).not.toContain("BITPIX 16");
+    expect(html).not.toContain("HDU 1");
+  });
+
+  it("keeps a PNG-only product free of FITS metadata", () => {
+    render({ ...QUICK_SLOPE, productPath: null, previewOnly: true });
+    const html = renderCurrent();
+    expect(html).toContain("PNG");
+    expect(html).not.toContain("BITPIX");
+    expect(html).not.toContain("HDU 1");
+    expect(html).not.toContain("0.01s");
+    expect(getHeaderMock).not.toHaveBeenCalled();
+  });
+
+  it("does not attribute the selected file's FITS metadata or dimensions to a composite", () => {
+    render({ fileHeader: SOURCE_HEADER, fileDims: UNCAL_GRID, compositeUrl: "asset://composite.png" });
+    const html = renderCurrent();
+    expect(html).toContain("Composite");
+    expect(html).not.toContain("BITPIX");
+    expect(html).not.toContain("2048×3200");
+    expect(html).not.toContain("0.01s");
+    expect(getHeaderMock).not.toHaveBeenCalled();
+  });
+
+  it("discards a product header after unmount", async () => {
+    const product = pendingHeader();
+    getHeaderMock.mockReturnValueOnce(product.promise).mockResolvedValueOnce({ BITPIX: "-64", BUNIT: "km/s" });
+    render(QUICK_SLOPE);
+    renderCurrent();
+    hooks.mount();
+    render({ ...QUICK_SLOPE, productPath: "/out/velocity.fits", label: "Velocity" });
+    renderCurrent();
+    await Promise.resolve();
+    product.resolve(PRODUCT_HEADER);
+    await Promise.resolve();
+    const html = renderCurrent();
+    expect(html).toContain("km/s");
+    expect(html).not.toContain("DN/s");
+  });
+});
+
+describe("PreviewPanel input revision", () => {
+  it.each([{ reloads: 1 }, { finishedAt: 123 }, { imageRef: "updated.fits" }])("clears a pixel spectrum when the same input changes %o", (change) => {
+    render({});
+    hooks.mount();
+    hooks.render(PreviewPanel, {});
+    const request = beginSpectrum({ x: 1, y: 2 });
+    commitSpectrum({ values: [1, 2], wavelengths: [], x: 1, y: 2, is_spectral: true, flux_jy: null }, 1, request);
+    expect(spectrumSnapshot().spectrum).toEqual([1, 2]);
+    Object.assign(state, change);
+    hooks.render(PreviewPanel, {});
+    expect(spectrumSnapshot().spectrum).toEqual([]);
+    expect(spectrumSnapshot().coord).toBeNull();
+  });
+
+  it("does not clear a current spectrum on an unrelated viewer rerender", () => {
+    render({});
+    hooks.mount();
+    hooks.render(PreviewPanel, {});
+    const request = beginSpectrum({ x: 1, y: 2 });
+    commitSpectrum({ values: [1, 2], wavelengths: [], x: 1, y: 2, is_spectral: true, flux_jy: null }, 1, request);
+    state.label = "Moment 0";
+    hooks.render(PreviewPanel, {});
+    expect(spectrumSnapshot().spectrum).toEqual([1, 2]);
+  });
+
+  it("rejects a pending pixel spectrum after the same input is reloaded", () => {
+    render({});
+    hooks.mount();
+    hooks.render(PreviewPanel, {});
+    const request = beginSpectrum({ x: 1, y: 2 });
+    state.reloads = 1;
+    hooks.render(PreviewPanel, {});
+    commitSpectrum({ values: [1, 2], wavelengths: [], x: 1, y: 2, is_spectral: true, flux_jy: null }, 1, request);
+    expect(spectrumSnapshot().spectrum).toEqual([]);
+    expect(spectrumSnapshot().loading).toBe(false);
+  });
+});
 
 const HINT_ATTRIBUTE = `data-canvas-hint="${CUBE_SPECTRUM_HINT}"`;
 

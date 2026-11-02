@@ -3,13 +3,15 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::cubeprep::cube::{Cube, DQ_DO_NOT_USE};
-use crate::core::imaging::convolve::{convolve_fft, convolve_fft_with_variance, ConvolveError, ConvolveOptions, FftPlanCache};
+use crate::core::imaging::convolve::{convolve_fft, convolve_fft_with_variance, ConvolveError, ConvolveOptions, FftPlanCache, NanTreatment};
 use crate::core::imaging::push_history;
 
 pub const KERNEL_MISSING: &str = "kernel_missing";
 pub const KERNEL_SCALE: &str = "kernel_scale";
 pub const CONVOLUTION_FAILED: &str = "convolution_failed";
 pub const KERNEL_SCALE_RTOL: f64 = 1e-3;
+const MATCH_ERROR_NOTE: &str = "ERR uses squared kernel weights assuming independent input pixels; existing covariance from alignment or other processing is not included and output covariance is not stored";
+const MATCH_DQ_NOTE: &str = "DQ is the bitwise OR of finite SCI contributors under every nonzero kernel coefficient, including negative lobes; flags do not exclude SCI";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -109,26 +111,78 @@ fn check_scales(cube: &Cube, kernels: &[Option<&PlaneKernel>], warnings: &mut Ve
 struct PlaneOutput {
     sci: Array2<f32>,
     err: Option<Array2<f32>>,
+    dq: Option<Array2<u32>>,
     warnings: Vec<String>,
 }
 
+struct PlaneInput<'a> {
+    sci: &'a Array2<f32>,
+    err: Option<&'a Array2<f32>>,
+    dq: Option<&'a Array2<u32>>,
+    no_data_dq: u32,
+}
+
+fn spread_support(mask: &Array2<f64>, support: &Array2<f64>, plans: &mut FftPlanCache<f64>) -> Result<Array2<f64>, ConvolveError> {
+    let options = ConvolveOptions { normalize_kernel: false, nan_treatment: NanTreatment::Fill, fill_value: 0.0, ..ConvolveOptions::lightstack() };
+    convolve_fft(mask, support, &options, plans).map(|result| result.image)
+}
+
 fn convolve_plane(
-    sci: &Array2<f32>,
-    err: Option<&Array2<f32>>,
+    input: PlaneInput<'_>,
     kernel: &PlaneKernel,
     filter: &str,
     options: &ConvolveOptions,
     plans: &mut FftPlanCache<f64>,
 ) -> Result<PlaneOutput, MatchError> {
-    let image = sci.mapv(f64::from);
-    let convolved = match err {
-        Some(err) => convolve_fft_with_variance(&image, &err.mapv(|e| f64::from(e) * f64::from(e)), &kernel.data, options, plans),
+    let image = input.sci.mapv(f64::from);
+    let failure = |error| MatchError::Convolve { filter: filter.to_string(), label: kernel.label.clone(), error };
+    let mut convolved = match input.err {
+        Some(err) => convolve_fft_with_variance(&image, &err.mapv(|e| if e.is_finite() && e >= 0.0 { f64::from(e).powi(2) } else { f64::NAN }), &kernel.data, options, plans),
         None => convolve_fft(&image, &kernel.data, options, plans),
     }
-    .map_err(|error| MatchError::Convolve { filter: filter.to_string(), label: kernel.label.clone(), error })?;
+    .map_err(failure)?;
+    let support = kernel.data.mapv(|weight| if weight.is_finite() && weight != 0.0 { 1.0 } else { 0.0 });
+    if let (Some(err), Some(variance)) = (input.err, convolved.variance.as_mut()) {
+        let unknown = Array2::from_shape_fn(image.dim(), |p| {
+            if image[p].is_finite() && !(err[p].is_finite() && err[p] >= 0.0) { 1.0 } else { 0.0 }
+        });
+        if unknown.iter().any(|&hit| hit != 0.0) {
+            let spread = spread_support(&unknown, &support, plans).map_err(failure)?;
+            for (value, hits) in variance.iter_mut().zip(spread) {
+                if hits > 0.5 {
+                    *value = f64::NAN;
+                }
+            }
+        }
+    }
+    let dq = input.dq.map(|source| -> Result<Array2<u32>, MatchError> {
+        let mut output = Array2::zeros(source.dim());
+        let mut flags = source.indexed_iter().filter(|(p, _)| image[*p].is_finite()).fold(0u32, |bits, (_, &value)| bits | value);
+        while flags != 0 {
+            let bit = 1u32 << flags.trailing_zeros();
+            let mask = Array2::from_shape_fn(source.dim(), |p| if image[p].is_finite() && source[p] & bit != 0 { 1.0 } else { 0.0 });
+            let spread = spread_support(&mask, &support, plans).map_err(failure)?;
+            for (value, hits) in output.iter_mut().zip(spread) {
+                if hits > 0.5 {
+                    *value |= bit;
+                }
+            }
+            flags &= !bit;
+        }
+        for (p, &value) in convolved.image.indexed_iter() {
+            if !value.is_finite() {
+                output[p] |= input.no_data_dq;
+                if !image[p].is_finite() {
+                    output[p] |= source[p];
+                }
+            }
+        }
+        Ok(output)
+    }).transpose()?;
     Ok(PlaneOutput {
         sci: convolved.image.mapv(|v| v as f32),
         err: convolved.variance.map(|variance| variance.mapv(|v| v.sqrt() as f32)),
+        dq,
         warnings: convolved.report.warnings.iter().map(|warning| format!("{filter}: {warning}")).collect(),
     })
 }
@@ -171,7 +225,9 @@ pub fn match_cube(cube: &Cube, kernels: &[PlaneKernel], options: &MatchOptions, 
         .map_init(FftPlanCache::<f64>::new, |plans, (z, sci)| match assigned[z].1 {
             Some(kernel) => {
                 let err = cube.err.as_ref().map(|err| &err[z]);
-                convolve_plane(sci, err, kernel, &cube.filters[z].filter, &convolve_options, plans).map(Some)
+                let dq = cube.dq.as_ref().map(|dq| &dq.planes[z]);
+                let input = PlaneInput { sci, err, dq, no_data_dq: dq_flags.get(z).copied().unwrap_or(DQ_DO_NOT_USE) };
+                convolve_plane(input, kernel, &cube.filters[z].filter, &convolve_options, plans).map(Some)
             }
             None => Ok(None),
         })
@@ -183,6 +239,9 @@ pub fn match_cube(cube: &Cube, kernels: &[PlaneKernel], options: &MatchOptions, 
             matched.planes[z] = output.sci;
             if let (Some(err), Some(propagated)) = (matched.err.as_mut(), output.err) {
                 err[z] = propagated;
+            }
+            if let (Some(dq), Some(propagated)) = (matched.dq.as_mut(), output.dq) {
+                dq.planes[z] = propagated;
             }
             warnings.extend(output.warnings);
         }
@@ -221,6 +280,16 @@ pub fn match_cube(cube: &Cube, kernels: &[PlaneKernel], options: &MatchOptions, 
     }
 
     let header = &mut matched.header;
+    if assigned.iter().any(|(status, _)| *status == PlaneStatus::Matched) {
+        if cube.err.is_some() {
+            warnings.push(MATCH_ERROR_NOTE.to_string());
+            push_history(header, MATCH_ERROR_NOTE);
+        }
+        if cube.dq.is_some() {
+            warnings.push(MATCH_DQ_NOTE.to_string());
+            push_history(header, MATCH_DQ_NOTE);
+        }
+    }
     match options.mode {
         MatchMode::Lightstack => push_history(header, &lightstack_history(reference)),
         MatchMode::Astroburst => push_history(
@@ -364,7 +433,7 @@ mod tests {
         assert!(out.planes[2][[10, 12]].is_finite() && out.planes[2][[30, 40]].is_finite(), "the reference keeps its own pixels");
         assert_eq!((matched.planes[0].masked_pixels, matched.planes[1].masked_pixels), (2, 2), "newly masked pixels per plane");
         let dq = &out.dq.as_ref().unwrap().planes;
-        assert_eq!((dq[0][[5, 5]] & 512, dq[0][[30, 40]] & 512, dq[0][[10, 12]] & 512), (512, 512, 0), "the DQ flag marks the newly masked pixels");
+        assert_eq!((dq[0][[5, 5]] & 512, dq[0][[30, 40]] & 512, dq[0][[10, 12]] & 512), (512, 512, 512), "the DQ flag marks every invalid convolved SCI pixel");
         assert_eq!(dq[0][[0, 0]], before.dq.as_ref().unwrap().planes[0][[0, 0]]);
         assert!(history(out).contains("union"), "{}", history(out));
 
@@ -472,6 +541,86 @@ mod tests {
                 }
                 assert_f_class(&matched.cube.err.as_ref().unwrap()[z], &expected, &format!("{mode:?} ERR of plane {z}"));
             }
+        }
+    }
+
+    #[test]
+    fn matched_companions_keep_invalid_err_unknown_on_every_nonzero_kernel_contributor() {
+        let mut cube = small_cube(&FILTERS, (12, 12), |_, _, _| 2.0);
+        let mut shape = Array2::zeros((3, 3));
+        shape[[1, 1]] = 1.25;
+        shape[[1, 0]] = -0.25;
+        let kernels = [kernel("F150W", shape), kernel("F277W", Array2::from_elem((1, 1), 1.0))];
+        for invalid in [-1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut err = (0..3).map(|_| Array2::from_elem((12, 12), 0.5)).collect::<Vec<_>>();
+            err[0][[5, 5]] = invalid;
+            cube.err = Some(err);
+            for mode in MODES {
+                let result = match_cube(&cube, &kernels, &options(mode), &[]).unwrap();
+                let err = &result.cube.err.as_ref().unwrap()[0];
+                assert!(err[[5, 5]].is_nan() && err[[5, 4]].is_nan(), "{mode:?}, {invalid}: {}, {}", err[[5, 5]], err[[5, 4]]);
+                assert!(err[[5, 6]].is_finite() && err[[4, 5]].is_finite());
+                assert!(result.cube.planes[0][[5, 5]].is_finite());
+                assert!(result.warnings.iter().any(|note| note.contains("covariance")));
+            }
+        }
+    }
+
+    #[test]
+    fn matched_companions_propagate_dq_by_nonzero_kernel_support_including_negative_lobes() {
+        let mut cube = small_cube(&FILTERS, (12, 12), |_, _, _| 2.0);
+        let mut flags = (0..3).map(|_| Array2::zeros((12, 12))).collect::<Vec<_>>();
+        flags[0][[5, 5]] = 1u32 << 31;
+        flags[0][[5, 6]] = 4;
+        cube.dq = Some(DqPlanes { planes: flags, signed: false });
+        let mut shape = Array2::zeros((3, 3));
+        shape[[1, 1]] = 1.25;
+        shape[[1, 0]] = -0.25;
+        let kernels = [kernel("F150W", shape), kernel("F277W", Array2::from_elem((1, 1), 1.0))];
+        for mode in MODES {
+            let result = match_cube(&cube, &kernels, &options(mode), &[]).unwrap();
+            let flags = &result.cube.dq.as_ref().unwrap().planes[0];
+            assert_eq!(flags[[5, 4]], 1u32 << 31, "{mode:?}");
+            assert_eq!(flags[[5, 5]], (1u32 << 31) | 4, "{mode:?}");
+            assert_eq!(flags[[5, 6]], 4);
+            assert_eq!(flags[[5, 7]], 0);
+            assert_eq!(flags[[4, 5]], 0);
+        }
+    }
+
+    #[test]
+    fn matched_companions_support_counts_match_direct_flags_for_even_kernels_and_tiny_lobes() {
+        let mut cube = small_cube(&FILTERS, (9, 11), |_, _, _| 2.0);
+        cube.planes[0][[2, 3]] = f32::NAN;
+        cube.err = Some((0..3).map(|_| Array2::from_elem((9, 11), 0.5)).collect());
+        cube.err.as_mut().unwrap()[0][[4, 5]] = f32::NAN;
+        cube.dq = Some(DqPlanes {
+            planes: (0..3).map(|z| Array2::from_shape_fn((9, 11), |(y, x)| (1u32 << ((x + 3 * y + z) % 32)) | u32::from((x + y) % 5 == 0))).collect(),
+            signed: false,
+        });
+        let mut shape = Array2::zeros((2, 4));
+        shape[[1, 2]] = 1.0;
+        shape[[0, 0]] = 1e-12;
+        shape[[1, 3]] = -0.1;
+        let kernels = [kernel("F150W", shape.clone()), kernel("F277W", Array2::from_elem((1, 1), 1.0))];
+        for mode in MODES {
+            let result = match_cube(&cube, &kernels, &options(mode), &[513; 3]).unwrap();
+            let actual = &result.cube.dq.as_ref().unwrap().planes[0];
+            for ((y, x), &value) in result.cube.planes[0].indexed_iter() {
+                if !value.is_finite() {
+                    assert_eq!(actual[[y, x]] & 513, 513);
+                    continue;
+                }
+                let mut expected = 0;
+                for ((ky, kx), &weight) in shape.indexed_iter() {
+                    let (sy, sx) = (y as isize + 1 - ky as isize, x as isize + 2 - kx as isize);
+                    if weight != 0.0 && sy >= 0 && sx >= 0 && sy < 9 && sx < 11 && cube.planes[0][[sy as usize, sx as usize]].is_finite() {
+                        expected |= cube.dq.as_ref().unwrap().planes[0][[sy as usize, sx as usize]];
+                    }
+                }
+                assert_eq!(actual[[y, x]], expected, "{mode:?} at ({x}, {y})");
+            }
+            assert!(result.cube.err.as_ref().unwrap()[0][[3, 3]].is_nan(), "even the 1e-12 kernel lobe reaches unknown ERR");
         }
     }
 

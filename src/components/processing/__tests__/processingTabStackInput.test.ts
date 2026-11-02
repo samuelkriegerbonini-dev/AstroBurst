@@ -63,6 +63,7 @@ import ProcessingTab from "../ProcessingTab";
 import type { ProcessedFile } from "../../../shared/types";
 import type { ProcessedResult } from "../../../shared/types/preview";
 import type { HistoryNode, HistoryState, OpSpec } from "../../../shared/types/ops";
+import { scientificInputRevisionOf } from "../../../utils/pixelSource";
 
 const LIGHT = "C:/data/light_001.fits";
 const STACK = "C:/out/light_001_stack3_20261010-120000-000.fits";
@@ -148,8 +149,8 @@ function stackRecord(): ProcessedResult {
   return { fitsPath: STACK, previewUrl: "asset://out/stack.png", dimensions: [66, 50], label: STACK_LABEL, kind: "stacking", inputPath: LIGHT };
 }
 
-function frameRecord(n: number): ProcessedResult {
-  return { fitsPath: `C:/out/f${n}.fits`, previewUrl: `asset://out/f${n}.png`, dimensions: [64, 48], label: `Frame ${n}`, kind: "cube", inputPath: LIGHT, frameIndex: n };
+function frameRecord(n: number, file: ProcessedFile): ProcessedResult {
+  return { fitsPath: `C:/out/f${n}.fits`, previewUrl: `asset://out/f${n}.png`, dimensions: [64, 48], label: `Frame ${n}`, kind: "cube", inputPath: LIGHT, inputRevision: scientificInputRevisionOf(file), frameIndex: n };
 }
 
 async function renderTab(file: ProcessedFile): Promise<string> {
@@ -258,7 +259,7 @@ describe("ProcessingTab PixelMath compare on a non-file input", () => {
   it("keeps the PV slice as the before image on every PixelMath run", async () => {
     const file = fileOf("pv-pixelmath");
     const key = fileKeyOf(file) as string;
-    publish(key, { fitsPath: PV, previewUrl: "asset://out/pv.png", dimensions: [40, 900], label: "PV slice", kind: "cube", inputPath: LIGHT });
+    publish(key, { fitsPath: PV, previewUrl: "asset://out/pv.png", dimensions: [40, 900], label: "PV slice", kind: "cube", inputPath: LIGHT, inputRevision: scientificInputRevisionOf(file) });
     const bases: { inputPreviewUrl?: string | null; inputLabel?: string }[] = [];
     for (let run = 0; run < 2; run++) {
       await renderTab(file);
@@ -291,11 +292,11 @@ describe("ProcessingTab when the frame on screen changes during a run", () => {
   it("drops a Background result computed from the previous frame", async () => {
     const file = fileOf("frame-bg-race");
     const key = fileKeyOf(file) as string;
-    publish(key, frameRecord(120));
+    publish(key, frameRecord(120, file));
     await renderTab(file);
     const bg = panel("background");
     expect(bg.selectedFile?.path).toBe("C:/out/f120.fits");
-    publish(key, frameRecord(121));
+    publish(key, frameRecord(121, file));
     getHistoryMock.mockResolvedValue(historyState(LIGHT, "C:/out/f120.fits", [historyNode("n0001", null, BACKGROUND)], "n0001"));
     await bg.onProcessingDone?.({ node: "n0001", corrected_fits: `${HISTORY_DIR}/n0001.fits`, previewUrl: "asset://out/f120_bg.png", dimensions: [64, 48] });
     expect(getHistoryMock).toHaveBeenLastCalledWith({ imageKey: LIGHT, basePath: "C:/out/f120.fits" });
@@ -308,11 +309,11 @@ describe("ProcessingTab when the frame on screen changes during a run", () => {
   it("drops a PSF measured on the previous frame", async () => {
     const file = fileOf("frame-psf-race");
     const key = fileKeyOf(file) as string;
-    publish(key, frameRecord(120));
+    publish(key, frameRecord(120, file));
     await renderTab(file);
     const psf = panel("psf");
     expect(psf.selectedFile?.path).toBe("C:/out/f120.fits");
-    publish(key, frameRecord(121));
+    publish(key, frameRecord(121, file));
     psf.onPsfReady?.([[0, 1, 0], [1, 4, 1], [0, 1, 0]]);
     expect(getRenderRecord(key)?.chain.psfKernel).toBeNull();
   });
@@ -320,7 +321,7 @@ describe("ProcessingTab when the frame on screen changes during a run", () => {
   it("keeps a PSF measured on the frame still on screen", async () => {
     const file = fileOf("frame-psf-kept");
     const key = fileKeyOf(file) as string;
-    publish(key, frameRecord(120));
+    publish(key, frameRecord(120, file));
     await renderTab(file);
     panel("psf").onPsfReady?.([[0, 1, 0], [1, 4, 1], [0, 1, 0]]);
     expect(getRenderRecord(key)?.chain.psfKernel).toEqual([[0, 1, 0], [1, 4, 1], [0, 1, 0]]);

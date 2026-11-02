@@ -38,6 +38,7 @@ export interface ProcessedResult {
   kind: ProcessedKind;
   inputPath: string;
   inputPreviewUrl?: string | null;
+  inputRevision?: string;
   frameIndex?: number;
   displayHint?: DisplayHint;
   planes?: number;
