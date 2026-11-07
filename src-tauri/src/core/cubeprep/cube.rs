@@ -1,10 +1,12 @@
 use ndarray::{s, Array2};
 use serde::{Deserialize, Serialize};
 
+use crate::core::alignment::wcs_reproject::smallest_odd_support;
 use crate::core::astrometry::wcs::WcsTransform;
-use crate::core::cubeprep::align::same_grid;
+use crate::core::cubeprep::align::{noise_correlation_header, same_grid, NoiseSource, CARD_NCORRK, CARD_NCORRSRC, NOISCORR_EXTNAME};
 use crate::core::cubeprep::footprint::{CropRounding, FootprintError};
 use crate::core::imaging::cutout::{shift_header, CutoutRect};
+use crate::core::imaging::dq_flags::DqTable;
 use crate::core::imaging::push_history;
 use crate::core::metadata::filter_wavelengths::{FilterEntry, FilterRegistry};
 use crate::core::metadata::photcal::card_text;
@@ -45,6 +47,10 @@ const COLUMN_BUNIT_IN: &str = "BUNIT_IN";
 const COLUMN_FLUXCONV: &str = "FLUXCONV";
 const COLUMN_PSF_FWHM: &str = "PSF_FWHM";
 const COLUMN_KERNEL: &str = "KERNEL";
+pub const COLUMN_NOISCORR_ALIGN: &str = "NOISCORR_ALIGN";
+pub const COLUMN_NOISCORR_MATCH: &str = "NOISCORR_MATCH";
+pub const COLUMN_MATCH: &str = "MATCH";
+const UNMATCHED_NOISCORR_MATCH: f64 = 1.0;
 const CARD_PHOTFLAM: &str = "PHOTFLAM";
 const CARD_PHOTPLAM: &str = "PHOTPLAM";
 const UNIT_MICRON: &str = "um";
@@ -152,12 +158,139 @@ pub struct CubeOptions {
     pub order: PlaneOrder,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchStatus {
+    Matched,
+    Reference,
+    Unmatched,
+    External,
+}
+
+impl MatchStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Reference => "reference",
+            Self::Unmatched => "unmatched",
+            Self::External => "external",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        [Self::Matched, Self::Reference, Self::Unmatched, Self::External].into_iter().find(|status| status.label() == text.trim())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputNoise {
+    pub correlation: Array2<f32>,
+    pub noiscorr_align: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaneNoise {
+    pub filter: String,
+    pub correlation: Array2<f32>,
+    pub noiscorr_align: f64,
+    pub noiscorr_match: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubeNoise {
+    pub planes: Vec<PlaneNoise>,
+    pub source: NoiseSource,
+}
+
+fn centred_pad(map: &Array2<f32>, k: usize) -> Array2<f32> {
+    let offset = (k - map.dim().0) / 2;
+    let mut padded = Array2::zeros((k, k));
+    padded.slice_mut(s![offset..offset + map.dim().0, offset..offset + map.dim().1]).assign(map);
+    padded
+}
+
+impl CubeNoise {
+    pub fn k(&self) -> usize {
+        self.planes.iter().map(|plane| plane.correlation.dim().0).max().unwrap_or(1)
+    }
+
+    pub fn padded_maps(&self) -> Vec<Array2<f32>> {
+        let k = self.k();
+        self.planes.iter().map(|plane| centred_pad(&plane.correlation, k)).collect()
+    }
+
+    pub fn header(&self) -> HduHeader {
+        noise_correlation_header(self.k(), self.source)
+    }
+
+    pub fn for_planes(&self, planes: &[CubePlane]) -> Result<CubeNoise, CubeError> {
+        let planes = planes
+            .iter()
+            .map(|plane| self.planes.iter().find(|noise| noise.filter == plane.filter).cloned().ok_or_else(|| CubeError::NoiseFilter(plane.filter.clone())))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(CubeNoise { planes, source: self.source })
+    }
+
+    pub fn from_hdu(table: &BintableData, header: &HduHeader, maps: Vec<Array2<f32>>) -> anyhow::Result<CubeNoise> {
+        let declared = card_text(header, CARD_NCORRSRC).unwrap_or_default();
+        let source = NoiseSource::parse(&declared).ok_or_else(|| anyhow::anyhow!("{NOISCORR_EXTNAME} {CARD_NCORRSRC}='{declared}' is neither 'align' nor 'match'"))?;
+        let k = header
+            .get_i64(CARD_NCORRK)
+            .filter(|k| *k > 0 && k % 2 == 1)
+            .ok_or_else(|| anyhow::anyhow!("{NOISCORR_EXTNAME} {CARD_NCORRK}={} is not a positive odd size", header.get(CARD_NCORRK).unwrap_or("absent")))?;
+        if let Some(map) = maps.iter().find(|map| map.nrows() != map.ncols() || map.nrows() as i64 != k) {
+            anyhow::bail!("{NOISCORR_EXTNAME} {CARD_NCORRK}={k} disagrees with its {}x{} maps", map.ncols(), map.nrows());
+        }
+        let filters = table.text_column(COLUMN_FILTER)?;
+        let align = finite_column(table, COLUMN_NOISCORR_ALIGN)?;
+        let matched = finite_column(table, COLUMN_NOISCORR_MATCH)?;
+        if [filters.len(), align.len(), matched.len()].iter().any(|&rows| rows != maps.len()) {
+            anyhow::bail!("{FILTERS_EXTNAME} has {} rows but {NOISCORR_EXTNAME} has {} planes", filters.len(), maps.len());
+        }
+        let planes = maps
+            .iter()
+            .zip(filters)
+            .enumerate()
+            .map(|(z, (map, filter))| PlaneNoise {
+                filter,
+                correlation: smallest_odd_support(map),
+                noiscorr_align: align[z].unwrap_or(f64::NAN),
+                noiscorr_match: matched[z].unwrap_or(f64::NAN),
+            })
+            .collect();
+        Ok(CubeNoise { planes, source })
+    }
+}
+
+pub fn match_statuses(table: &BintableData) -> anyhow::Result<Option<Vec<MatchStatus>>> {
+    let Ok(labels) = table.text_column(COLUMN_MATCH) else {
+        return Ok(None);
+    };
+    labels
+        .iter()
+        .enumerate()
+        .map(|(z, label)| MatchStatus::parse(label).ok_or_else(|| anyhow::anyhow!("{FILTERS_EXTNAME} row {}: unknown {COLUMN_MATCH} value '{label}'", z + 1)))
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map(Some)
+}
+
 #[derive(Debug, Clone)]
 pub struct AssembledCube {
     pub cube: Cube,
     pub order: Vec<usize>,
     pub bunit: String,
     pub warnings: Vec<String>,
+    pub noise: Option<CubeNoise>,
+}
+
+impl AssembledCube {
+    pub fn filters_table(&self) -> Result<FiltersTable, CubeError> {
+        let table = FiltersTable::new(&self.cube.filters).with_match(&vec![MatchStatus::Unmatched; self.cube.filters.len()])?;
+        match &self.noise {
+            Some(noise) => table.with_noise(noise),
+            None => Ok(table),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -196,6 +329,10 @@ pub enum CubeError {
     EmptyMask(&'static str),
     #[error("{0} has {1} planes, the cube has {2}")]
     CompanionMismatch(&'static str, usize, usize),
+    #[error("{label}: the {NOISCORR_EXTNAME} map is {cols}x{rows}; it must be square with an odd size")]
+    NoiseMap { label: String, rows: usize, cols: usize },
+    #[error("the {NOISCORR_EXTNAME} maps do not line up with the {0} plane")]
+    NoiseFilter(String),
     #[error(transparent)]
     Footprint(#[from] FootprintError),
 }
@@ -551,12 +688,46 @@ fn plane_order(inputs: &[CubeInput], order: PlaneOrder) -> Result<Vec<usize>, Cu
     Ok(indices)
 }
 
+fn check_noise(inputs: &[CubeInput], noise: &[InputNoise]) -> Result<(), CubeError> {
+    if noise.len() != inputs.len() {
+        return Err(CubeError::CompanionMismatch(NOISCORR_EXTNAME, noise.len(), inputs.len()));
+    }
+    for (input, noise) in inputs.iter().zip(noise) {
+        let (rows, cols) = noise.correlation.dim();
+        if rows != cols || rows % 2 == 0 {
+            return Err(CubeError::NoiseMap { label: input.label.clone(), rows, cols });
+        }
+    }
+    Ok(())
+}
+
 pub fn assemble_cube(inputs: Vec<CubeInput>, reference: usize, base: HduHeader, options: CubeOptions) -> Result<AssembledCube, CubeError> {
+    assemble(inputs, None, reference, base, options)
+}
+
+pub fn assemble_cube_with_noise(inputs: Vec<CubeInput>, noise: Vec<InputNoise>, reference: usize, base: HduHeader, options: CubeOptions) -> Result<AssembledCube, CubeError> {
+    check_noise(&inputs, &noise)?;
+    assemble(inputs, Some(noise), reference, base, options)
+}
+
+fn assemble(inputs: Vec<CubeInput>, noise: Option<Vec<InputNoise>>, reference: usize, base: HduHeader, options: CubeOptions) -> Result<AssembledCube, CubeError> {
     let anchor = inputs.get(reference).ok_or(CubeError::Empty)?;
     check_inputs(&inputs, anchor)?;
     let dims = anchor.sci.dim();
     let bunit = classify_unit(&anchor.header).bunit.unwrap_or_else(|| UNKNOWN_UNIT.to_string());
     let order = plane_order(&inputs, options.order)?;
+    let noise = noise.filter(|_| options.layout == CubeLayout::Mef).map(|noise| CubeNoise {
+        planes: order
+            .iter()
+            .map(|&i| PlaneNoise {
+                filter: inputs[i].plane.filter.clone(),
+                correlation: noise[i].correlation.clone(),
+                noiscorr_align: noise[i].noiscorr_align,
+                noiscorr_match: UNMATCHED_NOISCORR_MATCH,
+            })
+            .collect(),
+        source: NoiseSource::Align,
+    });
     let mut inputs = inputs;
     let mut warnings = Vec::new();
     let any_err = inputs.iter().any(|input| input.err.is_some());
@@ -597,7 +768,7 @@ pub fn assemble_cube(inputs: Vec<CubeInput>, reference: usize, base: HduHeader, 
     let filters: Vec<CubePlane> = order.iter().map(|&i| inputs[i].plane.clone()).collect();
     let planes: Vec<Array2<f32>> = order.iter().map(|&i| std::mem::take(&mut inputs[i].sci)).collect();
     let header = cube_header(base, options.layout, &bunit, &filters, dims, &mut warnings);
-    Ok(AssembledCube { cube: Cube { header, planes, err, dq, filters }, order, bunit, warnings })
+    Ok(AssembledCube { cube: Cube { header, planes, err, dq, filters }, order, bunit, warnings, noise })
 }
 
 pub fn without_hdu_identity(header: &HduHeader) -> HduHeader {
@@ -617,6 +788,11 @@ pub fn planes_from_header(header: &HduHeader, naxis3: usize, registry: &FilterRe
         .collect()
 }
 
+struct NoiseColumns {
+    align: Vec<f64>,
+    matched: Vec<f64>,
+}
+
 pub struct FiltersTable {
     filter: Vec<String>,
     dataset: Vec<String>,
@@ -627,6 +803,8 @@ pub struct FiltersTable {
     fluxconv: Vec<f64>,
     psf_fwhm: Vec<f64>,
     kernel: Vec<String>,
+    noise: Option<NoiseColumns>,
+    status: Option<Vec<String>>,
 }
 
 impl FiltersTable {
@@ -643,7 +821,30 @@ impl FiltersTable {
             fluxconv: number(|p| p.fluxconv),
             psf_fwhm: number(|p| p.psf_fwhm_arcsec),
             kernel: text(|p| &p.kernel),
+            noise: None,
+            status: None,
         }
+    }
+
+    pub fn with_noise(self, noise: &CubeNoise) -> Result<Self, CubeError> {
+        if noise.planes.len() != self.filter.len() {
+            return Err(CubeError::CompanionMismatch(NOISCORR_EXTNAME, noise.planes.len(), self.filter.len()));
+        }
+        if let Some(filter) = self.filter.iter().zip(&noise.planes).find(|(filter, plane)| plane.filter != **filter).map(|(filter, _)| filter) {
+            return Err(CubeError::NoiseFilter(filter.clone()));
+        }
+        let columns = NoiseColumns {
+            align: noise.planes.iter().map(|plane| plane.noiscorr_align).collect(),
+            matched: noise.planes.iter().map(|plane| plane.noiscorr_match).collect(),
+        };
+        Ok(Self { noise: Some(columns), ..self })
+    }
+
+    pub fn with_match(self, statuses: &[MatchStatus]) -> Result<Self, CubeError> {
+        if statuses.len() != self.filter.len() {
+            return Err(CubeError::CompanionMismatch(COLUMN_MATCH, statuses.len(), self.filter.len()));
+        }
+        Ok(Self { status: Some(statuses.iter().map(|status| status.label().to_string()).collect()), ..self })
     }
 
     pub fn columns(&self) -> Vec<TableColumn<'_>> {
@@ -653,7 +854,7 @@ impl FiltersTable {
         fn number<'a>(name: &'a str, unit: Option<&'a str>, values: &'a [f64]) -> TableColumn<'a> {
             TableColumn { name, unit, values: TableValues::F64(values) }
         }
-        vec![
+        let mut columns = vec![
             text(COLUMN_FILTER, &self.filter),
             text(COLUMN_DATASET, &self.dataset),
             text(COLUMN_INSTRUMENT, &self.instrument),
@@ -663,7 +864,15 @@ impl FiltersTable {
             number(COLUMN_FLUXCONV, None, &self.fluxconv),
             number(COLUMN_PSF_FWHM, Some(UNIT_ARCSEC), &self.psf_fwhm),
             text(COLUMN_KERNEL, &self.kernel),
-        ]
+        ];
+        if let Some(noise) = &self.noise {
+            columns.push(number(COLUMN_NOISCORR_ALIGN, None, &noise.align));
+            columns.push(number(COLUMN_NOISCORR_MATCH, None, &noise.matched));
+        }
+        if let Some(status) = &self.status {
+            columns.push(text(COLUMN_MATCH, status));
+        }
+        columns
     }
 }
 
@@ -697,8 +906,37 @@ pub fn planes_from_table(table: &BintableData) -> anyhow::Result<Vec<CubePlane>>
         .collect())
 }
 
-pub fn plane_is_valid(plane: &Array2<f32>, dq: Option<&Array2<u32>>, threshold: f64, frac_valid: f64) -> bool {
-    let usable = |index: (usize, usize), value: f32| value.is_finite() && dq.is_none_or(|bits| bits[index] & DQ_DO_NOT_USE == 0);
+pub fn dq_table_of(plane: &CubePlane) -> DqTable {
+    match plane.dataset.trim().to_ascii_uppercase().as_str() {
+        "JWST" => DqTable::Jwst,
+        "HST" => DqTable::Hst,
+        "ROMAN" => DqTable::Roman,
+        _ => DqTable::Unknown,
+    }
+}
+
+fn validity_mask(table: DqTable) -> u32 {
+    match table.exclusion_mask() {
+        0 => DQ_DO_NOT_USE,
+        mask => mask,
+    }
+}
+
+fn validity_note(plane: &CubePlane) -> String {
+    let table = dq_table_of(plane);
+    let mask = validity_mask(table);
+    let named: Vec<&str> = table.flags().iter().filter(|flag| flag.bit & mask != 0).map(|flag| flag.name).collect();
+    let (name, names) = match (table, named.first(), named.last()) {
+        (DqTable::Unknown, _, _) => ("unknown", "DO_NOT_USE assumed".to_string()),
+        (_, Some(first), Some(last)) if named.len() > 1 => (table.label(), format!("{first}..{last}")),
+        (_, Some(first), _) => (table.label(), first.to_string()),
+        _ => (table.label(), String::new()),
+    };
+    format!("{} ({name}): mask 0x{mask:X} ({names})", plane.filter)
+}
+
+pub fn plane_is_valid(plane: &Array2<f32>, dq: Option<(&Array2<u32>, u32)>, threshold: f64, frac_valid: f64) -> bool {
+    let usable = |index: (usize, usize), value: f32| value.is_finite() && dq.is_none_or(|(bits, mask)| bits[index] & mask == 0);
     let (total, above) = plane
         .indexed_iter()
         .filter(|&(index, &value)| usable(index, value))
@@ -722,13 +960,18 @@ fn select_planes(cube: &Cube, keep: &[usize]) -> Cube {
 
 pub fn drop_invalid_planes(cube: &Cube, threshold: f64, frac_valid: f64, use_dq: bool) -> Result<(Cube, Vec<String>), CubeError> {
     let dq = cube.dq.as_ref().filter(|_| use_dq);
-    let (keep, dropped): (Vec<usize>, Vec<usize>) = (0..cube.planes.len())
-        .partition(|&z| plane_is_valid(&cube.planes[z], dq.map(|dq| &dq.planes[z]), threshold, frac_valid));
+    let (keep, dropped): (Vec<usize>, Vec<usize>) = (0..cube.planes.len()).partition(|&z| {
+        let flagged = dq.map(|dq| (&dq.planes[z], validity_mask(dq_table_of(&cube.filters[z]))));
+        plane_is_valid(&cube.planes[z], flagged, threshold, frac_valid)
+    });
     if keep.is_empty() {
         return Err(CubeError::NoValidPlanes { threshold, frac_valid });
     }
     let mut valid = select_planes(cube, &keep);
-    let dq_note = if dq.is_some() { "; pixels with DQ bit 0 (DO_NOT_USE) do not count" } else { "" };
+    let dq_note = match dq {
+        Some(_) => format!("; DQ-flagged pixels do not count: {}", cube.filters.iter().map(validity_note).collect::<Vec<_>>().join(", ")),
+        None => String::new(),
+    };
     push_history(&mut valid.header, &format!("Removed invalid filters (threshold={threshold:?}, frac_valid={frac_valid:?}){dq_note}"));
     Ok((valid, dropped.iter().map(|&z| cube.filters[z].filter.clone()).collect()))
 }
@@ -980,6 +1223,8 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+    use crate::infra::fits::table::{find_bintable, load_bintable};
+    use crate::infra::fits::writer::{write_mef_with_tables, BinTableHdu, HduData, ImageHdu};
 
     fn text(header: &HduHeader, key: &str) -> Option<String> {
         card_text(header, key)
@@ -1227,7 +1472,7 @@ mod tests {
             planes: (0..6).map(|z| Array2::from_shape_fn(dims, |(y, x)| u32::from(z == 4 && y * 20 + x >= 100) * DQ_DO_NOT_USE)).collect(),
             signed: false,
         });
-        assert!(plane_is_valid(&flagged.planes[4], Some(&flagged.dq.as_ref().unwrap().planes[4]), 0.0, 0.015), "2 of 100 unflagged pixels");
+        assert!(plane_is_valid(&flagged.planes[4], Some((&flagged.dq.as_ref().unwrap().planes[4], DQ_DO_NOT_USE)), 0.0, 0.015), "2 of 100 unflagged pixels");
         let (dq_aware, removed) = drop_invalid_planes(&flagged, 0.0, 0.015, true).unwrap();
         assert_eq!(removed, ["F070W", "F090W", "F115W", "F150W"]);
         assert_eq!(cube_filters(&dq_aware), ["F200W", "F277W"]);
@@ -1397,5 +1642,213 @@ mod tests {
         let TableValues::Text(instrument) = columns[2].values else { panic!("INSTRUME is not text") };
         assert_eq!(instrument, ["NIRCam", "ACS"]);
         assert_eq!(columns[3].unit, Some("um"));
+    }
+
+    #[test]
+    fn drop_invalid_uses_the_dataset_exclusion_mask_and_names_it_in_history() {
+        use crate::core::imaging::dq_flags::DqTable;
+
+        let filters = [("HST", "F606W"), ("HST", "F814W"), ("JWST", "F150W"), ("JWST", "F200W"), ("JWST", "F277W")];
+        let dims = (10, 20);
+        let bright = |y: usize, x: usize| y == 0 && x < 3;
+        let mut cube = small_cube(&filters, dims, |_, y, x| f32::from(u8::from(bright(y, x))));
+        cube.filters[4].dataset = "SUBARU".into();
+        let flagged = |bits: u32| Array2::from_shape_fn(dims, |(y, x)| u32::from(bright(y, x)) * bits);
+        cube.dq = Some(DqPlanes { planes: vec![flagged(4096), flagged(0), flagged(4096), flagged(1), flagged(4096)], signed: false });
+        let dq = cube.dq.as_ref().unwrap();
+        assert_eq!(dq_table_of(&cube.filters[0]), DqTable::Hst);
+        assert_eq!(dq_table_of(&cube.filters[2]), DqTable::Jwst);
+        assert_eq!(dq_table_of(&cube.filters[4]), DqTable::Unknown);
+        assert!(plane_is_valid(&cube.planes[0], Some((&dq.planes[0], DqTable::Jwst.exclusion_mask())), 0.0, DEFAULT_FRAC_VALID), "bit 0 alone lets the COSMIC_RAY plane pass");
+        assert!(!plane_is_valid(&cube.planes[0], Some((&dq.planes[0], DqTable::Hst.exclusion_mask())), 0.0, DEFAULT_FRAC_VALID), "the HST mask excludes its bright pixels");
+
+        let (valid, removed) = drop_invalid_planes(&cube, 0.0, DEFAULT_FRAC_VALID, true).unwrap();
+        assert_eq!(removed, ["F606W", "F200W"], "HST COSMIC_RAY excludes, JWST WARM does not, an unknown dataset tests DO_NOT_USE only");
+        assert_eq!(cube_filters(&valid), ["F814W", "F150W", "F277W"]);
+        let note = history(&valid.header).join(" ");
+        assert!(note.contains("Removed invalid filters (threshold=0.0, frac_valid=0.01); DQ-flagged pixels do not count:"), "{note}");
+        for expected in [
+            "F606W (hst): mask 0x3FFF (REED_SOLOMON..COSMIC_RAY_SINGLE)",
+            "F814W (hst): mask 0x3FFF (REED_SOLOMON..COSMIC_RAY_SINGLE)",
+            "F150W (jwst): mask 0x1 (DO_NOT_USE)",
+            "F200W (jwst): mask 0x1 (DO_NOT_USE)",
+            "F277W (unknown): mask 0x1 (DO_NOT_USE assumed)",
+        ] {
+            assert!(note.contains(expected), "{expected} missing from {note}");
+        }
+        assert!(!note.contains("bit 0 (DO_NOT_USE) do not count"), "{note}");
+        let (blind, removed) = drop_invalid_planes(&cube, 0.0, DEFAULT_FRAC_VALID, false).unwrap();
+        assert!(removed.is_empty() && blind.filters.len() == 5);
+        assert!(history(&blind.header).contains(&"Removed invalid filters (threshold=0.0, frac_valid=0.01)".to_string()), "{:?}", history(&blind.header));
+    }
+
+    fn noise_map(values: &[f32]) -> Array2<f32> {
+        let k = (values.len() as f64).sqrt() as usize;
+        Array2::from_shape_vec((k, k), values.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn assemble_cube_with_noise_pads_the_maps_to_the_largest_k_and_fills_the_filters_columns() {
+        let registry = FilterRegistry::builtin();
+        let dims = (4, 5);
+        let grid = cd_grid(dims, 0.04, 0.0);
+        let inputs = || {
+            vec![
+                plane_input(&registry, "JWST", "F444W", &grid, &[("BUNIT", "Jy")], |_, _| 4.0),
+                plane_input(&registry, "JWST", "F150W", &grid, &[("BUNIT", "Jy")], |_, _| 1.5),
+                plane_input(&registry, "HST", "F814W", &grid, &[("BUNIT", "Jy")], |_, _| 0.8),
+            ]
+        };
+        let delta = noise_map(&[1.0]);
+        let wide = Array2::from_shape_fn((5, 5), |(y, x)| 1.0 / (1.0 + (y as f32 - 2.0).abs() + (x as f32 - 2.0).abs()));
+        let triangle = noise_map(&[0.0, 0.0, 0.0, 0.5, 1.0, 0.5, 0.0, 0.0, 0.0]);
+        let noise = || {
+            vec![
+                InputNoise { correlation: delta.clone(), noiscorr_align: 1.0 },
+                InputNoise { correlation: wide.clone(), noiscorr_align: 2.0 },
+                InputNoise { correlation: triangle.clone(), noiscorr_align: 2f64.sqrt() },
+            ]
+        };
+        let base = cube_base_header(&inputs()[0].header);
+        let mef = CubeOptions { layout: CubeLayout::Mef, order: PlaneOrder::Wavelength };
+        let assembled = assemble_cube_with_noise(inputs(), noise(), 0, base.clone(), mef).unwrap();
+        assert_eq!(assembled.order, [2, 1, 0]);
+        let cube_noise = assembled.noise.as_ref().expect("a mef cube carries its noise correlation");
+        assert_eq!(cube_noise.source, NoiseSource::Align);
+        assert_eq!(cube_noise.k(), 5);
+        let planes = &cube_noise.planes;
+        assert_eq!(planes.iter().map(|p| p.filter.as_str()).collect::<Vec<_>>(), ["F814W", "F150W", "F444W"]);
+        assert!(planes.iter().all(|p| p.noiscorr_match == 1.0));
+        assert_eq!(planes.iter().map(|p| p.noiscorr_align).collect::<Vec<_>>(), [2f64.sqrt(), 2.0, 1.0]);
+        assert_eq!(planes[0].correlation, triangle, "a plane keeps its own map");
+        assert_eq!(planes[2].correlation, delta, "the grid anchor keeps its own map");
+        let padded = cube_noise.padded_maps();
+        assert_eq!(padded.len(), 3);
+        assert!(padded.iter().all(|map| map.dim() == (5, 5)));
+        assert_eq!(padded[1], wide);
+        for ((y, x), value) in padded[0].indexed_iter() {
+            let inner = (1..=3).contains(&y) && (1..=3).contains(&x);
+            assert_eq!(*value, if inner { triangle[[y - 1, x - 1]] } else { 0.0 }, "({x}, {y})");
+        }
+        assert_eq!(padded[2][[2, 2]], 1.0);
+        assert_eq!(padded[2].iter().filter(|v| **v != 0.0).count(), 1);
+        let header = cube_noise.header();
+        assert_eq!(header.get_i64(CARD_NCORRK), Some(5));
+        assert_eq!(header.get(CARD_NCORRSRC), Some("align"));
+
+        let table = assembled.filters_table().unwrap();
+        let columns = table.columns();
+        let names: Vec<&str> = columns.iter().map(|c| c.name).collect();
+        assert_eq!(names[9..], ["NOISCORR_ALIGN", "NOISCORR_MATCH", "MATCH"]);
+        let TableValues::F64(align) = columns[9].values else { panic!("NOISCORR_ALIGN is not numeric") };
+        assert_eq!(align, [2f64.sqrt(), 2.0, 1.0]);
+        let TableValues::F64(matched) = columns[10].values else { panic!("NOISCORR_MATCH is not numeric") };
+        assert_eq!(matched, [1.0, 1.0, 1.0]);
+        let TableValues::Text(status) = columns[11].values else { panic!("MATCH is not text") };
+        assert_eq!(status, ["unmatched", "unmatched", "unmatched"], "nothing is PSF-matched at the cube stage, the grid anchor included");
+        let TableValues::F64(psf) = columns[7].values else { panic!("PSF_FWHM is not numeric") };
+        assert!(psf.iter().all(|v| v.is_nan()), "no plane is matched at the cube stage");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cube.fits").to_string_lossy().into_owned();
+        let hdus = [
+            ImageHdu { data: HduData::F32Cube(&assembled.cube.planes), header: Some(&assembled.cube.header), extname: "SCI", extver: 1 },
+            ImageHdu { data: HduData::F32Cube(&padded), header: Some(&header), extname: NOISCORR_EXTNAME, extver: 1 },
+        ];
+        let tables = [BinTableHdu { columns: &columns, extname: FILTERS_EXTNAME, extver: 1 }];
+        write_mef_with_tables(&path, None, &hdus, &tables).unwrap();
+        let read = load_bintable(&path, find_bintable(&path, FILTERS_EXTNAME, 1).unwrap()).unwrap();
+        let back = CubeNoise::from_hdu(&read, &header, padded.clone()).unwrap();
+        assert_eq!(&back, cube_noise, "the padded maps come back trimmed to their own support");
+        assert_eq!(back.padded_maps(), padded);
+        assert_eq!(match_statuses(&read).unwrap(), Some(vec![MatchStatus::Unmatched; 3]));
+        assert_eq!(planes_from_table(&read).unwrap(), assembled.cube.filters);
+        let mut wrong_k = header.clone();
+        wrong_k.set(CARD_NCORRK, "3".to_string());
+        assert!(CubeNoise::from_hdu(&read, &wrong_k, padded.clone()).is_err());
+        let mut wrong_source = header.clone();
+        wrong_source.set(CARD_NCORRSRC, "Align".to_string());
+        assert!(CubeNoise::from_hdu(&read, &wrong_source, padded.clone()).is_err());
+        assert!(CubeNoise::from_hdu(&read, &header, padded[..2].to_vec()).is_err());
+
+        let kept = cube_noise.for_planes(&[assembled.cube.filters[2].clone(), assembled.cube.filters[0].clone()]).unwrap();
+        assert_eq!(kept.planes.iter().map(|p| p.filter.as_str()).collect::<Vec<_>>(), ["F444W", "F814W"]);
+        assert_eq!(kept.k(), 3, "the padded size follows the kept planes");
+        let unknown = CubePlane { filter: "F999W".into(), ..assembled.cube.filters[0].clone() };
+        assert_eq!(cube_noise.for_planes(&[unknown]), Err(CubeError::NoiseFilter("F999W".into())));
+
+        let lightstack = assemble_cube_with_noise(inputs(), noise(), 0, base.clone(), CubeOptions { layout: CubeLayout::Lightstack, order: PlaneOrder::Wavelength }).unwrap();
+        assert!(lightstack.noise.is_none(), "the lightstack layout carries no noise correlation");
+        let plain = assemble_cube(inputs(), 0, base, mef).unwrap();
+        assert!(plain.noise.is_none());
+        assert_eq!(plain.cube.filters, assembled.cube.filters);
+        assert!(assembled.cube.planes.iter().zip(&plain.cube.planes).all(|(a, b)| a == b));
+        let plain_table = plain.filters_table().unwrap();
+        let plain_columns = plain_table.columns();
+        assert_eq!(plain_columns[9..].iter().map(|c| c.name).collect::<Vec<_>>(), ["MATCH"], "a mef cube without NOISCORR still states its match status");
+        assert_eq!(MatchStatus::parse("external"), Some(MatchStatus::External));
+        assert_eq!(MatchStatus::parse("other"), None);
+        assert_eq!(MatchStatus::Matched.label(), "matched");
+    }
+
+    #[test]
+    fn filters_table_refuses_noise_and_status_rows_that_do_not_line_up_with_its_planes() {
+        let registry = FilterRegistry::builtin();
+        let grid = cd_grid((4, 5), 0.04, 0.0);
+        let inputs = vec![
+            plane_input(&registry, "JWST", "F444W", &grid, &[("BUNIT", "Jy")], |_, _| 4.0),
+            plane_input(&registry, "JWST", "F150W", &grid, &[("BUNIT", "Jy")], |_, _| 1.5),
+            plane_input(&registry, "HST", "F814W", &grid, &[("BUNIT", "Jy")], |_, _| 0.8),
+        ];
+        let noise = (0..3).map(|_| InputNoise { correlation: noise_map(&[1.0]), noiscorr_align: 1.0 }).collect();
+        let base = cube_base_header(&inputs[0].header);
+        let assembled = assemble_cube_with_noise(inputs, noise, 0, base, CubeOptions { layout: CubeLayout::Mef, order: PlaneOrder::Wavelength }).unwrap();
+        let cube_noise = assembled.noise.as_ref().unwrap();
+        let filters = &assembled.cube.filters;
+        assert_eq!(FiltersTable::new(&filters[..2]).with_noise(cube_noise).err(), Some(CubeError::CompanionMismatch(NOISCORR_EXTNAME, 3, 2)));
+        assert_eq!(FiltersTable::new(&filters[..2]).with_match(&[MatchStatus::Unmatched; 3]).err(), Some(CubeError::CompanionMismatch(COLUMN_MATCH, 3, 2)));
+        let reversed: Vec<CubePlane> = filters.iter().rev().cloned().collect();
+        assert_eq!(FiltersTable::new(&reversed).with_noise(cube_noise).err(), Some(CubeError::NoiseFilter("F444W".into())), "rows are matched by filter, never shifted");
+        let realigned = cube_noise.for_planes(&reversed).unwrap();
+        assert!(FiltersTable::new(&reversed).with_noise(&realigned).is_ok());
+    }
+
+    #[test]
+    fn a_noiscorr_hdu_is_read_only_when_ncorrk_is_a_positive_odd_size() {
+        let registry = FilterRegistry::builtin();
+        let grid = cd_grid((4, 5), 0.04, 0.0);
+        let inputs = vec![plane_input(&registry, "JWST", "F444W", &grid, &[("BUNIT", "Jy")], |_, _| 4.0)];
+        let noise = vec![InputNoise { correlation: noise_map(&[1.0]), noiscorr_align: 1.0 }];
+        let base = cube_base_header(&inputs[0].header);
+        let assembled = assemble_cube_with_noise(inputs, noise, 0, base, CubeOptions { layout: CubeLayout::Mef, order: PlaneOrder::Wavelength }).unwrap();
+        let table = assembled.filters_table().unwrap();
+        let columns = table.columns();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cube.fits").to_string_lossy().into_owned();
+        let hdus = [ImageHdu { data: HduData::F32Cube(&assembled.cube.planes), header: Some(&assembled.cube.header), extname: "SCI", extver: 1 }];
+        write_mef_with_tables(&path, None, &hdus, &[BinTableHdu { columns: &columns, extname: FILTERS_EXTNAME, extver: 1 }]).unwrap();
+        let read = load_bintable(&path, find_bintable(&path, FILTERS_EXTNAME, 1).unwrap()).unwrap();
+        let declaring = |k: Option<&str>| {
+            let mut header = noise_correlation_header(1, NoiseSource::Align);
+            match k {
+                Some(k) => header.set(CARD_NCORRK, k.to_string()),
+                None => header.remove(CARD_NCORRK),
+            }
+            header
+        };
+        let even = |at: (usize, usize)| Array2::from_shape_fn((4, 4), |index| if index == (2, 2) { 1.0 } else if index == at { 0.1 } else { 0.0 });
+        let refused = [
+            (Some("4"), vec![even((0, 0))]),
+            (Some("4"), vec![even((3, 3))]),
+            (Some("0"), vec![Array2::<f32>::zeros((0, 0))]),
+            (Some("-1"), vec![noise_map(&[1.0])]),
+            (None, vec![noise_map(&[1.0])]),
+        ];
+        for (k, maps) in refused {
+            let error = CubeNoise::from_hdu(&read, &declaring(k), maps).expect_err(&format!("NCORRK {k:?} has no centre pixel and must be refused"));
+            assert!(error.to_string().contains("NCORRK") && error.to_string().contains("positive odd"), "{k:?}: {error}");
+        }
+        let accepted = CubeNoise::from_hdu(&read, &declaring(Some("1")), vec![noise_map(&[1.0])]).unwrap();
+        assert_eq!(accepted.planes[0].correlation, noise_map(&[1.0]));
     }
 }

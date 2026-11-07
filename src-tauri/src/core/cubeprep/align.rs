@@ -1,10 +1,13 @@
+use std::collections::HashSet;
+
 use ndarray::{s, Array2};
 use serde::{Deserialize, Serialize};
 
 use crate::core::alignment::wcs_reproject::{
     prefilter_coarse_target, prefilter_companions, relative_rotation_deg, reproject_exact_companions,
     reproject_exact_to_grid, reproject_interpolated_companions, reproject_to_grid_with, CoarseMap,
-    CompanionInput, CompanionMaps, Interpolation, MAP_TOLERANCE_PX, PREFILTER_MIN_RATIO, REF_TIE_TOLERANCE,
+    CompanionInput, CompanionMaps, Interpolation, NoiseCorrelation, MAP_TOLERANCE_PX, PREFILTER_MIN_RATIO,
+    REF_TIE_TOLERANCE,
 };
 use crate::core::astrometry::wcs::{WcsKind, WcsTransform};
 use crate::core::cubeprep::footprint::without_sip;
@@ -29,6 +32,58 @@ const NO_OVERLAP_WARNING: &str = "the input footprint does not overlap the refer
 const PIXEL_AREA_HISTORY: &str = "Per-pixel values divided by the relative pixel area of a distorted input grid before resampling and multiplied by that of a distorted reference grid after it";
 const ALIGN_ERROR_HISTORY: &str = "ERR propagated with squared effective resampling weights assuming independent input pixels; input covariance is unknown and output covariance is not stored";
 const ALIGN_DQ_HISTORY: &str = "DQ propagated by bitwise OR of nonzero effective contributors; DQ flags do not exclude SCI samples";
+const NOISCORR_ALIGN_HISTORY: &str = "NOISCORR holds Q(d), the normalised autocorrelation of the output noise for white input noise through the resampling weights w: the mean over output pixel pairs (p, p+d) of sum_i w_pi w_(p+d)i divided by the mean of sum_i w_pi^2, NCORRK x NCORRK, centred, zero outside; the variance of a sum over pixels is sum_pq ERR_p ERR_q Q(p-q)";
+const NOISCORR_MATCH_HISTORY: &str = "NOISCORR holds Q(d) after PSF matching: the alignment map convolved with the autocorrelation of the matching kernel and normalised to Q(0) = 1, NCORRK x NCORRK, centred, zero outside; the variance of a sum over pixels is sum_pq ERR_p ERR_q Q(p-q)";
+const NCORRALN_HISTORY: &str = "NCORRALN = 1/sqrt(mean over output pixels of sum_i w_pi^2) is the white-noise per-pixel ratio sigma_in/sigma_out of the resampling, not an aperture factor; aperture sums use the NOISCORR map";
+const PARTIAL_COVERAGE_TOLERANCE: f64 = 1e-6;
+pub const NOISCORR_EXTNAME: &str = "NOISCORR";
+pub const CARD_NCORRK: &str = "NCORRK";
+pub const CARD_NCORRSRC: &str = "NCORRSRC";
+pub const CARD_NOISCORR_ALIGN: &str = "NCORRALN";
+pub const NOISCORR_SOURCE_ALIGN: &str = "align";
+pub const NOISCORR_SOURCE_MATCH: &str = "match";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoiseSource {
+    Align,
+    Match,
+}
+
+impl NoiseSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Align => NOISCORR_SOURCE_ALIGN,
+            Self::Match => NOISCORR_SOURCE_MATCH,
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        [Self::Align, Self::Match].into_iter().find(|source| source.label() == text.trim())
+    }
+
+    fn history(self) -> &'static str {
+        match self {
+            Self::Align => NOISCORR_ALIGN_HISTORY,
+            Self::Match => NOISCORR_MATCH_HISTORY,
+        }
+    }
+}
+
+pub fn noise_correlation_header(k: usize, source: NoiseSource) -> HduHeader {
+    let mut header = HduHeader::empty();
+    header.set(CARD_NCORRK, k.to_string());
+    header.set(CARD_NCORRSRC, source.label().to_string());
+    header.string_keys = Some(HashSet::from([CARD_NCORRSRC.to_string()]));
+    push_history(&mut header, source.history());
+    header
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FluxRatioWeighting {
+    Footprint,
+    Unweighted,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -206,18 +261,22 @@ pub struct AlignPlan {
 }
 
 pub fn plan_alignment(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions) -> Result<AlignPlan, AlignError> {
+    plan_alignment_from_dims(input.image.dim(), input.header, input.wcs, grid, options)
+}
+
+pub fn plan_alignment_from_dims(dims: (usize, usize), header: &HduHeader, wcs: &WcsTransform, grid: &AlignGrid, options: &AlignOptions) -> Result<AlignPlan, AlignError> {
     let crop = options.border_crop;
     if crop.saturating_mul(2) >= grid.rows || crop.saturating_mul(2) >= grid.cols {
         return Err(AlignError::BorderCrop { border_crop: crop, rows: grid.rows, cols: grid.cols });
     }
-    let reprojected = !same_grid(input.wcs, input.image.dim(), grid.wcs, (grid.rows, grid.cols));
-    let mut warnings: Vec<String> = input.wcs.pv_warning().map(str::to_string).into_iter().collect();
-    if let Some(refusal) = input.wcs.gwcs_refusal() {
+    let reprojected = !same_grid(wcs, dims, grid.wcs, (grid.rows, grid.cols));
+    let mut warnings: Vec<String> = wcs.pv_warning().map(str::to_string).into_iter().collect();
+    if let Some(refusal) = wcs.gwcs_refusal() {
         warnings.push(format!("gWCS not used: {refusal}"));
     }
     let area = if reprojected {
-        let correction = area_correction(input.header, options.area_rule, &PixelGeometry::between(input.wcs, grid.wcs))?;
-        let surface_brightness = matches!(classify_unit(input.header).class, UnitClass::SurfaceBrightness { .. });
+        let correction = area_correction(header, options.area_rule, &PixelGeometry::between(wcs, grid.wcs))?;
+        let surface_brightness = matches!(classify_unit(header).class, UnitClass::SurfaceBrightness { .. });
         if correction.rule == AreaRule::Lightstack && correction.data_factor != 1.0 && surface_brightness {
             warnings.push(LIGHTSTACK_SURFACE_BRIGHTNESS_WARNING.to_string());
         }
@@ -239,6 +298,15 @@ pub struct AlignReport {
     pub pixel_area_corrected: bool,
     pub coverage: f64,
     pub flux_ratio: Option<f64>,
+    pub flux_ratio_weighting: FluxRatioWeighting,
+    pub sci_sum_ratio: Option<f64>,
+    pub nan_input_pixels: usize,
+    pub nan_output_pixels: usize,
+    pub nan_grown_pixels: usize,
+    pub partial_coverage_pixels: usize,
+    pub min_coverage: Option<f64>,
+    pub filled_fraction: Option<f64>,
+    pub noiscorr_align: Option<f64>,
     pub border_crop: usize,
     pub rows: usize,
     pub cols: usize,
@@ -264,14 +332,30 @@ pub struct AlignedScience {
     pub aligned: AlignedImage,
     pub err: Option<Array2<f32>>,
     pub dq: IntPlane,
+    pub noise_correlation: Array2<f32>,
+}
+
+impl AlignedScience {
+    pub fn noise_header(&self) -> HduHeader {
+        let mut header = noise_correlation_header(self.noise_correlation.nrows(), NoiseSource::Align);
+        if let Some(factor) = self.aligned.report.noiscorr_align {
+            header.set_f64(CARD_NOISCORR_ALIGN, factor);
+            push_history(&mut header, NCORRALN_HISTORY);
+        }
+        header
+    }
 }
 
 fn resample(input: &AlignInput, grid: &AlignGrid, method: ResampleMethod) -> (Array2<f32>, Option<Array2<f32>>, usize, Option<String>) {
     let (rows, cols) = (grid.rows, grid.cols);
     match method {
         ResampleMethod::Bilinear => {
+            let ratio = grid.wcs.pixel_scale_arcsec() / input.wcs.pixel_scale_arcsec();
+            let warning = (ratio >= PREFILTER_MIN_RATIO).then(|| {
+                format!("bilinear point-sampled a grid {ratio:.2} times coarser without averaging; per-pixel ERR is higher than area averaging and structure finer than the grid can alias; exact averages the input pixels")
+            });
             let (image, _) = reproject_to_grid_with(input.image, input.wcs, grid.wcs, rows, cols, Interpolation::Bilinear);
-            (image, None, 1, None)
+            (image, None, 1, warning)
         }
         ResampleMethod::Bicubic => {
             let ratio = grid.wcs.pixel_scale_arcsec() / input.wcs.pixel_scale_arcsec();
@@ -325,7 +409,18 @@ fn area_weighted(header: &HduHeader, area: Option<&AreaCorrection>) -> bool {
     }
 }
 
-fn flux_ratio(input: &AlignInput, grid: &AlignGrid, plan: &AlignPlan, image: &Array2<f32>, footprint: Option<&Array2<f32>>, crop: usize) -> Option<f64> {
+struct FluxDiagnostics {
+    flux_ratio: Option<f64>,
+    sci_sum_ratio: Option<f64>,
+    nan_input_pixels: usize,
+    nan_output_pixels: usize,
+    nan_grown_pixels: usize,
+    partial_coverage_pixels: usize,
+    min_coverage: Option<f64>,
+    filled_fraction: Option<f64>,
+}
+
+fn flux_diagnostics(input: &AlignInput, grid: &AlignGrid, plan: &AlignPlan, image: &Array2<f32>, footprint: Option<&Array2<f32>>, crop: usize) -> FluxDiagnostics {
     let (rows, cols) = (grid.rows, grid.cols);
     let kept = |x: f64, y: f64| {
         x >= crop as f64 - 0.5 && x < (cols - crop) as f64 - 0.5 && y >= crop as f64 - 0.5 && y < (rows - crop) as f64 - 0.5
@@ -337,22 +432,84 @@ fn flux_ratio(input: &AlignInput, grid: &AlignGrid, plan: &AlignPlan, image: &Ar
         .sum();
     let (in_rows, in_cols) = input.image.dim();
     let map = plan.reprojected.then(|| CoarseMap::within(grid.wcs, input.wcs, (0.0, 0.0), in_rows, in_cols, MAP_TOLERANCE_PX));
+    let kept_input = |x: usize, y: usize| {
+        let (gx, gy) = map.as_ref().map_or((x as f64, y as f64), |map| map.sample(x as f64, y as f64));
+        kept(gx, gy)
+    };
     let flux_in: f64 = input
         .image
         .indexed_iter()
-        .filter(|((y, x), value)| {
-            let (gx, gy) = map.as_ref().map_or((*x as f64, *y as f64), |map| map.sample(*x as f64, *y as f64));
-            value.is_finite() && kept(gx, gy)
-        })
+        .filter(|((y, x), value)| value.is_finite() && kept_input(*x, *y))
         .map(|(_, value)| f64::from(*value))
         .sum();
+    let nan_input_pixels = input.image.indexed_iter().filter(|((y, x), value)| !value.is_finite() && kept_input(*x, *y)).count();
+    let to_input = plan.reprojected.then(|| CoarseMap::within(input.wcs, grid.wcs, (0.0, 0.0), rows, cols, MAP_TOLERANCE_PX));
+    let nearest_input_is_nan = |x: usize, y: usize| -> Option<bool> {
+        let (sx, sy) = to_input.as_ref().map_or((x as f64, y as f64), |map| map.sample(x as f64, y as f64));
+        let inside = sx >= -0.5 && sy >= -0.5 && sx <= in_cols as f64 - 0.5 && sy <= in_rows as f64 - 0.5;
+        inside.then(|| {
+            let nearest = |value: f64, len: usize| ((value + 0.5).floor().max(0.0) as usize).min(len - 1);
+            !input.image[[nearest(sy, in_rows), nearest(sx, in_cols)]].is_finite()
+        })
+    };
+    let (mut sci_sum, mut filled) = (0.0f64, 0.0f64);
+    let (mut nan_output_pixels, mut nearest_nan_pixels, mut partial_coverage_pixels) = (0usize, 0usize, 0usize);
+    let mut min_coverage = f64::INFINITY;
+    for ((y, x), &value) in image.indexed_iter() {
+        if !kept(x as f64, y as f64) {
+            continue;
+        }
+        if value.is_finite() {
+            let coverage = footprint.map_or(1.0, |f| f64::from(f[[y, x]]));
+            sci_sum += f64::from(value);
+            if footprint.is_some() && coverage < 1.0 - PARTIAL_COVERAGE_TOLERANCE {
+                partial_coverage_pixels += 1;
+                min_coverage = min_coverage.min(coverage);
+                filled += f64::from(value) * (1.0 - coverage);
+            }
+        } else if let Some(nearest_nan) = nearest_input_is_nan(x, y) {
+            nan_output_pixels += 1;
+            nearest_nan_pixels += usize::from(nearest_nan);
+        }
+    }
     let (weight_in, weight_out) = if area_weighted(input.header, plan.area.as_ref()) {
         (pixel_area_arcsec2(input.wcs), pixel_area_arcsec2(grid.wcs))
     } else {
         (1.0, 1.0)
     };
-    let ratio = (flux_out * weight_out) / (flux_in * weight_in);
-    ratio.is_finite().then_some(ratio)
+    let ratio = |out: f64| {
+        let ratio = (out * weight_out) / (flux_in * weight_in);
+        ratio.is_finite().then_some(ratio)
+    };
+    FluxDiagnostics {
+        flux_ratio: ratio(flux_out),
+        sci_sum_ratio: ratio(sci_sum),
+        nan_input_pixels,
+        nan_output_pixels,
+        nan_grown_pixels: nan_output_pixels.saturating_sub(nearest_nan_pixels),
+        partial_coverage_pixels,
+        min_coverage: (partial_coverage_pixels > 0).then_some(min_coverage),
+        filled_fraction: (partial_coverage_pixels > 0 && sci_sum != 0.0).then(|| filled / sci_sum),
+    }
+}
+
+fn hole_warning(diagnostics: &FluxDiagnostics) -> Option<String> {
+    (diagnostics.nan_grown_pixels > 0).then(|| {
+        let ratio = diagnostics.flux_ratio.map_or_else(|| "unknown".to_string(), |ratio| format!("{ratio:.4}"));
+        format!(
+            "{} valid pixels next to {} NaN input pixels became NaN (flux ratio {ratio})",
+            diagnostics.nan_grown_pixels, diagnostics.nan_input_pixels
+        )
+    })
+}
+
+fn partial_coverage_warning(diagnostics: &FluxDiagnostics) -> Option<String> {
+    let min_coverage = diagnostics.min_coverage?;
+    let filled = diagnostics.filled_fraction.map_or_else(|| "an unknown share".to_string(), |fraction| format!("{:.1} %", 100.0 * fraction));
+    Some(format!(
+        "exact: {} output pixels hold the mean of partially covered input (min coverage {min_coverage:.4}, at the input edge or beside NaN input that overlaps them by less than the map tolerance); their values extend over the uncovered part, are scaled by the full area factor and their DQ does not carry the flags of the missing pixels, so {filled} of the kept flux is filled in",
+        diagnostics.partial_coverage_pixels
+    ))
 }
 
 fn holds_per_pixel_values(header: &HduHeader, area: Option<&AreaCorrection>) -> bool {
@@ -448,7 +605,7 @@ pub fn align_image(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions,
     if let Some(area) = &plan.area {
         apply_area_correction(area, &mut image, None, &mut header);
     }
-    let flux_ratio = flux_ratio(input, grid, plan, &image, footprint.as_ref(), options.border_crop);
+    let diagnostics = flux_diagnostics(input, grid, plan, &image, footprint.as_ref(), options.border_crop);
     let (image, header) = crop_border(image, header, options.border_crop);
     let (rows, cols) = image.dim();
     let coverage = if image.is_empty() { 0.0 } else { image.iter().filter(|v| v.is_finite()).count() as f64 / image.len() as f64 };
@@ -457,6 +614,8 @@ pub fn align_image(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions,
     if coverage == 0.0 {
         warnings.push(NO_OVERLAP_WARNING.to_string());
     }
+    warnings.extend(hole_warning(&diagnostics));
+    warnings.extend(partial_coverage_warning(&diagnostics));
     let report = AlignReport {
         reprojected: plan.reprojected,
         method: plan.reprojected.then_some(options.method),
@@ -466,7 +625,16 @@ pub fn align_image(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions,
         area: plan.area.clone(),
         pixel_area_corrected: pixel_area.is_some(),
         coverage,
-        flux_ratio,
+        flux_ratio: diagnostics.flux_ratio,
+        flux_ratio_weighting: if footprint.is_some() { FluxRatioWeighting::Footprint } else { FluxRatioWeighting::Unweighted },
+        sci_sum_ratio: diagnostics.sci_sum_ratio,
+        nan_input_pixels: diagnostics.nan_input_pixels,
+        nan_output_pixels: diagnostics.nan_output_pixels,
+        nan_grown_pixels: diagnostics.nan_grown_pixels,
+        partial_coverage_pixels: diagnostics.partial_coverage_pixels,
+        min_coverage: diagnostics.min_coverage,
+        filled_fraction: diagnostics.filled_fraction,
+        noiscorr_align: None,
         border_crop: options.border_crop,
         rows,
         cols,
@@ -503,22 +671,28 @@ pub fn align_image_with_companions(
     let data = CompanionInput { variance: variance.as_ref(), dq: companions.dq.map(|plane| &plane.bits), no_data_dq: companions.no_data_dq };
     let dims = (grid.rows, grid.cols);
     let mut maps = if !plan.reprojected {
-        CompanionMaps { variance: variance.clone(), dq: companions.dq.map_or_else(|| Array2::zeros(input.image.dim()), |plane| plane.bits.clone()) }
+        CompanionMaps {
+            variance: variance.clone(),
+            dq: companions.dq.map_or_else(|| Array2::zeros(input.image.dim()), |plane| plane.bits.clone()),
+            noise: NoiseCorrelation::identity(),
+        }
     } else {
         match options.method {
-            ResampleMethod::Bilinear => reproject_interpolated_companions(source, data, input.wcs, grid.wcs, dims, Interpolation::Bilinear),
-            ResampleMethod::Exact => reproject_exact_companions(source, data, input.wcs, grid.wcs, dims),
+            ResampleMethod::Bilinear => reproject_interpolated_companions(source, data, input.wcs, grid.wcs, dims, Interpolation::Bilinear, options.border_crop),
+            ResampleMethod::Exact => reproject_exact_companions(source, data, input.wcs, grid.wcs, dims, options.border_crop),
             ResampleMethod::Bicubic => {
                 let ratio = grid.wcs.pixel_scale_arcsec() / input.wcs.pixel_scale_arcsec();
                 let reduced = prefilter_coarse_target(source, input.header, ratio)
                     .and_then(|(image, header, k)| header_wcs(&header).ok().map(|wcs| (image, wcs, k)));
                 match reduced {
                     Some((image, wcs, k)) => {
-                        let reduced = prefilter_companions(source, data, k);
-                        let data = CompanionInput { variance: reduced.variance.as_ref(), dq: Some(&reduced.dq), no_data_dq: companions.no_data_dq };
-                        reproject_interpolated_companions(&image, data, &wcs, grid.wcs, dims, Interpolation::Bicubic)
+                        let (reduced_variance, reduced_dq) = prefilter_companions(source, data, k);
+                        let data = CompanionInput { variance: reduced_variance.as_ref(), dq: Some(&reduced_dq), no_data_dq: companions.no_data_dq };
+                        let mut maps = reproject_interpolated_companions(&image, data, &wcs, grid.wcs, dims, Interpolation::Bicubic, options.border_crop);
+                        maps.noise.factor *= k as f64;
+                        maps
                     }
-                    None => reproject_interpolated_companions(source, data, input.wcs, grid.wcs, dims, Interpolation::Bicubic),
+                    None => reproject_interpolated_companions(source, data, input.wcs, grid.wcs, dims, Interpolation::Bicubic, options.border_crop),
                 }
             }
         }
@@ -556,7 +730,9 @@ pub fn align_image_with_companions(
         aligned.report.warnings.push(ALIGN_DQ_HISTORY.to_string());
         push_history(&mut aligned.header, ALIGN_DQ_HISTORY);
     }
-    Ok(AlignedScience { aligned, err, dq: IntPlane { bits: dq, signed: companions.dq.is_some_and(|plane| plane.signed) } })
+    let NoiseCorrelation { map: noise_correlation, factor } = maps.noise;
+    aligned.report.noiscorr_align = factor.is_finite().then_some(factor);
+    Ok(AlignedScience { aligned, err, dq: IntPlane { bits: dq, signed: companions.dq.is_some_and(|plane| plane.signed) }, noise_correlation })
 }
 
 #[cfg(test)]
@@ -1151,5 +1327,322 @@ mod tests {
         let (plan, bright) = run("MJy/sr", Some(AreaRule::Lightstack)).unwrap();
         assert!((bright.report.flux_ratio.unwrap() - 4.0).abs() < 1e-5, "{:?}", bright.report.flux_ratio);
         assert!(plan.warnings.iter().any(|w| w.contains("LIGHTSTACK") && w.contains("surface brightness")), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn plans_from_dims_match_plans_from_pixels() {
+        let target_header = grid_header((24, 24), (12.5, 12.5), (150.0, 2.0), 0.08, 0.0, "Jy");
+        let target_wcs = wcs_of(&target_header);
+        let grid = AlignGrid { label: "F444W", header: &target_header, wcs: &target_wcs, rows: 24, cols: 24 };
+        let scene = textured(48, 48, 11);
+        for (method, scale, distorted, bunit) in [
+            (ResampleMethod::Bilinear, 0.04, false, "Jy"),
+            (ResampleMethod::Exact, 0.04, true, "ELECTRONS/S"),
+            (ResampleMethod::Bicubic, 0.08, false, "MJy/sr"),
+        ] {
+            let mut header = grid_header((48, 48), (24.5, 24.5), (150.0, 2.0), scale, 3.0, bunit);
+            header.set_f64("PHOTFNU", 1e-7);
+            let header = if distorted { with_sip(header) } else { header };
+            let wcs = wcs_of(&header);
+            let input = AlignInput { image: &scene, header: &header, wcs: &wcs };
+            let opts = AlignOptions { per_actual_pixel: distorted, area_rule: Some(AreaRule::Lightstack), ..options(method, 1, None) };
+            let from_pixels = plan_alignment(&input, &grid, &opts).unwrap();
+            let from_dims = plan_alignment_from_dims(scene.dim(), &header, &wcs, &grid, &opts).unwrap();
+            assert_eq!(from_dims, from_pixels, "{method:?}");
+        }
+        let same = AlignInput { image: &textured(24, 24, 2), header: &target_header, wcs: &target_wcs };
+        let copy = options(ResampleMethod::Exact, 0, None);
+        assert_eq!(plan_alignment_from_dims((24, 24), &target_header, &target_wcs, &grid, &copy), plan_alignment(&same, &grid, &copy));
+        let too_wide = options(ResampleMethod::Exact, 12, None);
+        assert_eq!(plan_alignment_from_dims((24, 24), &target_header, &target_wcs, &grid, &too_wide), Err(AlignError::BorderCrop { border_crop: 12, rows: 24, cols: 24 }));
+    }
+
+    #[test]
+    fn bilinear_onto_a_two_times_coarser_grid_warns_and_exact_does_not() {
+        let scene = textured(64, 64, 5);
+        let input_header = grid_header((64, 64), (32.5, 32.5), (150.0, 2.0), 0.04, 0.0, "MJy/sr");
+        let input_wcs = wcs_of(&input_header);
+        let input = AlignInput { image: &scene, header: &input_header, wcs: &input_wcs };
+        let run = |target: &HduHeader, method: ResampleMethod| {
+            let target_wcs = wcs_of(target);
+            let grid = AlignGrid { label: "F444W", header: target, wcs: &target_wcs, rows: 24, cols: 24 };
+            let opts = options(method, 0, None);
+            align_image(&input, &grid, &opts, &plan_alignment(&input, &grid, &opts).unwrap()).report
+        };
+        let coarser = grid_header((24, 24), (12.5, 12.5), (150.0, 2.0), 0.1, 0.0, "MJy/sr");
+        let bilinear = run(&coarser, ResampleMethod::Bilinear);
+        let coarse_warning = |report: &AlignReport| report.warnings.iter().find(|w| w.contains("point-sampled a grid")).cloned();
+        let warning = coarse_warning(&bilinear).unwrap_or_else(|| panic!("{:?}", bilinear.warnings));
+        assert!(warning.contains("2.50 times coarser") && warning.contains("exact averages the input pixels"), "{warning}");
+        assert_eq!(coarse_warning(&run(&coarser, ResampleMethod::Exact)), None);
+        let same_scale = grid_header((24, 24), (12.5, 12.5), (150.0, 2.0), 0.04, 5.0, "MJy/sr");
+        assert_eq!(coarse_warning(&run(&same_scale, ResampleMethod::Bilinear)), None);
+        let slightly_coarser = grid_header((24, 24), (12.5, 12.5), (150.0, 2.0), 0.04 * (PREFILTER_MIN_RATIO - 0.01), 0.0, "MJy/sr");
+        assert_eq!(coarse_warning(&run(&slightly_coarser, ResampleMethod::Bilinear)), None);
+    }
+
+    fn nan_count(image: &Array2<f32>) -> usize {
+        image.iter().filter(|v| v.is_nan()).count()
+    }
+
+    fn holed_3x2(seed: u64) -> Array2<f32> {
+        let mut scene = textured(48, 48, seed);
+        for y in 22..24 {
+            for x in 22..25 {
+                scene[[y, x]] = f32::NAN;
+            }
+        }
+        scene
+    }
+
+    fn nan_pixels(image: &Array2<f32>, offset: usize) -> Vec<(usize, usize)> {
+        image.indexed_iter().filter(|(_, value)| value.is_nan()).map(|((y, x), _)| (y + offset, x + offset)).collect()
+    }
+
+    fn hole_warning(report: &AlignReport) -> Option<String> {
+        report.warnings.iter().find(|w| w.contains("became NaN")).cloned()
+    }
+
+    #[test]
+    fn a_3x2_nan_hole_grows_to_4x3_under_a_sub_pixel_shift_and_is_counted() {
+        let input_header = grid_header((48, 48), (24.5, 24.5), (150.0, 2.0), 0.04, 0.0, "Jy");
+        let target_header = grid_header((32, 32), (8.8, 9.1), (150.0, 2.0), 0.04, 0.0, "Jy");
+        let (input_wcs, target_wcs) = (wcs_of(&input_header), wcs_of(&target_header));
+        let grid = AlignGrid { label: "F444W", header: &target_header, wcs: &target_wcs, rows: 32, cols: 32 };
+        let scene = holed_3x2(8);
+        let input = AlignInput { image: &scene, header: &input_header, wcs: &input_wcs };
+        let block: Vec<(usize, usize)> = (6..9).flat_map(|y| (6..10).map(move |x| (y, x))).collect();
+        for method in [ResampleMethod::Bilinear, ResampleMethod::Exact] {
+            let opts = options(method, 1, None);
+            let aligned = align_image(&input, &grid, &opts, &plan_alignment(&input, &grid, &opts).unwrap());
+            assert_eq!(nan_pixels(&aligned.image, 1), block, "{method:?}: input x = x + 15.7 and y = y + 15.4 put the hole columns 22..=24 in outputs 6..=9 and rows 22..=23 in 6..=8, the reproject_exact NaN set");
+            let report = &aligned.report;
+            assert_eq!((report.nan_input_pixels, report.nan_output_pixels, report.nan_grown_pixels), (6, 12, 6), "{method:?}: the nearest input of 6 outputs is in the hole");
+            let warning = hole_warning(report).unwrap_or_else(|| panic!("{method:?}: {:?}", report.warnings));
+            assert!(warning.starts_with("6 valid pixels next to 6 NaN input pixels became NaN (flux ratio 0."), "{method:?}: {warning}");
+        }
+        let whole = textured(48, 48, 8);
+        let clean = AlignInput { image: &whole, ..input };
+        let opts = options(ResampleMethod::Bilinear, 1, None);
+        let report = align_image(&clean, &grid, &opts, &plan_alignment(&clean, &grid, &opts).unwrap()).report;
+        assert_eq!((report.nan_input_pixels, report.nan_output_pixels, report.nan_grown_pixels), (0, 0, 0));
+        assert_eq!(hole_warning(&report), None);
+    }
+
+    #[test]
+    fn a_3x2_nan_hole_under_rotation_follows_the_coordinate_map_and_reproject_exact() {
+        let input_header = grid_header((48, 48), (24.5, 24.5), (150.0, 2.0), 0.04, 10.0, "Jy");
+        let target_header = grid_header((32, 32), (16.5, 16.5), (150.0, 2.0), 0.04, 0.0, "Jy");
+        let (input_wcs, target_wcs) = (wcs_of(&input_header), wcs_of(&target_header));
+        let grid = AlignGrid { label: "F444W", header: &target_header, wcs: &target_wcs, rows: 32, cols: 32 };
+        let scene = holed_3x2(8);
+        let input = AlignInput { image: &scene, header: &input_header, wcs: &input_wcs };
+        let map = CoarseMap::within(&input_wcs, &target_wcs, (0.0, 0.0), 32, 32, MAP_TOLERANCE_PX);
+        let in_hole = |y: f64, x: f64| (22.0..24.0).contains(&y) && (22.0..25.0).contains(&x);
+        let outputs: Vec<(usize, usize)> = (0..32).flat_map(|y| (0..32).map(move |x| (y, x))).collect();
+        let bilinear: Vec<(usize, usize)> = outputs
+            .iter()
+            .copied()
+            .filter(|&(y, x)| {
+                let (sx, sy) = map.sample(x as f64, y as f64);
+                let (ix, iy) = (sx.floor(), sy.floor());
+                let (fx, fy) = (sx - ix, sy - iy);
+                [(0.0, 0.0, (1.0 - fx) * (1.0 - fy)), (0.0, 1.0, fx * (1.0 - fy)), (1.0, 0.0, (1.0 - fx) * fy), (1.0, 1.0, fx * fy)]
+                    .iter()
+                    .any(|&(dy, dx, weight)| weight != 0.0 && in_hole(iy + dy, ix + dx))
+            })
+            .collect();
+        let exact = vec![(13, 15), (13, 16), (14, 13), (14, 14), (14, 15), (14, 16), (15, 13), (15, 14), (15, 15), (15, 16), (16, 13), (16, 14), (16, 15)];
+        let nearest_in_hole = |&(y, x): &(usize, usize)| {
+            let (sx, sy) = map.sample(x as f64, y as f64);
+            in_hole((sy + 0.5).floor(), (sx + 0.5).floor())
+        };
+        for (method, expected) in [(ResampleMethod::Bilinear, bilinear), (ResampleMethod::Exact, exact)] {
+            let opts = options(method, 0, None);
+            let aligned = align_image(&input, &grid, &opts, &plan_alignment(&input, &grid, &opts).unwrap());
+            assert_eq!(nan_pixels(&aligned.image, 0), expected, "{method:?}: bilinear from its four taps on the same coordinate map; exact = the outputs with positive overlap in reproject_exact, which also NaNs (16, 16) from the bounding box of the hole");
+            let report = &aligned.report;
+            let grown = expected.len() - expected.iter().filter(|output| nearest_in_hole(output)).count();
+            assert_eq!((report.nan_input_pixels, report.nan_output_pixels, report.nan_grown_pixels), (6, expected.len(), grown), "{method:?}");
+            let warning = hole_warning(report).unwrap_or_else(|| panic!("{method:?}: {:?}", report.warnings));
+            assert!(warning.starts_with(&format!("{grown} valid pixels next to 6 NaN input pixels became NaN (flux ratio 0.")), "{method:?}: {warning}");
+        }
+    }
+
+    fn hole_scenario() -> (HduHeader, HduHeader, Array2<f32>, Array2<f32>, IntPlane) {
+        let input_header = grid_header((16, 16), (8.5, 8.5), (150.0, 2.0), 0.1, 0.0, "Jy");
+        let target_header = grid_header((8, 8), (4.4, 4.5), (150.0, 2.0), 0.2, 0.0, "Jy");
+        let in_hole = |y: usize, x: usize| (4..12).contains(&y) && (4..8).contains(&x);
+        let science = Array2::from_shape_fn((16, 16), |(y, x)| if in_hole(y, x) { f32::NAN } else { 10.0 + x as f32 });
+        let error = Array2::from_elem((16, 16), 1.0f32);
+        let dq = IntPlane { bits: Array2::from_shape_fn((16, 16), |(y, x)| u32::from(in_hole(y, x)) * 3), signed: false };
+        (input_header, target_header, science, error, dq)
+    }
+
+    #[test]
+    fn exact_resampling_nans_outputs_touching_nan_input_and_ors_their_dq() {
+        let (input_header, target_header, science, error, dq) = hole_scenario();
+        let (input_wcs, target_wcs) = (wcs_of(&input_header), wcs_of(&target_header));
+        let grid = AlignGrid { label: "F444W", header: &target_header, wcs: &target_wcs, rows: 8, cols: 8 };
+        let input = AlignInput { image: &science, header: &input_header, wcs: &input_wcs };
+        let exact = options(ResampleMethod::Exact, 1, None);
+        let plan = plan_alignment(&input, &grid, &exact).unwrap();
+        let companions = AlignCompanions { err: Some(&error), dq: Some(&dq), no_data_dq: 513 };
+        let result = align_image_with_companions(&input, &grid, &exact, &plan, companions).unwrap();
+        let (image, err) = (&result.aligned.image, result.err.as_ref().unwrap());
+        assert_eq!(image.dim(), (6, 6));
+        for (y, x) in [(2, 0), (2, 1), (2, 2)] {
+            assert!(image[[y, x]].is_nan(), "cropped ({x}, {y}) touches the hole: {}", image[[y, x]]);
+            assert!(err[[y, x]].is_nan(), "({x}, {y})");
+            assert_eq!(result.dq.bits[[y, x]], 513 | 3, "({x}, {y}): the hole's flags travel with the NaN");
+        }
+        assert!((image[[2, 3]] - 74.8).abs() < 1e-3, "the first clean column holds 4 x the 0.8/1.0/0.2 weighted mean of 18, 19, 20: {}", image[[2, 3]]);
+        assert!((err[[2, 3]] - 4.0 * 0.21f32.sqrt()).abs() < 1e-4, "{}", err[[2, 3]]);
+        assert_eq!(result.dq.bits[[2, 3]], 0);
+        assert_eq!(nan_count(image), 12, "three output columns over four rows; reproject_exact 0.21 NaNs 18, adding the rows just above and below the hole, whose edges meet it with no overlap beyond a roundoff sliver under MAP_TOLERANCE_PX times the quad edge");
+        let report = &result.aligned.report;
+        assert_eq!((report.nan_input_pixels, report.nan_output_pixels, report.nan_grown_pixels), (32, 12, 4), "{report:?}");
+        assert_eq!(report.partial_coverage_pixels, 0, "no finite output extends over the hole any more");
+        assert!(report.warnings.iter().any(|w| w.starts_with("4 valid pixels next to 32 NaN input pixels became NaN")), "{:?}", report.warnings);
+        assert!(!report.warnings.iter().any(|w| w.contains("partially covered")), "{:?}", report.warnings);
+        let flux_ratio = report.flux_ratio.unwrap();
+        let sci_sum_ratio = report.sci_sum_ratio.unwrap();
+        let lost_to_growth = 1843.2 / 2024.0;
+        assert!((flux_ratio - lost_to_growth).abs() < 1e-6, "the inputs beside the hole feed NaN outputs only: {flux_ratio}");
+        assert!((sci_sum_ratio - flux_ratio).abs() < 1e-9, "no partial pixel is left to inflate the sum: {sci_sum_ratio}");
+        assert_eq!(report.min_coverage, None);
+        assert_eq!(report.filled_fraction, None);
+    }
+
+    #[test]
+    fn exact_resampling_reports_partially_covered_pixels_at_the_input_edge() {
+        let input_header = grid_header((10, 10), (5.5, 5.5), (150.0, 2.0), 0.1, 0.0, "Jy");
+        let target_header = grid_header((8, 8), (4.25, 4.25), (150.0, 2.0), 0.2, 0.0, "Jy");
+        let (input_wcs, target_wcs) = (wcs_of(&input_header), wcs_of(&target_header));
+        let grid = AlignGrid { label: "F444W", header: &target_header, wcs: &target_wcs, rows: 8, cols: 8 };
+        let flat = Array2::from_elem((10, 10), 7.0f32);
+        let input = AlignInput { image: &flat, header: &input_header, wcs: &input_wcs };
+        let exact = options(ResampleMethod::Exact, 1, None);
+        let aligned = align_image(&input, &grid, &exact, &plan_alignment(&input, &grid, &exact).unwrap());
+        let report = &aligned.report;
+        assert_eq!(report.partial_coverage_pixels, 20, "{report:?}");
+        assert!((report.min_coverage.unwrap() - 0.0625).abs() < 1e-6, "{report:?}");
+        assert_eq!(aligned.image.dim(), (6, 6));
+        assert!(aligned.image.iter().all(|v| (v - 28.0).abs() < 1e-4), "a partially covered edge pixel still holds 4 x the mean: {:?}", aligned.image);
+        assert!((report.flux_ratio.unwrap() - 1.0).abs() < 1e-9, "footprint-weighted ratio stays one: {:?}", report.flux_ratio);
+        let sci_sum_ratio = report.sci_sum_ratio.unwrap();
+        let kept_in = 100.0 * 7.0;
+        let kept_out = 36.0 * 28.0;
+        assert!((sci_sum_ratio - kept_out / kept_in).abs() < 1e-9, "unweighted sum ratio: {sci_sum_ratio}");
+        let filled = report.filled_fraction.unwrap();
+        assert!((filled - (kept_out - kept_in) / kept_out).abs() < 1e-9, "{filled}");
+        let warning = report.warnings.iter().find(|w| w.contains("partially covered")).unwrap_or_else(|| panic!("{:?}", report.warnings));
+        assert_eq!(
+            warning,
+            "exact: 20 output pixels hold the mean of partially covered input (min coverage 0.0625, at the input edge or beside NaN input that overlaps them by less than the map tolerance); their values extend over the uncovered part, are scaled by the full area factor and their DQ does not carry the flags of the missing pixels, so 30.6 % of the kept flux is filled in"
+        );
+        assert_eq!((report.nan_input_pixels, report.nan_output_pixels, report.nan_grown_pixels), (0, 0, 0));
+    }
+
+    #[test]
+    fn aligned_products_carry_the_noise_correlation_map_and_factor() {
+        let target_header = grid_header((8, 8), (4.5, 4.5), (150.0, 2.0), 0.1, 0.0, "Jy");
+        let target_wcs = wcs_of(&target_header);
+        let grid = AlignGrid { label: "F444W", header: &target_header, wcs: &target_wcs, rows: 8, cols: 8 };
+        let scene = textured(12, 12, 6);
+        let half = grid_header((12, 12), (7.0, 6.5), (150.0, 2.0), 0.1, 0.0, "Jy");
+        let half_wcs = wcs_of(&half);
+        let input = AlignInput { image: &scene, header: &half, wcs: &half_wcs };
+        let bilinear = options(ResampleMethod::Bilinear, 1, None);
+        let plan = plan_alignment(&input, &grid, &bilinear).unwrap();
+        let companions = AlignCompanions { err: None, dq: None, no_data_dq: 513 };
+        let result = align_image_with_companions(&input, &grid, &bilinear, &plan, companions).unwrap();
+        let triangle = Array2::from_shape_vec((3, 3), vec![0.0, 0.0, 0.0, 0.5, 1.0, 0.5, 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(result.noise_correlation.dim(), (3, 3));
+        assert!(result.noise_correlation.iter().zip(&triangle).all(|(a, b)| (a - b).abs() < 1e-6), "{:?}", result.noise_correlation);
+        let factor = result.aligned.report.noiscorr_align.unwrap();
+        assert!((factor - 2f64.sqrt()).abs() < 1e-9, "{factor}");
+        assert_eq!(result.aligned.header.get(CARD_NOISCORR_ALIGN), None, "NCORRALN belongs to the NOISCORR HDU, not to SCI");
+        assert!(!history(&result.aligned.header).contains("NOISCORR"), "SCI names no extension it does not hold: {}", history(&result.aligned.header));
+        let noise = result.noise_header();
+        assert_eq!(noise.get_i64(CARD_NCORRK), Some(3));
+        assert_eq!(noise.get(CARD_NCORRSRC), Some("align"));
+        assert_eq!(noise.is_string_value(CARD_NCORRSRC), Some(true));
+        assert!((noise.get_f64(CARD_NOISCORR_ALIGN).unwrap() - factor).abs() < 1e-12, "{factor}");
+        let notes = history(&noise);
+        assert!(notes.contains("NOISCORR holds Q(d)") && notes.contains("resampling weights"), "{notes}");
+        assert!(notes.contains("per-pixel ratio sigma_in/sigma_out") && notes.contains("not an aperture factor") && notes.contains("aperture sums use the NOISCORR map"), "{notes}");
+
+        let finer = grid_header((16, 16), (8.5, 8.5), (150.0, 2.0), 0.05, 0.0, "Jy");
+        let finer_wcs = wcs_of(&finer);
+        let fine_scene = textured(16, 16, 7);
+        let fine = AlignInput { image: &fine_scene, header: &finer, wcs: &finer_wcs };
+        let exact = options(ResampleMethod::Exact, 1, None);
+        let blocks = align_image_with_companions(&fine, &grid, &exact, &plan_alignment(&fine, &grid, &exact).unwrap(), companions).unwrap();
+        let k = blocks.noise_correlation.nrows();
+        assert!(k % 2 == 1 && k <= 3 && blocks.noise_correlation.ncols() == k, "{:?}", blocks.noise_correlation);
+        for ((y, x), value) in blocks.noise_correlation.indexed_iter() {
+            let expected = if (y, x) == (k / 2, k / 2) { 1.0 } else { 0.0 };
+            assert!((value - expected).abs() < 1e-6, "2x2 blocks share no input pixel; ({x}, {y}) carries only roundoff: {value}");
+        }
+        assert!((blocks.aligned.report.noiscorr_align.unwrap() - 2.0).abs() < 1e-9, "{:?}", blocks.aligned.report.noiscorr_align);
+        assert_eq!(blocks.aligned.header.get(CARD_NOISCORR_ALIGN), None);
+
+        let same = textured(8, 8, 9);
+        let copy = AlignInput { image: &same, header: &target_header, wcs: &target_wcs };
+        let copied = align_image_with_companions(&copy, &grid, &bilinear, &plan_alignment(&copy, &grid, &bilinear).unwrap(), companions).unwrap();
+        assert_eq!(copied.noise_correlation, Array2::from_elem((1, 1), 1.0f32), "a copy is the delta map, K = 1");
+        assert_eq!(copied.aligned.report.noiscorr_align, Some(1.0));
+        assert_eq!(copied.aligned.header.get(CARD_NOISCORR_ALIGN), None);
+        assert!(!history(&copied.aligned.header).contains("NOISCORR"), "{}", history(&copied.aligned.header));
+        let copied_noise = copied.noise_header();
+        assert_eq!((copied_noise.get_i64(CARD_NCORRK), copied_noise.get_f64(CARD_NOISCORR_ALIGN)), (Some(1), Some(1.0)));
+        let plain = align_image(&copy, &grid, &bilinear, &plan_alignment(&copy, &grid, &bilinear).unwrap());
+        assert_eq!(plain.report.noiscorr_align, None, "the science-only path tracks no weights");
+
+        let header = noise_correlation_header(5, NoiseSource::Match);
+        assert_eq!(header.get_i64(CARD_NCORRK), Some(5));
+        assert_eq!(header.get(CARD_NCORRSRC), Some("match"));
+        assert_eq!(header.is_string_value(CARD_NCORRSRC), Some(true));
+        assert!(history(&header).contains("after PSF matching"), "{}", history(&header));
+        assert_eq!(header.get(CARD_NOISCORR_ALIGN), None);
+        assert_eq!((NoiseSource::Align.label(), NoiseSource::Match.label()), (NOISCORR_SOURCE_ALIGN, NOISCORR_SOURCE_MATCH));
+        assert_eq!((NoiseSource::parse(" align "), NoiseSource::parse("match"), NoiseSource::parse("Align")), (Some(NoiseSource::Align), Some(NoiseSource::Match), None));
+    }
+
+    #[test]
+    fn the_noise_factor_covers_only_the_pixels_left_after_the_border_crop() {
+        let target_header = grid_header((8, 8), (4.5, 4.5), (150.0, 2.0), 0.1, 0.0, "Jy");
+        let target_wcs = wcs_of(&target_header);
+        let grid = AlignGrid { label: "F444W", header: &target_header, wcs: &target_wcs, rows: 8, cols: 8 };
+        let shifted = grid_header((8, 8), (4.0, 4.0), (150.0, 2.0), 0.1, 0.0, "Jy");
+        let shifted_wcs = wcs_of(&shifted);
+        let scene = textured(8, 8, 3);
+        let input = AlignInput { image: &scene, header: &shifted, wcs: &shifted_wcs };
+        let companions = AlignCompanions { err: None, dq: None, no_data_dq: 513 };
+        let factor = |crop: usize| {
+            let opts = options(ResampleMethod::Exact, crop, None);
+            let aligned = align_image_with_companions(&input, &grid, &opts, &plan_alignment(&input, &grid, &opts).unwrap(), companions).unwrap();
+            aligned.aligned.report.noiscorr_align.unwrap()
+        };
+        assert!((factor(1) - 2.0).abs() < 1e-9, "every kept output holds four quarter weights: {}", factor(1));
+        assert!(factor(0) < 1.9, "the first row and column, cropped away with border_crop 1, hold renormalised partial overlaps: {}", factor(0));
+    }
+
+    #[test]
+    fn a_reprojected_err_plane_keeps_the_released_covariance_note_until_its_file_holds_noiscorr() {
+        let (input_header, target_header, science, error, dq) = hole_scenario();
+        let (input_wcs, target_wcs) = (wcs_of(&input_header), wcs_of(&target_header));
+        let grid = AlignGrid { label: "F444W", header: &target_header, wcs: &target_wcs, rows: 8, cols: 8 };
+        let input = AlignInput { image: &science, header: &input_header, wcs: &input_wcs };
+        let released = "ERR propagated with squared effective resampling weights assuming independent input pixels; input covariance is unknown and output covariance is not stored";
+        for method in [ResampleMethod::Bilinear, ResampleMethod::Exact] {
+            let opts = options(method, 1, None);
+            let companions = AlignCompanions { err: Some(&error), dq: Some(&dq), no_data_dq: 513 };
+            let result = align_image_with_companions(&input, &grid, &opts, &plan_alignment(&input, &grid, &opts).unwrap(), companions).unwrap();
+            let notes = history(&result.aligned.header);
+            assert!(notes.contains(released), "{method:?}: the 03_align SCI HISTORY of 0.7.9 stays byte-identical: {notes}");
+            assert!(result.aligned.report.warnings.iter().any(|warning| warning == released), "{method:?}: {:?}", result.aligned.report.warnings);
+        }
     }
 }

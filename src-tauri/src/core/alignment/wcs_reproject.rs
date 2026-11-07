@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use ndarray::{s, Array2};
 use rayon::prelude::*;
 
@@ -242,6 +244,10 @@ fn overlap_mean(slice: &[f32], rows: usize, cols: usize, quad: &[Point; 4]) -> O
     overlap_mean_with(slice, rows, cols, quad, |_, _| {})
 }
 
+fn longest_edge(quad: &[Point; 4]) -> f64 {
+    (0..4).map(|i| (quad[(i + 1) % 4][0] - quad[i][0]).hypot(quad[(i + 1) % 4][1] - quad[i][1])).fold(0.0, f64::max)
+}
+
 fn overlap_mean_with(slice: &[f32], rows: usize, cols: usize, quad: &[Point; 4], mut include: impl FnMut(usize, f64)) -> Option<(f32, f32)> {
     if quad.iter().any(|p| !p[0].is_finite() || !p[1].is_finite()) {
         return None;
@@ -259,7 +265,7 @@ fn overlap_mean_with(slice: &[f32], rows: usize, cols: usize, quad: &[Point; 4],
     let ((x0, x1), (y0, y1)) = (span(0), span(1));
     let (x0, x1) = (x0.max(0), x1.min(cols as i64 - 1));
     let (y0, y1) = (y0.max(0), y1.min(rows as i64 - 1));
-    let (mut weighted, mut covered) = (0.0f64, 0.0f64);
+    let (mut weighted, mut covered, mut holed) = (0.0f64, 0.0f64, false);
     for iy in y0..=y1 {
         let band = polygon.clip_band(1, iy as f64 - 0.5, iy as f64 + 0.5);
         if band.is_empty() {
@@ -267,13 +273,24 @@ fn overlap_mean_with(slice: &[f32], rows: usize, cols: usize, quad: &[Point; 4],
         }
         for ix in x0..=x1 {
             let piece = band.clip_band(0, ix as f64 - 0.5, ix as f64 + 0.5).area();
-            let value = slice[iy as usize * cols + ix as usize];
-            if piece > 0.0 && value.is_finite() {
+            if piece <= 0.0 {
+                continue;
+            }
+            let index = iy as usize * cols + ix as usize;
+            let value = slice[index];
+            if value.is_finite() {
                 weighted += piece * value as f64;
                 covered += piece;
-                include(iy as usize * cols + ix as usize, piece);
+            } else if piece <= MAP_TOLERANCE_PX * longest_edge(quad) {
+                continue;
+            } else {
+                holed = true;
             }
+            include(index, piece);
         }
+    }
+    if holed {
+        return Some((f32::NAN, (covered / full) as f32));
     }
     (covered > 0.0).then(|| ((weighted / covered) as f32, (covered / full) as f32))
 }
@@ -285,9 +302,210 @@ pub(crate) struct CompanionInput<'a> {
     pub no_data_dq: u32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NoiseCorrelation {
+    pub map: Array2<f32>,
+    pub factor: f64,
+}
+
+impl NoiseCorrelation {
+    pub(crate) fn identity() -> Self {
+        Self { map: Array2::ones((1, 1)), factor: 1.0 }
+    }
+}
+
+pub(crate) fn smallest_odd_support(map: &Array2<f32>) -> Array2<f32> {
+    let half = map.nrows() / 2;
+    let reach = map
+        .indexed_iter()
+        .filter(|(_, value)| **value != 0.0)
+        .map(|((y, x), _)| y.abs_diff(half).max(x.abs_diff(half)))
+        .max()
+        .unwrap_or(0)
+        .min(half);
+    map.slice(s![half - reach..=half + reach, half - reach..=half + reach]).to_owned()
+}
+
 pub(crate) struct CompanionMaps {
     pub variance: Option<Array2<f64>>,
     pub dq: Array2<u32>,
+    pub noise: NoiseCorrelation,
+}
+
+const NOISE_BAND_ROWS: usize = 32;
+const NOISE_EXTENT_SAMPLES: usize = 9;
+const NOISE_EXTENT_TOLERANCE: f64 = 1e-6;
+const BILINEAR_TAP_SPAN: f64 = 2.0;
+const BICUBIC_TAP_SPAN: f64 = 4.0;
+
+fn output_extent_per_input_pixel(map: &CoarseMap, rows: usize, cols: usize) -> f64 {
+    if rows < 2 || cols < 2 {
+        return 0.0;
+    }
+    let lattice = |len: usize| (0..NOISE_EXTENT_SAMPLES).map(move |i| (i * (len - 2)) as f64 / (NOISE_EXTENT_SAMPLES - 1) as f64);
+    let mut extent = 0.0f64;
+    for y in lattice(rows) {
+        for x in lattice(cols) {
+            let (x0, y0) = map.sample(x, y);
+            let (x1, y1) = map.sample(x + 1.0, y);
+            let (x2, y2) = map.sample(x, y + 1.0);
+            let jacobian = [[x1 - x0, x2 - x0], [y1 - y0, y2 - y0]];
+            let det = det(&jacobian).abs();
+            if !(det > 0.0) || !det.is_finite() {
+                continue;
+            }
+            let along_x = (jacobian[1][1].abs() + jacobian[0][1].abs()) / det;
+            let along_y = (jacobian[1][0].abs() + jacobian[0][0].abs()) / det;
+            extent = extent.max(along_x).max(along_y);
+        }
+    }
+    extent
+}
+
+fn interpolation_noise_half_width(interpolation: Interpolation, extent: f64) -> usize {
+    let span = match interpolation {
+        Interpolation::Bilinear => BILINEAR_TAP_SPAN,
+        Interpolation::Bicubic => BICUBIC_TAP_SPAN,
+    };
+    ((span * extent - NOISE_EXTENT_TOLERANCE).ceil().max(1.0) as usize) - 1
+}
+
+fn exact_noise_half_width(extent: f64) -> usize {
+    ((extent - NOISE_EXTENT_TOLERANCE).ceil().max(1.0)) as usize
+}
+
+fn tap_dot(a: &[(usize, f64)], b: &[(usize, f64)]) -> f64 {
+    let (mut i, mut j, mut sum) = (0, 0, 0.0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                sum += a[i].1 * b[j].1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    sum
+}
+
+struct NoiseSums {
+    half: usize,
+    cross: Vec<f64>,
+    pairs: Vec<usize>,
+    squares: f64,
+    finite: usize,
+}
+
+impl NoiseSums {
+    fn new(half: usize) -> Self {
+        let cells = (half + 1) * (2 * half + 1);
+        Self { half, cross: vec![0.0; cells], pairs: vec![0; cells], squares: 0.0, finite: 0 }
+    }
+
+    fn cell(&self, dy: usize, dx: isize) -> usize {
+        dy * (2 * self.half + 1) + (dx + self.half as isize) as usize
+    }
+
+    fn merge(mut self, other: Self) -> Self {
+        for (sum, add) in self.cross.iter_mut().zip(&other.cross) {
+            *sum += add;
+        }
+        for (count, add) in self.pairs.iter_mut().zip(&other.pairs) {
+            *count += add;
+        }
+        self.squares += other.squares;
+        self.finite += other.finite;
+        self
+    }
+}
+
+fn band_noise_sums(band: Range<usize>, kept: (&Range<usize>, &Range<usize>), half: usize, taps: &(impl Fn(usize, usize, &mut Vec<(usize, f64)>) + Sync)) -> NoiseSums {
+    let (kept_rows, cols) = kept;
+    let rows = band.start..(band.end + half).min(kept_rows.end);
+    let width = cols.len();
+    let mut offsets = Vec::with_capacity(rows.len() * width + 1);
+    offsets.push(0usize);
+    let mut entries: Vec<(usize, f64)> = Vec::new();
+    let mut scratch = Vec::new();
+    for y in rows.clone() {
+        for x in cols.clone() {
+            scratch.clear();
+            taps(y, x, &mut scratch);
+            scratch.sort_unstable_by_key(|(index, _)| *index);
+            entries.extend_from_slice(&scratch);
+            offsets.push(entries.len());
+        }
+    }
+    let taps_of = |y: usize, x: usize| -> &[(usize, f64)] {
+        let i = (y - rows.start) * width + (x - cols.start);
+        &entries[offsets[i]..offsets[i + 1]]
+    };
+    let mut sums = NoiseSums::new(half);
+    for y in band {
+        for x in cols.clone() {
+            let own = taps_of(y, x);
+            if own.is_empty() {
+                continue;
+            }
+            sums.finite += 1;
+            sums.squares += own.iter().map(|(_, weight)| weight * weight).sum::<f64>();
+            for dy in 0..=half {
+                let qy = y + dy;
+                if qy >= rows.end {
+                    break;
+                }
+                let first_dx = if dy == 0 { 1 } else { -(half as isize) };
+                for dx in first_dx..=half as isize {
+                    let qx = x as isize + dx;
+                    if qx < cols.start as isize || qx >= cols.end as isize {
+                        continue;
+                    }
+                    let other = taps_of(qy, qx as usize);
+                    if other.is_empty() {
+                        continue;
+                    }
+                    let cell = sums.cell(dy, dx);
+                    sums.cross[cell] += tap_dot(own, other);
+                    sums.pairs[cell] += 1;
+                }
+            }
+        }
+    }
+    sums
+}
+
+fn noise_correlation(dims: (usize, usize), border_crop: usize, half: usize, taps: impl Fn(usize, usize, &mut Vec<(usize, f64)>) + Sync) -> NoiseCorrelation {
+    let (rows, cols) = (border_crop..dims.0.saturating_sub(border_crop), border_crop..dims.1.saturating_sub(border_crop));
+    let bands: Vec<usize> = rows.clone().step_by(NOISE_BAND_ROWS).collect();
+    let sums = bands
+        .into_par_iter()
+        .map(|y0| band_noise_sums(y0..(y0 + NOISE_BAND_ROWS).min(rows.end), (&rows, &cols), half, &taps))
+        .collect::<Vec<NoiseSums>>()
+        .into_iter()
+        .fold(NoiseSums::new(half), NoiseSums::merge);
+    if sums.finite == 0 {
+        return NoiseCorrelation { factor: f64::NAN, ..NoiseCorrelation::identity() };
+    }
+    let mean_squares = sums.squares / sums.finite as f64;
+    let mut map = Array2::zeros((2 * half + 1, 2 * half + 1));
+    map[[half, half]] = 1.0;
+    for dy in 0..=half {
+        for dx in -(half as isize)..=half as isize {
+            if dy == 0 && dx <= 0 {
+                continue;
+            }
+            let cell = sums.cell(dy, dx);
+            if sums.pairs[cell] == 0 {
+                continue;
+            }
+            let value = (sums.cross[cell] / sums.pairs[cell] as f64 / mean_squares) as f32;
+            map[[half + dy, (half as isize + dx) as usize]] = value;
+            map[[half - dy, (half as isize - dx) as usize]] = value;
+        }
+    }
+    NoiseCorrelation { map: smallest_odd_support(&map), factor: 1.0 / mean_squares.sqrt() }
 }
 
 impl CompanionInput<'_> {
@@ -303,7 +521,7 @@ impl CompanionInput<'_> {
     }
 }
 
-fn companion_maps(dims: (usize, usize), input: CompanionInput<'_>, sample: impl Fn(usize, usize) -> (f64, u32) + Sync) -> CompanionMaps {
+fn companion_maps(dims: (usize, usize), input: CompanionInput<'_>, sample: impl Fn(usize, usize) -> (f64, u32) + Sync) -> (Option<Array2<f64>>, Array2<u32>) {
     let (rows, cols) = dims;
     let mut variance = input.variance.map(|_| vec![f64::NAN; rows * cols]);
     let mut dq = vec![input.no_data_dq; rows * cols];
@@ -322,10 +540,10 @@ fn companion_maps(dims: (usize, usize), input: CompanionInput<'_>, sample: impl 
             }
         });
     }
-    CompanionMaps {
-        variance: variance.map(|values| Array2::from_shape_vec(dims, values).expect("variance matches the output shape")),
-        dq: Array2::from_shape_vec(dims, dq).expect("DQ matches the output shape"),
-    }
+    (
+        variance.map(|values| Array2::from_shape_vec(dims, values).expect("variance matches the output shape")),
+        Array2::from_shape_vec(dims, dq).expect("DQ matches the output shape"),
+    )
 }
 
 pub(crate) fn reproject_interpolated_companions(
@@ -335,19 +553,25 @@ pub(crate) fn reproject_interpolated_companions(
     reference_wcs: &WcsTransform,
     dims: (usize, usize),
     interpolation: Interpolation,
+    border_crop: usize,
 ) -> CompanionMaps {
     let (rows, cols) = science.dim();
     let standard = science.as_standard_layout();
     let slice = standard.as_slice().expect("standard layout is contiguous");
     let map = CoarseMap::within(source_wcs, reference_wcs, (0.0, 0.0), dims.0, dims.1, MAP_TOLERANCE_PX);
-    companion_maps(dims, input, |y, x| {
+    let sampled_at = |y: usize, x: usize| {
         let (sx, sy) = map.sample(x as f64, y as f64);
         if rows == 0 || cols == 0 || !(sx >= -0.5 && sy >= -0.5 && sx <= cols as f64 - 0.5 && sy <= rows as f64 - 0.5) {
-            return (f64::NAN, input.no_data_dq);
+            return None;
         }
-        let sampled = match interpolation {
+        Some(match interpolation {
             Interpolation::Bilinear => bilinear_with_weights(slice, rows, cols, sy, sx),
             Interpolation::Bicubic => bicubic_with_weights(slice, rows, cols, sy, sx),
+        })
+    };
+    let (variance, dq) = companion_maps(dims, input, |y, x| {
+        let Some(sampled) = sampled_at(y, x) else {
+            return (f64::NAN, input.no_data_dq);
         };
         let mut variance = 0.0;
         let mut dq = 0;
@@ -356,7 +580,14 @@ pub(crate) fn reproject_interpolated_companions(
             dq |= input.dq_at(index, cols);
         }
         if sampled.value.is_finite() { (variance, dq) } else { (f64::NAN, dq | input.no_data_dq) }
-    })
+    });
+    let half = interpolation_noise_half_width(interpolation, output_extent_per_input_pixel(&map, dims.0, dims.1));
+    let noise = noise_correlation(dims, border_crop, half, |y, x, taps| {
+        if let Some(sampled) = sampled_at(y, x).filter(|sampled| sampled.value.is_finite()) {
+            taps.extend(sampled.weights());
+        }
+    });
+    CompanionMaps { variance, dq, noise }
 }
 
 pub(crate) fn reproject_exact_companions(
@@ -365,19 +596,22 @@ pub(crate) fn reproject_exact_companions(
     source_wcs: &WcsTransform,
     reference_wcs: &WcsTransform,
     dims: (usize, usize),
+    border_crop: usize,
 ) -> CompanionMaps {
     let (rows, cols) = science.dim();
     let standard = science.as_standard_layout();
     let slice = standard.as_slice().expect("standard layout is contiguous");
     let corners = CoarseMap::within(source_wcs, reference_wcs, (-0.5, -0.5), dims.0 + 1, dims.1 + 1, MAP_TOLERANCE_PX);
-    companion_maps(dims, input, |y, x| {
+    let quad_at = |y: usize, x: usize| {
         let point = |dx: usize, dy: usize| {
             let (sx, sy) = corners.sample((x + dx) as f64 - 0.5, (y + dy) as f64 - 0.5);
             [sx, sy]
         };
-        let quad = [point(0, 0), point(1, 0), point(1, 1), point(0, 1)];
+        [point(0, 0), point(1, 0), point(1, 1), point(0, 1)]
+    };
+    let (variance, dq) = companion_maps(dims, input, |y, x| {
         let (mut variance, mut weight, mut dq) = (0.0, 0.0, 0);
-        let value = overlap_mean_with(slice, rows, cols, &quad, |index, area| {
+        let value = overlap_mean_with(slice, rows, cols, &quad_at(y, x), |index, area| {
             variance += area * area * input.variance_at(index, cols);
             weight += area;
             dq |= input.dq_at(index, cols);
@@ -387,10 +621,23 @@ pub(crate) fn reproject_exact_companions(
         } else {
             (f64::NAN, dq | input.no_data_dq)
         }
-    })
+    });
+    let half = exact_noise_half_width(output_extent_per_input_pixel(&corners, dims.0, dims.1));
+    let noise = noise_correlation(dims, border_crop, half, |y, x, taps| {
+        let value = overlap_mean_with(slice, rows, cols, &quad_at(y, x), |index, area| taps.push((index, area)));
+        if value.is_some_and(|(value, _)| value.is_finite()) {
+            let covered: f64 = taps.iter().map(|(_, area)| area).sum();
+            for (_, weight) in taps.iter_mut() {
+                *weight /= covered;
+            }
+        } else {
+            taps.clear();
+        }
+    });
+    CompanionMaps { variance, dq, noise }
 }
 
-pub(crate) fn prefilter_companions(science: &Array2<f32>, input: CompanionInput<'_>, k: usize) -> CompanionMaps {
+pub(crate) fn prefilter_companions(science: &Array2<f32>, input: CompanionInput<'_>, k: usize) -> (Option<Array2<f64>>, Array2<u32>) {
     let (rows, cols) = science.dim();
     companion_maps((rows / k, cols / k), input, |y, x| {
         let (mut variance, mut count, mut dq) = (0.0, 0usize, 0);
@@ -609,18 +856,18 @@ mod tests {
                 science[[y, x]] = f32::NAN;
             }
         }
-        let maps = prefilter_companions(&science, CompanionInput { variance: Some(&variance), dq: Some(&dq), no_data_dq: 513 }, 2);
-        let errors = maps.variance.unwrap();
+        let (reduced_variance, reduced_dq) = prefilter_companions(&science, CompanionInput { variance: Some(&variance), dq: Some(&dq), no_data_dq: 513 }, 2);
+        let errors = reduced_variance.unwrap();
         assert_eq!(errors.dim(), (2, 2));
         assert_eq!(errors[[0, 0]], 4.0 / 3.0);
         assert!(errors[[0, 1]].is_nan());
         assert!(errors[[1, 0]].is_nan());
         assert_eq!(errors[[1, 1]], 1.0);
-        assert_eq!(maps.dq[[0, 0]], (1 << 1) | (1 << 5) | (1 << 6));
-        assert_eq!(maps.dq[[1, 0]], 513);
-        let absent = prefilter_companions(&science, CompanionInput { variance: None, dq: None, no_data_dq: 513 }, 3);
-        assert!(absent.variance.is_none());
-        assert_eq!(absent.dq.dim(), (1, 1));
+        assert_eq!(reduced_dq[[0, 0]], (1 << 1) | (1 << 5) | (1 << 6));
+        assert_eq!(reduced_dq[[1, 0]], 513);
+        let (absent_variance, absent_dq) = prefilter_companions(&science, CompanionInput { variance: None, dq: None, no_data_dq: 513 }, 3);
+        assert!(absent_variance.is_none());
+        assert_eq!(absent_dq.dim(), (1, 1));
     }
 
     #[test]
@@ -632,11 +879,224 @@ mod tests {
         assert_eq!((value, coverage), (4.0, 1.0));
         assert_eq!(weights, [(0, 0.5), (1, 0.5)]);
         assert_eq!(weights.iter().map(|(_, weight)| weight * weight * 4.0).sum::<f64>(), 2.0);
-        let mut partial = Vec::new();
-        let (value, coverage) = overlap_mean_with(&[f32::NAN, 6.0], 1, 2, &quad, |index, area| partial.push((index, area))).unwrap();
-        assert_eq!((value, coverage), (6.0, 0.5));
-        assert_eq!(partial, [(1, 0.5)]);
-        assert_eq!(partial[0].1.powi(2) * 4.0 / 0.5f64.powi(2), 4.0);
+        let mut holed = Vec::new();
+        let (value, coverage) = overlap_mean_with(&[f32::NAN, 6.0], 1, 2, &quad, |index, area| holed.push((index, area))).unwrap();
+        assert!(value.is_nan(), "a quad over a NaN input pixel has no mean: {value}");
+        assert_eq!(coverage, 0.5, "the footprint counts the finite part only");
+        assert_eq!(holed, [(0, 0.5), (1, 0.5)], "the NaN contributor is reported so its DQ is carried");
+        let outside = [[5.0, -0.5], [6.0, -0.5], [6.0, 0.5], [5.0, 0.5]];
+        assert!(overlap_mean_with(&science, 1, 2, &outside, |_, _| {}).is_none());
+    }
+
+    #[test]
+    fn exact_outputs_whose_quad_touches_a_nan_input_are_nan_and_carry_its_dq() {
+        let reference = tan_header((6, 6), (3.5, 3.5), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let target = tan_header((6, 6), (3.0, 3.0), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let (ref_wcs, tgt_wcs) = (wcs(&reference), wcs(&target));
+        let mut science = Array2::from_shape_fn((6, 6), |(y, x)| (10 * y + x) as f32);
+        science[[2, 2]] = f32::NAN;
+        let variance = Array2::from_elem((6, 6), 1.0);
+        let dq = Array2::from_shape_fn((6, 6), |(y, x)| if (y, x) == (2, 2) { 8 } else { 0 });
+        let (image, footprint, report) = reproject_exact_to_grid(&science, &tgt_wcs, &ref_wcs, 6, 6);
+        let input = CompanionInput { variance: Some(&variance), dq: Some(&dq), no_data_dq: 513 };
+        let maps = reproject_exact_companions(&science, input, &tgt_wcs, &ref_wcs, (6, 6), 0);
+        let err = maps.variance.as_ref().unwrap();
+        assert!((image[[1, 1]] - 5.5).abs() < 1e-5, "a half-pixel shift averages four input pixels: {}", image[[1, 1]]);
+        for ((y, x), value) in image.indexed_iter() {
+            let touches_the_hole = (2..=3).contains(&y) && (2..=3).contains(&x);
+            if touches_the_hole {
+                assert!(value.is_nan(), "({x}, {y}) = {value}");
+                assert_eq!(maps.dq[[y, x]], 8 | 513, "({x}, {y})");
+                assert!(err[[y, x]].is_nan(), "({x}, {y})");
+                assert!((footprint[[y, x]] - 0.75).abs() < 1e-6, "({x}, {y}): three of four quarters are finite, {}", footprint[[y, x]]);
+            } else if x >= 1 && y >= 1 {
+                assert!(value.is_finite(), "({x}, {y})");
+                assert_eq!(maps.dq[[y, x]], 0, "({x}, {y})");
+                assert!((err[[y, x]] - 0.25).abs() < 1e-9, "({x}, {y}): four quarter weights give variance 0.25, got {}", err[[y, x]]);
+                assert!((footprint[[y, x]] - 1.0).abs() < 1e-6, "({x}, {y})");
+            }
+        }
+        assert!((report.coverage - 32.0 / 36.0).abs() < 1e-12, "{}", report.coverage);
+    }
+
+    #[test]
+    fn a_nan_sliver_within_the_map_tolerance_leaves_the_output_finite_and_its_dq_clean() {
+        let science = [6.0, f32::NAN];
+        let intruding = |depth: f64| [[-0.5 + depth, -0.5], [0.5 + depth, -0.5], [0.5 + depth, 0.5], [-0.5 + depth, 0.5]];
+        let mut contributors = Vec::new();
+        let (value, coverage) = overlap_mean_with(&science, 1, 2, &intruding(0.5 * MAP_TOLERANCE_PX), |index, area| contributors.push((index, area))).unwrap();
+        assert_eq!(value, 6.0, "a quad that reaches a NaN pixel by half the map tolerance keeps the mean of its finite part");
+        assert!((f64::from(coverage) - (1.0 - 0.5 * MAP_TOLERANCE_PX)).abs() < 1e-7, "{coverage}");
+        assert_eq!(contributors.len(), 1, "the NaN sliver adds no DQ: {contributors:?}");
+        assert_eq!(contributors[0].0, 0);
+        let mut holed = Vec::new();
+        let (value, _) = overlap_mean_with(&science, 1, 2, &intruding(2.0 * MAP_TOLERANCE_PX), |index, area| holed.push((index, area))).unwrap();
+        assert!(value.is_nan(), "twice the map tolerance is an overlap the map cannot have invented: {value}");
+        assert_eq!(holed.iter().map(|(index, _)| *index).collect::<Vec<_>>(), [0, 1]);
+        let wide = [[-0.5 + 1.5 * MAP_TOLERANCE_PX, -1.5], [0.5 + 1.5 * MAP_TOLERANCE_PX, -1.5], [0.5 + 1.5 * MAP_TOLERANCE_PX, 1.5], [-0.5 + 1.5 * MAP_TOLERANCE_PX, 1.5]];
+        let tall = [6.0, f32::NAN, 6.0, f32::NAN, 6.0, f32::NAN];
+        let (value, _) = overlap_mean_with(&tall, 3, 2, &wide, |_, _| {}).unwrap();
+        assert_eq!(value, 6.0, "the tolerance scales with the longest edge of the quad: a 3 px edge tolerates 3 x 1e-3 px2");
+    }
+
+    #[test]
+    fn an_aligned_exact_downsample_keeps_every_nan_input_pixel_in_one_output_far_from_the_tangent_point() {
+        let reference = tan_header((8, 8), (4.5 + 20000.0, 4.5 - 15000.0), (359.9, 2.0), rotated_cd(0.002, 0.0));
+        let target = tan_header((16, 16), (8.5 + 40000.0, 8.5 - 30000.0), (359.9, 2.0), rotated_cd(0.001, 0.0));
+        let (ref_wcs, tgt_wcs) = (wcs(&reference), wcs(&target));
+        for hole in (0..16).flat_map(|y| (0..16).map(move |x| (y, x))) {
+            let mut science = Array2::from_elem((16, 16), 7.0f32);
+            science[hole] = f32::NAN;
+            let dq = Array2::from_shape_fn((16, 16), |index| if index == hole { 8 } else { 0 });
+            let (image, footprint, _) = reproject_exact_to_grid(&science, &tgt_wcs, &ref_wcs, 8, 8);
+            let maps = reproject_exact_companions(&science, CompanionInput { variance: None, dq: Some(&dq), no_data_dq: 513 }, &tgt_wcs, &ref_wcs, (8, 8), 0);
+            let owner = (hole.0 / 2, hole.1 / 2);
+            let nan: Vec<(usize, usize)> = image.indexed_iter().filter(|(_, value)| value.is_nan()).map(|(index, _)| index).collect();
+            assert_eq!(nan, [owner], "NaN input {hole:?}: only the output holding it is NaN on a grid aligned in truth");
+            assert_eq!(maps.dq[owner], 8 | 513, "{hole:?}");
+            for ((y, x), value) in image.indexed_iter().filter(|(index, _)| *index != owner) {
+                assert_eq!(maps.dq[[y, x]], 0, "NaN input {hole:?}: ({x}, {y}) shares at most a roundoff sliver with it");
+                assert!((value - 7.0).abs() < 1e-5 && footprint[[y, x]] > 0.999_999, "NaN input {hole:?}: ({x}, {y}) = {value} at {}", footprint[[y, x]]);
+            }
+        }
+    }
+
+    fn delta_map(k: usize) -> Array2<f32> {
+        Array2::from_shape_fn((k, k), |(y, x)| f32::from(u8::from(y == k / 2 && x == k / 2)))
+    }
+
+    fn assert_map_close(actual: &Array2<f32>, expected: &Array2<f32>, context: &str) {
+        let reach = (actual.nrows().max(expected.nrows()) / 2) as isize;
+        let at = |map: &Array2<f32>, dy: isize, dx: isize| {
+            let centre = (map.nrows() / 2) as isize;
+            let (y, x) = (centre + dy, centre + dx);
+            if (0..map.nrows() as isize).contains(&y) && (0..map.ncols() as isize).contains(&x) { map[[y as usize, x as usize]] } else { 0.0 }
+        };
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                let (got, want) = (at(actual, dy, dx), at(expected, dy, dx));
+                assert!((got - want).abs() < 1e-6, "{context}: Q({dx}, {dy}) = {got} against {want} in {actual:?}");
+            }
+        }
+    }
+
+    fn ring_peak(map: &Array2<f32>, ring: usize) -> f32 {
+        let centre = map.nrows() / 2;
+        map.indexed_iter().filter(|((y, x), _)| y.abs_diff(centre).max(x.abs_diff(centre)) == ring).map(|(_, value)| value.abs()).fold(0.0, f32::max)
+    }
+
+    fn triangle() -> Array2<f32> {
+        Array2::from_shape_vec((3, 3), vec![0.0, 0.0, 0.0, 0.5, 1.0, 0.5, 0.0, 0.0, 0.0]).unwrap()
+    }
+
+    fn quarters() -> Array2<f32> {
+        Array2::from_shape_vec((3, 3), vec![0.25, 0.5, 0.25, 0.5, 1.0, 0.5, 0.25, 0.5, 0.25]).unwrap()
+    }
+
+    #[test]
+    fn noise_correlation_keeps_the_smallest_odd_size_holding_every_nonzero_value_over_the_kept_pixels() {
+        let identity = noise_correlation((6, 6), 0, 3, |y, x, taps| taps.push((y * 6 + x, 1.0)));
+        assert_eq!(identity, NoiseCorrelation { map: delta_map(1), factor: 1.0 }, "no two outputs share an input pixel: K = 1");
+        let halves = |y: usize, x: usize, taps: &mut Vec<(usize, f64)>| taps.extend([(y * 7 + x, 0.5), (y * 7 + x + 1, 0.5)]);
+        let shifted = noise_correlation((6, 6), 0, 3, halves);
+        assert_eq!(shifted, NoiseCorrelation { map: triangle(), factor: 1.0 / 0.5f64.sqrt() }, "the window of half width 3 shrinks to the non-zero 3x3");
+        let edged = |y: usize, x: usize, taps: &mut Vec<(usize, f64)>| if x == 5 { taps.push((y * 7 + x, 1.0)) } else { halves(y, x, taps) };
+        assert_eq!(noise_correlation((6, 6), 1, 3, edged), NoiseCorrelation { map: triangle(), factor: 1.0 / 0.5f64.sqrt() }, "a border crop of 1 leaves the renormalised edge column out");
+        let counted = noise_correlation((6, 6), 0, 3, edged);
+        assert!(counted.factor < 1.35, "the edge column has sum w^2 = 1 and lowers NCORRALN once it is counted: {}", counted.factor);
+        let empty = noise_correlation((6, 6), 3, 3, halves);
+        assert_eq!(empty.map, delta_map(1));
+        assert!(empty.factor.is_nan(), "no kept pixel, no factor");
+        let padded = Array2::from_shape_fn((7, 7), |(y, x)| if (2..5).contains(&y) && (2..5).contains(&x) { quarters()[[y - 2, x - 2]] } else { 0.0 });
+        assert_eq!(smallest_odd_support(&padded), quarters());
+        assert_eq!(smallest_odd_support(&delta_map(5)), delta_map(1));
+    }
+
+    #[test]
+    fn noise_correlation_divides_the_mean_cross_product_of_each_lag_by_the_mean_squared_weight() {
+        let alternating = |_: usize, x: usize, taps: &mut Vec<(usize, f64)>| if x % 2 == 0 { taps.push((x, 1.0)) } else { taps.extend([(x - 1, 0.5), (x + 1, 0.5)]) };
+        let noise = noise_correlation((1, 8), 0, 2, alternating);
+        let (one, two) = (2.0f32 / 3.0, 1.0f32 / 6.0);
+        let expected = Array2::from_shape_fn((5, 5), |(y, x)| if y == 2 { [two, one, 1.0, one, two][x] } else { 0.0 });
+        assert_map_close(&noise.map, &expected, "sum w^2 alternates 1 and 0.5 (mean 0.75); every lag-1 pair shares 0.5 and half the lag-2 pairs share 0.25, so Q(1) = 0.5/0.75 and Q(2) = 0.125/0.75 on both sides; dividing each pair by its own sum w^2 would give 5/7 at +1 and 11/14 at -1, which is no autocorrelation");
+        assert!((noise.factor - 1.0 / 0.75f64.sqrt()).abs() < 1e-12, "{}", noise.factor);
+    }
+
+    #[test]
+    fn the_noise_window_reads_an_extent_within_1e_6_above_an_integer_as_that_integer() {
+        for (interpolation, half) in [(Interpolation::Bilinear, 1), (Interpolation::Bicubic, 3)] {
+            assert_eq!(interpolation_noise_half_width(interpolation, 1.0 + 1e-9), half, "{interpolation:?}: an integer shift measures its extent as 1 plus TAN roundoff, and roundoff tap products near 1e-22 must not widen K beyond the contracted pure-translation size");
+            assert_eq!(interpolation_noise_half_width(interpolation, 1.0 + 1e-5), half + 1, "{interpolation:?}: a real rotation or scale above the allowance widens the window");
+        }
+        assert_eq!(exact_noise_half_width(2.0 + 1e-9), 2, "a 2x upsample keeps K = 2 * 2 + 1 = 5 although its clipping slivers reach a third output");
+        assert_eq!(exact_noise_half_width(2.0 + 1e-5), 3);
+        assert_eq!(exact_noise_half_width(0.5), 1, "every input pixel can still touch two neighbouring outputs");
+    }
+
+    #[test]
+    fn noise_correlation_of_an_integer_shift_is_the_delta_and_of_a_half_pixel_shift_the_triangle() {
+        let reference = tan_header((8, 8), (4.5, 4.5), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let integer = tan_header((12, 12), (6.5, 6.5), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let half = tan_header((12, 12), (7.0, 6.5), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let science = Array2::from_elem((12, 12), 3.0f32);
+        let input = CompanionInput { variance: None, dq: None, no_data_dq: 513 };
+        let bilinear = |header: &HduHeader| reproject_interpolated_companions(&science, input, &wcs(header), &wcs(&reference), (8, 8), Interpolation::Bilinear, 0);
+        let integer_shift = bilinear(&integer);
+        assert!(integer_shift.noise.map.nrows() <= 3, "{:?}", integer_shift.noise.map);
+        assert_map_close(&integer_shift.noise.map, &delta_map(1), "bilinear integer shift: off-centre cells hold TAN roundoff only");
+        assert!((integer_shift.noise.factor - 1.0).abs() < 1e-9, "{}", integer_shift.noise.factor);
+        let shifted = bilinear(&half);
+        assert_eq!(shifted.noise.map.dim(), (3, 3), "half weights two outputs apart never meet: K = 3");
+        assert_map_close(&shifted.noise.map, &triangle(), "bilinear half-pixel shift");
+        assert!((shifted.noise.factor - 2f64.sqrt()).abs() < 1e-9, "two half weights: {}", shifted.noise.factor);
+        let bicubic = reproject_interpolated_companions(&science, input, &wcs(&integer), &wcs(&reference), (8, 8), Interpolation::Bicubic, 0);
+        assert!(bicubic.noise.map.nrows() <= 7, "{:?}", bicubic.noise.map);
+        assert_map_close(&bicubic.noise.map, &delta_map(1), "bicubic integer shift");
+        assert!((bicubic.noise.factor - 1.0).abs() < 1e-9, "{}", bicubic.noise.factor);
+    }
+
+    #[test]
+    fn exact_noise_correlation_follows_the_pixel_footprint_and_its_size_the_geometry() {
+        let reference = tan_header((8, 8), (4.5, 4.5), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let science = Array2::from_elem((16, 16), 3.0f32);
+        let input = CompanionInput { variance: None, dq: None, no_data_dq: 513 };
+        let finer = tan_header((16, 16), (8.5, 8.5), (83.0, 22.0), rotated_cd(0.05, 0.0));
+        let blocks = reproject_exact_companions(&science, input, &wcs(&finer), &wcs(&reference), (8, 8), 0);
+        assert!(blocks.noise.map.nrows() <= 3, "{:?}", blocks.noise.map);
+        assert_map_close(&blocks.noise.map, &delta_map(1), "two by two blocks share no input pixel; clipping slivers leave roundoff only");
+        assert!((blocks.noise.factor - 2.0).abs() < 1e-9, "four quarter weights: {}", blocks.noise.factor);
+        let coarser = tan_header((4, 4), (2.5, 2.5), (83.0, 22.0), rotated_cd(0.2, 0.0));
+        let coarse = Array2::from_elem((4, 4), 3.0f32);
+        let split = reproject_exact_companions(&coarse, input, &wcs(&coarser), &wcs(&reference), (8, 8), 0);
+        assert!(split.noise.map.nrows() <= 5, "an input pixel two output pixels wide bounds K by 2 * 2 + 1: {:?}", split.noise.map);
+        let (side, corner) = (4.0f32 / 7.0, 16.0f32 / 49.0);
+        let shared = Array2::from_shape_vec((3, 3), vec![corner, side, corner, side, 1.0, side, corner, side, corner]).unwrap();
+        assert_map_close(&split.noise.map, &shared, "2x upsample on 8 columns: Q is the mean over the 7 neighbour pairs of a row, 4 of which share their input pixel");
+        assert!((split.noise.factor - 1.0).abs() < 1e-9, "{}", split.noise.factor);
+        let rotated = tan_header((16, 16), (8.5, 8.5), (83.0, 22.0), rotated_cd(0.1, 45.0));
+        let diagonal = reproject_exact_companions(&science, input, &wcs(&rotated), &wcs(&reference), (8, 8), 0);
+        assert_eq!(diagonal.noise.map.dim(), (5, 5), "a 45 degree input pixel spans sqrt(2) output pixels, so outputs two apart share inputs");
+        assert!(ring_peak(&diagonal.noise.map, 2) > 1e-6, "ring 2 holds real overlaps: {:?}", diagonal.noise.map);
+        assert_eq!(diagonal.noise.map[[2, 2]], 1.0);
+        let interpolated = reproject_interpolated_companions(&science, input, &wcs(&rotated), &wcs(&reference), (8, 8), Interpolation::Bilinear, 0);
+        assert_eq!(interpolated.noise.map.dim(), (5, 5), "taps two input pixels apart can sit two output pixels apart on the diagonal");
+        assert!(ring_peak(&interpolated.noise.map, 2) > 1e-6, "{:?}", interpolated.noise.map);
+    }
+
+    #[test]
+    fn noise_correlation_counts_only_the_pixels_left_after_the_border_crop() {
+        let reference = tan_header((6, 6), (3.5, 3.5), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let target = tan_header((6, 6), (3.0, 3.0), (83.0, 22.0), rotated_cd(0.1, 0.0));
+        let (ref_wcs, tgt_wcs) = (wcs(&reference), wcs(&target));
+        let science = Array2::from_elem((6, 6), 5.0f32);
+        let input = CompanionInput { variance: None, dq: None, no_data_dq: 513 };
+        let kept = reproject_exact_companions(&science, input, &tgt_wcs, &ref_wcs, (6, 6), 1);
+        assert_map_close(&kept.noise.map, &quarters(), "four quarter weights on every kept output");
+        assert!((kept.noise.factor - 2.0).abs() < 1e-9, "{}", kept.noise.factor);
+        let whole = reproject_exact_companions(&science, input, &tgt_wcs, &ref_wcs, (6, 6), 0);
+        assert!(whole.noise.factor < 1.9, "the first row and column hold renormalised partial overlaps: {}", whole.noise.factor);
+        let nothing = reproject_interpolated_companions(&science, input, &tgt_wcs, &ref_wcs, (6, 6), Interpolation::Bilinear, 3);
+        assert!(nothing.noise.factor.is_nan() && nothing.noise.map == delta_map(1), "{:?}", nothing.noise);
     }
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
