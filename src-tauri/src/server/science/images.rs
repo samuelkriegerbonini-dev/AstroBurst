@@ -78,9 +78,10 @@ pub(crate) async fn fits(
 }
 
 fn written_fits(cache: &ImageCache, entry: &ImageEntry) -> anyhow::Result<std::fs::File> {
-    let temp = tempfile::NamedTempFile::new().context("creating a temporary FITS file")?;
+    let temp = tempfile::NamedTempFile::new()
+        .context("creating a temporary FITS file")?
+        .into_temp_path();
     let path = temp
-        .path()
         .to_str()
         .context("the temporary folder path is not UTF-8")?;
     if let Some(plane) = entry.int_plane() {
@@ -92,7 +93,7 @@ fn written_fits(cache: &ImageCache, entry: &ImageEntry) -> anyhow::Result<std::f
             extver: 1,
         };
         write_mef_images(path, None, &[flags])?;
-        return temp.reopen().context("reopening the written FITS file");
+        return std::fs::File::open(&temp).context("reopening the written FITS file");
     }
     let companions = match entry.plane_info() {
         Some(info) if info.is_dq || info.is_err => LoadedCompanions::default(),
@@ -131,7 +132,7 @@ fn written_fits(cache: &ImageCache, entry: &ImageEntry) -> anyhow::Result<std::f
             write_mef_images(path, None, &hdus)?;
         }
     }
-    temp.reopen().context("reopening the written FITS file")
+    std::fs::File::open(&temp).context("reopening the written FITS file")
 }
 
 fn signed_bits(plane: &IntPlane) -> Option<Array2<i32>> {
@@ -142,5 +143,109 @@ fn int_data<'a>(plane: &'a IntPlane, signed: Option<&'a Array2<i32>>) -> HduData
     match signed {
         Some(bits) => HduData::I32(bits),
         None => HduData::U32(&plane.bits),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::Request;
+    use axum::Router;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    use astroburst_lib::types::ImageStats;
+
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::router::build_router_with;
+    use crate::science::config::ScienceConfig;
+    use crate::science::state::ScienceState;
+    use crate::state::AppState;
+    use crate::tests::v2_fixtures::write_mef_with_dq;
+    use crate::v2::images::register_and_respond;
+
+    async fn send(app: &Router, request: Request<Body>) -> Response {
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    fn product(dir: &std::path::Path, name: &str, write: impl FnOnce(&str) -> anyhow::Result<()>) -> Vec<u8> {
+        let path = dir.join(name);
+        write(path.to_str().unwrap()).unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_downloaded_ref_carries_the_bytes_the_writer_puts_in_its_product() {
+        let root = tempfile::tempdir().unwrap();
+        let mef = root.path().join("jw_cal.fits");
+        write_mef_with_dq(&mef, 5, 4);
+        let state = AppState::new(Arc::new(ServerConfig::default()));
+        let session = state.create_session().unwrap();
+        let sid = session.id.clone();
+        let server_root = root.path().to_str().unwrap().to_owned();
+        let cfg = ScienceConfig::from_lookup("127.0.0.1:8080".parse().unwrap(), move |name| {
+            (name == "ASTROBURST_SERVER_ROOT").then(|| server_root.clone())
+        });
+        let app = build_router_with(state.clone(), Arc::new(ScienceState::new(cfg)));
+        let opened = send(
+            &app,
+            Request::post(format!("/v2/sessions/{sid}/open"))
+                .header(header::HOST, "127.0.0.1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({ "path": mef, "hdu": 3, "name": "dq" }).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        let pixels = Array2::from_shape_vec((2, 3), vec![1.5f32, -0.0, f32::NAN, f32::MIN_POSITIVE, -3.25e7, f32::INFINITY]).unwrap();
+        session.cache.insert_synthetic_with_header("odd", Arc::new(pixels), ImageStats::default(), None);
+        let odd = session.cache.get("odd").unwrap();
+        register_and_respond(&session, "odd".into(), None, None, &odd, Value::Null);
+
+        let products = tempfile::tempdir().unwrap();
+        let mono = product(products.path(), "odd.fits", |path| write_fits_mono(path, odd.arr(), odd.header()));
+        let dq = session.cache.get("dq").unwrap();
+        let plane = dq.int_plane().unwrap();
+        let signed = signed_bits(plane);
+        let flags = product(products.path(), "dq.fits", |path| {
+            write_mef_images(
+                path,
+                None,
+                &[ImageHdu {
+                    data: int_data(plane, signed.as_ref()),
+                    header: dq.header(),
+                    extname: EXTNAME_DQ,
+                    extver: 1,
+                }],
+            )
+        });
+
+        for (name, expected) in [("odd", mono), ("dq", flags)] {
+            let response = send(
+                &app,
+                Request::get(format!("/v2/sessions/{sid}/images/{name}/fits"))
+                    .header(header::HOST, "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_eq!(response.headers()[header::CONTENT_LENGTH], expected.len().to_string().as_str(), "{name}");
+            let served = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(expected.len() >= 2880, "{name}");
+            assert!(served[..] == expected[..], "{name}: served {} bytes, the product has {}", served.len(), expected.len());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_downloaded_ref_is_written_to_a_file_only_its_owner_can_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let cache = ImageCache::new(4, usize::MAX);
+        cache.insert_synthetic("odd", Arc::new(Array2::from_elem((3, 2), 1.5f32)), ImageStats::default());
+        let entry = cache.get("odd").unwrap();
+        let file = written_fits(&cache, &entry).unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(file.metadata().unwrap().len(), 5760);
     }
 }

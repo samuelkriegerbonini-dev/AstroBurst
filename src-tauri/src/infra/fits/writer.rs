@@ -3,8 +3,11 @@ use fitsio_pure::compress::{compress_image_hdu, DitherSeed, Quantize, TileCompre
 use ndarray::Array2;
 use rayon::prelude::*;
 use std::borrow::Cow;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, ErrorKind, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::core::astrometry::wcs::SIP_RESIDUAL_KEYS;
 use crate::types::header::HduHeader;
@@ -532,6 +535,94 @@ pub(crate) fn validate_quantize_level(quantize_level: f64) -> Result<()> {
     Ok(())
 }
 
+static PARTIAL_OUTPUTS: AtomicU64 = AtomicU64::new(0);
+const PARTIAL_NAME_ATTEMPTS: usize = 8;
+const WINDOWS_ACCESS_DENIED: i32 = 5;
+const WINDOWS_SHARING_VIOLATION: i32 = 32;
+const RENAME_RETRY_DELAYS: [Duration; 6] = [
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+    Duration::from_millis(160),
+    Duration::from_millis(320),
+];
+
+struct PartialOutput {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl PartialOutput {
+    fn create_beside(target: &Path) -> Result<(Self, File)> {
+        let name = target.file_name().context("The output path has no file name")?.to_string_lossy().into_owned();
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Ok(replaced) = std::fs::metadata(target) {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            options.mode(replaced.permissions().mode() & 0o777);
+        }
+        let mut attempts = 1;
+        loop {
+            let path = target.with_file_name(format!(
+                ".{name}.{}-{}.partial",
+                std::process::id(),
+                PARTIAL_OUTPUTS.fetch_add(1, Ordering::Relaxed)
+            ));
+            match options.open(&path) {
+                Ok(file) => return Ok((Self { path, committed: false }, file)),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists && attempts < PARTIAL_NAME_ATTEMPTS => attempts += 1,
+                Err(error) => return Err(error).with_context(|| format!("cannot create {}", path.display())),
+            }
+        }
+    }
+
+    fn commit(mut self, target: &Path) -> Result<()> {
+        rename_once_released(&self.path, target).with_context(|| format!("cannot replace it with {}", self.path.display()))?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for PartialOutput {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn rename_once_released(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut delays = RENAME_RETRY_DELAYS.into_iter();
+    loop {
+        match std::fs::rename(from, to) {
+            Err(error) if is_held_by_another_handle(&error) => match delays.next() {
+                Some(delay) => std::thread::sleep(delay),
+                None => return Err(error),
+            },
+            renamed => return renamed,
+        }
+    }
+}
+
+fn is_held_by_another_handle(error: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(error.raw_os_error(), Some(WINDOWS_ACCESS_DENIED | WINDOWS_SHARING_VIOLATION))
+}
+
+fn write_replacing(path: &str, body: impl FnOnce(&mut BufWriter<File>) -> Result<()>) -> Result<()> {
+    write_partial_then_rename(Path::new(path), body).with_context(|| format!("Failed to write FITS file {path}"))
+}
+
+fn write_partial_then_rename(target: &Path, body: impl FnOnce(&mut BufWriter<File>) -> Result<()>) -> Result<()> {
+    let (partial, file) = PartialOutput::create_beside(target)?;
+    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
+    body(&mut writer)?;
+    writer.flush()?;
+    drop(writer);
+    partial.commit(target)
+}
+
 pub fn write_fits_mono(
     path: &str,
     data: &Array2<f32>,
@@ -547,10 +638,6 @@ pub fn write_fits_mono_bitpix(
     bitpix: i32,
 ) -> Result<()> {
     let (rows, cols) = data.dim();
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let mut bytes = 0;
-
     let (bitpix_str, bitpix_comment) = match bitpix {
         16 => ("16", "16-bit signed integer"),
         -64 => ("-64", "64-bit double"),
@@ -563,30 +650,26 @@ pub fn write_fits_mono_bitpix(
         (0.0, 1.0)
     };
 
-    bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
-    bytes += write_header_card(&mut writer, "BITPIX", bitpix_str, bitpix_comment)?;
-    bytes += write_header_card(&mut writer, "NAXIS", "2", "2D image")?;
-    bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
-    bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
-    bytes += write_header_card(&mut writer, "BZERO", &format!("{:.10E}", bzero), "")?;
-    bytes += write_header_card(&mut writer, "BSCALE", &format!("{:.10E}", bscale), "")?;
-    if bitpix == 16 {
-        bytes += write_header_card(&mut writer, "BLANK", &I16_BLANK.to_string(), "undefined pixel value")?;
-    }
-
-    if let Some(hdr) = header {
-        bytes += write_extra_header_cards(&mut writer, hdr, is_layout_card)?;
-    }
-
-    bytes += write_provenance(&mut writer, header)?;
-
-    write_header_end(&mut writer, bytes)?;
-
-    let data_bytes = write_array_with_bitpix(&mut writer, data, bitpix, bzero, bscale)?;
-    pad_to_block(&mut writer, data_bytes, 0u8)?;
-
-    writer.flush()?;
-    Ok(())
+    write_replacing(path, |writer| {
+        let mut bytes = 0;
+        bytes += write_header_card(writer, "SIMPLE", "T", "FITS standard")?;
+        bytes += write_header_card(writer, "BITPIX", bitpix_str, bitpix_comment)?;
+        bytes += write_header_card(writer, "NAXIS", "2", "2D image")?;
+        bytes += write_header_card(writer, "NAXIS1", &cols.to_string(), "width")?;
+        bytes += write_header_card(writer, "NAXIS2", &rows.to_string(), "height")?;
+        bytes += write_header_card(writer, "BZERO", &format!("{:.10E}", bzero), "")?;
+        bytes += write_header_card(writer, "BSCALE", &format!("{:.10E}", bscale), "")?;
+        if bitpix == 16 {
+            bytes += write_header_card(writer, "BLANK", &I16_BLANK.to_string(), "undefined pixel value")?;
+        }
+        if let Some(hdr) = header {
+            bytes += write_extra_header_cards(writer, hdr, is_layout_card)?;
+        }
+        bytes += write_provenance(writer, header)?;
+        write_header_end(writer, bytes)?;
+        let data_bytes = write_array_with_bitpix(writer, data, bitpix, bzero, bscale)?;
+        pad_to_block(writer, data_bytes, 0u8)
+    })
 }
 
 pub fn write_fits_mono_int(
@@ -604,37 +687,33 @@ pub fn write_fits_mono_int(
         bail!("a value does not fit BITPIX 16; write this image with BITPIX 32");
     }
     let (rows, cols) = data.dim();
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let mut bytes = 0;
-
-    bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
-    bytes += write_header_card(&mut writer, "BITPIX", &bitpix.to_string(), bitpix_comment)?;
-    bytes += write_header_card(&mut writer, "NAXIS", "2", "2D image")?;
-    bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
-    bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
-    if let Some(hdr) = header {
-        bytes += write_extra_header_cards(&mut writer, hdr, is_layout_card)?;
-    }
-    bytes += write_provenance(&mut writer, header)?;
-    write_header_end(&mut writer, bytes)?;
-
-    let values = data.as_standard_layout();
-    let slice = values.as_slice().context("integer plane not contiguous")?;
-    let data_bytes = if bitpix == 16 {
-        for chunk in slice.chunks(16384) {
-            let encoded: Vec<u8> = chunk.iter().flat_map(|&v| (v as i16).to_be_bytes()).collect();
-            writer.write_all(&encoded)?;
+    write_replacing(path, |writer| {
+        let mut bytes = 0;
+        bytes += write_header_card(writer, "SIMPLE", "T", "FITS standard")?;
+        bytes += write_header_card(writer, "BITPIX", &bitpix.to_string(), bitpix_comment)?;
+        bytes += write_header_card(writer, "NAXIS", "2", "2D image")?;
+        bytes += write_header_card(writer, "NAXIS1", &cols.to_string(), "width")?;
+        bytes += write_header_card(writer, "NAXIS2", &rows.to_string(), "height")?;
+        if let Some(hdr) = header {
+            bytes += write_extra_header_cards(writer, hdr, is_layout_card)?;
         }
-        slice.len() * 2
-    } else {
-        write_be_slice(&mut writer, slice, i32::to_be_bytes)?;
-        slice.len() * 4
-    };
-    pad_to_block(&mut writer, data_bytes, 0u8)?;
+        bytes += write_provenance(writer, header)?;
+        write_header_end(writer, bytes)?;
 
-    writer.flush()?;
-    Ok(())
+        let values = data.as_standard_layout();
+        let slice = values.as_slice().context("integer plane not contiguous")?;
+        let data_bytes = if bitpix == 16 {
+            for chunk in slice.chunks(16384) {
+                let encoded: Vec<u8> = chunk.iter().flat_map(|&v| (v as i16).to_be_bytes()).collect();
+                writer.write_all(&encoded)?;
+            }
+            slice.len() * 2
+        } else {
+            write_be_slice(writer, slice, i32::to_be_bytes)?;
+            slice.len() * 4
+        };
+        pad_to_block(writer, data_bytes, 0u8)
+    })
 }
 
 pub fn write_fits_rgb(
@@ -663,10 +742,6 @@ pub fn write_fits_rgb_bitpix(
         );
     }
 
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let mut bytes = 0;
-
     let (bitpix_str, bitpix_comment) = match bitpix {
         16 => ("16", "16-bit signed integer"),
         -64 => ("-64", "64-bit double"),
@@ -682,36 +757,32 @@ pub fn write_fits_rgb_bitpix(
         (0.0, 1.0)
     };
 
-    bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
-    bytes += write_header_card(&mut writer, "BITPIX", bitpix_str, bitpix_comment)?;
-    bytes += write_header_card(&mut writer, "NAXIS", "3", "3D RGB cube")?;
-    bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
-    bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
-    bytes += write_header_card(&mut writer, "NAXIS3", "3", "RGB channels")?;
-    bytes += write_string_header_card(&mut writer, "CTYPE3", RGB_AXIS_TYPE)?;
-    bytes += write_header_card(&mut writer, "BZERO", &format!("{:.10E}", bzero), "")?;
-    bytes += write_header_card(&mut writer, "BSCALE", &format!("{:.10E}", bscale), "")?;
-    if bitpix == 16 {
-        bytes += write_header_card(&mut writer, "BLANK", &I16_BLANK.to_string(), "undefined pixel value")?;
-    }
-
-    if let Some(hdr) = header {
-        bytes += write_extra_header_cards(&mut writer, hdr, |key| is_layout_card(key) || key == "CTYPE3")?;
-    }
-
-    bytes += write_provenance(&mut writer, header)?;
-
-    write_header_end(&mut writer, bytes)?;
-
-    let mut data_bytes = 0;
-    for channel in [r, g, b] {
-        let sl = channel.as_slice().context("Channel not contiguous")?;
-        data_bytes += write_slice_with_bitpix(&mut writer, sl, bitpix, bzero, bscale)?;
-    }
-    pad_to_block(&mut writer, data_bytes, 0u8)?;
-
-    writer.flush()?;
-    Ok(())
+    write_replacing(path, |writer| {
+        let mut bytes = 0;
+        bytes += write_header_card(writer, "SIMPLE", "T", "FITS standard")?;
+        bytes += write_header_card(writer, "BITPIX", bitpix_str, bitpix_comment)?;
+        bytes += write_header_card(writer, "NAXIS", "3", "3D RGB cube")?;
+        bytes += write_header_card(writer, "NAXIS1", &cols.to_string(), "width")?;
+        bytes += write_header_card(writer, "NAXIS2", &rows.to_string(), "height")?;
+        bytes += write_header_card(writer, "NAXIS3", "3", "RGB channels")?;
+        bytes += write_string_header_card(writer, "CTYPE3", RGB_AXIS_TYPE)?;
+        bytes += write_header_card(writer, "BZERO", &format!("{:.10E}", bzero), "")?;
+        bytes += write_header_card(writer, "BSCALE", &format!("{:.10E}", bscale), "")?;
+        if bitpix == 16 {
+            bytes += write_header_card(writer, "BLANK", &I16_BLANK.to_string(), "undefined pixel value")?;
+        }
+        if let Some(hdr) = header {
+            bytes += write_extra_header_cards(writer, hdr, |key| is_layout_card(key) || key == "CTYPE3")?;
+        }
+        bytes += write_provenance(writer, header)?;
+        write_header_end(writer, bytes)?;
+        let mut data_bytes = 0;
+        for channel in [r, g, b] {
+            let sl = channel.as_slice().context("Channel not contiguous")?;
+            data_bytes += write_slice_with_bitpix(writer, sl, bitpix, bzero, bscale)?;
+        }
+        pad_to_block(writer, data_bytes, 0u8)
+    })
 }
 
 
@@ -934,12 +1005,10 @@ pub fn write_fits_mono_rice(
 }
 
 fn write_compressed_file(path: &str, hdu: &CompressedHdu) -> Result<()> {
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    write_primary_hdu_stub(&mut writer, None)?;
-    hdu.write_to(&mut writer)?;
-    writer.flush()?;
-    Ok(())
+    write_replacing(path, |writer| {
+        write_primary_hdu_stub(writer, None)?;
+        hdu.write_to(writer)
+    })
 }
 
 pub fn write_fits_rgb_rice(
@@ -1288,25 +1357,23 @@ fn write_image_extension(writer: &mut BufWriter<File>, hdu: &ImageHdu) -> Result
 
 pub fn write_fits_cube(path: &str, planes: &[Array2<f32>], header: Option<&HduHeader>) -> Result<()> {
     let (rows, cols) = cube_dims(planes)?;
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let mut bytes = 0;
-    bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
-    bytes += write_header_card(&mut writer, "BITPIX", "-32", "32-bit float")?;
-    bytes += write_header_card(&mut writer, "NAXIS", "3", "3D cube")?;
-    bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
-    bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
-    bytes += write_header_card(&mut writer, "NAXIS3", &planes.len().to_string(), "planes")?;
-    bytes += write_header_card(&mut writer, "EXTEND", "T", "")?;
-    if let Some(hdr) = header {
-        bytes += write_extra_header_cards(&mut writer, hdr, is_layout_card)?;
-    }
-    bytes += write_provenance(&mut writer, header)?;
-    write_header_end(&mut writer, bytes)?;
-    let data_bytes = write_planes(&mut writer, planes, f32::to_be_bytes)?;
-    pad_to_block(&mut writer, data_bytes, 0u8)?;
-    writer.flush()?;
-    Ok(())
+    write_replacing(path, |writer| {
+        let mut bytes = 0;
+        bytes += write_header_card(writer, "SIMPLE", "T", "FITS standard")?;
+        bytes += write_header_card(writer, "BITPIX", "-32", "32-bit float")?;
+        bytes += write_header_card(writer, "NAXIS", "3", "3D cube")?;
+        bytes += write_header_card(writer, "NAXIS1", &cols.to_string(), "width")?;
+        bytes += write_header_card(writer, "NAXIS2", &rows.to_string(), "height")?;
+        bytes += write_header_card(writer, "NAXIS3", &planes.len().to_string(), "planes")?;
+        bytes += write_header_card(writer, "EXTEND", "T", "")?;
+        if let Some(hdr) = header {
+            bytes += write_extra_header_cards(writer, hdr, is_layout_card)?;
+        }
+        bytes += write_provenance(writer, header)?;
+        write_header_end(writer, bytes)?;
+        let data_bytes = write_planes(writer, planes, f32::to_be_bytes)?;
+        pad_to_block(writer, data_bytes, 0u8)
+    })
 }
 
 pub fn write_fits_f64(path: &str, data: &Array2<f64>, header: Option<&HduHeader>) -> Result<()> {
@@ -1318,31 +1385,30 @@ pub fn write_fits_f64_with_tables(path: &str, data: &Array2<f64>, header: Option
         table_rows(table)?;
     }
     let (rows, cols) = data.dim();
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let mut bytes = 0;
-    bytes += write_header_card(&mut writer, "SIMPLE", "T", "FITS standard")?;
-    bytes += write_header_card(&mut writer, "BITPIX", "-64", "64-bit double")?;
-    bytes += write_header_card(&mut writer, "NAXIS", "2", "2D image")?;
-    bytes += write_header_card(&mut writer, "NAXIS1", &cols.to_string(), "width")?;
-    bytes += write_header_card(&mut writer, "NAXIS2", &rows.to_string(), "height")?;
-    if !tables.is_empty() {
-        bytes += write_header_card(&mut writer, "EXTEND", "T", "")?;
-    }
-    if let Some(hdr) = header {
-        bytes += write_extra_header_cards(&mut writer, hdr, is_layout_card)?;
-    }
-    bytes += write_provenance(&mut writer, header)?;
-    write_header_end(&mut writer, bytes)?;
-    for value in data.iter() {
-        writer.write_all(&value.to_be_bytes())?;
-    }
-    pad_to_block(&mut writer, data.len() * 8, 0u8)?;
-    for table in tables {
-        write_bintable_extension(&mut writer, table)?;
-    }
-    writer.flush()?;
-    Ok(())
+    write_replacing(path, |writer| {
+        let mut bytes = 0;
+        bytes += write_header_card(writer, "SIMPLE", "T", "FITS standard")?;
+        bytes += write_header_card(writer, "BITPIX", "-64", "64-bit double")?;
+        bytes += write_header_card(writer, "NAXIS", "2", "2D image")?;
+        bytes += write_header_card(writer, "NAXIS1", &cols.to_string(), "width")?;
+        bytes += write_header_card(writer, "NAXIS2", &rows.to_string(), "height")?;
+        if !tables.is_empty() {
+            bytes += write_header_card(writer, "EXTEND", "T", "")?;
+        }
+        if let Some(hdr) = header {
+            bytes += write_extra_header_cards(writer, hdr, is_layout_card)?;
+        }
+        bytes += write_provenance(writer, header)?;
+        write_header_end(writer, bytes)?;
+        for value in data.iter() {
+            writer.write_all(&value.to_be_bytes())?;
+        }
+        pad_to_block(writer, data.len() * 8, 0u8)?;
+        for table in tables {
+            write_bintable_extension(writer, table)?;
+        }
+        Ok(())
+    })
 }
 
 fn column_rows(column: &TableColumn) -> usize {
@@ -1437,20 +1503,19 @@ pub fn write_mef_with_tables(
     for table in tables {
         table_rows(table)?;
     }
-    let file = File::create(path).context("Failed to create FITS file")?;
-    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
-    let primary = primary_header
-        .and_then(|h| filter_header(h, false, true))
-        .map(|h| without_structural_cards(&h));
-    write_primary_hdu_stub(&mut writer, primary.as_ref())?;
-    for hdu in hdus {
-        write_image_extension(&mut writer, hdu)?;
-    }
-    for table in tables {
-        write_bintable_extension(&mut writer, table)?;
-    }
-    writer.flush().context("Failed to flush FITS file")?;
-    Ok(())
+    write_replacing(path, |writer| {
+        let primary = primary_header
+            .and_then(|h| filter_header(h, false, true))
+            .map(|h| without_structural_cards(&h));
+        write_primary_hdu_stub(writer, primary.as_ref())?;
+        for hdu in hdus {
+            write_image_extension(writer, hdu)?;
+        }
+        for table in tables {
+            write_bintable_extension(writer, table)?;
+        }
+        Ok(())
+    })
 }
 
 pub fn write_mef_images(
@@ -2937,5 +3002,314 @@ mod tests {
         for &(row, column) in &extremes {
             assert_eq!(decoded[[row, column]], data[[row, column]], "({row}, {column})");
         }
+    }
+
+    fn exact_test_image(nrows: usize, ncols: usize) -> Array2<f32> {
+        Array2::from_shape_fn((nrows, ncols), |(y, x)| 100.0 + ((y * 7 + x * 13) % 29) as f32 * 0.375 - x as f32 / 3.0)
+    }
+
+    fn write_d1_shaped_mef(path: &str) {
+        let planes: Vec<Array2<f32>> = (0..6).map(|k| exact_test_image(43, 43).mapv(|v| v + k as f32)).collect();
+        let errors: Vec<Array2<f32>> = planes.iter().map(|plane| plane.mapv(|v| v * 0.01)).collect();
+        let flags: Vec<Array2<u32>> = (0..6).map(|k| Array2::from_elem((43, 43), k as u32)).collect();
+        let filters: Vec<String> = ["F814W", "F150W", "F200W", "F277W", "F356W", "F444W"].iter().map(|s| s.to_string()).collect();
+        let datasets: Vec<String> = ["HST", "JWST", "JWST", "JWST", "JWST", "JWST"].iter().map(|s| s.to_string()).collect();
+        let pivots = vec![0.8, 1.5, 2.0, 2.77, 3.56, 4.44];
+        let columns = [
+            TableColumn { name: "FILTER", unit: None, values: TableValues::Text(&filters) },
+            TableColumn { name: "DATASET", unit: None, values: TableValues::Text(&datasets) },
+            TableColumn { name: "PIVOT_UM", unit: Some("um"), values: TableValues::F64(&pivots) },
+        ];
+        let sci_header = mk_header(&[("BUNIT", "MJy/sr")]);
+        write_mef_with_tables(
+            path,
+            Some(&mk_header(&[("TELESCOP", "JWST"), ("OBJECT", "D1")])),
+            &[
+                ImageHdu { data: HduData::F32Cube(&planes), header: Some(&sci_header), extname: "SCI", extver: 1 },
+                ImageHdu { data: HduData::F32Cube(&errors), header: None, extname: "ERR", extver: 1 },
+                ImageHdu { data: HduData::U32Cube(&flags), header: None, extname: "DQ", extver: 1 },
+            ],
+            &[BinTableHdu { columns: &columns, extname: "FILTERS", extver: 1 }],
+        )
+        .unwrap();
+    }
+
+    fn sha256_hex_without_version_cards(path: &std::path::Path) -> String {
+        use sha2::{Digest, Sha256};
+        let mut bytes = std::fs::read(path).unwrap();
+        for card in bytes.chunks_exact_mut(80) {
+            if card.starts_with(b"PROGRAM = 'AstroBurst ") || card.starts_with(b"HISTORY Processed with AstroBurst ") {
+                card.fill(b' ');
+            }
+        }
+        Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn every_writer_produces_the_bytes_pinned_before_the_atomic_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = exact_test_image(7, 11);
+        let green = image.mapv(|v| v * 0.5);
+        let blue = image.mapv(|v| v + 1.0);
+        let ints = Array2::from_shape_fn((7, 11), |(y, x)| (y * 11 + x) as i32 - 30);
+        let doubles = image.mapv(f64::from);
+        let planes = vec![image.clone(), green.clone(), blue.clone()];
+        let header = mk_header(&[("OBJECT", "M16"), ("CTYPE1", "RA---TAN"), ("CTYPE2", "DEC--TAN"), ("CRVAL1", "202.4695"), ("CRPIX1", "4")]);
+        let names = vec!["a".to_string(), "b".to_string()];
+        let values = vec![1.5, -2.25];
+        let columns = [
+            TableColumn { name: "NAME", unit: None, values: TableValues::Text(&names) },
+            TableColumn { name: "VALUE", unit: Some("um"), values: TableValues::F64(&values) },
+        ];
+        let at = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+        write_fits_mono(&at("mono.fits"), &image, Some(&header)).unwrap();
+        write_fits_mono_bitpix(&at("mono16.fits"), &image, Some(&header), 16).unwrap();
+        write_fits_mono_int(&at("int32.fits"), &ints, None, 32).unwrap();
+        write_fits_rgb(&at("rgb.fits"), &image, &green, &blue, Some(&header)).unwrap();
+        write_fits_rgb_bitpix(&at("rgb16.fits"), &image, &green, &blue, None, 16).unwrap();
+        write_fits_cube(&at("cube.fits"), &planes, Some(&header)).unwrap();
+        write_fits_f64_with_tables(&at("f64.fits"), &doubles, Some(&header), &[BinTableHdu { columns: &columns, extname: "T", extver: 1 }]).unwrap();
+        write_fits_mono_rice(&at("rice.fits"), &image, Some(&header), -32, 4.0).unwrap();
+        write_fits_rgb_rice(&at("rgb_rice.fits"), &image, &green, &blue, None, 16, 4.0).unwrap();
+        write_d1_shaped_mef(&at("mef.fits"));
+        let pinned = [
+            ("mono.fits", "8fa0a17ae303762e0ed321f74ede74609de43684c49c3f52f2cad1b1136a6a60"),
+            ("mono16.fits", "5d50c5f5062a7677ced9b82ae86271da0248ef6073268359452d33174531854b"),
+            ("int32.fits", "c4c5b16dc103fdf80ef78084a457b31aa4f7172f9fdff4672c1923976d115b4a"),
+            ("rgb.fits", "fb2d7959b3cd495dad6dbc6fd43a29b95377ad09c37b4ee064ff6c21833bc771"),
+            ("rgb16.fits", "b8d93dcbc7f2d2fbac35335ef2e4890e7a5e8cd63be440e62349d83cc44d24d9"),
+            ("cube.fits", "b555138af83343738893f932d6d13a97a76e00a426346bc023feee59b0170715"),
+            ("f64.fits", "0388660ef4e53854a4920d8d7a3a703bbf65be68663efa59e441a319903e3b40"),
+            ("rice.fits", "9cc91a3d4ce8025688c852d54de0e30c6938a1fb535695e725f27fc4f393a642"),
+            ("rgb_rice.fits", "c944ecd04b44cbf007d5bd00029468f96931c1830d41788943804b08a8070a0a"),
+            ("mef.fits", "9d61eec586650bd436d8d975f41759267659cae0e141095aac6096c400a75d7f"),
+        ];
+        let actual: Vec<(&str, String)> = pinned.iter().map(|(name, _)| (*name, sha256_hex_without_version_cards(&dir.path().join(name)))).collect();
+        assert_eq!(std::fs::metadata(dir.path().join("mef.fits")).unwrap().len(), 155_520);
+        for ((name, expected), (_, hash)) in pinned.iter().zip(&actual) {
+            assert_eq!(hash, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_failing_body_leaves_the_previous_product_intact_and_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("d1_cube.fits");
+        let p = target.to_str().unwrap();
+        write_d1_shaped_mef(p);
+        let previous = std::fs::read(&target).unwrap();
+        assert_eq!(previous.len(), 155_520);
+        let error = write_replacing(p, |writer| {
+            write_primary_hdu_stub(writer, None)?;
+            bail!("No space left on device (os error 28)")
+        })
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(p) && message.contains("No space left on device"), "{message}");
+        assert_eq!(std::fs::read(&target).unwrap(), previous);
+        assert_eq!(dir_entries(dir.path()), ["d1_cube.fits"]);
+
+        let fresh = dir.path().join("fresh.fits");
+        let error = write_replacing(fresh.to_str().unwrap(), |writer| {
+            writer.write_all(&[0u8; 4096])?;
+            bail!("No space left on device (os error 28)")
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains(fresh.to_str().unwrap()), "{error:#}");
+        assert_eq!(dir_entries(dir.path()), ["d1_cube.fits"]);
+    }
+
+    #[test]
+    fn a_directory_in_place_of_the_target_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("product.fits");
+        std::fs::create_dir(&target).unwrap();
+        let p = target.to_str().unwrap();
+        let error = write_fits_mono(p, &smooth_test_image(4, 4), None).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(p), "{message}");
+        assert!(target.is_dir());
+        assert_eq!(dir_entries(dir.path()), ["product.fits"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rewrite_succeeds_while_the_old_product_is_open_with_share_delete_and_mmap() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("product.fits");
+        let p = target.to_str().unwrap();
+        write_fits_mono(p, &smooth_test_image(4, 4), None).unwrap();
+        let previous = std::fs::read(&target).unwrap();
+        let held = File::open(&target).unwrap();
+        let mapped = unsafe { memmap2::Mmap::map(&held).unwrap() };
+        write_fits_mono(p, &smooth_test_image(4, 4).mapv(|v| v * 2.0), None).unwrap();
+        let rewritten = std::fs::read(&target).unwrap();
+        assert_ne!(rewritten, previous);
+        assert_eq!(&mapped[..], &previous[..]);
+        assert_eq!(dir_entries(dir.path()), ["product.fits"]);
+        drop(mapped);
+        drop(held);
+    }
+
+    #[test]
+    fn a_body_that_panics_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("product.fits");
+        let p = target.to_str().unwrap();
+        let unwound = std::panic::catch_unwind(|| {
+            write_replacing(p, |writer| {
+                writer.write_all(&[1u8; FITS_BLOCK_SIZE])?;
+                panic!("an indexing bug in a writer body")
+            })
+        });
+        assert!(unwound.is_err());
+        assert!(dir_entries(dir.path()).is_empty(), "{:?}", dir_entries(dir.path()));
+    }
+
+    fn mono_product_bytes(image: &Array2<f32>) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reference.fits");
+        write_fits_mono(path.to_str().unwrap(), image, None).unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn a_partial_left_by_a_killed_run_is_kept_and_the_write_takes_the_next_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("product.fits");
+        let next = PARTIAL_OUTPUTS.load(Ordering::Relaxed);
+        let leftovers: Vec<String> = (next..next + 3).map(|n| format!(".product.fits.{}-{n}.partial", std::process::id())).collect();
+        for name in &leftovers {
+            std::fs::write(dir.path().join(name), b"left by a killed run").unwrap();
+        }
+        let image = exact_test_image(4, 4);
+        write_fits_mono(target.to_str().unwrap(), &image, None).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), mono_product_bytes(&image));
+        let mut expected = leftovers.clone();
+        expected.push("product.fits".to_string());
+        expected.sort();
+        assert_eq!(dir_entries(dir.path()), expected);
+        for name in &leftovers {
+            assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), b"left by a killed run");
+        }
+    }
+
+    #[test]
+    fn a_path_without_a_file_name_is_refused_before_a_partial_is_created() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let target = dir.path().join("sub").join("..");
+        let p = target.to_str().unwrap();
+        let error = write_fits_mono(p, &exact_test_image(2, 2), None).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains(p) && message.contains("has no file name"), "{message}");
+        assert_eq!(dir_entries(dir.path()), ["sub"]);
+    }
+
+    #[cfg(windows)]
+    fn held_without_share_delete(path: &std::path::Path) -> File {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE).open(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    fn released_after(held: File, delay: Duration) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            drop(held);
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rename_held_up_for_a_moment_by_a_scanner_on_the_partial_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("product.fits");
+        let mut scanner = None;
+        write_replacing(target.to_str().unwrap(), |writer| {
+            writer.write_all(&[7u8; FITS_BLOCK_SIZE])?;
+            let partial = dir_entries(dir.path()).into_iter().find(|name| name.ends_with(".partial")).context("no partial file")?;
+            scanner = Some(released_after(held_without_share_delete(&dir.path().join(partial)), Duration::from_millis(100)));
+            Ok(())
+        })
+        .unwrap();
+        scanner.unwrap().join().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), [7u8; FITS_BLOCK_SIZE]);
+        assert_eq!(dir_entries(dir.path()), ["product.fits"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rewrite_waits_for_a_reader_that_holds_the_product_briefly_without_share_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("product.fits");
+        let p = target.to_str().unwrap();
+        write_fits_mono(p, &exact_test_image(4, 4), None).unwrap();
+        let reader = released_after(held_without_share_delete(&target), Duration::from_millis(100));
+        let image = exact_test_image(4, 4).mapv(|v| v * 2.0);
+        write_fits_mono(p, &image, None).unwrap();
+        reader.join().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), mono_product_bytes(&image));
+        assert_eq!(dir_entries(dir.path()), ["product.fits"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rewrite_fails_naming_the_file_while_a_reader_holds_it_without_share_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("product.fits");
+        let p = target.to_str().unwrap();
+        write_fits_mono(p, &exact_test_image(4, 4), None).unwrap();
+        let previous = std::fs::read(&target).unwrap();
+        let held = held_without_share_delete(&target);
+        let error = write_fits_mono(p, &exact_test_image(4, 4).mapv(|v| v * 2.0), None).unwrap_err();
+        drop(held);
+        let message = format!("{error:#}");
+        assert!(message.contains(p), "{message}");
+        assert_eq!(std::fs::read(&target).unwrap(), previous);
+        assert_eq!(dir_entries(dir.path()), ["product.fits"]);
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &std::path::Path) -> std::io::Result<u32> {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_temporary_file_rewritten_by_the_writer_stays_owner_only_while_it_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = tempfile::NamedTempFile::new_in(dir.path()).unwrap().into_temp_path();
+        assert_eq!(mode_of(&target).unwrap(), 0o600);
+        let mut while_written = None;
+        write_replacing(target.to_str().unwrap(), |writer| {
+            writer.write_all(&[7u8; FITS_BLOCK_SIZE])?;
+            let partial = dir_entries(dir.path()).into_iter().find(|name| name.ends_with(".partial")).context("no partial file")?;
+            while_written = Some(mode_of(&dir.path().join(partial))?);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(while_written, Some(0o600));
+        assert_eq!(mode_of(&target).unwrap(), 0o600);
+        assert_eq!(std::fs::read(&target).unwrap(), [7u8; FITS_BLOCK_SIZE]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_product_gets_the_default_mode_and_a_rewrite_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain.fits");
+        File::create(&plain).unwrap();
+        let default_mode = mode_of(&plain).unwrap();
+        let target = dir.path().join("product.fits");
+        let p = target.to_str().unwrap();
+        write_fits_mono(p, &exact_test_image(4, 4), None).unwrap();
+        assert_eq!(mode_of(&target).unwrap(), default_mode);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_fits_mono(p, &exact_test_image(4, 4).mapv(|v| v * 2.0), None).unwrap();
+        assert_eq!(mode_of(&target).unwrap(), 0o640 & default_mode);
     }
 }
