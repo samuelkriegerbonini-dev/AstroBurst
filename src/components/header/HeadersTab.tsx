@@ -26,8 +26,15 @@ function HeadersTabInner() {
   const unavailableProduct = selected === "displayed" && (displayed.previewOnly || composite);
   const product = selected === "displayed" && displayed.isProcessed && !unavailableProduct;
   const targetPath = unavailableProduct ? null : product ? processed?.fitsPath ?? null : file?.path ?? null;
-  const headerKey = JSON.stringify([selected, targetPath, processedVersion, scientificInputRevisionOf(file), selectedPalette, composite, displayed.previewOnly]);
-  const [headerState, setHeaderState] = useState<{ key: string; data: HeaderData | null; loading: boolean; error: string | null } | null>(null);
+  const targetKey = product
+    ? ["product", targetPath, processedVersion]
+    : unavailableProduct
+      ? ["unavailable", processedVersion, displayed.previewOnly, composite]
+      : ["source", scientificInputRevisionOf(file)];
+  const headerKey = JSON.stringify([...targetKey, selectedPalette]);
+  const hduPath = !file ? null : product && targetPath ? targetPath : file.sourcePath || file.path;
+  const hduKey = JSON.stringify(product ? [hduPath, processedVersion] : [file?.id ?? null, hduPath, file?.reloads ?? 0, file?.finishedAt ?? null]);
+  const [headerState, setHeaderState] = useState<{ key: string; data: HeaderData | null; loading: boolean; error: string | null; attempt: number } | null>(null);
   const [activation, setActivation] = useState<{ key: string; loading: boolean; error: string | null } | null>(null);
   const loadSeqRef = useRef(0);
   const activationSeqRef = useRef(0);
@@ -55,14 +62,15 @@ function HeadersTabInner() {
     async (path: string) => {
       if (!targetPath || path !== targetPath) return;
       const seq = ++loadSeqRef.current;
-      setHeaderState({ key: headerKey, data: null, loading: true, error: null });
+      setHeaderState((previous) => previous?.key === headerKey && previous.error
+        ? { ...previous, loading: true }
+        : { key: headerKey, data: null, loading: true, error: null, attempt: seq });
       try {
         const data = await getFullHeader(path, selectedPalette);
-        if (seq === loadSeqRef.current && currentKeyRef.current === headerKey) setHeaderState({ key: headerKey, data, loading: false, error: null });
+        if (seq === loadSeqRef.current && currentKeyRef.current === headerKey) setHeaderState({ key: headerKey, data, loading: false, error: null, attempt: seq });
       } catch (e) {
         if (seq !== loadSeqRef.current || currentKeyRef.current !== headerKey) return;
-        setHeaderState({ key: headerKey, data: null, loading: false, error: e instanceof Error ? e.message : String(e) });
-        throw e;
+        setHeaderState({ key: headerKey, data: null, loading: false, error: e instanceof Error ? e.message : String(e), attempt: seq });
       }
     },
     [targetPath, headerKey, selectedPalette],
@@ -117,13 +125,27 @@ function HeadersTabInner() {
           <p className="break-all text-[10px] text-zinc-500">{selected === "source" ? `Source input: ${file.path}` : composite ? "Displayed composite: no FITS header is attached to this preview." : displayed.previewOnly ? "Displayed preview: no FITS header is attached to this image." : `Displayed product: ${targetPath}`}</p>
           {product && <p className="text-[10px] text-zinc-500">Inspect the product extensions here. Switch to Source input to change its displayed HDU.</p>}
         </div>}
-        {currentHeader?.error && <p role="alert" className="text-[11px] text-red-400">Failed to read this header: {currentHeader.error}</p>}
-        {file && targetPath && (
+        {currentHeader?.error && targetPath && (
+          <div className="flex items-start gap-2">
+            <p key={currentHeader.attempt} role="alert" className="flex-1 min-w-0 break-words text-[11px] text-red-400">Failed to read this header: {currentHeader.error}</p>
+            <button
+              type="button"
+              onClick={currentHeader.loading ? undefined : () => handleLoadHeader(targetPath)}
+              aria-busy={currentHeader.loading || undefined}
+              aria-disabled={currentHeader.loading || undefined}
+              className="shrink-0 rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300 hover:border-zinc-500 aria-disabled:cursor-wait aria-disabled:text-zinc-500 aria-disabled:hover:border-zinc-700"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {file && targetPath && hduPath && (
           <HduSelectorPanel
-            key={`hdu-${headerKey}`}
-            filePath={product ? targetPath : file.sourcePath || file.path}
+            key={`hdu-${hduKey}`}
+            filePath={hduPath}
             activePath={targetPath}
             activePlane={product ? null : file.result?.plane ?? null}
+            sourceOfProduct={selected === "source" && displayed.isProcessed}
             onActivate={product ? undefined : handleActivate}
             activating={currentActivation?.loading ?? false}
             activateError={currentActivation?.error ?? null}

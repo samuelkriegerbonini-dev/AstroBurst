@@ -5,6 +5,7 @@ import {
   PLAYBACK_SPEEDS,
   clampFrame,
   cubeFrameOutputPaths,
+  cubeFrameRequesters,
   drainFrameRequest,
   formatFrameLabel,
   frameLoadPlan,
@@ -13,6 +14,7 @@ import {
   nextPlaybackFrame,
   playbackIntervalMs,
   playbackStartFrame,
+  type CubeFrameFailure,
   type FrameLoadRequest,
   type FramePublishGate,
   type PlaybackSpeed,
@@ -27,6 +29,14 @@ type FrameKind = "transient" | "committed";
 
 function publishAllowed(gate: FramePublishGate | undefined): boolean {
   return gate?.isCurrent() ?? true;
+}
+
+export function frameStepTarget(current: number, total: number, direction: -1 | 1, loop: boolean): number | null {
+  if (direction === 1) return nextPlaybackFrame(current, total, loop);
+  if (!Number.isFinite(total) || total <= 1) return null;
+  const previous = clampFrame(current, total) - 1;
+  if (previous >= 0) return previous;
+  return loop ? Math.floor(total) - 1 : null;
 }
 
 export type FrameLoader = (
@@ -66,10 +76,11 @@ function CubeFrameNavInner({
   publishGate,
 }: CubeFrameNavProps) {
   const speedId = useId();
+  const errorId = useId();
   const [dragValue, setDragValue] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadingFrame, setLoadingFrame] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<CubeFrameFailure | null>(null);
   const [speed, setSpeed] = useState<PlaybackSpeed>(DEFAULT_SPEED);
   const [localLoop, setLocalLoop] = useState(false);
   const loopOn = loop ?? localLoop;
@@ -88,10 +99,15 @@ function CubeFrameNavInner({
   publishGateRef.current = publishGate;
   const frameLoaderRef = useRef<FrameLoader>(frameLoader ?? getCubeFrame);
   frameLoaderRef.current = frameLoader ?? getCubeFrame;
+  const failureRef = useRef(failure);
+  failureRef.current = failure;
+  const sliderRef = useRef<HTMLInputElement>(null);
+  const retryRef = useRef<HTMLButtonElement>(null);
 
   const playingRef = useRef(false);
+  const cursorRequestedRef = useRef(false);
   const seqRef = useRef(0);
-  const loadingRef = useRef(false);
+  const loadingFrameRef = useRef<number | null>(null);
   const pendingRef = useRef<FrameLoadRequest | null>(null);
   const pendingKindRef = useRef<FrameKind>("committed");
   const skipNextLoadRef = useRef(true);
@@ -126,12 +142,13 @@ function CubeFrameNavInner({
 
   useEffect(() => {
     playingRef.current = false;
+    cursorRequestedRef.current = false;
     setPlaying(false);
     setDragValue(null);
-    setError(null);
-    setLoading(false);
+    setFailure(null);
+    setLoadingFrame(null);
     seqRef.current++;
-    loadingRef.current = false;
+    loadingFrameRef.current = null;
     pendingRef.current = null;
     pendingKindRef.current = "committed";
     sliderDirtyRef.current = false;
@@ -141,6 +158,12 @@ function CubeFrameNavInner({
     fitsCacheRef.current.clear();
   }, [filePath, clearTimers]);
 
+  const resolveFailure = useCallback((idx: number) => {
+    const retry = retryRef.current;
+    if (failureRef.current?.idx === idx && retry !== null && retry.ownerDocument.activeElement === retry) sliderRef.current?.focus();
+    setFailure((current) => (current?.idx === idx ? null : current));
+  }, []);
+
   const loadFrame = useCallback(
     async (idx: number, withFits: boolean) => {
       if (idx < 0 || idx >= totalFrames) return;
@@ -148,15 +171,15 @@ function CubeFrameNavInner({
       const fits = fitsCacheRef.current.get(idx);
       if (png && (!withFits || fits)) {
         if (publishAllowed(publishGateRef.current)) onFrameChangeRef.current?.(png, idx, withFits ? fits : undefined);
+        resolveFailure(idx);
         return;
       }
-      if (loadingRef.current) {
+      if (loadingFrameRef.current !== null) {
         pendingRef.current = mergeFrameRequest(pendingRef.current, { idx, withFits });
         return;
       }
-      loadingRef.current = true;
-      setLoading(true);
-      setError(null);
+      loadingFrameRef.current = idx;
+      setLoadingFrame(idx);
       const seq = ++seqRef.current;
       try {
         const paths = cubeFrameOutputPaths(filePath, idx);
@@ -167,20 +190,21 @@ function CubeFrameNavInner({
         if (frameRef.current === idx && publishAllowed(publishGateRef.current)) {
           onFrameChangeRef.current?.(result.output_path, idx, result.fits_path ?? undefined);
         }
+        resolveFailure(idx);
       } catch (e) {
-        if (seqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
+        if (seqRef.current === seq) setFailure({ idx, message: e instanceof Error ? e.message : String(e) });
         console.error("Frame load failed:", e);
       } finally {
         if (seqRef.current === seq) {
-          loadingRef.current = false;
-          setLoading(false);
+          loadingFrameRef.current = null;
+          setLoadingFrame(null);
           const pending = drainFrameRequest(pendingRef.current, frameRef.current);
           pendingRef.current = null;
           if (pending) loadFrameRef.current(pending.idx, pending.withFits);
         }
       }
     },
-    [filePath, totalFrames],
+    [filePath, totalFrames, resolveFailure],
   );
   loadFrameRef.current = loadFrame;
 
@@ -199,6 +223,7 @@ function CubeFrameNavInner({
       skipNextLoadRef.current = false;
       return;
     }
+    cursorRequestedRef.current = true;
     const idx = frameRef.current;
     publishGateRef.current?.commit();
     if (fitsTimerRef.current) {
@@ -212,6 +237,7 @@ function CubeFrameNavInner({
 
   const requestFrame = useCallback(
     (idx: number, kind: FrameKind) => {
+      cursorRequestedRef.current = true;
       const target = clampFrame(idx, totalFrames);
       if (target === frameRef.current) {
         if (kind === "committed") {
@@ -225,6 +251,27 @@ function CubeFrameNavInner({
     },
     [totalFrames, scheduleFits],
   );
+  const requestFrameRef = useRef(requestFrame);
+  requestFrameRef.current = requestFrame;
+
+  const frameLabelOf = useCallback(
+    (idx: number) => (labelFor ? labelFor(idx) : formatFrameLabel(idx, totalFrames, null, "")),
+    [labelFor, totalFrames],
+  );
+  const frameFailure = failure !== null && failure.idx === frame ? failure : null;
+
+  useEffect(() => {
+    if (totalFrames <= 1) return;
+    return cubeFrameRequesters.register({
+      filePath,
+      totalFrames,
+      playing,
+      failure: frameFailure,
+      labelFor: frameLabelOf,
+      stepOrigin: (displayed) => (cursorRequestedRef.current ? frameRef.current : displayed),
+      request: (idx) => requestFrameRef.current(idx, "committed"),
+    });
+  }, [filePath, totalFrames, playing, frameFailure, frameLabelOf]);
 
   const commitSlider = useCallback(
     (idx: number) => {
@@ -275,12 +322,21 @@ function CubeFrameNavInner({
   }, [requestFrame]);
 
   const handlePrev = useCallback(() => {
-    requestFrame(frameRef.current - 1, "committed");
-  }, [requestFrame]);
+    const target = frameStepTarget(frameRef.current, totalFrames, -1, loopRef.current);
+    if (target !== null) requestFrame(target, "committed");
+  }, [totalFrames, requestFrame]);
 
   const handleNext = useCallback(() => {
-    requestFrame(frameRef.current + 1, "committed");
-  }, [requestFrame]);
+    const target = frameStepTarget(frameRef.current, totalFrames, 1, loopRef.current);
+    if (target !== null) requestFrame(target, "committed");
+  }, [totalFrames, requestFrame]);
+
+  const handleRetry = useCallback(() => {
+    const failed = failureRef.current;
+    if (failed === null || loadingFrameRef.current === failed.idx) return;
+    publishGateRef.current?.commit();
+    loadFrameRef.current(failed.idx, true);
+  }, []);
 
   const togglePlay = useCallback(() => {
     if (playingRef.current) {
@@ -322,8 +378,10 @@ function CubeFrameNavInner({
   if (totalFrames <= 1) return null;
 
   const shown = dragValue ?? frame;
-  const headerText =
-    dragValue === null && frameLabel ? frameLabel : labelFor ? labelFor(shown) : formatFrameLabel(shown, totalFrames, null, "");
+  const prevTarget = frameStepTarget(shown, totalFrames, -1, loopOn);
+  const nextTarget = frameStepTarget(shown, totalFrames, 1, loopOn);
+  const headerText = dragValue === null && frameLabel ? frameLabel : frameLabelOf(shown);
+  const retrying = frameFailure !== null && loadingFrame === frameFailure.idx;
 
   return (
     <div className="bg-zinc-950/50 rounded-lg border border-purple-500/20 p-3">
@@ -334,11 +392,12 @@ function CubeFrameNavInner({
         </span>
         <span className="text-[10px] font-mono text-zinc-400 truncate" title={headerText}>
           {headerText}
-          {loading && <Loader2 size={10} className="inline ml-1 animate-spin" />}
+          {loadingFrame !== null && <Loader2 size={10} className="inline ml-1 animate-spin" />}
         </span>
       </div>
 
       <input
+        ref={sliderRef}
         type="range"
         min={0}
         max={totalFrames - 1}
@@ -354,8 +413,8 @@ function CubeFrameNavInner({
       <div className="flex items-center justify-center gap-2">
         <button
           onClick={handlePrev}
-          disabled={shown === 0 || playing}
-          title="Previous frame"
+          disabled={prevTarget === null || playing}
+          title={prevTarget !== null && prevTarget > shown ? "Previous frame (wraps to the last)" : "Previous frame"}
           aria-label="Previous frame"
           className="p-1.5 rounded-md transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed"
         >
@@ -372,8 +431,8 @@ function CubeFrameNavInner({
         </button>
         <button
           onClick={handleNext}
-          disabled={shown === totalFrames - 1 || playing}
-          title="Next frame"
+          disabled={nextTarget === null || playing}
+          title={nextTarget !== null && nextTarget < shown ? "Next frame (wraps to the first)" : "Next frame"}
           aria-label="Next frame"
           className="p-1.5 rounded-md transition-colors text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed"
         >
@@ -407,10 +466,24 @@ function CubeFrameNavInner({
         </select>
       </div>
 
-      {error && (
-        <p className="text-[9px] text-red-400/80 mt-1.5 text-center truncate" title={error}>
-          Frame load failed: {error}
-        </p>
+      {frameFailure && (
+        <div className="mt-1.5 flex items-center justify-center gap-2">
+          <p id={errorId} className="min-w-0 text-[9px] text-red-400/80 text-center truncate" title={frameFailure.message}>
+            Frame load failed: {frameFailure.message}
+          </p>
+          <button
+            ref={retryRef}
+            type="button"
+            onClick={handleRetry}
+            aria-describedby={errorId}
+            aria-disabled={retrying || undefined}
+            aria-busy={retrying || undefined}
+            title="Load this frame again"
+            className="shrink-0 rounded px-1.5 py-0.5 text-[9px] text-purple-300 hover:bg-zinc-800 hover:text-purple-200 transition-colors aria-disabled:cursor-wait aria-disabled:hover:bg-transparent"
+          >
+            {retrying ? "Retrying..." : "Retry"}
+          </button>
+        </div>
       )}
     </div>
   );

@@ -11,6 +11,7 @@ interface ColorbarProps {
 }
 
 const TICK_MARK_PX = 3;
+const READBACK_VALUE_CH = 12;
 
 function labelShift(index: number, last: number): string {
   if (index === 0) return "none";
@@ -22,7 +23,7 @@ function Colorbar({ transfer, lut, unit, pending, centre }: ColorbarProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
-  const [readback, setReadback] = useState<string | null>(null);
+  const [hoverFrac, setHoverFrac] = useState<number | null>(null);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -52,9 +53,11 @@ function Colorbar({ transfer, lut, unit, pending, centre }: ColorbarProps) {
   const onMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     if (rect.width <= 0) return;
-    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    setReadback(valueAtFraction(frac, transfer).toPrecision(4));
+    setHoverFrac(Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)));
   };
+  const hoverValue = hoverFrac === null ? null : valueAtFraction(hoverFrac, transfer).toPrecision(4);
+  const readback = hoverValue === null || unit === null ? hoverValue : `${hoverValue} ${unit}`;
+  const readoutWidthCh = READBACK_VALUE_CH + (unit === null ? 0 : unit.length + 1);
 
   return (
     <div
@@ -78,8 +81,15 @@ function Colorbar({ transfer, lut, unit, pending, centre }: ColorbarProps) {
             className="block w-full"
             style={{ height: COLORBAR_HEIGHT_PX }}
             onMouseMove={onMove}
-            onMouseLeave={() => setReadback(null)}
+            onMouseLeave={() => setHoverFrac(null)}
           />
+          {hoverFrac !== null && (
+            <span
+              data-colorbar-marker
+              className="absolute top-0 w-px bg-amber-400/80 pointer-events-none"
+              style={{ left: `${hoverFrac * 100}%`, height: COLORBAR_HEIGHT_PX }}
+            />
+          )}
           {ticks.map((tick, i) => (
             <span
               key={i}
@@ -101,14 +111,16 @@ function Colorbar({ transfer, lut, unit, pending, centre }: ColorbarProps) {
             </span>
           ))}
         </div>
-        <span className="shrink-0 w-14 text-right text-zinc-300" style={{ lineHeight: `${COLORBAR_HEIGHT_PX}px` }}>
-          {readback !== null && <span data-colorbar-readback>{readback}</span>}
+        <span
+          className="shrink-0 text-right whitespace-nowrap"
+          style={{ minWidth: `${readoutWidthCh}ch`, lineHeight: `${COLORBAR_HEIGHT_PX}px` }}
+        >
+          {readback !== null ? (
+            <span data-colorbar-readback className="text-zinc-300">{readback}</span>
+          ) : (
+            unit !== null && <span data-colorbar-unit>{unit}</span>
+          )}
         </span>
-        {unit !== null && (
-          <span data-colorbar-unit className="shrink-0" style={{ lineHeight: `${COLORBAR_HEIGHT_PX}px` }}>
-            {unit}
-          </span>
-        )}
       </div>
     </div>
   );

@@ -31,10 +31,12 @@ import {
   viewerSizes,
 } from "../../utils/previewShell";
 import { viewScaleAttributes } from "../../utils/starOverlay";
+import { regionToolHint } from "../../utils/regionToolHints";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
 import OverlayLayer from "./OverlayLayer";
 import { useRegionKey } from "../../hooks/useRegionKey";
+import { useRegionTool } from "../../hooks/useRegionStore";
 import { useFileContext, useRenderContext } from "../../context/PreviewContext";
 
 interface ViewerImage {
@@ -73,6 +75,7 @@ function AdvancedImageViewer({
 }: AdvancedImageViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const regionKey = useRegionKey();
+  const regionTool = useRegionTool();
   const { file } = useFileContext();
   const { processed: shownRecord, chain } = useRenderContext();
   const [imgNatural, setImgNatural] = useState<{ w: number; h: number; url: string } | null>(null);
@@ -216,6 +219,7 @@ function AdvancedImageViewer({
 
   const regionsEnabled = sizes.fits !== null && renderW > 0 && renderH > 0 && regionKey !== null && onFileGrid;
   const hint = onFileGrid ? canvasHint : OTHER_GRID_CANVAS_HINT;
+  const regionHint = regionsEnabled ? regionToolHint(regionTool) : null;
   const handleRetry = useCallback(() => {
     if (compareActive) {
       if (procRetry.error) procRetry.retry();
@@ -253,9 +257,9 @@ function AdvancedImageViewer({
     <div className={`ab-viewer-root ${className}`}>
       <div className="ab-viewer-toolbar">
         <div className="ab-viewer-toolbar-group">
-          <button onClick={zoomIn} className="ab-viewer-btn" title="Zoom In"><ZoomIn size={14} /></button>
-          <button onClick={zoomOut} className="ab-viewer-btn" title="Zoom Out"><ZoomOut size={14} /></button>
-          <button onClick={fitToWindow} className="ab-viewer-btn" title="Fit to Window"><Maximize size={14} /></button>
+          <button onClick={zoomIn} className="ab-viewer-btn" title="Zoom in" aria-label="Zoom in"><ZoomIn size={14} /></button>
+          <button onClick={zoomOut} className="ab-viewer-btn" title="Zoom out" aria-label="Zoom out"><ZoomOut size={14} /></button>
+          <button onClick={fitToWindow} className="ab-viewer-btn" title="Fit to window" aria-label="Fit to window"><Maximize size={14} /></button>
           <button onClick={setOneToOne} className="ab-viewer-btn ab-viewer-btn-text" title="1:1 Pixel (one FITS pixel per screen pixel)">1:1</button>
         </div>
 
@@ -296,6 +300,7 @@ function AdvancedImageViewer({
             onClick={() => setShowOverlay((v) => !v)}
             className={`ab-viewer-btn ${showOverlay ? "ab-viewer-btn-active" : ""}`}
             title="Toggle status bar"
+            aria-pressed={showOverlay}
           >
             {showOverlay ? <Eye size={14} /> : <EyeOff size={14} />}
           </button>
@@ -307,7 +312,7 @@ function AdvancedImageViewer({
           {textureBadge && (
             <span
               className="ab-viewer-preview-badge"
-              title={previewTextureTitle({ renderW, renderH, fitsW, fitsH, deepZoomOffered: true })}
+              title={previewTextureTitle({ renderW, renderH, fitsW, fitsH, deepZoomOffered: !grid.previewOnly })}
             >
               {textureBadge}
             </span>
@@ -410,7 +415,12 @@ function AdvancedImageViewer({
           fitsH={fitsH}
           enabled={regionsEnabled}
         />
-        {hint && !viewerError && <div className={CANVAS_HINT_CLASS}>{hint}</div>}
+        {!viewerError && (hint || regionHint) && (
+          <div className={`${CANVAS_HINT_CLASS} flex flex-col gap-0.5 max-w-[calc(100%-1rem)]`}>
+            {hint && <span>{hint}</span>}
+            {regionHint && <span className="whitespace-normal">{regionHint}</span>}
+          </div>
+        )}
       </div>
 
       {showOverlay && (

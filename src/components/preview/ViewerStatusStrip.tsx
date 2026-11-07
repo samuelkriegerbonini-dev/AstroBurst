@@ -6,6 +6,7 @@ import { probePixel } from "../../services/display";
 import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
 import { recordGrid, statusStripIdleText, statusStripParts, viewerPublishesPixel, type PixelValueAt, type SkyAt } from "../../utils/previewShell";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
+import "./preview-layout.css";
 
 const HOVER_DEBOUNCE_MS = 40;
 const PROBE_BOX = 1;
@@ -22,9 +23,11 @@ function ViewerStatusStrip() {
   const [valueAt, setValueAt] = useState<(PixelValueAt & { path: string }) | null>(null);
   const [skyAt, setSkyAt] = useState<(SkyAt & { path: string }) | null>(null);
   const [wcsPath, setWcsPath] = useState<string | null>(null);
+  const [wavelengthPath, setWavelengthPath] = useState<string | null>(null);
   const x = pixel?.x ?? null;
   const y = pixel?.y ?? null;
   const hasWcs = path !== null && wcsPath === path;
+  const hasWavelength = path !== null && wavelengthPath === path;
 
   useEffect(() => {
     if (!path) return;
@@ -45,7 +48,9 @@ function ViewerStatusStrip() {
     const timer = setTimeout(() => {
       probePixel(path, x, y, PROBE_BOX)
         .then((res) => {
-          if (!cancelled) setValueAt({ path, x, y, value: res.value, unit: res.unit, wavelength: res.wavelength ?? null });
+          if (cancelled) return;
+          setValueAt({ path, x, y, value: res.value, unit: res.unit, wavelength: res.wavelength ?? null });
+          if (res.wavelength) setWavelengthPath(path);
         })
         .catch(() => {
           if (!cancelled) setValueAt({ path, x, y, value: null, unit: null, wavelength: null });
@@ -82,8 +87,10 @@ function ViewerStatusStrip() {
 
   return (
     <div
-      className="flex items-center gap-4 px-3 shrink-0 overflow-hidden whitespace-nowrap text-[10px] font-mono text-zinc-500"
-      style={{ height: 18, background: "rgba(5,5,16,0.6)", borderTop: "1px solid var(--ab-border)" }}
+      className="ab-viewer-status-strip text-[10px] font-mono text-zinc-500"
+      role="group"
+      aria-label="Pointer readout"
+      style={{ background: "rgba(5,5,16,0.6)", borderTop: "1px solid var(--ab-border)" }}
     >
       {parts ? (
         <>
@@ -97,7 +104,7 @@ function ViewerStatusStrip() {
           {parts.sky && <span style={{ color: "rgba(52,211,153,0.7)" }}>{parts.sky}</span>}
         </>
       ) : (
-        <span className="text-zinc-600">{statusStripIdleText(readout)}</span>
+        <span className="text-zinc-600">{statusStripIdleText(readout, { hasWcs, spectral: hasWavelength })}</span>
       )}
     </div>
   );

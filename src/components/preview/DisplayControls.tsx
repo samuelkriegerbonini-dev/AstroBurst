@@ -1,6 +1,7 @@
-import { memo, useSyncExternalStore } from "react";
-import { RotateCcw } from "lucide-react";
-import { useDisplayContext } from "../../context/PreviewContext";
+import { memo, useId, useSyncExternalStore } from "react";
+import { Loader2, RotateCcw } from "lucide-react";
+import "./display-controls.css";
+import { useDisplayContext, useRawPixelsContext } from "../../context/PreviewContext";
 import { normalizePercentiles, normalizeUserLimits } from "../../utils/displayLimits";
 import { symmetricStretchNote } from "../../utils/displayTransfer";
 import { wcsOverlayNote, wcsOverlayStatus } from "../../utils/wcsOverlayStatus";
@@ -27,17 +28,12 @@ interface DisplayControlsProps {
   renderOnlyTitle?: string;
 }
 
-const SELECT_CLASS =
-  "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] text-zinc-200 focus:border-zinc-500";
-const INPUT_CLASS =
-  "bg-zinc-900/80 border border-zinc-700/60 rounded px-1 py-0.5 text-[10px] font-mono text-zinc-200 w-16 focus:border-zinc-500";
-const LABEL_CLASS = "text-[9px] uppercase tracking-wide text-zinc-500";
-const GROUP_CLASS = "flex items-center gap-2 shrink-0";
-const TOOL_BUTTON_CLASS = "flex items-center gap-1 text-[9px] text-zinc-400 hover:text-zinc-200 transition-colors";
-const LINEAR_BUTTON_CLASS =
-  "text-[9px] px-1.5 py-0.5 rounded border transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
-const LINEAR_ON_CLASS = "text-violet-200 bg-violet-600/25 border-violet-500/40";
-const LINEAR_OFF_CLASS = "text-zinc-400 border-zinc-700/60 hover:text-zinc-200";
+const SELECT_CLASS = "ab-display-select";
+const INPUT_CLASS = "ab-display-input";
+const LABEL_CLASS = "ab-display-label";
+const GROUP_CLASS = "ab-display-group";
+const TOOL_BUTTON_CLASS = "ab-display-action";
+const NOTE_CLASS = "ab-display-note";
 
 const SAME_GROUP_TITLE =
   "Same display for frames of one instrument + filter: a file without its own display takes the last display set on a file with the same INSTRUME and filter (PUPIL when it names a filter). Off: such files start from the default display";
@@ -58,10 +54,16 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
     display, setDisplay, limits, limitsLoading, limitsError,
     linear, linearBlocked, toggleLinear, resetDisplay, setAsDefault, sameGroup, setSameGroup,
   } = useDisplayContext();
+  const { rawPixelsLoading } = useRawPixelsContext();
   const isMtf = display.stretch === "mtf";
+  const mtfHintShown = isMtf && !renderOnlyDisabled;
+  const mtfHintId = useId();
   const stretchNote = symmetricStretchNote(display);
   const wcsErrors = useSyncExternalStore(wcsOverlayStatus.subscribe, wcsOverlayStatus.get, wcsOverlayStatus.get);
   const wcsNote = wcsOverlayNote({ grid: display.grid, compass: display.compass }, wcsErrors);
+  const wcsNoteId = useId();
+  const gridNoteId = display.grid && wcsErrors.grid !== null ? wcsNoteId : undefined;
+  const compassNoteId = display.compass && wcsErrors.compass !== null ? wcsNoteId : undefined;
   const renderTitle = (title: string) => (renderOnlyDisabled ? renderOnlyTitle : title);
   const renderGroupClass = `${GROUP_CLASS} ${renderOnlyDisabled ? "opacity-50" : ""}`;
   const renderGroupTitle = renderOnlyDisabled ? renderOnlyTitle : undefined;
@@ -96,8 +98,8 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
   return (
     <fieldset
       data-testid="display-controls"
-      className="flex items-center gap-2 px-3 py-1 border-b border-zinc-800/80 flex-wrap"
-      style={{ background: "rgba(24,24,27,0.6)", minInlineSize: 0 }}
+      className="ab-display-controls"
+      aria-label="Image display"
     >
       <div className={GROUP_CLASS}>
         <button
@@ -107,10 +109,16 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
           disabled={linearBlocked !== null}
           onClick={toggleLinear}
           title={linearBlocked ?? linearTitle(linear)}
-          className={`${LINEAR_BUTTON_CLASS} ${linear !== null ? LINEAR_ON_CLASS : LINEAR_OFF_CLASS}`}
+          className="ab-display-toggle disabled:opacity-40"
         >
           Linear
         </button>
+        {renderOnlyDisabled && (
+          <span role="status" className={NOTE_CLASS}>
+            {rawPixelsLoading && <Loader2 size={9} className="animate-spin" aria-hidden="true" />}
+            {renderOnlyTitle}
+          </span>
+        )}
       </div>
 
       <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>
@@ -118,6 +126,7 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
           <span className={LABEL_CLASS}>stretch</span>
           <select
             className={SELECT_CLASS}
+            aria-label="Stretch curve"
             value={display.stretch}
             onChange={(e) => setDisplay({ stretch: e.target.value as StretchMode })}
           >
@@ -162,6 +171,7 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
           <span className={LABEL_CLASS}>limits</span>
           <select
             className={SELECT_CLASS}
+            aria-label="Display limits"
             value={display.limits}
             disabled={isMtf}
             onChange={(e) => setDisplay({ limits: e.target.value as LimitMode })}
@@ -239,19 +249,58 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
           </label>
         )}
 
+        {!renderOnlyDisabled && (
+          <span className="ab-display-range" title="resolved display limits">
+            {limitsLoading
+              ? "…"
+              : `${formatLimit(vmin)} … ${formatLimit(vmax)}${
+                  !isMtf && limits?.symmetric === true && limits.centre !== null
+                    ? ` · c ${formatLimit(limits.centre)}`
+                    : ""
+                }`}
+          </span>
+        )}
+      </fieldset>
+
+      <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>
         <label
-          className="flex items-center gap-1 cursor-pointer"
+          className="flex items-center gap-1"
+          title={renderTitle("colour lookup table; RdBu, coolwarm, bwr and seismic are diverging: pair them with symmetric limits and a linear stretch")}
+        >
+          <span className={LABEL_CLASS}>cmap</span>
+          <select
+            className={SELECT_CLASS}
+            aria-label="Color map"
+            value={display.colormap}
+            onChange={(e) => setDisplay({ colormap: e.target.value as ColormapName })}
+          >
+            {COLORMAP_NAMES.map((c) => (
+              <option key={c} value={c}>{COLORMAP_LABELS[c]}</option>
+            ))}
+          </select>
+        </label>
+      </fieldset>
+
+      <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>
+        <button
+          type="button"
+          data-testid="display-symmetric"
+          aria-label="Symmetric"
+          aria-pressed={display.symmetric}
+          aria-describedby={mtfHintShown ? mtfHintId : undefined}
+          disabled={renderOnlyDisabled}
+          onClick={() => setDisplay({ symmetric: !display.symmetric })}
+          className="ab-display-toggle"
           title={renderTitle("Mirror vmin/vmax about a centre: vmin = c - a, vmax = c + a with a = max(|lo - c|, |hi - c|) from the chosen limits; enabling it under mtf switches the stretch to linear")}
         >
-          <input
-            type="checkbox"
-            className="accent-zinc-400"
-            checked={display.symmetric}
-            onChange={(e) => setDisplay({ symmetric: e.target.checked })}
-          />
-          <span className={LABEL_CLASS}>symmetric</span>
-        </label>
-        {isMtf && <span className="text-[9px] text-zinc-500">(sets stretch to linear)</span>}
+          <span>symmetric</span>
+        </button>
+
+        {mtfHintShown && (
+          <span id={mtfHintId} className="ab-display-hint">
+            (sets stretch to linear)
+          </span>
+        )}
 
         {display.symmetric && (
           <label
@@ -267,78 +316,65 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
             />
           </label>
         )}
+
         {stretchNote && (
-          <span className="text-[9px] text-amber-400/80" title={stretchNote}>
+          <span className={NOTE_CLASS} title={stretchNote}>
             ({stretchNote})
           </span>
         )}
-      </fieldset>
 
-      <fieldset disabled={renderOnlyDisabled} className={renderGroupClass} title={renderGroupTitle} style={{ minInlineSize: 0 }}>
-        <label
-          className="flex items-center gap-1"
-          title={renderTitle("colour lookup table; RdBu, coolwarm, bwr and seismic are diverging: pair them with symmetric limits and a linear stretch")}
+        <button
+          type="button"
+          data-testid="display-invert"
+          aria-label="Invert"
+          aria-pressed={display.invert}
+          disabled={renderOnlyDisabled}
+          onClick={() => setDisplay({ invert: !display.invert })}
+          className="ab-display-toggle"
+          title={renderTitle("invert the lookup table")}
         >
-          <span className={LABEL_CLASS}>cmap</span>
-          <select
-            className={SELECT_CLASS}
-            value={display.colormap}
-            onChange={(e) => setDisplay({ colormap: e.target.value as ColormapName })}
-          >
-            {COLORMAP_NAMES.map((c) => (
-              <option key={c} value={c}>{COLORMAP_LABELS[c]}</option>
-            ))}
-          </select>
-        </label>
+          <span>invert</span>
+        </button>
 
-        <label className="flex items-center gap-1 cursor-pointer" title={renderTitle("invert the lookup table")}>
-          <input
-            type="checkbox"
-            className="accent-zinc-400"
-            checked={display.invert}
-            onChange={(e) => setDisplay({ invert: e.target.checked })}
-          />
-          <span className={LABEL_CLASS}>invert</span>
-        </label>
-
-        <label
-          className="flex items-center gap-1 cursor-pointer"
+        <button
+          type="button"
+          data-testid="display-colorbar"
+          aria-label="Colorbar"
+          aria-pressed={display.colorbar}
+          disabled={renderOnlyDisabled}
+          onClick={() => setDisplay({ colorbar: !display.colorbar })}
+          className="ab-display-toggle"
           title={renderTitle("value scale under the image: ticks follow stretch, limits and colormap")}
         >
-          <input
-            type="checkbox"
-            className="accent-zinc-400"
-            checked={display.colorbar}
-            onChange={(e) => setDisplay({ colorbar: e.target.checked })}
-          />
-          <span className={LABEL_CLASS}>colorbar</span>
-        </label>
+          <span>colorbar</span>
+        </button>
       </fieldset>
 
       <div className={GROUP_CLASS}>
-        <label className="flex items-center gap-1 cursor-pointer" title="WCS coordinate grid overlay (needs a plate-solved image)">
-          <input
-            type="checkbox"
-            className="accent-zinc-400"
-            checked={display.grid}
-            onChange={(e) => setDisplay({ grid: e.target.checked })}
-          />
-          <span className={LABEL_CLASS}>grid</span>
-        </label>
-        <label className="flex items-center gap-1 cursor-pointer" title="north/east compass and scale bar overlay (needs a WCS)">
-          <input
-            type="checkbox"
-            className="accent-zinc-400"
-            checked={display.compass}
-            onChange={(e) => setDisplay({ compass: e.target.checked })}
-          />
-          <span className={LABEL_CLASS}>compass</span>
-        </label>
-        {wcsNote && (
-          <span className="text-[9px] text-amber-400/80" title={wcsNote.title}>
-            ({wcsNote.text})
-          </span>
-        )}
+        <button
+          type="button"
+          data-testid="display-grid"
+          aria-label="Grid"
+          aria-pressed={display.grid}
+          aria-describedby={gridNoteId}
+          onClick={() => setDisplay({ grid: !display.grid })}
+          className="ab-display-toggle"
+          title="WCS coordinate grid overlay (needs a plate-solved image)"
+        >
+          <span>grid</span>
+        </button>
+        <button
+          type="button"
+          data-testid="display-compass"
+          aria-label="Compass"
+          aria-pressed={display.compass}
+          aria-describedby={compassNoteId}
+          onClick={() => setDisplay({ compass: !display.compass })}
+          className="ab-display-toggle"
+          title="north/east compass and scale bar overlay (needs a WCS)"
+        >
+          <span>compass</span>
+        </button>
 
         {display.grid && (
           <>
@@ -368,31 +404,26 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
             </label>
           </>
         )}
+
+        {wcsNote && (
+          <span id={wcsNoteId} className={NOTE_CLASS} title={wcsNote.title}>
+            ({wcsNote.text})<span className="sr-only"> {wcsNote.title}</span>
+          </span>
+        )}
       </div>
 
-      {!renderOnlyDisabled && (
-        <span className="text-[9px] font-mono text-zinc-500 ml-auto" title="resolved display limits">
-          {limitsLoading
-            ? "…"
-            : `${formatLimit(vmin)} … ${formatLimit(vmax)}${
-                !isMtf && limits?.symmetric === true && limits.centre !== null
-                  ? ` · c ${formatLimit(limits.centre)}`
-                  : ""
-              }`}
-        </span>
-      )}
-
-      <div className={`${GROUP_CLASS} ${renderOnlyDisabled ? "ml-auto" : ""}`}>
-        <label className="flex items-center gap-1 cursor-pointer" title={SAME_GROUP_TITLE}>
-          <input
-            type="checkbox"
-            className="accent-zinc-400"
-            data-testid="display-same-group"
-            checked={sameGroup}
-            onChange={(e) => setSameGroup(e.target.checked)}
-          />
-          <span className={LABEL_CLASS}>same filter</span>
-        </label>
+      <div className="ab-display-memory">
+        <button
+          type="button"
+          data-testid="display-same-group"
+          aria-label="Same filter"
+          aria-pressed={sameGroup}
+          onClick={() => setSameGroup(!sameGroup)}
+          className="ab-display-toggle"
+          title={SAME_GROUP_TITLE}
+        >
+          <span>same filter</span>
+        </button>
         <button type="button" data-testid="display-set-default" onClick={setAsDefault} className={TOOL_BUTTON_CLASS} title={SET_DEFAULT_TITLE}>
           Set as default
         </button>

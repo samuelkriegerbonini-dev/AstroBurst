@@ -14,7 +14,7 @@ import { OverlayLayerKeyContext } from "../../context/OverlayLayerKeyContext";
 import { COMPOSITE_RUN_KEY } from "../../utils/compositeChain";
 import type { RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
 import { GRAY_LUT_RGBA, resolveTransferLimits, toDisplayTransfer } from "../../utils/displayTransfer";
-import { CANVAS_HINT_CLASS, CUBE_SPECTRUM_HINT, cubeSpectrumHintShown, histogramOnPath, sameGrid } from "../../utils/previewShell";
+import { CUBE_SPECTRUM_HINT, cubeSpectrumHintShown, histogramOnPath, sameGrid } from "../../utils/previewShell";
 import { emitPixelClick, pixelFromRect, setMousePixel } from "../../hooks/useMousePixelStore";
 
 import ZoomPanView from "../ui/ZoomPanView";
@@ -342,6 +342,7 @@ function PreviewTabInner({ useGpu, activeBunit, rawPixels, rgbRawPixels, onCubeP
           regionsEnabled={regionsOnDisplayed}
           original={heldOriginal}
           label={displayed.isProcessed ? displayed.label : null}
+          canvasHint={cubeSpectrumHintShown({ isSpectralCube, fileDims, displayedDims }) ? CUBE_SPECTRUM_HINT : null}
         >
           <GpuRenderer
             pixels={rawPixels}
@@ -351,7 +352,6 @@ function PreviewTabInner({ useGpu, activeBunit, rawPixels, rgbRawPixels, onCubeP
             lut={lutBytes}
           />
         </GpuViewport>
-        {cubeSpectrumHintShown({ isSpectralCube, fileDims, displayedDims }) && <div className={CANVAS_HINT_CLASS}>{CUBE_SPECTRUM_HINT}</div>}
       </div>
       {display.colorbar && (
         <Colorbar

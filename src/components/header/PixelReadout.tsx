@@ -22,11 +22,12 @@ function fmt(v: number | null): string {
 }
 
 function PixelReadoutInner({ filePath, mouseX, mouseY }: PixelReadoutProps) {
-  const [probe, setProbe] = useState<PixelProbeResult | null>(null);
+  const [result, setResult] = useState<{ filePath: string; probe: PixelProbeResult } | null>(null);
+  const probe = result?.filePath === filePath ? result.probe : null;
 
   useEffect(() => {
     if (!filePath || mouseX === null || mouseY === null) {
-      setProbe(null);
+      setResult(null);
       return;
     }
     let cancelled = false;
@@ -34,11 +35,11 @@ function PixelReadoutInner({ filePath, mouseX, mouseY }: PixelReadoutProps) {
       probePixel(filePath, mouseX, mouseY, BOX_SIZE)
         .then((res) => {
           if (cancelled) return;
-          setProbe(res);
+          setResult({ filePath, probe: res });
         })
         .catch(() => {
           if (cancelled) return;
-          setProbe(null);
+          setResult(null);
         });
     }, HOVER_DEBOUNCE_MS);
     return () => {
@@ -52,7 +53,7 @@ function PixelReadoutInner({ filePath, mouseX, mouseY }: PixelReadoutProps) {
   const n = probe.neighborhood;
   const err = probe.err && probe.err.value !== null ? probe.err : null;
   return (
-    <div className="flex flex-col gap-0.5 text-[10px] font-mono" style={{ color: "rgba(251,191,36,0.7)" }}>
+    <div className="flex flex-col gap-1 text-[10px] font-mono" style={{ color: "#fcd34d" }}>
       <div className="flex items-center gap-2 flex-wrap">
         <Crosshair size={10} />
         <span>
@@ -60,7 +61,7 @@ function PixelReadoutInner({ filePath, mouseX, mouseY }: PixelReadoutProps) {
           {probe.unit ? ` ${probe.unit}` : ""}
           {err ? ` ± ${fmt(err.value)}${err.unit ? ` ${err.unit}` : ""}` : ""}
         </span>
-        <span className="text-zinc-600" title={ZERO_BASED_PIXEL_TITLE}>
+        <span className="text-zinc-400" title={ZERO_BASED_PIXEL_TITLE}>
           {zeroBasedPixelText(probe.x, probe.y)}
         </span>
       </div>
@@ -69,13 +70,13 @@ function PixelReadoutInner({ filePath, mouseX, mouseY }: PixelReadoutProps) {
           <span>DQ = {probe.dq.text}</span>
         </div>
       )}
-      <div className="flex items-center gap-2 flex-wrap text-zinc-500">
+      <div className="flex items-center gap-2 flex-wrap text-zinc-400">
         <span>box {probe.box}×{probe.box}:</span>
         <span>min {fmt(n.min)}</span>
         <span>max {fmt(n.max)}</span>
         <span>mean {fmt(n.mean)}</span>
         <span>median {fmt(n.median)}</span>
-        <span className="text-zinc-600">({n.n_pixels}, nan {n.n_nan})</span>
+        <span className="text-zinc-400">({n.n_pixels}, nan {n.n_nan})</span>
       </div>
     </div>
   );

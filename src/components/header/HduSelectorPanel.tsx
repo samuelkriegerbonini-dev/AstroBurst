@@ -11,6 +11,7 @@ interface HduSelectorPanelProps {
   filePath: string;
   activePath: string;
   activePlane?: PlaneInfo | null;
+  sourceOfProduct?: boolean;
   onSelectHdu?: (hduIndex: number, header: Record<string, string>) => void;
   onActivate?: (ref: string) => void;
   activating?: boolean;
@@ -28,6 +29,8 @@ const TYPE_STYLES: Record<string, { bg: string; border: string; text: string }> 
 };
 
 const DEFAULT_TYPE_STYLE = { bg: "rgba(113,113,122,0.1)", border: "rgba(113,113,122,0.2)", text: "#a1a1aa" };
+const SHOWN_BADGE = { text: "shown", title: "Currently displayed plane" };
+const SOURCE_BADGE = { text: "source", title: "Source plane of the displayed product" };
 const DQ_TAG_STYLE = { bg: "rgba(248,113,113,0.12)", border: "rgba(248,113,113,0.3)", text: "#f87171" };
 const ERR_TAG_STYLE = { bg: "rgba(251,191,36,0.12)", border: "rgba(251,191,36,0.3)", text: "#fbbf24" };
 
@@ -42,11 +45,13 @@ export default function HduSelectorPanel({
   filePath,
   activePath,
   activePlane,
+  sourceOfProduct = false,
   onSelectHdu,
   onActivate,
   activating = false,
   activateError = null,
 }: HduSelectorPanelProps) {
+  const shownBadge = sourceOfProduct ? SOURCE_BADGE : SHOWN_BADGE;
   const [extensions, setExtensions] = useState<HduInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -263,10 +268,10 @@ export default function HduSelectorPanel({
                   <span
                     className="text-[9px] font-medium px-1.5 py-px rounded shrink-0 flex items-center gap-1"
                     style={{ background: "rgba(20,184,166,0.12)", border: "1px solid rgba(20,184,166,0.3)", color: "var(--ab-teal)" }}
-                    title="Currently displayed plane"
+                    title={shownBadge.title}
                   >
-                    <Eye size={9} />
-                    shown
+                    {!sourceOfProduct && <Eye size={9} />}
+                    {shownBadge.text}
                   </span>
                 ) : (
                   <button

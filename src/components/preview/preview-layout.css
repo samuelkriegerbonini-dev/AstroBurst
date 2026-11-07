@@ -1,0 +1,108 @@
+.ab-preview-panel {
+  container: preview / inline-size;
+}
+
+.ab-preview-header {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  padding: 4px 12px;
+}
+
+.ab-preview-metadata {
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 3px 8px;
+  min-width: 0;
+}
+
+.ab-preview-name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ab-preview-dimensions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ab-preview-dimensions > span {
+  white-space: nowrap;
+}
+
+.ab-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.ab-preview-actions > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.ab-viewer-status-strip {
+  display: flex;
+  flex: 0 0 18px;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: flex-start;
+  gap: 0 12px;
+  min-width: 0;
+  height: 18px;
+  padding: 0 12px;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.ab-viewer-status-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.ab-viewer-status-strip > span {
+  flex-shrink: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+@container preview (max-width: 640px) {
+  .ab-preview-metadata {
+    order: 3;
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .ab-preview-actions {
+    flex: 1 1 0;
+  }
+
+  .ab-viewer-status-strip {
+    flex-basis: 36px;
+    height: 36px;
+  }
+}
+
+@container preview (max-width: 420px) {
+  .ab-viewer-status-strip {
+    flex-basis: 54px;
+    height: 54px;
+  }
+}

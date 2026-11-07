@@ -150,6 +150,80 @@ export function createFramePublishGate(): FramePublishGate {
   };
 }
 
+export interface CubeFrameFailure {
+  readonly idx: number;
+  readonly message: string;
+}
+
+export interface CubeFrameRequester {
+  readonly filePath: string;
+  readonly totalFrames: number;
+  readonly playing: boolean;
+  readonly failure: CubeFrameFailure | null;
+  readonly labelFor: (idx: number) => string;
+  readonly stepOrigin: (displayed: number) => number;
+  readonly request: (idx: number) => void;
+}
+
+let frameRequesters: readonly CubeFrameRequester[] = [];
+const frameRequesterListeners = new Set<() => void>();
+
+function notifyFrameRequesters(): void {
+  frameRequesterListeners.forEach((listener) => listener());
+}
+
+export const cubeFrameRequesters = {
+  subscribe(listener: () => void): () => void {
+    frameRequesterListeners.add(listener);
+    return () => {
+      frameRequesterListeners.delete(listener);
+    };
+  },
+  get(): readonly CubeFrameRequester[] {
+    return frameRequesters;
+  },
+  register(requester: CubeFrameRequester): () => void {
+    frameRequesters = [...frameRequesters, requester];
+    notifyFrameRequesters();
+    return () => {
+      frameRequesters = frameRequesters.filter((entry) => entry !== requester);
+      notifyFrameRequesters();
+    };
+  },
+};
+
+export interface ViewerFrameStep {
+  frame: number;
+  total: number;
+  playing: boolean;
+  label: string;
+  failure: string | null;
+  origin: () => number;
+  request: (idx: number) => void;
+}
+
+export function viewerFrameStep(
+  record: Pick<ProcessedResult, "kind" | "inputPath" | "frameIndex"> | null,
+  requesters: readonly CubeFrameRequester[],
+): ViewerFrameStep | null {
+  if (record === null || record.kind !== "cube" || typeof record.frameIndex !== "number") return null;
+  const requester = requesters.findLast((entry) => entry.filePath === record.inputPath);
+  if (requester === undefined || requester.totalFrames <= 1) return null;
+  const total = requester.totalFrames;
+  const displayed = clampFrame(record.frameIndex, total);
+  const stalled = requester.failure !== null && requester.failure.idx !== displayed ? requester.failure : null;
+  const frame = stalled === null ? displayed : clampFrame(stalled.idx, total);
+  return {
+    frame,
+    total,
+    playing: requester.playing,
+    label: requester.labelFor(frame),
+    failure: stalled?.message ?? null,
+    origin: () => clampFrame(requester.stepOrigin(displayed), total),
+    request: requester.request,
+  };
+}
+
 function pathHash(path: string): string {
   let hash = 5381;
   for (let i = 0; i < path.length; i++) hash = ((hash << 5) + hash + path.charCodeAt(i)) | 0;

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, memo } from "react";
-import { AlertTriangle, ChevronDown, Loader2 } from "lucide-react";
-import { useDqContext } from "../../context/PreviewContext";
+import { AlertTriangle, ChevronDown, Loader2, RefreshCw } from "lucide-react";
+import { useDqContext, type DqTarget } from "../../context/PreviewContext";
 import type { DqFlagTableResult } from "../../services/display";
 import type { DqOverlaySettings } from "../../shared/types/dq";
 import { hasBit, listedDqFlags, toggleBit } from "../../utils/dqFlags";
@@ -102,11 +102,22 @@ export function DqFlagMenu({ flagTable, overlay, setOverlay, excludeDq, setExclu
   );
 }
 
+function noDqTitle(target: DqTarget, flagTableLoading: boolean): string {
+  if (target.kind === "composite") return "No DQ overlay for the colour composite";
+  if (target.kind === "file") return "No DQ plane in this file";
+  return flagTableLoading ? `Reading DQ of ${target.label}…` : `No DQ plane in this product (${target.label})`;
+}
+
 function DqControlsInner() {
-  const { dqRef, flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMaskLoading, dqMaskError } = useDqContext();
+  const {
+    dqRef, dqTarget, flagTable, flagTableLoading, flagTableError, retryFlagTable,
+    overlay, setOverlay, excludeDq, setExcludeDq, dqMaskLoading, dqMaskError,
+  } = useDqContext();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const hasDq = !!dqRef;
+  const tableFailed = flagTableError !== null;
+  const menuAvailable = hasDq && !tableFailed;
 
   useEffect(() => {
     if (!open) return;
@@ -118,16 +129,18 @@ function DqControlsInner() {
   }, [open]);
 
   useEffect(() => {
-    if (!hasDq) setOpen(false);
-  }, [hasDq]);
+    if (!menuAvailable) setOpen(false);
+  }, [menuAvailable]);
 
-  const toggleTitle = !hasDq
-    ? "No DQ plane in this file"
+  const unavailableTitle = tableFailed ? `DQ table unavailable: ${flagTableError}` : noDqTitle(dqTarget, flagTableLoading);
+  const toggleTitle = tableFailed || !hasDq
+    ? unavailableTitle
     : dqMaskError
       ? `DQ overlay failed: ${dqMaskError}`
       : overlay.enabled
         ? "DQ overlay shown — click to hide"
         : "Show flagged DQ pixels over the image";
+  const pending = dqMaskLoading || (!hasDq && flagTableLoading);
 
   return (
     <div ref={rootRef} className="relative flex items-center gap-0.5">
@@ -136,21 +149,38 @@ function DqControlsInner() {
         disabled={!hasDq}
         title={toggleTitle}
         className={BTN_CLASS}
-        style={overlay.enabled ? ON_STYLE : OFF_STYLE}
+        style={overlay.enabled && hasDq ? ON_STYLE : OFF_STYLE}
       >
-        {dqMaskLoading ? <Loader2 size={10} className="animate-spin" /> : <AlertTriangle size={10} />}
+        {pending ? <Loader2 size={10} className="animate-spin" /> : <AlertTriangle size={10} />}
         DQ
       </button>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        disabled={!hasDq}
-        title={hasDq ? "DQ flags and masking options" : "No DQ plane in this file"}
-        className="p-0.5 rounded text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-      >
-        <ChevronDown size={10} />
-      </button>
+      {tableFailed ? (
+        <button
+          type="button"
+          onClick={retryFlagTable}
+          title={unavailableTitle}
+          aria-label="Retry reading the DQ table"
+          className={BTN_CLASS}
+          style={OFF_STYLE}
+        >
+          <RefreshCw size={10} />
+          Retry
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          disabled={!hasDq}
+          title={hasDq ? "DQ flags and masking options" : unavailableTitle}
+          aria-label="DQ flag options"
+          aria-expanded={open && menuAvailable}
+          className="p-1 rounded text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          <ChevronDown size={10} />
+        </button>
+      )}
 
-      {open && hasDq && (
+      {open && menuAvailable && (
         <DqFlagMenu
           flagTable={flagTable}
           overlay={overlay}

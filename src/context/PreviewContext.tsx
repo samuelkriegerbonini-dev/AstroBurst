@@ -32,7 +32,6 @@ import type {
   HistogramData,
   RawPixelData,
   RawRgbPixelData,
-  PlaneInfo,
   DqMaskData,
   DqOverlaySettings,
 } from "../shared/types";
@@ -185,10 +184,15 @@ interface DisplayContextValue {
   setSameGroup: (on: boolean) => void;
 }
 
+export type DqTarget = { kind: "file" } | { kind: "product"; label: string } | { kind: "composite" };
+
 interface DqContextValue {
-  plane: PlaneInfo | null;
   dqRef: string | null;
+  dqTarget: DqTarget;
   flagTable: DqFlagTableResult | null;
+  flagTableLoading: boolean;
+  flagTableError: string | null;
+  retryFlagTable: () => void;
   overlay: DqOverlaySettings;
   setOverlay: (patch: Partial<DqOverlaySettings>) => void;
   excludeDq: boolean;
@@ -416,6 +420,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [lut, setLut] = useState<Uint8Array | null>(GRAY_LUT_RGBA);
   const [flagTable, setFlagTable] = useState<DqFlagTableResult | null>(null);
   const [flagTableSource, setFlagTableSource] = useState<string | null>(null);
+  const [flagTableError, setFlagTableError] = useState<string | null>(null);
+  const [flagTableErrorSource, setFlagTableErrorSource] = useState<string | null>(null);
+  const [flagTableRefetch, setFlagTableRefetch] = useState(0);
   const [dqMaskSource, setDqMaskSource] = useState<string | null>(null);
   const [overlay, setOverlayRaw] = useState<DqOverlaySettings>(DEFAULT_DQ_OVERLAY);
   const [excludeDq, setExcludeDq] = useState(false);
@@ -475,6 +482,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const previousFileRevisionRef = useRef<string | null>(null);
   const histSeqRef = useRef(0);
   const flagTableSeqRef = useRef(0);
+  const overlayTableLabelRef = useRef<string | null>(null);
   const dqMaskSeqRef = useRef(0);
   const dqMaskKeyRef = useRef("");
   const excludeDqRef = useRef(excludeDq);
@@ -622,6 +630,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   const setOverlay = useCallback((patch: Partial<DqOverlaySettings>) => {
     setOverlayRaw((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  const retryFlagTable = useCallback(() => {
+    setFlagTableRefetch((count) => count + 1);
   }, []);
 
   const setSelectedPalette = useCallback((p: string) => {
@@ -893,6 +905,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setHistDataPath(null);
     setFlagTable(null);
     setOverlayRaw(DEFAULT_DQ_OVERLAY);
+    overlayTableLabelRef.current = null;
     setDqMask(null);
     setDqMaskLoading(false);
     setDqMaskError(null);
@@ -1035,38 +1048,55 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const dqRgbView = rgbViewOf({ compositePreviewUrl, fileIsRgb: !!file?.result?.is_rgb, filePath: imagePath, filePreviewUrl: file?.result?.previewUrl ?? null, processed });
   const dqPath = processedPreviewOnly || dqRgbView !== null ? null : processedPath ?? imagePath;
   const dqSource = dqPath ? `${dqPath}|${sourceVersion}` : null;
-  const hasProcessedResult = processed !== null;
+  const flagTablePath = dqPath !== null && (processed !== null || !!plane?.dq_ref) ? dqPath : null;
   const activeFlagTable = dqSource !== null && flagTableSource === dqSource ? flagTable : null;
+  const activeFlagTableError = dqSource !== null && flagTableErrorSource === dqSource ? flagTableError : null;
+  const flagTableLoading = flagTablePath !== null && activeFlagTable === null && activeFlagTableError === null;
   const dqRef = dqPath === null ? null : activeFlagTable ? activeFlagTable.dq_ref : processed === null ? plane?.dq_ref ?? null : null;
   const activeDqMask = dqSource !== null && dqMaskSource === `${dqSource}|${overlay.mask}` ? dqMask : null;
+  const compositeShown = dqRgbView?.kind === "composite";
+  const processedLabel = processed?.label ?? null;
+  const dqTarget = useMemo<DqTarget>(
+    () => (compositeShown ? { kind: "composite" } : processedLabel !== null ? { kind: "product", label: processedLabel } : { kind: "file" }),
+    [compositeShown, processedLabel],
+  );
 
   useEffect(() => {
-    const flagTableSeq = flagTableSeqRef;
     const dqMaskSeq = dqMaskSeqRef;
-    const seq = ++flagTableSeqRef.current;
     ++dqMaskSeqRef.current;
     dqMaskKeyRef.current = "";
-    setFlagTable(null);
-    setFlagTableSource(null);
     setDqMask(null);
     setDqMaskSource(null);
     setDqMaskLoading(false);
     setDqMaskError(null);
-    setOverlayRaw(DEFAULT_DQ_OVERLAY);
-    if (!dqPath || (!hasProcessedResult && !plane?.dq_ref)) return;
-    getDqFlagTable(dqPath)
+    return () => { ++dqMaskSeq.current; };
+  }, [dqSource]);
+
+  useEffect(() => {
+    const flagTableSeq = flagTableSeqRef;
+    const seq = ++flagTableSeqRef.current;
+    setFlagTable(null);
+    setFlagTableSource(null);
+    setFlagTableError(null);
+    setFlagTableErrorSource(null);
+    if (!flagTablePath) return;
+    getDqFlagTable(flagTablePath)
       .then((table) => {
         if (flagTableSeqRef.current !== seq) return;
         setFlagTable(table);
         setFlagTableSource(dqSource);
-        setOverlayRaw({ enabled: false, mask: table.default_mask });
+        if (overlayTableLabelRef.current === table.label) return;
+        overlayTableLabelRef.current = table.label;
+        setOverlayRaw((prev) => ({ ...prev, mask: table.default_mask }));
       })
       .catch((err) => {
         if (flagTableSeqRef.current !== seq) return;
         console.error("[AstroBurst] DQ flag table fetch failed:", err);
+        setFlagTableError(err instanceof Error ? err.message : String(err));
+        setFlagTableErrorSource(dqSource);
       });
-    return () => { ++flagTableSeq.current; ++dqMaskSeq.current; };
-  }, [dqSource, dqPath, hasProcessedResult, plane?.dq_ref]);
+    return () => { ++flagTableSeq.current; };
+  }, [dqSource, flagTablePath, flagTableRefetch]);
 
   const overlayEnabled = overlay.enabled;
   const overlayMask = overlay.mask;
@@ -1173,8 +1203,14 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const dqValue = useMemo<DqContextValue>(
-    () => ({ plane, dqRef, flagTable: activeFlagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMask: activeDqMask, dqMaskLoading, dqMaskError }),
-    [plane, dqRef, activeFlagTable, overlay, setOverlay, excludeDq, activeDqMask, dqMaskLoading, dqMaskError],
+    () => ({
+      dqRef, dqTarget, flagTable: activeFlagTable, flagTableLoading, flagTableError: activeFlagTableError, retryFlagTable,
+      overlay, setOverlay, excludeDq, setExcludeDq, dqMask: activeDqMask, dqMaskLoading, dqMaskError,
+    }),
+    [
+      dqRef, dqTarget, activeFlagTable, flagTableLoading, activeFlagTableError, retryFlagTable,
+      overlay, setOverlay, excludeDq, activeDqMask, dqMaskLoading, dqMaskError,
+    ],
   );
 
   return (

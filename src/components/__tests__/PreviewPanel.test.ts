@@ -1,9 +1,14 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createElement } from "react";
+import { createElement, isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CUBE_SPECTRUM_HINT } from "../../utils/previewShell";
+import { CUBE_SPECTRUM_HINT, PNG_ONLY_TITLE } from "../../utils/previewShell";
 import { dockStore } from "../../hooks/useDockLayout";
 import { DEFAULT_DOCK_LAYOUT, anchorOf, dockReducer } from "../../utils/dockLayout";
+import { middleEllipsis } from "../../utils/filenameDisplay";
+
+const previewLayoutCss = readFileSync(fileURLToPath(new URL("../preview/preview-layout.css", import.meta.url)), "utf8");
 
 interface ViewState {
   label: string | null;
@@ -18,10 +23,12 @@ interface ViewState {
   imageRef?: string;
   fileHeader?: Record<string, string>;
   filePath?: string;
+  fileName?: string;
   productPath?: string | null;
   productVersion?: number;
   previewOnly?: boolean;
   compositeUrl?: string | null;
+  cubeFrame?: number;
 }
 
 const S3D_GRID: [number, number] = [53, 55];
@@ -67,7 +74,7 @@ vi.mock("../../context/PreviewContext", () => ({
       : {
           id: "1",
           path: state.filePath ?? "/data/cube_s3d.fits",
-          name: "cube_s3d.fits",
+          name: state.fileName ?? "cube_s3d.fits",
           reloads: state.reloads,
           finishedAt: state.finishedAt,
           imageRef: state.imageRef,
@@ -95,7 +102,15 @@ vi.mock("../../context/PreviewContext", () => ({
     clearRgbRawPixels: () => {},
   }),
   useRenderContext: () => ({
-    processed: state.label ? { label: state.label, previewUrl: "asset://result.png", fitsPath: state.productPath === undefined ? "/out/result.fits" : state.productPath, dimensions: state.displayedDims } : null,
+    processed: state.label
+      ? {
+          label: state.label,
+          previewUrl: "asset://result.png",
+          fitsPath: state.productPath === undefined ? "/out/result.fits" : state.productPath,
+          dimensions: state.displayedDims,
+          ...(state.cubeFrame === undefined ? {} : { kind: "cube", inputPath: state.filePath ?? "/data/cube_s3d.fits", frameIndex: state.cubeFrame }),
+        }
+      : null,
     processedVersion: state.productVersion ?? 0,
     stfPreviewUrl: null,
     chain: { psfKernel: null },
@@ -129,7 +144,7 @@ vi.mock("../../hooks/useMousePixelStore", () => ({
 }));
 vi.mock("../../hooks/useRampStore", () => ({ useRampIntegration: () => 0 }));
 vi.mock("../../utils/gpuPreference", () => ({ loadGpuPreference: () => state.gpu, saveGpuPreference: () => {} }));
-const viewerProps: { onCanvasPixelClick?: (x: number, y: number) => void }[] = [];
+const viewerProps: { onCanvasPixelClick?: (x: number, y: number) => void; frameKeys?: unknown }[] = [];
 
 vi.mock("../viewer/AdvancedImageViewer", () => ({
   default: (props: { canvasHint?: string; onCanvasPixelClick?: (x: number, y: number) => void }) => {
@@ -150,7 +165,7 @@ vi.mock("../preview/SpectrumViewerEmpty", () => ({
   },
 }));
 vi.mock("../preview/DisplayControls", () => ({ default: () => null }));
-const tabProps: { onCubePixelClick?: (x: number, y: number) => void }[] = [];
+const tabProps: { onCubePixelClick?: (x: number, y: number) => void; frameKeys?: unknown }[] = [];
 
 vi.mock("../preview/PreviewTab", () => ({
   default: (props: { onCubePixelClick?: (x: number, y: number) => void }) => {
@@ -160,11 +175,13 @@ vi.mock("../preview/PreviewTab", () => ({
 }));
 
 import PreviewPanel from "../PreviewPanel";
+import { FrameKeysFocusRing } from "../preview/ViewerFrameStepper";
 import { hooks } from "../../test/hookRuntime";
+import { cubeFrameRequesters, formatFrameLabel } from "../../utils/cubeNavigation";
 import { beginSpectrum, commitSpectrum, resetSpectrum, useSpectrum, type SpectrumState } from "../../hooks/useSpectrumStore";
 
 function render(view: Partial<ViewState>): string {
-  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false, reloads: undefined, finishedAt: undefined, imageRef: undefined, fileHeader: undefined, filePath: undefined, productPath: undefined, productVersion: undefined, previewOnly: undefined, compositeUrl: undefined }, view);
+  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false, reloads: undefined, finishedAt: undefined, imageRef: undefined, fileHeader: undefined, filePath: undefined, fileName: undefined, productPath: undefined, productVersion: undefined, previewOnly: undefined, compositeUrl: undefined, cubeFrame: undefined }, view);
   return renderToStaticMarkup(createElement(PreviewPanel));
 }
 
@@ -247,7 +264,7 @@ describe("PreviewPanel active product metadata", () => {
     expect(renderCurrent()).not.toContain("DN/s");
   });
 
-  it.each([{ productVersion: 1 }, { reloads: 1 }, { finishedAt: 123 }, { imageRef: "updated.fits" }])("reloads product metadata for a changed revision %o", async (revision) => {
+  it.each([{ reloads: 1 }, { finishedAt: 123 }, { imageRef: "updated.fits" }])("reloads product metadata for a changed input revision %o", async (revision) => {
     const replacement = pendingHeader();
     getHeaderMock.mockResolvedValueOnce(PRODUCT_HEADER).mockReturnValueOnce(replacement.promise);
     render(QUICK_SLOPE);
@@ -259,6 +276,65 @@ describe("PreviewPanel active product metadata", () => {
     expect(html).not.toContain("DN/s");
     expect(html).toContain("Loading metadata");
     expect(getHeaderMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps BITPIX and BUNIT on screen while a new version of the same product is read", async () => {
+    const replacement = pendingHeader();
+    getHeaderMock.mockResolvedValueOnce(PRODUCT_HEADER).mockReturnValueOnce(replacement.promise);
+    render(QUICK_SLOPE);
+    renderCurrent();
+    await Promise.resolve();
+    expect(renderCurrent()).toContain("DN/s");
+    state.productVersion = 1;
+    const stepped = renderCurrent();
+    expect(stepped).toContain("BITPIX -32");
+    expect(stepped).toContain("DN/s");
+    expect(stepped).not.toContain("Loading metadata");
+    expect(getHeaderMock).toHaveBeenCalledTimes(2);
+    replacement.resolve({ ...PRODUCT_HEADER, BUNIT: "MJy/sr" });
+    await Promise.resolve();
+    expect(renderCurrent()).toContain("MJy/sr");
+  });
+
+  it("shows the header of a revisited frame at once and still re-reads it", async () => {
+    const revisit = pendingHeader();
+    getHeaderMock.mockResolvedValueOnce(PRODUCT_HEADER).mockResolvedValueOnce({ BITPIX: "-32", BUNIT: "Jy" }).mockReturnValueOnce(revisit.promise);
+    render({ ...QUICK_SLOPE, productPath: "/out/frame_0.fits", productVersion: 1 });
+    renderCurrent();
+    await Promise.resolve();
+    expect(renderCurrent()).toContain("DN/s");
+    Object.assign(state, { productPath: "/out/frame_1.fits", productVersion: 2 });
+    expect(renderCurrent()).toContain("Loading metadata");
+    await Promise.resolve();
+    expect(renderCurrent()).toContain(">Jy<");
+    Object.assign(state, { productPath: "/out/frame_0.fits", productVersion: 3 });
+    const revisited = renderCurrent();
+    expect(revisited).toContain("DN/s");
+    expect(revisited).not.toContain(">Jy<");
+    expect(revisited).not.toContain("Loading metadata");
+    expect(getHeaderMock).toHaveBeenLastCalledWith("/out/frame_0.fits");
+    expect(getHeaderMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("explains the PNG chip and the load-time chip", () => {
+    expect(render({ ...QUICK_SLOPE, productPath: null, previewOnly: true })).toContain(`title="${PNG_ONLY_TITLE}">PNG</span>`);
+    expect(render({})).toContain('title="Load time">0.01s</span>');
+  });
+
+  it("shortens long file names in the middle inside a flexible name span", () => {
+    const name = "jw02739001001_02105_00001_nrcb1_rate.fits";
+    const path = `/data/${name}`;
+    const shown = middleEllipsis(name, 40);
+    const source = render({ fileName: name, filePath: path });
+    expect(source).toContain(`<span class="ab-preview-name text-[10px] font-mono text-zinc-400" title="${path}">${shown}</span>`);
+    expect(source).not.toContain("max-w-[200px]");
+    const product = render({ fileName: name, filePath: path, label: "Moment 0" });
+    expect(product).toContain(`title="${path}">Source: ${shown}</span>`);
+    expect(product).not.toContain("max-w-[200px]");
+    const rule = /\.ab-preview-name\s*\{([^}]*)\}/.exec(previewLayoutCss)?.[1] ?? "";
+    expect(rule).toMatch(/min-width:\s*0/);
+    expect(rule).toMatch(/text-overflow:\s*ellipsis/);
+    expect(rule).toMatch(/white-space:\s*nowrap/);
   });
 
   it("restores source metadata after reverting while a product header is pending", async () => {
@@ -439,6 +515,118 @@ describe("PreviewPanel Revert to original", () => {
     (revert.onClick as () => void)();
     expect(revertMock).toHaveBeenCalledTimes(1);
     expect(resetProcessedMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("PreviewPanel frame stepper", () => {
+  const CUBE_PATH = "/data/cube_s3d.fits";
+  const FRAME: Partial<ViewState> = { label: "ch 5 (0–39)", cubeFrame: 5 };
+  const request = vi.fn<(idx: number) => void>();
+  let unregister: () => void = () => {};
+
+  beforeEach(() => {
+    request.mockReset();
+    unregister = cubeFrameRequesters.register({
+      filePath: CUBE_PATH,
+      totalFrames: 40,
+      playing: false,
+      failure: null,
+      labelFor: (idx) => formatFrameLabel(idx, 40, null, ""),
+      stepOrigin: (displayed) => displayed,
+      request,
+    });
+  });
+
+  afterEach(() => unregister());
+
+  type ElementProps = Record<string, unknown> & { children?: unknown };
+  interface Located {
+    path: number[];
+    type: unknown;
+    props: ElementProps;
+  }
+
+  function locate(node: unknown, match: (type: unknown, props: ElementProps) => boolean, path: number[] = []): Located | null {
+    if (!isValidElement<ElementProps>(node)) return null;
+    if (match(node.type, node.props)) return { path, type: node.type, props: node.props };
+    const children = Array.isArray(node.props.children) ? node.props.children : [node.props.children];
+    for (let i = 0; i < children.length; i++) {
+      const found = locate(children[i], match, [...path, i]);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const isViewport = (_type: unknown, props: ElementProps) => props["data-dock-viewport"] !== undefined;
+  const isRing = (type: unknown) => type === FrameKeysFocusRing;
+
+  function headerActions(html: string): string {
+    const at = html.indexOf('class="ab-preview-actions"');
+    expect(at).toBeGreaterThan(-1);
+    return html.slice(at, html.indexOf('data-dock-viewport=""'));
+  }
+
+  it("puts a frame stepper first in the header actions while a cube frame is on screen", () => {
+    const actions = headerActions(render(FRAME));
+    expect(actions).toContain('title="Previous frame"');
+    expect(actions).toContain(">ch 5 (0–39)</span>");
+    expect(actions).toContain('title="Next frame"');
+    expect(actions.indexOf('title="Next frame"')).toBeLessThan(actions.indexOf("data-dq-controls"));
+  });
+
+  it("shows no frame stepper on the original cube or on a map of it", () => {
+    expect(render({})).not.toContain('title="Previous frame"');
+    expect(render({ label: "Moment 0" })).not.toContain('title="Previous frame"');
+  });
+
+  it("keeps the frame keys on the viewport, which stays mounted when a PNG-first frame swaps the GPU viewer for the CPU viewer", () => {
+    render({ ...FRAME, gpu: true });
+    hooks.mount();
+    const gpu = hooks.render(PreviewPanel, {});
+    tabProps.length = 0;
+    renderToStaticMarkup(gpu as ReturnType<typeof createElement>);
+    expect(tabProps).toHaveLength(1);
+    expect(tabProps[0].frameKeys, "the GPU canvas leaves the page in the swap").toBeUndefined();
+    const onGpu = locate(gpu, isViewport);
+    state.previewOnly = true;
+    const cpu = hooks.render(PreviewPanel, {});
+    viewerProps.length = 0;
+    renderToStaticMarkup(cpu as ReturnType<typeof createElement>);
+    expect(viewerProps).toHaveLength(1);
+    expect(viewerProps[0].frameKeys, "the CPU canvas leaves the page when the FITS arrives").toBeUndefined();
+    const onCpu = locate(cpu, isViewport);
+    expect(onCpu?.type).toBe("div");
+    expect(onCpu?.path, "the same element in both viewers, so focus stays on it").toEqual(onGpu?.path);
+    for (const viewport of [onGpu, onCpu]) {
+      expect(viewport?.props.tabIndex).toBe(0);
+      expect(viewport?.props["aria-keyshortcuts"]).toContain("ArrowRight");
+    }
+    const self = {};
+    (onCpu?.props.onKeyDown as (event: unknown) => void)({ key: "ArrowRight", shiftKey: false, target: self, currentTarget: self, preventDefault: () => {} });
+    expect(request).toHaveBeenCalledWith(6);
+  });
+
+  it("draws the viewport's focus ring as a layer inside it and hands it the viewport's own outline", () => {
+    render(FRAME);
+    hooks.mount();
+    const tree = hooks.render(PreviewPanel, {});
+    const viewport = locate(tree, isViewport);
+    expect(String(viewport?.props.className).split(" ")).toEqual(expect.arrayContaining(["group/frame-keys", "relative"]));
+    expect(viewport?.props.style).toEqual({ outline: "none" });
+    const ring = locate(tree, isRing);
+    expect(ring?.path.slice(0, viewport?.path.length)).toEqual(viewport?.path);
+    expect(renderToStaticMarkup(tree as ReturnType<typeof createElement>)).toContain("group-focus-visible/frame-keys:block");
+  });
+
+  it("makes the viewport no focus stop and draws no ring without a cube frame on screen", () => {
+    render({ label: "Moment 0" });
+    hooks.mount();
+    const tree = hooks.render(PreviewPanel, {});
+    const viewport = locate(tree, isViewport);
+    expect(viewport?.props.tabIndex).toBeUndefined();
+    expect(viewport?.props.onKeyDown).toBeUndefined();
+    expect(viewport?.props.style).toBeUndefined();
+    expect(locate(tree, isRing)).toBeNull();
   });
 });
 

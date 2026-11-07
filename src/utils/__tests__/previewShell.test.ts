@@ -63,19 +63,28 @@ describe("viewerPublishesPixel", () => {
 });
 
 describe("statusStripIdleText", () => {
+  const onFileGrid = { composite: false, fileRgbView: false, gridMatchesFile: true };
+  const everyReadout = { hasWcs: true, spectral: true };
+
+  it("names only the readouts the file can give", () => {
+    expect(statusStripIdleText(onFileGrid, { hasWcs: false, spectral: false })).toBe("Hover the image for x, y and value");
+    expect(statusStripIdleText(onFileGrid, { hasWcs: true, spectral: false })).toBe("Hover the image for x, y, value and RA/Dec");
+    expect(statusStripIdleText(onFileGrid, { hasWcs: false, spectral: true })).toBe("Hover the image for x, y, value and wavelength");
+    expect(statusStripIdleText(onFileGrid, everyReadout)).toBe("Hover the image for x, y, value, wavelength and RA/Dec");
+  });
+
   it("asks for a hover only where the viewer publishes a pixel", () => {
-    expect(statusStripIdleText({ composite: false, fileRgbView: false, gridMatchesFile: true })).toBe("Hover the image for x, y, value and RA/Dec");
-    expect(statusStripIdleText({ composite: true, fileRgbView: false, gridMatchesFile: true })).toBe("No pixel readout for the colour composite");
+    expect(statusStripIdleText({ composite: true, fileRgbView: false, gridMatchesFile: true }, everyReadout)).toBe("No pixel readout for the colour composite");
   });
 
   it("says why a PNG-only result on another pixel grid has no readout and how to get it back", () => {
-    expect(statusStripIdleText({ composite: false, fileRgbView: false, gridMatchesFile: false })).toBe(OTHER_GRID_IDLE_TEXT);
+    expect(statusStripIdleText({ composite: false, fileRgbView: false, gridMatchesFile: false }, everyReadout)).toBe(OTHER_GRID_IDLE_TEXT);
     expect(OTHER_GRID_IDLE_TEXT).toBe("No pixel readout: this PNG-only result is on another pixel grid; Revert to measure the file");
     expect(OTHER_GRID_CANVAS_HINT).toMatch(/another pixel grid/);
   });
 
   it("names the colour composite when it covers a PNG-only result on another grid", () => {
-    expect(statusStripIdleText({ composite: true, fileRgbView: false, gridMatchesFile: false })).toBe("No pixel readout for the colour composite");
+    expect(statusStripIdleText({ composite: true, fileRgbView: false, gridMatchesFile: false }, everyReadout)).toBe("No pixel readout for the colour composite");
   });
 });
 
@@ -367,9 +376,10 @@ describe("gpuToggleView", () => {
     expect(gpuToggleView({ ...onGpu, loadError: "boom", pngOnlyMono: true }).tone).toBe("failed");
   });
 
-  it("shows a busy label while probing or loading, whatever the record", () => {
+  it("shows a busy label while probing and keeps the chosen renderer's label while loading", () => {
     expect(gpuToggleView({ ...onGpu, probing: true, available: null })).toMatchObject({ state: "probing", label: "...", tone: "gpu" });
-    expect(gpuToggleView({ ...onGpu, loading: true })).toMatchObject({ state: "loading", label: "...", title: "Rendering on GPU (WebGPU)" });
+    expect(gpuToggleView({ ...onGpu, loading: true })).toMatchObject({ state: "loading", label: "GPU", title: "Rendering on GPU (WebGPU)" });
+    expect(gpuToggleView({ ...onGpu, loading: true, useGpu: false })).toMatchObject({ state: "loading", label: "CPU" });
     expect(gpuToggleView({ ...onGpu, loading: true, pngOnlyMono: true }).tone).toBe("gpu");
   });
 
@@ -377,7 +387,7 @@ describe("gpuToggleView", () => {
     const shown = { ...onGpu, cpuViewerShown: true };
     expect(gpuToggleView({ ...shown, loading: true })).toEqual({
       state: "loading",
-      label: "...",
+      label: "GPU",
       title: GPU_WAITING_TOGGLE_TITLE,
       tone: "gpu",
     });

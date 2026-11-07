@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DEFAULT_DISPLAY_SETTINGS } from "../../../shared/types/display";
-import { CUBE_SPECTRUM_HINT } from "../../../utils/previewShell";
+import { CANVAS_HINT_CLASS, CUBE_SPECTRUM_HINT } from "../../../utils/previewShell";
 import { STF_LOCK_RGB_CPU } from "../../../utils/analysisTarget";
 import { RGB_LINEAR_BAKED, type FileDisplayEntry } from "../../../utils/displayMemory";
 import type { RawRgbPixelData } from "../../../shared/types";
@@ -62,8 +62,12 @@ vi.mock("../../../utils/displayMemoryStore", () => ({
 vi.mock("../../../context/ComposeWizardContext", () => ({ useWizardCompositeDims: () => null }));
 vi.mock("../../../hooks/useRegionKey", () => ({ useRegionKey: () => null }));
 vi.mock("../../render/GpuViewport", () => ({
-  default: (props: { label?: string | null; original?: { disabledReason: string | null } | null }) =>
-    createElement("div", { "data-viewport-label": props.label ?? "", "data-original": props.original ? (props.original.disabledReason ?? "usable") : "none" }),
+  default: (props: { label?: string | null; original?: { disabledReason: string | null } | null; canvasHint?: string | null }) =>
+    createElement("div", {
+      "data-viewport-label": props.label ?? "",
+      "data-original": props.original ? (props.original.disabledReason ?? "usable") : "none",
+      "data-canvas-hint": props.canvasHint ?? "",
+    }),
 }));
 vi.mock("../../render/GpuRenderer", () => ({ default: () => null }));
 vi.mock("../../render/GpuRgbRenderer", () => ({ default: () => null }));
@@ -135,6 +139,13 @@ describe("PreviewTab spectrum hint on the GPU viewer", () => {
   it("hides the hint on a ramp group frame and on its quick slope, where a click plots the pixel ramp", () => {
     expect(render({ isSpectralCube: false, fileDims: UNCAL_GRID, displayedDims: UNCAL_GRID })).not.toContain(CUBE_SPECTRUM_HINT);
     expect(render({ isSpectralCube: false, fileDims: UNCAL_GRID, displayedDims: [2048, 2048], label: "Quick slope (DN/s)" })).not.toContain(CUBE_SPECTRUM_HINT);
+  });
+
+  it("hands the hint to the viewport's canvas chip, where the region tool hint stacks under it, instead of drawing a second chip", () => {
+    const html = render({});
+    expect(html).toContain(`data-canvas-hint="${CUBE_SPECTRUM_HINT}"`);
+    expect(html).not.toContain(`class="${CANVAS_HINT_CLASS}`);
+    expect(render({ label: "PV diagram", displayedDims: [44, 3814] })).toContain('data-canvas-hint=""');
   });
 });
 

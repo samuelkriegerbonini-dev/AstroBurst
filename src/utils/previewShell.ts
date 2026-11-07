@@ -88,7 +88,7 @@ function gpuToggleState({ probing, loading, available, useGpu, loadError, pngOnl
 
 const GPU_TOGGLE_LABELS: Record<GpuToggleState, string> = {
   probing: "...",
-  loading: "...",
+  loading: "GPU",
   unavailable: "CPU",
   failed: "GPU failed",
   cpu: "CPU",
@@ -113,7 +113,8 @@ export function gpuToggleView(input: GpuToggleInput): GpuToggleView {
   const { useGpu, loadError } = input;
   const state = gpuToggleState(input);
   const tone: GpuToggleTone = loadError ? "failed" : state === "png-only" ? "muted" : useGpu ? "gpu" : "off";
-  return { state, label: GPU_TOGGLE_LABELS[state], title: gpuToggleTitle(input, state), tone };
+  const label = state === "loading" && !useGpu ? GPU_TOGGLE_LABELS.cpu : GPU_TOGGLE_LABELS[state];
+  return { state, label, title: gpuToggleTitle(input, state), tone };
 }
 
 export function gpuAfterProbe(ok: boolean, savedPreference: boolean | null, current: boolean): boolean {
@@ -343,9 +344,16 @@ export function viewerPublishesPixel(input: PixelReadoutInput): boolean {
   return !compositeHidesPixel(input) && input.gridMatchesFile;
 }
 
-export function statusStripIdleText(input: PixelReadoutInput): string {
+export interface PointerReadouts {
+  hasWcs: boolean;
+  spectral: boolean;
+}
+
+export function statusStripIdleText(input: PixelReadoutInput, { hasWcs, spectral }: PointerReadouts): string {
   if (compositeHidesPixel(input)) return "No pixel readout for the colour composite";
-  return input.gridMatchesFile ? "Hover the image for x, y, value and RA/Dec" : OTHER_GRID_IDLE_TEXT;
+  if (!input.gridMatchesFile) return OTHER_GRID_IDLE_TEXT;
+  const readouts = ["x", "y", "value", ...(spectral ? ["wavelength"] : []), ...(hasWcs ? ["RA/Dec"] : [])];
+  return `Hover the image for ${readouts.slice(0, -1).join(", ")} and ${readouts[readouts.length - 1]}`;
 }
 
 export interface PreviewTextureInput {

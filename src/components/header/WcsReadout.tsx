@@ -19,6 +19,12 @@ interface ReadoutPreference {
   format: CoordFormat;
 }
 
+interface CoordinateResult {
+  filePath: string;
+  frame: SkyFrame;
+  point: [number, number] | null;
+}
+
 const READOUT_STORAGE_KEY = "astroburst.readout.v1";
 const DEFAULT_READOUT: ReadoutPreference = { frame: "icrs", format: "sexagesimal" };
 const FRAMES: readonly SkyFrame[] = ["icrs", "fk5", "galactic", "ecliptic"];
@@ -26,7 +32,7 @@ const FORMATS: readonly CoordFormat[] = ["sexagesimal", "decimal"];
 const HOVER_DEBOUNCE_MS = 40;
 
 const SELECT_CLASS =
-  "bg-transparent border border-zinc-800 rounded px-0.5 text-[9px] text-zinc-400 focus:border-zinc-600";
+  "min-h-[22px] max-w-full bg-zinc-900 border border-zinc-700 rounded px-1 text-[10px] text-zinc-300 focus:border-zinc-500";
 
 function loadReadoutPreference(): ReadoutPreference {
   try {
@@ -50,11 +56,13 @@ function saveReadoutPreference(pref: ReadoutPreference): void {
 }
 
 function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: WcsReadoutProps) {
-  const [wcsAvailable, setWcsAvailable] = useState<boolean | null>(null);
-  const [wcsInfo, setWcsInfo] = useState<WcsInfo | null>(null);
-  const [coord, setCoord] = useState<[number, number] | null>(null);
-  const [center, setCenter] = useState<[number, number] | null>(null);
+  const [wcs, setWcs] = useState<{ filePath: string; info: WcsInfo } | null>(null);
+  const [coordResult, setCoord] = useState<CoordinateResult | null>(null);
+  const [centerResult, setCenter] = useState<CoordinateResult | null>(null);
   const [pref, setPref] = useState<ReadoutPreference>(loadReadoutPreference);
+  const wcsInfo = wcs?.filePath === filePath ? wcs.info : null;
+  const coord = coordResult?.filePath === filePath && coordResult.frame === pref.frame ? coordResult.point : null;
+  const center = centerResult?.filePath === filePath && centerResult.frame === pref.frame ? centerResult.point : null;
 
   const updatePref = useCallback((patch: Partial<ReadoutPreference>) => {
     setPref((prev) => {
@@ -66,8 +74,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
 
   useEffect(() => {
     if (!filePath) {
-      setWcsAvailable(null);
-      setWcsInfo(null);
+      setWcs(null);
       setCoord(null);
       return;
     }
@@ -75,12 +82,11 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
     getWcsInfo(filePath)
       .then((info) => {
         if (cancelled) return;
-        setWcsAvailable(true);
-        setWcsInfo(info);
+        setWcs({ filePath, info });
       })
       .catch(() => {
         if (cancelled) return;
-        setWcsAvailable(false);
+        setWcs(null);
       });
     return () => {
       cancelled = true;
@@ -88,19 +94,19 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
   }, [filePath]);
 
   useEffect(() => {
-    if (!filePath || !wcsAvailable || !wcsInfo) {
+    if (!filePath || !wcsInfo) {
       setCenter(null);
       return;
     }
     if (pref.frame === "icrs") {
-      setCenter([wcsInfo.center_ra, wcsInfo.center_dec]);
+      setCenter({ filePath, frame: pref.frame, point: [wcsInfo.center_ra, wcsInfo.center_dec] });
       return;
     }
     let cancelled = false;
     pixelToWorld(filePath, [[imageWidth / 2, imageHeight / 2]], pref.frame)
       .then((res) => {
         if (cancelled) return;
-        setCenter(res.points[0] ?? null);
+        setCenter({ filePath, frame: pref.frame, point: res.points[0] ?? null });
       })
       .catch(() => {
         if (cancelled) return;
@@ -109,10 +115,10 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
     return () => {
       cancelled = true;
     };
-  }, [filePath, wcsAvailable, wcsInfo, pref.frame, imageWidth, imageHeight]);
+  }, [filePath, wcsInfo, pref.frame, imageWidth, imageHeight]);
 
   useEffect(() => {
-    if (!filePath || !wcsAvailable || mouseX === null || mouseY === null) {
+    if (!filePath || !wcsInfo || mouseX === null || mouseY === null) {
       setCoord(null);
       return;
     }
@@ -121,7 +127,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
       pixelToWorld(filePath, [[mouseX, mouseY]], pref.frame)
         .then((res) => {
           if (cancelled) return;
-          setCoord(res.points[0] ?? null);
+          setCoord({ filePath, frame: pref.frame, point: res.points[0] ?? null });
         })
         .catch(() => {
           if (cancelled) return;
@@ -132,9 +138,9 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [filePath, wcsAvailable, mouseX, mouseY, pref.frame]);
+  }, [filePath, wcsInfo, mouseX, mouseY, pref.frame]);
 
-  if (!wcsAvailable || !wcsInfo) return null;
+  if (!wcsInfo) return null;
 
   const [lonLabel, latLabel] = frameAxisLabels(pref.frame);
   const hours = frameLonInHours(pref.frame);
@@ -142,7 +148,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
   const orientation = orientationLine(wcsInfo);
 
   return (
-    <div className="flex flex-col gap-1 text-[10px] font-mono" style={{ color: "rgba(52,211,153,0.6)" }}>
+    <div className="flex flex-col gap-1 text-[10px] font-mono" style={{ color: "#6ee7b7" }}>
       <div className="flex items-center gap-2 flex-wrap">
         <Globe size={10} />
         <select
@@ -179,12 +185,12 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
           </>
         ) : null}
         {mouseX !== null && mouseY !== null && (
-          <span className="text-zinc-600" title={ZERO_BASED_PIXEL_TITLE}>
+          <span className="text-zinc-400" title={ZERO_BASED_PIXEL_TITLE}>
             {zeroBasedPixelText(mouseX, mouseY)}
           </span>
         )}
       </div>
-      {orientation && <div className="text-zinc-600" title={ROTATION_TITLE}>{orientation}</div>}
+      {orientation && <div className="text-zinc-400" title={ROTATION_TITLE}>{orientation}</div>}
     </div>
   );
 }

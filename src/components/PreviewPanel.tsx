@@ -37,6 +37,8 @@ import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
 import { monoPixelsAction } from "../utils/gpuMonoPixels";
 import { pixelSourceVersion, scientificInputRevisionOf } from "../utils/pixelSource";
 import { colorbarUnit } from "../utils/colorbar";
+import { middleEllipsis } from "../utils/filenameDisplay";
+import { putCapped } from "../utils/processingChain";
 import { afterGpuLoss, gpuLossToggleView } from "../utils/gpuLoss";
 import { useComposeWizardContext } from "../context/ComposeWizardContext";
 import { parseImageRef, planeLabel } from "../utils/imageRef";
@@ -51,8 +53,11 @@ import HistoryShortcuts from "./history/HistoryShortcuts";
 import { useHistoryController } from "../hooks/useHistory";
 import DisplayControls from "./preview/DisplayControls";
 import PreviewTab from "./preview/PreviewTab";
+import ViewerFrameStepper, { FRAME_KEYS_GROUP_CLASS, FrameKeysFocusRing, useViewerFrameKeys, useViewerFrameStep } from "./preview/ViewerFrameStepper";
+import "./preview/preview-layout.css";
 import {
   CUBE_SPECTRUM_HINT,
+  PNG_ONLY_TITLE,
   backToFileAction,
   cpuViewerDisplayTitle,
   cubeSpectrumClickAllowed,
@@ -73,6 +78,15 @@ const GPU_TOGGLE_STYLES: Record<GpuToggleTone, React.CSSProperties> = {
   off: { color: "var(--ab-text-3)", border: "1px solid transparent" },
 };
 
+const PREVIEW_NAME_MAX = 40;
+const METADATA_CACHE_LIMIT = 64;
+
+interface ProductMetadata {
+  version: number;
+  header: Record<string, string> | null;
+  error: string | null;
+}
+
 export default function PreviewPanel() {
   const { file } = useFileContext();
   const { isCube, isSpectralCube, isSpectrum, ramp } = useCubeContext();
@@ -84,6 +98,8 @@ export default function PreviewPanel() {
   const history = useHistoryController();
   const { histData, histDataPath, stfParams } = useHistContext();
   const displayed = useDisplayedImage();
+  const frameStep = useViewerFrameStep();
+  const frameKeys = useViewerFrameKeys(frameStep);
   const processedSourcePath = processed?.fitsPath ?? null;
   const sourceVersion = pixelSourceVersion(file, processedSourcePath, processedVersion);
   const { compositePreviewUrl, compositeVersion, canShowParked } = useCompositePreview();
@@ -122,20 +138,29 @@ export default function PreviewPanel() {
   const isRgbView = rgbView !== null && (rgbView.kind !== "result" || useGpu);
   const isCompositeView = rgbView?.kind === "composite";
   const metadataProductPath = !isCompositeView && !displayed.previewOnly ? processedSourcePath : null;
-  const metadataKey = JSON.stringify([metadataProductPath, processedVersion, inputRevision]);
-  const [productMetadata, setProductMetadata] = useState<{ key: string; header: Record<string, string> | null; error: string | null } | null>(null);
+  const metadataCacheKey = JSON.stringify([metadataProductPath, processed?.label ?? null, inputRevision]);
+  const [productMetadata, setProductMetadata] = useState<ReadonlyMap<string, ProductMetadata>>(() => new Map());
 
   useEffect(() => {
     if (metadataProductPath === null) return;
     let current = true;
+    const store = (entry: ProductMetadata) => {
+      if (!current) return;
+      setProductMetadata((cache) => {
+        const next = new Map(cache);
+        putCapped(next, metadataCacheKey, entry, METADATA_CACHE_LIMIT);
+        return next;
+      });
+    };
     getHeader(metadataProductPath).then(
-      (header) => { if (current) setProductMetadata({ key: metadataKey, header, error: null }); },
-      (error: unknown) => { if (current) setProductMetadata({ key: metadataKey, header: null, error: error instanceof Error ? error.message : String(error) }); },
+      (header) => store({ version: processedVersion, header, error: null }),
+      (error: unknown) => store({ version: processedVersion, header: null, error: error instanceof Error ? error.message : String(error) }),
     );
     return () => { current = false; };
-  }, [metadataProductPath, metadataKey]);
+  }, [metadataProductPath, metadataCacheKey, processedVersion]);
 
-  const currentProductMetadata = metadataProductPath !== null && productMetadata?.key === metadataKey ? productMetadata : null;
+  const cachedMetadata = metadataProductPath !== null ? productMetadata.get(metadataCacheKey) ?? null : null;
+  const currentProductMetadata = cachedMetadata !== null && (cachedMetadata.version === processedVersion || cachedMetadata.header !== null) ? cachedMetadata : null;
   const activeHeader = isCompositeView || displayed.previewOnly ? null : displayed.isProcessed ? currentProductMetadata?.header : file?.result?.header;
   const activeBunit = colorbarUnit(activeHeader?.BUNIT, false);
   const activeDimensions = isCompositeView || (displayed.isProcessed && processed?.dimensions == null) ? null : displayed.dimensions;
@@ -451,39 +476,40 @@ export default function PreviewPanel() {
     : file ? planeLabel(parseImageRef(file.path), file.result?.plane?.extname) : null;
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-1 shrink-0" style={{ background: "rgba(5,5,16,0.6)", borderBottom: "1px solid var(--ab-border)" }}>
+    <div className="ab-preview-panel flex flex-col h-full overflow-hidden">
+      <div className="ab-preview-header" style={{ background: "rgba(5,5,16,0.6)", borderBottom: "1px solid var(--ab-border)" }}>
         <div className="flex items-center gap-2 shrink-0">
           <Image size={12} style={{ color: "var(--ab-teal)" }} />
           <span className="text-[11px] font-medium text-zinc-300">Preview</span>
         </div>
-        <div className="flex items-center gap-2 justify-center flex-1 min-w-0">
-          {metadataLabel && <span className="text-[10px] font-mono text-zinc-400 truncate max-w-[200px]" title={metadataPath}>{metadataLabel}</span>}
+        <div className="ab-preview-metadata">
+          {metadataLabel && <span className="ab-preview-name text-[10px] font-mono text-zinc-400" title={metadataPath}>{middleEllipsis(metadataLabel, PREVIEW_NAME_MAX)}</span>}
           {!isCompositeView && displayed.isProcessed && file && (
-            <span className="text-[9px] font-mono text-zinc-500 truncate max-w-[200px]" title={file.path}>Source: {file.name}</span>
+            <span className="ab-preview-name text-[9px] font-mono text-zinc-500" title={file.path}>Source: {middleEllipsis(file.name, PREVIEW_NAME_MAX)}</span>
           )}
-          {!isCompositeView && displayed.previewOnly && <span className="text-[9px] text-zinc-500">PNG</span>}
+          {!isCompositeView && displayed.previewOnly && <span className="text-[9px] text-zinc-500" title={PNG_ONLY_TITLE}>PNG</span>}
           {planeBadge && (
             <span
-              className="text-[9px] font-mono px-1.5 py-px rounded shrink-0"
+              className="text-[9px] font-mono px-1.5 py-px rounded max-w-full truncate"
               style={{ background: "rgba(20,184,166,0.12)", color: "var(--ab-teal)", border: "1px solid rgba(20,184,166,0.3)" }}
-              title={metadataPath}
+              title={`${planeBadge} · ${metadataPath}`}
             >
               {planeBadge}
             </span>
           )}
           {activeDimensions && (
-            <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1.5 shrink-0">
-              <span className="text-zinc-400">{activeDimensions[0]}&times;{activeDimensions[1]}</span>
-              {activeHeader?.BITPIX && <span className="text-zinc-500">BITPIX {activeHeader.BITPIX}</span>}
-              {activeBunit && <span className="text-zinc-500">{activeBunit}</span>}
-              {!displayed.isProcessed && file?.result && <span className="text-zinc-500">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>}
+            <span className="ab-preview-dimensions text-[10px] font-mono text-zinc-500">
+              <span className="text-zinc-400" title={`${activeDimensions[0]} × ${activeDimensions[1]} pixels`}>{activeDimensions[0]}&times;{activeDimensions[1]}</span>
+              {activeHeader?.BITPIX && <span className="text-zinc-500" title={`BITPIX ${activeHeader.BITPIX}`}>BITPIX {activeHeader.BITPIX}</span>}
+              {activeBunit && <span className="text-zinc-500 max-w-full truncate" title={activeBunit}>{activeBunit}</span>}
+              {!displayed.isProcessed && file?.result && <span className="text-zinc-500" title="Load time">{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>}
             </span>
           )}
-          {metadataLoading && <span className="text-[9px] text-zinc-500">Loading metadata...</span>}
+          {metadataLoading && <span className="text-[9px] text-zinc-500 whitespace-nowrap">Loading metadata...</span>}
           {currentProductMetadata?.error && <span className="text-[9px] text-amber-400" title={currentProductMetadata.error}>Metadata unavailable</span>}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="ab-preview-actions">
+          {frameStep && <ViewerFrameStepper step={frameStep} />}
           {file && !spectrumShown && <DqControls />}
           {file && <DqOverlayCanvas canvasRef={dqCanvasRef} />}
           {canCompositeReset && (
@@ -534,7 +560,7 @@ export default function PreviewPanel() {
         </div>
       </div>
 
-      <div data-dock-viewport="" className="flex-1 overflow-hidden min-h-0">
+      <div data-dock-viewport="" className={`${FRAME_KEYS_GROUP_CLASS} relative flex-1 overflow-hidden min-h-0`} {...frameKeys}>
         {viewer === "empty" ? (
           <AdvancedImageViewer original={null} processed={null} />
         ) : viewer === "spectrum" ? (
@@ -570,6 +596,7 @@ export default function PreviewPanel() {
             />
           </div>
         )}
+        {frameKeys && <FrameKeysFocusRing />}
       </div>
 
       {file && !spectrumShown && <ViewerStatusStrip />}

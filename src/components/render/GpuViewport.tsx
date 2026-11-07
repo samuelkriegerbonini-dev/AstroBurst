@@ -3,8 +3,10 @@ import { ZoomIn, ZoomOut, Maximize, Move, Crosshair, Eye } from "lucide-react";
 import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform";
 import { screenToImagePixel } from "../../utils/pixelMapping";
 import { imageRenderingFor, previewTextureBadge } from "../../utils/viewerZoom";
-import { previewTextureTitle, viewerClickRoute } from "../../utils/previewShell";
+import { CANVAS_HINT_CLASS, previewTextureTitle, viewerClickRoute } from "../../utils/previewShell";
 import { viewScaleAttributes } from "../../utils/starOverlay";
+import { regionToolHint } from "../../utils/regionToolHints";
+import { useRegionTool } from "../../hooks/useRegionStore";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
 import OverlayLayer from "../viewer/OverlayLayer";
@@ -24,6 +26,7 @@ interface GpuViewportProps {
   regionsEnabled?: boolean;
   original?: ViewportOriginal | null;
   label?: string | null;
+  canvasHint?: string | null;
   onMousePixel?: (x: number, y: number) => void;
   onPixelClick?: (x: number, y: number) => void;
   onMouseLeave?: () => void;
@@ -45,6 +48,7 @@ function GpuViewport({
   regionsEnabled = false,
   original = null,
   label = null,
+  canvasHint = null,
   onMousePixel,
   onPixelClick,
   onMouseLeave,
@@ -54,6 +58,7 @@ function GpuViewport({
   children,
 }: GpuViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const regionTool = useRegionTool();
   const [cursorMode, setCursorMode] = useState<"pan" | "crosshair">("pan");
   const [isPanning, setIsPanning] = useState(false);
   const [holdOriginal, setHoldOriginal] = useState(false);
@@ -72,6 +77,7 @@ function GpuViewport({
   } = useViewerTransform({ containerRef, renderW, renderH, fitsW: effFitsW });
 
   const regionsActive = regionsEnabled && renderW > 0 && renderH > 0 && effFitsW > 0 && effFitsH > 0;
+  const regionHint = regionsActive ? regionToolHint(regionTool) : null;
   const originalUsable = original !== null && original.disabledReason === null;
   if (holdOriginal && !originalUsable) setHoldOriginal(false);
   const showOriginal = holdOriginal && originalUsable;
@@ -172,9 +178,9 @@ function GpuViewport({
     <div className="ab-viewer-root">
       <div className="ab-viewer-toolbar">
         <div className="ab-viewer-toolbar-group">
-          <button onClick={zoomIn} className="ab-viewer-btn" title="Zoom In"><ZoomIn size={14} /></button>
-          <button onClick={zoomOut} className="ab-viewer-btn" title="Zoom Out"><ZoomOut size={14} /></button>
-          <button onClick={fitToWindow} className="ab-viewer-btn" title="Fit to Window"><Maximize size={14} /></button>
+          <button onClick={zoomIn} className="ab-viewer-btn" title="Zoom in" aria-label="Zoom in"><ZoomIn size={14} /></button>
+          <button onClick={zoomOut} className="ab-viewer-btn" title="Zoom out" aria-label="Zoom out"><ZoomOut size={14} /></button>
+          <button onClick={fitToWindow} className="ab-viewer-btn" title="Fit to window" aria-label="Fit to window"><Maximize size={14} /></button>
           <button onClick={setOneToOne} className="ab-viewer-btn ab-viewer-btn-text" title="1:1 Pixel (one FITS pixel per screen pixel)">1:1</button>
         </div>
 
@@ -311,6 +317,12 @@ function GpuViewport({
           fitsH={effFitsH}
           enabled={regionsActive}
         />
+        {(canvasHint || regionHint) && (
+          <div className={`${CANVAS_HINT_CLASS} flex flex-col gap-0.5 max-w-[calc(100%-1rem)]`}>
+            {canvasHint && <span>{canvasHint}</span>}
+            {regionHint && <span className="whitespace-normal">{regionHint}</span>}
+          </div>
+        )}
         {showOriginal && (
           <div className="ab-viewer-compare-label-left" style={{ zIndex: 4 }}>Original</div>
         )}

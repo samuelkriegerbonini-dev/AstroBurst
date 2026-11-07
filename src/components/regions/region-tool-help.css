@@ -1,0 +1,46 @@
+.ab-region-help-trigger {
+  width: 22px;
+  color: var(--ab-teal);
+}
+
+.ab-region-help-trigger-idle {
+  visibility: hidden;
+}
+
+.ab-region-help {
+  position: fixed;
+  z-index: 80;
+  width: 280px;
+  max-width: calc(100vw - 16px);
+  padding: 10px 12px;
+  border: 1px solid var(--ab-accent-border);
+  border-radius: 8px;
+  background: #141722;
+  color: var(--ab-text-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ab-region-help-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+  color: var(--ab-text-1);
+}
+
+.ab-region-help-heading button {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--ab-text-3);
+}
+
+.ab-region-help-heading button:hover {
+  background: var(--ab-bg-hover);
+  color: var(--ab-text-1);
+}

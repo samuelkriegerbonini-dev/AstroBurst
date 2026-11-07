@@ -320,6 +320,157 @@ describe("DQ belongs to the displayed product", () => {
     dq.setOverlay({ enabled: false });
     expect(contextWith<{ dqMaskLoading: boolean }>(renderPasses(file), "dqMaskLoading").dqMaskLoading).toBe(false);
   });
+
+  interface DqState {
+    dqRef: string | null;
+    dqTarget: unknown;
+    flagTable: { dq_ref: string | null } | null;
+    flagTableLoading: boolean;
+    flagTableError: string | null;
+    retryFlagTable: () => void;
+    overlay: DqOverlaySettings;
+    setOverlay: (patch: Partial<DqOverlaySettings>) => void;
+    dqMask: unknown;
+    dqMaskLoading: boolean;
+  }
+
+  const dqState = (tree: ReactNode) => contextWith<DqState>(tree, "flagTable");
+  const tableRequests = (path: string) => invokeMock.mock.calls.filter(([command, args]) => command === "get_dq_flag_table_cmd" && args?.path === path);
+  const maskRequests = (path: string) => invokeMock.mock.calls.filter(([command, args]) => command === "get_dq_mask_preview" && args?.path === path);
+
+  function publishNext(file: ProcessedFile, fitsPath: string, label: string): void {
+    const actions = contextWith<ReturnType<typeof useRenderActions>>(renderPasses(file), "publishProcessed");
+    actions.publishProcessed(fileKeyOf(file) as string, { fitsPath, previewUrl: null, dimensions: [8, 8], label, kind: "cube", inputPath: file.path, inputRevision: scientificInputRevisionOf(file) });
+    renderPasses(file);
+  }
+
+  it("exposes a rejected product DQ table instead of reporting no DQ plane, and reads it again on retry", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    let locked = true;
+    invokeMock.mockImplementation((command, args) => command === "get_dq_flag_table_cmd"
+      ? locked && args?.path === "C:/out/moment.fits" ? Promise.reject(new Error("output is locked")) : Promise.resolve(table(String(args?.path)))
+      : new Promise(() => {}));
+    const file = { ...IMAGE_ROW, id: "dq-table-error" };
+    publishScientificProduct(file);
+    await flushMicrotasks();
+    const failed = dqState(renderPasses(file));
+    expect(failed.flagTable).toBeNull();
+    expect(failed.flagTableError).toBe("output is locked");
+    expect(failed.flagTableLoading).toBe(false);
+    expect(quiet).toHaveBeenCalled();
+    locked = false;
+    failed.retryFlagTable();
+    renderPasses(file);
+    await flushMicrotasks();
+    const recovered = dqState(renderPasses(file));
+    expect(recovered.flagTableError).toBeNull();
+    expect(recovered.flagTable?.dq_ref).toBe("C:/out/moment.fits#hdu=3");
+    expect(tableRequests("C:/out/moment.fits")).toHaveLength(2);
+    quiet.mockRestore();
+  });
+
+  function maskBuffer(): ArrayBuffer {
+    const bytes = new ArrayBuffer(20);
+    const view = new DataView(bytes);
+    view.setUint32(0, 2, true);
+    view.setUint32(4, 2, true);
+    view.setUint32(8, 1, true);
+    return bytes;
+  }
+
+  it("keeps the painted overlay of the source when its failed DQ table is read again", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    let sourceTableReads = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_dq_mask_preview") return Promise.resolve(maskBuffer());
+      if (command !== "get_dq_flag_table_cmd") return new Promise(() => {});
+      if (args?.path === IMAGE_PATH && ++sourceTableReads === 2) return Promise.reject(new Error("source is locked"));
+      return Promise.resolve(table(String(args?.path)));
+    });
+    const file = { ...IMAGE_ROW, id: "dq-source-retry" };
+    mount(file);
+    await flushMicrotasks();
+    dqState(renderPasses(file)).setOverlay({ enabled: true });
+    renderPasses(file);
+    await flushMicrotasks();
+    publishNext(file, "C:/out/moment.fits", "Moment 0");
+    await flushMicrotasks();
+    renderPasses(file);
+    await flushMicrotasks();
+    contextWith<ReturnType<typeof useRenderActions>>(renderPasses(file), "resetProcessed").resetProcessed();
+    renderPasses(file);
+    await flushMicrotasks();
+    const failed = dqState(renderPasses(file));
+    expect(failed.flagTableError).toBe("source is locked");
+    expect(failed.overlay.enabled).toBe(true);
+    expect(failed.dqMask).not.toBeNull();
+    failed.retryFlagTable();
+    renderPasses(file);
+    await flushMicrotasks();
+    const recovered = dqState(renderPasses(file));
+    expect(recovered.flagTableError).toBeNull();
+    expect(recovered.flagTable?.dq_ref).toBe(`${IMAGE_PATH}#hdu=3`);
+    expect(recovered.overlay.enabled).toBe(true);
+    expect(recovered.dqMask).toBe(failed.dqMask);
+    expect(recovered.dqMaskLoading).toBe(false);
+    expect(tableRequests(IMAGE_PATH)).toHaveLength(3);
+    quiet.mockRestore();
+  });
+
+  it("reports a product table that is still being read and names the displayed product", () => {
+    const file = { ...IMAGE_ROW, id: "dq-table-pending" };
+    publishScientificProduct(file);
+    const dq = dqState(renderPasses(file));
+    expect(dq.dqRef).toBeNull();
+    expect(dq.flagTableLoading).toBe(true);
+    expect(dq.flagTableError).toBeNull();
+    expect(dq.dqTarget).toEqual({ kind: "product", label: "Moment 0" });
+  });
+
+  it.each([
+    ["the selected file", null, { kind: "file" }],
+    ["a colour composite", "asset://composite.png", { kind: "composite" }],
+  ])("names %s as the DQ target", (_name, compositeUrl, target) => {
+    compositePreview.compositePreviewUrl = compositeUrl;
+    const dq = dqState(mount({ ...IMAGE_ROW, id: `dq-target-${target.kind}` }));
+    expect(dq.dqTarget).toEqual(target);
+  });
+
+  it("keeps the overlay on when another product is published and requests that product's mask", async () => {
+    invokeMock.mockImplementation((command, args) => command === "get_dq_flag_table_cmd"
+      ? Promise.resolve(table(String(args?.path))) : new Promise(() => {}));
+    const file = { ...IMAGE_ROW, id: "dq-overlay-kept" };
+    publishScientificProduct(file);
+    await flushMicrotasks();
+    dqState(renderPasses(file)).setOverlay({ enabled: true });
+    renderPasses(file);
+    expect(maskRequests("C:/out/moment.fits")).toHaveLength(1);
+    publishNext(file, "C:/out/moment1.fits", "Moment 1");
+    await flushMicrotasks();
+    const dq = dqState(renderPasses(file));
+    expect(dq.overlay.enabled).toBe(true);
+    expect(maskRequests("C:/out/moment1.fits")).toHaveLength(1);
+  });
+
+  it("keeps the chosen flags while products share a flag table and restores the default for another table", async () => {
+    invokeMock.mockImplementation((command, args) => {
+      if (command !== "get_dq_flag_table_cmd") return new Promise(() => {});
+      const path = String(args?.path);
+      return Promise.resolve(path === "C:/out/raw.fits" ? { ...table(path), table: "unknown", label: "unknown (raw bits)", default_mask: 0 } : table(path));
+    });
+    const file = { ...IMAGE_ROW, id: "dq-overlay-mask" };
+    publishScientificProduct(file);
+    await flushMicrotasks();
+    expect(dqState(renderPasses(file)).overlay.mask).toBe(1);
+    dqState(renderPasses(file)).setOverlay({ enabled: true, mask: 6 });
+    publishNext(file, "C:/out/moment1.fits", "Moment 1");
+    await flushMicrotasks();
+    expect(dqState(renderPasses(file)).overlay).toEqual({ enabled: true, mask: 6 });
+    expect(invokeMock).toHaveBeenCalledWith("get_dq_mask_preview", expect.objectContaining({ path: "C:/out/moment1.fits", mask: 6 }));
+    publishNext(file, "C:/out/raw.fits", "Raw ratio");
+    await flushMicrotasks();
+    expect(dqState(renderPasses(file)).overlay).toEqual({ enabled: true, mask: 0 });
+  });
 });
 
 describe("PreviewProvider scientific cache validity without the Cube tool", () => {
