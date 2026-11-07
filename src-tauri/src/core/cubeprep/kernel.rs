@@ -74,6 +74,7 @@ impl EpsMode {
 #[serde(rename_all = "snake_case")]
 pub enum ShapeName {
     Reference,
+    Max,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +136,8 @@ pub struct AutoCandidate {
     pub value: f64,
     pub residual_max: f64,
     pub residual_rms: f64,
+    pub negative_weight: f64,
+    pub sum_squares: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -152,6 +155,8 @@ pub struct KernelDiagnostics {
     pub min: f64,
     pub max: f64,
     pub negative_fraction: f64,
+    pub negative_weight: f64,
+    pub sum_squares: f64,
     pub residual_max: f64,
     pub residual_rms: f64,
     pub encircled_energy_difference: f64,
@@ -362,6 +367,10 @@ fn fwhm_text(fwhm: Option<f64>) -> String {
     fwhm.map_or_else(|| "unknown".to_string(), |value| format!("{value:.3}"))
 }
 
+fn negative_weight_and_sum_squares(kernel: &Array2<f64>) -> (f64, f64) {
+    kernel.iter().fold((0.0, 0.0), |(negative, squares), &v| (if v < 0.0 { negative - v } else { negative }, squares + v * v))
+}
+
 pub fn diagnose_kernel(source: &Array2<f64>, target: &Array2<f64>, kernel: &Array2<f64>) -> Result<KernelDiagnostics, KernelError> {
     let MatchedPsf { matched, target: target_canvas, residual_max, residual_rms } = matched_psf(source, target, kernel)?;
     let (source_fit, target_fit, matched_fit) = (fit_gaussian(source), fit_gaussian(target), fit_gaussian(&matched));
@@ -394,6 +403,7 @@ pub fn diagnose_kernel(source: &Array2<f64>, target: &Array2<f64>, kernel: &Arra
         }
     }
     let (rows, cols) = kernel.dim();
+    let (negative_weight, sum_squares) = negative_weight_and_sum_squares(kernel);
     Ok(KernelDiagnostics {
         rows,
         cols,
@@ -401,6 +411,8 @@ pub fn diagnose_kernel(source: &Array2<f64>, target: &Array2<f64>, kernel: &Arra
         min: kernel.iter().copied().fold(f64::INFINITY, f64::min),
         max: kernel.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         negative_fraction: kernel.iter().filter(|&&v| v < 0.0).count() as f64 / kernel.len().max(1) as f64,
+        negative_weight,
+        sum_squares,
         residual_max,
         residual_rms,
         encircled_energy_difference,
@@ -416,6 +428,7 @@ fn construct(source: &Array2<f64>, target: &Array2<f64>, method: KernelMethod) -
         KernelMethod::Wiener { eps, eps_mode, shape } => {
             let shape = match shape {
                 KernelShape::Named(ShapeName::Reference) => target.dim(),
+                KernelShape::Named(ShapeName::Max) => (source.nrows().max(target.nrows()), source.ncols().max(target.ncols())),
                 KernelShape::Fixed([rows, cols]) => (rows, cols),
             };
             let (kernel, eps_absolute) = wiener_with(source, target, shape, eps, eps_mode)?;
@@ -449,7 +462,8 @@ fn tune(source: &Array2<f64>, target: &Array2<f64>, method: KernelMethod) -> Res
         .map(|&(value, method)| {
             let (kernel, _) = construct(source, target, method)?;
             let MatchedPsf { residual_max, residual_rms, .. } = matched_psf(source, target, &kernel)?;
-            Ok(AutoCandidate { value, residual_max, residual_rms })
+            let (negative_weight, sum_squares) = negative_weight_and_sum_squares(&kernel);
+            Ok(AutoCandidate { value, residual_max, residual_rms, negative_weight, sum_squares })
         })
         .collect::<Result<Vec<_>, KernelError>>()?;
     let best = scored.iter().map(|candidate| candidate.residual_rms).fold(f64::INFINITY, f64::min);
@@ -516,6 +530,13 @@ pub fn kernel_header(kernel: &MatchingKernel, source_label: &str, target_label: 
     if let Some(scale) = pixel_scale_arcsec {
         header.set_f64("PIXSCALE", scale);
     }
+    let d = &kernel.diagnostics;
+    for (key, fwhm) in [("SRCFWHM", d.source_fwhm_px), ("TGTFWHM", d.target_fwhm_px), ("MATFWHM", d.matched_fwhm_px)] {
+        if let Some(fwhm) = fwhm {
+            header.set_f64(key, fwhm);
+        }
+    }
+    header.set_f64("KSUMSQ", d.sum_squares);
     push_history(&mut header, &format!("Matching kernel from {source_label} to {target_label}: {recipe}"));
     if let Some(choice) = &kernel.auto {
         push_history(
@@ -529,11 +550,10 @@ pub fn kernel_header(kernel: &MatchingKernel, source_label: &str, target_label: 
             ),
         );
     }
-    let d = &kernel.diagnostics;
     push_history(
         &mut header,
         &format!(
-            "Matched-PSF residual max {:.3e} and RMS {:.3e} of the target peak; encircled energy difference {:.4}; FWHM {} px to {} px (target {} px); kernel sum {:.6}, {:.1} percent negative pixels",
+            "Matched-PSF residual max {:.3e} and RMS {:.3e} of the target peak; encircled energy difference {:.4}; FWHM {} px to {} px (target {} px); kernel sum {:.6}, {:.1} percent negative pixels; negative weight W- {:.3}, sum of squared coefficients {:.4} (per-pixel white-noise variance factor)",
             d.residual_max,
             d.residual_rms,
             d.encircled_energy_difference,
@@ -541,7 +561,9 @@ pub fn kernel_header(kernel: &MatchingKernel, source_label: &str, target_label: 
             fwhm_text(d.matched_fwhm_px),
             fwhm_text(d.target_fwhm_px),
             d.sum,
-            100.0 * d.negative_fraction
+            100.0 * d.negative_fraction,
+            d.negative_weight,
+            d.sum_squares
         ),
     );
     header
@@ -553,7 +575,8 @@ mod tests {
 
     use super::*;
     use crate::core::cubeprep::psf_io::load_psf;
-    use crate::math::bspline::scipy_golden::{array2, assert_close, number};
+    use crate::infra::fits::writer::write_fits_f64;
+    use crate::math::bspline::scipy_golden::{array2, assert_close, checked, number};
     use serde_json::Value;
 
     const PARITY: f64 = 1e-9;
@@ -573,8 +596,7 @@ mod tests {
     }
 
     fn golden() -> Value {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack/kernels/kernel_goldens.json");
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))).unwrap()
+        checked("kernels", "kernel_goldens.json")
     }
 
     fn golden_psfs(golden: &Value, source: &str) -> (Array2<f64>, Array2<f64>) {
@@ -732,6 +754,17 @@ mod tests {
         assert!(tuned.diagnostics.residual_max < RESIDUAL_WARNING, "{:?}", tuned.diagnostics);
         assert!(lightstack.diagnostics.residual_max > 10.0 * tuned.diagnostics.residual_max, "{:?}", lightstack.diagnostics);
         assert!(lightstack.diagnostics.warnings.iter().any(|w| w.contains("percent of its peak")), "{:?}", lightstack.diagnostics.warnings);
+        for candidate in &choice.candidates {
+            let rebuilt = build_kernel(&source, &target, &wiener_options(candidate.value, EpsMode::Relative, KernelShape::default())).unwrap();
+            let d = &rebuilt.diagnostics;
+            assert_eq!((candidate.negative_weight, candidate.sum_squares), (d.negative_weight, d.sum_squares), "eps {}", candidate.value);
+            assert!(candidate.negative_weight > 0.0 && candidate.sum_squares > 0.0, "{candidate:?}");
+        }
+        assert!(choice.candidates.windows(2).all(|pair| pair[1].sum_squares >= pair[0].sum_squares), "sum k^2 grows as eps falls: {:?}", choice.candidates);
+        let (tuned_d, lightstack_d) = (&tuned.diagnostics, &lightstack.diagnostics);
+        assert!((tuned_d.sum_squares - 0.2392).abs() < 1e-3 && (tuned_d.negative_weight - 1.249).abs() < 1e-3, "{tuned_d:?}");
+        assert!((lightstack_d.sum_squares - 0.0920).abs() < 1e-3 && (lightstack_d.negative_weight - 0.3808).abs() < 1e-3, "{lightstack_d:?}");
+        assert!(tuned_d.warnings.len() <= lightstack_d.warnings.len() && !tuned_d.warnings.iter().any(|w| w.contains("negative weight")), "{:?}", tuned_d.warnings);
 
         let window = build_kernel(&source, &target, &KernelOptions { auto: true, ..window_options(TaperWindow::Tukey { alpha: 0.5 }) }).unwrap();
         let choice = window.auto.unwrap();
@@ -756,6 +789,9 @@ mod tests {
         assert!(d.warnings.is_empty(), "{:?}", d.warnings);
         let negative = good.data.iter().filter(|&&v| v < 0.0).count() as f64 / good.data.len() as f64;
         assert_eq!(d.negative_fraction, negative);
+        assert_eq!(d.sum_squares, good.data.iter().map(|v| v * v).sum::<f64>());
+        assert_eq!(d.negative_weight, -good.data.iter().filter(|&&v| v < 0.0).sum::<f64>());
+        assert!(d.sum_squares > 0.0 && d.negative_weight > 0.0 && d.sum_squares < 1.0, "{d:?}");
 
         let poor = build_kernel(&source, &target, &window_options(TaperWindow::CosineBell { alpha: 0.7 })).unwrap();
         let p = &poor.diagnostics;
@@ -779,6 +815,26 @@ mod tests {
         let history: Vec<&str> = header.cards.iter().filter(|(key, _)| key == "HISTORY").map(|(_, value)| value.as_str()).collect();
         assert!(history.join(" ").contains("LIGHTSTACK build_kernel"), "{history:?}");
         assert!(history.join(" ").contains("residual"), "{history:?}");
+        let d = &wiener_kernel.diagnostics;
+        let card = |key: &str, value: Option<f64>| match (header.get_f64(key), value) {
+            (Some(card), Some(value)) => (card / value - 1.0).abs() < 1e-13,
+            (card, value) => card.is_none() && value.is_none(),
+        };
+        assert!(card("SRCFWHM", d.source_fwhm_px) && card("TGTFWHM", d.target_fwhm_px) && card("MATFWHM", d.matched_fwhm_px), "{:?}", header.cards);
+        assert!(d.source_fwhm_px.is_some() && d.matched_fwhm_px.is_some());
+        assert!(card("KSUMSQ", Some(d.sum_squares)), "{:?}", header.get("KSUMSQ"));
+        assert!(!header.is_string_value("KSUMSQ").unwrap() && !header.is_string_value("MATFWHM").unwrap());
+        let joined = history.join(" ");
+        assert!(joined.contains(&format!("negative weight W- {:.3}", d.negative_weight)), "{history:?}");
+        assert!(joined.contains(&format!("sum of squared coefficients {:.4} (per-pixel white-noise variance factor)", d.sum_squares)), "{history:?}");
+        let scratch = tempfile::tempdir().unwrap();
+        let auto_wiener = build_kernel(&source, &target, &KernelOptions { auto: true, ..wiener_options(0.05, EpsMode::Absolute, KernelShape::default()) }).unwrap();
+        let auto_window = build_kernel(&source, &target, &KernelOptions { auto: true, ..window_options(TaperWindow::SplitCosineBell { alpha: 0.3, beta: 0.1 }) }).unwrap();
+        for (name, kernel) in [("tutorial", &wiener_kernel), ("auto_wiener", &auto_wiener), ("auto_window", &auto_window)] {
+            let path = scratch.path().join(format!("{name}.fits"));
+            write_fits_f64(path.to_str().unwrap(), &kernel.data, Some(&kernel_header(kernel, "JWST_F277W", "JWST_F444W", Some(0.04)))).unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 8640, "{name}: one 2880-byte header block and two data blocks for a 21x21 kernel");
+        }
 
         let window_kernel = build_kernel(&source, &target, &window_options(TaperWindow::SplitCosineBell { alpha: 0.3, beta: 0.1 })).unwrap();
         let header = kernel_header(&window_kernel, "F277W", "F444W", None);
@@ -786,6 +842,41 @@ mod tests {
         assert_eq!((header.get_f64("KALPHA"), header.get_f64("KBETA"), header.get_f64("KREG")), (Some(0.3), Some(0.1), Some(DEFAULT_REGULARIZATION)));
         assert!(header.get("PIXSCALE").is_none() && header.get("KEPS").is_none());
         assert_eq!(kernel_file_name(" F277W", "F444W "), "kernel_f277w_to_f444w.fits");
+
+        let unknown = MatchingKernel {
+            diagnostics: KernelDiagnostics { source_fwhm_px: None, target_fwhm_px: None, matched_fwhm_px: None, ..wiener_kernel.diagnostics.clone() },
+            ..wiener_kernel.clone()
+        };
+        let header = kernel_header(&unknown, "JWST_F277W", "JWST_F444W", Some(0.04));
+        assert!(header.get("SRCFWHM").is_none() && header.get("TGTFWHM").is_none() && header.get("MATFWHM").is_none());
+        assert!((header.get_f64("KSUMSQ").unwrap() / wiener_kernel.diagnostics.sum_squares - 1.0).abs() < 1e-13);
+        let history = header.cards.iter().filter(|(key, _)| key == "HISTORY").map(|(_, value)| value.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(history.contains("FWHM unknown px to unknown px (target unknown px)"), "{history}");
+    }
+
+    #[test]
+    fn shape_max_pads_the_smaller_psf_to_the_larger_odd_shape() {
+        let (source, target) = (gaussian(41, 41, 2.0), gaussian(21, 21, 3.0));
+        let shape_max = KernelShape::Named(ShapeName::Max);
+        let padded = build_kernel(&source, &target, &wiener_options(1e-3, EpsMode::Absolute, shape_max)).unwrap();
+        assert_eq!(padded.data.dim(), (41, 41));
+        let fixed = build_kernel(&source, &target, &wiener_options(1e-3, EpsMode::Absolute, KernelShape::Fixed([41, 41]))).unwrap();
+        assert_eq!(padded.data, fixed.data, "max is the explicit [41, 41] shape bit for bit");
+        assert!((padded.data.sum() - 1.0).abs() < 1e-12);
+        match build_kernel(&source, &target, &wiener_options(1e-3, EpsMode::Absolute, KernelShape::default())) {
+            Err(KernelError::KernelShape { rows: 21, cols: 21, needed_rows: 41, needed_cols: 41 }) => {}
+            other => panic!("shape reference keeps refusing a source larger than the reference PSF: {other:?}"),
+        }
+        let swapped = build_kernel(&gaussian(21, 21, 2.0), &gaussian(41, 41, 3.0), &wiener_options(1e-3, EpsMode::Absolute, shape_max)).unwrap();
+        assert_eq!(swapped.data.dim(), (41, 41), "max pads the smaller source too");
+        let mixed = build_kernel(&gaussian(41, 21, 2.0), &gaussian(21, 41, 3.0), &wiener_options(1e-3, EpsMode::Absolute, shape_max)).unwrap();
+        assert_eq!(mixed.data.dim(), (41, 41), "max takes each axis from the larger PSF");
+
+        let (f277w, f444w) = (d1("d1_psf_JWST_F277W_40mas.fits"), d1("d1_psf_JWST_F444W_40mas.fits"));
+        let reference = build_kernel(&f277w, &f444w, &wiener_options(0.05, EpsMode::Absolute, KernelShape::default())).unwrap();
+        let max = build_kernel(&f277w, &f444w, &wiener_options(0.05, EpsMode::Absolute, shape_max)).unwrap();
+        assert_eq!(max.data, reference.data, "PSFs of one shape give the same kernel bit for bit");
+        assert_eq!(max.diagnostics, reference.diagnostics);
     }
 
     #[test]
@@ -800,6 +891,10 @@ mod tests {
         let back = serde_json::to_value(window).unwrap();
         assert_eq!(back, serde_json::json!({ "method": "window", "window": "cosine_bell", "alpha": 0.7, "regularization": DEFAULT_REGULARIZATION, "auto": false }));
         assert_eq!(serde_json::to_value(KernelOptions::default()).unwrap()["shape"], "reference");
+        let max = parse(serde_json::json!({ "method": "wiener", "eps": 0.05, "shape": "max" }));
+        assert_eq!(max, wiener_options(0.05, EpsMode::Absolute, KernelShape::Named(ShapeName::Max)));
+        assert_eq!(serde_json::to_value(max).unwrap()["shape"], "max");
+        assert!(serde_json::from_value::<KernelOptions>(serde_json::json!({ "method": "wiener", "shape": "largest" })).is_err());
     }
 
     #[test]

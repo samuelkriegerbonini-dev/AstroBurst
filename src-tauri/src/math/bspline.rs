@@ -263,13 +263,56 @@ pub fn zoom(data: &Array2<f64>, factors: [f64; 2], mode: SplineMode) -> Array2<f
 
 #[cfg(test)]
 pub(crate) mod scipy_golden {
+    use std::path::{Path, PathBuf};
+
     use ndarray::Array2;
     use serde_json::Value;
+    use sha2::{Digest, Sha256};
+
+    pub fn fixtures_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack")
+    }
+
+    fn read_json(path: &Path) -> Value {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        serde_json::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    pub fn stale_input(fixtures: &Path, folder: &str) -> Result<(), String> {
+        let name = format!("{folder}/manifest.json");
+        let manifest = read_json(&fixtures.join(folder).join("manifest.json"));
+        if manifest["kind"] != "scipy_reference" {
+            return Err(format!("{name}: kind {} is not scipy_reference", manifest["kind"]));
+        }
+        let inputs = manifest["inputs"].as_array().filter(|inputs| !inputs.is_empty()).ok_or_else(|| format!("{name}: no inputs list"))?;
+        let regenerate = manifest["regenerate"].as_str().unwrap_or("its generator");
+        for input in inputs {
+            let path = input["path"].as_str().ok_or_else(|| format!("{name}: an input has no path"))?;
+            let bytes = std::fs::read(fixtures.join(path)).map_err(|error| format!("{name}: input {path}: {error}"))?;
+            if Some(bytes.len() as u64) != input["bytes"].as_u64() || Some(sha256_hex(&bytes).as_str()) != input["sha256"].as_str() {
+                return Err(format!("{name}: input {path} differs from the manifest; the goldens are stale, re-run {regenerate}"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn checked_in(fixtures: &Path, folder: &str, file: &str) -> Value {
+        if let Err(message) = stale_input(fixtures, folder) {
+            panic!("{message}");
+        }
+        read_json(&fixtures.join(folder).join(file))
+    }
+
+    pub fn checked(folder: &str, file: &str) -> Value {
+        checked_in(&fixtures_dir(), folder, file)
+    }
 
     pub fn load() -> Value {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack/scipy/scipy_spline.json");
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-        serde_json::from_str(&text).unwrap()
+        checked("scipy", "scipy_spline.json")
     }
 
     pub fn number(value: &Value) -> f64 {
@@ -399,6 +442,42 @@ mod tests {
             SplineMode::Constant(0.0),
         );
         assert_close(&got, &array2(&case["output"]), PARITY, "affine_transform rotation");
+    }
+
+    #[test]
+    fn checked_loader_fails_on_a_stale_input() {
+        let fixtures = scipy_golden::fixtures_dir();
+        let scratch = tempfile::tempdir().unwrap();
+        let manifest: Value = serde_json::from_str(&std::fs::read_to_string(fixtures.join("kernels").join("manifest.json")).unwrap()).unwrap();
+        std::fs::create_dir_all(scratch.path().join("kernels")).unwrap();
+        for file in ["manifest.json", "kernel_goldens.json"] {
+            std::fs::copy(fixtures.join("kernels").join(file), scratch.path().join("kernels").join(file)).unwrap();
+        }
+        let inputs: Vec<&str> = manifest["inputs"].as_array().unwrap().iter().map(|input| input["path"].as_str().unwrap()).collect();
+        assert_eq!(inputs[0], "d1/psf/d1_psf_JWST_F444W_40mas.fits");
+        for input in &inputs {
+            let copy = scratch.path().join(input);
+            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            std::fs::copy(fixtures.join(input), &copy).unwrap();
+        }
+        assert_eq!(scipy_golden::stale_input(scratch.path(), "kernels"), Ok(()), "a faithful copy verifies");
+        assert_eq!(scipy_golden::checked_in(scratch.path(), "kernels", "kernel_goldens.json")["target"], scipy_golden::checked("kernels", "kernel_goldens.json")["target"]);
+
+        let flipped = scratch.path().join(inputs[0]);
+        let mut bytes = std::fs::read(&flipped).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&flipped, &bytes).unwrap();
+        let message = scipy_golden::stale_input(scratch.path(), "kernels").unwrap_err();
+        let expected = format!(
+            "kernels/manifest.json: input d1/psf/d1_psf_JWST_F444W_40mas.fits differs from the manifest; the goldens are stale, re-run {}",
+            manifest["regenerate"].as_str().unwrap()
+        );
+        assert_eq!(message, expected);
+        let root = scratch.path();
+        let payload = std::panic::catch_unwind(|| scipy_golden::checked_in(root, "kernels", "kernel_goldens.json")).expect_err("a stale input must stop the loader");
+        let panicked = payload.downcast_ref::<String>().map(String::as_str).or_else(|| payload.downcast_ref::<&str>().copied());
+        assert_eq!(panicked, Some(expected.as_str()));
     }
 
     #[test]

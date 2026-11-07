@@ -19,6 +19,8 @@ pub const EDGE_ENERGY_WARNING: f64 = 0.01;
 pub const SCALE_RTOL: f64 = 1e-6;
 pub const GAUSSIAN_SIGMA_TO_FWHM: f64 = 2.354_820_045_030_949_3;
 const GAUSSIAN_FIT_ITERATIONS: usize = 200;
+const NEGATIVE_INPUT_WARNING: &str = "percent of the pixels are negative";
+const TRUNCATED_INPUT_WARNING: &str = "may be truncated";
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PsfError {
@@ -134,6 +136,13 @@ pub struct LightstackPadding {
     pub target_pixel_scale_arcsec: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LightstackResampling {
+    pub resampled: Array2<f64>,
+    pub clipped_negative_fraction: f64,
+    pub clipped_negative_flux_fraction: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PsfPrepareOptions {
@@ -169,6 +178,7 @@ pub struct PreparedPsf {
     pub recentred_by_px: Option<[f64; 2]>,
     pub resampled: Option<ResampleRecord>,
     pub clipped_negative_fraction: f64,
+    pub clipped_negative_flux_fraction: f64,
     pub warnings: Vec<String>,
 }
 
@@ -500,6 +510,20 @@ fn nansum(values: &Array2<f64>) -> f64 {
     values.iter().filter(|v| !v.is_nan()).sum()
 }
 
+fn negative_share(values: &Array2<f64>) -> (f64, f64) {
+    let (mut negative_pixels, mut negative_flux, mut positive_flux) = (0usize, 0.0, 0.0);
+    for &v in values {
+        if v < 0.0 {
+            negative_pixels += 1;
+            negative_flux -= v;
+        } else if v > 0.0 {
+            positive_flux += v;
+        }
+    }
+    let fraction = negative_pixels as f64 / values.len().max(1) as f64;
+    (fraction, if positive_flux > 0.0 { negative_flux / positive_flux } else { 0.0 })
+}
+
 fn odd_up(len: usize) -> usize {
     len + 1 - len % 2
 }
@@ -529,12 +553,12 @@ pub fn lightstack_pad(
     Ok(LightstackPadding { padded, source_pixel_scale_arcsec: source, target_pixel_scale_arcsec: target })
 }
 
-pub fn lightstack_resample(
+pub fn lightstack_resample_measured(
     psf: &Array2<f64>,
     source_pixel_scale_arcsec: f64,
     target_pixel_scale_arcsec: f64,
     output_shape: Option<(usize, usize)>,
-) -> Result<Array2<f64>, PsfError> {
+) -> Result<LightstackResampling, PsfError> {
     let (ny, nx) = psf.dim();
     let scale = checked_scale(source_pixel_scale_arcsec)? / checked_scale(target_pixel_scale_arcsec)?;
     let shape = output_shape.unwrap_or((zoomed_len(ny, scale), zoomed_len(nx, scale)));
@@ -545,13 +569,23 @@ pub fn lightstack_resample(
     let centre = |len: usize| (len as f64 - 1.0) / 2.0;
     let offset = [centre(ny) - step * centre(shape.0), centre(nx) - step * centre(shape.1)];
     let mut resampled = affine_transform(psf, [[step, 0.0], [0.0, step]], offset, shape, SplineMode::Constant(0.0));
+    let (clipped_negative_fraction, clipped_negative_flux_fraction) = negative_share(&resampled);
     resampled.mapv_inplace(|v| if v < 0.0 { 0.0 } else { v });
     let total = nansum(&resampled);
     if !(total.is_finite() && total > 0.0) {
         return Err(PsfError::NotNormalizable(total));
     }
     resampled.mapv_inplace(|v| v / total);
-    Ok(resampled)
+    Ok(LightstackResampling { resampled, clipped_negative_fraction, clipped_negative_flux_fraction })
+}
+
+pub fn lightstack_resample(
+    psf: &Array2<f64>,
+    source_pixel_scale_arcsec: f64,
+    target_pixel_scale_arcsec: f64,
+    output_shape: Option<(usize, usize)>,
+) -> Result<Array2<f64>, PsfError> {
+    lightstack_resample_measured(psf, source_pixel_scale_arcsec, target_pixel_scale_arcsec, output_shape).map(|measured| measured.resampled)
 }
 
 fn edge_coordinates(input_len: usize, output_len: usize, factor: f64) -> Vec<f64> {
@@ -657,21 +691,42 @@ pub fn prepare_psf(psf: &LoadedPsf, options: &PsfPrepareOptions) -> Result<Prepa
         padded_rows: padded.map(|p| p.0),
         padded_cols: padded.map(|p| p.1),
     };
-    let (resampled_data, resampled) = if same_scale(source, target) && target_shape == data.dim() {
-        (data, None)
+    let (resampled_data, resampled, (clipped_negative_fraction, clipped_negative_flux_fraction)) = if same_scale(source, target) && target_shape == data.dim() {
+        let share = negative_share(&data);
+        (data, None, share)
     } else if same_scale(source, target) || options.method == PsfResampleMethod::Area {
-        (area_resample(&data, source, target, target_shape)?, Some(record(PsfResampleMethod::Area, None)))
+        let integrated = area_resample(&data, source, target, target_shape)?;
+        let share = negative_share(&integrated);
+        (integrated, Some(record(PsfResampleMethod::Area, None)), share)
     } else {
         let padding = lightstack_pad(&data, source, target, target_shape)?;
         let padded = padding.padded.dim();
-        (lightstack_resample(&padding.padded, source, target, Some(target_shape))?, Some(record(PsfResampleMethod::Lightstack, Some(padded))))
+        let measured = lightstack_resample_measured(&padding.padded, source, target, Some(target_shape))?;
+        let share = (measured.clipped_negative_fraction, measured.clipped_negative_flux_fraction);
+        (measured.resampled, Some(record(PsfResampleMethod::Lightstack, Some(padded))), share)
     };
-    let clipped_negative_fraction = resampled_data.iter().filter(|&&v| v < 0.0).count() as f64 / resampled_data.len() as f64;
     if clipped_negative_fraction > 0.0 {
-        warnings.push(format!("{:.2} percent of the pixels were negative and set to 0", 100.0 * clipped_negative_fraction));
+        warnings.push(format!(
+            "{:.2} percent of the pixels were negative and set to 0; their absolute flux is {:.3} percent of the kept flux",
+            100.0 * clipped_negative_fraction,
+            100.0 * clipped_negative_flux_fraction
+        ));
     }
     let data = normalize_psf(&resampled_data)?;
     let after = diagnose_psf(&data, Some(target));
+    let hidden_kinds: &[&str] = match &resampled {
+        Some(_) => &[NEGATIVE_INPUT_WARNING, TRUNCATED_INPUT_WARNING],
+        None => &[TRUNCATED_INPUT_WARNING],
+    };
+    for &kind in hidden_kinds {
+        if after.warnings.iter().any(|warning| warning.contains(kind)) {
+            continue;
+        }
+        if let Some(hidden) = before.warnings.iter().find(|warning| warning.contains(kind)) {
+            warnings.push(format!("input PSF: {hidden}"));
+        }
+    }
+    warnings.extend(after.warnings.iter().map(|warning| format!("prepared PSF: {warning}")));
     Ok(PreparedPsf {
         data,
         pixel_scale_arcsec: target,
@@ -681,6 +736,7 @@ pub fn prepare_psf(psf: &LoadedPsf, options: &PsfPrepareOptions) -> Result<Prepa
         recentred_by_px,
         resampled,
         clipped_negative_fraction,
+        clipped_negative_flux_fraction,
         warnings,
     })
 }
@@ -731,7 +787,7 @@ pub fn prepare_psf_set(psfs: &[LoadedPsf], options: &PsfSetOptions) -> Result<Ps
     };
     let reference = reference_index.map(|index| single(&psfs[index], None)).transpose()?;
     let target_shape = reference.as_ref().map(|prepared| prepared.data.dim());
-    let prepared = psfs
+    let mut prepared = psfs
         .iter()
         .enumerate()
         .map(|(index, psf)| match &reference {
@@ -739,6 +795,24 @@ pub fn prepare_psf_set(psfs: &[LoadedPsf], options: &PsfSetOptions) -> Result<Ps
             _ => single(psf, target_shape),
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if !options.recentre {
+        let reference_at = reference.as_ref().zip(reference_index);
+        for (index, plane) in prepared.iter_mut().enumerate() {
+            let note = match reference_at {
+                Some((_, at)) if at == index => None,
+                Some((target, at)) => {
+                    let (dx, dy) = (target.after.offset_x_px - plane.after.offset_x_px, target.after.offset_y_px - plane.after.offset_y_px);
+                    let filter = psfs[at].filter.as_deref().map_or("", str::trim);
+                    (dx.abs().max(dy.abs()) > CENTRE_TOLERANCE_PX).then(|| {
+                        format!("prepared PSF: recentre is off, so the kernel matching this PSF to the reference PSF {filter} will shift this plane by about ({dx:.3}, {dy:.3}) px, the difference of their centroid offsets")
+                    })
+                }
+                None => (plane.after.offset_x_px.abs().max(plane.after.offset_y_px.abs()) > CENTRE_TOLERANCE_PX)
+                    .then(|| "prepared PSF: recentre is off, so against a centred target PSF the matching kernel will shift this plane by the opposite of its centroid offset".to_string()),
+            };
+            plane.warnings.extend(note);
+        }
+    }
     Ok(PsfSet { prepared, reference_index, target_pixel_scale_arcsec, target_shape })
 }
 
@@ -802,8 +876,10 @@ pub fn prepared_psf_header(psf: &LoadedPsf, prepared: &PreparedPsf, source_name:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cubeprep::kernel::{build_kernel, KernelOptions};
     use crate::infra::fits::reader::test_fixtures::write_raw_hdus;
     use crate::math::bspline::scipy_golden::{array2, assert_close, load, number, vector};
+    use serde_json::Value;
 
     fn gaussian(size: usize, sigma: f64, centre: (f64, f64)) -> Array2<f64> {
         Array2::from_shape_fn((size, size), |(r, c)| {
@@ -855,6 +931,17 @@ mod tests {
     fn d1_psf(name: &str) -> LoadedPsf {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack/d1/psf").join(name);
         load_psf(&path, None).unwrap()
+    }
+
+    fn clipped_fwhm_cases(gaussian_fwhm: &Value) -> &[Value] {
+        let clipped = &gaussian_fwhm["clipped_psfs"];
+        if clipped.is_null() {
+            return &[];
+        }
+        clipped["psfs"].as_array().or_else(|| clipped.as_array()).filter(|cases| !cases.is_empty()).map_or_else(
+            || panic!("gaussian_fwhm.clipped_psfs must be a non-empty list of {{input, fwhm_px}} cases or hold one under psfs, got {clipped}"),
+            Vec::as_slice,
+        )
     }
 
     #[test]
@@ -1070,16 +1157,178 @@ mod tests {
     }
 
     #[test]
+    fn an_even_psf_centred_on_its_geometric_centre_warns_off_centre_without_recentre() {
+        let even = gaussian(40, 1.2, (19.5, 19.5));
+        let options = PsfSetOptions { method: PsfResampleMethod::Lightstack, recentre: false, ..PsfSetOptions::default() };
+        let set = prepare_psf_set(&[loaded(even.clone(), 0.04)], &options).unwrap();
+        let prepared = &set.prepared[0];
+        assert_eq!(prepared.data, normalize_psf(&make_odd(&even)).unwrap(), "recentre off leaves the padded PSF where make_odd put it");
+        assert!(prepared.recentred_by_px.is_none() && prepared.padded_to_odd && prepared.resampled.is_none());
+        assert!((prepared.after.offset_x_px + 0.5).abs() < 1e-9 && (prepared.after.offset_y_px + 0.5).abs() < 1e-9, "{:?}", prepared.after);
+        assert!(prepared.warnings.iter().any(|w| w == "prepared PSF: the PSF centroid is off centre by (-0.500, -0.500) px"), "{:?}", prepared.warnings);
+        let note = "prepared PSF: recentre is off, so against a centred target PSF the matching kernel will shift this plane by the opposite of its centroid offset";
+        assert_eq!(prepared.warnings.iter().filter(|w| w.contains("recentre is off")).collect::<Vec<_>>(), vec![note], "without a reference PSF the shift has no number");
+        assert!(prepared.warnings.iter().any(|w| w.contains("padded from 40x40 to 41x41")), "{:?}", prepared.warnings);
+        assert_eq!(prepared.warnings.iter().filter(|w| w.starts_with("prepared PSF: ")).count(), 2, "{:?}", prepared.warnings);
+
+        let recentred = prepare_psf_set(&[loaded(even, 0.04)], &PsfSetOptions { recentre: true, ..options }).unwrap();
+        let prepared = &recentred.prepared[0];
+        assert!(prepared.recentred_by_px.is_some() && prepared.after.offset_x_px.abs() < CENTRE_TOLERANCE_PX, "{:?}", prepared.after);
+        assert!(!prepared.warnings.iter().any(|w| w.contains("off centre") || w.contains("recentre is off")), "{:?}", prepared.warnings);
+    }
+
+    #[test]
+    fn the_kernel_shift_note_uses_the_offset_relative_to_the_reference_psf() {
+        let psf = |size: usize, sigma: f64, scale: f64, filter: &str| {
+            let centre = (size as f64 - 1.0) / 2.0;
+            LoadedPsf { filter: Some(filter.into()), ..loaded(gaussian(size, sigma, (centre, centre)), scale) }
+        };
+        let options = PsfSetOptions { target_pixel_scale_arcsec: Some(0.04), reference: Some("F444W".into()), method: PsfResampleMethod::Lightstack, recentre: false };
+        let notes = |prepared: &PreparedPsf| prepared.warnings.iter().filter(|w| w.contains("recentre is off")).cloned().collect::<Vec<_>>();
+        let kernel_moment = |source: &Array2<f64>, target: &Array2<f64>| {
+            let kernel = build_kernel(source, target, &KernelOptions::default()).unwrap().data;
+            let (rows, cols, total) = (kernel.nrows(), kernel.ncols(), kernel.sum());
+            kernel.indexed_iter().fold((0.0, 0.0), |(x, y), ((r, c), &v)| (x + v * (c as f64 - (cols / 2) as f64) / total, y + v * (r as f64 - (rows / 2) as f64) / total))
+        };
+
+        let filters = [("F814W", 1.0), ("F150W", 1.2), ("F200W", 1.4), ("F277W", 1.6), ("F356W", 1.8), ("F444W", 2.0)];
+        let all_even: Vec<LoadedPsf> = filters.iter().map(|&(filter, sigma)| psf(40, sigma, 0.04, filter)).collect();
+        let set = prepare_psf_set(&all_even, &options).unwrap();
+        for (prepared, (filter, _)) in set.prepared.iter().zip(filters) {
+            assert!(prepared.warnings.iter().any(|w| w == "prepared PSF: the PSF centroid is off centre by (-0.500, -0.500) px"), "{filter}: {:?}", prepared.warnings);
+            assert!(notes(prepared).is_empty(), "{filter}: every PSF carries the same make_odd offset, so no kernel shifts its plane: {:?}", prepared.warnings);
+        }
+        let (mx, my) = kernel_moment(&set.prepared[1].data, &set.prepared[5].data);
+        assert!(mx.abs() < 0.01 && my.abs() < 0.01, "F150W to F444W, both even: kernel first moment ({mx}, {my})");
+
+        let mixed = [psf(80, 2.4, 0.02, "F150W"), psf(41, 1.4, 0.04, "F200W"), psf(40, 2.0, 0.04, "F444W")];
+        let set = prepare_psf_set(&mixed, &options).unwrap();
+        let reference = &set.prepared[2];
+        assert!(notes(reference).is_empty(), "the reference plane is never convolved: {:?}", reference.warnings);
+        for (index, filter, expected) in [(0, "F150W", -0.25), (1, "F200W", -0.5)] {
+            let plane = &set.prepared[index];
+            let (dx, dy) = (reference.after.offset_x_px - plane.after.offset_x_px, reference.after.offset_y_px - plane.after.offset_y_px);
+            assert!((dx - expected).abs() < 0.01 && (dy - expected).abs() < 0.01, "{filter}: ({dx}, {dy}) against {expected}");
+            let line = format!(
+                "prepared PSF: recentre is off, so the kernel matching this PSF to the reference PSF F444W will shift this plane by about ({dx:.3}, {dy:.3}) px, the difference of their centroid offsets"
+            );
+            assert_eq!(notes(plane), vec![line], "{filter}");
+            let (mx, my) = kernel_moment(&plane.data, &reference.data);
+            eprintln!("{filter} to an even F444W reference: note ({dx:.4}, {dy:.4}) px, kernel first moment ({mx:.4}, {my:.4}) px");
+            assert!((mx - dx).abs() < 0.01 && (my - dy).abs() < 0.01, "{filter}: kernel first moment ({mx}, {my}) against the note ({dx}, {dy})");
+        }
+        assert!(!set.prepared[1].warnings.iter().any(|w| w.contains("off centre")), "the F200W PSF itself is centred: {:?}", set.prepared[1].warnings);
+
+        let centred_target = [psf(40, 1.2, 0.04, "F150W"), psf(41, 2.0, 0.04, "F444W")];
+        let set = prepare_psf_set(&centred_target, &options).unwrap();
+        let line = "prepared PSF: recentre is off, so the kernel matching this PSF to the reference PSF F444W will shift this plane by about (0.500, 0.500) px, the difference of their centroid offsets";
+        assert_eq!(notes(&set.prepared[0]), vec![line.to_string()]);
+        assert!(notes(&set.prepared[1]).is_empty());
+        let (mx, my) = kernel_moment(&set.prepared[0].data, &set.prepared[1].data);
+        assert!((mx - 0.5).abs() < 0.01 && (my - 0.5).abs() < 0.01, "even F150W to a centred odd F444W: kernel first moment ({mx}, {my})");
+    }
+
+    #[test]
+    fn d1_psfs_through_the_recipe_options_raise_no_warning() {
+        let names = [
+            ("F814W", "d1_psf_HST_F814W_40mas.fits"),
+            ("F150W", "d1_psf_JWST_F150W_20mas.fits"),
+            ("F200W", "d1_psf_JWST_F200W_20mas.fits"),
+            ("F277W", "d1_psf_JWST_F277W_40mas.fits"),
+            ("F356W", "d1_psf_JWST_F356W_40mas.fits"),
+            ("F444W", "d1_psf_JWST_F444W_40mas.fits"),
+        ];
+        let psfs: Vec<LoadedPsf> = names.iter().map(|&(filter, name)| LoadedPsf { filter: Some(filter.into()), ..d1_psf(name) }).collect();
+        let options = PsfSetOptions { target_pixel_scale_arcsec: Some(0.04), reference: Some("F444W".into()), method: PsfResampleMethod::Lightstack, recentre: false };
+        let set = prepare_psf_set(&psfs, &options).unwrap();
+        assert_eq!(set.reference_index, Some(5));
+        for (prepared, (filter, _)) in set.prepared.iter().zip(names) {
+            assert!(prepared.warnings.is_empty(), "{filter}: {:?}", prepared.warnings);
+            assert!(prepared.after.offset_x_px.abs() < 1e-9 && prepared.after.offset_y_px.abs() < 1e-9, "{filter}: {:?}", prepared.after);
+        }
+    }
+
+    #[test]
+    fn the_lightstack_path_reports_clipped_negative_pixels_and_flux() {
+        let narrow = loaded(gaussian(21, 0.7, (10.0, 10.0)), 0.031);
+        let options = PsfPrepareOptions { target_pixel_scale_arcsec: Some(0.04), method: PsfResampleMethod::Lightstack, ..PsfPrepareOptions::default() };
+        let prepared = prepare_psf(&narrow, &options).unwrap();
+        let padding = lightstack_pad(&narrow.data, 0.031, 0.04, prepared.data.dim()).unwrap();
+        let measured = lightstack_resample_measured(&padding.padded, 0.031, 0.04, Some(prepared.data.dim())).unwrap();
+        assert_eq!(measured.resampled, lightstack_resample(&padding.padded, 0.031, 0.04, Some(prepared.data.dim())).unwrap(), "the wrapper returns the measured array bit for bit");
+        assert_eq!((prepared.clipped_negative_fraction, prepared.clipped_negative_flux_fraction), (measured.clipped_negative_fraction, measured.clipped_negative_flux_fraction));
+        assert!(prepared.data.iter().all(|&v| v >= 0.0) && (prepared.data.sum() - 1.0).abs() < 1e-12);
+        eprintln!(
+            "Gaussian sigma 0.7 px, 0.031\" to 0.04\" with the LIGHTSTACK method: {:.4} of the pixels negative, negative flux {:.5} of the kept flux",
+            prepared.clipped_negative_fraction, prepared.clipped_negative_flux_fraction
+        );
+        assert_eq!(prepared.data.dim(), (17, 17));
+        assert!((prepared.clipped_negative_fraction - 132.0 / 289.0).abs() < 1e-12, "{}", prepared.clipped_negative_fraction);
+        assert!((prepared.clipped_negative_flux_fraction - 0.01421).abs() < 1e-4, "{}", prepared.clipped_negative_flux_fraction);
+        let clipped = prepared.warnings.iter().find(|w| w.contains("were negative and set to 0")).unwrap_or_else(|| panic!("{:?}", prepared.warnings));
+        let expected = format!(
+            "{:.2} percent of the pixels were negative and set to 0; their absolute flux is {:.3} percent of the kept flux",
+            100.0 * prepared.clipped_negative_fraction,
+            100.0 * prepared.clipped_negative_flux_fraction
+        );
+        assert_eq!(clipped, &expected);
+
+        for name in ["d1_psf_JWST_F150W_20mas.fits", "d1_psf_JWST_F200W_20mas.fits"] {
+            let parity = prepare_psf(&d1_psf(name), &PsfPrepareOptions { target_shape: Some((21, 21)), recentre: false, ..options.clone() }).unwrap();
+            eprintln!("{name} 0.02\" to 0.04\" (21x21, LIGHTSTACK): warnings {:?}, offset ({:.4}, {:.4}) px", parity.warnings, parity.after.offset_x_px, parity.after.offset_y_px);
+            assert_eq!((parity.clipped_negative_fraction, parity.clipped_negative_flux_fraction), (0.0, 0.0), "{name}: {:?}", parity.warnings);
+            assert!(parity.warnings.is_empty(), "{name}: the D1 PSFs keep an empty warning list: {:?}", parity.warnings);
+        }
+
+        let ringing = Array2::from_shape_vec((1, 6), vec![0.0, 0.5, -0.25, 0.25, f64::NAN, 0.25]).unwrap();
+        assert_eq!(negative_share(&ringing), (1.0 / 6.0, 0.25));
+        let area = prepare_psf(&loaded(moffat(41, 4.0).mapv(|v| v - 0.0005), 0.02), &PsfPrepareOptions { target_pixel_scale_arcsec: Some(0.04), ..PsfPrepareOptions::default() }).unwrap();
+        assert!(area.clipped_negative_fraction > 0.0 && area.clipped_negative_flux_fraction > 0.0, "{:?}", area.warnings);
+        assert!(area.warnings.iter().any(|w| w.contains("percent of the kept flux")), "{:?}", area.warnings);
+    }
+
+    #[test]
+    fn input_warnings_hidden_by_the_lightstack_padding_are_forwarded() {
+        let truncated = loaded(gaussian(9, 3.0, (4.0, 4.0)).mapv(|v| v - 0.2), 0.02);
+        let before = diagnose_psf(&truncated.data, Some(0.02));
+        assert!(before.warnings.iter().any(|w| w.contains("truncated")) && before.warnings.iter().any(|w| w.contains("are negative")), "{:?}", before.warnings);
+        let options = PsfPrepareOptions { target_pixel_scale_arcsec: Some(0.04), target_shape: Some((21, 21)), method: PsfResampleMethod::Lightstack, ..PsfPrepareOptions::default() };
+        let prepared = prepare_psf(&truncated, &options).unwrap();
+        assert!(!prepared.after.warnings.iter().any(|w| w.contains("truncated") || w.contains("are negative")), "{:?}", prepared.after.warnings);
+        let forwarded: Vec<&String> = prepared.warnings.iter().filter(|w| w.starts_with("input PSF: ")).collect();
+        assert_eq!(forwarded.len(), 2, "{:?}", prepared.warnings);
+        assert!(forwarded.iter().any(|w| w.contains("may be truncated")) && forwarded.iter().any(|w| w.contains("percent of the pixels are negative")), "{forwarded:?}");
+
+        let kept = prepare_psf(&truncated, &PsfPrepareOptions { target_pixel_scale_arcsec: Some(0.02), target_shape: Some((9, 9)), ..options.clone() }).unwrap();
+        assert!(kept.after.warnings.iter().any(|w| w.contains("truncated")), "{:?}", kept.after.warnings);
+        assert!(kept.warnings.iter().any(|w| w.starts_with("prepared PSF: ") && w.contains("truncated")), "{:?}", kept.warnings);
+        assert!(!kept.warnings.iter().any(|w| w.starts_with("input PSF: ")), "without resampling nothing is hidden: {:?}", kept.warnings);
+        let negative: Vec<&String> = kept.warnings.iter().filter(|w| w.contains("negative")).collect();
+        assert_eq!(negative.len(), 1, "the clipped warning already reports the input negatives: {:?}", kept.warnings);
+        assert!(negative[0].starts_with(&format!("{:.2} percent of the pixels were negative and set to 0", 100.0 * before.negative_fraction)), "{negative:?}");
+
+        let area = prepare_psf(&truncated, &PsfPrepareOptions { method: PsfResampleMethod::Area, ..options }).unwrap();
+        assert!(area.warnings.iter().any(|w| w.starts_with("input PSF: ") && w.contains("percent of the pixels are negative")), "{:?}", area.warnings);
+    }
+
+    #[test]
     fn gaussian_fwhm_matches_a_minpack_fit_on_the_lightstack_box() {
         let golden = load();
         let cases = &golden["gaussian_fwhm"];
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack");
-        for case in cases["psfs"].as_array().unwrap() {
+        let clipped = clipped_fwhm_cases(cases);
+        for wanted in ["d1/psf/d1_psf_JWST_F356W_40mas.fits", "d1/psf/d1_psf_JWST_F444W_40mas.fits"] {
+            assert!(clipped.is_empty() || clipped.iter().any(|case| case["input"] == wanted), "gaussian_fwhm.clipped_psfs lacks {wanted}");
+        }
+        let mut checked = 0;
+        for case in cases["psfs"].as_array().unwrap().iter().chain(clipped) {
             let input = case["input"].as_str().unwrap();
             let psf = load_psf(&fixtures.join(input), None).unwrap();
             let (got, expected) = (fit_gaussian(&psf.data).unwrap().fwhm_px, number(&case["fwhm_px"]));
             assert!((got / expected - 1.0).abs() < 1e-5, "{input}: {got} px against MINPACK {expected} px");
+            checked += 1;
         }
+        assert_eq!(checked, if clipped.is_empty() { 5 } else { 7 }, "five full-box PSFs, plus F356W and F444W once the clipped goldens exist");
         let rotated = &cases["rotated"];
         let (sigma, centre) = (vector(&rotated["sigma"]), vector(&rotated["centre"]));
         let theta = number(&rotated["theta"]);
@@ -1093,6 +1342,21 @@ mod tests {
         assert!((fit.fwhm_px / number(&rotated["fwhm_px"]) - 1.0).abs() < 1e-6, "{fit:?}");
         assert!((fit.sigma_x - 2.5).abs() < 1e-6 && (fit.sigma_y - 1.5).abs() < 1e-6 && (fit.theta - theta).abs() < 1e-6, "{fit:?}");
         assert!((fit.x - centre[0]).abs() < 1e-6 && (fit.y - centre[1]).abs() < 1e-6, "{fit:?}");
+    }
+
+    #[test]
+    fn clipped_fwhm_goldens_in_an_unknown_layout_are_refused() {
+        let case = serde_json::json!({ "input": "d1/psf/d1_psf_JWST_F356W_40mas.fits", "fwhm_px": 3.470861740116989 });
+        assert!(clipped_fwhm_cases(&serde_json::json!({ "psfs": [] })).is_empty(), "no clipped_psfs key adds no case");
+        assert_eq!(clipped_fwhm_cases(&serde_json::json!({ "clipped_psfs": [case.clone()] })).len(), 1);
+        assert_eq!(clipped_fwhm_cases(&serde_json::json!({ "clipped_psfs": { "description": "box clipped", "psfs": [case.clone(), case.clone()] } })).len(), 2);
+        for layout in [serde_json::json!({ "description": "box clipped", "cases": [case.clone()] }), serde_json::json!([]), serde_json::json!({ "psfs": [] }), serde_json::json!("F356W")] {
+            let golden = serde_json::json!({ "clipped_psfs": layout });
+            let refused = std::panic::catch_unwind(|| clipped_fwhm_cases(&golden).len());
+            let payload = refused.expect_err(&format!("{layout}: an unknown layout must fail, not add zero cases"));
+            let message = payload.downcast_ref::<String>().map(String::as_str).or_else(|| payload.downcast_ref::<&str>().copied()).unwrap_or_default();
+            assert!(message.starts_with("gaussian_fwhm.clipped_psfs must be"), "{layout}: {message}");
+        }
     }
 
     #[test]
