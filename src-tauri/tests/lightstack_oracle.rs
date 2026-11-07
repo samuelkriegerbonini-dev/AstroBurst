@@ -54,7 +54,7 @@ use astroburst_lib::infra::fits::writer::write_fits_cube;
 use astroburst_lib::infra::progress::ProgressHandle;
 use astroburst_lib::infra::wcs_source::header_wcs;
 use astroburst_lib::math::window::TaperWindow;
-use astroburst_lib::service::cubeprep_recipe::{run_recipe, Recipe};
+use astroburst_lib::service::cubeprep_recipe::{run_recipe, Recipe, RecipeReport};
 use astroburst_lib::types::header::HduHeader;
 use ndarray::Array2;
 use serde_json::Value;
@@ -65,8 +65,10 @@ const RECIPE: &str = "recipe_d1.json";
 const STARS_RECIPE: &str = "recipe_d1_stars.json";
 const ORACLE_DIR_VAR: &str = "ASTROBURST_ORACLE_DIR";
 const WRITE_FIXTURES_VAR: &str = "ASTROBURST_WRITE_LIGHTSTACK_FIXTURES";
-const FIXTURE_BUDGET_BYTES: u64 = 2_000_000;
+const FIXTURE_BUDGET_BYTES: u64 = 3_100_000;
 const LIGHTSTACK_VERSION: &str = "0.4.0";
+const LIGHTSTACK_CODE_SHA256: &str =
+    "f43772588e34d39a12ad38a1b6ab9be90681605605c71949e5cb3b42e7c43357";
 const ORACLE_VERSIONS: [&str; 10] = [
     "python",
     "lightstack",
@@ -206,6 +208,23 @@ fn manifest_errors(manifest_path: &Path) -> Vec<String> {
             ));
         }
     }
+    if manifest["kind"] == "scipy_reference" {
+        let fixtures = dir.parent().unwrap();
+        let created_by = manifest["created_by"].as_str().unwrap_or("its generator");
+        for input in manifest["inputs"].as_array().into_iter().flatten() {
+            let name = input["path"].as_str().unwrap();
+            let unchanged = std::fs::read(fixtures.join(name)).is_ok_and(|bytes| {
+                Some(bytes.len() as u64) == input["bytes"].as_u64()
+                    && Some(sha256_hex(&bytes).as_str()) == input["sha256"].as_str()
+            });
+            if !unchanged {
+                errors.push(format!(
+                    "{}: input {name} differs from the manifest; re-run {created_by}",
+                    manifest_path.display()
+                ));
+            }
+        }
+    }
     errors
 }
 
@@ -230,6 +249,30 @@ fn oracle_manifest_errors(manifest: &Value) -> Vec<String> {
             "versions.lightstack is {}, not {LIGHTSTACK_VERSION}",
             manifest["versions"]["lightstack"]
         ));
+    }
+    if manifest["manifest_version"]
+        .as_u64()
+        .is_some_and(|version| version >= 2)
+    {
+        let source = &manifest["lightstack_source"];
+        if source["code_sha256"] != LIGHTSTACK_CODE_SHA256 {
+            errors.push(format!(
+                "lightstack_source.code_sha256 is {}, not {LIGHTSTACK_CODE_SHA256}",
+                source["code_sha256"]
+            ));
+        }
+        if source["dirty"] == true {
+            errors.push("lightstack_source.dirty is true".to_owned());
+        }
+        if !source["modified_since_install"]
+            .as_array()
+            .is_some_and(|files| files.is_empty())
+        {
+            errors.push(format!(
+                "lightstack_source.modified_since_install is {}, not an empty list",
+                source["modified_since_install"]
+            ));
+        }
     }
     let steps = manifest["steps"].as_array().cloned().unwrap_or_default();
     if steps.is_empty() {
@@ -331,6 +374,74 @@ fn oracle_calls<'a>(manifest: &'a Value, step: &str) -> Vec<&'a Value> {
 }
 
 #[test]
+fn scipy_reference_manifests_detect_a_changed_input() {
+    let scratch = tempfile::tempdir().unwrap();
+    let kernels = scratch.path().join("kernels");
+    std::fs::create_dir_all(&kernels).unwrap();
+    for name in [MANIFEST, "kernel_goldens.json"] {
+        std::fs::copy(fixtures_dir().join("kernels").join(name), kernels.join(name)).unwrap();
+    }
+    let manifest = read_json(&kernels.join(MANIFEST));
+    assert_eq!(manifest["kind"], "scipy_reference");
+    let inputs: Vec<String> = manifest["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|input| input["path"].as_str().unwrap().to_owned())
+        .collect();
+    for input in &inputs {
+        let copy = scratch.path().join(input);
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::copy(fixtures_dir().join(input), &copy).unwrap();
+    }
+    assert_eq!(
+        manifest_errors(&kernels.join(MANIFEST)),
+        Vec::<String>::new(),
+        "an unchanged copy of the kernels goldens and their D1 PSF inputs"
+    );
+    let flipped = scratch.path().join(&inputs[0]);
+    let mut bytes = std::fs::read(&flipped).unwrap();
+    bytes[2880 + 8] ^= 0x01;
+    std::fs::write(&flipped, bytes).unwrap();
+    let errors = manifest_errors(&kernels.join(MANIFEST));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains(&inputs[0]) && errors[0].contains("scripts/oracle/kernel_goldens.py"),
+        "the error names the stale input and the script that regenerates the goldens: {}",
+        errors[0]
+    );
+}
+
+#[test]
+fn oracle_manifest_version_two_requires_the_lightstack_code_fingerprint() {
+    let mut manifest = read_json(&oracle_d1_dir().join(MANIFEST));
+    assert_eq!(
+        oracle_manifest_errors(&manifest),
+        Vec::<String>::new(),
+        "the committed version 1 manifest"
+    );
+    manifest["manifest_version"] = Value::from(2);
+    let errors = oracle_manifest_errors(&manifest);
+    assert!(
+        errors.iter().any(|error| error.contains("code_sha256"))
+            && errors.iter().any(|error| error.contains("modified_since_install")),
+        "version 2 without the fingerprint fields: {errors:?}"
+    );
+    manifest["lightstack_source"] = serde_json::json!({
+        "kind": "index",
+        "code_sha256": LIGHTSTACK_CODE_SHA256,
+        "dirty": false,
+        "modified_since_install": [],
+    });
+    assert_eq!(oracle_manifest_errors(&manifest), Vec::<String>::new());
+    manifest["lightstack_source"]["dirty"] = Value::from(true);
+    manifest["lightstack_source"]["code_sha256"] = Value::from("0".repeat(64));
+    manifest["lightstack_source"]["modified_since_install"] = serde_json::json!(["lightstack/psf.py"]);
+    let errors = oracle_manifest_errors(&manifest);
+    assert_eq!(errors.len(), 3, "{errors:?}");
+}
+
+#[test]
 fn fixtures_match_manifest_sha256() {
     let manifests = manifests_under(&fixtures_dir());
     assert!(
@@ -345,14 +456,18 @@ fn fixtures_match_manifest_sha256() {
 }
 
 #[test]
-fn lightstack_fixtures_stay_under_two_megabytes() {
+fn lightstack_fixtures_stay_under_budget() {
     let total: u64 = files_under(&fixtures_dir())
         .values()
         .map(|path| path.metadata().unwrap().len())
         .sum();
+    let headroom = FIXTURE_BUDGET_BYTES as i64 - total as i64;
+    eprintln!(
+        "tests/fixtures/lightstack holds {total} bytes of the {FIXTURE_BUDGET_BYTES} budget, headroom {headroom}"
+    );
     assert!(
         total < FIXTURE_BUDGET_BYTES,
-        "tests/fixtures/lightstack holds {total} bytes"
+        "tests/fixtures/lightstack holds {total} bytes, the budget is {FIXTURE_BUDGET_BYTES} (headroom {headroom}); raise FIXTURE_BUDGET_BYTES on purpose or drop a golden"
     );
 }
 
@@ -1250,7 +1365,7 @@ fn f277w_crop_matches_crop_from_radec(
     edit: impl FnOnce(&mut HduHeader),
     astropy_scale: f64,
     [x_min, x_max, y_min, y_max]: [i64; 4],
-) {
+) -> Vec<String> {
     let (center, size) = recipe_crop();
     let f277w = d1_planes()
         .into_iter()
@@ -1302,6 +1417,7 @@ fn f277w_crop_matches_crop_from_radec(
         "{name}: AstroBurst reads {scale} arcsec/px, astropy {astropy_scale}"
     );
     eprintln!("{name}: crop edges judged as ties: {ties:#?}");
+    ties
 }
 
 #[test]
@@ -1337,6 +1453,23 @@ fn d1_crop_on_cd_next_to_pc_and_cdelt_follows_crop_from_radec() {
         },
         0.07999999999999992,
         [20, 43, 20, 43],
+    );
+}
+
+#[test]
+fn d1_crop_off_the_half_pixel_grid_has_no_tie() {
+    let ties = f277w_crop_matches_crop_from_radec(
+        "F277W with CRPIX 32.3/32.7",
+        |header| {
+            header.set("CRPIX1", "32.3".to_string());
+            header.set("CRPIX2", "32.7".to_string());
+        },
+        0.04,
+        [8, 54, 9, 55],
+    );
+    assert!(
+        ties.is_empty(),
+        "a crop centre 0.2 px off the half-pixel grid leaves no edge within {CROP_TIE_PX} px of a boundary: {ties:?}"
     );
 }
 
@@ -2116,7 +2249,7 @@ fn oracle_d1_crop_bounds_match_crop_from_radec() {
 }
 
 #[test]
-fn oracle_d1_tan_reference_meridian_crops_match_without_a_tie_exception() {
+fn oracle_d1_tan_reference_meridian_crops_match_on_a_one_ulp_tie() {
     let manifest = read_json(&oracle_d1_dir().join(MANIFEST));
     let (center, size) = recipe_crop();
     let planes = d1_planes();
@@ -2126,13 +2259,32 @@ fn oracle_d1_tan_reference_meridian_crops_match_without_a_tie_exception() {
         let metrics = &call["metrics"];
         let wcs = lightstack_wcs(&plane.header).unwrap();
         let rect = lightstack_square_rect(&wcs, (plane.side, plane.side), center, size).unwrap();
+        let (x, y) = astroburst_crop_centre(&wcs, center);
+        let excess = (center.dec - f64_card(&plane.header, "CRVAL2")) / f64_card(&plane.header, "CD2_2");
+        assert_eq!(
+            x, 31.5,
+            "{filter}: the crop centre sits on the half-pixel grid in x, so x_min 9 and x_max 54 are exact ties"
+        );
+        assert!(
+            ((y - 31.5) - excess).abs() < 1e-13,
+            "{filter}: the crop centre is {:e} px above the half-pixel grid in y, not (dec - CRVAL2) / CD2_2 = {excess:e} px",
+            y - 31.5
+        );
+        assert!(
+            excess > 0.0 && excess < 1e-9,
+            "{filter}: the stored CRVAL2 is one ulp south of the crop Dec, which puts y_min and y_max {excess:e} px above the boundaries 9 and 54"
+        );
         assert_eq!((rect.x0, rect.y0, rect.width, rect.height), (
             metrics["x_min"].as_f64().unwrap() as i64,
             metrics["y_min"].as_f64().unwrap() as i64,
             metrics["shape"][1].as_u64().unwrap() as usize,
             metrics["shape"][0].as_u64().unwrap() as usize,
-        ), "{filter}: exact D1 reference-meridian crop");
-        assert_eq!((rect.width, rect.height), (45, 46));
+        ), "{filter}: the D1 reference-meridian crop is a tie: AstroBurst rounds the y edges {excess:e} px above 9 and 54 to 9 and 55, and crop_from_radec rounded the same way because its wcslib centre lands +1.46e-9 px above the boundary under astropy 8.0.2 (-3.16e-10 px for a zero CRVAL offset), so a regenerated golden may give y_min 8 with AstroBurst unchanged");
+        assert_eq!(
+            (rect.width, rect.height),
+            (45, 46),
+            "{filter}: 45 by 46 holds only while the y edges stay a hair above the pixel boundaries (a one-ulp tie, not WCS geometry); the compatibility cube's 44 rows by 43 columns follow from it"
+        );
     }
 }
 
@@ -2355,53 +2507,18 @@ fn oracle_d1_bilinear_alignment_matches_align_reproject_fits() {
             AlignClass::Float
         };
         classes.insert(class);
+        let error = assert_align_class(filter, class, &got, &oracle_file(output));
         match class {
             AlignClass::Exact => {
-                assert!(
-                    identical(&got, expected),
-                    "{filter}: a plane that is not reprojected must be LIGHTSTACK's copy read at float32, bit for bit (E class)"
-                );
                 eprintln!("{filter}: E, not reprojected, identical to align_reproject_fits");
             }
             AlignClass::Float => {
-                let reference = f64_planes(&oracle_file(output)).1.remove(0);
-                let error = worst_relative(filter, &got.mapv(f64::from), &reference);
                 eprintln!(
                     "{filter}: F, TAN, max difference against align_reproject_fits {error:.2e} of the max abs value over every pixel, NaN masks equal"
                 );
-                assert!(
-                    error <= 2e-6,
-                    "{filter}: {error:e} of the max abs value (F class)"
-                );
             }
             AlignClass::Equivalent => {
-                let range = percentile_range(expected);
-                let (rows, cols) = got.dim();
-                let mut worst = 0.0f64;
-                let mut one_sided = Vec::new();
-                for ((y, x), value) in got.indexed_iter() {
-                    let interior = (2..rows - 2).contains(&y) && (2..cols - 2).contains(&x);
-                    let reference_value = expected[[y, x]];
-                    if !interior {
-                        continue;
-                    }
-                    if value.is_finite() != reference_value.is_finite() {
-                        one_sided.push((x, y, *value, reference_value));
-                    } else if value.is_finite() {
-                        let difference = f64::from((value - reference_value).abs());
-                        worst = worst.max(difference / range);
-                        assert!(
-                            difference <= 1e-3 * range,
-                            "{filter} ({x}, {y}): {value} against LIGHTSTACK {reference_value}"
-                        );
-                    }
-                }
-                assert!(
-                    one_sided.is_empty(),
-                    "{filter}: the interior NaN masks differ (E class) at {} pixels; first (x, y, AstroBurst, LIGHTSTACK): {:?}",
-                    one_sided.len(),
-                    &one_sided[..one_sided.len().min(4)]
-                );
+                let worst = error;
                 let native = truth["planes"]
                     .as_array()
                     .unwrap()
@@ -2455,6 +2572,71 @@ fn identical(a: &Array2<f32>, b: &Array2<f32>) -> bool {
         && a.iter()
             .zip(b.iter())
             .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
+}
+
+fn identical_f64(a: &Array2<f64>, b: &Array2<f64>) -> bool {
+    a.dim() == b.dim()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()))
+}
+
+fn assert_align_class(label: &str, class: AlignClass, got: &Array2<f32>, golden: &Path) -> f64 {
+    let expected = first_image(golden).1;
+    assert_eq!(
+        got.dim(),
+        expected.dim(),
+        "{label}: shape against {}",
+        golden.display()
+    );
+    match class {
+        AlignClass::Exact => {
+            assert!(
+                identical(got, &expected),
+                "{label}: a plane that is not reprojected must be LIGHTSTACK's copy read at float32, bit for bit (E class)"
+            );
+            0.0
+        }
+        AlignClass::Float => {
+            let reference = f64_planes(golden).1.remove(0);
+            let error = worst_relative(label, &got.mapv(f64::from), &reference);
+            assert!(
+                error <= 2e-6,
+                "{label}: {error:e} of the max abs value (F class)"
+            );
+            error
+        }
+        AlignClass::Equivalent => {
+            let range = percentile_range(&expected);
+            let (rows, cols) = got.dim();
+            let mut worst = 0.0f64;
+            let mut one_sided = Vec::new();
+            for ((y, x), value) in got.indexed_iter() {
+                let interior = (2..rows - 2).contains(&y) && (2..cols - 2).contains(&x);
+                let reference_value = expected[[y, x]];
+                if !interior {
+                    continue;
+                }
+                if value.is_finite() != reference_value.is_finite() {
+                    one_sided.push((x, y, *value, reference_value));
+                } else if value.is_finite() {
+                    let difference = f64::from((value - reference_value).abs());
+                    worst = worst.max(difference / range);
+                    assert!(
+                        difference <= 1e-3 * range,
+                        "{label} ({x}, {y}): {value} against LIGHTSTACK {reference_value} (I class)"
+                    );
+                }
+            }
+            assert!(
+                one_sided.is_empty(),
+                "{label}: the interior NaN masks differ (E class) at {} pixels; first (x, y, AstroBurst, LIGHTSTACK): {:?}",
+                one_sided.len(),
+                &one_sided[..one_sided.len().min(4)]
+            );
+            worst
+        }
+    }
 }
 
 fn interior_aperture_sum(image: &Array2<f32>, x: f64, y: f64, radius: f64) -> Option<f64> {
@@ -2800,12 +2982,15 @@ fn oracle_reproduces_the_d1_area_factor_and_gaussian_psf_fwhm() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs ASTROBURST_ORACLE_DIR: a folder holding scripts/oracle/lightstack_oracle.py --out folders; checks only manifest sha256, versions and call records, not AstroBurst output"]
 fn oracle_real_data_manifests_match_their_files_and_versions() {
-    let Some(root) = std::env::var_os(ORACLE_DIR_VAR).map(PathBuf::from) else {
-        eprintln!("skipped: {ORACLE_DIR_VAR} unset");
-        return;
-    };
+    let root = std::env::var_os(ORACLE_DIR_VAR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!(
+                "{ORACLE_DIR_VAR} is unset: produce one folder per recipe with docs/notCommit/oracle/.venv313/Scripts/python.exe -I scripts/oracle/lightstack_oracle.py --recipe <recipe.json> --data <folder the recipe paths are relative to> --out <folder>, then point {ORACLE_DIR_VAR} at their parent; this test checks only the manifests (sha256 of every file, library versions, call records), not AstroBurst's output"
+            )
+        });
     let manifests = manifests_under(&root);
     assert!(
         !manifests.is_empty(),
@@ -3126,6 +3311,87 @@ fn d1_gaussian_kernel_brings_f277w_stars_to_the_target_fwhm_and_keeps_their_flux
         );
     }
 }
+
+struct KernelPin {
+    filter: &'static str,
+    residual_max: f64,
+    residual_rms: f64,
+    encircled_energy_difference: f64,
+    source_fwhm_px: f64,
+    matched_fwhm_px: f64,
+    negative_fraction: f64,
+    warnings: &'static [&'static str],
+}
+
+const D1_TARGET_FWHM_PX: f64 = 3.470962718563258;
+const D1_TUTORIAL_KERNEL_PINS: [KernelPin; 5] = [
+    KernelPin {
+        filter: "F814W",
+        residual_max: 0.163247039656284,
+        residual_rms: 0.009009066057347763,
+        encircled_energy_difference: 0.019421501874558378,
+        source_fwhm_px: 2.7970197514109083,
+        matched_fwhm_px: 3.842143338919234,
+        negative_fraction: 0.38095238095238093,
+        warnings: &[
+            "the source PSF convolved with the kernel differs from the target by up to 16.32 percent of its peak (RMS 0.901 percent)",
+            "the matched FWHM 3.842 px differs from the target FWHM 3.471 px by +10.69 percent",
+            "the encircled energy of the matched PSF differs from the target by up to 0.0194 beyond one FWHM",
+        ],
+    },
+    KernelPin {
+        filter: "F150W",
+        residual_max: 0.025797861771782095,
+        residual_rms: 0.0014347199819372263,
+        encircled_energy_difference: 0.008391057133931734,
+        source_fwhm_px: 1.2138023524833936,
+        matched_fwhm_px: 3.5115876756385194,
+        negative_fraction: 0.29024943310657597,
+        warnings: &[
+            "the source PSF convolved with the kernel differs from the target by up to 2.58 percent of its peak (RMS 0.143 percent)",
+        ],
+    },
+    KernelPin {
+        filter: "F200W",
+        residual_max: 0.0399177186246489,
+        residual_rms: 0.002185678430596558,
+        encircled_energy_difference: 0.011247293097084499,
+        source_fwhm_px: 1.614703751906119,
+        matched_fwhm_px: 3.537941611811592,
+        negative_fraction: 0.34467120181405897,
+        warnings: &[
+            "the source PSF convolved with the kernel differs from the target by up to 3.99 percent of its peak (RMS 0.219 percent)",
+            "the encircled energy of the matched PSF differs from the target by up to 0.0112 beyond one FWHM",
+        ],
+    },
+    KernelPin {
+        filter: "F277W",
+        residual_max: 0.07350806505105269,
+        residual_rms: 0.003994899370860249,
+        encircled_energy_difference: 0.008551804269569918,
+        source_fwhm_px: 2.3970607481600745,
+        matched_fwhm_px: 3.6255440067282776,
+        negative_fraction: 0.32653061224489793,
+        warnings: &[
+            "the source PSF convolved with the kernel differs from the target by up to 7.35 percent of its peak (RMS 0.399 percent)",
+            "the matched FWHM 3.626 px differs from the target FWHM 3.471 px by +4.45 percent",
+        ],
+    },
+    KernelPin {
+        filter: "F356W",
+        residual_max: 0.2863592544641417,
+        residual_rms: 0.016159043921685663,
+        encircled_energy_difference: 0.04547987181558677,
+        source_fwhm_px: 3.4708684032980845,
+        matched_fwhm_px: 4.209660401560967,
+        negative_fraction: 0.36281179138321995,
+        warnings: &[
+            "the source PSF convolved with the kernel differs from the target by up to 28.64 percent of its peak (RMS 1.616 percent)",
+            "the matched FWHM 4.210 px differs from the target FWHM 3.471 px by +21.28 percent",
+            "the encircled energy of the matched PSF differs from the target by up to 0.0455 beyond one FWHM",
+        ],
+    },
+];
 
 fn d1_psf_at(plane: &Value, scale: f64) -> Array2<f64> {
     let file = plane["psf"]["files"]
@@ -3877,6 +4143,35 @@ fn oracle_d1_kernels_match_build_kernel() {
             metrics["negative_fraction"].as_f64().unwrap(),
             diagnostics.negative_fraction
         );
+        eprintln!("{filter}: {diagnostics:?}");
+        let pin = D1_TUTORIAL_KERNEL_PINS
+            .iter()
+            .find(|pin| pin.filter == filter)
+            .unwrap_or_else(|| panic!("{filter}: no pinned diagnostics"));
+        let fwhm = |value: Option<f64>| value.unwrap_or_else(|| panic!("{filter}: no Gaussian fit"));
+        for (name, got, expected, bound) in [
+            ("residual_max", diagnostics.residual_max, pin.residual_max, 1e-9),
+            ("residual_rms", diagnostics.residual_rms, pin.residual_rms, 1e-9),
+            (
+                "encircled_energy_difference",
+                diagnostics.encircled_energy_difference,
+                pin.encircled_energy_difference,
+                1e-9,
+            ),
+            ("negative_fraction", diagnostics.negative_fraction, pin.negative_fraction, 1e-9),
+            ("source_fwhm_px", fwhm(diagnostics.source_fwhm_px), pin.source_fwhm_px, 1e-7),
+            ("target_fwhm_px", fwhm(diagnostics.target_fwhm_px), D1_TARGET_FWHM_PX, 1e-7),
+            ("matched_fwhm_px", fwhm(diagnostics.matched_fwhm_px), pin.matched_fwhm_px, 1e-7),
+        ] {
+            assert!(
+                relative_difference(got, expected) <= bound,
+                "{filter}: {name} {got:?} moved from the pinned {expected:?} by more than {bound:e} relative"
+            );
+        }
+        assert_eq!(
+            diagnostics.warnings, pin.warnings,
+            "{filter}: the kernel warnings users read changed"
+        );
     }
 }
 
@@ -4090,6 +4385,307 @@ fn plane_agreement(got: &Array2<f64>, expected: &Array2<f64>, border: usize) -> 
     agreement
 }
 
+fn assert_cube_plane(
+    label: &str,
+    distorted: bool,
+    ours: &Array2<f64>,
+    theirs: &Array2<f64>,
+) -> PlaneAgreement {
+    assert_eq!(ours.dim(), theirs.dim(), "{label}: plane shape");
+    let agreement = plane_agreement(ours, theirs, 2);
+    assert_eq!(agreement.one_sided, 0, "{label}: the NaN masks differ");
+    if distorted {
+        assert!(
+            agreement.interior_worst_of_range <= 1e-3,
+            "{label}: {:e} (I class)",
+            agreement.interior_worst_of_range
+        );
+    } else {
+        assert!(
+            agreement.worst_of_max <= 2e-6,
+            "{label}: {:e} (F class)",
+            agreement.worst_of_max
+        );
+    }
+    agreement
+}
+
+const CUBE_CARDS: [&str; 8] = [
+    "BUNIT", "CTYPE3", "CUNIT1", "CUNIT2", "RADESYS", "NFILTERS", "FILTERS", "DATASETS",
+];
+
+fn celestial_matrix(header: &HduHeader) -> [[f64; 2]; 2] {
+    let cd = |i: usize, j: usize| header.get_f64(&format!("CD{i}_{j}"));
+    if [cd(1, 1), cd(1, 2), cd(2, 1), cd(2, 2)]
+        .iter()
+        .any(Option::is_some)
+    {
+        let element = |i: usize, j: usize| cd(i, j).unwrap_or(0.0);
+        return [[element(1, 1), element(1, 2)], [element(2, 1), element(2, 2)]];
+    }
+    let pc = |i: usize, j: usize| {
+        header
+            .get_f64(&format!("PC{i}_{j}"))
+            .unwrap_or(if i == j { 1.0 } else { 0.0 })
+    };
+    let cdelt = |i: usize| header.get_f64(&format!("CDELT{i}")).unwrap_or(1.0);
+    [
+        [pc(1, 1) * cdelt(1), pc(1, 2) * cdelt(1)],
+        [pc(2, 1) * cdelt(2), pc(2, 2) * cdelt(2)],
+    ]
+}
+
+fn history_lines(header: &HduHeader) -> Vec<String> {
+    header
+        .cards
+        .iter()
+        .filter(|(key, _)| key == "HISTORY")
+        .map(|(_, value)| value.trim().to_string())
+        .collect()
+}
+
+fn assert_cube_header_matches(label: &str, ours: &HduHeader, golden: &HduHeader) {
+    let planes = golden
+        .get_i64("NFILTERS")
+        .unwrap_or_else(|| panic!("{label}: the golden has no NFILTERS"));
+    let mut keys: Vec<String> = CUBE_CARDS.iter().map(|key| key.to_string()).collect();
+    for n in 1..=planes {
+        keys.push(format!("FILTER{n}"));
+        keys.push(format!("DATASET{n}"));
+    }
+    for key in keys {
+        let expected = golden
+            .get(&key)
+            .unwrap_or_else(|| panic!("{label}: the golden has no {key}"));
+        assert!(
+            same_card(ours.get(&key), expected),
+            "{label}: {key} is {:?}, the golden has {expected:?}",
+            ours.get(&key)
+        );
+    }
+    let (got, expected) = (celestial_matrix(ours), celestial_matrix(golden));
+    let scale = expected
+        .iter()
+        .flatten()
+        .fold(0.0f64, |acc, value| acc.max(value.abs()));
+    for (i, j) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        assert!(
+            (got[i][j] - expected[i][j]).abs() <= 1e-12 * scale,
+            "{label}: celestial matrix element {}_{} is {} where the golden's PC times CDELT gives {}",
+            i + 1,
+            j + 1,
+            got[i][j],
+            expected[i][j]
+        );
+    }
+    let ours_history = history_lines(ours);
+    for line in history_lines(golden) {
+        assert!(
+            ours_history.iter().any(|our| our.contains(&line)),
+            "{label}: the golden HISTORY line {line:?} is in none of ours: {ours_history:?}"
+        );
+    }
+}
+
+fn assert_runner_steps_match_the_goldens(
+    recipe: &Recipe,
+    report: &RecipeReport,
+    manifest: &Value,
+    distorted: &[&str],
+) {
+    let path_of = |value: &Value| PathBuf::from(value.as_str().unwrap());
+    let match_call = oracle_calls(manifest, "match")[0];
+    let reference = match_call["arguments"]["ref_filter"].as_str().unwrap();
+    let align_call = oracle_calls(manifest, "align")[0];
+    let align_filters: Vec<&str> = align_call["arguments"]["fits_list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item[2].as_str().unwrap())
+        .collect();
+    let align_golden = |filter: &str, side: &str| {
+        let index = align_filters
+            .iter()
+            .position(|known| *known == filter)
+            .unwrap_or_else(|| panic!("{filter}: not in align_reproject_fits"));
+        oracle_entry_path(&align_call[side][index])
+    };
+    let built_kernels: Vec<&Value> = oracle_calls(manifest, "kernels")
+        .into_iter()
+        .filter(|call| call["function"] == "lightstack.psf.build_kernel")
+        .collect();
+    let saved_kernels: Vec<&Value> = oracle_calls(manifest, "kernels")
+        .into_iter()
+        .filter(|call| call["function"] == "lightstack.psf.save_kernel")
+        .collect();
+    let mut aligned: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for step in &report.steps {
+        let at = |filter: &str| format!("{} {filter}", step.directory);
+        let files = || {
+            recipe
+                .inputs
+                .iter()
+                .zip(step.report["files"].as_array().unwrap())
+        };
+        match step.step {
+            "crop" => {
+                for (input, file) in files() {
+                    let label = at(&input.filter);
+                    let call = oracle_calls(manifest, "crop")
+                        .into_iter()
+                        .find(|call| call["metrics"]["filter"] == input.filter.as_str())
+                        .unwrap_or_else(|| panic!("{label}: no crop_from_radec call"));
+                    let ours = first_image(&path_of(&file["output_path"])).1;
+                    let theirs = first_image(&oracle_entry_path(&call["outputs"][0])).1;
+                    assert_eq!(ours.dim(), theirs.dim(), "{label}: crop shape");
+                    assert!(
+                        identical(&ours, &theirs),
+                        "{label}: the crop is not crop_from_radec's bit for bit"
+                    );
+                    eprintln!("{label}: identical to crop_from_radec, {:?}", ours.dim());
+                }
+            }
+            "units" => {
+                for (input, file) in files() {
+                    let label = at(&input.filter);
+                    let (ours_header, mut ours) = f64_planes(&path_of(&file["output_path"]));
+                    let (golden_header, mut theirs) =
+                        f64_planes(&align_golden(&input.filter, "inputs"));
+                    let error = worst_relative(&label, &ours.remove(0), &theirs.remove(0));
+                    assert!(
+                        error <= 2e-6,
+                        "{label}: {error:e} of the max abs value against the plane LIGHTSTACK aligned (F class)"
+                    );
+                    let bunit = golden_header.get("BUNIT").unwrap();
+                    assert!(
+                        same_card(ours_header.get("BUNIT"), bunit),
+                        "{label}: BUNIT is {:?}, LIGHTSTACK wrote {bunit:?}",
+                        ours_header.get("BUNIT")
+                    );
+                    eprintln!(
+                        "{label}: F, {error:.2e} of the max abs value, BUNIT {}",
+                        card(&ours_header, "BUNIT").unwrap()
+                    );
+                }
+            }
+            "align" => {
+                for (input, file) in files() {
+                    let label = at(&input.filter);
+                    let output = path_of(&file["output_path"]);
+                    let class = if distorted.contains(&input.filter.as_str()) {
+                        AlignClass::Equivalent
+                    } else {
+                        AlignClass::Float
+                    };
+                    let error = assert_align_class(
+                        &label,
+                        class,
+                        &first_image(&output).1,
+                        &align_golden(&input.filter, "outputs"),
+                    );
+                    eprintln!("{label}: {class:?}, {error:.2e} against align_reproject_fits");
+                    aligned.insert(input.filter.clone(), output);
+                }
+            }
+            "cube" | "edit" | "match" => {
+                let strings = |value: &Value| -> Vec<String> {
+                    value
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|item| item.as_str().map(str::to_owned).unwrap_or_else(|| item["filter"].as_str().unwrap().to_owned()))
+                        .collect()
+                };
+                let (golden, filters) = match step.step {
+                    "cube" => (
+                        &oracle_calls(manifest, "cube")[0]["outputs"][0],
+                        strings(&step.report["planes"]),
+                    ),
+                    "edit" => {
+                        let call = oracle_calls(manifest, "edit")
+                            .into_iter()
+                            .find(|call| call["function"] == "lightstack.datacube.build_valid_datacube")
+                            .unwrap_or_else(|| panic!("{}: no build_valid_datacube call", step.directory));
+                        (&call["outputs"][0], strings(&step.report["filters"]))
+                    }
+                    _ => (&match_call["outputs"][0], strings(&step.report["planes"])),
+                };
+                let (ours_header, ours) = f64_planes(&path_of(&step.report["output_path"]));
+                let (golden_header, theirs) = f64_planes(&oracle_entry_path(golden));
+                assert_eq!(ours.len(), filters.len(), "{}: planes", step.directory);
+                assert_eq!(theirs.len(), filters.len(), "{}: golden planes", step.directory);
+                for ((filter, ours), theirs) in filters.iter().zip(&ours).zip(&theirs) {
+                    let label = at(filter);
+                    if step.step != "match" {
+                        let own = f64_planes(&aligned[filter]).1.remove(0);
+                        assert!(
+                            identical_f64(ours, &own),
+                            "{label}: not the runner's own aligned plane bit for bit"
+                        );
+                    }
+                    let agreement =
+                        assert_cube_plane(&label, distorted.contains(&filter.as_str()), ours, theirs);
+                    eprintln!(
+                        "{label}: {}, max difference {:.2e} of the max abs value, interior {:.2e} of the 0.1 to 99.9 percentile range",
+                        if distorted.contains(&filter.as_str()) { "I" } else { "F" },
+                        agreement.worst_of_max,
+                        agreement.interior_worst_of_range
+                    );
+                }
+                assert_cube_header_matches(&step.directory, &ours_header, &golden_header);
+                eprintln!("{}: header cards, celestial matrix and HISTORY agree", step.directory);
+            }
+            "psfs" => {
+                for psf in step.report["prepared"]["psfs"].as_array().unwrap() {
+                    let filter = psf["filter"].as_str().unwrap();
+                    let label = at(filter);
+                    let golden = if filter == reference {
+                        &built_kernels[0]["inputs"][1]
+                    } else {
+                        &built_kernels
+                            .iter()
+                            .find(|call| call["metrics"]["filter"] == filter)
+                            .unwrap_or_else(|| panic!("{label}: no build_kernel call"))["inputs"][0]
+                    };
+                    let ours = f64_planes(&path_of(&psf["output_path"])).1.remove(0);
+                    let theirs = f64_planes(&oracle_entry_path(golden)).1.remove(0);
+                    let error = worst_relative(&label, &ours, &theirs);
+                    assert!(
+                        error <= 1e-9,
+                        "{label}: {error:e} of the peak against the PSF LIGHTSTACK fed to build_kernel (N class)"
+                    );
+                    eprintln!("{label}: N, {error:.2e} of the peak");
+                }
+            }
+            "kernels" => {
+                for kernel in step.report["kernels"].as_array().unwrap() {
+                    let filter = kernel["filter"].as_str().unwrap();
+                    let label = at(filter);
+                    let name = kernel_file_name(filter, reference);
+                    let golden = saved_kernels
+                        .iter()
+                        .find_map(|call| {
+                            let output = &call["outputs"][0];
+                            output["path"].as_str().unwrap().ends_with(&name).then_some(output)
+                        })
+                        .unwrap_or_else(|| panic!("{label}: no save_kernel output named {name}"));
+                    let ours = f64_planes(&path_of(&kernel["output_path"])).1.remove(0);
+                    let theirs = f64_planes(&oracle_entry_path(golden)).1.remove(0);
+                    assert_eq!(ours.dim(), theirs.dim(), "{label}: kernel shape");
+                    let error = worst_relative(&label, &ours, &theirs);
+                    assert!(
+                        error <= 1e-9,
+                        "{label}: {error:e} of the peak against build_kernel (N class)"
+                    );
+                    eprintln!("{label}: N, {:?}, {error:.2e} of the peak", ours.dim());
+                }
+            }
+            "export" => {}
+            other => panic!("{}: no golden comparison for the {other} step", step.directory),
+        }
+    }
+}
+
 #[test]
 fn the_d1_recipe_from_lightstacks_crops_reproduces_its_psf_matched_cube() {
     let mut value = read_json(&d1_dir().join(RECIPE));
@@ -4142,31 +4738,17 @@ fn assert_d1_recipe_reproduces_psf_matched_cube(value: Value) {
         .map(|input| input.filter.as_str())
         .collect();
     assert_eq!(distorted, ["F814W"], "D1 holds one SIP plane");
+    assert_runner_steps_match_the_goldens(&recipe, &report, &manifest, &distorted);
     for ((plane, ours), theirs) in planes.iter().zip(&got).zip(&expected) {
-        let agreement = plane_agreement(ours, theirs, 2);
+        let agreement = assert_cube_plane(
+            &plane.filter,
+            distorted.contains(&plane.filter.as_str()),
+            ours,
+            theirs,
+        );
         eprintln!(
             "{}: one-sided NaN {} (interior {}), max difference {:.2e} of the max abs value, interior {:.2e} of the 0.1 to 99.9 percentile range",
             plane.filter, agreement.one_sided, agreement.interior_one_sided, agreement.worst_of_max, agreement.interior_worst_of_range
         );
-        assert_eq!(
-            agreement.one_sided, 0,
-            "{}: the NaN masks differ",
-            plane.filter
-        );
-        if distorted.contains(&plane.filter.as_str()) {
-            assert!(
-                agreement.interior_worst_of_range <= 1e-3,
-                "{}: {:e} (I class)",
-                plane.filter,
-                agreement.interior_worst_of_range
-            );
-        } else {
-            assert!(
-                agreement.worst_of_max <= 2e-6,
-                "{}: {:e} (F class)",
-                plane.filter,
-                agreement.worst_of_max
-            );
-        }
     }
 }
