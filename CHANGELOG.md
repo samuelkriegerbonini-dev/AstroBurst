@@ -4,6 +4,23 @@ All notable changes to AstroBurst will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-11-06
+
+### Added
+- Cube Prep records resampling noise correlation (NOISCORR) per plane, reports kernel noise diagnostics (negative weight, sum of squared coefficients, FWHM cards) and PSF clipping, and accepts PSFs of different sizes with the "max" kernel shape.
+- Recipe runs write failure.json when they stop early, report advisories such as a cut before matching, and accept an optional PSF "recentre" key.
+- SAGUI regional photometry adds errors corrected for noise correlation, per-region component counts, minimum S/N, DQ exclusions and run diagnostics; R failures and progress are shown as reported by R.
+- An All tools browser with sidebar shortcut pins, a viewer cube frame stepper with keyboard stepping, analysis section tips and stale-result notes.
+- FITS units accept exact-case MJy and the word prefix mega as megajansky.
+
+### Fixed
+- FITS products are written atomically and keep the previous file on failure; DQ and SCI+ERR+DQ downloads from the REST API return the full file again.
+- Exact resampling no longer fills pixels beside NaN input, and invalid-plane removal uses each mission's DQ exclusion mask.
+- Screen reader names and states for shared controls, file panels, display controls and region tools.
+
+### Limitations
+- Exact resampling keeps roundoff slivers finite where reproject_exact makes them NaN. The LIGHTSTACK oracle and real-data validation were not rerun for this release.
+
 ## [0.7.9] - 2026-11-02
 
 ### Added
