@@ -15,7 +15,7 @@ const report: CubePrepReport = { recipe_version: 1, name: "D1", output_dir: "/da
 function setup() {
   const draft = createCubePrepDraft();
   draft.recipe.inputs = [{ path: "/data/a.fits", dataset: "JWST", filter: "F200W" }];
-  draft.recipe.steps = [{ step: "cube", layout: "mef", output: "cube.fits" }];
+  draft.recipe.steps = [{ step: "cube", reference: "F200W", layout: "mef", output: "cube.fits" }];
   draft.outputParent = "/data";
   draft.baseDir = "/data";
   const validation: CubePrepValidation = { recipe: draft.recipe, dependencies: ["/data/a.fits"], warnings: ["Check registration"] };
@@ -138,6 +138,45 @@ describe("Cube Prep desktop job lifecycle", () => {
     expect(store.get().status).toBe("cancelled");
     expect(store.get().outputDir).toContain("/data/cubeprep-");
     expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("publishes the run folder only when the backend run starts (SCIENCE-03)", async () => {
+    const { store, api, validation } = setup();
+    await store.run();
+    expect(store.get().outputDir).toBe("/data/job");
+    const refused = deferred<CubePrepValidation>();
+    vi.mocked(api.validate).mockReturnValueOnce(refused.promise);
+    const work = store.run();
+    expect(store.get()).toMatchObject({ status: "validating", outputDir: null, report: null });
+    refused.reject(new Error("Missing ERR"));
+    await work;
+    expect(store.get()).toMatchObject({ status: "error", error: "Missing ERR", outputDir: null });
+    const early = deferred<CubePrepValidation>();
+    vi.mocked(api.validate).mockReturnValueOnce(early.promise);
+    const cancelled = store.run();
+    await store.cancel();
+    early.resolve(validation);
+    await cancelled;
+    expect(store.get()).toMatchObject({ status: "cancelled", outputDir: null });
+    expect(api.run).toHaveBeenCalledOnce();
+    vi.mocked(api.run).mockImplementationOnce(async (_recipe, _base, outputDir) => {
+      expect(outputDir).toMatch(/^\/data\/cubeprep-field-/);
+      expect(store.get()).toMatchObject({ status: "running", outputDir });
+      expect(store.get().startedAt).toEqual(expect.any(Number));
+      return report;
+    });
+    await store.run();
+    expect(store.get()).toMatchObject({ status: "complete", outputDir: "/data/job" });
+  });
+
+  it("keeps the report when only the name, working folder or profile label change (SCIENCE-06)", async () => {
+    const { store } = setup();
+    await store.run();
+    const draft = store.get().draft;
+    store.edit({ ...draft, outputParent: "/elsewhere", profile: "scientific", recipe: { ...draft.recipe, name: "renamed" } });
+    expect(store.get()).toMatchObject({ report, outputDir: "/data/job", validation: null, status: "idle" });
+    store.edit({ ...store.get().draft, recipe: { ...store.get().draft.recipe, steps: [{ step: "cube", layout: "lightstack", output: "cube.fits" }] } });
+    expect(store.get()).toMatchObject({ report: null, outputDir: null });
   });
 
   it("persists configuration without reviving a running job after restart", async () => {

@@ -27,8 +27,8 @@ use crate::core::metadata::units::{AreaRule, TargetUnit};
 use crate::infra::paths::plain;
 use crate::infra::progress::ProgressHandle;
 use crate::service::cubeprep::{
-    align_set, build_cube, build_kernels, convert_units_file, crop_set, edit_cube, filter_registry, load_psfs, psf_match_cube,
-    CubeInputSpec, PsfInputSpec,
+    align_set_with, build_cube_with, build_kernels_with, convert_units_file, crop_set_with, edit_cube_with, filter_registry, load_psfs_with,
+    psf_match_cube_with, CubeInputSpec, PsfInputSpec,
 };
 use crate::service::cutout::export_cutout_rect;
 use crate::service::empirical_psf::{build_empirical_psf_file, PsfStarSource};
@@ -836,12 +836,12 @@ impl Run {
         match step {
             RecipeStep::Units { to } => self.units(*to, dir, progress),
             RecipeStep::Crop(crop) => self.crop(crop, dir, progress),
-            RecipeStep::Align(align) => self.align(align, dir),
-            RecipeStep::Cube(cube) => self.build(cube, dir),
-            RecipeStep::Edit(edit) => self.edit(edit, dir),
+            RecipeStep::Align(align) => self.align(align, dir, progress),
+            RecipeStep::Cube(cube) => self.build(cube, dir, progress),
+            RecipeStep::Edit(edit) => self.edit(edit, dir, progress),
             RecipeStep::Psfs(psfs) => self.psfs(psfs, dir, progress),
-            RecipeStep::Kernels(kernels) => self.kernels(kernels, dir),
-            RecipeStep::Match(matching) => self.matching(matching, dir),
+            RecipeStep::Kernels(kernels) => self.kernels(kernels, dir, progress),
+            RecipeStep::Match(matching) => self.matching(matching, dir, progress),
             RecipeStep::Export { output } => self.export(output, dir),
         }
     }
@@ -871,7 +871,7 @@ impl Run {
             CropMode::Region { region_file, index } => CropRegion::Region { region_file: region_file.clone(), index: *index },
             CropMode::RegionCommon { region_file } => CropRegion::RegionCommon { region_file: region_file.clone() },
         };
-        let report = crop_set(&self.paths(), &region, crop.rounding, dir, true, true)?;
+        let report = crop_set_with(&self.paths(), &region, crop.rounding, dir, true, true, &|| progress.is_cancelled())?;
         for (image, file) in self.images.iter_mut().zip(&report.files) {
             image.path = file.cutout.output_path.clone();
         }
@@ -894,7 +894,7 @@ impl Run {
         Ok(StepDone { report: json!({ "rect": rect, "files": files }), warnings })
     }
 
-    fn align(&mut self, align: &AlignStep, dir: &str) -> Result<StepDone> {
+    fn align(&mut self, align: &AlignStep, dir: &str, progress: &ProgressHandle) -> Result<StepDone> {
         let reference = self.filter(&align.reference)?;
         let (reference_path, reference_filter) = (reference.path.clone(), reference.filter.clone());
         let options = AlignOptions {
@@ -904,7 +904,7 @@ impl Run {
             area_rule: Some(align.area_rule),
             per_actual_pixel: false,
         };
-        let report = align_set(&self.paths(), dir, &options)?;
+        let report = align_set_with(&self.paths(), dir, &options, &|| progress.is_cancelled())?;
         for (image, file) in self.images.iter_mut().zip(&report.files) {
             image.path = file.output_path.clone();
         }
@@ -912,7 +912,7 @@ impl Run {
         Ok(StepDone { warnings: report.warnings.clone(), report: serde_json::to_value(&report)? })
     }
 
-    fn build(&mut self, cube: &CubeStep, dir: &str) -> Result<StepDone> {
+    fn build(&mut self, cube: &CubeStep, dir: &str, progress: &ProgressHandle) -> Result<StepDone> {
         let wanted = cube.reference.clone().or_else(|| self.aligned.clone()).context("name a reference filter or align first")?;
         let reference = self.filter(&wanted)?.filter.clone();
         let specs: Vec<CubeInputSpec> = self
@@ -921,13 +921,14 @@ impl Run {
             .map(|image| CubeInputSpec { path: image.path.clone(), dataset: Some(image.dataset.clone()), filter: Some(image.filter.clone()) })
             .collect();
         let target = Path::new(dir).join(&cube.output).to_string_lossy().into_owned();
-        let report = build_cube(&specs, &target, None, CubeOptions { layout: cube.layout, order: cube.order }, Some(&reference))?;
+        let report =
+            build_cube_with(&specs, &target, None, CubeOptions { layout: cube.layout, order: cube.order }, Some(&reference), &|| progress.is_cancelled())?;
         self.cube = Some(report.output_path.clone());
         Ok(StepDone { warnings: report.warnings.clone(), report: serde_json::to_value(&report)? })
     }
 
-    fn edit(&mut self, edit: &CubeEdit, dir: &str) -> Result<StepDone> {
-        let report = edit_cube(&self.cube()?, edit, "", Some(dir), None)?;
+    fn edit(&mut self, edit: &CubeEdit, dir: &str, progress: &ProgressHandle) -> Result<StepDone> {
+        let report = edit_cube_with(&self.cube()?, edit, "", Some(dir), None, &|| progress.is_cancelled())?;
         self.cube = Some(report.output_path.clone());
         Ok(StepDone { warnings: report.warnings.clone(), report: serde_json::to_value(&report)? })
     }
@@ -965,7 +966,7 @@ impl Run {
             method: PsfResampleMethod::Lightstack,
             recentre: psfs.recentre.unwrap_or(false),
         };
-        let set = load_psfs(&specs, &options, Some(dir))?;
+        let set = load_psfs_with(&specs, &options, Some(dir), &|| progress.is_cancelled())?;
         warnings.extend(set.warnings.iter().cloned());
         let prepared = sources
             .iter()
@@ -980,22 +981,22 @@ impl Run {
         Ok(StepDone { report: Value::Object(report), warnings })
     }
 
-    fn kernels(&mut self, kernels: &KernelsStep, dir: &str) -> Result<StepDone> {
+    fn kernels(&mut self, kernels: &KernelsStep, dir: &str, progress: &ProgressHandle) -> Result<StepDone> {
         let reference = self.filter(&kernels.reference)?.filter.clone();
         let specs: Vec<PsfInputSpec> = self
             .psfs
             .iter()
             .map(|(filter, path)| PsfInputSpec { path: path.clone(), filter: Some(filter.clone()), pixel_scale_arcsec: None })
             .collect();
-        let report = build_kernels(&specs, &reference, &kernels.options, Some(dir))?;
+        let report = build_kernels_with(&specs, &reference, &kernels.options, Some(dir), &|| progress.is_cancelled())?;
         self.kernel_dir = Some(dir.to_string());
         Ok(StepDone { warnings: report.warnings.clone(), report: serde_json::to_value(&report)? })
     }
 
-    fn matching(&mut self, matching: &MatchStep, dir: &str) -> Result<StepDone> {
+    fn matching(&mut self, matching: &MatchStep, dir: &str, progress: &ProgressHandle) -> Result<StepDone> {
         let kernel_dir = self.kernel_dir.clone().context("no kernels were built before this step")?;
         let options = MatchOptions { reference: self.filter(&matching.reference)?.filter.clone(), mode: matching.mode, allow_unmatched: matching.allow_unmatched };
-        let report = psf_match_cube(&self.cube()?, Some(&kernel_dir), &[], &options, "", Some(dir), None)?;
+        let report = psf_match_cube_with(&self.cube()?, Some(&kernel_dir), &[], &options, "", Some(dir), None, &|| progress.is_cancelled())?;
         self.cube = Some(report.output_path.clone());
         Ok(StepDone { warnings: report.warnings.clone(), report: serde_json::to_value(&report)? })
     }
@@ -1170,7 +1171,7 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-fn write_failure(out_dir: &Path, stage: &Stage, error: &anyhow::Error, progress: &ProgressHandle, started_at_utc: &str) {
+fn write_failure(out_dir: &Path, stage: &Stage, error: &anyhow::Error, warnings: &[String], progress: &ProgressHandle, started_at_utc: &str) {
     let coded = error.downcast_ref::<CodedError>();
     let cancelled = error.downcast_ref::<AppError>().is_some();
     let marker = json!({
@@ -1181,6 +1182,7 @@ fn write_failure(out_dir: &Path, stage: &Stage, error: &anyhow::Error, progress:
         "code": coded.map_or(if cancelled { "cancelled" } else { "cubeprep_failed" }, |coded| coded.code),
         "message": format!("{error:#}"),
         "hint": coded.and_then(|coded| coded.hint.clone()),
+        "warnings": warnings,
         "published": false,
         "software_version": env!("CARGO_PKG_VERSION"),
         "started_at_utc": started_at_utc,
@@ -1273,7 +1275,7 @@ pub fn run_recipe(recipe: &Recipe, out_dir: &Path, progress: &ProgressHandle) ->
             cube: run.cube.clone(),
             steps,
             files,
-            warnings,
+            warnings: warnings.clone(),
             elapsed_ms: started.elapsed().as_millis() as u64,
             provenance: RecipeProvenance {
                 schema_version: 1,
@@ -1301,12 +1303,12 @@ pub fn run_recipe(recipe: &Recipe, out_dir: &Path, progress: &ProgressHandle) ->
     match outcome {
         Ok(Ok(report)) => Ok(report),
         Ok(Err(error)) => {
-            write_failure(out_dir, &stage, &error, progress, &started_at_utc);
+            write_failure(out_dir, &stage, &error, &warnings, progress, &started_at_utc);
             Err(error)
         }
         Err(panic) => {
             let error: anyhow::Error = coded(PANIC, format!("the run panicked: {}", panic_text(panic.as_ref())), None).into();
-            write_failure(out_dir, &stage, &error, progress, &started_at_utc);
+            write_failure(out_dir, &stage, &error, &warnings, progress, &started_at_utc);
             resume_unwind(panic)
         }
     }
@@ -1328,12 +1330,50 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::core::cubeprep::kernel::{EpsMode, KernelMethod, KernelShape};
+    use crate::core::cubeprep::kernel::{EpsMode, KernelMethod, KernelShape, ShapeName};
+    use crate::core::cubeprep::psf_io::{decode_planes_f64, image_hdus};
     use crate::core::imaging::psf_estimation::RadiusUnit;
-    use crate::infra::fits::reader::extract_header_by_index;
+    use crate::core::metadata::photcal::card_text;
+    use crate::infra::fits::reader::{extract_header_by_index, list_extensions};
+    use crate::types::header::HduHeader;
 
     fn fixtures() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("lightstack")
+    }
+
+    fn fits_products(folder: &Path) -> usize {
+        std::fs::read_dir(folder).map_or(0, |entries| {
+            entries.filter_map(Result::ok).filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("fits"))).count()
+        })
+    }
+
+    fn extension_names(path: &Path) -> Vec<String> {
+        list_extensions(&File::open(path).unwrap()).unwrap().into_iter().filter_map(|hdu| hdu.extname).collect()
+    }
+
+    fn noise_extension(path: &Path) -> (HduHeader, Vec<ndarray::Array2<f64>>) {
+        let bytes = std::fs::read(path).unwrap();
+        let label = path.to_string_lossy();
+        let (_, parsed) = image_hdus(&bytes, &label)
+            .unwrap()
+            .into_iter()
+            .find(|(_, parsed)| card_text(&parsed.header, "EXTNAME").as_deref() == Some("NOISCORR"))
+            .unwrap_or_else(|| panic!("{} holds no NOISCORR extension", path.display()));
+        let maps = decode_planes_f64(&bytes, &parsed, &label).unwrap();
+        (parsed.header, maps)
+    }
+
+    fn assert_noiscorr_history_only_beside_the_extension(root: &Path, files: &[RecipeFile]) {
+        for product in files.iter().filter(|file| file.path.ends_with(".fits")) {
+            let file = File::open(root.join(&product.path)).unwrap();
+            let extensions = list_extensions(&file).unwrap();
+            let holds = extensions.iter().any(|hdu| hdu.extname.as_deref() == Some("NOISCORR"));
+            for hdu in &extensions {
+                let header = extract_header_by_index(&file, hdu.index).unwrap();
+                let named = header.cards.iter().any(|(key, text)| key == "HISTORY" && text.contains("NOISCORR"));
+                assert!(holds || !named, "{} HDU {} names NOISCORR in its HISTORY but the file holds no NOISCORR extension", product.path, hdu.index);
+            }
+        }
     }
 
     fn fixture_recipe(folder: &str, file: &str) -> Value {
@@ -1483,6 +1523,7 @@ mod tests {
     #[test]
     fn the_complete_mef_recipe_keeps_science_error_quality_and_filter_products() {
         use crate::infra::fits::reader::{extract_image_planes_by_index, extract_int_planes_by_index, list_extensions};
+        use crate::infra::fits::table::{load_bintable, ColumnValues};
         let dir = tempfile::tempdir().unwrap();
         let mut value = d1_recipe();
         value["steps"][3]["layout"] = json!("mef");
@@ -1490,13 +1531,43 @@ mod tests {
         let recipe = Recipe::from_value(&value).unwrap().resolved(&fixtures().join("d1"));
         let target = dir.path().join("run");
         let report = run_recipe(&recipe, &target, &quiet()).unwrap();
-        for product in report.files.iter().filter(|file| file.path.ends_with(".fits") && ["03_align/", "04_cube/", "08_match/", "09_export/"].iter().any(|prefix| file.path.starts_with(prefix))) {
+        let mut checked = Vec::new();
+        for product in report.files.iter().filter(|file| file.path.ends_with(".fits") && ["03_align/", "04_cube/", "05_edit/", "08_match/", "09_export/"].iter().any(|prefix| file.path.starts_with(prefix))) {
             let file = File::open(target.join(&product.path)).unwrap();
             let extensions = list_extensions(&file).unwrap();
-            for name in ["SCI", "ERR", "DQ"] {
+            for name in ["SCI", "ERR", "DQ", "NOISCORR"] {
                 assert!(extensions.iter().any(|hdu| hdu.extname.as_deref() == Some(name)), "{} lost {name}", product.path);
             }
+            let folder = product.path.split('/').next().unwrap();
+            let (noise, maps) = noise_extension(&target.join(&product.path));
+            let k = noise.get_i64("NCORRK").unwrap();
+            let source = if ["08_match", "09_export"].contains(&folder) { "match" } else { "align" };
+            assert_eq!(card_text(&noise, "NCORRSRC").as_deref(), Some(source), "{}", product.path);
+            assert_eq!((k % 2, noise.get_i64("NAXIS1"), noise.get_i64("NAXIS2")), (1, Some(k), Some(k)), "{}", product.path);
+            let centre = (k / 2) as usize;
+            assert!(maps.iter().all(|map| (map[[centre, centre]] - 1.0).abs() < 1e-6 && map.iter().all(|value| value.is_finite())), "{}", product.path);
+            if folder == "03_align" {
+                assert_eq!((noise.get_i64("NAXIS"), maps.len()), (Some(2), 1), "{}", product.path);
+                assert!(noise.get_f64("NCORRALN").is_some_and(|factor| factor.is_finite() && factor >= 1.0 - 1e-9), "{}", product.path);
+            } else {
+                assert_eq!((noise.get_i64("NAXIS"), maps.len()), (Some(3), 6), "{}", product.path);
+                let filters = load_bintable(target.join(&product.path).to_str().unwrap(), extensions.iter().find(|hdu| hdu.extname.as_deref() == Some("FILTERS")).unwrap().index).unwrap();
+                let matched = folder == "08_match" || folder == "09_export";
+                let statuses: Vec<&str> = if matched { vec!["matched", "matched", "matched", "matched", "matched", "reference"] } else { vec!["unmatched"; 6] };
+                assert_eq!(filters.text_column("MATCH").unwrap(), statuses, "{}", product.path);
+                let column = |name: &str| match filters.flattened_column(name).unwrap().values {
+                    ColumnValues::F64(values) => values,
+                    other => panic!("{name} holds {other:?}"),
+                };
+                assert!(column("NOISCORR_ALIGN").iter().all(|factor| factor.is_finite() && *factor >= 1.0 - 1e-9), "{}", product.path);
+                let factors = column("NOISCORR_MATCH");
+                assert!(factors.iter().zip(&statuses).all(|(factor, status)| if *status == "matched" { *factor > 1.0 } else { (factor - 1.0).abs() < 1e-12 }), "{}: {factors:?}", product.path);
+            }
+            checked.push(folder.to_string());
         }
+        checked.dedup();
+        assert_eq!(checked, ["03_align", "04_cube", "05_edit", "08_match", "09_export"]);
+        assert_noiscorr_history_only_beside_the_extension(&target, &report.files);
         let file = File::open(report.cube.as_ref().unwrap()).unwrap();
         let extensions = list_extensions(&file).unwrap();
         let index = |name: &str| extensions.iter().find(|hdu| hdu.extname.as_deref() == Some(name)).unwrap().index;
@@ -1742,6 +1813,20 @@ mod tests {
         assert!(report.files.iter().all(|file| !file.path.ends_with(".partial")), "{:?}", report.files);
         let header = extract_header_by_index(&std::fs::File::open(cube).unwrap(), 0).unwrap();
         assert_eq!(header.get_i64("NAXIS3"), Some(6));
+        let aligned: Vec<&RecipeFile> = report.files.iter().filter(|file| file.path.starts_with("03_align/")).collect();
+        assert_eq!(aligned.len(), 6);
+        for file in aligned {
+            let (noise, maps) = noise_extension(&target.join(&file.path));
+            assert_eq!((card_text(&noise, "NCORRSRC").as_deref(), noise.get_i64("NAXIS"), maps.len()), (Some("align"), Some(2), 1), "{}", file.path);
+        }
+        for folder in ["04_cube", "05_edit", "08_match", "09_export"] {
+            for entry in std::fs::read_dir(target.join(folder)).unwrap() {
+                let path = entry.unwrap().path();
+                assert_eq!(extension_names(&path), Vec::<String>::new(), "{}: the lightstack layout holds the primary cube only", path.display());
+            }
+        }
+        assert_eq!(report.steps[3].report["hdus"], json!(["PRIMARY"]));
+        assert_noiscorr_history_only_beside_the_extension(&target, &report.files);
         let names: Vec<&str> = report.files.iter().map(|file| file.path.as_str()).collect();
         assert!(names.contains(&RECIPE_FILE), "{names:?}");
         assert!(names.contains(&"07_kernels/kernel_f150w_to_f444w.fits"), "{names:?}");
@@ -1920,7 +2005,7 @@ mod tests {
             json!({ "step": "edit", "action": "cut_sky", "ra": 1.0, "dec": 2.0, "size_arcsec": 3.0, "rounding": "lightstack" }),
             json!({ "step": "edit", "action": "header", "redshift": 0.1, "ra_center": 1.0, "dec_center": 2.0, "use_brightest_pixel": false }),
             json!({ "step": "edit", "action": "reference_nan_mask", "reference_slice": 0, "mode": "union" }),
-            json!({ "step": "psfs", "source": "files", "files": [{ "filter": "F444W", "path": "p.fits" }], "pixel_scale_arcsec": 0.04, "reference": "F444W" }),
+            json!({ "step": "psfs", "source": "files", "files": [{ "filter": "F444W", "path": "p.fits" }], "pixel_scale_arcsec": 0.04, "reference": "F444W", "recentre": false }),
             json!({
                 "step": "psfs", "source": "empirical", "dataset": "JWST", "filters": ["F444W"], "data_dir": "d", "cutout_size": 31,
                 "background_border": 5, "background_sigma": 4.0, "clip_negative": true, "noise_threshold": 0.5, "radial_cleaning": true,
@@ -1928,6 +2013,7 @@ mod tests {
                 "psf_size": 21, "oversampling": 2, "stack": "median", "oversampling_order": 3
             }),
             json!({ "step": "kernels", "reference": "F444W", "method": "wiener", "eps": 0.01, "eps_mode": "relative", "shape": [21, 21], "auto": false }),
+            json!({ "step": "kernels", "reference": "F444W", "method": "wiener", "shape": "max" }),
             json!({ "step": "kernels", "reference": "F444W", "method": "window", "window": "split_cosine_bell", "alpha": 0.5, "beta": 0.5, "regularization": 0.001, "auto": true }),
             json!({ "step": "kernels", "reference": "F444W", "method": "window", "window": "top_hat", "beta": 0.5 }),
             json!({ "step": "kernels", "reference": "F444W", "method": "window", "window": "tukey", "alpha": 0.5 }),
@@ -2105,14 +2191,21 @@ mod tests {
 
     const SCIENTIFIC_PLANES: usize = 6;
     const SCIENTIFIC_PLANE_SHAPE: (usize, usize) = (43, 43);
-    const SCIENTIFIC_MATCH_MASKED_PIXELS: [u64; SCIENTIFIC_PLANES] = [1, 10, 10, 8, 2, 0];
-    const SCIENTIFIC_FINITE_PIXELS_PER_PLANE: [usize; SCIENTIFIC_PLANES] = [1835, 1835, 1835, 1835, 1835, 1843];
+    const SCIENTIFIC_MATCH_MASKED_PIXELS: [u64; SCIENTIFIC_PLANES] = [1, 10, 10, 8, 2, 8];
+    const SCIENTIFIC_FINITE_PIXELS_PER_PLANE: [usize; SCIENTIFIC_PLANES] = [1835; SCIENTIFIC_PLANES];
     const SCIENTIFIC_FINITE_IN_EVERY_PLANE: usize = 1835;
-    const SCIENTIFIC_FILTERS_COLUMNS: [&str; 9] = ["FILTER", "DATASET", "INSTRUME", "PIVOT_UM", "PIXSCALE", "BUNIT_IN", "FLUXCONV", "PSF_FWHM", "KERNEL"];
+    const SCIENTIFIC_REFERENCE_UNION_WARNING: &str = "F444W: 8 pixels finite in the reference are NaN in another plane";
+    const SCIENTIFIC_HDUS: [&str; 5] = ["SCI", "ERR", "DQ", "NOISCORR", "FILTERS"];
+    const SCIENTIFIC_FILTERS_COLUMNS: [&str; 12] = [
+        "FILTER", "DATASET", "INSTRUME", "PIVOT_UM", "PIXSCALE", "BUNIT_IN", "FLUXCONV", "PSF_FWHM", "KERNEL", "NOISCORR_ALIGN", "NOISCORR_MATCH", "MATCH",
+    ];
     const SCIENTIFIC_FILTERS: [&str; SCIENTIFIC_PLANES] = ["F814W", "F150W", "F200W", "F277W", "F356W", "F444W"];
     const SCIENTIFIC_DATASETS: [&str; SCIENTIFIC_PLANES] = ["HST", "JWST", "JWST", "JWST", "JWST", "JWST"];
     const SCIENTIFIC_PIVOT_UM: [f64; SCIENTIFIC_PLANES] = [0.804553, 1.500744, 1.988648, 2.76174, 3.568362, 4.404315];
-    const SCIENTIFIC_PSF_FWHM_FINITE: [bool; SCIENTIFIC_PLANES] = [false; SCIENTIFIC_PLANES];
+    const SCIENTIFIC_PSF_FWHM_ARCSEC: [f64; SCIENTIFIC_PLANES] = [0.15369, 0.14046, 0.14152, 0.14502, 0.16839, 0.13884];
+    const SCIENTIFIC_PSF_FWHM_TOLERANCE_ARCSEC: f64 = 5e-6;
+    const SCIENTIFIC_MATCH: [&str; SCIENTIFIC_PLANES] = ["matched", "matched", "matched", "matched", "matched", "reference"];
+    const SCIENTIFIC_KERNEL_HALF_WIDTH: usize = 10;
     const SCIENTIFIC_KERNELS: [&str; SCIENTIFIC_PLANES] = [
         "kernel_f814w_to_f444w.fits",
         "kernel_f150w_to_f444w.fits",
@@ -2150,12 +2243,15 @@ mod tests {
         let masked: Vec<u64> = planes.iter().map(|plane| plane["masked_pixels"].as_u64().unwrap()).collect();
         assert_eq!(masked, SCIENTIFIC_MATCH_MASKED_PIXELS);
         assert_eq!((planes[5]["filter"].as_str(), planes[5]["status"].as_str()), (Some("F444W"), Some("reference")));
+        assert!(report.steps[7].warnings.iter().any(|warning| warning.starts_with(SCIENTIFIC_REFERENCE_UNION_WARNING)), "{:?}", report.steps[7].warnings);
+        assert_eq!(report.steps[7].report["hdus"], json!(SCIENTIFIC_HDUS));
         let history = |path: &str| {
             let header = extract_header_by_index(&File::open(path).unwrap(), 1).unwrap();
             header.cards.iter().filter(|(key, _)| key == "HISTORY").map(|(_, text)| text.as_str()).collect::<Vec<_>>().join(" ")
         };
         assert!(history(report.steps[4].report["output_path"].as_str().unwrap()).contains("DO_NOT_USE"));
-        assert!(history(report.steps[7].report["output_path"].as_str().unwrap()).contains("union NaN mask"));
+        let matched_history = history(report.steps[7].report["output_path"].as_str().unwrap());
+        assert!(matched_history.contains("union NaN mask") && matched_history.contains("the reference included"), "{matched_history}");
         let cube_path = report.cube.as_deref().unwrap();
         let cube = File::open(cube_path).unwrap();
         let extensions = list_extensions(&cube).unwrap();
@@ -2167,6 +2263,7 @@ mod tests {
         assert_eq!(filters.text_column("FILTER").unwrap(), SCIENTIFIC_FILTERS);
         assert_eq!(filters.text_column("DATASET").unwrap(), SCIENTIFIC_DATASETS);
         assert_eq!(filters.text_column("KERNEL").unwrap(), SCIENTIFIC_KERNELS);
+        assert_eq!(filters.text_column("MATCH").unwrap(), SCIENTIFIC_MATCH);
         let numbers = |name: &str| match filters.flattened_column(name).unwrap().values {
             ColumnValues::F64(values) => values,
             other => panic!("{name} holds {other:?}"),
@@ -2174,8 +2271,39 @@ mod tests {
         let pivots = numbers("PIVOT_UM");
         assert_eq!(pivots.len(), SCIENTIFIC_PLANES);
         assert!(pivots.iter().zip(SCIENTIFIC_PIVOT_UM).all(|(found, pinned)| (found - pinned).abs() <= 1e-12 * pinned), "{pivots:?}");
-        let fwhm_finite: Vec<bool> = numbers("PSF_FWHM").iter().map(|fwhm| fwhm.is_finite()).collect();
-        assert_eq!(fwhm_finite, SCIENTIFIC_PSF_FWHM_FINITE);
+        let fwhm = numbers("PSF_FWHM");
+        assert!(fwhm.iter().zip(SCIENTIFIC_PSF_FWHM_ARCSEC).all(|(found, pinned)| (found - pinned).abs() <= SCIENTIFIC_PSF_FWHM_TOLERANCE_ARCSEC), "{fwhm:?}");
+        let kernel_squares: Vec<Option<f64>> = SCIENTIFIC_KERNELS
+            .iter()
+            .map(|name| (!name.is_empty()).then(|| extract_header_by_index(&File::open(target.join("07_kernels").join(name)).unwrap(), 0).unwrap().get_f64("KSUMSQ").unwrap()))
+            .collect();
+        let noiscorr_match = numbers("NOISCORR_MATCH");
+        let expected_match: Vec<f64> = kernel_squares.iter().map(|squares| squares.map_or(1.0, |squares| 1.0 / squares.sqrt())).collect();
+        assert!(noiscorr_match.iter().zip(&expected_match).all(|(found, expected)| (found / expected - 1.0).abs() < 1e-12), "{noiscorr_match:?} against {expected_match:?}");
+        let aligned: Vec<(HduHeader, Vec<ndarray::Array2<f64>>)> = report.steps[2].report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| noise_extension(Path::new(file["output_path"].as_str().unwrap())))
+            .collect();
+        let factors: Vec<f64> = aligned.iter().map(|(header, _)| header.get_f64("NCORRALN").unwrap()).collect();
+        let noiscorr_align = numbers("NOISCORR_ALIGN");
+        assert!(noiscorr_align.iter().zip(&factors).all(|(found, expected)| (found / expected - 1.0).abs() < 1e-12), "{noiscorr_align:?} against {factors:?}");
+        assert!((noiscorr_align[5] - 1.0).abs() < 1e-12, "the reference is copied onto its own grid: {noiscorr_align:?}");
+        let (noise, maps) = noise_extension(Path::new(cube_path));
+        let k = noise.get_i64("NCORRK").unwrap() as usize;
+        assert_eq!((card_text(&noise, "NCORRSRC").as_deref(), maps.len(), k % 2), (Some("match"), SCIENTIFIC_PLANES, 1));
+        let centre = k / 2;
+        let support = |map: &ndarray::Array2<f64>| 2 * map.indexed_iter().filter(|(_, value)| **value != 0.0).map(|((y, x), _)| y.abs_diff(centre).max(x.abs_diff(centre))).max().unwrap() + 1;
+        let aligned_sizes: Vec<usize> = aligned.iter().map(|(header, _)| header.get_i64("NCORRK").unwrap() as usize).collect();
+        let supports: Vec<usize> = maps.iter().map(support).collect();
+        let expected_supports: Vec<usize> =
+            aligned_sizes.iter().zip(SCIENTIFIC_MATCH).map(|(size, status)| if status == "matched" { size + 4 * SCIENTIFIC_KERNEL_HALF_WIDTH } else { *size }).collect();
+        assert_eq!(supports, expected_supports, "aligned map sizes {aligned_sizes:?}");
+        assert_eq!(k, *expected_supports.iter().max().unwrap());
+        assert!(maps.iter().all(|map| map.dim() == (k, k) && (map[[centre, centre]] - 1.0).abs() < 1e-6 && map.iter().all(|value| value.is_finite())));
+        let reference = &maps[5];
+        assert!(reference.indexed_iter().all(|((y, x), value)| (y, x) == (centre, centre) || value.abs() < 1e-12), "the reference keeps its own aligned map");
         let sci = extract_image_planes_by_index(&cube, index("SCI")).unwrap();
         let err = extract_image_planes_by_index(&cube, index("ERR")).unwrap();
         let dq = extract_int_planes_by_index(&cube, index("DQ")).unwrap();
@@ -2293,7 +2421,7 @@ mod tests {
         let stage = Stage { name: "03_align".to_string(), step_index: Some(3) };
         let marker = |error: anyhow::Error, progress: &ProgressHandle| {
             let dir = tempfile::tempdir().unwrap();
-            write_failure(dir.path(), &stage, &error, progress, "2026-11-06T00:00:00Z");
+            write_failure(dir.path(), &stage, &error, &[], progress, "2026-11-06T00:00:00Z");
             let marker = read_value(&dir.path().join(FAILURE_FILE));
             (marker["status"].as_str().unwrap().to_string(), marker["code"].as_str().unwrap().to_string())
         };
@@ -2388,5 +2516,154 @@ mod tests {
         assert!(recentred(Some(true)).is_array(), "{}", recentred(Some(true)));
         assert_eq!(recentred(Some(false)), Value::Null);
         assert_eq!(recentred(None), Value::Null);
+    }
+
+    #[test]
+    fn an_explicit_recentre_false_writes_the_products_of_the_default_d1_run() {
+        let mut explicit = d1_recipe();
+        explicit["steps"][5]["recentre"] = json!(false);
+        let out = tempfile::tempdir().unwrap();
+        let run = |value: &Value, folder: &str| {
+            let recipe = Recipe::from_value(value).unwrap().resolved(&fixtures().join("d1"));
+            let target = out.path().join(folder);
+            rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap().install(|| run_recipe(&recipe, &target, &quiet())).unwrap()
+        };
+        let default = run(&d1_recipe(), "default");
+        let given = run(&explicit, "explicit");
+        let products = |report: &RecipeReport| report.files.iter().filter(|file| file.path != RECIPE_FILE).cloned().collect::<Vec<_>>();
+        assert_eq!(products(&default), products(&given));
+        assert_eq!(default.warnings, given.warnings);
+        assert_eq!(given.steps[5].parameters["recentre"], json!(false));
+        assert!(default.steps[5].parameters.get("recentre").is_none());
+        assert!(default.steps[5].report["prepared"]["psfs"].as_array().unwrap().iter().all(|psf| psf["recentred_by_px"].is_null()));
+    }
+
+    #[test]
+    fn a_cancel_requested_as_a_step_starts_stops_that_step_before_its_first_product() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let dir = tempfile::tempdir().unwrap();
+        for (index, folder) in ["01_crop", "02_units", "03_align", "04_cube", "05_edit", "06_psfs", "07_kernels", "08_match"].into_iter().enumerate() {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let signal = cancelled.clone();
+            let progress = ProgressHandle::with_sink(Arc::new(move |event| {
+                if event.stage == folder {
+                    signal.store(true, Ordering::SeqCst);
+                }
+            }), 1)
+            .with_cancel_source(Arc::new(move || cancelled.load(Ordering::SeqCst)));
+            let target = dir.path().join(folder);
+            let error = run_recipe(&recipe, &target, &progress).unwrap_err();
+            assert!(error.downcast_ref::<AppError>().is_some(), "{folder}: {error:#}");
+            let written: Vec<String> = std::fs::read_dir(target.join(folder)).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            assert!(written.is_empty(), "{folder} wrote {written:?} after the cancel request");
+            let marker = read_value(&target.join(FAILURE_FILE));
+            assert_eq!((marker["status"].as_str(), marker["stage"].as_str(), marker["step_index"].as_u64()), (Some("cancelled"), Some(folder), Some(index as u64 + 1)), "{marker}");
+            assert!(!target.join(RESULT_FILE).exists() && !target.join(RUN_LOCK).exists(), "{folder}");
+        }
+    }
+
+    #[test]
+    fn a_cancel_inside_the_align_step_keeps_only_its_first_product() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("run");
+        let aligned = target.join("03_align");
+        let watched = aligned.clone();
+        let progress = quiet().with_cancel_source(Arc::new(move || fits_products(&watched) > 0));
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let error = run_recipe(&recipe, &target, &progress).unwrap_err();
+        assert!(error.downcast_ref::<AppError>().is_some(), "{error:#}");
+        assert_eq!(fits_products(&aligned), 1, "the align step went on after the cancel request");
+        let marker = read_value(&target.join(FAILURE_FILE));
+        assert_eq!(
+            (marker["status"].as_str(), marker["stage"].as_str(), marker["step_index"].as_u64(), marker["code"].as_str()),
+            (Some("cancelled"), Some("03_align"), Some(3), Some("cancelled")),
+            "{marker}"
+        );
+        assert!(!target.join("04_cube").exists());
+        assert!(!target.join(RESULT_FILE).exists());
+        assert!(!target.join(RUN_LOCK).exists());
+    }
+
+    #[test]
+    fn a_failure_marker_keeps_the_advisories_and_the_step_warnings_gathered_before_the_failure() {
+        let mut value = d1_recipe();
+        value["steps"][5]["files"].as_array_mut().unwrap().remove(1);
+        value["steps"].as_array_mut().unwrap().insert(5, json!({ "step": "edit", "action": "cut", "x_start": 2, "x_end": 40, "y_start": 2, "y_end": 40 }));
+        let recipe = Recipe::from_value(&value).unwrap().resolved(&fixtures().join("d1"));
+        let advisories = recipe.validate().unwrap();
+        assert_eq!(advisories.len(), 1, "{advisories:?}");
+        let out = tempfile::tempdir().unwrap();
+        let target = out.path().join("run");
+        let error = run_recipe(&recipe, &target, &quiet()).unwrap_err();
+        assert_eq!(error.downcast_ref::<CodedError>().map(|coded| coded.code), Some("kernel_missing"), "{error:#}");
+        let marker = read_value(&target.join(FAILURE_FILE));
+        let warnings: Vec<&str> = marker["warnings"].as_array().unwrap_or_else(|| panic!("{marker}")).iter().map(|warning| warning.as_str().unwrap()).collect();
+        assert_eq!(warnings.first().copied(), Some(advisories[0].as_str()));
+        assert!(warnings.iter().any(|warning| warning.starts_with("08_kernels: ")), "{warnings:?}");
+        let folders = ["01_crop", "02_units", "03_align", "04_cube", "05_edit", "06_edit", "07_psfs", "08_kernels", "09_match"];
+        assert!(warnings.iter().all(|warning| folders.iter().any(|folder| warning.starts_with(&format!("{folder}: ")))), "{warnings:?}");
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let progress = ProgressHandle::with_sink(Arc::new(move |event| {
+            if event.stage == HASHING_INPUTS {
+                signal.store(true, Ordering::SeqCst);
+            }
+        }), 1)
+        .with_cancel_source(Arc::new(move || cancelled.load(Ordering::SeqCst)));
+        let stopped = out.path().join("cancelled");
+        run_recipe(&recipe, &stopped, &progress).unwrap_err();
+        let marker = read_value(&stopped.join(FAILURE_FILE));
+        assert_eq!((marker["stage"].as_str(), &marker["warnings"]), (Some(HASHING_INPUTS), &json!(advisories)), "{marker}");
+    }
+
+    #[test]
+    fn the_kernels_step_takes_shape_max_where_shape_reference_refuses_a_larger_source_psf() {
+        use ndarray::Array2;
+        use crate::infra::fits::writer::write_fits_mono;
+        let max = json!({ "step": "kernels", "reference": "F444W", "method": "wiener", "eps": 0.05, "shape": "max" });
+        let parsed = parse_step(6, &max).unwrap();
+        let options = KernelOptions { method: KernelMethod::Wiener { eps: 0.05, eps_mode: EpsMode::Absolute, shape: KernelShape::Named(ShapeName::Max) }, auto: false };
+        assert_eq!(parsed, RecipeStep::Kernels(KernelsStep { reference: "F444W".into(), options }));
+        assert_eq!(serde_json::to_value(&parsed).unwrap()["shape"], json!("max"));
+        let d1 = Recipe::from_value(&with_step(6, max.clone())).unwrap().resolved(&fixtures().join("d1"));
+        assert!(d1.validate().unwrap().is_empty());
+        let mut cut = with_step(6, max);
+        cut["steps"].as_array_mut().unwrap().insert(5, json!({ "step": "edit", "action": "cut", "x_start": 2, "x_end": 40, "y_start": 2, "y_end": 40 }));
+        let advisories = Recipe::from_value(&cut).unwrap().resolved(&fixtures().join("d1")).validate().unwrap();
+        assert!(advisories.len() == 1 && advisories[0].contains("pixels within half a kernel width of the cut edges"), "{advisories:?}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let wide = dir.path().join("wide_f150w_psf.fits");
+        let psf = Array2::from_shape_fn((41, 41), |(y, x)| (-((x as f64 - 20.0).powi(2) + (y as f64 - 20.0).powi(2)) / 2.0).exp() as f32);
+        let mut header = HduHeader::empty();
+        header.set_f64("PIXSCALE", 0.04);
+        write_fits_mono(wide.to_str().unwrap(), &psf, Some(&header)).unwrap();
+        let run = |shape: Value| {
+            let value = json!({
+                "recipe_version": 1,
+                "inputs": d1_recipe()["inputs"].clone(),
+                "steps": [
+                    { "step": "psfs", "source": "files", "files": [{ "filter": "F150W", "path": wide }, { "filter": "F444W", "path": "psf/d1_psf_JWST_F444W_40mas.fits" }] },
+                    { "step": "kernels", "reference": "F444W", "method": "wiener", "eps": 0.05, "shape": shape }
+                ]
+            });
+            let recipe = Recipe::from_value(&value).unwrap().resolved(&fixtures().join("d1"));
+            recipe.validate().unwrap();
+            let target = dir.path().join(format!("run_{}", shape.as_str().unwrap()));
+            (run_recipe(&recipe, &target, &quiet()), target)
+        };
+        let (refused, target) = run(json!("reference"));
+        let error = refused.unwrap_err();
+        assert_eq!(error.downcast_ref::<CodedError>().map(|coded| coded.code), Some("kernel_shape"), "{error:#}");
+        let marker = read_value(&target.join(FAILURE_FILE));
+        assert_eq!((marker["stage"].as_str(), marker["code"].as_str()), (Some("02_kernels"), Some("kernel_shape")), "{marker}");
+        assert!(marker["hint"].as_str().is_some_and(|hint| hint.contains("\"shape\": \"max\"")), "{marker}");
+        let (built, target) = run(json!("max"));
+        let report = built.unwrap_or_else(|error| panic!("{error:#}"));
+        assert_eq!(report.steps[1].parameters["shape"], json!("max"));
+        let kernel = extract_header_by_index(&File::open(target.join("02_kernels").join("kernel_f150w_to_f444w.fits")).unwrap(), 0).unwrap();
+        assert_eq!((kernel.get_i64("NAXIS1"), kernel.get_i64("NAXIS2")), (Some(41), Some(41)));
     }
 }

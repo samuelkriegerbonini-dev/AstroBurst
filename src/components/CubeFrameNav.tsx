@@ -9,6 +9,7 @@ import {
   drainFrameRequest,
   formatFrameLabel,
   frameLoadPlan,
+  frameStepTarget,
   isPlaybackSpeed,
   mergeFrameRequest,
   nextPlaybackFrame,
@@ -29,14 +30,6 @@ type FrameKind = "transient" | "committed";
 
 function publishAllowed(gate: FramePublishGate | undefined): boolean {
   return gate?.isCurrent() ?? true;
-}
-
-export function frameStepTarget(current: number, total: number, direction: -1 | 1, loop: boolean): number | null {
-  if (direction === 1) return nextPlaybackFrame(current, total, loop);
-  if (!Number.isFinite(total) || total <= 1) return null;
-  const previous = clampFrame(current, total) - 1;
-  if (previous >= 0) return previous;
-  return loop ? Math.floor(total) - 1 : null;
 }
 
 export type FrameLoader = (

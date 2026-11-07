@@ -31,6 +31,10 @@ FWHM_PSFS = [
     "d1/psf/d1_psf_JWST_F150W_40mas.fits",
     "d1/psf/d1_psf_JWST_F277W_40mas.fits",
 ]
+CLIPPED_FWHM_PSFS = [
+    "d1/psf/d1_psf_JWST_F356W_40mas.fits",
+    "d1/psf/d1_psf_JWST_F444W_40mas.fits",
+]
 EDGE_POINTS = [
     [0.0, 0.0],
     [6.0, 8.0],
@@ -172,18 +176,33 @@ def gaussian2d(xy, amplitude, x_mean, y_mean, x_stddev, y_stddev, theta):
     return amplitude * np.exp(-(a * xdiff ** 2 + b * xdiff * ydiff + c * ydiff ** 2))
 
 
-def minpack_fwhm(psf):
+def first_guess(psf):
     data = np.nan_to_num(np.asarray(psf, dtype=float))
     yc, xc = np.unravel_index(np.argmax(data), data.shape)
     fwhm0 = 2 * np.sqrt(np.sum(data > data[yc, xc] / 2) / np.pi)
-    half = int(np.ceil(max(5, 3 * fwhm0)))
-    if yc + half >= data.shape[0] or xc + half >= data.shape[1]:
-        raise SystemExit("the measure_psf_fwhm box leaves the array")
-    y, x = np.mgrid[max(yc - half, 0):yc + half + 1, max(xc - half, 0):xc + half + 1]
+    return data, yc, xc, fwhm0, int(np.ceil(max(5, 3 * fwhm0)))
+
+
+def fit_fwhm(data, yc, xc, fwhm0, y, x):
     sigma0 = fwhm0 / GAUSSIAN_SIGMA_TO_FWHM
     start = [data[yc, xc], xc, yc, sigma0, sigma0, 0.0]
     popt, _ = curve_fit(gaussian2d, (x.ravel().astype(float), y.ravel().astype(float)), data[y, x].ravel(), p0=start, method="lm", maxfev=20000)
     return (abs(popt[3]) + abs(popt[4])) / 2 * GAUSSIAN_SIGMA_TO_FWHM
+
+
+def minpack_fwhm(psf):
+    data, yc, xc, fwhm0, half = first_guess(psf)
+    if yc + half >= data.shape[0] or xc + half >= data.shape[1]:
+        raise SystemExit("the measure_psf_fwhm box leaves the array")
+    y, x = np.mgrid[max(yc - half, 0):yc + half + 1, max(xc - half, 0):xc + half + 1]
+    return fit_fwhm(data, yc, xc, fwhm0, y, x)
+
+
+def clipped_minpack_fwhm(psf):
+    data, yc, xc, fwhm0, half = first_guess(psf)
+    rows, cols = data.shape
+    y, x = np.mgrid[max(yc - half, 0):min(yc + half, rows - 1) + 1, max(xc - half, 0):min(xc + half, cols - 1) + 1]
+    return fit_fwhm(data, yc, xc, fwhm0, y, x)
 
 
 def rotated_gaussian():
@@ -238,6 +257,10 @@ def build(fixtures):
             "description": "scipy curve_fit (MINPACK lm) of the astropy Gaussian2D model on the box and first guess of LIGHTSTACK 0.4.0 measure_psf_fwhm; FWHM in pixels",
             "psfs": [{"input": path, "fwhm_px": minpack_fwhm(read_primary_f64(fixtures / path)[0])} for path in FWHM_PSFS],
             "rotated": {"sigma": [2.5, 1.5], "theta": 0.6, "centre": [15.3, 14.6], "shape": [31, 31], "fwhm_px": minpack_fwhm(rotated_gaussian())},
+            "clipped_psfs": {
+                "description": "the same fit with the box clipped to the array, as AstroBurst's fit_gaussian does, for PSFs whose measure_psf_fwhm box leaves the array (LIGHTSTACK 0.4.0 raises IndexError on them); FWHM in pixels",
+                "psfs": [{"input": path, "fwhm_px": clipped_minpack_fwhm(read_primary_f64(fixtures / path)[0])} for path in CLIPPED_FWHM_PSFS],
+            },
         },
         "cumulative_rebin": {
             "input": D1_PSF,
@@ -277,10 +300,10 @@ def main(argv=None):
         "manifest_version": MANIFEST_VERSION,
         "kind": "scipy_reference",
         "created_by": CREATED_BY,
-        "regenerate": "docs\\notCommit\\oracle\\.venv\\Scripts\\python.exe -I scripts\\oracle\\scipy_spline_goldens.py",
+        "regenerate": "docs\\notCommit\\oracle\\.venv313\\Scripts\\python.exe -I scripts\\oracle\\scipy_spline_goldens.py",
         "versions": versions(),
         "platform": platform.platform(),
-        "inputs": [file_entry(fixtures / path, fixtures) for path in dict.fromkeys([D1_PSF] + FWHM_PSFS)],
+        "inputs": [file_entry(fixtures / path, fixtures) for path in dict.fromkeys([D1_PSF] + FWHM_PSFS + CLIPPED_FWHM_PSFS)],
         "files": [file_entry(golden, out_dir)],
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8", newline="\n")

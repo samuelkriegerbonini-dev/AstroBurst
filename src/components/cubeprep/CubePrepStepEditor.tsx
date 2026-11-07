@@ -8,6 +8,9 @@ export function PrepField({ label, children }: { label: string; children: ReactN
   return <label className="flex min-w-0 flex-col gap-1 text-[10px] text-zinc-400">{label}{children}</label>;
 }
 
+const sentence = (label: string) => /^[A-Z][a-z]/.test(label) ? `${label[0].toLowerCase()}${label.slice(1)}` : label;
+const psfLabel = (filter: string) => `${filter || "Unspecified filter"} PSF`;
+
 interface Props {
   step: CubePrepStep;
   recipe: CubePrepRecipe;
@@ -34,10 +37,10 @@ export default function CubePrepStepEditor({ step, recipe, onChange, browse }: P
     } else patch({ [key]: value });
   };
   const text = (key: string, label: string, optional = false) => <PrepField key={key} label={label}><input className={PREP_FIELD} value={String(step[key] ?? "")} onChange={(e) => patch({ [key]: optional && !e.target.value ? null : e.target.value })} /></PrepField>;
-  const number = (key: string, label: string, fallback?: number, optional = false) => <PrepField key={key} label={label}><input type="number" step="any" className={PREP_FIELD} value={typeof step[key] === "number" ? step[key] as number : fallback ?? ""} onChange={(e) => patch({ [key]: e.target.value === "" ? optional ? null : "" : Number(e.target.value) })} /></PrepField>;
+  const number = (key: string, label: string, fallback?: number) => <PrepField key={key} label={label}><input type="number" step="any" className={PREP_FIELD} value={typeof step[key] === "number" ? step[key] as number : key in step ? "" : fallback ?? ""} onChange={(e) => patch({ [key]: e.target.value === "" ? null : Number(e.target.value) })} /></PrepField>;
   const select = (key: string, label: string, options: readonly (string | [string, string])[], fallback = "") => <PrepField key={key} label={label}><select className={PREP_FIELD} value={String(step[key] ?? fallback)} onChange={(e) => choose(key, e.target.value)}>{options.map((option) => { const [value, name] = typeof option === "string" ? [option, option] : option; return <option key={value} value={value}>{name}</option>; })}</select></PrepField>;
   const toggle = (key: string, label: string, fallback = false) => <label key={key} className="flex items-center gap-2 text-[11px] text-zinc-300"><input type="checkbox" checked={Boolean(step[key] ?? fallback)} onChange={(e) => patch({ [key]: e.target.checked })} />{label}</label>;
-  const path = (key: string, label: string, directory = false) => <div key={key} className="flex items-end gap-1"><div className="min-w-0 flex-1">{text(key, label)}</div><button type="button" className={PREP_BUTTON} onClick={() => browse(directory, (value) => patch({ [key]: value }))}>Browse</button></div>;
+  const path = (key: string, label: string, directory = false) => <div key={key} className="flex items-end gap-1"><div className="min-w-0 flex-1">{text(key, label)}</div><button type="button" className={PREP_BUTTON} aria-label={`Browse ${sentence(label)}`} onClick={() => browse(directory, (value) => patch({ [key]: value }))}>Browse</button></div>;
   const reference = select("reference", "Reference filter", [["", "Choose a reference"], ...recipe.inputs.map((input): [string, string] => [input.filter, input.filter])]);
   const sky = <div className="grid grid-cols-2 gap-2">{number("ra", "RA (degrees)")}{number("dec", "Dec (degrees)")}{number("size_arcsec", "Size (arcsec)")}</div>;
   const pixel = <div className="grid grid-cols-2 gap-2">{number("x_start", "X start (zero-based)")}{number("x_end", "X end (exclusive)")}{number("y_start", "Y start (zero-based)")}{number("y_end", "Y end (exclusive)")}</div>;
@@ -55,10 +58,10 @@ export default function CubePrepStepEditor({ step, recipe, onChange, browse }: P
     case "cube": controls = <>{reference}{select("order", "Band order", [["wavelength", "Increasing wavelength"], ["given", "Input order"]])}{select("layout", "FITS layout", [["lightstack", "LIGHTSTACK (SCI only)"], ["mef", "MEF (SCI / ERR / DQ when available)"]])}{text("output", "Cube filename")}</>; break;
     case "edit": controls = <>
       {select("action", "Cube operation", [["drop_invalid", "Drop invalid bands"], ["remove_filter", "Remove one filter"], ["cut", "Pixel crop"], ["cut_sky", "Sky crop"], ["header", "Set centre / redshift"], ["reference_nan_mask", "Apply common validity mask"]])}
-      {step.action === "drop_invalid" && <>{number("threshold", "Signal threshold", 0)}{number("frac_valid", "Minimum valid fraction", 0.01)}{toggle("use_dq", "Exclude flagged DQ pixels")}</>}
+      {step.action === "drop_invalid" && <>{number("threshold", "Signal threshold", 0)}{number("frac_valid", "Minimum valid fraction", 0.01)}{toggle("use_dq", "Exclude flagged DQ pixels")}<p>DQ exclusion uses the dataset mask: DO_NOT_USE (bit 0) for JWST, Roman and any other dataset; 0x3FFF (REED_SOLOMON..COSMIC_RAY_SINGLE) for HST.</p></>}
       {step.action === "remove_filter" && select("filter", "Filter to remove", recipe.inputs.map((input) => input.filter))}
       {step.action === "cut" && pixel}{step.action === "cut_sky" && <>{sky}{select("rounding", "Rounding", ["astroburst", "lightstack"], "astroburst")}</>}
-      {step.action === "header" && <>{number("redshift", "Redshift (optional)", undefined, true)}{number("ra_center", "Centre RA (degrees, optional)", undefined, true)}{number("dec_center", "Centre Dec (degrees, optional)", undefined, true)}{toggle("use_brightest_pixel", "Use brightest pixel as centre")}</>}
+      {step.action === "header" && <>{number("redshift", "Redshift (optional)")}{number("ra_center", "Centre RA (degrees, optional)")}{number("dec_center", "Centre Dec (degrees, optional)")}{toggle("use_brightest_pixel", "Use brightest pixel as centre")}</>}
       {step.action === "reference_nan_mask" && <>{number("reference_slice", "Reference band index", 0)}{select("mode", "Mask combination", ["reference", "union", "intersection"], "reference")}</>}
       <p>Repeated edits and custom step ordering can be entered in the recipe editor.</p>
     </>; break;
@@ -67,15 +70,15 @@ export default function CubePrepStepEditor({ step, recipe, onChange, browse }: P
       const updateFile = (filter: string, value: string) => patch({ files: [...files.filter((file) => file.filter !== filter), { filter, path: value }] });
       controls = <>
         <PrepField label="PSF source"><select className={PREP_FIELD} value={String(step.source)} onChange={(e) => onChange(e.target.value === "files" ? { step: "psfs", source: "files", reference: step.reference, files: recipe.inputs.map((input) => ({ filter: input.filter, path: "" })) } : { step: "psfs", source: "empirical", reference: step.reference, dataset: recipe.inputs[0]?.dataset ?? "", filters: recipe.inputs.map((input) => input.filter), data_dir: "" })}><option value="files">Existing FITS PSFs</option><option value="empirical">Estimate from stars / DS9 boxes</option></select></PrepField>
-        {reference}{number("pixel_scale_arcsec", "PSF pixel scale (arcsec, optional)", undefined, true)}
-        {step.source === "files" && recipe.inputs.map((input) => <div key={input.filter} className="flex items-end gap-1"><div className="min-w-0 flex-1"><PrepField label={`${input.filter || "Unspecified filter"} PSF`}><input className={PREP_FIELD} value={files.find((file) => file.filter === input.filter)?.path ?? ""} onChange={(e) => updateFile(input.filter, e.target.value)} /></PrepField></div><button type="button" className={PREP_BUTTON} onClick={() => browse(false, (value) => updateFile(input.filter, value))}>Browse</button></div>)}
+        {reference}{number("pixel_scale_arcsec", "PSF pixel scale (arcsec, optional)")}
+        {step.source === "files" && recipe.inputs.map((input) => <div key={input.filter} className="flex items-end gap-1"><div className="min-w-0 flex-1"><PrepField label={psfLabel(input.filter)}><input className={PREP_FIELD} value={files.find((file) => file.filter === input.filter)?.path ?? ""} onChange={(e) => updateFile(input.filter, e.target.value)} /></PrepField></div><button type="button" className={PREP_BUTTON} aria-label={`Browse ${sentence(psfLabel(input.filter))}`} onClick={() => browse(false, (value) => updateFile(input.filter, value))}>Browse</button></div>)}
         {step.source === "empirical" && <>
           {text("dataset", "PSF dataset")}{path("data_dir", "Star images and DS9 folder", true)}
           <p>Provide one FITS image per filter with the filter in its filename, and stars_&lt;filter in lowercase&gt;.reg DS9 boxes beside it. Filters: {Array.isArray(step.filters) ? step.filters.join(", ") : "none"}.</p>
           <details><summary className="cursor-pointer text-zinc-300">Star selection and cleaning</summary><div className="mt-2 grid gap-2">
             {number("cutout_size", "Star cutout size (pixels)", 61)}{number("psf_size", "Final PSF size (pixels)", 51)}{number("background_border", "Background border (pixels)", 10)}{number("background_sigma", "Background sigma", 4)}
-            {number("noise_threshold", "Noise threshold (optional)", 0.5, true)}{toggle("clip_negative", "Clip negative values", true)}{toggle("radial_cleaning", "Radial cleaning")}{number("cleaning_sigma", "Cleaning sigma", 1)}{number("cleaning_consecutive_bins", "Consecutive cleaning bins", 3)}
-            {number("normalization_radius", "Normalization radius", 20)}{select("normalization_radius_unit", "Radius unit", ["pixel", "arcsec"], "pixel")}{number("oversampling", "Oversampling (optional)", undefined, true)}{select("stack", "Star stack", ["median", "mean"], "median")}
+            {number("noise_threshold", "Noise threshold (optional)", 0.5)}{toggle("clip_negative", "Clip negative values", true)}{toggle("radial_cleaning", "Radial cleaning")}{number("cleaning_sigma", "Cleaning sigma", 1)}{number("cleaning_consecutive_bins", "Consecutive cleaning bins", 3)}
+            {number("normalization_radius", "Normalization radius", 20)}{select("normalization_radius_unit", "Radius unit", ["pixel", "arcsec"], "pixel")}{number("oversampling", "Oversampling (optional)")}{select("stack", "Star stack", ["median", "mean"], "median")}
           </div></details>
         </>}
       </>;

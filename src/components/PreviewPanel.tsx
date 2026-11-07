@@ -53,7 +53,8 @@ import HistoryShortcuts from "./history/HistoryShortcuts";
 import { useHistoryController } from "../hooks/useHistory";
 import DisplayControls from "./preview/DisplayControls";
 import PreviewTab from "./preview/PreviewTab";
-import ViewerFrameStepper, { FRAME_KEYS_GROUP_CLASS, FrameKeysFocusRing, useViewerFrameKeys, useViewerFrameStep } from "./preview/ViewerFrameStepper";
+import ViewerFrameStepper, { FRAME_KEYS_GROUP_CLASS, FrameKeysFocusRing } from "./preview/ViewerFrameStepper";
+import { useViewerFrameKeys, useViewerFrameStep } from "./preview/useViewerFrameKeys";
 import "./preview/preview-layout.css";
 import {
   CUBE_SPECTRUM_HINT,

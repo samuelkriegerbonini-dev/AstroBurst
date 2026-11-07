@@ -15,17 +15,21 @@ use crate::service::cutout::{export_cutout_rect, padded_dq_bits, refuse_source_a
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cubeprep::align::{
-    align_image_with_companions, choose_reference, plan_alignment, same_grid, AlignCompanions, AlignGrid, AlignInput, AlignOptions, AlignReport, ReferenceCandidate,
-    ReferencePolicy, ResampleMethod,
+    align_image_with_companions, choose_reference, plan_alignment_from_dims, same_grid, AlignCompanions, AlignGrid, AlignInput, AlignOptions, AlignReport,
+    ReferenceCandidate, ReferencePolicy, ResampleMethod, CARD_NCORRK, CARD_NCORRSRC, CARD_NOISCORR_ALIGN, NOISCORR_EXTNAME, NOISCORR_SOURCE_ALIGN,
 };
 use crate::core::cubeprep::cube::{
-    apply_nan_mask, assemble_cube, companion_header, cube_base_header, drop_invalid_planes, is_cube_axis_card,
-    planes_from_header, planes_from_table, remove_filter, subcube, update_metadata, without_hdu_identity, Cube, CubeCentre,
-    CubeEdit, CubeError, CubeInput, CubeLayout, CubeOptions, CubePlane, DqPlanes, FiltersTable, PlaneOrder, DQ_DO_NOT_USE,
-    FILTERS_EXTNAME,
+    apply_nan_mask, assemble_cube, assemble_cube_with_noise, companion_header, cube_base_header, dq_table_of, drop_invalid_planes, is_cube_axis_card,
+    match_statuses, planes_from_header, planes_from_table, remove_filter, subcube, update_metadata, without_hdu_identity, Cube, CubeCentre,
+    CubeEdit, CubeError, CubeInput, CubeLayout, CubeNoise, CubeOptions, CubePlane, DqPlanes, FiltersTable, InputNoise, MatchStatus, PlaneOrder,
+    DQ_DO_NOT_USE, FILTERS_EXTNAME,
 };
-use crate::core::cubeprep::kernel::{build_kernel, kernel_file_name, kernel_header, AutoChoice, KernelDiagnostics, KernelMethod, KernelOptions};
-use crate::core::cubeprep::match_cube::{match_cube, MatchMode, MatchOptions, MatchedCube, MatchedPlane, PlaneKernel};
+use crate::core::cubeprep::kernel::{
+    build_kernel, kernel_file_name, kernel_header, AutoChoice, KernelDiagnostics, KernelError, KernelMethod, KernelOptions, KernelShape, ShapeName,
+};
+use crate::core::cubeprep::match_cube::{
+    match_cube_with, KernelCards, MatchError, MatchMode, MatchOptions, MatchProducts, MatchedCube, MatchedPlane, PlaneKernel, INSUFFICIENT_MEMORY,
+};
 use crate::core::cubeprep::psf_io::{
     decode_planes_f64, image_hdus, load_psf, pixel_scale, prepare_psf_set, prepared_psf_header, LoadedPsf, PsfDiagnostics, PsfError,
     PsfResampleMethod, PsfSetOptions, ResampleRecord, ScaleSource, SCALE_RTOL,
@@ -37,18 +41,21 @@ use crate::core::imaging::dq_flags::DqTable;
 use crate::core::metadata::filter_wavelengths::{FilterEntry, FilterRegistry, FilterSource};
 use crate::core::metadata::photcal::card_text;
 use crate::core::metadata::units::{apply_conversion, classify_unit, unit_conversion, TargetUnit, UnitClass};
-use crate::infra::cache::ImageEntry;
+use crate::core::stacking::memory::{effective_memory, format_bytes, header_size, MemoryInfo};
+use crate::infra::cache::{ImageEntry, GLOBAL_IMAGE_CACHE};
 use crate::infra::config::load_config;
 use crate::infra::fits::dispatcher::resolve_single_image;
+use crate::infra::fits::file_bytes::read_file_bytes;
 use crate::infra::fits::reader::{
     extract_header_by_index, extract_image_planes_by_index, extract_int_planes_by_index, list_extensions, HduInfo,
 };
-use crate::infra::fits::table::{find_bintable, load_bintable};
+use crate::infra::fits::table::{find_bintable, load_bintable, BintableData};
 use crate::infra::fits::writer::{is_wcs_card, write_fits_cube, write_fits_f64, BinTableHdu, HduData, ImageHdu};
 use crate::infra::image_source::LoadedCompanions;
 use crate::infra::wcs_source::{header_wcs, load_wcs};
-use crate::service::common::derived_output_header;
+use crate::service::common::{cached_header, derived_output_header};
 use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, EXTNAME_SCI};
+use crate::types::error::{AppError, CodedError};
 use crate::types::header::HduHeader;
 use crate::types::image_ref::ImageRef;
 
@@ -59,10 +66,57 @@ const ABPROC_CUBE_EDIT: &str = "cube-edit";
 const ABPROC_PSF_MATCHED: &str = "psf-matched";
 const DEFAULT_CUBE_NAME: &str = "datacube.fits";
 const PRIMARY_HDU_NAME: &str = "PRIMARY";
+const KERNEL_SHAPE: &str = "kernel_shape";
 const LIGHTSTACK_LAYOUT_DROPS_COMPANIONS: &str =
     "the lightstack layout holds the science planes only: the ERR and DQ cubes are not written; the mef layout keeps them";
+const LIGHTSTACK_LAYOUT_DROPS_NOISE: &str =
+    "the lightstack layout holds no NOISCORR noise correlation maps: they are not written; the mef layout keeps them";
 const AREA_MAP_WARNING: &str =
     "the AREA pixel-area map was carried unchanged; the conversion used the nominal pixel area, as LIGHTSTACK does";
+const CROP_FIRST_ADVICE: &str =
+    "add a crop step before this one, close other applications, or, if the system can page this much, set ASTROBURST_MEMORY_BUDGET_MB to the memory to allow (in MB) and restart";
+const CLOSE_APPLICATIONS_ADVICE: &str =
+    "crop the images one at a time, close other applications, or, if the system can page this much, set ASTROBURST_MEMORY_BUDGET_MB to the memory to allow (in MB) and restart";
+const PAGING_FRACTION: f64 = 0.8;
+const INPUT_BYTES_PER_PIXEL: u64 = 16;
+const SCIENCE_BYTES_PER_PIXEL: u64 = 8;
+const ALIGN_GRID_BYTES_PER_PIXEL: u64 = 32;
+const ALIGN_INPUT_WORK_BYTES_PER_PIXEL: u64 = 12;
+const NOISE_BAND_ROWS: u64 = 32;
+const NOISE_TAP_BYTES: u64 = 16;
+const NOISE_CENTRE_TOLERANCE: f64 = 1e-6;
+
+fn check_cancelled(cancelled: &(dyn Fn() -> bool + Sync)) -> Result<()> {
+    if cancelled() {
+        return Err(AppError::Cancelled.into());
+    }
+    Ok(())
+}
+
+fn check_preparation_memory(required: u64, memory: Option<MemoryInfo>, subject: &str, advice: &'static str) -> Result<Option<String>> {
+    let Some(memory) = memory else {
+        return Ok(None);
+    };
+    if required > memory.commit_available {
+        let message = format!(
+            "{subject} needs about {} of memory but only {} is available: {advice}",
+            format_bytes(required),
+            format_bytes(memory.commit_available)
+        );
+        return Err(CodedError { code: INSUFFICIENT_MEMORY, message, hint: Some(advice.to_string()) }.into());
+    }
+    Ok((required as f64 > PAGING_FRACTION * memory.physical_available as f64).then(|| {
+        format!(
+            "{subject} needs about {} of memory and {} is free; the system may page to disk and slow down",
+            format_bytes(required),
+            format_bytes(memory.physical_available)
+        )
+    }))
+}
+
+fn pixels(rows: usize, cols: usize) -> u64 {
+    (rows as u64).saturating_mul(cols as u64)
+}
 
 enum DqPixels {
     Unsigned(Array2<u32>),
@@ -228,18 +282,54 @@ impl LoadedImage {
         let wcs = load_wcs(path, &header).map_err(|error| anyhow!("{}: no usable WCS: {error:#}", output_stem(path)))?;
         Ok(Self { entry, header, wcs })
     }
+}
 
-    fn frame(&self) -> CropFrame<'_> {
-        let (rows, cols) = self.entry.arr().dim();
-        CropFrame { header: &self.header, wcs: &self.wcs, dims: (cols, rows) }
+struct ImageFrame {
+    header: HduHeader,
+    wcs: WcsTransform,
+    rows: usize,
+    cols: usize,
+}
+
+impl ImageFrame {
+    fn read(path: &str) -> Result<Self> {
+        let header = cached_header(&GLOBAL_IMAGE_CACHE, path)?;
+        let wcs = load_wcs(path, &header).map_err(|error| anyhow!("{}: no usable WCS: {error:#}", output_stem(path)))?;
+        let (rows, cols) = declared_dims(path, &header)?;
+        Ok(Self { header, wcs, rows, cols })
+    }
+
+    fn crop_frame(&self) -> CropFrame<'_> {
+        CropFrame { header: &self.header, wcs: &self.wcs, dims: (self.cols, self.rows) }
+    }
+
+    fn pixels(&self) -> u64 {
+        pixels(self.rows, self.cols)
     }
 }
 
-fn load_all(paths: &[String], what: &str) -> Result<Vec<LoadedImage>> {
+fn declared_dims(path: &str, header: &HduHeader) -> Result<(usize, usize)> {
+    let size = header_size(header);
+    if size.width > 0 && size.height > 0 {
+        return Ok((size.height as usize, size.width as usize));
+    }
+    Ok(load_cached_full(path)?.arr().dim())
+}
+
+fn read_frames(paths: &[String], what: &str) -> Result<Vec<ImageFrame>> {
     if paths.is_empty() {
         bail!("no image to {what}");
     }
-    paths.iter().map(|path| LoadedImage::load(path)).collect()
+    paths.iter().map(|path| ImageFrame::read(path)).collect()
+}
+
+fn largest<'a>(paths: &'a [String], frames: &'a [ImageFrame], bytes: impl Fn(&ImageFrame) -> u64) -> Result<(&'a String, &'a ImageFrame, u64)> {
+    paths
+        .iter()
+        .zip(frames)
+        .map(|(path, frame)| (path, frame, bytes(frame)))
+        .max_by_key(|(_, _, bytes)| *bytes)
+        .context("no image in the set")
 }
 
 pub(crate) fn crop_set(
@@ -250,11 +340,23 @@ pub(crate) fn crop_set(
     include_err: bool,
     include_dq: bool,
 ) -> Result<CropSetReport> {
+    crop_set_with(paths, region, rounding, output_dir, include_err, include_dq, &|| false)
+}
+
+pub(crate) fn crop_set_with(
+    paths: &[String],
+    region: &CropRegion,
+    rounding: CropRounding,
+    output_dir: &str,
+    include_err: bool,
+    include_dq: bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<CropSetReport> {
     let started = Instant::now();
-    let images = load_all(paths, "crop")?;
-    let frames: Vec<CropFrame> = images.iter().map(LoadedImage::frame).collect();
+    let images = read_frames(paths, "crop")?;
+    let frames: Vec<CropFrame> = images.iter().map(ImageFrame::crop_frame).collect();
     let reference = match region {
-        CropRegion::Reference { reference } => Some(LoadedImage::load(reference)?),
+        CropRegion::Reference { reference } => Some(ImageFrame::read(reference)?),
         _ => None,
     };
     let region_text = match region {
@@ -263,16 +365,21 @@ pub(crate) fn crop_set(
         ),
         _ => None,
     };
-    let reference_frame = reference.as_ref().map(LoadedImage::frame);
+    let reference_frame = reference.as_ref().map(ImageFrame::crop_frame);
     let resolved = resolve_crop_shape(region, rounding, &frames, reference_frame.as_ref(), region_text.as_deref())?;
     let rects = frames
         .iter()
         .zip(paths)
         .map(|(frame, path)| resolved.shape.rect(frame).map_err(|error| anyhow!("{}: {error}", output_stem(path))))
         .collect::<Result<Vec<_>>>()?;
+    let (path, frame, required) = largest(paths, &images, |frame| frame.pixels().saturating_mul(INPUT_BYTES_PER_PIXEL))?;
+    let subject = format!("Cropping {} ({}x{})", output_stem(path), frame.cols, frame.rows);
+    let memory = check_preparation_memory(required, effective_memory(), &subject, CLOSE_APPLICATIONS_ADVICE)?;
     let mut warnings = resolved.warnings.clone();
+    warnings.extend(memory);
     let mut files = Vec::with_capacity(paths.len());
     for (path, rect) in paths.iter().zip(rects) {
+        check_cancelled(cancelled)?;
         let cutout = export_cutout_rect(path, "", Some(output_dir), rect, include_err, include_dq)?;
         if cutout.fraction_on_image < 1.0 {
             warnings.push(format!(
@@ -326,62 +433,125 @@ pub fn filter_registry() -> FilterRegistry {
         .unwrap_or_else(FilterRegistry::builtin)
 }
 
-fn identified_filters(paths: &[String], images: &[LoadedImage], policy: &ReferencePolicy) -> Vec<Option<String>> {
+fn identified_filters(paths: &[String], frames: &[ImageFrame], policy: &ReferencePolicy) -> Vec<Option<String>> {
     if !matches!(policy, ReferencePolicy::Filter { .. }) {
         return vec![None; paths.len()];
     }
     let registry = filter_registry();
     paths
         .iter()
-        .zip(images)
-        .map(|(path, image)| registry.identify(Some(&image.header), path, None).ok().map(|found| found.entry.filter))
+        .zip(frames)
+        .map(|(path, frame)| registry.identify(Some(&frame.header), path, None).ok().map(|found| found.entry.filter))
         .collect()
 }
 
+fn noise_pass_bytes(method: ResampleMethod, scale_ratio: f64, cols: usize) -> u64 {
+    let ratio = if scale_ratio.is_finite() && scale_ratio > 0.0 { scale_ratio } else { 1.0 };
+    let taps: u64 = match method {
+        ResampleMethod::Bilinear => 4,
+        ResampleMethod::Bicubic => 16,
+        ResampleMethod::Exact => (ratio.ceil() as u64).saturating_add(1).saturating_pow(2),
+    };
+    let rows = NOISE_BAND_ROWS.saturating_add((1.0 / ratio).ceil() as u64);
+    (rayon::current_num_threads() as u64)
+        .saturating_mul(rows)
+        .saturating_mul(cols as u64)
+        .saturating_mul(taps)
+        .saturating_mul(NOISE_TAP_BYTES)
+}
+
+fn alignment_bytes(frame: &ImageFrame, grid: &AlignGrid, method: ResampleMethod) -> u64 {
+    let ratio = grid.wcs.pixel_scale_arcsec() / frame.wcs.pixel_scale_arcsec();
+    frame
+        .pixels()
+        .saturating_mul(INPUT_BYTES_PER_PIXEL + ALIGN_INPUT_WORK_BYTES_PER_PIXEL)
+        .saturating_add(pixels(grid.rows, grid.cols).saturating_mul(ALIGN_GRID_BYTES_PER_PIXEL))
+        .saturating_add(noise_pass_bytes(method, ratio, grid.cols))
+}
+
+fn aligned_destination(output_dir: &str, path: &str, method: ResampleMethod) -> String {
+    std::path::Path::new(output_dir).join(format!("{}_aligned_{}.fits", output_stem(path), method.label())).to_string_lossy().into_owned()
+}
+
 pub(crate) fn align_set(paths: &[String], output_dir: &str, options: &AlignOptions) -> Result<AlignSetReport> {
+    align_set_with(paths, output_dir, options, &|| false)
+}
+
+pub(crate) fn align_set_with(paths: &[String], output_dir: &str, options: &AlignOptions, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<AlignSetReport> {
     let started = Instant::now();
-    let images = load_all(paths, "align")?;
-    let companions = paths.iter().zip(&images).map(|(path, image)| load_preparation_companions(path, &image.entry)).collect::<Result<Vec<_>>>()?;
-    let filters = identified_filters(paths, &images, &options.reference);
+    let frames = read_frames(paths, "align")?;
+    let filters = identified_filters(paths, &frames, &options.reference);
     let candidates: Vec<ReferenceCandidate> = paths
         .iter()
-        .zip(&images)
+        .zip(&frames)
         .zip(&filters)
-        .map(|((path, image), filter)| ReferenceCandidate {
+        .map(|((path, frame), filter)| ReferenceCandidate {
             path,
-            scale_arcsec: image.wcs.pixel_scale_arcsec(),
+            scale_arcsec: frame.wcs.pixel_scale_arcsec(),
             filter: filter.as_deref(),
         })
         .collect();
     let choice = choose_reference(&candidates, &options.reference)?;
-    let reference = &images[choice.index];
-    let (rows, cols) = reference.entry.arr().dim();
+    let reference = &frames[choice.index];
+    let (rows, cols) = (reference.rows, reference.cols);
     let label = filters[choice.index].clone().unwrap_or_else(|| output_stem(&paths[choice.index]));
     let grid = AlignGrid { label: &label, header: &reference.header, wcs: &reference.wcs, rows, cols };
-    let inputs: Vec<AlignInput> =
-        images.iter().map(|image| AlignInput { image: image.entry.arr(), header: &image.header, wcs: &image.wcs }).collect();
-    let plans = inputs
+    let plans = frames
         .iter()
         .zip(paths)
-        .map(|(input, path)| plan_alignment(input, &grid, options).map_err(|error| anyhow!("{}: {error}", output_stem(path))))
+        .map(|(frame, path)| {
+            plan_alignment_from_dims((frame.rows, frame.cols), &frame.header, &frame.wcs, &grid, options).map_err(|error| anyhow!("{}: {error}", output_stem(path)))
+        })
         .collect::<Result<Vec<_>>>()?;
+    let destinations: Vec<String> = paths.iter().map(|path| aligned_destination(output_dir, path, options.method)).collect();
+    for destination in &destinations {
+        for path in paths {
+            refuse_source_as_target(destination, path)?;
+        }
+    }
+    let (largest_path, largest_frame, required) = largest(paths, &frames, |frame| alignment_bytes(frame, &grid, options.method))?;
+    let subject = format!(
+        "Aligning {} ({}x{}) onto the {}x{} grid of {label}",
+        output_stem(largest_path),
+        largest_frame.cols,
+        largest_frame.rows,
+        cols,
+        rows
+    );
+    let memory = check_preparation_memory(required, effective_memory(), &subject, CROP_FIRST_ADVICE)?;
+    for path in paths {
+        check_cancelled(cancelled)?;
+        let entry = load_cached_full(path)?;
+        load_preparation_companions(path, &entry)?;
+    }
     std::fs::create_dir_all(output_dir).with_context(|| format!("Failed to create output directory: {output_dir}"))?;
     let mut files = Vec::with_capacity(paths.len());
-    let mut warnings = Vec::new();
-    for (((path, input), plan), (companions, companion_warnings)) in paths.iter().zip(&inputs).zip(&plans).zip(&companions) {
+    let mut warnings: Vec<String> = memory.into_iter().collect();
+    for (((path, frame), plan), destination) in paths.iter().zip(&frames).zip(&plans).zip(destinations) {
+        check_cancelled(cancelled)?;
         let stem = output_stem(path);
-        let destination =
-            format!("{}/{stem}_aligned_{}.fits", output_dir.trim_end_matches(['/', '\\']), options.method.label());
-        refuse_source_as_target(&destination, path)?;
+        let entry = load_cached_full(path)?;
+        if entry.arr().dim() != (frame.rows, frame.cols) {
+            bail!(
+                "{stem}: the image is {}x{} but its header declared {}x{} when the set was planned; the file changed during the alignment",
+                entry.arr().ncols(),
+                entry.arr().nrows(),
+                frame.cols,
+                frame.rows
+            );
+        }
+        let (companions, companion_warnings) = load_preparation_companions(path, &entry)?;
+        let input = AlignInput { image: entry.arr(), header: &frame.header, wcs: &frame.wcs };
         let table = companions.dq.as_ref().map_or_else(|| DqTable::select(input.header), |(_, table)| *table);
         let data = AlignCompanions {
             err: companions.err.as_ref().map(ImageEntry::arr),
             dq: companions.dq.as_ref().and_then(|(plane, _)| plane.int_plane()),
             no_data_dq: padded_dq_bits(table)?,
         };
-        let result = align_image_with_companions(input, &grid, options, plan, data)?;
+        let result = align_image_with_companions(&input, &grid, options, plan, data)?;
+        let noise_header = result.noise_header();
         let mut aligned = result.aligned;
-        aligned.report.warnings.extend(companion_warnings.iter().cloned());
+        aligned.report.warnings.extend(companion_warnings);
         let header = derived_output_header(Some(&aligned.header), ABPROC_ALIGNED, OutputValues::Linear);
         let primary = source_primary_header(path, Some(input.header));
         let err_header = companion_header(&header, true);
@@ -393,6 +563,7 @@ pub(crate) fn align_set(paths: &[String], output_dir: &str, options: &AlignOptio
         }
         let dq_data = signed_dq.as_ref().map_or_else(|| HduData::U32(&result.dq.bits), HduData::I32);
         hdus.push(ImageHdu { data: dq_data, header: Some(&dq_header), extname: EXTNAME_DQ, extver: 1 });
+        hdus.push(ImageHdu { data: HduData::F32(&result.noise_correlation), header: Some(&noise_header), extname: NOISCORR_EXTNAME, extver: 1 });
         write_derived_mef(&destination, Some(&primary), &hdus)?;
         warnings.extend(aligned.report.warnings.iter().map(|warning| format!("{stem}: {warning}")));
         files.push(AlignedFile { path: path.clone(), output_path: destination, report: aligned.report });
@@ -448,6 +619,16 @@ pub struct CubeReport {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PlaneValidity {
+    pub filter: String,
+    pub pixels: usize,
+    pub usable: usize,
+    pub above: usize,
+    pub dq_mask: Option<u32>,
+    pub kept: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CubeEditReport {
     pub output_path: String,
     pub layout: CubeLayout,
@@ -458,6 +639,7 @@ pub struct CubeEditReport {
     pub cols: usize,
     pub masked_pixels: Option<usize>,
     pub centre: Option<CubeCentre>,
+    pub validity: Option<Vec<PlaneValidity>>,
     pub hdus: Vec<String>,
     pub warnings: Vec<String>,
     pub elapsed_ms: u64,
@@ -466,6 +648,9 @@ pub struct CubeEditReport {
 pub(crate) struct CubeFile {
     pub cube: Cube,
     pub layout: CubeLayout,
+    pub noise: Option<CubeNoise>,
+    pub statuses: Option<Vec<MatchStatus>>,
+    pub warnings: Vec<String>,
 }
 
 fn named_cube<'a>(extensions: &'a [HduInfo], name: &str) -> Option<&'a HduInfo> {
@@ -479,6 +664,29 @@ fn check_depth(name: &'static str, planes: usize, depth: usize) -> Result<()> {
         bail!(CubeError::CompanionMismatch(name, planes, depth));
     }
     Ok(())
+}
+
+fn noise_extension(fits_path: &std::path::Path) -> Result<Option<(HduHeader, Vec<Array2<f32>>)>> {
+    let file = File::open(fits_path).with_context(|| format!("Failed to open {}", fits_path.display()))?;
+    let bytes = read_file_bytes(&file)?;
+    let label = fits_path.to_string_lossy();
+    let hdus = image_hdus(&bytes, &label)?;
+    let Some((_, parsed)) = hdus.iter().find(|(_, parsed)| card_text(&parsed.header, "EXTNAME").is_some_and(|name| name.eq_ignore_ascii_case(NOISCORR_EXTNAME))) else {
+        return Ok(None);
+    };
+    let maps = decode_planes_f64(&bytes, parsed, &label)?.into_iter().map(|plane| plane.mapv(|value| value as f32)).collect();
+    Ok(Some((parsed.header.clone(), maps)))
+}
+
+fn read_cube_noise(fits_path: &std::path::Path, table: &BintableData, depth: usize) -> Result<Option<CubeNoise>> {
+    let Some((header, maps)) = noise_extension(fits_path)? else {
+        return Ok(None);
+    };
+    if header.get_i64("NAXIS") != Some(3) {
+        bail!("the {NOISCORR_EXTNAME} extension of a cube is a 3-D image with one map per plane");
+    }
+    check_depth(NOISCORR_EXTNAME, maps.len(), depth)?;
+    CubeNoise::from_hdu(table, &header, maps).map(Some)
 }
 
 pub(crate) fn read_cube_file(path: &str, registry: &FilterRegistry) -> Result<CubeFile> {
@@ -509,19 +717,61 @@ pub(crate) fn read_cube_file(path: &str, registry: &FilterRegistry) -> Result<Cu
         check_depth(EXTNAME_DQ, dq.planes.len(), depth)?;
     }
     let fits_text = fits_path.to_string_lossy();
-    let filters = match find_bintable(&fits_text, FILTERS_EXTNAME, 1) {
-        Ok(table_index) => planes_from_table(&load_bintable(&fits_text, table_index)?)?,
-        Err(_) => planes_from_header(&header, depth, registry)?,
+    let table = find_bintable(&fits_text, FILTERS_EXTNAME, 1).ok().map(|table_index| load_bintable(&fits_text, table_index)).transpose()?;
+    let filters = match &table {
+        Some(table) => planes_from_table(table)?,
+        None => planes_from_header(&header, depth, registry)?,
     };
     check_depth(FILTERS_EXTNAME, filters.len(), depth)?;
-    Ok(CubeFile { cube: Cube { header, planes, err, dq, filters }, layout })
+    let mut warnings = Vec::new();
+    let statuses = table.as_ref().and_then(|table| {
+        match_statuses(table).unwrap_or_else(|error| {
+            warnings.push(format!("the {FILTERS_EXTNAME} match statuses were not carried: {error:#}"));
+            None
+        })
+    });
+    let noise = match (layout, &table) {
+        (CubeLayout::Mef, Some(table)) => match read_cube_noise(&fits_path, table, depth) {
+            Ok(noise) => noise,
+            Err(error) => {
+                warnings.push(format!("the {NOISCORR_EXTNAME} maps were not carried: {error:#}"));
+                None
+            }
+        },
+        _ => None,
+    };
+    Ok(CubeFile { cube: Cube { header, planes, err, dq, filters }, layout, noise, statuses, warnings })
 }
 
+#[cfg(test)]
 pub(crate) fn write_cube_file(path: &str, cube: &Cube, layout: CubeLayout, abproc: &str) -> Result<(Vec<String>, Vec<String>)> {
+    write_prepared_cube(path, cube, layout, abproc, FiltersTable::new(&cube.filters), None)
+}
+
+fn filters_table(planes: &[CubePlane], statuses: Option<&[MatchStatus]>, noise: Option<&CubeNoise>) -> Result<FiltersTable> {
+    let mut table = FiltersTable::new(planes);
+    if let Some(statuses) = statuses {
+        table = table.with_match(statuses)?;
+    }
+    if let Some(noise) = noise {
+        table = table.with_noise(noise)?;
+    }
+    Ok(table)
+}
+
+fn write_prepared_cube(
+    path: &str,
+    cube: &Cube,
+    layout: CubeLayout,
+    abproc: &str,
+    table: FiltersTable,
+    noise: Option<&CubeNoise>,
+) -> Result<(Vec<String>, Vec<String>)> {
     match layout {
         CubeLayout::Lightstack => {
-            let warnings: Vec<String> =
+            let mut warnings: Vec<String> =
                 (cube.err.is_some() || cube.dq.is_some()).then(|| LIGHTSTACK_LAYOUT_DROPS_COMPANIONS.to_string()).into_iter().collect();
+            warnings.extend(noise.map(|_| LIGHTSTACK_LAYOUT_DROPS_NOISE.to_string()));
             GLOBAL_CUBE_CACHE.invalidate(path);
             let written = write_fits_cube(path, &cube.planes, Some(&cube.header));
             invalidate_written(path);
@@ -534,6 +784,7 @@ pub(crate) fn write_cube_file(path: &str, cube: &Cube, layout: CubeLayout, abpro
             let dq_header = companion_header(&cube.header, false);
             let signed_dq: Option<Vec<Array2<i32>>> =
                 cube.dq.as_ref().filter(|dq| dq.signed).map(|dq| dq.planes.iter().map(|plane| plane.mapv(|bits| bits as i32)).collect());
+            let noise_maps = noise.map(|noise| (noise.padded_maps(), noise.header()));
             let mut hdus = vec![ImageHdu { data: HduData::F32Cube(&cube.planes), header: Some(&cube.header), extname: EXTNAME_SCI, extver: 1 }];
             if let Some(err) = &cube.err {
                 hdus.push(ImageHdu { data: HduData::F32Cube(err), header: Some(&err_header), extname: EXTNAME_ERR, extver: 1 });
@@ -545,7 +796,9 @@ pub(crate) fn write_cube_file(path: &str, cube: &Cube, layout: CubeLayout, abpro
                 };
                 hdus.push(ImageHdu { data, header: Some(&dq_header), extname: EXTNAME_DQ, extver: 1 });
             }
-            let table = FiltersTable::new(&cube.filters);
+            if let Some((maps, header)) = &noise_maps {
+                hdus.push(ImageHdu { data: HduData::F32Cube(maps), header: Some(header), extname: NOISCORR_EXTNAME, extver: 1 });
+            }
             let columns = table.columns();
             let tables = [BinTableHdu { columns: &columns, extname: FILTERS_EXTNAME, extver: 1 }];
             write_derived_mef_with_tables(path, Some(&primary), &hdus, &tables)?;
@@ -592,18 +845,27 @@ struct LoadedCubeInput {
     input: CubeInput,
     path: String,
     identified_by: String,
+    has_err: bool,
+    has_dq: bool,
     warnings: Vec<String>,
 }
 
-fn load_cube_input(spec: &CubeInputSpec, registry: &FilterRegistry) -> Result<LoadedCubeInput> {
+fn load_cube_input(spec: &CubeInputSpec, registry: &FilterRegistry, layout: CubeLayout) -> Result<LoadedCubeInput> {
     let image = LoadedImage::load(&spec.path)?;
     let (entry, identified_by, mut warnings) = identify_input(spec, &image.header, registry)?;
     let (companions, companion_warnings) = load_preparation_companions(&spec.path, &image.entry)?;
     warnings.extend(companion_warnings);
-    let err = companions.err.as_ref().map(|plane| plane.arr().to_owned());
-    let dq = match companions.dq.as_ref() {
-        Some((plane, _)) => Some(plane.int_plane().context("DQ companion has no integer plane")?.clone()),
-        None => None,
+    let (has_err, has_dq) = (companions.err.is_some(), companions.dq.is_some());
+    let (err, dq) = match layout {
+        CubeLayout::Lightstack => (None, None),
+        CubeLayout::Mef => {
+            let err = companions.err.as_ref().map(|plane| plane.arr().to_owned());
+            let dq = match companions.dq.as_ref() {
+                Some((plane, _)) => Some(plane.int_plane().context("DQ companion has no integer plane")?.clone()),
+                None => None,
+            };
+            (err, dq)
+        }
     };
     let plane = CubePlane::from_entry(&entry, &image.header, &image.wcs);
     let input = CubeInput {
@@ -615,7 +877,36 @@ fn load_cube_input(spec: &CubeInputSpec, registry: &FilterRegistry) -> Result<Lo
         wcs: image.wcs,
         plane,
     };
-    Ok(LoadedCubeInput { input, path: spec.path.clone(), identified_by, warnings })
+    Ok(LoadedCubeInput { input, path: spec.path.clone(), identified_by, has_err, has_dq, warnings })
+}
+
+fn input_noise(path: &str) -> Result<Option<InputNoise>> {
+    let reference = ImageRef::parse(path);
+    let (fits_path, _tmp) = resolve_single_image(&reference.path)?;
+    let Some((header, mut maps)) = noise_extension(&fits_path)? else {
+        return Ok(None);
+    };
+    if header.get_i64("NAXIS") != Some(2) || maps.len() != 1 {
+        bail!("the {NOISCORR_EXTNAME} extension holds {} maps; an aligned image holds one 2-D map", maps.len());
+    }
+    let correlation = maps.remove(0);
+    let size = correlation.nrows();
+    if correlation.ncols() != size || size % 2 == 0 || header.get_i64(CARD_NCORRK) != Some(size as i64) {
+        bail!(
+            "the {NOISCORR_EXTNAME} map is {}x{size} with {CARD_NCORRK}={}; it must be square with an odd size equal to {CARD_NCORRK}",
+            correlation.ncols(),
+            header.get(CARD_NCORRK).unwrap_or("absent")
+        );
+    }
+    let declared = card_text(&header, CARD_NCORRSRC).unwrap_or_default();
+    if declared != NOISCORR_SOURCE_ALIGN {
+        bail!("the {NOISCORR_EXTNAME} map has {CARD_NCORRSRC}='{declared}'; a cube is built from '{NOISCORR_SOURCE_ALIGN}' maps");
+    }
+    let centre = correlation[[size / 2, size / 2]];
+    if (f64::from(centre) - 1.0).abs() > NOISE_CENTRE_TOLERANCE || correlation.iter().any(|value| !value.is_finite()) {
+        bail!("the {NOISCORR_EXTNAME} map is not a normalised finite autocorrelation: its centre is {centre}");
+    }
+    Ok(Some(InputNoise { correlation, noiscorr_align: header.get_f64(CARD_NOISCORR_ALIGN).unwrap_or(f64::NAN) }))
 }
 
 fn reference_index(loaded: &[LoadedCubeInput], reference: Option<&str>) -> Result<usize> {
@@ -630,6 +921,20 @@ fn reference_index(loaded: &[LoadedCubeInput], reference: Option<&str>) -> Resul
         .with_context(|| format!("no input matches the reference {wanted}"))
 }
 
+fn lightstack_drop_warning(loaded: &[LoadedCubeInput]) -> Option<String> {
+    let carried: Vec<&str> = [(loaded.iter().any(|item| item.has_err), "ERR"), (loaded.iter().any(|item| item.has_dq), "DQ")]
+        .into_iter()
+        .filter(|(any, _)| *any)
+        .map(|(_, name)| name)
+        .collect();
+    (!carried.is_empty()).then(|| {
+        format!(
+            "the lightstack layout holds the science planes only: the {} planes of the inputs are not written; the mef layout keeps them",
+            carried.join(" and ")
+        )
+    })
+}
+
 pub(crate) fn build_cube(
     specs: &[CubeInputSpec],
     output_path: &str,
@@ -637,24 +942,86 @@ pub(crate) fn build_cube(
     options: CubeOptions,
     reference: Option<&str>,
 ) -> Result<CubeReport> {
+    build_cube_with(specs, output_path, output_dir, options, reference, &|| false)
+}
+
+pub(crate) fn build_cube_with(
+    specs: &[CubeInputSpec],
+    output_path: &str,
+    output_dir: Option<&str>,
+    options: CubeOptions,
+    reference: Option<&str>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<CubeReport> {
     let started = Instant::now();
     let first = specs.first().context("no image to build a cube from")?;
+    let sizes = specs
+        .iter()
+        .map(|spec| cached_header(&GLOBAL_IMAGE_CACHE, &spec.path).and_then(|header| declared_dims(&spec.path, &header)))
+        .collect::<Result<Vec<_>>>()?;
+    let per_pixel = match options.layout {
+        CubeLayout::Lightstack => SCIENCE_BYTES_PER_PIXEL,
+        CubeLayout::Mef => INPUT_BYTES_PER_PIXEL,
+    };
+    let required = sizes.iter().fold(0u64, |total, &(rows, cols)| total.saturating_add(pixels(rows, cols).saturating_mul(per_pixel)));
+    let (rows, cols) = sizes.iter().copied().max_by_key(|&(rows, cols)| pixels(rows, cols)).unwrap_or_default();
+    let subject = format!("Building a {cols}x{rows} cube of {} {}", specs.len(), if specs.len() == 1 { "plane" } else { "planes" });
+    let memory = check_preparation_memory(required, effective_memory(), &subject, CROP_FIRST_ADVICE)?;
     let registry = filter_registry();
-    let loaded = specs.iter().map(|spec| load_cube_input(spec, &registry)).collect::<Result<Vec<_>>>()?;
+    let loaded = specs
+        .iter()
+        .map(|spec| {
+            check_cancelled(cancelled)?;
+            load_cube_input(spec, &registry, options.layout)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let reference = reference_index(&loaded, reference)?;
     let base = derived_output_header(Some(&cube_base_header(&loaded[reference].input.header)), ABPROC_CUBE, OutputValues::Linear);
-    let mut warnings: Vec<String> =
-        loaded.iter().flat_map(|item| item.warnings.iter().map(move |warning| format!("{}: {warning}", item.input.label))).collect();
-    let described: Vec<(String, String, bool, bool)> = loaded
-        .iter()
-        .map(|item| (item.path.clone(), item.identified_by.clone(), item.input.err.is_some(), item.input.dq.is_some()))
-        .collect();
-    let assembled = assemble_cube(loaded.into_iter().map(|item| item.input).collect(), reference, base, options)?;
+    let mut warnings: Vec<String> = memory.into_iter().collect();
+    warnings.extend(loaded.iter().flat_map(|item| item.warnings.iter().map(move |warning| format!("{}: {warning}", item.input.label))));
+    let described: Vec<(String, String, bool, bool)> =
+        loaded.iter().map(|item| (item.path.clone(), item.identified_by.clone(), item.has_err, item.has_dq)).collect();
+    let dropped = match options.layout {
+        CubeLayout::Lightstack => lightstack_drop_warning(&loaded),
+        CubeLayout::Mef => None,
+    };
+    let inputs: Vec<CubeInput> = loaded.into_iter().map(|item| item.input).collect();
+    let assembled = match options.layout {
+        CubeLayout::Lightstack => assemble_cube(inputs, reference, base, options)?,
+        CubeLayout::Mef => {
+            let noise: Vec<Option<InputNoise>> = specs
+                .iter()
+                .zip(&inputs)
+                .map(|(spec, input)| {
+                    input_noise(&spec.path).unwrap_or_else(|error| {
+                        warnings.push(format!("{}: its {NOISCORR_EXTNAME} map was not used: {error:#}", input.label));
+                        None
+                    })
+                })
+                .collect();
+            let without: Vec<&str> = inputs.iter().zip(&noise).filter(|(_, noise)| noise.is_none()).map(|(input, _)| input.label.as_str()).collect();
+            if without.is_empty() {
+                assemble_cube_with_noise(inputs, noise.into_iter().flatten().collect(), reference, base, options)?
+            } else {
+                if without.len() < inputs.len() {
+                    warnings.push(format!(
+                        "the cube carries no {NOISCORR_EXTNAME} noise correlation maps: {} {} none, and the maps are kept only when every input has one",
+                        without.join(", "),
+                        if without.len() == 1 { "has" } else { "have" }
+                    ));
+                }
+                assemble_cube(inputs, reference, base, options)?
+            }
+        }
+    };
     let destination = resolve_output_target(&first.path, output_path, output_dir, DEFAULT_CUBE_NAME)?;
     for spec in specs {
         refuse_source_as_target(&destination, &spec.path)?;
     }
-    let (hdus, write_warnings) = write_cube_file(&destination, &assembled.cube, options.layout, ABPROC_CUBE)?;
+    let table = assembled.filters_table()?;
+    check_cancelled(cancelled)?;
+    let (hdus, write_warnings) = write_prepared_cube(&destination, &assembled.cube, options.layout, ABPROC_CUBE, table, assembled.noise.as_ref())?;
+    warnings.extend(dropped);
     warnings.extend(assembled.warnings);
     warnings.extend(write_warnings);
     let planes = assembled
@@ -684,13 +1051,35 @@ pub(crate) fn build_cube(
 
 
 fn masked_dq_bits(plane: &CubePlane) -> u32 {
-    let table = match plane.dataset.trim().to_ascii_uppercase().as_str() {
-        "JWST" => DqTable::Jwst,
-        "HST" => DqTable::Hst,
-        "ROMAN" => DqTable::Roman,
-        _ => DqTable::Unknown,
-    };
-    padded_dq_bits(table).unwrap_or(DQ_DO_NOT_USE)
+    padded_dq_bits(dq_table_of(plane)).unwrap_or(DQ_DO_NOT_USE)
+}
+
+fn plane_validity(cube: &Cube, threshold: f64, use_dq: bool, kept: &[CubePlane]) -> Vec<PlaneValidity> {
+    let dq = cube.dq.as_ref().filter(|_| use_dq);
+    cube.planes
+        .iter()
+        .zip(&cube.filters)
+        .enumerate()
+        .map(|(z, (plane, filter))| {
+            let mask = dq.map(|_| match dq_table_of(filter).exclusion_mask() {
+                0 => DQ_DO_NOT_USE,
+                mask => mask,
+            });
+            let flagged = |index: (usize, usize)| dq.zip(mask).is_some_and(|(dq, mask)| dq.planes[z][index] & mask != 0);
+            let (usable, above) = plane
+                .indexed_iter()
+                .filter(|&(index, value)| value.is_finite() && !flagged(index))
+                .fold((0, 0), |(usable, above), (_, &value)| (usable + 1, above + usize::from(f64::from(value) > threshold)));
+            PlaneValidity {
+                filter: filter.filter.clone(),
+                pixels: plane.len(),
+                usable,
+                above,
+                dq_mask: mask,
+                kept: kept.iter().any(|plane| plane.filter == filter.filter),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn edit_cube(
@@ -700,18 +1089,34 @@ pub(crate) fn edit_cube(
     output_dir: Option<&str>,
     layout: Option<CubeLayout>,
 ) -> Result<CubeEditReport> {
+    edit_cube_with(path, edit, output_path, output_dir, layout, &|| false)
+}
+
+pub(crate) fn edit_cube_with(
+    path: &str,
+    edit: &CubeEdit,
+    output_path: &str,
+    output_dir: Option<&str>,
+    layout: Option<CubeLayout>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<CubeEditReport> {
     let started = Instant::now();
-    let CubeFile { cube, layout: source_layout } = read_cube_file(path, &filter_registry())?;
-    let mut warnings = Vec::new();
+    let CubeFile { cube, layout: source_layout, noise, statuses, warnings: read_warnings } = read_cube_file(path, &filter_registry())?;
+    check_cancelled(cancelled)?;
+    let mut warnings = read_warnings;
     let mut removed = Vec::new();
     let mut masked_pixels = None;
     let mut centre = None;
+    let mut validity = None;
+    let named_statuses: Option<Vec<(String, MatchStatus)>> =
+        statuses.map(|statuses| cube.filters.iter().map(|plane| plane.filter.clone()).zip(statuses).collect());
     let mut edited = match edit {
         CubeEdit::DropInvalid { threshold, frac_valid, use_dq } => {
             if *use_dq && cube.dq.is_none() {
                 warnings.push("use_dq was asked but the cube has no DQ planes: every finite pixel counts".to_string());
             }
             let (valid, dropped) = drop_invalid_planes(&cube, *threshold, *frac_valid, *use_dq)?;
+            validity = Some(plane_validity(&cube, *threshold, *use_dq, &valid.filters));
             removed = dropped;
             valid
         }
@@ -737,11 +1142,17 @@ pub(crate) fn edit_cube(
             updated
         }
     };
+    let noise = noise.map(|noise| noise.for_planes(&edited.filters)).transpose()?;
+    let statuses: Option<Vec<MatchStatus>> = named_statuses.map(|named| {
+        named.into_iter().filter(|(filter, _)| edited.filters.iter().any(|plane| plane.filter == *filter)).map(|(_, status)| status).collect()
+    });
     let layout = layout.unwrap_or(source_layout);
     let file_name = format!("{}_{}.fits", output_stem(path), edit.suffix());
     let destination = resolve_output_target(path, output_path, output_dir, &file_name)?;
     edited.header = cube_output_header(&edited.header, ABPROC_CUBE_EDIT);
-    let (hdus, write_warnings) = write_cube_file(&destination, &edited, layout, ABPROC_CUBE_EDIT)?;
+    let table = filters_table(&edited.filters, statuses.as_deref(), noise.as_ref())?;
+    check_cancelled(cancelled)?;
+    let (hdus, write_warnings) = write_prepared_cube(&destination, &edited, layout, ABPROC_CUBE_EDIT, table, noise.as_ref())?;
     warnings.extend(write_warnings);
     let (rows, cols) = edited.dims();
     Ok(CubeEditReport {
@@ -754,6 +1165,7 @@ pub(crate) fn edit_cube(
         cols,
         masked_pixels,
         centre,
+        validity,
         hdus,
         warnings,
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -805,6 +1217,8 @@ pub struct PreparedPsfFile {
     pub padded_to_odd: bool,
     pub recentred_by_px: Option<[f64; 2]>,
     pub resampled: Option<ResampleRecord>,
+    pub clipped_negative_fraction: f64,
+    pub clipped_negative_flux_fraction: f64,
     pub output_path: Option<String>,
 }
 
@@ -821,6 +1235,15 @@ pub struct PsfSetReport {
 }
 
 pub(crate) fn load_psfs(inputs: &[PsfInputSpec], options: &PsfSetOptions, output_dir: Option<&str>) -> Result<PsfSetReport> {
+    load_psfs_with(inputs, options, output_dir, &|| false)
+}
+
+pub(crate) fn load_psfs_with(
+    inputs: &[PsfInputSpec],
+    options: &PsfSetOptions,
+    output_dir: Option<&str>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<PsfSetReport> {
     let started = Instant::now();
     if inputs.is_empty() {
         bail!("no PSF to load");
@@ -828,6 +1251,7 @@ pub(crate) fn load_psfs(inputs: &[PsfInputSpec], options: &PsfSetOptions, output
     let psfs = inputs
         .iter()
         .map(|spec| {
+            check_cancelled(cancelled)?;
             let mut psf = load_psf(std::path::Path::new(&spec.path), spec.pixel_scale_arcsec)?;
             if let Some(filter) = spec.filter.as_deref().map(str::trim).filter(|filter| !filter.is_empty()) {
                 psf.filter = Some(filter.to_string());
@@ -854,6 +1278,7 @@ pub(crate) fn load_psfs(inputs: &[PsfInputSpec], options: &PsfSetOptions, output
     for (((spec, psf), prepared), target) in inputs.iter().zip(&psfs).zip(&set.prepared).zip(targets) {
         let stem = output_stem(&spec.path);
         if let Some(target) = &target {
+            check_cancelled(cancelled)?;
             let source_name = std::path::Path::new(&spec.path).file_name().map_or_else(|| spec.path.clone(), |name| name.to_string_lossy().into_owned());
             write_fits_f64(target, &prepared.data, Some(&prepared_psf_header(psf, prepared, &source_name)))?;
         }
@@ -875,6 +1300,8 @@ pub(crate) fn load_psfs(inputs: &[PsfInputSpec], options: &PsfSetOptions, output
             padded_to_odd: prepared.padded_to_odd,
             recentred_by_px: prepared.recentred_by_px,
             resampled: prepared.resampled.clone(),
+            clipped_negative_fraction: prepared.clipped_negative_fraction,
+            clipped_negative_flux_fraction: prepared.clipped_negative_flux_fraction,
             output_path: target,
         });
     }
@@ -921,7 +1348,44 @@ fn psf_label(psf: &LoadedPsf, filter: &str) -> String {
     }
 }
 
+fn kernel_failure(error: KernelError, filter: &str, reference: &str, source: (usize, usize), method: KernelMethod) -> anyhow::Error {
+    let context = format!("kernel from {filter} to {reference}");
+    let (message, remedy) = match error {
+        KernelError::KernelShape { rows, cols, needed_rows, needed_cols } => match method {
+            KernelMethod::Wiener { shape: KernelShape::Named(ShapeName::Reference), .. } => (
+                format!(
+                    "{context}: the {filter} PSF is {}x{} and the reference PSF {cols}x{rows}; shape \"reference\" makes the kernel {cols}x{rows}, the size of the reference PSF, so it cannot hold the larger PSF",
+                    source.1, source.0
+                ),
+                format!(
+                    "Give the kernels step \"shape\": \"max\", which takes the larger odd size ({needed_cols}x{needed_rows}), or an odd fixed shape of at least {needed_cols}x{needed_rows}, e.g. \"shape\": [{needed_rows}, {needed_cols}]; or give the psfs step pixel_scale_arcsec with reference, which puts every PSF on the reference grid and footprint (a larger PSF is cropped to it and renormalised, so its outer flux is dropped)"
+                ),
+            ),
+            _ => (
+                format!("{context}: {error}"),
+                format!("Give the kernels step an odd shape of at least {needed_cols}x{needed_rows}, e.g. \"shape\": [{needed_rows}, {needed_cols}]"),
+            ),
+        },
+        KernelError::ShapeMismatch { .. } => (
+            format!("{context}: {error}"),
+            "Give the psfs step pixel_scale_arcsec with reference, which puts every PSF on the reference grid and footprint, or use the wiener method with \"shape\": \"max\"".to_string(),
+        ),
+        other => return anyhow::Error::new(other).context(context),
+    };
+    CodedError { code: KERNEL_SHAPE, message: format!("{message}. {remedy}"), hint: Some(remedy) }.into()
+}
+
 pub(crate) fn build_kernels(inputs: &[PsfInputSpec], reference: &str, options: &KernelOptions, output_dir: Option<&str>) -> Result<KernelSetReport> {
+    build_kernels_with(inputs, reference, options, output_dir, &|| false)
+}
+
+pub(crate) fn build_kernels_with(
+    inputs: &[PsfInputSpec],
+    reference: &str,
+    options: &KernelOptions,
+    output_dir: Option<&str>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<KernelSetReport> {
     let started = Instant::now();
     if inputs.is_empty() {
         bail!("no PSF to build kernels from");
@@ -929,6 +1393,7 @@ pub(crate) fn build_kernels(inputs: &[PsfInputSpec], reference: &str, options: &
     let loaded = inputs
         .iter()
         .map(|spec| {
+            check_cancelled(cancelled)?;
             let psf = load_psf(std::path::Path::new(&spec.path), spec.pixel_scale_arcsec)?;
             let filter = spec
                 .filter
@@ -965,7 +1430,8 @@ pub(crate) fn build_kernels(inputs: &[PsfInputSpec], reference: &str, options: &
                 target.pixel_scale_arcsec
             );
         }
-        let kernel = build_kernel(&psf.data, &target.data, options).with_context(|| format!("kernel from {filter} to {reference}"))?;
+        check_cancelled(cancelled)?;
+        let kernel = build_kernel(&psf.data, &target.data, options).map_err(|error| kernel_failure(error, filter, reference, psf.data.dim(), options.method))?;
         warnings.extend(psf.warnings.iter().map(|warning| format!("{}: {warning}", output_stem(&spec.path))));
         warnings.extend(kernel.diagnostics.warnings.iter().map(|warning| format!("{filter}: {warning}")));
         built.push((spec, filter, psf_label(psf, filter), kernel));
@@ -974,6 +1440,7 @@ pub(crate) fn build_kernels(inputs: &[PsfInputSpec], reference: &str, options: &
     for (spec, filter, source_label, kernel) in built {
         let output_path = match output_dir {
             Some(dir) => {
+                check_cancelled(cancelled)?;
                 let destination = resolve_output_target(&spec.path, "", Some(dir), &kernel_file_name(filter, reference))?;
                 let header = kernel_header(&kernel, &source_label, &target_label, Some(target.pixel_scale_arcsec));
                 write_fits_f64(&destination, &kernel.data, Some(&header))?;
@@ -1033,15 +1500,32 @@ pub(crate) fn psf_match_cube(
     output_dir: Option<&str>,
     layout: Option<CubeLayout>,
 ) -> Result<PsfMatchReport> {
+    psf_match_cube_with(path, kernel_dir, kernels, options, output_path, output_dir, layout, &|| false)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn psf_match_cube_with(
+    path: &str,
+    kernel_dir: Option<&str>,
+    kernels: &[KernelFileSpec],
+    options: &MatchOptions,
+    output_path: &str,
+    output_dir: Option<&str>,
+    layout: Option<CubeLayout>,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<PsfMatchReport> {
     let started = Instant::now();
-    let CubeFile { cube, layout: source_layout } = read_cube_file(path, &filter_registry())?;
+    let CubeFile { cube, layout: source_layout, noise, mut warnings, .. } = read_cube_file(path, &filter_registry())?;
+    check_cancelled(cancelled)?;
     let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
-    let mut warnings: Vec<String> = kernels
-        .iter()
-        .filter(|spec| !cube.filters.iter().any(|plane| same(&plane.filter, &spec.filter)))
-        .map(|spec| format!("the kernel {} is for {}, which is not a plane of the cube", spec.path, spec.filter))
-        .collect();
+    warnings.extend(
+        kernels
+            .iter()
+            .filter(|spec| !cube.filters.iter().any(|plane| same(&plane.filter, &spec.filter)))
+            .map(|spec| format!("the kernel {} is for {}, which is not a plane of the cube", spec.path, spec.filter)),
+    );
     let mut plane_kernels = Vec::new();
+    let mut cards = Vec::new();
     for plane in cube.filters.iter().filter(|plane| !same(&plane.filter, &options.reference)) {
         let given = kernels.iter().find(|spec| same(&spec.filter, &plane.filter)).map(|spec| spec.path.clone());
         let named = kernel_dir
@@ -1049,16 +1533,25 @@ pub(crate) fn psf_match_cube(
             .filter(|candidate| candidate.is_file())
             .map(|candidate| candidate.to_string_lossy().into_owned());
         if let Some(kernel_path) = given.or(named) {
-            plane_kernels.push(read_kernel_file(&kernel_path, &plane.filter, &mut warnings)?);
+            check_cancelled(cancelled)?;
+            let (kernel, kernel_cards) = read_kernel_file(&kernel_path, &plane.filter, &mut warnings)?;
+            plane_kernels.push(kernel);
+            cards.push(kernel_cards);
         }
     }
     let flags: Vec<u32> = cube.filters.iter().map(masked_dq_bits).collect();
-    let MatchedCube { cube: mut matched, planes, warnings: match_warnings } = match_cube(&cube, &plane_kernels, options, &flags)?;
+    let MatchProducts { matched: MatchedCube { cube: mut matched, planes, warnings: match_warnings }, noise, statuses } =
+        match_cube_with(&cube, &plane_kernels, &cards, options, &flags, noise.as_ref(), effective_memory(), cancelled).map_err(|error| match error {
+            MatchError::Cancelled => anyhow::Error::from(AppError::Cancelled),
+            other => other.into(),
+        })?;
     warnings.extend(match_warnings);
     let layout = layout.unwrap_or(source_layout);
     let destination = resolve_output_target(path, output_path, output_dir, &format!("{}_psfmatched.fits", output_stem(path)))?;
     matched.header = cube_output_header(&matched.header, ABPROC_PSF_MATCHED);
-    let (hdus, write_warnings) = write_cube_file(&destination, &matched, layout, ABPROC_PSF_MATCHED)?;
+    let table = filters_table(&matched.filters, Some(statuses.as_slice()), noise.as_ref())?;
+    check_cancelled(cancelled)?;
+    let (hdus, write_warnings) = write_prepared_cube(&destination, &matched, layout, ABPROC_PSF_MATCHED, table, noise.as_ref())?;
     warnings.extend(write_warnings);
     let (rows, cols) = matched.dims();
     Ok(PsfMatchReport {
@@ -1075,7 +1568,7 @@ pub(crate) fn psf_match_cube(
     })
 }
 
-fn read_kernel_file(path: &str, filter: &str, warnings: &mut Vec<String>) -> Result<PlaneKernel> {
+fn read_kernel_file(path: &str, filter: &str, warnings: &mut Vec<String>) -> Result<(PlaneKernel, KernelCards)> {
     let bytes = std::fs::read(path).with_context(|| format!("Failed to read the kernel {path}"))?;
     let hdus = image_hdus(&bytes, path)?;
     let (hdu, parsed) = hdus.first().ok_or_else(|| PsfError::NoImage(path.to_string()))?;
@@ -1087,14 +1580,14 @@ fn read_kernel_file(path: &str, filter: &str, warnings: &mut Vec<String>) -> Res
     let mut scale_warnings = Vec::new();
     let pixel_scale_arcsec = pixel_scale(&parsed.header, None, &mut scale_warnings)?.map(|(scale, _)| scale);
     warnings.extend(scale_warnings.into_iter().map(|warning| format!("{label}: {warning}")));
-    Ok(PlaneKernel { filter: filter.to_string(), label, data: planes.remove(0), pixel_scale_arcsec })
+    let kernel = PlaneKernel { filter: filter.to_string(), label, data: planes.remove(0), pixel_scale_arcsec };
+    Ok((kernel, KernelCards::read(&parsed.header)))
 }
-
-#[allow(clippy::too_many_arguments)]
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cubeprep::match_cube::match_cube;
     use crate::core::metadata::photcal::card_text;
     use crate::core::metadata::units::{AreaRule, CARD_BUNIT_IN, CARD_FLUXCONV};
     use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData as TestData, TestHdu};
@@ -1953,5 +2446,452 @@ mod tests {
         for path in [source.as_str(), report.output_path.as_str(), lightstack.output_path.as_str()] {
             release(path);
         }
+    }
+
+    fn noise_source(dir: &std::path::Path, filter: &str, size: usize, scale: f64, shift: f64) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(format!("{}_src.fits", filter.to_lowercase()));
+        let centre = size as f64 / 2.0 + 0.5;
+        let mut sci_cards = wcs_cards((centre - shift, centre - shift), scale, 0.0);
+        sci_cards.push(("BUNIT", "'Jy'".into()));
+        let sci: Vec<f32> = (0..size * size).map(|i| 10.0 + (i % size) as f32 + 0.5 * (i / size) as f32).collect();
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'JWST'".into()), ("INSTRUME", "'NIRCAM'".into()), ("FILTER", format!("'{filter}'"))],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols: size, rows: size, data: TestData::F32(sci), extra_cards: sci_cards },
+                TestHdu { extname: Some("ERR"), extver: Some(1), cols: size, rows: size, data: TestData::F32(vec![1.0; size * size]), extra_cards: vec![("BUNIT", "'Jy'".into())] },
+                TestHdu { extname: Some("DQ"), extver: Some(1), cols: size, rows: size, data: TestData::I32(vec![0; size * size]), extra_cards: vec![] },
+            ],
+        );
+        path.to_string_lossy().into_owned()
+    }
+
+    fn noise_sources(dir: &std::path::Path) -> Vec<String> {
+        let inputs = dir.join("inputs");
+        vec![noise_source(&inputs, "F150W", 30, 0.04, 0.0), noise_source(&inputs, "F277W", 24, 0.05, 0.3), noise_source(&inputs, "F444W", 24, 0.05, 0.0)]
+    }
+
+    fn bilinear_without_crop() -> AlignOptions {
+        AlignOptions { method: ResampleMethod::Bilinear, border_crop: 0, ..AlignOptions::default() }
+    }
+
+    fn aligned_noise_set(dir: &std::path::Path) -> AlignSetReport {
+        align_set(&noise_sources(dir), dir.join("aligned").to_str().unwrap(), &bilinear_without_crop()).unwrap()
+    }
+
+    fn aligned_paths(report: &AlignSetReport) -> Vec<String> {
+        report.files.iter().map(|file| file.output_path.clone()).collect()
+    }
+
+    fn noise_cube(dir: &std::path::Path, aligned: &AlignSetReport) -> CubeReport {
+        let options = CubeOptions { layout: CubeLayout::Mef, order: PlaneOrder::Wavelength };
+        build_cube(&specs_for(&aligned_paths(aligned)), dir.join("noise_cube.fits").to_str().unwrap(), None, options, None).unwrap()
+    }
+
+    fn noise_hdu(path: &str) -> Option<(HduInfo, HduHeader, Vec<Array2<f32>>)> {
+        let file = File::open(path).unwrap();
+        let hdu = list_extensions(&file).unwrap().into_iter().find(|hdu| hdu.extname.as_deref() == Some("NOISCORR"))?;
+        let (header, maps) = noise_extension(std::path::Path::new(path)).unwrap().unwrap();
+        Some((hdu, header, maps))
+    }
+
+    fn table_numbers(path: &str, column: &str) -> Vec<f64> {
+        let table = load_bintable(path, find_bintable(path, "FILTERS", 1).unwrap()).unwrap();
+        let crate::infra::fits::table::ColumnValues::F64(values) = table.flattened_column(column).unwrap().values else { panic!("{column} is not numeric") };
+        values
+    }
+
+    fn table_texts(path: &str, column: &str) -> Vec<String> {
+        load_bintable(path, find_bintable(path, "FILTERS", 1).unwrap()).unwrap().text_column(column).unwrap()
+    }
+
+    fn support(map: &Array2<f32>) -> Array2<f32> {
+        crate::core::alignment::wcs_reproject::smallest_odd_support(map)
+    }
+
+    fn close_maps(a: &Array2<f32>, b: &Array2<f32>, tolerance: f32) -> bool {
+        a.dim() == b.dim() && a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() <= tolerance)
+    }
+
+    #[test]
+    fn aligned_products_carry_their_noise_correlation_map_beside_sci_err_and_dq() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = aligned_noise_set(dir.path());
+        assert_eq!(report.reference_index, 2);
+        for file in &report.files {
+            let opened = File::open(&file.output_path).unwrap();
+            let names: Vec<Option<String>> = list_extensions(&opened).unwrap().into_iter().map(|hdu| hdu.extname).collect();
+            assert_eq!(names, [None, Some("SCI".into()), Some("ERR".into()), Some("DQ".into()), Some("NOISCORR".into())], "{}", file.output_path);
+            let (hdu, header, maps) = noise_hdu(&file.output_path).unwrap();
+            let k = maps[0].nrows();
+            assert_eq!((hdu.naxis, maps.len(), maps[0].ncols(), k % 2), (2, 1, k, 1), "{}", file.output_path);
+            assert_eq!((header.get_i64("NCORRK"), card_text(&header, "NCORRSRC").as_deref()), (Some(k as i64), Some("align")));
+            assert_eq!(maps[0][[k / 2, k / 2]], 1.0);
+            let factor = file.report.noiscorr_align.unwrap();
+            assert!((header.get_f64("NCORRALN").unwrap() / factor - 1.0).abs() < 1e-12, "{factor}");
+            assert!(header.cards.iter().any(|(key, value)| key == "HISTORY" && value.contains("NOISCORR")));
+            let sci = extract_header_by_index(&opened, 1).unwrap();
+            assert!(["NCORRK", "NCORRSRC", "NCORRALN"].iter().all(|key| sci.get(key).is_none()), "{:?}", sci.cards);
+            assert!(!sci.cards.iter().any(|(key, value)| key == "HISTORY" && value.contains("NOISCORR")));
+        }
+        let shifted = noise_hdu(&report.files[1].output_path).unwrap().2.remove(0);
+        assert_eq!(shifted.dim(), (3, 3));
+        let interior_squares = 0.3 * 0.3 + 0.7 * 0.7;
+        let axis_squares = (1.0 + 23.0 * interior_squares) / 24.0;
+        let axis_cross = (0.3 + 22.0 * 0.3 * 0.7) / 23.0;
+        let neighbour = axis_cross / axis_squares;
+        for (index, expected) in [((1, 2), neighbour), ((2, 1), neighbour), ((1, 0), neighbour), ((2, 2), neighbour * neighbour), ((0, 2), neighbour * neighbour)] {
+            assert!((f64::from(shifted[index]) - expected).abs() < 1e-5, "{index:?}: {} against {expected}", shifted[index]);
+        }
+        assert_eq!(noise_hdu(&report.files[2].output_path).unwrap().2[0], Array2::<f32>::ones((1, 1)));
+        assert_eq!(report.files[2].report.noiscorr_align, Some(1.0));
+    }
+
+    #[test]
+    fn a_mef_cube_of_aligned_images_stacks_their_noise_maps_and_writes_the_noise_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let aligned = aligned_noise_set(dir.path());
+        let paths = aligned_paths(&aligned);
+        let inputs: Vec<(Array2<f32>, f64)> = paths
+            .iter()
+            .map(|path| {
+                let (_, header, mut maps) = noise_hdu(path).unwrap();
+                (maps.remove(0), header.get_f64("NCORRALN").unwrap())
+            })
+            .collect();
+        let cube = noise_cube(dir.path(), &aligned);
+        assert_eq!(cube.hdus, ["SCI", "ERR", "DQ", "NOISCORR", "FILTERS"]);
+        assert!(!cube.warnings.iter().any(|warning| warning.contains("NOISCORR")), "{:?}", cube.warnings);
+        let (hdu, header, maps) = noise_hdu(&cube.output_path).unwrap();
+        let k = inputs.iter().map(|(map, _)| map.nrows()).max().unwrap();
+        assert_eq!((hdu.naxis, hdu.naxis1, hdu.naxis2, hdu.naxis3), (3, k as i64, k as i64, 3));
+        assert_eq!((header.get_i64("NCORRK"), card_text(&header, "NCORRSRC").as_deref()), (Some(k as i64), Some("align")));
+        for (z, (map, _)) in inputs.iter().enumerate() {
+            let offset = (k - map.nrows()) / 2;
+            for ((y, x), &value) in maps[z].indexed_iter() {
+                let inside = (offset..offset + map.nrows()).contains(&y) && (offset..offset + map.ncols()).contains(&x);
+                let expected = if inside { map[[y - offset, x - offset]] } else { 0.0 };
+                assert!((value - expected).abs() <= f32::EPSILON, "plane {z} ({y}, {x}): {value} against {expected}");
+            }
+        }
+        assert_eq!(table_texts(&cube.output_path, "FILTER"), ["F150W", "F277W", "F444W"]);
+        let align = table_numbers(&cube.output_path, "NOISCORR_ALIGN");
+        assert!(align.iter().zip(&inputs).all(|(column, (_, card))| (column / card - 1.0).abs() < 1e-12), "{align:?}");
+        assert_eq!(table_numbers(&cube.output_path, "NOISCORR_MATCH"), [1.0; 3]);
+        assert_eq!(table_texts(&cube.output_path, "MATCH"), ["unmatched"; 3]);
+        let back = read_cube_file(&cube.output_path, &FilterRegistry::builtin()).unwrap();
+        assert_eq!(back.statuses, Some(vec![MatchStatus::Unmatched; 3]));
+        assert_eq!(back.noise.as_ref().map(|noise| noise.planes.len()), Some(3));
+
+        let lightstack = build_cube(&specs_for(&paths), dir.path().join("ls.fits").to_str().unwrap(), None, CubeOptions::default(), None).unwrap();
+        assert_eq!(lightstack.hdus, ["PRIMARY"]);
+        assert!(!lightstack.warnings.iter().any(|warning| warning.contains("NOISCORR")), "{:?}", lightstack.warnings);
+        assert!(noise_hdu(&lightstack.output_path).is_none());
+
+        let raw_reference = noise_sources(dir.path()).remove(2);
+        let mixed_specs = specs_for(&[paths[0].clone(), paths[1].clone(), raw_reference]);
+        let options = CubeOptions { layout: CubeLayout::Mef, order: PlaneOrder::Wavelength };
+        let mixed = build_cube(&mixed_specs, dir.path().join("mixed.fits").to_str().unwrap(), None, options, None).unwrap();
+        assert_eq!(mixed.hdus, ["SCI", "ERR", "DQ", "FILTERS"]);
+        assert!(mixed.warnings.iter().any(|warning| warning.contains("NOISCORR") && warning.contains("f444w_src") && !warning.contains("f150w")), "{:?}", mixed.warnings);
+        assert_eq!(table_texts(&mixed.output_path, "MATCH"), ["unmatched"; 3]);
+        for path in [cube.output_path.as_str(), lightstack.output_path.as_str(), mixed.output_path.as_str()] {
+            release(path);
+        }
+    }
+
+    #[test]
+    fn edits_carry_the_noise_maps_and_columns_of_the_planes_they_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let aligned = aligned_noise_set(dir.path());
+        let cube = noise_cube(dir.path(), &aligned);
+        let (_, _, before) = noise_hdu(&cube.output_path).unwrap();
+        let align = table_numbers(&cube.output_path, "NOISCORR_ALIGN");
+        let out = dir.path().join("edits");
+
+        let removed = edit_cube(&cube.output_path, &CubeEdit::RemoveFilter { filter: "F277W".into() }, "", Some(out.to_str().unwrap()), None).unwrap();
+        assert_eq!(removed.hdus, ["SCI", "ERR", "DQ", "NOISCORR", "FILTERS"]);
+        let (_, header, kept) = noise_hdu(&removed.output_path).unwrap();
+        assert_eq!((kept.len(), card_text(&header, "NCORRSRC").as_deref()), (2, Some("align")));
+        assert!(close_maps(&support(&kept[0]), &support(&before[0]), 0.0) && close_maps(&support(&kept[1]), &support(&before[2]), 0.0));
+        assert_eq!(table_texts(&removed.output_path, "FILTER"), ["F150W", "F444W"]);
+        assert_eq!(table_numbers(&removed.output_path, "NOISCORR_ALIGN"), [align[0], align[2]]);
+        assert_eq!(table_numbers(&removed.output_path, "NOISCORR_MATCH"), [1.0; 2]);
+        assert_eq!(table_texts(&removed.output_path, "MATCH"), ["unmatched"; 2]);
+
+        let cut = edit_cube(&cube.output_path, &CubeEdit::Cut { x_start: 2, x_end: 20, y_start: 3, y_end: 21 }, "", Some(out.to_str().unwrap()), None).unwrap();
+        assert_eq!(cut.hdus, ["SCI", "ERR", "DQ", "NOISCORR", "FILTERS"]);
+        assert_eq!(noise_hdu(&cut.output_path).unwrap().2, before);
+        assert_eq!(table_numbers(&cut.output_path, "NOISCORR_ALIGN"), align);
+        assert_eq!(table_texts(&cut.output_path, "MATCH"), ["unmatched"; 3]);
+
+        let lightstack = edit_cube(&cube.output_path, &CubeEdit::Cut { x_start: 2, x_end: 20, y_start: 3, y_end: 21 }, out.join("ls.fits").to_str().unwrap(), None, Some(CubeLayout::Lightstack)).unwrap();
+        assert_eq!(lightstack.hdus, ["PRIMARY"]);
+        assert!(noise_hdu(&lightstack.output_path).is_none());
+        assert!(lightstack.warnings.iter().any(|warning| warning.contains("NOISCORR")), "{:?}", lightstack.warnings);
+        for path in [cube.output_path.as_str(), removed.output_path.as_str(), cut.output_path.as_str(), lightstack.output_path.as_str()] {
+            release(path);
+        }
+    }
+
+    #[test]
+    fn psf_matching_writes_match_noise_maps_and_the_kernel_cards_into_the_filters_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let aligned = aligned_noise_set(dir.path());
+        let cube = noise_cube(dir.path(), &aligned);
+        let align = table_numbers(&cube.output_path, "NOISCORR_ALIGN");
+        let blur = Array2::from_shape_vec((3, 3), vec![0.05, 0.1, 0.05, 0.1, 0.4, 0.1, 0.05, 0.1, 0.05]).unwrap();
+        let sum_squares = blur.iter().map(|weight| weight * weight).sum::<f64>();
+        let kernels = dir.path().join("kernels");
+        let carded = write_kernel(&kernels, "kernel_f150w_to_f444w.fits", &blur, &[("PIXSCALE", 0.05), ("SRCFWHM", 2.0), ("TGTFWHM", 3.0), ("MATFWHM", 3.05), ("KSUMSQ", sum_squares)]);
+        write_kernel(&kernels, "kernel_f277w_to_f444w.fits", &blur, &[("PIXSCALE", 0.05)]);
+        let options = MatchOptions { reference: "F444W".into(), mode: MatchMode::Astroburst, allow_unmatched: false };
+        let out = dir.path().join("matched");
+        let report = psf_match_cube(&cube.output_path, Some(kernels.to_str().unwrap()), &[], &options, "", Some(out.to_str().unwrap()), None).unwrap();
+        assert_eq!(report.hdus, ["SCI", "ERR", "DQ", "NOISCORR", "FILTERS"]);
+
+        let source = read_cube_file(&cube.output_path, &FilterRegistry::builtin()).unwrap();
+        let kernel_header = extract_header_by_index(&File::open(&carded).unwrap(), 0).unwrap();
+        let plane_kernels = [
+            PlaneKernel { filter: "F150W".into(), label: "kernel_f150w_to_f444w.fits".into(), data: blur.clone(), pixel_scale_arcsec: Some(0.05) },
+            PlaneKernel { filter: "F277W".into(), label: "kernel_f277w_to_f444w.fits".into(), data: blur.clone(), pixel_scale_arcsec: Some(0.05) },
+        ];
+        let cards = [KernelCards::read(&kernel_header), KernelCards::ABSENT];
+        let flags: Vec<u32> = source.cube.filters.iter().map(masked_dq_bits).collect();
+        let expected = match_cube_with(&source.cube, &plane_kernels, &cards, &options, &flags, source.noise.as_ref(), None, &|| false).unwrap();
+        let expected_maps = expected.noise.as_ref().unwrap().padded_maps();
+        let (_, header, maps) = noise_hdu(&report.output_path).unwrap();
+        assert_eq!((card_text(&header, "NCORRSRC").as_deref(), header.get_i64("NCORRK")), (Some("match"), Some(maps[0].nrows() as i64)));
+        assert_eq!(maps.len(), 3);
+        for (z, (written, wanted)) in maps.iter().zip(&expected_maps).enumerate() {
+            assert!(close_maps(written, wanted, 1e-6), "plane {z}: {written:?} against {wanted:?}");
+            assert_eq!(written[[written.nrows() / 2, written.ncols() / 2]], 1.0, "plane {z}");
+        }
+        assert!(maps[0].nrows() > 3, "the kernel autocorrelation widens the matched maps");
+        assert!(close_maps(&support(&maps[2]), &Array2::ones((1, 1)), 0.0), "the reference keeps its alignment map");
+        assert_eq!(table_texts(&report.output_path, "MATCH"), ["matched", "external", "reference"]);
+        let matched = table_numbers(&report.output_path, "NOISCORR_MATCH");
+        assert!((matched[0] * sum_squares.sqrt() - 1.0).abs() < 1e-12 && matched[1].is_nan() && matched[2] == 1.0, "{matched:?}");
+        assert_eq!(table_numbers(&report.output_path, "NOISCORR_ALIGN"), align);
+        let fwhm = table_numbers(&report.output_path, "PSF_FWHM");
+        assert!((fwhm[0] / (3.05 * 0.05) - 1.0).abs() < 1e-9 && fwhm[1].is_nan() && (fwhm[2] / (3.0 * 0.05) - 1.0).abs() < 1e-9, "{fwhm:?}");
+        let after = read_cube_file(&report.output_path, &FilterRegistry::builtin()).unwrap().cube;
+        assert!(after.planes.iter().zip(&expected.matched.cube.planes).all(|(a, b)| a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())));
+        for path in [cube.output_path.as_str(), report.output_path.as_str()] {
+            release(path);
+        }
+    }
+
+    fn psf_spec(dir: &std::path::Path, name: &str, filter: &str, size: usize, sigma: f64) -> PsfInputSpec {
+        let centre = (size / 2) as f64;
+        let data = Array2::from_shape_fn((size, size), |(r, c)| (-((r as f64 - centre).powi(2) + (c as f64 - centre).powi(2)) / (2.0 * sigma * sigma)).exp());
+        let data = &data / data.sum();
+        PsfInputSpec { path: write_kernel(dir, name, &data, &[("PIXSCALE", 0.04)]), filter: Some(filter.into()), pixel_scale_arcsec: None }
+    }
+
+    #[test]
+    fn kernel_shape_failure_carries_code_and_hint() {
+        use crate::core::cubeprep::kernel::{EpsMode, KernelShape};
+        use crate::math::window::TaperWindow;
+
+        let dir = tempfile::tempdir().unwrap();
+        let psfs = dir.path().join("psfs");
+        let inputs = vec![psf_spec(&psfs, "stpsf_f150w.fits", "F150W", 101, 1.5), psf_spec(&psfs, "f444w.fits", "F444W", 21, 3.0)];
+        let out = dir.path().join("kernels");
+        let error = build_kernels(&inputs, "F444W", &KernelOptions::default(), Some(out.to_str().unwrap())).unwrap_err();
+        let coded = error.downcast_ref::<CodedError>().unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!(coded.code, "kernel_shape");
+        for needed in ["F150W", "101x101", "21x21", "\"shape\": \"max\"", "\"shape\": [101, 101]", "pixel_scale_arcsec", "reference"] {
+            assert!(coded.message.contains(needed), "{needed}: {}", coded.message);
+        }
+        let hint = coded.hint.as_deref().unwrap();
+        assert!(coded.message.contains(hint) && hint.contains("\"shape\": \"max\"") && hint.contains("\"shape\": [101, 101]"), "{hint}");
+        assert_eq!(files_in(&out), 0);
+
+        let fixed = KernelOptions { method: KernelMethod::Wiener { eps: 0.05, eps_mode: EpsMode::Absolute, shape: KernelShape::Fixed([51, 51]) }, auto: false };
+        let small = build_kernels(&inputs, "F444W", &fixed, Some(out.to_str().unwrap())).unwrap_err();
+        let coded = small.downcast_ref::<CodedError>().unwrap_or_else(|| panic!("{small:#}"));
+        assert_eq!(coded.code, "kernel_shape");
+        assert!(coded.message.contains("\"shape\": [101, 101]") && !coded.message.contains("\"max\""), "{}", coded.message);
+        assert!(coded.hint.as_deref().is_some_and(|hint| coded.message.contains(hint)), "{coded:?}");
+
+        let window = KernelOptions { method: KernelMethod::Window { window: TaperWindow::Hanning, regularization: 1e-4 }, auto: false };
+        let mismatch = build_kernels(&inputs, "F444W", &window, Some(out.to_str().unwrap())).unwrap_err();
+        let coded = mismatch.downcast_ref::<CodedError>().unwrap_or_else(|| panic!("{mismatch:#}"));
+        assert_eq!(coded.code, "kernel_shape");
+        assert!(coded.message.contains("pixel_scale_arcsec") && coded.message.contains("\"shape\": \"max\""), "{}", coded.message);
+        assert_eq!(files_in(&out), 0);
+
+        let other = build_kernels(&inputs, "F150W", &KernelOptions::default(), None).unwrap_err();
+        assert!(other.downcast_ref::<CodedError>().is_none() && format!("{other:#}").contains("narrower"), "{other:#}");
+    }
+
+    #[test]
+    fn prepared_psf_reports_carry_the_clipped_negative_fractions() {
+        let inputs = vec![d1_psf("d1_psf_JWST_F150W_20mas.fits"), d1_psf("d1_psf_JWST_F444W_40mas.fits")];
+        let options = PsfSetOptions { reference: Some("F444W".into()), method: PsfResampleMethod::Lightstack, ..PsfSetOptions::default() };
+        let report = load_psfs(&inputs, &options, None).unwrap();
+        let psfs: Vec<LoadedPsf> = inputs.iter().map(|spec| load_psf(std::path::Path::new(&spec.path), None).unwrap()).collect();
+        let set = prepare_psf_set(&psfs, &options).unwrap();
+        let value = serde_json::to_value(&report).unwrap();
+        for (z, (file, prepared)) in report.psfs.iter().zip(&set.prepared).enumerate() {
+            assert_eq!((file.clipped_negative_fraction, file.clipped_negative_flux_fraction), (prepared.clipped_negative_fraction, prepared.clipped_negative_flux_fraction));
+            assert_eq!(value["psfs"][z]["clipped_negative_fraction"].as_f64(), Some(prepared.clipped_negative_fraction));
+            assert_eq!(value["psfs"][z]["clipped_negative_flux_fraction"].as_f64(), Some(prepared.clipped_negative_flux_fraction));
+        }
+    }
+
+    #[test]
+    fn a_cancel_request_during_alignment_keeps_only_the_files_already_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("aligned");
+        let first = out.join("f150w_src_aligned_bilinear.fits");
+        let error = align_set_with(&noise_sources(dir.path()), out.to_str().unwrap(), &bilinear_without_crop(), &|| first.exists()).unwrap_err();
+        assert!(error.downcast_ref::<AppError>().is_some(), "{error:#}");
+        assert!(first.exists());
+        assert_eq!(files_in(&out), 1);
+    }
+
+    #[test]
+    fn every_step_stops_at_a_cancel_request_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = dir.path().join("inputs");
+        let paths = vec![filter_image(&inputs, "F150W", true), filter_image(&inputs, "F444W", true)];
+        let source = mef_cube(dir.path());
+        let kernels = dir.path().join("match_kernels");
+        let blur = Array2::from_shape_vec((3, 3), vec![0.05, 0.1, 0.05, 0.1, 0.4, 0.1, 0.05, 0.1, 0.05]).unwrap();
+        for filter in ["f150w", "f277w"] {
+            write_kernel(&kernels, &format!("kernel_{filter}_to_f444w.fits"), &blur, &[("PIXSCALE", 0.04)]);
+        }
+        let psfs = vec![d1_psf("d1_psf_JWST_F150W_40mas.fits"), d1_psf("d1_psf_JWST_F444W_40mas.fits")];
+        let target = |step: &str| dir.path().join(step).to_string_lossy().into_owned();
+        let stop = || true;
+        let options = MatchOptions { reference: "F444W".into(), mode: MatchMode::Astroburst, allow_unmatched: false };
+        let outcomes: Vec<(&str, Option<anyhow::Error>)> = vec![
+            ("crop", crop_set_with(&paths, &CropRegion::Common, CropRounding::Astroburst, &target("crop"), true, true, &stop).err()),
+            ("align", align_set_with(&paths, &target("align"), &AlignOptions::default(), &stop).err()),
+            ("cube", build_cube_with(&specs_for(&paths), "", Some(&target("cube")), CubeOptions::default(), None, &stop).err()),
+            ("edit", edit_cube_with(&source, &CubeEdit::Cut { x_start: 0, x_end: 3, y_start: 0, y_end: 3 }, "", Some(&target("edit")), None, &stop).err()),
+            ("psfs", load_psfs_with(&psfs, &PsfSetOptions::default(), Some(&target("psfs")), &stop).err()),
+            ("kernels", build_kernels_with(&psfs, "F444W", &KernelOptions::default(), Some(&target("kernels")), &stop).err()),
+            ("match", psf_match_cube_with(&source, Some(kernels.to_str().unwrap()), &[], &options, "", Some(&target("match")), None, &stop).err()),
+        ];
+        for (step, error) in outcomes {
+            let error = error.unwrap_or_else(|| panic!("{step} ran to the end"));
+            assert!(error.downcast_ref::<AppError>().is_some(), "{step}: {error:#}");
+            assert_eq!(files_in(std::path::Path::new(&target(step))), 0, "{step} wrote a product");
+        }
+        release(&source);
+    }
+
+    #[test]
+    fn align_set_refuses_a_bad_companion_on_the_last_input_before_writing_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [
+            alignment_companion_fixture(&dir, "fine.fits", 0.04),
+            alignment_companion_fixture(&dir, "reference.fits", 0.08),
+            companion_contract_fixture(&dir, "err_shape"),
+        ];
+        let out = dir.path().join("refused");
+        let error = align_set(&paths, out.to_str().unwrap(), &AlignOptions::default()).unwrap_err();
+        assert!(format!("{error:#}").contains("err_shape"), "{error:#}");
+        assert_eq!(files_in(&out), 0);
+    }
+
+    #[test]
+    fn drop_invalid_reports_the_usable_and_above_counts_of_every_plane_with_its_dataset_mask() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs = dir.path().join("inputs");
+        std::fs::create_dir_all(&inputs).unwrap();
+        let hst = inputs.join("hst_f814w.fits");
+        let mut sci_cards = wcs_cards((3.5, 3.0), 0.04, 15.0);
+        sci_cards.push(("BUNIT", "'Jy'".into()));
+        let mut pixels = vec![2.0f32; CUBE_COLS * CUBE_ROWS];
+        pixels[7] = f32::NAN;
+        let hst_dq: Vec<i32> = (0..CUBE_COLS * CUBE_ROWS).map(|i| dq_value("F814W", i % CUBE_COLS, i / CUBE_COLS)).collect();
+        write_test_mef(
+            &hst,
+            &[("TELESCOP", "'HST'".into())],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols: CUBE_COLS, rows: CUBE_ROWS, data: TestData::F32(pixels.clone()), extra_cards: sci_cards },
+                TestHdu { extname: Some("DQ"), extver: Some(1), cols: CUBE_COLS, rows: CUBE_ROWS, data: TestData::I32(hst_dq.clone()), extra_cards: vec![] },
+            ],
+        );
+        let jwst = filter_image(&inputs, "F444W", true);
+        let specs = vec![
+            CubeInputSpec { path: hst.to_string_lossy().into_owned(), dataset: Some("HST".into()), filter: Some("F814W".into()) },
+            CubeInputSpec { path: jwst, dataset: None, filter: None },
+        ];
+        let options = CubeOptions { layout: CubeLayout::Mef, order: PlaneOrder::Wavelength };
+        let cube = build_cube(&specs, dir.path().join("cube.fits").to_str().unwrap(), None, options, None).unwrap();
+        let usable_hst = pixels.iter().zip(&hst_dq).filter(|(value, bits)| value.is_finite() && **bits as u32 & 0x3FFF == 0).count();
+        let flagged_hst = pixels.iter().zip(&hst_dq).filter(|(value, bits)| value.is_finite() && **bits != 0).count();
+        assert!(flagged_hst > 0 && usable_hst > 0);
+
+        let with_dq = CubeEdit::DropInvalid { threshold: 1.0, frac_valid: 0.5, use_dq: true };
+        let report = edit_cube(&cube.output_path, &with_dq, dir.path().join("with_dq.fits").to_str().unwrap(), None, None).unwrap();
+        let validity = report.validity.clone().unwrap();
+        let total = CUBE_COLS * CUBE_ROWS;
+        assert_eq!(
+            validity.iter().map(|plane| (plane.filter.as_str(), plane.pixels, plane.usable, plane.above, plane.dq_mask, plane.kept)).collect::<Vec<_>>(),
+            [("F814W", total, usable_hst, usable_hst, Some(0x3FFF), true), ("F444W", total, total, total, Some(1), true)]
+        );
+        assert!(!report.warnings.iter().any(|warning| warning.contains("REED_SOLOMON") || warning.contains("other HST flags")), "{:?}", report.warnings);
+
+        let strict = CubeEdit::DropInvalid { threshold: 100.0, frac_valid: 0.5, use_dq: false };
+        let dropped = edit_cube(&cube.output_path, &strict, dir.path().join("strict.fits").to_str().unwrap(), None, None).unwrap();
+        let validity = dropped.validity.clone().unwrap();
+        assert_eq!(
+            validity.iter().map(|plane| (plane.filter.as_str(), plane.usable, plane.above, plane.dq_mask, plane.kept)).collect::<Vec<_>>(),
+            [("F814W", total - 1, 0, None, false), ("F444W", total, total, None, true)]
+        );
+        assert_eq!(dropped.removed, ["F814W"]);
+        let other = edit_cube(&cube.output_path, &CubeEdit::Cut { x_start: 0, x_end: 3, y_start: 0, y_end: 3 }, dir.path().join("cut.fits").to_str().unwrap(), None, None).unwrap();
+        assert!(other.validity.is_none());
+        for path in [cube.output_path.as_str(), report.output_path.as_str(), dropped.output_path.as_str(), other.output_path.as_str()] {
+            release(path);
+        }
+    }
+
+    #[test]
+    fn oversized_sets_are_refused_from_their_headers_before_any_pixel_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let huge = dir.path().join("huge.fits");
+        let side = 400_000;
+        let mut cards = wcs_cards((side as f64 / 2.0, side as f64 / 2.0), 0.04, 0.0);
+        cards.push(("BUNIT", "'Jy'".into()));
+        write_test_mef(
+            &huge,
+            &[("TELESCOP", "'JWST'".into()), ("INSTRUME", "'NIRCAM'".into()), ("FILTER", "'F444W'".into())],
+            &[TestHdu { extname: Some("SCI"), extver: Some(1), cols: side, rows: side, data: TestData::F32(vec![0.0; 4]), extra_cards: cards }],
+        );
+        let paths = vec![huge.to_string_lossy().into_owned()];
+        let out = dir.path().join("out");
+        let refusals = [
+            ("crop", crop_set(&paths, &CropRegion::Radec { ra: 150.0, dec: 2.0, size_arcsec: 1.0 }, CropRounding::Astroburst, out.to_str().unwrap(), true, true).err()),
+            ("align", align_set(&paths, out.to_str().unwrap(), &AlignOptions::default()).err()),
+            ("cube", build_cube(&specs_for(&paths), "", Some(out.to_str().unwrap()), CubeOptions::default(), None).err()),
+        ];
+        for (step, error) in refusals {
+            let error = error.unwrap_or_else(|| panic!("{step} accepted a {side}x{side} image"));
+            let coded = error.downcast_ref::<CodedError>().unwrap_or_else(|| panic!("{step}: {error:#}"));
+            assert_eq!(coded.code, "insufficient_memory", "{step}");
+            assert!(coded.message.contains(&format!("{side}x{side}")) && coded.message.contains("ASTROBURST_MEMORY_BUDGET_MB"), "{step}: {}", coded.message);
+            assert!(coded.hint.as_deref().is_some_and(|hint| coded.message.contains(hint)), "{step}: {coded:?}");
+        }
+        assert_eq!(files_in(&out), 0);
+    }
+
+    #[test]
+    fn preparation_memory_refuses_beyond_the_commit_limit_and_warns_near_the_physical_one() {
+        let info = Some(MemoryInfo { physical_available: 1000, commit_available: 2000 });
+        assert_eq!(check_preparation_memory(500, info, "Aligning this set", CROP_FIRST_ADVICE).unwrap(), None);
+        let near = check_preparation_memory(900, info, "Aligning this set", CROP_FIRST_ADVICE).unwrap().unwrap();
+        assert!(near.starts_with("Aligning this set needs about") && near.contains("page"), "{near}");
+        let refused = check_preparation_memory(2001, info, "Aligning this set", CROP_FIRST_ADVICE).unwrap_err();
+        let coded = refused.downcast_ref::<CodedError>().unwrap();
+        assert_eq!((coded.code, coded.hint.as_deref()), ("insufficient_memory", Some(CROP_FIRST_ADVICE)));
+        assert_eq!(check_preparation_memory(u64::MAX, None, "Aligning this set", CROP_FIRST_ADVICE).unwrap(), None);
     }
 }

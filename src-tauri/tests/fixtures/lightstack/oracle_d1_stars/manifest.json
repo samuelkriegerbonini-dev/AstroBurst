@@ -1,5 +1,5 @@
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "kind": "lightstack_oracle",
   "created_by": "scripts/oracle/lightstack_oracle.py",
   "recipe": {
@@ -45,7 +45,9 @@
     "pandas": "3.1.0"
   },
   "lightstack_source": {
-    "kind": "index"
+    "kind": "index",
+    "code_sha256": "f43772588e34d39a12ad38a1b6ab9be90681605605c71949e5cb3b42e7c43357",
+    "modified_since_install": []
   },
   "platform": "Windows-11-10.0.26300-SP0",
   "inputs": [
@@ -242,7 +244,7 @@
             "RuntimeWarning: All-NaN slice encountered",
             "RuntimeWarning: All-NaN slice encountered"
           ],
-          "wall_time_s": 0.02007709999452345
+          "wall_time_s": 0.020472299998800736
         },
         {
           "function": "lightstack.psf.measure_psf_fwhm",
@@ -265,7 +267,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.00032919999648584053,
+          "wall_time_s": 0.0005946000001131324,
           "error": "IndexError: index 21 is out of bounds for axis 0 with size 21"
         }
       ],
@@ -287,5 +289,5 @@
       "sha256": "d004e3bbe4cff011ebc7bff351ed415846b27c96f5278ca30ee0c0a31458393b"
     }
   ],
-  "wall_time_s": 2.2754575999933877
+  "wall_time_s": 2.010734699999375
 }

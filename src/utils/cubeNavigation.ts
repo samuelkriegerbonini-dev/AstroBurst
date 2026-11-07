@@ -104,6 +104,14 @@ export function nextPlaybackFrame(current: number, total: number, loop: boolean)
   return loop ? 0 : null;
 }
 
+export function frameStepTarget(current: number, total: number, direction: -1 | 1, loop: boolean): number | null {
+  if (direction === 1) return nextPlaybackFrame(current, total, loop);
+  if (!Number.isFinite(total) || total <= 1) return null;
+  const previous = clampFrame(current, total) - 1;
+  if (previous >= 0) return previous;
+  return loop ? Math.floor(total) - 1 : null;
+}
+
 export function playbackStartFrame(current: number, total: number): number | null {
   return nextPlaybackFrame(current, total, true);
 }

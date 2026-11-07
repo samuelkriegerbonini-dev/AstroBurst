@@ -1,0 +1,1286 @@
+{
+  "manifest_version": 2,
+  "kind": "lightstack_oracle",
+  "created_by": "scripts/oracle/lightstack_oracle.py",
+  "recipe": {
+    "file": "recipe_d1_exact_edits.json",
+    "sha256": "0fc862a0a176c6e311d9c979e0c1172c01c80e13564dbe135988ec4e231c32d8",
+    "content": {
+      "recipe_version": 1,
+      "name": "d1_exact_edits",
+      "inputs": [
+        {
+          "path": "d1_HST_F814W.fits",
+          "dataset": "HST",
+          "filter": "F814W"
+        },
+        {
+          "path": "d1_JWST_F150W.fits",
+          "dataset": "JWST",
+          "filter": "F150W"
+        },
+        {
+          "path": "d1_JWST_F200W.fits",
+          "dataset": "JWST",
+          "filter": "F200W"
+        },
+        {
+          "path": "d1_JWST_F277W.fits",
+          "dataset": "JWST",
+          "filter": "F277W"
+        },
+        {
+          "path": "d1_JWST_F356W.fits",
+          "dataset": "JWST",
+          "filter": "F356W"
+        },
+        {
+          "path": "d1_JWST_F444W.fits",
+          "dataset": "JWST",
+          "filter": "F444W"
+        }
+      ],
+      "steps": [
+        {
+          "step": "crop",
+          "mode": "radec",
+          "ra": 53.1625,
+          "dec": -27.7914,
+          "size_arcsec": 1.8
+        },
+        {
+          "step": "units",
+          "to": "Jy/pixel"
+        },
+        {
+          "step": "align",
+          "reference": "F444W",
+          "method": "exact",
+          "border_crop": 1
+        },
+        {
+          "step": "cube",
+          "reference": "F444W",
+          "order": "wavelength",
+          "output": "d1_cube.fits"
+        },
+        {
+          "step": "edit",
+          "action": "remove_filter",
+          "filter": "F814W"
+        },
+        {
+          "step": "edit",
+          "action": "cut",
+          "x_start": 6,
+          "x_end": 37,
+          "y_start": 4,
+          "y_end": 39
+        },
+        {
+          "step": "edit",
+          "action": "header",
+          "redshift": 0.1,
+          "ra_center": 53.1625125598822,
+          "dec_center": -27.791408333332768
+        },
+        {
+          "step": "edit",
+          "action": "reference_nan_mask",
+          "reference_slice": 3
+        }
+      ]
+    }
+  },
+  "versions": {
+    "python": "3.13.17",
+    "lightstack": "0.4.0",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "astropy": "8.0.2",
+    "reproject": "0.21.0",
+    "photutils": "3.1.1",
+    "regions": "0.13",
+    "matplotlib": "3.11.2",
+    "pandas": "3.1.0"
+  },
+  "lightstack_source": {
+    "kind": "index",
+    "code_sha256": "f43772588e34d39a12ad38a1b6ab9be90681605605c71949e5cb3b42e7c43357",
+    "modified_since_install": []
+  },
+  "platform": "Windows-11-10.0.26300-SP0",
+  "inputs": [
+    {
+      "path": "d1_HST_F814W.fits",
+      "bytes": 63360,
+      "sha256": "d4b2eb6aafc7482bebddb13db9abe497f0f80757002cb56e252f5a10c4f5def9"
+    },
+    {
+      "path": "d1_JWST_F150W.fits",
+      "bytes": 210240,
+      "sha256": "2f4a5bd980fbe0744c94e42bcad2a61bd91641e261d6ef6e417a1f08832e92fd"
+    },
+    {
+      "path": "d1_JWST_F200W.fits",
+      "bytes": 210240,
+      "sha256": "326a3e4444bfaa527f0f88f89d790d31bb46c003e039f4f08eeaca85acc01a27"
+    },
+    {
+      "path": "d1_JWST_F277W.fits",
+      "bytes": 63360,
+      "sha256": "25a37c3293f5a4310395267f7c0e92c57a0dbde222ebf401ea1592e1e34507c1"
+    },
+    {
+      "path": "d1_JWST_F356W.fits",
+      "bytes": 63360,
+      "sha256": "0f184ae8b142d19b978615bc99077a415c8b092464f4a40917acad2e9e8c63a9"
+    },
+    {
+      "path": "d1_JWST_F444W.fits",
+      "bytes": 63360,
+      "sha256": "a9fdfb979211ede10936c66a5bea680230bb0a06580d3bdb2b4d964daf181080"
+    }
+  ],
+  "steps": [
+    {
+      "index": 1,
+      "step": "crop",
+      "parameters": {
+        "step": "crop",
+        "mode": "radec",
+        "ra": 53.1625,
+        "dec": -27.7914,
+        "size_arcsec": 1.8
+      },
+      "directory": "01_crop",
+      "calls": [
+        {
+          "function": "lightstack.crop.crop_from_radec",
+          "arguments": {
+            "fits_path": "<data>\\d1_HST_F814W.fits",
+            "ra": 53.1625,
+            "dec": -27.7914,
+            "size_arcsec": 1.8,
+            "output_path": "<out>\\01_crop\\d1_HST_F814W.fits"
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_HST_F814W.fits",
+              "bytes": 63360,
+              "sha256": "d4b2eb6aafc7482bebddb13db9abe497f0f80757002cb56e252f5a10c4f5def9"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_HST_F814W.fits",
+              "bytes": 11520,
+              "sha256": "58e2f8fc0bee53a81bcb09b7ace3df6edf3b88c6cf2cb254b64a97d34721b489"
+            }
+          ],
+          "metrics": {
+            "filter": "F814W",
+            "shape": [
+              46,
+              46
+            ],
+            "x_min": 9.0,
+            "y_min": 8.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.009904299999107025
+        },
+        {
+          "function": "lightstack.crop.crop_from_radec",
+          "arguments": {
+            "fits_path": "<data>\\d1_JWST_F150W.fits",
+            "ra": 53.1625,
+            "dec": -27.7914,
+            "size_arcsec": 1.8,
+            "output_path": "<out>\\01_crop\\d1_JWST_F150W.fits"
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F150W.fits",
+              "bytes": 210240,
+              "sha256": "2f4a5bd980fbe0744c94e42bcad2a61bd91641e261d6ef6e417a1f08832e92fd"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F150W.fits",
+              "bytes": 37440,
+              "sha256": "205b1d8732d65a16e4d60a91b15e47697fad1d278613ab3b3e724f6a06971980"
+            }
+          ],
+          "metrics": {
+            "filter": "F150W",
+            "shape": [
+              91,
+              91
+            ],
+            "x_min": 18.0,
+            "y_min": 18.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004406100000778679
+        },
+        {
+          "function": "lightstack.crop.crop_from_radec",
+          "arguments": {
+            "fits_path": "<data>\\d1_JWST_F200W.fits",
+            "ra": 53.1625,
+            "dec": -27.7914,
+            "size_arcsec": 1.8,
+            "output_path": "<out>\\01_crop\\d1_JWST_F200W.fits"
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F200W.fits",
+              "bytes": 210240,
+              "sha256": "326a3e4444bfaa527f0f88f89d790d31bb46c003e039f4f08eeaca85acc01a27"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F200W.fits",
+              "bytes": 37440,
+              "sha256": "aa8814266bb666ae37dd8e3b991a15937ae05069f9b40f9c443188dd95f59f09"
+            }
+          ],
+          "metrics": {
+            "filter": "F200W",
+            "shape": [
+              91,
+              91
+            ],
+            "x_min": 18.0,
+            "y_min": 18.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004176999998890096
+        },
+        {
+          "function": "lightstack.crop.crop_from_radec",
+          "arguments": {
+            "fits_path": "<data>\\d1_JWST_F277W.fits",
+            "ra": 53.1625,
+            "dec": -27.7914,
+            "size_arcsec": 1.8,
+            "output_path": "<out>\\01_crop\\d1_JWST_F277W.fits"
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F277W.fits",
+              "bytes": 63360,
+              "sha256": "25a37c3293f5a4310395267f7c0e92c57a0dbde222ebf401ea1592e1e34507c1"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F277W.fits",
+              "bytes": 11520,
+              "sha256": "b2d6b0e0e6547489c3a7510a03e7e72889ba97e68a4234d164af41b177dfdad7"
+            }
+          ],
+          "metrics": {
+            "filter": "F277W",
+            "shape": [
+              46,
+              45
+            ],
+            "x_min": 9.0,
+            "y_min": 9.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004595899999912945
+        },
+        {
+          "function": "lightstack.crop.crop_from_radec",
+          "arguments": {
+            "fits_path": "<data>\\d1_JWST_F356W.fits",
+            "ra": 53.1625,
+            "dec": -27.7914,
+            "size_arcsec": 1.8,
+            "output_path": "<out>\\01_crop\\d1_JWST_F356W.fits"
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F356W.fits",
+              "bytes": 63360,
+              "sha256": "0f184ae8b142d19b978615bc99077a415c8b092464f4a40917acad2e9e8c63a9"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F356W.fits",
+              "bytes": 11520,
+              "sha256": "5ed04c02e58d6891be2a362d98803deedde744b494f25666466e7dd20886ad99"
+            }
+          ],
+          "metrics": {
+            "filter": "F356W",
+            "shape": [
+              46,
+              46
+            ],
+            "x_min": 9.0,
+            "y_min": 8.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.0047130000002653105
+        },
+        {
+          "function": "lightstack.crop.crop_from_radec",
+          "arguments": {
+            "fits_path": "<data>\\d1_JWST_F444W.fits",
+            "ra": 53.1625,
+            "dec": -27.7914,
+            "size_arcsec": 1.8,
+            "output_path": "<out>\\01_crop\\d1_JWST_F444W.fits"
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F444W.fits",
+              "bytes": 63360,
+              "sha256": "a9fdfb979211ede10936c66a5bea680230bb0a06580d3bdb2b4d964daf181080"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F444W.fits",
+              "bytes": 11520,
+              "sha256": "f478fb82b9105be7489c1f33f940953786d37ba88a68f7a235892f48f9c99328"
+            }
+          ],
+          "metrics": {
+            "filter": "F444W",
+            "shape": [
+              46,
+              45
+            ],
+            "x_min": 9.0,
+            "y_min": 9.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004470500000024913
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "01_crop/d1_HST_F814W.fits",
+          "bytes": 11520,
+          "sha256": "58e2f8fc0bee53a81bcb09b7ace3df6edf3b88c6cf2cb254b64a97d34721b489"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F150W.fits",
+          "bytes": 37440,
+          "sha256": "205b1d8732d65a16e4d60a91b15e47697fad1d278613ab3b3e724f6a06971980"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F200W.fits",
+          "bytes": 37440,
+          "sha256": "aa8814266bb666ae37dd8e3b991a15937ae05069f9b40f9c443188dd95f59f09"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F277W.fits",
+          "bytes": 11520,
+          "sha256": "b2d6b0e0e6547489c3a7510a03e7e72889ba97e68a4234d164af41b177dfdad7"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F356W.fits",
+          "bytes": 11520,
+          "sha256": "5ed04c02e58d6891be2a362d98803deedde744b494f25666466e7dd20886ad99"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F444W.fits",
+          "bytes": 11520,
+          "sha256": "f478fb82b9105be7489c1f33f940953786d37ba88a68f7a235892f48f9c99328"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "step": "units",
+      "parameters": {
+        "step": "units",
+        "to": "Jy/pixel"
+      },
+      "directory": "02_units",
+      "calls": [
+        {
+          "function": "lightstack.utils.counts_s_to_jy",
+          "arguments": {
+            "fits_path": "<out>\\01_crop\\d1_HST_F814W.fits",
+            "output_path": "<out>\\02_units\\d1_HST_F814W_Jy.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_HST_F814W.fits",
+              "bytes": 11520,
+              "sha256": "58e2f8fc0bee53a81bcb09b7ace3df6edf3b88c6cf2cb254b64a97d34721b489"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_units/d1_HST_F814W_Jy.fits",
+              "bytes": 20160,
+              "sha256": "8fe3ff10855dd7886a7041b100f548a83855b6a0d83b85f57888eee07eccb292"
+            }
+          ],
+          "metrics": {
+            "filter": "F814W",
+            "bunit_in": "ELECTRONS/S",
+            "method": "PHOTFNU",
+            "factor_printed": 1.527036e-07
+          },
+          "stdout": "\nd1_HST_F814W.fits\nInput unit : Jy\nMethod     : PHOTFNU\nFactor     : 1.527036e-07 Jy per input unit\n",
+          "warnings": [],
+          "wall_time_s": 0.002077199998893775
+        },
+        {
+          "function": "lightstack.utils.MJy_sr_to_jy",
+          "arguments": {
+            "aligned_list": [
+              [
+                "<out>\\02_units\\d1_JWST_F150W.fits",
+                "F150W"
+              ]
+            ]
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F150W.fits",
+              "bytes": 37440,
+              "sha256": "205b1d8732d65a16e4d60a91b15e47697fad1d278613ab3b3e724f6a06971980"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_units/d1_JWST_F150W_Jy.fits",
+              "bytes": 72000,
+              "sha256": "88cf9b797f39d4a8ba479a98bd495dc448630ed5f6c33ff489a683170b5b19cd"
+            }
+          ],
+          "metrics": {
+            "filter": "F150W",
+            "bunit_in": "MJy/sr",
+            "factor": 9.401772215639154e-09
+          },
+          "stdout": "Saved: <out>\\02_units\\d1_JWST_F150W_Jy.fits\n",
+          "warnings": [],
+          "wall_time_s": 0.018529099999796017
+        },
+        {
+          "function": "lightstack.utils.MJy_sr_to_jy",
+          "arguments": {
+            "aligned_list": [
+              [
+                "<out>\\02_units\\d1_JWST_F200W.fits",
+                "F200W"
+              ]
+            ]
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F200W.fits",
+              "bytes": 37440,
+              "sha256": "aa8814266bb666ae37dd8e3b991a15937ae05069f9b40f9c443188dd95f59f09"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_units/d1_JWST_F200W_Jy.fits",
+              "bytes": 72000,
+              "sha256": "57646ea3d864d61662a1fc12be0450aec3c5966454fba66b718cb92dd02a5e19"
+            }
+          ],
+          "metrics": {
+            "filter": "F200W",
+            "bunit_in": "MJy/sr",
+            "factor": 9.401772215639154e-09
+          },
+          "stdout": "Saved: <out>\\02_units\\d1_JWST_F200W_Jy.fits\n",
+          "warnings": [],
+          "wall_time_s": 0.0106988999996247
+        },
+        {
+          "function": "lightstack.utils.MJy_sr_to_jy",
+          "arguments": {
+            "aligned_list": [
+              [
+                "<out>\\02_units\\d1_JWST_F444W.fits",
+                "F444W"
+              ]
+            ]
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F444W.fits",
+              "bytes": 11520,
+              "sha256": "f478fb82b9105be7489c1f33f940953786d37ba88a68f7a235892f48f9c99328"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_units/d1_JWST_F444W_Jy.fits",
+              "bytes": 20160,
+              "sha256": "91ea72e84e9ed29afa5a1148dd2711cc78307c0c80f3a956f77987619c74cfee"
+            }
+          ],
+          "metrics": {
+            "filter": "F444W",
+            "bunit_in": "MJy/sr",
+            "factor": 3.7607088862556615e-08
+          },
+          "stdout": "Saved: <out>\\02_units\\d1_JWST_F444W_Jy.fits\n",
+          "warnings": [],
+          "wall_time_s": 0.01176829999894835
+        }
+      ],
+      "notes": [
+        "F277W: BUNIT Jy, passed through",
+        "F356W: BUNIT Jy, passed through"
+      ],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "02_units/d1_HST_F814W_Jy.fits",
+          "bytes": 20160,
+          "sha256": "8fe3ff10855dd7886a7041b100f548a83855b6a0d83b85f57888eee07eccb292"
+        },
+        {
+          "root": "out",
+          "path": "02_units/d1_JWST_F150W_Jy.fits",
+          "bytes": 72000,
+          "sha256": "88cf9b797f39d4a8ba479a98bd495dc448630ed5f6c33ff489a683170b5b19cd"
+        },
+        {
+          "root": "out",
+          "path": "02_units/d1_JWST_F200W_Jy.fits",
+          "bytes": 72000,
+          "sha256": "57646ea3d864d61662a1fc12be0450aec3c5966454fba66b718cb92dd02a5e19"
+        },
+        {
+          "root": "out",
+          "path": "02_units/d1_JWST_F444W_Jy.fits",
+          "bytes": 20160,
+          "sha256": "91ea72e84e9ed29afa5a1148dd2711cc78307c0c80f3a956f77987619c74cfee"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "step": "align",
+      "parameters": {
+        "step": "align",
+        "reference": "F444W",
+        "method": "exact",
+        "border_crop": 1
+      },
+      "directory": "03_align",
+      "calls": [
+        {
+          "function": "lightstack.datacube.align_reproject_fits",
+          "arguments": {
+            "fits_list": [
+              [
+                "<out>\\03_align\\d1_HST_F814W_Jy.fits",
+                "HST",
+                "F814W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F150W_Jy.fits",
+                "JWST",
+                "F150W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F200W_Jy.fits",
+                "JWST",
+                "F200W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F277W.fits",
+                "JWST",
+                "F277W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F356W.fits",
+                "JWST",
+                "F356W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F444W_Jy.fits",
+                "JWST",
+                "F444W"
+              ]
+            ],
+            "ref_file": "<out>\\03_align\\d1_JWST_F444W_Jy.fits",
+            "method": "exact",
+            "crop": 1
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "02_units/d1_HST_F814W_Jy.fits",
+              "bytes": 20160,
+              "sha256": "8fe3ff10855dd7886a7041b100f548a83855b6a0d83b85f57888eee07eccb292"
+            },
+            {
+              "root": "out",
+              "path": "02_units/d1_JWST_F150W_Jy.fits",
+              "bytes": 72000,
+              "sha256": "88cf9b797f39d4a8ba479a98bd495dc448630ed5f6c33ff489a683170b5b19cd"
+            },
+            {
+              "root": "out",
+              "path": "02_units/d1_JWST_F200W_Jy.fits",
+              "bytes": 72000,
+              "sha256": "57646ea3d864d61662a1fc12be0450aec3c5966454fba66b718cb92dd02a5e19"
+            },
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F277W.fits",
+              "bytes": 11520,
+              "sha256": "b2d6b0e0e6547489c3a7510a03e7e72889ba97e68a4234d164af41b177dfdad7"
+            },
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F356W.fits",
+              "bytes": 11520,
+              "sha256": "5ed04c02e58d6891be2a362d98803deedde744b494f25666466e7dd20886ad99"
+            },
+            {
+              "root": "out",
+              "path": "02_units/d1_JWST_F444W_Jy.fits",
+              "bytes": 20160,
+              "sha256": "91ea72e84e9ed29afa5a1148dd2711cc78307c0c80f3a956f77987619c74cfee"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "03_align/d1_HST_F814W_Jy_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "5f35df721dc60e2dbab08fd615cd0e60465b886fc8e9c834b3bfd3e505e07129"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F150W_Jy_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "09da3a64bf6abdad2ee49027373bba3f47f2066ba3767f555d04b70468e1b84c"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F200W_Jy_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "084810f5d05bfa911530faa2ae3f49ac916ed2e31a492850e21aec37bb678e40"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F277W_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "e52c22de957f5fe6f6fd899e21465e7f9c7a5168ac959d27f43f870168c95da1"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F356W_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "85d9857fb8b5ca50fd26c3a57f85bb047e042b265471c585944240b8df403d02"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F444W_Jy_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "de9518a4c9fa091df4be4d035fc11344f2c688d02bf199f5e0d670cd954758fc"
+            }
+          ],
+          "metrics": {
+            "reference": "F444W",
+            "method": "exact",
+            "planes": {
+              "F814W": {
+                "reprojected": true,
+                "area_correction": null,
+                "flux_ratio_printed": 0.9656,
+                "pixel_scale_in_printed": 0.04,
+                "pixel_scale_out_printed": 0.04,
+                "flux_ratio": 0.9656312297896498
+              },
+              "F150W": {
+                "reprojected": true,
+                "area_correction": 4.0,
+                "flux_ratio_printed": 0.9903,
+                "pixel_scale_in_printed": 0.02,
+                "pixel_scale_out_printed": 0.04,
+                "flux_ratio": 0.9902844309597013
+              },
+              "F200W": {
+                "reprojected": true,
+                "area_correction": 4.0,
+                "flux_ratio_printed": 0.9897,
+                "pixel_scale_in_printed": 0.02,
+                "pixel_scale_out_printed": 0.04,
+                "flux_ratio": 0.9897495036147953
+              },
+              "F277W": {
+                "reprojected": false,
+                "area_correction": null,
+                "flux_ratio_printed": null,
+                "pixel_scale_in_printed": 0.04,
+                "pixel_scale_out_printed": 0.04,
+                "flux_ratio": 0.999926217422108
+              },
+              "F356W": {
+                "reprojected": true,
+                "area_correction": null,
+                "flux_ratio_printed": 0.9727,
+                "pixel_scale_in_printed": 0.04,
+                "pixel_scale_out_printed": 0.04,
+                "flux_ratio": 0.9726989896111926
+              },
+              "F444W": {
+                "reprojected": false,
+                "area_correction": null,
+                "flux_ratio_printed": null,
+                "pixel_scale_in_printed": 0.04,
+                "pixel_scale_out_printed": 0.04,
+                "flux_ratio": 0.996767813483871
+              }
+            }
+          },
+          "stdout": "\nProcessing HST / F814W\nUnit: Jy\nPixel scale in/out: 0.0400 -> 0.0400\nPixel scales identical: no area correction applied.\nFlux ratio (out/in): 0.9656\nSaved: <out>\\03_align\\d1_HST_F814W_Jy_aligned_exact.fits\n\nProcessing JWST / F150W\nUnit: Jy\nPixel scale in/out: 0.0200 -> 0.0400\nApplied area correction: 4.0000\nFlux ratio (out/in): 0.9903\nSaved: <out>\\03_align\\d1_JWST_F150W_Jy_aligned_exact.fits\n\nProcessing JWST / F200W\nUnit: Jy\nPixel scale in/out: 0.0200 -> 0.0400\nApplied area correction: 4.0000\nFlux ratio (out/in): 0.9897\nSaved: <out>\\03_align\\d1_JWST_F200W_Jy_aligned_exact.fits\n\nProcessing JWST / F277W\nUnit: Jy\nPixel scale in/out: 0.0400 -> 0.0400\nAlready aligned with reference: skipping reprojection.\nSaved: <out>\\03_align\\d1_JWST_F277W_aligned_exact.fits\n\nProcessing JWST / F356W\nUnit: Jy\nPixel scale in/out: 0.0400 -> 0.0400\nPixel scales identical: no area correction applied.\nFlux ratio (out/in): 0.9727\nSaved: <out>\\03_align\\d1_JWST_F356W_aligned_exact.fits\n\nProcessing JWST / F444W\nUnit: Jy\nPixel scale in/out: 0.0400 -> 0.0400\nAlready aligned with reference: skipping reprojection.\nSaved: <out>\\03_align\\d1_JWST_F444W_Jy_aligned_exact.fits\n",
+          "warnings": [
+            "AstropyWarning: Some non-standard WCS keywords were excluded: A_ORDER, A_0_2, A_1_1, A_2_0, B_ORDER, B_0_2, B_1_1, B_2_0 Use the ``relax`` kwarg to control this."
+          ],
+          "wall_time_s": 0.13843579999957
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "03_align/d1_HST_F814W_Jy_aligned_exact.fits",
+          "bytes": 20160,
+          "sha256": "5f35df721dc60e2dbab08fd615cd0e60465b886fc8e9c834b3bfd3e505e07129"
+        },
+        {
+          "root": "out",
+          "path": "03_align/d1_JWST_F150W_Jy_aligned_exact.fits",
+          "bytes": 20160,
+          "sha256": "09da3a64bf6abdad2ee49027373bba3f47f2066ba3767f555d04b70468e1b84c"
+        },
+        {
+          "root": "out",
+          "path": "03_align/d1_JWST_F200W_Jy_aligned_exact.fits",
+          "bytes": 20160,
+          "sha256": "084810f5d05bfa911530faa2ae3f49ac916ed2e31a492850e21aec37bb678e40"
+        },
+        {
+          "root": "out",
+          "path": "03_align/d1_JWST_F277W_aligned_exact.fits",
+          "bytes": 20160,
+          "sha256": "e52c22de957f5fe6f6fd899e21465e7f9c7a5168ac959d27f43f870168c95da1"
+        },
+        {
+          "root": "out",
+          "path": "03_align/d1_JWST_F356W_aligned_exact.fits",
+          "bytes": 20160,
+          "sha256": "85d9857fb8b5ca50fd26c3a57f85bb047e042b265471c585944240b8df403d02"
+        },
+        {
+          "root": "out",
+          "path": "03_align/d1_JWST_F444W_Jy_aligned_exact.fits",
+          "bytes": 20160,
+          "sha256": "de9518a4c9fa091df4be4d035fc11344f2c688d02bf199f5e0d670cd954758fc"
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "step": "cube",
+      "parameters": {
+        "step": "cube",
+        "reference": "F444W",
+        "order": "wavelength",
+        "output": "d1_cube.fits"
+      },
+      "directory": "04_cube",
+      "calls": [
+        {
+          "function": "lightstack.datacube.build_datacube",
+          "arguments": {
+            "selected_fits": [
+              [
+                "<out>\\03_align\\d1_HST_F814W_Jy_aligned_exact.fits",
+                "HST",
+                "F814W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F150W_Jy_aligned_exact.fits",
+                "JWST",
+                "F150W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F200W_Jy_aligned_exact.fits",
+                "JWST",
+                "F200W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F277W_aligned_exact.fits",
+                "JWST",
+                "F277W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F356W_aligned_exact.fits",
+                "JWST",
+                "F356W"
+              ],
+              [
+                "<out>\\03_align\\d1_JWST_F444W_Jy_aligned_exact.fits",
+                "JWST",
+                "F444W"
+              ]
+            ],
+            "reference_file": "<out>\\03_align\\d1_JWST_F444W_Jy_aligned_exact.fits",
+            "output_path": "<out>\\04_cube\\d1_cube.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "03_align/d1_HST_F814W_Jy_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "5f35df721dc60e2dbab08fd615cd0e60465b886fc8e9c834b3bfd3e505e07129"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F150W_Jy_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "09da3a64bf6abdad2ee49027373bba3f47f2066ba3767f555d04b70468e1b84c"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F200W_Jy_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "084810f5d05bfa911530faa2ae3f49ac916ed2e31a492850e21aec37bb678e40"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F277W_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "e52c22de957f5fe6f6fd899e21465e7f9c7a5168ac959d27f43f870168c95da1"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F356W_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "85d9857fb8b5ca50fd26c3a57f85bb047e042b265471c585944240b8df403d02"
+            },
+            {
+              "root": "out",
+              "path": "03_align/d1_JWST_F444W_Jy_aligned_exact.fits",
+              "bytes": 20160,
+              "sha256": "de9518a4c9fa091df4be4d035fc11344f2c688d02bf199f5e0d670cd954758fc"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "04_cube/d1_cube.fits",
+              "bytes": 97920,
+              "sha256": "4f69415ba6e7cf9e08061fc754316635a2c847578c9e65b04c3d7b87c1f7f351"
+            }
+          ],
+          "metrics": {
+            "filters": [
+              "F814W",
+              "F150W",
+              "F200W",
+              "F277W",
+              "F356W",
+              "F444W"
+            ],
+            "datasets": [
+              "HST",
+              "JWST",
+              "JWST",
+              "JWST",
+              "JWST",
+              "JWST"
+            ]
+          },
+          "stdout": "Datacube saved at <out>\\04_cube\\d1_cube.fits\n",
+          "warnings": [],
+          "wall_time_s": 0.009522700000161421
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "04_cube/d1_cube.fits",
+          "bytes": 97920,
+          "sha256": "4f69415ba6e7cf9e08061fc754316635a2c847578c9e65b04c3d7b87c1f7f351"
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "step": "edit",
+      "parameters": {
+        "step": "edit",
+        "action": "remove_filter",
+        "filter": "F814W"
+      },
+      "directory": "05_edit",
+      "calls": [
+        {
+          "function": "lightstack.datacube.remove_filter",
+          "arguments": {
+            "cube_fits_file": "<out>\\04_cube\\d1_cube.fits",
+            "output_cube": "<out>\\05_edit\\d1_cube_without_f814w.fits",
+            "filter_to_remove": "F814W"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "04_cube/d1_cube.fits",
+              "bytes": 97920,
+              "sha256": "4f69415ba6e7cf9e08061fc754316635a2c847578c9e65b04c3d7b87c1f7f351"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "05_edit/d1_cube_without_f814w.fits",
+              "bytes": 83520,
+              "sha256": "050a8a7311d1f2189898f1e6609d585fbd714d50212a8f19f67b47b2406e998a"
+            }
+          ],
+          "metrics": {
+            "filters": [
+              "F150W",
+              "F200W",
+              "F277W",
+              "F356W",
+              "F444W"
+            ],
+            "written": true
+          },
+          "stdout": "Removing filter: F814W\nNew datacube saved at <out>\\05_edit\\d1_cube_without_f814w.fits\n",
+          "warnings": [],
+          "wall_time_s": 0.003455400001257658
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "05_edit/d1_cube_without_f814w.fits",
+          "bytes": 83520,
+          "sha256": "050a8a7311d1f2189898f1e6609d585fbd714d50212a8f19f67b47b2406e998a"
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "step": "edit",
+      "parameters": {
+        "step": "edit",
+        "action": "cut",
+        "x_start": 6,
+        "x_end": 37,
+        "y_start": 4,
+        "y_end": 39
+      },
+      "directory": "06_edit",
+      "calls": [
+        {
+          "function": "lightstack.datacube.cut_region_datacube",
+          "arguments": {
+            "cube_fits_file": "<out>\\05_edit\\d1_cube_without_f814w.fits",
+            "output_path": "<out>\\06_edit\\d1_cube_without_f814w_cut.fits",
+            "x_start": 6,
+            "x_end": 37,
+            "y_start": 4,
+            "y_end": 39
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "05_edit/d1_cube_without_f814w.fits",
+              "bytes": 83520,
+              "sha256": "050a8a7311d1f2189898f1e6609d585fbd714d50212a8f19f67b47b2406e998a"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "06_edit/d1_cube_without_f814w_cut.fits",
+              "bytes": 51840,
+              "sha256": "58af64506035e492da3ccb3e75f63ec8239f9fe63c08c4cf4531cf0a0beddd52"
+            }
+          ],
+          "metrics": {},
+          "stdout": "Cut datacube saved to '<out>\\06_edit\\d1_cube_without_f814w_cut.fits'\n",
+          "warnings": [],
+          "wall_time_s": 0.006773299999622395
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "06_edit/d1_cube_without_f814w_cut.fits",
+          "bytes": 51840,
+          "sha256": "58af64506035e492da3ccb3e75f63ec8239f9fe63c08c4cf4531cf0a0beddd52"
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "step": "edit",
+      "parameters": {
+        "step": "edit",
+        "action": "header",
+        "redshift": 0.1,
+        "ra_center": 53.1625125598822,
+        "dec_center": -27.791408333332768
+      },
+      "directory": "07_edit",
+      "calls": [
+        {
+          "function": "lightstack.datacube.update_cube_header",
+          "arguments": {
+            "cube_fits_file": "<out>\\06_edit\\d1_cube_without_f814w_cut.fits",
+            "output_file": "<out>\\07_edit\\d1_cube_without_f814w_cut_more.fits",
+            "redshift": 0.1,
+            "ra_center": 53.1625125598822,
+            "dec_center": -27.791408333332768,
+            "use_brightest_pixel": false,
+            "overwrite": true
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "06_edit/d1_cube_without_f814w_cut.fits",
+              "bytes": 51840,
+              "sha256": "58af64506035e492da3ccb3e75f63ec8239f9fe63c08c4cf4531cf0a0beddd52"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "07_edit/d1_cube_without_f814w_cut_more.fits",
+              "bytes": 51840,
+              "sha256": "a9b412a2f84c1bd2b30c05d73a076b411cca5e1ab342c3ebcc40ef3f37dc8f38"
+            }
+          ],
+          "metrics": {},
+          "stdout": "Updated header saved to: <out>\\07_edit\\d1_cube_without_f814w_cut_more.fits\n",
+          "warnings": [],
+          "wall_time_s": 0.005173899999135756
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "07_edit/d1_cube_without_f814w_cut_more.fits",
+          "bytes": 51840,
+          "sha256": "a9b412a2f84c1bd2b30c05d73a076b411cca5e1ab342c3ebcc40ef3f37dc8f38"
+        }
+      ]
+    },
+    {
+      "index": 8,
+      "step": "edit",
+      "parameters": {
+        "step": "edit",
+        "action": "reference_nan_mask",
+        "reference_slice": 3
+      },
+      "directory": "08_edit",
+      "calls": [
+        {
+          "function": "lightstack.datacube.apply_reference_nan_mask",
+          "arguments": {
+            "cube_file": "<out>\\07_edit\\d1_cube_without_f814w_cut_more.fits",
+            "reference_slice": 3,
+            "output_path": "<out>\\08_edit\\d1_cube_without_f814w_cut_more_masked.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "07_edit/d1_cube_without_f814w_cut_more.fits",
+              "bytes": 51840,
+              "sha256": "a9b412a2f84c1bd2b30c05d73a076b411cca5e1ab342c3ebcc40ef3f37dc8f38"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "08_edit/d1_cube_without_f814w_cut_more_masked.fits",
+              "bytes": 51840,
+              "sha256": "075b6daf82d7fabf155a9fe7bcb9c9f108d28804f19cebc3da0a9b244f078121"
+            }
+          ],
+          "metrics": {},
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.0038039000010030577
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "08_edit/d1_cube_without_f814w_cut_more_masked.fits",
+          "bytes": 51840,
+          "sha256": "075b6daf82d7fabf155a9fe7bcb9c9f108d28804f19cebc3da0a9b244f078121"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "01_crop/d1_HST_F814W.fits",
+      "bytes": 11520,
+      "sha256": "58e2f8fc0bee53a81bcb09b7ace3df6edf3b88c6cf2cb254b64a97d34721b489"
+    },
+    {
+      "path": "01_crop/d1_JWST_F150W.fits",
+      "bytes": 37440,
+      "sha256": "205b1d8732d65a16e4d60a91b15e47697fad1d278613ab3b3e724f6a06971980"
+    },
+    {
+      "path": "01_crop/d1_JWST_F200W.fits",
+      "bytes": 37440,
+      "sha256": "aa8814266bb666ae37dd8e3b991a15937ae05069f9b40f9c443188dd95f59f09"
+    },
+    {
+      "path": "01_crop/d1_JWST_F277W.fits",
+      "bytes": 11520,
+      "sha256": "b2d6b0e0e6547489c3a7510a03e7e72889ba97e68a4234d164af41b177dfdad7"
+    },
+    {
+      "path": "01_crop/d1_JWST_F356W.fits",
+      "bytes": 11520,
+      "sha256": "5ed04c02e58d6891be2a362d98803deedde744b494f25666466e7dd20886ad99"
+    },
+    {
+      "path": "01_crop/d1_JWST_F444W.fits",
+      "bytes": 11520,
+      "sha256": "f478fb82b9105be7489c1f33f940953786d37ba88a68f7a235892f48f9c99328"
+    },
+    {
+      "path": "02_units/d1_HST_F814W_Jy.fits",
+      "bytes": 20160,
+      "sha256": "8fe3ff10855dd7886a7041b100f548a83855b6a0d83b85f57888eee07eccb292"
+    },
+    {
+      "path": "02_units/d1_JWST_F150W_Jy.fits",
+      "bytes": 72000,
+      "sha256": "88cf9b797f39d4a8ba479a98bd495dc448630ed5f6c33ff489a683170b5b19cd"
+    },
+    {
+      "path": "02_units/d1_JWST_F200W_Jy.fits",
+      "bytes": 72000,
+      "sha256": "57646ea3d864d61662a1fc12be0450aec3c5966454fba66b718cb92dd02a5e19"
+    },
+    {
+      "path": "02_units/d1_JWST_F444W_Jy.fits",
+      "bytes": 20160,
+      "sha256": "91ea72e84e9ed29afa5a1148dd2711cc78307c0c80f3a956f77987619c74cfee"
+    },
+    {
+      "path": "03_align/d1_HST_F814W_Jy_aligned_exact.fits",
+      "bytes": 20160,
+      "sha256": "5f35df721dc60e2dbab08fd615cd0e60465b886fc8e9c834b3bfd3e505e07129"
+    },
+    {
+      "path": "03_align/d1_JWST_F150W_Jy_aligned_exact.fits",
+      "bytes": 20160,
+      "sha256": "09da3a64bf6abdad2ee49027373bba3f47f2066ba3767f555d04b70468e1b84c"
+    },
+    {
+      "path": "03_align/d1_JWST_F200W_Jy_aligned_exact.fits",
+      "bytes": 20160,
+      "sha256": "084810f5d05bfa911530faa2ae3f49ac916ed2e31a492850e21aec37bb678e40"
+    },
+    {
+      "path": "03_align/d1_JWST_F277W_aligned_exact.fits",
+      "bytes": 20160,
+      "sha256": "e52c22de957f5fe6f6fd899e21465e7f9c7a5168ac959d27f43f870168c95da1"
+    },
+    {
+      "path": "03_align/d1_JWST_F356W_aligned_exact.fits",
+      "bytes": 20160,
+      "sha256": "85d9857fb8b5ca50fd26c3a57f85bb047e042b265471c585944240b8df403d02"
+    },
+    {
+      "path": "03_align/d1_JWST_F444W_Jy_aligned_exact.fits",
+      "bytes": 20160,
+      "sha256": "de9518a4c9fa091df4be4d035fc11344f2c688d02bf199f5e0d670cd954758fc"
+    },
+    {
+      "path": "04_cube/d1_cube.fits",
+      "bytes": 97920,
+      "sha256": "4f69415ba6e7cf9e08061fc754316635a2c847578c9e65b04c3d7b87c1f7f351"
+    },
+    {
+      "path": "05_edit/d1_cube_without_f814w.fits",
+      "bytes": 83520,
+      "sha256": "050a8a7311d1f2189898f1e6609d585fbd714d50212a8f19f67b47b2406e998a"
+    },
+    {
+      "path": "06_edit/d1_cube_without_f814w_cut.fits",
+      "bytes": 51840,
+      "sha256": "58af64506035e492da3ccb3e75f63ec8239f9fe63c08c4cf4531cf0a0beddd52"
+    },
+    {
+      "path": "07_edit/d1_cube_without_f814w_cut_more.fits",
+      "bytes": 51840,
+      "sha256": "a9b412a2f84c1bd2b30c05d73a076b411cca5e1ab342c3ebcc40ef3f37dc8f38"
+    },
+    {
+      "path": "08_edit/d1_cube_without_f814w_cut_more_masked.fits",
+      "bytes": 51840,
+      "sha256": "075b6daf82d7fabf155a9fe7bcb9c9f108d28804f19cebc3da0a9b244f078121"
+    }
+  ],
+  "wall_time_s": 2.5808550999990985
+}

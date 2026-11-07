@@ -1,5 +1,7 @@
 import type { CubePrepProgress } from "./cubeprep";
 
+export type SaguiSedScaling = "median_centre" | "median_mad";
+
 export interface SaguiConfig {
   input_path: string;
   output_dir: string;
@@ -13,11 +15,18 @@ export interface SaguiConfig {
   psf_target: string;
   mode: "ward" | "sparse";
   knn_k: number;
+  sed_scaling?: SaguiSedScaling;
 }
 
 export interface SaguiBand {
   filter: string;
   pivot_um: number;
+}
+
+export interface SaguiPlaneDqFlags {
+  filter: string;
+  table: string;
+  flagged_finite: Record<string, number>;
 }
 
 export interface SaguiInputInfo {
@@ -27,6 +36,8 @@ export interface SaguiInputInfo {
   unit: string;
   has_err: boolean;
   has_dq: boolean;
+  has_noise_correlation?: boolean;
+  dq_flags?: SaguiPlaneDqFlags[];
   estimated_memory_bytes: number;
   warnings: string[];
 }
@@ -43,11 +54,15 @@ export interface SaguiRuntimeInfo {
 export interface SaguiRegionalBand extends SaguiBand {
   flux: number;
   error: number | null;
+  error_correlated?: number | null;
 }
 
 export interface SaguiRegion {
   region: number;
   n_pixels: number;
+  n_components?: number;
+  min_snr?: number | null;
+  min_snr_lower_bound?: number | null;
   bands: SaguiRegionalBand[];
 }
 

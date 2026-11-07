@@ -1,7 +1,9 @@
 import argparse
+import base64
 import contextlib
 import hashlib
 import importlib.metadata
+import importlib.util
 import inspect
 import io
 import json
@@ -18,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 RECIPE_VERSION = 1
 CREATED_BY = "scripts/oracle/lightstack_oracle.py"
 PACKAGES = ("lightstack", "numpy", "scipy", "astropy", "reproject", "photutils", "regions", "matplotlib", "pandas")
@@ -84,6 +86,20 @@ EDIT_FUNCTIONS = {
     "header": "update_cube_header",
     "reference_nan_mask": "apply_reference_nan_mask",
 }
+PHOTUTILS_REGULARIZATION = 1e-4
+LIGHTSTACK_VALUES = {
+    "crop": {"rounding": "lightstack"},
+    "align": {"area_rule": "lightstack"},
+    "cube": {"layout": "lightstack"},
+    "edit drop_invalid": {"use_dq": False},
+    "edit reference_nan_mask": {"mode": "reference"},
+    "psfs files": {"recentre": False},
+    "psfs empirical": {"stack": "median", "recentre": False},
+    "kernels wiener": {"eps_mode": "absolute", "auto": False},
+    "kernels window": {"regularization": PHOTUTILS_REGULARIZATION, "auto": False},
+    "match": {"mode": "lightstack", "allow_unmatched": False},
+}
+STEP_VARIANTS = {"edit": "action", "psfs": "source", "kernels": "method"}
 
 
 class RecipeError(ValueError):
@@ -119,6 +135,36 @@ def check_pixel_box(where, step):
     for key in ("x_start", "x_end", "y_start", "y_end"):
         require(is_count(step[key]), f"{where}: {key} must be a non-negative integer")
     require(step["x_start"] < step["x_end"] and step["y_start"] < step["y_end"], f"{where}: empty pixel box")
+
+
+def shown(value):
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def lightstack_step(where, step):
+    if not isinstance(step, dict):
+        return step
+    kind = step.get("step")
+    detail = STEP_VARIANTS.get(kind)
+    extensions = LIGHTSTACK_VALUES.get(f"{kind} {step.get(detail)}" if detail else kind, {})
+    form = {}
+    for key, value in step.items():
+        if value is None:
+            continue
+        if key in extensions:
+            expected = extensions[key]
+            require(type(value) is type(expected) and value == expected, f"{where} ({kind}): AstroBurst-only value {key}={shown(value)}; LIGHTSTACK has no equivalent")
+            continue
+        form[key] = value
+    return form
+
+
+def lightstack_form(recipe):
+    require(isinstance(recipe, dict), "recipe: expected a JSON object")
+    form = {key: value for key, value in recipe.items() if not (key == "name" and value is None)}
+    if isinstance(form.get("steps"), list):
+        form["steps"] = [lightstack_step(f"steps[{number}]", step) for number, step in enumerate(form["steps"])]
+    return form
 
 
 def validate(recipe, data_dir):
@@ -283,17 +329,49 @@ def versions():
     return found
 
 
-def lightstack_source():
-    direct = importlib.metadata.distribution("lightstack").read_text("direct_url.json")
-    if not direct:
-        return {"kind": "index"}
-    url = json.loads(direct).get("url", "")
-    source = {"kind": "direct", "url": url}
-    if url.startswith("file:"):
-        directory = url2pathname(urlparse(url).path)
-        run = subprocess.run(["git", "-C", directory, "rev-parse", "HEAD"], capture_output=True, text=True)
-        if run.returncode == 0:
-            source["commit"] = run.stdout.strip()
+def code_sha256(package_dir):
+    root = Path(package_dir).parent
+    lines = sorted(f"{path.relative_to(root).as_posix()}\0{hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()}\n" for path in Path(package_dir).rglob("*.py"))
+    return hashlib.sha256("".join(lines).encode("utf-8")).hexdigest()
+
+
+def modified_since_install(distribution):
+    files = distribution.files
+    if files is None:
+        return None
+    modified = []
+    for file in files:
+        if file.hash is None:
+            continue
+        path = Path(distribution.locate_file(file))
+        digest = hashlib.new(file.hash.mode, path.read_bytes()).digest() if path.is_file() else b""
+        if base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii") != file.hash.value:
+            modified.append(file.as_posix())
+    return sorted(modified)
+
+
+def git(directory, *arguments):
+    return subprocess.run(["git", "-C", str(directory), *arguments], capture_output=True, text=True)
+
+
+def lightstack_source(distribution, package_dir):
+    source = {"kind": "index"}
+    direct = distribution.read_text("direct_url.json")
+    if direct:
+        recorded = json.loads(direct)
+        url = recorded.get("url", "")
+        source = {"kind": "direct", "url": url}
+        source.update({key: recorded[key] for key in ("vcs_info", "archive_info", "dir_info") if key in recorded})
+        directory = Path(url2pathname(urlparse(url).path)) if url.startswith("file:") else None
+        if directory is not None and directory.is_dir():
+            head = git(directory, "rev-parse", "HEAD")
+            if head.returncode == 0:
+                source["commit"] = head.stdout.strip()
+            status = git(directory, "status", "--porcelain")
+            if status.returncode == 0:
+                source["dirty"] = bool(status.stdout.strip())
+    source["code_sha256"] = code_sha256(package_dir)
+    source["modified_since_install"] = modified_since_install(distribution)
     return source
 
 
@@ -358,7 +436,7 @@ class Oracle:
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if hasattr(value, "shape") and hasattr(value, "dtype"):
-            return f"<array {value.dtype} {list(value.shape)}>"
+            return value.item() if value.ndim == 0 else f"<array {value.dtype} {list(value.shape)}>"
         if hasattr(value, "item"):
             return value.item()
         return self.scrub(repr(value))
@@ -764,7 +842,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         recipe_bytes = args.recipe.read_bytes()
-        recipe = json.loads(recipe_bytes)
+        content = json.loads(recipe_bytes)
+        recipe = lightstack_form(content)
         data_dir = args.data.resolve()
         validate(recipe, data_dir)
         if args.check:
@@ -782,9 +861,9 @@ def main(argv=None):
             "manifest_version": MANIFEST_VERSION,
             "kind": "lightstack_oracle",
             "created_by": CREATED_BY,
-            "recipe": {"file": args.recipe.name, "sha256": hashlib.sha256(recipe_bytes).hexdigest(), "content": recipe},
+            "recipe": {"file": args.recipe.name, "sha256": hashlib.sha256(recipe_bytes).hexdigest(), "content": content},
             "versions": versions(),
-            "lightstack_source": lightstack_source(),
+            "lightstack_source": lightstack_source(importlib.metadata.distribution("lightstack"), Path(importlib.util.find_spec("lightstack").submodule_search_locations[0])),
             "platform": platform.platform(),
             "inputs": input_files(recipe, data_dir),
             "steps": oracle.steps,

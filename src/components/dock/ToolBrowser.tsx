@@ -5,7 +5,8 @@ import { ANCHOR_LABELS, anchorOf, anchorOpenTool, DOCK_TOOL_META, type DockLayou
 import { TOOL_CATEGORIES, TOOL_DESCRIPTIONS } from "../../utils/toolCatalog";
 import { DOCK_TOOLS } from "./toolRegistry";
 import { dockOnboardingStore } from "./dockOnboardingStore";
-import { firstRendered, rightRailToolsTrigger } from "./dockGeometry";
+import { rightRailToolsTrigger } from "./dockGeometry";
+import { openToolBrowserDialog } from "./toolBrowserDialog";
 import { announce } from "./useDockDrag";
 import "./tool-browser.css";
 
@@ -25,21 +26,6 @@ interface ToolBrowserProps {
   enabledTools: readonly DockToolId[];
   onToggleTool(tool: DockToolId): void;
   onClose(): void;
-}
-
-export function openToolBrowserDialog(
-  dialog: Pick<HTMLDialogElement, "showModal" | "close">,
-  input: Pick<HTMLElement, "focus"> | null,
-  opener: (Pick<HTMLElement, "focus" | "isConnected"> & { getClientRects(): ArrayLike<unknown> }) | null,
-  fallback: () => Pick<HTMLElement, "focus"> | null,
-): () => void {
-  dialog.showModal();
-  input?.focus();
-  return () => {
-    dialog.close();
-    const target = opener?.isConnected && opener !== document.body && firstRendered([opener]) ? opener : fallback();
-    target?.focus({ preventScroll: true });
-  };
 }
 
 export default function ToolBrowser({ layout, hasFile, enabledTools, onToggleTool, onClose }: ToolBrowserProps) {

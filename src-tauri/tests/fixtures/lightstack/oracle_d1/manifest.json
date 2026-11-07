@@ -1,5 +1,5 @@
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "kind": "lightstack_oracle",
   "created_by": "scripts/oracle/lightstack_oracle.py",
   "recipe": {
@@ -129,7 +129,9 @@
     "pandas": "3.1.0"
   },
   "lightstack_source": {
-    "kind": "index"
+    "kind": "index",
+    "code_sha256": "f43772588e34d39a12ad38a1b6ab9be90681605605c71949e5cb3b42e7c43357",
+    "modified_since_install": []
   },
   "platform": "Windows-11-10.0.26300-SP0",
   "inputs": [
@@ -243,7 +245,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.012800399999832734
+          "wall_time_s": 0.013601799999378272
         },
         {
           "function": "lightstack.crop.crop_from_radec",
@@ -281,7 +283,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.003980800000135787
+          "wall_time_s": 0.004617700000380864
         },
         {
           "function": "lightstack.crop.crop_from_radec",
@@ -319,7 +321,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.003765900000871625
+          "wall_time_s": 0.0037735999994765734
         },
         {
           "function": "lightstack.crop.crop_from_radec",
@@ -357,7 +359,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.003561599995009601
+          "wall_time_s": 0.003776200001084362
         },
         {
           "function": "lightstack.crop.crop_from_radec",
@@ -395,7 +397,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0034653000038815662
+          "wall_time_s": 0.003187199999956647
         },
         {
           "function": "lightstack.crop.crop_from_radec",
@@ -433,7 +435,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0035974999991594814
+          "wall_time_s": 0.0058499000006122515
         }
       ],
       "notes": [],
@@ -515,7 +517,7 @@
           },
           "stdout": "\nd1_HST_F814W.fits\nInput unit : Jy\nMethod     : PHOTFNU\nFactor     : 1.527036e-07 Jy per input unit\n",
           "warnings": [],
-          "wall_time_s": 0.001800600002752617
+          "wall_time_s": 0.0019428999985393602
         },
         {
           "function": "lightstack.utils.MJy_sr_to_jy",
@@ -550,7 +552,7 @@
           },
           "stdout": "Saved: <out>\\02_units\\d1_JWST_F150W_Jy.fits\n",
           "warnings": [],
-          "wall_time_s": 0.0021833999999216758
+          "wall_time_s": 0.015862800000832067
         },
         {
           "function": "lightstack.utils.MJy_sr_to_jy",
@@ -585,7 +587,7 @@
           },
           "stdout": "Saved: <out>\\02_units\\d1_JWST_F200W_Jy.fits\n",
           "warnings": [],
-          "wall_time_s": 0.0031949000040185638
+          "wall_time_s": 0.015855600000577397
         },
         {
           "function": "lightstack.utils.MJy_sr_to_jy",
@@ -620,7 +622,7 @@
           },
           "stdout": "Saved: <out>\\02_units\\d1_JWST_F444W_Jy.fits\n",
           "warnings": [],
-          "wall_time_s": 0.0020982999994885176
+          "wall_time_s": 0.014512999998260057
         }
       ],
       "notes": [
@@ -838,7 +840,7 @@
           "warnings": [
             "AstropyWarning: Some non-standard WCS keywords were excluded: A_ORDER, A_0_2, A_1_1, A_2_0, B_ORDER, B_0_2, B_1_1, B_2_0 Use the ``relax`` kwarg to control this."
           ],
-          "wall_time_s": 0.03932209999766201
+          "wall_time_s": 0.1102984999997716
         }
       ],
       "notes": [],
@@ -996,7 +998,7 @@
           },
           "stdout": "Datacube saved at <out>\\04_cube\\d1_cube.fits\n",
           "warnings": [],
-          "wall_time_s": 0.007029499996860977
+          "wall_time_s": 0.009429699999600416
         }
       ],
       "notes": [],
@@ -1057,7 +1059,7 @@
           },
           "stdout": "Filtered datacube saved at '<out>\\05_edit\\d1_cube_filtered.fits'\nValid filters: ['F814W', 'F150W', 'F200W', 'F277W', 'F356W', 'F444W']\n",
           "warnings": [],
-          "wall_time_s": 0.002524699993955437
+          "wall_time_s": 0.0027883000002475455
         }
       ],
       "notes": [],
@@ -1128,7 +1130,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0032352999987779185
+          "wall_time_s": 0.0035987999999633757
         },
         {
           "function": "lightstack.psf.pad_psf_for_resampling",
@@ -1174,7 +1176,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0027461999998195097
+          "wall_time_s": 0.002818200000547222
         },
         {
           "function": "lightstack.psf.resample_psf_to_pixel_scale",
@@ -1213,7 +1215,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0012974999990547076
+          "wall_time_s": 0.00018559999989520293
         },
         {
           "function": "lightstack.psf.measure_psf_fwhm",
@@ -1236,7 +1238,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0010837000008905306
+          "wall_time_s": 0.0012734000010823365
         },
         {
           "function": "lightstack.psf.pad_psf_for_resampling",
@@ -1282,7 +1284,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0018142000044463202
+          "wall_time_s": 0.0020905999990645796
         },
         {
           "function": "lightstack.psf.resample_psf_to_pixel_scale",
@@ -1321,7 +1323,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.00015910000365693122
+          "wall_time_s": 0.0001838000007410301
         },
         {
           "function": "lightstack.psf.measure_psf_fwhm",
@@ -1344,7 +1346,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0010368000002927147
+          "wall_time_s": 0.0017459999999118736
         },
         {
           "function": "lightstack.psf.measure_psf_fwhm",
@@ -1367,7 +1369,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0015447000041604042
+          "wall_time_s": 0.00363889999971434
         },
         {
           "function": "lightstack.psf.measure_psf_fwhm",
@@ -1390,7 +1392,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.00026780000189319253,
+          "wall_time_s": 0.00028500000007625204,
           "error": "IndexError: index 21 is out of bounds for axis 0 with size 21"
         },
         {
@@ -1414,7 +1416,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0002420999953756109,
+          "wall_time_s": 0.00029489999906218145,
           "error": "IndexError: index 21 is out of bounds for axis 0 with size 21"
         }
       ],
@@ -1485,7 +1487,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.0033452999996370636
+          "wall_time_s": 0.004990100000213715
         },
         {
           "function": "lightstack.psf.save_kernel",
@@ -1506,7 +1508,7 @@
           "metrics": {},
           "stdout": "Kernel saved at <out>\\07_kernels\\kernel_f814w_to_f444w.fits\n",
           "warnings": [],
-          "wall_time_s": 0.0014287999947555363
+          "wall_time_s": 0.0014268000013544224
         },
         {
           "function": "lightstack.psf.build_kernel",
@@ -1547,7 +1549,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.00018709999858401716
+          "wall_time_s": 0.00029739999990852084
         },
         {
           "function": "lightstack.psf.save_kernel",
@@ -1568,7 +1570,7 @@
           "metrics": {},
           "stdout": "Kernel saved at <out>\\07_kernels\\kernel_f150w_to_f444w.fits\n",
           "warnings": [],
-          "wall_time_s": 0.002265299997816328
+          "wall_time_s": 0.0013257000009616604
         },
         {
           "function": "lightstack.psf.build_kernel",
@@ -1609,7 +1611,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.00016759999562054873
+          "wall_time_s": 0.00030900000092515256
         },
         {
           "function": "lightstack.psf.save_kernel",
@@ -1630,7 +1632,7 @@
           "metrics": {},
           "stdout": "Kernel saved at <out>\\07_kernels\\kernel_f200w_to_f444w.fits\n",
           "warnings": [],
-          "wall_time_s": 0.0009839999984251335
+          "wall_time_s": 0.0013308000015967991
         },
         {
           "function": "lightstack.psf.build_kernel",
@@ -1671,7 +1673,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.00016789999790489674
+          "wall_time_s": 0.000325400000292575
         },
         {
           "function": "lightstack.psf.save_kernel",
@@ -1692,7 +1694,7 @@
           "metrics": {},
           "stdout": "Kernel saved at <out>\\07_kernels\\kernel_f277w_to_f444w.fits\n",
           "warnings": [],
-          "wall_time_s": 0.0011183000024175271
+          "wall_time_s": 0.0018417000010231277
         },
         {
           "function": "lightstack.psf.build_kernel",
@@ -1733,7 +1735,7 @@
           },
           "stdout": "",
           "warnings": [],
-          "wall_time_s": 0.00016529999993508682
+          "wall_time_s": 0.0003371999991941266
         },
         {
           "function": "lightstack.psf.save_kernel",
@@ -1754,7 +1756,7 @@
           "metrics": {},
           "stdout": "Kernel saved at <out>\\07_kernels\\kernel_f356w_to_f444w.fits\n",
           "warnings": [],
-          "wall_time_s": 0.0019787999990512617
+          "wall_time_s": 0.0031084000002010725
         }
       ],
       "notes": [],
@@ -1860,7 +1862,7 @@
           },
           "stdout": "Processing 1/6: F814W\nProcessing 2/6: F150W\nProcessing 3/6: F200W\nProcessing 4/6: F277W\nProcessing 5/6: F356W\nProcessing 6/6: F444W\nPSF-matched datacube saved at <out>\\08_match\\d1_cube_filtered_psfmatched.fits\n",
           "warnings": [],
-          "wall_time_s": 0.008903000001737382
+          "wall_time_s": 0.012846800000261283
         }
       ],
       "notes": [],
@@ -2006,5 +2008,5 @@
       "sha256": "004145e1d9480f1b574261d708f9f3bd6e2175e2d737a4769b6e5dbbf3584d64"
     }
   ],
-  "wall_time_s": 2.816911199995957
+  "wall_time_s": 2.571318300000712
 }

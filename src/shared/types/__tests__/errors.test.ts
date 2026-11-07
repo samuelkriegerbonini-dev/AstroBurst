@@ -47,4 +47,25 @@ describe("normalizeTauriError", () => {
     const original = new TauriCommandError("mast_search_cmd", "m", "mast_timeout", { timeoutSec: 120 });
     expect(normalizeTauriError("other", original)).toBe(original);
   });
+
+  it("keeps a backend hint in its own field, outside the context", () => {
+    const err = normalizeTauriError("validate_cubeprep_recipe_cmd", {
+      code: "unknown_parameter",
+      message: "steps[2] (align): unknown crop",
+      hint: "accepted keys: area_rule, border_crop, method, reference",
+    });
+    expect(err.message).toBe("steps[2] (align): unknown crop");
+    expect(err.code).toBe("unknown_parameter");
+    expect(err.hint).toBe("accepted keys: area_rule, border_crop, method, reference");
+    expect(err.context).toBeUndefined();
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["blank text", "   "],
+    ["null", null],
+    ["a number", 3],
+  ])("drops a hint that is %s", (_label, hint) => {
+    expect(normalizeTauriError("validate_cubeprep_recipe_cmd", { code: "recipe_invalid", message: "x", hint }).hint).toBeUndefined();
+  });
 });

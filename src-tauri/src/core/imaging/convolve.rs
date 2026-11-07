@@ -370,6 +370,35 @@ fn convolve_with<T: FftFloat>(
     Ok(Convolved { image: out, variance, weight: interpolate.then(|| Array2::from_shape_fn((rows, cols), |(r, c)| weight_at(r, c))), report })
 }
 
+pub(crate) struct PreparedSpectrum {
+    engine: Arc<FftEngine2D<f64>>,
+    spectrum: Vec<Complex<f64>>,
+    dims: (usize, usize),
+    scratch: Vec<Complex<f64>>,
+}
+
+impl PreparedSpectrum {
+    pub(crate) fn new(kernel: &Array2<f64>, dims: (usize, usize), plans: &mut FftPlanCache<f64>) -> Self {
+        let engine = plans.engine(padded_len(dims.0, kernel.nrows()), padded_len(dims.1, kernel.ncols()));
+        let mut scratch = Vec::new();
+        let spectrum = kernel_spectrum(kernel, &engine, &mut scratch);
+        Self { engine, spectrum, dims, scratch }
+    }
+
+    pub(crate) fn convolve_complex(&mut self, inside: impl Fn(usize, usize) -> Complex<f64> + Sync) -> Array2<Complex<f64>> {
+        let (rows, cols) = self.dims;
+        let fft_cols = self.engine.fft_cols;
+        let mut buffer = self.engine.alloc_buffer();
+        buffer.par_chunks_mut(fft_cols).take(rows).enumerate().for_each(|(r, row)| {
+            for (c, slot) in row.iter_mut().take(cols).enumerate() {
+                *slot = inside(r, c);
+            }
+        });
+        let buffer = convolved(buffer, &self.spectrum, &self.engine, &mut self.scratch);
+        Array2::from_shape_fn(self.dims, |(r, c)| buffer[r * fft_cols + c])
+    }
+}
+
 pub fn convolve_fft<T: FftFloat>(
     image: &Array2<T>,
     kernel: &Array2<f64>,
@@ -553,6 +582,57 @@ mod tests {
                 let expected = direct_convolve(&image, &kernel.mapv(|v| 0.97 * v), &options);
                 assert_same(&got, &expected, 1e-9, &format!("{what}, {options:?}"));
             }
+        }
+    }
+
+    #[test]
+    fn a_flat_field_edge_value_equals_scale_times_the_in_field_kernel_weight() {
+        let (rows, cols) = (12, 15);
+        let image = Array2::from_elem((rows, cols), 1.0);
+        let scale = 0.9;
+        let kernel = normalized(gaussian(5, 1.1)).mapv(|v| scale * v);
+        let got = run(&image, &kernel, &ConvolveOptions::lightstack()).image;
+        let in_field = |r: usize, c: usize| -> f64 {
+            kernel
+                .indexed_iter()
+                .filter(|((kr, kc), _)| {
+                    let (y, x) = (r as isize + 2 - *kr as isize, c as isize + 2 - *kc as isize);
+                    y >= 0 && x >= 0 && y < rows as isize && x < cols as isize
+                })
+                .map(|(_, &weight)| weight)
+                .sum()
+        };
+        for ((r, c), &value) in got.indexed_iter() {
+            assert!((value - in_field(r, c)).abs() < 1e-12, "({r}, {c}): {value} against the in-field kernel weight {}", in_field(r, c));
+        }
+        assert!((got[[6, 7]] - scale).abs() < 1e-12, "the interior keeps the kernel sum {scale}");
+        let (corner, edge, interior) = (got[[0, 0]], got[[0, 7]], got[[6, 7]]);
+        assert!(corner < edge && edge < interior, "zero fill darkens the edge {edge} and the corner {corner} below {interior}");
+        let beyond: f64 = kernel.slice(ndarray::s![3.., ..]).sum();
+        assert!((edge - (scale - beyond)).abs() < 1e-12, "an edge pixel loses the kernel mass beyond the edge, {beyond}");
+    }
+
+    #[test]
+    fn a_prepared_spectrum_convolves_two_planes_in_one_complex_transform() {
+        let dims = (17, 22);
+        let first = scene(dims.0, dims.1);
+        let second = Array2::from_shape_fn(dims, |(r, c)| if (3 * r + 5 * c) % 7 == 0 { 1.0 } else { 0.0 });
+        let mut holed = difference_of_gaussians(7);
+        holed[[3, 3]] = 0.0;
+        holed[[0, 6]] = 0.0;
+        let even = normalized(gaussian(4, 1.2)).slice(ndarray::s![..3, ..]).to_owned();
+        let fill = ConvolveOptions { nan_treatment: NanTreatment::Fill, fill_value: 0.0, ..ConvolveOptions::lightstack() };
+        for kernel in [holed, even, row(&[1.0, 0.0, 1.0, 1.0])] {
+            let mut plans = FftPlanCache::new();
+            let mut prepared = PreparedSpectrum::new(&kernel, dims, &mut plans);
+            let packed = prepared.convolve_complex(|r, c| Complex::new(first[[r, c]], second[[r, c]]));
+            assert_eq!(packed.dim(), dims);
+            assert_same(&packed.mapv(|v| v.re), &direct_convolve(&first, &kernel, &fill), 1e-12, "the real half");
+            assert_same(&packed.mapv(|v| v.im), &direct_convolve(&second, &kernel, &fill), 1e-12, "the imaginary half");
+            let again = prepared.convolve_complex(|r, c| Complex::new(second[[r, c]], 0.0));
+            assert_same(&again.mapv(|v| v.re), &direct_convolve(&second, &kernel, &fill), 1e-12, "the spectrum is reused");
+            assert!(again.iter().all(|v| v.im.abs() < 1e-12), "an empty imaginary half stays empty");
+            assert_eq!(plans.len(), 1, "one engine for the plane");
         }
     }
 

@@ -1,0 +1,17 @@
+{
+  "recipe_version": 1,
+  "name": "d1_crop_pixel",
+  "inputs": [
+    {"path": "d1_HST_F814W.fits", "dataset": "HST", "filter": "F814W"},
+    {"path": "d1_JWST_F150W.fits", "dataset": "JWST", "filter": "F150W"},
+    {"path": "d1_JWST_F200W.fits", "dataset": "JWST", "filter": "F200W"},
+    {"path": "d1_JWST_F277W.fits", "dataset": "JWST", "filter": "F277W"},
+    {"path": "d1_JWST_F356W.fits", "dataset": "JWST", "filter": "F356W"},
+    {"path": "d1_JWST_F444W.fits", "dataset": "JWST", "filter": "F444W"}
+  ],
+  "steps": [
+    {"step": "crop", "mode": "pixel", "x_start": 10, "x_end": 42, "y_start": 12, "y_end": 44},
+    {"step": "crop", "mode": "common"},
+    {"step": "crop", "mode": "reference", "reference": "F444W"}
+  ]
+}

@@ -31,7 +31,8 @@ export interface SaguiState {
   error: string | null;
 }
 
-const DEFAULT_CONFIG: SaguiConfig = { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 0xffffffff, psf_target: "", mode: "ward", knn_k: 40 };
+const DEFAULT_CONFIG: SaguiConfig = { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 1, psf_target: "", mode: "ward", knn_k: 40 };
+const RESULT_INDEPENDENT_KEYS = new Set<keyof SaguiConfig>(["output_dir", "rscript_path", "library_path"]);
 const API: SaguiApi = { load: loadSaguiResult, inspectInput: inspectSaguiInput, inspectRuntime: inspectSaguiRuntime, run: runSagui, listen: onSaguiProgress, cancel: cancelSagui, install: installSaguiRuntime, listenInstall: onSaguiInstallProgress, cancelInstall: cancelSaguiInstall };
 type SaguiStorage = Pick<Storage, "getItem" | "setItem">;
 function browserStorage(): SaguiStorage | null { try { return typeof window === "undefined" ? null : window.localStorage; } catch { return null; } }
@@ -80,12 +81,14 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
   const restore = async (manifestPath: string) => {
     if (active) return;
     const key = ++revision;
-    patch({ status: "checking", operation: "restore", error: null, input: null, runtime: null, result: null, progress: null, outputDir: null, unit: null, installation: null });
+    patch({ status: "checking", operation: "restore", error: null, input: null, result: null, progress: null, outputDir: null, unit: null, installation: null });
     try {
       const saved = await api.load(manifestPath);
       if (key !== revision) return;
-      patch({ config: saved.config, result: saved.result, outputDir: saved.result.output_dir, unit: saved.result.unit, status: "restored", operation: null });
-      try { storage?.setItem("ab.sagui.v1", JSON.stringify(saved.config)); } catch { return; }
+      const { rscript_path, library_path, output_dir } = state.config;
+      const config = { ...saved.config, rscript_path, library_path, output_dir };
+      patch({ config, result: saved.result, outputDir: saved.result.output_dir, unit: saved.result.unit, status: "restored", operation: null });
+      try { storage?.setItem("ab.sagui.v1", JSON.stringify(config)); } catch { return; }
     } catch (error) { if (key === revision) patch({ status: "error", operation: null, error: cubePrepError(error) }); }
   };
   const inspectRuntime = async () => {
@@ -102,13 +105,13 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
     if (!report.cube) throw new Error("The Cube Prep report has no final cube.");
     const key = ++revision;
     const path = joinProductPath(report.output_dir, report.cube);
-    patch({ status: "checking", operation: null, error: null, input: null, result: null, progress: null, outputDir: null, unit: null });
+    patch({ status: "checking", operation: null, error: null });
     try {
       const input = await api.inspectInput(path);
       if (key !== revision) return false;
       if (!isCurrent()) { patch({ status: "idle" }); return false; }
       const config = { ...state.config, input_path: path, output_dir: state.config.output_dir || report.output_dir, psf_target: cubePrepPsfTarget(report, input.bands.map((band) => band.filter)) };
-      patch({ config, input, status: "idle", installation: null });
+      patch({ config, input, status: "idle", installation: null, result: null, progress: null, outputDir: null, unit: null });
       try { storage?.setItem("ab.sagui.v1", JSON.stringify(config)); } catch { return true; }
       return true;
     } catch (error) {
@@ -127,7 +130,7 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
     active = id;
     cancelled = false;
     const candidate = { ...state.config };
-    patch({ status: "checking", operation: "segment", error: null, result: null, input: null, runtime: null, unit: null, progress: null, outputDir: joinProductPath(candidate.output_dir, `sagui-${id}`) });
+    patch({ status: "checking", operation: "segment", error: null, result: null, input: null, runtime: null, unit: null, progress: null, outputDir: null });
     let stop: (() => void) | undefined;
     try {
       const data = await check(candidate);
@@ -136,13 +139,11 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
       if (!data.runtime.ready) throw new Error(data.runtime.issues.join(" ") || "The official SAGUI runtime is not ready.");
       stop = await api.listen(id, (progress) => { if (active === id && !cancelled) patch({ progress }); });
       if (cancelled) { patch({ status: "cancelled" }); return; }
-      patch({ status: "running", unit: data.input.unit });
+      patch({ status: "running", unit: data.input.unit, outputDir: joinProductPath(candidate.output_dir, `sagui-${id}`) });
       const result = await api.run(candidate, id);
       patch({ result, status: "complete", progress: null, outputDir: result.output_dir });
     } catch (error) {
-      const message = cubePrepError(error);
-      const isCancelled = /cancelled|canceled/i.test(message);
-      patch({ status: isCancelled ? "cancelled" : "error", error: isCancelled ? null : message, progress: null });
+      patch({ status: cancelled ? "cancelled" : "error", error: cancelled ? null : cubePrepError(error), progress: null });
     } finally { stop?.(); active = null; cancelled = false; }
   };
   const install = async () => {
@@ -170,9 +171,7 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
       patch({ config, installation, runtime, status: "installed", error: null });
       try { storage?.setItem("ab.sagui.v1", JSON.stringify(config)); } catch { return; }
     } catch (error) {
-      const message = cubePrepError(error);
-      const isCancelled = /cancelled|canceled/i.test(message);
-      patch({ status: isCancelled ? "cancelled" : "error", error: isCancelled ? null : message, progress: null });
+      patch({ status: cancelled ? "cancelled" : "error", error: cancelled ? null : cubePrepError(error), progress: null });
     } finally { stop?.(); active = null; cancelled = false; }
   };
   const cancel = async () => {
@@ -195,7 +194,16 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
     edit: (next: SaguiConfig) => {
       if (active) return;
       ++revision;
-      patch({ config: next, input: null, runtime: null, status: "idle", operation: null, result: null, progress: null, outputDir: null, unit: null, error: null, installation: null });
+      const previous = state.config;
+      const changed = (key: keyof SaguiConfig) => JSON.stringify(previous[key]) !== JSON.stringify(next[key]);
+      const keys = [...new Set([...Object.keys(previous), ...Object.keys(next)])] as (keyof SaguiConfig)[];
+      const keepResult = state.result !== null && !keys.some((key) => !RESULT_INDEPENDENT_KEYS.has(key) && changed(key));
+      patch({
+        config: next, status: "idle", operation: null, progress: null, error: null,
+        ...(changed("input_path") ? { input: null } : {}),
+        ...(changed("rscript_path") || changed("library_path") ? { runtime: null } : {}),
+        ...(keepResult ? {} : { result: null, outputDir: null, unit: null }),
+      });
       try { storage?.setItem("ab.sagui.v1", JSON.stringify(next)); } catch { return; }
     },
     setInstallParent: (path: string) => {

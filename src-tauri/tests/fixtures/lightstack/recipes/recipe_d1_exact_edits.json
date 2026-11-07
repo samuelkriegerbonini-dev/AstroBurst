@@ -1,0 +1,22 @@
+{
+  "recipe_version": 1,
+  "name": "d1_exact_edits",
+  "inputs": [
+    {"path": "d1_HST_F814W.fits", "dataset": "HST", "filter": "F814W"},
+    {"path": "d1_JWST_F150W.fits", "dataset": "JWST", "filter": "F150W"},
+    {"path": "d1_JWST_F200W.fits", "dataset": "JWST", "filter": "F200W"},
+    {"path": "d1_JWST_F277W.fits", "dataset": "JWST", "filter": "F277W"},
+    {"path": "d1_JWST_F356W.fits", "dataset": "JWST", "filter": "F356W"},
+    {"path": "d1_JWST_F444W.fits", "dataset": "JWST", "filter": "F444W"}
+  ],
+  "steps": [
+    {"step": "crop", "mode": "radec", "ra": 53.1625, "dec": -27.7914, "size_arcsec": 1.8},
+    {"step": "units", "to": "Jy/pixel"},
+    {"step": "align", "reference": "F444W", "method": "exact", "border_crop": 1},
+    {"step": "cube", "reference": "F444W", "order": "wavelength", "output": "d1_cube.fits"},
+    {"step": "edit", "action": "remove_filter", "filter": "F814W"},
+    {"step": "edit", "action": "cut", "x_start": 6, "x_end": 37, "y_start": 4, "y_end": 39},
+    {"step": "edit", "action": "header", "redshift": 0.1, "ra_center": 53.1625125598822, "dec_center": -27.791408333332768},
+    {"step": "edit", "action": "reference_nan_mask", "reference_slice": 3}
+  ]
+}

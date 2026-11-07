@@ -2699,6 +2699,49 @@ async fn a_cubeprep_job_without_a_kernel_for_a_plane_fails_with_kernel_missing_a
 }
 
 #[tokio::test]
+async fn a_failed_cubeprep_job_keeps_the_advisories_of_its_202_in_the_failure_marker() {
+    let out = tempfile::tempdir().unwrap();
+    let state = test_state();
+    let session = state.create_session().unwrap();
+    let app = science_app(cubeprep_cfg("127.0.0.1:8080", out.path()), &state);
+    let mut recipe = d1_recipe();
+    recipe["steps"][5]["files"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    recipe["steps"].as_array_mut().unwrap().insert(
+        5,
+        json!({ "step": "edit", "action": "cut", "x_start": 2, "x_end": 40, "y_start": 2, "y_end": 40 }),
+    );
+
+    let response = post_authorized(&app, &cubeprep_uri(&session), recipe).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted = body_json(response).await;
+    let advisories = accepted["warnings"].as_array().unwrap().clone();
+    assert_eq!(advisories.len(), 1, "{accepted}");
+    let job = job_of(&session, &accepted);
+    let output_dir = PathBuf::from(accepted["output_dir"].as_str().unwrap());
+    wait_for_workers(&state).await;
+    assert_eq!(job.current_status(), JobStatus::Error);
+    let marker: Value =
+        serde_json::from_str(&std::fs::read_to_string(output_dir.join("failure.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        (marker["code"].as_str(), marker["stage"].as_str()),
+        (Some("kernel_missing"), Some("09_match")),
+        "{marker}"
+    );
+    let warnings = marker["warnings"].as_array().unwrap();
+    assert_eq!(warnings.first(), advisories.first(), "{marker}");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap().starts_with("08_kernels: ")),
+        "{marker}"
+    );
+}
+
+#[tokio::test]
 async fn a_guarded_cubeprep_refuses_a_path_outside_the_roots_and_resolves_relative_ones_under_the_root(
 ) {
     let out = tempfile::tempdir().unwrap();

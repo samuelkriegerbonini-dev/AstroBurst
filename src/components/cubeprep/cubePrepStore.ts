@@ -18,6 +18,7 @@ export interface CubePrepState {
   report: CubePrepReport | null;
   outputDir: string | null;
   error: string | null;
+  startedAt: number | null;
 }
 
 type CubePrepStorage = Pick<Storage, "getItem" | "setItem">;
@@ -29,7 +30,7 @@ function storageOrNull(): CubePrepStorage | null {
 }
 
 export function createCubePrepStore(api: CubePrepApi = API, storage: CubePrepStorage | null = storageOrNull()) {
-  let state: CubePrepState = { draft: createCubePrepDraft(), status: "idle", validation: null, progress: null, report: null, outputDir: null, error: null };
+  let state: CubePrepState = { draft: createCubePrepDraft(), status: "idle", validation: null, progress: null, report: null, outputDir: null, error: null, startedAt: null };
   try {
     const saved = JSON.parse(storage?.getItem(STORAGE_KEY) ?? "null") as Partial<CubePrepState> | null;
     if (saved?.draft && typeof saved.draft.baseDir === "string" && typeof saved.draft.outputParent === "string") {
@@ -78,7 +79,7 @@ export function createCubePrepStore(api: CubePrepApi = API, storage: CubePrepSto
     cancelRequested = false;
     const draft = state.draft;
     const outputDir = workingDirectory(draft.outputParent, draft.recipe.name ?? "field", id);
-    update({ status: "validating", error: null, report: null, progress: null, validation: null, outputDir }, true);
+    update({ status: "validating", error: null, report: null, progress: null, validation: null, outputDir: null, startedAt: Date.now() }, true);
     let unlisten: (() => void) | undefined;
     try {
       const validation = await api.validate(draft.recipe, draft.baseDir);
@@ -88,7 +89,7 @@ export function createCubePrepStore(api: CubePrepApi = API, storage: CubePrepSto
         if (runId === id && !cancelRequested) update({ progress });
       });
       if (cancelRequested) { update({ status: "cancelled" }); return; }
-      update({ status: "running" });
+      update({ status: "running", outputDir }, true);
       const report = await api.run(validation.recipe, draft.baseDir, outputDir, id);
       update({ report, status: "complete", outputDir: report.output_dir, progress: null }, true);
     } catch (error) {
@@ -128,7 +129,9 @@ export function createCubePrepStore(api: CubePrepApi = API, storage: CubePrepSto
     edit: (draft: CubePrepDraft) => {
       if (runId) return;
       ++revision;
-      update({ draft, status: "idle", validation: null, report: null, outputDir: null, progress: null, error: null }, true);
+      const products = (next: CubePrepDraft) => JSON.stringify([next.recipe.inputs, next.recipe.steps, next.baseDir]);
+      const stale = products(draft) !== products(state.draft);
+      update({ draft, status: "idle", validation: null, progress: null, error: null, ...(stale ? { report: null, outputDir: null } : {}) }, true);
     },
     validate, run, cancel,
   };

@@ -1,0 +1,1161 @@
+{
+  "manifest_version": 2,
+  "kind": "lightstack_oracle",
+  "created_by": "scripts/oracle/lightstack_oracle.py",
+  "recipe": {
+    "file": "recipe_d1_crop_pixel.json",
+    "sha256": "b6dbc3eee23e8a0af4032e2ff2a4fdd02bac3f0e2aae43a3c53144483f85ad66",
+    "content": {
+      "recipe_version": 1,
+      "name": "d1_crop_pixel",
+      "inputs": [
+        {
+          "path": "d1_HST_F814W.fits",
+          "dataset": "HST",
+          "filter": "F814W"
+        },
+        {
+          "path": "d1_JWST_F150W.fits",
+          "dataset": "JWST",
+          "filter": "F150W"
+        },
+        {
+          "path": "d1_JWST_F200W.fits",
+          "dataset": "JWST",
+          "filter": "F200W"
+        },
+        {
+          "path": "d1_JWST_F277W.fits",
+          "dataset": "JWST",
+          "filter": "F277W"
+        },
+        {
+          "path": "d1_JWST_F356W.fits",
+          "dataset": "JWST",
+          "filter": "F356W"
+        },
+        {
+          "path": "d1_JWST_F444W.fits",
+          "dataset": "JWST",
+          "filter": "F444W"
+        }
+      ],
+      "steps": [
+        {
+          "step": "crop",
+          "mode": "pixel",
+          "x_start": 10,
+          "x_end": 42,
+          "y_start": 12,
+          "y_end": 44
+        },
+        {
+          "step": "crop",
+          "mode": "common"
+        },
+        {
+          "step": "crop",
+          "mode": "reference",
+          "reference": "F444W"
+        }
+      ]
+    }
+  },
+  "versions": {
+    "python": "3.13.17",
+    "lightstack": "0.4.0",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "astropy": "8.0.2",
+    "reproject": "0.21.0",
+    "photutils": "3.1.1",
+    "regions": "0.13",
+    "matplotlib": "3.11.2",
+    "pandas": "3.1.0"
+  },
+  "lightstack_source": {
+    "kind": "index",
+    "code_sha256": "f43772588e34d39a12ad38a1b6ab9be90681605605c71949e5cb3b42e7c43357",
+    "modified_since_install": []
+  },
+  "platform": "Windows-11-10.0.26300-SP0",
+  "inputs": [
+    {
+      "path": "d1_HST_F814W.fits",
+      "bytes": 63360,
+      "sha256": "d4b2eb6aafc7482bebddb13db9abe497f0f80757002cb56e252f5a10c4f5def9"
+    },
+    {
+      "path": "d1_JWST_F150W.fits",
+      "bytes": 210240,
+      "sha256": "2f4a5bd980fbe0744c94e42bcad2a61bd91641e261d6ef6e417a1f08832e92fd"
+    },
+    {
+      "path": "d1_JWST_F200W.fits",
+      "bytes": 210240,
+      "sha256": "326a3e4444bfaa527f0f88f89d790d31bb46c003e039f4f08eeaca85acc01a27"
+    },
+    {
+      "path": "d1_JWST_F277W.fits",
+      "bytes": 63360,
+      "sha256": "25a37c3293f5a4310395267f7c0e92c57a0dbde222ebf401ea1592e1e34507c1"
+    },
+    {
+      "path": "d1_JWST_F356W.fits",
+      "bytes": 63360,
+      "sha256": "0f184ae8b142d19b978615bc99077a415c8b092464f4a40917acad2e9e8c63a9"
+    },
+    {
+      "path": "d1_JWST_F444W.fits",
+      "bytes": 63360,
+      "sha256": "a9fdfb979211ede10936c66a5bea680230bb0a06580d3bdb2b4d964daf181080"
+    }
+  ],
+  "steps": [
+    {
+      "index": 1,
+      "step": "crop",
+      "parameters": {
+        "step": "crop",
+        "mode": "pixel",
+        "x_start": 10,
+        "x_end": 42,
+        "y_start": 12,
+        "y_end": 44
+      },
+      "directory": "01_crop",
+      "calls": [
+        {
+          "function": "lightstack.crop.cut_region_2d",
+          "arguments": {
+            "fits_file": "<data>\\d1_HST_F814W.fits",
+            "output_path": "<out>\\01_crop\\d1_HST_F814W.fits",
+            "x_start": 10,
+            "x_end": 42,
+            "y_start": 12,
+            "y_end": 44
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_HST_F814W.fits",
+              "bytes": 63360,
+              "sha256": "d4b2eb6aafc7482bebddb13db9abe497f0f80757002cb56e252f5a10c4f5def9"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_HST_F814W.fits",
+              "bytes": 8640,
+              "sha256": "2142a5d99dac46eb7bca2121317652ca3dedab24867d67e3e0f8663f63723a88"
+            }
+          ],
+          "metrics": {
+            "filter": "F814W",
+            "shape": [
+              32,
+              32
+            ],
+            "x_min": 10.000000000000433,
+            "y_min": 11.999999999999881
+          },
+          "stdout": "Cut 2D fits saved to '<out>\\01_crop\\d1_HST_F814W.fits'\n",
+          "warnings": [
+            "AstropyWarning: Some non-standard WCS keywords were excluded: A_ORDER, A_0_2, A_1_1, A_2_0, B_ORDER, B_0_2, B_1_1, B_2_0 Use the ``relax`` kwarg to control this."
+          ],
+          "wall_time_s": 0.008120099999359809
+        },
+        {
+          "function": "lightstack.crop.cut_region_2d",
+          "arguments": {
+            "fits_file": "<data>\\d1_JWST_F150W.fits",
+            "output_path": "<out>\\01_crop\\d1_JWST_F150W.fits",
+            "x_start": 10,
+            "x_end": 42,
+            "y_start": 12,
+            "y_end": 44
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F150W.fits",
+              "bytes": 210240,
+              "sha256": "2f4a5bd980fbe0744c94e42bcad2a61bd91641e261d6ef6e417a1f08832e92fd"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F150W.fits",
+              "bytes": 8640,
+              "sha256": "152b9b394b071d834407339f6885f6804555e8da818803de91e6150ad70009fb"
+            }
+          ],
+          "metrics": {
+            "filter": "F150W",
+            "shape": [
+              32,
+              32
+            ],
+            "x_min": 10.0,
+            "y_min": 11.999999999999993
+          },
+          "stdout": "Cut 2D fits saved to '<out>\\01_crop\\d1_JWST_F150W.fits'\n",
+          "warnings": [],
+          "wall_time_s": 0.0036017000002175337
+        },
+        {
+          "function": "lightstack.crop.cut_region_2d",
+          "arguments": {
+            "fits_file": "<data>\\d1_JWST_F200W.fits",
+            "output_path": "<out>\\01_crop\\d1_JWST_F200W.fits",
+            "x_start": 10,
+            "x_end": 42,
+            "y_start": 12,
+            "y_end": 44
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F200W.fits",
+              "bytes": 210240,
+              "sha256": "326a3e4444bfaa527f0f88f89d790d31bb46c003e039f4f08eeaca85acc01a27"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F200W.fits",
+              "bytes": 8640,
+              "sha256": "da7f69a6ad1b10d51cf301a73100868e3408fced6f3b6540a64443f7b19a7267"
+            }
+          ],
+          "metrics": {
+            "filter": "F200W",
+            "shape": [
+              32,
+              32
+            ],
+            "x_min": 10.0,
+            "y_min": 11.999999999999993
+          },
+          "stdout": "Cut 2D fits saved to '<out>\\01_crop\\d1_JWST_F200W.fits'\n",
+          "warnings": [],
+          "wall_time_s": 0.0032166000000870554
+        },
+        {
+          "function": "lightstack.crop.cut_region_2d",
+          "arguments": {
+            "fits_file": "<data>\\d1_JWST_F277W.fits",
+            "output_path": "<out>\\01_crop\\d1_JWST_F277W.fits",
+            "x_start": 10,
+            "x_end": 42,
+            "y_start": 12,
+            "y_end": 44
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F277W.fits",
+              "bytes": 63360,
+              "sha256": "25a37c3293f5a4310395267f7c0e92c57a0dbde222ebf401ea1592e1e34507c1"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F277W.fits",
+              "bytes": 8640,
+              "sha256": "2dba669993263060a783bb9ed428aac99359d87990b2c7c645889c405d0beb54"
+            }
+          ],
+          "metrics": {
+            "filter": "F277W",
+            "shape": [
+              32,
+              32
+            ],
+            "x_min": 10.0,
+            "y_min": 12.0
+          },
+          "stdout": "Cut 2D fits saved to '<out>\\01_crop\\d1_JWST_F277W.fits'\n",
+          "warnings": [],
+          "wall_time_s": 0.0039920999988680705
+        },
+        {
+          "function": "lightstack.crop.cut_region_2d",
+          "arguments": {
+            "fits_file": "<data>\\d1_JWST_F356W.fits",
+            "output_path": "<out>\\01_crop\\d1_JWST_F356W.fits",
+            "x_start": 10,
+            "x_end": 42,
+            "y_start": 12,
+            "y_end": 44
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F356W.fits",
+              "bytes": 63360,
+              "sha256": "0f184ae8b142d19b978615bc99077a415c8b092464f4a40917acad2e9e8c63a9"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F356W.fits",
+              "bytes": 8640,
+              "sha256": "a3550b9429f42ed85e57760310397b91bbfe4635220ab4f9de9a941f014eecc5"
+            }
+          ],
+          "metrics": {
+            "filter": "F356W",
+            "shape": [
+              32,
+              32
+            ],
+            "x_min": 9.999999999999996,
+            "y_min": 12.0
+          },
+          "stdout": "Cut 2D fits saved to '<out>\\01_crop\\d1_JWST_F356W.fits'\n",
+          "warnings": [],
+          "wall_time_s": 0.0034939999986818293
+        },
+        {
+          "function": "lightstack.crop.cut_region_2d",
+          "arguments": {
+            "fits_file": "<data>\\d1_JWST_F444W.fits",
+            "output_path": "<out>\\01_crop\\d1_JWST_F444W.fits",
+            "x_start": 10,
+            "x_end": 42,
+            "y_start": 12,
+            "y_end": 44
+          },
+          "inputs": [
+            {
+              "root": "data",
+              "path": "d1_JWST_F444W.fits",
+              "bytes": 63360,
+              "sha256": "a9fdfb979211ede10936c66a5bea680230bb0a06580d3bdb2b4d964daf181080"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F444W.fits",
+              "bytes": 8640,
+              "sha256": "6bc237e53eee6b878688c008f517b059f10209fee74b4b834a2ce870b07e8002"
+            }
+          ],
+          "metrics": {
+            "filter": "F444W",
+            "shape": [
+              32,
+              32
+            ],
+            "x_min": 10.0,
+            "y_min": 12.0
+          },
+          "stdout": "Cut 2D fits saved to '<out>\\01_crop\\d1_JWST_F444W.fits'\n",
+          "warnings": [],
+          "wall_time_s": 0.004169600000750506
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "01_crop/d1_HST_F814W.fits",
+          "bytes": 8640,
+          "sha256": "2142a5d99dac46eb7bca2121317652ca3dedab24867d67e3e0f8663f63723a88"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F150W.fits",
+          "bytes": 8640,
+          "sha256": "152b9b394b071d834407339f6885f6804555e8da818803de91e6150ad70009fb"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F200W.fits",
+          "bytes": 8640,
+          "sha256": "da7f69a6ad1b10d51cf301a73100868e3408fced6f3b6540a64443f7b19a7267"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F277W.fits",
+          "bytes": 8640,
+          "sha256": "2dba669993263060a783bb9ed428aac99359d87990b2c7c645889c405d0beb54"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F356W.fits",
+          "bytes": 8640,
+          "sha256": "a3550b9429f42ed85e57760310397b91bbfe4635220ab4f9de9a941f014eecc5"
+        },
+        {
+          "root": "out",
+          "path": "01_crop/d1_JWST_F444W.fits",
+          "bytes": 8640,
+          "sha256": "6bc237e53eee6b878688c008f517b059f10209fee74b4b834a2ce870b07e8002"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "step": "crop",
+      "parameters": {
+        "step": "crop",
+        "mode": "common"
+      },
+      "directory": "02_crop",
+      "calls": [
+        {
+          "function": "lightstack.crop.get_common_sky_bbox",
+          "arguments": {
+            "fits_files": [
+              "<out>\\01_crop\\d1_HST_F814W.fits",
+              "<out>\\01_crop\\d1_JWST_F150W.fits",
+              "<out>\\01_crop\\d1_JWST_F200W.fits",
+              "<out>\\01_crop\\d1_JWST_F277W.fits",
+              "<out>\\01_crop\\d1_JWST_F356W.fits",
+              "<out>\\01_crop\\d1_JWST_F444W.fits"
+            ]
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_HST_F814W.fits",
+              "bytes": 8640,
+              "sha256": "2142a5d99dac46eb7bca2121317652ca3dedab24867d67e3e0f8663f63723a88"
+            },
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F150W.fits",
+              "bytes": 8640,
+              "sha256": "152b9b394b071d834407339f6885f6804555e8da818803de91e6150ad70009fb"
+            },
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F200W.fits",
+              "bytes": 8640,
+              "sha256": "da7f69a6ad1b10d51cf301a73100868e3408fced6f3b6540a64443f7b19a7267"
+            },
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F277W.fits",
+              "bytes": 8640,
+              "sha256": "2dba669993263060a783bb9ed428aac99359d87990b2c7c645889c405d0beb54"
+            },
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F356W.fits",
+              "bytes": 8640,
+              "sha256": "a3550b9429f42ed85e57760310397b91bbfe4635220ab4f9de9a941f014eecc5"
+            },
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F444W.fits",
+              "bytes": 8640,
+              "sha256": "6bc237e53eee6b878688c008f517b059f10209fee74b4b834a2ce870b07e8002"
+            }
+          ],
+          "outputs": [],
+          "metrics": {
+            "sky_bbox": {
+              "ra_min": 53.16267742482647,
+              "ra_max": 53.16277003798488,
+              "dec_min": -27.791616666615408,
+              "dec_max": -27.79140280086019
+            }
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.01179269999920507
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\01_crop\\d1_HST_F814W.fits",
+            "output_path": "<out>\\02_crop\\d1_HST_F814W.fits",
+            "sky_bbox": {
+              "ra_min": 53.16267742482647,
+              "ra_max": 53.16277003798488,
+              "dec_min": -27.791616666615408,
+              "dec_max": -27.79140280086019
+            }
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_HST_F814W.fits",
+              "bytes": 8640,
+              "sha256": "2142a5d99dac46eb7bca2121317652ca3dedab24867d67e3e0f8663f63723a88"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_HST_F814W.fits",
+              "bytes": 5760,
+              "sha256": "166028ada9f207380ead830de95f4b3088561023d2b75a63f2f0117e55309035"
+            }
+          ],
+          "metrics": {
+            "filter": "F814W",
+            "shape": [
+              17,
+              12
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.0034108999989257427
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\01_crop\\d1_JWST_F150W.fits",
+            "output_path": "<out>\\02_crop\\d1_JWST_F150W.fits",
+            "sky_bbox": {
+              "ra_min": 53.16267742482647,
+              "ra_max": 53.16277003798488,
+              "dec_min": -27.791616666615408,
+              "dec_max": -27.79140280086019
+            }
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F150W.fits",
+              "bytes": 8640,
+              "sha256": "152b9b394b071d834407339f6885f6804555e8da818803de91e6150ad70009fb"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F150W.fits",
+              "bytes": 5760,
+              "sha256": "f7b0fef804a70a9a2f3efd93910d890089e14ebd720fec2b6ad7084cb79fe72f"
+            }
+          ],
+          "metrics": {
+            "filter": "F150W",
+            "shape": [
+              32,
+              19
+            ],
+            "x_min": 13.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.003696599998875172
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\01_crop\\d1_JWST_F200W.fits",
+            "output_path": "<out>\\02_crop\\d1_JWST_F200W.fits",
+            "sky_bbox": {
+              "ra_min": 53.16267742482647,
+              "ra_max": 53.16277003798488,
+              "dec_min": -27.791616666615408,
+              "dec_max": -27.79140280086019
+            }
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F200W.fits",
+              "bytes": 8640,
+              "sha256": "da7f69a6ad1b10d51cf301a73100868e3408fced6f3b6540a64443f7b19a7267"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F200W.fits",
+              "bytes": 5760,
+              "sha256": "cab926df93f6498817a216d58074dd6dc04984522c3783e3cec825de35790f84"
+            }
+          ],
+          "metrics": {
+            "filter": "F200W",
+            "shape": [
+              32,
+              19
+            ],
+            "x_min": 13.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.0039342000000033295
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\01_crop\\d1_JWST_F277W.fits",
+            "output_path": "<out>\\02_crop\\d1_JWST_F277W.fits",
+            "sky_bbox": {
+              "ra_min": 53.16267742482647,
+              "ra_max": 53.16277003798488,
+              "dec_min": -27.791616666615408,
+              "dec_max": -27.79140280086019
+            }
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F277W.fits",
+              "bytes": 8640,
+              "sha256": "2dba669993263060a783bb9ed428aac99359d87990b2c7c645889c405d0beb54"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F277W.fits",
+              "bytes": 5760,
+              "sha256": "4d9be92f39d6d28f2ff8b0c85b96483254a5d2a4c8a0bcfa31e6e508406542b5"
+            }
+          ],
+          "metrics": {
+            "filter": "F277W",
+            "shape": [
+              20,
+              8
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.003182399999786867
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\01_crop\\d1_JWST_F356W.fits",
+            "output_path": "<out>\\02_crop\\d1_JWST_F356W.fits",
+            "sky_bbox": {
+              "ra_min": 53.16267742482647,
+              "ra_max": 53.16277003798488,
+              "dec_min": -27.791616666615408,
+              "dec_max": -27.79140280086019
+            }
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F356W.fits",
+              "bytes": 8640,
+              "sha256": "a3550b9429f42ed85e57760310397b91bbfe4635220ab4f9de9a941f014eecc5"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F356W.fits",
+              "bytes": 5760,
+              "sha256": "d36950276d8d3191572c2def8c3699bc3e8e63dd0662fd2c24dc4dc440b22d41"
+            }
+          ],
+          "metrics": {
+            "filter": "F356W",
+            "shape": [
+              19,
+              9
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.0034873000004154164
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\01_crop\\d1_JWST_F444W.fits",
+            "output_path": "<out>\\02_crop\\d1_JWST_F444W.fits",
+            "sky_bbox": {
+              "ra_min": 53.16267742482647,
+              "ra_max": 53.16277003798488,
+              "dec_min": -27.791616666615408,
+              "dec_max": -27.79140280086019
+            }
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "01_crop/d1_JWST_F444W.fits",
+              "bytes": 8640,
+              "sha256": "6bc237e53eee6b878688c008f517b059f10209fee74b4b834a2ce870b07e8002"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            }
+          ],
+          "metrics": {
+            "filter": "F444W",
+            "shape": [
+              20,
+              8
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004634900000382913
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "02_crop/d1_HST_F814W.fits",
+          "bytes": 5760,
+          "sha256": "166028ada9f207380ead830de95f4b3088561023d2b75a63f2f0117e55309035"
+        },
+        {
+          "root": "out",
+          "path": "02_crop/d1_JWST_F150W.fits",
+          "bytes": 5760,
+          "sha256": "f7b0fef804a70a9a2f3efd93910d890089e14ebd720fec2b6ad7084cb79fe72f"
+        },
+        {
+          "root": "out",
+          "path": "02_crop/d1_JWST_F200W.fits",
+          "bytes": 5760,
+          "sha256": "cab926df93f6498817a216d58074dd6dc04984522c3783e3cec825de35790f84"
+        },
+        {
+          "root": "out",
+          "path": "02_crop/d1_JWST_F277W.fits",
+          "bytes": 5760,
+          "sha256": "4d9be92f39d6d28f2ff8b0c85b96483254a5d2a4c8a0bcfa31e6e508406542b5"
+        },
+        {
+          "root": "out",
+          "path": "02_crop/d1_JWST_F356W.fits",
+          "bytes": 5760,
+          "sha256": "d36950276d8d3191572c2def8c3699bc3e8e63dd0662fd2c24dc4dc440b22d41"
+        },
+        {
+          "root": "out",
+          "path": "02_crop/d1_JWST_F444W.fits",
+          "bytes": 5760,
+          "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "step": "crop",
+      "parameters": {
+        "step": "crop",
+        "mode": "reference",
+        "reference": "F444W"
+      },
+      "directory": "03_crop",
+      "calls": [
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\02_crop\\d1_HST_F814W.fits",
+            "output_path": "<out>\\03_crop\\d1_HST_F814W.fits",
+            "ref_cutout": "<out>\\02_crop\\d1_JWST_F444W.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_HST_F814W.fits",
+              "bytes": 5760,
+              "sha256": "166028ada9f207380ead830de95f4b3088561023d2b75a63f2f0117e55309035"
+            },
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "03_crop/d1_HST_F814W.fits",
+              "bytes": 5760,
+              "sha256": "c02c7a9529fa946dc35ce78466e32a1ef29fc9f7b8ac780e133dae70a489518c"
+            }
+          ],
+          "metrics": {
+            "filter": "F814W",
+            "shape": [
+              16,
+              12
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004827900000236696
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\02_crop\\d1_JWST_F150W.fits",
+            "output_path": "<out>\\03_crop\\d1_JWST_F150W.fits",
+            "ref_cutout": "<out>\\02_crop\\d1_JWST_F444W.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F150W.fits",
+              "bytes": 5760,
+              "sha256": "f7b0fef804a70a9a2f3efd93910d890089e14ebd720fec2b6ad7084cb79fe72f"
+            },
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "03_crop/d1_JWST_F150W.fits",
+              "bytes": 5760,
+              "sha256": "f7b0fef804a70a9a2f3efd93910d890089e14ebd720fec2b6ad7084cb79fe72f"
+            }
+          ],
+          "metrics": {
+            "filter": "F150W",
+            "shape": [
+              32,
+              19
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004801299999598996
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\02_crop\\d1_JWST_F200W.fits",
+            "output_path": "<out>\\03_crop\\d1_JWST_F200W.fits",
+            "ref_cutout": "<out>\\02_crop\\d1_JWST_F444W.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F200W.fits",
+              "bytes": 5760,
+              "sha256": "cab926df93f6498817a216d58074dd6dc04984522c3783e3cec825de35790f84"
+            },
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "03_crop/d1_JWST_F200W.fits",
+              "bytes": 5760,
+              "sha256": "cab926df93f6498817a216d58074dd6dc04984522c3783e3cec825de35790f84"
+            }
+          ],
+          "metrics": {
+            "filter": "F200W",
+            "shape": [
+              32,
+              19
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004957799999829149
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\02_crop\\d1_JWST_F277W.fits",
+            "output_path": "<out>\\03_crop\\d1_JWST_F277W.fits",
+            "ref_cutout": "<out>\\02_crop\\d1_JWST_F444W.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F277W.fits",
+              "bytes": 5760,
+              "sha256": "4d9be92f39d6d28f2ff8b0c85b96483254a5d2a4c8a0bcfa31e6e508406542b5"
+            },
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "03_crop/d1_JWST_F277W.fits",
+              "bytes": 5760,
+              "sha256": "4d9be92f39d6d28f2ff8b0c85b96483254a5d2a4c8a0bcfa31e6e508406542b5"
+            }
+          ],
+          "metrics": {
+            "filter": "F277W",
+            "shape": [
+              20,
+              8
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.004953700001351535
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\02_crop\\d1_JWST_F356W.fits",
+            "output_path": "<out>\\03_crop\\d1_JWST_F356W.fits",
+            "ref_cutout": "<out>\\02_crop\\d1_JWST_F444W.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F356W.fits",
+              "bytes": 5760,
+              "sha256": "d36950276d8d3191572c2def8c3699bc3e8e63dd0662fd2c24dc4dc440b22d41"
+            },
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "03_crop/d1_JWST_F356W.fits",
+              "bytes": 5760,
+              "sha256": "d36950276d8d3191572c2def8c3699bc3e8e63dd0662fd2c24dc4dc440b22d41"
+            }
+          ],
+          "metrics": {
+            "filter": "F356W",
+            "shape": [
+              19,
+              9
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.00474220000069181
+        },
+        {
+          "function": "lightstack.crop.crop_using_reference",
+          "arguments": {
+            "fits_path": "<out>\\02_crop\\d1_JWST_F444W.fits",
+            "output_path": "<out>\\03_crop\\d1_JWST_F444W.fits",
+            "ref_cutout": "<out>\\02_crop\\d1_JWST_F444W.fits"
+          },
+          "inputs": [
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            },
+            {
+              "root": "out",
+              "path": "02_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            }
+          ],
+          "outputs": [
+            {
+              "root": "out",
+              "path": "03_crop/d1_JWST_F444W.fits",
+              "bytes": 5760,
+              "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+            }
+          ],
+          "metrics": {
+            "filter": "F444W",
+            "shape": [
+              20,
+              8
+            ],
+            "x_min": 0.0,
+            "y_min": 0.0
+          },
+          "stdout": "",
+          "warnings": [],
+          "wall_time_s": 0.005620800000542658
+        }
+      ],
+      "notes": [],
+      "outputs": [
+        {
+          "root": "out",
+          "path": "03_crop/d1_HST_F814W.fits",
+          "bytes": 5760,
+          "sha256": "c02c7a9529fa946dc35ce78466e32a1ef29fc9f7b8ac780e133dae70a489518c"
+        },
+        {
+          "root": "out",
+          "path": "03_crop/d1_JWST_F150W.fits",
+          "bytes": 5760,
+          "sha256": "f7b0fef804a70a9a2f3efd93910d890089e14ebd720fec2b6ad7084cb79fe72f"
+        },
+        {
+          "root": "out",
+          "path": "03_crop/d1_JWST_F200W.fits",
+          "bytes": 5760,
+          "sha256": "cab926df93f6498817a216d58074dd6dc04984522c3783e3cec825de35790f84"
+        },
+        {
+          "root": "out",
+          "path": "03_crop/d1_JWST_F277W.fits",
+          "bytes": 5760,
+          "sha256": "4d9be92f39d6d28f2ff8b0c85b96483254a5d2a4c8a0bcfa31e6e508406542b5"
+        },
+        {
+          "root": "out",
+          "path": "03_crop/d1_JWST_F356W.fits",
+          "bytes": 5760,
+          "sha256": "d36950276d8d3191572c2def8c3699bc3e8e63dd0662fd2c24dc4dc440b22d41"
+        },
+        {
+          "root": "out",
+          "path": "03_crop/d1_JWST_F444W.fits",
+          "bytes": 5760,
+          "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "01_crop/d1_HST_F814W.fits",
+      "bytes": 8640,
+      "sha256": "2142a5d99dac46eb7bca2121317652ca3dedab24867d67e3e0f8663f63723a88"
+    },
+    {
+      "path": "01_crop/d1_JWST_F150W.fits",
+      "bytes": 8640,
+      "sha256": "152b9b394b071d834407339f6885f6804555e8da818803de91e6150ad70009fb"
+    },
+    {
+      "path": "01_crop/d1_JWST_F200W.fits",
+      "bytes": 8640,
+      "sha256": "da7f69a6ad1b10d51cf301a73100868e3408fced6f3b6540a64443f7b19a7267"
+    },
+    {
+      "path": "01_crop/d1_JWST_F277W.fits",
+      "bytes": 8640,
+      "sha256": "2dba669993263060a783bb9ed428aac99359d87990b2c7c645889c405d0beb54"
+    },
+    {
+      "path": "01_crop/d1_JWST_F356W.fits",
+      "bytes": 8640,
+      "sha256": "a3550b9429f42ed85e57760310397b91bbfe4635220ab4f9de9a941f014eecc5"
+    },
+    {
+      "path": "01_crop/d1_JWST_F444W.fits",
+      "bytes": 8640,
+      "sha256": "6bc237e53eee6b878688c008f517b059f10209fee74b4b834a2ce870b07e8002"
+    },
+    {
+      "path": "02_crop/d1_HST_F814W.fits",
+      "bytes": 5760,
+      "sha256": "166028ada9f207380ead830de95f4b3088561023d2b75a63f2f0117e55309035"
+    },
+    {
+      "path": "02_crop/d1_JWST_F150W.fits",
+      "bytes": 5760,
+      "sha256": "f7b0fef804a70a9a2f3efd93910d890089e14ebd720fec2b6ad7084cb79fe72f"
+    },
+    {
+      "path": "02_crop/d1_JWST_F200W.fits",
+      "bytes": 5760,
+      "sha256": "cab926df93f6498817a216d58074dd6dc04984522c3783e3cec825de35790f84"
+    },
+    {
+      "path": "02_crop/d1_JWST_F277W.fits",
+      "bytes": 5760,
+      "sha256": "4d9be92f39d6d28f2ff8b0c85b96483254a5d2a4c8a0bcfa31e6e508406542b5"
+    },
+    {
+      "path": "02_crop/d1_JWST_F356W.fits",
+      "bytes": 5760,
+      "sha256": "d36950276d8d3191572c2def8c3699bc3e8e63dd0662fd2c24dc4dc440b22d41"
+    },
+    {
+      "path": "02_crop/d1_JWST_F444W.fits",
+      "bytes": 5760,
+      "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+    },
+    {
+      "path": "03_crop/d1_HST_F814W.fits",
+      "bytes": 5760,
+      "sha256": "c02c7a9529fa946dc35ce78466e32a1ef29fc9f7b8ac780e133dae70a489518c"
+    },
+    {
+      "path": "03_crop/d1_JWST_F150W.fits",
+      "bytes": 5760,
+      "sha256": "f7b0fef804a70a9a2f3efd93910d890089e14ebd720fec2b6ad7084cb79fe72f"
+    },
+    {
+      "path": "03_crop/d1_JWST_F200W.fits",
+      "bytes": 5760,
+      "sha256": "cab926df93f6498817a216d58074dd6dc04984522c3783e3cec825de35790f84"
+    },
+    {
+      "path": "03_crop/d1_JWST_F277W.fits",
+      "bytes": 5760,
+      "sha256": "4d9be92f39d6d28f2ff8b0c85b96483254a5d2a4c8a0bcfa31e6e508406542b5"
+    },
+    {
+      "path": "03_crop/d1_JWST_F356W.fits",
+      "bytes": 5760,
+      "sha256": "d36950276d8d3191572c2def8c3699bc3e8e63dd0662fd2c24dc4dc440b22d41"
+    },
+    {
+      "path": "03_crop/d1_JWST_F444W.fits",
+      "bytes": 5760,
+      "sha256": "9c3dd3357e45b1e120db59a2eed9fb956624a6ed890301be2a8afe77c8c91824"
+    }
+  ],
+  "wall_time_s": 2.4492165000010573
+}

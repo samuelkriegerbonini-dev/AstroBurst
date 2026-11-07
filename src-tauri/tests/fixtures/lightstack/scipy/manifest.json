@@ -2,9 +2,9 @@
   "manifest_version": 1,
   "kind": "scipy_reference",
   "created_by": "scripts/oracle/scipy_spline_goldens.py",
-  "regenerate": "docs\\notCommit\\oracle\\.venv\\Scripts\\python.exe -I scripts\\oracle\\scipy_spline_goldens.py",
+  "regenerate": "docs\\notCommit\\oracle\\.venv313\\Scripts\\python.exe -I scripts\\oracle\\scipy_spline_goldens.py",
   "versions": {
-    "python": "3.15.0",
+    "python": "3.13.17",
     "numpy": "2.5.4",
     "scipy": "1.18.1"
   },
@@ -34,13 +34,23 @@
       "path": "d1/psf/d1_psf_JWST_F277W_40mas.fits",
       "bytes": 8640,
       "sha256": "9dc1c3255f46c6b43b625adfb56bc2cde0ee39765a20a5a1d7718f587020a1fa"
+    },
+    {
+      "path": "d1/psf/d1_psf_JWST_F356W_40mas.fits",
+      "bytes": 8640,
+      "sha256": "08dcb481c4cc158e23c3cf73d005edd58c7a7a7d17e9b063fbf7b843fdaa6676"
+    },
+    {
+      "path": "d1/psf/d1_psf_JWST_F444W_40mas.fits",
+      "bytes": 8640,
+      "sha256": "ac870e2d584f97dfed46f128ce2c4829d9b55e697934b6bd47427bc1dcbaa66b"
     }
   ],
   "files": [
     {
       "path": "scipy_spline.json",
-      "bytes": 83428,
-      "sha256": "0c546b24d8ffdc684de8d6a5740655c710c9ecc319e01a3f96e2ec943e38cc9a"
+      "bytes": 83887,
+      "sha256": "91d6b47d6d109d298cf4aa68d276e9a30121a8f84e00d67944e31c894f26e99a"
     }
   ]
 }

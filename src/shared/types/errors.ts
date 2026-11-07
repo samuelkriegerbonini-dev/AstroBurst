@@ -2,13 +2,15 @@ export class TauriCommandError extends Error {
   command: string;
   code?: string;
   context?: Record<string, unknown>;
+  hint?: string;
 
-  constructor(command: string, message: string, code?: string, context?: Record<string, unknown>) {
+  constructor(command: string, message: string, code?: string, context?: Record<string, unknown>, hint?: string) {
     super(message);
     this.name = "TauriCommandError";
     this.command = command;
     this.code = code;
     this.context = context;
+    this.hint = hint;
   }
 }
 
@@ -35,6 +37,7 @@ export function normalizeTauriError(command: string, raw: unknown): TauriCommand
       String(obj.message ?? obj.error ?? JSON.stringify(raw)),
       typeof obj.code === "string" ? obj.code : undefined,
       isPlainObject(obj.context) ? { ...obj.context } : undefined,
+      typeof obj.hint === "string" && obj.hint.trim() ? obj.hint : undefined,
     );
   }
   return new TauriCommandError(command, String(raw));

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use astroburst_lib::core::alignment::wcs_reproject::{prefilter_coarse_target, reproject_to_grid};
 use astroburst_lib::core::astrometry::wcs::WcsTransform;
 use astroburst_lib::core::cubeprep::align::{
-    align_image, choose_reference, plan_alignment, AlignGrid, AlignInput, AlignOptions,
+    align_image, choose_reference, plan_alignment, AlignGrid, AlignInput, AlignOptions, AlignPlan,
     ReferenceCandidate, ReferencePolicy, ResampleMethod,
 };
 use astroburst_lib::core::cubeprep::cube::{
@@ -18,8 +18,9 @@ use astroburst_lib::core::cubeprep::cube::{
     CubeOptions, CubePlane, MaskMode, PlaneOrder, DEFAULT_FRAC_VALID,
 };
 use astroburst_lib::core::cubeprep::footprint::{
-    common_polygon, image_footprint, lightstack_square_rect, lightstack_wcs, polygon_contains,
-    square_polygon, CropFrame, CropShape, SkyPoint,
+    common_polygon, image_footprint, lightstack_bbox_rect, lightstack_common_bbox,
+    lightstack_footprint_bbox, lightstack_linear_wcs, lightstack_square_rect, lightstack_wcs,
+    polygon_contains, square_polygon, CropFrame, CropShape, SkyBbox, SkyPoint,
 };
 use astroburst_lib::core::cubeprep::kernel::{
     build_kernel, diagnose_kernel, kernel_file_name, wiener, EpsMode, KernelMethod, KernelOptions,
@@ -33,7 +34,7 @@ use astroburst_lib::core::cubeprep::psf_io::{
     prepare_psf, wcs_scale, PsfPrepareOptions, PsfResampleMethod, GAUSSIAN_SIGMA_TO_FWHM,
 };
 use astroburst_lib::core::imaging::convolve::{convolve_fft, ConvolveOptions, FftPlanCache};
-use astroburst_lib::core::imaging::cutout::fraction_on_image;
+use astroburst_lib::core::imaging::cutout::{cut_plane, fraction_on_image, shift_header, CutoutRect};
 use astroburst_lib::core::imaging::psf_estimation::{
     build_empirical_psf, stars_from_regions, EmpiricalPsfOptions, PsfStack, PsfStar, RadiusUnit,
 };
@@ -63,6 +64,9 @@ use sha2::{Digest, Sha256};
 const MANIFEST: &str = "manifest.json";
 const RECIPE: &str = "recipe_d1.json";
 const STARS_RECIPE: &str = "recipe_d1_stars.json";
+const EXACT_EDITS_RECIPE: &str = "recipe_d1_exact_edits.json";
+const CROP_PIXEL_RECIPE: &str = "recipe_d1_crop_pixel.json";
+const STARS_OVERSAMPLED_RECIPE: &str = "recipe_d1_stars_oversampled.json";
 const ORACLE_DIR_VAR: &str = "ASTROBURST_ORACLE_DIR";
 const WRITE_FIXTURES_VAR: &str = "ASTROBURST_WRITE_LIGHTSTACK_FIXTURES";
 const FIXTURE_BUDGET_BYTES: u64 = 3_100_000;
@@ -116,6 +120,22 @@ fn d1_stars_dir() -> PathBuf {
 
 fn oracle_d1_stars_dir() -> PathBuf {
     fixtures_dir().join("oracle_d1_stars")
+}
+
+fn recipes_dir() -> PathBuf {
+    fixtures_dir().join("recipes")
+}
+
+fn oracle_d1_exact_edits_dir() -> PathBuf {
+    fixtures_dir().join("oracle_d1_exact_edits")
+}
+
+fn oracle_d1_crop_pixel_dir() -> PathBuf {
+    fixtures_dir().join("oracle_d1_crop_pixel")
+}
+
+fn oracle_d1_stars_oversampled_dir() -> PathBuf {
+    fixtures_dir().join("oracle_d1_stars_oversampled")
 }
 
 fn read_json(path: &Path) -> Value {
@@ -213,15 +233,21 @@ fn manifest_errors(manifest_path: &Path) -> Vec<String> {
         let created_by = manifest["created_by"].as_str().unwrap_or("its generator");
         for input in manifest["inputs"].as_array().into_iter().flatten() {
             let name = input["path"].as_str().unwrap();
-            let unchanged = std::fs::read(fixtures.join(name)).is_ok_and(|bytes| {
-                Some(bytes.len() as u64) == input["bytes"].as_u64()
-                    && Some(sha256_hex(&bytes).as_str()) == input["sha256"].as_str()
-            });
-            if !unchanged {
-                errors.push(format!(
-                    "{}: input {name} differs from the manifest; re-run {created_by}",
+            match std::fs::read(fixtures.join(name)) {
+                Ok(bytes) => {
+                    if Some(bytes.len() as u64) != input["bytes"].as_u64()
+                        || Some(sha256_hex(&bytes).as_str()) != input["sha256"].as_str()
+                    {
+                        errors.push(format!(
+                            "{}: input {name} differs from the manifest; re-run {created_by}",
+                            manifest_path.display()
+                        ));
+                    }
+                }
+                Err(error) => errors.push(format!(
+                    "{}: input {name}: {error}",
                     manifest_path.display()
-                ));
+                )),
             }
         }
     }
@@ -410,17 +436,31 @@ fn scipy_reference_manifests_detect_a_changed_input() {
         "the error names the stale input and the script that regenerates the goldens: {}",
         errors[0]
     );
+    std::fs::remove_file(&flipped).unwrap();
+    let errors = manifest_errors(&kernels.join(MANIFEST));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains(&inputs[0]) && !errors[0].contains("re-run"),
+        "a missing input is reported with its read error, not as a stale golden: {}",
+        errors[0]
+    );
 }
 
 #[test]
 fn oracle_manifest_version_two_requires_the_lightstack_code_fingerprint() {
     let mut manifest = read_json(&oracle_d1_dir().join(MANIFEST));
     assert_eq!(
+        manifest["manifest_version"], 2,
+        "the committed oracle_d1 manifest records the LIGHTSTACK code fingerprint"
+    );
+    assert_eq!(
         oracle_manifest_errors(&manifest),
         Vec::<String>::new(),
-        "the committed version 1 manifest"
+        "the committed version 2 manifest"
     );
-    manifest["manifest_version"] = Value::from(2);
+    let source = manifest["lightstack_source"].as_object_mut().unwrap();
+    source.remove("code_sha256");
+    source.remove("modified_since_install");
     let errors = oracle_manifest_errors(&manifest);
     assert!(
         errors.iter().any(|error| error.contains("code_sha256"))
@@ -2389,6 +2429,7 @@ fn oracle_d1_units_match_counts_s_to_jy_and_mjy_sr_to_jy() {
 
 struct OracleAlignment {
     call: Value,
+    method: ResampleMethod,
     filters: Vec<String>,
     inputs: Vec<(HduHeader, Array2<f32>)>,
     outputs: Vec<(HduHeader, Array2<f32>)>,
@@ -2397,13 +2438,15 @@ struct OracleAlignment {
 }
 
 impl OracleAlignment {
-    fn load() -> Self {
-        let manifest = read_json(&oracle_d1_dir().join(MANIFEST));
+    fn load(goldens: &Path) -> Self {
+        let manifest = read_json(&goldens.join(MANIFEST));
         let align = oracle_calls(&manifest, "align");
         assert_eq!(align.len(), 1, "one align_reproject_fits call");
         let call = align[0].clone();
+        let method = serde_json::from_value(oracle_step(&manifest, "align")["parameters"]["method"].clone())
+            .unwrap_or_else(|error| panic!("{}: the recipe's align method: {error}", goldens.display()));
         let golden = |entry: &Value| {
-            let path = oracle_file(entry);
+            let path = oracle_entry_path_in(entry, &d1_dir(), goldens);
             let read = extract_image_mmap_by_index(&open(&path), 0)
                 .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
             (read.header, read.image)
@@ -2433,6 +2476,7 @@ impl OracleAlignment {
         let reference_wcs = header_wcs(&inputs[reference].0).unwrap();
         Self {
             call,
+            method,
             filters,
             inputs,
             outputs,
@@ -2455,7 +2499,7 @@ impl OracleAlignment {
 
     fn options(&self, area_rule: AreaRule) -> AlignOptions {
         AlignOptions {
-            method: ResampleMethod::Bilinear,
+            method: self.method,
             reference: ReferencePolicy::Filter {
                 filter: self.filters[self.reference].clone(),
             },
@@ -2472,7 +2516,7 @@ impl OracleAlignment {
 
 #[test]
 fn oracle_d1_bilinear_alignment_matches_align_reproject_fits() {
-    let alignment = OracleAlignment::load();
+    let alignment = OracleAlignment::load(&oracle_d1_dir());
     let grid = alignment.grid();
     let options = alignment.options(AreaRule::Lightstack);
     let truth = read_json(&d1_dir().join(MANIFEST))["truth"].clone();
@@ -2499,13 +2543,7 @@ fn oracle_d1_bilinear_alignment_matches_align_reproject_fits() {
         );
         let got = align_image(&input, &grid, &options, &plan).image;
         assert_eq!(got.dim(), expected.dim(), "{filter}");
-        let class = if !plan.reprojected {
-            AlignClass::Exact
-        } else if header.get("A_ORDER").is_some() {
-            AlignClass::Equivalent
-        } else {
-            AlignClass::Float
-        };
+        let class = align_class(&plan, header);
         classes.insert(class);
         let error = assert_align_class(filter, class, &got, &oracle_file(output));
         match class {
@@ -2560,11 +2598,97 @@ fn oracle_d1_bilinear_alignment_matches_align_reproject_fits() {
     );
 }
 
+const D1_EXACT_NAN_ONLY_IN_LIGHTSTACK: [(usize, usize); 4] = [(21, 22), (21, 24), (23, 20), (24, 24)];
+
+#[test]
+fn oracle_d1_exact_alignment_matches_align_reproject_fits() {
+    let goldens = oracle_d1_exact_edits_dir();
+    let alignment = OracleAlignment::load(&goldens);
+    let grid = alignment.grid();
+    let options = alignment.options(AreaRule::Lightstack);
+    assert_eq!(
+        (options.method, &alignment.call["arguments"]["method"]),
+        (ResampleMethod::Exact, &Value::from("exact")),
+        "the exact-edits recipe aligns with method exact, which align_reproject_fits runs as reproject_exact"
+    );
+    let mut classes = BTreeSet::new();
+    for (((filter, (header, image)), (_, expected)), output) in alignment
+        .filters
+        .iter()
+        .zip(&alignment.inputs)
+        .zip(&alignment.outputs)
+        .zip(alignment.call["outputs"].as_array().unwrap())
+    {
+        let wcs = header_wcs(header).unwrap();
+        let input = AlignInput {
+            image,
+            header,
+            wcs: &wcs,
+        };
+        let plan = plan_alignment(&input, &grid, &options).unwrap();
+        assert_eq!(
+            Some(plan.reprojected),
+            alignment.plane_metrics(filter)["reprojected"].as_bool(),
+            "{filter}: AstroBurst and align_reproject_fits disagree on whether the plane is reprojected"
+        );
+        let mut got = align_image(&input, &grid, &options, &plan).image;
+        assert_eq!(got.dim(), expected.dim(), "{filter}");
+        let class = align_class(&plan, header);
+        classes.insert(class);
+        let nan_only_in_lightstack: Vec<(usize, usize)> = got
+            .indexed_iter()
+            .filter(|((y, x), value)| value.is_finite() && !expected[[*y, *x]].is_finite())
+            .map(|((y, x), _)| (y, x))
+            .collect();
+        let nan_only_in_astroburst = got
+            .indexed_iter()
+            .filter(|((y, x), value)| !value.is_finite() && expected[[*y, *x]].is_finite())
+            .count();
+        if class == AlignClass::Equivalent {
+            assert_eq!(
+                nan_only_in_astroburst, 0,
+                "{filter}: AstroBurst leaves NaN where reproject_exact has a value"
+            );
+            assert_eq!(
+                nan_only_in_lightstack, D1_EXACT_NAN_ONLY_IN_LIGHTSTACK,
+                "{filter}: the expected exact-path divergence (y, x): under OD-L002 rule (c) AstroBurst NaNs an output only when non-finite input covers more than the map tolerance of it, and reproject_exact also NaNs these SIP-plane pixels whose overlap with NaN input is below 1e-6 of their area"
+            );
+            for &(y, x) in &nan_only_in_lightstack {
+                got[[y, x]] = f32::NAN;
+            }
+        }
+        let error = assert_align_class(
+            filter,
+            class,
+            &got,
+            &oracle_entry_path_in(output, &d1_dir(), &goldens),
+        );
+        eprintln!(
+            "{filter}: {class:?}, {error:.2e} against align_reproject_fits exact; NaN only in LIGHTSTACK at (y, x) {nan_only_in_lightstack:?}, only in AstroBurst at {nan_only_in_astroburst} pixels"
+        );
+    }
+    assert_eq!(
+        classes.into_iter().collect::<Vec<_>>(),
+        [AlignClass::Exact, AlignClass::Float, AlignClass::Equivalent],
+        "the D1 exact alignment exercises the E, F and I classes"
+    );
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum AlignClass {
     Exact,
     Float,
     Equivalent,
+}
+
+fn align_class(plan: &AlignPlan, header: &HduHeader) -> AlignClass {
+    if !plan.reprojected {
+        AlignClass::Exact
+    } else if header.get("A_ORDER").is_some() {
+        AlignClass::Equivalent
+    } else {
+        AlignClass::Float
+    }
 }
 
 fn identical(a: &Array2<f32>, b: &Array2<f32>) -> bool {
@@ -2655,9 +2779,8 @@ fn oracle_file(entry: &Value) -> PathBuf {
     oracle_d1_dir().join(entry["path"].as_str().unwrap())
 }
 
-fn oracle_cube(entry: &Value, registry: &FilterRegistry) -> Cube {
-    let path = oracle_file(entry);
-    let file = open(&path);
+fn oracle_cube(path: &Path, registry: &FilterRegistry) -> Cube {
+    let file = open(path);
     let header = extract_header_by_index(&file, 0).unwrap();
     let planes = extract_image_planes_by_index(&file, 0)
         .unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
@@ -2726,7 +2849,7 @@ fn oracle_d1_cube_matches_build_datacube() {
     let ours = assemble_cube(inputs, reference, base, options)
         .unwrap()
         .cube;
-    let golden = oracle_cube(&call["outputs"][0], &registry);
+    let golden = oracle_cube(&oracle_file(&call["outputs"][0]), &registry);
     assert_eq!(ours.planes.len(), golden.planes.len());
     for (z, (a, b)) in ours.planes.iter().zip(&golden.planes).enumerate() {
         assert!(
@@ -2771,8 +2894,8 @@ fn oracle_d1_drop_invalid_matches_build_valid_datacube() {
         .iter()
         .find(|call| call["function"] == "lightstack.datacube.build_valid_datacube")
         .expect("a build_valid_datacube call");
-    let source = oracle_cube(&call["inputs"][0], &registry);
-    let golden = oracle_cube(&call["outputs"][0], &registry);
+    let source = oracle_cube(&oracle_file(&call["inputs"][0]), &registry);
+    let golden = oracle_cube(&oracle_file(&call["outputs"][0]), &registry);
     let (valid, removed) = drop_invalid_planes(
         &source,
         call["arguments"]["threshold"].as_f64().unwrap(),
@@ -2812,25 +2935,350 @@ fn oracle_d1_drop_invalid_matches_build_valid_datacube() {
     }
 }
 
+fn assert_same_planes(label: &str, ours: &Cube, golden: &Cube) {
+    assert_eq!(ours.planes.len(), golden.planes.len(), "{label}: planes");
+    for (z, (a, b)) in ours.planes.iter().zip(&golden.planes).enumerate() {
+        assert!(
+            identical(a, b),
+            "{label}: plane {z} ({}) is not LIGHTSTACK's bit for bit",
+            ours.filters[z].filter
+        );
+    }
+}
+
+fn assert_same_cards(label: &str, ours: &HduHeader, golden: &HduHeader, keys: &[&str]) {
+    for key in keys {
+        let expected = golden
+            .get(key)
+            .unwrap_or_else(|| panic!("{label}: the golden has no {key}"));
+        assert!(
+            same_card(ours.get(key), expected),
+            "{label}: {key} is {:?}, LIGHTSTACK wrote {expected:?}",
+            ours.get(key)
+        );
+    }
+}
+
+fn assert_same_sky(label: &str, ours: &HduHeader, golden: &HduHeader) {
+    let wcs = |header: &HduHeader, whose: &str| {
+        header_wcs(header)
+            .unwrap_or_else(|error| panic!("{label}: the {whose} celestial WCS: {error:#}"))
+    };
+    let (ours_wcs, golden_wcs) = (wcs(ours, "AstroBurst"), wcs(golden, "golden"));
+    let last = |key: &str| {
+        golden
+            .get_f64(key)
+            .unwrap_or_else(|| panic!("{label}: the golden has no {key}"))
+            - 1.0
+    };
+    let (right, top) = (last("NAXIS1"), last("NAXIS2"));
+    for (x, y) in [
+        (0.0, 0.0),
+        (right, 0.0),
+        (0.0, top),
+        (right, top),
+        (right / 2.0, top / 2.0),
+    ] {
+        let (a, b) = (
+            ours_wcs.pixel_to_world(x, y),
+            golden_wcs.pixel_to_world(x, y),
+        );
+        assert!(
+            (a.ra - b.ra).abs() < 1e-12 && (a.dec - b.dec).abs() < 1e-12,
+            "{label}: pixel ({x}, {y}) is at RA {} Dec {} in AstroBurst's header and RA {} Dec {} in the golden's",
+            a.ra,
+            a.dec,
+            b.ra,
+            b.dec
+        );
+    }
+}
+
+#[test]
+fn oracle_d1_cube_edits_match_lightstack_on_its_own_cubes() {
+    let goldens = oracle_d1_exact_edits_dir();
+    let manifest = read_json(&goldens.join(MANIFEST));
+    let registry = FilterRegistry::builtin();
+    let cube_at =
+        |entry: &Value| oracle_cube(&oracle_entry_path_in(entry, &d1_dir(), &goldens), &registry);
+    let calls = oracle_calls(&manifest, "edit");
+    let functions: Vec<&str> = calls
+        .iter()
+        .map(|call| call["function"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        functions,
+        [
+            "lightstack.datacube.remove_filter",
+            "lightstack.datacube.cut_region_datacube",
+            "lightstack.datacube.update_cube_header",
+            "lightstack.datacube.apply_reference_nan_mask"
+        ]
+    );
+    let [removal, cut, metadata, mask] = calls[..] else {
+        unreachable!()
+    };
+
+    let source = cube_at(&removal["inputs"][0]);
+    let golden = cube_at(&removal["outputs"][0]);
+    let removed = remove_filter(
+        &source,
+        removal["arguments"]["filter_to_remove"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_same_planes("remove_filter", &removed, &golden);
+    let mut keys = vec!["NFILTERS".to_string(), "FILTERS".to_string()];
+    keys.extend((1..=golden.planes.len()).map(|n| format!("FILTER{n}")));
+    assert_same_cards(
+        "remove_filter",
+        &removed.header,
+        &golden.header,
+        &keys.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let depth = source.planes.len();
+    let datasets = |cube: &Cube| {
+        (
+            card(&cube.header, "DATASETS"),
+            (1..=depth)
+                .map(|n| card(&cube.header, &format!("DATASET{n}")))
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        datasets(&golden),
+        datasets(&source),
+        "remove_filter: LIGHTSTACK leaves DATASETS and DATASET1..{depth} as they were before the removal"
+    );
+    let kept: Vec<&str> = removed
+        .filters
+        .iter()
+        .map(|plane| plane.dataset.as_str())
+        .collect();
+    assert_eq!(
+        datasets(&removed),
+        (
+            Some(kept.join(",")),
+            kept.iter()
+                .map(|dataset| Some(dataset.to_string()))
+                .chain([None])
+                .collect::<Vec<_>>()
+        ),
+        "remove_filter: AstroBurst rewrites DATASETS and DATASETn for the kept planes, the explicit divergence from LIGHTSTACK's stale cards"
+    );
+
+    let source = cube_at(&cut["inputs"][0]);
+    let golden = cube_at(&cut["outputs"][0]);
+    let bound = |key: &str| cut["arguments"][key].as_i64().unwrap();
+    let cropped = subcube(
+        &source,
+        bound("x_start"),
+        bound("x_end"),
+        bound("y_start"),
+        bound("y_end"),
+    )
+    .unwrap();
+    assert_same_planes("cut_region_datacube", &cropped, &golden);
+    assert_same_cards(
+        "cut_region_datacube",
+        &cropped.header,
+        &golden.header,
+        &["CRPIX1", "CRPIX2", "XMINPIX", "XMAXPIX", "YMINPIX", "YMAXPIX", "NFILTERS", "FILTERS"],
+    );
+    assert_same_sky("cut_region_datacube", &cropped.header, &golden.header);
+
+    let mut updated = cube_at(&metadata["inputs"][0]);
+    let golden = cube_at(&metadata["outputs"][0]);
+    let arguments = &metadata["arguments"];
+    assert_eq!(arguments["use_brightest_pixel"], false);
+    let centre = update_metadata(
+        &mut updated,
+        arguments["redshift"].as_f64(),
+        Some((
+            arguments["ra_center"].as_f64().unwrap(),
+            arguments["dec_center"].as_f64().unwrap(),
+        )),
+        false,
+    )
+    .unwrap();
+    assert_eq!(centre.kind, "USER");
+    assert_same_planes("update_cube_header", &updated, &golden);
+    assert_same_cards(
+        "update_cube_header",
+        &updated.header,
+        &golden.header,
+        &["REDSHIFT", "GAL_RA", "GAL_DEC", "CEN_TYPE"],
+    );
+
+    let mut masked = cube_at(&mask["inputs"][0]);
+    let golden = cube_at(&mask["outputs"][0]);
+    let slice = mask["arguments"]["reference_slice"].as_u64().unwrap() as usize;
+    let nan_pixels = |cube: &Cube| -> usize {
+        cube.planes
+            .iter()
+            .map(|plane| plane.iter().filter(|value| value.is_nan()).count())
+            .sum()
+    };
+    let before = nan_pixels(&masked);
+    let newly = apply_nan_mask(&mut masked, MaskMode::Reference, slice, &[]).unwrap();
+    assert_same_planes("apply_reference_nan_mask", &masked, &golden);
+    assert!(
+        newly > 0 && newly == nan_pixels(&golden) - before,
+        "apply_reference_nan_mask: the NaN mask of slice {slice} adds {newly} NaN pixels, LIGHTSTACK's {}",
+        nan_pixels(&golden) - before
+    );
+    eprintln!(
+        "remove_filter, cut_region_datacube, update_cube_header and apply_reference_nan_mask (slice {slice}, {newly} pixels masked) match LIGHTSTACK on its own cubes; DATASETS {:?} against LIGHTSTACK's stale {:?}",
+        datasets(&removed).0,
+        datasets(&source).0
+    );
+}
+
+#[test]
+fn oracle_d1_pixel_common_and_reference_crops_match_lightstack() {
+    let goldens = oracle_d1_crop_pixel_dir();
+    let manifest = read_json(&goldens.join(MANIFEST));
+    let path = |entry: &Value| oracle_entry_path_in(entry, &d1_dir(), &goldens);
+    let common_bbox = "lightstack.crop.get_common_sky_bbox";
+    let mut modes = Vec::new();
+    let mut sip_planes = Vec::new();
+    for step in manifest["steps"].as_array().unwrap() {
+        let directory = step["directory"].as_str().unwrap();
+        let mode = step["parameters"]["mode"].as_str().unwrap();
+        modes.push(mode);
+        let calls = step["calls"].as_array().unwrap();
+        let common = calls
+            .iter()
+            .find(|call| call["function"] == common_bbox)
+            .map(|call| {
+                let bboxes: Vec<SkyBbox> = call["inputs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| {
+                        let (header, image) = first_image(&path(entry));
+                        lightstack_footprint_bbox(
+                            &lightstack_wcs(&header).unwrap(),
+                            (image.ncols(), image.nrows()),
+                        )
+                        .unwrap()
+                    })
+                    .collect();
+                let common = lightstack_common_bbox(&bboxes).unwrap();
+                let recorded = &call["metrics"]["sky_bbox"];
+                for (key, ours) in [
+                    ("ra_min", common.ra_min),
+                    ("ra_max", common.ra_max),
+                    ("dec_min", common.dec_min),
+                    ("dec_max", common.dec_max),
+                ] {
+                    let theirs = recorded[key].as_f64().unwrap();
+                    assert!(
+                        (ours - theirs).abs() <= 1e-10,
+                        "{directory}: the common {key} is {ours} deg, get_common_sky_bbox gave {theirs} deg"
+                    );
+                }
+                common
+            });
+        for call in calls.iter().filter(|call| call["function"] != common_bbox) {
+            let label = format!("{directory} {}", call["metrics"]["filter"].as_str().unwrap());
+            let (header, image) = first_image(&path(&call["inputs"][0]));
+            let dims = (image.ncols(), image.nrows());
+            let linear = || lightstack_linear_wcs(&header).unwrap();
+            let rect = match mode {
+                "pixel" => {
+                    let bound = |key: &str| call["arguments"][key].as_i64().unwrap();
+                    CutoutRect {
+                        x0: bound("x_start"),
+                        y0: bound("y_start"),
+                        width: (bound("x_end") - bound("x_start")) as usize,
+                        height: (bound("y_end") - bound("y_start")) as usize,
+                    }
+                }
+                "common" => lightstack_bbox_rect(&linear(), dims, common.as_ref().unwrap()).unwrap(),
+                "reference" => {
+                    let (reference_header, reference) = first_image(&path(&call["inputs"][1]));
+                    let bbox = lightstack_footprint_bbox(
+                        &lightstack_wcs(&reference_header).unwrap(),
+                        (reference.ncols(), reference.nrows()),
+                    )
+                    .unwrap();
+                    lightstack_bbox_rect(&linear(), dims, &bbox).unwrap()
+                }
+                other => panic!("{label}: no comparison for the crop mode {other}"),
+            };
+            let metrics = &call["metrics"];
+            let edge = |key: &str| metrics[key].as_f64().unwrap().round() as i64;
+            let side = |axis: usize| metrics["shape"][axis].as_u64().unwrap() as usize;
+            assert_eq!(
+                (rect.x0, rect.y0, rect.width, rect.height),
+                (edge("x_min"), edge("y_min"), side(1), side(0)),
+                "{label}: AstroBurst's rectangle (x0, y0, width, height) against {}",
+                call["function"]
+            );
+            let (golden_header, golden) = first_image(&path(&call["outputs"][0]));
+            assert!(
+                identical(&cut_plane(&image, &rect), &golden),
+                "{label}: the cropped pixels are not LIGHTSTACK's bit for bit"
+            );
+            let shifted = shift_header(&header, &rect);
+            assert_same_cards(&label, &shifted, &golden_header, &["CRPIX1", "CRPIX2"]);
+            if header.get("A_ORDER").is_some() {
+                assert!(
+                    golden_header.get("A_ORDER").is_none() && shifted.get("A_ORDER").is_some(),
+                    "{label}: cut_region_2d writes the crop through astropy's WCS.to_header(), which drops SIP, while AstroBurst's cutout header keeps it"
+                );
+                sip_planes.push(label.clone());
+            }
+            eprintln!(
+                "{label}: rectangle {rect:?} and pixels identical to {}",
+                call["function"]
+            );
+        }
+    }
+    assert_eq!(modes, ["pixel", "common", "reference"]);
+    assert_eq!(
+        sip_planes,
+        ["01_crop F814W"],
+        "only the raw F814W carries SIP; LIGHTSTACK's later crops start from its SIP-free 01_crop files"
+    );
+}
+
 #[test]
 fn oracle_manifest_records_library_versions() {
     let mut errors = Vec::new();
     for (goldens, data, recipe) in [
-        (oracle_d1_dir(), d1_dir(), RECIPE),
-        (oracle_d1_stars_dir(), d1_stars_dir(), STARS_RECIPE),
+        (oracle_d1_dir(), d1_dir(), d1_dir().join(RECIPE)),
+        (oracle_d1_stars_dir(), d1_stars_dir(), d1_stars_dir().join(STARS_RECIPE)),
+        (oracle_d1_exact_edits_dir(), d1_dir(), recipes_dir().join(EXACT_EDITS_RECIPE)),
+        (oracle_d1_crop_pixel_dir(), d1_dir(), recipes_dir().join(CROP_PIXEL_RECIPE)),
+        (
+            oracle_d1_stars_oversampled_dir(),
+            d1_stars_dir(),
+            recipes_dir().join(STARS_OVERSAMPLED_RECIPE),
+        ),
     ] {
         let manifest = read_json(&goldens.join(MANIFEST));
         let folder = goldens.file_name().unwrap().to_string_lossy().into_owned();
+        if manifest["manifest_version"]
+            .as_u64()
+            .is_none_or(|version| version < 2)
+        {
+            errors.push(format!(
+                "{folder}: manifest_version {} records no LIGHTSTACK code fingerprint; regenerate it with scripts/oracle/lightstack_oracle.py",
+                manifest["manifest_version"]
+            ));
+        }
         errors.extend(
             oracle_manifest_errors(&manifest)
                 .into_iter()
                 .map(|error| format!("{folder}: {error}")),
         );
-        let recipe_bytes = std::fs::read(data.join(recipe)).unwrap();
+        let recipe_bytes = std::fs::read(&recipe)
+            .unwrap_or_else(|error| panic!("{}: {error}", recipe.display()));
         if manifest["recipe"]["sha256"].as_str() != Some(sha256_hex(&recipe_bytes).as_str()) {
             errors.push(format!(
                 "{folder}: the goldens were not produced from {}",
-                data.join(recipe).display()
+                recipe.display()
             ));
         }
         let committed: BTreeMap<String, String> = listed_files(&read_json(&data.join(MANIFEST)))
@@ -2897,7 +3345,7 @@ fn oracle_reproduces_the_d1_area_factor_and_gaussian_psf_fwhm() {
         align[0]["metrics"]["planes"]["F277W"]["reprojected"], false,
         "F277W shares the F444W grid"
     );
-    let alignment = OracleAlignment::load();
+    let alignment = OracleAlignment::load(&oracle_d1_dir());
     let grid = alignment.grid();
     let (lightstack, keep) = (
         alignment.options(AreaRule::Lightstack),
@@ -3836,9 +4284,27 @@ fn first_image(path: &Path) -> (HduHeader, Array2<f32>) {
 
 #[test]
 fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
-    let manifest = read_json(&oracle_d1_stars_dir().join(MANIFEST));
+    let plain = assert_empirical_psfs_match_build_empirical_psf(&oracle_d1_stars_dir());
+    let cleaned =
+        assert_empirical_psfs_match_build_empirical_psf(&oracle_d1_stars_oversampled_dir());
+    assert_eq!(
+        plain,
+        Vec::<f64>::new(),
+        "without radial cleaning no star has a cleaning radius"
+    );
+    assert_eq!(
+        cleaned,
+        [11.0, 11.0, 11.0, 11.0, 13.0],
+        "the radial cleaning radii of s1 to s5 in pixels"
+    );
+}
+
+fn assert_empirical_psfs_match_build_empirical_psf(goldens: &Path) -> Vec<f64> {
+    let manifest = read_json(&goldens.join(MANIFEST));
     let registry = FilterRegistry::builtin();
-    let path = |entry: &Value| oracle_entry_path_in(entry, &d1_stars_dir(), &oracle_d1_stars_dir());
+    let path = |entry: &Value| oracle_entry_path_in(entry, &d1_stars_dir(), goldens);
+    let folder = goldens.file_name().unwrap().to_string_lossy().into_owned();
+    let mut cleaning_radii = Vec::new();
     let recipe = &oracle_step(&manifest, "psfs")["parameters"];
     let defaults = serde_json::to_value(EmpiricalPsfOptions::default()).unwrap();
     let calls: Vec<&Value> = oracle_calls(&manifest, "psfs")
@@ -3855,14 +4321,14 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
         assert_eq!(
             arguments["oversampling_order"].as_u64(),
             Some(3),
-            "{filter}: only the cubic oversampling of the default recipe is ported"
+            "{folder} {filter}: only the cubic oversampling of the default recipe is ported"
         );
         for (key, default) in defaults.as_object().unwrap() {
             if key == "stack" {
                 continue;
             }
             let recorded = arguments.get(key).unwrap_or_else(|| {
-                panic!("{filter}: the effective arguments of build_empirical_psf lack {key}")
+                panic!("{folder} {filter}: the effective arguments of build_empirical_psf lack {key}")
             });
             let (expected, source) = match recipe.get(key) {
                 Some(set) => (set, "the recipe sets"),
@@ -3870,14 +4336,14 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
             };
             assert!(
                 same_json(recorded, expected),
-                "{filter} {key}: build_empirical_psf ran with {recorded}, {source} {expected}"
+                "{folder} {filter} {key}: build_empirical_psf ran with {recorded}, {source} {expected}"
             );
         }
         let options: EmpiricalPsfOptions = serde_json::from_value(arguments.clone()).unwrap();
         assert_eq!(
             options.stack,
             PsfStack::Median,
-            "{filter}: build_empirical_psf median-stacks the cutouts"
+            "{folder} {filter}: build_empirical_psf median-stacks the cutouts"
         );
         let inputs: Vec<PathBuf> = call["inputs"]
             .as_array()
@@ -3896,7 +4362,7 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
             })
             .collect();
         let [fits] = named_for_the_filter[..] else {
-            panic!("{filter}: get_psf_input_files pairs one FITS named for the filter, the inputs hold {named_for_the_filter:?}");
+            panic!("{folder} {filter}: get_psf_input_files pairs one FITS named for the filter, the inputs hold {named_for_the_filter:?}");
         };
         let region_name = format!("stars_{}.reg", filter.to_lowercase());
         let region = inputs
@@ -3906,7 +4372,7 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
                     .file_name()
                     .is_some_and(|name| name == region_name.as_str())
             })
-            .unwrap_or_else(|| panic!("{filter}: no {region_name} among the inputs"));
+            .unwrap_or_else(|| panic!("{folder} {filter}: no {region_name} among the inputs"));
         let (header, image) = first_image(fits);
         let region_text = std::fs::read_to_string(region).unwrap();
         let stars: Vec<PsfStar> = physical_box_stars(&region_text)
@@ -3921,13 +4387,13 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
         assert_eq!(
             built.stars_used(),
             stars.len(),
-            "{filter}: LIGHTSTACK uses every listed star"
+            "{folder} {filter}: LIGHTSTACK uses every listed star"
         );
         let metrics = &call["metrics"];
         assert_eq!(
             metrics["nstars"].as_u64(),
             Some(stars.len() as u64),
-            "{filter}: stars in build_empirical_psf"
+            "{folder} {filter}: stars in build_empirical_psf"
         );
         let half = options.cutout_size as f64 / 2.0;
         let mut largest = [0.0f64; 4];
@@ -3937,7 +4403,7 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
             assert_eq!(
                 serde_json::to_value(report.centroid).unwrap(),
                 centre["method"],
-                "{filter} {name}: centroid method"
+                "{folder} {filter} {name}: centroid method"
             );
             let offset = [
                 report.centre_x.unwrap() - (report.x - half).ceil() - centre["x"].as_f64().unwrap(),
@@ -3953,7 +4419,7 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
                 relative(report.aperture_flux, "fluxes"),
             ];
             eprintln!(
-                "{filter} {name}: centre {:+.2e} {:+.2e} px, relative background {:.2e}, background std {:.2e}, aperture flux {:.2e} against build_empirical_psf",
+                "{folder} {filter} {name}: centre {:+.2e} {:+.2e} px, relative background {:.2e}, background std {:.2e}, aperture flux {:.2e} against build_empirical_psf",
                 offset[0], offset[1], differences[1], differences[2], differences[3]
             );
             for (quantity, difference) in [
@@ -3967,15 +4433,26 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
             {
                 assert!(
                     difference <= 1e-9,
-                    "{filter} {name}: {quantity} differs from build_empirical_psf by {difference:e} (N class, 1e-9)"
+                    "{folder} {filter} {name}: {quantity} differs from build_empirical_psf by {difference:e} (N class, 1e-9)"
                 );
             }
             for (worst, difference) in largest.iter_mut().zip(differences) {
                 *worst = worst.max(difference);
             }
+            assert_eq!(
+                report.cleaning_radius,
+                metrics["cleaning_radii"][name].as_f64(),
+                "{folder} {filter} {name}: radial cleaning radius in pixels against build_empirical_psf"
+            );
+            cleaning_radii.extend(report.cleaning_radius);
         }
+        assert_eq!(
+            call["outputs"].as_array().unwrap().len(),
+            1 + usize::from(options.oversampling.is_some()),
+            "{folder} {filter}: build_empirical_psf writes the PSF plus one oversampled PSF when the recipe oversamples"
+        );
         let golden = f64_planes(&path(&call["outputs"][0])).1.remove(0);
-        let error = worst_relative(filter, &built.psf, &golden);
+        let error = worst_relative(&format!("{folder} {filter}"), &built.psf, &golden);
         let (ours_fwhm, golden_fwhm) = (
             fit_gaussian(&built.psf).unwrap().fwhm_px,
             fit_gaussian(&golden).unwrap().fwhm_px,
@@ -3996,7 +4473,7 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
             .map(|(_, got, expected)| (got - expected).abs())
             .fold(0.0f64, f64::max);
         eprintln!(
-            "{filter}: {} stars; largest per-star difference: centre {:.2e} px, background {:.2e}, background std {:.2e}, aperture flux {:.2e}; PSF max difference {error:.2e} of the peak, Gaussian FWHM {ours_fwhm:.6} px against {golden_fwhm:.6} px ({:.2e} relative), EE at 1 to 3 FWHM within {ee_difference:.2e}",
+            "{folder} {filter}: {} stars; largest per-star difference: centre {:.2e} px, background {:.2e}, background std {:.2e}, aperture flux {:.2e}; PSF max difference {error:.2e} of the peak, Gaussian FWHM {ours_fwhm:.6} px against {golden_fwhm:.6} px ({:.2e} relative), EE at 1 to 3 FWHM within {ee_difference:.2e}",
             stars.len(),
             largest[0],
             largest[1],
@@ -4004,16 +4481,16 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
             largest[3],
             relative_difference(ours_fwhm, golden_fwhm)
         );
-        assert!(error <= 1e-9, "{filter}: {error:e} of the peak (N class)");
-        assert!(error < 1e-3, "{filter}: {error:e} of the peak (T12)");
+        assert!(error <= 1e-9, "{folder} {filter}: {error:e} of the peak (N class)");
+        assert!(error < 1e-3, "{folder} {filter}: {error:e} of the peak (T12)");
         assert!(
             relative_difference(ours_fwhm, golden_fwhm) < 0.01,
-            "{filter}: FWHM {ours_fwhm} px against {golden_fwhm} px"
+            "{folder} {filter}: FWHM {ours_fwhm} px against {golden_fwhm} px"
         );
         for (factor, got, expected) in energies {
             assert!(
                 (got - expected).abs() <= 0.005,
-                "{filter}: encircled energy at {factor} FWHM {got} against {expected}"
+                "{folder} {filter}: encircled energy at {factor} FWHM {got} against {expected}"
             );
         }
         if let Some(entry) = call["outputs"].as_array().unwrap().get(1) {
@@ -4022,13 +4499,18 @@ fn oracle_d1_empirical_psf_matches_build_empirical_psf() {
                 .oversampled
                 .as_ref()
                 .expect("the oracle wrote an oversampled PSF");
-            let error = worst_relative(&format!("{filter} oversampled"), oversampled, &golden);
+            let error = worst_relative(&format!("{folder} {filter} oversampled"), oversampled, &golden);
+            eprintln!(
+                "{folder} {filter}: oversampled PSF {:?}, max difference {error:.2e} of the peak",
+                oversampled.dim()
+            );
             assert!(
                 error <= 1e-9,
-                "{filter}: oversampled PSF {error:e} of the peak (N class)"
+                "{folder} {filter}: oversampled PSF {error:e} of the peak (N class)"
             );
         }
     }
+    cleaning_radii
 }
 
 #[test]
@@ -4144,35 +4626,44 @@ fn oracle_d1_kernels_match_build_kernel() {
             diagnostics.negative_fraction
         );
         eprintln!("{filter}: {diagnostics:?}");
-        let pin = D1_TUTORIAL_KERNEL_PINS
-            .iter()
-            .find(|pin| pin.filter == filter)
-            .unwrap_or_else(|| panic!("{filter}: no pinned diagnostics"));
-        let fwhm = |value: Option<f64>| value.unwrap_or_else(|| panic!("{filter}: no Gaussian fit"));
-        for (name, got, expected, bound) in [
-            ("residual_max", diagnostics.residual_max, pin.residual_max, 1e-9),
-            ("residual_rms", diagnostics.residual_rms, pin.residual_rms, 1e-9),
-            (
-                "encircled_energy_difference",
-                diagnostics.encircled_energy_difference,
-                pin.encircled_energy_difference,
-                1e-9,
-            ),
-            ("negative_fraction", diagnostics.negative_fraction, pin.negative_fraction, 1e-9),
-            ("source_fwhm_px", fwhm(diagnostics.source_fwhm_px), pin.source_fwhm_px, 1e-7),
-            ("target_fwhm_px", fwhm(diagnostics.target_fwhm_px), D1_TARGET_FWHM_PX, 1e-7),
-            ("matched_fwhm_px", fwhm(diagnostics.matched_fwhm_px), pin.matched_fwhm_px, 1e-7),
-        ] {
-            assert!(
-                relative_difference(got, expected) <= bound,
-                "{filter}: {name} {got:?} moved from the pinned {expected:?} by more than {bound:e} relative"
-            );
-        }
-        assert_eq!(
-            diagnostics.warnings, pin.warnings,
-            "{filter}: the kernel warnings users read changed"
+        assert_matches_kernel_pin(filter, filter, &serde_json::to_value(&diagnostics).unwrap());
+    }
+}
+
+fn assert_matches_kernel_pin(label: &str, filter: &str, diagnostics: &Value) -> &'static KernelPin {
+    let pins: &'static [KernelPin] = &D1_TUTORIAL_KERNEL_PINS;
+    let pin = pins
+        .iter()
+        .find(|pin| pin.filter == filter)
+        .unwrap_or_else(|| panic!("{label}: no pinned diagnostics for {filter}"));
+    for (name, expected, bound) in [
+        ("residual_max", pin.residual_max, 1e-9),
+        ("residual_rms", pin.residual_rms, 1e-9),
+        ("encircled_energy_difference", pin.encircled_energy_difference, 1e-9),
+        ("negative_fraction", pin.negative_fraction, 1e-9),
+        ("source_fwhm_px", pin.source_fwhm_px, 1e-7),
+        ("target_fwhm_px", D1_TARGET_FWHM_PX, 1e-7),
+        ("matched_fwhm_px", pin.matched_fwhm_px, 1e-7),
+    ] {
+        let got = diagnostics[name]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{label}: diagnostics.{name} is {}", diagnostics[name]));
+        assert!(
+            relative_difference(got, expected) <= bound,
+            "{label}: {name} {got:?} moved from the pinned {expected:?} by more than {bound:e} relative"
         );
     }
+    let warnings: Vec<&str> = diagnostics["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: diagnostics.warnings is {}", diagnostics["warnings"]))
+        .iter()
+        .map(|warning| warning.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        warnings, pin.warnings,
+        "{label}: the kernel warnings users read changed"
+    );
+    pin
 }
 
 #[test]
@@ -4184,7 +4675,7 @@ fn oracle_d1_psf_match_reproduces_psf_match_datacube() {
     let reference = call["arguments"]["ref_filter"].as_str().unwrap();
     let inputs = call["inputs"].as_array().unwrap();
     let registry = FilterRegistry::builtin();
-    let cube = oracle_cube(&inputs[0], &registry);
+    let cube = oracle_cube(&oracle_file(&inputs[0]), &registry);
     let kernels: Vec<PlaneKernel> = cube
         .filters
         .iter()
@@ -4303,7 +4794,7 @@ fn oracle_d1_astroburst_kernels_through_match_cube_reproduce_psf_match_datacube(
         .collect();
     assert_eq!(kernels.len(), 5, "one kernel per filter but the reference");
     let registry = FilterRegistry::builtin();
-    let cube = oracle_cube(&call["inputs"][0], &registry);
+    let cube = oracle_cube(&oracle_file(&call["inputs"][0]), &registry);
     let options = MatchOptions {
         reference: reference.to_string(),
         mode: MatchMode::Lightstack,
@@ -4387,53 +4878,43 @@ fn plane_agreement(got: &Array2<f64>, expected: &Array2<f64>, border: usize) -> 
 
 fn assert_cube_plane(
     label: &str,
-    distorted: bool,
+    class: AlignClass,
     ours: &Array2<f64>,
     theirs: &Array2<f64>,
 ) -> PlaneAgreement {
     assert_eq!(ours.dim(), theirs.dim(), "{label}: plane shape");
     let agreement = plane_agreement(ours, theirs, 2);
     assert_eq!(agreement.one_sided, 0, "{label}: the NaN masks differ");
-    if distorted {
-        assert!(
-            agreement.interior_worst_of_range <= 1e-3,
-            "{label}: {:e} (I class)",
-            agreement.interior_worst_of_range
-        );
-    } else {
-        assert!(
+    match class {
+        AlignClass::Exact => assert!(
+            identical_f64(ours, theirs),
+            "{label}: not bit for bit (E class)"
+        ),
+        AlignClass::Float => assert!(
             agreement.worst_of_max <= 2e-6,
             "{label}: {:e} (F class)",
             agreement.worst_of_max
-        );
+        ),
+        AlignClass::Equivalent => assert!(
+            agreement.interior_worst_of_range <= 1e-3,
+            "{label}: {:e} (I class)",
+            agreement.interior_worst_of_range
+        ),
     }
     agreement
+}
+
+fn cube_plane_class(distorted: &[&str], filter: &str) -> AlignClass {
+    if distorted.contains(&filter) {
+        AlignClass::Equivalent
+    } else {
+        AlignClass::Float
+    }
 }
 
 const CUBE_CARDS: [&str; 8] = [
     "BUNIT", "CTYPE3", "CUNIT1", "CUNIT2", "RADESYS", "NFILTERS", "FILTERS", "DATASETS",
 ];
-
-fn celestial_matrix(header: &HduHeader) -> [[f64; 2]; 2] {
-    let cd = |i: usize, j: usize| header.get_f64(&format!("CD{i}_{j}"));
-    if [cd(1, 1), cd(1, 2), cd(2, 1), cd(2, 2)]
-        .iter()
-        .any(Option::is_some)
-    {
-        let element = |i: usize, j: usize| cd(i, j).unwrap_or(0.0);
-        return [[element(1, 1), element(1, 2)], [element(2, 1), element(2, 2)]];
-    }
-    let pc = |i: usize, j: usize| {
-        header
-            .get_f64(&format!("PC{i}_{j}"))
-            .unwrap_or(if i == j { 1.0 } else { 0.0 })
-    };
-    let cdelt = |i: usize| header.get_f64(&format!("CDELT{i}")).unwrap_or(1.0);
-    [
-        [pc(1, 1) * cdelt(1), pc(1, 2) * cdelt(1)],
-        [pc(2, 1) * cdelt(2), pc(2, 2) * cdelt(2)],
-    ]
-}
 
 fn history_lines(header: &HduHeader) -> Vec<String> {
     header
@@ -4444,7 +4925,7 @@ fn history_lines(header: &HduHeader) -> Vec<String> {
         .collect()
 }
 
-fn assert_cube_header_matches(label: &str, ours: &HduHeader, golden: &HduHeader) {
+fn assert_cube_header_matches(label: &str, ours: &HduHeader, golden: &HduHeader) -> usize {
     let planes = golden
         .get_i64("NFILTERS")
         .unwrap_or_else(|| panic!("{label}: the golden has no NFILTERS"));
@@ -4453,38 +4934,22 @@ fn assert_cube_header_matches(label: &str, ours: &HduHeader, golden: &HduHeader)
         keys.push(format!("FILTER{n}"));
         keys.push(format!("DATASET{n}"));
     }
-    for key in keys {
-        let expected = golden
-            .get(&key)
-            .unwrap_or_else(|| panic!("{label}: the golden has no {key}"));
-        assert!(
-            same_card(ours.get(&key), expected),
-            "{label}: {key} is {:?}, the golden has {expected:?}",
-            ours.get(&key)
-        );
-    }
-    let (got, expected) = (celestial_matrix(ours), celestial_matrix(golden));
-    let scale = expected
-        .iter()
-        .flatten()
-        .fold(0.0f64, |acc, value| acc.max(value.abs()));
-    for (i, j) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-        assert!(
-            (got[i][j] - expected[i][j]).abs() <= 1e-12 * scale,
-            "{label}: celestial matrix element {}_{} is {} where the golden's PC times CDELT gives {}",
-            i + 1,
-            j + 1,
-            got[i][j],
-            expected[i][j]
-        );
-    }
+    assert_same_cards(
+        label,
+        ours,
+        golden,
+        &keys.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    assert_same_sky(label, ours, golden);
     let ours_history = history_lines(ours);
-    for line in history_lines(golden) {
+    let golden_history = history_lines(golden);
+    for line in &golden_history {
         assert!(
-            ours_history.iter().any(|our| our.contains(&line)),
+            ours_history.iter().any(|our| our.contains(line)),
             "{label}: the golden HISTORY line {line:?} is in none of ours: {ours_history:?}"
         );
     }
+    golden_history.len()
 }
 
 fn assert_runner_steps_match_the_goldens(
@@ -4522,10 +4987,16 @@ fn assert_runner_steps_match_the_goldens(
     for step in &report.steps {
         let at = |filter: &str| format!("{} {filter}", step.directory);
         let files = || {
-            recipe
-                .inputs
-                .iter()
-                .zip(step.report["files"].as_array().unwrap())
+            let listed = step.report["files"].as_array().unwrap();
+            assert_eq!(
+                listed.len(),
+                recipe.inputs.len(),
+                "{}: the step report lists {} files for {} recipe inputs",
+                step.directory,
+                listed.len(),
+                recipe.inputs.len()
+            );
+            recipe.inputs.iter().zip(listed)
         };
         match step.step {
             "crop" => {
@@ -4572,11 +5043,7 @@ fn assert_runner_steps_match_the_goldens(
                 for (input, file) in files() {
                     let label = at(&input.filter);
                     let output = path_of(&file["output_path"]);
-                    let class = if distorted.contains(&input.filter.as_str()) {
-                        AlignClass::Equivalent
-                    } else {
-                        AlignClass::Float
-                    };
+                    let class = cube_plane_class(distorted, &input.filter);
                     let error = assert_align_class(
                         &label,
                         class,
@@ -4614,6 +5081,19 @@ fn assert_runner_steps_match_the_goldens(
                 let (golden_header, theirs) = f64_planes(&oracle_entry_path(golden));
                 assert_eq!(ours.len(), filters.len(), "{}: planes", step.directory);
                 assert_eq!(theirs.len(), filters.len(), "{}: golden planes", step.directory);
+                let golden_filters: Vec<String> = (1..=theirs.len())
+                    .map(|n| {
+                        card(&golden_header, &format!("FILTER{n}")).unwrap_or_else(|| {
+                            panic!("{}: the golden has no FILTER{n}", step.directory)
+                        })
+                    })
+                    .collect();
+                assert_eq!(
+                    filters, golden_filters,
+                    "{}: the runner's plane order against the golden's FILTERn",
+                    step.directory
+                );
+                let history = assert_cube_header_matches(&step.directory, &ours_header, &golden_header);
                 for ((filter, ours), theirs) in filters.iter().zip(&ours).zip(&theirs) {
                     let label = at(filter);
                     if step.step != "match" {
@@ -4623,17 +5103,18 @@ fn assert_runner_steps_match_the_goldens(
                             "{label}: not the runner's own aligned plane bit for bit"
                         );
                     }
-                    let agreement =
-                        assert_cube_plane(&label, distorted.contains(&filter.as_str()), ours, theirs);
+                    let class = cube_plane_class(distorted, filter);
+                    let agreement = assert_cube_plane(&label, class, ours, theirs);
                     eprintln!(
-                        "{label}: {}, max difference {:.2e} of the max abs value, interior {:.2e} of the 0.1 to 99.9 percentile range",
-                        if distorted.contains(&filter.as_str()) { "I" } else { "F" },
+                        "{label}: {class:?}, max difference {:.2e} of the max abs value, interior {:.2e} of the 0.1 to 99.9 percentile range",
                         agreement.worst_of_max,
                         agreement.interior_worst_of_range
                     );
                 }
-                assert_cube_header_matches(&step.directory, &ours_header, &golden_header);
-                eprintln!("{}: header cards, celestial matrix and HISTORY agree", step.directory);
+                eprintln!(
+                    "{}: plane order, header cards, sky positions at the corners and centre, and {history} of {history} golden HISTORY lines agree",
+                    step.directory
+                );
             }
             "psfs" => {
                 for psf in step.report["prepared"]["psfs"].as_array().unwrap() {
@@ -4677,7 +5158,20 @@ fn assert_runner_steps_match_the_goldens(
                         error <= 1e-9,
                         "{label}: {error:e} of the peak against build_kernel (N class)"
                     );
-                    eprintln!("{label}: N, {:?}, {error:.2e} of the peak", ours.dim());
+                    let pin = assert_matches_kernel_pin(&label, filter, &kernel["diagnostics"]);
+                    for warning in pin.warnings {
+                        let shown = format!("{filter}: {warning}");
+                        assert!(
+                            step.warnings.contains(&shown),
+                            "{label}: the step warnings lack {shown:?}: {:?}",
+                            step.warnings
+                        );
+                    }
+                    eprintln!(
+                        "{label}: N, {:?}, {error:.2e} of the peak; diagnostics and {} step warnings match the pins",
+                        ours.dim(),
+                        pin.warnings.len()
+                    );
                 }
             }
             "export" => {}
@@ -4740,14 +5234,10 @@ fn assert_d1_recipe_reproduces_psf_matched_cube(value: Value) {
     assert_eq!(distorted, ["F814W"], "D1 holds one SIP plane");
     assert_runner_steps_match_the_goldens(&recipe, &report, &manifest, &distorted);
     for ((plane, ours), theirs) in planes.iter().zip(&got).zip(&expected) {
-        let agreement = assert_cube_plane(
-            &plane.filter,
-            distorted.contains(&plane.filter.as_str()),
-            ours,
-            theirs,
-        );
+        let class = cube_plane_class(&distorted, &plane.filter);
+        let agreement = assert_cube_plane(&plane.filter, class, ours, theirs);
         eprintln!(
-            "{}: one-sided NaN {} (interior {}), max difference {:.2e} of the max abs value, interior {:.2e} of the 0.1 to 99.9 percentile range",
+            "{}: {class:?}, one-sided NaN {} (interior {}), max difference {:.2e} of the max abs value, interior {:.2e} of the 0.1 to 99.9 percentile range",
             plane.filter, agreement.one_sided, agreement.interior_one_sided, agreement.worst_of_max, agreement.interior_worst_of_range
         );
     }

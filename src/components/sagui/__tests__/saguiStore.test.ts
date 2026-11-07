@@ -26,7 +26,7 @@ describe("SAGUI desktop lifecycle", () => {
     const saved = { result: { ...result, output_dir: "/old/jobs/sagui-saved", manifest_path: "/old/jobs/sagui-saved/manifest.json" }, config };
     vi.mocked(api.load).mockResolvedValueOnce(saved);
     await store.restore(saved.result.manifest_path);
-    expect(store.get()).toMatchObject({ status: "restored", operation: null, result: saved.result, config, input: null, runtime: null, outputDir: saved.result.output_dir });
+    expect(store.get()).toMatchObject({ status: "restored", operation: null, result: saved.result, config: { ...config, output_dir: "/out" }, input: null, runtime: null, outputDir: saved.result.output_dir });
     expect(api.load).toHaveBeenCalledWith(saved.result.manifest_path);
     expect(api.run).not.toHaveBeenCalled();
     expect(api.inspectInput).not.toHaveBeenCalled();
@@ -183,6 +183,57 @@ describe("SAGUI desktop lifecycle", () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
+  it("keeps a failure whose message names a cancelled folder as an error when nobody cancelled", async () => {
+    const { api, store } = setup();
+    const unreadable = "The input cube C:\\runs\\cancelled\\cube.fits is no longer readable; results were not published";
+    vi.mocked(api.run).mockRejectedValueOnce(new Error(unreadable));
+    await store.run();
+    expect(store.get()).toMatchObject({ status: "error", error: unreadable, result: null });
+    const denied = "Cannot create the SAGUI working folder D:\\cancelled\\install-1: Access is denied. (os error 5)";
+    store.setInstallParent("D:\\cancelled");
+    vi.mocked(api.install).mockRejectedValueOnce(new Error(denied));
+    await store.install();
+    expect(store.get()).toMatchObject({ status: "error", error: denied });
+    expect(store.get().config.library_path).toBe("/r/library");
+  });
+
+  it("reports a job the user cancelled as cancelled whatever text the backend returns", async () => {
+    const { api, store } = setup();
+    let rejectRun!: (reason: unknown) => void;
+    vi.mocked(api.run).mockReturnValueOnce(new Promise((_yes, no) => { rejectRun = no; }));
+    const running = store.run();
+    await vi.waitFor(() => expect(api.run).toHaveBeenCalledOnce());
+    await store.cancel();
+    rejectRun(new Error("Rscript failed (exit code: 1); see /out/stderr.log"));
+    await running;
+    expect(store.get()).toMatchObject({ status: "cancelled", error: null, result: null });
+    store.setInstallParent("/private");
+    let rejectInstall!: (reason: unknown) => void;
+    vi.mocked(api.install).mockReturnValueOnce(new Promise((_yes, no) => { rejectInstall = no; }));
+    const installing = store.install();
+    await vi.waitFor(() => expect(api.install).toHaveBeenCalledOnce());
+    await store.cancel();
+    rejectInstall(new Error("Rscript failed (exit code: 1); see /private/stderr.log"));
+    await installing;
+    expect(store.get()).toMatchObject({ status: "cancelled", error: null });
+    expect(store.get().config.library_path).toBe("/r/library");
+  });
+
+  it("treats a failure after a refused cancellation as an error", async () => {
+    const { api, store } = setup();
+    let reject!: (reason: unknown) => void;
+    vi.mocked(api.run).mockReturnValueOnce(new Promise((_yes, no) => { reject = no; }));
+    vi.mocked(api.cancel).mockResolvedValueOnce(false);
+    const work = store.run();
+    await vi.waitFor(() => expect(api.run).toHaveBeenCalledOnce());
+    await store.cancel();
+    expect(store.get().status).toBe("running");
+    const unreadable = "The input cube /jobs/cancelled/cube.fits is no longer readable; results were not published";
+    reject(new Error(unreadable));
+    await work;
+    expect(store.get()).toMatchObject({ status: "error", error: unreadable });
+  });
+
   it("requires a ready official runtime and never substitutes fake results", async () => {
     const { api, store } = setup();
     vi.mocked(api.inspectRuntime).mockResolvedValue({ available: false, ready: false, r_version: null, sagui_version: null, sagui_commit: null, issues: ["Rscript not installed"] });
@@ -201,7 +252,100 @@ describe("SAGUI desktop lifecycle", () => {
     expect(vi.mocked(api.run).mock.calls[0][0].output_dir).toBe("/out");
     store.edit({ ...store.get().config, n_regions: 3 });
     expect(store.get().result).toBeNull();
+    expect(store.get().input).toEqual(input);
+  });
+
+  it("publishes the SAGUI run folder only once R starts (SCIENCE-04)", async () => {
+    const { api, store } = setup();
+    const folders: (string | null)[] = [];
+    store.subscribe(() => folders.push(store.get().outputDir));
+    vi.mocked(api.inspectRuntime).mockResolvedValueOnce({ available: false, ready: false, r_version: null, sagui_version: null, sagui_commit: null, issues: ["Rscript not installed"] });
+    await store.run();
+    expect(store.get().status).toBe("error");
+    expect(folders.length).toBeGreaterThan(0);
+    expect(folders.every((folder) => folder === null)).toBe(true);
+    vi.mocked(api.run).mockImplementationOnce(async (_config, id) => {
+      expect(store.get()).toMatchObject({ status: "running", outputDir: `/out/sagui-${id}` });
+      return result;
+    });
+    await store.run();
+    expect(store.get()).toMatchObject({ status: "complete", outputDir: "/out/run" });
+    let resolveInput!: (value: SaguiInputInfo) => void;
+    vi.mocked(api.inspectInput).mockReturnValueOnce(new Promise((yes) => { resolveInput = yes; }));
+    const early = store.run();
+    expect(store.get().outputDir).toBeNull();
+    await store.cancel();
+    resolveInput(input);
+    await early;
+    expect(store.get()).toMatchObject({ status: "cancelled", outputDir: null });
+  });
+
+  it("clears only what an edited field invalidates (SCIENCE-05)", async () => {
+    const { store } = setup();
+    await store.run();
+    const ran = store.get();
+    expect(ran).toMatchObject({ result, outputDir: "/out/run", unit: "Jy/pixel", input });
+    store.edit({ ...ran.config, output_dir: "/next" });
+    expect(store.get()).toMatchObject({ result, outputDir: "/out/run", unit: "Jy/pixel", input, runtime: ran.runtime, status: "idle" });
+    store.edit({ ...store.get().config, rscript_path: "/opt/Rscript" });
+    expect(store.get()).toMatchObject({ result, input, runtime: null });
+    store.edit({ ...store.get().config, n_regions: 3 });
+    expect(store.get()).toMatchObject({ result: null, outputDir: null, unit: null, input });
+    store.edit({ ...store.get().config, input_path: "/data/other.fits" });
     expect(store.get().input).toBeNull();
+  });
+
+  it("keeps a verified installation and runtime through analysis edits (SCIENCE-05)", async () => {
+    const { store } = setup();
+    store.setInstallParent("/private");
+    await store.install();
+    const { installation, runtime } = store.get();
+    expect(installation).not.toBeNull();
+    store.edit({ ...store.get().config, n_regions: 5, starlet_scales: [1, 2] });
+    expect(store.get().installation).toBe(installation);
+    expect(store.get().runtime).toBe(runtime);
+  });
+
+  it("restores the saved analysis and input but keeps the current R paths and working folder (SCIENCE-08)", async () => {
+    const { store, api } = setup();
+    await store.inspectRuntime();
+    const runtime = store.get().runtime;
+    const config = { ...store.get().config, input_path: "/old/science.fits", output_dir: "/old/jobs", rscript_path: "/old/bin/Rscript", library_path: "/old/library", n_regions: 7, mode: "sparse" as const, dq_exclude_bits: 3 };
+    vi.mocked(api.load).mockResolvedValueOnce({ result: { ...result, output_dir: "/old/jobs/sagui-saved" }, config });
+    await store.restore("/old/jobs/sagui-saved/manifest.json");
+    expect(store.get().config).toEqual({ ...config, output_dir: "/out", rscript_path: "/bin/Rscript", library_path: "/r/library" });
+    expect(store.get()).toMatchObject({ status: "restored", runtime, outputDir: "/old/jobs/sagui-saved" });
+  });
+
+  it("keeps the previous result and input while a Cube Prep hand-off is checked or dropped (SCIENCE-14)", async () => {
+    const { api, store } = setup();
+    await store.run();
+    const before = store.get();
+    const report = { output_dir: "/prepared/run", cube: "final.fits", steps: [] } as unknown as CubePrepReport;
+    let resolve!: (value: SaguiInputInfo) => void;
+    vi.mocked(api.inspectInput).mockReturnValueOnce(new Promise((yes) => { resolve = yes; }));
+    let current = true;
+    const pending = store.prepareCubePrep(report, () => current);
+    const kept = { result, input: before.input, outputDir: "/out/run", unit: "Jy/pixel", config: before.config };
+    expect(store.get()).toMatchObject({ status: "checking", ...kept });
+    current = false;
+    resolve({ ...input, unit: "MJy/sr" });
+    expect(await pending).toBe(false);
+    expect(store.get()).toMatchObject({ status: "idle", ...kept });
+    vi.mocked(api.inspectInput).mockRejectedValueOnce(new Error("SAGUI requires a multiband cube"));
+    await expect(store.prepareCubePrep(report)).rejects.toThrow("multiband");
+    expect(store.get()).toMatchObject({ status: "error", ...kept });
+    expect(await store.prepareCubePrep(report)).toBe(true);
+    expect(store.get()).toMatchObject({ status: "idle", result: null, outputDir: null, unit: null, input });
+    expect(store.get().config.input_path).toBe("/prepared/run/final.fits");
+  });
+
+  it("excludes only DO_NOT_USE by default and keeps a stored mask (OD-L009 a)", () => {
+    const { api } = setup();
+    expect(createSaguiStore(api, null).get().config.dq_exclude_bits).toBe(1);
+    const stored = { input_path: "/data/cube.fits", output_dir: "/out", rscript_path: "", library_path: "", dq_exclude_bits: 4294967295 };
+    const storage = { getItem: (key: string) => key === "ab.sagui.v1" ? JSON.stringify(stored) : null, setItem: vi.fn() };
+    expect(createSaguiStore(api, storage).get().config.dq_exclude_bits).toBe(4294967295);
   });
 
   it("does not attach a late input inspection to a different cube", async () => {

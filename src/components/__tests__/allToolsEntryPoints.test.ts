@@ -9,7 +9,7 @@ import { modifierKey, shortcutSheet } from "../../utils/shortcutSheet";
 import type { DockToolId } from "../../utils/dockLayout";
 import CommandPalette, { type PaletteAction } from "../CommandPalette";
 import DockContextMenu, { DockMenuList } from "../dock/DockContextMenu";
-import { openToolBrowserDialog } from "../dock/ToolBrowser";
+import { openToolBrowserDialog } from "../dock/toolBrowserDialog";
 import { rightRailToolsTrigger } from "../dock/dockGeometry";
 import { toolBrowserStore } from "../dock/toolBrowserStore";
 

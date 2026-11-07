@@ -28,12 +28,12 @@ fn recipe_failure(error: anyhow::Error) -> CubePrepFailure {
     CubePrepFailure { code: code.to_string(), message: format!("{error:#}"), hint: None }
 }
 
-fn desktop_recipe(value: &Value, base_dir: &str) -> Result<Recipe> {
+fn desktop_recipe(value: &Value, base_dir: &str) -> Result<(Recipe, Vec<String>)> {
     let base = Path::new(base_dir).canonicalize()?;
     anyhow::ensure!(base.is_dir(), "The input folder is not a directory");
     let recipe = Recipe::from_value(value)?.resolved(&base);
-    recipe.validate()?;
-    Ok(recipe)
+    let advisories = recipe.validate()?;
+    Ok((recipe, advisories))
 }
 
 fn recipe_progress_event(run_id: &str) -> Result<String> {
@@ -52,7 +52,7 @@ pub async fn cubeprep_filters_cmd() -> Result<Value, CubePrepFailure> {
 #[tauri::command]
 pub async fn validate_cubeprep_recipe_cmd(recipe: Value, base_dir: String) -> Result<Value, CubePrepFailure> {
     tokio::task::spawn_blocking(move || {
-        let recipe = desktop_recipe(&recipe, &base_dir)?;
+        let (recipe, advisories) = desktop_recipe(&recipe, &base_dir)?;
         let mut dependencies: Vec<String> = recipe.paths().into_iter().filter(|path| Path::new(path).is_file()).map(str::to_string).collect();
         dependencies.extend(recipe.empirical_files()?);
         dependencies.sort();
@@ -65,6 +65,7 @@ pub async fn validate_cubeprep_recipe_cmd(recipe: Value, base_dir: String) -> Re
                 _ => {}
             }
         }
+        warnings.extend(advisories);
         Ok::<_, anyhow::Error>(json!({ "recipe": recipe, "dependencies": dependencies, "warnings": warnings }))
     }).await.map_err(|error| recipe_failure(error.into()))?.map_err(recipe_failure)
 }
@@ -74,7 +75,7 @@ pub async fn run_cubeprep_recipe_cmd(app: tauri::AppHandle, recipe: Value, base_
     let event = recipe_progress_event(&run_id).map_err(recipe_failure)?;
     let progress = ProgressHandle::new(&app, &event, 1);
     tokio::task::spawn_blocking(move || {
-        let recipe = desktop_recipe(&recipe, &base_dir)?;
+        let (recipe, _) = desktop_recipe(&recipe, &base_dir)?;
         anyhow::ensure!(Path::new(&output_dir).is_absolute(), "The output folder must be an absolute path");
         run_recipe(&recipe, Path::new(&output_dir), &progress)
     }).await.map_err(|error| recipe_failure(error.into()))?.map_err(recipe_failure)
@@ -239,10 +240,24 @@ mod recipe_tests {
     fn desktop_validation_resolves_the_complete_recipe_without_writing_outputs() {
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack/d1");
         let value: Value = serde_json::from_slice(&std::fs::read(base.join("recipe_d1.json")).unwrap()).unwrap();
-        let recipe = desktop_recipe(&value, base.to_str().unwrap()).unwrap();
+        let (recipe, advisories) = desktop_recipe(&value, base.to_str().unwrap()).unwrap();
         assert_eq!(recipe.steps.len(), 8);
+        assert!(advisories.is_empty(), "{advisories:?}");
         assert!(recipe.inputs.iter().all(|input| Path::new(&input.path).is_absolute()));
         assert_eq!(serde_json::to_value(&recipe.steps[2]).unwrap()["area_rule"], "lightstack");
+    }
+
+    #[tokio::test]
+    async fn desktop_validation_returns_the_recipe_advisories_among_its_warnings() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack/d1");
+        let mut value: Value = serde_json::from_slice(&std::fs::read(base.join("recipe_d1.json")).unwrap()).unwrap();
+        value["steps"].as_array_mut().unwrap().insert(5, json!({ "step": "edit", "action": "cut", "x_start": 2, "x_end": 40, "y_start": 2, "y_end": 40 }));
+        let expected = "09_match: 06_edit cuts the cube before the match; pixels within half a kernel width of the cut edges are matched against zeros; place the cut after match to use the cut-away data";
+        let (_, advisories) = desktop_recipe(&value, base.to_str().unwrap()).unwrap();
+        assert_eq!(advisories, [expected]);
+        let validated = validate_cubeprep_recipe_cmd(value, base.to_string_lossy().into_owned()).await.unwrap_or_else(|failure| panic!("{}", failure.message));
+        let warnings: Vec<&str> = validated["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert_eq!(warnings.last(), Some(&expected), "{warnings:?}");
     }
 
     #[test]

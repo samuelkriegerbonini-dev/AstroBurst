@@ -24,6 +24,7 @@ const STAR_MASK_PLANE_FRACTION: f64 = 0.25;
 
 const MEMORY_ADVICE: &str = "Stack fewer frames at a time and combine the partial stacks, turn alignment off if the frames are already registered, or close other applications. If the system can page this much, set ASTROBURST_MEMORY_BUDGET_MB to the memory to allow (in MB) and restart.";
 const MOSAIC_MEMORY_ADVICE: &str = "Build the mosaic from fewer or smaller panels, or close other applications. If the system can page this much, set ASTROBURST_MEMORY_BUDGET_MB to the memory to allow (in MB) and restart.";
+const PSF_MATCH_MEMORY_ADVICE: &str = "Crop the cube to the region of interest before matching, drop filters you do not need, or close other applications. If the system can page this much, set ASTROBURST_MEMORY_BUDGET_MB to the memory to allow (in MB) and restart.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryInfo {
@@ -50,6 +51,7 @@ pub enum MemoryJob<'a> {
     PipelineChannel(&'a str),
     PipelineMasters,
     Mosaic { cols: usize, rows: usize },
+    PsfMatch { planes: usize, rows: usize, cols: usize },
 }
 
 impl MemoryJob<'_> {
@@ -64,6 +66,7 @@ impl MemoryJob<'_> {
             MemoryJob::PipelineChannel(label) => format!("Channel '{}' of the Pipeline needs", label),
             MemoryJob::PipelineMasters => "Building the calibration masters of the Pipeline needs".to_string(),
             MemoryJob::Mosaic { cols, rows } => format!("A mosaic canvas of {}x{} needs", cols, rows),
+            MemoryJob::PsfMatch { planes, rows, cols } => format!("PSF matching this cube of {planes} planes of {cols}x{rows} needs"),
         }
     }
 
@@ -71,6 +74,7 @@ impl MemoryJob<'_> {
         match self {
             MemoryJob::PipelineMasters => "the calibration frames and the masters",
             MemoryJob::Mosaic { .. } => "the canvas planes and one tile in flight",
+            MemoryJob::PsfMatch { .. } => "the cube, its matched copy and the convolution buffers of the planes in flight",
             _ => "the frames, their aligned copies and the result",
         }
     }
@@ -78,6 +82,7 @@ impl MemoryJob<'_> {
     fn advice(&self) -> &'static str {
         match self {
             MemoryJob::Mosaic { .. } => MOSAIC_MEMORY_ADVICE,
+            MemoryJob::PsfMatch { .. } => PSF_MATCH_MEMORY_ADVICE,
             _ => MEMORY_ADVICE,
         }
     }
@@ -380,6 +385,19 @@ mod tests {
         assert!(err.starts_with("Drizzling these 6 frames of 1024x1024 needs about 3.0 GB"), "{err}");
         let channel = check_memory(3 * GIB_BYTES, info(1, 1), &MemoryJob::PipelineChannel("L")).unwrap_err().to_string();
         assert!(channel.starts_with("Channel 'L' of the Pipeline needs about 3.0 GB"), "{channel}");
+    }
+
+    #[test]
+    fn psf_matching_is_refused_with_its_own_advice() {
+        let job = MemoryJob::PsfMatch { planes: 6, rows: 4096, cols: 4096 };
+        let err = check_memory(30 * GIB_BYTES, info(16, 20), &job).unwrap_err().to_string();
+        assert!(err.starts_with("PSF matching this cube of 6 planes of 4096x4096 needs about 30.0 GB"), "{err}");
+        for needle in ["20.0 GB is available", "the cube, its matched copy", "Crop the cube", "drop filters", MEMORY_BUDGET_ENV] {
+            assert!(err.contains(needle), "{needle:?} missing from {err}");
+        }
+        assert!(!err.contains("Stack fewer frames") && !err.contains("mosaic"), "{err}");
+        let warning = check_memory(14 * GIB_BYTES, info(16, 40), &job).unwrap().expect("14 GB of 16 GB free must warn");
+        assert!(warning.contains("may page to disk"), "{warning}");
     }
 
     #[test]

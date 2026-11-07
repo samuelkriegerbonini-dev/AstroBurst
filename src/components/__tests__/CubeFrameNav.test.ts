@@ -6,7 +6,8 @@ vi.mock("../../services/cube", () => ({ getCubeFrame: vi.fn() }));
 
 import { hooks } from "../../test/hookRuntime";
 import { createFramePublishGate, cubeFrameOutputPaths, cubeFrameRequesters } from "../../utils/cubeNavigation";
-import CubeFrameNav, { frameStepTarget, type FrameLoader } from "../CubeFrameNav";
+import CubeFrameNav, { type FrameLoader } from "../CubeFrameNav";
+import { frameStepTarget } from "../../utils/cubeNavigation";
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 

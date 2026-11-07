@@ -9,7 +9,8 @@ import { DEFAULT_DOCK_LAYOUT, DOCK_TOOL_IDS, DOCK_TOOL_META, dockReducer, type D
 import { DEFAULT_TOOL_SHORTCUTS, TOOL_DESCRIPTIONS } from "../../utils/toolCatalog";
 import { dockStore } from "../../hooks/useDockLayout";
 import { dockOnboardingStore } from "../dock/dockOnboardingStore";
-import ToolBrowser, { openToolBrowserDialog } from "../dock/ToolBrowser";
+import ToolBrowser from "../dock/ToolBrowser";
+import { openToolBrowserDialog } from "../dock/toolBrowserDialog";
 
 const { announceSpy } = vi.hoisted(() => ({ announceSpy: vi.fn<(text: string) => void>() }));
 

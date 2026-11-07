@@ -9,7 +9,8 @@ vi.mock("../../../context/PreviewContext", () => ({ useRenderContext: () => ({ p
 
 import { hooks } from "../../../test/hookRuntime";
 import { cubeFrameRequesters, formatFrameLabel, type CubeFrameRequester } from "../../../utils/cubeNavigation";
-import ViewerFrameStepper, { FrameKeysFocusRing, useViewerFrameKeys, useViewerFrameStep } from "../ViewerFrameStepper";
+import ViewerFrameStepper, { FrameKeysFocusRing } from "../ViewerFrameStepper";
+import { useViewerFrameKeys, useViewerFrameStep } from "../useViewerFrameKeys";
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 
