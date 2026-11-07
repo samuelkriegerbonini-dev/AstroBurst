@@ -1,7 +1,8 @@
 use super::*;
-use std::fmt::Write as FmtWrite;
 use std::path::Component;
 use std::sync::Arc;
+
+const LEGACY_CSV_HEADER: &str = "region,n_pixels,filter,pivot_um,flux,error,unit\n";
 
 #[derive(Debug, Serialize)]
 pub struct SavedResult {
@@ -9,20 +10,20 @@ pub struct SavedResult {
     pub config: SaguiConfig,
 }
 
-fn table_text(regions: &[Region]) -> Result<String> {
-    let mut table = String::from("region,n_pixels,filter,pivot_um,flux,error,unit\n");
+pub(crate) fn legacy_regions_csv(regions: &[Region]) -> String {
+    let mut table = String::from(LEGACY_CSV_HEADER);
     for region in regions {
         for band in &region.bands {
-            writeln!(table, "{},{},{},{},{},{},Jy", region.region, region.n_pixels, csv_text(&band.filter), band.pivot_um, band.flux, band.error.map(|value| value.to_string()).unwrap_or_default())?;
+            table.push_str(&format!("{},{},{},{},{},{},Jy\n", region.region, region.n_pixels, csv_text(&band.filter), band.pivot_um, band.flux, csv_number(band.error)));
         }
     }
-    Ok(table)
+    table
 }
 
 pub fn load(manifest_path: &str) -> Result<SavedResult> {
-    let manifest_path = Path::new(manifest_path).canonicalize()?;
-    let root = manifest_path.parent().context("The manifest has no result directory")?;
-    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    let manifest_file = Path::new(manifest_path).canonicalize().with_context(|| format!("Cannot open the SAGUI manifest {manifest_path}"))?;
+    let root = manifest_file.parent().context("The manifest has no result directory")?;
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_file).with_context(|| format!("Cannot open the SAGUI manifest {manifest_path}"))?)?;
     ensure!(manifest["schema_version"] == 1 && manifest["status"] == "complete", "Choose a completed SAGUI analysis manifest with schema version 1");
     let mut result: SaguiResult = serde_json::from_value(manifest["result"].clone())?;
     let mut config: SaguiConfig = serde_json::from_value(manifest["config"].clone())?;
@@ -57,10 +58,21 @@ pub fn load(manifest_path: &str) -> Result<SavedResult> {
     for (region, (&label, &count)) in result.regions.iter().zip(&counts) {
         ensure!(region.region == label && region.n_pixels == count && region.bands.len() == first.bands.len(), "Saved region table disagrees with its map");
         for (band, expected) in region.bands.iter().zip(&first.bands) {
-            ensure!(band.filter == expected.filter && band.pivot_um == expected.pivot_um && band.pivot_um.is_finite() && band.pivot_um > 0.0 && band.flux.is_finite() && band.error.is_none_or(|value| value.is_finite() && value >= 0.0), "Invalid saved regional photometry");
+            ensure!(band.filter == expected.filter && band.pivot_um == expected.pivot_um && band.pivot_um.is_finite() && band.pivot_um > 0.0 && band.flux.is_finite() && band.error.is_none_or(|value| value.is_finite() && value >= 0.0) && band.error_correlated.is_none_or(|value| value.is_finite() && value >= 0.0), "Invalid saved regional photometry");
         }
     }
-    ensure!(fs::read_to_string(root.join("regions.csv"))? == table_text(&result.regions)?, "Saved photometry disagrees with its verified CSV");
+    let width = result.width;
+    for region in &mut result.regions {
+        let derived = diagnostics(&labels, width, region);
+        if region.n_components == 0 {
+            (region.n_components, region.min_snr, region.min_snr_lower_bound) = derived;
+        } else {
+            ensure!((region.n_components, region.min_snr, region.min_snr_lower_bound) == derived, "Saved region diagnostics disagree with the verified map and photometry");
+        }
+    }
+    let table = fs::read_to_string(root.join("regions.csv"))?;
+    let expected = if table.starts_with(LEGACY_CSV_HEADER) { legacy_regions_csv(&result.regions) } else { regions_csv(&result.regions) };
+    ensure!(table == expected, "Saved photometry disagrees with its verified CSV");
     let labels_header = extract_header_by_index(&File::open(root.join("labels.fits"))?, 1)?;
     let label_wcs = header_wcs(&labels_header).context("Saved labels have no celestial WCS")?;
     for (name, expected) in [("labels.fits", &labels), ("support.fits", &mask)] {
@@ -71,13 +83,14 @@ pub fn load(manifest_path: &str) -> Result<SavedResult> {
         let image = crate::infra::fits::reader::extract_int_plane_by_index(&file, 1)?;
         ensure!(image.bits.iter().eq(expected.iter()), "Saved FITS map disagrees with its verified binary map: {name}");
     }
-    let path = |name: &str| root.join(name).to_string_lossy().into_owned();
-    result.output_dir = root.to_string_lossy().into_owned();
+    let shown = plain(root);
+    let path = |name: &str| shown.join(name).to_string_lossy().into_owned();
+    result.output_dir = shown.to_string_lossy().into_owned();
     result.labels_path = path("labels.fits");
     result.mask_path = path("support.fits");
     result.table_path = path("regions.csv");
-    result.manifest_path = manifest_path.to_string_lossy().into_owned();
-    config.output_dir = root.parent().unwrap_or(root).to_string_lossy().into_owned();
+    result.manifest_path = plain(&manifest_file).to_string_lossy().into_owned();
+    config.output_dir = shown.parent().unwrap_or(&shown).to_string_lossy().into_owned();
     result.warnings.push("Reopened saved products were checked against their manifest. The original input, PSFs and R installation were not revalidated; consult the saved provenance before running another analysis.".into());
     Ok(SavedResult { result, config })
 }

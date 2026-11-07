@@ -2,14 +2,30 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use anyhow::{ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use serde::Serialize;
 use serde_json::json;
 use crate::core::history::stamp::utc_timestamp;
 use crate::infra::progress::ProgressHandle;
+use crate::infra::paths::plain;
 use super::{library_fingerprint, runtime, sha256, valid_run_id};
 
 const SCRIPT: &str = include_str!("install.R");
+const INSTALL_STAGE: &str = "Preparing private SAGUI packages and checking exact, starlet and sparse modes";
+
+pub(crate) fn r_version_advice() -> String {
+    let archive = if cfg!(windows) { format!(" (Windows: https://cran.r-project.org/bin/windows/base/old/{}/)", runtime::R_VERSION) } else { String::new() };
+    format!("Install R {} alongside your current R{archive} and select its bin/Rscript{}", runtime::R_VERSION, if cfg!(windows) { ".exe" } else { "" })
+}
+
+pub(crate) fn r_version_hint(issues: &[String]) -> String {
+    if issues.iter().any(|issue| issue.starts_with("Expected R")) { format!(". {}", r_version_advice()) } else { String::new() }
+}
+
+fn install_failure(work: &Path, error: anyhow::Error) -> anyhow::Error {
+    let issues: Vec<String> = fs::read_to_string(work.join("stdout.log")).map(|text| text.lines().filter_map(|line| line.strip_prefix("ASTROBURST_ISSUE\t").map(str::to_string)).collect()).unwrap_or_default();
+    if issues.is_empty() { error } else { anyhow!("{}. {}", issues.join("; "), r_version_advice()) }
+}
 
 #[derive(Debug, Serialize)]
 pub struct InstallResult {
@@ -38,7 +54,7 @@ fn prepare_work(output: &Path, run_id: &str, progress: &ProgressHandle) -> Resul
     let existing_parent = output.ancestors().find(|path| path.exists()).context("The installation parent has no existing ancestor")?.canonicalize()?;
     ensure!(!existing_parent.ancestors().any(|path| path.join("sagui/DESCRIPTION").is_file()), "Choose an installation parent outside an existing SAGUI library; recovery preserves the previous library");
     fs::create_dir_all(output)?;
-    let work = output.canonicalize()?.join(format!("install-{run_id}"));
+    let work = plain(&output.canonicalize()?).join(format!("install-{run_id}"));
     fs::create_dir(&work).context("This installation identifier already exists; retry with a new identifier")?;
     let path = work.join(".install.lock");
     let file = OpenOptions::new().create_new(true).write(true).open(&path)?;
@@ -89,8 +105,8 @@ fn install_in_dir(executable: &str, work: &Path, progress: &ProgressHandle) -> R
         "started_at_utc": utc_timestamp(SystemTime::now()),
     }))?)?;
     let command = script_command(executable, &library_text, work, "install")?;
-    progress.report(1, 4, "Preparing private SAGUI packages and checking exact, starlet and sparse modes");
-    runtime::execute(command, work, progress, None)?;
+    progress.report(1, 4, INSTALL_STAGE);
+    runtime::execute_labelled(INSTALL_STAGE, command, work, progress, None).map_err(|error| install_failure(work, error))?;
     let output = fs::read_to_string(work.join("stdout.log"))?;
     ensure!(output.lines().any(|line| line == "ASTROBURST_INSTALL_READY"), "SAGUI installation did not complete its verification");
     let identity = runtime::parse_runtime(&output)?;
@@ -211,6 +227,19 @@ mod tests {
         for name in ["config.json", "bridge.R", "stdout.log", "stderr.log"] { assert!(work.join(name).exists(), "{name}"); }
         assert!(!work.join("manifest.json").exists());
         assert!(!work.join(".install.lock").exists());
+    }
+
+    #[test]
+    fn r_version_issue_lines_turn_into_an_actionable_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("stdout.log"), "ASTROBURST_ISSUE\tExpected R 4.6.2 before installing packages; found 4.6.3\n").unwrap();
+        let error = install_failure(dir.path(), anyhow::anyhow!("Rscript failed (exit code: 1); see stderr.log")).to_string();
+        assert!(error.contains("found 4.6.3") && error.contains("Install R 4.6.2 alongside your current R"), "{error}");
+        assert_eq!(error.contains("cran.r-project.org/bin/windows/base/old/4.6.2/"), cfg!(windows), "{error}");
+        assert!(!error.contains("stderr.log"), "{error}");
+        fs::write(dir.path().join("stdout.log"), "nothing useful").unwrap();
+        assert_eq!(install_failure(dir.path(), anyhow::anyhow!("original")).to_string(), "original");
+        assert_eq!(install_failure(&dir.path().join("absent"), anyhow::anyhow!("original")).to_string(), "original");
     }
 
     #[test]
