@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ save: async (dialog: { defaultPath
 import { hooks } from "../../../test/hookRuntime";
 
 const { default: CatalogPanel } = await import("../CatalogPanel");
+const { default: TargetsPanel } = await import("../TargetsPanel");
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 
@@ -109,5 +110,45 @@ describe("CatalogPanel Saved notice", () => {
     expect(notice(), "the second export is still shown 5 s after it").toBeDefined();
     await vi.advanceTimersByTimeAsync(1_500);
     expect(notice()).toBeUndefined();
+  });
+});
+
+describe("Sky panels without an image", () => {
+  beforeEach(() => hooks.mount());
+  afterEach(() => hooks.mount());
+
+  const runReason = (nodes: Props[], label: string) => {
+    const run = nodes.find((p) => p.label === label);
+    const reason = nodes.find((p) => typeof p.id === "string" && p.id === run?.describedBy);
+    return { run, reason: reason ? textOf(reason.children as ReactNode) : null, wrapper: nodes.find((p) => p.title !== undefined && p.title === (reason ? textOf(reason.children as ReactNode) : null)) };
+  };
+
+  it("says why Search Gaia DR3 and the cross-match are disabled", () => {
+    const nodes = elements(hooks.render(panel, { filePath: null }) as ReactNode);
+    const search = runReason(nodes, "Search Gaia DR3");
+    expect(search.run?.disabled).toBe(true);
+    expect(search.reason).toMatch(/^Select an image first\..*WCS.*Stars/);
+    expect(search.wrapper).toBeDefined();
+    expect(nodes.find((p) => p.label === "Cross-match detected stars")?.describedBy).toBe(search.run?.describedBy);
+  });
+
+  it("drops the reason once an image is selected", () => {
+    const nodes = elements(show());
+    const search = runReason(nodes, "Search Gaia DR3");
+    expect(search.run?.disabled).toBe(false);
+    expect(search.run?.describedBy).toBeUndefined();
+    expect(nodes.some((p) => typeof p.children === "string" && p.children.startsWith("Select an image first."))).toBe(false);
+  });
+
+  it("says why Place is disabled, for a missing image and for an empty target list", () => {
+    const targets = (TargetsPanel as unknown as { type: Panel }).type;
+    const noImage = runReason(elements(hooks.render(targets, { filePath: null }) as ReactNode), "Place");
+    expect(noImage.run?.disabled).toBe(true);
+    expect(noImage.reason).toMatch(/^Select an image first\..*WCS.*Stars/);
+    expect(noImage.wrapper).toBeDefined();
+    hooks.mount();
+    const noTargets = runReason(elements(hooks.render(targets, { filePath: WCS_PATH }) as ReactNode), "Place");
+    expect(noTargets.run?.disabled).toBe(true);
+    expect(noTargets.reason).toBe("Enter at least one target to place.");
   });
 });

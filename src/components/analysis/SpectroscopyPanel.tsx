@@ -4,6 +4,7 @@ import CubeFrameNav from "../CubeFrameNav";
 import LineMeasurementSection from "./LineMeasurementSection";
 import LineFitSection from "./LineFitSection";
 import OutputNote from "./OutputNote";
+import StaleResultNote, { ReopenedProductNote } from "./StaleResultNote";
 import LineListControls from "./LineListControls";
 import SpectralAxisControls from "./SpectralAxisControls";
 import SpectrumComparisonSection from "./SpectrumComparisonSection";
@@ -22,6 +23,7 @@ import { lineEntry, lineFitEntry, measurementLog, spectrumExportEntry } from "..
 import {
   COMPONENT_COLORS,
   DEFAULT_LINE_FIT_SNR,
+  LINE_FIT_LABEL_PREFIX,
   displayedLineFitPlane,
   inspectKey,
   lineFitConfig,
@@ -59,6 +61,7 @@ import type {
   LineFitComponents,
   LineFitPlane,
   LineFitSpaxel,
+  MomentConfig,
   MomentKind,
   MomentMapsResult,
   ScienceDqPolicy,
@@ -356,6 +359,56 @@ const SELECT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 focus:border-violet-500/50 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 const WAVELENGTH_FRAME_CHOICES: readonly WavelengthFrameChoice[] = ["air", "vacuum"];
+const SPECTROSCOPY_PRODUCT_PREFIXES: readonly string[] = ["Collapse ", "Moment ", LINE_FIT_LABEL_PREFIX];
+
+interface RangeRequest {
+  z0: number;
+  z1: number;
+  mode: CollapseRangeMode;
+}
+
+interface RangeRun {
+  result: CollapseRangeResult;
+  request: RangeRequest;
+}
+
+interface MomentRun {
+  result: MomentMapsResult;
+  config: MomentConfig;
+}
+
+interface MomentConfigInput {
+  range: ChannelRange;
+  snrText: string;
+  windows: ContinuumWindows | null;
+  channelCount: number;
+  restUm: number | null;
+  convention: VelocityConvention;
+  maskBelow: boolean;
+  dqPolicy: ScienceDqPolicy;
+}
+
+function momentConfig(input: MomentConfigInput): MomentConfig | { error: string } {
+  const snr = decimalFieldState(input.snrText, SNR_FIELD);
+  if (snr.value === null) return { error: `SNR threshold: ${snr.error ?? "Enter a number"}` };
+  if (input.windows && !windowsAreValid(input.windows, input.channelCount)) {
+    return { error: `continuum windows must be channel ranges inside 0–${Math.max(input.channelCount - 1, 0)}` };
+  }
+  return {
+    z0: input.range.z0,
+    z1: input.range.z1,
+    rest_um: input.restUm,
+    convention: input.convention,
+    continuum: input.windows,
+    snr_threshold: snr.value,
+    mask_below_threshold: input.maskBelow,
+    dq_policy: input.dqPolicy,
+  };
+}
+
+function sameRequest(stored: object, current: object | null): boolean {
+  return current !== null && !("error" in current) && JSON.stringify(stored) === JSON.stringify(current);
+}
 
 function SpectroscopyPanel({
   spectrum = [],
@@ -400,6 +453,10 @@ function SpectroscopyPanel({
   const momentProductsRef = useRef<string[]>([]);
   const fitProductsRef = useRef<string[]>([]);
   const regionPendingRef = useRef(false);
+  const showCubeFocusRef = useRef<HTMLElement | null>(null);
+  const holdShowCubeFocus = useCallback((element: HTMLElement | null) => {
+    showCubeFocusRef.current = element;
+  }, []);
 
   const spectrumStore = useSpectrum();
   const region = documentMode ? null : spectrumStore.region;
@@ -460,12 +517,14 @@ function SpectroscopyPanel({
   const [rangeMode, setRangeMode] = useState<CollapseRangeMode>("sum");
   const [rangeLoading, setRangeLoading] = useState(false);
   const [rangeError, setRangeError] = useState<string | null>(null);
-  const [rangeResult, setRangeResult] = useState<CollapseRangeResult | null>(null);
+  const [rangeRun, setRangeRun] = useState<RangeRun | null>(null);
+  const rangeResult = rangeRun?.result ?? null;
   const [snrText, setSnrText] = useState(String(DEFAULT_SNR));
   const [maskBelow, setMaskBelow] = useState(true);
   const [momentLoading, setMomentLoading] = useState(false);
   const [momentError, setMomentError] = useState<string | null>(null);
-  const [momentResult, setMomentResult] = useState<MomentMapsResult | null>(null);
+  const [momentRun, setMomentRun] = useState<MomentRun | null>(null);
+  const momentResult = momentRun?.result ?? null;
   const [momentKind, setMomentKind] = useState<MomentKind>("m0");
   const [lineModel, setLineModel] = useState<LineModel>("gaussian");
   const [lineResult, setLineResult] = useState<LineRun | null>(null);
@@ -524,9 +583,9 @@ function SpectroscopyPanel({
     inspectKeyRef.current = null;
     setRange(null);
     setWindows(null);
-    setMomentResult(null);
+    setMomentRun(null);
     setRangeError(null);
-    setRangeResult(null);
+    setRangeRun(null);
     setMomentError(null);
     setCollapseResult(null);
     setCollapseError(null);
@@ -583,6 +642,59 @@ function SpectroscopyPanel({
   const channelCount = totalFrames > 0 ? totalFrames : n;
   const continuumToSend = windowsAreValid(windows, channelCount) ? windows : null;
   const frameLinked = totalFrames > 1;
+  const rangeRequest = useMemo<RangeRequest | null>(() => (range ? { z0: range.z0, z1: range.z1, mode: rangeMode } : null), [range, rangeMode]);
+  const momentRequest = useMemo(
+    () => (range ? momentConfig({ range, snrText, windows, channelCount, restUm, convention, maskBelow, dqPolicy: scienceDqPolicy }) : null),
+    [range, snrText, windows, channelCount, restUm, convention, maskBelow, scienceDqPolicy],
+  );
+  const fitRequest = useMemo(
+    () =>
+      range
+        ? lineFitConfig({
+            range,
+            windows,
+            channelCount,
+            restUm,
+            convention,
+            snrText: lineFitSnrText,
+            emissionOnly,
+            useErr,
+            useDq,
+            resolvingPowerText,
+            components: lineFitComponents,
+          })
+        : null,
+    [range, windows, channelCount, restUm, convention, lineFitSnrText, emissionOnly, useErr, useDq, resolvingPowerText, lineFitComponents],
+  );
+  const rangeStale = rangeRun !== null && !sameRequest(rangeRun.request, rangeRequest);
+  const momentStale = momentRun !== null && !sameRequest(momentRun.config, momentRequest);
+  const fitStale = lineFitRun !== null && !sameRequest(lineFitRun.config, fitRequest);
+  const ownedProducts = [
+    collapseResult?.fits_path,
+    rangeResult?.fits_path,
+    ...(momentResult ? MOMENT_KINDS.map((kind) => momentResult[kind].fits_path) : []),
+    ...(lineFitRun ? Object.values(lineFitRun.result.planes).map((plane) => plane?.fits_path) : []),
+  ];
+  const calculating = collapseLoading || rangeLoading || momentLoading || lineFitLoading;
+  const reopened =
+    !documentMode &&
+    !calculating &&
+    processed !== null &&
+    processed.kind === "cube" &&
+    processed.inputPath === filePath &&
+    processed.frameIndex === undefined &&
+    processed.fitsPath !== null &&
+    !ownedProducts.includes(processed.fitsPath) &&
+    SPECTROSCOPY_PRODUCT_PREFIXES.some((prefix) => processed.label.startsWith(prefix))
+      ? { label: processed.label, path: processed.fitsPath }
+      : null;
+  const reopenedNote = reopened && (
+    <ReopenedProductNote
+      label={reopened.label}
+      onShowCube={onInvalidateCubeResult ? () => invalidateCubeResultRef.current?.([reopened.path]) : undefined}
+      focusAfterShowCube={showCubeFocusRef}
+    />
+  );
 
   const formatted = useMemo(() => formatAxis(axis, mode, restUm, convention), [axis, mode, restUm, convention]);
 
@@ -701,22 +813,34 @@ function SpectroscopyPanel({
     rangeSeqRef.current++;
     if (rangeProductsRef.current.length) invalidateCubeResultRef.current?.(rangeProductsRef.current);
     rangeProductsRef.current = [];
-    setRangeResult(null);
+    setRangeRun(null);
     setRangeError(null);
     setRangeLoading(false);
     return () => { rangeSeq.current++; };
-  }, [inputKey, range?.z0, range?.z1, rangeMode, collapseZeroPolicy, useDq]);
+  }, [inputKey, collapseZeroPolicy, useDq]);
+
+  useLayoutEffect(() => {
+    rangeSeqRef.current++;
+    setRangeError(null);
+    setRangeLoading(false);
+  }, [range?.z0, range?.z1, rangeMode]);
 
   useLayoutEffect(() => {
     const momentSeq = momentSeqRef;
     momentSeqRef.current++;
     if (momentProductsRef.current.length) invalidateCubeResultRef.current?.(momentProductsRef.current);
     momentProductsRef.current = [];
-    setMomentResult(null);
+    setMomentRun(null);
     setMomentError(null);
     setMomentLoading(false);
     return () => { momentSeq.current++; };
-  }, [inputKey, range?.z0, range?.z1, continuumKey, restUm, convention, snrText, maskBelow, useDq]);
+  }, [inputKey, useDq]);
+
+  useLayoutEffect(() => {
+    momentSeqRef.current++;
+    setMomentError(null);
+    setMomentLoading(false);
+  }, [range?.z0, range?.z1, continuumKey, restUm, convention, snrText, maskBelow]);
 
   useLayoutEffect(() => {
     const lineSeq = lineSeqRef;
@@ -745,7 +869,13 @@ function SpectroscopyPanel({
       lineFitSeq.current++;
       inspectSeq.current++;
     };
-  }, [inputKey, range?.z0, range?.z1, continuumKey, restUm, convention, lineFitSnrText, emissionOnly, useErr, useDq, resolvingPowerText, lineFitComponents]);
+  }, [inputKey, useDq]);
+
+  useLayoutEffect(() => {
+    lineFitSeqRef.current++;
+    setLineFitError(null);
+    setLineFitLoading(false);
+  }, [range?.z0, range?.z1, continuumKey, restUm, convention, lineFitSnrText, emissionOnly, useErr, resolvingPowerText, lineFitComponents]);
 
   useLayoutEffect(() => {
     const regionSeq = regionSeqRef;
@@ -1286,18 +1416,20 @@ function SpectroscopyPanel({
   );
 
   const handleCollapseRange = useCallback(async () => {
-    if (!filePath || !range) return;
+    if (!filePath || !rangeRequest) return;
+    const request = rangeRequest;
     const seq = ++rangeSeqRef.current;
     const publication = framePublishGate.reserve();
     setRangeLoading(true);
     setRangeError(null);
-    setRangeResult(null);
     try {
       const dir = await getOutputDir();
-      const result = await collapseCubeRange(filePath, dir, range.z0, range.z1, rangeMode, collapseZeroPolicy, scienceDqPolicy);
+      const result = await collapseCubeRange(filePath, dir, request.z0, request.z1, request.mode, collapseZeroPolicy, scienceDqPolicy);
       if (rangeSeqRef.current !== seq) return;
-      rangeProductsRef.current = result.fits_path ? [result.fits_path] : [];
-      setRangeResult(result);
+      const products = result.fits_path ? [result.fits_path] : [];
+      const replaced = rangeProductsRef.current.filter((path) => !products.includes(path));
+      rangeProductsRef.current = products;
+      setRangeRun({ result, request });
       if (result.previewUrl && framePublishGate.isLatest(publication)) {
         publishCubeResult({
           label: `Collapse ${result.mode} · ch ${result.z0}-${result.z1}`,
@@ -1306,12 +1438,13 @@ function SpectroscopyPanel({
           dimensions: result.dimensions ?? null,
         });
       }
+      if (replaced.length) invalidateCubeResultRef.current?.(replaced);
     } catch (e) {
       if (rangeSeqRef.current === seq) setRangeError(e instanceof Error ? e.message : String(e));
     } finally {
       if (rangeSeqRef.current === seq) setRangeLoading(false);
     }
-  }, [filePath, range, rangeMode, collapseZeroPolicy, scienceDqPolicy, publishCubeResult, framePublishGate]);
+  }, [filePath, rangeRequest, collapseZeroPolicy, scienceDqPolicy, publishCubeResult, framePublishGate]);
 
   const showMoment = useCallback(
     (result: MomentMapsResult, kind: MomentKind) => {
@@ -1330,43 +1463,32 @@ function SpectroscopyPanel({
   );
 
   const handleMoments = useCallback(async () => {
-    if (!filePath || !range) return;
-    const snr = decimalFieldState(snrText, SNR_FIELD);
-    if (snr.value === null) {
-      setMomentError(`SNR threshold: ${snr.error ?? "Enter a number"}`);
+    if (!filePath || !momentRequest) return;
+    if ("error" in momentRequest) {
+      setMomentError(momentRequest.error);
       return;
     }
-    if (windows && !windowsAreValid(windows, channelCount)) {
-      setMomentError(`continuum windows must be channel ranges inside 0–${Math.max(channelCount - 1, 0)}`);
-      return;
-    }
+    const config = momentRequest;
     const seq = ++momentSeqRef.current;
     const publication = framePublishGate.reserve();
     setMomentLoading(true);
     setMomentError(null);
-    setMomentResult(null);
     try {
       const dir = await getOutputDir();
-      const result = await computeMomentMaps(filePath, dir, {
-        z0: range.z0,
-        z1: range.z1,
-        rest_um: restUm,
-        convention,
-        continuum: windows,
-        snr_threshold: snr.value,
-        mask_below_threshold: maskBelow,
-        dq_policy: scienceDqPolicy,
-      });
+      const result = await computeMomentMaps(filePath, dir, config);
       if (momentSeqRef.current !== seq) return;
-      momentProductsRef.current = MOMENT_KINDS.map((kind) => result[kind].fits_path).filter(Boolean);
-      setMomentResult(result);
+      const products = MOMENT_KINDS.map((kind) => result[kind].fits_path).filter(Boolean);
+      const replaced = momentProductsRef.current.filter((path) => !products.includes(path));
+      momentProductsRef.current = products;
+      setMomentRun({ result, config });
       if (framePublishGate.isLatest(publication)) showMoment(result, "m0");
+      if (replaced.length) invalidateCubeResultRef.current?.(replaced);
     } catch (e) {
       if (momentSeqRef.current === seq) setMomentError(e instanceof Error ? e.message : String(e));
     } finally {
       if (momentSeqRef.current === seq) setMomentLoading(false);
     }
-  }, [filePath, range, snrText, restUm, convention, windows, channelCount, maskBelow, scienceDqPolicy, showMoment, framePublishGate]);
+  }, [filePath, momentRequest, showMoment, framePublishGate]);
 
   const handleMeasureLine = useCallback(async () => {
     if (!filePath || !range || !measureSource) return;
@@ -1429,64 +1551,33 @@ function SpectroscopyPanel({
   );
 
   const handleFitLines = useCallback(async () => {
-    if (!filePath || !range) return;
-    const config = lineFitConfig({
-      range,
-      windows,
-      channelCount,
-      restUm,
-      convention,
-      snrText: lineFitSnrText,
-      emissionOnly,
-      useErr,
-      useDq,
-      resolvingPowerText,
-      components: lineFitComponents,
-    });
-    if ("error" in config) {
-      setLineFitError(config.error);
+    if (!filePath || !fitRequest) return;
+    if ("error" in fitRequest) {
+      setLineFitError(fitRequest.error);
       return;
     }
+    const config = fitRequest;
     const seq = ++lineFitSeqRef.current;
     const publication = framePublishGate.reserve();
     setLineFitLoading(true);
     setLineFitError(null);
-    setLineFitRun(null);
-    inspectSeqRef.current++;
-    inspectKeyRef.current = null;
-    setInspect(null);
-    setInspectError(null);
-    setInspectLoading(false);
     try {
       const result = await fitCubeLines(filePath, await getOutputDir(), config);
       if (lineFitSeqRef.current !== seq) return;
-      fitProductsRef.current = Object.values(result.planes).flatMap((plane) => plane?.fits_path ? [plane.fits_path] : []);
+      const products = Object.values(result.planes).flatMap((plane) => plane?.fits_path ? [plane.fits_path] : []);
+      const replaced = fitProductsRef.current.filter((path) => !products.includes(path));
+      fitProductsRef.current = products;
       const run: LineFitRun = { key: `${filePath}#run${seq}`, filePath, config, result, lineLabel: pickedShown?.label ?? null };
       setLineFitRun(run);
       measurementLog.append(lineFitEntry(run));
       if (framePublishGate.isLatest(publication)) showLineFitPlane(run, "velocity");
+      if (replaced.length) invalidateCubeResultRef.current?.(replaced);
     } catch (e) {
       if (lineFitSeqRef.current === seq) setLineFitError(e instanceof Error ? e.message : String(e));
     } finally {
       if (lineFitSeqRef.current === seq) setLineFitLoading(false);
     }
-  }, [
-    filePath,
-    range,
-    windows,
-    channelCount,
-    restUm,
-    convention,
-    lineFitSnrText,
-    emissionOnly,
-    useErr,
-    useDq,
-    resolvingPowerText,
-    lineFitComponents,
-    pickedShown,
-    showLineFitPlane,
-    framePublishGate,
-  ]);
+  }, [filePath, fitRequest, pickedShown, showLineFitPlane, framePublishGate]);
 
   const handleShowLineFitPlane = useCallback(
     (plane: LineFitPlane) => {
@@ -1614,7 +1705,10 @@ function SpectroscopyPanel({
         >
           <Activity size={18} style={{ color: "var(--ab-violet)", opacity: 0.5 }} />
         </div>
-        <p className="text-[11px] text-zinc-500">Click on the preview image to extract a spectrum</p>
+        <p ref={holdShowCubeFocus} tabIndex={-1} className="text-[11px] text-zinc-500">
+          Click on the preview image to extract a spectrum
+        </p>
+        {reopenedNote}
         {regionButton}
         {error && (
           <p className="text-[10px] text-red-400/80 text-center px-2 py-1 rounded bg-red-900/15 border border-red-800/20">
@@ -1652,7 +1746,9 @@ function SpectroscopyPanel({
       <div className="ab-panel-header">
         <div className="flex items-center gap-1.5">
           <Activity size={12} style={{ color: "var(--ab-violet)" }} />
-          <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Spectroscopy</span>
+          <span ref={holdShowCubeFocus} tabIndex={-1} className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+            Spectroscopy
+          </span>
         </div>
         <div className="flex items-center gap-2 text-[10px] font-mono text-zinc-500">
           {(isLoading || regionLoading) && (
@@ -1682,6 +1778,8 @@ function SpectroscopyPanel({
           {elapsed > 0 && <span>{elapsed}ms</span>}
         </div>
       </div>
+
+      {reopenedNote && <div className="px-3 pb-2">{reopenedNote}</div>}
 
       {docSpectrum && (
         <div data-document-frame className="px-3 pb-2 flex flex-col gap-1 text-[10px] font-mono">
@@ -2011,6 +2109,7 @@ function SpectroscopyPanel({
           {rangeError && (
             <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{rangeError}</p>
           )}
+          {rangeStale && !documentMode && <StaleResultNote />}
           {rangeResult && !documentMode && (
             <div className="text-[10px] font-mono text-zinc-500">
               <span>{`${rangeResult.mode} collapse, ch ${rangeResult.z0}–${rangeResult.z1}: `}</span>
@@ -2123,6 +2222,7 @@ function SpectroscopyPanel({
                   {momentError && (
                     <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{momentError}</p>
                   )}
+                  {momentStale && <StaleResultNote />}
                   {momentResult && (
                     <div className="text-[10px] font-mono text-zinc-500">
                       <span>
@@ -2179,6 +2279,7 @@ function SpectroscopyPanel({
           onComponents={setLineFitComponents}
           onFit={handleFitLines}
           run={lineFitRun}
+          stale={fitStale}
           shownPlane={lineFitRun ? (displayedLineFitPlane(processed, lineFitRun.result) ?? null) : null}
           onShowPlane={handleShowLineFitPlane}
           inspect={inspect}

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, lazy, Suspense, memo } from "react";
 import MeasurementBadge from "./MeasurementBadge";
-import SectionChips from "./SectionChips";
+import SectionChips, { SectionTipNote } from "./SectionChips";
+import { useSectionTip } from "./useSectionTip";
 import { detectStars, detectStarsComposite } from "../../services/analysis";
 import { useRenderActions, useStarOverlayContext } from "../../context/PreviewContext";
 import { ANALYSIS_SECTION, toolSections } from "../../utils/analysisSections";
@@ -18,6 +19,20 @@ const TargetsPanel = lazy(() => import("./TargetsPanel"));
 
 const EMPTY_STARS: Star[] = [];
 const ASTROMETRY_SECTIONS = toolSections("astrometry", { hasHistogram: false, isCube: false, showFft: false, showDeepZoom: false });
+const SECTION_TIPS = {
+  [ANALYSIS_SECTION.stars.id]: {
+    title: "Detect stars and solve the field",
+    body: "Detect Stars finds sources and marks them on the image for the Photometry table. Plate Solve fits sky coordinates to the image and finds its own sources. Write WCS to image stores the solution in a new FITS that Catalog and Targets use.",
+  },
+  [ANALYSIS_SECTION.catalog.id]: {
+    title: "Compare with Gaia DR3",
+    body: "Needs a WCS, solved in Stars or read from the header. Search Gaia DR3 lists the catalog stars in the field; Cross-match detected stars finds sources in the image (5 sigma, up to 500) and pairs them with Gaia DR3 to check the solution.",
+  },
+  [ANALYSIS_SECTION.targets.id]: {
+    title: "Place targets on the image",
+    body: "Needs a WCS. Enter targets one per line, choose their coordinate frame, then click Place to mark them on the image.",
+  },
+};
 
 function AstrometryTool() {
   const { publishProcessed } = useRenderActions();
@@ -25,6 +40,7 @@ function AstrometryTool() {
   const { effectivePath, compositeOnScreen, rgbPath, regionKey, targetWidth, targetHeight, filePath, fileKey, detectionScope, starsOnMeasuredImage } =
     useAnalysisMeasure();
   const { result: starResult, loading: starLoading, error: detectError } = useStarDetection(detectionScope);
+  const sectionTip = useSectionTip(ASTROMETRY_SECTIONS, SECTION_TIPS);
 
   const handleDetectStars = useCallback(
     async (sigma: number) => {
@@ -69,9 +85,10 @@ function AstrometryTool() {
   return (
     <Suspense fallback={<TabSpinner />}>
       <div className="flex flex-col gap-3 p-3">
-        <SectionChips label="Astrometry" sections={ASTROMETRY_SECTIONS} />
+        <SectionChips label="Astrometry" sections={ASTROMETRY_SECTIONS} tip={sectionTip} />
 
         <section id={ANALYSIS_SECTION.stars.id}>
+          <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.stars.id} />
           <PlateSolvePanel
             stars={stars}
             isLoading={starLoading}
@@ -98,10 +115,12 @@ function AstrometryTool() {
         </section>
 
         <section id={ANALYSIS_SECTION.catalog.id}>
+          <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.catalog.id} />
           <CatalogPanel filePath={skyFilePath} measurePath={effectivePath} />
         </section>
 
         <section id={ANALYSIS_SECTION.targets.id}>
+          <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.targets.id} />
           <TargetsPanel filePath={skyFilePath} measurePath={effectivePath} />
         </section>
       </div>

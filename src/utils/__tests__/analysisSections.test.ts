@@ -75,6 +75,12 @@ describe("toolSections", () => {
     expect(labels("cube", { ...nothing, isSpectrum: false })).toEqual([]);
   });
 
+  it("gives an open spectrum document, a CSV or a 1D file, the Spectrum section the Cube tool renders for it", () => {
+    expect(toolSections("cube", { ...nothing, hasSpectrumDocument: true })).toEqual([ANALYSIS_SECTION.spectrum]);
+    expect(labels("cube", { ...nothing, hasSpectrumDocument: false })).toEqual([]);
+    expect(analysisSections({ ...nothing, hasSpectrumDocument: true })).toContain(ANALYSIS_SECTION.spectrum);
+  });
+
   it("gives the Log tool only the log section", () => {
     for (const input of [everything, nothing]) expect(toolSections("log", input)).toEqual([ANALYSIS_SECTION.log]);
   });
@@ -141,19 +147,24 @@ describe("analysisSections", () => {
 });
 
 describe("showSectionChips", () => {
-  it("shows the chip nav from four sections up", () => {
-    expect(MIN_CHIP_SECTIONS).toBe(4);
+  it("shows the chip nav from two sections up", () => {
+    expect(MIN_CHIP_SECTIONS).toBe(2);
     const s = Object.values(ANALYSIS_SECTION);
     expect(showSectionChips([])).toBe(false);
-    expect(showSectionChips(s.slice(0, 3))).toBe(false);
-    expect(showSectionChips(s.slice(0, 4))).toBe(true);
+    expect(showSectionChips(s.slice(0, 1))).toBe(false);
+    expect(showSectionChips(s.slice(0, 2))).toBe(true);
     expect(showSectionChips(s.slice(0, 8))).toBe(true);
   });
 
-  it("gives chips to Image and Astrometry and never to Photometry, Cube or Log", () => {
+  it("gives chips to every panel with sections to jump between and none to a single-section panel", () => {
     expect(showSectionChips(toolSections("image", nothing))).toBe(true);
     expect(showSectionChips(toolSections("astrometry", nothing))).toBe(true);
-    for (const tool of ["photometry", "cube", "log"] as const) expect(showSectionChips(toolSections(tool, everything))).toBe(false);
+    expect(showSectionChips(toolSections("photometry", nothing))).toBe(true);
+    expect(showSectionChips(toolSections("cube", { ...nothing, isCube: true }))).toBe(true);
+    expect(showSectionChips(toolSections("cube", everything))).toBe(true);
+    expect(showSectionChips(toolSections("cube", { ...nothing, isRamp: true }))).toBe(false);
+    expect(showSectionChips(toolSections("cube", { ...nothing, hasSpectrumDocument: true }))).toBe(false);
+    expect(showSectionChips(toolSections("log", everything))).toBe(false);
   });
 });
 

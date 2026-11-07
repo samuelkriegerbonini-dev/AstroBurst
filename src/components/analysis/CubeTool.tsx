@@ -2,7 +2,7 @@ import { useState, useCallback, useLayoutEffect, useMemo, useRef, lazy, Suspense
 import { FileText, X } from "lucide-react";
 import { getPreviewUrl } from "../../infrastructure/tauri";
 import { fileKeyOf, getRenderRecord, useFileContext, useCubeContext, useRenderActions } from "../../context/PreviewContext";
-import { ANALYSIS_SECTION, CUBE_TOOL_EMPTY_TITLE } from "../../utils/analysisSections";
+import { ANALYSIS_SECTION, CUBE_TOOL_EMPTY_TITLE, toolSections } from "../../utils/analysisSections";
 import { filterFrameLabel, frameRecordLabel } from "../../utils/cubeNavigation";
 import { cubePanelGates, formatRampFrameLabel } from "../../utils/rampLabels";
 import { useSpectrum } from "../../hooks/useSpectrumStore";
@@ -14,10 +14,24 @@ import type { CubeResult } from "./SpectroscopyPanel";
 import TabSpinner from "./TabSpinner";
 import CubeSampleOffers from "./CubeSampleOffers";
 import SedPanel from "./SedPanel";
+import SectionChips, { SectionTipNote } from "./SectionChips";
+import { useSectionTip } from "./useSectionTip";
 
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
 const PvPanel = lazy(() => import("./PvPanel"));
 const RampPanel = lazy(() => import("./RampPanel"));
+
+const LINE_TIP_TITLE = "Measure a spectral line";
+const LINE_STEPS = "Drag across the plot to select a line range, set continuum windows A and B beside the line, choose a model, then click Measure line.";
+const CUBE_SECTION_TIPS = {
+  [ANALYSIS_SECTION.spectrum.id]: {
+    title: LINE_TIP_TITLE,
+    body: `Select Crosshair in the viewer and click the image to extract a spectrum. ${LINE_STEPS}`,
+  },
+};
+const DOCUMENT_SECTION_TIPS = {
+  [ANALYSIS_SECTION.spectrum.id]: { title: LINE_TIP_TITLE, body: LINE_STEPS },
+};
 
 function CubeTool() {
   const { file } = useFileContext();
@@ -101,9 +115,20 @@ function CubeTool() {
     [publishCube, cubeDims, ramp, currentFileKey, fileKey, cubeGates],
   );
 
+  const sections = toolSections("cube", {
+    hasHistogram: false,
+    showFft: false,
+    showDeepZoom: false,
+    isCube: content === "cube" && isCube,
+    isRamp: content === "cube" && ramp !== null,
+    hasSpectrumDocument: docPath !== null,
+  });
+  const sectionTip = useSectionTip(sections, content === "cube" ? (ramp ? undefined : CUBE_SECTION_TIPS) : DOCUMENT_SECTION_TIPS);
+
   return (
     <Suspense fallback={<TabSpinner />}>
       <div className="flex flex-col gap-3 p-3">
+        <SectionChips label="Cube" sections={sections} tip={sectionTip} />
         {content === "empty" && (
           <div className="px-3 py-2 flex flex-col items-start gap-2 text-[10px] text-zinc-500">
             <span data-cube-empty>{CUBE_TOOL_EMPTY_TITLE}</span>
@@ -125,32 +150,35 @@ function CubeTool() {
         <CubeSampleOffers idle={content === "empty"} />
 
         {docPath !== null && (
-          <section id={ANALYSIS_SECTION.spectrum.id} className="flex flex-col gap-2">
-            {content === "csv" && (
-              <div data-spectrum-csv className="px-1 flex items-center gap-2 text-[10px] font-mono text-zinc-500">
-                <FileText size={10} />
-                <span className="truncate" title={docPath}>
-                  {fileBaseName(docPath)}
-                </span>
-                <button
-                  onClick={() => spectrumCsvStore.close()}
-                  className="ml-auto flex items-center gap-1 text-zinc-500 hover:text-zinc-300"
-                  title="Close the CSV spectrum"
-                >
-                  <X size={10} />
-                  Close
-                </button>
-              </div>
-            )}
-            <SpectroscopyPanel
-              key={`${panelKey}|${content}|${docHdu ?? ""}|${docPath}`}
-              documentMode
-              spectrumDocument={spectrumDocument}
-              isLoading={docSpectrum === null && doc.error === null}
-              error={doc.error}
-              filePath={docPath}
-              publishGate={cubeGates.spectrum}
-            />
+          <section id={ANALYSIS_SECTION.spectrum.id}>
+            <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.spectrum.id} />
+            <div className="flex flex-col gap-2">
+              {content === "csv" && (
+                <div data-spectrum-csv className="px-1 flex items-center gap-2 text-[10px] font-mono text-zinc-500">
+                  <FileText size={10} />
+                  <span className="truncate" title={docPath}>
+                    {fileBaseName(docPath)}
+                  </span>
+                  <button
+                    onClick={() => spectrumCsvStore.close()}
+                    className="ml-auto flex items-center gap-1 text-zinc-500 hover:text-zinc-300"
+                    title="Close the CSV spectrum"
+                  >
+                    <X size={10} />
+                    Close
+                  </button>
+                </div>
+              )}
+              <SpectroscopyPanel
+                key={`${panelKey}|${content}|${docHdu ?? ""}|${docPath}`}
+                documentMode
+                spectrumDocument={spectrumDocument}
+                isLoading={docSpectrum === null && doc.error === null}
+                error={doc.error}
+                filePath={docPath}
+                publishGate={cubeGates.spectrum}
+              />
+            </div>
           </section>
         )}
 
@@ -171,6 +199,7 @@ function CubeTool() {
 
         {content === "cube" && isCube && (
           <section id={ANALYSIS_SECTION.spectrum.id}>
+            <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.spectrum.id} />
             <SpectroscopyPanel
               key={panelKey}
               spectrum={spec.spectrum}

@@ -29,6 +29,20 @@ const samples = vi.hoisted(() => ({
   opens: [] as unknown[],
   started: [] as string[],
 }));
+const sectionTips = vi.hoisted(() => ({
+  calls: [] as { sections: readonly { id: string }[]; tips: Readonly<Record<string, { title: string; body: string } | undefined>> | undefined }[],
+}));
+
+vi.mock("../useSectionTip", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../useSectionTip")>();
+  return {
+    ...actual,
+    useSectionTip: (...args: Parameters<typeof actual.useSectionTip>) => {
+      sectionTips.calls.push({ sections: args[0], tips: args[1] });
+      return actual.useSectionTip(...args);
+    },
+  };
+});
 
 vi.mock("../../../context/PreviewContext", () => ({
   fileKeyOf: (file: { id: string; path: string } | null) => (file ? `${file.id}|${file.path}` : null),
@@ -147,6 +161,7 @@ beforeEach(() => {
   samples.entries = [];
   samples.opens = [];
   samples.started = [];
+  sectionTips.calls = [];
 });
 
 describe("CubeTool sections", () => {
@@ -165,6 +180,74 @@ describe("CubeTool sections", () => {
     expect(html).toContain(sectionMarkup(ANALYSIS_SECTION.pv.id));
     expect(html).toContain("[pv-panel]");
     expect(html).not.toContain(sectionMarkup(ANALYSIS_SECTION.ramp.id));
+  });
+});
+
+describe("CubeTool section guidance", () => {
+  const SPECTRUM_ID = ANALYSIS_SECTION.spectrum.id;
+  const lastCall = () => sectionTips.calls.at(-1);
+  const spectrumTip = () => lastCall()?.tips?.[SPECTRUM_ID];
+  const insideSpectrumSection = (html: string, marker: string) => {
+    const at = html.indexOf(sectionMarkup(SPECTRUM_ID));
+    const end = html.indexOf("</section>", at);
+    const found = html.indexOf(marker, at);
+    return at >= 0 && found > at && found < end;
+  };
+
+  it("gives a cube Spectrum and PV chips with the cube extraction steps in the Spectrum section", async () => {
+    const html = await renderCubeTool(null);
+    expect(html).toContain('aria-label="Cube panels"');
+    expect(html).toContain(`data-section-help="${SPECTRUM_ID}"`);
+    expect(html).toContain('aria-label="Help: Measure a spectral line"');
+    expect(insideSpectrumSection(html, `data-section-tip="${SPECTRUM_ID}"`)).toBe(true);
+    expect(lastCall()?.sections.map((s) => s.id)).toEqual([SPECTRUM_ID, ANALYSIS_SECTION.pv.id]);
+    expect(spectrumTip()?.title).toBe("Measure a spectral line");
+    expect(spectrumTip()?.body).toContain("click the image to extract a spectrum");
+    expect(spectrumTip()?.body).toContain("Measure line");
+  });
+
+  it("gives a ramp its Ramp and Spectrum chips and no guidance", async () => {
+    const html = await renderCubeTool(RAMP);
+    expect(html).toContain('aria-label="Cube panels"');
+    expect(lastCall()?.sections.map((s) => s.id)).toEqual([ANALYSIS_SECTION.ramp.id, SPECTRUM_ID]);
+    expect(lastCall()?.tips).toBeUndefined();
+    expect(html).not.toContain("data-section-help");
+    expect(html).not.toContain("data-section-tip");
+  });
+
+  it("gives a 1D spectrum document the line steps without the cube extraction step, with its help in the section", async () => {
+    cubeState.isCube = false;
+    cubeState.isSpectrum = true;
+    cubeState.file = { id: "x1", path: X1D_PATH, status: "spectrum", spectrum: { kind: "x1d", hdu: 1 } };
+    docState.doc = { loading: false, spectrum: SPECTRUM, error: null };
+    const html = await render();
+    expect(html).not.toContain('aria-label="Cube panels"');
+    expect(lastCall()?.sections.map((s) => s.id)).toEqual([SPECTRUM_ID]);
+    expect(insideSpectrumSection(html, `data-section-help="${SPECTRUM_ID}"`)).toBe(true);
+    expect(spectrumTip()?.title).toBe("Measure a spectral line");
+    expect(spectrumTip()?.body).toContain("Drag across the plot");
+    expect(spectrumTip()?.body).not.toContain("Crosshair");
+    expect(spectrumTip()?.body).not.toContain("click the image");
+  });
+
+  it("gives an open CSV spectrum the same document guidance", async () => {
+    cubeState.isCube = false;
+    cubeState.file = { id: "img", path: "C:/data/m31.fits" };
+    docState.csv = { path: "C:/data/ha_spectrum.csv", over: "other|C:/data/o.fits" };
+    docState.doc = { loading: false, spectrum: SPECTRUM, error: null };
+    const html = await render();
+    expect(lastCall()?.sections.map((s) => s.id)).toEqual([SPECTRUM_ID]);
+    expect(insideSpectrumSection(html, `data-section-help="${SPECTRUM_ID}"`)).toBe(true);
+    expect(spectrumTip()?.body).not.toContain("click the image");
+  });
+
+  it("offers no section chips or guidance when the Cube tool has nothing to show", async () => {
+    cubeState.isCube = false;
+    cubeState.file = { id: "img", path: "C:/data/m31.fits" };
+    const html = await render();
+    expect(lastCall()?.sections).toEqual([]);
+    expect(html).not.toContain('aria-label="Cube panels"');
+    expect(html).not.toContain("data-section-help");
   });
 });
 

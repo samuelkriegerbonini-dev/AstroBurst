@@ -12,7 +12,7 @@ export const ANALYSIS_TOOL_IDS: readonly AnalysisToolId[] = ["image", "astrometr
 
 export const CUBE_TOOL_EMPTY_TITLE = "Open a data cube or a ramp";
 
-export const MIN_CHIP_SECTIONS = 4;
+export const MIN_CHIP_SECTIONS = 2;
 
 export interface AnalysisSection {
   id: string;
@@ -25,6 +25,7 @@ export interface AnalysisSectionsInput {
   isCube: boolean;
   isRamp?: boolean;
   isSpectrum?: boolean;
+  hasSpectrumDocument?: boolean;
   showFft: boolean;
   showDeepZoom: boolean;
 }
@@ -72,7 +73,7 @@ export function toolSections(tool: AnalysisToolId, input: AnalysisSectionsInput)
     case "cube":
       return [
         ...(input.isRamp ? [s.ramp] : []),
-        ...(input.isCube || input.isSpectrum ? [s.spectrum] : []),
+        ...(input.isCube || input.isSpectrum || input.hasSpectrumDocument ? [s.spectrum] : []),
         ...(input.isCube && !input.isRamp ? [s.pv] : []),
       ];
     case "log":

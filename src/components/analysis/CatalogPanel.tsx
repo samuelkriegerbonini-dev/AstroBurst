@@ -24,10 +24,11 @@ interface CatalogPanelProps {
 const DEFAULT_MAG_LIMIT = 18;
 const DEFAULT_MAX_ROWS = 5000;
 const DEFAULT_MATCH_RADIUS_ARCSEC = 2;
-const DEFAULT_DETECTION_SIGMA = 5;
-const DEFAULT_MAX_STARS = 500;
+export const DEFAULT_DETECTION_SIGMA = 5;
+export const DEFAULT_MAX_STARS = 500;
 const TABLE_ROW_LIMIT = 200;
 const SAVED_NOTICE_MS = 6000;
+const NO_IMAGE_REASON = "Select an image first. Gaia DR3 search needs its WCS, from the header or solved in Stars.";
 const RADIUS_FIELD: DecimalFieldOptions = { optional: true, min: 0.1 };
 const MAG_LIMIT_FIELD: DecimalFieldOptions = { optional: true, min: 5 };
 const MATCH_RADIUS_FIELD: DecimalFieldOptions = { optional: true, min: 0.2 };
@@ -54,6 +55,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
   const magLimitId = useId();
   const bandId = useId();
   const matchRadiusId = useId();
+  const reasonId = useId();
   const [radiusText, setRadiusText] = useState("");
   const [magLimitText, setMagLimitText] = useState(String(DEFAULT_MAG_LIMIT));
   const [band, setBand] = useState<GaiaBand>("G");
@@ -239,6 +241,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
   }, [filePath, tableRows]);
 
   const busy = searching || matching;
+  const noImageReason = wcsPath ? null : NO_IMAGE_REASON;
   const zp = cross?.zero_point ?? null;
   const astrometry = cross?.astrometry ?? null;
   const warnings = [...(cone?.warnings ?? []), ...(cross?.warnings ?? [])];
@@ -286,15 +289,19 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
         <div className="text-[9px] text-zinc-600">blank radius: half the image diagonal</div>
         {searchFieldError && <div className="text-[9px] text-amber-400/90" data-field-error>{searchFieldError}</div>}
 
-        <RunButton
-          label="Search Gaia DR3"
-          runningLabel="Querying VizieR..."
-          running={searching}
-          disabled={!wcsPath || busy || searchFieldError !== null}
-          accent="cyan"
-          icon={<Database size={12} />}
-          onClick={() => void runSearch()}
-        />
+        <div title={noImageReason ?? undefined}>
+          <RunButton
+            label="Search Gaia DR3"
+            runningLabel="Querying VizieR..."
+            running={searching}
+            disabled={!wcsPath || busy || searchFieldError !== null}
+            accent="cyan"
+            icon={<Database size={12} />}
+            describedBy={noImageReason ? reasonId : undefined}
+            onClick={() => void runSearch()}
+          />
+        </div>
+        {noImageReason && <div id={reasonId} data-run-blocked className="text-[9px] text-zinc-500">{noImageReason}</div>}
 
         <div className="grid grid-cols-3 gap-2 items-end">
           <div className="flex flex-col gap-0.5">
@@ -327,15 +334,18 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
 
         {matchFieldError && <div className="text-[9px] text-amber-400/90" data-field-error>{matchFieldError}</div>}
 
-        <RunButton
-          label="Cross-match detected stars"
-          runningLabel="Detecting and matching..."
-          running={matching}
-          disabled={!wcsPath || busy || matchFieldError !== null}
-          accent="amber"
-          icon={<Crosshair size={12} />}
-          onClick={() => void runCrossMatch()}
-        />
+        <div title={noImageReason ?? undefined}>
+          <RunButton
+            label="Cross-match detected stars"
+            runningLabel="Detecting and matching..."
+            running={matching}
+            disabled={!wcsPath || busy || matchFieldError !== null}
+            accent="amber"
+            icon={<Crosshair size={12} />}
+            describedBy={noImageReason ? reasonId : undefined}
+            onClick={() => void runCrossMatch()}
+          />
+        </div>
 
         <ErrorAlert message={error} />
 

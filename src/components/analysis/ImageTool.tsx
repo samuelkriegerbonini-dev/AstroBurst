@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense, memo
 import HistogramPanel from "./HistogramPanel";
 import RgbStfPanel from "./RgbStfPanel";
 import MeasurementBadge from "./MeasurementBadge";
-import SectionChips from "./SectionChips";
+import SectionChips, { SectionTipNote } from "./SectionChips";
+import { useSectionTip } from "./useSectionTip";
 import { computeFftSpectrum, computeHistogram } from "../../services/analysis";
 import { useFileContext, useHistContext, useCubeContext, useRenderContext, useRawPixelsContext, useDisplayContext, useDqContext } from "../../context/PreviewContext";
 import { useToolHost } from "../../context/ToolHostContext";
@@ -22,6 +23,13 @@ const RegionProfilesPanel = lazy(() => import("../regions/RegionProfilesPanel"))
 const ContourPanel = lazy(() => import("./ContourPanel"));
 const StatisticsPanel = lazy(() => import("./StatisticsPanel"));
 const PixelTablePanel = lazy(() => import("./PixelTablePanel"));
+
+const SECTION_TIPS = {
+  [ANALYSIS_SECTION.regions.id]: {
+    title: "Measure image regions",
+    body: "Choose a shape in the viewer toolbar and draw a region on the image. Select it here to inspect its statistics or assign a background region.",
+  },
+};
 
 function ImageTool() {
   const { file } = useFileContext();
@@ -111,11 +119,12 @@ function ImageTool() {
     showDeepZoom,
   };
   const sections = toolSections("image", sectionsInput);
+  const sectionTip = useSectionTip(sections, SECTION_TIPS);
 
   return (
     <Suspense fallback={<TabSpinner />}>
       <div className="flex flex-col gap-3 p-3">
-        <SectionChips label="Image" sections={sections} />
+        <SectionChips label="Image" sections={sections} tip={sectionTip} />
 
         {histData && histStats && histData.bins.length > 0 && (
           <section id={ANALYSIS_SECTION.histogram.id}>
@@ -161,6 +170,7 @@ function ImageTool() {
         </section>
 
         <section id={ANALYSIS_SECTION.regions.id}>
+          <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.regions.id} />
           <RegionsPanel filePath={regionKey} measurePath={effectivePath} measureKey={measureKey} />
         </section>
 

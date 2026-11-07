@@ -35,6 +35,7 @@ const spectrumState = vi.hoisted(() => ({ region: null as unknown, regionSource:
 const spectrumActions = vi.hoisted(() => ({ begin: vi.fn(() => 41), commit: vi.fn(), fail: vi.fn(), clear: vi.fn() }));
 const regionDocState = vi.hoisted(() => ({ regions: [] as unknown[] }));
 const bandCalls = vi.hoisted(() => ({ calls: [] as { y: readonly number[]; err: readonly number[] | null }[] }));
+const renderState = vi.hoisted(() => ({ processed: null as unknown }));
 
 vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../../services/spectral", async (importOriginal) => ({
@@ -87,7 +88,7 @@ vi.mock("../../../utils/lineMeasure", async (importOriginal) => {
 vi.mock("../../../context/PreviewContext", () => ({
   useCubeContext: () => ({ isCube: true, ramp: cubeState.ramp, rampSource: cubeState.ramp ? "fits" : null }),
   useFileContext: () => ({ file: { ...fileState, path: "C:/data/cube.fits", result: { header: { BUNIT: "DN" } } } }),
-  useRenderContext: () => ({ processed: null }),
+  useRenderContext: () => ({ processed: renderState.processed }),
 }));
 vi.mock("../../../hooks/useSpectrumStore", () => ({
   useSpectrum: () => ({
@@ -120,6 +121,7 @@ vi.mock("../../CubeFrameNav", () => ({ default: () => "[frame-nav]" }));
 import { hooks } from "../../../test/hookRuntime";
 import SpectroscopyPanel from "../SpectroscopyPanel";
 import OutputNote from "../OutputNote";
+import StaleResultNote, { ReopenedProductNote } from "../StaleResultNote";
 
 const RAMP: RampInfo = {
   kind: "jwst_groups",
@@ -1166,14 +1168,18 @@ const commonCalculationEdits: [string, PanelEdit][] = [
   ["velocity convention", (tree) => (axisSection(tree).onConventionChange as (v: string) => void)("radio")],
 ];
 
-const fitCalculationEdits: [string, PanelEdit][] = [
+const fitParameterEdits: [string, PanelEdit][] = [
   ...commonCalculationEdits,
   ["fit S/N", (tree) => (fitSection(tree).onSnrText as (v: string) => void)("5")],
   ["emission only", (tree) => (fitSection(tree).onEmissionOnly as (v: boolean) => void)(false)],
   ["ERR weighting", (tree) => (fitSection(tree).onUseErr as (v: boolean) => void)(false)],
-  ["DQ masking", (tree) => (fitSection(tree).onUseDq as (v: boolean) => void)(false)],
   ["resolving power", (tree) => (fitSection(tree).onResolvingPowerText as (v: string) => void)("2700")],
   ["components", (tree) => (fitSection(tree).onComponents as (v: string) => void)("two")],
+];
+
+const fitCalculationEdits: [string, PanelEdit][] = [
+  ...fitParameterEdits,
+  ["DQ masking", (tree) => (fitSection(tree).onUseDq as (v: boolean) => void)(false)],
 ];
 
 const momentCalculationEdits: [string, PanelEdit][] = [
@@ -1181,6 +1187,22 @@ const momentCalculationEdits: [string, PanelEdit][] = [
   ["moment S/N", (tree) => (mustFind(tree, (p) => p.min === 0 && typeof p.onChange === "function", "moment S/N").onChange as (v: string) => void)("5")],
   ["moment masking", (tree) => (mustFind(tree, (p) => p.type === "checkbox", "moment mask").onChange as (e: unknown) => void)({ target: { checked: false } })],
 ];
+
+function allProps(node: ReactNode, match: (props: Props, type: unknown) => boolean): Props[] {
+  if (Array.isArray(node)) return node.flatMap((child) => allProps(child, match));
+  if (!isValidElement<Props>(node)) return [];
+  return [...(match(node.props, node.type) ? [node.props] : []), ...allProps(node.props.children as ReactNode, match)];
+}
+
+const staleNotes = (tree: ReactNode) => allProps(tree, (_p, type) => type === StaleResultNote).length;
+const staleMarks = (tree: ReactNode) => ({ panelNotes: staleNotes(tree), fitStale: fitSection(tree).stale });
+const NOT_STALE = { panelNotes: 0, fitStale: false };
+const markedStale = (label: string) => (label === "Fit lines" ? { panelNotes: 0, fitStale: true } : { panelNotes: 1, fitStale: false });
+const momentSnr = (tree: ReactNode, text: string) =>
+  (mustFind(tree, (p) => p.min === 0 && typeof p.onChange === "function", "moment S/N").onChange as (v: string) => void)(text);
+const fitSnr = (tree: ReactNode, text: string) => (fitSection(tree).onSnrText as (v: string) => void)(text);
+const chooseRangeMode = (tree: ReactNode, value: string) =>
+  (mustFind(tree, (p) => p["aria-label"] === "Range collapse mode", "collapse mode").onChange as (e: unknown) => void)({ target: { value } });
 
 describe("SpectroscopyPanel result validity", () => {
   beforeEach(() => {
@@ -1280,15 +1302,33 @@ describe("SpectroscopyPanel result validity", () => {
     expect(props.onCubeResult).not.toHaveBeenCalled();
   });
 
-  it.each(fitCalculationEdits)("clears a completed fit after changing %s", async (_name, edit) => {
-    const props = prepared();
+  it("clears a completed fit and invalidates its maps after changing the DQ masking", async () => {
+    const props = { ...prepared(), onInvalidateCubeResult: vi.fn() };
     await (fitSection(pass(props)).onFit as () => Promise<void>)();
     expect(fitSection(pass(props)).run).not.toBeNull();
-    edit(pass(props));
-    const after = fitSection(settledPanel(props));
+    (fitSection(pass(props)).onUseDq as (v: boolean) => void)(false);
+    const tree = settledPanel(props);
+    const after = fitSection(tree);
     expect(after.run).toBeNull();
     expect(after.inspect).toBeNull();
     expect(after.error).toBeNull();
+    expect(staleMarks(tree)).toEqual(NOT_STALE);
+    expect(props.onInvalidateCubeResult).toHaveBeenCalledExactlyOnceWith(["C:/out/fit.fits"]);
+  });
+
+  it.each(fitParameterEdits)("keeps a completed fit and its published map, marked stale, after changing %s", async (_name, edit) => {
+    const props = { ...prepared(), onInvalidateCubeResult: vi.fn() };
+    await (fitSection(pass(props)).onFit as () => Promise<void>)();
+    const run = fitSection(pass(props)).run;
+    expect(run).not.toBeNull();
+    expect(staleMarks(settledPanel(props))).toEqual(NOT_STALE);
+    edit(pass(props));
+    const tree = settledPanel(props);
+    expect(fitSection(tree).run).toBe(run);
+    expect(fitSection(tree).error).toBeNull();
+    expect(staleMarks(tree)).toEqual(markedStale("Fit lines"));
+    expect(props.onInvalidateCubeResult).not.toHaveBeenCalled();
+    expect(props.onCubeResult).toHaveBeenCalledTimes(1);
   });
 
   it.each(fitCalculationEdits)("rejects a late fit after changing %s", async (_name, edit) => {
@@ -1307,12 +1347,16 @@ describe("SpectroscopyPanel result validity", () => {
     expect(logMock.append).not.toHaveBeenCalled();
   });
 
-  it.each(momentCalculationEdits)("clears completed moment maps after changing %s", async (_name, edit) => {
-    const props = prepared();
+  it.each(momentCalculationEdits)("keeps completed moment maps and the published map, marked stale, after changing %s", async (_name, edit) => {
+    const props = { ...prepared(), onInvalidateCubeResult: vi.fn() };
     await clickCalculation(pass(props), "Moments");
-    expect(findProps(pass(props), (p) => p["data-err-plane"] === "moments")).not.toBeNull();
+    expect(staleNotes(settledPanel(props))).toBe(0);
     edit(pass(props));
-    expect(findProps(settledPanel(props), (p) => p["data-err-plane"] === "moments")).toBeNull();
+    const tree = settledPanel(props);
+    expect(findProps(tree, (p) => p["data-err-plane"] === "moments")).not.toBeNull();
+    expect(staleNotes(tree)).toBe(1);
+    expect(props.onInvalidateCubeResult).not.toHaveBeenCalled();
+    expect(props.onCubeResult).toHaveBeenCalledTimes(1);
   });
 
   it.each(momentCalculationEdits)("rejects late moment maps after changing %s", async (_name, edit) => {
@@ -1411,14 +1455,116 @@ describe("SpectroscopyPanel result validity", () => {
     expect(mustFind(settledPanel(next), (p) => p.label === label, label).loading).toBe(false);
   });
 
-  it("clears the range collapse when its reduction mode changes", async () => {
-    backend.collapseRange.mockResolvedValue(collapseResult());
+  it.each([
+    ["reduction mode", (tree: ReactNode) => chooseRangeMode(tree, "mean")],
+    ["range", (tree: ReactNode) => commitRangeStart(tree, 6)],
+  ] as [string, PanelEdit][])("keeps the range collapse and its published map, marked stale, when its %s changes", async (_name, edit) => {
+    backend.collapseRange.mockResolvedValue(collapseResult({ previewUrl: "asset://collapse.png" }));
+    const props = { ...prepared(), onInvalidateCubeResult: vi.fn() };
+    await clickCalculation(pass(props), "Collapse range");
+    expect(staleNotes(settledPanel(props))).toBe(0);
+    edit(pass(props));
+    const tree = settledPanel(props);
+    expect(findProps(tree, (p) => p["data-err-plane"] === "collapse")).not.toBeNull();
+    expect(staleNotes(tree)).toBe(1);
+    expect(props.onInvalidateCubeResult).not.toHaveBeenCalled();
+    expect(props.onCubeResult).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["Collapse range", (tree: ReactNode) => chooseRangeMode(tree, "mean"), (tree: ReactNode) => chooseRangeMode(tree, "sum")],
+    ["Moments", (tree: ReactNode) => momentSnr(tree, "5"), (tree: ReactNode) => momentSnr(tree, "3")],
+    ["Fit lines", (tree: ReactNode) => fitSnr(tree, "5"), (tree: ReactNode) => fitSnr(tree, "3")],
+  ] as [string, PanelEdit, PanelEdit][])("drops the stale note of %s when its parameters return to the values of the result", async (label, edit, revert) => {
+    backend.collapseRange.mockResolvedValue(collapseResult({ previewUrl: "asset://collapse.png" }));
+    const props = prepared();
+    await calculateWithDq(pass(props), label);
+    edit(pass(props));
+    expect(staleMarks(settledPanel(props))).toEqual(markedStale(label));
+    revert(pass(props));
+    expect(staleMarks(settledPanel(props))).toEqual(NOT_STALE);
+  });
+
+  it("marks only the results whose parameters changed", async () => {
+    backend.collapseRange.mockResolvedValue(collapseResult({ previewUrl: "asset://collapse.png" }));
     const props = prepared();
     await clickCalculation(pass(props), "Collapse range");
-    expect(findProps(pass(props), (p) => p["data-err-plane"] === "collapse")).not.toBeNull();
-    const select = mustFind(pass(props), (p) => p["aria-label"] === "Range collapse mode", "collapse mode");
-    (select.onChange as (e: unknown) => void)({ target: { value: "mean" } });
-    expect(findProps(settledPanel(props), (p) => p["data-err-plane"] === "collapse")).toBeNull();
+    await clickCalculation(pass(props), "Moments");
+    await (fitSection(pass(props)).onFit as () => Promise<void>)();
+    expect(staleMarks(settledPanel(props))).toEqual(NOT_STALE);
+    momentSnr(pass(props), "5");
+    expect(staleMarks(settledPanel(props))).toEqual({ panelNotes: 1, fitStale: false });
+    chooseRangeMode(pass(props), "mean");
+    expect(staleMarks(settledPanel(props))).toEqual({ panelNotes: 2, fitStale: false });
+    fitSnr(pass(props), "5");
+    expect(staleMarks(settledPanel(props))).toEqual({ panelNotes: 2, fitStale: true });
+  });
+
+  const nextRun: Record<string, { service: typeof backend.fit; old: string[]; fresh: string; result: () => unknown; shown: (tree: ReactNode) => boolean }> = {
+    "Collapse range": {
+      service: backend.collapseRange,
+      old: ["C:/out/c.fits"],
+      fresh: "C:/out/c2.fits",
+      result: () => collapseResult({ fits_path: "C:/out/c2.fits", previewUrl: "asset://c2.png" }),
+      shown: (tree) => findProps(tree, (p, type) => type === OutputNote && p.path === "C:/out/c2.fits") !== null,
+    },
+    Moments: {
+      service: backend.moments,
+      old: ["m.fits", "C:/out/m.fits"],
+      fresh: "C:/out/m2_0.fits",
+      result: () =>
+        momentResult({
+          m0: { png_path: "C:/out/m2_0.png", fits_path: "C:/out/m2_0.fits", previewUrl: "asset://m2_0.png" },
+          m1: { png_path: "C:/out/m2_1.png", fits_path: "C:/out/m2_1.fits" },
+          m2: { png_path: "C:/out/m2_2.png", fits_path: "C:/out/m2_2.fits" },
+        }),
+      shown: (tree) => findProps(tree, (p, type) => type === OutputNote && p.path === "C:/out/m2_0.fits") !== null,
+    },
+    "Fit lines": {
+      service: backend.fit,
+      old: ["C:/out/fit.fits"],
+      fresh: "C:/out/fit2.fits",
+      result: () => ({ ...fitResult(), planes: { velocity: { png_path: "C:/out/fit2.png", fits_path: "C:/out/fit2.fits", previewUrl: "asset://fit2.png" } } }),
+      shown: (tree) => (fitSection(tree).run as { result: LineFitResult } | null)?.result.planes.velocity?.fits_path === "C:/out/fit2.fits",
+    },
+  };
+
+  it.each(Object.keys(nextRun))("replaces a stale %s on the next run and invalidates the maps it replaced", async (label) => {
+    const next = nextRun[label];
+    backend.collapseRange.mockResolvedValue(collapseResult({ previewUrl: "asset://collapse.png" }));
+    const props = { ...prepared(), onInvalidateCubeResult: vi.fn() };
+    await calculateWithDq(pass(props), label);
+    commitRangeStart(pass(props), 6);
+    expect(staleMarks(settledPanel(props))).toEqual(markedStale(label));
+    next.service.mockResolvedValue(next.result());
+    await calculateWithDq(pass(props), label);
+    const tree = settledPanel(props);
+    expect(next.shown(tree)).toBe(true);
+    expect(staleMarks(tree)).toEqual(NOT_STALE);
+    expect(props.onCubeResult).toHaveBeenLastCalledWith(expect.objectContaining({ fitsPath: next.fresh }));
+    expect(new Set(props.onInvalidateCubeResult.mock.calls.flatMap(([paths]) => paths as string[]))).toEqual(new Set(next.old));
+  });
+
+  it.each(Object.keys(nextRun))("keeps the stale %s when another edit rejects its next run", async (label) => {
+    const next = nextRun[label];
+    backend.collapseRange.mockResolvedValue(collapseResult({ previewUrl: "asset://collapse.png" }));
+    const props = { ...prepared(), onInvalidateCubeResult: vi.fn() };
+    await calculateWithDq(pass(props), label);
+    commitRangeStart(pass(props), 6);
+    settledPanel(props);
+    const pending = deferred<unknown>();
+    next.service.mockReturnValue(pending.promise);
+    const running = calculateWithDq(pass(props), label);
+    await Promise.resolve();
+    commitRangeStart(pass(props), 7);
+    settledPanel(props);
+    pending.resolve(next.result());
+    await running;
+    const tree = settledPanel(props);
+    expect(next.shown(tree)).toBe(false);
+    expect(staleMarks(tree)).toEqual(markedStale(label));
+    expect(props.onCubeResult).toHaveBeenCalledTimes(1);
+    expect(props.onInvalidateCubeResult).not.toHaveBeenCalled();
   });
 
   it.each(["reload", "HDU", "file identity"])("rejects a pending fit after changing the input %s at the same path", async (change) => {
@@ -1480,7 +1626,7 @@ describe("SpectroscopyPanel result validity", () => {
     const props = { ...prepared(), onInvalidateCubeResult: invalidated };
     await (fitSection(pass(props)).onFit as () => Promise<void>)();
     settledPanel(props);
-    (fitSection(pass(props)).onSnrText as (v: string) => void)("5");
+    (fitSection(pass(props)).onUseDq as (v: boolean) => void)(false);
     settledPanel(props);
     expect(invalidated).toHaveBeenCalledExactlyOnceWith(["C:/out/fit.fits"]);
     invalidated.mockClear();
@@ -1607,5 +1753,102 @@ describe("SpectroscopyPanel result validity", () => {
     expect(spectrumActions.clear).toHaveBeenCalled();
     expect(spectrumActions.commit).not.toHaveBeenCalled();
     expect(spectrumActions.fail).not.toHaveBeenCalled();
+  });
+});
+
+describe("SpectroscopyPanel product of an earlier run on the viewer", () => {
+  const OLD_MOMENT = {
+    kind: "cube",
+    label: "Moment m0 · 35 ch",
+    fitsPath: "C:/out/moments-1/cube_moment0_5-39.fits",
+    previewUrl: "asset://old_m0.png",
+    dimensions: [8, 8],
+    inputPath: "C:/data/cube.fits",
+  };
+  const reopened = (tree: ReactNode) => findProps(tree, (_p, type) => type === ReopenedProductNote);
+
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    regionDocState.regions = [];
+    backend.moments.mockReset().mockResolvedValue(momentResult({ m0: { png_path: "C:/out/m.png", fits_path: "C:/out/m.fits", previewUrl: "asset://m.png" } }));
+  });
+  afterEach(() => {
+    renderState.processed = null;
+  });
+
+  it("names a product of an earlier run on the viewer and offers Show cube", () => {
+    renderState.processed = OLD_MOMENT;
+    const props = { ...cubeProps(), onInvalidateCubeResult: vi.fn() };
+    const note = reopened(settledPanel(props));
+    expect(note?.label).toBe("Moment m0 · 35 ch");
+    (note?.onShowCube as () => void)();
+    expect(props.onInvalidateCubeResult).toHaveBeenCalledExactlyOnceWith([OLD_MOMENT.fitsPath]);
+  });
+
+  it("names the product in the empty panel before a spectrum is extracted", () => {
+    renderState.processed = { ...OLD_MOMENT, label: "Line fit Velocity · ch 5-39 · 64 px", fitsPath: "C:/out/fit-1/velocity.fits" };
+    const tree = settledPanel({ ...cubeProps(), spectrum: [], pixelCoord: null });
+    expect(findProps(tree, (p) => p.children === "Click on the preview image to extract a spectrum")).not.toBeNull();
+    expect(reopened(tree)?.label).toBe("Line fit Velocity · ch 5-39 · 64 px");
+  });
+
+  it.each([
+    ["the panel title", () => cubeProps(), "Spectroscopy"],
+    ["the hint of the empty panel", () => ({ ...cubeProps(), spectrum: [], pixelCoord: null }), "Click on the preview image to extract a spectrum"],
+  ] as [string, () => Record<string, unknown>, string][])("hands focus to %s when Show cube removes the note", (_name, props, text) => {
+    renderState.processed = OLD_MOMENT;
+    const tree = settledPanel(props());
+    const target = findProps(tree, (p) => p.children === text);
+    expect(target?.tabIndex).toBe(-1);
+    const element = { focus: vi.fn() };
+    (target?.ref as (element: unknown) => void)(element);
+    expect((reopened(tree)?.focusAfterShowCube as { current: unknown } | undefined)?.current).toBe(element);
+  });
+
+  it("does not name the product of the result the panel shows", async () => {
+    const props = cubeProps();
+    settledPanel(props);
+    commitRangeStart(pass(props), 5);
+    settledPanel(props);
+    await clickCalculation(pass(props), "Moments");
+    renderState.processed = { ...OLD_MOMENT, fitsPath: "C:/out/m.fits", previewUrl: "asset://m.png" };
+    expect(reopened(settledPanel(props))).toBeNull();
+  });
+
+  it.each([
+    ["a channel preview", { ...OLD_MOMENT, label: "ch 5", frameIndex: 5 }],
+    ["a quick slope of the RAMP section", { ...OLD_MOMENT, label: "Quick slope (DN/s)" }],
+    ["a product without a FITS file", { ...OLD_MOMENT, fitsPath: null }],
+    ["a product of another file", { ...OLD_MOMENT, inputPath: "C:/data/other.fits" }],
+  ])("does not name %s", (_name, processed) => {
+    renderState.processed = processed;
+    expect(reopened(settledPanel(cubeProps()))).toBeNull();
+  });
+
+  it("does not name a product in a spectrum file", () => {
+    renderState.processed = { ...OLD_MOMENT, inputPath: DOC_PATH };
+    cubeState.ramp = null;
+    const tree = settledPanel({ documentMode: true, spectrumDocument: documentOf(), filePath: DOC_PATH, publishGate: createFramePublishGate() });
+    expect(reopened(tree)).toBeNull();
+  });
+
+  it("hides the note while a run that will replace the product is in progress", async () => {
+    renderState.processed = OLD_MOMENT;
+    const pending = deferred<MomentMapsResult>();
+    backend.moments.mockReturnValue(pending.promise);
+    const props = cubeProps();
+    settledPanel(props);
+    commitRangeStart(pass(props), 5);
+    expect(reopened(settledPanel(props))).not.toBeNull();
+    const running = clickCalculation(pass(props), "Moments");
+    await Promise.resolve();
+    expect(reopened(settledPanel(props))).toBeNull();
+    pending.resolve(momentResult());
+    await running;
   });
 });

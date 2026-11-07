@@ -135,16 +135,19 @@ describe("RATE comparison validity", () => {
     expect(props.onInvalidateCubeResult).toHaveBeenCalledWith(["ratio.fits", "difference.fits"]);
   });
 
-  const edits: [string, (props: Props, tree: ReactNode) => Props][] = [
+  const referenceEdits: [string, (props: Props, tree: ReactNode) => Props][] = [
     ["RATE file", (props) => ({ ...props, ratePath: "other_rate.fits" })],
     ["Quick Slope product", (props) => ({ ...props, qslopePath: "other_slope.fits" })],
+  ];
+  const edits: [string, (props: Props, tree: ReactNode) => Props][] = [
+    ...referenceEdits,
     ["row window", (props, tree) => {
       (required(tree, (p) => p.inputMode === "numeric").onChange as (e: unknown) => void)({ target: { value: "1" } });
       return props;
     }],
   ];
 
-  it.each(edits)("clears completed comparison after changing %s", async (_name, edit) => {
+  it.each(referenceEdits)("clears completed comparison after changing %s", async (_name, edit) => {
     const props = compareProps();
     await run(render(RampComparePanel, props), "Compare");
     const completed = render(RampComparePanel, props);
@@ -205,16 +208,19 @@ describe("Quick Slope validity", () => {
     expect(find(render(RampPanel, { ...props, filePath: "other_uncal.fits" }), (p) => p.path === "C:/out/slope/provenance.json")).toBeNull();
   });
 
-  const edits: [string, (props: Props, tree: ReactNode) => Props][] = [
+  const inputEdits: [string, (props: Props, tree: ReactNode) => Props][] = [
     ["file", (props) => ({ ...props, filePath: "other_uncal.fits" })],
     ["integration", (props) => { state.integration = 1; return props; }],
+  ];
+  const edits: [string, (props: Props, tree: ReactNode) => Props][] = [
+    ...inputEdits,
     ["parameters", (props, tree) => {
       (required(tree, (p) => p.label === "Jump k").onChange as (v: number) => void)(6);
       return props;
     }],
   ];
 
-  it.each(edits)("clears completed slope after changing %s", async (_name, edit) => {
+  it.each(inputEdits)("clears completed slope after changing %s", async (_name, edit) => {
     const props = rampProps();
     await run(render(RampPanel, props), "Run quick slope");
     const completed = render(RampPanel, props);

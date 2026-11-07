@@ -47,6 +47,7 @@ function MeasureBtn({
     <button
       onClick={onClick}
       disabled={disabled}
+      title="Measure the selected spectral range using the chosen model and continuum windows"
       className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[10px] font-medium transition-all disabled:opacity-40"
       style={{
         background: `color-mix(in srgb, ${ACCENT} 8%, transparent)`,

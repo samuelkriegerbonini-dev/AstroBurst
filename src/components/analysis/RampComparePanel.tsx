@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, CheckCircle2, XCircle } from "lucide-react";
 import ProfilePlot, { type ProfileSeries } from "../regions/ProfilePlot";
 import { ErrorAlert, RunButton, WarningList } from "../ui";
@@ -19,6 +19,7 @@ import {
 import type { Histogram, RateComparison } from "../../shared/types/ramp";
 import type { CubeResult } from "./SpectroscopyPanel";
 import OutputNote from "./OutputNote";
+import StaleResultNote from "./StaleResultNote";
 
 interface RampComparePanelProps {
   qslopePath: string;
@@ -26,6 +27,14 @@ interface RampComparePanelProps {
   dimensions: [number, number] | null;
   onCubeResult?: (result: CubeResult) => void;
   onInvalidateCubeResult?: (fitsPaths: string[]) => void;
+  slopeStale?: boolean;
+}
+
+type UncalRows = [number, number] | null;
+
+interface CompletedComparison {
+  comparison: RateComparison;
+  rows: UncalRows;
 }
 
 const INPUT_CLASS =
@@ -36,10 +45,12 @@ const SMALL_BUTTON_CLASS =
 const HIST_HEIGHT = 120;
 const REL_HIST_COLOR = "rgba(45,212,191,0.9)";
 const DELTA_HIST_COLOR = "rgba(167,139,250,0.9)";
-const RATIO_LABEL = "Quick / rate ratio";
+export const RATIO_LABEL = "Quick / rate ratio";
+export const DIFFERENCE_LABEL = "Quick − rate (DN/s)";
 const FAINT_BIN_LABELS = ["[-inf,0.05)", "[0.05,0.3)"];
 const REL_HIST_LABEL = "delta / rate";
 const DELTA_HIST_LABEL = "delta DN/s";
+const SLOPE_STALE_REASON = "Run the quick slope again first.";
 
 function fileName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
@@ -50,17 +61,24 @@ function signedDelta(v: number | null): string {
   return `${v >= 0 ? "+" : ""}${v.toFixed(4)}`;
 }
 
+function sameRows(a: UncalRows, b: UncalRows): boolean {
+  return a === b || (a !== null && b !== null && a[0] === b[0] && a[1] === b[1]);
+}
+
 function histogramPlot(h: Histogram, color: string, label: string): ProfileSeries[] {
   const { x, y } = histogramSeries(h);
   return x.length > 0 ? [{ x, y, color, label, mode: "line" }] : [];
 }
 
-function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult, onInvalidateCubeResult }: RampComparePanelProps) {
+function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult, onInvalidateCubeResult, slopeStale = false }: RampComparePanelProps) {
+  const rowsErrorId = useId();
+  const slopeStaleId = useId();
   const [y0Text, setY0Text] = useState("");
   const [y1Text, setY1Text] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [cmp, setCmp] = useState<RateComparison | null>(null);
+  const [completed, setCompleted] = useState<CompletedComparison | null>(null);
+  const cmp = completed?.comparison ?? null;
   const seqRef = useRef(0);
   const outputRef = useRef<string[]>([]);
   const invalidateRef = useRef(onInvalidateCubeResult);
@@ -68,12 +86,18 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult, onIn
 
   useLayoutEffect(() => {
     seqRef.current++;
-    setCmp(null);
+    setCompleted(null);
     setError(null);
     setRunning(false);
     if (outputRef.current.length) invalidateRef.current?.(outputRef.current);
     outputRef.current = [];
-  }, [qslopePath, ratePath, y0Text, y1Text]);
+  }, [qslopePath, ratePath]);
+
+  useLayoutEffect(() => {
+    seqRef.current++;
+    setError(null);
+    setRunning(false);
+  }, [y0Text, y1Text]);
 
   useEffect(() => {
     const seq = seqRef;
@@ -83,30 +107,35 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult, onIn
   }, []);
 
   const rows = useMemo(() => parseUncalRows(y0Text, y1Text), [y0Text, y1Text]);
+  const stale = completed !== null && (slopeStale || rows.error !== null || !sameRows(rows.rows, completed.rows));
+  const compareDescribedBy =
+    [rows.error !== null ? rowsErrorId : null, slopeStale ? slopeStaleId : null].filter((id): id is string => id !== null).join(" ") ||
+    undefined;
 
   const handleRun = useCallback(async () => {
-    if (rows.error) return;
+    if (rows.error || slopeStale) return;
     const seq = ++seqRef.current;
+    const requested = rows.rows;
     setRunning(true);
     setError(null);
-    setCmp(null);
+    setCompleted(null);
     if (outputRef.current.length) invalidateRef.current?.(outputRef.current);
     outputRef.current = [];
     try {
-      const res = await compareWithRate(qslopePath, ratePath, undefined, rows.rows);
+      const res = await compareWithRate(qslopePath, ratePath, undefined, requested);
       if (seq === seqRef.current) {
         outputRef.current = [res.ratio_fits_path, res.difference_fits_path];
-        setCmp(res);
+        setCompleted({ comparison: res, rows: requested });
       }
     } catch (e) {
       if (seq === seqRef.current) {
-        setCmp(null);
+        setCompleted(null);
         setError(e instanceof Error ? e.message : String(e));
       }
     } finally {
       if (seq === seqRef.current) setRunning(false);
     }
-  }, [qslopePath, ratePath, rows.error, rows.rows]);
+  }, [qslopePath, ratePath, rows.error, rows.rows, slopeStale]);
 
   const verdict = useMemo(() => (cmp ? compareVerdict(cmp) : null), [cmp]);
   const ampRows = useMemo(() => (cmp ? ampFaintRows(cmp) : []), [cmp]);
@@ -120,7 +149,7 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult, onIn
 
   const publishDifference = useCallback(() => {
     if (!cmp?.differencePreviewUrl) return;
-    onCubeResult?.({ label: "Quick − rate (DN/s)", previewUrl: cmp.differencePreviewUrl, fitsPath: cmp.difference_fits_path, dimensions });
+    onCubeResult?.({ label: DIFFERENCE_LABEL, previewUrl: cmp.differencePreviewUrl, fitsPath: cmp.difference_fits_path, dimensions });
   }, [cmp, dimensions, onCubeResult]);
 
   return (
@@ -142,12 +171,22 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult, onIn
           <input type="text" inputMode="numeric" value={y1Text} onChange={(e) => setY1Text(e.target.value)} className={INPUT_CLASS} />
         </label>
       </div>
-      {rows.error && <div className="text-[9px] text-amber-300">{rows.error}</div>}
-      <RunButton label="Compare" runningLabel="Comparing..." running={running} disabled={rows.error !== null} small onClick={handleRun} />
+      {rows.error && <div id={rowsErrorId} className="text-[9px] text-amber-300">{rows.error}</div>}
+      {slopeStale && <div id={slopeStaleId} className="text-[9px] text-amber-300">{SLOPE_STALE_REASON}</div>}
+      <RunButton
+        label="Compare"
+        runningLabel="Comparing..."
+        running={running}
+        disabled={rows.error !== null || slopeStale}
+        small
+        describedBy={compareDescribedBy}
+        onClick={handleRun}
+      />
       <ErrorAlert message={error} />
 
       {cmp && verdict && (
         <div className="space-y-2">
+          {stale && <StaleResultNote />}
           <div
             role="status"
             className={`rounded px-2 py-1.5 text-[10px] border ${

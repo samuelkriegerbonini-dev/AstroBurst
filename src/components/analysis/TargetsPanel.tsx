@@ -30,6 +30,8 @@ const TEXTAREA_ROWS = 4;
 const DEG_DIGITS = 5;
 const PIXEL_DIGITS = 1;
 const LIST_PLACEHOLDER = "10:45:03.6 -59:41:04 label";
+const NO_IMAGE_REASON = "Select an image first. Placing targets needs its WCS, from the header or solved in Stars.";
+const NO_TARGETS_REASON = "Enter at least one target to place.";
 
 const TEXTAREA_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-cyan-500/50 w-full resize-y";
@@ -58,6 +60,7 @@ function TargetsPanel({ filePath, measurePath = null }: TargetsPanelProps) {
   const wcsPath = targetProjectionPath(filePath, measurePath);
   const textId = useId();
   const frameId = useId();
+  const placeReasonId = useId();
   const [text, setText] = useState("");
   const [frame, setFrame] = useState<SkyFrame>("icrs");
   const [placed, setPlaced] = useState<{ targets: SkyTarget[]; result: WorldToPixelResult } | null>(null);
@@ -80,6 +83,7 @@ function TargetsPanel({ filePath, measurePath = null }: TargetsPanelProps) {
     [text, frame],
   );
 
+  const placeReason = !wcsPath ? NO_IMAGE_REASON : parsed.targets.length === 0 ? NO_TARGETS_REASON : null;
   const rows = useMemo(() => (placed ? placeRows(placed.targets, placed.result) : []), [placed]);
   const onImageRows = useMemo(() => rows.filter((r) => r.onImage && r.x !== null && r.y !== null), [rows]);
   const tableRows = useMemo(() => rows.slice(0, TABLE_ROW_LIMIT), [rows]);
@@ -209,15 +213,19 @@ function TargetsPanel({ filePath, measurePath = null }: TargetsPanelProps) {
           <span className="text-[9px] text-zinc-600 font-mono">{parsed.targets.length} parsed</span>
         </div>
 
-        <RunButton
-          label="Place"
-          runningLabel="Projecting..."
-          running={loading}
-          disabled={!wcsPath || parsed.targets.length === 0}
-          accent="cyan"
-          icon={<Pin size={12} />}
-          onClick={() => void place()}
-        />
+        <div title={placeReason ?? undefined}>
+          <RunButton
+            label="Place"
+            runningLabel="Projecting..."
+            running={loading}
+            disabled={placeReason !== null}
+            accent="cyan"
+            icon={<Pin size={12} />}
+            describedBy={placeReason ? placeReasonId : undefined}
+            onClick={() => void place()}
+          />
+        </div>
+        {placeReason && <div id={placeReasonId} data-run-blocked className="text-[9px] text-zinc-500">{placeReason}</div>}
 
         <ErrorAlert message={error} />
 

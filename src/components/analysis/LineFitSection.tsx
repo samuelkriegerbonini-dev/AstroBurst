@@ -4,6 +4,7 @@ import type { LineFitComponents, LineFitPlane, LineFitSpaxel } from "../../share
 import { LINE_FIT_COMPONENTS } from "../../shared/types/cube";
 import LineFitInspectPlot from "./LineFitInspectPlot";
 import OutputNote from "./OutputNote";
+import StaleResultNote from "./StaleResultNote";
 import { DecimalField } from "../ui";
 import { scienceDqSummary } from "../../utils/analysisLabels";
 import {
@@ -38,6 +39,7 @@ interface LineFitSectionProps {
   onComponents(v: LineFitComponents): void;
   onFit(): void;
   run: LineFitRun | null;
+  stale?: boolean;
   shownPlane: LineFitPlane | null;
   onShowPlane(plane: LineFitPlane): void;
   inspect: LineFitSpaxel | null;
@@ -112,6 +114,7 @@ function LineFitSection({
   onComponents,
   onFit,
   run,
+  stale,
   shownPlane,
   onShowPlane,
   inspect,
@@ -220,6 +223,7 @@ function LineFitSection({
 
       {run && result && (
         <>
+          {stale && <StaleResultNote />}
           <p className="text-[10px] text-zinc-500" data-dq-policy="fit">{scienceDqSummary(result)}</p>
           <div className="flex items-center gap-1 flex-wrap text-[10px] font-mono">
             {result.plane_order.map((plane) => {

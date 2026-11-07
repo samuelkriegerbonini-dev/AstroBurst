@@ -63,7 +63,7 @@ const RUN: LineFitRun = {
   lineLabel: "Paα",
 };
 
-function render(run: LineFitRun | null, shownPlane: LineFitPlane | null): string {
+function render(run: LineFitRun | null, shownPlane: LineFitPlane | null, stale = false): string {
   const noop = () => {};
   return renderToStaticMarkup(
     createElement(LineFitSection, {
@@ -93,6 +93,7 @@ function render(run: LineFitRun | null, shownPlane: LineFitPlane | null): string
       inspectLoading: false,
       inspectError: null,
       frameNote: "velocities in the file's frame",
+      stale,
     }),
   );
 }
@@ -105,9 +106,9 @@ describe("LineFitSection output note", () => {
     } } };
     const html = render(run, null);
     expect(html).toContain('data-output-path="C:/out/fit/provenance.json"');
-    expect(html).toContain("Show manifest");
+    expect(html).toContain("does not copy this manifest");
     expect(html).toContain("Input SHA-256: abcdef012345…");
-    expect(render(null, null)).not.toContain("Show manifest");
+    expect(render(null, null)).not.toContain("does not copy this manifest");
   });
 
   it("names the map on screen as an output-folder file that is cleared at launch, with Show in folder", () => {
@@ -124,5 +125,20 @@ describe("LineFitSection output note", () => {
 
   it("shows no note before a fit", () => {
     expect(render(null, null)).not.toContain("data-output-note");
+  });
+});
+
+describe("LineFitSection stale note", () => {
+  it("shows the stale note once, at the top of the fit result above its DQ policy, numbers and manifest", () => {
+    const html = render(RUN, null, true);
+    const note = html.indexOf("data-stale-result");
+    expect(html.split("data-stale-result")).toHaveLength(2);
+    expect(note).toBeGreaterThan(html.indexOf('aria-label="Fit lines"'));
+    expect(note).toBeLessThan(html.indexOf('data-dq-policy="fit"'));
+  });
+
+  it("shows no stale note for a current fit or before a fit", () => {
+    expect(render(RUN, null)).not.toContain("data-stale-result");
+    expect(render(null, null, true)).not.toContain("data-stale-result");
   });
 });

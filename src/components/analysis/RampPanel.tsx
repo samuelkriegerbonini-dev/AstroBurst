@@ -2,8 +2,9 @@ import { memo, useCallback, useEffect, useLayoutEffect, useId, useMemo, useRef, 
 import { Activity, FileText, FolderOpen, X } from "lucide-react";
 import CubeFrameNav from "../CubeFrameNav";
 import ProfilePlot, { type ProfileSeries } from "../regions/ProfilePlot";
-import RampComparePanel from "./RampComparePanel";
+import RampComparePanel, { DIFFERENCE_LABEL, RATIO_LABEL } from "./RampComparePanel";
 import OutputNote from "./OutputNote";
+import StaleResultNote, { ReopenedProductNote } from "./StaleResultNote";
 import { ErrorAlert, RunButton, Slider, WarningList } from "../ui";
 import { getPreviewUrl, isTauri } from "../../infrastructure/tauri";
 import { useDisplayedImage } from "../../context/PreviewContext";
@@ -80,6 +81,11 @@ interface InspectState {
   fitError: string | null;
 }
 
+interface CompletedSlope {
+  result: QuickSlopeResult;
+  params: QuickSlopeParams;
+}
+
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 font-mono focus:border-violet-500/50 w-16 disabled:opacity-40";
 const SELECT_CLASS =
@@ -89,6 +95,7 @@ const BADGE_CLASS = "px-1.5 py-0.5 rounded text-[9px] font-mono border";
 const SMALL_BUTTON_CLASS =
   "flex items-center gap-1 px-2 py-0.5 rounded text-[9px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40";
 const QSLOPE_LABEL = "Quick slope (DN/s)";
+const RAMP_PRODUCT_LABELS: readonly string[] = [QSLOPE_LABEL, RATIO_LABEL, DIFFERENCE_LABEL];
 const PLOT_HEIGHT = 170;
 const RAW_COLOR = "rgba(161,161,170,0.8)";
 const CORRECTED_COLOR = "rgba(45,212,191,0.95)";
@@ -106,6 +113,11 @@ function errorText(e: unknown): string {
 
 function fixedOrNa(v: number | null | undefined, digits: number): string {
   return v === null || v === undefined || !Number.isFinite(v) ? "n/a" : v.toFixed(digits);
+}
+
+function sameSlopeParams(a: QuickSlopeParams, b: QuickSlopeParams): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every((key) => Reflect.get(a, key) === Reflect.get(b, key));
 }
 
 function inspectorPlot(state: InspectState): { series: ProfileSeries[]; xLabel: string } {
@@ -193,7 +205,8 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, onInval
   const [draft, setDraft] = useState<QuickSlopeDraft>(() => draftFromParams(DEFAULT_QUICK_SLOPE_PARAMS));
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
-  const [result, setResult] = useState<QuickSlopeResult | null>(null);
+  const [completed, setCompleted] = useState<CompletedSlope | null>(null);
+  const result = completed?.result ?? null;
   const [runId, setRunId] = useState(0);
   const [pickedRate, setPickedRate] = useState<string | null>(null);
   const [asdfFrame, setAsdfFrame] = useState(0);
@@ -206,6 +219,7 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, onInval
   const mountedRef = useRef(true);
   const asdfPublishSeqRef = useRef(0);
   const outputPathsRef = useRef<string[]>([]);
+  const quickSlopeHeadingRef = useRef<HTMLDivElement>(null);
   const invalidateRef = useRef(onInvalidateCubeResult);
   invalidateRef.current = onInvalidateCubeResult;
 
@@ -224,15 +238,31 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, onInval
   const totalFrames = ramp.ngroups * Math.max(ramp.nints, 1);
   const badge = irs2Badge(ramp);
   const ratePath = pickedRate ?? result?.rate_sibling ?? null;
+  const slopeStale = completed !== null && !sameSlopeParams(completed.params, params);
+  const reopened =
+    completed === null &&
+    !running &&
+    displayed.isProcessed &&
+    !displayed.previewOnly &&
+    displayed.path !== null &&
+    displayed.label !== null &&
+    RAMP_PRODUCT_LABELS.includes(displayed.label)
+      ? { label: displayed.label, path: displayed.path }
+      : null;
 
   useLayoutEffect(() => {
     runSeqRef.current++;
-    setResult(null);
+    setCompleted(null);
     setRunError(null);
     setPickedRate(null);
     invalidateRef.current?.(outputPathsRef.current);
     outputPathsRef.current = [];
-  }, [filePath, source, integration, draft]);
+  }, [filePath, source, integration]);
+
+  useLayoutEffect(() => {
+    runSeqRef.current++;
+    setRunError(null);
+  }, [draft]);
 
   const invalidateComparison = useCallback((paths: string[]) => {
     invalidateRef.current?.(paths);
@@ -333,20 +363,22 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, onInval
     if (!filePath || slopeBlocker !== null || paramErrors.length > 0 || runningRef.current) return;
     const seq = ++runSeqRef.current;
     const publication = gate.reserve();
+    const requested = params;
     runningRef.current = true;
     setRunning(true);
     setRunError(null);
     resetProgress();
     try {
-      const res = await runQuickSlope(filePath, undefined, integration, params);
+      const res = await runQuickSlope(filePath, undefined, integration, requested);
       if (seq !== runSeqRef.current) return;
+      const replaced = outputPathsRef.current.filter((path) => path !== res.fits_path);
       outputPathsRef.current = [res.fits_path];
-      setResult(res);
+      setCompleted({ result: res, params: requested });
       setRunId((n) => n + 1);
-      setPickedRate(null);
       if (res.previewUrl && gate.isLatest(publication)) {
         publishers.result({ label: QSLOPE_LABEL, previewUrl: res.previewUrl, fitsPath: res.fits_path, dimensions: res.dimensions });
       }
+      if (replaced.length) invalidateRef.current?.(replaced);
     } catch (e) {
       if (seq === runSeqRef.current) setRunError(errorText(e));
     } finally {
@@ -519,7 +551,7 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, onInval
         </div>
 
         <div className="space-y-2">
-          <div className={LABEL_CLASS}>Quick slope</div>
+          <div ref={quickSlopeHeadingRef} tabIndex={-1} className={LABEL_CLASS}>Quick slope</div>
           {slopeBlocker && (
             <div id={slopeBlockerId} className="text-[9px] text-amber-300">
               {slopeBlocker}
@@ -647,9 +679,17 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, onInval
           )}
           <p className="text-[9px] leading-snug text-zinc-500">{QSLOPE_ACCURACY_NOTE}</p>
           <ErrorAlert message={runError} />
+          {reopened && (
+            <ReopenedProductNote
+              label={reopened.label}
+              onShowCube={onInvalidateCubeResult ? () => invalidateRef.current?.([reopened.path]) : undefined}
+              focusAfterShowCube={quickSlopeHeadingRef}
+            />
+          )}
           {result && (
             <div className="space-y-1.5">
               <div className="text-[9px] text-zinc-500">{running ? "Previous result; recalculation in progress" : "Last completed result"}</div>
+              {slopeStale && <StaleResultNote />}
               <WarningList warnings={result.warnings} />
               <div className="text-[9px] font-mono text-zinc-400 space-y-0.5">
                 <div className="break-all" title={result.fits_path}>
@@ -682,6 +722,7 @@ function RampPanel({ filePath, ramp, rampSource, cubeDims, onCubeResult, onInval
                   dimensions={result.dimensions}
                   onCubeResult={onCubeResult ? publishComparison : undefined}
                   onInvalidateCubeResult={invalidateComparison}
+                  slopeStale={slopeStale}
                 />
               )}
             </div>

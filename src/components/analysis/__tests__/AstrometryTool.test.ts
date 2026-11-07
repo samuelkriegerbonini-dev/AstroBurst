@@ -17,11 +17,17 @@ interface SkyPanelProps {
   measurePath?: string | null;
 }
 
-const { captured, publishProcessed, skyPanels, measureOverride } = vi.hoisted(() => ({
+interface ChipProps {
+  sections: readonly { id: string }[];
+  tip?: { tips: Readonly<Record<string, { title: string; body: string } | undefined>> };
+}
+
+const { captured, publishProcessed, skyPanels, measureOverride, chips } = vi.hoisted(() => ({
   captured: { props: null as CapturedPanelProps | null },
   publishProcessed: vi.fn(),
   skyPanels: { catalog: null as SkyPanelProps | null, targets: null as SkyPanelProps | null },
   measureOverride: { value: {} as Record<string, unknown> },
+  chips: { props: null as ChipProps | null },
 }));
 
 const STACK_PATH = "/out/stack.fits";
@@ -58,7 +64,13 @@ vi.mock("../../../hooks/useStarDetectionStore", () => ({
   useStarDetection: () => ({ scope: null, result: null, loading: false, error: null }),
 }));
 vi.mock("../../../services/analysis", () => ({ detectStars: async () => null, detectStarsComposite: async () => null }));
-vi.mock("../SectionChips", () => ({ default: () => null }));
+vi.mock("../SectionChips", () => ({
+  default: (props: ChipProps) => {
+    chips.props = props;
+    return null;
+  },
+  SectionTipNote: ({ sectionId }: { sectionId: string }) => createElement("b", { "data-tip-note": sectionId }),
+}));
 vi.mock("../ObservationGeometryPanel", () => ({ default: () => null }));
 vi.mock("../CatalogPanel", () => ({
   default: (props: SkyPanelProps) => {
@@ -130,6 +142,51 @@ describe("AstrometryTool plate solve target", () => {
     });
     expect(solvedWcsFor(STACK_PATH)).toBe("/out/stack_wcs_spcc.fits");
     expect(solvedWcsFor(FRAME_PATH)).toBeNull();
+  });
+});
+
+describe("AstrometryTool section tips", () => {
+  const STARS = "analysis-stars";
+  const CATALOG = "analysis-catalog";
+  const TARGETS = "analysis-targets";
+
+  it("guides the stars, solve and WCS flow, then the catalog and targets that depend on it", async () => {
+    await renderTool();
+    const tips = chips.props?.tip?.tips;
+    expect(chips.props?.sections.map((s) => s.id)).toEqual([STARS, "analysis-geometry", CATALOG, TARGETS]);
+    expect(tips?.[STARS]?.title).toBe("Detect stars and solve the field");
+    for (const step of ["Detect Stars", "Plate Solve", "Write WCS to image"]) expect(tips?.[STARS]?.body).toContain(step);
+    expect(tips?.[STARS]?.body.indexOf("Detect Stars")).toBeLessThan(tips?.[STARS]?.body.indexOf("Plate Solve") ?? -1);
+    expect(tips?.[STARS]?.body.indexOf("Plate Solve")).toBeLessThan(tips?.[STARS]?.body.indexOf("Write WCS to image") ?? -1);
+    expect(tips?.[CATALOG]?.title).toBe("Compare with Gaia DR3");
+    for (const step of ["WCS", "Search Gaia DR3", "Cross-match detected stars"]) expect(tips?.[CATALOG]?.body).toContain(step);
+    expect(tips?.[TARGETS]?.title).toBe("Place targets on the image");
+    for (const step of ["WCS", "one per line", "Place"]) expect(tips?.[TARGETS]?.body).toContain(step);
+    expect(tips?.["analysis-geometry"]).toBeUndefined();
+  });
+
+  it("says Plate Solve and the cross-match find their own sources, so Detect Stars feeds neither", async () => {
+    const { DEFAULT_DETECTION_SIGMA, DEFAULT_MAX_STARS } = await vi.importActual<typeof import("../CatalogPanel")>("../CatalogPanel");
+    await renderTool();
+    const tips = chips.props?.tip?.tips;
+    expect(tips?.[STARS]?.body).toContain("Plate Solve fits sky coordinates to the image and finds its own sources");
+    expect(tips?.[STARS]?.body).not.toMatch(/from them|your detections/);
+    expect(tips?.[CATALOG]?.body).toContain(
+      `Cross-match detected stars finds sources in the image (${DEFAULT_DETECTION_SIGMA} sigma, up to ${DEFAULT_MAX_STARS}) and pairs them with Gaia DR3`,
+    );
+    expect(tips?.[CATALOG]?.body).not.toContain("your detections");
+  });
+
+  it("renders each tip slot inside its own section", async () => {
+    const html = await renderTool();
+    for (const id of [STARS, CATALOG, TARGETS]) {
+      const at = html.indexOf(`id="${id}"`);
+      const note = html.indexOf(`data-tip-note="${id}"`);
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(note).toBeGreaterThan(at);
+      expect(note).toBeLessThan(html.indexOf("</section>", at));
+    }
+    expect(html).not.toContain('data-tip-note="analysis-geometry"');
   });
 });
 
