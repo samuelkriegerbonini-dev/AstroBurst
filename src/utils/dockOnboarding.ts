@@ -5,8 +5,8 @@ export const DOCK_TOGGLE_TIP_KEY = "ab.onboarding.dockToggle.v1";
 export const DOCK_SETTINGS_TIP_KEY = "ab.onboarding.settings.v1";
 export const DOCK_ONBOARDING_DONE = "done";
 export const DOCK_ONBOARDING_DELAY_MS = 600;
-export const DOCK_ONBOARDING_TITLE = "Arrange your tool windows";
-export const DOCK_ONBOARDING_TIP = "Right-click a tool (or Shift+F10) for Move to…, and Reset Layout puts everything back.";
+export const DOCK_ONBOARDING_TITLE = "Arrange your sidebar tools";
+export const DOCK_ONBOARDING_TIP = "Right-click a tool (or Shift+F10) for Move to…, and Reset layout puts everything back.";
 
 export const ONBOARDING_INSET_PX = 16;
 export const ONBOARDING_MAX_WIDTH_PX = 360;
@@ -31,13 +31,13 @@ export const DOCK_TIPS: Readonly<Record<DockTipId, DockTip>> = {
     id: "toggle",
     tool: "compose",
     title: "Open and close tools",
-    body: "Click any tool in this bar to open it, and click it again to close it.",
+    body: "Click any tool in the sidebar to open it, and click it again to close it.",
   },
   settings: {
     id: "settings",
     tool: "config",
     title: "Settings",
-    body: "Click Config for the settings: astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close them.",
+    body: "Click Settings for the astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close it.",
   },
 };
 
@@ -73,14 +73,14 @@ export const DOCK_ONBOARDING_STEPS: readonly DockOnboardingStep[] = [
   {
     demo: "vertical",
     title: "Drag vertically",
-    body: "Drag any tool icon from a side strip and drop it on the top half of either strip. The tool opens as a full-height column beside the viewer.",
+    body: "Drag any tool icon from a sidebar and drop it on the top half of either sidebar. The tool opens as a full-height column beside the viewer.",
     anchor: "right-top",
     label: moveLabel("right-top"),
   },
   {
     demo: "horizontal",
     title: "Drag horizontally",
-    body: "Drop it on the bottom half of a strip instead to open it under the viewer. Two bottom tools sit side by side.",
+    body: "Drop it on the bottom half of a sidebar instead to open it under the viewer. Two bottom tools sit side by side.",
     anchor: "right-bottom",
     label: moveLabel("right-bottom"),
   },

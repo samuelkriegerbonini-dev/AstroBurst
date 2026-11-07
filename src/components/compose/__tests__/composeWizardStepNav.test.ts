@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createElement, isValidElement, type ReactNode } from "react";
+import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { WizardState } from "../../../utils/wizard";
 
@@ -43,6 +43,7 @@ vi.mock("../steps/StackStep", () => ({ default: () => null }));
 vi.mock("../steps/AlignStep", () => ({ default: () => null }));
 
 import { hooks } from "../../../test/hookRuntime";
+import { elementsOf, textOf } from "../../../test/elementTree";
 import ComposeWizard, { StepNavFooter } from "../ComposeWizard";
 import { INITIAL_STATE } from "../../../utils/wizard";
 
@@ -87,20 +88,30 @@ interface Node {
   props: Record<string, unknown> & { children?: ReactNode };
 }
 
-function nodes(node: ReactNode): Node[] {
-  if (Array.isArray(node)) return node.flatMap(nodes);
-  if (!isValidElement<Node["props"]>(node)) return [];
-  return [{ type: node.type, props: node.props }, ...nodes(node.props.children)];
-}
-
 function footerOfWizard(state: WizardState, activeStep: string): Node[] {
   current.state = state;
   current.activeStep = activeStep;
   hooks.mount();
-  const wizard = nodes(hooks.render(ComposeWizard, undefined) as ReactNode);
+  const wizard = elementsOf(hooks.render(ComposeWizard, undefined));
   const footer = wizard.find((n) => n.type === StepNavFooter);
   expect(footer, "ComposeWizard renders the step footer").toBeDefined();
-  return nodes(StepNavFooter(footer!.props as unknown as Parameters<typeof StepNavFooter>[0]));
+  return elementsOf(StepNavFooter(footer!.props as unknown as Parameters<typeof StepNavFooter>[0]));
+}
+
+function wizardNodes(state: WizardState, activeStep: string): Node[] {
+  current.state = state;
+  current.activeStep = activeStep;
+  return elementsOf(hooks.render(ComposeWizard, undefined));
+}
+
+function byTestId(tree: Node[], testId: string): Node {
+  const node = tree.find((n) => n.props["data-testid"] === testId);
+  expect(node, testId).toBeDefined();
+  return node!;
+}
+
+function noteOf(tree: Node[]): Node | undefined {
+  return tree.find((n) => n.props.role === "note");
 }
 
 function click(footer: Node[], testId: string): void {
@@ -115,6 +126,18 @@ beforeEach(() => {
 });
 
 describe("Compose wizard step footer", () => {
+  it("identifies only the current workflow step independently of its visual styling", () => {
+    const html = renderWizard(stateWith(M16), "channels");
+    const currentStep = [...html.matchAll(/<button[^>]*aria-current="step"[^>]*>/g)].map((match) => match[0]);
+    expect(currentStep).toHaveLength(1);
+    expect(currentStep[0]).toContain('data-testid="step-channels"');
+    const aligned = stateWith(M16, { alignedPaths: M16_ALIGNED, completedSteps: { align: true } });
+    const changed = renderWizard(aligned, "align");
+    const nextCurrent = [...changed.matchAll(/<button[^>]*aria-current="step"[^>]*>/g)].map((match) => match[0]);
+    expect(nextCurrent).toHaveLength(1);
+    expect(nextCurrent[0]).toContain('data-testid="step-align"');
+  });
+
   it("Next skips a disabled Stack step and lands on Align for single-file channels", () => {
     expect(footerButtons(renderWizard(stateWith(M16), "channels"))).toEqual([{ text: "Next: Align", disabled: false }]);
     const footer = footerOfWizard(stateWith(M16), "channels");
@@ -161,5 +184,50 @@ describe("Compose wizard step footer", () => {
     click(footer, "wizard-step-next");
     expect(mocks.setActiveStep).not.toHaveBeenCalled();
     expect(mocks.dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("Compose wizard blocked step pill", () => {
+  it("stays focusable: aria-disabled, never disabled", () => {
+    const pill = /<button[^>]*data-testid="step-stack"[^>]*>/.exec(renderWizard(stateWith(M16), "channels"))?.[0];
+    expect(pill, "Stack pill").toBeDefined();
+    expect(pill).toContain('aria-disabled="true"');
+    expect(pill).not.toMatch(/\sdisabled=""/);
+  });
+
+  it("shows why the step is blocked under the stepper when it is clicked or focused, and does not open it", () => {
+    hooks.mount();
+    const state = stateWith(M16);
+    let tree = wizardNodes(state, "channels");
+    expect(noteOf(tree)).toBeUndefined();
+
+    click(tree, "step-stack");
+    tree = wizardNodes(state, "channels");
+    const note = noteOf(tree);
+    expect(note && textOf(note.props.children)).toBe("Stacking: needs a channel with 2+ frames");
+    expect(note?.props.id).toBeTruthy();
+    expect(byTestId(tree, "step-stack").props["aria-describedby"]).toBe(note?.props.id);
+    expect(mocks.setActiveStep).not.toHaveBeenCalled();
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+
+    (byTestId(tree, "step-stack").props.onBlur as () => void)();
+    tree = wizardNodes(state, "channels");
+    expect(noteOf(tree)).toBeUndefined();
+    expect(byTestId(tree, "step-stack").props["aria-describedby"]).toBeUndefined();
+
+    (byTestId(tree, "step-stack").props.onFocus as () => void)();
+    tree = wizardNodes(state, "channels");
+    expect(noteOf(tree) && textOf(noteOf(tree)!.props.children)).toBe("Stacking: needs a channel with 2+ frames");
+
+    click(tree, "step-align");
+    expect(mocks.setActiveStep).toHaveBeenCalledWith("align");
+    expect(noteOf(wizardNodes(state, "align"))).toBeUndefined();
+  });
+
+  it("shows no note when an open step is focused", () => {
+    hooks.mount();
+    const state = stateWith(M16);
+    (byTestId(wizardNodes(state, "channels"), "step-align").props.onFocus as () => void)?.();
+    expect(noteOf(wizardNodes(state, "channels"))).toBeUndefined();
   });
 });

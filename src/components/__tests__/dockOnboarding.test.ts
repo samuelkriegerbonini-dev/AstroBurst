@@ -1,26 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DockOnboardingCard, type DockOnboardingCardProps } from "../dock/DockOnboarding";
+import DockOnboarding, { DockOnboardingCard, DockOnboardingPopup, type DockOnboardingCardProps } from "../dock/DockOnboarding";
 import { DockTipCard, type DockTipCardProps } from "../dock/DockTip";
 import { createDockOnboardingStore, dockOnboardingStore, type OnboardingStorage } from "../dock/dockOnboardingStore";
-import { onboardingAnchorReady } from "../dock/dockGeometry";
+import { onboardingAnchorReady, rightRailToolsTrigger } from "../dock/dockGeometry";
+import { tipAnchorSelector } from "../dock/tipAnchor";
 import { commitDockMove } from "../dock/useDockDrag";
+import { hooks } from "../../test/hookRuntime";
 import { dockStore } from "../../hooks/useDockLayout";
 import { DEFAULT_DOCK_LAYOUT, dockReducer } from "../../utils/dockLayout";
 import { DOCK_TIPS, onboardingPlacement, viewerToolbarBottom, type OnboardingToolbarHost } from "../../utils/dockOnboarding";
 
+vi.mock("react", async (original) => {
+  const { reactWithFakeHooks } = await import("../../test/hookRuntime");
+  return reactWithFakeHooks(await original<Record<string, unknown>>());
+});
+
+vi.mock("react-dom", async (original) => ({
+  ...(await original<Record<string, unknown>>()),
+  createPortal: (node: unknown) => node,
+}));
+
 const KEY = "ab.onboarding.dock.v1";
 const TOGGLE_KEY = "ab.onboarding.dockToggle.v1";
 const SETTINGS_KEY = "ab.onboarding.settings.v1";
-const TOGGLE_BODY = "Click any tool in this bar to open it, and click it again to close it.";
+const TOGGLE_BODY = "Click any tool in the sidebar to open it, and click it again to close it.";
 const SETTINGS_BODY =
-  "Click Config for the settings: astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close them.";
-const TITLE = "Arrange your tool windows";
+  "Click Settings for the astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close it.";
+const TITLE = "Arrange your sidebar tools";
 const STEP_ONE_BODY =
-  "Drag any tool icon from a side strip and drop it on the top half of either strip. The tool opens as a full-height column beside the viewer.";
-const STEP_TWO_BODY = "Drop it on the bottom half of a strip instead to open it under the viewer. Two bottom tools sit side by side.";
-const TIP = "Right-click a tool (or Shift+F10) for Move to…, and Reset Layout puts everything back.";
+  "Drag any tool icon from a sidebar and drop it on the top half of either sidebar. The tool opens as a full-height column beside the viewer.";
+const STEP_TWO_BODY = "Drop it on the bottom half of a sidebar instead to open it under the viewer. Two bottom tools sit side by side.";
+const TIP = "Right-click a tool (or Shift+F10) for Move to…, and Reset layout puts everything back.";
 
 type CardProps = DockOnboardingCardProps & {
   onNext: ReturnType<typeof vi.fn<() => void>>;
@@ -150,6 +162,14 @@ describe("DockOnboardingCard step 1", () => {
     expect(html).toMatch(/<text[^>]*>Move to Right Top<\/text>/);
     expect(html).toMatch(/class="ab-dock-onboarding-preview"/);
     expect(html).toMatch(/class="ab-dock-onboarding-static-arrow"/);
+  });
+
+  it("draws the All tools trigger at the top of the right rail in both demos", () => {
+    for (const demo of [html, render(cardProps({ step: 1 }))]) {
+      expect(demo.match(/class="ab-dock-onboarding-demo-trigger"/g)).toHaveLength(1);
+      expect(demo).toMatch(/<rect class="ab-dock-onboarding-demo-trigger" x="228.5" y="5"/);
+      expect(demo).not.toMatch(/<rect class="ab-dock-onboarding-slot" x="228.5" y="5"/);
+    }
   });
 });
 
@@ -330,28 +350,28 @@ function queueStore(storage: OnboardingStorage = memoryStorage()) {
 }
 
 describe("dock onboarding queue", () => {
-  it("gives a new user without a file the settings tip, then the drag tour, then the toggle tip once a file loads", () => {
+  it("gives a new user without a file the drag tour, then the toggle tip and the settings tip once a file loads", () => {
     const storage = memoryStorage();
     const { store, timers } = queueStore(storage);
-    store.setReady("settings", true);
     expect(store.get().card).toBeNull();
     store.autoShow();
-    expect(store.get()).toEqual({ card: "settings", step: 0 });
-    store.dismiss();
-    expect(store.get().card).toBeNull();
-    expect(storage.data.get(SETTINGS_KEY)).toBe("done");
-    expect(timers.delays()).toEqual([600]);
-    timers.flush();
     expect(store.get()).toEqual({ card: "tour", step: 0 });
     store.setStep(1);
     store.dismiss();
+    expect(store.get().card).toBeNull();
     expect(storage.data.get(KEY)).toBe("done");
+    expect(timers.delays()).toEqual([600]);
     timers.flush();
     expect(store.get().card).toBeNull();
     store.setReady("toggle", true);
+    store.setReady("settings", true);
     expect(store.get()).toEqual({ card: "toggle", step: 0 });
     store.dismiss();
     expect(storage.data.get(TOGGLE_KEY)).toBe("done");
+    timers.flush();
+    expect(store.get()).toEqual({ card: "settings", step: 0 });
+    store.dismiss();
+    expect(storage.data.get(SETTINGS_KEY)).toBe("done");
     timers.flush();
     expect(store.get().card).toBeNull();
   });
@@ -670,6 +690,11 @@ describe("onboardingAnchorReady", () => {
     expect(onboardingAnchorReady(anchor())).toBe(true);
   });
 
+  it("does not offer a tip for a shortcut hidden through the tool catalog", () => {
+    expect(onboardingAnchorReady({ ...anchor(), getClientRects: () => [] })).toBe(false);
+    expect(onboardingAnchorReady({ ...anchor(), getClientRects: () => [{}] })).toBe(true);
+  });
+
   it("is not ready when the anchor is missing, disabled or inside a hidden inert layer", () => {
     expect(onboardingAnchorReady(null)).toBe(false);
     expect(onboardingAnchorReady(undefined)).toBe(false);
@@ -707,5 +732,139 @@ describe("dock move path", () => {
     expect(commitDockMove("image", "right-top", 0)).toBe(false);
     expect(storage.setItem.mock.calls.some(([key]) => key === KEY)).toBe(false);
     expect(dockOnboardingStore.get().card).toBe("tour");
+  });
+});
+
+interface FakeTarget {
+  calls: string[];
+  getAttribute(name: string): string | null;
+  closest(selector: string): unknown;
+  getClientRects(): unknown[];
+  focus(): void;
+  scrollIntoView(): void;
+}
+
+function fakeTarget({ rendered = true, disabled = () => false }: { rendered?: boolean; disabled?: () => boolean } = {}): FakeTarget {
+  const calls: string[] = [];
+  return {
+    calls,
+    getAttribute: (name) => (name === "aria-disabled" && disabled() ? "true" : null),
+    closest: (selector) => (selector === ".ab-dock-strip" ? {} : null),
+    getClientRects: () => (rendered ? [{}] : []),
+    focus: () => void calls.push("focus"),
+    scrollIntoView: () => void calls.push("scroll"),
+  };
+}
+
+function fakeViewer() {
+  return {
+    ...fakeTarget(),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 600, bottom: 600 }),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+}
+
+function resetOnboardingSingleton(): void {
+  dockOnboardingStore.skipAll();
+  hooks.mount();
+  dockOnboardingStore.setReady("toggle", false);
+  dockOnboardingStore.setReady("settings", false);
+  dockOnboardingStore.setReady("tour", true);
+}
+
+describe("dock onboarding readiness", () => {
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", memoryStorage());
+    vi.stubGlobal("window", { setTimeout: () => 0, clearTimeout: () => {} });
+    resetOnboardingSingleton();
+  });
+
+  afterEach(() => {
+    resetOnboardingSingleton();
+    vi.unstubAllGlobals();
+  });
+
+  it("holds the settings tip until a file is open, so a fresh profile meets the toggle tip before it", () => {
+    let fileOpen = false;
+    const anchors = new Map<string, FakeTarget>([
+      ["[data-dock-viewer]", fakeViewer()],
+      [tipAnchorSelector("compose"), fakeTarget({ disabled: () => !fileOpen })],
+      [tipAnchorSelector("config"), fakeTarget()],
+    ]);
+    const rootRef = { current: { querySelector: (selector: string) => anchors.get(selector) ?? null } as unknown as HTMLElement };
+    hooks.render(DockOnboarding, { rootRef, layout: DEFAULT_DOCK_LAYOUT, hasFile: false });
+    dockOnboardingStore.show();
+    expect(dockOnboardingStore.get().card).toBe("tour");
+    fileOpen = true;
+    hooks.render(DockOnboarding, { rootRef, layout: DEFAULT_DOCK_LAYOUT, hasFile: true });
+    dockOnboardingStore.show();
+    expect(dockOnboardingStore.get().card).toBe("toggle");
+  });
+});
+
+describe("closing the drag tour", () => {
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", memoryStorage());
+    vi.stubGlobal("window", { innerWidth: 1280, innerHeight: 800, addEventListener() {}, removeEventListener() {} });
+    vi.stubGlobal("document", { activeElement: null, body: {} });
+    vi.stubGlobal("requestAnimationFrame", (run: (time: number) => void) => {
+      run(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    vi.stubGlobal("MutationObserver", class { observe() {} disconnect() {} });
+    resetOnboardingSingleton();
+  });
+
+  afterEach(() => {
+    resetOnboardingSingleton();
+    vi.unstubAllGlobals();
+  });
+
+  function railTriggerSelector(): string {
+    const asked: string[] = [];
+    rightRailToolsTrigger({
+      querySelector: (selector: string) => {
+        asked.push(selector);
+        return null;
+      },
+    } as unknown as ParentNode);
+    return asked[0];
+  }
+
+  function closeTour(tools: FakeTarget[], trigger: FakeTarget): void {
+    const viewer = fakeViewer();
+    const triggerSelector = railTriggerSelector();
+    const root = {
+      querySelector: (selector: string) =>
+        selector === "[data-dock-viewer]" ? viewer : selector === triggerSelector ? trigger : selector.endsWith("[data-tool-id]") ? (tools[0] ?? null) : null,
+      querySelectorAll: (selector: string) => (selector.endsWith("[data-tool-id]") ? tools : []),
+    };
+    const rootRef = { current: root as unknown as HTMLElement };
+    expect(hooks.render(DockOnboardingPopup, { rootRef, step: 0 })).toBeNull();
+    const card = hooks.render(DockOnboardingPopup, { rootRef, step: 0 }) as ReactElement<DockOnboardingCardProps>;
+    expect(card.type).toBe(DockOnboardingCard);
+    (card.props.cardRef as { current: unknown }).current = { contains: () => true };
+    card.props.onClose();
+  }
+
+  it("moves the focus to the first tool the right rail renders, not to a hidden one", () => {
+    const hidden = fakeTarget({ rendered: false });
+    const shown = fakeTarget();
+    const trigger = fakeTarget();
+    closeTour([hidden, shown], trigger);
+    expect(hidden.calls).toEqual([]);
+    expect(shown.calls).toEqual(["focus", "scroll"]);
+    expect(trigger.calls).toEqual([]);
+  });
+
+  it("falls back to the All tools trigger when the right rail renders no tool", () => {
+    const hidden = fakeTarget({ rendered: false });
+    const trigger = fakeTarget();
+    closeTour([hidden], trigger);
+    expect(hidden.calls).toEqual([]);
+    expect(trigger.calls).toEqual(["focus", "scroll"]);
   });
 });

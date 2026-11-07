@@ -10,6 +10,7 @@ import {
   parseDockLayout,
   serializeDockLayout,
 } from "../dockPersistence";
+import { DEFAULT_TOOL_SHORTCUTS, TOOL_SHORTCUTS_KEY } from "../toolCatalog";
 
 function persisted(patch: Record<string, unknown> = {}): Record<string, unknown> {
   return { ...(JSON.parse(serializeDockLayout(DEFAULT_DOCK_LAYOUT)) as Record<string, unknown>), ...patch };
@@ -290,7 +291,7 @@ describe("dockStore", () => {
     expect(storedLayout(storage).sizes.bottomH).toBe(220);
   });
 
-  it("resetAll restores the default and removes only the dock and legacy keys", async () => {
+  it("resetAll restores the default layout and shortcuts and removes only the dock and legacy keys", async () => {
     const storage = memoryStorage({
       "ab.layout.sidebarW": "260",
       "ab.layout.rightW": "500",
@@ -299,12 +300,16 @@ describe("dockStore", () => {
       "ab.gpu": "true",
     });
     const { dockStore } = await freshStore(storage);
+    const { toolShortcutsStore } = await import("../../hooks/useToolShortcuts");
+    toolShortcutsStore.toggle("image");
     dockStore.dispatch({ type: "move", tool: "files", anchor: "right-top" });
     dockStore.dispatch({ type: "resize", key: "leftW", value: 600, persist: false });
     expect(storage.map.has(DOCK_LAYOUT_STORAGE_KEY)).toBe(true);
     dockStore.resetAll();
     expect(dockStore.get()).toEqual(DEFAULT_DOCK_LAYOUT);
-    expect([...storage.map.keys()].sort()).toEqual(["ab.gpu", "astroburst.readout.v1"]);
+    expect([...storage.map.keys()].sort()).toEqual(["ab.gpu", TOOL_SHORTCUTS_KEY, "astroburst.readout.v1"]);
+    expect(JSON.parse(storage.map.get(TOOL_SHORTCUTS_KEY) ?? "null")).toEqual(DEFAULT_TOOL_SHORTCUTS);
+    expect(toolShortcutsStore.get()).toEqual(DEFAULT_TOOL_SHORTCUTS);
     dockStore.dispatch({ type: "toggle", tool: "info" });
     expect(storedLayout(storage).sizes).toEqual(DEFAULT_DOCK_LAYOUT.sizes);
   });

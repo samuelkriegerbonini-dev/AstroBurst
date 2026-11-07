@@ -1,15 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { createElement } from "react";
+import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import Stripe from "../dock/Stripe";
+import { LayoutGrid } from "lucide-react";
+import Stripe, { type StripeProps } from "../dock/Stripe";
 import type { StripButtonDragProps } from "../dock/useDockDrag";
-import { focusStripButton, nextShown, settleBottom, settleSide, startResizeDrag, type AnchorTools } from "../dock/dockGeometry";
+import { focusStripButton, nextRailSession, nextShown, rightRailToolsTrigger, settleBottom, settleSide, startResizeDrag, withActiveTools, type AnchorTools } from "../dock/dockGeometry";
 import type { ResizeSession } from "../dock/ResizeHandle";
+import { DOCK_TOOLS } from "../dock/toolRegistry";
+import { hooks } from "../../test/hookRuntime";
 import { dockStore } from "../../hooks/useDockLayout";
 import { measurementLog } from "../../utils/measurementLog";
 import { stripButtonHint } from "../../utils/dockOnboarding";
+import { DEFAULT_TOOL_SHORTCUTS } from "../../utils/toolCatalog";
 import {
   DEFAULT_DOCK_LAYOUT,
+  DOCK_TOOL_IDS,
   DOCK_TOOL_META,
   dockReducer,
   type DockAnchor,
@@ -17,6 +22,11 @@ import {
   type DockSide,
   type DockToolId,
 } from "../../utils/dockLayout";
+
+vi.mock("react", async (original) => {
+  const { reactWithFakeHooks } = await import("../../test/hookRuntime");
+  return reactWithFakeHooks(await original<Record<string, unknown>>());
+});
 
 const NO_DRAG: StripButtonDragProps = {
   onPointerDown() {},
@@ -32,10 +42,37 @@ const GROUPS: Record<DockSide, [DockAnchor, DockAnchor]> = {
   right: ["right-top", "right-bottom"],
 };
 
-function render(side: DockSide, layout: DockLayout = DEFAULT_DOCK_LAYOUT, hasFile = true): string {
-  return renderToStaticMarkup(
-    createElement(Stripe, { side, layout, hasFile, buttonProps: () => NO_DRAG, onContextMenu: () => {} }),
-  );
+interface Rail {
+  enabledTools: readonly DockToolId[];
+  onBrowseTools?(): void;
+}
+
+function stripeProps(side: DockSide, layout: DockLayout = DEFAULT_DOCK_LAYOUT, hasFile = true, rail?: Rail): StripeProps {
+  const base: StripeProps = { side, layout, hasFile, buttonProps: () => NO_DRAG, onContextMenu: () => {} };
+  return rail ? { ...base, compact: true, enabledTools: rail.enabledTools, onBrowseTools: rail.onBrowseTools } : base;
+}
+
+function render(side: DockSide, layout: DockLayout = DEFAULT_DOCK_LAYOUT, hasFile = true, rail?: Rail): string {
+  return renderToStaticMarkup(createElement(Stripe, stripeProps(side, layout, hasFile, rail)));
+}
+
+const RAIL: Rail = { enabledTools: DEFAULT_TOOL_SHORTCUTS, onBrowseTools() {} };
+
+function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
+  const map = new Map<string, string>();
+  return {
+    getItem: (key) => map.get(key) ?? null,
+    setItem: (key, value) => void map.set(key, value),
+    removeItem: (key) => void map.delete(key),
+  };
+}
+
+type Node = { type: unknown; props: Record<string, unknown> };
+
+function elements(node: ReactNode): Node[] {
+  if (Array.isArray(node)) return node.flatMap(elements);
+  if (!isValidElement<Record<string, unknown>>(node)) return [];
+  return [{ type: node.type, props: node.props }, ...elements(node.props.children as ReactNode)];
 }
 
 function attrs(tag: string): Record<string, string> {
@@ -101,6 +138,22 @@ describe("Stripe", () => {
     }
   });
 
+  it("presses an open tool that needs a file only while a file is open, the same rule that disables it", () => {
+    const opened = dockReducer(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "stacking" }), { type: "open", tool: "config" });
+    for (const rail of [undefined, RAIL]) {
+      const left = render("left", DEFAULT_DOCK_LAYOUT, false, rail);
+      const right = render("right", opened, false, rail);
+      expect(pressed(left, "left-top")).toEqual(["files"]);
+      expect(pressed(left, "left-bottom")).toEqual([]);
+      expect(pressed(right, "right-top")).toEqual([]);
+      expect(pressed(right, "right-bottom")).toEqual(["config"]);
+      const buttons = [...GROUPS.left.flatMap((anchor) => group(left, anchor)), ...GROUPS.right.flatMap((anchor) => group(right, anchor))];
+      expect(buttons.filter((b) => b.class.split(" ").includes("ab-dock-strip-btn-active")).map((b) => b["data-tool-id"])).toEqual(["files", "config"]);
+      expect(pressed(render("left", DEFAULT_DOCK_LAYOUT, true, rail), "left-bottom")).toEqual(["compose"]);
+      expect(pressed(render("right", opened, true, rail), "right-top")).toEqual(["stacking"]);
+    }
+  });
+
   it("disables only the tools that need a file while there is none, and keeps them in place", () => {
     for (const side of ["left", "right"] as const) {
       for (const anchor of GROUPS[side]) {
@@ -130,8 +183,8 @@ describe("Stripe", () => {
         }
       }
     }
-    expect(render("left")).toContain(">Comp</span>");
-    expect(render("right")).toContain(">Config</span>");
+    expect(render("left")).toContain(">Compose</span>");
+    expect(render("right")).toContain(">Settings</span>");
   });
 
   it("titles each button with what a click does while its name stays the tool label", () => {
@@ -199,6 +252,110 @@ describe("Stripe", () => {
   });
 });
 
+describe("compact sidebar rail", () => {
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", memoryStorage());
+    hooks.mount();
+  });
+
+  afterEach(() => {
+    hooks.mount();
+    dockStore.dispatch({ type: "reset" });
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function railButton(layout: DockLayout, tool: DockToolId): Node {
+    const tree = elements(hooks.render(Stripe, stripeProps("right", layout, true, RAIL)) as ReactNode);
+    return tree.find((node) => node.props["data-tool-id"] === tool)!;
+  }
+
+  it("shows pinned and open tools and hides closed unpinned ones", () => {
+    const layout = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "image" });
+    const rail: Rail = { enabledTools: ["files", "export"], onBrowseTools() {} };
+    const left = render("left", layout, true, rail);
+    const right = render("right", layout, true, rail);
+    expect(right).toMatch(/^<div[^>]*data-compact="true"/);
+    const buttons = [...group(left, "left-top"), ...group(left, "left-bottom"), ...group(right, "right-top"), ...group(right, "right-bottom")];
+    const visible = Object.fromEntries(buttons.map((b) => [b["data-tool-id"], b["data-shortcut-visible"]]));
+    expect(visible).toMatchObject({ files: "true", export: "true", image: "true", compose: "true", info: "false", headers: "false", log: "false" });
+  });
+
+  it("keeps a closed unpinned tool on the rail while its button holds focus", () => {
+    dockStore.dispatch({ type: "open", tool: "sagui" });
+    const opened = railButton(dockStore.get(), "sagui");
+    expect(opened.props["data-shortcut-visible"]).toBe("true");
+    (opened.props.onFocus as (() => void) | undefined)?.();
+    (opened.props.onClick as () => void)();
+    expect(dockStore.get().active["right-top"]).toBeNull();
+    const focused = railButton(dockStore.get(), "sagui");
+    expect(focused.props["data-shortcut-visible"]).toBe("true");
+    (focused.props.onBlur as (() => void) | undefined)?.();
+    expect(railButton(dockStore.get(), "sagui").props["data-shortcut-visible"]).toBe("false");
+  });
+
+  it("puts the All tools trigger on the right rail, and on the left rail only while that rail shows no tool", () => {
+    const trigger = 'aria-label="Browse all tools"';
+    expect(render("right", DEFAULT_DOCK_LAYOUT, true, RAIL)).toContain(trigger);
+    expect(render("right", DEFAULT_DOCK_LAYOUT, true, RAIL)).toContain('data-tools-trigger=""');
+    expect(render("left", DEFAULT_DOCK_LAYOUT, true, RAIL)).not.toContain(trigger);
+    const closed = dockReducer(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "closeAnchor", anchor: "left-top" }), { type: "closeAnchor", anchor: "left-bottom" });
+    const bare: Rail = { enabledTools: [], onBrowseTools() {} };
+    expect(render("left", closed, true, bare)).toContain(trigger);
+    expect(render("left", DEFAULT_DOCK_LAYOUT, true, bare)).not.toContain(trigger);
+    expect(render("left", closed, true, { enabledTools: [] })).not.toContain(trigger);
+    expect(render("right", closed, true, { enabledTools: [] })).not.toContain(trigger);
+  });
+
+  it("finds the All tools trigger by the attributes the right rail renders, not the left one", () => {
+    const matches = (props: Record<string, unknown>, selector: string) => {
+      const [, name, value] = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(selector) ?? [];
+      return name !== undefined && (value === undefined ? name in props : props[name] === value);
+    };
+    const trigger = {};
+    const asked: string[] = [];
+    const root = {
+      querySelector: (selector: string) => {
+        asked.push(selector);
+        return trigger;
+      },
+    };
+    expect(rightRailToolsTrigger(root as unknown as ParentNode)).toBe(trigger);
+    const [rail, button] = asked[0].split(" ");
+    const right = elements(hooks.render(Stripe, stripeProps("right", DEFAULT_DOCK_LAYOUT, true, RAIL)) as ReactNode);
+    expect(matches(right[0].props, rail)).toBe(true);
+    expect(right.filter((node) => matches(node.props, button)).map((node) => node.props["aria-label"])).toEqual(["Browse all tools"]);
+    const closed = dockReducer(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "closeAnchor", anchor: "left-top" }), { type: "closeAnchor", anchor: "left-bottom" });
+    hooks.mount();
+    const left = elements(hooks.render(Stripe, stripeProps("left", closed, true, { enabledTools: [], onBrowseTools() {} })) as ReactNode);
+    expect(left.some((node) => matches(node.props, button))).toBe(true);
+    expect(matches(left[0].props, rail)).toBe(false);
+  });
+
+  it("keeps the native menu off the rail itself", () => {
+    const root = elements(hooks.render(Stripe, stripeProps("right", DEFAULT_DOCK_LAYOUT, true, RAIL)) as ReactNode)[0];
+    expect(root.props["data-dock-strip"]).toBe("right");
+    const preventDefault = vi.fn();
+    (root.props.onContextMenu as ((e: { preventDefault(): void }) => void) | undefined)?.({ preventDefault });
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+  });
+
+  it("captions every rail button with its short label, compact or not", () => {
+    for (const rail of [RAIL, undefined]) {
+      const html = render("left", DEFAULT_DOCK_LAYOUT, true, rail) + render("right", DEFAULT_DOCK_LAYOUT, true, rail);
+      const captions = Object.fromEntries([...html.matchAll(/<button[^>]*data-tool-id="([\w-]+)"[^>]*>.*?<span>([^<]*)<\/span>/g)].map((m) => [m[1], m[2]]));
+      expect(DOCK_TOOL_IDS.map((tool) => captions[tool])).toEqual(["Files", "Info", "Compose", "Headers", "Image", "Astro", "Phot", "Cube", "Prep", "SAGUI", "Process", "History", "Masks", "Stack", "Synth", "Export", "Settings", "Log"]);
+      for (const tool of DOCK_TOOL_IDS) expect(captions[tool]).toBe(DOCK_TOOL_META[tool].shortLabel);
+    }
+  });
+
+  it("gives every tool its own icon, apart from the All tools trigger", () => {
+    const icons = DOCK_TOOL_IDS.map((tool) => DOCK_TOOLS[tool].icon);
+    expect(new Set(icons).size).toBe(DOCK_TOOL_IDS.length);
+    expect(icons).not.toContain(LayoutGrid);
+  });
+});
+
 function addEntry(i: number) {
   measurementLog.append({ kind: "pixel", file: "a.fits", image: "original", dq: "off", unit: null, source: "test", params: {}, values: { i }, notes: [] });
 }
@@ -238,6 +395,15 @@ describe("Log strip count", () => {
     const { attrs: a } = logButton(render("right"));
     expect(a.title).toBe("Log (1 entry): click to open, click again to close");
     expect(a["aria-label"]).toBe("Log (1 entry)");
+  });
+
+  it("shows the Log on the default compact rail with its entry count", () => {
+    measurementLog.clear();
+    addEntry(0);
+    addEntry(1);
+    const { attrs: a, inner } = logButton(render("right", DEFAULT_DOCK_LAYOUT, true, RAIL));
+    expect(a["data-shortcut-visible"]).toBe("true");
+    expect(inner).toMatch(/data-log-count=""[^>]*>2<\/span>/);
   });
 
   it("caps the badge at 99+", () => {
@@ -341,6 +507,33 @@ describe("dock shown state (close animation)", () => {
   it("returns the same record from a settle that has nothing to clear", () => {
     expect(settleSide(NONE, NONE, "left-top")).toBe(NONE);
     expect(settleBottom(NONE, NONE)).toBe(NONE);
+  });
+});
+
+describe("session tools", () => {
+  it("adds every open tool and keeps the same set while nothing new opens", () => {
+    const seen = withActiveTools(new Set(), tools({ "left-top": "files", "right-top": "sagui" }));
+    expect([...seen].sort()).toEqual(["files", "sagui"]);
+    expect(withActiveTools(seen, tools({ "right-top": "sagui" }))).toBe(seen);
+    expect(withActiveTools(seen, NONE)).toBe(seen);
+    expect([...withActiveTools(seen, tools({ "right-bottom": "log" }))].sort()).toEqual(["files", "log", "sagui"]);
+  });
+
+  it("keeps the same session until a tool opens, and starts over from the open tools after a shortcut reset", () => {
+    const files = tools({ "left-top": "files" });
+    const start = nextRailSession(null, 0, files);
+    expect([...start.tools]).toEqual(["files"]);
+    expect(nextRailSession(start, 0, files)).toBe(start);
+    const opened = nextRailSession(start, 0, tools({ "left-top": "files", "right-top": "sagui" }));
+    expect([...opened.tools].sort()).toEqual(["files", "sagui"]);
+    expect(nextRailSession(opened, 0, files)).toBe(opened);
+    const defaults = tools({ "left-top": "files", "left-bottom": "compose" });
+    const reset = nextRailSession(opened, 1, defaults);
+    expect([...reset.tools].sort()).toEqual(["compose", "files"]);
+    expect(nextRailSession(reset, 1, defaults)).toBe(reset);
+    const empty = nextRailSession(null, 2, NONE);
+    expect(empty.tools.size).toBe(0);
+    expect(nextRailSession(empty, 2, NONE)).toBe(empty);
   });
 });
 

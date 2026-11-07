@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
+import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DockMenuList } from "../dock/DockContextMenu";
 import LiveRegion from "../dock/LiveRegion";
 import { announce, moveAnnouncement } from "../dock/useDockDrag";
 import { DEFAULT_DOCK_LAYOUT, DOCK_ANCHORS, dockReducer, type DockAnchor, type DockToolId } from "../../utils/dockLayout";
+import { findElement, textOf } from "../../test/elementTree";
 
 interface MenuProps {
   tool: DockToolId;
@@ -13,6 +14,7 @@ interface MenuProps {
   count: number;
   onMove: ReturnType<typeof vi.fn<(anchor: DockAnchor) => void>>;
   onReorder: ReturnType<typeof vi.fn<(delta: -1 | 1) => void>>;
+  onBrowseTools: ReturnType<typeof vi.fn<() => void>>;
   onReset: ReturnType<typeof vi.fn<() => void>>;
   onShowTips: ReturnType<typeof vi.fn<() => void>>;
   onClose: ReturnType<typeof vi.fn<() => void>>;
@@ -26,6 +28,7 @@ function menuProps(over: Partial<MenuProps> = {}): MenuProps {
     count: 4,
     onMove: vi.fn<(anchor: DockAnchor) => void>(),
     onReorder: vi.fn<(delta: -1 | 1) => void>(),
+    onBrowseTools: vi.fn<() => void>(),
     onReset: vi.fn<() => void>(),
     onShowTips: vi.fn<() => void>(),
     onClose: vi.fn<() => void>(),
@@ -56,26 +59,10 @@ function byText(list: RenderedButton[], text: string): RenderedButton {
 
 type AnyProps = Record<string, unknown> & { children?: ReactNode };
 
-function textOf(node: ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(textOf).join("");
-  if (isValidElement<AnyProps>(node)) return textOf(node.props.children);
-  return "";
-}
-
-function findElement(node: ReactNode, match: (props: AnyProps) => boolean): ReactElement<AnyProps> {
-  const stack: ReactNode[] = [node];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (Array.isArray(current)) {
-      stack.push(...current);
-      continue;
-    }
-    if (!isValidElement<AnyProps>(current)) continue;
-    if (match(current.props)) return current;
-    stack.push(current.props.children);
-  }
-  throw new Error("element not found");
+function requireElement(node: ReactNode, match: (props: AnyProps) => boolean): ReactElement<AnyProps> {
+  const found = findElement(node, (element) => match(element.props));
+  if (!found) throw new Error("element not found");
+  return found;
 }
 
 function tree(props: MenuProps): ReactElement<AnyProps> {
@@ -83,7 +70,7 @@ function tree(props: MenuProps): ReactElement<AnyProps> {
 }
 
 function activate(props: MenuProps, role: string, text: string): void {
-  const el = findElement(tree(props), (p) => p.role === role && textOf(p.children).trim() === text);
+  const el = requireElement(tree(props), (p) => p.role === role && textOf(p.children).trim() === text);
   (el.props.onClick as () => void)();
 }
 
@@ -92,7 +79,7 @@ interface FakeItem {
 }
 
 function pressKey(props: MenuProps, key: string, focusedIndex: number) {
-  const menu = findElement(tree(props), (p) => p.role === "menu");
+  const menu = requireElement(tree(props), (p) => p.role === "menu");
   const items: FakeItem[] = Array.from({ length: 7 }, () => ({ focus: vi.fn() }));
   const event = {
     key,
@@ -156,16 +143,26 @@ describe("DockMenuList markup", () => {
     expect(byText(lone, "Move down").attrs).toContain('aria-disabled="true"');
   });
 
-  it("ends with Reset layout and Show tool window tips after separators", () => {
+  it("offers no reorder for a tool missing from its group", () => {
+    const props = menuProps({ index: -1, count: 4 });
+    const items = buttons(render(props), "menuitem");
+    expect(byText(items, "Move up").attrs).toContain('aria-disabled="true"');
+    expect(byText(items, "Move down").attrs).toContain('aria-disabled="true"');
+    activate(props, "menuitem", "Move up");
+    activate(props, "menuitem", "Move down");
+    expect(props.onReorder).not.toHaveBeenCalled();
+  });
+
+  it("ends with All tools, Reset layout and Show sidebar tips after separators", () => {
     const html = render(menuProps());
-    expect(buttons(html, "menuitem").map((b) => b.text)).toEqual(["Move up", "Move down", "Reset layout", "Show tool window tips"]);
+    expect(buttons(html, "menuitem").map((b) => b.text)).toEqual(["Move up", "Move down", "All tools", "Reset layout", "Show sidebar tips"]);
     expect(html.match(/role="separator"/g)?.length).toBe(2);
   });
 
   it("keeps every item out of the tab order", () => {
     const html = render(menuProps());
     const items = [...buttons(html, "menuitemradio"), ...buttons(html, "menuitem")];
-    expect(items).toHaveLength(8);
+    expect(items).toHaveLength(9);
     for (const item of items) {
       expect(item.attrs).toContain('tabindex="-1"');
       expect(item.attrs).toContain('type="button"');
@@ -204,16 +201,26 @@ describe("DockMenuList activation", () => {
     expect(props.onReorder).toHaveBeenCalledWith(-1);
   });
 
+  it("opens All tools without closing on its own", () => {
+    const props = menuProps();
+    activate(props, "menuitem", "All tools");
+    expect(props.onBrowseTools).toHaveBeenCalledTimes(1);
+    expect(props.onReset).not.toHaveBeenCalled();
+    expect(props.onShowTips).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it("resets the layout", () => {
     const props = menuProps();
     activate(props, "menuitem", "Reset layout");
     expect(props.onReset).toHaveBeenCalledTimes(1);
+    expect(props.onBrowseTools).not.toHaveBeenCalled();
     expect(props.onShowTips).not.toHaveBeenCalled();
   });
 
-  it("shows the tool window tips, named as in the command palette", () => {
+  it("shows the sidebar tips, named as in the command palette", () => {
     const props = menuProps();
-    activate(props, "menuitem", "Show tool window tips");
+    activate(props, "menuitem", "Show sidebar tips");
     expect(props.onShowTips).toHaveBeenCalledTimes(1);
     expect(props.onReset).not.toHaveBeenCalled();
   });
@@ -263,7 +270,7 @@ describe("DockMenuList roving focus", () => {
   });
 
   it("keeps key releases from global shortcuts", () => {
-    const menu = findElement(tree(menuProps()), (p) => p.role === "menu");
+    const menu = requireElement(tree(menuProps()), (p) => p.role === "menu");
     const event = { key: "Shift", stopPropagation: vi.fn(), preventDefault: vi.fn() };
     (menu.props.onKeyUp as (e: typeof event) => void)(event);
     expect(event.stopPropagation).toHaveBeenCalled();
@@ -273,7 +280,7 @@ describe("DockMenuList roving focus", () => {
 
 describe("DockMenuList native menu and focus", () => {
   function menuHandler(props: MenuProps, name: string): (e: unknown) => void {
-    const menu = findElement(tree(props), (p) => p.role === "menu");
+    const menu = requireElement(tree(props), (p) => p.role === "menu");
     return menu.props[name] as (e: unknown) => void;
   }
 

@@ -51,7 +51,7 @@ export interface DockToolMeta {
 export const DOCK_TOOL_META: Record<DockToolId, DockToolMeta> = {
   files: { id: "files", label: "Files", shortLabel: "Files", accent: "var(--ab-accent)", needsFile: false, mount: "always", minWidth: 180 },
   info: { id: "info", label: "Info", shortLabel: "Info", accent: "var(--ab-teal)", needsFile: false, mount: "whileOpen", minWidth: 180 },
-  compose: { id: "compose", label: "Compose", shortLabel: "Comp", accent: "var(--ab-teal)", needsFile: true, mount: "whileOpen", minWidth: 280 },
+  compose: { id: "compose", label: "Compose", shortLabel: "Compose", accent: "var(--ab-teal)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   headers: { id: "headers", label: "Headers", shortLabel: "Headers", accent: "var(--ab-teal)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   image: {
     id: "image",
@@ -99,11 +99,11 @@ export const DOCK_TOOL_META: Record<DockToolId, DockToolMeta> = {
   },
   cubeprep: { id: "cubeprep", label: "Cube Prep", shortLabel: "Prep", accent: "var(--ab-cyan)", keywords: ["LIGHTSTACK", "Multiband", "PSF", "Kernel", "Recipe", "Preparation", "SAGUI"], needsFile: false, mount: "whileOpen", minWidth: 320 },
   sagui: { id: "sagui", label: "SAGUI", shortLabel: "SAGUI", accent: "var(--ab-violet)", keywords: ["Segmentation", "Regions", "SED", "Starlet", "Ward", "Multiband"], needsFile: false, mount: "whileOpen", minWidth: 320 },
-  processing: { id: "processing", label: "Processing", shortLabel: "Proc", accent: "var(--ab-amber)", needsFile: true, mount: "whileOpen", minWidth: 280 },
+  processing: { id: "processing", label: "Processing", shortLabel: "Process", accent: "var(--ab-amber)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   history: {
     id: "history",
     label: "History",
-    shortLabel: "Hist",
+    shortLabel: "History",
     accent: "var(--ab-amber)",
     keywords: ["Undo", "Redo", "Processing history", "Re-run"],
     needsFile: true,
@@ -123,7 +123,7 @@ export const DOCK_TOOL_META: Record<DockToolId, DockToolMeta> = {
   stacking: { id: "stacking", label: "Stacking", shortLabel: "Stack", accent: "var(--ab-blue)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   synth: { id: "synth", label: "Synth", shortLabel: "Synth", accent: "var(--ab-rose)", needsFile: true, mount: "whileOpen", minWidth: 280 },
   export: { id: "export", label: "Export", shortLabel: "Export", accent: "var(--ab-amber)", needsFile: true, mount: "whileOpen", minWidth: 280 },
-  config: { id: "config", label: "Settings", shortLabel: "Config", accent: "#a1a1aa", keywords: ["Config"], needsFile: false, mount: "whileOpen", minWidth: 280 },
+  config: { id: "config", label: "Settings", shortLabel: "Settings", accent: "#a1a1aa", keywords: ["Config"], needsFile: false, mount: "whileOpen", minWidth: 280 },
   log: {
     id: "log",
     label: "Log",
@@ -410,6 +410,6 @@ export interface PaletteToolEntry {
 export function paletteToolEntries(layout: DockLayout, hasFile: boolean): PaletteToolEntry[] {
   return DOCK_TOOL_IDS.filter((tool) => hasFile || !DOCK_TOOL_META[tool].needsFile).map((tool) => {
     const shown = anchorOpenTool(layout, anchorOf(layout, tool), hasFile) === tool;
-    return { tool, label: `${shown ? "Hide" : "Open"} ${DOCK_TOOL_META[tool].label} Panel` };
+    return { tool, label: `${shown ? "Close" : "Open"} ${DOCK_TOOL_META[tool].label}` };
   });
 }

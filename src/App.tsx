@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo, memo, useSyncExternalStore, useId, lazy, Suspense, type CSSProperties } from "react";
-import { Plus, RotateCcw, FolderOpen, Info as InfoIcon, X, Download, Columns2, Sparkles, Undo2, Redo2, Activity } from "lucide-react";
+import { Plus, RotateCcw, FolderOpen, Info as InfoIcon, X, Download, Columns2, Sparkles, Undo2, Redo2, Activity, LayoutGrid } from "lucide-react";
 import { historyStore } from "./utils/historyStore";
 
 import DropZone from "./components/file/DropZone";
@@ -9,13 +9,16 @@ import { appModeStore, modeFromShortcut, useAppMode } from "./hooks/useAppMode";
 import { useArchivePaletteActions } from "./components/archive/state/useArchivePaletteActions";
 import { workspaceFileRef } from "./components/archive/state/useAroundTarget";
 import DisplayedImageBridge from "./components/archive/DisplayedImageBridge";
-import { shortcutSheet, type ShortcutRow } from "./utils/shortcutSheet";
+import { modifierKey, redoKeys, shortcutSheet, type ShortcutRow } from "./utils/shortcutSheet";
+import { isMacPlatform } from "./utils/historyKeys";
+import { NO_OVERLAYS, newBatchConfirmAccepted, newBatchPaletteEntry, overlaysAfter, shellKeyAction, shiftReleaseAction, type ShellOverlayAction, type ShellOverlays } from "./utils/shellKeys";
 import MetadataFileList from "./components/file/MetadataFileList";
 import type { MetadataFile } from "./components/file/MetadataFileList";
 import PreviewPanel from "./components/PreviewPanel";
 import DockShell from "./components/dock/DockShell";
 import { DOCK_TOOLS } from "./components/dock/toolRegistry";
 import { dockOnboardingStore } from "./components/dock/dockOnboardingStore";
+import { toolBrowserStore } from "./components/dock/toolBrowserStore";
 
 import Confetti from "./components/Confetti";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -68,8 +71,9 @@ const showCubeTool = () => {
   dockStore.dispatch({ type: "open", tool: "cube" });
 };
 const PALETTE_SAMPLE_SETS = paletteSampleSetsSelector(sampleDataStore);
-const IS_MAC = typeof navigator !== "undefined" && (navigator.platform?.toLowerCase().includes("mac") ?? false);
-const SHORTCUT_GROUPS = shortcutSheet(IS_MAC).filter((g) => g.rows.length > 0);
+const IS_MAC = typeof navigator !== "undefined" && isMacPlatform(navigator.platform);
+const MOD = modifierKey(IS_MAC);
+const SHORTCUT_GROUPS = shortcutSheet(IS_MAC);
 
 function ShortcutRows({ rows }: { rows: readonly ShortcutRow[] }) {
   return (
@@ -232,7 +236,30 @@ export default function App() {
   const sampleData = useSampleData(openSampleFrames);
   const paletteSampleSets = useSyncExternalStore(sampleDataStore.subscribe, PALETTE_SAMPLE_SETS, PALETTE_SAMPLE_SETS);
 
-  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [overlays, setOverlays] = useState<ShellOverlays>(NO_OVERLAYS);
+  const [newBatchArmedInPalette, setNewBatchArmedInPalette] = useState(false);
+  const newBatchArmedAtRef = useRef(0);
+  const keyRepeatRef = useRef(false);
+  const { paletteOpen, shortcutsOpen } = overlays;
+  const applyOverlayAction = useCallback((action: ShellOverlayAction) => {
+    setNewBatchArmedInPalette(false);
+    setOverlays((current) => overlaysAfter(current, action));
+  }, []);
+  const openPalette = useCallback(() => setOverlays({ paletteOpen: true, shortcutsOpen: false }), []);
+  const closePalette = useCallback(() => {
+    setNewBatchArmedInPalette(false);
+    setOverlays((current) => ({ ...current, paletteOpen: false }));
+  }, []);
+  const openShortcuts = useCallback(() => setOverlays({ paletteOpen: false, shortcutsOpen: true }), []);
+  const closeShortcuts = useCallback(() => setOverlays((current) => ({ ...current, shortcutsOpen: false })), []);
+  const showNewBatchConfirm = useCallback(() => {
+    setNewBatchArmedInPalette(true);
+    openPalette();
+  }, [openPalette]);
+  const armNewBatchInPalette = useCallback(() => {
+    newBatchArmedAtRef.current = performance.now();
+    showNewBatchConfirm();
+  }, [showNewBatchConfirm]);
   const shortcutsRef = useRef<HTMLDivElement>(null);
   const shortcutsTitleId = useId();
   useEffect(() => {
@@ -251,7 +278,6 @@ export default function App() {
     e.preventDefault();
     focusables[target].focus();
   }, []);
-  const [paletteOpen, setPaletteOpen] = useState(false);
   const lastShiftUp = useRef(0);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -261,47 +287,35 @@ export default function App() {
         appModeStore.set(nextMode);
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && (e.key === "o" || e.key === "O")) {
-        e.preventDefault();
-        handleBrowseFiles();
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
-        e.preventDefault();
-        setPaletteOpen((p) => !p);
-        return;
-      }
       if (e.key !== "Shift") lastShiftUp.current = 0;
       const target = e.target as HTMLElement | null;
       const inInput = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || (target?.isContentEditable ?? false);
-      if (inInput) return;
-      if (e.key === "?") {
-        e.preventDefault();
-        setShortcutsOpen((p) => !p);
-        return;
-      }
-      if (e.key === "Escape") {
-        setShortcutsOpen(false);
-        setPaletteOpen(false);
-      }
+      const action = shellKeyAction(e, { inInput });
+      if (action === null) return;
+      if (action !== "close-overlays") e.preventDefault();
+      if (action === "open-files") handleBrowseFiles();
+      else applyOverlayAction(action);
+    };
+    const noteKeyRepeat = (e: KeyboardEvent) => {
+      keyRepeatRef.current = e.repeat;
     };
     const onKeyUp = (e: KeyboardEvent) => {
+      keyRepeatRef.current = false;
       if (e.key !== "Shift") return;
       const now = Date.now();
-      if (now - lastShiftUp.current < 350) {
-        lastShiftUp.current = 0;
-        setPaletteOpen((p) => !p);
-      } else {
-        lastShiftUp.current = now;
-      }
+      const action = shiftReleaseAction(now, lastShiftUp.current);
+      lastShiftUp.current = action ? 0 : now;
+      if (action) applyOverlayAction(action);
     };
+    window.addEventListener("keydown", noteKeyRepeat, true);
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
     return () => {
+      window.removeEventListener("keydown", noteKeyRepeat, true);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [handleBrowseFiles]);
+  }, [handleBrowseFiles, applyOverlayAction]);
 
   const handleSelectFolder = useCallback(async () => {
     if (!isTauri()) { handleBrowseFiles(); return; }
@@ -335,16 +349,27 @@ export default function App() {
 
   const [confirmNewBatch, setConfirmNewBatch] = useState(false);
   const confirmNewBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const discardBatch = useCallback(() => {
+    if (confirmNewBatchTimerRef.current) clearTimeout(confirmNewBatchTimerRef.current);
+    setConfirmNewBatch(false);
+    handleNewBatch();
+  }, [handleNewBatch]);
+  const confirmNewBatchInPalette = useCallback(() => {
+    if (!newBatchConfirmAccepted(performance.now() - newBatchArmedAtRef.current, keyRepeatRef.current)) {
+      showNewBatchConfirm();
+      return;
+    }
+    showWorkspace();
+    discardBatch();
+  }, [discardBatch, showNewBatchConfirm]);
   const handleNewBatchClick = useCallback(() => {
     if (stats.done === 0 || confirmNewBatch) {
-      if (confirmNewBatchTimerRef.current) clearTimeout(confirmNewBatchTimerRef.current);
-      setConfirmNewBatch(false);
-      handleNewBatch();
+      discardBatch();
       return;
     }
     setConfirmNewBatch(true);
     confirmNewBatchTimerRef.current = setTimeout(() => setConfirmNewBatch(false), 4000);
-  }, [stats.done, confirmNewBatch, handleNewBatch]);
+  }, [stats.done, confirmNewBatch, discardBatch]);
 
   const handleHideFiles = useCallback(() => dockStore.dispatch({ type: "hide", tool: "files" }), []);
 
@@ -431,6 +456,7 @@ export default function App() {
     [selectedPath, selectedName, selectedStatus],
   );
   const archivePaletteActions = useArchivePaletteActions({ mode, setMode: appModeStore.set, workspaceFile });
+  const newBatchEntry = useMemo(() => newBatchPaletteEntry(stats.done, newBatchArmedInPalette), [stats.done, newBatchArmedInPalette]);
 
   const paletteActions = useMemo<PaletteAction[]>(() => {
     const inWorkspace = (run: () => void) => () => {
@@ -438,7 +464,7 @@ export default function App() {
       run();
     };
     const acts: PaletteAction[] = [
-      { id: "open-files", label: "Open FITS Files...", hint: "Ctrl+O", icon: FolderOpen, run: handleBrowseFiles },
+      { id: "open-files", label: "Open FITS Files...", hint: `${MOD}O`, icon: FolderOpen, run: handleBrowseFiles },
       { id: "open-folder", label: "Open Folder...", icon: FolderOpen, run: handleSelectFolder },
     ];
     acts.push(...sampleEntries);
@@ -453,9 +479,10 @@ export default function App() {
           run: inWorkspace(() => dockStore.dispatch({ type: "toggle", tool })),
         });
       }
+      acts.push({ id: "all-tools", label: "All tools", keywords: ["Tools", "Sidebar", "Pin", "Browse"], icon: LayoutGrid, run: inWorkspace(toolBrowserStore.open) });
       acts.push({
         id: "reset-layout",
-        label: "Reset Layout (default panels, order and sizes; closes the right panels)",
+        label: "Reset layout (default panels, order, sizes and sidebar shortcuts; closes the right panels)",
         icon: Columns2,
         run: inWorkspace(() => dockStore.resetAll()),
       });
@@ -469,16 +496,25 @@ export default function App() {
         ),
         icon: Activity,
       });
-      acts.push({ id: "dock-tips", label: "Show tool window tips", keywords: ["Layout", "Drag", "Dock", "Onboarding"], icon: Sparkles, run: inWorkspace(() => dockOnboardingStore.show()) });
-      acts.push({ id: "history-undo", label: "Undo processing step", hint: "Ctrl+Z · single files", keywords: ["History", "Undo"], icon: Undo2, run: inWorkspace(() => historyStore.undo()) });
-      acts.push({ id: "history-redo", label: "Redo processing step", hint: "Ctrl+Shift+Z · single files", keywords: ["History", "Redo"], icon: Redo2, run: inWorkspace(() => historyStore.redo()) });
+      acts.push({ id: "dock-tips", label: "Show sidebar tips", keywords: ["Layout", "Drag", "Dock", "Onboarding", "Tool window"], icon: Sparkles, run: inWorkspace(() => dockOnboardingStore.show()) });
+      acts.push({ id: "history-undo", label: "Undo processing step", hint: `${MOD}Z · single files`, keywords: ["History", "Undo"], icon: Undo2, run: inWorkspace(() => historyStore.undo()) });
+      acts.push({ id: "history-redo", label: "Redo processing step", hint: `${redoKeys(IS_MAC)} · single files`, keywords: ["History", "Redo"], icon: Redo2, run: inWorkspace(() => historyStore.redo()) });
       if (stats.done > 0) acts.push({ id: "export-zip", label: "Download ZIP of Processed Files", icon: Download, run: inWorkspace(handleExportZip) });
-      if (isComplete) acts.push({ id: "new-batch", label: "New Batch (discard processed files)", hint: "confirm in footer", icon: RotateCcw, run: inWorkspace(handleNewBatchClick) });
+      if (isComplete) {
+        acts.push({
+          id: "new-batch",
+          label: newBatchEntry.label,
+          hint: newBatchEntry.hint,
+          keywords: newBatchEntry.keywords,
+          icon: RotateCcw,
+          run: newBatchEntry.step === "arm" ? armNewBatchInPalette : newBatchEntry.step === "confirm" ? confirmNewBatchInPalette : inWorkspace(discardBatch),
+        });
+      }
     }
     acts.push(...archivePaletteActions);
-    acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: () => setShortcutsOpen(true) });
+    acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: openShortcuts });
     return acts;
-  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, handleBrowseFiles, handleSelectFolder, sampleEntries, handleExportZip, handleNewBatchClick, archivePaletteActions]);
+  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, newBatchEntry, handleBrowseFiles, handleSelectFolder, sampleEntries, handleExportZip, discardBatch, armNewBatchInPalette, confirmNewBatchInPalette, openShortcuts, archivePaletteActions]);
 
   const handlePaletteSelectFile = useCallback((id: string) => {
     showWorkspace();
@@ -501,16 +537,17 @@ export default function App() {
         {showConfetti && <Confetti show />}
         <CommandPalette
           open={paletteOpen}
-          onClose={() => setPaletteOpen(false)}
+          onClose={closePalette}
           actions={paletteActions}
           files={paletteFiles}
           selectedId={selectedId}
           onSelectFile={handlePaletteSelectFile}
         />
+        <div role="status" className="sr-only">{newBatchEntry.prompt}</div>
         {shortcutsOpen && (
           <div
             className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 backdrop-blur-sm"
-            onClick={() => setShortcutsOpen(false)}
+            onClick={closeShortcuts}
           >
             <div
               ref={shortcutsRef}
@@ -526,7 +563,7 @@ export default function App() {
             >
               <div className="flex items-center justify-between mb-3">
                 <span id={shortcutsTitleId} className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Keyboard Shortcuts</span>
-                <button onClick={() => setShortcutsOpen(false)} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                <button onClick={closeShortcuts} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
                   <X size={12} />
                 </button>
               </div>
@@ -655,34 +692,32 @@ export default function App() {
                 )}
               </DropZone>
             </div>
-            {(mode === "archive" || view !== "empty") && (
-              <AppFooter mode={mode} onModeChange={appModeStore.set} onOpenPalette={() => setPaletteOpen(true)} onOpenShortcuts={() => setShortcutsOpen(true)}>
-                {mode === "archive" ? (
-                  <Suspense fallback={null}>
-                    <ArchiveFooterStatus processing={processing} />
-                  </Suspense>
-                ) : isComplete ? (
-                  <button
-                    onClick={handleNewBatchClick}
-                    className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                    style={confirmNewBatch
-                      ? { background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", color: "#fbbf24" }
-                      : { background: "rgba(255,255,255,0.03)", border: "1px solid var(--ab-border)", color: "#a1a1aa" }}
-                  >
-                    <RotateCcw size={10} />
-                    {confirmNewBatch ? `Discard ${stats.done} processed file${stats.done === 1 ? "" : "s"}?` : "New Batch"}
-                  </button>
-                ) : (
-                  <button
-                    onClick={handleBrowseFiles}
-                    className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
-                    style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--ab-border)", color: "#a1a1aa" }}
-                  >
-                    <Plus size={11} /> Add FITS
-                  </button>
-                )}
-              </AppFooter>
-            )}
+            <AppFooter mode={mode} onModeChange={appModeStore.set} onOpenPalette={openPalette} onOpenShortcuts={openShortcuts}>
+              {mode === "archive" ? (
+                <Suspense fallback={null}>
+                  <ArchiveFooterStatus processing={processing} />
+                </Suspense>
+              ) : view === "empty" ? null : isComplete ? (
+                <button
+                  onClick={handleNewBatchClick}
+                  className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
+                  style={confirmNewBatch
+                    ? { background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", color: "#fbbf24" }
+                    : { background: "rgba(255,255,255,0.03)", border: "1px solid var(--ab-border)", color: "#a1a1aa" }}
+                >
+                  <RotateCcw size={10} />
+                  {confirmNewBatch ? `Discard ${stats.done} processed file${stats.done === 1 ? "" : "s"}?` : "New Batch"}
+                </button>
+              ) : (
+                <button
+                  onClick={handleBrowseFiles}
+                  className="flex items-center gap-1 transition-all duration-200 px-2 py-1 rounded text-[10px] font-medium"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--ab-border)", color: "#a1a1aa" }}
+                >
+                  <Plus size={11} /> Add FITS
+                </button>
+              )}
+            </AppFooter>
           </div>
         )}
       </div>

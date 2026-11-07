@@ -5,6 +5,8 @@ import ProgressBar from "./file/ProgressBar";
 import type { SampleControls } from "../hooks/useSampleData";
 import { sampleDataHint, sampleOfferAction, samplePercent } from "../utils/sampleOffers";
 import { createFocusHandoff } from "../utils/focusHandoff";
+import { isMacPlatform } from "../utils/historyKeys";
+import { modifierKey } from "../utils/shortcutSheet";
 
 interface EmptyStateProps {
   onBrowseFiles: () => void;
@@ -52,7 +54,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
     sample?.cancel();
   };
 
-  const isMac = navigator.platform?.includes("Mac");
+  const mod = modifierKey(isMacPlatform(navigator.platform));
 
   return (
     <div className="flex flex-col items-center justify-center h-full animate-fade-in">
@@ -96,7 +98,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                   className="ml-1 text-[9px] font-mono px-1.5 py-0.5 rounded"
                   style={{ background: "rgba(255,255,255,0.15)", color: "rgba(255,255,255,0.7)" }}
                 >
-                  {isMac ? "⌘O" : "Ctrl+O"}
+                  {`${mod}O`}
                 </kbd>
               </button>
               <button type="button" onClick={handleFolder} className="ab-btn-secondary">
@@ -111,7 +113,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                     className="ml-1 text-[9px] font-mono px-1.5 py-0.5 rounded"
                     style={{ background: "rgba(255,255,255,0.08)", color: "var(--ab-text-2)" }}
                   >
-                    {isMac ? "⌘2" : "Ctrl+2"}
+                    {`${mod}2`}
                   </kbd>
                 </button>
               )}

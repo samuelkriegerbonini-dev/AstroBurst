@@ -48,7 +48,7 @@ import { useCompositeMode } from "../../hooks/useCompositeMode";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { beginCompositeCheck } from "../../hooks/useProcessingRun";
 import { adoptRun, useHistoryController, useHistoryRender, useHistorySnapshot } from "../../hooks/useHistory";
-import { compareLabelsFor, compositeCrumbLabelFor, crumbLabelFor, nodeAtPath, opLabel, opNameLabel } from "../../utils/historyModel";
+import { chainStepLabel, compareLabelsFor, compositeCrumbLabelFor, crumbLabelFor, nodeAtPath, opLabel, opNameLabel } from "../../utils/historyModel";
 import { historyRerunStore, type PendingRerun } from "../../utils/historyRerunStore";
 import type { HistoryNode, HistoryState, OpName } from "../../shared/types/ops";
 import { getOutputDir } from "../../infrastructure/tauri";
@@ -160,17 +160,6 @@ function psfSourceOf(result: CompositeStepResult | CompositeDeconvolveResult): P
   return "psf_source" in result ? result.psf_source : undefined;
 }
 
-const BANNER_LABELS: Record<ChainStep, string> = {
-  background: "Background Extraction",
-  denoise: "Wavelet Denoise",
-  deconv: "Deconvolution",
-  stretch: "Arcsinh Stretch",
-  maskedStretch: "Masked Stretch",
-  localContrast: "LHE / HDRMT",
-  tone: "Curves",
-  pixelMath: "PixelMath",
-};
-
 interface ChainInput {
   path: string;
   from: ChainStep | null;
@@ -236,7 +225,7 @@ function fileStepLabels(chain: ProcessingChain, history: HistoryState | null): S
 }
 
 function compositeToolLabel(step: ChainStep, entry: CompositeChainEntry): string {
-  return step === "localContrast" ? entry.label : BANNER_LABELS[step];
+  return step === "localContrast" ? entry.label : chainStepLabel(step);
 }
 
 function compositeStepLabels(chain: CompositeChain): StepLabel[] {
@@ -344,7 +333,7 @@ function compositeInputView(chain: CompositeChain, step: ChainStep, liveUrl: str
 }
 
 function compositeBannerOf(view: CompositeInputView): string | undefined {
-  return view.input === "base" ? undefined : BANNER_LABELS[view.input];
+  return view.input === "base" ? undefined : chainStepLabel(view.input);
 }
 
 function ProcessingTabInner() {
@@ -502,7 +491,7 @@ function ProcessingTabInner() {
   const compareLabels = useMemo(() => compareLabelsFor(stepSources), [stepSources]);
   const stepToolLabel = (step: ChainStep): string => {
     const op = stepSources[step]?.op;
-    return op ? opLabel(op) : BANNER_LABELS[step];
+    return op ? opLabel(op) : chainStepLabel(step);
   };
   const inputPreviewOf = (input: ChainInput): string | null => input.entry?.previewUrl ?? (input.from ? null : originalPreviewUrl);
   const inputLabelOf = (input: ChainInput): string => (input.from ? compareLabels[input.from] : originalLabel);
@@ -573,13 +562,17 @@ function ProcessingTabInner() {
                   <button
                     key={s.id}
                     onClick={() => setActive(s.id)}
+                    aria-current={isActive ? "true" : undefined}
                     className={`ab-processing-pill ${isActive ? colors.active : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"}`}
                     title={s.title}
                     data-processing-section={s.id}
                   >
                     {s.label}
                     {hasResult && (
-                      <span className={`ab-processing-pill-dot ${colors.dot}`} title="Has a result in this chain" />
+                      <>
+                        <span className={`ab-processing-pill-dot ${colors.dot}`} title="Has a result in this chain" />
+                        <span className="sr-only">, has a result in this chain</span>
+                      </>
                     )}
                   </button>
                 );

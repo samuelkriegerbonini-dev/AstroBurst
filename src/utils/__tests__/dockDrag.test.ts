@@ -38,7 +38,7 @@ function geometryFor(layout: DockLayout): DockGeometry {
       items: tools.map((tool, i) => ({ tool, rect: { x: strip.x + 2, y: y + i * BTN, w: BTN, h: BTN } })),
     };
   });
-  return { dock: DOCK, leftStrip: LEFT_STRIP, rightStrip: RIGHT_STRIP, groups };
+  return { dock: DOCK, viewportW: DOCK.w, leftStrip: LEFT_STRIP, rightStrip: RIGHT_STRIP, groups };
 }
 
 function withActive(active: Partial<DockLayout["active"]>, base: DockLayout = DEFAULT_DOCK_LAYOUT): DockLayout {
@@ -230,6 +230,13 @@ describe("dropPreviewRect", () => {
     expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, wide, IMAGE)).toEqual({ x: 42, y: 40, w: 640, h: 700 });
     expect(dropPreviewRect({ anchor: "left-top", index: 0 }, G, withActive({ "right-top": "processing" }, wide), IMAGE))
       .toEqual({ x: 42, y: 40, w: 512, h: 700 });
+  });
+
+  it("caps a side column at the share of the window width the CSS clamp uses, not of the dock width", () => {
+    const narrowDock: DockGeometry = { ...G, dock: { ...DOCK, w: 920 }, viewportW: 1000 };
+    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, narrowDock, withSizes({ leftW: 640 }), IMAGE)).toEqual({ x: 42, y: 40, w: 600, h: 700 });
+    expect(dropPreviewRect({ anchor: "left-top", index: 0 }, narrowDock, withActive({ "right-top": "processing" }, withSizes({ leftW: 640 })), IMAGE))
+      .toEqual({ x: 42, y: 40, w: 400, h: 700 });
   });
 
   it("covers the full centre width when the moved tool closes its source column", () => {

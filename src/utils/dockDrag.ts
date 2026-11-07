@@ -29,11 +29,13 @@ export interface Point {
 export interface StripGroupGeometry {
   anchor: DockAnchor;
   rect: Rect;
-  items: { tool: DockToolId; rect: Rect }[];
+  items: { tool: DockToolId; rect: Rect; index?: number }[];
+  totalItems?: number;
 }
 
 export interface DockGeometry {
   dock: Rect;
+  viewportW: number;
   leftStrip: Rect;
   rightStrip: Rect;
   groups: StripGroupGeometry[];
@@ -116,27 +118,36 @@ export function dropTargetAt(p: Point, g: DockGeometry, src: DragSource): DropTa
   const top: DockAnchor = side === "left" ? "left-top" : "right-top";
   const bottom: DockAnchor = side === "left" ? "left-bottom" : "right-bottom";
   const anchor = prefersTopGroup(p.y, groupHitRect(top, g), groupHitRect(bottom, g)) ? top : bottom;
-  const items = (groupOf(anchor, g)?.items ?? []).map((item) => item.rect);
-  return { anchor, index: insertionIndex(p.y, items, src.from === anchor ? src.fromIndex : null) };
+  const group = groupOf(anchor, g);
+  const items = (group?.items ?? []).map((item, index) => ({ ...item, index: item.index ?? index }));
+  const sourceIndex = src.from === anchor ? items.findIndex((item) => item.tool === src.tool) : -1;
+  const slot = insertionIndex(p.y, items.map((item) => item.rect), sourceIndex < 0 ? null : sourceIndex);
+  if (sourceIndex >= 0 && slot === sourceIndex) return { anchor, index: src.fromIndex };
+  const remaining = items.filter((item) => src.from !== anchor || item.tool !== src.tool);
+  const next = remaining[slot];
+  const last = remaining.at(-1);
+  const fullIndex = next?.index ?? (last ? last.index + 1 : group?.totalItems ?? 0);
+  return { anchor, index: src.from === anchor && src.fromIndex < fullIndex ? fullIndex - 1 : fullIndex };
 }
 
 export function insertionMarkerRect(t: DropTarget, g: DockGeometry, src: DragSource): Rect {
   const strip = stripOf(anchorSide(t.anchor), g);
   const items = (groupOf(t.anchor, g)?.items ?? [])
+    .map((item, index) => ({ ...item, index: item.index ?? index }))
     .filter((item) => !(t.anchor === src.from && item.tool === src.tool))
-    .map((item) => item.rect);
+    .map((item) => ({ ...item, index: t.anchor === src.from && src.fromIndex < item.index ? item.index - 1 : item.index }));
+  const before = items.filter((item) => item.index < t.index).at(-1)?.rect;
+  const after = items.find((item) => item.index >= t.index)?.rect;
   let y: number;
   if (items.length === 0) {
     const slot = emptyGroupSlotRect(t.anchor, g);
     y = slot.y + slot.h / 2;
-  } else if (t.index <= 0) {
-    y = items[0].y;
-  } else if (t.index >= items.length) {
-    const last = items[items.length - 1];
-    y = last.y + last.h;
+  } else if (before && after) {
+    y = (before.y + before.h + after.y) / 2;
+  } else if (before) {
+    y = before.y + before.h;
   } else {
-    const prev = items[t.index - 1];
-    y = (prev.y + prev.h + items[t.index].y) / 2;
+    y = (after ?? items[0].rect).y;
   }
   return { x: strip.x + (strip.w - INSERT_MARKER_W) / 2, y: y - INSERT_MARKER_H / 2, w: INSERT_MARKER_W, h: INSERT_MARKER_H };
 }
@@ -159,8 +170,8 @@ export function dropPreviewRect(t: DropTarget, g: DockGeometry, layout: DockLayo
   if (t.anchor === src.from) return null;
   if (DOCK_TOOL_META[src.tool].needsFile && !hasFile) return null;
   const next = openWithFile(dockReducer(layout, { type: "move", tool: src.tool, anchor: t.anchor, index: t.index }), hasFile);
-  const leftColW = sideColumnWidth(next, "left-top", g.dock.w);
-  const rightColW = sideColumnWidth(next, "right-top", g.dock.w);
+  const leftColW = sideColumnWidth(next, "left-top", g.viewportW);
+  const rightColW = sideColumnWidth(next, "right-top", g.viewportW);
   if (t.anchor === "left-top") return { x: g.leftStrip.x + g.leftStrip.w, y: g.dock.y, w: leftColW, h: g.dock.h };
   if (t.anchor === "right-top") return { x: g.rightStrip.x - rightColW, y: g.dock.y, w: rightColW, h: g.dock.h };
   const leftTool = next.active["left-bottom"];

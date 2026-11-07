@@ -37,6 +37,21 @@ export function opNameLabel(name: OpName): string {
   return OP_LABELS[name];
 }
 
+const STEP_DEFAULT_OPS: Record<ChainStep, readonly OpName[]> = {
+  background: ["background"],
+  denoise: ["wavelet_denoise"],
+  deconv: ["rl_deconv"],
+  stretch: ["arcsinh"],
+  maskedStretch: ["masked_stretch"],
+  localContrast: ["lhe", "hdrmt"],
+  tone: ["tone"],
+  pixelMath: ["pixelmath"],
+};
+
+export function chainStepLabel(step: ChainStep): string {
+  return STEP_DEFAULT_OPS[step].map((name) => OP_LABELS[name]).join(" / ");
+}
+
 export function backgroundModelLabel(model: BackgroundModel["model"]): string {
   if (model === "spline") return "DBE";
   return model === "polynomial" ? OP_LABELS.background : "De-band";

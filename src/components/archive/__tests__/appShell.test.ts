@@ -118,6 +118,7 @@ describe("AppFooter", () => {
   });
 
   it("keeps the Search Ctrl+K and shortcut sheet buttons", () => {
+    vi.stubGlobal("navigator", { platform: "Win32" });
     const html = renderToStaticMarkup(createElement(AppFooter, props()));
     expect(html).toContain('title="Search everywhere (Ctrl+K or double Shift)"');
     expect(html).toContain('<kbd class="ab-cmdp-kbd">Ctrl+K</kbd>');
@@ -133,6 +134,7 @@ describe("AppFooter", () => {
   });
 
   it("passes the mode to the switch and wires Search and the shortcut sheet", () => {
+    vi.stubGlobal("navigator", { platform: "Win32" });
     const onModeChange = vi.fn();
     const onOpenPalette = vi.fn();
     const onOpenShortcuts = vi.fn();

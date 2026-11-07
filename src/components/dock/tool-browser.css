@@ -1,0 +1,69 @@
+.ab-tool-browser {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(600px, 100vw);
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100dvh;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--ab-border-strong);
+  background: #10131c;
+  color: var(--ab-text-1);
+  box-shadow: -24px 0 80px #0006;
+}
+
+.ab-tool-browser::backdrop { background: #02040a9c; }
+.ab-tool-browser-content { display: flex; flex-direction: column; height: 100%; }
+.ab-tool-browser-header { display: flex; justify-content: space-between; gap: 16px; padding: 28px 24px 20px; }
+.ab-tool-browser-header h2 { margin: 0 0 6px; font-size: 24px; font-weight: 600; letter-spacing: -0.04em; }
+.ab-tool-browser-header p { color: var(--ab-text-2); font-size: 12px; }
+.ab-tool-browser-close { align-self: flex-start; padding: 8px; border-radius: 8px; color: var(--ab-text-2); cursor: pointer; }
+.ab-tool-browser-close:hover { background: var(--ab-bg-hover); color: var(--ab-text-1); }
+.ab-tool-browser-search { display: flex; align-items: center; gap: 10px; margin: 0 24px; padding: 11px 12px; border: 1px solid var(--ab-border-strong); border-radius: 9px; background: #090d15; color: var(--ab-text-3); }
+.ab-tool-browser-search:focus-within { border-color: var(--ab-accent); }
+.ab-tool-browser-search input { width: 100%; min-width: 0; outline: none; background: transparent; color: var(--ab-text-1); font-size: 12px; }
+.ab-tool-browser-search input::-webkit-search-cancel-button { display: none; }
+.ab-tool-browser-search button { padding: 2px; cursor: pointer; }
+.ab-tool-browser-results { padding: 12px 24px 2px; color: var(--ab-text-3); font-size: 10px; }
+.ab-tool-browser-groups { flex: 1; min-height: 0; overflow-y: auto; padding: 0 24px 24px; }
+.ab-tool-browser-category { --tool-category-color: #5eead4; }
+.ab-tool-browser-groups h3 { display: flex; align-items: center; gap: 7px; margin: 22px 0 10px; font-size: 11px; font-weight: 600; color: var(--tool-category-color); }
+.ab-tool-browser-groups h3 > svg { flex-shrink: 0; }
+.ab-tool-browser-category-count { margin-left: auto; color: var(--ab-text-3); font-size: 10px; font-weight: 400; }
+.ab-tool-browser-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.ab-tool-browser-card { display: flex; flex-direction: column; min-width: 0; text-align: left; border: 1px solid var(--ab-border); border-radius: 10px; background: #ffffff03; transition: background 150ms ease, border-color 150ms ease; }
+.ab-tool-browser-card:hover { border-color: color-mix(in srgb, var(--tool-category-color) 45%, transparent); }
+.ab-tool-browser-card[data-selected="true"] { border-color: color-mix(in srgb, var(--tool-category-color) 42%, transparent); background: color-mix(in srgb, var(--tool-category-color) 8%, transparent); }
+.ab-tool-browser-open { display: flex; flex: 1; gap: 9px; align-items: flex-start; min-height: 91px; padding: 12px 10px; border-radius: 9px 9px 0 0; text-align: left; cursor: pointer; }
+.ab-tool-browser-open:not([aria-disabled="true"]):hover { background: color-mix(in srgb, var(--tool-category-color) 8%, transparent); }
+.ab-tool-browser-open[aria-disabled="true"] { cursor: not-allowed; }
+.ab-tool-browser-open[aria-disabled="true"] .ab-tool-browser-icon,
+.ab-tool-browser-open[aria-disabled="true"] .ab-tool-browser-card-heading { opacity: 0.5; }
+.ab-tool-browser-icon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 31px; height: 31px; border: 1px solid color-mix(in srgb, var(--tool-category-color) 22%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--tool-category-color) 10%, transparent); color: var(--tool-category-color); }
+.ab-tool-browser-copy { flex: 1; min-width: 0; }
+.ab-tool-browser-card-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.ab-tool-browser-card strong { font-size: 12px; font-weight: 500; line-height: 1.5; color: var(--tool-category-color); }
+.ab-tool-browser-description { display: block; }
+.ab-tool-browser-card small { display: block; margin-top: 4px; color: var(--ab-text-2); font-size: 11px; line-height: 1.5; }
+.ab-tool-browser-reason { display: block; margin-top: 6px; color: var(--ab-text-1); font-size: 10px; font-weight: 500; line-height: 1.4; }
+.ab-tool-browser-open-state { padding: 1px 4px; border-radius: 4px; color: var(--tool-category-color); background: color-mix(in srgb, var(--tool-category-color) 12%, transparent); font-size: 9px; line-height: 1.5; }
+.ab-tool-browser-arrow { flex-shrink: 0; margin-top: 4px; color: var(--ab-text-3); }
+.ab-tool-browser-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 5px; padding: 7px 9px; border-top: 1px solid var(--ab-border); }
+.ab-tool-browser-sidebar-state { display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--ab-text-3); font-size: 9px; }
+.ab-tool-browser-card[data-selected="true"] .ab-tool-browser-sidebar-state { color: var(--tool-category-color); }
+.ab-tool-browser-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex-shrink: 0; min-height: 26px; padding: 4px 7px; border: 1px solid var(--ab-border-strong); border-radius: 5px; background: var(--ab-bg-hover); color: var(--ab-text-2); font-size: 10px; cursor: pointer; }
+.ab-tool-browser-toggle:hover { border-color: var(--tool-category-color); color: var(--tool-category-color); }
+.ab-tool-browser-card[data-selected="false"] .ab-tool-browser-toggle { border-color: color-mix(in srgb, var(--tool-category-color) 35%, transparent); color: var(--tool-category-color); }
+.ab-tool-browser-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 56px 16px; color: var(--ab-text-3); font-size: 12px; text-align: center; }
+.ab-tool-browser-empty strong { color: var(--ab-text-1); }
+.ab-tool-browser-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; border-top: 1px solid var(--ab-border); padding: 16px 24px; color: var(--ab-text-3); font-size: 10px; }
+.ab-tool-browser-footer kbd { padding: 2px 4px; border: 1px solid var(--ab-border-strong); border-radius: 4px; }
+
+@media (max-width: 420px) {
+  .ab-tool-browser-grid { grid-template-columns: 1fr; }
+  .ab-tool-browser-header { padding: 20px 16px 16px; }
+  .ab-tool-browser-search { margin: 0 16px; }
+  .ab-tool-browser-groups { padding: 0 16px 16px; }
+}

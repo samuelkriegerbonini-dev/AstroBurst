@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ANCHOR_LABELS,
+  COLUMN_VW_CAP_DOUBLE,
+  COLUMN_VW_CAP_SINGLE,
   DOCK_ANCHORS,
   DOCK_SIZE_LIMITS,
+  DOCK_TOOL_IDS,
   DOCK_TOOL_META,
   MIN_PREVIEW_H,
   MIN_PREVIEW_W,
@@ -15,6 +18,7 @@ import {
 } from "../../utils/dockLayout";
 import { clampBottomToViewer, clampColumnsToViewer } from "../../utils/dockDrag";
 import { dockStore, useDockLayout } from "../../hooks/useDockLayout";
+import { toolShortcutsStore, useToolShortcutResetCount, useToolShortcuts } from "../../hooks/useToolShortcuts";
 import { fileKeyOf, useFileContext } from "../../context/PreviewContext";
 import Stripe from "./Stripe";
 import SideColumn from "./SideColumn";
@@ -27,7 +31,9 @@ import DockContextMenu, { type DockMenuRequest } from "./DockContextMenu";
 import LiveRegion from "./LiveRegion";
 import { useDockDrag } from "./useDockDrag";
 import { useAnalysisRouting } from "./useAnalysisRouting";
-import { nextShown, settleBottom, settleSide, type AnchorTools } from "./dockGeometry";
+import { nextRailSession, nextShown, settleBottom, settleSide, type AnchorTools } from "./dockGeometry";
+import ToolBrowser from "./ToolBrowser";
+import { toolBrowserStore, useToolBrowserOpen } from "./toolBrowserStore";
 
 export interface DockShellProps {
   tools: Partial<Record<DockToolId, React.ReactNode>>;
@@ -64,6 +70,14 @@ function observeWithFrame(el: Element, run: () => void): () => void {
 
 export default function DockShell({ tools, children }: DockShellProps) {
   const layout = useDockLayout();
+  const toolsOpen = useToolBrowserOpen();
+  const pinnedTools = useToolShortcuts();
+  const shortcutResets = useToolShortcutResetCount();
+  const [railSessionState, setRailSession] = useState(() => nextRailSession(null, shortcutResets, layout.active));
+  const railSession = nextRailSession(railSessionState, shortcutResets, layout.active);
+  if (railSession !== railSessionState) setRailSession(railSession);
+  const sessionTools = railSession.tools;
+  const railTools = useMemo(() => DOCK_TOOL_IDS.filter((tool) => pinnedTools.includes(tool) || sessionTools.has(tool)), [pinnedTools, sessionTools]);
   const { file } = useFileContext();
   const hasFile = file !== null;
   const fileKey = fileKeyOf(file);
@@ -132,8 +146,9 @@ export default function DockShell({ tools, children }: DockShellProps) {
     if (!outer || !inner || !centre || tool === null) return null;
     const min = sideMin(anchor, tool);
     const start = inner.offsetWidth;
-    const max = Math.min(DOCK_SIZE_LIMITS[SIDE_SIZE_KEY[anchor]].max, Math.max(min, start + centre.clientWidth - MIN_PREVIEW_W));
     const both = o["left-top"] !== null && o["right-top"] !== null;
+    const viewportCap = Math.floor((window.innerWidth * (both ? COLUMN_VW_CAP_DOUBLE : COLUMN_VW_CAP_SINGLE)) / 100);
+    const max = Math.min(DOCK_SIZE_LIMITS[SIDE_SIZE_KEY[anchor]].max, viewportCap, Math.max(min, start + centre.clientWidth - MIN_PREVIEW_W));
     return {
       start,
       min,
@@ -263,7 +278,7 @@ export default function DockShell({ tools, children }: DockShellProps) {
 
   return (
     <div ref={rootRef} data-dock-root="" className="flex-1 flex min-h-0 overflow-hidden">
-      <Stripe side="left" layout={layout} hasFile={hasFile} buttonProps={buttonProps} onContextMenu={openMenu} />
+      <Stripe side="left" layout={layout} hasFile={hasFile} buttonProps={buttonProps} onContextMenu={openMenu} compact enabledTools={railTools} onBrowseTools={toolBrowserStore.open} />
       <SideColumn
         anchor="left-top"
         open={leftOpen}
@@ -306,11 +321,12 @@ export default function DockShell({ tools, children }: DockShellProps) {
         containerRef={containerRefs["right-top"]}
         onSettled={handleSideSettled}
       />
-      <Stripe side="right" layout={layout} hasFile={hasFile} buttonProps={buttonProps} onContextMenu={openMenu} />
+      <Stripe side="right" layout={layout} hasFile={hasFile} buttonProps={buttonProps} onContextMenu={openMenu} compact enabledTools={railTools} onBrowseTools={toolBrowserStore.open} />
+      {toolsOpen && <ToolBrowser layout={layout} hasFile={hasFile} enabledTools={pinnedTools} onToggleTool={toolShortcutsStore.toggle} onClose={toolBrowserStore.close} />}
       <ToolHostRoot tools={tools} containers={containers} layout={layout} open={open} shown={shown} hasFile={hasFile} fileKey={fileKey} />
       <DragOverlay />
       <DockOnboarding rootRef={rootRef} layout={layout} hasFile={hasFile} />
-      <DockContextMenu request={menu} onClose={closeMenu} />
+      <DockContextMenu request={menu} enabledTools={railTools} onClose={closeMenu} />
       <LiveRegion />
     </div>
   );

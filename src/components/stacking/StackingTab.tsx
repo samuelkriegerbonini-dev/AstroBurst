@@ -32,14 +32,14 @@ const MosaicPanel = lazy(() => import("./MosaicPanel"));
 
 type StackSection = "calibrate" | "cosmetic" | "subframe" | "stack" | "pipeline" | "drizzle_rgb" | "mosaic";
 
-const SECTIONS: { id: StackSection; label: string; color: string }[] = [
-  { id: "calibrate", label: "Calibrate", color: "violet" },
-  { id: "cosmetic", label: "Cosmetic", color: "fuchsia" },
-  { id: "subframe", label: "Subframes", color: "teal" },
-  { id: "stack", label: "Stack", color: "amber" },
-  { id: "pipeline", label: "Pipeline", color: "cyan" },
-  { id: "drizzle_rgb", label: "Drizzle RGB", color: "rose" },
-  { id: "mosaic", label: "Mosaic", color: "indigo" },
+const SECTIONS: { id: StackSection; label: string; title: string; color: string }[] = [
+  { id: "calibrate", label: "Calibrate", title: "Subtract bias and dark, divide by flat", color: "violet" },
+  { id: "cosmetic", label: "Cosmetic", title: "Repair hot and cold pixels", color: "fuchsia" },
+  { id: "subframe", label: "Subframes", title: "Measure frame quality and choose which to stack", color: "teal" },
+  { id: "stack", label: "Stack", title: "Register and combine the selected frames", color: "amber" },
+  { id: "pipeline", label: "Pipeline", title: "Calibrate, cosmetic, stack and compose in one run", color: "cyan" },
+  { id: "drizzle_rgb", label: "Drizzle RGB", title: "Drizzle three filters straight into an RGB composite", color: "rose" },
+  { id: "mosaic", label: "Mosaic", title: "Join overlapping tiles into one image", color: "indigo" },
 ];
 
 const SECTION_ACTIVE_CLASS: Record<string, string> = {
@@ -298,7 +298,7 @@ function StackingTabInner() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex gap-1 flex-wrap px-4 pt-3 pb-1">
+      <div role="group" aria-label="Stacking sections" className="flex gap-1 flex-wrap px-4 pt-3 pb-1">
         {SECTIONS.map((s) => {
           const isActive = active === s.id;
           const hasCalibrated = s.id === "stack" && calibration.calibratedFitsPath;
@@ -306,13 +306,18 @@ function StackingTabInner() {
             <button
               key={s.id}
               onClick={() => setActive(s.id)}
+              aria-current={isActive ? "true" : undefined}
+              title={s.title}
               className={`ab-processing-pill whitespace-nowrap shrink-0 ${
                 isActive ? SECTION_ACTIVE_CLASS[s.color] : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
               }`}
             >
               {s.label}
               {hasCalibrated && (
-                <span className="ab-processing-pill-dot bg-emerald-400" />
+                <>
+                  <span className="ab-processing-pill-dot bg-emerald-400" title="Calibrated frame ready to stack" />
+                  <span className="sr-only">, calibrated frame ready</span>
+                </>
               )}
             </button>
           );

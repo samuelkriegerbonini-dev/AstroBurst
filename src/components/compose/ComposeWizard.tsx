@@ -1,8 +1,9 @@
-import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, useEffect, useId, useMemo, useRef, lazy, Suspense, type ReactNode } from "react";
 import { Loader2, ChevronLeft, ChevronRight, Check, ArrowRight, RotateCcw } from "lucide-react";
 import { useDoneFilesContext, useNarrowbandContext, useFileContext, useHistContext, useRenderActions } from "../../context/PreviewContext";
-import { useCompositeActions } from "../../context/CompositeContext";
-import { useComposeWizardContext } from "../../context/ComposeWizardContext";
+import { useCompositeActions, useCompositeStf } from "../../context/CompositeContext";
+import { useComposeWizardContext, useWizardCompositeDims } from "../../context/ComposeWizardContext";
+import { useCompositeMode } from "../../hooks/useCompositeMode";
 import {
   nextEnabledStep,
   STEPS,
@@ -41,17 +42,58 @@ const COLOR_MAP: Record<string, { tab: string; dot: string }> = {
   teal: { tab: "bg-teal-600/20 text-teal-400 ring-1 ring-teal-500/30", dot: "bg-teal-400" },
 };
 
-export function MiniInfoBar() {
-  const { file } = useFileContext();
-  const { histData, stfParams } = useHistContext();
-
-  if (!file) return null;
-
+function InfoBarRow({ children }: { children: ReactNode }) {
   return (
     <div
       className="flex items-center gap-3 px-3 py-1 text-[9px] font-mono overflow-x-auto scrollbar-hide shrink-0"
       style={{ borderBottom: "1px solid var(--ab-border)", background: "rgba(255,255,255,0.02)" }}
     >
+      {children}
+    </div>
+  );
+}
+
+function StfReadout({ stf }: { stf: StfParams }) {
+  return (
+    <span className="shrink-0">
+      <span style={{ color: "rgba(239,68,68,0.5)" }}>S={stf.shadow.toFixed(4)}</span>
+      {" "}
+      <span style={{ color: "rgba(245,158,11,0.5)" }}>M={stf.midtone.toFixed(4)}</span>
+      {" "}
+      <span style={{ color: "rgba(16,185,129,0.5)" }}>H={stf.highlight.toFixed(4)}</span>
+    </span>
+  );
+}
+
+function CompositeInfoBar({ fileBar }: { fileBar: ReactNode }) {
+  const onScreen = useCompositeMode();
+  const dims = useWizardCompositeDims();
+  const { compositeStfR, compositeStfLinked } = useCompositeStf();
+
+  if (!onScreen) return fileBar;
+
+  return (
+    <InfoBarRow>
+      <span className="text-zinc-400 shrink-0">Composite</span>
+      {dims && (
+        <span className="text-zinc-500 shrink-0">
+          {dims[0]}&times;{dims[1]}
+        </span>
+      )}
+      <span style={{ color: "var(--ab-border-strong)" }}>|</span>
+      {compositeStfLinked ? <StfReadout stf={compositeStfR} /> : <span className="text-zinc-600 shrink-0">per-channel STF</span>}
+    </InfoBarRow>
+  );
+}
+
+export function MiniInfoBar({ compositeReady = false }: { compositeReady?: boolean }) {
+  const { file } = useFileContext();
+  const { histData, stfParams } = useHistContext();
+
+  if (!file) return null;
+
+  const fileBar = (
+    <InfoBarRow>
       {file.result?.dimensions && (
         <span className="text-zinc-500 shrink-0">
           {file.result.dimensions[0]}&times;{file.result.dimensions[1]}
@@ -64,13 +106,7 @@ export function MiniInfoBar() {
             <span title={SIGMA_MAD_TITLE}>{SIGMA_MAD_LABEL}={histData.sigma?.toFixed(2)}</span>
           </span>
           <span style={{ color: "var(--ab-border-strong)" }}>|</span>
-          <span className="shrink-0">
-            <span style={{ color: "rgba(239,68,68,0.5)" }}>S={stfParams.shadow.toFixed(4)}</span>
-            {" "}
-            <span style={{ color: "rgba(245,158,11,0.5)" }}>M={stfParams.midtone.toFixed(4)}</span>
-            {" "}
-            <span style={{ color: "rgba(16,185,129,0.5)" }}>H={stfParams.highlight.toFixed(4)}</span>
-          </span>
+          <StfReadout stf={stfParams} />
         </>
       )}
       {file.result?.header && (
@@ -85,8 +121,10 @@ export function MiniInfoBar() {
           </span>
         </>
       )}
-    </div>
+    </InfoBarRow>
   );
+
+  return compositeReady ? <CompositeInfoBar fileBar={fileBar} /> : fileBar;
 }
 
 interface StepNavFooterProps {
@@ -149,6 +187,8 @@ export default function ComposeWizard() {
   const { state, dispatch, activeStep, setActiveStep, setOutputForgetter, setCompositeDims } = useComposeWizardContext();
   const [suggestedStep, setSuggestedStep] = useState<string | null>(null);
   const suggestedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [blockedStepId, setBlockedStepId] = useState<string | null>(null);
+  const blockedNoteId = useId();
 
   const filledBins = useMemo(() => state.bins.filter((b) => b.files.length > 0), [state.bins]);
   const totalFiles = useMemo(() => state.bins.reduce((a, b) => a + b.files.length, 0), [state.bins]);
@@ -180,6 +220,7 @@ export default function ComposeWizard() {
 
   const handleStepClick = useCallback((stepId: string) => {
     setActiveStep(stepId);
+    setBlockedStepId(null);
     if (suggestedTimerRef.current) clearTimeout(suggestedTimerRef.current);
     setSuggestedStep(null);
   }, [setActiveStep]);
@@ -385,9 +426,12 @@ export default function ComposeWizard() {
     }
   }, [activeStep, state, doneFiles, handleCompositePreview, handleRestretchPreview, handleRecomputedStf, handleCompositeOp, handleChannelOutput, narrowbandPalette, filterDetections, completeStep, dispatch, setCompositeDims]);
 
+  const blockedStep = STEPS.find((s) => s.id === blockedStepId);
+  const blockedNote = blockedStep ? blockedStep.blockedReason(state) : null;
+
   return (
     <div className="flex flex-col h-full">
-      <MiniInfoBar />
+      <MiniInfoBar compositeReady={state.compositeReady} />
 
       <div className="flex items-start gap-1 px-2 pt-1.5 pb-1 shrink-0">
         <div className="flex flex-wrap items-center gap-0.5 flex-1 min-w-0">
@@ -399,12 +443,19 @@ export default function ComposeWizard() {
             const isDone = !!state.completedSteps[step.id];
             const isSuggested = suggestedStep === step.id;
             const colors = COLOR_MAP[step.color] ?? COLOR_MAP.violet;
+            const isNoted = blockedNote !== null && blockedStepId === step.id;
             return (
               <button
                 key={step.id}
-                onClick={() => isEnabled && handleStepClick(step.id)}
-                disabled={!isEnabled}
+                onClick={() => (isEnabled ? handleStepClick(step.id) : setBlockedStepId(step.id))}
+                onFocus={() => {
+                  if (!isEnabled) setBlockedStepId(step.id);
+                }}
+                onBlur={() => setBlockedStepId((shown) => (shown === step.id ? null : shown))}
+                aria-disabled={isEnabled ? undefined : true}
+                aria-describedby={isNoted ? blockedNoteId : undefined}
                 data-testid={`step-${step.id}`}
+                aria-current={isActive ? "step" : undefined}
                 data-complete={isDone ? "true" : undefined}
                 className={`ab-step-pill ${
                   isActive ? colors.tab : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
@@ -446,6 +497,12 @@ export default function ComposeWizard() {
           {resetArmed && "Reset all steps?"}
         </button>
       </div>
+
+      {blockedStep && blockedNote && (
+        <p role="note" id={blockedNoteId} className="px-3 pb-1 text-[10px] text-zinc-400">
+          {`${blockedStep.label}: ${blockedNote}`}
+        </p>
+      )}
 
       {totalFiles > 0 && (
         <div className="flex items-center gap-1 px-3 py-1 text-[9px] font-mono text-zinc-600 border-b border-zinc-800/30 overflow-x-auto shrink-0">

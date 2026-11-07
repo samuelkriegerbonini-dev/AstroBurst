@@ -1,5 +1,5 @@
-import { useState, useCallback, useMemo, lazy, Suspense, memo } from "react";
-import { Loader2, Box, Film } from "lucide-react";
+import { useState, useCallback, useMemo, useRef, useLayoutEffect, lazy, Suspense, memo } from "react";
+import { Loader2, Box, Film, X } from "lucide-react";
 import { exportFits, exportFitsRgb } from "../../services/export";
 import type { ExportResult, ExportFitsOptions, ExportFitsRgbOptions } from "../../services/export";
 import { getCubeFrame } from "../../services/cube";
@@ -10,6 +10,16 @@ import { cubeFrameExportName, exportSourceLabel, exportTimestamp, resolveRgbExpo
 import { RGB_PLANES, rgbProductOf } from "../../utils/rgbProduct";
 
 const ExportPanel = lazy(() => import("./ExportPanel"));
+
+interface CubeExportResult {
+  path: string;
+  exported: number;
+  total: number;
+  fits?: boolean;
+  dir?: string;
+  stopped?: boolean;
+  error?: string;
+}
 
 function ExportTabInner() {
   const { file } = useFileContext();
@@ -26,8 +36,13 @@ function ExportTabInner() {
   const [exportLoading, setExportLoading] = useState(false);
   const [cubeExporting, setCubeExporting] = useState(false);
   const [cubeExportProgress, setCubeExportProgress] = useState(0);
-  const [cubeExportResult, setCubeExportResult] = useState<{ exported?: number; total?: number; fits?: boolean; dir?: string; error?: string } | null>(null);
+  const [cubeExportResult, setCubeExportResult] = useState<CubeExportResult | null>(null);
   const [cubeExportFits, setCubeExportFits] = useState(false);
+  const [cubeStopping, setCubeStopping] = useState(false);
+  const cubeCancelRef = useRef(false);
+  const exportFramesButtonRef = useRef<HTMLButtonElement>(null);
+  const stopButtonRef = useRef<HTMLButtonElement>(null);
+  const refocusExportFramesRef = useRef(false);
 
   const handleExportFits = useCallback(
     async (path: string, outputPath: string, options: ExportFitsOptions) => {
@@ -76,9 +91,12 @@ function ExportTabInner() {
 
   const handleExportCubeFrames = useCallback(async () => {
     if (!file?.path || !cubeDims) return;
+    const path = file.path;
     const totalFrames = cubeDims.frames ?? 0;
     if (totalFrames <= 0) return;
 
+    cubeCancelRef.current = false;
+    setCubeStopping(false);
     setCubeExporting(true);
     setCubeExportProgress(0);
     setCubeExportResult(null);
@@ -88,23 +106,37 @@ function ExportTabInner() {
     let exported = 0;
 
     try {
-      for (let i = 0; i < totalFrames; i++) {
-        const outputPath = `${dir}/${cubeFrameExportName(file.path, i, "png", stamp)}`;
-        const fitsPath = cubeExportFits ? `${dir}/${cubeFrameExportName(file.path, i, "fits", stamp)}` : undefined;
-        await getCubeFrame(file.path, i, outputPath, fitsPath);
+      for (let i = 0; i < totalFrames && !cubeCancelRef.current; i++) {
+        const outputPath = `${dir}/${cubeFrameExportName(path, i, "png", stamp)}`;
+        const fitsPath = cubeExportFits ? `${dir}/${cubeFrameExportName(path, i, "fits", stamp)}` : undefined;
+        await getCubeFrame(path, i, outputPath, fitsPath);
         exported++;
         setCubeExportProgress(Math.round((exported / totalFrames) * 100));
       }
-      setCubeExportResult({ exported, total: totalFrames, fits: cubeExportFits, dir });
+      setCubeExportResult({ path, exported, total: totalFrames, fits: cubeExportFits, dir, stopped: exported < totalFrames });
     } catch (e) {
       console.error("Cube frame export failed:", e);
-      setCubeExportResult({ exported, total: totalFrames, error: String(e) });
+      setCubeExportResult({ path, exported, total: totalFrames, error: e instanceof Error ? e.message : String(e) });
     } finally {
+      const stop = stopButtonRef.current;
+      refocusExportFramesRef.current = stop !== null && stop.ownerDocument.activeElement === stop;
       setCubeExporting(false);
     }
   }, [file?.path, cubeDims, cubeExportFits]);
 
+  const stopCubeExport = useCallback(() => {
+    cubeCancelRef.current = true;
+    setCubeStopping(true);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (cubeExporting || !refocusExportFramesRef.current) return;
+    refocusExportFramesRef.current = false;
+    exportFramesButtonRef.current?.focus();
+  }, [cubeExporting]);
+
   const totalFrames = cubeDims ? (cubeDims.frames ?? 0) : 0;
+  const shownCubeResult = cubeExportResult && cubeExportResult.path === file?.path ? cubeExportResult : null;
 
   const rgbProduct = useMemo(
     () =>
@@ -194,6 +226,7 @@ function ExportTabInner() {
                 <span className="text-[11px] text-zinc-300">Also export as FITS</span>
               </label>
               <button
+                ref={exportFramesButtonRef}
                 onClick={handleExportCubeFrames}
                 disabled={cubeExporting}
                 className="w-full flex items-center justify-center gap-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-600/30 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50"
@@ -212,26 +245,43 @@ function ExportTabInner() {
               </button>
 
               {cubeExporting && (
-                <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-purple-500 rounded-full transition-all duration-300"
-                    style={{ width: `${cubeExportProgress}%` }}
-                  />
-                </div>
+                <>
+                  <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-purple-500 rounded-full transition-all duration-300"
+                      style={{ width: `${cubeExportProgress}%` }}
+                    />
+                  </div>
+                  <button
+                    ref={stopButtonRef}
+                    type="button"
+                    onClick={stopCubeExport}
+                    aria-disabled={cubeStopping || undefined}
+                    title="Stop after the frame being exported"
+                    className="w-full flex items-center justify-center gap-1 rounded border border-zinc-700/60 px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100 hover:border-zinc-500 transition-colors aria-disabled:opacity-50 aria-disabled:cursor-default"
+                  >
+                    <X size={12} /> {cubeStopping ? "Stopping..." : "Stop"}
+                  </button>
+                </>
               )}
 
-              {cubeExportResult && (
-                <div className={`text-[10px] font-mono px-2 py-1 rounded ${
-                  cubeExportResult.error ? "text-amber-300 bg-amber-900/20" : "text-emerald-300 bg-emerald-900/20"
-                }`}>
-                  {cubeExportResult.exported}/{cubeExportResult.total} frames exported
-                  {cubeExportResult.fits && " (PNG + FITS)"}
-                  {cubeExportResult.dir && !cubeExportResult.error && (
-                    <span className="block text-emerald-400/60 mt-0.5 truncate">
-                      {cubeExportResult.dir}
-                    </span>
+              {(cubeExporting || shownCubeResult) && (
+                <div role="status">
+                  {shownCubeResult && (
+                    <div className={`text-[10px] font-mono px-2 py-1 rounded ${
+                      shownCubeResult.error || shownCubeResult.stopped ? "text-amber-300 bg-amber-900/20" : "text-emerald-300 bg-emerald-900/20"
+                    }`}>
+                      {shownCubeResult.exported}/{shownCubeResult.total} frames exported
+                      {shownCubeResult.fits && " (PNG + FITS)"}
+                      {shownCubeResult.stopped && " (stopped)"}
+                      {shownCubeResult.dir && !shownCubeResult.error && (
+                        <span className="block text-emerald-400/60 mt-0.5 truncate">
+                          {shownCubeResult.dir}
+                        </span>
+                      )}
+                      {shownCubeResult.error && ` (stopped: ${shownCubeResult.error})`}
+                    </div>
                   )}
-                  {cubeExportResult.error && ` (stopped: ${cubeExportResult.error})`}
                 </div>
               )}
             </div>

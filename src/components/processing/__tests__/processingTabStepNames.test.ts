@@ -30,12 +30,13 @@ vi.mock("../PixelMathPanel", () => capture("pixelMath"));
 import { CompositeProvider } from "../../../context/CompositeContext";
 import { ComposeWizardProvider } from "../../../context/ComposeWizardContext";
 import { PreviewProvider, fileKeyOf, useRenderActions } from "../../../context/PreviewContext";
-import { nodeRecord, projectChain } from "../../../utils/historyModel";
+import { nodeRecord, opNameLabel, projectChain } from "../../../utils/historyModel";
+import ChainBanner from "../../ui/ChainBanner";
 import { EMPTY_HISTORY_SNAPSHOT, historyStore } from "../../../utils/historyStore";
 import { historyRerunStore } from "../../../utils/historyRerunStore";
 import ProcessingTab from "../ProcessingTab";
 import type { ProcessedFile } from "../../../shared/types";
-import type { HistoryDoc, HistoryNode, HistoryState, OpSpec } from "../../../shared/types/ops";
+import type { HistoryDoc, HistoryNode, HistoryState, OpName, OpSpec } from "../../../shared/types/ops";
 
 const RAW = "C:/data/673nmos.fits";
 const DIR = "C:/app/history/7a1c3e5b9d2f4086";
@@ -134,6 +135,23 @@ function crumbLabels(html: string): string[] {
 
 const READ_ONLY: HistoryState = { ...STATE, read_only: "this history was written with history format version 2" };
 
+const EVERY_OP = Object.keys({
+  background: true,
+  wavelet_denoise: true,
+  rl_deconv: true,
+  arcsinh: true,
+  ghs: true,
+  masked_stretch: true,
+  lhe: true,
+  hdrmt: true,
+  tone: true,
+  pixelmath: true,
+} satisfies Record<OpName, true>) as OpName[];
+
+function bannerText(chainedFrom: string): string {
+  return renderToStaticMarkup(createElement(ChainBanner, { chainedFrom })).replace(/<[^>]*>/g, "");
+}
+
 beforeEach(() => {
   for (const name of Object.keys(captured)) delete captured[name];
   historyStore.set(EMPTY_HISTORY_SNAPSHOT);
@@ -187,6 +205,18 @@ describe("ProcessingTab names each step by the tool that made it", () => {
       expect(panel("hdr")).toMatchObject({ inputLabel: "GHS", chainedFrom: "GHS Stretch" });
       expect(panel("denoise")).toMatchObject({ inputLabel: "DBE", chainedFrom: "DBE" });
       expect(panel("pixelMath").chainedFrom).toBe("HDRMT");
+    }
+  });
+});
+
+describe("ChainBanner names the input as History does", () => {
+  it("shows the label History gives each tool, unchanged", () => {
+    for (const op of EVERY_OP) expect(bannerText(opNameLabel(op))).toBe(`Using output from ${opNameLabel(op)}`);
+  });
+
+  it("shows a base image label as given, even when it reads like a step id", () => {
+    for (const label of ["background", "denoise", "deconvolution", "deconv"]) {
+      expect(bannerText(label)).toBe(`Using output from ${label}`);
     }
   });
 });

@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -8,13 +9,23 @@ function read(rel: string): string {
 
 const indexCss = read("../../index.css");
 const viewerCss = read("../../advanced-viewer.css");
+const dockCss = read("../../components/dock/dock.css");
 const stylesheets = `${indexCss}\n${viewerCss}`;
+
+const srcDir = fileURLToPath(new URL("../../", import.meta.url));
+const everyStylesheet = readdirSync(srcDir, { recursive: true, encoding: "utf8" })
+  .filter((rel) => rel.endsWith(".css"))
+  .map((rel) => ({ file: rel.replaceAll("\\", "/"), text: readFileSync(join(srcDir, rel), "utf8").replace(/\/\*[\s\S]*?\*\//g, "") }));
 
 function ruleBody(text: string, selector: string): string | null {
   for (const m of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     if (m[1].split(",").some((s) => s.trim() === selector)) return m[2];
   }
   return null;
+}
+
+function ruleBodies(text: string, selector: string): string[] {
+  return [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((m) => m[1].split(",").some((s) => s.trim() === selector)).map((m) => m[2]);
 }
 
 function declarations(body: string): Map<string, string> {
@@ -33,6 +44,23 @@ function px(value: string | undefined): number[] {
   return (value ?? "").split(/\s+/).map((v) => Number(/^([\d.]+)px$/.exec(v)?.[1] ?? NaN));
 }
 
+function subject(selector: string): string {
+  return selector.split(/[\s>+~]+/).filter(Boolean).at(-1) ?? "";
+}
+
+function declaredFor(targets: RegExp, property: string): string[] {
+  const found: string[] = [];
+  for (const { file, text } of everyStylesheet) {
+    for (const m of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const value = declarations(m[2]).get(property);
+      if (value === undefined) continue;
+      const hits = m[1].split(",").map(subject).filter((s) => targets.test(s) && !s.includes("::"));
+      found.push(...hits.map(() => `${file}: ${value}`));
+    }
+  }
+  return found;
+}
+
 function classNames(source: string): string[] {
   const names = new Set<string>();
   for (const m of source.matchAll(/className=(?:"([^"]*)"|\{`([^`]*)`\})/g)) {
@@ -46,6 +74,57 @@ describe("viewer canvas", () => {
     const decl = rule(viewerCss, ".ab-viewer-canvas");
     expect(decl.get("user-select")).toBe("none");
     expect(decl.get("-webkit-user-select")).toBe("none");
+  });
+
+  it("keeps touch panning to the viewer, so a pan drag does not scroll or zoom the page", () => {
+    expect(rule(viewerCss, ".ab-viewer-canvas").get("touch-action")).toBe("none");
+  });
+});
+
+describe("sidebar rail", () => {
+  const RAIL = ".ab-dock-strip[data-workspace-rail]";
+
+  it("declares the rail width and the caption size once, in the rail base of dock.css", () => {
+    expect(declaredFor(/\.ab-dock-strip(?![\w-])/, "width")).toEqual(["components/dock/dock.css: 48px"]);
+    expect(declaredFor(/\.ab-dock-strip-btn(?![\w-])/, "font-size")).toEqual(["components/dock/dock.css: 9px"]);
+  });
+
+  it("shows a thin token-coloured scrollbar on the rails, so a rail with more tools than fit shows that it scrolls", () => {
+    expect(declaredFor(/\.ab-dock-strip(?![\w-])/, "scrollbar-width")).toEqual([]);
+    expect(declaredFor(/\.ab-dock-strip(?![\w-])/, "scrollbar-color")).toEqual([]);
+    expect(rule(dockCss, RAIL).get("overflow-y")).toBe("auto");
+    const scrollbar = rule(dockCss, `${RAIL}::-webkit-scrollbar`);
+    expect(scrollbar.has("display")).toBe(false);
+    const [width] = px(scrollbar.get("width"));
+    expect(width).toBeGreaterThanOrEqual(2);
+    expect(width).toBeLessThanOrEqual(4);
+    expect(rule(dockCss, `${RAIL}::-webkit-scrollbar-thumb`).get("background")).toMatch(/^var\(--ab-[\w-]+\)$/);
+  });
+
+  it("keeps the 44px rail buttons clear of that scrollbar on both rails", () => {
+    const rail = rule(dockCss, RAIL);
+    const [railWidth] = px(rail.get("width"));
+    const [, paddingX] = (rail.get("padding") ?? "").split(/\s+/).map(parseFloat);
+    const [scrollbar] = px(rule(dockCss, `${RAIL}::-webkit-scrollbar`).get("width"));
+    const [button] = px(rule(dockCss, `${RAIL} .ab-dock-strip-btn`).get("width"));
+    for (const [side, edge] of [["left", "border-right"], ["right", "border-left"]]) {
+      const border = parseFloat(rule(dockCss, `${RAIL}[data-side="${side}"]`).get(edge) ?? "");
+      expect(railWidth - border - 2 * paddingX - scrollbar).toBeGreaterThanOrEqual(button);
+    }
+  });
+});
+
+describe("section pills", () => {
+  it.each([".ab-step-pill", ".ab-processing-pill"])("%s leaves the background to the bg- utilities of the active pill", (selector) => {
+    const backgrounds = ruleBodies(indexCss, selector).flatMap((body) => [...declarations(body).keys()].filter((p) => p.startsWith("background")));
+    expect(backgrounds).toEqual([]);
+  });
+
+  it("dims a blocked Compose step that stays focusable, instead of a disabled one", () => {
+    const blocked = rule(indexCss, '.ab-step-pill[aria-disabled="true"]');
+    expect(Number(blocked.get("opacity"))).toBeLessThan(0.6);
+    expect(blocked.get("cursor")).toBe("not-allowed");
+    expect(ruleBody(indexCss, ".ab-step-pill:disabled")).toBeNull();
   });
 });
 

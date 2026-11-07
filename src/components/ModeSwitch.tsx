@@ -1,5 +1,7 @@
 import type { CSSProperties } from "react";
 import type { AppMode } from "../hooks/useAppMode";
+import { isMacPlatform } from "../utils/historyKeys";
+import { modifierKey } from "../utils/shortcutSheet";
 
 interface ModeSwitchProps {
   mode: AppMode;
@@ -15,7 +17,7 @@ const SEGMENT_STYLE: CSSProperties = { padding: "1px 8px", fontSize: 10 };
 const ACTIVE_STYLE: CSSProperties = { ...SEGMENT_STYLE, background: "var(--ab-accent-bg-strong)", color: "var(--ab-accent)" };
 
 export default function ModeSwitch({ mode, onChange }: ModeSwitchProps) {
-  const modifier = navigator.platform?.includes("Mac") ? "⌘" : "Ctrl+";
+  const modifier = modifierKey(isMacPlatform(navigator.platform));
   return (
     <div
       data-testid="mode-switch"

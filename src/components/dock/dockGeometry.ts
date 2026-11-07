@@ -28,12 +28,16 @@ function stripRect(root: HTMLElement, side: DockSide, dock: Rect): Rect {
 }
 
 function groupGeometry(el: HTMLElement, anchor: DockAnchor): StripGroupGeometry {
-  const items: { tool: DockToolId; rect: Rect }[] = [];
+  const items: StripGroupGeometry["items"] = [];
+  let totalItems = 0;
   for (const button of el.querySelectorAll<HTMLElement>("[data-tool-id]")) {
     const tool = button.dataset.toolId;
-    if (isDockToolId(tool)) items.push({ tool, rect: toRect(button.getBoundingClientRect()) });
+    if (!isDockToolId(tool)) continue;
+    const index = totalItems++;
+    const rect = toRect(button.getBoundingClientRect());
+    if (rect.w > 0 && rect.h > 0) items.push({ tool, rect, index });
   }
-  return { anchor, rect: toRect(el.getBoundingClientRect()), items };
+  return { anchor, rect: toRect(el.getBoundingClientRect()), items, totalItems };
 }
 
 export function measureDockGeometry(root: HTMLElement): DockGeometry {
@@ -43,7 +47,7 @@ export function measureDockGeometry(root: HTMLElement): DockGeometry {
     const anchor = el.dataset.dockGroup;
     if (isDockAnchor(anchor) && !groups.some((g) => g.anchor === anchor)) groups.push(groupGeometry(el, anchor));
   }
-  return { dock, leftStrip: stripRect(root, "left", dock), rightStrip: stripRect(root, "right", dock), groups };
+  return { dock, viewportW: window.innerWidth, leftStrip: stripRect(root, "left", dock), rightStrip: stripRect(root, "right", dock), groups };
 }
 
 export function stripShowsFile(root: HTMLElement): boolean {
@@ -56,6 +60,17 @@ interface StripButton {
   scrollIntoView(options?: ScrollIntoViewOptions): void;
 }
 
+export function firstRendered<T extends { getClientRects(): ArrayLike<unknown> }>(candidates: Iterable<T>): T | null {
+  for (const candidate of candidates) if (candidate.getClientRects().length > 0) return candidate;
+  return null;
+}
+
+const RIGHT_RAIL_TOOLS_TRIGGER = '[data-dock-strip="right"] [data-tools-trigger]';
+
+export function rightRailToolsTrigger(root: ParentNode = document): HTMLElement | null {
+  return root.querySelector<HTMLElement>(RIGHT_RAIL_TOOLS_TRIGGER);
+}
+
 export function focusStripButton(button: StripButton | null | undefined): void {
   if (!button) return;
   button.focus({ preventScroll: true });
@@ -65,11 +80,12 @@ export function focusStripButton(button: StripButton | null | undefined): void {
 interface OnboardingAnchor {
   getAttribute(name: string): string | null;
   closest(selector: string): unknown;
+  getClientRects?(): ArrayLike<unknown>;
 }
 
 export function onboardingAnchorReady(anchor: OnboardingAnchor | null | undefined): boolean {
   if (!anchor) return false;
-  return anchor.getAttribute("aria-disabled") !== "true" && anchor.closest("[inert]") === null;
+  return anchor.getAttribute("aria-disabled") !== "true" && anchor.closest("[inert]") === null && (anchor.getClientRects?.().length ?? 1) > 0;
 }
 
 export type AnchorTools = Record<DockAnchor, DockToolId | null>;
@@ -86,6 +102,28 @@ export function nextShown(shown: AnchorTools, open: AnchorTools): AnchorTools {
     if (value !== next[anchor]) next = { ...next, [anchor]: value };
   }
   return next;
+}
+
+export function withActiveTools(seen: ReadonlySet<DockToolId>, active: Readonly<AnchorTools>): ReadonlySet<DockToolId> {
+  let next = seen;
+  for (const anchor of DOCK_ANCHORS) {
+    const tool = active[anchor];
+    if (tool !== null && !next.has(tool)) next = new Set([...next, tool]);
+  }
+  return next;
+}
+
+export interface RailSession {
+  readonly resetCount: number;
+  readonly tools: ReadonlySet<DockToolId>;
+}
+
+const NO_SESSION_TOOLS: ReadonlySet<DockToolId> = new Set();
+
+export function nextRailSession(session: RailSession | null, resetCount: number, active: Readonly<AnchorTools>): RailSession {
+  const current = session?.resetCount === resetCount ? session : null;
+  const tools = withActiveTools(current?.tools ?? NO_SESSION_TOOLS, active);
+  return current !== null && tools === current.tools ? current : { resetCount, tools };
 }
 
 export function settleSide(shown: AnchorTools, open: AnchorTools, anchor: SideAnchor): AnchorTools {

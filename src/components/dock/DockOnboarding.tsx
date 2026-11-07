@@ -17,7 +17,7 @@ import {
   type OnboardingPlacement,
 } from "../../utils/dockOnboarding";
 import { dockOnboardingStore, useDockOnboarding } from "./dockOnboardingStore";
-import { focusStripButton, onboardingAnchorReady } from "./dockGeometry";
+import { firstRendered, focusStripButton, onboardingAnchorReady, rightRailToolsTrigger } from "./dockGeometry";
 import { DockTipPopup } from "./DockTip";
 import { tipAnchorSelector } from "./tipAnchor";
 import { dragStore } from "./useDockDrag";
@@ -53,12 +53,13 @@ interface DemoScene {
 
 const STRIP_SLOT_X = { left: 3.5, right: 228.5 };
 const LEFT_SLOTS = [5, 16, 91];
+const TRIGGER_SLOT_Y = 5;
 const SLOT_SIZE = 8;
 const PILL_HEIGHT = 12;
 
 const DEMO_SCENES: Record<DockOnboardingDemo, DemoScene> = {
   vertical: {
-    rightSlots: [5, 16, 27, 91],
+    rightSlots: [16, 27, 91],
     source: 80,
     target: 38,
     preview: { x: 165.5, y: 0.5, w: 60, h: 103 },
@@ -66,7 +67,7 @@ const DEMO_SCENES: Record<DockOnboardingDemo, DemoScene> = {
     arrow: { line: "M 219 84 L 219 45", head: "M 215.5 48.5 L 219 44.5 L 222.5 48.5" },
   },
   horizontal: {
-    rightSlots: [5, 16, 91],
+    rightSlots: [16, 91],
     source: 27,
     target: 80,
     preview: { x: 120, y: 70, w: 105.5, h: 33.5 },
@@ -99,6 +100,7 @@ function DockOnboardingDemoFrame({ step }: { step: DockOnboardingStep }): React.
       {LEFT_SLOTS.map((y) => (
         <Slot key={`l${y}`} x={STRIP_SLOT_X.left} y={y} />
       ))}
+      <Slot x={STRIP_SLOT_X.right} y={TRIGGER_SLOT_Y} className="ab-dock-onboarding-demo-trigger" />
       {scene.rightSlots.map((y) => (
         <Slot key={`r${y}`} x={STRIP_SLOT_X.right} y={y} />
       ))}
@@ -198,7 +200,7 @@ function samePlacement(a: OnboardingPlacement, b: OnboardingPlacement): boolean 
   return a.left === b.left && a.top === b.top && a.width === b.width && a.maxHeight === b.maxHeight && a.arrow === b.arrow;
 }
 
-function DockOnboardingPopup({ rootRef, step }: DockOnboardingPopupProps): React.ReactNode {
+export function DockOnboardingPopup({ rootRef, step }: DockOnboardingPopupProps): React.ReactNode {
   const titleId = useId();
   const bodyId = useId();
   const cardRef = useRef<HTMLDivElement>(null);
@@ -245,7 +247,10 @@ function DockOnboardingPopup({ rootRef, step }: DockOnboardingPopupProps): React
     dockOnboardingStore.dismiss();
     if (!refocus) return;
     requestAnimationFrame(() => {
-      focusStripButton(rootRef.current?.querySelector<HTMLElement>('[data-dock-strip="right"] [data-tool-id]'));
+      const root = rootRef.current;
+      if (!root) return;
+      const tool = firstRendered(root.querySelectorAll<HTMLElement>('[data-dock-strip="right"] [data-tool-id]'));
+      focusStripButton(tool ?? rightRailToolsTrigger(root));
     });
   };
 
@@ -297,7 +302,8 @@ export default function DockOnboarding({ rootRef, layout, hasFile }: DockOnboard
     const root = rootRef.current;
     dockOnboardingStore.setReady("tour", onboardingAnchorReady(root?.querySelector("[data-dock-viewer]")));
     for (const id of DOCK_TIP_IDS) {
-      dockOnboardingStore.setReady(id, onboardingAnchorReady(root?.querySelector(tipAnchorSelector(DOCK_TIPS[id].tool))));
+      const ready = onboardingAnchorReady(root?.querySelector(tipAnchorSelector(DOCK_TIPS[id].tool)));
+      dockOnboardingStore.setReady(id, id === "settings" ? ready && hasFile : ready);
     }
   });
 

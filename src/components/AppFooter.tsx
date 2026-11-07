@@ -4,6 +4,8 @@ import { AstroLogo } from "./AstroLogo";
 import ModeSwitch from "./ModeSwitch";
 import type { AppMode } from "../hooks/useAppMode";
 import { APP_VERSION } from "../utils/constants";
+import { isMacPlatform } from "../utils/historyKeys";
+import { modifierKey } from "../utils/shortcutSheet";
 
 interface AppFooterProps {
   mode: AppMode;
@@ -14,6 +16,7 @@ interface AppFooterProps {
 }
 
 export default function AppFooter({ mode, onModeChange, onOpenPalette, onOpenShortcuts, children }: AppFooterProps) {
+  const searchKeys = `${modifierKey(isMacPlatform(navigator.platform))}K`;
   return (
     <footer
       data-testid="app-footer"
@@ -38,13 +41,13 @@ export default function AppFooter({ mode, onModeChange, onOpenPalette, onOpenSho
         <button
           type="button"
           onClick={onOpenPalette}
-          title="Search everywhere (Ctrl+K or double Shift)"
+          title={`Search everywhere (${searchKeys} or double Shift)`}
           className="flex items-center gap-1.5 px-2 py-1 rounded text-[10px] transition-colors text-zinc-500 hover:text-zinc-300"
           style={{ background: "transparent", border: "none" }}
         >
           <Search size={10} />
           Search
-          <kbd className="ab-cmdp-kbd">Ctrl+K</kbd>
+          <kbd className="ab-cmdp-kbd">{searchKeys}</kbd>
         </button>
         <button
           type="button"

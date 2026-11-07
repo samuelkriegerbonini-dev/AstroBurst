@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback, useId } from "react";
 import { Search, FileText } from "lucide-react";
+import { firstRendered, focusStripButton, rightRailToolsTrigger } from "./dock/dockGeometry";
 
 export interface PaletteAction {
   id: string;
@@ -72,7 +73,8 @@ export default function CommandPalette({ open, onClose, actions, files, selected
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("keydown", keepFocusInInput, true);
-      if (previous?.isConnected) previous.focus();
+      if (previous?.isConnected && firstRendered([previous])) previous.focus();
+      else focusStripButton(rightRailToolsTrigger());
     };
   }, [open]);
 

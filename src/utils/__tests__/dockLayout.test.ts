@@ -118,9 +118,9 @@ describe("DOCK_TOOL_META", () => {
     expect(new Set(DOCK_TOOL_IDS).size).toBe(DOCK_TOOL_IDS.length);
   });
 
-  it("keeps today's strip labels and panel labels", () => {
+  it("names each tool once for the rail and once for its panel, calling the configuration tool Settings", () => {
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].shortLabel)).toEqual([
-      "Files", "Info", "Comp", "Headers", "Image", "Astro", "Phot", "Cube", "Prep", "SAGUI", "Proc", "Hist", "Masks", "Stack", "Synth", "Export", "Config", "Log",
+      "Files", "Info", "Compose", "Headers", "Image", "Astro", "Phot", "Cube", "Prep", "SAGUI", "Process", "History", "Masks", "Stack", "Synth", "Export", "Settings", "Log",
     ]);
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].label)).toEqual([
       "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Cube", "Cube Prep", "SAGUI", "Processing", "History", "Masks", "Stacking", "Synth", "Export", "Settings", "Log",
@@ -641,24 +641,25 @@ describe("paletteToolEntries", () => {
   it("lists only the tools that open without a file when no file is visible", () => {
     expect(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false).map((entry) => entry.tool)).toEqual(["files", "info", "cubeprep", "sagui", "config", "log"]);
     expect(DOCK_TOOL_IDS.filter((tool) => !DOCK_TOOL_META[tool].needsFile)).toEqual(["files", "info", "cubeprep", "sagui", "config", "log"]);
-    expect(labelOf(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false), "config")).toBe("Open Settings Panel");
+    expect(labelOf(paletteToolEntries(DEFAULT_DOCK_LAYOUT, false), "config")).toBe("Open Settings");
   });
 
   it("lists every tool in order once a file is visible", () => {
     expect(paletteToolEntries(DEFAULT_DOCK_LAYOUT, true).map((entry) => entry.tool)).toEqual([...DOCK_TOOL_IDS]);
   });
 
-  it("says Hide only for a panel on screen", () => {
+  it("says Close only for a tool on screen", () => {
     const withFile = paletteToolEntries(DEFAULT_DOCK_LAYOUT, true);
-    expect(labelOf(withFile, "files")).toBe("Hide Files Panel");
-    expect(labelOf(withFile, "compose")).toBe("Hide Compose Panel");
-    expect(labelOf(withFile, "image")).toBe("Open Image Panel");
-    expect(labelOf(withFile, "config")).toBe("Open Settings Panel");
+    expect(labelOf(withFile, "files")).toBe("Close Files");
+    expect(labelOf(withFile, "compose")).toBe("Close Compose");
+    expect(labelOf(withFile, "image")).toBe("Open Image");
+    expect(labelOf(withFile, "config")).toBe("Open Settings");
+    expect(withFile.every((entry) => !entry.label.includes("Panel"))).toBe(true);
   });
 
-  it("offers to open Log while a file tool holds its group without a file, and to hide it while it is open", () => {
-    expect(labelOf(paletteToolEntries(withActive({ "right-bottom": "export" }), false), "log")).toBe("Open Log Panel");
-    expect(labelOf(paletteToolEntries(withActive({ "right-bottom": "log" }), false), "log")).toBe("Hide Log Panel");
+  it("offers to open Log while a file tool holds its group without a file, and to close it while it is open", () => {
+    expect(labelOf(paletteToolEntries(withActive({ "right-bottom": "export" }), false), "log")).toBe("Open Log");
+    expect(labelOf(paletteToolEntries(withActive({ "right-bottom": "log" }), false), "log")).toBe("Close Log");
   });
 
   it("an entry listed without a file keeps an open Log, or replaces it with its own panel in the same group", () => {

@@ -7,6 +7,7 @@ import {
   activePath,
   backgroundModelLabel,
   branchMarkers,
+  chainStepLabel,
   compareLabelsFor,
   compositeCrumbLabelFor,
   crumbLabelFor,
@@ -240,6 +241,18 @@ describe("node mapping", () => {
     expect(opNameLabel("lhe")).toBe("LHE");
     expect(opNameLabel("hdrmt")).toBe("HDRMT");
     expect(opNameLabel("background")).toBe("Background Extraction");
+  });
+
+  it("names a chain step that records no op by the label History gives its default tool", () => {
+    expect(chainStepLabel("background")).toBe(opNameLabel("background"));
+    expect(chainStepLabel("denoise")).toBe(opNameLabel("wavelet_denoise"));
+    expect(chainStepLabel("deconv")).toBe(opNameLabel("rl_deconv"));
+    expect(chainStepLabel("stretch")).toBe(opNameLabel("arcsinh"));
+    expect(chainStepLabel("maskedStretch")).toBe(opNameLabel("masked_stretch"));
+    expect(chainStepLabel("localContrast")).toBe(`${opNameLabel("lhe")} / ${opNameLabel("hdrmt")}`);
+    expect(chainStepLabel("localContrast")).toBe("LHE / HDRMT");
+    expect(chainStepLabel("tone")).toBe(opNameLabel("tone"));
+    expect(chainStepLabel("pixelMath")).toBe(opNameLabel("pixelmath"));
   });
 
   it("names a crumb by the tool that made its step, and by the step when no node says which", () => {

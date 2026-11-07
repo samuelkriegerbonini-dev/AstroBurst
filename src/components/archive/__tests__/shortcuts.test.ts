@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ARCHIVE_SHORTCUTS } from "../logic/shortcuts";
+import { archiveShortcuts } from "../logic/shortcuts";
 
-describe("ARCHIVE_SHORTCUTS", () => {
-  const keys = ARCHIVE_SHORTCUTS.map((s) => s.keys);
+describe("archiveShortcuts", () => {
+  const keys = archiveShortcuts(false).map((s) => s.keys);
 
   it.each([
-    "Ctrl+1 / Ctrl+2",
     "/ or Ctrl+F",
     "Enter",
     "Esc",
@@ -32,8 +31,19 @@ describe("ARCHIVE_SHORTCUTS", () => {
     expect(keys).toContain(k);
   });
 
-  it("describes every entry and repeats no key", () => {
-    expect(ARCHIVE_SHORTCUTS.every((s) => s.desc.length > 0)).toBe(true);
-    expect(new Set(keys).size).toBe(keys.length);
+  it("leaves the workspace switch to the General group", () => {
+    expect(keys).not.toContain("Ctrl+1 / Ctrl+2");
+  });
+
+  it("names the Command keys on macOS", () => {
+    expect(archiveShortcuts(true).map((s) => s.keys)).toEqual(
+      expect.arrayContaining(["/ or ⌘F", "⌘Home / ⌘End", "⌘C", "⇧⌘C"]),
+    );
+  });
+
+  it.each([false, true])("describes every entry and repeats no key (mac %s)", (mac) => {
+    const shortcuts = archiveShortcuts(mac);
+    expect(shortcuts.every((s) => s.desc.length > 0)).toBe(true);
+    expect(new Set(shortcuts.map((s) => s.keys)).size).toBe(shortcuts.length);
   });
 });

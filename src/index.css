@@ -504,12 +504,11 @@ img,
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, opacity 150ms ease, transform 150ms ease, filter 150ms ease;
   white-space: nowrap;
   cursor: pointer;
-  background: none;
   border: none;
   position: relative;
 }
 
-.ab-step-pill:disabled {
+.ab-step-pill[aria-disabled="true"] {
   opacity: 0.3;
   cursor: not-allowed;
 }
@@ -566,7 +565,6 @@ img,
   position: relative;
   cursor: pointer;
   border: none;
-  background: none;
 }
 
 .ab-processing-pill-dot {
@@ -785,86 +783,6 @@ img,
   border-color: var(--ab-accent);
 }
 
-.ab-dock-strip {
-  width: 42px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 4px 0;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  scrollbar-width: none;
-}
-
-.ab-dock-strip::-webkit-scrollbar {
-  display: none;
-}
-
-.ab-dock-strip[data-side="left"] {
-  border-right: 1px solid var(--ab-border);
-  background: rgba(5, 5, 16, 0.6);
-}
-
-.ab-dock-strip[data-side="right"] {
-  border-left: 1px solid var(--ab-border);
-  background: rgba(5, 5, 16, 0.5);
-}
-
-.ab-dock-group {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  width: 100%;
-  border-radius: var(--ab-radius-sm);
-  transition: background-color 0.12s ease;
-}
-
-.ab-dock-strip-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 1px;
-  padding: 6px 2px;
-  border-radius: var(--ab-radius-sm);
-  font-size: 9px;
-  color: #8b8b94;
-  cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease, transform 0.15s ease, filter 0.15s ease;
-  border: 1px solid transparent;
-  background: transparent;
-  width: 38px;
-  line-height: 1;
-  letter-spacing: 0.02em;
-}
-
-.ab-dock-strip-btn:focus-visible {
-  outline-offset: -2px;
-}
-
-.ab-dock-strip-btn:hover {
-  color: #a1a1aa;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.ab-dock-strip-btn-active {
-  color: var(--strip-accent, var(--ab-accent));
-  background: var(--ab-bg-active);
-}
-
-.ab-dock-strip-btn[aria-disabled="true"] {
-  opacity: 0.35;
-  cursor: default;
-}
-
-.ab-dock-strip-btn[aria-disabled="true"]:hover {
-  color: #8b8b94;
-  background: transparent;
-}
-
 .ab-dock-host {
   height: 100%;
   overflow: auto;
@@ -1038,5 +956,6 @@ img,
   *::after {
     animation: none !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
   }
 }

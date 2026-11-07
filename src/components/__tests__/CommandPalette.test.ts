@@ -1,7 +1,25 @@
-import { describe, expect, it } from "vitest";
-import { createElement } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+
+vi.mock("react", async (importOriginal) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
+
+import { hooks } from "../../test/hookRuntime";
 import CommandPalette from "../CommandPalette";
+
+type AnyElement = ReactElement<Record<string, unknown> & { children?: ReactNode }>;
+
+function elements(node: ReactNode): AnyElement[] {
+  if (Array.isArray(node)) return node.flatMap(elements);
+  if (!isValidElement(node)) return [];
+  const el = node as AnyElement;
+  return [el, ...elements(el.props.children)];
+}
+
+afterEach(() => {
+  hooks.mount();
+  vi.unstubAllGlobals();
+});
 
 function renderPalette(open: boolean): string {
   return renderToStaticMarkup(
@@ -59,5 +77,122 @@ describe("CommandPalette accessibility", () => {
   it("keeps the rows out of the tab order so Tab stays in the input", () => {
     const html = renderPalette(true);
     expect(html.match(/role="option"[^>]*tabindex="-1"/g)).toHaveLength(3);
+  });
+});
+
+describe("CommandPalette running an entry", () => {
+  it("closes before it runs the chosen entry, so an entry can reopen the palette to ask for a confirmation", () => {
+    vi.stubGlobal("window", { addEventListener: () => {}, removeEventListener: () => {} });
+    vi.stubGlobal("document", { activeElement: null, querySelector: () => null });
+    vi.stubGlobal("HTMLElement", class {});
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    const calls: string[] = [];
+    hooks.mount();
+    const tree = hooks.render(CommandPalette, {
+      open: true,
+      onClose: () => calls.push("close"),
+      actions: [{ id: "new-batch", label: "New Batch (discard processed files)", run: () => calls.push("run") }],
+      files: [],
+      selectedId: null,
+      onSelectFile: () => {},
+    }) as ReactNode;
+    const option = elements(tree).find((el) => el.props.role === "option");
+    (option?.props.onClick as () => void)();
+    expect(calls).toEqual(["close", "run"]);
+  });
+});
+
+describe("CommandPalette returning focus", () => {
+  const TOOLS_TRIGGER = '[data-dock-strip="right"] [data-tools-trigger]';
+
+  class FakeElement {}
+
+  interface Page {
+    activeElement: unknown;
+    body?: unknown;
+  }
+
+  function focusable(page: Page, name: string) {
+    let rendered = true;
+    const element = Object.assign(new FakeElement(), {
+      name,
+      isConnected: true,
+      getClientRects: () => (rendered ? [{}] : []),
+      closest: () => ({}),
+      scrollIntoView: vi.fn(),
+      focus: vi.fn(() => {
+        if (element.isConnected && rendered) page.activeElement = element;
+      }),
+      hide() {
+        rendered = false;
+      },
+      remove() {
+        rendered = false;
+        element.isConnected = false;
+      },
+    });
+    return element;
+  }
+
+  function stubPage() {
+    const page: Page = { activeElement: null };
+    const body = focusable(page, "body");
+    const trigger = focusable(page, "All tools trigger");
+    page.body = body;
+    page.activeElement = body;
+    vi.stubGlobal("window", { addEventListener: () => {}, removeEventListener: () => {} });
+    vi.stubGlobal("document", Object.assign(page, { querySelector: (selector: string) => (selector === TOOLS_TRIGGER ? trigger : null) }));
+    vi.stubGlobal("HTMLElement", FakeElement);
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    return { page, trigger };
+  }
+
+  const palette = (open: boolean) => ({
+    open,
+    onClose: () => {},
+    actions: [{ id: "reset-layout", label: "Reset layout", run: () => {} }],
+    files: [],
+    selectedId: null,
+    onSelectFile: () => {},
+  });
+
+  function openThenClose(page: Page, whileOpen: () => void = () => {}): void {
+    hooks.mount();
+    hooks.render(CommandPalette, palette(true));
+    page.activeElement = page.body;
+    whileOpen();
+    hooks.render(CommandPalette, palette(false));
+  }
+
+  const focusedName = (page: Page) => (page.activeElement as { name: string }).name;
+
+  it("gives focus back to the element that had it before the palette opened while that element is still shown", () => {
+    const { page, trigger } = stubPage();
+    page.activeElement = focusable(page, "Stacking rail button");
+    openThenClose(page);
+    expect(focusedName(page)).toBe("Stacking rail button");
+    expect(trigger.focus).not.toHaveBeenCalled();
+  });
+
+  it("leaves focus on the page body when nothing had focus before the palette opened", () => {
+    const { page, trigger } = stubPage();
+    openThenClose(page);
+    expect(focusedName(page)).toBe("body");
+    expect(trigger.focus).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["hid it", false],
+    ["moved it to another group", true],
+  ])("falls back to the right rail's All tools trigger when Reset layout %s", (_change, moved) => {
+    const { page, trigger } = stubPage();
+    const stacking = focusable(page, "Stacking rail button");
+    page.activeElement = stacking;
+    openThenClose(page, () => (moved ? stacking.remove() : stacking.hide()));
+    expect(focusedName(page)).toBe("All tools trigger");
+    expect(trigger.focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(trigger.scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
   });
 });

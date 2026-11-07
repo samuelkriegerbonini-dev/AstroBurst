@@ -7,6 +7,7 @@ import {
   parseDockLayout,
   serializeDockLayout,
 } from "../utils/dockPersistence";
+import { toolShortcutsStore } from "./useToolShortcuts";
 
 function loadInitial(): DockLayout {
   try {
@@ -66,6 +67,7 @@ export const dockStore = {
         localStorage.removeItem(key);
       } catch { }
     }
+    toolShortcutsStore.reset();
   },
 };
 

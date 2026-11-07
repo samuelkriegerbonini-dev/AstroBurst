@@ -1,5 +1,7 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { LayoutGrid } from "lucide-react";
 import {
+  anchorOpenTool,
   DOCK_TOOL_META,
   type DockAnchor,
   type DockLayout,
@@ -12,6 +14,7 @@ import { stripButtonHint } from "../../utils/dockOnboarding";
 import { DOCK_TOOLS } from "./toolRegistry";
 import { dockOnboardingStore } from "./dockOnboardingStore";
 import { useDockDragState, type StripButtonDragProps } from "./useDockDrag";
+import { toolCategoryColor } from "../../utils/toolCatalog";
 
 export interface StripeProps {
   side: DockSide;
@@ -19,6 +22,9 @@ export interface StripeProps {
   hasFile: boolean;
   buttonProps(tool: DockToolId, anchor: DockAnchor, index: number): StripButtonDragProps;
   onContextMenu(tool: DockToolId, button: HTMLButtonElement): void;
+  compact?: boolean;
+  enabledTools?: readonly DockToolId[];
+  onBrowseTools?(): void;
 }
 
 const GROUPS: Record<DockSide, [DockAnchor, DockAnchor]> = {
@@ -61,20 +67,24 @@ function LogStripCount({ children }: { children(label: string, badge: ReactNode)
   );
 }
 
-export default function Stripe({ side, layout, hasFile, buttonProps, onContextMenu }: StripeProps) {
+export default function Stripe({ side, layout, hasFile, buttonProps, onContextMenu, compact = false, enabledTools, onBrowseTools }: StripeProps) {
   const drag = useDockDragState();
+  const [focusedTool, setFocusedTool] = useState<DockToolId | null>(null);
   const targetAnchor = drag?.target?.anchor ?? null;
+  const shortcutShown = (tool: DockToolId, anchor: DockAnchor) =>
+    enabledTools === undefined || enabledTools.includes(tool) || layout.active[anchor] === tool || tool === focusedTool;
 
   const renderButton = (tool: DockToolId, anchor: DockAnchor, index: number, label: string, badge: ReactNode) => {
     const meta = DOCK_TOOL_META[tool];
     const Icon = DOCK_TOOLS[tool].icon;
-    const isActive = layout.active[anchor] === tool;
+    const isActive = anchorOpenTool(layout, anchor, hasFile) === tool;
     const disabled = meta.needsFile && !hasFile;
     return (
       <button
         key={tool}
         type="button"
         data-tool-id={tool}
+        data-shortcut-visible={shortcutShown(tool, anchor) ? "true" : "false"}
         data-anchor={anchor}
         data-dragging={drag?.tool === tool ? "true" : undefined}
         aria-pressed={isActive}
@@ -83,8 +93,10 @@ export default function Stripe({ side, layout, hasFile, buttonProps, onContextMe
         title={stripButtonHint(label, { open: isActive, disabled })}
         aria-label={label}
         className={`ab-dock-strip-btn${isActive ? " ab-dock-strip-btn-active" : ""}${badge ? " relative" : ""}`}
-        style={isActive ? ({ "--strip-accent": meta.accent } as React.CSSProperties) : undefined}
+        style={onBrowseTools ? ({ "--strip-accent": toolCategoryColor(tool) } as React.CSSProperties) : isActive ? ({ "--strip-accent": meta.accent } as React.CSSProperties) : undefined}
         {...buttonProps(tool, anchor, index)}
+        onFocus={() => setFocusedTool(tool)}
+        onBlur={() => setFocusedTool((current) => (current === tool ? null : current))}
         onClick={() => {
           if (disabled) return;
           dockStore.dispatch({ type: "toggle", tool });
@@ -123,14 +135,23 @@ export default function Stripe({ side, layout, hasFile, buttonProps, onContextMe
   );
 
   const [top, bottom] = GROUPS[side];
+  const railEmpty = [top, bottom].every((anchor) => !layout.anchors[anchor].some((tool) => !compact || shortcutShown(tool, anchor)));
   return (
     <div
       className="ab-dock-strip"
       data-side={side}
       data-dock-strip={side}
+      data-workspace-rail={onBrowseTools ? "" : undefined}
+      data-compact={compact ? "true" : "false"}
       role="group"
       aria-label={side === "left" ? "Left tools" : "Right tools"}
+      onContextMenu={(e) => e.preventDefault()}
     >
+      {onBrowseTools && (side === "right" || railEmpty) && (
+        <button type="button" data-tools-trigger="" className="ab-dock-strip-btn ab-tool-browser-trigger" onClick={onBrowseTools} title="Browse all tools" aria-label="Browse all tools" aria-haspopup="dialog">
+          <LayoutGrid size={17} /><span>All tools</span>
+        </button>
+      )}
       {renderGroup(top)}
       <div className="flex-1" />
       {renderGroup(bottom)}

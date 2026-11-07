@@ -31,4 +31,8 @@ describe("reduced motion in index.css", () => {
   it("keeps transitions short instead of removing them, because the dock waits for transitionend", () => {
     expect(universalRule()).toMatch(/transition-duration:\s*0\.01ms\s*!important/);
   });
+
+  it("drops transition delays, so a delayed highlight such as the resize handle's shows at once", () => {
+    expect(universalRule()).toMatch(/transition-delay:\s*0s\s*!important/);
+  });
 });

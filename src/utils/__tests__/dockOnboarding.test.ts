@@ -103,19 +103,19 @@ describe("dock onboarding move detection", () => {
 
 describe("dock onboarding content", () => {
   it("has the owner's title and tip", () => {
-    expect(DOCK_ONBOARDING_TITLE).toBe("Arrange your tool windows");
-    expect(DOCK_ONBOARDING_TIP).toBe("Right-click a tool (or Shift+F10) for Move to…, and Reset Layout puts everything back.");
+    expect(DOCK_ONBOARDING_TITLE).toBe("Arrange your sidebar tools");
+    expect(DOCK_ONBOARDING_TIP).toBe("Right-click a tool (or Shift+F10) for Move to…, and Reset layout puts everything back.");
   });
 
   it("has two steps, vertical then horizontal, with the verbatim texts", () => {
     expect(DOCK_ONBOARDING_STEPS.map((s) => s.demo)).toEqual(["vertical", "horizontal"]);
     expect(DOCK_ONBOARDING_STEPS[0].title).toBe("Drag vertically");
     expect(DOCK_ONBOARDING_STEPS[0].body).toBe(
-      "Drag any tool icon from a side strip and drop it on the top half of either strip. The tool opens as a full-height column beside the viewer.",
+      "Drag any tool icon from a sidebar and drop it on the top half of either sidebar. The tool opens as a full-height column beside the viewer.",
     );
     expect(DOCK_ONBOARDING_STEPS[1].title).toBe("Drag horizontally");
     expect(DOCK_ONBOARDING_STEPS[1].body).toBe(
-      "Drop it on the bottom half of a strip instead to open it under the viewer. Two bottom tools sit side by side.",
+      "Drop it on the bottom half of a sidebar instead to open it under the viewer. Two bottom tools sit side by side.",
     );
   });
 
@@ -234,16 +234,16 @@ describe("dock tips content and keys", () => {
       id: "toggle",
       tool: "compose",
       title: "Open and close tools",
-      body: "Click any tool in this bar to open it, and click it again to close it.",
+      body: "Click any tool in the sidebar to open it, and click it again to close it.",
     });
   });
 
-  it("has the settings tip on Config naming the Settings sections", () => {
+  it("has the settings tip on the Settings tool naming what it holds", () => {
     expect(DOCK_TIPS.settings).toEqual({
       id: "settings",
       tool: "config",
       title: "Settings",
-      body: "Click Config for the settings: astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close them.",
+      body: "Click Settings for the astrometry.net API key, plate solving, catalogs, archive downloads and output storage. Click it again to close it.",
     });
     expect(DOCK_TIPS.settings.body).toContain(`Click ${DOCK_TOOL_META.config.shortLabel} `);
   });

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { prerender } from "react-dom/static";
+import { renderToStaticMarkup } from "react-dom/server";
 import { CompositeProvider } from "../../../context/CompositeContext";
 import { ComposeWizardProvider } from "../../../context/ComposeWizardContext";
-import { PreviewProvider } from "../../../context/PreviewContext";
+import { PreviewProvider, fileKeyOf, useRenderActions } from "../../../context/PreviewContext";
 import ProcessingTab from "../ProcessingTab";
 import type { ProcessedFile } from "../../../shared/types";
+import type { ChainStep } from "../../../shared/types/preview";
 
 const FILE: ProcessedFile = {
   id: "groups",
@@ -41,14 +43,33 @@ interface Pill {
   label: string;
 }
 
-async function renderTab(): Promise<string> {
+async function renderTab(file: ProcessedFile = FILE): Promise<string> {
   const tree = createElement(CompositeProvider, {
     children: createElement(ComposeWizardProvider, {
-      children: createElement(PreviewProvider, { file: FILE, doneFiles: [FILE], children: createElement(ProcessingTab) }),
+      children: createElement(PreviewProvider, { file, doneFiles: [file], children: createElement(ProcessingTab) }),
     }),
   });
   const { prelude } = await prerender(tree);
   return new Response(prelude).text();
+}
+
+function publishStep(file: ProcessedFile, step: ChainStep): void {
+  const key = fileKeyOf(file) as string;
+  const entry = { fitsPath: `C:/out/${step}.fits`, previewUrl: null, dimensions: [64, 64] as [number, number] };
+  function Publisher() {
+    useRenderActions().setChain(key, (c) => ({ ...c, steps: { ...c.steps, [step]: entry } }));
+    return null;
+  }
+  const preview = createElement(PreviewProvider, { file: null, doneFiles: [], children: createElement(Publisher) });
+  renderToStaticMarkup(createElement(CompositeProvider, { children: preview }));
+}
+
+function pillTags(html: string): [string, string][] {
+  return [...html.matchAll(/<button[^>]*data-processing-section="([^"]+)"[^>]*>/g)].map((m) => [m[1], m[0]]);
+}
+
+function pillContent(html: string, section: string): string {
+  return new RegExp(String.raw`<button[^>]*data-processing-section="${section}"[^>]*>([\s\S]*?)</button>`).exec(html)?.[1] ?? "";
 }
 
 function pillsOf(html: string): Pill[] {
@@ -93,5 +114,24 @@ describe("ProcessingTab tool groups", () => {
     for (const [section, title] of Object.entries(CARD_TITLES)) {
       expect(pills.find((p) => p.section === section)?.title).toBe(title);
     }
+  });
+});
+
+describe("ProcessingTab section state for assistive technology", () => {
+  it("marks only the open section as current, without toggle-button semantics", async () => {
+    const tags = pillTags(await renderTab());
+    expect(tags).toHaveLength(12);
+    expect(tags.filter(([, tag]) => tag.includes('aria-current="true"')).map(([section]) => section)).toEqual(["background"]);
+    expect(tags.filter(([, tag]) => tag.includes("aria-pressed"))).toEqual([]);
+  });
+
+  it("says in text that a section has a result, next to the dot that only shows it", async () => {
+    const file = { ...FILE, id: "groups-result-dot" };
+    publishStep(file, "background");
+    const html = await renderTab(file);
+    const background = pillContent(html, "background");
+    expect(background).toMatch(/<span class="ab-processing-pill-dot[^"]*" title="Has a result in this chain"><\/span>/);
+    expect(background).toContain('<span class="sr-only">, has a result in this chain</span>');
+    expect(pillContent(html, "denoise")).not.toContain("sr-only");
   });
 });

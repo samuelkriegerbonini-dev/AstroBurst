@@ -15,8 +15,9 @@ import {
   type DockToolId,
 } from "../../utils/dockLayout";
 import { announce, commitDockMove, moveAnnouncement } from "./useDockDrag";
-import { focusStripButton } from "./dockGeometry";
+import { firstRendered, focusStripButton, rightRailToolsTrigger } from "./dockGeometry";
 import { dockOnboardingStore } from "./dockOnboardingStore";
+import { toolBrowserStore } from "./toolBrowserStore";
 import "./dock.css";
 
 export interface DockMenuRequest {
@@ -26,6 +27,7 @@ export interface DockMenuRequest {
 
 interface DockContextMenuProps {
   request: DockMenuRequest | null;
+  enabledTools?: readonly DockToolId[];
   onClose(): void;
 }
 
@@ -36,6 +38,7 @@ interface DockMenuListProps {
   count: number;
   onMove(anchor: DockAnchor): void;
   onReorder(delta: -1 | 1): void;
+  onBrowseTools(): void;
   onReset(): void;
   onShowTips(): void;
   onClose(): void;
@@ -66,9 +69,9 @@ function focusIndex(key: string, current: number, count: number): number | null 
   }
 }
 
-export function DockMenuList({ tool, anchor, index, count, onMove, onReorder, onReset, onShowTips, onClose, id }: DockMenuListProps): React.JSX.Element {
+export function DockMenuList({ tool, anchor, index, count, onMove, onReorder, onBrowseTools, onReset, onShowTips, onClose, id }: DockMenuListProps): React.JSX.Element {
   const upDisabled = index <= 0;
-  const downDisabled = index >= count - 1;
+  const downDisabled = index < 0 || index >= count - 1;
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     e.stopPropagation();
@@ -148,13 +151,17 @@ export function DockMenuList({ tool, anchor, index, count, onMove, onReorder, on
         Move down
       </button>
       <div role="separator" className="my-1 h-px bg-zinc-800" />
+      <button type="button" role="menuitem" aria-haspopup="dialog" tabIndex={-1} onClick={onBrowseTools} className={ITEM_CLASS}>
+        <span className="w-3" />
+        All tools
+      </button>
       <button type="button" role="menuitem" tabIndex={-1} onClick={onReset} className={ITEM_CLASS}>
         <span className="w-3" />
         Reset layout
       </button>
       <button type="button" role="menuitem" tabIndex={-1} onClick={onShowTips} className={ITEM_CLASS}>
         <span className="w-3" />
-        Show tool window tips
+        Show sidebar tips
       </button>
     </div>
   );
@@ -172,19 +179,24 @@ function menuPosition(trigger: DOMRect, side: DockSide, height: number): { left:
   };
 }
 
+function railFocusTarget(tool: DockToolId, trigger: HTMLButtonElement): HTMLElement | null {
+  const toolButtons = document.querySelectorAll<HTMLElement>(`[data-dock-root] [data-tool-id="${tool}"]`);
+  return firstRendered([trigger, ...toolButtons]) ?? rightRailToolsTrigger();
+}
+
 function returnFocus(tool: DockToolId, trigger: HTMLButtonElement): void {
   const active = document.activeElement;
   if (active !== null && active !== document.body && active.isConnected) return;
-  const target = trigger.isConnected ? trigger : document.querySelector<HTMLElement>(`[data-dock-root] [data-tool-id="${tool}"]`);
-  focusStripButton(target);
+  focusStripButton(railFocusTarget(tool, trigger));
 }
 
-function DockMenuPopup({ request, onClose }: { request: DockMenuRequest; onClose(): void }): React.ReactNode {
+function DockMenuPopup({ request, enabledTools, onClose }: { request: DockMenuRequest; enabledTools?: readonly DockToolId[]; onClose(): void }): React.ReactNode {
   const { tool, trigger } = request;
   const layout = useDockLayout();
   const anchor = anchorOf(layout, tool);
-  const index = indexOf(layout, tool);
-  const count = layout.anchors[anchor].length;
+  const visibleTools = layout.anchors[anchor].filter((id) => id === tool || enabledTools === undefined || enabledTools.includes(id) || layout.active[anchor] === id);
+  const index = visibleTools.indexOf(tool);
+  const count = visibleTools.length;
   const side = anchorSide(anchor);
   const menuId = useId();
   const boxRef = useRef<HTMLDivElement>(null);
@@ -256,15 +268,23 @@ function DockMenuPopup({ request, onClose }: { request: DockMenuRequest; onClose
   };
 
   const onReorder = (delta: -1 | 1) => {
+    const neighbor = visibleTools[index + delta];
+    if (index < 0 || neighbor === undefined) return;
     const before = dockStore.get();
-    dockStore.dispatch({ type: "reorder", anchor, from: index, to: index + delta });
+    dockStore.dispatch({ type: "reorder", anchor, from: indexOf(before, tool), to: indexOf(before, neighbor) });
     reportMove(before);
+    close();
+  };
+
+  const onBrowseTools = () => {
+    focusStripButton(rightRailToolsTrigger() ?? railFocusTarget(tool, trigger));
+    toolBrowserStore.open();
     close();
   };
 
   const onReset = () => {
     dockStore.resetAll();
-    announce("Layout reset");
+    announce("Layout and sidebar shortcuts reset");
     close();
   };
 
@@ -283,6 +303,7 @@ function DockMenuPopup({ request, onClose }: { request: DockMenuRequest; onClose
         count={count}
         onMove={onMove}
         onReorder={onReorder}
+        onBrowseTools={onBrowseTools}
         onReset={onReset}
         onShowTips={onShowTips}
         onClose={close}
@@ -292,7 +313,7 @@ function DockMenuPopup({ request, onClose }: { request: DockMenuRequest; onClose
   );
 }
 
-export default function DockContextMenu({ request, onClose }: DockContextMenuProps): React.ReactNode {
+export default function DockContextMenu({ request, enabledTools, onClose }: DockContextMenuProps): React.ReactNode {
   if (request === null) return null;
-  return <DockMenuPopup key={request.tool} request={request} onClose={onClose} />;
+  return <DockMenuPopup key={request.tool} request={request} enabledTools={enabledTools} onClose={onClose} />;
 }
