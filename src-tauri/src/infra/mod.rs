@@ -5,6 +5,7 @@ pub mod config;
 pub mod fits;
 pub mod image_source;
 pub mod ipc;
+pub mod paths;
 pub mod progress;
 pub mod render;
 pub mod asdf;

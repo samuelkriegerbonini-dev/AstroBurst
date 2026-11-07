@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::{Extension, Json};
 use serde_json::{json, Value};
 
+use astroburst_lib::infra::paths::plain;
 use astroburst_lib::service::cubeprep::filter_registry;
 use astroburst_lib::service::cubeprep_recipe::{run_recipe, Recipe, FILE_NOT_FOUND};
 use astroburst_lib::types::error::CodedError;
@@ -44,14 +45,14 @@ pub(crate) async fn run(
         let paths = recipe.paths().into_iter().map(str::to_owned).collect();
         confine(&science.cfg, paths).await?;
     }
-    let (recipe, found) = tokio::task::spawn_blocking(move || {
-        recipe.validate()?;
+    let (recipe, found, advisories) = tokio::task::spawn_blocking(move || {
+        let advisories = recipe.validate()?;
         let found = if guarded {
             recipe.empirical_files()?
         } else {
             Vec::new()
         };
-        Ok::<_, CodedError>((recipe, found))
+        Ok::<_, CodedError>((recipe, found, advisories))
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))?
@@ -80,26 +81,8 @@ pub(crate) async fn run(
     if let Some(job_id) = accepted["job_id"].as_str().map(str::to_owned) {
         accepted["output_dir"] = json!(output_dir(&output_root, &job_id).to_string_lossy());
     }
+    accepted["warnings"] = json!(advisories);
     Ok((status, Json(accepted)))
-}
-
-#[cfg(windows)]
-fn plain(path: &Path) -> PathBuf {
-    use std::path::{Component, Prefix};
-
-    match (path.components().next(), path.to_str()) {
-        (Some(Component::Prefix(prefix)), Some(text))
-            if matches!(prefix.kind(), Prefix::VerbatimDisk(_)) =>
-        {
-            PathBuf::from(&text[4..])
-        }
-        _ => path.to_path_buf(),
-    }
-}
-
-#[cfg(not(windows))]
-fn plain(path: &Path) -> PathBuf {
-    path.to_path_buf()
 }
 
 fn output_dir(root: &Path, job_id: &str) -> PathBuf {

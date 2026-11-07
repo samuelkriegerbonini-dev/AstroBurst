@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
@@ -21,6 +24,7 @@ use crate::core::imaging::psf_estimation::EmpiricalPsfOptions;
 use crate::core::history::stamp::{file_stamp, utc_timestamp};
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::metadata::units::{AreaRule, TargetUnit};
+use crate::infra::paths::plain;
 use crate::infra::progress::ProgressHandle;
 use crate::service::cubeprep::{
     align_set, build_cube, build_kernels, convert_units_file, crop_set, edit_cube, filter_registry, load_psfs, psf_match_cube,
@@ -34,6 +38,7 @@ use crate::types::error::{AppError, CodedError};
 pub const RECIPE_VERSION: u64 = 1;
 pub const RECIPE_FILE: &str = "recipe.json";
 pub const RESULT_FILE: &str = "result.json";
+pub const FAILURE_FILE: &str = "failure.json";
 const RUN_LOCK: &str = ".cubeprep.lock";
 pub const STEPS: [&str; 9] = ["units", "crop", "align", "cube", "edit", "psfs", "kernels", "match", "export"];
 
@@ -46,6 +51,13 @@ pub const FILE_NOT_FOUND: &str = "file_not_found";
 
 const DEFAULT_CUBE_OUTPUT: &str = "cube.fits";
 const DEFAULT_BORDER_CROP: usize = 1;
+const HASH_BLOCK: usize = 8 * 1024 * 1024;
+const HASH_WORKERS: usize = 4;
+const HASHING_INPUTS: &str = "hashing_inputs";
+const VERIFYING_INPUTS: &str = "verifying_inputs";
+const HASHING_PRODUCTS: &str = "hashing_products";
+const PUBLISHING: &str = "publishing";
+const PANIC: &str = "panic";
 const KERNEL_MISSING_HINT: &str =
     "give a PSF for every filter of the cube in the psfs step, or set allow_unmatched to true in the match step to copy those planes unmatched";
 
@@ -140,6 +152,8 @@ pub struct PsfsStep {
     pub reference: Option<String>,
     #[serde(default)]
     pub pixel_scale_arcsec: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recentre: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -373,7 +387,7 @@ fn same(a: &str, b: &str) -> bool {
 
 fn resolve(base: &Path, path: &mut String) {
     if !Path::new(path.as_str()).is_absolute() {
-        *path = base.join(path.as_str()).to_string_lossy().into_owned();
+        *path = plain(&base.join(path.as_str())).to_string_lossy().into_owned();
     }
 }
 
@@ -492,7 +506,7 @@ impl Recipe {
         Ok(files)
     }
 
-    pub fn validate(&self) -> Result<(), CodedError> {
+    pub fn validate(&self) -> Result<Vec<String>, CodedError> {
         let mut filters: Vec<&str> = Vec::new();
         for (index, input) in self.inputs.iter().enumerate() {
             let place = format!("inputs[{index}]");
@@ -528,8 +542,40 @@ impl Recipe {
         for (index, step) in self.steps.iter().enumerate() {
             validate_step(&format!("steps[{index}] ({})", step.kind()), step, &filters, &mut planned)?;
         }
-        Ok(())
+        Ok(cut_before_match(&self.steps))
     }
+}
+
+fn step_folder(index: usize, step: &RecipeStep) -> String {
+    format!("{:02}_{}", index + 1, step.kind())
+}
+
+fn cut_before_match(steps: &[RecipeStep]) -> Vec<String> {
+    let mut cut = None;
+    let mut kernel_half_width = None;
+    let mut warnings = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        match step {
+            RecipeStep::Edit(CubeEdit::Cut { .. } | CubeEdit::CutSky { .. }) => cut = Some(step_folder(index, step)),
+            RecipeStep::Kernels(kernels) => {
+                kernel_half_width = match kernels.options.method {
+                    KernelMethod::Wiener { shape: KernelShape::Fixed([rows, cols]), .. } => Some(rows.max(cols) / 2),
+                    _ => None,
+                };
+            }
+            RecipeStep::Match(_) => {
+                if let Some(cut) = &cut {
+                    let band = kernel_half_width.map_or_else(|| "half a kernel width".to_string(), |px| format!("{px} px"));
+                    warnings.push(format!(
+                        "{}: {cut} cuts the cube before the match; pixels within {band} of the cut edges are matched against zeros; place the cut after match to use the cut-away data",
+                        step_folder(index, step)
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    warnings
 }
 
 fn input_filter<'a>(place: &str, filters: &[&'a str], wanted: &str) -> Result<&'a str, CodedError> {
@@ -664,7 +710,7 @@ fn validate_step<'a>(place: &str, step: &'a RecipeStep, filters: &[&'a str], pla
                 }
                 if let KernelShape::Fixed(sides) = shape {
                     if sides.iter().any(|side| side % 2 == 0) {
-                        return Err(invalid(format!("{place}: shape must be reference or two odd integers")));
+                        return Err(invalid(format!("{place}: shape must be reference, max or two odd integers")));
                     }
                 }
             }
@@ -917,7 +963,7 @@ impl Run {
             target_pixel_scale_arcsec: psfs.pixel_scale_arcsec,
             reference: psfs.pixel_scale_arcsec.and(psfs.reference.clone()),
             method: PsfResampleMethod::Lightstack,
-            recentre: false,
+            recentre: psfs.recentre.unwrap_or(false),
         };
         let set = load_psfs(&specs, &options, Some(dir))?;
         warnings.extend(set.warnings.iter().cloned());
@@ -957,7 +1003,13 @@ impl Run {
     fn export(&mut self, output: &str, dir: &str) -> Result<StepDone> {
         let source = self.cube()?;
         let target = Path::new(dir).join(output).to_string_lossy().into_owned();
-        std::fs::copy(&source, &target).with_context(|| format!("Failed to copy {source} to {target}"))?;
+        let mut staged = tempfile::NamedTempFile::new_in(dir).with_context(|| format!("Failed to stage {target}"))?;
+        let mut cube = File::open(&source).with_context(|| format!("Failed to open {source}"))?;
+        std::io::copy(&mut cube, staged.as_file_mut()).with_context(|| format!("Failed to copy {source} to {target}"))?;
+        let permissions = cube.metadata().with_context(|| format!("Failed to read {source}"))?.permissions();
+        staged.as_file().set_permissions(permissions).with_context(|| format!("Failed to give {target} the permissions of {source}"))?;
+        staged.as_file().sync_all().with_context(|| format!("Failed to flush {target}"))?;
+        staged.persist_noclobber(&target).map_err(|error| error.error).with_context(|| format!("Failed to publish {target}"))?;
         invalidate_written(&target);
         self.cube = Some(target.clone());
         Ok(StepDone { report: json!({ "source": source, "output_path": target }), warnings: Vec::new() })
@@ -992,7 +1044,7 @@ fn file_digest(path: &Path, progress: &ProgressHandle) -> Result<(u64, String)> 
     let mut file = File::open(path).with_context(|| format!("Cannot hash {}", path.display()))?;
     let before = file_stamp(&file.metadata()?);
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; HASH_BLOCK];
     let mut bytes = 0u64;
     loop {
         check_cancelled(progress)?;
@@ -1016,7 +1068,7 @@ fn dependency_paths(recipe: &Recipe) -> Result<BTreeMap<String, Vec<String>>> {
     let mut paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut add = |path: &str, role: String| -> Result<()> {
         let canonical = Path::new(path).canonicalize().with_context(|| format!("Cannot resolve dependency {path}"))?;
-        let key = canonical.to_string_lossy().into_owned();
+        let key = plain(&canonical).to_string_lossy().into_owned();
         let roles = paths.entry(key).or_default();
         if !roles.contains(&role) { roles.push(role); }
         Ok(())
@@ -1043,30 +1095,102 @@ fn dependency_paths(recipe: &Recipe) -> Result<BTreeMap<String, Vec<String>>> {
     Ok(paths)
 }
 
-fn dependencies(recipe: &Recipe, progress: &ProgressHandle) -> Result<Vec<RecipeDependency>> {
-    dependency_paths(recipe)?.into_iter().map(|(path, roles)| {
-        let (bytes, sha256) = file_digest(Path::new(&path), progress)?;
-        Ok(RecipeDependency { path, roles, bytes, sha256 })
-    }).collect()
+fn digests(paths: &[&Path], progress: &ProgressHandle, stage: &str) -> Result<Vec<(u64, String)>> {
+    let workers = std::thread::available_parallelism().map_or(1, |cores| cores.get()).min(HASH_WORKERS).min(paths.len());
+    let files = paths.len() as u64;
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let done = Mutex::new(Vec::with_capacity(paths.len()));
+    progress.report(0, files, stage);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while !failed.load(Ordering::SeqCst) {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(path) = paths.get(index) else { break };
+                    let digest = file_digest(path, progress);
+                    failed.fetch_or(digest.is_err(), Ordering::SeqCst);
+                    let mut done = done.lock().unwrap();
+                    done.push((index, digest));
+                    progress.report(done.len() as u64, files, stage);
+                }
+            });
+        }
+    });
+    let mut done = done.into_inner().unwrap();
+    done.sort_by_key(|(index, _)| *index);
+    done.into_iter().map(|(_, digest)| digest).collect()
+}
+
+fn dependencies(recipe: &Recipe, progress: &ProgressHandle, stage: &str) -> Result<Vec<RecipeDependency>> {
+    let listed: Vec<(String, Vec<String>)> = dependency_paths(recipe)?.into_iter().collect();
+    let paths: Vec<&Path> = listed.iter().map(|(path, _)| Path::new(path)).collect();
+    let digests = digests(&paths, progress, stage)?;
+    Ok(listed.into_iter().zip(digests).map(|((path, roles), (bytes, sha256))| RecipeDependency { path, roles, bytes, sha256 }).collect())
 }
 
 struct RecipeLock(PathBuf);
+
+impl RecipeLock {
+    fn acquire(out_dir: &Path, started_at_utc: &str) -> Result<Self> {
+        let path = out_dir.join(RUN_LOCK);
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&path).context("Another preparation is using this output folder")?;
+        let lock = Self(path);
+        let holder = json!({ "pid": std::process::id(), "started_at_utc": started_at_utc, "software_version": env!("CARGO_PKG_VERSION") });
+        serde_json::to_writer_pretty(&mut file, &holder)?;
+        Ok(lock)
+    }
+}
 
 impl Drop for RecipeLock {
     fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
 }
 
-fn atomic_result(path: &Path, report: &RecipeReport) -> Result<()> {
-    let mut file = tempfile::NamedTempFile::new_in(path.parent().context("The result has no parent folder")?)?;
-    serde_json::to_writer_pretty(&mut file, report)?;
+struct Stage {
+    name: String,
+    step_index: Option<usize>,
+}
+
+impl Stage {
+    fn named(name: &str) -> Self {
+        Self { name: name.to_string(), step_index: None }
+    }
+}
+
+fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let folder = path.parent().context("The file has no parent folder")?;
+    #[cfg(unix)]
+    let mut file = tempfile::Builder::new().permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666)).tempfile_in(folder)?;
+    #[cfg(not(unix))]
+    let mut file = tempfile::NamedTempFile::new_in(folder)?;
+    serde_json::to_writer_pretty(&mut file, value)?;
     file.write_all(b"\n")?;
     file.as_file().sync_all()?;
     file.persist_noclobber(path).map_err(|error| error.error)?;
     Ok(())
 }
 
-fn files_under(root: &Path, progress: &ProgressHandle) -> Result<Vec<RecipeFile>> {
-    let mut files = Vec::new();
+fn write_failure(out_dir: &Path, stage: &Stage, error: &anyhow::Error, progress: &ProgressHandle, started_at_utc: &str) {
+    let coded = error.downcast_ref::<CodedError>();
+    let cancelled = error.downcast_ref::<AppError>().is_some();
+    let marker = json!({
+        "schema_version": 1,
+        "status": if cancelled || progress.is_cancelled() { "cancelled" } else { "failed" },
+        "stage": stage.name,
+        "step_index": stage.step_index,
+        "code": coded.map_or(if cancelled { "cancelled" } else { "cubeprep_failed" }, |coded| coded.code),
+        "message": format!("{error:#}"),
+        "hint": coded.and_then(|coded| coded.hint.clone()),
+        "published": false,
+        "software_version": env!("CARGO_PKG_VERSION"),
+        "started_at_utc": started_at_utc,
+        "ended_at_utc": utc_timestamp(SystemTime::now()),
+    });
+    let _ = atomic_json(&out_dir.join(FAILURE_FILE), &marker);
+}
+
+fn files_under(root: &Path, progress: &ProgressHandle, stage: &str) -> Result<Vec<RecipeFile>> {
+    let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).with_context(|| format!("Failed to list {}", dir.display()))? {
@@ -1074,17 +1198,18 @@ fn files_under(root: &Path, progress: &ProgressHandle) -> Result<Vec<RecipeFile>
             let path = entry.path();
             if path.file_name().is_some_and(|name| name == RUN_LOCK) { continue; }
             anyhow::ensure!(!entry.file_type()?.is_symlink(), "Unexpected symbolic link in output: {}", path.display());
-            let metadata = entry.metadata()?;
-            if metadata.is_dir() {
+            if entry.metadata()?.is_dir() {
                 pending.push(path);
                 continue;
             }
             let relative = path.strip_prefix(root).unwrap_or(&path);
             let text = relative.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
-            let (bytes, sha256) = file_digest(&path, progress)?;
-            files.push(RecipeFile { path: text, bytes, sha256 });
+            found.push((text, path));
         }
     }
+    let paths: Vec<&Path> = found.iter().map(|(_, path)| path.as_path()).collect();
+    let digests = digests(&paths, progress, stage)?;
+    let mut files: Vec<RecipeFile> = found.into_iter().zip(digests).map(|((path, _), (bytes, sha256))| RecipeFile { path, bytes, sha256 }).collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
 }
@@ -1092,84 +1217,107 @@ fn files_under(root: &Path, progress: &ProgressHandle) -> Result<Vec<RecipeFile>
 pub fn run_recipe(recipe: &Recipe, out_dir: &Path, progress: &ProgressHandle) -> Result<RecipeReport> {
     let started = Instant::now();
     let started_at_utc = utc_timestamp(SystemTime::now());
-    recipe.validate()?;
+    let mut warnings = recipe.validate()?;
     check_cancelled(progress)?;
     prepare_output_dir(out_dir)?;
-    let lock = out_dir.join(RUN_LOCK);
-    OpenOptions::new().write(true).create_new(true).open(&lock).context("Another preparation is using this output folder")?;
-    let _lock = RecipeLock(lock);
-    progress.emit_stage("hashing_inputs");
-    let initial_dependencies = dependencies(recipe, progress)?;
-    let initial_registry = serde_json::to_value(filter_registry().entries())?;
-    let mut input_paths: Vec<String> = recipe.paths().into_iter().filter(|p| Path::new(p).is_file()).map(str::to_string).collect();
-    input_paths.extend(recipe.empirical_files()?);
-    input_paths.extend(initial_dependencies.iter().map(|d| d.path.clone()));
-    for input in input_paths {
-        invalidate_written(&input);
-        GLOBAL_CUBE_CACHE.invalidate(&input);
-    }
-    write_json(&out_dir.join(RECIPE_FILE), recipe)?;
+    let _lock = RecipeLock::acquire(out_dir, &started_at_utc)?;
     let total = recipe.steps.len() as u64;
-    let mut run = Run::new(recipe);
-    let mut steps = Vec::with_capacity(recipe.steps.len());
-    let mut warnings = Vec::new();
-    for (index, step) in recipe.steps.iter().enumerate() {
+    let half_steps = 2 * total;
+    let mut stage = Stage::named(HASHING_INPUTS);
+    let outcome = catch_unwind(AssertUnwindSafe(|| -> Result<RecipeReport> {
+        let initial_dependencies = dependencies(recipe, &progress.part(0, half_steps), HASHING_INPUTS)?;
+        let initial_registry = serde_json::to_value(filter_registry().entries())?;
+        let mut input_paths: Vec<String> = recipe.paths().into_iter().filter(|p| Path::new(p).is_file()).map(str::to_string).collect();
+        input_paths.extend(recipe.empirical_files()?);
+        input_paths.extend(initial_dependencies.iter().map(|d| d.path.clone()));
+        for input in input_paths {
+            invalidate_written(&input);
+            GLOBAL_CUBE_CACHE.invalidate(&input);
+        }
+        write_json(&out_dir.join(RECIPE_FILE), recipe)?;
+        let mut run = Run::new(recipe);
+        let mut steps = Vec::with_capacity(recipe.steps.len());
+        for (index, step) in recipe.steps.iter().enumerate() {
+            let directory = step_folder(index, step);
+            stage = Stage { name: directory.clone(), step_index: Some(index + 1) };
+            check_cancelled(progress)?;
+            progress.report(index as u64, total, &directory);
+            let dir = out_dir.join(&directory);
+            std::fs::create_dir(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+            let dir_text = dir.to_str().with_context(|| format!("{} is not valid UTF-8", dir.display()))?;
+            let step_started = Instant::now();
+            let done = run.step(step, dir_text, progress).map_err(|error| step_failure(&directory, error))?;
+            warnings.extend(labelled(&directory, &done.warnings));
+            steps.push(StepReport {
+                index: index + 1,
+                step: step.kind(),
+                directory,
+                parameters: serde_json::to_value(step)?,
+                report: done.report,
+                warnings: done.warnings,
+                elapsed_ms: step_started.elapsed().as_millis() as u64,
+            });
+        }
+        stage = Stage::named(VERIFYING_INPUTS);
+        let verifying = progress.part(half_steps.saturating_sub(2), half_steps);
+        if dependencies(recipe, &verifying, VERIFYING_INPUTS)? != initial_dependencies || serde_json::to_value(filter_registry().entries())? != initial_registry {
+            return Err(coded("input_changed", "A recipe dependency or filter registry changed during execution", Some("Keep inputs unchanged and run again in a new output folder".into())).into());
+        }
+        stage = Stage::named(HASHING_PRODUCTS);
+        let files = files_under(out_dir, &progress.part(half_steps.saturating_sub(1), half_steps), HASHING_PRODUCTS)?;
+        let recipe_sha256 = files.iter().find(|file| file.path == RECIPE_FILE).context("The saved recipe is missing")?.sha256.clone();
+        let report = RecipeReport {
+            recipe_version: recipe.recipe_version,
+            name: recipe.name.clone(),
+            output_dir: out_dir.to_string_lossy().into_owned(),
+            cube: run.cube.clone(),
+            steps,
+            files,
+            warnings,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            provenance: RecipeProvenance {
+                schema_version: 1,
+                software_version: env!("CARGO_PKG_VERSION").to_string(),
+                operating_system: std::env::consts::OS.to_string(),
+                architecture: std::env::consts::ARCH.to_string(),
+                started_at_utc: started_at_utc.to_string(),
+                recipe_sha256,
+                dependencies: initial_dependencies,
+                filter_registry: initial_registry,
+                integrity: "sha256_before_after",
+                limitations: vec![
+                    "Input hashes are verified before and after execution, not an atomic snapshot; do not modify inputs while a run is active".into(),
+                    "The saved recipe contains resolved paths; its SHA-256 identifies the exact recipe.json bytes, not a location-independent recipe".into(),
+                    "SCI/ERR/DQ availability and propagation follow each step report and the selected output layout; hashes do not certify scientific accuracy".into(),
+                ],
+            },
+        };
+        stage = Stage::named(PUBLISHING);
         check_cancelled(progress)?;
-        let directory = format!("{:02}_{}", index + 1, step.kind());
-        progress.report(index as u64, total, &directory);
-        let dir = out_dir.join(&directory);
-        std::fs::create_dir(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-        let dir_text = dir.to_str().with_context(|| format!("{} is not valid UTF-8", dir.display()))?;
-        let step_started = Instant::now();
-        let done = run.step(step, dir_text, progress).map_err(|error| step_failure(&directory, error))?;
-        warnings.extend(labelled(&directory, &done.warnings));
-        steps.push(StepReport {
-            index: index + 1,
-            step: step.kind(),
-            directory,
-            parameters: serde_json::to_value(step)?,
-            report: done.report,
-            warnings: done.warnings,
-            elapsed_ms: step_started.elapsed().as_millis() as u64,
-        });
+        atomic_json(&out_dir.join(RESULT_FILE), &report)?;
+        progress.report(total, total, "done");
+        Ok(report)
+    }));
+    match outcome {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(error)) => {
+            write_failure(out_dir, &stage, &error, progress, &started_at_utc);
+            Err(error)
+        }
+        Err(panic) => {
+            let error: anyhow::Error = coded(PANIC, format!("the run panicked: {}", panic_text(panic.as_ref())), None).into();
+            write_failure(out_dir, &stage, &error, progress, &started_at_utc);
+            resume_unwind(panic)
+        }
     }
-    progress.emit_stage("verifying_inputs");
-    if dependencies(recipe, progress)? != initial_dependencies || serde_json::to_value(filter_registry().entries())? != initial_registry {
-        return Err(coded("input_changed", "A recipe dependency or filter registry changed during execution", Some("Keep inputs unchanged and run again in a new output folder".into())).into());
+}
+
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    match (payload.downcast_ref::<&str>(), payload.downcast_ref::<String>()) {
+        (Some(text), _) => text.to_string(),
+        (None, Some(text)) => text.clone(),
+        (None, None) => "no panic message".to_string(),
     }
-    progress.emit_stage("hashing_products");
-    let files = files_under(out_dir, progress)?;
-    let recipe_sha256 = files.iter().find(|file| file.path == RECIPE_FILE).context("The saved recipe is missing")?.sha256.clone();
-    let report = RecipeReport {
-        recipe_version: recipe.recipe_version,
-        name: recipe.name.clone(),
-        output_dir: out_dir.to_string_lossy().into_owned(),
-        cube: run.cube.clone(),
-        steps,
-        files,
-        warnings,
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        provenance: RecipeProvenance {
-            schema_version: 1,
-            software_version: env!("CARGO_PKG_VERSION").to_string(),
-            operating_system: std::env::consts::OS.to_string(),
-            architecture: std::env::consts::ARCH.to_string(),
-            started_at_utc,
-            recipe_sha256,
-            dependencies: initial_dependencies,
-            filter_registry: initial_registry,
-            integrity: "sha256_before_after",
-            limitations: vec![
-                "Input hashes are verified before and after execution, not an atomic snapshot; do not modify inputs while a run is active".into(),
-                "The saved recipe contains resolved paths; its SHA-256 identifies the exact recipe.json bytes, not a location-independent recipe".into(),
-                "SCI/ERR/DQ availability and propagation follow each step report and the selected output layout; hashes do not certify scientific accuracy".into(),
-            ],
-        },
-    };
-    check_cancelled(progress)?;
-    atomic_result(&out_dir.join(RESULT_FILE), &report)?;
-    progress.report(total, total, "done");
-    Ok(report)
 }
 
 #[cfg(test)]
@@ -1311,7 +1459,7 @@ mod tests {
         let image = extract_image_mmap_by_index(&File::open(result).unwrap(), 1).unwrap();
         assert!(image.image.iter().all(|value| *value == 7.0));
         let written = std::fs::read(target.join(RESULT_FILE)).unwrap();
-        assert!(atomic_result(&target.join(RESULT_FILE), &report).is_err());
+        assert!(atomic_json(&target.join(RESULT_FILE), &report).is_err());
         assert_eq!(std::fs::read(target.join(RESULT_FILE)).unwrap(), written);
     }
 
@@ -1423,7 +1571,7 @@ mod tests {
     #[test]
     fn the_star_field_recipe_carries_its_empirical_psf_parameters() {
         let recipe = Recipe::from_value(&fixture_recipe("d1_stars", "recipe_d1_stars.json")).unwrap();
-        let RecipeStep::Psfs(PsfsStep { source: PsfSource::Empirical(empirical), reference: None, pixel_scale_arcsec: None }) =
+        let RecipeStep::Psfs(PsfsStep { source: PsfSource::Empirical(empirical), reference: None, pixel_scale_arcsec: None, recentre: None }) =
             &recipe.steps[0]
         else {
             panic!("{:?}", recipe.steps[0])
@@ -1544,7 +1692,7 @@ mod tests {
             (3, json!({ "step": "cube", "output": "../d1_cube.fits" }), "steps[3] (cube): output must be a .fits file name"),
             (6, json!({ "step": "kernels", "reference": "F090W", "method": "wiener" }), "steps[6] (kernels): no PSF for the reference F090W"),
             (6, json!({ "step": "kernels", "reference": "F444W", "method": "wiener", "eps": 0.0 }), "steps[6] (kernels): eps must be positive"),
-            (6, json!({ "step": "kernels", "reference": "F444W", "method": "wiener", "shape": [20, 21] }), "steps[6] (kernels): shape must be reference or two odd integers"),
+            (6, json!({ "step": "kernels", "reference": "F444W", "method": "wiener", "shape": [20, 21] }), "steps[6] (kernels): shape must be reference, max or two odd integers"),
             (7, json!({ "step": "match", "reference": "F277W" }), "steps[7] (match): no kernels to F277W"),
         ] {
             let error = refusal(&with_step(index, step));
@@ -1583,6 +1731,15 @@ mod tests {
         let matched = report.steps[7].report["output_path"].as_str().unwrap();
         assert!(Path::new(matched).starts_with(target.join("08_match")), "{matched}");
         assert_eq!(std::fs::read(cube).unwrap(), std::fs::read(matched).unwrap());
+        assert_eq!(std::fs::read_dir(target.join("09_export")).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode(Path::new(cube)), mode(Path::new(matched)), "the exported cube keeps the mode of every other product");
+            assert_eq!(mode(&target.join(RESULT_FILE)), mode(&target.join(RECIPE_FILE)), "result.json keeps the mode of recipe.json");
+        }
+        assert!(report.files.iter().all(|file| !file.path.ends_with(".partial")), "{:?}", report.files);
         let header = extract_header_by_index(&std::fs::File::open(cube).unwrap(), 0).unwrap();
         assert_eq!(header.get_i64("NAXIS3"), Some(6));
         let names: Vec<&str> = report.files.iter().map(|file| file.path.as_str()).collect();
@@ -1782,5 +1939,454 @@ mod tests {
             value["steps"] = json!([step.clone()]);
             Recipe::from_value(&value).unwrap_or_else(|error| panic!("{step}: {}", error.message));
         }
+    }
+
+    fn read_value(path: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))).unwrap()
+    }
+
+    fn scientific_profile_recipe() -> Value {
+        let mut value = d1_recipe();
+        value["steps"][0]["rounding"] = json!("astroburst");
+        value["steps"][2]["area_rule"] = json!("scale");
+        value["steps"][3]["layout"] = json!("mef");
+        value["steps"][4]["use_dq"] = json!(true);
+        value["steps"][7]["mode"] = json!("astroburst");
+        value["steps"].as_array_mut().unwrap().push(json!({ "step": "export", "output": "prepared_cube.fits" }));
+        value
+    }
+
+    #[test]
+    fn a_failed_step_leaves_a_failure_marker_naming_the_step_code_and_hint() {
+        let mut value = d1_recipe();
+        value["steps"][5]["files"].as_array_mut().unwrap().remove(1);
+        let recipe = Recipe::from_value(&value).unwrap().resolved(&fixtures().join("d1"));
+        let out = tempfile::tempdir().unwrap();
+        let target = out.path().join("run");
+        let error = run_recipe(&recipe, &target, &quiet()).unwrap_err();
+        let marker = read_value(&target.join(FAILURE_FILE));
+        assert_eq!(marker["schema_version"], 1);
+        assert_eq!(marker["status"], "failed");
+        assert_eq!(marker["stage"], "08_match");
+        assert_eq!(marker["step_index"], 8);
+        assert_eq!(marker["code"], "kernel_missing");
+        assert_eq!(marker["message"], json!(format!("{error:#}")));
+        assert!(marker["hint"].as_str().unwrap().contains("allow_unmatched"), "{marker}");
+        assert_eq!(marker["published"], false);
+        assert_eq!(marker["software_version"], env!("CARGO_PKG_VERSION"));
+        assert!(marker["started_at_utc"].as_str().unwrap().ends_with('Z') && marker["ended_at_utc"].as_str().unwrap().ends_with('Z'), "{marker}");
+        assert!(!target.join(RESULT_FILE).exists());
+        assert!(!target.join(RUN_LOCK).exists());
+        assert!(target.join("07_kernels").is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode(&target.join(FAILURE_FILE)), mode(&target.join(RECIPE_FILE)), "failure.json keeps the mode of recipe.json");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_product_hashing_leaves_a_cancelled_failure_marker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let progress = ProgressHandle::with_sink(Arc::new(move |event| {
+            if event.stage == "hashing_products" { signal.store(true, Ordering::SeqCst); }
+        }), 1).with_cancel_source(Arc::new(move || cancelled.load(Ordering::SeqCst)));
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let target = dir.path().join("run");
+        let error = run_recipe(&recipe, &target, &progress).unwrap_err();
+        assert!(error.downcast_ref::<AppError>().is_some(), "{error:#}");
+        let marker = read_value(&target.join(FAILURE_FILE));
+        assert_eq!(marker["status"], "cancelled");
+        assert_eq!(marker["stage"], "hashing_products");
+        assert_eq!(marker["step_index"], Value::Null);
+        assert_eq!(marker["code"], "cancelled");
+        assert!(marker["message"].as_str().unwrap().to_lowercase().contains("cancel"), "{marker}");
+        assert_eq!(marker["hint"], Value::Null);
+        assert_eq!(marker["published"], false);
+        assert!(!target.join(RESULT_FILE).exists());
+        assert!(!target.join(RUN_LOCK).exists());
+    }
+
+    #[test]
+    fn a_successful_run_writes_no_failure_marker_and_a_refused_folder_stays_untouched() {
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("keep.txt"), "x").unwrap();
+        run_recipe(&recipe, out.path(), &quiet()).unwrap_err();
+        let names: Vec<String> = std::fs::read_dir(out.path()).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["keep.txt"]);
+        let target = out.path().join("run");
+        let report = run_recipe(&recipe, &target, &quiet()).unwrap();
+        assert!(!target.join(FAILURE_FILE).exists());
+        assert!(target.join(RESULT_FILE).is_file());
+        assert!(report.files.iter().all(|file| file.path != FAILURE_FILE && file.path != RUN_LOCK));
+    }
+
+    #[test]
+    fn the_lock_names_the_process_and_the_start_of_the_run_while_it_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("run");
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let lock_path = target.join(RUN_LOCK);
+        let sink_seen = seen.clone();
+        let progress = ProgressHandle::with_sink(Arc::new(move |event| {
+            if event.stage == "01_crop" {
+                *sink_seen.lock().unwrap() = Some(std::fs::read_to_string(&lock_path).unwrap_or_default());
+            }
+        }), 1);
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let report = run_recipe(&recipe, &target, &progress).unwrap();
+        let held = seen.lock().unwrap().clone().expect("the sink saw 01_crop");
+        let lock: Value = serde_json::from_str(&held).unwrap_or_else(|error| panic!("{held:?}: {error}"));
+        assert_eq!(lock["pid"], std::process::id());
+        assert_eq!(lock["started_at_utc"], json!(report.provenance.started_at_utc));
+        assert_eq!(lock["software_version"], env!("CARGO_PKG_VERSION"));
+        assert!(!target.join(RUN_LOCK).exists());
+    }
+
+    #[test]
+    fn resolved_inputs_and_dependency_paths_carry_no_verbatim_prefix() {
+        let base = std::fs::canonicalize(fixtures().join("d1")).unwrap();
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&base);
+        for path in recipe.paths() {
+            assert!(!path.starts_with(r"\\?\"), "{path}");
+            assert!(Path::new(path).is_file(), "{path}");
+        }
+        let dependencies = dependency_paths(&recipe).unwrap();
+        assert_eq!(dependencies.len(), 12);
+        for path in dependencies.keys() {
+            assert!(!path.starts_with(r"\\?\"), "{path}");
+            assert!(Path::new(path).is_file(), "{path}");
+        }
+        let mut value = d1_recipe();
+        value["inputs"][0]["path"] = json!("../d1/d1_HST_F814W.fits");
+        let recipe = Recipe::from_value(&value).unwrap().resolved(&base);
+        let resolved = &recipe.inputs[0].path;
+        assert!(!resolved.starts_with(r"\\?\"), "{resolved}");
+        if cfg!(windows) {
+            assert!(!resolved.contains(".."), "joining onto the verbatim folder removes the parent step: {resolved}");
+        }
+        assert_eq!(std::fs::canonicalize(resolved).unwrap(), base.join("d1_HST_F814W.fits"));
+    }
+
+    #[test]
+    fn parallel_and_serial_dependency_manifests_are_identical() {
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let pooled = dependencies(&recipe, &quiet(), HASHING_INPUTS).unwrap();
+        let serial: Vec<RecipeDependency> = dependency_paths(&recipe)
+            .unwrap()
+            .into_iter()
+            .map(|(path, roles)| {
+                let (bytes, sha256) = file_digest(Path::new(&path), &quiet()).unwrap();
+                RecipeDependency { path, roles, bytes, sha256 }
+            })
+            .collect();
+        assert_eq!(pooled.len(), 12);
+        assert_eq!(pooled, serial);
+        let out = tempfile::tempdir().unwrap();
+        let target = out.path().join("run");
+        let report = run_recipe(&recipe, &target, &quiet()).unwrap();
+        let products = files_under(&target, &quiet(), HASHING_PRODUCTS).unwrap();
+        let serial: Vec<RecipeFile> = products
+            .iter()
+            .map(|file| {
+                let (bytes, sha256) = file_digest(&target.join(&file.path), &quiet()).unwrap();
+                RecipeFile { path: file.path.clone(), bytes, sha256 }
+            })
+            .collect();
+        assert_eq!(products, serial);
+        assert!(products.windows(2).all(|pair| pair[0].path < pair[1].path));
+        assert_eq!(products.iter().filter(|file| file.path != RESULT_FILE).cloned().collect::<Vec<_>>(), report.files);
+    }
+
+    const SCIENTIFIC_PLANES: usize = 6;
+    const SCIENTIFIC_PLANE_SHAPE: (usize, usize) = (43, 43);
+    const SCIENTIFIC_MATCH_MASKED_PIXELS: [u64; SCIENTIFIC_PLANES] = [1, 10, 10, 8, 2, 0];
+    const SCIENTIFIC_FINITE_PIXELS_PER_PLANE: [usize; SCIENTIFIC_PLANES] = [1835, 1835, 1835, 1835, 1835, 1843];
+    const SCIENTIFIC_FINITE_IN_EVERY_PLANE: usize = 1835;
+    const SCIENTIFIC_FILTERS_COLUMNS: [&str; 9] = ["FILTER", "DATASET", "INSTRUME", "PIVOT_UM", "PIXSCALE", "BUNIT_IN", "FLUXCONV", "PSF_FWHM", "KERNEL"];
+    const SCIENTIFIC_FILTERS: [&str; SCIENTIFIC_PLANES] = ["F814W", "F150W", "F200W", "F277W", "F356W", "F444W"];
+    const SCIENTIFIC_DATASETS: [&str; SCIENTIFIC_PLANES] = ["HST", "JWST", "JWST", "JWST", "JWST", "JWST"];
+    const SCIENTIFIC_PIVOT_UM: [f64; SCIENTIFIC_PLANES] = [0.804553, 1.500744, 1.988648, 2.76174, 3.568362, 4.404315];
+    const SCIENTIFIC_PSF_FWHM_FINITE: [bool; SCIENTIFIC_PLANES] = [false; SCIENTIFIC_PLANES];
+    const SCIENTIFIC_KERNELS: [&str; SCIENTIFIC_PLANES] = [
+        "kernel_f814w_to_f444w.fits",
+        "kernel_f150w_to_f444w.fits",
+        "kernel_f200w_to_f444w.fits",
+        "kernel_f277w_to_f444w.fits",
+        "kernel_f356w_to_f444w.fits",
+        "",
+    ];
+
+    #[test]
+    fn the_scientific_profile_recipe_wires_its_options_into_the_43x43_mef_cube() {
+        use crate::infra::fits::reader::{extract_image_planes_by_index, extract_int_planes_by_index, list_extensions};
+        use crate::infra::fits::table::{list_tables, load_bintable, ColumnValues};
+        let dir = tempfile::tempdir().unwrap();
+        let recipe = Recipe::from_value(&scientific_profile_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let target = dir.path().join("run");
+        let report = run_recipe(&recipe, &target, &quiet()).unwrap();
+        let rects: Vec<(i64, i64, u64, u64)> = report.steps[0].report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| {
+                let rect = &file["rect"];
+                (rect["x0"].as_i64().unwrap(), rect["y0"].as_i64().unwrap(), rect["width"].as_u64().unwrap(), rect["height"].as_u64().unwrap())
+            })
+            .collect();
+        assert_eq!(rects, [(5, 5, 53, 53), (7, 6, 115, 115), (7, 6, 115, 115), (9, 9, 45, 45), (9, 8, 47, 47), (9, 9, 45, 45)]);
+        assert_eq!(report.steps[0].report["rounding"], json!("astroburst"));
+        let rules: Vec<Option<&str>> = report.steps[2].report["files"].as_array().unwrap().iter().map(|file| file["area"]["rule"].as_str()).collect();
+        assert_eq!(rules, [Some("scale"), Some("scale"), Some("scale"), None, Some("scale"), None]);
+        assert_eq!(report.steps[4].parameters["use_dq"], json!(true));
+        assert_eq!(report.steps[4].report["removed"], json!([]));
+        assert_eq!(report.steps[7].report["mode"], json!("astroburst"));
+        let planes = report.steps[7].report["planes"].as_array().unwrap();
+        let masked: Vec<u64> = planes.iter().map(|plane| plane["masked_pixels"].as_u64().unwrap()).collect();
+        assert_eq!(masked, SCIENTIFIC_MATCH_MASKED_PIXELS);
+        assert_eq!((planes[5]["filter"].as_str(), planes[5]["status"].as_str()), (Some("F444W"), Some("reference")));
+        let history = |path: &str| {
+            let header = extract_header_by_index(&File::open(path).unwrap(), 1).unwrap();
+            header.cards.iter().filter(|(key, _)| key == "HISTORY").map(|(_, text)| text.as_str()).collect::<Vec<_>>().join(" ")
+        };
+        assert!(history(report.steps[4].report["output_path"].as_str().unwrap()).contains("DO_NOT_USE"));
+        assert!(history(report.steps[7].report["output_path"].as_str().unwrap()).contains("union NaN mask"));
+        let cube_path = report.cube.as_deref().unwrap();
+        let cube = File::open(cube_path).unwrap();
+        let extensions = list_extensions(&cube).unwrap();
+        let index = |name: &str| extensions.iter().find(|hdu| hdu.extname.as_deref() == Some(name)).unwrap_or_else(|| panic!("no {name}")).index;
+        let (filters_hdu, _) = list_tables(&cube).unwrap().into_iter().find(|(table, _)| table.index == index("FILTERS")).unwrap();
+        let columns: Vec<String> = filters_hdu.columns.into_iter().map(|column| column.name).collect();
+        assert_eq!(columns, SCIENTIFIC_FILTERS_COLUMNS);
+        let filters = load_bintable(cube_path, index("FILTERS")).unwrap();
+        assert_eq!(filters.text_column("FILTER").unwrap(), SCIENTIFIC_FILTERS);
+        assert_eq!(filters.text_column("DATASET").unwrap(), SCIENTIFIC_DATASETS);
+        assert_eq!(filters.text_column("KERNEL").unwrap(), SCIENTIFIC_KERNELS);
+        let numbers = |name: &str| match filters.flattened_column(name).unwrap().values {
+            ColumnValues::F64(values) => values,
+            other => panic!("{name} holds {other:?}"),
+        };
+        let pivots = numbers("PIVOT_UM");
+        assert_eq!(pivots.len(), SCIENTIFIC_PLANES);
+        assert!(pivots.iter().zip(SCIENTIFIC_PIVOT_UM).all(|(found, pinned)| (found - pinned).abs() <= 1e-12 * pinned), "{pivots:?}");
+        let fwhm_finite: Vec<bool> = numbers("PSF_FWHM").iter().map(|fwhm| fwhm.is_finite()).collect();
+        assert_eq!(fwhm_finite, SCIENTIFIC_PSF_FWHM_FINITE);
+        let sci = extract_image_planes_by_index(&cube, index("SCI")).unwrap();
+        let err = extract_image_planes_by_index(&cube, index("ERR")).unwrap();
+        let dq = extract_int_planes_by_index(&cube, index("DQ")).unwrap();
+        assert_eq!((sci.len(), err.len(), dq.len()), (SCIENTIFIC_PLANES, SCIENTIFIC_PLANES, SCIENTIFIC_PLANES));
+        let finite: Vec<usize> = sci.iter().map(|plane| plane.iter().filter(|value| value.is_finite()).count()).collect();
+        assert_eq!(finite, SCIENTIFIC_FINITE_PIXELS_PER_PLANE);
+        let (rows, cols) = SCIENTIFIC_PLANE_SHAPE;
+        let finite_everywhere = (0..rows * cols).filter(|pixel| sci.iter().all(|plane| plane[(pixel / cols, pixel % cols)].is_finite())).count();
+        assert_eq!(finite_everywhere, SCIENTIFIC_FINITE_IN_EVERY_PLANE);
+        for ((sci, err), dq) in sci.iter().zip(&err).zip(&dq) {
+            assert_eq!(sci.dim(), SCIENTIFIC_PLANE_SHAPE);
+            assert_eq!(err.dim(), SCIENTIFIC_PLANE_SHAPE);
+            assert_eq!(dq.bits.dim(), SCIENTIFIC_PLANE_SHAPE);
+            assert!(sci.iter().zip(err.iter()).all(|(sci, err)| sci.is_nan() == err.is_nan()));
+            assert!(sci.iter().zip(dq.bits.iter()).all(|(sci, bits)| sci.is_finite() || *bits != 0));
+        }
+    }
+
+    #[test]
+    fn the_d1_recipe_writes_the_same_products_on_one_thread_and_on_eight() {
+        let out = tempfile::tempdir().unwrap();
+        let mut value = d1_recipe();
+        value["steps"].as_array_mut().unwrap().push(json!({ "step": "export", "output": "d1_final.fits" }));
+        let recipe = Recipe::from_value(&value).unwrap().resolved(&fixtures().join("d1"));
+        let run = |threads: usize| {
+            let target = out.path().join(format!("threads_{threads}"));
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            pool.install(|| run_recipe(&recipe, &target, &quiet())).unwrap()
+        };
+        let one = run(1);
+        let eight = run(8);
+        assert_eq!(one.files.len(), 34);
+        assert_eq!(one.files, eight.files);
+        assert_eq!(one.warnings, eight.warnings);
+    }
+
+    #[test]
+    fn the_saved_form_of_the_d1_recipe_reads_back_as_the_same_recipe() {
+        let saved = read_value(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("cubeprep").join("recipe_d1_saved.json"));
+        let base = fixtures().join("d1");
+        let from_saved = Recipe::from_value(&saved).unwrap().resolved(&base);
+        let from_source = Recipe::from_value(&d1_recipe()).unwrap().resolved(&base);
+        assert_eq!(from_saved, from_source);
+        from_saved.validate().unwrap();
+        for (index, key) in [(0, "rounding"), (2, "area_rule"), (3, "layout"), (4, "use_dq"), (6, "eps_mode"), (6, "auto"), (7, "mode"), (7, "allow_unmatched")] {
+            assert!(saved["steps"][index].get(key).is_some(), "steps[{index}].{key}");
+            assert!(d1_recipe()["steps"][index].get(key).is_none(), "steps[{index}].{key}");
+        }
+    }
+
+    #[test]
+    fn a_cut_before_the_match_is_accepted_with_a_warning_about_zero_filled_edges() {
+        let cut = json!({ "step": "edit", "action": "cut", "x_start": 2, "x_end": 40, "y_start": 2, "y_end": 40 });
+        let mut before = d1_recipe();
+        before["steps"].as_array_mut().unwrap().insert(5, cut.clone());
+        let recipe = Recipe::from_value(&before).unwrap().resolved(&fixtures().join("d1"));
+        let expected = "09_match: 06_edit cuts the cube before the match; pixels within half a kernel width of the cut edges are matched against zeros; place the cut after match to use the cut-away data";
+        assert_eq!(recipe.validate().unwrap(), [expected]);
+        let out = tempfile::tempdir().unwrap();
+        let report = run_recipe(&recipe, &out.path().join("run"), &quiet()).unwrap();
+        assert_eq!(report.warnings.first().map(String::as_str), Some(expected));
+        assert_eq!(report.steps[8].directory, "09_match");
+        assert_eq!(report.steps[5].directory, "06_edit");
+        let mut fixed = before.clone();
+        fixed["steps"][7]["shape"] = json!([21, 21]);
+        let warnings = Recipe::from_value(&fixed).unwrap().resolved(&fixtures().join("d1")).validate().unwrap();
+        assert!(warnings[0].contains("pixels within 10 px of the cut edges"), "{warnings:?}");
+        let mut sky = d1_recipe();
+        sky["steps"].as_array_mut().unwrap().insert(4, json!({ "step": "edit", "action": "cut_sky", "ra": 53.1625, "dec": -27.7914, "size_arcsec": 1.0 }));
+        let warnings = Recipe::from_value(&sky).unwrap().resolved(&fixtures().join("d1")).validate().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("09_match: 05_edit cuts the cube before the match"), "{warnings:?}");
+        let mut after = d1_recipe();
+        after["steps"].as_array_mut().unwrap().push(cut);
+        assert!(Recipe::from_value(&after).unwrap().resolved(&fixtures().join("d1")).validate().unwrap().is_empty());
+        assert!(Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1")).validate().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cut_sky_defaults_to_astroburst_rounding_while_crop_defaults_to_lightstack() {
+        let cut = parse_step(0, &json!({ "step": "edit", "action": "cut_sky", "ra": 53.1625, "dec": -27.7914, "size_arcsec": 1.0 })).unwrap();
+        assert_eq!(cut, RecipeStep::Edit(CubeEdit::CutSky { ra: 53.1625, dec: -27.7914, size_arcsec: 1.0, rounding: CropRounding::Astroburst }));
+        let crop = parse_step(0, &json!({ "step": "crop", "mode": "radec", "ra": 53.1625, "dec": -27.7914, "size_arcsec": 1.0 })).unwrap();
+        assert_eq!(crop, RecipeStep::Crop(CropStep { region: CropMode::Radec { ra: 53.1625, dec: -27.7914, size_arcsec: 1.0 }, rounding: CropRounding::Lightstack }));
+    }
+
+    #[test]
+    fn a_panic_inside_a_step_leaves_a_failure_marker_and_keeps_unwinding() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("run");
+        let progress = ProgressHandle::with_sink(Arc::new(|event| {
+            if event.stage == "03_align" {
+                panic!("probe panic in 03_align");
+            }
+        }), 1);
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_recipe(&recipe, &target, &progress)));
+        let payload = unwound.expect_err("the panic reaches the caller");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"probe panic in 03_align"));
+        let marker = read_value(&target.join(FAILURE_FILE));
+        assert_eq!(marker["status"], "failed");
+        assert_eq!(marker["stage"], "03_align");
+        assert_eq!(marker["step_index"], 3);
+        assert_eq!(marker["code"], "panic");
+        assert!(marker["message"].as_str().unwrap().contains("probe panic in 03_align"), "{marker}");
+        assert_eq!(marker["hint"], Value::Null);
+        assert_eq!(marker["published"], false);
+        assert!(!target.join(RESULT_FILE).exists());
+        assert!(!target.join(RUN_LOCK).exists());
+        assert!(target.join("02_units").is_dir());
+    }
+
+    #[test]
+    fn the_failure_code_follows_the_error_and_the_status_follows_the_cancel_request() {
+        let stage = Stage { name: "03_align".to_string(), step_index: Some(3) };
+        let marker = |error: anyhow::Error, progress: &ProgressHandle| {
+            let dir = tempfile::tempdir().unwrap();
+            write_failure(dir.path(), &stage, &error, progress, "2026-11-06T00:00:00Z");
+            let marker = read_value(&dir.path().join(FAILURE_FILE));
+            (marker["status"].as_str().unwrap().to_string(), marker["code"].as_str().unwrap().to_string())
+        };
+        let cancel_requested = quiet().with_cancel_source(Arc::new(|| true));
+        let pair = |status: &str, code: &str| (status.to_string(), code.to_string());
+        assert_eq!(marker(anyhow::anyhow!("disk full"), &cancel_requested), pair("cancelled", "cubeprep_failed"));
+        assert_eq!(marker(anyhow::anyhow!("disk full"), &quiet()), pair("failed", "cubeprep_failed"));
+        assert_eq!(marker(AppError::Cancelled.into(), &quiet()), pair("cancelled", "cancelled"));
+        assert_eq!(marker(coded("kernel_missing", "no kernel", None).into(), &cancel_requested), pair("cancelled", "kernel_missing"));
+    }
+
+    #[test]
+    fn hashing_stops_taking_new_files_once_one_fails() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = vec![dir.path().join("missing.fits")];
+        for index in 0..40 {
+            let path = dir.path().join(format!("{index:02}.bin"));
+            std::fs::write(&path, b"x").unwrap();
+            paths.push(path);
+        }
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = polls.clone();
+        let progress = quiet().with_cancel_source(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            false
+        }));
+        let listed: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        let error = digests(&listed, &progress, HASHING_INPUTS).unwrap_err();
+        assert!(format!("{error:#}").contains("missing.fits"), "{error:#}");
+        let polled = polls.load(Ordering::SeqCst);
+        assert!(polled < paths.len(), "{polled} cancel polls: the workers kept hashing after the first error");
+    }
+
+    #[test]
+    fn hashing_reports_the_files_done_within_the_first_and_the_last_step() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_seen = seen.clone();
+        let progress = ProgressHandle::with_sink(Arc::new(move |event| {
+            sink_seen.lock().unwrap().push((event.stage.clone(), event.current, event.total, event.percent));
+        }), 1);
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let out = tempfile::tempdir().unwrap();
+        let report = run_recipe(&recipe, &out.path().join("run"), &progress).unwrap();
+        let steps = recipe.steps.len() as u32;
+        let products = report.files.len() as u64;
+        let seen = seen.lock().unwrap();
+        let last = |stage: &str| seen.iter().filter(|event| event.0 == stage).last().cloned().unwrap_or_else(|| panic!("no {stage} event in {seen:?}"));
+        assert_eq!(seen.first().cloned(), Some(("hashing_inputs".to_string(), 0, 12, 0)));
+        assert_eq!(last("hashing_inputs"), ("hashing_inputs".to_string(), 12, 12, 100 / (2 * steps)));
+        assert!(seen.iter().filter(|event| event.0 == "hashing_inputs").all(|event| event.3 <= 100 / (2 * steps)), "{seen:?}");
+        assert_eq!(last("verifying_inputs"), ("verifying_inputs".to_string(), 12, 12, (2 * steps - 1) * 100 / (2 * steps)));
+        assert_eq!(last("hashing_products"), ("hashing_products".to_string(), products, products, 100));
+        let closing: Vec<u32> = seen.iter().skip_while(|event| event.0 != "08_match").map(|event| event.3).collect();
+        assert!(closing.windows(2).all(|pair| pair[0] <= pair[1]), "the percent goes back after 08_match: {closing:?}");
+        assert_eq!(seen.last().cloned(), Some(("done".to_string(), u64::from(steps), u64::from(steps), 100)));
+        let folders: Vec<&str> = seen.iter().map(|event| event.0.as_str()).filter(|stage| stage.as_bytes()[0].is_ascii_digit()).collect();
+        assert_eq!(folders, ["01_crop", "02_units", "03_align", "04_cube", "05_edit", "06_psfs", "07_kernels", "08_match"]);
+    }
+
+    #[test]
+    fn the_psfs_step_recentres_only_when_asked_and_saves_the_key_only_when_given() {
+        use ndarray::Array2;
+        use crate::infra::fits::writer::write_fits_mono;
+        use crate::types::header::HduHeader;
+        let unset = Recipe::from_value(&d1_recipe()).unwrap();
+        assert!(serde_json::to_value(&unset).unwrap()["steps"][5].get("recentre").is_none());
+        for given in [true, false] {
+            let mut value = d1_recipe();
+            value["steps"][5]["recentre"] = json!(given);
+            let recipe = Recipe::from_value(&value).unwrap_or_else(|error| panic!("recentre {given}: {}", error.message));
+            assert_eq!(serde_json::to_value(&recipe).unwrap()["steps"][5]["recentre"], json!(given));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let psf_path = dir.path().join("offset_psf.fits");
+        let psf = Array2::from_shape_fn((21, 21), |(y, x)| (-((x as f64 - 10.4).powi(2) + (y as f64 - 9.7).powi(2)) / 4.5).exp() as f32);
+        let mut header = HduHeader::empty();
+        header.set_f64("PIXSCALE", 0.04);
+        write_fits_mono(psf_path.to_str().unwrap(), &psf, Some(&header)).unwrap();
+        let recentred = |recentre: Option<bool>| {
+            let mut step = json!({ "step": "psfs", "source": "files", "files": [{ "filter": "F444W", "path": psf_path }] });
+            if let Some(recentre) = recentre {
+                step["recentre"] = json!(recentre);
+            }
+            let value = json!({ "recipe_version": 1, "inputs": d1_recipe()["inputs"].clone(), "steps": [step] });
+            let recipe = Recipe::from_value(&value).unwrap().resolved(&fixtures().join("d1"));
+            let target = dir.path().join(format!("run_{recentre:?}"));
+            let report = run_recipe(&recipe, &target, &quiet()).unwrap();
+            report.steps[0].report["prepared"]["psfs"][0]["recentred_by_px"].clone()
+        };
+        assert!(recentred(Some(true)).is_array(), "{}", recentred(Some(true)));
+        assert_eq!(recentred(Some(false)), Value::Null);
+        assert_eq!(recentred(None), Value::Null);
     }
 }

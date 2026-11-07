@@ -1,0 +1,118 @@
+{
+  "recipe_version": 1,
+  "name": "d1",
+  "inputs": [
+    {
+      "path": "d1_HST_F814W.fits",
+      "dataset": "HST",
+      "filter": "F814W"
+    },
+    {
+      "path": "d1_JWST_F150W.fits",
+      "dataset": "JWST",
+      "filter": "F150W"
+    },
+    {
+      "path": "d1_JWST_F200W.fits",
+      "dataset": "JWST",
+      "filter": "F200W"
+    },
+    {
+      "path": "d1_JWST_F277W.fits",
+      "dataset": "JWST",
+      "filter": "F277W"
+    },
+    {
+      "path": "d1_JWST_F356W.fits",
+      "dataset": "JWST",
+      "filter": "F356W"
+    },
+    {
+      "path": "d1_JWST_F444W.fits",
+      "dataset": "JWST",
+      "filter": "F444W"
+    }
+  ],
+  "steps": [
+    {
+      "step": "crop",
+      "mode": "radec",
+      "ra": 53.1625,
+      "dec": -27.7914,
+      "size_arcsec": 1.8,
+      "rounding": "lightstack"
+    },
+    {
+      "step": "units",
+      "to": "Jy/pixel"
+    },
+    {
+      "step": "align",
+      "reference": "F444W",
+      "method": "bilinear",
+      "border_crop": 1,
+      "area_rule": "lightstack"
+    },
+    {
+      "step": "cube",
+      "reference": "F444W",
+      "order": "wavelength",
+      "output": "d1_cube.fits",
+      "layout": "lightstack"
+    },
+    {
+      "step": "edit",
+      "action": "drop_invalid",
+      "threshold": 0.0,
+      "frac_valid": 0.01,
+      "use_dq": false
+    },
+    {
+      "step": "psfs",
+      "source": "files",
+      "files": [
+        {
+          "filter": "F814W",
+          "path": "psf/d1_psf_HST_F814W_40mas.fits"
+        },
+        {
+          "filter": "F150W",
+          "path": "psf/d1_psf_JWST_F150W_20mas.fits"
+        },
+        {
+          "filter": "F200W",
+          "path": "psf/d1_psf_JWST_F200W_20mas.fits"
+        },
+        {
+          "filter": "F277W",
+          "path": "psf/d1_psf_JWST_F277W_40mas.fits"
+        },
+        {
+          "filter": "F356W",
+          "path": "psf/d1_psf_JWST_F356W_40mas.fits"
+        },
+        {
+          "filter": "F444W",
+          "path": "psf/d1_psf_JWST_F444W_40mas.fits"
+        }
+      ],
+      "reference": "F444W",
+      "pixel_scale_arcsec": 0.04
+    },
+    {
+      "step": "kernels",
+      "reference": "F444W",
+      "method": "wiener",
+      "eps": 0.05,
+      "eps_mode": "absolute",
+      "shape": "reference",
+      "auto": false
+    },
+    {
+      "step": "match",
+      "reference": "F444W",
+      "mode": "lightstack",
+      "allow_unmatched": false
+    }
+  ]
+}

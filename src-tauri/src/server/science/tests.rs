@@ -7,6 +7,7 @@ use axum::http::{header, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 use astroburst_lib::core::stacking::calibration::stack_from_paths_with_memory;
@@ -2504,6 +2505,59 @@ async fn a_cubeprep_job_runs_the_d1_recipe_from_the_data_root_and_lists_its_file
     assert_eq!(recorded["products"], json!([]));
     assert_eq!(recorded["error"], Value::Null);
     assert!(recorded.get("error_code").is_none() && recorded.get("error_hint").is_none());
+
+    let saved = std::fs::read(output_dir.join("recipe.json")).unwrap();
+    let response = send(
+        &app,
+        authorized(Method::POST, &cubeprep_uri(&session))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(saved.clone()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted = body_json(response).await;
+    assert_eq!(accepted["warnings"], json!([]), "{accepted}");
+    let repeated = job_of(&session, &accepted);
+    wait_for_workers(&state).await;
+    let again = get(&app, &outcome_uri(&session, &repeated.id)).await;
+    assert_eq!(repeated.current_status(), JobStatus::Done, "{again}");
+    let rerun = &again["outcome"]["result"];
+    let saved_sha256: String = Sha256::digest(&saved)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(result["provenance"]["recipe_sha256"], json!(saved_sha256));
+    assert_eq!(rerun["provenance"]["recipe_sha256"], json!(saved_sha256));
+    assert_eq!(
+        rerun["provenance"]["dependencies"],
+        result["provenance"]["dependencies"]
+    );
+    let directories = |run: &Value| -> Vec<Value> {
+        run["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["directory"].clone())
+            .collect()
+    };
+    assert_eq!(directories(rerun), directories(result));
+    assert_eq!(
+        rerun["files"].as_array().unwrap().len(),
+        result["files"].as_array().unwrap().len()
+    );
+    let cube_sha256 = |run: &Value| -> Value {
+        let cube = Path::new(run["cube"].as_str().unwrap());
+        let folder = Path::new(run["output_dir"].as_str().unwrap());
+        run["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| folder.join(file["path"].as_str().unwrap()) == cube)
+            .expect("the cube is listed among the files")["sha256"]
+            .clone()
+    };
+    assert_eq!(cube_sha256(rerun), cube_sha256(result));
 }
 
 #[tokio::test]
@@ -2574,6 +2628,38 @@ async fn cubeprep_refuses_a_bad_recipe_with_its_code_and_hint_before_taking_a_jo
         state.config.jobs_max
     );
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn a_cubeprep_recipe_that_cuts_before_the_match_is_accepted_with_the_validation_advisory() {
+    let out = tempfile::tempdir().unwrap();
+    let state = test_state();
+    let session = state.create_session().unwrap();
+    let app = science_app(cubeprep_cfg("127.0.0.1:8080", out.path()), &state);
+    let mut recipe = d1_recipe();
+    recipe["steps"].as_array_mut().unwrap().insert(
+        5,
+        json!({ "step": "edit", "action": "cut", "x_start": 2, "x_end": 40, "y_start": 2, "y_end": 40 }),
+    );
+    let advisory = json!(
+        "09_match: 06_edit cuts the cube before the match; pixels within half a kernel width of the cut edges are matched against zeros; place the cut after match to use the cut-away data"
+    );
+
+    let response = post_authorized(&app, &cubeprep_uri(&session), recipe).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let accepted = body_json(response).await;
+    assert_eq!(accepted["warnings"], json!([advisory]), "{accepted}");
+    let job = job_of(&session, &accepted);
+    wait_for_workers(&state).await;
+    let outcome = get(&app, &outcome_uri(&session, &job.id)).await;
+    assert_eq!(job.current_status(), JobStatus::Done, "{outcome}");
+    assert!(
+        outcome["outcome"]["warnings"]
+            .as_array()
+            .unwrap()
+            .contains(&advisory),
+        "{outcome}"
+    );
 }
 
 #[tokio::test]
@@ -2731,6 +2817,52 @@ async fn a_cubeprep_job_writes_under_the_default_output_root_of_the_server_root(
         Some(out.as_path())
     );
     assert!(output_dir.join("08_match").is_dir());
+}
+
+#[tokio::test]
+async fn a_cubeprep_job_reads_its_inputs_under_a_server_root_whose_name_ends_in_a_period() {
+    let parent = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(parent.path()).unwrap();
+    let data = canonical.join("d1.");
+    copy_tree(&lightstack_fixtures().join("d1"), &data);
+    copy_tree(&lightstack_fixtures().join("d1"), &canonical.join("d1"));
+
+    for bind in ["0.0.0.0:8080", "127.0.0.1:8080"] {
+        let out = tempfile::tempdir().unwrap();
+        let state = test_state();
+        let session = state.create_session().unwrap();
+        let cfg = cfg_with(
+            bind,
+            &[
+                ("ASTROBURST_TOKEN", TOKEN),
+                ("ASTROBURST_SERVER_ROOT", data.to_str().unwrap()),
+                ("ASTROBURST_OUTPUT_ROOT", out.path().to_str().unwrap()),
+            ],
+        );
+        let app = science_app(cfg, &state);
+        let (job, _) = accepted_cubeprep(&app, &session, d1_recipe()).await;
+        wait_for_workers(&state).await;
+        let response = send(
+            &app,
+            authorized(Method::GET, &outcome_uri(&session, &job.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{bind}");
+        let outcome = body_json(response).await;
+        assert_eq!(job.current_status(), JobStatus::Done, "{bind}: {outcome}");
+        let dependencies = outcome["outcome"]["result"]["provenance"]["dependencies"]
+            .as_array()
+            .unwrap();
+        assert_eq!(dependencies.len(), 12, "{bind}");
+        assert!(
+            dependencies
+                .iter()
+                .all(|dependency| Path::new(dependency["path"].as_str().unwrap()).starts_with(&data)),
+            "{bind}: {dependencies:?}"
+        );
+    }
 }
 
 #[tokio::test]
