@@ -79,7 +79,7 @@ The binary is `target/release-server/astroburst-server` (`target/release/` with 
 Start-up log:
 
 ```
-[2026-10-23T12:00:00Z INFO  astroburst_server] AstroBurst Headless Server v0.7.5
+[2026-10-23T12:00:00Z INFO  astroburst_server] AstroBurst Headless Server v0.8.0
 [2026-10-23T12:00:00Z INFO  astroburst_server] Listening on 127.0.0.1:8080
 [2026-10-23T12:00:00Z INFO  astroburst_server] Session TTL: 900s, Max sessions: 8
 [2026-10-23T12:00:00Z INFO  astroburst_server] Per-session cache: 32 entries / 2048 MiB
@@ -353,7 +353,7 @@ The guard's refusals (`401`, `403`, `421` and `503 guard_unconfigured`, section 
 No session needed (`server/router.rs`).
 
 ```json
-{ "status": "ok", "version": "0.7.5", "sessions_active": 2, "sessions_total": 17 }
+{ "status": "ok", "version": "0.8.0", "sessions_active": 2, "sessions_total": 17 }
 ```
 
 `sessions_total` counts every session created since start.
@@ -364,7 +364,7 @@ What this server offers (`server/science/capabilities.rs`). No session needed.
 
 ```json
 {
-  "version": "0.7.6",
+  "version": "0.8.0",
   "features": { "mast": true, "astrometry_net": true, "vizier": true, "asdf_full": true },
   "limits": { "session_max": 8, "session_ttl_seconds": 900, "jobs_max": 4, "cache_max_entries": 32, "cache_max_bytes": 2147483648 },
   "routes": [ { "method": "GET", "path": "/health" }, { "method": "POST", "path": "/sessions" } ],
@@ -1135,8 +1135,8 @@ Steps, their keys and defaults; a filter value names the `filter` of an input:
 | `align` | `reference` (required, a filter: the grid every image is resampled onto); `method`: `bilinear` (default), `bicubic` or `exact`; `border_crop`: pixels cut from each side, default `1`; `area_rule`: `lightstack` (default), `scale` or `keep` |
 | `cube` | `reference`: a filter, default the `align` reference; `order`: `wavelength` (default, by pivot) or `given`; `output`: a `.fits` file name, default `cube.fits`; `layout`: `lightstack` (default, the planes in the primary HDU) or `mef` (SCI, with ERR and DQ cubes when the inputs carry them; `align` writes SCI only) |
 | `edit` | `action` and its keys: `drop_invalid` (`threshold`, default `0`; `frac_valid`, default `0.01`; `use_dq`, default `false`), `remove_filter` (`filter`), `cut` (`x_start`, `x_end`, `y_start`, `y_end`), `cut_sky` (`ra`, `dec`, `size_arcsec`, `rounding`), `header` (`redshift`, `ra_center`, `dec_center`, `use_brightest_pixel`) or `reference_nan_mask` (`reference_slice`, `mode`) |
-| `psfs` | `source` and its keys: `files` (`files`, a list of `filter` and `path`) or `empirical` (`dataset`; `filters`; `data_dir`, default the server root; the keys of the desktop's empirical PSF options: `cutout_size`, `background_border`, `background_sigma`, `clip_negative`, `noise_threshold`, `radial_cleaning`, `cleaning_sigma`, `cleaning_consecutive_bins`, `normalization_radius`, `normalization_radius_unit`, `psf_size`, `oversampling`, `stack`; `oversampling_order` may only be `3`). An empirical PSF is built from the one FITS file in `data_dir` whose name the registry reads as that filter, with the stars of `stars_<filter>.reg` (lower case) beside it. `pixel_scale_arcsec` resamples every PSF to that scale and then needs `reference`, the filter whose PSF sets the size |
-| `kernels` | `reference` (required, a filter with a PSF); `method` (required): `wiener` (`eps`, default `0.001`; `eps_mode`: `absolute` (default) or `relative`; `shape`: `reference` (default) or `[rows, cols]`, both odd) or `window` (the desktop's taper window keys and `regularization`); `auto`: let the desktop's automatic search choose `eps` or the window, default `false` |
+| `psfs` | `source` and its keys: `files` (`files`, a list of `filter` and `path`) or `empirical` (`dataset`; `filters`; `data_dir`, default the server root; the keys of the desktop's empirical PSF options: `cutout_size`, `background_border`, `background_sigma`, `clip_negative`, `noise_threshold`, `radial_cleaning`, `cleaning_sigma`, `cleaning_consecutive_bins`, `normalization_radius`, `normalization_radius_unit`, `psf_size`, `oversampling`, `stack`; `oversampling_order` may only be `3`). An empirical PSF is built from the one FITS file in `data_dir` whose name the registry reads as that filter, with the stars of `stars_<filter>.reg` (lower case) beside it. `pixel_scale_arcsec` resamples every PSF to that scale and then needs `reference`, the filter whose PSF sets the size; `recentre` (0.8.0, default `false`): recentre each PSF on its centroid, otherwise the report states the shift a kernel will apply |
+| `kernels` | `reference` (required, a filter with a PSF); `method` (required): `wiener` (`eps`, default `0.001`; `eps_mode`: `absolute` (default) or `relative`; `shape`: `reference` (default), `max` (pads the smaller PSF to the larger size on each axis, 0.8.0) or `[rows, cols]`, both odd) or `window` (the desktop's taper window keys and `regularization`); `auto`: let the desktop's automatic search choose `eps` or the window, default `false` |
 | `match` | `reference` (required, the filter the kernels lead to); `mode`: `lightstack` (default) or `astroburst`; `allow_unmatched`: default `false` |
 | `export` | `output`: a `.fits` file name; copies the current cube under that name |
 
@@ -1193,7 +1193,8 @@ The outcome's `result` (section 6):
 - Each `files` entry also carries `sha256`, computed from the final file bytes. Existing `path` and `bytes` fields remain unchanged. The execution lock is not a product and is excluded.
 - `provenance` has its own `schema_version: 1`, software version, operating system, architecture, start time, `recipe_sha256`, resolved dependencies and the effective filter registry. Dependencies include science inputs, supplied PSFs, crop regions, and the FITS and DS9 files selected for empirical PSFs. Each dependency carries its roles, size and SHA-256. The recipe hash identifies the exact saved `recipe.json`, including resolved paths; it is not independent of file location.
 - Input SHA-256 values and the filter registry are checked before and after execution. Input caches are invalidated before processing. A persistent change fails with `input_changed`; no successful `result.json` is published. These checkpoints are not an atomic input snapshot: keep inputs unchanged throughout the run. Hashes establish file identity, not scientific accuracy or eligibility for automatic cache reuse.
-- `result.json` is published atomically after product hashing and a final cancellation check. Cancelled or failed runs retain their partial files without a success manifest. Hashing checks cancellation between read blocks; progress stages include `hashing_inputs`, `verifying_inputs` and `hashing_products`. Every run must use a new or empty output folder, with exclusive reservation during execution.
+- `result.json` is published atomically after product hashing and a final cancellation check. Cancelled or failed runs retain their partial files without a success manifest. Since 0.8.0 they write `failure.json` instead, with the stage, step index, code, message and hint, the validation advisories and the warnings of the steps that finished; the execution lock records the process id, start time and software version. A cancel stops a running step at its next input or plane boundary.
+- MEF cubes carry a `NOISCORR` extension (0.8.0): the normalized noise autocorrelation of each plane after alignment or matching, with the `NCORRK`, `NCORRSRC` and `NCORRALN` cards, and the `FILTERS` table gains `NOISCORR_ALIGN`, `NOISCORR_MATCH` and `MATCH`. Kernel files carry `SRCFWHM`, `TGTFWHM`, `MATFWHM` and `KSUMSQ`. The LIGHTSTACK layout carries none of them. Hashing checks cancellation between read blocks; progress stages include `hashing_inputs`, `verifying_inputs` and `hashing_products`. Every run must use a new or empty output folder, with exclusive reservation during execution.
 - `warnings` collects the steps' warnings, each prefixed with its step folder, and the outcome's `warnings` repeat them. The kernel and matching warnings judge the PSF match (residuals, FWHM, encircled energy, negative kernel lobes, values near NaN holes); read them before using a cube.
 - `products` stays empty: the files are on disk, not refs. `output_dir` lies under a path root, so `POST /v2/sessions/:sid/open` opens a file of it and `GET /v2/fs?dir=<output_dir>` lists it.
 

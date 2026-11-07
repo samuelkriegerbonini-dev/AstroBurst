@@ -38,7 +38,7 @@
 </p>
 <p align="center"><em>The Pillars of Creation from three JWST NIRCam mosaics (jw02739), F444W to red, F200W to green and F090W to blue, aligned through their WCS, level-matched and stretched in the compose wizard.</em></p>
 
-**Version:** 0.7.5. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
+**Version:** 0.8.0. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## What it is
 
@@ -188,7 +188,7 @@ Where AstroBurst is genuinely different: a single desktop app that reads ASDF na
 
 Pre-1.0, developed by one maintainer with outside contributions. Formats, command names and the REST API may change before 1.0.
 
-Version 0.7.5 adds local-first plate solving, Gaia DR3 WCS refinement, catalogue management, MAST filters and scientific export and photometry improvements. The FITS and ASDF readers, display path, compose wizard and export are used daily; newer processing and science tools have had less time in the field. The [technical document](docs/astroburst_technical_document.pdf) (release 0.7.0) describes the algorithms and the rules behind each step; [CHANGELOG.md](CHANGELOG.md) records later changes. CI checks the TypeScript types, a production build, eslint with zero warnings allowed, the Rust library on Windows, all Rust features on Ubuntu and macOS (including the headless server), the vitest suite and the Node.js script tests.
+Version 0.8.0 records the noise correlation that alignment and PSF matching introduce in Cube Prep cubes and uses it for SAGUI regional errors, writes FITS products atomically, and adds an All tools browser and cube frame stepping in the viewer. Earlier 0.7.x releases added Cube Prep and SAGUI on the desktop, masks, mosaics by WCS, local-first plate solving and Gaia DR3 WCS refinement. The FITS and ASDF readers, display path, compose wizard and export are used daily; newer processing and science tools have had less time in the field. The [technical document](docs/astroburst_technical_document.pdf) (release 0.8.0) describes the algorithms and the rules behind each step; [CHANGELOG.md](CHANGELOG.md) records later changes. CI checks the TypeScript types, a production build, eslint with zero warnings allowed, the Rust library on Windows, all Rust features on Ubuntu and macOS (including the headless server), the vitest suite and the Node.js script tests.
 
 Real-data validation of the local solver found 46 of 48 DSS2 fields of 0.4 degrees and wider solved with 2MASS, and 23 of 24 fields of 1 degree and wider with Tycho-2 alone, with no false solution in those tests. On the tested JWST FGS fields of the LMC, Gaia refinement reduced a 1.77 arcsec header offset to a hold-out RMS of 34 to 44 mas. These results describe the tested fields, not a general accuracy guarantee.
 

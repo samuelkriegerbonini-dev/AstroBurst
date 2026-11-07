@@ -71,7 +71,7 @@ The categorical preview may be reduced in resolution for display. The exported F
 - Eligible support requires finite SCI in every band and no excluded DQ bit in any band. Starlet can further restrict the support. Missing DQ means that only finite-value support can be checked. DQ flags have instrument-specific meaning; preserving flags does not itself choose which flags should exclude a pixel.
 - Regional photometry sums the original calibrated SCI values within each region, rather than the transformed values used for clustering, and converts the sum and its uncertainty to Jy. The result's unit is used by both the SED viewer and CSV; the manifest separately records the original input unit. For example, a summed input of 11 mJy per pixel becomes a regional flux of 0.011 Jy. Zero and negative finite fluxes remain valid measurements.
 - Regional uncertainty is `sqrt(sum(ERR^2))` under an independent-pixel assumption. If a used uncertainty is missing or invalid, the regional uncertainty remains unknown; it is not replaced by zero. Missing ERR does not prevent segmentation, but does prevent known regional errors.
-- Alignment and PSF convolution propagate available variance and DQ, but introduce covariance between output pixels. That covariance is not represented by an ERR plane or by the current regional error calculation. Report this limitation when interpreting regional S/N or fitting the SEDs.
+- Alignment and PSF convolution propagate available variance and DQ, but introduce covariance between output pixels that an ERR plane cannot represent. Since 0.8.0 a scientific MEF cube records it as a `NOISCORR` extension, one normalized noise autocorrelation map per plane, and SAGUI adds `error_correlated_jy`, the regional error with that correlation applied. It stays empty when the cube has no `NOISCORR`, and for PSF-matched planes whose map covers alignment only; then only the independent-pixel error is known, and it underestimates the true uncertainty. The LIGHTSTACK layout never carries `NOISCORR`.
 
 Unit prefixes preserve their physical meaning: `mJy` is millijansky and `MJy` is megajansky. In Cube Prep, `mJy/sr` and `MJy/sr` therefore differ by a factor of one billion before conversion. The legacy photometry calibration supports the megajansky convention and refuses milli input; convert it explicitly in Cube Prep. Spectral calculations reject an explicitly incompatible ERR unit when using ERR. Missing ERR BUNIT retains the documented assumption that ERR uses the SCI unit; no scale conversion is invented.
 
@@ -85,7 +85,7 @@ SAGUI writes a separate `sagui-<run-id>` folder. The main products are:
 |---|---|
 | `labels.fits` | Full-resolution region identifiers in the `LABELS` extension; zero is background. |
 | `support.fits` | Segmentation support in the `SUPPORT` extension. |
-| `regions.csv` | Region and band identifiers, pixel counts, pivot wavelengths, summed flux and uncertainty in Jy; unknown errors are empty. |
+| `regions.csv` | Region and band identifiers, pixel counts, pivot wavelengths, summed flux, independent-pixel uncertainty and, from 0.8.0, `error_correlated_jy`, all in Jy; unknown errors are empty. Results saved before 0.8.0 still reopen. |
 | `manifest.json` | Completion state, input/runtime/library identities, configuration, output hashes, platform and measurement limitations. |
 | `config.json`, `bridge.R` | Parameters and the R bridge used for the job. |
 | `packages.tsv`, `session.txt` | Installed package and R session details. |
