@@ -26,6 +26,7 @@ const PER_STERADIAN_SUFFIXES: [&str; 6] = ["/sr", "/steradian", ".sr**-1", "sr**
 const PER_ARCSEC2_SUFFIXES: [&str; 5] = ["/arcsec2", "/arcsec**2", "/arcsec^2", ".arcsec-2", ".arcsec**-2"];
 const PER_PIXEL_SUFFIXES: [&str; 4] = ["/pixel", "/pix", ".pixel**-1", ".pix**-1"];
 const JANSKY_NAMES: [&str; 2] = ["jansky", "jy"];
+const FITS_MEGAJANSKY: &str = "MJy";
 const LIGHTSTACK_SCALE_RTOL: f64 = 1e-6;
 const LIGHTSTACK_SCALE_ATOL: f64 = 1e-8;
 
@@ -188,6 +189,7 @@ fn prefix_scale(prefix: &str) -> Option<f64> {
         "u" | "\u{b5}" | "\u{3bc}" => Some(1e-6),
         "n" => Some(1e-9),
         word => match word.to_ascii_lowercase().as_str() {
+            "mega" => Some(1e6),
             "milli" => Some(1e-3),
             "micro" => Some(1e-6),
             "nano" => Some(1e-9),
@@ -197,6 +199,9 @@ fn prefix_scale(prefix: &str) -> Option<f64> {
 }
 
 fn jansky_scale(unit: &str) -> Option<f64> {
+    if unit == FITS_MEGAJANSKY {
+        return Some(JY_PER_MJY);
+    }
     JANSKY_NAMES.iter().find_map(|name| {
         let start = unit.len().checked_sub(name.len())?;
         unit.get(start..).filter(|tail| tail.eq_ignore_ascii_case(name))?;
@@ -609,6 +614,84 @@ mod tests {
         assert_eq!(to_jy.bunit_in.as_deref(), Some("10.0*nanoJansky"));
         let to_mjy_sr = unit_conversion(&grizli, None, TargetUnit::MjyPerSr).unwrap();
         assert!((to_mjy_sr.factor - 1e-8 / (1e6 * 9.4e-15)).abs() < 1e-12 * to_mjy_sr.factor, "{}", to_mjy_sr.factor);
+    }
+
+    #[test]
+    fn fits_megajansky_per_pixel_is_physical_while_all_caps_stays_refused() {
+        let physical = |bunit: &str| match classify_unit(&make_header(&[("BUNIT", bunit)])).class {
+            UnitClass::PerPixelPhysical { jy_per_unit } => Some(jy_per_unit),
+            _ => None,
+        };
+        for (unit, expected) in [("MJy", 1e6), ("MJy/pixel", 1e6), (" MJy / pix ", 1e6), ("MJy.pix**-1", 1e6), ("10*MJy", 1e7), ("10*MJy/pixel", 1e7), ("megaJansky", 1e6), ("MegaJy", 1e6), ("MEGAJY", 1e6), ("MEGAJANSKY", 1e6), ("mJy", 1e-3)] {
+            let got = physical(unit).unwrap_or_else(|| panic!("{unit} is not a flux density per pixel"));
+            assert!((got - expected).abs() <= expected * 1e-15, "{unit}: {got}");
+        }
+        for refused in ["MJY", "Mjy", "MJansky", "MJY/pixel", "MJY/arcsec2", "Mjy/arcsec2", "kJy", "kiloJansky"] {
+            assert_eq!(classify_unit(&make_header(&[("BUNIT", refused)])).class, UnitClass::Unknown, "{refused}");
+        }
+        for (unit, jy_per_sr) in [
+            ("MJy/sr", 1e6),
+            ("megaJansky/sr", 1e6),
+            ("MEGAJY/SR", 1e6),
+            ("MJy/arcsec2", 1e6 * ARCSEC_PER_RADIAN.powi(2)),
+            ("MJy/arcsec**2", 1e6 * ARCSEC_PER_RADIAN.powi(2)),
+            ("MJy/arcsec^2", 1e6 * ARCSEC_PER_RADIAN.powi(2)),
+            ("MJy.arcsec-2", 1e6 * ARCSEC_PER_RADIAN.powi(2)),
+            ("MJy.arcsec**-2", 1e6 * ARCSEC_PER_RADIAN.powi(2)),
+            ("megaJansky/arcsec2", 1e6 * ARCSEC_PER_RADIAN.powi(2)),
+        ] {
+            assert_eq!(classify_unit(&make_header(&[("BUNIT", unit)])).class, UnitClass::SurfaceBrightness { jy_per_sr_per_unit: jy_per_sr }, "{unit}");
+        }
+        let header = make_header(&[("BUNIT", "MJy"), ("PIXAR_SR", "2.1E-13")]);
+        let to_jy = unit_conversion(&header, None, TargetUnit::JyPerPixel).unwrap();
+        assert_eq!(to_jy.factor, 1e6);
+        assert_eq!(to_jy.bunit_in.as_deref(), Some("MJy"));
+        assert!(to_jy.method.ends_with("Jy per MJy"), "{}", to_jy.method);
+        let to_mjy_sr = unit_conversion(&header, None, TargetUnit::MjyPerSr).unwrap();
+        assert!((to_mjy_sr.factor * 2.1e-13 - 1.0).abs() < 1e-12, "{}", to_mjy_sr.factor);
+        assert_eq!(area_correction(&header, None, &geometry_2x()).unwrap().data_factor, 4.0);
+    }
+
+    #[test]
+    fn a_megajansky_bunit_wins_over_count_calibration_cards_as_jansky_does() {
+        let arcsec2 = ARCSEC_PER_RADIAN * ARCSEC_PER_RADIAN;
+        for card in COUNT_CALIBRATION_CARDS.into_iter().chain(ROMAN_CONVERSION_MJY_KEYS).chain(GENERIC_ZERO_POINT_KEYS).chain(CALIBRATION_ZERO_POINT_CARDS) {
+            let header = |bunit: &str| make_header(&[("BUNIT", bunit), (card, "0.5")]);
+            let default_rule = |bunit: &str| {
+                let correction = area_correction(&header(bunit), None, &geometry_2x()).unwrap();
+                (correction.rule, correction.data_factor)
+            };
+            for (unit, jy_per_unit) in [("Jy", 1.0), ("MJy", 1e6), ("MJy/pixel", 1e6), ("10*MJy", 1e7), ("megaJansky", 1e6), ("MegaJy", 1e6)] {
+                assert_eq!(classify_unit(&header(unit)).class, UnitClass::PerPixelPhysical { jy_per_unit }, "{unit} with {card}");
+                assert_eq!(default_rule(unit), (AreaRule::Scale, 4.0), "{unit} with {card}");
+            }
+            for (unit, jy_per_sr_per_unit) in [("MJy/sr", 1e6), ("Jy/arcsec2", arcsec2), ("MJy/arcsec2", 1e6 * arcsec2)] {
+                assert_eq!(classify_unit(&header(unit)).class, UnitClass::SurfaceBrightness { jy_per_sr_per_unit }, "{unit} with {card}");
+                assert_eq!(default_rule(unit), (AreaRule::Keep, 1.0), "{unit} with {card}");
+            }
+            for unit in ["ELECTRONS/S", "MJY", "Mjy", "MJansky", "MJY/arcsec2"] {
+                assert_eq!(classify_unit(&header(unit)).class, UnitClass::PerPixelCalibrated { cards: vec![card.to_string()] }, "{unit} with {card}");
+                assert_eq!(default_rule(unit), (AreaRule::Keep, 1.0), "{unit} with {card}");
+            }
+        }
+
+        for unit in ["Jy", "MJy"] {
+            let mut header = make_header(&[("BUNIT", unit), ("PHOTFNU", "3.0E-07"), ("MAGZERO", "25.0"), ("PIXAR_SR", "9.4E-15")]);
+            let correction = area_correction(&header, None, &geometry_2x()).unwrap();
+            assert_eq!(correction, AreaCorrection { rule: AreaRule::Scale, requested: false, data_factor: 4.0, area_ratio: 4.0 }, "{unit}");
+            let mut sci = Array2::from_elem((2, 2), 1.5f32);
+            let mut err = Array2::from_elem((2, 2), 0.25f32);
+            apply_area_correction(&correction, &mut sci, Some(&mut err), &mut header);
+            assert!(sci.iter().all(|value| *value == 6.0) && err.iter().all(|value| *value == 1.0), "{unit}");
+            assert_eq!((header.get_f64("PHOTFNU"), header.get_f64("MAGZERO")), (Some(3.0e-7), Some(25.0)), "{unit}");
+            assert!(relative(header.get_f64("PIXAR_SR"), 3.76e-14) < 1e-12, "{unit}");
+            assert!(history_text(&header).contains("Area rule scale"), "{unit}: {}", history_text(&header));
+        }
+
+        let converted = unit_conversion(&make_header(&[("BUNIT", "MJy"), ("PHOTFNU", "3.0E-07")]), None, TargetUnit::JyPerPixel).unwrap();
+        assert_eq!((converted.factor, converted.method.as_str()), (1e6, "1E6 Jy per MJy"));
+        let refused = unit_conversion(&make_header(&[("BUNIT", "MJY"), ("PHOTFNU", "3.0E-07")]), None, TargetUnit::JyPerPixel).unwrap_err();
+        assert!(matches!(&refused, UnitError::NoConversion { reason, .. } if reason.contains("not per second")), "{refused}");
     }
 
     #[test]
