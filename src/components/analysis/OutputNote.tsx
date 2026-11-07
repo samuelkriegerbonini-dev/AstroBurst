@@ -4,6 +4,8 @@ import { SHOW_IN_FOLDER, outputNote } from "../../utils/outputNote";
 import { revealInFolder } from "../../utils/revealInFolder";
 import type { ScientificProvenance } from "../../shared/types/cube";
 
+const MANIFEST_WARNING = "In the output folder, which is cleared when AstroBurst starts. Export > FITS does not copy this manifest, so keep a copy next to the exported files.";
+
 function OutputNote({ path, kind, provenance }: { path: string; kind?: "manifest"; provenance?: ScientificProvenance }) {
   const [revealFailure, setRevealFailure] = useState<{ path: string; message: string | null } | null>(null);
   const revealError = revealFailure?.path === path ? revealFailure.message : null;
@@ -22,10 +24,10 @@ function OutputNote({ path, kind, provenance }: { path: string; kind?: "manifest
           className="ml-auto shrink-0 flex items-center gap-1 text-zinc-500 hover:text-zinc-300"
         >
           <FolderOpen size={9} />
-          {kind === "manifest" ? "Show manifest" : SHOW_IN_FOLDER}
+          {SHOW_IN_FOLDER}
         </button>
       </div>
-      <span className="leading-snug">{kind === "manifest" ? "Keep the manifest with its result files; exporting an image alone does not copy its provenance." : note.warning}</span>
+      <span className="leading-snug">{kind === "manifest" ? MANIFEST_WARNING : note.warning}</span>
       {source?.sha256 && <span className="font-mono break-all" title={`${source.input_ref}\n${source.sha256}`}>Input SHA-256: {source.sha256.slice(0, 12)}{source.sha256.length > 12 ? "…" : ""}</span>}
       {verification && <span className="leading-snug">Verification: {verification}</span>}
       {provenance?.integrity_limit && <span className="leading-snug">{provenance.integrity_limit}</span>}

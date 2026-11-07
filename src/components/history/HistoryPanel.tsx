@@ -1,6 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useState } from "react";
 import { CornerDownRight, Download, GitBranch, History, Pencil, RefreshCw, Redo2, RotateCcw, Trash2, Undo2 } from "lucide-react";
-import { ErrorAlert } from "../ui";
+import { ErrorAlert, SectionHeader } from "../ui";
 import { CONFIRM_DELETE_LABEL, useArmedConfirm } from "../../hooks/useArmedConfirm";
 import { loadHistory, useHistoryController, useHistoryRender, useHistorySnapshot } from "../../hooks/useHistory";
 import { estimateNextNode } from "../../services/ops";
@@ -69,8 +69,6 @@ function NodeRow({ node, masks, current, undone, nested, hasDownstream, actions 
         className="flex-1 min-w-0 text-left disabled:cursor-not-allowed"
         onClick={() => actions.onGoTo(node.id)}
         disabled={actions.blocked}
-        aria-label={`Go to ${node.id}`}
-        title={`Show ${label} (${node.id})`}
       >
         <span className="flex items-center gap-1.5">
           <span className="font-mono text-[9px] text-zinc-600">{node.id}</span>
@@ -190,24 +188,27 @@ export function HistoryPanelView({ snapshot, estimate, fileName, blockedReason, 
   const hasNodes = (doc?.nodes.length ?? 0) > 0;
   return (
     <div className="flex flex-col gap-2 p-3">
-      <div className="flex items-center gap-2">
-        <History size={14} className="text-amber-400" />
-        <span className="text-sm font-semibold text-zinc-200 tracking-wide">History</span>
-        <span className="text-[10px] text-zinc-500 truncate" title={fileName}>{fileName}</span>
-        <span className="ml-auto flex items-center gap-1">
-          <button type="button" data-history-undo="" className={HEADER_BUTTON} onClick={onUndo} disabled={blocked || !doc || doc.head === null} title="Undo (Ctrl+Z)">
-            <Undo2 size={11} />
-            Undo
-          </button>
-          <button type="button" data-history-redo="" className={HEADER_BUTTON} onClick={onRedo} disabled={blocked || !doc || !canRedo(doc)} title="Redo (Ctrl+Shift+Z or Ctrl+Y)">
-            <Redo2 size={11} />
-            Redo
-          </button>
-          <button type="button" className={ICON_BUTTON} onClick={onRefresh} aria-label="Reload the history from disk" title="Reload the history from disk">
-            <RefreshCw size={11} />
-          </button>
-        </span>
-      </div>
+      <SectionHeader
+        icon={<History size={14} className="text-amber-400" />}
+        title="History"
+        subtitle={fileName}
+        truncateSubtitle
+        actions={
+          <>
+            <button type="button" data-history-undo="" className={HEADER_BUTTON} onClick={onUndo} disabled={blocked || !doc || doc.head === null} title="Undo (Ctrl+Z)">
+              <Undo2 size={11} />
+              Undo
+            </button>
+            <button type="button" data-history-redo="" className={HEADER_BUTTON} onClick={onRedo} disabled={blocked || !doc || !canRedo(doc)} title="Redo (Ctrl+Shift+Z or Ctrl+Y)">
+              <Redo2 size={11} />
+              Redo
+            </button>
+            <button type="button" className={ICON_BUTTON} onClick={onRefresh} aria-label="Reload the history from disk" title="Reload the history from disk">
+              <RefreshCw size={11} />
+            </button>
+          </>
+        }
+      />
       {blockedReason && (
         <div role="note" className="text-[10px] text-amber-300/90 bg-amber-900/15 border border-amber-700/25 rounded px-2 py-1.5">
           {blockedReason}

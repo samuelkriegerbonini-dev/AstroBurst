@@ -8,7 +8,7 @@ function ErrorAlert({ message }: ErrorAlertProps) {
   if (!message) return null;
 
   return (
-    <div className="ab-error-alert">
+    <div className="ab-error-alert" role="alert">
       {message}
     </div>
   );

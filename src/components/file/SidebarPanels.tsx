@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { Info } from "lucide-react";
 import { useFileContext, useHistContext } from "../../context/PreviewContext";
 import { useMousePixel } from "../../hooks/useMousePixelStore";
 import { useAnalysisTarget, useMeasurementSource } from "../../hooks/useAnalysisTarget";
@@ -7,6 +8,21 @@ import PixelReadout from "../header/PixelReadout";
 import MeasurementBadge from "../analysis/MeasurementBadge";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import { wcsProbeTarget } from "../../utils/analysisTarget";
+import "./info-panel.css";
+
+const OBSERVATION_FIELDS = [
+  ["OBJECT", "Object"],
+  ["TELESCOP", "Telescope"],
+  ["INSTRUME", "Instrument"],
+  ["FILTER", "Filter"],
+  ["PUPIL", "Pupil"],
+  ["EXPTIME", "Exposure"],
+  ["DATE-OBS", "Observed"],
+] as const;
+
+function formatStat(value: number | undefined, digits = 2): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "—";
+}
 
 export const InfoPanel = memo(function InfoPanel() {
   const { file } = useFileContext();
@@ -15,7 +31,12 @@ export const InfoPanel = memo(function InfoPanel() {
   const target = useAnalysisTarget();
   const probePath = target.path;
   const valueSource = useMeasurementSource(false);
-  if (!file) return <div className="px-3 py-4 text-[10px] text-zinc-600">No file selected</div>;
+  if (!file) return (
+    <section className="ab-info-panel">
+      <header className="ab-info-heading"><Info size={15} aria-hidden="true" /><h2>File info</h2></header>
+      <div className="ab-info-empty"><strong>No file selected</strong><p>Select a file to inspect its details.</p></div>
+    </section>
+  );
   const wcsProbe = probePath
     ? wcsProbeTarget({
         path: probePath,
@@ -24,67 +45,79 @@ export const InfoPanel = memo(function InfoPanel() {
         fileDims: file.result?.dimensions ?? null,
       })
     : null;
+  const result = file.result;
+  const header = result?.header;
+  const observation = OBSERVATION_FIELDS.filter(([key]) => header?.[key]);
   return (
-    <div className="flex flex-col gap-3 px-3 py-2 text-[10px] font-mono text-zinc-500">
-      {wcsProbe && (
-        <WcsReadout
-          filePath={wcsProbe.path}
-          imageWidth={wcsProbe.dimensions[0]}
-          imageHeight={wcsProbe.dimensions[1]}
-          mouseX={mousePixel?.x ?? null}
-          mouseY={mousePixel?.y ?? null}
-        />
-      )}
-      {valueSource && (
-        <div className="flex items-center gap-2">
-          <span className="text-zinc-600">Values from</span>
-          <MeasurementBadge />
-        </div>
-      )}
-      {probePath && (
-        <PixelReadout
-          filePath={probePath}
-          mouseX={mousePixel?.x ?? null}
-          mouseY={mousePixel?.y ?? null}
-        />
-      )}
-      {file.result?.dimensions && (
-        <div className="flex items-center gap-3 flex-wrap">
-          <span className="text-zinc-400">{file.result.dimensions[0]}&times;{file.result.dimensions[1]}</span>
-          {file.result.header?.BITPIX && <span>BITPIX {file.result.header.BITPIX}</span>}
-          {file.result.elapsed_ms && <span>{(file.result.elapsed_ms / 1000).toFixed(2)}s</span>}
-        </div>
-      )}
-      {histData && (
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-3 flex-wrap">
-            <span>mean={histData.mean?.toFixed(2)}</span>
-            <span>median={histData.median?.toFixed(2)}</span>
-            <span title={SIGMA_MAD_TITLE}>{SIGMA_MAD_LABEL}={histData.sigma?.toFixed(2)}</span>
-            {histData.masked && (
-              <span className="text-zinc-600" title="Pixels flagged by the DQ exclusion mask were ignored">
-                (DQ-masked, {histData.dq_excluded ?? 0} excluded)
-              </span>
+    <section className="ab-info-panel">
+      <header className="ab-info-header">
+        <div className="ab-info-heading"><Info size={15} aria-hidden="true" /><h2>File info</h2></div>
+        <p className="ab-info-filename" title={file.name}>{file.name}</p>
+      </header>
+      <div className="ab-info-body">
+        {result && (
+          <div className="ab-info-section">
+            <h3 className="sr-only">File details</h3>
+            <dl className="ab-info-fields">
+              {result.dimensions && <div><dt>Dimensions</dt><dd>{result.dimensions.join(" × ")}</dd></div>}
+              {header?.BITPIX && <div><dt title="FITS BITPIX">BITPIX</dt><dd>{header.BITPIX}</dd></div>}
+              {header?.BUNIT && <div><dt title="FITS BUNIT">Data unit</dt><dd>{header.BUNIT}</dd></div>}
+              {typeof result.elapsed_ms === "number" && Number.isFinite(result.elapsed_ms) && <div><dt>Load time</dt><dd>{(result.elapsed_ms / 1000).toFixed(2)} s</dd></div>}
+            </dl>
+          </div>
+        )}
+        {observation.length > 0 && (
+          <div className="ab-info-section">
+            <h3>Observation</h3>
+            <dl className="ab-info-fields">
+              {observation.map(([key, label]) => <div key={key}><dt title={key}>{label}</dt><dd>{header?.[key]}{key === "EXPTIME" ? " s" : ""}</dd></div>)}
+            </dl>
+          </div>
+        )}
+        {histData && (
+          <div className="ab-info-section">
+            <h3>Image statistics</h3>
+            <dl className="ab-info-metrics">
+              <div><dt>Mean</dt><dd>{formatStat(histData.mean)}</dd></div>
+              <div><dt>Median</dt><dd>{formatStat(histData.median)}</dd></div>
+              <div title={SIGMA_MAD_TITLE}><dt>{SIGMA_MAD_LABEL}</dt><dd>{formatStat(histData.sigma)}</dd></div>
+            </dl>
+            {histData.masked && <p className="ab-info-note" title="Pixels flagged by the DQ exclusion mask were ignored">DQ-masked · {histData.dq_excluded ?? 0} excluded</p>}
+          </div>
+        )}
+        {histData && (
+          <div className="ab-info-section">
+            <h3 title="Screen transfer function">Display transfer <span>STF</span></h3>
+            <dl className="ab-info-fields ab-info-stf">
+              <div data-tone="shadow"><dt title="S: shadow clipping point">Shadows</dt><dd>{formatStat(stfParams.shadow, 4)}</dd></div>
+              <div data-tone="midtone"><dt title="M: midtone balance">Midtones</dt><dd>{formatStat(stfParams.midtone, 4)}</dd></div>
+              <div data-tone="highlight"><dt title="H: highlight clipping point">Highlights</dt><dd>{formatStat(stfParams.highlight, 4)}</dd></div>
+            </dl>
+          </div>
+        )}
+        {probePath && (
+          <div className="ab-info-section ab-info-live">
+            <h3>Live readout</h3>
+            {valueSource && <div className="ab-info-source"><span>Values from</span><MeasurementBadge /></div>}
+            {wcsProbe && (
+              <WcsReadout
+                filePath={wcsProbe.path}
+                imageWidth={wcsProbe.dimensions[0]}
+                imageHeight={wcsProbe.dimensions[1]}
+                mouseX={mousePixel?.x ?? null}
+                mouseY={mousePixel?.y ?? null}
+              />
             )}
+            <PixelReadout
+              filePath={probePath}
+              mouseX={mousePixel?.x ?? null}
+              mouseY={mousePixel?.y ?? null}
+            />
+            {!mousePixel && <p className="ab-info-note">Hover the image for pixel values.</p>}
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            <span style={{ color: "rgba(239,68,68,0.6)" }}>S={stfParams.shadow.toFixed(4)}</span>
-            <span style={{ color: "rgba(245,158,11,0.6)" }}>M={stfParams.midtone.toFixed(4)}</span>
-            <span style={{ color: "rgba(16,185,129,0.6)" }}>H={stfParams.highlight.toFixed(4)}</span>
-          </div>
-        </div>
-      )}
-      {file.result?.header && (
-        <div className="flex flex-col gap-1 text-zinc-600">
-          {file.result.header.TELESCOP && <span>TELESCOP: {file.result.header.TELESCOP}</span>}
-          {file.result.header.INSTRUME && <span>INSTRUME: {file.result.header.INSTRUME}</span>}
-          {file.result.header.FILTER && <span>FILTER: {file.result.header.FILTER}</span>}
-          {file.result.header.PUPIL && <span>PUPIL: {file.result.header.PUPIL}</span>}
-          {file.result.header.EXPTIME && <span>EXPTIME: {file.result.header.EXPTIME}s</span>}
-          {file.result.header["DATE-OBS"] && <span>DATE: {file.result.header["DATE-OBS"]}</span>}
-          {file.result.header.OBJECT && <span>OBJECT: {file.result.header.OBJECT}</span>}
-        </div>
-      )}
-    </div>
+        )}
+        {!result && <p className="ab-info-note">No image details available yet.</p>}
+      </div>
+    </section>
   );
 });

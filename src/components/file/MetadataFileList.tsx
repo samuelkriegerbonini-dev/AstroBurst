@@ -24,7 +24,9 @@ import {
   Pin,
   X,
   Activity,
+  ChevronDown,
 } from "lucide-react";
+import "./metadata-file-list.css";
 
 export interface FileMetadata {
   filter?: string;
@@ -62,6 +64,10 @@ import { getFilterColor } from "../../utils/filterColors";
 const OPEN_TABLE_TITLE = "Select its cube, open Cube and compare this x1d with the cube spectrum in Spectroscopy";
 const OPEN_SPECTRUM_TITLE = "Select this spectrum and open the Cube tool";
 const SPECTRUM_NOTE = "1D spectrum";
+const MATCH_MODES: readonly { mode: FilterMode; label: string; title: string }[] = [
+  { mode: "and", label: "AND", title: "Match all selected filters" },
+  { mode: "or", label: "OR", title: "Match any selected filter" },
+];
 
 function spectrumNote(spectrum: Spectrum1dKind | undefined): { text: string; title: string } {
   if (spectrum === undefined) return { text: SPECTRUM_NOTE, title: SPECTRUM_NOTE };
@@ -341,6 +347,7 @@ function MetadataFileList({
   const [scrollTop, setScrollTop] = useState(0);
   const [viewHeight, setViewHeight] = useState(600);
   const [searchQuery, setSearchQuery] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const rafRef = useRef<number | null>(null);
 
   const doneCount = useMemo(() => files.filter((f) => f.status === "done").length, [files]);
@@ -416,6 +423,7 @@ function MetadataFileList({
     const q = searchQuery.trim();
     if (!q) return;
     onAddCustomChip?.(q);
+    setFiltersOpen(true);
     setSearchQuery("");
   }, [searchQuery, onAddCustomChip]);
 
@@ -454,8 +462,8 @@ function MetadataFileList({
     <div className="ab-mfl-root">
       <div className="ab-mfl-header">
         <div className="flex items-center gap-2">
-          <FolderOpen size={13} style={{ color: "var(--ab-teal)", opacity: 0.6 }} />
-          <h3 className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Files</h3>
+          <FolderOpen size={15} style={{ color: "var(--ab-teal)" }} />
+          <h2 className="ab-mfl-title">Files</h2>
           <span
             className="text-[10px] font-mono px-1.5 py-0.5 rounded"
             style={{ color: "var(--ab-teal)", background: "rgba(20,184,166,0.08)" }}
@@ -473,67 +481,9 @@ function MetadataFileList({
         </button>
       </div>
 
-      {(productTypes.length > 1 || customChips.length > 0) && (
-        <div className="ab-mfl-product-filter">
-          <div className="ab-mfl-filter-label">
-            <SlidersHorizontal size={10} />
-            <span>Filter</span>
-          </div>
-          <div className="ab-mfl-filter-chips">
-            {productTypes.map((pt) => (
-              <button
-                key={pt}
-                onClick={() => onToggleFilter?.(pt)}
-                className={`ab-mfl-product-chip ${activeFilters.includes(pt) ? "ab-mfl-product-chip-active" : ""}`}
-                title={`Filter by ${pt} product type`}
-              >
-                {pt}
-              </button>
-            ))}
-            {customChips.map((chip) => (
-              <span key={chip} className="ab-mfl-custom-chip-wrapper">
-                <button
-                  onClick={() => onToggleFilter?.(chip)}
-                  className={`ab-mfl-product-chip ab-mfl-product-chip-custom ${activeFilters.includes(chip) ? "ab-mfl-product-chip-active" : ""}`}
-                  title={`Filter by "${chip}"`}
-                >
-                  {chip}
-                </button>
-                <button
-                  onClick={() => onRemoveCustomChip?.(chip)}
-                  className="ab-mfl-chip-remove"
-                  title={`Remove "${chip}" filter`}
-                >
-                  <X size={8} />
-                </button>
-              </span>
-            ))}
-            {activeFilters.length >= 2 && (
-              <button
-                onClick={onToggleMode}
-                className="ab-mfl-mode-toggle"
-                title={filterMode === "or" ? "OR mode: matches ANY selected filter. Click for AND." : "AND mode: matches ALL selected filters. Click for OR."}
-              >
-                <span className={`ab-mfl-mode-opt ${filterMode === "and" ? "ab-mfl-mode-opt-active" : ""}`}>AND</span>
-                <span className={`ab-mfl-mode-opt ${filterMode === "or" ? "ab-mfl-mode-opt-active" : ""}`}>OR</span>
-              </button>
-            )}
-            {activeFilters.length > 0 && (
-              <button
-                onClick={() => onClearFilters?.()}
-                className="ab-mfl-product-chip ab-mfl-product-chip-clear"
-                title="Clear all filters"
-              >
-                ✕
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
       <div className="ab-mfl-search-row">
         <div className="ab-mfl-search">
-          <Search size={12} className="ab-mfl-search-icon" />
+          <Search size={13} className="ab-mfl-search-icon" />
           <input
             type="text"
             value={searchQuery}
@@ -548,6 +498,7 @@ function MetadataFileList({
               onClick={() => setSearchQuery("")}
               className="ab-mfl-search-clear"
               title="Clear search"
+              aria-label="Clear search"
             >
               <X size={10} />
             </button>
@@ -558,11 +509,87 @@ function MetadataFileList({
             onClick={handlePinSearch}
             className="ab-mfl-pin-btn"
             title={`Pin "${searchQuery.trim()}" as persistent filter (Enter)`}
+            aria-label={`Pin "${searchQuery.trim()}" as persistent filter`}
           >
             <Pin size={10} />
           </button>
         )}
       </div>
+
+      {(productTypes.length > 1 || customChips.length > 0 || isFiltered) && (
+        <details className="ab-mfl-filters" open={filtersOpen} onToggle={(e) => setFiltersOpen(e.currentTarget.open)}>
+          <summary className="ab-mfl-filters-summary">
+            <SlidersHorizontal size={12} />
+            <span>Filters</span>
+            <span className="ab-mfl-filters-status" data-active={isFiltered ? "true" : undefined} title={activeFilters.join(", ")}>
+              {isFiltered ? `${activeFilters.length} active` : "All files"}
+              {activeFilters.length >= 2 && <span className="ab-mfl-filters-mode"> · {filterMode === "and" ? "Match all" : "Match any"}</span>}
+            </span>
+            <ChevronDown size={12} className="ab-mfl-filters-chevron" />
+          </summary>
+          <div className="ab-mfl-filter-chips ab-mfl-filter-options">
+            {productTypes.map((pt) => (
+              <button
+                key={pt}
+                onClick={() => onToggleFilter?.(pt)}
+                className={`ab-mfl-product-chip ${activeFilters.includes(pt) ? "ab-mfl-product-chip-active" : ""}`}
+                title={`Filter by ${pt} product type`}
+                aria-pressed={activeFilters.includes(pt)}
+              >
+                {pt}
+              </button>
+            ))}
+            {customChips.map((chip) => (
+              <span key={chip} className="ab-mfl-custom-chip-wrapper">
+                <button
+                  onClick={() => onToggleFilter?.(chip)}
+                  className={`ab-mfl-product-chip ab-mfl-product-chip-custom ${activeFilters.includes(chip) ? "ab-mfl-product-chip-active" : ""}`}
+                  title={`Filter by "${chip}"`}
+                  aria-pressed={activeFilters.includes(chip)}
+                >
+                  {chip}
+                </button>
+                <button
+                  onClick={() => onRemoveCustomChip?.(chip)}
+                  className="ab-mfl-chip-remove"
+                  title={`Remove "${chip}" filter`}
+                  aria-label={`Remove "${chip}" filter`}
+                >
+                  <X size={8} />
+                </button>
+              </span>
+            ))}
+            {activeFilters.length >= 2 && (
+              <div role="group" aria-label="Match mode" className="ab-mfl-mode-toggle">
+                {MATCH_MODES.map(({ mode, label, title }) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      if (mode !== filterMode) onToggleMode?.();
+                    }}
+                    className={`ab-mfl-mode-opt ${filterMode === mode ? "ab-mfl-mode-opt-active" : ""}`}
+                    title={title}
+                    aria-pressed={filterMode === mode}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {activeFilters.length > 0 && (
+              <button
+                onClick={() => onClearFilters?.()}
+                className="ab-mfl-product-chip ab-mfl-product-chip-clear"
+                title="Clear all filters"
+                aria-label="Clear all filters"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </details>
+      )}
 
       <div
         ref={scrollRef}

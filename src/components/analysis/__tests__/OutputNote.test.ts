@@ -32,18 +32,26 @@ describe("OutputNote", () => {
 
   it("shows the manifest and only the source identity and verification reported by the backend", () => {
     const html = renderToStaticMarkup(createElement(OutputNote, { path: MANIFEST, kind: "manifest", provenance: PROVENANCE }));
-    expect(html).toContain("Show manifest");
+    expect(html).toContain(">provenance.json<");
     expect(html).toContain("Input SHA-256: 0123456789ab…");
     expect(html).toContain(PROVENANCE.source.sha256);
     expect(html).toContain("SHA-256 before reading and before publishing");
     expect(html).toContain(PROVENANCE.integrity_limit);
-    expect(html).toContain("Keep the manifest with its result files");
     expect(html).not.toContain("Export &gt; FITS keeps a copy");
+  });
+
+  it("warns that the manifest is cleared at launch and that Export does not copy it, and names the reveal action Show in folder", () => {
+    const html = renderToStaticMarkup(createElement(OutputNote, { path: MANIFEST, kind: "manifest", provenance: PROVENANCE }));
+    expect(html).toContain(
+      "<span class=\"leading-snug\">In the output folder, which is cleared when AstroBurst starts. Export &gt; FITS does not copy this manifest, so keep a copy next to the exported files.</span>",
+    );
+    expect(html).toMatch(/<button type="button"[^>]*>(?:(?!<\/button>)[\s\S])*Show in folder<\/button>/);
+    expect(html).not.toContain("Show manifest");
   });
 
   it("does not infer a content check from a manifest path or an unknown verification method", () => {
     const legacy = renderToStaticMarkup(createElement(OutputNote, { path: MANIFEST, kind: "manifest" }));
-    expect(legacy).toContain("Show manifest");
+    expect(legacy).toContain("Show in folder");
     expect(legacy).not.toContain("SHA-256");
     const future = renderToStaticMarkup(createElement(OutputNote, { path: MANIFEST, kind: "manifest", provenance: { integrity: "future_method" } }));
     expect(future).toContain("future_method");

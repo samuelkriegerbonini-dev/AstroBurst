@@ -1,0 +1,33 @@
+.ab-info-panel {
+  min-width: 0;
+  padding: 10px;
+  color: var(--ab-text-1);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ab-info-header { margin-bottom: 10px; }
+.ab-info-heading { display: flex; align-items: center; gap: 7px; color: #67e8f9; }
+.ab-info-heading h2 { margin: 0; color: var(--ab-text-1); font-size: 12px; font-weight: 600; }
+.ab-info-filename { margin-top: 5px; color: var(--ab-text-2); font-size: 10px; overflow-wrap: anywhere; }
+.ab-info-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; align-items: start; }
+.ab-info-section { min-width: 0; padding-top: 10px; border-top: 1px solid var(--ab-border); }
+.ab-info-section h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 7px; color: var(--ab-text-2); font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.ab-info-section h3 > span { color: var(--ab-text-3); font-size: 9px; font-weight: 400; }
+.ab-info-fields, .ab-info-metrics { display: flex; flex-direction: column; gap: 5px; }
+.ab-info-fields > div, .ab-info-metrics > div { display: grid; grid-template-columns: minmax(58px, 0.85fr) minmax(0, 1.15fr); align-items: baseline; gap: 7px; }
+.ab-info-fields dt, .ab-info-metrics dt { color: var(--ab-text-2); font-size: 10px; overflow-wrap: anywhere; }
+.ab-info-fields dd, .ab-info-metrics dd { text-align: right; font-family: var(--ab-font-mono); font-size: 10px; font-weight: 400; overflow-wrap: anywhere; }
+.ab-info-stf [data-tone="shadow"] dd { color: #fca5a5; }
+.ab-info-stf [data-tone="midtone"] dd { color: #fcd34d; }
+.ab-info-stf [data-tone="highlight"] dd { color: #6ee7b7; }
+.ab-info-note { margin-top: 8px; color: var(--ab-text-2); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.ab-info-source { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-bottom: 8px; color: var(--ab-text-2); font-size: 10px; }
+.ab-info-live > div + div { margin-top: 9px; }
+.ab-info-live > div > div { row-gap: 4px; }
+.ab-info-live { overflow-wrap: anywhere; }
+.ab-info-live select { max-width: 100%; }
+.ab-info-empty { margin-top: 18px; color: var(--ab-text-2); }
+.ab-info-empty strong { color: var(--ab-text-1); font-weight: 500; }
+.ab-info-empty p { margin-top: 5px; }
+

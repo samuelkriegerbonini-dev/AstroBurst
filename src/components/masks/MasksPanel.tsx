@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Download, Eye, EyeOff, FolderOpen, RefreshCw, RotateCcw, Tag, Trash2, VenetianMask } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { DecimalField, ErrorAlert, RunButton, Slider, Toggle } from "../ui";
+import { DecimalField, ErrorAlert, RunButton, SectionHeader, Slider, Toggle } from "../ui";
 import { CONFIRM_DELETE_LABEL, useArmedConfirm } from "../../hooks/useArmedConfirm";
 import { HISTORY_BUSY_MESSAGE, loadHistory, useHistoryRender, useHistorySnapshot, useHistoryTarget, type HistoryTarget } from "../../hooks/useHistory";
 import { useCompositeMode } from "../../hooks/useCompositeMode";
@@ -422,13 +422,7 @@ export function MasksTool({ fileName, compositeMode, target, snapshot, imageDims
 
   return (
     <div className="flex flex-col gap-3 p-3" data-masks-tool="">
-      <div className="flex items-center gap-2">
-        <VenetianMask size={14} className="text-amber-400" />
-        <span className="text-sm font-semibold text-zinc-200 tracking-wide">Masks</span>
-        <span className="text-[10px] text-zinc-500 truncate" title={subject}>
-          {subject}
-        </span>
-      </div>
+      <SectionHeader icon={<VenetianMask size={14} className="text-amber-400" />} title="Masks" subtitle={subject} truncateSubtitle />
       {compositeMode && (
         <div role="note" data-mask-composite-note="" className={NOTE}>
           {MASKS_COMPOSITE_NOTE}

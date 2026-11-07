@@ -140,6 +140,37 @@ describe("Calibration result lines", () => {
 });
 
 describe("Calibration mapper slots", () => {
+  it("names each empty picker by its calibration slot and exposes its collapsed state", async () => {
+    const actual = await vi.importActual<typeof import("../../compose/SmartChannelMapper")>("../../compose/SmartChannelMapper");
+    const html = renderToStaticMarkup(createElement(actual.default, { mode: "calibration", files: [] }));
+    const pickers = [...html.matchAll(/<button[^>]*class="ab-channel-browse"[^>]*>/g)].map((match) => match[0]);
+    expect(pickers).toHaveLength(5);
+    for (const [index, name] of ["Select Science file", "Select Bias frames", "Select Dark frames", "Select Flat frames", "Select Flat dark frames"].entries()) {
+      expect(pickers[index]).toContain(`aria-label="${name}"`);
+      expect(pickers[index]).toContain('aria-expanded="false"');
+    }
+  });
+
+  it("distinguishes the four RGB pickers without relying on nearby visual labels", async () => {
+    const actual = await vi.importActual<typeof import("../../compose/SmartChannelMapper")>("../../compose/SmartChannelMapper");
+    const html = renderToStaticMarkup(createElement(actual.default, { mode: "rgb", files: [] }));
+    for (const label of ["Luminance", "Red", "Green", "Blue"]) expect(html).toContain(`aria-label="Select ${label} file"`);
+    expect(html.match(/aria-expanded="false"/g)).toHaveLength(4);
+  });
+
+  it("names the slot affected by clearing a selected science file or calibration frames", async () => {
+    const actual = await vi.importActual<typeof import("../../compose/SmartChannelMapper")>("../../compose/SmartChannelMapper");
+    const html = renderToStaticMarkup(createElement(actual.default, {
+      mode: "calibration",
+      files: [LIGHT, ...DARKS],
+      calibAssignment: { science: LIGHT, bias: [], dark: DARKS, flat: [], flatdark: [] },
+      onCalibAssignmentChange: vi.fn(),
+    }));
+    expect(html).toContain('aria-label="Clear Science slot"');
+    expect(html).toContain('aria-label="Clear all 2 Dark frames"');
+    expect(html).toContain('aria-label="Select Dark frames"');
+  });
+
   it("offers a Flat dark slot after the Flat slot", async () => {
     const actual = await vi.importActual<typeof import("../../compose/SmartChannelMapper")>("../../compose/SmartChannelMapper");
     const html = renderToStaticMarkup(createElement(actual.default, { mode: "calibration", files: [] }));

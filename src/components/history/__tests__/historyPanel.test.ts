@@ -91,6 +91,17 @@ function buttonTag(html: string, label: string): string {
   return tag;
 }
 
+function textOf(markup: string): string {
+  return markup.replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
+}
+
+function goToButton(html: string, id: string): { tag: string; name: string } {
+  const match = new RegExp(`<li data-history-row="${id}"[^>]*>(<button[^>]*>)([\\s\\S]*?)</button>`).exec(html);
+  if (!match) throw new Error(`no Go to button in row ${id}`);
+  const label = /\saria-label="([^"]*)"/.exec(match[1])?.[1];
+  return { tag: match[1], name: label ?? textOf(match[2]) };
+}
+
 const BRANCHED = doc(
   [
     node("n0001", null, BACKGROUND),
@@ -124,9 +135,28 @@ describe("HistoryPanelView", () => {
     expect(html).toMatch(/data-history-row="n0003"[\s\S]*?cannot be rebuilt/);
   });
 
+  it("names each Go to button by its visible step, op summary and status instead of the bare node id", () => {
+    const html = render({ snapshot: snapshot(BRANCHED) });
+    const evicted = goToButton(html, "n0002");
+    expect(evicted.name).toBe("n0002 Wavelet Denoise thresholds 3 / 2.5 / 2 / 1.5 / 1 evicted · replayable");
+    expect(evicted.tag).not.toContain("aria-label=");
+    expect(evicted.tag).not.toContain("title=");
+    expect(goToButton(html, "n0003").name).toContain("Arcsinh Stretch");
+    expect(goToButton(html, "n0003").name).toContain("cannot be rebuilt");
+    expect(goToButton(html, "n0005").name).not.toContain("Go to");
+    expect(html).toContain('aria-label="Go to the original image"');
+  });
+
+  it("titles the panel with an h3 heading and the file name as its subtitle", () => {
+    const html = render({ snapshot: snapshot(BRANCHED), fileName: "jw02739-o001_t001_nircam_clear-f444w_i2d.fits" });
+    expect(html).toMatch(/<h3 class="text-sm font-semibold text-zinc-200 tracking-wide">History<\/h3>/);
+    expect(html).toContain('title="jw02739-o001_t001_nircam_clear-f444w_i2d.fits">jw02739-o001_t001_nircam_clear-f444w_i2d.fits</span>');
+    expect(html.indexOf(">History</h3>")).toBeLessThan(html.indexOf("data-history-undo"));
+  });
+
   it("offers re-run, downstream re-run and branch deletion per step", () => {
     const html = render({ snapshot: snapshot(BRANCHED) });
-    expect(html).toContain('aria-label="Go to n0005"');
+    expect(goToButton(html, "n0005").name).toContain("Wavelet Denoise");
     expect(html).toContain('aria-label="Re-run n0005 with other settings"');
     expect(html).toContain('aria-label="Re-run n0005 and re-apply the steps after it"');
     expect(html).not.toContain('aria-label="Re-run n0007 and re-apply the steps after it"');
@@ -145,7 +175,8 @@ describe("HistoryPanelView", () => {
     };
     const html = render({ snapshot: snapshot(masked) });
     expect(html).toMatch(/data-history-row="n0002"[\s\S]*?>Wavelet Denoise · mask m01</);
-    expect(html).toContain('title="Show Wavelet Denoise · mask m01 (n0002)"');
+    expect(goToButton(html, "n0002").name).toContain("Wavelet Denoise · mask m01");
+    expect(goToButton(html, "n0003").name).toContain("Arcsinh Stretch · mask m02 (deleted)");
     expect(html).toMatch(/data-history-row="n0003"[\s\S]*?>Arcsinh Stretch · mask m02 \(deleted\)</);
     expect(html).toMatch(/data-history-row="n0001"[\s\S]*?>Background Extraction</);
   });
@@ -167,9 +198,10 @@ describe("HistoryPanelView", () => {
     const html = render({ snapshot: snapshot(doc(BRANCHED.nodes, "n0006")), blockedReason: reason });
     expect(html).toMatch(/<button[^>]*data-history-undo=""[^>]*disabled=""/);
     expect(html).toMatch(/<button[^>]*data-history-redo=""[^>]*disabled=""/);
-    for (const label of ["Go to n0001", "Go to n0002", "Go to n0007", "Go to the original image"]) {
-      expect(buttonTag(html, label), label).toContain('disabled=""');
+    for (const id of ["n0001", "n0002", "n0007"]) {
+      expect(goToButton(html, id).tag, id).toContain('disabled=""');
     }
+    expect(buttonTag(html, "Go to the original image")).toContain('disabled=""');
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*Revert to original/);
     expect(html).toMatch(/<div role="note"[^>]*>A colour composite is on screen\. Undo, Redo and Go to apply to single files: show 673nmos\.fits/);
     expect(html.indexOf('role="note"')).toBeLessThan(html.indexOf('data-history-row="root"'));
@@ -183,7 +215,10 @@ describe("HistoryPanelView", () => {
     const html = render({ snapshot: snapshot(doc(BRANCHED.nodes, "n0006")) });
     expect(html).toMatch(/<button[^>]*data-history-undo=""(?![^>]*disabled="")/);
     expect(html).toMatch(/<button[^>]*data-history-redo=""(?![^>]*disabled="")/);
-    for (const label of ["Go to n0001", "Go to n0007", "Go to the original image", "Re-run n0005 with other settings", "Re-run n0005 and re-apply the steps after it"]) {
+    for (const id of ["n0001", "n0007"]) {
+      expect(goToButton(html, id).tag, id).not.toContain('disabled=""');
+    }
+    for (const label of ["Go to the original image", "Re-run n0005 with other settings", "Re-run n0005 and re-apply the steps after it"]) {
       expect(buttonTag(html, label), label).not.toContain('disabled=""');
     }
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>(?:(?!<\/button>)[\s\S])*Revert to original/);

@@ -372,6 +372,15 @@ describe("Masks tool", () => {
     expect(maskStore.masksOf(KEY)).toEqual([]);
   });
 
+  it("masks_panel_titles_the_tool_with_a_heading_and_names_the_file_or_the_composite", () => {
+    const KEY = "C:/data/m16_title.fits";
+    const target = fileTarget(KEY);
+    const ready = snapshotFor(target, historyState(KEY, null, []));
+    const heading = (html: string) => /<h3[^>]*>Masks<\/h3><span[^>]*\btruncate\b[^>]*title="([^"]*)">([^<]*)<\/span>/.exec(html)?.slice(1);
+    expect(heading(harness({ target, snapshot: ready }).html())).toEqual(["m16.fits", "m16.fits"]);
+    expect(heading(harness({ compositeMode: true, target, snapshot: ready }).html())).toEqual(["Colour composite", "Colour composite"]);
+  });
+
   it("masks_panel_shows_backend_refusals_in_the_backends_words", async () => {
     const KEY = "C:/data/m16_refusal.fits";
     const target = fileTarget(KEY);

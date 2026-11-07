@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createElement } from "react";
+import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+
+vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
+
+import { hooks } from "../../../test/hookRuntime";
 import DecimalField, { DecimalNumberField, type DecimalFieldProps, type DecimalNumberFieldProps } from "../DecimalField";
 import { DecimalField as ExportedDecimalField, DecimalNumberField as ExportedDecimalNumberField } from "..";
 
@@ -9,6 +13,31 @@ const INVALID_RING = "ring-1 ring-red-500/70";
 
 function render(props: Partial<DecimalFieldProps> & { value: string }): string {
   return renderToStaticMarkup(createElement(DecimalField, { onChange: () => {}, ...props }));
+}
+
+type AnyProps = Record<string, unknown> & { children?: ReactNode };
+
+function elements(node: ReactNode): ReactElement<AnyProps>[] {
+  if (Array.isArray(node)) return node.flatMap(elements);
+  if (!isValidElement<AnyProps>(node)) return [];
+  return [node, ...elements(node.props.children)];
+}
+
+function describedByIds(markup: string): string[] {
+  return (/<input[^>]*\saria-describedby="([^"]*)"/.exec(markup)?.[1] ?? "").split(/\s+/).filter(Boolean);
+}
+
+function messageSpans(markup: string): { id: string; hidden: boolean; className: string; text: string }[] {
+  return [...markup.matchAll(/<span id="([^"]+)"( hidden="")? class="([^"]*)">([^<]*)<\/span>/g)].map(([, id, hidden, className, text]) => ({
+    id,
+    hidden: hidden !== undefined,
+    className,
+    text,
+  }));
+}
+
+function textSkippingHidden(markup: string): string {
+  return markup.replace(/<(\w+)\b[^>]*\shidden=""[^>]*>[^<]*<\/\1>/g, "").replace(/<[^>]*>/g, "");
 }
 
 describe("DecimalField", () => {
@@ -76,10 +105,51 @@ describe("DecimalField", () => {
   });
 
   it("hands the raw text to onChange, comma included", () => {
+    hooks.mount();
     const onChange = vi.fn();
-    const input = DecimalField({ value: "", onChange });
-    input.props.onChange({ target: { value: "2,5" } });
+    const input = elements(hooks.render(DecimalField, { value: "", onChange }) as ReactNode).find((el) => el.type === "input");
+    (input?.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: "2,5" } });
     expect(onChange).toHaveBeenCalledWith("2,5");
+  });
+
+  it("links the message of an invalid value to the input, hidden by default and shown with showError", () => {
+    const hidden = render({ value: "2,5" });
+    const [message] = messageSpans(hidden);
+    expect(message).toMatchObject({ hidden: true, text: COMMA });
+    expect(describedByIds(hidden)).toEqual([message.id]);
+    const shown = render({ value: "2,5", showError: true });
+    const [visible] = messageSpans(shown);
+    expect(visible).toMatchObject({ hidden: false, text: COMMA });
+    expect(visible.className).toContain("text-red-400");
+    expect(describedByIds(shown)).toEqual([visible.id]);
+  });
+
+  it("keeps the hidden message out of the name of a label that wraps the field", () => {
+    const markup = renderToStaticMarkup(
+      createElement("label", null, createElement("span", null, "lo%"), createElement(DecimalField, { value: "0,5", onChange: () => {} })),
+    );
+    const [message] = messageSpans(markup);
+    expect(message.text).toBe(COMMA);
+    expect(describedByIds(markup)).toEqual([message.id]);
+    expect(textSkippingHidden(markup)).toBe("lo%");
+  });
+
+  it("keeps a caller's aria-describedby and adds the message id only while the value is invalid", () => {
+    const invalid = render({ value: "150", max: 100, "aria-describedby": "radius-hint" } as DecimalFieldProps);
+    const [message] = messageSpans(invalid);
+    expect(message.text).toBe("Use a value of at most 100");
+    expect(describedByIds(invalid)).toEqual(["radius-hint", message.id]);
+    const valid = render({ value: "50", max: 100, "aria-describedby": "radius-hint" } as DecimalFieldProps);
+    expect(messageSpans(valid)).toEqual([]);
+    expect(describedByIds(valid)).toEqual(["radius-hint"]);
+    expect(render({ value: "50", max: 100 })).not.toContain("aria-describedby");
+  });
+
+  it("links a caller error the same way", () => {
+    const markup = render({ value: "-2", error: "Redshift must be above -1" });
+    const [message] = messageSpans(markup);
+    expect(message.text).toBe("Redshift must be above -1");
+    expect(describedByIds(markup)).toEqual([message.id]);
   });
 });
 

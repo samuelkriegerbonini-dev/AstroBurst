@@ -570,9 +570,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
+  min-height: 48px;
+  padding: 10px 12px;
   flex-shrink: 0;
-  border-bottom: 1px solid var(--ab-border);
 }
 
 .ab-mfl-search {
@@ -581,10 +581,11 @@
   gap: 6px;
   flex: 1;
   min-width: 0;
-  padding: 5px 8px;
+  min-height: 34px;
+  padding: 7px 9px;
   border-radius: var(--ab-radius-sm);
-  background: rgba(24, 24, 32, 0.6);
-  border: 1px solid rgba(63, 63, 70, 0.3);
+  background: var(--ab-bg-raised);
+  border: 1px solid var(--ab-border-strong);
   transition: border-color var(--ab-transition);
 }
 
@@ -600,6 +601,7 @@
 
 .ab-mfl-search-input {
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
@@ -615,7 +617,8 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  margin: 6px 8px;
+  flex-shrink: 0;
+  padding: 0 10px 8px;
 }
 
 .ab-mfl-search-clear {
@@ -664,25 +667,6 @@
   align-items: center;
   gap: 0;
   position: relative;
-}
-
-.ab-mfl-product-chip-custom {
-  border-color: rgba(168, 85, 247, 0.25);
-  color: #a78bfa;
-  background: rgba(168, 85, 247, 0.08);
-  padding-right: 6px;
-}
-
-.ab-mfl-product-chip-custom:hover {
-  background: rgba(168, 85, 247, 0.15);
-  border-color: rgba(168, 85, 247, 0.35);
-}
-
-.ab-mfl-product-chip-custom.ab-mfl-product-chip-active {
-  background: rgba(168, 85, 247, 0.2);
-  color: #c4b5fd;
-  border-color: rgba(168, 85, 247, 0.45);
-  box-shadow: 0 0 6px rgba(168, 85, 247, 0.15);
 }
 
 .ab-mfl-chip-remove {
@@ -912,16 +896,9 @@
   background: var(--ab-teal);
 }
 
-.ab-mfl-product-filter {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 6px 10px 4px;
-  flex-wrap: nowrap;
-}
-
 .ab-mfl-product-chip {
-  padding: 1px 8px;
+  min-height: 24px;
+  padding: 4px 8px;
   border-radius: 9999px;
   font-size: 10px;
   font-weight: 600;
@@ -965,14 +942,31 @@
   border-color: rgba(239, 68, 68, 0.35);
 }
 
+.ab-mfl-product-chip-custom {
+  border-color: rgba(168, 85, 247, 0.25);
+  color: #a78bfa;
+  background: rgba(168, 85, 247, 0.08);
+  padding-right: 6px;
+}
+
+.ab-mfl-product-chip-custom:hover {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: rgba(168, 85, 247, 0.35);
+}
+
+.ab-mfl-product-chip-custom.ab-mfl-product-chip-active {
+  background: rgba(168, 85, 247, 0.2);
+  color: #c4b5fd;
+  border-color: rgba(168, 85, 247, 0.45);
+  box-shadow: 0 0 6px rgba(168, 85, 247, 0.15);
+}
+
 .ab-mfl-mode-toggle {
   display: inline-flex;
   align-items: center;
   border-radius: 9999px;
-  overflow: hidden;
   background: rgba(24, 24, 32, 0.7);
   border: 1px solid rgba(63, 63, 70, 0.35);
-  cursor: pointer;
   padding: 0;
   flex-shrink: 0;
   transition: border-color var(--ab-transition);
@@ -994,6 +988,15 @@
   color: var(--ab-text-3);
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease, transform 0.15s ease, filter 0.15s ease;
   line-height: 1;
+  cursor: pointer;
+}
+
+.ab-mfl-mode-opt:first-child {
+  border-radius: 9999px 0 0 9999px;
+}
+
+.ab-mfl-mode-opt:last-child {
+  border-radius: 0 9999px 9999px 0;
 }
 
 .ab-mfl-mode-opt-active {
@@ -1004,7 +1007,7 @@
 
 .ab-mfl-footer {
   flex-shrink: 0;
-  padding: 8px;
+  padding: 10px;
   border-top: 1px solid var(--ab-border);
 }
 
@@ -1088,19 +1091,6 @@
 
 
 /* ─── MetadataFileList: filter panel improvements ─── */
-
-.ab-mfl-filter-label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 9px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ab-text-4);
-  flex-shrink: 0;
-  padding-right: 4px;
-}
 
 .ab-mfl-filter-chips {
   display: flex;

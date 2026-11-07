@@ -25,8 +25,10 @@ function RunButton({
 }: RunButtonProps) {
   return (
     <button
-      onClick={onClick}
-      disabled={running || disabled}
+      onClick={running ? undefined : onClick}
+      disabled={disabled && !running}
+      aria-busy={running || undefined}
+      aria-disabled={running || undefined}
       aria-describedby={describedBy}
       className={`ab-run-btn ${small ? "ab-run-btn-sm" : ""}`}
       data-accent={accent}

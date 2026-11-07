@@ -66,14 +66,14 @@ export default function RejectionControls({
 
   return (
     <>
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <label htmlFor={selectId} className="text-xs text-zinc-400">{label}</label>
         <select
           id={selectId}
           value={shown.rejection}
           onChange={(e) => onChange({ rejection: e.target.value as RejectionMethod })}
           disabled={disabled}
-          className="ab-select"
+          className="ab-select min-w-0 max-w-full flex-1 basis-44"
         >
           {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
@@ -85,7 +85,7 @@ export default function RejectionControls({
         const value = shown[row.parameter];
         if (fixed?.values[row.parameter] !== undefined) {
           return (
-            <div key={row.parameter} data-testid="rejection-fixed" className="flex items-center justify-between">
+            <div key={row.parameter} data-testid="rejection-fixed" className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs text-zinc-400">{row.label}</span>
               <span className="text-[11px] text-zinc-500">{`${row.format(value)}, ${fixed.note}`}</span>
             </div>

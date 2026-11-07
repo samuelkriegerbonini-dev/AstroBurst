@@ -1,0 +1,67 @@
+.ab-mfl-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ab-text-1);
+}
+
+.ab-mfl-filters {
+  flex-shrink: 0;
+  margin: 0 10px 8px;
+  border: 1px solid var(--ab-border);
+  border-radius: var(--ab-radius-sm);
+  background: var(--ab-bg-panel);
+}
+
+.ab-mfl-filters-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 7px 8px;
+  list-style: none;
+  color: var(--ab-text-2);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ab-mfl-filters-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ab-mfl-filters-summary:hover {
+  background: var(--ab-bg-hover);
+}
+
+.ab-mfl-filters-summary > svg {
+  flex-shrink: 0;
+}
+
+.ab-mfl-filters-status {
+  margin-left: auto;
+  min-width: 0;
+  font-size: 10px;
+  text-align: right;
+  color: var(--ab-text-3);
+}
+
+.ab-mfl-filters-status[data-active="true"] {
+  color: var(--ab-accent);
+}
+
+.ab-mfl-filters-mode {
+  white-space: nowrap;
+}
+
+.ab-mfl-filters[open] .ab-mfl-filters-chevron {
+  transform: rotate(180deg);
+}
+
+.ab-mfl-filters .ab-mfl-filter-options {
+  max-height: 144px;
+  overflow-y: auto;
+  padding: 8px;
+  border-top: 1px solid var(--ab-border);
+  gap: 6px;
+}

@@ -318,7 +318,8 @@ function DropZoneSlot({
                     setShowDropdown((v) => !v);
                   }}
                   title={togglesFrames ? `Pick ${label.toLowerCase()} frames` : "Add another frame"}
-                  aria-expanded={togglesFrames ? showDropdown : undefined}
+                  aria-label={`Select ${label} frames`}
+                  aria-expanded={showDropdown}
                 >
                   <ChevronDown size={12} />
                   <span>+</span>
@@ -331,6 +332,7 @@ function DropZoneSlot({
                   onClear(slot);
                 }}
                 title={multi && count > 1 ? `Clear all ${count} frames` : "Remove"}
+                aria-label={multi && count > 1 ? `Clear all ${count} ${label} frames` : `Clear ${label} slot`}
               >
                 <X size={12} />
               </button>
@@ -340,7 +342,8 @@ function DropZoneSlot({
               ref={toggleRef}
               className="ab-channel-browse"
               onClick={() => setShowDropdown((v) => !v)}
-              aria-expanded={togglesFrames ? showDropdown : undefined}
+              aria-label={`Select ${label} ${multi ? "frames" : "file"}`}
+              aria-expanded={showDropdown}
             >
               <ChevronDown size={12} />
               <span>Drop file or select</span>

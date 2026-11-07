@@ -1,4 +1,4 @@
-import { useEffect, useState, type InputHTMLAttributes } from "react";
+import { useEffect, useId, useState, type InputHTMLAttributes } from "react";
 import {
   decimalDraftFor,
   decimalDraftText,
@@ -16,9 +16,11 @@ export interface DecimalFieldProps extends NativeInputProps, DecimalFieldOptions
   value: string;
   onChange: (text: string) => void;
   error?: string | null;
+  showError?: boolean;
 }
 
 const INVALID_RING_CLASS = "ring-1 ring-red-500/70";
+const ERROR_MESSAGE_CLASS = "text-[9px] text-red-400/90";
 
 export default function DecimalField({
   value,
@@ -28,23 +30,34 @@ export default function DecimalField({
   integer,
   optional,
   error,
+  showError = false,
   className,
   title,
+  "aria-describedby": describedBy,
   ...inputProps
 }: DecimalFieldProps) {
+  const errorId = useId();
   const shownError = decimalFieldState(value, { min, max, integer, optional }).error ?? error ?? null;
   const invalid = shownError !== null;
   return (
-    <input
-      {...inputProps}
-      type="text"
-      inputMode="decimal"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      aria-invalid={invalid ? true : undefined}
-      title={invalid ? shownError : title}
-      className={invalid ? [className, INVALID_RING_CLASS].filter(Boolean).join(" ") : className}
-    />
+    <>
+      <input
+        {...inputProps}
+        type="text"
+        inputMode="decimal"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-invalid={invalid ? true : undefined}
+        aria-describedby={invalid ? [describedBy, errorId].filter(Boolean).join(" ") : describedBy}
+        title={invalid ? shownError : title}
+        className={invalid ? [className, INVALID_RING_CLASS].filter(Boolean).join(" ") : className}
+      />
+      {invalid && (
+        <span id={errorId} hidden={!showError} className={ERROR_MESSAGE_CLASS}>
+          {shownError}
+        </span>
+      )}
+    </>
   );
 }
 
