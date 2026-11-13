@@ -301,7 +301,8 @@ mod tests {
         let error = execute_labelled("Running official SAGUI in isolated R", script, dir.path(), &progress, None).unwrap_err().to_string();
         let stages = seen.lock().unwrap().clone();
         assert!(stages.iter().any(|stage| stage.starts_with("Running official SAGUI in isolated R - R running ") && stage.ends_with(" s - Fehler in foo : kaputt")), "{stages:?}");
-        assert!(error.starts_with("Rscript failed (exit code: 1): Fehler in foo : kaputt; full log: ") && error.ends_with("stderr.log"), "{error}");
+        let status = if cfg!(windows) { "exit code: 1" } else { "exit status: 1" };
+        assert!(error.starts_with(&format!("Rscript failed ({status}): Fehler in foo : kaputt; full log: ")) && error.ends_with("stderr.log"), "{error}");
     }
 
     #[cfg(windows)]
