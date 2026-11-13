@@ -2,12 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { HistogramData, ProcessResult } from "../../../shared/types";
+import type { ProcessedResult } from "../../../shared/types/preview";
 import { SIGMA_MAD_LABEL } from "../../../utils/analysisLabels";
+import { CUBE_FRAME_VALUE_PENDING } from "../../../utils/previewShell";
 
 const { current, wcsReadout, pixelReadout } = vi.hoisted(() => ({
   current: {
-    file: null as { name: string; result: Partial<ProcessResult> | null } | null,
+    file: null as { name: string; path?: string; result: Partial<ProcessResult> | null } | null,
     histData: null as Partial<HistogramData> | null,
+    histDataPath: null as string | null,
+    processed: null as ProcessedResult | null,
     mousePixel: null as { x: number; y: number } | null,
     target: { path: null as string | null, dimensions: null as [number, number] | null, displayed: { previewOnly: false } },
   },
@@ -17,7 +21,8 @@ const { current, wcsReadout, pixelReadout } = vi.hoisted(() => ({
 
 vi.mock("../../../context/PreviewContext", () => ({
   useFileContext: () => ({ file: current.file }),
-  useHistContext: () => ({ histData: current.histData, stfParams: { shadow: 0, midtone: 0.5, highlight: 1 } }),
+  useHistContext: () => ({ histData: current.histData, histDataPath: current.histDataPath, stfParams: { shadow: 0, midtone: 0.5, highlight: 1 } }),
+  useRenderContext: () => ({ processed: current.processed }),
 }));
 vi.mock("../../../hooks/useMousePixelStore", () => ({ useMousePixel: () => current.mousePixel }));
 vi.mock("../../../hooks/useAnalysisTarget", () => ({
@@ -52,6 +57,8 @@ function metric(html: string, label: string): string | null {
 beforeEach(() => {
   current.file = null;
   current.histData = null;
+  current.histDataPath = null;
+  current.processed = null;
   current.mousePixel = null;
   current.target = { path: null, dimensions: null, displayed: { previewOnly: false } };
   vi.clearAllMocks();
@@ -93,8 +100,8 @@ describe("InfoPanel", () => {
     current.file = { name: "x.fits", result: {} };
     current.histData = { mean: 0, median: 2.5, sigma: 3.25, masked: true, dq_excluded: 12 };
     const html = render();
-    expect(metric(html, "Mean")).toBe("0.00");
-    expect(metric(html, "Median")).toBe("2.50");
+    expect(metric(html, "Mean")).toBe("0");
+    expect(metric(html, "Median")).toBe("2.5");
     expect(metric(html, SIGMA_MAD_LABEL)).toBe("3.25");
     expect(metric(html, "Shadows")).toBe("0.0000");
     expect(metric(html, "Midtones")).toBe("0.5000");
@@ -109,6 +116,62 @@ describe("InfoPanel", () => {
     expect(metric(html, "Mean")).toBe("—");
     expect(metric(html, "Median")).toBe("—");
     expect(metric(html, SIGMA_MAD_LABEL)).toBe("—");
+  });
+
+  it("keeps four significant digits and the data unit for the small statistics of a rate image", () => {
+    const rate = "/data/jw01266005001_02103_00001_nrs1_rate.fits";
+    current.file = { name: "jw01266005001_02103_00001_nrs1_rate.fits", path: rate, result: { header: { BUNIT: "DN/s" } } };
+    current.histData = { mean: -0.124586, median: -0.003707, sigma: 0.063128 };
+    current.histDataPath = rate;
+    const html = render();
+    expect(metric(html, "Mean")).toBe("-0.1246 DN/s");
+    expect(metric(html, "Median")).toBe("-0.003707 DN/s");
+    expect(metric(html, SIGMA_MAD_LABEL)).toBe("0.06313 DN/s");
+  });
+
+  it("writes statistics below 1e-3 with an exponent and large ones rounded to whole units", () => {
+    const coadd = "/data/frame-r-008162-6-0080.fits";
+    current.file = { name: "frame-r-008162-6-0080.fits", path: coadd, result: { header: { BUNIT: "'nanomaggy'" } } };
+    current.histData = { mean: 0.00042137, median: -0.0000123456, sigma: 12345.678 };
+    current.histDataPath = coadd;
+    const html = render();
+    expect(metric(html, "Mean")).toBe("4.214e-4 nanomaggy");
+    expect(metric(html, "Median")).toBe("-1.235e-5 nanomaggy");
+    expect(metric(html, SIGMA_MAD_LABEL)).toBe("12346 nanomaggy");
+  });
+
+  it("does not give the file's unit to the statistics of a product on screen", () => {
+    current.file = { name: "cube_s3d.fits", path: "/data/cube_s3d.fits", result: { header: { BUNIT: "MJy/sr" } } };
+    current.histData = { mean: 152.25, median: 3.5, sigma: 0.25 };
+    current.histDataPath = "/out/moment1.fits";
+    const html = render();
+    expect(metric(html, "Mean")).toBe("152.3");
+    expect(metric(html, "Median")).toBe("3.5");
+    expect(metric(html, SIGMA_MAD_LABEL)).toBe("0.25");
+  });
+
+  it("does not probe the cube file while a PNG-only cube frame is shown and says when its value comes", () => {
+    const cube = "/data/jw01366_nirspec_s3d.fits";
+    current.file = { name: "jw01366_nirspec_s3d.fits", path: cube, result: { dimensions: [64, 64] } };
+    current.target = { path: cube, dimensions: [64, 64], displayed: { previewOnly: true } };
+    current.processed = { kind: "cube", frameIndex: 37, fitsPath: null, previewUrl: "asset://out/cube_frame_abc_37.png", dimensions: null, label: "ch 37 (0–39)", inputPath: cube };
+    current.mousePixel = { x: 3, y: 4 };
+    const html = render();
+    expect(pixelReadout.mock.calls.map(([props]) => props.filePath)).not.toContain(cube);
+    expect(html).toContain(`<p class="ab-info-note">${CUBE_FRAME_VALUE_PENDING}</p>`);
+    expect(html).not.toContain("Hover the image for pixel values.");
+  });
+
+  it("probes the frame's own FITS once it is published", () => {
+    const cube = "/data/jw01366_nirspec_s3d.fits";
+    const frame = "/out/cube_frame_abc_37.fits";
+    current.file = { name: "jw01366_nirspec_s3d.fits", path: cube, result: { dimensions: [64, 64] } };
+    current.target = { path: frame, dimensions: [64, 64], displayed: { previewOnly: false } };
+    current.processed = { kind: "cube", frameIndex: 37, fitsPath: frame, previewUrl: "asset://out/cube_frame_abc_37.png", dimensions: [64, 64], label: "ch 37 (0–39)", inputPath: cube };
+    current.mousePixel = { x: 3, y: 4 };
+    const html = render();
+    expect(pixelReadout.mock.calls.map(([props]) => props.filePath)).toEqual([frame]);
+    expect(html).not.toContain(CUBE_FRAME_VALUE_PENDING);
   });
 
   it("passes the analysis path, dimensions and zero-based cursor coordinates to the readouts", () => {

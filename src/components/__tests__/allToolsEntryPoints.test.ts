@@ -233,3 +233,57 @@ describe("All tools from the sidebar tool menu", () => {
     expect(onClose).toHaveBeenCalled();
   });
 });
+
+describe("Open spectrum (CSV) from the command palette", () => {
+  it("is not offered while no file is shown, where the Cube tool that would show the CSV cannot open", () => {
+    fileStore.addFiles([{ name: "catalogue.fits", path: "/data/catalogue.fits", size: 1 }]);
+    fileStore.fileError(fileStore.getFiles()[0].id, "no HDU in this file holds a 2D image");
+    const ids = appPaletteActions().map((action) => action.id);
+    expect(ids).toContain("reset-layout");
+    expect(ids).not.toContain("open-spectrum-csv");
+  });
+
+  it("is offered while a file is shown", () => {
+    loadProcessedFile();
+    expect(appPaletteActions().map((action) => action.id)).toContain("open-spectrum-csv");
+  });
+});
+
+describe("Keyboard shortcut sheet", () => {
+  const renderApp = () => elements(hooks.render(App, {}) as ReactNode);
+  const sheetIn = (nodes: Node[]) => nodes.find((node) => node.props["data-testid"] === "shortcuts-sheet");
+
+  it("closes itself on Esc and keeps the key from the window listeners, so a polygon being drawn survives", () => {
+    hooks.mount();
+    const palette = renderApp().find((node) => node.type === CommandPalette);
+    (palette?.props.actions as PaletteAction[]).find((action) => action.id === "shortcuts")?.run();
+    const sheet = sheetIn(renderApp());
+    expect(sheet).toBeDefined();
+    const escape = { key: "Escape", stopPropagation: vi.fn() };
+    (sheet?.props.onKeyDown as (e: typeof escape) => void)(escape);
+    expect(escape.stopPropagation).toHaveBeenCalledTimes(1);
+    expect(sheetIn(renderApp())).toBeUndefined();
+  });
+});
+
+describe("Tool rows of the command palette", () => {
+  const toolRows = () => appPaletteActions().filter((action) => action.id.startsWith("tool-"));
+
+  it("say Open for every tool while the Archive hides the workspace, and open the tool there", () => {
+    loadProcessedFile();
+    appModeStore.set("archive");
+    const rows = toolRows();
+    expect(rows.map((row) => row.label).filter((label) => !label.startsWith("Open "))).toEqual([]);
+    rows.find((row) => row.id === "tool-files")?.run();
+    expect(appModeStore.get()).toBe("workspace");
+    expect(dockStore.get().active["left-top"]).toBe("files");
+  });
+
+  it("say Close for a tool on screen in the workspace and close it", () => {
+    loadProcessedFile();
+    const files = toolRows().find((row) => row.id === "tool-files");
+    expect(files?.label).toBe("Close Files");
+    files?.run();
+    expect(dockStore.get().active["left-top"]).toBeNull();
+  });
+});

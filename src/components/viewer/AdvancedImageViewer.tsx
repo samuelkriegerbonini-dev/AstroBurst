@@ -38,6 +38,7 @@ import OverlayLayer from "./OverlayLayer";
 import { useRegionKey } from "../../hooks/useRegionKey";
 import { useRegionTool } from "../../hooks/useRegionStore";
 import { useFileContext, useRenderContext } from "../../context/PreviewContext";
+import { pointerModeStore, usePointerMode } from "../../utils/pointerModeStore";
 
 interface ViewerImage {
   url: string;
@@ -82,7 +83,7 @@ function AdvancedImageViewer({
   const [compareMode, setCompareMode] = useState(false);
   const [comparePos, setComparePos] = useState(50);
   const [showOverlay, setShowOverlay] = useState(true);
-  const [cursorMode, setCursorMode] = useState<"pan" | "crosshair">("pan");
+  const cursorMode = usePointerMode();
   const [isPanning, setIsPanning] = useState(false);
   const isPanningRef = useRef(false);
   const panStart = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
@@ -111,7 +112,7 @@ function AdvancedImageViewer({
     transform, transformRef, setTransform,
     fitToWindow, zoomToFits, zoomIn, zoomOut, setOneToOne,
     hasRenderDims, zoomPct, isPresetActive,
-  } = useViewerTransform({ containerRef, renderW, renderH, fitsW: sizes.fits?.[0] });
+  } = useViewerTransform({ containerRef, renderW, renderH, fitsW: sizes.fits?.[0], fitsH: sizes.fits?.[1] });
   const textureBadge = previewTextureBadge(renderW, sizes.fits?.[0]);
 
   const mainRetry = useImageRetry(activeImage?.url);
@@ -267,7 +268,7 @@ function AdvancedImageViewer({
 
         <div className="ab-viewer-toolbar-group" role="group" aria-label="Pointer mode">
           <button
-            onClick={() => setCursorMode("pan")}
+            onClick={() => pointerModeStore.set("pan")}
             className={`ab-viewer-btn ${cursorMode === "pan" ? "ab-viewer-btn-active" : ""}`}
             title="Pan"
             aria-pressed={cursorMode === "pan"}
@@ -275,7 +276,7 @@ function AdvancedImageViewer({
             <Move size={14} />
           </button>
           <button
-            onClick={() => setCursorMode("crosshair")}
+            onClick={() => pointerModeStore.set("crosshair")}
             className={`ab-viewer-btn ${cursorMode === "crosshair" ? "ab-viewer-btn-active" : ""}`}
             title="Crosshair"
             aria-pressed={cursorMode === "crosshair"}

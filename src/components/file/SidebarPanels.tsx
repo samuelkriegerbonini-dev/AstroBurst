@@ -1,6 +1,6 @@
 import { memo } from "react";
 import { Info } from "lucide-react";
-import { useFileContext, useHistContext } from "../../context/PreviewContext";
+import { useFileContext, useHistContext, useRenderContext } from "../../context/PreviewContext";
 import { useMousePixel } from "../../hooks/useMousePixelStore";
 import { useAnalysisTarget, useMeasurementSource } from "../../hooks/useAnalysisTarget";
 import WcsReadout from "../header/WcsReadout";
@@ -8,6 +8,9 @@ import PixelReadout from "../header/PixelReadout";
 import MeasurementBadge from "../analysis/MeasurementBadge";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import { wcsProbeTarget } from "../../utils/analysisTarget";
+import { colorbarUnit } from "../../utils/colorbar";
+import { formatSignificant } from "../../utils/formatSignificant";
+import { CUBE_FRAME_VALUE_PENDING, pointerProbePath } from "../../utils/previewShell";
 import "./info-panel.css";
 
 const OBSERVATION_FIELDS = [
@@ -20,16 +23,24 @@ const OBSERVATION_FIELDS = [
   ["DATE-OBS", "Observed"],
 ] as const;
 
-function formatStat(value: number | undefined, digits = 2): string {
+function formatStat(value: number | undefined, digits: number): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "—";
+}
+
+function formatDataStat(value: number | undefined, unit: string | null): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  const text = value !== 0 && Math.abs(value) < 1e-3 ? value.toExponential(3) : formatSignificant(value);
+  return unit === null ? text : `${text} ${unit}`;
 }
 
 export const InfoPanel = memo(function InfoPanel() {
   const { file } = useFileContext();
-  const { histData, stfParams } = useHistContext();
+  const { histData, histDataPath, stfParams } = useHistContext();
+  const { processed } = useRenderContext();
   const mousePixel = useMousePixel();
   const target = useAnalysisTarget();
   const probePath = target.path;
+  const pixelProbePath = pointerProbePath(probePath, processed);
   const valueSource = useMeasurementSource(false);
   if (!file) return (
     <section className="ab-info-panel">
@@ -47,6 +58,7 @@ export const InfoPanel = memo(function InfoPanel() {
     : null;
   const result = file.result;
   const header = result?.header;
+  const statUnit = colorbarUnit(header?.BUNIT, histDataPath !== file.path);
   const observation = OBSERVATION_FIELDS.filter(([key]) => header?.[key]);
   return (
     <section className="ab-info-panel">
@@ -78,9 +90,9 @@ export const InfoPanel = memo(function InfoPanel() {
           <div className="ab-info-section">
             <h3>Image statistics</h3>
             <dl className="ab-info-metrics">
-              <div><dt>Mean</dt><dd>{formatStat(histData.mean)}</dd></div>
-              <div><dt>Median</dt><dd>{formatStat(histData.median)}</dd></div>
-              <div title={SIGMA_MAD_TITLE}><dt>{SIGMA_MAD_LABEL}</dt><dd>{formatStat(histData.sigma)}</dd></div>
+              <div><dt>Mean</dt><dd>{formatDataStat(histData.mean, statUnit)}</dd></div>
+              <div><dt>Median</dt><dd>{formatDataStat(histData.median, statUnit)}</dd></div>
+              <div title={SIGMA_MAD_TITLE}><dt>{SIGMA_MAD_LABEL}</dt><dd>{formatDataStat(histData.sigma, statUnit)}</dd></div>
             </dl>
             {histData.masked && <p className="ab-info-note" title="Pixels flagged by the DQ exclusion mask were ignored">DQ-masked · {histData.dq_excluded ?? 0} excluded</p>}
           </div>
@@ -109,11 +121,12 @@ export const InfoPanel = memo(function InfoPanel() {
               />
             )}
             <PixelReadout
-              filePath={probePath}
+              filePath={pixelProbePath}
               mouseX={mousePixel?.x ?? null}
               mouseY={mousePixel?.y ?? null}
             />
             {!mousePixel && <p className="ab-info-note">Hover the image for pixel values.</p>}
+            {mousePixel && pixelProbePath === null && <p className="ab-info-note">{CUBE_FRAME_VALUE_PENDING}</p>}
           </div>
         )}
         {!result && <p className="ab-info-note">No image details available yet.</p>}

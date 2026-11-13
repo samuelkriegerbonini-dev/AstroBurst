@@ -13,8 +13,10 @@ import { pipelineViewOutput } from "../../utils/stackingOutputs";
 import { CANVAS_HINT_CLASS, CUBE_SPECTRUM_HINT, OTHER_GRID_CANVAS_HINT } from "../../utils/previewShell";
 import { regionToolHint } from "../../utils/regionToolHints";
 import { regionStore } from "../../utils/regionStore";
+import { pointerModeStore } from "../../utils/pointerModeStore";
+import { forgetViewerView } from "../../hooks/useViewerTransform";
 
-const viewerContext = vi.hoisted(() => ({ current: null as { file: ProcessedFile; processed: ProcessedResult; chain: typeof EMPTY_CHAIN } | null }));
+const viewerContext = vi.hoisted(() => ({ current: null as { file: ProcessedFile; processed: ProcessedResult | null; chain: typeof EMPTY_CHAIN } | null }));
 
 vi.mock("react", async (original) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await original()));
 vi.mock("../../context/PreviewContext", async (importOriginal) => {
@@ -260,6 +262,10 @@ type ToolbarProps = {
   title?: string;
   onClick?: () => void;
   onLoad?: (event: unknown) => void;
+  onPointerDown?: (event: unknown) => void;
+  onPointerMove?: (event: unknown) => void;
+  onPointerUp?: () => void;
+  ref?: (element: unknown) => void;
   onKeyDown?: unknown;
   tabIndex?: number;
   role?: string;
@@ -434,5 +440,173 @@ describe("viewer canvas focus and region hint", () => {
     const view = loadedCpuViewer(lightFile("cpu-other-grid", LIGHT_1), pngOnly({ dimensions: [2048, 1536] }), [2048, 1536]);
     const chips = elementsOf(canvasOf(view())?.children, "div").filter((div) => div.className?.startsWith(CANVAS_HINT_CLASS));
     expect(chips.map((chip) => elementsOf(chip.children, "span").map((span) => span.children))).toEqual([[OTHER_GRID_CANVAS_HINT]]);
+  });
+});
+
+interface CanvasSize {
+  width: number;
+  height: number;
+}
+
+const anyCpuViewer = (AdvancedImageViewer as unknown as { type: (props: ComponentProps<typeof AdvancedImageViewer>) => ReactNode }).type;
+
+describe("viewer keeps the view", () => {
+  const SIZE_800x600: CanvasSize = { width: 800, height: 600 };
+  const SIZE_1000x800: CanvasSize = { width: 1000, height: 800 };
+  let frames: (() => void)[] = [];
+
+  beforeEach(() => {
+    hooks.mount();
+    frames = [];
+    vi.stubGlobal("requestAnimationFrame", (frame: () => void) => frames.push(frame));
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  });
+
+  afterEach(() => {
+    hooks.mount();
+    viewerContext.current = null;
+    pointerModeStore.set("pan");
+    forgetViewerView();
+    vi.unstubAllGlobals();
+  });
+
+  function flushFrames(): void {
+    for (const frame of frames.splice(0)) frame();
+  }
+
+  function fakeContainer({ width, height }: CanvasSize) {
+    return {
+      clientWidth: width,
+      clientHeight: height,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width, height }),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+  }
+
+  function loadImages(view: () => ReactNode, natural: number): void {
+    for (const img of elementsOf(view(), "img")) img.onLoad?.({ currentTarget: { naturalWidth: natural, naturalHeight: natural } });
+    view();
+  }
+
+  function mountGpu(view: () => ReactNode, size: CanvasSize): void {
+    canvasOf(view())?.ref?.(fakeContainer(size));
+    view();
+    flushFrames();
+  }
+
+  function mountCpu(view: () => ReactNode, size: CanvasSize, natural: number): void {
+    canvasOf(view())?.ref?.(fakeContainer(size));
+    loadImages(view, natural);
+    flushFrames();
+  }
+
+  function click(tree: ReactNode, match: (button: ToolbarProps) => boolean): void {
+    elementsOf(tree, "button").find(match)?.onClick?.();
+  }
+
+  function dragWithMiddleButton(view: () => ReactNode, dx: number, dy: number): void {
+    canvasOf(view())?.onPointerDown?.({ button: 1, clientX: 400, clientY: 300, pointerId: 1, currentTarget: { setPointerCapture: () => {} } });
+    canvasOf(view())?.onPointerMove?.({ clientX: 400 + dx, clientY: 300 + dy });
+    canvasOf(view())?.onPointerUp?.();
+    view();
+  }
+
+  const isPreset = (label: string) => (button: ToolbarProps) => button.children === label;
+  const isCrosshair = (button: ToolbarProps) => button.title === "Crosshair";
+  const crosshairPressed = (tree: ReactNode) => elementsOf(tree, "button").find(isCrosshair)?.["aria-pressed"];
+  const gpuZoom = (tree: ReactNode) => elementsOf(tree, "span").find((span) => span.className?.includes("ab-viewer-zoom-readout"))?.children;
+  const cpuZoom = (tree: ReactNode) => elementsOf(tree, "span").find((span) => span.className === "ab-viewer-status-item")?.children;
+  const layerTransform = (tree: ReactNode) => elementsOf(tree, "div").find((div) => typeof div.style?.transform === "string")?.style?.transform as string | undefined;
+
+  function fitsCentre(tree: ReactNode, size: CanvasSize, fitsPerRender: number): [number, number] {
+    const [x, y, scale] = (/translate\((\S+)px, (\S+)px\) scale\((\S+)\)/.exec(layerTransform(tree) ?? "") ?? []).slice(1).map(Number);
+    return [((size.width / 2 - x) / scale) * fitsPerRender, ((size.height / 2 - y) / scale) * fitsPerRender];
+  }
+
+  it("keeps 4x and Crosshair in the GPU viewer across the remount that a cube frame step or a file switch causes", () => {
+    const props: GpuViewportProps = { renderW: 2048, renderH: 2048, fitsW: 4096, fitsH: 4096, crosshairEnabled: true, children: null };
+    const view = () => hooks.render(gpuViewport, props) as ReactNode;
+    mountGpu(view, SIZE_800x600);
+    expect(gpuZoom(view())).toBe("15%");
+    click(view(), isPreset("4x"));
+    click(view(), isCrosshair);
+    expect({ zoom: gpuZoom(view()), crosshair: crosshairPressed(view()) }).toEqual({ zoom: "400%", crosshair: true });
+    hooks.mount();
+    mountGpu(view, SIZE_800x600);
+    expect({ zoom: gpuZoom(view()), crosshair: crosshairPressed(view()) }).toEqual({ zoom: "400%", crosshair: true });
+  });
+
+  it("keeps the FITS zoom, the centre and Crosshair while the CPU viewer stands in for a PNG-first cube frame and the GPU viewer comes back", () => {
+    const gpuProps: GpuViewportProps = { renderW: 2048, renderH: 2048, fitsW: 4096, fitsH: 4096, crosshairEnabled: true, children: null };
+    const gpu = () => hooks.render(gpuViewport, gpuProps) as ReactNode;
+    mountGpu(gpu, SIZE_800x600);
+    click(gpu(), isPreset("4x"));
+    click(gpu(), isCrosshair);
+    dragWithMiddleButton(gpu, 800, 400);
+    expect(fitsCentre(gpu(), SIZE_800x600, 2)).toEqual([1848, 1948]);
+    hooks.mount();
+    const file = lightFile("cube-step", LIGHT_1, [4096, 4096]);
+    const frame = pngOnly({ kind: "cube", dimensions: null, frameIndex: 5, label: "Frame 6 / 40", previewUrl: "asset://out/frame6.png" });
+    viewerContext.current = { file, processed: frame, chain: EMPTY_CHAIN };
+    const cpu = () => hooks.render(cpuViewer, cpuViewerProps(file, frame)) as ReactNode;
+    mountCpu(cpu, SIZE_800x600, 1024);
+    expect({ zoom: cpuZoom(cpu()), crosshair: crosshairPressed(cpu()), centre: fitsCentre(cpu(), SIZE_800x600, 4) }).toEqual({ zoom: "400%", crosshair: true, centre: [1848, 1948] });
+    hooks.mount();
+    mountGpu(gpu, SIZE_800x600);
+    expect({ zoom: gpuZoom(gpu()), crosshair: crosshairPressed(gpu()), centre: fitsCentre(gpu(), SIZE_800x600, 2) }).toEqual({ zoom: "400%", crosshair: true, centre: [1848, 1948] });
+  });
+
+  it("keeps 400% in the CPU viewer when a stretch change re-renders the same grid under a new URL", () => {
+    viewerContext.current = { file: lightFile("stf", LIGHT_1, [4096, 4096]), processed: null, chain: EMPTY_CHAIN };
+    const stretched = (t: number) => ({ url: `asset://stf.png?t=${t}`, label: "Original · STF", width: 4096, height: 4096 });
+    const props = { original: { url: "asset://stf.png?_v=stf", label: "Original", width: 4096, height: 4096 }, processed: stretched(1) };
+    const view = () => hooks.render(anyCpuViewer, props) as ReactNode;
+    mountCpu(view, SIZE_800x600, 2048);
+    expect(cpuZoom(view())).toBe("15%");
+    click(view(), isPreset("4x"));
+    expect(cpuZoom(view())).toBe("400%");
+    props.processed = stretched(2);
+    loadImages(view, 2048);
+    flushFrames();
+    expect(cpuZoom(view())).toBe("400%");
+  });
+
+  it("keeps the 4x view and its centre in the CPU viewer when the next file has the same 512 x 512 grid", () => {
+    const band = (name: string) => ({ url: `asset://legacy_${name}.png?_v=${name}`, label: "Original", width: 512, height: 512 });
+    viewerContext.current = { file: lightFile("g", "C:/data/legacy_g.fits", [512, 512]), processed: null, chain: EMPTY_CHAIN };
+    const props = { original: band("g"), processed: null };
+    const view = () => hooks.render(anyCpuViewer, props) as ReactNode;
+    mountCpu(view, SIZE_1000x800, 512);
+    expect(layerTransform(view())).toBe("translate(100px, 0px) scale(1.5625)");
+    click(view(), isPreset("4x"));
+    expect(layerTransform(view())).toBe("translate(-524px, -624px) scale(4)");
+    viewerContext.current = { file: lightFile("r", "C:/data/legacy_r.fits", [512, 512]), processed: null, chain: EMPTY_CHAIN };
+    props.original = band("r");
+    loadImages(view, 512);
+    flushFrames();
+    expect(layerTransform(view())).toBe("translate(-524px, -624px) scale(4)");
+  });
+
+  it("fits the CPU viewer to the window when the next file has another grid", () => {
+    viewerContext.current = { file: lightFile("g", "C:/data/legacy_g.fits", [512, 512]), processed: null, chain: EMPTY_CHAIN };
+    const props = { original: { url: "asset://legacy_g.png?_v=g", label: "Original", width: 512, height: 512 }, processed: null };
+    const view = () => hooks.render(anyCpuViewer, props) as ReactNode;
+    mountCpu(view, SIZE_1000x800, 512);
+    click(view(), isPreset("4x"));
+    viewerContext.current = { file: lightFile("wide", "C:/data/wide.fits", [1024, 1024]), processed: null, chain: EMPTY_CHAIN };
+    props.original = { url: "asset://wide.png?_v=wide", label: "Original", width: 1024, height: 1024 };
+    loadImages(view, 1024);
+    flushFrames();
+    expect(layerTransform(view())).toBe("translate(100px, 0px) scale(0.78125)");
+  });
+
+  it("pans with the left button in a GPU viewer that has no pointer buttons, whatever mode another viewer picked", () => {
+    pointerModeStore.set("crosshair");
+    const view = () => hooks.render(gpuViewport, { renderW: 512, renderH: 512, crosshairEnabled: false, children: null }) as ReactNode;
+    mountGpu(view, SIZE_800x600);
+    expect(elementsOf(view(), "button").find(isCrosshair)).toBeUndefined();
+    expect(canvasOf(view())?.style?.cursor).toBe("grab");
   });
 });

@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   CANVAS_HINT_CLASS,
+  CUBE_FRAME_VALUE_PENDING,
   CUBE_SPECTRUM_HINT,
+  CUBE_TOOL_SPECTRUM_HINT,
   GPU_LOAD_FAILED_TITLE,
   GPU_PNG_ONLY_TOGGLE_TITLE,
   GPU_PROBING_CPU_VIEWER_TOGGLE_TITLE,
@@ -15,7 +17,9 @@ import {
   backToFileAction,
   compareDividerGrabbed,
   cpuViewerDisplayTitle,
+  cubeClickOpensCube,
   cubeSpectrumClickAllowed,
+  cubeSpectrumHint,
   cubeSpectrumHintShown,
   displayedGrid,
   fileSwitchCompositeAction,
@@ -25,6 +29,7 @@ import {
   gpuDisplayOnScreen,
   gpuToggleView,
   histogramOnPath,
+  pointerProbePath,
   previewTextureTitle,
   previewViewer,
   recordGrid,
@@ -42,6 +47,7 @@ import {
   type ViewerClickInput,
 } from "../previewShell";
 import { EMPTY_CHAIN, chainForPublish, withStep } from "../processingChain";
+import { DEFAULT_DOCK_LAYOUT, dockReducer } from "../dockLayout";
 import { pipelineViewOutput } from "../stackingOutputs";
 import { previewTextureBadge } from "../viewerZoom";
 import type { ProcessedResult } from "../../shared/types/preview";
@@ -165,6 +171,39 @@ describe("recordGrid", () => {
   it("gives no file grid to a cube result that is not a frame of the cube and has no size", () => {
     const pv = pngOnly({ kind: "cube", inputPath: LIGHT_1, dimensions: null, label: "PV" });
     expect(recordGrid({ processed: pv, chain: EMPTY_CHAIN, filePath: LIGHT_1, fileDims: DIMS })).toEqual({ dims: null, matchesFile: false, previewOnly: true });
+  });
+});
+
+describe("pointerProbePath", () => {
+  const CUBE = "/data/jw01366_nirspec_s3d.fits";
+  const FRAME_FITS = "/out/cube_frame_abc_37.fits";
+  const PNG_ONLY_FRAME: ProcessedResult = {
+    kind: "cube",
+    frameIndex: 37,
+    fitsPath: null,
+    previewUrl: "asset://out/cube_frame_abc_37.png",
+    dimensions: null,
+    label: "ch 37 (0–39)",
+    inputPath: CUBE,
+  };
+
+  it("has no path to probe while a cube frame is shown before its FITS, since the cube path reads plane 0", () => {
+    expect(pointerProbePath(CUBE, PNG_ONLY_FRAME)).toBeNull();
+  });
+
+  it("probes the frame's own FITS once it is published", () => {
+    expect(pointerProbePath(FRAME_FITS, { ...PNG_ONLY_FRAME, fitsPath: FRAME_FITS, dimensions: [64, 64] })).toBe(FRAME_FITS);
+  });
+
+  it("keeps the path of the file itself, of a FITS result and of a PNG-only cube result that is not a frame", () => {
+    expect(pointerProbePath(CUBE, null)).toBe(CUBE);
+    expect(pointerProbePath("/out/m0.fits", { fitsPath: "/out/m0.fits", previewUrl: "asset://out/m0.png", dimensions: [64, 64], label: "Moment 0", kind: "cube", inputPath: CUBE })).toBe("/out/m0.fits");
+    expect(pointerProbePath(CUBE, { fitsPath: null, previewUrl: "asset://out/pv.png", dimensions: null, label: "PV", kind: "cube", inputPath: CUBE })).toBe(CUBE);
+    expect(pointerProbePath(null, null)).toBeNull();
+  });
+
+  it("says when the value of a frame shown before its FITS comes", () => {
+    expect(CUBE_FRAME_VALUE_PENDING).toBe("Value after the frame FITS loads");
   });
 });
 
@@ -527,6 +566,38 @@ describe("cubeSpectrumClickAllowed", () => {
 
   it("refuses a click while the displayed image has no dimensions, as sameGrid does", () => {
     expect(cubeSpectrumClickAllowed({ isCube: true, hasRamp: false, fileDims: [53, 55], displayedDims: null })).toBe(false);
+  });
+});
+
+describe("cubeClickOpensCube", () => {
+  it("opens the Cube tool from a fresh layout, whose right-top anchor shows no tool", () => {
+    expect(DEFAULT_DOCK_LAYOUT.active["right-top"]).toBeNull();
+    expect(cubeClickOpensCube(DEFAULT_DOCK_LAYOUT)).toBe(true);
+  });
+
+  it("leaves the anchor alone while Photometry or the Cube tool itself is shown there", () => {
+    expect(cubeClickOpensCube(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "photometry" }))).toBe(false);
+    expect(cubeClickOpensCube(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "cube" }))).toBe(false);
+  });
+
+  it("follows the Cube tool to the anchor it was moved to", () => {
+    const moved = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "move", tool: "cube", anchor: "left-bottom" });
+    const hidden = dockReducer(dockReducer(moved, { type: "hide", tool: "cube" }), { type: "open", tool: "photometry" });
+    expect(hidden.active["left-bottom"]).toBeNull();
+    expect(cubeClickOpensCube(hidden)).toBe(true);
+    expect(cubeClickOpensCube(dockReducer(hidden, { type: "open", tool: "compose" }))).toBe(false);
+  });
+});
+
+describe("cubeSpectrumHint", () => {
+  it("keeps the short hint while a click opens the Cube tool or the Cube tool is shown", () => {
+    expect(cubeSpectrumHint(DEFAULT_DOCK_LAYOUT)).toBe(CUBE_SPECTRUM_HINT);
+    expect(cubeSpectrumHint(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "cube" }))).toBe(CUBE_SPECTRUM_HINT);
+  });
+
+  it("names the Cube tool while another tool holds its anchor", () => {
+    expect(cubeSpectrumHint(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "photometry" }))).toBe(CUBE_TOOL_SPECTRUM_HINT);
+    expect(CUBE_TOOL_SPECTRUM_HINT).toBe("Click to extract a spectrum into the Cube tool");
   });
 });
 

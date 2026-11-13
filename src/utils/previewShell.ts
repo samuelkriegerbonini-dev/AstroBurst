@@ -1,5 +1,6 @@
 import { formatLat, formatLon } from "./coordFormat";
 import { deepZoomAvailable } from "./analysisSections";
+import { anchorOf, type DockLayout } from "./dockLayout";
 import { viewportClickRoute, type ViewportClickRoute } from "./regionClick";
 import { displaysFileGrid } from "./stackingOutputs";
 import { gridSourceOf } from "./processingChain";
@@ -127,6 +128,7 @@ export function histogramOnPath<T>(histData: T | null, histDataPath: string | nu
 }
 
 export const CUBE_SPECTRUM_HINT = "Click to extract spectrum";
+export const CUBE_TOOL_SPECTRUM_HINT = "Click to extract a spectrum into the Cube tool";
 export const CANVAS_HINT_CLASS =
   "absolute bottom-2 right-2 z-[6] bg-black/60 text-[10px] text-purple-300 px-2 py-1 rounded pointer-events-none whitespace-nowrap";
 
@@ -149,6 +151,15 @@ export function cubeSpectrumClickAllowed({ isCube, hasRamp, fileDims, displayedD
   displayedDims: [number, number] | null;
 }): boolean {
   return isCube && (hasRamp || sameGrid(fileDims, displayedDims));
+}
+
+export function cubeClickOpensCube(layout: DockLayout): boolean {
+  return layout.active[anchorOf(layout, "cube")] === null;
+}
+
+export function cubeSpectrumHint(layout: DockLayout): string {
+  const shown = layout.active[anchorOf(layout, "cube")];
+  return shown === null || shown === "cube" ? CUBE_SPECTRUM_HINT : CUBE_TOOL_SPECTRUM_HINT;
 }
 
 export const CLICK_SLOP_PX = 4;
@@ -308,6 +319,12 @@ export function recordGrid({ processed, chain, filePath, fileDims }: RecordGridI
   const onFileGrid = filePath !== null && displaysFileGrid(gridSourceOf(processed, chain), filePath);
   const processedDims = processed?.dimensions ?? (cubeFrame(processed) ? fileDims : null);
   return { ...displayedGrid({ previewOnly, processedDims, fileDims, onFileGrid }), previewOnly };
+}
+
+export const CUBE_FRAME_VALUE_PENDING = "Value after the frame FITS loads";
+
+export function pointerProbePath(path: string | null, processed: ProcessedResult | null): string | null {
+  return cubeFrame(processed) && processed?.fitsPath === null ? null : path;
 }
 
 export interface ViewerSizesInput {

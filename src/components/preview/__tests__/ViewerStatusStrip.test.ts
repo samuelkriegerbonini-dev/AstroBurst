@@ -3,10 +3,12 @@ import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { hooks } from "../../../test/hookRuntime";
 import { ZERO_BASED_PIXEL_TITLE } from "../../../utils/regionGeometry";
+import { CUBE_FRAME_VALUE_PENDING } from "../../../utils/previewShell";
 import { getWcsInfo, pixelToWorld } from "../../../services/astrometry";
 import { probePixel } from "../../../services/display";
 import type { PixelProbeResult, WavelengthProbe } from "../../../shared/types/analysis";
 import type { WcsInfo } from "../../../shared/types/astrometry";
+import type { ProcessedResult } from "../../../shared/types/preview";
 
 vi.mock("react", async (importOriginal) => {
   const { reactWithFakeHooks } = await import("../../../test/hookRuntime");
@@ -16,17 +18,22 @@ vi.mock("react", async (importOriginal) => {
 interface StripView {
   pixel: { x: number; y: number } | null;
   path: string | null;
+  filePath: string | null;
+  processed: ProcessedResult | null;
 }
 
-const view: StripView = { pixel: null, path: "/data/m51_cal.fits" };
+const view: StripView = { pixel: null, path: "/data/m51_cal.fits", filePath: null, processed: null };
 
 vi.mock("../../../hooks/useMousePixelStore", () => ({ useMousePixel: () => view.pixel }));
 vi.mock("../../../hooks/useAnalysisTarget", () => ({
   useAnalysisTarget: () => ({ path: view.path, composite: false, fileRgbView: false }),
 }));
 vi.mock("../../../context/PreviewContext", () => ({
-  useFileContext: () => ({ file: view.path === null ? null : { path: view.path, result: { dimensions: [64, 64] } } }),
-  useRenderContext: () => ({ processed: null, chain: { steps: {}, psfKernel: null, base: null } }),
+  useFileContext: () => {
+    const path = view.filePath ?? view.path;
+    return { file: path === null ? null : { path, result: { dimensions: [64, 64] } } };
+  },
+  useRenderContext: () => ({ processed: view.processed, chain: { steps: {}, psfKernel: null, base: null } }),
 }));
 vi.mock("../../../services/display", () => ({ probePixel: vi.fn() }));
 vi.mock("../../../services/astrometry", () => ({ getWcsInfo: vi.fn(), pixelToWorld: vi.fn() }));
@@ -64,6 +71,8 @@ beforeEach(() => {
   hooks.mount();
   view.pixel = null;
   view.path = "/data/m51_cal.fits";
+  view.filePath = null;
+  view.processed = null;
   answerProbes({ wcs: true, wavelength: MICRONS });
 });
 
@@ -142,5 +151,66 @@ describe("ViewerStatusStrip idle text", () => {
     view.path = "/data/m51_i2d.fits";
     answerProbes({ wcs: false, wavelength: null });
     expect(await settle()).toContain(">Hover the image for x, y and value</span>");
+  });
+});
+
+describe("ViewerStatusStrip over a cube frame shown before its FITS", () => {
+  const CUBE = "/data/jw01366_nirspec_s3d.fits";
+  const FRAME_FITS = "/out/cube_frame_abc_37.fits";
+  const PLANE_0_VALUE = 1234;
+  const FRAME_37_VALUE = 5678;
+
+  function frame37(fitsPath: string | null): ProcessedResult {
+    return {
+      kind: "cube",
+      frameIndex: 37,
+      fitsPath,
+      previewUrl: "asset://out/cube_frame_abc_37.png",
+      dimensions: fitsPath === null ? null : [64, 64],
+      label: "ch 37 (0–39)",
+      inputPath: CUBE,
+    };
+  }
+
+  beforeEach(() => {
+    vi.mocked(probePixel).mockImplementation((path, x, y) =>
+      Promise.resolve({ x, y, value: path === CUBE ? PLANE_0_VALUE : FRAME_37_VALUE, unit: "MJy/sr", wavelength: null } as PixelProbeResult),
+    );
+    view.filePath = CUBE;
+    view.pixel = { x: 3, y: 4 };
+  });
+
+  it("does not print another plane's value while a PNG-only cube frame is shown", async () => {
+    view.path = CUBE;
+    view.processed = frame37(null);
+    const html = await settle();
+    expect(vi.mocked(probePixel).mock.calls.map((call) => call[0])).not.toContain(CUBE);
+    expect(html).not.toContain(`${PLANE_0_VALUE} MJy/sr`);
+    expect(html).toContain(`title="Pixel value of the image being measured">${CUBE_FRAME_VALUE_PENDING}</span>`);
+    expect(html).toContain("x 3  y 4");
+  });
+
+  it("probes the frame's own FITS once it is published and prints its value", async () => {
+    view.path = FRAME_FITS;
+    view.processed = frame37(FRAME_FITS);
+    const html = await settle();
+    expect(vi.mocked(probePixel).mock.calls.map((call) => call[0])).toEqual([FRAME_FITS]);
+    expect(html).toContain(`${FRAME_37_VALUE} MJy/sr`);
+  });
+
+  it("follows playback from a frame's PNG to its FITS and drops its value when the next frame shows without one", async () => {
+    view.path = CUBE;
+    view.processed = frame37(null);
+    expect(await settle()).not.toContain(`${PLANE_0_VALUE} MJy/sr`);
+    view.path = FRAME_FITS;
+    view.processed = frame37(FRAME_FITS);
+    expect(await settle()).toContain(`${FRAME_37_VALUE} MJy/sr`);
+    view.path = CUBE;
+    view.processed = { ...frame37(null), frameIndex: 38, previewUrl: "asset://out/cube_frame_abc_38.png", label: "ch 38 (0–39)" };
+    const html = await settle();
+    expect(vi.mocked(probePixel).mock.calls.map((call) => call[0])).toEqual([FRAME_FITS]);
+    expect(html).not.toContain(`${FRAME_37_VALUE} MJy/sr`);
+    expect(html).not.toContain(`${PLANE_0_VALUE} MJy/sr`);
+    expect(html).toContain(`title="Pixel value of the image being measured">${CUBE_FRAME_VALUE_PENDING}</span>`);
   });
 });

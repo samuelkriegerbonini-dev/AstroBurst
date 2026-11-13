@@ -38,6 +38,12 @@ describe("shortcutSheet", () => {
     expect(sheet.find((g) => g.id === "cube-regions")?.title).toBe("Cube and regions");
   });
 
+  it("lists the region delete key, which acts only while the image has the focus, under Cube and regions", () => {
+    for (const mac of [false, true]) {
+      expect(rowsOf(shortcutSheet(mac), "cube-regions")).toContainEqual({ keys: "Delete / Backspace (image focused)", desc: "Delete the selected region" });
+    }
+  });
+
   it("lists the frame keys of the focused image next to the spectrum plot keys", () => {
     expect(rowsOf(shortcutSheet(false), "cube-regions").slice(0, 3)).toEqual([
       { keys: "← / → (spectrum plot)", desc: "Previous / next channel of the cube or ramp" },

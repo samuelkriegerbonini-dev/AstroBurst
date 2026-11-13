@@ -4,7 +4,16 @@ import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
 import { useFileContext, useRenderContext } from "../../context/PreviewContext";
 import { probePixel } from "../../services/display";
 import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
-import { recordGrid, statusStripIdleText, statusStripParts, viewerPublishesPixel, type PixelValueAt, type SkyAt } from "../../utils/previewShell";
+import {
+  CUBE_FRAME_VALUE_PENDING,
+  pointerProbePath,
+  recordGrid,
+  statusStripIdleText,
+  statusStripParts,
+  viewerPublishesPixel,
+  type PixelValueAt,
+  type SkyAt,
+} from "../../utils/previewShell";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import "./preview-layout.css";
 
@@ -20,6 +29,8 @@ function ViewerStatusStrip() {
   const readout = { composite, fileRgbView, gridMatchesFile };
   const publishesPixel = viewerPublishesPixel(readout);
   const pixel = publishesPixel ? mousePixel : null;
+  const probePath = pointerProbePath(path, processed);
+  const frameValuePending = path !== null && probePath === null;
   const [valueAt, setValueAt] = useState<(PixelValueAt & { path: string }) | null>(null);
   const [skyAt, setSkyAt] = useState<(SkyAt & { path: string }) | null>(null);
   const [wcsPath, setWcsPath] = useState<string | null>(null);
@@ -43,24 +54,24 @@ function ViewerStatusStrip() {
   }, [path]);
 
   useEffect(() => {
-    if (!path || x === null || y === null) return;
+    if (!probePath || x === null || y === null) return;
     let cancelled = false;
     const timer = setTimeout(() => {
-      probePixel(path, x, y, PROBE_BOX)
+      probePixel(probePath, x, y, PROBE_BOX)
         .then((res) => {
           if (cancelled) return;
-          setValueAt({ path, x, y, value: res.value, unit: res.unit, wavelength: res.wavelength ?? null });
-          if (res.wavelength) setWavelengthPath(path);
+          setValueAt({ path: probePath, x, y, value: res.value, unit: res.unit, wavelength: res.wavelength ?? null });
+          if (res.wavelength) setWavelengthPath(probePath);
         })
         .catch(() => {
-          if (!cancelled) setValueAt({ path, x, y, value: null, unit: null, wavelength: null });
+          if (!cancelled) setValueAt({ path: probePath, x, y, value: null, unit: null, wavelength: null });
         });
     }, HOVER_DEBOUNCE_MS);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [path, x, y]);
+  }, [probePath, x, y]);
 
   useEffect(() => {
     if (!path || !hasWcs || x === null || y === null) return;
@@ -81,7 +92,7 @@ function ViewerStatusStrip() {
 
   const parts = statusStripParts(
     pixel,
-    valueAt !== null && valueAt.path === path ? valueAt : null,
+    valueAt !== null && valueAt.path === probePath ? valueAt : null,
     hasWcs && skyAt !== null && skyAt.path === path ? skyAt : null,
   );
 
@@ -95,7 +106,7 @@ function ViewerStatusStrip() {
       {parts ? (
         <>
           <span className="text-zinc-400" title={ZERO_BASED_PIXEL_TITLE}>{parts.position}</span>
-          <span style={{ color: "rgba(251,191,36,0.8)" }} title="Pixel value of the image being measured">{parts.value}</span>
+          <span style={{ color: "rgba(251,191,36,0.8)" }} title="Pixel value of the image being measured">{frameValuePending ? CUBE_FRAME_VALUE_PENDING : parts.value}</span>
           {parts.wavelength && (
             <span style={{ color: "rgba(167,139,250,0.85)" }} title="Wavelength at this pixel from the WAVELENGTH extension">
               {parts.wavelength}

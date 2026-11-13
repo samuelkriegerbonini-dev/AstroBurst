@@ -4,9 +4,13 @@ import {
   fitScale,
   fitsPerRenderPx,
   isZoomPresetActive,
+  keptTransform,
+  keptViewFor,
+  keptViewOf,
   renderScaleForFits,
   wheelZoomFactor,
   zoomPercentLabel,
+  type KeptView,
 } from "../utils/viewerZoom";
 
 export interface Transform {
@@ -17,14 +21,21 @@ export interface Transform {
 
 const ZOOM_STEP = 1.15;
 
+let keptView: KeptView | null = null;
+
+export function forgetViewerView(): void {
+  keptView = null;
+}
+
 export interface UseViewerTransformOptions {
   containerRef: React.RefObject<HTMLDivElement | null>;
   renderW: number;
   renderH: number;
   fitsW?: number;
+  fitsH?: number;
 }
 
-export function useViewerTransform({ containerRef, renderW, renderH, fitsW }: UseViewerTransformOptions) {
+export function useViewerTransform({ containerRef, renderW, renderH, fitsW, fitsH }: UseViewerTransformOptions) {
   const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
   const [transform, setTransformState] = useState<Transform>({ scale: 1, x: 0, y: 0 });
   const transformRef = useRef(transform);
@@ -35,6 +46,10 @@ export function useViewerTransform({ containerRef, renderW, renderH, fitsW }: Us
   const fitsPerRender = fitsPerRenderPx(fitsW, renderW);
   const fitsPerRenderRef = useRef(fitsPerRender);
   fitsPerRenderRef.current = fitsPerRender;
+  const gridW = fitsW ?? renderW;
+  const gridH = fitsH ?? renderH;
+  const viewSizesRef = useRef({ renderW, renderH, gridW, gridH });
+  viewSizesRef.current = { renderW, renderH, gridW, gridH };
 
   const attachContainer = useCallback(
     (el: HTMLDivElement | null) => {
@@ -57,6 +72,7 @@ export function useViewerTransform({ containerRef, renderW, renderH, fitsW }: Us
     if (cw === 0 || ch === 0) return;
     const scale = fitScale(cw, ch, renderW, renderH, fitsPerRender);
     userInteractedRef.current = false;
+    forgetViewerView();
     setTransformState({
       scale,
       x: (cw - renderW * scale) / 2,
@@ -64,8 +80,23 @@ export function useViewerTransform({ containerRef, renderW, renderH, fitsW }: Us
     });
   }, [containerRef, renderW, renderH, hasRenderDims, fitsPerRender]);
 
-  const fitToWindowRef = useRef(fitToWindow);
-  fitToWindowRef.current = fitToWindow;
+  const settleView = useCallback(() => {
+    const kept = keptViewFor(keptView, gridW, gridH);
+    if (!kept) {
+      fitToWindow();
+      return;
+    }
+    const container = containerRef.current;
+    const restored = container
+      ? keptTransform(kept, { containerW: container.clientWidth, containerH: container.clientHeight, renderW, renderH, gridW, gridH })
+      : null;
+    if (!restored) return;
+    userInteractedRef.current = true;
+    setTransformState(restored);
+  }, [containerRef, fitToWindow, renderW, renderH, gridW, gridH]);
+
+  const settleViewRef = useRef(settleView);
+  settleViewRef.current = settleView;
 
   const zoomTo = useCallback((newScale: number, centerX?: number, centerY?: number) => {
     userInteractedRef.current = true;
@@ -157,9 +188,16 @@ export function useViewerTransform({ containerRef, renderW, renderH, fitsW }: Us
   useEffect(() => {
     if (hasRenderDims) {
       userInteractedRef.current = false;
-      requestAnimationFrame(() => fitToWindowRef.current());
+      requestAnimationFrame(() => settleViewRef.current());
     }
   }, [hasRenderDims, renderW, renderH]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!userInteractedRef.current || !container) return;
+    const view = keptViewOf(transform, { containerW: container.clientWidth, containerH: container.clientHeight, ...viewSizesRef.current });
+    if (view) keptView = view;
+  }, [transform, containerRef]);
 
   useEffect(() => {
     if (!containerEl) return;
@@ -168,7 +206,7 @@ export function useViewerTransform({ containerRef, renderW, renderH, fitsW }: Us
       if (raf !== null) return;
       raf = requestAnimationFrame(() => {
         raf = null;
-        if (!userInteractedRef.current) fitToWindowRef.current();
+        if (!userInteractedRef.current) settleViewRef.current();
       });
     });
     ro.observe(containerEl);

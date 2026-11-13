@@ -1,3 +1,5 @@
+import type { ViewerTransform } from "./pixelMapping";
+
 export const VIEWER_ZOOM_MIN = 0.1;
 export const VIEWER_ZOOM_MAX = 32;
 export const FIT_SCALE_CAP = 16;
@@ -60,6 +62,55 @@ export function imageRenderingFor(renderScale: number): "pixelated" | "auto" {
 export function previewTextureBadge(renderW: number, fitsW: number | undefined): string | null {
   if (fitsW === undefined || !Number.isFinite(fitsW) || renderW <= 0 || fitsW <= renderW) return null;
   return `preview ${renderW} px (${(fitsW / renderW).toFixed(1)}:1)`;
+}
+
+export interface KeptView {
+  gridW: number;
+  gridH: number;
+  fitsScale: number;
+  centreX: number;
+  centreY: number;
+}
+
+export interface ViewSizes {
+  containerW: number;
+  containerH: number;
+  renderW: number;
+  renderH: number;
+  gridW: number;
+  gridH: number;
+}
+
+function hasSize({ containerW, containerH, renderW, renderH, gridW, gridH }: ViewSizes): boolean {
+  return [containerW, containerH, renderW, renderH, gridW, gridH].every((side) => side > 0);
+}
+
+export function keptViewOf(transform: ViewerTransform, sizes: ViewSizes): KeptView | null {
+  if (!hasSize(sizes)) return null;
+  const { containerW, containerH, renderW, renderH, gridW, gridH } = sizes;
+  return {
+    gridW,
+    gridH,
+    fitsScale: (transform.scale * renderW) / gridW,
+    centreX: (((containerW / 2 - transform.x) / transform.scale) * gridW) / renderW,
+    centreY: (((containerH / 2 - transform.y) / transform.scale) * gridH) / renderH,
+  };
+}
+
+export function keptViewFor(kept: KeptView | null, gridW: number, gridH: number): KeptView | null {
+  return kept !== null && kept.gridW === gridW && kept.gridH === gridH ? kept : null;
+}
+
+export function keptTransform(kept: KeptView, sizes: ViewSizes): ViewerTransform | null {
+  if (!hasSize(sizes)) return null;
+  const { containerW, containerH, renderW, renderH, gridW, gridH } = sizes;
+  const fitsPerRender = gridW / renderW;
+  const scale = clampViewerScale(kept.fitsScale * fitsPerRender, fitsPerRender);
+  return {
+    scale,
+    x: containerW / 2 - ((kept.centreX * renderW) / gridW) * scale,
+    y: containerH / 2 - ((kept.centreY * renderH) / gridH) * scale,
+  };
 }
 
 export const ZOOM_PAN_MIN = 0.25;

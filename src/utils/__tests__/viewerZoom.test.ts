@@ -15,10 +15,14 @@ import {
   ACTUAL_SIZE_SCALE,
   actualSizeView,
   clampZoomPanScale,
+  keptTransform,
+  keptViewFor,
+  keptViewOf,
   panForZoom,
   wheelGestureZooms,
   ZOOM_PAN_MAX,
   ZOOM_PAN_MIN,
+  type KeptView,
 } from "../viewerZoom";
 
 describe("fitsPerRenderPx", () => {
@@ -214,5 +218,45 @@ describe("ZoomPanView actual size", () => {
     const previewPerFrame = 2048 / 6000;
     expect(14 * previewPerFrame * fit).toBeLessThan(1);
     expect(14 * previewPerFrame * actualSizeView(fit, fitPan, fit, containerW, containerH).scale).toBeGreaterThan(4);
+  });
+});
+
+describe("view kept across frames, stretches and files of one FITS grid", () => {
+  const gpu = { containerW: 800, containerH: 600, renderW: 2048, renderH: 2048, gridW: 4096, gridH: 4096 };
+  const zoomedAndPanned = { scale: 8, x: -6992, y: -7492 };
+
+  it("keeps the view for the same grid and refits for another grid", () => {
+    const kept: KeptView = { gridW: 512, gridH: 512, fitsScale: 4, centreX: 256, centreY: 256 };
+    expect(keptViewFor(kept, 512, 512)).toBe(kept);
+    expect(keptViewFor(kept, 1024, 1024)).toBeNull();
+    expect(keptViewFor(kept, 512, 1024)).toBeNull();
+    expect(keptViewFor(null, 512, 512)).toBeNull();
+  });
+
+  it("records the zoom in FITS pixels and the FITS point at the container centre", () => {
+    expect(keptViewOf(zoomedAndPanned, gpu)).toEqual({ gridW: 4096, gridH: 4096, fitsScale: 4, centreX: 1848, centreY: 1948 });
+  });
+
+  it("gives back the transform it was recorded from on the same sizes", () => {
+    expect(keptTransform(keptViewOf(zoomedAndPanned, gpu)!, gpu)).toEqual(zoomedAndPanned);
+  });
+
+  it("shows the same FITS zoom and centre on a texture and a container of other sizes", () => {
+    const cpu = { ...gpu, containerH: 560, renderW: 1024, renderH: 1024 };
+    expect(keptTransform(keptViewOf(zoomedAndPanned, gpu)!, cpu)).toEqual({ scale: 16, x: -6992, y: -7512 });
+  });
+
+  it("keeps the restored zoom inside the viewer limits of the new texture", () => {
+    const kept: KeptView = { gridW: 4096, gridH: 4096, fitsScale: 0.05, centreX: 2048, centreY: 2048 };
+    expect(keptTransform(kept, { ...gpu, renderW: 4096, renderH: 4096 })?.scale).toBe(VIEWER_ZOOM_MIN);
+  });
+
+  it("keeps and restores nothing while the image, the grid or the container has no size", () => {
+    expect(keptViewOf(zoomedAndPanned, { ...gpu, renderW: 0, renderH: 0 })).toBeNull();
+    expect(keptViewOf(zoomedAndPanned, { ...gpu, containerW: 0 })).toBeNull();
+    expect(keptViewOf(zoomedAndPanned, { ...gpu, gridW: 0 })).toBeNull();
+    const kept = keptViewOf(zoomedAndPanned, gpu)!;
+    expect(keptTransform(kept, { ...gpu, containerH: 0 })).toBeNull();
+    expect(keptTransform(kept, { ...gpu, renderW: 0 })).toBeNull();
   });
 });

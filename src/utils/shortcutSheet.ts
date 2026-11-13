@@ -55,6 +55,7 @@ export function shortcutSheet(mac: boolean): readonly ShortcutGroup[] {
         { keys: "Shift+← / →", desc: "Step 10 channels or frames" },
         { keys: "Double-click (spectrum plot)", desc: "Jump to the channel under the cursor" },
         { keys: "Enter / double-click (polygon tool)", desc: "Close the polygon being drawn (3 vertices or more)" },
+        { keys: "Delete / Backspace (image focused)", desc: "Delete the selected region" },
       ],
     },
     { id: "archive", title: "Archive", rows: archiveShortcuts(mac) },

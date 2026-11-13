@@ -24,8 +24,10 @@ import { regionStore } from "../../utils/regionStore";
 import { DEFAULT_REGION_PROPS } from "../../utils/regionPersistence";
 import { useRegionDoc, useRegionTool, useRegionDraft } from "../../hooks/useRegionStore";
 import { useRegionKey } from "../../hooks/useRegionKey";
+import { appModeStore } from "../../hooks/useAppMode";
 import { generateId } from "../../utils/format";
 import { regionLayerSwallowsClick } from "../../utils/regionClick";
+import { regionKeyAction } from "../../utils/regionKeys";
 
 interface RegionsLayerProps {
   containerRef: RefObject<HTMLDivElement | null>;
@@ -45,6 +47,7 @@ const HANDLE_SIZE = 8;
 const HANDLE_TOLERANCE_PX = 6;
 const DRAG_THRESHOLD_PX = 2;
 const DASH: number[] = [4, 3];
+const MODAL_SELECTOR = "[aria-modal='true']";
 
 type DragState =
   | { kind: "draw"; tool: Exclude<RegionTool, "none" | "select" | "polygon">; start: Pt; startScreen: Pt; moved: boolean }
@@ -55,6 +58,15 @@ function isEditableTarget(t: EventTarget | null): boolean {
   if (!(t instanceof HTMLElement)) return false;
   const tag = t.tagName;
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
+}
+
+function isModalTarget(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && t.closest(MODAL_SELECTOR) !== null;
+}
+
+function isViewerTarget(t: EventTarget | null, viewer: HTMLElement | null): boolean {
+  if (!viewer || !(t instanceof HTMLElement)) return false;
+  return t.contains(viewer) || viewer.contains(t);
 }
 
 function cursorForTool(tool: RegionTool): string {
@@ -383,38 +395,35 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
-      if (isEditableTarget(e.target)) return;
       const key = fileKey;
       if (!key) return;
-      if (e.key === "Delete" || e.key === "Backspace") {
-        const d = regionStore.getDoc(key);
-        if (d.selectedId) {
-          regionStore.remove(key, d.selectedId);
-          e.preventDefault();
-        }
-        return;
-      }
-      if (e.key === "Enter") {
-        if (regionStore.getDraftFor(key)?.shape === "polygon") {
-          closePolygon();
-          e.preventDefault();
-        }
-        return;
-      }
-      if (e.key === "Escape") {
-        if (regionStore.getDraftFor(key)) {
-          regionStore.clearDraft(key);
-          dragRef.current = null;
-        } else if (regionStore.getDoc(key).selectedId) {
-          regionStore.select(key, null);
-        } else if (regionStore.getTool() !== "none") {
-          regionStore.setTool("none");
-        }
+      const selectedId = regionStore.getDoc(key).selectedId;
+      const action = regionKeyAction(e.key, {
+        editable: isEditableTarget(e.target),
+        inViewer: appModeStore.get() === "workspace" && isViewerTarget(e.target, containerRef.current),
+        inModal: isModalTarget(e.target),
+        draft: regionStore.getDraftFor(key)?.shape ?? null,
+        hasSelection: selectedId !== null,
+        tool: regionStore.getTool(),
+      });
+      if (action === "delete-selected" && selectedId !== null) {
+        regionStore.remove(key, selectedId);
+        e.preventDefault();
+      } else if (action === "close-polygon") {
+        closePolygon();
+        e.preventDefault();
+      } else if (action === "clear-draft") {
+        regionStore.clearDraft(key);
+        dragRef.current = null;
+      } else if (action === "deselect") {
+        regionStore.select(key, null);
+      } else if (action === "tool-off") {
+        regionStore.setTool("none");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, fileKey, closePolygon]);
+  }, [active, fileKey, closePolygon, containerRef]);
 
   useEffect(() => {
     if (tool === "polygon") return;

@@ -7,6 +7,7 @@ import { CANVAS_HINT_CLASS, previewTextureTitle, viewerClickRoute } from "../../
 import { viewScaleAttributes } from "../../utils/starOverlay";
 import { regionToolHint } from "../../utils/regionToolHints";
 import { useRegionTool } from "../../hooks/useRegionStore";
+import { pointerModeStore, usePointerMode } from "../../utils/pointerModeStore";
 import RegionToolbar from "../regions/RegionToolbar";
 import RegionsLayer from "../regions/RegionsLayer";
 import OverlayLayer from "../viewer/OverlayLayer";
@@ -59,7 +60,8 @@ function GpuViewport({
 }: GpuViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const regionTool = useRegionTool();
-  const [cursorMode, setCursorMode] = useState<"pan" | "crosshair">("pan");
+  const pickedPointerMode = usePointerMode();
+  const cursorMode = crosshairEnabled ? pickedPointerMode : "pan";
   const [isPanning, setIsPanning] = useState(false);
   const [holdOriginal, setHoldOriginal] = useState(false);
   const isPanningRef = useRef(false);
@@ -74,7 +76,7 @@ function GpuViewport({
     transform, transformRef, setTransform,
     fitToWindow, zoomToFits, zoomIn, zoomOut, setOneToOne,
     hasRenderDims, zoomPct, isPresetActive,
-  } = useViewerTransform({ containerRef, renderW, renderH, fitsW: effFitsW });
+  } = useViewerTransform({ containerRef, renderW, renderH, fitsW: effFitsW, fitsH: effFitsH });
 
   const regionsActive = regionsEnabled && renderW > 0 && renderH > 0 && effFitsW > 0 && effFitsH > 0;
   const regionHint = regionsActive ? regionToolHint(regionTool) : null;
@@ -189,7 +191,7 @@ function GpuViewport({
             <div className="ab-viewer-toolbar-divider" />
             <div className="ab-viewer-toolbar-group" role="group" aria-label="Pointer mode">
               <button
-                onClick={() => setCursorMode("pan")}
+                onClick={() => pointerModeStore.set("pan")}
                 className={`ab-viewer-btn ${cursorMode === "pan" ? "ab-viewer-btn-active" : ""}`}
                 title="Pan"
                 aria-pressed={cursorMode === "pan"}
@@ -197,7 +199,7 @@ function GpuViewport({
                 <Move size={14} />
               </button>
               <button
-                onClick={() => setCursorMode("crosshair")}
+                onClick={() => pointerModeStore.set("crosshair")}
                 className={`ab-viewer-btn ${cursorMode === "crosshair" ? "ab-viewer-btn-active" : ""}`}
                 title="Crosshair"
                 aria-pressed={cursorMode === "crosshair"}

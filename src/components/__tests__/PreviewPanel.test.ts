@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CUBE_SPECTRUM_HINT, PNG_ONLY_TITLE } from "../../utils/previewShell";
+import { CUBE_SPECTRUM_HINT, CUBE_TOOL_SPECTRUM_HINT, PNG_ONLY_TITLE } from "../../utils/previewShell";
 import { dockStore } from "../../hooks/useDockLayout";
 import { DEFAULT_DOCK_LAYOUT, anchorOf, dockReducer } from "../../utils/dockLayout";
 import { middleEllipsis } from "../../utils/filenameDisplay";
@@ -29,6 +29,7 @@ interface ViewState {
   previewOnly?: boolean;
   compositeUrl?: string | null;
   cubeFrame?: number;
+  pixelClick?: { x: number; y: number; seq: number };
 }
 
 const S3D_GRID: [number, number] = [53, 55];
@@ -40,6 +41,8 @@ const state: ViewState = { label: null, isCube: true, isSpectralCube: true, file
 
 const getHeaderMock = vi.hoisted(() => vi.fn<() => Promise<Record<string, string>>>());
 vi.mock("../../services/header", () => ({ getHeader: getHeaderMock }));
+const getCubeSpectrumMock = vi.hoisted(() => vi.fn<(path: string, x: number, y: number) => Promise<never>>(() => new Promise<never>(() => {})));
+vi.mock("../../services/cube", async (original) => ({ ...(await original<Record<string, unknown>>()), getCubeSpectrum: getCubeSpectrumMock }));
 
 vi.mock("react", async (original) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await original()));
 
@@ -140,7 +143,7 @@ vi.mock("../../hooks/useMousePixelStore", () => ({
   useMousePixelActions: () => ({ handleLeave: () => {}, reset: () => {} }),
   setMousePixel: () => {},
   emitPixelClick: () => {},
-  usePixelClick: () => null,
+  usePixelClick: () => state.pixelClick ?? null,
 }));
 vi.mock("../../hooks/useRampStore", () => ({ useRampIntegration: () => 0 }));
 vi.mock("../../utils/gpuPreference", () => ({ loadGpuPreference: () => state.gpu, saveGpuPreference: () => {} }));
@@ -181,7 +184,7 @@ import { cubeFrameRequesters, formatFrameLabel } from "../../utils/cubeNavigatio
 import { beginSpectrum, commitSpectrum, resetSpectrum, useSpectrum, type SpectrumState } from "../../hooks/useSpectrumStore";
 
 function render(view: Partial<ViewState>): string {
-  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false, reloads: undefined, finishedAt: undefined, imageRef: undefined, fileHeader: undefined, filePath: undefined, fileName: undefined, productPath: undefined, productVersion: undefined, previewOnly: undefined, compositeUrl: undefined, cubeFrame: undefined }, view);
+  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false, reloads: undefined, finishedAt: undefined, imageRef: undefined, fileHeader: undefined, filePath: undefined, fileName: undefined, productPath: undefined, productVersion: undefined, previewOnly: undefined, compositeUrl: undefined, cubeFrame: undefined, pixelClick: undefined }, view);
   return renderToStaticMarkup(createElement(PreviewPanel));
 }
 
@@ -493,6 +496,66 @@ describe("PreviewPanel spectrum click on the GPU viewer", () => {
 
   it("passes the spectrum click handler on the cube's spatial grid", () => {
     expect(typeof tabClickAfterRender({ displayedDims: S3D_GRID })).toBe("function");
+  });
+});
+
+describe("PreviewPanel spectrum click with the Cube tool closed", () => {
+  const CUBE_PATH = "/data/cube_s3d.fits";
+  const cubeAnchorTool = () => dockStore.get().active[anchorOf(dockStore.get(), "cube")];
+
+  beforeEach(() => {
+    dockStore.dispatch({ type: "reset" });
+    getCubeSpectrumMock.mockClear();
+    viewerProps.length = 0;
+    tabProps.length = 0;
+  });
+
+  afterEach(() => dockStore.dispatch({ type: "reset" }));
+
+  it("opens the Cube tool when a click on the CPU viewer extracts a spectrum and its anchor shows no tool", () => {
+    expect(dockStore.get().active["right-top"]).toBeNull();
+    expect(render({})).toContain(HINT_ATTRIBUTE);
+    viewerProps.at(-1)!.onCanvasPixelClick!(10, 10);
+    expect(getCubeSpectrumMock).toHaveBeenCalledWith(CUBE_PATH, 10, 10);
+    expect(cubeAnchorTool()).toBe("cube");
+  });
+
+  it("opens the Cube tool when a click on the GPU viewer extracts a spectrum", () => {
+    render({ gpu: true });
+    tabProps.at(-1)!.onCubePixelClick!(10, 10);
+    expect(getCubeSpectrumMock).toHaveBeenCalledWith(CUBE_PATH, 10, 10);
+    expect(cubeAnchorTool()).toBe("cube");
+  });
+
+  it("opens the Cube tool when a crosshair click extracts a spectrum", () => {
+    render({});
+    hooks.mount();
+    state.pixelClick = { x: 10, y: 10, seq: 1 };
+    hooks.render(PreviewPanel, {});
+    expect(getCubeSpectrumMock).toHaveBeenCalledWith(CUBE_PATH, 10, 10);
+    expect(cubeAnchorTool()).toBe("cube");
+  });
+
+  it("keeps another tool on the Cube tool's anchor and names the Cube tool in the hint", () => {
+    dockStore.dispatch({ type: "open", tool: "photometry" });
+    const html = render({});
+    expect(html).not.toContain(HINT_ATTRIBUTE);
+    expect(html).toContain(`data-canvas-hint="${CUBE_TOOL_SPECTRUM_HINT}"`);
+    viewerProps.at(-1)!.onCanvasPixelClick!(10, 10);
+    expect(getCubeSpectrumMock).toHaveBeenCalledWith(CUBE_PATH, 10, 10);
+    expect(dockStore.get().active["right-top"]).toBe("photometry");
+  });
+
+  it("keeps the short hint while the Cube tool is shown", () => {
+    dockStore.dispatch({ type: "open", tool: "cube" });
+    expect(render({})).toContain(HINT_ATTRIBUTE);
+  });
+
+  it("opens nothing for a click outside the cube's grid", () => {
+    render({});
+    viewerProps.at(-1)!.onCanvasPixelClick!(53, 10);
+    expect(getCubeSpectrumMock).not.toHaveBeenCalled();
+    expect(cubeAnchorTool()).toBeNull();
   });
 });
 

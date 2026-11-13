@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useSyncExternalStore } from "react";
 import { Image, Cpu, Zap, Loader2, SkipBack, Palette } from "lucide-react";
 
 import { getCubeSpectrum } from "../services/cube";
@@ -57,11 +57,12 @@ import ViewerFrameStepper, { FRAME_KEYS_GROUP_CLASS, FrameKeysFocusRing } from "
 import { useViewerFrameKeys, useViewerFrameStep } from "./preview/useViewerFrameKeys";
 import "./preview/preview-layout.css";
 import {
-  CUBE_SPECTRUM_HINT,
   PNG_ONLY_TITLE,
   backToFileAction,
   cpuViewerDisplayTitle,
+  cubeClickOpensCube,
   cubeSpectrumClickAllowed,
+  cubeSpectrumHint,
   cubeSpectrumHintShown,
   gpuAfterProbe,
   gpuDisplayOnScreen,
@@ -81,6 +82,8 @@ const GPU_TOGGLE_STYLES: Record<GpuToggleTone, React.CSSProperties> = {
 
 const PREVIEW_NAME_MAX = 40;
 const METADATA_CACHE_LIMIT = 64;
+
+const currentCubeSpectrumHint = () => cubeSpectrumHint(dockStore.get());
 
 interface ProductMetadata {
   version: number;
@@ -114,6 +117,7 @@ export default function PreviewPanel() {
   wizardReadyRef.current = wizardState.compositeReady;
   const { starOverlayRef } = useStarOverlayContext();
   const { handleLeave, reset: resetMouse } = useMousePixelActions();
+  const cubeHint = useSyncExternalStore(dockStore.subscribe, currentCubeSpectrumHint, currentCubeSpectrumHint);
 
   const [gpuPref] = useState(() => loadGpuPreference());
   const [useGpu, setUseGpu] = useState(gpuPref ?? false);
@@ -414,8 +418,9 @@ export default function PreviewPanel() {
   const handleCubePixelClick = useCallback((x: number, y: number) => {
     const dims = file?.result?.dimensions;
     if (!isCube || !dims || x < 0 || x >= dims[0] || y < 0 || y >= dims[1]) return;
+    if (cubeClickOpensCube(dockStore.get())) openCubeTool();
     extractSpectrum(x, y);
-  }, [isCube, file?.result?.dimensions, extractSpectrum]);
+  }, [isCube, file?.result?.dimensions, extractSpectrum, openCubeTool]);
 
   const spectrumClickAllowed = cubeSpectrumClickAllowed({
     isCube,
@@ -432,8 +437,9 @@ export default function PreviewPanel() {
     if (pixelClick.seq === spectrumClickSeqRef.current) return;
     spectrumClickSeqRef.current = pixelClick.seq;
     if (!spectrumClickAllowed) return;
+    if (cubeClickOpensCube(dockStore.get())) openCubeTool();
     extractSpectrum(pixelClick.x, pixelClick.y);
-  }, [pixelClick, isCube, spectrumClickAllowed, extractSpectrum]);
+  }, [pixelClick, isCube, spectrumClickAllowed, extractSpectrum, openCubeTool]);
 
   const handleViewerMousePixel = useCallback((x: number, y: number) => { setMousePixel({ x, y }); }, []);
 
@@ -579,7 +585,7 @@ export default function PreviewPanel() {
                 onMouseLeave={handleLeave}
                 overlayCanvasRef={starOverlayRef}
                 dqCanvasRef={dqCanvasRef}
-                canvasHint={cubeSpectrumHintShown({ isSpectralCube, fileDims: file?.result?.dimensions ?? null, displayedDims }) ? CUBE_SPECTRUM_HINT : undefined}
+                canvasHint={cubeSpectrumHintShown({ isSpectralCube, fileDims: file?.result?.dimensions ?? null, displayedDims }) ? cubeHint : undefined}
               />
             </div>
           </div>
