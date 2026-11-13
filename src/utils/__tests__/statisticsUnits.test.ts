@@ -127,6 +127,13 @@ describe("formatStatistic", () => {
     expect(formatStatistic(NaN, "location", "raw")).toBe("--");
     expect(formatStatistic(5 / 6, "fraction", "raw")).toBe("83.33%");
   });
+
+  it("keeps the significant digits of a [0, 1] noise on a JWST i2d with a saturated core (trust-14)", () => {
+    const sigma = 0.009 / (4800 - -0.6);
+    expect(formatStatistic(sigma, "scale", "normalized")).toBe("1.875e-6");
+    expect(formatStatistic(sigma * sigma, "variance", "normalized")).toBe("3.515e-12");
+    expect(formatStatistic(0.123456789, "location", "normalized")).toBe("0.123457");
+  });
 });
 
 describe("statisticsToCsv", () => {

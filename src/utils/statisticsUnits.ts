@@ -123,7 +123,6 @@ export function formatStatistic(value: number, kind: StatisticKind, unit: Statis
   if (!Number.isFinite(value)) return "--";
   if (kind === "count") return String(Math.round(value));
   if (kind === "fraction") return `${(value * 100).toFixed(2)}%`;
-  if (unit === "normalized") return value.toFixed(6);
   if (unit === "16bit") return value.toFixed(1);
   if (value === 0) return "0";
   const magnitude = Math.abs(value);

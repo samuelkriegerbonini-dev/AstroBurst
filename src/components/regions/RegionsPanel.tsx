@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Shapes, FileUp, FileDown, ClipboardCopy, Plus, Trash2, Loader2 } from "lucide-react";
 import type { Region, RegionStatsEntry, RegionSystem } from "../../shared/types";
-import { REGION_SYSTEMS, type RegionSky } from "../../shared/types/regions";
+import { REGION_SYSTEMS, type RegionNetErrTerms, type RegionSky } from "../../shared/types/regions";
 import { importRegions, exportRegions, toWire } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { MAX_CLIP_ITERS, parseClipIters, parseClipSigma, useRegionStats } from "../../hooks/useRegionStats";
@@ -14,6 +14,7 @@ import { useDqContext } from "../../context/PreviewContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { measurementLog, regionLogReady, regionStatsEntries } from "../../utils/measurementLog";
 import { generateId } from "../../utils/format";
+import { formatSignificant } from "../../utils/formatSignificant";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import {
   EXCLUDED_CELL_TITLE,
@@ -52,6 +53,18 @@ const INCLUDE_OFF_CLASS = "text-amber-400/90 border-amber-700/60 bg-amber-900/20
 const DELETE_IDLE_CLASS = "text-zinc-600 hover:text-red-400";
 const DELETE_ARMED_CLASS = "text-[9px] px-1 rounded border border-red-700/60 text-red-400 hover:text-red-300";
 const DELETE_ARMED_TITLE = `Press again within ${ARMED_CONFIRM_WINDOW_MS / 1000} s to delete the region`;
+const SNR_DECIMALS = 1;
+const NET_ERROR_TITLES: Record<RegionNetErrTerms, string> = {
+  "err_plane+background_level":
+    "Error of the net sum: ERR plane of the region in quadrature with the background level term n² σ_bg² / n_bg",
+  "background_scatter+background_level":
+    "Error of the net sum: no ERR plane, so the pixel noise n σ_bg² from the background scatter, plus the background level term n² σ_bg² / n_bg",
+};
+const NO_NET_ERROR_TITLE = "No error: the background has zero scatter and the region has no ERR noise";
+const SNR_TITLE = "Net sum divided by its error";
+const COPY_CSV_TITLE = "Copy the region table (statistics and calibrated fluxes) as CSV";
+const SAVE_CSV_TITLE = "Save the region table (statistics and calibrated fluxes) as a CSV file";
+const STATS_PENDING_TITLE = "Waiting for statistics that match the current regions, clipping and DQ settings";
 
 function regionDeleteKey(id: string): string {
   return `region:${id}`;
@@ -96,11 +109,15 @@ function fileStem(path: string): string {
   return dot > 0 ? base.slice(0, dot) : base;
 }
 
-function fmt(v: number | null | undefined, digits = 3): string {
-  if (v === null || v === undefined || !Number.isFinite(v)) return "--";
+function fmt(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return MISSING_VALUE;
+  return formatSignificant(v);
+}
+
+function fmtSnr(v: number): string {
   const a = Math.abs(v);
-  if (a !== 0 && (a >= 1e5 || a < 1e-3)) return v.toExponential(digits);
-  return v.toFixed(digits);
+  if (a !== 0 && (a >= 1e5 || a < 1e-3)) return v.toExponential(SNR_DECIMALS);
+  return v.toFixed(SNR_DECIMALS);
 }
 
 function StatCell({ label, value, title }: { label: string; value: string; title?: string }) {
@@ -206,8 +223,14 @@ function RegionRow({
           <StatCell label="sum" value={s.sum_err != null ? `${fmt(s.sum)} ± ${fmt(s.sum_err)}` : fmt(s.sum)} />
           <StatCell label={SIGMA_MAD_LABEL} value={fmt(s.sigma)} title={SIGMA_MAD_TITLE} />
           {s.weighted_mean != null && <StatCell label="wmean" value={fmt(s.weighted_mean)} />}
-          {s.net_sum !== null && <StatCell label="net" value={fmt(s.net_sum)} />}
-          {s.net_snr !== null && <StatCell label="snr" value={fmt(s.net_snr, 1)} />}
+          {s.net_sum !== null && (
+            <StatCell
+              label="net"
+              value={s.net_err != null ? `${fmt(s.net_sum)} ± ${fmt(s.net_err)}` : fmt(s.net_sum)}
+              title={s.net_err_terms ? NET_ERROR_TITLES[s.net_err_terms] : NO_NET_ERROR_TITLE}
+            />
+          )}
+          {s.net_snr !== null && <StatCell label="snr" value={fmtSnr(s.net_snr)} title={SNR_TITLE} />}
           {s.calibrated && (
             <>
               <StatCell label="Jy" value={formatJanskyWithError(s.calibrated.flux_jy, s.calibrated.flux_err_jy)} />
@@ -407,6 +430,7 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
   }, [filePath, measurePath, busy, doc.regions, stats]);
 
   const logReady = regionLogReady(statsMeasured, { regions: doc.regions, excludeDq, sigma, maxiters });
+  const statsPending = doc.regions.length > 0 && (!logReady || loading);
   const handleLogRows = useCallback(() => {
     if (!logReady || !statsMeasured) return;
     measurementLog.appendAll(regionStatsEntries(provenance, statsMeasured, stats, photcal));
@@ -502,17 +526,17 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
           </button>
           <button
             onClick={() => void handleCopyCsv()}
-            disabled={doc.regions.length === 0}
+            disabled={doc.regions.length === 0 || statsPending}
             className={HEADER_BUTTON_CLASS}
-            title="Copy the region table (statistics and calibrated fluxes) as CSV"
+            title={statsPending ? STATS_PENDING_TITLE : COPY_CSV_TITLE}
           >
             <ClipboardCopy size={11} /> Copy CSV
           </button>
           <button
             onClick={() => void handleSaveCsv()}
-            disabled={!filePath || busy || doc.regions.length === 0}
+            disabled={!filePath || busy || doc.regions.length === 0 || statsPending}
             className={HEADER_BUTTON_CLASS}
-            title="Save the region table (statistics and calibrated fluxes) as a CSV file"
+            title={statsPending ? STATS_PENDING_TITLE : SAVE_CSV_TITLE}
           >
             <FileDown size={11} /> Save CSV
           </button>

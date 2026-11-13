@@ -650,6 +650,9 @@ pub struct BackgroundEstimate {
     pub count: u64,
 }
 
+const NET_ERR_TERMS_ERR_PLANE: &str = "err_plane+background_level";
+const NET_ERR_TERMS_BACKGROUND_SCATTER: &str = "background_scatter+background_level";
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RegionStats {
     pub count: u64,
@@ -673,6 +676,8 @@ pub struct RegionStats {
     pub n_rejected: u64,
     pub background: Option<BackgroundEstimate>,
     pub net_sum: Option<f64>,
+    pub net_err: Option<f64>,
+    pub net_err_terms: Option<&'static str>,
     pub net_snr: Option<f64>,
     pub sum_err: Option<f64>,
     pub weighted_mean: Option<f64>,
@@ -686,6 +691,18 @@ fn background_estimate(mut values: Vec<f32>) -> Option<BackgroundEstimate> {
     let median = exact_median_mut(&mut values);
     let mad = exact_mad_mut(&mut values, median as f32) as f64;
     Some(BackgroundEstimate { median, sigma: mad * MAD_TO_SIGMA, count })
+}
+
+fn net_error(background: &BackgroundEstimate, count: u64, sum_err: Option<f64>) -> Option<(f64, &'static str)> {
+    let n = count as f64;
+    let n_bg = background.count as f64;
+    let level_variance = n * n * background.sigma * background.sigma / n_bg;
+    let (pixel_variance, terms) = match sum_err {
+        Some(err) => (err * err, NET_ERR_TERMS_ERR_PLANE),
+        None => (n * background.sigma * background.sigma, NET_ERR_TERMS_BACKGROUND_SCATTER),
+    };
+    let variance = pixel_variance + level_variance;
+    (variance.is_finite() && variance > 0.0).then(|| (variance.sqrt(), terms))
 }
 
 fn sample_std(values: &[f32], mean: f64) -> f64 {
@@ -749,11 +766,9 @@ pub fn region_data_stats(
     };
 
     let net_sum = bg.as_ref().map(|b| sum - b.median * count as f64);
-    let net_snr = match (&bg, net_sum) {
-        (Some(b), Some(ns)) if b.sigma > 0.0 => Some(ns / (b.sigma * (count as f64).sqrt())),
-        _ => None,
-    };
     let (sum_err, weighted_mean) = error_summary(&mv.values, &mv.errors);
+    let (net_err, net_err_terms) = bg.as_ref().and_then(|b| net_error(b, count, sum_err)).unzip();
+    let net_snr = net_sum.zip(net_err).map(|(net, err)| net / err);
 
     Ok(RegionStats {
         count,
@@ -777,6 +792,8 @@ pub fn region_data_stats(
         n_rejected,
         background: bg,
         net_sum,
+        net_err,
+        net_err_terms,
         net_snr,
         sum_err,
         weighted_mean,
@@ -1635,6 +1652,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{header_with_cd, north_up_cd, rotated_cd};
     use super::*;
+    use crate::core::analysis::photometry::{measure_star_full, PhotometryConfig};
 
     fn circle(x: f64, y: f64, r: f64) -> RegionShape {
         RegionShape::Circle { x, y, r }
@@ -2163,8 +2181,109 @@ mod tests {
         let net = s.sum - b.median * s.count as f64;
         assert!((s.net_sum.unwrap() - net).abs() < 1e-9);
         assert!(b.sigma > 0.0);
-        let snr = net / (b.sigma * (s.count as f64).sqrt());
-        assert!((s.net_snr.unwrap() - snr).abs() < 1e-9);
+        let n = s.count as f64;
+        let net_err = (n * b.sigma * b.sigma + n * n * b.sigma * b.sigma / b.count as f64).sqrt();
+        assert!((s.net_err.unwrap() - net_err).abs() < 1e-9);
+        assert!((s.net_snr.unwrap() - net / net_err).abs() < 1e-9);
+    }
+
+    fn source_on_a_three_level_sky() -> Array2<f32> {
+        Array2::from_shape_fn((32, 32), |(y, x)| {
+            let sky = 5.0 + ((x + y) % 3) as f32;
+            let dx = x as f64 - 16.0;
+            let dy = y as f64 - 16.0;
+            if dx * dx + dy * dy <= 9.0 { sky + 20.0 } else { sky }
+        })
+    }
+
+    #[test]
+    fn net_snr_includes_the_background_level_error() {
+        let arr = source_on_a_three_level_sky();
+        let src = circle(16.0, 16.0, 3.0);
+        let bg = RegionShape::Annulus { x: 16.0, y: 16.0, r_inner: 6.0, r_outer: 10.0 };
+        let s = region_data_stats(&arr, &src, Some(&bg), None, None, SigmaClip::default()).unwrap();
+        let b = s.background.clone().expect("background");
+        assert_eq!((s.count, b.count, b.median), (29, 204, 6.0));
+        assert!((b.sigma - 1.4826).abs() < 1e-12, "sigma {}", b.sigma);
+        assert_eq!(s.net_sum, Some(585.0));
+        let snr = s.net_snr.unwrap();
+        assert!(
+            (snr - 68.559_871_439_690_55).abs() < 1e-9,
+            "net_snr {snr}: 585 / sqrt(29 sigma^2 + 29^2 sigma^2 / 204) is 68.5599; the pixel noise alone gives 73.2711"
+        );
+        assert!((s.net_err.unwrap() - 8.532_688_112_091_95).abs() < 1e-9, "net_err {:?}", s.net_err);
+        assert_eq!(s.net_err_terms, Some(NET_ERR_TERMS_BACKGROUND_SCATTER));
+        assert_eq!(s.sum_err, None);
+
+        let err = Array2::from_elem((32, 32), 1.0f32);
+        let s = region_data_stats(&arr, &src, Some(&bg), None, Some(&err), SigmaClip::default()).unwrap();
+        assert!((s.sum_err.unwrap() - 29f64.sqrt()).abs() < 1e-12, "sum_err {:?}", s.sum_err);
+        assert!(
+            (s.net_err.unwrap() - 6.169_423_504_529_033).abs() < 1e-9,
+            "net_err {:?}: sqrt(29 + 29^2 sigma^2 / 204) is 6.1694; the ERR plane alone gives 5.3852",
+            s.net_err
+        );
+        assert!((s.net_snr.unwrap() - 94.822_474_023_795_89).abs() < 1e-9, "net_snr {:?}", s.net_snr);
+        assert_eq!(s.net_err_terms, Some(NET_ERR_TERMS_ERR_PLANE));
+    }
+
+    #[test]
+    fn net_error_is_absent_without_a_background_and_without_any_noise_estimate() {
+        let src = circle(16.0, 16.0, 3.0);
+        let bg = RegionShape::Annulus { x: 16.0, y: 16.0, r_inner: 6.0, r_outer: 10.0 };
+        let err = Array2::from_elem((32, 32), 0.5f32);
+
+        let arr = source_on_a_three_level_sky();
+        let unlinked = region_data_stats(&arr, &src, None, None, Some(&err), SigmaClip::default()).unwrap();
+        assert!(unlinked.sum_err.is_some());
+        assert_eq!((unlinked.net_sum, unlinked.net_err, unlinked.net_err_terms, unlinked.net_snr), (None, None, None, None));
+
+        let flat = Array2::from_elem((32, 32), 5.0f32);
+        let scatterless = region_data_stats(&flat, &src, Some(&bg), None, None, SigmaClip::default()).unwrap();
+        assert_eq!(scatterless.background.as_ref().map(|b| b.sigma), Some(0.0));
+        assert_eq!(scatterless.net_sum, Some(0.0));
+        assert_eq!((scatterless.net_err, scatterless.net_err_terms, scatterless.net_snr), (None, None, None));
+
+        let from_err_plane = region_data_stats(&flat, &src, Some(&bg), None, Some(&err), SigmaClip::default()).unwrap();
+        assert_eq!(from_err_plane.net_err, from_err_plane.sum_err);
+        assert_eq!(from_err_plane.net_err_terms, Some(NET_ERR_TERMS_ERR_PLANE));
+        assert_eq!(from_err_plane.net_snr, Some(0.0));
+    }
+
+    fn star_on_a_three_level_sky() -> Array2<f32> {
+        Array2::from_shape_fn((64, 64), |(y, x)| {
+            let dx = x as f64 - 32.0;
+            let dy = y as f64 - 32.0;
+            let star = 5000.0 * (-(dx * dx + dy * dy) / 8.0).exp();
+            (100.0 + ((x + y) % 3) as f64 + star) as f32
+        })
+    }
+
+    fn relative_gap(measured: f64, reference: f64) -> f64 {
+        (measured / reference - 1.0).abs()
+    }
+
+    #[test]
+    fn a_circle_with_a_linked_annulus_reports_the_flux_error_of_aperture_photometry_up_to_edge_pixels() {
+        let arr = star_on_a_three_level_sky();
+        let src = circle(32.0, 32.0, 6.0);
+        let bg = RegionShape::Annulus { x: 32.0, y: 32.0, r_inner: 12.0, r_outer: 18.0 };
+        let cfg = PhotometryConfig { aperture_radius: Some(6.0), sky_annulus: Some((12.0, 18.0)), ..PhotometryConfig::default() };
+
+        let region = region_data_stats(&arr, &src, Some(&bg), None, None, SigmaClip::default()).unwrap();
+        let star = measure_star_full(&arr, None, None, None, 32.0, 32.0, &cfg).unwrap();
+        assert!(!star.err_used);
+        let (net, net_err, net_snr) = (region.net_sum.unwrap(), region.net_err.unwrap(), region.net_snr.unwrap());
+        assert!(relative_gap(net, star.net_flux) < 0.01, "net flux: region {net}, photometry {}", star.net_flux);
+        assert!(relative_gap(net_err, star.flux_err) < 0.01, "error from the sky scatter: region {net_err}, photometry {}", star.flux_err);
+        assert!(relative_gap(net_snr, star.snr) < 0.01, "snr: region {net_snr}, photometry {}", star.snr);
+
+        let err = Array2::from_elem((64, 64), 2.0f32);
+        let region = region_data_stats(&arr, &src, Some(&bg), None, Some(&err), SigmaClip::default()).unwrap();
+        let star = measure_star_full(&arr, Some(&err), None, None, 32.0, 32.0, &cfg).unwrap();
+        assert!(star.err_used);
+        let net_err = region.net_err.unwrap();
+        assert!(relative_gap(net_err, star.flux_err) < 0.04, "error from the ERR plane: region {net_err}, photometry {}", star.flux_err);
     }
 
     #[test]

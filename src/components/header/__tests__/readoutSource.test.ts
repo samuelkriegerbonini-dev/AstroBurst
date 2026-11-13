@@ -148,7 +148,7 @@ describe("WCS readout source", () => {
     expect(mocks.world.mock.calls.every(([path]) => path === "a.fits")).toBe(true);
   });
 
-  it("uses the new file's center while its hover coordinates are still pending", async () => {
+  it("shows no coordinates, not the new file's centre, beside the pixel while its hover lookup is pending (viewer-4)", async () => {
     await resolveInitialWcs();
     mocks.info.mockResolvedValue(info(44, 55));
     mocks.world.mockReturnValue(deferred<PixelToWorldResult>().promise);
@@ -157,10 +157,61 @@ describe("WCS readout source", () => {
     await vi.advanceTimersByTimeAsync(0);
     wcs(props);
     const html = wcs(props);
-    expect(html).toContain("44.000000");
+    expect(html).toContain("px(4,5)");
+    expect(html).not.toContain("44.000000");
     expect(html).not.toContain("11.125000");
     await vi.advanceTimersByTimeAsync(40);
     expect(mocks.world).toHaveBeenLastCalledWith("b.fits", [[4, 5]], "icrs");
+  });
+
+  it("shows no sky coordinates, not the image centre, beside a hovered pixel without a sky position (viewer-4)", async () => {
+    mocks.world.mockResolvedValue({ points: [null], frame: "icrs" });
+    const props = { ...wcsProps, mouseX: 1, mouseY: 1 };
+    wcs(props);
+    await vi.advanceTimersByTimeAsync(0);
+    wcs(props);
+    await vi.advanceTimersByTimeAsync(40);
+    const html = wcs(props);
+    expect(html).toContain("px(1,1)");
+    expect(html).not.toContain("30.000000");
+    expect(html).not.toContain("10.000000");
+    expect(html).toContain("<span>RA —</span><span>Dec —</span>");
+  });
+
+  it("replaces the dash with the next pixel's coordinates once they resolve", async () => {
+    mocks.world.mockResolvedValueOnce({ points: [null], frame: "icrs" });
+    const corner = { ...wcsProps, mouseX: 1, mouseY: 1 };
+    wcs(corner);
+    await vi.advanceTimersByTimeAsync(0);
+    wcs(corner);
+    await vi.advanceTimersByTimeAsync(40);
+    expect(wcs(corner)).toContain("RA —");
+    mocks.world.mockResolvedValue({ points: [[12.5, 33.25]], frame: "icrs" });
+    const inside = { ...wcsProps, mouseX: 6, mouseY: 7 };
+    wcs(inside);
+    await vi.advanceTimersByTimeAsync(40);
+    const html = wcs(inside);
+    expect(html).toContain("12.500000");
+    expect(html).not.toContain("—");
+  });
+
+  it("prints the pixel scale with four significant digits (trust-8)", async () => {
+    mocks.info.mockResolvedValue({ ...info(30, 10), pixel_scale_arcsec: 0.0311 });
+    wcs();
+    await vi.advanceTimersByTimeAsync(0);
+    const html = wcs();
+    expect(html).toContain("<span>0.03110&quot;/px</span>");
+    expect(html).not.toContain(">0.03&quot;/px<");
+  });
+
+  it("prints no pixel scale when the WCS gives none", async () => {
+    mocks.info.mockResolvedValue({ ...info(30, 10), pixel_scale_arcsec: 0 });
+    wcs();
+    await vi.advanceTimersByTimeAsync(0);
+    const html = wcs();
+    expect(html).toContain("Coordinate format");
+    expect(html).not.toContain("/px");
+    expect(html).not.toContain("</select>0<");
   });
 
   it("does not relabel old coordinates with a newly selected sky frame", async () => {
@@ -173,7 +224,8 @@ describe("WCS readout source", () => {
     expect(html).not.toContain("30.000000");
     expect(mocks.world).toHaveBeenLastCalledWith("a.fits", [[100, 50]], "galactic");
     next.resolve({ points: [[66, 77]], frame: "galactic" });
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(40);
+    expect(mocks.world).toHaveBeenLastCalledWith("a.fits", [[4, 5]], "galactic");
     expect(wcs()).toContain("66.000000");
   });
 
@@ -187,14 +239,15 @@ describe("WCS readout source", () => {
     expect(wcs(props)).toContain("11.125000");
   });
 
-  it("falls back to the image centre without a pixel label when the pointer leaves", async () => {
+  it("falls back to the image centre, labelled centre, without a pixel label when the pointer leaves", async () => {
     await resolveInitialWcs();
     expect(wcs()).toContain("px(4,5)");
+    expect(wcs()).not.toContain(">centre<");
     const lookups = mocks.world.mock.calls.length;
     const left = { ...wcsProps, mouseX: null, mouseY: null };
     wcs(left);
     const html = wcs(left);
-    expect(html).toContain("30.000000");
+    expect(html).toContain('<span class="text-zinc-400">centre</span><span>RA 30.000000°</span>');
     expect(html).toContain("10.000000");
     expect(html).not.toContain("11.125000");
     expect(html).not.toContain("px(");

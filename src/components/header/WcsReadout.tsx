@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, memo } from "react";
 import { Globe } from "lucide-react";
 import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
 import type { WcsInfo, SkyFrame } from "../../shared/types/astrometry";
-import { formatLat, formatLon, frameAxisLabels, frameLonInHours, type CoordFormat } from "../../utils/coordFormat";
+import { formatLat, formatLon, frameAxisLabels, frameLonInHours, pixelScaleText, type CoordFormat } from "../../utils/coordFormat";
 import { ZERO_BASED_PIXEL_TITLE, zeroBasedPixelText } from "../../utils/regionGeometry";
 import { ROTATION_TITLE, orientationLine } from "../../utils/wcsOrientation";
 
@@ -30,6 +30,8 @@ const DEFAULT_READOUT: ReadoutPreference = { frame: "icrs", format: "sexagesimal
 const FRAMES: readonly SkyFrame[] = ["icrs", "fk5", "galactic", "ecliptic"];
 const FORMATS: readonly CoordFormat[] = ["sexagesimal", "decimal"];
 const HOVER_DEBOUNCE_MS = 40;
+const NO_SKY_POSITION: [number, number] = [Number.NaN, Number.NaN];
+const CENTRE_LABEL = "centre";
 
 const SELECT_CLASS =
   "min-h-[22px] max-w-full bg-zinc-900 border border-zinc-700 rounded px-1 text-[10px] text-zinc-300 focus:border-zinc-500";
@@ -61,7 +63,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
   const [centerResult, setCenter] = useState<CoordinateResult | null>(null);
   const [pref, setPref] = useState<ReadoutPreference>(loadReadoutPreference);
   const wcsInfo = wcs?.filePath === filePath ? wcs.info : null;
-  const coord = coordResult?.filePath === filePath && coordResult.frame === pref.frame ? coordResult.point : null;
+  const coordResolved = coordResult?.filePath === filePath && coordResult.frame === pref.frame;
   const center = centerResult?.filePath === filePath && centerResult.frame === pref.frame ? centerResult.point : null;
 
   const updatePref = useCallback((patch: Partial<ReadoutPreference>) => {
@@ -144,7 +146,10 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
 
   const [lonLabel, latLabel] = frameAxisLabels(pref.frame);
   const hours = frameLonInHours(pref.frame);
-  const shown = coord ?? center;
+  const hovering = mouseX !== null && mouseY !== null;
+  const hovered = coordResolved ? (coordResult.point ?? NO_SKY_POSITION) : null;
+  const shown = hovering ? hovered : center;
+  const scale = pixelScaleText(wcsInfo.pixel_scale_arcsec);
   const orientation = orientationLine(wcsInfo);
 
   return (
@@ -173,11 +178,10 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
             <option key={f} value={f}>{f}</option>
           ))}
         </select>
-        {wcsInfo.pixel_scale_arcsec && (
-          <span>{wcsInfo.pixel_scale_arcsec.toFixed(2)}"/px</span>
-        )}
+        {scale && <span>{scale}</span>}
       </div>
       <div className="flex items-center gap-3 flex-wrap">
+        {!hovering && shown && <span className="text-zinc-400">{CENTRE_LABEL}</span>}
         {shown ? (
           <>
             <span>{lonLabel} {formatLon(shown[0], { hours, format: pref.format })}</span>

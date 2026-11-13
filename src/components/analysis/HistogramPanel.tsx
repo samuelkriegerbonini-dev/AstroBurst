@@ -5,6 +5,7 @@ import { constrainStf, dragStfMarker, pickStfMarker, stfMarkerPositions } from "
 import type { HistogramRange } from "../../utils/histogramWindow";
 import { MEAN_LABEL, SIGMA_MAD_LABEL, SIGMA_MAD_TITLE, skyRangeLabel } from "../../utils/analysisLabels";
 import type { DecimalFieldOptions } from "../../utils/decimalText";
+import { formatSignificant } from "../../utils/formatSignificant";
 import {
   STF_HIGHLIGHT_FIELD,
   STF_MIDTONE_FIELD,
@@ -23,9 +24,9 @@ const BAR_COLOR = "#3b82f6";
 const BG_COLOR = "#0a0a0f";
 const OFF_COLOR = "var(--ab-text-3)";
 interface HistogramStats {
-  mean?: number;
-  median?: number;
-  sigma?: number;
+  mean: number;
+  median: number;
+  sigma: number;
 }
 
 interface HistogramPanelProps {
@@ -40,6 +41,7 @@ interface HistogramPanelProps {
   onAutoStf?: () => void;
   onReset?: () => void;
   stats?: HistogramStats | null;
+  unit?: string | null;
   disabled?: boolean;
   disabledHint?: string;
   badge?: React.ReactNode;
@@ -73,6 +75,7 @@ function HistogramPanel({
                           onAutoStf,
                           onReset,
                           stats,
+                          unit = null,
                           disabled = false,
                           disabledHint = DISABLED_HINT,
                           badge,
@@ -288,11 +291,11 @@ function HistogramPanel({
   }, [disabled]);
 
   const shadowVal = useMemo(
-    () => (dataMin + shadow * (dataMax - dataMin)).toFixed(1),
+    () => formatSignificant(dataMin + shadow * (dataMax - dataMin)),
     [shadow, dataMin, dataMax],
   );
   const highlightVal = useMemo(
-    () => (dataMin + highlight * (dataMax - dataMin)).toFixed(1),
+    () => formatSignificant(dataMin + highlight * (dataMax - dataMin)),
     [highlight, dataMin, dataMax],
   );
   const stfState = stfStateOf({ shadow, midtone, highlight }, autoStf);
@@ -448,9 +451,10 @@ function HistogramPanel({
           className="flex items-center gap-4 px-3 py-1.5 text-[10px] font-mono text-zinc-500"
           style={{ borderTop: "1px solid rgba(63,63,70,0.12)" }}
         >
-          <span>{`${MEAN_LABEL}=${stats.mean?.toFixed(1)}`}</span>
-          <span>med={stats.median?.toFixed(1)}</span>
-          <span title={SIGMA_MAD_TITLE}>{`${SIGMA_MAD_LABEL}=${stats.sigma?.toFixed(1)}`}</span>
+          <span>{`${MEAN_LABEL}=${formatSignificant(stats.mean)}`}</span>
+          <span>med={formatSignificant(stats.median)}</span>
+          <span title={SIGMA_MAD_TITLE}>{`${SIGMA_MAD_LABEL}=${formatSignificant(stats.sigma)}`}</span>
+          {unit && <span>{unit}</span>}
           {binsWindow && (
             <span className="ml-auto text-zinc-600" title={SKY_TITLE}>
               {skyRangeLabel(binsWindow)}

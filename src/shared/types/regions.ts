@@ -60,6 +60,8 @@ export interface BackgroundEstimate {
   count: number;
 }
 
+export type RegionNetErrTerms = "err_plane+background_level" | "background_scatter+background_level";
+
 export interface RegionStats {
   count: number;
   n_nan: number;
@@ -82,6 +84,8 @@ export interface RegionStats {
   n_rejected: number;
   background: BackgroundEstimate | null;
   net_sum: number | null;
+  net_err?: number | null;
+  net_err_terms?: RegionNetErrTerms | null;
   net_snr: number | null;
   sum_err?: number | null;
   weighted_mean?: number | null;

@@ -131,9 +131,14 @@ fn anisotropy_warning(wcs: &WcsTransform) -> Option<String> {
     }
     ((scale_x - scale_y).abs() / larger > PIXEL_SCALE_ANISOTROPY_TOLERANCE).then(|| {
         format!(
-            "pixel scales differ per axis ({scale_x:.5} x {scale_y:.5} arcsec); the pixel area uses their mean"
+            "pixel scales differ per axis ({scale_x:.5} x {scale_y:.5} arcsec); the pixel area is the CD determinant and lengths in arcsec use the mean scale"
         )
     })
+}
+
+fn wcs_pixel_area_arcsec2(wcs: &WcsTransform) -> f64 {
+    let cd = wcs.raw_params().4;
+    (cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0]).abs() * ARCSEC_PER_DEGREE.powi(2)
 }
 
 fn positive_finite(value: f64) -> Option<f64> {
@@ -166,7 +171,7 @@ pub(crate) fn entry_calibration(path: &str, entry: &ImageEntry) -> EntryCalibrat
         Some(PhotCal { convention: FluxConvention::JwstMjySr { pixar_a2: Some(a2), .. }, .. }) => positive_finite(*a2),
         _ => wcs.as_ref().and_then(|w| {
             warnings.extend(anisotropy_warning(w));
-            positive_finite(w.pixel_scale_arcsec().powi(2))
+            positive_finite(wcs_pixel_area_arcsec2(w))
         }),
     };
     EntryCalibration { photcal, wcs, pixel_area_arcsec2, warnings }
@@ -239,13 +244,16 @@ fn region_sky_json(stats: &RegionStats, shape: &RegionShape, cal: &EntryCalibrat
 
 pub(crate) fn calibrated_flux_json(stats: &RegionStats, shape: &RegionShape, cal: &EntryCalibration) -> Value {
     let Some(photcal) = &cal.photcal else { return Value::Null };
-    let flux_native = stats.net_sum.unwrap_or(stats.sum);
-    let Some(c) = photcal.calibrate(flux_native, stats.sum_err) else { return Value::Null };
+    let (flux_source, flux_native, flux_err_native) = match stats.net_sum {
+        Some(net_sum) => (FLUX_SOURCE_NET, net_sum, stats.net_err),
+        None => (FLUX_SOURCE_SUM, stats.sum, stats.sum_err),
+    };
+    let Some(c) = photcal.calibrate(flux_native, flux_err_native) else { return Value::Null };
     let sky = region_sky(stats, shape, cal);
     json!({
-        RES_FLUX_SOURCE: if stats.net_sum.is_some() { FLUX_SOURCE_NET } else { FLUX_SOURCE_SUM },
+        RES_FLUX_SOURCE: flux_source,
         RES_FLUX_NATIVE: flux_native,
-        RES_FLUX_ERR_NATIVE: stats.sum_err,
+        RES_FLUX_ERR_NATIVE: flux_err_native,
         RES_FLUX_JY: c.flux_jy,
         RES_FLUX_ERR_JY: c.flux_err_jy,
         RES_MAG_AB: c.mag_ab,
@@ -577,7 +585,7 @@ mod tests {
     use crate::cmd::analysis::resolve_dq_mask;
     use crate::core::imaging::region::test_support::{header_with_cd, north_up_cd};
     use crate::core::imaging::region_file::RegionProperties;
-    use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef_with_dq_cards;
+    use crate::infra::fits::reader::test_fixtures::{sci_err_dq_mef_with_dq_cards, write_test_mef, HduData, TestHdu};
     use crate::infra::fits::writer::write_fits_mono;
     use ndarray::Array2;
 
@@ -1331,6 +1339,135 @@ mod tests {
         assert_eq!(value["flux_source"], "sum");
     }
 
+    const FAINT_FRAME_SIZE: usize = 128;
+    const FAINT_SKY_LEVEL: f32 = 0.25;
+    const FAINT_SKY_STEP: f32 = 1.0 / 128.0;
+    const FAINT_GALAXY_EXCESS: f32 = 1.0 / 64.0;
+    const FAINT_ERR_PLANE: f32 = 1.0 / 64.0;
+    const HDU_SCI_WITH_ERR: usize = 1;
+    const HDU_SCI_WITHOUT_ERR: usize = 3;
+
+    fn faint_galaxy() -> RegionShape {
+        RegionShape::Ellipse { x: 64.0, y: 64.0, rx: 40.0, ry: 16.0, angle: 0.0 }
+    }
+
+    fn faint_galaxy_requests() -> Vec<RegionStatsRequest> {
+        let sky = RegionShape::Annulus { x: 64.0, y: 64.0, r_inner: 45.0, r_outer: 52.0 };
+        vec![
+            RegionStatsRequest { id: "net".into(), shape: faint_galaxy(), background: Some(sky) },
+            req("gross", faint_galaxy()),
+        ]
+    }
+
+    fn faint_galaxy_pixels() -> Vec<f32> {
+        let galaxy = faint_galaxy();
+        (0..FAINT_FRAME_SIZE * FAINT_FRAME_SIZE)
+            .map(|i| {
+                let (x, y) = (i % FAINT_FRAME_SIZE, i / FAINT_FRAME_SIZE);
+                let sky = FAINT_SKY_LEVEL + (((x + y) % 3) as f32 - 1.0) * FAINT_SKY_STEP;
+                if galaxy.contains(x as f64, y as f64) { sky + FAINT_GALAXY_EXCESS } else { sky }
+            })
+            .collect()
+    }
+
+    fn write_faint_galaxy_i2d(dir: &std::path::Path) -> String {
+        let n = FAINT_FRAME_SIZE;
+        let sci = |extver| TestHdu {
+            extname: Some("SCI"),
+            extver: Some(extver),
+            cols: n,
+            rows: n,
+            data: HduData::F32(faint_galaxy_pixels()),
+            extra_cards: vec![("BUNIT", "'MJy/sr'".into()), ("PIXAR_SR", format!("{JWST_PIXAR_SR:.14E}"))],
+        };
+        let err = TestHdu {
+            extname: Some("ERR"),
+            extver: Some(1),
+            cols: n,
+            rows: n,
+            data: HduData::F32(vec![FAINT_ERR_PLANE; n * n]),
+            extra_cards: vec![("BUNIT", "'MJy/sr'".into())],
+        };
+        let path = dir.join("faint_galaxy_i2d.fits");
+        write_test_mef(&path, &[], &[sci(1), err, sci(2)]);
+        path.to_str().unwrap().to_string()
+    }
+
+    fn number(value: &Value, key: &str) -> f64 {
+        value[key].as_f64().unwrap_or_else(|| panic!("{key} is not a number in {value}"))
+    }
+
+    fn assert_close(label: &str, measured: f64, expected: f64) {
+        assert!((measured / expected - 1.0).abs() < 1e-12, "{label}: measured {measured}, expected {expected}");
+    }
+
+    #[tokio::test]
+    async fn net_flux_errors_add_the_background_level_term_to_the_err_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_faint_galaxy_i2d(dir.path());
+        let key = format!("{path}#hdu={HDU_SCI_WITH_ERR}");
+        let out = region_stats_cmd(key, faint_galaxy_requests(), None, None, None, None).await.unwrap();
+        assert_eq!(out[RES_PHOTCAL]["convention"]["kind"], "jwst_mjy_sr", "{out}");
+        let net = &out[RES_REGIONS][0][RES_STATS];
+        assert_eq!((net["count"].as_u64(), net["background"]["count"].as_u64()), (Some(2001), Some(2136)), "{net}");
+        assert_eq!(net["net_sum"], 31.2890625, "{net}");
+        assert_close("sum_err, the ERR plane over the gross sum", number(net, "sum_err"), 0.698_945_913_948_282_5);
+        let cal = &net[RES_CALIBRATED];
+        assert_eq!(cal[RES_FLUX_SOURCE], FLUX_SOURCE_NET, "{cal}");
+        assert_close(
+            "flux_err_native = sqrt(sum_err^2 + n^2 sigma_bg^2 / n_bg)",
+            number(cal, RES_FLUX_ERR_NATIVE),
+            0.860_241_559_892_618,
+        );
+        assert_close("flux_err_jy", number(cal, RES_FLUX_ERR_JY), 1.720_483_119_785_236e-8);
+        assert_close("mag_ab_err", number(cal, RES_MAG_AB_ERR), 0.029_850_539_830_428_725);
+        assert_close("flux_jy", number(cal, RES_FLUX_JY), 6.257_812_5e-7);
+        assert_close("mag_ab", number(cal, RES_MAG_AB), 24.408_943_633_909_075);
+        assert_close("net_err", number(net, "net_err"), 0.860_241_559_892_618);
+        assert_close("net_snr = net_sum / net_err", number(net, "net_snr"), 36.372_414_399_399_33);
+        assert_eq!(net["net_err_terms"], "err_plane+background_level", "{net}");
+
+        let gross = &out[RES_REGIONS][1][RES_STATS];
+        for field in ["net_sum", "net_err", "net_snr", "net_err_terms"] {
+            assert!(gross.get(field).is_some_and(Value::is_null), "{field}: {gross}");
+        }
+        assert_eq!(gross[RES_CALIBRATED][RES_FLUX_SOURCE], FLUX_SOURCE_SUM, "{gross}");
+        assert_close(
+            "flux_err_native of a region without a background stays the ERR plane sum",
+            number(&gross[RES_CALIBRATED], RES_FLUX_ERR_NATIVE),
+            0.698_945_913_948_282_5,
+        );
+    }
+
+    #[tokio::test]
+    async fn net_flux_errors_without_an_err_plane_come_from_the_background_scatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_faint_galaxy_i2d(dir.path());
+        let key = format!("{path}#hdu={HDU_SCI_WITHOUT_ERR}");
+        let out = region_stats_cmd(key, faint_galaxy_requests(), None, None, None, None).await.unwrap();
+        let net = &out[RES_REGIONS][0][RES_STATS];
+        assert!(net["sum_err"].is_null(), "{net}");
+        assert_eq!(net["net_sum"], 31.2890625, "{net}");
+        assert_close("background sigma", number(&net["background"], "sigma"), 0.011_582_812_5);
+        let cal = &net[RES_CALIBRATED];
+        assert_close(
+            "flux_err_native = sqrt(n sigma_bg^2 + n^2 sigma_bg^2 / n_bg)",
+            number(cal, RES_FLUX_ERR_NATIVE),
+            0.721_073_784_787_109_8,
+        );
+        assert_close("flux_err_jy", number(cal, RES_FLUX_ERR_JY), 1.442_147_569_574_219_7e-8);
+        assert_close("mag_ab_err", number(cal, RES_MAG_AB_ERR), 0.025_021_392_521_598_77);
+        assert_close("net_err", number(net, "net_err"), 0.721_073_784_787_109_8);
+        assert_close("net_snr = net_sum / net_err", number(net, "net_snr"), 43.392_317_346_882_606);
+        assert_eq!(net["net_err_terms"], "background_scatter+background_level", "{net}");
+
+        let gross = &out[RES_REGIONS][1][RES_STATS][RES_CALIBRATED];
+        assert_eq!(gross[RES_FLUX_SOURCE], FLUX_SOURCE_SUM, "{gross}");
+        for field in [RES_FLUX_ERR_NATIVE, RES_FLUX_ERR_JY, RES_MAG_AB_ERR] {
+            assert!(gross.get(field).is_some_and(Value::is_null), "{field}: {gross}");
+        }
+    }
+
     #[tokio::test]
     async fn region_stats_refuse_calibration_on_display_referred_or_processed_data() {
         let dir = tempfile::tempdir().unwrap();
@@ -1378,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_calibration_warns_about_anisotropic_pixel_scales_and_uses_their_mean() {
+    fn entry_calibration_warns_about_anisotropic_pixel_scales_and_takes_the_area_from_the_cd_determinant() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("anisotropic.fits");
         let s = 1.0 / 3600.0;
@@ -1388,8 +1525,7 @@ mod tests {
         let cal = entry_calibration(path.to_str().unwrap(), &entry);
         assert!(cal.photcal.is_none());
         assert!(cal.warnings.iter().any(|w| w.contains("pixel scales differ per axis")), "{:?}", cal.warnings);
-        let expected = (1.025f64).powi(2);
-        assert!((cal.pixel_area_arcsec2.unwrap() - expected).abs() < 1e-9, "{:?}", cal.pixel_area_arcsec2);
+        assert!((cal.pixel_area_arcsec2.unwrap() - 1.05).abs() < 1e-9, "{:?}", cal.pixel_area_arcsec2);
 
         let isotropic = header_with_cd(north_up_cd());
         let path = dir.path().join("isotropic.fits");
@@ -1398,6 +1534,61 @@ mod tests {
         let cal = entry_calibration(path.to_str().unwrap(), &entry);
         assert!(!cal.warnings.iter().any(|w| w.contains("pixel scales differ")), "{:?}", cal.warnings);
         assert!((cal.pixel_area_arcsec2.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    const SPAXEL_SCALES_ARCSEC: (f64, f64) = (0.29, 0.68);
+    const SPAXEL_AREA_ARCSEC2: f64 = 0.1972;
+    const SPAXEL_ZERO_POINT: f64 = 25.0;
+    const SHEAR_DEG: f64 = 5.7;
+
+    fn write_zero_point_disc(dir: &std::path::Path, name: &str, cd: [[f64; 2]; 2]) -> String {
+        let mut header = header_with_cd(cd);
+        header.set("BUNIT", "ADU".into());
+        header.set_f64("MAGZPT", SPAXEL_ZERO_POINT);
+        let path = dir.join(name);
+        write_fits_mono(path.to_str().unwrap(), &disc_frame(), Some(&header)).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn region_and_profile_pixel_area_is_the_cd_determinant_for_rectangular_and_sheared_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = 1.0 / ARCSEC_PER_DEGREE;
+        let spaxels = [[-SPAXEL_SCALES_ARCSEC.0 * s, 0.0], [0.0, SPAXEL_SCALES_ARCSEC.1 * s]];
+        let key = write_zero_point_disc(dir.path(), "spaxels.fits", spaxels);
+        let out = region_stats_cmd(key.clone(), vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
+        assert_eq!(out[RES_PHOTCAL]["convention"]["kind"], "generic_zero_point", "{out}");
+        let pixel_area = out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap();
+        assert!((pixel_area - SPAXEL_AREA_ARCSEC2).abs() < 1e-9, "0.29 x 0.68 arcsec pixels cover 0.1972 arcsec2, got {pixel_area}");
+        let stats = &out[RES_REGIONS][0][RES_STATS];
+        assert_eq!(stats["count"], 49);
+        let cal = &stats[RES_CALIBRATED];
+        assert!((cal[RES_AREA_ARCSEC2].as_f64().unwrap() - 49.0 * SPAXEL_AREA_ARCSEC2).abs() < 1e-7, "{cal}");
+        assert!((stats[RES_SKY][RES_AREA_ARCSEC2].as_f64().unwrap() - 49.0 * SPAXEL_AREA_ARCSEC2).abs() < 1e-7, "{stats}");
+        let expected_sb = SPAXEL_ZERO_POINT - 2.5 * (DISC_VALUE as f64 / SPAXEL_AREA_ARCSEC2).log10();
+        assert!((expected_sb - 21.732_12).abs() < 1e-4, "4 ADU per 0.1972 arcsec2 at zero point 25 is 21.732 mag/arcsec2, got {expected_sb}");
+        let sb = cal[RES_SB_MAG_ARCSEC2].as_f64().unwrap();
+        assert!((sb - expected_sb).abs() < 1e-6, "region surface brightness {sb}, expected {expected_sb}");
+        let warnings: Vec<&str> = out[RES_CALIBRATION_WARNINGS].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+        let anisotropy = "pixel scales differ per axis (0.29000 x 0.68000 arcsec); the pixel area is the CD determinant and lengths in arcsec use the mean scale";
+        assert!(warnings.contains(&anisotropy), "{warnings:?}");
+
+        let profile = sb_profile_cmd(key, circle(8.0), None, None, None, None).await.unwrap();
+        assert!((profile[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap() - SPAXEL_AREA_ARCSEC2).abs() < 1e-9, "{profile}");
+        let mean_scale = (SPAXEL_SCALES_ARCSEC.0 + SPAXEL_SCALES_ARCSEC.1) / 2.0;
+        assert!((profile[RES_PIXEL_SCALE_ARCSEC].as_f64().unwrap() - mean_scale).abs() < 1e-9, "{profile}");
+        let bin = &profile[RES_BINS][1];
+        assert_eq!(bin["mean"], DISC_VALUE as f64, "{bin}");
+        let mu = bin[RES_MU_AB].as_f64().unwrap();
+        assert!((mu - expected_sb).abs() < 1e-6, "profile surface brightness {mu}, expected {expected_sb}");
+
+        let (sin, cos) = SHEAR_DEG.to_radians().sin_cos();
+        let sheared = write_zero_point_disc(dir.path(), "sheared.fits", [[-s, s * sin], [0.0, s * cos]]);
+        let out = region_stats_cmd(sheared, vec![req("r4", circle(4.0))], None, None, None, None).await.unwrap();
+        let pixel_area = out[RES_PIXEL_AREA_ARCSEC2].as_f64().unwrap();
+        assert!((pixel_area - cos).abs() < 1e-9, "a 1 arcsec pixel sheared by 5.7 deg covers cos(5.7 deg) = 0.99506 arcsec2, got {pixel_area}");
+        let warnings = out[RES_CALIBRATION_WARNINGS].as_array().unwrap();
+        assert!(!warnings.iter().any(|w| w.as_str().unwrap().contains("pixel scales differ")), "equal axis scales: {warnings:?}");
     }
 
     #[tokio::test]

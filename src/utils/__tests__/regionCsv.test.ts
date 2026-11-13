@@ -4,7 +4,7 @@ import { REGION_CSV_COLUMNS, regionSkyOf, regionsCsvFileName, regionsTableCsv } 
 import type { Region, RegionCalibrated, RegionSky, RegionStats, RegionStatsEntry } from "../../shared/types/regions";
 
 const EXPECTED_HEADER =
-  "id,shape,text,include,n,n_excluded,area_px,mean,median,sigma,std,min,max,sum,sum_err,net_sum,net_snr," +
+  "id,shape,text,include,n,n_excluded,area_px,mean,median,sigma,std,min,max,sum,sum_err,net_sum,net_err,net_snr,net_err_terms," +
   "flux_source,flux_jy,flux_err_jy,mag_ab,mag_ab_err,sb_mag_arcsec2,area_arcsec2,ra,dec,pa_sky_deg";
 
 function region(id: string, overrides: Partial<Region> = {}): Region {
@@ -84,6 +84,12 @@ function lines(csv: string): string[] {
   return csv.split(CSV_LINE_END).filter((l) => l.length > 0);
 }
 
+function cellsByHeader(csv: string): Record<string, string> {
+  const [header, row] = lines(csv);
+  const cells = row.replace(/"[^"]*"/g, "").split(",");
+  return Object.fromEntries(header.split(",").map((name, i) => [name, cells[i]]));
+}
+
 describe("regionsTableCsv", () => {
   it("writes the columns in the documented order", () => {
     expect(REGION_CSV_COLUMNS.map((c) => c.header).join(",")).toBe(EXPECTED_HEADER);
@@ -99,8 +105,8 @@ describe("regionsTableCsv", () => {
     const rows = lines(regionsTableCsv(regions, table));
     expect(rows).toHaveLength(4);
     expect(rows[1].startsWith('a,"circle (10.0, 20.0) r=4.0",,true,49,2,50.27,4,4,0,0.5,3,5,196,,,,')).toBe(true);
-    expect(rows[2]).toBe('b,"circle (10.0, 20.0) r=4.0",,true' + ",".repeat(23));
-    expect(rows[3]).toBe('c,"circle (10.0, 20.0) r=4.0",,true' + ",".repeat(23));
+    expect(rows[2]).toBe('b,"circle (10.0, 20.0) r=4.0",,true' + ",".repeat(25));
+    expect(rows[3]).toBe('c,"circle (10.0, 20.0) r=4.0",,true' + ",".repeat(25));
   });
 
   it("leaves every calibrated field blank when the image is uncalibrated", () => {
@@ -113,6 +119,8 @@ describe("regionsTableCsv", () => {
   it("writes the calibrated flux, magnitudes, surface brightness, area, sky centre and PA", () => {
     const s = stats({
       net_sum: 147,
+      net_err: 3.568,
+      net_err_terms: "err_plane+background_level",
       net_snr: 41.2,
       sum_err: 3.5,
       calibrated: calibrated({ flux_source: "net", flux_err_jy: 7e-8, mag_ab_err: 0.02, pa_sky_deg: 120 }),
@@ -123,9 +131,33 @@ describe("regionsTableCsv", () => {
     });
     const rows = lines(regionsTableCsv([r], new Map([["box", entry("box", s)]])));
     expect(rows[1]).toBe(
-      'box,"box (50.0, 50.0) 8.0×4.0 θ=30.0°","core, inner",false,49,2,50.27,4,4,0,0.5,3,5,196,3.5,147,41.2,' +
-        "net,0.00000392,7e-8,22.417,0.02,18.967,0.04165,150.001,2.002,120",
+      'box,"box (50.0, 50.0) 8.0×4.0 θ=30.0°","core, inner",false,49,2,50.27,4,4,0,0.5,3,5,196,3.5,147,3.568,41.2,' +
+        "err_plane+background_level,net,0.00000392,7e-8,22.417,0.02,18.967,0.04165,150.001,2.002,120",
     );
+  });
+
+  it("writes the net error and its variance terms after the net sum and snr (trust-1)", () => {
+    const s = stats({
+      background: { median: 6, sigma: 1.4826, count: 204 },
+      net_sum: 585,
+      net_err: 8.53268811209195,
+      net_err_terms: "background_scatter+background_level",
+      net_snr: 68.55987143969055,
+    });
+    const header = REGION_CSV_COLUMNS.map((c) => c.header);
+    expect(header.indexOf("net_err")).toBe(header.indexOf("net_sum") + 1);
+    expect(header.indexOf("net_err_terms")).toBe(header.indexOf("net_snr") + 1);
+    const cells = cellsByHeader(regionsTableCsv([region("a")], new Map([["a", entry("a", s)]])));
+    expect(cells.net_sum).toBe("585");
+    expect(cells.net_err).toBe("8.53268811209195");
+    expect(cells.net_snr).toBe("68.55987143969055");
+    expect(cells.net_err_terms).toBe("background_scatter+background_level");
+  });
+
+  it("leaves the net error cells blank without a linked background", () => {
+    const cells = cellsByHeader(regionsTableCsv([region("a")], new Map([["a", entry("a", stats())]])));
+    expect(cells.net_err).toBe("");
+    expect(cells.net_err_terms).toBe("");
   });
 
   it("writes the sky centre, PA and area of a plate-solved image that has no flux calibration", () => {

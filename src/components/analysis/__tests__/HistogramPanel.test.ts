@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import HistogramPanel, { ManualInput } from "../HistogramPanel";
 import histogramPanelSource from "../HistogramPanel.tsx?raw";
 import { STF_MIDTONE_FIELD, stfDraft, stfDraftFields } from "../../../utils/analysisTarget";
+import { MEAN_LABEL, SIGMA_MAD_LABEL } from "../../../utils/analysisLabels";
 
 type PanelProps = ComponentProps<typeof HistogramPanel>;
 
@@ -33,6 +34,47 @@ describe("HistogramPanel channel badge (preview0923-98)", () => {
     const markup = render();
     expect(markup).not.toContain("channel</span>");
     expect(markup).not.toContain("data-histogram-channel");
+  });
+});
+
+describe("HistogramPanel statistics in data units (trust-3)", () => {
+  const DRC_STATS = { mean: 0.0341, median: 0.0339, sigma: 0.0047 };
+
+  it("prints μ, median and σ(MAD) of an HST drc in e-/s with significant digits instead of 0.0", () => {
+    const markup = render({ dataMin: 0, dataMax: 1, shadow: 0.0207, stats: DRC_STATS });
+    expect(markup).toContain(`${MEAN_LABEL}=0.0341<`);
+    expect(markup).toContain("med=0.0339<");
+    expect(markup).toContain(`${SIGMA_MAD_LABEL}=0.0047<`);
+    expect(markup).not.toContain("=0.0<");
+  });
+
+  it("prints the statistics of a flux-calibrated image near 1e-17 instead of 0.0", () => {
+    const markup = render({ dataMin: -2e-17, dataMax: 4e-15, stats: { mean: 1.234e-17, median: 1.2e-17, sigma: 3.5e-18 } });
+    expect(markup).toContain(`${MEAN_LABEL}=1.234e-17<`);
+    expect(markup).toContain("med=1.2e-17<");
+    expect(markup).toContain(`${SIGMA_MAD_LABEL}=3.5e-18<`);
+  });
+
+  it("prints the S and H clip points in data units with significant digits", () => {
+    const markup = render({ dataMin: 0, dataMax: 1, shadow: 0.0207, highlight: 0.4567, stats: DRC_STATS });
+    expect(markup).toContain('<span class="text-zinc-600">(0.0207)</span>');
+    expect(markup).toContain('<span class="text-zinc-600">(0.4567)</span>');
+  });
+
+  it("prints a shadow clip below zero on a sky-subtracted image instead of -0.0", () => {
+    const markup = render({ dataMin: -0.8, dataMax: 60, shadow: 0.012949, stats: DRC_STATS });
+    expect(markup).toContain("(-0.0127)");
+    expect(markup).not.toContain("(-0.0)");
+  });
+
+  it("appends the data unit to the statistics of a JWST i2d in MJy/sr", () => {
+    const markup = render({ stats: { mean: 0.31, median: 0.214, sigma: 0.0081 }, unit: "MJy/sr" });
+    expect(markup).toContain("med=0.214<");
+    expect(markup).toContain(`${SIGMA_MAD_LABEL}=0.0081</span><span>MJy/sr</span>`);
+  });
+
+  it("prints no unit when the header has none", () => {
+    expect(render({ stats: DRC_STATS })).toContain(`${SIGMA_MAD_LABEL}=0.0047</span></div>`);
   });
 });
 
