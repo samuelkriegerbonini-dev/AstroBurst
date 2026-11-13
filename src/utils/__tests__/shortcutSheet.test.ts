@@ -84,6 +84,10 @@ describe("shortcutSheet", () => {
     expect(keysOf(shortcutSheet(true), "general")).toContain("⌘1 / ⌘2");
   });
 
+  it("says what Enter does on a spectrum row of the file list", () => {
+    expect(rowsOf(shortcutSheet(false), "general").filter((row) => row.keys === "Enter")).toEqual([{ keys: "Enter", desc: "Open the selected spectrum in the Spectra tool" }]);
+  });
+
   it("names the palette entry that opens All tools", () => {
     expect(rowsOf(shortcutSheet(false), "general")).toContainEqual({ keys: "Ctrl+K, then All tools", desc: "Open any tool or choose the sidebar shortcuts" });
     expect(keysOf(shortcutSheet(true), "general")).toContain("⌘K, then All tools");

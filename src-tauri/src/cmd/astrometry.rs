@@ -957,6 +957,7 @@ fn no_solution_error(
                 "rmsPx": best.rms_px,
                 "falseAlarmLog10": best.false_alarm_log10,
                 "coverageLog10": best.coverage_log10,
+                "covered": best.covered(),
             })
         }),
     );
@@ -965,6 +966,7 @@ fn no_solution_error(
     let acceptance = LocalSolveParams::default();
     context.insert("minMatches".into(), json!(acceptance.min_matches));
     context.insert("maxRmsPx".into(), json!(acceptance.max_rms_px));
+    context.insert("maxFalseAlarmLog10".into(), json!(acceptance.max_false_alarm.log10()));
     context.insert(
         "centresTried".into(),
         json!(tried.iter().map(|(_, f)| f.centres_tried).sum::<usize>()),
@@ -3245,11 +3247,43 @@ mod tests {
             let context = &refused["context"];
             assert_eq!(context["minMatches"].as_u64(), Some(defaults.min_matches as u64), "{refused}");
             assert_eq!(context["maxRmsPx"].as_f64(), Some(defaults.max_rms_px), "{refused}");
+            assert_eq!(context["maxFalseAlarmLog10"].as_f64(), Some(defaults.max_false_alarm.log10()), "{refused}");
             assert_eq!(
                 context["tier0MinExpectedStars"].as_f64(),
                 Some(crate::core::astrometry::local_solve::TIER0_MIN_EXPECTED_STARS),
                 "{refused}"
             );
+        }
+
+        #[test]
+        fn a_refused_best_candidate_carries_its_false_alarm_probability_and_coverage_verdict() {
+            use crate::core::astrometry::local_solve::{CandidateNumbers, FailureReason, SolveFailure};
+            for (coverage_log10, coverage_chance_log10, covered) in [(-0.196, -1.029, true), (-5.0, -1.0, false)] {
+                let best = CandidateNumbers {
+                    centre: (274.71097451756015, -13.832391002435887),
+                    matched: 14,
+                    predicted: 22,
+                    rms_px: 0.6479768925696433,
+                    false_alarm_log10: -6.994454267420924,
+                    coverage_log10,
+                    coverage_chance_log10,
+                };
+                let tried = [(
+                    0,
+                    SolveFailure {
+                        reason: FailureReason::NoSolution,
+                        message: "no solution within 0.02 deg of the hint after 19 centres".to_string(),
+                        detections: 300,
+                        centres_tried: 19,
+                        best: Some(Box::new(best)),
+                        elapsed: std::time::Duration::ZERO,
+                    },
+                )];
+                let refused = super::super::no_solution_error(&CancelledNovaEnv, &memory_tiers(&[]), &tried, 0.12);
+                let best = &refused["context"]["best"];
+                assert_eq!(best["falseAlarmLog10"].as_f64(), Some(-6.994454267420924), "{refused}");
+                assert_eq!(best["covered"].as_bool(), Some(covered), "{refused}");
+            }
         }
 
         struct CancelledNovaEnv;

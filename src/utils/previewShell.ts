@@ -29,11 +29,15 @@ export function previewViewer(input: GpuDisplayInput): PreviewViewer {
   return gpuDisplayOnScreen(input) ? "preview-tab" : "cpu";
 }
 
-export const SPECTRUM_VIEWER_HINT = "It has no image to show here. The Cube tool plots and measures it.";
-export const SPECTRUM_VIEWER_OPEN_CUBE = "Open the Cube tool";
+export const SPECTRUM_VIEWER_HINT = "It has no image to show here. The Spectra tool plots and measures it.";
+export const SPECTRUM_VIEWER_OPEN_CUBE = "Open the Spectra tool";
 
 export function spectrumViewerTitle(name: string): string {
   return `${name} is a 1D spectrum`;
+}
+
+export function tableViewerTitle(name: string): string {
+  return `${name} is a table`;
 }
 
 export const NEEDS_GPU_TITLE = "needs GPU rendering";
@@ -128,7 +132,7 @@ export function histogramOnPath<T>(histData: T | null, histDataPath: string | nu
 }
 
 export const CUBE_SPECTRUM_HINT = "Click to extract spectrum";
-export const CUBE_TOOL_SPECTRUM_HINT = "Click to extract a spectrum into the Cube tool";
+export const CUBE_TOOL_SPECTRUM_HINT = "Click to extract a spectrum into the Spectra tool";
 export const CANVAS_HINT_CLASS =
   "absolute bottom-2 right-2 z-[6] bg-black/60 text-[10px] text-purple-300 px-2 py-1 rounded pointer-events-none whitespace-nowrap";
 
@@ -264,6 +268,9 @@ export function formatWavelength(w: WavelengthProbe): string {
   return `λ ${w.value.toFixed(w.value < 10 ? 4 : 3)}${w.unit ? ` ${w.unit}` : ""}`;
 }
 
+const SKY_RA_SECONDS_DECIMALS = 3;
+const SKY_DEC_ARCSEC_DECIMALS = 2;
+
 export function statusStripParts(
   pixel: { x: number; y: number } | null,
   valueAt: PixelValueAt | null,
@@ -276,7 +283,7 @@ export function statusStripParts(
     position: `x ${pixel.x}  y ${pixel.y}`,
     value: valueHere ? `${formatPixelValue(valueHere.value)}${valueHere.unit ? ` ${valueHere.unit}` : ""}` : "…",
     sky: skyHere
-      ? `RA ${formatLon(skyHere.radec[0], { hours: true, format: "sexagesimal" })}  Dec ${formatLat(skyHere.radec[1], { format: "sexagesimal" })} ICRS`
+      ? `RA ${formatLon(skyHere.radec[0], { hours: true, format: "sexagesimal", precision: SKY_RA_SECONDS_DECIMALS })}  Dec ${formatLat(skyHere.radec[1], { format: "sexagesimal", precision: SKY_DEC_ARCSEC_DECIMALS })} ICRS`
       : null,
     wavelength: valueHere?.wavelength ? formatWavelength(valueHere.wavelength) : null,
   };

@@ -9,7 +9,7 @@ import { generateId } from "../../utils/format";
 import { frameLonInHours } from "../../utils/coordFormat";
 import { parseSkyCsv, targetProjectionPath, type SkyTarget } from "../../utils/skyList";
 import { TARGET_LAYER_ID, TARGET_LAYER_KIND, createTargetPainter, type PlacedTarget } from "../viewer/painters/targetPainter";
-import { ErrorAlert, RunButton, Toggle } from "../ui";
+import { ErrorAlert, RunButton, SMALL_BUTTON_CLASS, Toggle } from "../ui";
 
 interface TargetsPanelProps {
   filePath: string | null;
@@ -36,8 +36,6 @@ const NO_TARGETS_REASON = "Enter at least one target to place.";
 const TEXTAREA_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-cyan-500/50 w-full resize-y";
 const SELECT_CLASS = "bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[10px] text-zinc-300 font-mono";
-const SMALL_BUTTON_CLASS =
-  "flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed";
 
 function fmt(v: number | null, digits: number): string {
   return v === null || !Number.isFinite(v) ? "--" : v.toFixed(digits);

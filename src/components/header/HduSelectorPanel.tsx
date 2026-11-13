@@ -4,6 +4,8 @@ import { Database, ChevronRight, FileText, Search, X, Copy, Check, Eye, Loader2 
 import { getFitsExtensions, getHeaderByHdu } from "../../services/header";
 import type { FitsExtension } from "../../services/header";
 import type { PlaneInfo } from "../../shared/types/fits.types";
+import { bandButtonLabel, hduLayerName, roleChip, rowActions, shownLayerText, type ChipTone, type PendingLayer } from "../../utils/layerLabels";
+import CompanionAssign from "./CompanionAssign";
 
 const COPIED_FEEDBACK_MS = 1500;
 
@@ -33,10 +35,21 @@ const SHOWN_BADGE = { text: "shown", title: "Currently displayed plane" };
 const SOURCE_BADGE = { text: "source", title: "Source plane of the displayed product" };
 const DQ_TAG_STYLE = { bg: "rgba(248,113,113,0.12)", border: "rgba(248,113,113,0.3)", text: "#f87171" };
 const ERR_TAG_STYLE = { bg: "rgba(251,191,36,0.12)", border: "rgba(251,191,36,0.3)", text: "#fbbf24" };
+const TAG_STYLES: Record<ChipTone, typeof DQ_TAG_STYLE> = { dq: DQ_TAG_STYLE, err: ERR_TAG_STYLE };
+const TEAL_BADGE_STYLE = { background: "rgba(20,184,166,0.12)", border: "1px solid rgba(20,184,166,0.3)", color: "var(--ab-teal)" };
+const ROW_BUTTON_CLASS =
+  "text-[9px] font-medium px-1.5 py-px rounded shrink-0 transition-colors disabled:opacity-40 disabled:cursor-not-allowed hover:bg-zinc-700/40";
+const ROW_BUTTON_STYLE = { color: "#a1a1aa", border: "1px solid rgba(113,113,122,0.3)" };
+const PRESSED_BAND_CLASS = "text-[9px] font-medium px-1.5 py-px rounded shrink-0";
+const IN_USE_CHIPS = {
+  err: { text: "error layer", title: "Error layer of the shown image" },
+  dq: { text: "mask", title: "Mask of the shown image" },
+};
 
 function isShownPlane(ext: HduInfo, activePath: string, activePlane: PlaneInfo | null | undefined): boolean {
   if (activePath === ext.ref) return true;
   if (!activePlane) return false;
+  if (activePlane.band_plane) return false;
   if (ext.kind === "hdu") return activePlane.kind === "hdu" && activePlane.index === ext.index;
   return activePlane.kind === "array" && activePlane.key === ext.extname;
 }
@@ -53,7 +66,7 @@ export default function HduSelectorPanel({
 }: HduSelectorPanelProps) {
   const shownBadge = sourceOfProduct ? SOURCE_BADGE : SHOWN_BADGE;
   const [extensions, setExtensions] = useState<HduInfo[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(Boolean(filePath));
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [hduHeader, setHduHeader] = useState<Record<string, string> | null>(null);
   const [headerLoading, setHeaderLoading] = useState(false);
@@ -62,8 +75,13 @@ export default function HduSelectorPanel({
   const [extensionsError, setExtensionsError] = useState<string | null>(null);
   const [headerError, setHeaderError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [pending, setPending] = useState<PendingLayer | null>(null);
 
   const headerRequestRef = useRef(0);
+
+  useEffect(() => {
+    setPending(null);
+  }, [filePath, activePath]);
 
   useEffect(() => {
     if (!filePath) return;
@@ -138,6 +156,10 @@ export default function HduSelectorPanel({
   const isAsdf = extensions.length > 0 && extensions[0].kind === "array";
   const panelTitle = isAsdf ? "ASDF Arrays" : "FITS Extensions";
   const countLabel = isAsdf ? `${extensions.length} arrays` : `${extensions.length} HDUs`;
+  const assignablePlane = activePlane && shownLayerText(activePlane) === null ? activePlane : null;
+  const layersBlock = activePlane ? (
+    <CompanionAssign imagePath={activePath} plane={activePlane} pending={pending} onPendingChange={setPending} />
+  ) : null;
 
   if (loading) {
     return (
@@ -162,7 +184,7 @@ export default function HduSelectorPanel({
           </div>
         </div>
         <div className="flex flex-col items-center gap-2 py-4 px-3">
-          <p className="text-[10px] text-red-400/80 text-center select-text">
+          <p role="alert" className="text-[10px] text-red-400/80 text-center select-text">
             Failed to read extensions: {extensionsError}
           </p>
           <button
@@ -177,7 +199,22 @@ export default function HduSelectorPanel({
     );
   }
 
-  if (extensions.length <= 1) return null;
+  if (extensions.length <= 1) {
+    if (!layersBlock) return null;
+    return (
+      <div className="ab-panel overflow-hidden">
+        <div className="ab-panel-header">
+          <div className="flex items-center gap-2">
+            <Database size={12} style={{ color: "var(--ab-rose)" }} />
+            <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">
+              Layers
+            </span>
+          </div>
+        </div>
+        {layersBlock}
+      </div>
+    );
+  }
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -193,6 +230,8 @@ export default function HduSelectorPanel({
         </span>
       </div>
 
+      {layersBlock}
+
       <div className="max-h-[240px] overflow-y-auto">
         {extensions.map((ext, i) => {
           const idx = ext.index ?? i;
@@ -205,7 +244,11 @@ export default function HduSelectorPanel({
           const dims = dimParts.length > 0 ? dimParts.join(" × ") : "";
           const typeLabel = !isHdu ? "ARRAY" : idx === 0 ? "PRIMARY" : ext.has_data ? "IMAGE" : "EXT";
           const ts = TYPE_STYLES[typeLabel] || DEFAULT_TYPE_STYLE;
-          const tag = ext.is_dq ? { label: "DQ", style: DQ_TAG_STYLE } : ext.is_err ? { label: "ERR", style: ERR_TAG_STYLE } : null;
+          const chip = roleChip(ext);
+          const actions = rowActions(ext, assignablePlane, isShown);
+          const layerName = hduLayerName(ext);
+          const bands = ext.bands ?? [];
+          const shownBand = activePlane?.band_plane?.hdu === ext.index ? activePlane.band_plane.plane : null;
           const nameLabel = ext.extname
             ? ext.extver !== null && ext.extver !== undefined && isHdu
               ? `${ext.extname},${ext.extver}`
@@ -215,75 +258,136 @@ export default function HduSelectorPanel({
           return (
             <div
               key={ext.ref || i}
-              className="flex items-center gap-2 px-3 py-1.5 transition-all"
+              className="px-3 py-1.5 transition-all"
               style={{
                 background: isSelected ? "rgba(244,63,94,0.06)" : isShown ? "rgba(20,184,166,0.05)" : "transparent",
                 borderBottom: "1px solid rgba(63,63,70,0.12)",
               }}
             >
-              <button
-                onClick={() => { if (isHdu) handleSelectHdu(idx); }}
-                disabled={!isHdu}
-                className="flex items-center gap-2.5 flex-1 min-w-0 text-left disabled:cursor-default"
-                title={isHdu ? "Show this HDU's header" : ext.extname ?? undefined}
-              >
-                <span
-                  className="transition-transform shrink-0"
-                  style={{ transform: isSelected ? "rotate(90deg)" : "rotate(0deg)", visibility: isHdu ? "visible" : "hidden" }}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { if (isHdu) handleSelectHdu(idx); }}
+                  disabled={!isHdu}
+                  className="flex items-center gap-2.5 flex-1 min-w-0 text-left disabled:cursor-default"
+                  title={isHdu ? "Show this HDU's header" : ext.extname ?? undefined}
                 >
-                  <ChevronRight size={10} style={{ color: isSelected ? "var(--ab-rose)" : "var(--ab-text-4)" }} />
-                </span>
-                <span className="text-[10px] font-mono shrink-0 w-[24px]" style={{ color: "var(--ab-text-4)" }}>
-                  #{idx}
-                </span>
-                <span
-                  className="text-[9px] font-bold px-2 py-0.5 rounded shrink-0"
-                  style={{ background: ts.bg, border: `1px solid ${ts.border}`, color: ts.text }}
-                >
-                  {typeLabel}
-                </span>
-                <span
-                  className="text-[11px] truncate flex-1"
-                  style={{ color: isSelected || isShown ? "#e4e4e7" : "var(--ab-text-3)" }}
-                  title={ext.extname ?? undefined}
-                >
-                  {nameLabel}
-                </span>
-                {tag && (
                   <span
-                    className="text-[9px] font-bold px-1.5 py-px rounded shrink-0"
-                    style={{ background: tag.style.bg, border: `1px solid ${tag.style.border}`, color: tag.style.text }}
+                    className="transition-transform shrink-0"
+                    style={{ transform: isSelected ? "rotate(90deg)" : "rotate(0deg)", visibility: isHdu ? "visible" : "hidden" }}
                   >
-                    {tag.label}
+                    <ChevronRight size={10} style={{ color: isSelected ? "var(--ab-rose)" : "var(--ab-text-4)" }} />
+                  </span>
+                  <span className="text-[10px] font-mono shrink-0 w-[24px]" style={{ color: "var(--ab-text-4)" }}>
+                    #{idx}
+                  </span>
+                  <span
+                    className="text-[9px] font-bold px-2 py-0.5 rounded shrink-0"
+                    style={{ background: ts.bg, border: `1px solid ${ts.border}`, color: ts.text }}
+                  >
+                    {typeLabel}
+                  </span>
+                  <span
+                    className="text-[11px] truncate flex-1"
+                    style={{ color: isSelected || isShown ? "#e4e4e7" : "var(--ab-text-3)" }}
+                    title={ext.extname ?? undefined}
+                  >
+                    {nameLabel}
+                  </span>
+                  {chip && (
+                    <span
+                      className="text-[9px] font-bold px-1.5 py-px rounded shrink-0"
+                      style={{ background: TAG_STYLES[chip.tone].bg, border: `1px solid ${TAG_STYLES[chip.tone].border}`, color: TAG_STYLES[chip.tone].text }}
+                      title={chip.title}
+                    >
+                      {chip.label}
+                    </span>
+                  )}
+                  {dims && (
+                    <span className="text-[10px] font-mono min-w-0 truncate" style={{ color: "var(--ab-text-4)" }} title={dims}>
+                      {dims}
+                    </span>
+                  )}
+                  {ext.bunit && (
+                    <span className="text-[10px] font-mono min-w-0 truncate" style={{ color: "var(--ab-text-4)" }} title={`BUNIT ${ext.bunit}`}>
+                      {ext.bunit}
+                    </span>
+                  )}
+                </button>
+                {actions.inUse && (
+                  <span
+                    className="text-[9px] font-medium px-1.5 py-px rounded shrink-0"
+                    style={TEAL_BADGE_STYLE}
+                    title={IN_USE_CHIPS[actions.inUse].title}
+                  >
+                    {IN_USE_CHIPS[actions.inUse].text}
                   </span>
                 )}
-                {dims && (
-                  <span className="text-[10px] font-mono min-w-0 truncate" style={{ color: "var(--ab-text-4)" }} title={dims}>
-                    {dims}
-                  </span>
-                )}
-              </button>
-              {ext.has_data && (
-                isShown ? (
-                  <span
-                    className="text-[9px] font-medium px-1.5 py-px rounded shrink-0 flex items-center gap-1"
-                    style={{ background: "rgba(20,184,166,0.12)", border: "1px solid rgba(20,184,166,0.3)", color: "var(--ab-teal)" }}
-                    title={shownBadge.title}
-                  >
-                    {!sourceOfProduct && <Eye size={9} />}
-                    {shownBadge.text}
-                  </span>
-                ) : (
+                {actions.asErr && (
                   <button
-                    onClick={() => onActivate?.(ext.ref)}
-                    disabled={activating || !onActivate}
-                    className="text-[9px] font-medium px-1.5 py-px rounded shrink-0 transition-colors disabled:opacity-40 disabled:cursor-not-allowed hover:bg-zinc-700/40"
-                    style={{ color: "#a1a1aa", border: "1px solid rgba(113,113,122,0.3)" }}
-                    title={`Display ${ext.ref}`}
+                    type="button"
+                    onClick={() => setPending({ role: "err", source: ext.ref, name: layerName })}
+                    className={ROW_BUTTON_CLASS}
+                    style={ROW_BUTTON_STYLE}
+                    title={`Use ${layerName} as the error layer of the shown image`}
                   >
-                    {activating ? <Loader2 size={9} className="animate-spin" /> : "Display"}
+                    Use as ERR
                   </button>
-                )
+                )}
+                {actions.asDq && (
+                  <button
+                    type="button"
+                    onClick={() => setPending({ role: "dq", source: ext.ref, name: layerName })}
+                    className={ROW_BUTTON_CLASS}
+                    style={ROW_BUTTON_STYLE}
+                    title={`Use ${layerName} as the mask of the shown image`}
+                  >
+                    Use as DQ
+                  </button>
+                )}
+                {ext.has_data && (
+                  isShown ? (
+                    <span
+                      className="text-[9px] font-medium px-1.5 py-px rounded shrink-0 flex items-center gap-1"
+                      style={TEAL_BADGE_STYLE}
+                      title={shownBadge.title}
+                    >
+                      {!sourceOfProduct && <Eye size={9} />}
+                      {shownBadge.text}
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => onActivate?.(ext.ref)}
+                      disabled={activating || !onActivate}
+                      className={ROW_BUTTON_CLASS}
+                      style={ROW_BUTTON_STYLE}
+                      title={`Display ${ext.ref}`}
+                    >
+                      {activating ? <Loader2 size={9} className="animate-spin" /> : "Display"}
+                    </button>
+                  )
+                )}
+              </div>
+              {bands.length > 0 && (
+                <div role="group" aria-label={`Bands of HDU ${idx}`} className="flex flex-wrap items-center gap-1 mt-1 pl-[34px]">
+                  {bands.map((band) => {
+                    const label = bandButtonLabel(band);
+                    const pressed = shownBand === band.plane;
+                    return (
+                      <button
+                        key={band.key}
+                        type="button"
+                        aria-pressed={pressed}
+                        disabled={pressed || activating || !onActivate}
+                        onClick={() => onActivate?.(band.key)}
+                        className={pressed ? PRESSED_BAND_CLASS : ROW_BUTTON_CLASS}
+                        style={pressed ? TEAL_BADGE_STYLE : ROW_BUTTON_STYLE}
+                        title={`Display band ${label} (plane ${band.plane} of HDU ${idx})`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
               )}
             </div>
           );
@@ -292,7 +396,7 @@ export default function HduSelectorPanel({
 
       {activateError && (
         <div className="flex items-center gap-2 px-3 py-2" style={{ borderTop: "1px solid var(--ab-border)" }}>
-          <p className="text-[10px] text-red-400/80 flex-1 truncate select-text" title={activateError}>
+          <p role="alert" className="text-[10px] text-red-400/80 flex-1 truncate select-text" title={activateError}>
             Failed to display plane: {activateError}
           </p>
         </div>
@@ -309,7 +413,7 @@ export default function HduSelectorPanel({
 
       {headerError && !headerLoading && (
         <div className="flex items-center gap-2 px-3 py-2" style={{ borderTop: "1px solid var(--ab-border)" }}>
-          <p className="text-[10px] text-red-400/80 flex-1 truncate select-text" title={headerError}>
+          <p role="alert" className="text-[10px] text-red-400/80 flex-1 truncate select-text" title={headerError}>
             Failed to read HDU header: {headerError}
           </p>
           <button

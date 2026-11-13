@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { historyKeyAction, historyMoveBlock, isMacPlatform, type HistoryKeyContext, type HistoryKeyEvent } from "../historyKeys";
+import { historyKeyAction, historyMoveBlock, isMacPlatform, openMenuPresent, type HistoryKeyContext, type HistoryKeyEvent } from "../historyKeys";
+import shortcutsSource from "../../components/history/HistoryShortcuts.tsx?raw";
 
 const WORKSPACE: HistoryKeyContext = { inInput: false, menuOpen: false, mode: "workspace", compositeMode: false, mac: false };
 const MAC: HistoryKeyContext = { ...WORKSPACE, mac: true };
@@ -69,5 +70,24 @@ describe("historyMoveBlock", () => {
     { compositeMode: true, fileName: "", reason: COMPOSITE_REASON.replace("673nmos.fits", "the file") },
   ])("composite $compositeMode, file '$fileName'", ({ compositeMode, fileName, reason }) => {
     expect(historyMoveBlock({ compositeMode, fileName })).toBe(reason);
+  });
+});
+
+describe("openMenuPresent", () => {
+  const node = (inert: boolean) => ({ closest: (selector: string) => (selector === "[inert]" && inert ? {} : null) });
+
+  it("counts a menu or a dialog of the visible mode", () => {
+    expect(openMenuPresent([node(false)])).toBe(true);
+    expect(openMenuPresent([node(true), node(false)])).toBe(true);
+  });
+
+  it("does not count a dialog left open inside the hidden mode", () => {
+    expect(openMenuPresent([node(true)])).toBe(false);
+    expect(openMenuPresent([])).toBe(false);
+  });
+
+  it("asks through the helper", () => {
+    expect(shortcutsSource).toContain("openMenuPresent(document.querySelectorAll(MENU_SELECTOR))");
+    expect(shortcutsSource).not.toContain("document.querySelector(MENU_SELECTOR)");
   });
 });

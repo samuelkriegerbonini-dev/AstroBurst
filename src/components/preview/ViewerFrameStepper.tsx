@@ -13,7 +13,7 @@ const FOCUS_RING_STYLE: CSSProperties = {
   outline: "2px solid var(--ab-accent)",
   outlineOffset: -2,
 };
-const PLAYING_TITLE = "Playing in the Cube tool: pause playback to step frames";
+const PLAYING_TITLE = "Playing in the Spectra tool: pause playback to step frames";
 const FRAME_KEYS_TIP = "Click the image, then ArrowLeft and ArrowRight step frames and Shift steps by 10";
 const STEP_BUTTON =
   "flex items-center justify-center p-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent";
@@ -24,7 +24,7 @@ export function FrameKeysFocusRing() {
 
 function readoutTitle({ playing, label, failure }: ViewerFrameStep): string {
   if (playing) return PLAYING_TITLE;
-  if (failure !== null) return `Could not load ${label}: ${failure}. Previous and Next step from this frame; Retry it in the Cube tool`;
+  if (failure !== null) return `Could not load ${label}: ${failure}. Previous and Next step from this frame; Retry it in the Spectra tool`;
   return `${label}. ${FRAME_KEYS_TIP}`;
 }
 

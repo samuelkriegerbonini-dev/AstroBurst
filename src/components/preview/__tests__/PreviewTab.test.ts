@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DEFAULT_DISPLAY_SETTINGS } from "../../../shared/types/display";
-import { CANVAS_HINT_CLASS, CUBE_SPECTRUM_HINT } from "../../../utils/previewShell";
+import { CANVAS_HINT_CLASS, CUBE_SPECTRUM_HINT, CUBE_TOOL_SPECTRUM_HINT } from "../../../utils/previewShell";
+import { dockStore } from "../../../hooks/useDockLayout";
 import { STF_LOCK_RGB_CPU } from "../../../utils/analysisTarget";
 import { RGB_LINEAR_BAKED, type FileDisplayEntry } from "../../../utils/displayMemory";
 import type { RawRgbPixelData } from "../../../shared/types";
@@ -146,6 +147,15 @@ describe("PreviewTab spectrum hint on the GPU viewer", () => {
     expect(html).toContain(`data-canvas-hint="${CUBE_SPECTRUM_HINT}"`);
     expect(html).not.toContain(`class="${CANVAS_HINT_CLASS}`);
     expect(render({ label: "PV diagram", displayedDims: [44, 3814] })).toContain('data-canvas-hint=""');
+  });
+
+  it("names the Spectra tool in the hint while another tool holds its place in the dock", () => {
+    try {
+      dockStore.dispatch({ type: "open", tool: "photometry" });
+      expect(render({})).toContain(`data-canvas-hint="${CUBE_TOOL_SPECTRUM_HINT}"`);
+    } finally {
+      dockStore.dispatch({ type: "reset" });
+    }
   });
 });
 

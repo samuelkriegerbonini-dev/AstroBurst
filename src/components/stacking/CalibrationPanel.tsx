@@ -156,7 +156,7 @@ export default function CalibrationPanel({ files = [], runTarget = null, onCalib
           </div>
           <div className="flex justify-between items-center text-[10px] text-zinc-500">
             <span>{stackProgressText(progress.stage, progress.current, progress.total)}</span>
-            <span>{progress.percent}%</span>
+            <span className="tabular-nums">{progress.percent}%</span>
           </div>
         </div>
       )}

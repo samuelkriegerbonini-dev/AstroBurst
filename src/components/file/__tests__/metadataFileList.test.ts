@@ -9,7 +9,9 @@ vi.mock("react", async (importOriginal) => (await import("../../../test/hookRunt
 import { hooks } from "../../../test/hookRuntime";
 import MetadataFileList, { type MetadataFile } from "../MetadataFileList";
 import { rowTops, rowWindow } from "../../../utils/fileListRows";
+import { tableRowTitle } from "../../../utils/fileKinds";
 import type { Spectrum1dKind } from "../../../shared/types/spectrum1d";
+import type { TableProbe } from "../../../shared/types/tables";
 
 type ListProps = ComponentProps<typeof MetadataFileList>;
 type AnyProps = Record<string, unknown> & { children?: ReactNode };
@@ -264,6 +266,8 @@ const X1D_REJECTION =
 
 const X1D: Spectrum1dKind = { kind: "x1d", hdu: 1 };
 const WCS1D: Spectrum1dKind = { kind: "wcs1d", hdu: 0 };
+const E1: Spectrum1dKind = { kind: "x1dints", layout: "rows", n_series: 1, n_integrations: 240, n_channels: 431 };
+const E1_PATH = "C:/d/jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_x1dints.fits";
 
 function spectrumFile(id: string, path: string, spectrum: Spectrum1dKind): MetadataFile {
   return { id, name: path.split("/").pop() ?? path, path, size: 1, status: "spectrum", spectrum };
@@ -292,6 +296,8 @@ describe("MetadataFileList spectrum rows", () => {
     expect(html).toContain(">1D spectrum, EXTRACT1D table<");
     expect(html).toContain(">Open as spectrum<");
     expect(html).toContain(">Compare with its cube<");
+    expect(html).toContain('title="Select this spectrum and open the Spectra tool"');
+    expect(html).toContain('title="Select its cube, open the Spectra tool and compare this x1d with the cube spectrum"');
   });
 
   it("drops Compare with its cube while the sibling cube is not loaded and keeps Open as spectrum enabled", () => {
@@ -328,9 +334,192 @@ describe("MetadataFileList spectrum rows", () => {
     expect(html).not.toContain("Compare with its cube");
   });
 
+  it("opens the selected spectrum row on Enter and does nothing on an image row", () => {
+    const x1d = spectrumFile("x", "C:/d/jw01_nrs1_x1d.fits", X1D);
+    const image = doneFile("img", "673nmos.fits");
+    type EnterEvent = { key: string; preventDefault: () => void; target?: unknown; currentTarget?: unknown };
+    function pressEnter(selectedId: string, event: Omit<EnterEvent, "key" | "preventDefault"> = {}) {
+      hooks.mount();
+      const spy = vi.fn();
+      const preventDefault = vi.fn();
+      const tree = elements(hooks.render(listView, { files: [x1d, image], selectedId, onSelect: () => {}, onOpenSpectrum: spy }) as ReactNode);
+      const listbox = tree.find((el) => el.props.role === "listbox");
+      if (!listbox) throw new Error("no listbox in the Files list");
+      (listbox.props.onKeyDown as (e: EnterEvent) => void)({ key: "Enter", preventDefault, ...event });
+      hooks.mount();
+      return { spy, preventDefault };
+    }
+    const spectrumRow = pressEnter("x");
+    expect(spectrumRow.spy.mock.calls).toEqual([["x"]]);
+    expect(spectrumRow.preventDefault).toHaveBeenCalledTimes(1);
+    const imageRow = pressEnter("img");
+    expect(imageRow.spy).not.toHaveBeenCalled();
+    expect(imageRow.preventDefault).not.toHaveBeenCalled();
+    const rowButton = pressEnter("x", { target: {}, currentTarget: {} });
+    expect(rowButton.spy).not.toHaveBeenCalled();
+    expect(rowButton.preventDefault).not.toHaveBeenCalled();
+  });
+
   it("does not offer a spectrum row for dragging into a composite", () => {
     const html = renderRow(spectrumFile("x", "C:/d/jw01_nrs1_x1d.fits", X1D));
     expect(html).toContain('draggable="false"');
+  });
+
+  it("names a row-per-integration file as time-series spectra, never as a 1D spectrum", () => {
+    const html = renderRow(spectrumFile("s", E1_PATH, E1), { comparableX1d: new Set(["s"]) });
+    expect(html).toContain(
+      '<span class="ab-mfl-spectrum-text" title="Time-series spectra, 240 integrations x 431 channels, 1 series; one table row per integration">Time-series spectra, 240 integrations x 431 channels, 1 series</span>',
+    );
+    expect(html).toContain("ab-mfl-item-clickable");
+    expect(html).toContain('data-status="spectrum"');
+    expect(html).toContain(">Open time series<");
+    expect(buttonTag(html, "Open time series")).toContain('title="Select these time-series spectra and open the Spectra tool"');
+    expect(html).not.toContain("1D spectrum");
+    expect(html).not.toContain(">Open as spectrum<");
+    expect(html).not.toContain("Compare with its cube");
+  });
+
+  it("says how many EXTRACT1D tables an x1d file holds", () => {
+    const html = renderRow(spectrumFile("m", "C:/d/jw01345_nirspec_mos_x1d.fits", { kind: "x1d", hdu: 2, n_tables: 3 }));
+    expect(html).toContain(">1D spectra, 3 EXTRACT1D tables<");
+    expect(html).toContain('title="1D spectra, 3 EXTRACT1D tables, HDU 2 opens first"');
+    expect(html).toContain(">Open as spectrum<");
+  });
+
+  it("opens a selected time-series row on Enter", () => {
+    hooks.mount();
+    const spy = vi.fn();
+    const preventDefault = vi.fn();
+    const tree = elements(hooks.render(listView, { files: [spectrumFile("s", "C:/d/x_x1dints.fits", E1)], selectedId: "s", onSelect: () => {}, onOpenSpectrum: spy }) as ReactNode);
+    const listbox = tree.find((el) => el.props.role === "listbox");
+    if (!listbox) throw new Error("no listbox in the Files list");
+    (listbox.props.onKeyDown as (e: { key: string; preventDefault: () => void }) => void)({ key: "Enter", preventDefault });
+    hooks.mount();
+    expect(spy.mock.calls).toEqual([["s"]]);
+  });
+});
+
+const C1_PROBE: TableProbe = {
+  format: "csv",
+  n_rows: 297,
+  columns: Array.from({ length: 17 }, (_, i) => ({ name: i === 0 ? "ra" : i === 1 ? "dec" : `col${i}`, unit: null, datatype: "float64", numeric: true })),
+  tables: null,
+  meta: null,
+  comments: [],
+  guess: { kind: "catalogue", reason: "sky position columns ra and dec" },
+  notes: [],
+};
+
+const CSV_SPECTRUM_PROBE: TableProbe = {
+  format: "csv",
+  n_rows: 431,
+  columns: [
+    { name: "channel", unit: null, datatype: "float64", numeric: true },
+    { name: "wavelength_vacuum_um", unit: null, datatype: "float64", numeric: true },
+    { name: "flux", unit: null, datatype: "float64", numeric: true },
+  ],
+  tables: null,
+  meta: null,
+  comments: [],
+  guess: { kind: "spectrum", reason: "columns wavelength_vacuum_um and flux: a spectrum exported by AstroBurst" },
+  notes: [],
+};
+
+const WHTLT_PROBE: TableProbe = {
+  format: "ecsv",
+  n_rows: 240,
+  columns: ["MJD_UTC_NRS1", "BJD_TDB_NRS1", "whitelight_flux_NRS1"].map((name) => ({ name, unit: null, datatype: "float64", numeric: true })),
+  tables: null,
+  meta: null,
+  comments: [],
+  guess: { kind: "light_curve", reason: "time column MJD_UTC_NRS1 and value column whitelight_flux_NRS1" },
+  notes: [],
+};
+
+const FITSCAT_PROBE: TableProbe = {
+  format: "fits_bintable",
+  n_rows: 500,
+  columns: Array.from({ length: 8 }, (_, i) => ({ name: `c${i}`, unit: null, datatype: "float64", numeric: true })),
+  tables: [{ hdu: 1, extname: "CATALOG", n_rows: 500, n_columns: 8 }],
+  meta: null,
+  comments: [],
+  guess: { kind: "catalogue", reason: "sky position columns RA and DEC" },
+  notes: [],
+};
+
+const WHTLT_NAME = "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv";
+
+function tableFile(id: string, name: string, table: TableProbe): MetadataFile {
+  return { id, name, path: `C:/d/${name}`, size: 1, status: "table", table };
+}
+
+const ROW_CHIP_BUTTON = "<button type=\"button\" class=\"ab-mfl-chip";
+
+describe("MetadataFileList table rows", () => {
+  it("renders a table row as a clickable row with the action of its kind", () => {
+    const table = tableFile("t", "C1_ls_dr10_box_A.csv", C1_PROBE);
+    const html = renderRow(table, { comparableX1d: new Set(["t"]) });
+    expect(html).toContain('data-status="table"');
+    expect(html).toContain('<div class="ab-mfl-status-dot" data-status="table" style="background:var(--ab-sky)"></div>');
+    expect(html).toContain(">Table, 297 rows x 17 columns (CSV)<");
+    expect(html).toContain(`<span class="ab-mfl-spectrum-text" title="${tableRowTitle(C1_PROBE)}">Table, 297 rows x 17 columns (CSV)</span>`);
+    expect(html).toContain("ab-mfl-item-clickable");
+    expect(html).not.toContain("Open as spectrum");
+    expect(html).not.toContain("Compare with its cube");
+    expect(html).not.toContain(ROW_CHIP_BUTTON);
+    expect(html).toContain('draggable="false"');
+    expect(rowHeights(html)).toEqual([{ id: "t", height: 72 }]);
+
+    const lightCurve = renderRow(tableFile("w", WHTLT_NAME, WHTLT_PROBE), { onTableAction: () => {} });
+    expect(lightCurve).toContain("ab-mfl-item-clickable");
+    expect(lightCurve).toContain(">Open as light curve<");
+    expect(buttonTag(lightCurve, "Open as light curve")).toContain('title="Open this table as a light curve in the Series section of Photometry"');
+    expect(lightCurve).not.toContain("Use as catalogue");
+    expect(rowHeights(lightCurve)).toEqual([{ id: "w", height: 72 }]);
+
+    const catalogue = renderRow(table, { onTableAction: () => {} });
+    expect(catalogue).toContain(">Use as catalogue<");
+    expect(buttonTag(catalogue, "Use as catalogue")).toContain('title="Use this table as the catalogue of the Compare section of Photometry"');
+    expect(rowHeights(catalogue)).toEqual([{ id: "t", height: 72 }]);
+
+    const fitsTable = renderRow(tableFile("f", "cat.fits", FITSCAT_PROBE), { onTableAction: () => {} });
+    expect(fitsTable).toContain("ab-mfl-item-clickable");
+    expect(fitsTable).toContain(">Table, 500 rows x 8 columns (FITS table)<");
+    expect(fitsTable).not.toContain(ROW_CHIP_BUTTON);
+    expect(rowHeights(fitsTable)).toEqual([{ id: "f", height: 72 }]);
+
+    const noCallback = renderRow(tableFile("w", WHTLT_NAME, WHTLT_PROBE));
+    expect(noCallback).not.toContain(ROW_CHIP_BUTTON);
+    expect(noCallback).not.toContain("Open as light curve");
+  });
+
+  it("selects a table row on click and hands it over from its button without selecting it", () => {
+    hooks.mount();
+    const select = vi.fn();
+    const act = vi.fn();
+    const stop = vi.fn();
+    const tree = elements(hooks.render(listView, { files: [tableFile("t", WHTLT_NAME, WHTLT_PROBE)], selectedId: null, onSelect: select, onTableAction: act }) as ReactNode);
+    const item = tree.find((el) => (el.props.file as MetadataFile | undefined)?.id === "t");
+    if (!item) throw new Error("no row element for the table");
+    hooks.mount();
+    const row = elements(hooks.render((item.type as unknown as { type: (props: unknown) => ReactNode }).type, item.props) as ReactNode);
+    hooks.mount();
+    (row[0].props.onClick as () => void)();
+    expect(select.mock.calls).toEqual([["t"]]);
+    const button = row.find((el) => el.type === "button");
+    if (!button) throw new Error("no action button on the table row");
+    (button.props.onClick as (e: { stopPropagation: () => void }) => void)({ stopPropagation: stop });
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(act.mock.calls).toEqual([["t", "light_curve"]]);
+    expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  it("names a CSV spectrum row", () => {
+    const spectrum: MetadataFile = { id: "s", name: "spectrum.csv", path: "C:/d/spectrum.csv", size: 1, status: "spectrum", table: CSV_SPECTRUM_PROBE };
+    const html = renderRow(spectrum);
+    expect(html).toContain('<span class="ab-mfl-spectrum-text" title="1D spectrum, CSV file">1D spectrum, CSV file</span>');
+    expect(html).toContain(">Open as spectrum<");
+    expect(html).toContain("ab-mfl-item-clickable");
   });
 });
 
@@ -376,6 +565,20 @@ describe("MetadataFileList row heights", () => {
     expect(rowHeights(html).map((r) => r.height)).toEqual([72]);
   });
 
+  it("keeps a time-series row at one button line even beside its cube", () => {
+    const html = renderToStaticMarkup(
+      createElement(MetadataFileList, {
+        files: [spectrumFile("s", E1_PATH, E1)],
+        selectedId: null,
+        onSelect: () => {},
+        onOpenSpectrum: () => {},
+        onOpenTable: () => {},
+        comparableX1d: new Set(["s"]),
+      }),
+    );
+    expect(rowHeights(html).map((r) => r.height)).toEqual([72]);
+  });
+
   it("windows rows of mixed heights by their real offsets", () => {
     const tops = rowTops([72, 92, 72, 72, 92, 72]);
     expect(tops).toEqual([0, 72, 164, 236, 308, 400, 472]);
@@ -384,5 +587,31 @@ describe("MetadataFileList row heights", () => {
     expect(rowWindow(tops, 400, 72, 0)).toEqual({ start: 5, end: 6 });
     expect(rowWindow(tops, 300, 100, 2)).toEqual({ start: 1, end: 6 });
     expect(rowWindow(rowTops([]), 0, 600, 4)).toEqual({ start: 0, end: 0 });
+  });
+});
+
+function optionRow(html: string, id: string): string {
+  const start = html.indexOf(`<div id="mfl-opt-${id}"`);
+  if (start < 0) throw new Error(`no row ${id}`);
+  const next = html.indexOf('<div id="mfl-opt-', start + 1);
+  return next < 0 ? html.slice(start) : html.slice(start, next);
+}
+
+describe("MetadataFileList layer rows", () => {
+  it("tags a layer file and leaves a science image without a tag", () => {
+    const html = renderList([
+      { ...doneFile("w", "legacysurvey-0532m280-invvar-r.fits.fz"), layer: { role: "inverse_variance", basis: "file name -invvar-", assumed: false } },
+      { ...doneFile("s", "legacysurvey-0532m280-image-r.fits.fz"), layer: { role: "science", basis: "EXTNAME SCI", assumed: false } },
+      doneFile("n", "m42.fits"),
+    ]);
+    expect(html.match(/>inverse variance</g)).toHaveLength(1);
+    expect(optionRow(html, "w")).toContain('<span class="ab-mfl-chip ab-mfl-chip-neutral" title="inverse variance layer, from file name -invvar-">inverse variance</span>');
+    expect(optionRow(html, "s")).not.toContain("ab-mfl-chip-neutral");
+    expect(optionRow(html, "n")).not.toContain("ab-mfl-chip-neutral");
+    expect(rowHeights(html)).toEqual([
+      { id: "w", height: 72 },
+      { id: "s", height: 72 },
+      { id: "n", height: 72 },
+    ]);
   });
 });

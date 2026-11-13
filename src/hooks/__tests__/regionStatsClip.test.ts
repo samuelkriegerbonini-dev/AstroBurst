@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_CLIP_ITERS, parseClipIters, parseClipSigma } from "../useRegionStats";
+import { MAX_CLIP_ITERS, clipFieldError, parseClipIters, parseClipSigma } from "../useRegionStats";
 
 describe("parseClipIters", () => {
   it("mirrors the backend iteration limit", () => {
@@ -38,5 +38,31 @@ describe("parseClipSigma", () => {
 
   it("treats a blank field as the default", () => {
     expect(parseClipSigma("  ")).toBeNull();
+  });
+});
+
+describe("clipFieldError", () => {
+  const COMMA = "Use a dot (.) as the decimal separator";
+  const ITERS_LISTS = [["1", " 5 ", "100"], ["200", "101", "1e3", "1e20", "7.5", "2.5", "0", "-3", "abc", "Infinity"], ["", "   "]];
+  const SIGMA_LISTS = [["3", " 2.5 "], ["1e39", "1e-46", "0", "-1", "Infinity", "NaN", "abc"], ["  "]];
+
+  it("clipFieldError words every entry the parsers refuse and nothing else", () => {
+    for (const text of ["", "  ", "3", " 2.5 "]) expect(clipFieldError("sigma", text)).toBeNull();
+    expect(clipFieldError("sigma", "2,5")).toBe(COMMA);
+    for (const text of ["abc", "NaN", "Infinity"]) expect(clipFieldError("sigma", text)).toBe("Not a number");
+    for (const text of ["0", "-1", "1e39", "1e-46"]) expect(clipFieldError("sigma", text)).toBe("Use a number above 0 and below 3.4e38");
+
+    for (const text of ["", "1", " 5 ", "100"]) expect(clipFieldError("iters", text)).toBeNull();
+    for (const text of ["7.5", "2.5"]) expect(clipFieldError("iters", text)).toBe("Use a whole number");
+    for (const text of ["200", "101", "0", "-3", "1e3", "1e20"]) expect(clipFieldError("iters", text)).toBe("Use a value from 1 to 100");
+    expect(clipFieldError("iters", "2,5")).toBe(COMMA);
+    expect(clipFieldError("iters", "abc")).toBe("Not a number");
+
+    for (const text of ITERS_LISTS.flat()) {
+      expect(clipFieldError("iters", text) === null, text).toBe(text.trim() === "" || parseClipIters(text) !== null);
+    }
+    for (const text of SIGMA_LISTS.flat()) {
+      expect(clipFieldError("sigma", text) === null, text).toBe(text.trim() === "" || parseClipSigma(text) !== null);
+    }
   });
 });

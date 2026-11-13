@@ -4,8 +4,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ErrorAlert from "../ErrorAlert";
 import SectionHeader from "../SectionHeader";
 import RunButton from "../RunButton";
+import Toggle from "../Toggle";
+import { SMALL_BUTTON_CLASS, ERROR_ALERT_COMPACT_CLASS } from "../uiClasses";
 
 type RunButtonProps = ComponentProps<typeof RunButton>;
+type ToggleProps = ComponentProps<typeof Toggle>;
 
 const ICON = createElement("i", { "data-icon": "" });
 
@@ -33,6 +36,56 @@ describe("ErrorAlert", () => {
   it("renders nothing without a message", () => {
     expect(renderToStaticMarkup(createElement(ErrorAlert, { message: null }))).toBe("");
     expect(renderToStaticMarkup(createElement(ErrorAlert, { message: "" }))).toBe("");
+  });
+
+  it("keeps one compact look for panel failures and still announces them", () => {
+    const markup = renderToStaticMarkup(createElement(ErrorAlert, { message: "Star detection failed: no stars above 5 sigma", compact: true }));
+    expect(markup).toBe('<div class="ab-error-alert ab-error-alert-compact" role="alert">Star detection failed: no stars above 5 sigma</div>');
+  });
+
+  it("appends the layout classes a panel passes", () => {
+    const markup = renderToStaticMarkup(createElement(ErrorAlert, { message: "Cube collapse failed: no channels", compact: true, className: "w-full" }));
+    expect(markup).toBe('<div class="ab-error-alert ab-error-alert-compact w-full" role="alert">Cube collapse failed: no channels</div>');
+  });
+});
+
+describe("shared panel classes", () => {
+  it("exports the 10 px small button class of the science panels", () => {
+    expect(SMALL_BUTTON_CLASS).toBe(
+      "flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed",
+    );
+  });
+
+  it("names the compact alert classes for elements that keep their own markup", () => {
+    expect(ERROR_ALERT_COMPACT_CLASS).toBe("ab-error-alert ab-error-alert-compact");
+  });
+});
+
+describe("Toggle", () => {
+  function toggleMarkup(props: Partial<ToggleProps>): string {
+    return renderToStaticMarkup(createElement(Toggle, { label: "EE fraction", checked: false, onChange: () => {}, ...props }));
+  }
+
+  function rowTag(markup: string): string {
+    const tag = /^<div[^>]*>/.exec(markup)?.[0];
+    if (!tag) throw new Error("no toggle row rendered");
+    return tag;
+  }
+
+  it("dims the label of a disabled toggle and says why on the row", () => {
+    const markup = toggleMarkup({ disabled: true, disabledReason: "needs a growth-curve plateau" });
+    const row = rowTag(markup);
+    expect(row).toMatch(/\saria-disabled="true"/);
+    expect(row).toMatch(/\stitle="needs a growth-curve plateau"/);
+    expect(markup).toContain('<span class="text-xs text-zinc-400 opacity-50">EE fraction</span>');
+  });
+
+  it("leaves an enabled toggle as it is", () => {
+    const markup = toggleMarkup({ disabled: false });
+    const row = rowTag(markup);
+    expect(row).not.toContain("aria-disabled");
+    expect(row).not.toContain("title=");
+    expect(markup).toContain('<span class="text-xs text-zinc-400 cursor-pointer">EE fraction</span>');
   });
 });
 

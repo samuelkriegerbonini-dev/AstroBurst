@@ -2,11 +2,15 @@ import type {
   CorrectionFrame,
   GaussianFitResult,
   LineMeasurement,
-  LineMeasurementSource,
+  MeasuredLineSource,
+  SeriesSpectrumSource,
   SpectralAxisInfo,
 } from "../shared/types/spectral";
 import { SIGMA_MAD_LABEL } from "./analysisLabels";
+import { provenanceLines, unitLines, withProvenance } from "./csvProvenance";
+import { formatWithUncertainty } from "./formatUncertainty";
 import { formatRedshift } from "./lineList";
+import { spectrumUnitOf } from "./measurementLog";
 import { airToVacuumUm } from "./spectralAxis";
 import { axisValueToPixel, channelAxisValue, type PlotMapping } from "./spectrumRange";
 
@@ -44,10 +48,29 @@ export interface MeasurementRow {
   value: string;
 }
 
+export type AxisDisplayUnit = "um" | "nm" | "A";
+
+export interface LineRowOptions {
+  axisDisplayUnit?: AxisDisplayUnit;
+}
+
+export interface LineCsvContext {
+  fileName?: string | null;
+  dq?: string | null;
+  provenance?: { software: string; exportedUtc: string } | null;
+}
+
 export const FWHM_PER_SIGMA = 2.354820045030949;
 export const MODEL_SUBSAMPLES = 4;
 export const UNAVAILABLE = "n/a";
 export const PLUS_MINUS = "±";
+export const POOR_FIT_CHI2_RED = 3;
+
+const MICRONS_TO_DISPLAY: Record<AxisDisplayUnit, number> = { um: 1, nm: 1e3, A: 1e4 };
+const RELIABLE_ERRORS_MIN_SNR = 10;
+const WIDTH_ERROR_LIMIT_PERCENT = 15;
+const SI_FLUX_UNIT = "W m^-2";
+const CGS_FLUX_UNIT = "erg s^-1 cm^-2";
 
 const GENERAL_DIGITS = 4;
 const EXPONENT_BELOW = 1e-3;
@@ -57,6 +80,7 @@ const MAX_AXIS_DECIMALS = 10;
 const VELOCITY_DECIMALS = 1;
 const UNDECLARED_AXIS_FRAME = "axis frame not declared (no SPECSYS)";
 const NO_ERR_SOURCE = "none: flux error from the continuum scatter";
+const NIRISS_SOSS_DETECTOR = "NIS";
 
 export const CSV_COLUMNS = [
   "source_kind",
@@ -115,7 +139,55 @@ export const CSV_COLUMNS = [
   "velocity_source_fwhm_kms",
   "continuum_chi2_red",
   "n_channels_nominal",
+  "equivalent_width_err",
+  "centroid_err",
+  "sigma_err",
+  "fwhm_err",
+  "errors_reliable",
+  "width_errors_reliable",
+  "velocity_centroid_err_kms",
+  "velocity_sigma_err_kms",
+  "velocity_fwhm_err_kms",
+  "velocity_source_centroid_err_kms",
+  "velocity_source_sigma_err_kms",
+  "velocity_source_fwhm_err_kms",
+  "velocity_z_line",
+  "velocity_z_line_err",
+  "peak_axis",
+  "wavelength_frame",
+  "line_id",
+  "line_label",
+  "redshift",
+  "flux_si",
+  "flux_si_err",
+  "flux_cgs",
+  "flux_cgs_err",
+  "flux_physical_basis",
+  "file",
+  "dq",
+  "source_series",
 ] as const;
+
+type LineCsvColumn = (typeof CSV_COLUMNS)[number];
+
+const FLUX_UNIT_COLUMNS: readonly LineCsvColumn[] = ["flux", "flux_err", "flux_err_pixel", "flux_err_level", "flux_err_slope"];
+const SPECTRUM_UNIT_COLUMNS: readonly LineCsvColumn[] = ["continuum_level", "continuum_sigma", "peak", "fit_amplitude", "fit_amplitude_err"];
+const AXIS_UNIT_COLUMNS: readonly LineCsvColumn[] = [
+  "equivalent_width",
+  "equivalent_width_err",
+  "centroid",
+  "centroid_err",
+  "sigma",
+  "sigma_err",
+  "fwhm",
+  "fwhm_err",
+  "continuum_reference",
+  "peak_axis",
+  "fit_centre",
+  "fit_sigma",
+  "fit_centre_err",
+  "fit_sigma_err",
+];
 
 function finite(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -180,17 +252,26 @@ export function lineMeasurementAxis(axis: SpectralAxisInfo | null, documentMode:
   return axis ? axis.values : null;
 }
 
-export function spectrumSourceKey(source: LineMeasurementSource, view: string): string {
+export function spectrumSourceKey(source: MeasuredLineSource, view: string): string {
   return `${source.kind}:${view}:${JSON.stringify(source)}`;
 }
 
-export function spectrumSourceLabel(source: LineMeasurementSource): string {
+function seriesSourceLabel({ detector, sporder, pick }: SeriesSpectrumSource): string {
+  const ordersShareDetector = sporder !== null && (sporder >= 2 || (sporder === 1 && detector === NIRISS_SOSS_DETECTOR));
+  const series = ordersShareDetector ? `${detector}, order ${sporder}` : detector;
+  if (pick.kind === "median") return `time series ${series}, median`;
+  if (pick.kind === "mean") return `time series ${series}, mean ${pick.first + 1} to ${pick.last + 1}`;
+  return `time series ${series}, integration ${pick.index + 1}`;
+}
+
+export function spectrumSourceLabel(source: MeasuredLineSource): string {
   if (source.kind === "pixel") return `pixel (${source.x}, ${source.y})`;
   if (source.kind === "file") return source.hdu === null ? "spectrum file" : `spectrum file, HDU ${source.hdu}`;
+  if (source.kind === "series") return seriesSourceLabel(source);
   return `${source.shape.shape} region${source.background ? " with background" : ""}`;
 }
 
-export function runForSource<T extends { key: string }>(run: T | null, source: LineMeasurementSource | null, view: string): T | null {
+export function runForSource<T extends { key: string }>(run: T | null, source: MeasuredLineSource | null, view: string): T | null {
   return run && source && spectrumSourceKey(source, view) === run.key ? run : null;
 }
 
@@ -263,26 +344,128 @@ export function lineOverlayPolylines(
   return { continuum: continuumLine, model };
 }
 
-function withVelocity(axisText: string, kms: number | null | undefined, hasVelocity: boolean): string {
-  return hasVelocity ? `${axisText} / ${formatVelocity(kms)}` : axisText;
+function velocityWithError(kms: number | null | undefined, errKms: number | null | undefined): string {
+  return finite(kms) && finite(errKms) && errKms > 0
+    ? `${kms.toFixed(VELOCITY_DECIMALS)} ${PLUS_MINUS} ${errKms.toFixed(VELOCITY_DECIMALS)} km/s`
+    : formatVelocity(kms);
 }
 
-export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
-  const unit = m.axis_unit;
+function withVelocity(axisText: string, kms: number | null | undefined, errKms: number | null | undefined, hasVelocity: boolean): string {
+  return hasVelocity ? `${axisText} / ${velocityWithError(kms, errKms)}` : axisText;
+}
+
+function withError(value: number | null | undefined, err: number | null | undefined, unit: string, plain: string): string {
+  if (!finite(value)) return `${UNAVAILABLE} ${unit}`;
+  return finite(err) && err > 0 ? formatWithUncertainty(value, err, { unit }) : plain;
+}
+
+function scaled(value: number | null | undefined, factor: number): number | null | undefined {
+  return finite(value) ? value * factor : value;
+}
+
+function signalToNoiseText(snr: number | null): string {
+  if (!finite(snr)) return UNAVAILABLE;
+  const magnitude = Math.abs(snr).toFixed(1);
+  if (snr > 0) return `${magnitude} (emission)`;
+  return snr < 0 ? `${magnitude} (absorption)` : magnitude;
+}
+
+function fitChi2Text(chi2: number | null, dof: number): string {
+  const ratio = finite(chi2) && dof > 0 ? chi2 / dof : null;
+  const reduced = ratio === null ? "" : ` = ${formatQuantity(ratio)}${ratio > POOR_FIT_CHI2_RED ? " (poor fit)" : ""}`;
+  return `chi2/dof ${formatQuantity(chi2)}/${dof}${reduced}`;
+}
+
+function windowChannelCount([[a0, a1], [b0, b1]]: LineMeasurement["continuum_windows"]): number {
+  const span = (lo: number, hi: number) => Math.max(0, hi - lo + 1);
+  return span(a0, a1) + span(b0, b1) - span(Math.max(a0, b0), Math.min(a1, b1));
+}
+
+function errorReliabilityText(m: LineMeasurement): string | null {
+  if (m.errors_reliable === false && [m.equivalent_width_err, m.centroid_err, m.sigma_err].some(finite)) {
+    const snr = finite(m.snr) ? Math.abs(m.snr).toFixed(1) : UNAVAILABLE;
+    return `line S/N ${snr} is below ${RELIABLE_ERRORS_MIN_SNR}: the errors of equivalent width, centroid and widths are indicative`;
+  }
+  if (m.errors_reliable === true && m.width_errors_reliable === false && finite(m.sigma) && finite(m.sigma_err)) {
+    const percent = ((100 * m.sigma_err) / Math.abs(m.sigma)).toFixed(0);
+    return `sigma is known to ${percent} percent: the errors of sigma and FWHM are indicative above ${WIDTH_ERROR_LIMIT_PERCENT} percent`;
+  }
+  return null;
+}
+
+export function lineMeasurementRows(m: LineMeasurement, options: LineRowOptions = {}): MeasurementRow[] {
+  const displayUnit = m.axis_unit === "um" ? (options.axisDisplayUnit ?? "um") : null;
+  const unit = displayUnit ?? m.axis_unit;
+  const factor = displayUnit ? MICRONS_TO_DISPLAY[displayUnit] : 1;
+  const positionUnit = m.wavelength_frame ? `${unit} ${m.wavelength_frame}` : unit;
   const v = m.velocity;
+  const hasVelocity = v !== null;
+  const equivalentWidth = scaled(m.equivalent_width, factor);
+  const centroid = scaled(m.centroid, factor);
+  const sigma = scaled(m.sigma, factor);
+  const fwhm = scaled(m.fwhm, factor);
+  const spectrumUnit = spectrumUnitOf(m.flux_unit, m.axis_unit);
+  const peakValue = spectrumUnit ? `${formatQuantity(m.peak)} ${spectrumUnit}` : formatQuantity(m.peak);
+  const peakAxis = scaled(m.peak_axis, factor);
   const rows: MeasurementRow[] = [
-    { label: "Flux", value: `${formatQuantity(m.flux)} ${PLUS_MINUS} ${formatQuantity(m.flux_err)} ${m.flux_unit}` },
-    { label: "Equivalent width (absorption > 0, emission < 0)", value: `${formatQuantity(m.equivalent_width)} ${unit}` },
-    { label: "Centroid", value: withVelocity(`${formatAxisQuantity(m.centroid)} ${unit}`, v?.source_centroid_kms, v !== null) },
-    { label: "Sigma", value: withVelocity(`${formatQuantity(m.sigma)} ${unit}`, v?.source_sigma_kms, v !== null) },
-    { label: "FWHM", value: withVelocity(`${formatQuantity(m.fwhm)} ${unit}`, v?.source_fwhm_kms, v !== null) },
-    { label: finite(m.flux) && m.flux < 0 ? "Trough" : "Peak", value: `${formatQuantity(m.peak)} at ch ${m.peak_channel}` },
-    { label: "SNR", value: finite(m.snr) ? m.snr.toFixed(1) : UNAVAILABLE },
+    {
+      label: "Flux",
+      value: withError(m.flux, m.flux_err, m.flux_unit, `${formatQuantity(m.flux)} ${PLUS_MINUS} ${formatQuantity(m.flux_err)} ${m.flux_unit}`),
+    },
+  ];
+  const basis = m.flux_physical_basis;
+  if (basis) {
+    rows.push({
+      label: "Physical flux",
+      value: finite(m.flux_si)
+        ? `${formatWithUncertainty(m.flux_si, m.flux_si_err, { unit: SI_FLUX_UNIT })} = ${formatWithUncertainty(m.flux_cgs, m.flux_cgs_err, { unit: CGS_FLUX_UNIT })} (${basis})`
+        : basis,
+    });
+  }
+  rows.push(
+    {
+      label: "Equivalent width (absorption > 0, emission < 0)",
+      value: withError(equivalentWidth, scaled(m.equivalent_width_err, factor), unit, `${formatQuantity(equivalentWidth)} ${unit}`),
+    },
+    {
+      label: "Centroid",
+      value: withVelocity(
+        withError(centroid, scaled(m.centroid_err, factor), positionUnit, `${formatAxisQuantity(centroid)} ${positionUnit}`),
+        v?.source_centroid_kms,
+        v?.source_centroid_err_kms,
+        hasVelocity,
+      ),
+    },
+    {
+      label: "Sigma (2nd moment)",
+      value: withVelocity(
+        withError(sigma, scaled(m.sigma_err, factor), unit, `${formatQuantity(sigma)} ${unit}`),
+        v?.source_sigma_kms,
+        v?.source_sigma_err_kms,
+        hasVelocity,
+      ),
+    },
+    {
+      label: "FWHM (2.355 x sigma)",
+      value: withVelocity(
+        withError(fwhm, scaled(m.fwhm_err, factor), unit, `${formatQuantity(fwhm)} ${unit}`),
+        v?.source_fwhm_kms,
+        v?.source_fwhm_err_kms,
+        hasVelocity,
+      ),
+    },
+    {
+      label: finite(m.flux) && m.flux < 0 ? "Trough" : "Peak",
+      value: finite(peakAxis)
+        ? `${peakValue} at ${formatAxisQuantity(peakAxis)} ${positionUnit} (ch ${m.peak_channel})`
+        : `${peakValue} at ch ${m.peak_channel}`,
+    },
+    { label: "SNR", value: signalToNoiseText(m.snr) },
     {
       label: "Continuum",
       value: `level ${formatQuantity(m.continuum_level)}, slope ${formatQuantity(m.continuum_slope)}, ${SIGMA_MAD_LABEL} ${formatQuantity(m.continuum_sigma)}, ${m.continuum_channels} ch ${m.continuum_linear ? "linear" : "constant"}`,
     },
-  ];
+  );
   if (v) {
     const redshift = v.redshift ?? 0;
     const frame = v.axis_frame ? `axis frame ${v.axis_frame}` : UNDECLARED_AXIS_FRAME;
@@ -297,12 +480,20 @@ export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
         value: `centroid ${formatVelocity(v.centroid_kms)}, sigma ${formatVelocity(v.sigma_kms)}, FWHM ${formatVelocity(v.fwhm_kms)}`,
       });
     }
+    if (finite(v.z_line)) {
+      rows.push({
+        label: "Line redshift",
+        value: `z = ${formatWithUncertainty(v.z_line, v.z_line_err)} (centroid over rest wavelength, minus 1)`,
+      });
+    }
   }
   if (m.fit) {
     const f = m.fit;
+    const centreErr = scaled(f.centre_err, factor);
+    const fitWidths = `s ${formatQuantity(scaled(f.sigma, factor))} ${PLUS_MINUS} ${formatQuantity(scaled(f.sigma_err, factor))} ${unit}, FWHM ${formatQuantity(scaled(f.sigma, factor * FWHM_PER_SIGMA))} ${PLUS_MINUS} ${formatQuantity(scaled(f.sigma_err, factor * FWHM_PER_SIGMA))} ${unit}`;
     rows.push({
       label: "Gaussian fit",
-      value: `A ${formatQuantity(f.amplitude)} ${PLUS_MINUS} ${formatQuantity(f.amplitude_err)}, c ${formatAxisQuantity(f.centre, f.centre_err)} ${PLUS_MINUS} ${formatQuantity(f.centre_err)}, s ${formatQuantity(f.sigma)} ${PLUS_MINUS} ${formatQuantity(f.sigma_err)} ${unit}, chi2/dof ${formatQuantity(f.chi2)}/${f.dof}, ${f.iterations} it`,
+      value: `A ${formatQuantity(f.amplitude)} ${PLUS_MINUS} ${formatQuantity(f.amplitude_err)}, c ${formatAxisQuantity(scaled(f.centre, factor), centreErr)} ${PLUS_MINUS} ${formatQuantity(centreErr)}, ${fitWidths}, ${fitChi2Text(f.chi2, f.dof)}, ${f.iterations} it`,
     });
   }
   const chi2Red = m.continuum_chi2_red;
@@ -318,9 +509,16 @@ export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
       value: `pixel ${formatQuantity(terms.pixel)}, level ${formatQuantity(terms.level)}, slope ${formatQuantity(terms.slope)} ${m.flux_unit}`,
     });
   }
+  const reliability = errorReliabilityText(m);
+  if (reliability) rows.push({ label: "Error reliability", value: reliability });
+  const exclusions = `${m.n_dq_excluded} DQ-flagged, ${m.n_nonfinite} non-finite flux, ${m.n_bad_err} ERR <= 0 or non-finite`;
+  const nominal = m.n_channels_nominal;
+  const continuumNominal = windowChannelCount(m.continuum_windows);
   rows.push({
     label: "Excluded channels",
-    value: `${m.n_dq_excluded} DQ-flagged, ${m.n_nonfinite} non-finite flux, ${m.n_bad_err} ERR <= 0 or non-finite`,
+    value: finite(nominal)
+      ? `in line ${nominal - m.n_channels} of ${nominal}, in continuum ${continuumNominal - m.continuum_channels} of ${continuumNominal}: ${exclusions}`
+      : exclusions,
   });
   return rows;
 }
@@ -333,7 +531,24 @@ function csvCell(value: unknown): string {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-export function lineMeasurementCsv(m: LineMeasurement): string {
+function lineCsvUnit(column: LineCsvColumn, m: LineMeasurement, spectrumUnit: string | null): string | null {
+  if (FLUX_UNIT_COLUMNS.includes(column)) return m.flux_unit;
+  if (SPECTRUM_UNIT_COLUMNS.includes(column)) return spectrumUnit;
+  if (column === "continuum_slope") return spectrumUnit ? `${spectrumUnit} per ${m.axis_unit}` : null;
+  if (AXIS_UNIT_COLUMNS.includes(column)) return m.axis_unit;
+  if (column.endsWith("_kms")) return "km/s";
+  if (column === "velocity_rest_um") return "um";
+  if (column === "flux_si" || column === "flux_si_err") return SI_FLUX_UNIT;
+  if (column === "flux_cgs" || column === "flux_cgs_err") return CGS_FLUX_UNIT;
+  return null;
+}
+
+function lineCsvUnits(m: LineMeasurement): Record<string, string | null> {
+  const spectrumUnit = spectrumUnitOf(m.flux_unit, m.axis_unit);
+  return Object.fromEntries(CSV_COLUMNS.map((column) => [column, lineCsvUnit(column, m, spectrumUnit)]));
+}
+
+export function lineMeasurementCsv(m: LineMeasurement, context?: LineCsvContext): string {
   const v = m.velocity;
   const f = m.fit;
   const s = m.source;
@@ -394,6 +609,48 @@ export function lineMeasurementCsv(m: LineMeasurement): string {
     v?.source_fwhm_kms ?? null,
     m.continuum_chi2_red ?? null,
     m.n_channels_nominal ?? null,
+    m.equivalent_width_err ?? null,
+    m.centroid_err ?? null,
+    m.sigma_err ?? null,
+    m.fwhm_err ?? null,
+    m.errors_reliable ?? null,
+    m.width_errors_reliable ?? null,
+    v?.centroid_err_kms ?? null,
+    v?.sigma_err_kms ?? null,
+    v?.fwhm_err_kms ?? null,
+    v?.source_centroid_err_kms ?? null,
+    v?.source_sigma_err_kms ?? null,
+    v?.source_fwhm_err_kms ?? null,
+    v?.z_line ?? null,
+    v?.z_line_err ?? null,
+    m.peak_axis ?? null,
+    m.wavelength_frame ?? null,
+    m.line_id ?? null,
+    m.line_label ?? null,
+    m.redshift ?? null,
+    m.flux_si ?? null,
+    m.flux_si_err ?? null,
+    m.flux_cgs ?? null,
+    m.flux_cgs_err ?? null,
+    m.flux_physical_basis ?? null,
+    context?.fileName ?? null,
+    context?.dq ?? null,
+    s.kind === "series" ? JSON.stringify({ paths: s.paths, detector: s.detector, sporder: s.sporder, pick: s.pick }) : null,
   ];
-  return `${CSV_COLUMNS.join(",")}\n${values.map(csvCell).join(",")}`;
+  const body = `${CSV_COLUMNS.join(",")}\n${values.map(csvCell).join(",")}`;
+  const provenance = context?.provenance;
+  if (!provenance) return body;
+  const lines = [
+    ...provenanceLines([
+      ["software", provenance.software],
+      ["exported_utc", provenance.exportedUtc],
+      ["file", context?.fileName ?? null],
+      ["line", m.line_label ?? m.line_id ?? null],
+      ["source", spectrumSourceLabel(m.source)],
+      ["err_source", m.err_source],
+      ["flux_physical_basis", m.flux_physical_basis ?? null],
+    ]),
+    ...unitLines(lineCsvUnits(m)),
+  ];
+  return withProvenance(lines, body, "\n");
 }

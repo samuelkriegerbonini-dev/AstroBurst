@@ -7,10 +7,11 @@ interface ToggleProps {
   accent?: string;
   badge?: string | null;
   describedBy?: string;
+  disabledReason?: string;
   onChange: (v: boolean) => void;
 }
 
-function Toggle({ label, checked, disabled = false, accent = "teal", badge, describedBy, onChange }: ToggleProps) {
+function Toggle({ label, checked, disabled = false, accent = "teal", badge, describedBy, disabledReason, onChange }: ToggleProps) {
   const handleClick = useCallback(() => {
     if (!disabled) onChange(!checked);
   }, [disabled, checked, onChange]);
@@ -19,9 +20,11 @@ function Toggle({ label, checked, disabled = false, accent = "teal", badge, desc
     <div
       className={`flex items-center justify-between py-0.5 ${disabled ? "" : "cursor-pointer"}`}
       onClick={handleClick}
+      aria-disabled={disabled ? true : undefined}
+      title={disabled && disabledReason ? disabledReason : undefined}
     >
       <div className="flex items-center gap-1.5">
-        <span className={`text-xs text-zinc-400 ${disabled ? "" : "cursor-pointer"}`}>{label}</span>
+        <span className={`text-xs text-zinc-400 ${disabled ? "opacity-50" : "cursor-pointer"}`}>{label}</span>
         {badge && (
           <span className="text-[9px] text-emerald-400 bg-emerald-900/30 px-1.5 py-0.5 rounded font-medium">
             {badge}

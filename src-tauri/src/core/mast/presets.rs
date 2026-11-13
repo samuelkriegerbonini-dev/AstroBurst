@@ -25,7 +25,7 @@ pub static PRESETS: [PresetSpec; 7] = [
             ("tsovisit", "t"),
             ("exp_type", "NRS_BRIGHTOBJ,NIS_SOSS,MIR_LRS-SLITLESS,NRC_TSGRISM"),
         ],
-        products: &["x1dints", "calints"],
+        products: &["x1dints", "calints", "whtlt"],
     },
     PresetSpec {
         id: "ifu_cubes",
@@ -203,7 +203,7 @@ mod tests {
                     "label": "TSO",
                     "description": "Time-series observations: NIRSpec bright object, NIRISS SOSS, MIRI slitless LRS, NIRCam grism",
                     "conditions": [{"column": "tsovisit", "value": "t"}, {"column": "exp_type", "value": TSO_TYPES}],
-                    "products": ["x1dints", "calints"]
+                    "products": ["x1dints", "calints", "whtlt"]
                 },
                 {
                     "id": "ifu_cubes",
@@ -283,6 +283,14 @@ mod tests {
             let error = find(mission, id).unwrap_err();
             assert_eq!(error.code, MastErrorCode::BadInput, "{id}");
             assert_eq!(error.message, reason, "{mission:?} {id}");
+        }
+    }
+
+    #[test]
+    fn the_tso_preset_asks_for_the_white_light_table_and_no_other_preset_does() {
+        assert_eq!(find(MastMissionId::Jwst, "tso").unwrap().products, ["x1dints", "calints", "whtlt"]);
+        for preset in PRESETS.iter().filter(|preset| preset.id != "tso") {
+            assert!(!preset.products.contains(&"whtlt"), "{}", preset.id);
         }
     }
 

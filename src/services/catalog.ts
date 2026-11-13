@@ -29,6 +29,9 @@ export function catalogCrossMatch(path: string, options: CrossMatchOptions = {})
     band: options.band ?? null,
     colourTerm: options.colourTerm ?? null,
     apertureRadius: options.apertureRadius ?? null,
+    coneRadiusArcmin: options.coneRadiusArcmin ?? null,
+    magLimit: options.magLimit ?? null,
+    maxRows: options.maxRows ?? null,
   });
 }
 
@@ -37,7 +40,12 @@ export type CatalogExportItems =
   | { kind: "sources"; rows: MeasuredSource[] }
   | { kind: "matches"; matches: CrossMatchEntry[] };
 
-export function catalogExportCsv(path: string, outputPath: string, items: CatalogExportItems): Promise<CatalogExportResult> {
+export function catalogExportCsv(
+  path: string,
+  outputPath: string,
+  items: CatalogExportItems,
+  headerLines?: readonly string[],
+): Promise<CatalogExportResult> {
   const kind: CatalogCsvKind = items.kind;
   return typedInvoke<CatalogExportResult>("catalog_export_csv_cmd", {
     path,
@@ -45,5 +53,6 @@ export function catalogExportCsv(path: string, outputPath: string, items: Catalo
     kind,
     rows: items.kind === "matches" ? null : items.rows,
     matches: items.kind === "matches" ? items.matches : null,
+    headerLines: headerLines ? [...headerLines] : null,
   });
 }

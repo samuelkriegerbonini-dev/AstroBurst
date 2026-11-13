@@ -27,7 +27,7 @@ import {
 } from "../../utils/contourLevels";
 import { useMeasurementSource } from "../../hooks/useAnalysisTarget";
 import { CONTOUR_LAYER_ID, CONTOUR_LAYER_KIND, createContourPainter } from "../viewer/painters/contourPainter";
-import { DecimalField, ErrorAlert, RunButton, Toggle, WarningList } from "../ui";
+import { DecimalField, ErrorAlert, RunButton, SMALL_BUTTON_CLASS, Toggle, WarningList } from "../ui";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions, type DecimalFieldState } from "../../utils/decimalText";
 import MeasurementBadge from "./MeasurementBadge";
 
@@ -55,8 +55,6 @@ const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-teal-500/50 w-full";
 const SELECT_CLASS = "bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[10px] text-zinc-300 font-mono w-full";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
-const SMALL_BUTTON_CLASS =
-  "flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed";
 
 const MODE_LABELS: Record<ContourMode, string> = {
   list: "Explicit list",

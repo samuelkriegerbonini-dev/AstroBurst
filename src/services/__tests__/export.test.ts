@@ -30,7 +30,7 @@ describe("mefSizeSummary", () => {
   });
 
   it("bases the ratio of a .fits.gz source on its decompressed size and names the .gz size", () => {
-    expect(mefSizeSummary(result(1_024_000, 4_096_000, 2_048_000))).toBe("4000 KB decompressed (1000 KB .gz on disk) → 2000 KB (50%), 85 ms");
+    expect(mefSizeSummary(result(1_024_000, 4_096_000, 2_048_000))).toBe("4000 KB decompressed (1000 KB compressed on disk) → 2000 KB (50%), 85 ms");
   });
 
   it("prints no ratio for an empty source", () => {

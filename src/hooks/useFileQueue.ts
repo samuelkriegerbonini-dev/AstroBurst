@@ -10,8 +10,11 @@ import {
   isCubePlaneResult,
   spectrum1dHint,
   spectrumProbeFailure,
+  noImageHduVerdict,
 } from "../utils/fitsErrors";
 import { probeSpectrum1d } from "../services/spectrum1d";
+import { probeTable } from "../services/tables";
+import { isTextTableFile } from "../utils/validation";
 import { fileStore } from "./useFileStore";
 import { refreshOverwrittenFiles } from "./refreshOverwrittenFiles";
 import { onCommandOutputs } from "../infrastructure/tauri";
@@ -102,10 +105,45 @@ async function settledAsSpectrum(file: ProcessedFile, msg: string): Promise<bool
   return true;
 }
 
+async function settledAsFitsTable(file: ProcessedFile): Promise<boolean> {
+  try {
+    const probe = await probeTable(file.path);
+    if (probe.format !== "fits_bintable" || (probe.tables?.length ?? 0) === 0) return false;
+    fileStore.fileTable(file.id, probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function settleIngestFailure(file: ProcessedFile, msg: string): Promise<void> {
   if (ingestOutcome(msg) === "spectrum" && (await settledAsSpectrum(file, msg))) return;
   const loadedAsCube = await loadFirstCubePlane(file, msg);
-  if (!loadedAsCube) fileStore.fileError(file.id, msg);
+  if (loadedAsCube) return;
+  if (noImageHduVerdict(msg) && (await settledAsFitsTable(file))) return;
+  fileStore.fileError(file.id, msg);
+}
+
+export type IngestRoute = "text-table" | "fits";
+
+export function ingestRoute(path: string): IngestRoute {
+  return isTextTableFile(path) ? "text-table" : "fits";
+}
+
+export async function settleTextTable(file: ProcessedFile): Promise<void> {
+  try {
+    const probe = await probeTable(file.path);
+    if (probe.guess.kind === "spectrum" && probe.format === "csv") fileStore.fileCsvSpectrum(file.id, probe);
+    else fileStore.fileTable(file.id, probe);
+  } catch (e) {
+    fileStore.fileError(file.id, e instanceof Error ? e.message : String(e));
+  }
+}
+
+export function alreadyInFilesMessage(loaded: readonly Pick<ProcessedFile, "name">[]): string | null {
+  if (loaded.length === 0) return null;
+  if (loaded.length === 1) return `${loaded[0].name} is already in Files: selected it instead of adding it again`;
+  return `${loaded.length} files are already in Files: selected the first instead of adding them again`;
 }
 
 type SelectionPaths = Pick<ProcessedFile, "path" | "sourcePath">;
@@ -137,13 +175,15 @@ export function useFileQueue() {
 
   useEffect(() => releaseCubesOnSwitch(), []);
 
-  const addFiles = useCallback((fileList: AstroFile[]) => {
-    fileStore.addFiles(fileList);
-  }, []);
+  const addFiles = useCallback((fileList: AstroFile[]) => fileStore.addFiles(fileList), []);
 
   const processOneFile = useCallback(
     async (file: ProcessedFile) => {
       fileStore.fileStarted(file.id);
+      if (ingestRoute(file.path) === "text-table") {
+        await settleTextTable(file);
+        return;
+      }
       try {
         const result = await processFitsFull(file.path);
         fileStore.fileDone(file.id, result);

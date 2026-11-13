@@ -23,6 +23,7 @@ import {
   ridgeSeries,
 } from "../pvDiagram";
 import { CSV_LINE_END } from "../catalogCsv";
+import { APP_VERSION } from "../constants";
 import type { Region } from "../../shared/types/regions";
 import type { RadialVelocityCorrectionResult, SpectralAxisInfo } from "../../shared/types/spectral";
 import type { PvDiagramResult, PvRun, PvRunParams } from "../../shared/types/pv";
@@ -330,27 +331,104 @@ describe("ridgeSeries", () => {
 });
 
 describe("pvRidgeCsv", () => {
-  it("writes six provenance lines, the unit-tagged header and empty null cells", () => {
-    const csv = pvRidgeCsv(run());
+  const UTC = "2026-11-12T12:00:00.000Z";
+
+  it("starts with the provenance of the export, then the unit of every column, then the table", () => {
+    const csv = pvRidgeCsv(run(), { exportedUtc: UTC });
     const lines = csv.split(CSV_LINE_END);
-    expect(lines.slice(0, 6).every((l) => l.startsWith("# "))).toBe(true);
-    expect(lines[0]).toBe("# file C:/d/cube.fits");
-    expect(lines[1]).toBe("# slit 2,16 -> 29,16 (px, 0-based)");
-    expect(lines[2]).toBe("# step_px 1, width_px 1, n_across 1");
-    expect(lines[3]).toBe("# channels 0-39");
-    expect(lines[4]).toBe("# spectral axis: Velocity, optical (km/s), barycentric");
-    expect(lines[5]).toBe("# fits: C:/out/cube_pv_0-39_2-16_29-16.fits");
-    expect(lines[6]).toBe("offset_arcsec,ridge_km_s,ridge_channel,peak_channel,peak_km_s,peak_value");
-    expect(lines[7]).toBe("-0.36,-50,19.5,19,-50,1.5");
-    expect(lines[8]).toBe("0,,,,,");
-    expect(lines[9]).toBe("0.36,50,20.5,21,50,1.4");
+    expect(lines).toEqual([
+      `# software: AstroBurst ${APP_VERSION}`,
+      "# exported_utc: 2026-11-12T12:00:00.000Z",
+      "# file: cube.fits",
+      "# source_path: C:/d/cube.fits",
+      "# slit_px: 2,16 -> 29,16 (0-based pixels, integer pixel centres)",
+      "# step_px: 1",
+      "# width_px: 1",
+      "# n_across: 1",
+      "# channels: 0-39 (0-based, inclusive)",
+      "# spectral_axis: Velocity, optical (km/s), barycentric",
+      "# fits: C:/out/cube_pv_0-39_2-16_29-16.fits",
+      "# unit offset_arcsec: arcsec",
+      "# unit ridge_km_s: km/s",
+      "# unit ridge_channel: channel (0-based)",
+      "# unit peak_channel: channel (0-based)",
+      "# unit peak_km_s: km/s",
+      "# unit peak_value: Jy/beam",
+      "offset_arcsec,ridge_km_s,ridge_channel,peak_channel,peak_km_s,peak_value",
+      "-0.36,-50,19.5,19,-50,1.5",
+      "0,,,,,",
+      "0.36,50,20.5,21,50,1.4",
+      "",
+    ]);
     expect(csv.endsWith(CSV_LINE_END)).toBe(true);
     expect(csv).not.toContain("\n\n");
   });
 
-  it("tags pixel offsets and channel units", () => {
-    const csv = pvRidgeCsv(run({ mode: "wavelength_vac" }, { offset_unit: "pixel", spectral_unit: "ch", spectral_mode: "wavelength_vac" }));
-    expect(csv.split(CSV_LINE_END)[6]).toBe("offset_px,ridge_ch,ridge_channel,peak_channel,peak_ch,peak_value");
+  it("tags pixel offsets and channel units and names them in the unit lines", () => {
+    const csv = pvRidgeCsv(
+      run({ mode: "wavelength_vac" }, { offset_unit: "pixel", spectral_unit: "ch", spectral_mode: "wavelength_vac" }),
+      { exportedUtc: UTC },
+    );
+    const lines = csv.split(CSV_LINE_END);
+    expect(lines.find((l) => !l.startsWith("#"))).toBe("offset_px,ridge_ch,ridge_channel,peak_channel,peak_ch,peak_value");
+    expect(lines.filter((l) => l.startsWith("# unit "))).toEqual([
+      "# unit offset_px: px",
+      "# unit ridge_ch: channel (0-based)",
+      "# unit ridge_channel: channel (0-based)",
+      "# unit peak_channel: channel (0-based)",
+      "# unit peak_ch: channel (0-based)",
+      "# unit peak_value: Jy/beam",
+    ]);
+    expect(lines).toContain("# spectral_axis: Channel");
+  });
+
+  it("leaves out the unit of the peak value when the cube has no BUNIT", () => {
+    const lines = pvRidgeCsv(run({}, { summary: { ...result().summary, bunit: null } }), { exportedUtc: UTC }).split(CSV_LINE_END);
+    expect(lines.some((l) => l.startsWith("# unit peak_value"))).toBe(false);
+    expect(lines.filter((l) => l.startsWith("# unit "))).toHaveLength(5);
+  });
+
+  it("names the file without its folder and keeps the path with its plane", () => {
+    const lines = pvRidgeCsv(run({ filePath: "C:\\data\\cube.fits#hdu=1" }), { exportedUtc: UTC }).split(CSV_LINE_END);
+    expect(lines[2]).toBe("# file: cube.fits");
+    expect(lines[3]).toBe("# source_path: C:\\data\\cube.fits#hdu=1");
+  });
+
+  it("stamps the export time when none is given", () => {
+    expect(pvRidgeCsv(run()).split(CSV_LINE_END)[1]).toMatch(/^# exported_utc: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+
+  it("every header line splits into a key and a value at its first colon", () => {
+    const header = pvRidgeCsv(run(), { exportedUtc: UTC })
+      .split(CSV_LINE_END)
+      .filter((l) => l.startsWith("#"));
+    expect(header).toHaveLength(17);
+    expect(header.every((l) => l.startsWith("# "))).toBe(true);
+    const pairs = header.map((l) => {
+      const body = l.slice(1);
+      const colon = body.indexOf(":");
+      return [body.slice(0, colon).trim(), body.slice(colon + 1).trim()];
+    });
+    expect(pairs.map(([key]) => key)).toEqual([
+      "software",
+      "exported_utc",
+      "file",
+      "source_path",
+      "slit_px",
+      "step_px",
+      "width_px",
+      "n_across",
+      "channels",
+      "spectral_axis",
+      "fits",
+      "unit offset_arcsec",
+      "unit ridge_km_s",
+      "unit ridge_channel",
+      "unit peak_channel",
+      "unit peak_km_s",
+      "unit peak_value",
+    ]);
+    expect(pairs.every(([, value]) => value !== "")).toBe(true);
   });
 });
 

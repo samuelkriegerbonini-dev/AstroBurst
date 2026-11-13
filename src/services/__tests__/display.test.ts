@@ -4,8 +4,10 @@ const { typedInvokeMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn() }));
 
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, withPreview: vi.fn() }));
 
-import { computeScaleLimits, getColormapLut } from "../display";
+import { computeScaleLimits, getColormapLut, type DqFlagTableResult } from "../display";
 import { DEFAULT_DISPLAY_SETTINGS, type ScaleLimits } from "../../shared/types/display";
+import type { ErrProbe } from "../../shared/types/dq";
+import type { PlaneInfo } from "../../shared/types/fits.types";
 
 describe("computeScaleLimits", () => {
   beforeEach(() => typedInvokeMock.mockReset());
@@ -51,5 +53,14 @@ describe("getColormapLut", () => {
     const again = await getColormapLut("bwr");
     expect(again).toBe(lut);
     expect(typedInvokeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("layer fields", () => {
+  it("types the layer fields of the flag table and of the probe as optional", () => {
+    expectTypeOf<DqFlagTableResult["dq_unavailable"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<DqFlagTableResult["exclusion_default"]>().toEqualTypeOf<number | undefined>();
+    expectTypeOf<ErrProbe["source"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<NonNullable<PlaneInfo["err_origin"]>["n_no_data"]>().toEqualTypeOf<number | null>();
   });
 });

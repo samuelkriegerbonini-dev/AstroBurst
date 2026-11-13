@@ -7,12 +7,13 @@ use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::imaging::push_history;
 use crate::core::metadata::photcal::{
     card_text, is_mjy_per_sr, is_rate_unit, normalized_unit, pixel_area_sr, ARCSEC_PER_RADIAN, GENERIC_ZERO_POINT_KEYS,
-    JY_PER_MJY, ROMAN_CONVERSION_MJY_KEYS, ROMAN_PIXEL_AREA_SR_KEYS,
+    JY_PER_MJY, ROMAN_CONVERSION_MJY_KEYS, ROMAN_PIXEL_AREA_SR_KEYS, SURVEY_ZERO_POINT_KEYS,
 };
 use crate::types::header::HduHeader;
 
 pub const SPEED_OF_LIGHT_ANGSTROM_PER_S: f64 = 2.997_924_58e18;
 pub const ERG_S_CM2_HZ_PER_JY: f64 = 1e-23;
+pub const JY_PER_NANOMAGGY: f64 = 3.630_780_547_701_014e-6;
 pub const BUNIT_JY: &str = "Jy";
 pub const BUNIT_MJY_SR: &str = "MJy/sr";
 pub const CARD_FLUXCONV: &str = "FLUXCONV";
@@ -27,6 +28,7 @@ const PER_ARCSEC2_SUFFIXES: [&str; 5] = ["/arcsec2", "/arcsec**2", "/arcsec^2", 
 const PER_PIXEL_SUFFIXES: [&str; 4] = ["/pixel", "/pix", ".pixel**-1", ".pix**-1"];
 const JANSKY_NAMES: [&str; 2] = ["jansky", "jy"];
 const FITS_MEGAJANSKY: &str = "MJy";
+const NANOMAGGY_NAMES: [&str; 3] = ["nanomaggy", "nanomaggies", "nmgy"];
 const LIGHTSTACK_SCALE_RTOL: f64 = 1e-6;
 const LIGHTSTACK_SCALE_ATOL: f64 = 1e-8;
 
@@ -202,6 +204,9 @@ fn jansky_scale(unit: &str) -> Option<f64> {
     if unit == FITS_MEGAJANSKY {
         return Some(JY_PER_MJY);
     }
+    if NANOMAGGY_NAMES.iter().any(|name| unit.eq_ignore_ascii_case(name)) {
+        return Some(JY_PER_NANOMAGGY);
+    }
     JANSKY_NAMES.iter().find_map(|name| {
         let start = unit.len().checked_sub(name.len())?;
         unit.get(start..).filter(|tail| tail.eq_ignore_ascii_case(name))?;
@@ -209,7 +214,7 @@ fn jansky_scale(unit: &str) -> Option<f64> {
     })
 }
 
-fn per_pixel_jansky_scale(bunit: &str) -> Option<f64> {
+pub(crate) fn per_pixel_jansky_scale(bunit: &str) -> Option<f64> {
     let compact: String = bunit.chars().filter(|c| !c.is_whitespace()).collect();
     let (multiplier, unit) = match compact.split_once('*').map(|(number, rest)| (number.parse::<f64>(), rest)) {
         Some((Ok(multiplier), rest)) => (multiplier, rest),
@@ -445,6 +450,13 @@ fn rescale_calibration_cards(header: &mut HduHeader, area_ratio: f64) {
             header.set_f64(key, v - zero_point_shift);
         }
     }
+    let [fluxmag0, fpa_zp] = SURVEY_ZERO_POINT_KEYS;
+    if let Some(v) = header.get_f64(fluxmag0) {
+        header.set_f64(fluxmag0, v / area_ratio);
+    }
+    if let Some(v) = header.get_f64(fpa_zp) {
+        header.set_f64(fpa_zp, v - zero_point_shift);
+    }
 }
 
 fn remove_saturation_cards(header: &mut HduHeader) {
@@ -457,6 +469,15 @@ pub fn rescale_per_pixel_calibration(header: &mut HduHeader, area_ratio: f64) {
     if !area_ratio.is_finite() || area_ratio <= 0.0 {
         return;
     }
+    let flux_density_unit =
+        card_text(header, "BUNIT").filter(|unit| area_ratio != 1.0 && per_pixel_jansky_scale(unit).is_some());
+    if let Some(unit) = flux_density_unit {
+        header.remove("BUNIT");
+        push_history(
+            header,
+            &format!("BUNIT {unit} removed: the values are per input pixel after a pixel-area change by x {area_ratio:.6}"),
+        );
+    }
     rescale_pixel_area_cards(header, area_ratio);
     rescale_calibration_cards(header, area_ratio);
     remove_saturation_cards(header);
@@ -466,7 +487,7 @@ pub fn rescale_per_pixel_calibration(header: &mut HduHeader, area_ratio: f64) {
 mod tests {
     use super::*;
     use crate::core::imaging::region::test_support::{make_header, wcs_cards};
-    use crate::core::metadata::photcal::{card_text, PhotCal, ARCSEC_PER_RADIAN};
+    use crate::core::metadata::photcal::{card_text, FluxConvention, PhotCal, ARCSEC_PER_RADIAN};
 
     fn geometry_2x() -> PixelGeometry {
         PixelGeometry { area_ratio: 4.0, scale_in_arcsec: 0.02, scale_out_arcsec: 0.04 }
@@ -546,7 +567,112 @@ mod tests {
         }
         assert_eq!(with_photfnu.get_f64("PHOTPLAM"), Some(photplam));
         assert_eq!(card_text(&with_photfnu, CARD_BUNIT_IN).as_deref(), Some("ELECTRONS/S"));
-        assert!(PhotCal::from_header(&with_photfnu, None).is_none(), "a Jy/pixel image must not be calibrated as counts again");
+        assert!(
+            matches!(
+                PhotCal::from_header(&with_photfnu, None).map(|cal| cal.convention),
+                Some(FluxConvention::FluxDensityPerPixel { jy_per_unit, .. }) if jy_per_unit == 1.0
+            ),
+            "a Jy/pixel image is calibrated by its unit, not as counts again"
+        );
+    }
+
+    #[test]
+    fn nanomaggy_is_a_flux_density_per_pixel_of_3_63_micro_jansky() {
+        let class_of = |bunit: &str| classify_unit(&make_header(&[("BUNIT", bunit)])).class;
+        let physical = |bunit: &str| match class_of(bunit) {
+            UnitClass::PerPixelPhysical { jy_per_unit } => Some(jy_per_unit),
+            _ => None,
+        };
+        let close = |bunit: &str, expected: f64| {
+            let got = physical(bunit).unwrap_or_else(|| panic!("{bunit} is not a flux density per pixel"));
+            assert!((got / expected - 1.0).abs() < 1e-12, "{bunit}: {got:e}");
+        };
+        for unit in ["nanomaggy", "nanomaggies", "NMGY", " nanomaggy / pixel "] {
+            close(unit, 3.630780547701014e-6);
+        }
+        close("10*nanomaggy", 3.630780547701014e-5);
+        for unit in ["1/nanomaggy^2", "nanomaggy^2", "maggy", "picomaggy"] {
+            assert_eq!(physical(unit), None, "{unit}");
+            assert_eq!(class_of(unit), UnitClass::Unknown, "{unit}");
+        }
+        assert_eq!(
+            class_of("nanomaggy/arcsec2"),
+            UnitClass::SurfaceBrightness { jy_per_sr_per_unit: JY_PER_NANOMAGGY * ARCSEC_PER_RADIAN * ARCSEC_PER_RADIAN }
+        );
+        assert!((JY_PER_NANOMAGGY / 10f64.powf((8.90 - 22.5) / 2.5) - 1.0).abs() < 1e-14, "{JY_PER_NANOMAGGY:e}");
+
+        let brick = make_header(&[("BUNIT", "nanomaggy"), ("MAGZERO", "22.5")]);
+        assert_eq!(classify_unit(&brick).class, UnitClass::PerPixelPhysical { jy_per_unit: JY_PER_NANOMAGGY });
+        let correction = area_correction(&brick, None, &geometry_2x()).unwrap();
+        assert_eq!((correction.rule, correction.data_factor), (AreaRule::Scale, 4.0));
+        let to_jy = unit_conversion(&brick, None, TargetUnit::JyPerPixel).unwrap();
+        assert_eq!(to_jy.factor, JY_PER_NANOMAGGY);
+        assert!(to_jy.method.ends_with("Jy per nanomaggy"), "{}", to_jy.method);
+    }
+
+    #[test]
+    fn a_rescaled_header_drops_a_flux_density_bunit_that_no_longer_describes_its_pixels() {
+        let mut brick = make_header(&[("BUNIT", "nanomaggy"), ("MAGZERO", "22.5")]);
+        rescale_per_pixel_calibration(&mut brick, 4.0);
+        assert!(brick.get("BUNIT").is_none(), "{:?}", brick.get("BUNIT"));
+        assert!(
+            history_text(&brick)
+                .contains("BUNIT nanomaggy removed: the values are per input pixel after a pixel-area change by x 4.000000"),
+            "{}",
+            history_text(&brick)
+        );
+        let shifted = brick.get_f64("MAGZERO").unwrap();
+        assert!((shifted - 20.994850021680094).abs() < 1e-9, "MAGZERO = {shifted}");
+        let cal = PhotCal::from_header(&brick, None).unwrap();
+        assert!(matches!(cal.convention, FluxConvention::GenericZeroPoint { .. }), "{:?}", cal.convention);
+        assert!(relative(cal.jy_per_native_unit, 1.4523122190804056e-5) < 1e-12, "{:?}", cal.jy_per_native_unit);
+
+        let mut jansky = make_header(&[("BUNIT", "Jy")]);
+        rescale_per_pixel_calibration(&mut jansky, 4.0);
+        assert!(jansky.get("BUNIT").is_none(), "{:?}", jansky.get("BUNIT"));
+        assert_eq!(PhotCal::from_header(&jansky, None), None);
+
+        let mut same_area = make_header(&[("BUNIT", "nanomaggy"), ("MAGZERO", "22.5")]);
+        rescale_per_pixel_calibration(&mut same_area, 1.0);
+        assert_eq!(card_text(&same_area, "BUNIT").as_deref(), Some("nanomaggy"));
+        assert_eq!(same_area.get_f64("MAGZERO"), Some(22.5));
+        assert!(history(&same_area).is_empty(), "{:?}", history(&same_area));
+
+        for cards in [&[("BUNIT", "MJy/sr")][..], &[("BUNIT", "ADU"), ("MAGZERO", "25.0")][..]] {
+            let mut kept = make_header(cards);
+            rescale_per_pixel_calibration(&mut kept, 4.0);
+            assert_eq!(card_text(&kept, "BUNIT").as_deref(), Some(cards[0].1));
+            assert!(history(&kept).is_empty(), "{:?}", history(&kept));
+        }
+    }
+
+    #[test]
+    fn survey_zero_points_follow_the_pixel_area_of_a_rescaled_header() {
+        let mut afw = make_header(&[("BUNIT", "DN"), ("FLUXMAG0", "63095734448.0194")]);
+        rescale_per_pixel_calibration(&mut afw, 4.0);
+        assert!(relative(afw.get_f64("FLUXMAG0"), 15773933612.00485) < 1e-12, "{:?}", afw.get("FLUXMAG0"));
+        assert_eq!(card_text(&afw, "BUNIT").as_deref(), Some("DN"));
+        let afw_factor = PhotCal::from_header(&afw, None).and_then(|cal| cal.jy_per_native_unit());
+        assert!(relative(afw_factor, 2.3017597493486266e-7) < 1e-12, "{afw_factor:?}");
+
+        let mut stack = make_header(&[
+            ("HIERARCH FPA.ZP", "25."),
+            ("EXPTIME", "600."),
+            ("EXP_0001", "40."),
+            ("EXP_0002", "40."),
+            ("SCL_0008", "0."),
+        ]);
+        rescale_per_pixel_calibration(&mut stack, 4.0);
+        let shifted = stack.get_f64("HIERARCH FPA.ZP").unwrap();
+        assert!((shifted - 23.494850021680094).abs() < 1e-9, "HIERARCH FPA.ZP = {shifted}");
+        assert_eq!(stack.get_f64("EXPTIME"), Some(600.0));
+        let stack_factor = PhotCal::from_header(&stack, None).and_then(|cal| cal.jy_per_native_unit());
+        assert!(relative(stack_factor, 2.4205203651340005e-9) < 1e-12, "{stack_factor:?}");
+
+        let mut same_area = make_header(&[("FLUXMAG0", "63095734448.0194"), ("HIERARCH FPA.ZP", "25.")]);
+        rescale_per_pixel_calibration(&mut same_area, 1.0);
+        assert_eq!(same_area.get_f64("FLUXMAG0"), Some(63095734448.0194));
+        assert_eq!(same_area.get_f64("HIERARCH FPA.ZP"), Some(25.0));
     }
 
     #[test]

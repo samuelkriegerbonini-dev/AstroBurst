@@ -2,7 +2,7 @@ const FILTER_TOKEN = /^f\d{3,4}[a-z]/i;
 const SEPARATORS = /[_-]+/;
 const LAST_THREE_TOKENS = /[^_-]+[_-]+[^_-]+[_-]+[^_-]+$/;
 const DROPPED = "...";
-const GZIP_FITS = /\.(?:fits|fit|fts)\.gz$/i;
+const GZIP_FITS = /\.(?:fits|fit|fts)\.(?:gz|bz2)$/i;
 const LAST_EXTENSION = /\.[^.]+$/;
 
 export interface FileListEntry {

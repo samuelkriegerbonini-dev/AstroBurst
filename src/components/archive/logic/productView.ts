@@ -75,7 +75,7 @@ const NOUNS: Record<string, [string, string]> = {
 };
 
 const SECTIONS: { key: Exclude<SectionKey, "opens" | "hidden">; title: string; classes: MastProductClass[]; note: string | null; suffix: string }[] = [
-  { key: "catalog", title: "Catalogues", classes: ["catalog"], note: "overlay arrives with C18", suffix: "" },
+  { key: "catalog", title: "Catalogues and tables", classes: ["catalog"], note: "ECSV tables open in Files as table rows", suffix: "" },
   { key: "preview", title: "Previews", classes: ["preview"], note: null, suffix: " (see Previews)" },
   { key: "association", title: "Association", classes: ["association"], note: null, suffix: "" },
   { key: "auxiliary", title: "Auxiliary", classes: ["auxiliary"], note: null, suffix: "" },
@@ -182,10 +182,24 @@ export const CLASS_LABELS: Readonly<Record<MastProductClass, string>> = {
   other: "Other",
 };
 
+export function productLabel(product: Pick<MastProduct, "cls" | "suffix" | "filename">): string {
+  if (product.cls !== "catalog") return CLASS_LABELS[product.cls];
+  if (product.suffix === "whtlt" || product.filename.toLowerCase().endsWith("_whtlt.ecsv")) return "Light curve";
+  if (product.suffix === "segm") return "Segmentation map";
+  return CLASS_LABELS.catalog;
+}
+
 export function shortFilename(filename: string, datasetId: string): string {
   const prefix = `${datasetId.toLowerCase()}_`;
   if (!filename.toLowerCase().startsWith(prefix) || filename.length <= prefix.length) return filename;
   return `…_${filename.slice(prefix.length)}`;
+}
+
+export function filenameParts(filename: string, datasetId: string): { head: string; tail: string } {
+  const shown = shortFilename(filename, datasetId);
+  const cut = shown.lastIndexOf("_");
+  if (cut <= 0) return { head: shown, tail: "" };
+  return { head: shown.slice(0, cut), tail: shown.slice(cut) };
 }
 
 export function sectionExpanded(section: ProductSection, overrides: SectionOverrides): boolean {

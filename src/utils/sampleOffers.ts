@@ -17,7 +17,7 @@ export const JWST_SAMPLE_PROGRAMS: Readonly<Record<string, string>> = {
 
 const SHOWN_PRODUCTS = [/_s3d\.fits$/i, /_x1d\.fits$/i];
 const PRIMARY_KEYWORDS = ["Sample", "Example", "M16", "Eagle", "Download"];
-const SAMPLE_SET_KEYWORDS = ["Sample", "Example", "Download", "JWST", "Cube", "Spectrum"];
+const SAMPLE_SET_KEYWORDS = ["Sample", "Example", "Download", "JWST", "Cube", "Spectrum", "Spectra"];
 
 export function shownSamplePath(paths: readonly string[]): string | null {
   for (const product of SHOWN_PRODUCTS) {

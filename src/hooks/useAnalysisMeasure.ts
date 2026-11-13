@@ -28,12 +28,13 @@ export function useAnalysisMeasure(): AnalysisMeasure {
   const { compositeVersion } = useCompositePreview();
   const processedFitsPath = processed?.fitsPath ?? null;
   const filePath = file?.path;
+  const reloads = file?.reloads ?? 0;
   const fileKey = fileKeyOf(file);
   return useMemo(() => {
     const effectivePath = target.path;
     const compositeOnScreen = target.composite;
     const rgbPath = target.rgbPath;
-    const measureKey = analysisMeasureKey({ path: effectivePath, composite: compositeOnScreen, processedFitsPath, processedVersion });
+    const measureKey = analysisMeasureKey({ path: effectivePath, composite: compositeOnScreen, processedFitsPath, processedVersion, filePath: filePath ?? null, reloads });
     return {
       target,
       effectivePath,
@@ -48,5 +49,5 @@ export function useAnalysisMeasure(): AnalysisMeasure {
       detectionScope: starDetectionScope({ path: effectivePath, measureKey, composite: compositeOnScreen, rgbPath, compositeVersion }),
       starsOnMeasuredImage: detectedStarsOnMeasuredImage({ compositeOnScreen, measuresFilePlanes: rgbPath !== null }),
     };
-  }, [target, regionKey, processedFitsPath, processedVersion, filePath, fileKey, compositeVersion]);
+  }, [target, regionKey, processedFitsPath, processedVersion, filePath, reloads, fileKey, compositeVersion]);
 }

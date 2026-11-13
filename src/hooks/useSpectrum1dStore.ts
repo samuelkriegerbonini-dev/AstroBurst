@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useSyncExternalStore } from "react";
-import { readSpectrumDocument } from "../services/spectrum1d";
-import type { Spectrum1d } from "../shared/types/spectrum1d";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { readSpectrumRequest, type SpectrumRequest } from "../services/spectrum1d";
+import type { Spectrum1d, TsoSeriesPick } from "../shared/types/spectrum1d";
 import { OPEN_SPECTRUM_CSV_LABEL, type OpenSpectrumCsv } from "../utils/spectrumDocument";
 
 export interface Spectrum1dDoc {
@@ -15,13 +15,27 @@ export const MAX_SPECTRUM1D_DOCS = 8;
 
 type Listener = () => void;
 
-type Spectrum1dReader = (path: string, hdu: number | null) => Promise<Spectrum1d>;
+type Spectrum1dReader = (request: SpectrumRequest) => Promise<Spectrum1d>;
 
-function docKey(path: string, hdu: number | null): string {
-  return `${hdu ?? ""}|${path}`;
+export function pickKey(pick: TsoSeriesPick): string {
+  if (pick.kind === "integration") return `int${pick.index}`;
+  if (pick.kind === "mean") return `mean${pick.first}-${pick.last}`;
+  return "median";
 }
 
-function errorText(reason: unknown): string {
+export function requestKey(request: SpectrumRequest): string {
+  if (request.kind === "series") {
+    return `${request.detector}:${request.sporder ?? ""}:${pickKey(request.pick)}|${request.paths.join(";")}`;
+  }
+  const hdu = `${request.hdu ?? ""}`;
+  return `${request.wavelengthUnit === null ? hdu : `${hdu}@${request.wavelengthUnit}`}|${request.path}`;
+}
+
+function fileRequest(path: string, hdu: number | null): SpectrumRequest {
+  return { kind: "file", path, hdu, wavelengthUnit: null };
+}
+
+export function errorText(reason: unknown): string {
   if (typeof reason === "object" && reason !== null && "message" in reason) return String(reason.message);
   return String(reason);
 }
@@ -31,7 +45,7 @@ export class Spectrum1dStore {
   private holders = new Map<string, number>();
   private listeners = new Set<Listener>();
 
-  constructor(private readonly read: Spectrum1dReader = readSpectrumDocument) {}
+  constructor(private readonly read: Spectrum1dReader = readSpectrumRequest) {}
 
   subscribe = (listener: Listener): (() => void) => {
     this.listeners.add(listener);
@@ -40,12 +54,20 @@ export class Spectrum1dStore {
     };
   };
 
+  getRequest(request: SpectrumRequest): Spectrum1dDoc {
+    return this.docs.get(requestKey(request)) ?? EMPTY_SPECTRUM1D_DOC;
+  }
+
   getDoc(path: string, hdu: number | null): Spectrum1dDoc {
-    return this.docs.get(docKey(path, hdu)) ?? EMPTY_SPECTRUM1D_DOC;
+    return this.getRequest(fileRequest(path, hdu));
   }
 
   retain(path: string, hdu: number | null): () => void {
-    const key = docKey(path, hdu);
+    return this.retainRequest(fileRequest(path, hdu));
+  }
+
+  retainRequest(request: SpectrumRequest): () => void {
+    const key = requestKey(request);
     this.holders.set(key, (this.holders.get(key) ?? 0) + 1);
     let released = false;
     return () => {
@@ -71,13 +93,17 @@ export class Spectrum1dStore {
     this.listeners.forEach((l) => l());
   }
 
-  async load(path: string, hdu: number | null): Promise<void> {
-    const key = docKey(path, hdu);
+  load(path: string, hdu: number | null): Promise<void> {
+    return this.loadRequest(fileRequest(path, hdu));
+  }
+
+  async loadRequest(request: SpectrumRequest): Promise<void> {
+    const key = requestKey(request);
     const current = this.docs.get(key);
     if (current && (current.loading || current.spectrum !== null)) return;
     this.write(key, { loading: true, spectrum: null, error: null });
     try {
-      const spectrum = await this.read(path, hdu);
+      const spectrum = await this.read(request);
       this.write(key, { loading: false, spectrum, error: null });
     } catch (e) {
       this.write(key, { loading: false, spectrum: null, error: errorText(e) });
@@ -85,28 +111,34 @@ export class Spectrum1dStore {
   }
 
   async reread(path: string, hdu: number | null): Promise<void> {
-    const key = docKey(path, hdu);
+    const request = fileRequest(path, hdu);
+    const key = requestKey(request);
     const current = this.docs.get(key);
     if (!current || current.loading) return;
     this.docs.delete(key);
-    if (this.holders.has(key)) await this.load(path, hdu);
+    if (this.holders.has(key)) await this.loadRequest(request);
   }
 }
 
 export const spectrum1dStore = new Spectrum1dStore();
 
-export function useSpectrum1dDoc(path: string | null, hdu: number | null): Spectrum1dDoc {
+export function useSpectrum1dRequest(request: SpectrumRequest | null): Spectrum1dDoc {
   const getSnapshot = useCallback(
-    () => (path === null ? EMPTY_SPECTRUM1D_DOC : spectrum1dStore.getDoc(path, hdu)),
-    [path, hdu],
+    () => (request === null ? EMPTY_SPECTRUM1D_DOC : spectrum1dStore.getRequest(request)),
+    [request],
   );
   useEffect(() => {
-    if (path === null) return;
-    const release = spectrum1dStore.retain(path, hdu);
-    void spectrum1dStore.load(path, hdu);
+    if (request === null) return;
+    const release = spectrum1dStore.retainRequest(request);
+    void spectrum1dStore.loadRequest(request);
     return release;
-  }, [path, hdu]);
+  }, [request]);
   return useSyncExternalStore(spectrum1dStore.subscribe, getSnapshot, getSnapshot);
+}
+
+export function useSpectrum1dDoc(path: string | null, hdu: number | null): Spectrum1dDoc {
+  const request = useMemo(() => (path === null ? null : fileRequest(path, hdu)), [path, hdu]);
+  return useSpectrum1dRequest(request);
 }
 
 export const SPECTRUM_CSV_FILTER = { name: "Spectrum CSV", extensions: ["csv"] };

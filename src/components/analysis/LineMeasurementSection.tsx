@@ -1,9 +1,13 @@
 import { memo, useCallback, useId } from "react";
-import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { Activity, Copy } from "lucide-react";
 import type { LineMeasurement, LineModel } from "../../shared/types/spectral";
 import { LINE_MODEL_LABELS, LINE_MODELS } from "../../shared/types/spectral";
-import { lineMeasurementCsv, lineMeasurementRows, spectrumSourceLabel } from "../../utils/lineMeasure";
+import { APP_VERSION } from "../../utils/constants";
+import { formatRedshift } from "../../utils/lineList";
+import { lineMeasurementCsv, lineMeasurementRows, spectrumSourceLabel, type AxisDisplayUnit } from "../../utils/lineMeasure";
+import { dqHandlingOf, fileNameOf } from "../../utils/measurementLog";
+import LineRedshiftSummary from "./LineRedshiftSummary";
+import { CopyCsvButton, ErrorAlert, SMALL_BUTTON_CLASS } from "../ui";
 
 export interface LineErrControls {
   useErr: boolean;
@@ -24,10 +28,12 @@ interface LineMeasurementSectionProps {
   disabled: boolean;
   disabledHint: string | null;
   errControls?: LineErrControls | null;
+  axisDisplayUnit?: AxisDisplayUnit;
+  measuredSeriesNote?: string | null;
+  filePath?: string | null;
 }
 
 const ACCENT = "var(--ab-violet)";
-const COPY_FEEDBACK_MS = 1500;
 const SELECT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 focus:border-violet-500/50 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
@@ -75,21 +81,29 @@ function LineMeasurementSection({
   disabled,
   disabledHint,
   errControls = null,
+  axisDisplayUnit,
+  measuredSeriesNote = null,
+  filePath = null,
 }: LineMeasurementSectionProps) {
   const modelId = useId();
-  const [copied, flagCopied, clearCopied] = useTimedFlag(COPY_FEEDBACK_MS);
+  const fileName = fileNameOf(filePath);
+  const dqRequested = errControls ? errControls.useDq : true;
 
-  const handleCopy = useCallback(async () => {
-    if (!result) return;
-    try {
-      await navigator.clipboard.writeText(lineMeasurementCsv(result));
-      flagCopied();
-    } catch {
-      clearCopied();
-    }
-  }, [result, flagCopied, clearCopied]);
+  const copyText = useCallback(() => {
+    if (!result) return null;
+    const dq = dqHandlingOf(dqRequested, result.n_dq_excluded > 0);
+    const provenance = { software: "AstroBurst " + APP_VERSION, exportedUtc: new Date().toISOString() };
+    return lineMeasurementCsv(result, { fileName, dq, provenance });
+  }, [result, fileName, dqRequested]);
 
-  const rows = result ? lineMeasurementRows(result) : [];
+  const rows = result ? lineMeasurementRows(result, { axisDisplayUnit }) : [];
+  const lineName = result?.line_label || result?.line_id || null;
+  const requestedRedshift = result?.redshift;
+  const atRedshift =
+    typeof requestedRedshift === "number" && Number.isFinite(requestedRedshift) && requestedRedshift !== 0
+      ? ` at z = ${formatRedshift(requestedRedshift)}`
+      : "";
+  const lineHeader = lineName ? `${lineName}${atRedshift}, ` : "";
   const fit = result?.fit ?? null;
   const nominalChannels = result ? (result.n_channels_nominal ?? result.z1 - result.z0 + 1) : 0;
   const droppedChannels = result ? nominalChannels - result.n_channels : 0;
@@ -146,20 +160,18 @@ function LineMeasurementSection({
         )}
         {disabled && !loading && disabledHint && <span className="text-zinc-600">{disabledHint}</span>}
         {result && (
-          <button
-            onClick={handleCopy}
-            className="ml-auto flex items-center gap-1 text-zinc-500 hover:text-zinc-300"
-            title="Copy the measurement as one CSV row"
-          >
-            <Copy size={10} />
-            {copied ? "copied" : "Copy CSV"}
-          </button>
+          <CopyCsvButton
+            text={copyText}
+            title="Copy the measurement as one CSV row with its units and provenance"
+            icon={<Copy size={10} />}
+            className={`ml-auto ${SMALL_BUTTON_CLASS}`}
+          />
         )}
       </div>
 
-      {error && (
-        <p className="text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20">{error}</p>
-      )}
+      {measuredSeriesNote && <p className="text-[10px] font-mono text-zinc-500">{measuredSeriesNote}</p>}
+
+      <ErrorAlert compact message={error} />
 
       {result && (
         <>
@@ -179,8 +191,10 @@ function LineMeasurementSection({
               </div>
             )}
           </div>
+          {fileName !== null && <LineRedshiftSummary fileName={fileName} source={JSON.stringify(result.source)} />}
           <div className="text-[10px] font-mono text-zinc-500 flex items-center gap-2 flex-wrap">
             <span>
+              {lineHeader}
               {spectrumSourceLabel(result.source)}, ch {result.z0}-{result.z1},{" "}
               {droppedChannels !== 0 ? (
                 <span

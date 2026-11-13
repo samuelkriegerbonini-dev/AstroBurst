@@ -14,6 +14,7 @@ import { cosmeticCopiesOf, withCosmeticCopies, type CosmeticCopy } from "../../u
 import { withCalibrationFrames } from "../../utils/calibrationHandoff";
 import { wizardHasProgress } from "../../utils/wizard";
 import { mosaicViewOutput } from "../../utils/mosaicView";
+import { sectionMemory } from "../../utils/sectionMemory";
 import type { ComposeMaster } from "../../utils/pipelineToCompose";
 import { composeMasters } from "./resultHandoff";
 import type { CalibrateResult } from "../../shared/types";
@@ -41,6 +42,8 @@ const SECTIONS: { id: StackSection; label: string; title: string; color: string 
   { id: "drizzle_rgb", label: "Drizzle RGB", title: "Drizzle three filters straight into an RGB composite", color: "rose" },
   { id: "mosaic", label: "Mosaic", title: "Join overlapping tiles into one image", color: "indigo" },
 ];
+
+const STACK_SECTION_IDS: readonly StackSection[] = SECTIONS.map((s) => s.id);
 
 const SECTION_ACTIVE_CLASS: Record<string, string> = {
   violet: "bg-violet-600/20 text-violet-400 ring-1 ring-violet-500/30",
@@ -92,7 +95,8 @@ function StackingTabInner() {
   const wizardViewRef = useRef({ onScreen: wizardCompositeOnScreen, ready: wizardState.compositeReady });
   wizardViewRef.current = { onScreen: wizardCompositeOnScreen, ready: wizardState.compositeReady };
   const { file } = useFileContext();
-  const [active, setActive] = useState<StackSection>("calibrate");
+  const [active, setActive] = useState<StackSection>(() => sectionMemory.get("stacking", STACK_SECTION_IDS, "calibrate"));
+  useEffect(() => { sectionMemory.set("stacking", active); }, [active]);
   const [resolvedDir, setResolvedDir] = useState("./output");
   useEffect(() => { getOutputDir().then(setResolvedDir); }, []);
 

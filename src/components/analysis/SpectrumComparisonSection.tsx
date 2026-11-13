@@ -1,11 +1,13 @@
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useState } from "react";
 import { Layers } from "lucide-react";
 import ProfilePlot from "../regions/ProfilePlot";
-import { DecimalNumberField } from "../ui";
+import { DecimalNumberField, SMALL_BUTTON_CLASS } from "../ui";
+import ExportNotice, { SAVED_NOTICE_MS } from "./ExportNotice";
 import { getCubeSpectrum, getCubeSpectrumRegion } from "../../services/cube";
 import { readX1dSpectrum } from "../../services/spectral";
 import { readSpectrumDocument } from "../../services/spectrum1d";
 import { spectrumComparisonStore, useSpectrumComparison } from "../../hooks/useSpectrumComparisonStore";
+import { useTimedNotice } from "../../hooks/useTimedNotice";
 import { measurementLog, spectrumCompareEntry } from "../../utils/measurementLog";
 import type { ContinuumWindows } from "../../shared/types/cube";
 import type { Region } from "../../shared/types/regions";
@@ -69,10 +71,10 @@ interface SpectrumComparisonSectionProps {
   windows: ContinuumWindows | null;
   fileSpectrum?: Spectrum1d | null;
   fileSpectrumSource?: FileSpectrumSource | null;
+  dqMasked?: boolean;
 }
 
 const ACCENT = "#22d3ee";
-const NOTICE_MS = 2500;
 const NO_CANDIDATE_HINT = "draw an included circle, box, ellipse or polygon region, or click a pixel";
 const WINDOW_HINT = "brush continuum windows A and B first";
 const NOTHING_HINT = "nothing to compare yet";
@@ -82,7 +84,6 @@ const SELECT_CLASS =
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] font-mono text-zinc-200 focus:border-violet-500/50 w-16 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
-const SMALL_BUTTON_CLASS = "px-2 py-0.5 rounded border transition-colors text-zinc-500 hover:text-zinc-300 disabled:opacity-40";
 const FITS_FILTER = { name: "FITS", extensions: [...FITS_FILE_EXTENSIONS] };
 const SPECTRUM_FILTER = { name: "Spectrum (FITS or CSV)", extensions: [...FITS_FILE_EXTENSIONS, "csv"] };
 const PICK_TITLE = "Pick a pipeline x1d table";
@@ -118,14 +119,15 @@ function SpectrumComparisonSection({
   windows,
   fileSpectrum = null,
   fileSpectrumSource = null,
+  dqMasked = true,
 }: SpectrumComparisonSectionProps) {
   const documentMode = fileSpectrum !== null && fileSpectrumSource !== null;
   const doc = useSpectrumComparison(filePath);
   const normaliseId = useId();
   const stepId = useId();
   const [saveBusy, setSaveBusy] = useState(false);
-  const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null);
-  const noticeTimerRef = useRef<number | null>(null);
+  const [savedPath, showSavedPath] = useTimedNotice<string>(SAVED_NOTICE_MS);
+  const [noticeError, setNoticeError] = useState<string | null>(null);
 
   const regions = documentMode ? NO_REGIONS : regionDoc.regions;
   const limited = useMemo(() => limitCandidates(comparisonCandidates(regions), regions), [regions]);
@@ -146,9 +148,9 @@ function SpectrumComparisonSection({
   const entries = useMemo(
     () =>
       fileSpectrum !== null && fileSpectrumSource !== null
-        ? documentComparisonEntries(fileSpectrum, fileSpectrumSource, doc.table, vacuum, channelCount)
-        : withTable(pruneEntries(doc.entries, regions, channelCount), doc.table, vacuum, channelCount),
-    [fileSpectrum, fileSpectrumSource, doc.entries, regions, channelCount, doc.table, vacuum],
+        ? documentComparisonEntries(fileSpectrum, fileSpectrumSource, doc.table, vacuum, channelCount, dqMasked)
+        : withTable(pruneEntries(doc.entries, regions, channelCount), doc.table, vacuum, channelCount, dqMasked),
+    [fileSpectrum, fileSpectrumSource, doc.entries, regions, channelCount, doc.table, vacuum, dqMasked],
   );
   const hidden = useMemo(() => new Set(doc.hidden), [doc.hidden]);
   const windowsValid = windowsAreValid(windows, channelCount);
@@ -161,18 +163,6 @@ function SpectrumComparisonSection({
   const stale = documentMode
     ? doc.tableLoading
     : doc.loading || doc.tableLoading || doc.regionVersion !== regionDoc.version || doc.pixelKey !== pixelKey;
-
-  const showNotice = useCallback((text: string, error: boolean) => {
-    if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
-    setNotice({ text, error });
-    noticeTimerRef.current = window.setTimeout(() => setNotice(null), NOTICE_MS);
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
-    };
-  }, []);
 
   const runFetch = useCallback(async () => {
     const seq = spectrumComparisonStore.begin(filePath, regionDoc.version, pixelKey);
@@ -230,6 +220,7 @@ function SpectrumComparisonSection({
   }, [filePath]);
 
   const pickTable = useCallback(async () => {
+    setNoticeError(null);
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const filter = documentMode ? SPECTRUM_FILTER : FITS_FILTER;
@@ -241,9 +232,9 @@ function SpectrumComparisonSection({
       });
       if (typeof picked === "string") spectrumComparisonStore.requestTable(filePath, picked);
     } catch (e) {
-      showNotice(`pick failed: ${errorMessage(e)}`, true);
+      setNoticeError(`pick failed: ${errorMessage(e)}`);
     }
-  }, [filePath, documentMode, showNotice]);
+  }, [filePath, documentMode]);
 
   const tableHduOptions = useMemo(() => {
     const table = doc.table;
@@ -262,6 +253,7 @@ function SpectrumComparisonSection({
   const handleSave = useCallback(async () => {
     if (saveBusy) return;
     setSaveBusy(true);
+    setNoticeError(null);
     try {
       const csvInput: ComparisonCsvInput = {
         fileName: fileBaseName(filePath),
@@ -283,14 +275,14 @@ function SpectrumComparisonSection({
       };
       const csv = comparisonCsv(csvInput);
       const path = await saveCsvDialog(csv, comparisonCsvFileName(filePath), "Save comparison CSV");
-      if (path) showNotice(`saved: ${path}`, false);
+      if (path) showSavedPath(path);
       if (path) measurementLog.append(spectrumCompareEntry(filePath, csvInput, path));
     } catch (e) {
-      showNotice(`export failed: ${e instanceof Error ? e.message : String(e)}`, true);
+      setNoticeError(`export failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaveBusy(false);
     }
-  }, [saveBusy, filePath, view, doc.normalise, usableWindows, axisCol, axis, vacuum, channelCount, entries, result, mode, correction, correctionResult, tablePlotted, showNotice]);
+  }, [saveBusy, filePath, view, doc.normalise, usableWindows, axisCol, axis, vacuum, channelCount, entries, result, mode, correction, correctionResult, tablePlotted, showSavedPath]);
 
   const candidateCount = candidates.length;
   const skippedCount = limited.omitted.length;
@@ -324,23 +316,22 @@ function SpectrumComparisonSection({
         ) : (
           <>
             {!documentMode && (
-              <button onClick={() => void runFetch()} disabled={doc.loading} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
+              <button onClick={() => void runFetch()} disabled={doc.loading} className={SMALL_BUTTON_CLASS}>
                 Refresh
               </button>
             )}
             <button
               onClick={() => spectrumComparisonStore.patch(filePath, { enabled: false })}
               className={SMALL_BUTTON_CLASS}
-              style={{ borderColor: "var(--ab-border)" }}
             >
               Close
             </button>
             {!documentMode && (
-              <button onClick={requestSiblingTable} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
+              <button onClick={requestSiblingTable} className={SMALL_BUTTON_CLASS}>
                 Compare with pipeline x1d
               </button>
             )}
-            <button onClick={() => void pickTable()} className={SMALL_BUTTON_CLASS} style={{ borderColor: "var(--ab-border)" }}>
+            <button onClick={() => void pickTable()} className={SMALL_BUTTON_CLASS}>
               {documentMode ? "Pick spectrum…" : "Pick x1d…"}
             </button>
             {(doc.loading || doc.tableLoading) && (
@@ -354,7 +345,7 @@ function SpectrumComparisonSection({
                   onClick={() => spectrumComparisonStore.clearTable(filePath)}
                   title={CANCEL_TABLE_TITLE}
                   aria-label={CANCEL_TABLE_TITLE}
-                  className="px-1 text-zinc-500 hover:text-zinc-300"
+                  className="min-w-6 min-h-6 inline-flex items-center justify-center rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
                 >
                   ×
                 </button>
@@ -381,7 +372,11 @@ function SpectrumComparisonSection({
                 <div key={entry.id} className="flex items-center gap-1.5 min-w-0">
                   <label className="flex items-center gap-1.5 cursor-pointer min-w-0">
                     <input type="checkbox" checked={!hidden.has(entry.id)} onChange={() => toggleHidden(entry.id)} />
-                    <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: entry.color }} />
+                    {entry.dashed ? (
+                      <span data-series-dash className="inline-block w-2.5 shrink-0" style={{ borderTop: "2px dashed " + entry.color }} />
+                    ) : (
+                      <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: entry.color }} />
+                    )}
                     <span className="text-zinc-300 truncate">{entry.label}</span>
                     {entry.region && (
                       <span className="text-zinc-600">
@@ -392,6 +387,9 @@ function SpectrumComparisonSection({
                       <span className="text-zinc-600" title={tableOverlapTitle(entry, documentMode)}>
                         {entry.table.nRows} rows · {entry.table.resampled.droppedDq} DQ rows dropped
                       </span>
+                    )}
+                    {entry.document && entry.document.droppedDq > 0 && (
+                      <span className="text-zinc-600">{entry.document.droppedDq} DQ rows dropped</span>
                     )}
                     {entry.error !== null && <span className="text-red-400/80 truncate">{entry.error}</span>}
                   </label>
@@ -418,7 +416,7 @@ function SpectrumComparisonSection({
                       onClick={() => spectrumComparisonStore.clearTable(filePath)}
                       title="Remove the x1d from the comparison"
                       aria-label="Remove the x1d from the comparison"
-                      className="px-1 text-zinc-500 hover:text-zinc-300"
+                      className="min-w-6 min-h-6 inline-flex items-center justify-center rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
                     >
                       ×
                     </button>
@@ -511,12 +509,11 @@ function SpectrumComparisonSection({
               disabled={saveBusy || stale || result.plotted.length === 0}
               title={stale ? STALE_TITLE : undefined}
               className={SMALL_BUTTON_CLASS}
-              style={{ borderColor: "var(--ab-border)" }}
             >
               Save CSV
             </button>
-            {notice && <span className={notice.error ? "text-red-400/80 truncate" : "text-zinc-600 truncate"}>{notice.text}</span>}
           </div>
+          <ExportNotice saved={savedPath} error={noticeError} />
         </>
       )}
     </div>

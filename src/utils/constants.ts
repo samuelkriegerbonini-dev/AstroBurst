@@ -4,6 +4,7 @@ export const FILE_STATUS = {
   DONE: "done",
   ERROR: "error",
   SPECTRUM: "spectrum",
+  TABLE: "table",
 } as const;
 
-export const APP_VERSION = "v0.8.1";
+export const APP_VERSION = "v0.9.0";

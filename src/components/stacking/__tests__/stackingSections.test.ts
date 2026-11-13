@@ -33,6 +33,7 @@ vi.mock("../../../infrastructure/tauri", async (importOriginal) => ({
 
 import { hooks } from "../../../test/hookRuntime";
 import StackingTab from "../StackingTab";
+import { sectionMemory } from "../../../utils/sectionMemory";
 
 const StackingTabInner = (StackingTab as unknown as { type: (props: object) => ReactNode }).type;
 
@@ -68,7 +69,10 @@ function currentSections(tree: Node[]): (Key | null)[] {
   return pills(tree).filter((p) => p.props["aria-current"] === "true").map((p) => p.key);
 }
 
-afterEach(() => hooks.mount());
+afterEach(() => {
+  hooks.mount();
+  sectionMemory.reset();
+});
 
 describe("Stacking section pills", () => {
   it("name their row and mark only the open section as current, not as pressed toggles", () => {
@@ -109,5 +113,20 @@ describe("Stacking section pills", () => {
     expect(spans.find((s) => String(s.props.className).startsWith("ab-processing-pill-dot"))?.props.title).toBe("Calibrated frame ready to stack");
     expect(spans.filter((s) => s.props.className === "sr-only").map((s) => s.props.children)).toEqual([", calibrated frame ready"]);
     expect(nodes(pill(tree, "calibrate").props.children).filter((n) => n.props.className === "sr-only")).toEqual([]);
+  });
+});
+
+describe("Stacking section memory", () => {
+  it("reopens on the section chosen last", () => {
+    hooks.mount();
+    (pill(view(), "mosaic").props.onClick as () => void)();
+    expect(currentSections(view())).toEqual(["mosaic"]);
+    hooks.mount();
+    expect(currentSections(view())).toEqual(["mosaic"]);
+  });
+
+  it("opens on Calibrate in a fresh session", () => {
+    hooks.mount();
+    expect(currentSections(view())).toEqual(["calibrate"]);
   });
 });

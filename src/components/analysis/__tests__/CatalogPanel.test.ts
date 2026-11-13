@@ -3,6 +3,10 @@ import { isValidElement, type ReactNode } from "react";
 import type { ConeSearchResult, CrossMatchEntry, CrossMatchResult, ZeroPointFit, ZeroPointStatus } from "../../../shared/types/catalog";
 import type { PlotReferenceLine, ProfileSeries } from "../../regions/ProfilePlot";
 import { APERTURE_RANGE_HINT } from "../../../utils/photometryTable";
+import { APP_VERSION } from "../../../utils/constants";
+import { catalogueCsvText, coneCsvHeaderLines, crossMatchCsvHeaderLines } from "../../../utils/catalogProvenance";
+import plotsSource from "../CrossMatchPlots.tsx?raw";
+import panelSource from "../CatalogPanel.tsx?raw";
 
 const WCS_PATH = "C:/data/m16.fits";
 
@@ -10,6 +14,7 @@ const backend = vi.hoisted(() => ({
   cone: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   crossMatch: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   exported: [] as string[],
+  headers: [] as (string[] | null)[],
 }));
 
 vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
@@ -17,8 +22,9 @@ vi.mock("../../../services/catalog", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/catalog")>()),
   catalogConeSearch: backend.cone,
   catalogCrossMatch: backend.crossMatch,
-  catalogExportCsv: async (_path: string, outputPath: string) => {
+  catalogExportCsv: async (_path: string, outputPath: string, _items: unknown, headerLines?: readonly string[]) => {
     backend.exported.push(outputPath);
+    backend.headers.push(headerLines ? [...headerLines] : null);
     return { output_path: outputPath, n: 1 };
   },
 }));
@@ -85,6 +91,7 @@ describe("CatalogPanel Saved notice", () => {
     hooks.mount();
     backend.cone.mockReset().mockResolvedValue(CONE);
     backend.exported = [];
+    backend.headers = [];
   });
 
   afterEach(() => {
@@ -203,6 +210,12 @@ function crossMatchResult(matches: CrossMatchEntry[], overrides: Partial<CrossMa
   };
 }
 
+const QUERY = { radius_arcmin: 3.017, field_radius_arcmin: 3.017, mag_limit: null, max_rows: 5000, row_cap_reached: false, cone_smaller_than_field: false };
+const LISTED = { catalog_query: QUERY, catalog_table: "I/355/gaiadr3", mag_system: "vega" as const, detection_sigma: 5, max_stars: 500, catalog_source: "network" as const };
+
+const withoutExportTime = (lines: readonly string[]) => lines.filter((l) => !l.startsWith("# exported_utc:"));
+const CONTEXT = { appVersion: APP_VERSION, exportedUtc: "x", fileName: "x_calibrated.fits" };
+
 const pairs = (value: number, count: number) => Array.from({ length: count }, () => [value, -value]).flat();
 const catalogueG = (matches: CrossMatchEntry[]) => matches.map((m) => m.row.g);
 
@@ -210,6 +223,7 @@ interface PlotProps {
   series: ProfileSeries[];
   referenceLines?: PlotReferenceLine[];
   csvName?: string;
+  xLabel?: string;
 }
 
 const plotsType = (CrossMatchPlots as unknown as { type: (props: { cross: CrossMatchResult }) => unknown }).type;
@@ -269,6 +283,20 @@ describe("CrossMatchPlots zero point plot", () => {
     });
     expect(zeroPoint.series.find((s) => s.mode === "line")?.label).toBe("mag - ZP (25.000)");
   });
+
+  it("labels the catalogue axis as a Vega magnitude", () => {
+    const matches = [zeroPointMatch(0, 0, "used")];
+    expect(plotsOf(crossMatchResult(matches)).zeroPoint.xLabel).toBe("Gaia G (Vega mag)");
+    expect(plotsOf(crossMatchResult(matches, { band: "RP" })).zeroPoint.xLabel).toBe("Gaia RP (Vega mag)");
+  });
+});
+
+describe("CrossMatchPlots source", () => {
+  it("takes the zero point groups from the catalogue helpers, not from the plot helpers", () => {
+    expect(plotsSource).toMatch(/from "\.\.\/\.\.\/utils\/zeroPointPlot"/);
+    expect(plotsSource).not.toMatch(/plotInteraction/);
+    expect(plotsSource).not.toMatch(/function catalogueMag\b/);
+  });
 });
 
 describe("CrossMatchPlots residual plot", () => {
@@ -309,6 +337,8 @@ describe("CatalogPanel cross-match", () => {
     hooks.mount();
     backend.cone.mockReset().mockResolvedValue(CONE);
     backend.crossMatch.mockReset().mockResolvedValue(crossMatchResult(matches));
+    backend.exported = [];
+    backend.headers = [];
   });
 
   afterEach(() => hooks.mount());
@@ -373,5 +403,145 @@ describe("CatalogPanel cross-match", () => {
     await crossMatched(first);
     const nodes = elements(render(first));
     for (const warning of warnings) expect(nodes.some((p) => p.children === warning), warning).toBe(true);
+  });
+
+  const SAME_LIST = "Same Gaia list as the search";
+  const COPY_TITLE = "Copy the matches (or the catalog when nothing is matched) as CSV, with the header lines of the saved file";
+
+  function sameList(on: boolean): void {
+    const toggle = elements(render(first)).find((p) => p.label === SAME_LIST);
+    expect(toggle, `the panel has a ${SAME_LIST} toggle`).toBeDefined();
+    (toggle!.onChange as (value: boolean) => void)(on);
+  }
+
+  function typeIn(label: string, text: string): void {
+    const field = fieldLabelled(elements(render(first)), label);
+    expect(field, `the panel has a ${label} field`).toBeDefined();
+    (field!.onChange as (value: string) => void)(text);
+  }
+
+  async function shownAfter(result: CrossMatchResult): Promise<ReactNode> {
+    hooks.mount();
+    backend.crossMatch.mockResolvedValue(result);
+    await crossMatched(first);
+    return render(first);
+  }
+
+  async function searchedFirst(): Promise<void> {
+    (elements(render(first)).find((p) => p.label === "Search Gaia DR3")!.onClick as () => void)();
+    await flush();
+  }
+
+  const listRule = (nodes: Props[]) => textOf(nodes.find((p) => p["data-list-rule"] !== undefined)?.children as ReactNode);
+  const csvLines = (text: string) => withoutExportTime(text.split("\r\n"));
+
+  it("sends no cone and no G limit unless the list of the search is asked for", async () => {
+    await crossMatched(first);
+    const options = backend.crossMatch.mock.calls[0][1];
+    for (const key of ["coneRadiusArcmin", "magLimit", "maxRows"]) expect(options).not.toHaveProperty(key);
+    sameList(true);
+    typeIn("Radius (arcmin)", "12");
+    await crossMatched(first);
+    expect(backend.crossMatch.mock.calls[1]).toEqual([CALIBRATED, expect.objectContaining({ coneRadiusArcmin: 12, magLimit: 18, maxRows: 5000 })]);
+    typeIn("Radius (arcmin)", "");
+    await crossMatched(first);
+    expect(backend.crossMatch.mock.calls[2]).toEqual([CALIBRATED, expect.objectContaining({ coneRadiusArcmin: null, magLimit: 18 })]);
+  });
+
+  it("blocks the cross-match on a bad search field only while the list of the search is asked for", async () => {
+    typeIn("G limit (mag)", "abc");
+    const off = elements(render(first));
+    expect(off.find((p) => p.label === "Cross-match detected stars")?.disabled).toBe(false);
+    expect(listRule(off)).toBe("Cross-match list: every Gaia star in the field, no G limit.");
+    sameList(true);
+    const on = elements(render(first));
+    const run = on.find((p) => p.label === "Cross-match detected stars");
+    expect(run?.disabled).toBe(true);
+    expect(listRule(on)).toBe("Cross-match list: the radius and G limit typed above.");
+    (run!.onClick as () => void)();
+    await flush();
+    expect(backend.crossMatch).not.toHaveBeenCalled();
+  });
+
+  it("says which Gaia list the cross-match used and how the stars were detected", async () => {
+    const listed = textOf(await shownAfter(crossMatchResult(matches, { ...LISTED })));
+    expect(listed).toContain("Gaia list: 120 rows within 3.0' of the centre, no G limit, row cap 5000, from VizieR");
+    expect(listed).toContain("detection at 5 sigma: 3 detections, at most 500 kept, 3 measured");
+    const older = textOf(await shownAfter(crossMatchResult(matches)));
+    expect(older).not.toContain("Gaia list:");
+    expect(older).not.toContain("detection at");
+  });
+
+  it("names the system of the zero point and how to apply it", async () => {
+    const shown = await shownAfter(crossMatchResult(matches));
+    const text = textOf(shown);
+    expect(text).toContain("Zero point (Gaia G, Vega)");
+    expect(elements(shown).some((p) => p.title === "Gaia magnitudes are in the Vega system: this is not an AB zero point")).toBe(true);
+    expect(text).toContain("Not applied to the image. Gaia G = mag_inst + 25.000 for a star measured in this aperture.");
+    const red = textOf(await shownAfter(crossMatchResult(matches, { zero_point: { ...fitOf(matches, 0.02), colour_coeff: 0.08, colour_term_used: true } })));
+    expect(red).toContain("Gaia G = mag_inst + 25.000 + 0.0800 x (BP-RP) for a star measured in this aperture.");
+    const blue = textOf(await shownAfter(crossMatchResult(matches, { zero_point: { ...fitOf(matches, 0.02), colour_coeff: -0.08, colour_term_used: true } })));
+    expect(blue).toContain("mag_inst + 25.000 - 0.0800 x (BP-RP)");
+    expect(textOf(await shownAfter(crossMatchResult(matches, { zero_point: null })))).not.toContain("Not applied to the image");
+    expect(textOf(await shownAfter(crossMatchResult(matches, { photcal_present: true })))).toContain(
+      "Zero point (Gaia G, Vega) - informational, image already calibrated",
+    );
+  });
+
+  it("prints the epoch of the cone as the exports do", async () => {
+    backend.cone.mockResolvedValue({ ...CONE, epoch_year: null });
+    await searched();
+    expect(textOf(show())).toContain("epoch J2016.0 (no observation date in the header)");
+    hooks.mount();
+    backend.cone.mockResolvedValue(CONE);
+    await searched();
+    expect(textOf(show())).toContain("epoch J2024.50");
+  });
+
+  it("saves each CSV with the header lines of its kind", async () => {
+    const result = crossMatchResult(matches, { ...LISTED });
+    backend.crossMatch.mockResolvedValue(result);
+    await searchedFirst();
+    await crossMatched(first);
+    for (const [i, label] of ["Matches CSV", "Sources CSV", "Catalog CSV"].entries()) {
+      const button = elements(render(first)).find((p) => p.children !== undefined && textOf(p.children as ReactNode).trim() === label);
+      expect(button?.disabled, `${label} is enabled`).toBe(false);
+      (button!.onClick as () => void)();
+      await vi.waitFor(() => expect(backend.exported).toHaveLength(i + 1));
+      await flush();
+    }
+    expect(withoutExportTime(backend.headers[0]!)).toEqual(withoutExportTime(crossMatchCsvHeaderLines("matches", result, CONTEXT)));
+    expect(withoutExportTime(backend.headers[1]!)).toEqual(withoutExportTime(crossMatchCsvHeaderLines("sources", result, CONTEXT)));
+    expect(withoutExportTime(backend.headers[2]!)).toEqual(withoutExportTime(coneCsvHeaderLines(CONE, CONTEXT)));
+    for (const lines of backend.headers) {
+      expect(lines!.filter((l) => /^# exported_utc: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(l))).toHaveLength(1);
+      expect(lines).toContain("# file: x_calibrated.fits");
+    }
+  });
+
+  it("copies the CSV with the header lines", async () => {
+    const copyButton = () => elements(render(first)).find((p) => typeof p.text === "function");
+    expect(copyButton(), "no copy button before any search").toBeUndefined();
+    const result = crossMatchResult(matches, { ...LISTED });
+    backend.crossMatch.mockResolvedValue(result);
+    await searchedFirst();
+    const catalogCopy = copyButton();
+    expect(catalogCopy?.title).toBe(COPY_TITLE);
+    expect(csvLines((catalogCopy!.text as () => string | null)()!)).toEqual(
+      csvLines(catalogueCsvText({ kind: "catalog", rows: CONE.rows }, coneCsvHeaderLines(CONE, CONTEXT))),
+    );
+    await crossMatched(first);
+    const matchesCopy = copyButton();
+    expect(matchesCopy?.title).toBe(COPY_TITLE);
+    expect(csvLines((matchesCopy!.text as () => string | null)()!)).toEqual(
+      csvLines(catalogueCsvText({ kind: "matches", matches: result.matches }, crossMatchCsvHeaderLines("matches", result, CONTEXT))),
+    );
+  });
+});
+
+describe("CatalogPanel source", () => {
+  it("uses the shared small button class", () => {
+    expect(panelSource).not.toMatch(/const SMALL_BUTTON_CLASS\s*=/);
+    expect(panelSource).toMatch(/import \{[^}]*\bSMALL_BUTTON_CLASS\b[^}]*\} from "\.\.\/ui";/);
   });
 });

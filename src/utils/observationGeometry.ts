@@ -1,4 +1,4 @@
-import type { GeometryOverrides, ObservationGeometryResult } from "../shared/types/geometry";
+import type { GeometryOverrides, GeometrySite, GeometryTarget, ObservationGeometryResult } from "../shared/types/geometry";
 
 export const SITE_OVERRIDE_STORAGE_KEY = "astroburst.geometry.site.v1";
 export const NO_TIME_HINT =
@@ -27,6 +27,8 @@ const TENTHS_PER_MINUTE = 600;
 const HOURS_PER_TURN = 24;
 const DEGREES_PER_HOUR = 15;
 const NULL_VALUE = "--";
+const TARGET_IN_USE_DIGITS = 6;
+const SITE_IN_USE_DIGITS = 4;
 
 export interface SiteOverride {
   lat: number;
@@ -201,4 +203,14 @@ export function geometryText(result: ObservationGeometryResult): string {
   for (const note of result.notes) lines.push(`Note: ${note}`);
   for (const note of result.geometry.time_scale_notes) lines.push(`Note: ${note}`);
   return lines.join("\n") + "\n";
+}
+
+export function targetInUseLine(target: GeometryTarget): string {
+  return `RA ${fixed(target.ra_deg, TARGET_IN_USE_DIGITS)} deg, Dec ${fixed(target.dec_deg, TARGET_IN_USE_DIGITS)} deg, from ${target.source}`;
+}
+
+export function siteInUseLine(site: GeometrySite): string {
+  const lat = fixed(site.lat_deg, SITE_IN_USE_DIGITS);
+  const lon = fixed(site.lon_deg, SITE_IN_USE_DIGITS);
+  return `lat ${lat} deg, lon ${lon} deg (E+), height ${fixed(site.height_m, 0)} m, from ${site.source}`;
 }

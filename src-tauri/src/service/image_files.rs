@@ -8,6 +8,7 @@ use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::imaging::push_history;
 use crate::infra::asdf::converter::is_asdf_file;
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry};
+use crate::infra::fits::band_planes::band_plane_of_path;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::reader::extract_header_by_index;
 use crate::infra::fits::writer::{filter_header, write_mef_with_tables, BinTableHdu, HduData, ImageHdu};
@@ -20,10 +21,12 @@ const HEADER_PROGRAM: &str = "PROGRAM";
 const READABLE_WIZARD_STEM_PREFIX: &str = "wizard_";
 const PLANE_ONLY_KEYS: &[&str] = &[
     "BUNIT", "EXTNAME", "EXTVER", "LTV1", "LTV2", "LTM1_1", "LTM2_2", "BZERO", "BSCALE", "BLANK", "DATAMIN", "DATAMAX",
+    "BSOFTEN", "BOFFSET",
 ];
 
 pub(crate) fn source_path(path: &str) -> String {
-    ImageRef::parse(path).path
+    let path = ImageRef::parse(path).path;
+    band_plane_of_path(&path).map_or(path, |band| band.file)
 }
 
 #[cfg(not(test))]
@@ -187,6 +190,20 @@ mod tests {
     }
 
     #[test]
+    fn provenance_only_drops_the_asinh_cards_of_the_source_plane() {
+        let mut merged = HduHeader::empty();
+        for (k, v) in [("TELESCOP", "PS1"), ("BSOFTEN", "0.25"), ("BOFFSET", "3.5")] {
+            merged.set(k, v.to_string());
+        }
+        let primary = provenance_only(&merged);
+        assert_eq!(primary.get("TELESCOP"), Some("PS1"));
+        for gone in ["BSOFTEN", "BOFFSET"] {
+            assert!(primary.get(gone).is_none(), "{gone}");
+            assert!(!primary.cards.iter().any(|(k, _)| k == gone), "{gone}");
+        }
+    }
+
+    #[test]
     fn provenance_keeps_every_history_and_comment_line_out_of_the_keyword_index() {
         let mut merged = HduHeader::empty();
         merged.set("TELESCOP", "JWST".to_string());
@@ -206,5 +223,18 @@ mod tests {
         );
         assert!(primary.index.get("HISTORY").is_none() && primary.index.get("COMMENT").is_none());
         assert_eq!(primary.get("TELESCOP"), Some("JWST"));
+    }
+
+    #[test]
+    fn the_source_path_of_a_band_plane_is_its_file() {
+        assert_eq!(source_path("C:/d/cut.fits#hdu=0&plane=1"), "C:/d/cut.fits");
+        assert_eq!(source_path("C:/d/cut.fits#hdu=2"), "C:/d/cut.fits");
+        assert_eq!(source_path("C:/d/cut.fits"), "C:/d/cut.fits");
+        assert_eq!(source_path("__composite_r"), "__composite_r");
+
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("odd.fits#hdu=0&plane=1").to_str().unwrap().to_string();
+        crate::infra::fits::writer::write_fits_mono(&odd, &ndarray::Array2::zeros((3, 4)), None).unwrap();
+        assert_eq!(source_path(&odd), odd, "a file named like a plane key stays a file");
     }
 }

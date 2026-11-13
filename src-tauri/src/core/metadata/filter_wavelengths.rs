@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::infra::fits::band_planes::loaded_band_plane;
 use crate::types::config::CustomFilter;
 use crate::types::header::HduHeader;
 
@@ -297,6 +298,45 @@ const BUILTIN_FILTERS: &[BuiltinFilter] = &[
     row("ROMAN", "F158", 15749.0, "WFI", "WFI", &[]),
     row("ROMAN", "F184", 18394.0, "WFI", "WFI", &[]),
     row("ROMAN", "F213", 21230.0, "WFI", "WFI", &[]),
+    row("EUCLID", "VIS", 7103.4, "VIS", "VIS", &[]),
+    row("EUCLID", "Y", 10785.4, "NISP", "NISP", &[]),
+    row("EUCLID", "J", 13620.6, "NISP", "NISP", &[]),
+    row("EUCLID", "H", 17648.8, "NISP", "NISP", &[]),
+    row("HSC", "g", 4798.2, "HSC", "HSC", &[]),
+    row("HSC", "r", 6218.4, "HSC", "HSC", &["r2"]),
+    row("HSC", "i", 7727.0, "HSC", "HSC", &["i2"]),
+    row("HSC", "z", 8908.5, "HSC", "HSC", &[]),
+    row("HSC", "y", 9775.1, "HSC", "HSC", &[]),
+    row("DECAM", "u", 3814.3, "DECam", "DECam", &[]),
+    row("DECAM", "g", 4808.5, "DECam", "DECam", &[]),
+    row("DECAM", "r", 6417.6, "DECam", "DECam", &[]),
+    row("DECAM", "i", 7814.6, "DECam", "DECam", &[]),
+    row("DECAM", "z", 9168.9, "DECam", "DECam", &[]),
+    row("DECAM", "Y", 9896.1, "DECam", "DECam", &[]),
+    row("SDSS", "u", 3556.5, "SDSS", "SDSS", &[]),
+    row("SDSS", "g", 4702.5, "SDSS", "SDSS", &[]),
+    row("SDSS", "r", 6175.6, "SDSS", "SDSS", &[]),
+    row("SDSS", "i", 7490.0, "SDSS", "SDSS", &[]),
+    row("SDSS", "z", 8946.7, "SDSS", "SDSS", &[]),
+    row("PS1", "g", 4849.1, "GPC1", "GPC1", &[]),
+    row("PS1", "r", 6201.2, "GPC1", "GPC1", &[]),
+    row("PS1", "i", 7535.0, "GPC1", "GPC1", &[]),
+    row("PS1", "z", 8674.2, "GPC1", "GPC1", &[]),
+    row("PS1", "y", 9627.8, "GPC1", "GPC1", &[]),
+    row("2MASS", "J", 12393.1, "2MASS", "2MASS", &[]),
+    row("2MASS", "H", 16494.9, "2MASS", "2MASS", &[]),
+    row("2MASS", "Ks", 21638.6, "2MASS", "2MASS", &[]),
+    row("WISE", "W1", 33682.2, "WISE", "WISE", &[]),
+    row("WISE", "W2", 46179.1, "WISE", "WISE", &[]),
+    row("WISE", "W3", 120718.1, "WISE", "WISE", &[]),
+    row("WISE", "W4", 221944.0, "WISE", "WISE", &[]),
+    row("GALEX", "FUV", 1535.1, "GALEX", "GALEX", &[]),
+    row("GALEX", "NUV", 2300.8, "GALEX", "GALEX", &[]),
+    row("VISTA", "Z", 8793.6, "VIRCAM", "VIRCAM", &[]),
+    row("VISTA", "Y", 10210.7, "VIRCAM", "VIRCAM", &[]),
+    row("VISTA", "J", 12525.2, "VIRCAM", "VIRCAM", &[]),
+    row("VISTA", "H", 16432.7, "VIRCAM", "VIRCAM", &[]),
+    row("VISTA", "Ks", 21521.7, "VIRCAM", "VIRCAM", &[]),
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -354,17 +394,31 @@ pub enum FilterError {
     NoFilterInFileName { dataset: String, file_name: String },
     #[error("'{file_name}': the file name names several {dataset} filters ({})", filters.join(", "))]
     SeveralFiltersInFileName { dataset: String, file_name: String, filters: Vec<String> },
-    #[error("'{file_name}': TELESCOP says {header} but the dataset {requested} was asked for")]
+    #[error("'{file_name}': the header identifies {header} but the dataset {requested} was asked for")]
     DatasetMismatch { file_name: String, header: String, requested: String },
-    #[error("'{file_name}': no TELESCOP card names a registry dataset, so the dataset must be given to read the filter from the file name")]
+    #[error("'{file_name}': the header does not identify a registry dataset, so the dataset must be given")]
     DatasetRequired { file_name: String },
+    #[error("'{file_name}': the file holds the bands {} as planes; open one plane to identify its filter", bands.join(", "))]
+    BandPlaneRequired { file_name: String, bands: Vec<String> },
     #[error("no file matched the filter selection")]
     NothingSelected,
     #[error("dataset '{dataset}': {reason}")]
     InvalidDataset { dataset: String, reason: String },
 }
 
-const HEADER_INSTRUMENT_ALIASES: [(&str, &str); 1] = [("UVOTA", "UVOT")];
+const HEADER_INSTRUMENT_ALIASES: [(&str, &str); 4] =
+    [("UVOTA", "UVOT"), ("HYPER SUPRIME-CAM", "HSC"), ("LSSTCAM", "LSST"), ("LSSTCOMCAM", "LSST")];
+const SURVEY_FILTER_KEYS: [&str; 3] = ["BAND", "FILTERX", "HIERARCH FPA.FILTER"];
+const FILTER_WORD_INSTRUMENTS: [&str; 2] = ["DECAM", "HSC"];
+const PS1_TELESCOPE_KEY: &str = "HIERARCH FPA.TELESCOPE";
+const PS1_INSTRUMENT_KEYS: [&str; 2] = ["HIERARCH FPA.INSTRUMENT", "PSCAMERA"];
+const LEGACY_SURVEY_NAME: &str = "LegacySurvey";
+const LEGACY_SURVEY_DATASET: &str = "DECAM";
+const LEGACY_SURVEY_ASSUMPTION: &str = "dataset DECAM is assumed from SURVEY = LegacySurvey (Legacy Surveys DR10 imaging is DECam)";
+const EUCLID_FILE_PREFIX: &str = "EUC_";
+const EUCLID_DATASET: &str = "EUCLID";
+const BAND_LIST_KEY: &str = "BANDS";
+const MIN_BAND_PLANES: i64 = 2;
 
 impl FilterEntry {
     fn names(&self) -> impl Iterator<Item = &str> {
@@ -409,6 +463,17 @@ fn header_instrument(header: &HduHeader) -> Option<String> {
     Some(alias.unwrap_or(raw))
 }
 
+fn band_plane_key(plane: usize) -> String {
+    format!("BAND{plane}")
+}
+
+fn plane_bands(header: &HduHeader) -> Vec<String> {
+    if header_text(header, BAND_LIST_KEY).is_none() || header.get_i64("NAXIS3").is_none_or(|planes| planes < MIN_BAND_PLANES) {
+        return Vec::new();
+    }
+    (0..).map_while(|plane| header_text(header, &band_plane_key(plane))).collect()
+}
+
 fn resolve_value<'a>(candidates: &[&'a FilterEntry], value: &str) -> Option<&'a FilterEntry> {
     let upper = value.to_uppercase();
     let lookup = |code: &str| candidates.iter().copied().find(|entry| entry.is_named(code));
@@ -451,6 +516,25 @@ impl FilterRegistry {
             registry.add_dataset(dataset, filters, false)?;
         }
         Ok(registry)
+    }
+
+    pub fn with_custom_datasets(datasets: &BTreeMap<String, BTreeMap<String, CustomFilter>>) -> (Self, Vec<String>) {
+        let mut registry = Self::builtin();
+        let mut warnings = Vec::new();
+        for (dataset, filters) in datasets {
+            let Err(error) = registry.add_dataset(dataset, filters, false) else { continue };
+            let name = dataset.trim().to_uppercase();
+            let reason = if BUILTIN_FILTERS.iter().any(|row| row.dataset == name) {
+                format!("{name} is a built-in dataset; rename it in filter_datasets to keep its filters")
+            } else {
+                match error {
+                    FilterError::InvalidDataset { reason, .. } => reason,
+                    other => other.to_string(),
+                }
+            };
+            warnings.push(format!("custom filter dataset {name} is not used: {reason}"));
+        }
+        (registry, warnings)
     }
 
     pub fn entries(&self) -> &[FilterEntry] {
@@ -551,7 +635,13 @@ impl FilterRegistry {
         }
     }
 
-    fn identify_in_header(&self, header: &HduHeader, dataset: &str) -> Result<FilterIdentification, Option<String>> {
+    fn identify_in_header(
+        &self,
+        header: &HduHeader,
+        dataset: &str,
+        plane: Option<usize>,
+        label: Option<&str>,
+    ) -> Result<FilterIdentification, Option<String>> {
         let in_dataset: Vec<&FilterEntry> = self.entries_of(dataset).collect();
         let instrument = header_instrument(header);
         let candidates: Vec<&FilterEntry> = match instrument.as_deref() {
@@ -562,8 +652,14 @@ impl FilterRegistry {
             None => in_dataset.clone(),
         };
         let pupil_resolves = header_filter_value(header, PUPIL_KEY).is_some_and(|value| resolve_value(&candidates, &value).is_some());
-        let keys: &[&str] = if pupil_resolves { &PUPIL_FIRST_KEYS } else { &FILTER_HEADER_KEYS };
-        let values: Vec<(&str, String)> = keys.iter().filter_map(|key| header_filter_value(header, key).map(|value| (*key, value))).collect();
+        let filter_keys: &[&str] = if pupil_resolves { &PUPIL_FIRST_KEYS } else { &FILTER_HEADER_KEYS };
+        let plane_key = plane.map(band_plane_key);
+        let plane_card = plane_key
+            .as_deref()
+            .and_then(|key| header_filter_value(header, key).map(|value| (key, value)))
+            .or_else(|| label.map(|label| (BAND_LIST_KEY, label.to_string())));
+        let filter_cards = filter_keys.iter().copied().chain(SURVEY_FILTER_KEYS).filter_map(|key| header_filter_value(header, key).map(|value| (key, value)));
+        let values: Vec<(&str, String)> = plane_card.into_iter().chain(filter_cards).collect();
         if let Some((keyword, entry)) = values.iter().find_map(|(key, value)| resolve_value(&candidates, value).map(|entry| (*key, entry))) {
             return Ok(FilterIdentification {
                 entry: entry.clone(),
@@ -594,16 +690,51 @@ impl FilterRegistry {
         owners.all(|dataset| dataset == first).then_some(first)
     }
 
-    fn header_dataset(&self, header: &HduHeader) -> Option<&str> {
-        header_text(header, "TELESCOP")
-            .and_then(|telescope| self.dataset_key(&telescope))
+    fn filter_word_dataset(&self, header: &HduHeader) -> Option<&str> {
+        FILTER_HEADER_KEYS.iter().chain(&SURVEY_FILTER_KEYS).filter_map(|key| header_text(header, key)).find_map(|value| {
+            value
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .find(|word| FILTER_WORD_INSTRUMENTS.iter().any(|instrument| instrument.eq_ignore_ascii_case(word)))
+                .and_then(|word| self.instrument_dataset(word))
+        })
+    }
+
+    fn header_dataset(&self, header: &HduHeader) -> Option<(&str, Option<&'static str>)> {
+        let named_by = |key: &str| header_text(header, key).and_then(|value| self.dataset_key(&value));
+        let instrument_in = |key: &str| header_text(header, key).and_then(|value| self.instrument_dataset(&value));
+        let legacy_survey = header_text(header, "SURVEY").is_some_and(|survey| survey.eq_ignore_ascii_case(LEGACY_SURVEY_NAME));
+        named_by("TELESCOP")
             .or_else(|| header_instrument(header).and_then(|instrument| self.instrument_dataset(&instrument)))
+            .or_else(|| named_by(PS1_TELESCOPE_KEY))
+            .or_else(|| PS1_INSTRUMENT_KEYS.iter().find_map(|key| instrument_in(key)))
+            .or_else(|| named_by("ORIGIN"))
+            .or_else(|| self.filter_word_dataset(header))
+            .map(|dataset| (dataset, None))
+            .or_else(|| {
+                legacy_survey.then(|| self.dataset_key(LEGACY_SURVEY_DATASET)).flatten().map(|dataset| (dataset, Some(LEGACY_SURVEY_ASSUMPTION)))
+            })
+    }
+
+    fn file_name_dataset(&self, path: &str) -> Option<&str> {
+        let file_name = file_name_of(path);
+        let prefix = file_name.get(..EUCLID_FILE_PREFIX.len())?;
+        prefix.eq_ignore_ascii_case(EUCLID_FILE_PREFIX).then(|| self.dataset_key(EUCLID_DATASET)).flatten()
     }
 
     pub fn identify(&self, header: Option<&HduHeader>, path: &str, dataset: Option<&str>) -> Result<FilterIdentification, FilterError> {
+        self.identify_plane(header, path, dataset, None)
+    }
+
+    pub fn identify_plane(
+        &self,
+        header: Option<&HduHeader>,
+        path: &str,
+        dataset: Option<&str>,
+        plane: Option<usize>,
+    ) -> Result<FilterIdentification, FilterError> {
         let requested = dataset.map(|name| self.require_dataset(name)).transpose()?;
         let from_header = header.and_then(|header| self.header_dataset(header));
-        if let (Some(requested), Some(from_header)) = (requested, from_header) {
+        if let (Some(requested), Some((from_header, _))) = (requested, from_header) {
             if requested != from_header {
                 return Err(FilterError::DatasetMismatch {
                     file_name: file_name_of(path),
@@ -612,11 +743,23 @@ impl FilterRegistry {
                 });
             }
         }
-        let dataset = requested.or(from_header).ok_or_else(|| FilterError::DatasetRequired { file_name: file_name_of(path) })?;
+        let (dataset, assumption) = match (requested, from_header) {
+            (Some(requested), _) => (requested, None),
+            (None, Some(found)) => found,
+            (None, None) => {
+                let dataset = self.file_name_dataset(path).ok_or_else(|| FilterError::DatasetRequired { file_name: file_name_of(path) })?;
+                (dataset, None)
+            }
+        };
+        let loaded = if plane.is_none() { header.and_then(loaded_band_plane) } else { None };
+        let plane = plane.or(loaded.as_ref().map(|loaded| loaded.plane));
+        let label = loaded.and_then(|loaded| loaded.label);
         let mut notes = Vec::new();
         if let Some(header) = header {
-            match self.identify_in_header(header, dataset) {
+            let bands = if plane.is_none() { plane_bands(header) } else { Vec::new() };
+            match self.identify_in_header(header, dataset, plane, label.as_deref()) {
                 Ok(mut found) => {
+                    found.warnings.extend(assumption.map(String::from));
                     if let Ok(named) = self.identify_file_name(path, dataset) {
                         if named.entry.filter != found.entry.filter {
                             found.warnings.push(format!(
@@ -627,11 +770,13 @@ impl FilterRegistry {
                     }
                     return Ok(found);
                 }
+                Err(_) if !bands.is_empty() => return Err(FilterError::BandPlaneRequired { file_name: file_name_of(path), bands }),
                 Err(Some(reason)) => notes.push(format!("header: {reason}; the file name rule decides")),
                 Err(None) => {}
             }
         }
         let mut found = self.identify_file_name(path, dataset)?;
+        found.warnings.extend(assumption.map(String::from));
         if notes.is_empty() {
             if let Some(instrument) = header.and_then(header_instrument) {
                 if !found.entry.instrument.eq_ignore_ascii_case(&instrument) {
@@ -942,11 +1087,8 @@ mod tests {
             Err(FilterError::DatasetNotInFileName { dataset: "JWST".into(), file_name: "HST_F814W.fits".into() })
         );
         assert_eq!(
-            found("JWST_F444W.fits", "euclid"),
-            Err(FilterError::UnknownDataset {
-                dataset: "EUCLID".into(),
-                known: ["JWST", "HST", "LSST", "JPAS", "JPLUS", "SWIFT", "FDS", "ROMAN"].map(String::from).to_vec(),
-            })
+            found("JWST_F444W.fits", "nosuch"),
+            Err(FilterError::UnknownDataset { dataset: "NOSUCH".into(), known: SEVENTEEN_DATASETS.map(String::from).to_vec() })
         );
     }
 
@@ -1004,9 +1146,9 @@ mod tests {
     fn the_registry_holds_every_lightstack_dataset_and_the_roman_filters() {
         let registry = FilterRegistry::builtin();
         let datasets = registry.datasets();
-        assert_eq!(datasets, ["JWST", "HST", "LSST", "JPAS", "JPLUS", "SWIFT", "FDS", "ROMAN"]);
+        assert_eq!(datasets, SEVENTEEN_DATASETS);
         let count = |dataset: &str| registry.entries().iter().filter(|found| found.dataset == dataset).count();
-        assert_eq!(datasets.iter().map(|dataset| count(dataset)).collect::<Vec<_>>(), [29, 23, 6, 60, 12, 3, 4, 8]);
+        assert_eq!(datasets.iter().map(|dataset| count(dataset)).collect::<Vec<_>>(), [29, 23, 6, 60, 12, 3, 4, 8, 4, 5, 6, 5, 5, 3, 4, 2, 5]);
         for dataset in &datasets {
             let mut names: Vec<String> = registry
                 .entries()
@@ -1052,20 +1194,20 @@ mod tests {
 
     #[test]
     fn custom_datasets_follow_the_add_custom_dataset_rules() {
-        let euclid = custom(serde_json::json!({
-            "VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"},
-            "Y": {"lambda": 10800.0, "instrument": "NISP", "group": "nir", "aliases": ["NISP_Y"]},
+        let cfht = custom(serde_json::json!({
+            "u": {"lambda": 3676.1, "instrument": "MegaCam", "group": "optical"},
+            "g": {"lambda": 4764.0, "instrument": "MegaCam", "group": "optical", "aliases": ["MEGACAM_G"]},
         }));
         let mut registry = FilterRegistry::builtin();
-        registry.add_dataset("euclid", &euclid, false).unwrap();
-        assert_eq!(registry.identify_file_name("EUCLID_VIS.fits", "Euclid").unwrap().entry.pivot_angstrom, 7180.0);
-        assert_eq!(registry.identify_file_name("ngc1399_euclid_nisp_y.fits", "EUCLID").unwrap().entry.filter, "Y");
-        assert!(matches!(registry.add_dataset("EUCLID", &euclid, false), Err(FilterError::InvalidDataset { .. })));
+        registry.add_dataset("cfht", &cfht, false).unwrap();
+        assert_eq!(registry.identify_file_name("CFHT_u.fits", "Cfht").unwrap().entry.pivot_angstrom, 3676.1);
+        assert_eq!(registry.identify_file_name("ngc1399_cfht_megacam_g.fits", "CFHT").unwrap().entry.filter, "g");
+        assert!(matches!(registry.add_dataset("CFHT", &cfht, false), Err(FilterError::InvalidDataset { .. })));
 
-        let replaced = custom(serde_json::json!({"VIS": {"lambda": 7150.0, "instrument": "VIS", "group": "optical"}}));
-        registry.add_dataset("EUCLID", &replaced, true).unwrap();
-        assert_eq!(registry.entry("EUCLID", "VIS").map(|found| found.pivot_angstrom), Some(7150.0));
-        assert!(registry.entry("EUCLID", "Y").is_none());
+        let replaced = custom(serde_json::json!({"u": {"lambda": 3650.0, "instrument": "MegaCam", "group": "optical"}}));
+        registry.add_dataset("CFHT", &replaced, true).unwrap();
+        assert_eq!(registry.entry("CFHT", "u").map(|found| found.pivot_angstrom), Some(3650.0));
+        assert!(registry.entry("CFHT", "g").is_none());
 
         let colliding = custom(serde_json::json!({
             "H": {"lambda": 17700.0, "instrument": "NISP", "group": "nir"},
@@ -1082,10 +1224,12 @@ mod tests {
         }
         assert!(registry.entry("TEST", "X").is_none());
 
-        let from_config = FilterRegistry::with_datasets(&BTreeMap::from([("EUCLID".to_string(), euclid.clone())])).unwrap();
-        assert_eq!(from_config.datasets().last().map(String::as_str), Some("EUCLID"));
-        let clash = BTreeMap::from([("JWST".to_string(), euclid)]);
-        assert!(matches!(FilterRegistry::with_datasets(&clash), Err(FilterError::InvalidDataset { .. })));
+        let from_config = FilterRegistry::with_datasets(&BTreeMap::from([("CFHT".to_string(), cfht.clone())])).unwrap();
+        assert_eq!(from_config.datasets().last().map(String::as_str), Some("CFHT"));
+        for built_in in ["JWST", "EUCLID"] {
+            let clash = BTreeMap::from([(built_in.to_string(), cfht.clone())]);
+            assert!(matches!(FilterRegistry::with_datasets(&clash), Err(FilterError::InvalidDataset { .. })), "{built_in}");
+        }
     }
 
     #[test]
@@ -1093,11 +1237,339 @@ mod tests {
         let registry = FilterRegistry::builtin();
         let files = [FilterCandidate { path: "fits/cut/swift_uvw1.fits", header: None }];
         assert_eq!(registry.select(&files, &[selection("LSST", None, None)]).unwrap_err(), FilterError::NothingSelected);
-        assert!(matches!(registry.select(&files, &[selection("EUCLID", None, None)]), Err(FilterError::UnknownDataset { .. })));
+        assert!(matches!(registry.select(&files, &[selection("NOSUCH", None, None)]), Err(FilterError::UnknownDataset { .. })));
         let twice = selected(&registry, &["LSST_FDS_g.fits".to_string()], &[selection("LSST", None, None), selection("FDS", None, None)]);
         let found: Vec<(String, f64)> = twice.iter().map(|item| (item.identification.entry.dataset.clone(), item.identification.entry.pivot_angstrom)).collect();
         assert_eq!(found, [("FDS".to_string(), 4750.0), ("LSST".to_string(), 4782.26)]);
         let lower_case = selected(&registry, &["JWST_F444W.fits".to_string()], &[selection("jwst", Some("nircam"), Some("lw"))]);
         assert_eq!(filters_of(&lower_case), ["F444W"]);
+    }
+
+    const SEVENTEEN_DATASETS: [&str; 17] = [
+        "JWST", "HST", "LSST", "JPAS", "JPLUS", "SWIFT", "FDS", "ROMAN", "EUCLID", "HSC", "DECAM", "SDSS", "PS1", "2MASS", "WISE", "GALEX",
+        "VISTA",
+    ];
+    const SVO_PIVOT_SOURCE: &str =
+        "SVO Filter Profile Service, WavelengthPivot of the total response (ids without _filter), read 2026-11-09, 0.1 A";
+    const LEGACY_ASSUMPTION: &str = "dataset DECAM is assumed from SURVEY = LegacySurvey (Legacy Surveys DR10 imaging is DECam)";
+    const EUCLID_CUTOUT: &str = "EUC_MER_BGSUB-MOSAIC-VIS_TILE102044185-3EA2F5_20241021T041200.630008Z_00.00_cut60_A.fits";
+    const EUCLID_CARDS: [(&str, &str); 3] = [("ORIGIN", "euchvs40"), ("FILTER", "VIS"), ("MAGZERO", "24.6")];
+    const SDSS_FRAME: &str = "frame-r-001462-4-0165.fits.bz2";
+    const SDSS_CARDS: [(&str, &str); 3] = [("TELESCOP", "2.5m"), ("ORIGIN", "SDSS"), ("FILTER", "r")];
+    const LEGACY_CUBE: &str = "ls-dr10_A_griz_invvar_maskbits_458px.fits";
+    const LEGACY_CUBE_CARDS: [(&str, &str); 10] = [
+        ("SURVEY", "LegacySurvey"),
+        ("VERSION", "DR10"),
+        ("IMAGETYP", "IMAGE"),
+        ("BANDS", "griz"),
+        ("BAND0", "g"),
+        ("BAND1", "r"),
+        ("BAND2", "i"),
+        ("BAND3", "z"),
+        ("NAXIS", "3"),
+        ("NAXIS3", "4"),
+    ];
+
+    fn header_keyword(keyword: &str) -> FilterSource {
+        FilterSource::Header { keyword: keyword.into() }
+    }
+
+    #[test]
+    fn the_survey_datasets_carry_the_svo_pivots_of_the_total_response() {
+        let registry = FilterRegistry::builtin();
+        let pivots: [(&str, &str, f64); 39] = [
+            ("EUCLID", "VIS", 7103.4),
+            ("EUCLID", "Y", 10785.4),
+            ("EUCLID", "J", 13620.6),
+            ("EUCLID", "H", 17648.8),
+            ("HSC", "g", 4798.2),
+            ("HSC", "r", 6218.4),
+            ("HSC", "i", 7727.0),
+            ("HSC", "z", 8908.5),
+            ("HSC", "y", 9775.1),
+            ("DECAM", "u", 3814.3),
+            ("DECAM", "g", 4808.5),
+            ("DECAM", "r", 6417.6),
+            ("DECAM", "i", 7814.6),
+            ("DECAM", "z", 9168.9),
+            ("DECAM", "Y", 9896.1),
+            ("SDSS", "u", 3556.5),
+            ("SDSS", "g", 4702.5),
+            ("SDSS", "r", 6175.6),
+            ("SDSS", "i", 7490.0),
+            ("SDSS", "z", 8946.7),
+            ("PS1", "g", 4849.1),
+            ("PS1", "r", 6201.2),
+            ("PS1", "i", 7535.0),
+            ("PS1", "z", 8674.2),
+            ("PS1", "y", 9627.8),
+            ("2MASS", "J", 12393.1),
+            ("2MASS", "H", 16494.9),
+            ("2MASS", "Ks", 21638.6),
+            ("WISE", "W1", 33682.2),
+            ("WISE", "W2", 46179.1),
+            ("WISE", "W3", 120718.1),
+            ("WISE", "W4", 221944.0),
+            ("GALEX", "FUV", 1535.1),
+            ("GALEX", "NUV", 2300.8),
+            ("VISTA", "Z", 8793.6),
+            ("VISTA", "Y", 10210.7),
+            ("VISTA", "J", 12525.2),
+            ("VISTA", "H", 16432.7),
+            ("VISTA", "Ks", 21521.7),
+        ];
+        for (dataset, filter, angstrom) in pivots {
+            assert_eq!(registry.entry(dataset, filter).map(|found| found.pivot_angstrom), Some(angstrom), "{dataset} {filter} ({SVO_PIVOT_SOURCE})");
+            assert_eq!(registry.entry(dataset, filter).map(|found| found.filter.as_str()), Some(filter), "{dataset} {filter}");
+        }
+        assert_eq!(registry.entries().len(), 184);
+        assert_eq!(registry.entry("EUCLID", "H").unwrap().instrument, "NISP");
+        assert_eq!(registry.entry("EUCLID", "VIS").unwrap().instrument, "VIS");
+        assert_eq!(registry.entry("PS1", "r").unwrap().instrument, "GPC1");
+        assert_eq!(registry.entry("VISTA", "Ks").unwrap().instrument, "VIRCAM");
+    }
+
+    #[test]
+    fn hsc_r2_and_i2_resolve_to_r_and_i() {
+        let registry = FilterRegistry::builtin();
+        let r = registry.entry("HSC", "r").cloned().unwrap();
+        assert_eq!(r.pivot_angstrom, 6218.4);
+        assert_eq!(registry.entry("HSC", "r2"), Some(&r));
+        assert_eq!(registry.entry("hsc", "R"), Some(&r));
+        assert_eq!(registry.entry("HSC", "i2").map(|found| (found.filter.as_str(), found.pivot_angstrom)), Some(("i", 7727.0)));
+
+        let subaru = header(&[("TELESCOP", "Subaru"), ("INSTRUME", "Hyper Suprime-Cam"), ("FILTER", "HSC-R2")]);
+        let found = registry.identify(Some(&subaru), "calexp-HSC-R2-9813-4,4.fits", None).unwrap();
+        assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str()), ("HSC", "r"));
+        assert_eq!(found.source, header_keyword("FILTER"));
+        let filter_only = header(&[("FILTER", "HSC-I")]);
+        let found = registry.identify(Some(&filter_only), "image.fits", None).unwrap();
+        assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str(), found.entry.pivot_angstrom), ("HSC", "i", 7727.0));
+        let rubin = header(&[("INSTRUME", "LSSTCam"), ("FILTER", "r_57")]);
+        let found = registry.identify(Some(&rubin), "image.fits", None).unwrap();
+        assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str(), found.entry.pivot_angstrom), ("LSST", "r", 6217.82));
+    }
+
+    #[test]
+    fn survey_headers_identify_their_dataset_and_band() {
+        let registry = FilterRegistry::builtin();
+        let ps1_cards = [
+            ("HIERARCH FPA.TELESCOPE", "PS1"),
+            ("HIERARCH FPA.INSTRUMENT", "GPC1"),
+            ("HIERARCH FPA.FILTERID", "r.00000"),
+            ("HIERARCH FPA.FILTER", "r.00000"),
+            ("PSCAMERA", "GPC1"),
+        ];
+        let cases: [(&str, Vec<(&str, &str)>, &str, &str, f64, &str); 5] = [
+            (
+                "legacysurvey-0532m280-image-r.fits.fz",
+                vec![
+                    ("TELESCOP", "CTIO 4.0-m telescope"),
+                    ("INSTRUME", "DECam"),
+                    ("FILTER", "r DECam SDSS c0002 6415.0 1480.0"),
+                    ("FILTERX", "r"),
+                    ("BANDS", "griz"),
+                    ("BAND0", "g"),
+                    ("BAND1", "r"),
+                    ("BAND2", "i"),
+                    ("BAND3", "z"),
+                    ("NAXIS", "2"),
+                ],
+                "DECAM",
+                "r",
+                6417.6,
+                "FILTER",
+            ),
+            (
+                "des-dr2_A_g_extn1.fits",
+                vec![
+                    ("ORIGIN", "ccc0005.campuscluster.illinois.edu"),
+                    ("FILTER", "g DECam SDSS c0001 4720.0 1520.0"),
+                    ("BAND", "g"),
+                    ("DES_EXT", "IMAGE"),
+                ],
+                "DECAM",
+                "g",
+                4808.5,
+                "FILTER",
+            ),
+            (EUCLID_CUTOUT, EUCLID_CARDS.to_vec(), "EUCLID", "VIS", 7103.4, "FILTER"),
+            ("ps1_A_r_stack_480px.fits", ps1_cards.to_vec(), "PS1", "r", 6201.2, "HIERARCH FPA.FILTER"),
+            (SDSS_FRAME, SDSS_CARDS.to_vec(), "SDSS", "r", 6175.6, "FILTER"),
+        ];
+        for (path, cards, dataset, filter, pivot, keyword) in cases {
+            let found = registry.identify(Some(&header(&cards)), path, None).unwrap_or_else(|error| panic!("{path}: {error}"));
+            assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str(), found.entry.pivot_angstrom), (dataset, filter, pivot), "{path}");
+            assert_eq!(found.source, header_keyword(keyword), "{path}");
+            assert!(found.warnings.is_empty(), "{path}: {:?}", found.warnings);
+        }
+        assert_eq!(
+            registry.identify(Some(&header(&EUCLID_CARDS)), "cutout.fits", None).unwrap_err(),
+            FilterError::DatasetRequired { file_name: "cutout.fits".into() }
+        );
+        let ps1_without_telescope = header(&ps1_cards[1..]);
+        assert_eq!(registry.identify(Some(&ps1_without_telescope), "stack.fits", None).unwrap().entry.dataset, "PS1");
+    }
+
+    #[test]
+    fn a_plane_of_a_band_cube_takes_its_band_card() {
+        let registry = FilterRegistry::builtin();
+        let cube = header(&LEGACY_CUBE_CARDS);
+        let found = registry.identify_plane(Some(&cube), LEGACY_CUBE, None, Some(1)).unwrap();
+        assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str(), found.entry.pivot_angstrom), ("DECAM", "r", 6417.6));
+        assert_eq!(found.source, header_keyword("BAND1"));
+        assert_eq!(found.warnings, [LEGACY_ASSUMPTION]);
+        for (plane, filter, pivot) in [(0, "g", 4808.5), (2, "i", 7814.6), (3, "z", 9168.9)] {
+            let found = registry.identify_plane(Some(&cube), LEGACY_CUBE, None, Some(plane)).unwrap();
+            assert_eq!((found.entry.filter.as_str(), found.entry.pivot_angstrom), (filter, pivot), "plane {plane}");
+            assert_eq!(found.source, header_keyword(&format!("BAND{plane}")));
+        }
+        let refused = registry.identify(Some(&cube), LEGACY_CUBE, None).unwrap_err();
+        assert_eq!(
+            refused,
+            FilterError::BandPlaneRequired { file_name: LEGACY_CUBE.into(), bands: ["g", "r", "i", "z"].map(String::from).to_vec() }
+        );
+        assert_eq!(
+            refused.to_string(),
+            "'ls-dr10_A_griz_invvar_maskbits_458px.fits': the file holds the bands g, r, i, z as planes; open one plane to identify its filter"
+        );
+        let requested = registry.identify_plane(Some(&cube), LEGACY_CUBE, Some("decam"), Some(1)).unwrap();
+        assert_eq!((requested.entry.dataset.as_str(), requested.entry.filter.as_str()), ("DECAM", "r"));
+        assert!(requested.warnings.is_empty(), "{:?}", requested.warnings);
+    }
+
+    #[test]
+    fn the_dataset_is_never_guessed_from_a_band_or_a_stray_word() {
+        let registry = FilterRegistry::builtin();
+        let unnamed: [&[(&str, &str)]; 6] = [
+            &[("FILTER", "r")],
+            &[("TELESCOP", "2.5m"), ("FILTER", "r")],
+            &[("ORIGIN", "NOAO-IRAF FITS Image Kernel July 2003"), ("FILTER", "r")],
+            &[("FILTER", "VIS")],
+            &[("FILTER", "SDSS r")],
+            &[("FILTER", "2MASS Ks")],
+        ];
+        for cards in unnamed {
+            assert_eq!(
+                registry.identify(Some(&header(cards)), "image.fits", None).unwrap_err(),
+                FilterError::DatasetRequired { file_name: "image.fits".into() },
+                "{cards:?}"
+            );
+        }
+        assert_eq!(
+            registry.identify(Some(&header(&[("FILTER", "F444W")])), "JWST_F200W.fits", None).unwrap_err(),
+            FilterError::DatasetRequired { file_name: "JWST_F200W.fits".into() }
+        );
+        assert_eq!(
+            FilterError::DatasetRequired { file_name: "image.fits".into() }.to_string(),
+            "'image.fits': the header does not identify a registry dataset, so the dataset must be given"
+        );
+    }
+
+    #[test]
+    fn a_requested_dataset_that_contradicts_the_header_is_refused() {
+        let registry = FilterRegistry::builtin();
+        let refused = registry.identify(Some(&header(&SDSS_CARDS)), SDSS_FRAME, Some("PS1")).unwrap_err();
+        assert!(matches!(refused, FilterError::DatasetMismatch { .. }), "{refused:?}");
+        assert_eq!(refused.to_string(), "'frame-r-001462-4-0165.fits.bz2': the header identifies SDSS but the dataset PS1 was asked for");
+    }
+
+    #[test]
+    fn a_custom_dataset_that_names_a_built_in_one_is_skipped_and_the_others_are_kept() {
+        let cfht = custom(serde_json::json!({"u": {"lambda": 3676.1, "instrument": "MegaCam", "group": "optical"}}));
+        let euclid = custom(serde_json::json!({"VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}}));
+        let stored = BTreeMap::from([("EUCLID".to_string(), euclid), ("CFHT".to_string(), cfht.clone())]);
+        let (registry, warnings) = FilterRegistry::with_custom_datasets(&stored);
+        assert_eq!(registry.entry("EUCLID", "VIS").map(|found| found.pivot_angstrom), Some(7103.4));
+        assert_eq!(registry.entry("CFHT", "u").map(|found| found.pivot_angstrom), Some(3676.1));
+        assert_eq!(
+            warnings,
+            ["custom filter dataset EUCLID is not used: EUCLID is a built-in dataset; rename it in filter_datasets to keep its filters"]
+        );
+        assert!(matches!(FilterRegistry::with_datasets(&stored), Err(FilterError::InvalidDataset { .. })));
+
+        let bad = custom(serde_json::json!({"X": {"lambda": -1.0, "instrument": "I", "group": "g"}}));
+        let (registry, warnings) = FilterRegistry::with_custom_datasets(&BTreeMap::from([("BAD".to_string(), bad), ("CFHT".to_string(), cfht)]));
+        assert_eq!(registry.entry("CFHT", "u").map(|found| found.pivot_angstrom), Some(3676.1));
+        assert!(registry.entry("BAD", "X").is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("custom filter dataset BAD is not used: "), "{warnings:?}");
+
+        let (registry, warnings) = FilterRegistry::with_custom_datasets(&BTreeMap::new());
+        assert_eq!(registry, FilterRegistry::builtin());
+        assert!(warnings.is_empty());
+    }
+
+    const LEGACY_PLANE_COPY_CARDS: [(&str, &str); 9] = [
+        ("SURVEY", "LegacySurvey"),
+        ("VERSION", "DR10"),
+        ("IMAGETYP", "IMAGE"),
+        ("BANDS", "griz"),
+        ("BAND0", "g"),
+        ("BAND1", "r"),
+        ("BAND2", "i"),
+        ("BAND3", "z"),
+        ("NAXIS", "2"),
+    ];
+
+    fn legacy_plane_copy(plane_cards: &[(&str, &str)]) -> HduHeader {
+        header(&[&LEGACY_PLANE_COPY_CARDS[..], plane_cards].concat())
+    }
+
+    #[test]
+    fn the_header_of_a_loaded_band_plane_names_its_plane() {
+        let registry = FilterRegistry::builtin();
+        let plane_one = legacy_plane_copy(&[("ABPLHDU", "0"), ("ABPLANE", "1"), ("ABPLBAND", "r")]);
+        let found = registry.identify(Some(&plane_one), LEGACY_CUBE, None).unwrap();
+        assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str(), found.entry.pivot_angstrom), ("DECAM", "r", 6417.6));
+        assert_eq!(found.source, header_keyword("BAND1"));
+        assert_eq!(found.warnings, [LEGACY_ASSUMPTION]);
+
+        let plane_two = legacy_plane_copy(&[("ABPLHDU", "0"), ("ABPLANE", "2"), ("ABPLBAND", "i")]);
+        let found = registry.identify(Some(&plane_two), LEGACY_CUBE, None).unwrap();
+        assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str(), found.entry.pivot_angstrom), ("DECAM", "i", 7814.6));
+        assert_eq!(found.source, header_keyword("BAND2"));
+
+        let argument = registry.identify_plane(Some(&plane_one), LEGACY_CUBE, None, Some(3)).unwrap();
+        assert_eq!((argument.entry.filter.as_str(), argument.entry.pivot_angstrom), ("z", 9168.9));
+        assert_eq!(argument.source, header_keyword("BAND3"));
+
+        let requested = registry.identify(Some(&plane_one), LEGACY_CUBE, Some("decam")).unwrap();
+        assert_eq!((requested.entry.dataset.as_str(), requested.entry.filter.as_str()), ("DECAM", "r"));
+        assert!(requested.warnings.is_empty(), "{:?}", requested.warnings);
+    }
+
+    #[test]
+    fn a_plane_labelled_only_by_the_bands_card_takes_its_label() {
+        let registry = FilterRegistry::builtin();
+        let labelled = [("SURVEY", "LegacySurvey"), ("BANDS", "grz"), ("NAXIS", "2"), ("ABPLHDU", "0"), ("ABPLANE", "2"), ("ABPLBAND", "z")];
+        let found = registry.identify(Some(&header(&labelled)), "cut.fits", None).unwrap();
+        assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str(), found.entry.pivot_angstrom), ("DECAM", "z", 9168.9));
+        assert_eq!(found.source, header_keyword("BANDS"));
+        assert_eq!(found.warnings, [LEGACY_ASSUMPTION]);
+
+        let unlabelled = header(&labelled[..5]);
+        assert_eq!(
+            registry.identify(Some(&unlabelled), "cut.fits", None).unwrap_err(),
+            FilterError::DatasetNotInFileName { dataset: "DECAM".into(), file_name: "cut.fits".into() }
+        );
+    }
+
+    #[test]
+    fn a_header_without_both_plane_cards_is_read_as_before() {
+        let registry = FilterRegistry::builtin();
+        assert_eq!(
+            registry.identify(Some(&header(&LEGACY_CUBE_CARDS)), LEGACY_CUBE, None).unwrap_err(),
+            FilterError::BandPlaneRequired { file_name: LEGACY_CUBE.into(), bands: ["g", "r", "i", "z"].map(String::from).to_vec() }
+        );
+
+        let without_hdu_card = legacy_plane_copy(&[("ABPLANE", "1"), ("ABPLBAND", "r")]);
+        let refused = registry.identify(Some(&without_hdu_card), LEGACY_CUBE, None).unwrap_err();
+        assert!(matches!(refused, FilterError::DatasetNotInFileName { .. }), "{refused:?}");
+
+        let jwst = header(&[("TELESCOP", "JWST"), ("INSTRUME", "NIRCAM"), ("FILTER", "F200W"), ("ABPLHDU", "0"), ("ABPLANE", "1")]);
+        let found = registry.identify(Some(&jwst), "jw.fits", None).unwrap();
+        assert_eq!((found.entry.dataset.as_str(), found.entry.filter.as_str()), ("JWST", "F200W"));
+        assert_eq!(found.source, header_keyword("FILTER"));
     }
 }

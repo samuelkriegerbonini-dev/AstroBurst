@@ -5,6 +5,7 @@ import {
   clampZoomPanScale,
   FIT_SCALE_CAP,
   imageRenderingFor,
+  screenPixelRatio,
   wheelGestureZooms,
   wheelZoomFactor,
   ZOOM_PAN_MAX,
@@ -259,7 +260,7 @@ function ZoomPanView({
           draggable={false}
           onLoad={handleImgLoad}
           onError={handleImgError}
-          style={{ imageRendering: imageRenderingFor(scale) }}
+          style={{ imageRendering: imageRenderingFor(scale, screenPixelRatio()) }}
         />
         {overlayCanvasRef && (
           <canvas

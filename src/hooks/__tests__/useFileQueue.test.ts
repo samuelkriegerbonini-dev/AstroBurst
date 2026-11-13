@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const { processFitsFullMock, getFitsExtensionsMock, releaseCubesMock, probeSpectrum1dMock } = vi.hoisted(() => ({
+const { processFitsFullMock, getFitsExtensionsMock, releaseCubesMock, probeSpectrum1dMock, probeTableMock } = vi.hoisted(() => ({
   processFitsFullMock: vi.fn(),
   getFitsExtensionsMock: vi.fn(),
   releaseCubesMock: vi.fn(async () => {}),
   probeSpectrum1dMock: vi.fn(),
+  probeTableMock: vi.fn(),
 }));
 
 vi.mock("../../services/fits", () => ({
@@ -18,9 +19,11 @@ vi.mock("../../services/header", () => ({
 }));
 vi.mock("../../services/cube", () => ({ releaseCubes: releaseCubesMock }));
 vi.mock("../../services/spectrum1d", () => ({ probeSpectrum1d: probeSpectrum1dMock }));
+vi.mock("../../services/tables", () => ({ probeTable: probeTableMock }));
 
 import { fileStore } from "../useFileStore";
-import { ingestOutcome, pathToRelease, releaseCubesOnSwitch, settleIngestFailure } from "../useFileQueue";
+import { alreadyInFilesMessage, ingestOutcome, ingestRoute, pathToRelease, releaseCubesOnSwitch, settleIngestFailure, settleTextTable } from "../useFileQueue";
+import type { TableProbe, TableProbeColumn } from "../../shared/types/tables";
 
 const X1D_REJECTION =
   "Failed to load C:/d/jw_x1d.fits: HDU 1 (EXTRACT1D): BINTABLE extension, holds no image pixels; " +
@@ -74,12 +77,120 @@ describe("ingestOutcome", () => {
   });
 });
 
+const CATALOG_REJECTION =
+  "Failed to load C:/d/cat.fits: HDU 1 (CATALOG): BINTABLE extension, holds no image pixels; " +
+  "no HDU in this file holds a 2D image. " +
+  "HDUs: [0] EXTNAME=(none) XTENSION=PRIMARY NAXIS=0 -- header only, no pixel data; " +
+  "[1] EXTNAME=CATALOG XTENSION=BINTABLE NAXIS=2 [64x500] -- BINTABLE extension, holds no image pixels";
+
+function probeColumns(names: string[]): TableProbeColumn[] {
+  return names.map((name) => ({ name, unit: null, datatype: "float64", numeric: true }));
+}
+
+function tableProbe(overrides: Partial<TableProbe>): TableProbe {
+  return {
+    format: "csv",
+    n_rows: 10,
+    columns: probeColumns(["a", "b"]),
+    tables: null,
+    meta: null,
+    comments: [],
+    guess: { kind: "unknown", reason: "no column set of a spectrum, a light curve or a catalogue" },
+    notes: [],
+    ...overrides,
+  };
+}
+
+const CATALOG_PROBE = tableProbe({
+  format: "fits_bintable",
+  n_rows: 500,
+  columns: probeColumns(["RA", "DEC", "FLUX_G", "FLUX_R", "FLUX_Z", "TYPE", "MASKBITS", "SHAPE_R"]),
+  tables: [{ hdu: 1, extname: "CATALOG", n_rows: 500, n_columns: 8 }],
+  guess: { kind: "catalogue", reason: "ra and dec columns" },
+});
+
+describe("ingestRoute", () => {
+  it("routes text tables away from the FITS reader", () => {
+    expect(ingestRoute("C:/d/C1_ls_dr10_box_A.csv")).toBe("text-table");
+    expect(ingestRoute("C:/d/x_whtlt.ecsv")).toBe("text-table");
+    expect(ingestRoute("C:/D/X_WHTLT.ECSV")).toBe("text-table");
+    expect(ingestRoute("C:/d/m42.fits")).toBe("fits");
+    expect(ingestRoute("C:/d/frame-r-001462-4-0165.fits.bz2")).toBe("fits");
+  });
+});
+
+describe("settleTextTable", () => {
+  beforeEach(() => {
+    fileStore.reset();
+    processFitsFullMock.mockReset();
+    probeTableMock.mockReset();
+  });
+
+  it("lists the app's CSV spectrum as a spectrum and every other text table as a table", async () => {
+    const csvSpectrum = queued("spec.csv");
+    const spectrumProbe = tableProbe({ columns: probeColumns(["wavelength_vacuum_um", "flux"]), guess: { kind: "spectrum", reason: "columns wavelength_vacuum_um and flux: a spectrum exported by AstroBurst" } });
+    probeTableMock.mockResolvedValueOnce(spectrumProbe);
+    await settleTextTable(csvSpectrum);
+    expect(probeTableMock).toHaveBeenLastCalledWith("C:/d/spec.csv");
+    expect(fileStore.getFile(csvSpectrum.id)).toMatchObject({ status: "spectrum", error: null, table: spectrumProbe });
+    expect(fileStore.getFile(csvSpectrum.id)?.spectrum).toBeUndefined();
+
+    const cases: [string, Partial<TableProbe>][] = [
+      ["x_whtlt.ecsv", { format: "ecsv", guess: { kind: "light_curve", reason: "time column MJD_UTC and value column whitelight_flux" } }],
+      ["C1_ls_dr10_box_A.csv", { format: "csv", guess: { kind: "catalogue", reason: "sky position columns ra and dec" } }],
+      ["exported.ecsv", { format: "ecsv", guess: { kind: "spectrum", reason: "columns wavelength_vacuum_um and flux: a spectrum exported by AstroBurst" } }],
+    ];
+    for (const [name, overrides] of cases) {
+      const file = queued(name);
+      const probe = tableProbe(overrides);
+      probeTableMock.mockResolvedValueOnce(probe);
+      await settleTextTable(file);
+      expect(fileStore.getFile(file.id), name).toMatchObject({ status: "table", error: null, table: probe });
+    }
+
+    const broken = queued("broken.csv");
+    probeTableMock.mockRejectedValueOnce(new Error("the CSV header row is missing"));
+    await settleTextTable(broken);
+    expect(fileStore.getFile(broken.id)).toMatchObject({ status: "error", error: "the CSV header row is missing" });
+    expect(fileStore.getStats()).toMatchObject({ total: 5, done: 0, failed: 1, spectra: 1, tables: 3 });
+    expect(processFitsFullMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("settleIngestFailure", () => {
   beforeEach(() => {
     fileStore.reset();
     processFitsFullMock.mockReset();
     getFitsExtensionsMock.mockReset();
     probeSpectrum1dMock.mockReset();
+    probeTableMock.mockReset();
+    probeTableMock.mockRejectedValue(new Error("not a table"));
+  });
+
+  it("turns a FITS file that holds only tables into a table row", async () => {
+    const file = queued("cat.fits");
+    getFitsExtensionsMock.mockResolvedValue({ extensions: [] });
+    probeTableMock.mockResolvedValue(CATALOG_PROBE);
+    await settleIngestFailure(file, CATALOG_REJECTION);
+    expect(probeTableMock).toHaveBeenCalledWith("C:/d/cat.fits");
+    expect(probeSpectrum1dMock).not.toHaveBeenCalled();
+    expect(fileStore.getFile(file.id)).toMatchObject({ status: "table", error: null, table: CATALOG_PROBE });
+    expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 0, spectra: 0, tables: 1 });
+  });
+
+  it("keeps the FITS rejection when the table probe lists no binary table or fails", async () => {
+    getFitsExtensionsMock.mockResolvedValue({ extensions: [] });
+    const empty = queued("cat.fits");
+    probeTableMock.mockResolvedValueOnce({ ...CATALOG_PROBE, tables: [] });
+    await settleIngestFailure(empty, CATALOG_REJECTION);
+    expect(fileStore.getFile(empty.id)).toMatchObject({ status: "error", error: CATALOG_REJECTION });
+
+    fileStore.reset();
+    const refused = queued("cat.fits");
+    probeTableMock.mockRejectedValueOnce(new Error("C:/d/cat.fits holds no binary table"));
+    await settleIngestFailure(refused, CATALOG_REJECTION);
+    expect(fileStore.getFile(refused.id)).toMatchObject({ status: "error", error: CATALOG_REJECTION });
+    expect(fileStore.getStats()).toMatchObject({ failed: 1, tables: 0 });
   });
 
   it("lists an x1d as a spectrum with its probe, without scanning extensions and without counting a failure", async () => {
@@ -90,6 +201,18 @@ describe("settleIngestFailure", () => {
     expect(getFitsExtensionsMock).not.toHaveBeenCalled();
     expect(fileStore.getFile(file.id)).toMatchObject({ status: "spectrum", error: null, spectrum: { kind: "x1d", hdu: 1 } });
     expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 0, spectra: 1 });
+  });
+
+  it("keeps the time-series probe on the row as the backend gave it", async () => {
+    const file = queued("jw02358_x1dints.fits");
+    const series = { kind: "x1dints", layout: "rows", n_series: 1, n_integrations: 240, n_channels: 431 };
+    probeSpectrum1dMock.mockResolvedValue(series);
+    expect(ingestOutcome(X1D_REJECTION)).toBe("spectrum");
+    await settleIngestFailure(file, X1D_REJECTION);
+    expect(fileStore.getFile(file.id)).toMatchObject({ status: "spectrum", error: null });
+    expect(fileStore.getFile(file.id)?.spectrum).toEqual(series);
+    expect(fileStore.getStats()).toMatchObject({ spectra: 1, failed: 0 });
+    expect(probeTableMock).not.toHaveBeenCalled();
   });
 
   it("lists a 1D array file as a wcs1d spectrum on the HDU the probe found", async () => {
@@ -150,6 +273,7 @@ describe("settleIngestFailure", () => {
     getFitsExtensionsMock.mockResolvedValue({ extensions: [] });
     await settleIngestFailure(file, PLAIN_REJECTION);
     expect(probeSpectrum1dMock).not.toHaveBeenCalled();
+    expect(probeTableMock).not.toHaveBeenCalled();
     expect(fileStore.getFile(file.id)).toMatchObject({ status: "error", error: PLAIN_REJECTION });
     expect(fileStore.getStats()).toMatchObject({ done: 0, failed: 1, spectra: 0 });
   });
@@ -206,5 +330,17 @@ describe("releaseCubesOnSwitch", () => {
     fileStore.selectFile(cube.id);
     await settled();
     expect(releaseCubesMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("alreadyInFilesMessage", () => {
+  it("names the file a repeated open found in Files, counts several, and says nothing when every file was new", () => {
+    expect(alreadyInFilesMessage([{ name: "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv" }])).toBe(
+      "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv is already in Files: selected it instead of adding it again",
+    );
+    expect(alreadyInFilesMessage([{ name: "a.fits" }, { name: "b.fits" }, { name: "c.csv" }])).toBe(
+      "3 files are already in Files: selected the first instead of adding them again",
+    );
+    expect(alreadyInFilesMessage([])).toBeNull();
   });
 });

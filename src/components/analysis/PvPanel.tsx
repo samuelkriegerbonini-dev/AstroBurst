@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { Activity, Loader2 } from "lucide-react";
+import { CopyCsvButton, ErrorAlert, SMALL_BUTTON_CLASS } from "../ui";
 import SpectralAxisControls from "./SpectralAxisControls";
 import OutputNote from "./OutputNote";
 import ProfilePlot from "../regions/ProfilePlot";
@@ -50,12 +50,9 @@ interface PvPanelProps {
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 font-mono focus:border-violet-500/50 w-14 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
-const SMALL_BUTTON_CLASS =
-  "px-2 py-0.5 rounded text-[9px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40";
 const RUN_COLOR = "var(--ab-violet)";
 const NO_LINE_HINT = "draw a line region on the cube (the selected line is used, else the first one)";
 const WIDTH_TITLE = "width averaged across the slit in pixels, one sample per step; width <= step = single sample";
-const COPIED_FEEDBACK_MS = 1500;
 const PLOT_HEIGHT = 200;
 const CSV_NAME = "pv-ridge";
 const SIGNIFICANT_DIGITS = 4;
@@ -63,9 +60,9 @@ const EM_DASH = "—";
 
 function Card({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="bg-zinc-900/80 rounded px-2 py-1.5" title={title}>
+    <div className="bg-zinc-900/80 rounded px-2 py-1.5" title={title ?? value}>
       <div className="text-[9px] text-zinc-500 uppercase">{label}</div>
-      <div className="text-[10px] font-mono text-zinc-200 truncate">{value}</div>
+      <div className="text-[10px] font-mono text-zinc-200 break-words">{value}</div>
     </div>
   );
 }
@@ -101,7 +98,6 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [copied, flagCopied] = useTimedFlag(COPIED_FEEDBACK_MS);
   const [ioError, setIoError] = useState<string | null>(null);
   const seqRef = useRef(0);
 
@@ -189,16 +185,10 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
     }
   }, [filePath, region, line, step, width, z0, z1, runMode, restUm, convention, correction, correctionResult, publishPv]);
 
-  const handleCopyCsv = useCallback(async () => {
-    if (!run) return;
+  const copyText = useCallback(() => {
     setIoError(null);
-    try {
-      await navigator.clipboard.writeText(pvRidgeCsv(run));
-      flagCopied();
-    } catch (e) {
-      setIoError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }, [run, flagCopied]);
+    return run ? pvRidgeCsv(run) : null;
+  }, [run]);
 
   const handleSaveCsv = useCallback(async () => {
     if (!run || busy) return;
@@ -326,11 +316,7 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
           </button>
         </div>
         {region && blocker && <div className="text-[9px] text-amber-300">{blocker}</div>}
-        {error && (
-          <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
-            {error}
-          </div>
-        )}
+        <ErrorAlert compact message={error} />
         {pvLabel !== null && (
           <div className="text-[9px] text-amber-300 bg-amber-900/20 border border-amber-800/30 rounded px-2 py-1 break-words">
             PV image on screen ({pvLabel}): row 0 (top) is the first channel of the range; pixel clicks and regions on
@@ -383,14 +369,12 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
               <Card label="cells" value={`${summary.n_offsets} × ${summary.n_channels}, ${summary.n_across} across`} />
             </div>
             <div className="flex flex-wrap items-center gap-1">
-              <button type="button" onClick={handleCopyCsv} className={SMALL_BUTTON_CLASS} title="Copy the ridge table as CSV">
-                {copied ? "copied" : "Copy CSV"}
-              </button>
+              <CopyCsvButton text={copyText} title="Copy the ridge table as CSV" onError={setIoError} />
               <button type="button" onClick={handleSaveCsv} disabled={busy} className={SMALL_BUTTON_CLASS} title="Save the ridge table as CSV">
                 Save CSV
               </button>
             </div>
-            {ioError && <div className="text-[9px] text-red-400 break-words">{ioError}</div>}
+            <ErrorAlert compact message={ioError} />
             {res.notes.length > 0 && (
               <details className="text-[10px] font-mono text-zinc-600">
                 <summary className="cursor-pointer select-none">notes ({res.notes.length})</summary>

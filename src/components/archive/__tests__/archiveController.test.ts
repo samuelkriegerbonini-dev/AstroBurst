@@ -422,6 +422,14 @@ describe("mission switch and filters", () => {
     expect(t.svc.search).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ mission: "hst", filters: { instrument: "WFC3", filter: "F502N" } }), false);
   });
 
+  it("applies the preset of a science suggestion", async () => {
+    const t = await ready();
+    const tso = SUGGESTIONS.find((s) => s.id === "p1366-tso")!;
+    await t.ctl.runSuggestion(tso);
+    expect(t.store.getState().form).toMatchObject({ mission: "jwst", text: "1366", preset: "tso" });
+    expect(t.svc.search).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ mission: "jwst", preset: "tso" }), false);
+  });
+
   it("searches around a plate-solved workspace image", async () => {
     const t = await ready();
     await t.ctl.searchAround({ raDeg: 274.71, decDeg: -13.83, radiusArcmin: 4.2, label: "673nmos.fits" });

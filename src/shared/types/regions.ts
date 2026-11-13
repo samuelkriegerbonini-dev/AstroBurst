@@ -135,6 +135,9 @@ export interface RegionStatsResult {
   photcal?: PhotCal | null;
   calibration_warnings?: string[];
   pixel_area_arcsec2?: number | null;
+  notes?: string[];
+  bunit?: string | null;
+  summed_unit?: string | null;
 }
 
 export interface RadialBin {
@@ -156,6 +159,9 @@ export interface RadialProfile {
   dq_excluded: number | null;
   region_excluded: number;
   elapsed_ms: number;
+  notes?: string[];
+  bunit?: string | null;
+  summed_unit?: string | null;
 }
 
 export interface LineCut {
@@ -173,6 +179,9 @@ export interface LineCut {
   dq_excluded: number | null;
   region_excluded: number;
   elapsed_ms: number;
+  notes?: string[];
+  bunit?: string | null;
+  summed_unit?: string | null;
 }
 
 export interface RegionImportResult {
@@ -226,4 +235,6 @@ export interface SbProfile {
   dq_excluded: number | null;
   region_excluded: number;
   elapsed_ms: number;
+  bunit?: string | null;
+  summed_unit?: string | null;
 }

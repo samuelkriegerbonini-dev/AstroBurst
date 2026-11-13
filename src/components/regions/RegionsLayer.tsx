@@ -28,6 +28,7 @@ import { appModeStore } from "../../hooks/useAppMode";
 import { generateId } from "../../utils/format";
 import { regionLayerSwallowsClick } from "../../utils/regionClick";
 import { regionKeyAction } from "../../utils/regionKeys";
+import { toolAfterCommit } from "../../utils/regionToolHints";
 
 interface RegionsLayerProps {
   containerRef: RefObject<HTMLDivElement | null>;
@@ -245,7 +246,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
       regionStore.add(fileKey, { id, shape, props: { ...DEFAULT_REGION_PROPS }, backgroundId: null });
       regionStore.select(fileKey, id);
       regionStore.clearDraft(fileKey);
-      regionStore.setTool("select");
+      regionStore.setTool(toolAfterCommit(shape.shape));
     },
     [fileKey],
   );
@@ -402,6 +403,7 @@ function RegionsLayer({ containerRef, transform, renderW, renderH, fitsW, fitsH,
         editable: isEditableTarget(e.target),
         inViewer: appModeStore.get() === "workspace" && isViewerTarget(e.target, containerRef.current),
         inModal: isModalTarget(e.target),
+        inWorkspace: appModeStore.get() === "workspace",
         draft: regionStore.getDraftFor(key)?.shape ?? null,
         hasSelection: selectedId !== null,
         tool: regionStore.getTool(),

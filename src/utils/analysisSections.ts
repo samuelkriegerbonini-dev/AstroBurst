@@ -10,7 +10,7 @@ export type AnalysisToolId = Extract<DockToolId, "image" | "astrometry" | "photo
 
 export const ANALYSIS_TOOL_IDS: readonly AnalysisToolId[] = ["image", "astrometry", "photometry", "cube", "log"];
 
-export const CUBE_TOOL_EMPTY_TITLE = "Open a data cube or a ramp";
+export const CUBE_TOOL_EMPTY_TITLE = "Open a 1D spectrum, a data cube or a ramp";
 
 export const MIN_CHIP_SECTIONS = 2;
 
@@ -26,6 +26,8 @@ export interface AnalysisSectionsInput {
   isRamp?: boolean;
   isSpectrum?: boolean;
   hasSpectrumDocument?: boolean;
+  hasSpectrumSeries?: boolean;
+  hasPhotometricPlanes?: boolean;
   showFft: boolean;
   showDeepZoom: boolean;
 }
@@ -50,6 +52,12 @@ export const ANALYSIS_SECTION = {
   pv: { id: "analysis-pv", label: "PV", tool: "cube" },
   deepZoom: { id: "analysis-deep-zoom", label: "Deep Zoom", tool: "image" },
   log: { id: "analysis-log", label: "Log", tool: "log" },
+  tso: { id: "analysis-tso", label: "Light curves", tool: "cube" },
+  sed: { id: "analysis-sed", label: "SED", tool: "cube" },
+  forced: { id: "analysis-forced", label: "Multi-band", tool: "photometry" },
+  depth: { id: "analysis-depth", label: "Depth", tool: "photometry" },
+  resolution: { id: "analysis-resolution", label: "Resolution", tool: "photometry" },
+  compare: { id: "analysis-compare", label: "Compare", tool: "photometry" },
 } as const satisfies Record<string, AnalysisSection>;
 
 export function toolSections(tool: AnalysisToolId, input: AnalysisSectionsInput): AnalysisSection[] {
@@ -69,11 +77,13 @@ export function toolSections(tool: AnalysisToolId, input: AnalysisSectionsInput)
     case "astrometry":
       return [s.stars, s.geometry, s.catalog, s.targets];
     case "photometry":
-      return [s.photometry, s.table, s.series];
+      return [s.photometry, s.table, s.series, s.forced, s.depth, s.resolution, s.compare];
     case "cube":
       return [
         ...(input.isRamp ? [s.ramp] : []),
         ...(input.isCube || input.isSpectrum || input.hasSpectrumDocument ? [s.spectrum] : []),
+        ...(input.hasSpectrumSeries ? [s.tso] : []),
+        ...(input.isCube && input.hasPhotometricPlanes ? [s.sed] : []),
         ...(input.isCube && !input.isRamp ? [s.pv] : []),
       ];
     case "log":

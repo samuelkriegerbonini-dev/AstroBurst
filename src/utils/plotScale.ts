@@ -43,6 +43,8 @@ export function linearScale(domain: [number, number], range: [number, number]): 
 const TICK_EXPONENTIAL_BELOW = 1e-2;
 const TICK_EXPONENTIAL_ABOVE = 1e5;
 const TICK_EXPONENTIAL_DIGITS = 2;
+const TICK_EXPONENTIAL_MAX_DIGITS = 6;
+const TICK_SPAN_INTERVALS = 4;
 const TICK_EXTRA_DECIMALS = 2;
 const TICK_MAX_DECIMALS = 6;
 
@@ -52,7 +54,8 @@ export function formatAxisTick(value: number, range: number): string {
   const span = Number.isFinite(range) && range > 0 ? range : Math.abs(value);
   const magnitude = Math.max(Math.abs(value), span);
   if (magnitude < TICK_EXPONENTIAL_BELOW || magnitude >= TICK_EXPONENTIAL_ABOVE) {
-    return value.toExponential(TICK_EXPONENTIAL_DIGITS);
+    const resolved = Math.floor(Math.log10(Math.abs(value))) - Math.floor(Math.log10(span / TICK_SPAN_INTERVALS));
+    return value.toExponential(Math.min(TICK_EXPONENTIAL_MAX_DIGITS, Math.max(TICK_EXPONENTIAL_DIGITS, resolved)));
   }
   const decimals = Math.min(
     TICK_MAX_DECIMALS,
@@ -107,4 +110,38 @@ export function finiteExtent(values: (number | null)[]): [number, number] | null
     if (v > hi) hi = v;
   }
   return lo <= hi ? [lo, hi] : null;
+}
+
+export const LEGEND_CHAR_PX = 5.4;
+export const LEGEND_ROW_PX = 11;
+
+export interface LegendSlot {
+  x: number;
+  row: number;
+}
+
+export function legendRows(widths: readonly number[], startX: number, maxX: number, swatchPx = 11, gapPx = 10): LegendSlot[] {
+  const slots: LegendSlot[] = [];
+  let x = startX;
+  let row = 0;
+  for (const w of widths) {
+    if (x > startX && x + swatchPx + w > maxX) {
+      row += 1;
+      x = startX;
+    }
+    slots.push({ x, row });
+    x += swatchPx + w + gapPx;
+  }
+  return slots;
+}
+
+const LEGEND_ELLIPSIS = "...";
+const LEGEND_MIN_SPLIT_CHARS = 5;
+
+export function fitLegendLabel(label: string, maxChars: number): string {
+  if (label.length <= maxChars) return label;
+  if (maxChars < LEGEND_MIN_SPLIT_CHARS) return label.slice(0, Math.max(1, maxChars));
+  const kept = maxChars - LEGEND_ELLIPSIS.length;
+  const tail = Math.floor(kept / 2);
+  return label.slice(0, Math.ceil(kept / 2)) + LEGEND_ELLIPSIS + label.slice(label.length - tail);
 }

@@ -1,8 +1,14 @@
 pub(crate) mod area;
 mod time_series;
 pub use time_series::*;
+mod status;
+pub use status::*;
+mod depth;
+pub use depth::*;
+mod forced;
+pub use forced::*;
 use area::AreaWeights;
-use crate::service::area::{extname_is, holds_one_plane};
+use crate::service::area::holds_one_plane;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,15 +46,19 @@ use crate::core::astrometry::catalog::{
 use crate::core::astrometry::wcs::WcsTransform;
 use crate::infra::wcs_source::load_wcs;
 use crate::core::imaging::dq_flags::{apply_exclusion, exclusion_map};
+use crate::core::imaging::layer_roles::{classify_layer, LayerRole};
 use crate::core::imaging::luminance::rgb_to_luminance;
 use crate::core::imaging::region::{paint_exclusions, RegionShape};
 use crate::core::imaging::stats::{
     build_histogram, compute_histogram_with_stats, compute_image_stats, downsample_histogram, is_valid_pixel,
 };
 use crate::core::imaging::stf::auto_stf;
-use crate::core::metadata::photcal::{missing_calibration_reason, PhotCal};
+use crate::core::metadata::photcal::{missing_calibration_reason, MagSystem, PhotCal};
 use crate::infra::cache::ImageEntry;
+use crate::infra::fits::band_planes::band_plane_of_path;
 use crate::infra::fits::dispatcher::list_source_extensions;
+use crate::infra::fits::reader::HduInfo;
+use crate::infra::image_source::ErrOrigin;
 use crate::types::header::HduHeader;
 use crate::types::image_ref::PlaneSelector;
 
@@ -65,7 +75,6 @@ const ARCSEC_PER_ARCMIN: f64 = 60.0;
 const IDENTITY_STF: StfParams = StfParams { shadow: 0.0, midtone: 0.5, highlight: 1.0 };
 const HISTOGRAM_CHUNK: usize = 65536;
 const MIN_HISTOGRAM_WINDOW: f64 = 1e-10;
-const ERR_EXTNAME: &str = "ERR";
 
 fn is_display_referred(path: &str) -> bool {
     cached_header(path)
@@ -83,15 +92,17 @@ pub(crate) fn resolve_dq_mask(path: &str, exclude_dq: bool, dims: (usize, usize)
     if !exclude_dq {
         return None;
     }
-    let (entry, table) = match load_companions(path) {
-        Ok(comps) => comps.dq.filter(|(_, table)| table.exclusion_mask() != 0)?,
+    let comps = match load_companions(path) {
+        Ok(comps) => comps,
         Err(e) => {
             log::warn!("DQ exclusion unavailable for {}: {:#}", path, e);
             return None;
         }
     };
+    let exclusion = comps.exclusion_mask();
+    let (entry, _) = comps.dq.filter(|_| exclusion != 0)?;
     let plane = entry.int_plane().filter(|plane| plane.bits.dim() == dims)?;
-    let map = exclusion_map(&plane.bits, table.exclusion_mask());
+    let map = exclusion_map(&plane.bits, exclusion);
     let excluded = map.iter().filter(|&&v| v != 0).count() as u64;
     Some(DqMask { map, excluded })
 }
@@ -382,6 +393,7 @@ fn composite_detection_luminance(
 pub const PHOTOMETRY_SATURATED_FLAG: &str = "SATURATED";
 pub const HEADER_PROCESSING_PROVENANCE: &str = "ABPROC";
 pub const RES_PHOTCAL: &str = "photcal";
+pub(crate) const DQ_NOT_APPLIED_PREFIX: &str = "DQ exclusion requested but not applied: ";
 
 pub(crate) struct PhotometryPlanes {
     pub err: Option<ImageEntry>,
@@ -396,11 +408,11 @@ pub(crate) fn photometry_planes(path: &str, dims: (usize, usize)) -> PhotometryP
             return PhotometryPlanes { err: None, saturated: None };
         }
     };
+    let saturation = comps.saturated_mask();
     let err = comps.err.filter(|entry| entry.arr().dim() == dims);
-    let saturated = comps.dq.and_then(|(entry, table)| {
-        let bits = table.mask_from_names(&[PHOTOMETRY_SATURATED_FLAG]).ok()?;
+    let saturated = comps.dq.filter(|_| saturation != 0).and_then(|(entry, _)| {
         let plane = entry.int_plane()?;
-        (plane.bits.dim() == dims).then(|| exclusion_map(&plane.bits, bits))
+        (plane.bits.dim() == dims).then(|| exclusion_map(&plane.bits, saturation))
     });
     PhotometryPlanes { err, saturated }
 }
@@ -484,6 +496,50 @@ fn gaia_match_field(geometry: &FieldGeometry) -> ConeQuery {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UserMagSystem {
+    Ab,
+    Vega,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct UserZeroPoint {
+    pub zp: f64,
+    pub system: UserMagSystem,
+    pub per_second: bool,
+}
+
+pub(crate) use crate::core::metadata::photcal::USER_ZERO_POINT_WARNING;
+
+fn check_user_zero_point(zero_point: Option<&UserZeroPoint>) -> anyhow::Result<()> {
+    if let Some(UserZeroPoint { zp, .. }) = zero_point {
+        if !zp.is_finite() {
+            anyhow::bail!("user zero point {zp} must be a finite magnitude");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn user_photcal(header: Option<&HduHeader>, zero_point: &UserZeroPoint) -> anyhow::Result<(PhotCal, Vec<String>)> {
+    let bunit = header.and_then(|h| crate::core::metadata::photcal::card_text(h, "BUNIT"));
+    let rate = bunit.as_deref().is_some_and(|unit| {
+        crate::core::metadata::photcal::is_rate_unit(&crate::core::metadata::photcal::normalized_unit(unit))
+    });
+    let exptime = header.and_then(|h| h.get_f64("EXPTIME")).filter(|t| t.is_finite() && *t > 0.0);
+    if zero_point.per_second && !rate && exptime.is_none() {
+        anyhow::bail!(
+            "a zero point per second needs EXPTIME to turn the pixel values into a rate, and this header has none (BUNIT '{}')",
+            bunit.as_deref().unwrap_or("missing")
+        );
+    }
+    let system = match zero_point.system {
+        UserMagSystem::Ab => MagSystem::Ab,
+        UserMagSystem::Vega => MagSystem::Vega,
+    };
+    Ok((PhotCal::user_zero_point_for(header, zero_point.zp, system, zero_point.per_second), Vec::new()))
+}
+
 pub(crate) struct PhotometryContext {
     pub entry: ImageEntry,
     pub mask: Option<DqMask>,
@@ -493,44 +549,267 @@ pub(crate) struct PhotometryContext {
     pub photcal: Option<PhotCal>,
     pub gain_model: GainModel,
     pub warnings: Vec<String>,
+    pub layers: LayerReport,
+    pub calibration_source: Option<&'static str>,
+    pub calibration_gap: Option<String>,
+    pub exclusion: Option<ndarray::Array2<u8>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LayerReport {
+    pub err_source: Option<String>,
+    pub dq_source: Option<String>,
+    pub dq_flags: Option<String>,
+    pub dq_exclusion_available: bool,
+    pub dq_gap: Option<String>,
+    pub err_note: Option<String>,
+    pub err_gap: Option<String>,
+}
+
+fn plane_label(plane: &PlaneSelector) -> String {
+    match plane {
+        PlaneSelector::Hdu(index) => format!("HDU {index}"),
+        PlaneSelector::Array(key) => format!("array {key}"),
+        PlaneSelector::Auto => "primary image".to_string(),
+    }
+}
+
+fn err_origin_text(origin: &ErrOrigin) -> String {
+    match origin.n_no_data {
+        0 => origin.source.clone(),
+        1 => format!("{}, 1 pixel without data", origin.source),
+        n => format!("{}, {n} pixels without data", origin.source),
+    }
+}
+
+pub(crate) fn layer_report(path: &str, entry: &ImageEntry) -> LayerReport {
+    let dims = entry.arr().dim();
+    let references = entry.companions();
+    let dq_reference = references
+        .and_then(|c| c.dq.as_ref())
+        .map(|r| format!("DQ plane ({})", plane_label(&r.plane)));
+    let loaded = match load_companions(path) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            return LayerReport {
+                dq_source: dq_reference,
+                dq_gap: Some(format!("the companion planes could not be loaded ({e:#})")),
+                ..LayerReport::default()
+            };
+        }
+    };
+    let err_source = match &loaded.err_origin {
+        Some(origin) => Some(err_origin_text(origin)),
+        None => references
+            .and_then(|c| c.err.as_ref())
+            .filter(|_| loaded.err.as_ref().is_some_and(|plane| plane.arr().dim() == dims))
+            .map(|r| format!("ERR plane ({})", plane_label(&r.plane))),
+    };
+    let err_note = loaded
+        .err_origin
+        .as_ref()
+        .filter(|origin| origin.role != LayerRole::Sigma || origin.assumed || origin.n_no_data > 0)
+        .map(|origin| format!("error layer: {}", err_origin_text(origin)));
+    let dq_flags = match &loaded.flags {
+        Some(flags) => Some(flags.source.clone()),
+        None => loaded.dq.as_ref().map(|(_, table)| table.label().to_string()),
+    };
+    let dq_exclusion_available = loaded.exclusion_mask() != 0
+        && loaded
+            .dq
+            .as_ref()
+            .is_some_and(|(companion, _)| companion.int_plane().is_some_and(|plane| plane.bits.dim() == dims));
+    let dq_gap = match (&loaded.dq_unavailable, &loaded.flags, &dq_reference) {
+        _ if dq_exclusion_available => None,
+        (Some(reason), _, _) => Some(reason.clone()),
+        (None, Some(flags), _) if !flags.is_named() => Some(format!(
+            "the flag layer has no usable bit names ({}), so nothing is excluded until bits are chosen",
+            flags.source
+        )),
+        (None, Some(flags), _) if flags.exclusion_mask == 0 => {
+            Some(format!("no flag of this layer is selected for exclusion ({})", flags.source))
+        }
+        (None, _, None) => Some("this image has no DQ plane".to_string()),
+        (None, _, Some(source)) => Some(format!("the {source} could not be read as an integer mask of the image size")),
+    };
+    LayerReport {
+        err_source,
+        dq_source: loaded.dq_origin.or(dq_reference),
+        dq_flags,
+        dq_exclusion_available,
+        dq_gap,
+        err_note,
+        err_gap: loaded.err_unavailable,
+    }
+}
+
+fn no_data_exclusion(path: &str, planes: &PhotometryPlanes, mask: Option<&DqMask>) -> Option<ndarray::Array2<u8>> {
+    let sigma = planes.err.as_ref()?.arr();
+    load_companions(path).ok()?.err_origin.filter(|origin| origin.n_no_data > 0)?;
+    let mut excluded = mask.map_or_else(|| ndarray::Array2::zeros(sigma.dim()), |dq| dq.map.clone());
+    ndarray::Zip::from(&mut excluded).and(sigma).for_each(|flag, value| {
+        if value.is_nan() {
+            *flag = 1;
+        }
+    });
+    Some(excluded)
+}
+
+fn uncalibrated_layer_reason(path: &str, entry: &ImageEntry) -> Option<String> {
+    let layer = entry.plane_info().and_then(|info| info.pairing.layer.clone()).or_else(|| {
+        let source = source_path(path);
+        let file_name = std::path::Path::new(&source).file_name().and_then(|name| name.to_str()).unwrap_or("");
+        entry.header().map(|header| classify_layer(header, file_name))
+    })?;
+    let kind = match layer.role {
+        LayerRole::Mask => "a mask",
+        LayerRole::Variance => "a variance",
+        LayerRole::InverseVariance => "an inverse-variance",
+        LayerRole::Science | LayerRole::Sigma | LayerRole::Other => return None,
+    };
+    Some(format!("no calibration applied: this plane is {kind} layer ({})", layer.basis))
+}
+
+pub(crate) fn dq_not_applied_warning(report: &LayerReport) -> Option<String> {
+    report.dq_gap.as_ref().map(|gap| format!("{DQ_NOT_APPLIED_PREFIX}{gap}"))
 }
 
 pub(crate) fn has_err_extension(path: &str, dims: (usize, usize)) -> bool {
-    let Ok(hdus) = list_source_extensions(&source_path(path)) else {
+    let Ok(entry) = load_cached_full(path).or_else(|_| load_cached(path)) else {
+        return false;
+    };
+    let Some(reference) = entry.companions().and_then(|c| c.err.as_ref()) else {
         return false;
     };
     let (rows, cols) = dims;
-    hdus.iter().any(|h| {
-        extname_is(h.extname.as_deref(), ERR_EXTNAME)
-            && holds_one_plane(h)
-            && h.naxis1 == cols as i64
-            && h.naxis2 == rows as i64
-    })
+    let fits_the_image = |h: &HduInfo| h.naxis1 == cols as i64 && h.naxis2 == rows as i64;
+    let listed = |file: &str| list_source_extensions(file).unwrap_or_default();
+    match (&reference.plane, band_plane_of_path(&reference.path)) {
+        (PlaneSelector::Array(_), _) => false,
+        (_, Some(band)) => listed(&band.file)
+            .iter()
+            .any(|h| h.index == band.hdu && h.has_data && h.naxis == 3 && fits_the_image(h) && (band.plane as i64) < h.naxis3),
+        (PlaneSelector::Hdu(index), None) => {
+            listed(&reference.path).iter().any(|h| h.index == *index && holds_one_plane(h) && fits_the_image(h))
+        }
+        (PlaneSelector::Auto, None) => {
+            listed(&reference.path).iter().find(|h| h.has_data).is_some_and(|h| holds_one_plane(h) && fits_the_image(h))
+        }
+    }
 }
 
 pub(crate) fn photometry_context(path: &str, exclude_dq: bool) -> anyhow::Result<PhotometryContext> {
+    photometry_context_with(path, exclude_dq, None)
+}
+
+pub(crate) fn photometry_context_with(
+    path: &str,
+    exclude_dq: bool,
+    zero_point: Option<&UserZeroPoint>,
+) -> anyhow::Result<PhotometryContext> {
     let entry = load_cached_full(path).or_else(|_| load_cached(path))?;
     let dims = entry.arr().dim();
     let mask = resolve_dq_mask(path, exclude_dq, dims);
     let planes = photometry_planes(path, dims);
+    let layers = layer_report(path, &entry);
     let header = entry.header();
     let wcs = header.and_then(|h| load_wcs(path, h).ok());
-    let mut photcal = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
     let gain_model = gain_model(header, planes.err.is_some());
     let mut warnings: Vec<String> = Vec::new();
-    match &photcal {
-        Some(cal) => warnings.extend(cal.warnings.iter().cloned()),
-        None => warnings.push(missing_calibration_reason(header)),
-    }
+    let header_calibration = match uncalibrated_layer_reason(path, &entry) {
+        Some(layer_reason) => Err(layer_reason),
+        None => Ok(header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()))),
+    };
+    let (mut photcal, calibration_source, calibration_gap) = match (header_calibration, zero_point) {
+        (Err(layer_reason), _) => (None, None, Some(layer_reason)),
+        (Ok(Some(cal)), typed) => {
+            warnings.extend(cal.warnings.iter().cloned());
+            if typed.is_some() {
+                warnings.push(format!("user zero point not applied: the header calibrates this image ({})", cal.origin));
+            }
+            (Some(cal), Some("header"), None)
+        }
+        (Ok(None), Some(typed)) => {
+            let (cal, _) = user_photcal(header, typed)?;
+            warnings.extend(cal.warnings.iter().cloned());
+            (Some(cal), Some("user"), None)
+        }
+        (Ok(None), None) => (None, None, Some(missing_calibration_reason(header))),
+    };
+    warnings.extend(calibration_gap.clone());
+    warnings.extend(layers.err_note.clone());
+    warnings.extend(layers.err_gap.as_ref().map(|gap| format!("error layer not used: {gap}")));
     let area = AreaWeights::resolve(path, &entry, photcal.as_mut(), &mut warnings);
     warnings.extend(processed_data_warning(header));
     warnings.extend(wcs.as_ref().and_then(|w| w.pv_warning()).map(str::to_string));
-    Ok(PhotometryContext { entry, mask, planes, area, wcs, photcal, gain_model, warnings })
+    if exclude_dq && mask.is_none() {
+        warnings.extend(dq_not_applied_warning(&layers));
+    }
+    let exclusion = no_data_exclusion(path, &planes, mask.as_ref());
+    Ok(PhotometryContext {
+        entry,
+        mask,
+        planes,
+        area,
+        wcs,
+        photcal,
+        gain_model,
+        warnings,
+        layers,
+        calibration_source,
+        calibration_gap,
+        exclusion,
+    })
 }
 
 pub(crate) fn processed_data_warning(header: Option<&HduHeader>) -> Option<String> {
     let provenance = header?.get(HEADER_PROCESSING_PROVENANCE)?;
     Some(format!("photometry on processed data ({})", provenance.trim().trim_matches('\'').trim()))
+}
+
+pub(crate) fn axis_scales_arcsec(wcs: &WcsTransform) -> (f64, f64) {
+    axis_scales_of_cd(wcs.raw_params().4)
+}
+
+pub(crate) fn pixel_area_scale_arcsec(wcs: &WcsTransform) -> Option<f64> {
+    area_scale_of_cd(wcs.raw_params().4)
+}
+
+const PIXEL_SCALE_ANISOTROPY_TOLERANCE: f64 = 0.01;
+
+pub(crate) fn axis_scale_warning(wcs: &WcsTransform) -> Option<String> {
+    let (sx, sy) = axis_scales_arcsec(wcs);
+    let s = pixel_area_scale_arcsec(wcs)?;
+    ((sx - sy).abs() / sx.max(sy) > PIXEL_SCALE_ANISOTROPY_TOLERANCE).then(|| {
+        format!(
+            "pixel scales differ per axis ({sx:.5} x {sy:.5} arcsec); radii in arcsec use the square root of the pixel area ({s:.5} arcsec)"
+        )
+    })
+}
+
+pub(crate) fn pixel_units(header: Option<&HduHeader>) -> (Option<String>, Option<String>) {
+    let Some(header) = header else {
+        return (None, None);
+    };
+    let Some(bunit) = crate::core::metadata::photcal::card_text(header, "BUNIT") else {
+        return (None, None);
+    };
+    let summed_unit = match crate::core::metadata::units::classify_unit(header).class {
+        crate::core::metadata::units::UnitClass::SurfaceBrightness { .. } => {
+            format!("{bunit}{}", crate::cmd::line_measure::REGION_SUM_UNIT_SUFFIX)
+        }
+        _ => bunit.clone(),
+    };
+    (Some(bunit), Some(summed_unit))
+}
+
+fn axis_scales_of_cd(cd: [[f64; 2]; 2]) -> (f64, f64) {
+    (cd[0][0].hypot(cd[1][0]) * 3600.0, cd[0][1].hypot(cd[1][1]) * 3600.0)
+}
+
+fn area_scale_of_cd(cd: [[f64; 2]; 2]) -> Option<f64> {
+    let scale = (cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0]).abs().sqrt() * 3600.0;
+    (scale.is_finite() && scale > 0.0).then_some(scale)
 }
 
 impl PhotometryContext {
@@ -545,7 +824,7 @@ impl PhotometryContext {
     }
 
     fn masked_image(&self) -> Result<MaskedImage<'_>, String> {
-        self.area.masked_image(&self.entry, self.mask.as_ref().map(|m| &m.map))
+        self.area.masked_image(&self.entry, self.exclusion.as_ref().or(self.mask.as_ref().map(|m| &m.map)))
     }
 
     fn measure(&self, source: &MaskedImage, x: f64, y: f64, config: &PhotometryConfig) -> Result<StarPhotometry, String> {
@@ -585,6 +864,7 @@ impl PhotometryContext {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn photometry_for_path(
     path: &str,
     x: f64,
@@ -604,6 +884,7 @@ pub(crate) fn photometry_for_path(
         gaia_match,
         exclude_dq,
         gain,
+        None,
         &mut |q| query_gaia_cached(q),
     )
 }
@@ -617,10 +898,11 @@ pub(crate) fn photometry_for_path_with_catalog(
     gaia_match: bool,
     exclude_dq: bool,
     gain: Option<f64>,
+    zero_point: Option<&UserZeroPoint>,
     cached: &mut dyn FnMut(&ConeQuery) -> Result<CatalogHit, String>,
 ) -> anyhow::Result<serde_json::Value> {
     let t0 = Instant::now();
-    let ctx = photometry_context(path, exclude_dq)?;
+    let ctx = photometry_context_with(path, exclude_dq, zero_point)?;
     let config = ctx.config(aperture_radius, sky_annulus, gain);
     let source = ctx.masked_image().map_err(anyhow::Error::msg)?;
     let phot = ctx.measure(&source, x, y, &config).map_err(|e| anyhow::anyhow!(e))?;
@@ -658,12 +940,15 @@ pub(crate) fn photometry_for_path_with_catalog(
         }
         (_, false) => serde_json::Value::Null,
     };
+    let (bunit, summed_unit) = pixel_units(ctx.entry.header());
 
     Ok(json!({
         RES_PHOTOMETRY: serde_json::to_value(&phot)?,
         RES_SKY: sky,
         RES_GAIA: gaia,
         RES_PHOTCAL: ctx.photcal_json()?,
+        "bunit": bunit,
+        "summed_unit": summed_unit,
         RES_WARNINGS: warnings,
         RES_GAIN_USED: config.gain,
         RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
@@ -721,6 +1006,7 @@ pub async fn measure_photometry_cmd(
     gaia_match: Option<bool>,
     exclude_dq: Option<bool>,
     gain: Option<f64>,
+    zero_point: Option<UserZeroPoint>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         if !x.is_finite() || !y.is_finite() {
@@ -729,7 +1015,8 @@ pub async fn measure_photometry_cmd(
         let aperture_radius = aperture_radius_arg(aperture_radius)?;
         let sky_annulus = annulus_arg(annulus_inner, annulus_outer)?;
         check_annulus_clears_aperture(aperture_radius, sky_annulus)?;
-        photometry_for_path(
+        check_user_zero_point(zero_point.as_ref())?;
+        photometry_for_path_with_catalog(
             &path,
             x,
             y,
@@ -738,6 +1025,8 @@ pub async fn measure_photometry_cmd(
             gaia_match.unwrap_or(false),
             exclude_dq.unwrap_or(false),
             gain,
+            zero_point.as_ref(),
+            &mut |q| query_gaia_cached(q),
         )
     })
 }
@@ -752,6 +1041,7 @@ pub async fn measure_photometry_batch_cmd(
     gain: Option<f64>,
     exclude_dq: Option<bool>,
     with_growth_curve: Option<bool>,
+    zero_point: Option<UserZeroPoint>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
@@ -767,9 +1057,10 @@ pub async fn measure_photometry_batch_cmd(
         let aperture_radius = aperture_radius_arg(aperture_radius)?;
         let sky_annulus = annulus_arg(annulus_inner, annulus_outer)?;
         check_annulus_clears_aperture(aperture_radius, sky_annulus)?;
+        check_user_zero_point(zero_point.as_ref())?;
         let with_growth_curve = with_growth_curve.unwrap_or(false);
 
-        let ctx = photometry_context(&path, exclude_dq.unwrap_or(false))?;
+        let ctx = photometry_context_with(&path, exclude_dq.unwrap_or(false), zero_point.as_ref())?;
         let config = ctx.config(aperture_radius, sky_annulus, gain);
         let source = ctx.masked_image().map_err(anyhow::Error::msg)?;
         let measure = |&(x, y): &(f64, f64)| ctx.measure(&source, x, y, &config);
@@ -809,10 +1100,13 @@ pub async fn measure_photometry_batch_cmd(
         let n_failed = rows.len() - n_measured;
         let mut warnings = ctx.warnings.clone();
         warnings.extend(photon_noise_warning(&ctx.gain_model, config.gain.is_some(), all_err_used));
+        let (bunit, summed_unit) = pixel_units(ctx.entry.header());
 
         Ok(json!({
             RES_ROWS: rows,
             RES_PHOTCAL: ctx.photcal_json()?,
+            "bunit": bunit,
+            "summed_unit": summed_unit,
             RES_WARNINGS: warnings,
             RES_GAIN_USED: config.gain,
             RES_MASKED: ctx.mask.is_some(),
@@ -889,10 +1183,134 @@ pub async fn analyze_subframes_cmd(
 }
 
 #[cfg(test)]
+pub(crate) mod layer_fixtures {
+    use crate::infra::fits::reader::test_fixtures::{write_raw_hdus, write_test_mef, HduData, TestHdu};
+    use crate::infra::fits::writer::write_fits_mono;
+    use crate::service::area::test_fixtures::gaussian_pixels;
+    use crate::types::header::HduHeader;
+    use crate::types::image_ref::BandPlaneKey;
+
+    pub const SIZE: usize = 64;
+    pub const NO_DATA_PIXELS: [(usize, usize); 3] = [(32, 30), (32, 31), (33, 30)];
+    pub const AFW_BAD_PIXEL: (usize, usize) = (32, 34);
+    pub const AFW_SATURATED_PIXEL: (usize, usize) = (32, 32);
+    pub const AFW_DETECTED_BLOCK: std::ops::Range<usize> = 30..35;
+    pub const UNNAMED_FLAG_PIXEL: (usize, usize) = (32, 33);
+
+    pub fn layer(extname: &'static str, data: HduData, extra_cards: Vec<(&'static str, String)>) -> TestHdu {
+        TestHdu { extname: Some(extname), extver: None, cols: SIZE, rows: SIZE, data, extra_cards }
+    }
+
+    pub fn star(extname: &'static str) -> TestHdu {
+        layer(extname, HduData::F32(gaussian_pixels(SIZE, 1000.0, 2.0, 100.0)), vec![])
+    }
+
+    pub fn flat(extname: &'static str, value: f32) -> TestHdu {
+        layer(extname, HduData::F32(vec![value; SIZE * SIZE]), vec![])
+    }
+
+    pub fn flagged(pixels: &[(usize, usize)], value: i32) -> Vec<i32> {
+        let mut bits = vec![0i32; SIZE * SIZE];
+        for (row, col) in pixels {
+            bits[row * SIZE + col] = value;
+        }
+        bits
+    }
+
+    fn first_plane_key(path: &std::path::Path) -> String {
+        format!("{}#hdu=1", path.to_str().unwrap())
+    }
+
+    pub fn afw_star_mef(path: &std::path::Path, error: TestHdu) -> String {
+        let mut mask = vec![0i32; SIZE * SIZE];
+        for row in AFW_DETECTED_BLOCK {
+            for col in AFW_DETECTED_BLOCK {
+                mask[row * SIZE + col] = 32;
+            }
+        }
+        mask[AFW_BAD_PIXEL.0 * SIZE + AFW_BAD_PIXEL.1] |= 1;
+        mask[AFW_SATURATED_PIXEL.0 * SIZE + AFW_SATURATED_PIXEL.1] |= 2;
+        let planes = vec![("MP_BAD", "0".to_string()), ("MP_SAT", "1".to_string()), ("HIERARCH MP_DETECTED", "5".to_string())];
+        write_test_mef(path, &[], &[star("IMAGE"), layer("MASK", HduData::I32(mask), planes), error]);
+        first_plane_key(path)
+    }
+
+    pub fn inverse_variance_star_mef(path: &std::path::Path) -> String {
+        let mut inverse_variance = vec![0.25f32; SIZE * SIZE];
+        for (row, col) in NO_DATA_PIXELS {
+            inverse_variance[row * SIZE + col] = 0.0;
+        }
+        write_test_mef(path, &[], &[star("SCI"), layer("IVAR", HduData::F32(inverse_variance), vec![])]);
+        first_plane_key(path)
+    }
+
+    pub fn unnamed_flag_star_mef(path: &std::path::Path) -> String {
+        write_test_mef(path, &[], &[star("SCI"), layer("FLAG", HduData::I32(flagged(&[UNNAMED_FLAG_PIXEL], 1 << 24)), vec![])]);
+        first_plane_key(path)
+    }
+
+    pub const LEGACY_BRICK_IMAGE: &str = "legacysurvey-0001m001-image-r.fits";
+    pub const LEGACY_BRICK_INVVAR: &str = "legacysurvey-0001m001-invvar-r.fits";
+    pub const CUTOUT_PLANES: usize = 3;
+    pub const CUTOUT_STAR_PLANE: usize = 1;
+
+    pub fn legacy_brick(dir: &std::path::Path, invvar_size: Option<usize>) -> String {
+        let star = ndarray::Array2::from_shape_vec((SIZE, SIZE), gaussian_pixels(SIZE, 1000.0, 2.0, 100.0)).unwrap();
+        let mut header = HduHeader::empty();
+        header.set("BUNIT", "nanomaggy".to_string());
+        let image = dir.join(LEGACY_BRICK_IMAGE).to_str().unwrap().to_string();
+        write_fits_mono(&image, &star, Some(&header)).unwrap();
+        if let Some(size) = invvar_size {
+            let weights = ndarray::Array2::from_elem((size, size), 0.25f32);
+            write_fits_mono(dir.join(LEGACY_BRICK_INVVAR).to_str().unwrap(), &weights, None).unwrap();
+        }
+        image
+    }
+
+    pub fn legacy_band_cutout(path: &std::path::Path, error_size: usize) -> String {
+        let image_cards: Vec<(&'static str, String)> = vec![
+            ("SIMPLE", "T".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "3".into()),
+            ("NAXIS1", SIZE.to_string()),
+            ("NAXIS2", SIZE.to_string()),
+            ("NAXIS3", CUTOUT_PLANES.to_string()),
+            ("EXTEND", "T".into()),
+            ("IMAGETYP", "'IMAGE   '".into()),
+            ("BANDS", "'grz     '".into()),
+            ("BAND0", "'g       '".into()),
+            ("BAND1", "'r       '".into()),
+            ("BAND2", "'z       '".into()),
+            ("SURVEY", "'LegacySurvey'".into()),
+        ];
+        let star = gaussian_pixels(SIZE, 1000.0, 2.0, 100.0);
+        let image: Vec<u8> = (0..CUTOUT_PLANES)
+            .flat_map(|plane| if plane == CUTOUT_STAR_PLANE { star.clone() } else { vec![100.0f32; SIZE * SIZE] })
+            .flat_map(f32::to_be_bytes)
+            .collect();
+        let invvar_cards: Vec<(&'static str, String)> = vec![
+            ("XTENSION", "'IMAGE   '".into()),
+            ("BITPIX", "-32".into()),
+            ("NAXIS", "3".into()),
+            ("NAXIS1", error_size.to_string()),
+            ("NAXIS2", error_size.to_string()),
+            ("NAXIS3", CUTOUT_PLANES.to_string()),
+            ("PCOUNT", "0".into()),
+            ("GCOUNT", "1".into()),
+            ("IMAGETYP", "'INVVAR  '".into()),
+        ];
+        let weights: Vec<u8> = vec![0.25f32; error_size * error_size * CUTOUT_PLANES].into_iter().flat_map(f32::to_be_bytes).collect();
+        write_raw_hdus(path, &[(image_cards, image), (invvar_cards, weights)]);
+        BandPlaneKey::new(path.to_str().unwrap(), 0, CUTOUT_STAR_PLANE).key()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use super::layer_fixtures::*;
     use crate::service::area::test_fixtures::*;
     use crate::core::analysis::gain::{PoissonRoute, UnitClass, SKY_ONLY_ERRORS_WARNING};
     use crate::cmd::common::dq_exclusion;
@@ -1369,10 +1787,10 @@ mod tests {
     async fn batch_photometry_of_one_point_equals_the_single_measurement_field_by_field() {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "batch.fits");
-        let single = measure_photometry_cmd(path.clone(), 31.0, 33.0, Some(5.0), Some(10.0), Some(15.0), Some(false), None, Some(2.0))
+        let single = measure_photometry_cmd(path.clone(), 31.0, 33.0, Some(5.0), Some(10.0), Some(15.0), Some(false), None, Some(2.0), None)
             .await
             .unwrap();
-        let batch = measure_photometry_batch_cmd(path.clone(), vec![(31.0, 33.0)], Some(5.0), Some(10.0), Some(15.0), Some(2.0), None, Some(true))
+        let batch = measure_photometry_batch_cmd(path.clone(), vec![(31.0, 33.0)], Some(5.0), Some(10.0), Some(15.0), Some(2.0), None, Some(true), None)
             .await
             .unwrap();
         let rows = batch[RES_ROWS].as_array().unwrap();
@@ -1392,7 +1810,7 @@ mod tests {
         assert!(!phot["growth_curve"].as_array().unwrap().is_empty());
         assert!(phot["growth_curve"][0]["r"].is_number() && phot["growth_curve"][0]["flux"].is_number());
 
-        let mixed = measure_photometry_batch_cmd(path, vec![(32.0, 32.0), (5.0, 5.0)], None, None, None, None, None, None)
+        let mixed = measure_photometry_batch_cmd(path, vec![(32.0, 32.0), (5.0, 5.0)], None, None, None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(mixed[RES_N_MEASURED], 2);
@@ -1425,13 +1843,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "batch_photon_noise.fits");
         let points = vec![(32.0, 32.0), (30.0, 34.0), (34.0, 30.0)];
-        let out = measure_photometry_batch_cmd(path.clone(), points.clone(), Some(5.0), None, None, None, None, None)
+        let out = measure_photometry_batch_cmd(path.clone(), points.clone(), Some(5.0), None, None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(out[RES_N_MEASURED], 3);
         assert_eq!(sky_only_warnings(&out), 1, "{}", out[RES_WARNINGS]);
         assert!(out[RES_GAIN_USED].is_null(), "{}", out[RES_GAIN_USED]);
-        let with = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, Some(2.0), None, None).await.unwrap();
+        let with = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, Some(2.0), None, None, None).await.unwrap();
         assert_eq!(sky_only_warnings(&with), 0, "{}", with[RES_WARNINGS]);
         assert_eq!(with[RES_GAIN_USED], 2.0);
     }
@@ -1579,31 +1997,325 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn photometry_results_carry_the_pixel_unit_and_the_unit_of_a_sum() {
+        let dir = tempfile::tempdir().unwrap();
+        let jwst = jwst_star_mef(&dir.path().join("jwst_units.fits"), vec![]);
+        let plain = gaussian_fits(dir.path(), "plain_units.fits");
+        let adu = dir.path().join("adu_units.fits").to_str().unwrap().to_string();
+        let arr = ndarray::Array2::from_shape_vec((64, 64), gaussian_pixels(64, 1000.0, 2.0, 100.0)).unwrap();
+        let mut header = HduHeader::empty();
+        header.set("BUNIT", "adu".to_string());
+        crate::infra::fits::writer::write_fits_mono(&adu, &arr, Some(&header)).unwrap();
+        let cases = [
+            (jwst, json!("MJy/sr"), json!("MJy/sr x pix")),
+            (plain, serde_json::Value::Null, serde_json::Value::Null),
+            (adu, json!("adu"), json!("adu")),
+        ];
+        for (path, bunit, summed_unit) in cases {
+            let single = photometry_for_path(&path, 32.0, 32.0, None, None, false, false, None).unwrap();
+            let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, None, None, None, None, None, None)
+                .await
+                .unwrap();
+            for out in [&single, &batch] {
+                assert_eq!(out["bunit"], bunit, "{path}");
+                assert_eq!(out["summed_unit"], summed_unit, "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_scale_helpers_read_a_rotated_cd_and_refuse_a_singular_one() {
+        let (n, c) = 30f64.to_radians().sin_cos();
+        let s = 0.5 / 3600.0;
+        let cd = [[-c * s, -n * s], [-n * s, c * s]];
+        let wcs = WcsTransform::from_header(&crate::core::imaging::region::test_support::header_with_cd(cd)).unwrap();
+        let (sx, sy) = axis_scales_arcsec(&wcs);
+        assert!((sx - 0.5).abs() < 1e-12, "{sx}");
+        assert!((sy - 0.5).abs() < 1e-12, "{sy}");
+        let area = pixel_area_scale_arcsec(&wcs).unwrap();
+        assert!((area - 0.5).abs() < 1e-12, "{area}");
+        assert_eq!(axis_scale_warning(&wcs), None);
+        assert_eq!(area_scale_of_cd([[0.0, 0.0], [0.0, 0.0]]), None);
+        assert_eq!(area_scale_of_cd([[1e-4, 1e-4], [1e-4, 1e-4]]), None);
+    }
+
+    const NO_DQ_PLANE_WARNING: &str = "DQ exclusion requested but not applied: this image has no DQ plane";
+    const LAYER_STAR_SIZE: usize = 32;
+
+    fn layer_star_sci(extver: Option<i64>) -> TestHdu {
+        TestHdu {
+            extname: Some("SCI"),
+            extver,
+            cols: LAYER_STAR_SIZE,
+            rows: LAYER_STAR_SIZE,
+            data: HduData::F32(gaussian_pixels(LAYER_STAR_SIZE, 1000.0, 2.0, 100.0)),
+            extra_cards: vec![("BUNIT", "'DN/s'".into())],
+        }
+    }
+
+    fn layer_star_companion(extname: &'static str, extver: Option<i64>, data: HduData) -> TestHdu {
+        TestHdu { extname: Some(extname), extver, cols: LAYER_STAR_SIZE, rows: LAYER_STAR_SIZE, data, extra_cards: vec![] }
+    }
+
+    fn float_dq_mef(dir: &std::path::Path) -> String {
+        let path = dir.join("float_dq.fits");
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'JWST'".into())],
+            &[
+                layer_star_sci(Some(1)),
+                layer_star_companion("DQ", Some(1), HduData::F32(vec![0.0; LAYER_STAR_SIZE * LAYER_STAR_SIZE])),
+            ],
+        );
+        format!("{}#hdu=1", path.to_str().unwrap())
+    }
+
+    fn unknown_flags_mef(dir: &std::path::Path) -> String {
+        let path = dir.join("unknown_flags.fits");
+        let mut dq = vec![0i32; LAYER_STAR_SIZE * LAYER_STAR_SIZE];
+        dq[5] = 1;
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'Subaru'".into())],
+            &[layer_star_sci(None), layer_star_companion("DQ", None, HduData::I32(dq))],
+        );
+        format!("{}#hdu=1", path.to_str().unwrap())
+    }
+
+    fn dq_not_applied_warnings(out: &serde_json::Value) -> Vec<String> {
+        out[RES_WARNINGS]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap().to_string())
+            .filter(|w| w.starts_with(DQ_NOT_APPLIED_PREFIX))
+            .collect()
+    }
+
+    fn layer_star_photometry(key: &str, exclude_dq: bool) -> serde_json::Value {
+        let centre = (LAYER_STAR_SIZE / 2) as f64;
+        photometry_for_path(key, centre, centre, Some(5.0), None, false, exclude_dq, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_err_plane_of_another_extver_is_not_the_err_plane_of_this_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two_sci.fits");
+        sci_err_dq_mef_with_dq_cards(&path, 6, 5, vec![0; 30], vec![]);
+        let dims = (5, 6);
+        let key4 = format!("{}#hdu=4", path.to_str().unwrap());
+        assert!(photometry_planes(&key4, dims).err.is_none());
+        assert!(!has_err_extension(&key4, dims), "SCI,2 has no ERR of its own");
+        let model4 = photometry_gain_model_cmd(key4).await.unwrap();
+        assert_ne!(model4["poisson_route"], "err_plane", "{model4}");
+
+        let key1 = format!("{}#hdu=1", path.to_str().unwrap());
+        assert!(has_err_extension(&key1, dims));
+        let model1 = photometry_gain_model_cmd(key1).await.unwrap();
+        assert_eq!(model1["poisson_route"], "err_plane", "{model1}");
+    }
+
+    #[tokio::test]
+    async fn the_gain_model_and_the_measurement_agree_on_the_err_plane_when_extver_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("err_without_extver.fits");
+        let mut err = layer_star_companion("ERR", None, HduData::F32(vec![0.5; LAYER_STAR_SIZE * LAYER_STAR_SIZE]));
+        err.extra_cards = vec![("BUNIT", "'DN/s'".into())];
+        write_test_mef(&path, &[], &[layer_star_sci(Some(1)), err]);
+        let key = format!("{}#hdu=1", path.to_str().unwrap());
+        let used = layer_star_photometry(&key, false)[RES_PHOTOMETRY]["err_used"] == true;
+        let said = photometry_gain_model_cmd(key).await.unwrap()["poisson_route"] == "err_plane";
+        assert_eq!(said, used, "gain model says ERR plane: {said}; measurement used one: {used}");
+    }
+
+    fn error_reference(path: &str) -> Option<crate::types::image_ref::ImageRef> {
+        let entry = load_cached_full(path).or_else(|_| load_cached(path)).ok()?;
+        entry.companions().and_then(|c| c.err.clone())
+    }
+
+    fn star_photometry(path: &str) -> serde_json::Value {
+        photometry_for_path(path, 32.0, 32.0, Some(5.0), None, false, false, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_gain_model_sees_an_error_layer_that_sits_in_a_sibling_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = legacy_brick(dir.path(), Some(SIZE));
+        let out = star_photometry(&image);
+        assert_eq!(out[RES_PHOTOMETRY]["err_used"], true, "the sibling pairing of SURVEY-LAYERS-R3: {}", out[RES_WARNINGS]);
+        assert!(has_err_extension(&image, (SIZE, SIZE)), "error reference {:?}", error_reference(&image));
+        let model = photometry_gain_model_cmd(image).await.unwrap();
+        assert_eq!(model["poisson_route"], "err_plane", "{model}");
+    }
+
+    #[tokio::test]
+    async fn the_gain_model_and_the_measurement_agree_when_a_sibling_cannot_be_used() {
+        for invvar_size in [Some(SIZE / 2), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let image = legacy_brick(dir.path(), invvar_size);
+            let out = star_photometry(&image);
+            assert_eq!(out[RES_PHOTOMETRY]["err_used"], false, "invvar {invvar_size:?}: {}", out[RES_WARNINGS]);
+            assert!(!has_err_extension(&image, (SIZE, SIZE)), "invvar {invvar_size:?}: {:?}", error_reference(&image));
+            let model = photometry_gain_model_cmd(image).await.unwrap();
+            assert_ne!(model["poisson_route"], "err_plane", "invvar {invvar_size:?}: {model}");
+        }
+    }
+
+    #[test]
+    fn the_gain_model_sees_the_error_plane_of_one_band_of_a_cutout_cube() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = legacy_band_cutout(&dir.path().join("cut.fits"), SIZE);
+        let out = star_photometry(&key);
+        assert_eq!(out[RES_PHOTOMETRY]["err_used"], true, "the band-plane pairing of SURVEY-LAYERS-R7: {}", out[RES_WARNINGS]);
+        assert!(has_err_extension(&key, (SIZE, SIZE)), "error reference {:?}", error_reference(&key));
+        let small = legacy_band_cutout(&dir.path().join("small_error_cut.fits"), SIZE / 2);
+        assert!(!has_err_extension(&small, (SIZE, SIZE)), "error reference {:?}", error_reference(&small));
+    }
+
+    #[test]
+    fn dq_exclusion_that_cannot_be_applied_is_reported_in_the_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = float_dq_mef(dir.path());
+        let out = layer_star_photometry(&key, true);
+        assert_eq!(out[RES_MASKED], false);
+        let reason = load_companions(&key).unwrap().dq_unavailable.expect("a floating-point DQ plane says why it is no mask");
+        assert_eq!(
+            dq_not_applied_warnings(&out),
+            vec![format!("{DQ_NOT_APPLIED_PREFIX}{reason}")],
+            "{}",
+            out[RES_WARNINGS]
+        );
+        let not_requested = layer_star_photometry(&key, false);
+        assert!(dq_not_applied_warnings(&not_requested).is_empty(), "{}", not_requested[RES_WARNINGS]);
+    }
+
+    #[test]
+    fn dq_exclusion_on_an_image_without_a_dq_plane_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "plain.fits");
+        let out = photometry_for_path(&path, 32.0, 32.0, Some(5.0), None, false, true, None).unwrap();
+        assert_eq!(dq_not_applied_warnings(&out), vec![NO_DQ_PLANE_WARNING.to_string()], "{}", out[RES_WARNINGS]);
+        assert_eq!(out[RES_MASKED], false);
+    }
+
+    #[test]
+    fn dq_exclusion_with_unknown_flag_definitions_says_that_no_bit_is_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unknown_flags_mef(dir.path());
+        let out = layer_star_photometry(&key, true);
+        assert_eq!(dq_not_applied_warnings(&out), vec![unnamed_flags_warning(&key)], "{}", out[RES_WARNINGS]);
+        assert_eq!(out[RES_MASKED], false);
+    }
+
+    #[test]
+    fn a_usable_dq_plane_raises_no_warning_and_the_layer_report_names_both_planes() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = jwst_cal_mef(&dir.path().join("cal.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![]);
+        let ctx = photometry_context(&fixture.key, true).unwrap();
+        let loaded = load_companions(&fixture.key).unwrap();
+        let err_source = loaded.err_origin.map(|origin| origin.source);
+        assert!(err_source.is_some() && loaded.dq_origin.is_some());
+        assert_eq!(
+            ctx.layers,
+            LayerReport {
+                err_source: err_source.clone(),
+                dq_source: loaded.dq_origin,
+                dq_flags: Some("jwst".into()),
+                dq_exclusion_available: true,
+                dq_gap: None,
+                err_note: None,
+                err_gap: None,
+            }
+        );
+        assert!(ctx.mask.is_some());
+        assert!(!ctx.warnings.iter().any(|w| w.starts_with(DQ_NOT_APPLIED_PREFIX)), "{:?}", ctx.warnings);
+
+        let without_dq = jwst_cal_mef(&dir.path().join("cal_sci_err.fits"), &[], cal_sci_cards(), CalPlanes::SCI_ERR, vec![]);
+        let ctx = photometry_context(&without_dq.key, true).unwrap();
+        assert_eq!(
+            ctx.layers,
+            LayerReport {
+                err_source,
+                dq_source: None,
+                dq_flags: None,
+                dq_exclusion_available: false,
+                dq_gap: Some("this image has no DQ plane".into()),
+                err_note: None,
+                err_gap: None,
+            }
+        );
+        assert!(ctx.mask.is_none());
+        assert_eq!(ctx.warnings.last().map(String::as_str), Some(NO_DQ_PLANE_WARNING), "{:?}", ctx.warnings);
+    }
+
+    #[test]
+    fn the_layer_report_and_resolve_dq_mask_agree_on_every_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = [
+            float_dq_mef(dir.path()),
+            gaussian_fits(dir.path(), "plain.fits"),
+            unknown_flags_mef(dir.path()),
+            jwst_cal_mef(&dir.path().join("cal.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![]).key,
+            afw_star_mef(&dir.path().join("calexp.fits"), flat("VARIANCE", 4.0)),
+            unnamed_flag_star_mef(&dir.path().join("flag.fits")),
+        ];
+        let available: Vec<bool> = keys
+            .iter()
+            .map(|key| {
+                let entry = load_cached_full(key).unwrap();
+                let report = layer_report(key, &entry);
+                assert_eq!(
+                    report.dq_exclusion_available,
+                    resolve_dq_mask(key, true, entry.arr().dim()).is_some(),
+                    "{key}: {report:?}"
+                );
+                assert_eq!(report.dq_gap.is_none(), report.dq_exclusion_available, "{key}: {report:?}");
+                report.dq_exclusion_available
+            })
+            .collect();
+        assert_eq!(available, vec![false, false, false, true, true, false]);
+    }
+
+    #[tokio::test]
+    async fn the_warning_order_keeps_batch_and_single_equal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = gaussian_fits(dir.path(), "plain.fits");
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), None, None, Some(false), Some(true), Some(2.0), None)
+            .await
+            .unwrap();
+        let batch = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), None, None, Some(2.0), Some(true), None, None)
+            .await
+            .unwrap();
+        assert_eq!(batch[RES_WARNINGS], single[RES_WARNINGS]);
+        assert_eq!(single[RES_WARNINGS].as_array().unwrap().last().unwrap(), NO_DQ_PLANE_WARNING, "{}", single[RES_WARNINGS]);
+    }
+
+    #[tokio::test]
     async fn a_sky_annulus_inside_the_aperture_is_refused_by_both_commands() {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "refused.fits");
         let sentence = "sky annulus inner radius 5 must be larger than the aperture radius 5";
-        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), Some(5.0), Some(10.0), Some(false), None, None)
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), Some(5.0), Some(10.0), Some(false), None, None, None)
             .await
             .unwrap_err();
         assert!(single.contains(sentence), "{single}");
-        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(5.0), Some(5.0), Some(10.0), None, None, None)
+        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(5.0), Some(5.0), Some(10.0), None, None, None, None)
             .await
             .unwrap_err();
         assert!(batch.contains(sentence), "{batch}");
 
-        let auto_radius = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, Some(2.0), Some(4.0), None, None, None)
+        let auto_radius = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, Some(2.0), Some(4.0), None, None, None, None)
             .await
             .unwrap();
         assert_eq!(auto_radius[RES_N_FAILED], 1);
         assert!(auto_radius[RES_ROWS][0][RES_ERROR].as_str().unwrap().contains("must be larger than the aperture radius"));
         assert!(auto_radius[RES_ROWS][0][RES_PHOTOMETRY].is_null());
 
-        let half = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(8.0), None, Some(false), None, None)
+        let half = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(8.0), None, Some(false), None, None, None)
             .await
             .unwrap_err();
         assert!(half.contains("sky annulus needs both an inner and an outer radius"), "{half}");
-        let inverted = measure_photometry_cmd(path, 32.0, 32.0, None, Some(12.0), Some(8.0), Some(false), None, None)
+        let inverted = measure_photometry_cmd(path, 32.0, 32.0, None, Some(12.0), Some(8.0), Some(false), None, None, None)
             .await
             .unwrap_err();
         assert!(inverted.contains("sky annulus outer radius 8 must be larger than the inner radius 12"), "{inverted}");
@@ -1614,15 +2326,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "limits.fits");
         let too_many = vec![(32.0, 32.0); 6000];
-        let err = measure_photometry_batch_cmd(path.clone(), too_many, None, None, None, None, None, None)
+        let err = measure_photometry_batch_cmd(path.clone(), too_many, None, None, None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(err.contains("6000 points exceeds the limit of 5000"), "{err}");
-        let empty = measure_photometry_batch_cmd(path.clone(), vec![], None, None, None, None, None, None)
+        let empty = measure_photometry_batch_cmd(path.clone(), vec![], None, None, None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(empty.contains("at least one point"), "{empty}");
-        let nan = measure_photometry_batch_cmd(path, vec![(32.0, f64::NAN)], None, None, None, None, None, None)
+        let nan = measure_photometry_batch_cmd(path, vec![(32.0, f64::NAN)], None, None, None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(nan.contains("point 0"), "{nan}");
@@ -1632,7 +2344,7 @@ mod tests {
     async fn batch_photometry_without_growth_curves_still_reports_encircled_energy_radii() {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "growth.fits");
-        let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(6.0), None, None, None, None, Some(false))
+        let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(6.0), None, None, None, None, Some(false), None)
             .await
             .unwrap();
         let phot = &out[RES_ROWS][0][RES_PHOTOMETRY];
@@ -1649,7 +2361,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "outside.fits");
         let points = vec![(32.0, 32.0), (3000.0, 3000.0), (-500.0, 10.0), (70.0, 32.0)];
-        let out = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, None, None, None).await.unwrap();
+        let out = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, None, None, None, None).await.unwrap();
         assert_eq!(out[RES_N_MEASURED], 1);
         assert_eq!(out[RES_N_FAILED], 3);
         for i in [1usize, 2, 3] {
@@ -1665,11 +2377,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "wide_annulus.fits");
         let sentence = "sky annulus outer radius 3000 must be at most 512 pixels";
-        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(20.0), Some(3000.0), Some(false), None, None)
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(20.0), Some(3000.0), Some(false), None, None, None)
             .await
             .unwrap_err();
         assert!(single.contains(sentence), "{single}");
-        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 100], Some(5.0), Some(20.0), Some(3000.0), None, None, None)
+        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 100], Some(5.0), Some(20.0), Some(3000.0), None, None, None, None)
             .await
             .unwrap_err();
         assert!(batch.contains(sentence), "{batch}");
@@ -1681,27 +2393,27 @@ mod tests {
     async fn an_aperture_radius_outside_the_measurable_range_is_refused_once_by_both_commands() {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "aperture_range.fits");
-        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(1.5), None, None, Some(false), None, None)
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(1.5), None, None, Some(false), None, None, None)
             .await
             .unwrap_err();
         assert!(single.contains("aperture radius 1.5 must be between 2 and 60 pixels"), "{single}");
-        let small = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 3], Some(1.5), Some(1.8), Some(4.0), None, None, None)
+        let small = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 3], Some(1.5), Some(1.8), Some(4.0), None, None, None, None)
             .await
             .unwrap_err();
         assert!(small.contains("aperture radius 1.5 must be between 2 and 60 pixels"), "{small}");
-        let large = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(100.0), None, None, None, None, None)
+        let large = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(100.0), None, None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(large.contains("aperture radius 100 must be between 2 and 60 pixels"), "{large}");
-        let single_large = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(100.0), None, None, Some(false), None, None)
+        let single_large = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(100.0), None, None, Some(false), None, None, None)
             .await
             .unwrap_err();
         assert!(single_large.contains("aperture radius 100 must be between 2 and 60 pixels"), "{single_large}");
-        let nan = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(f64::NAN), None, None, None, None, None)
+        let nan = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(f64::NAN), None, None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(nan.contains("aperture radius NaN"), "{nan}");
-        let edge = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(2.0), None, None, None, None, None)
+        let edge = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(2.0), None, None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(edge[RES_N_MEASURED], 1);
@@ -1712,7 +2424,7 @@ mod tests {
     async fn batch_photometry_reports_a_sky_annulus_with_no_usable_pixel_as_a_failed_row() {
         let dir = tempfile::tempdir().unwrap();
         let path = gaussian_fits(dir.path(), "thin_annulus.fits");
-        let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), Some(10.0), Some(10.3), None, None, None)
+        let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), Some(10.0), Some(10.3), None, None, None, None)
             .await
             .unwrap();
         assert_eq!(out[RES_N_FAILED], 1);
@@ -1727,7 +2439,7 @@ mod tests {
         let key = jwst_star_mef(&dir.path().join("jwst_batch_dq.fits"), vec![]);
         let points: Vec<(f64, f64)> = (0..70).map(|i| (24.0 + (i % 10) as f64 * 1.7, 24.0 + (i / 10) as f64 * 2.3)).collect();
         assert!(points.len() > PAR_BATCH_POINTS);
-        let batch = measure_photometry_batch_cmd(key.clone(), points.clone(), None, None, None, None, Some(true), Some(true))
+        let batch = measure_photometry_batch_cmd(key.clone(), points.clone(), None, None, None, None, Some(true), Some(true), None)
             .await
             .unwrap();
         assert_eq!(batch[RES_MASKED], true);
@@ -1941,7 +2653,7 @@ mod tests {
         primed.insert(catalog_cache_key(&field), vec![gaia_row(star.ra, star.dec, 12.0)]);
         let mut seen = Vec::new();
         let mut cached = |q: &ConeQuery| catalog_from_map(&primed, &mut seen, q);
-        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, &mut cached).unwrap();
+        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached).unwrap();
         assert_eq!(out[RES_GAIA][RES_BP_RP], 0.8, "{}", out[RES_GAIA]);
         assert_eq!(out[RES_GAIA][RES_GMAG], 12.0);
         assert!(out[RES_GAIA][RES_SEPARATION_ARCSEC].as_f64().unwrap() < 1.0, "{}", out[RES_GAIA]);
@@ -1965,7 +2677,7 @@ mod tests {
         primed.insert(catalog_cache_key(&per_star), vec![gaia_row(star.ra, star.dec, 12.0)]);
         let mut seen = Vec::new();
         let mut cached = |q: &ConeQuery| catalog_from_map(&primed, &mut seen, q);
-        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, &mut cached).unwrap();
+        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached).unwrap();
         assert_eq!(out[RES_GAIA][RES_BP_RP], 0.8, "{}", out[RES_GAIA]);
         assert_eq!(out[RES_GAIA][RES_GMAG], 12.0);
         assert_eq!(field.max_rows, 5000);
@@ -1981,7 +2693,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = wcs_gaussian_fits_at(dir.path(), "offline.fits", 213.5, -18.25);
         let mut cached = |_: &ConeQuery| Err("VizieR request failed: timeout".to_string());
-        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, &mut cached).unwrap();
+        let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached).unwrap();
         assert!(out[RES_GAIA].is_null(), "{}", out[RES_GAIA]);
         let warnings = out[RES_WARNINGS].as_array().unwrap();
         assert!(
@@ -2020,7 +2732,7 @@ mod tests {
     async fn click_photometry_skips_the_gaia_match_unless_asked() {
         let dir = tempfile::tempdir().unwrap();
         let path = wcs_gaussian_fits(dir.path(), "wcs.fits");
-        let out = measure_photometry_cmd(path, 32.0, 32.0, None, None, None, None, None, None).await.unwrap();
+        let out = measure_photometry_cmd(path, 32.0, 32.0, None, None, None, None, None, None, None).await.unwrap();
         assert!(out[RES_SKY][RES_RA].is_number(), "{}", out[RES_SKY]);
         assert!(out[RES_GAIA].is_null());
         let warnings = out[RES_WARNINGS].as_array().unwrap();
@@ -2451,10 +3163,10 @@ mod tests {
             CalPlanes::ALL,
             vec![area_hdu(blocked_area(), CAL_SIZE, Some(1))],
         );
-        let single = measure_photometry_cmd(fixture.key.clone(), 32.0, 32.0, Some(CAL_APERTURE_RADIUS), None, None, Some(false), Some(true), None)
+        let single = measure_photometry_cmd(fixture.key.clone(), 32.0, 32.0, Some(CAL_APERTURE_RADIUS), None, None, Some(false), Some(true), None, None)
             .await
             .unwrap();
-        let batch = measure_photometry_batch_cmd(fixture.key.clone(), vec![(32.0, 32.0)], Some(CAL_APERTURE_RADIUS), None, None, None, Some(true), Some(true))
+        let batch = measure_photometry_batch_cmd(fixture.key.clone(), vec![(32.0, 32.0)], Some(CAL_APERTURE_RADIUS), None, None, None, Some(true), Some(true), None)
             .await
             .unwrap();
         let rows = batch[RES_ROWS].as_array().unwrap();
@@ -2645,5 +3357,524 @@ mod tests {
             assert_eq!(ctx.photcal.as_ref().unwrap().label(), AREA_LABEL);
             eprintln!("crf: {}", ctx.photcal.as_ref().unwrap().notes.join(" | "));
         }
+    }
+
+    const USER_AB_25_JY_PER_UNIT: f64 = 3.63078054770101e-07;
+    const USER_AB_25_PER_SECOND_600_JY_PER_COUNT: f64 = 6.051300912835017e-10;
+    const TWO_AND_A_HALF_LOG10_600: f64 = 6.945378125959109;
+    const PER_SECOND_REFUSAL_PREFIX: &str =
+        "a zero point per second needs EXPTIME to turn the pixel values into a rate, and this header has none";
+
+    fn counts_star(dir: &std::path::Path, name: &str, cards: &[(&str, &str)]) -> String {
+        let size = 64;
+        let arr = ndarray::Array2::from_shape_vec((size, size), gaussian_pixels(size, 1000.0, 2.0, 100.0)).unwrap();
+        let mut header = crate::types::header::HduHeader::empty();
+        for (key, value) in cards {
+            header.set(key, value.to_string());
+        }
+        let path = dir.join(name);
+        crate::infra::fits::writer::write_fits_mono(path.to_str().unwrap(), &arr, Some(&header)).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    fn user_zero_point(zp: f64, system: UserMagSystem, per_second: bool) -> UserZeroPoint {
+        UserZeroPoint { zp, system, per_second }
+    }
+
+    fn measured_with(path: &str, zero_point: Option<&UserZeroPoint>) -> anyhow::Result<serde_json::Value> {
+        photometry_for_path_with_catalog(path, 32.0, 32.0, Some(5.0), None, false, false, None, zero_point, &mut |q| {
+            query_gaia_cached(q)
+        })
+    }
+
+    fn warning_texts(out: &serde_json::Value) -> Vec<String> {
+        out[RES_WARNINGS].as_array().unwrap().iter().map(|w| w.as_str().unwrap().to_string()).collect()
+    }
+
+    fn assert_relative(measured: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (measured - expected).abs() <= tolerance * expected.abs(),
+            "measured {measured:e} expected {expected:e} within {tolerance:e} relative"
+        );
+    }
+
+    #[test]
+    fn a_typed_ab_zero_point_calibrates_an_image_without_calibration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = counts_star(dir.path(), "adu.fits", &[("BUNIT", "adu")]);
+        let zp = user_zero_point(25.0, UserMagSystem::Ab, false);
+        let out = measured_with(&path, Some(&zp)).unwrap();
+        let phot = &out[RES_PHOTOMETRY];
+        let net = phot["net_flux"].as_f64().unwrap();
+        let flux_err = phot["flux_err"].as_f64().unwrap();
+        assert_relative(phot["flux_jy"].as_f64().unwrap(), net * USER_AB_25_JY_PER_UNIT, 1e-12);
+        assert!((phot["mag_ab"].as_f64().unwrap() - (25.0 - 2.5 * net.log10())).abs() <= 1e-9, "{phot}");
+        assert_relative(phot["flux_err_jy"].as_f64().unwrap(), flux_err * USER_AB_25_JY_PER_UNIT, 1e-12);
+        assert_eq!(out[RES_PHOTCAL]["mag_system"], "ab");
+        let origin = out[RES_PHOTCAL]["origin"].as_str().unwrap();
+        assert!(!origin.is_empty() && origin.contains("25"), "{origin}");
+        let warnings = warning_texts(&out);
+        assert_eq!(warnings.first().map(String::as_str), Some(USER_ZERO_POINT_WARNING), "{warnings:?}");
+        assert_eq!(warnings.iter().filter(|w| w.as_str() == USER_ZERO_POINT_WARNING).count(), 1, "{warnings:?}");
+        assert!(!warnings.iter().any(|w| w.contains("no photometric calibration")), "{warnings:?}");
+
+        let uncalibrated = measured_with(&path, None).unwrap();
+        assert!(uncalibrated[RES_PHOTOMETRY]["flux_jy"].is_null());
+        assert!(
+            warning_texts(&uncalibrated).iter().any(|w| w.contains("no photometric calibration")),
+            "{:?}",
+            warning_texts(&uncalibrated)
+        );
+    }
+
+    #[test]
+    fn a_per_second_zero_point_divides_counts_by_the_exposure_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = counts_star(dir.path(), "adu_600.fits", &[("BUNIT", "adu"), ("EXPTIME", "600")]);
+        let out = measured_with(&path, Some(&user_zero_point(25.0, UserMagSystem::Ab, true))).unwrap();
+        let phot = &out[RES_PHOTOMETRY];
+        let net = phot["net_flux"].as_f64().unwrap();
+        assert_relative(phot["flux_jy"].as_f64().unwrap(), net * USER_AB_25_PER_SECOND_600_JY_PER_COUNT, 1e-12);
+        assert!(
+            (phot["mag_ab"].as_f64().unwrap() - (25.0 + TWO_AND_A_HALF_LOG10_600 - 2.5 * net.log10())).abs() <= 1e-9,
+            "{phot}"
+        );
+        let header = cached_header(&path).unwrap();
+        let expected = PhotCal::user_zero_point_for(Some(&header), 25.0, MagSystem::Ab, true).warnings;
+        assert!(expected
+            .iter()
+            .any(|w| w == "the user zero point is defined for one count per second: the pixel values are divided by EXPTIME = 600.0 s"));
+        let warnings = warning_texts(&out);
+        assert!(warnings.len() >= expected.len(), "{warnings:?}");
+        assert_eq!(warnings[..expected.len()], expected[..], "{warnings:?}");
+        assert_eq!(warnings.iter().filter(|w| w.contains("EXPTIME")).count(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn a_per_second_zero_point_on_a_rate_image_applies_no_exposure_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = counts_star(dir.path(), "adu_s.fits", &[("BUNIT", "adu/s"), ("EXPTIME", "600")]);
+        let out = measured_with(&path, Some(&user_zero_point(25.0, UserMagSystem::Ab, true))).unwrap();
+        let phot = &out[RES_PHOTOMETRY];
+        let net = phot["net_flux"].as_f64().unwrap();
+        assert_relative(phot["flux_jy"].as_f64().unwrap(), net * USER_AB_25_JY_PER_UNIT, 1e-12);
+        let warnings = warning_texts(&out);
+        assert!(!warnings.iter().any(|w| w.contains("EXPTIME")), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_per_second_zero_point_without_exptime_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let per_second = user_zero_point(25.0, UserMagSystem::Ab, true);
+        let with_unit = counts_star(dir.path(), "adu_no_exptime.fits", &[("BUNIT", "adu")]);
+        let error = measured_with(&with_unit, Some(&per_second)).unwrap_err();
+        assert_eq!(format!("{error:#}"), format!("{PER_SECOND_REFUSAL_PREFIX} (BUNIT 'adu')"));
+        let without_unit = counts_star(dir.path(), "no_unit.fits", &[]);
+        let error = measured_with(&without_unit, Some(&per_second)).unwrap_err();
+        assert_eq!(format!("{error:#}"), format!("{PER_SECOND_REFUSAL_PREFIX} (BUNIT 'missing')"));
+        assert_eq!(
+            format!("{:#}", user_photcal(None, &per_second).unwrap_err()),
+            format!("{PER_SECOND_REFUSAL_PREFIX} (BUNIT 'missing')")
+        );
+    }
+
+    #[test]
+    fn a_vega_zero_point_gives_no_jansky_and_no_ab_magnitude() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = counts_star(dir.path(), "adu_vega.fits", &[("BUNIT", "adu")]);
+        let out = measured_with(&path, Some(&user_zero_point(25.0, UserMagSystem::Vega, false))).unwrap();
+        let uncalibrated = measured_with(&path, None).unwrap();
+        let phot = &out[RES_PHOTOMETRY];
+        for key in ["flux_jy", "mag_ab", "mag_ab_err", "mag_ab_total"] {
+            assert!(phot[key].is_null(), "{key}: {}", phot[key]);
+        }
+        assert_eq!(phot["mag_inst"], uncalibrated[RES_PHOTOMETRY]["mag_inst"]);
+        assert!(phot["mag_inst"].is_number(), "{phot}");
+        assert_eq!(out[RES_PHOTCAL]["mag_system"], "vega");
+        let warnings = warning_texts(&out);
+        let position = warnings.iter().position(|w| w == USER_ZERO_POINT_WARNING).expect("user zero point warning");
+        assert!(warnings.len() > position + 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn a_user_zero_point_is_not_applied_when_the_header_calibrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = jwst_star_mef(&dir.path().join("calibrated.fits"), vec![]);
+        let typed = measured_with(&key, Some(&user_zero_point(25.0, UserMagSystem::Ab, false))).unwrap();
+        let plain = measured_with(&key, None).unwrap();
+        assert_eq!(typed[RES_PHOTOMETRY], plain[RES_PHOTOMETRY]);
+        assert_eq!(typed[RES_PHOTCAL], plain[RES_PHOTCAL]);
+        let prefix = "user zero point not applied: the header calibrates this image (";
+        let warnings = warning_texts(&typed);
+        assert_eq!(warnings.iter().filter(|w| w.starts_with(prefix)).count(), 1, "{warnings:?}");
+        let origin = plain[RES_PHOTCAL]["origin"].as_str().unwrap();
+        assert!(warnings.iter().any(|w| *w == format!("{prefix}{origin})")), "{warnings:?}");
+        assert!(!warning_texts(&plain).iter().any(|w| w.starts_with(prefix)));
+    }
+
+    #[tokio::test]
+    async fn a_non_finite_zero_point_is_refused_by_the_commands() {
+        let path = "C:/nope/missing_user_zero_point.fits".to_string();
+        let nan = || Some(user_zero_point(f64::NAN, UserMagSystem::Ab, false));
+        let expected = "user zero point NaN must be a finite magnitude";
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, None, None, None, None, None, nan()).await.unwrap_err();
+        assert!(single.contains(expected), "{single}");
+        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, None, None, None, None, None, nan())
+            .await
+            .unwrap_err();
+        assert!(batch.contains(expected), "{batch}");
+        let status = photometry_status_cmd(path, None, nan()).await.unwrap_err();
+        assert!(status.contains(expected), "{status}");
+    }
+
+    #[tokio::test]
+    async fn batch_and_single_agree_with_a_typed_zero_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = counts_star(dir.path(), "adu_batch.fits", &[("BUNIT", "adu"), ("EXPTIME", "600")]);
+        let zp = || Some(user_zero_point(25.0, UserMagSystem::Ab, true));
+        let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), None, None, Some(false), None, None, zp())
+            .await
+            .unwrap();
+        let batch = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), None, None, None, None, Some(true), zp())
+            .await
+            .unwrap();
+        assert!(single[RES_PHOTOMETRY]["flux_jy"].is_number(), "{}", single[RES_PHOTOMETRY]);
+        assert_eq!(batch[RES_ROWS][0][RES_PHOTOMETRY], single[RES_PHOTOMETRY]);
+        assert_eq!(batch[RES_WARNINGS], single[RES_WARNINGS]);
+        assert_eq!(batch[RES_PHOTCAL], single[RES_PHOTCAL]);
+    }
+
+    fn sorted_keys(value: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn the_wire_names_of_the_calibration_are_the_ones_the_frontend_mirrors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = counts_star(dir.path(), "adu_wire.fits", &[("BUNIT", "adu")]);
+        let header = cached_header(&path).unwrap();
+        let ab = serde_json::to_value(user_photcal(Some(&header), &user_zero_point(25.0, UserMagSystem::Ab, false)).unwrap().0).unwrap();
+        let vega =
+            serde_json::to_value(user_photcal(Some(&header), &user_zero_point(25.0, UserMagSystem::Vega, false)).unwrap().0).unwrap();
+        let mut njy_header = crate::types::header::HduHeader::empty();
+        njy_header.set("BUNIT", "nJy".to_string());
+        let njy = serde_json::to_value(PhotCal::from_header(&njy_header, None).unwrap()).unwrap();
+        let mut fluxmag0_header = crate::types::header::HduHeader::empty();
+        fluxmag0_header.set_f64("FLUXMAG0", 6.31e10);
+        let survey = serde_json::to_value(PhotCal::from_header(&fluxmag0_header, None).unwrap()).unwrap();
+        let photcal_keys = ["area_applied", "bunit", "convention", "jy_per_native_unit", "mag_system", "notes", "origin", "warnings"];
+        for value in [&ab, &vega, &njy, &survey] {
+            assert_eq!(sorted_keys(value), photcal_keys, "{value}");
+        }
+        let generic_keys = ["exptime", "exptime_applied", "keyword", "kind", "per_second", "system", "zp"];
+        assert_eq!(ab["convention"]["kind"], "generic_zero_point");
+        assert_eq!(sorted_keys(&ab["convention"]), generic_keys);
+        assert_eq!(ab["convention"]["system"], "ab");
+        assert_eq!(ab["mag_system"], "ab");
+        assert!(ab["jy_per_native_unit"].is_number());
+        assert_eq!(vega["convention"]["kind"], "generic_zero_point");
+        assert_eq!(sorted_keys(&vega["convention"]), generic_keys);
+        assert_eq!(vega["convention"]["system"], "vega");
+        assert_eq!(vega["mag_system"], "vega");
+        assert!(vega["jy_per_native_unit"].is_null());
+        assert_eq!(njy["convention"]["kind"], "flux_density_per_pixel");
+        assert_eq!(sorted_keys(&njy["convention"]), ["jy_per_unit", "kind", "unit"]);
+        assert_eq!(njy["mag_system"], "ab");
+        assert_eq!(survey["convention"]["kind"], "survey_zero_point");
+        assert_eq!(sorted_keys(&survey["convention"]), ["exptime_applied", "kind", "source", "zp_ab"]);
+        assert!(survey["convention"]["exptime_applied"].is_null());
+    }
+
+    #[test]
+    fn the_user_zero_point_deserialises_from_the_wire_shape() {
+        let parsed = serde_json::from_str::<UserZeroPoint>(r#"{"zp":25.0,"system":"vega","per_second":true}"#).unwrap();
+        assert_eq!(parsed, user_zero_point(25.0, UserMagSystem::Vega, true));
+        let ab = serde_json::from_str::<UserZeroPoint>(r#"{"zp":25.0,"system":"ab","per_second":false}"#).unwrap();
+        assert_eq!(ab, user_zero_point(25.0, UserMagSystem::Ab, false));
+        assert!(serde_json::from_str::<UserZeroPoint>(r#"{"zp":25.0,"system":"st","per_second":true}"#).is_err());
+    }
+
+    const ERROR_LAYER_NOTE_PREFIX: &str = "error layer: ";
+
+    fn survey_star_photometry(key: &str, exclude_dq: bool, gain: Option<f64>) -> serde_json::Value {
+        photometry_for_path(key, 32.0, 32.0, Some(5.0), None, false, exclude_dq, gain).unwrap()
+    }
+
+    fn unnamed_flags_warning(key: &str) -> String {
+        let source = load_companions(key).unwrap().flags.expect("the flag layer is the mask of this image").source;
+        format!(
+            "{DQ_NOT_APPLIED_PREFIX}the flag layer has no usable bit names ({source}), so nothing is excluded until bits are chosen"
+        )
+    }
+
+    fn dq_twin_of_the_inverse_variance_star(path: &std::path::Path) -> String {
+        write_test_mef(
+            path,
+            &[("TELESCOP", "'JWST'".into())],
+            &[star("SCI"), layer("DQ", HduData::I32(flagged(&NO_DATA_PIXELS, 1)), vec![])],
+        );
+        format!("{}#hdu=1", path.to_str().unwrap())
+    }
+
+    #[test]
+    fn a_mask_with_named_planes_excludes_and_flags_saturation_in_photometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = afw_star_mef(&dir.path().join("calexp.fits"), flat("VARIANCE", 4.0));
+        let exclusion_mask = load_companions(&key).unwrap().exclusion_mask();
+        assert_eq!(exclusion_mask, 3, "BAD and SAT are excluded by default, DETECTED never is");
+
+        let excluded = survey_star_photometry(&key, true, None);
+        assert_eq!(excluded[RES_MASKED], true, "{}", excluded[RES_WARNINGS]);
+        assert_eq!(excluded[RES_PHOTOMETRY]["n_masked"], (exclusion_mask & 3).count_ones(), "{}", excluded[RES_PHOTOMETRY]);
+
+        let kept = survey_star_photometry(&key, false, None);
+        let phot = &kept[RES_PHOTOMETRY];
+        assert_eq!(phot["saturated"], true, "{phot}");
+        assert_eq!(phot["n_saturated"], 1, "{phot}");
+        assert_eq!(phot["saturation_source"], "DQ SATURATED", "{phot}");
+        assert_eq!(phot["err_used"], true, "{phot}");
+        let sigma_twin = afw_star_mef(&dir.path().join("calexp_sigma.fits"), flat("ERR", 2.0));
+        let twin_err = number(&survey_star_photometry(&sigma_twin, false, None)[RES_PHOTOMETRY], "flux_err");
+        let gap = relative_gap(number(phot, "flux_err"), twin_err);
+        assert!(gap <= 1e-6, "a variance of 4 is a sigma of 2: flux_err {} against {twin_err}", phot["flux_err"]);
+    }
+
+    #[test]
+    fn an_inverse_variance_layer_is_named_once_and_its_pixels_without_data_leave_the_sum() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = inverse_variance_star_mef(&dir.path().join("ivar.fits"));
+        let origin = load_companions(&key).unwrap().err_origin.expect("the IVAR layer is the error layer of this image");
+        let out = survey_star_photometry(&key, false, None);
+        let named: Vec<String> = warning_texts(&out).into_iter().filter(|w| w.starts_with(ERROR_LAYER_NOTE_PREFIX)).collect();
+        assert_eq!(
+            named,
+            vec![format!("{ERROR_LAYER_NOTE_PREFIX}{}, 3 pixels without data", origin.source)],
+            "{}",
+            out[RES_WARNINGS]
+        );
+        let phot = &out[RES_PHOTOMETRY];
+        assert_eq!(phot["err_used"], true, "{phot}");
+        let flux_err = number(phot, "flux_err");
+        assert!(flux_err.is_finite() && flux_err > 0.0, "{flux_err}");
+        assert_eq!(out[RES_MASKED], false);
+        assert_eq!(phot["n_masked"], 3, "{phot}");
+
+        let twin = dq_twin_of_the_inverse_variance_star(&dir.path().join("dq_twin.fits"));
+        let through_dq = survey_star_photometry(&twin, true, None);
+        assert_eq!(through_dq[RES_MASKED], true, "{}", through_dq[RES_WARNINGS]);
+        assert_eq!(through_dq[RES_PHOTOMETRY]["n_masked"], 3);
+        assert_eq!(
+            number(phot, "net_flux").to_bits(),
+            number(&through_dq[RES_PHOTOMETRY], "net_flux").to_bits(),
+            "net flux {} against {} with the same three pixels left out through the DQ route",
+            phot["net_flux"],
+            through_dq[RES_PHOTOMETRY]["net_flux"]
+        );
+
+        let jwst_key = jwst_star_mef(&dir.path().join("jwst_star.fits"), vec![]);
+        let jwst = survey_star_photometry(&jwst_key, false, None);
+        assert!(!warning_texts(&jwst).iter().any(|w| w.starts_with("error layer")), "{}", jwst[RES_WARNINGS]);
+        assert_eq!(jwst[RES_PHOTOMETRY]["n_masked"], 0);
+        assert!(photometry_context(&jwst_key, false).unwrap().exclusion.is_none(), "a pass-through ERR plane gets no map");
+        let no_data_map = photometry_context(&key, false).unwrap().exclusion.expect("the pixels without an error value");
+        assert_eq!(no_data_map.iter().filter(|&&excluded| excluded != 0).count(), NO_DATA_PIXELS.len());
+        assert!(NO_DATA_PIXELS.iter().all(|&(row, col)| no_data_map[[row, col]] == 1));
+    }
+
+    #[test]
+    fn a_flag_layer_without_bit_names_excludes_nothing_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = unnamed_flag_star_mef(&dir.path().join("flag.fits"));
+        let sentence = unnamed_flags_warning(&key);
+        let out = survey_star_photometry(&key, true, Some(2.0));
+        assert_eq!(out[RES_MASKED], false);
+        assert_eq!(warning_texts(&out).last(), Some(&sentence), "{}", out[RES_WARNINGS]);
+        assert_eq!(photometry_context(&key, true).unwrap().warnings.last(), Some(&sentence));
+    }
+
+    #[test]
+    fn jwst_exclusion_and_saturation_are_bit_identical_with_or_without_a_flag_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = jwst_cal_mef(&dir.path().join("cal.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![]);
+        let loaded = load_companions(&fixture.key).unwrap();
+        let table = loaded.dq.as_ref().map(|(_, table)| *table).expect("a cal file has a DQ plane");
+        assert_eq!(loaded.exclusion_mask(), table.exclusion_mask());
+        assert_eq!(Ok(loaded.saturated_mask()), table.mask_from_names(&[PHOTOMETRY_SATURATED_FLAG]));
+        let mask = resolve_dq_mask(&fixture.key, true, (CAL_SIZE, CAL_SIZE)).expect("mask");
+        assert_eq!(mask.excluded, 1);
+        assert_eq!(mask.map[[CAL_EXCLUDED_PIXEL.0, CAL_EXCLUDED_PIXEL.1]], 1);
+    }
+
+    const LAYER_REFUSAL_PREFIX: &str = "no calibration applied: this plane is";
+
+    fn plane_basis(key: &str) -> String {
+        load_cached_full(key)
+            .unwrap()
+            .plane_info()
+            .and_then(|info| info.pairing.layer.clone())
+            .expect("a FITS plane has a layer role")
+            .basis
+    }
+
+    fn assert_not_calibrated(key: &str, expected: &str) {
+        assert!(expected.starts_with(LAYER_REFUSAL_PREFIX), "{expected}");
+        assert!(expected.ends_with(&format!("({})", plane_basis(key))), "{expected} against the basis {}", plane_basis(key));
+        let status = photometry_status_for_path(key, false, None).unwrap();
+        assert!(status.photcal.is_null(), "{}", status.photcal);
+        assert_eq!(status.calibration_source, None);
+        assert_eq!(status.missing_reason.as_deref(), Some(expected));
+        assert!(!status.warnings.iter().any(|w| w == expected), "{:?}", status.warnings);
+        let ctx = photometry_context(key, false).unwrap();
+        assert!(ctx.photcal.is_none());
+        assert_eq!(ctx.calibration_gap.as_deref(), Some(expected));
+        assert_eq!(ctx.warnings.iter().filter(|w| *w == expected).count(), 1, "{:?}", ctx.warnings);
+        let typed = photometry_context_with(key, false, Some(&user_zero_point(25.0, UserMagSystem::Ab, false))).unwrap();
+        assert!(typed.photcal.is_none() && typed.calibration_source.is_none(), "{:?}", typed.warnings);
+        assert_eq!(typed.calibration_gap.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn a_mask_plane_is_not_calibrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let zero_point = ("MAGZERO", "24.6");
+        let mask_path = dir.path().join("maskbits.fits");
+        write_raw_hdus(
+            &mask_path,
+            &[(
+                vec![
+                    ("SIMPLE", "T".into()),
+                    ("BITPIX", "32".into()),
+                    ("NAXIS", "2".into()),
+                    ("NAXIS1", SIZE.to_string()),
+                    ("NAXIS2", SIZE.to_string()),
+                    ("IMAGETYP", "'MASKBITS'".into()),
+                    ("MAGZERO", "24.6".into()),
+                ],
+                vec![0u8; SIZE * SIZE * 4],
+            )],
+        );
+        assert_not_calibrated(mask_path.to_str().unwrap(), "no calibration applied: this plane is a mask layer (IMAGETYP MASKBITS)");
+
+        let science = counts_star(dir.path(), "science.fits", &[zero_point]);
+        let calibrated = photometry_context(&science, false).unwrap();
+        assert_eq!(calibrated.calibration_gap, None, "{:?}", calibrated.warnings);
+        assert!(calibrated.photcal.is_some());
+        assert_eq!(calibrated.calibration_source, Some("header"));
+
+        let inverse_variance = counts_star(dir.path(), "invvar.fits", &[("IMAGETYP", "INVVAR"), zero_point]);
+        assert_not_calibrated(
+            &inverse_variance,
+            "no calibration applied: this plane is an inverse-variance layer (IMAGETYP INVVAR)",
+        );
+
+        let layered = |name: &str, science: &'static str, second: &'static str, value: f32| {
+            let path = dir.path().join(name);
+            let mut second_plane = flat(second, value);
+            second_plane.extra_cards = vec![("MAGZERO", "24.6".into())];
+            write_test_mef(&path, &[], &[star(science), second_plane]);
+            format!("{}#hdu=2", path.to_str().unwrap())
+        };
+        assert_not_calibrated(
+            &layered("variance.fits", "IMAGE", "VARIANCE", 4.0),
+            "no calibration applied: this plane is a variance layer (EXTNAME VARIANCE)",
+        );
+
+        let sigma = photometry_context(&layered("rms.fits", "SCI", "RMS", 0.25), false).unwrap();
+        assert!(
+            !sigma.calibration_gap.as_deref().is_some_and(|gap| gap.starts_with(LAYER_REFUSAL_PREFIX)),
+            "a sigma layer is in the unit of its image and keeps its calibration: {:?}",
+            sigma.calibration_gap
+        );
+
+        let named_only = dir.path().join("legacysurvey-0001m002-invvar-r.fits");
+        let mut header = crate::types::header::HduHeader::empty();
+        header.set("MAGZERO", "24.6".to_string());
+        crate::infra::fits::writer::write_fits_mono(
+            named_only.to_str().unwrap(),
+            &ndarray::Array2::from_elem((SIZE, SIZE), 0.25f32),
+            Some(&header),
+        )
+        .unwrap();
+        assert_not_calibrated(
+            named_only.to_str().unwrap(),
+            "no calibration applied: this plane is an inverse-variance layer (file name -invvar-)",
+        );
+    }
+
+    #[test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: survey/E1, the Euclid VIS cutout with its RMS and FLAG siblings"]
+    fn real_euclid_e1_status_names_the_rms_map_and_the_unnamed_flag_layer() {
+        let science = crate::core::astrometry::gwcs::test_support::env_dir("ASTROBURST_SCIENCE_DATA_DIR")
+            .join("survey")
+            .join("E1")
+            .join("EUC_MER_BGSUB-MOSAIC-VIS_TILE102044185-3EA2F5_20241021T041200.630008Z_00.00_cut60_A.fits");
+        assert!(science.is_file(), "{} is missing", science.display());
+        let science = science.to_str().unwrap();
+
+        let status = photometry_status_for_path(science, true, None).unwrap();
+        println!("euclid e1 status: err {:?}, dq {:?}, warnings {:?}", status.err, status.dq, status.warnings);
+        let err = status.err.expect("the RMS sibling is the error layer");
+        assert!(err.origin.contains("MOSAIC-VIS-RMS"), "{}", err.origin);
+        let dq = status.dq.expect("the FLAG sibling is the mask layer");
+        assert!(dq.source.contains("MOSAIC-VIS-FLAG"), "{}", dq.source);
+        assert!(!dq.exclusion_available, "bit 24 of FLAG lies on the sources: nothing may be excluded by default");
+        assert!(dq.unavailable_reason.is_some());
+        let not_applied: Vec<&String> = status.warnings.iter().filter(|w| w.starts_with(DQ_NOT_APPLIED_PREFIX)).collect();
+        assert_eq!(not_applied.len(), 1, "{:?}", status.warnings);
+
+        let (x, y) = (337.17675170716575, 127.33561326757126);
+        let out = photometry_for_path(science, x, y, Some(4.0), None, false, true, None).unwrap();
+        let phot = &out[RES_PHOTOMETRY];
+        println!(
+            "euclid e1 photometry at ({x}, {y}), r = 4 px: centroid ({}, {}) px, net_flux {} +/- {} (image unit x pix), err_used {}, masked {}, n_masked {}, warnings {}",
+            phot["x"], phot["y"], phot["net_flux"], phot["flux_err"], phot["err_used"], out[RES_MASKED], phot["n_masked"], out[RES_WARNINGS]
+        );
+        let golden = "plan/goldens/survey/phot_euclid_e1.json point_like_sources[0]";
+        assert_eq!(phot["err_used"], true, "{golden}");
+        assert_eq!(out[RES_MASKED], false, "{golden}");
+        assert_eq!(phot["n_masked"], 0, "{golden}: none of the 22 sentinel pixels of the RMS map lies on a source");
+        let offset = (number(phot, "x") - x).hypot(number(phot, "y") - y);
+        assert!(offset <= 1.0, "{golden}: centroid {offset} px from the requested position");
+    }
+
+    fn assert_real_gain_model_agrees(relative: &str, (x, y): (f64, f64), radius: f64) {
+        let path = crate::core::astrometry::gwcs::test_support::env_dir("ASTROBURST_SCIENCE_DATA_DIR").join("survey").join(relative);
+        assert!(path.is_file(), "{} is missing", path.display());
+        let path = path.to_str().unwrap();
+        let out = photometry_for_path(path, x, y, Some(radius), None, false, false, None).unwrap();
+        let dims = load_cached_full(path).or_else(|_| load_cached(path)).unwrap().arr().dim();
+        let has_err = has_err_extension(path, dims);
+        let phot = &out[RES_PHOTOMETRY];
+        println!(
+            "{relative}: error reference {:?}, dims {dims:?}, has_err_extension {has_err}, err_used {}, net_flux {} +/- {} (image unit x pix) at ({x}, {y}) px, r = {radius} px",
+            error_reference(path),
+            phot["err_used"],
+            phot["net_flux"],
+            phot["flux_err"]
+        );
+        assert_eq!(phot["err_used"], true, "{}", out[RES_WARNINGS]);
+        assert!(has_err);
+    }
+
+    #[test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: survey/L2/legacysurvey-0532m280-image-r.fits.fz"]
+    fn real_legacy_l2_r_gain_model_agrees_with_the_measurement() {
+        assert_real_gain_model_agrees(
+            "L2/legacysurvey-0532m280-image-r.fits.fz",
+            (3333.811483943494, 625.4191790671039),
+            7.633587786259541,
+        );
+    }
+
+    #[test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: survey/E1/EUC_MER_BGSUB-MOSAIC-VIS_TILE102044185-3EA2F5_20241021T041200.630008Z_00.00_cut60_A.fits"]
+    fn real_euclid_e1_gain_model_agrees_with_the_measurement() {
+        assert_real_gain_model_agrees(
+            "E1/EUC_MER_BGSUB-MOSAIC-VIS_TILE102044185-3EA2F5_20241021T041200.630008Z_00.00_cut60_A.fits",
+            (337.17675170716575, 127.33561326757126),
+            4.0,
+        );
     }
 }

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import { detectProductTypes, extractProductType, fileSearchText, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "../useProductFilter";
 import { displayFilterValue } from "../../utils/channelMapping";
@@ -37,6 +38,30 @@ describe("extractProductType", () => {
     expect(extractProductType(TSO_X1DINTS)).toBe("x1dints");
     expect(extractProductType("jw01366004001_04101_00001-seg001_nis_rateints.fits")).toBe("rateints");
   });
+
+  it("gives the remaining time-series products their own chips", () => {
+    expect(extractProductType("jw02358001001_04101_00001-seg001_nrs1_crfints.fits")).toBe("crfints");
+    expect(extractProductType("jw02358001001_04101_00001-seg001_nrs1_crf.fits")).toBe("crf");
+    expect(extractProductType("jw01366-o003_t001_nirspec_f290lp-g395h_c1d.fits")).toBe("c1d");
+  });
+
+  it("tags the white-light table by the ECSV file the pipeline writes", () => {
+    expect(extractProductType("jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv")).toBe("whtlt");
+    expect(extractProductType("x_whtlt.ECSV")).toBe("whtlt");
+    expect(extractProductType("x_whtlt.csv")).toBeNull();
+    expect(extractProductType("x_whtlt.ecsv.gz")).toBeNull();
+    expect(extractProductType("jw1_cat.ecsv")).toBeNull();
+    expect(extractProductType("jw1_cal.ecsv")).toBeNull();
+    expect(extractProductType("jw_whtlt.fits")).toBe("whtlt");
+  });
+
+  it("tags a bzip2-compressed FITS product like its plain file and nothing else", () => {
+    expect(extractProductType("jw01_nrs1_x1d.fits.bz2")).toBe("x1d");
+    expect(extractProductType("jw01_nrs1_cal.FIT.BZ2")).toBe("cal");
+    expect(extractProductType("frame-r-001462-4-0165.fits.bz2")).toBeNull();
+    expect(extractProductType("jw01_nrs1_s3d.bz2")).toBeNull();
+    expect(extractProductType("jw01_nrs1_cal.asdf.bz2")).toBeNull();
+  });
 });
 
 describe("product chips", () => {
@@ -70,6 +95,19 @@ describe("product chips", () => {
     expect(kept([TSO_CALINTS, TSO_X1DINTS], ["x1d"])).toEqual([]);
     expect(kept([TSO_CALINTS, TSO_X1DINTS], ["calints"])).toEqual([TSO_CALINTS]);
     expect(kept([TSO_CALINTS, TSO_X1DINTS], ["x1dints"])).toEqual([TSO_X1DINTS]);
+  });
+
+  it("keeps the white-light tables under their chip and out of the x1dints chip", () => {
+    const names = [
+      "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv",
+      "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_x1dints.fits",
+      "jw02358001001_04101_00001-seg001_nrs1_crfints.fits",
+      "jw02358001001_04101_00001-seg001_nrs1_crf.fits",
+    ];
+    expect(detectProductTypes(names)).toEqual(["crf", "crfints", "whtlt", "x1dints"]);
+    expect(kept(names, ["whtlt"])).toEqual([names[0]]);
+    expect(kept(names, ["crf"])).toEqual([names[3]]);
+    expect(kept(names, ["x1dints"])).toEqual([names[1]]);
   });
 
   it("combines a product chip with a text chip on the file name", () => {
@@ -159,6 +197,21 @@ describe("filtersRevealing", () => {
 
   it("clears the filters when the file has no product chip to add", () => {
     expect(filtersRevealing({ name: "cube.fits", instrument: "NIRSPEC" }, ["x1d"], "or")).toEqual([]);
+  });
+});
+
+describe.skipIf(!process.env.ASTROBURST_SCIENCE_DATA_DIR)("the science data set", () => {
+  it("finds the two product chips of the 72 manifest names", () => {
+    const manifest = readFileSync(`${process.env.ASTROBURST_SCIENCE_DATA_DIR}/MANIFEST.tsv`, "utf8");
+    const names = manifest.split(/\r?\n/).filter((line) => line.length > 0).slice(1).map((line) => line.split("\t")[1]);
+    expect(names).toHaveLength(72);
+    expect(detectProductTypes(names)).toEqual(["whtlt", "x1dints"]);
+    expect(names.filter((name) => matchesActiveFilters({ name }, ["whtlt"], "or"))).toHaveLength(16);
+    expect(names.filter((name) => matchesActiveFilters({ name }, ["x1dints"], "or"))).toHaveLength(16);
+    const untyped = names.filter((name) => extractProductType(name) === null);
+    expect(untyped).toHaveLength(40);
+    expect(names.filter((name) => /^frame-.*\.fits\.bz2$/.test(name)).every((name) => untyped.includes(name))).toBe(true);
+    expect(names.filter((name) => /\.csv$|_asn\.json$/.test(name)).every((name) => untyped.includes(name))).toBe(true);
   });
 });
 

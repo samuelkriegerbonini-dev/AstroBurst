@@ -47,7 +47,9 @@ import { gpuDisplayStore } from "../hooks/useGpuDisplay";
 import DqControls from "./preview/DqControls";
 import DqOverlayCanvas from "./preview/DqOverlayCanvas";
 import ViewerStatusStrip from "./preview/ViewerStatusStrip";
-import SpectrumViewerEmpty from "./preview/SpectrumViewerEmpty";
+import SpectrumViewer from "./preview/SpectrumViewer";
+import TableViewerNote from "./preview/TableViewerNote";
+import type { TableNote, TableRouteKind } from "../utils/fileKinds";
 import { dockStore } from "../hooks/useDockLayout";
 import HistoryShortcuts from "./history/HistoryShortcuts";
 import { useHistoryController } from "../hooks/useHistory";
@@ -91,7 +93,7 @@ interface ProductMetadata {
   error: string | null;
 }
 
-export default function PreviewPanel() {
+export default function PreviewPanel({ tableNote = null, onTableAction }: { tableNote?: TableNote | null; onTableAction?: (id: string, kind: TableRouteKind) => void } = {}) {
   const { file } = useFileContext();
   const { isCube, isSpectralCube, isSpectrum, ramp } = useCubeContext();
   const rampIntegration = useRampIntegration();
@@ -569,9 +571,9 @@ export default function PreviewPanel() {
 
       <div data-dock-viewport="" className={`${FRAME_KEYS_GROUP_CLASS} relative flex-1 overflow-hidden min-h-0`} {...frameKeys}>
         {viewer === "empty" ? (
-          <AdvancedImageViewer original={null} processed={null} />
+          tableNote ? <TableViewerNote note={tableNote} onAction={onTableAction} /> : <AdvancedImageViewer original={null} processed={null} />
         ) : viewer === "spectrum" ? (
-          <SpectrumViewerEmpty name={file?.name ?? ""} onOpenCubeTool={openCubeTool} />
+          <SpectrumViewer name={file?.name ?? ""} onOpenTool={openCubeTool} />
         ) : viewer === "cpu" ? (
           <div className="flex flex-col h-full">
             <DisplayControls vmin={Number.NaN} vmax={Number.NaN} renderOnlyDisabled renderOnlyTitle={cpuDisplayTitle} />

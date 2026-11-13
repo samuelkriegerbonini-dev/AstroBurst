@@ -105,6 +105,11 @@ describe("detectChannel on the real MAST file", () => {
     expect(resolveFilterFromName("h_alpha.FIT.GZ")).toEqual({ code: "H_ALPHA", nm: 656 });
     expect(resolveFilterFromName("jw06565_t001_miri_f1130w_i2d.fts.gz")).toEqual({ code: "F1130W", nm: 11300 });
   });
+
+  it("reads the filter of a bzip2 FITS name", () => {
+    expect(resolveFilterFromName("H_ALPHA.fits.bz2")).toEqual({ code: "H_ALPHA", nm: 656 });
+    expect(resolveFilterFromName("jw06565_t001_miri_f1130w_i2d.fits.bz2")).toEqual({ code: "F1130W", nm: 11300 });
+  });
 });
 
 describe("HST filter wheels", () => {

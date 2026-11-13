@@ -155,6 +155,11 @@ describe("AppFooter", () => {
 describe("EmptyState archive entry", () => {
   const base = { onBrowseFiles: () => {}, onSelectFolder: () => {} };
 
+  it("leads with what the app measures", () => {
+    const html = renderToStaticMarkup(createElement(EmptyState, base));
+    expect(html).toContain("Measure spectra, light curves and photometry in JWST, HST and survey FITS; calibrate, stack and compose images");
+  });
+
   it("offers no archive button unless onBrowseArchive is passed", () => {
     const html = renderToStaticMarkup(createElement(EmptyState, base));
     expect(html).toContain("Browse Files");
@@ -193,6 +198,24 @@ describe("EmptyState archive entry", () => {
     expect(onBrowseFiles).not.toHaveBeenCalled();
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
     expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the key chip of the primary button readable", () => {
+    const html = renderToStaticMarkup(createElement(EmptyState, base));
+    const start = html.lastIndexOf("<button", html.indexOf("Browse Files"));
+    const button = html.slice(start, html.indexOf("</button>", start));
+    expect(/<kbd[^>]*>/.exec(button)?.[0]).toContain('style="background:rgba(0,0,0,0.25);color:#ffffff"');
+    const linear = (channel: number) => {
+      const c = channel / 255;
+      return c < 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    const whiteOnChipOver = (hex: string) => {
+      const [r, g, b] = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16) * 0.75);
+      const luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+      return 1.05 / (luminance + 0.05);
+    };
+    expect(whiteOnChipOver("#3b82f6")).toBeGreaterThanOrEqual(4.5);
+    expect(whiteOnChipOver("#2563eb")).toBeGreaterThanOrEqual(4.5);
   });
 });
 

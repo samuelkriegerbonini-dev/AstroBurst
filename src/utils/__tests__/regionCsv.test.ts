@@ -1,11 +1,34 @@
 import { describe, expect, it } from "vitest";
 import { CSV_LINE_END } from "../catalogCsv";
-import { REGION_CSV_COLUMNS, regionSkyOf, regionsCsvFileName, regionsTableCsv } from "../regionCsv";
+import { APP_VERSION } from "../constants";
+import { exportEntries, provenanceLines, unitLines, withProvenance } from "../csvProvenance";
+import {
+  REGION_CSV_COLUMNS,
+  REGION_MEMBERSHIP_NOTE,
+  REGION_NET_ERR_NOTE,
+  REGION_NET_NOTE,
+  REGION_POSITIONS_NOTE,
+  REGION_SIGMA_NOTE,
+  regionCsvProvenance,
+  regionCsvUnits,
+  regionSkyOf,
+  regionsCsvFileName,
+  regionsTableCsv,
+  type RegionCsvContext,
+} from "../regionCsv";
+import { shapeSummary } from "../regionGeometry";
 import type { Region, RegionCalibrated, RegionSky, RegionStats, RegionStatsEntry } from "../../shared/types/regions";
 
 const EXPECTED_HEADER =
   "id,shape,text,include,n,n_excluded,area_px,mean,median,sigma,std,min,max,sum,sum_err,net_sum,net_err,net_snr,net_err_terms," +
-  "flux_source,flux_jy,flux_err_jy,mag_ab,mag_ab_err,sb_mag_arcsec2,area_arcsec2,ra,dec,pa_sky_deg";
+  "flux_source,flux_jy,flux_err_jy,mag_ab,mag_ab_err,sb_mag_arcsec2,area_arcsec2,ra,dec,pa_sky_deg," +
+  "n_nan,n_padding,mad,clipped_mean,clipped_median,clipped_sigma,n_rejected,background,bg_median,bg_sigma,bg_n";
+
+const CONTEXT: RegionCsvContext = {
+  exportedUtc: "2026-11-12T18:00:00.000Z", fileName: "x_i2d.fits", image: "original",
+  bunit: "MJy/sr", summedUnit: "MJy/sr x pix", calibration: "JWST MJy/sr", excludeDq: true, dqExcludedPx: 12,
+  regionExcludedPx: 0, clipSigma: 2.5, clipMaxiters: 10, notes: [],
+};
 
 function region(id: string, overrides: Partial<Region> = {}): Region {
   return {
@@ -72,10 +95,6 @@ function sky(overrides: Partial<RegionSky> = {}): RegionSky {
   return { ra: 150, dec: 2, pa_sky_deg: 90, area_arcsec2: 0.04, geometric_area_arcsec2: 0.05, ...overrides };
 }
 
-function lastCells(row: string, count: number): string[] {
-  return row.split(",").slice(-count);
-}
-
 function entry(id: string, s: RegionStats | null, error: string | null = null): RegionStatsEntry {
   return { id, stats: s, error };
 }
@@ -105,15 +124,18 @@ describe("regionsTableCsv", () => {
     const rows = lines(regionsTableCsv(regions, table));
     expect(rows).toHaveLength(4);
     expect(rows[1].startsWith('a,"circle (10.0, 20.0) r=4.0",,true,49,2,50.27,4,4,0,0.5,3,5,196,,,,')).toBe(true);
-    expect(rows[2]).toBe('b,"circle (10.0, 20.0) r=4.0",,true' + ",".repeat(25));
-    expect(rows[3]).toBe('c,"circle (10.0, 20.0) r=4.0",,true' + ",".repeat(25));
+    expect(rows[2]).toBe('b,"circle (10.0, 20.0) r=4.0",,true' + ",".repeat(36));
+    expect(rows[3]).toBe('c,"circle (10.0, 20.0) r=4.0",,true' + ",".repeat(36));
   });
 
   it("leaves every calibrated field blank when the image is uncalibrated", () => {
-    const rows = lines(regionsTableCsv([region("a")], new Map([["a", entry("a", stats())]])));
+    const csv = regionsTableCsv([region("a")], new Map([["a", entry("a", stats())]]));
+    const rows = lines(csv);
     const cells = rows[1].split(",");
     expect(cells.length).toBeGreaterThan(EXPECTED_HEADER.split(",").length);
-    expect(rows[1].endsWith(",".repeat(10))).toBe(true);
+    const byHeader = cellsByHeader(csv);
+    const calibratedColumns = ["flux_source", "flux_jy", "flux_err_jy", "mag_ab", "mag_ab_err", "sb_mag_arcsec2", "area_arcsec2", "ra", "dec", "pa_sky_deg"];
+    expect(calibratedColumns.map((name) => byHeader[name])).toEqual(Array(10).fill(""));
   });
 
   it("writes the calibrated flux, magnitudes, surface brightness, area, sky centre and PA", () => {
@@ -132,7 +154,7 @@ describe("regionsTableCsv", () => {
     const rows = lines(regionsTableCsv([r], new Map([["box", entry("box", s)]])));
     expect(rows[1]).toBe(
       'box,"box (50.0, 50.0) 8.0×4.0 θ=30.0°","core, inner",false,49,2,50.27,4,4,0,0.5,3,5,196,3.5,147,3.568,41.2,' +
-        "err_plane+background_level,net,0.00000392,7e-8,22.417,0.02,18.967,0.04165,150.001,2.002,120",
+        "err_plane+background_level,net,0.00000392,7e-8,22.417,0.02,18.967,0.04165,150.001,2.002,120,0,0,0,4,4,0,0,,,,",
     );
   });
 
@@ -161,14 +183,117 @@ describe("regionsTableCsv", () => {
   });
 
   it("writes the sky centre, PA and area of a plate-solved image that has no flux calibration", () => {
-    const rows = lines(regionsTableCsv([region("a")], new Map([["a", entry("a", stats({ calibrated: null, sky: sky() }))]])));
-    expect(lastCells(rows[1], 10)).toEqual(["", "", "", "", "", "", "0.04", "150", "2", "90"]);
+    const cells = cellsByHeader(regionsTableCsv([region("a")], new Map([["a", entry("a", stats({ calibrated: null, sky: sky() }))]])));
+    const columns = ["flux_source", "flux_jy", "flux_err_jy", "mag_ab", "mag_ab_err", "sb_mag_arcsec2", "area_arcsec2", "ra", "dec", "pa_sky_deg"];
+    expect(columns.map((name) => cells[name])).toEqual(["", "", "", "", "", "", "0.04", "150", "2", "90"]);
   });
 
   it("leaves the PA cell blank when the region has no major axis", () => {
     const s = stats({ calibrated: calibrated({ pa_sky_deg: null }), sky: sky({ pa_sky_deg: null }) });
-    const rows = lines(regionsTableCsv([region("a")], new Map([["a", entry("a", s)]])));
-    expect(lastCells(rows[1], 4)).toEqual(["0.04", "150", "2", ""]);
+    const cells = cellsByHeader(regionsTableCsv([region("a")], new Map([["a", entry("a", s)]])));
+    expect(["area_arcsec2", "ra", "dec", "pa_sky_deg"].map((name) => cells[name])).toEqual(["0.04", "150", "2", ""]);
+  });
+
+  const ring = region("ring", { shape: { shape: "annulus", x: 10, y: 20, r_inner: 8, r_outer: 12 } });
+  const core = region("core", { backgroundId: "ring" });
+  const coreStats = stats({
+    n_nan: 3,
+    n_padding: 72,
+    mad: 0.5,
+    clipped_mean: 3.9,
+    clipped_median: 4,
+    clipped_sigma: 0.4,
+    n_rejected: 5,
+    background: { median: 6, sigma: 1.4826, count: 204 },
+    net_sum: 585,
+  });
+  const regions = [core, ring];
+  const table = new Map([
+    ["core", entry("core", coreStats)],
+    ["ring", entry("ring", stats())],
+  ]);
+
+  it("writes the statistics the row hides and the background that was subtracted", () => {
+    const rows = lines(regionsTableCsv(regions, table));
+    expect(rows[1].endsWith(`,3,72,0.5,3.9,4,0.4,5,"${shapeSummary(ring.shape)}",6,1.4826,204`)).toBe(true);
+    expect(rows[2].endsWith(",0,0,0,4,4,0,0,,,,")).toBe(true);
+  });
+
+  it("leaves the body alone when no context is given", () => {
+    const csv = regionsTableCsv(regions, table);
+    expect(lines(csv).some((l) => l.startsWith("#"))).toBe(false);
+    expect(lines(csv)[0]).toBe(EXPECTED_HEADER);
+  });
+
+  it("puts the provenance and the unit lines before the table", () => {
+    const csv = regionsTableCsv(regions, table, CONTEXT);
+    expect(csv).toBe(
+      withProvenance(
+        [...provenanceLines(regionCsvProvenance(CONTEXT, 2)), ...unitLines(regionCsvUnits(CONTEXT))],
+        regionsTableCsv(regions, table),
+        CSV_LINE_END,
+      ),
+    );
+    const split = csv.split(CSV_LINE_END);
+    expect(split.slice(0, 3)).toEqual([`# software: AstroBurst ${APP_VERSION}`, "# exported_utc: 2026-11-12T18:00:00.000Z", "# file: x_i2d.fits"]);
+    expect(split).toContain(`# sigma: ${REGION_SIGMA_NOTE}`);
+    expect(split).toContain("# dq_exclusion: applied, 12 pixels excluded");
+    expect(split).toContain("# unit net_err: MJy/sr x pix");
+    expect(split.find((l) => !l.startsWith("#"))).toBe(EXPECTED_HEADER);
+  });
+});
+
+describe("regionCsvProvenance", () => {
+  it("lists the provenance of a region table in the order of the contract", () => {
+    const entries = regionCsvProvenance(CONTEXT, 3);
+    expect(entries).toEqual([
+      ...exportEntries("x_i2d.fits", "2026-11-12T18:00:00.000Z"),
+      ["image", "original"],
+      ["regions", 3],
+      ["bunit", "MJy/sr"],
+      ["calibration", "JWST MJy/sr"],
+      ["dq_exclusion", "applied, 12 pixels excluded"],
+      ["exclude_regions_px", 0],
+      ["sigma_clip", "2.5 sigma, at most 10 iterations (columns clipped_mean, clipped_median, clipped_sigma, n_rejected)"],
+      ["sigma", REGION_SIGMA_NOTE],
+      ["net_sum", REGION_NET_NOTE],
+      ["net_err", REGION_NET_ERR_NOTE],
+      ["membership", REGION_MEMBERSHIP_NOTE],
+      ["positions", REGION_POSITIONS_NOTE],
+    ]);
+    expect(regionCsvProvenance({ ...CONTEXT, excludeDq: false }, 3)[7]).toEqual(["dq_exclusion", "off"]);
+    expect(regionCsvProvenance({ ...CONTEXT, excludeDq: true, dqExcludedPx: null }, 3)[7]).toEqual(["dq_exclusion", "requested, not applied"]);
+    expect(regionCsvProvenance({ ...CONTEXT, calibration: null }, 3)[6]).toEqual(["calibration", "none"]);
+    expect(regionCsvProvenance({ ...CONTEXT, notes: ["a", "b", "a"] }, 3).slice(-3)).toEqual([
+      ["positions", REGION_POSITIONS_NOTE],
+      ["note", "a"],
+      ["note", "b"],
+    ]);
+  });
+});
+
+describe("regionCsvUnits", () => {
+  it("names the unit of every numeric column", () => {
+    const units = regionCsvUnits(CONTEXT);
+    for (const name of ["mean", "median", "sigma", "std", "min", "max", "mad", "clipped_mean", "clipped_median", "clipped_sigma", "bg_median", "bg_sigma"]) {
+      expect(units[name], name).toBe("MJy/sr");
+    }
+    for (const name of ["sum", "sum_err", "net_sum", "net_err"]) expect(units[name], name).toBe("MJy/sr x pix");
+    expect(units.flux_jy).toBe("Jy");
+    expect(units.mag_ab).toBe("mag (AB)");
+    expect(units.ra).toBe("deg (ICRS)");
+    expect(units.pa_sky_deg).toBe("deg (east of north)");
+    expect(units.area_px).toBe("pixel");
+    expect(units.bg_n).toBe("pixel");
+    expect(Object.keys(units)).toEqual([
+      "area_px", "mean", "median", "sigma", "std", "min", "max", "sum", "sum_err", "net_sum", "net_err",
+      "flux_jy", "flux_err_jy", "mag_ab", "mag_ab_err", "sb_mag_arcsec2", "area_arcsec2", "ra", "dec", "pa_sky_deg",
+      "mad", "clipped_mean", "clipped_median", "clipped_sigma", "bg_median", "bg_sigma", "bg_n",
+    ]);
+    const bare = regionCsvUnits({ ...CONTEXT, bunit: null, summedUnit: null });
+    expect(bare.mean).toBe("image unit");
+    expect(bare.sum).toBe("image unit, summed over pixels");
+    expect(regionCsvUnits({ ...CONTEXT, bunit: "adu", summedUnit: null }).sum).toBe("adu");
   });
 });
 

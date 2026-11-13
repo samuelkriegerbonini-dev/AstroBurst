@@ -8,9 +8,11 @@ use crate::core::stacking::memory::{
     effective_memory, format_bytes, MemoryInfo, MEMORY_BUDGET_ENV,
 };
 use crate::types::header::MAX_FITS_AXES;
+use crate::types::image::IntPlane;
 use crate::types::HduHeader;
 
 use super::compress;
+use super::int_tiles;
 
 const MAX_FIELDS: i64 = 999;
 const F32_BYTES: u64 = 4;
@@ -33,6 +35,20 @@ pub fn decode_planes(
     validate_layout(mmap, header, data_start, effective_memory())?;
     let decoder_header = with_zblank_as_blank(header)?;
     compress::decode_compressed_planes(mmap, &decoder_header, data_start)
+}
+
+pub fn decode_int_planes(
+    mmap: &[u8],
+    header: &HduHeader,
+    data_start: usize,
+    hdu_index: usize,
+    bscale: f64,
+    bzero: f64,
+) -> Result<Vec<IntPlane>> {
+    int_tiles::refuse_unless_lossless_integers(header, hdu_index)?;
+    reject_non_ascii(header)?;
+    validate_layout(mmap, header, data_start, effective_memory())?;
+    int_tiles::decode_int_planes(mmap, header, data_start, hdu_index, bscale, bzero)
 }
 
 fn with_zblank_as_blank(header: &HduHeader) -> Result<Cow<'_, HduHeader>> {
@@ -1455,5 +1471,33 @@ mod tests {
             err.contains("TFORM") && err.contains("printable ASCII"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn the_integer_entry_point_refuses_a_corrupt_table_before_decoding_and_real_scaling_after() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("fits_compressed")
+                .join("rice_i32_default_tile.fits"),
+        )
+        .unwrap();
+        let hdu = compressed_hdu(&bytes);
+        let planes = decode_int_planes(&bytes, &hdu.header, hdu.data_start, 1, 1.0, 0.0).unwrap();
+        assert_eq!(planes.len(), 1);
+        assert_eq!(planes[0].value_at(0, 0), 6500);
+
+        let corrupt = with_card(bytes.clone(), "NAXIS2", b"24");
+        let corrupt_hdu = compressed_hdu(&corrupt);
+        let err = decode_int_planes(&corrupt, &corrupt_hdu.header, corrupt_hdu.data_start, 1, 1.0, 0.0)
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("NAXIS2 = 24 rows but ZNAXISn/ZTILEn describe 23 tiles"),
+            "{err:#}"
+        );
+
+        let err = decode_int_planes(&bytes, &hdu.header, hdu.data_start, 1, 2.0, 0.0).unwrap_err();
+        assert!(format!("{err:#}").contains("scaled integer data"), "{err:#}");
     }
 }

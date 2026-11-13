@@ -37,6 +37,7 @@ import {
   type PaletteToolEntry,
   type ToolMountInput,
 } from "../dockLayout";
+import { TOOL_CATEGORIES, TOOL_DESCRIPTIONS } from "../toolCatalog";
 
 function withActive(active: Partial<DockLayout["active"]>, base: DockLayout = DEFAULT_DOCK_LAYOUT): DockLayout {
   return { ...base, active: { ...base.active, ...active } };
@@ -120,12 +121,12 @@ describe("DOCK_TOOL_META", () => {
 
   it("names each tool once for the rail and once for its panel, calling the configuration tool Settings", () => {
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].shortLabel)).toEqual([
-      "Files", "Info", "Compose", "Headers", "Image", "Astro", "Phot", "Cube", "Prep", "SAGUI", "Process", "History", "Masks", "Stack", "Synth", "Export", "Settings", "Log",
+      "Files", "Info", "Compose", "Headers", "Image", "Astro", "Phot", "Spectra", "Prep", "SAGUI", "Process", "History", "Masks", "Stack", "Synth", "Export", "Settings", "Log",
     ]);
     expect(DOCK_TOOL_IDS.map((id) => DOCK_TOOL_META[id].label)).toEqual([
-      "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Cube", "Cube Prep", "SAGUI", "Processing", "History", "Masks", "Stacking", "Synth", "Export", "Settings", "Log",
+      "Files", "Info", "Compose", "Headers", "Image", "Astrometry", "Photometry", "Spectra", "Cube Prep", "SAGUI", "Processing", "History", "Masks", "Stacking", "Synth", "Export", "Settings", "Log",
     ]);
-    expect(DOCK_TOOL_META.config.keywords).toEqual(["Config"]);
+    expect(DOCK_TOOL_META.config.keywords).toEqual(["Config", "API key", "astrometry.net", "Data folder"]);
   });
 
   it("registers Masks right after History as a per-image tool mounted while open", () => {
@@ -158,11 +159,27 @@ describe("DOCK_TOOL_META", () => {
   });
 
   it("keeps Analysis as a palette keyword of every analysis tool", () => {
-    expect(DOCK_TOOL_META.image.keywords).toEqual(["Analysis", "Histogram", "STF", "Statistics", "Pixels", "Regions", "Profiles", "Contours", "FFT", "Deep Zoom"]);
-    expect(DOCK_TOOL_META.astrometry.keywords).toEqual(["Analysis", "Stars", "Star detection", "Plate solve", "WCS", "Catalog", "Targets", "Geometry"]);
-    expect(DOCK_TOOL_META.photometry.keywords).toEqual(["Analysis", "Aperture", "Photometry table", "Time series", "Light curve"]);
-    expect(DOCK_TOOL_META.cube.keywords).toEqual(["Analysis", "Spectrum", "Spectroscopy", "Ramp", "PV", "Line fit", "Moments"]);
+    expect(DOCK_TOOL_META.image.keywords).toEqual(["Analysis", "Histogram", "STF", "Statistics", "Pixels", "Regions", "Profiles", "Contours", "FFT", "Deep Zoom", "Stats"]);
+    expect(DOCK_TOOL_META.astrometry.keywords).toEqual(["Analysis", "Stars", "Star detection", "Plate solve", "WCS", "Catalog", "Targets", "Geometry", "Gaia", "Cross-match", "Zero point", "Airmass"]);
+    expect(DOCK_TOOL_META.photometry.keywords).toEqual(["Analysis", "Aperture", "Photometry table", "Time series", "Light curve", "Multi-band", "Forced photometry", "Depth", "Resolution", "Catalogue comparison", "Magnitude", "Transit", "Differential photometry", "ETD", "ExoClock", "BJD"]);
+    expect(DOCK_TOOL_META.cube.keywords).toEqual(["Analysis", "Spectrum", "Spectroscopy", "Ramp", "PV", "Line fit", "Moments", "x1d", "1D spectrum", "Time-series spectra", "White light", "Transmission", "SED", "Cube", "IFU cube"]);
     expect(DOCK_TOOL_META.log.keywords).toEqual(["Analysis", "Measurement log", "Measurements", "CSV"]);
+  });
+
+  it("gives the tools that hide features behind pills the words of those features", () => {
+    expect(DOCK_TOOL_META.headers.keywords).toEqual(["HDU", "Extension", "ERR", "WHT", "DQ"]);
+    expect(DOCK_TOOL_META.processing.keywords).toEqual(["Background extraction", "Denoise", "PSF", "FWHM", "Deconvolution", "Richardson-Lucy", "Stretch", "Curves", "PixelMath", "Rotate", "Flip", "Debayer"]);
+    expect(DOCK_TOOL_META.stacking.keywords).toEqual(["Calibration", "Bias", "Dark", "Flat", "Cosmetic", "Subframes", "FWHM", "Drizzle", "Mosaic", "Pipeline"]);
+    const keywordsOf = (id: DockToolId) => (DOCK_TOOL_META[id].keywords ?? []).map((keyword) => keyword.toLowerCase());
+    for (const id of DOCK_TOOL_IDS) {
+      expect(keywordsOf(id).filter((keyword) => ["tools", "sidebar", "pin"].some((prefix) => keyword.startsWith(prefix))), id).toEqual([]);
+    }
+    const measureTools: readonly DockToolId[] = TOOL_CATEGORIES.find((category) => category.label === "Measure")!.tools;
+    for (const id of DOCK_TOOL_IDS.filter((tool) => !measureTools.includes(tool))) {
+      expect(keywordsOf(id).filter((keyword) => keyword.includes("measure")), id).toEqual([]);
+    }
+    const texts = (id: DockToolId) => [DOCK_TOOL_META[id].label, TOOL_DESCRIPTIONS[id], ...(DOCK_TOOL_META[id].keywords ?? [])].map((text) => text.toLowerCase());
+    expect(DOCK_TOOL_IDS.filter((id) => texts(id).some((text) => text.includes("process")))).toEqual(["processing", "history", "masks"]);
   });
 
   it("keeps the four analysis tools per file, the Log while open and only Files always mounted", () => {

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useHistory } from "../../hooks/useHistory";
 import { appModeStore } from "../../hooks/useAppMode";
 import { useCompositeMode } from "../../hooks/useCompositeMode";
-import { historyKeyAction, isMacPlatform } from "../../utils/historyKeys";
+import { historyKeyAction, isMacPlatform, openMenuPresent } from "../../utils/historyKeys";
 
 const MENU_SELECTOR = "[data-dock-menu], [aria-modal='true']";
 
@@ -20,7 +20,7 @@ export default function HistoryShortcuts(): null {
       if (e.defaultPrevented || e.repeat) return;
       const action = historyKeyAction(e, {
         inInput: typingTarget(e.target),
-        menuOpen: document.querySelector(MENU_SELECTOR) !== null,
+        menuOpen: openMenuPresent(document.querySelectorAll(MENU_SELECTOR)),
         mode: appModeStore.get(),
         compositeMode,
         mac,

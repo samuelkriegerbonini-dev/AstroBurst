@@ -19,18 +19,19 @@ import DockShell from "./components/dock/DockShell";
 import { DOCK_TOOLS } from "./components/dock/toolRegistry";
 import { dockOnboardingStore } from "./components/dock/dockOnboardingStore";
 import { toolBrowserStore } from "./components/dock/toolBrowserStore";
+import { focusRailTool } from "./components/dock/railFocus";
 
 import Confetti from "./components/Confetti";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
-import { useFileQueue } from "./hooks/useFileQueue";
-import { followFilteredSelection, registerFileIngest, showWorkspaceUnlessKept, type IngestOptions } from "./hooks/useFileIngest";
+import { alreadyInFilesMessage, useFileQueue } from "./hooks/useFileQueue";
+import { followFilteredSelection, registerFileIngest, showFile, showWhenLoaded, showWorkspaceUnlessKept, type IngestOptions } from "./hooks/useFileIngest";
 import { quietCompletion } from "./utils/quietCompletion";
 import { useFileStats, useFileIds, useSelectedId, fileStore, useSelectedFile, useDoneFiles } from "./hooks/useFileStore";
 import { useZipExport } from "./hooks/useZipExport";
 import { SUPPORTED_EXTENSIONS, astroFileFromPath, dialogExtensions, folderErrorReport, folderReport, partitionIncoming, rejectionReport, type IngestReport } from "./utils/validation";
-import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "./hooks/useProductFilter";
+import { useActiveFilters, useFilterMode, useProductFilterActions, useProductFilterState, detectProductTypes, fileSearchText, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "./hooks/useProductFilter";
 import { displayFilterValue } from "./utils/channelMapping";
 import { FOCUSABLE_SELECTOR, focusTrapTarget } from "./utils/focusTrap";
 import { comparableX1dIds, findSiblingCube } from "./utils/x1dCompare";
@@ -39,6 +40,16 @@ import { spectrumComparisonStore } from "./hooks/useSpectrumComparisonStore";
 import type { AstroFile, ProcessedFile } from "./shared/types";
 import { FILE_STATUS } from "./utils/constants";
 import { fallbackSelectionId, selectableRows } from "./utils/fileSelection";
+import { previewableFile, tableNoteOf, type TableRouteKind } from "./utils/fileKinds";
+import { tableRouteStore } from "./hooks/useTableRouteStore";
+import {
+  domSectionHold,
+  followTableRoute,
+  holdSectionAtStart,
+  scrollToSectionWhenMounted,
+  SECTION_MOUNT_TRIES,
+  tableRouteHost,
+} from "./utils/tableRoutes";
 import { CompositeProvider } from "./context/CompositeContext";
 import { ComposeWizardProvider } from "./context/ComposeWizardContext";
 import { PreviewProvider, fileKeyOf } from "./context/PreviewContext";
@@ -107,6 +118,8 @@ function toMetadataFiles(
       status: (f.status ?? FILE_STATUS.QUEUED) as MetadataFile["status"],
       error: f.error ?? undefined,
       spectrum: f.spectrum,
+      table: f.table,
+      layer: f.result?.plane?.layer ?? undefined,
       metadata: header
         ? {
           filter: displayFilterValue(f) ?? undefined,
@@ -167,8 +180,15 @@ export default function App() {
   const handleFilesAdded = useCallback((newFiles: AstroFile[], options?: IngestOptions) => {
     if (newFiles.length === 0) return;
     showWorkspaceUnlessKept(options);
+    const { added, loaded } = addFiles(newFiles);
+    if (added === 0) {
+      if (loaded.length > 0) {
+        showWhenLoaded(loaded[0].sourcePath || loaded[0].path);
+        setIngestReport({ skipped: 0, calib: 0, message: alreadyInFilesMessage(loaded) });
+      }
+      return;
+    }
     quietCompletionRef.current = quietCompletion(options?.quiet === true, prevCompleteRef.current, quietCompletionRef.current);
-    addFiles(newFiles);
     setView((v) => (v === "empty" || v === "complete") ? "processing" : v);
     scheduleProcessing();
   }, [addFiles, scheduleProcessing]);
@@ -206,7 +226,7 @@ export default function App() {
     if (isTauri()) {
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
-        const result = await open({ multiple: true, filters: [{ name: "FITS", extensions: dialogExtensions(SUPPORTED_EXTENSIONS, IS_MAC) }] });
+        const result = await open({ multiple: true, filters: [{ name: "FITS and tables", extensions: dialogExtensions(SUPPORTED_EXTENSIONS, IS_MAC) }] });
         if (result) {
           const partition = partitionIncoming(Array.isArray(result) ? result : [result]);
           setIngestReport(rejectionReport(partition));
@@ -348,6 +368,7 @@ export default function App() {
     reset();
     resetProductFilter();
     spectrumCsvStore.close();
+    tableRouteStore.reset();
     setView("empty");
     setShowConfetti(false);
   }, [reset, resetProductFilter]);
@@ -376,7 +397,10 @@ export default function App() {
     confirmNewBatchTimerRef.current = setTimeout(() => setConfirmNewBatch(false), 4000);
   }, [stats.done, confirmNewBatch, discardBatch]);
 
-  const handleHideFiles = useCallback(() => dockStore.dispatch({ type: "hide", tool: "files" }), []);
+  const handleHideFiles = useCallback(() => {
+    dockStore.dispatch({ type: "hide", tool: "files" });
+    requestAnimationFrame(() => focusRailTool("files"));
+  }, []);
 
   const handleSelectFile = useCallback((id: string) => {
     fileStore.selectFile(id);
@@ -446,16 +470,44 @@ export default function App() {
     return filteredMetadataFiles.some((f) => f.id === selectedFile.id) ? selectedFile : null;
   }, [selectedFile, activeFilters, filteredMetadataFiles]);
 
-  const hasVisibleFile = visibleSelectedFile !== null;
-  const visibleFileKey = fileKeyOf(visibleSelectedFile);
+  const shownFile = previewableFile(visibleSelectedFile);
+  const hasVisibleFile = shownFile !== null;
+  const visibleFileKey = fileKeyOf(shownFile);
+  const tableNote = useMemo(() => tableNoteOf(visibleSelectedFile), [visibleSelectedFile]);
+  const lastShownIdRef = useRef<string | null>(null);
+  const shownId = shownFile?.id ?? null;
+  useEffect(() => {
+    if (shownId !== null) lastShownIdRef.current = shownId;
+  }, [shownId]);
+  const handleTableAction = useCallback((id: string, kind: TableRouteKind) => {
+    const row = fileStore.getFile(id);
+    if (!row?.table) return;
+    tableRouteStore.request(kind, { path: row.path, name: row.name, probe: row.table });
+    const lastShown = lastShownIdRef.current === null ? null : fileStore.getFile(lastShownIdRef.current);
+    const hostId = hasVisibleFile ? null : tableRouteHost(kind, lastShown);
+    if (hostId !== null && lastShown) showFile(lastShown);
+    const message = followTableRoute(kind, hasVisibleFile || hostId !== null, {
+      openTool: (tool) => dockStore.dispatch({ type: "open", tool }),
+      scrollTo: (sectionId) =>
+        scrollToSectionWhenMounted(
+          sectionId,
+          (elementId) => document.getElementById(elementId),
+          (run) => requestAnimationFrame(run),
+          SECTION_MOUNT_TRIES,
+          (section) => holdSectionAtStart(section, domSectionHold(section)),
+        ),
+    });
+    if (message) setIngestReport({ skipped: 0, calib: 0, message });
+  }, [hasVisibleFile]);
   const sampleEntries = useMemo(
     () => samplePaletteActions(paletteSampleSets, { workspaceEmpty: view === "empty", fileShown: hasVisibleFile }, sampleRunners),
     [paletteSampleSets, view, hasVisibleFile, sampleRunners],
   );
 
-  const selectedPath = selectedFile?.path ?? null;
-  const selectedName = selectedFile?.name ?? null;
-  const selectedStatus = selectedFile?.status ?? null;
+  const imageSelection = previewableFile(selectedFile);
+  const selectedPath = imageSelection?.path ?? null;
+  const selectedName = imageSelection?.name ?? null;
+  const selectedStatus = imageSelection?.status ?? null;
   const workspaceFile = useMemo(
     () => workspaceFileRef(selectedPath, selectedName, selectedStatus),
     [selectedPath, selectedName, selectedStatus],
@@ -524,7 +576,8 @@ export default function App() {
 
   const handlePaletteSelectFile = useCallback((id: string) => {
     showWorkspace();
-    fileStore.selectFile(id);
+    const file = fileStore.getFile(id);
+    if (file) showFile(file);
   }, []);
 
   const processing = useMemo(
@@ -532,10 +585,16 @@ export default function App() {
     [isProcessing, stats.done, stats.total],
   );
 
-  const paletteFiles = useMemo<PaletteFile[]>(
-    () => selectableRows(filteredMetadataFiles).map((f) => ({ id: f.id, name: f.name, filter: f.metadata?.filter })),
-    [filteredMetadataFiles],
-  );
+  const paletteFiles = useMemo<PaletteFile[]>(() => {
+    const shown = new Set(filteredMetadataFiles.map((f) => f.id));
+    return selectableRows(metadataFiles).map((f) => ({
+      id: f.id,
+      name: f.name,
+      filter: f.metadata?.filter,
+      searchText: fileSearchText(metadataFilterable(f)),
+      hidden: !shown.has(f.id),
+    }));
+  }, [metadataFiles, filteredMetadataFiles]);
 
   return (
     <ErrorBoundary>
@@ -569,7 +628,7 @@ export default function App() {
             >
               <div className="flex items-center justify-between mb-3">
                 <span id={shortcutsTitleId} className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Keyboard Shortcuts</span>
-                <button onClick={closeShortcuts} title="Close" className="text-zinc-500 hover:text-zinc-300 transition-colors">
+                <button type="button" onClick={closeShortcuts} title="Close" aria-label="Close keyboard shortcuts" className="min-w-6 min-h-6 inline-flex items-center justify-center rounded text-zinc-500 hover:text-zinc-300 transition-colors">
                   <X size={12} />
                 </button>
               </div>
@@ -616,7 +675,7 @@ export default function App() {
                   ) : (
                     <CompositeProvider>
                       <ComposeWizardProvider>
-                        <PreviewProvider file={visibleSelectedFile} doneFiles={filteredDoneFiles}>
+                        <PreviewProvider file={shownFile} doneFiles={filteredDoneFiles}>
                           <DisplayedImageBridge />
                           <div className="flex flex-col h-full">
                             <div
@@ -676,12 +735,13 @@ export default function App() {
                                       onRemoveCustomChip={removeCustomChip}
                                       onOpenSpectrum={handleOpenSpectrum}
                                       onOpenTable={handleOpenTable}
+                                      onTableAction={handleTableAction}
                                       comparableX1d={comparableX1d}
                                     />
                                 ),
                               }}
                             >
-                              <MemoizedPreviewPanel />
+                              <MemoizedPreviewPanel tableNote={tableNote} onTableAction={handleTableAction} />
                             </DockShell>
                           </div>
                         </PreviewProvider>

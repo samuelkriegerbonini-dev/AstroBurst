@@ -8,6 +8,8 @@ import {
   etdText,
   exportBlockerNotes,
   exoClockBlocker,
+  leftOutReasons,
+  leftOutSummary,
   exoClockCsv,
   exoClockFileName,
   formatPrintfF,
@@ -20,7 +22,7 @@ import {
   NO_TARGET_BLOCKER,
   type LightCurveExportSource,
 } from "../lightCurveExports";
-import { lightCurve, MAG_ERR_FACTOR } from "../differentialPhotometry";
+import { lightCurve, lightCurveCsv, lightCurveExtras, MAG_ERR_FACTOR } from "../differentialPhotometry";
 import type { StarPhotometry } from "../../services/analysis";
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesTarget } from "../../shared/types/analysis";
 import type { FrameGeometry } from "../../shared/types/geometry";
@@ -564,5 +566,68 @@ describe("named blockers (C02)", () => {
     const frames = withFrame(3, { exptime: null, time_source: EXPOSURE_START_SOURCE });
     expect(() => etdText(source(frames))).toThrow("no EXPTIME for f3.fits");
     expect(() => exoClockCsv(source(frames), "jd_utc")).toThrow("no EXPTIME for f3.fits");
+  });
+});
+
+describe("exports follow the frames the light-curve view leaves out (timeseries/U6, U3, G5)", () => {
+  it("maps the states of the view to the reasons written in the files", () => {
+    expect(leftOutReasons(["kept", "flagged", "manual", "clipped", "missing"])).toEqual([null, "flagged", "by hand", "clipped", null]);
+    expect(leftOutSummary([null, "flagged", "by hand", "by hand"])).toBe("3 frames (1 flagged, 2 by hand)");
+    expect(leftOutSummary(["clipped"])).toBe("1 frame (1 clipped)");
+    expect(leftOutSummary([null, null])).toBeNull();
+    expect(leftOutSummary([])).toBeNull();
+  });
+
+  it("a left-out frame is not written to the ETD file", () => {
+    expect(etdText({ ...source(), leftOut: [null, "by hand", null, null] })).toBe(ETD_GOLDEN.split("\n").slice(0, 4).join("\n"));
+    expect(etdText(source())).toBe(ETD_GOLDEN);
+    expect(etdText({ ...source(), leftOut: [null, null, null, null] })).toBe(ETD_GOLDEN);
+  });
+
+  it("the ExoClock file omits the frame and says how many were left out and why", () => {
+    const lines = exoClockCsv({ ...source(), leftOut: [null, "by hand", null, null] }, "jd_utc").trimEnd().split("\n");
+    const goldenLines = EXOCLOCK_JD_UTC_GOLDEN.trimEnd().split("\n");
+    const header = lines.findIndex((l) => l.startsWith("jd_utc,"));
+    expect(lines.slice(header + 1)).toEqual(goldenLines.slice(-3, -1));
+    const rowsLine = lines.indexOf("# rows: 2 of 4 frames (1 omitted: skipped or no differential magnitude)");
+    expect(rowsLine).toBeGreaterThan(0);
+    expect(lines[rowsLine + 1]).toBe("# left out: 1 frame (1 by hand)");
+    const untouched = exoClockCsv({ ...source(), leftOut: [null, null, null, null] }, "jd_utc");
+    expect(untouched).toBe(EXOCLOCK_JD_UTC_GOLDEN);
+    expect(untouched.split("\n").some((l) => l.startsWith("# left out"))).toBe(false);
+  });
+
+  it("a left-out frame can not block the export", () => {
+    const frames = withFrame(1, { targets: [star(480, 5), star(1000, 10, { saturated: true }), star(1000, 10)] });
+    expect(etdBlocker(source(frames))).toBe("comparison star C1 saturated on f1.fits (leave it out of the ensemble)");
+    const flagged = { ...source(frames), leftOut: [null, "flagged", null, null] };
+    expect(etdBlocker(flagged)).toBeNull();
+    expect(etdText(flagged).split("\n").slice(2)).toHaveLength(2);
+    expect(etdBlocker({ ...source(frames), leftOut: ["by hand", "flagged", null, "clipped"] })).toBe(NO_ROWS_BLOCKER);
+  });
+
+  it("the BJD_TDB file states the accuracy of computed values only", () => {
+    expect(exoClockCsv(source(), "bjd_tdb").split("\n").slice(4, 7)).toEqual([
+      "# time: bjd_tdb = BJD_TDB at mid-exposure",
+      "# bjd_tdb source: computed",
+      "# bjd_tdb accuracy: computed values use a low-precision ephemeris, within 1 s of astropy",
+    ]);
+    const tdbMid = goldenFrames().map((f) => ({ ...f, geometry: geometry(f.jd_mid!, { bjd_source: "TDB-MID" }) }));
+    const accuracy = (text: string) => text.split("\n").some((l) => l.startsWith("# bjd_tdb accuracy"));
+    expect(accuracy(exoClockCsv(source(tdbMid), "bjd_tdb"))).toBe(false);
+    expect(accuracy(exoClockCsv(source(), "jd_utc"))).toBe(false);
+    expect(accuracy(exoClockCsv(source(), "hjd_utc"))).toBe(false);
+  });
+
+  it("an unmeasured FWHM is an empty cell, never a zero", () => {
+    const frames = withFrame(0, { targets: [star(500, 5, { fwhm: null }), star(1000, 10), star(1000, 10)] });
+    const lines = exoClockCsv(source(frames), "jd_utc").split("\n");
+    const header = lines.findIndex((l) => l.startsWith("jd_utc,"));
+    expect(lines[header + 1].split(",")[lines[header].split(",").indexOf("fwhm_px")]).toBe("");
+    const src = source(frames);
+    const extras = lightCurveExtras(src.result, 0, [1, 2]);
+    expect(extras[0].fwhm).toBeNull();
+    const csv = lightCurveCsv(src.result, lightCurve(src.result, 0, [1, 2], "index"), extras).split("\n");
+    expect(csv[1].split(",")[csv[0].split(",").indexOf("fwhm")]).toBe("");
   });
 });

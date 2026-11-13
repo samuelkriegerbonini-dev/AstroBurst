@@ -76,7 +76,7 @@ export default function ToolBrowser({ layout, hasFile, enabledTools, onToggleToo
         </header>
         <div className="ab-tool-browser-search">
           <Search size={16} aria-hidden="true" />
-          <input ref={inputRef} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tools, e.g. plate solve" aria-label="Search tools" />
+          <input ref={inputRef} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tools, e.g. light curve, x1d, SED" aria-label="Search tools" />
           {query && <button type="button" aria-label="Clear tool search" onClick={() => { setQuery(""); inputRef.current?.focus(); }}><X size={14} /></button>}
         </div>
         <div className="ab-tool-browser-results" role="status">{count} {count === 1 ? "tool" : "tools"}{search ? " found" : " available"}</div>
@@ -151,7 +151,7 @@ export default function ToolBrowser({ layout, hasFile, enabledTools, onToggleToo
               </section>
             );
           })}
-          {count === 0 && <div className="ab-tool-browser-empty"><Search size={24} /><strong>No tools found</strong><span>Try a tool name or an operation such as histogram.</span></div>}
+          {count === 0 && <div className="ab-tool-browser-empty"><Search size={24} /><strong>No tools found</strong><span>Try a tool name or a feature such as light curve, x1d or SED.</span></div>}
         </div>
         <footer className="ab-tool-browser-footer">Tools removed from the sidebar stay available here.<span><kbd>Esc</kbd> to close</span></footer>
       </div>

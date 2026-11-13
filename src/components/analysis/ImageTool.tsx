@@ -11,7 +11,7 @@ import { histogramSkyWindow } from "../../utils/histogramWindow";
 import type { HistogramRange } from "../../utils/histogramWindow";
 import { ANALYSIS_SECTION, deepZoomAvailable, toolSections, type AnalysisSectionsInput } from "../../utils/analysisSections";
 import { useAnalysisMeasure } from "../../hooks/useAnalysisMeasure";
-import { histogramChannelLabel, histogramStfLock, rgbStfPanelMode } from "../../utils/analysisTarget";
+import { histogramChannelLabel, histogramStfLock, histogramUnit, rgbStfPanelMode } from "../../utils/analysisTarget";
 import { IDENTITY_STF } from "../../utils/displayMemory";
 import type { HistogramData } from "../../shared/types";
 import TabSpinner from "./TabSpinner";
@@ -107,6 +107,7 @@ function ImageTool() {
   );
 
   const histChannel = histogramChannelLabel({ isRgbFile: file?.result?.is_rgb === true, histDataPath, filePath: filePath ?? null });
+  const histUnit = histogramUnit({ bunit: file?.result?.header?.BUNIT, histDataPath, filePath: filePath ?? null });
   const measurementBadge = useMemo(() => <MeasurementBadge />, []);
 
   const showFft = Boolean(effectivePath) && !isCube && (targetWidth ?? 0) >= 64;
@@ -141,6 +142,7 @@ function ImageTool() {
               onAutoStf={handleAutoStf}
               onReset={handleResetStf}
               stats={histStats}
+              unit={histUnit}
               disabled={stfLock !== null}
               disabledHint={stfLock ?? undefined}
               badge={measurementBadge}

@@ -94,3 +94,21 @@ describe("Run button accents", () => {
     expect(failing(hoverBrightness(css))).toEqual([]);
   });
 });
+
+function primaryBackground(selectorPattern: string): string {
+  const body = new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`).exec(css)?.[1];
+  if (body === undefined) throw new Error(`no rule for ${selectorPattern}`);
+  const background = /(?:^|[;\s])background\s*:\s*([^;]+);/.exec(body)?.[1];
+  if (background === undefined) throw new Error(`no background in ${selectorPattern}`);
+  return resolveColor(background);
+}
+
+describe("primary button", () => {
+  it("keeps white text at 4.5:1 or more on the primary button at rest", () => {
+    expect(whiteContrast(hexRgb(primaryBackground("\\.ab-btn-primary")))).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps white text at 4.5:1 or more on the primary button under the pointer", () => {
+    expect(whiteContrast(hexRgb(primaryBackground("\\.ab-btn-primary:hover:not\\(:disabled\\)")))).toBeGreaterThanOrEqual(4.5);
+  });
+});

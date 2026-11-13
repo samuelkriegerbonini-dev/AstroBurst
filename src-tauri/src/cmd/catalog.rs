@@ -16,7 +16,8 @@ use crate::core::analysis::photometry::{
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::catalog::{
     cross_match, fit_zero_point, observation_epoch_year, propagate_epoch, query_gaia_cached, CatalogRow,
-    ConeQuery, CrossMatch, ZeroPointFit, ZeroPointStatus, DEFAULT_MAX_ROWS, MAX_CONE_RADIUS_DEG, MIN_CONE_RADIUS_DEG,
+    ConeQuery, CrossMatch, ZeroPointFit, ZeroPointStatus, DEFAULT_MAX_ROWS, GAIA_VIZIER_TABLE, MAX_CONE_RADIUS_DEG,
+    MIN_CONE_RADIUS_DEG,
 };
 use crate::core::astrometry::wcs::{pixel_center, WcsTransform};
 use crate::infra::wcs_source::load_wcs;
@@ -36,6 +37,7 @@ pub const CSV_KIND_MATCHES: &str = "matches";
 pub const RES_N: &str = "n";
 const ARCMIN_PER_DEGREE: f64 = 60.0;
 const CSV_LINE_END: &str = "\r\n";
+const GAIA_MAG_SYSTEM: &str = "vega";
 const UNCALIBRATED_PROVENANCE: [&str; 3] = [ABPROC_LHE, ABPROC_HDRMT, DEFAULT_PIXELMATH_SUFFIX];
 
 pub const CATALOG_CSV_COLUMNS: &[(&str, &str)] = &[
@@ -67,6 +69,7 @@ pub const SOURCES_CSV_COLUMNS: &[(&str, &str)] = &[
     ("fwhm", "fwhm"),
     ("snr", "snr"),
     ("saturated", "saturated"),
+    ("aperture_radius", "aperture_radius"),
 ];
 
 pub const MATCHES_CSV_COLUMNS: &[(&str, &str)] = &[
@@ -89,6 +92,9 @@ pub const MATCHES_CSV_COLUMNS: &[(&str, &str)] = &[
     ("sep_arcsec", "sep_arcsec"),
     ("d_ra_arcsec", "d_ra_arcsec"),
     ("d_dec_arcsec", "d_dec_arcsec"),
+    ("saturated", "star.saturated"),
+    ("aperture_radius", "star.aperture_radius"),
+    ("zp_status", "zp_status"),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +116,9 @@ pub struct ConeSearchResult {
     pub center_ra: f64,
     pub center_dec: f64,
     pub catalog_source: &'static str,
+    pub mag_limit: Option<f64>,
+    pub max_rows: usize,
+    pub catalog_table: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,6 +193,34 @@ pub struct CrossMatchResult {
     pub match_radius_arcsec: f64,
     pub catalog_source: &'static str,
     pub aperture: ZeroPointAperture,
+    pub catalog_query: CatalogQueryInfo,
+    pub catalog_table: &'static str,
+    pub mag_system: &'static str,
+    pub detection_sigma: f64,
+    pub max_stars: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogQueryInfo {
+    pub radius_arcmin: f64,
+    pub field_radius_arcmin: f64,
+    pub mag_limit: Option<f64>,
+    pub max_rows: usize,
+    pub row_cap_reached: bool,
+    pub cone_smaller_than_field: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CrossMatchArgs {
+    pub sigma: Option<f64>,
+    pub max_stars: Option<usize>,
+    pub radius_arcsec: Option<f64>,
+    pub band: Option<String>,
+    pub colour_term: Option<bool>,
+    pub aperture_radius: Option<f64>,
+    pub cone_radius_arcmin: Option<f64>,
+    pub mag_limit: Option<f64>,
+    pub max_rows: Option<usize>,
 }
 
 pub(crate) struct FieldGeometry {
@@ -219,6 +256,10 @@ pub(crate) fn cone_query_for_field(
         mag_limit: mag_limit.filter(|m| m.is_finite()),
         max_rows: max_rows.filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_ROWS),
     }
+}
+
+fn usable_radius_arcmin(radius_arcmin: Option<f64>) -> Option<f64> {
+    radius_arcmin.filter(|r| r.is_finite() && *r > 0.0)
 }
 
 fn wcs_for<'a>(entry: &'a ImageEntry, path: &str) -> anyhow::Result<(&'a HduHeader, WcsTransform)> {
@@ -290,6 +331,14 @@ pub(crate) fn cone_search_for_path(
             query.max_rows
         ));
     }
+    let needed_radius_deg =
+        usable_radius_arcmin(radius_arcmin).unwrap_or(geometry.diagonal_arcmin / 2.0) / ARCMIN_PER_DEGREE;
+    if needed_radius_deg > MAX_CONE_RADIUS_DEG {
+        warnings.push(format!(
+            "Gaia cone limited to {} deg: {:.1} deg was needed, so rows beyond the cone are not listed",
+            MAX_CONE_RADIUS_DEG, needed_radius_deg
+        ));
+    }
     let (rows, epoch_year) = epoch_propagated_rows(header, &hit.rows, &mut warnings);
     let placed = place_rows(&wcs, rows, cols, image_rows);
     let n_on_image = placed.iter().filter(|r| r.on_image).count();
@@ -302,6 +351,9 @@ pub(crate) fn cone_search_for_path(
         center_ra: query.ra,
         center_dec: query.dec,
         catalog_source: hit.source_name(),
+        mag_limit: query.mag_limit,
+        max_rows: query.max_rows,
+        catalog_table: GAIA_VIZIER_TABLE,
     })?;
     Ok(with_envelope(body, t0.elapsed().as_millis() as u64, warnings))
 }
@@ -389,7 +441,10 @@ fn trusted_photcal(header: &HduHeader, wcs: &WcsTransform, warnings: &mut Vec<St
             warnings.push(reason);
             None
         }
-        None => Some(photcal),
+        None => {
+            warnings.extend(photcal.warnings.iter().cloned());
+            Some(photcal)
+        }
     }
 }
 
@@ -408,17 +463,9 @@ fn summarize_astrometry(matches: &[CrossMatch]) -> Option<AstrometrySummary> {
     })
 }
 
-pub(crate) fn crossmatch_for_path(
-    path: &str,
-    sigma: Option<f64>,
-    max_stars: Option<usize>,
-    radius_arcsec: Option<f64>,
-    band: Option<String>,
-    colour_term: Option<bool>,
-    aperture_radius: Option<f64>,
-) -> anyhow::Result<Value> {
+pub(crate) fn crossmatch_with(path: &str, args: &CrossMatchArgs) -> anyhow::Result<Value> {
     let t0 = Instant::now();
-    let band = normalize_band(band)?;
+    let band = normalize_band(args.band.clone())?;
     let entry = load_cached_full(path)?;
     let (header, wcs) = wcs_for(&entry, path)?;
     let dims = entry.arr().dim();
@@ -430,14 +477,16 @@ pub(crate) fn crossmatch_for_path(
     let area = AreaWeights::resolve(path, &entry, photcal.as_mut(), &mut warnings);
     let source = area.masked_image(&entry, None).map_err(anyhow::Error::msg)?;
 
-    let detection_sigma = sigma.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(DEFAULT_DETECTION_SIGMA);
+    let detection_sigma = args.sigma.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(DEFAULT_DETECTION_SIGMA);
     let mut stars = detect_stars(entry.arr(), detection_sigma).stars;
     let n_detected = stars.len();
-    stars.truncate(max_stars.filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_STARS));
+    let max_stars = args.max_stars.filter(|n| *n > 0).unwrap_or(DEFAULT_MAX_STARS);
+    stars.truncate(max_stars);
 
     let (level, level_source) = saturation_level(Some(header), entry.stats().max);
     let saturation_source = if planes.saturated.is_some() { DQ_SATURATION_SOURCE } else { level_source };
-    let fixed_aperture = aperture_radius
+    let fixed_aperture = args
+        .aperture_radius
         .filter(|r| r.is_finite() && *r > 0.0)
         .map(|r| r.clamp(MIN_APERTURE_RADIUS, MAX_APERTURE_RADIUS));
     let config = PhotometryConfig {
@@ -456,16 +505,27 @@ pub(crate) fn crossmatch_for_path(
     );
 
     let geometry = field_geometry(&wcs, cols, image_rows);
-    let query = cone_query_for_field(&geometry, None, None, None);
+    let query = cone_query_for_field(&geometry, args.cone_radius_arcmin, args.mag_limit, args.max_rows);
     let hit = query_gaia_cached(&query).map_err(|e| anyhow::anyhow!(e))?;
-    if hit.rows.len() >= query.max_rows {
+    let row_cap_reached = hit.rows.len() >= query.max_rows;
+    if row_cap_reached {
         warnings.push(format!(
             "VizieR row cap of {} reached: the Gaia list holds only the brightest stars in G within the cone, so fainter detections find no partner",
             query.max_rows
         ));
     }
-    let field_radius_deg = geometry.diagonal_arcmin / 2.0 / ARCMIN_PER_DEGREE;
-    if field_radius_deg > query.radius_deg {
+    let field_radius_arcmin = geometry.diagonal_arcmin / 2.0;
+    let field_radius_deg = field_radius_arcmin / ARCMIN_PER_DEGREE;
+    let cone_radius_arcmin = query.radius_deg * ARCMIN_PER_DEGREE;
+    let cone_smaller_than_field = field_radius_deg > query.radius_deg;
+    let cone_as_asked =
+        usable_radius_arcmin(args.cone_radius_arcmin).is_some_and(|r| r / ARCMIN_PER_DEGREE == query.radius_deg);
+    if cone_smaller_than_field && cone_as_asked {
+        warnings.push(format!(
+            "Gaia cone of {:.1} arcmin is smaller than the field, which reaches {:.1} arcmin from its centre: detections beyond the cone find no partner",
+            cone_radius_arcmin, field_radius_arcmin
+        ));
+    } else if cone_smaller_than_field {
         warnings.push(format!(
             "Gaia cone limited to {} deg: the field reaches {:.1} deg from its centre, so detections beyond the cone find no partner",
             query.radius_deg, field_radius_deg
@@ -473,7 +533,8 @@ pub(crate) fn crossmatch_for_path(
     }
     let (rows, epoch_year) = epoch_propagated_rows(header, &hit.rows, &mut warnings);
 
-    let match_radius = radius_arcsec
+    let match_radius = args
+        .radius_arcsec
         .filter(|r| r.is_finite() && *r > 0.0)
         .unwrap_or(DEFAULT_MATCH_RADIUS_ARCSEC);
     let sky: Vec<(f64, f64)> = sources.iter().map(|s| (s.ra, s.dec)).collect();
@@ -493,7 +554,7 @@ pub(crate) fn crossmatch_for_path(
         .map(|m| band_magnitude(&rows[m.row_index], &band).unwrap_or(f64::NAN))
         .collect();
     let colour: Vec<Option<f64>> = usable.iter().map(|m| rows[m.row_index].bp_rp).collect();
-    let zero_point = fit_zero_point(&mag_inst, &cat_mag, &colour, colour_term.unwrap_or(true), &band);
+    let zero_point = fit_zero_point(&mag_inst, &cat_mag, &colour, args.colour_term.unwrap_or(true), &band);
     if pairs.len() > usable.len() {
         warnings.push(format!(
             "{} saturated star(s) excluded from the zero point (saturation from {})",
@@ -564,6 +625,18 @@ pub(crate) fn crossmatch_for_path(
         match_radius_arcsec: match_radius,
         catalog_source: hit.source_name(),
         aperture,
+        catalog_query: CatalogQueryInfo {
+            radius_arcmin: cone_radius_arcmin,
+            field_radius_arcmin,
+            mag_limit: query.mag_limit,
+            max_rows: query.max_rows,
+            row_cap_reached,
+            cone_smaller_than_field,
+        },
+        catalog_table: GAIA_VIZIER_TABLE,
+        mag_system: GAIA_MAG_SYSTEM,
+        detection_sigma,
+        max_stars,
     })?;
     Ok(with_envelope(body, t0.elapsed().as_millis() as u64, warnings))
 }
@@ -632,8 +705,26 @@ pub(crate) fn build_csv(kind: &str, items: &[Value]) -> anyhow::Result<String> {
     Ok(out)
 }
 
-pub(crate) fn write_csv(output_path: &str, kind: &str, items: &[Value]) -> anyhow::Result<usize> {
-    let csv = build_csv(kind, items)?;
+pub(crate) fn build_csv_with_header(kind: &str, items: &[Value], header_lines: &[String]) -> anyhow::Result<String> {
+    let mut out = String::new();
+    for (index, line) in header_lines.iter().enumerate() {
+        if !line.starts_with('#') || line.contains(['\r', '\n']) {
+            anyhow::bail!("header line {} must start with '#' and hold no line break", index + 1);
+        }
+        out.push_str(line);
+        out.push_str(CSV_LINE_END);
+    }
+    out.push_str(&build_csv(kind, items)?);
+    Ok(out)
+}
+
+pub(crate) fn write_csv_with_header(
+    output_path: &str,
+    kind: &str,
+    items: &[Value],
+    header_lines: &[String],
+) -> anyhow::Result<usize> {
+    let csv = build_csv_with_header(kind, items, header_lines)?;
     std::fs::write(output_path, csv).map_err(|e| anyhow::anyhow!("cannot write {}: {}", output_path, e))?;
     Ok(items.len())
 }
@@ -657,9 +748,25 @@ pub async fn catalog_crossmatch_cmd(
     band: Option<String>,
     colour_term: Option<bool>,
     aperture_radius: Option<f64>,
+    cone_radius_arcmin: Option<f64>,
+    mag_limit: Option<f64>,
+    max_rows: Option<usize>,
 ) -> Result<Value, String> {
     blocking_cmd!({
-        crossmatch_for_path(&path, sigma, max_stars, radius_arcsec, band, colour_term, aperture_radius)
+        crossmatch_with(
+            &path,
+            &CrossMatchArgs {
+                sigma,
+                max_stars,
+                radius_arcsec,
+                band,
+                colour_term,
+                aperture_radius,
+                cone_radius_arcmin,
+                mag_limit,
+                max_rows,
+            },
+        )
     })
 }
 
@@ -670,10 +777,11 @@ pub async fn catalog_export_csv_cmd(
     kind: String,
     rows: Option<Vec<Value>>,
     matches: Option<Vec<Value>>,
+    header_lines: Option<Vec<String>>,
 ) -> Result<Value, String> {
     blocking_cmd!({
         let items = if kind == CSV_KIND_MATCHES { matches } else { rows }.unwrap_or_default();
-        let n = write_csv(&output_path, &kind, &items)?;
+        let n = write_csv_with_header(&output_path, &kind, &items, &header_lines.unwrap_or_default())?;
         log::info!("catalog CSV ({}) for {} -> {} ({} rows)", kind, path, output_path, n);
         Ok(json!({ RES_OUTPUT_PATH: output_path, RES_N: n }))
     })
@@ -692,6 +800,7 @@ mod tests {
     const STAR_POSITIONS: [(f64, f64); 5] = [(30.0, 30.0), (90.0, 40.0), (60.0, 95.0), (100.0, 100.0), (25.0, 80.0)];
     const STAR_AMPLITUDES: [f64; 5] = [4000.0, 2500.0, 1500.0, 900.0, 600.0];
     const TEST_ZERO_POINT: f64 = 25.0;
+    const MATCHES_CSV_HEADER: &str = "id,x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,cat_ra,cat_dec,g,bp,rp,bp_rp,sep_arcsec,d_ra_arcsec,d_dec_arcsec,saturated,aperture_radius,zp_status";
 
     fn wcs_header(extra: &[(&str, &str)]) -> HduHeader {
         let mut header = HduHeader::empty();
@@ -774,17 +883,32 @@ mod tests {
         query_gaia_cached_with(query, |_| Ok(rows)).unwrap();
     }
 
+    fn crossmatch_for_path(
+        path: &str,
+        sigma: Option<f64>,
+        max_stars: Option<usize>,
+        radius_arcsec: Option<f64>,
+        band: Option<String>,
+        colour_term: Option<bool>,
+        aperture_radius: Option<f64>,
+    ) -> anyhow::Result<Value> {
+        crossmatch_with(
+            path,
+            &CrossMatchArgs { sigma, max_stars, radius_arcsec, band, colour_term, aperture_radius, ..Default::default() },
+        )
+    }
+
     #[test]
     fn csv_export_escapes_fields_and_writes_empty_cells_for_missing_values() {
         let items = vec![
-            json!({"x": 1.5, "y": 2.0, "ra": 150.0, "dec": 2.0, "flux": 1234.5, "mag_inst": -7.73, "mag_ab": 17.27, "fwhm": 4.7, "snr": 120.0, "saturated": false}),
-            json!({"x": 3.0, "y": 4.0, "ra": 150.1, "dec": 2.1, "flux": 10.0, "mag_inst": -2.5, "mag_ab": null, "fwhm": 4.1, "snr": 5.0, "saturated": true}),
+            json!({"x": 1.5, "y": 2.0, "ra": 150.0, "dec": 2.0, "flux": 1234.5, "mag_inst": -7.73, "mag_ab": 17.27, "fwhm": 4.7, "snr": 120.0, "saturated": false, "aperture_radius": 7.05}),
+            json!({"x": 3.0, "y": 4.0, "ra": 150.1, "dec": 2.1, "flux": 10.0, "mag_inst": -2.5, "mag_ab": null, "fwhm": 4.1, "snr": 5.0, "saturated": true, "aperture_radius": 6.0}),
         ];
         let csv = build_csv(CSV_KIND_SOURCES, &items).unwrap();
         let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
-        assert_eq!(lines[0], "x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,saturated");
-        assert_eq!(lines[1], "1.5,2,150,2,1234.5,-7.73,17.27,4.7,120,false");
-        assert_eq!(lines[2], "3,4,150.1,2.1,10,-2.5,,4.1,5,true");
+        assert_eq!(lines[0], "x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,saturated,aperture_radius");
+        assert_eq!(lines[1], "1.5,2,150,2,1234.5,-7.73,17.27,4.7,120,false,7.05");
+        assert_eq!(lines[2], "3,4,150.1,2.1,10,-2.5,,4.1,5,true,6");
         assert_eq!(lines[3], "");
         assert_eq!(lines.len(), 4, "file ends with a single line terminator");
 
@@ -810,15 +934,15 @@ mod tests {
         })];
         let csv = build_csv(CSV_KIND_MATCHES, &matched).unwrap();
         let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
-        assert_eq!(lines[0], "id,x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,cat_ra,cat_dec,g,bp,rp,bp_rp,sep_arcsec,d_ra_arcsec,d_dec_arcsec");
-        assert_eq!(lines[1], "gaia1,30,30,150,2,100,-5,,4,50,150.0001,2.0001,20,,,0.8,0.3,0.2,-0.1");
+        assert_eq!(lines[0], MATCHES_CSV_HEADER);
+        assert_eq!(lines[1], "gaia1,30,30,150,2,100,-5,,4,50,150.0001,2.0001,20,,,0.8,0.3,0.2,-0.1,,,");
 
         let err = build_csv("bogus", &[]).unwrap_err().to_string();
         assert!(err.contains("bogus"), "{err}");
 
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("sources.csv");
-        let n = write_csv(out.to_str().unwrap(), CSV_KIND_SOURCES, &items).unwrap();
+        let n = write_csv_with_header(out.to_str().unwrap(), CSV_KIND_SOURCES, &items, &[]).unwrap();
         assert_eq!(n, 2);
         let written = std::fs::read_to_string(&out).unwrap();
         assert_eq!(written, build_csv(CSV_KIND_SOURCES, &items).unwrap());
@@ -832,7 +956,7 @@ mod tests {
         })];
         let csv = build_csv(CSV_KIND_SOURCES, &items).unwrap();
         let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
-        assert_eq!(lines[1], "2,30,0.1,0.000123,1234.5,-7,0.30000000000000004,4,120,false");
+        assert_eq!(lines[1], "2,30,0.1,0.000123,1234.5,-7,0.30000000000000004,4,120,false,");
         assert_eq!(csv_cell(Some(&json!(2.0))), "2");
         assert_eq!(csv_cell(Some(&json!(2))), "2");
         assert_eq!(csv_cell(Some(&json!(-0.5))), "-0.5");
@@ -1507,5 +1631,230 @@ mod tests {
         let cells: Vec<&str> = csv.split(CSV_LINE_END).nth(1).unwrap().split(',').collect();
         assert_eq!(cells[7], "", "the fwhm cell of {csv}");
         assert_ne!(cells[8], "", "the snr cell of {csv}");
+    }
+
+    #[test]
+    fn cone_search_warns_when_the_cone_is_limited_to_five_degrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let wide_cards = [
+            ("CRVAL1", "161.0"),
+            ("CRVAL2", "13.0"),
+            ("CD1_1", "-8.5e-2"),
+            ("CD2_2", "8.5e-2"),
+            ("DATE-OBS", "2016-01-01T00:00:00"),
+        ];
+        let (wide_path, wide_wcs, wide_query) = star_field_at(&dir, "wide_cone.fits", &wide_cards);
+        prime_cache(&wide_query, catalog_rows_for_field(&wide_wcs));
+        let wide = cone_search_for_path(&wide_path, None, None, None).unwrap();
+        assert!(
+            warning_texts(&wide)
+                .contains(&"Gaia cone limited to 5 deg: 7.7 deg was needed, so rows beyond the cone are not listed".to_string()),
+            "{:?}",
+            warning_texts(&wide)
+        );
+
+        let small_cards = [("CRVAL1", "157.0"), ("CRVAL2", "9.0"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let (small_path, small_wcs, _) = star_field_at(&dir, "small_cone.fits", &small_cards);
+        let geometry = field_geometry(&small_wcs, IMAGE_SIZE, IMAGE_SIZE);
+        prime_cache(&cone_query_for_field(&geometry, Some(400.0), None, None), catalog_rows_for_field(&small_wcs));
+        let asked = cone_search_for_path(&small_path, Some(400.0), None, None).unwrap();
+        assert!(
+            warning_texts(&asked)
+                .contains(&"Gaia cone limited to 5 deg: 6.7 deg was needed, so rows beyond the cone are not listed".to_string()),
+            "{:?}",
+            warning_texts(&asked)
+        );
+        assert_eq!(asked["radius_arcmin"], 300.0);
+    }
+
+    #[test]
+    fn the_matches_and_sources_csv_carry_the_aperture_the_saturation_flag_and_the_zero_point_status() {
+        let sources = vec![json!({"x": 3.0, "y": 4.0, "ra": 150.1, "dec": 2.1, "flux": 10.0, "mag_inst": -2.5, "mag_ab": null, "fwhm": 4.1, "snr": 5.0, "saturated": true, "aperture_radius": 6.0})];
+        let csv = build_csv(CSV_KIND_SOURCES, &sources).unwrap();
+        let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
+        assert_eq!(lines[0], "x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,saturated,aperture_radius");
+        assert_eq!(lines[1], "3,4,150.1,2.1,10,-2.5,,4.1,5,true,6");
+
+        let star = json!({"x": 30.0, "y": 30.0, "ra": 150.0, "dec": 2.0, "flux": 100.0, "mag_inst": -5.0, "mag_ab": null, "fwhm": 4.0, "snr": 50.0, "saturated": false, "aperture_radius": 6.0});
+        let row = json!({"id": "gaia1", "ra": 150.0001, "dec": 2.0001, "g": 20.0, "bp": null, "rp": null, "bp_rp": 0.8});
+        let mut saturated_star = star.clone();
+        saturated_star["saturated"] = json!(true);
+        let mut old_caller_star = star.clone();
+        old_caller_star.as_object_mut().unwrap().retain(|key, _| key != "saturated" && key != "aperture_radius");
+        let matched = vec![
+            json!({"star": star, "row": row, "sep_arcsec": 0.3, "d_ra_arcsec": 0.2, "d_dec_arcsec": -0.1, "zp_status": "used"}),
+            json!({"star": saturated_star, "row": row, "sep_arcsec": 0.3, "d_ra_arcsec": 0.2, "d_dec_arcsec": -0.1, "zp_status": null}),
+            json!({"star": old_caller_star, "row": row, "sep_arcsec": 0.3, "d_ra_arcsec": 0.2, "d_dec_arcsec": -0.1}),
+        ];
+        let csv = build_csv(CSV_KIND_MATCHES, &matched).unwrap();
+        let lines: Vec<&str> = csv.split(CSV_LINE_END).collect();
+        assert_eq!(lines[0], MATCHES_CSV_HEADER);
+        assert_eq!(lines[1], "gaia1,30,30,150,2,100,-5,,4,50,150.0001,2.0001,20,,,0.8,0.3,0.2,-0.1,false,6,used");
+        assert!(lines[2].ends_with(",-0.1,true,6,"), "{}", lines[2]);
+        assert!(lines[3].ends_with(",-0.1,,,"), "{}", lines[3]);
+        assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn crossmatch_lists_the_warnings_of_the_header_calibration_once() {
+        const PIXAR_SR_WARNING: &str = "PIXAR_SR missing; pixel area derived from the WCS pixel scale";
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [("CRVAL1", "162.0"), ("CRVAL2", "14.0"), ("BUNIT", "MJy/sr"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let (path, wcs, query) = star_field_at(&dir, "mjysr.fits", &cards);
+        prime_cache(&query, catalog_rows_for_field(&wcs));
+        let out = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        assert_eq!(out["photcal_present"], true);
+        let warnings = warning_texts(&out);
+        assert_eq!(warnings.iter().filter(|w| w.starts_with(PIXAR_SR_WARNING)).count(), 1, "{warnings:?}");
+
+        let lhe_cards = [
+            ("CRVAL1", "162.0"),
+            ("CRVAL2", "14.0"),
+            ("BUNIT", "MJy/sr"),
+            ("DATE-OBS", "2016-01-01T00:00:00"),
+            ("ABPROC", "lhe"),
+        ];
+        let (lhe_path, lhe_wcs, lhe_query) = star_field_at(&dir, "mjysr_lhe.fits", &lhe_cards);
+        prime_cache(&lhe_query, catalog_rows_for_field(&lhe_wcs));
+        let lhe = crossmatch_for_path(&lhe_path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        assert_eq!(lhe["photcal_present"], false);
+        let warnings = warning_texts(&lhe);
+        assert!(!warnings.iter().any(|w| w.starts_with(PIXAR_SR_WARNING)), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("header flux calibration ignored: lhe changed")), "{warnings:?}");
+    }
+
+    fn default_run_args() -> CrossMatchArgs {
+        CrossMatchArgs {
+            sigma: Some(5.0),
+            max_stars: Some(50),
+            radius_arcsec: Some(2.0),
+            colour_term: Some(false),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn crossmatch_says_which_gaia_list_it_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [("CRVAL1", "158.0"), ("CRVAL2", "10.0"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let (path, wcs, query) = star_field_at(&dir, "which_list.fits", &cards);
+        let half_diagonal = field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE).diagonal_arcmin / 2.0;
+        assert!((half_diagonal - 1.5085).abs() < 1e-4, "{half_diagonal}");
+        prime_cache(&query, catalog_rows_for_field(&wcs));
+        let out = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+
+        let info = &out["catalog_query"];
+        assert!((info["radius_arcmin"].as_f64().unwrap() - half_diagonal).abs() < 1e-9, "{info:?}");
+        assert!((info["field_radius_arcmin"].as_f64().unwrap() - half_diagonal).abs() < 1e-9, "{info:?}");
+        assert!(info["mag_limit"].is_null(), "{info:?}");
+        assert_eq!(info["max_rows"], 5000);
+        assert_eq!(info["row_cap_reached"], false);
+        assert_eq!(info["cone_smaller_than_field"], false);
+        assert_eq!(out["catalog_table"], "I/355/gaiadr3");
+        assert_eq!(out["mag_system"], "vega");
+        assert_eq!(out["detection_sigma"], 5.0);
+        assert_eq!(out["max_stars"], 50);
+
+        prime_cache(&query, catalog_rows_for_field(&wcs));
+        let through_args = crossmatch_with(&path, &default_run_args()).unwrap();
+        for key in ["zero_point", "matches", "astrometry", "n_catalog", RES_WARNINGS] {
+            assert_eq!(out[key], through_args[key], "{key}");
+        }
+    }
+
+    #[test]
+    fn crossmatch_asks_for_the_cone_and_the_g_limit_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [("CRVAL1", "159.0"), ("CRVAL2", "11.0"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let (path, wcs, _) = star_field_at(&dir, "limited.fits", &cards);
+        let geometry = field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE);
+        let limited = cone_query_for_field(&geometry, Some(1.0), Some(13.8), Some(200));
+        let brighter: Vec<CatalogRow> =
+            catalog_rows_for_field(&wcs).into_iter().filter(|row| row.g.is_some_and(|g| g < 13.8)).collect();
+        assert_eq!(brighter.len(), 3);
+        let args = CrossMatchArgs {
+            cone_radius_arcmin: Some(1.0),
+            mag_limit: Some(13.8),
+            max_rows: Some(200),
+            ..default_run_args()
+        };
+
+        prime_cache(&limited, brighter.clone());
+        let out = crossmatch_with(&path, &args).unwrap();
+        assert_eq!(out["n_catalog"], 3);
+        assert_eq!(out["catalog_source"], "memory");
+        let mut ids: Vec<&str> = out["matches"].as_array().unwrap().iter().map(|m| m["row"]["id"].as_str().unwrap()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["star0", "star1", "star2"]);
+        let info = &out["catalog_query"];
+        assert!((info["radius_arcmin"].as_f64().unwrap() - 1.0).abs() < 1e-12, "{info:?}");
+        assert!((info["field_radius_arcmin"].as_f64().unwrap() - 1.5085).abs() < 1e-3, "{info:?}");
+        assert_eq!(info["mag_limit"], 13.8);
+        assert_eq!(info["max_rows"], 200);
+        assert_eq!(info["row_cap_reached"], false);
+        assert_eq!(info["cone_smaller_than_field"], true);
+        let warnings = warning_texts(&out);
+        assert!(
+            warnings.contains(
+                &"Gaia cone of 1.0 arcmin is smaller than the field, which reaches 1.5 arcmin from its centre: detections beyond the cone find no partner"
+                    .to_string()
+            ),
+            "{warnings:?}"
+        );
+        assert!(!warnings.iter().any(|w| w.starts_with("Gaia cone limited")), "{warnings:?}");
+
+        prime_cache(&limited, brighter);
+        let cone = cone_search_for_path(&path, Some(1.0), Some(13.8), Some(200)).unwrap();
+        assert_eq!(cone["n_total"], 3);
+        assert_eq!(cone["catalog_source"], "memory");
+        assert_eq!(cone["mag_limit"], 13.8);
+        assert_eq!(cone["max_rows"], 200);
+        assert_eq!(cone["catalog_table"], "I/355/gaiadr3");
+
+        let limit_cards = [("CRVAL1", "160.0"), ("CRVAL2", "12.0"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let (limit_path, limit_wcs, default_query) = star_field_at(&dir, "limits.fits", &limit_cards);
+        let half_diagonal = field_geometry(&limit_wcs, IMAGE_SIZE, IMAGE_SIZE).diagonal_arcmin / 2.0;
+        for (cone_radius_arcmin, mag_limit, max_rows) in [
+            (Some(f64::NAN), None, None),
+            (Some(0.0), None, None),
+            (Some(-3.0), None, None),
+            (None, None, Some(0)),
+            (None, Some(f64::INFINITY), None),
+        ] {
+            prime_cache(&default_query, catalog_rows_for_field(&limit_wcs));
+            let out = crossmatch_with(&limit_path, &CrossMatchArgs { cone_radius_arcmin, mag_limit, max_rows, ..default_run_args() }).unwrap();
+            let info = &out["catalog_query"];
+            let case = format!("{cone_radius_arcmin:?} {mag_limit:?} {max_rows:?}");
+            assert_eq!(out["catalog_source"], "memory", "{case}");
+            assert!((info["radius_arcmin"].as_f64().unwrap() - half_diagonal).abs() < 1e-9, "{case}: {info:?}");
+            assert!(info["mag_limit"].is_null(), "{case}: {info:?}");
+            assert_eq!(info["max_rows"], 5000, "{case}");
+            assert_eq!(info["cone_smaller_than_field"], false, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_catalogue_csv_starts_with_the_header_lines_it_is_given() {
+        let items = vec![json!({"x": 1.5, "y": 2.0, "ra": 150.0, "dec": 2.0, "flux": 1234.5, "mag_inst": -7.73, "mag_ab": 17.27, "fwhm": 4.7, "snr": 120.0, "saturated": false, "aperture_radius": 7.05})];
+        let header_lines = vec!["# software: AstroBurst v0.8.0".to_string(), "# unit x: px".to_string()];
+        let plain = build_csv(CSV_KIND_SOURCES, &items).unwrap();
+        let csv = build_csv_with_header(CSV_KIND_SOURCES, &items, &header_lines).unwrap();
+        assert_eq!(csv, format!("# software: AstroBurst v0.8.0\r\n# unit x: px\r\n{plain}"));
+        assert_eq!(build_csv_with_header(CSV_KIND_SOURCES, &items, &[]).unwrap(), plain);
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("sources.csv");
+        let n = write_csv_with_header(out.to_str().unwrap(), CSV_KIND_SOURCES, &items, &header_lines).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), csv);
+
+        let err = build_csv_with_header(CSV_KIND_SOURCES, &items, &["software: x".to_string()]).unwrap_err().to_string();
+        assert!(err.contains("header line 1 must start with '#'"), "{err}");
+        let err = build_csv_with_header(CSV_KIND_SOURCES, &items, &["# a".to_string(), "# b\nc".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("header line 2"), "{err}");
+        let err = build_csv_with_header(CSV_KIND_SOURCES, &items, &["# a\r".to_string()]).unwrap_err().to_string();
+        assert!(err.contains("header line 1"), "{err}");
     }
 }

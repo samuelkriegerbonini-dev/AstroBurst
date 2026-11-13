@@ -9,6 +9,7 @@ import {
   type HintedDisplay,
 } from "../displayHint";
 import { displayHintFor } from "../lineFit";
+import { pickLook } from "../displayMemory";
 import { DEFAULT_DISPLAY_SETTINGS, type DisplayLook, type DisplaySettings } from "../../shared/types/display";
 
 const USER: DisplaySettings = {
@@ -220,5 +221,40 @@ describe("fileDisplayState", () => {
     expect(reapplied.snapshot).toEqual({ ...USER, ...LOOK });
     expect(reapplied.display).toMatchObject({ colormap: "rdbu", stretch: "linear", limits: "percentile", symmetric: true, grid: true });
     expect(persistableDisplay(reapplied)).toBeNull();
+  });
+});
+
+describe("Symmetric switched on under mtf", () => {
+  const OPENED: DisplaySettings = { ...USER, stretch: "mtf", limits: "minmax", compass: true };
+
+  it("switching it off gives back the stretch it replaced and changes nothing else", () => {
+    let s = startSession(OPENED);
+    s = edit(s, { symmetric: true });
+    expect(s.state.display).toEqual({ ...OPENED, symmetric: true, stretch: "linear" });
+    s = edit(s, { symmetric: false });
+    expect(s.state.display).toEqual(OPENED);
+    expect(s.stored).toEqual(OPENED);
+  });
+
+  it("keeps edits made while it was on, and a stretch picked meanwhile wins over the one it replaced", () => {
+    let s = startSession(OPENED);
+    s = edit(s, { symmetric: true });
+    s = edit(s, { colormap: "rdbu", centre: 2 });
+    s = edit(s, { symmetric: false });
+    expect(s.state.display).toEqual({ ...OPENED, colormap: "rdbu", centre: 2 });
+    s = edit(s, { symmetric: true });
+    s = edit(s, { stretch: "asinh" });
+    s = edit(s, { symmetric: false });
+    expect(s.state.display).toEqual({ ...OPENED, colormap: "rdbu", centre: 2, stretch: "asinh" });
+  });
+
+  it("leaves a stretch it did not replace alone, also after a file switch", () => {
+    let s = startSession({ ...OPENED, stretch: "linear" });
+    s = edit(s, { symmetric: true });
+    s = edit(s, { symmetric: false });
+    expect(s.state.display.stretch).toBe("linear");
+    const switched = edit(startSession(OPENED), { symmetric: true });
+    const other = fileDisplayState(switched.state, { ...pickLook(OPENED), stretch: "linear", symmetric: true }, null);
+    expect(patchHintedDisplay(other, { symmetric: false }).display.stretch).toBe("linear");
   });
 });

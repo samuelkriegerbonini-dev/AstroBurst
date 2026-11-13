@@ -168,7 +168,7 @@ export default function HdrPanel({ selectedFile, outputDir = "./output", onProce
           </div>
           <div className="flex justify-between items-center text-[10px] text-zinc-500">
             <span>{progress.stage}</span>
-            <span className="flex items-center gap-2">
+            <span className="flex items-center gap-2 tabular-nums">
               {progress.percent}%
               <button
                 onClick={() => { cancelProgress(HDR_PROGRESS_EVENT).catch(() => {}); }}

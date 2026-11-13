@@ -5,12 +5,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use tempfile::TempDir;
 
+use super::band_planes::{band_plane_of_path, resolve_band_plane, resolve_band_plane_fresh};
+use super::bzip::split_bz2_suffix;
 use super::gzip::{
     copy_capped, gunzip_or_copy, resolve_gzip, resolve_gzip_fresh, split_gz_suffix, temp_folder_cap, Cap, SharedTempDir,
 };
 use super::reader::{list_extensions, HduInfo};
 
 pub fn resolve_single_image(path: &str) -> Result<(PathBuf, Option<SharedTempDir>)> {
+    if let Some(band) = band_plane_of_path(path) {
+        let (copy, dir) = resolve_band_plane(&band)?;
+        return Ok((copy, Some(dir)));
+    }
     let p = Path::new(path);
     if !is_zip_path(p) {
         return resolve_gzip(p);
@@ -20,6 +26,10 @@ pub fn resolve_single_image(path: &str) -> Result<(PathBuf, Option<SharedTempDir
 }
 
 pub fn resolve_single_image_fresh(path: &str) -> Result<(PathBuf, Option<SharedTempDir>)> {
+    if let Some(band) = band_plane_of_path(path) {
+        let (copy, dir) = resolve_band_plane_fresh(&band)?;
+        return Ok((copy, Some(dir)));
+    }
     let p = Path::new(path);
     if !is_zip_path(p) {
         return resolve_gzip_fresh(p);
@@ -42,8 +52,9 @@ fn is_zip_path(p: &Path) -> bool {
 
 const MAX_ZIP_DEPTH: u32 = 4;
 
-const ZIP_IMAGE_SUFFIXES: [&str; 8] =
-    [".fits", ".fit", ".fts", ".fz", ".asdf", ".fits.gz", ".fit.gz", ".fts.gz"];
+const ZIP_IMAGE_SUFFIXES: [&str; 11] = [
+    ".fits", ".fit", ".fts", ".fz", ".asdf", ".fits.gz", ".fit.gz", ".fts.gz", ".fits.bz2", ".fit.bz2", ".fts.bz2",
+];
 
 struct ZipMember {
     label: String,
@@ -141,7 +152,7 @@ impl ZipExtraction<'_> {
                     label,
                     archive: zip_path.to_path_buf(),
                     index: i,
-                    relative: without_gz_suffix(relative),
+                    relative: without_compression_suffix(relative),
                     out_dir: out_dir.to_path_buf(),
                 });
             } else {
@@ -223,13 +234,13 @@ impl ZipExtraction<'_> {
     }
 }
 
-fn without_gz_suffix(relative: PathBuf) -> PathBuf {
+fn without_compression_suffix(relative: PathBuf) -> PathBuf {
     let name = relative
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    match split_gz_suffix(&name) {
-        (stem, Some(_)) => relative.with_file_name(stem),
+    match (split_gz_suffix(&name), split_bz2_suffix(&name)) {
+        ((stem, Some(_)), _) | (_, (stem, Some(_))) => relative.with_file_name(stem),
         _ => relative,
     }
 }
@@ -277,6 +288,7 @@ mod tests {
     use super::*;
 
     use crate::core::stacking::memory::{format_bytes, MEMORY_BUDGET_ENV};
+    use crate::infra::fits::bzip::test_support::bzip2_bytes;
     use crate::infra::fits::gzip::test_support::{gzip_bytes, memory_budget};
     use crate::infra::fits::reader::test_fixtures::{empty_primary_cards, plane_hdu, write_raw_hdus};
     use crate::infra::image_source::load_plane;
@@ -469,6 +481,51 @@ mod tests {
             assert_eq!(first.file_name().unwrap(), name);
             assert_eq!(fs::read(&first).unwrap(), content, "{member}");
         }
+    }
+
+    #[test]
+    fn bzip2_compressed_fits_members_open_under_their_name_without_bz2() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("frame.fits");
+        write_raw_hdus(&plain, &[(empty_primary_cards(), Vec::new()), plane_hdu("SCI", 6, 5)]);
+        let zip_path = dir.path().join("compressed.zip");
+        write_zip(
+            &zip_path,
+            &[
+                ("a/logs.tar.bz2", &bzip2_bytes(b"tar")),
+                ("a/readme.bz2", &bzip2_bytes(b"text")),
+                ("b/frame.fits.bz2", &bzip2_bytes(&fs::read(&plain).unwrap())),
+            ],
+        );
+
+        let (first, tmp) = resolve_single_image(zip_path.to_str().unwrap()).unwrap();
+        assert!(tmp.is_some());
+        assert_eq!(first.file_name().unwrap(), "frame.fits");
+        assert_eq!(
+            load_plane(&ImageRef::parse(zip_path.to_str().unwrap())).unwrap().arr,
+            load_plane(&ImageRef::parse(plain.to_str().unwrap())).unwrap().arr
+        );
+
+        for (member, bytes, name, content) in [
+            ("b/LUM.FIT.BZ2", bzip2_bytes(b"upper"), "LUM.FIT", b"upper".as_slice()),
+            ("c/old.fts.bz2", bzip2_bytes(b"fts"), "old.fts", b"fts".as_slice()),
+        ] {
+            let single = dir.path().join(format!("{name}.zip"));
+            write_zip(&single, &[(member, &bytes)]);
+            let (first, _tmp) = first_image(&single, u64::MAX).unwrap();
+            assert_eq!(first.file_name().unwrap(), name);
+            assert_eq!(fs::read(&first).unwrap(), content, "{member}");
+        }
+    }
+
+    #[test]
+    fn a_bz2_member_without_the_bzip2_magic_is_copied_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("misnamed.zip");
+        write_zip(&zip_path, &[("misnamed.fits.bz2", b"SIMPLE plain")]);
+        let (first, _tmp) = first_image(&zip_path, u64::MAX).unwrap();
+        assert_eq!(first.file_name().unwrap(), "misnamed.fits");
+        assert_eq!(fs::read(&first).unwrap(), b"SIMPLE plain");
     }
 
     #[test]

@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, expectTypeOf, beforeEach, vi } from "vitest";
 
 const { typedInvokeMock } = vi.hoisted(() => ({ typedInvokeMock: vi.fn() }));
 
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock, withPreview: vi.fn() }));
 
 import { finiteSky, measurePhotometry, measurePhotometryBatch, timeSeriesPhotometry, pixelTable, photometryGainModel } from "../analysis";
+import type { FluxConvention, MagSystem, PhotCal, UserZeroPoint } from "../analysis";
 
 const BASE = { photometry: {}, gaia: null, photcal: null, warnings: [], masked: false, elapsed_ms: 1 };
 
@@ -40,6 +41,7 @@ describe("measurePhotometry arguments", () => {
       gaiaMatch: false,
       excludeDq: false,
       gain: null,
+      zeroPoint: null,
     });
   });
 
@@ -73,6 +75,7 @@ describe("measurePhotometryBatch", () => {
       gain: null,
       excludeDq: false,
       withGrowthCurve: false,
+      zeroPoint: null,
     });
   });
 
@@ -161,6 +164,7 @@ describe("timeSeriesPhotometry", () => {
       siteLat: null,
       siteLon: null,
       siteHeight: null,
+      zeroPoint: null,
     });
     expect(res).toBe(SERIES);
   });
@@ -245,5 +249,56 @@ describe("photometryGainModel", () => {
     const res = await photometryGainModel("/w/502nmos.fits");
     expect(typedInvokeMock).toHaveBeenCalledWith("photometry_gain_model_cmd", { path: "/w/502nmos.fits" });
     expect(res).toBe(model);
+  });
+});
+
+describe("typed zero point", () => {
+  beforeEach(() => typedInvokeMock.mockReset());
+
+  const TYPED: UserZeroPoint = { zp: 25, system: "vega", per_second: true };
+
+  it("forwards a typed zero point in the wire shape", async () => {
+    typedInvokeMock.mockResolvedValue({ ...BASE, sky: null });
+    await measurePhotometry("/a.fits", 1, 2, { zeroPoint: TYPED });
+    expect(typedInvokeMock.mock.calls[0][0]).toBe("measure_photometry_cmd");
+    expect(typedInvokeMock.mock.calls[0][1].zeroPoint).toEqual({ zp: 25, system: "vega", per_second: true });
+  });
+
+  it("forwards a typed zero point from the batch wrapper", async () => {
+    typedInvokeMock.mockResolvedValue({ photcal: null, warnings: [], masked: false, n_measured: 1, n_failed: 0, elapsed_ms: 1, rows: [] });
+    await measurePhotometryBatch("/b.fits", [[1, 2]], { zeroPoint: TYPED });
+    expect(typedInvokeMock.mock.calls[0][0]).toBe("measure_photometry_batch_cmd");
+    expect(typedInvokeMock.mock.calls[0][1].zeroPoint).toEqual({ zp: 25, system: "vega", per_second: true });
+  });
+
+  it("forwards a typed zero point from the time-series wrapper", async () => {
+    typedInvokeMock.mockResolvedValue({});
+    await timeSeriesPhotometry(["/a.fits"], [], { apertureRadius: 5, zeroPoint: TYPED });
+    expect(typedInvokeMock.mock.calls[0][0]).toBe("time_series_photometry_cmd");
+    expect(typedInvokeMock.mock.calls[0][1].zeroPoint).toEqual({ zp: 25, system: "vega", per_second: true });
+  });
+
+  it("types the calibration members that mirror the backend", () => {
+    expectTypeOf<PhotCal["mag_system"]>().toEqualTypeOf<MagSystem | undefined>();
+    expectTypeOf<PhotCal["origin"]>().toEqualTypeOf<string | undefined>();
+    expectTypeOf<PhotCal["jy_per_native_unit"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<UserZeroPoint["system"]>().toEqualTypeOf<"ab" | "vega">();
+    const perPixel: FluxConvention = { kind: "flux_density_per_pixel", jy_per_unit: 1e-9, unit: "nJy" };
+    const survey: FluxConvention = {
+      kind: "survey_zero_point",
+      zp_ab: 31.95,
+      source: "FPA.ZP + 2.5 log10(EXPTIME)",
+      exptime_applied: 600,
+    };
+    const user: FluxConvention = {
+      kind: "generic_zero_point",
+      zp: 25,
+      keyword: "user",
+      per_second: false,
+      exptime: null,
+      system: "vega",
+      exptime_applied: false,
+    };
+    expect([perPixel.kind, survey.kind, user.kind]).toEqual(["flux_density_per_pixel", "survey_zero_point", "generic_zero_point"]);
   });
 });

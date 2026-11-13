@@ -381,6 +381,24 @@ describe("products tab", () => {
     expect(buttons(markup).filter((b) => /^Download/.test(b))).toEqual([]);
   });
 
+  it("keeps the product suffix of a long file name in a part of the row that is never cut", () => {
+    const tso = "jw02358-o030_t003_nirspec";
+    const files = [
+      product(`${tso}_clear-prism-s1600a1-sub2048_x1dints.fits`, "spectrum", 14_702_400, { datasetId: tso, suffix: "x1dints" }),
+      product(`${tso}_clear-prism-s1600a1-sub2048_whtlt.ecsv`, "catalog", 14_107, { datasetId: tso, suffix: "whtlt" }),
+    ];
+    const s = run(
+      productsTab(withList()),
+      { type: "productsStarted", key: KEY, requestId: `g1:products:${ID}`, at: 0 },
+      { type: "productsLoaded", key: KEY, requestId: `g1:products:${ID}`, list: { ...productList(), products: files } },
+    );
+    const markup = html(DetailPane, { state: s, ctl });
+    expect(markup).toContain(
+      `<span class="ab-mast-prow-name ab-mast-mono" title="${tso}_clear-prism-s1600a1-sub2048_x1dints.fits"><span class="ab-mast-prow-name-head">…_clear-prism-s1600a1-sub2048</span><span class="ab-mast-prow-name-tail">_x1dints.fits</span></span>`,
+    );
+    expect(markup).toContain('<span class="ab-mast-prow-name-tail">_whtlt.ecsv</span>');
+  });
+
   it("disables the checkbox of a file the app cannot download and keeps the others", () => {
     const classy = product("hlsp_classy_hst_cos_j0021+0052_g130m_v1_coadded.fits", "image", 1_000, {
       mastUri: "mast:HLSP/classy/j0021+0052/hlsp_classy_hst_cos_j0021+0052_g130m_v1_coadded.fits",

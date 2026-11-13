@@ -294,6 +294,23 @@ describe("entries", () => {
     expect(entriesFrom(candidates, regions, settled, null)).toHaveLength(3);
   });
 
+  it("tells regions past the palette apart by a dash", () => {
+    const sixteen = Array.from({ length: MAX_COMPARISON_REGIONS }, (_, i) => regionOf(`r${i + 1}`, { shape: "circle", x: i, y: i, r: 1 }));
+    const settled = sixteen.map(() => fulfilled(regionSpectrum([1, 2, 3])));
+    const nine = entriesFrom(sixteen.slice(0, 9), sixteen, settled.slice(0, 9), null);
+    expect(nine.slice(0, 8).map((e) => e.dashed)).toEqual(Array(8).fill(false));
+    expect(nine[8].dashed).toBe(true);
+    expect(nine[8].color).toBe(nine[0].color);
+    expect(nine[8].color).toBe(COMPARISON_PALETTE[0]);
+    const all = entriesFrom(sixteen, sixteen, settled, null);
+    expect(all.slice(8).map((e) => e.dashed)).toEqual(Array(8).fill(true));
+    expect(all.slice(0, 8).map((e) => e.dashed)).toEqual(Array(8).fill(false));
+    const coloured = [...sixteen.slice(0, 8), regionOf("own", circle, { color: "#123456" })];
+    const own = entriesFrom(coloured, coloured, settled.slice(0, 9), null);
+    expect(own[8].color).toBe("#123456");
+    expect(own[8].dashed).toBe(true);
+  });
+
   it("pruneEntries drops entries of removed regions and of another channel count", () => {
     const regions = [regionOf("r1", circle), regionOf("r2", box)];
     const entries = [
@@ -492,6 +509,16 @@ describe("table entries", () => {
     expect(mean.yLabel).toBe("MJy/sr");
   });
 
+  it("hands the dash to the plot", () => {
+    const region = regionEntry("r1", [1, 2, 3]);
+    const table = tableEntryOf([10, NaN, 30], null, { dashed: true });
+    const result = comparisonSeries([region, table], new Set(), axis3, "sum", "none", null, null, "MJy/sr");
+    expect(result.series).toEqual([
+      { x: axis3, y: [1, 2, 3], color: "#111111", label: "r1", dashed: false },
+      { x: axis3, y: [10, null, 30], color: "#f0abfc", label: TABLE_LABEL, dashed: true },
+    ]);
+  });
+
   it("comparisonSeries omits an x1d without SURF_BRIGHT in the mean view with its own reason", () => {
     const result = comparisonSeries([tableEntryOf([10, 20, 30])], new Set(), axis3, "mean", "none", null, null, "MJy/sr");
     expect(result.series).toEqual([]);
@@ -604,7 +631,7 @@ describe("spectrum file entries", () => {
       region: null,
       pixel: null,
       table: null,
-      document: { flux, fluxUnit },
+      document: { flux, fluxUnit, droppedDq: 0 },
       error: null,
     };
   }

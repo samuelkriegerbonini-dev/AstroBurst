@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  FRAME_LABEL_VACUUM,
   FRAME_STEP_LARGE,
   PLAYBACK_SPEEDS,
   channelFromPlotPixel,
@@ -126,6 +127,15 @@ describe("formatFrameLabel", () => {
     expect(formatFrameLabel(0, 40, NaN, "um")).toBe("ch 0 (0–39)");
     expect(formatFrameLabel(0, 0, null, "")).toBe("ch 0 (0–0)");
   });
+
+  it("keeps the decimals the channel spacing needs", () => {
+    expect(formatFrameLabel(2, 40, 2.000004, "um", 2e-6)).toBe("ch 2 (0–39) - 2.000004 um");
+    expect(formatFrameLabel(2, 40, 1.002, "um", 6.65e-4)).toBe("ch 2 (0–39) - 1.0020 um");
+    expect(formatFrameLabel(9, 40, -0.96, "km/s", 0.04)).toBe("ch 9 (0–39) - -0.96 km/s");
+    expect(formatFrameLabel(2, 40, 1.002, "um", 0)).toBe("ch 2 (0–39) - 1.0020 um");
+    expect(formatFrameLabel(2, 40, 1.002, "um", Number.NaN)).toBe("ch 2 (0–39) - 1.0020 um");
+    expect(formatFrameLabel(2, 40, 1.002, "um", undefined)).toBe("ch 2 (0–39) - 1.0020 um");
+  });
 });
 
 describe("filterFrameLabel", () => {
@@ -165,7 +175,7 @@ describe("frameRecordLabel", () => {
   };
 
   it("labels an air-wavelength cube channel with the vacuum wavelength the navigator shows", () => {
-    expect(frameRecordLabel(1450, 3681, museAirAxis)).toBe("ch 1450 (0–3680) - 0.6564 um");
+    expect(frameRecordLabel(1450, 3681, museAirAxis)).toBe("ch 1450 (0–3680) - 0.6564 um vacuum");
     const nav = formatAxis(museAirAxis, "wavelength_vac", null, "optical");
     for (const idx of [0, 1450, 3000, 3680]) {
       const navLabel = formatFrameLabel(idx, 3681, frameAxisValue(idx, nav?.values), nav?.unit ?? "");
@@ -178,6 +188,21 @@ describe("frameRecordLabel", () => {
     expect(frameRecordLabel(0, 1, freq)).toBe("ch 0 (0–0) - 230.5000 GHz");
     expect(frameRecordLabel(3, 40, { ...museAirAxis, kind: "unknown" })).toBe("ch 3 (0–39)");
     expect(frameRecordLabel(3, 40, null)).toBe("ch 3 (0–39)");
+  });
+
+  const fineAxis: SpectralAxisInfo = { ...museAirAxis, kind: "wave", ctype: "WAVE", values: [2, 2.000002, 2.000004, 2.000006, 2.000008] };
+
+  it("keeps neighbouring channels of a fine axis apart", () => {
+    expect(frameRecordLabel(2, 5, fineAxis)).toBe("ch 2 (0–4) - 2.000004 um");
+    expect(frameRecordLabel(3, 5, fineAxis)).toBe("ch 3 (0–4) - 2.000006 um");
+  });
+
+  it("names the frame of the record's example", () => {
+    expect(frameRecordLabel(0, 3681, { ...museAirAxis, values: [0.656281] })).toBe("ch 0 (0–3680) - 0.6565 um vacuum");
+  });
+
+  it("adds no frame word where nothing was converted", () => {
+    expect(frameRecordLabel(2, 5, fineAxis).endsWith(FRAME_LABEL_VACUUM)).toBe(false);
   });
 });
 

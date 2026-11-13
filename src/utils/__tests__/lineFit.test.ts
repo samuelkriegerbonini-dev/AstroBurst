@@ -7,6 +7,7 @@ import {
   VELOCITY_PLANES,
   displayHintFor,
   displayedLineFitPlane,
+  fitRedshiftHint,
   inspectKey,
   isVelocityPlane,
   lineFitConfig,
@@ -18,11 +19,14 @@ import {
   lineFitResultLabel,
   lineFitSpaxelNotes,
   lineFitSpaxelRows,
+  lineFitSpectrumUnit,
   lineFitSummary,
   parseResolvingPower,
   planeLabel,
   planeUnit,
+  preferredLineFitPlane,
   sigmaCaption,
+  sourceFrameCaption,
   spanAxisValue,
   type LineFitConfigInput,
   type LineFitRun,
@@ -174,6 +178,19 @@ function spaxel(overrides: Partial<LineFitSpaxel> = {}): LineFitSpaxel {
   };
 }
 
+const AT_Z: Partial<LineFitComponentFit> = {
+  velocity_kms: 149914.68, v_err_kms: 1.5, sigma_kms: 150.0, sigma_err_kms: 3.0, sigma_corr_kms: null, flux: 939.99, flux_err: 18.75, snr: 50.13,
+  source_velocity_kms: 12.3, source_v_err_kms: 1.0, source_sigma_kms: 100.0, source_sigma_err_kms: 2.0, source_sigma_corr_kms: null, source_flux: 626.66, source_flux_err: 12.5,
+};
+
+const SOURCE_PLANES: LineFitPlane[] = ["source_flux", "source_velocity", "source_sigma_obs", "source_flux_err", "source_v_err", "source_sigma_err"];
+
+function atZResult(): LineFitResult {
+  const plain = result();
+  const order = [...plain.plane_order, ...SOURCE_PLANES];
+  return { ...plain, plane_order: order, planes: Object.fromEntries(order.map((p) => [p, files(p)])) };
+}
+
 const MAPPING: PlotMapping = { width: 100, padLeft: 10, padRight: 10, xMin: 1, xMax: 3, xValues: [1, 2, 3], n: 3 };
 const FRAME = { top: 0, height: 100, yMin: 0, yMax: 10 };
 
@@ -259,6 +276,26 @@ describe("lineFitConfig", () => {
     expect(parseResolvingPower("-5")).toHaveProperty("error");
     expect(parseResolvingPower("Infinity")).toHaveProperty("error");
   });
+
+  it("sends the redshift beside the laboratory rest wavelength", () => {
+    const cfg = lineFitConfig(configInput({ restUm: 0.656461, redshift: 0.5 }));
+    expect(cfg).toMatchObject({ rest_um: 0.656461, redshift: 0.5 });
+    expect(Object.keys(cfg).slice(-1)).toEqual(["redshift"]);
+    expect(lineFitConfig(configInput({ redshift: 0 }))).toHaveProperty("redshift", 0);
+    expect(lineFitConfig(configInput({ redshift: -0.2 }))).toHaveProperty("redshift", -0.2);
+  });
+
+  it("leaves the config as it was when no redshift is given", () => {
+    expect(lineFitConfig(configInput())).not.toHaveProperty("redshift");
+    expect(lineFitConfig(configInput({ redshift: null }))).not.toHaveProperty("redshift");
+  });
+
+  it("refuses a redshift that is not finite or not above -1 with the sentence of the backend", () => {
+    expect(lineFitConfig(configInput({ redshift: -1 }))).toEqual({ error: "redshift must be a finite number above -1, got -1" });
+    for (const redshift of [-2, NaN, Infinity]) {
+      expect(lineFitConfig(configInput({ redshift }))).toHaveProperty("error", expect.stringMatching(/^redshift must be a finite number above -1, got /));
+    }
+  });
 });
 
 describe("plane labels, units and display hints", () => {
@@ -292,13 +329,48 @@ describe("plane labels, units and display hints", () => {
     expect(planeUnit(r, "snr")).toBeNull();
   });
 
-  it("isVelocityPlane is true for the three velocity planes only", () => {
-    expect(VELOCITY_PLANES).toEqual(["velocity", "c1_velocity", "c2_velocity"]);
+  it("labels the source-frame planes after their observer-frame plane", () => {
+    expect(planeLabel("source_velocity")).toBe("V (source frame)");
+    expect(planeLabel("source_flux")).toBe("flux (source frame)");
+    expect(planeLabel("source_sigma_obs")).toBe("σ obs (source frame)");
+    expect(planeLabel("source_sigma_corr")).toBe("σ corr (source frame)");
+    expect(planeLabel("source_flux_err")).toBe("flux err (source frame)");
+    expect(planeLabel("source_v_err")).toBe("V err (source frame)");
+    expect(planeLabel("source_sigma_err")).toBe("σ err (source frame)");
+    expect(planeLabel("c1_source_velocity")).toBe("V (source frame) c1");
+    expect(planeLabel("c2_source_sigma_err")).toBe("σ err (source frame) c2");
+  });
+
+  it("gives the source-frame planes the unit of their observer-frame plane", () => {
+    const r = result();
+    expect(planeUnit(r, "source_flux")).toBe("MJy/sr km/s");
+    expect(planeUnit(r, "c2_source_flux_err")).toBe("MJy/sr km/s");
+    for (const plane of ["source_velocity", "source_sigma_obs", "source_sigma_corr", "source_v_err", "c1_source_sigma_err"] as const) {
+      expect(planeUnit(r, plane)).toBe("km/s");
+    }
+  });
+
+  it("treats the three source-frame velocity planes as velocities", () => {
+    expect(VELOCITY_PLANES).toEqual(["velocity", "c1_velocity", "c2_velocity", "source_velocity", "c1_source_velocity", "c2_source_velocity"]);
     expect(INTEGER_PLANES).toEqual(["mask", "ncomp"]);
     expect(isVelocityPlane("velocity")).toBe(true);
     expect(isVelocityPlane("c2_velocity")).toBe(true);
     expect(isVelocityPlane("v_err")).toBe(false);
     expect(isVelocityPlane("flux")).toBe(false);
+    expect(isVelocityPlane("source_velocity")).toBe(true);
+    expect(isVelocityPlane("c2_source_velocity")).toBe(true);
+    expect(isVelocityPlane("source_v_err")).toBe(false);
+    expect(isVelocityPlane("source_sigma_obs")).toBe(false);
+    expect(displayHintFor("c1_source_velocity")).toEqual(displayHintFor("velocity"));
+    expect(displayHintFor("source_flux")).toEqual(displayHintFor("flux"));
+  });
+
+  it("shows the source-frame velocity first when the run has it", () => {
+    const extended = atZResult();
+    expect(preferredLineFitPlane(extended)).toBe("source_velocity");
+    expect(preferredLineFitPlane(result())).toBe("velocity");
+    expect(lineFitResultLabel(extended, "source_velocity", "Hα")).toBe("Line fit V (source frame) · Hα · 1310 px");
+    expect(lineFitCubeResult({ ...run(), result: extended }, "source_velocity")?.displayHint).toEqual(displayHintFor("velocity"));
   });
 
   it("displayHintFor gives a diverging map for velocities, gray minmax for integer planes and viridis otherwise", () => {
@@ -440,6 +512,20 @@ describe("lineFitOverlayPolylines", () => {
     const curves = lineFitOverlayPolylines(sloped, MAPPING, FRAME);
     expect(curves.components[0]).toEqual([{ x: px(1), y: py(4.5) }]);
   });
+
+  it("places a 1e-17 line-fit model inside a 0.9e-17 to 2.1e-17 frame instead of on a 1e-10 floor", () => {
+    const xs = Array.from({ length: 40 }, (_, i) => 0.6555 + i * 1e-4);
+    const mapping: PlotMapping = { width: 400, padLeft: 50, padRight: 12, xMin: xs[0], xMax: xs[39], xValues: xs, n: 40 };
+    const frame = { top: 10, height: 146, yMin: 0.9e-17, yMax: 2.1e-17 };
+    const faint = spaxel({ model: { channel: [10, 20, 30], continuum: [1e-17, 1e-17, 1e-17], total: [1e-17, 2e-17, 1e-17], components: [] } });
+    const curves = lineFitOverlayPolylines(faint, mapping, frame);
+    expect(curves.continuum[0].y).toBeCloseTo(143.83, 1);
+    expect(curves.model[1].y).toBeCloseTo(22.17, 1);
+    const flat = spaxel({ model: { channel: [0, 1, 2], continuum: [5, 5, 5], total: [5, 5, 5], components: [] } });
+    const flatCurves = lineFitOverlayPolylines(flat, MAPPING, { top: 0, height: 100, yMin: 5, yMax: 5 });
+    expect(flatCurves.model).toHaveLength(3);
+    expect(flatCurves.model.every((p) => p.y === 100)).toBe(true);
+  });
 });
 
 describe("lineFitSpaxelRows", () => {
@@ -502,6 +588,46 @@ describe("lineFitSpaxelRows", () => {
     expect(lineFitSpaxelRows(spaxel(), units).some((r) => r.label.startsWith("c1"))).toBe(false);
   });
 
+  it("reads the unit of the spectrum from the flux unit of the fit", () => {
+    expect(lineFitSpectrumUnit({ flux: "MJy/sr km/s", velocity: "km/s", sigma: "km/s" })).toBe("MJy/sr");
+    expect(lineFitSpectrumUnit({ flux: "Jy/beam km/s", velocity: "km/s", sigma: "km/s" })).toBe("Jy/beam");
+    expect(lineFitSpectrumUnit({ flux: "km/s", velocity: "km/s", sigma: "km/s" })).toBeNull();
+    expect(lineFitSpectrumUnit({ flux: "", velocity: "km/s", sigma: "km/s" })).toBeNull();
+    expect(lineFitSpectrumUnit({ flux: "MJy/sr", velocity: "km/s", sigma: "km/s" })).toBeNull();
+  });
+
+  it("prints the amplitude and the continuum with the unit of the spectrum", () => {
+    expect(value(spaxel(), "Amplitude")).toBe("2.500 ± 0.1000 MJy/sr");
+    expect(value(spaxel(), "Continuum")).toBe("linear, 2 ch, level 1.000 MJy/sr, σ(MAD) 0.05000 MJy/sr");
+    const constant = spaxel({ continuum: { intercept: 1, slope: 0, x_ref: 2, sigma: null, linear: false, channels: 1 } });
+    expect(value(constant, "Continuum")).toBe("constant, 1 ch, level 1.000 MJy/sr, σ(MAD) n/a");
+    expect(value(spaxel({ continuum: null }), "Continuum")).toBe("n/a");
+    expect(value(spaxel({ single: null }), "Amplitude")).toBe("n/a");
+  });
+
+  it("leaves the numbers alone when the cube has no unit", () => {
+    const bare = { flux: "km/s", velocity: "km/s", sigma: "km/s" };
+    const rows = lineFitSpaxelRows(spaxel(), bare);
+    const row = (label: string) => rows.find((r) => r.label === label)?.value;
+    expect(row("Amplitude")).toBe("2.500 ± 0.1000");
+    expect(row("Continuum")).toBe("linear, 2 ch, level 1.000, σ(MAD) 0.05000");
+    expect(row("Flux")).toBe("601.5 ± 25.00 km/s");
+  });
+
+  it("gives the amplitude of each component its unit", () => {
+    const s = spaxel({
+      ncomp: 2,
+      delta_bic: 512.5,
+      mask: 129,
+      components: [component({ velocity_kms: -220.4 }), component({ velocity_kms: 35.5, v_err_kms: 2.25 })],
+    });
+    const componentRows = lineFitSpaxelRows(s, units).filter((r) => r.label.startsWith("c1") || r.label.startsWith("c2"));
+    expect(componentRows).toHaveLength(2);
+    expect(componentRows.every((r) => r.value.endsWith(", A 2.500 ± 0.1000 MJy/sr"))).toBe(true);
+    expect(componentRows[0].value).toContain("V -220.4 ± 1.6 km/s");
+    expect(componentRows[1].value).toContain("V 35.5 ± 2.3 km/s");
+  });
+
   it("shows n/a values and a no-fit status when the spaxel was not fitted", () => {
     const s = spaxel({ single: null, converged: false, mask: 0, ncomp: 0, chi2: null, chi2_red: null, model: null });
     expect(value(s, "V")).toBe("n/a");
@@ -550,6 +676,77 @@ describe("lineFitSpaxelRows", () => {
 
   it("the default S/N threshold is 3", () => {
     expect(DEFAULT_LINE_FIT_SNR).toBe(3);
+  });
+
+  it("shows velocity, width and flux in the source frame with the observer-frame values beside them", () => {
+    const rows = lineFitSpaxelRows(spaxel({ single: component(AT_Z) }), units, null, 0.5);
+    const row = (label: string) => rows.find((r) => r.label === label)?.value;
+    expect(row("V")).toBe("12.3 ± 1.0 km/s");
+    expect(rows.map((r) => r.label)).toEqual(["Frame", "V", "σ obs", "Flux", "Observer frame", "Amplitude", "χ²_red", "S/N", "ncomp", "ΔBIC", "Dropped", "Continuum", "Fit"]);
+    expect(row("Frame")).toBe("source frame at z = 0.5");
+    expect(row("σ obs")).toBe("100.0 ± 2.0 km/s");
+    expect(row("Flux")).toBe("626.7 ± 12.50 MJy/sr km/s");
+    expect(row("Observer frame")).toBe("V 149914.7 km/s, σ 150.0 km/s, flux 940.0 MJy/sr km/s");
+  });
+
+  it("corrects or flags the source-frame width against the instrumental width", () => {
+    const sigmaOf = (rows: { label: string; value: string }[]) => rows.find((r) => r.label === "σ corr")?.value;
+    const corrected = spaxel({ single: component({ ...AT_Z, source_sigma_corr_kms: 80.0, sigma_corr_kms: 137.5 }) });
+    expect(sigmaOf(lineFitSpaxelRows(corrected, units, 2121.8, 0.5))).toBe("80.0 km/s (obs 100.0 ± 2.0)");
+    const unresolved = spaxel({ single: component({ ...AT_Z, source_sigma_corr_kms: null, sigma_corr_kms: 90.0 }) });
+    expect(sigmaOf(lineFitSpaxelRows(unresolved, units, 1060.9, 0.5))).toBe("unresolved (σ ≤ σ_inst), obs 100.0 ± 2.0 km/s");
+    const withoutR = lineFitSpaxelRows(unresolved, units, null, 0.5).map((r) => r.label);
+    expect(withoutR).toContain("σ obs");
+    expect(withoutR).not.toContain("σ corr");
+  });
+
+  it("keeps today's rows without a redshift and on a stored velocity axis", () => {
+    const atZ = spaxel({ single: component(AT_Z) });
+    const today = lineFitSpaxelRows(atZ, units);
+    for (const redshift of [0, null, undefined]) expect(lineFitSpaxelRows(atZ, units, null, redshift)).toEqual(today);
+    expect(today.map((r) => r.label)).not.toContain("Frame");
+    expect(today.map((r) => r.label)).not.toContain("Observer frame");
+    expect(today.find((r) => r.label === "V")?.value).toBe("149914.7 ± 1.5 km/s");
+    const stored = spaxel({
+      single: component({
+        ...AT_Z,
+        source_velocity_kms: null,
+        source_v_err_kms: null,
+        source_sigma_kms: null,
+        source_sigma_err_kms: null,
+        source_flux: null,
+        source_flux_err: null,
+      }),
+    });
+    expect(lineFitSpaxelRows(stored, units, null, 0.5)).toEqual(lineFitSpaxelRows(stored, units));
+    expect(lineFitSpaxelRows(stored, units, null, 0.5).find((r) => r.label === "V")?.value).toBe("149914.7 ± 1.5 km/s");
+    const noFit = spaxel({ single: null, converged: false, mask: 0, ncomp: 0, chi2: null, chi2_red: null, model: null });
+    expect(lineFitSpaxelRows(noFit, units, null, 0.5).map((r) => r.label)).not.toContain("Frame");
+  });
+
+  it("prints the source frame of each component of a two-component spaxel", () => {
+    const s = spaxel({
+      ncomp: 2,
+      single: component(AT_Z),
+      components: [
+        component({
+          ...AT_Z,
+          source_velocity_kms: -220.4,
+          source_v_err_kms: 1.1,
+          source_sigma_kms: 64.0,
+          source_sigma_err_kms: 2.1,
+          source_flux: 401.0,
+          source_flux_err: 16.7,
+        }),
+        component(AT_Z),
+      ],
+    });
+    const componentRows = (redshift?: number) => lineFitSpaxelRows(s, units, null, redshift).filter((r) => r.label.startsWith("c1") || r.label.startsWith("c2"));
+    const [c1, c2] = componentRows(0.5);
+    expect(c1.value).toContain("V -220.4 ± 1.1 km/s, σ 64.0 ± 2.1 km/s, flux 401.0 ± 16.70 MJy/sr km/s");
+    expect(c2.value).toContain("V 12.3 ± 1.0 km/s");
+    expect(componentRows()).toHaveLength(2);
+    expect(componentRows().every((r) => r.value.includes("V 149914.7 ± 1.5 km/s"))).toBe(true);
   });
 });
 
@@ -678,6 +875,14 @@ describe("lineFitInspectPlot", () => {
     expect(lineFitInspectPlot(inspectSpaxel({ ncomp: 1, components: [], single: null, model: null })).markers).toEqual([]);
   });
 
+  it("labels the centre marker with the source-frame velocity at a redshift", () => {
+    const s = { ...singleSpaxel(), single: component({ centre: 4.0055, ...AT_Z }) };
+    const plot = lineFitInspectPlot(s, 0.5);
+    expect(plot.markers).toEqual([{ x: 4.0055, label: "12.3 km/s", component: null }]);
+    expect(lineFitInspectPlot(s).markers[0].label).toBe("149914.7 km/s");
+    expect(lineFitInspectSummary(s, plot).endsWith("; centre 12.3 km/s.")).toBe(true);
+  });
+
   it("fits the y range to the used and out-of-window samples and the model, leaving dropped outliers out, with min/max ticks", () => {
     const plot = lineFitInspectPlot(inspectSpaxel());
     expect(plot.yTicks).toEqual([0.9, 4.25]);
@@ -730,7 +935,31 @@ describe("lineFitInspectPlot", () => {
     expect(lineFitInspectSummary(none, lineFitInspectPlot(none))).toContain("; no model (no fit attempted or the fit did not converge).");
   });
 
+  it("keeps the digits of a finely sampled axis in the range of the summary", () => {
+    const fine = inspectSpaxel({ axis: Array.from({ length: 13 }, (_, k) => 0.658 + k * 2e-6) });
+    expect(lineFitInspectSummary(fine, lineFitInspectPlot(fine))).toContain("(0.658000-0.658024 μm)");
+    const velocity = inspectSpaxel({ axis_unit: "km/s", axis: Array.from({ length: 13 }, (_, k) => -1 + k * 0.04) });
+    expect(lineFitInspectSummary(velocity, lineFitInspectPlot(velocity))).toContain("(-1.00--0.52 km/s)");
+  });
+
   it("colours c1 blue and c2 red", () => {
     expect(COMPONENT_COLORS).toEqual(["rgba(96,165,250,0.95)", "rgba(248,113,113,0.95)"]);
+  });
+});
+
+describe("source-frame captions", () => {
+  it("says which frame the maps are in", () => {
+    const withSourcePlanes = (redshift: number | null | undefined): LineFitRun => ({ ...run(), config: config({ redshift }), result: atZResult() });
+    expect(sourceFrameCaption(withSourcePlanes(0.5))).toBe(
+      "source frame at z = 0.5: the planes marked (source frame) give V relative to z, and σ and flux in the rest frame of the source; the other planes are observer-frame values (see the redshift note)",
+    );
+    expect(sourceFrameCaption({ ...run(), config: config({ redshift: 0.5 }) })).toBe(
+      "redshift 0.5 was not applied: this fit has no source-frame planes (see the notes)",
+    );
+    for (const redshift of [0, null, undefined]) expect(sourceFrameCaption(withSourcePlanes(redshift))).toBeNull();
+    expect(sourceFrameCaption({ ...run(), result: atZResult() })).toBeNull();
+    expect(fitRedshiftHint(0.5)).toBe("fits at z = 0.5 (Redshift z of the line list) and adds source-frame maps");
+    for (const redshift of [0, null, undefined, NaN]) expect(fitRedshiftHint(redshift)).toBeNull();
+    expect(fitRedshiftHint(0.123456789)).toContain("z = 0.123457");
   });
 });

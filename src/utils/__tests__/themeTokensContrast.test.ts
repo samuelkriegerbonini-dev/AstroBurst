@@ -87,3 +87,41 @@ describe("muted text tokens", () => {
     expect(failing).toEqual([]);
   });
 });
+
+function layerBaseBlocks(text: string): string[] {
+  const blocks: string[] = [];
+  for (const m of text.matchAll(/@layer\s+base\s*\{/g)) {
+    let depth = 0;
+    for (let i = m.index + m[0].length - 1; i < text.length; i += 1) {
+      if (text[i] === "{") depth += 1;
+      if (text[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          blocks.push(text.slice(m.index + m[0].length, i));
+          break;
+        }
+      }
+    }
+  }
+  return blocks;
+}
+
+function placeholderToken(): string {
+  for (const block of layerBaseBlocks(css)) {
+    const token = /(?:^|[\s}])::placeholder\s*\{[^}]*?(?:^|[;\s])color\s*:\s*var\((--[\w-]+)\)\s*;/.exec(block)?.[1];
+    if (token !== undefined) return token;
+  }
+  throw new Error("no ::placeholder colour inside @layer base");
+}
+
+describe("input placeholders", () => {
+  it("colour every placeholder from a muted text token inside the base layer", () => {
+    expect(placeholderToken()).toBe("--ab-text-3");
+  });
+
+  it("reach 4.5:1 on the zinc-900 and zinc-800 input backgrounds", () => {
+    const text = color(placeholderToken());
+    expect(contrast(text, parseColor("#18181b"))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(text, parseColor("#27272a"))).toBeGreaterThanOrEqual(4.5);
+  });
+});

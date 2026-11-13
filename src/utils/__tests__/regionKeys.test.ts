@@ -72,3 +72,18 @@ describe("regionKeyAction with other keys", () => {
     }
   });
 });
+
+describe("regionKeyAction while the Archive is on screen", () => {
+  it("keeps every existing result when the field is absent or true", () => {
+    expect(regionKeyAction("Escape", { ...ON_IMAGE, tool: "circle", inWorkspace: true })).toBe("tool-off");
+    expect(regionKeyAction("Enter", { ...ON_IMAGE, draft: "polygon" })).toBe("close-polygon");
+  });
+
+  it("does nothing to the hidden Workspace", () => {
+    expect(regionKeyAction("Enter", { ...ON_PANEL, draft: "polygon", tool: "polygon", inWorkspace: false })).toBeNull();
+    expect(regionKeyAction("Escape", { ...ON_PANEL, draft: "polygon", tool: "polygon", inWorkspace: false })).toBeNull();
+    expect(regionKeyAction("Escape", { ...ON_PANEL, hasSelection: true, tool: "select", inWorkspace: false })).toBeNull();
+    expect(regionKeyAction("Escape", { ...ON_PANEL, tool: "circle", inWorkspace: false })).toBeNull();
+    expect(regionKeyAction("Delete", { ...ON_IMAGE, hasSelection: true, inWorkspace: false })).toBeNull();
+  });
+});

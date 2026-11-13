@@ -25,6 +25,7 @@ import {
   X,
   Activity,
   ChevronDown,
+  Table,
 } from "lucide-react";
 import "./metadata-file-list.css";
 
@@ -43,9 +44,11 @@ export interface MetadataFile {
   name: string;
   path: string;
   size: number;
-  status: "queued" | "processing" | "done" | "error" | "spectrum";
+  status: "queued" | "processing" | "done" | "error" | "spectrum" | "table";
   error?: string;
   spectrum?: Spectrum1dKind;
+  table?: TableProbe;
+  layer?: LayerGuess | null;
   metadata?: FileMetadata;
   previewUrl?: string;
   dimensions?: [number, number];
@@ -53,27 +56,23 @@ export interface MetadataFile {
 }
 
 import { fileSearchText, metadataFilterable, type FilterMode } from "../../hooks/useProductFilter";
-import { ONE_D_ARRAY_HINT } from "../../utils/fitsErrors";
-import { TABLE_ONLY_HINT } from "../../utils/x1dCompare";
 import { isSelectableStatus, nextSelectableIndex } from "../../utils/fileSelection";
+import { layerTag, spectrumRowNote, tableRowAction, tableRowText, tableRowTitle, type TableRouteKind } from "../../utils/fileKinds";
+import type { LayerGuess } from "../../shared/types/layers";
 import type { Spectrum1dKind } from "../../shared/types/spectrum1d";
+import type { TableProbe } from "../../shared/types/tables";
 import { fileListNames } from "../../utils/fileListNames";
 import { rowTops, rowWindow } from "../../utils/fileListRows";
 import { getFilterColor } from "../../utils/filterColors";
 
-const OPEN_TABLE_TITLE = "Select its cube, open Cube and compare this x1d with the cube spectrum in Spectroscopy";
-const OPEN_SPECTRUM_TITLE = "Select this spectrum and open the Cube tool";
-const SPECTRUM_NOTE = "1D spectrum";
+const OPEN_TABLE_TITLE = "Select its cube, open the Spectra tool and compare this x1d with the cube spectrum";
+const OPEN_SPECTRUM_TITLE = "Select this spectrum and open the Spectra tool";
+const OPEN_SERIES_LABEL = "Open time series";
+const OPEN_SERIES_TITLE = "Select these time-series spectra and open the Spectra tool";
 const MATCH_MODES: readonly { mode: FilterMode; label: string; title: string }[] = [
   { mode: "and", label: "AND", title: "Match all selected filters" },
   { mode: "or", label: "OR", title: "Match any selected filter" },
 ];
-
-function spectrumNote(spectrum: Spectrum1dKind | undefined): { text: string; title: string } {
-  if (spectrum === undefined) return { text: SPECTRUM_NOTE, title: SPECTRUM_NOTE };
-  const text = spectrum.kind === "x1d" ? TABLE_ONLY_HINT : ONE_D_ARRAY_HINT;
-  return { text, title: `${text}, HDU ${spectrum.hdu}` };
-}
 
 interface MetadataFileListProps {
   files: MetadataFile[];
@@ -99,6 +98,7 @@ interface MetadataFileListProps {
   onRemoveCustomChip?: (text: string) => void;
   onOpenSpectrum?: (id: string) => void;
   onOpenTable?: (id: string) => void;
+  onTableAction?: (id: string, kind: TableRouteKind) => void;
   comparableX1d?: ReadonlySet<string>;
 }
 
@@ -108,7 +108,10 @@ const STATUS_CONFIG = {
   done: { icon: CheckCircle2, color: "", accentColor: "var(--ab-green)" },
   error: { icon: XCircle, color: "text-red-400", accentColor: "" },
   spectrum: { icon: Activity, color: "text-fuchsia-300", accentColor: "" },
+  table: { icon: Table, color: "", accentColor: "var(--ab-sky)" },
 };
+
+const TABLE_STATUS_DOT_STYLE: React.CSSProperties = { background: "var(--ab-sky)" };
 
 function filterChipStyle(filter: string): React.CSSProperties {
   const color = getFilterColor(filter);
@@ -134,10 +137,11 @@ interface MetadataFileItemProps {
   onSelect: (id: string) => void;
   onOpenSpectrum?: (id: string) => void;
   onOpenTable?: (id: string) => void;
+  onTableAction?: (id: string, kind: TableRouteKind) => void;
   siblingCubeLoaded: boolean;
 }
 
-function MetadataFileItem({ file, displayName, clipStart, isSelected, height, onSelect, onOpenSpectrum, onOpenTable, siblingCubeLoaded }: MetadataFileItemProps) {
+function MetadataFileItem({ file, displayName, clipStart, isSelected, height, onSelect, onOpenSpectrum, onOpenTable, onTableAction, siblingCubeLoaded }: MetadataFileItemProps) {
   const [thumbError, setThumbError] = useState(false);
   const [thumbLoaded, setThumbLoaded] = useState(false);
 
@@ -146,7 +150,9 @@ function MetadataFileItem({ file, displayName, clipStart, isSelected, height, on
   const Icon = config.icon;
   const isClickable = isSelectableStatus(status);
   const meta = file.metadata;
-  const note = spectrumNote(file.spectrum);
+  const note = spectrumRowNote(file);
+  const tableAction = file.table ? tableRowAction(file.table) : null;
+  const tag = layerTag(file.layer);
 
   useEffect(() => {
     setThumbError(false);
@@ -222,12 +228,15 @@ function MetadataFileItem({ file, displayName, clipStart, isSelected, height, on
           <span className="ab-mfl-filename" title={file.path || file.name} style={clipStart ? START_CLIP_STYLE : undefined}>
             <bdi>{displayName}</bdi>
           </span>
-          <div className="ab-mfl-status-dot" data-status={status} />
+          <div className="ab-mfl-status-dot" data-status={status} style={status === "table" ? TABLE_STATUS_DOT_STYLE : undefined} />
         </div>
 
         <div className="ab-mfl-row-meta">
           {status === "done" && (
             <>
+              {tag && (
+                <span className="ab-mfl-chip ab-mfl-chip-neutral" title={tag.title}>{tag.text}</span>
+              )}
               {meta?.filter && (
                 <span className="ab-mfl-chip" style={filterChipStyle(meta.filter)}>
                   <Filter size={8} />
@@ -262,6 +271,24 @@ function MetadataFileItem({ file, displayName, clipStart, isSelected, height, on
           {status === "error" && (
             <span className="ab-mfl-error-text" title={file.error}>{file.error}</span>
           )}
+          {status === "table" && file.table && (
+            <>
+              <span className="ab-mfl-spectrum-text" title={tableRowTitle(file.table)}>{tableRowText(file.table)}</span>
+              {tableAction && onTableAction && (
+                <button
+                  type="button"
+                  className="ab-mfl-chip ab-mfl-chip-neutral"
+                  title={tableAction.title}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTableAction(file.id, tableAction.kind);
+                  }}
+                >
+                  {tableAction.label}
+                </button>
+              )}
+            </>
+          )}
           {status === "spectrum" && (
             <>
               <span className="ab-mfl-spectrum-text" title={note.title}>{note.text}</span>
@@ -269,16 +296,16 @@ function MetadataFileItem({ file, displayName, clipStart, isSelected, height, on
                 <button
                   type="button"
                   className="ab-mfl-chip ab-mfl-chip-neutral"
-                  title={OPEN_SPECTRUM_TITLE}
+                  title={note.series ? OPEN_SERIES_TITLE : OPEN_SPECTRUM_TITLE}
                   onClick={(e) => {
                     e.stopPropagation();
                     onOpenSpectrum(file.id);
                   }}
                 >
-                  Open as spectrum
+                  {note.series ? OPEN_SERIES_LABEL : "Open as spectrum"}
                 </button>
               )}
-              {onOpenTable && siblingCubeLoaded && (
+              {onOpenTable && siblingCubeLoaded && !note.series && (
                 <button
                   type="button"
                   className="ab-mfl-chip ab-mfl-chip-neutral"
@@ -313,8 +340,11 @@ const MemoFileItem = memo(MetadataFileItem, (prev, next) =>
   && prev.file.previewUrl === next.file.previewUrl
   && prev.file.error === next.file.error
   && prev.file.spectrum === next.file.spectrum
+  && prev.file.table === next.file.table
+  && prev.file.layer === next.file.layer
   && prev.onOpenSpectrum === next.onOpenSpectrum
   && prev.onOpenTable === next.onOpenTable
+  && prev.onTableAction === next.onTableAction
   && prev.siblingCubeLoaded === next.siblingCubeLoaded,
 );
 
@@ -341,6 +371,7 @@ function MetadataFileList({
                             onRemoveCustomChip,
                             onOpenSpectrum,
                             onOpenTable,
+                            onTableAction,
                             comparableX1d,
                           }: MetadataFileListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -387,7 +418,7 @@ function MetadataFileList({
     () =>
       rowTops(
         filteredFiles.map((f) =>
-          f.status === "spectrum" && onOpenSpectrum && onOpenTable && comparableX1d?.has(f.id) ? TWO_ACTION_ITEM_HEIGHT : ITEM_HEIGHT,
+          f.status === "spectrum" && onOpenSpectrum && onOpenTable && comparableX1d?.has(f.id) && !spectrumRowNote(f).series ? TWO_ACTION_ITEM_HEIGHT : ITEM_HEIGHT,
         ),
       ),
     [filteredFiles, onOpenSpectrum, onOpenTable, comparableX1d],
@@ -399,6 +430,15 @@ function MetadataFileList({
   );
 
   const handleListKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      if (e.target !== e.currentTarget) return;
+      const row = filteredFiles.find((f) => f.id === selectedId);
+      if (row?.status === "spectrum" && onOpenSpectrum) {
+        e.preventDefault();
+        onOpenSpectrum(row.id);
+      }
+      return;
+    }
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
     const dir = e.key === "ArrowDown" ? 1 : -1;
@@ -412,7 +452,7 @@ function MetadataFileList({
       if (top < el.scrollTop) el.scrollTop = top;
       else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
     }
-  }, [filteredFiles, selectedId, onSelect, tops]);
+  }, [filteredFiles, selectedId, onSelect, onOpenSpectrum, tops]);
 
   const searchTerm = searchQuery.trim();
   const isFiltered = activeFilters.length > 0;
@@ -635,6 +675,7 @@ function MetadataFileList({
                   onSelect={onSelect}
                   onOpenSpectrum={onOpenSpectrum}
                   onOpenTable={onOpenTable}
+                  onTableAction={onTableAction}
                   siblingCubeLoaded={comparableX1d?.has(file.id) ?? false}
                 />
               ))}

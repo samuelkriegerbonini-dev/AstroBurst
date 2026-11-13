@@ -394,7 +394,7 @@ mod tests {
         let value = read_x1d_spectrum_cmd(single.to_str().unwrap().to_string(), None).await.unwrap();
         assert_eq!(value["wavelength_um"], json!([1.0, 1.1, 1.2]), "{value}");
         assert_eq!(value["flux"], json!([10.0, 11.0, 12.0]), "{value}");
-        assert_eq!(value["n_rows"], 1);
+        assert_eq!(value["n_rows"], 3);
     }
 
     #[test]

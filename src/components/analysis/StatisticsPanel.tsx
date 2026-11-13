@@ -9,7 +9,7 @@ import type {
   StatisticsUnit,
 } from "../../shared/types/statistics";
 import type { RegionShape } from "../../shared/types";
-import { useDqContext } from "../../context/PreviewContext";
+import { useDqContext, useFileContext } from "../../context/PreviewContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { measurementLog, statisticsEntry, statisticsLogReady } from "../../utils/measurementLog";
 import { useRegionKey } from "../../hooks/useRegionKey";
@@ -27,6 +27,8 @@ import {
   statisticValue,
   statisticsToCsv,
 } from "../../utils/statisticsUnits";
+import { DQ_NOT_APPLIED_PREFIX, STATISTICS_DESCRIPTION, dqExclusionGap } from "../../utils/statisticsNotes";
+import { statisticsClipboardCsv } from "../../utils/statisticsExport";
 
 interface StatisticsPanelProps {
   filePath: string | null;
@@ -61,7 +63,8 @@ function channelRange(body: ChannelStatisticsBody): DataRange {
 }
 
 function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, measureKey }: StatisticsPanelProps) {
-  const { excludeDq } = useDqContext();
+  const { excludeDq, flagTable } = useDqContext();
+  const { file } = useFileContext();
   const provenance = useMeasurementProvenance(true);
   const regionKey = useRegionKey();
   const doc = useRegionDoc(regionKey);
@@ -185,6 +188,10 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
     region: useRegion && !isShowingComposite ? selectedShape : null,
   });
   const stale = result !== null && !logReady;
+  const dqGap =
+    result && result.excludeDq && !result.masked && !result.composite
+      ? dqExclusionGap({ planeReason: file?.path === filePath ? file.result?.plane?.dq_unavailable : null, flagTable })
+      : null;
 
   const handleCopy = useCallback(() => {
     if (!result || stale) return;
@@ -194,10 +201,20 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
       lines.push(["noise_sigma", ...noiseSigmas.map((s) => (Number.isFinite(s) ? String(s) : ""))].join(","));
       lines.push(["noise_fraction", ...result.channels.map((c) => String(c.body.noise?.fraction ?? ""))].join(","));
     }
-    lines.push(`unit,${unit}`);
-    navigator.clipboard?.writeText(lines.join("\n"));
+    const csv = statisticsClipboardCsv({
+      table: lines.join("\n"),
+      file: provenance.file,
+      region: result.regionKind ? `${result.regionKind} region` : "full frame",
+      bunit: result.unit,
+      displayUnit: unit,
+      dqExcluded: result.masked ? result.dqExcluded ?? 0 : null,
+      dqGap,
+      noiseMethod: result.channels.find((c) => c.body.noise)?.body.noise?.method ?? null,
+      exportedUtc: new Date().toISOString(),
+    });
+    navigator.clipboard?.writeText(csv);
     flagCopied();
-  }, [result, stale, converted, noiseSigmas, unit, flagCopied]);
+  }, [result, stale, converted, noiseSigmas, unit, flagCopied, provenance.file, dqGap]);
 
   const handleLog = useCallback(() => {
     if (!logReady || !result) return;
@@ -205,6 +222,7 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
   }, [logReady, result, provenance]);
 
   const hasTarget = Boolean(filePath) || isShowingComposite;
+  const zerosLeftOut = result && !result.composite ? result.channels[0].body.statistics.padding : 0;
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -220,7 +238,7 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
       <div className="px-3 py-2 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-xs text-zinc-400">Units</span>
-          <div className="flex rounded overflow-hidden border border-zinc-800">
+          <div role="group" aria-label="Statistics units" className="flex rounded overflow-hidden border border-zinc-800">
             {UNITS.map((u) => {
               const disabled = u === "16bit" && !sixteenBitAvailable;
               const active = unit === u;
@@ -229,6 +247,7 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
                   key={u}
                   type="button"
                   disabled={disabled}
+                  aria-pressed={active}
                   onClick={() => setUnit(u)}
                   title={disabled ? "16-bit units need data inside [0, 1]" : `Show values as ${UNIT_LABELS[u]}`}
                   className={`px-2 py-0.5 text-[9px] font-mono transition-colors ${
@@ -270,6 +289,7 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
                 {result.elapsedMs}ms
                 {result.regionKind ? ` | ${result.regionKind} region` : " | full frame"}
                 {result.masked ? ` | DQ excluded: ${result.dqExcluded ?? 0}` : ""}
+                {zerosLeftOut > 0 ? ` | zeros left out: ${zerosLeftOut}` : ""}
                 {result.unit ? ` | BUNIT ${result.unit}` : ""}
               </span>
               <button
@@ -293,6 +313,12 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
                 <span>Log</span>
               </button>
             </div>
+
+            {dqGap && (
+              <div role="status" className="text-[10px] text-amber-300/90">
+                {DQ_NOT_APPLIED_PREFIX + dqGap}
+              </div>
+            )}
 
             {stale && !loading && (
               <div role="status" className="text-[10px] text-amber-300/90">
@@ -363,10 +389,7 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
         )}
 
         {!result && !error && !loading && (
-          <div className="text-[10px] text-zinc-600">
-            Exact per-pixel statistics (no histogram approximation, negatives and zeros included). avgDev, MAD
-            and sqrt(BWMV) are robust scale estimates; the noise row uses the k-sigma multiresolution estimator.
-          </div>
+          <div className="text-[10px] text-zinc-600">{STATISTICS_DESCRIPTION}</div>
         )}
       </div>
     </div>

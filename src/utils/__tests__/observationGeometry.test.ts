@@ -12,6 +12,8 @@ import {
   parseSiteInputs,
   parseTargetInputs,
   saveSiteOverride,
+  siteInUseLine,
+  targetInUseLine,
   type StorageLike,
 } from "../observationGeometry";
 import type { ObservationGeometryResult } from "../../shared/types/geometry";
@@ -237,5 +239,24 @@ describe("hints and overrides", () => {
     expect(NO_TIME_HINT).toContain("BJDREF");
     expect(NO_SITE_HINT).toContain("altitude");
     expect(NO_TARGET_HINT).toContain("BJD_TDB");
+  });
+});
+
+describe("target and site in use", () => {
+  it("prints the target in use with six decimals and its source", () => {
+    expect(targetInUseLine({ ra_deg: 150, dec_deg: 2, source: "WCS at image centre (49.5, 49.5)" })).toBe(
+      "RA 150.000000 deg, Dec 2.000000 deg, from WCS at image centre (49.5, 49.5)",
+    );
+    expect(targetInUseLine({ ra_deg: 83.8220833, dec_deg: -5.3911111, source: "RA_TARG/DEC_TARG" })).toBe(
+      "RA 83.822083 deg, Dec -5.391111 deg, from RA_TARG/DEC_TARG",
+    );
+    expect(targetInUseLine({ ra_deg: NaN, dec_deg: 2, source: "RA_TARG/DEC_TARG" })).toBe("RA -- deg, Dec 2.000000 deg, from RA_TARG/DEC_TARG");
+  });
+
+  it("prints the site in use east-positive, with whole metres", () => {
+    const site = { lon_deg: -155.47, lat_deg: 19.82, height_m: 0, source: "SITELAT/SITELONG" };
+    expect(siteInUseLine(site)).toBe("lat 19.8200 deg, lon -155.4700 deg (E+), height 0 m, from SITELAT/SITELONG");
+    expect(siteInUseLine({ ...site, height_m: 4205.4 })).toBe("lat 19.8200 deg, lon -155.4700 deg (E+), height 4205 m, from SITELAT/SITELONG");
+    expect(siteInUseLine({ ...site, height_m: Infinity })).toBe("lat 19.8200 deg, lon -155.4700 deg (E+), height -- m, from SITELAT/SITELONG");
   });
 });

@@ -42,6 +42,12 @@ describe("overwrittenFileIds", () => {
     expect(overwrittenFileIds(files, ["C:/o/cube.fits"])).toEqual(["plane"]);
   });
 
+  it("matches a loaded band plane when its cube file was rewritten", () => {
+    const band = [{ id: "band", path: "C:/o/cut.fits#hdu=0&plane=1" }];
+    expect(overwrittenFileIds(band, ["C:/o/cut.fits"])).toEqual(["band"]);
+    expect(overwrittenFileIds(band, ["C:/o/other.fits"])).toEqual([]);
+  });
+
   it("leaves every other loaded file alone", () => {
     expect(overwrittenFileIds(files, ["C:/o/M42_deconv.fits"])).toEqual([]);
     expect(overwrittenFileIds(files, [])).toEqual([]);

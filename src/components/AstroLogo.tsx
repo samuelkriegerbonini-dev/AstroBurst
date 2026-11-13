@@ -25,7 +25,7 @@ export function AstroLogo({ size = 32, showText = true, className = "" }: AstroL
           <span className="text-sm font-bold text-zinc-100 tracking-widest uppercase">
             AstroBurst
           </span>
-                    <span className="text-[10px] text-blue-400/60 font-mono tracking-tighter">
+                    <span className="text-[10px] text-blue-400/90 font-mono tracking-tighter">
             {APP_VERSION}
           </span>
                 </div>

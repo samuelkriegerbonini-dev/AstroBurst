@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SaguiConfig } from "../../shared/types/sagui";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import type { SaguiBand, SaguiConfig, SaguiInputInfo } from "../../shared/types/sagui";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: mocks.invoke }));
@@ -50,5 +50,12 @@ describe("SAGUI desktop command contract", () => {
     expect(event).toBe("sagui-progress-job-2");
     expect(receive).toHaveBeenCalledWith(payload);
     expect(mocks.invoke).toHaveBeenCalledWith("cancel_progress_cmd", { event });
+  });
+
+  it("the check result carries optional PSF fields per band and an optional redshift", () => {
+    expectTypeOf<SaguiBand["psf_fwhm_arcsec"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<SaguiBand["pixscale_arcsec"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<SaguiBand["psf_area_px"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<SaguiInputInfo["redshift"]>().toEqualTypeOf<number | null | undefined>();
   });
 });

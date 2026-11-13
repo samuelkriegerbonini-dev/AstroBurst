@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  BATCH_ROWS_NOTE,
   EMPTY_LOG,
   EXCLUDE_ROW_NOTE,
   MAX_LOG_ENTRIES,
@@ -36,6 +37,7 @@ import {
   statisticsEntry,
   statisticsLogReady,
   timeSeriesEntry,
+  type MeasurementKind,
   type MeasurementLogDraft,
   type MeasurementLogEntry,
   type MeasurementProvenance,
@@ -66,6 +68,7 @@ import type { LineFitRun } from "../lineFit";
 import type { SpectrumExportInput } from "../spectrumExport";
 import type { ComparisonCsvInput, ComparisonEntry } from "../spectrumCompare";
 import type { TableEntryData } from "../x1dCompare";
+import { APP_VERSION } from "../constants";
 
 const CLOCK = "2026-09-25T12:00:00.000Z";
 const PROV: MeasurementProvenance = { file: "x.fits", image: "original" };
@@ -157,8 +160,35 @@ const RATE_PHOTCAL: PhotCal = {
   label: "JWST DN/s",
 };
 
+const AB_USER: PhotCal = {
+  area_applied: false,
+  bunit: "adu",
+  convention: { exptime: null, exptime_applied: false, keyword: "user", kind: "generic_zero_point", per_second: false, system: "ab", zp: 25.0 },
+  jy_per_native_unit: 3.63078054770101e-7,
+  mag_system: "ab",
+  notes: ["user zero point: mag = 25.0 - 2.5 log10(sum)"],
+  origin: "user zero point 25.0 AB",
+  warnings: ["calibrated with a user zero point"],
+  label: "user zero point (AB)",
+};
+
+const VEGA_USER: PhotCal = {
+  area_applied: false,
+  bunit: "adu",
+  convention: { exptime: null, exptime_applied: false, keyword: "user", kind: "generic_zero_point", per_second: false, system: "vega", zp: 21.432 },
+  jy_per_native_unit: null,
+  mag_system: "vega",
+  notes: ["user zero point: mag = 21.432 - 2.5 log10(sum)"],
+  origin: "user zero point 21.432 Vega",
+  warnings: [
+    "calibrated with a user zero point",
+    "the user zero point is in the Vega system: magnitudes are in the Vega system and no AB magnitude or flux in Jy is given",
+  ],
+  label: "user zero point (Vega)",
+};
+
 const MJY_PHOTOMETRY_UNIT_NOTE =
-  "net_flux, flux_err, flux_total in MJy/sr x pix; peak, bg_mean, bg_sigma in MJy/sr (pixel values); flux_jy, flux_err_jy in Jy; mag_inst, mag_ab, mag_ab_err, mag_ab_total, gaia_gmag, gaia_bp_rp in mag; x, y, fwhm, ee50_radius, ee80_radius in px; ra, dec in deg; aperture_correction = flux_total / net_flux and ee_in_aperture = net_flux / flux_total, both dimensionless";
+  "net_flux, flux_err, flux_total in MJy/sr x pix; peak, bg_mean, bg_sigma in MJy/sr (pixel values); flux_jy, flux_err_jy in Jy; mag_inst, mag_ab, mag_ab_err, mag_ab_total, mag, mag_err, gaia_gmag, gaia_bp_rp in mag (mag and mag_err in the system of the parameter mag_system); x, y, fwhm, ee50_radius, ee80_radius in px; ra, dec in deg; aperture_correction = flux_total / net_flux and ee_in_aperture = net_flux / flux_total, both dimensionless";
 const MJY_REGION_SUM_NOTE = "sum, sum_err, net_sum, net_err in MJy/sr x pix";
 const FALLBACK_APERTURE_WARNING = "FWHM not measured: the automatic aperture radius of 6.0 px is a fallback, not 1.5 x FWHM";
 const NO_DATA_WARNING = "3 aperture pixels without data (non-finite): the flux is a lower limit";
@@ -831,7 +861,7 @@ describe("builders", () => {
     expect(entry.values.median_net_flux).toBe(3);
     expect(entry.values.median_snr).toBe(20);
     expect(entry.values.median_fwhm).toBe(3);
-    expect(entry.notes).toEqual(["bw"]);
+    expect(entry.notes).toEqual(["bw", BATCH_ROWS_NOTE]);
 
     const unmeasuredOnly = batchPhotometryEntry(PROV, { ...res, rows: [{ index: 0, photometry: star({ fwhm: null }), sky: null, error: null }], n_measured: 1, n_failed: 0 }, { excludeDq: false, from: "pasted" });
     expect(unmeasuredOnly.values.median_fwhm).toBeNull();
@@ -957,6 +987,27 @@ describe("builders", () => {
     expect(unweighted.params.err_used).toBe(false);
     expect(unweighted.params.err_source).toBe("none");
     expect(unweighted.values.flux_err_pixel).toBeNull();
+  });
+
+  it("lineEntry names a series pick as a spectrum file", () => {
+    const picked = lineMeasurement({
+      source: {
+        kind: "series",
+        paths: ["C:\\d\\jw_x1dints.fits"],
+        detector: "NRS2",
+        sporder: -1,
+        pick: { kind: "mean", first: 3, last: 9 },
+      },
+      flux_unit: "Jy x um",
+      err_used: true,
+      err_source: "FLUX_ERROR of the series pick",
+    });
+    const entry = lineEntry("C:\\d\\jw_x1dints.fits", picked, "none", true);
+    expect(entry.image).toBe("spectrum file");
+    expect(entry.file).toBe("jw_x1dints.fits");
+    expect(entry.source).toBe(JSON.stringify(picked.source));
+    expect(entry.source).toContain('"pick":{"kind":"mean","first":3,"last":9}');
+    expect(entry.params.err_source).toBe("FLUX_ERROR of the series pick");
   });
 
   it("lineEntry records a cube measurement that asked for DQ, and keeps one without a request as not applied", () => {
@@ -1338,9 +1389,9 @@ describe("builders", () => {
     expect(entry.file).toBe("x.fits");
     expect(entry.image).toBe("loaded file");
     expect(entry.dq).toBe("not_applied");
-    expect(entry.unit).toBe("mag");
+    expect(entry.unit).toBe("mag (Vega)");
     expect(entry.source).toBe('{"kind":"file"}');
-    expect(entry.params).toEqual({
+    const expectedParams = {
       band: "G",
       match_radius_arcsec: 2,
       colour_term: true,
@@ -1349,7 +1400,23 @@ describe("builders", () => {
       epoch_year: 2024.3,
       aperture_radius_px: "auto",
       aperture_effective_px: 7.06,
-    });
+      aperture_fwhm_factor: 1.5,
+      aperture_min_px: 4.62,
+      aperture_max_px: 9.06,
+      catalogue: "Gaia DR3",
+      catalogue_table: null,
+      catalogue_source: null,
+      magnitude_system: "Vega",
+      cone_radius_arcmin: null,
+      g_limit_mag: null,
+      max_rows: null,
+    };
+    expect(entry.params).toEqual(expectedParams);
+    expect(Object.keys(entry.params)).toEqual(Object.keys(expectedParams));
+    expect(Object.keys(entry.values).slice(-3)).toEqual(["n_measured", "row_cap_reached", "cone_smaller_than_field"]);
+    expect(entry.values.n_measured).toBe(0);
+    expect(entry.values.row_cap_reached).toBeNull();
+    expect(entry.values.cone_smaller_than_field).toBeNull();
     expect(entry.values.zp).toBe(25.31);
     expect(entry.values.zp_err).toBe(0.02);
     expect(entry.values.zp_rms).toBe(0.05);
@@ -1517,6 +1584,9 @@ describe("builders", () => {
       sigma_label: "observed (instrumental width not removed)",
       fits_velocity: "C:/o/g395h_s3d_hdu1_linefit_velocity_1769-1786.fits",
       fits_flux: "C:/o/g395h_s3d_hdu1_linefit_flux_1769-1786.fits",
+      redshift: 0,
+      fits_source_velocity: null,
+      fits_source_flux: null,
     });
     expect(entry.values).toEqual({
       n_fit: 690,
@@ -1532,6 +1602,77 @@ describe("builders", () => {
     expect(sparse.params.rest_um).toBeNull();
     expect(sparse.params.err_hdu).toBeNull();
     expect(sparse.params.weighting).toBe("continuum");
+  });
+
+  it("lineFitEntry records the redshift of the fit and its source-frame maps", () => {
+    const run: LineFitRun = {
+      key: "k",
+      filePath: "C:\\d\\g395h_s3d.fits#hdu=1",
+      lineLabel: "Brα",
+      config: {
+        z0: 1769,
+        z1: 1786,
+        rest_um: 4.052262,
+        convention: "optical",
+        continuum: null,
+        snr_threshold: 3,
+        emission_only: true,
+        use_err: true,
+        use_dq: true,
+        resolving_power: null,
+        components: "auto",
+        redshift: 0.5,
+      },
+      result: {
+        planes: {
+          flux: { png_path: "C:/o/f.png", fits_path: "C:/o/g395h_s3d_hdu1_linefit_flux_1769-1786.fits" },
+          velocity: { png_path: "C:/o/v.png", fits_path: "C:/o/g395h_s3d_hdu1_linefit_velocity_1769-1786.fits" },
+          source_flux: { png_path: "C:/o/sf.png", fits_path: "C:/o/g395h_s3d_hdu1_linefit_source_flux_1769-1786.fits" },
+          source_velocity: { png_path: "C:/o/sv.png", fits_path: "C:/o/g395h_s3d_hdu1_linefit_source_velocity_1769-1786.fits" },
+        },
+        plane_order: ["flux", "velocity", "source_flux", "source_velocity"],
+        units: { flux: "MJy/sr km/s", velocity: "km/s", sigma: "km/s" },
+        sigma_label: "observed (instrumental width not removed)",
+        weighting: "err",
+        err_hdu: 2,
+        dq_hdu: 3,
+        z0: 1769,
+        z1: 1786,
+        n_channels: 18,
+        rest_um: 4.052262,
+        convention: "optical",
+        components: "auto",
+        continuum_windows: [
+          [1750, 1762],
+          [1789, 1800],
+        ],
+        resolving_power: null,
+        snr_threshold: 3,
+        n_fit: 690,
+        n_masked: 40,
+        n_const_continuum: 65,
+        n_two_components: 351,
+        median_chi2_red: 225.5,
+        notes: ["weights note", "caveat"],
+        dimensions: [53, 55],
+        elapsed_ms: 2400,
+      },
+    };
+    const entry = lineFitEntry(run);
+    expect(entry.params.redshift).toBe(0.5);
+    expect(entry.params.fits_source_velocity).toBe("C:/o/g395h_s3d_hdu1_linefit_source_velocity_1769-1786.fits");
+    expect(entry.params.fits_source_flux).toBe("C:/o/g395h_s3d_hdu1_linefit_source_flux_1769-1786.fits");
+    expect(Object.keys(entry.params).slice(-3)).toEqual(["redshift", "fits_source_velocity", "fits_source_flux"]);
+    expect(entry.values).toEqual({
+      n_fit: 690,
+      n_masked: 40,
+      n_const_continuum: 65,
+      n_two_components: 351,
+      median_chi2_red: 225.5,
+      elapsed_ms: 2400,
+    });
+    expect(entry.unit).toBe("MJy/sr km/s");
+    expect(entry.notes).toEqual(["weights note", "caveat"]);
   });
 
   it("formatLogValue and entrySummary render numbers, strings, booleans and null", () => {
@@ -1582,7 +1723,7 @@ describe("log entries of the results corrected in wave 0", () => {
   it("photometryEntry states the unit of the sums, the pixel values, the calibrated fluxes, the magnitudes, the radii and the two aperture ratios (front-photometry/B2)", () => {
     expect(photometryEntry(PROV, photometry(), NO_GAIA).notes).toEqual(["w1", MJY_PHOTOMETRY_UNIT_NOTE]);
     expect(photometryEntry(PROV, photometry({ photcal: RATE_PHOTCAL, warnings: [] }), NO_GAIA).notes).toEqual([
-      "net_flux, flux_err, flux_total in DN/s; peak, bg_mean, bg_sigma in DN/s (pixel values); flux_jy, flux_err_jy in Jy; mag_inst, mag_ab, mag_ab_err, mag_ab_total, gaia_gmag, gaia_bp_rp in mag; x, y, fwhm, ee50_radius, ee80_radius in px; ra, dec in deg; aperture_correction = flux_total / net_flux and ee_in_aperture = net_flux / flux_total, both dimensionless",
+      "net_flux, flux_err, flux_total in DN/s; peak, bg_mean, bg_sigma in DN/s (pixel values); flux_jy, flux_err_jy in Jy; mag_inst, mag_ab, mag_ab_err, mag_ab_total, mag, mag_err, gaia_gmag, gaia_bp_rp in mag (mag and mag_err in the system of the parameter mag_system); x, y, fwhm, ee50_radius, ee80_radius in px; ra, dec in deg; aperture_correction = flux_total / net_flux and ee_in_aperture = net_flux / flux_total, both dimensionless",
     ]);
     const uncalibrated = photometryEntry(PROV, photometry({ photcal: null, warnings: [] }), NO_GAIA).notes;
     expect(uncalibrated).toHaveLength(1);
@@ -1601,7 +1742,7 @@ describe("log entries of the results corrected in wave 0", () => {
       { index: 2, photometry: star({ n_nonfinite: 3, warnings: [NO_DATA_WARNING] }), sky: null, error: null },
       { index: 3, photometry: null, sky: null, error: "off image" },
     ];
-    expect(batchPhotometryEntry(PROV, batchOf(rows, { warnings: ["bw"] }), FROM_STARS).notes).toEqual(["bw", NO_DATA_WARNING, FALLBACK_APERTURE_WARNING]);
+    expect(batchPhotometryEntry(PROV, batchOf(rows, { warnings: ["bw"] }), FROM_STARS).notes).toEqual(["bw", NO_DATA_WARNING, FALLBACK_APERTURE_WARNING, BATCH_ROWS_NOTE]);
   });
 
   it("photometryEntry logs the aperture pixels without data and the enclosed fraction, and keeps the multiplicative aperture correction under its key (W0-R3 front:6, front:7)", () => {
@@ -1689,6 +1830,85 @@ describe("log entries of the results corrected in wave 0", () => {
     expect(Object.keys(absorption.values).filter((key) => key.includes("trough"))).toEqual([]);
   });
 
+  it("lineEntry records the line identity, the errors, the redshifts and the physical flux", () => {
+    const base = lineMeasurement();
+    const identified = lineMeasurement({
+      equivalent_width_err: 5.3e-4,
+      centroid_err: 2.8e-4,
+      errors_reliable: true,
+      width_errors_reliable: false,
+      peak_axis: 1.02,
+      wavelength_frame: "vacuum",
+      line_id: "h_alpha",
+      line_label: "Hα",
+      redshift: 0.5,
+      flux_si: 7.84e-17,
+      flux_si_err: 3.8e-18,
+      flux_cgs: 7.84e-14,
+      flux_cgs_err: 3.8e-15,
+      flux_physical_basis: "F_nu in Jy integrated per channel with c / lambda^2",
+      velocity: { ...base.velocity!, z_line: 0.5000891, z_line_err: 4.57e-5, source_sigma_err_kms: 144.4 },
+      fit: { ...base.fit!, amplitude_err: 0.01, iterations: 6 },
+    });
+    const entry = lineEntry("C:\\d\\x.fits", identified, "gaussian");
+    expect(entry.params.line_id).toBe("h_alpha");
+    expect(entry.params.line_label).toBe("Hα");
+    expect(entry.params.redshift_requested).toBe(0.5);
+    expect(entry.params.wavelength_frame).toBe("vacuum");
+    expect(entry.params.errors_reliable).toBe(true);
+    expect(entry.params.width_errors_reliable).toBe(false);
+    expect(entry.params.flux_physical_basis).toBe("F_nu in Jy integrated per channel with c / lambda^2");
+    expect(entry.values.equivalent_width_err).toBe(5.3e-4);
+    expect(entry.values.centroid_err).toBe(2.8e-4);
+    expect(entry.values.peak_axis).toBe(1.02);
+    expect(entry.values.z_line).toBe(0.5000891);
+    expect(entry.values.z_line_err).toBe(4.57e-5);
+    expect(entry.values.source_sigma_err_kms).toBe(144.4);
+    expect(entry.values.flux_si).toBe(7.84e-17);
+    expect(entry.values.flux_cgs_err).toBe(3.8e-15);
+    expect(entry.values.fit_amplitude_err).toBe(0.01);
+    expect(entry.values.fit_iterations).toBe(6);
+    expect(Object.keys(entry.values).slice(0, 3)).toEqual(["flux", "flux_err", "flux_err_pixel"]);
+
+    const newParams = ["line_id", "line_label", "redshift_requested", "wavelength_frame", "errors_reliable", "width_errors_reliable", "flux_physical_basis"];
+    const newValues = [
+      "equivalent_width_err",
+      "centroid_err",
+      "sigma_err",
+      "fwhm_err",
+      "centroid_err_kms",
+      "sigma_err_kms",
+      "fwhm_err_kms",
+      "source_centroid_err_kms",
+      "source_sigma_err_kms",
+      "source_fwhm_err_kms",
+      "z_line",
+      "z_line_err",
+      "peak_axis",
+      "flux_si",
+      "flux_si_err",
+      "flux_cgs",
+      "flux_cgs_err",
+      "fit_amplitude_err",
+      "fit_iterations",
+    ];
+    expect(Object.keys(entry.params).slice(-newParams.length)).toEqual(newParams);
+    expect(Object.keys(entry.values).slice(-newValues.length)).toEqual(newValues);
+    const bare = lineEntry("C:\\d\\x.fits", lineMeasurement({ velocity: null, fit: null }), "none");
+    expect(newParams.map((key) => bare.params[key])).toEqual(newParams.map(() => null));
+    expect(newValues.map((key) => bare.values[key])).toEqual(newValues.map(() => null));
+    expect(Object.keys(bare.values).slice(0, 3)).toEqual(["flux", "flux_err", "flux_err_pixel"]);
+  });
+
+  it("the unit note names the new values", () => {
+    const note = lineUnitNote("Jy x um", "um");
+    expect(note).toContain("peak, continuum_level, continuum_sigma, fit_amplitude in the spectrum unit (Jy)");
+    expect(note).toContain("centroid, sigma, fwhm, equivalent_width, fit_centre, fit_sigma, fit_centre_err, fit_sigma_err in um");
+    expect(note).toContain("flux_si, flux_si_err in W m^-2");
+    expect(note).toContain("fit_amplitude_err in the spectrum unit (Jy)");
+    expect(note.endsWith("z_line, z_line_err dimensionless")).toBe(true);
+  });
+
   it("timeSeriesEntry counts the frames with a saturated comparison star, names each one with its frame count and records where BJD_TDB came from (W0-F2 B1, W0-R5)", () => {
     const measured = (net: number, saturated = false) => star({ net_flux: net, flux_err: 1, saturated });
     const tdbMid = (bjd: number) => geometry({ bjd_tdb: bjd, bjd_source: "TDB-MID" });
@@ -1712,20 +1932,99 @@ describe("log entries of the results corrected in wave 0", () => {
     expect(plain.notes).toEqual(["ts warning"]);
   });
 
+  it("timeSeriesEntry without an ensemble argument is the entry of wave 0b plus four empty parameters", () => {
+    const res = analyticSeries();
+    const entry = timeSeriesEntry(res, { apertureRadius: 5, excludeDq: false, trackDrift: false });
+    expect(entry.params.comps_left_out).toBeNull();
+    expect(entry.params.target_ra_deg).toBeNull();
+    expect(entry.params.target_dec_deg).toBeNull();
+    expect(entry.params.target_source).toBeNull();
+    expect(Object.keys(entry.params).slice(-5)).toEqual(["bjd_source", "comps_left_out", "target_ra_deg", "target_dec_deg", "target_source"]);
+    expect(JSON.parse(entry.source).targets).toEqual(res.targets);
+    expect(entry.notes).toEqual(["ts warning"]);
+  });
+
+  it("timeSeriesEntry follows the comparison stars in use and names the one left out", () => {
+    const measured = (net: number, saturated = false) => star({ net_flux: net, flux_err: 1, saturated });
+    const tdbMid = (bjd: number) => geometry({ bjd_tdb: bjd, bjd_source: "TDB-MID" });
+    const res = timeSeries([
+      frame(0, [measured(100), measured(50, true), measured(50, true)], { geometry: tdbMid(2460000.51) }),
+      frame(1, [measured(100, true), measured(50), measured(50)], { geometry: tdbMid(2460001.51) }),
+      frame(2, [measured(110), measured(50), measured(50, true)], { geometry: tdbMid(2460002.51) }),
+      frame(3, [null, measured(50, true), null], { skipped: "failed to load", geometry: geometry() }),
+    ]);
+    const entry = timeSeriesEntry(res, { apertureRadius: 5, excludeDq: false, trackDrift: false, compIdx: [1] });
+    expect(entry.params.n_comp).toBe(1);
+    expect(entry.params.comps_left_out).toBe("C2");
+    expect(entry.values.n_frames_comp_saturated).toBe(1);
+    expect(entry.values.check_rms_mag).toBeNull();
+    expect(entry.values.check_label).toBeNull();
+    const [t, c1, c2] = res.targets;
+    expect(JSON.parse(entry.source).targets).toEqual([{ ...t }, { ...c1 }, { ...c2, left_out: true }]);
+    expect(entry.notes).toEqual([
+      "ts warning",
+      "comparison star C1 saturated on 1 frame",
+      "comparison star C2 saturated on 2 frames, left out of the ensemble",
+      "ensemble: 1 of 2 comparison stars (left out: C2)",
+    ]);
+  });
+
+  it("the rms of the smaller ensemble is computed on it", () => {
+    const measured = (net: number) => star({ net_flux: net, flux_err: 1 });
+    const res = timeSeries([
+      frame(0, [measured(100), measured(50), measured(50)]),
+      frame(1, [measured(100), measured(60), measured(50)]),
+      frame(2, [measured(110), measured(50), measured(50)]),
+    ]);
+    const opts = { apertureRadius: 5, excludeDq: false, trackDrift: false };
+    const d = 2.5 * Math.log10(1.1);
+    const smaller = timeSeriesEntry(res, { ...opts, compIdx: [2] });
+    expect(smaller.values.target_rms_mag).toBeCloseTo((d * Math.SQRT2) / 3, 9);
+    expect(smaller.values.n_used).toBe(3);
+    expect(smaller.params.comps_left_out).toBe("C1");
+    const full = timeSeriesEntry(res, opts);
+    expect(full.values.target_rms_mag).toBeCloseTo(d * Math.sqrt(2 / 3), 9);
+    expect(full.params.comps_left_out).toBeNull();
+    const filtered = timeSeriesEntry(res, { ...opts, compIdx: [1, 2, 7, 0] });
+    expect(filtered.params.n_comp).toBe(2);
+    expect(filtered.params.comps_left_out).toBeNull();
+    expect(filtered.values.target_rms_mag).toBeCloseTo(d * Math.sqrt(2 / 3), 9);
+  });
+
+  it("timeSeriesEntry records the light-time target", () => {
+    const res = { ...analyticSeries(), geometry_target: { ra_deg: 290.123456, dec_deg: 53.5, source: "target override" } };
+    const entry = timeSeriesEntry(res, { apertureRadius: 5, excludeDq: false, trackDrift: false });
+    expect(entry.params.target_ra_deg).toBe(290.123456);
+    expect(entry.params.target_dec_deg).toBe(53.5);
+    expect(entry.params.target_source).toBe("target override");
+  });
+
   it("crossMatchEntry logs the aperture behind the zero point: auto with the median radius of the fitted stars, or the fixed radius (W0-R4 front:6)", () => {
     const opts = { sigma: 5, maxStars: 500, colourTerm: false };
     const auto = crossMatchEntry("C:\\d\\x.fits", crossMatch(), opts);
     expect(auto.params.aperture_radius_px).toBe("auto");
     expect(auto.params.aperture_effective_px).toBe(7.06);
+    expect(auto.params.aperture_fwhm_factor).toBe(1.5);
+    expect(auto.params.aperture_min_px).toBe(4.62);
+    expect(auto.params.aperture_max_px).toBe(9.06);
     const fixed = crossMatchEntry("C:\\d\\x.fits", { ...crossMatch(), aperture: { kind: "fixed", radius_px: 5 } }, opts);
     expect(fixed.params.aperture_radius_px).toBe(5);
     expect(fixed.params.aperture_effective_px).toBe(5);
+    expect(fixed.params.aperture_fwhm_factor).toBeNull();
+    expect(fixed.params.aperture_min_px).toBe(5);
+    expect(fixed.params.aperture_max_px).toBe(5);
     const noFit = crossMatchEntry("C:\\d\\x.fits", { ...crossMatch(), aperture: { kind: "auto", fwhm_factor: 1.5, median_radius_px: null, min_radius_px: null, max_radius_px: null } }, opts);
     expect(noFit.params.aperture_radius_px).toBe("auto");
     expect(noFit.params.aperture_effective_px).toBeNull();
+    expect(noFit.params.aperture_fwhm_factor).toBe(1.5);
+    expect(noFit.params.aperture_min_px).toBeNull();
+    expect(noFit.params.aperture_max_px).toBeNull();
     const unknown = crossMatchEntry("C:\\d\\x.fits", { ...crossMatch(), aperture: undefined }, opts);
     expect(unknown.params.aperture_radius_px).toBeNull();
     expect(unknown.params.aperture_effective_px).toBeNull();
+    expect(unknown.params.aperture_fwhm_factor).toBeNull();
+    expect(unknown.params.aperture_min_px).toBeNull();
+    expect(unknown.params.aperture_max_px).toBeNull();
   });
 
   it("crossMatchEntry logs a zero point fitted on one star without an error (W0-R4 front:6, D1)", () => {
@@ -1734,6 +2033,38 @@ describe("log entries of the results corrected in wave 0", () => {
     expect(one.values.zp).toBe(25.31);
     expect(one.values.zp_err).toBeNull();
     expect(one.values.n_used).toBe(1);
+  });
+
+  it("crossMatchEntry names the Gaia list, the catalogue table and the system of the zero point (catalog-sed/U4)", () => {
+    const query = { radius_arcmin: 1, field_radius_arcmin: 1.5085, mag_limit: 13.8, max_rows: 200, row_cap_reached: true, cone_smaller_than_field: true };
+    const result: CrossMatchResult = {
+      ...crossMatch(),
+      catalog_query: query,
+      catalog_table: "I/355/gaiadr3",
+      mag_system: "vega",
+      detection_sigma: 4,
+      max_stars: 300,
+      catalog_source: "disk",
+    };
+    const opts = { sigma: 5, maxStars: 500, colourTerm: true };
+    const entry = crossMatchEntry("C:\\d\\x.fits", result, opts);
+    expect(entry.unit).toBe("mag (Vega)");
+    expect(entry.params.catalogue).toBe("Gaia DR3");
+    expect(entry.params.catalogue_table).toBe("I/355/gaiadr3");
+    expect(entry.params.catalogue_source).toBe("disk");
+    expect(entry.params.magnitude_system).toBe("Vega");
+    expect(entry.params.cone_radius_arcmin).toBe(1);
+    expect(entry.params.g_limit_mag).toBe(13.8);
+    expect(entry.params.max_rows).toBe(200);
+    expect(entry.params.detection_sigma).toBe(4);
+    expect(entry.params.max_stars).toBe(300);
+    expect(entry.values.row_cap_reached).toBe(true);
+    expect(entry.values.cone_smaller_than_field).toBe(true);
+    const noLimit = crossMatchEntry("C:\\d\\x.fits", { ...result, catalog_query: { ...query, mag_limit: null } }, opts);
+    expect(noLimit.params.g_limit_mag).toBeNull();
+    const header = measurementLogCsv([{ ...entry, id: "e0", timestamp_utc: "2026-11-12T00:00:00.000Z" }]).split("\r\n")[0];
+    expect(header).toContain("p_aperture_effective_px,p_aperture_fwhm_factor,p_aperture_min_px,p_aperture_max_px,p_catalogue,p_catalogue_table,p_catalogue_source,p_magnitude_system,p_cone_radius_arcmin,p_g_limit_mag,p_max_rows");
+    expect(header).toContain("v_photcal_present,v_n_measured,v_row_cap_reached,v_cone_smaller_than_field");
   });
 
   it("regionStatsEntries logs the error of the net sum with its variance terms and states the unit of the sums of an MJy/sr image (W0-R8, A:trust-1)", () => {
@@ -1771,6 +2102,231 @@ describe("log entries of the results corrected in wave 0", () => {
     const hole = region("hole", { props: { color: null, width: null, text: null, dash: null, include: false } });
     const holeRows = regionStatsEntries(PROV, { ...measured, regions: [hole] }, new Map([["hole", { id: "hole", stats: stats(), error: null }]]), PHOTCAL);
     expect(holeRows[0].notes).toEqual([EXCLUDE_ROW_NOTE, MJY_REGION_SUM_NOTE]);
+  });
+
+  describe("regionStatsEntries background, padding, unit and notes (trust-7, trust-4)", () => {
+    const ring = region("ring", { shape: ANNULUS });
+    const core = region("core", { backgroundId: "ring" });
+    const measured: RegionStatsMeasured = { regions: [core, ring], excludeDq: false, sigma: null, maxiters: null, masked: false, dqExcluded: null, regionExcluded: 0, elapsedMs: 1 };
+    const background = { median: 6, sigma: 1.4826, count: 204 };
+    const scatter = stats({ count: 29, sum: 759, n_padding: 72, background, net_sum: 585, net_err: 8.53268811209195, net_err_terms: "background_scatter+background_level", net_snr: 68.55987143969055 });
+    const table = new Map<string, RegionStatsEntry>([
+      ["core", { id: "core", stats: scatter, error: null }],
+      ["ring", { id: "ring", stats: stats({ count: 204, sum: 1224 }), error: null }],
+    ]);
+    const NOTE = "DQ exclusion requested but not applied: this image has no DQ plane";
+
+    it("regionStatsEntries logs the background, the zeros left out and nothing new in params", () => {
+      const [coreRow, ringRow] = regionStatsEntries(PROV, measured, table, PHOTCAL);
+      expect(coreRow.values.bg_median).toBe(6);
+      expect(coreRow.values.bg_sigma).toBe(1.4826);
+      expect(coreRow.values.bg_n).toBe(204);
+      expect(coreRow.values.n_padding).toBe(72);
+      expect(ringRow.values.bg_median).toBeNull();
+      expect(ringRow.values.bg_sigma).toBeNull();
+      expect(ringRow.values.bg_n).toBeNull();
+      expect(ringRow.values.n_padding).toBe(0);
+      expect(coreRow.params).toEqual({ sigma: 3, maxiters: 5, dq_excluded_px: null, region_excluded_px: 0, photcal: "JWST MJy/sr" });
+    });
+
+    it("regionStatsEntries names the unit of an uncalibrated image and ends each row with the notes of the command", () => {
+      const uncalibrated: RegionStatsMeasured = { ...measured, excludeDq: true, notes: [NOTE], bunit: "adu", summedUnit: "adu" };
+      const rows = regionStatsEntries(PROV, uncalibrated, table, null);
+      expect(rows.map((r) => r.unit)).toEqual(["adu", "adu"]);
+      expect(rows.map((r) => r.notes)).toEqual([[NOTE], [NOTE]]);
+      const missing = regionStatsEntries(PROV, uncalibrated, new Map(), null);
+      expect(missing.map((r) => r.unit)).toEqual(["adu", "adu"]);
+      expect(missing.map((r) => r.notes)).toEqual([["no statistics", NOTE], ["no statistics", NOTE]]);
+
+      const calibratedRows = regionStatsEntries(PROV, { ...uncalibrated, summedUnit: "MJy/sr x pix" }, table, PHOTCAL);
+      expect(calibratedRows.map((r) => r.unit)).toEqual(["MJy/sr", "MJy/sr"]);
+      expect(calibratedRows.map((r) => r.notes)).toEqual([[MJY_REGION_SUM_NOTE, NOTE], [MJY_REGION_SUM_NOTE, NOTE]]);
+
+      const surfaceBrightness = regionStatsEntries(PROV, { ...uncalibrated, bunit: "MJy/sr", summedUnit: "MJy/sr x pix" }, table, null);
+      expect(surfaceBrightness.map((r) => r.unit)).toEqual(["MJy/sr", "MJy/sr"]);
+      expect(surfaceBrightness.map((r) => r.notes)).toEqual([[MJY_REGION_SUM_NOTE, NOTE], [MJY_REGION_SUM_NOTE, NOTE]]);
+    });
+  });
+
+  const ARCSEC_NOTE = "radii typed in arcsec and converted to pixels with 0.262 arcsec/px, the square root of the pixel area";
+  const LIMIT_NOTE =
+    "upper_limit_jy in Jy, upper_limit_ab in mag (AB), upper_limit_native in the unit of net_flux; a value is a limit when the flux is below limit_sigma x flux_err x f_corr";
+  const USER_NOTE = "calibration: zero point user: mag = 25.0 - 2.5 log10(sum)";
+
+  function measuredRows(n: number): BatchPhotometryResult["rows"] {
+    return Array.from({ length: n }, (_, index) => ({ index, photometry: star(), sky: null, error: null }));
+  }
+
+  it("the photometry entries name the unit of an image without calibration from the result", () => {
+    const adu = photometryEntry(PROV, photometry({ photcal: null, bunit: "adu", summed_unit: "adu", warnings: [] }), NO_GAIA);
+    expect(adu.unit).toBe("adu");
+    expect(adu.params.bunit).toBe("adu");
+    expect(adu.notes).toHaveLength(1);
+    expect(adu.notes[0].startsWith("net_flux, flux_err, flux_total in adu; peak, bg_mean, bg_sigma in adu (pixel values);")).toBe(true);
+    const surface = photometryEntry(PROV, photometry({ photcal: null, bunit: "MJy/sr", summed_unit: "MJy/sr x pix", warnings: [] }), NO_GAIA);
+    expect(surface.unit).toBe("MJy/sr x pix");
+    expect(surface.notes[0].startsWith("net_flux, flux_err, flux_total in MJy/sr x pix; peak, bg_mean, bg_sigma in MJy/sr (pixel values);")).toBe(true);
+    expect(batchPhotometryEntry(PROV, batchOf([], { photcal: null, bunit: "adu", summed_unit: "adu" }), FROM_STARS).unit).toBe("adu");
+  });
+
+  it("photometryEntry records a request in pixels as today and adds the request keys", () => {
+    const entry = photometryEntry(PROV, photometry(), NO_GAIA);
+    expect(entry.params.radius_unit).toBe("px");
+    for (const key of [
+      "aperture_radius_arcsec",
+      "annulus_inner_arcsec",
+      "annulus_outer_arcsec",
+      "pixel_scale_arcsec",
+      "aperture_effective_arcsec",
+      "zero_point",
+      "zero_point_system",
+      "zero_point_per_second",
+    ]) {
+      expect(entry.params[key], key).toBeNull();
+    }
+    expect(entry.params.calibration).toBe("JWST MJy/sr");
+    expect(entry.params.calibration_source).toBe("header");
+    expect(entry.params.mag_system).toBe("ab");
+    expect(entry.params.bunit).toBe("MJy/sr");
+    expect("limit_sigma" in entry.params).toBe(false);
+    expect(entry.values.mag).toBe(22.9);
+    expect(entry.values.mag_err).toBe(0.01);
+    expect("upper_limit_jy" in entry.values).toBe(false);
+    expect(Object.keys(entry.params).slice(0, 9)).toEqual([
+      "aperture_radius_px",
+      "annulus_inner_px",
+      "annulus_outer_px",
+      "gain",
+      "gaia_match",
+      "aperture_effective_px",
+      "sky_inner_effective_px",
+      "sky_outer_effective_px",
+      "photcal",
+    ]);
+  });
+
+  it("photometryEntry records a request typed in arcsec with the pixel scale that converted it", () => {
+    const entry = photometryEntry(PROV, photometry(), {
+      ...NO_GAIA,
+      apertureRadius: 3.8167938931297707,
+      radiusUnit: "arcsec",
+      typedRadii: { aperture: 1 },
+      pixelScaleArcsec: 0.262,
+    });
+    expect(entry.params.aperture_radius_px).toBe(3.8167938931297707);
+    expect(entry.params.radius_unit).toBe("arcsec");
+    expect(entry.params.aperture_radius_arcsec).toBe(1);
+    expect(entry.params.annulus_inner_arcsec).toBe("auto");
+    expect(entry.params.annulus_outer_arcsec).toBe("auto");
+    expect(entry.params.pixel_scale_arcsec).toBe(0.262);
+    expect(entry.params.aperture_effective_arcsec as number).toBeCloseTo(1.2576, 12);
+    expect(entry.notes.at(-1)).toBe(ARCSEC_NOTE);
+  });
+
+  it("photometryEntry records a typed Vega zero point and logs the magnitude in its system", () => {
+    const vegaStar = star({ mag_inst: -9.87, net_flux: 8872, flux_err: 50, mag_ab: null, mag_ab_err: null, flux_jy: null, flux_err_jy: null });
+    const vega = photometryEntry(PROV, photometry({ photcal: VEGA_USER, photometry: vegaStar }), {
+      ...NO_GAIA,
+      zeroPoint: { zp: 21.432, system: "vega", per_second: false },
+    });
+    expect(vega.params.zero_point).toBe(21.432);
+    expect(vega.params.zero_point_system).toBe("vega");
+    expect(vega.params.zero_point_per_second).toBe(false);
+    expect(vega.params.calibration).toBe(VEGA_USER.origin);
+    expect(vega.params.calibration_source).toBe("user");
+    expect(vega.params.mag_system).toBe("vega");
+    expect(vega.values.mag as number).toBeCloseTo(11.562, 10);
+    expect(vega.values.mag_err as number).toBeCloseTo((1.0857362047581294 * 50) / 8872, 12);
+    expect(vega.values.mag_ab).toBeNull();
+    expect(vega.values.flux_jy).toBeNull();
+
+    const ab = photometryEntry(PROV, photometry({ photcal: AB_USER, photometry: star({ mag_ab: 17.5, mag_ab_err: 0.011 }) }), NO_GAIA);
+    expect(ab.params.calibration_source).toBe("user");
+    expect(ab.params.mag_system).toBe("ab");
+    expect(ab.values.mag).toBe(17.5);
+
+    const none = photometryEntry(PROV, photometry({ photcal: null }), NO_GAIA);
+    expect(none.params.calibration).toBeNull();
+    expect(none.params.calibration_source).toBeNull();
+    expect(none.params.mag_system).toBeNull();
+    expect(none.values.mag).toBeNull();
+    expect(none.values.mag_err).toBeNull();
+  });
+
+  it("photometryEntry stores the notes of the calibration after the warnings", () => {
+    const photcal: PhotCal = { ...PHOTCAL, notes: ["zero point user: mag = 25.0 - 2.5 log10(sum)"] };
+    expect(photometryEntry(PROV, photometry({ photcal }), NO_GAIA).notes).toEqual(["w1", USER_NOTE, MJY_PHOTOMETRY_UNIT_NOTE]);
+    expect(batchPhotometryEntry(PROV, batchOf([], { photcal, warnings: ["bw"] }), FROM_STARS).notes).toEqual(["bw", USER_NOTE, BATCH_ROWS_NOTE]);
+  });
+
+  it("photometryEntry logs an upper limit only when one was evaluated", () => {
+    const entry = photometryEntry(PROV, photometry(), {
+      ...NO_GAIA,
+      limitSigma: 3,
+      fCorr: 1.65,
+      limit: { limitJy: 3.3e-7, limitAb: 25.103715, limitNative: null },
+    });
+    expect(entry.params.limit_sigma).toBe(3);
+    expect(entry.params.f_corr).toBe(1.65);
+    expect(entry.values.upper_limit_jy).toBe(3.3e-7);
+    expect(entry.values.upper_limit_ab).toBe(25.103715);
+    expect(entry.values.upper_limit_native).toBeNull();
+    expect(entry.notes.at(-1)).toBe(LIMIT_NOTE);
+
+    const noLimit = photometryEntry(PROV, photometry(), { ...NO_GAIA, limitSigma: 3, limit: null });
+    expect(noLimit.values.upper_limit_jy).toBeNull();
+    expect(noLimit.values.upper_limit_ab).toBeNull();
+    expect(noLimit.values.upper_limit_native).toBeNull();
+    expect(noLimit.params.f_corr).toBeNull();
+  });
+
+  it("batchPhotometryEntry logs sky positions as their own source with the positions left out", () => {
+    const leftOut = batchPhotometryEntry(PROV, batchOf(measuredRows(3)), { excludeDq: false, from: "sky", placement: { requested: 5, onImage: 3 } });
+    expect(leftOut.source).toBe('{"kind":"points","n":3,"from":"sky"}');
+    expect(leftOut.values.n_sky_requested).toBe(5);
+    expect(leftOut.values.n_sky_outside).toBe(2);
+    expect(leftOut.notes.slice(-2)).toEqual(["2 of 5 sky positions are outside the image and were left out", BATCH_ROWS_NOTE]);
+
+    const allIn = batchPhotometryEntry(PROV, batchOf(measuredRows(3)), { excludeDq: false, from: "sky", placement: { requested: 3, onImage: 3 } });
+    expect(allIn.values.n_sky_outside).toBe(0);
+    expect(allIn.notes).toEqual([BATCH_ROWS_NOTE]);
+
+    const stars = batchPhotometryEntry(PROV, batchOf(measuredRows(3)), FROM_STARS);
+    expect("n_sky_requested" in stars.values).toBe(false);
+  });
+
+  it("batchPhotometryEntry logs the saved table with its path and row count", () => {
+    const saved = batchPhotometryEntry(PROV, batchOf(measuredRows(4)), { ...FROM_STARS, saved: { path: "C:/out/502nmos_photometry.csv", rows: 4 } });
+    expect(saved.params.csv_path).toBe("C:/out/502nmos_photometry.csv");
+    expect(saved.params.csv_rows).toBe(4);
+    expect(saved.notes.at(-1)).toBe("per-source rows saved to 502nmos_photometry.csv (4 rows)");
+    expect(saved.notes).not.toContain(BATCH_ROWS_NOTE);
+    const one = batchPhotometryEntry(PROV, batchOf(measuredRows(1)), { ...FROM_STARS, saved: { path: "C:/out/502nmos_photometry.csv", rows: 1 } });
+    expect(one.notes.at(-1)?.endsWith("(1 row)")).toBe(true);
+    expect("csv_path" in batchPhotometryEntry(PROV, batchOf(measuredRows(1)), FROM_STARS).params).toBe(false);
+  });
+
+  it("batchPhotometryEntry carries the request keys of the single entry", () => {
+    const entry = batchPhotometryEntry(PROV, batchOf(measuredRows(2), { photcal: AB_USER }), {
+      ...FROM_STARS,
+      apertureRadius: 7.633587786259541,
+      radiusUnit: "arcsec",
+      typedRadii: { aperture: 2 },
+      pixelScaleArcsec: 0.262,
+      zeroPoint: { zp: 25, system: "ab", per_second: true },
+      nLimits: 2,
+      limitSigma: 3,
+    });
+    expect(entry.params.aperture_radius_px).toBe(7.633587786259541);
+    expect(entry.params.radius_unit).toBe("arcsec");
+    expect(entry.params.aperture_radius_arcsec).toBe(2);
+    expect(entry.params.pixel_scale_arcsec).toBe(0.262);
+    expect(entry.params.zero_point).toBe(25);
+    expect(entry.params.zero_point_per_second).toBe(true);
+    expect(entry.params.calibration_source).toBe("user");
+    expect(entry.params.limit_sigma).toBe(3);
+    expect(entry.values.n_limits).toBe(2);
+    expect("aperture_effective_arcsec" in entry.params).toBe(false);
   });
 });
 
@@ -1840,7 +2396,7 @@ describe("spectrumExportEntry for a spectrum file", () => {
   });
 
   it("logs a comparison made on a spectrum file as a spectrum file, not a loaded cube", () => {
-    const documentEntry: ComparisonEntry = { ...comparisonEntry("document", "doc.fits"), kind: "document", source: { kind: "file", hdu: 1 }, document: { flux: [1, 2], fluxUnit: "Jy" } };
+    const documentEntry: ComparisonEntry = { ...comparisonEntry("document", "doc.fits"), kind: "document", source: { kind: "file", hdu: 1 }, document: { flux: [1, 2], fluxUnit: "Jy", droppedDq: 0 } };
     const compared = spectrumCompareEntry(WINDOWS_DOC_PATH, { ...comparisonInput(), entries: [documentEntry, comparisonEntry("x1d", "other.fits")] }, null);
     expect(compared.image).toBe("spectrum file");
     expect(spectrumCompareEntry(WINDOWS_DOC_PATH, comparisonInput(), null).image).toBe("loaded cube");
@@ -1848,6 +2404,22 @@ describe("spectrumExportEntry for a spectrum file", () => {
 
   it("adds no document path to a cube export", () => {
     expect(spectrumExportEntry("C:\\d\\x.fits#hdu=1", exportInput(), null).params).not.toHaveProperty("document_path");
+  });
+
+  it("logs a binned export with the DQ handling that was applied", () => {
+    const input = {
+      ...fileExportInput(fileSpectrumOf([0, 1, 0])),
+      display: { wavelengthUnit: "um" as const, fluxUnit: "native" as const, binFactor: 2, dqExcluded: [false, true, false] },
+    };
+    const excluded = spectrumExportEntry(WINDOWS_DOC_PATH, input, null);
+    expect(excluded.dq).toBe("excluded");
+    expect(excluded.params).toMatchObject({ bin_factor: 2, bin_dq_requested: true, bin_dq_excluded: 1 });
+    const requested = { ...input, display: { ...input.display, dqExcluded: [false, false, false] } };
+    expect(spectrumExportEntry(WINDOWS_DOC_PATH, requested, null).dq).toBe("requested");
+    const off = { ...input, display: { ...input.display, dqExcluded: null } };
+    expect(spectrumExportEntry(WINDOWS_DOC_PATH, off, null).dq).toBe("off");
+    const unbinned = { ...input, display: { ...input.display, binFactor: 1 } };
+    expect(spectrumExportEntry(WINDOWS_DOC_PATH, unbinned, null).dq).toBe("reported");
   });
 });
 
@@ -1921,5 +2493,199 @@ describe("spectrumExportEntry for a region spectrum with propagated errors", () 
   it("derives the DQ field from the DQ cube the region spectrum used instead of not applied", () => {
     expect(spectrumExportEntry("C:\\d\\cube_s3d.fits", regionExportInput(erroredRegionSpectrum({ n_dq_excluded: [0, 3] })), null).dq).toBe("excluded");
     expect(spectrumExportEntry("C:\\d\\cube_s3d.fits", regionExportInput(erroredRegionSpectrum({ n_dq_excluded: [0, 0] })), null).dq).toBe("requested");
+  });
+});
+
+describe("measurement kinds of the science round", () => {
+  const ROUND_KINDS: MeasurementKind[] = [
+    "tso_light_curve",
+    "tso_depth_spectrum",
+    "tso_transit_spectrum",
+    "periodogram",
+    "forced_photometry",
+    "image_depth",
+    "resolution_check",
+    "catalog_compare",
+    "sed",
+    "layer_assignment",
+    "transit_fit",
+  ];
+
+  it("MEASUREMENT_KINDS keeps the sixteen kinds of 0.8.0 in their order and appends the eleven of the science round", () => {
+    expect([...MEASUREMENT_KINDS]).toEqual([
+      "photometry",
+      "photometry_batch",
+      "region_stats",
+      "radial_profile",
+      "sb_profile",
+      "line_cut",
+      "sky_separation",
+      "line",
+      "time_series",
+      "pixel",
+      "statistics",
+      "catalog_crossmatch",
+      "spectrum_export",
+      "spectrum_compare",
+      "pv",
+      "line_fit",
+      "tso_light_curve",
+      "tso_depth_spectrum",
+      "tso_transit_spectrum",
+      "periodogram",
+      "forced_photometry",
+      "image_depth",
+      "resolution_check",
+      "catalog_compare",
+      "sed",
+      "layer_assignment",
+      "transit_fit",
+    ]);
+  });
+
+  it("a row of each new kind is kept, found by its kind and written to the CSV", () => {
+    const { store } = makeStore();
+    for (const kind of ROUND_KINDS) store.append(draft({ kind }));
+    for (const kind of ROUND_KINDS) {
+      const found = filterEntries(store.getSnapshot(), kind, null);
+      expect(found).toHaveLength(1);
+      expect(found[0].kind).toBe(kind);
+    }
+    expect(filterEntries(store.getSnapshot(), "all", "x.fits")).toHaveLength(11);
+    const lines = measurementLogCsv(store.getSnapshot()).split("\r\n");
+    expect(lines).toHaveLength(13);
+    for (let i = 0; i < ROUND_KINDS.length; i++) expect(lines[i + 1].split(",")[1]).toBe(ROUND_KINDS[i]);
+  });
+});
+
+describe("log export provenance and the unit of sums", () => {
+  const UTC = "2026-11-12T12:00:00.000Z";
+
+  function provenanceStore(): MeasurementLogCore {
+    const { store } = makeStore();
+    store.append(draft({ params: { a: 1 }, values: { x: 2 }, notes: ["n1", "n2"] }));
+    store.append(draft({ kind: "pixel", file: "y.fits", dq: "reported", unit: "ADU", params: { b: "q" }, values: { y: 3 } }));
+    store.append(draft({ kind: "pixel", file: null }));
+    store.append(draft({ kind: "statistics" }));
+    return store;
+  }
+
+  const EXPECTED_WITH_PROVENANCE = [
+    `# software: AstroBurst ${APP_VERSION}`,
+    "# exported_utc: 2026-11-12T12:00:00.000Z",
+    "# file: x.fits; y.fits",
+    "# rows: 4",
+    "# kinds: photometry; pixel; statistics",
+    "# timestamps: UTC, ISO 8601, the time each row was logged",
+    "# units: the unit column gives the unit of the main values of a row; the notes of the row name the values that have another unit",
+    "# columns: p_ columns are parameters and v_ columns are values; an empty cell means the row has no such key; the notes of a row are joined by a vertical bar",
+    "timestamp_utc,kind,file,image,dq,unit,source,notes,p_a,p_b,v_x,v_y",
+    `${CLOCK},photometry,x.fits,original,off,,s,n1 | n2,1,,2,`,
+    `${CLOCK},pixel,y.fits,original,reported,ADU,s,,,q,,3`,
+    `${CLOCK},pixel,,original,off,,s,,,,,`,
+    `${CLOCK},statistics,x.fits,original,off,,s,,,,,`,
+    "",
+  ];
+
+  it("measurementLogCsv starts with the provenance of the export when it is given the export time", () => {
+    expect(measurementLogCsv(provenanceStore().getSnapshot(), { exportedUtc: UTC }).split("\r\n")).toEqual(EXPECTED_WITH_PROVENANCE);
+  });
+
+  it("measurementLogCsv without the export time is the table alone", () => {
+    expect(measurementLogCsv(provenanceStore().getSnapshot())).toBe(EXPECTED_WITH_PROVENANCE.slice(8).join("\r\n"));
+  });
+
+  it("the provenance of a log without a file or without rows leaves the value empty", () => {
+    const { store } = makeStore();
+    store.append(draft({ file: null }));
+    const lines = measurementLogCsv(store.getSnapshot(), { exportedUtc: "T" }).split("\r\n");
+    expect(lines.slice(0, 5)).toEqual([`# software: AstroBurst ${APP_VERSION}`, "# exported_utc: T", "# file:", "# rows: 1", "# kinds: photometry"]);
+    const empty = measurementLogCsv([], { exportedUtc: "T" }).split("\r\n");
+    expect(empty).toHaveLength(10);
+    expect(empty[2]).toBe("# file:");
+    expect(empty[3]).toBe("# rows: 0");
+    expect(empty[4]).toBe("# kinds:");
+    expect(empty[8]).toBe("timestamp_utc,kind,file,image,dq,unit,source,notes");
+    expect(empty[9]).toBe("");
+  });
+
+  it("statisticsEntry names the unit of the sum of a surface-brightness image (W0-F6, front-photometry/B2)", () => {
+    const mjy = statisticsEntry(PROV, statisticsInput({ unit: "MJy/sr" }));
+    expect(mjy.unit).toBe("MJy/sr");
+    expect(mjy.notes).toEqual(["sum in MJy/sr x pix"]);
+    const withNoise = statisticsEntry(PROV, statisticsInput({ unit: "MJy/sr", channels: [{ label: "K", body: { ...channelBody(2), noise_note: "nn" } }] }));
+    expect(withNoise.notes).toEqual(["nn", "sum in MJy/sr x pix"]);
+    expect(statisticsEntry(PROV, statisticsInput()).notes).toEqual([]);
+    expect(statisticsEntry(PROV, statisticsInput({ unit: "DN/s" })).notes).toEqual([]);
+    expect(statisticsEntry(PROV, statisticsInput({ unit: null })).notes).toEqual([]);
+    const rgb = statisticsEntry(
+      PROV,
+      statisticsInput({
+        unit: "Jy/beam",
+        channels: [
+          { label: "R", body: channelBody(1) },
+          { label: "G", body: channelBody(2) },
+          { label: "B", body: channelBody(3) },
+        ],
+      }),
+    );
+    expect(rgb.notes).toEqual(["r_sum, g_sum, b_sum in Jy/beam x pix"]);
+    expect(mjy.values).toEqual(statisticsEntry(PROV, statisticsInput()).values);
+  });
+
+  it("radialProfileEntry logs the pixel unit it is given and names the unit of the cumulative sum", () => {
+    const data: RadialProfile = {
+      x: 10.5,
+      y: 20.5,
+      max_radius: 30,
+      background: { median: 1.5, sigma: 0.2, count: 400 },
+      bins: [
+        { r: 0, count: 4, mean: 10, median: 10, std: 1, cumulative_sum: 40 },
+        { r: 1, count: 12, mean: 5, median: 5, std: 1, cumulative_sum: 100 },
+      ],
+      masked: true,
+      dq_excluded: 12,
+      region_excluded: 0,
+      elapsed_ms: 2,
+    };
+    const req = { x: 10, y: 20, maxRadius: 30, background: [40, 60] as [number, number], exclude: [] };
+    const reg = region("r1");
+    const mjy = radialProfileEntry(PROV, data, true, req, reg, "MJy/sr");
+    expect(mjy.unit).toBe("MJy/sr");
+    expect(mjy.notes).toEqual(["cumulative_sum_last in MJy/sr x pix"]);
+    const rate = radialProfileEntry(PROV, data, true, req, reg, " DN/s ");
+    expect(rate.unit).toBe("DN/s");
+    expect(rate.notes).toEqual([]);
+    const bare = radialProfileEntry(PROV, data, true, req, reg);
+    for (const e of [bare, radialProfileEntry(PROV, data, true, req, reg, null), radialProfileEntry(PROV, data, true, req, reg, "  ")]) {
+      expect(e.unit).toBeNull();
+      expect(e.notes).toEqual([]);
+    }
+    expect(mjy.params).toEqual(bare.params);
+    expect(mjy.values).toEqual(bare.values);
+  });
+
+  it("lineCutEntry logs the pixel unit it is given", () => {
+    const cut: LineCut = {
+      x1: 1,
+      y1: 2,
+      x2: 4,
+      y2: 6,
+      length: 5,
+      n_samples: 6,
+      distance: [0, 1, 2, 3, 4, 5],
+      xs: [],
+      ys: [],
+      values: [null, 2, NaN, 9, 4, null],
+      masked: false,
+      dq_excluded: null,
+      region_excluded: 0,
+      elapsed_ms: 1,
+    };
+    const mjy = lineCutEntry(PROV, cut, true, region("l", { shape: LINE }), [], "MJy/sr");
+    expect(mjy.unit).toBe("MJy/sr");
+    expect(mjy.notes).toEqual([]);
+    expect(mjy.values).toEqual({ length_px: 5, n_samples: 6, value_min: 2, value_max: 9 });
+    expect(lineCutEntry(PROV, cut, true, region("l", { shape: LINE }), [])).toMatchObject({ unit: null });
   });
 });

@@ -259,7 +259,7 @@ describe("WCS readout source", () => {
     await resolveInitialWcs();
     choose(wcsTree(), "Coordinate format", "sexagesimal");
     const html = wcs();
-    expect(html).toContain("00h44m30.00s");
+    expect(html).toContain("00h44m30.000s");
     expect(html).toContain("+22°15");
     expect(html).not.toContain("11.125000");
     const setItem = (window.localStorage.setItem as unknown as ReturnType<typeof vi.fn>).mock.calls;

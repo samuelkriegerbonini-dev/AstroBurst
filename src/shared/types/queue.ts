@@ -7,5 +7,6 @@ export interface QueueStats {
   done: number;
   failed: number;
   spectra: number;
+  tables?: number;
   totalBytes: number;
 }

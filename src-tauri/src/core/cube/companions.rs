@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cube::lazy::{CubeGeometry, LazyCube};
+use crate::core::imaging::dq_flags::{DqTable, TELESCOPE_KEYS};
 use crate::core::metadata::units::{classify_unit, UnitClass};
 use crate::infra::fits::reader::{list_extensions, HduInfo};
 use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR};
@@ -130,6 +131,18 @@ fn open_cube_set_using(path: &str, fresh: bool) -> Result<CubeSet> {
     let mut notes = Vec::new();
     let err = open_companion(&extensions, EXTNAME_ERR, ERR_UNREADABLE, &sci, &base, &mut notes, fresh);
     let dq = open_companion(&extensions, EXTNAME_DQ, DQ_UNREADABLE, &sci, &base, &mut notes, fresh);
+    if let Some(dq_cube) = &dq {
+        let merged = sci.merged_header();
+        let table = DqTable::select(&merged);
+        let names_its_origin = TELESCOPE_KEYS.iter().any(|key| merged.get(key).is_some());
+        if names_its_origin && !matches!(table, DqTable::Jwst | DqTable::Roman) {
+            notes.push(format!(
+                "DQ extension HDU {}: the flag table of this file is {}; cube tools exclude bit 0 only, which is not known to mean DO_NOT_USE here",
+                dq_cube.hdu_index,
+                table.label()
+            ));
+        }
+    }
     if err.as_ref().is_some_and(|cube| card_text(&cube.header, "BUNIT").is_none()) {
         notes.push(format!("ERR has no BUNIT: when ERR is used, the SCI unit {} is assumed", card_text(&sci.header, "BUNIT").as_deref().unwrap_or("(unspecified)")));
     }
@@ -249,6 +262,44 @@ mod tests {
         fit_cube_lines(&mismatch.inputs(), &cfg).unwrap();
         let result = fit_spaxel(&mismatch.inputs(), &cfg, 0, 0).unwrap();
         assert!(result.err.is_none());
+    }
+
+    fn sci_dq_notes(path: &std::path::Path, primary_cards: &[(&str, &str)]) -> Vec<String> {
+        let mut cards = vec![("EXTEND", "T")];
+        cards.extend_from_slice(primary_cards);
+        let mut sci_cards = line_cube_cards();
+        sci_cards.push(("EXTNAME", "'SCI'"));
+        let mut bytes = image_hdu("SIMPLE", &[], 8, &cards, Vec::new());
+        bytes.extend(image_hdu("XTENSION", &[2, 2, 40], -32, &sci_cards, f32_samples(2, 2, 40, |z, _, _| LINE_CONTINUUM + line_profile(z))));
+        bytes.extend(image_hdu("XTENSION", &[2, 2, 40], 32, &[("EXTNAME", "'DQ'")], vec![0u8; 2 * 2 * 40 * 4]));
+        write_bytes(path, &bytes);
+        let set = open_cube_set_fresh(path.to_str().unwrap()).unwrap();
+        assert_eq!(set.dq.as_ref().map(|cube| cube.hdu_index), Some(2));
+        set.notes
+    }
+
+    #[test]
+    fn a_cube_of_an_unknown_telescope_says_that_only_bit_0_is_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let muse = sci_dq_notes(&dir.path().join("muse.fits"), &[("TELESCOP", "'ESO-VLT-U4'"), ("INSTRUME", "'MUSE'")]);
+        assert_eq!(
+            muse,
+            vec![
+                "DQ extension HDU 2: the flag table of this file is unknown (raw bits); cube tools exclude bit 0 only, which is not known to mean DO_NOT_USE here"
+                    .to_string()
+            ]
+        );
+        let acs = sci_dq_notes(&dir.path().join("acs.fits"), &[("TELESCOP", "'HST'"), ("INSTRUME", "'ACS'")]);
+        assert_eq!(
+            acs,
+            vec![
+                "DQ extension HDU 2: the flag table of this file is hst; cube tools exclude bit 0 only, which is not known to mean DO_NOT_USE here"
+                    .to_string()
+            ]
+        );
+        assert!(sci_dq_notes(&dir.path().join("jwst.fits"), &[("TELESCOP", "'JWST'")]).is_empty());
+        assert!(sci_dq_notes(&dir.path().join("roman.fits"), &[("INSTRUME", "'WFI'")]).is_empty());
+        assert!(sci_dq_notes(&dir.path().join("no_cards.fits"), &[]).is_empty());
     }
 
     #[test]

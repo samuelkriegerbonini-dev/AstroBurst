@@ -7,6 +7,7 @@ import { CUBE_SPECTRUM_HINT, CUBE_TOOL_SPECTRUM_HINT, PNG_ONLY_TITLE } from "../
 import { dockStore } from "../../hooks/useDockLayout";
 import { DEFAULT_DOCK_LAYOUT, anchorOf, dockReducer } from "../../utils/dockLayout";
 import { middleEllipsis } from "../../utils/filenameDisplay";
+import type { TableNote } from "../../utils/fileKinds";
 
 const previewLayoutCss = readFileSync(fileURLToPath(new URL("../preview/preview-layout.css", import.meta.url)), "utf8");
 
@@ -30,6 +31,7 @@ interface ViewState {
   compositeUrl?: string | null;
   cubeFrame?: number;
   pixelClick?: { x: number; y: number; seq: number };
+  noFile?: boolean;
 }
 
 const S3D_GRID: [number, number] = [53, 55];
@@ -72,7 +74,9 @@ vi.mock("../../hooks/useHistory", () => ({ useHistoryController: () => ({ revert
 vi.mock("../../context/PreviewContext", () => ({
   fileKeyOf: (file: { id: string; path: string } | null) => (file ? `${file.id}|${file.path}` : null),
   useFileContext: () => ({
-    file: state.spectrum
+    file: state.noFile
+      ? null
+      : state.spectrum
       ? { id: "spec", path: X1D_PATH, name: X1D_NAME, status: "spectrum", spectrum: { kind: "x1d", hdu: 1 }, result: null }
       : {
           id: "1",
@@ -85,14 +89,17 @@ vi.mock("../../context/PreviewContext", () => ({
         },
   }),
   useCubeContext: () => ({ isCube: state.isCube, isSpectralCube: state.isSpectralCube, isSpectrum: state.spectrum, ramp: null }),
-  useDisplayedImage: () => ({
-    path: state.spectrum ? null : state.label && state.productPath !== null ? state.productPath ?? "/out/result.fits" : state.filePath ?? "/data/cube_s3d.fits",
-    dimensions: state.spectrum ? null : state.displayedDims,
-    isProcessed: state.label !== null,
-    label: state.label,
-    previewOnly: state.previewOnly ?? false,
-    previewUrl: state.spectrum ? null : "asset://shown.png",
-  }),
+  useDisplayedImage: () =>
+    state.noFile
+      ? { path: null, dimensions: null, isProcessed: false, label: null, previewOnly: false, previewUrl: null }
+      : {
+          path: state.spectrum ? null : state.label && state.productPath !== null ? state.productPath ?? "/out/result.fits" : state.filePath ?? "/data/cube_s3d.fits",
+          dimensions: state.spectrum ? null : state.displayedDims,
+          isProcessed: state.label !== null,
+          label: state.label,
+          previewOnly: state.previewOnly ?? false,
+          previewUrl: state.spectrum ? null : "asset://shown.png",
+        },
   useRawPixelsContext: () => ({
     rawPixels: state.gpu ? ({ width: state.displayedDims[0], height: state.displayedDims[1] } as unknown) : null,
     rawPixelsLoading: false,
@@ -159,15 +166,16 @@ vi.mock("../history/HistoryShortcuts", () => ({ default: () => createElement("i"
 vi.mock("../preview/DqControls", () => ({ default: () => createElement("i", { "data-dq-controls": "" }) }));
 vi.mock("../preview/DqOverlayCanvas", () => ({ default: () => null }));
 vi.mock("../preview/ViewerStatusStrip", () => ({ default: () => createElement("i", { "data-status-strip": "" }) }));
-const spectrumPanelProps: { name: string; onOpenCubeTool: () => void }[] = [];
+const spectrumPanelProps: { name: string; onOpenTool: () => void }[] = [];
 
-vi.mock("../preview/SpectrumViewerEmpty", () => ({
-  default: (props: { name: string; onOpenCubeTool: () => void }) => {
-    spectrumPanelProps.push(props);
-    return createElement("i", { "data-spectrum-empty": props.name });
+vi.mock("../preview/SpectrumViewer", () => ({
+  default: (props: { name: string; onOpenTool: () => void }) => {
+    spectrumPanelProps.push({ name: props.name, onOpenTool: props.onOpenTool });
+    return createElement("i", { "data-spectrum-viewer": props.name });
   },
 }));
 vi.mock("../preview/DisplayControls", () => ({ default: () => null }));
+vi.mock("../preview/TableViewerNote", () => ({ default: (props: { note: { id: string } }) => createElement("i", { "data-table-note": props.note.id }) }));
 const tabProps: { onCubePixelClick?: (x: number, y: number) => void; frameKeys?: unknown }[] = [];
 
 vi.mock("../preview/PreviewTab", () => ({
@@ -219,6 +227,7 @@ function spectrumSnapshot(): SpectrumState {
 afterEach(() => {
   hooks.mount();
   resetSpectrum();
+  state.noFile = undefined;
 });
 
 describe("PreviewPanel active product metadata", () => {
@@ -702,7 +711,7 @@ describe("PreviewPanel with a 1D spectrum selected", () => {
     viewerProps.length = 0;
     tabProps.length = 0;
     const html = render(SPECTRUM_VIEW);
-    expect(html).toContain(`data-spectrum-empty="${X1D_NAME}"`);
+    expect(html).toContain(`data-spectrum-viewer="${X1D_NAME}"`);
     expect(spectrumPanelProps.at(-1)?.name).toBe(X1D_NAME);
     expect(viewerProps).toHaveLength(0);
     expect(tabProps).toHaveLength(0);
@@ -713,21 +722,21 @@ describe("PreviewPanel with a 1D spectrum selected", () => {
 
   it("keeps the DQ controls, the GPU toggle and the status strip on an image (control)", () => {
     const html = render({ isCube: false, isSpectralCube: false });
-    expect(html).not.toContain("data-spectrum-empty");
+    expect(html).not.toContain("data-spectrum-viewer");
     expect(html).toContain("data-dq-controls");
     expect(html).toContain(GPU_TOGGLE);
     expect(html).toContain("data-status-strip");
   });
 
-  it("opens the Cube tool from the spectrum panel and keeps it open when routing already opened it", () => {
+  it("opens the Spectra tool from the spectrum panel and keeps it open when routing already opened it", () => {
     const dispatch = vi.spyOn(dockStore, "dispatch").mockImplementation(() => {});
     try {
       spectrumPanelProps.length = 0;
       render(SPECTRUM_VIEW);
-      const openCubeTool = spectrumPanelProps.at(-1)?.onOpenCubeTool;
-      if (!openCubeTool) throw new Error("the spectrum panel got no Open the Cube tool handler");
-      openCubeTool();
-      openCubeTool();
+      const openTool = spectrumPanelProps.at(-1)?.onOpenTool;
+      if (!openTool) throw new Error("the spectrum panel got no onOpenTool handler");
+      openTool();
+      openTool();
       expect(dispatch).toHaveBeenCalledTimes(2);
       const routed = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "cube" });
       let layout = routed;
@@ -741,5 +750,39 @@ describe("PreviewPanel with a 1D spectrum selected", () => {
     } finally {
       dispatch.mockRestore();
     }
+  });
+});
+
+describe("PreviewPanel with a table selected", () => {
+  const NOTE: TableNote = {
+    id: "t",
+    name: "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv",
+    text: "Table, 240 rows x 3 columns (ECSV)",
+    reason: "time column MJD_UTC_NRS1 and value column whitelight_flux_NRS1",
+    hint: "It has no image to show here.",
+    action: { kind: "light_curve", label: "Open as light curve", title: "Open this table as a light curve in the Series section of Photometry" },
+  };
+
+  function renderWith(props: Parameters<typeof PreviewPanel>[0]): string {
+    return renderToStaticMarkup(hooks.render(PreviewPanel, props) as ReturnType<typeof createElement>);
+  }
+
+  it("shows the note of the selected table in the viewer", () => {
+    render({ noFile: true });
+    const html = renderWith({ tableNote: NOTE });
+    expect(html).toContain('data-table-note="t"');
+  });
+
+  it("keeps the empty viewer while no file and no table are selected", () => {
+    render({ noFile: true });
+    hooks.mount();
+    expect(renderWith({})).not.toContain("data-table-note");
+  });
+
+  it("lets the viewer of a file on screen win over a table note", () => {
+    render({ isCube: false, isSpectralCube: false });
+    hooks.mount();
+    const html = renderWith({ tableNote: NOTE });
+    expect(html).not.toContain("data-table-note");
   });
 });

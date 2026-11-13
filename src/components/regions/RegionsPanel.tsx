@@ -1,20 +1,30 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Shapes, FileUp, FileDown, ClipboardCopy, Plus, Trash2, Loader2 } from "lucide-react";
-import type { Region, RegionStatsEntry, RegionSystem } from "../../shared/types";
+import type { Region, RegionStats, RegionStatsEntry, RegionSystem } from "../../shared/types";
 import { REGION_SYSTEMS, type RegionNetErrTerms, type RegionSky } from "../../shared/types/regions";
 import { importRegions, exportRegions, toWire } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
-import { MAX_CLIP_ITERS, parseClipIters, parseClipSigma, useRegionStats } from "../../hooks/useRegionStats";
+import {
+  DEFAULT_CLIP_ITERS,
+  DEFAULT_CLIP_SIGMA,
+  MAX_CLIP_ITERS,
+  clipFieldError,
+  parseClipIters,
+  parseClipSigma,
+  useRegionStats,
+} from "../../hooks/useRegionStats";
 import { regionStore, shapeKindKey } from "../../utils/regionStore";
 import { normalizeProps } from "../../utils/regionPersistence";
 import { shapeSummary, shapeSummaryTitle, isRegionShape } from "../../utils/regionGeometry";
-import { regionSkyOf, regionsCsvFileName, regionsTableCsv } from "../../utils/regionCsv";
+import { regionSkyOf, regionsCsvFileName, regionsTableCsv, type RegionCsvContext } from "../../utils/regionCsv";
+import { summedFluxUnit } from "../../utils/photometryTable";
 import { formatLat, formatLon } from "../../utils/coordFormat";
 import { useDqContext } from "../../context/PreviewContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { measurementLog, regionLogReady, regionStatsEntries } from "../../utils/measurementLog";
 import { generateId } from "../../utils/format";
 import { formatSignificant } from "../../utils/formatSignificant";
+import { formatFluxDensityJy, formatWithUncertainty } from "../../utils/formatUncertainty";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import {
   EXCLUDED_CELL_TITLE,
@@ -24,6 +34,7 @@ import {
   toggledInclude,
 } from "../../utils/regionExclude";
 import MeasurementBadge from "../analysis/MeasurementBadge";
+import { CopyCsvButton, DecimalField, ErrorAlert } from "../ui";
 import { ARMED_CONFIRM_WINDOW_MS, CONFIRM_DELETE_LABEL, useArmedConfirm } from "../../hooks/useArmedConfirm";
 
 interface RegionsPanelProps {
@@ -33,8 +44,16 @@ interface RegionsPanelProps {
 }
 
 const DEFAULT_SWATCH = "#7dd3fc";
-const DEFAULT_CLIP_SIGMA_TEXT = "3";
-const DEFAULT_CLIP_ITERS_TEXT = "5";
+const DEFAULT_CLIP_SIGMA_TEXT = String(DEFAULT_CLIP_SIGMA);
+const DEFAULT_CLIP_ITERS_TEXT = String(DEFAULT_CLIP_ITERS);
+const CLIP_SIGMA_TITLE = `Sigma-clipping threshold for the clipped mean and sigma of each region (shown in the row when pixels are rejected, and logged); blank uses the default ${DEFAULT_CLIP_SIGMA}`;
+const CLIP_ITERS_TITLE = `Maximum sigma-clipping iterations, a whole number from 1 to ${MAX_CLIP_ITERS}; blank uses the default ${DEFAULT_CLIP_ITERS}`;
+const CLIP_ERROR_CLASS = "text-[9px] text-amber-400/90 px-3";
+const DQ_NOT_APPLIED_PREFIX = "DQ exclusion requested but not applied: ";
+const NO_DQ_MASK_TITLE = "No DQ mask was applied to these statistics";
+const PARTLY_OFF_IMAGE_TITLE = "Part of the region lies outside the image; the statistics use the pixels inside";
+const ZERO_PADDING_TITLE = "exact zeros are treated as padding and left out";
+const NO_DATA_TITLE = "pixels without data (NaN or infinite) are left out";
 const MAG_DECIMALS = 3;
 const SURFACE_BRIGHTNESS_DECIMALS = 2;
 const AREA_DECIMALS = 3;
@@ -42,7 +61,7 @@ const POSITION_ANGLE_DECIMALS = 1;
 const MISSING_CALIBRATION_REASON = "no flux calibration in the header";
 const MISSING_VALUE = "--";
 const CLIP_INPUT_CLASS =
-  "w-9 bg-zinc-900 border rounded px-1 py-0.5 text-[9px] text-zinc-300 font-mono text-right focus:outline-none focus:border-sky-500/60";
+  "w-9 bg-zinc-900 border rounded px-1 py-0.5 text-[9px] text-zinc-300 font-mono text-right focus:outline-none focus:border-sky-500/60 focus-visible:ring-1 focus-visible:ring-sky-500/60";
 const HEADER_BUTTON_CLASS =
   "flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-zinc-400 hover:text-zinc-200 disabled:opacity-40";
 const DANGER_BUTTON_CLASS = "flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded text-red-400 hover:text-red-300";
@@ -70,23 +89,13 @@ function regionDeleteKey(id: string): string {
   return `region:${id}`;
 }
 
-function formatJansky(v: number | null | undefined): string {
-  if (v == null || !Number.isFinite(v)) return "--";
-  const a = Math.abs(v);
-  if (a >= 1) return `${v.toFixed(4)} Jy`;
-  if (a >= 1e-3) return `${(v * 1e3).toFixed(4)} mJy`;
-  if (a >= 1e-6) return `${(v * 1e6).toFixed(4)} uJy`;
-  return `${(v * 1e9).toFixed(4)} nJy`;
+function formatMagnitude(v: number | null, decimals: number): string {
+  if (v == null || !Number.isFinite(v)) return MISSING_VALUE;
+  return v.toFixed(decimals);
 }
 
-function formatJanskyWithError(v: number, err: number | null): string {
-  return err != null && Number.isFinite(err) ? `${formatJansky(v)} ± ${formatJansky(err)}` : formatJansky(v);
-}
-
-function formatMagnitude(v: number | null, err: number | null, decimals: number): string {
-  if (v == null || !Number.isFinite(v)) return "--";
-  const base = v.toFixed(decimals);
-  return err != null && Number.isFinite(err) ? `${base} ± ${err.toFixed(decimals)}` : base;
+function isPositiveError(err: number | null | undefined): err is number {
+  return err != null && Number.isFinite(err) && err > 0;
 }
 
 function formatArea(areaArcsec2: number | null | undefined): string | null {
@@ -112,6 +121,19 @@ function fileStem(path: string): string {
 function fmt(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return MISSING_VALUE;
   return formatSignificant(v);
+}
+
+function countCell(s: RegionStats): { value: string; title: string | undefined } {
+  const excludedLabel = excludedCellLabel(s);
+  const parts = [
+    excludedLabel && { label: excludedLabel, title: EXCLUDED_CELL_TITLE },
+    s.n_padding > 0 && { label: `(−${s.n_padding} zero)`, title: ZERO_PADDING_TITLE },
+    s.n_nan > 0 && { label: `(−${s.n_nan} no data)`, title: NO_DATA_TITLE },
+  ].filter((part): part is { label: string; title: string } => !!part);
+  return {
+    value: [String(s.count), ...parts.map((part) => part.label)].join(" "),
+    title: parts.length > 0 ? parts.map((part) => part.title).join("; ") : undefined,
+  };
 }
 
 function fmtSnr(v: number): string {
@@ -140,6 +162,7 @@ function RegionRow({
   deleteArmed,
   onDelete,
   onDeleteBlur,
+  clip,
 }: {
   region: Region;
   selected: boolean;
@@ -151,9 +174,9 @@ function RegionRow({
   deleteArmed: boolean;
   onDelete: (id: string) => void;
   onDeleteBlur: (id: string) => void;
+  clip: { sigma: number; maxiters: number };
 }) {
   const s = entry?.stats ?? null;
-  const excludedLabel = s ? excludedCellLabel(s) : null;
   const sky = regionSkyOf(s);
   const area = formatArea(sky?.area_arcsec2);
   const skyText = skyLine(sky);
@@ -208,7 +231,7 @@ function RegionRow({
             onDelete(region.id);
           }}
           onBlur={() => onDeleteBlur(region.id)}
-          className={`ml-auto shrink-0 ${deleteArmed ? DELETE_ARMED_CLASS : DELETE_IDLE_CLASS}`}
+          className={`ml-auto shrink-0 min-w-6 min-h-6 inline-flex items-center justify-center ${deleteArmed ? DELETE_ARMED_CLASS : DELETE_IDLE_CLASS}`}
           title={deleteArmed ? DELETE_ARMED_TITLE : "Delete region"}
         >
           {deleteArmed ? CONFIRM_DELETE_LABEL : <Trash2 size={11} />}
@@ -217,29 +240,47 @@ function RegionRow({
       {entry?.error && <div className="mt-1 text-[9px] text-red-400 break-words">{entry.error}</div>}
       {s && (
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] font-mono">
-          <StatCell label="n" value={`${s.count}${excludedLabel ? ` ${excludedLabel}` : ""}`} title={excludedLabel ? EXCLUDED_CELL_TITLE : undefined} />
+          <StatCell label="n" {...countCell(s)} />
           <StatCell label="mean" value={fmt(s.mean)} />
           <StatCell label="med" value={fmt(s.median)} />
-          <StatCell label="sum" value={s.sum_err != null ? `${fmt(s.sum)} ± ${fmt(s.sum_err)}` : fmt(s.sum)} />
+          <StatCell label="sum" value={isPositiveError(s.sum_err) ? formatWithUncertainty(s.sum, s.sum_err) : fmt(s.sum)} />
           <StatCell label={SIGMA_MAD_LABEL} value={fmt(s.sigma)} title={SIGMA_MAD_TITLE} />
+          {s.n_rejected > 0 && s.clipped_mean !== null && s.clipped_sigma !== null && (
+            <StatCell
+              label="sigma-clip"
+              value={`mean ${fmt(s.clipped_mean)}, sigma ${fmt(s.clipped_sigma)}, ${s.n_rejected} rejected`}
+              title={`After sigma clipping at ${clip.sigma} sigma and at most ${clip.maxiters} iterations: ${s.n_rejected} of ${s.count} pixels rejected. Every other value of this row uses all the pixels.`}
+            />
+          )}
           {s.weighted_mean != null && <StatCell label="wmean" value={fmt(s.weighted_mean)} />}
           {s.net_sum !== null && (
             <StatCell
               label="net"
-              value={s.net_err != null ? `${fmt(s.net_sum)} ± ${fmt(s.net_err)}` : fmt(s.net_sum)}
+              value={isPositiveError(s.net_err) ? formatWithUncertainty(s.net_sum, s.net_err) : fmt(s.net_sum)}
               title={s.net_err_terms ? NET_ERROR_TITLES[s.net_err_terms] : NO_NET_ERROR_TITLE}
             />
           )}
           {s.net_snr !== null && <StatCell label="snr" value={fmtSnr(s.net_snr)} title={SNR_TITLE} />}
           {s.calibrated && (
             <>
-              <StatCell label="Jy" value={formatJanskyWithError(s.calibrated.flux_jy, s.calibrated.flux_err_jy)} />
-              <StatCell label="AB" value={formatMagnitude(s.calibrated.mag_ab, s.calibrated.mag_ab_err, MAG_DECIMALS)} />
-              <StatCell label="SB" value={formatMagnitude(s.calibrated.sb_mag_arcsec2, null, SURFACE_BRIGHTNESS_DECIMALS)} />
+              <StatCell label="Jy" value={formatFluxDensityJy(s.calibrated.flux_jy, s.calibrated.flux_err_jy)} />
+              <StatCell
+                label="AB"
+                value={
+                  isPositiveError(s.calibrated.mag_ab_err)
+                    ? formatWithUncertainty(s.calibrated.mag_ab, s.calibrated.mag_ab_err)
+                    : formatMagnitude(s.calibrated.mag_ab, MAG_DECIMALS)
+                }
+              />
+              <StatCell label="SB" value={formatMagnitude(s.calibrated.sb_mag_arcsec2, SURFACE_BRIGHTNESS_DECIMALS)} />
             </>
           )}
           {area && <StatCell label="area" value={area} />}
-          {s.clipped && <span className="text-amber-400/80">clipped</span>}
+          {s.clipped && (
+            <span className="text-amber-400/80" title={PARTLY_OFF_IMAGE_TITLE}>
+              partly off image
+            </span>
+          )}
         </div>
       )}
       {skyText && (
@@ -278,13 +319,18 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
   const sigma = parseClipSigma(sigmaText);
   const maxiters = parseClipIters(itersText);
   const clip = useMemo(() => ({ sigma, maxiters }), [sigma, maxiters]);
-  const { stats, loading, error: statsError, photcal, calibrationWarnings, measured: statsMeasured } = useRegionStats(
-    measurePath,
-    doc.regions,
-    excludeDq,
-    clip,
-    measureKey,
-  );
+  const sigmaError = clipFieldError("sigma", sigmaText);
+  const itersError = clipFieldError("iters", itersText);
+  const {
+    stats,
+    loading,
+    error: statsError,
+    photcal,
+    calibrationWarnings,
+    measured: statsMeasured,
+    notes: statsNotes,
+    units,
+  } = useRegionStats(measurePath, doc.regions, excludeDq, clip, measureKey);
   const [system, setSystem] = useState<RegionSystem>("image");
   const [busy, setBusy] = useState(false);
   const [ioError, setIoError] = useState<string | null>(null);
@@ -296,6 +342,8 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
   const confirmingDeletePoints = armedPointsKey !== null && armedPointsKey === pointsKey;
   if (armedPointsKey !== null && !confirmingDeletePoints) setArmedPointsKey(null);
   const measured = doc.regions.length > 0 && stats.size > 0;
+  const dqNotApplied = statsMeasured !== null && statsMeasured.excludeDq && statsMeasured.dqExcluded === null;
+  const rowClip = { sigma: statsMeasured?.sigma ?? DEFAULT_CLIP_SIGMA, maxiters: statsMeasured?.maxiters ?? DEFAULT_CLIP_ITERS };
 
   const handleSelect = useCallback(
     (id: string) => {
@@ -398,18 +446,32 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
     }
   }, [filePath, busy, doc.regions, system]);
 
-  const handleCopyCsv = useCallback(async () => {
-    if (doc.regions.length === 0) return;
+  const csvContext = useCallback(
+    (): RegionCsvContext => ({
+      exportedUtc: new Date().toISOString(),
+      fileName: provenance.file,
+      image: provenance.image,
+      bunit: units.bunit,
+      summedUnit: units.summedUnit ?? summedFluxUnit(photcal),
+      calibration: photcal?.origin || photcal?.label || null,
+      excludeDq: statsMeasured?.excludeDq ?? excludeDq,
+      dqExcludedPx: statsMeasured?.dqExcluded ?? null,
+      regionExcludedPx: statsMeasured?.regionExcluded ?? 0,
+      clipSigma: statsMeasured?.sigma ?? DEFAULT_CLIP_SIGMA,
+      clipMaxiters: statsMeasured?.maxiters ?? DEFAULT_CLIP_ITERS,
+      notes: [...new Set([...statsNotes, ...calibrationWarnings])],
+    }),
+    [provenance, units, photcal, statsMeasured, excludeDq, statsNotes, calibrationWarnings],
+  );
+
+  const copyText = useCallback(() => {
     setIoError(null);
-    try {
-      await navigator.clipboard.writeText(regionsTableCsv(doc.regions, stats));
-    } catch (e) {
-      setIoError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }, [doc.regions, stats]);
+    return doc.regions.length === 0 ? null : regionsTableCsv(doc.regions, stats, csvContext());
+  }, [doc.regions, stats, csvContext]);
 
   const handleSaveCsv = useCallback(async () => {
     if (!filePath || busy || doc.regions.length === 0) return;
+    const context = csvContext();
     setBusy(true);
     setIoError(null);
     try {
@@ -421,13 +483,13 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
       });
       if (!target) return;
       const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-      await writeTextFile(target, regionsTableCsv(doc.regions, stats));
+      await writeTextFile(target, regionsTableCsv(doc.regions, stats, context));
     } catch (e) {
       setIoError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [filePath, measurePath, busy, doc.regions, stats]);
+  }, [filePath, measurePath, busy, doc.regions, stats, csvContext]);
 
   const logReady = regionLogReady(statsMeasured, { regions: doc.regions, excludeDq, sigma, maxiters });
   const statsPending = doc.regions.length > 0 && (!logReady || loading);
@@ -465,7 +527,17 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
           <span className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">Regions</span>
           <span className="text-[9px] text-zinc-600 font-mono">{doc.regions.length}</span>
           {doc.regions.length > 0 && <MeasurementBadge />}
-          {excludeDq && <span className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30">DQ masked</span>}
+          {excludeDq &&
+            (dqNotApplied ? (
+              <span
+                className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30"
+                title={statsNotes.find((note) => note.startsWith(DQ_NOT_APPLIED_PREFIX)) ?? NO_DQ_MASK_TITLE}
+              >
+                DQ not applied
+              </span>
+            ) : (
+              <span className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30">DQ masked</span>
+            ))}
           {(statsMeasured?.regionExcluded ?? 0) > 0 && (
             <span
               className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30"
@@ -475,29 +547,40 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
             </span>
           )}
           {calibrationBadge}
+          {measured && units.bunit !== null && (
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded text-zinc-400 bg-zinc-800/60"
+              title={`mean, median, sigma, min and max are pixel values in ${units.bunit}; sum and net are sums over pixels in ${units.summedUnit ?? units.bunit}`}
+              data-region-unit
+            >
+              unit {units.bunit}
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-1">
           {(loading || busy) && <Loader2 size={12} className="animate-spin text-sky-400/70" />}
-          <label className="flex items-center gap-1 text-[9px] text-zinc-500" title="Sigma-clipping threshold in sigma units (blank or invalid uses the default 3)">
+          <label className="flex items-center gap-1 text-[9px] text-zinc-500" title={CLIP_SIGMA_TITLE}>
             sigma
-            <input
-              type="text"
-              inputMode="decimal"
+            <DecimalField
+              optional
               value={sigmaText}
-              onChange={(e) => setSigmaText(e.target.value)}
+              onChange={setSigmaText}
+              error={sigmaError}
               aria-label="Sigma clipping threshold"
-              className={`${CLIP_INPUT_CLASS} ${sigma === null && sigmaText.trim() !== "" ? "border-amber-500/60" : "border-zinc-800"}`}
+              className={`${CLIP_INPUT_CLASS} border-zinc-800`}
+              title={CLIP_SIGMA_TITLE}
             />
           </label>
-          <label className="flex items-center gap-1 text-[9px] text-zinc-500" title={`Maximum sigma-clipping iterations, a whole number from 1 to ${MAX_CLIP_ITERS} (blank or invalid uses the default 5)`}>
+          <label className="flex items-center gap-1 text-[9px] text-zinc-500" title={CLIP_ITERS_TITLE}>
             iters
-            <input
-              type="text"
-              inputMode="numeric"
+            <DecimalField
+              optional
               value={itersText}
-              onChange={(e) => setItersText(e.target.value)}
+              onChange={setItersText}
+              error={itersError}
               aria-label="Sigma clipping iterations"
-              className={`${CLIP_INPUT_CLASS} ${maxiters === null && itersText.trim() !== "" ? "border-amber-500/60" : "border-zinc-800"}`}
+              className={`${CLIP_INPUT_CLASS} border-zinc-800`}
+              title={CLIP_ITERS_TITLE}
             />
           </label>
           <select
@@ -524,14 +607,14 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
           >
             <FileDown size={11} /> Export
           </button>
-          <button
-            onClick={() => void handleCopyCsv()}
+          <CopyCsvButton
+            text={copyText}
             disabled={doc.regions.length === 0 || statsPending}
-            className={HEADER_BUTTON_CLASS}
             title={statsPending ? STATS_PENDING_TITLE : COPY_CSV_TITLE}
-          >
-            <ClipboardCopy size={11} /> Copy CSV
-          </button>
+            className={HEADER_BUTTON_CLASS}
+            icon={<ClipboardCopy size={11} />}
+            onError={setIoError}
+          />
           <button
             onClick={() => void handleSaveCsv()}
             disabled={!filePath || busy || doc.regions.length === 0 || statsPending}
@@ -572,6 +655,16 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
           )}
         </div>
       </div>
+      {sigmaError && (
+        <div className={CLIP_ERROR_CLASS} role="status" data-clip-error="sigma">
+          {`sigma: ${sigmaError}; using the default ${DEFAULT_CLIP_SIGMA}`}
+        </div>
+      )}
+      {itersError && (
+        <div className={CLIP_ERROR_CLASS} role="status" data-clip-error="iters">
+          {`iters: ${itersError}; using the default ${DEFAULT_CLIP_ITERS}`}
+        </div>
+      )}
       <div className="px-3 py-2 space-y-1.5">
         {!filePath && <div className="text-[10px] text-zinc-600">Select a file to draw regions.</div>}
         {filePath && doc.regions.length === 0 && (
@@ -579,15 +672,21 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
             Pick a shape tool in the viewer toolbar and drag on the image, or import a .reg file.
           </div>
         )}
-        {(ioError || statsError) && (
-          <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
-            {ioError ?? statsError}
-          </div>
-        )}
+        <ErrorAlert compact message={ioError ?? statsError} />
         {warnings.length > 0 && (
           <div className="text-[9px] text-amber-300/90 bg-amber-900/15 border border-amber-800/30 rounded px-2 py-1 space-y-0.5">
             {warnings.map((w, i) => (
               <div key={i}>{w}</div>
+            ))}
+          </div>
+        )}
+        {doc.regions.length > 0 && statsNotes.length > 0 && (
+          <div
+            data-stats-notes
+            className="text-[9px] text-amber-300/90 bg-amber-900/15 border border-amber-800/30 rounded px-2 py-1 space-y-0.5"
+          >
+            {statsNotes.map((note) => (
+              <div key={note}>{note}</div>
             ))}
           </div>
         )}
@@ -606,6 +705,7 @@ function RegionsPanel({ filePath, measurePath, measureKey }: RegionsPanelProps) 
                 deleteArmed={deleteConfirm.armedKey === regionDeleteKey(r.id)}
                 onDelete={handleDelete}
                 onDeleteBlur={handleDeleteBlur}
+                clip={rowClip}
               />
             ))}
           </div>

@@ -40,3 +40,12 @@ pub mod mast;
 pub mod catalog_store;
 #[cfg(feature = "net")]
 pub mod sample_data;
+pub mod periodogram;
+pub mod tables;
+pub mod tso;
+pub mod transit;
+pub mod tso_transit;
+pub mod resolution;
+pub mod catalog_compare;
+pub mod filters;
+pub mod companions;

@@ -364,7 +364,7 @@ export default function ConfigPanel() {
             Astrometry.net API Key
           </h4>
           {apiKeyMasked && (
-            <span className="text-[10px] font-mono text-emerald-400/60">{apiKeyMasked}</span>
+            <span className="text-[10px] font-mono text-emerald-400/90">{apiKeyMasked}</span>
           )}
         </div>
         <div className="flex gap-2">

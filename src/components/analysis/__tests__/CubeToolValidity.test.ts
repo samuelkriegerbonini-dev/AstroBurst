@@ -25,7 +25,7 @@ vi.mock("../../../context/PreviewContext", () => ({
   }),
 }));
 vi.mock("../../../hooks/useSpectrumStore", () => ({ useSpectrum: () => ({}) }));
-vi.mock("../../../hooks/useSpectrum1dStore", () => ({ useOpenSpectrumCsv: () => null, useSpectrum1dDoc: () => ({ spectrum: null, error: null }) }));
+vi.mock("../../../hooks/useSpectrum1dStore", () => ({ useOpenSpectrumCsv: () => null, useSpectrum1dDoc: () => ({ spectrum: null, error: null }), useSpectrum1dRequest: () => ({ loading: false, spectrum: null, error: null }) }));
 vi.mock("../../../infrastructure/tauri", () => ({ getPreviewUrl: state.preview }));
 
 import { hooks } from "../../../test/hookRuntime";

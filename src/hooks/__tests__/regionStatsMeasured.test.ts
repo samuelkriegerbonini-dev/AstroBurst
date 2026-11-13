@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_REGIONS_PER_STATS_CALL, measuredOfChunks, statsCalls } from "../useRegionStats";
+import { MAX_REGIONS_PER_STATS_CALL, measuredOf, measuredOfChunks, notesOfChunks, statsCalls, unitsOfChunks } from "../useRegionStats";
 import type { Region, RegionShape, RegionStatsResult } from "../../shared/types/regions";
 
 function chunk(extra: Partial<RegionStatsResult>): RegionStatsResult {
@@ -36,6 +36,50 @@ describe("measuredOfChunks", () => {
         chunk({ masked: false, region_excluded: 0, elapsed_ms: 1 }),
       ]),
     ).toEqual({ masked: true, dqExcluded: null, regionExcluded: 81, elapsedMs: 5 });
+  });
+});
+
+describe("notesOfChunks", () => {
+  it("notesOfChunks keeps each note once in the order first seen", () => {
+    expect(notesOfChunks([chunk({ notes: ["a"] }), chunk({ notes: ["b", "a"] }), chunk({})])).toEqual(["a", "b"]);
+    expect(notesOfChunks([])).toEqual([]);
+    expect(notesOfChunks([chunk({})])).toEqual([]);
+  });
+});
+
+describe("unitsOfChunks", () => {
+  it("unitsOfChunks takes the units of the first chunk that names them", () => {
+    expect(unitsOfChunks([chunk({}), chunk({ bunit: "MJy/sr", summed_unit: "MJy/sr x pix" }), chunk({ bunit: "adu" })])).toEqual({
+      bunit: "MJy/sr",
+      summedUnit: "MJy/sr x pix",
+    });
+    expect(unitsOfChunks([chunk({ bunit: null, summed_unit: null })])).toEqual({ bunit: null, summedUnit: null });
+    expect(unitsOfChunks([])).toEqual({ bunit: null, summedUnit: null });
+  });
+});
+
+describe("measuredOf", () => {
+  it("measuredOf joins the chunk facts with the notes and the units", () => {
+    const note = "DQ exclusion requested but not applied: this image has no DQ plane";
+    const r = region("a", { shape: "circle", x: 5, y: 5, r: 2 });
+    const regions = [r];
+    const measured = measuredOf(regions, true, { sigma: 2.5, maxiters: null }, [
+      chunk({ dq_excluded: null, masked: false, notes: [note], bunit: "adu", summed_unit: "adu", elapsed_ms: 4 }),
+    ]);
+    expect(measured).toEqual({
+      regions: [r],
+      excludeDq: true,
+      sigma: 2.5,
+      maxiters: null,
+      masked: false,
+      dqExcluded: null,
+      regionExcluded: 0,
+      elapsedMs: 4,
+      notes: [note],
+      bunit: "adu",
+      summedUnit: "adu",
+    });
+    expect(measured.regions).toBe(regions);
   });
 });
 

@@ -2,7 +2,7 @@ import { useCallback, useRef, useState, memo } from "react";
 import { ZoomIn, ZoomOut, Maximize, Move, Crosshair, Eye } from "lucide-react";
 import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform";
 import { screenToImagePixel } from "../../utils/pixelMapping";
-import { imageRenderingFor, previewTextureBadge } from "../../utils/viewerZoom";
+import { imageRenderingFor, previewTextureBadge, screenPixelRatio } from "../../utils/viewerZoom";
 import { CANVAS_HINT_CLASS, previewTextureTitle, viewerClickRoute } from "../../utils/previewShell";
 import { viewScaleAttributes } from "../../utils/starOverlay";
 import { regionToolHint } from "../../utils/regionToolHints";
@@ -173,7 +173,7 @@ function GpuViewport({
     left: 0,
     width: renderW,
     height: renderH,
-    imageRendering: imageRenderingFor(transform.scale),
+    imageRendering: imageRenderingFor(transform.scale, screenPixelRatio()),
   };
 
   return (

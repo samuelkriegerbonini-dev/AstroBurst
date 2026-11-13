@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { parseImageRef, formatImageRef, hduRef, arrayRef, planeLabel, exportStem } from "../imageRef";
+import {
+  parseImageRef,
+  formatImageRef,
+  hduRef,
+  arrayRef,
+  planeLabel,
+  exportStem,
+  parseBandPlaneRef,
+  bandPlaneRef,
+  sourceFile,
+} from "../imageRef";
 
 describe("parseImageRef", () => {
   it("returns auto for a plain path", () => {
@@ -98,10 +108,23 @@ describe("exportStem", () => {
     expect(exportStem("obs.fits.fz")).toBe("obs");
   });
 
+  it("drops the bz2 extension like the gz one", () => {
+    expect(exportStem("C:/d/frame-r-001462-4-0165.fits.bz2")).toBe("frame-r-001462-4-0165");
+    expect(exportStem("a.FIT.BZ2#hdu=2")).toBe("a");
+    expect(exportStem("notes.bz2")).toBe("notes");
+  });
+
   it("falls back when nothing usable remains", () => {
     expect(exportStem("")).toBe("output");
     expect(exportStem(".fits")).toBe("output");
     expect(exportStem("", "image")).toBe("image");
+  });
+
+  it("names the hdu and plane of a band plane", () => {
+    expect(exportStem("C:/d/ls-dr10_A.fits#hdu=0&plane=1")).toBe("ls-dr10_A_hdu0_plane1");
+    expect(exportStem("cut.fits.gz#hdu=1&plane=3")).toBe("cut_hdu1_plane3");
+    expect(exportStem("C:/data/run#7/a.fits")).toBe("a");
+    expect(exportStem("C:/run#7/a.fits#hdu=12&plane=3")).toBe("a_hdu12_plane3");
   });
 });
 
@@ -124,5 +147,53 @@ describe("planeLabel", () => {
 
   it("labels an encoded array ref with its decoded key", () => {
     expect(planeLabel(parseImageRef("x.asdf#array=sci%20image"))).toBe("array sci image");
+  });
+
+  it("labels a band plane with its hdu and plane", () => {
+    expect(planeLabel(parseImageRef("a.fits#hdu=0&plane=1"))).toBe("HDU 0 · plane 1");
+    expect(planeLabel(parseImageRef("a.fits#hdu=0&plane=1"), "SCI")).toBe("HDU 0 · SCI · plane 1");
+    expect(planeLabel(parseImageRef("a.fits"))).toBeNull();
+  });
+});
+
+describe("band plane refs", () => {
+  it("parses and builds the band plane key of the backend", () => {
+    expect(parseBandPlaneRef("C:/d/cut.fits#hdu=0&plane=1")).toEqual({ file: "C:/d/cut.fits", hdu: 0, plane: 1 });
+    expect(parseBandPlaneRef("C:/run#7/a.fits#hdu=12&plane=3")).toEqual({ file: "C:/run#7/a.fits", hdu: 12, plane: 3 });
+    for (const s of [
+      "a.fits",
+      "a.fits#hdu=1",
+      "a.fits#plane=1",
+      "a.fits#hdu=1&plane=",
+      "a.fits#hdu=&plane=1",
+      "a.fits#hdu=1&plane=x",
+      "a.fits#hdu=01&plane=1",
+      "a.fits#hdu=1&plane=01",
+      "a.fits#hdu=-1&plane=1",
+      "a.fits#hdu=1&plane=-1",
+      "a.fits#hdu=1 &plane=1",
+      "a.fits#hdu=1&plane=1 ",
+      "a.fits#hdu=1&PLANE=1",
+      "a.fits#hdu=1&plane=1&plane=2",
+      "a.fits#array=dq&plane=1",
+      "#hdu=0&plane=1",
+      "__composite_r#hdu=0&plane=1",
+      "a.fits#hdu=1&plane=99999999999999999999999999",
+      "a.fits#hdu=99999999999999999999999999&plane=1",
+    ]) {
+      expect(parseBandPlaneRef(s), s).toBeNull();
+    }
+    expect(bandPlaneRef("a.fits", 0, 1)).toBe("a.fits#hdu=0&plane=1");
+    const ref = parseImageRef("a.fits#hdu=0&plane=1");
+    expect(ref).toEqual({ path: "a.fits#hdu=0&plane=1", plane: { kind: "auto" } });
+    expect(formatImageRef(ref)).toBe("a.fits#hdu=0&plane=1");
+  });
+
+  it("gives the real file of any key", () => {
+    for (const s of ["C:/d/cut.fits#hdu=0&plane=1", "C:/d/cut.fits#hdu=3", "C:/d/cut.fits"]) {
+      expect(sourceFile(s), s).toBe("C:/d/cut.fits");
+    }
+    expect(sourceFile("r.asdf#array=dq")).toBe("r.asdf");
+    expect(sourceFile("__composite_r")).toBe("__composite_r");
   });
 });

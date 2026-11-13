@@ -21,6 +21,7 @@ const DEFAULT_NOVA_HOST = "nova.astrometry.net";
 const TIER0_MIN_EXPECTED_STARS = 50;
 const MIN_MATCHES = 8;
 const MAX_RMS_PX = 1;
+const MAX_FALSE_ALARM_LOG10 = -9;
 const MS_PER_S = 1000;
 
 const SOLVER_NAMES: Readonly<Record<string, string>> = {
@@ -114,6 +115,8 @@ export interface FailureCandidate {
   matched: number | null;
   predicted: number | null;
   rmsPx: number | null;
+  falseAlarmLog10: number | null;
+  covered: boolean | null;
 }
 
 export type LocalFailureKind = "no_solution" | "missing_hint" | "no_catalogue" | "deadline";
@@ -129,6 +132,7 @@ export interface LocalFailure {
   apiKeyStored: boolean | null;
   minMatches: number | null;
   maxRmsPx: number | null;
+  maxFalseAlarmLog10: number | null;
   tier0MinExpectedStars: number | null;
 }
 
@@ -181,6 +185,8 @@ export function localFailure(error: unknown): LocalFailure | null {
           matched: firstNumber(best, "matched"),
           predicted: firstNumber(best, "predicted"),
           rmsPx: firstNumber(best, "rms_px", "rmsPx"),
+          falseAlarmLog10: firstNumber(best, "falseAlarmLog10", "false_alarm_log10"),
+          covered: firstBoolean(best, "covered"),
         }
       : null,
     expectedTier0Stars: firstNumber(context, "expectedTier0Stars", "expected_tier0_stars"),
@@ -190,6 +196,7 @@ export function localFailure(error: unknown): LocalFailure | null {
     apiKeyStored: firstBoolean(context, "apiKeyStored", "api_key_stored"),
     minMatches: firstNumber(context, "minMatches", "min_matches"),
     maxRmsPx: firstNumber(context, "maxRmsPx", "max_rms_px"),
+    maxFalseAlarmLog10: firstNumber(context, "maxFalseAlarmLog10", "max_false_alarm_log10"),
     tier0MinExpectedStars: firstNumber(context, "tier0MinExpectedStars", "tier0_min_expected_stars"),
   };
 }
@@ -206,6 +213,7 @@ export function deadlineFailure(message: string): LocalFailure {
     apiKeyStored: null,
     minMatches: null,
     maxRmsPx: null,
+    maxFalseAlarmLog10: null,
     tier0MinExpectedStars: null,
   };
 }
@@ -237,6 +245,11 @@ function reasonLine(failure: LocalFailure): string | null {
   return SENTENCE_END.test(text) ? text : `${text}.`;
 }
 
+function andList(items: readonly string[]): string {
+  if (items.length < 2) return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
 function bestLine(failure: LocalFailure): string | null {
   const best = failure.best;
   if (!best || best.matched === null) return null;
@@ -244,7 +257,20 @@ function bestLine(failure: LocalFailure): string | null {
   const rms = best.rmsPx === null ? "" : `, RMS ${best.rmsPx.toFixed(2)} px`;
   const minMatches = failure.minMatches ?? MIN_MATCHES;
   const maxRmsPx = failure.maxRmsPx ?? MAX_RMS_PX;
-  return `Best candidate: ${best.matched}${predicted} stars matched${rms}; a solution needs ${minMatches} matches and an RMS of ${maxRmsPx} px or less.`;
+  const maxFalseAlarmLog10 = failure.maxFalseAlarmLog10 ?? MAX_FALSE_ALARM_LOG10;
+  const tooFew = best.matched < minMatches;
+  const chance = best.falseAlarmLog10 !== null && best.falseAlarmLog10 >= maxFalseAlarmLog10 ? best.falseAlarmLog10 : null;
+  const uneven = !tooFew && chance === null && best.covered === false;
+  const odds = chance === null ? "" : `, false-alarm probability 10^${chance.toFixed(1)}`;
+  const spread = uneven ? ", too few matches in part of the image" : "";
+  const missed = [
+    tooFew ? `${minMatches} matches` : null,
+    best.rmsPx !== null && best.rmsPx > maxRmsPx ? `an RMS of ${maxRmsPx} px or less` : null,
+    chance === null ? null : `a false-alarm probability below 10^${formatSignificant(maxFalseAlarmLog10, 3)}`,
+    uneven ? "matches across the whole image" : null,
+  ].filter((item): item is string => item !== null);
+  const needs = missed.length === 0 ? "" : `; a solution needs ${andList(missed)}`;
+  return `Best candidate: ${best.matched}${predicted} stars matched${rms}${odds}${spread}${needs}.`;
 }
 
 function searchLine(centres: number | null, detections: number | null): string | null {

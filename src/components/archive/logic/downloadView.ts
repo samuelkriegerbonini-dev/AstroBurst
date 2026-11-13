@@ -1,5 +1,7 @@
 import type { MastDownloadAction, MastDownloadInput, MastDownloadItem, MastError, MastMission, MastMissionId, MastOpensAs, MastProduct } from "../../../shared/types/mast";
-import { isValidFitsFile } from "../../../utils/validation";
+import { isTextTableFile, isValidFitsFile } from "../../../utils/validation";
+import { cubeClickOpensCube } from "../../../utils/previewShell";
+import type { DockLayout, DockToolId } from "../../../utils/dockLayout";
 import { formatBytes } from "./productView";
 
 export const CONFIRM_ABOVE_BYTES = 1_000_000_000;
@@ -15,6 +17,7 @@ export const ACTION_LABELS: Readonly<Record<MastDownloadAction, string>> = {
 };
 
 const OPENS_IN_WORKSPACE: readonly MastOpensAs[] = ["image", "cube", "spectrum", "ramp"];
+const OPENS_SPECTRA_TOOL: readonly MastOpensAs[] = ["cube", "spectrum", "ramp"];
 const HLSP_PREFIX = "mast:HLSP/";
 const ROMAN_PREFIX = "roman";
 const PRODUCT_URI_MISSIONS: readonly MastMissionId[] = ["jwst", "hst", "tess"];
@@ -71,7 +74,13 @@ export function picksAfterSend(current: PickedProducts, sentKey: string): Picked
 }
 
 export function openableDownload(item: Pick<MastDownloadItem, "opensAs" | "filename">): boolean {
-  return item.opensAs !== null && OPENS_IN_WORKSPACE.includes(item.opensAs) && isValidFitsFile(item.filename.toLowerCase());
+  const filename = item.filename.toLowerCase();
+  if (item.opensAs === "catalog") return isTextTableFile(filename);
+  return item.opensAs !== null && OPENS_IN_WORKSPACE.includes(item.opensAs) && isValidFitsFile(filename);
+}
+
+export function archiveOpenTool(opensAs: MastOpensAs | null, layout: DockLayout): DockToolId | null {
+  return opensAs !== null && OPENS_SPECTRA_TOOL.includes(opensAs) && cubeClickOpensCube(layout) ? "cube" : null;
 }
 
 export function downloadInput(product: MastProduct, program: string | null, replace = false): MastDownloadInput {

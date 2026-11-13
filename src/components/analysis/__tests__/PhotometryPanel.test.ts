@@ -31,17 +31,73 @@ vi.mock("../../../context/PreviewContext", () => ({ useDqContext: () => ({ exclu
 vi.mock("../../../hooks/useMeasurementLog", () => ({ useMeasurementProvenance: () => ({ file: "502nmos.fits", image: "original" }) }));
 vi.mock("../../../hooks/useAnalysisTarget", () => ({ useMeasurementSource: () => null }));
 vi.mock("../../../hooks/useMousePixelStore", () => ({ usePixelClick: () => pixelClick.current }));
+const statusDoc = vi.hoisted(() => ({ current: { loading: false, status: null, error: null } as Record<string, unknown> }));
+const keyedStatus = vi.hoisted(() => ({ doc: null as Record<string, unknown> | null, calls: [] as unknown[][] }));
+vi.mock("../../../hooks/usePhotometryStatus", () => ({
+  usePhotometryStatus: (...args: unknown[]) => {
+    keyedStatus.calls.push(args);
+    return args[3] != null && keyedStatus.doc !== null ? keyedStatus.doc : statusDoc.current;
+  },
+}));
+const depthHolder = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock("../../../hooks/usePhotometryLimit", () => ({ useImageDepth: () => depthHolder.current }));
+vi.mock("../ResolutionCard", () => ({ default: () => null }));
 
 import { hooks } from "../../../test/hookRuntime";
 import { elementsOf, textOf } from "../../../test/elementTree";
 import PhotometryPanel from "../PhotometryPanel";
 import PhotometryTablePanel from "../PhotometryTablePanel";
-import { fluxCellText } from "../../../utils/photometryTable";
+import { abCellText, fluxCellText } from "../../../utils/photometryTable";
+import { formatFluxDensityJy, formatWithUncertainty } from "../../../utils/formatUncertainty";
+import { measurementLog } from "../../../utils/measurementLog";
+import { depthNoiseText } from "../../../utils/photometryPanel";
+import { noiseFactorOffer } from "../../../utils/forcedPhotometryRequest";
+import type { ImageDepth } from "../../../shared/types/depth";
+import ResolutionCard from "../ResolutionCard";
+import { ErrorAlert } from "../../ui";
+import { adHocErrorBoxLines } from "../../../test/panelRules";
+import photometryPanelSource from "../PhotometryPanel.tsx?raw";
+
+const UNDERSAMPLED_NOTE =
+  "undersampled: below 2 px the width depends on where the star falls on the pixel grid (a few percent at 1.5 px, up to 10 percent at 1 px)";
 
 const GAIN_TITLE_TEXT = "Gain in e-/ADU; prefilled from the header when known";
 
 vi.stubGlobal("localStorage", { getItem: () => null, setItem: () => {}, removeItem: () => {} });
 vi.stubGlobal("navigator", { clipboard: { writeText: clipboardWrite } });
+
+afterEach(() => {
+  statusDoc.current = { loading: false, status: null, error: null };
+  keyedStatus.doc = null;
+  keyedStatus.calls = [];
+});
+
+const AB_USER: PhotCal = {
+  area_applied: false,
+  bunit: "adu",
+  convention: { exptime: null, exptime_applied: false, keyword: "user", kind: "generic_zero_point", per_second: false, system: "ab", zp: 25.0 },
+  jy_per_native_unit: 3.63078054770101e-7,
+  mag_system: "ab",
+  notes: ["user zero point: mag = 25.0 - 2.5 log10(sum)"],
+  origin: "user zero point 25.0 AB",
+  warnings: ["calibrated with a user zero point"],
+  label: "user zero point (AB)",
+};
+
+const VEGA_USER: PhotCal = {
+  area_applied: false,
+  bunit: "adu",
+  convention: { exptime: null, exptime_applied: false, keyword: "user", kind: "generic_zero_point", per_second: false, system: "vega", zp: 21.432 },
+  jy_per_native_unit: null,
+  mag_system: "vega",
+  notes: ["user zero point: mag = 21.432 - 2.5 log10(sum)"],
+  origin: "user zero point 21.432 Vega",
+  warnings: [
+    "calibrated with a user zero point",
+    "the user zero point is in the Vega system: magnitudes are in the Vega system and no AB magnitude or flux in Jy is given",
+  ],
+  label: "user zero point (Vega)",
+};
 
 function gainInput(markup: string): string {
   const input = markup.match(new RegExp(`<input[^>]*title="${GAIN_TITLE_TEXT}"[^>]*>`));
@@ -349,7 +405,7 @@ describe("PhotometryPanel sky position copy", () => {
     (skyCopyButton(show())!.onClick as () => void)();
     await flush();
     const tree = show();
-    expect(findElement(tree, (props) => props.children === `Clipboard copy failed: ${CLIPBOARD_DENIED}`)).not.toBeNull();
+    expect(findElement(tree, (props) => props.message === `Clipboard copy failed: ${CLIPBOARD_DENIED}`)).not.toBeNull();
     expect(showsCopied(tree)).toBe(false);
     expect(copyStatusText(tree)).toBe("");
   });
@@ -360,10 +416,10 @@ describe("PhotometryPanel sky position copy", () => {
     const failure = `Clipboard copy failed: ${CLIPBOARD_DENIED}`;
     (skyCopyButton(show())!.onClick as () => void)();
     await flush();
-    expect(findElement(show(), (props) => props.children === failure)).not.toBeNull();
+    expect(findElement(show(), (props) => props.message === failure)).not.toBeNull();
     (skyCopyButton(show())!.onClick as () => void)();
     await flush();
-    expect(findElement(show(), (props) => props.children === failure)).toBeNull();
+    expect(findElement(show(), (props) => props.message === failure)).toBeNull();
   });
 
   it("announces the copy to assistive technology", async () => {
@@ -420,7 +476,7 @@ describe("PhotometryTablePanel result table", () => {
         { index: 0, photometry: measuredStar({}), sky: null, error: null },
         { index: 1, photometry: measuredStar({ net_flux: 2.5e7, mag_ab: null, mag_ab_err: null }), sky: null, error: null },
       ],
-      photcal: null,
+      photcal: AB_USER,
       warnings: [],
       masked: false,
       n_measured: 2,
@@ -541,6 +597,11 @@ describe("PhotometryPanel result card with the fields wave 0 added", () => {
     await flush();
     return show();
   };
+  const measuredAgain = (result: PhotometryMeasurement): Promise<ReactNode> => {
+    hooks.run.cells = [];
+    pixelClick.current = null;
+    return measured(result);
+  };
 
   beforeEach(() => {
     hooks.run.active = true;
@@ -629,6 +690,86 @@ describe("PhotometryPanel result card with the fields wave 0 added", () => {
       "Aperture radius in pixels; blank uses 1.5 × FWHM of the clicked star, or 6 px when its FWHM is not measured",
     );
   });
+
+  it("prints the net flux rounded to its error", async () => {
+    const value = cardValue(await measured(measurementWith({ net_flux: 1234.5678, flux_err: 12.3 })), "Net flux");
+    expect(value).toBe(formatWithUncertainty(1234.5678, 12.3));
+    expect(value).not.toBe("1.235e+3 ± 1.23e+1");
+    expect(value).toBe("1235 ± 12");
+  });
+
+  it("prints the flux density with one prefix for value and error", async () => {
+    const tree = await measured(measurementWith({ flux_jy: 1.23e-5, flux_err_jy: 9.9e-7 }));
+    expect(cardValue(tree, "Flux density")).toBe(formatFluxDensityJy(1.23e-5, 9.9e-7));
+    const shown = texts(tree);
+    expect(shown.some((text) => text.includes("Flux (Jy)"))).toBe(false);
+    expect(shown.some((text) => text.includes("nJy"))).toBe(false);
+  });
+
+  it("prints the AB magnitude with the table formatter", async () => {
+    expect(cardValue(await measured(measurementWith({ mag_ab: 24.5123, mag_ab_err: 0.0314 }, { photcal: AB_USER })), "AB mag")).toBe("24.512 ± 0.031");
+  });
+
+  it("names the unit of the net flux of an uncalibrated image from the result", async () => {
+    expect(texts(await measured(measurementWith({}, { photcal: null, summed_unit: "adu", bunit: "adu" })))).toContain("Net flux adu");
+    expect(texts(await measuredAgain(measurementWith({}, { photcal: null })))).toContain("Net flux");
+  });
+
+  it("prints the FWHM in pixels and arcsec", async () => {
+    statusDoc.current = { loading: false, status: { pixel_scale_arcsec: 0.1 }, error: null };
+    expect(cardValue(await measured(measurementWith({ fwhm: 3.214 })), "FWHM")).toBe('3.21 px (0.321")');
+    statusDoc.current = { loading: false, status: { pixel_scale_arcsec: null }, error: null };
+    expect(cardValue(show(), "FWHM")).toBe("3.21 px");
+    statusDoc.current = { loading: false, status: { pixel_scale_arcsec: 0.1 }, error: null };
+    expect(cardValue(await measuredAgain(measurementWith({ fwhm: null })), "FWHM")).toBe("--");
+  });
+
+  it("says that a width below two pixels is undersampled", async () => {
+    const notes = (tree: ReactNode) => texts(tree).filter((text) => text === UNDERSAMPLED_NOTE);
+    expect(notes(await measured(measurementWith({ fwhm: 1.66 })))).toHaveLength(1);
+    expect(notes(await measuredAgain(measurementWith({ fwhm: 2.0 })))).toHaveLength(0);
+  });
+
+  it("states the sky level, the pixel scatter and the error of the level separately", async () => {
+    const tree = await measured(
+      measurementWith({ bg_mean: 10.25, bg_sigma: 2, bg_pixels: 200, sky_inner: 10, sky_outer: 15 }, { bunit: "adu" }),
+    );
+    const value = cardValue(tree, "Sky level per pixel (200 px, annulus 10.0 - 15.0 px)");
+    expect(value).toBe(
+      `${formatWithUncertainty(10.25, null)} adu; pixel scatter ${formatWithUncertainty(2, null)}; error of the level ${formatWithUncertainty(0.1414213562373095, null)}`,
+    );
+    expect(value).not.toContain("±");
+    expect(texts(tree).some((text) => text.includes("Background ("))).toBe(false);
+  });
+
+  it("announces a failed measurement through the shared error alert", async () => {
+    const failure = "position (900, 900) lies outside the 64 x 64 image";
+    measureMock.mockReset().mockRejectedValue(new Error(failure));
+    (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+    pixelClick.current = { seq: 1, x: 900, y: 900 };
+    show();
+    await flush();
+    const tree = show();
+    expect(findElement(tree, (props) => props.message === failure)).not.toBeNull();
+    const handWritten = elementsWhere(tree, (props) => typeof props.className === "string" && props.className.includes("text-red-400 bg-red-900/20"));
+    expect(handWritten).toHaveLength(0);
+  });
+
+  it("holds no hand-made failure box", () => {
+    expect(adHocErrorBoxLines(photometryPanelSource)).toEqual([]);
+  });
+
+  it("shows a failed measurement in the compact alert", async () => {
+    const failure = "position (900, 900) lies outside the 64 x 64 image";
+    measureMock.mockReset().mockRejectedValue(new Error(failure));
+    (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+    pixelClick.current = { seq: 1, x: 900, y: 900 };
+    show();
+    await flush();
+    const alert = elementsOf(show()).find((e) => e.type === ErrorAlert);
+    expect(alert?.props.message).toBe(failure);
+    expect(alert?.props.compact).toBe(true);
+  });
 });
 
 describe("PhotometryPanel when the measured file is rewritten under the same path", () => {
@@ -685,5 +826,675 @@ describe("PhotometryPanel when the measured file is rewritten under the same pat
     await click(version(3), 1);
     show(version(3));
     expect(cardShown(show(version(3)))).toBe(true);
+  });
+});
+
+describe("PhotometryPanel status line", () => {
+  const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    pixelClick.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+  });
+
+  it("puts the status line above the measure toggle and gives it the file, the measure key and the DQ flag", async () => {
+    const { default: PhotometryStatusLine } = await import("../PhotometryStatusLine");
+    const order = elementsOf(show());
+    const line = order.findIndex((element) => {
+      const props = element.props as Props;
+      return props.filePath === FIRST && props.measureKey === null && props.excludeDq === false;
+    });
+    const toggle = order.findIndex((element) => (element.props as Props).label === "Measure on image click");
+    expect(line, "status line element").toBeGreaterThanOrEqual(0);
+    expect(order[line].type).toBe(PhotometryStatusLine);
+    expect((order[line].props as Props).zeroPoint).toBeNull();
+    expect(line).toBeLessThan(toggle);
+  });
+
+  it("prints the EE radii in arcsec with the pixel scale of the status", async () => {
+    statusDoc.current = { loading: false, status: { pixel_scale_arcsec: 0.1 }, error: null };
+    measureMock.mockReset().mockResolvedValue(measurementWith({ ee50_radius: 2.345 }));
+    (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+    pixelClick.current = { seq: 1, x: 10, y: 12 };
+    show();
+    await flush();
+    expect(cardValue(show(), "EE50 r")).toBe('2.35 px (0.235")');
+    statusDoc.current = { loading: false, status: { pixel_scale_arcsec: null }, error: null };
+    expect(cardValue(show(), "EE50 r")).toBe("2.35 px");
+  });
+});
+
+const RADIUS_TITLE_PREFIXES = ["Aperture radius in", "Inner sky radius in", "Outer sky radius in"];
+const NO_ARCSEC_TITLE = "No celestial WCS: radii in arcsec are not available for this image";
+const PIXEL_SCALE_PENDING = "Reading the pixel scale of this image...";
+const NO_PIXEL_SCALE = "Radii in arcsec need the pixel scale of a celestial WCS, which this image does not have. Switch the unit to px.";
+const scaleDoc = (pixelScale: number | null) => ({ loading: false, status: { pixel_scale_arcsec: pixelScale }, error: null });
+
+describe("PhotometryPanel radius unit", () => {
+  const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+  const unitSelect = (tree: ReactNode) => findElement(tree, (props) => props["aria-label"] === "Radius unit");
+  const chooseUnit = (unit: string) =>
+    (unitSelect(show())!.onChange as (event: { target: { value: string } }) => void)({ target: { value: unit } });
+  const radiusField = (tree: ReactNode, index: number) => findElement(tree, byTitlePrefix(RADIUS_TITLE_PREFIXES[index]))!;
+  const typeRadius = (index: number, text: string) => (radiusField(show(), index).onChange as (text: string) => void)(text);
+  const radiusTexts = () => {
+    const tree = show();
+    return [0, 1, 2].map((index) => radiusField(tree, index).value);
+  };
+  const fieldLabels = (tree: ReactNode) => elementsWhere(tree, (props) => typeof props.htmlFor === "string").map((props) => textOf(props.children).trim());
+  const echoText = (tree: ReactNode) => {
+    const echo = findElement(tree, (props) => props["data-radius-echo"] === true);
+    return echo ? textOf(echo.children) : null;
+  };
+  const radiusErrorText = (tree: ReactNode) => {
+    const line = findElement(tree, (props) => props["data-radius-error"] === true);
+    return line ? textOf(line.children) : null;
+  };
+  const arm = () => (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+  const clickStar = (seq: number) => {
+    pixelClick.current = { seq, x: 10, y: 12 };
+    return show();
+  };
+  const sentApertureRadius = () => (measureMock.mock.calls[0][3] as Props).apertureRadius;
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    measureMock.mockReset().mockReturnValue(new Promise(() => {}));
+    pixelClick.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+  });
+
+  it("offers px and arcsec for the radii with px selected", () => {
+    let tree = show();
+    const select = unitSelect(tree);
+    expect(select, "radius unit select").not.toBeNull();
+    expect(select!.value).toBe("px");
+    const options = elementsWhere(select!.children as ReactNode, (props) => typeof props.value === "string");
+    expect(options.map((option) => option.value)).toEqual(["px", "arcsec"]);
+    expect(options.map((option) => option.children)).toEqual(["px", "arcsec"]);
+    expect(fieldLabels(tree).slice(0, 3)).toEqual(["r_ap px", "sky in px", "sky out px"]);
+
+    statusDoc.current = scaleDoc(null);
+    tree = show();
+    const arcsec = elementsWhere(unitSelect(tree)!.children as ReactNode, (props) => props.value === "arcsec")[0];
+    expect(arcsec.disabled).toBe(true);
+    expect(arcsec.title).toBe(NO_ARCSEC_TITLE);
+
+    statusDoc.current = scaleDoc(0.262);
+    tree = show();
+    expect(elementsWhere(unitSelect(tree)!.children as ReactNode, (props) => props.value === "arcsec")[0].disabled).toBe(false);
+  });
+
+  it("sends the pixel radius of an aperture typed in arcsec", () => {
+    statusDoc.current = scaleDoc(0.262);
+    chooseUnit("arcsec");
+    typeRadius(0, "1");
+    arm();
+    const tree = clickStar(1);
+    expect(measureMock).toHaveBeenCalledTimes(1);
+    expect(sentApertureRadius()).toBeCloseTo(3.8167938931297707, 10);
+    expect(echoText(tree)).toBe("r_ap 1 arcsec = 3.82 px");
+    expect(fieldLabels(tree).slice(0, 3)).toEqual(["r_ap arcsec", "sky in arcsec", "sky out arcsec"]);
+  });
+
+  it("converts the typed radii when the unit changes", () => {
+    statusDoc.current = scaleDoc(0.262);
+    typeRadius(0, "5");
+    typeRadius(1, "10");
+    typeRadius(2, "15");
+    chooseUnit("arcsec");
+    expect(radiusTexts()).toEqual(["1.31", "2.62", "3.93"]);
+    chooseUnit("px");
+    expect(radiusTexts()).toEqual(["5", "10", "15"]);
+  });
+
+  it("refuses an arcsec aperture outside the pixel limits and does not measure", () => {
+    statusDoc.current = scaleDoc(0.1);
+    chooseUnit("arcsec");
+    typeRadius(0, "7");
+    arm();
+    const tree = clickStar(1);
+    expect(radiusErrorText(tree)).toBe(
+      "Aperture radius 7 arcsec is 70.00 px at 0.1000 arcsec/px; it must be between 2 and 60 px (0.2000 to 6.000 arcsec).",
+    );
+    expect(measureMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a typed pixel radius in arcsec", () => {
+    statusDoc.current = scaleDoc(0.262);
+    typeRadius(0, "5");
+    expect(echoText(show())).toBe("r_ap 5 px = 1.310 arcsec");
+    statusDoc.current = scaleDoc(null);
+    expect(echoText(show())).toBeNull();
+  });
+
+  it("prints the measured aperture in pixels and arcsec", async () => {
+    statusDoc.current = scaleDoc(0.1);
+    measureMock.mockReset().mockResolvedValue(measurementWith({ aperture_radius: 4.8, aperture_pixels: 72 }));
+    arm();
+    clickStar(1);
+    await flush();
+    expect(texts(show())).toContain('r=4.80 px (0.480") (72px)');
+    statusDoc.current = scaleDoc(null);
+    const shown = texts(show());
+    expect(shown).toContain("r=4.80 px (72px)");
+    expect(shown).not.toContain("r=4.8 (72px)");
+  });
+
+  it("names the arcsec field instead of reading 2,5 as 25", () => {
+    statusDoc.current = scaleDoc(0.262);
+    chooseUnit("arcsec");
+    (findElement(show(), byTitlePrefix("Aperture radius in arcsec"))!.onChange as (text: string) => void)("2,5");
+    arm();
+    const tree = clickStar(1);
+    expect(fieldErrorText(tree)).toBe("r_ap arcsec: Use a dot (.) as the decimal separator");
+    expect(measureMock).not.toHaveBeenCalled();
+  });
+
+  it("waits for the pixel scale instead of refusing an arcsec radius while the status is pending", () => {
+    statusDoc.current = scaleDoc(0.262);
+    chooseUnit("arcsec");
+    typeRadius(0, "1");
+    arm();
+    const cases: [Record<string, unknown>, string][] = [
+      [{ loading: true, status: null, error: null }, PIXEL_SCALE_PENDING],
+      [{ loading: false, status: null, error: null }, PIXEL_SCALE_PENDING],
+      [{ loading: false, status: null, error: "no such file" }, "Status not available: no such file"],
+      [scaleDoc(null), NO_PIXEL_SCALE],
+    ];
+    cases.forEach(([doc, expected], index) => {
+      statusDoc.current = doc;
+      const tree = clickStar(index + 1);
+      expect(radiusErrorText(tree)).toBe(expected);
+      if (expected !== NO_PIXEL_SCALE) {
+        expect(texts(tree).some((text) => text.includes("Radii in arcsec need the pixel scale"))).toBe(false);
+      }
+    });
+    expect(measureMock).not.toHaveBeenCalled();
+  });
+
+  it("clears the radii when the unit goes back to px without a pixel scale", () => {
+    const typeAllInArcsec = () => {
+      statusDoc.current = scaleDoc(0.262);
+      chooseUnit("arcsec");
+      typeRadius(0, "1");
+      typeRadius(1, "2");
+      typeRadius(2, "3");
+    };
+    typeAllInArcsec();
+    statusDoc.current = { loading: false, status: null, error: null };
+    chooseUnit("px");
+    expect(radiusTexts()).toEqual(["", "", ""]);
+    arm();
+    clickStar(1);
+    expect(measureMock).toHaveBeenCalledTimes(1);
+    expect(sentApertureRadius()).toBeUndefined();
+
+    hooks.run.cells = [];
+    pixelClick.current = null;
+    typeAllInArcsec();
+    chooseUnit("px");
+    expect(radiusTexts()).toEqual(["3.817", "7.634", "11.45"]);
+  });
+});
+
+const ZERO_POINT_TITLE = "Zero point in magnitudes of one pixel unit; used because the header has no calibration";
+const NO_JY_TITLE = "No Jy for a zero point that is not AB: the conversion needs the AB offset of the band.";
+const PER_SECOND_LABEL = "Zero point is per second";
+const PER_SECOND_REFUSAL =
+  "a zero point per second needs EXPTIME to turn the pixel values into a rate, and this header has none (BUNIT 'adu')";
+const VEGA_MAG = 21.432 - 9.87;
+const VEGA_MAG_ERR = (1.0857362047581294 * 50) / 8872;
+const sourceDoc = (calibrationSource: string | null) => ({
+  loading: false,
+  status: { pixel_scale_arcsec: null, calibration_source: calibrationSource },
+  error: null,
+});
+
+describe("PhotometryPanel calibration", () => {
+  const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+  const arm = () => (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+  const clickStar = (seq: number) => {
+    pixelClick.current = { seq, x: 10, y: 12 };
+    return show();
+  };
+  const measured = async (result: PhotometryMeasurement): Promise<ReactNode> => {
+    measureMock.mockReset().mockResolvedValue(result);
+    arm();
+    clickStar(1);
+    await flush();
+    return show();
+  };
+  const cardValueProps = (tree: ReactNode, label: string): Props | null => {
+    const card = elementsOf(tree).find((element) => {
+      const children = (element.props as Props).children;
+      return Array.isArray(children) && isValidElement(children[0]) && textOf(children[0]) === label;
+    });
+    return card ? (((card.props as Props).children as ReactElement[])[1].props as Props) : null;
+  };
+  const zeroPointField = (tree: ReactNode) => findElement(tree, (props) => props.title === ZERO_POINT_TITLE);
+  const systemSelect = (tree: ReactNode) => findElement(tree, (props) => props["aria-label"] === "Zero point system");
+  const perSecondToggle = (tree: ReactNode) => findElement(tree, (props) => props.label === PER_SECOND_LABEL);
+  const statusLine = (tree: ReactNode) => findElement(tree, (props) => props.filePath === FIRST && props.excludeDq === false && "zeroPoint" in props);
+  const typeZeroPoint = (text: string) => (zeroPointField(show())!.onChange as (text: string) => void)(text);
+  const chooseSystem = (system: string) =>
+    (systemSelect(show())!.onChange as (event: { target: { value: string } }) => void)({ target: { value: system } });
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    measureMock.mockReset().mockReturnValue(new Promise(() => {}));
+    pixelClick.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+  });
+
+  it("titles the magnitude of a Vega zero point Vega mag and shows no AB value", async () => {
+    let tree = await measured(
+      measurementWith(
+        { mag_inst: -9.87, net_flux: 8872, flux_err: 50, mag_ab: null, mag_ab_err: null, flux_jy: null, flux_err_jy: null },
+        { photcal: VEGA_USER, warnings: [] },
+      ),
+    );
+    expect(cardValue(tree, "Vega mag")).toBe(abCellText(VEGA_MAG, VEGA_MAG_ERR));
+    expect(cardValue(tree, "AB mag")).toBeNull();
+    expect(cardValue(tree, "Flux density")).toBe("--");
+    expect(cardValueProps(tree, "Flux density")!.title).toBe(NO_JY_TITLE);
+
+    hooks.run.cells = [];
+    pixelClick.current = null;
+    const hstWithoutExptime: PhotCal = {
+      convention: { kind: "hst_counts", photflam: 1.5e-19, photplam: 6563, photzpt: -21.1, per_second: false, exptime: null },
+      bunit: "COUNTS",
+      notes: [],
+      warnings: [],
+      label: "HST PHOTFLAM/PHOTPLAM (counts), STmag to ABmag",
+      mag_system: "ab",
+      jy_per_native_unit: null,
+    };
+    tree = await measured(measurementWith({ flux_jy: null, flux_err_jy: null }, { photcal: hstWithoutExptime }));
+    expect(cardValue(tree, "Flux density")).toBe("--");
+    expect(cardValueProps(tree, "Flux density")!.title).toBeUndefined();
+  });
+
+  it("says that the AB system was assumed when the header does not state it", async () => {
+    const tree = await measured(measurementWith({ mag_ab: 24.5123, mag_ab_err: 0.0314 }, { photcal: { ...AB_USER, mag_system: "unknown" } }));
+    expect(cardValue(tree, "AB mag (system assumed)")).toBe("24.512 ± 0.031");
+    expect(cardValue(tree, "AB mag")).toBeNull();
+  });
+
+  it("prints the origin sentence of the calibration and folds its notes", async () => {
+    const origin = "MAGZERO = 30.0, AB assumed";
+    const note = "zero point applied to the native unit";
+    let tree = await measured(measurementWith({}, { photcal: { ...AB_USER, origin, notes: [note] } }));
+    expect(cardValue(tree, "Calibration")).toBe(origin);
+    const summaries = elementsOf(tree).filter((element) => element.type === "summary");
+    expect(summaries.map((summary) => textOf(summary))).toEqual(["calibration notes (1)"]);
+    expect(texts(tree)).toContain(note);
+
+    hooks.run.cells = [];
+    pixelClick.current = null;
+    tree = await measured(measurementWith({}, { photcal: { ...AB_USER, origin, notes: [] } }));
+    expect(elementsOf(tree).filter((element) => element.type === "details")).toHaveLength(0);
+  });
+
+  it("keeps the old texts of a measurement without calibration", async () => {
+    const tree = await measured(measurementWith({ mag_ab: 24.5123, mag_ab_err: 0.0314 }, { photcal: null }));
+    expect(cardValue(tree, "Calibration")).toBe("no calibration in header");
+    expect(cardValue(tree, "AB mag")).toBe("--");
+  });
+
+  it("offers the zero point fields only when the header has no calibration", () => {
+    statusDoc.current = sourceDoc(null);
+    let tree = show();
+    expect(zeroPointField(tree), "zero point field").not.toBeNull();
+    expect(systemSelect(tree), "system select").not.toBeNull();
+    expect(perSecondToggle(tree), "per second toggle").not.toBeNull();
+    const options = elementsWhere(systemSelect(tree)!.children as ReactNode, (props) => typeof props.value === "string");
+    expect(options.map((option) => [option.value, option.children])).toEqual([
+      ["ab", "AB"],
+      ["vega", "Vega"],
+    ]);
+    expect(elementsWhere(tree, (props) => typeof props.htmlFor === "string").map((props) => textOf(props.children).trim())).toContain("zero point mag");
+
+    for (const doc of [sourceDoc("header"), { loading: false, status: null, error: null }, { loading: true, status: null, error: null }]) {
+      statusDoc.current = doc;
+      tree = show();
+      expect(zeroPointField(tree)).toBeNull();
+      expect(systemSelect(tree)).toBeNull();
+      expect(perSecondToggle(tree)).toBeNull();
+    }
+  });
+
+  it("sends the typed zero point with the measurement and to the status line", () => {
+    statusDoc.current = sourceDoc(null);
+    typeZeroPoint("21.432");
+    chooseSystem("vega");
+    arm();
+    const tree = clickStar(1);
+    const expected = { zp: 21.432, system: "vega", per_second: false };
+    expect(measureMock).toHaveBeenCalledTimes(1);
+    expect((measureMock.mock.calls[0][3] as Props).zeroPoint).toEqual(expected);
+    expect(statusLine(tree)!.zeroPoint).toEqual(expected);
+    expect(keyedStatus.calls.length).toBeGreaterThan(0);
+    for (const call of keyedStatus.calls) {
+      expect(call).toHaveLength(3);
+      expect(call[3]).toBeUndefined();
+    }
+  });
+
+  it("sends no zero point when the header calibrates", () => {
+    statusDoc.current = sourceDoc(null);
+    typeZeroPoint("25");
+    statusDoc.current = sourceDoc("header");
+    arm();
+    const tree = clickStar(1);
+    expect(measureMock).toHaveBeenCalledTimes(1);
+    expect((measureMock.mock.calls[0][3] as Props).zeroPoint).toBeUndefined();
+    expect(statusLine(tree)!.zeroPoint).toBeNull();
+  });
+
+  it("names the zero point field in the error line and does not measure an invalid entry", () => {
+    statusDoc.current = sourceDoc(null);
+    typeZeroPoint("2,5");
+    arm();
+    const tree = clickStar(1);
+    expect(fieldErrorText(tree)).toBe("zero point: Use a dot (.) as the decimal separator");
+    expect(measureMock).not.toHaveBeenCalled();
+  });
+
+  it("explains in the help text that a zero point can be typed", () => {
+    const shown = texts(show());
+    expect(shown.some((text) => text.includes("a zero point can be typed when the header has none"))).toBe(true);
+    expect(shown.some((text) => text.includes("MAGZPT-style keywords"))).toBe(false);
+  });
+
+  it("keeps the zero point row while the status of the typed value is being read", () => {
+    statusDoc.current = sourceDoc(null);
+    keyedStatus.doc = { loading: true, status: null, error: null };
+    typeZeroPoint("2");
+    const tree = show();
+    expect(zeroPointField(tree)!.value).toBe("2");
+    expect(systemSelect(tree)).not.toBeNull();
+    expect(perSecondToggle(tree)).not.toBeNull();
+    expect(statusLine(tree)!.zeroPoint).toEqual({ zp: 2, system: "ab", per_second: false });
+  });
+
+  it("keeps the row and shows the refusal of a per-second zero point in the status line", () => {
+    statusDoc.current = sourceDoc(null);
+    keyedStatus.doc = { loading: false, status: null, error: PER_SECOND_REFUSAL };
+    typeZeroPoint("25");
+    (perSecondToggle(show())!.onChange as (on: boolean) => void)(true);
+    let tree = show();
+    expect(zeroPointField(tree)).not.toBeNull();
+    expect(perSecondToggle(tree)!.checked).toBe(true);
+    expect(statusLine(tree)!.zeroPoint).toEqual({ zp: 25, system: "ab", per_second: true });
+    (perSecondToggle(tree)!.onChange as (on: boolean) => void)(false);
+    tree = show();
+    expect(zeroPointField(tree)).not.toBeNull();
+    expect(statusLine(tree)!.zeroPoint).toEqual({ zp: 25, system: "ab", per_second: false });
+  });
+});
+
+describe("PhotometryPanel measurement log", () => {
+  const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+  const arm = () => (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+  const chooseUnit = (unit: string) =>
+    (findElement(show(), (props) => props["aria-label"] === "Radius unit")!.onChange as (event: { target: { value: string } }) => void)({
+      target: { value: unit },
+    });
+  const typeAperture = (text: string) => (findElement(show(), byTitlePrefix("Aperture radius in"))!.onChange as (text: string) => void)(text);
+  const typeZeroPoint = (text: string) => (findElement(show(), (props) => props.title === ZERO_POINT_TITLE)!.onChange as (text: string) => void)(text);
+  const chooseSystem = (system: string) =>
+    (findElement(show(), (props) => props["aria-label"] === "Zero point system")!.onChange as (event: { target: { value: string } }) => void)({
+      target: { value: system },
+    });
+  const measuredLog = async (result: PhotometryMeasurement) => {
+    measureMock.mockReset().mockResolvedValue(result);
+    arm();
+    pixelClick.current = { seq: 1, x: 10, y: 12 };
+    show();
+    await flush();
+    show();
+    return measurementLog.getSnapshot().at(-1)!;
+  };
+  const restart = () => {
+    hooks.run.cells = [];
+    pixelClick.current = null;
+  };
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    measureMock.mockReset().mockReturnValue(new Promise(() => {}));
+    pixelClick.current = null;
+    measurementLog.clear();
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+  });
+
+  it("logs the request as it was typed", async () => {
+    statusDoc.current = scaleDoc(0.262);
+    chooseUnit("arcsec");
+    typeAperture("1");
+    let entry = await measuredLog(measurementWith({}));
+    expect(entry.params.radius_unit).toBe("arcsec");
+    expect(entry.params.aperture_radius_arcsec).toBe(1);
+    expect(entry.params.aperture_radius_px as number).toBeCloseTo(3.8167938931297707, 12);
+    expect(entry.params.pixel_scale_arcsec).toBe(0.262);
+
+    restart();
+    typeAperture("5");
+    entry = await measuredLog(measurementWith({}));
+    expect(entry.params.radius_unit).toBe("px");
+    expect(entry.params.aperture_radius_px).toBe(5);
+    expect(entry.params.aperture_radius_arcsec).toBeNull();
+    expect(entry.params.pixel_scale_arcsec).toBe(0.262);
+  });
+
+  it("logs the typed zero point", async () => {
+    statusDoc.current = sourceDoc(null);
+    typeZeroPoint("21.432");
+    chooseSystem("vega");
+    let entry = await measuredLog(
+      measurementWith({ mag_inst: -9.87, net_flux: 8872, flux_err: 50, mag_ab: null, mag_ab_err: null, flux_jy: null, flux_err_jy: null }, { photcal: VEGA_USER }),
+    );
+    expect(entry.params.zero_point).toBe(21.432);
+    expect(entry.params.zero_point_system).toBe("vega");
+    expect(entry.params.calibration_source).toBe("user");
+
+    restart();
+    statusDoc.current = sourceDoc(null);
+    typeZeroPoint("25");
+    statusDoc.current = sourceDoc("header");
+    entry = await measuredLog(measurementWith({}, { photcal: JWST_I2D }));
+    expect(entry.params.zero_point).toBeNull();
+  });
+});
+
+const PX_DEPTH = { radius_arcsec: null, radius_px: 3.82, f_corr: 1.65 } as unknown as ImageDepth;
+const FAINT: Partial<StarPhotometry> = { net_flux: 20, flux_err: 12.3, flux_jy: 2.0e-7, flux_err_jy: 1.1e-7, mag_ab: 25.647, mag_ab_err: 0.6, err_used: true };
+const NEAR_LIMIT: Partial<StarPhotometry> = { net_flux: 50, flux_err: 12.3, flux_jy: 5.0e-7, flux_err_jy: 1.1e-7, mag_ab: 24.653, mag_ab_err: 0.239, err_used: true };
+const FACTOR_CLAUSE = "; errors multiplied by f_corr 1.65 from the Depth section";
+
+describe("PhotometryPanel upper limit, Depth factor and Resolved or not card", () => {
+  const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+  let clicks = 0;
+  const measure = async (result: PhotometryMeasurement): Promise<ReactNode> => {
+    measureMock.mockReset().mockResolvedValue(result);
+    (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+    pixelClick.current = { seq: ++clicks, x: 10, y: 12 };
+    show();
+    await flush();
+    return show();
+  };
+  const typeAperture = (text: string) => (findElement(show(), byTitlePrefix("Aperture radius in"))!.onChange as (text: string) => void)(text);
+  const limitLine = (tree: ReactNode) => {
+    const line = findElement(tree, (props) => props["data-photometry-limit"] === true);
+    return line ? textOf(line.children) : null;
+  };
+  const offerLine = (tree: ReactNode) => findElement(tree, (props) => typeof props["data-depth-noise-offer"] === "string");
+  const offerText = (tree: ReactNode) => (offerLine(tree)!.children as ReactNode[])[0];
+  const offerButton = (tree: ReactNode) =>
+    findElement(tree, (props) => props["data-action"] === "use-depth-fcorr" || props["data-action"] === "remove-depth-fcorr");
+  const lastEntry = () => measurementLog.getSnapshot().at(-1)!;
+  const resolutionCard = (tree: ReactNode) => elementsOf(tree).find((element) => (element.props as Props).context === "photometry");
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    measureMock.mockReset().mockReturnValue(new Promise(() => {}));
+    pixelClick.current = null;
+    clicks = 0;
+    measurementLog.clear();
+    depthHolder.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+    depthHolder.current = null;
+  });
+
+  it("says not detected with the limit instead of leaving the magnitude empty", async () => {
+    let tree = await measure(measurementWith(FAINT, { photcal: AB_USER }));
+    expect(offerLine(tree)).toBeNull();
+    expect(limitLine(tree)).toBe(`not detected at 3 sigma: AB > 25.10 (flux below ${formatFluxDensityJy(3.3e-7, null)})`);
+    expect(limitLine(tree)).toBe("not detected at 3 sigma: AB > 25.10 (flux below 330.0 nJy)");
+    expect(cardValue(tree, "AB mag")).toBe("> 25.10 (3 sigma)");
+    expect(cardValue(tree, "Net flux adu")).toBe(formatWithUncertainty(20, 12.3));
+    expect(cardValue(tree, "Net flux adu")).toBe("20 ± 12");
+    expect(cardValue(tree, "Flux density")).toBe(formatFluxDensityJy(2.0e-7, 1.1e-7));
+
+    tree = await measure(measurementWith({ ...FAINT, flux_jy: 5.0e-7, net_flux: 50 }, { photcal: AB_USER }));
+    expect(limitLine(tree)).toBeNull();
+    expect(cardValue(tree, "AB mag")).toBe(abCellText(25.647, 0.6));
+  });
+
+  it("offers the Depth factor for the typed aperture and applies it only after Use", async () => {
+    depthHolder.current = PX_DEPTH;
+    expect(offerLine(show())).toBeNull();
+    typeAperture("3.82");
+    const offer = noiseFactorOffer(PX_DEPTH, 3.82, "px");
+    let tree = show();
+    expect(offerLine(tree)!["data-depth-noise-offer"]).toBe("usable");
+    expect(offerText(tree)).toBe(depthNoiseText(offer, null));
+    expect(offerButton(tree)!["data-action"]).toBe("use-depth-fcorr");
+    expect(offerButton(tree)!["aria-label"]).toBe("Use the Depth noise factor for this aperture");
+    expect(offerButton(tree)!.children).toBe("Use");
+    const nearLimit = measurementWith(NEAR_LIMIT, { photcal: AB_USER });
+    tree = await measure(nearLimit);
+    expect(limitLine(tree)).toBeNull();
+    expect(cardValue(tree, "AB mag")).toBe(abCellText(24.653, 0.239));
+    expect(lastEntry().params.f_corr).toBeNull();
+
+    (offerButton(tree)!.onClick as () => void)();
+    tree = show();
+    expect(offerText(tree)).toBe(depthNoiseText(offer, 1.65));
+    expect(offerButton(tree)!["data-action"]).toBe("remove-depth-fcorr");
+    expect(offerButton(tree)!["aria-label"]).toBe("Do not use the Depth noise factor");
+    expect(offerButton(tree)!.children).toBe("Remove");
+    expect(limitLine(tree)).toBeNull();
+    expect(cardValue(tree, "AB mag")).toBe(abCellText(24.653, 0.239));
+    tree = await measure(nearLimit);
+    expect(limitLine(tree)!.endsWith(FACTOR_CLAUSE)).toBe(true);
+    expect(cardValue(tree, "AB mag")).toBe("> 24.56 (3 sigma)");
+    expect(lastEntry().params.f_corr).toBe(1.65);
+
+    tree = await measure(measurementWith({ ...NEAR_LIMIT, err_used: false }, { photcal: AB_USER }));
+    expect(limitLine(tree)).toBeNull();
+
+    (offerButton(tree)!.onClick as () => void)();
+    tree = await measure(nearLimit);
+    expect(limitLine(tree)).toBeNull();
+    expect(lastEntry().params.f_corr).toBeNull();
+  });
+
+  it("logs the limit it showed", async () => {
+    await measure(measurementWith(FAINT, { photcal: AB_USER }));
+    let entry = lastEntry();
+    expect(entry.params.limit_sigma).toBe(3);
+    expect(entry.params.f_corr).toBeNull();
+    expect(entry.values.upper_limit_jy as number).toBeCloseTo(3.3e-7, 15);
+    expect(entry.values.upper_limit_ab as number).toBeCloseTo(25.103715150305284, 12);
+    expect(entry.values.upper_limit_native as number).toBeCloseTo(36.9, 12);
+
+    await measure(measurementWith({ ...FAINT, flux_jy: 5.0e-7, net_flux: 50 }, { photcal: AB_USER }));
+    entry = lastEntry();
+    expect(entry.params.limit_sigma).toBe(3);
+    expect([entry.values.upper_limit_jy, entry.values.upper_limit_ab, entry.values.upper_limit_native]).toEqual([null, null, null]);
+  });
+
+  it("mounts the Resolved or not card under the result with the size and the signal-to-noise of the source", async () => {
+    expect(resolutionCard(show())).toBeUndefined();
+    statusDoc.current = { loading: false, status: { pixel_scale_arcsec: 0.1 }, error: null };
+    const tree = await measure(measurementWith({ fwhm: 3.214, ee50_radius: 2.345, snr: 100.4, x: 10, y: 12 }));
+    const card = resolutionCard(tree);
+    expect(card?.type).toBe(ResolutionCard);
+    const props = card!.props as Props;
+    expect(props.filePath).toBe(FIRST);
+    expect(props.fwhmArcsec as number).toBeCloseTo(0.3214, 12);
+    expect(props.halfLightRadiusArcsec as number).toBeCloseTo(0.2345, 12);
+    expect(props.snr).toBe(100.4);
+    expect(props.sourceLabel).toBe("source at (10.0, 12.0)");
+    const order = elementsOf(tree);
+    const ee80 = order.findIndex((element) => textOf(element) === "EE80 r");
+    expect(ee80).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(card!)).toBeGreaterThan(ee80);
+
+    statusDoc.current = { loading: false, status: { pixel_scale_arcsec: null }, error: null };
+    const unscaled = resolutionCard(show())!.props as Props;
+    expect(unscaled.fwhmArcsec).toBeNull();
+    expect(unscaled.halfLightRadiusArcsec).toBeNull();
+  });
+
+  it("does not offer a factor measured with another aperture radius and drops an accepted one when the radius changes", async () => {
+    depthHolder.current = PX_DEPTH;
+    typeAperture("5");
+    let tree = show();
+    expect(offerLine(tree)!["data-depth-noise-offer"]).toBe("other_radius");
+    expect(offerText(tree)).toBe(
+      "The Depth section measured this image at r = 3.82 px, not with this aperture: its f_corr is not offered. Measure the depth again with this radius to get one.",
+    );
+    expect(offerButton(tree)).toBeNull();
+    const nearLimit = measurementWith(NEAR_LIMIT, { photcal: AB_USER });
+    tree = await measure(nearLimit);
+    expect(limitLine(tree)).toBeNull();
+    expect(lastEntry().params.f_corr).toBeNull();
+
+    typeAperture("3.82");
+    (offerButton(show())!.onClick as () => void)();
+    expect(offerButton(show())!.children).toBe("Remove");
+    typeAperture("5");
+    show();
+    tree = show();
+    expect(offerLine(tree)!["data-depth-noise-offer"]).toBe("other_radius");
+    tree = await measure(nearLimit);
+    expect(limitLine(tree)).toBeNull();
+    expect(lastEntry().params.f_corr).toBeNull();
+    typeAperture("3.82");
+    expect(offerButton(show())!.children).toBe("Use");
   });
 });

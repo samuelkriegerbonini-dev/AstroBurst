@@ -11,12 +11,15 @@ import type {
 } from "../shared/types/cube";
 import type { DisplayHint } from "../shared/types/preview";
 import type { VelocityConvention } from "../shared/types/spectral";
+import { SIGMA_MAD_LABEL } from "./analysisLabels";
+import { formatRedshift } from "./lineList";
 import { PLUS_MINUS, UNAVAILABLE, formatQuantity, formatVelocity, type MeasurementRow, type PlotFrame, type PlotPoint } from "./lineMeasure";
 import { finiteExtent, formatAxisTick, formatTickLabels, niceTicks } from "./plotScale";
 import { formatAxisValue } from "./spectralAxis";
 import {
   axisValueToPixel,
   channelAxisValue,
+  channelWidthAt,
   defaultContinuumWindows,
   windowsAreValid,
   type ChannelRange,
@@ -26,7 +29,14 @@ import {
 export const LINE_FIT_LABEL_PREFIX = "Line fit";
 export const DEFAULT_LINE_FIT_SNR = 3;
 export const RESOLVING_POWER_HINT = "resolving power R of the grating, not the sampling; leave empty to keep sigma observed";
-export const VELOCITY_PLANES: readonly LineFitPlane[] = ["velocity", "c1_velocity", "c2_velocity"];
+export const VELOCITY_PLANES: readonly LineFitPlane[] = [
+  "velocity",
+  "c1_velocity",
+  "c2_velocity",
+  "source_velocity",
+  "c1_source_velocity",
+  "c2_source_velocity",
+];
 export const INTEGER_PLANES: readonly LineFitPlane[] = ["mask", "ncomp"];
 export const COMPONENT_COLORS: readonly string[] = ["rgba(96,165,250,0.95)", "rgba(248,113,113,0.95)"];
 
@@ -69,8 +79,10 @@ export interface LineFitInspectPlot {
 const VELOCITY_UNIT = "km/s";
 const VELOCITY_DECIMALS = 1;
 const SNR_DECIMALS = 1;
-const MIN_Y_RANGE = 1e-10;
 const COMPONENT_PREFIX = /^c([12])_(.+)$/;
+const SOURCE_PREFIX = "source_";
+const SOURCE_FRAME_LABEL = " (source frame)";
+const SOURCE_VELOCITY_PLANE: LineFitPlane = "source_velocity";
 const COMPONENT_NAMES = ["c1 (blue)", "c2 (red)"];
 const UNRESOLVED_SIGMA = "unresolved (σ ≤ σ_inst)";
 const MASK_FITTED_BIT = 1;
@@ -124,15 +136,18 @@ export interface LineFitConfigInput {
   useDq: boolean;
   resolvingPowerText: string;
   components: LineFitComponents;
+  redshift?: number | null;
 }
 
 function finite(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function splitPlane(plane: LineFitPlane): { base: string; component: string | null } {
+function splitPlane(plane: LineFitPlane): { base: string; component: string | null; source: boolean } {
   const match = COMPONENT_PREFIX.exec(plane);
-  return match ? { base: match[2], component: `c${match[1]}` } : { base: plane, component: null };
+  const name = match ? match[2] : plane;
+  const source = name.startsWith(SOURCE_PREFIX);
+  return { base: source ? name.slice(SOURCE_PREFIX.length) : name, component: match ? `c${match[1]}` : null, source };
 }
 
 export function parseResolvingPower(text: string): number | null | { error: string } {
@@ -152,7 +167,9 @@ export function lineFitConfig(input: LineFitConfigInput): LineFitConfig | { erro
   if (input.windows && !windowsAreValid(input.windows, input.channelCount)) {
     return { error: `continuum windows must be channel ranges inside 0–${Math.max(input.channelCount - 1, 0)}` };
   }
-  return {
+  const redshift = input.redshift ?? null;
+  if (redshift !== null && !(finite(redshift) && redshift > -1)) return { error: `redshift must be a finite number above -1, got ${redshift}` };
+  const config: LineFitConfig = {
     z0: input.range.z0,
     z1: input.range.z1,
     rest_um: input.restUm,
@@ -166,11 +183,12 @@ export function lineFitConfig(input: LineFitConfigInput): LineFitConfig | { erro
     resolving_power: resolvingPower,
     components: input.components,
   };
+  return redshift === null ? config : { ...config, redshift };
 }
 
 export function planeLabel(plane: LineFitPlane): string {
-  const { base, component } = splitPlane(plane);
-  const label = BASE_LABELS[base] ?? base;
+  const { base, component, source } = splitPlane(plane);
+  const label = `${BASE_LABELS[base] ?? base}${source ? SOURCE_FRAME_LABEL : ""}`;
   return component ? `${label} ${component}` : label;
 }
 
@@ -189,6 +207,27 @@ export function displayHintFor(plane: LineFitPlane): DisplayHint {
   if (isVelocityPlane(plane)) return { ...VELOCITY_HINT };
   if (INTEGER_PLANES.includes(plane)) return { ...INTEGER_HINT };
   return { ...VALUE_HINT };
+}
+
+export function preferredLineFitPlane(result: LineFitResult): LineFitPlane {
+  return result.plane_order.includes(SOURCE_VELOCITY_PLANE) ? SOURCE_VELOCITY_PLANE : "velocity";
+}
+
+function sourceFrameAt(z: number): string {
+  return `source frame at z = ${formatRedshift(z)}`;
+}
+
+export function sourceFrameCaption(run: LineFitRun): string | null {
+  const z = run.config.redshift;
+  if (!finite(z) || z === 0) return null;
+  return run.result.plane_order.includes(SOURCE_VELOCITY_PLANE)
+    ? `${sourceFrameAt(z)}: the planes marked (source frame) give V relative to z, and σ and flux in the rest frame of the source; the other planes are observer-frame values (see the redshift note)`
+    : `redshift ${formatRedshift(z)} was not applied: this fit has no source-frame planes (see the notes)`;
+}
+
+export function fitRedshiftHint(redshift: number | null | undefined): string | null {
+  if (!finite(redshift) || redshift === 0) return null;
+  return `fits at z = ${formatRedshift(redshift)} (Redshift z of the line list) and adds source-frame maps`;
 }
 
 export function lineFitResultLabel(result: LineFitResult, plane: LineFitPlane, lineLabel: string | null): string {
@@ -245,7 +284,7 @@ export function lineFitOverlayPolylines(
   if (!model || mapping.n <= 0) return { continuum: [], model: [], components: [] };
   const left = mapping.padLeft;
   const right = mapping.width - mapping.padRight;
-  const yRange = Math.max(frame.yMax - frame.yMin, MIN_Y_RANGE);
+  const yRange = frame.yMax > frame.yMin ? frame.yMax - frame.yMin : 1;
   const xs = model.channel.map((channel) => (finite(channel) && channel >= 0 ? axisValueToPixel(displayAxisValue(channel, mapping), mapping) : NaN));
   const polyline = (values: readonly (number | null)[], base: readonly (number | null)[] | null = null): PlotPoint[] => {
     const points: PlotPoint[] = [];
@@ -274,9 +313,20 @@ function kmsWithError(value: number | null | undefined, error: number | null | u
   return `${formatKms(value)} ${PLUS_MINUS} ${formatKms(error)} ${VELOCITY_UNIT}`;
 }
 
-function quantityWithError(value: number | null | undefined, error: number | null | undefined, unit: string): string {
+function quantityWithError(value: number | null | undefined, error: number | null | undefined, unit: string | null): string {
   if (!finite(value)) return UNAVAILABLE;
   return `${formatQuantity(value)} ${PLUS_MINUS} ${formatQuantity(error)}${unit ? ` ${unit}` : ""}`;
+}
+
+function quantityWithUnit(value: number | null | undefined, unit: string | null): string {
+  return finite(value) && unit ? `${formatQuantity(value)} ${unit}` : formatQuantity(value);
+}
+
+export function lineFitSpectrumUnit(units: LineFitUnits): string | null {
+  const suffix = ` ${units.velocity}`;
+  if (!units.flux.endsWith(suffix)) return null;
+  const unit = units.flux.slice(0, -suffix.length);
+  return unit === "" ? null : unit;
 }
 
 function unresolvedSigma(fit: LineFitComponentFit, resolvingPower: number | null): boolean {
@@ -323,18 +373,54 @@ function componentRow(fit: LineFitComponentFit, index: number, units: LineFitUni
   const sigma = componentSigma(fit, resolvingPower);
   return {
     label: COMPONENT_NAMES[index] ?? `c${index + 1}`,
-    value: `V ${kmsWithError(fit.velocity_kms, fit.v_err_kms)}, ${sigma}, flux ${quantityWithError(fit.flux, fit.flux_err, units.flux)}, A ${quantityWithError(fit.amplitude, fit.amplitude_err, "")}`,
+    value: `V ${kmsWithError(fit.velocity_kms, fit.v_err_kms)}, ${sigma}, flux ${quantityWithError(fit.flux, fit.flux_err, units.flux)}, A ${quantityWithError(fit.amplitude, fit.amplitude_err, lineFitSpectrumUnit(units))}`,
   };
 }
 
-export function lineFitSpaxelRows(spaxel: LineFitSpaxel, units: LineFitUnits, resolvingPower: number | null = null): MeasurementRow[] {
-  const fit = spaxel.single;
+function sourceFrameRedshift(fit: LineFitComponentFit, redshift: number | null): number | null {
+  return finite(redshift) && redshift !== 0 && finite(fit.source_sigma_kms) ? redshift : null;
+}
+
+function frameFit(fit: LineFitComponentFit, redshift: number | null): LineFitComponentFit {
+  if (sourceFrameRedshift(fit, redshift) === null) return fit;
+  return {
+    ...fit,
+    velocity_kms: fit.source_velocity_kms ?? NaN,
+    v_err_kms: fit.source_v_err_kms ?? null,
+    sigma_kms: fit.source_sigma_kms ?? NaN,
+    sigma_err_kms: fit.source_sigma_err_kms ?? null,
+    sigma_corr_kms: fit.source_sigma_corr_kms ?? null,
+    flux: fit.source_flux ?? NaN,
+    flux_err: fit.source_flux_err ?? null,
+  };
+}
+
+function observerFrameRow(fit: LineFitComponentFit, units: LineFitUnits): MeasurementRow {
+  return {
+    label: "Observer frame",
+    value: `V ${formatVelocity(fit.velocity_kms)}, σ ${formatVelocity(fit.sigma_kms)}, flux ${quantityWithUnit(fit.flux, units.flux)}`,
+  };
+}
+
+export function lineFitSpaxelRows(
+  spaxel: LineFitSpaxel,
+  units: LineFitUnits,
+  resolvingPower: number | null = null,
+  redshift: number | null = null,
+): MeasurementRow[] {
+  const observed = spaxel.single;
+  const fit = observed && frameFit(observed, redshift);
+  const z = observed && sourceFrameRedshift(observed, redshift);
   const continuum = spaxel.continuum;
-  const rows: MeasurementRow[] = [
+  const spectrumUnit = lineFitSpectrumUnit(units);
+  const measured: MeasurementRow[] = [
     { label: "V", value: kmsWithError(fit?.velocity_kms, fit?.v_err_kms) },
     sigmaRow(fit, resolvingPower),
     { label: "Flux", value: quantityWithError(fit?.flux, fit?.flux_err, units.flux) },
-    { label: "Amplitude", value: quantityWithError(fit?.amplitude, fit?.amplitude_err, "") },
+  ];
+  const rows: MeasurementRow[] = [
+    ...(observed && z !== null ? [{ label: "Frame", value: sourceFrameAt(z) }, ...measured, observerFrameRow(observed, units)] : measured),
+    { label: "Amplitude", value: quantityWithError(fit?.amplitude, fit?.amplitude_err, spectrumUnit) },
     {
       label: "χ²_red",
       value: finite(spaxel.chi2_red) ? `${formatQuantity(spaxel.chi2_red)} (dof ${spaxel.dof})` : UNAVAILABLE,
@@ -346,12 +432,12 @@ export function lineFitSpaxelRows(spaxel: LineFitSpaxel, units: LineFitUnits, re
     {
       label: "Continuum",
       value: continuum
-        ? `${continuum.linear ? "linear" : "constant"}, ${continuum.channels} ch, level ${formatQuantity(continuum.intercept)}, sigma ${formatQuantity(continuum.sigma)}`
+        ? `${continuum.linear ? "linear" : "constant"}, ${continuum.channels} ch, level ${quantityWithUnit(continuum.intercept, spectrumUnit)}, ${SIGMA_MAD_LABEL} ${quantityWithUnit(continuum.sigma, spectrumUnit)}`
         : UNAVAILABLE,
     },
     { label: "Fit", value: fitStatus(spaxel) },
   ];
-  if (spaxel.ncomp === 2) spaxel.components.forEach((c, i) => rows.push(componentRow(c, i, units, resolvingPower)));
+  if (spaxel.ncomp === 2) spaxel.components.forEach((c, i) => rows.push(componentRow(frameFit(c, redshift), i, units, resolvingPower)));
   return rows;
 }
 
@@ -421,7 +507,7 @@ function fittedComponents(spaxel: LineFitSpaxel): LineFitComponentFit[] {
   return spaxel.single ? [spaxel.single] : [];
 }
 
-export function lineFitInspectPlot(spaxel: LineFitSpaxel): LineFitInspectPlot {
+export function lineFitInspectPlot(spaxel: LineFitSpaxel, redshift: number | null = null): LineFitInspectPlot {
   const dropped = new Set([...spaxel.dropped_dq, ...spaxel.dropped_err]);
   const used = new Set(spaxel.channels);
   const samples: InspectSample[] = [];
@@ -440,7 +526,7 @@ export function lineFitInspectPlot(spaxel: LineFitSpaxel): LineFitInspectPlot {
   const markers: InspectMarker[] = [];
   fittedComponents(spaxel).forEach((fit, i) => {
     if (!finite(fit.centre)) return;
-    const velocity = formatVelocity(fit.velocity_kms);
+    const velocity = formatVelocity(frameFit(fit, redshift).velocity_kms);
     markers.push(spaxel.ncomp === 2 ? { x: fit.centre, label: `c${i + 1} ${velocity}`, component: i } : { x: fit.centre, label: velocity, component: null });
   });
   const kept = samples.filter((s) => s.state !== "dropped").map((s) => s.y);
@@ -472,7 +558,8 @@ export function lineFitInspectPlot(spaxel: LineFitSpaxel): LineFitInspectPlot {
 export function lineFitInspectSummary(spaxel: LineFitSpaxel, plot: LineFitInspectPlot): string {
   const count = (state: InspectSampleState) => plot.samples.filter((s) => s.state === state).length;
   const unit = plot.unit ? ` ${plot.unit}` : "";
-  const range = `${formatAxisValue(plot.xDomain[0], spaxel.axis_unit)}-${formatAxisValue(plot.xDomain[1], spaxel.axis_unit)}${unit}`;
+  const step = Math.min(channelWidthAt(spaxel.axis, 0), channelWidthAt(spaxel.axis, spaxel.axis.length - 1));
+  const range = `${formatAxisValue(plot.xDomain[0], spaxel.axis_unit, step)}-${formatAxisValue(plot.xDomain[1], spaxel.axis_unit, step)}${unit}`;
   const [w0, w1] = spaxel.continuum_windows;
   const head = `Fitted spectrum of spaxel (${spaxel.x}, ${spaxel.y}), ch ${spaxel.span[0]}-${spaxel.span[1]} (${range}): ${plot.samples.length} samples, ${count("used")} used, ${count("dropped")} dropped by DQ or ERR, ${count("unused")} outside the windows`;
   const windows = `line window ch ${spaxel.z0}-${spaxel.z1}, continuum ch ${w0[0]}-${w0[1]} and ${w1[0]}-${w1[1]}`;

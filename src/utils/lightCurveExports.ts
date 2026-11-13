@@ -10,7 +10,10 @@ export interface LightCurveExportSource {
   result: TimeSeriesResult;
   targetIdx: number;
   compIdx: number[];
+  leftOut?: readonly (string | null)[];
 }
+
+export const BJD_ACCURACY_NOTE = "computed values use a low-precision ephemeris, within 1 s of astropy";
 
 export const NO_TARGET_BLOCKER = "no star has the target role";
 export const NO_ROWS_BLOCKER = "no frame has a differential magnitude";
@@ -28,6 +31,12 @@ const EXPOSURE_START_MARK = "EXPTIME missing";
 const HALF_EXPOSURE_NOTE = /\/2 \((\S+) s\)/;
 
 const TIME_NAMES: Record<ExoClockTime, string> = { jd_utc: "JD_UTC", bjd_tdb: "BJD_TDB", hjd_utc: "HJD_UTC" };
+const LEFT_OUT_REASONS: ReadonlyMap<string, string> = new Map([
+  ["flagged", "flagged"],
+  ["manual", "by hand"],
+  ["clipped", "clipped"],
+]);
+const LEFT_OUT_ORDER = ["flagged", "by hand", "clipped"] as const;
 
 interface ExportRow {
   frame: TimeSeriesFrame;
@@ -93,13 +102,36 @@ function comps(source: LightCurveExportSource): number[] {
   return source.compIdx.filter((i) => i !== source.targetIdx);
 }
 
-function exportRows(source: LightCurveExportSource): ExportRow[] {
+export function leftOutReasons(states: readonly string[]): (string | null)[] {
+  return states.map((state) => LEFT_OUT_REASONS.get(state) ?? null);
+}
+
+export function leftOutSummary(reasons: readonly (string | null)[]): string | null {
+  const given = reasons.filter((reason): reason is string => typeof reason === "string");
+  if (given.length === 0) return null;
+  const parts = LEFT_OUT_ORDER.flatMap((reason) => {
+    const count = given.filter((r) => r === reason).length;
+    return count > 0 ? [`${count} ${reason}`] : [];
+  });
+  const n = given.length;
+  return `${n} ${n === 1 ? "frame" : "frames"} (${parts.join(", ")})`;
+}
+
+function measuredRows(source: LightCurveExportSource): ExportRow[] {
   const curve = lightCurve(source.result, source.targetIdx, comps(source), "index");
   return curve.flatMap((point, k) => {
     const frame = source.result.frames[point.frameIndex];
     if (!frame || point.skipped || point.mag === null || point.err === null) return [];
     return [{ frame, mag: point.mag, err: point.err, extraIndex: k }];
   });
+}
+
+function leftOutReason(source: LightCurveExportSource, row: ExportRow): string | null {
+  return source.leftOut?.[row.frame.index] ?? null;
+}
+
+function exportRows(source: LightCurveExportSource): ExportRow[] {
+  return measuredRows(source).filter((row) => leftOutReason(source, row) === null);
 }
 
 function utcTime(frame: TimeSeriesFrame): number | null {
@@ -220,7 +252,10 @@ export function exoClockCsv(source: LightCurveExportSource, time: ExoClockTime):
   const rows = sortedRows(source, time);
   const extras = lightCurveExtras(result, source.targetIdx, comps(source));
   const measured = rows.map(({ row }) => row);
-  const omitted = result.frames.length - rows.length;
+  const all = measuredRows(source);
+  const frames = result.frames.length;
+  const leftOut = all.length > rows.length ? leftOutSummary(all.map((row) => leftOutReason(source, row))) : null;
+  const bjdComputed = time === "bjd_tdb" && measured.some((r) => r.frame.geometry?.bjd_source === "computed");
   const lines = [
     "# AstroBurst differential light curve for ExoClock",
     `# target: ${targetLabel(source)}`,
@@ -228,11 +263,13 @@ export function exoClockCsv(source: LightCurveExportSource, time: ExoClockTime):
     `# reference frame: ${fileBaseName(result.reference_path)}`,
     `# time: ${time} = ${TIME_NAMES[time]} at mid-exposure`,
     ...(time === "bjd_tdb" ? [`# bjd_tdb source: ${bjdSources(measured.map((r) => r.frame)) ?? "unknown"}`] : []),
+    ...(bjdComputed ? [`# bjd_tdb accuracy: ${BJD_ACCURACY_NOTE}`] : []),
     `# flux: target / sum of comparison fluxes, not normalised; rel_flux_err = rel_flux * diff_err / ${MAG_ERR_FACTOR}`,
     `# filter: ${distinct(measured.map((r) => r.frame.filter))}`,
     `# exposure s: ${distinct(measured.map((r) => exposureSeconds(r.frame)))}`,
     apertureLine(result, source.targetIdx),
-    `# rows: ${rows.length} of ${result.frames.length} frames (${omitted} omitted: skipped or no differential magnitude)`,
+    `# rows: ${rows.length} of ${frames} frames (${frames - all.length} omitted: skipped or no differential magnitude)`,
+    ...(leftOut ? [`# left out: ${leftOut}`] : []),
     [time, ...EXOCLOCK_COLUMNS].join(","),
   ];
   for (const { row, t } of rows) {

@@ -1,5 +1,4 @@
 import type { PlotHit, ProfileSeries } from "../components/regions/ProfilePlot";
-import type { ZeroPointStatus } from "../shared/types/catalog";
 import { buildCsv, type CsvColumn } from "./catalogCsv";
 
 export type Domain = [number, number];
@@ -282,46 +281,6 @@ export function seriesToCsv(series: ProfileSeries[], xLabel: string): string {
   return buildCsv(columns, rows);
 }
 
-export interface ZeroPointSplit {
-  fitted: { x: number[]; y: number[] };
-  outliers: { x: number[]; y: number[] };
-  saturated: { x: number[]; y: number[] };
-  noColour: { x: number[]; y: number[] };
-  line: { x: number[]; y: number[] } | null;
-}
-
-export function splitZeroPointPoints(
-  catMag: (number | null)[],
-  magInst: (number | null)[],
-  zp: number | null,
-  status: (ZeroPointStatus | null)[],
-  colour: (number | null)[] = [],
-  colourCoeff: number | null = null,
-): ZeroPointSplit {
-  const fitted = { x: [] as number[], y: [] as number[] };
-  const outliers = { x: [] as number[], y: [] as number[] };
-  const saturated = { x: [] as number[], y: [] as number[] };
-  const noColour = { x: [] as number[], y: [] as number[] };
-  const groups = { used: fitted, clipped: outliers, saturated, no_colour: noColour };
-  const fit = zp !== null && Number.isFinite(zp) ? zp : null;
-  const coeff = colourCoeff !== null && Number.isFinite(colourCoeff) ? colourCoeff : null;
-  const n = Math.min(catMag.length, magInst.length);
-  for (let i = 0; i < n; i++) {
-    const x = catMag[i];
-    const raw = magInst[i];
-    const entered = status[i] ?? null;
-    if (entered === null || x === null || raw === null || !Number.isFinite(x) || !Number.isFinite(raw)) continue;
-    const c = colour[i] ?? null;
-    const corrected = entered !== "no_colour" && coeff !== null && c !== null && Number.isFinite(c);
-    groups[entered].x.push(x);
-    groups[entered].y.push(corrected ? raw + coeff * c : raw);
-  }
-  const xs = fitted.x.concat(outliers.x);
-  const ext = finiteExtentOf(xs);
-  const line = fit !== null && ext ? { x: [ext[0], ext[1]], y: [ext[0] - fit, ext[1] - fit] } : null;
-  return { fitted, outliers, saturated, noColour, line };
-}
-
 function finiteExtentOf(values: number[]): Domain | null {
   let lo = Infinity;
   let hi = -Infinity;
@@ -331,4 +290,56 @@ function finiteExtentOf(values: number[]): Domain | null {
     if (v > hi) hi = v;
   }
   return lo <= hi ? [lo, hi] : null;
+}
+
+export const PLOT_PNG_BACKGROUND = "#0a0a0f";
+const PLOT_PNG_MIN_SCALE = 2;
+
+export function plotPngScale(devicePixelRatio: number | undefined): number {
+  if (devicePixelRatio === undefined || !Number.isFinite(devicePixelRatio) || devicePixelRatio <= 0) return PLOT_PNG_MIN_SCALE;
+  return Math.max(PLOT_PNG_MIN_SCALE, devicePixelRatio);
+}
+
+function summaryNumber(v: number): string {
+  const a = Math.abs(v);
+  if (a === 0) return "0";
+  if (a >= 1e5 || a < 1e-3) return v.toExponential(3);
+  return String(Number(v.toPrecision(5)));
+}
+
+function seriesSentence(s: { x: number[]; y: (number | null)[]; label: string }, xLabel: string, yLabel: string): string {
+  let count = 0;
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  let y0 = Infinity;
+  let y1 = -Infinity;
+  const n = Math.min(s.x.length, s.y.length);
+  for (let i = 0; i < n; i++) {
+    const x = s.x[i];
+    const y = s.y[i];
+    if (y === null || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+    count++;
+    x0 = Math.min(x0, x);
+    x1 = Math.max(x1, x);
+    y0 = Math.min(y0, y);
+    y1 = Math.max(y1, y);
+  }
+  if (count === 0) return `${s.label}: no data.`;
+  return `${s.label}: ${count} points, ${xLabel} ${summaryNumber(x0)} to ${summaryNumber(x1)}, ${yLabel} ${summaryNumber(y0)} to ${summaryNumber(y1)}.`;
+}
+
+export function plotSummary(
+  series: readonly { x: number[]; y: (number | null)[]; label: string }[],
+  xLabel: string,
+  yLabel: string,
+  selected: { seriesIndex: number; index: number } | null = null,
+): string {
+  if (series.length === 0) return "No data.";
+  const text = [`${series.length} series.`, ...series.map((s) => seriesSentence(s, xLabel, yLabel))].join(" ");
+  if (!selected) return text;
+  const picked = series[selected.seriesIndex];
+  const x = picked?.x[selected.index];
+  const y = picked?.y[selected.index];
+  if (!picked || x === undefined || y === undefined || y === null || !Number.isFinite(x) || !Number.isFinite(y)) return text;
+  return `${text} Selected point of ${picked.label}: ${xLabel} ${summaryNumber(x)}, ${yLabel} ${summaryNumber(y)}.`;
 }

@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::fs::File;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -7,7 +9,7 @@ use serde::Serialize;
 use crate::core::astrometry::spectral::wavelength_unit_to_um;
 use crate::core::imaging::dq_flags::DqTable;
 use crate::infra::fits::gzip::{resolve_gzip, split_gz_suffix};
-use crate::infra::fits::reader::{read_primary_header, ParsedHdu};
+use crate::infra::fits::reader::{read_header_blocks, read_primary_header, ParsedHdu};
 use crate::infra::fits::table::{list_tables, load_bintable, Column, ColumnValues, TableHdu};
 use crate::types::constants::DEFAULT_WAVELENGTH_UNIT;
 use crate::types::header::HduHeader;
@@ -32,6 +34,22 @@ pub struct X1dTableRef {
     pub hdu: usize,
     pub extver: Option<i64>,
     pub n_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct X1dTableInfo {
+    pub hdu: usize,
+    pub extver: Option<i64>,
+    pub n_rows: usize,
+    pub n_channels: usize,
+    pub sporder: Option<i64>,
+    pub detector: Option<String>,
+    pub slit_name: Option<String>,
+    pub source_id: Option<i64>,
+    pub source_name: Option<String>,
+    pub int_num: Option<i64>,
+    pub srctype: Option<String>,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +164,92 @@ fn card(header: &HduHeader, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn no_extract1d_table(name: &str, tables: &[(TableHdu, ParsedHdu)]) -> anyhow::Error {
+    anyhow::anyhow!("no {EXTNAME_EXTRACT1D} table in {name}; tables in this file: {}", inventory(tables))
+}
+
+fn channels(table: &TableHdu) -> usize {
+    table
+        .columns
+        .iter()
+        .find(|c| c.name == COL_WAVELENGTH)
+        .map(|c| c.repeat)
+        .filter(|&repeat| repeat > 1)
+        .unwrap_or(table.n_rows)
+}
+
+fn table_info(table: &TableHdu, header: &HduHeader, primary: &HduHeader) -> X1dTableInfo {
+    X1dTableInfo {
+        hdu: table.index,
+        extver: table.extver,
+        n_rows: table.n_rows,
+        n_channels: channels(table),
+        sporder: header.get_i64("SPORDER"),
+        detector: card(header, "DETECTOR").or_else(|| card(primary, "DETECTOR")),
+        slit_name: card(header, "SLTNAME"),
+        source_id: header.get_i64("SOURCEID"),
+        source_name: card(header, "SRCNAME"),
+        int_num: header.get_i64("INT_NUM"),
+        srctype: card(header, "SRCTYPE"),
+        label: String::new(),
+    }
+}
+
+fn differs<T: Eq + Hash>(cards: impl Iterator<Item = Option<T>>) -> bool {
+    cards.flatten().collect::<HashSet<T>>().len() > 1
+}
+
+fn table_label(tables: &[X1dTableInfo], position: usize) -> String {
+    let table = &tables[position];
+    let slit = table.slit_name.as_ref().filter(|_| differs(tables.iter().map(|t| t.slit_name.as_ref())));
+    let source = table.source_id.filter(|_| differs(tables.iter().map(|t| t.source_id)));
+    let order = table.sporder.filter(|_| differs(tables.iter().map(|t| t.sporder)));
+    let detector = table.detector.as_ref().filter(|_| differs(tables.iter().map(|t| t.detector.as_ref())));
+    let integration = table.int_num.map(|int_num| {
+        let same_series = |t: &&X1dTableInfo| t.int_num.is_some() && t.detector == table.detector && t.sporder == table.sporder;
+        format!("integration {int_num} of {}", tables.iter().filter(same_series).count())
+    });
+    let parts: Vec<String> = [
+        slit.map(|name| format!("slit {name}")),
+        source.map(|id| format!("source {id}")),
+        order.map(|sporder| format!("order {sporder}")),
+        detector.cloned(),
+        integration,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !parts.is_empty() {
+        return parts.join(", ");
+    }
+    let extver = table.extver.map(|v| format!(" (EXTVER {v})")).unwrap_or_default();
+    format!("table {} of {}{extver}", position + 1, tables.len())
+}
+
+fn extract1d_infos(primary: &HduHeader, tables: &[(TableHdu, ParsedHdu)]) -> Vec<X1dTableInfo> {
+    let mut infos: Vec<X1dTableInfo> = tables
+        .iter()
+        .filter(|(t, _)| is_extract1d(t))
+        .map(|(t, parsed)| table_info(t, &parsed.header, primary))
+        .collect();
+    let labels: Vec<String> = (0..infos.len()).map(|position| table_label(&infos, position)).collect();
+    for (info, label) in infos.iter_mut().zip(labels) {
+        info.label = label;
+    }
+    infos
+}
+
+pub fn describe_extract1d_tables(path: &str) -> Result<Vec<X1dTableInfo>> {
+    let (readable, _decompressed) = resolve_gzip(Path::new(path))?;
+    let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
+    let tables = list_tables(&file)?;
+    let infos = extract1d_infos(&read_header_blocks(&file, 0)?.header, &tables);
+    if infos.is_empty() {
+        return Err(no_extract1d_table(&file_name(Path::new(path)), &tables));
+    }
+    Ok(infos)
+}
+
 fn as_f64(column: &Column) -> Vec<f64> {
     match &column.values {
         ColumnValues::F64(v) => v.clone(),
@@ -173,7 +277,7 @@ pub fn read_x1d_spectrum(path: &str, hdu: Option<usize>) -> Result<X1dSpectrum> 
     let tables = list_tables(&file)?;
     let refs = extract1d_refs(&tables);
     if refs.is_empty() {
-        bail!("no {EXTNAME_EXTRACT1D} table in {name}; tables in this file: {}", inventory(&tables));
+        return Err(no_extract1d_table(&name, &tables));
     }
     if let Some(n) = hdu.filter(|n| !refs.iter().any(|r| r.hdu == *n)) {
         let label = tables
@@ -214,7 +318,7 @@ pub fn read_x1d_spectrum(path: &str, hdu: Option<usize>) -> Result<X1dSpectrum> 
         }
         Some(unit) => wavelength_unit_to_um(unit).with_context(|| format!("unknown wavelength unit '{unit}'"))?,
     };
-    let wavelength_um = as_f64(wavelength).into_iter().map(|w| w * scale).collect();
+    let wavelength_um: Vec<f64> = as_f64(wavelength).into_iter().map(|w| w * scale).collect();
 
     let flux = column(COL_FLUX).with_context(|| format!("{COL_FLUX} column missing"))?;
     let flux_unit = match flux.unit.clone() {
@@ -228,12 +332,16 @@ pub fn read_x1d_spectrum(path: &str, hdu: Option<usize>) -> Result<X1dSpectrum> 
     let dq = column(COL_DQ).map(as_u32);
     let dq_flagged_rows = dq.as_ref().map_or(0, |d| d.iter().filter(|&&v| v != 0).count());
     let primary = read_primary_header(&readable_key)?;
+    let infos = extract1d_infos(&primary, &tables);
+    if let Some(shown) = infos.iter().find(|info| info.hdu == chosen.hdu).filter(|_| infos.len() > 1) {
+        notes.push(format!("this file holds {} {EXTNAME_EXTRACT1D} tables; shown: {}", infos.len(), shown.label));
+    }
 
     Ok(X1dSpectrum {
         path: resolved_key,
         hdu: chosen.hdu,
         extver: chosen.extver,
-        n_rows: table.n_rows,
+        n_rows: wavelength_um.len(),
         wavelength_um,
         wavelength_unit: DEFAULT_WAVELENGTH_UNIT.to_string(),
         flux: as_f64(flux),
@@ -368,7 +476,8 @@ pub mod test_fixtures {
 mod tests {
     use super::test_fixtures::*;
     use super::*;
-    use crate::infra::fits::table::test_support::write_table;
+    use crate::infra::fits::reader::test_fixtures::{empty_primary_cards, write_raw_hdus};
+    use crate::infra::fits::table::test_support::{bintable_cards, write_table};
 
     fn key(path: &std::path::Path) -> String {
         path.to_str().unwrap().to_string()
@@ -598,5 +707,166 @@ mod tests {
         assert_eq!(s.wavelength_um, (0..3).map(|i| fixture_wavelength(i, "")).collect::<Vec<_>>());
         assert_eq!(s.wavelength_unit, "um");
         assert!(s.notes.iter().any(|n| n == "TUNIT of WAVELENGTH missing: assumed um"), "{:?}", s.notes);
+    }
+
+    #[test]
+    fn a_one_row_vector_table_reports_its_samples_not_its_row_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let values = [1.0f64, 1.1, 1.2, 10.0, 11.0, 12.0];
+        let path = write_table(
+            dir.path(),
+            "one_row.fits",
+            &[("WAVELENGTH", "3D", Some("um")), ("FLUX", "3D", Some("Jy"))],
+            1,
+            values.iter().flat_map(|v| v.to_be_bytes()).collect(),
+            &[],
+        );
+        let vector = read_x1d_spectrum(&key(&path), None).unwrap();
+        assert_eq!(vector.wavelength_um, vec![1.0, 1.1, 1.2]);
+        assert_eq!(vector.n_rows, 3);
+
+        let scalar = write_x1d_fixture(dir.path(), "scalar_x1d.fits", 6, &[1], "um");
+        assert_eq!(read_x1d_spectrum(&key(&scalar), None).unwrap().n_rows, 6);
+    }
+
+    type Hdu = (Vec<(&'static str, String)>, Vec<u8>);
+
+    const LABEL_ROWS: usize = 4;
+
+    fn owned(cards: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+        cards.iter().map(|(name, value)| (*name, value.to_string())).collect()
+    }
+
+    fn primary(cards: &[(&'static str, &str)]) -> Hdu {
+        let mut all = empty_primary_cards();
+        all.extend(owned(cards));
+        (all, Vec::new())
+    }
+
+    fn scalar_table(cards: &[(&'static str, &str)]) -> Hdu {
+        let columns = [("WAVELENGTH", "1D", Some("um")), ("FLUX", "1D", Some("Jy"))];
+        (bintable_cards(&columns, LABEL_ROWS, &owned(cards)), vec![0u8; 16 * LABEL_ROWS])
+    }
+
+    fn described(dir: &std::path::Path, name: &str, hdus: &[Hdu]) -> Vec<X1dTableInfo> {
+        let path = dir.join(name);
+        write_raw_hdus(&path, hdus);
+        describe_extract1d_tables(&key(&path)).unwrap()
+    }
+
+    fn labels(tables: &[X1dTableInfo]) -> Vec<&str> {
+        tables.iter().map(|t| t.label.as_str()).collect()
+    }
+
+    #[test]
+    fn describe_extract1d_tables_reads_the_identity_cards_and_builds_labels() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let soss = described(
+            dir.path(),
+            "soss.fits",
+            &[
+                primary(&[("DETECTOR", "'NIS     '")]),
+                scalar_table(&[("EXTVER", "1"), ("SPORDER", "1")]),
+                scalar_table(&[("EXTVER", "2"), ("SPORDER", "2")]),
+                scalar_table(&[("EXTVER", "3"), ("SPORDER", "3")]),
+            ],
+        );
+        assert_eq!(labels(&soss), ["order 1", "order 2", "order 3"]);
+        assert!(soss.iter().all(|t| t.detector.as_deref() == Some("NIS")), "{soss:?}");
+        assert_eq!(
+            soss[1],
+            X1dTableInfo {
+                hdu: 2,
+                extver: Some(2),
+                n_rows: 4,
+                n_channels: 4,
+                sporder: Some(2),
+                detector: Some("NIS".to_string()),
+                slit_name: None,
+                source_id: None,
+                source_name: None,
+                int_num: None,
+                srctype: None,
+                label: "order 2".to_string(),
+            }
+        );
+
+        let slit = |name: &'static str, source: &'static str, source_name: &'static str, srctype: &'static str| {
+            scalar_table(&[("SLTNAME", name), ("SOURCEID", source), ("SRCNAME", source_name), ("SRCTYPE", srctype)])
+        };
+        let mos = described(
+            dir.path(),
+            "mos.fits",
+            &[
+                primary(&[]),
+                slit("'S200A1  '", "12", "'star-12 '", "'POINT   '"),
+                slit("'S200A1  '", "15", "'gal-15  '", "'EXTENDED'"),
+                slit("'S400A1  '", "12", "'star-12 '", "'POINT   '"),
+            ],
+        );
+        assert_eq!(labels(&mos), ["slit S200A1, source 12", "slit S200A1, source 15", "slit S400A1, source 12"]);
+        assert_eq!(mos[1].slit_name.as_deref(), Some("S200A1"));
+        assert_eq!(mos[1].source_id, Some(15));
+        assert_eq!(mos[1].source_name.as_deref(), Some("gal-15"));
+        assert_eq!(mos[1].srctype.as_deref(), Some("EXTENDED"));
+        assert_eq!(mos[2].source_name.as_deref(), Some("star-12"));
+        assert_eq!(mos[2].srctype.as_deref(), Some("POINT"));
+        assert!(mos.iter().all(|t| t.detector.is_none() && t.extver.is_none()), "{mos:?}");
+
+        let detectors = described(
+            dir.path(),
+            "detectors.fits",
+            &[
+                primary(&[("DETECTOR", "'MULTIPLE'")]),
+                scalar_table(&[("DETECTOR", "'NRS1    '"), ("SPORDER", "-1")]),
+                scalar_table(&[("DETECTOR", "'NRS2    '"), ("SPORDER", "-1")]),
+            ],
+        );
+        assert_eq!(labels(&detectors), ["NRS1", "NRS2"]);
+        assert!(detectors.iter().all(|t| t.sporder == Some(-1)), "{detectors:?}");
+
+        let integrations = described(
+            dir.path(),
+            "integrations.fits",
+            &[
+                primary(&[("DETECTOR", "'MIRIMAGE'")]),
+                scalar_table(&[("INT_NUM", "1"), ("SPORDER", "1")]),
+                scalar_table(&[("INT_NUM", "2"), ("SPORDER", "1")]),
+                scalar_table(&[("SPORDER", "1")]),
+            ],
+        );
+        assert_eq!(labels(&integrations), ["integration 1 of 2", "integration 2 of 2", "table 3 of 3"]);
+        assert_eq!(integrations[1].int_num, Some(2));
+
+        let plain = write_x1d_fixture(dir.path(), "two.fits", 4, &[2, 1], "um");
+        let plain = describe_extract1d_tables(&key(&plain)).unwrap();
+        assert_eq!(labels(&plain), ["table 1 of 2 (EXTVER 2)", "table 2 of 2 (EXTVER 1)"]);
+        assert_eq!(plain.iter().map(|t| t.hdu).collect::<Vec<_>>(), [1, 2]);
+
+        let rows = write_table(
+            dir.path(),
+            "rows.fits",
+            &[("WAVELENGTH", "5D", Some("um")), ("FLUX", "5D", Some("Jy"))],
+            3,
+            vec![0u8; 240],
+            &[],
+        );
+        let rows = describe_extract1d_tables(&key(&rows)).unwrap();
+        assert_eq!((rows[0].n_rows, rows[0].n_channels), (3, 5));
+        assert_eq!(labels(&rows), ["table 1 of 1"]);
+
+        let no_table = write_x1d_fixture(dir.path(), "plain.fits", 4, &[], "um");
+        let err = format!("{:#}", describe_extract1d_tables(&key(&no_table)).unwrap_err());
+        assert!(err.starts_with("no EXTRACT1D table in plain.fits; tables in this file: [1] ASDF (1 rows)"), "{err}");
+    }
+
+    #[test]
+    fn describe_extract1d_tables_reads_a_gzip_compressed_file_under_its_own_path() {
+        use crate::infra::fits::gzip::test_support::gzip_copy;
+        let dir = tempfile::tempdir().unwrap();
+        let plain = write_x1d_fixture(dir.path(), "two_x1d.fits", 4, &[2, 1], "um");
+        let gz = gzip_copy(&plain, "two_x1d.fits.gz");
+        assert_eq!(describe_extract1d_tables(&key(&gz)).unwrap(), describe_extract1d_tables(&key(&plain)).unwrap());
     }
 }

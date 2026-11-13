@@ -17,6 +17,7 @@ const source: ProcessedFile = {
 };
 const view = { file: source, processed: { fitsPath: "/out/velocity.fits", label: "Velocity", previewUrl: "out.png", dimensions: [4, 5] } as ProcessedResult | null, version: 1, palette: "SHO", composite: null as string | null };
 vi.mock("../../../context/PreviewContext", () => ({
+  imagePathOf: (file: { path: string; status: string } | null) => (file !== null && file.status !== "spectrum" ? file.path : null),
   useFileContext: () => ({ file: view.file }),
   useRgbContext: () => ({ setRgbChannels: mocks.assign }),
   useNarrowbandContext: () => ({ selectedPalette: view.palette }),

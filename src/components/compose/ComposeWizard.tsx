@@ -470,7 +470,7 @@ export default function ComposeWizard() {
                   </span>
                 )}
                 {badge && (
-                  <span className={`w-4 h-4 flex items-center justify-center rounded-full text-[8px] font-bold ${isDone ? "bg-emerald-500 text-white" : colors.dot + " text-zinc-900"}`}>
+                  <span className={`w-4 h-4 flex items-center justify-center rounded-full text-[8px] font-bold ${isDone ? "bg-emerald-500 text-zinc-900" : colors.dot + " text-zinc-900"}`}>
                     {isDone && badge === "✓" ? <Check size={8} strokeWidth={3} /> : badge}
                   </span>
                 )}
@@ -517,7 +517,7 @@ export default function ComposeWizard() {
             </span>
           ))}
           {state.compositeReady && (
-            <span className="ml-auto text-emerald-500/70 flex items-center gap-1">
+            <span className="ml-auto text-emerald-500/90 flex items-center gap-1">
               <Check size={9} /> composite ready
             </span>
           )}

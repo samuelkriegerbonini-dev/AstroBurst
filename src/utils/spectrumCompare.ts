@@ -79,6 +79,7 @@ const COMPARED_ERROR_NOTE = `${COMPARED_FLUX_ERR_HEADER}: errors combined in qua
 export interface DocumentSeries {
   flux: number[];
   fluxUnit: string;
+  droppedDq: number;
 }
 
 export interface ComparisonEntry {
@@ -86,6 +87,7 @@ export interface ComparisonEntry {
   kind: "region" | "pixel" | "table" | "document";
   label: string;
   color: string;
+  dashed?: boolean;
   source: SpectrumSource | TableSource | FileSpectrumSource;
   regionText: string | null;
   backgroundId: string | null;
@@ -157,6 +159,7 @@ export function entriesFrom(
       kind: "region",
       label: regionLabel(region, ordinal),
       color: region.props.color ?? COMPARISON_PALETTE[i % COMPARISON_PALETTE.length],
+      dashed: i >= COMPARISON_PALETTE.length,
       source: { kind: "region", shape: region.shape, background },
       regionText: region.props.text,
       backgroundId: background ? region.backgroundId : null,
@@ -361,7 +364,7 @@ export function comparisonSeries(
       const out = v / factor + offset;
       return Number.isFinite(out) ? out : null;
     });
-    series.push({ x: axisValues, y, color: entry.color, label: entry.label });
+    series.push({ x: axisValues, y, color: entry.color, label: entry.label, dashed: entry.dashed === true });
     plotted.push({ id: entry.id, label: entry.label, unit: seriesUnit(mode, fluxUnit), factor, offset });
   });
   omitted.push(...skipped);

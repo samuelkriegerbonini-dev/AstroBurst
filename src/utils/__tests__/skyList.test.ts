@@ -24,6 +24,13 @@ describe("parseAngle", () => {
     expect(parseAngle("24:00:00", "lon").value).toBeCloseTo(0, 9);
   });
 
+  it("keeps a decimal RA that is already inside 0..360 exactly as typed", () => {
+    expect(parseAngle("53.1", "lon").value).toBe(53.1);
+    expect(parseAngle("53.13873891283809", "lon").value).toBe(53.13873891283809);
+    expect(parseSkyCsv("53.1 -28.1").targets[0].lon).toBe(53.1);
+    expect(parseSkyCsv("-10 5").targets[0].lon).toBe(350);
+  });
+
   it("rejects RA above 24 hours, Dec beyond 90 degrees, bad fields and non-finite values", () => {
     expect(parseAngle("25:00:00", "lon").error).toMatch(/exceeds 24 hours/);
     expect(parseAngle("10:61:00", "lon").error).toMatch(/60 or more/);

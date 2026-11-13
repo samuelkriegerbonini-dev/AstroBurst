@@ -6,7 +6,10 @@ use serde_json::{json, Value};
 
 use ndarray::Array2;
 
-use crate::cmd::analysis::{resolve_pixel_mask, PixelMask, HEADER_PROCESSING_PROVENANCE, RES_PHOTCAL};
+use crate::cmd::analysis::{
+    dq_not_applied_warning, layer_report, pixel_units, resolve_pixel_mask, PixelMask, HEADER_PROCESSING_PROVENANCE,
+    RES_PHOTCAL,
+};
 use crate::cmd::catalog::uncalibrated_reason;
 use crate::cmd::common::{blocking_cmd, load_cached_full, load_companions};
 use crate::core::astrometry::wcs::{position_angle_deg, WcsTransform};
@@ -302,6 +305,29 @@ fn with_mask(mut body: Value, mask: Option<&PixelMask>, t0: Instant) -> Value {
     body
 }
 
+fn with_units(mut body: Value, entry: &ImageEntry) -> Value {
+    let (bunit, summed_unit) = pixel_units(entry.header());
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("bunit".to_string(), json!(bunit));
+        obj.insert("summed_unit".to_string(), json!(summed_unit));
+    }
+    body
+}
+
+fn dq_request_note(path: &str, entry: &ImageEntry, exclude_dq: bool, mask: Option<&PixelMask>) -> Option<String> {
+    if !exclude_dq || mask.is_some_and(|m| m.dq_excluded.is_some()) {
+        return None;
+    }
+    dq_not_applied_warning(&layer_report(path, entry))
+}
+
+fn with_note(mut body: Value, note: Option<String>) -> Value {
+    if let (Some(note), Some(list)) = (note, body.get_mut(RES_NOTES).and_then(Value::as_array_mut)) {
+        list.push(Value::String(note));
+    }
+    body
+}
+
 pub(crate) fn stats_for_entry(
     entry: &ImageEntry,
     regions: &[RegionStatsRequest],
@@ -369,7 +395,9 @@ pub async fn region_stats_cmd(
         let exclude = exclude_shapes(exclude)?;
         let clip = sigma_clip_params(sigma, maxiters)?;
         let entry = load_cached_full(&path)?;
-        let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
+        let exclude_dq = exclude_dq.unwrap_or(false);
+        let mask = resolve_pixel_mask(&path, exclude_dq, &exclude, entry.arr().dim());
+        let dq_note = dq_request_note(&path, &entry, exclude_dq, mask.as_ref());
         let err_entry = companion_err(&path, entry.arr().dim());
         let cal = entry_calibration(&path, &entry);
         let entries = stats_for_entry(
@@ -384,7 +412,8 @@ pub async fn region_stats_cmd(
             Some(photcal) => photcal_json(photcal)?,
             None => Value::Null,
         };
-        Ok(json!({
+        let (bunit, summed_unit) = pixel_units(entry.header());
+        let body = json!({
             RES_REGIONS: entries,
             RES_MASKED: mask.as_ref().is_some_and(PixelMask::masked),
             RES_DQ_EXCLUDED: mask.as_ref().and_then(|m| m.dq_excluded),
@@ -394,7 +423,10 @@ pub async fn region_stats_cmd(
             RES_PHOTCAL: photcal,
             RES_CALIBRATION_WARNINGS: cal.warnings,
             RES_PIXEL_AREA_ARCSEC2: cal.pixel_area_arcsec2,
-        }))
+            "bunit": bunit,
+            "summed_unit": summed_unit,
+        });
+        Ok(with_note(body, dq_note))
     })
 }
 
@@ -412,7 +444,9 @@ pub async fn radial_profile_cmd(
         let t0 = Instant::now();
         let exclude = exclude_shapes(exclude)?;
         let entry = load_cached_full(&path)?;
-        let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
+        let exclude_dq = exclude_dq.unwrap_or(false);
+        let mask = resolve_pixel_mask(&path, exclude_dq, &exclude, entry.arr().dim());
+        let dq_note = dq_request_note(&path, &entry, exclude_dq, mask.as_ref());
         let profile = radial_profile(
             entry.arr(),
             x,
@@ -421,7 +455,7 @@ pub async fn radial_profile_cmd(
             background.map(|b| (b[0], b[1])),
             mask.as_ref().map(|m| &m.map),
         )?;
-        Ok(with_mask(serde_json::to_value(profile)?, mask.as_ref(), t0))
+        Ok(with_note(with_units(with_mask(serde_json::to_value(profile)?, mask.as_ref(), t0), &entry), dq_note))
     })
 }
 
@@ -439,9 +473,11 @@ pub async fn line_cut_cmd(
         let t0 = Instant::now();
         let exclude = exclude_shapes(exclude)?;
         let entry = load_cached_full(&path)?;
-        let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
+        let exclude_dq = exclude_dq.unwrap_or(false);
+        let mask = resolve_pixel_mask(&path, exclude_dq, &exclude, entry.arr().dim());
+        let dq_note = dq_request_note(&path, &entry, exclude_dq, mask.as_ref());
         let cut = line_cut(entry.arr(), x1, y1, x2, y2, mask.as_ref().map(|m| &m.map))?;
-        Ok(with_mask(serde_json::to_value(cut)?, mask.as_ref(), t0))
+        Ok(with_note(with_units(with_mask(serde_json::to_value(cut)?, mask.as_ref(), t0), &entry), dq_note))
     })
 }
 
@@ -536,7 +572,9 @@ pub async fn sb_profile_cmd(
         }
         let exclude = exclude_shapes(exclude)?;
         let entry = load_cached_full(&path)?;
-        let mask = resolve_pixel_mask(&path, exclude_dq.unwrap_or(false), &exclude, entry.arr().dim());
+        let exclude_dq = exclude_dq.unwrap_or(false);
+        let mask = resolve_pixel_mask(&path, exclude_dq, &exclude, entry.arr().dim());
+        let dq_note = dq_request_note(&path, &entry, exclude_dq, mask.as_ref());
         let profile = elliptical_profile(
             entry.arr(),
             x,
@@ -549,7 +587,8 @@ pub async fn sb_profile_cmd(
             mask.as_ref().map(|m| &m.map),
         )?;
         let cal = entry_calibration(&path, &entry);
-        sb_profile_json(&profile, &shape, background.as_ref(), &cal, mask.as_ref(), t0)
+        let body = sb_profile_json(&profile, &shape, background.as_ref(), &cal, mask.as_ref(), t0)?;
+        Ok(with_note(with_units(body, &entry), dq_note))
     })
 }
 
@@ -582,7 +621,8 @@ pub async fn regions_export_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::analysis::resolve_dq_mask;
+    use crate::cmd::analysis::layer_fixtures::{afw_star_mef, flat};
+    use crate::cmd::analysis::{resolve_dq_mask, DQ_NOT_APPLIED_PREFIX};
     use crate::core::imaging::region::test_support::{header_with_cd, north_up_cd};
     use crate::core::imaging::region_file::RegionProperties;
     use crate::infra::fits::reader::test_fixtures::{sci_err_dq_mef_with_dq_cards, write_test_mef, HduData, TestHdu};
@@ -664,6 +704,83 @@ mod tests {
         assert_eq!(stats["n_padding"], 1, "{stats}");
         assert_eq!(stats["count"], 10, "{stats}");
         assert_eq!(stats["sum"], 85.0, "{stats}");
+    }
+
+    const NO_DQ_PLANE_NOTE: &str = "DQ exclusion requested but not applied: this image has no DQ plane";
+
+    fn dq_not_applied_notes(out: &Value) -> Vec<&str> {
+        out[RES_NOTES]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap())
+            .filter(|n| n.starts_with(DQ_NOT_APPLIED_PREFIX))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn region_stats_notes_say_when_dq_exclusion_was_requested_and_not_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let target = || vec![req("c", RegionShape::Circle { x: 32.0, y: 32.0, r: 5.0 })];
+
+        let requested = region_stats_cmd(key.clone(), target(), Some(true), None, None, None).await.unwrap();
+        assert_eq!(requested[RES_NOTES], json!([NO_DQ_PLANE_NOTE]), "{requested}");
+        assert!(requested[RES_DQ_EXCLUDED].is_null(), "{requested}");
+        assert_eq!(requested[RES_MASKED], false, "{requested}");
+
+        let not_requested = region_stats_cmd(key.clone(), target(), None, None, None, None).await.unwrap();
+        assert_eq!(not_requested[RES_NOTES], json!([]), "{not_requested}");
+
+        let with_exclude_region =
+            region_stats_cmd(key, target(), Some(true), None, None, Some(vec![star_exclusion()])).await.unwrap();
+        assert_eq!(with_exclude_region[RES_MASKED], true, "{with_exclude_region}");
+        assert!(with_exclude_region[RES_DQ_EXCLUDED].is_null(), "{with_exclude_region}");
+        assert_eq!(with_exclude_region[RES_NOTES], json!([NO_DQ_PLANE_NOTE]), "{with_exclude_region}");
+
+        let path = dir.path().join("usable_dq.fits");
+        let mut dq = vec![-2147483648i32; 16];
+        dq[1] = -2147483647;
+        sci_err_dq_mef_with_dq_cards(&path, 4, 4, dq, vec![("TELESCOP", "'JWST'".into())]);
+        let whole = RegionShape::Box { x: 1.5, y: 1.5, width: 4.0, height: 4.0, angle: 0.0 };
+        let applied = region_stats_cmd(format!("{}#hdu=1", path.to_str().unwrap()), vec![req("all", whole)], Some(true), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(applied[RES_DQ_EXCLUDED], 1, "{applied}");
+        assert!(dq_not_applied_notes(&applied).is_empty(), "{applied}");
+    }
+
+    #[tokio::test]
+    async fn profiles_and_line_cut_say_when_dq_exclusion_was_requested_and_not_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_star_field(dir.path());
+        let ellipse = || RegionShape::Ellipse { x: 32.0, y: 32.0, rx: 12.0, ry: 8.0, angle: 0.0 };
+
+        let radial = radial_profile_cmd(key.clone(), 32.0, 32.0, 10.0, None, Some(true), None).await.unwrap();
+        assert_eq!(radial[RES_NOTES], json!([NO_DQ_PLANE_NOTE]), "{}", radial[RES_NOTES]);
+        let cut = line_cut_cmd(key.clone(), 5.0, 5.0, 50.0, 50.0, Some(true), None).await.unwrap();
+        assert_eq!(cut[RES_NOTES], json!([NO_DQ_PLANE_NOTE]), "{}", cut[RES_NOTES]);
+        let sb = sb_profile_cmd(key.clone(), ellipse(), None, None, Some(true), None).await.unwrap();
+        assert_eq!(sb[RES_NOTES], json!([SB_COARSE_BIN_NOTE, SB_NO_BACKGROUND_NOTE, NO_DQ_PLANE_NOTE]), "{}", sb[RES_NOTES]);
+
+        let radial = radial_profile_cmd(key.clone(), 32.0, 32.0, 10.0, None, None, None).await.unwrap();
+        assert_eq!(radial[RES_NOTES], json!([]), "{}", radial[RES_NOTES]);
+        let cut = line_cut_cmd(key.clone(), 5.0, 5.0, 50.0, 50.0, None, None).await.unwrap();
+        assert_eq!(cut[RES_NOTES], json!([]), "{}", cut[RES_NOTES]);
+        let sb = sb_profile_cmd(key, ellipse(), None, None, None, None).await.unwrap();
+        assert_eq!(sb[RES_NOTES], json!([SB_COARSE_BIN_NOTE, SB_NO_BACKGROUND_NOTE]), "{}", sb[RES_NOTES]);
+    }
+
+    #[tokio::test]
+    async fn region_statistics_use_a_named_mask_and_a_converted_error_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = afw_star_mef(&dir.path().join("calexp.fits"), flat("VARIANCE", 4.0));
+        let out = region_stats_cmd(key, vec![req("c", RegionShape::Circle { x: 32.0, y: 32.0, r: 5.0 })], Some(true), None, None, None)
+            .await
+            .unwrap();
+        assert!(out[RES_DQ_EXCLUDED].as_u64().is_some_and(|excluded| excluded > 0), "{out}");
+        assert!(out[RES_REGIONS][0][RES_STATS]["sum_err"].is_number(), "{out}");
+        assert!(dq_not_applied_notes(&out).is_empty(), "{out}");
     }
 
     #[tokio::test]
@@ -1930,5 +2047,90 @@ mod tests {
         let bad_bg = RegionShape::Circle { x: 1.0, y: 1.0, r: -2.0 };
         let err = sb_profile_cmd("nowhere.fits".into(), circle(4.0), None, Some(bad_bg), None, None).await.unwrap_err();
         assert!(err.contains("invalid region"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn region_statistics_name_the_pixel_unit_and_the_unit_of_a_sum() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_jwst_disc(dir.path(), "unit_disc.fits", &[]);
+        let out = region_stats_cmd(key, vec![req("c", circle(4.0))], None, None, None, None).await.unwrap();
+        assert_eq!(out["bunit"], "MJy/sr");
+        assert_eq!(out["summed_unit"], "MJy/sr x pix");
+    }
+
+    #[tokio::test]
+    async fn region_statistics_of_an_uncalibrated_image_still_name_its_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adu_ones.fits");
+        let mut header = HduHeader::empty();
+        header.set("BUNIT", "adu".into());
+        write_fits_mono(path.to_str().unwrap(), &Array2::<f32>::from_elem((64, 64), 1.0), Some(&header)).unwrap();
+        let key = path.to_str().unwrap().to_string();
+        let out = region_stats_cmd(key, vec![req("c", circle(4.0))], None, None, None, None).await.unwrap();
+        assert!(out[RES_PHOTCAL].is_null());
+        assert_eq!(out["bunit"], "adu");
+        assert_eq!(out["summed_unit"], "adu");
+
+        let star = write_star_field(dir.path());
+        let shape = RegionShape::Circle { x: STAR_X as f64, y: STAR_Y as f64, r: 4.0 };
+        let out = region_stats_cmd(star, vec![req("c", shape)], None, None, None, None).await.unwrap();
+        let obj = out.as_object().unwrap();
+        assert!(obj.contains_key("bunit") && obj.contains_key("summed_unit"));
+        assert!(out["bunit"].is_null());
+        assert!(out["summed_unit"].is_null());
+    }
+
+    #[tokio::test]
+    async fn profiles_and_the_line_cut_name_the_pixel_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let ellipse = RegionShape::Ellipse { x: DISC_CENTRE, y: DISC_CENTRE, rx: 12.0, ry: 8.0, angle: 0.0 };
+        let key = write_jwst_disc(dir.path(), "unit_disc.fits", &[]);
+        let results = [
+            radial_profile_cmd(key.clone(), DISC_CENTRE, DISC_CENTRE, 12.0, None, None, None).await.unwrap(),
+            line_cut_cmd(key.clone(), 40.0, 50.0, 60.0, 50.0, None, None).await.unwrap(),
+            sb_profile_cmd(key.clone(), ellipse.clone(), None, None, None, None).await.unwrap(),
+        ];
+        for out in &results {
+            assert_eq!(out["bunit"], "MJy/sr");
+            assert_eq!(out["summed_unit"], "MJy/sr x pix");
+        }
+
+        let star = write_star_field(dir.path());
+        let star_ellipse = RegionShape::Ellipse { x: STAR_X as f64, y: STAR_Y as f64, rx: 12.0, ry: 8.0, angle: 0.0 };
+        let results = [
+            radial_profile_cmd(star.clone(), STAR_X as f64, STAR_Y as f64, 12.0, None, None, None).await.unwrap(),
+            line_cut_cmd(star.clone(), 20.0, 30.0, 40.0, 30.0, None, None).await.unwrap(),
+            sb_profile_cmd(star.clone(), star_ellipse, None, None, None, None).await.unwrap(),
+        ];
+        for out in &results {
+            let obj = out.as_object().unwrap();
+            assert!(obj.contains_key("bunit") && obj.contains_key("summed_unit"));
+            assert!(out["bunit"].is_null());
+            assert!(out["summed_unit"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_unit_keys_change_no_other_key_of_the_region_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_jwst_disc(dir.path(), "unit_disc.fits", &[]);
+        let out = region_stats_cmd(key, vec![req("c", circle(4.0))], None, None, None, None).await.unwrap();
+        let mut keys: Vec<&str> = out.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            RES_REGIONS,
+            RES_MASKED,
+            RES_DQ_EXCLUDED,
+            RES_REGION_EXCLUDED,
+            RES_NOTES,
+            RES_ELAPSED_MS,
+            RES_PHOTCAL,
+            RES_CALIBRATION_WARNINGS,
+            RES_PIXEL_AREA_ARCSEC2,
+            "bunit",
+            "summed_unit",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
     }
 }

@@ -1,4 +1,4 @@
-import { parseImageRef } from "./imageRef";
+import { sourceFile } from "./imageRef";
 import { samePath } from "./processingChain";
 
 const FITS_OUTPUT_KEYS = ["fits_path", "r_path", "g_path", "b_path", "corrected_fits", "model_fits", "output_path"] as const;
@@ -28,7 +28,7 @@ export function overwrittenFileIds(files: readonly LoadedFileRef[], written: rea
   if (written.length === 0) return [];
   return files
     .filter((file) => {
-      const source = parseImageRef(file.path).path;
+      const source = sourceFile(file.path);
       return written.some((path) => samePath(source, path));
     })
     .map((file) => file.id);

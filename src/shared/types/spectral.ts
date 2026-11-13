@@ -1,5 +1,6 @@
 import type { ContinuumWindows } from "./cube";
 import type { RegionShape } from "./regions";
+import type { TsoPick } from "./tso";
 
 export type SpectralAxisKind = "wave" | "awav" | "freq" | "vrad" | "vopt" | "velo" | "zopt" | "unknown";
 
@@ -62,6 +63,16 @@ export interface FileSpectrumSource {
 
 export type LineMeasurementSource = SpectrumSource | FileSpectrumSource;
 
+export interface SeriesSpectrumSource {
+  kind: "series";
+  paths: string[];
+  detector: string;
+  sporder: number | null;
+  pick: TsoPick;
+}
+
+export type MeasuredLineSource = LineMeasurementSource | SeriesSpectrumSource;
+
 export interface TableSource {
   kind: "table";
   path: string;
@@ -113,6 +124,14 @@ export interface LineVelocity {
   source_centroid_kms?: number | null;
   source_sigma_kms?: number | null;
   source_fwhm_kms?: number | null;
+  centroid_err_kms?: number | null;
+  sigma_err_kms?: number | null;
+  fwhm_err_kms?: number | null;
+  source_centroid_err_kms?: number | null;
+  source_sigma_err_kms?: number | null;
+  source_fwhm_err_kms?: number | null;
+  z_line?: number | null;
+  z_line_err?: number | null;
 }
 
 export interface GaussianFitResult {
@@ -151,13 +170,25 @@ export interface LineMeasurement {
   continuum_windows: ContinuumWindows;
   flux: number | null;
   flux_err: number | null;
+  flux_si?: number | null;
+  flux_si_err?: number | null;
+  flux_cgs?: number | null;
+  flux_cgs_err?: number | null;
+  flux_physical_basis?: string;
   equivalent_width: number | null;
   centroid: number | null;
   sigma: number | null;
   fwhm: number | null;
   peak: number | null;
   peak_channel: number;
+  peak_axis?: number | null;
   snr: number | null;
+  equivalent_width_err?: number | null;
+  centroid_err?: number | null;
+  sigma_err?: number | null;
+  fwhm_err?: number | null;
+  errors_reliable?: boolean;
+  width_errors_reliable?: boolean;
   velocity: LineVelocity | null;
   fit: GaussianFitResult | null;
   err_used: boolean;
@@ -166,7 +197,11 @@ export interface LineMeasurement {
   n_nonfinite: number;
   n_bad_err: number;
   err_source: string;
+  line_id?: string | null;
+  line_label?: string | null;
+  redshift?: number | null;
+  wavelength_frame?: "air" | "vacuum" | null;
   notes: string[];
   elapsed_ms: number;
-  source: LineMeasurementSource;
+  source: MeasuredLineSource;
 }

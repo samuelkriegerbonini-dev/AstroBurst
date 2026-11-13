@@ -16,6 +16,10 @@ export const ONE_D_ARRAY_HINT = "1D spectrum, 1D array";
 
 const NO_IMAGE_HDU_MARKER = "no HDU in this file holds a 2D image";
 
+export function noImageHduVerdict(message: string | null | undefined): boolean {
+  return message?.includes(NO_IMAGE_HDU_MARKER) ?? false;
+}
+
 function ingestVerdict(message: string): string {
   const end = message.indexOf(NO_IMAGE_HDU_MARKER);
   return end === -1 ? message : message.slice(0, end);

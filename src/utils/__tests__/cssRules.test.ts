@@ -170,3 +170,60 @@ describe("Run button and palette classes", () => {
     expect(undefinedClasses).toEqual([]);
   });
 });
+
+describe("rules other packages rely on", () => {
+  it("draws the Run button label with tabular figures, so a live percentage keeps its width", () => {
+    expect(rule(indexCss, ".ab-run-btn").get("font-variant-numeric")).toBe("tabular-nums");
+  });
+
+  it("defines the compact error alert used by the science panels", () => {
+    const compact = rule(indexCss, ".ab-error-alert-compact");
+    expect(compact.get("font-size")).toBe("10px");
+    expect(compact.get("padding")).toBe("6px 10px");
+  });
+
+  it("marks a focused resize handle with its accent line instead of an outline", () => {
+    expect(rule(indexCss, ".ab-resize-handle:focus-visible::after").get("opacity")).toBe("1");
+    expect(rule(indexCss, ".ab-resize-handle-h:focus-visible::after").get("opacity")).toBe("1");
+    expect(rule(indexCss, ".ab-resize-handle:focus-visible").get("outline")).toBe("none");
+  });
+});
+
+function splitBaseLayer(text: string): { blocks: string[]; rest: string } {
+  const blocks: string[] = [];
+  let rest = "";
+  let from = 0;
+  for (const m of text.matchAll(/@layer\s+base\s*\{/g)) {
+    let depth = 0;
+    for (let i = m.index + m[0].length - 1; i < text.length; i += 1) {
+      if (text[i] === "{") depth += 1;
+      if (text[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          blocks.push(text.slice(m.index + m[0].length, i));
+          rest += text.slice(from, m.index);
+          from = i + 1;
+          break;
+        }
+      }
+    }
+  }
+  return { blocks, rest: rest + text.slice(from) };
+}
+
+describe("focus outline", () => {
+  const { blocks, rest } = splitBaseLayer(indexCss);
+
+  it("keeps the global focus outline in the base layer, so that an outline utility can remove it", () => {
+    const layered = blocks.map((block) => ruleBody(block, ":focus-visible")).filter((body) => body !== null);
+    expect(layered).toHaveLength(1);
+    const outline = declarations(layered[0]);
+    expect(outline.get("outline")).toBe("2px solid var(--ab-accent)");
+    expect(outline.get("outline-offset")).toBe("2px");
+    expect(ruleBody(rest, ":focus-visible")).toBeNull();
+  });
+
+  it("keeps the focus mark of the resize handles outside the layer", () => {
+    expect(rule(rest, ".ab-resize-handle:focus-visible").get("outline")).toBe("none");
+  });
+});

@@ -145,6 +145,11 @@ describe("fileListNames", () => {
     expect(texts([`${x1d}.fits.gz`])).toEqual(texts([`${x1d}.fits`]));
   });
 
+  it("drops a bzip2 FITS extension whole, like a gzip one", () => {
+    expect(texts(["673nmos_bz.fits.bz2", "502nmos.fit.bz2", "M42.FTS.BZ2"])).toEqual(texts(["673nmos_bz.fits", "502nmos.fit", "M42.FTS"]));
+    expect(texts(["notes.tar.bz2"])).toEqual(texts(["notes.tar.gz"]));
+  });
+
   it("tells a plain and a gzip copy of one file in the same folder apart by their names", () => {
     expect(texts(["673nmos.fits", "673nmos.fits.gz"])).toEqual(["673nmos.fits", "673nmos.fits.gz"]);
     expect(labelsOf(["C:/a/673nmos.fits", "C:/a/673nmos.fits"])).toEqual(["673nmos", "673nmos"]);

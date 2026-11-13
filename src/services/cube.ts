@@ -17,7 +17,7 @@ import type {
   ScienceDqPolicy,
 } from "../shared/types/cube";
 import type { RegionShape } from "../shared/types/regions";
-import { parseImageRef } from "../utils/imageRef";
+import { sourceFile } from "../utils/imageRef";
 
 interface RawCubeSpectrum {
   spectrum?: number[];
@@ -29,7 +29,7 @@ interface RawCubeSpectrum {
 }
 
 export async function releaseCubes(paths: readonly string[]): Promise<void> {
-  const sources = [...new Set(paths.map((p) => parseImageRef(p).path))];
+  const sources = [...new Set(paths.map((p) => sourceFile(p)))];
   const settled = await Promise.allSettled(sources.map((path) => typedInvoke<void>("release_cube_cmd", { path })));
   settled.forEach((s, i) => {
     if (s.status === "rejected") console.warn(`[AstroBurst] Could not release the cube mapping of ${sources[i]}:`, s.reason);

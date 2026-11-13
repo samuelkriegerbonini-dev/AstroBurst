@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { prerender } from "react-dom/static";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -6,8 +6,12 @@ import { CompositeProvider } from "../../../context/CompositeContext";
 import { ComposeWizardProvider } from "../../../context/ComposeWizardContext";
 import { PreviewProvider, fileKeyOf, useRenderActions } from "../../../context/PreviewContext";
 import ProcessingTab from "../ProcessingTab";
+import processingTabSource from "../ProcessingTab.tsx?raw";
+import { sectionMemory } from "../../../utils/sectionMemory";
+import { historyRerunStore } from "../../../utils/historyRerunStore";
 import type { ProcessedFile } from "../../../shared/types";
 import type { ChainStep } from "../../../shared/types/preview";
+import type { OpSpec } from "../../../shared/types/ops";
 
 const FILE: ProcessedFile = {
   id: "groups",
@@ -36,6 +40,13 @@ const CARD_TITLES: Record<string, string> = {
   local_contrast: "Local contrast on a stretched image",
   debayer: "Colour-camera frames: debayer or extract CFA planes",
 };
+
+const ARCSINH: OpSpec = { op: "arcsinh", v: 1, factor: 50 };
+
+afterEach(() => {
+  sectionMemory.reset();
+  historyRerunStore.clear();
+});
 
 interface Pill {
   section: string | null;
@@ -133,5 +144,31 @@ describe("ProcessingTab section state for assistive technology", () => {
     expect(background).toMatch(/<span class="ab-processing-pill-dot[^"]*" title="Has a result in this chain"><\/span>/);
     expect(background).toContain('<span class="sr-only">, has a result in this chain</span>');
     expect(pillContent(html, "denoise")).not.toContain("sr-only");
+  });
+});
+
+function currentPills(html: string): string[] {
+  return pillTags(html).filter(([, tag]) => tag.includes('aria-current="true"')).map(([section]) => section);
+}
+
+describe("ProcessingTab section memory", () => {
+  it("opens on the section remembered from the last time the tool was open", async () => {
+    sectionMemory.set("processing", "psf");
+    expect(currentPills(await renderTab())).toEqual(["psf"]);
+  });
+
+  it("lets a pending History rerun choose the section over the remembered one", async () => {
+    sectionMemory.set("processing", "psf");
+    historyRerunStore.request({ section: "stretch", op: ARCSINH, node: "n0003", downstream: false, scope: { imageKey: FILE.path, basePath: null } });
+    expect(currentPills(await renderTab())).toEqual(["stretch"]);
+  });
+
+  it("ignores a remembered value that is not a Processing section", async () => {
+    sectionMemory.set("processing", "mosaic");
+    expect(currentPills(await renderTab())).toEqual(["background"]);
+  });
+
+  it("writes the open section back", () => {
+    expect(processingTabSource).toContain('sectionMemory.set("processing", active)');
   });
 });

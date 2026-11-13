@@ -1,5 +1,7 @@
 import type { PixelTableResult, PixelTableStats } from "../shared/types/analysis";
-import { buildCsv, type CsvColumn } from "./catalogCsv";
+import type { PixelTableLayers } from "../shared/types/layers";
+import { buildCsv, CSV_LINE_END, type CsvColumn } from "./catalogCsv";
+import { exportEntries, provenanceLines, unitLines, withProvenance, type ProvenanceEntry } from "./csvProvenance";
 
 export type CellTone = "normal" | "max" | "min" | "nan" | "dq";
 
@@ -31,12 +33,39 @@ export function rowIndices(result: Pick<PixelTableResult, "y0" | "size">): numbe
   return Array.from({ length: result.size }, (_, i) => result.y0 + i);
 }
 
-export function pixelTableCsv(result: PixelTableResult, grid: (number | null)[][] = result.values): string {
+export interface PixelCsvContext {
+  file: string | null;
+  plane: PixelTablePlane;
+  exportedUtc: string;
+}
+
+const PIXEL_COORDINATES_TEXT = "0-based, integer pixel centres; rows are y, columns are x";
+
+function pixelCsvProvenance(result: PixelTableResult & PixelTableLayers, context: PixelCsvContext): string[] {
+  const entries: ProvenanceEntry[] = [
+    ...exportEntries(context.file, context.exportedUtc),
+    ["plane", context.plane],
+    ["centre_x", result.x],
+    ["centre_y", result.y],
+    ["pixel_coordinates", PIXEL_COORDINATES_TEXT],
+  ];
+  if (context.plane === "ERR" && result.err_source != null) entries.push(["err_source", result.err_source]);
+  if (result.dq_table !== null) entries.push(["dq_table", result.dq_table]);
+  const unit = context.plane === "WAVELENGTH" ? result.wavelength_unit : result.unit;
+  return [...provenanceLines(entries), ...columnIndices(result).flatMap((x) => unitLines({ [String(x)]: unit }))];
+}
+
+export function pixelTableCsv(
+  result: PixelTableResult & PixelTableLayers,
+  grid: (number | null)[][] = result.values,
+  context?: PixelCsvContext,
+): string {
   const columns: CsvColumn<number>[] = [
     { header: CSV_CORNER_HEADER, value: (rowIndex) => result.y0 + rowIndex },
     ...columnIndices(result).map((x, col) => ({ header: String(x), value: (rowIndex: number) => grid[rowIndex]?.[col] ?? null })),
   ];
-  return buildCsv(columns, Array.from({ length: result.size }, (_, i) => i));
+  const table = buildCsv(columns, Array.from({ length: result.size }, (_, i) => i));
+  return context === undefined ? table : withProvenance(pixelCsvProvenance(result, context), table, CSV_LINE_END);
 }
 
 export function formatCell(v: number | null, digits: number): string {
@@ -101,4 +130,40 @@ export function cellTone(v: number | null, stats: PixelTableStats, dqNames: stri
   if (stats.max !== null && v === stats.max) return "max";
   if (stats.min !== null && v === stats.min) return "min";
   return "normal";
+}
+
+export const PIXEL_TABLE_KEY: readonly { tone: Exclude<CellTone, "normal">; label: string }[] = [
+  { tone: "dq", label: "DQ flagged *" },
+  { tone: "max", label: "max" },
+  { tone: "min", label: "min" },
+  { tone: "nan", label: "no value" },
+];
+
+export const DQ_CELL_GLYPH = "*";
+
+const UNTOUCHED_PIPELINE_ERROR = /^(EXTNAME ERR|ASDF array [^,]*), [^:]*: as is$/;
+
+export function errorOriginLine(source: string | null | undefined): string | null {
+  if (!source || UNTOUCHED_PIPELINE_ERROR.test(source)) return null;
+  return `± from ${source}`;
+}
+
+export function cellMark(tone: CellTone, dqNames: string | null, centre: boolean): { glyph: string | null; srText: string | null } {
+  const flagged = tone === "dq";
+  const parts = [...(flagged ? [`DQ: ${dqNames}`] : []), ...(centre ? ["clicked pixel"] : [])];
+  return { glyph: flagged ? DQ_CELL_GLYPH : null, srText: parts.length > 0 ? parts.join(", ") : null };
+}
+
+export function centreSummary(result: Pick<PixelTableResult, "x" | "y" | "size" | "dq_names">): string {
+  const half = Math.floor(result.size / 2);
+  const names = result.dq_names?.[half]?.[half];
+  return `clicked (${result.x}, ${result.y})${names ? `: DQ ${names}` : ""}`;
+}
+
+export function layerNotes(layers: PixelTableLayers): { origin: string | null; gaps: string[] } {
+  const gaps = [
+    ...(layers.err_unavailable ? [`ERR not used: ${layers.err_unavailable}`] : []),
+    ...(layers.dq_unavailable ? [`DQ not used: ${layers.dq_unavailable}`] : []),
+  ];
+  return { origin: layers.err_source ? `ERR ${layers.err_source}` : null, gaps };
 }

@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement } from "react";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createFramePublishGate } from "../../../utils/cubeNavigation";
+import { FRAME_KEY_HINT, createFramePublishGate } from "../../../utils/cubeNavigation";
 import { framePublishers } from "../../../utils/rampLabels";
 import type { CollapseRangeResult, CubeDims, LineFitResult, MomentMapsResult, NoiseFactor, RegionSpectrum } from "../../../shared/types/cube";
 import type { Region, RegionShape } from "../../../shared/types/regions";
-import { defaultContinuumWindows } from "../../../utils/spectrumRange";
+import { AUTO_WINDOWS_RULE, guardedContinuumWindows } from "../../../utils/lineWindows";
 import type { RampInfo } from "../../../shared/types/ramp";
 import type { LineMeasurement, SpectralAxisInfo } from "../../../shared/types/spectral";
 import type { Spectrum1d } from "../../../shared/types/spectrum1d";
@@ -31,11 +31,18 @@ const backend = vi.hoisted(() => ({
   fit: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   inspect: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
 }));
-const spectrumState = vi.hoisted(() => ({ region: null as unknown, regionSource: null as unknown, regionContinuum: null as unknown }));
+const spectrumState = vi.hoisted(() => ({
+  region: null as unknown,
+  regionSource: null as unknown,
+  regionContinuum: null as unknown,
+  regionError: null as string | null,
+}));
 const spectrumActions = vi.hoisted(() => ({ begin: vi.fn(() => 41), commit: vi.fn(), fail: vi.fn(), clear: vi.fn() }));
 const regionDocState = vi.hoisted(() => ({ regions: [] as unknown[] }));
 const bandCalls = vi.hoisted(() => ({ calls: [] as { y: readonly number[]; err: readonly number[] | null }[] }));
 const renderState = vi.hoisted(() => ({ processed: null as unknown }));
+const csvInputs = vi.hoisted(() => ({ calls: [] as unknown[] }));
+const saveDialog = vi.hoisted(() => ({ save: vi.fn<(...args: unknown[]) => Promise<string | null>>() }));
 
 vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../../services/spectral", async (importOriginal) => ({
@@ -84,6 +91,17 @@ vi.mock("../../../utils/lineMeasure", async (importOriginal) => {
     },
   };
 });
+vi.mock("../../../utils/spectrumExport", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../utils/spectrumExport")>();
+  return {
+    ...actual,
+    spectrumCsv: (...args: Parameters<typeof actual.spectrumCsv>) => {
+      csvInputs.calls.push(args[0]);
+      return actual.spectrumCsv(...args);
+    },
+    saveCsvDialog: (...args: unknown[]) => saveDialog.save(...args),
+  };
+});
 
 vi.mock("../../../context/PreviewContext", () => ({
   useCubeContext: () => ({ isCube: true, ramp: cubeState.ramp, rampSource: cubeState.ramp ? "fits" : null }),
@@ -96,7 +114,7 @@ vi.mock("../../../hooks/useSpectrumStore", () => ({
     regionSource: spectrumState.regionSource,
     regionContinuum: spectrumState.regionContinuum,
     regionLoading: false,
-    regionError: null,
+    regionError: spectrumState.regionError,
   }),
   beginRegionSpectrum: spectrumActions.begin,
   clearRegionSpectrum: spectrumActions.clear,
@@ -120,8 +138,23 @@ vi.mock("../../CubeFrameNav", () => ({ default: () => "[frame-nav]" }));
 
 import { hooks } from "../../../test/hookRuntime";
 import SpectroscopyPanel from "../SpectroscopyPanel";
+import SpectrumPlot from "../SpectrumPlot";
+import SpectrumViewControls from "../SpectrumViewControls";
+import RangeEdgeField from "../RangeEdgeField";
+import { SPECTRUM_PLOT_HEIGHT, SPECTRUM_PLOT_PAD, documentPlot, type SpectrumPlotModel } from "../../../utils/spectrumPlotModel";
+import { cubeViewKey, documentViewKey, spectrumViewStore } from "../../../hooks/useSpectrumViewStore";
 import OutputNote from "../OutputNote";
 import StaleResultNote, { ReopenedProductNote } from "../StaleResultNote";
+import { fluxUnitLabel } from "../../../utils/spectrumExport";
+import { lineFitCubeResult, type LineFitRun } from "../../../utils/lineFit";
+import { bandById, pickedBandLabel, type BandMark } from "../../../utils/lineList";
+import ExportNotice from "../ExportNotice";
+import SpectrumComparisonSection from "../SpectrumComparisonSection";
+import spectroscopyPanelSource from "../SpectroscopyPanel.tsx?raw";
+import { adHocErrorBoxLines } from "../../../test/panelRules";
+import { SMALL_BUTTON_CLASS } from "../../ui";
+
+beforeEach(() => spectrumViewStore.reset());
 
 const RAMP: RampInfo = {
   kind: "jwst_groups",
@@ -236,6 +269,8 @@ describe("SpectroscopyPanel grey text", () => {
 const DOC_PATH = "C:/data/ha_bess.fits";
 const N_DOC = 40;
 const AIR_VALUES = Array.from({ length: N_DOC }, (_, i) => 0.6555 + i * 1e-4);
+const DOC_VIEW_KEY = documentViewKey(DOC_PATH, "0");
+const CUBE_VIEW_KEY = cubeViewKey("C:/data/cube.fits");
 
 function airAxis(kind: SpectralAxisInfo["kind"] = "awav"): SpectralAxisInfo {
   return {
@@ -324,9 +359,9 @@ describe("SpectroscopyPanel document mode", () => {
     expect(html).toContain("[axis-controls]");
     expect(html).toContain("[line-list]");
     expect(html).toContain("continuum A");
-    expect(html).toContain('aria-label="Range first channel z0"');
-    expect(html).toContain('aria-label="Continuum B last channel"');
-    expect(html.match(/inputMode="decimal"/g)?.length).toBe(6);
+    expect(html).toContain('aria-label="Range first channel, in μm"');
+    expect(html).toContain('aria-label="Continuum B last channel, in μm"');
+    expect(html.match(/inputMode="decimal"/g)?.length).toBe(7);
     expect(html).toContain("[line-measure]");
   });
 
@@ -408,6 +443,24 @@ function pass(props: Props): ReactNode {
   return tree;
 }
 
+const plotFunction = (SpectrumPlot as unknown as { type: (props: Props) => ReactNode }).type;
+const plotRun = { cells: [] as typeof hooks.run.cells };
+
+function spectrumPlotOf(panelTree: ReactNode): Props {
+  return mustFind(panelTree, (_p, type) => type === SpectrumPlot, "spectrum plot");
+}
+
+function renderPlot(panelTree: ReactNode): ReactNode {
+  const plotProps = spectrumPlotOf(panelTree);
+  const panelCells = hooks.run.cells;
+  hooks.run.cells = plotRun.cells;
+  try {
+    return hooks.render(plotFunction, plotProps) as ReactNode;
+  } finally {
+    hooks.run.cells = panelCells;
+  }
+}
+
 function measured(source: LineMeasurement["source"]): LineMeasurement {
   return {
     z0: 5,
@@ -453,7 +506,7 @@ function lineSection(tree: ReactNode): Props {
 }
 
 function commitRangeStart(tree: ReactNode, z0: number): void {
-  const box = mustFind(tree, (p) => p.label === "Range first channel z0", "range z0 box");
+  const box = mustFind(tree, (p) => p.edge === "range:z0", "range z0 box");
   (box.onCommit as (value: number) => void)(z0);
 }
 
@@ -467,6 +520,7 @@ describe("SpectroscopyPanel document-mode line measurement", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectralMock.measure.mockReset();
     spectralMock.axis.mockReset();
@@ -491,7 +545,7 @@ describe("SpectroscopyPanel document-mode line measurement", () => {
     pass(props);
     commitRangeStart(pass(props), 5);
     const tree = pass(props);
-    const overlay = mustFind(tree, (p) => p.className === "absolute inset-0 w-full pointer-events-none", "overlay canvas");
+    const overlay = mustFind(renderPlot(tree), (p) => p.className === "absolute inset-0 w-full pointer-events-none", "overlay canvas");
     const ctx = new Proxy({} as Record<string | symbol, unknown>, {
       get: (target, key) => (key in target ? target[key] : key === "measureText" ? () => ({ width: 10 }) : () => {}),
       set: (target, key, value) => {
@@ -499,12 +553,27 @@ describe("SpectroscopyPanel document-mode line measurement", () => {
         return true;
       },
     });
-    (overlay.ref as { current: unknown }).current = { width: 400, height: 180, getContext: () => ctx };
+    (overlay.ref as { current: unknown }).current = { width: 400, height: SPECTRUM_PLOT_HEIGHT, getContext: () => ctx };
     overlayAxes.calls = [];
     await (lineSection(tree).onMeasure as () => Promise<void>)();
-    pass(props);
+    renderPlot(pass(props));
     expect(overlayAxes.calls.length).toBeGreaterThan(0);
     expect(overlayAxes.calls[overlayAxes.calls.length - 1]).toEqual(AIR_VALUES);
+  });
+
+  it("hands the plot the air axis the backend fitted on", async () => {
+    const props = docProps();
+    await brushAndMeasure(props);
+    const lineOverlay = spectrumPlotOf(pass(props)).lineOverlay as { measurementAxis: number[] } | null;
+    expect(lineOverlay?.measurementAxis).toEqual(AIR_VALUES);
+  });
+
+  it("gives the plot no overlay and no marker in document mode before a measurement", () => {
+    const plot = spectrumPlotOf(settledPanel(docProps()));
+    expect(plot.lineOverlay).toBeNull();
+    expect(plot.fitOverlay).toBeNull();
+    expect(plot.frameMarker).toBeNull();
+    expect(plot.referenceChannel).toBeNull();
   });
 
   it("logs the file measurement as a spectrum file with the DQ request", async () => {
@@ -516,8 +585,8 @@ describe("SpectroscopyPanel document-mode line measurement", () => {
   it("sends the frame chosen in the panel and the ERR and DQ switches of the line section", async () => {
     const props = docProps();
     pass(props);
-    const vacuum = mustFind(pass(props), (p) => p["data-frame-choice"] === "vacuum", "vacuum frame button");
-    (vacuum.onClick as () => void)();
+    spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "vacuum" });
+    pass(props);
     const controls = lineSection(pass(props)).errControls as {
       onUseErr: (v: boolean) => void;
       onUseDq: (v: boolean) => void;
@@ -537,11 +606,11 @@ describe("SpectroscopyPanel document-mode line measurement", () => {
     const props = docProps();
     await brushAndMeasure(props);
     expect(lineSection(pass(props)).result).not.toBeNull();
-    const air = mustFind(pass(props), (p) => p["data-frame-choice"] === "air", "air frame button");
-    (air.onClick as () => void)();
+    spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "air" });
+    pass(props);
     expect(lineSection(pass(props)).result).not.toBeNull();
-    const vacuum = mustFind(pass(props), (p) => p["data-frame-choice"] === "vacuum", "vacuum frame button");
-    (vacuum.onClick as () => void)();
+    spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "vacuum" });
+    pass(props);
     const after = lineSection(pass(props));
     expect(after.result).toBeNull();
     expect(after.error).toBeNull();
@@ -562,9 +631,10 @@ describe("SpectroscopyPanel document-mode line measurement", () => {
     const running = (lineSection(pass(props)).onMeasure as () => Promise<void>)();
     const tree = pass(props);
     expect(lineSection(tree).loading).toBe(true);
-    const vacuum = mustFind(tree, (p) => p["data-frame-choice"] === "vacuum", "vacuum frame button");
-    expect(vacuum.disabled).toBe(true);
-    (vacuum.onClick as () => void)();
+    const viewControls = mustFind(tree, (_p, type) => type === SpectrumViewControls, "view controls");
+    expect(viewControls.disabled).toBe(true);
+    spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "vacuum" });
+    pass(props);
     answer();
     await running;
     const after = lineSection(pass(props));
@@ -594,6 +664,7 @@ describe("SpectroscopyPanel document-mode barycentric correction", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
   });
 
@@ -623,6 +694,7 @@ describe("SpectroscopyPanel document-mode comparison and export", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     logMock.append.mockReset();
     backend.cubeSpectrum.mockReset();
@@ -666,7 +738,7 @@ describe("SpectroscopyPanel document-mode comparison and export", () => {
     const csv = writeText.mock.calls[0][0];
     const lines = csv.split("\r\n");
     const headerIndex = lines.findIndex((line) => !line.startsWith("#"));
-    expect(lines[headerIndex]).toBe("channel,wavelength_vacuum_um,wavelength_air_um,vacuum_wavelength_um,flux,flux_unit,err");
+    expect(lines[headerIndex]).toBe("channel,wavelength_vacuum_um,wavelength_air_um,air_wavelength_um,flux,flux_unit,err");
     expect(lines[headerIndex + 1].split(",")[2]).toBe(String(AIR_VALUES[0]));
     expect(csv).toContain("# wavelength_air_note: wavelength_vacuum_um converted from the spectrum's air wavelengths");
     expect(csv).toContain("# image: ha_bess.fits (spectrum file, read from disk)");
@@ -787,6 +859,7 @@ describe("SpectroscopyPanel region spectrum errors", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectrumState.region = null;
     spectrumState.regionSource = null;
@@ -817,7 +890,7 @@ describe("SpectroscopyPanel region spectrum errors", () => {
       ).onClick as () => Promise<void>
     )();
   const commitField = (tree: ReactNode, label: string, value: number) =>
-    (mustFind(tree, (p) => p.label === label, label).onCommit as (value: number) => void)(value);
+    (mustFind(tree, (p) => p.channelLabel === label, label).onCommit as (value: number) => void)(value);
   const staleNote = (tree: ReactNode) =>
     findProps(tree, (p) => typeof p.children === "string" && p.children.startsWith("noise factor measured on continuum"))?.children ?? null;
   const factorLine = (tree: ReactNode) => mustFind(tree, (p) => "data-noise-factor" in p, "noise factor line");
@@ -857,7 +930,7 @@ describe("SpectroscopyPanel region spectrum errors", () => {
     commitRangeStart(pass(props), 3);
     (mustFind(pass(props), (p) => p.children === "auto", "auto windows button").onClick as () => void)();
     await pressRegionSpectrum(pass(props));
-    const sent = defaultContinuumWindows({ z0: 3, z1: N_DOC - 1 }, N_DOC);
+    const sent = guardedContinuumWindows({ z0: 3, z1: N_DOC - 1 }, N_DOC);
     expect(sent).toEqual([
       [0, 2],
       [0, 2],
@@ -897,11 +970,11 @@ describe("SpectroscopyPanel region spectrum errors", () => {
     const props = cubeProps();
     const tree = pass(props);
     const plot = yTickCanvas();
-    (mustFind(tree, (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas").ref as { current: unknown }).current = plot.canvas;
+    (mustFind(renderPlot(tree), (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas").ref as { current: unknown }).current = plot.canvas;
     (mustFind(pass(props), (p) => p.children === "mean", "mean series button").onClick as () => void)();
-    pass(props);
+    renderPlot(pass(props));
     (mustFind(pass(props), (p) => p.children === "sum", "sum series button").onClick as () => void)();
-    pass(props);
+    renderPlot(pass(props));
     const ticks = plot.lastTicks();
     expect(ticks).toHaveLength(5);
     expect(ticks[0]).toBeGreaterThanOrEqual(0.2 + 0.65);
@@ -947,7 +1020,7 @@ describe("SpectroscopyPanel region spectrum errors", () => {
     commitRangeStart(pass(props), 5);
     (mustFind(pass(props), (p) => p.children === "auto", "auto windows button").onClick as () => void)();
     await (regionButton(pass(props)).onClick as () => Promise<void>)();
-    const expected = defaultContinuumWindows({ z0: 5, z1: N_DOC - 1 }, N_DOC);
+    const expected = guardedContinuumWindows({ z0: 5, z1: N_DOC - 1 }, N_DOC);
     expect(expected).not.toBeNull();
     expect(backend.regionSpectrum).toHaveBeenLastCalledWith("C:/data/cube.fits", REGION_CIRCLE, null, expected);
   });
@@ -957,10 +1030,10 @@ describe("SpectroscopyPanel region spectrum errors", () => {
     showRegion(region);
     const props = cubeProps();
     const tree = pass(props);
-    const canvas = mustFind(tree, (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas");
+    const canvas = mustFind(renderPlot(tree), (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas");
     (canvas.ref as { current: unknown }).current = fakeCanvas();
     (mustFind(pass(props), (p) => p.children === "mean", "mean series button").onClick as () => void)();
-    pass(props);
+    renderPlot(pass(props));
     expect(bandCalls.calls.length).toBeGreaterThan(0);
     const meanErrs = bandCalls.calls.map((call) => call.err);
     expect(meanErrs).toContainEqual(region.mean_err);
@@ -970,11 +1043,28 @@ describe("SpectroscopyPanel region spectrum errors", () => {
     expect(bandCalls.calls[0].y).toEqual(region.mean);
     bandCalls.calls = [];
     (mustFind(pass(props), (p) => p.children === "sum", "sum series button").onClick as () => void)();
-    pass(props);
+    renderPlot(pass(props));
     const sumErrs = bandCalls.calls.map((call) => call.err);
     expect(sumErrs).toContainEqual(region.err);
     expect(sumErrs).toContainEqual(region.err_scaled);
     expect(sumErrs).not.toContainEqual(region.mean_err);
+  });
+
+  it("hands the plot the series and the band of the shown region view", () => {
+    const region = regionWithErrors({ factor: 1.3 });
+    showRegion(region);
+    const props = cubeProps();
+    pass(props);
+    (mustFind(pass(props), (p) => p.children === "mean", "mean series button").onClick as () => void)();
+    const mean = spectrumPlotOf(pass(props)).model as SpectrumPlotModel;
+    expect(mean.series).toEqual(region.mean);
+    expect(mean.errors?.err).toEqual(region.mean_err);
+    expect(mean.errors?.scaled).toEqual(region.mean_err!.map((e) => e * 1.3));
+    (mustFind(pass(props), (p) => p.children === "sum", "sum series button").onClick as () => void)();
+    const sum = spectrumPlotOf(pass(props)).model as SpectrumPlotModel;
+    expect(sum.series).toEqual(region.sum);
+    expect(sum.errors?.err).toEqual(region.err);
+    expect(sum.errors?.scaled).toEqual(region.err_scaled);
   });
 });
 
@@ -1021,6 +1111,7 @@ describe("SpectroscopyPanel moment and collapse error planes", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectrumState.region = null;
     spectrumState.regionSource = null;
@@ -1163,7 +1254,7 @@ type PanelEdit = (tree: ReactNode) => void;
 
 const commonCalculationEdits: [string, PanelEdit][] = [
   ["range", (tree) => commitRangeStart(tree, 6)],
-  ["continuum", (tree) => (mustFind(tree, (p) => p.label === "Continuum A first channel", "continuum A").onCommit as (n: number) => void)(1)],
+  ["continuum", (tree) => (mustFind(tree, (p) => p.channelLabel === "Continuum A first channel", "continuum A").onCommit as (n: number) => void)(1)],
   ["rest wavelength", (tree) => (axisSection(tree).onRestChange as (v: number) => void)(2.16612)],
   ["velocity convention", (tree) => (axisSection(tree).onConventionChange as (v: string) => void)("radio")],
 ];
@@ -1175,6 +1266,7 @@ const fitParameterEdits: [string, PanelEdit][] = [
   ["ERR weighting", (tree) => (fitSection(tree).onUseErr as (v: boolean) => void)(false)],
   ["resolving power", (tree) => (fitSection(tree).onResolvingPowerText as (v: string) => void)("2700")],
   ["components", (tree) => (fitSection(tree).onComponents as (v: string) => void)("two")],
+  ["redshift", (tree) => (mustFind(tree, (p) => typeof p.onRedshiftChange === "function", "line list").onRedshiftChange as (z: number) => void)(0.2)],
 ];
 
 const fitCalculationEdits: [string, PanelEdit][] = [
@@ -1208,6 +1300,7 @@ describe("SpectroscopyPanel result validity", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectrumState.region = null;
     spectrumState.regionSource = null;
@@ -1770,6 +1863,7 @@ describe("SpectroscopyPanel product of an earlier run on the viewer", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectrumState.region = null;
     spectrumState.regionSource = null;
@@ -1882,7 +1976,8 @@ function strokeCanvas() {
 }
 
 const SERIES_STROKE = "#a855f7";
-const PLOT_BOTTOM = 180 - 24;
+const PLOT_BOTTOM = SPECTRUM_PLOT_HEIGHT - SPECTRUM_PLOT_PAD.bottom;
+const PLOT_SPAN = 400 - SPECTRUM_PLOT_PAD.left - SPECTRUM_PLOT_PAD.right;
 
 function subpaths(ops: PathOp[]): PathOp[][] {
   return ops.reduce<PathOp[][]>((paths, op) => {
@@ -1893,14 +1988,14 @@ function subpaths(ops: PathOp[]): PathOp[][] {
 }
 
 function channelPx(i: number): number {
-  return 50 + ((AIR_VALUES[i] - AIR_VALUES[0]) / (AIR_VALUES[N_DOC - 1] - AIR_VALUES[0])) * 338;
+  return SPECTRUM_PLOT_PAD.left + ((AIR_VALUES[i] - AIR_VALUES[0]) / (AIR_VALUES[N_DOC - 1] - AIR_VALUES[0])) * PLOT_SPAN;
 }
 
 function drawnDocument(props: Props) {
   const plot = strokeCanvas();
-  (mustFind(pass(props), (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas").ref as { current: unknown }).current = plot.canvas;
-  (mustFind(pass(props), (p) => p["data-frame-choice"] === "vacuum", "vacuum frame button").onClick as () => void)();
-  pass(props);
+  (mustFind(renderPlot(pass(props)), (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas").ref as { current: unknown }).current = plot.canvas;
+  spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "vacuum" });
+  renderPlot(pass(props));
   const series = plot.strokes.filter((s) => s.style === SERIES_STROKE).at(-1);
   const dqTicks = plot.strokes.filter((s) => s.ops.length > 0 && s.ops.every((op) => (op[0] === "M" ? op[2] === PLOT_BOTTOM : op[2] < PLOT_BOTTOM)));
   return { series: series ? subpaths(series.ops) : [], dqTicks: dqTicks.at(-1)?.ops.filter((op) => op[0] === "M") ?? [], ticks: plot.lastTicks() };
@@ -1918,18 +2013,18 @@ function readoutCanvas() {
       return true;
     },
   });
-  return { canvas: { width: 400, height: 180, getContext: () => ctx }, texts };
+  return { canvas: { width: 400, height: SPECTRUM_PLOT_HEIGHT, getContext: () => ctx }, texts };
 }
 
 function hoverReadout(props: Props, channel: number): string | undefined {
-  const tree = pass(props);
+  const tree = renderPlot(pass(props));
   const overlay = readoutCanvas();
   (mustFind(tree, (p) => p.className === "absolute inset-0 w-full pointer-events-none", "overlay canvas").ref as { current: unknown }).current =
     overlay.canvas;
   const plot = mustFind(tree, (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas");
-  (plot.ref as { current: unknown }).current = { width: 400, height: 180, getBoundingClientRect: () => ({ left: 0, width: 400 }) };
-  (plot.onMouseMove as (e: unknown) => void)({ clientX: 50 + (338 * channel) / (N_DOC - 1) });
-  pass(props);
+  (plot.ref as { current: unknown }).current = { width: 400, height: SPECTRUM_PLOT_HEIGHT, getBoundingClientRect: () => ({ left: 0, width: 400 }) };
+  (plot.onMouseMove as (e: unknown) => void)({ clientX: SPECTRUM_PLOT_PAD.left + (PLOT_SPAN * channel) / (N_DOC - 1) });
+  renderPlot(pass(props));
   return overlay.texts.filter((text) => new RegExp(`^ch ${channel}[ ,]`).test(text)).at(-1);
 }
 
@@ -1939,6 +2034,7 @@ describe("SpectroscopyPanel plot of a spectrum file", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectrumState.region = null;
     spectrumState.regionSource = null;
@@ -1950,9 +2046,9 @@ describe("SpectroscopyPanel plot of a spectrum file", () => {
   it("labels the y axis of an F_lambda spectrum with its own range", () => {
     const props = docProps(documentOf({ flux: FAINT_FLUX }));
     const plot = yTickCanvas();
-    (mustFind(pass(props), (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas").ref as { current: unknown }).current = plot.canvas;
-    (mustFind(pass(props), (p) => p["data-frame-choice"] === "vacuum", "vacuum frame button").onClick as () => void)();
-    pass(props);
+    (mustFind(renderPlot(pass(props)), (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas").ref as { current: unknown }).current = plot.canvas;
+    spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "vacuum" });
+    renderPlot(pass(props));
     const ticks = plot.lastTicks();
     expect(ticks[4]).toBeGreaterThan(0);
     expect(ticks[4]).toBeCloseTo(9.5e-18, 20);
@@ -2031,6 +2127,7 @@ describe("SpectroscopyPanel hover readout of a cube", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectrumState.region = null;
     spectrumState.regionSource = null;
@@ -2056,6 +2153,7 @@ describe("SpectroscopyPanel region pick", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectrumState.region = null;
     spectrumState.regionSource = null;
@@ -2091,6 +2189,7 @@ describe("SpectroscopyPanel line measurement at a redshift", () => {
   beforeEach(() => {
     hooks.run.cells = [];
     hooks.run.effects = [];
+    plotRun.cells = [];
     cubeState.ramp = null;
     spectralMock.measure.mockReset().mockImplementation(async (_path, source) => measured(source as LineMeasurement["source"]));
     logMock.append.mockReset();
@@ -2126,5 +2225,1118 @@ describe("SpectroscopyPanel line measurement at a redshift", () => {
     expect(lineSection(pass(props)).result).not.toBeNull();
     (lineList(pass(props)).onRedshiftChange as (z: number) => void)(0.5);
     expect(lineSection(settledPanel(props)).result).toBeNull();
+  });
+});
+
+describe("SpectroscopyPanel frame navigation before a spectrum", () => {
+  const SHOWN_CHANNEL = 30;
+  const CHANNEL_ON_SCREEN = {
+    kind: "cube",
+    label: `ch ${SHOWN_CHANNEL}`,
+    fitsPath: `C:/out/cube_frame_${SHOWN_CHANNEL}.fits`,
+    previewUrl: `asset://cube_frame_${SHOWN_CHANNEL}.png`,
+    dimensions: [8, 8],
+    inputPath: "C:/data/cube.fits",
+    frameIndex: SHOWN_CHANNEL,
+  };
+  const emptyPanel = (): Props => ({ ...cubeProps(), spectrum: [], pixelCoord: null });
+  const frameNav = (tree: ReactNode) => findProps(tree, (p) => typeof p.onFrameRequest === "function");
+
+  function frameNavSlot(tree: ReactNode): { root: unknown; type: unknown; key: string | null } | null {
+    if (!isValidElement<Props>(tree)) return null;
+    const children = ([] as ReactNode[]).concat(tree.props.children as ReactNode);
+    const slot = children.find((child) => isValidElement<Props>(child) && frameNav(child) !== null);
+    return isValidElement(slot) ? { root: tree.type, type: slot.type, key: slot.key } : null;
+  }
+
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    plotRun.cells = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    renderState.processed = CHANNEL_ON_SCREEN;
+  });
+
+  afterEach(() => {
+    renderState.processed = null;
+  });
+
+  it("keeps Frame Navigation on the channel on screen when the cube comes back from the Files list without a spectrum", () => {
+    const tree = settledPanel(emptyPanel());
+    expect(findProps(tree, (p) => p.children === "Click on the preview image to extract a spectrum")).not.toBeNull();
+    const nav = frameNav(tree);
+    expect(nav, "Frame Navigation registers the frame requests of the viewer's stepper and arrow keys").not.toBeNull();
+    expect(nav).toMatchObject({ filePath: "C:/data/cube.fits", totalFrames: N_DOC, frame: SHOWN_CHANNEL });
+  });
+
+  it("keeps the same Frame Navigation when the first spectrum arrives, so a frame load or playback in progress goes on", () => {
+    const empty = frameNavSlot(settledPanel(emptyPanel()));
+    hooks.run.cells = [];
+    const withSpectrum = frameNavSlot(settledPanel(cubeProps()));
+    expect(empty?.key, "React keeps a child of the same root across the two layouts only by its key").toEqual(expect.any(String));
+    expect(withSpectrum).toEqual(empty);
+  });
+});
+
+describe("SpectroscopyPanel plot title, file error band and keys", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    plotRun.cells = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+  });
+
+  afterEach(() => {
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+  });
+
+  const docProps = (doc: SpectrumDocument): Props => ({ documentMode: true, spectrumDocument: doc, filePath: DOC_PATH, publishGate: createFramePublishGate() });
+  const freshModel = (props: Props): SpectrumPlotModel => {
+    hooks.run.cells = [];
+    return spectrumPlotOf(pass(props)).model as SpectrumPlotModel;
+  };
+  const plotContainer = (tree: ReactNode) =>
+    mustFind(tree, (p) => p.className === "p-2 rounded-md outline-none focus-visible:ring-1 focus-visible:ring-violet-500/50", "plot container");
+
+  it("gives a spectrum file its error band without letting the errors set the y range", () => {
+    const err = AIR_VALUES.map(() => 0.05);
+    const doc = documentOf({ err });
+    const model = freshModel(docProps(doc));
+    expect(model.errors).toEqual({ err, scaled: null });
+    expect(model.errorBand).toBe("propagated");
+    const html = renderDocument(doc);
+    expect(html).toContain('data-error-band="propagated"');
+    expect(html).toContain("error band: ±1 sigma from the file (ERR extension)");
+
+    const bare = documentOf({ err: null });
+    expect(freshModel(docProps(bare)).errors).toBeNull();
+    const bareHtml = renderDocument(bare);
+    expect(bareHtml).toContain('data-error-band="none"');
+    expect(bareHtml).not.toContain("sigma from the file");
+
+    const spike = documentOf({ err: AIR_VALUES.map((_, i) => (i === 20 ? 1e6 : 0.05)) });
+    const spiked = freshModel(docProps(spike));
+    expect(spiked.errorBand).toBe("propagated");
+    expect(spiked.yMax).toBeLessThan(3);
+
+    const x1d = documentOf({ source: { kind: "x1d", path: DOC_PATH, hdu: 1, extver: null } });
+    expect(renderDocument(x1d)).toContain("error band: ±1 sigma from the file (FLUX_ERROR column)");
+    const csv = documentOf({ source: { kind: "csv", path: "C:/data/ha.csv" } });
+    expect(renderDocument(csv)).toContain("error band: ±1 sigma from the file (err column)");
+  });
+
+  it("titles the y axis with the unit of the readout", () => {
+    expect(freshModel(docProps(documentOf())).yLabel).toBe("Flux (erg/s/cm2/A)");
+    expect(freshModel(docProps(documentOf({ flux_unit: null }))).yLabel).toBe("Flux (native)");
+    expect(freshModel(cubeProps()).yLabel).toBe("Flux (DN)");
+    showRegion(regionWithErrors(null, { flux_jy: AIR_VALUES.map(() => 1e-3) }));
+    const props = cubeProps();
+    expect(freshModel(props).yLabel).toBe("Flux (DN x pix)");
+    const view = (label: string) => {
+      (mustFind(pass(props), (p) => p.children === label, `${label} series button`).onClick as () => void)();
+      return (spectrumPlotOf(pass(props)).model as SpectrumPlotModel).yLabel;
+    };
+    expect(view("mean")).toBe("Flux (DN)");
+    expect(view("Jy")).toBe("Flux (Jy)");
+    expect(view("sum")).toBe("Flux (DN x pix)");
+  });
+
+  it("makes the plot the one tab stop of a spectrum file and keeps the frame keys on a cube", () => {
+    const docTree = pass(docProps(documentOf()));
+    const docPlot = spectrumPlotOf(docTree);
+    expect(docPlot.cursorKeys).toBe(true);
+    expect(docPlot.keyHint).toBe(
+      "Left and Right arrows move the channel cursor, Shift moves ten channels, Home and End go to the ends, Escape clears it.",
+    );
+    expect(docPlot.status).toBeNull();
+    expect(plotContainer(docTree).tabIndex).toBeUndefined();
+    expect(plotContainer(docTree).onKeyDown).toBeUndefined();
+
+    hooks.run.cells = [];
+    const cubeTree = pass(cubeProps());
+    const cubePlot = spectrumPlotOf(cubeTree);
+    const frameLabel = mustFind(cubeTree, (p) => typeof p.onFrameRequest === "function", "frame navigation").frameLabel;
+    expect(frameLabel).toEqual(expect.any(String));
+    expect(cubePlot.cursorKeys).toBe(false);
+    expect(cubePlot.keyHint).toBe(FRAME_KEY_HINT);
+    expect(cubePlot.status).toBe(frameLabel);
+    expect(plotContainer(cubeTree).tabIndex).toBe(0);
+    expect(plotContainer(cubeTree).onKeyDown).toEqual(expect.any(Function));
+    expect(plotContainer(cubeTree).title).toBe(FRAME_KEY_HINT);
+  });
+});
+
+describe("SpectroscopyPanel view store", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    plotRun.cells = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    regionDocState.regions = [];
+    spectralMock.measure.mockReset().mockImplementation(async (_path, source) => measured(source as LineMeasurement["source"]));
+    logMock.append.mockReset();
+    backend.cubeSpectrum.mockReset().mockResolvedValue({ flux_jy: null });
+    backend.pixelToWorld.mockReset().mockResolvedValue({ points: [] });
+    csvInputs.calls = [];
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const docProps = (filePath: string = DOC_PATH): Props => ({
+    documentMode: true,
+    spectrumDocument: documentOf(),
+    filePath,
+    publishGate: createFramePublishGate(),
+  });
+  const lineList = (tree: ReactNode) => mustFind(tree, (p) => typeof p.onRedshiftChange === "function", "line list controls");
+  const CHOSEN = { mode: "velocity", restValue: 0.656461, redshift: 0.05, range: { z0: 5, z1: N_DOC - 1 } };
+  const DEFAULTS = { mode: "wavelength_air", restValue: null, redshift: 0, range: null };
+  const NATIVE_DISPLAY = { wavelengthUnit: "um", fluxUnit: "native", binFactor: 1, dqExcluded: null };
+
+  function choose(props: Props): void {
+    pass(props);
+    (axisSection(pass(props)).onModeChange as (mode: string) => void)("velocity");
+    (axisSection(pass(props)).onRestChange as (restUm: number) => void)(0.656461);
+    (lineList(pass(props)).onRedshiftChange as (z: number) => void)(0.05);
+    commitRangeStart(pass(props), 5);
+  }
+
+  function mountedAgain(props: Props) {
+    hooks.run.cells = [];
+    const tree = pass(props);
+    const axis = axisSection(tree);
+    return { mode: axis.mode, restValue: axis.restValue, redshift: lineList(tree).redshift, range: spectrumPlotOf(tree).range };
+  }
+
+  async function exportedInput(props: Props): Promise<{ software?: string | null; display?: unknown }> {
+    csvInputs.calls = [];
+    logMock.append.mockClear();
+    (mustFind(pass(props), (p) => p.children === "Copy CSV", "Copy CSV button").onClick as () => void)();
+    await vi.waitFor(() => expect(logMock.append).toHaveBeenCalledTimes(1));
+    expect(csvInputs.calls).toHaveLength(1);
+    return csvInputs.calls[0] as { software?: string | null; display?: unknown };
+  }
+
+  it("keeps the choices of a spectrum when its panel is mounted again", () => {
+    const props = docProps();
+    choose(props);
+    expect(mountedAgain(props)).toEqual(CHOSEN);
+  });
+
+  it("keeps two spectra apart", () => {
+    choose(docProps());
+    expect(mountedAgain(docProps("C:/data/other.fits"))).toEqual(DEFAULTS);
+    expect(mountedAgain(docProps())).toEqual(CHOSEN);
+  });
+
+  it("stores a cube's choices under the cube key", () => {
+    const props = cubeProps();
+    pass(props);
+    commitRangeStart(pass(props), 5);
+    expect(spectrumViewStore.get(CUBE_VIEW_KEY).range).toEqual({ z0: 5, z1: N_DOC - 1 });
+  });
+
+  it("takes the key it is given", () => {
+    const viewKey = "NRS1::median|C:/d/x.fits";
+    const props = { ...docProps(), viewKey };
+    pass(props);
+    commitRangeStart(pass(props), 5);
+    expect(spectrumViewStore.get(viewKey).range).toEqual({ z0: 5, z1: N_DOC - 1 });
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).range).toBeNull();
+  });
+
+  it("drops a stored range that no longer fits the series", () => {
+    spectrumViewStore.patch(DOC_VIEW_KEY, {
+      range: { z0: 5, z1: 400 },
+      windows: [
+        [0, 4],
+        [390, 399],
+      ],
+    });
+    const plot = spectrumPlotOf(pass(docProps()));
+    expect(plot.range).toBeNull();
+    expect(plot.windows).toBeNull();
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).range).toBeNull();
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).windows).toBeNull();
+  });
+
+  it("publishes the measured line for the viewer and takes it back", async () => {
+    const props = docProps();
+    await brushAndMeasure(props);
+    const result = lineSection(pass(props)).result;
+    expect(result).not.toBeNull();
+    const overlay = spectrumViewStore.overlay(DOC_VIEW_KEY);
+    expect(overlay?.result).toBe(result);
+    expect(overlay?.measurementAxis).toEqual(AIR_VALUES);
+    commitRangeStart(pass(props), 6);
+    settledPanel(props);
+    expect(spectrumViewStore.overlay(DOC_VIEW_KEY)).toBeNull();
+    await (lineSection(pass(props)).onMeasure as () => Promise<void>)();
+    pass(props);
+    expect(spectrumViewStore.overlay(DOC_VIEW_KEY)).not.toBeNull();
+    hooks.mount();
+    expect(spectrumViewStore.overlay(DOC_VIEW_KEY)).toBeNull();
+  });
+
+  it("gives the plot of a document exactly what documentPlot builds", () => {
+    const props = docProps();
+    const doc = props.spectrumDocument as SpectrumDocument;
+    const expectBuilt = () => {
+      const plot = spectrumPlotOf(pass(props));
+      const built = documentPlot(doc.spectrum, spectrumViewStore.get(DOC_VIEW_KEY));
+      expect(plot.model).toEqual(built.model);
+      expect(plot.marks).toEqual(built.marks);
+    };
+    expectBuilt();
+    spectrumViewStore.patch(DOC_VIEW_KEY, { mode: "wavelength_air", useDq: false });
+    expectBuilt();
+  });
+
+  it("passes the view and the software name to the export", async () => {
+    const writeText = vi.fn(async (text: string) => {
+      void text;
+    });
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.stubGlobal("window", { setTimeout: () => 1, clearTimeout: () => {} });
+    const fromDocument = await exportedInput(docProps());
+    expect(fromDocument.software).toMatch(/^AstroBurst v\d+\.\d+\.\d+/);
+    expect(fromDocument.display).toEqual(NATIVE_DISPLAY);
+    hooks.run.cells = [];
+    const cube = cubeProps();
+    pass(cube);
+    expect((await exportedInput(cube)).display).toEqual(NATIVE_DISPLAY);
+    spectrumViewStore.patch(CUBE_VIEW_KEY, { wavelengthUnit: "nm", fluxUnit: "mJy", binFactor: 4 });
+    expect((await exportedInput(cube)).display).toEqual({ wavelengthUnit: "nm", fluxUnit: "native", binFactor: 1, dqExcluded: null });
+  });
+
+  it("mounts the view controls for a cube too, with no document", () => {
+    const tree = pass(cubeProps());
+    const controls = mustFind(tree, (_p, type) => type === SpectrumViewControls, "view controls");
+    expect(controls.spectrum).toBeNull();
+    expect(controls.viewKey).toBe(CUBE_VIEW_KEY);
+    expect(controls.model).toBe(spectrumPlotOf(tree).model);
+    expect(renderToStaticMarkup(createElement(SpectroscopyPanel, cubeProps() as never))).not.toContain("data-document-frame");
+  });
+
+  it("opens an air file on its own air axis", () => {
+    const props = docProps();
+    const shown = () => {
+      const tree = settledPanel(props);
+      const model = spectrumPlotOf(tree).model as SpectrumPlotModel;
+      return { label: model.xLabel, values: model.xValues, mode: axisSection(tree).mode };
+    };
+    expect(shown()).toEqual({ label: "Air wavelength (μm)", values: AIR_VALUES, mode: "wavelength_air" });
+    spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "vacuum" });
+    expect(shown()).toEqual({ label: "Vacuum wavelength (μm)", values: AIR_VALUES, mode: "wavelength_vac" });
+    spectrumViewStore.patch(DOC_VIEW_KEY, { mode: "frequency" });
+    expect(shown().mode).toBe("frequency");
+    spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "air" });
+    expect(shown().mode).toBe("frequency");
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).mode).toBe("frequency");
+    spectrumViewStore.patch(DOC_VIEW_KEY, { frameChoice: "vacuum" });
+    expect(shown().mode).toBe("frequency");
+  });
+
+  const OTHER_PATH = "C:/data/other.fits";
+  const OTHER_VIEW_KEY = documentViewKey(OTHER_PATH, "0");
+  const CARRIED_NOTE = "line setup carried over from ha_bess.fits, 1D array in HDU 0";
+  const CARRIED_ON_B = { ...CHOSEN, range: { z0: 0, z1: 34 } };
+
+  function docPropsAt(filePath: string, values: number[]): Props {
+    return {
+      documentMode: true,
+      spectrumDocument: documentOf({
+        source: { kind: "wcs1d", path: filePath, hdu: 0 },
+        axis: { ...airAxis(), values, crval: values[0] },
+      }),
+      filePath,
+      publishGate: createFramePublishGate(),
+    };
+  }
+
+  const propsB = () => docPropsAt(OTHER_PATH, AIR_VALUES.map((v) => v + 5e-4));
+
+  function newMount(props: Props): ReactNode {
+    hooks.run.cells = [];
+    pass(props);
+    return pass(props);
+  }
+
+  function setupShown(tree: ReactNode) {
+    const axis = axisSection(tree);
+    return { mode: axis.mode, restValue: axis.restValue, redshift: lineList(tree).redshift, range: spectrumPlotOf(tree).range };
+  }
+
+  const setupNote = (tree: ReactNode) => findProps(tree, (p) => "data-setup-from" in p);
+
+  function noteText(tree: ReactNode): unknown {
+    const note = setupNote(tree);
+    return note === null ? null : findProps(note.children as ReactNode, (p) => typeof p.children === "string")?.children;
+  }
+
+  function chooseOnA(): Props {
+    const propsA = docProps();
+    choose(propsA);
+    pass(propsA);
+    return propsA;
+  }
+
+  it("carries the line setup to the next spectrum", () => {
+    chooseOnA();
+    const tree = newMount(propsB());
+    expect(setupShown(tree)).toEqual(CARRIED_ON_B);
+    expect(noteText(tree)).toBe(CARRIED_NOTE);
+    const clear = mustFind(tree, (p) => "data-setup-clear" in p, "clear button");
+    expect(clear.title).toBe("Reset the axis, rest wavelength, redshift, line families, model, range and windows of this spectrum");
+    expect(clear.children).toBe("clear");
+  });
+
+  it("does not replace the line setup a spectrum already has, and ignores what is not a line setup", () => {
+    spectrumViewStore.patch(OTHER_VIEW_KEY, { redshift: 0.2 });
+    chooseOnA();
+    const own = newMount(propsB());
+    expect(lineList(own).redshift).toBe(0.2);
+    expect(axisSection(own).mode).toBe("wavelength_air");
+    expect(setupNote(own)).toBeNull();
+
+    spectrumViewStore.reset();
+    hooks.run.cells = [];
+    spectrumViewStore.patch(OTHER_VIEW_KEY, { xDomain: [0.657, 0.658], binFactor: 2, fluxUnit: "uJy" });
+    chooseOnA();
+    const seeded = newMount(propsB());
+    expect(setupShown(seeded)).toEqual(CARRIED_ON_B);
+    expect(noteText(seeded)).toBe(CARRIED_NOTE);
+    const stored = spectrumViewStore.get(OTHER_VIEW_KEY);
+    expect(stored.binFactor).toBe(2);
+    expect(stored.fluxUnit).toBe("uJy");
+    expect(stored.xDomain).toBeNull();
+  });
+
+  it("clears a carried setup and does not bring it back", () => {
+    chooseOnA();
+    const props = propsB();
+    const tree = newMount(props);
+    (mustFind(tree, (p) => "data-setup-clear" in p, "clear button").onClick as () => void)();
+    const cleared = pass(props);
+    expect(setupShown(cleared)).toEqual(DEFAULTS);
+    expect(setupNote(cleared)).toBeNull();
+    const again = newMount(props);
+    expect(setupShown(again)).toEqual(DEFAULTS);
+    expect(setupNote(again)).toBeNull();
+  });
+
+  it("drops a range that lies outside the next spectrum", () => {
+    chooseOnA();
+    const tree = newMount(docPropsAt("C:/data/far.fits", AIR_VALUES.map((v) => v + 0.1)));
+    expect(setupShown(tree)).toEqual({ ...CHOSEN, range: null });
+    expect(spectrumPlotOf(tree).windows).toBeNull();
+    expect(noteText(tree)).toBe(CARRIED_NOTE);
+  });
+
+  it("carries nothing into a cube and nothing out of one", () => {
+    chooseOnA();
+    const cube = cubeProps();
+    const cubeTree = newMount(cube);
+    expect(lineList(cubeTree).redshift).toBe(0);
+    expect(setupNote(cubeTree)).toBeNull();
+    (lineList(cubeTree).onRedshiftChange as (z: number) => void)(0.3);
+    expect(lineList(pass(cube)).redshift).toBe(0.3);
+    pass(cube);
+    expect(lineList(newMount(propsB())).redshift).toBe(0.05);
+  });
+
+  it("shows the note again when the panel of a seeded spectrum is mounted again", () => {
+    chooseOnA();
+    const props = propsB();
+    newMount(props);
+    const again = newMount(props);
+    expect(noteText(again)).toBe(CARRIED_NOTE);
+    expect(setupShown(again)).toEqual(CARRIED_ON_B);
+  });
+
+  it("passes the setup on through a spectrum the user only looked at", () => {
+    chooseOnA();
+    newMount(propsB());
+    const tree = newMount(docPropsAt("C:/data/third.fits", AIR_VALUES.map((v) => v + 5e-4)));
+    expect(setupShown(tree)).toEqual(CARRIED_ON_B);
+  });
+
+  it("carries a cleared setup no further", () => {
+    chooseOnA();
+    const props = propsB();
+    const tree = newMount(props);
+    (mustFind(tree, (p) => "data-setup-clear" in p, "clear button").onClick as () => void)();
+    pass(props);
+    const third = newMount(docPropsAt("C:/data/third.fits", AIR_VALUES.map((v) => v + 5e-4)));
+    expect(setupShown(third)).toEqual(DEFAULTS);
+    expect(setupNote(third)).toBeNull();
+  });
+
+  it("carries no line setup to a spectrum of another instrument, disperser or filter", () => {
+    const withCards = (props: Props, cards: Record<string, string>): Props => {
+      const doc = props.spectrumDocument as SpectrumDocument;
+      return { ...props, spectrumDocument: { ...doc, spectrum: { ...doc.spectrum, cards } } };
+    };
+    const G235H = { INSTRUME: "NIRSPEC", GRATING: "G235H", FILTER: "F170LP", DETECTOR: "NRS1" };
+    const propsA = withCards(docProps(), G235H);
+    choose(propsA);
+    pass(propsA);
+    const miri = newMount(withCards(propsB(), { INSTRUME: "MIRI", FILTER: "P750L", DETECTOR: "MIRIMAGE" }));
+    expect(setupShown(miri)).toEqual(DEFAULTS);
+    expect(setupNote(miri)).toBeNull();
+    const bare = newMount(docPropsAt("C:/data/bare.fits", AIR_VALUES.map((v) => v + 5e-4)));
+    expect(setupShown(bare)).toEqual(DEFAULTS);
+    expect(setupNote(bare)).toBeNull();
+    const nrs2 = newMount(withCards(docPropsAt("C:/data/nrs2.fits", AIR_VALUES.map((v) => v + 5e-4)), { ...G235H, DETECTOR: "NRS2" }));
+    expect(setupShown(nrs2)).toEqual(CARRIED_ON_B);
+    expect(noteText(nrs2)).toBe(CARRIED_NOTE);
+  });
+});
+
+describe("SpectroscopyPanel range boxes in the unit of the axis", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    plotRun.cells = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    regionDocState.regions = [];
+    backend.cubeSpectrum.mockReset().mockResolvedValue({ flux_jy: null });
+    backend.pixelToWorld.mockReset().mockResolvedValue({ points: [] });
+  });
+
+  const docProps = (): Props => ({ documentMode: true, spectrumDocument: documentOf(), filePath: DOC_PATH, publishGate: createFramePublishGate() });
+  const EDGES = ["range:z0", "range:z1", "window:0:0", "window:0:1", "window:1:0", "window:1:1"];
+
+  function edgeBoxes(tree: ReactNode): Props[] {
+    return EDGES.map((edge) => mustFind(tree, (p, type) => type === RangeEdgeField && p.edge === edge, edge));
+  }
+  const edgeBox = (tree: ReactNode, edge: string) => mustFind(tree, (p, type) => type === RangeEdgeField && p.edge === edge, edge);
+  const unitButton = (tree: ReactNode, unit: string) => mustFind(tree, (p) => p["data-range-fields"] === unit, `${unit} button`);
+  const unitGroup = (tree: ReactNode) => findProps(tree, (p) => p["aria-label"] === "Range field unit");
+
+  it("gives the range and window boxes of a spectrum file the axis of the plot", () => {
+    const props = docProps();
+    pass(props);
+    const tree = pass(props);
+    const model = spectrumPlotOf(tree).model as SpectrumPlotModel;
+    const boxes = edgeBoxes(tree);
+    for (const box of boxes) {
+      const mapping = box.mapping as { n: number; xValues: number[] | null };
+      expect(mapping.n).toBe(N_DOC);
+      expect(mapping.xValues).toBe(model.xValues);
+      expect(box.unit).toBe(model.xUnit);
+    }
+    expect(boxes[0].axisLabel).toBe("Range first channel, in μm");
+    expect(boxes[0].channelLabel).toBe("Range first channel z0");
+    (edgeBox(pass(props), "range:z0").onCommit as (channel: number) => void)(5);
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).range).toEqual({ z0: 5, z1: N_DOC - 1 });
+    (edgeBox(pass(props), "window:0:1").onCommit as (channel: number) => void)(3);
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).windows?.[0][1]).toBe(3);
+  });
+
+  it("switches the boxes back to channels and says which unit is on", () => {
+    const props = docProps();
+    pass(props);
+    const tree = pass(props);
+    const group = unitGroup(tree);
+    expect(group?.role).toBe("group");
+    expect(unitButton(group?.children as ReactNode, "channel").children).toBe("ch");
+    expect(unitButton(group?.children as ReactNode, "axis").children).toBe("μm");
+    expect(unitButton(tree, "channel")["aria-pressed"]).toBe(false);
+    expect(unitButton(tree, "axis")["aria-pressed"]).toBe(true);
+    (unitButton(tree, "channel").onClick as () => void)();
+    const inChannels = pass(props);
+    for (const box of edgeBoxes(inChannels)) expect(box.mapping).toBeNull();
+    expect(unitButton(inChannels, "channel")["aria-pressed"]).toBe(true);
+    expect(unitButton(inChannels, "axis")["aria-pressed"]).toBe(false);
+    (unitButton(inChannels, "axis").onClick as () => void)();
+    for (const box of edgeBoxes(pass(props))) expect(box.mapping).not.toBeNull();
+  });
+
+  it("keeps channel boxes for a spectrum without an axis", () => {
+    spectralMock.axis.mockReset().mockRejectedValue(new Error("no spectral axis"));
+    const spectrum = Array.from({ length: 10 }, (_, i) => 100 + i * 5);
+    const props: Props = {
+      spectrum,
+      wavelengths: null,
+      pixelCoord: { x: 1023, y: 2446 },
+      cubeDims: NON_SPECTRAL_DIMS,
+      filePath: "C:/data/cube.fits",
+      publishGate: createFramePublishGate(),
+    };
+    pass(props);
+    const tree = pass(props);
+    expect(unitGroup(tree)).toBeNull();
+    expect(edgeBox(tree, "range:z0").mapping).toBeNull();
+    expect(edgeBox(tree, "range:z1").mapping).toBeNull();
+    const html = renderClickedPixel(null);
+    expect(html).not.toContain('aria-label="Range field unit"');
+    expect(html).toContain('aria-label="Range first channel z0"');
+  });
+
+  it("names the channels of the continuum windows under axis boxes", () => {
+    spectrumViewStore.patch(DOC_VIEW_KEY, {
+      windows: [
+        [0, 4],
+        [35, 39],
+      ],
+    });
+    const props = docProps();
+    const html = renderToStaticMarkup(createElement(SpectroscopyPanel, props as never));
+    expect(html).toContain("data-continuum-channels");
+    expect(html).toContain("A ch 0–4 · B ch 35–39");
+    pass(props);
+    const tree = pass(props);
+    expect(mustFind(tree, (p) => "data-continuum-channels" in p, "continuum channels line").children).toBe("A ch 0–4 · B ch 35–39");
+    (unitButton(tree, "channel").onClick as () => void)();
+    expect(findProps(pass(props), (p) => "data-continuum-channels" in p)).toBeNull();
+  });
+});
+
+describe("SpectroscopyPanel line features", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    plotRun.cells = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    regionDocState.regions = [];
+    spectralMock.measure.mockReset().mockImplementation(async (_path, source) => measured(source as LineMeasurement["source"]));
+    spectralMock.axis.mockReset();
+    logMock.append.mockReset();
+    backend.fit.mockReset().mockResolvedValue(fitResult());
+    backend.inspect.mockReset();
+  });
+
+  afterEach(() => {
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+  });
+
+  const SERIES_PATH = "C:/data/jw03375_x1dints.fits";
+  const SERIES_PICK = { kind: "integration", index: 2 } as const;
+  const docProps = (doc: SpectrumDocument = documentOf(), filePath: string = DOC_PATH): Props => ({
+    documentMode: true,
+    spectrumDocument: doc,
+    filePath,
+    publishGate: createFramePublishGate(),
+  });
+  const seriesDocument = (): SpectrumDocument => ({
+    ...documentOf({ source: { kind: "x1dints", paths: [SERIES_PATH], detector: "NRS1", sporder: -1, pick: SERIES_PICK } }),
+    source: { kind: "file", hdu: null },
+  });
+  const lineList = (tree: ReactNode) => mustFind(tree, (p) => typeof p.onRedshiftChange === "function", "line list controls");
+  const H_ALPHA_MARK = { id: "h_alpha", label: "Hα", family: "optical", restVacuumUm: 0.656461, value: 0.656461 };
+  const pickHalpha = (tree: ReactNode) => (spectrumPlotOf(tree).onPickMark as (mark: unknown) => void)(H_ALPHA_MARK);
+  const measureNow = async (props: Props) => {
+    commitRangeStart(pass(props), 5);
+    await (lineSection(pass(props)).onMeasure as () => Promise<void>)();
+  };
+  const lastOptions = () => spectralMock.measure.mock.calls.at(-1)?.[2];
+  const autoButton = (tree: ReactNode) => mustFind(tree, (p) => p.children === "auto", "auto windows button");
+  const NONE_TITLE = "no windows: the measurement then takes two windows as wide as the line range, touching it";
+
+  it("measures a pick of a time series through its series source", async () => {
+    const props = docProps(seriesDocument(), SERIES_PATH);
+    await brushAndMeasure(props);
+    expect(spectralMock.measure).toHaveBeenCalledTimes(1);
+    expect(spectralMock.measure.mock.calls[0].slice(0, 2)).toEqual([
+      SERIES_PATH,
+      { kind: "series", paths: [SERIES_PATH], detector: "NRS1", sporder: -1, pick: { kind: "integration", index: 2 } },
+    ]);
+    expect(lineSection(pass(props)).result).not.toBeNull();
+    expect(logMock.append).toHaveBeenCalledTimes(1);
+    const html = renderToStaticMarkup(createElement(SpectroscopyPanel, docProps(seriesDocument(), SERIES_PATH) as never));
+    expect(html).toContain("time series NRS1, integration 3");
+  });
+
+  it("keeps the file source for a table and for a 1D array", async () => {
+    const table: SpectrumDocument = {
+      ...documentOf({ source: { kind: "x1d", path: DOC_PATH, hdu: 1, extver: null } }),
+      source: { kind: "file", hdu: 1 },
+    };
+    await brushAndMeasure(docProps(table));
+    expect(spectralMock.measure.mock.calls[0][1]).toEqual({ kind: "file", hdu: 1 });
+    spectrumViewStore.reset();
+    hooks.run.cells = [];
+    await brushAndMeasure(docProps());
+    expect(spectralMock.measure.mock.calls[1][1]).toEqual({ kind: "file", hdu: 0 });
+  });
+
+  it("names the picked line in the request", async () => {
+    const props = docProps();
+    pass(props);
+    await measureNow(props);
+    expect(lastOptions()).toMatchObject({ lineId: null, lineLabel: null });
+    pickHalpha(pass(props));
+    await measureNow(props);
+    expect(lastOptions()).toMatchObject({ lineId: "h_alpha", lineLabel: "Hα", restUm: 0.656461 });
+    (axisSection(pass(props)).onRestChange as (restUm: number) => void)(0.65);
+    await measureNow(props);
+    expect(lastOptions()).toMatchObject({ lineId: null, lineLabel: null, restUm: 0.65 });
+    hooks.run.cells = [];
+    const cube = cubeProps();
+    pass(cube);
+    pickHalpha(pass(cube));
+    await measureNow(cube);
+    expect(spectralMock.measure.mock.calls.at(-1)?.[1]).toEqual({ kind: "pixel", x: 3, y: 4 });
+    expect(lastOptions()).toMatchObject({ lineId: "h_alpha", lineLabel: "Hα", restUm: 0.656461 });
+  });
+
+  it("drops a shown measurement when the picked line changes", async () => {
+    const props = docProps();
+    pass(props);
+    pickHalpha(pass(props));
+    await measureNow(props);
+    expect(lineSection(pass(props)).result).not.toBeNull();
+    spectrumViewStore.patch(DOC_VIEW_KEY, { pickedLineId: null });
+    expect(lineSection(settledPanel(props)).result).toBeNull();
+  });
+
+  it("tells the line section the unit of the card and the file", () => {
+    const props = docProps();
+    const tree = settledPanel(props);
+    expect(lineSection(tree).axisDisplayUnit).toBe("um");
+    expect(lineSection(tree).filePath).toBe(DOC_PATH);
+    spectrumViewStore.patch(DOC_VIEW_KEY, { wavelengthUnit: "A" });
+    expect(lineSection(settledPanel(props)).axisDisplayUnit).toBe("A");
+  });
+
+  it("says when the measured series is not the one on screen", () => {
+    const props = docProps();
+    expect(lineSection(settledPanel(props)).measuredSeriesNote).toBeNull();
+    spectrumViewStore.patch(DOC_VIEW_KEY, { binFactor: 4 });
+    expect(lineSection(settledPanel(props)).measuredSeriesNote).toBe("measured on the unbinned channels");
+    spectrumViewStore.patch(DOC_VIEW_KEY, { binFactor: 1, fluxUnit: "uJy" });
+    expect(lineSection(settledPanel(props)).measuredSeriesNote).toBe("measured in the unit of the file (erg/s/cm2/A)");
+    spectrumViewStore.patch(DOC_VIEW_KEY, { binFactor: 4, fluxUnit: "uJy" });
+    expect(lineSection(settledPanel(props)).measuredSeriesNote).toBe(
+      "measured on the unbinned channels; measured in the unit of the file (erg/s/cm2/A)",
+    );
+
+    hooks.run.cells = [];
+    showRegion(regionWithErrors());
+    const cube = cubeProps();
+    expect(lineSection(settledPanel(cube)).measuredSeriesNote).toBeNull();
+    (mustFind(pass(cube), (p) => p.children === "mean", "mean series button").onClick as () => void)();
+    expect(lineSection(settledPanel(cube)).measuredSeriesNote).toBe(
+      `measured on the sum series (${fluxUnitLabel("DN", "sum", "region")}), not on the mean series shown`,
+    );
+
+    hooks.run.cells = [];
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    expect(lineSection(settledPanel(cubeProps())).measuredSeriesNote).toBeNull();
+  });
+
+  it("sets guarded windows with the auto button and says its rule", () => {
+    spectrumViewStore.patch(DOC_VIEW_KEY, { range: { z0: 10, z1: 19 } });
+    const props = docProps();
+    const tree = settledPanel(props);
+    expect(autoButton(tree).title).toBe(AUTO_WINDOWS_RULE);
+    (autoButton(tree).onClick as () => void)();
+    const expected = [
+      [0, 9],
+      [23, 32],
+    ];
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).windows).toEqual(expected);
+    expect(guardedContinuumWindows({ z0: 10, z1: 19 }, N_DOC)).toEqual(expected);
+    expect(mustFind(settledPanel(props), (p) => p.children === "none", "no windows button").title).toBe(NONE_TITLE);
+
+    spectrumViewStore.reset();
+    hooks.run.cells = [];
+    spectrumViewStore.patch(DOC_VIEW_KEY, { range: { z0: 10, z1: 19 } });
+    (mustFind(settledPanel(props), (p) => p.edge === "window:0:1", "window A last edge").onCommit as (value: number) => void)(5);
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).windows).toEqual([
+      [0, 5],
+      [23, 32],
+    ]);
+
+    spectrumViewStore.reset();
+    hooks.run.cells = [];
+    spectrumViewStore.patch(DOC_VIEW_KEY, { range: { z0: 0, z1: 9 } });
+    (autoButton(settledPanel(props)).onClick as () => void)();
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).windows).toEqual([
+      [13, 22],
+      [13, 22],
+    ]);
+
+    spectrumViewStore.reset();
+    hooks.run.cells = [];
+    spectrumViewStore.patch(DOC_VIEW_KEY, { range: { z0: 0, z1: N_DOC - 1 } });
+    (autoButton(settledPanel(props)).onClick as () => void)();
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).windows).toBeNull();
+  });
+
+  it("words the overlap note for a spectrum file", () => {
+    const stored = {
+      range: { z0: 10, z1: 19 },
+      windows: [
+        [5, 12],
+        [25, 30],
+      ] as [[number, number], [number, number]],
+    };
+    spectrumViewStore.patch(DOC_VIEW_KEY, stored);
+    const doc = renderToStaticMarkup(createElement(SpectroscopyPanel, docProps() as never));
+    expect(doc).toContain("Continuum window A overlaps the line range; Measure line would fit its continuum over line flux.");
+    spectrumViewStore.patch(CUBE_VIEW_KEY, stored);
+    const cube = renderToStaticMarkup(createElement(SpectroscopyPanel, cubeProps() as never));
+    expect(cube).toContain(
+      "Continuum window A overlaps the line range; Measure line, Moments and Fit lines would fit their continuum over line flux.",
+    );
+  });
+
+  const fitConfig = () => backend.fit.mock.calls.at(-1)?.[2];
+
+  async function fitAt(z: number | null): Promise<Props> {
+    const props = { ...cubeProps(), publishGate: createFramePublishGate(), onCubeResult: vi.fn() };
+    settledPanel(props);
+    commitRangeStart(pass(props), 5);
+    (axisSection(pass(props)).onRestChange as (restUm: number) => void)(0.6563);
+    if (z !== null) (lineList(pass(props)).onRedshiftChange as (value: number) => void)(z);
+    await (fitSection(settledPanel(props)).onFit as () => Promise<void>)();
+    return props;
+  }
+
+  it("sends the redshift of the line list to the cube line fit", async () => {
+    const props = await fitAt(0.5);
+    expect(backend.fit).toHaveBeenCalledTimes(1);
+    expect(fitConfig()).toMatchObject({ redshift: 0.5, rest_um: 0.6563 });
+    expect(fitSection(settledPanel(props)).redshift).toBe(0.5);
+    spectrumViewStore.reset();
+    hooks.run.cells = [];
+    await fitAt(null);
+    expect(fitConfig()).toMatchObject({ redshift: 0, rest_um: 0.6563 });
+  });
+
+  it("marks a fit stale when the redshift changes after the run", async () => {
+    const props = await fitAt(0.5);
+    expect(fitSection(settledPanel(props)).stale).toBe(false);
+    (lineList(pass(props)).onRedshiftChange as (value: number) => void)(0.2);
+    expect(fitSection(settledPanel(props)).stale).toBe(true);
+    (lineList(pass(props)).onRedshiftChange as (value: number) => void)(0.5);
+    expect(fitSection(settledPanel(props)).stale).toBe(false);
+  });
+
+  it("shows the source-frame velocity first when the fit made one", async () => {
+    const plain = fitResult();
+    backend.fit.mockResolvedValue({
+      ...plain,
+      plane_order: [...plain.plane_order, "source_velocity"],
+      planes: {
+        ...plain.planes,
+        source_velocity: { png_path: "C:/out/fit_src.png", fits_path: "C:/out/fit_src.fits", previewUrl: "asset://fit_src.png" },
+      },
+    });
+    const props = await fitAt(0.5);
+    const run = fitSection(pass(props)).run as LineFitRun;
+    const onCubeResult = props.onCubeResult as ReturnType<typeof vi.fn>;
+    expect(onCubeResult).toHaveBeenCalledTimes(1);
+    expect(onCubeResult.mock.calls[0][0]).toMatchObject({ label: lineFitCubeResult(run, "source_velocity")?.label, fitsPath: "C:/out/fit_src.fits" });
+
+    spectrumViewStore.reset();
+    hooks.run.cells = [];
+    backend.fit.mockResolvedValue(fitResult());
+    const plainProps = await fitAt(0.5);
+    const plainRun = fitSection(pass(plainProps)).run as LineFitRun;
+    expect((plainProps.onCubeResult as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({
+      label: lineFitCubeResult(plainRun, "velocity")?.label,
+      fitsPath: "C:/out/fit.fits",
+    });
+  });
+});
+
+describe("SpectroscopyPanel band strips", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    plotRun.cells = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    regionDocState.regions = [];
+  });
+
+  const G_AXIS = Array.from({ length: 200 }, (_, i) => 3.6 + i * 0.005);
+  const bandDocument = (): SpectrumDocument =>
+    documentOf({
+      axis: { ...airAxis("wave"), header_unit: "um", header_scale: 1, values: G_AXIS, crval: G_AXIS[0], cdelt: 0.005 },
+      wavelength_frame: "vacuum",
+      flux: G_AXIS.map(() => 1),
+      err: null,
+      flux_unit: "Jy",
+      n_rows: G_AXIS.length,
+    });
+  const bandProps = (): Props => ({
+    documentMode: true,
+    spectrumDocument: bandDocument(),
+    filePath: DOC_PATH,
+    publishGate: createFramePublishGate(),
+  });
+  const lineList = (tree: ReactNode) => mustFind(tree, (p) => typeof p.onRedshiftChange === "function", "line list controls");
+  const rangeBandNote = (tree: ReactNode) => findProps(tree, (p) => "data-range-band" in p);
+
+  it("hands the band species to the line list and stores a change", () => {
+    const props = bandProps();
+    pass(props);
+    const first = lineList(pass(props));
+    expect(first.bandSpecies).toEqual([]);
+    expect(first.bandDrawnCount).toBe(0);
+    (first.onBandSpeciesChange as (species: string[]) => void)(["CO2"]);
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).bandSpecies).toEqual(["CO2"]);
+    const tree = pass(props);
+    expect((spectrumPlotOf(tree).bands as BandMark[]).map((b) => b.id)).toEqual(["co2_4p3"]);
+    expect(lineList(tree).bandDrawnCount).toBe(1);
+  });
+
+  it("sets the line range to a clicked band and says which band", () => {
+    spectrumViewStore.patch(DOC_VIEW_KEY, { bandSpecies: ["CO2"] });
+    const props = bandProps();
+    pass(props);
+    const brush = mustFind(pass(props), (p, type) => type === "select" && p.value === "range", "brush select");
+    (brush.onChange as (e: unknown) => void)({ target: { value: "left" } });
+    const plot = spectrumPlotOf(pass(props));
+    expect(plot.activeBrush).toBe("left");
+    const bands = plot.bands as BandMark[];
+    (plot.onPickBand as (band: BandMark) => void)(bands[0]);
+    expect(spectrumViewStore.get(DOC_VIEW_KEY).range).toEqual({ z0: 110, z1: 180 });
+    const tree = pass(props);
+    expect(spectrumPlotOf(tree).range).toEqual({ z0: 110, z1: 180 });
+    const note = rangeBandNote(tree);
+    expect(note, "range band note").not.toBeNull();
+    expect(note!.children).toBe(pickedBandLabel(bandById("co2_4p3")!));
+    expect(note!.children).toBe("range ← CO2 4.3 4.15 to 4.5 μm vacuum (display range)");
+    commitRangeStart(tree, 5);
+    expect(rangeBandNote(pass(props))).toBeNull();
+  });
+});
+
+describe("SpectroscopyPanel export notice, export name, Compare DQ and frame label", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    plotRun.cells = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    logMock.append.mockReset();
+    saveDialog.save.mockReset();
+    backend.cubeSpectrum.mockReset();
+    backend.pixelToWorld.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    renderState.processed = null;
+  });
+
+  const LONG_PATH = `C:/Users/jdoe/${"spectra/".repeat(7)}ha_bess_spectrum.csv`;
+  const docProps = (filePath = DOC_PATH): Props => ({ documentMode: true, spectrumDocument: documentOf(), filePath, publishGate: createFramePublishGate() });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const exportNoticeOf = (tree: ReactNode) => mustFind(tree, (_p, type) => type === ExportNotice, "export notice");
+  const noticeShown = (props: Props) => {
+    const notice = exportNoticeOf(pass(props));
+    return { saved: notice.saved, copied: notice.copied, error: notice.error };
+  };
+  const click = async (props: Props, label: string) => {
+    (mustFind(pass(props), (p) => p.children === label, `${label} button`).onClick as () => void)();
+    await settle();
+    await settle();
+  };
+  const savedName = () => saveDialog.save.mock.calls[0][1] as string;
+  const compareOf = (tree: ReactNode) => mustFind(tree, (_p, type) => type === SpectrumComparisonSection, "comparison section");
+
+  it("shows the whole saved path and tells a failed export from a saved one", async () => {
+    expect(LONG_PATH).toHaveLength(90);
+    const props = docProps();
+    saveDialog.save.mockResolvedValue(LONG_PATH);
+    await click(props, "Save CSV");
+    expect(noticeShown(props)).toEqual({ saved: LONG_PATH, copied: false, error: null });
+
+    vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn(async () => Promise.reject(new Error("denied"))) } });
+    await click(props, "Copy CSV");
+    expect(noticeShown(props)).toEqual({ saved: null, copied: false, error: "export failed: denied" });
+
+    vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn(async () => {}) } });
+    await click(props, "Copy CSV");
+    expect(noticeShown(props)).toEqual({ saved: null, copied: true, error: null });
+
+    logMock.append.mockReset();
+    saveDialog.save.mockResolvedValue(null);
+    await click(props, "Save CSV");
+    expect(noticeShown(props)).toEqual({ saved: null, copied: false, error: null });
+    expect(logMock.append).not.toHaveBeenCalled();
+  });
+
+  it("clears the export notice when the spectrum changes", async () => {
+    const props = docProps();
+    saveDialog.save.mockResolvedValue(LONG_PATH);
+    await click(props, "Save CSV");
+    expect(noticeShown(props).saved).toBe(LONG_PATH);
+    pass(docProps("C:/data/other_bess.fits"));
+    expect(noticeShown(docProps("C:/data/other_bess.fits"))).toEqual({ saved: null, copied: false, error: null });
+  });
+
+  it("names a binned export by its factor", async () => {
+    saveDialog.save.mockResolvedValue(null);
+    spectrumViewStore.patch(DOC_VIEW_KEY, { binFactor: 4 });
+    await click(docProps(), "Save CSV");
+    expect(savedName()).toMatch(/_spectrum_bin4\.csv$/);
+
+    saveDialog.save.mockReset();
+    saveDialog.save.mockResolvedValue(null);
+    spectrumViewStore.patch(DOC_VIEW_KEY, { binFactor: 1 });
+    await click(docProps(), "Save CSV");
+    expect(savedName()).toMatch(/[^n]_spectrum\.csv$/);
+
+    saveDialog.save.mockReset();
+    saveDialog.save.mockResolvedValue(null);
+    hooks.run.cells = [];
+    backend.cubeSpectrum.mockResolvedValue({ flux_jy: null });
+    backend.pixelToWorld.mockResolvedValue({ points: [] });
+    await click(cubeProps(), "Save CSV");
+    expect(savedName()).toMatch(/_spectrum_pixel_3_4\.csv$/);
+  });
+
+  it("passes the DQ switch of a spectrum file to Compare and leaves a cube alone", () => {
+    const props = docProps();
+    expect(compareOf(pass(props)).dqMasked).toBe(true);
+    spectrumViewStore.patch(DOC_VIEW_KEY, { useDq: false });
+    expect(compareOf(pass(props)).dqMasked).toBe(false);
+
+    hooks.run.cells = [];
+    const cube = cubeProps();
+    expect(compareOf(pass(cube)).dqMasked).toBe(true);
+    const select = mustFind(pass(cube), (p) => p["aria-label"] === "Science DQ policy", "shared DQ policy");
+    (select.onChange as (e: unknown) => void)({ target: { value: "ignore" } });
+    expect(compareOf(pass(cube)).dqMasked).toBe(true);
+
+    hooks.run.cells = [];
+    const emptyCube = { ...cubeProps(), spectrum: [], pixelCoord: null };
+    expect(compareOf(settledPanel(emptyCube)).dqMasked).toBe(true);
+  });
+
+  it("prints the frame label to the channel spacing", () => {
+    const values = Array.from({ length: N_DOC }, (_, i) => 0.658 + i * 2e-6);
+    const dims: CubeDims = {
+      ...SPECTRAL_CUBE_DIMS,
+      spectral_axis: { ...airAxis("wave"), header_unit: "um", header_scale: 1, values, crval: values[0], cdelt: 2e-6 },
+    };
+    renderState.processed = {
+      kind: "cube",
+      label: "ch 1",
+      fitsPath: "C:/out/cube_frame_1.fits",
+      previewUrl: "asset://cube_frame_1.png",
+      dimensions: [8, 8],
+      inputPath: "C:/data/cube.fits",
+      frameIndex: 1,
+    };
+    const nav = mustFind(settledPanel(cubeProps(dims)), (p) => typeof p.onFrameRequest === "function", "frame navigation");
+    expect(nav.frame).toBe(1);
+    expect(nav.frameLabel).toBe("ch 1 (0–39) - 0.658002 μm");
+  });
+});
+
+describe("SpectroscopyPanel sweep rules", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    plotRun.cells = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    spectrumState.regionError = null;
+    backend.moments.mockReset();
+  });
+
+  afterEach(() => {
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionError = null;
+  });
+
+  it("holds no hand-made failure box", () => {
+    expect(adHocErrorBoxLines(spectroscopyPanelSource)).toEqual([]);
+  });
+
+  it("announces a spectrum that cannot be read through the compact alert", () => {
+    const html = renderDocument(null, { error: "CTYPE1 = 'WAVE-LOG': log-lambda dispersion is not supported" }).replaceAll("&#x27;", "'");
+    expect(html).toContain(
+      `<div class="ab-error-alert ab-error-alert-compact text-center" role="alert">This spectrum could not be read: CTYPE1 = 'WAVE-LOG': log-lambda dispersion is not supported</div>`,
+    );
+  });
+
+  it("announces a failed region spectrum", () => {
+    spectrumState.regionError = "region lies outside the cube";
+    const html = renderToStaticMarkup(createElement(SpectroscopyPanel, cubeProps() as never));
+    expect(html).toContain('role="alert">Region spectrum failed: region lies outside the cube</div>');
+  });
+
+  it("marks the active series as pressed inside a named group", () => {
+    const html = renderRegion(regionWithErrors());
+    const start = html.indexOf('role="group" aria-label="Region series"');
+    expect(start).toBeGreaterThan(-1);
+    const group = html.slice(start, html.indexOf("</span>", start));
+    const buttons = [...group.matchAll(/<button([^>]*)>([^<]*)<\/button>/g)].map(([, attributes, text]) => ({ attributes, text }));
+    expect(buttons.map((button) => button.text)).toEqual(["sum", "mean"]);
+    const pressed = buttons.filter((button) => button.attributes.includes('aria-pressed="true"'));
+    expect(pressed.map((button) => button.text)).toEqual(["sum"]);
+    expect(pressed[0].attributes).toMatch(/class="[^"]*\bfont-semibold\b/);
+    expect(buttons.filter((button) => button.attributes.includes('aria-pressed="false"')).map((button) => button.text)).toEqual(["mean"]);
+  });
+
+  it("marks the shown moment map as pressed inside a named group", async () => {
+    backend.moments.mockResolvedValue(momentResult());
+    const props = cubeProps({ ...SPECTRAL_CUBE_DIMS, spectral_axis: { ...airAxis("wave"), rest_wavelength_um: 0.6563 } });
+    pass(props);
+    commitRangeStart(pass(props), 5);
+    await (mustFind(pass(props), (p) => p.label === "Moments", "Moments button").onClick as () => Promise<void>)();
+    const momentButtons = (tree: ReactNode) =>
+      (mustFind(tree, (p) => p.role === "group" && p["aria-label"] === "Moment map", "moment map group").children as { props: Props }[]).map(
+        (button) => button.props,
+      );
+    const pressedState = (tree: ReactNode) =>
+      momentButtons(tree).map((button) => [button.children, button["aria-pressed"], String(button.className).includes("font-semibold")]);
+    expect(pressedState(pass(props))).toEqual([
+      ["m0", true, true],
+      ["m1", false, false],
+      ["m2", false, false],
+    ]);
+    (momentButtons(pass(props)).find((button) => button.children === "m2")!.onClick as () => void)();
+    expect(pressedState(pass(props))).toEqual([
+      ["m0", false, false],
+      ["m1", false, false],
+      ["m2", true, true],
+    ]);
+  });
+
+  it("draws the export buttons with the shared small button class", () => {
+    const tree = pass({ documentMode: true, spectrumDocument: documentOf(), filePath: DOC_PATH, publishGate: createFramePublishGate() });
+    for (const label of ["Copy CSV", "Save CSV"]) {
+      const button = mustFind(tree, (p) => p.children === label, `${label} button`);
+      expect(button.className).toBe(SMALL_BUTTON_CLASS);
+      expect(button.style).toBeUndefined();
+    }
   });
 });

@@ -51,7 +51,7 @@ use crate::infra::fits::reader::{
 };
 use crate::infra::fits::table::{find_bintable, load_bintable, BintableData};
 use crate::infra::fits::writer::{is_wcs_card, write_fits_cube, write_fits_f64, BinTableHdu, HduData, ImageHdu};
-use crate::infra::image_source::LoadedCompanions;
+use crate::infra::image_source::{layer_absent_without_fault, LoadedCompanions};
 use crate::infra::wcs_source::{header_wcs, load_wcs};
 use crate::service::common::{cached_header, derived_output_header};
 use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, EXTNAME_SCI};
@@ -125,6 +125,10 @@ enum DqPixels {
 
 fn load_preparation_companions(path: &str, sci: &ImageEntry) -> Result<(LoadedCompanions, Vec<String>)> {
     let loaded = load_companions(path)?;
+    let faults = [loaded.err_unavailable.as_deref(), loaded.dq_unavailable.as_deref()];
+    if let Some(reason) = faults.into_iter().flatten().find(|reason| !layer_absent_without_fault(reason)) {
+        bail!("{}: {reason}", output_stem(path));
+    }
     let mut warnings = Vec::new();
     let header = sci.header().context("SCI has no header for companion validation")?;
     let declared = sci.companions();
@@ -426,11 +430,23 @@ pub struct AlignSetReport {
     pub elapsed_ms: u64,
 }
 
+static LOGGED_FILTER_REGISTRY_WARNINGS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+pub fn filter_registry_report() -> (FilterRegistry, Vec<String>) {
+    load_config().map_or_else(|_| (FilterRegistry::builtin(), Vec::new()), |config| FilterRegistry::with_custom_datasets(&config.filter_datasets))
+}
+
 pub fn filter_registry() -> FilterRegistry {
-    load_config()
-        .ok()
-        .and_then(|config| FilterRegistry::with_datasets(&config.filter_datasets).ok())
-        .unwrap_or_else(FilterRegistry::builtin)
+    let (registry, warnings) = filter_registry_report();
+    let mut logged = LOGGED_FILTER_REGISTRY_WARNINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for warning in warnings {
+        if !logged.contains(&warning) {
+            log::warn!("{warning}");
+            logged.insert(warning);
+        }
+    }
+    registry
 }
 
 fn identified_filters(paths: &[String], frames: &[ImageFrame], policy: &ReferencePolicy) -> Vec<Option<String>> {
@@ -2893,5 +2909,17 @@ mod tests {
         let coded = refused.downcast_ref::<CodedError>().unwrap();
         assert_eq!((coded.code, coded.hint.as_deref()), ("insufficient_memory", Some(CROP_FIRST_ADVICE)));
         assert_eq!(check_preparation_memory(u64::MAX, None, "Aligning this set", CROP_FIRST_ADVICE).unwrap(), None);
+    }
+
+    #[test]
+    fn an_sdss_frame_without_a_typed_gain_is_prepared_without_an_error_plane() {
+        use crate::infra::sdss_frame_file::test_support::{write_frame, FRAME_XINTERP};
+        use crate::infra::sdss_frame_file::SDSS_NO_ERROR_REASON;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_frame(dir.path(), "frame-r-000094-1-0131.fits", &FRAME_XINTERP);
+        let entry = load_cached_full(&path).unwrap();
+        let (loaded, _) = load_preparation_companions(&path, &entry).unwrap();
+        assert!(loaded.err.is_none());
+        assert_eq!(loaded.err_unavailable.as_deref(), Some(SDSS_NO_ERROR_REASON));
     }
 }

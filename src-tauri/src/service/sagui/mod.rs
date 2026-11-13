@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use crate::core::cubeprep::cube::{cube_base_header, dq_table_of, Cube, CubePlane};
+use crate::core::analysis::resolution::psf_noise_equivalent_area_px;
 use crate::core::cubeprep::align::{same_grid, CARD_NCORRK, CARD_NCORRSRC, NOISCORR_EXTNAME, NOISCORR_SOURCE_ALIGN, NOISCORR_SOURCE_MATCH};
 use crate::core::imaging::dq_flags::{bits_present, DqTable};
 use crate::core::metadata::photcal::card_text;
@@ -60,6 +61,9 @@ fn default_sed_scaling() -> String { SED_SCALINGS[0].into() }
 pub struct Band {
     pub filter: String,
     pub pivot_um: f64,
+    pub psf_fwhm_arcsec: Option<f64>,
+    pub pixscale_arcsec: Option<f64>,
+    pub psf_area_px: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +85,7 @@ pub struct InputInfo {
     pub dq_flags: Vec<PlaneDqFlags>,
     pub estimated_memory_bytes: u64,
     pub warnings: Vec<String>,
+    pub redshift: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,13 +279,16 @@ fn validate_cube(cube: &Cube) -> Result<InputInfo> {
     let bands = cube.filters.iter().map(|plane| {
         ensure!(!plane.filter.trim().is_empty() && seen.insert(plane.filter.to_lowercase()), "Filters must be nonempty and unique");
         let pivot_um = plane.pivot_um.filter(|v| v.is_finite() && *v > 0.0).context("Every filter requires a positive pivot wavelength")?;
-        Ok(Band { filter: plane.filter.clone(), pivot_um })
+        let psf_fwhm_arcsec = plane.psf_fwhm_arcsec.filter(|v| v.is_finite() && *v > 0.0);
+        let pixscale_arcsec = plane.pixscale_arcsec.filter(|v| v.is_finite() && *v > 0.0);
+        let psf_area_px = psf_fwhm_arcsec.zip(pixscale_arcsec).map(|(fwhm, scale)| psf_noise_equivalent_area_px(fwhm / scale));
+        Ok(Band { filter: plane.filter.clone(), pivot_um, psf_fwhm_arcsec, pixscale_arcsec, psf_area_px })
     }).collect::<Result<Vec<_>>>()?;
     let mut warnings = vec!["External cubes require aligned bands and a verified common PSF; a target name alone does not validate matching".to_string()];
     if cube.err.is_none() { warnings.push("ERR is absent: regional uncertainties remain unknown".into()); }
     if cube.dq.is_none() { warnings.push("DQ is absent: only finite-value support can be checked".into()); }
     warnings.extend(zero_error_warnings(cube));
-    Ok(InputInfo { width, height, bands, unit: card_text(&cube.header, "BUNIT").unwrap_or_default(), has_err: cube.err.is_some(), has_dq: cube.dq.is_some(), has_noise_correlation: false, dq_flags: dq_flag_counts(cube), estimated_memory_bytes: memory_estimate((width * height) as u64, cube.planes.len() as u64, "ward", 40), warnings })
+    Ok(InputInfo { width, height, bands, unit: card_text(&cube.header, "BUNIT").unwrap_or_default(), has_err: cube.err.is_some(), has_dq: cube.dq.is_some(), has_noise_correlation: false, dq_flags: dq_flag_counts(cube), estimated_memory_bytes: memory_estimate((width * height) as u64, cube.planes.len() as u64, "ward", 40), warnings, redshift: cube.header.get_f64("REDSHIFT").filter(|z| z.is_finite() && *z > 0.0) })
 }
 
 fn validate_companion_header(cube: &Cube, header: &HduHeader, name: &str) -> Result<Vec<String>> {

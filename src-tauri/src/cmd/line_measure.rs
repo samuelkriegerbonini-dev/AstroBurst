@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 use crate::cmd::common::blocking_cmd;
 use crate::cmd::cube::{err_source, APERTURE_SUBSAMPLES, ERR_SOURCE_NONE};
 use crate::core::analysis::line_measure::{
-    measure_line_with_errors, resolve_windows, with_velocity, ContinuumWindows, LineMeasurement, LineModel,
+    line_redshift, measure_line_physical, resolve_windows, with_velocity, ContinuumWindows, LineMeasurement, LineModel,
+    CGS_FLUX_PER_SI_FLUX,
 };
 use crate::core::analysis::spectrum1d::{Spectrum1d, Spectrum1dSource, WavelengthFrame, CSV_ERR_COLUMN};
+use crate::core::analysis::tso::{find_series, open_tso, series_label, series_spectrum, SeriesKey, TsoPick};
 use crate::core::analysis::x1d::{COL_FLUX_ERROR, EXTNAME_EXTRACT1D};
 use crate::core::astrometry::spectral::{
     air_formula_applies, air_to_vacuum_um, vacuum_to_air_um, AxisKind, SpectralAxis, VelocityConvention,
@@ -17,8 +19,12 @@ use crate::core::astrometry::spectral::{
 use crate::core::cube::companions::{open_cube_set, CubeSet};
 use crate::core::cube::lazy::{ApertureSpectrum, LazyCube};
 use crate::core::cube::linefit::dq_flagged;
+use crate::core::cube::moments::channel_widths;
 use crate::core::imaging::region::RegionShape;
+use crate::core::metadata::flux_units::{fnu_jy_to_flambda_si_um, parse_spectral_flux_unit, SpectralFluxUnit};
+use crate::core::metadata::photcal::{FluxConvention, PhotCal, JY_PER_MJY};
 use crate::infra::fits::spectrum1d::load_spectrum1d;
+use crate::infra::wcs_source::load_wcs;
 use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, HEADER_BUNIT, RES_SOURCE};
 
 pub const MAX_LINE_CHANNEL: usize = 1 << 24;
@@ -28,7 +34,19 @@ pub const DEFAULT_CONVENTION: &str = "optical";
 pub const FRAME_AIR: &str = "air";
 pub const FRAME_VACUUM: &str = "vacuum";
 pub const KEY_ERR_SOURCE: &str = "err_source";
+pub const KEY_LINE_ID: &str = "line_id";
+pub const KEY_LINE_LABEL: &str = "line_label";
+pub const KEY_REDSHIFT: &str = "redshift";
+pub const KEY_WAVELENGTH_FRAME: &str = "wavelength_frame";
+pub const MAX_LINE_ID_CHARS: usize = 64;
+pub const MAX_LINE_LABEL_CHARS: usize = 120;
 const ASSUMED_FRAME_SUFFIX: &str = " assumed, no header card names the frame";
+const NO_PHYSICAL_FLUX_PREFIX: &str = "no physical flux: ";
+const SOSS_FLUX_LABEL: &str = "MJy";
+const PER_BEAM_MARKER: &str = "beam";
+const ANGSTROM_PER_UM: f64 = 1e4;
+const SI_FLUX_PER_JY_GHZ: f64 = 1e-17;
+const SERIES_NOTES_RESTATED: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -45,6 +63,13 @@ pub enum SpectrumSource {
     File {
         #[serde(default)]
         hdu: Option<usize>,
+    },
+    Series {
+        paths: Vec<String>,
+        detector: String,
+        #[serde(default)]
+        sporder: Option<i64>,
+        pick: TsoPick,
     },
 }
 
@@ -73,6 +98,12 @@ pub struct LineRequest {
     pub redshift: Option<f64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LineIdentity {
+    pub id: Option<String>,
+    pub label: Option<String>,
+}
+
 fn bunit(cube: &LazyCube) -> Option<String> {
     cube.header
         .get(HEADER_BUNIT)
@@ -92,6 +123,143 @@ fn measured_axis_values(axis: &SpectralAxis, notes: &mut Vec<String>) -> Vec<f64
     }
     notes.push(format!("air wavelengths converted to vacuum with {}", AIR_VACUUM_FORMULA));
     axis.values.iter().map(|&w| air_to_vacuum_um(w)).collect()
+}
+
+enum MeasuredAxis<'a> {
+    VacuumWavelength,
+    AirWavelength,
+    VacuumFromAir(&'a [f64]),
+    Frequency,
+    Other,
+}
+
+enum FluxSource<'a> {
+    File,
+    Spaxel,
+    Region(&'a LazyCube),
+}
+
+fn cube_measured_axis(axis: &SpectralAxis) -> MeasuredAxis<'_> {
+    match axis.kind {
+        AxisKind::Wave => MeasuredAxis::VacuumWavelength,
+        AxisKind::Awav => MeasuredAxis::VacuumFromAir(&axis.values),
+        AxisKind::Freq => MeasuredAxis::Frequency,
+        _ => MeasuredAxis::Other,
+    }
+}
+
+fn document_measured_axis(frame: WavelengthFrame, kind: AxisKind) -> MeasuredAxis<'static> {
+    match (frame, kind) {
+        (WavelengthFrame::Vacuum, _) => MeasuredAxis::VacuumWavelength,
+        (WavelengthFrame::Air, _) => MeasuredAxis::AirWavelength,
+        (WavelengthFrame::NotWavelength, AxisKind::Freq) => MeasuredAxis::Frequency,
+        (WavelengthFrame::NotWavelength, _) => MeasuredAxis::Other,
+    }
+}
+
+fn mjy_per_sr_pixel_solid_angle(cube: &LazyCube) -> Option<f64> {
+    let wcs = load_wcs(&cube.source_path, &cube.header).ok();
+    match PhotCal::from_header(&cube.header, wcs.as_ref())?.convention {
+        FluxConvention::JwstMjySr { pixar_sr, .. } => Some(pixar_sr),
+        _ => None,
+    }
+}
+
+fn width_ratios(numerator_axis: &[f64], denominator_axis: &[f64]) -> Vec<f64> {
+    channel_widths(numerator_axis).into_iter().zip(channel_widths(denominator_axis)).map(|(n, d)| n / d).collect()
+}
+
+fn physical_flux_factor(
+    unit: Option<&str>,
+    axis: &MeasuredAxis,
+    measured: &[f64],
+    source: &FluxSource,
+) -> (Option<Vec<f64>>, String) {
+    let refused = |reason: String| (None, format!("{}{}", NO_PHYSICAL_FLUX_PREFIX, reason));
+    let Some(unit) = unit else {
+        return refused("the spectrum has no flux unit".to_string());
+    };
+    if unit == SOSS_FLUX_LABEL {
+        return refused(format!(
+            "{} is the label JWST NIRISS SOSS spectra carry on values that are not on a MJy scale, so the unit cannot be trusted",
+            unit
+        ));
+    }
+    if unit.to_lowercase().contains(PER_BEAM_MARKER) {
+        return refused(format!("{} is a brightness per beam and this version does not read the beam area", unit));
+    }
+    let (jy_per_unit, f_nu) = match parse_spectral_flux_unit(unit) {
+        SpectralFluxUnit::Unknown => {
+            return refused(format!("unit '{}' is not a flux density this version converts", unit));
+        }
+        SpectralFluxUnit::Rate => return refused(format!("{} is a count rate without a flux calibration", unit)),
+        SpectralFluxUnit::FluxDensityLambda { cgs_per_unit } => {
+            let si_per_unit = cgs_per_unit * ANGSTROM_PER_UM / CGS_FLUX_PER_SI_FLUX;
+            return match axis {
+                MeasuredAxis::VacuumWavelength | MeasuredAxis::AirWavelength => (
+                    Some(vec![si_per_unit; measured.len()]),
+                    format!("F_lambda in {} integrated over wavelength", unit),
+                ),
+                MeasuredAxis::VacuumFromAir(air) => (
+                    Some(width_ratios(air, measured).into_iter().map(|ratio| si_per_unit * ratio).collect()),
+                    format!(
+                        "F_lambda in {} integrated over air wavelengths (axis converted with {} for the measurement)",
+                        unit, AIR_VACUUM_FORMULA
+                    ),
+                ),
+                MeasuredAxis::Frequency | MeasuredAxis::Other => {
+                    refused("F_lambda is integrated over wavelength only".to_string())
+                }
+            };
+        }
+        SpectralFluxUnit::FluxDensityNu { jy_per_unit } => (jy_per_unit, format!("F_nu in {}", unit)),
+        SpectralFluxUnit::SurfaceBrightness => match source {
+            FluxSource::File => {
+                return refused(format!("{} is a surface brightness and a spectrum file carries no solid angle", unit));
+            }
+            FluxSource::Spaxel => {
+                return refused(format!("one spaxel in {} is an intensity, not a flux; measure a region", unit));
+            }
+            FluxSource::Region(cube) => match mjy_per_sr_pixel_solid_angle(cube) {
+                Some(pixar_sr) => (
+                    pixar_sr * JY_PER_MJY,
+                    format!("{} summed over the region with a pixel solid angle of {:.4e} sr, then F_nu", unit, pixar_sr),
+                ),
+                None => {
+                    return refused(format!(
+                        "{} needs MJy/sr and a pixel solid angle (PIXAR_SR or a celestial WCS), which this cube does not give",
+                        unit
+                    ));
+                }
+            },
+        },
+    };
+    match axis {
+        MeasuredAxis::VacuumWavelength | MeasuredAxis::VacuumFromAir(_) => (
+            Some(measured.iter().map(|&x| fnu_jy_to_flambda_si_um(jy_per_unit, x)).collect()),
+            format!("{} integrated per channel with c / lambda^2", f_nu),
+        ),
+        MeasuredAxis::AirWavelength => {
+            let vacuum: Vec<f64> = measured.iter().map(|&x| air_to_vacuum_um(x)).collect();
+            let factor = vacuum
+                .iter()
+                .zip(width_ratios(&vacuum, measured))
+                .map(|(&x, ratio)| fnu_jy_to_flambda_si_um(jy_per_unit, x) * ratio)
+                .collect();
+            (
+                Some(factor),
+                format!(
+                    "{} integrated per channel with c / lambda^2 on vacuum wavelengths (air axis converted with {})",
+                    f_nu, AIR_VACUUM_FORMULA
+                ),
+            )
+        }
+        MeasuredAxis::Frequency => (
+            Some(vec![jy_per_unit * SI_FLUX_PER_JY_GHZ; measured.len()]),
+            format!("{} integrated over frequency", f_nu),
+        ),
+        MeasuredAxis::Other => refused("the axis is not a wavelength or frequency axis".to_string()),
+    }
 }
 
 struct CubeSpectrum {
@@ -208,7 +376,9 @@ fn extract_spectrum(
     let mut companion_notes = Vec::new();
     let (err, dq) = used_companions(set, options, &mut companion_notes);
     let spectrum = match source {
-        SpectrumSource::File { .. } => bail!("a spectrum file source has no cube spectrum to extract"),
+        SpectrumSource::File { .. } | SpectrumSource::Series { .. } => {
+            bail!("a spectrum file source has no cube spectrum to extract")
+        }
         SpectrumSource::Pixel { x, y } => {
             let flux = set.sci.extract_spectrum_at(*y, *x)?;
             let errors = err.map(|c| c.extract_spectrum_at(*y, *x)).transpose()?.map(widened);
@@ -264,7 +434,7 @@ fn measure_cube_line(
     source: &SpectrumSource,
     request: &LineRequest,
     options: &MeasureOptions,
-) -> anyhow::Result<(LineMeasurement, String)> {
+) -> anyhow::Result<(LineMeasurement, String, Option<&'static str>)> {
     if options.wavelength_frame.is_some() {
         bail!("wavelength_frame applies to spectrum files only: a cube's air or vacuum frame comes from its CTYPE3");
     }
@@ -280,7 +450,14 @@ fn measure_cube_line(
     let mut notes = set.notes.clone();
     let axis_values = measured_axis_values(&axis, &mut notes);
     let spectrum = extract_spectrum(&set, source, request, options, &mut notes)?;
-    let mut m = measure_line_with_errors(
+    let unit = bunit(cube);
+    let flux_source = match source {
+        SpectrumSource::Region { .. } => FluxSource::Region(cube),
+        _ => FluxSource::Spaxel,
+    };
+    let (channel_factor, physical_basis) =
+        physical_flux_factor(unit.as_deref(), &cube_measured_axis(&axis), &axis_values, &flux_source);
+    let mut m = measure_line_physical(
         &axis_values,
         &spectrum.flux,
         spectrum.err.as_deref(),
@@ -288,10 +465,12 @@ fn measure_cube_line(
         (request.z0, request.z1),
         request.continuum,
         request.model,
+        channel_factor.as_deref(),
     )
     .map_err(anyhow::Error::msg)?;
     m.axis_unit = axis.unit.clone();
-    let native_unit = bunit(cube).unwrap_or_else(|| NATIVE_FLUX_UNIT.to_string());
+    m.flux_physical_basis = physical_basis;
+    let native_unit = unit.unwrap_or_else(|| NATIVE_FLUX_UNIT.to_string());
     let spectrum_unit = if matches!(source, SpectrumSource::Region { .. }) {
         format!("{}{}", native_unit, REGION_SUM_UNIT_SUFFIX)
     } else {
@@ -301,7 +480,8 @@ fn measure_cube_line(
     notes.append(&mut m.notes);
     m.notes = notes;
     add_velocity(&mut m, &axis, request.rest_um.or(axis.rest_wavelength_um), request);
-    Ok((m, spectrum.err_source))
+    let measured_frame = matches!(axis.kind, AxisKind::Wave | AxisKind::Awav).then_some(FRAME_VACUUM);
+    Ok((m, spectrum.err_source, measured_frame))
 }
 
 fn parse_wavelength_frame(name: &str) -> Result<WavelengthFrame, String> {
@@ -333,10 +513,18 @@ fn frame_text(frame: WavelengthFrame) -> &'static str {
     }
 }
 
+fn frame_name(frame: WavelengthFrame) -> Option<&'static str> {
+    match frame {
+        WavelengthFrame::Air => Some(FRAME_AIR),
+        WavelengthFrame::Vacuum => Some(FRAME_VACUUM),
+        WavelengthFrame::NotWavelength => None,
+    }
+}
+
 fn document_hdu(source: &Spectrum1dSource) -> Option<usize> {
     match source {
         Spectrum1dSource::X1d { hdu, .. } | Spectrum1dSource::Wcs1d { hdu, .. } => Some(*hdu),
-        Spectrum1dSource::Csv { .. } => None,
+        Spectrum1dSource::Csv { .. } | Spectrum1dSource::X1dInts { .. } => None,
     }
 }
 
@@ -345,6 +533,7 @@ fn document_label(source: &Spectrum1dSource) -> String {
         Spectrum1dSource::X1d { hdu, .. } => format!("{} table in HDU {}", EXTNAME_EXTRACT1D, hdu),
         Spectrum1dSource::Wcs1d { hdu, .. } => format!("1D array in HDU {}", hdu),
         Spectrum1dSource::Csv { .. } => "CSV file".to_string(),
+        Spectrum1dSource::X1dInts { .. } => "time-series pick".to_string(),
     }
 }
 
@@ -354,6 +543,7 @@ fn document_err_source(source: &Spectrum1dSource, err_used: bool) -> String {
         (Spectrum1dSource::X1d { hdu, .. }, true) => format!("{} column (HDU {})", COL_FLUX_ERROR, hdu),
         (Spectrum1dSource::Wcs1d { .. }, true) => format!("{} extension", EXTNAME_ERR),
         (Spectrum1dSource::Csv { .. }, true) => format!("{} column (CSV)", CSV_ERR_COLUMN),
+        (Spectrum1dSource::X1dInts { .. }, true) => format!("{} of the series pick", COL_FLUX_ERROR),
     }
 }
 
@@ -422,35 +612,37 @@ fn air_rest_um(rest_um: f64, redshift: Option<f64>, notes: &mut Vec<String>) -> 
     air
 }
 
-fn measure_file_line(
-    path: &str,
-    hdu: Option<usize>,
-    request: &LineRequest,
-    options: &MeasureOptions,
-) -> anyhow::Result<(LineMeasurement, SpectrumSource, String)> {
-    let doc = load_spectrum1d(path, hdu)?;
-    let frame = document_frame(doc.wavelength_frame, options.wavelength_frame).map_err(anyhow::Error::msg)?;
-    let label = document_label(&doc.source);
+fn measured_frame_text(doc: &Spectrum1d, frame: WavelengthFrame) -> String {
     let file_frame = format!(
         "{}{}",
         frame_text(doc.wavelength_frame),
         if doc.frame_assumed() { ASSUMED_FRAME_SUFFIX } else { "" }
     );
-    let mut notes = vec![if frame == doc.wavelength_frame {
-        format!("spectrum file, {}: {}", label, file_frame)
+    if frame == doc.wavelength_frame {
+        file_frame
     } else {
-        format!(
-            "spectrum file, {}: {} set by the request (the file reads as {})",
-            label,
-            frame_text(frame),
-            file_frame
-        )
-    }];
-    let err = document_errors(&doc, options.use_err, &mut notes);
+        format!("{} set by the request (the file reads as {})", frame_text(frame), file_frame)
+    }
+}
+
+fn measure_document_line(
+    doc: &Spectrum1d,
+    frame: WavelengthFrame,
+    mut notes: Vec<String>,
+    request: &LineRequest,
+    options: &MeasureOptions,
+) -> anyhow::Result<(LineMeasurement, String, Option<&'static str>)> {
+    let err = document_errors(doc, options.use_err, &mut notes);
     let err_label = document_err_source(&doc.source, err.is_some());
-    let excluded = document_exclusions(&doc, options.use_dq, &mut notes);
+    let excluded = document_exclusions(doc, options.use_dq, &mut notes);
     let flux = measured_flux(&doc.flux, &mut notes);
-    let mut m = measure_line_with_errors(
+    let (channel_factor, physical_basis) = physical_flux_factor(
+        doc.flux_unit.as_deref().map(str::trim).filter(|unit| !unit.is_empty()),
+        &document_measured_axis(frame, doc.axis.kind),
+        &doc.axis.values,
+        &FluxSource::File,
+    );
+    let mut m = measure_line_physical(
         &doc.axis.values,
         &flux,
         err,
@@ -458,18 +650,72 @@ fn measure_file_line(
         (request.z0, request.z1),
         request.continuum,
         request.model,
+        channel_factor.as_deref(),
     )
     .map_err(anyhow::Error::msg)?;
     m.axis_unit = doc.axis.unit.clone();
+    m.flux_physical_basis = physical_basis;
     m.flux_unit = format!("{} x {}", doc.flux_unit.as_deref().unwrap_or(NATIVE_FLUX_UNIT), doc.axis.unit);
     notes.append(&mut m.notes);
     m.notes = notes;
-    let rest = match (request.rest_um.or(doc.axis.rest_wavelength_um), frame) {
+    let rest_vacuum = request.rest_um.or(doc.axis.rest_wavelength_um);
+    let rest = match (rest_vacuum, frame) {
         (Some(rest), WavelengthFrame::Air) => Some(air_rest_um(rest, request.redshift, &mut m.notes)),
         (rest, _) => rest,
     };
     add_velocity(&mut m, &doc.axis, rest, request);
-    Ok((m, SpectrumSource::File { hdu: document_hdu(&doc.source) }, err_label))
+    if let (WavelengthFrame::Air, Some(rest_vacuum), Some(velocity)) = (frame, rest_vacuum, m.velocity.as_mut()) {
+        let centroid_vacuum = air_to_vacuum_um(m.centroid);
+        let centroid_err_vacuum = m.centroid_err * centroid_vacuum / m.centroid;
+        (velocity.z_line, velocity.z_line_err) =
+            line_redshift(centroid_vacuum, centroid_err_vacuum, rest_vacuum, velocity.shift_applied_kms);
+    }
+    Ok((m, err_label, frame_name(frame)))
+}
+
+fn measure_file_line(
+    path: &str,
+    hdu: Option<usize>,
+    request: &LineRequest,
+    options: &MeasureOptions,
+) -> anyhow::Result<(LineMeasurement, SpectrumSource, String, Option<&'static str>)> {
+    let doc = load_spectrum1d(path, hdu)?;
+    let frame = document_frame(doc.wavelength_frame, options.wavelength_frame).map_err(anyhow::Error::msg)?;
+    let notes =
+        vec![format!("spectrum file, {}: {}", document_label(&doc.source), measured_frame_text(&doc, frame))];
+    let (m, err_label, measured_frame) = measure_document_line(&doc, frame, notes, request, options)?;
+    Ok((m, SpectrumSource::File { hdu: document_hdu(&doc.source) }, err_label, measured_frame))
+}
+
+fn pick_text(pick: &TsoPick, n_integrations: usize) -> String {
+    match *pick {
+        TsoPick::Integration { index } => format!("integration {}", index + 1),
+        TsoPick::Median => format!("median of {} integrations", n_integrations),
+        TsoPick::Mean { first, last } => format!("mean of integrations {} to {}", first + 1, last + 1),
+    }
+}
+
+fn measure_series_line(
+    paths: &[String],
+    key: &SeriesKey,
+    pick: &TsoPick,
+    request: &LineRequest,
+    options: &MeasureOptions,
+) -> anyhow::Result<(LineMeasurement, String, Option<&'static str>)> {
+    let set = open_tso(paths)?;
+    let series = find_series(&set, key)?;
+    let doc = series_spectrum(&set, key, pick)?;
+    let frame = document_frame(doc.wavelength_frame, options.wavelength_frame).map_err(anyhow::Error::msg)?;
+    let keys: Vec<SeriesKey> = set.series.iter().map(|found| found.key.clone()).collect();
+    let mut notes = vec![format!(
+        "time series {}, {}: {}",
+        series_label(key, &keys),
+        pick_text(pick, series.n_integrations),
+        measured_frame_text(&doc, frame)
+    )];
+    notes.extend(doc.notes.iter().skip(SERIES_NOTES_RESTATED).cloned());
+    notes.extend(series.warnings.iter().cloned());
+    measure_document_line(&doc, frame, notes, request, options)
 }
 
 #[cfg(test)]
@@ -477,18 +723,34 @@ pub(crate) fn measure_line_json(path: &str, source: &SpectrumSource, request: &L
     measure_line_json_with(path, source, request, &MeasureOptions::default())
 }
 
+#[cfg(test)]
 pub(crate) fn measure_line_json_with(
     path: &str,
     source: &SpectrumSource,
     request: &LineRequest,
     options: &MeasureOptions,
 ) -> anyhow::Result<serde_json::Value> {
+    measure_line_json_identified(path, source, request, options, &LineIdentity::default())
+}
+
+pub(crate) fn measure_line_json_identified(
+    path: &str,
+    source: &SpectrumSource,
+    request: &LineRequest,
+    options: &MeasureOptions,
+    identity: &LineIdentity,
+) -> anyhow::Result<serde_json::Value> {
     let t0 = Instant::now();
-    let (mut m, measured, err_label) = match source {
+    let (mut m, measured, err_label, measured_frame) = match source {
         SpectrumSource::File { hdu } => measure_file_line(path, *hdu, request, options)?,
+        SpectrumSource::Series { paths, detector, sporder, pick } => {
+            let key = SeriesKey { detector: detector.clone(), sporder: *sporder };
+            let (m, err_label, measured_frame) = measure_series_line(paths, &key, pick, request, options)?;
+            (m, source.clone(), err_label, measured_frame)
+        }
         SpectrumSource::Pixel { .. } | SpectrumSource::Region { .. } => {
-            let (m, err_label) = measure_cube_line(path, source, request, options)?;
-            (m, source.clone(), err_label)
+            let (m, err_label, measured_frame) = measure_cube_line(path, source, request, options)?;
+            (m, source.clone(), err_label, measured_frame)
         }
     };
     m.elapsed_ms = t0.elapsed().as_millis() as u64;
@@ -496,8 +758,23 @@ pub(crate) fn measure_line_json_with(
     if let Some(object) = value.as_object_mut() {
         object.insert(RES_SOURCE.to_string(), serde_json::to_value(&measured)?);
         object.insert(KEY_ERR_SOURCE.to_string(), serde_json::Value::String(err_label));
+        object.insert(KEY_LINE_ID.to_string(), serde_json::to_value(&identity.id)?);
+        object.insert(KEY_LINE_LABEL.to_string(), serde_json::to_value(&identity.label)?);
+        object.insert(KEY_REDSHIFT.to_string(), serde_json::to_value(request.redshift)?);
+        object.insert(KEY_WAVELENGTH_FRAME.to_string(), serde_json::to_value(measured_frame)?);
     }
     Ok(value)
+}
+
+fn identity_text(name: &str, text: Option<String>, max_chars: usize) -> Result<Option<String>, String> {
+    let Some(trimmed) = text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    let length = trimmed.chars().count();
+    if length > max_chars {
+        return Err(format!("{} must be at most {} characters, got {}", name, max_chars, length));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn validate_window(window: (usize, usize)) -> Result<(), String> {
@@ -522,6 +799,8 @@ pub async fn measure_spectral_line_cmd(
     use_dq: Option<bool>,
     wavelength_frame: Option<String>,
     redshift: Option<f64>,
+    line_id: Option<String>,
+    line_label: Option<String>,
 ) -> Result<serde_json::Value, String> {
     if path.trim().is_empty() {
         return Err("path must name a cube or spectrum file, got an empty string".to_string());
@@ -548,17 +827,22 @@ pub async fn measure_spectral_line_cmd(
             return Err(format!("redshift must be a finite number above -1, got {}", z));
         }
     }
+    let identity = LineIdentity {
+        id: identity_text(KEY_LINE_ID, line_id, MAX_LINE_ID_CHARS)?,
+        label: identity_text(KEY_LINE_LABEL, line_label, MAX_LINE_LABEL_CHARS)?,
+    };
     let convention = VelocityConvention::parse(convention.as_deref().unwrap_or(DEFAULT_CONVENTION))?;
     let model = LineModel::parse(model.as_deref().unwrap_or(LineModel::None.name()))?;
     let wavelength_frame = wavelength_frame.as_deref().map(parse_wavelength_frame).transpose()?;
     let options = MeasureOptions { use_err: use_err.unwrap_or(true), use_dq: use_dq.unwrap_or(true), wavelength_frame };
     let request = LineRequest { z0, z1, continuum, rest_um, convention, model, velocity_shift_kms, redshift };
-    blocking_cmd!(measure_line_json_with(&path, &source, &request, &options))
+    blocking_cmd!(measure_line_json_identified(&path, &source, &request, &options, &identity))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::analysis::line_measure::measure_line_with_errors;
     use crate::core::analysis::line_measure::golden::{assert_matches_golden, fixtures_dir, without_elapsed};
     use crate::cmd::spectrum1d::test_fixtures::{iraf_linear_cards, write_wcs1d, write_x1d_columns};
     use crate::core::analysis::line_measure::golden::{golden_diffs, read_golden, unweighted_diffs};
@@ -566,6 +850,9 @@ mod tests {
     use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
     use crate::core::cube::companions::open_cube_set;
     use crate::core::cube::moments::channel_widths;
+    use crate::core::analysis::tso::{DATAMODEL_ROWS, MEDIAN_ERROR_FACTOR};
+    use crate::core::astrometry::gwcs::test_support::env_dir;
+    use crate::infra::fits::x1dints::test_fixtures::{ramp_row, rows_hdu, series_primary, write_series_file, SynthRow, SynthTable};
 
     const LINE_RANGE: (usize, usize) = (8, 32);
     const WINDOWS: ContinuumWindows = ((0, 5), (34, 39));
@@ -778,7 +1065,9 @@ mod tests {
         let run = |path: &str, source: &SpectrumSource, req: &LineRequest| {
             let mut value = without_elapsed(measure_line_json(path, source, req).unwrap());
             assert_eq!(value[KEY_ERR_SOURCE], ERR_SOURCE_NONE, "{}", value);
-            value.as_object_mut().unwrap().remove(KEY_ERR_SOURCE);
+            for key in [KEY_ERR_SOURCE, KEY_LINE_ID, KEY_LINE_LABEL, KEY_REDSHIFT, KEY_WAVELENGTH_FRAME] {
+                value.as_object_mut().unwrap().remove(key);
+            }
             value
         };
         vec![
@@ -823,7 +1112,17 @@ mod tests {
         assert!(value["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("converted to vacuum")));
     }
 
-    const DOCUMENT_KEYS: [&str; 5] = ["axis_unit", "flux_unit", "notes", RES_SOURCE, KEY_ERR_SOURCE];
+    const DOCUMENT_KEYS: [&str; 9] = [
+        "axis_unit",
+        "flux_unit",
+        "notes",
+        RES_SOURCE,
+        KEY_ERR_SOURCE,
+        KEY_LINE_ID,
+        KEY_LINE_LABEL,
+        KEY_REDSHIFT,
+        KEY_WAVELENGTH_FRAME,
+    ];
     const DOCUMENT_ERR: f64 = 0.05;
     const DO_NOT_USE: i32 = 1;
     const JUMP_DET: i32 = 4;
@@ -889,6 +1188,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -920,10 +1221,69 @@ mod tests {
             None,
             Some("sideways".to_string()),
             None,
+            None,
+            None,
         )
         .await
         .unwrap_err();
         assert!(refused.contains("unknown wavelength frame"), "{}", refused);
+    }
+
+    #[tokio::test]
+    async fn the_command_reports_the_errors_of_every_quantity_of_a_file_measurement() {
+        let dir = tempfile::tempdir().unwrap();
+        let (axis, flux) = centre_arrays(0.0);
+        let n = axis.len();
+        let path = write_document(&dir, "errors_x1d.fits", &axis, &flux, &vec![DOCUMENT_ERR; n], &vec![0; n]);
+        let value = measure_spectral_line_cmd(
+            path,
+            file_source(),
+            LINE_RANGE.0,
+            LINE_RANGE.1,
+            Some(WINDOWS),
+            Some(LINE_REST_UM),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let velocity = &value["velocity"];
+        let oracle = [
+            (&value, "equivalent_width_err", 5.319820064779271e-4),
+            (&value, "centroid_err", 2.807258815067002e-4),
+            (&value, "sigma_err", 4.913453585348932e-4),
+            (&value, "fwhm_err", 1.1570298993108848e-3),
+            (velocity, "centroid_err_kms", 82.50931572657882),
+        ];
+        for (object, key, expected) in oracle {
+            let found = number(object, key);
+            assert!((found - expected).abs() <= 1e-9 * expected, "{key}: found {found:?}, oracle {expected:?}");
+        }
+        assert_eq!(value["errors_reliable"], true);
+        assert_eq!(value["width_errors_reliable"], false);
+        let measurement_keys =
+            ["equivalent_width_err", "centroid_err", "sigma_err", "fwhm_err", "errors_reliable", "width_errors_reliable"];
+        let velocity_keys = [
+            "centroid_err_kms",
+            "sigma_err_kms",
+            "fwhm_err_kms",
+            "source_centroid_err_kms",
+            "source_sigma_err_kms",
+            "source_fwhm_err_kms",
+        ];
+        for key in measurement_keys {
+            assert!(value.get(key).is_some_and(|v| !v.is_null()), "{key} missing in {value}");
+        }
+        for key in velocity_keys {
+            assert!(velocity.get(key).is_some_and(|v| !v.is_null()), "{key} missing in {velocity}");
+        }
     }
 
     #[test]
@@ -997,17 +1357,20 @@ mod tests {
         h_alpha_air_document_with(dir, "h_alpha_air.fits", &[])
     }
 
-    fn h_alpha_air_document_with(dir: &tempfile::TempDir, name: &str, frame_cards: &[(&'static str, String)]) -> String {
+    fn h_alpha_air_flux() -> Vec<f32> {
         let centre = vacuum_to_air_um(H_ALPHA_VACUUM_UM) * 1e4;
-        let flux: Vec<f32> = (0..H_ALPHA_CHANNELS)
+        (0..H_ALPHA_CHANNELS)
             .map(|i| {
                 let d = (H_ALPHA_START_ANGSTROM + H_ALPHA_STEP_ANGSTROM * i as f64 - centre) / H_ALPHA_SIGMA_ANGSTROM;
                 (1.0 + (-0.5 * d * d).exp()) as f32
             })
-            .collect();
+            .collect()
+    }
+
+    fn h_alpha_air_document_with(dir: &tempfile::TempDir, name: &str, frame_cards: &[(&'static str, String)]) -> String {
         let mut cards = iraf_linear_cards(H_ALPHA_START_ANGSTROM, H_ALPHA_STEP_ANGSTROM, H_ALPHA_BUNIT);
         cards.extend(frame_cards.iter().cloned());
-        write_wcs1d(dir.path(), name, &cards, &flux).to_str().unwrap().to_string()
+        write_wcs1d(dir.path(), name, &cards, &h_alpha_air_flux()).to_str().unwrap().to_string()
     }
 
     fn h_alpha_request() -> LineRequest {
@@ -1097,15 +1460,85 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn the_command_takes_a_redshift_and_reports_source_frame_velocities_beside_the_observer_frame_ones() {
-        let dir = tempfile::tempdir().unwrap();
+    fn redshifted_h_alpha_x1d(dir: &tempfile::TempDir) -> String {
         let centre = H_ALPHA_VACUUM_UM * (1.0 + REDSHIFT);
         let sigma_um = centre * SOURCE_SIGMA_KMS / SPEED_OF_LIGHT_KMS;
         let axis: Vec<f64> = (0..81).map(|i| centre + (i as f64 - 40.0) * sigma_um / 4.0).collect();
         let flux = gaussian_line(&axis, centre, sigma_um);
         let n = axis.len();
-        let path = write_document(&dir, "redshifted_x1d.fits", &axis, &flux, &vec![DOCUMENT_ERR; n], &vec![0; n]);
+        write_document(dir, "redshifted_x1d.fits", &axis, &flux, &vec![DOCUMENT_ERR; n], &vec![0; n])
+    }
+
+    #[tokio::test]
+    async fn the_command_echoes_the_line_identity_and_the_requested_redshift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = redshifted_h_alpha_x1d(&dir);
+        let measure = |redshift: Option<f64>, line_id: Option<&str>, line_label: Option<&str>| {
+            measure_spectral_line_cmd(
+                path.clone(),
+                file_source(),
+                REDSHIFTED_LINE.0,
+                REDSHIFTED_LINE.1,
+                Some(REDSHIFTED_WINDOWS),
+                Some(H_ALPHA_VACUUM_UM),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                redshift,
+                line_id.map(str::to_string),
+                line_label.map(str::to_string),
+            )
+        };
+        let null = serde_json::Value::Null;
+
+        let value = measure(Some(REDSHIFT), Some("h_alpha"), Some(" Hα ")).await.unwrap();
+        assert_eq!(value[KEY_LINE_ID], "h_alpha");
+        assert_eq!(value[KEY_LINE_LABEL], "Hα");
+        assert_eq!(value[KEY_REDSHIFT], REDSHIFT);
+        assert_eq!(value[KEY_WAVELENGTH_FRAME], FRAME_VACUUM);
+        let velocity = &value["velocity"];
+        let z_line = number(velocity, "z_line");
+        assert!((z_line - REDSHIFT).abs() < 1e-7, "z_line={z_line:?}");
+        let z_line_err = number(velocity, "z_line_err");
+        assert_relative("z_line_err", z_line_err, number(&value, "centroid_err") / H_ALPHA_VACUUM_UM, 1e-12);
+        assert_relative("z_line_err against the oracle", z_line_err, 7.270589272315482e-5, 1e-9);
+
+        let anonymous = measure(None, None, None).await.unwrap();
+        for key in [KEY_LINE_ID, KEY_LINE_LABEL, KEY_REDSHIFT] {
+            assert_eq!(anonymous.get(key), Some(&null), "{key} in {anonymous}");
+        }
+        assert_eq!(number(&anonymous["velocity"], "redshift"), 0.0);
+        assert_eq!(anonymous["velocity"]["z_line"], velocity["z_line"]);
+
+        let blank = measure(None, Some(""), Some("   ")).await.unwrap();
+        assert_eq!(blank.get(KEY_LINE_ID), Some(&null));
+        assert_eq!(blank.get(KEY_LINE_LABEL), Some(&null));
+
+        let longest_id = "x".repeat(64);
+        assert_eq!(measure(None, Some(&longest_id), None).await.unwrap()[KEY_LINE_ID], longest_id.as_str());
+        let refused = measure(None, Some(&"x".repeat(65)), None).await.unwrap_err();
+        assert_eq!(refused, "line_id must be at most 64 characters, got 65");
+        let refused = measure(None, None, Some(&"x".repeat(121))).await.unwrap_err();
+        assert_eq!(refused, "line_label must be at most 120 characters, got 121");
+
+        let greek = "α".repeat(120);
+        assert_eq!(greek.len(), 240);
+        assert_eq!(measure(None, None, Some(&greek)).await.unwrap()[KEY_LINE_LABEL], greek.as_str());
+        let refused = measure(None, None, Some(&"α".repeat(121))).await.unwrap_err();
+        assert_eq!(refused, "line_label must be at most 120 characters, got 121");
+
+        let letters = "x".repeat(120);
+        let padded = format!(" {letters} ");
+        assert_eq!(measure(None, None, Some(&padded)).await.unwrap()[KEY_LINE_LABEL], letters.as_str());
+    }
+
+    #[tokio::test]
+    async fn the_command_takes_a_redshift_and_reports_source_frame_velocities_beside_the_observer_frame_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = redshifted_h_alpha_x1d(&dir);
         let measure = |redshift: Option<f64>| {
             measure_spectral_line_cmd(
                 path.clone(),
@@ -1121,6 +1554,8 @@ mod tests {
                 None,
                 None,
                 redshift,
+                None,
+                None,
             )
         };
         let value = measure(Some(REDSHIFT)).await.unwrap();
@@ -1147,23 +1582,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_air_document_measured_at_a_redshift_converts_the_rest_wavelength_where_the_line_is_observed() {
-        let dir = tempfile::tempdir().unwrap();
+    fn redshifted_h_alpha_air_document(dir: &tempfile::TempDir) -> (String, f64) {
         let centre = vacuum_to_air_um(H_ALPHA_VACUUM_UM * (1.0 + REDSHIFT)) * 1e4;
         let sigma = centre * SOURCE_SIGMA_KMS / SPEED_OF_LIGHT_KMS;
         let (start, step) = (9796.0, 0.8);
         let axis: Vec<f64> = (0..121).map(|i| start + step * i as f64).collect();
         let cards = iraf_linear_cards(start, step, H_ALPHA_BUNIT);
         let path = write_wcs1d(dir.path(), "h_alpha_air_redshifted.fits", &cards, &gaussian_line(&axis, centre, sigma));
-        let request = LineRequest {
-            z0: 35,
-            z1: 85,
-            continuum: Some(((0, 20), (100, 120))),
-            redshift: Some(REDSHIFT),
-            ..h_alpha_request()
-        };
-        let value = measure_line_json(path.to_str().unwrap(), &file_source(), &request).unwrap();
+        (path.to_str().unwrap().to_string(), centre)
+    }
+
+    fn redshifted_air_request(redshift: Option<f64>) -> LineRequest {
+        LineRequest { z0: 35, z1: 85, continuum: Some(((0, 20), (100, 120))), redshift, ..h_alpha_request() }
+    }
+
+    #[test]
+    fn an_air_document_measured_at_a_redshift_converts_the_rest_wavelength_where_the_line_is_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, centre) = redshifted_h_alpha_air_document(&dir);
+        let value = measure_line_json(&path, &file_source(), &redshifted_air_request(Some(REDSHIFT))).unwrap();
         let velocity = &value["velocity"];
         assert!(number(velocity, "source_centroid_kms").abs() < SOURCE_VELOCITY_TOLERANCE_KMS, "{}", velocity);
         assert_relative("source-frame sigma", number(velocity, "source_sigma_kms"), SOURCE_SIGMA_KMS, 1e-3);
@@ -1173,6 +1610,60 @@ mod tests {
         let naive_rest = vacuum_to_air_um(H_ALPHA_VACUUM_UM) * (1.0 + REDSHIFT);
         let naive_kms = SPEED_OF_LIGHT_KMS * (centre * 1e-4 - naive_rest) / naive_rest;
         assert!(naive_kms.abs() > 4.0 * SOURCE_VELOCITY_TOLERANCE_KMS, "naive_kms={}", naive_kms);
+    }
+
+    #[test]
+    fn the_redshift_of_a_line_on_an_air_document_does_not_depend_on_a_typed_redshift() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = redshifted_h_alpha_air_document(&dir);
+        for typed_redshift in [Some(REDSHIFT), None] {
+            let value = measure_line_json(&path, &file_source(), &redshifted_air_request(typed_redshift)).unwrap();
+            let z_line = number(&value["velocity"], "z_line");
+            assert!((z_line - REDSHIFT).abs() < 5e-7, "typed {typed_redshift:?}: z_line={z_line:?}");
+        }
+        let value = measure_line_json(&path, &file_source(), &redshifted_air_request(None)).unwrap();
+        assert_eq!(value[KEY_WAVELENGTH_FRAME], FRAME_AIR);
+        let as_vacuum = MeasureOptions { wavelength_frame: Some(WavelengthFrame::Vacuum), ..MeasureOptions::default() };
+        let value = measure_line_json_with(&path, &file_source(), &redshifted_air_request(None), &as_vacuum).unwrap();
+        assert_eq!(value[KEY_WAVELENGTH_FRAME], FRAME_VACUUM);
+    }
+
+    #[test]
+    fn the_wavelength_frame_of_a_cube_is_vacuum_and_absent_on_other_axes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = write(&dir, "line.fits", 0.0);
+        let value = measure_line_json(&wave, &centre_pixel(), &request(LineModel::None)).unwrap();
+        assert_eq!(value[KEY_WAVELENGTH_FRAME], FRAME_VACUUM);
+
+        let air = dir.path().join("air.fits");
+        write_line_cube_with_cards(&air, &[("CTYPE3", "'AWAV'")]);
+        let value = measure_line_json(air.to_str().unwrap(), &centre_pixel(), &request(LineModel::None)).unwrap();
+        assert_eq!(value[KEY_WAVELENGTH_FRAME], FRAME_VACUUM);
+        let peak_axis = number(&value, "peak_axis");
+        assert!((peak_axis - air_to_vacuum_um(LINE_REST_UM)).abs() < 1e-9, "peak_axis={peak_axis:?}");
+
+        let frequency = dir.path().join("frequency.fits");
+        write_line_cube_with_cards(&frequency, &[("CTYPE3", "'FREQ'"), ("CUNIT3", "'GHz'")]);
+        let value = measure_line_json(frequency.to_str().unwrap(), &centre_pixel(), &request(LineModel::None)).unwrap();
+        assert_eq!(value.get(KEY_WAVELENGTH_FRAME), Some(&serde_json::Value::Null), "{}", value);
+
+        let (axis, flux) = centre_arrays(0.05);
+        let csv = write_csv_document(&dir, &axis, &flux, &vec![DOCUMENT_ERR; axis.len()]);
+        let value = measure_line_json(&csv, &file_source(), &request(LineModel::None)).unwrap();
+        assert_eq!(value[KEY_WAVELENGTH_FRAME], FRAME_VACUUM);
+    }
+
+    #[test]
+    fn a_window_overlapping_the_line_reaches_the_notes_of_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "line.fits", 0.0);
+        let mut overlapping = request(LineModel::None);
+        overlapping.continuum = Some(((0, 5), (30, 39)));
+        let note = "continuum window 30..=39 overlaps the line range 8..=32 in 3 channels: line flux is fitted as continuum there, and the errors treat line and continuum channels as independent";
+        for source in [centre_pixel(), disk_source()] {
+            let notes = notes_of(&measure_line_json(&path, &source, &overlapping).unwrap());
+            assert_eq!(notes.iter().filter(|n| *n == note).count(), 1, "{:?}", notes);
+        }
     }
 
     #[test]
@@ -1561,6 +2052,189 @@ mod tests {
         GLOBAL_CUBE_CACHE.invalidate(&path);
     }
 
+    const PHYSICAL_FLUX_KEYS: [&str; 4] = ["flux_si", "flux_si_err", "flux_cgs", "flux_cgs_err"];
+    const KEY_PHYSICAL_BASIS: &str = "flux_physical_basis";
+    const F_NU_PER_CHANNEL_BASIS: &str = "F_nu in Jy integrated per channel with c / lambda^2";
+    const CENTRE_PIXEL_FLUX_SI: f64 = 2.166841286254905e-14;
+    const CENTRE_PIXEL_FLUX_SI_ERR: f64 = 1.2654046416104045e-15;
+    const SURFACE_BRIGHTNESS_CARDS: [(&str, &str); 2] = [("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")];
+    const JY_PER_SUMMED_MJY_PER_SR: f64 = 3.0461742e-6;
+
+    fn write_with_cards(dir: &tempfile::TempDir, name: &str, cards: &[(&'static str, &'static str)]) -> String {
+        let path = dir.path().join(name);
+        write_line_cube_with_cards(&path, cards);
+        path.to_str().unwrap().to_string()
+    }
+
+    fn measured(path: &str, source: &SpectrumSource) -> serde_json::Value {
+        measure_line_json(path, source, &request(LineModel::None)).unwrap()
+    }
+
+    fn assert_no_physical_flux(value: &serde_json::Value, basis: &str) {
+        for key in PHYSICAL_FLUX_KEYS {
+            assert_eq!(value.get(key), Some(&serde_json::Value::Null), "{key} in {value}");
+        }
+        assert_eq!(value[KEY_PHYSICAL_BASIS], basis);
+    }
+
+    #[test]
+    fn an_x1d_line_flux_in_jy_is_also_given_in_watts_per_square_metre() {
+        let dir = tempfile::tempdir().unwrap();
+        let (axis, flux) = centre_arrays(0.0);
+        let n = axis.len();
+        let path = write_document(&dir, "physical_x1d.fits", &axis, &flux, &vec![DOCUMENT_ERR; n], &vec![0; n]);
+        let value = measured(&path, &file_source());
+        let (flux_si, flux_si_err) = (number(&value, "flux_si"), number(&value, "flux_si_err"));
+        assert_relative("flux_si", flux_si, CENTRE_PIXEL_FLUX_SI, 1e-9);
+        assert_relative("flux_si_err", flux_si_err, CENTRE_PIXEL_FLUX_SI_ERR, 1e-9);
+        assert_relative("flux_cgs", number(&value, "flux_cgs"), 1000.0 * flux_si, 1e-12);
+        assert_relative("flux_cgs_err", number(&value, "flux_cgs_err"), 1000.0 * flux_si_err, 1e-12);
+        assert_eq!(value[KEY_PHYSICAL_BASIS], F_NU_PER_CHANNEL_BASIS);
+        assert_eq!(value["flux_unit"], "Jy x um");
+    }
+
+    #[test]
+    fn an_f_lambda_spectrum_integrates_over_wavelength() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = h_alpha_air_document(&dir);
+        let value = measure_line_json(&path, &file_source(), &h_alpha_request()).unwrap();
+        let (flux, flux_err) = (number(&value, "flux"), number(&value, "flux_err"));
+        assert_relative("flux_cgs", number(&value, "flux_cgs"), flux * 1e4, 1e-12);
+        assert_relative("flux_si", number(&value, "flux_si"), flux * 10.0, 1e-12);
+        assert_relative("flux_cgs_err", number(&value, "flux_cgs_err"), flux_err * 1e4, 1e-12);
+        assert_eq!(value[KEY_PHYSICAL_BASIS], "F_lambda in erg/cm2/s/A integrated over wavelength");
+    }
+
+    #[test]
+    fn an_f_lambda_cube_on_an_air_axis_is_integrated_over_air_wavelengths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_with_cards(&dir, "f_lambda_air.fits", &[("CTYPE3", "'AWAV'"), ("BUNIT", "'erg/cm2/s/A'")]);
+        let value = measured(&path, &centre_pixel());
+        let air = LazyCube::open(&path).unwrap().spectral_axis().unwrap().values;
+        let vacuum: Vec<f64> = air.iter().map(|&w| air_to_vacuum_um(w)).collect();
+        let centre = LINE_CENTRE_CHANNEL as usize;
+        let air_over_vacuum_width = channel_widths(&air)[centre] / channel_widths(&vacuum)[centre];
+        assert!((air_over_vacuum_width - 0.9997290).abs() < 1e-7, "air over vacuum width {air_over_vacuum_width:?}");
+        let (flux, flux_cgs) = (number(&value, "flux"), number(&value, "flux_cgs"));
+        let over_vacuum_widths = flux * 1e4;
+        assert!(
+            (flux_cgs / over_vacuum_widths - air_over_vacuum_width).abs() < 1e-7,
+            "flux_cgs {flux_cgs:?} over {over_vacuum_widths:?}, widths {air_over_vacuum_width:?}"
+        );
+        assert!(
+            (flux_cgs - over_vacuum_widths).abs() > 1e-4 * flux_cgs,
+            "flux_cgs {flux_cgs:?} was integrated over the vacuum widths: {over_vacuum_widths:?}"
+        );
+        assert_relative("flux_si", number(&value, "flux_si"), flux_cgs / 1000.0, 1e-12);
+        let (flux_err, flux_cgs_err) = (number(&value, "flux_err"), number(&value, "flux_cgs_err"));
+        assert!(flux_err > 0.0, "flux_err {flux_err:?}");
+        assert!(
+            (flux_cgs_err / (flux_err * 1e4) - air_over_vacuum_width).abs() < 1e-7,
+            "flux_cgs_err {flux_cgs_err:?} over {:?}, widths {air_over_vacuum_width:?}",
+            flux_err * 1e4
+        );
+        let basis = value[KEY_PHYSICAL_BASIS].as_str().unwrap();
+        assert!(
+            basis.starts_with("F_lambda in erg/cm2/s/A integrated over air wavelengths (axis converted with ")
+                && basis.ends_with(" for the measurement)"),
+            "{basis}"
+        );
+        let per_beam_twin = write_with_cards(&dir, "air.fits", &[("CTYPE3", "'AWAV'")]);
+        assert_eq!(flux.to_bits(), number(&measured(&per_beam_twin, &centre_pixel()), "flux").to_bits());
+        assert_eq!(value["flux_unit"], "erg/cm2/s/A x um");
+    }
+
+    #[test]
+    fn an_f_nu_spectrum_on_an_air_axis_is_integrated_on_vacuum_wavelengths() {
+        let dir = tempfile::tempdir().unwrap();
+        let flux = h_alpha_air_flux();
+        let cards = iraf_linear_cards(H_ALPHA_START_ANGSTROM, H_ALPHA_STEP_ANGSTROM, "Jy");
+        let air = write_wcs1d(dir.path(), "fnu_air.fits", &cards, &flux).to_str().unwrap().to_string();
+        let vacuum_axis: Vec<f64> = (0..H_ALPHA_CHANNELS)
+            .map(|i| air_to_vacuum_um((H_ALPHA_START_ANGSTROM + H_ALPHA_STEP_ANGSTROM * i as f64) * 1e-4))
+            .collect();
+        let n = H_ALPHA_CHANNELS;
+        let vacuum = write_document(&dir, "fnu_vacuum_x1d.fits", &vacuum_axis, &flux, &vec![DOCUMENT_ERR; n], &vec![0; n]);
+        let scatter_path = MeasureOptions { use_err: false, ..MeasureOptions::default() };
+        let on_air = measure_line_json(&air, &file_source(), &h_alpha_request()).unwrap();
+        let on_vacuum = measure_line_json_with(&vacuum, &file_source(), &h_alpha_request(), &scatter_path).unwrap();
+        assert_eq!(on_air[KEY_WAVELENGTH_FRAME], FRAME_AIR);
+        assert_eq!(on_vacuum[KEY_WAVELENGTH_FRAME], FRAME_VACUUM);
+        assert_relative("flux_si on the air axis against its vacuum twin", number(&on_air, "flux_si"), number(&on_vacuum, "flux_si"), 1e-8);
+        assert_eq!(on_vacuum[KEY_PHYSICAL_BASIS], F_NU_PER_CHANNEL_BASIS);
+        let basis = on_air[KEY_PHYSICAL_BASIS].as_str().unwrap();
+        assert!(basis.ends_with("on vacuum wavelengths (air axis converted with Morton (2000, ApJS 130, 403))"), "{basis}");
+    }
+
+    #[test]
+    fn a_cube_in_jy_per_beam_or_one_spaxel_of_a_surface_brightness_cube_has_no_physical_flux() {
+        let dir = tempfile::tempdir().unwrap();
+        let per_beam = write(&dir, "line.fits", 0.0);
+        for source in [centre_pixel(), disk_source()] {
+            assert_no_physical_flux(
+                &measured(&per_beam, &source),
+                "no physical flux: Jy/beam is a brightness per beam and this version does not read the beam area",
+            );
+        }
+        let surface_brightness = write_with_cards(&dir, "sb.fits", &SURFACE_BRIGHTNESS_CARDS);
+        assert_no_physical_flux(
+            &measured(&surface_brightness, &centre_pixel()),
+            "no physical flux: one spaxel in MJy/sr is an intensity, not a flux; measure a region",
+        );
+    }
+
+    #[test]
+    fn a_region_of_a_surface_brightness_cube_uses_the_pixel_solid_angle() {
+        let dir = tempfile::tempdir().unwrap();
+        let surface_brightness = measured(&write_with_cards(&dir, "sb.fits", &SURFACE_BRIGHTNESS_CARDS), &disk_source());
+        let in_jy = write_with_cards(&dir, "jy.fits", &[("BUNIT", "'Jy'")]);
+        let summed_jy = measured(&in_jy, &disk_source());
+        for key in ["flux_si", "flux_si_err"] {
+            assert_relative(key, number(&surface_brightness, key) / number(&summed_jy, key), JY_PER_SUMMED_MJY_PER_SR, 1e-9);
+        }
+        assert_eq!(
+            surface_brightness[KEY_PHYSICAL_BASIS],
+            "MJy/sr summed over the region with a pixel solid angle of 3.0462e-12 sr, then F_nu integrated per channel with c / lambda^2"
+        );
+        assert_eq!(surface_brightness["flux_unit"], "MJy/sr x pix x um");
+        assert_eq!(summed_jy[KEY_PHYSICAL_BASIS], F_NU_PER_CHANNEL_BASIS);
+        let spaxel = measured(&in_jy, &centre_pixel());
+        assert_relative("flux_si of the centre spaxel", number(&spaxel, "flux_si"), CENTRE_PIXEL_FLUX_SI, 1e-6);
+        assert_eq!(spaxel[KEY_PHYSICAL_BASIS], F_NU_PER_CHANNEL_BASIS);
+    }
+
+    #[test]
+    fn a_frequency_axis_in_jy_integrates_over_frequency() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_with_cards(&dir, "frequency.fits", &[("CTYPE3", "'FREQ'"), ("CUNIT3", "'GHz'"), ("BUNIT", "'Jy'")]);
+        let value = measured(&path, &centre_pixel());
+        assert_eq!(value["flux_unit"], "Jy x GHz");
+        assert_relative("flux_si", number(&value, "flux_si"), number(&value, "flux") * 1e-17, 1e-12);
+        assert_eq!(value[KEY_PHYSICAL_BASIS], "F_nu in Jy integrated over frequency");
+    }
+
+    #[test]
+    fn a_spectrum_without_a_unit_with_a_count_rate_or_with_the_soss_label_says_why_there_is_no_physical_flux() {
+        let dir = tempfile::tempdir().unwrap();
+        let unitless = write_with_cards(&dir, "unitless.fits", &[("BUNIT", "''")]);
+        assert_no_physical_flux(&measured(&unitless, &centre_pixel()), "no physical flux: the spectrum has no flux unit");
+        let count_rate = write_with_cards(&dir, "rate.fits", &[("BUNIT", "'DN/s'")]);
+        assert_no_physical_flux(
+            &measured(&count_rate, &centre_pixel()),
+            "no physical flux: DN/s is a count rate without a flux calibration",
+        );
+        let soss_label = measured(&write_with_cards(&dir, "soss.fits", &[("BUNIT", "'MJy'")]), &centre_pixel());
+        assert_no_physical_flux(
+            &soss_label,
+            "no physical flux: MJy is the label JWST NIRISS SOSS spectra carry on values that are not on a MJy scale, so the unit cannot be trusted",
+        );
+        assert_eq!(soss_label["flux_unit"], "MJy x um");
+        let in_mjy = measured(&write_with_cards(&dir, "millijansky.fits", &[("BUNIT", "'mJy'")]), &centre_pixel());
+        let in_jy = measured(&write_with_cards(&dir, "jy.fits", &[("BUNIT", "'Jy'")]), &centre_pixel());
+        assert_relative("flux_si in mJy over Jy", number(&in_mjy, "flux_si") / number(&in_jy, "flux_si"), 1e-3, 1e-9);
+        assert_eq!(in_mjy[KEY_PHYSICAL_BASIS], "F_nu in mJy integrated per channel with c / lambda^2");
+    }
+
     const G395H_X1D: &str = "jw01266-o005_t001_nirspec_g395h-f290lp_x1d.fits";
     const G395H_BR_ALPHA_GOLDEN: &str = "line_measure_goldens/jw01266_g395h_br_alpha.json";
     const BR_ALPHA_LINE: (usize, usize) = (1769, 1786);
@@ -1672,6 +2346,36 @@ mod tests {
 
     #[test]
     #[ignore = "needs ASTROBURST_DOCUMENTS_FITS_DIR with the jw01266 G395H x1d"]
+    fn real_g395h_br_alpha_line_flux_in_watts_per_square_metre() {
+        let path = g395h_path();
+        let request = g395h_request(BR_ALPHA_LINE, BR_ALPHA_CONTINUUM, LineModel::None);
+        let scatter_path = MeasureOptions { use_err: false, ..MeasureOptions::default() };
+        let cases = [
+            ("with FLUX_ERROR", MeasureOptions::default(), [4.2943156309121404e-4, 7.840006575608761e-17, 3.798092195963517e-18]),
+            ("without ERR", scatter_path, [4.2495643550283636e-4, 7.758325622903776e-17, 2.656171471621122e-18]),
+        ];
+        let quantities = [("flux", "Jy um"), ("flux_si", "W m^-2"), ("flux_si_err", "W m^-2")];
+        let mut failures = Vec::new();
+        for (label, options, oracle) in cases {
+            let value = measure_line_json_with(&path, &file_source(), &request, &options).unwrap();
+            for ((key, unit), expected) in quantities.into_iter().zip(oracle) {
+                let found = value[key].as_f64().unwrap_or(f64::NAN);
+                println!("{label}: {key} {found:?} {unit}, oracle {expected:?} {unit}");
+                if !((found - expected).abs() <= 1e-9 * expected) {
+                    failures.push(format!("{label}: {key} {found:?} {unit}, oracle {expected:?} {unit}"));
+                }
+            }
+            println!("{label}: flux_cgs {} +- {} erg s^-1 cm^-2", value["flux_cgs"], value["flux_cgs_err"]);
+            println!("{label}: {}", value[KEY_PHYSICAL_BASIS]);
+            if value[KEY_PHYSICAL_BASIS] != F_NU_PER_CHANNEL_BASIS {
+                failures.push(format!("{label}: basis {}", value[KEY_PHYSICAL_BASIS]));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    #[ignore = "needs ASTROBURST_DOCUMENTS_FITS_DIR with the jw01266 G395H x1d"]
     fn a_g395h_line_range_across_the_detector_gap_excludes_and_counts_its_58_zero_error_channels() {
         let path = g395h_path();
         let x1d = g395h_arrays(&path);
@@ -1702,5 +2406,359 @@ mod tests {
         let unweighted = measure_line_json_with(&path, &source, &request, &plain).unwrap();
         assert_eq!(unweighted["n_channels"], line_channels);
         assert_eq!((unweighted["n_bad_err"].as_u64(), unweighted["n_dq_excluded"].as_u64()), (Some(0), Some(0)));
+    }
+
+    const SERIES_DETECTOR: &str = "NRS1";
+    const SERIES_CHANNELS: usize = 40;
+    const SERIES_INTEGRATIONS: usize = 5;
+    const SERIES_ERR: f64 = 0.05;
+    const SERIES_MEDIAN_INTEGRATION: usize = 2;
+    const FIRST_INTEGRATION_FLUX: f64 = 7.519612589399947e-3;
+    const MEDIAN_OVER_FIRST_INTEGRATION: f64 = 1.02;
+    const PICKED_FLUX_TOLERANCE: f64 = 1e-6;
+    const SAME_ARRAYS_TOLERANCE: f64 = 1e-12;
+    const SAME_ARRAYS_KEYS: [&str; 17] = [
+        "flux",
+        "flux_err",
+        "equivalent_width",
+        "centroid",
+        "sigma",
+        "fwhm",
+        "snr",
+        "continuum_level",
+        "continuum_slope",
+        "continuum_sigma",
+        "continuum_chi2_red",
+        "equivalent_width_err",
+        "centroid_err",
+        "sigma_err",
+        "fwhm_err",
+        "flux_si",
+        "flux_si_err",
+    ];
+    const SERIES_ERR_SOURCE: &str = "FLUX_ERROR of the series pick";
+    const MEDIAN_ERROR_CONVENTION: &str = "error of the median = 1.2533 x that";
+    const PIPELINE_NOTE_START: &str = "EXTRACT1D table";
+
+    fn series_axis() -> Vec<f64> {
+        (0..SERIES_CHANNELS).map(|z| 1.0 + 0.001 * z as f64).collect()
+    }
+
+    fn series_flux(integration: usize) -> Vec<f64> {
+        (0..SERIES_CHANNELS)
+            .map(|z| {
+                let offset = z as f64 - 20.0;
+                (1.0 + (-offset * offset / 18.0).exp()) * (1.0 + 0.01 * integration as f64)
+            })
+            .collect()
+    }
+
+    fn series_rows() -> Vec<SynthRow> {
+        (0..SERIES_INTEGRATIONS)
+            .map(|integration| SynthRow {
+                wavelength: series_axis(),
+                flux: series_flux(integration),
+                flux_error: vec![SERIES_ERR; SERIES_CHANNELS],
+                ..ramp_row(integration as i32 + 1, 60000.0 + 0.01 * integration as f64, SERIES_CHANNELS)
+            })
+            .collect()
+    }
+
+    fn write_series_rows(dir: &tempfile::TempDir, name: &str, primary: &[(&'static str, String)], rows: Vec<SynthRow>) -> String {
+        let table = SynthTable { extver: 1, detector: Some(SERIES_DETECTOR), sporder: Some(0), flux_unit: Some("Jy"), rows };
+        write_series_file(dir.path(), name, series_primary(DATAMODEL_ROWS, primary), vec![rows_hdu(&table)])
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn write_series(dir: &tempfile::TempDir) -> String {
+        write_series_rows(dir, "series_x1dints.fits", &[], series_rows())
+    }
+
+    fn series_key(detector: &str) -> SeriesKey {
+        SeriesKey { detector: detector.to_string(), sporder: Some(0) }
+    }
+
+    fn series_pick(path: &str, detector: &str, pick: TsoPick) -> SpectrumSource {
+        SpectrumSource::Series { paths: vec![path.to_string()], detector: detector.to_string(), sporder: Some(0), pick }
+    }
+
+    fn measured_pick(path: &str, pick: TsoPick) -> serde_json::Value {
+        measured(path, &series_pick(path, SERIES_DETECTOR, pick))
+    }
+
+    #[test]
+    fn a_series_source_deserializes_from_the_frontend_shape() {
+        let median: SpectrumSource = serde_json::from_str(
+            r#"{"kind":"series","paths":["a.fits"],"detector":"NRS1","sporder":0,"pick":{"kind":"median"}}"#,
+        )
+        .unwrap();
+        assert_eq!(median, series_pick("a.fits", "NRS1", TsoPick::Median));
+        let without_order: SpectrumSource = serde_json::from_str(
+            r#"{"kind":"series","paths":["a.fits","b.fits"],"detector":"MIRIMAGE","pick":{"kind":"integration","index":3}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            without_order,
+            SpectrumSource::Series {
+                paths: vec!["a.fits".to_string(), "b.fits".to_string()],
+                detector: "MIRIMAGE".to_string(),
+                sporder: None,
+                pick: TsoPick::Integration { index: 3 },
+            }
+        );
+        let unknown_pick = r#"{"kind":"series","paths":["a.fits"],"detector":"NRS1","sporder":0,"pick":{"kind":"mode"}}"#;
+        assert!(serde_json::from_str::<SpectrumSource>(unknown_pick).is_err());
+        assert_eq!(
+            serde_json::to_value(series_pick("a.fits", "NRS1", TsoPick::Mean { first: 0, last: 4 })).unwrap(),
+            serde_json::json!({
+                "kind": "series",
+                "paths": ["a.fits"],
+                "detector": "NRS1",
+                "sporder": 0,
+                "pick": { "kind": "mean", "first": 0, "last": 4 },
+            })
+        );
+    }
+
+    #[test]
+    fn the_median_pick_of_a_series_is_measured_like_the_same_arrays_in_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = write_series(&dir);
+        let on_series = measured_pick(&series, TsoPick::Median);
+        let median: Vec<f32> = series_flux(SERIES_MEDIAN_INTEGRATION).iter().map(|&v| v as f32).collect();
+        let median_err = MEDIAN_ERROR_FACTOR * SERIES_ERR / (SERIES_INTEGRATIONS as f64).sqrt();
+        let document = write_document(
+            &dir,
+            "median_x1d.fits",
+            &series_axis(),
+            &median,
+            &vec![median_err; SERIES_CHANNELS],
+            &vec![0; SERIES_CHANNELS],
+        );
+        let on_file = measured(&document, &file_source());
+        for key in SAME_ARRAYS_KEYS {
+            assert_relative(key, number(&on_series, key), number(&on_file, key), SAME_ARRAYS_TOLERANCE);
+        }
+        assert_relative(
+            "flux of the median pick",
+            number(&on_series, "flux"),
+            MEDIAN_OVER_FIRST_INTEGRATION * FIRST_INTEGRATION_FLUX,
+            PICKED_FLUX_TOLERANCE,
+        );
+        assert_eq!(on_series["err_used"], true);
+        assert_eq!(on_file[RES_SOURCE]["kind"], "file");
+    }
+
+    #[test]
+    fn one_integration_and_a_mean_are_picked_by_their_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = write_series(&dir);
+        let first = measured_pick(&series, TsoPick::Integration { index: 0 });
+        assert_relative("flux of integration 1", number(&first, "flux"), FIRST_INTEGRATION_FLUX, PICKED_FLUX_TOLERANCE);
+        assert_eq!(notes_of(&first)[0], "time series NRS1, integration 1: vacuum wavelengths");
+        assert_eq!(first[RES_SOURCE]["pick"], serde_json::json!({ "kind": "integration", "index": 0 }));
+
+        let mean = measured_pick(&series, TsoPick::Mean { first: 0, last: 4 });
+        assert_relative(
+            "flux of the mean of integrations 1 to 5",
+            number(&mean, "flux"),
+            MEDIAN_OVER_FIRST_INTEGRATION * FIRST_INTEGRATION_FLUX,
+            PICKED_FLUX_TOLERANCE,
+        );
+        assert_eq!(notes_of(&mean)[0], "time series NRS1, mean of integrations 1 to 5: vacuum wavelengths");
+        assert_eq!(mean[RES_SOURCE]["pick"], serde_json::json!({ "kind": "mean", "first": 0, "last": 4 }));
+
+        let last = measured_pick(&series, TsoPick::Integration { index: 4 });
+        assert_relative(
+            "flux of integration 5",
+            number(&last, "flux"),
+            1.04 * FIRST_INTEGRATION_FLUX,
+            PICKED_FLUX_TOLERANCE,
+        );
+        assert_eq!(notes_of(&last)[0], "time series NRS1, integration 5: vacuum wavelengths");
+        let beyond = measure_line_json(
+            &series,
+            &series_pick(&series, SERIES_DETECTOR, TsoPick::Integration { index: 5 }),
+            &request(LineModel::None),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(beyond, "integration index 5 is out of range: the series NRS1 has 5 integrations (0 to 4)");
+    }
+
+    fn assert_notes_hold_in_order(notes: &[String], expected: &[String]) {
+        let mut searched_from = 0;
+        for sentence in expected {
+            let found = notes[searched_from..]
+                .iter()
+                .position(|note| note == sentence)
+                .unwrap_or_else(|| panic!("'{sentence}' is not in the notes after position {searched_from}: {notes:?}"));
+            searched_from += found + 1;
+        }
+    }
+
+    #[test]
+    fn the_series_source_is_echoed_and_labelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = write_series(&dir);
+        let median = measured_pick(&series, TsoPick::Median);
+        assert_eq!(
+            median[RES_SOURCE],
+            serde_json::json!({
+                "kind": "series",
+                "paths": [series.as_str()],
+                "detector": "NRS1",
+                "sporder": 0,
+                "pick": { "kind": "median" },
+            })
+        );
+        assert_eq!(median[KEY_ERR_SOURCE], SERIES_ERR_SOURCE);
+        assert_eq!(median[KEY_WAVELENGTH_FRAME], FRAME_VACUUM);
+        assert_eq!(median[KEY_PHYSICAL_BASIS], F_NU_PER_CHANNEL_BASIS);
+        assert_eq!(median["flux_unit"], "Jy x um");
+        assert_eq!(median["axis_unit"], "um");
+        let notes = notes_of(&median);
+        assert_eq!(notes[0], "time series NRS1, median of 5 integrations: vacuum wavelengths");
+        assert!(notes[1].contains(MEDIAN_ERROR_CONVENTION), "{notes:?}");
+        assert!(!notes.iter().any(|note| note.starts_with(PIPELINE_NOTE_START)), "{notes:?}");
+        assert!(!notes.iter().any(|note| note.starts_with("time series NRS1:")), "{notes:?}");
+        let set = open_tso(std::slice::from_ref(&series)).unwrap();
+        let warnings = &find_series(&set, &series_key(SERIES_DETECTOR)).unwrap().warnings;
+        assert_eq!(warnings.len(), 0, "{warnings:?}");
+        assert_notes_hold_in_order(&notes, warnings);
+
+        let scatter_path = MeasureOptions { use_err: false, ..MeasureOptions::default() };
+        let source = series_pick(&series, SERIES_DETECTOR, TsoPick::Median);
+        let without_err = measure_line_json_with(&series, &source, &request(LineModel::None), &scatter_path).unwrap();
+        assert_eq!(without_err[KEY_ERR_SOURCE], ERR_SOURCE_NONE);
+        assert_eq!(without_err["err_used"], false);
+        assert!(notes_of(&without_err).iter().any(|note| note.contains("use_err = false")), "{:?}", notes_of(&without_err));
+
+        let another_path = measure_line_json("not_read.fits", &source, &request(LineModel::None)).unwrap();
+        assert_eq!(without_elapsed(another_path), without_elapsed(median));
+
+        let air = MeasureOptions { wavelength_frame: Some(WavelengthFrame::Air), ..MeasureOptions::default() };
+        let read_as_air = measure_line_json_with(&series, &source, &request(LineModel::None), &air).unwrap();
+        assert_eq!(read_as_air[KEY_WAVELENGTH_FRAME], FRAME_AIR);
+        assert!(
+            notes_of(&read_as_air)[0].starts_with("time series NRS1, median of 5 integrations: air wavelengths set by the request"),
+            "{:?}",
+            notes_of(&read_as_air)
+        );
+
+        let first = measured_pick(&series, TsoPick::Integration { index: 0 });
+        assert!(!notes_of(&first).iter().any(|note| note.contains("error of the median")), "{:?}", notes_of(&first));
+        assert_eq!(first[KEY_ERR_SOURCE], SERIES_ERR_SOURCE);
+    }
+
+    #[test]
+    fn the_warnings_of_the_series_follow_the_notes_of_the_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let untimed: Vec<SynthRow> =
+            series_rows().into_iter().map(|row| SynthRow { mjd_avg: f64::NAN, tdb_mid: 60000.5, ..row }).collect();
+        let series = write_series_rows(&dir, "untimed_x1dints.fits", &[("NINTS", "8".to_string())], untimed);
+        let set = open_tso(std::slice::from_ref(&series)).unwrap();
+        let warnings = find_series(&set, &series_key(SERIES_DETECTOR)).unwrap().warnings.clone();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].starts_with("no usable integration times"), "{warnings:?}");
+        assert!(warnings[1].contains("5 of 8 integrations found"), "{warnings:?}");
+
+        let notes = notes_of(&measured_pick(&series, TsoPick::Median));
+        assert_eq!(notes[0], "time series NRS1, median of 5 integrations: vacuum wavelengths");
+        assert!(notes[1].contains(MEDIAN_ERROR_CONVENTION), "{notes:?}");
+        assert_eq!(notes[2..4], warnings[..], "{notes:?}");
+
+        let notes = notes_of(&measured_pick(&series, TsoPick::Integration { index: 0 }));
+        assert_eq!(notes[0], "time series NRS1, integration 1: vacuum wavelengths");
+        assert_eq!(notes[1..3], warnings[..], "{notes:?}");
+    }
+
+    #[test]
+    fn a_series_that_is_not_in_the_files_is_refused_with_the_ones_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = write_series(&dir);
+        let refused = measure_line_json(&series, &series_pick(&series, "NRS2", TsoPick::Median), &request(LineModel::None))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(refused, "no series NRS2, order 0 in these files; series found: NRS1");
+        assert_eq!(refused, find_series(&open_tso(&[series]).unwrap(), &series_key("NRS2")).unwrap_err().to_string());
+    }
+
+    const A5_X1DINTS: &str = "tso/A5/jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_x1dints.fits";
+    const A5_LINE: (usize, usize) = (1170, 1321);
+    const A5_WINDOWS: ContinuumWindows = ((1110, 1149), (1342, 1381));
+    const A5_ORACLE_TOLERANCE: f64 = 1e-6;
+    const A5_ORACLE: [(&str, f64, &str); 5] = [
+        ("flux", 1.0416364540562062e-5, "Jy um"),
+        ("flux_err", 2.973799047632048e-6, "Jy um"),
+        ("centroid", 4.661921647663075, "um"),
+        ("continuum_chi2_red", 1365.084854130164, "(dimensionless)"),
+        ("flux_si", 1.4369394397143645e-18, "W m^-2"),
+    ];
+
+    #[test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: tso/A5/jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_x1dints.fits"]
+    fn real_a5_nrs2_median_pick_is_measured_like_its_arrays() {
+        let path = env_dir("ASTROBURST_SCIENCE_DATA_DIR").join(A5_X1DINTS).to_str().unwrap().to_string();
+        let key = SeriesKey { detector: "NRS2".to_string(), sporder: Some(-1) };
+        let source = SpectrumSource::Series {
+            paths: vec![path.clone()],
+            detector: key.detector.clone(),
+            sporder: key.sporder,
+            pick: TsoPick::Median,
+        };
+        let request = g395h_request(A5_LINE, A5_WINDOWS, LineModel::None);
+        let value = measure_line_json(&path, &source, &request).unwrap();
+        for note in notes_of(&value) {
+            println!("note: {note}");
+        }
+        println!("err_source: {}, basis: {}", value[KEY_ERR_SOURCE], value[KEY_PHYSICAL_BASIS]);
+
+        let set = open_tso(std::slice::from_ref(&path)).unwrap();
+        let doc = series_spectrum(&set, &key, &TsoPick::Median).unwrap();
+        let mut step_notes = Vec::new();
+        let flux = measured_flux(&doc.flux, &mut step_notes);
+        let err = document_errors(&doc, true, &mut step_notes);
+        let excluded = document_exclusions(&doc, true, &mut step_notes);
+        let (channel_factor, basis) = physical_flux_factor(
+            doc.flux_unit.as_deref(),
+            &document_measured_axis(doc.wavelength_frame, doc.axis.kind),
+            &doc.axis.values,
+            &FluxSource::File,
+        );
+        assert_eq!(doc.flux_unit.as_deref(), Some("Jy"));
+        assert_eq!(basis, F_NU_PER_CHANNEL_BASIS);
+        let direct = measure_line_physical(
+            &doc.axis.values,
+            &flux,
+            err,
+            excluded.as_deref(),
+            A5_LINE,
+            Some(A5_WINDOWS),
+            LineModel::None,
+            channel_factor.as_deref(),
+        )
+        .unwrap();
+        let direct = serde_json::to_value(&direct).unwrap();
+
+        let mut failures = Vec::new();
+        for key in SAME_ARRAYS_KEYS {
+            let (found, expected) = (number(&value, key), number(&direct, key));
+            println!("{key}: command {found:?}, same arrays {expected:?}");
+            if !((found - expected).abs() <= SAME_ARRAYS_TOLERANCE * expected.abs()) {
+                failures.push(format!("{key}: command {found:?}, same arrays {expected:?}"));
+            }
+        }
+        for (key, expected, unit) in A5_ORACLE {
+            let found = number(&value, key);
+            let difference = (found - expected).abs() / expected.abs();
+            println!("{key}: measured {found:?} {unit}, oracle {expected:?} {unit}, relative difference {difference:.1e}");
+            if !(difference <= A5_ORACLE_TOLERANCE) {
+                failures.push(format!("{key}: measured {found:?} {unit}, oracle {expected:?} {unit}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

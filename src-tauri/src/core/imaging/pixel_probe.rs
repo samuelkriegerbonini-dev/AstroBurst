@@ -1,12 +1,12 @@
 use ndarray::Array2;
 use serde_json::{json, Value};
 
-use crate::core::imaging::dq_flags::DqTable;
+use crate::core::imaging::dq_flags::{DqTable, FlagSet};
 use crate::math::exact_median_f64;
 use crate::types::constants::{
     DEFAULT_WAVELENGTH_UNIT, HEADER_BUNIT, RES_BITS, RES_BOX, RES_DQ, RES_ERR, RES_MAX, RES_MEAN,
     RES_MEDIAN, RES_MIN, RES_NAMES, RES_NEIGHBORHOOD, RES_N_FINITE, RES_N_NAN, RES_N_PIXELS,
-    RES_TABLE, RES_TEXT, RES_UNIT, RES_VALUE, RES_WAVELENGTH, RES_X, RES_Y,
+    RES_SOURCE, RES_TABLE, RES_TEXT, RES_UNIT, RES_VALUE, RES_WAVELENGTH, RES_X, RES_Y,
 };
 use crate::types::header::HduHeader;
 use crate::types::image::IntPlane;
@@ -48,21 +48,42 @@ pub fn probe_companions(
     x: i64,
     y: i64,
 ) -> CompanionProbe {
-    let dq = dq.and_then(|(plane, table)| {
+    let flags = dq.map(|(_, table)| FlagSet::from_table(table));
+    let named = dq.zip(flags.as_ref()).map(|((plane, _), flags)| (plane, flags));
+    probe_companions_named(named, err, wavelength, x, y)
+}
+
+pub fn probe_companions_named(
+    dq: Option<(&IntPlane, &FlagSet)>,
+    err: Option<&Array2<f32>>,
+    wavelength: Option<&Array2<f32>>,
+    x: i64,
+    y: i64,
+) -> CompanionProbe {
+    let dq = dq.and_then(|(plane, flags)| {
         let (rows, cols) = plane.bits.dim();
         let (yy, xx) = in_bounds(rows, cols, x, y)?;
         let bits = plane.bits[[yy, xx]];
         Some(DqProbe {
             bits,
             value: plane.value_at(yy, xx),
-            names: table.decode(bits),
-            table,
-            text: table.format(bits),
+            names: flags.decode(bits),
+            table: flags.table,
+            text: flags.format(bits),
         })
     });
     let err = err.and_then(|arr| finite_at(arr, x, y));
     let wavelength = wavelength.and_then(|arr| finite_at(arr, x, y));
     CompanionProbe { dq, err, wavelength }
+}
+
+pub fn with_layer_sources(mut body: Value, err_source: Option<&str>, dq_source: Option<&str>) -> Value {
+    for (key, source) in [(RES_ERR, err_source), (RES_DQ, dq_source)] {
+        if let Some(layer) = body.get_mut(key).and_then(Value::as_object_mut) {
+            layer.insert(RES_SOURCE.to_string(), json!(source));
+        }
+    }
+    body
 }
 
 pub fn wavelength_unit(header: Option<&HduHeader>) -> String {
@@ -735,5 +756,34 @@ mod tests {
         assert!(j[RES_UNIT].is_null());
         assert!(j[RES_NEIGHBORHOOD][RES_MEDIAN].is_null());
         assert_eq!(j[RES_NEIGHBORHOOD][RES_N_NAN], 1);
+    }
+
+    #[test]
+    fn the_named_probe_decodes_with_the_flag_set_and_the_old_probe_is_unchanged() {
+        let mut bits = Array2::<u32>::zeros((3, 3));
+        bits[[1, 1]] = 34;
+        let plane = IntPlane { bits, signed: false };
+        let mut mask = HduHeader::empty();
+        for (key, bit) in [("MP_BAD", "0"), ("MP_SAT", "1"), ("MP_DETECTED", "5")] {
+            mask.set(key, bit.to_string());
+        }
+        let afw = FlagSet::from_headers(Some(&mask), None, DqTable::Unknown);
+
+        let named = probe_companions_named(Some((&plane, &afw)), None, None, 1, 1).dq.unwrap();
+        assert_eq!(named.names, vec!["SAT", "DETECTED"]);
+        assert_eq!(named.text, "34: SAT | DETECTED");
+        assert_eq!(named.table, DqTable::Unknown);
+        let raw = probe_companions(Some((&plane, DqTable::Unknown)), None, None, 1, 1).dq.unwrap();
+        assert_eq!(raw.names, vec!["BIT1", "BIT5"]);
+        assert_eq!(raw.text, "34: BIT1 | BIT5");
+
+        let body = json!({ RES_VALUE: 4.0, RES_ERR: null, RES_DQ: { RES_BITS: 34 } });
+        let sourced = with_layer_sources(body, Some("EXTNAME VARIANCE, HDU 3: square root"), Some("MP_ cards (afw mask planes)"));
+        assert!(sourced[RES_ERR].is_null(), "{sourced}");
+        assert_eq!(sourced[RES_DQ], json!({ RES_BITS: 34, RES_SOURCE: "MP_ cards (afw mask planes)" }));
+        let body = json!({ RES_ERR: { RES_VALUE: 0.5 }, RES_DQ: null });
+        let sourced = with_layer_sources(body, None, None);
+        assert_eq!(sourced[RES_ERR], json!({ RES_VALUE: 0.5, RES_SOURCE: null }));
+        assert!(sourced[RES_DQ].is_null());
     }
 }

@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createElement } from "react";
+import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ANALYSIS_SECTION, CUBE_TOOL_EMPTY_TITLE } from "../../../utils/analysisSections";
 import type { RampInfo } from "../../../shared/types/ramp";
 import type { Spectrum1d } from "../../../shared/types/spectrum1d";
+import type { SpectrumRequest } from "../../../services/spectrum1d";
 import type { OpenSampleFrames, SampleDataStore, SampleEntry } from "../../../hooks/useSampleData";
 
 const cubeState = vi.hoisted(() => ({
@@ -20,10 +21,12 @@ const specState = vi.hoisted(() => ({
 }));
 const docState = vi.hoisted(() => ({
   doc: { loading: false, spectrum: null as unknown, error: null as string | null },
-  requests: [] as [string | null, number | null][],
+  requests: [] as (SpectrumRequest | null)[],
   csv: null as { path: string; over: string | null } | null,
 }));
 const panelProps = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
+const tsoProps = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
+const pickerProps = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
 const samples = vi.hoisted(() => ({
   entries: [] as Record<string, unknown>[],
   opens: [] as unknown[],
@@ -68,10 +71,11 @@ vi.mock("../../../hooks/useSpectrumStore", () => ({
     region: null,
   }),
 }));
-vi.mock("../../../hooks/useSpectrum1dStore", () => ({
-  useSpectrum1dDoc: (path: string | null, hdu: number | null) => {
-    docState.requests.push([path, hdu]);
-    return path === null ? { loading: false, spectrum: null, error: null } : docState.doc;
+vi.mock("../../../hooks/useSpectrum1dStore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../hooks/useSpectrum1dStore")>()),
+  useSpectrum1dRequest: (request: SpectrumRequest | null) => {
+    docState.requests.push(request);
+    return request === null ? { loading: false, spectrum: null, error: null } : docState.doc;
   },
   useOpenSpectrumCsv: () => docState.csv,
   openSpectrumCsv: vi.fn(async () => false),
@@ -82,6 +86,12 @@ vi.mock("../SpectroscopyPanel", () => ({
   default: (props: Record<string, unknown>) => {
     panelProps.current = props;
     return "[spectroscopy-panel]";
+  },
+}));
+vi.mock("../SpectrumSourcePicker", () => ({
+  default: (props: Record<string, unknown>) => {
+    pickerProps.current = props;
+    return "[source-picker]";
   },
 }));
 vi.mock("../PvPanel", () => ({ default: () => "[pv-panel]" }));
@@ -104,8 +114,15 @@ vi.mock("../../../hooks/useSampleData", async (importOriginal) => {
   };
 });
 vi.mock("../RampPanel", () => ({ default: () => "[ramp-panel]" }));
+vi.mock("../TsoLightCurvesPanel", () => ({
+  default: (props: Record<string, unknown>) => {
+    tsoProps.current = props;
+    return "[tso-panel]";
+  },
+}));
 
 import CubeTool from "../CubeTool";
+import { spectrumSelectionStore } from "../../../hooks/useActiveSpectrumDocument";
 
 const RAMP: RampInfo = {
   kind: "jwst_groups",
@@ -128,6 +145,7 @@ const RAMP: RampInfo = {
 };
 
 const X1D_PATH = "C:/data/jw01266-o005_t001_nirspec_g395h-f290lp_x1d.fits";
+const X1DINTS_PATH = "C:/data/jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_x1dints.fits";
 
 const SPECTRUM = { source: { kind: "x1d", path: X1D_PATH, hdu: 1, extver: 1 }, flux: [1, 2, 3] } as unknown as Spectrum1d;
 
@@ -145,7 +163,33 @@ async function renderCubeTool(ramp: RampInfo | null): Promise<string> {
 
 const sectionMarkup = (id: string) => `id="${id}"`;
 
+const fileRequest = (path: string, hdu: number | null): SpectrumRequest => ({ kind: "file", path, hdu, wavelengthUnit: null });
+
+function findElement(node: ReactNode, match: (props: Record<string, unknown>) => boolean): ReactElement<Record<string, unknown>> | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, match);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!isValidElement<Record<string, unknown>>(node)) return null;
+  if (match(node.props)) return node;
+  return findElement(node.props.children as ReactNode, match);
+}
+
+function documentPanelKey(): string | null {
+  let tree: ReactNode = null;
+  const readTree = () => {
+    tree = (CubeTool as unknown as { type: () => ReactNode }).type();
+    return null;
+  };
+  renderToStaticMarkup(createElement(readTree));
+  return findElement(tree, (props) => props.documentMode === true)?.key ?? null;
+}
+
 beforeEach(() => {
+  spectrumSelectionStore.reset();
   cubeState.isCube = true;
   cubeState.isSpectrum = false;
   cubeState.ramp = null;
@@ -158,6 +202,8 @@ beforeEach(() => {
   docState.requests = [];
   docState.csv = null;
   panelProps.current = null;
+  tsoProps.current = null;
+  pickerProps.current = null;
   samples.entries = [];
   samples.opens = [];
   samples.started = [];
@@ -196,7 +242,7 @@ describe("CubeTool section guidance", () => {
 
   it("gives a cube Spectrum and PV chips with the cube extraction steps in the Spectrum section", async () => {
     const html = await renderCubeTool(null);
-    expect(html).toContain('aria-label="Cube panels"');
+    expect(html).toContain('aria-label="Spectra panels"');
     expect(html).toContain(`data-section-help="${SPECTRUM_ID}"`);
     expect(html).toContain('aria-label="Help: Measure a spectral line"');
     expect(insideSpectrumSection(html, `data-section-tip="${SPECTRUM_ID}"`)).toBe(true);
@@ -208,7 +254,7 @@ describe("CubeTool section guidance", () => {
 
   it("gives a ramp its Ramp and Spectrum chips and no guidance", async () => {
     const html = await renderCubeTool(RAMP);
-    expect(html).toContain('aria-label="Cube panels"');
+    expect(html).toContain('aria-label="Spectra panels"');
     expect(lastCall()?.sections.map((s) => s.id)).toEqual([ANALYSIS_SECTION.ramp.id, SPECTRUM_ID]);
     expect(lastCall()?.tips).toBeUndefined();
     expect(html).not.toContain("data-section-help");
@@ -221,13 +267,41 @@ describe("CubeTool section guidance", () => {
     cubeState.file = { id: "x1", path: X1D_PATH, status: "spectrum", spectrum: { kind: "x1d", hdu: 1 } };
     docState.doc = { loading: false, spectrum: SPECTRUM, error: null };
     const html = await render();
-    expect(html).not.toContain('aria-label="Cube panels"');
+    expect(html).not.toContain('aria-label="Spectra panels"');
     expect(lastCall()?.sections.map((s) => s.id)).toEqual([SPECTRUM_ID]);
     expect(insideSpectrumSection(html, `data-section-help="${SPECTRUM_ID}"`)).toBe(true);
     expect(spectrumTip()?.title).toBe("Measure a spectral line");
     expect(spectrumTip()?.body).toContain("Drag across the plot");
     expect(spectrumTip()?.body).not.toContain("Crosshair");
     expect(spectrumTip()?.body).not.toContain("click the image");
+  });
+
+  it("gives time-series spectra a Light curves section after the spectrum document", async () => {
+    const TSO_ID = ANALYSIS_SECTION.tso.id;
+    const insideTsoSection = (html: string, marker: string) => {
+      const at = html.indexOf(sectionMarkup(TSO_ID));
+      const found = html.indexOf(marker, at);
+      return at >= 0 && found > at && found < html.indexOf("</section>", at);
+    };
+    cubeState.isCube = false;
+    cubeState.isSpectrum = true;
+    cubeState.file = {
+      id: "x2",
+      path: X1DINTS_PATH,
+      status: "spectrum",
+      spectrum: { kind: "x1dints", layout: "rows", n_series: 1, n_integrations: 240, n_channels: 431 },
+    };
+    const html = await render();
+    expect(lastCall()?.sections.map((s) => s.id)).toEqual([SPECTRUM_ID, TSO_ID]);
+    expect(insideTsoSection(html, "[tso-panel]")).toBe(true);
+    expect(html.indexOf(sectionMarkup(SPECTRUM_ID))).toBeLessThan(html.indexOf(sectionMarkup(TSO_ID)));
+    expect(tsoProps.current).toEqual({ filePath: X1DINTS_PATH, fileKey: `x2|${X1DINTS_PATH}` });
+    expect(docState.requests.every((request) => request === null)).toBe(true);
+
+    cubeState.file = { id: "x1", path: X1D_PATH, status: "spectrum", spectrum: { kind: "x1d", hdu: 1 } };
+    const x1d = await render();
+    expect(lastCall()?.sections.map((s) => s.id)).toEqual([SPECTRUM_ID]);
+    expect(x1d).not.toContain(sectionMarkup(TSO_ID));
   });
 
   it("gives an open CSV spectrum the same document guidance", async () => {
@@ -246,8 +320,28 @@ describe("CubeTool section guidance", () => {
     cubeState.file = { id: "img", path: "C:/data/m31.fits" };
     const html = await render();
     expect(lastCall()?.sections).toEqual([]);
-    expect(html).not.toContain('aria-label="Cube panels"');
+    expect(html).not.toContain('aria-label="Spectra panels"');
     expect(html).not.toContain("data-section-help");
+  });
+
+  it("tells the line steps with the rest line before the measurement", async () => {
+    const lineSteps =
+      "Drag across the plot to select a line range, set continuum windows A and B beside the line, click a rest-line marker or type the rest wavelength to get velocities, choose a model, then click Measure line.";
+    cubeState.isCube = false;
+    cubeState.isSpectrum = true;
+    cubeState.file = { id: "x1", path: X1D_PATH, status: "spectrum", spectrum: { kind: "x1d", hdu: 1 } };
+    docState.doc = { loading: false, spectrum: SPECTRUM, error: null };
+    await render();
+    const body = spectrumTip()?.body ?? "";
+    expect(body).toBe(lineSteps);
+    expect(body).toContain("Drag across the plot");
+    expect(body).toContain("Measure line");
+    expect(body.indexOf("rest-line marker")).toBeGreaterThanOrEqual(0);
+    expect(body.indexOf("rest-line marker")).toBeLessThan(body.indexOf("Measure line"));
+
+    await renderCubeTool(null);
+    expect(spectrumTip()?.body).toContain("click the image to extract a spectrum");
+    expect(spectrumTip()?.body).toContain(lineSteps);
   });
 });
 
@@ -297,6 +391,32 @@ describe("CubeTool SED", () => {
     expect(count(html, "data-sed-point")).toBe(0);
   });
 
+  it("wraps the SED of a filter cube in its own section between Spectrum and PV", async () => {
+    cubeState.cubeDims = photometricDims;
+    const html = await renderCubeTool(null);
+    expect(sectionTips.calls.at(-1)?.sections.map((s) => s.id)).toEqual([ANALYSIS_SECTION.spectrum.id, ANALYSIS_SECTION.sed.id, ANALYSIS_SECTION.pv.id]);
+    const at = html.indexOf(sectionMarkup(ANALYSIS_SECTION.sed.id));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(html.slice(at, html.indexOf("</section>", at))).toContain("data-sed-panel");
+  });
+
+  it("gives the SED of a filter cube its own tip", async () => {
+    const SED_ID = ANALYSIS_SECTION.sed.id;
+    cubeState.cubeDims = photometricDims;
+    const html = await renderCubeTool(null);
+    const tip = sectionTips.calls.at(-1)?.tips?.[SED_ID];
+    expect(tip?.title).toBe("Plot the SED of a filter cube");
+    expect(tip?.body).toContain("each filter plane with a pivot wavelength gives one point of the SED");
+    expect(html).toContain(`data-section-help="${SED_ID}"`);
+    expect(html).toContain('aria-label="Help: Plot the SED of a filter cube"');
+    const at = html.indexOf(sectionMarkup(SED_ID));
+    expect(at).toBeGreaterThanOrEqual(0);
+    const section = html.slice(at, html.indexOf("</section>", at));
+    const tipAt = section.indexOf(`data-section-tip="${SED_ID}"`);
+    expect(tipAt).toBeGreaterThanOrEqual(0);
+    expect(tipAt).toBeLessThan(section.indexOf("data-sed-panel"));
+  });
+
   it("leaves the SED out of a cube without filter planes", async () => {
     cubeState.cubeDims = { width: 6, height: 5, frames: 3, photometric_planes: null };
     specState.spectrum = [1, 2, 3];
@@ -341,7 +461,7 @@ describe("CubeTool spectrum documents", () => {
     expect(html).not.toContain(CUBE_TOOL_EMPTY_TITLE);
     expect(html).toContain(sectionMarkup(ANALYSIS_SECTION.spectrum.id));
     expect(html).not.toContain(sectionMarkup(ANALYSIS_SECTION.pv.id));
-    expect(docState.requests).toContainEqual([X1D_PATH, 1]);
+    expect(docState.requests).toContainEqual(fileRequest(X1D_PATH, 1));
     expect(panelProps.current).toMatchObject({
       documentMode: true,
       filePath: X1D_PATH,
@@ -383,7 +503,7 @@ describe("CubeTool spectrum documents", () => {
     expect(html).not.toContain(CUBE_TOOL_EMPTY_TITLE);
     expect(html).toContain("ha_spectrum.csv");
     expect(html).toContain("Close");
-    expect(docState.requests).toContainEqual(["C:/data/ha_spectrum.csv", null]);
+    expect(docState.requests).toContainEqual(fileRequest("C:/data/ha_spectrum.csv", null));
     expect(panelProps.current).toMatchObject({
       documentMode: true,
       filePath: "C:/data/ha_spectrum.csv",
@@ -391,10 +511,104 @@ describe("CubeTool spectrum documents", () => {
     });
   });
 
+  it("passes the document's view key to the panel", async () => {
+    cubeState.isCube = false;
+    cubeState.isSpectrum = true;
+    cubeState.file = { id: "x1", path: X1D_PATH, status: "spectrum", spectrum: { kind: "x1d", hdu: 1 } };
+    docState.doc = { loading: false, spectrum: SPECTRUM, error: null };
+    await render();
+    expect(panelProps.current?.viewKey).toBe("1|" + X1D_PATH);
+
+    cubeState.isSpectrum = false;
+    cubeState.file = { id: "img", path: "C:/data/m31.fits" };
+    docState.csv = { path: "C:/data/ha_spectrum.csv", over: "other|C:/data/o.fits" };
+    await render();
+    expect(panelProps.current?.viewKey).toBe("|C:/data/ha_spectrum.csv");
+
+    docState.csv = null;
+    cubeState.file = { id: "f1", path: "C:/data/cube.fits" };
+    await renderCubeTool(null);
+    expect(panelProps.current).toMatchObject({ filePath: "C:/data/cube.fits" });
+    expect(panelProps.current?.documentMode).toBeFalsy();
+    expect(panelProps.current?.viewKey).toBeUndefined();
+  });
+
   it("asks for no document while a cube is shown", async () => {
     await renderCubeTool(null);
-    expect(docState.requests.every(([path]) => path === null)).toBe(true);
+    expect(docState.requests.every((request) => request === null)).toBe(true);
     expect(panelProps.current?.documentMode).toBeFalsy();
+  });
+
+  it("remounts the panel when the chosen table or pick changes", async () => {
+    const path = "C:/data/jw01345-o063_t001_nirspec_g395m-f290lp_x1d.fits";
+    const fileKey = `m1|${path}`;
+    cubeState.isCube = false;
+    cubeState.isSpectrum = true;
+    cubeState.file = { id: "m1", path, status: "spectrum", spectrum: { kind: "x1d", hdu: 2, n_tables: 3 } };
+    docState.doc = { loading: false, spectrum: SPECTRUM, error: null };
+    const afterPanelKey = (key: string | null) => key?.slice(key.indexOf("|spectrum|"));
+    const probeTable = documentPanelKey();
+    expect(afterPanelKey(probeTable)).toBe(`|spectrum|2|${path}`);
+
+    spectrumSelectionStore.set(fileKey, { kind: "table", hdu: 3, wavelengthUnit: null });
+    const otherTable = documentPanelKey();
+    expect(afterPanelKey(otherTable)).toBe(`|spectrum|3|${path}`);
+
+    spectrumSelectionStore.set(fileKey, { kind: "table", hdu: 3, wavelengthUnit: "nm" });
+    const statedUnit = documentPanelKey();
+    expect(afterPanelKey(statedUnit)).toBe(`|spectrum|3@nm|${path}`);
+    expect(new Set([probeTable, otherTable, statedUnit]).size).toBe(3);
+
+    await render();
+    expect(panelProps.current?.viewKey).toBe("3@nm|" + path);
+    expect(docState.requests).toContainEqual({ kind: "file", path, hdu: 3, wavelengthUnit: "nm" });
+  });
+
+  it("shows the Light curves section for a time-series file only", async () => {
+    cubeState.isCube = false;
+    cubeState.isSpectrum = true;
+    cubeState.file = {
+      id: "x2",
+      path: X1DINTS_PATH,
+      status: "spectrum",
+      spectrum: { kind: "x1dints", layout: "rows", n_series: 1, n_integrations: 240, n_channels: 431 },
+    };
+    const series = await render();
+    expect(series).toContain(sectionMarkup(ANALYSIS_SECTION.tso.id));
+    expect(panelProps.current).toMatchObject({ documentMode: true, spectrumDocument: null, isLoading: true, error: null });
+    expect(docState.requests.every((request) => request === null)).toBe(true);
+
+    cubeState.file = { id: "x1", path: X1D_PATH, status: "spectrum", spectrum: { kind: "x1d", hdu: 1, n_tables: 1 } };
+    const single = await render();
+    expect(single).not.toContain(sectionMarkup(ANALYSIS_SECTION.tso.id));
+    expect(single).toContain(sectionMarkup(ANALYSIS_SECTION.spectrum.id));
+  });
+
+  it("puts the picker above the panel of a spectrum file", async () => {
+    const pickerBeforePanel = (html: string) => {
+      const section = html.indexOf(sectionMarkup(ANALYSIS_SECTION.spectrum.id));
+      const picker = html.indexOf("[source-picker]");
+      const panel = html.indexOf("[spectroscopy-panel]");
+      return section >= 0 && section < picker && picker < panel;
+    };
+    cubeState.isCube = false;
+    cubeState.isSpectrum = true;
+    cubeState.file = { id: "x1", path: X1D_PATH, status: "spectrum", spectrum: { kind: "x1d", hdu: 1 } };
+    docState.doc = { loading: false, spectrum: SPECTRUM, error: null };
+    expect(pickerBeforePanel(await render())).toBe(true);
+    expect(pickerProps.current?.active).toMatchObject({ content: "spectrum", path: X1D_PATH, kind: { kind: "x1d", hdu: 1 } });
+
+    cubeState.isSpectrum = false;
+    cubeState.file = { id: "img", path: "C:/data/m31.fits" };
+    docState.csv = { path: "C:/data/ha_spectrum.csv", over: "other|C:/data/o.fits" };
+    expect(pickerBeforePanel(await render())).toBe(true);
+    expect(pickerProps.current?.active).toMatchObject({ content: "csv", path: "C:/data/ha_spectrum.csv" });
+
+    docState.csv = null;
+    cubeState.file = { id: "f1", path: "C:/data/cube.fits" };
+    const cube = await renderCubeTool(null);
+    expect(cube).toContain("[spectroscopy-panel]");
+    expect(cube).not.toContain("[source-picker]");
   });
 });
 

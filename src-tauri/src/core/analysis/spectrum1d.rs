@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use crate::core::analysis::tso::TsoPick;
 use crate::core::analysis::x1d::{X1dSpectrum, COL_WAVELENGTH, EXTNAME_EXTRACT1D};
 use crate::core::astrometry::spectral::{
     is_non_linear_spectral_ctype, is_spacecraft, spectral_axis_on, wavelength_unit_to_um, AxisKind,
@@ -87,6 +88,12 @@ pub enum Spectrum1dSource {
     Csv {
         path: String,
     },
+    X1dInts {
+        paths: Vec<String>,
+        detector: String,
+        sporder: Option<i64>,
+        pick: TsoPick,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -104,6 +111,42 @@ pub enum Precision {
     F32Widened,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WavelengthUnitSource {
+    File,
+    Assumed,
+    User,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WavelengthUnitChoice {
+    Um,
+    Nm,
+    Angstrom,
+}
+
+impl WavelengthUnitChoice {
+    pub fn parse(text: &str) -> Result<WavelengthUnitChoice, String> {
+        match text {
+            "um" => Ok(WavelengthUnitChoice::Um),
+            "nm" => Ok(WavelengthUnitChoice::Nm),
+            "Angstrom" => Ok(WavelengthUnitChoice::Angstrom),
+            _ => Err(format!(
+                "wavelengthUnit must be one of um, nm, Angstrom; got '{text}'"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WavelengthUnitChoice::Um => "um",
+            WavelengthUnitChoice::Nm => "nm",
+            WavelengthUnitChoice::Angstrom => "Angstrom",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Spectrum1d {
     pub source: Spectrum1dSource,
@@ -118,6 +161,7 @@ pub struct Spectrum1d {
     pub n_rows: usize,
     pub cards: BTreeMap<String, String>,
     pub notes: Vec<String>,
+    pub wavelength_unit_source: WavelengthUnitSource,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +179,13 @@ impl Spectrum1d {
 
     pub fn from_x1d(x1d: X1dSpectrum) -> Spectrum1d {
         let mut notes = x1d.notes;
+        let unit_assumed =
+            format!("TUNIT of {COL_WAVELENGTH} missing: assumed {DEFAULT_WAVELENGTH_UNIT}");
+        let wavelength_unit_source = if notes.contains(&unit_assumed) {
+            WavelengthUnitSource::Assumed
+        } else {
+            WavelengthUnitSource::File
+        };
         notes.push(format!(
             "{EXTNAME_EXTRACT1D} table of a space-mission pipeline: vacuum wavelengths"
         ));
@@ -166,6 +217,7 @@ impl Spectrum1d {
             flux_unit: Some(x1d.flux_unit),
             cards,
             notes,
+            wavelength_unit_source,
         }
     }
 
@@ -175,11 +227,31 @@ impl Spectrum1d {
         header: &HduHeader,
         arrays: Wcs1dArrays,
     ) -> Result<Spectrum1d, String> {
+        Spectrum1d::from_wcs1d_with_unit(path, hdu, header, arrays, None)
+    }
+
+    pub fn from_wcs1d_with_unit(
+        path: &str,
+        hdu: usize,
+        header: &HduHeader,
+        arrays: Wcs1dArrays,
+        unit: Option<WavelengthUnitChoice>,
+    ) -> Result<Spectrum1d, String> {
         check_shape(header, &arrays)?;
         refuse_multispec(header)?;
         refuse_log_lambda(header)?;
         let len = arrays.flux.len();
         let mut notes = Vec::new();
+        let stated = stated_wavelength_unit(header);
+        let user_header = unit.and_then(|choice| {
+            header_with_user_unit(header, len, choice, stated.as_deref(), &mut notes)
+        });
+        let wavelength_unit_source = match (&user_header, &stated) {
+            (Some(_), _) => WavelengthUnitSource::User,
+            (None, Some(_)) => WavelengthUnitSource::File,
+            (None, None) => WavelengthUnitSource::Assumed,
+        };
+        let header = user_header.as_ref().unwrap_or(header);
         let (axis, wavelength_frame) = match card_upper(header, CTYPE1) {
             Some(ctype) if ctype != IRAF_LINEAR_CTYPE => {
                 ctype_axis(header, len, &ctype, &mut notes)?
@@ -209,6 +281,7 @@ impl Spectrum1d {
             flux_unit,
             cards: cards_of_interest(header),
             notes,
+            wavelength_unit_source,
         })
     }
 
@@ -304,6 +377,7 @@ impl Spectrum1d {
             flux_unit,
             cards: provenance,
             notes,
+            wavelength_unit_source: WavelengthUnitSource::File,
         })
     }
 }
@@ -469,7 +543,7 @@ fn card_upper(header: &HduHeader, key: &str) -> Option<String> {
     card(header, key).map(|s| s.to_uppercase())
 }
 
-fn tabulated_axis(values: Vec<f64>, kind: AxisKind, ctype: &str) -> SpectralAxis {
+pub(crate) fn tabulated_axis(values: Vec<f64>, kind: AxisKind, ctype: &str) -> SpectralAxis {
     let steps: Vec<f64> = values
         .windows(2)
         .map(|w| w[1] - w[0])
@@ -826,6 +900,52 @@ fn linear_layout_axis(
     let mut axis = normalised_axis(header, len, frame_code(frame), Some(&unit), &label)?;
     axis.ctype = ctype.unwrap_or_default();
     Ok((axis, frame))
+}
+
+fn stated_wavelength_unit(header: &HduHeader) -> Option<String> {
+    card(header, CUNIT1)
+        .map(|unit| format!("{CUNIT1} '{unit}'"))
+        .or_else(|| {
+            let text = wat_text(&wat_cards(header, WAT_SPECTRAL_AXIS))?;
+            let attributes = wat_attributes(&text);
+            wat_attribute(&attributes, WAT_UNITS).map(|unit| format!("WAT1 {WAT_UNITS}={unit}"))
+        })
+}
+
+fn non_wavelength_ctype(header: &HduHeader, len: usize) -> Option<String> {
+    card_upper(header, CTYPE1).filter(|ctype| {
+        ctype != IRAF_LINEAR_CTYPE
+            && !spectral_axis_on(header, 1, len)
+                .is_ok_and(|axis| matches!(axis.kind, AxisKind::Wave | AxisKind::Awav))
+    })
+}
+
+fn header_with_user_unit(
+    header: &HduHeader,
+    len: usize,
+    choice: WavelengthUnitChoice,
+    stated: Option<&str>,
+    notes: &mut Vec<String>,
+) -> Option<HduHeader> {
+    let unit = choice.as_str();
+    if let Some(description) = stated {
+        notes.push(format!(
+            "wavelength unit '{unit}' not applied: the file states {description}"
+        ));
+        return None;
+    }
+    if let Some(ctype) = non_wavelength_ctype(header, len) {
+        notes.push(format!(
+            "wavelength unit '{unit}' not applied: {CTYPE1} '{ctype}' is not a wavelength axis"
+        ));
+        return None;
+    }
+    let mut with_unit = header.clone();
+    with_unit.set(CUNIT1, unit.to_string());
+    notes.push(format!(
+        "{CUNIT1} missing: wavelength unit '{unit}' set by the user"
+    ));
+    Some(with_unit)
 }
 
 fn cards_of_interest(header: &HduHeader) -> BTreeMap<String, String> {
@@ -1800,6 +1920,233 @@ mod tests {
         assert_eq!(
             serde_json::to_value(WavelengthFrame::NotWavelength).unwrap(),
             "not_wavelength"
+        );
+    }
+
+    #[test]
+    fn a_time_series_source_serialises_as_x1dints() {
+        let series_source = |sporder: Option<i64>| Spectrum1dSource::X1dInts {
+            paths: vec!["C:/d/a_x1dints.fits".into()],
+            detector: "NRS1".into(),
+            sporder,
+            pick: TsoPick::Median,
+        };
+        assert_eq!(
+            serde_json::to_value(series_source(Some(-1))).unwrap(),
+            serde_json::json!({
+                "kind": "x1dints",
+                "paths": ["C:/d/a_x1dints.fits"],
+                "detector": "NRS1",
+                "sporder": -1,
+                "pick": { "kind": "median" }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(series_source(None)).unwrap(),
+            serde_json::json!({
+                "kind": "x1dints",
+                "paths": ["C:/d/a_x1dints.fits"],
+                "detector": "NRS1",
+                "sporder": null,
+                "pick": { "kind": "median" }
+            })
+        );
+    }
+
+    const WAVE_WITHOUT_UNIT: [(&str, &str); 4] = [
+        ("CTYPE1", "WAVE"),
+        ("CRVAL1", "6500.0"),
+        ("CDELT1", "0.5"),
+        ("CRPIX1", "1.0"),
+    ];
+    const UNIT_TOLERANCE_UM: f64 = 1e-12;
+
+    fn open_with_unit(
+        pairs: &[(&str, &str)],
+        unit: WavelengthUnitChoice,
+    ) -> Result<Spectrum1d, String> {
+        Spectrum1d::from_wcs1d_with_unit(PATH, 0, &header(pairs), arrays(), Some(unit))
+    }
+
+    fn assert_um(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < UNIT_TOLERANCE_UM,
+            "actual {actual} um expected {expected} um"
+        );
+    }
+
+    fn axis_json(s: &Spectrum1d) -> serde_json::Value {
+        serde_json::to_value(&s.axis).unwrap()
+    }
+
+    fn has_note(s: &Spectrum1d, note: &str) -> bool {
+        s.notes.iter().any(|n| n == note)
+    }
+
+    #[test]
+    fn a_spectral_axis_without_cunit1_takes_the_unit_the_user_states() {
+        let assumed = open(&WAVE_WITHOUT_UNIT).unwrap();
+        assert_eq!(assumed.wavelength_unit_source, WavelengthUnitSource::Assumed);
+        assert_relative(assumed.axis.values[0], 6.5e9, 1e-9);
+
+        let stated = open_with_unit(&WAVE_WITHOUT_UNIT, WavelengthUnitChoice::Angstrom).unwrap();
+        assert_um(stated.axis.values[0], 0.65);
+        assert_um(stated.axis.values[2], 0.6501);
+        assert_eq!(stated.wavelength_unit_source, WavelengthUnitSource::User);
+        assert!(
+            has_note(
+                &stated,
+                "CUNIT1 missing: wavelength unit 'Angstrom' set by the user"
+            ),
+            "{:?}",
+            stated.notes
+        );
+        assert_eq!(stated.wavelength_frame, WavelengthFrame::Vacuum);
+        assert_eq!(stated.axis.header_unit, "Angstrom");
+        assert!(
+            !stated.axis.notes.iter().any(|n| n.contains("FITS default")),
+            "{:?}",
+            stated.axis.notes
+        );
+    }
+
+    #[test]
+    fn a_unit_the_file_states_wins_over_the_override() {
+        let cards = [&WAVE_WITHOUT_UNIT[..], &[("CUNIT1", "Angstrom")]].concat();
+        let plain = open(&cards).unwrap();
+        let s = open_with_unit(&cards, WavelengthUnitChoice::Nm).unwrap();
+        assert_eq!(axis_json(&s), axis_json(&plain));
+        assert_um(s.axis.values[0], 0.65);
+        assert_eq!(s.wavelength_unit_source, WavelengthUnitSource::File);
+        assert_eq!(plain.wavelength_unit_source, WavelengthUnitSource::File);
+        assert!(
+            has_note(
+                &s,
+                "wavelength unit 'nm' not applied: the file states CUNIT1 'Angstrom'"
+            ),
+            "{:?}",
+            s.notes
+        );
+
+        let iraf = iraf_cards("angstroms");
+        let pairs: Vec<(&str, &str)> = iraf.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let s = open_with_unit(&pairs, WavelengthUnitChoice::Um).unwrap();
+        assert_eq!(axis_json(&s), axis_json(&open(&pairs).unwrap()));
+        assert_eq!(s.wavelength_unit_source, WavelengthUnitSource::File);
+        assert!(
+            has_note(
+                &s,
+                "wavelength unit 'um' not applied: the file states WAT1 units=angstroms"
+            ),
+            "{:?}",
+            s.notes
+        );
+    }
+
+    #[test]
+    fn an_iraf_axis_without_units_takes_the_user_unit_and_says_so() {
+        let cards = [
+            ("CTYPE1", "LINEAR"),
+            ("WAT0_001", "system=equispec"),
+            ("WAT1_001", "wtype=linear label=Wavelength"),
+            ("DC-FLAG", "0"),
+            ("CRVAL1", "400.0"),
+            ("CDELT1", "0.25"),
+            ("CRPIX1", "1.0"),
+        ];
+        let assumed = open(&cards).unwrap();
+        assert_um(assumed.axis.values[0], 0.04);
+        assert_eq!(assumed.wavelength_unit_source, WavelengthUnitSource::Assumed);
+        assert!(
+            has_note(
+                &assumed,
+                "WAT1 has no units= and CUNIT1 is missing: Angstrom assumed"
+            ),
+            "{:?}",
+            assumed.notes
+        );
+
+        let stated = open_with_unit(&cards, WavelengthUnitChoice::Nm).unwrap();
+        assert_um(stated.axis.values[0], 0.4);
+        assert_um(stated.axis.values[1], 0.40025);
+        assert_eq!(stated.wavelength_unit_source, WavelengthUnitSource::User);
+        for note in [
+            "WAT1 has no units=: CUNIT1 'nm' used",
+            "CUNIT1 missing: wavelength unit 'nm' set by the user",
+        ] {
+            assert!(has_note(&stated, note), "{note}: {:?}", stated.notes);
+        }
+    }
+
+    #[test]
+    fn an_override_never_touches_an_axis_that_is_not_a_wavelength() {
+        let cards = [
+            ("CTYPE1", "FREQ"),
+            ("CRVAL1", "1.0e11"),
+            ("CDELT1", "1.0e6"),
+        ];
+        let plain = open(&cards).unwrap();
+        assert_eq!(plain.wavelength_unit_source, WavelengthUnitSource::Assumed);
+        let s = open_with_unit(&cards, WavelengthUnitChoice::Um).unwrap();
+        assert_eq!(axis_json(&s), axis_json(&plain));
+        assert_eq!(s.axis.kind, AxisKind::Freq);
+        assert_eq!(s.wavelength_unit_source, WavelengthUnitSource::Assumed);
+        assert!(
+            has_note(
+                &s,
+                "wavelength unit 'um' not applied: CTYPE1 'FREQ' is not a wavelength axis"
+            ),
+            "{:?}",
+            s.notes
+        );
+    }
+
+    #[test]
+    fn the_unit_choice_parses_three_exact_spellings() {
+        for spelling in ["um", "nm", "Angstrom"] {
+            assert_eq!(
+                WavelengthUnitChoice::parse(spelling).unwrap().as_str(),
+                spelling
+            );
+        }
+        assert_eq!(
+            WavelengthUnitChoice::parse("Angstrom"),
+            Ok(WavelengthUnitChoice::Angstrom)
+        );
+        for spelling in ["angstrom", "A", ""] {
+            assert_eq!(
+                WavelengthUnitChoice::parse(spelling),
+                Err(format!(
+                    "wavelengthUnit must be one of um, nm, Angstrom; got '{spelling}'"
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn every_source_reports_where_its_axis_unit_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_x1d_fixture(dir.path(), "unit_x1d.fits", 6, &[1], "um");
+        let x1d = Spectrum1d::from_x1d(read_x1d_spectrum(path.to_str().unwrap(), None).unwrap());
+        assert_eq!(x1d.wavelength_unit_source, WavelengthUnitSource::File);
+
+        let csv = Spectrum1d::from_csv(CSV_PATH, "wavelength_vacuum_um,flux\n2.0,1\n2.1,2\n")
+            .unwrap();
+        assert_eq!(csv.wavelength_unit_source, WavelengthUnitSource::File);
+
+        let json = serde_json::to_value(&csv).unwrap();
+        assert_eq!(json["wavelength_unit_source"], "file");
+        assert_eq!(
+            serde_json::to_value(WavelengthUnitSource::User).unwrap(),
+            "user"
+        );
+        assert_eq!(
+            serde_json::to_value(WavelengthUnitSource::File).unwrap(),
+            "file"
+        );
+        assert_eq!(
+            serde_json::to_value(WavelengthUnitSource::Assumed).unwrap(),
+            "assumed"
         );
     }
 }

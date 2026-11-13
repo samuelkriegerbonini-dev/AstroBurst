@@ -5,6 +5,7 @@ import { regionStore } from "../../../utils/regionStore";
 import { DEFAULT_REGION_PROPS } from "../../../utils/regionPersistence";
 import { appModeStore } from "../../../hooks/useAppMode";
 import type { RegionShape } from "../../../shared/types/regions";
+import regionsLayerSource from "../RegionsLayer.tsx?raw";
 
 vi.mock("react", async (importOriginal) => {
   const { reactWithFakeHooks } = await import("../../../test/hookRuntime");
@@ -227,5 +228,28 @@ describe("RegionsLayer Esc and Enter outside a dialog", () => {
     expect(press("Enter", body)).toBe(true);
     expect(regionStore.getDraftFor(KEY)).toBeNull();
     expect(regionStore.getDoc(KEY).regions.map((r) => r.shape)).toEqual([TRIANGLE]);
+  });
+
+  it("keeps the Point tool after a point is committed", () => {
+    expect(regionsLayerSource).toContain("regionStore.setTool(toolAfterCommit(shape.shape))");
+    expect(regionsLayerSource).not.toContain('regionStore.setTool("select")');
+  });
+
+  it("keeps the polygon draft, the selection and the tool of the hidden Workspace when Esc or Enter is pressed in the Archive", () => {
+    regionStore.setTool("polygon");
+    regionStore.setDraft(KEY, { shape: "polygon", points: [[10, 10], [40, 10], [40, 40]] });
+    renderLayer();
+    appModeStore.set("archive");
+    expect(press("Enter", dockButton)).toBe(false);
+    const draft = regionStore.getDraftFor(KEY);
+    expect(draft?.shape === "polygon" ? draft.points.length : 0).toBe(3);
+    expect(regionIds()).toEqual([]);
+    press("Escape", body);
+    expect(regionStore.getDraftFor(KEY)).not.toBeNull();
+    expect(regionStore.getTool()).toBe("polygon");
+    regionStore.clearDraft(KEY);
+    seedSourceWithBackground();
+    press("Escape", body);
+    expect(regionStore.getDoc(KEY).selectedId).toBe("bg");
   });
 });

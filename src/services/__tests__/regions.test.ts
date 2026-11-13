@@ -10,6 +10,7 @@ import {
   type LineCut,
   type RadialProfile,
   type RegionCalibrated,
+  type RegionNetErrTerms,
   type RegionSky,
   type RegionStats,
   type RegionStatsResult,
@@ -105,6 +106,20 @@ describe("regionStats", () => {
     expectTypeOf<LineCut["dq_excluded"]>().toEqualTypeOf<number | null>();
     expectTypeOf<SbProfile["dq_excluded"]>().toEqualTypeOf<number | null>();
   });
+
+  it("types the notes and the two unit members the region commands return", () => {
+    expectTypeOf<RegionStatsResult["notes"]>().toEqualTypeOf<string[] | undefined>();
+    expectTypeOf<RegionStatsResult["bunit"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<RegionStatsResult["summed_unit"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<RadialProfile["notes"]>().toEqualTypeOf<string[] | undefined>();
+    expectTypeOf<RadialProfile["bunit"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<RadialProfile["summed_unit"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<LineCut["notes"]>().toEqualTypeOf<string[] | undefined>();
+    expectTypeOf<LineCut["bunit"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<LineCut["summed_unit"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<SbProfile["bunit"]>().toEqualTypeOf<string | null | undefined>();
+    expectTypeOf<SbProfile["notes"]>().toEqualTypeOf<string[]>();
+  });
 });
 
 describe("radialProfile and lineCut", () => {
@@ -162,6 +177,8 @@ describe("RegionCalibrated payload", () => {
     expectTypeOf<RegionStats["calibrated"]>().toEqualTypeOf<RegionCalibrated | null | undefined>();
     expectTypeOf<RegionStatsResult["photcal"]>().toEqualTypeOf<PhotCal | null | undefined>();
     expectTypeOf<RegionStatsResult["calibration_warnings"]>().toEqualTypeOf<string[] | undefined>();
+    expectTypeOf<RegionStats["net_err"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<RegionStats["net_err_terms"]>().toEqualTypeOf<RegionNetErrTerms | null | undefined>();
   });
 
   it("types the WCS-only sky block that is sent with or without flux calibration", () => {

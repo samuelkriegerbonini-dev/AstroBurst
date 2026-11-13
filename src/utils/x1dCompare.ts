@@ -4,6 +4,7 @@ import type { Spectrum1d, Spectrum1dKind } from "../shared/types/spectrum1d";
 import { parseImageRef } from "./imageRef";
 import type { ComparisonEntry } from "./spectrumCompare";
 import { fileBaseName, fluxUnitLabel, vacuumUmAxis, type SpectrumView, type VacuumAxis } from "./spectrumExport";
+import { documentDqExclusions, documentSourceHdu, documentSourcePath, dqExclusionMask } from "./spectrumDocument";
 
 export type SiblingCandidate = Pick<ProcessedFile, "path" | "status">;
 
@@ -20,8 +21,8 @@ export const TABLE_ONLY_HINT = "1D spectrum, EXTRACT1D table";
 export const APERTURE_NOTE =
   "the pipeline aperture differs from your region: compare shapes and line positions, not absolute levels";
 
-const X1D_NAME_RE = /_x1d(\.fits|\.fit|\.fts)(\.gz)?$/i;
-const FITS_EXTENSION_RE = /\.(fits|fit|fts)(\.gz)?$/i;
+const X1D_NAME_RE = /_x1d(\.fits|\.fit|\.fts)(\.(gz|bz2))?$/i;
+const FITS_EXTENSION_RE = /\.(fits|fit|fts)(\.(gz|bz2))?$/i;
 const CUBE_SUFFIX = "_s3d";
 const EXACT_HIT_RELATIVE = 1e-9;
 const TABLE_REJECTION = "BINTABLE extension, holds no image pixels";
@@ -66,12 +67,13 @@ function finiteOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-export function usableRows(x1d: X1dSpectrum): UsableRows {
+export function usableRows(x1d: X1dSpectrum, dqMasked = true): UsableRows {
   const nodes: { wavelength: number; flux: number; err: number | null; sb: number | null; flagged: boolean }[] = [];
+  const mask = dqMasked ? dqExclusionMask(x1d.dq_table) : 0;
   let droppedDq = 0;
   x1d.wavelength_um.forEach((raw, i) => {
     const dq = x1d.dq?.[i];
-    const flagged = typeof dq === "number" && dq !== 0;
+    const flagged = typeof dq === "number" && (dq & mask) !== 0;
     if (flagged) droppedDq += 1;
     const wavelength = finiteOrNull(raw);
     if (wavelength === null) return;
@@ -147,8 +149,8 @@ function overlapOf(axisUm: readonly number[], wavelength: readonly number[]): [n
   return lo <= hi ? [lo, hi] : null;
 }
 
-export function resampleTable(x1d: X1dSpectrum, cubeVacuumUm: readonly number[]): ResampledTable {
-  const rows = usableRows(x1d);
+export function resampleTable(x1d: X1dSpectrum, cubeVacuumUm: readonly number[], dqMasked = true): ResampledTable {
+  const rows = usableRows(x1d, dqMasked);
   const unflagged = rows.wavelength.filter((_, i) => !rows.flagged[i]);
   const toNumbers = (values: (number | null)[]) => values.map((v) => v ?? NaN);
   return {
@@ -173,7 +175,7 @@ export function tableLabel(x1d: X1dSpectrum): string {
   return parts.length === 0 ? TABLE_LABEL : `${TABLE_LABEL} (${parts.join(", ")})`;
 }
 
-export function tableEntry(x1d: X1dSpectrum, vacuum: VacuumAxis, channelCount: number): ComparisonEntry {
+export function tableEntry(x1d: X1dSpectrum, vacuum: VacuumAxis, channelCount: number, dqMasked = true): ComparisonEntry {
   const axis = vacuum.values;
   const error =
     axis === null
@@ -186,6 +188,7 @@ export function tableEntry(x1d: X1dSpectrum, vacuum: VacuumAxis, channelCount: n
     kind: "table",
     label: tableLabel(x1d),
     color: TABLE_SERIES_COLOR,
+    dashed: true,
     source: { kind: "table", path: x1d.path, hdu: x1d.hdu },
     regionText: null,
     backgroundId: null,
@@ -200,7 +203,7 @@ export function tableEntry(x1d: X1dSpectrum, vacuum: VacuumAxis, channelCount: n
             nRows: x1d.n_rows,
             fluxUnit: x1d.flux_unit,
             sbUnit: x1d.surf_bright_unit,
-            resampled: resampleTable(x1d, axis),
+            resampled: resampleTable(x1d, axis, dqMasked),
           },
     error,
   };
@@ -211,8 +214,9 @@ export function withTable(
   x1d: X1dSpectrum | null,
   vacuum: VacuumAxis,
   channelCount: number,
+  dqMasked = true,
 ): ComparisonEntry[] {
-  return x1d === null ? entries : [...entries, tableEntry(x1d, vacuum, channelCount)];
+  return x1d === null ? entries : [...entries, tableEntry(x1d, vacuum, channelCount, dqMasked)];
 }
 
 function baseName(path: string): string {
@@ -266,12 +270,12 @@ export function comparableX1dIds(files: readonly ListedFile[]): Set<string> {
 export function documentAsTable(spectrum: Spectrum1d): X1dSpectrum {
   const source = spectrum.source;
   const vacuum = vacuumUmAxis(spectrum.axis, null, "optical", spectrum.flux.length);
-  if (vacuum.values === null) throw new Error(`${fileBaseName(source.path)}: ${vacuum.reason}`);
+  if (vacuum.values === null) throw new Error(`${fileBaseName(documentSourcePath(source))}: ${vacuum.reason}`);
   const card = (key: string) => cardText(spectrum.cards[key] ?? null);
   const dq = spectrum.dq_table === UNKNOWN_DQ_TABLE ? null : spectrum.dq;
   return {
-    path: source.path,
-    hdu: source.kind === "csv" ? CSV_TABLE_HDU : source.hdu,
+    path: documentSourcePath(source),
+    hdu: documentSourceHdu(source) ?? CSV_TABLE_HDU,
     extver: source.kind === "x1d" ? source.extver : null,
     n_rows: spectrum.n_rows,
     wavelength_um: vacuum.values,
@@ -285,7 +289,7 @@ export function documentAsTable(spectrum: Spectrum1d): X1dSpectrum {
     npixels: null,
     dq,
     dq_table: spectrum.dq_table,
-    dq_flagged_rows: dq?.filter((bits) => bits !== 0).length ?? 0,
+    dq_flagged_rows: dq?.filter((bits) => (bits & dqExclusionMask(spectrum.dq_table)) !== 0).length ?? 0,
     srctype: card("SRCTYPE"),
     grating: card("GRATING"),
     filter: card("FILTER"),
@@ -303,11 +307,15 @@ export function documentComparisonEntries(
   table: X1dSpectrum | null,
   vacuum: VacuumAxis,
   channelCount: number,
+  dqMasked = true,
 ): ComparisonEntry[] {
+  const excluded = dqMasked ? documentDqExclusions(spectrum) : null;
+  const droppedDq = excluded?.filter(Boolean).length ?? 0;
+  const flux = excluded === null || droppedDq === 0 ? spectrum.flux : spectrum.flux.map((value, i) => (excluded[i] ? NaN : value));
   const own: ComparisonEntry = {
     id: DOCUMENT_ENTRY_ID,
     kind: "document",
-    label: fileBaseName(spectrum.source.path),
+    label: fileBaseName(documentSourcePath(spectrum.source)),
     color: DOCUMENT_SERIES_COLOR,
     source,
     regionText: null,
@@ -315,11 +323,11 @@ export function documentComparisonEntries(
     region: null,
     pixel: null,
     table: null,
-    document: { flux: spectrum.flux, fluxUnit: spectrum.flux_unit ?? NATIVE_FLUX_UNIT },
+    document: { flux, fluxUnit: spectrum.flux_unit ?? NATIVE_FLUX_UNIT, droppedDq },
     error: null,
   };
   if (table === null) return [own];
-  return [own, { ...tableEntry(table, vacuum, channelCount), label: fileBaseName(table.path) }];
+  return [own, { ...tableEntry(table, vacuum, channelCount, dqMasked), label: fileBaseName(table.path) }];
 }
 
 export interface ComparisonReaders {

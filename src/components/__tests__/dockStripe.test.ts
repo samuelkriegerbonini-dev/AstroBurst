@@ -230,7 +230,7 @@ describe("Stripe", () => {
     expect(byId.astrometry).toBe("Astrometry");
     expect(byId.photometry).toBe("Photometry");
     expect(byId.image).toBe("Image");
-    expect(byId.cube).toBe("Cube");
+    expect(byId.cube).toBe("Spectra");
   });
 
   it("shows the Masks button right after History, labelled Masks and off without a file", () => {
@@ -344,7 +344,7 @@ describe("compact sidebar rail", () => {
     for (const rail of [RAIL, undefined]) {
       const html = render("left", DEFAULT_DOCK_LAYOUT, true, rail) + render("right", DEFAULT_DOCK_LAYOUT, true, rail);
       const captions = Object.fromEntries([...html.matchAll(/<button[^>]*data-tool-id="([\w-]+)"[^>]*>.*?<span>([^<]*)<\/span>/g)].map((m) => [m[1], m[2]]));
-      expect(DOCK_TOOL_IDS.map((tool) => captions[tool])).toEqual(["Files", "Info", "Compose", "Headers", "Image", "Astro", "Phot", "Cube", "Prep", "SAGUI", "Process", "History", "Masks", "Stack", "Synth", "Export", "Settings", "Log"]);
+      expect(DOCK_TOOL_IDS.map((tool) => captions[tool])).toEqual(["Files", "Info", "Compose", "Headers", "Image", "Astro", "Phot", "Spectra", "Prep", "SAGUI", "Process", "History", "Masks", "Stack", "Synth", "Export", "Settings", "Log"]);
       for (const tool of DOCK_TOOL_IDS) expect(captions[tool]).toBe(DOCK_TOOL_META[tool].shortLabel);
     }
   });

@@ -1,6 +1,7 @@
 import { typedInvoke } from "../infrastructure/tauri";
 import type { HeaderData } from "../shared/types/header";
 import type { PlaneKind } from "../shared/types/fits.types";
+import type { BandPlaneEntry, LayerRole } from "../shared/types/layers";
 
 export function getHeader(path: string): Promise<Record<string, string>> {
   return typedInvoke<Record<string, string>>("get_header", { path });
@@ -25,6 +26,11 @@ export interface FitsExtension {
   kind: PlaneKind;
   is_dq: boolean;
   is_err: boolean;
+  role?: LayerRole;
+  role_basis?: string;
+  role_assumed?: boolean;
+  bunit?: string | null;
+  bands?: BandPlaneEntry[];
 }
 
 export function getFitsExtensions(path: string): Promise<{ extensions: FitsExtension[] }> {

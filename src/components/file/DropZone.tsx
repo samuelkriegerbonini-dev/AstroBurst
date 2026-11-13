@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Upload, AlertTriangle, X } from "lucide-react";
-import { astroFileFromPath, partitionIncoming, rejectionReport, SUPPORTED_EXTENSIONS_LABEL, type IngestReport } from "../../utils/validation";
+import { astroFileFromPath, ingestDrop, partitionIncoming, rejectionReport, SUPPORTED_EXTENSIONS_LABEL, type IngestReport } from "../../utils/validation";
 import { isTauri } from "../../infrastructure/tauri";
 import type { AstroFile } from "../../shared/types";
 
@@ -59,11 +59,14 @@ export default function DropZone({ onFilesAdded, report = null, children }: Drop
             setIsDragOver(true);
           } else if (t === "drop") {
             setIsDragOver(false);
-            const partition = partitionIncoming(event.payload.paths || []);
-            reportRejectedRef.current(rejectionReport(partition));
-            if (partition.accepted.length > 0) {
-              callbackRef.current(partition.accepted.map(astroFileFromPath));
-            }
+            const dropped = event.payload.paths || [];
+            void (async () => {
+              const { readDir } = await import("@tauri-apps/plugin-fs");
+              const { accepted, report } = await ingestDrop(dropped, readDir);
+              if (cancelled) return;
+              reportRejectedRef.current(report);
+              if (accepted.length > 0) callbackRef.current(accepted.map(astroFileFromPath));
+            })();
           } else if (t === "leave" || t === "cancel") {
             setIsDragOver(false);
           }

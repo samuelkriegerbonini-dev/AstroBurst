@@ -38,6 +38,9 @@ export interface ConeSearchResult {
   elapsed_ms: number;
   warnings: string[];
   catalog_source?: CatalogSource;
+  mag_limit?: number | null;
+  max_rows?: number;
+  catalog_table?: string;
 }
 
 export interface ConeSearchOptions {
@@ -125,6 +128,20 @@ export interface CrossMatchResult {
   warnings: string[];
   catalog_source?: CatalogSource;
   aperture?: ZeroPointAperture;
+  catalog_query?: CatalogQueryInfo;
+  catalog_table?: string;
+  mag_system?: "vega";
+  detection_sigma?: number;
+  max_stars?: number;
+}
+
+export interface CatalogQueryInfo {
+  radius_arcmin: number;
+  field_radius_arcmin: number;
+  mag_limit: number | null;
+  max_rows: number;
+  row_cap_reached: boolean;
+  cone_smaller_than_field: boolean;
 }
 
 export interface CrossMatchOptions {
@@ -134,6 +151,9 @@ export interface CrossMatchOptions {
   band?: GaiaBand | null;
   colourTerm?: boolean | null;
   apertureRadius?: number | null;
+  coneRadiusArcmin?: number | null;
+  magLimit?: number | null;
+  maxRows?: number | null;
 }
 
 export interface CatalogExportResult {

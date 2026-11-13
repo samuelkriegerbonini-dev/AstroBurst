@@ -84,3 +84,26 @@ fn area_map(path: &str, entry: &ImageEntry, photcal: Option<&mut PhotCal>, warni
     }
     Some(area)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::common::load_from_cache_or_disk;
+    use crate::infra::fits::writer::write_fits_mono;
+    use crate::types::header::HduHeader;
+
+    #[test]
+    fn an_area_map_is_refused_for_a_flux_density_per_pixel_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rubin_like.fits");
+        let mut header = HduHeader::empty();
+        header.set("BUNIT", "nJy".to_string());
+        write_fits_mono(path.to_str().unwrap(), &Array2::from_elem((16, 16), 1.0f32), Some(&header)).unwrap();
+        let entry = load_from_cache_or_disk(path.to_str().unwrap()).unwrap();
+        let cal = PhotCal::from_header(entry.header().unwrap(), None).unwrap();
+        assert_eq!(
+            calibration_refusal(Some(&cal), &entry),
+            Some("flux density per pixel (nJy) is not JWST MJy/sr".to_string())
+        );
+    }
+}

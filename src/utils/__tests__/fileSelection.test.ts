@@ -15,8 +15,8 @@ const MIXED = [
 ];
 
 describe("isSelectableStatus", () => {
-  it("selects done and spectrum rows only", () => {
-    expect(["queued", "processing", "done", "error", "spectrum"].filter(isSelectableStatus)).toEqual(["done", "spectrum"]);
+  it("selects done, spectrum and table rows only", () => {
+    expect(["queued", "processing", "done", "error", "spectrum", "table"].filter(isSelectableStatus)).toEqual(["done", "spectrum", "table"]);
   });
 });
 
@@ -55,5 +55,9 @@ describe("nextSelectableIndex", () => {
     expect(nextSelectableIndex(MIXED, 4, 1)).toBeNull();
     expect(nextSelectableIndex(MIXED, 2, -1)).toBeNull();
     expect(nextSelectableIndex([], -1, 1)).toBeNull();
+  });
+
+  it("stops on a table row", () => {
+    expect(nextSelectableIndex([row("e", "error"), row("t", "table"), row("d", "done")], -1, 1)).toBe(1);
   });
 });

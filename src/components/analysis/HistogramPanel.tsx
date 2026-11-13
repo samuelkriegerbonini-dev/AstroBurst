@@ -17,6 +17,7 @@ import {
   type StfDraft,
 } from "../../utils/analysisTarget";
 import { DecimalField } from "../ui";
+import { devicePixelRatioOrOne, sizeCanvas } from "../../utils/canvasDpr";
 
 const CANVAS_H = 110;
 const DRAG_THRESHOLD = 0.03;
@@ -92,6 +93,7 @@ function HistogramPanel({
   const draggingRef = useRef<"shadow" | "midtone" | "highlight" | null>(null);
   const rafRef = useRef<number | null>(null);
   const overlayRafRef = useRef<number | null>(null);
+  const cssWidthRef = useRef(0);
   const frame = useMemo(() => ({ min: dataMin, max: dataMax }), [dataMin, dataMax]);
   const stateRef = useRef({ shadow, midtone, highlight, frame, binsWindow });
   stateRef.current = { shadow, midtone, highlight, frame, binsWindow };
@@ -135,13 +137,10 @@ function HistogramPanel({
       const rect = canvas.parentElement!.getBoundingClientRect();
       const W = Math.floor(rect.width);
       const H = CANVAS_H;
+      if (W <= 0) return;
+      cssWidthRef.current = W;
 
-      if (canvas.width !== W || canvas.height !== H) {
-        canvas.width = W;
-        canvas.height = H;
-      }
-
-      const ctx = canvas.getContext("2d", { alpha: false });
+      const ctx = sizeCanvas(canvas, W, H, devicePixelRatioOrOne());
       if (!ctx) return;
       ctx.fillStyle = BG_COLOR;
       ctx.fillRect(0, 0, W, H);
@@ -159,18 +158,11 @@ function HistogramPanel({
     if (overlayRafRef.current) cancelAnimationFrame(overlayRafRef.current);
     overlayRafRef.current = requestAnimationFrame(() => {
       const canvas = overlayRef.current;
-      const barsCanvas = canvasRef.current;
-      if (!canvas || !barsCanvas) return;
+      const W = cssWidthRef.current;
+      const H = CANVAS_H;
+      if (!canvas || W <= 0) return;
 
-      const W = barsCanvas.width;
-      const H = barsCanvas.height;
-
-      if (canvas.width !== W || canvas.height !== H) {
-        canvas.width = W;
-        canvas.height = H;
-      }
-
-      const ctx = canvas.getContext("2d");
+      const ctx = sizeCanvas(canvas, W, H, devicePixelRatioOrOne());
       if (!ctx) return;
       ctx.clearRect(0, 0, W, H);
 

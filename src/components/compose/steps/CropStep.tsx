@@ -388,7 +388,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
                 <span className="w-2 h-2 rounded-full" style={{ background: bin?.color }} />
                 <span className="text-[10px] text-zinc-300">{bin?.shortLabel}</span>
                 <span className="text-[8px] text-[var(--ab-text-4)] font-mono truncate flex-1">{displayName}</span>
-                {hasCropped && <span className="text-[8px] text-cyan-400/60">cropped</span>}
+                {hasCropped && <span className="text-[8px] text-cyan-400/90">cropped</span>}
               </div>
             );
           })}

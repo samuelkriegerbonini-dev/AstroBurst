@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { HistogramData, ProcessResult } from "../../../shared/types";
+import type { PlaneInfo } from "../../../shared/types/fits.types";
 import type { ProcessedResult } from "../../../shared/types/preview";
 import { SIGMA_MAD_LABEL } from "../../../utils/analysisLabels";
 import { CUBE_FRAME_VALUE_PENDING } from "../../../utils/previewShell";
@@ -271,5 +272,35 @@ describe("InfoPanel sky readout follows the analysis target", () => {
   it("hides the readout without a measured path", () => {
     current.target = { path: null, dimensions: null, displayed: { previewOnly: false } };
     expect(wcsProps()).toEqual([]);
+  });
+});
+
+describe("InfoPanel layer role", () => {
+  it("names the layer on screen and why a layer was not used", () => {
+    current.file = {
+      name: "ps1_A_g_mask_480px.fits",
+      result: {
+        header: {},
+        dimensions: [480, 480],
+        plane: {
+          layer: { role: "mask", basis: "PS1 mask cards", assumed: false },
+          dq_unavailable: "mask layer ps1_A_g_mask_480px.fits is a floating-point plane (BITPIX -32): flag bits cannot be read exactly",
+        } as unknown as PlaneInfo,
+      },
+    };
+    const html = render();
+    expect(html).toContain('<dt>Layer</dt><dd title="mask layer, from PS1 mask cards">mask</dd>');
+    expect(html).toContain('<p class="ab-info-note">Mask layer not used: mask layer ps1_A_g_mask_480px.fits is a floating-point plane (BITPIX -32): flag bits cannot be read exactly</p>');
+  });
+
+  it("shows neither for a science image", () => {
+    current.file = { name: "sci.fits", result: { header: {}, dimensions: [480, 480], plane: { layer: { role: "science", basis: "EXTNAME SCI", assumed: false } } as unknown as PlaneInfo } };
+    const science = render();
+    expect(science).not.toContain(">Layer<");
+    expect(science).not.toContain("not used:");
+    current.file = { name: "m42.fits", result: { header: {}, dimensions: [480, 480] } };
+    const plain = render();
+    expect(plain).not.toContain(">Layer<");
+    expect(plain).not.toContain("not used:");
   });
 });

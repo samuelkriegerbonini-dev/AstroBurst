@@ -2,8 +2,8 @@ import { typedInvoke } from "../infrastructure/tauri";
 import type { ContinuumWindows } from "../shared/types/cube";
 import type {
   LineMeasurement,
-  LineMeasurementSource,
   LineModel,
+  MeasuredLineSource,
   RadialVelocityCorrectionError,
   RadialVelocityCorrectionResponse,
   SpectralAxisInfo,
@@ -50,11 +50,13 @@ export interface MeasureLineOptions {
   useDq?: boolean | null;
   wavelengthFrame?: WavelengthFrameChoice | null;
   redshift?: number | null;
+  lineId?: string | null;
+  lineLabel?: string | null;
 }
 
 export function measureSpectralLine(
   path: string,
-  source: LineMeasurementSource,
+  source: MeasuredLineSource,
   opts: MeasureLineOptions,
 ): Promise<LineMeasurement> {
   return typedInvoke<LineMeasurement>("measure_spectral_line_cmd", {
@@ -71,5 +73,7 @@ export function measureSpectralLine(
     useDq: opts.useDq ?? null,
     wavelengthFrame: opts.wavelengthFrame ?? null,
     redshift: opts.redshift ?? null,
+    lineId: opts.lineId ?? null,
+    lineLabel: opts.lineLabel ?? null,
   });
 }

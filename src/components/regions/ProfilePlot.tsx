@@ -1,6 +1,18 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTimedFlag } from "../../hooks/useTimedNotice";
-import { niceTicks, linearScale, finiteExtent, formatLogTickLabel, formatTickLabels, tickLabels } from "../../utils/plotScale";
+import {
+  niceTicks,
+  linearScale,
+  finiteExtent,
+  fitLegendLabel,
+  formatLogTickLabel,
+  formatTickLabels,
+  legendRows,
+  tickLabels,
+  LEGEND_CHAR_PX,
+  LEGEND_ROW_PX,
+} from "../../utils/plotScale";
+import { visibleBands } from "../../utils/plotBands";
 import {
   clampDomain,
   emptyPlotMessage,
@@ -10,6 +22,9 @@ import {
   logTicks,
   nearestHit,
   panDomain,
+  plotPngScale,
+  plotSummary,
+  PLOT_PNG_BACKGROUND,
   savePngWith,
   seriesToCsv,
   seriesYExtent,
@@ -17,6 +32,7 @@ import {
   zoomScopeKey,
   type Domain,
 } from "../../utils/plotInteraction";
+import { wheelGestureZooms, type WheelZoomMode } from "../../utils/viewerZoom";
 
 export type SeriesMode = "line" | "points" | "both";
 
@@ -37,6 +53,15 @@ export interface PlotReferenceLine {
   color?: string;
   dashed?: boolean;
 }
+
+export interface PlotBand {
+  x0: number;
+  x1: number;
+  color?: string;
+  label?: string;
+}
+
+export type PlotLegend = "inline" | "wrap" | "none";
 
 export interface PlotHit {
   seriesIndex: number;
@@ -62,6 +87,9 @@ export interface ProfilePlotProps {
   csvName?: string;
   xTickFormat?: XTickFormat;
   logToggle?: boolean;
+  bands?: PlotBand[];
+  legend?: PlotLegend;
+  wheelZoom?: WheelZoomMode;
 }
 
 export type XTickFormat = (v: number, step: number) => string;
@@ -79,7 +107,7 @@ const ZOOM_FACTOR = 1.15;
 const HIT_DISTANCE_PX = 12;
 const POINT_RADIUS_PX = 2.5;
 const ERROR_CAP_PX = 3;
-const TOOLBAR_H = 20;
+const TOOLBAR_H = 24;
 const DRAG_THRESHOLD_PX = 3;
 const DASH_PATTERN = [4, 3];
 const REFERENCE_DASH = [3, 3];
@@ -95,9 +123,20 @@ const DEFAULT_CSV_NAME = "plot";
 const DEFAULT_HEIGHT = 160;
 const MIN_PLOT_PX = 10;
 const DECADE_TOLERANCE = 1e-9;
+const Y_TITLE_CLEARANCE_PX = 22;
+const LEGEND_INSET_PX = 6;
+const LEGEND_TEXT_OFFSET_PX = 11;
+const LEGEND_SWATCH_DROP_PX = 3;
+const LEGEND_INLINE_TEXT_Y = 7;
+const LEGEND_WRAP_TEXT_Y = 1;
+const BAND_LABEL_INSET_PX = 2;
+const BAND_LABEL_UNDER_LEGEND_PX = 13;
+const BAND_LABEL_GAP_PX = 4;
+const BAND_LABEL_ROWS = 3;
+const WHEEL_MODIFIER_HINT = "Ctrl+wheel zooms, drag pans, double-click resets";
 const TOOLBAR_BUTTON_CLASS =
-  "px-1.5 rounded text-[9px] font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 disabled:opacity-40 disabled:cursor-not-allowed";
-const TOOLBAR_ACTIVE_CLASS = "px-1.5 rounded text-[9px] font-mono text-cyan-300 bg-zinc-800/80";
+  "px-1.5 min-h-6 min-w-6 inline-flex items-center justify-center rounded text-[9px] font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 disabled:opacity-40 disabled:cursor-not-allowed";
+const TOOLBAR_ACTIVE_CLASS = "px-1.5 min-h-6 min-w-6 inline-flex items-center justify-center rounded text-[9px] font-mono text-cyan-300 bg-zinc-800/80";
 
 function fmtValue(v: number): string {
   const a = Math.abs(v);
@@ -149,13 +188,48 @@ function haloText(ctx: CanvasRenderingContext2D, text: string, x: number, y: num
   ctx.restore();
 }
 
+let measureContext: CanvasRenderingContext2D | null | undefined;
+
+function axisTextWidth(text: string): number {
+  if (typeof document === "undefined") return text.length * LEGEND_CHAR_PX;
+  if (measureContext === undefined) {
+    measureContext = document.createElement("canvas").getContext("2d");
+    if (measureContext) measureContext.font = AXIS_FONT;
+  }
+  return measureContext ? measureContext.measureText(text).width : text.length * LEGEND_CHAR_PX;
+}
+
+interface LegendEntry {
+  x: number;
+  y: number;
+  text: string;
+}
+
+function legendSlots(series: ProfileSeries[], startX: number, maxX: number) {
+  const rowPx = maxX - startX - LEGEND_TEXT_OFFSET_PX;
+  const texts: string[] = [];
+  const widths: number[] = [];
+  for (const s of series) {
+    const full = axisTextWidth(s.label);
+    const text = full > rowPx ? fitLegendLabel(s.label, Math.floor((rowPx * s.label.length) / full)) : s.label;
+    texts.push(text);
+    widths.push(text === s.label ? full : axisTextWidth(text));
+  }
+  return legendRows(widths, startX, maxX).map((slot, i) => ({ ...slot, text: texts[i] }));
+}
+
 interface PlotLayout {
+  left: number;
+  top: number;
   plotW: number;
   plotH: number;
   xDomain: Domain;
   xExtent: Domain;
   xTicks: number[];
   yTicks: number[];
+  yText: (string | null)[];
+  legend: LegendEntry[];
+  bandLabelY: number;
   logY: boolean;
   sx: (v: number) => number;
   sy: (v: number) => number;
@@ -170,10 +244,8 @@ function computeLayout(
   logY: boolean,
   invertY: boolean,
   zoom: Domain | null,
+  legend: PlotLegend,
 ): PlotLayout | null {
-  const plotW = width - MARGIN.left - MARGIN.right;
-  const plotH = height - MARGIN.top - MARGIN.bottom;
-  if (plotW <= MIN_PLOT_PX || plotH <= MIN_PLOT_PX) return null;
   const xExt = finiteExtent(series.flatMap((s) => s.x));
   if (!xExt) return null;
   const fullTicks = niceTicks(xExt[0], xExt[1], X_TICK_COUNT);
@@ -201,11 +273,46 @@ function computeLayout(
     yDomainT = yExt[0] === yExt[1] ? [yExt[0] - 1, yExt[1] + 1] : [ticks[0] ?? yExt[0], ticks[ticks.length - 1] ?? yExt[1]];
     yTicks = yExt[0] === yExt[1] ? niceTicks(yDomainT[0], yDomainT[1], Y_TICK_COUNT) : ticks;
   }
-  const sx = linearScale(xDomain, [MARGIN.left, MARGIN.left + plotW]);
-  const syRaw = linearScale(yDomainT, invertY ? [MARGIN.top, MARGIN.top + plotH] : [MARGIN.top + plotH, MARGIN.top]);
+  const decadesOnly = logY && yTicks.length > Y_TICK_COUNT * 2;
+  const tickText = logY ? yTicks.map(formatLogTickLabel) : formatTickLabels(yTicks);
+  const yText = yTicks.map((t, i) => (decadesOnly && !isDecade(t) ? null : tickText[i]));
+  const widest = Math.max(0, ...yText.map((t) => (t === null ? 0 : axisTextWidth(t))));
+  const left = Math.max(MARGIN.left, Math.ceil(Y_TITLE_CLEARANCE_PX + widest));
+  const plotW = width - left - MARGIN.right;
+  if (plotW <= MIN_PLOT_PX) return null;
+
+  const slots = legend === "none" ? [] : legendSlots(series, left + LEGEND_INSET_PX, width);
+  const rows = slots.reduce((n, slot) => Math.max(n, slot.row + 1), 0);
+  const top =
+    legend === "wrap" ? MARGIN.top + LEGEND_ROW_PX * rows : MARGIN.top + LEGEND_ROW_PX * Math.max(0, rows - 1);
+  const plotH = height - top - MARGIN.bottom;
+  if (plotH <= MIN_PLOT_PX) return null;
+  const textTop = legend === "wrap" ? LEGEND_WRAP_TEXT_Y : LEGEND_INLINE_TEXT_Y;
+  const legendEntries = slots.map((slot) => ({ x: slot.x, y: textTop + LEGEND_ROW_PX * slot.row, text: slot.text }));
+  const bandLabelY = top + (legend === "inline" && rows > 0 ? BAND_LABEL_UNDER_LEGEND_PX : BAND_LABEL_INSET_PX);
+
+  const sx = linearScale(xDomain, [left, left + plotW]);
+  const syRaw = linearScale(yDomainT, invertY ? [top, top + plotH] : [top + plotH, top]);
   const sy = logY ? (v: number) => (v > 0 ? syRaw(Math.log10(v)) : NaN) : syRaw;
-  const xOf = (px: number) => xDomain[0] + ((px - MARGIN.left) / plotW) * (xDomain[1] - xDomain[0]);
-  return { plotW, plotH, xDomain, xExtent, xTicks, yTicks, logY, sx, sy, xOf, yFloorPx: syRaw(yDomainT[0]) };
+  const xOf = (px: number) => xDomain[0] + ((px - left) / plotW) * (xDomain[1] - xDomain[0]);
+  return {
+    left,
+    top,
+    plotW,
+    plotH,
+    xDomain,
+    xExtent,
+    xTicks,
+    yTicks,
+    yText,
+    legend: legendEntries,
+    bandLabelY,
+    logY,
+    sx,
+    sy,
+    xOf,
+    yFloorPx: syRaw(yDomainT[0]),
+  };
 }
 
 function drawBase(
@@ -217,10 +324,17 @@ function drawBase(
   yLabel: string,
   layout: PlotLayout | null,
   referenceLines: PlotReferenceLine[],
+  bands: PlotBand[],
   xTickFormat: XTickFormat | undefined,
   emptyMessage: string,
+  background: string | null = null,
 ) {
-  ctx.clearRect(0, 0, width, height);
+  if (background === null) {
+    ctx.clearRect(0, 0, width, height);
+  } else {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, width, height);
+  }
   ctx.font = AXIS_FONT;
   if (!layout) {
     ctx.fillStyle = TEXT_COLOR;
@@ -229,9 +343,7 @@ function drawBase(
     ctx.fillText(emptyMessage, width / 2, height / 2);
     return;
   }
-  const { plotW, plotH, xTicks, yTicks, sx, sy, logY, yFloorPx } = layout;
-  const left = MARGIN.left;
-  const top = MARGIN.top;
+  const { left, top, plotW, plotH, xTicks, yTicks, yText, sx, sy, logY, yFloorPx } = layout;
   const right = left + plotW;
   const bottom = top + plotH;
 
@@ -255,12 +367,11 @@ function drawBase(
   ctx.fillStyle = TEXT_COLOR;
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
-  const yText = logY ? yTicks.map(formatLogTickLabel) : formatTickLabels(yTicks);
-  const decadesOnly = logY && yTicks.length > Y_TICK_COUNT * 2;
   yTicks.forEach((t, i) => {
-    if (decadesOnly && !isDecade(t)) return;
+    const text = yText[i];
+    if (text === null) return;
     const y = sy(t);
-    if (Number.isFinite(y)) ctx.fillText(yText[i], left - 4, y);
+    if (Number.isFinite(y)) ctx.fillText(text, left - 4, y);
   });
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
@@ -277,6 +388,11 @@ function drawBase(
   ctx.beginPath();
   ctx.rect(left, top, plotW, plotH);
   ctx.clip();
+  const spans = visibleBands(bands, layout.xDomain);
+  for (const band of spans) {
+    ctx.fillStyle = band.color;
+    ctx.fillRect(sx(band.x0), top, sx(band.x1) - sx(band.x0), plotH);
+  }
   for (const s of series) {
     const line = drawsLine(s);
     const points = drawsPoints(s);
@@ -346,6 +462,22 @@ function drawBase(
       }
     }
   }
+  const labelRows: [number, number][][] = [];
+  for (const band of spans) {
+    if (band.label === null) continue;
+    const cx = (sx(band.x0) + sx(band.x1)) / 2;
+    const half = ctx.measureText(band.label).width / 2;
+    const span: [number, number] = [cx - half, cx + half];
+    const clear = (row: [number, number][]) => row.every(([a, b]) => span[1] + BAND_LABEL_GAP_PX <= a || b + BAND_LABEL_GAP_PX <= span[0]);
+    const found = labelRows.findIndex(clear);
+    const row = found >= 0 ? found : labelRows.length < BAND_LABEL_ROWS ? labelRows.length : BAND_LABEL_ROWS - 1;
+    if (row === labelRows.length) labelRows.push([]);
+    labelRows[row].push(span);
+    ctx.fillStyle = TEXT_COLOR;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(band.label, cx, layout.bandLabelY + row * LEGEND_ROW_PX);
+  }
 
   for (const ref of referenceLines) {
     if (!Number.isFinite(ref.value)) continue;
@@ -362,9 +494,11 @@ function drawBase(
       ctx.stroke();
       if (ref.label) {
         ctx.fillStyle = color;
-        ctx.textAlign = "left";
+        ctx.font = HALO_FONT;
+        const fits = px + 3 + ctx.measureText(ref.label).width <= right;
+        ctx.textAlign = fits ? "left" : "right";
         ctx.textBaseline = "bottom";
-        haloText(ctx, ref.label, px + 3, bottom - 2);
+        haloText(ctx, ref.label, fits ? px + 3 : px - 3, bottom - 2);
       }
     } else {
       const py = Math.round(sy(ref.value)) + 0.5;
@@ -384,15 +518,26 @@ function drawBase(
   ctx.restore();
 
   ctx.font = AXIS_FONT;
-  let lx = left + 6;
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
-  for (const s of series) {
+  layout.legend.forEach((entry, i) => {
+    const s = series[i];
+    const swatchY = entry.y + LEGEND_SWATCH_DROP_PX;
     ctx.fillStyle = s.color;
-    ctx.fillRect(lx, top + 2, 8, 2);
-    ctx.fillText(s.label, lx + 11, top - 1);
-    lx += 11 + ctx.measureText(s.label).width + 10;
-  }
+    if (s.dashed) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash(DASH_PATTERN);
+      ctx.beginPath();
+      ctx.moveTo(entry.x, swatchY + 1);
+      ctx.lineTo(entry.x + 8, swatchY + 1);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    } else {
+      ctx.fillRect(entry.x, swatchY, 8, 2);
+    }
+    ctx.fillText(entry.text, entry.x + LEGEND_TEXT_OFFSET_PX, entry.y);
+  });
 }
 
 function tooltipLines(series: ProfileSeries[], hit: PlotHit, logY: boolean, xTickFormat: XTickFormat | undefined): string[] {
@@ -428,9 +573,7 @@ function drawOverlay(
 ) {
   ctx.clearRect(0, 0, width, height);
   if (!layout) return;
-  const { plotW, plotH, sx, sy } = layout;
-  const left = MARGIN.left;
-  const top = MARGIN.top;
+  const { left, top, plotW, plotH, sx, sy } = layout;
   const right = left + plotW;
   const bottom = top + plotH;
 
@@ -525,10 +668,14 @@ function ProfilePlot(props: ProfilePlotProps) {
     csvName = DEFAULT_CSV_NAME,
     xTickFormat,
     logToggle = true,
+    bands,
+    legend = "inline",
+    wheelZoom = "always",
   } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  const summaryId = useId();
   const [width, setWidth] = useState(0);
   const [ownDomain, setOwnDomain] = useState<Domain | null>(null);
   const zoomScope = useMemo(() => zoomScopeKey(series, xLabel), [series, xLabel]);
@@ -552,13 +699,14 @@ function ProfilePlot(props: ProfilePlotProps) {
   const zoom = controlled ? xDomainProp : ownDomain;
 
   const layout = useMemo(
-    () => (width > 0 ? computeLayout(series, width, height, logY, invertY, zoom ?? null) : null),
-    [series, width, height, logY, invertY, zoom],
+    () => (width > 0 ? computeLayout(series, width, height, logY, invertY, zoom ?? null, legend) : null),
+    [series, width, height, logY, invertY, zoom, legend],
   );
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
   const emptyMessage = useMemo(() => emptyPlotMessage(series, logY), [series, logY]);
   const logHidden = useMemo(() => (logY ? logHiddenCount(series) : null), [series, logY]);
+  const summary = useMemo(() => plotSummary(series, xLabel, yLabel, selected), [series, xLabel, yLabel, selected]);
 
   const setDomain = useCallback(
     (d: Domain | null) => {
@@ -569,6 +717,8 @@ function ProfilePlot(props: ProfilePlotProps) {
   );
   const setDomainRef = useRef(setDomain);
   setDomainRef.current = setDomain;
+  const wheelZoomRef = useRef(wheelZoom);
+  wheelZoomRef.current = wheelZoom;
 
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -585,8 +735,8 @@ function ProfilePlot(props: ProfilePlotProps) {
     if (!canvas || width <= 0) return;
     const ctx = sizeCanvas(canvas, width, height);
     if (!ctx) return;
-    drawBase(ctx, width, height, series, xLabel, yLabel, layout, referenceLines ?? [], xTickFormat, emptyMessage);
-  }, [series, xLabel, yLabel, width, height, layout, referenceLines, xTickFormat, emptyMessage]);
+    drawBase(ctx, width, height, series, xLabel, yLabel, layout, referenceLines ?? [], bands ?? [], xTickFormat, emptyMessage);
+  }, [series, xLabel, yLabel, width, height, layout, referenceLines, bands, xTickFormat, emptyMessage]);
 
   useEffect(() => {
     const canvas = overlayRef.current;
@@ -606,11 +756,12 @@ function ProfilePlot(props: ProfilePlotProps) {
     const canvas = overlayRef.current;
     if (!canvas) return;
     const onWheel = (e: WheelEvent) => {
+      if (!wheelGestureZooms(wheelZoomRef.current, e)) return;
       const l = layoutRef.current;
       if (!l || e.deltaY === 0) return;
       const rect = canvas.getBoundingClientRect();
       const px = e.clientX - rect.left;
-      const anchor = l.xOf(Math.min(Math.max(px, MARGIN.left), MARGIN.left + l.plotW));
+      const anchor = l.xOf(Math.min(Math.max(px, l.left), l.left + l.plotW));
       const factor = e.deltaY > 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
       const next = zoomDomain(l.xDomain, l.xExtent, anchor, factor);
       if (next[0] === l.xDomain[0] && next[1] === l.xDomain[1]) return;
@@ -704,8 +855,7 @@ function ProfilePlot(props: ProfilePlotProps) {
   }, [series, xLabel, flagCopied]);
 
   const handleSavePng = useCallback(async () => {
-    const canvas = canvasRef.current;
-    if (!canvas || saving) return;
+    if (saving || width <= 0) return;
     setPngNotice(null);
     setSaving(true);
     const outcome = await savePngWith(
@@ -718,6 +868,27 @@ function ProfilePlot(props: ProfilePlotProps) {
         });
       },
       async () => {
+        const scale = plotPngScale(window.devicePixelRatio);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        drawBase(
+          ctx,
+          width,
+          height,
+          series,
+          xLabel,
+          yLabel,
+          layout,
+          referenceLines ?? [],
+          bands ?? [],
+          xTickFormat,
+          emptyMessage,
+          PLOT_PNG_BACKGROUND,
+        );
         const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
         return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
       },
@@ -733,14 +904,25 @@ function ProfilePlot(props: ProfilePlotProps) {
     } else if (outcome.kind === "failed") {
       setPngNotice({ ok: false, text: outcome.message });
     }
-  }, [csvName, saving]);
+  }, [csvName, saving, width, height, series, xLabel, yLabel, layout, referenceLines, bands, xTickFormat, emptyMessage]);
 
   return (
     <div ref={wrapRef} className="w-full" style={{ height: height + (toolbar ? TOOLBAR_H : 0) }}>
       <div className="relative w-full" style={{ height }}>
-        <canvas ref={canvasRef} style={{ width: "100%", height, display: "block" }} />
+        <canvas
+          ref={canvasRef}
+          role="img"
+          aria-label={
+            series.length > 0
+              ? `Plot of ${yLabel} against ${xLabel}: ${series.map((s) => s.label).join(", ")}`
+              : `Plot of ${yLabel} against ${xLabel}`
+          }
+          aria-describedby={summaryId}
+          style={{ width: "100%", height, display: "block" }}
+        />
         <canvas
           ref={overlayRef}
+          title={wheelZoom === "modifier" ? WHEEL_MODIFIER_HINT : undefined}
           onMouseMove={interactive ? handleMouseMove : undefined}
           onMouseLeave={interactive ? handleMouseLeave : undefined}
           onMouseDown={interactive ? handleMouseDown : undefined}
@@ -757,6 +939,9 @@ function ProfilePlot(props: ProfilePlotProps) {
             cursor: interactive ? "crosshair" : "default",
           }}
         />
+        <p id={summaryId} className="sr-only" data-plot-summary>
+          {summary}
+        </p>
       </div>
       {toolbar && (
         <div className="flex items-center gap-1 px-1 min-w-0" style={{ height: TOOLBAR_H }}>
@@ -765,6 +950,7 @@ function ProfilePlot(props: ProfilePlotProps) {
               type="button"
               onClick={() => setLogOverride(!logY)}
               className={logY ? TOOLBAR_ACTIVE_CLASS : TOOLBAR_BUTTON_CLASS}
+              aria-pressed={logY}
               title="Toggle a logarithmic y axis"
             >
               log y

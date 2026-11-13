@@ -2135,10 +2135,21 @@
 }
 
 .ab-mast-prow-name {
+  display: flex;
+  min-width: 0;
   overflow: hidden;
   color: var(--ab-text-1);
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ab-mast-prow-name-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ab-mast-prow-name-tail {
+  flex: none;
 }
 
 .ab-mast-prow-cls {

@@ -205,7 +205,7 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
                   <div className="flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full" style={{ background: bin?.color }} />
                     <span className="text-[10px] text-zinc-300">{bin?.shortLabel}</span>
-                    {isReference && !rowChips && <span data-testid="align-ref-tag" className="text-[8px] text-sky-400/60 ml-1">REF</span>}
+                    {isReference && !rowChips && <span data-testid="align-ref-tag" className="text-[8px] text-sky-400/90 ml-1">REF</span>}
                     {chip && (
                       <span
                         data-testid={chip.kind === "reference" ? "align-ref-tag" : undefined}
@@ -220,7 +220,7 @@ export default function AlignStep({ state, onAligned }: AlignStepProps) {
                   </div>
                   <div className="flex items-center gap-2">
                     {match && (
-                      <span className="text-[9px] font-mono text-sky-400/60">{match}</span>
+                      <span className="text-[9px] font-mono text-sky-400/90">{match}</span>
                     )}
                     {offset && !isReference && !note?.wcs && (
                       <span className="text-[10px] font-mono text-zinc-400 whitespace-pre" title={ALIGN_OFFSET_TITLE}>

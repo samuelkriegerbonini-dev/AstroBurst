@@ -20,7 +20,11 @@ const AIR_VACUUM_MAX_ITERATIONS = 50;
 const MICRON = "μm";
 const EM_DASH = "—";
 const AXIS_DECIMALS = 4;
-const VELOCITY_AXIS_DECIMALS = 1;
+const UNIT_AXIS_DECIMALS: ReadonlyMap<string, number> = new Map([
+  ["km/s", 1],
+  ["nm", 1],
+  ["Å", 0],
+]);
 const MAX_AXIS_DECIMALS = 10;
 const STEP_LOG_EPSILON = 1e-9;
 
@@ -231,7 +235,7 @@ export function applyCorrectionKms(
 
 export function formatAxisValue(value: number, unit: string, step?: number): string {
   if (!Number.isFinite(value)) return EM_DASH;
-  const unitDecimals = unit === "km/s" ? VELOCITY_AXIS_DECIMALS : AXIS_DECIMALS;
+  const unitDecimals = UNIT_AXIS_DECIMALS.get(unit) ?? AXIS_DECIMALS;
   const decimals =
     step !== undefined && Number.isFinite(step) && step > 0
       ? Math.min(MAX_AXIS_DECIMALS, Math.max(unitDecimals, Math.ceil(-Math.log10(step) - STEP_LOG_EPSILON)))

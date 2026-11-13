@@ -10,3 +10,7 @@ pub mod reader;
 pub mod spectrum1d;
 pub mod table;
 pub mod writer;
+pub mod x1dints;
+pub mod bzip;
+pub mod int_tiles;
+pub mod band_planes;

@@ -105,7 +105,7 @@
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\small\textcolor{gray}{AstroBurst --- Technical Document v0.8.0}}
+\fancyhead[L]{\small\textcolor{gray}{AstroBurst: Technical Document v0.9.0}}
 \fancyhead[R]{\small\textcolor{gray}{\thepage}}
 \fancyfoot[C]{\small\textcolor{gray}{AGPL-3.0 License \textbullet\ \the\year}}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -124,8 +124,8 @@
 \newcommand{\cmd}[1]{\texttt{\bfseries #1}}
 \newcommand{\mat}[1]{\mathbf{#1}}
 
-\newcommand{\nCommands}{214}
-\newcommand{\nServices}{40}
+\newcommand{\nCommands}{238}
+\newcommand{\nServices}{52}
 \newcommand{\nLibTests}{3\,365}
 \newcommand{\nLibIgnored}{54}
 \newcommand{\nServerTests}{192}
@@ -136,10 +136,10 @@
     \vspace{-1cm}
     {\Huge\bfseries\textcolor{astropurple}{AstroBurst}}\\[0.3cm]
     {\Large Astronomical Image Viewer and Processor}\\[0.2cm]
-    {\large Technical Document --- Release v0.8.0}
+    {\large Technical Document, Release v0.9.0}
 }
 \author{Samuel Krieger Bonini}
-\date{25 October 2026}
+\date{13 November 2026}
 
 \begin{document}
 
@@ -153,9 +153,9 @@
             \toprule
             \textbf{Field} & \textbf{Value} \\
             \midrule
-            Document Version & 0.8.0 \\
-            Release & v0.8.0 (frontend, Rust crate and Tauri bundle 0.8.0) \\
-            Date & 25 October 2026 \\
+            Document Version & 0.9.0 \\
+            Release & v0.9.0 (frontend, Rust crate and Tauri bundle 0.9.0) \\
+            Date & 13 November 2026 \\
             Author & Samuel Krieger Bonini \\
             Stack & Rust 1.96.0 $\cdot$ Tauri 2 $\cdot$ React 19 $\cdot$ TypeScript 5.7 \\
             Platforms & Windows $\cdot$ macOS $\cdot$ Linux \\
@@ -181,16 +181,16 @@
     \item Advanced astrophotographers processing deep-sky narrowband and broadband imaging data
     \end{itemize}
 
-    Release 0.8.0 exposes \textbf{\nCommands{} backend commands} through a typed TypeScript service layer of \nServices{} modules, a ten-step compose wizard, a processing tab whose steps form a chain with a persistent history, and an archive browser for MAST. The same core is served over HTTP by an optional headless server (Section~\ref{sec:server}), so region statistics, rendering, histograms, cutouts, WCS queries and batch stacking are reachable from a script without a display. Section~\ref{sec:testing} describes the automated checks, gives the suite sizes measured for 0.8.0 and identifies older counts by their release.
+    Release 0.9.0 exposes \textbf{\nCommands{} backend commands} through a typed TypeScript service layer of \nServices{} modules, a ten-step compose wizard, a processing tab whose steps form a chain with a persistent history, and an archive browser for MAST. The same core is served over HTTP by an optional headless server (Section~\ref{sec:server}), so region statistics, rendering, histograms, cutouts, WCS queries and batch stacking are reachable from a script without a display. Section~\ref{sec:testing} describes the automated checks, gives the suite sizes last measured (0.8.0) and identifies older counts by their release.
 
-    The current scientific path combines aperture and batch photometry, calibrated region fluxes, error-aware line measurement, per-spaxel line-fit maps, position-velocity diagrams and time-series photometry. Instrument-specific support includes JWST ramps for quick-look inspection, pipeline \code{x1d} spectra, tabulated spectral axes and evaluation of supported JWST and Roman imaging gWCS chains. Spectroscopic gWCS remains outside that evaluated set (Section~\ref{sec:wcs}).
+    The current scientific path combines aperture and batch photometry, calibrated region fluxes, error-aware line measurement with errors on every derived quantity and a physical line flux, per-spaxel line-fit maps, position-velocity diagrams and time-series photometry. Release 0.9.0 adds JWST time-series spectroscopy with white-light and binned light curves, a transit and eclipse model fitted by least squares, a fitted transmission spectrum and a period search (Section~\ref{sec:tso}), and the reading, calibration and forced multi-band photometry of ground-based and space survey images, with catalogue comparison, empty-aperture depth and a resolution check (Section~\ref{sec:survey}). Instrument-specific support includes JWST ramps for quick-look inspection, pipeline \code{x1d} and \code{x1dints} spectra, tabulated spectral axes and evaluation of supported JWST and Roman imaging gWCS chains. Spectroscopic gWCS remains outside that evaluated set (Section~\ref{sec:wcs}).
 
     Archive discovery, resumable downloads and samples on demand feed the same workspace (Section~\ref{sec:mast}). Local-first plate solving and Gaia DR3 refinement add astrometric calibration (Sections~\ref{sec:offline_foundations} and \ref{sec:gaia_refine}); file-processing history records supported operations for undo, redo and replay (Section~\ref{sec:history}). Network queries, temporary output files and incomplete server parity have distinct limits described below. Gaia data are never bundled, hosted or redistributed by AstroBurst.
 
     \subsection{Scope and Reading Guide}
     \label{sec:scope}
 
-    The reference version is 0.8.0, dated 6 November 2026. AstroBurst remains pre-1.0: file handling, processing and science tools have different levels of validation, and the HTTP API covers a subset of the desktop tools. The operational sections describe the current implementation; Appendix~\ref{sec:release_history} preserves the release history. Appendix~\ref{sec:comparison} contains the separate editorial comparison, including its qualitative scores and sources.
+    The reference version is 0.9.0, dated 13 November 2026. AstroBurst remains pre-1.0: file handling, processing and science tools have different levels of validation, and the HTTP API covers a subset of the desktop tools. The operational sections describe the current implementation; Appendix~\ref{sec:release_history} preserves the release history. Appendix~\ref{sec:comparison} contains the separate editorial comparison, including its qualitative scores and sources.
 
     \begin{table}[H]
     \centering
@@ -201,6 +201,8 @@
     \midrule
     Inspect an image or its coordinates & WCS (Section~\ref{sec:wcs}) and FITS/ASDF I/O (Section~\ref{sec:fitsio}). \\
     Evaluate a scientific measurement & Mathematical definitions (Section~\ref{sec:math}) and measurement contracts (Section~\ref{sec:measure}). \\
+    Analyse a transit or a time-series spectrum & Time-series spectroscopy and transit fitting (Section~\ref{sec:tso}). \\
+    Measure survey images across bands & Survey images and multi-band photometry (Section~\ref{sec:survey}). \\
     Solve or refine a WCS & Plate solving (Section~\ref{sec:platesolve}) and Gaia refinement (Section~\ref{sec:gaia_refine}). \\
     Calibrate, stack or compose & Calibration and stacking (Section~\ref{sec:calstack}) and processing history (Section~\ref{sec:history}). \\
     Automate an inspection workflow & Headless API (Section~\ref{sec:server}) and the route reference in \code{docs/server-api.md}. \\
@@ -212,6 +214,21 @@
     \end{table}
 
     \textbf{Conventions.} Application and API pixel coordinates are 0-based, while FITS \code{CRPIX} retains the standard 1-based convention. Sky coordinates use degrees unless sexagesimal notation or another unit is stated; a celestial frame and observation epoch must be retained when interpreting an astrometric result. Residuals in pixels and milliarcseconds (mas), formal uncertainties, and rejection thresholds are distinct quantities. A fit residual such as \code{SIPMXERR} describes its stated fit, rather than absolute sky accuracy. Dates and time scales in exported measurements follow the contracts in Section~\ref{sec:measure}.
+
+    \subsection{What's New in v0.9.0}
+    \label{sec:new_090}
+
+    Release 0.9.0 (13 November 2026) is a science round in two slices: exoplanet time series and survey images. Release 0.8.1 (13 November 2026), on which it builds, corrected the region net error, line measurement without ERR, the photometry FWHM and aperture correction, the Gaia zero-point error and the air and vacuum conversion; it is summarised in Appendix~\ref{sec:release_history}.
+
+    \begin{itemize}[nosep]
+    \item \textbf{Time-series spectra} (Sections~\ref{sec:tso_series} to \ref{sec:tso_whtlt}): JWST \code{x1dints} products in both layouts open as one series per detector and spectral order, segment files are stitched with a completeness check, and white-light and binned light curves are computed in a pipeline mode that reproduces the archived \code{\_whtlt.ecsv} to rounding and in a masked mode with element rejection.
+    \item \textbf{Transit and eclipse fit} (Sections~\ref{sec:transit_model} to \ref{sec:eclipse}): the Mandel and Agol (2002) model with quadratic limb darkening on a circular orbit, times a baseline polynomial, fitted by weighted least squares with errors from the covariance, a time-averaging test, the inclination, durations and stellar density with propagated errors, and an eclipse variant for the planet-to-star flux ratio.
+    \item \textbf{Fitted transmission spectrum} (Section~\ref{sec:transit_spectrum}) per wavelength bin, beside the quick-look box depth, and a generalised Lomb-Scargle period search (Section~\ref{sec:gls}).
+    \item \textbf{Lines} (Section~\ref{sec:line_090}): errors of the equivalent width, centroid, sigma, FWHM and velocities, the redshift of each measured line, and the integrated line flux in W\,m$^{-2}$ and erg\,s$^{-1}$\,cm$^{-2}$ with its error. The Cube tool is now named Spectra; it shows spectra in chosen units, bins them and measures lines on a spectrum picked from a time series.
+    \item \textbf{Tables} (Section~\ref{sec:tables}): CSV and ECSV tables are read and the binary tables of a FITS file are listed, and a saved CSV or ECSV table can become light curves or a catalogue.
+    \item \textbf{Survey images} (Sections~\ref{sec:survey_files} to \ref{sec:survey_cal}): bzip2 FITS, exact integer planes of tile-compressed HDUs, Pan-STARRS asinh pixels linearised on load, band planes of cutout cubes, error and mask layers classified by role with a conversion to one sigma, sibling files paired by name and grid, mask flag sets named by the file, the SDSS frame error rebuilt from the file, calibration by pixel unit and the survey zero points.
+    \item \textbf{Survey photometry} (Sections~\ref{sec:forced} to \ref{sec:resolution}): forced aperture photometry of one band and across up to 12 bands with coverage, a growth-curve aperture correction and a correlated-noise correction, catalogue comparison with robust statistics, empty-aperture depth, the PSF FWHM of an image, the resolved-or-not rule and the cosmological scale.
+    \end{itemize}
 
     \subsection{What's New in v0.8.0}
     \label{sec:new_080}
@@ -304,8 +321,8 @@
     \begin{description}[style=nextline, leftmargin=2cm]
     \item[\texttt{cmd/}] Tauri command handlers grouped by domain, built only with the \code{tauri} feature (\nCommands{} registered commands, Section~\ref{sec:commands}). Each handler receives deserialized arguments, moves the work off the UI thread, delegates to \code{core/} and returns JSON or a binary buffer.
     \item[\texttt{server/}] The headless HTTP front end, built only with the \code{server} feature (Section~\ref{sec:server}).
-    \item[\texttt{core/}] Computation, in fifteen domains: \code{alignment} (phase correlation, the star-triangle matcher with its rotation rule, WCS reprojection with the point-source residual), \code{analysis} (histogram, FFT, star detection, aperture photometry, the gain model, line measurement with errors, x1d reader, 1D spectra, subframe metrics), \code{astrometry} (WCS wrapper, the gWCS evaluator and TAN-SIP fitter under \code{gwcs/}, coordinate frames, grid, spectral axes, time scales, observation geometry, Gaia catalog with its disk cache, the HEALPix catalogue reader, STC-S regions, SPCC), \code{compose} (channel blend, LRGB, white balance, RGB drizzle), \code{cube} (lazy and eager cubes, ERR and DQ companions, moments, PV diagrams, line-fit maps, the empirical noise factor), \code{history} (the history document, node ids, replay plans), \code{imaging} (STF and scale, colormaps, background and DBE, deband, wavelets, deconvolution, LHE, HDRMT, curves, geometry, regions, cutouts, contours, cosmetic correction, calibration pipeline, DQ flags, the CFA model and extraction), \code{mast} (MAST query building, missions, presets, product classification, previews, footprints, the error model), \code{metadata} (header discovery, photometric calibration, the filter-wavelength table, keyword aliases, the camera table), \code{ops} (the serialisable processing operations a history records), \code{pixelmath}, \code{ramp} (ramp inspection, IRS2 layout, quick slope, comparison with \code{\_rate}), \code{registration} (the polynomial distortion fitter), \code{stacking} (rejection kernel, calibration, frame cards, consistency checks, masters, CFA guard, drizzle) and \code{synth}.
-    \item[\texttt{infra/}] Infrastructure: the Arc-based image cache with the ORIG/KEY layers of the composite, configuration, FITS I/O (memory-mapped reader, MEF scanner, tile compression through \crate{fitsio-pure} behind a header guard, gzip decompression, a header walker for byte-range reads, binary-table reader with array columns, the JWST \code{ASDF} extension reader, writer with multi-BITPIX output), the ASDF reader (YAML tree, blocks, zlib/bzip2/lz4) and \code{asdf\_bridge} (header synthesis, including the fitted TAN-SIP cards), \code{wcs\_source} (the single loader that chooses between a gWCS and the header WCS for a path), \code{net} (HTTP profiles, the resumable download engine, the Data folder and free-space queries), \code{mast} (the MAST client, cache, download queue and header peek), the catalogue store, the astrometry.net client, PNG and tile rendering, binary IPC encoding and progress events.
+    \item[\texttt{core/}] Computation, in seventeen domains: \code{alignment} (phase correlation, the star-triangle matcher with its rotation rule, WCS reprojection with the point-source residual), \code{analysis} (histogram, FFT, star detection, aperture photometry, the gain model, line measurement with errors, x1d reader, 1D spectra, subframe metrics; since 0.9.0 time-series spectra under \code{tso/}, the transit model and fit, the periodogram, forced photometry, empty-aperture depth and the resolution check), \code{astrometry} (WCS wrapper, the cosmological scale and the catalogue comparison of 0.9.0, the gWCS evaluator and TAN-SIP fitter under \code{gwcs/}, coordinate frames, grid, spectral axes, time scales, observation geometry, Gaia catalog with its disk cache, the HEALPix catalogue reader, STC-S regions, SPCC), \code{compose} (channel blend, LRGB, white balance, RGB drizzle), \code{cube} (lazy and eager cubes, ERR and DQ companions, moments, PV diagrams, line-fit maps, the empirical noise factor), \code{cubeprep} (alignment, cube assembly, PSF input, kernels and PSF matching of Cube Prep), \code{history} (the history document, node ids, replay plans), \code{imaging} (STF and scale, colormaps, background and DBE, deband, wavelets, deconvolution, LHE, HDRMT, curves, geometry, regions, cutouts, contours, cosmetic correction, calibration pipeline, DQ flags and flag sets, layer roles, asinh linearisation, the SDSS frame error model, the CFA model and extraction), \code{mask} (the mask cache and feathering of the Masks tool), \code{mast} (MAST query building, missions, presets, product classification, previews, footprints, the error model), \code{metadata} (header discovery, photometric calibration, the filter-wavelength table and filter registry, flux-unit arithmetic, keyword aliases, the camera table), \code{ops} (the serialisable processing operations a history records), \code{pixelmath}, \code{ramp} (ramp inspection, IRS2 layout, quick slope, comparison with \code{\_rate}), \code{registration} (the polynomial distortion fitter), \code{stacking} (rejection kernel, calibration, frame cards, consistency checks, masters, CFA guard, drizzle) and \code{synth}.
+    \item[\texttt{infra/}] Infrastructure: the Arc-based image cache with the ORIG/KEY layers of the composite, configuration, FITS I/O (memory-mapped reader, MEF scanner, tile compression through \crate{fitsio-pure} behind a header guard, gzip and bzip2 decompression, exact integer planes of tile-compressed HDUs, band planes of cutout cubes, a header walker for byte-range reads, binary-table reader with array columns and a row-range reader, the \code{x1dints} identification, the JWST \code{ASDF} extension reader, writer with multi-BITPIX output), the ASDF reader (YAML tree, blocks, zlib/bzip2/lz4) and \code{asdf\_bridge} (header synthesis, including the fitted TAN-SIP cards), \code{wcs\_source} (the single loader that chooses between a gWCS and the header WCS for a path), \code{net} (HTTP profiles, the resumable download engine, the Data folder and free-space queries), \code{mast} (the MAST client, cache, download queue and header peek), the catalogue store, the CSV and ECSV table readers (\code{tables}, 0.9.0), the astrometry.net client, PNG and tile rendering, binary IPC encoding and progress events.
     \item[\texttt{types/}] Shared types: image references, headers, stacking and compose configuration, errors, and about 490 named constants in \code{types/constants.rs} (JSON keys, header card names, wizard cache keys).
     \item[\texttt{math/}] Primitives: NaN-safe median/MAD, sigma clipping, SIMD log approximation (Cephes degree-8 minimax, $<1$\,ULP), FFT and complex arithmetic, windows, sub-pixel peak interpolation, normalization and the bounded Gauss-Newton fitter.
     \end{description}
@@ -339,7 +356,7 @@
     \label{sec:frontend}
 
     \begin{description}[style=nextline, leftmargin=2cm]
-    \item[\texttt{services/}] \nServices{} domain service modules wrapping Tauri IPC: analysis, astrometry, catalog, catalogStore, channelLevels, compose, compositeChain, config, contours, cosmetic, cube, cubeprep (Cube Prep, 0.7.9), cutout, dbe, display, export, fits, geometry (observation geometry), header, imageGeometry (rotate and flip), localContrast, masks (0.7.7), mast (the MAST client, 0.6.9, and archive, 0.6.9.5), ops (the processing history, 0.6.9.5), pixelmath, processing, progress, pv, ramp, regions, sagui (0.7.9), sampleData, spectral, spectrum1d (1D spectra, 0.7.0), stacking, statistics, synth, tiles, tone and toneFile. Command name strings live only in these modules; components never call \code{typedInvoke} directly. Arguments cross the boundary in camelCase and arrive in Rust as snake\_case, so a rename on either side is a runtime failure, not a compile error.
+    \item[\texttt{services/}] \nServices{} domain service modules wrapping Tauri IPC: analysis, astrometry, catalog, catalogCompare (0.9.0), catalogStore, channelLevels, companions (layer assignment, 0.9.0), compose, compositeChain, config, contours, cosmetic, cube, cubeprep (Cube Prep, 0.7.9), cutout, dbe, depth (0.9.0), display, export, filters (0.9.0), fits, forcedPhotometry (0.9.0), geometry (observation geometry), header, imageGeometry (rotate and flip), localContrast, masks (0.7.7), mast (the MAST client, 0.6.9, and archive, 0.6.9.5), ops (the processing history, 0.6.9.5), periodogram (0.9.0), photometryStatus (0.9.0), pixelmath, processing, progress, pv, ramp, regions, resolution (0.9.0), sagui (0.7.9), sampleData, spectral, spectrum1d (1D spectra, 0.7.0), stacking, statistics, synth, tables (0.9.0), tiles, tone, toneFile, transit (0.9.0), tso and tsoTransit (0.9.0). Command name strings live only in these modules; components never call \code{typedInvoke} directly. Arguments cross the boundary in camelCase and arrive in Rust as snake\_case, so a rename on either side is a runtime failure, not a compile error.
     \item[\texttt{ComposeWizard}] Ten steps: Channels $\to$ Stack $\to$ Align $\to$ Crop $\to$ Background $\to$ Blend $\to$ Colour $\to$ Stretch $\to$ Adjust $\to$ Export. Internal \code{useReducer} state with step completion tracking and suggested-next-step logic; each step declares an \code{enabled} predicate over the wizard data, so availability is derived from state. Since 0.6.7 the state also carries the Align run token and a stack generation counter (Section~\ref{sec:compose}).
     \item[Processing chain] The Processing tab keeps one chain per file (\code{src/utils/processingChain.ts}) with fixed stages: background, denoise, deconvolution, stretch or masked stretch, LHE or HDRMT, Curves (0.6.7) and PixelMath. Re-running a step drops the later ones, and each step reads the output of the latest earlier stage. Debayer and Geometry write new files instead of joining the chain. Since 0.6.9.5 the steps of a single file are also recorded by the backend as a tree of history nodes (Section~\ref{sec:history}), so a re-run starts a new branch and the dropped steps stay reachable.
     \item[Preview Contexts] 12 split React contexts in \code{PreviewContext.tsx} (FileCtx, DisplayCtx, DoneFilesCtx, HistCtx, CubeCtx, RgbCtx, RenderCtx, RenderActionsCtx, StarOverlayCtx, RawPixelsCtx, NarrowbandCtx, DqCtx), plus three composite contexts, the wizard context and a tool-host context. Splitting them this finely keeps a cursor move over the image from re-rendering the file list or the wizard.
@@ -399,7 +416,7 @@
     \textbf{Properties:}
     \begin{itemize}[nosep]
     \item $\text{MTF}(0, m) = 0$ and $\text{MTF}(1, m) = 1$ for all $m$
-    \item $\text{MTF}(m, m) = 0.5$ --- the midtone maps to 50\% brightness
+    \item $\text{MTF}(m, m) = 0.5$: the midtone maps to 50\% brightness
     \item $m < 0.5$ brightens the image; $m > 0.5$ darkens it
     \item When $m = 0.5$: $\text{MTF}(x, 0.5) = x$ (identity)
     \end{itemize}
@@ -752,7 +769,7 @@
 
     so that a frame dimmed by cloud to half its signal (raw $\sigma$ halved, $k_f = 2$) no longer receives four times the weight of a clear frame of equal true noise. With two such frames the old weighting gave a stack noise of $0.825$ against the optimal $1/\sqrt{2} = 0.707$. The response reports the effective weights per input (\code{weights\_applied}, \code{null} for excluded frames), and the Stack tab hint shows their range renormalised to mean 1 together with the number of frames it describes. Median combination ignores weights, as before.
 
-    \subsection{Thin-Plate Spline Background Extraction --- DBE (v0.6.0)}
+    \subsection{Thin-Plate Spline Background Extraction (DBE, v0.6.0)}
     \label{sec:dbe}
 
     The Spline background model (\code{core/imaging/dbe.rs}) fits a \textbf{regularised thin-plate spline} through box samples, in place of the global polynomial surface of the Background Extraction subsection. Coordinates are divided by $S = \max(\text{rows}, \text{cols})$ before the fit, so the node spacing is $O(1)$.
@@ -807,10 +824,10 @@
     \textbf{Sample rejection} has four recorded reasons:
 
     \begin{itemize}[nosep]
-    \item \code{bounds} --- the rounded centre falls outside the image
-    \item \code{finite} --- fewer than $25\%$ of the nominal box pixels are finite
-    \item \code{star} --- the box maximum exceeds $\text{median} + 5 \max(\sigma_{\text{sky}}, \sigma_{\text{box}})$, where $\sigma_{\text{sky}}$ is the median of the usable per-box sigmas
-    \item \code{deviation} --- after a first fit, the residual exceeds $\max\!\left(\text{tolerance} \cdot \sigma_{\text{sky}},\; 3 \sigma_{\text{res}}\right)$, with $\sigma_{\text{res}}$ the MAD-based sigma of the residuals and tolerance default $1.0$
+    \item \code{bounds}: the rounded centre falls outside the image
+    \item \code{finite}: fewer than $25\%$ of the nominal box pixels are finite
+    \item \code{star}: the box maximum exceeds $\text{median} + 5 \max(\sigma_{\text{sky}}, \sigma_{\text{box}})$, where $\sigma_{\text{sky}}$ is the median of the usable per-box sigmas
+    \item \code{deviation}: after a first fit, the residual exceeds $\max\!\left(\text{tolerance} \cdot \sigma_{\text{sky}},\; 3 \sigma_{\text{res}}\right)$, with $\sigma_{\text{res}}$ the MAD-based sigma of the residuals and tolerance default $1.0$
     \end{itemize}
 
     Deviation rejection runs once and the spline is refitted on the survivors; it is skipped when it would leave fewer than 4 accepted samples, which is also the minimum for any fit. The final model is evaluated on a coarse lattice of step $\max\!\left(8,\; \min(\text{rows},\text{cols})/256\right)$ and bilinearly interpolated to full resolution, then applied by subtraction or by division (guarded at $B > 10^{-10}$). The reported RMS residual is taken over the accepted samples only.
@@ -1047,7 +1064,7 @@
     \subsection{Local Histogram Equalization and HDR Multiscale Transform (v0.6.0)}
     \label{sec:lhe_hdrmt}
 
-    \textbf{LHE} (\code{core/imaging/local\_contrast.rs}) is contrast-limited adaptive histogram equalization. The image is covered by a grid of tiles of side $R = $ \code{kernel\_radius}, clamped to $[16, 512]$ with default 64, and a lookup table is built at each tile centre from the pixels within $R$ of it --- a disc when \code{circular} is set, the bounding square otherwise. Values are mapped onto $B = 2^b$ bins, $b \in \{8, 10, 12\}$ with default 8, by
+    \textbf{LHE} (\code{core/imaging/local\_contrast.rs}) is contrast-limited adaptive histogram equalization. The image is covered by a grid of tiles of side $R = $ \code{kernel\_radius}, clamped to $[16, 512]$ with default 64, and a lookup table is built at each tile centre from the pixels within $R$ of it, a disc when \code{circular} is set, the bounding square otherwise. Values are mapped onto $B = 2^b$ bins, $b \in \{8, 10, 12\}$ with default 8, by
 
     \begin{equation}
         p(v) = \operatorname{clamp}\!\left(\frac{v - v_{\min}}{v_{\max} - v_{\min}},\, 0,\, 1\right) (B - 1),
@@ -1184,7 +1201,7 @@
         \sigma_F^2 = 2\pi\left[(\sigma_v \sigma_A)^2 + (A\, \sigma_{\sigma_v})^2 + 2 A \sigma_v \operatorname{cov}(A, \sigma_v)\right]
     \end{equation}
 
-    in \code{BUNIT}$\cdot$km/s. With ERR weighting the errors are absolute and inflated by $\sqrt{\chi^2_{\text{red}}}$ where $\chi^2_{\text{red}} > 1$; without ERR they are scaled by $\sqrt{\chi^2/\text{dof}}$; every error includes the continuum uncertainty. Given a resolving power $R$, the instrumental width $\sigma_{\text{inst}} = c / (2\sqrt{2 \ln 2}\, R)$ is removed, $\sigma_{\text{corr}} = \sqrt{\sigma_v^2 - \sigma_{\text{inst}}^2}$, and the spaxel is NaN with mask bit 16 when $\sigma_v \le \sigma_{\text{inst}}$.
+    in \code{BUNIT}$\cdot$km/s. With ERR weighting the errors are absolute and inflated by $\sqrt{\chi^2_{\text{red}}}$ where $\chi^2_{\text{red}} > 1$; without ERR they are scaled by $\sqrt{\chi^2/\text{dof}}$; every error includes the continuum uncertainty. Given a resolving power $R$, the instrumental width $\sigma_{\text{inst}} = c / (2\sqrt{2 \ln 2}\, R)$ is removed, $\sigma_{\text{corr}} = \sqrt{\sigma_v^2 - \sigma_{\text{inst}}^2}$, and the spaxel is NaN with mask bit 16 when $\sigma_v \le \sigma_{\text{inst}}$. Since 0.9.0 a fit run at a redshift $z \ne 0$ on a WAVE, AWAV or FREQ axis compares the source-frame width $c\,\sigma/\lambda_c$ with $\sigma_{\text{inst}}$ instead (on a ZOPT axis $c\,\sigma/(1 + x_c)$), so bit 16 follows the source-frame sigma; a stored velocity axis keeps the stored width, and the \code{sigma\_corr} plane keeps its observer-frame correction, so with a redshift the bit and \code{sigma\_corr} can disagree.
 
     A two-component fit is tried where the single fit passes the S/N threshold and at least 8 channels are usable; the pair is kept only when the centres are at least one channel apart, each component is wider than the sigma lower bound and narrower than a quarter of the window, carries at least 10\,\% of the flux and has its centre inside the window, and, in \code{auto} mode, when
 
@@ -1376,7 +1393,7 @@
             \sigma_f = f\,\frac{1.1664}{\sqrt{N - p}}
         }
     \end{equation}
-    and the scaled error is $f\,e$. A warning says that the ERR plane does not describe the scatter when the factor lies outside $[0.8, 1.25]$ by more than two standard errors, that is when $f\,\exp(2\sigma_f/f) < 0.8$ or $f\,\exp(-2\sigma_f/f) > 1.25$. The Cube tool prints the factor in the form \code{ERR HDU n x 1.31 +- 0.05 (12 line-free channels)}, draws the propagated error as a band and the scaled one as a dashed outline, and its CSV exports write \code{err} and then \code{err\_scaled}, with the error source and the factor in the header.
+    and the scaled error is $f\,e$. A warning says that the ERR plane does not describe the scatter when the factor lies outside $[0.8, 1.25]$ by more than two standard errors, that is when $f\,\exp(2\sigma_f/f) < 0.8$ or $f\,\exp(-2\sigma_f/f) > 1.25$. The Spectra tool prints the factor in the form \code{ERR HDU n x 1.31 +- 0.05 (12 line-free channels)}, draws the propagated error as a band and the scaled one as a dashed outline, and its CSV exports write \code{err} and then \code{err\_scaled}, with the error source and the factor in the header.
 
 
 %% ============================================================================
@@ -1440,7 +1457,7 @@
             JWST \code{\_rate} & no \code{meta.wcs} before \code{assign\_wcs} & header \\
             Roman L2 \code{\_cal.asdf} & \code{roman.meta.wcs} & gWCS \\
             Roman \code{\_wcs.asdf} sidecar & \code{roman.wcs\_l2}, \code{roman.wcs\_l1} & parsed in tests only \\
-            Any imaging gWCS with an unsupported transform or frame & --- & header, with the refusal shown \\
+            Any imaging gWCS with an unsupported transform or frame & not applicable & header, with the refusal shown \\
             \bottomrule
         \end{tabularx}
         \caption{Which WCS a file gets. A refusal is never silent: the Info line ends with ``gWCS not used: \textless reason\textgreater'' (for example ``gWCS transform 'tabular' at steps[0].transform''), and \code{get\_wcs\_info} returns it as \code{gwcs\_refusal}.}
@@ -1578,6 +1595,16 @@
 
     Circles, ellipses, boxes, annuli and polygons have an include/exclude toggle (0.6.5.0), the DS9 \code{-} prefix, kept by \code{.reg} import and export. The pixels inside every exclude region are left out of the other regions' statistics and background annuli and of radial profiles, line cuts and surface-brightness profiles, merged with the DQ mask when DQ exclusion is on; the \code{n} cell reads \code{(-N excl)} and counts both causes, and an exclude region's own row is measured on its own pixels. \code{region\_stats\_cmd}, \code{radial\_profile\_cmd}, \code{line\_cut\_cmd} and \code{sb\_profile\_cmd} take at most 512 exclude shapes; an invalid shape (zero radius, polygon with fewer than three points) is skipped and named in \code{notes}. When the header carries a flux calibration and a WCS, every region also reports flux in Jy, AB magnitude, surface brightness, area, centre RA/Dec and sky position angle (0.6.2).
 
+    Since 0.8.1 the net flux $F_{\text{net}} = \sum_p I_p - n\,\tilde{b}$ of a region with a linked background, over its $n$ valid pixels, with $\tilde{b}$ the median and $\sigma_{\text{bg}}$ the scatter (1.4826 times the median absolute deviation) of the $n_{\text{bg}}$ background pixels, has the error
+    \begin{equation}
+        \sigma^2_{F_{\text{net}}} =
+        \begin{cases}
+            \displaystyle\sum_{p} e_p^2 \;+\; \frac{n^2 \sigma^2_{\text{bg}}}{n_{\text{bg}}} & \text{ERR plane present} \\[10pt]
+            n\,\sigma^2_{\text{bg}} \;+\; \dfrac{n^2 \sigma^2_{\text{bg}}}{n_{\text{bg}}} & \text{no ERR plane}
+        \end{cases}
+    \end{equation}
+    with $e_p$ the ERR value of pixel $p$ (\code{net\_err}, with \code{net\_err\_terms} naming the case), and the region's SNR $F_{\text{net}} / \sigma_{F_{\text{net}}}$ and its Jy and AB errors follow from it.
+
     \subsection{Photometry}
 
     Aperture photometry (Section~\ref{sec:aperture_photometry}) runs on a click with the Crosshair tool, on a list in the Photometry table (detected stars, Point regions or pasted positions, with apertures drawn on the image), or across frames as a time series with drift tracking and a differential light curve. The gain field is prefilled from the model of Section~\ref{sec:gain_math} with a caption naming the source, and click and batch responses report \code{gain\_used}.
@@ -1609,7 +1636,7 @@
     \subsection{1D Spectra as Documents (v0.7.0)}
     \label{sec:spec1d}
 
-    A 1D spectrum is a file in its own right, not a failed image. On load, JWST \code{x1d} tables (\code{EXTRACT1D}) and 1D FITS arrays with a wavelength axis are recognised, listed in the Files panel as spectrum rows, counted as spectra in the status bar and selectable from the list, the keyboard and the palette; a 1D array without a wavelength axis still falls back to a cube plane or is reported as an error. Selecting a spectrum shows a viewer panel that names the file and offers to open the Cube tool, and no image, histogram, scale-limit, cube, DQ, raw-pixel or WCS request is sent for it. \code{core/analysis/spectrum1d.rs} reads three sources into one model (flux, optional error and DQ with its flag table, flux unit and spectral axis): the \code{x1d} table, a 1D FITS array with a linear spectral axis (FITS \code{WAVE} and \code{AWAV} or the IRAF linear forms; multispec and logarithmic axes are refused with a reason) and a CSV file.
+    A 1D spectrum is a file in its own right, not a failed image. On load, JWST \code{x1d} tables (\code{EXTRACT1D}) and 1D FITS arrays with a wavelength axis are recognised, listed in the Files panel as spectrum rows, counted as spectra in the status bar and selectable from the list, the keyboard and the palette; a 1D array without a wavelength axis still falls back to a cube plane or is reported as an error. Selecting a spectrum shows a viewer panel that names the file and offers to open the Spectra tool (named Cube before 0.9.0), and no image, histogram, scale-limit, cube, DQ, raw-pixel or WCS request is sent for it. \code{core/analysis/spectrum1d.rs} reads three sources into one model (flux, optional error and DQ with its flag table, flux unit and spectral axis): the \code{x1d} table, a 1D FITS array with a linear spectral axis (FITS \code{WAVE} and \code{AWAV} or the IRAF linear forms; multispec and logarithmic axes are refused with a reason) and a CSV file.
 
     Version 0.7.5 also recognises short JWST \code{x1d} spectra with a few hundred points, such as MIRI LRS and slit spectra, instead of misclassifying them as images and failing on their ASDF table.
 
@@ -1621,13 +1648,50 @@
     \end{equation}
     and a rest wavelength below $0.2\,\mu$m, where the formula does not apply, is left as vacuum with a note.
 
-    \textbf{Measurement.} The Cube tool plots a selected spectrum and measures lines on it as on a cube spectrum: brush a line range and continuum windows, pick a rest line from the line list, and measure with the file's \code{FLUX\_ERROR} or \code{ERR} as weights and its DQ-flagged and non-finite channels left out (Section~\ref{sec:lineerr_math}); Weight by ERR and Mask DQ channels turn either off. Collapse, moments, line-fit maps, frame navigation and region controls are hidden, and no barycentric or heliocentric correction is computed for a spectrum. Every line measurement, on a cube or a spectrum, lists its error source, the pixel, level and slope terms of the flux error and the channels left out, in the panel, its CSV row and the measurement log.
+    \textbf{Measurement.} The Spectra tool plots a selected spectrum and measures lines on it as on a cube spectrum: brush a line range and continuum windows, pick a rest line from the line list, and measure with the file's \code{FLUX\_ERROR} or \code{ERR} as weights and its DQ-flagged and non-finite channels left out (Section~\ref{sec:lineerr_math}); Weight by ERR and Mask DQ channels turn either off. Collapse, moments, line-fit maps, frame navigation and region controls are hidden, and no barycentric or heliocentric correction is computed for a spectrum. Every line measurement, on a cube or a spectrum, lists its error source, the pixel, level and slope terms of the flux error and the channels left out, in the panel, its CSV row and the measurement log.
 
-    \textbf{CSV round trip and comparison.} Copy CSV and Save CSV write the flux with \code{err} and \code{dq} columns and the DQ table (an air spectrum also keeps \code{wavelength\_air\_um} next to the converted \code{wavelength\_vacuum\_um}), and the measurement log records the file's path. Open spectrum (CSV), in the Cube tool and the command palette, reads back a CSV with a \code{wavelength\_air\_um} or \code{wavelength\_vacuum\_um} column and a \code{flux} column, with optional \code{err}, \code{dq} and \code{flux\_unit}; a velocity spectrum exported without a rest wavelength has neither wavelength column and cannot be reopened. Compare plots a second \code{x1d}, 1D FITS or CSV spectrum resampled onto the spectrum's own vacuum wavelengths, and an \code{x1d} whose \code{\_s3d} cube is loaded offers Compare with its cube.
+    \textbf{CSV round trip and comparison.} Copy CSV and Save CSV write the flux with \code{err} and \code{dq} columns and the DQ table (an air spectrum also keeps \code{wavelength\_air\_um} next to the converted \code{wavelength\_vacuum\_um}), and the measurement log records the file's path. Open spectrum (CSV), in the Spectra tool and the command palette, reads back a CSV with a \code{wavelength\_air\_um} or \code{wavelength\_vacuum\_um} column and a \code{flux} column, with optional \code{err}, \code{dq} and \code{flux\_unit}; a velocity spectrum exported without a rest wavelength has neither wavelength column and cannot be reopened. Compare plots a second \code{x1d}, 1D FITS or CSV spectrum resampled onto the spectrum's own vacuum wavelengths, and an \code{x1d} whose \code{\_s3d} cube is loaded offers Compare with its cube.
+
+    \subsection{Line Measurement Errors, Physical Flux and Line Redshift (v0.9.0)}
+    \label{sec:line_090}
+
+    \textbf{Errors of the derived quantities.} Section~\ref{sec:lineerr_math} gives the error of the line flux. Since 0.9.0 the equivalent width $W$, the centroid $\mu$, the second moment $V = \sigma^2$ and the FWHM carry first-order errors from the same noise model (\code{core/analysis/line\_measure.rs}). Over the usable line channels $i$, with flux $f_i$, continuum $c_i = \alpha + \beta\,(x_i - \bar{x}_w)$, width $\Delta x_i$ and line flux $F = \sum_i (f_i - c_i)\,\Delta x_i$, a quantity $Q$ with derivatives $a_i = \partial Q / \partial f_i$ and $b_i = \partial Q / \partial c_i$ has
+    \begin{equation}
+        \sigma_Q = k \left[ \sum_i (a_i s_i)^2 + \Big(\sum_i b_i\Big)^2 \sigma_\alpha^2 + \Big(\sum_i b_i\,(x_i - \bar{x}_w)\Big)^2 \sigma_\beta^2 \right]^{1/2},
+    \end{equation}
+    \begin{center}
+    \small
+    \begin{tabular}{lll}
+        \toprule
+        $Q$ & $a_i$ & $b_i$ \\
+        \midrule
+        $W = \sum_i (1 - f_i/c_i)\,\Delta x_i$ & $-\Delta x_i / c_i$ & $f_i\,\Delta x_i / c_i^2$ \\
+        $\mu = \sum_i x_i (f_i - c_i)\,\Delta x_i / F$ & $(x_i - \mu)\,\Delta x_i / F$ & $-a_i$ \\
+        $V = \sum_i (x_i - \mu)^2 (f_i - c_i)\,\Delta x_i / F$ & $\big((x_i - \mu)^2 - \sigma^2\big)\,\Delta x_i / F$ & $-a_i$ \\
+        \bottomrule
+    \end{tabular}
+    \end{center}
+    with $\sigma_\sigma = \sigma_V / (2\sigma)$ and $\sigma_{\text{FWHM}} = 2\sqrt{2\ln 2}\,\sigma_\sigma$. With an ERR plane $s_i = e_i$ and $k = \sqrt{\max(1, \chi^2_{\text{red}})}$ of the continuum fit, the factor that already scales the flux error (0.8.1); without one $s_i = 1$ and $k = \sqrt{\chi^2/\text{dof}}$, the residual rms of the continuum. The errors are undefined (\code{null}) exactly where their quantity or the flux error is. Two flags qualify them: \code{errors\_reliable} when the absolute line S/N is at least 10, and \code{width\_errors\_reliable} when, in addition, $\sigma_\sigma \le 0.15\,\sigma$, because the sigma error leaves the linear regime beyond that ratio. Over 10\,000 noise realisations without ERR the ratio of the actual scatter to the reported error is 1.0015, 0.9927 and 0.9954 for $W$, $\mu$ and $\sigma$ at noise 0.02, and 1.0016, 0.9912 and 0.84 at noise 0.05, where the sigma error is non-linear; with ERR equal to the noise the ratios lie between 0.917 and 0.925, as conservative as the flux error. Velocity errors are half the velocity difference at $x \pm \sigma_x$ in the chosen convention; source-frame width errors are $c\,\sigma_\sigma / \mu$, the term of the centroid error neglected.
+
+    \textbf{Redshift of a line.} Each measurement reports the redshift of the measured line,
+    \begin{equation}
+        z_{\text{line}} = \frac{\mu_{\text{vac}}\,(1 + v_{\text{shift}}/c)}{\lambda_{\text{rest,vac}}} - 1, \qquad
+        \sigma_z = \frac{\sigma_\mu\,(1 + v_{\text{shift}}/c)}{\lambda_{\text{rest,vac}}},
+    \end{equation}
+    with $v_{\text{shift}}$ the frame shift the velocities carry; on an air document the centroid is converted to vacuum with Morton (2000) before the ratio, on a frequency axis $\sigma_\mu$ is the half difference of the converted wavelengths, and neither number depends on the velocity convention or on the typed redshift. The request may name the line (\code{lineId}, \code{lineLabel}), and the result echoes it with the requested redshift, the wavelength frame (\code{air}, \code{vacuum} or none) and \code{peak\_axis}, the axis value of the peak channel. A continuum window that shares channels with the line range is measured with a note that its line flux is fitted as continuum. On the NIRSpec G395H spectrum of programme 1266, Br$\alpha$ (rest 4.052262\,$\mu$m) gives $z_{\text{line}} = (4.25 \pm 29.6) \times 10^{-6}$ with \code{FLUX\_ERROR} weights, equal to the oracle within $2.2 \times 10^{-16}$.
+
+    \textbf{Physical line flux.} The integrated flux is also given in W\,m$^{-2}$ and erg\,s$^{-1}$\,cm$^{-2}$ when the unit allows it: $F_{\text{SI}} = \sum_i k_i (f_i - c_i)\,\Delta x_i$, with $k_i$ the W\,m$^{-2}$ in one unit of spectrum unit times axis unit at channel $i$, and its error from the expression above with $a_i = k_i \Delta x_i$ and $b_i = -a_i$; $F_{\text{cgs}} = 10^3 F_{\text{SI}}$. The unit is parsed by \code{core/metadata/flux\_units.rs}, whose classes (flux density per frequency, per wavelength, surface brightness, rate, unknown) are pinned to a table generated with astropy 8.0.2, and $m_{\text{AB}} = -2.5 \log_{10} F_\nu[\text{Jy}] + 8.90$. A flux density $F_\nu$ of $j$ Jy per unit on a vacuum wavelength axis in $\mu$m integrates with $k_i = j \times 10^{-26}\,c / \lambda_i^2$, $c$ in $\mu$m\,s$^{-1}$ (an air axis is converted to vacuum first, with the channel widths rescaled); on a frequency axis in GHz $k = j \times 10^{-17}$; an $F_\lambda$ in erg\,s$^{-1}$\,cm$^{-2}$\,\AA$^{-1}$ integrates over wavelength only, with $10^4$\,\AA\ per $\mu$m and $10^{-3}$\,W\,m$^{-2}$ per erg\,s$^{-1}$\,cm$^{-2}$; a region of a JWST cube in MJy/sr is multiplied by $10^6\,\Omega_{\text{pix}}$ (\code{PIXAR\_SR}) first. \code{flux\_physical\_basis} states the rule used, or why none applies: no unit, a unit it does not convert, the label \code{MJy} that NIRISS SOSS spectra carry on values not on that scale, a brightness per beam, a count rate, an $F_\lambda$ on a frequency axis, an axis that is neither wavelength nor frequency, a surface brightness in a spectrum file or a single spaxel, or a cube region without a pixel solid angle. On the Br$\alpha$ line the result is $(7.840 \pm 0.380) \times 10^{-17}$\,W\,m$^{-2}$, within $2.6 \times 10^{-16}$ relative of the oracle, whose own check through astropy's spectral density agrees to $2.2 \times 10^{-16}$.
+
+    \textbf{The Spectra tool.} The tool named Cube until 0.8.1 is the Spectra tool. Since 0.9.0 it shows a spectrum with the wavelength in $\mu$m, nm or \AA\ and the flux in Jy, mJy, $\mu$Jy, $F_\lambda$ or AB magnitudes, converted with the same unit arithmetic in TypeScript; it bins a 1D spectrum by an integer factor $f$, each bin the plain mean of its $n$ unmasked finite samples with error $\sqrt{\sum e_i^2}/n$ and the shorter last bin kept, and writes the binning into the CSV and the log. A 1D array stored as integers or with \code{BSCALE}/\code{BZERO} is read in double precision, and an array without a wavelength unit can be opened with a unit the user states (\code{um}, \code{nm} or \code{Angstrom}); the document then says whether its unit came from the file, was assumed or was set by the user, and a stated unit is never overridden. The line setup of a spectrum (axis, frame, rest wavelength, redshift, families, bands, picked line, line range and windows, kept as wavelengths) is remembered with the identity of its spectrum, the trimmed upper-case \code{INSTRUME}, \code{GRATING}, \code{FILTER} and \code{PUPIL} cards that are present, and seeds only a next spectrum without choices of its own and with the same identity; \code{DETECTOR} is left out, so NRS1 carries to NRS2, and two files without any of these cards still carry. Clearing a carried setup also forgets it, so it is carried no further.
+
+    \subsection{Text and FITS Tables (v0.9.0)}
+    \label{sec:tables}
+
+    \code{infra/tables/} reads CSV and ECSV text tables of at most 256\,MiB and 20 million cells. \code{probe\_table\_cmd} also lists the binary tables of a FITS file with their columns, but this version reads the values of CSV and ECSV tables only. A CSV column is typed \code{float64}, \code{int64}, \code{bool} or \code{string}; an empty numeric cell is NaN, and an integer column with a value beyond $2^{53}$ is kept as text so that identifiers stay exact (with a note). \code{\# key: value} lines before the header are kept as comments, and a comment \code{\# unit <column>: <unit>} sets a column unit. The ECSV reader takes the version 0.9 and 1.0 headers, their datatypes, units and meta, and reads another version number with the 1.0 rules and a note; a file that starts with \code{\# \%ECSV} is read as ECSV whatever its extension. Refusals name the line and the field count. These readers feed the import of the pipeline white-light table (Section~\ref{sec:tso_whtlt}), light curves from a saved table, whose time column and scale are chosen from the column names and units, and the catalogue comparison (Section~\ref{sec:catcompare}). The probe guesses a light curve from a numeric time column named after its scale (\code{mjd}, \code{jd\_mid}, \code{jd\_utc}, \code{hjd\_utc}, \code{bmjd\_tdb}, or a name that starts with \code{mjd\_utc} or \code{bjd\_tdb}) and a value column whose name holds \code{flux} or \code{mag}; a bare \code{time} column is not guessed, because it does not say its scale. The transit-fit CSV therefore names its time column after the time scale of the curve (\code{bmjd\_tdb}, \code{bjd\_tdb}, \code{mjd\_utc}, \code{jd\_utc}, \code{hjd\_utc}, \code{jd\_mid}, or \code{index} for integration numbers), so a fit on a time scale opens again as a light curve. Open as light curve and Use as catalogue show again the file that was on screen last when it can host the section (an image, or for a light curve an image or a spectrum) and open the Photometry tool at Series or Compare, which is scrolled to the start again whenever the tool resizes while its panels load, until the first user input or for 5\,s; the app never picks one of several loaded images by itself, and with no such file the table is kept for later with a note.
 
     \subsection{Cubes}
 
-    Region spectra, range collapse and moment maps follow Section~\ref{sec:moment_maps}; since 0.6.9.5 they carry errors when the cube has an ERR extension (Section~\ref{sec:lineerr_math}). In the Cube tool (0.7.0) the propagated error is drawn as a band around the sum, mean or Jy series, each view with its own error; when continuum windows are set before Region spectrum the empirical noise factor is measured on them and the scaled error is outlined, with a note when the windows could not be used and the backend's warning when the ERR plane does not describe the scatter. Region CSV exports write \code{err} and \code{err\_scaled}, and the measurement log records both and whether DQ-flagged spaxels were excluded. Moment and range-collapse results say whether an ERR plane was written and from which ERR cube. Line-fit maps (0.6.6, Section~\ref{sec:linefit_math}) fit a brushed line in every spaxel in a fraction of a second on a NIRSpec IFU cube and write one 2-D FITS per plane (\code{flux}, \code{velocity}, \code{sigma\_obs}, \code{sigma\_corr}, the errors, \code{chi2\_red}, \code{snr}, \code{mask}, \code{ncomp} and, for accepted pairs, twelve \code{c1\_*}/\code{c2\_*} planes) with the celestial WCS and \code{LF*} provenance cards. A click on a displayed plane refits that spaxel and draws a mini plot of the fit from the arrays the backend returns. Velocity planes open in an inverted RdBu map symmetric about zero, a temporary display that is never saved. Position-velocity diagrams (0.6.3) sample a cube along a line region without loading it whole, with offsets in arcsec from the CD matrix, and are written as a 2-D FITS with an \code{OFFSET} axis and the native spectral axis.
+    Region spectra, range collapse and moment maps follow Section~\ref{sec:moment_maps}; since 0.6.9.5 they carry errors when the cube has an ERR extension (Section~\ref{sec:lineerr_math}). In the Spectra tool (0.7.0, then named Cube) the propagated error is drawn as a band around the sum, mean or Jy series, each view with its own error; when continuum windows are set before Region spectrum the empirical noise factor is measured on them and the scaled error is outlined, with a note when the windows could not be used and the backend's warning when the ERR plane does not describe the scatter. Region CSV exports write \code{err} and \code{err\_scaled}, and the measurement log records both and whether DQ-flagged spaxels were excluded. Moment and range-collapse results say whether an ERR plane was written and from which ERR cube. Line-fit maps (0.6.6, Section~\ref{sec:linefit_math}) fit a brushed line in every spaxel in a fraction of a second on a NIRSpec IFU cube and write one 2-D FITS per plane (\code{flux}, \code{velocity}, \code{sigma\_obs}, \code{sigma\_corr}, the errors, \code{chi2\_red}, \code{snr}, \code{mask}, \code{ncomp} and, for accepted pairs, twelve \code{c1\_*}/\code{c2\_*} planes) with the celestial WCS and \code{LF*} provenance cards. A click on a displayed plane refits that spaxel and draws a mini plot of the fit from the arrays the backend returns. Velocity planes open in an inverted RdBu map symmetric about zero, a temporary display that is never saved. Position-velocity diagrams (0.6.3) sample a cube along a line region without loading it whole, with offsets in arcsec from the CD matrix, and are written as a 2-D FITS with an \code{OFFSET} axis and the native spectral axis.
 
     \subsection{Ramps (v0.6.6)}
 
@@ -1681,6 +1745,342 @@
     \end{table}
 
     \textbf{Header dates.} \code{core/astrometry/time.rs} validates the calendar date of the ISO form \code{YYYY-MM-DD[Thh:mm[:ss]]} and of the old \code{DD/MM/YY} form, whose year is $1900 + \text{YY}$. The month must lie in 1 to 12 and the day within the month, with the Gregorian century rule for leap years (2000 is a leap year, 1900 and 2100 are not). An impossible date such as \code{2026-02-30} is refused instead of rolling over to a later day; the card is skipped, the time comes from the next card in the order above, and the notes name it (``DATE-OBS ignored: date '2026-02-30T12:00:00' has day 30, but February 2026 has 28 days'', or \code{DATE-OBS/TIME-OBS} when the two were joined). When no card remains, the refusal ``no observation time in the header'' lists the cards searched and is followed by that note. An old-style \code{DATE-OBS} such as \code{19/09/96} with the time of day in \code{TIME-OBS} is read as that date at that time.
+
+%% ============================================================================
+    \section{Time-Series Spectroscopy and Transit Fitting (v0.9.0)}
+    \label{sec:tso}
+%% ============================================================================
+
+    JWST time-series observations deliver one extracted spectrum per integration in \code{x1dints} products. Release 0.9.0 reads them as series, builds light curves from them, fits a transit or eclipse model to any light curve and a transit model to every wavelength bin, and searches for periods. The engine is in \code{core/analysis/tso/} (\code{series}, \code{stitch}, \code{white\_light}, \code{bins}, \code{whtlt}, \code{pick}, \code{cache}, \code{transit\_spectrum}), \code{core/analysis/transit\_model.rs}, \code{transit\_fit.rs} and \code{periodogram.rs}; the commands are \code{cmd::tso}, \code{cmd::tso\_transit}, \code{cmd::transit} and \code{cmd::periodogram}, and the views live in the Light curves section of the Spectra tool, whose light-curve and fit view also serves the Series section of the Photometry tool and saved tables. Times are in days in one scale throughout; the model is evaluated at the mid-integration times.
+
+    \subsection{Series per Detector and Order}
+    \label{sec:tso_series}
+
+    \textbf{Identification.} A file with \code{EXTRACT1D} tables is a time series when its headers say so: \code{DATAMODL = TSOMultiSpecModel} with one table per series and one row per integration, whose vector columns hold \code{N\_ALONGDISP} channels (layout \code{rows}), or \code{MultiSpecModel} with one \code{EXTRACT1D} extension per integration (layout \code{extensions}, the older MIRI products). Only header cards are read for this. The series key is the pair (\code{DETECTOR}, \code{SPORDER}): NIRSpec gives one series per detector, NIRISS SOSS one per spectral order. Asked to open such a file as one spectrum, the loader refuses with the counts and offers its light curves or a pick. A row-range reader of binary tables (\code{infra/fits/table.rs}) reads only the rows asked for. A sample is valid when its wavelength and flux are finite and the \code{DO\_NOT\_USE} bit (1) of its DQ is clear.
+
+    \textbf{Times.} The abscissa is BMJD\,(TDB) $= \text{BJD}_{\text{TDB}} - 2400000.5$ in days from the \code{TDB-MID} column (or keyword). When \code{TDB-MID} is missing, NaN or repeated, the times are \code{MJD-AVG} (UTC, not barycentric) with a warning; when neither is usable the abscissa is the integration number and the app says so. In the test set the NIRCam grism and NIRISS SOSS products are in that last case.
+
+    \textbf{Stitching.} The rows of every table of a key are concatenated and sorted by time (else by exposure, segment and \code{INT\_NUM}); the grid of a channel is its first finite wavelength, and the series has a common grid when every finite wavelength lies within $10^{-9}\,\mu$m of it. Overlapping \code{INT\_NUM} ranges of one exposure, a level 3 product together with its own segments, and series of other channel counts or units are refused; files from different pipeline versions are named in a warning; each exposure reports the integrations found against \code{NINTS} and the missing ranges. The six level 2b segments of programme 2327 stitch to the level 3 series bit for bit in \code{INT\_NUM}, the six time arrays, wavelength and DQ over 44 integrations; their flux differs in 17\,643 of 57\,156 samples, because the level 3 product is extracted after outlier detection. An open set is kept in a process cache and named by a 16-hexadecimal \code{set\_id} derived from the SHA-256 of its files.
+
+    \textbf{Picking a spectrum.} One integration, the median or the mean of a range of integrations (0-based positions in the series, both ends inclusive) can be opened in the Spectra tool as a document. Median and mean are taken per channel over the valid rows, $k$ in number, with the error $\sqrt{\sum e^2}/k$ for the mean and $\sqrt{\pi/2}$ times that for the median; both need a common grid. Lines can be measured on such a spectrum as on any other (Section~\ref{sec:line_090}), and the measurement records its source series.
+
+    \subsection{White Light, Binned Curves and Element Rejection}
+    \label{sec:tso_curves}
+
+    The white light sums a closed interval $[\lambda_{\text{lo}}, \lambda_{\text{hi}}]$ and each of at most 512 bins a half-open interval $[\lambda_a, \lambda_b)$. For integration $r$ over the channels $c$ used,
+    \begin{equation}
+        F_r = \sum_{c} f_{r,c}, \qquad \sigma_{F_r} = \Big(\sum_{c} e_{r,c}^2\Big)^{1/2}, \qquad \bar{N}_r = \operatorname{mean}_c \text{NPIXELS}_{r,c},
+    \end{equation}
+    with only finite positive errors in the second sum. $\sigma_{F_r}$ is the app's number, not a pipeline product, and the curves say so.
+
+    \textbf{Pipeline mode} reproduces what the pipeline sums: per row the samples whose own wavelength lies in the interval and whose flux is not NaN, without a DQ test; rows whose \code{MJD-AVG} is NaN or repeats an earlier one are dropped, as the pipeline does. The white-light limits are those logged in the file, else 0.93 to 2.82\,$\mu$m for NIRISS SOSS (every order, as the archived table does, with a warning for orders 2 and 3), 5.0 to 12.0\,$\mu$m for MIRI LRS slitless, 2.47 to 3.94\,$\mu$m for NIRCam F322W2, else every wavelength; the limits in use and their origin (\code{file log}, \code{built-in default}, \code{user}, \code{open}) are always shown.
+
+    \textbf{Masked mode} sums only channels valid in every integration, so every point of a curve has the same elements; it needs a common grid. Closed exclusion ranges remove channels, and an optional rejection removes elements whose time-median flux $m_c$ departs from that of their neighbours: with up to 10 kept channels on each side (at least 4 in all), $\tilde{m}$ their median and $s = 1.4826\,\operatorname{median}|m_{\text{nb}} - \tilde{m}|$, channel $c$ is rejected when $|m_c - \tilde{m}| / s$ exceeds the threshold (default 100). Each rejected element is listed with its wavelength and the numbers of the test. At 100 robust sigma one element is rejected in each of two of the eleven level 3 series of the test set (programmes 3375 and 2327); in programme 3375 it has a time-median flux of $-6109$ against neighbours near $10^{-3}$, $6.6 \times 10^{7}$ robust sigma away.
+
+    \textbf{Pixel loss.} A warning names the integrations where the mean \code{NPIXELS} of the summed elements falls below 0.9 of its median: the extraction lost pixels there, and a depth measured over them is biased.
+
+    \subsection{Comparison with the Pipeline White-Light Table}
+    \label{sec:tso_whtlt}
+
+    The pipeline's \code{\_whtlt.ecsv} is imported in its legacy schema (\code{MJD}, \code{whitelight\_flux}) and its current one (\code{MJD\_UTC}, \code{BJD\_TDB} and flux columns with an optional order and detector suffix). Each table column is paired with the one series of the set that matches its detector and order, the app's pipeline-mode white light is computed with the default limits, and every table row is joined to the integration nearest in \code{MJD-AVG} when the two times differ by at most $10^{-9}$\,d, never by row index. The comparison reports the rows joined and $\max |F_{\text{app}} - F_{\text{whtlt}}| / |F_{\text{whtlt}}|$, and whether it is within $10^{-4}$.
+
+    \begin{table}[H]
+        \centering
+        \small
+        \begin{tabularx}{\textwidth}{lXlr}
+            \toprule
+            \textbf{Set} & \textbf{Series and limits} & \textbf{Joined} & \textbf{Largest relative difference} \\
+            \midrule
+            PID 2459, NIRCam grism & NRCALONG, 2.47 to 3.94\,$\mu$m, file log & 1 of 1 & 0 \\
+            PID 7073, NIRISS SOSS & orders 1, 2, 3, 0.93 to 2.82\,$\mu$m & 1 of 1 each & $1.0 \times 10^{-15}$ \\
+            PID 4498, MIRI LRS & MIRIMAGE, 5.0 to 12.0\,$\mu$m, file log & 64 of 64 & $7.7 \times 10^{-16}$ \\
+            PID 3375, NIRSpec & NRS1 and NRS2, open & 8 of 8 each & $4.1 \times 10^{-15}$ \\
+            PID 4967, NIRSpec PRISM & NRS1, open & 65 of 65 & $1.6 \times 10^{-15}$ \\
+            PID 1274, MIRI LRS (legacy table) & MIRIMAGE, 5.0 to 12.0\,$\mu$m, built-in & 10 of 10 & $1.3 \times 10^{-15}$ \\
+            PID 2327, NIRSpec & NRS1, open & 44 of 44 & $1.5 \times 10^{-15}$ \\
+            PID 2358, NIRSpec PRISM & NRS1, open & 240 of 240 & $2.0 \times 10^{-15}$ \\
+            \midrule
+            PID 3375, level 2b pair & NRS1, NRS2 & 8 of 8 each & $7.4 \times 10^{-7}$, $1.1 \times 10^{-3}$ \\
+            PID 2327, six level 2b segments & NRS1 & 44 of 44 & 724 \\
+            \bottomrule
+        \end{tabularx}
+        \caption{Pipeline-mode white light against the archived \code{\_whtlt.ecsv} of eight level 3 products (largest difference over the series of a set). Level 2b spectra are extracted before outlier detection, so their difference from the level 3 table is expected and the comparison says so.}
+    \end{table}
+
+    \subsection{Quick-Look Depth}
+    \label{sec:quicklook}
+
+    With a transit window set in the light-curve view, the box depth of a curve is
+    \begin{equation}
+        D = 1 - \frac{\bar{F}_{\text{in}}}{\bar{F}_{\text{out}}}, \qquad
+        \sigma_D = \frac{\left(\sigma_{\text{in}}^2 + (\bar{F}_{\text{in}}/\bar{F}_{\text{out}})^2\,\sigma_{\text{out}}^2\right)^{1/2}}{|\bar{F}_{\text{out}}|},
+    \end{equation}
+    where $\sigma_{\text{in}}$ and $\sigma_{\text{out}}$ are the errors of the two means, taken once from the sample scatter, $s/\sqrt{N}$, and once from the formal errors, $\sqrt{\sum e^2}/N$; the larger of the two depth errors is reported. The depth spectrum plots $D$ of every bin against wavelength with the white-light depth and, as a guide, the ranges where molecular bands absorb. It is labelled a quick look without limb darkening or a systematics model. On the PRISM white light of WD\,1856+534\,b (programme 2358, INT\_NUM 183 to 188 in transit) $D = 0.95039$ with a scatter error of 0.00633 and a formal one of 0.000275; mean \code{NPIXELS} inside the window is 0.439 of the baseline, so this number pins the file, not the planet.
+
+    \subsection{Transit Model}
+    \label{sec:transit_model}
+
+    \code{transit\_model.rs} implements the light curve of Mandel and Agol (2002) for quadratic limb darkening on a circular orbit. Lengths are in stellar radii: $p = R_p/R_\star$, $a = a/R_\star$, $b$ the impact parameter. At time $t$ with phase $\phi = 2\pi\,[(t - t_0)/P - \operatorname{round}((t - t_0)/P)]$ the sky separation of the centres is
+    \begin{equation}
+        z(t) = \left[(a \sin\phi)^2 + (b \cos\phi)^2\right]^{1/2},
+    \end{equation}
+    and the planet is in front of the star when $\cos\phi > 0$. With $I(\mu) = 1 - u_1(1 - \mu) - u_2(1 - \mu)^2$, $\mu = \sqrt{1 - r^2}$, the relative flux is
+    \begin{equation}
+        \boxed{
+        F(p, z) = 1 - \frac{(1 - u_1 - 2u_2)\,\Lambda_A + (u_1 + 2u_2)\,\Lambda_\mu + u_2\,\Lambda_r}{1 - u_1/3 - u_2/6}
+        }
+    \end{equation}
+    where $\Lambda_A$, $\Lambda_\mu$ and $\Lambda_r$ are the integrals of $1$, $\mu$ and $r^2$ over the hidden part of the stellar disc divided by $\pi$ (0 for $z \ge 1 + p$; $1$, $2/3$ and $1/2$ when the disc is covered). They are evaluated in closed form, the $\mu$ term through Carlson's symmetric elliptic integrals, and $F = 1$ exactly out of transit and on the far half of the orbit. No exposure-time smearing is applied. The total and full durations are
+    \begin{equation}
+        T_{14} = \frac{P}{\pi} \arcsin\!\left[\frac{(1 + p)^2 - b^2}{a^2 - b^2}\right]^{1/2}, \qquad
+        T_{23} = \frac{P}{\pi} \arcsin\!\left[\frac{(1 - p)^2 - b^2}{a^2 - b^2}\right]^{1/2},
+    \end{equation}
+    $T_{23}$ undefined for a grazing transit ($b \ge 1 - p$). A shape is refused with its reason when $P \le 0$, $p \le 0$ or $p > 100$, $a \le 1$, $b < 0$ or $b \ge a$, when the planet never crosses the star ($b \ge 1 + p$), when it covers the whole star at mid-transit ($p \ge 1 + b$), or when $u_1 \notin [0, 2]$ or $u_2 \notin [-1, 1]$.
+
+    \textbf{Validation.} Against a numerical integration of the limb-darkened disc the 550 rows of the committed grid agree within $3.3 \times 10^{-13}$, 4\,000 random cases with $p$ from 0.001 to 30 within $2.9 \times 10^{-11}$, and cases with $p$ up to 100 within $1.2 \times 10^{-9}$. The only cases above $10^{-10}$ near the contacts have $p = 1$ exactly and $z \le 10^{-9}$, where $p^2 + z^2 - 1$ loses $z$ (at most $3.1 \times 10^{-9}$). Just inside first contact rounding can lift the flux above 1 by at most $3.4 \times 10^{-15}$ for $p \le 1.5$, growing with $p$ to $2.1 \times 10^{-11}$ at $p = 30$ and $1.5 \times 10^{-9}$ at $p = 100$.
+
+    \subsection{Least-Squares Fit and Its Errors}
+    \label{sec:transit_fit}
+
+    \code{fit\_transit} (\code{transit\_fit.rs}, command \code{light\_curve\_transit\_fit\_cmd}) fits
+    \begin{equation}
+        F(t) = \Big(\sum_{k=0}^{K} c_k x^k\Big)\, T(x;\, t_0, p, a, b, u_1, u_2), \qquad x = t - t_{\text{ref}}, \quad t_{\text{ref}} = \tfrac{1}{2}(t_{\min} + t_{\max}),
+    \end{equation}
+    with a baseline polynomial of order $K = 0$, 1 or 2 and the transit model $T$ of Section~\ref{sec:transit_model}. The period is given, not fitted; each of $t_0$, $p$, $a$, $b$, $u_1$, $u_2$ is free or fixed, and the limb-darkening coefficients are typed or fitted, never taken from a stellar model. The fit runs on $y = F/\operatorname{median}(F)$ with weights $w_i = (\operatorname{median}/e_i)^2$ (1 without errors) through the bounded, damped Gauss-Newton solver of \code{math::gauss\_newton}, called twice, the second time from the first solution; $\chi^2 = \sum ((F_i - M_i)/e_i)^2$ (with errors) and the degrees of freedom are those of the second call. A typed $t_0$ of another epoch is moved to the transit nearest the middle of the series with a note. The covariance is
+    \begin{equation}
+        \mat{C} = s^2 \left(\mat{J}^{\mathsf{T}} \mat{W} \mat{J}\right)^{-1}, \qquad
+        s = \begin{cases} 1 & \text{errors given} \\ \sqrt{\chi^2/\text{dof}} & \text{no errors, or errors scaled on request} \end{cases}
+    \end{equation}
+    at the final parameters, with the baseline rows rescaled to flux units; the reported errors are $\sqrt{C_{jj}}$ (1$\sigma$), the depth is $p^2$ with error $2p\,\sigma_p$, and a parameter that ends at a bound is flagged. The result reports the residual rms in flux units and in ppm of the fitted baseline, the points in transit, the iterations and convergence, and every assumption in its notes. A fit is refused before it starts when the inputs disagree in length, are empty or hold more than 200\,000 points, hold non-finite values or errors that are not positive, have one time only, ask for a baseline order above 2, a shape of Section~\ref{sec:transit_model} that is refused, a median flux not above 0, no more points than free parameters, or no point inside the transit of the starting values.
+
+    \textbf{Validation.} Five fits of a synthetic series (weighted, unweighted, radius only, all six shape parameters free, quadratic baseline with scaled errors) agree with an independent scipy least-squares oracle within $6.2 \times 10^{-6}\,\sigma$ in every value, $3.7 \times 10^{-5}$ relative in every error and $1.1 \times 10^{-13}$ relative in $\chi^2$; a noiseless series returns its parameters within $2 \times 10^{-13}$. A fit of 240 points with four shape parameters takes about 11\,ms in an optimised build, and the one-bin request of the transmission spectrum about 1.7\,ms.
+
+    \subsection{Time-Averaging Test and Derived Quantities}
+    \label{sec:transit_diag}
+
+    \textbf{Time-averaging test.} The relative residuals $r_i = (F_i - M_i)/B_i$, $B$ the fitted baseline, are put in time order, with $\sigma_1 = (\sum r_i^2/n)^{1/2}$. For $N = 1, 2, 4, \ldots$ while $n/N \ge 4$, the series is cut into $M = \lfloor n/N \rfloor$ bins of $N$ consecutive points (an incomplete last bin is dropped) and
+    \begin{equation}
+        \text{rms}_N = \Big(\frac{1}{M}\sum_{j=1}^{M} \bar{r}_j^{\,2}\Big)^{1/2}, \qquad
+        \text{exp}_N = \frac{\sigma_1}{\sqrt{N}} \sqrt{\frac{M}{M - 1}}, \qquad
+        \beta = \max\Big(1,\; \max_{N > 1} \frac{\text{rms}_N}{\text{exp}_N}\Big),
+    \end{equation}
+    the test of Pont et al.\ (2006) in the form of Winn et al.\ (2008). Bins are counted in points, across gaps. $\beta$ is reported with the table of $\text{rms}_N$ and $\text{exp}_N$ in ppm and never applied to the errors; at $\beta \ge 1.5$ a warning says that the errors are too small by about that factor.
+
+    \textbf{Derived quantities.} The inclination $i = \arccos(b/a)$, $T_{14}$ and $T_{23}$ of Section~\ref{sec:transit_model} and the mean stellar density
+    \begin{equation}
+        \rho_\star = \frac{3\pi a^3}{G P^2}
+    \end{equation}
+    (Seager and Mallen-Ornelas 2003, circular orbit, planet mass neglected; in g\,cm$^{-3}$) are reported with errors $\sigma_q^2 = \nabla q^{\mathsf{T}} \mat{C}\, \nabla q$ over the free parameters they depend on, the gradient taken by central differences (steps $10^{-6}$ in $p$ and $b$, $10^{-5}$ in $a$). An error that cannot be propagated is absent, never 0. The correlation matrix $C_{jk}/\sqrt{C_{jj}C_{kk}}$ is reported, and a note names each pair of shape parameters with $|r| \ge 0.95$. A 400-point model curve over the series is returned for the plot.
+
+    \textbf{Validation on WASP-39\,b.} On the JWST NIRCam F322W2 white light of WASP-39\,b (366 integrations, no errors, period fixed at 4.0552941\,d from Mancini et al.\ 2018, $u_1 = u_2 = 0.1$ typed) the fit converges in 8 iterations:
+
+    \begin{table}[H]
+        \centering
+        \small
+        \begin{tabular}{lll}
+            \toprule
+            \textbf{Quantity} & \textbf{AstroBurst} & \textbf{Carter et al.\ (2024), same visit} \\
+            \midrule
+            $T_{\text{mid}}$ (BJD$_{\text{TDB}}$) & $2459783.501568 \pm 0.000058$ & $2459783.50150 \pm 0.0000068$ \\
+            $a/R_\star$ & $11.306 \pm 0.079$ & $11.390 \pm 0.012$ \\
+            $i$ (deg) & $87.652 \pm 0.076$ & $87.7369 \pm 0.0024$ \\
+            $b$ & $0.463 \pm 0.012$ & $0.4498 \pm 0.0022$ \\
+            $R_p/R_\star$ & $0.14632 \pm 0.00019$ & \\
+            $T_{14}$ & 2.880\,h & \\
+            $\rho_\star$ (g\,cm$^{-3}$) & $1.662 \pm 0.035$ & \\
+            residual scatter, $\beta$ & 411\,ppm, 1.10 & \\
+            \bottomrule
+        \end{tabular}
+        \caption{Transit fit of the WASP-39\,b white light against the published values (Carter et al.\ 2024, as listed by the NASA Exoplanet Archive); the fit agrees within 1.2$\sigma$. The optical $R_p/R_\star = 0.1457^{+0.0015}_{-0.0016}$ of Maciejewski et al.\ (2016) is 0.4$\sigma$ away; Faedi et al.\ (2011) give $T_{14} = 0.1168 \pm 0.0008$\,d (2.80\,h).}
+    \end{table}
+
+    The white light of WD\,1856+534\,b (programme 2358) is also fitted in the tests, but its level 3 extraction loses pixels during the transit: the reduced $\chi^2$ is 5\,648, both warnings fire, and the numbers pin the code, not the planet.
+
+    \subsection{Eclipse}
+    \label{sec:eclipse}
+
+    With \code{kind = eclipse} the same fit models the planet passing behind the star. $t_0$ is then the mid-eclipse time (on a circular orbit the mid-transit time plus half a period), the planet disc is uniform, and
+    \begin{equation}
+        E(t) = 1 - \frac{f}{1 + f}\,\frac{\Lambda_A(p, z)}{p^2}, \qquad D_{\text{ecl}} = \frac{f}{1 + f}, \qquad \sigma_{D} = \frac{\sigma_f}{(1 + f)^2},
+    \end{equation}
+    with $f$ the planet-to-star flux ratio, fitted in $(-0.5, 10]$ or fixed, and the geometry fixed or free; limb darkening does not enter. A negative fitted ratio is reported with the warning that no eclipse is detected at that depth. No file of the test data holds a real eclipse: the acceptance is the recovery of an injected ratio of 0.002 on a synthetic series of 240 points, $f = 0.0019959 \pm 0.0000067$ ($-0.61\sigma$), in agreement with a scipy oracle within $1.8 \times 10^{-7}\sigma$.
+
+    \subsection{Fitted Transmission Spectrum}
+    \label{sec:transit_spectrum}
+
+    \code{tso\_transit\_spectrum\_cmd} fits the transit model to the light curve of every wavelength bin of a series. Each curve is divided by its median; $P$, $t_0$, $a$ and $b$ are fixed (typically from the white-light fit), $R_p/R_\star$ and a baseline of order 0 to 2 are free, $u_1$ and $u_2$ are fixed or free, and chosen integrations can be left out of every bin. Each bin reports $R_p/R_\star$, the depth $(R_p/R_\star)^2$ and their 1$\sigma$ errors, $\chi^2$, rms and the degrees of freedom; errors come from the covariance alone when the bin has errors and are multiplied by $\sqrt{\chi^2/\text{dof}}$ of that bin on request or without errors. Each bin also reports the ratio of mean \code{NPIXELS} inside the transit to outside, flagged below 0.9, and whether the transit is grazing ($b + R_p/R_\star > 1$), when $(R_p/R_\star)^2$ is not the fraction of light blocked. A bin that cannot be fitted says why, and the bins are fitted in parallel. The time scale must be BMJD or MJD; a series on integration numbers is refused.
+
+    On three injected noise-free curves the fitted $R_p/R_\star$ equals the injected 0.095, 0.1 and 0.108 within $1.9 \times 10^{-15}$; on noisy injections depths agree with the oracle within $2.1 \times 10^{-8}$ relative and depth errors within $10^{-9}$ relative. On the PRISM series of WD\,1856+534\,b (programme 2358) the five bins agree with the oracle within $1.5 \times 10^{-8}$ in depth, but the fixed geometry cannot follow the corrupted dip of that extraction ($\chi^2$ of $1.2 \times 10^5$ to $2.0 \times 10^6$ over 240 points, \code{NPIXELS} ratio 0.64 to 0.82 in transit), so the test pins the code, not the planet.
+
+    \subsection{Period Search}
+    \label{sec:gls}
+
+    \code{periodogram.rs} computes the generalised Lomb-Scargle periodogram with a floating mean (Zechmeister and K\"urster 2009), standard normalisation. With normalised weights $w_i \propto 1/e_i^2$ (equal without errors), times counted from the earliest, and at angular frequency $\omega$ the weighted means $\bar{y} = \sum w_i y_i$, $\bar{c} = \sum w_i \cos\omega t_i$, $\bar{s} = \sum w_i \sin\omega t_i$,
+    \begin{equation}
+    \begin{gathered}
+        YY = \textstyle\sum w_i y_i^2 - \bar{y}^2, \quad YC = \textstyle\sum w_i y_i \cos\omega t_i - \bar{y}\bar{c}, \quad YS = \textstyle\sum w_i y_i \sin\omega t_i - \bar{y}\bar{s}, \\
+        CC = \textstyle\sum w_i \cos^2\omega t_i - \bar{c}^2, \quad SS = \textstyle\sum w_i \sin^2\omega t_i - \bar{s}^2, \quad CS = \textstyle\sum w_i \cos\omega t_i \sin\omega t_i - \bar{c}\bar{s}, \\
+        p(\omega) = \frac{SS\cdot YC^2 + CC\cdot YS^2 - 2\,CS\cdot YC\cdot YS}{YY\,(CC\cdot SS - CS^2)} \in [0, 1],
+    \end{gathered}
+    \end{equation}
+    with the one-term forms when $CC$ or $SS$ vanishes ($< 10^{-12}$). The grid runs from the minimum frequency (default one step) in steps of $1/(n_{\text{spp}}\,T)$, $T$ the baseline and $n_{\text{spp}} = 5$ samples per peak by default, to the maximum frequency, capped at 200\,000 samples and at $2 \times 10^9$ point-frequency products by widening the step, with a note. The default maximum depends on the sampling. The cadence $\Delta$ is the median positive time step, and the sampling is regular when at least half of the steps lie within $0.1\,\Delta$ of a whole number of cadences, so gaps are allowed; the default maximum is then the Nyquist frequency of the cadence, $1/(2\Delta)$, above which the power only repeats aliases of the sampling. An irregular series keeps the heuristic of astropy, $5 \times N/(2T)$, five times the mean Nyquist frequency, as does a regular one whose typed minimum frequency (longest period) already lies above $1/(2\Delta)$. A typed maximum frequency (shortest period) is searched as given; when it passes $1/(2\Delta)$ a note says that a peak there can be an alias, and the view flags a highest peak above it. The result carries \code{first\_frequency}, \code{last\_frequency}, \code{upper\_limit} (\code{given}, \code{cadence\_nyquist} or \code{five\_mean\_nyquist}) and \code{cadence\_days} (null for irregular sampling), and the view prints the periods searched with the rule that set the shortest one. On 366 points at the 0.0009354\,d cadence of a JWST white light the mean-Nyquist rule would reach 2\,680 cycles per day, where the highest peak lies at twice the sampling frequency; the cadence limit stops at 534.6 cycles per day. The false-alarm probability of the highest peak is the upper limit of Baluev (2008) for white Gaussian noise,
+    \begin{equation}
+    \begin{gathered}
+        \text{FAP} = 1 - \left[1 - (1 - p)^{(N-3)/2}\right] e^{-\tau}, \\
+        \tau = \gamma\, f_{\max} \sqrt{4\pi\sigma_t^2}\,(1 - p)^{(N-4)/2} \sqrt{\tfrac{(N - 1)\,p}{2}}, \qquad
+        \gamma = \sqrt{\tfrac{2}{N-1}}\,\frac{\Gamma\!\left(\frac{N-1}{2}\right)}{\Gamma\!\left(\frac{N-2}{2}\right)},
+    \end{gathered}
+    \end{equation}
+    $\sigma_t^2$ the weighted variance of the times. The search assumes a sinusoid, so a box-shaped transit shows at its period and its harmonics. Against astropy 8.0.2 the powers agree within $1.7 \times 10^{-15}$ and the false-alarm probabilities within $3.4 \times 10^{-14}$ relative on two series and $6.7 \times 10^{-15}$ absolute on a third. The default search over 2\,000 points (25\,000 frequencies) takes 0.09\,s and over 10\,000 points 2.6\,s in the unoptimised test build; curves of more than 20\,000 samples are returned with the highest power of each run of frequencies kept.
+
+    \subsection{Image Time Series}
+
+    The time-series photometry of images (Section~\ref{sec:measure}) reports \code{BUNIT} per frame, reads the exposure from \code{EXPTIME}, \code{XPOSURE}, \code{EFFEXPTM} or \code{EXPOSURE} (a value of 0 is absent), warns when only the frame or only the reference names a filter, accepts a typed zero point and lists the calibration warnings of the frames. A light curve built from images, from a time-series spectrum or from a saved table enters the same fit, periodogram and exports, which carry their provenance (input files with SHA-256, mode, limits and the quick-look label) into CSV files and the measurement log.
+
+    \subsection{Scope and Limits}
+
+    The chain was accepted on 16 real \code{x1dints} files and 16 \code{\_whtlt.ecsv} tables of NIRSpec, NIRISS SOSS, NIRCam grism and MIRI LRS. Padding beyond \code{N\_ALONGDISP}, rows with no channel, several exposures in one series, overlapping integrations, a series without a common grid and every refusal of the reader were tested on synthetic files only. The fits leave out orbital eccentricity, the finite exposure time, limb darkening from stellar models, systematics beyond the baseline polynomial, a red-noise model and MCMC; their errors are the linear estimate of least squares. NIRISS SOSS fluxes are labelled MJy but are not on that scale, so they are relative. A level 3 product can lose pixels during a deep, short event (programme 2358), which biases the quick-look depth and the fitted depth alike; the \code{NPIXELS} warnings report it.
+
+%% ============================================================================
+    \section{Survey Images and Multi-Band Photometry (v0.9.0)}
+    \label{sec:survey}
+%% ============================================================================
+
+    Release 0.9.0 reads the image products of the large surveys, calibrates them from their own cards, and measures forced photometry at given sky positions across bands. The acceptance data are a Legacy Surveys DR10 brick and a $griz$ cutout, a DES DR2 coadd, an SDSS DR17 frame, a Pan-STARRS DR2 stack cutout and a Euclid Q1 MER mosaic, each with the catalogue of its survey. A second set, validated on 2026-11-13, holds an LSSTCam visit image and an \code{afwdata} exposure of the LSST Science Pipelines (image, mask and variance) and a full Pan-STARRS1 skycell stack with its weight and mask files (asinh linearisation, \code{BLANK} pixels, \code{FPA.ZP} zero point); the afw layout of HSC files was tested on synthetic files only. The numbers below pin the code on those files.
+
+    \subsection{Survey Files}
+    \label{sec:survey_files}
+
+    \textbf{bzip2.} A file whose first bytes are a bzip2 stream (\code{BZh}, a level digit and a block or end marker) is decompressed like a gzip file, under the same memory cap and copy cache, by content and never by name; concatenated streams decode as one and only zero padding may follow. The SDSS \code{frame-*.fits.bz2} files open this way, also as members of a ZIP.
+
+    \textbf{Exact integers of tile-compressed HDUs.} A tile-compressed image with \code{ZBITPIX} 8, 16 or 32 and \code{ZCMPTYPE} \code{RICE\_1}, \code{GZIP\_1}, \code{GZIP\_2}, \code{PLIO\_1}, \code{HCOMPRESS\_1} with \code{SCALE} 0 or \code{NOCOMPRESS} is decoded to its exact integers, so DQ and mask planes stored that way (fpacked JWST and HST products, the Legacy Surveys \code{maskbits} file) give their flag bits. Floating-point and 64-bit tiles, quantised integers (\code{ZSCALE}, \code{ZZERO}) and lossy HCOMPRESS are refused with the reason. HCOMPRESS was checked on the Legacy Surveys \code{maskbits} file; PLIO, NOCOMPRESS and unsigned 16 and 32-bit tiles on synthetic files written by astropy.
+
+    \textbf{Pan-STARRS asinh pixels.} A stack image with \code{BSOFTEN} and \code{BOFFSET} stores asinh-scaled values $v$ (after \code{BSCALE} and \code{BZERO}); they are linearised on load,
+    \begin{equation}
+        L = \text{BOFFSET} + \text{BSOFTEN}\,\left(e^{v/a} - e^{-v/a}\right), \qquad a = 2.5/\ln 10,
+    \end{equation}
+    the two cards are renamed \code{ABSOFTEN} and \code{ABOFFSET}, and the plane description warns that the pixels were linearised. One card without the other, a card that is not a finite number, or \code{BSOFTEN} $= 0$ refuses the image instead of reading it as linear; a zero-point card on asinh pixels is not read as a calibration, and derived files do not copy the two cards. On a real Pan-STARRS1 $r$ skycell stack (tile-compressed int16, $6279 \times 6261$) four probes agree with astropy within $10^{-6}$ relative, the 42\,846 pixels equal to \code{BLANK} read as NaN, and the \code{.wt} weight beside it, linearised with its own pair and then square-rooted, agrees with the sigma of the oracle at the same probes within the same tolerance.
+
+    \textbf{Band planes.} One plane of a multi-band cutout cube is addressed as \code{<file>\#hdu=<N>\&plane=<K>} (both 0-based) and opens as its own image, built from the bytes of that plane with the 2D cards of its HDU and the primary header; labels come from \code{BAND<n>} or \code{BANDS}. A $griz$ cutout opens on its first band. Tile-compressed cubes are not addressed this way. The old-style \code{PC001001} matrix cards of Pan-STARRS cutouts are read, so sky positions on them are no longer mirrored in $x$.
+
+    \textbf{SDSS frame error model.} An SDSS \code{frame} file carries no error plane but holds what rebuilds it: the calibration vector $c_j$ per column (HDU 1, nanomaggy per count) and the sky grid \code{ALLSKY} with its sampling \code{XINTERP}, \code{YINTERP} (HDU 2). The sky image $S$ is the bilinear interpolation of the grid at those coordinates (edges clamped), and per pixel
+    \begin{equation}
+        \text{dn} = \frac{I}{c_j} + S, \qquad \sigma = c_j \left(\frac{\max(\text{dn}, 0)}{g} + \sigma_{\text{dark}}^2\right)^{1/2}\ [\text{nanomaggy}],
+    \end{equation}
+    with the gain $g$ (e$^-$/DN) and the dark variance $\sigma^2_{\text{dark}}$ (DN$^2$) of the camera column and band typed by the user, never assumed. On an $r$ frame (with $g = 4.76$ and $\sigma^2_{\text{dark}} = 1.3225$ as test inputs) the rebuilt counts lie within 0.02 of an integer for 99.7\,\% of the pixels, and $\sigma$ agrees with the oracle within $5 \times 10^{-6}$ relative.
+
+    \subsection{Layer Roles and the Conversion to One Sigma}
+    \label{sec:layers}
+
+    \code{core/imaging/layer\_roles.rs} gives every plane a role: science, sigma, variance, inverse variance, mask or other. The first rule that applies decides: the \code{EXTNAME}, or the \code{EXTTYPE} when \code{EXTNAME} is absent or blank, as in the older LSST Science Pipelines exposure layout (\code{SCI}, \code{IMAGE}, \code{DATA}; \code{ERR}, \code{RMS}; \code{VARIANCE}, \code{VAR}; \code{IVAR}, \code{INVVAR}; \code{WGT} and \code{WEIGHT}, assumed inverse variance; \code{DQ}, \code{MASK}, \code{MSK}, \code{FLAG}, \code{MASKBITS}), then the cards \code{IMAGETYP}/\code{IMTYPE}, \code{DES\_EXT}, \code{PS\_COVAR} (assumed variance) and \code{MSKNAM00}, then the file name (\code{-invvar-}, \code{-maskbits}, the Euclid MER \code{-RMS\_} and \code{-FLAG\_}, the Pan-STARRS \code{.wt} and \code{.mask}). An error layer becomes one sigma per pixel,
+    \begin{equation}
+        \sigma = s \ \ (\text{sigma}), \qquad \sigma = \sqrt{v} \ \ (\text{variance}), \qquad \sigma = 1/\sqrt{w} \ \ (\text{inverse variance}),
+    \end{equation}
+    in the unit of the image, and a pixel has no data when the input is not finite, $v < 0$, $w \le 0$ or $\sigma \ge 10^{15}$; the count of such pixels is reported. Inside one file the error layer is a single plane of the same \code{EXTVER}: \code{ERR} first, then a sigma, variance or inverse-variance layer; a layer whose grid differs from the image is not used, with the reason. Sibling files are paired by the survey's naming rule (Legacy brick, Euclid MER mosaic, Pan-STARRS stack) when the grids match, and the file taken is named; when the name rule gives a variance and the sibling's own header says so too, the origin names both, as for a Pan-STARRS weight, \code{file name .wt and PS\_COVAR card (PS1 variance layer)}. \code{EXTTYPE} is never read for an HDU that has an \code{EXTNAME}, even a name outside the table. A layer can also be assigned by hand from another file or HDU, switched off or returned to the automatic choice. Every error carries its origin, for example \code{EXTNAME VARIANCE, HDU 3: square root}. One band of a Legacy $griz$ cutout takes the same band of the inverse-variance cube as its error and the mask HDU as its flags. Cube Prep refuses an input whose error or mask layer is present but cannot be used, unless the reason is no fault of the file (a layer switched off, an SDSS frame without a typed gain).
+
+    \subsection{Mask Flag Sets}
+    \label{sec:flagsets}
+
+    A mask layer is read as exact integers, and \code{core/\allowbreak imaging/\allowbreak dq\_flags.rs} gives its bits the names the file gives. JWST, Roman and HST products keep their flag tables, chosen by whole tokens of the telescope and instrument cards (STIS, COS and WFPC2 no longer take the ACS and WFC3 names). Otherwise, in order: the afw \code{MP\_<NAME>} cards of Rubin and HSC (exclusion \code{BAD}, \code{SAT}, \code{CR}, \code{NO\_DATA}); the Legacy Surveys \code{MBIT\_<n>} cards or, for a cutout typed \code{MASKBITS}, the built-in DR10 table of 17 bits (exclusion \code{SATUR\_<B>} and \code{ALLMASK\_<B>} of the image's band $B$); the Pan-STARRS \code{MSKNAM} and \code{MSKVAL} pairs (exclusion the value named \code{MASK.VALUE}); the DES coadd mask, where any non-zero value means no good data; and raw bits, which exclude nothing until bits are chosen. A flag set has two masks: the exclusion set, which histograms, statistics and photometry leave out while exclusion is on, and the overlay set drawn on the image, which for afw masks also holds \code{EDGE}, \code{INTRP} and \code{SUSPECT}. In the DQ menu a tick marks a flag of the overlay set and the tag \code{excl} a flag of the exclusion set, and a line above the list says which is which. The bits named \code{DETECTED} and \code{DETECTED\_\allowbreak NEGATIVE} are never excluded from measurements, and a floating-point or 64-bit mask is not offered as flags, with the reason.
+
+    \subsection{Calibration by Pixel Unit and the Survey Zero Points}
+    \label{sec:survey_cal}
+
+    \code{PhotCal::from\_header} decides in this order: MJy/sr, then a flux density per pixel named by \code{BUNIT}, then the Roman and JWST DN/s rules, HST \code{PHOTFLAM}/\code{PHOTPLAM}, and the generic zero-point cards. A per-pixel \code{BUNIT} of Jy, mJy, $\mu$Jy, nJy, MJy, \code{10*nanoJansky} or nanomaggy ($3.630780547701014 \times 10^{-6}$\,Jy) calibrates by itself, with the zero point $8.90 - 2.5\log_{10} j$ for $j$ Jy per unit (22.5 for nanomaggy); a zero-point card that contradicts the unit by more than 0.005\,mag gives no calibration, and leftover \code{PHOTFLAM} cards are not applied. The survey zero points are
+    \begin{equation}
+        m_0 = 2.5 \log_{10} \text{FLUXMAG0}, \qquad m_0 = \text{FPA.ZP} + 2.5 \log_{10} \text{EXPTIME}\ \ \text{(Pan-STARRS stack)},
+    \end{equation}
+    and a Legacy Surveys cutout without unit cards is read as nanomaggy with a warning. Generic zero points (\code{MAGZERO}, \code{MAGZPT}, \code{ZPT}, \code{PHOTZP}, \code{ZEROPT}) state their system from \code{PHOTSYS}/\code{MAGSYS} (AB, Vega, ST, or AB assumed); a Vega or ST zero point yields no AB magnitude or Jy, and \code{MAGZPT} holds for one count per second, so the pixel values of a count image are divided by \code{EXPTIME} before it is applied. A zero point can be typed (value, AB or Vega, per second or not). Zero-point cards on mask, flag, weight or variance layers are not a calibration, and resampled, blended and drizzled products drop or correct them for the change of pixel area. An uncalibrated image says why by cause. The filter registry gained 39 survey bands (Euclid VIS, $Y$, $J$, $H$; HSC $grizy$ and the other surveys) with their pivot wavelengths, found from the survey headers. Implied zero points measured through the catalogue comparison are 22.5000 (Legacy $r$), 29.996 (DES $r$), 22.503 (SDSS $r$), 31.963 (Pan-STARRS $r$, one count) and 24.590 (Euclid VIS).
+
+    \subsection{Forced Photometry of a Band}
+    \label{sec:forced}
+
+    Forced photometry (\code{core/analysis/forced.rs}, \code{cmd/analysis/forced.rs}) measures given sky positions without recentring. Each RA/Dec goes through the band's WCS to 0-based pixel coordinates; a radius in arcsec becomes pixels through the area scale $3600\sqrt{|\det \mat{CD}|}$ and must give 2 to 60\,px, with a warning when the two axis scales differ by more than 1\,\%. Without a sky annulus the flux is the plain weighted sum over the aperture of Section~\ref{sec:aperture_photometry}, suited to sky-subtracted coadds,
+    \begin{equation}
+        F = \sum_p w_p q_p I_p, \qquad \sigma_F^2 = \sum_p (w_p q_p \sigma_p)^2,
+    \end{equation}
+    with $q_p$ the relative pixel area when an area map applies and $\sigma_p$ the one-sigma error layer; with an annulus the measurement of Section~\ref{sec:aperture_photometry} runs in fixed-position mode, sky removed. Pixels excluded by the flag set, without data or with an error that is not finite and positive are left out, and the masked fraction is
+    \begin{equation}
+        \phi = 1 - \frac{\sum_{p\ \text{used}} w_p}{W_{\text{full}}},
+    \end{equation}
+    where $W_{\text{full}}$ is the weight of the whole circle, computed on its own canvas when the circle crosses the image edge; a cell with $\phi > 0$ is flagged as a lower limit. Each cell also reports the OR of the flag bits under the aperture, saturation and the FWHM at the position. When a cell of the size band was measured but the FWHM fit finds no width (a source too faint, or far wider than the PSF, such as a large galaxy or a blend), the Size column of the Multi-band section reads \code{no FWHM} rather than giving no verdict, and the legend and the note of the source give the reason and point to the Profiles section, where an ellipse gives $R_{50}$ against the PSF. Fluxes go to Jy and AB through the band's calibration. With a correlated-noise factor $f_{\text{corr}}$ (Section~\ref{sec:depth}) the corrected error is $f_{\text{corr}}\,\sigma_F$, and a cell with $F < n\,f_{\text{corr}}\,\sigma_F$ ($n = 3$ by default) reports the upper limit $n\,f_{\text{corr}}\,\sigma_F$ beside the measured flux.
+
+    \subsection{Photometry Across Bands}
+    \label{sec:forced_bands}
+
+    \code{forced\_photometry\_cmd} measures up to 5\,000 positions in up to 12 bands, one band at a time with progress and cancellation; a radius in pixels needs bands of one pixel scale within 1\,\%. A failed band is reported and the others are kept.
+
+    \textbf{Growth correction.} With \code{correction = growth\_curve} each band derives an aperture correction to a reference radius (default 3.5\,arcsec). Candidate stars have S/N $\ge 50$, are unsaturated, have $\phi = 0$ and no other position within the reference radius; their growth ratios $g_k = F(r_{\text{ref}})/F(r)$ are sorted, the point-source locus keeps the ratios at most $g_{(2)} + \max(0.5\,(g_{(2)} - 1), 0.01)$, $g_{(2)}$ the second smallest, and the factor is their median with a scatter of $1.4826$ MAD; at least 3 stars are needed, and $F_{\text{total}} = F \times \text{factor}$.
+
+    \textbf{Colours and SED.} Colours of adjacent bands are taken on one basis (aperture or total), with errors in quadrature and limit flags; SED points sit at the band pivots. Bands without a calibration to Jy or without an identified filter stay out of the colours and the SED, with a warning. The long and wide CSV files carry provenance, band lines and units.
+
+    \begin{table}[H]
+        \centering
+        \small
+        \begin{tabularx}{\textwidth}{lXl}
+            \toprule
+            \textbf{Set, band} & \textbf{Comparison} & \textbf{Median (NMAD), $n$} \\
+            \midrule
+            Legacy brick, $r$ & flux in 2\,arcsec over \code{apflux\_r\_5} & 1.0000182 ($5.2 \times 10^{-5}$), 21 \\
+            Legacy brick, $g$, $z$ & flux over \code{apflux\_g\_5}, \code{apflux\_z\_5} & 1.0000165, 1.0000232; 67, 66 \\
+            Legacy brick, $r$ & error over \code{1/sqrt(apflux\_ivar\_r\_5)} & 0.9844 ($3.7 \times 10^{-3}$), 38 \\
+            Legacy brick, $r$ & growth factor 2 to 3.5\,arcsec & 1.0425 (scatter 0.0048), 64 stars \\
+            Legacy cutout, $r$ plane & flux over \code{apflux\_r\_5} & 0.99999 ($3.7 \times 10^{-3}$), 33 \\
+            DES, $r$ & flux over \code{flux\_aper\_8\_r} & 0.9964 ($3.7 \times 10^{-3}$), 13 \\
+            DES, $r$, faint & error over \code{fluxerr\_aper\_8\_r} & 0.9820 ($1.2 \times 10^{-3}$), 29 \\
+            SDSS, $r$ & flux over \code{aperFlux7\_r} (annulus) & 1.0030 ($6.3 \times 10^{-3}$), 31 \\
+            Pan-STARRS, $r$ & flux over \code{rflxr5} & 1.0167 ($2.2 \times 10^{-3}$), 4 \\
+            Euclid, VIS & growth plateau over \code{flux\_detection\_total} & 1.006 and 0.998, 2 \\
+            \bottomrule
+        \end{tabularx}
+        \caption{Forced photometry against the catalogue of each survey. The $r$ fluxes of two stars are 3.1\,\% and 0.5\,\% higher on DES than on Legacy and 8\,\% and 21\,\% lower on Pan-STARRS, inside the bands the test allows for the filter differences (0.98 to 1.04 and 0.75 to 0.95); the DES ratio of 1.031 lies 0.001 outside the 0.99 to 1.03 first planned, as for the oracle. Against \code{flux\_vis\_psf} the Euclid plateaus are 1.19 and 1.13, outside the 10\,\% hoped for, as for the oracle.}
+    \end{table}
+
+    \subsection{Catalogue Comparison}
+    \label{sec:catcompare}
+
+    \code{core/astrometry/catalog\_compare.rs} and \code{catalog\_compare\_cmd} measure the rows of a catalogue table (CSV or ECSV; a FITS table is refused with the advice to save it as CSV) on an image with the forced photometry of Section~\ref{sec:forced} and compare. Catalogue fluxes go to Jy as $v \times k(\text{zp})$ with $k(\text{zp}) = 10^{(8.90 - \text{zp})/2.5}$ (zp 22.5 for nanomaggy, or a given zero point), by the Jy prefixes, or from an AB magnitude; the catalogue error comes from an error or an inverse-variance column. Presets name the columns and cuts of Legacy DR10, DES DR2, SDSS DR17, Pan-STARRS DR2 and Euclid Q1; in the Compare section the preset starts on the band of the image on screen, read from its filter, and follows the image until a preset is chosen or a field is edited. Rows are rejected, with the count of each reason, for no position, off the image, a missing value, a cut, catalogue S/N outside the limits, a neighbour closer than the limit, a flux not positive, an aperture crossing the edge, a failed measurement, pixels without data and saturation; at most 5\,000 rows are measured. Over the rows used,
+    \begin{equation}
+        \tilde{x} = \operatorname{median}(x), \qquad \text{NMAD} = 1.4826\,\operatorname{median}|x - \tilde{x}|, \qquad \sigma_{\tilde{x}} = \sqrt{\pi/2}\;\text{NMAD}/\sqrt{n}\ \ (n \ge 2),
+    \end{equation}
+    for the flux ratio $F_{\text{Jy}}/F_{\text{cat}}$ (also as $-2.5\log_{10}$ of its median), the error ratio and the implied zero point $2.5\log_{10}(F_{\text{native}}/F_{\text{cat,Jy}}) + 8.90$. Fewer than 5 rows give a warning that the median is indicative. On the five sets the flux-ratio medians are 1.0000182, 0.9964, 1.0030, 1.0167 and 0.9905 (Legacy, DES, SDSS, Pan-STARRS, Euclid), every rejection count equal to the oracle's cascade.
+
+    \subsection{Empty-Aperture Depth}
+    \label{sec:depth}
+
+    \code{image\_depth\_cmd} (\code{core/analysis/depth.rs}) measures the depth from the scatter of apertures on source-free sky, placed as in photutils' \code{ImageDepth}, reimplemented. Sources are masked on the image over its error map (or over its robust scatter) smoothed with a Gaussian of FWHM 3\,px: groups of at least 5 pixels above the median plus $k$ clipped standard deviations ($k = 3$ by default), grown by 8\,px; mask pixels named \code{DETECTED} or \code{DETECTED\_NEGATIVE} count as sources. Centres are drawn with a seeded SplitMix64 generator on pixels farther than $r + 1.5$\,px from any excluded pixel and the border, at least $2r$ apart. For the $n$ usable sums $S_j$ and their formal errors $\epsilon_j = (\sum (w\sigma)^2)^{1/2}$,
+    \begin{equation}
+        \sigma_{\text{empty}} = 1.4826\,\operatorname{MAD}(S_j), \qquad
+        f_{\text{corr}} = \frac{\sigma_{\text{empty}}}{\operatorname{median}(\epsilon_j)}, \qquad
+        \text{limit} = n_\sigma\,\sigma_{\text{empty}},
+    \end{equation}
+    with a relative uncertainty $1.166/\sqrt{n}$ of $\sigma_{\text{empty}}$, the limit converted to Jy and AB. $f_{\text{corr}}$ measures how far correlated noise makes the formal error too small and is the band correction of Section~\ref{sec:forced}. A formal point-source limit $n_\sigma\,\tilde{\sigma}_{\text{pix}}\,(\pi\,\text{FWHM}^2/(2\ln 2))^{1/2}$ is also given and carries no such correction. Warnings report fewer than 200 usable apertures, a detection threshold below 2.5$\sigma$, and an error layer whose 84th percentile exceeds 1.5 times its 16th, when one depth does not describe the whole image.
+
+    \textbf{Validation.} The sums at the oracle's positions on the Legacy $r$ brick agree with photutils within 0.04\,\% in total and 0.27\,\% in $\sigma_{\text{empty}}$. Through the command, the 5$\sigma$ limit in 1\,arcsec apertures is 25.536 against the oracle's 25.582 (Legacy $r$, $f_{\text{corr}} = 1.76$), 25.249 against 25.251 (DES $r$) and 22.986 against 23.025 (Pan-STARRS $r$); on the Euclid VIS cutout it is 25.80 against the oracle's 25.61, 0.19\,mag deeper, outside the 0.1\,mag tolerance: on the 601\,px cutout only 352 apertures of 1\,arcsec fit once the source mask is grown by 8\,px, and they sit on the quietest sky. The real-data test that holds this comparison still fails.
+
+    \subsection{PSF FWHM and the Resolved-or-Not Rule}
+    \label{sec:resolution}
+
+    \textbf{PSF FWHM of an image.} \code{image\_psf\_fwhm\_cmd} detects stars at 5$\sigma$ and keeps those with peak S/N $\ge 50$, eccentricity $\le 0.6$, at least 16\,px from the edges and without a detection of at least 5\,\% of their flux within 12\,px, at most 200. Each is measured by the photometry of Section~\ref{sec:aperture_photometry} and kept when unsaturated, free of masked and non-finite pixels, with a measurable FWHM and within 2\,px of its detection. The stellar locus keeps widths between 0.80 and 1.10 times their 25th percentile (all of them below 4 stars); the FWHM is the median of the locus, its scatter 1.4826 MAD (from 3 stars), and the half-light radius the median of the stars' EE50 radii. Warnings report fewer than 3 stars, a scatter above 10\,\% and fewer than 2\,px per FWHM. The cards \code{SEEING}, \code{PSF\_FWHM} and \code{PSFFWHM} are offered when they hold 0 to 60\,arcsec. Measured: SDSS $r$ 1.007\,arcsec from 70 stars against 0.992\,arcsec from a Moffat fit of its stars ($+1.6$\,\%), DES $r$ $+1.6$\,\% and Pan-STARRS $r$ $-1.3$\,\% from two stars each; Euclid VIS is undersampled (1.90\,px per FWHM) and reads 0.190\,arcsec against the oracle's 0.177 from four stars, 7.8\,\% wide and outside the 5\,\% tolerance, as the warning says; the real-data test that holds this comparison still fails.
+
+    \textbf{Resolved or not.} \code{resolution\_check\_cmd} (\code{core/analysis/resolution.rs}) classifies a source of observed FWHM $\theta_{\text{obs}}$ or half-light radius $R$ against a PSF of FWHM $\theta_P$ (half-light radius $R_P$, else $\theta_P/2$ with the floor raised to $0.92\,\theta_P$):
+    \begin{equation}
+        \theta = \sqrt{\theta_{\text{obs}}^2 - \theta_P^2} \quad\text{or}\quad \theta = 2\sqrt{R^2 - R_P^2}, \qquad
+        \theta_{\text{floor}} = \theta_P \max(L, E),
+    \end{equation}
+    $\theta = 0$ when the source is not wider than the PSF. The signal-to-noise term follows Lobanov (2005, Eq.~44), $L = \left(\ln 4/\ln x - 1\right)^{1/2}$ with $x = 4cS/(4 + cS)$ and $c = 0.93944$, and has no value below $S = 1.42$; the PSF term is $E = \sqrt{(1 + \epsilon)^2 - 1}$ for a relative PSF error $\epsilon$ (default 0.03). The source is unresolved when $\theta < \theta_{\text{floor}}$, marginal when $\theta/\theta_P$ is below the resolved threshold (default 3 resolution elements) or the PSF spans fewer than 2 pixels per FWHM, and resolved otherwise. The first expression is exact for Gaussian profiles only, the second is a size proxy, and the notes say which was used. The rule reproduces the classes of the oracle on 55 Legacy rows with both PSF references.
+
+    \subsection{Cosmological Scale}
+    \label{sec:cosmology}
+
+    \code{core/astrometry/cosmology.rs} converts angles to proper sizes in a flat $\Lambda$CDM model with the Planck 2018 values ($H_0 = 67.66$\,km\,s$^{-1}$\,Mpc$^{-1}$, $\Omega_m = 0.30966$, massive neutrinos and radiation), $H_0$ (20 to 200\,km\,s$^{-1}$\,Mpc$^{-1}$) and $\Omega_m$ editable (the neutrino and radiation densities scale with $h^{-2}$):
+    \begin{equation}
+        E(z) = \left[\Omega_M (1 + z)^3 + \Omega_r (1 + z)^4 + 1 - \Omega_M - \Omega_r\right]^{1/2}, \qquad
+        D_A = \frac{c}{H_0 (1 + z)} \int_0^z \frac{dz'}{E(z')},
+    \end{equation}
+    $\Omega_M$ including the massive neutrinos, the integral by composite Simpson with $2\lceil 256\max(z, 1)\rceil$ intervals; the scale is $D_A$ in kpc per arcsec. It agrees with astropy within $10^{-6}$ up to $z = 2$ and $5 \times 10^{-6}$ up to $z = 6$, and $D_A(1) = 1697.817$\,Mpc. The resolution check reports the PSF, the floor and the source size in kpc at the given redshift.
+
+    \textbf{Other changes.} Cube spectra are given in Jy for every unit with a known conversion (MJy/sr through \code{PIXAR\_SR} or the WCS pixel area, per-pixel flux densities by their factor). The photometry status line names the error plane really used, the flag set and why DQ exclusion does not apply, and results carry the pixel unit. The SAGUI input check reports the PSF FWHM, pixel scale and PSF area of each band and the cube's redshift, and Cube Prep refuses asinh-scaled PSF, kernel and noise planes.
 
 %% ============================================================================
     \section{Calibration, Stacking and Compose}
@@ -2019,9 +2419,9 @@
     \label{sec:commands}
 %% ============================================================================
 
-    The backend registers \textbf{\nCommands{} Tauri commands}, all of them listed in the \code{tauri::generate\_handler!} macro in \code{src-tauri/src/lib.rs}; the table below groups them by their \code{cmd::} module path. Release 0.6.0 registered 107 and release 0.6.7.0 registered 140. The 21 \code{cmd::mast} commands are compiled with the \code{mast} Cargo feature, which is in the default set.
+    The backend registers \textbf{\nCommands{} Tauri commands}, all of them listed in the \code{tauri::generate\_handler!} macro in \code{src-tauri/src/lib.rs}; the table below groups them by their \code{cmd::} module path. Release 0.6.0 registered 107, release 0.6.7.0 registered 140 and release 0.8.1 registered 214. The 21 \code{cmd::mast} commands are compiled with the \code{mast} Cargo feature, which is in the default set.
 
-    The command name strings appear nowhere in the React components. They live only in the service layer, \code{src/services/*.ts}, where each exported function passes the literal name to \code{typedInvoke} (\code{src/infrastructure/tauri/client.ts}). Arguments cross the boundary in camelCase and arrive in Rust as snake\_case --- \code{computeStatistics} sends \code{excludeDq} and \code{compute\_statistics\_cmd} receives \code{exclude\_dq} --- so a rename on either side is a runtime failure, not a compile error.
+    The command name strings appear nowhere in the React components. They live only in the service layer, \code{src/services/*.ts}, where each exported function passes the literal name to \code{typedInvoke} (\code{src/infrastructure/tauri/client.ts}). Arguments cross the boundary in camelCase and arrive in Rust as snake\_case (\code{computeStatistics} sends \code{excludeDq} and \code{compute\_statistics\_cmd} receives \code{exclude\_dq}), so a rename on either side is a runtime failure, not a compile error.
 
     \begingroup
     \small
@@ -2039,17 +2439,18 @@
     \multicolumn{3}{r}{\footnotesize\textit{continued on the next page}} \\
     \endfoot
     \bottomrule
-    \caption{The \nCommands{} command paths in \code{generate\_handler!} for 0.7.5, grouped by their top-level \code{cmd::} module, including nested modules and feature-gated entries. The registry had 183 entries in 0.7.0; seven more cover the four sample-data operations, solve hints, Gaia refinement and the Zenodo catalogue offer.}
+    \caption{The \nCommands{} command paths in \code{generate\_handler!} for 0.9.0, grouped by their top-level \code{cmd::} module, including nested modules and feature-gated entries. The registry had 183 entries in 0.7.0, 190 in 0.7.5 and 214 in 0.8.1; 0.9.0 adds the 24 commands of the science round.}
     \endlastfoot
     \code{cmd::io} & 6 & FITS/ASDF ingestion, linear mono and RGB preview buffers, RGB file as composite, cube release \\
     \code{cmd::export} & 5 & FITS and PNG export, mono and RGB, RICE-compressed MEF \\
     \code{cmd::metadata} & 5 & Headers, HDU and ASDF array listings, narrowband filter detection \\
-    \code{cmd::analysis} & 9 & Histograms, FFT power spectrum, star detection (mono and composite), click and batch photometry, gain model, time-series photometry, subframe metrics \\
+    \code{cmd::analysis} & 12 & Histograms, FFT power spectrum, star detection (mono and composite), click and batch photometry, gain model, time-series photometry, subframe metrics; photometry status, image depth and forced photometry (0.9.0) \\
     \code{cmd::regions} & 6 & Region statistics, radial and surface-brightness profiles, line cuts, DS9 \code{.reg} import and export \\
     \code{cmd::visualization} & 9 & STF render, scale limits, colormap LUT, pixel probe, pixel table, DQ flag table and mask preview, tile pyramids (mono and RGB) \\
-    \code{cmd::stacking} & 5 & Calibration, integration, drizzle (mono and RGB), batch pipeline \\
-    \code{cmd::compose} & 20 & Channel blend, level measurement, alignment and its overlay preview, crop and border detection, LRGB, white balance, SCNR, restretch, composite cache, aligned-channel export, the composite processing chain \\
+    \code{cmd::stacking} & 7 & Calibration, integration, drizzle (mono and RGB), batch pipeline, mosaic estimate and mosaic by WCS \\
+    \code{cmd::compose} & 21 & Channel blend, level measurement, alignment with its plan and overlay preview, crop and border detection, LRGB, white balance, SCNR, restretch, composite cache, aligned-channel export, the composite processing chain \\
     \code{cmd::processing} & 25 & Resample, debayer (single and batch), CFA channel extraction (single and batch), deconvolution, background (polynomial with de-band, batch, DBE), wavelets, arcsinh/GHS/masked stretch, star removal, tone on files and on the composite, geometry, LHE, HDRMT, composite variants \\
+    \code{cmd::masks} & 4 & Mask creation, preview, deletion and export \\
     \code{cmd::pixelmath} & 2 & Expression evaluation and expression validation \\
     \code{cmd::cosmetic} & 2 & Cosmetic correction, single frame and batch \\
     \code{cmd::statistics} & 3 & Exact statistics (mono and composite) and batch noise evaluation \\
@@ -2058,7 +2459,16 @@
     \code{cmd::linefit} & 2 & Line-fit maps and single-spaxel refit \\
     \code{cmd::ramp} & 7 & Ramp info, pixel series, tables, frames, pixel fit, quick slope, comparison with \code{\_rate} \\
     \code{cmd::spectral} & 3 & Spectral axis (tabulated included), radial-velocity correction, \code{x1d} reader \\
-    \code{cmd::spectrum1d} & 3 & 1D spectrum read and probe (\code{x1d} or 1D FITS), CSV spectrum read \\
+    \code{cmd::spectrum1d} & 4 & 1D spectrum read and probe (\code{x1d}, \code{x1dints} or 1D FITS), CSV spectrum read, \code{EXTRACT1D} table list (0.9.0) \\
+    \code{cmd::tso} & 5 & Time-series sets: open, light curves, picked spectrum, white-light table import and comparison (0.9.0) \\
+    \code{cmd::tso\_transit} & 1 & Fitted transmission spectrum (0.9.0) \\
+    \code{cmd::transit} & 1 & Transit and eclipse fit of a light curve (0.9.0) \\
+    \code{cmd::periodogram} & 1 & Generalised Lomb-Scargle period search (0.9.0) \\
+    \code{cmd::tables} & 2 & Table probe (CSV, ECSV, FITS binary tables) and read (CSV, ECSV) (0.9.0) \\
+    \code{cmd::companions} & 5 & Error and mask layer assignment, clearing, suggestions, flag exclusion, SDSS frame error (0.9.0) \\
+    \code{cmd::filters} & 1 & Filter and band identification (0.9.0) \\
+    \code{cmd::resolution} & 2 & PSF FWHM of an image and the resolution check (0.9.0) \\
+    \code{cmd::catalog\_compare} & 2 & Catalogue comparison and its table probe (0.9.0) \\
     \code{cmd::pv} & 1 & Position-velocity diagram \\
     \code{cmd::cutout} & 1 & Science cutout export (SCI, ERR, DQ) \\
     \code{cmd::catalog} & 3 & Gaia DR3 cone search, cross-match, CSV export \\
@@ -2067,8 +2477,11 @@
     \code{cmd::astrometry} & 10 & Local-first plate solving, solve hints, Gaia refinement, Write WCS, WCS info, pixel-to-world, world-to-pixel, sky separation, pointing overlap, grid lines \\
     \code{cmd::geometry} & 1 & Observation geometry (time scales, airmass, Sun and Moon) \\
     \code{cmd::contours} & 1 & Contour lines \\
-    \code{cmd::psf} & 1 & PSF estimation \\
+    \code{cmd::psf} & 2 & PSF estimation and the empirical PSF \\
     \code{cmd::spcc} & 1 & SPCC (blackbody colour calibration) \\
+    \code{cmd::cubeprep} & 11 & Cube Prep: units, filters, recipe validation and run, crop, alignment, cube build and edit, PSFs, kernels, PSF matching \\
+    \code{cmd::sagui} & 4 & SAGUI input and runtime inspection, run, result loading \\
+    \code{cmd::sagui\_install} & 1 & SAGUI runtime installation \\
     \code{cmd::config} & 4 & Configuration read and write, API key storage \\
     \code{cmd::synth} & 2 & Synthetic frame and synthetic stack generation \\
     \code{cmd::output} & 4 & Output directory info, output cleanup, history sweep, progress cancellation \\
@@ -2258,17 +2671,17 @@
     Each session owns four things (\code{server/session.rs}):
 
     \begin{itemize}[nosep]
-        \item an \code{ImageCache} --- the same LRU cache the desktop app uses --- bounded by both \code{cache\_max\_entries} and \code{cache\_max\_bytes};
+        \item an \code{ImageCache} bounded by both \code{cache\_max\_entries} and \code{cache\_max\_bytes}, the same LRU cache the desktop app uses;
         \item a map of jobs, keyed by job id;
         \item the v2 state: a monotonic counter, an \code{active\_ref} under an \code{RwLock}, and a map of \code{ImageMeta} records;
         \item a \code{last\_accessed} timestamp.
     \end{itemize}
 
-    Images are referenced by name inside the session rather than by path. The v2 routes mint a ref on each producing call --- \code{img\_0}, \code{img\_1}, \code{cutout\_0}, \code{bin\_0} and so on, from a per-session counter --- unless the caller supplies \code{name}. Each ref carries an \code{ImageMeta} record holding \code{image\_ref}, \code{source}, \code{hdu}, \code{array}, \code{plane\_ref}, \code{is\_dq}, \code{width}, \code{height}, \code{wcs\_present} and \code{extname}. Open, HDU switching, cutout and binning set the session's \code{active\_ref}; endpoints with an optional \code{ref} use it when the field is omitted and answer \code{400} when no active image exists. The older routes take a caller-chosen \code{slot}, defaulting to the file path. Slots and refs address the same cache, but v1 calls do not create the source metadata listed by the v2 image API.
+    Images are referenced by name inside the session rather than by path. The v2 routes mint a ref on each producing call (\code{img\_0}, \code{img\_1}, \code{cutout\_0}, \code{bin\_0} and so on, from a per-session counter) unless the caller supplies \code{name}. Each ref carries an \code{ImageMeta} record holding \code{image\_ref}, \code{source}, \code{hdu}, \code{array}, \code{plane\_ref}, \code{is\_dq}, \code{width}, \code{height}, \code{wcs\_present} and \code{extname}. Open, HDU switching, cutout and binning set the session's \code{active\_ref}; endpoints with an optional \code{ref} use it when the field is omitted and answer \code{400} when no active image exists. The older routes take a caller-chosen \code{slot}, defaulting to the file path. Slots and refs address the same cache, but v1 calls do not create the source metadata listed by the v2 image API.
 
     Lifetime is bounded on three axes. Session creation fails with \code{503} once \code{session\_max} sessions exist. Any request that resolves a session touches its timestamp through the \code{SessionExtractor}, and \code{POST /v2/sessions/:sid/keepalive} exists to do only that. A background task ticks every \code{cleanup\_interval}, skips any session with a running job, and removes sessions idle longer than \code{session\_ttl}, logging the eviction. \code{DELETE /v2/sessions/:sid} removes one immediately.
 
-    Eviction inside a session is independent of session lifetime: the image cache drops least-recently-used entries when either bound is exceeded, which can silently invalidate a ref the client still holds. The server reconciles rather than pretending otherwise --- \code{prune\_evicted\_meta} drops metadata whose cache entry is gone, and \code{reconcile\_active\_ref} additionally clears \code{active\_ref} when it points at an evicted image. \code{GET /v2/sessions/:sid} and \code{GET /v2/sessions/:sid/images} run that reconciliation before reporting, so a listing never advertises an image the cache no longer holds.
+    Eviction inside a session is independent of session lifetime: the image cache drops least-recently-used entries when either bound is exceeded, which can silently invalidate a ref the client still holds. The server reconciles rather than pretending otherwise: \code{prune\_evicted\_meta} drops metadata whose cache entry is gone, and \code{reconcile\_active\_ref} additionally clears \code{active\_ref} when it points at an evicted image. \code{GET /v2/sessions/:sid} and \code{GET /v2/sessions/:sid/images} run that reconciliation before reporting, so a listing never advertises an image the cache no longer holds.
 
     \subsection{The v2 API Surface}
 
@@ -2316,7 +2729,7 @@
         \caption{Every route registered in \code{server/router.rs} under \code{/v2}, plus \code{/health}. Paths are literal; \code{:sid} is the session id.}
     \end{table}
 
-    The v2 endpoints share one region grammar (\code{server/v2/region.rs}): a request may pass a pixel rectangle, a sky rectangle in arcminutes around an RA/Dec, or a full shape --- the core \code{RegionShape} set --- in pixel or sky coordinates. A region that leaves the frame is rejected with \code{region\_out\_of\_bounds} unless the caller passes \code{clip: true}, and a sky region on an image without WCS is rejected with \code{wcs\_required}.
+    The v2 endpoints share one region grammar (\code{server/v2/region.rs}): a request may pass a pixel rectangle, a sky rectangle in arcminutes around an RA/Dec, or a full shape (the core \code{RegionShape} set) in pixel or sky coordinates. A region that leaves the frame is rejected with \code{region\_out\_of\_bounds} unless the caller passes \code{clip: true}, and a sky region on an image without WCS is rejected with \code{wcs\_required}.
 
     Among the v2 routes, \code{POST /v2/sessions/:sid/render} returns \code{image/png} instead of JSON. Its \code{x-render-resolved} JSON header records the region used, \code{vmin}/\code{vmax}, limit algorithm, stretch, colormap, binning factor applied for \code{max\_dim}, the PNG's arcsec-per-pixel scale and the fractions clipped at each end. Crosshair and scalebar overlays are drawn before encoding. The \code{scale} block accepts the 13 colormaps and \code{symmetric}/\code{centre} (alias \code{center}); the resolved header echoes them with notes. The v1 render routes also return PNG, and the job stream uses SSE.
 
@@ -2347,15 +2760,15 @@
     The server is a second front end over the library crate, not a reimplementation. It links \code{astroburst\_lib} and calls the same core modules the Tauri commands call:
 
     \begin{itemize}[nosep]
-        \item \code{core/imaging/scale.rs} --- \code{LimitMode}, \code{StretchKind}, \code{resolve\_limits}, \code{normalize\_and\_stretch}: used by \code{server/v2/render/handler.rs} and by \code{cmd/visualization/mod.rs}, so limits and stretches resolve identically on both;
-        \item \code{core/imaging/region.rs} --- the shape set, \code{shape\_to\_pixel}, masked values: used by \code{server/v2/region.rs} and by \code{cmd/regions.rs}, \code{cmd/statistics.rs}, \code{cmd/cutout.rs};
-        \item \code{core/imaging/cutout.rs} --- \code{resolve\_cutout\_rect}, \code{cut\_plane\_within}, \code{shift\_header}, \code{reported\_ltv}: used by \code{server/v2/cutout.rs} and \code{cmd/cutout.rs};
-        \item \code{core/imaging/pixel\_probe.rs} --- \code{probe\_pixel}, \code{probe\_companions}, \code{data\_unit}: used by \code{server/v2/pixel.rs} and by \code{cmd/statistics.rs} and \code{cmd/visualization/mod.rs}.
+        \item \code{core/imaging/scale.rs} (\code{LimitMode}, \code{StretchKind}, \code{resolve\_limits}, \code{normalize\_and\_stretch}) is used by \code{server/v2/render/handler.rs} and by \code{cmd/visualization/mod.rs}, so limits and stretches resolve identically on both;
+        \item \code{core/imaging/region.rs} (the shape set, \code{shape\_to\_pixel}, masked values) is used by \code{server/v2/region.rs} and by \code{cmd/regions.rs}, \code{cmd/statistics.rs}, \code{cmd/cutout.rs};
+        \item \code{core/imaging/cutout.rs}, used by \code{server/v2/cutout.rs} and \code{cmd/cutout.rs}, holds \code{resolve\_cutout\_rect}, \code{cut\_plane\_within}, \code{shift\_header} and \code{reported\_ltv};
+        \item \code{core/imaging/pixel\_probe.rs} (\code{probe\_pixel}, \code{probe\_companions}, \code{data\_unit}) is used by \code{server/v2/pixel.rs} and by \code{cmd/statistics.rs} and \code{cmd/visualization/mod.rs}.
     \end{itemize}
 
-    The same holds for \code{core/imaging/colormap.rs}, \code{core/imaging/statistics.rs}, \code{core/astrometry/} (\code{wcs.rs}, the \code{gwcs/} evaluator, \code{grid.rs}, \code{frames.rs}), \code{core/stacking/} (the rejection kernel, frame cards, consistency checks and masters) and the infrastructure layer --- \code{infra/cache.rs}, \code{infra/image\_source.rs} and \code{infra/wcs\_source.rs} --- all of which both binaries import.
+    The same holds for \code{core/imaging/colormap.rs}, \code{core/imaging/statistics.rs}, \code{core/astrometry/} (\code{wcs.rs}, the \code{gwcs/} evaluator, \code{grid.rs}, \code{frames.rs}), \code{core/stacking/} (the rejection kernel, frame cards, consistency checks and masters) and the infrastructure layer (\code{infra/cache.rs}, \code{infra/image\_source.rs} and \code{infra/wcs\_source.rs}), all of which both binaries import.
 
-    The split is in the command layer, not the core. Radial profiles, line cuts, exclude regions and DS9 \code{.reg} import/export exist as core functions (\code{radial\_profile} and \code{line\_cut} in \code{core/imaging/region.rs}, and \code{core/imaging/region\_file.rs}) but are reachable only through \code{cmd/regions.rs}; no route in \code{server/router.rs} exposes them. Likewise, the \code{exclude\_dq} flag that drives \code{resolve\_dq\_mask} appears only under \code{cmd/} --- in \code{cmd/analysis/mod.rs}, \code{cmd/regions.rs} and \code{cmd/statistics.rs} --- and is absent from the server's \code{StatsParams} and \code{HistogramParams}.
+    The split is in the command layer, not the core. Radial profiles, line cuts, exclude regions and DS9 \code{.reg} import/export exist as core functions (\code{radial\_profile} and \code{line\_cut} in \code{core/imaging/region.rs}, and \code{core/imaging/region\_file.rs}) but are reachable only through \code{cmd/regions.rs}; no route in \code{server/router.rs} exposes them. Likewise, the \code{exclude\_dq} flag that drives \code{resolve\_dq\_mask} appears only under \code{cmd/} (in \code{cmd/analysis/mod.rs}, \code{cmd/regions.rs} and \code{cmd/statistics.rs}) and is absent from the server's \code{StatsParams} and \code{HistogramParams}.
 
     \begin{notebox}[DQ on the server]
         The asymmetry is narrower than ``no DQ''. \code{POST /v2/sessions/:sid/pixel} does load the DQ and ERR companions of the probed plane and returns decoded DQ flags for the sampled pixel. What the server lacks is DQ-\emph{masked} aggregation: its stats and histogram endpoints have no exclusion flag, so they measure every finite pixel in the region regardless of its DQ state. Since 0.6.9 a DQ plane of an instrument the app does not know is decoded as raw bits, named \code{BITn} by the pixel endpoint (Section~\ref{sec:fitsio}).
@@ -2391,7 +2804,7 @@
         \caption{Status codes produced by \code{AppError}. The four typed 400 codes let a client distinguish a bad request from an out-of-frame one without parsing prose.}
     \end{table}
 
-    Two details are worth noting for clients. The \code{429} message, \code{"job queue full (max N concurrent)"}, names the configured \code{jobs\_max}; the status code, not the text, is the contract. And errors that originate in the core --- \code{RegionError}, \code{CutoutError}, \code{ProbeError} --- are mapped explicitly to \code{400} with a hint, so a caller mistake is never reported as \code{500}. The exception is plane loading, where only the two recognised messages (no ASDF arrays, no HDU index) become \code{400} and everything else is surfaced as \code{internal\_error}.
+    Two details are worth noting for clients. The \code{429} message, \code{"job queue full (max N concurrent)"}, names the configured \code{jobs\_max}; the status code, not the text, is the contract. And errors that originate in the core (\code{RegionError}, \code{CutoutError}, \code{ProbeError}) are mapped explicitly to \code{400} with a hint, so a caller mistake is never reported as \code{500}. The exception is plane loading, where only the two recognised messages (no ASDF arrays, no HDU index) become \code{400} and everything else is surfaced as \code{internal\_error}.
 
 
 %% ============================================================================
@@ -2435,6 +2848,10 @@
         \end{tabularx}
         \caption{The five job definitions of \code{.github/workflows/ci.yml}, run on every pull request and on pushes to main, with the Unix job expanded over two runners. CI and release builds use Rust 1.96.0, Node.js 22 and pnpm 10.}
     \end{table}
+
+    \textbf{Science round of 0.9.0.} The changes of the round were written after a failing test, with a few tests added afterwards and named as such in the package records, and are pinned against an independent oracle where one exists: astropy 8.0.2 for flux units, the periodogram and the cosmological scale, scipy for the transit and eclipse fits, a numerical integration of the limb-darkened disc for the transit model, photutils for the empty-aperture sums, and the archived pipeline products and survey catalogues named in Sections~\ref{sec:tso} and \ref{sec:survey}. The real-data tests read \code{ASTROBURST\_SCIENCE\_DATA\_DIR} (those of the line measurement on the NIRSpec G395H spectrum read \code{ASTROBURST\_DOCUMENTS\_FITS\_DIR}) and are ignored without it. The LIGHTSTACK oracle kept its 47 passes, and no SAGUI product moved. The built app was driven through a checklist of 52 steps on real files (26 for time series and spectra, 26 for survey images); 46 were run and 6 could not be (keyboard-only behaviour and a Gaia query while VizieR was down). The defects that run exposed were corrected and their corrections are covered by tests, and four of the six corrected time-series steps were seen again in the app after the correction. Real-data tests added after that run open an LSSTCam visit image, an \code{afwdata} exposure and a Pan-STARRS1 skycell stack with its weight and mask files (Section~\ref{sec:survey}).
+
+    \textbf{Suite sizes (0.9.0).} On the 0.9.0 tree, \cmd{cargo test -{}-lib} had 5\,086 passed, 0 failed and 253 ignored; \cmd{pnpm test} had 8\,806 tests in 582 files, 8\,794 passed, 10 skipped and 2 failed, the two link checks of \code{README.md} and \code{docs/features.md}, which name the screenshots 20 to 31 that were not yet in the tree; \cmd{pnpm test:scripts} had 28 passed.
 
     \textbf{Suite sizes (0.8.0).} On the 0.8.0 release tree, \cmd{cargo test -{}-lib} had 4\,225 passed, 0 failed and 118 ignored; \cmd{pnpm test} had 6\,747 tests in 431 files and \cmd{pnpm test:scripts} 28; \cmd{npx tsc -{}-noEmit}, \cmd{npx vite build} and \cmd{npx eslint src -{}-max-warnings 0} exited 0. The server binary, all-features and LIGHTSTACK oracle runs were not repeated for this release.
 
@@ -2563,17 +2980,17 @@
     \toprule
     \textbf{Crate} & \textbf{Version} & \textbf{Purpose (gating feature)} \\
     \midrule
-    \crate{tauri} & 2.10 & Application framework, IPC, asset protocol --- \code{tauri} \\
-    \crate{tauri-plugin-dialog} & 2.6.0 & Native file dialogs --- \code{tauri} \\
-    \crate{tauri-plugin-fs} & 2.2.0 & Filesystem access from the webview --- \code{tauri} \\
-    \crate{tauri-plugin-shell} & 2.3 & External process and shell access --- \code{tauri} \\
-    \crate{tauri-plugin-opener} & 2.3 & Open files and URLs in the system handler --- \code{tauri} \\
-    \crate{axum} & 0.7 & HTTP router and request-id middleware of the headless server --- \code{server} \\
-    \crate{dashmap} & 6 & Concurrent session and image maps --- \code{server} \\
-    \crate{uuid} & 1 & v4 session, job and request identifiers --- \code{server} \\
-    \crate{tokio-stream} & 0.1 & SSE job-event stream --- \code{server} \\
-    \crate{tokio-util} & 0.7 & Cancellation tokens for jobs --- \code{server} \\
-    \crate{env\_logger} & 0.11 & Logger initialisation for the server binary --- \code{server} \\
+    \crate{tauri} & 2.10 & Application framework, IPC, asset protocol (\code{tauri}) \\
+    \crate{tauri-plugin-dialog} & 2.6.0 & Native file dialogs (\code{tauri}) \\
+    \crate{tauri-plugin-fs} & 2.2.0 & Filesystem access from the webview (\code{tauri}) \\
+    \crate{tauri-plugin-shell} & 2.3 & External process and shell access (\code{tauri}) \\
+    \crate{tauri-plugin-opener} & 2.3 & Open files and URLs in the system handler (\code{tauri}) \\
+    \crate{axum} & 0.7 & HTTP router and request-id middleware of the headless server (\code{server}) \\
+    \crate{dashmap} & 6 & Concurrent session and image maps (\code{server}) \\
+    \crate{uuid} & 1 & v4 session, job and request identifiers (\code{server}) \\
+    \crate{tokio-stream} & 0.1 & SSE job-event stream (\code{server}) \\
+    \crate{tokio-util} & 0.7 & Cancellation tokens for jobs (\code{server}) \\
+    \crate{env\_logger} & 0.11 & Logger initialisation for the server binary (\code{server}) \\
     \crate{reqwest} & 0.12 & Astrometry.net upload, VizieR, MAST and the catalogue store, \code{rustls-tls} and \code{multipart}: \code{net}, enabled by \code{astrometry-net}, \code{vizier} and \code{mast}; \code{vizier} adds \code{reqwest/blocking} \\
     \crate{lz4\_flex} & 0.11 & lz4 ASDF blocks: \code{asdf-full} \\
     \crate{zstd} & 0.13 & Input decoding for the catalogue build utility: \code{tools} \\
@@ -2597,7 +3014,7 @@
     \item \textbf{Registration of sequences is basic (N4).} Phase-correlation stacking, drizzle and the batch Pipeline validate shifts against a star transform when enough stars are available, use a decisive transform for rotation or scale, and exclude mirrored frames with a warning. There is no local normalization, mosaic assembly, comet alignment or distortion-aware sequence registration, and integration holds every frame in memory.
     \item \textbf{SPCC is a blackbody approximation (N5).} Expected colours come from a Planck spectrum at each channel's effective wavelength, driven by Gaia BP$-$RP; Gaia XP spectra are not integrated through filter and sensor curves.
     \item \textbf{gWCS coverage.} Imaging gWCS only: spectroscopic, slit and IFU gWCS are not evaluated and those files keep their header WCS; Roman \code{\_uncal} files do not look up their \code{\_wcs.asdf} sidecar; transforms outside the supported set (\code{tabular}, \code{fix\_inputs}, \code{jwst\_pipeline/*}) fall back to the header with the reason shown. A derived Roman FITS carries the fitted TAN-SIP, accurate to the stated residual, not the gWCS.
-    \item \textbf{PV distortion is not applied.} TAN headers with SCAMP-style PV cards preserve the linear TAN solution and report the unapplied distortion. Full TPV support remains pending, and explicit \code{RA---TPV} headers are refused.
+    \item \textbf{PV distortion is not applied.} TAN headers with SCAMP-style PV cards preserve the linear TAN solution and report the unapplied distortion. Full TPV support remains pending, and explicit \code{RA-{}-{}-TPV} headers are refused.
     \item \textbf{Tabulated axes and tables.} Only separable one-axis \code{-TAB} tables are read; variable-length \code{P}/\code{Q} columns are not; a PV diagram of a \code{-TAB} cube is refused when the table departs from linear by more than 1\,\% of its step.
     \item \textbf{No distortion-correcting export.} Compose Align reprojects channels through their full WCS (SIP or gWCS), but there is no tool that resamples a single image onto an undistorted grid.
     \item \textbf{Provenance gaps.} The RGB drizzle FITS does not carry the stack cards (\code{NCOMBINE}, \code{ABCOMB}, \code{ABDRZSCL}).
@@ -2606,8 +3023,12 @@
     \item \textbf{Network-dependent Gaia features.} Gaia refinement, catalogue queries and click-photometry matching need VizieR for a field not in the disk cache; SPCC can fall back to a synthetic catalogue whose factors are not photometrically reliable. Image pixels are not sent in these Gaia queries.
     \item \textbf{No session persistence.} The dock layout, display settings (per file since 0.6.7.2), per-file regions and panel preferences survive a restart through \code{localStorage}, and the processing history of single files survives in \code{history/}; the loaded files and the composite do not. There is no project file.
     \item \textbf{WebGPU is preferred, not required.} The display path needs a WebGPU-capable WebView; otherwise the CPU viewer is used without the stretch, limit and colormap controls.
-    \item \textbf{Server parity is partial.} Rendering, region statistics, histograms, cutouts, WCS queries, stacking, drizzle and the pipeline are available over HTTP. Radial profiles, line cuts, exclude regions, \code{.reg} import/export, DQ-masked statistics, photometry, catalogs, cube science, 1D spectra, ramps, the processing tools and their history, the MAST archive and the compose wizard are desktop-only, and the Python client covers the v1 routes only.
+    \item \textbf{Server parity is partial.} Rendering, region statistics, histograms, cutouts, WCS queries, stacking, drizzle and the pipeline are available over HTTP. Radial profiles, line cuts, exclude regions, \code{.reg} import/export, DQ-masked statistics, photometry, catalogs, cube science, 1D spectra, ramps, the processing tools and their history, the MAST archive, the compose wizard and every tool of 0.9.0 (time-series spectra, transit fits, the periodogram, tables, layer assignment, forced photometry, catalogue comparison, depth and the resolution check) are desktop-only, and the Python client covers the v1 routes only.
     \item \textbf{Temporary scientific products.} Solved-WCS copies, moment and line-fit maps, cube collapses, PV diagrams and quick-slope maps are written to the output folder, which is cleared at launch; products to keep must be saved or moved. The measurement log is session-only and needs Save CSV to preserve its rows.
+    \item \textbf{Transit fits are least squares on a circular orbit.} Eccentricity, the finite exposure time, limb darkening from stellar models, systematics beyond a baseline polynomial, a red-noise model and MCMC are not available; the errors are the linear estimate of the covariance, and $\beta$ of the time-averaging test is reported but not applied. The period is never fitted. No real eclipse has been fitted yet.
+    \item \textbf{Time-series spectra.} Level 3 extractions that lose pixels during a deep event bias depths, and NIRISS SOSS fluxes labelled MJy are relative. The masked mode, median and mean spectra need one wavelength grid for every integration. Several exposures in one series, padding and overlapping integrations were tested on synthetic files only.
+    \item \textbf{Survey formats tested on synthetic data.} The afw layout of HSC, the DES mask rule, PLIO or NOCOMPRESS integer tiles, \code{FLUXMAG0} zero points and the HSC and Rubin filter names were tested on synthetic files or headers; Pan-STARRS asinh pixels and mask names, the Rubin afw layout (with \code{EXTNAME} and with \code{EXTTYPE} only) and the nJy unit of Rubin were confirmed on real files on 2026-11-13. No Euclid NISP ($Y$, $J$, $H$) file was available; tile-compressed cubes have no band-plane keys. The SDSS frame error needs the gain and dark variance typed. On the Euclid VIS cutout the depth is 25.80 against 25.61 from the oracle (0.19\,mag deeper, tolerance 0.1\,mag) and the PSF FWHM 0.190\,arcsec against 0.177 (7.8\,\% wide, tolerance 5\,\%, four stars at 1.90\,px per FWHM), and the tests that hold both comparisons still fail; and its plateau fluxes exceed \code{flux\_vis\_psf} by 13 to 19\,\%.
+    \item \textbf{Edge apertures.} An aperture that leaves the image by less than one subsample step (0.2\,px) reports a masked fraction of 0. The resolved rule is exact for Gaussian profiles only, and the half-light form is a size proxy.
     \end{enumerate}
 
 
@@ -2668,6 +3089,10 @@
             N1 hinted local solving, catalogue downloads and Gaia DR3 WCS refinement & High & \textcolor{ForestGreen}{Done (v0.7.5)} \\
             MAST category, type and level filters; verified HST/JWST samples on demand & Medium & \textcolor{ForestGreen}{Done (v0.7.5)} \\
             ETD/ExoClock exports, JWST AREA photometry and TAN+PV warnings & High & \textcolor{ForestGreen}{Done (v0.7.5)} \\
+            Masks, mosaic by WCS, LIGHTSTACK cube preparation, Cube Prep and SAGUI & High & \textcolor{ForestGreen}{Done (v0.7.7 to 0.7.9)} \\
+            Correlated noise of resampling and PSF matching & Medium & \textcolor{ForestGreen}{Done (v0.8.0)} \\
+            JWST time-series spectra, transit and eclipse fit, transmission spectrum, period search & High & \textcolor{ForestGreen}{Done (v0.9.0)} \\
+            Survey images: layers, flag sets, zero points, forced multi-band photometry, catalogue comparison, depth & High & \textcolor{ForestGreen}{Done (v0.9.0)} \\
             \midrule
             Flatpak & Medium & Community package (FlatPark) \\
             \midrule
@@ -2687,7 +3112,7 @@
     \label{sec:samples}
 %% ============================================================================
 
-    The installers contain no sample images. Download sample data offers three fixed sets; the empty workspace offers the HST set, the Cube tool offers the JWST sets, and the command palette lists each set with its current Open, Download, Resume, Retry or Show download action.
+    The installers contain no sample images. Download sample data offers three fixed sets; the empty workspace offers the HST set, the Spectra tool offers the JWST sets, and the command palette lists each set with its current Open, Download, Resume, Retry or Show download action.
 
     \begin{table}[H]
         \centering
@@ -2717,7 +3142,7 @@
     \section{Release History}
     \label{sec:release_history}
 
-    These entries record the behaviour and measurements of their named releases. Historical thresholds, counts and timings are retained for provenance; consult the operational sections for 0.7.5 behaviour and Section~\ref{sec:testing} for the scope of validation.
+    These entries record the behaviour and measurements of their named releases. Historical thresholds, counts and timings are retained for provenance; consult the operational sections for the behaviour of 0.9.0 and Section~\ref{sec:testing} for the scope of validation.
 
     \subsection{What's New since v0.6.0}
     \label{sec:new_since_060}
@@ -2725,25 +3150,27 @@
     One line per release; the full entries are in \code{CHANGELOG.md}. Version numbers with four components are point releases of the 0.6 line.
 
     \begin{itemize}[nosep]
-    \item \textbf{0.6.1} --- The CPU and GPU previews show the same image after every processing step.
-    \item \textbf{0.6.2 (2026-09-25), measurement round} --- An interactive profile plot (hover, zoom, pan, CSV and PNG export); aperture photometry controls with a curve of growth and EE50/EE80 radii, and a Photometry table for batch measurement; calibrated region statistics (Jy, AB magnitude, mag/arcsec$^2$, area, centre RA/Dec, position angle); sky geometry (\code{world\_to\_pixel\_cmd}, separation and position angle, WCS orientation, a Targets panel, a compass and scale bar); spectral line measurement with a bounded Gauss-Newton fit (\code{math::gauss\_newton}); contours; elliptical surface-brightness profiles; time-series photometry; a pixel table; spectrum-linked channel navigation.
-    \item \textbf{0.6.3 (2026-09-25), science round 2} --- A rest-frame line list; spectrum export and comparison; observation geometry (UTC/TT/TDB, BJD\_TDB, HJD\_UTC, local sidereal time, airmass, parallactic angle, Sun and Moon); position-velocity diagrams; four diverging colormaps and symmetric limits (13 colormaps in total); the measurement log; and an interface round (status strip, press-and-hold Original, Compare wipe, 0-based coordinate labels, modal command palette).
-    \item \textbf{0.6.4 (2026-09-26)} --- The Processing tab works on the colour composite built in Compose, with its own processing chain and a revert to the original; Masked Stretch protection rewritten.
-    \item \textbf{0.6.5.0 (2026-10-02)} --- Dockable tool windows; an Align overlay and a Crop editor in the wizard; dependency warnings between wizard steps; the JWST pipeline \code{x1d} in the spectrum comparison; a wavelength readout from a \code{WAVELENGTH} extension; exclude regions; a colorbar; a first Match levels (replaced in 0.6.7); Write WCS after a plate solve; the Pipeline writes its masters; one-shot-colour lights refused before alignment and drizzle; display-referred STF export headers.
-    \item \textbf{0.6.6 (2026-10-03)} --- Per-spaxel line-fit kinematic maps for IFU cubes with a spaxel inspect plot; 27 lines in the line list; JWST \code{\_uncal} and Roman L1 ramps with a quick-look slope compared against the official \code{\_rate}; synthetic stacks that vary from frame to frame and list each frame in a manifest.
-    \item \textbf{0.6.6.3 (2026-10-04)} --- Analysis becomes five dock tools (Image, Astrometry, Photometry, Cube, Log); PixelMath \code{\$T} always names the input image; the \code{PUPIL} filter rule for NIRCam pupil-wheel filters; decimal-comma validation; the Masked Stretch black point follows the Auto STF shadow rule.
-    \item \textbf{0.6.7.0 (2026-10-10)} --- Detailed in Section~\ref{sec:new_067}.
+    \item \textbf{0.6.1}: The CPU and GPU previews show the same image after every processing step.
+    \item \textbf{0.6.2 (2026-09-25), measurement round}: An interactive profile plot (hover, zoom, pan, CSV and PNG export); aperture photometry controls with a curve of growth and EE50/EE80 radii, and a Photometry table for batch measurement; calibrated region statistics (Jy, AB magnitude, mag/arcsec$^2$, area, centre RA/Dec, position angle); sky geometry (\code{world\_to\_pixel\_cmd}, separation and position angle, WCS orientation, a Targets panel, a compass and scale bar); spectral line measurement with a bounded Gauss-Newton fit (\code{math::gauss\_newton}); contours; elliptical surface-brightness profiles; time-series photometry; a pixel table; spectrum-linked channel navigation.
+    \item \textbf{0.6.3 (2026-09-25), science round 2}: A rest-frame line list; spectrum export and comparison; observation geometry (UTC/TT/TDB, BJD\_TDB, HJD\_UTC, local sidereal time, airmass, parallactic angle, Sun and Moon); position-velocity diagrams; four diverging colormaps and symmetric limits (13 colormaps in total); the measurement log; and an interface round (status strip, press-and-hold Original, Compare wipe, 0-based coordinate labels, modal command palette).
+    \item \textbf{0.6.4 (2026-09-26)}: The Processing tab works on the colour composite built in Compose, with its own processing chain and a revert to the original; Masked Stretch protection rewritten.
+    \item \textbf{0.6.5.0 (2026-10-02)}: Dockable tool windows; an Align overlay and a Crop editor in the wizard; dependency warnings between wizard steps; the JWST pipeline \code{x1d} in the spectrum comparison; a wavelength readout from a \code{WAVELENGTH} extension; exclude regions; a colorbar; a first Match levels (replaced in 0.6.7); Write WCS after a plate solve; the Pipeline writes its masters; one-shot-colour lights refused before alignment and drizzle; display-referred STF export headers.
+    \item \textbf{0.6.6 (2026-10-03)}: Per-spaxel line-fit kinematic maps for IFU cubes with a spaxel inspect plot; 27 lines in the line list; JWST \code{\_uncal} and Roman L1 ramps with a quick-look slope compared against the official \code{\_rate}; synthetic stacks that vary from frame to frame and list each frame in a manifest.
+    \item \textbf{0.6.6.3 (2026-10-04)}: Analysis becomes five dock tools (Image, Astrometry, Photometry, Cube, Log); PixelMath \code{\$T} always names the input image; the \code{PUPIL} filter rule for NIRCam pupil-wheel filters; decimal-comma validation; the Masked Stretch black point follows the Auto STF shadow rule.
+    \item \textbf{0.6.7.0 (2026-10-10)}: Detailed in Section~\ref{sec:new_067}.
     \item \textbf{0.6.7.1 (2026-10-10)}: Compose Blend notes when the preview stretch is unlinked and the blend weights give R, G and B unequal totals, so their backgrounds differ even after Match levels, and offers Balanced ($\lambda$); \code{.asdf} and \code{.fits} files are marked binary in \code{.gitattributes}, which fixed the Windows CI run; README updated for 0.6.7.
     \item \textbf{0.6.7.2 (2026-10-11)}: Per-file display state (stretch, limits, colormap, invert, symmetry) kept across restarts, with the last look of an instrument and filter reused for new files and a Set as default; a one-click Linear look; a tool dropped on a group with an open panel replaces that panel; 64 open findings of past audits fixed, among them a memory check before stacking, the dark-scale optimiser no longer leaving the bias pedestal and Processing steps running on the image on screen.
     \item \textbf{0.6.9 (2026-10-16)}: Tile-compressed FITS read and written through \crate{fitsio-pure} and refused with a named cause when malformed; third-party licence notices shipped with the installers; the MAST Mission Search client for ten missions, without its screen; ASDF float16 arrays, \code{fitswcs\_imaging} in pure ASDF files and Roman metadata cards; rotate and flip carry ERR and DQ; DQ planes of unknown instruments shown as raw bits; the Airy profile's Bessel J1 corrected. Detailed in Section~\ref{sec:new_070}.
     \item \textbf{0.6.9.5 (2026-10-17)}: The MAST archive browser, whose image slots show the cause of a MAST failure; undo, redo and a persistent processing history with a History tool; error columns and error planes for cube products; \code{.fits.gz} decompression capped by the memory budget; a Data folder and a MAST download quota in Settings; a collapsing progress strip; optimised dependencies in development builds. Detailed in Section~\ref{sec:new_070}.
-    \item \textbf{0.7.0 (2026-10-17)}: MAST downloads, JWST search presets, footprints and header peek; 1D spectra as documents with error-aware line measurement and CSV export and reopen; error bands and the empirical noise factor in the Cube tool; \code{.fits.gz} in every file picker; CFA channel extraction and one CFA model for Bayer and X-Trans; star alignment at any rotation; FITS keyword aliases; the foundations of offline plate solving. Detailed in Section~\ref{sec:new_070}.
+    \item \textbf{0.7.0 (2026-10-17)}: MAST downloads, JWST search presets, footprints and header peek; 1D spectra as documents with error-aware line measurement and CSV export and reopen; error bands and the empirical noise factor in the Cube tool (now Spectra); \code{.fits.gz} in every file picker; CFA channel extraction and one CFA model for Bayer and X-Trans; star alignment at any rotation; FITS keyword aliases; the foundations of offline plate solving. Detailed in Section~\ref{sec:new_070}.
     \item \textbf{0.7.5 (2026-10-25)}: Local-first plate solving, Gaia DR3 WCS refinement, catalogue downloads and management, MAST filters, HST/JWST samples on demand, ETD/ExoClock exports, AREA-aware photometry, registration checks, file-handling fixes and release hardening.
     \item \textbf{0.7.6 (2026-10-25)}: TIMESYS \code{TCB}, \code{TCG} and \code{GPS} converted by their definitions and \code{TREFPOS} read, so a header time already at the barycentre is no longer corrected twice; untrusted time references and impossible calendar dates refused with a note naming the card; RGB exports and the GPU viewer use the processed RGB result on screen; VizieR errors, unverified Zenodo catalogues and failed or cancelled catalogue installs reported as such; stars detected once per plate solve; the headless v1 and v2 image slots kept consistent. Detailed in Section~\ref{sec:new_076_079}.
     \item \textbf{0.7.7 (2026-10-31)}: Masks for Processing steps; Mosaic by WCS in the Stacking tab; the wave 1 interface round of Processing, Stacking, Compose and the tool windows; Solve options for Plate Solve; astrometry.net submissions that fail at once or stay pending and can be checked again; LIGHTSTACK cube preparation in the engine, checked against LIGHTSTACK 0.4.0 by an oracle; the science API foundations of the headless server; \code{PC} read before \code{CD} as astropy does. Detailed in Section~\ref{sec:new_076_079}.
     \item \textbf{0.7.8 (2026-11-01)}: Cube preparation recipes run as server jobs, with coded refusals before a job starts and, from LIGHTSTACK's own crops of D1, a PSF-matched cube that agrees with LIGHTSTACK's; \code{error\_code} and \code{error\_hint} in job outcomes; \code{Session.cubeprep} and the job outcome in the Python client. Detailed in Section~\ref{sec:new_076_079}.
     \item \textbf{0.7.9 (2026-11-02)}: Cube Prep and SAGUI in the desktop; SHA-256 manifests of inputs and products, with spectral maps, Collapse and RAMP products checking their inputs before reading and before publishing; SCI, ERR and DQ preserved through cube preparation, and the D1 result at LIGHTSTACK's 44 by 43 pixels; one \code{DO\_NOT\_USE} policy for line fits, moment maps and Collapse; spectral moments weighted by channel widths; RAMP and RATE compared on one population. Detailed in Section~\ref{sec:new_076_079}.
     \item \textbf{0.8.0 (2026-11-06)}: Resampling and PSF-matching noise correlation recorded as \code{NOISCORR} maps and used for SAGUI's correlated regional errors; kernel shape \code{max} and kernel noise cards; \code{failure.json} and in-step cancellation for recipe runs; atomic FITS writes; the All tools browser, viewer frame stepper and analysis section tips. Detailed in Section~\ref{sec:new_080}.
+    \item \textbf{0.8.1 (2026-11-13)}: Line measurement in the source frame of the typed redshift; one air and vacuum relation, Morton (2000), for axes, spectra, plots and velocities, and \code{WAVE} read as vacuum; the line flux error without ERR including the continuum level and slope; absorption troughs; a photometry FWHM independent of the pixel phase and the aperture correction as the factor total over net; the Gaia zero-point error as the standard error of the intercept; a star-detection FWHM that no longer grows with brightness; the region net error with the background term (Section~\ref{sec:measure}); the pixel area from the determinant of the CD matrix; time-series BJD\_TDB from \code{TDB-MID}.
+    \item \textbf{0.9.0 (2026-11-13)}: JWST time-series spectra, transit and eclipse fits, the fitted transmission spectrum and the period search; line errors, line redshift and physical line flux; tables; survey files, layers, flag sets and zero points; forced multi-band photometry, catalogue comparison, depth and the resolution check; the Cube tool renamed Spectra. Detailed in Section~\ref{sec:new_090}.
     \end{itemize}
 
     \subsection{What's New in v0.7.6 to v0.7.9}
@@ -2849,46 +3276,46 @@
     \begin{itemize}[nosep]
     \item \textbf{Astrometry and WCS} (Sections~\ref{sec:wcs}, \ref{sec:gwcs_math}, \ref{sec:sipfit_math})
         \begin{itemize}[nosep]
-        \item \textbf{Celestial axis pair required} --- A header without \code{CTYPE1}/\code{CTYPE2}, with a non-celestial second axis, with latitude on axis 1 or with two different projection codes is refused with a reason. Before, a missing \code{CTYPE1} was read as \code{RA-{}-{}-TAN} and \code{CTYPE2} was never read, so a 2-D spectrum without \code{CTYPE} received invented sky coordinates.
-        \item \textbf{SIP fit residual} --- \code{SIPMXERR}/\code{SIPIVERR} are read, reported by \code{get\_wcs\_info} and the server \code{wcs} route, shown in the Info orientation line, grouped under ``WCS / Astrometry'' in the Header Explorer, rescaled by drizzle and resample, and treated as WCS cards when a WCS is replaced.
-        \item \textbf{gWCS evaluator} --- The JWST \code{\_cal} gWCS (read from the \code{ASDF} extension of the FITS file) and the Roman L2 \code{roman.meta.wcs} are evaluated exactly: polynomial distortion, mappings, 3-D rotation sequences and the TAN projection, with an exact inverse by Newton iteration on the sphere. Roman \code{\_cal.asdf} files, which previously opened without any WCS, now have sky coordinates, a grid and catalog overlays; JWST \code{\_cal} files use the gWCS instead of the header TAN-SIP and report the difference between the two.
-        \item \textbf{TAN-SIP fit for derived FITS} --- A Roman image gets a TAN-SIP header fitted to its gWCS (degree chosen automatically to 0.01\,px), so cutouts, crops and exports carry a valid header WCS; a JWST cutout receives the pipeline's own residual cards.
-        \item \textbf{Arithmetic gWCS operators} --- The astropy compound operators (\code{add}, \code{subtract}, \code{multiply}, \code{divide}, \code{power}) and \code{Const1D}/\code{Const2D} are evaluated, so tweakreg-corrected \code{\_crf} products use their gWCS instead of falling back to the header SIP.
-        \item \textbf{Plate solving} --- Solve and Write WCS run on the image being measured (a stack or a processed result), not on the original file; every GET to nova.astrometry.net is retried on transient failures (Section~\ref{sec:platesolve}).
+        \item \textbf{Celestial axis pair required}: A header without \code{CTYPE1}/\code{CTYPE2}, with a non-celestial second axis, with latitude on axis 1 or with two different projection codes is refused with a reason. Before, a missing \code{CTYPE1} was read as \code{RA-{}-{}-TAN} and \code{CTYPE2} was never read, so a 2-D spectrum without \code{CTYPE} received invented sky coordinates.
+        \item \textbf{SIP fit residual}: \code{SIPMXERR}/\code{SIPIVERR} are read, reported by \code{get\_wcs\_info} and the server \code{wcs} route, shown in the Info orientation line, grouped under ``WCS / Astrometry'' in the Header Explorer, rescaled by drizzle and resample, and treated as WCS cards when a WCS is replaced.
+        \item \textbf{gWCS evaluator}: The JWST \code{\_cal} gWCS (read from the \code{ASDF} extension of the FITS file) and the Roman L2 \code{roman.meta.wcs} are evaluated exactly: polynomial distortion, mappings, 3-D rotation sequences and the TAN projection, with an exact inverse by Newton iteration on the sphere. Roman \code{\_cal.asdf} files, which previously opened without any WCS, now have sky coordinates, a grid and catalog overlays; JWST \code{\_cal} files use the gWCS instead of the header TAN-SIP and report the difference between the two.
+        \item \textbf{TAN-SIP fit for derived FITS}: A Roman image gets a TAN-SIP header fitted to its gWCS (degree chosen automatically to 0.01\,px), so cutouts, crops and exports carry a valid header WCS; a JWST cutout receives the pipeline's own residual cards.
+        \item \textbf{Arithmetic gWCS operators}: The astropy compound operators (\code{add}, \code{subtract}, \code{multiply}, \code{divide}, \code{power}) and \code{Const1D}/\code{Const2D} are evaluated, so tweakreg-corrected \code{\_crf} products use their gWCS instead of falling back to the header SIP.
+        \item \textbf{Plate solving}: Solve and Write WCS run on the image being measured (a stack or a processed result), not on the original file; every GET to nova.astrometry.net is retried on transient failures (Section~\ref{sec:platesolve}).
         \end{itemize}
     \item \textbf{Measurement} (Section~\ref{sec:measure})
         \begin{itemize}[nosep]
-        \item \textbf{Measurements follow the image on screen} --- The Info panel sky readout reads the analysis target and hides itself for a target without a celestial WCS (a PV diagram); Statistics, region statistics, profiles and the line sky readout re-run when a processing step rewrites the same file; a click on a result whose grid differs from the cube (a PV diagram) no longer extracts the spectrum of an unrelated spaxel.
-        \item \textbf{Gain model for photometry} --- The gain field is prefilled from the header (\code{EGAIN}, \code{ATODGAIN}, \code{CCDGAIN}, \code{ADCGAIN}, never the camera \code{GAIN} setting), scaled for AstroBurst stacks by \code{NCOMBINE} and the combine method, and replaced by the ERR plane when there is one. Click, batch and time-series photometry warn when the errors leave out source photon noise (Section~\ref{sec:gain_math}).
-        \item \textbf{Filters in Rust} --- A Rust mirror of the filter-wavelength table (74 codes, NIRISS F158M and F380M and 14 HST broadband codes added), a parity test against the TypeScript table, and the \code{PUPIL} rule in the backend, so a time series no longer mixes an F444W+F470N frame with an F444W frame.
-        \item \textbf{Catalog disk cache} --- Gaia DR3 cones are cached on disk (64\,MiB, oldest first) and served memory $\to$ disk $\to$ network; the VizieR endpoint and the cache directory can be overridden; click photometry matches against one field cone instead of one request per star; SPCC uses the same cache.
-        \item \textbf{Tables and \code{-TAB} axes} --- Fixed-repeat array columns of binary tables are read (with \code{TDIM}); a \code{WAVE-TAB} spectral axis is evaluated from its \code{WCS-TABLE} per FITS WCS Paper III (Section~\ref{sec:tab_math}).
+        \item \textbf{Measurements follow the image on screen}: The Info panel sky readout reads the analysis target and hides itself for a target without a celestial WCS (a PV diagram); Statistics, region statistics, profiles and the line sky readout re-run when a processing step rewrites the same file; a click on a result whose grid differs from the cube (a PV diagram) no longer extracts the spectrum of an unrelated spaxel.
+        \item \textbf{Gain model for photometry}: The gain field is prefilled from the header (\code{EGAIN}, \code{ATODGAIN}, \code{CCDGAIN}, \code{ADCGAIN}, never the camera \code{GAIN} setting), scaled for AstroBurst stacks by \code{NCOMBINE} and the combine method, and replaced by the ERR plane when there is one. Click, batch and time-series photometry warn when the errors leave out source photon noise (Section~\ref{sec:gain_math}).
+        \item \textbf{Filters in Rust}: A Rust mirror of the filter-wavelength table (74 codes, NIRISS F158M and F380M and 14 HST broadband codes added), a parity test against the TypeScript table, and the \code{PUPIL} rule in the backend, so a time series no longer mixes an F444W+F470N frame with an F444W frame.
+        \item \textbf{Catalog disk cache}: Gaia DR3 cones are cached on disk (64\,MiB, oldest first) and served memory $\to$ disk $\to$ network; the VizieR endpoint and the cache directory can be overridden; click photometry matches against one field cone instead of one request per star; SPCC uses the same cache.
+        \item \textbf{Tables and \code{-TAB} axes}: Fixed-repeat array columns of binary tables are read (with \code{TDIM}); a \code{WAVE-TAB} spectral axis is evaluated from its \code{WCS-TABLE} per FITS WCS Paper III (Section~\ref{sec:tab_math}).
         \end{itemize}
     \item \textbf{Calibration and stacking} (Section~\ref{sec:calstack})
         \begin{itemize}[nosep]
-        \item \textbf{Frame-card checks} --- Binning, \code{GAIN}, \code{OFFSET}, dark exposures, flat filters and \code{IMAGETYP} are checked before any master is built, in the Calibration tab, the Pipeline and the server; mismatches that corrupt the result are refused, the others warned.
-        \item \textbf{Dark scale from exposures} --- The Calibration tab no longer asks for a dark ratio; the scale is the exposure ratio when a bias is present and 1 otherwise. Exposure is read from the merged primary and SCI header, so a JWST \code{EXPOSURE=1} (a count) is no longer read as one second.
-        \item \textbf{Flat-darks and temperature groups} --- Flat-darks are a fourth master; darks are grouped by sensor temperature and each light takes the nearest group.
-        \item \textbf{Provenance cards} --- Stack, Pipeline and drizzle outputs write \code{NCOMBINE}, \code{EXPTIME}, \code{TOTEXP}, \code{ABCOMB}, \code{ABREJECT}, \code{ABNORM} and \code{ABDRZSCL}.
-        \item \textbf{Combine correctness} --- Noise weights are divided by the square of the normalization scale; frames of different sizes are refused without alignment; the cosmetic zero-MAD fallback uses the 90th percentile; the Masked Stretch shadow guard no longer depends on the data range; cosmetic correction detects Bayer data from the header.
-        \item \textbf{Unregistered frames excluded} --- The batch Pipeline leaves out every frame it could not register and reports each one by its position in the channel; an unknown alignment method name sent to Stack, Compose Align or the aligned-channel export is an error instead of a silent phase correlation.
+        \item \textbf{Frame-card checks}: Binning, \code{GAIN}, \code{OFFSET}, dark exposures, flat filters and \code{IMAGETYP} are checked before any master is built, in the Calibration tab, the Pipeline and the server; mismatches that corrupt the result are refused, the others warned.
+        \item \textbf{Dark scale from exposures}: The Calibration tab no longer asks for a dark ratio; the scale is the exposure ratio when a bias is present and 1 otherwise. Exposure is read from the merged primary and SCI header, so a JWST \code{EXPOSURE=1} (a count) is no longer read as one second.
+        \item \textbf{Flat-darks and temperature groups}: Flat-darks are a fourth master; darks are grouped by sensor temperature and each light takes the nearest group.
+        \item \textbf{Provenance cards}: Stack, Pipeline and drizzle outputs write \code{NCOMBINE}, \code{EXPTIME}, \code{TOTEXP}, \code{ABCOMB}, \code{ABREJECT}, \code{ABNORM} and \code{ABDRZSCL}.
+        \item \textbf{Combine correctness}: Noise weights are divided by the square of the normalization scale; frames of different sizes are refused without alignment; the cosmetic zero-MAD fallback uses the 90th percentile; the Masked Stretch shadow guard no longer depends on the data range; cosmetic correction detects Bayer data from the header.
+        \item \textbf{Unregistered frames excluded}: The batch Pipeline leaves out every frame it could not register and reports each one by its position in the channel; an unknown alignment method name sent to Stack, Compose Align or the aligned-channel export is an error instead of a silent phase correlation.
         \end{itemize}
     \item \textbf{Compose} (Section~\ref{sec:compose})
         \begin{itemize}[nosep]
-        \item \textbf{Match levels by median and MAD} --- Each channel is scaled to the largest MAD and shifted to the reference median before blending; the composite FITS has balanced planes (Section~\ref{sec:levels_math}).
-        \item \textbf{STF link rule} --- The preview STF is unlinked when the composite planes' medians differ by more than three sigma or by a ratio above 1.5.
-        \item \textbf{SPCC at each channel's wavelength} --- The blackbody model is evaluated at the effective wavelength of each input filter instead of fixed 640/530/460\,nm, and the option is labelled ``SPCC (blackbody approximation)''.
-        \item \textbf{Align by WCS} --- Channels with a celestial WCS are reprojected onto the reference grid through the WCS, the residual is measured on point sources, and the reference is the finest pixel scale unless the user picks one (Section~\ref{sec:reproject_math}).
-        \item \textbf{Run tokens, crop and export} --- Wizard cache keys carry a per-run token so a late Align cannot overwrite a newer one; a stack that finishes after a Reset is discarded; Crop works on a single channel; star removal no longer marks Stretch done; Export shows and records the fixed channel mapping.
+        \item \textbf{Match levels by median and MAD}: Each channel is scaled to the largest MAD and shifted to the reference median before blending; the composite FITS has balanced planes (Section~\ref{sec:levels_math}).
+        \item \textbf{STF link rule}: The preview STF is unlinked when the composite planes' medians differ by more than three sigma or by a ratio above 1.5.
+        \item \textbf{SPCC at each channel's wavelength}: The blackbody model is evaluated at the effective wavelength of each input filter instead of fixed 640/530/460\,nm, and the option is labelled ``SPCC (blackbody approximation)''.
+        \item \textbf{Align by WCS}: Channels with a celestial WCS are reprojected onto the reference grid through the WCS, the residual is measured on point sources, and the reference is the finest pixel scale unless the user picks one (Section~\ref{sec:reproject_math}).
+        \item \textbf{Run tokens, crop and export}: Wizard cache keys carry a per-run token so a late Align cannot overwrite a newer one; a stack that finishes after a Reset is discarded; Crop works on a single channel; star removal no longer marks Stretch done; Export shows and records the fixed channel mapping.
         \end{itemize}
     \item \textbf{Processing} (Section~\ref{sec:processing})
         \begin{itemize}[nosep]
-        \item \textbf{Curves and Levels on a file} --- A Curves panel applies levels and a tone curve to a mono or RGB FITS as a chain step.
-        \item \textbf{De-banding on a file} --- The Background panel offers the de-band modes for a single frame and refuses dispersed exposures.
-        \item \textbf{Rotate and flip} --- Rotations by 90, 180 and 270 degrees and flips with an exact WCS update, including the SIP polynomials (Section~\ref{sec:geometry_math}).
+        \item \textbf{Curves and Levels on a file}: A Curves panel applies levels and a tone curve to a mono or RGB FITS as a chain step.
+        \item \textbf{De-banding on a file}: The Background panel offers the de-band modes for a single frame and refuses dispersed exposures.
+        \item \textbf{Rotate and flip}: Rotations by 90, 180 and 270 degrees and flips with an exact WCS update, including the SIP polynomials (Section~\ref{sec:geometry_math}).
         \end{itemize}
-    \item \textbf{Interface} --- A first-run coachmark explains how to dock tool windows vertically and horizontally (Section~\ref{sec:dock}).
-    \item \textbf{Headless server} --- The same WCS loader (gWCS included), the frame-card checks and flat-darks in \code{pipeline/run}, the new WCS keys on the \code{wcs} route, and the catalog cache initialised at start (Section~\ref{sec:server}).
+    \item \textbf{Interface}: A first-run coachmark explains how to dock tool windows vertically and horizontally (Section~\ref{sec:dock}).
+    \item \textbf{Headless server}: The same WCS loader (gWCS included), the frame-card checks and flat-darks in \code{pipeline/run}, the new WCS keys on the \code{wcs} route, and the catalog cache initialised at start (Section~\ref{sec:server}).
     \end{itemize}
 
     \subsection{v0.6.0 in Brief}
@@ -2896,13 +3323,13 @@
     Version 0.6.0 was published as a preview of the 0.6 line; the Windows MSI bundle reported \code{0.6.0} because MSI versions cannot carry a pre-release identifier. Its content, condensed:
 
     \begin{itemize}[nosep]
-    \item \textbf{Viewer maturity} --- Six scale modes (\code{mtf}, \code{linear}, \code{log}, \code{sqrt}, \code{asinh}, \code{power}), four limit modes (\code{minmax}, \code{zscale}, \code{percentile}, \code{user}) and nine colormaps defined once in \code{core/imaging/scale.rs} and shared by the GPU shader, the worker fallback and the server; pixel readout with units; cursor coordinates in ICRS, FK5, galactic or ecliptic.
-    \item \textbf{Planes and DQ} --- Image references (\code{<path>\#hdu=<n>}, \code{<path>\#array=<key>}), lossless integer planes, per-telescope DQ flag tables, DQ and ERR companions in the pixel readout, a DQ overlay and DQ-masked statistics.
-    \item \textbf{Regions} --- Seven shapes with handles, DS9 \code{.reg} import and export, per-region statistics with background annuli, radial profiles and line cuts, one geometry module shared with the server.
-    \item \textbf{Processing parity} --- The pixel rejection family and frame normalization (Sections~\ref{sec:rejection_families}, \ref{sec:frame_normalization}), masters integrated with the same kernel, cosmetic correction, DBE (Section~\ref{sec:dbe}), PixelMath, LHE and HDRMT (Section~\ref{sec:lhe_hdrmt}), the multiscale API, exact statistics with k-sigma noise.
-    \item \textbf{Science analysis} --- Photometric calibration from header zero points, fractional-pixel apertures (Section~\ref{sec:aperture_photometry}), the FITS spectral axis with velocity conventions and barycentric correction (Section~\ref{sec:radial_velocity}), region spectra, range collapse and moment maps (Section~\ref{sec:moment_maps}), science cutouts, the WCS coordinate grid and the Gaia DR3 catalog panel.
-    \item \textbf{WCS engine} --- The \crate{wcs} crate (wcs-rs and mapproj, about 20 projections, the CD, PC and CDELT conventions); SIP is applied by AstroBurst's own code because \crate{mapproj} 0.4.0's SIP evaluator advances polynomial powers by repeated squaring.
-    \item \textbf{GPU viewer parity} --- The processed FITS becomes the raw-pixel source of the WebGPU renderer for every mono step.
+    \item \textbf{Viewer maturity}: Six scale modes (\code{mtf}, \code{linear}, \code{log}, \code{sqrt}, \code{asinh}, \code{power}), four limit modes (\code{minmax}, \code{zscale}, \code{percentile}, \code{user}) and nine colormaps defined once in \code{core/imaging/scale.rs} and shared by the GPU shader, the worker fallback and the server; pixel readout with units; cursor coordinates in ICRS, FK5, galactic or ecliptic.
+    \item \textbf{Planes and DQ}: Image references (\code{<path>\#hdu=<n>}, \code{<path>\#array=<key>}), lossless integer planes, per-telescope DQ flag tables, DQ and ERR companions in the pixel readout, a DQ overlay and DQ-masked statistics.
+    \item \textbf{Regions}: Seven shapes with handles, DS9 \code{.reg} import and export, per-region statistics with background annuli, radial profiles and line cuts, one geometry module shared with the server.
+    \item \textbf{Processing parity}: The pixel rejection family and frame normalization (Sections~\ref{sec:rejection_families}, \ref{sec:frame_normalization}), masters integrated with the same kernel, cosmetic correction, DBE (Section~\ref{sec:dbe}), PixelMath, LHE and HDRMT (Section~\ref{sec:lhe_hdrmt}), the multiscale API, exact statistics with k-sigma noise.
+    \item \textbf{Science analysis}: Photometric calibration from header zero points, fractional-pixel apertures (Section~\ref{sec:aperture_photometry}), the FITS spectral axis with velocity conventions and barycentric correction (Section~\ref{sec:radial_velocity}), region spectra, range collapse and moment maps (Section~\ref{sec:moment_maps}), science cutouts, the WCS coordinate grid and the Gaia DR3 catalog panel.
+    \item \textbf{WCS engine}: The \crate{wcs} crate (wcs-rs and mapproj, about 20 projections, the CD, PC and CDELT conventions); SIP is applied by AstroBurst's own code because \crate{mapproj} 0.4.0's SIP evaluator advances polynomial powers by repeated squaring.
+    \item \textbf{GPU viewer parity}: The processed FITS becomes the raw-pixel source of the WebGPU renderer for every mono step.
     \end{itemize}
 
     \subsection{What's New in v0.5.8}
@@ -2910,78 +3337,78 @@
     Version 0.5.8 is an audit release: the math, GPU flow, image-processing and performance paths were reviewed across 21 module groups with every finding reproduced by hand before being fixed, and the ASDF reader was validated against the ASDF Standard 1.5/1.6.
 
     \begin{itemize}[nosep]
-    \item \textbf{Drizzle kernel} --- The Lanczos3 kernel was evaluated in output-pixel units, so at scale 3 (and any integer scale with zero offsets) 8/9 of the output pixels received zero weight and rendered as holes; the kernel argument and support now scale with the output grid
-    \item \textbf{Sigma-clip floor} --- Sigma-clip combine and the batch pipeline used a 1e-10 sigma floor when the MAD is 0 (more than half the samples tied), rejecting every value that differed from the median; they now fall back to the mean absolute deviation and skip rejection when the scale is truly zero
-    \item \textbf{Star removal} --- The soft star mask was applied twice, since push-pull fill already blends by the mask, leaving $m - m^2$ of the star flux at every mask edge
-    \item \textbf{GHS stretch} --- $D = 0$ returned the raw, un-normalized data instead of the normalized identity, producing a white preview and export once the composite was cached
-    \item \textbf{Wavelet reconstruction} --- Negative pixels were clamped to 0 and NaN was rewritten as 0
-    \item \textbf{Phase correlation} --- A confident coarse shift was discarded whenever the fixed centre crop was featureless, falling back to identity or noise; the coarse estimate is now kept when the refine pass has no signal
-    \item \textbf{Star detection} --- Saturated flat-top stars were deblended into several detections; equal-valued adjacent maxima now collapse to a single seed
-    \item \textbf{GPU/CPU preview parity} --- IPC preview extrema were computed over all finite pixels while auto-STF came from padding-aware statistics, so the GPU render and the canonical PNG disagreed; NaN pixels were rewritten to 0.0 before upload and rendered gray; and linked STF on the GPU normalized each channel by its own range while the Rust path uses the combined range
-    \item \textbf{WebGPU recovery} --- A failed initialisation (no adapter, device creation error) was cached for the whole session; the retry path re-probes
-    \item \textbf{Compressed FITS tiles} --- Quantized GZIP\_1/GZIP\_2 tiles were decoded as raw f32 bit patterns (the integer width is now inferred from the tile byte count), ZBITPIX $\pm 64$ was rejected for every codec including AstroBurst's own GZIP\_2 files, the Rice decoder indexed the stream unchecked and panicked on short or corrupt tiles, and constant tiles quantized with scale 1 under SUBTRACTIVE\_DITHER\_1 gained $\pm 0.5$ noise on decode
-    \item \textbf{ASDF block handling} --- Blocks are memory-mapped and decompressed lazily, so only the block behind the selected array is decoded (Roman L2 files carry six or more full-frame arrays), and uncompressed contiguous arrays are borrowed instead of copied three times
-    \item \textbf{ASDF conformance} --- \code{\#ASDF BLOCK INDEX} trailers, CRLF line endings, tree padding, STREAMED blocks and \code{shape: ['*', ...]} are handled per spec; negative strides were silently read as contiguous; external block references now fail explicitly; gWCS chains under \code{roman.meta.wcs} are resolved with the \code{Shift} offset converted from 0-based gwcs pixels to 1-based \code{CRPIX}; YAML-tagged \code{meta} subtrees are flattened into the header instead of dropped; and allocation sizes from untrusted block headers are bounded
-    \item \textbf{Headless server correctness} --- Region, histogram, cutout and pixel endpoints validated inputs only after arithmetic that could wrap or allocate unbounded memory; statistics and histograms silently discarded every pixel $\le$ 1e-7, giving wrong results for bias-subtracted or difference images; binning by a non-divisible factor averaged overlapping windows; viewport auto-STF from crop statistics was applied with global normalization; and re-opening an image under an existing name returned the stale cached array
-    \item \textbf{Job state} --- Cancellation is observed by workers before results are published and terminal transitions are atomic, so a late worker can no longer overwrite \code{cancelled}
-    \item \textbf{Memory and throughput} --- The batch stacking pipeline loads and stacks one channel at a time and returns 2048\,px previews instead of full-resolution base64 masters; drizzle scatters contributions directly into per-band accumulators in parallel instead of materialising every contribution as a tuple; and cube global statistics sample at most 32 frames with a pixel stride bounded to roughly 8M samples
+    \item \textbf{Drizzle kernel}: The Lanczos3 kernel was evaluated in output-pixel units, so at scale 3 (and any integer scale with zero offsets) 8/9 of the output pixels received zero weight and rendered as holes; the kernel argument and support now scale with the output grid
+    \item \textbf{Sigma-clip floor}: Sigma-clip combine and the batch pipeline used a 1e-10 sigma floor when the MAD is 0 (more than half the samples tied), rejecting every value that differed from the median; they now fall back to the mean absolute deviation and skip rejection when the scale is truly zero
+    \item \textbf{Star removal}: The soft star mask was applied twice, since push-pull fill already blends by the mask, leaving $m - m^2$ of the star flux at every mask edge
+    \item \textbf{GHS stretch}: $D = 0$ returned the raw, un-normalized data instead of the normalized identity, producing a white preview and export once the composite was cached
+    \item \textbf{Wavelet reconstruction}: Negative pixels were clamped to 0 and NaN was rewritten as 0
+    \item \textbf{Phase correlation}: A confident coarse shift was discarded whenever the fixed centre crop was featureless, falling back to identity or noise; the coarse estimate is now kept when the refine pass has no signal
+    \item \textbf{Star detection}: Saturated flat-top stars were deblended into several detections; equal-valued adjacent maxima now collapse to a single seed
+    \item \textbf{GPU/CPU preview parity}: IPC preview extrema were computed over all finite pixels while auto-STF came from padding-aware statistics, so the GPU render and the canonical PNG disagreed; NaN pixels were rewritten to 0.0 before upload and rendered gray; and linked STF on the GPU normalized each channel by its own range while the Rust path uses the combined range
+    \item \textbf{WebGPU recovery}: A failed initialisation (no adapter, device creation error) was cached for the whole session; the retry path re-probes
+    \item \textbf{Compressed FITS tiles}: Quantized GZIP\_1/GZIP\_2 tiles were decoded as raw f32 bit patterns (the integer width is now inferred from the tile byte count), ZBITPIX $\pm 64$ was rejected for every codec including AstroBurst's own GZIP\_2 files, the Rice decoder indexed the stream unchecked and panicked on short or corrupt tiles, and constant tiles quantized with scale 1 under SUBTRACTIVE\_DITHER\_1 gained $\pm 0.5$ noise on decode
+    \item \textbf{ASDF block handling}: Blocks are memory-mapped and decompressed lazily, so only the block behind the selected array is decoded (Roman L2 files carry six or more full-frame arrays), and uncompressed contiguous arrays are borrowed instead of copied three times
+    \item \textbf{ASDF conformance}: \code{\#ASDF BLOCK INDEX} trailers, CRLF line endings, tree padding, STREAMED blocks and \code{shape: ['*', ...]} are handled per spec; negative strides were silently read as contiguous; external block references now fail explicitly; gWCS chains under \code{roman.meta.wcs} are resolved with the \code{Shift} offset converted from 0-based gwcs pixels to 1-based \code{CRPIX}; YAML-tagged \code{meta} subtrees are flattened into the header instead of dropped; and allocation sizes from untrusted block headers are bounded
+    \item \textbf{Headless server correctness}: Region, histogram, cutout and pixel endpoints validated inputs only after arithmetic that could wrap or allocate unbounded memory; statistics and histograms silently discarded every pixel $\le$ 1e-7, giving wrong results for bias-subtracted or difference images; binning by a non-divisible factor averaged overlapping windows; viewport auto-STF from crop statistics was applied with global normalization; and re-opening an image under an existing name returned the stale cached array
+    \item \textbf{Job state}: Cancellation is observed by workers before results are published and terminal transitions are atomic, so a late worker can no longer overwrite \code{cancelled}
+    \item \textbf{Memory and throughput}: The batch stacking pipeline loads and stacks one channel at a time and returns 2048\,px previews instead of full-resolution base64 masters; drizzle scatters contributions directly into per-band accumulators in parallel instead of materialising every contribution as a tuple; and cube global statistics sample at most 32 frames with a pixel stride bounded to roughly 8M samples
     \end{itemize}
 
     \subsection{What's New in v0.5.5}
     \begin{itemize}[nosep]
-    \item \textbf{WebGPU RGB preview} --- GPU-only \code{GpuRgbRenderer} renders full RGB composites from three \code{r32float} textures with per-channel STF in the WGSL shader (MTF identical to the mono shader, the CPU worker and the Rust backend); falls back to the PNG composite when WebGPU is unavailable, no adapter is found or the device is lost
-    \item \textbf{Live per-channel RGB STF} --- \code{RgbStfPanel} in the Analysis tab restretches the GPU composite live with no backend round-trip; the mono STF slider skips its backend render while a GPU preview is active
-    \item \textbf{Linear RGB preview command} --- \code{get\_raw\_rgb\_pixels\_preview(path?, max\_dim)} returns a linear 3-channel float preview with per-channel min/max from a native RGB FITS or the composite cache (planar R$|$G$|$B behind a 32-byte header), with \code{encode\_channel\_preview} factored out of the mono encoder byte-identically
-    \item \textbf{Canonical filter table} --- \code{FILTER\_WAVELENGTHS\_NM} and \code{filter\_to\_wavelength\_nm} in \code{types/constants.rs}, mirrored by \code{utils/filterWavelengths.ts}, normalize CLEAR, separators and dual filters, replacing two duplicated JWST tables
-    \item \textbf{Dynamic channel Auto-Map} --- Each non-narrowband, non-RGB filter gets its own wavelength-labelled channel grouped by nm, so NIRCam F090W--F444W yields five distinct channels
-    \item \textbf{Auto ($\lambda$) blend} --- Spreads any number of channels across R/G/B by wavelength, applied once for untouched broadband stacks and never overriding a palette or manual weights
-    \item \textbf{Preview downsampling} --- Nearest-neighbour replaced by a contrast-weighted hybrid (mean to max) area kernel that preserves faint point sources while anti-aliasing the background
-    \item \textbf{STF GPU/CPU parity} --- The CPU fallback worker no longer hard-zeros raw $\le$ 1e-7, which blacked out background-subtracted pixels that the GPU shader maps to gray; epsilons are aligned at 1e-8
-    \item \textbf{Preview normalization} --- \code{data\_min}/\code{data\_max} describe the full image through a shared \code{scan\_extrema} instead of the decimated subset, so the live preview matches the canonical PNG
-    \item \textbf{GPU failure handling} --- \code{GpuSingleton} exposes \code{onGpuLost} and an uncaptured-error handler so a dead device's resources are dropped and the CPU worker takes over, an oversized image degrades to the worker instead of a blank canvas, and switching files no longer leaves stale pixels blocking the fetch
-    \item \textbf{Dead code removed} --- The orphaned ZNCC WebGPU shader (\code{zncc\_align.wgsl}), the unreachable client-side downsample worker and unused imports
+    \item \textbf{WebGPU RGB preview}: GPU-only \code{GpuRgbRenderer} renders full RGB composites from three \code{r32float} textures with per-channel STF in the WGSL shader (MTF identical to the mono shader, the CPU worker and the Rust backend); falls back to the PNG composite when WebGPU is unavailable, no adapter is found or the device is lost
+    \item \textbf{Live per-channel RGB STF}: \code{RgbStfPanel} in the Analysis tab restretches the GPU composite live with no backend round-trip; the mono STF slider skips its backend render while a GPU preview is active
+    \item \textbf{Linear RGB preview command}: \code{get\_raw\_rgb\_pixels\_preview(path?, max\_dim)} returns a linear 3-channel float preview with per-channel min/max from a native RGB FITS or the composite cache (planar R$|$G$|$B behind a 32-byte header), with \code{encode\_channel\_preview} factored out of the mono encoder byte-identically
+    \item \textbf{Canonical filter table}: \code{FILTER\_WAVELENGTHS\_NM} and \code{filter\_to\_wavelength\_nm} in \code{types/constants.rs}, mirrored by \code{utils/filterWavelengths.ts}, normalize CLEAR, separators and dual filters, replacing two duplicated JWST tables
+    \item \textbf{Dynamic channel Auto-Map}: Each non-narrowband, non-RGB filter gets its own wavelength-labelled channel grouped by nm, so NIRCam F090W--F444W yields five distinct channels
+    \item \textbf{Auto ($\lambda$) blend}: Spreads any number of channels across R/G/B by wavelength, applied once for untouched broadband stacks and never overriding a palette or manual weights
+    \item \textbf{Preview downsampling}: Nearest-neighbour replaced by a contrast-weighted hybrid (mean to max) area kernel that preserves faint point sources while anti-aliasing the background
+    \item \textbf{STF GPU/CPU parity}: The CPU fallback worker no longer hard-zeros raw $\le$ 1e-7, which blacked out background-subtracted pixels that the GPU shader maps to gray; epsilons are aligned at 1e-8
+    \item \textbf{Preview normalization}: \code{data\_min}/\code{data\_max} describe the full image through a shared \code{scan\_extrema} instead of the decimated subset, so the live preview matches the canonical PNG
+    \item \textbf{GPU failure handling}: \code{GpuSingleton} exposes \code{onGpuLost} and an uncaptured-error handler so a dead device's resources are dropped and the CPU worker takes over, an oversized image degrades to the worker instead of a blank canvas, and switching files no longer leaves stale pixels blocking the fetch
+    \item \textbf{Dead code removed}: The orphaned ZNCC WebGPU shader (\code{zncc\_align.wgsl}), the unreachable client-side downsample worker and unused imports
     \end{itemize}
 
     \subsection{What's New in v0.4.6}
     \begin{itemize}[nosep]
-    \item \textbf{Tone curves (AdjustStep)} --- Spline-based curve editor with per-channel R/G/B and linked RGB modes; non-destructive (reads COMPOSITE\_KEY, applies STF + curves for preview only)
-    \item \textbf{Auto-STF preview} --- All linear-domain commands (blend, calibrate, WB, SCNR, reset) render preview with linked auto-STF, eliminating washed-out previews
-    \item \textbf{Cache-only intermediate processing} --- align, stack, calibrate, and background extraction store results in GLOBAL\_IMAGE\_CACHE; only PNG previews written to disk until explicit export
-    \item \textbf{Narrowband detection via blend preset} --- \code{isNarrowbandWorkflow} checks preset (SHO, HOO, Foraxx) as fallback when bin IDs are r/g/b; SCNR warning badge for narrowband workflows
-    \item \textbf{Auto-STF propagation} --- blend, calibrate, WB, and reset commands return \code{auto\_stf} in response; StretchStep sliders initialize from auto-STF; ColorBalanceStep propagates post-WB STF to CompositeContext
-    \item \textbf{Export pipeline fixes} --- STF cache hit corruption fixed (linear data rendered directly when \code{applyStfStretch = false}); WCS header preservation for composite FITS; sentinel path handling
-    \item \textbf{Star detection safety} --- NaN guard (\code{is\_finite \&\& > 1e-7}), degenerate image early return, NaN-safe sort comparator
-    \item \textbf{TypeScript strict mode} --- 39 errors resolved (0 remaining); 22 missing lucide-react declarations added
-    \item \textbf{Windows asset protocol} --- Path safety with canonicalize, URL decode compatibility, async runtime
-    \item \textbf{Flatpak/Flathub} --- Submission pending approval for Linux distribution
+    \item \textbf{Tone curves (AdjustStep)}: Spline-based curve editor with per-channel R/G/B and linked RGB modes; non-destructive (reads COMPOSITE\_KEY, applies STF + curves for preview only)
+    \item \textbf{Auto-STF preview}: All linear-domain commands (blend, calibrate, WB, SCNR, reset) render preview with linked auto-STF, eliminating washed-out previews
+    \item \textbf{Cache-only intermediate processing}: align, stack, calibrate, and background extraction store results in GLOBAL\_IMAGE\_CACHE; only PNG previews written to disk until explicit export
+    \item \textbf{Narrowband detection via blend preset}: \code{isNarrowbandWorkflow} checks preset (SHO, HOO, Foraxx) as fallback when bin IDs are r/g/b; SCNR warning badge for narrowband workflows
+    \item \textbf{Auto-STF propagation}: blend, calibrate, WB, and reset commands return \code{auto\_stf} in response; StretchStep sliders initialize from auto-STF; ColorBalanceStep propagates post-WB STF to CompositeContext
+    \item \textbf{Export pipeline fixes}: STF cache hit corruption fixed (linear data rendered directly when \code{applyStfStretch = false}); WCS header preservation for composite FITS; sentinel path handling
+    \item \textbf{Star detection safety}: NaN guard (\code{is\_finite \&\& > 1e-7}), degenerate image early return, NaN-safe sort comparator
+    \item \textbf{TypeScript strict mode}: 39 errors resolved (0 remaining); 22 missing lucide-react declarations added
+    \item \textbf{Windows asset protocol}: Path safety with canonicalize, URL decode compatibility, async runtime
+    \item \textbf{Flatpak/Flathub}: Submission pending approval for Linux distribution
     \end{itemize}
 
     \subsection{What's New in v0.4.5}
     \begin{itemize}[nosep]
-    \item \textbf{Non-destructive composite pipeline} --- Immutable ORIG cache with idempotent WB and SCNR; \code{reset\_wb\_cmd} for one-click undo
-    \item \textbf{STF rendering consistency} --- GPU shader, CPU worker, and Rust backend produce pixel-identical output via symmetric denominator protection and unified padding threshold
-    \item \textbf{Blend preset positional fallback} --- SHO/HOO/Foraxx presets work with any bin configuration via positional weight mapping
-    \item \textbf{Spectroscopy wavelength unit conversion} --- Automatic CUNIT3 detection (M, NM, ANGSTROM, HZ) with display conversion
-    \item \textbf{Export pipeline fix} --- Exports use user STF params instead of identity, matching preview
+    \item \textbf{Non-destructive composite pipeline}: Immutable ORIG cache with idempotent WB and SCNR; \code{reset\_wb\_cmd} for one-click undo
+    \item \textbf{STF rendering consistency}: GPU shader, CPU worker, and Rust backend produce pixel-identical output via symmetric denominator protection and unified padding threshold
+    \item \textbf{Blend preset positional fallback}: SHO/HOO/Foraxx presets work with any bin configuration via positional weight mapping
+    \item \textbf{Spectroscopy wavelength unit conversion}: Automatic CUNIT3 detection (M, NM, ANGSTROM, HZ) with display conversion
+    \item \textbf{Export pipeline fix}: Exports use user STF params instead of identity, matching preview
     \end{itemize}
 
     \subsection{What's New in v0.4.2}
     \begin{itemize}[nosep]
-    \item \textbf{ComposeWizard} --- 11-step pipeline (Channels, Stack, Align, Crop, BG, Blend, Color, Mask, Stretch, Adjust, Export)
-    \item \textbf{Synthetic FITS generation} --- Star field, PSF, and noise injection for testing
-    \item \textbf{Narrowband palette system} --- SHO, HOO, HOS, NaturalColor, Custom with auto-detection
-    \item \textbf{Live composite STF re-stretch} --- Per-channel shadow/midtone/highlight without re-composing
-    \item \textbf{SPCC} --- Spectrophotometric color calibration with optional Gaia DR3 TAP (vizier feature)
-    \item \textbf{Masked stretch} --- Iterative MTF with star mask protection
-    \item \textbf{PSF enhancement} --- Moment-based FWHM with subpixel peak estimation
+    \item \textbf{ComposeWizard}: 11-step pipeline (Channels, Stack, Align, Crop, BG, Blend, Color, Mask, Stretch, Adjust, Export)
+    \item \textbf{Synthetic FITS generation}: Star field, PSF, and noise injection for testing
+    \item \textbf{Narrowband palette system}: SHO, HOO, HOS, NaturalColor, Custom with auto-detection
+    \item \textbf{Live composite STF re-stretch}: Per-channel shadow/midtone/highlight without re-composing
+    \item \textbf{SPCC}: Spectrophotometric color calibration with optional Gaia DR3 TAP (vizier feature)
+    \item \textbf{Masked stretch}: Iterative MTF with star mask protection
+    \item \textbf{PSF enhancement}: Moment-based FWHM with subpixel peak estimation
     \end{itemize}
 
     \subsection{What's New in v0.4.0}
     \begin{itemize}[nosep]
-    \item \textbf{Star-based affine alignment} --- Triangle asterism matching with RANSAC, automatic fallback to FFT phase correlation
-    \item \textbf{Stability-based auto white balance} --- Lowest MAD/median channel as reference
-    \item \textbf{SCNR luminance redistribution} --- ITU-R BT.709 weighted redistribution to R and B
-    \item \textbf{Numerical correctness audit} --- NaN ordering, Hann window, polynomial basis, RL regularization, phase correlation confidence
+    \item \textbf{Star-based affine alignment}: Triangle asterism matching with RANSAC, automatic fallback to FFT phase correlation
+    \item \textbf{Stability-based auto white balance}: Lowest MAD/median channel as reference
+    \item \textbf{SCNR luminance redistribution}: ITU-R BT.709 weighted redistribution to R and B
+    \item \textbf{Numerical correctness audit}: NaN ordering, Hann window, polynomial basis, RL regularization, phase correlation confidence
     \end{itemize}
 
     \clearpage

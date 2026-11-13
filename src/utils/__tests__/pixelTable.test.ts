@@ -2,23 +2,31 @@ import { describe, it, expect } from "vitest";
 import {
   DEFAULT_PIXEL_TABLE_SIZE,
   PIXEL_TABLE_PLANES,
+  PIXEL_TABLE_KEY,
   PIXEL_TABLE_SIZES,
+  DQ_CELL_GLYPH,
+  cellMark,
   cellTone,
+  centreSummary,
   columnIndices,
   displayedPlane,
+  errorOriginLine,
   formatCell,
   formatPlaneCell,
+  layerNotes,
   pixelCellTitle,
   pixelTableCsv,
   planeAvailable,
   rowIndices,
 } from "../pixelTable";
 import { CSV_LINE_END } from "../catalogCsv";
+import { APP_VERSION } from "../constants";
 import type { PixelTableResult, PixelTableStats } from "../../shared/types/analysis";
+import type { PixelTableLayers } from "../../shared/types/layers";
 
 const STATS: PixelTableStats = { min: 1, max: 9, mean: 4.5, median: 4, n_finite: 6, n_nan: 0 };
 
-function result(overrides: Partial<PixelTableResult> = {}): PixelTableResult {
+function result(overrides: Partial<PixelTableResult & PixelTableLayers> = {}): PixelTableResult & PixelTableLayers {
   return {
     x: 0,
     y: 1,
@@ -81,6 +89,55 @@ describe("pixelTableCsv", () => {
     expect(colAxis).toBe("x");
     expect(headers).toEqual(columnIndices(r).map(String));
     expect(lines.slice(1, 1 + r.size).map((l) => l.split(",")[0])).toEqual(rowIndices(r).map(String));
+  });
+
+  const EXPORTED = "2026-11-12T10:00:00.000Z";
+  const ERR_GRID = [
+    [null, 0.5, 1],
+    [null, 2, 2.5],
+    [null, 4, 4.5],
+  ];
+  const provenanceOf = (csv: string) => csv.split(CSV_LINE_END).filter((line) => line.startsWith("#"));
+  const bodyOf = (csv: string) => csv.split(CSV_LINE_END).filter((line) => !line.startsWith("#") && line !== "");
+
+  it("the copied table says which file, plane, unit and pixel it is", () => {
+    const csv = pixelTableCsv(
+      result({ unit: "MJy/sr", err: ERR_GRID, err_source: "EXTNAME VARIANCE, HDU 3: square root", dq_table: "jwst" }),
+      ERR_GRID,
+      { file: "a.fits", plane: "ERR", exportedUtc: EXPORTED },
+    );
+    expect(provenanceOf(csv)).toEqual([
+      `# software: AstroBurst ${APP_VERSION}`,
+      "# exported_utc: 2026-11-12T10:00:00.000Z",
+      "# file: a.fits",
+      "# plane: ERR",
+      "# centre_x: 0",
+      "# centre_y: 1",
+      "# pixel_coordinates: 0-based, integer pixel centres; rows are y, columns are x",
+      "# err_source: EXTNAME VARIANCE, HDU 3: square root",
+      "# dq_table: jwst",
+      "# unit -1: MJy/sr",
+      "# unit 0: MJy/sr",
+      "# unit 1: MJy/sr",
+    ]);
+    expect(bodyOf(csv)).toEqual(["y\\x,-1,0,1","0,,0.5,1", "1,,2,2.5", "2,,4,4.5"]);
+  });
+
+  it("leaves out what is not known and keeps the bare grid without a context", () => {
+    const bare = provenanceOf(pixelTableCsv(result(), undefined, { file: null, plane: "SCI", exportedUtc: EXPORTED }));
+    expect(bare[2]).toBe("# file:");
+    expect(bare.some((line) => line.startsWith("# err_source") || line.startsWith("# dq_table") || line.startsWith("# unit"))).toBe(false);
+    const sci = provenanceOf(pixelTableCsv(result({ err_source: "EXTNAME ERR, HDU 2: as is" }), undefined, { file: "a.fits", plane: "SCI", exportedUtc: EXPORTED }));
+    expect(sci.some((line) => line.startsWith("# err_source"))).toBe(false);
+    const wave = [
+      [null, 1.5, 1.6],
+      [null, 1.5, 1.6],
+      [null, 1.5, 1.6],
+    ];
+    const lambda = provenanceOf(
+      pixelTableCsv(result({ unit: "MJy/sr", wavelength: wave, wavelength_unit: "um" }), wave, { file: "a.fits", plane: "WAVELENGTH", exportedUtc: EXPORTED }),
+    );
+    expect(lambda.filter((line) => line.startsWith("# unit "))).toEqual(["# unit -1: um", "# unit 0: um", "# unit 1: um"]);
   });
 });
 
@@ -241,5 +298,80 @@ describe("cellTone", () => {
     expect(cellTone(3, flat, null)).toBe("max");
     const empty: PixelTableStats = { min: null, max: null, mean: null, median: null, n_finite: 0, n_nan: 9 };
     expect(cellTone(2, empty, null)).toBe("normal");
+  });
+});
+
+describe("errorOriginLine", () => {
+  it("errorOriginLine hides the untouched error plane of a pipeline product and shows every other origin", () => {
+    for (const hidden of [null, undefined, "", "EXTNAME ERR, HDU 2: as is", "ASDF array err, roman.err: as is"]) {
+      expect(errorOriginLine(hidden), String(hidden)).toBeNull();
+    }
+    expect(errorOriginLine("EXTNAME VARIANCE, HDU 3: square root")).toBe("± from EXTNAME VARIANCE, HDU 3: square root");
+    for (const shown of [
+      "EXTNAME RMS, HDU 2: as is",
+      "EXTNAME WGT, HDU 3: 1 / square root, assumed inverse variance",
+      "file name -RMS, EUC_MER_MOSAIC-VIS-RMS_TILE1-BBB_t2_00.00.fits: as is",
+      "user assignment, wgt.fits: 1 / square root",
+      "SDSS frame recipe (gain 4.76 e-/DN, dark variance 1.3225 DN^2, typed by the user): rebuilt from the calibration vector and the sky table",
+    ]) {
+      expect(errorOriginLine(shown)).toBe(`± from ${shown}`);
+    }
+  });
+});
+
+describe("cellMark", () => {
+  it("cellMark gives a flagged cell and the clicked cell a mark that is not a colour", () => {
+    expect(cellMark("dq", "SATURATED | JUMP_DET", false)).toEqual({ glyph: "*", srText: "DQ: SATURATED | JUMP_DET" });
+    expect(cellMark("dq", "SATURATED | JUMP_DET", true)).toEqual({ glyph: "*", srText: "DQ: SATURATED | JUMP_DET, clicked pixel" });
+    expect(cellMark("normal", null, true)).toEqual({ glyph: null, srText: "clicked pixel" });
+    for (const tone of ["max", "min", "nan", "normal"] as const) {
+      expect(cellMark(tone, null, false), tone).toEqual({ glyph: null, srText: null });
+    }
+    expect(DQ_CELL_GLYPH).toBe("*");
+  });
+});
+
+describe("PIXEL_TABLE_KEY", () => {
+  it("the key names the four tints in the order of their priority", () => {
+    expect(PIXEL_TABLE_KEY).toEqual([
+      { tone: "dq", label: "DQ flagged *" },
+      { tone: "max", label: "max" },
+      { tone: "min", label: "min" },
+      { tone: "nan", label: "no value" },
+    ]);
+  });
+});
+
+describe("centreSummary", () => {
+  it("centreSummary names the clicked pixel and its flags", () => {
+    expect(centreSummary(result())).toBe("clicked (0, 1)");
+    const dq_names = [
+      [null, null, null],
+      [null, "SATURATED", null],
+      [null, null, null],
+    ];
+    expect(centreSummary(result({ dq_names }))).toBe("clicked (0, 1): DQ SATURATED");
+  });
+});
+
+describe("layerNotes", () => {
+  it("layerNotes says where the error comes from and which layer was not used", () => {
+    expect(layerNotes({ err_source: "EXTNAME VARIANCE, HDU 3: square root", dq_source: "MP_ cards (afw mask planes)" })).toEqual({
+      origin: "ERR EXTNAME VARIANCE, HDU 3: square root",
+      gaps: [],
+    });
+    expect(
+      layerNotes({
+        err_unavailable: "error layer HDU 2 (VARIANCE) is 2x2 and does not match the image 4x4: not used",
+        dq_unavailable: "mask layer HDU 2 is a floating-point plane (BITPIX -32): flag bits cannot be read exactly",
+      }),
+    ).toEqual({
+      origin: null,
+      gaps: [
+        "ERR not used: error layer HDU 2 (VARIANCE) is 2x2 and does not match the image 4x4: not used",
+        "DQ not used: mask layer HDU 2 is a floating-point plane (BITPIX -32): flag bits cannot be read exactly",
+      ],
+    });
+    expect(layerNotes({})).toEqual({ origin: null, gaps: [] });
   });
 });

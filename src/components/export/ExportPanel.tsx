@@ -15,7 +15,7 @@ import {
   type CompressMefResult,
   type FitsCompression,
 } from "../../services/export";
-import { parseImageRef } from "../../utils/imageRef";
+import { sourceFile } from "../../utils/imageRef";
 import {
   channelSourceLabel,
   compositeExportName,
@@ -328,7 +328,7 @@ export default function ExportPanel({
 
   const handleCompressMef = useCallback(async () => {
     if (!filePath || mefQuantizeError) return;
-    const sourcePath = parseImageRef(filePath).path;
+    const sourcePath = sourceFile(filePath);
     setError(null);
     setMefRunning(true);
     setMefResult(null);
@@ -659,11 +659,11 @@ export default function ExportPanel({
               Export RGB as PNG ({pngBitDepth}-bit)
             </button>
             {rgbFilePath ? (
-              <p className="text-[10px] text-sky-400/60 px-1">{rgbFilePngNote(rgbResult, compositeStf ?? null)}</p>
+              <p className="text-[10px] text-sky-400/90 px-1">{rgbFilePngNote(rgbResult, compositeStf ?? null)}</p>
             ) : channelLabel ? (
-              <p className="text-[10px] text-sky-400/60 px-1">{channelLabel}</p>
+              <p className="text-[10px] text-sky-400/90 px-1">{channelLabel}</p>
             ) : compositeStf && (
-              <p className="text-[10px] text-sky-400/60 px-1">
+              <p className="text-[10px] text-sky-400/90 px-1">
                 Source: composite on screen; STF stretch auto-applied from composite preview
               </p>
             )}
@@ -820,7 +820,7 @@ export default function ExportPanel({
 
       {hasHeaderChannels && headerChannels && (
         <div className="flex flex-col gap-2 border-t border-zinc-800/50 pt-3">
-          <p className="text-[10px] text-teal-400/60 px-1">{channelSourceLabel(headerChannels)}</p>
+          <p className="text-[10px] text-teal-400/90 px-1">{channelSourceLabel(headerChannels)}</p>
           <div className="flex items-center justify-between">
             <label htmlFor={`${fieldId}-align-method`} className="text-xs text-zinc-400">Align Method</label>
             <select

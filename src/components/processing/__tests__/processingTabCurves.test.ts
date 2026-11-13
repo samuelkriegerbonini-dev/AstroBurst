@@ -32,7 +32,10 @@ vi.mock("../../../infrastructure/tauri", async (importOriginal) => ({
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   const useState = (init: unknown) =>
-    actual.useState(init === "background" && initialSection.value !== null ? initialSection.value : init);
+    actual.useState(() => {
+      const value = typeof init === "function" ? (init as () => unknown)() : init;
+      return value === "background" && initialSection.value !== null ? initialSection.value : value;
+    });
   return { ...actual, useState };
 });
 

@@ -187,6 +187,7 @@ export interface LineFitConfig {
   dq_policy?: ScienceDqPolicy;
   resolving_power: number | null;
   components: LineFitComponents;
+  redshift?: number | null;
 }
 
 export type LineFitBasePlane =
@@ -200,9 +201,17 @@ export type LineFitBasePlane =
   | "chi2_red"
   | "snr"
   | "mask"
-  | "ncomp";
+  | "ncomp"
+  | "source_flux"
+  | "source_velocity"
+  | "source_sigma_obs"
+  | "source_sigma_corr"
+  | "source_flux_err"
+  | "source_v_err"
+  | "source_sigma_err";
 
-export type LineFitComponentPlane = `c${1 | 2}_${"flux" | "velocity" | "sigma_obs" | "flux_err" | "v_err" | "sigma_err"}`;
+export type LineFitComponentPlane =
+  `c${1 | 2}_${"" | "source_"}${"flux" | "velocity" | "sigma_obs" | "flux_err" | "v_err" | "sigma_err"}`;
 
 export type LineFitPlane = LineFitBasePlane | LineFitComponentPlane;
 
@@ -256,6 +265,13 @@ export interface LineFitComponentFit {
   flux: number;
   flux_err: number | null;
   snr: number | null;
+  source_velocity_kms?: number | null;
+  source_v_err_kms?: number | null;
+  source_sigma_kms?: number | null;
+  source_sigma_err_kms?: number | null;
+  source_sigma_corr_kms?: number | null;
+  source_flux?: number | null;
+  source_flux_err?: number | null;
 }
 
 export interface LineFitContinuum {

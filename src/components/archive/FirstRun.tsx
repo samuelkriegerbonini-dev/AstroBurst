@@ -21,7 +21,7 @@ export default function FirstRun({ ctl, around, onSwitchToWorkspace }: FirstRunP
       <div className="ab-mast-suggestions">
         <span className="ab-mast-hero-label">Try</span>
         {SUGGESTIONS.map((s) => (
-          <button key={s.id} type="button" data-testid="mast-suggestion" data-query={s.text} data-mission={s.mission} className="ab-mast-chip ab-mast-suggestion" onClick={() => void ctl.runSuggestion(s)}>
+          <button key={s.id} type="button" data-testid="mast-suggestion" data-query={s.text} data-mission={s.mission} data-preset={s.preset} className="ab-mast-chip ab-mast-suggestion" onClick={() => void ctl.runSuggestion(s)}>
             {s.label}
           </button>
         ))}

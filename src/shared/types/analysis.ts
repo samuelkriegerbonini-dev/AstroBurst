@@ -113,6 +113,7 @@ export interface TimeSeriesFrame {
   geometry: FrameGeometry | null;
   offset: TimeSeriesFrameOffset | null;
   photcal_label: string | null;
+  bunit?: string | null;
   targets: (StarPhotometry | null)[];
   errors: (string | null)[];
   skipped: string | null;

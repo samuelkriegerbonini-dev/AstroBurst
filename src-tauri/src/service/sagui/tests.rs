@@ -648,6 +648,99 @@ fn mef_contract_reads_filters_err_dq_and_preserves_non_square_dimensions() {
     assert!(info.dq_flags.iter().all(|plane| plane.flagged_finite.is_empty()));
 }
 
+const CUBE_PSF_AREA_PX: f64 = 17.485957337296277;
+
+#[test]
+fn the_cube_check_reports_the_psf_and_pixel_scale_of_each_band() {
+    let info = validate_cube(&cube()).unwrap();
+    let f: f64 = 0.1 / 0.036;
+    let expected = std::f64::consts::PI * f * f / (2.0 * std::f64::consts::LN_2);
+    assert!(((expected - CUBE_PSF_AREA_PX) / CUBE_PSF_AREA_PX).abs() < 1e-12);
+    assert_eq!(info.bands.len(), 2);
+    for band in &info.bands {
+        assert_eq!(band.psf_fwhm_arcsec, Some(0.1));
+        assert_eq!(band.pixscale_arcsec, Some(0.036));
+        assert_eq!(band.psf_area_px.map(f64::to_bits), Some(expected.to_bits()));
+    }
+}
+
+#[test]
+fn a_band_without_a_psf_or_a_scale_has_no_psf_area() {
+    let reference = validate_cube(&cube()).unwrap();
+    for missing in [None, Some(f64::NAN), Some(0.0)] {
+        let mut cube = cube();
+        cube.filters[1].psf_fwhm_arcsec = missing;
+        let info = validate_cube(&cube).unwrap();
+        assert_eq!(info.bands[1].psf_fwhm_arcsec, None);
+        assert_eq!(info.bands[1].psf_area_px, None);
+        assert_eq!(info.bands[1].pixscale_arcsec, Some(0.036));
+        assert_eq!(info.bands[0].psf_fwhm_arcsec, reference.bands[0].psf_fwhm_arcsec);
+        assert_eq!(info.bands[0].pixscale_arcsec, reference.bands[0].pixscale_arcsec);
+        assert_eq!(info.bands[0].psf_area_px.map(f64::to_bits), reference.bands[0].psf_area_px.map(f64::to_bits));
+    }
+    let mut cube = cube();
+    cube.filters[0].pixscale_arcsec = None;
+    let info = validate_cube(&cube).unwrap();
+    assert_eq!(info.bands[0].psf_fwhm_arcsec, Some(0.1));
+    assert_eq!(info.bands[0].pixscale_arcsec, None);
+    assert_eq!(info.bands[0].psf_area_px, None);
+}
+
+fn cube_at_redshift_0_303() -> Cube {
+    let mut cube = cube();
+    crate::core::cubeprep::cube::update_metadata(&mut cube, Some(0.303), None, false).unwrap();
+    cube
+}
+
+#[test]
+fn the_redshift_card_of_the_cube_is_read_back() {
+    assert_eq!(validate_cube(&cube_at_redshift_0_303()).unwrap().redshift, Some(0.303));
+    let mut unknown = cube();
+    crate::core::cubeprep::cube::update_metadata(&mut unknown, None, None, false).unwrap();
+    assert!(unknown.header.cards.iter().any(|(key, _)| key == "REDSHIFT"));
+    assert_eq!(validate_cube(&unknown).unwrap().redshift, None);
+    assert_eq!(validate_cube(&cube()).unwrap().redshift, None);
+    for value in ["-0.2", "0"] {
+        let mut cube = cube();
+        cube.header.set("REDSHIFT", value.into());
+        assert_eq!(validate_cube(&cube).unwrap().redshift, None);
+    }
+}
+
+#[test]
+fn the_new_check_fields_survive_a_file_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input.fits");
+    crate::service::cubeprep::write_cube_file(path.to_str().unwrap(), &cube_at_redshift_0_303(), CubeLayout::Mef, "test").unwrap();
+    let info = inspect_input(path.to_str().unwrap()).unwrap();
+    assert_eq!(info.redshift, Some(0.303));
+    assert_eq!(info.bands.len(), 2);
+    for band in &info.bands {
+        assert!((band.psf_fwhm_arcsec.unwrap() - 0.1).abs() < 1e-6);
+        assert!((band.pixscale_arcsec.unwrap() - 0.036).abs() < 1e-6);
+        assert!(((band.psf_area_px.unwrap() - CUBE_PSF_AREA_PX) / CUBE_PSF_AREA_PX).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn the_check_json_carries_the_new_keys_and_keeps_the_old_ones() {
+    let value = serde_json::to_value(validate_cube(&cube()).unwrap()).unwrap();
+    let object = value.as_object().unwrap();
+    assert!(object["redshift"].is_null());
+    for key in ["width", "height", "bands", "unit", "has_err", "has_dq", "has_noise_correlation", "dq_flags", "estimated_memory_bytes", "warnings"] {
+        assert!(object.contains_key(key), "{key}");
+    }
+    assert_eq!(object.len(), 11);
+    for band in object["bands"].as_array().unwrap() {
+        let mut keys = band.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, ["filter", "pivot_um", "pixscale_arcsec", "psf_area_px", "psf_fwhm_arcsec"]);
+    }
+    let warnings = object["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].as_str().unwrap().starts_with("External cubes require aligned bands"));
+}
+
 #[test]
 fn companion_contract_refuses_mismatched_error_units_and_grid() {
     let cube = cube();

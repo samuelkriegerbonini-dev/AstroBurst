@@ -286,4 +286,16 @@ describe("rest wavelength and corrections", () => {
     expect(formatAxisValue(1.2345678, "μm", 0)).toBe("1.2346");
     expect(formatAxisValue(1.2345678, "μm", NaN)).toBe("1.2346");
   });
+
+  it("gives nanometres and Angstrom the decimals that match four of a micrometre", () => {
+    expect(formatAxisValue(656.28, "nm")).toBe("656.3");
+    expect(formatAxisValue(6562.8, "Å")).toBe("6563");
+    expect(formatAxisValue(656.2812, "nm", 0.002)).toBe("656.281");
+    expect(formatAxisValue(6562.812, "Å", 0.02)).toBe("6562.81");
+    expect(formatAxisValue(6562.8, "Å", 4)).toBe("6563");
+    expect(formatAxisValue(0.65628, "μm")).toBe("0.6563");
+    expect(formatAxisValue(12.34, "km/s")).toBe("12.3");
+    expect(formatAxisValue(656.2812, "nm", 0.002)).toBe((656.2812).toFixed(Math.ceil(-Math.log10(0.002))));
+    expect(formatAxisValue(656.2812, "nm", 0.5)).toBe("656.3");
+  });
 });

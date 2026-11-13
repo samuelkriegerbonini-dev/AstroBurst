@@ -275,7 +275,7 @@ function ExportTabInner() {
                       {shownCubeResult.fits && " (PNG + FITS)"}
                       {shownCubeResult.stopped && " (stopped)"}
                       {shownCubeResult.dir && !shownCubeResult.error && (
-                        <span className="block text-emerald-400/60 mt-0.5 truncate">
+                        <span className="block text-emerald-400/90 mt-0.5 truncate">
                           {shownCubeResult.dir}
                         </span>
                       )}

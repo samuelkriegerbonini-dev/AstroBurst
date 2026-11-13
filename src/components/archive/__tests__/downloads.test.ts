@@ -6,8 +6,10 @@ import type { AstroFile } from "../../../shared/types";
 import type { MastDownloadItem, MastProduct } from "../../../shared/types/mast";
 import { fileStore } from "../../../hooks/useFileStore";
 import { registerFileIngest } from "../../../hooks/useFileIngest";
+import { DEFAULT_DOCK_LAYOUT, dockReducer } from "../../../utils/dockLayout";
 import {
   ACTION_LABELS,
+  archiveOpenTool,
   CONFIRM_ABOVE_BYTES,
   NOT_VERIFIED_TEXT,
   downloadInput,
@@ -142,11 +144,14 @@ describe("download confirmation", () => {
 });
 
 describe("which downloads open in the workspace", () => {
-  it("opens images, cubes, spectra and ramps in readable files only", () => {
+  it("opens images, cubes, spectra, ramps and text tables in readable files only", () => {
     expect(openableDownload(item())).toBe(true);
     for (const opensAs of ["cube", "spectrum", "ramp"] as const) expect(openableDownload(item({ opensAs }))).toBe(true);
     expect(openableDownload(item({ opensAs: "catalog", filename: "jw02739-o001_t001_nircam_clear-f090w_segm.fits" }))).toBe(false);
-    expect(openableDownload(item({ opensAs: "catalog", filename: "x_cat.ecsv" }))).toBe(false);
+    expect(openableDownload(item({ opensAs: "catalog", filename: "x_cat.ecsv" }))).toBe(true);
+    expect(openableDownload(item({ opensAs: "catalog", filename: "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv" }))).toBe(true);
+    expect(openableDownload(item({ opensAs: "catalog", filename: "X_CAT.ECSV" }))).toBe(true);
+    expect(openableDownload(item({ opensAs: "image", filename: "x_cat.ecsv" }))).toBe(false);
     expect(openableDownload(item({ opensAs: null }))).toBe(false);
     expect(openableDownload(item({ opensAs: "spectrum", filename: "hlsp_x_spec.fits.gz" }))).toBe(true);
     expect(openableDownload(item({ opensAs: "spectrum", filename: "hlsp_x_spec.tar.gz" }))).toBe(false);
@@ -161,11 +166,49 @@ describe("which downloads open in the workspace", () => {
     expect(show).toHaveBeenCalledWith(`C:\\data\\mast\\JWST\\2739\\${CAL}`);
     expect(setMode).toHaveBeenCalledWith("workspace");
     expect(openDownloaded(item({ state: "downloading" }), { show, load, setMode, reload: vi.fn() })).toBe(false);
-    expect(openDownloaded(item({ state: "done", opensAs: "catalog", filename: "x_cat.ecsv" }), { show, load, setMode, reload: vi.fn() })).toBe(false);
+    expect(openDownloaded(item({ state: "done", opensAs: "catalog", filename: "jw02739-o001_t001_nircam_f444w-f470n_segm.fits" }), { show, load, setMode, reload: vi.fn() })).toBe(false);
     expect(show).toHaveBeenCalledTimes(1);
     expect(load).not.toHaveBeenCalled();
     const notReady = vi.fn(() => false);
     expect(openDownloaded(item({ state: "done" }), { show: notReady, load, setMode, reload: vi.fn() })).toBe(false);
+  });
+
+  it("opens a finished ECSV table like any other file", () => {
+    const show = vi.fn(() => true);
+    const load = vi.fn();
+    const setMode = vi.fn();
+    const path = "C:\\data\\mast\\JWST\\2358\\x_whtlt.ecsv";
+    expect(openDownloaded(item({ state: "done", opensAs: "catalog", filename: "x_whtlt.ecsv", path }), { show, load, setMode, reload: vi.fn() })).toBe(true);
+    expect(show).toHaveBeenCalledWith(path);
+    expect(setMode).toHaveBeenCalledWith("workspace");
+  });
+
+  it("names the tool an archive open should bring up", () => {
+    for (const opensAs of ["spectrum", "cube", "ramp"] as const) expect(archiveOpenTool(opensAs, DEFAULT_DOCK_LAYOUT)).toBe("cube");
+    for (const opensAs of ["image", "catalog", null] as const) expect(archiveOpenTool(opensAs, DEFAULT_DOCK_LAYOUT)).toBeNull();
+    const busy = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "photometry" });
+    expect(archiveOpenTool("spectrum", busy)).toBeNull();
+    const shown = dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "cube" });
+    expect(archiveOpenTool("spectrum", shown)).toBeNull();
+  });
+
+  it("routes a finished spectrum to its tool after showing it, and nothing that did not show", () => {
+    const load = vi.fn();
+    const setMode = vi.fn();
+    const spectrum = item({ state: "done", opensAs: "spectrum", filename: "x_x1d.fits" });
+    const route = vi.fn();
+    expect(openDownloaded(spectrum, { show: vi.fn(() => true), load, setMode, reload: vi.fn(), route })).toBe(true);
+    expect(route).toHaveBeenCalledTimes(1);
+    expect(route).toHaveBeenCalledWith("spectrum");
+    const notShown = vi.fn();
+    expect(openDownloaded(spectrum, { show: vi.fn(() => false), load, setMode, reload: vi.fn(), route: notShown })).toBe(false);
+    expect(notShown).not.toHaveBeenCalled();
+    const unfinished = vi.fn();
+    expect(openDownloaded(item({ state: "downloading", opensAs: "spectrum" }), { show: vi.fn(() => true), load, setMode, reload: vi.fn(), route: unfinished })).toBe(false);
+    expect(unfinished).not.toHaveBeenCalled();
+    const image = vi.fn();
+    expect(openDownloaded(item({ state: "done" }), { show: vi.fn(() => true), load, setMode, reload: vi.fn(), route: image })).toBe(true);
+    expect(image).toHaveBeenCalledWith("image");
   });
 });
 
@@ -250,7 +293,7 @@ describe("downloads store", () => {
         item({ open: true, state: "done" }),
         item({ id: "dl1:1", open: true, state: "downloading" }),
         item({ id: "dl1:2", open: false, state: "done" }),
-        item({ id: "dl1:3", open: true, state: "done", opensAs: "catalog", filename: "x_cat.ecsv" }),
+        item({ id: "dl1:3", open: true, state: "done", opensAs: "catalog", filename: "x_segm.fits" }),
         item({ id: "dl1:4", open: true, state: "error" }),
       ],
     });
@@ -259,6 +302,14 @@ describe("downloads store", () => {
     expect(pendingOpens(state)).toEqual([]);
     state = downloadsReducer(state, { type: "item", item: item({ id: "dl1:1", open: true, state: "done" }) });
     expect(pendingOpens(state).map((i) => i.id)).toEqual(["dl1:1"]);
+  });
+
+  it("also opens a finished table that was asked to open", () => {
+    const state = downloadsReducer(createDownloadsState(), {
+      type: "snapshot",
+      items: [item({ id: "dl3:0", open: true, state: "done", opensAs: "catalog", filename: "x_whtlt.ecsv" })],
+    });
+    expect(pendingOpens(state).map((i) => i.id)).toEqual(["dl3:0"]);
   });
 
   it("hands the refusal banner the same error object while progress events arrive", () => {
@@ -368,18 +419,21 @@ describe("download rows", () => {
     expect(downloadStatusText(item({ state: "downloading", received: 0, total: null, sizeBytes: 0 }))).toBe("Starting");
     expect(downloadStatusText(item({ state: "queued" }))).toBe("Queued");
     expect(downloadStatusText(item({ state: "cancelled", action: "resume" }))).toBe("Cancelled");
-    const html = renderToStaticMarkup(
-      createElement(DownloadQueueView, {
-        items: [unverified, item({ id: "dl1:1", state: "done", verified: true, opensAs: "catalog", filename: "x_cat.ecsv" }), item({ id: "dl1:2", state: "downloading", received: 5, total: 10 })],
-        onCancel: vi.fn(),
-        onAction: vi.fn(),
-        onOpen: vi.fn(),
-        onReveal: vi.fn(),
-        onClose: vi.fn(),
-      }),
-    );
+    const queueHtml = (second: MastDownloadItem) =>
+      renderToStaticMarkup(
+        createElement(DownloadQueueView, {
+          items: [unverified, second, item({ id: "dl1:2", state: "downloading", received: 5, total: 10 })],
+          onCancel: vi.fn(),
+          onAction: vi.fn(),
+          onOpen: vi.fn(),
+          onReveal: vi.fn(),
+          onClose: vi.fn(),
+        }),
+      );
+    const html = queueHtml(item({ id: "dl1:1", state: "done", verified: true, opensAs: "catalog", filename: "x_segm.fits" }));
     expect(html).toContain(NOT_VERIFIED_TEXT);
     expect(html.match(/>Open</g)).toHaveLength(1);
+    expect(queueHtml(item({ id: "dl1:1", state: "done", verified: true, opensAs: "catalog", filename: "x_cat.ecsv" })).match(/>Open</g)).toHaveLength(2);
     expect(html.match(/>Show in folder</g)).toHaveLength(2);
     expect(html.match(/>Cancel</g)).toHaveLength(1);
     expect(html).toContain('aria-valuenow="50"');

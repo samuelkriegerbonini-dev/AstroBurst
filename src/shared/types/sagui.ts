@@ -21,6 +21,9 @@ export interface SaguiConfig {
 export interface SaguiBand {
   filter: string;
   pivot_um: number;
+  psf_fwhm_arcsec?: number | null;
+  pixscale_arcsec?: number | null;
+  psf_area_px?: number | null;
 }
 
 export interface SaguiPlaneDqFlags {
@@ -40,6 +43,7 @@ export interface SaguiInputInfo {
   dq_flags?: SaguiPlaneDqFlags[];
   estimated_memory_bytes: number;
   warnings: string[];
+  redshift?: number | null;
 }
 
 export interface SaguiRuntimeInfo {

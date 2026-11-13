@@ -5,10 +5,13 @@ import { regionStats, type RegionStatsRequest } from "../services/regions";
 import type { RegionStatsMeasured } from "../utils/measurementLog";
 import { excludeShapes, isExcludeRegion } from "../utils/regionExclude";
 import { regionStatsRunKey } from "../utils/analysisTarget";
+import { decimalFieldState } from "../utils/decimalText";
 
 export const STATS_DEBOUNCE_MS = 250;
 export const MAX_REGIONS_PER_STATS_CALL = 512;
 export const MAX_CLIP_ITERS = 100;
+export const DEFAULT_CLIP_SIGMA = 3;
+export const DEFAULT_CLIP_ITERS = 5;
 
 const EMPTY_STATS: Map<string, RegionStatsEntry> = new Map();
 
@@ -41,6 +44,42 @@ export function parseClipSigma(text: string): number | null {
   return Number.isFinite(asF32) && asF32 > 0 ? v : null;
 }
 
+const SIGMA_RANGE_ERROR = "Use a number above 0 and below 3.4e38";
+const ITERS_RANGE_ERROR = `Use a whole number from 1 to ${MAX_CLIP_ITERS}`;
+
+export function clipFieldError(kind: "sigma" | "iters", text: string): string | null {
+  if (text.trim() === "") return null;
+  if (kind === "sigma") {
+    if (parseClipSigma(text) !== null) return null;
+    return decimalFieldState(text, { optional: true }).error ?? SIGMA_RANGE_ERROR;
+  }
+  if (parseClipIters(text) !== null) return null;
+  return decimalFieldState(text, { optional: true, integer: true, min: 1, max: MAX_CLIP_ITERS }).error ?? ITERS_RANGE_ERROR;
+}
+
+export interface RegionStatsUnits {
+  bunit: string | null;
+  summedUnit: string | null;
+}
+
+const NO_UNITS: RegionStatsUnits = { bunit: null, summedUnit: null };
+const NO_NOTES: string[] = [];
+
+export function notesOfChunks(responses: readonly RegionStatsResult[]): string[] {
+  return [...new Set(responses.flatMap((r) => r.notes ?? []))];
+}
+
+function firstNamed(values: readonly (string | null | undefined)[]): string | null {
+  return values.find((v): v is string => typeof v === "string" && v !== "") ?? null;
+}
+
+export function unitsOfChunks(responses: readonly RegionStatsResult[]): RegionStatsUnits {
+  return {
+    bunit: firstNamed(responses.map((r) => r.bunit)),
+    summedUnit: firstNamed(responses.map((r) => r.summed_unit)),
+  };
+}
+
 export interface RegionCalibrationState {
   photcal: PhotCal | null;
   calibrationWarnings: string[];
@@ -52,6 +91,8 @@ export interface RegionStatsState extends RegionCalibrationState {
   loading: boolean;
   error: string | null;
   measured: RegionStatsMeasured | null;
+  notes: string[];
+  units: RegionStatsUnits;
 }
 
 const NO_CALIBRATION: RegionCalibrationState = { photcal: null, calibrationWarnings: [], pixelAreaArcsec2: null };
@@ -77,6 +118,25 @@ export function measuredOfChunks(responses: readonly RegionStatsResult[]): Chunk
     dqExcluded: responses.find((r) => typeof r.dq_excluded === "number")?.dq_excluded ?? null,
     regionExcluded: responses.find((r) => r.region_excluded > 0)?.region_excluded ?? 0,
     elapsedMs: responses.reduce((sum, r) => sum + r.elapsed_ms, 0),
+  };
+}
+
+export function measuredOf(
+  regions: Region[],
+  excludeDq: boolean,
+  clip: RegionStatsClip,
+  responses: readonly RegionStatsResult[],
+): RegionStatsMeasured {
+  const units = unitsOfChunks(responses);
+  return {
+    regions,
+    excludeDq,
+    sigma: clip.sigma,
+    maxiters: clip.maxiters,
+    ...measuredOfChunks(responses),
+    notes: notesOfChunks(responses),
+    bunit: units.bunit,
+    summedUnit: units.summedUnit,
   };
 }
 
@@ -116,6 +176,8 @@ export function useRegionStats(
   const [stats, setStats] = useState<Map<string, RegionStatsEntry>>(EMPTY_STATS);
   const [calibration, setCalibration] = useState<RegionCalibrationState>(NO_CALIBRATION);
   const [measured, setMeasured] = useState<RegionStatsMeasured | null>(null);
+  const [notes, setNotes] = useState<string[]>(NO_NOTES);
+  const [units, setUnits] = useState<RegionStatsUnits>(NO_UNITS);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const seqRef = useRef(0);
@@ -127,6 +189,8 @@ export function useRegionStats(
     setStats(EMPTY_STATS);
     setCalibration(NO_CALIBRATION);
     setMeasured(null);
+    setNotes(NO_NOTES);
+    setUnits(NO_UNITS);
   }, [filePath]);
 
   useEffect(() => {
@@ -135,6 +199,8 @@ export function useRegionStats(
       setStats(EMPTY_STATS);
       setCalibration(NO_CALIBRATION);
       setMeasured(null);
+      setNotes(NO_NOTES);
+      setUnits(NO_UNITS);
       setLoading(false);
       setError(null);
       return;
@@ -160,7 +226,9 @@ export function useRegionStats(
         }
         setStats(merged);
         setCalibration(last);
-        setMeasured({ regions, excludeDq, sigma, maxiters, ...measuredOfChunks(responses) });
+        setMeasured(measuredOf(regions, excludeDq, { sigma, maxiters }, responses));
+        setNotes(notesOfChunks(responses));
+        setUnits(unitsOfChunks(responses));
         setError(null);
       } catch (e) {
         if (seqRef.current !== seq) return;
@@ -172,5 +240,5 @@ export function useRegionStats(
     return () => clearTimeout(timer);
   }, [filePath, runKey, regions, excludeDq, sigma, maxiters]);
 
-  return { stats, loading, error, measured, ...calibration };
+  return { stats, loading, error, measured, notes, units, ...calibration };
 }

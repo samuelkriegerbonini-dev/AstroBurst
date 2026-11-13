@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, CheckCircle2, XCircle } from "lucide-react";
 import ProfilePlot, { type ProfileSeries } from "../regions/ProfilePlot";
-import { ErrorAlert, RunButton, WarningList } from "../ui";
+import { ErrorAlert, RunButton, SMALL_BUTTON_CLASS, WarningList } from "../ui";
 import { compareWithRate } from "../../services/ramp";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import {
@@ -40,8 +40,6 @@ interface CompletedComparison {
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 font-mono focus:border-violet-500/50 w-16 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
-const SMALL_BUTTON_CLASS =
-  "px-2 py-0.5 rounded text-[9px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40";
 const HIST_HEIGHT = 120;
 const REL_HIST_COLOR = "rgba(45,212,191,0.9)";
 const DELTA_HIST_COLOR = "rgba(167,139,250,0.9)";

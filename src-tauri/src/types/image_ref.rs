@@ -5,7 +5,7 @@ use crate::types::constants::{REF_FRAGMENT_ARRAY, REF_FRAGMENT_HDU};
 
 const MAX_STEM_FRAGMENT_LEN: usize = 64;
 const DEFAULT_STEM: &str = "output";
-const COMPRESSION_EXTENSIONS: &[&str] = &["fz", "gz"];
+const COMPRESSION_EXTENSIONS: &[&str] = &["fz", "gz", "bz2"];
 const FITS_EXTENSIONS: &[&str] = &["fits", "fit", "fts"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
@@ -20,6 +20,53 @@ pub enum PlaneSelector {
 pub struct ImageRef {
     pub path: String,
     pub plane: PlaneSelector,
+}
+
+pub const REF_FRAGMENT_PLANE: &str = "&plane=";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BandPlaneKey {
+    pub file: String,
+    pub hdu: usize,
+    pub plane: usize,
+}
+
+fn canonical_index(text: &str) -> Option<usize> {
+    let canonical = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) && (text == "0" || !text.starts_with('0'));
+    canonical.then(|| text.parse().ok()).flatten()
+}
+
+impl BandPlaneKey {
+    pub fn new(file: &str, hdu: usize, plane: usize) -> BandPlaneKey {
+        BandPlaneKey { file: file.to_string(), hdu, plane }
+    }
+
+    pub fn parse(key: &str) -> Option<BandPlaneKey> {
+        if key.starts_with("__") {
+            return None;
+        }
+        let (file, fragment) = key.rsplit_once('#')?;
+        if file.is_empty() {
+            return None;
+        }
+        let (hdu, plane) = fragment.strip_prefix(REF_FRAGMENT_HDU)?.split_once(REF_FRAGMENT_PLANE)?;
+        Some(BandPlaneKey::new(file, canonical_index(hdu)?, canonical_index(plane)?))
+    }
+
+    pub fn key(&self) -> String {
+        format!("{}#{}{}{}{}", self.file, REF_FRAGMENT_HDU, self.hdu, REF_FRAGMENT_PLANE, self.plane)
+    }
+
+    pub fn cube_ref(&self) -> ImageRef {
+        ImageRef::hdu(&self.file, self.hdu)
+    }
+}
+
+pub fn source_file(path: &str) -> &str {
+    match BandPlaneKey::parse(path) {
+        Some(key) if !Path::new(path).is_file() => &path[..key.file.len()],
+        _ => path,
+    }
 }
 
 fn is_array_key_byte(b: u8) -> bool {
@@ -97,6 +144,9 @@ fn has_extension_in(ext: &str, list: &[&str]) -> bool {
 }
 
 pub fn source_stem(path: &str) -> String {
+    if let Some(key) = BandPlaneKey::parse(path) {
+        return format!("{}_hdu{}_plane{}", source_stem(&key.file), key.hdu, key.plane);
+    }
     let name = Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or("");
     let stem = match split_extension(name) {
         Some((stem, ext)) if has_extension_in(ext, COMPRESSION_EXTENSIONS) => match split_extension(stem) {
@@ -345,6 +395,13 @@ mod tests {
     }
 
     #[test]
+    fn output_stem_drops_the_bz2_extension_with_the_fits_extension() {
+        assert_eq!(stem("C:/d/frame-r-001462-4-0165.fits.bz2"), "frame-r-001462-4-0165");
+        assert_eq!(stem("C:/d/m31.FIT.BZ2#hdu=1"), "m31_hdu1");
+        assert_eq!(stem("C:/d/notes.tar.bz2"), "notes.tar");
+    }
+
+    #[test]
     fn same_stem_from_different_sources_gets_distinct_output_stems() {
         let mut stems = OutputStems::default();
         let first = ImageRef::parse("C:/night1/light_001.fits").output_stem_in(&mut stems);
@@ -421,5 +478,90 @@ mod tests {
             let key_string = r.cache_key();
             assert_eq!(ImageRef::parse(&key_string), r, "{key_string}");
         }
+    }
+
+    fn parts(key: &str) -> Option<(String, usize, usize)> {
+        BandPlaneKey::parse(key).map(|k| (k.file, k.hdu, k.plane))
+    }
+
+    #[test]
+    fn a_band_plane_key_parses_into_its_file_hdu_and_plane() {
+        assert_eq!(parts("C:/d/cut.fits#hdu=0&plane=1"), Some(("C:/d/cut.fits".into(), 0, 1)));
+        assert_eq!(parts("C:/run#7/a.fits#hdu=12&plane=3"), Some(("C:/run#7/a.fits".into(), 12, 3)));
+        assert_eq!(parts("a.fits.gz#hdu=1&plane=0"), Some(("a.fits.gz".into(), 1, 0)));
+        assert_eq!(parts("a.fits#hdu=0&plane=1#hdu=2&plane=3"), Some(("a.fits#hdu=0&plane=1".into(), 2, 3)));
+    }
+
+    #[test]
+    fn strings_that_are_not_band_plane_keys_are_refused() {
+        for s in [
+            "a.fits",
+            "a.fits#hdu=1",
+            "a.fits#plane=1",
+            "a.fits#hdu=1&plane=",
+            "a.fits#hdu=&plane=1",
+            "a.fits#hdu=1&plane=x",
+            "a.fits#hdu=01&plane=1",
+            "a.fits#hdu=1&plane=01",
+            "a.fits#hdu=-1&plane=1",
+            "a.fits#hdu=1&plane=-1",
+            "a.fits#hdu=1 &plane=1",
+            "a.fits#hdu=1&plane=1 ",
+            "a.fits#hdu=1&PLANE=1",
+            "a.fits#hdu=1&plane=1&plane=2",
+            "a.fits#array=dq&plane=1",
+            "#hdu=0&plane=1",
+            "__composite_r#hdu=0&plane=1",
+            "a.fits#hdu=1&plane=99999999999999999999999999",
+            "a.fits#hdu=99999999999999999999999999&plane=1",
+        ] {
+            assert_eq!(BandPlaneKey::parse(s), None, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn a_band_plane_key_round_trips_through_its_text() {
+        for (file, hdu, plane) in [("a.fits", 0, 0), ("C:/x y/b.fits", 3, 15), ("z.fits.bz2", 1, 2)] {
+            let key = BandPlaneKey::new(file, hdu, plane);
+            let text = key.key();
+            assert_eq!(text, format!("{file}#hdu={hdu}&plane={plane}"));
+            assert_eq!(BandPlaneKey::parse(&text), Some(key.clone()), "{text}");
+            assert_eq!(key.cube_ref(), ImageRef::hdu(file, hdu), "{text}");
+        }
+    }
+
+    #[test]
+    fn image_ref_parse_keeps_a_band_plane_key_whole() {
+        let r = ImageRef::parse("a.fits#hdu=0&plane=1");
+        assert_eq!(r, ImageRef::auto("a.fits#hdu=0&plane=1"));
+        assert_eq!(r.cache_key(), "a.fits#hdu=0&plane=1");
+        assert_eq!(r.fragment(), None);
+        assert_eq!(ImageRef::parse("a.fits#hdu=0&plane=1#hdu=0"), ImageRef::hdu("a.fits#hdu=0&plane=1", 0));
+    }
+
+    #[test]
+    fn source_file_is_the_file_of_a_band_plane_key_and_the_path_otherwise() {
+        assert_eq!(source_file("C:/d/cut.fits#hdu=0&plane=1"), "C:/d/cut.fits");
+        for s in ["C:/d/cut.fits", "C:/d/cut.fits#hdu=1", "__composite_r", ""] {
+            assert_eq!(source_file(s), s, "{s:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("odd.fits#hdu=0&plane=1");
+        std::fs::write(&odd, b"x").unwrap();
+        let odd = odd.to_str().unwrap();
+        assert_eq!(source_file(odd), odd);
+    }
+
+    #[test]
+    fn the_output_stem_of_a_band_plane_names_its_hdu_and_plane() {
+        assert_eq!(stem("C:/d/ls-dr10_A.fits#hdu=0&plane=1"), "ls-dr10_A_hdu0_plane1");
+        assert_eq!(stem("C:/d/cut.fits.gz#hdu=1&plane=3"), "cut_hdu1_plane3");
+        assert_eq!(stem("C:/d/cut.fits#hdu=0&plane=1#hdu=0"), "cut_hdu0_plane1_hdu0");
+        let mut stems = OutputStems::default();
+        let named: Vec<String> = ["C:/d/cut.fits#hdu=0&plane=0", "C:/d/cut.fits#hdu=0&plane=1", "C:/d/cut.fits#hdu=0"]
+            .iter()
+            .map(|key| ImageRef::parse(key).output_stem_in(&mut stems))
+            .collect();
+        assert_eq!(named, ["cut_hdu0_plane0", "cut_hdu0_plane1", "cut_hdu0"]);
     }
 }

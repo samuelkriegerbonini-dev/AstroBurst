@@ -1,5 +1,7 @@
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesRole, TimeSeriesTarget } from "../shared/types/analysis";
 import { fileBaseName } from "./values";
+import { exportEntries, provenanceLines, summedPixelUnit, unitLines, withProvenance } from "./csvProvenance";
+import { relativeFlux } from "./lightCurveAnalysis";
 
 export type TimeAxis = "jd" | "bjd" | "index";
 
@@ -88,6 +90,9 @@ export const LIGHT_CURVE_CSV_COLUMNS = [
   "skipped",
   "errors",
   "comp_saturated",
+  "rel_flux",
+  "rel_flux_err",
+  "left_out",
 ] as const;
 
 function isFiniteNumber(v: number | null | undefined): v is number {
@@ -146,6 +151,35 @@ export function bjdSources(frames: readonly TimeSeriesFrame[]): string | null {
 export function geometryNotes(result: TimeSeriesResult): string[] {
   const reference = result.frames.find((f) => f.path === result.reference_path);
   return [...new Set([...result.geometry_notes, ...(reference?.geometry?.time_scale_notes ?? [])])];
+}
+
+function noteKind(note: string): string {
+  return note.replace(/[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/g, "#");
+}
+
+export function otherFrameNotes(result: TimeSeriesResult): string[] {
+  const measured = result.frames.filter((f) => f.skipped === null);
+  const shown = new Set(geometryNotes(result).map(noteKind));
+  const kinds = new Map<string, { text: string; fileName: string; frames: number; varied: boolean }>();
+  for (const frame of measured) {
+    const seen = new Set<string>();
+    for (const note of frame.geometry?.time_scale_notes ?? []) {
+      const kind = noteKind(note);
+      if (shown.has(kind)) continue;
+      const entry = kinds.get(kind);
+      if (!entry) {
+        kinds.set(kind, { text: note, fileName: frame.file_name, frames: 1, varied: false });
+      } else {
+        entry.varied = entry.varied || note !== entry.text;
+        if (!seen.has(kind)) entry.frames += 1;
+      }
+      seen.add(kind);
+    }
+  }
+  const total = measured.length;
+  return [...kinds.values()].map((k) =>
+    k.varied ? `${k.text} (${k.frames} of ${total} frames; numbers of ${k.fileName})` : `${k.text} (${k.frames} of ${total} frames)`,
+  );
 }
 
 export interface TimeAxisAvailability {
@@ -375,8 +409,22 @@ function csvCell(v: number | string | boolean | null | undefined, digits?: numbe
   return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
 }
 
-export function lightCurveCsv(result: TimeSeriesResult, rows: LightCurvePoint[], extra: LightCurveExtra[]): string {
+function tenDigitCell(v: number | null): string {
+  return v === null ? "" : String(Number(v.toPrecision(10)));
+}
+
+export function lightCurveCsv(
+  result: TimeSeriesResult,
+  rows: LightCurvePoint[],
+  extra: LightCurveExtra[],
+  leftOut?: readonly (string | null)[],
+): string {
   const lines = [LIGHT_CURVE_CSV_COLUMNS.join(",")];
+  const relative = relativeFlux(
+    rows.map((row) => row.mag),
+    rows.map((row) => row.err),
+    MAG_ERR_FACTOR,
+  );
   rows.forEach((row, k) => {
     const frame = result.frames[row.frameIndex];
     if (!frame) return;
@@ -411,6 +459,9 @@ export function lightCurveCsv(result: TimeSeriesResult, rows: LightCurvePoint[],
         csvCell(frame.skipped),
         csvCell(e?.errors ?? null),
         csvCell(e?.compSaturated.join("; ") ?? null),
+        tenDigitCell(relative.flux[k]),
+        tenDigitCell(relative.err[k]),
+        csvCell(leftOut?.[row.frameIndex] ?? null),
       ].join(","),
     );
   });
@@ -424,7 +475,7 @@ export function apertureLine(result: TimeSeriesResult, targetIdx: number): strin
   return `# aperture px: ${star.aperture_radius}; sky annulus px: ${star.sky_inner} to ${star.sky_outer}`;
 }
 
-function provenanceLines(result: TimeSeriesResult, targetIdx: number, comps: number[], fluxUnit: string | null): string[] {
+function exportKeyLines(result: TimeSeriesResult, targetIdx: number, comps: number[], fluxUnit: string | null): string[] {
   const label = (i: number) => result.targets[i]?.label ?? `#${i}`;
   const leftOut = result.targets.flatMap((star, i) => (star.role === "comp" && !comps.includes(i) ? [star.label] : []));
   const sources = bjdSources(result.frames.filter((f) => f.skipped === null));
@@ -441,10 +492,45 @@ function provenanceLines(result: TimeSeriesResult, targetIdx: number, comps: num
   ];
 }
 
-export function lightCurveCsvText(result: TimeSeriesResult, targetIdx: number, compIdx: number[], fluxUnit: string | null): string {
+export interface LightCurveCsvOptions {
+  exportedUtc?: string;
+  leftOut?: readonly (string | null)[];
+}
+
+export function lightCurveCsvText(
+  result: TimeSeriesResult,
+  targetIdx: number,
+  compIdx: number[],
+  fluxUnit: string | null,
+  options: LightCurveCsvOptions = {},
+): string {
   const comps = compIdx.filter((i) => i !== targetIdx);
-  const table = lightCurveCsv(result, lightCurve(result, targetIdx, comps, "index"), lightCurveExtras(result, targetIdx, comps));
-  return [...provenanceLines(result, targetIdx, comps, fluxUnit), table].join("\n");
+  const table = lightCurveCsv(result, lightCurve(result, targetIdx, comps, "index"), lightCurveExtras(result, targetIdx, comps), options.leftOut);
+  const summed = summedPixelUnit(fluxUnit);
+  const lines = [
+    ...provenanceLines(exportEntries(fileBaseName(result.reference_path), options.exportedUtc)),
+    ...exportKeyLines(result, targetIdx, comps, fluxUnit),
+    `# rel_flux: 10^(-0.4 diff_mag), the target over the sum of the comparison stars, not normalised; rel_flux_err = rel_flux * diff_err / ${MAG_ERR_FACTOR}`,
+    "# left_out: why the light-curve view leaves the frame out of its analysis (flagged, by hand, clipped); blank when the frame is used",
+    ...unitLines({
+      jd_mid: "d",
+      exptime: "s",
+      bjd_tdb: "d",
+      hjd_utc: "d",
+      altitude_deg: "deg",
+      parallactic_angle_deg: "deg",
+      diff_mag: "mag",
+      diff_err: "mag",
+      target_flux: summed,
+      target_err: summed,
+      ensemble_flux: summed,
+      fwhm: "px",
+      bg_mean: fluxUnit,
+      dx: "px",
+      dy: "px",
+    }),
+  ];
+  return withProvenance(lines, table, "\n");
 }
 
 export function referenceStem(referencePath: string): string {
@@ -469,6 +555,37 @@ export function timeSeriesRoleHint(roles: readonly TimeSeriesRole[]): string | n
   return null;
 }
 
+export function defaultSeriesRoles(
+  ids: readonly string[],
+  chosen: Readonly<Record<string, TimeSeriesRole>>,
+  limit: number = MAX_TIME_SERIES_TARGETS,
+): TimeSeriesRole[] {
+  const chosenRoles = ids.map((id) => chosen[id] as TimeSeriesRole | undefined);
+  const chosenTarget = chosenRoles.includes("target");
+  let budget = limit - chosenRoles.filter((role) => role !== undefined && role !== "ignore").length;
+  return chosenRoles.map((role, index) => {
+    if (role !== undefined) return role;
+    if (budget <= 0) return "ignore";
+    budget -= 1;
+    return index === 0 && !chosenTarget ? "target" : "comp";
+  });
+}
+
+export function withExclusiveTarget(
+  chosen: Readonly<Record<string, TimeSeriesRole>>,
+  ids: readonly string[],
+  id: string,
+  role: TimeSeriesRole,
+): Record<string, TimeSeriesRole> {
+  const next: Record<string, TimeSeriesRole> = { ...chosen, [id]: role };
+  if (role !== "target") return next;
+  const current = defaultSeriesRoles(ids, chosen);
+  ids.forEach((other, index) => {
+    if (other !== id && current[index] === "target") next[other] = "comp";
+  });
+  return next;
+}
+
 export function inFrameOrder(result: TimeSeriesResult, framePaths: string[]): TimeSeriesResult {
   const rank = new Map<string, number>();
   framePaths.forEach((p, i) => {
@@ -484,6 +601,43 @@ export function inFrameOrder(result: TimeSeriesResult, framePaths: string[]): Ti
 export function frameJdLabel(value: number | null | undefined, axis: TimeAxis, jd0: number): string {
   if (!isFiniteNumber(value)) return "--";
   return axis !== "index" ? (value - jd0).toFixed(RELATIVE_JD_DIGITS) : value.toFixed(FRAME_JD_DIGITS);
+}
+
+export interface SeriesTableHeaders {
+  jd: string;
+  bjd: string;
+  diffMag: string;
+  fwhm: string;
+  sky: string;
+  offset: string;
+}
+
+export function seriesTableHeaders(axis: TimeAxis, jd0: number, unit: string | null): SeriesTableHeaders {
+  return {
+    jd: axis === "jd" ? `JD - ${jd0} [d]` : "JD [d]",
+    bjd: axis === "bjd" ? `BJD_TDB - ${jd0} [d]` : "BJD_TDB [d]",
+    diffMag: "diff mag [mag]",
+    fwhm: "FWHM [px]",
+    sky: unit ? `sky [${unit}]` : "sky",
+    offset: "dx/dy [px]",
+  };
+}
+
+export interface FrameUnits {
+  unit: string | null;
+  mixed: string | null;
+}
+
+export function frameUnits(result: TimeSeriesResult): FrameUnits {
+  const counts = new Map<string | null, number>();
+  for (const frame of result.frames) {
+    if (frame.skipped !== null) continue;
+    const unit = frame.bunit?.trim() || null;
+    counts.set(unit, (counts.get(unit) ?? 0) + 1);
+  }
+  if (counts.size <= 1) return { unit: [...counts.keys()][0] ?? null, mixed: null };
+  const parts = [...counts].map(([unit, count]) => `${unit ?? "none"} (${count})`).join(", ");
+  return { unit: "mixed units", mixed: `frames have different BUNIT: ${parts}` };
 }
 
 export function jdOffsetLabel(value: number, step?: number): string {

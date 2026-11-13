@@ -1,9 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
+  BAND_SPECIES,
+  DEFAULT_BAND_SPECIES,
   LINE_FAMILIES,
   LINE_PICK_TOLERANCE_PX,
   MAX_REDSHIFT,
+  REST_BANDS,
   REST_LINES,
+  bandById,
+  bandMarks,
   conventionForKind,
   displayConvention,
   familyLabel,
@@ -15,10 +20,12 @@ import {
   lineDisplayValue,
   lineListAvailability,
   lineMarks,
+  nearestBandMark,
   nearestLineMark,
   observedVacuumUm,
   parseRedshiftInput,
   parseSystemicInput,
+  pickedBandLabel,
   pickedLineLabel,
   placeLineMarks,
   redshiftFrameLabel,
@@ -26,9 +33,12 @@ import {
   resyncRedshiftText,
   resyncSystemicText,
   storedVacuumUm,
+  toggleBandSpecies,
   velocityKmsFromRedshift,
   type LineFamily,
   type LineMark,
+  type LineMarksInput,
+  type RestBandKind,
 } from "../lineList";
 import {
   SPEED_OF_LIGHT_KMS,
@@ -37,7 +47,7 @@ import {
   vacuumToAirUm,
   velocityKms,
 } from "../spectralAxis";
-import { nearestChannel, type PlotMapping } from "../spectrumRange";
+import { axisValueToPixel, nearestChannel, type PlotMapping } from "../spectrumRange";
 import type { SpectralAxisInfo, SpectralAxisKind, SpectralAxisMode, VelocityConvention } from "../../shared/types/spectral";
 
 const HA = 0.656461;
@@ -84,9 +94,9 @@ function optical(id: string): number {
 }
 
 describe("rest-frame line table", () => {
-  it("the table holds the 43 lines of the brief once each with the family of their storage unit", () => {
-    expect(REST_LINES).toHaveLength(43);
-    expect(new Set(REST_LINES.map((l) => l.id)).size).toBe(43);
+  it("the table holds the 47 lines of the brief once each with the family of their storage unit", () => {
+    expect(REST_LINES).toHaveLength(47);
+    expect(new Set(REST_LINES.map((l) => l.id)).size).toBe(47);
     expect(LINE_FAMILIES).toEqual(["optical", "nir", "mir", "radio"]);
     const count: Record<LineFamily, number> = { optical: 0, nir: 0, mir: 0, radio: 0 };
     for (const line of REST_LINES) {
@@ -95,7 +105,7 @@ describe("rest-frame line table", () => {
       if (line.family === "radio") expect(line.restGhz).toBeGreaterThan(0);
       else expect(line.restGhz).toBeNull();
     }
-    expect(count).toEqual({ optical: 10, nir: 10, mir: 16, radio: 7 });
+    expect(count).toEqual({ optical: 14, nir: 10, mir: 16, radio: 7 });
   });
 
   it("optical lines match NIST ASD vacuum wavelengths", () => {
@@ -115,6 +125,19 @@ describe("rest-frame line table", () => {
       const line = lineById(id);
       expect(line?.family).toBe("optical");
       expectNear(line?.vacuumUm ?? null, um, 2e-6);
+    }
+    const alkali: Record<string, [string, number]> = {
+      nai_5890: ["Na I 5890", 0.5891583264],
+      nai_5896: ["Na I 5896", 0.5897558147],
+      ki_7665: ["K I 7665", 0.7667008906],
+      ki_7699: ["K I 7699", 0.7701083536],
+    };
+    for (const [id, [label, um]] of Object.entries(alkali)) {
+      const line = lineById(id);
+      expect(line?.label).toBe(label);
+      expect(line?.family).toBe("optical");
+      expect(line?.restGhz).toBeNull();
+      expectNear(line?.vacuumUm ?? null, um, 1e-7);
     }
   });
 
@@ -507,5 +530,300 @@ describe("click hit test and hints", () => {
     expect(resyncRedshiftText("1e-3", 0.001)).toBe("1e-3");
     expect(resyncRedshiftText("0.5", 0.25)).toBe("0.25");
     expect(resyncRedshiftText("", 0)).toBe("0");
+  });
+});
+
+describe("band table", () => {
+  const MOLECULAR_IDS = [
+    "h2o_2p7",
+    "h2o_6p3",
+    "co2_4p3",
+    "co_4p7",
+    "ch4_3p3",
+    "ch4_7p7",
+    "so2_7p3",
+    "so2_8p7",
+    "nh3_3p0",
+    "nh3_6p1",
+    "nh3_10p5",
+    "h2s_3p8",
+    "h2s_8p5",
+    "hcn_3p0",
+    "hcn_4p8",
+    "c2h2_3p0",
+  ];
+  const ALL_SPECIES = ["H2O", "CO2", "CO", "CH4", "SO2", "NH3", "H2S", "HCN", "C2H2", "Na", "K", "He", "H", "G395H gap"];
+
+  it("the band table holds the 21 sourced rows with unique ids that no line uses", () => {
+    expect(REST_BANDS).toHaveLength(21);
+    expect(REST_BANDS.map((b) => b.id)).toEqual([...MOLECULAR_IDS, "na_d", "k_i_doublet", "he_i_triplet", "h_alpha_band", "nirspec_g395h_gap"]);
+    expect(new Set(REST_BANDS.map((b) => b.id)).size).toBe(21);
+    expect(REST_BANDS.map((b) => b.label)).toEqual([
+      "H2O 2.7",
+      "H2O 6.3",
+      "CO2 4.3",
+      "CO 4.7",
+      "CH4 3.3",
+      "CH4 7.7",
+      "SO2 7.3",
+      "SO2 8.7",
+      "NH3 3.0",
+      "NH3 6.1",
+      "NH3 10.5",
+      "H2S 3.8",
+      "H2S 8.5",
+      "HCN 3.0",
+      "HCN 4.8",
+      "C2H2 3.0",
+      "Na I D",
+      "K I 0.77",
+      "He I 1.083",
+      "Hα",
+      "G395H gap",
+    ]);
+    const lineIds = new Set(REST_LINES.map((l) => l.id));
+    const count: Record<RestBandKind, number> = { molecular_band: 0, atomic_line: 0, instrument: 0 };
+    for (const band of REST_BANDS) {
+      expect(lineIds.has(band.id)).toBe(false);
+      expect(band.loVacuumUm).toBeLessThanOrEqual(band.centreVacuumUm);
+      expect(band.centreVacuumUm).toBeLessThanOrEqual(band.hiVacuumUm);
+      expect(band.source.length).toBeGreaterThan(0);
+      expect(Object.keys(count)).toContain(band.kind);
+      count[band.kind]++;
+    }
+    expect(count).toEqual({ molecular_band: 16, atomic_line: 4, instrument: 1 });
+    expect(BAND_SPECIES).toEqual(ALL_SPECIES);
+    expect(DEFAULT_BAND_SPECIES).toEqual(["H2O", "CO2", "CO", "CH4", "SO2"]);
+    for (const name of DEFAULT_BAND_SPECIES) expect(BAND_SPECIES).toContain(name);
+    expect(bandById("nope")).toBeNull();
+  });
+
+  it("molecular band centres are the NIST band origins as 10000 / nu", () => {
+    const origins: Record<string, [number, string[]]> = {
+      h2o_2p7: [2.662406816, ["3756 cm-1", "3657 cm-1"]],
+      h2o_6p3: [6.269592476, ["1595 cm-1"]],
+      co2_4p3: [4.257130694, ["2349 cm-1"]],
+      co_4p7: [4.666355576, ["2143 cm-1"]],
+      ch4_3p3: [3.312355084, ["3019 cm-1"]],
+      ch4_7p7: [7.656967841, ["1306 cm-1"]],
+      so2_7p3: [7.342143906, ["1362 cm-1"]],
+      so2_8p7: [8.688097307, ["1151 cm-1"]],
+      nh3_3p0: [2.996703626, ["3337 cm-1", "3444 cm-1"]],
+      nh3_6p1: [6.1462815, ["1627 cm-1"]],
+      nh3_10p5: [10.72386059, ["932.5 and 968.3 cm-1"]],
+      h2s_3p8: [3.824091778, ["2615 cm-1", "2626 cm-1"]],
+      h2s_8p5: [8.453085376, ["1183 cm-1"]],
+      hcn_3p0: [3.019323671, ["3312 cm-1"]],
+      hcn_4p8: [4.786979416, ["2089 cm-1"]],
+      c2h2_3p0: [3.040437823, ["3289 cm-1"]],
+    };
+    expect(Object.keys(origins)).toEqual(MOLECULAR_IDS);
+    for (const [id, [um, wavenumbers]] of Object.entries(origins)) {
+      const band = bandById(id);
+      expect(band?.kind).toBe("molecular_band");
+      expect(band?.centreVacuumUm).toBeCloseTo(um, 9);
+      for (const text of wavenumbers) expect(band?.source).toContain(text);
+      if (id === "co_4p7") expect(band?.source.endsWith("display range from Grant et al., arXiv 2304.11994")).toBe(true);
+      else expect(band?.source.endsWith("display range editorial")).toBe(true);
+    }
+  });
+
+  it("molecular display ranges are the ones of the research table", () => {
+    const ranges: Record<string, [number, number]> = {
+      h2o_2p7: [2.5, 3.0],
+      h2o_6p3: [5.5, 7.5],
+      co2_4p3: [4.15, 4.5],
+      co_4p7: [4.3, 5.1],
+      ch4_3p3: [3.15, 3.5],
+      ch4_7p7: [7.3, 8.1],
+      so2_7p3: [7.1, 7.6],
+      so2_8p7: [8.4, 9.0],
+      nh3_3p0: [2.85, 3.05],
+      nh3_6p1: [5.9, 6.4],
+      nh3_10p5: [10.0, 11.0],
+      h2s_3p8: [3.7, 4.0],
+      h2s_8p5: [8.0, 9.0],
+      hcn_3p0: [2.95, 3.1],
+      hcn_4p8: [4.7, 4.9],
+      c2h2_3p0: [2.95, 3.1],
+    };
+    expect(Object.keys(ranges)).toEqual(MOLECULAR_IDS);
+    for (const [id, [lo, hi]] of Object.entries(ranges)) {
+      const band = bandById(id);
+      expect(band?.loVacuumUm).toBe(lo);
+      expect(band?.hiVacuumUm).toBe(hi);
+    }
+  });
+
+  it("atomic rows span their NIST multiplet and agree with the line list", () => {
+    const rows: Record<string, [string, number, number, number]> = {
+      na_d: ["Na", 0.5891583264, 0.5891583264, 0.5897558147],
+      k_i_doublet: ["K", 0.7667008906, 0.7667008906, 0.7701083536],
+      he_i_triplet: ["He", 1.0832057482, 1.0833306454, 1.0833306454],
+      h_alpha_band: ["H", 0.656452, 0.65646, 0.656463],
+    };
+    for (const [id, [species, lo, centre, hi]] of Object.entries(rows)) {
+      const band = bandById(id);
+      expect(band?.kind).toBe("atomic_line");
+      expect(band?.species).toBe(species);
+      expect(band?.loVacuumUm).toBe(lo);
+      expect(band?.centreVacuumUm).toBe(centre);
+      expect(band?.hiVacuumUm).toBe(hi);
+      expect(band?.source.startsWith("NIST ASD vacuum: ")).toBe(true);
+    }
+    const apart = (a: number | undefined, b: number) => Math.abs((a ?? NaN) - b);
+    expect(apart(bandById("na_d")?.loVacuumUm, optical("nai_5890"))).toBeLessThan(1e-7);
+    expect(apart(bandById("na_d")?.hiVacuumUm, optical("nai_5896"))).toBeLessThan(1e-7);
+    expect(apart(bandById("k_i_doublet")?.loVacuumUm, optical("ki_7665"))).toBeLessThan(1e-7);
+    expect(apart(bandById("k_i_doublet")?.hiVacuumUm, optical("ki_7699"))).toBeLessThan(1e-7);
+    expect(apart(bandById("he_i_triplet")?.centreVacuumUm, optical("hei_1083"))).toBeLessThan(1e-6);
+    expect(apart(bandById("h_alpha_band")?.centreVacuumUm, optical("h_alpha"))).toBeLessThan(2e-6);
+  });
+
+  it("the instrument row is the G395H detector gap", () => {
+    const gap = bandById("nirspec_g395h_gap");
+    expect(gap?.kind).toBe("instrument");
+    expect(gap?.species).toBe("G395H gap");
+    expect(gap?.loVacuumUm).toBe(3.72);
+    expect(gap?.centreVacuumUm).toBe(3.77);
+    expect(gap?.hiVacuumUm).toBe(3.82);
+    expect(gap?.source).toContain("not redshifted");
+    expect(REST_BANDS.filter((b) => b.kind === "instrument")).toEqual([gap]);
+  });
+});
+
+describe("band marks", () => {
+  const bandBase: LineMarksInput = {
+    axis: axisOf("wave", linearAxis(2.4, 5.2, 281)),
+    mode: "wavelength_vac",
+    restUm: null,
+    convention: "optical",
+    shiftKms: null,
+    redshift: 0,
+    families: [],
+    xMin: 2.4,
+    xMax: 5.2,
+  };
+  const nirMapping = mapping(2.4, 5.2, linearAxis(2.4, 5.2, 281), 281);
+
+  it("bandMarks lists the bands of the chosen species inside the range in table order", () => {
+    const all = bandMarks({ ...bandBase, species: BAND_SPECIES });
+    expect(all.map((b) => b.id)).toEqual([
+      "h2o_2p7",
+      "co2_4p3",
+      "co_4p7",
+      "ch4_3p3",
+      "nh3_3p0",
+      "h2s_3p8",
+      "hcn_3p0",
+      "hcn_4p8",
+      "c2h2_3p0",
+      "nirspec_g395h_gap",
+    ]);
+    expect(all[1]).toEqual({ id: "co2_4p3", label: "CO2 4.3", species: "CO2", kind: "molecular_band", lo: 4.15, hi: 4.5 });
+    expect(bandMarks({ ...bandBase, species: DEFAULT_BAND_SPECIES }).map((b) => b.id)).toEqual(["h2o_2p7", "co2_4p3", "co_4p7", "ch4_3p3"]);
+    expect(bandMarks({ ...bandBase, species: [] })).toEqual([]);
+    expect(bandMarks({ ...bandBase, families: LINE_FAMILIES, species: ["CO2"] }).map((b) => b.id)).toEqual(["co2_4p3"]);
+  });
+
+  it("bandMarks clips a band to the axis and drops one outside it", () => {
+    const marks = bandMarks({ ...bandBase, xMin: 2.6, xMax: 4.4, species: BAND_SPECIES });
+    const span = (id: string) => {
+      const mark = marks.find((b) => b.id === id);
+      return mark ? [mark.lo, mark.hi] : null;
+    };
+    expect(span("h2o_2p7")).toEqual([2.6, 3.0]);
+    expect(span("co2_4p3")).toEqual([4.15, 4.4]);
+    expect(span("co_4p7")).toEqual([4.3, 4.4]);
+    expect(span("hcn_4p8")).toBeNull();
+  });
+
+  it("bandMarks moves molecular and atomic rows with the redshift and leaves the instrument row in place", () => {
+    const shifted = bandMarks({ ...bandBase, redshift: 1, xMin: 8.1, xMax: 10.5, species: BAND_SPECIES });
+    expect(shifted.map((b) => b.id)).toEqual(["co2_4p3", "co_4p7", "hcn_4p8"]);
+    const expected = [
+      [8.3, 9.0],
+      [8.6, 10.2],
+      [9.4, 9.8],
+    ];
+    shifted.forEach((mark, i) => {
+      expect(mark.lo).toBeCloseTo(expected[i][0], 9);
+      expect(mark.hi).toBeCloseTo(expected[i][1], 9);
+    });
+
+    const sodiumShifted = bandMarks({ ...bandBase, redshift: 1, xMin: 1.1, xMax: 1.2, species: ["Na"] });
+    expect(sodiumShifted.map((b) => b.id)).toEqual(["na_d"]);
+    expect(sodiumShifted[0].lo).toBeCloseTo(1.1783166528, 9);
+    expect(sodiumShifted[0].hi).toBeCloseTo(1.1795116294, 9);
+
+    const gapOnly = bandMarks({ ...bandBase, redshift: 1, xMin: 3.5, xMax: 4.0, species: BAND_SPECIES });
+    expect(gapOnly.map((b) => b.id)).toEqual(["nirspec_g395h_gap"]);
+    expect(gapOnly[0].kind).toBe("instrument");
+    expect(gapOnly[0].lo).toBe(3.72);
+    expect(gapOnly[0].hi).toBe(3.82);
+
+    const corrected = bandMarks({ ...bandBase, shiftKms: 30, species: BAND_SPECIES });
+    const gap = corrected.find((b) => b.id === "nirspec_g395h_gap");
+    expectNear(gap?.lo ?? null, 3.72, 1e-9);
+    expectNear(gap?.hi ?? null, 3.82, 1e-9);
+    const co2 = corrected.find((b) => b.id === "co2_4p3");
+    expectNear(co2?.lo ?? null, 4.15 / (1 + 30 / c), 1e-12);
+    expectNear(co2?.hi ?? null, 4.5 / (1 + 30 / c), 1e-12);
+    expect(co2?.lo as number).toBeLessThan(4.15 - 4e-4);
+  });
+
+  it("bandMarks orders the edges on a frequency display and follows the air display", () => {
+    const frequency = bandMarks({ ...bandBase, mode: "frequency", xMin: 60000, xMax: 80000, species: ["CO2"] });
+    expect(frequency.map((b) => b.id)).toEqual(["co2_4p3"]);
+    const loGhz = frequencyGhzFromWavelengthUm(4.5);
+    const hiGhz = frequencyGhzFromWavelengthUm(4.15);
+    expectNear(loGhz, c / 4.5, 1e-6);
+    expectNear(loGhz, 66620.546, 1e-3);
+    expectNear(hiGhz, 72239.146, 1e-3);
+    expectNear(frequency[0].lo, loGhz, loGhz * 1e-6);
+    expectNear(frequency[0].hi, hiGhz, hiGhz * 1e-6);
+    expect(frequency[0].lo).toBeLessThan(frequency[0].hi);
+
+    const air = bandMarks({ ...bandBase, mode: "wavelength_air", species: ["CO2"] });
+    expect(air.map((b) => b.id)).toEqual(["co2_4p3"]);
+    expect(air[0].lo).toBe(vacuumToAirUm(4.15));
+    expect(air[0].hi).toBe(vacuumToAirUm(4.5));
+    expect(air[0].lo).toBeLessThan(4.15);
+
+    expect(bandMarks({ ...bandBase, mode: "velocity", species: BAND_SPECIES })).toEqual([]);
+  });
+
+  it("bandMarks returns the atomic doublets as narrow spans", () => {
+    const marks = bandMarks({ ...bandBase, xMin: 0.58, xMax: 0.6, species: ["Na"] });
+    expect(marks).toEqual([{ id: "na_d", label: "Na I D", species: "Na", kind: "atomic_line", lo: 0.5891583264, hi: 0.5897558147 }]);
+  });
+
+  it("nearestBandMark picks the narrowest band under the pointer and reaches narrow rows through the tolerance", () => {
+    const marks = bandMarks({ ...bandBase, species: BAND_SPECIES });
+    expect(nearestBandMark(marks, nirMapping, axisValueToPixel(4.4, nirMapping))?.id).toBe("co2_4p3");
+    expect(nearestBandMark(marks, nirMapping, axisValueToPixel(3.0, nirMapping))?.id).toBe("hcn_3p0");
+    expect(nearestBandMark(marks, nirMapping, axisValueToPixel(3.6, nirMapping))).toBeNull();
+    expect(nearestBandMark(marks, nirMapping, axisValueToPixel(3.6, nirMapping), 13)?.id).toBe("h2s_3p8");
+    expect(nearestBandMark([], nirMapping, axisValueToPixel(4.4, nirMapping))).toBeNull();
+
+    const sodium = bandMarks({ ...bandBase, xMin: 0.58, xMax: 0.6, species: ["Na"] });
+    const opticalMapping = mapping(0.5, 1.0, linearAxis(0.5, 1.0, 501), 501);
+    const px = axisValueToPixel(0.5895, opticalMapping);
+    expect(nearestBandMark(sodium, opticalMapping, px + 3)).toBe(sodium[0]);
+    expect(nearestBandMark(sodium, opticalMapping, px + 20)).toBeNull();
+  });
+
+  it("pickedBandLabel names the range it sets", () => {
+    expect(pickedBandLabel(bandById("co2_4p3")!)).toBe("range ← CO2 4.3 4.15 to 4.5 μm vacuum (display range)");
+    expect(pickedBandLabel(bandById("na_d")!)).toBe("range ← Na I D 0.589158 to 0.589756 μm vacuum");
+    expect(pickedBandLabel(bandById("nirspec_g395h_gap")!)).toBe("range ← G395H gap 3.72 to 3.82 μm vacuum");
+  });
+
+  it("toggleBandSpecies adds or removes one species and keeps the table order", () => {
+    expect(toggleBandSpecies(["H2O", "CO2"], "CH4")).toEqual(["H2O", "CO2", "CH4"]);
+    expect(toggleBandSpecies(["CH4", "H2O"], "H2O")).toEqual(["CH4"]);
+    expect(toggleBandSpecies(["CO2", "H2O"], "Na")).toEqual(["H2O", "CO2", "Na"]);
+    expect(toggleBandSpecies([], "nope")).toEqual([]);
+    expect(toggleBandSpecies(["nope", "H2O"], "CO")).toEqual(["H2O", "CO"]);
   });
 });

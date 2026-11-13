@@ -6,6 +6,7 @@ use anyhow::Result;
 use ndarray::Array2;
 
 use crate::core::history::stamp::{file_stamp, FileStamp};
+use crate::infra::fits::band_planes::band_plane_of_path;
 use crate::infra::image_source::{Companions, PlaneInfo};
 #[cfg(test)]
 use crate::types::constants::WIZARD_CACHE_PREFIX;
@@ -218,9 +219,16 @@ pub struct ImageCache {
     stamps: Mutex<HashMap<String, FileStamp>>,
 }
 
+fn source_file_of(r: &ImageRef) -> &str {
+    match band_plane_of_path(&r.path) {
+        Some(band) => &r.path[..band.file.len()],
+        None => &r.path,
+    }
+}
+
 fn is_key_of_source(key: &str, source: &str) -> bool {
     let r = ImageRef::parse(key);
-    !r.is_synthetic() && r.path == source
+    !r.is_synthetic() && source_file_of(&r) == source
 }
 
 impl ImageCache {
@@ -248,7 +256,7 @@ impl ImageCache {
         if r.is_synthetic() {
             return None;
         }
-        let source = r.path;
+        let source = source_file_of(&r).to_string();
         let meta = std::fs::metadata(&source);
         let mut stamps = self.lock_stamps();
         match meta {
@@ -286,14 +294,15 @@ impl ImageCache {
         if r.is_synthetic() {
             return;
         }
-        let now = std::fs::metadata(&r.path).ok().map(|meta| file_stamp(&meta));
+        let source = source_file_of(&r);
+        let now = std::fs::metadata(source).ok().map(|meta| file_stamp(&meta));
         if now != before {
-            self.invalidate_source(&r.path);
+            self.invalidate_source(source);
         }
     }
 
     pub fn invalidate_written(&self, path: &str) {
-        let source = ImageRef::parse(path).path;
+        let source = source_file_of(&ImageRef::parse(path)).to_string();
         let meta = std::fs::metadata(&source);
         let mut stamps = self.lock_stamps();
         self.invalidate_source(&source);
@@ -980,5 +989,79 @@ mod tests {
             .unwrap();
         assert!(entry.header().is_some());
         assert_eq!(entry.header().unwrap().get("SIMPLE"), Some("T"));
+    }
+
+    fn load_entries(cache: &ImageCache, keys: &[&str]) {
+        for key in keys {
+            cache.get_or_load(key, || Ok(make_test_entry(2, 2))).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_key_of_a_rewritten_file_is_dropped_together_band_planes_included() {
+        let dir = tempfile::tempdir().unwrap();
+        let f_path = dir.path().join("f.fits");
+        let g_path = dir.path().join("g.fits");
+        std::fs::write(&f_path, b"abc").unwrap();
+        std::fs::write(&g_path, b"g").unwrap();
+        let (f, g) = (f_path.to_str().unwrap(), g_path.to_str().unwrap());
+        let band = format!("{f}#hdu=0&plane=1");
+        let band_hdu = format!("{band}#hdu=0");
+        let hdu = format!("{f}#hdu=1");
+        let cache = ImageCache::new(8, usize::MAX);
+
+        assert!(cache.revalidate_source(&band).is_some());
+        load_entries(&cache, &[f, &hdu, &band, &band_hdu, g]);
+        cache.revalidate_source(&band);
+        assert_eq!(cache.len(), 5);
+
+        std::fs::write(&f_path, b"rewritten more").unwrap();
+        assert!(cache.revalidate_source(f).is_some());
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains(g));
+    }
+
+    #[test]
+    fn a_band_plane_entry_follows_its_file_when_it_is_written_or_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let f_path = dir.path().join("f.fits");
+        std::fs::write(&f_path, b"abc").unwrap();
+        let f = f_path.to_str().unwrap();
+        let band = format!("{f}#hdu=0&plane=1");
+        let cache = ImageCache::new(8, usize::MAX);
+
+        load_entries(&cache, &[f, &band]);
+        cache.invalidate_written(f);
+        assert_eq!(cache.len(), 0);
+
+        load_entries(&cache, &[f, &band]);
+        std::fs::remove_file(&f_path).unwrap();
+        assert!(cache.revalidate_source(&band).is_none());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn a_file_named_like_a_plane_key_keeps_its_own_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd_path = dir.path().join("odd.fits");
+        let named_path = dir.path().join("odd.fits#hdu=0&plane=1");
+        std::fs::write(&odd_path, b"abc").unwrap();
+        std::fs::write(&named_path, b"def").unwrap();
+        let (odd, named) = (odd_path.to_str().unwrap(), named_path.to_str().unwrap());
+        let cache = ImageCache::new(8, usize::MAX);
+        for key in [odd, named] {
+            assert!(cache.revalidate_source(key).is_some(), "{key}");
+            load_entries(&cache, &[key]);
+        }
+
+        std::fs::write(&odd_path, b"abcd").unwrap();
+        cache.revalidate_source(odd);
+        assert!(!cache.contains(odd));
+        assert!(cache.contains(named));
+
+        std::fs::write(&named_path, b"defg").unwrap();
+        cache.revalidate_source(named);
+        assert!(!cache.contains(named));
+        assert_eq!(cache.len(), 0);
     }
 }

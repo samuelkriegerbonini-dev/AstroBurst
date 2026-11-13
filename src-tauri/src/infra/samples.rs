@@ -89,7 +89,7 @@ static SAMPLE_SETS: [SampleSet; 3] = [
         title: "JWST/NIRSpec IFU cube of the Galactic Center (G395H/F290LP) with its 1-D spectrum",
         credit: "JWST/NIRSpec IFU cube and 1-D spectrum of the Galactic Center (GC-NIRSPEC-1): NASA, ESA, CSA, GTO programme 1266 (PI M. Garcia Marin), data via MAST at STScI",
         licence: JWST_LICENCE,
-        demonstrates: "Cube: spectra with error bands, moment maps, line fits and line measurement, next to the pipeline's 1-D spectrum",
+        demonstrates: "Spectra tool on an IFU cube: spaxel spectra with error bands, moment maps, line fits and line measurement, next to the pipeline's 1-D spectrum",
         source: SampleSource::ReleaseAsset {
             tag: SAMPLE_RELEASE_TAG,
         },
@@ -1032,6 +1032,17 @@ mod tests {
             for text in [set.title, set.credit, set.licence, set.demonstrates] {
                 assert!(!text.trim().is_empty(), "{}", set.id);
             }
+        }
+    }
+
+    #[test]
+    fn the_ifu_sample_text_names_the_spectra_tool_and_keeps_cube_for_the_data() {
+        assert_eq!(
+            find_set("jwst-gc-nirspec-ifu").unwrap().demonstrates,
+            "Spectra tool on an IFU cube: spaxel spectra with error bands, moment maps, line fits and line measurement, next to the pipeline's 1-D spectrum"
+        );
+        for set in sample_sets() {
+            assert!(!set.demonstrates.starts_with("Cube:"), "{}", set.id);
         }
     }
 

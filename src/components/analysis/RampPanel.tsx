@@ -5,7 +5,7 @@ import ProfilePlot, { type ProfileSeries } from "../regions/ProfilePlot";
 import RampComparePanel, { DIFFERENCE_LABEL, RATIO_LABEL } from "./RampComparePanel";
 import OutputNote from "./OutputNote";
 import StaleResultNote, { ReopenedProductNote } from "./StaleResultNote";
-import { ErrorAlert, RunButton, Slider, WarningList } from "../ui";
+import { ErrorAlert, RunButton, Slider, SMALL_BUTTON_CLASS, WarningList } from "../ui";
 import { getPreviewUrl, isTauri } from "../../infrastructure/tauri";
 import { useDisplayedImage } from "../../context/PreviewContext";
 import { useToolHost } from "../../context/ToolHostContext";
@@ -92,8 +92,6 @@ const SELECT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 focus:border-violet-500/50 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 const BADGE_CLASS = "px-1.5 py-0.5 rounded text-[9px] font-mono border";
-const SMALL_BUTTON_CLASS =
-  "flex items-center gap-1 px-2 py-0.5 rounded text-[9px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40";
 const QSLOPE_LABEL = "Quick slope (DN/s)";
 const RAMP_PRODUCT_LABELS: readonly string[] = [QSLOPE_LABEL, RATIO_LABEL, DIFFERENCE_LABEL];
 const PLOT_HEIGHT = 170;
@@ -101,7 +99,7 @@ const RAW_COLOR = "rgba(161,161,170,0.8)";
 const CORRECTED_COLOR = "rgba(45,212,191,0.95)";
 const FIT_COLOR = "rgba(250,250,250,0.9)";
 const FLAGGED_COLOR = "rgba(248,113,113,1)";
-const EXCLUDED_COLOR = "rgba(82,82,91,0.9)";
+const EXCLUDED_COLOR = "rgba(251,191,36,0.9)";
 const JUMP_K_MIN = 3;
 const JUMP_K_MAX = 10;
 const JUMP_K_STEP = 0.5;

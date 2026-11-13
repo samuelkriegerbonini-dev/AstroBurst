@@ -1,8 +1,12 @@
-import type { PhotCal, StarPhotometry } from "../services/analysis";
+import type { MagSystem, PhotCal, StarPhotometry, UserZeroPoint } from "../services/analysis";
 import type { PlotReferenceLine } from "../components/regions/ProfilePlot";
-import { buildCsv, type CsvCell, type CsvColumn } from "./catalogCsv";
+import { CSV_LINE_END, buildCsv, type CsvCell, type CsvColumn } from "./catalogCsv";
+import { exportEntries, provenanceLines, summedPixelUnit, unitLines, withProvenance, type ProvenanceEntry } from "./csvProvenance";
 import { formatSignificantFixed } from "./formatSignificant";
+import { formatWithUncertainty } from "./formatUncertainty";
 import { parseImageRef } from "./imageRef";
+import type { CalibratedMagnitude, PhotometryLimit } from "./photometryPanel";
+import { radiusInArcsec, radiusInPixels, type RadiiInput, type RadiusUnit } from "./photometryUnits";
 
 export interface PhotometryTableRow {
   index: number;
@@ -10,6 +14,8 @@ export interface PhotometryTableRow {
   photometry: StarPhotometry | null;
   sky: { ra: number; dec: number } | null;
   error: string | null;
+  magnitude?: CalibratedMagnitude;
+  limit?: PhotometryLimit;
 }
 
 export const PHOTOMETRY_COLUMN_KEYS = [
@@ -44,6 +50,11 @@ export const PHOTOMETRY_COLUMN_KEYS = [
   "error",
   "n_nonfinite",
   "ee_in_aperture",
+  "mag",
+  "mag_err",
+  "mag_system",
+  "upper_limit_jy",
+  "upper_limit_ab",
 ] as const;
 
 export type PhotometryColumnKey = (typeof PHOTOMETRY_COLUMN_KEYS)[number];
@@ -86,6 +97,16 @@ export function rowValue(row: PhotometryTableRow, key: PhotometryColumnKey): Csv
       return p ? p.err_used : null;
     case "n_masked":
       return p ? p.n_masked : null;
+    case "mag":
+      return finiteOrNull(row.magnitude?.mag);
+    case "mag_err":
+      return finiteOrNull(row.magnitude?.magErr);
+    case "mag_system":
+      return row.magnitude?.system ?? null;
+    case "upper_limit_jy":
+      return row.limit?.limitJy ?? null;
+    case "upper_limit_ab":
+      return row.limit?.limitAb ?? null;
     default:
       return p ? finiteOrNull(p[key]) : null;
   }
@@ -103,15 +124,25 @@ export function fluxCellText(value: number | null | undefined): string {
 
 export function abCellText(mag: number | null | undefined, err: number | null | undefined): string {
   if (mag == null || !Number.isFinite(mag)) return MISSING_CELL;
-  const text = mag.toFixed(MAG_DECIMALS);
-  return err != null && Number.isFinite(err) ? `${text} ± ${err.toFixed(MAG_DECIMALS)}` : text;
+  return err != null && Number.isFinite(err) && err > 0 ? formatWithUncertainty(mag, err) : mag.toFixed(MAG_DECIMALS);
 }
+
+const OTHER_COLUMN_UNITS = "AB, inst mag; FWHM, EE50 px";
+
+export function tableUnitsCaption(unit: string | null | undefined): string {
+  const flux = unit ? `flux ${unit}` : "flux in the pixel unit of the image (not stated in the header)";
+  return `units: ${flux}; ${OTHER_COLUMN_UNITS}`;
+}
+
+export const NO_DETECTED_STARS_HINT =
+  "No detected stars yet. Run Detect Stars in the Astrometry tool (Stars section), or choose another source of positions above.";
 
 const SURFACE_BRIGHTNESS_UNIT = "MJy/sr";
 const PIXEL_SUM_SUFFIX = " x pix";
 
 export function summedFluxUnit(photcal: PhotCal | null | undefined): string | null {
   if (photcal?.convention.kind === "jwst_mjy_sr") return `${photcal.bunit ?? SURFACE_BRIGHTNESS_UNIT}${PIXEL_SUM_SUFFIX}`;
+  if (photcal?.convention.kind === "flux_density_per_pixel") return photcal.bunit ?? photcal.convention.unit;
   return photcal?.bunit ?? null;
 }
 
@@ -120,8 +151,173 @@ export const PHOTOMETRY_CSV_COLUMNS: CsvColumn<PhotometryTableRow>[] = PHOTOMETR
   value: (row) => rowValue(row, key),
 }));
 
-export function photometryTableCsv(rows: PhotometryTableRow[]): string {
-  return buildCsv(PHOTOMETRY_CSV_COLUMNS, rows);
+export interface PhotometryCsvContext {
+  exportedUtc: string;
+  fileName: string | null;
+  image: string | null;
+  positions: "stars" | "regions" | "pasted" | "sky";
+  bunit: string | null;
+  summedUnit: string | null;
+  calibration: string | null;
+  calibrationNotes: readonly string[];
+  magSystem: MagSystem | null;
+  zeroPoint: UserZeroPoint | null;
+  filter: { dataset: string; filter: string; pivot_um: number; source: string } | null;
+  pixelScaleArcsec: number | null;
+  radiusUnit: RadiusUnit;
+  typedRadii: RadiiInput;
+  gain: number | null;
+  excludeDq: boolean;
+  masked: boolean;
+  errLayer: string | null;
+  dqLayer: string | null;
+  warnings: readonly string[];
+  limitSigma: number;
+  fCorr: number | null;
+  fCorrRadius: string | null;
+}
+
+export const PHOTOMETRY_WEIGHTS_NOTE = "5 x 5 subsampled overlap of the aperture with boundary pixels";
+export const PHOTOMETRY_ERROR_NOTE =
+  "with an error layer (err_used true): sqrt(sum (w sigma)^2) over the aperture, w the overlap weight, plus n_ap^2 sigma_sky^2 / n_sky; without one: sqrt(net_flux / gain + n_ap sigma_sky^2 + n_ap^2 sigma_sky^2 / n_sky), the first term only when a gain is given";
+export const PHOTOMETRY_POSITIONS_NOTE = `x, y are measured centroids in 0-based pixels (integer pixel centres); each input position snaps to the brightest pixel within ${PEAK_SEARCH_RADIUS_PX} px and is recentred`;
+export const PHOTOMETRY_CORRECTION_NOTE =
+  "flux_total / net_flux from the curve of growth of each star; empty when the curve has no plateau before the sky annulus";
+export const PHOTOMETRY_LIMIT_NOTE =
+  "a row is a limit when flux_jy < limit_sigma x flux_err_jy x f_corr; then upper_limit_jy = limit_sigma x flux_err_jy x f_corr and upper_limit_ab = -2.5 log10(upper_limit_jy) + 8.90; f_corr is 1 unless the line f_corr names a factor; the measured flux and error are kept";
+
+const POSITION_SOURCE_TEXT: Record<PhotometryCsvContext["positions"], string> = {
+  stars: "detected stars",
+  regions: "point regions",
+  pasted: "pasted pixel positions",
+  sky: "sky positions (ICRS) placed with the WCS of the image",
+};
+const ZERO_POINT_SYSTEM_TEXT: Record<UserZeroPoint["system"], string> = { ab: "AB", vega: "Vega" };
+const AUTOMATIC_APERTURE_TEXT = `automatic: 1.5 x FWHM of each star, ${FALLBACK_APERTURE_RADIUS_PX} px where the FWHM is not measured`;
+const AUTOMATIC_ANNULUS_TEXT = "automatic: 2 to 3 x the aperture radius";
+const NO_ERROR_LAYER_TEXT = "none: errors from the sky scatter (column err_used is false)";
+const SENTENCE_DIGITS = 6;
+
+function sentenceNumber(value: number): string {
+  return String(Number(value.toPrecision(SENTENCE_DIGITS)));
+}
+
+function magSystemText(magSystem: MagSystem | null): string {
+  if (magSystem === null) return "none";
+  return magSystem === "unknown" ? "unknown (AB assumed)" : magSystem;
+}
+
+function zeroPointText(zeroPoint: UserZeroPoint | null): string {
+  if (zeroPoint === null) return "none";
+  const text = `${sentenceNumber(zeroPoint.zp)} ${ZERO_POINT_SYSTEM_TEXT[zeroPoint.system]}`;
+  return zeroPoint.per_second ? `${text}, per second` : text;
+}
+
+function filterText(filter: PhotometryCsvContext["filter"]): string {
+  if (filter === null) return "not identified";
+  return `${filter.dataset} ${filter.filter}, pivot ${sentenceNumber(filter.pivot_um)} um, from the ${filter.source}`;
+}
+
+function apertureRadiusText(context: PhotometryCsvContext): string {
+  const aperture = context.typedRadii.aperture;
+  if (aperture === undefined) return AUTOMATIC_APERTURE_TEXT;
+  const typed = `${sentenceNumber(aperture)} ${context.radiusUnit}`;
+  const converted =
+    context.radiusUnit === "px"
+      ? radiusInArcsec(aperture, context.pixelScaleArcsec)
+      : radiusInPixels(aperture, "arcsec", context.pixelScaleArcsec);
+  if (converted === null) return typed;
+  return `${typed} (${sentenceNumber(converted)} ${context.radiusUnit === "px" ? "arcsec" : "px"})`;
+}
+
+function skyAnnulusText(context: PhotometryCsvContext): string {
+  const { skyInner, skyOuter } = context.typedRadii;
+  if (skyInner === undefined && skyOuter === undefined) return AUTOMATIC_ANNULUS_TEXT;
+  const side = (radius: number | undefined) => (radius === undefined ? "auto" : sentenceNumber(radius));
+  return `${side(skyInner)} to ${side(skyOuter)} ${context.radiusUnit}`;
+}
+
+function dqExclusionText(context: PhotometryCsvContext): string {
+  if (!context.excludeDq) return "off";
+  return context.masked ? "applied" : "requested, not applied";
+}
+
+function depthFactorText(context: PhotometryCsvContext): string {
+  if (context.fCorr === null) return "not applied";
+  const radius = context.fCorrRadius === null ? "" : ` (${context.fCorrRadius})`;
+  return `${sentenceNumber(context.fCorr)} from the Depth section${radius}, applied on request to rows measured with an error layer`;
+}
+
+export function photometryCsvProvenance(context: PhotometryCsvContext, nRows: number): ProvenanceEntry[] {
+  return [
+    ...exportEntries(context.fileName, context.exportedUtc),
+    ["image", context.image],
+    ["rows", nRows],
+    ["position_source", POSITION_SOURCE_TEXT[context.positions]],
+    ["bunit", context.bunit],
+    ["calibration", context.calibration ?? "none"],
+    ["mag_system", magSystemText(context.magSystem)],
+    ["zero_point_typed", zeroPointText(context.zeroPoint)],
+    ["filter", filterText(context.filter)],
+    ["pixel_scale_arcsec", context.pixelScaleArcsec],
+    ["aperture_radius", apertureRadiusText(context)],
+    ["sky_annulus", skyAnnulusText(context)],
+    ["gain", context.gain ?? "none"],
+    ["dq_exclusion", dqExclusionText(context)],
+    ["error_layer", context.errLayer ?? NO_ERROR_LAYER_TEXT],
+    ["mask_layer", context.dqLayer ?? "none"],
+    ["aperture_weights", PHOTOMETRY_WEIGHTS_NOTE],
+    ["flux_error", PHOTOMETRY_ERROR_NOTE],
+    ["limit_sigma", context.limitSigma],
+    ["f_corr", depthFactorText(context)],
+    ["upper_limit", PHOTOMETRY_LIMIT_NOTE],
+    ["aperture_correction", PHOTOMETRY_CORRECTION_NOTE],
+    ["positions", PHOTOMETRY_POSITIONS_NOTE],
+    ...context.calibrationNotes.map((note): ProvenanceEntry => ["calibration_note", note]),
+    ...[...new Set(context.warnings)].map((warning): ProvenanceEntry => ["warning", warning]),
+  ];
+}
+
+export function photometryCsvUnits(context: PhotometryCsvContext): Record<string, string> {
+  const pixel = context.bunit ?? "image unit";
+  const summed = context.summedUnit ?? summedPixelUnit(context.bunit) ?? "image unit, summed over the aperture pixels";
+  return {
+    x: "pixel (0-based)",
+    y: "pixel (0-based)",
+    ra: "deg (ICRS)",
+    dec: "deg (ICRS)",
+    net_flux: summed,
+    flux_err: summed,
+    mag_inst: "mag (instrumental: -2.5 log10 of net_flux)",
+    mag_ab: "mag (AB)",
+    mag_ab_err: "mag",
+    flux_jy: "Jy",
+    flux_err_jy: "Jy",
+    fwhm: "pixel",
+    aperture_radius: "pixel",
+    sky_inner: "pixel",
+    sky_outer: "pixel",
+    bg_mean: pixel,
+    bg_sigma: pixel,
+    flux_total: summed,
+    mag_ab_total: "mag (AB)",
+    ee50_radius: "pixel",
+    ee80_radius: "pixel",
+    mag: "mag (system of the column mag_system)",
+    mag_err: "mag",
+    upper_limit_jy: "Jy",
+    upper_limit_ab: "mag (AB)",
+  };
+}
+
+export function photometryTableCsv(rows: PhotometryTableRow[], context?: PhotometryCsvContext): string {
+  const body = buildCsv(PHOTOMETRY_CSV_COLUMNS, rows);
+  if (!context) return body;
+  return withProvenance(
+    [...provenanceLines(photometryCsvProvenance(context, rows.length)), ...unitLines(photometryCsvUnits(context))],
+    body,
+    CSV_LINE_END,
+  );
 }
 
 export function parsePositions(text: string): { points: [number, number][]; errors: string[] } {
@@ -212,7 +408,7 @@ export function medianSnr(rows: PhotometryTableRow[]): number | null {
 
 export function photometryCsvFileName(filePath: string): string {
   const base = parseImageRef(filePath).path.split(/[\\/]/).pop() ?? "image";
-  const stem = base.replace(/\.(fits?|fts|asdf)(\.gz)?$/i, "");
+  const stem = base.replace(/\.(fits?|fts|asdf)(\.(gz|fz|bz2))?$/i, "");
   return `${stem}_photometry.csv`;
 }
 

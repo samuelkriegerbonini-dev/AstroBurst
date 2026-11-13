@@ -5,7 +5,10 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
-use crate::core::analysis::spectrum1d::{Precision, Spectrum1d, Wcs1dArrays};
+use crate::core::analysis::spectrum1d::{
+    Precision, Spectrum1d, WavelengthUnitChoice, Wcs1dArrays,
+};
+use crate::core::analysis::tso::TsoLayout;
 use crate::core::analysis::x1d::{
     extract1d_tables, pick_table, read_x1d_spectrum, X1dTableRef, EXTNAME_EXTRACT1D,
 };
@@ -15,6 +18,7 @@ use crate::infra::fits::gzip::resolve_gzip;
 use crate::infra::fits::reader::{
     decode_pixels_blank, decode_pixels_int, parse_header_at, IntPixels, ParsedHdu,
 };
+use crate::infra::fits::x1dints::probe_x1dints;
 use crate::infra::image_source::{is_dq_name, is_err_name};
 use crate::types::constants::BLOCK_SIZE;
 use crate::types::header::{parse_fits_float, HduHeader};
@@ -28,12 +32,15 @@ const SUPPORTED_BITPIX: [i64; 6] = [8, 16, 32, 64, -32, -64];
 const F32_WIDENED_BITPIX: i64 = -64;
 const CSV_EXTENSION: &str = "csv";
 const MAX_SPECTRUM_CSV_BYTES: u64 = 256 * 1024 * 1024;
+const CSV_NAMES_ITS_UNIT: &str = "a spectrum CSV names its unit in the column header";
+const TABLE_STATES_ITS_UNIT: &str = "an EXTRACT1D table states its unit in TUNIT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Spectrum1dKind {
-    X1d { hdu: usize },
+    X1d { hdu: usize, n_tables: usize },
     Wcs1d { hdu: usize },
+    X1dInts { layout: TsoLayout, n_series: usize, n_integrations: usize, n_channels: usize },
 }
 
 pub fn classify(file: &File) -> Result<Option<Spectrum1dKind>> {
@@ -41,9 +48,31 @@ pub fn classify(file: &File) -> Result<Option<Spectrum1dKind>> {
 }
 
 fn classify_with(file: &File, tables: &[X1dTableRef]) -> Result<Option<Spectrum1dKind>> {
+    match series_kind(file, tables)? {
+        Some(series) => Ok(Some(series)),
+        None => single_spectrum_kind(file, tables),
+    }
+}
+
+fn series_kind(file: &File, tables: &[X1dTableRef]) -> Result<Option<Spectrum1dKind>> {
+    if tables.is_empty() {
+        return Ok(None);
+    }
+    Ok(probe_x1dints(file)?.map(|shape| Spectrum1dKind::X1dInts {
+        layout: shape.layout,
+        n_series: shape.n_series,
+        n_integrations: shape.n_integrations,
+        n_channels: shape.n_channels,
+    }))
+}
+
+fn single_spectrum_kind(file: &File, tables: &[X1dTableRef]) -> Result<Option<Spectrum1dKind>> {
     if !tables.is_empty() {
         let table = pick_table(tables, None).map_err(anyhow::Error::msg)?;
-        return Ok(Some(Spectrum1dKind::X1d { hdu: table.hdu }));
+        return Ok(Some(Spectrum1dKind::X1d {
+            hdu: table.hdu,
+            n_tables: tables.len(),
+        }));
     }
     let bytes = read_file_bytes(file)?;
     let hdus = scan_headers(&bytes)?;
@@ -123,30 +152,85 @@ fn read_spectrum_csv_capped(path: &str, max_bytes: u64) -> Result<Spectrum1d> {
     Spectrum1d::from_csv(path, &text).map_err(anyhow::Error::msg)
 }
 
+fn unit_not_applied(
+    mut spectrum: Spectrum1d,
+    unit: Option<WavelengthUnitChoice>,
+    reason: &str,
+) -> Spectrum1d {
+    if let Some(choice) = unit {
+        spectrum.notes.push(format!(
+            "wavelength unit '{}' not applied: {reason}",
+            choice.as_str()
+        ));
+    }
+    spectrum
+}
+
 pub fn load_spectrum1d(path: &str, hdu: Option<usize>) -> Result<Spectrum1d> {
+    load_spectrum1d_with_unit(path, hdu, None)
+}
+
+pub fn load_spectrum1d_with_unit(
+    path: &str,
+    hdu: Option<usize>,
+    unit: Option<WavelengthUnitChoice>,
+) -> Result<Spectrum1d> {
     if is_spectrum_csv_path(path) {
         if let Some(n) = hdu {
             bail!("HDU {n} requested but {path} is a CSV spectrum, which has no HDUs");
         }
-        return read_spectrum_csv(path);
+        return Ok(unit_not_applied(
+            read_spectrum_csv(path)?,
+            unit,
+            CSV_NAMES_ITS_UNIT,
+        ));
     }
     let (readable, _decompressed) = resolve_gzip(Path::new(path))?;
     let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
     let tables = extract1d_tables(&file)?;
-    let kind = match hdu {
-        Some(n) if tables.iter().any(|t| t.hdu == n) => Spectrum1dKind::X1d { hdu: n },
-        Some(n) => Spectrum1dKind::Wcs1d { hdu: n },
-        None => classify_with(&file, &tables)?.with_context(|| {
+    let series_to_refuse = series_kind(&file, &tables)?.filter(|series| {
+        hdu.is_none()
+            || matches!(
+                series,
+                Spectrum1dKind::X1dInts {
+                    layout: TsoLayout::Rows,
+                    ..
+                }
+            )
+    });
+    let kind = match (series_to_refuse, hdu) {
+        (Some(series), _) => series,
+        (None, Some(n)) if tables.iter().any(|t| t.hdu == n) => Spectrum1dKind::X1d {
+            hdu: n,
+            n_tables: tables.len(),
+        },
+        (None, Some(n)) => Spectrum1dKind::Wcs1d { hdu: n },
+        (None, None) => single_spectrum_kind(&file, &tables)?.with_context(|| {
             format!("{path} holds no 1D spectrum: no {EXTNAME_EXTRACT1D} table and no 1D array with a spectral axis")
         })?,
     };
     match kind {
-        Spectrum1dKind::X1d { hdu } => {
-            Ok(Spectrum1d::from_x1d(read_x1d_spectrum(path, Some(hdu))?))
-        }
+        Spectrum1dKind::X1d { hdu, .. } => Ok(unit_not_applied(
+            Spectrum1d::from_x1d(read_x1d_spectrum(path, Some(hdu))?),
+            unit,
+            TABLE_STATES_ITS_UNIT,
+        )),
         Spectrum1dKind::Wcs1d { hdu } => {
             let (header, arrays) = read_1d_array(path, hdu)?;
-            Spectrum1d::from_wcs1d(path, hdu, &header, arrays).map_err(anyhow::Error::msg)
+            Spectrum1d::from_wcs1d_with_unit(path, hdu, &header, arrays, unit)
+                .map_err(anyhow::Error::msg)
+        }
+        Spectrum1dKind::X1dInts {
+            n_series,
+            n_integrations,
+            n_channels,
+            ..
+        } => {
+            let name = Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            bail!("{name} holds time-series spectra ({n_integrations} integrations x {n_channels} channels, {n_series} series), not one spectrum: open its light curves, or pick one integration, the median or the mean of a series")
         }
     }
 }
@@ -321,13 +405,48 @@ fn decode_values(bytes: &[u8], parsed: &ParsedHdu, label: &str) -> Result<(Vec<f
     let (raw, bitpix) = data_unit(bytes, parsed, label)?;
     let bzero = scale_card(header, "BZERO", 0.0, label)?;
     let bscale = scale_card(header, "BSCALE", 1.0, label)?;
-    let values = decode_pixels_blank(raw, bitpix, bscale, bzero, header.get_i64("BLANK"));
-    let precision = if bitpix == F32_WIDENED_BITPIX {
-        Precision::F32Widened
-    } else {
-        Precision::F64
+    let blank = header.get_i64("BLANK");
+    let scaled = |stored: f64| {
+        if bscale == 1.0 && bzero == 0.0 {
+            stored
+        } else {
+            stored * bscale + bzero
+        }
     };
-    Ok((values.into_iter().map(f64::from).collect(), precision))
+    let integer = |stored: i64| {
+        if blank == Some(stored) {
+            f64::NAN
+        } else {
+            scaled(stored as f64)
+        }
+    };
+    let values: Vec<f64> = match bitpix {
+        F32_WIDENED_BITPIX => {
+            let narrowed = decode_pixels_blank(raw, bitpix, bscale, bzero, blank);
+            return Ok((
+                narrowed.into_iter().map(f64::from).collect(),
+                Precision::F32Widened,
+            ));
+        }
+        8 => raw.iter().map(|&b| integer(i64::from(b))).collect(),
+        16 => raw
+            .chunks_exact(2)
+            .map(|c| integer(i64::from(i16::from_be_bytes([c[0], c[1]]))))
+            .collect(),
+        32 => raw
+            .chunks_exact(4)
+            .map(|c| integer(i64::from(i32::from_be_bytes([c[0], c[1], c[2], c[3]]))))
+            .collect(),
+        64 => raw
+            .chunks_exact(8)
+            .map(|c| integer(i64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])))
+            .collect(),
+        _ => raw
+            .chunks_exact(4)
+            .map(|c| scaled(f64::from(f32::from_be_bytes([c[0], c[1], c[2], c[3]]))))
+            .collect(),
+    };
+    Ok((values, Precision::F64))
 }
 
 fn decode_dq(bytes: &[u8], parsed: &ParsedHdu, label: &str) -> Result<Vec<u32>> {
@@ -348,15 +467,20 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::core::analysis::spectrum1d::{Precision, Spectrum1dSource, WavelengthFrame};
+    use crate::core::analysis::spectrum1d::{
+        Precision, Spectrum1dSource, WavelengthFrame, WavelengthUnitChoice, WavelengthUnitSource,
+    };
     use crate::core::analysis::x1d::read_x1d_spectrum;
-    use crate::core::analysis::x1d::test_fixtures::write_x1d_fixture;
+    use crate::core::analysis::x1d::test_fixtures::{
+        fixture_flux, fixture_wavelength, write_x1d_fixture, FIXTURE_FLAGGED_ROW,
+    };
     use crate::core::astrometry::gwcs::test_support::documents_fits_dir;
     use crate::core::imaging::dq_flags::DqTable;
     use crate::infra::fits::reader::test_fixtures::{
         empty_primary_cards, ramp_f32, write_raw_hdus, write_test_mef, HduData, TestHdu,
     };
     use crate::infra::fits::reader::{extract_image_mmap, ONE_D_ARRAY_VERDICT};
+    use crate::infra::fits::table::test_support::bintable_cards;
 
     const LEN: usize = 24;
     const DQ_BZERO: i64 = 2_147_483_648;
@@ -933,6 +1057,167 @@ mod tests {
         }
     }
 
+    fn i64_bytes(values: &[i64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    fn padded_i32(head: &[i32]) -> Vec<i32> {
+        let mut values = head.to_vec();
+        values.resize(LEN, 0);
+        values
+    }
+
+    #[test]
+    fn integer_and_scaled_1d_arrays_keep_the_digits_the_file_holds() {
+        const ABOVE_F32_MANTISSA: i32 = 16_777_217;
+        const BLANK_CHANNEL: usize = 5;
+        const I16_BZERO: f64 = 100_000_000.5;
+        const F32_BSCALE: f64 = 0.001;
+        const F32_BZERO: f64 = 5000.0;
+        const TWO_POW_40_PLUS_1: i64 = 1_099_511_627_777;
+        let dir = tempfile::tempdir().unwrap();
+
+        let counts = padded_i32(&[
+            ABOVE_F32_MANTISSA,
+            16_777_219,
+            -ABOVE_F32_MANTISSA,
+            i32::MAX,
+            0,
+            i32::MIN,
+        ]);
+        let path = write(
+            dir.path(),
+            "i32.fits",
+            &[
+                array_hdu(
+                    true,
+                    32,
+                    LEN,
+                    &with(&WAVE_ANGSTROM, &[("BLANK", "-2147483648")]),
+                    i32_bytes(&counts),
+                ),
+                array_hdu(
+                    false,
+                    32,
+                    LEN,
+                    &[("EXTNAME", "'ERR     '")],
+                    i32_bytes(&padded_i32(&[ABOVE_F32_MANTISSA])),
+                ),
+            ],
+        );
+        let (_, arrays) = read_1d_array(text(&path), 0).unwrap();
+        assert_eq!(arrays.flux[0], 16_777_217.0);
+        assert_eq!(arrays.flux[1], 16_777_219.0);
+        assert_eq!(arrays.flux[2], -16_777_217.0);
+        assert_eq!(arrays.flux[3], 2_147_483_647.0);
+        assert!(
+            arrays.flux[BLANK_CHANNEL].is_nan(),
+            "BLANK decoded as {}",
+            arrays.flux[BLANK_CHANNEL]
+        );
+        for (i, (&value, &stored)) in arrays.flux.iter().zip(&counts).enumerate() {
+            if i != BLANK_CHANNEL {
+                assert_eq!(value, f64::from(stored), "BITPIX 32 channel {i}");
+            }
+        }
+        assert_eq!(arrays.precision, Precision::F64);
+        assert_eq!(arrays.err.unwrap()[0], 16_777_217.0);
+
+        let shorts: Vec<i16> = (1..=LEN as i16).collect();
+        let path = write(
+            dir.path(),
+            "i16_bzero.fits",
+            &[array_hdu(
+                true,
+                16,
+                LEN,
+                &with(
+                    &WAVE_ANGSTROM,
+                    &[("BSCALE", "1.0"), ("BZERO", "100000000.5")],
+                ),
+                i16_bytes(&shorts),
+            )],
+        );
+        let (_, arrays) = read_1d_array(text(&path), 0).unwrap();
+        assert_eq!(arrays.flux[0], 100_000_001.5);
+        for (i, (&value, &stored)) in arrays.flux.iter().zip(&shorts).enumerate() {
+            assert_eq!(
+                value,
+                f64::from(stored) * 1.0 + I16_BZERO,
+                "BITPIX 16 channel {i}"
+            );
+        }
+        assert_eq!(arrays.precision, Precision::F64);
+
+        let floats: Vec<f32> = (1..=LEN).map(|i| 1.25 * i as f32).collect();
+        let path = write(
+            dir.path(),
+            "f32_scaled.fits",
+            &[array_hdu(
+                true,
+                -32,
+                LEN,
+                &with(&WAVE_ANGSTROM, &[("BSCALE", "0.001"), ("BZERO", "5000.0")]),
+                f32_bytes(&floats),
+            )],
+        );
+        let (_, arrays) = read_1d_array(text(&path), 0).unwrap();
+        assert_eq!(
+            arrays.flux[0],
+            f64::from(1.25f32) * F32_BSCALE + F32_BZERO
+        );
+        for (i, (&value, &stored)) in arrays.flux.iter().zip(&floats).enumerate() {
+            assert_eq!(
+                value,
+                f64::from(stored) * F32_BSCALE + F32_BZERO,
+                "BITPIX -32 channel {i}"
+            );
+        }
+        assert_eq!(arrays.precision, Precision::F64);
+
+        let longs: Vec<i64> = (0..LEN as i64).map(|i| TWO_POW_40_PLUS_1 + i).collect();
+        let path = write(
+            dir.path(),
+            "i64.fits",
+            &[array_hdu(
+                true,
+                64,
+                LEN,
+                &WAVE_ANGSTROM,
+                i64_bytes(&longs),
+            )],
+        );
+        let (_, arrays) = read_1d_array(text(&path), 0).unwrap();
+        assert_eq!(arrays.flux[0], 1_099_511_627_777.0);
+        for (i, (&value, &stored)) in arrays.flux.iter().zip(&longs).enumerate() {
+            assert_eq!(value, stored as f64, "BITPIX 64 channel {i}");
+        }
+        assert_eq!(arrays.precision, Precision::F64);
+
+        let bytes: Vec<u8> = (0..LEN as u8).map(|i| 255 - i).collect();
+        let path = write(
+            dir.path(),
+            "u8_scaled.fits",
+            &[array_hdu(
+                true,
+                8,
+                LEN,
+                &with(
+                    &WAVE_ANGSTROM,
+                    &[("BSCALE", "0.5"), ("BZERO", "0.25"), ("BLANK", "255")],
+                ),
+                bytes.clone(),
+            )],
+        );
+        let (_, arrays) = read_1d_array(text(&path), 0).unwrap();
+        assert!(arrays.flux[0].is_nan(), "BLANK decoded as {}", arrays.flux[0]);
+        assert_eq!(arrays.flux[1], 127.25);
+        for (i, (&value, &stored)) in arrays.flux.iter().zip(&bytes).enumerate().skip(1) {
+            assert_eq!(value, f64::from(stored) * 0.5 + 0.25, "BITPIX 8 channel {i}");
+        }
+        assert_eq!(arrays.precision, Precision::F64);
+    }
+
     #[test]
     fn unreadable_scaling_and_a_float_dq_are_refused_naming_the_hdu() {
         let dir = tempfile::tempdir().unwrap();
@@ -997,7 +1282,13 @@ mod tests {
     fn extract1d_table_classifies_as_x1d_and_loads_through_from_x1d() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_x1d_fixture(dir.path(), "jw_nrs1_x1d.fits", 6, &[1, 2], "um");
-        assert_eq!(kind_of(&path), Some(Spectrum1dKind::X1d { hdu: 1 }));
+        assert_eq!(
+            kind_of(&path),
+            Some(Spectrum1dKind::X1d {
+                hdu: 1,
+                n_tables: 2
+            })
+        );
 
         let expected = read_x1d_spectrum(text(&path), None).unwrap();
         let s = load_spectrum1d(text(&path), None).unwrap();
@@ -1025,6 +1316,177 @@ mod tests {
         );
     }
 
+    fn series_file(dir: &Path) -> PathBuf {
+        let mut primary = empty_primary_cards();
+        primary.push(("DATAMODL", "'TSOMultiSpecModel'".to_string()));
+        let table = bintable_cards(
+            &[
+                ("INT_NUM", "1J", None),
+                ("WAVELENGTH", "3D", Some("um")),
+                ("FLUX", "3D", Some("Jy")),
+                ("N_ALONGDISP", "1J", None),
+            ],
+            2,
+            &[],
+        );
+        write(
+            dir,
+            "series.fits",
+            &[(primary, Vec::new()), (table, vec![0u8; 112])],
+        )
+    }
+
+    #[test]
+    fn a_row_per_integration_table_classifies_as_time_series_spectra_not_as_one_spectrum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = series_file(dir.path());
+        for hdu in [None, Some(1)] {
+            let error = load_spectrum1d(text(&path), hdu).unwrap_err();
+            let message = format!("{:#}", error);
+            assert!(
+                message.contains(
+                    "series.fits holds time-series spectra (2 integrations x 3 channels, 1 series), not one spectrum"
+                ),
+                "{message}"
+            );
+        }
+        let kind = serde_json::to_value(kind_of(&path)).unwrap();
+        assert_eq!(kind["kind"], "x1dints", "{kind}");
+        assert_eq!(
+            kind_of(&path),
+            Some(Spectrum1dKind::X1dInts {
+                layout: TsoLayout::Rows,
+                n_series: 1,
+                n_integrations: 2,
+                n_channels: 3
+            })
+        );
+    }
+
+    fn legacy_series_file(dir: &Path) -> PathBuf {
+        const ROWS: usize = 6;
+        let mut primary = empty_primary_cards();
+        primary.extend([
+            ("TELESCOP", "'JWST    '".to_string()),
+            ("INSTRUME", "'NIRSPEC '".to_string()),
+            ("GRATING", "'G235H   '".to_string()),
+            ("FILTER", "'F170LP  '".to_string()),
+            ("DETECTOR", "'NRS1    '".to_string()),
+            ("TARGNAME", "'T       '".to_string()),
+            ("DATAMODL", "'MultiSpecModel'".to_string()),
+        ]);
+        let columns = [
+            ("WAVELENGTH", "1D", Some("um")),
+            ("FLUX", "1D", Some("Jy")),
+            ("FLUX_ERROR", "1D", Some("Jy")),
+            ("SURF_BRIGHT", "1D", Some("MJy/sr")),
+            ("BACKGROUND", "1D", Some("Jy")),
+            ("NPIXELS", "1D", None),
+            ("DQ", "1J", None),
+        ];
+        let mut data = Vec::with_capacity(52 * ROWS);
+        for row in 0..ROWS {
+            let dq: i32 = if row == FIXTURE_FLAGGED_ROW { 1 } else { 0 };
+            data.extend(f64_bytes(&[
+                fixture_wavelength(row, "um"),
+                fixture_flux(row),
+                0.1 * (row as f64 + 1.0),
+                100.0 + row as f64,
+                1.0,
+                9.0,
+            ]));
+            data.extend(i32_bytes(&[dq]));
+        }
+        let mut hdus = vec![(primary, Vec::new())];
+        for integration in 1..=3 {
+            let cards = [
+                ("EXTVER", integration.to_string()),
+                ("SRCTYPE", "'POINT   '".to_string()),
+                ("INT_NUM", integration.to_string()),
+            ];
+            hdus.push((bintable_cards(&columns, ROWS, &cards), data.clone()));
+        }
+        write(dir, "legacy_x1dints.fits", &hdus)
+    }
+
+    #[test]
+    fn a_per_integration_file_classifies_as_extensions_and_still_opens_one_integration_by_hdu() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = legacy_series_file(dir.path());
+        assert_eq!(
+            kind_of(&path),
+            Some(Spectrum1dKind::X1dInts {
+                layout: TsoLayout::Extensions,
+                n_series: 1,
+                n_integrations: 3,
+                n_channels: 6
+            })
+        );
+        let error = load_spectrum1d(text(&path), None).unwrap_err();
+        let message = format!("{:#}", error);
+        assert!(
+            message.contains(
+                "legacy_x1dints.fits holds time-series spectra (3 integrations x 6 channels, 1 series), not one spectrum"
+            ),
+            "{message}"
+        );
+
+        let second = load_spectrum1d(text(&path), Some(2)).unwrap();
+        assert_eq!(
+            second.source,
+            Spectrum1dSource::X1d {
+                path: text(&path).to_string(),
+                hdu: 2,
+                extver: Some(2)
+            }
+        );
+        assert_eq!(second.flux, (0..6).map(fixture_flux).collect::<Vec<_>>());
+        assert!(
+            second
+                .notes
+                .iter()
+                .any(|note| note == "this file holds 3 EXTRACT1D tables; shown: integration 2 of 3"),
+            "{:?}",
+            second.notes
+        );
+
+        let error = load_spectrum1d(text(&path), Some(0)).unwrap_err();
+        let message = format!("{:#}", error);
+        assert!(!message.contains("time-series spectra"), "{message}");
+    }
+
+    const TABLES_NOTE_START: &str = "this file holds";
+
+    #[test]
+    fn an_x1d_with_several_tables_reports_their_number_and_the_document_says_which_one_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_x1d_fixture(dir.path(), "mos_x1d.fits", 5, &[2, 1], "um");
+        let notes = load_spectrum1d(text(&path), None).unwrap().notes;
+        assert!(
+            notes.iter().any(|note| note
+                == "this file holds 2 EXTRACT1D tables; shown: table 2 of 2 (EXTVER 1)"),
+            "{notes:?}"
+        );
+        let kind = serde_json::to_value(kind_of(&path)).unwrap();
+        assert_eq!(kind["n_tables"], 2, "{kind}");
+        assert_eq!(
+            kind_of(&path),
+            Some(Spectrum1dKind::X1d {
+                hdu: 2,
+                n_tables: 2
+            })
+        );
+
+        let single = write_x1d_fixture(dir.path(), "one_x1d.fits", 5, &[1], "um");
+        let kind = serde_json::to_value(kind_of(&single)).unwrap();
+        assert_eq!(kind["n_tables"], 1, "{kind}");
+        let notes = load_spectrum1d(text(&single), None).unwrap().notes;
+        assert!(
+            !notes.iter().any(|note| note.starts_with(TABLES_NOTE_START)),
+            "{notes:?}"
+        );
+    }
+
     fn bits(values: &[f64]) -> Vec<u64> {
         values.iter().map(|v| v.to_bits()).collect()
     }
@@ -1036,7 +1498,7 @@ mod tests {
         for grating in ["g395h-f290lp", "g235h-f170lp"] {
             let x1d = dir.join(format!("jw01266-o005_t001_nirspec_{grating}_x1d.fits"));
             assert!(x1d.is_file(), "{} is missing", x1d.display());
-            let Some(Spectrum1dKind::X1d { hdu }) = kind_of(&x1d) else {
+            let Some(Spectrum1dKind::X1d { hdu, .. }) = kind_of(&x1d) else {
                 panic!("{} did not classify as an x1d table", x1d.display());
             };
             let expected = read_x1d_spectrum(text(&x1d), None).unwrap();
@@ -1087,6 +1549,89 @@ mod tests {
     }
 
     #[test]
+    fn load_spectrum1d_with_unit_opens_a_bare_linear_array_the_plain_loader_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [("CRVAL1", "4000.0"), ("CDELT1", "2.5"), ("CRPIX1", "1.0")];
+        let path = write(
+            dir.path(),
+            "bare_linear.fits",
+            &[array_hdu(true, -32, LEN, &cards, f32_bytes(&flux()))],
+        );
+        assert_eq!(kind_of(&path), Some(Spectrum1dKind::Wcs1d { hdu: 0 }));
+        let refused = format!("{:#}", load_spectrum1d(text(&path), None).unwrap_err());
+        assert!(
+            refused.contains("the array has no wavelength solution"),
+            "{refused}"
+        );
+
+        let s = load_spectrum1d_with_unit(text(&path), None, Some(WavelengthUnitChoice::Angstrom))
+            .unwrap();
+        assert!(
+            (s.axis.values[0] - 0.4).abs() < 1e-12,
+            "{}",
+            s.axis.values[0]
+        );
+        assert!(
+            (s.axis.values[1] - 0.40025).abs() < 1e-12,
+            "{}",
+            s.axis.values[1]
+        );
+        assert_eq!(s.wavelength_unit_source, WavelengthUnitSource::User);
+        assert_eq!(s.wavelength_frame, WavelengthFrame::Air);
+        assert!(s.frame_assumed(), "{:?}", s.notes);
+        assert!(
+            s.notes
+                .iter()
+                .any(|note| note == "CUNIT1 missing: wavelength unit 'Angstrom' set by the user"),
+            "{:?}",
+            s.notes
+        );
+        assert_eq!(s.flux, widen(&flux()));
+    }
+
+    #[test]
+    fn an_override_is_refused_for_tables_and_csv_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = write_x1d_fixture(dir.path(), "t_x1d.fits", 6, &[1], "um");
+        let s = load_spectrum1d_with_unit(text(&table), None, Some(WavelengthUnitChoice::Nm))
+            .unwrap();
+        assert_eq!(s.axis.values[0], 2.0);
+        assert_eq!(
+            s.axis.values,
+            load_spectrum1d(text(&table), None).unwrap().axis.values
+        );
+        assert_eq!(s.wavelength_unit_source, WavelengthUnitSource::File);
+        assert!(
+            s.notes.iter().any(|note| note
+                == "wavelength unit 'nm' not applied: an EXTRACT1D table states its unit in TUNIT"),
+            "{:?}",
+            s.notes
+        );
+
+        let unitless = write_x1d_fixture(dir.path(), "unitless_x1d.fits", 6, &[1], "");
+        let s = load_spectrum1d(text(&unitless), None).unwrap();
+        assert_eq!(s.wavelength_unit_source, WavelengthUnitSource::Assumed);
+        assert!(
+            !s.notes.iter().any(|note| note.contains("not applied")),
+            "{:?}",
+            s.notes
+        );
+
+        let csv = dir.path().join("spectrum.csv");
+        std::fs::write(&csv, SMALL_CSV).unwrap();
+        let s = load_spectrum1d_with_unit(text(&csv), None, Some(WavelengthUnitChoice::Um))
+            .unwrap();
+        assert_eq!(s.axis.values, vec![2.0, 2.1]);
+        assert_eq!(s.wavelength_unit_source, WavelengthUnitSource::File);
+        assert!(
+            s.notes.iter().any(|note| note
+                == "wavelength unit 'um' not applied: a spectrum CSV names its unit in the column header"),
+            "{:?}",
+            s.notes
+        );
+    }
+
+    #[test]
     fn read_spectrum_csv_refuses_a_file_above_the_cap_text_that_is_not_utf8_and_a_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("spectrum.csv");
@@ -1117,12 +1662,32 @@ mod tests {
     #[test]
     fn spectrum1d_kind_serialises_with_the_kind_tag_the_probe_returns() {
         assert_eq!(
-            serde_json::to_value(Spectrum1dKind::X1d { hdu: 1 }).unwrap(),
-            serde_json::json!({ "kind": "x1d", "hdu": 1 })
+            serde_json::to_value(Spectrum1dKind::X1d {
+                hdu: 1,
+                n_tables: 1
+            })
+            .unwrap(),
+            serde_json::json!({ "kind": "x1d", "hdu": 1, "n_tables": 1 })
         );
         assert_eq!(
             serde_json::to_value(Spectrum1dKind::Wcs1d { hdu: 0 }).unwrap(),
             serde_json::json!({ "kind": "wcs1d", "hdu": 0 })
+        );
+        assert_eq!(
+            serde_json::to_value(Spectrum1dKind::X1dInts {
+                layout: TsoLayout::Rows,
+                n_series: 2,
+                n_integrations: 8,
+                n_channels: 1271
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "x1dints",
+                "layout": "rows",
+                "n_series": 2,
+                "n_integrations": 8,
+                "n_channels": 1271
+            })
         );
     }
 }

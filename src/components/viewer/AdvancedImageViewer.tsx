@@ -20,7 +20,7 @@ import {
 import { useViewerTransform, ZOOM_PRESETS } from "../../hooks/useViewerTransform";
 import { useImageRetry } from "../../hooks/useImageRetry";
 import { screenToImagePixel } from "../../utils/pixelMapping";
-import { imageRenderingFor, previewTextureBadge } from "../../utils/viewerZoom";
+import { imageRenderingFor, previewTextureBadge, screenPixelRatio } from "../../utils/viewerZoom";
 import {
   CANVAS_HINT_CLASS,
   OTHER_GRID_CANVAS_HINT,
@@ -233,7 +233,7 @@ function AdvancedImageViewer({
   const imgStyle: React.CSSProperties = {
     transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
     transformOrigin: "0 0",
-    imageRendering: imageRenderingFor(transform.scale),
+    imageRendering: imageRenderingFor(transform.scale, screenPixelRatio()),
     willChange: "transform",
     position: "absolute",
     top: 0,

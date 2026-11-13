@@ -3,11 +3,12 @@ import type { ProcessedResult } from "../shared/types/preview";
 import type { SpectralAxisInfo } from "../shared/types/spectral";
 import { measurementAxisValues } from "./lineMeasure";
 import { formatAxisValue } from "./spectralAxis";
-import { nearestChannel, pixelToAxisValue, type PlotMapping } from "./spectrumRange";
+import { channelWidthAt, nearestChannel, pixelToAxisValue, type PlotMapping } from "./spectrumRange";
 
 export const FRAME_STEP = 1;
 export const FRAME_STEP_LARGE = 10;
 export const FRAME_KEY_HINT = "ArrowLeft / ArrowRight step the displayed channel, Shift steps by 10, double-click jumps to a channel";
+export const FRAME_LABEL_VACUUM = "vacuum";
 
 export type PlaybackSpeed = "fast" | "normal" | "slow";
 
@@ -56,10 +57,10 @@ export function frameAxisValue(idx: number, values: number[] | null | undefined)
   return Number.isFinite(v) ? v : null;
 }
 
-export function formatFrameLabel(idx: number, total: number, axisValue: number | null, unit: string): string {
+export function formatFrameLabel(idx: number, total: number, axisValue: number | null, unit: string, step?: number): string {
   const channel = `ch ${idx} (0–${Math.max(total - 1, 0)})`;
   if (axisValue === null || !Number.isFinite(axisValue) || !unit || unit === "ch") return channel;
-  return `${channel} - ${formatAxisValue(axisValue, unit)} ${unit}`;
+  return `${channel} - ${formatAxisValue(axisValue, unit, step)} ${unit}`;
 }
 
 const PIVOT_LABEL_DECIMALS = 3;
@@ -73,7 +74,10 @@ export function filterFrameLabel(idx: number, total: number, planes: readonly Ph
 }
 
 export function frameRecordLabel(idx: number, total: number, axis: SpectralAxisInfo | null): string {
-  return formatFrameLabel(idx, total, frameAxisValue(idx, measurementAxisValues(axis)), axis?.unit ?? "");
+  const values = measurementAxisValues(axis);
+  const channel = formatFrameLabel(idx, total, null, "");
+  const label = formatFrameLabel(idx, total, frameAxisValue(idx, values), axis?.unit ?? "", values ? channelWidthAt(values, idx) : undefined);
+  return axis?.kind === "awav" && label !== channel ? `${label} ${FRAME_LABEL_VACUUM}` : label;
 }
 
 export function displayedChannel(

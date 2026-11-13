@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 use anyhow::{bail, Context, Result};
 
 use crate::core::astrometry::spectral::{TabColumn, TabTables};
-use crate::infra::fits::gzip::resolve_gzip;
+use crate::infra::fits::gzip::{resolve_gzip, SharedTempDir};
 use crate::infra::fits::reader::{list_extensions, read_header_blocks, ParsedHdu};
 use crate::types::HduHeader;
 
@@ -166,7 +166,7 @@ pub fn is_bintable_hdu(header: &HduHeader) -> bool {
     is_bintable && !is_zimage
 }
 
-fn card_text(header: &HduHeader, key: &str) -> Option<String> {
+pub(crate) fn card_text(header: &HduHeader, key: &str) -> Option<String> {
     header
         .get(key)
         .map(|s| s.trim().trim_matches('\'').trim().to_string())
@@ -285,6 +285,16 @@ fn read_raw_int(bytes: &[u8], type_code: char) -> i64 {
 }
 
 fn read_one_column(data: &[u8], layout: &BintableLayout, info: &ColumnInfo, tdim_card: Option<&str>) -> Result<Column> {
+    read_column_rows(data, layout, layout.n_rows, info, tdim_card)
+}
+
+fn read_column_rows(
+    data: &[u8],
+    layout: &BintableLayout,
+    n_rows: usize,
+    info: &ColumnInfo,
+    tdim_card: Option<&str>,
+) -> Result<Column> {
     let span = layout
         .columns
         .get(&info.name)
@@ -317,7 +327,7 @@ fn read_one_column(data: &[u8], layout: &BintableLayout, info: &ColumnInfo, tdim
         None => None,
     };
     let elem_bytes = tform_elem_bytes(type_code)?;
-    let elements = (0..layout.n_rows).flat_map(|row| {
+    let elements = (0..n_rows).flat_map(|row| {
         let start = row * layout.row_width + offset;
         (0..repeat).map(move |e| &data[start + e * elem_bytes..start + (e + 1) * elem_bytes])
     });
@@ -491,6 +501,133 @@ pub fn load_bintable(path: &str, hdu: usize) -> Result<BintableData> {
     file.read_exact(&mut bytes)
         .with_context(|| format!("{label}: table data truncated"))?;
     Ok(BintableData { label, header: parsed.header, bytes })
+}
+
+pub struct BintableReader {
+    file: File,
+    label: String,
+    header: HduHeader,
+    layout: BintableLayout,
+    infos: Vec<ColumnInfo>,
+    data_start: u64,
+    _decompressed: Option<SharedTempDir>,
+}
+
+pub fn bintable_reader(file: &File, index: usize, parsed: &ParsedHdu) -> Result<BintableReader> {
+    let label = format!("HDU {index} ({})", hdu_label(&parsed.header));
+    if !is_bintable_hdu(&parsed.header) {
+        bail!("{label} is not a BINTABLE");
+    }
+    let naxis1 = parsed.header.get_i64("NAXIS1").context("Missing NAXIS1")?.max(0) as usize;
+    let naxis2 = parsed.header.get_i64("NAXIS2").context("Missing NAXIS2")?.max(0) as usize;
+    let needed = naxis1
+        .checked_mul(naxis2)
+        .with_context(|| format!("{label}: NAXIS1*NAXIS2 overflows (NAXIS1={naxis1} x NAXIS2={naxis2})"))?;
+    let file_len = file.metadata().with_context(|| format!("{label}: stat failed"))?.len();
+    let available = file_len.saturating_sub(parsed.data_start as u64);
+    if needed as u64 > available {
+        bail!(
+            "{label}: header declares {needed} bytes of table data (NAXIS1={naxis1} x NAXIS2={naxis2}) but only {available} bytes follow the header"
+        );
+    }
+    let layout = BintableLayout { n_rows: naxis2, ..build_bintable_layout(&parsed.header)? };
+    let infos = column_infos(&parsed.header, &label)?;
+    let file = file
+        .try_clone()
+        .with_context(|| format!("{label}: duplicating the file handle failed"))?;
+    Ok(BintableReader {
+        file,
+        label,
+        header: parsed.header.clone(),
+        layout,
+        infos,
+        data_start: parsed.data_start as u64,
+        _decompressed: None,
+    })
+}
+
+pub fn open_bintable(path: &str, hdu: usize) -> Result<BintableReader> {
+    let (readable, decompressed) = resolve_gzip(std::path::Path::new(path))?;
+    let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
+    let extensions = list_extensions(&file)?;
+    let info = extensions
+        .get(hdu)
+        .with_context(|| format!("HDU index {hdu} out of range (file has {} HDUs)", extensions.len()))?;
+    let parsed = read_header_blocks(&file, info.header_start)?;
+    Ok(BintableReader { _decompressed: decompressed, ..bintable_reader(&file, hdu, &parsed)? })
+}
+
+impl BintableReader {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn header(&self) -> &HduHeader {
+        &self.header
+    }
+
+    pub fn n_rows(&self) -> usize {
+        self.layout.n_rows
+    }
+
+    pub fn row_width(&self) -> usize {
+        self.layout.row_width
+    }
+
+    pub fn data_bytes(&self) -> u64 {
+        (self.layout.row_width * self.layout.n_rows) as u64
+    }
+
+    pub fn columns(&self) -> &[ColumnInfo] {
+        &self.infos
+    }
+
+    pub fn info(&self, name: &str) -> Option<&ColumnInfo> {
+        let wanted = name.trim().to_uppercase();
+        self.infos.iter().find(|c| c.name == wanted)
+    }
+
+    pub fn read_rows(&mut self, rows: std::ops::Range<usize>, names: &[&str]) -> Result<Vec<Column>> {
+        let label = &self.label;
+        let total = self.layout.n_rows;
+        if rows.end > total {
+            bail!("{label}: rows {}..{} requested, the table has {total} rows", rows.start, rows.end);
+        }
+        let available = self.infos.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ");
+        let wanted = names
+            .iter()
+            .map(|requested| {
+                let wanted = requested.trim().to_uppercase();
+                let matches: Vec<&ColumnInfo> = self.infos.iter().filter(|c| c.name == wanted).collect();
+                if matches.len() > 1 {
+                    let keys = matches.iter().map(|c| format!("TTYPE{}", c.index)).collect::<Vec<_>>().join(", ");
+                    bail!("column '{wanted}' appears {} times in {label} ({keys}); refusing the ambiguous name", matches.len());
+                }
+                matches
+                    .first()
+                    .copied()
+                    .with_context(|| format!("column '{wanted}' not in {label}; columns: {available}"))
+            })
+            .collect::<Result<Vec<&ColumnInfo>>>()?;
+        let n_rows = rows.len();
+        let mut data = vec![0u8; n_rows * self.layout.row_width];
+        if n_rows > 0 {
+            let offset = self.data_start + (rows.start * self.layout.row_width) as u64;
+            self.file
+                .seek(SeekFrom::Start(offset))
+                .with_context(|| format!("{label}: seek to table data failed"))?;
+            self.file
+                .read_exact(&mut data)
+                .with_context(|| format!("{label}: table data truncated"))?;
+        }
+        wanted
+            .into_iter()
+            .map(|info| {
+                let tdim_card = card_text(&self.header, &format!("TDIM{}", info.index));
+                read_column_rows(&data, &self.layout, n_rows, info, tdim_card.as_deref())
+            })
+            .collect()
+    }
 }
 
 pub fn read_bintable_columns(path: &str, hdu: usize, names: &[&str]) -> Result<Vec<Column>> {
@@ -1213,5 +1350,185 @@ mod tests {
         );
         assert_eq!(layout.columns["ZSCALE"], ColumnSpan::Fixed { offset: 8, type_code: 'D', repeat: 1 });
         assert_eq!(layout.columns["ARR"], ColumnSpan::Fixed { offset: 16, type_code: 'D', repeat: 3 });
+    }
+
+    fn rows_table(dir: &std::path::Path, rows: usize) -> std::path::PathBuf {
+        let mut data = Vec::new();
+        for row in 0..rows {
+            let base = 10.0 * row as f64;
+            let flags: [i32; 3] = if row == 2 { [0, 1, 0] } else { [0, 0, 0] };
+            data.extend_from_slice(&(row as i32 + 1).to_be_bytes());
+            data.extend(f64_rows(&[&[1.0, 1.1, 1.2], &[base, base + 1.0, base + 2.0]]));
+            for flag in flags {
+                data.extend_from_slice(&(i32::MIN + flag).to_be_bytes());
+            }
+            data.extend_from_slice(&(i32::MIN + 3).to_be_bytes());
+        }
+        write_table(
+            dir,
+            "rows.fits",
+            &[
+                ("INT_NUM", "1J", None),
+                ("WAVELENGTH", "3D", Some("um")),
+                ("FLUX", "3D", Some("Jy")),
+                ("DQ", "3J", None),
+                ("N_ALONGDISP", "1J", None),
+            ],
+            rows,
+            data,
+            &[("TZERO4", "2147483648".into()), ("TZERO5", "2147483648".into())],
+        )
+    }
+
+    #[test]
+    fn read_rows_of_a_multi_row_array_table_equals_the_matching_slice_of_the_flattened_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = rows_table(dir.path(), 4);
+        let key = path.to_str().unwrap();
+        let names = ["FLUX", "DQ", "INT_NUM", "N_ALONGDISP"];
+        let columns = open_bintable(key, 1).unwrap().read_rows(1..3, &names).unwrap();
+        assert_eq!(columns.len(), 4);
+        assert_eq!(f64s(&columns[0]), vec![10.0, 11.0, 12.0, 20.0, 21.0, 22.0]);
+        assert_eq!(columns[0].repeat, 3);
+        assert_eq!(i64s(&columns[1]), vec![0, 0, 0, 0, 1, 0]);
+        assert_eq!(i64s(&columns[2]), vec![2, 3]);
+        assert_eq!(i64s(&columns[3]), vec![3, 3]);
+        let whole = load_bintable(key, 1).unwrap();
+        for (column, name) in columns.iter().zip(names) {
+            let flattened = whole.flattened_column(name).unwrap();
+            let slice = column.repeat..3 * column.repeat;
+            assert_eq!(column.repeat, flattened.repeat, "{name}");
+            match (&column.values, &flattened.values) {
+                (ColumnValues::F64(read), ColumnValues::F64(all)) => assert_eq!(read[..], all[slice], "{name}"),
+                (ColumnValues::I64(read), ColumnValues::I64(all)) => assert_eq!(read[..], all[slice], "{name}"),
+                other => panic!("{name}: value kinds differ: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn reading_a_table_in_chunks_gives_the_same_values_as_reading_it_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = rows_table(dir.path(), 7);
+        let key = path.to_str().unwrap();
+        let names = ["FLUX", "DQ"];
+        let mut reader = open_bintable(key, 1).unwrap();
+        let mut flux = Vec::new();
+        let mut dq = Vec::new();
+        for chunk in [0..3, 3..6, 6..7] {
+            let columns = reader.read_rows(chunk, &names).unwrap();
+            flux.extend(f64s(&columns[0]));
+            dq.extend(i64s(&columns[1]));
+        }
+        let whole = reader.read_rows(0..7, &names).unwrap();
+        assert_eq!(flux.len(), 21);
+        assert_eq!(flux, f64s(&whole[0]));
+        assert_eq!(dq, i64s(&whole[1]));
+        let flattened = load_bintable(key, 1).unwrap().flattened_columns(&names).unwrap();
+        assert_eq!(whole, flattened);
+    }
+
+    #[test]
+    fn read_rows_accepts_an_empty_range_and_refuses_one_past_the_end_naming_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = rows_table(dir.path(), 7);
+        let mut reader = open_bintable(path.to_str().unwrap(), 1).unwrap();
+        let empty = reader.read_rows(2..2, &["FLUX"]).unwrap();
+        assert_eq!(f64s(&empty[0]), Vec::<f64>::new());
+        assert_eq!(empty[0].repeat, 3);
+        let err = format!("{:#}", reader.read_rows(3..9, &["FLUX"]).unwrap_err());
+        assert!(err.contains("HDU 1 (EXTRACT1D): rows 3..9 requested, the table has 7 rows"), "{err}");
+    }
+
+    #[test]
+    fn open_bintable_reports_rows_width_and_columns_without_reading_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = rows_table(dir.path(), 4);
+        let reader = open_bintable(path.to_str().unwrap(), 1).unwrap();
+        assert_eq!(reader.n_rows(), 4);
+        assert_eq!(reader.row_width(), 68);
+        assert_eq!(reader.data_bytes(), 272);
+        assert_eq!(reader.label(), "HDU 1 (EXTRACT1D)");
+        assert_eq!(reader.header().get_i64("NAXIS2"), Some(4));
+        let flux = reader.info("flux").unwrap();
+        assert_eq!(flux.repeat, 3);
+        assert_eq!(flux.tform, "3D");
+        assert_eq!(flux.unit.as_deref(), Some("Jy"));
+        assert!(reader.info("NOPE").is_none());
+        assert_eq!(reader.columns().len(), 5);
+    }
+
+    #[test]
+    fn open_bintable_keeps_the_refusals_of_load_bintable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mef = dir.path().join("mef.fits");
+        sci_err_dq_mef(&mef, 4, 4, vec![0i32; 16]);
+        let image = format!("{:#}", open_bintable(mef.to_str().unwrap(), 1).err().unwrap());
+        assert!(image.contains("is not a BINTABLE"), "{image}");
+
+        let path = rows_table(dir.path(), 4);
+        let key = path.to_str().unwrap();
+        let range = format!("{:#}", open_bintable(key, 9).err().unwrap());
+        assert!(range.contains("HDU index 9 out of range"), "{range}");
+        let unknown = format!("{:#}", open_bintable(key, 1).unwrap().read_rows(0..1, &["NOPE"]).unwrap_err());
+        assert!(
+            unknown.contains("column 'NOPE' not in HDU 1 (EXTRACT1D); columns: INT_NUM, WAVELENGTH, FLUX, DQ, N_ALONGDISP"),
+            "{unknown}"
+        );
+
+        let cut_dir = tempfile::tempdir().unwrap();
+        let cut = rows_table(cut_dir.path(), 4);
+        let mut opened_before_the_cut = open_bintable(cut.to_str().unwrap(), 1).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&cut).unwrap().set_len(2880 + 2880 + 100).unwrap();
+        let truncated = format!("{:#}", open_bintable(cut.to_str().unwrap(), 1).err().unwrap());
+        assert!(truncated.contains("header declares 272 bytes of table data"), "{truncated}");
+        assert!(truncated.contains("bytes follow the header"), "{truncated}");
+        assert_eq!(i64s(&opened_before_the_cut.read_rows(0..1, &["INT_NUM"]).unwrap()[0]), vec![1]);
+        let short = format!("{:#}", opened_before_the_cut.read_rows(1..3, &["INT_NUM"]).unwrap_err());
+        assert!(short.contains("HDU 1 (EXTRACT1D): table data truncated"), "{short}");
+
+        let twice_dir = tempfile::tempdir().unwrap();
+        let twice = write_table(
+            twice_dir.path(),
+            "dup.fits",
+            &[("FLUX", "1D", Some("Jy")), ("FLUX", "1D", None), ("OK", "1J", None)],
+            1,
+            vec![0u8; 20],
+            &[],
+        );
+        let mut reader = open_bintable(twice.to_str().unwrap(), 1).unwrap();
+        let repeated = format!("{:#}", reader.read_rows(0..1, &["FLUX"]).unwrap_err());
+        assert!(
+            repeated.contains("column 'FLUX' appears 2 times in HDU 1 (EXTRACT1D) (TTYPE1, TTYPE2); refusing the ambiguous name"),
+            "{repeated}"
+        );
+        assert_eq!(reader.info("flux").map(|c| c.index), Some(1));
+        assert_eq!(i64s(&reader.read_rows(0..1, &["OK"]).unwrap()[0]), vec![0]);
+    }
+
+    #[test]
+    fn open_bintable_reads_a_gzip_compressed_table_under_its_own_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = rows_table(dir.path(), 4);
+        let gz = crate::infra::fits::gzip::test_support::gzip_copy(&path, "rows.fits.gz");
+        let plain = open_bintable(path.to_str().unwrap(), 1).unwrap().read_rows(0..4, &["FLUX"]).unwrap();
+        let compressed = open_bintable(gz.to_str().unwrap(), 1).unwrap().read_rows(0..4, &["FLUX"]).unwrap();
+        assert_eq!(f64s(&plain[0]).len(), 12);
+        assert_eq!(compressed, plain);
+    }
+
+    #[test]
+    fn bintable_reader_built_from_a_listed_table_reads_the_same_rows_as_open_bintable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = rows_table(dir.path(), 4);
+        let names = ["WAVELENGTH", "INT_NUM"];
+        let file = File::open(&path).unwrap();
+        let tables = list_tables(&file).unwrap();
+        assert_eq!(tables.len(), 1);
+        let (table, parsed) = &tables[0];
+        let listed = bintable_reader(&file, table.index, parsed).unwrap().read_rows(0..4, &names).unwrap();
+        let opened = open_bintable(path.to_str().unwrap(), 1).unwrap().read_rows(0..4, &names).unwrap();
+        assert_eq!(i64s(&listed[1]), vec![1, 2, 3, 4]);
+        assert_eq!(listed, opened);
     }
 }

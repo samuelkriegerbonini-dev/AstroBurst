@@ -671,7 +671,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     await init();
     const s = get();
     if (!enabled(s, suggestion.mission)) return;
-    const fields = { text: suggestion.text, kindOverride: null, radiusText: String(DEFAULT_RADIUS_ARCMIN), filters: { ...suggestion.filters }, preset: null };
+    const fields = { text: suggestion.text, kindOverride: null, radiusText: String(DEFAULT_RADIUS_ARCMIN), filters: { ...suggestion.filters }, preset: suggestion.preset ?? null };
     if (suggestion.mission !== s.form.mission) moveTo({ ...formFor(s, suggestion.mission), ...fields });
     else dispatch({ type: "formChanged", patch: fields });
     if (suggestion.filters.level) saveLevel(storage, suggestion.filters.level);

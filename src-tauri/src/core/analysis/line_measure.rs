@@ -17,6 +17,9 @@ pub const MIN_LINE_CHANNELS: usize = 3;
 pub const MAX_FIT_ITERATIONS: usize = 50;
 pub const MODEL_NONE: &str = "none";
 pub const MODEL_GAUSSIAN: &str = "gaussian";
+pub const RELIABLE_ERRORS_MIN_SNR: f64 = 10.0;
+pub const WIDTH_ERROR_LINEAR_LIMIT: f64 = 0.15;
+pub const CGS_FLUX_PER_SI_FLUX: f64 = 1000.0;
 
 const SIGMA_LOWER_BOUND_FRACTION: f64 = 0.25;
 const SLOPE_CONDITION_EPSILON: f64 = 1e-12;
@@ -71,6 +74,14 @@ pub struct LineVelocity {
     pub source_centroid_kms: f64,
     pub source_sigma_kms: f64,
     pub source_fwhm_kms: f64,
+    pub centroid_err_kms: f64,
+    pub sigma_err_kms: f64,
+    pub fwhm_err_kms: f64,
+    pub source_centroid_err_kms: f64,
+    pub source_sigma_err_kms: f64,
+    pub source_fwhm_err_kms: f64,
+    pub z_line: f64,
+    pub z_line_err: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -91,13 +102,25 @@ pub struct LineMeasurement {
     pub continuum_windows: ContinuumWindows,
     pub flux: f64,
     pub flux_err: f64,
+    pub flux_si: Option<f64>,
+    pub flux_si_err: Option<f64>,
+    pub flux_cgs: Option<f64>,
+    pub flux_cgs_err: Option<f64>,
+    pub flux_physical_basis: String,
     pub equivalent_width: f64,
     pub centroid: f64,
     pub sigma: f64,
     pub fwhm: f64,
     pub peak: f64,
     pub peak_channel: usize,
+    pub peak_axis: f64,
     pub snr: f64,
+    pub equivalent_width_err: f64,
+    pub centroid_err: f64,
+    pub sigma_err: f64,
+    pub fwhm_err: f64,
+    pub errors_reliable: bool,
+    pub width_errors_reliable: bool,
     pub velocity: Option<LineVelocity>,
     pub fit: Option<GaussianFit>,
     pub err_used: bool,
@@ -406,6 +429,16 @@ pub(crate) fn resolve_windows(
             windows.0 .0, windows.0 .1, windows.1 .0, windows.1 .1
         ));
     }
+    let distinct_windows = [Some(windows.0), (windows.1 != windows.0).then_some(windows.1)];
+    for window in distinct_windows.into_iter().flatten() {
+        let shared_channels = (window.0.max(line.0)..=window.1.min(line.1)).count();
+        if shared_channels > 0 {
+            notes.push(format!(
+                "continuum window {}..={} overlaps the line range {}..={} in {} channels: line flux is fitted as continuum there, and the errors treat line and continuum channels as independent",
+                window.0, window.1, line.0, line.1, shared_channels
+            ));
+        }
+    }
     Ok(windows)
 }
 
@@ -434,6 +467,24 @@ fn flux_error_terms(samples: &[LineSample], channel_sigma: impl Fn(usize) -> f64
         level: width.abs() * covariance.level_variance.sqrt(),
         slope: lever.abs() * covariance.slope_variance.sqrt(),
     }
+}
+
+fn first_order_error(
+    samples: &[LineSample],
+    channel_sigma: impl Fn(usize) -> f64,
+    continuum: &ContinuumFit,
+    partials: impl Fn(&LineSample) -> (f64, f64),
+) -> f64 {
+    let covariance = &continuum.covariance;
+    let (mut pixel, mut level, mut lever) = (0.0, 0.0, 0.0);
+    for s in samples {
+        let (to_flux, to_continuum) = partials(s);
+        let e = to_flux * channel_sigma(s.channel);
+        pixel += e * e;
+        level += to_continuum;
+        lever += to_continuum * (s.x - continuum.x_ref - covariance.x_mean);
+    }
+    (pixel + level * level * covariance.level_variance + lever * lever * covariance.slope_variance).sqrt()
 }
 
 fn err_scatter_note(chi2_red: f64, dof: usize) -> Option<String> {
@@ -552,9 +603,24 @@ pub fn measure_line_with_errors(
     continuum: Option<ContinuumWindows>,
     model: LineModel,
 ) -> Result<LineMeasurement, String> {
+    measure_line_physical(axis, flux, err, excluded, line, continuum, model, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn measure_line_physical(
+    axis: &[f64],
+    flux: &[f32],
+    err: Option<&[f64]>,
+    excluded: Option<&[bool]>,
+    line: (usize, usize),
+    continuum: Option<ContinuumWindows>,
+    model: LineModel,
+    channel_factor: Option<&[f64]>,
+) -> Result<LineMeasurement, String> {
     validate_axis(axis, flux, line)?;
     check_companion_length("ERR", err.map(<[f64]>::len), flux.len())?;
     check_companion_length("DQ exclusion mask", excluded.map(<[bool]>::len), flux.len())?;
+    check_companion_length("physical-flux factor", channel_factor.map(<[f64]>::len), flux.len())?;
     let channels = Channels { flux, err, excluded };
     let depth = axis.len();
     let mut notes = Vec::new();
@@ -647,13 +713,16 @@ pub fn measure_line_with_errors(
     };
 
     let continuum_chi2_red = (err.is_some() && cont.dof > 0).then(|| cont.chi2 / cont.dof as f64);
+    let noise_scale = match err {
+        Some(_) => error_scale(Weighting::Err, cont.chi2, cont.dof).sqrt(),
+        None => (cont.chi2 / cont.dof as f64).sqrt(),
+    };
     let flux_err_terms = match err {
         Some(err) => {
-            let scale = error_scale(Weighting::Err, cont.chi2, cont.dof).sqrt();
-            let terms = flux_error_terms(&samples, |z| err[z], &cont).scaled(scale);
+            let terms = flux_error_terms(&samples, |z| err[z], &cont).scaled(noise_scale);
             let scaling = match continuum_chi2_red {
-                Some(chi2_red) if scale > 1.0 => {
-                    format!(", each scaled by {:.3}, the square root of the reduced chi2 {:.3} of the continuum fit", scale, chi2_red)
+                Some(chi2_red) if noise_scale > 1.0 => {
+                    format!(", each scaled by {:.3}, the square root of the reduced chi2 {:.3} of the continuum fit", noise_scale, chi2_red)
                 }
                 _ => String::new(),
             };
@@ -665,15 +734,46 @@ pub fn measure_line_with_errors(
             Some(terms)
         }
         None => {
-            let residual_rms = (cont.chi2 / cont.dof as f64).sqrt();
-            if !(residual_rms.is_finite() && residual_rms > 0.0) {
+            if !(noise_scale.is_finite() && noise_scale > 0.0) {
                 notes.push("continuum scatter is zero or unknown: flux error and SNR are not meaningful".to_string());
             }
-            residual_rms.is_finite().then(|| flux_error_terms(&samples, |_| 1.0, &cont).scaled(residual_rms))
+            noise_scale.is_finite().then(|| flux_error_terms(&samples, |_| 1.0, &cont).scaled(noise_scale))
         }
     };
     let flux_err = flux_err_terms.map_or(f64::NAN, |terms| terms.total());
     let snr = flux_total / flux_err;
+
+    let propagated = |partials: &dyn Fn(&LineSample) -> (f64, f64)| {
+        noise_scale * first_order_error(&samples, |z| err.map_or(1.0, |err| err[z]), &cont, partials)
+    };
+    let moment_error = |weight: &dyn Fn(f64) -> f64| {
+        propagated(&|s| {
+            let to_flux = weight(s.x - centroid) * s.dx / flux_total;
+            (to_flux, -to_flux)
+        })
+    };
+    let errors_defined = noise_scale.is_finite() && flux_total != 0.0;
+    let equivalent_width_err = if errors_defined && equivalent_width.is_finite() {
+        propagated(&|s| (-s.dx / s.continuum, (s.excess + s.continuum) * s.dx / (s.continuum * s.continuum)))
+    } else {
+        f64::NAN
+    };
+    let centroid_err = if errors_defined { moment_error(&|offset| offset) } else { f64::NAN };
+    let sigma_err = if errors_defined && sigma > 0.0 {
+        moment_error(&|offset| offset * offset - sigma * sigma) / (2.0 * sigma)
+    } else {
+        f64::NAN
+    };
+    let flux_si = channel_factor.map(|factor| samples.iter().map(|s| factor[s.channel] * s.excess * s.dx).sum::<f64>());
+    let flux_si_err = channel_factor.map(|factor| {
+        propagated(&|s| {
+            let to_flux = factor[s.channel] * s.dx;
+            (to_flux, -to_flux)
+        })
+    });
+    let errors_reliable = snr.is_finite() && snr.abs() >= RELIABLE_ERRORS_MIN_SNR;
+    let width_errors_reliable =
+        errors_reliable && sigma_err.is_finite() && sigma > 0.0 && sigma_err <= WIDTH_ERROR_LINEAR_LIMIT * sigma;
 
     let x_bounds = (axis[line.0].min(axis[line.1]), axis[line.0].max(axis[line.1]));
     let fit = match model {
@@ -715,13 +815,25 @@ pub fn measure_line_with_errors(
         continuum_windows: windows,
         flux: flux_total,
         flux_err,
+        flux_si,
+        flux_si_err,
+        flux_cgs: flux_si.map(|watts_per_m2| watts_per_m2 * CGS_FLUX_PER_SI_FLUX),
+        flux_cgs_err: flux_si_err.map(|watts_per_m2| watts_per_m2 * CGS_FLUX_PER_SI_FLUX),
+        flux_physical_basis: String::new(),
         equivalent_width,
         centroid,
         sigma,
         fwhm: sigma * FWHM_PER_SIGMA,
         peak: extremum.1,
         peak_channel: extremum.0,
+        peak_axis: axis[extremum.0],
         snr,
+        equivalent_width_err,
+        centroid_err,
+        sigma_err,
+        fwhm_err: sigma_err * FWHM_PER_SIGMA,
+        errors_reliable,
+        width_errors_reliable,
         velocity: None,
         fit,
         err_used: err.is_some(),
@@ -732,6 +844,14 @@ pub fn measure_line_with_errors(
         notes,
         elapsed_ms: 0,
     })
+}
+
+pub fn line_redshift(centroid_vacuum_um: f64, centroid_err_um: f64, rest_vacuum_um: f64, shift_kms: f64) -> (f64, f64) {
+    if !(rest_vacuum_um.is_finite() && rest_vacuum_um > 0.0) {
+        return (f64::NAN, f64::NAN);
+    }
+    let stretch = 1.0 + shift_kms / SPEED_OF_LIGHT_KMS;
+    (centroid_vacuum_um * stretch / rest_vacuum_um - 1.0, centroid_err_um * stretch / rest_vacuum_um)
 }
 
 pub fn with_velocity(
@@ -770,6 +890,21 @@ pub fn with_velocity(
     let systemic_um = rest_um * (1.0 + z);
     let source_centroid_kms = velocity_kms(to_um(m.centroid), systemic_um, convention);
     let source_sigma_kms = SPEED_OF_LIGHT_KMS * (m.sigma / m.centroid).abs();
+    let velocity_step = |x: f64, half_width: f64, reference_um: f64| {
+        let upper = velocity_kms(to_um(x + half_width), reference_um, convention);
+        let lower = velocity_kms(to_um(x - half_width), reference_um, convention);
+        (upper - lower).abs() / 2.0
+    };
+    let centroid_err_kms = velocity_step(m.centroid, m.centroid_err, rest_um);
+    let sigma_err_kms = velocity_step(m.centroid + m.sigma, m.sigma_err, rest_um);
+    let source_centroid_err_kms = velocity_step(m.centroid, m.centroid_err, systemic_um);
+    let source_sigma_err_kms = SPEED_OF_LIGHT_KMS * (m.sigma_err / m.centroid).abs();
+    let centroid_err_um = if axis_kind == AxisKind::Freq {
+        (to_um(m.centroid + m.centroid_err) - to_um(m.centroid - m.centroid_err)).abs() / 2.0
+    } else {
+        m.centroid_err
+    };
+    let (z_line, z_line_err) = line_redshift(to_um(m.centroid), centroid_err_um, rest_um, shift);
     let frame_text = match axis_frame {
         Some(frame) => format!("axis frame {}", frame),
         None => "axis frame not stated in the header (no SPECSYS)".to_string(),
@@ -799,6 +934,14 @@ pub fn with_velocity(
         source_centroid_kms: source_centroid_kms + shift,
         source_sigma_kms,
         source_fwhm_kms: source_sigma_kms * FWHM_PER_SIGMA,
+        centroid_err_kms,
+        sigma_err_kms,
+        fwhm_err_kms: sigma_err_kms * FWHM_PER_SIGMA,
+        source_centroid_err_kms,
+        source_sigma_err_kms,
+        source_fwhm_err_kms: source_sigma_err_kms * FWHM_PER_SIGMA,
+        z_line,
+        z_line_err,
     });
 }
 
@@ -809,14 +952,26 @@ pub(crate) mod golden {
     use serde_json::Value;
 
     pub const ELAPSED_KEY: &str = "elapsed_ms";
-    pub const ADDED_KEYS: [&str; 7] = [
+    pub const ADDED_KEYS: [&str; 19] = [
+        "centroid_err",
         "continuum_chi2_red",
+        "equivalent_width_err",
         "err_used",
+        "errors_reliable",
+        "flux_cgs",
+        "flux_cgs_err",
         "flux_err_terms",
+        "flux_physical_basis",
+        "flux_si",
+        "flux_si_err",
+        "fwhm_err",
         "n_bad_err",
         "n_channels_nominal",
         "n_dq_excluded",
         "n_nonfinite",
+        "peak_axis",
+        "sigma_err",
+        "width_errors_reliable",
     ];
     const FIT_KEY: &str = "fit";
     const LIBM_EXP_RELATIVE_TOLERANCE: f64 = 1e-12;
@@ -1282,6 +1437,56 @@ mod tests {
         assert_matches_golden(&dir.join(G395H_GOLDEN), &value, 0);
     }
 
+    #[test]
+    #[ignore = "needs ASTROBURST_DOCUMENTS_FITS_DIR with the jw01266 G395H x1d"]
+    fn real_g395h_br_alpha_errors_match_the_first_order_oracle() {
+        let path = documents_fits_dir().join(G395H_X1D);
+        let x1d = crate::core::analysis::x1d::read_x1d_spectrum(path.to_str().unwrap(), None).unwrap();
+        let flux: Vec<f32> = x1d.flux.iter().map(|&v| v as f32).collect();
+        let flux_error = x1d.flux_error.as_deref().expect("FLUX_ERROR column");
+        let measure = |err: Option<&[f64]>| {
+            measure_line_with_errors(&x1d.wavelength_um, &flux, err, None, BR_ALPHA_LINE, Some(BR_ALPHA_CONTINUUM), LineModel::None)
+                .unwrap()
+        };
+        let cases = [
+            (
+                "without ERR",
+                measure(None),
+                [6.858337994062189e-4, 9.199607150168557e-5, 6.851788799063807e-5, 1.6134729608353987e-4, 1.4550059801436975e-5],
+            ),
+            (
+                "with FLUX_ERROR",
+                measure(Some(flux_error)),
+                [8.033968781726503e-4, 1.1992222678074621e-4, 8.867718214483896e-5, 2.0881880605152733e-4, 2.08023919855367e-5],
+            ),
+        ];
+        let names = [
+            ("equivalent_width_err", "um"),
+            ("centroid_err", "um"),
+            ("sigma_err", "um"),
+            ("fwhm_err", "um"),
+            ("flux_err", "Jy um"),
+        ];
+        let mut failures = Vec::new();
+        for (label, m, oracle) in &cases {
+            let found = [m.equivalent_width_err, m.centroid_err, m.sigma_err, m.fwhm_err, m.flux_err];
+            println!(
+                "{label}: snr {:?}, errors_reliable {}, width_errors_reliable {}",
+                m.snr, m.errors_reliable, m.width_errors_reliable
+            );
+            for (((name, unit), found), oracle) in names.iter().zip(found).zip(oracle) {
+                println!("{label}: {name} {found:?} {unit}, oracle {oracle:?} {unit}");
+                if !close(found, *oracle, 1e-9) {
+                    failures.push(format!("{label}: {name} {found:?} {unit}, oracle {oracle:?} {unit}"));
+                }
+            }
+            if !(m.errors_reliable && m.width_errors_reliable) {
+                failures.push(format!("{label}: flags ({}, {}), oracle (true, true)", m.errors_reliable, m.width_errors_reliable));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     const ERR_SIGMA: f64 = 0.05;
     const MC_REALISATIONS: usize = 10_000;
     const MC_SEED: u64 = 20_261_016;
@@ -1326,7 +1531,7 @@ mod tests {
         first: LineMeasurement,
     }
 
-    fn monte_carlo_fluxes(noise: &[f64], err: Option<&[f64]>, windows: ContinuumWindows) -> FluxMonteCarlo {
+    fn monte_carlo_measurements(noise: &[f64], err: Option<&[f64]>, windows: ContinuumWindows) -> Vec<LineMeasurement> {
         use rand::rngs::StdRng;
         use rand::{Rng, SeedableRng};
         let axis: Vec<f64> = (0..LINE_CUBE_DEPTH).map(|z| 1.0 + z as f64 * LINE_CDELT_UM).collect();
@@ -1337,23 +1542,40 @@ mod tests {
             let u2: f64 = rng.gen::<f64>();
             (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
         };
-        let mut fluxes = Vec::with_capacity(MC_REALISATIONS);
-        let mut squared_errors = 0.0;
-        let mut first = None;
-        for _ in 0..MC_REALISATIONS {
-            let flux: Vec<f32> = truth.iter().zip(noise).map(|(t, s)| (t + s * gauss()) as f32).collect();
-            let m = measure_line_with_errors(&axis, &flux, err, None, LINE_RANGE, Some(windows), LineModel::None).unwrap();
-            fluxes.push(m.flux);
-            squared_errors += m.flux_err * m.flux_err;
-            first.get_or_insert(m);
-        }
-        let mean = fluxes.iter().sum::<f64>() / fluxes.len() as f64;
-        let variance = fluxes.iter().map(|f| (f - mean) * (f - mean)).sum::<f64>() / (fluxes.len() - 1) as f64;
-        FluxMonteCarlo {
-            scatter: variance.sqrt(),
-            rms_flux_err: (squared_errors / fluxes.len() as f64).sqrt(),
-            first: first.unwrap(),
-        }
+        (0..MC_REALISATIONS)
+            .map(|_| {
+                let flux: Vec<f32> = truth.iter().zip(noise).map(|(t, s)| (t + s * gauss()) as f32).collect();
+                measure_line_with_errors(&axis, &flux, err, None, LINE_RANGE, Some(windows), LineModel::None).unwrap()
+            })
+            .collect()
+    }
+
+    fn scatter_and_rms_error(measurements: &[LineMeasurement], quantity: impl Fn(&LineMeasurement) -> (f64, f64)) -> (f64, f64) {
+        let defined: Vec<(f64, f64)> =
+            measurements.iter().map(quantity).filter(|(value, error)| value.is_finite() && error.is_finite()).collect();
+        let n = defined.len() as f64;
+        let mean = defined.iter().map(|(value, _)| value).sum::<f64>() / n;
+        let variance = defined.iter().map(|(value, _)| (value - mean) * (value - mean)).sum::<f64>() / (n - 1.0);
+        let squared_errors: f64 = defined.iter().map(|(_, error)| error * error).sum();
+        (variance.sqrt(), (squared_errors / n).sqrt())
+    }
+
+    fn monte_carlo_fluxes(noise: &[f64], err: Option<&[f64]>, windows: ContinuumWindows) -> FluxMonteCarlo {
+        let measurements = monte_carlo_measurements(noise, err, windows);
+        let (scatter, rms_flux_err) = scatter_and_rms_error(&measurements, |m| (m.flux, m.flux_err));
+        FluxMonteCarlo { scatter, rms_flux_err, first: measurements.into_iter().next().unwrap() }
+    }
+
+    fn scatter_over_rms_error(measurements: &[LineMeasurement]) -> [(&'static str, f64); 3] {
+        let ratio = |quantity: fn(&LineMeasurement) -> (f64, f64)| {
+            let (scatter, rms_error) = scatter_and_rms_error(measurements, quantity);
+            scatter / rms_error
+        };
+        [
+            ("equivalent width", ratio(|m| (m.equivalent_width, m.equivalent_width_err))),
+            ("centroid", ratio(|m| (m.centroid, m.centroid_err))),
+            ("sigma", ratio(|m| (m.sigma, m.sigma_err))),
+        ]
     }
 
     #[test]
@@ -1770,5 +1992,522 @@ mod tests {
         let e = measure_line(&axis, &emission, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
         assert_eq!(e.peak_channel, 20, "peak {} at channel {}", e.peak, e.peak_channel);
         assert!((e.peak - 0.5).abs() < 1e-5, "peak={}", e.peak);
+    }
+
+    const TIGHT_ERR_SIGMA: f64 = 0.02;
+    const LOOSE_ERR_SIGMA: f64 = 0.2;
+    const UNKNOWN_SCATTER_WINDOWS: ContinuumWindows = ((3, 3), (3, 3));
+
+    fn with_constant_err(axis: &[f64], flux: &[f32], sigma: f64) -> LineMeasurement {
+        let err = vec![sigma; axis.len()];
+        measure_line_with_errors(axis, flux, Some(&err), None, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap()
+    }
+
+    fn four_errors(m: &LineMeasurement) -> [f64; 4] {
+        [m.equivalent_width_err, m.centroid_err, m.sigma_err, m.fwhm_err]
+    }
+
+    #[test]
+    fn with_a_constant_err_the_errors_of_equivalent_width_centroid_sigma_and_fwhm_are_the_first_order_propagation() {
+        let (axis, flux) = centre_spectrum(0.0);
+        let m = with_constant_err(&axis, &flux, ERR_SIGMA);
+        let oracle = [
+            ("equivalent_width_err", m.equivalent_width_err, 5.319820064779271e-4),
+            ("centroid_err", m.centroid_err, 2.807258815067002e-4),
+            ("sigma_err", m.sigma_err, 4.913453585348932e-4),
+            ("fwhm_err", m.fwhm_err, 1.1570298993108848e-3),
+            ("flux_err", m.flux_err, 4.391125651753231e-4),
+            ("snr", m.snr, 17.124567105925596),
+        ];
+        for (name, found, expected) in oracle {
+            assert!(close(found, expected, 1e-9), "{name}: found {found:?}, oracle {expected:?}");
+        }
+        assert!(m.errors_reliable, "snr={}", m.snr);
+        assert!(!m.width_errors_reliable, "sigma_err / sigma = {}", m.sigma_err / m.sigma);
+
+        let tight = with_constant_err(&axis, &flux, TIGHT_ERR_SIGMA);
+        let names = ["equivalent_width_err", "centroid_err", "sigma_err", "fwhm_err"];
+        for (name, (reference_error, tight_error)) in names.iter().zip(four_errors(&m).into_iter().zip(four_errors(&tight))) {
+            let ratio = tight_error / reference_error;
+            assert!(close(ratio, TIGHT_ERR_SIGMA / ERR_SIGMA, 1e-12), "{name}: ratio {ratio:?}");
+        }
+        assert!(tight.errors_reliable && tight.width_errors_reliable, "sigma_err / sigma = {}", tight.sigma_err / tight.sigma);
+    }
+
+    #[test]
+    fn an_absorption_line_carries_the_same_first_order_errors() {
+        let axis: Vec<f64> = (0..LINE_CUBE_DEPTH).map(|z| 1.0 + z as f64 * LINE_CDELT_UM).collect();
+        let flux: Vec<f32> = (0..LINE_CUBE_DEPTH).map(|z| LINE_CONTINUUM - 0.5 * line_profile(z)).collect();
+        let m = with_constant_err(&axis, &flux, TIGHT_ERR_SIGMA);
+        let oracle = [
+            ("equivalent_width_err", m.equivalent_width_err, 1.5827547526695498e-4),
+            ("centroid_err", m.centroid_err, 2.245807052053602e-4),
+            ("sigma_err", m.sigma_err, 3.9307628682791446e-4),
+            ("snr", m.snr, -21.405708882406994),
+        ];
+        for (name, found, expected) in oracle {
+            assert!(close(found, expected, 1e-9), "{name}: found {found:?}, oracle {expected:?}");
+        }
+        assert!(m.errors_reliable, "snr={}", m.snr);
+    }
+
+    struct ScatterRecipe {
+        flux_err: f64,
+        equivalent_width_err: f64,
+        centroid_err: f64,
+        sigma_err: f64,
+    }
+
+    fn scatter_recipe(axis: &[f64], flux: &[f32], m: &LineMeasurement, line_channels: &[usize]) -> ScatterRecipe {
+        let window_channels: Vec<usize> = (WINDOWS.0 .0..=WINDOWS.0 .1).chain(WINDOWS.1 .0..=WINDOWS.1 .1).collect();
+        let continuum_at = |z: usize| m.continuum_level + m.continuum_slope * (axis[z] - m.continuum_reference);
+        let residual_squares: f64 = window_channels.iter().map(|&z| (flux[z] as f64 - continuum_at(z)).powi(2)).sum();
+        let n = window_channels.len() as f64;
+        let rms = (residual_squares / (n - 2.0)).sqrt();
+        let x_mean = window_channels.iter().map(|&z| axis[z]).sum::<f64>() / n;
+        let sxx: f64 = window_channels.iter().map(|&z| (axis[z] - x_mean).powi(2)).sum();
+        let widths = channel_widths(axis);
+        let propagate = |partials: &dyn Fn(usize) -> (f64, f64)| {
+            let (mut pixel, mut level, mut lever) = (0.0, 0.0, 0.0);
+            for &z in line_channels {
+                let (to_flux, to_continuum) = partials(z);
+                pixel += to_flux * to_flux;
+                level += to_continuum;
+                lever += to_continuum * (axis[z] - x_mean);
+            }
+            rms * (pixel + level * level / n + lever * lever / sxx).sqrt()
+        };
+        let moment = |z: usize, weight: f64| {
+            let to_flux = weight * widths[z] / m.flux;
+            (to_flux, -to_flux)
+        };
+        ScatterRecipe {
+            flux_err: propagate(&|z| (widths[z], -widths[z])),
+            equivalent_width_err: propagate(&|z| {
+                let continuum = continuum_at(z);
+                (-widths[z] / continuum, flux[z] as f64 * widths[z] / (continuum * continuum))
+            }),
+            centroid_err: propagate(&|z| moment(z, axis[z] - m.centroid)),
+            sigma_err: propagate(&|z| moment(z, (axis[z] - m.centroid).powi(2) - m.sigma * m.sigma)) / (2.0 * m.sigma),
+        }
+    }
+
+    #[test]
+    fn without_err_the_new_errors_use_the_residual_rms_and_the_same_geometry() {
+        let (axis, flux) = centre_spectrum(0.05);
+        let m = measure_line(&axis, &flux, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        let line_channels: Vec<usize> = (LINE_RANGE.0..=LINE_RANGE.1).collect();
+        let recipe = scatter_recipe(&axis, &flux, &m, &line_channels);
+        let rebuilt = [
+            ("flux_err", m.flux_err, recipe.flux_err),
+            ("equivalent_width_err", m.equivalent_width_err, recipe.equivalent_width_err),
+            ("centroid_err", m.centroid_err, recipe.centroid_err),
+            ("sigma_err", m.sigma_err, recipe.sigma_err),
+            ("fwhm_err", m.fwhm_err, recipe.sigma_err * FWHM_PER_SIGMA),
+        ];
+        for (name, found, expected) in rebuilt {
+            assert!(close(found, expected, 1e-9), "{name}: found {found:?}, recipe {expected:?}");
+        }
+    }
+
+    #[test]
+    fn the_errors_match_the_scatter_of_10000_realisations_without_err() {
+        let quiet = monte_carlo_measurements(&vec![TIGHT_ERR_SIGMA; LINE_CUBE_DEPTH], None, WINDOWS);
+        for (name, ratio) in scatter_over_rms_error(&quiet) {
+            assert!((ratio - 1.0).abs() < MC_RELATIVE_TOLERANCE, "noise {TIGHT_ERR_SIGMA}, {name}: scatter / rms error = {ratio}");
+        }
+        let noisy = monte_carlo_measurements(&vec![ERR_SIGMA; LINE_CUBE_DEPTH], None, WINDOWS);
+        let still_linear = scatter_over_rms_error(&noisy).into_iter().filter(|(name, _)| *name != "sigma");
+        for (name, ratio) in still_linear {
+            assert!((ratio - 1.0).abs() < MC_RELATIVE_TOLERANCE, "noise {ERR_SIGMA}, {name}: scatter / rms error = {ratio}");
+        }
+    }
+
+    #[test]
+    fn with_err_equal_to_the_noise_the_new_errors_are_as_conservative_as_the_flux_error() {
+        let sigma = vec![TIGHT_ERR_SIGMA; LINE_CUBE_DEPTH];
+        let measurements = monte_carlo_measurements(&sigma, Some(&sigma), WINDOWS);
+        for (name, ratio) in scatter_over_rms_error(&measurements) {
+            assert!(ratio > 0.89 && ratio < 0.96, "{name}: scatter / rms error = {ratio}");
+        }
+    }
+
+    #[test]
+    fn the_new_errors_are_undefined_exactly_where_their_quantity_is() {
+        let flat_axis = flat_axis();
+        let constant = measure_line(&flat_axis, &vec![1.0f32; 40], LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        assert_eq!(constant.flux, 0.0);
+        assert!(four_errors(&constant).iter().all(|e| e.is_nan()), "{:?}", four_errors(&constant));
+        assert!(!constant.errors_reliable);
+
+        let (axis, noisy) = centre_spectrum(0.05);
+        let unknown_scatter = measure_line(&axis, &noisy, LINE_RANGE, Some(UNKNOWN_SCATTER_WINDOWS), LineModel::None).unwrap();
+        assert!(unknown_scatter.flux_err.is_nan());
+        assert!(four_errors(&unknown_scatter).iter().all(|e| e.is_nan()), "{:?}", four_errors(&unknown_scatter));
+
+        let (level, line_flux, sigma_um) = (-1e-5, 2.0e-3, 0.002);
+        let amplitude = line_flux / (sigma_um * (2.0 * std::f64::consts::PI).sqrt());
+        let on_negative_continuum: Vec<f32> = flat_axis
+            .iter()
+            .map(|&x| (level + amplitude * (-(x - 1.02) * (x - 1.02) / (2.0 * sigma_um * sigma_um)).exp()) as f32)
+            .collect();
+        let negative = measure_line(&flat_axis, &on_negative_continuum, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        assert!(negative.equivalent_width.is_nan() && negative.equivalent_width_err.is_nan(), "{:?}", four_errors(&negative));
+        assert!(negative.centroid_err.is_finite() && negative.sigma_err.is_finite(), "{:?}", four_errors(&negative));
+
+        let mut with_nan = noisy.clone();
+        with_nan[20] = f32::NAN;
+        let dropped = measure_line(&axis, &with_nan, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        assert_eq!(dropped.n_channels, 24);
+        let remaining: Vec<usize> = (LINE_RANGE.0..=LINE_RANGE.1).filter(|&z| z != 20).collect();
+        let recipe = scatter_recipe(&axis, &with_nan, &dropped, &remaining);
+        assert!(
+            close(dropped.equivalent_width_err, recipe.equivalent_width_err, 1e-9),
+            "found {:?}, recipe {:?}",
+            dropped.equivalent_width_err,
+            recipe.equivalent_width_err
+        );
+        assert!(
+            close(dropped.centroid_err, recipe.centroid_err, 1e-9),
+            "found {:?}, recipe {:?}",
+            dropped.centroid_err,
+            recipe.centroid_err
+        );
+
+        let flat_noise: Vec<f32> = (0..40).map(|i| 1.0 + deterministic_noise(i, 0, 0, 0.05)).collect();
+        let insignificant = measure_line(&flat_axis, &flat_noise, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        assert!(insignificant.sigma.is_nan() && insignificant.sigma_err.is_nan() && insignificant.fwhm_err.is_nan());
+        assert!(insignificant.centroid_err.is_finite(), "centroid_err={}", insignificant.centroid_err);
+        assert!(!insignificant.errors_reliable && !insignificant.width_errors_reliable, "snr={}", insignificant.snr);
+    }
+
+    #[test]
+    fn the_reliability_flags_follow_the_line_signal_to_noise_and_the_relative_width_error() {
+        let (axis, flux) = centre_spectrum(0.0);
+        let flags = |m: &LineMeasurement| (m.errors_reliable, m.width_errors_reliable);
+        assert_eq!(flags(&with_constant_err(&axis, &flux, ERR_SIGMA)), (true, false));
+        assert_eq!(flags(&with_constant_err(&axis, &flux, TIGHT_ERR_SIGMA)), (true, true));
+        let loose = with_constant_err(&axis, &flux, LOOSE_ERR_SIGMA);
+        assert!(close(loose.snr, 4.281, 1e-4), "snr={}", loose.snr);
+        assert_eq!(flags(&loose), (false, false));
+
+        let (_, noisy) = centre_spectrum(0.05);
+        let undefined = measure_line(&axis, &noisy, LINE_RANGE, Some(UNKNOWN_SCATTER_WINDOWS), LineModel::None).unwrap();
+        assert!(undefined.snr.is_nan());
+        assert_eq!(flags(&undefined), (false, false));
+    }
+
+    #[test]
+    fn velocity_errors_follow_the_convention_and_the_source_frame() {
+        let (axis, flux) = centre_spectrum(0.0);
+        let measured = with_constant_err(&axis, &flux, ERR_SIGMA);
+        let velocity_in = |convention: VelocityConvention| {
+            let mut m = measured.clone();
+            with_velocity(&mut m, LINE_REST_UM, None, convention, AxisKind::Wave, None, None);
+            m.velocity.expect("velocity")
+        };
+        let optical = velocity_in(VelocityConvention::Optical);
+        let oracle = [
+            ("centroid_err_kms", optical.centroid_err_kms, 82.50931572657882),
+            ("centroid_err_kms as c x centroid_err / rest", optical.centroid_err_kms, SPEED_OF_LIGHT_KMS * measured.centroid_err / LINE_REST_UM),
+            ("sigma_err_kms", optical.sigma_err_kms, 144.41336545300678),
+            ("sigma_err_kms as c x sigma_err / rest", optical.sigma_err_kms, SPEED_OF_LIGHT_KMS * measured.sigma_err / LINE_REST_UM),
+            ("fwhm_err_kms", optical.fwhm_err_kms, 340.0674877391203),
+            ("source_sigma_err_kms", optical.source_sigma_err_kms, 144.4133673808968),
+            (
+                "source_sigma_err_kms as c x sigma_err / centroid",
+                optical.source_sigma_err_kms,
+                SPEED_OF_LIGHT_KMS * measured.sigma_err / measured.centroid,
+            ),
+            ("source_fwhm_err_kms", optical.source_fwhm_err_kms, optical.source_sigma_err_kms * FWHM_PER_SIGMA),
+        ];
+        for (name, found, expected) in oracle {
+            assert!(close(found, expected, 1e-9), "{name}: found {found:?}, oracle {expected:?}");
+        }
+        assert_eq!(optical.source_centroid_err_kms.to_bits(), optical.centroid_err_kms.to_bits());
+
+        let radio = velocity_in(VelocityConvention::Radio);
+        assert!(close(radio.centroid_err_kms, 82.50931792954509, 1e-6), "radio: {:?}", radio.centroid_err_kms);
+        let relativistic = velocity_in(VelocityConvention::Relativistic);
+        assert!(close(relativistic.centroid_err_kms, 82.50931682806194, 1e-6), "relativistic: {:?}", relativistic.centroid_err_kms);
+
+        let (redshifted_axis, redshifted_flux) = redshifted_h_alpha();
+        let mut redshifted =
+            measure_line(&redshifted_axis, &redshifted_flux, REDSHIFTED_LINE, Some(REDSHIFTED_WINDOWS), LineModel::None).unwrap();
+        redshifted.centroid_err = 1e-5;
+        with_velocity(&mut redshifted, H_ALPHA_UM, Some(REDSHIFT), VelocityConvention::Optical, AxisKind::Wave, None, None);
+        let v = redshifted.velocity.expect("velocity");
+        assert!(
+            close(v.source_centroid_err_kms, v.centroid_err_kms / (1.0 + REDSHIFT), 1e-9),
+            "source {:?}, observer {:?}",
+            v.source_centroid_err_kms,
+            v.centroid_err_kms
+        );
+
+        let mut on_frequency = measured.clone();
+        on_frequency.centroid = SPEED_OF_LIGHT_KMS / LINE_REST_UM;
+        on_frequency.centroid_err = 1.0;
+        with_velocity(&mut on_frequency, LINE_REST_UM, None, VelocityConvention::Optical, AxisKind::Freq, None, None);
+        let v = on_frequency.velocity.expect("velocity");
+        let kms_per_ghz_at_rest = 1.02;
+        assert!(close(v.centroid_err_kms, kms_per_ghz_at_rest, 1e-6), "frequency axis: {:?}", v.centroid_err_kms);
+
+        let mut without_centroid_err = measured.clone();
+        without_centroid_err.centroid_err = f64::NAN;
+        with_velocity(&mut without_centroid_err, LINE_REST_UM, None, VelocityConvention::Optical, AxisKind::Wave, None, None);
+        let v = without_centroid_err.velocity.expect("velocity");
+        assert!(v.centroid_kms.is_finite(), "centroid_kms={}", v.centroid_kms);
+        assert!(v.centroid_err_kms.is_nan() && v.source_centroid_err_kms.is_nan(), "{:?}", v);
+    }
+
+    #[test]
+    fn the_redshift_of_a_line_is_its_vacuum_centroid_over_the_rest_wavelength_minus_one() {
+        let (centroid, centroid_err, rest) = (1.0199999863832008, 2.807258815067002e-4, 1.02);
+        let oracle = [
+            (0.0, -1.3349803151818662e-8, 2.752214524575492e-4),
+            (12.5, 4.1682161539879914e-5, 2.7523292795689523e-4),
+            (-30.0, -1.0008257702676104e-4, 2.751939112591188e-4),
+        ];
+        for (shift, z, z_err) in oracle {
+            let (found, found_err) = line_redshift(centroid, centroid_err, rest, shift);
+            assert!((found - z).abs() < 1e-14, "shift {shift} km/s: z_line {found:?}, oracle {z:?}");
+            assert!(close(found_err, z_err, 1e-12), "shift {shift} km/s: z_line_err {found_err:?}, oracle {z_err:?}");
+        }
+        for not_a_rest_wavelength in [0.0, -1.0, f64::NAN] {
+            let (z, z_err) = line_redshift(centroid, centroid_err, not_a_rest_wavelength, 0.0);
+            assert!(z.is_nan() && z_err.is_nan(), "rest {not_a_rest_wavelength} um: ({z}, {z_err})");
+        }
+    }
+
+    #[test]
+    fn with_velocity_reports_the_redshift_of_the_line_whatever_the_convention_and_the_typed_redshift() {
+        let (axis, flux) = redshifted_h_alpha();
+        let mut measured = measure_line(&axis, &flux, REDSHIFTED_LINE, Some(REDSHIFTED_WINDOWS), LineModel::None).unwrap();
+        measured.centroid_err = 1e-5;
+        let conventions = [VelocityConvention::Optical, VelocityConvention::Radio, VelocityConvention::Relativistic];
+        for convention in conventions {
+            for typed_redshift in [None, Some(REDSHIFT), Some(0.2)] {
+                let mut m = measured.clone();
+                with_velocity(&mut m, H_ALPHA_UM, typed_redshift, convention, AxisKind::Wave, None, None);
+                let v = m.velocity.expect("velocity");
+                assert!((v.z_line - REDSHIFT).abs() < 1e-7, "{convention:?}, typed {typed_redshift:?}: z_line={:?}", v.z_line);
+                assert!(
+                    close(v.z_line_err, measured.centroid_err / H_ALPHA_UM, 1e-12),
+                    "{convention:?}, typed {typed_redshift:?}: z_line_err={:?}",
+                    v.z_line_err
+                );
+            }
+        }
+
+        let mut shifted = measured.clone();
+        with_velocity(&mut shifted, H_ALPHA_UM, None, VelocityConvention::Optical, AxisKind::Wave, None, Some(12.5));
+        let v = shifted.velocity.expect("velocity");
+        let in_the_shifted_frame = (1.0 + REDSHIFT) * (1.0 + 12.5 / SPEED_OF_LIGHT_KMS) - 1.0;
+        assert!((v.z_line - in_the_shifted_frame).abs() < 1e-7, "z_line={:?}, expected {in_the_shifted_frame:?}", v.z_line);
+
+        let mut on_frequency = measured.clone();
+        on_frequency.centroid = SPEED_OF_LIGHT_KMS / 1.02;
+        on_frequency.centroid_err = 1.0;
+        with_velocity(&mut on_frequency, 1.02, None, VelocityConvention::Optical, AxisKind::Freq, None, None);
+        let v = on_frequency.velocity.expect("velocity");
+        assert!(v.z_line.abs() < 1e-12, "frequency axis: z_line={:?}", v.z_line);
+        assert!(close(v.z_line_err, 3.4023537710211516e-6, 1e-6), "frequency axis: z_line_err={:?}", v.z_line_err);
+
+        let mut on_velocity_axis = measured.clone();
+        with_velocity(&mut on_velocity_axis, H_ALPHA_UM, None, VelocityConvention::Optical, AxisKind::Vrad, None, None);
+        assert!(on_velocity_axis.velocity.is_none());
+    }
+
+    #[test]
+    fn the_peak_axis_is_the_axis_value_at_the_peak_channel() {
+        let (axis, flux) = centre_spectrum(0.0);
+        let emission = measure_line(&axis, &flux, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        assert_eq!(emission.peak_channel, 20);
+        assert!((emission.peak_axis - 1.02).abs() < 1e-12, "peak_axis={:?}", emission.peak_axis);
+
+        let absorption_axis: Vec<f64> = (0..LINE_CUBE_DEPTH).map(|z| 1.0 + z as f64 * LINE_CDELT_UM).collect();
+        let absorption_flux: Vec<f32> = (0..LINE_CUBE_DEPTH).map(|z| LINE_CONTINUUM - 0.5 * line_profile(z)).collect();
+        let absorption = measure_line(&absorption_axis, &absorption_flux, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        assert_eq!(absorption.peak_channel, 20);
+        assert!((absorption.peak_axis - 1.02).abs() < 1e-12, "peak_axis={:?}", absorption.peak_axis);
+
+        let reversed_axis: Vec<f64> = axis.iter().rev().copied().collect();
+        let reversed_flux: Vec<f32> = flux.iter().rev().copied().collect();
+        let reversed = measure_line(&reversed_axis, &reversed_flux, (7, 31), Some(((0, 5), (34, 39))), LineModel::None).unwrap();
+        assert_eq!(reversed.peak_channel, 19);
+        assert!((reversed.peak_axis - 1.02).abs() < 1e-12, "peak_axis={:?}", reversed.peak_axis);
+
+        let flat_axis = flat_axis();
+        let constant = measure_line(&flat_axis, &vec![1.0f32; 40], LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        assert!(constant.peak_axis.is_finite(), "peak_axis={:?}", constant.peak_axis);
+        assert_eq!(constant.peak_axis.to_bits(), flat_axis[constant.peak_channel].to_bits());
+    }
+
+    #[test]
+    fn a_continuum_window_that_overlaps_the_line_range_is_measured_with_a_note() {
+        let (axis, flux) = centre_spectrum(0.0);
+        let overlap_notes = |windows: Option<ContinuumWindows>| -> Vec<String> {
+            let m = measure_line(&axis, &flux, LINE_RANGE, windows, LineModel::None).unwrap();
+            m.notes.into_iter().filter(|n| n.contains("overlaps the line range")).collect()
+        };
+        let right = "continuum window 30..=39 overlaps the line range 8..=32 in 3 channels: line flux is fitted as continuum there, and the errors treat line and continuum channels as independent";
+        let left = "continuum window 6..=10 overlaps the line range 8..=32 in 3 channels: line flux is fitted as continuum there, and the errors treat line and continuum channels as independent";
+        assert_eq!(overlap_notes(Some(((0, 5), (30, 39)))), [right]);
+        assert_eq!(overlap_notes(Some(((6, 10), (30, 39)))), [left, right]);
+        assert_eq!(overlap_notes(Some(((30, 39), (30, 39)))), [right]);
+        assert!(overlap_notes(Some(WINDOWS)).is_empty());
+        assert!(overlap_notes(None).is_empty());
+    }
+
+    const FLAMBDA_SI_PER_JY_UM2: f64 = 2.99792458e-12;
+
+    fn c_over_lambda_squared(axis: &[f64]) -> Vec<f64> {
+        axis.iter().map(|x| FLAMBDA_SI_PER_JY_UM2 / (x * x)).collect()
+    }
+
+    fn with_factor(axis: &[f64], flux: &[f32], err: Option<&[f64]>, windows: ContinuumWindows, factor: &[f64]) -> LineMeasurement {
+        measure_line_physical(axis, flux, err, None, LINE_RANGE, Some(windows), LineModel::None, Some(factor)).unwrap()
+    }
+
+    fn physical_flux(m: &LineMeasurement) -> [f64; 4] {
+        [m.flux_si, m.flux_si_err, m.flux_cgs, m.flux_cgs_err].map(|value| value.unwrap_or_else(|| panic!("no physical flux in {:?}", m)))
+    }
+
+    #[test]
+    fn a_per_channel_factor_gives_the_physical_flux_and_its_first_order_error() {
+        let (axis, flux) = centre_spectrum(0.0);
+        let err = vec![ERR_SIGMA; axis.len()];
+        let m = with_factor(&axis, &flux, Some(&err), WINDOWS, &c_over_lambda_squared(&axis));
+        let oracle = [
+            ("flux_si", 2.166841286254905e-14),
+            ("flux_si_err", 1.2654046416104045e-15),
+            ("flux_cgs", 2.166841286254905e-11),
+            ("flux_cgs_err", 1.2654046416104045e-12),
+        ];
+        let [flux_si, ..] = physical_flux(&m);
+        for ((name, expected), found) in oracle.into_iter().zip(physical_flux(&m)) {
+            assert!(close(found, expected, 1e-9), "{name}: found {found:?}, oracle {expected:?}");
+        }
+        let converted_at_the_centroid = m.flux * FLAMBDA_SI_PER_JY_UM2 / (m.centroid * m.centroid);
+        assert!(close(converted_at_the_centroid, 2.1667850841729107e-14, 1e-9), "{converted_at_the_centroid:?}");
+        assert!(
+            (flux_si - converted_at_the_centroid).abs() > 1e-5 * flux_si,
+            "the factor must sit inside the sum: flux_si {flux_si:?}, converted at the centroid {converted_at_the_centroid:?}"
+        );
+        assert!(m.flux_physical_basis.is_empty(), "{:?}", m.flux_physical_basis);
+
+        let without_factor = with_constant_err(&axis, &flux, ERR_SIGMA);
+        assert_eq!(
+            [m.flux, m.flux_err, m.snr].map(f64::to_bits),
+            [without_factor.flux, without_factor.flux_err, without_factor.snr].map(f64::to_bits)
+        );
+    }
+
+    #[test]
+    fn a_constant_factor_scales_the_flux_and_its_error() {
+        let (axis, flux) = centre_spectrum(0.05);
+        let err = vec![ERR_SIGMA; axis.len()];
+        let factor = vec![10.0; axis.len()];
+        for (label, err) in [("with ERR", Some(err.as_slice())), ("without ERR", None)] {
+            let m = with_factor(&axis, &flux, err, WINDOWS, &factor);
+            let [flux_si, flux_si_err, flux_cgs, flux_cgs_err] = physical_flux(&m);
+            assert!(close(flux_si, 10.0 * m.flux, 1e-12), "{label}: flux_si {flux_si:?}, flux {:?}", m.flux);
+            assert!(close(flux_si_err, 10.0 * m.flux_err, 1e-12), "{label}: flux_si_err {flux_si_err:?}, flux_err {:?}", m.flux_err);
+            assert!(close(flux_cgs, 1000.0 * flux_si, 1e-15), "{label}: flux_cgs {flux_cgs:?}");
+            assert!(close(flux_cgs_err, 1000.0 * flux_si_err, 1e-15), "{label}: flux_cgs_err {flux_cgs_err:?}");
+        }
+    }
+
+    #[test]
+    fn without_a_factor_no_physical_flux_is_reported() {
+        let (axis, flux) = centre_spectrum(0.05);
+        let err = vec![ERR_SIGMA; axis.len()];
+        let measurements = [
+            measure_line(&axis, &flux, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap(),
+            measure_line_with_errors(&axis, &flux, Some(&err), None, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap(),
+        ];
+        for m in measurements {
+            assert_eq!((m.flux_si, m.flux_si_err, m.flux_cgs, m.flux_cgs_err), (None, None, None, None));
+            assert!(m.flux_physical_basis.is_empty(), "{:?}", m.flux_physical_basis);
+        }
+    }
+
+    #[test]
+    fn a_factor_of_another_length_is_refused_and_a_non_finite_factor_gives_no_number() {
+        let (axis, flux) = centre_spectrum(0.05);
+        let n = axis.len();
+        let err = vec![ERR_SIGMA; n];
+        let factor = c_over_lambda_squared(&axis);
+        let refused =
+            measure_line_physical(&axis, &flux, None, None, LINE_RANGE, Some(WINDOWS), LineModel::None, Some(&factor[..n - 1]))
+                .unwrap_err();
+        assert_eq!(refused, "physical-flux factor has 39 values but the spectrum has 40 channels");
+
+        let without_factor = measure_line(&axis, &flux, LINE_RANGE, Some(WINDOWS), LineModel::None).unwrap();
+        let mut broken = factor.clone();
+        broken[20] = f64::NAN;
+        let undefined = with_factor(&axis, &flux, None, WINDOWS, &broken);
+        assert!(undefined.flux_si.is_some_and(f64::is_nan), "{:?}", undefined.flux_si);
+        assert!(serde_json::to_value(&undefined).unwrap()["flux_si"].is_null());
+        assert_eq!(undefined.flux.to_bits(), without_factor.flux.to_bits());
+
+        let zero = with_factor(&axis, &flux, None, WINDOWS, &vec![0.0; n]);
+        assert_eq!(zero.flux_si, Some(0.0));
+
+        let unknown_scatter = with_factor(&axis, &flux, None, UNKNOWN_SCATTER_WINDOWS, &factor);
+        let [flux_si, flux_si_err, ..] = physical_flux(&unknown_scatter);
+        assert!(unknown_scatter.flux_err.is_nan());
+        assert!(flux_si.is_finite() && flux_si_err.is_nan(), "flux_si {flux_si:?} +- {flux_si_err:?}");
+        let single_channel_with_err = with_factor(&axis, &flux, Some(&err), UNKNOWN_SCATTER_WINDOWS, &factor);
+        let [_, flux_si_err, ..] = physical_flux(&single_channel_with_err);
+        assert!(single_channel_with_err.flux_err.is_finite() && flux_si_err.is_finite(), "flux_si_err {flux_si_err:?}");
+
+        let mut with_nan = flux.clone();
+        with_nan[20] = f32::NAN;
+        let dropped = with_factor(&axis, &with_nan, None, WINDOWS, &factor);
+        assert_eq!(dropped.n_channels, 24);
+        let widths = channel_widths(&axis);
+        let continuum_at = |z: usize| dropped.continuum_level + dropped.continuum_slope * (axis[z] - dropped.continuum_reference);
+        let over_the_remaining_channels: f64 = (LINE_RANGE.0..=LINE_RANGE.1)
+            .filter(|&z| z != 20)
+            .map(|z| factor[z] * (with_nan[z] as f64 - continuum_at(z)) * widths[z])
+            .sum();
+        let [flux_si, ..] = physical_flux(&dropped);
+        assert!(close(flux_si, over_the_remaining_channels, 1e-9), "flux_si {flux_si:?}, recipe {over_the_remaining_channels:?}");
+    }
+
+    const BR_ALPHA_REST_UM: f64 = 4.052262;
+
+    #[test]
+    #[ignore = "needs ASTROBURST_DOCUMENTS_FITS_DIR with the jw01266 G395H x1d"]
+    fn real_g395h_br_alpha_redshift_of_the_line() {
+        let path = documents_fits_dir().join(G395H_X1D);
+        let x1d = crate::core::analysis::x1d::read_x1d_spectrum(path.to_str().unwrap(), None).unwrap();
+        let flux: Vec<f32> = x1d.flux.iter().map(|&v| v as f32).collect();
+        let flux_error = x1d.flux_error.as_deref().expect("FLUX_ERROR column");
+        let cases = [
+            ("without ERR", None, 2.951102042070275e-6, 2.270239967250034e-5),
+            ("with FLUX_ERROR", Some(flux_error), 4.2549001086911176e-6, 2.959389762575722e-5),
+        ];
+        let mut failures = Vec::new();
+        for (label, err, z, z_err) in cases {
+            let mut m =
+                measure_line_with_errors(&x1d.wavelength_um, &flux, err, None, BR_ALPHA_LINE, Some(BR_ALPHA_CONTINUUM), LineModel::None)
+                    .unwrap();
+            with_velocity(&mut m, BR_ALPHA_REST_UM, None, VelocityConvention::Optical, AxisKind::Wave, None, None);
+            let v = m.velocity.as_ref().expect("velocity");
+            println!("{label}: z_line {:?} +- {:?}, oracle {z:?} +- {z_err:?}", v.z_line, v.z_line_err);
+            println!("{label}: peak_axis {:?} um at channel {}, centroid {:?} um", m.peak_axis, m.peak_channel, m.centroid);
+            if !((v.z_line - z).abs() < 1e-12) {
+                failures.push(format!("{label}: z_line {:?}, oracle {z:?}", v.z_line));
+            }
+            if !close(v.z_line_err, z_err, 1e-9) {
+                failures.push(format!("{label}: z_line_err {:?}, oracle {z_err:?}", v.z_line_err));
+            }
+            if m.peak_axis.to_bits() != x1d.wavelength_um[m.peak_channel].to_bits() {
+                failures.push(format!("{label}: peak_axis {:?} um, axis {:?} um", m.peak_axis, x1d.wavelength_um[m.peak_channel]));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

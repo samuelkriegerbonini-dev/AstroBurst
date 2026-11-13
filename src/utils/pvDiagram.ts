@@ -9,9 +9,11 @@ import type {
 } from "../shared/types/spectral";
 import type { ProfileSeries } from "../components/regions/ProfilePlot";
 import { CSV_LINE_END, buildCsv, type CsvColumn } from "./catalogCsv";
-import { exportStem } from "./imageRef";
+import { exportEntries, provenanceLines, unitLines, withProvenance } from "./csvProvenance";
+import { exportStem, parseImageRef } from "./imageRef";
 import { planeTag } from "./exportSources";
 import { availableModes } from "./spectralAxis";
+import { fileBaseName } from "./values";
 
 export const PV_STEP_RANGE: readonly [number, number] = [0.05, 1024];
 export const PV_WIDTH_RANGE: readonly [number, number] = [0, 4096];
@@ -146,18 +148,38 @@ function unitTag(unit: string): string {
   return unit.replace(/\//g, "_");
 }
 
-export function pvRidgeCsv(run: PvRun): string {
+export interface PvCsvContext {
+  exportedUtc?: string;
+}
+
+const CHANNEL_UNIT = "channel (0-based)";
+
+export function pvRidgeCsv(run: PvRun, context?: PvCsvContext): string {
   const { params, result } = run;
   const { line } = params;
   const offsetTag = result.offset_unit === "arcsec" ? "arcsec" : "px";
   const spectralTag = unitTag(result.spectral_unit);
+  const spectralUnit = result.spectral_unit === "ch" ? CHANNEL_UNIT : result.spectral_unit;
   const provenance = [
-    `# file ${params.filePath}`,
-    `# slit ${line.x0},${line.y0} -> ${line.x1},${line.y1} (px, 0-based)`,
-    `# step_px ${params.stepPx}, width_px ${params.widthPx}, n_across ${result.n_across}`,
-    `# channels ${result.z0}-${result.z1}`,
-    `# spectral axis: ${pvSpectralLabel(run)}`,
-    `# fits: ${result.fits_path}`,
+    ...provenanceLines([
+      ...exportEntries(fileBaseName(parseImageRef(params.filePath).path), context?.exportedUtc),
+      ["source_path", params.filePath],
+      ["slit_px", `${line.x0},${line.y0} -> ${line.x1},${line.y1} (0-based pixels, integer pixel centres)`],
+      ["step_px", params.stepPx],
+      ["width_px", params.widthPx],
+      ["n_across", result.n_across],
+      ["channels", `${result.z0}-${result.z1} (0-based, inclusive)`],
+      ["spectral_axis", pvSpectralLabel(run)],
+      ["fits", result.fits_path],
+    ]),
+    ...unitLines({
+      [`offset_${offsetTag}`]: offsetTag,
+      [`ridge_${spectralTag}`]: spectralUnit,
+      ridge_channel: CHANNEL_UNIT,
+      peak_channel: CHANNEL_UNIT,
+      [`peak_${spectralTag}`]: spectralUnit,
+      peak_value: result.summary.bunit,
+    }),
   ];
   const columns: CsvColumn<number>[] = [
     { header: `offset_${offsetTag}`, value: (i) => result.offsets[i] },
@@ -168,7 +190,7 @@ export function pvRidgeCsv(run: PvRun): string {
     { header: "peak_value", value: (i) => result.peak_value[i] },
   ];
   const rows = result.offsets.map((_, i) => i);
-  return provenance.join(CSV_LINE_END) + CSV_LINE_END + buildCsv(columns, rows);
+  return withProvenance(provenance, buildCsv(columns, rows), CSV_LINE_END);
 }
 
 export function pvCsvFileName(filePath: string | null): string {

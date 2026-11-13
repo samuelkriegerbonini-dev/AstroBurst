@@ -7,10 +7,16 @@ vi.mock("../../infrastructure/tauri", () => ({ typedInvoke: typedInvokeMock }));
 import {
   fromSpectrum1dWire,
   isSpectrumCsvPath,
+  listSpectrumSeries,
+  listSpectrumTables,
   probeSpectrum1d,
+  readSeriesSpectrum,
   readSpectrum1d,
   readSpectrumCsv,
   readSpectrumDocument,
+  readSpectrumRequest,
+  type SpectrumSeriesSet,
+  type SpectrumTableOption,
 } from "../spectrum1d";
 import type { ProcessedFile } from "../../shared/types";
 import type { SpectralAxisInfo } from "../../shared/types/spectral";
@@ -20,6 +26,7 @@ import type {
   Spectrum1dSource,
   Spectrum1dWire,
   SpectrumPrecision,
+  TsoSeriesPick,
   WavelengthFrame,
 } from "../../shared/types/spectrum1d";
 
@@ -59,11 +66,12 @@ function wire(extra: Partial<Spectrum1dWire> = {}): Spectrum1dWire {
 
 describe("spectrum1d types", () => {
   it("pins the document shapes the backend serialises", () => {
-    expectTypeOf<Spectrum1dKind>().toEqualTypeOf<{ kind: "x1d"; hdu: number } | { kind: "wcs1d"; hdu: number }>();
+    expectTypeOf<Spectrum1dKind>().toEqualTypeOf<{ kind: "x1d"; hdu: number; n_tables?: number } | { kind: "wcs1d"; hdu: number } | { kind: "x1dints"; layout: "rows" | "extensions"; n_series: number; n_integrations: number; n_channels: number }>();
     expectTypeOf<Spectrum1dSource>().toEqualTypeOf<
       | { kind: "x1d"; path: string; hdu: number; extver: number | null }
       | { kind: "wcs1d"; path: string; hdu: number }
       | { kind: "csv"; path: string }
+      | { kind: "x1dints"; paths: string[]; detector: string; sporder: number | null; pick: TsoSeriesPick }
     >();
     expectTypeOf<WavelengthFrame>().toEqualTypeOf<"air" | "vacuum" | "not_wavelength">();
     expectTypeOf<SpectrumPrecision>().toEqualTypeOf<"f64" | "f32_widened">();
@@ -195,6 +203,97 @@ describe("readSpectrumDocument", () => {
   it("reads any other path with the spectrum file command and its HDU", async () => {
     await readSpectrumDocument("C:/d/jw_x1d.fits", 1);
     expect(typedInvokeMock).toHaveBeenCalledWith("read_spectrum1d_cmd", { path: "C:/d/jw_x1d.fits", hdu: 1 });
+  });
+});
+
+describe("documents from a chosen table, series pick or unit", () => {
+  const P = "C:/d/jw03375-o001_x1dints.fits";
+
+  beforeEach(() => {
+    typedInvokeMock.mockReset();
+    typedInvokeMock.mockResolvedValue(wire());
+  });
+
+  it("keeps the read request without an override as it was", async () => {
+    await readSpectrum1d("C:/d/a.fits", 2);
+    expect(typedInvokeMock).toHaveBeenCalledWith("read_spectrum1d_cmd", { path: "C:/d/a.fits", hdu: 2 });
+    await readSpectrum1d("C:/d/a.fits", 2, null);
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("read_spectrum1d_cmd", { path: "C:/d/a.fits", hdu: 2 });
+    expect(typedInvokeMock).toHaveBeenCalledTimes(2);
+    expect(typedInvokeMock.mock.calls.map(([, args]) => Object.keys(args))).toEqual([
+      ["path", "hdu"],
+      ["path", "hdu"],
+    ]);
+  });
+
+  it("sends the wavelength unit the user stated", async () => {
+    await readSpectrum1d("C:/d/a.fits", 0, "nm");
+    expect(typedInvokeMock).toHaveBeenCalledWith("read_spectrum1d_cmd", { path: "C:/d/a.fits", hdu: 0, wavelengthUnit: "nm" });
+    await readSpectrumDocument("C:/d/a.fits", 0, "Angstrom");
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("read_spectrum1d_cmd", { path: "C:/d/a.fits", hdu: 0, wavelengthUnit: "Angstrom" });
+  });
+
+  it("lists the EXTRACT1D tables of a file", async () => {
+    const order = (sporder: number, hdu: number): SpectrumTableOption => ({
+      hdu,
+      extver: hdu - 1,
+      n_rows: 2048,
+      n_channels: 2048,
+      sporder,
+      detector: null,
+      slit_name: null,
+      source_id: null,
+      source_name: null,
+      int_num: null,
+      srctype: null,
+      label: `order ${sporder}`,
+    });
+    const tables = [order(1, 2), order(2, 3)];
+    typedInvokeMock.mockResolvedValueOnce({ tables });
+    await expect(listSpectrumTables(P)).resolves.toEqual(tables);
+    expect(typedInvokeMock).toHaveBeenCalledWith("spectrum1d_tables_cmd", { path: P });
+  });
+
+  it("lists the series of a time-series file", async () => {
+    const set: SpectrumSeriesSet = {
+      set_id: "a5a5a5a5a5a5a5a5",
+      series: [
+        { key: { detector: "NRS1", sporder: -1 }, label: "NRS1", n_integrations: 8, n_channels: 1271, flux_unit: "Jy" },
+        { key: { detector: "NRS2", sporder: -1 }, label: "NRS2", n_integrations: 8, n_channels: 2048, flux_unit: "Jy" },
+      ],
+      notes: [],
+      warnings: [],
+    };
+    typedInvokeMock.mockResolvedValueOnce(set);
+    await expect(listSpectrumSeries([P])).resolves.toEqual(set);
+    expect(typedInvokeMock).toHaveBeenCalledWith("tso_open_cmd", { paths: [P] });
+  });
+
+  it("reads a pick of a series as a document", async () => {
+    typedInvokeMock.mockResolvedValueOnce(
+      wire({ source: { kind: "x1dints", paths: [P], detector: "NRS1", sporder: -1, pick: { kind: "mean", first: 0, last: 7 } }, flux: [1.5, null] }),
+    );
+    const doc = await readSeriesSpectrum([P], { detector: "NRS1", sporder: -1 }, { kind: "mean", first: 0, last: 7 });
+    expect(typedInvokeMock).toHaveBeenCalledWith("tso_spectrum_cmd", {
+      paths: [P],
+      series: { detector: "NRS1", sporder: -1 },
+      pick: { kind: "mean", first: 0, last: 7 },
+    });
+    expect(doc.flux).toEqual([1.5, NaN]);
+  });
+
+  it("routes a request to its command", async () => {
+    await readSpectrumRequest({ kind: "file", path: "C:/d/x.fits", hdu: 1, wavelengthUnit: "Angstrom" });
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("read_spectrum1d_cmd", { path: "C:/d/x.fits", hdu: 1, wavelengthUnit: "Angstrom" });
+    await readSpectrumRequest({ kind: "file", path: "C:/d/s.csv", hdu: 3, wavelengthUnit: "nm" });
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("read_spectrum_csv_cmd", { path: "C:/d/s.csv" });
+    await readSpectrumRequest({ kind: "series", paths: [P], detector: "NIS", sporder: 2, pick: { kind: "integration", index: 2 } });
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("tso_spectrum_cmd", {
+      paths: [P],
+      series: { detector: "NIS", sporder: 2 },
+      pick: { kind: "integration", index: 2 },
+    });
+    expect(typedInvokeMock).toHaveBeenCalledTimes(3);
   });
 });
 

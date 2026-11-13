@@ -7,16 +7,16 @@ use tauri::ipc::Response;
 
 use crate::cmd::common::{
     blocking_cmd, cached_header, load_cached, load_cached_full, load_companions, output_stem,
-    resolve_output_dir, save_stf_preview_png, LoadedCompanions,
+    resolve_output_dir, save_stf_preview_png, ErrOriginJson, LoadedCompanions,
 };
 use crate::cmd::helpers;
 use crate::cmd::io::{load_rgb_file_planes, RgbPlanes};
 use crate::cmd::processing::is_display_referred;
 use crate::core::imaging::colormap::Colormap;
-use crate::core::imaging::dq_flags::{bits_present, mask_preview_or, DqTable};
+use crate::core::imaging::dq_flags::{bits_present, mask_preview_or, DqTable, FlagSet};
 use crate::core::imaging::pixel_probe::{
     data_unit, grid_origin, grid_stats, grid_stats_json, int_grid, int_value_grid, pixel_grid,
-    probe_companions, probe_json_with_companions, probe_pixel, wavelength_unit,
+    probe_companions_named, probe_json_with_companions, probe_pixel, wavelength_unit, with_layer_sources,
 };
 use crate::core::imaging::scale::{
     resolve_limits, symmetric_about, validate_symmetric_centre, LimitMode, DEFAULT_SYMMETRIC_CENTRE,
@@ -31,11 +31,21 @@ use crate::types::constants::{
     RES_DEFAULT_MASK, RES_DQ, RES_DQ_NAMES, RES_DQ_REF, RES_DQ_TABLE, RES_ELAPSED_MS, RES_ERR,
     RES_ERR_REF, RES_ERR_STATS, RES_EXCLUSION_MASK, RES_FLAGS, RES_HIGHLIGHT, RES_LABEL,
     RES_MIDTONE, RES_NAME, RES_NODATA, RES_NOTES, RES_PNG_PATH, RES_RGBA, RES_SHADOW, RES_SIZE,
-    RES_STATS, RES_SYMMETRIC, RES_TABLE, RES_UNIT, RES_VALUES, RES_VMAX, RES_VMIN, RES_WAVELENGTH,
+    RES_SOURCE, RES_STATS, RES_SYMMETRIC, RES_TABLE, RES_UNIT, RES_VALUES, RES_VMAX, RES_VMIN, RES_WAVELENGTH,
     RES_WAVELENGTH_STATS, RES_WAVELENGTH_UNIT, RES_X, RES_X0, RES_Y, RES_Y0,
 };
 use crate::types::header::HduHeader;
 use crate::types::image_ref::ImageRef;
+
+const RES_SATURATED_MASK: &str = "saturated_mask";
+const RES_EXCLUSION_DEFAULT: &str = "exclusion_default";
+const RES_EXCLUSION_EDITED: &str = "exclusion_edited";
+const RES_DQ_ORIGIN: &str = "dq_origin";
+const RES_DQ_UNAVAILABLE: &str = "dq_unavailable";
+const RES_DQ_SOURCE: &str = "dq_source";
+const RES_ERR_ORIGIN: &str = "err_origin";
+const RES_ERR_UNAVAILABLE: &str = "err_unavailable";
+const RES_ERR_SOURCE: &str = "err_source";
 
 const SYMMETRIC_SKIPPED_DISPLAY_REFERRED_NOTE: &str =
     "symmetric limits skipped: the image is display-referred (ABDISP=T)";
@@ -57,12 +67,12 @@ fn pixel_table_size(size: Option<usize>) -> anyhow::Result<usize> {
     Ok(size)
 }
 
-fn dq_name_grid(bits: &[Vec<Option<u32>>], table: DqTable) -> Vec<Vec<Option<String>>> {
+fn dq_name_grid(bits: &[Vec<Option<u32>>], flags: &FlagSet) -> Vec<Vec<Option<String>>> {
     bits.iter()
         .map(|row| {
             row.iter()
                 .map(|cell| match cell {
-                    Some(b) if *b != 0 => Some(table.decode(*b).join(" | ")),
+                    Some(b) if *b != 0 => Some(flags.decode(*b).join(" | ")),
                     _ => None,
                 })
                 .collect()
@@ -113,45 +123,67 @@ pub(crate) fn scale_limits_json(
     }))
 }
 
-pub(crate) fn resolve_overlay_mask(table: DqTable, requested: Option<u32>) -> u32 {
-    requested.unwrap_or_else(|| table.default_overlay_mask())
+pub(crate) fn resolve_overlay_mask(flags: &FlagSet, requested: Option<u32>) -> u32 {
+    requested.unwrap_or(flags.overlay_mask)
 }
 
-pub(crate) fn dq_table_for(path: &str) -> anyhow::Result<(DqTable, Option<String>, Option<String>, Option<u32>)> {
+pub(crate) struct DqFlagTable {
+    pub(crate) set: FlagSet,
+    pub(crate) bits_present: Option<u32>,
+    pub(crate) dq_ref: Option<String>,
+    pub(crate) err_ref: Option<String>,
+    pub(crate) dq_origin: Option<String>,
+    pub(crate) dq_unavailable: Option<String>,
+    pub(crate) err_origin: Option<ErrOriginJson>,
+    pub(crate) err_unavailable: Option<String>,
+}
+
+pub(crate) fn dq_table_for(path: &str) -> anyhow::Result<DqFlagTable> {
     let active = load_cached_full(path)?;
     let comps = active.companions().cloned().unwrap_or_default();
-    let dq_ref = comps.dq.as_ref().map(ImageRef::cache_key);
-    let err_ref = comps.err.as_ref().map(ImageRef::cache_key);
     let loaded = load_companions(path)?;
-    let table = match &loaded.dq {
-        Some((_, table)) => *table,
-        None => active.header().map(DqTable::select).unwrap_or(DqTable::Unknown),
-    };
-    let present = (table == DqTable::Unknown).then(|| {
-        let plane = loaded.dq.as_ref().and_then(|(entry, _)| entry.int_plane());
-        plane.map_or(0, |plane| bits_present(&plane.bits))
+    let set = loaded.flags.clone().unwrap_or_else(|| match active.header() {
+        Some(header) => FlagSet::from_headers(Some(header), Some(header), DqTable::select(header)),
+        None => FlagSet::from_table(DqTable::Unknown),
     });
-    Ok((table, dq_ref, err_ref, present))
+    let plane = loaded.dq.as_ref().and_then(|(entry, _)| entry.int_plane());
+    let err_choice = active.plane_info().and_then(|info| info.pairing.err.as_ref());
+    Ok(DqFlagTable {
+        bits_present: plane.filter(|_| !set.is_named()).map(|plane| bits_present(&plane.bits)),
+        dq_ref: loaded.dq.as_ref().and(comps.dq.as_ref()).map(ImageRef::cache_key),
+        err_ref: comps.err.as_ref().map(ImageRef::cache_key),
+        err_origin: loaded.err_origin.as_ref().zip(err_choice).map(|(origin, choice)| ErrOriginJson::loaded(origin, choice)),
+        dq_origin: loaded.dq_origin,
+        dq_unavailable: loaded.dq_unavailable,
+        err_unavailable: loaded.err_unavailable,
+        set,
+    })
 }
 
 #[tauri::command]
 pub async fn get_dq_flag_table_cmd(path: String) -> Result<serde_json::Value, String> {
     blocking_cmd!({
-        let (table, dq_ref, err_ref, present) = dq_table_for(&path)?;
-        let flags: Vec<serde_json::Value> = table
-            .flags()
-            .iter()
-            .map(|f| json!({ RES_BIT: f.bit, RES_NAME: f.name }))
-            .collect();
+        let found = dq_table_for(&path)?;
+        let set = &found.set;
+        let flags: Vec<serde_json::Value> =
+            set.flags.iter().map(|(bit, name)| json!({ RES_BIT: bit, RES_NAME: name })).collect();
         Ok(json!({
-            RES_TABLE: table,
-            RES_LABEL: table.label(),
+            RES_TABLE: set.table,
+            RES_LABEL: set.source,
             RES_FLAGS: flags,
-            RES_DEFAULT_MASK: table.default_overlay_mask(),
-            RES_EXCLUSION_MASK: table.exclusion_mask(),
-            RES_BITS_PRESENT: present,
-            RES_DQ_REF: dq_ref,
-            RES_ERR_REF: err_ref,
+            RES_DEFAULT_MASK: set.overlay_mask,
+            RES_EXCLUSION_MASK: set.exclusion_mask,
+            RES_BITS_PRESENT: found.bits_present,
+            RES_DQ_REF: found.dq_ref,
+            RES_ERR_REF: found.err_ref,
+            RES_SOURCE: set.source,
+            RES_SATURATED_MASK: set.saturated_mask,
+            RES_EXCLUSION_DEFAULT: set.exclusion_default,
+            RES_EXCLUSION_EDITED: set.exclusion_mask != set.exclusion_default,
+            RES_DQ_ORIGIN: found.dq_origin,
+            RES_DQ_UNAVAILABLE: found.dq_unavailable,
+            RES_ERR_ORIGIN: found.err_origin,
+            RES_ERR_UNAVAILABLE: found.err_unavailable,
         }))
     })
 }
@@ -165,9 +197,11 @@ pub async fn get_dq_mask_preview(
     tokio::task::spawn_blocking(move || -> anyhow::Result<Response> {
         let dim = max_dim.unwrap_or(DEFAULT_MASK_PREVIEW_DIM) as usize;
         let loaded = load_companions(&path)?;
-        let (entry, table) = loaded.dq.ok_or_else(|| anyhow::anyhow!(NO_DQ_PLANE))?;
+        let (Some((entry, table)), Some(flags)) = (loaded.dq.as_ref(), loaded.flags.as_ref()) else {
+            bail!(NO_DQ_PLANE);
+        };
         let plane = entry.int_plane().ok_or_else(|| anyhow::anyhow!(NO_DQ_PLANE))?;
-        let applied = resolve_overlay_mask(table, mask);
+        let applied = resolve_overlay_mask(flags, mask);
         let (cells, width, height) = mask_preview_or(&plane.bits, applied, dim);
         Ok(Response::new(encode_mask_with_header(
             &cells,
@@ -233,22 +267,28 @@ pub async fn probe_pixel_cmd(
         let dq = comps
             .dq
             .as_ref()
-            .and_then(|(e, table)| e.int_plane().map(|p| (p, *table)));
+            .zip(comps.flags.as_ref())
+            .and_then(|((e, _), flags)| e.int_plane().map(|p| (p, flags)));
         let err_unit = comps.err.as_ref().and_then(|e| e.header().and_then(data_unit));
         let wave_unit = wavelength_unit(comps.wavelength.as_ref().and_then(|e| e.header()));
-        let companions = probe_companions(
+        let companions = probe_companions_named(
             dq,
             comps.err.as_ref().map(|e| e.arr()),
             comps.wavelength.as_ref().map(|e| e.arr()),
             probe.x,
             probe.y,
         );
-        Ok(probe_json_with_companions(
+        let body = probe_json_with_companions(
             &probe,
             unit.as_deref(),
             err_unit.as_deref(),
             Some(&wave_unit),
             &companions,
+        );
+        Ok(with_layer_sources(
+            body,
+            comps.err_origin.as_ref().map(|origin| origin.source.as_str()),
+            comps.flags.as_ref().map(|flags| flags.source.as_str()),
         ))
     })
 }
@@ -286,12 +326,13 @@ pub async fn pixel_table_cmd(
         let dq = comps
             .dq
             .as_ref()
-            .and_then(|(e, table)| e.int_plane().map(|plane| (plane, *table)));
+            .zip(comps.flags.as_ref())
+            .and_then(|((e, _), flags)| e.int_plane().map(|plane| (plane, flags)));
         let (dq_values, dq_names, dq_table) = match dq {
-            Some((plane, table)) => (
+            Some((plane, flags)) => (
                 Some(int_value_grid(plane, x, y, size)),
-                Some(dq_name_grid(&int_grid(&plane.bits, x, y, size), table)),
-                Some(table.label()),
+                Some(dq_name_grid(&int_grid(&plane.bits, x, y, size), flags)),
+                Some(flags.source.as_str()),
             ),
             None => (None, None, None),
         };
@@ -312,6 +353,10 @@ pub async fn pixel_table_cmd(
             RES_WAVELENGTH: wavelength,
             RES_WAVELENGTH_STATS: wavelength_stats,
             RES_WAVELENGTH_UNIT: wave_unit,
+            RES_ERR_SOURCE: comps.err_origin.as_ref().map(|origin| origin.source.as_str()),
+            RES_DQ_SOURCE: comps.flags.as_ref().map(|flags| flags.source.as_str()),
+            RES_ERR_UNAVAILABLE: comps.err_unavailable,
+            RES_DQ_UNAVAILABLE: comps.dq_unavailable,
             RES_ELAPSED_MS: t0.elapsed().as_millis() as u64,
         }))
     })
@@ -426,19 +471,28 @@ pub async fn generate_tiles_rgb(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::common::test_support::{afw_mef, float_dq_mef};
     use crate::infra::fits::reader::test_fixtures::{
         sci_err_dq_mef, sci_err_dq_mef_with_dq_cards, sci_err_dq_wave_mef, sci_err_dq_wave_mef_with_wave_cards,
     };
     use crate::types::constants::RES_VALUE;
 
     #[test]
-    fn overlay_mask_defaults_per_table() {
-        assert_eq!(resolve_overlay_mask(DqTable::Jwst, None), 7);
-        assert_eq!(resolve_overlay_mask(DqTable::Hst, None), 4 | 256 | 4096 | 8192);
-        assert_eq!(resolve_overlay_mask(DqTable::Unknown, None), 0);
-        assert_eq!(resolve_overlay_mask(DqTable::Unknown, Some(5)), 5);
-        assert_eq!(resolve_overlay_mask(DqTable::Jwst, Some(0)), 0);
-        assert_eq!(resolve_overlay_mask(DqTable::Hst, Some(1 << 31)), 1 << 31);
+    fn the_default_overlay_is_the_one_of_the_flag_set() {
+        let (jwst, hst, raw) =
+            (FlagSet::from_table(DqTable::Jwst), FlagSet::from_table(DqTable::Hst), FlagSet::from_table(DqTable::Unknown));
+        assert_eq!(resolve_overlay_mask(&jwst, None), 7);
+        assert_eq!(resolve_overlay_mask(&hst, None), 4 | 256 | 4096 | 8192);
+        assert_eq!(resolve_overlay_mask(&raw, None), 0);
+        assert_eq!(resolve_overlay_mask(&raw, Some(5)), 5);
+        assert_eq!(resolve_overlay_mask(&jwst, Some(0)), 0);
+        assert_eq!(resolve_overlay_mask(&hst, Some(1 << 31)), 1 << 31);
+
+        let dir = tempfile::tempdir().unwrap();
+        let k = format!("{}#hdu=1", afw_mef(dir.path(), "calexp.fits", vec![]));
+        let afw = load_companions(&k).unwrap().flags.expect("the MASK HDU is the flag layer of the IMAGE HDU");
+        assert_eq!(resolve_overlay_mask(&afw, None), 3);
+        assert_eq!(resolve_overlay_mask(&afw, Some(5)), 5);
     }
 
     #[test]
@@ -451,20 +505,20 @@ mod tests {
         assert_eq!(sci_header.get("TELESCOP"), None);
         assert_eq!(DqTable::select(&sci_header), DqTable::Unknown);
 
-        let (table, dq_ref, err_ref, present) = dq_table_for(&format!("{}#hdu=1", p)).unwrap();
-        assert_eq!(table, DqTable::Jwst);
-        assert_eq!(dq_ref.as_deref(), Some(format!("{}#hdu=3", p).as_str()));
-        assert_eq!(err_ref.as_deref(), Some(format!("{}#hdu=2", p).as_str()));
-        assert_eq!(present, None);
+        let found = dq_table_for(&format!("{}#hdu=1", p)).unwrap();
+        assert_eq!(found.set.table, DqTable::Jwst);
+        assert_eq!(found.dq_ref.as_deref(), Some(format!("{}#hdu=3", p).as_str()));
+        assert_eq!(found.err_ref.as_deref(), Some(format!("{}#hdu=2", p).as_str()));
+        assert_eq!(found.bits_present, None);
 
-        let (table, dq_ref, _, present) = dq_table_for(&format!("{}#hdu=4", p)).unwrap();
-        assert_eq!(table, DqTable::Unknown);
-        assert!(dq_ref.is_none());
-        assert_eq!(present, Some(0));
+        let lonely = dq_table_for(&format!("{}#hdu=4", p)).unwrap();
+        assert_eq!(lonely.set.table, DqTable::Unknown);
+        assert!(lonely.dq_ref.is_none());
+        assert_eq!(lonely.bits_present, None);
 
-        let (table, dq_ref, _, _) = dq_table_for(&format!("{}#hdu=3", p)).unwrap();
-        assert_eq!(table, DqTable::Jwst);
-        assert_eq!(dq_ref.as_deref(), Some(format!("{}#hdu=3", p).as_str()));
+        let own = dq_table_for(&format!("{}#hdu=3", p)).unwrap();
+        assert_eq!(own.set.table, DqTable::Jwst);
+        assert_eq!(own.dq_ref.as_deref(), Some(format!("{}#hdu=3", p).as_str()));
     }
 
     #[tokio::test]
@@ -506,8 +560,81 @@ mod tests {
         assert!(named[RES_BITS_PRESENT].is_null(), "{named}");
         assert_eq!(named[RES_EXCLUSION_MASK], 1);
         let lonely = get_dq_flag_table_cmd(format!("{p}#hdu=4")).await.unwrap();
-        assert_eq!(lonely[RES_BITS_PRESENT], 0);
+        assert!(lonely[RES_BITS_PRESENT].is_null(), "{lonely}");
         assert!(lonely[RES_DQ_REF].is_null());
+    }
+
+    #[tokio::test]
+    async fn the_flag_table_of_an_unreadable_dq_has_no_bits_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = float_dq_mef(dir.path(), "float_dq.fits");
+
+        let t = get_dq_flag_table_cmd(format!("{p}#hdu=1")).await.unwrap();
+        assert!(t[RES_BITS_PRESENT].is_null(), "{t}");
+        assert!(t[RES_DQ_REF].is_null(), "{t}");
+        assert_eq!(
+            t["dq_unavailable"],
+            "mask layer HDU 2 is a floating-point plane (BITPIX -32): flag bits cannot be read exactly"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_flag_table_of_an_afw_mask_lists_the_names_of_its_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = afw_mef(dir.path(), "calexp.fits", vec![]);
+
+        let t = get_dq_flag_table_cmd(format!("{p}#hdu=1")).await.unwrap();
+        assert_eq!(t[RES_TABLE], "unknown");
+        assert_eq!(t[RES_LABEL], "MP_ cards (afw mask planes)");
+        assert_eq!(t[RES_SOURCE], t[RES_LABEL]);
+        assert_eq!(t[RES_FLAGS], json!([{"bit": 1, "name": "BAD"}, {"bit": 2, "name": "SAT"}, {"bit": 32, "name": "DETECTED"}]));
+        assert_eq!(t[RES_EXCLUSION_MASK], 3);
+        assert_eq!(t["exclusion_default"], 3);
+        assert_eq!(t["exclusion_edited"], false);
+        assert_eq!(t["saturated_mask"], 2);
+        assert_eq!(t[RES_DEFAULT_MASK], 3);
+        assert!(t[RES_BITS_PRESENT].is_null(), "{t}");
+        assert_eq!(t[RES_DQ_REF], format!("{p}#hdu=2"));
+        assert_eq!(t["dq_origin"], "EXTNAME MASK, HDU 2");
+        assert!(t["dq_unavailable"].is_null(), "{t}");
+        assert_eq!(
+            t["err_origin"],
+            json!({"role": "variance", "source": "EXTNAME VARIANCE, HDU 3: square root", "assumed": false, "n_no_data": 1, "origin": "same_file"})
+        );
+        assert!(t["err_unavailable"].is_null(), "{t}");
+    }
+
+    #[tokio::test]
+    async fn the_hover_readout_names_the_flags_and_the_origin_of_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = format!("{}#hdu=1", afw_mef(dir.path(), "calexp.fits", vec![]));
+
+        let j = probe_pixel_cmd(k.clone(), 1.0, 1.0, None).await.unwrap();
+        assert_eq!(
+            j[RES_DQ],
+            json!({"bits": 34, "value": 34, "names": ["SAT", "DETECTED"], "table": "unknown", "text": "34: SAT | DETECTED", "source": "MP_ cards (afw mask planes)"})
+        );
+        assert_eq!(j[RES_ERR], json!({"value": 5.0, "unit": "nJy", "source": "EXTNAME VARIANCE, HDU 3: square root"}));
+
+        let no_data = probe_pixel_cmd(k, 2.0, 1.0, None).await.unwrap();
+        assert!(no_data[RES_ERR].is_null(), "{no_data}");
+    }
+
+    #[tokio::test]
+    async fn the_pixel_table_names_the_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = format!("{}#hdu=1", afw_mef(dir.path(), "calexp.fits", vec![]));
+
+        let t = pixel_table_cmd(k, 1, 1, Some(3)).await.unwrap();
+        assert_eq!(t["err_source"], "EXTNAME VARIANCE, HDU 3: square root");
+        assert_eq!(t["dq_source"], "MP_ cards (afw mask planes)");
+        assert_eq!(t[RES_DQ_TABLE], "MP_ cards (afw mask planes)");
+        assert_eq!(t[RES_DQ_NAMES][1][1], "SAT | DETECTED");
+        assert_eq!(t[RES_ERR][1][1], 5.0);
+        for key in ["err_unavailable", "dq_unavailable"] {
+            assert!(t.as_object().unwrap().contains_key(key), "{key}: {t}");
+            assert!(t[key].is_null(), "{key}: {t}");
+        }
     }
 
     #[tokio::test]
@@ -924,7 +1051,7 @@ mod tests {
     #[test]
     fn dq_name_grid_decodes_set_bits_and_leaves_good_and_off_image_cells_null() {
         let bits = vec![vec![None, Some(0), Some(1)], vec![Some(6), Some(1 << 20), None]];
-        let names = dq_name_grid(&bits, DqTable::Jwst);
+        let names = dq_name_grid(&bits, &FlagSet::from_table(DqTable::Jwst));
         assert_eq!(names[0], vec![None, None, Some("DO_NOT_USE".to_string())]);
         assert_eq!(names[1][0].as_deref(), Some("SATURATED | JUMP_DET"));
         assert!(names[1][1].is_some());
@@ -940,18 +1067,99 @@ mod tests {
         sci_err_dq_mef(&path, 4, 4, dq);
         let key = format!("{}#hdu=1", path.to_str().unwrap());
         let loaded = load_companions(&key).unwrap();
+        let flags = loaded.flags.clone().unwrap();
         let (entry, table) = loaded.dq.unwrap();
         assert_eq!(table, DqTable::Unknown);
         let plane = entry.int_plane().unwrap();
-        let applied = resolve_overlay_mask(table, None);
+        let applied = resolve_overlay_mask(&flags, None);
         assert_eq!(applied, 0);
         assert!(mask_preview_or(&plane.bits, applied, 2).0.iter().all(|&c| c == 0));
-        let applied = resolve_overlay_mask(table, Some(1));
+        let applied = resolve_overlay_mask(&flags, Some(1));
         let (cells, w, h) = mask_preview_or(&plane.bits, applied, 2);
         let bytes = encode_mask_with_header(&cells, w as u32, h as u32, applied, table.id());
         assert_eq!(bytes.len(), 16 + 4);
         assert_eq!(u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]), 1);
         assert_eq!(u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]), 0xFFFF_FFFF);
         assert_eq!(&bytes[16..], &[0, 1, 0, 0]);
+    }
+
+    fn survey_file(set: &str, name: &str) -> String {
+        let root = crate::core::astrometry::gwcs::test_support::env_dir("ASTROBURST_SCIENCE_DATA_DIR");
+        root.join("survey").join(set).join(name).to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: survey/E1 science, RMS and FLAG files of tile 102044185"]
+    async fn real_euclid_open_response_and_flag_table_name_the_paired_files() {
+        let rms = "EUC_MER_MOSAIC-VIS-RMS_TILE102044185-8BF2FC_20241021T010718.207983Z_00.00_cut60_A.fits";
+        let flag = "EUC_MER_MOSAIC-VIS-FLAG_TILE102044185-A61C42_20241021T010718.208008Z_00.00_cut60_A.fits";
+        let p = survey_file("E1", "EUC_MER_BGSUB-MOSAIC-VIS_TILE102044185-3EA2F5_20241021T041200.630008Z_00.00_cut60_A.fits");
+
+        let plane = crate::cmd::common::plane_info_json(&p, &load_cached_full(&p).unwrap()).unwrap();
+        println!("euclid open response: err_origin {}, dq_origin {}, notes {}", plane["err_origin"], plane["dq_origin"], plane["pairing_notes"]);
+        assert_eq!(plane["err_origin"]["source"], format!("file name -RMS, {rms}: as is"));
+        assert_eq!(plane["err_origin"]["origin"], "sibling");
+        assert_eq!(
+            plane["pairing_notes"],
+            json!([
+                format!("error layer taken from the sibling file {rms} (name rule Euclid MER mosaic, same 601x601 grid)"),
+                format!("mask layer taken from the sibling file {flag} (name rule Euclid MER mosaic, same 601x601 grid)"),
+                "flag layer without bit names: nothing is excluded until bits are chosen",
+            ])
+        );
+
+        let t = get_dq_flag_table_cmd(p.clone()).await.unwrap();
+        println!("euclid flag table: label {}, bits_present {}, exclusion {}, err n_no_data {}", t[RES_LABEL], t[RES_BITS_PRESENT], t[RES_EXCLUSION_MASK], t["err_origin"]["n_no_data"]);
+        assert_eq!(t[RES_LABEL], "unknown (raw bits)");
+        assert_eq!(t[RES_FLAGS], json!([]));
+        assert_eq!(t[RES_BITS_PRESENT], 25301342);
+        assert_eq!(t[RES_EXCLUSION_MASK], 0);
+        assert_eq!(t["err_origin"]["n_no_data"], 22);
+
+        let sentinel = probe_pixel_cmd(p.clone(), 541.0, 70.0, None).await.unwrap();
+        let corner = probe_pixel_cmd(p, 0.0, 0.0, None).await.unwrap();
+        println!("euclid probe: (541, 70) value {} err {}; (0, 0) err {}", sentinel[RES_VALUE], sentinel[RES_ERR], corner[RES_ERR]);
+        assert!(sentinel[RES_ERR].is_null(), "{sentinel}");
+        assert_eq!(sentinel[RES_VALUE], 0.0);
+        assert_eq!(corner[RES_ERR][RES_VALUE], 0.004187881480902433_f32 as f64);
+        assert!(corner[RES_ERR][RES_UNIT].is_null(), "{corner}");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: survey/L2/legacysurvey-0532m280-image-r.fits.fz with its invvar and maskbits files"]
+    async fn real_legacy_brick_flag_table_has_the_names_of_the_file() {
+        let p = survey_file("L2", "legacysurvey-0532m280-image-r.fits.fz");
+
+        let t = get_dq_flag_table_cmd(p.clone()).await.unwrap();
+        println!("legacy flag table: label {}, {} flags, exclusion {}, saturated {}, bits_present {}", t[RES_LABEL], t[RES_FLAGS].as_array().map_or(0, Vec::len), t[RES_EXCLUSION_MASK], t["saturated_mask"], t[RES_BITS_PRESENT]);
+        assert_eq!(t[RES_LABEL], "MBIT_ cards (Legacy maskbits)");
+        assert_eq!(t[RES_FLAGS].as_array().unwrap().len(), 17);
+        assert_eq!(t[RES_EXCLUSION_MASK], 72);
+        assert_eq!(t["saturated_mask"], 8);
+        assert!(t[RES_BITS_PRESENT].is_null(), "{t}");
+
+        let star = probe_pixel_cmd(p.clone(), 2972.0, 893.0, None).await.unwrap();
+        let corner = probe_pixel_cmd(p, 0.0, 0.0, None).await.unwrap();
+        println!("legacy probe: (2972, 893) dq {}; (0, 0) err {}", star[RES_DQ], corner[RES_ERR]);
+        assert_eq!(star[RES_DQ]["bits"], 51352);
+        assert_eq!(star[RES_DQ]["names"], json!(["SATUR_R", "SATUR_Z", "ALLMASK_Z", "MEDIUM", "SATUR_I", "ALLMASK_I"]));
+        let expected = 7.175998180759543e-4;
+        let sigma = corner[RES_ERR][RES_VALUE].as_f64().unwrap();
+        assert!((sigma - expected).abs() <= 1e-6 * expected, "{sigma} against {expected}");
+        assert_eq!(corner[RES_ERR][RES_UNIT], "nanomaggy");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: survey/P1/ps1_A_r_mask_480px.fits"]
+    async fn real_ps1_mask_cutout_shown_on_its_own_says_it_holds_no_mask() {
+        let p = survey_file("P1", "ps1_A_r_mask_480px.fits");
+
+        let t = get_dq_flag_table_cmd(p).await.unwrap();
+        println!("ps1 mask flag table: label {}, {} flags, dq_ref {}, bits_present {}, dq_unavailable {}", t[RES_LABEL], t[RES_FLAGS].as_array().map_or(0, Vec::len), t[RES_DQ_REF], t[RES_BITS_PRESENT], t["dq_unavailable"]);
+        assert!(t[RES_DQ_REF].is_null(), "{t}");
+        assert!(t[RES_BITS_PRESENT].is_null(), "{t}");
+        assert!(t["dq_unavailable"].as_str().unwrap().contains("floating-point plane (BITPIX -32)"), "{t}");
+        assert_eq!(t[RES_LABEL], "MSKNAM cards (PS1 mask)");
+        assert_eq!(t[RES_FLAGS].as_array().unwrap().len(), 16);
     }
 }

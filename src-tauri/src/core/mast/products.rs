@@ -9,6 +9,7 @@ pub const DOWNLOAD_FILE_URL: &str = "https://mast.stsci.edu/api/v0.1/Download/fi
 
 const IMAGE_SUFFIXES: [&str; 10] = ["cal", "calints", "rate", "rateints", "crf", "i2d", "flt", "flc", "drz", "drc"];
 const CATALOGUES: [(&str, &str); 4] = [("cat", ".ecsv"), ("segm", ".fits"), ("point-cat", ".ecsv"), ("segment-cat", ".ecsv")];
+const WHITE_LIGHT_TABLE: &str = "_whtlt.ecsv";
 const PREVIEW_EXTENSIONS: [&str; 3] = [".jpg", ".jpeg", ".png"];
 const OPENABLE_EXTENSIONS: [&str; 2] = [".fits", ".asdf"];
 const AUXILIARY_CATEGORIES: [&str; 3] = ["AUX", "JITTER/SUPPORT", "OTHER"];
@@ -34,7 +35,7 @@ pub fn product_class(category: &str, product_type: &str, suffix: &str, filename:
     if has_extension(&PREVIEW_EXTENSIONS) || suffix.ends_with("thumb") || suffix.ends_with("preview") {
         return MastProductClass::Preview;
     }
-    if CATALOGUES.iter().any(|(name, extension)| suffix == *name && filename.ends_with(extension)) {
+    if filename.ends_with(WHITE_LIGHT_TABLE) || CATALOGUES.iter().any(|(name, extension)| suffix == *name && filename.ends_with(extension)) {
         return MastProductClass::Catalog;
     }
     if has_extension(&OPENABLE_EXTENSIONS) {
@@ -367,6 +368,71 @@ mod tests {
             assert_eq!(opens_as(cls), opens, "{cls:?}");
             assert_eq!(default_visible(cls), opens.is_some(), "{cls:?}");
         }
+    }
+
+    #[test]
+    fn a_white_light_table_is_classed_with_the_tables_that_open() {
+        use MastProductClass::*;
+        let cases = [
+            ("3", "science", "whtlt", "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv", Catalog),
+            ("3", "science", "", "jw01366-o002_t001_nircam_f322w2-grismr-subgrism256_whtlt.ecsv", Catalog),
+            ("3", "science", "whtlt", "JW01274-O013_T008_MIRI_P750L-SLITLESSPRISM_WHTLT.ECSV", Catalog),
+            ("3", "science", "whtlt", "jw1_whtlt.fits", Other),
+            ("3", "science", "whtlt", "jw1_whtlt.csv", Other),
+            ("REFERENCE", "reference", "whtlt", "x_whtlt.ecsv", Reference),
+        ];
+        for (category, product_type, suffix, filename, expected) in cases {
+            assert_eq!(product_class(category, product_type, suffix, filename), expected, "{suffix} {filename}");
+        }
+        assert_eq!(opens_as(Catalog), Some(OpensAs::Catalog));
+        assert!(default_visible(Catalog));
+    }
+
+    #[test]
+    fn the_combined_1d_product_stays_among_the_files_that_do_not_open() {
+        use MastProductClass::*;
+        assert_eq!(product_class("3", "science", "c1d", "jw01366-o003_t001_nirspec_f290lp-g395h_c1d.fits"), Other);
+        assert_eq!(opens_as(Other), None);
+        assert!(!default_visible(Other));
+    }
+
+    #[test]
+    fn a_time_series_listing_shows_the_white_light_table_and_hides_the_combined_spectrum() {
+        use MastProductClass::*;
+        const TSO: &str = "jw02358-o030_t003_nirspec";
+        const WHITE_LIGHT: &str = "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv";
+        const COMBINED: &str = "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_c1d.fits";
+        fn row(filename: &str, suffix: &str, size: i64) -> DatasetProduct {
+            serde_json::from_value(serde_json::json!({
+                "product_key": filename,
+                "access": "PUBLIC",
+                "dataset": TSO,
+                "filename": filename,
+                "uri": format!("{TSO}/{filename}"),
+                "authz_primary_identifier": filename,
+                "authz_secondary_identifier": filename,
+                "file_suffix": suffix,
+                "category": "3",
+                "size": size,
+                "type": "science"
+            }))
+            .unwrap()
+        }
+        let list = classify(
+            MastMissionId::Jwst,
+            &[TSO.to_owned()],
+            vec![
+                row("jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_x1dints.fits", "_x1dints", 14_702_400),
+                row(WHITE_LIGHT, "_whtlt", 14_107),
+                row(COMBINED, "_c1d", 31_680),
+            ],
+        );
+        assert_eq!(groups(&list), vec![(Spectrum, 1, 14_702_400, true), (Catalog, 1, 14_107, true), (Other, 1, 31_680, false)]);
+        let white_light = find(&list, WHITE_LIGHT);
+        assert_eq!((white_light.cls, white_light.opens_as, white_light.suffix.as_str()), (Catalog, Some(OpensAs::Catalog), "whtlt"));
+        assert_eq!(white_light.dataset_id, TSO);
+        assert_eq!(white_light.mast_uri, "mast:JWST/product/jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv");
+        assert_eq!(find(&list, COMBINED).opens_as, None);
     }
 
     #[test]

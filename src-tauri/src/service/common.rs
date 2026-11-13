@@ -5,6 +5,7 @@ use crate::core::analysis::photometry::SATURATION_KEYWORDS;
 use crate::core::history::stamp::FileStamp;
 use crate::core::metadata::photcal::{
     GENERIC_ZERO_POINT_KEYS, ROMAN_CONVERSION_MJY_KEYS, ROMAN_PIXEL_AREA_SR_KEYS,
+    SURVEY_ZERO_POINT_KEYS,
 };
 use crate::core::ops::OutputValues;
 use crate::infra::cache::{ImageCache, ImageEntry, PlaneLoad};
@@ -140,6 +141,7 @@ fn is_calibration_card(key: &str) -> bool {
         || GAIN_KEYWORDS.contains(&key)
         || CALIBRATION_PREFIXES.iter().any(|p| key.starts_with(p))
         || GENERIC_ZERO_POINT_KEYS.contains(&key)
+        || SURVEY_ZERO_POINT_KEYS.contains(&key)
         || SATURATION_KEYWORDS.contains(&key)
         || ROMAN_CONVERSION_MJY_KEYS.contains(&key)
         || ROMAN_PIXEL_AREA_SR_KEYS.contains(&key)

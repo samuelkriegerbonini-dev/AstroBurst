@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::core::metadata::photcal::{is_mjy_per_sr, normalized_unit};
+use crate::core::metadata::units::per_pixel_jansky_scale;
 use crate::types::constants::{
     HEADER_COMBINE_METHOD, HEADER_DISPLAY_REFERRED_CARD, HEADER_DRIZZLE_SCALE, HEADER_NCOMBINE,
 };
@@ -146,7 +147,10 @@ fn unit_gain(
             (Some(_), None) => (None, Some(format!("BUNIT '{bunit_text}' without EXPTIME: gain unavailable"))),
             (None, _) => (None, None),
         },
-        UnitClass::Calibrated => (None, Some(format!("JWST/Roman calibrated units ({bunit_text}): no gain applies"))),
+        UnitClass::Calibrated => {
+            let family = if is_mjy_per_sr(bunit_text) { "JWST/Roman calibrated units" } else { "calibrated flux units" };
+            (None, Some(format!("{family} ({bunit_text}): no gain applies")))
+        }
         UnitClass::Other => (None, Some(format!("BUNIT '{bunit_text}' is not a count unit: no gain applies"))),
     }
 }
@@ -238,7 +242,11 @@ pub fn gain_model(header: Option<&HduHeader>, has_err_plane: bool) -> GainModel 
     let header = header.unwrap_or(&empty);
     let bunit = card_text(header, BUNIT_KEY);
     let normalized = bunit.as_deref().map(normalized_unit);
-    let unit_class = classify_unit(normalized.as_deref());
+    let unit_class = if bunit.as_deref().is_some_and(|unit| per_pixel_jansky_scale(unit).is_some()) {
+        UnitClass::Calibrated
+    } else {
+        classify_unit(normalized.as_deref())
+    };
     let keyword_gain = header_gain(header);
     let gain_card = positive_card(header, CAMERA_GAIN_KEYWORD);
     let (unit, class_note) = unit_gain(unit_class, header, bunit.as_deref(), keyword_gain);
@@ -413,6 +421,39 @@ mod tests {
         assert_eq!(classify_unit(Some("MJY")), UnitClass::Calibrated);
         assert_eq!(classify_unit(Some("W/M2/HZ")), UnitClass::Other);
         assert_eq!(classify_unit(None), UnitClass::Counts);
+    }
+
+    #[test]
+    fn calibrated_flux_units_of_surveys_have_no_gain_and_say_so() {
+        for bunit in ["nJy", "uJy", "mJy", "Jy", "nanomaggy", "10.0*nanoJansky"] {
+            let cards = [("BUNIT", bunit), ("EGAIN", "2"), ("EXPTIME", "10")];
+            let without_err = model(&cards, false);
+            assert_eq!(without_err.unit_class, UnitClass::Calibrated, "{bunit}");
+            assert_eq!(without_err.poisson_route, PoissonRoute::Unavailable, "{bunit}");
+            assert_eq!(without_err.effective_gain, None, "{bunit}");
+            assert_eq!(
+                without_err.note,
+                Some(format!("calibrated flux units ({bunit}): no gain applies")),
+                "{bunit}"
+            );
+            let with_err = model(&cards, true);
+            assert_eq!(with_err.unit_class, UnitClass::Calibrated, "{bunit}");
+            assert_eq!(with_err.poisson_route, PoissonRoute::ErrPlane, "{bunit}");
+            assert_eq!(note_of(&with_err), "Poisson noise from the ERR plane", "{bunit}");
+        }
+
+        let nanomaggy = model(&[("BUNIT", "nanomaggy")], false);
+        assert_eq!(
+            photon_noise_warning(&nanomaggy, false, false).as_deref(),
+            Some("flux errors leave out source photon noise: calibrated flux units (nanomaggy): no gain applies")
+        );
+
+        let inverse_variance = model(&[("BUNIT", "1/nanomaggy^2")], false);
+        assert_eq!(inverse_variance.unit_class, UnitClass::Other);
+        assert!(note_of(&inverse_variance).contains("is not a count unit"), "{:?}", inverse_variance.note);
+
+        let surface_brightness = model(&[("BUNIT", "MJy/sr")], false);
+        assert_eq!(note_of(&surface_brightness), "JWST/Roman calibrated units (MJy/sr): no gain applies");
     }
 
     #[test]

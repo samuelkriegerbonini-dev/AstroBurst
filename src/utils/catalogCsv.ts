@@ -64,6 +64,7 @@ export const SOURCES_CSV_COLUMNS: CsvColumn<MeasuredSource>[] = [
   { header: "fwhm", value: (s) => s.fwhm },
   { header: "snr", value: (s) => s.snr },
   { header: "saturated", value: (s) => s.saturated },
+  { header: "aperture_radius", value: (s) => s.aperture_radius },
 ];
 
 export const MATCHES_CSV_COLUMNS: CsvColumn<CrossMatchEntry>[] = [
@@ -86,6 +87,9 @@ export const MATCHES_CSV_COLUMNS: CsvColumn<CrossMatchEntry>[] = [
   { header: "sep_arcsec", value: (m) => m.sep_arcsec },
   { header: "d_ra_arcsec", value: (m) => m.d_ra_arcsec },
   { header: "d_dec_arcsec", value: (m) => m.d_dec_arcsec },
+  { header: "saturated", value: (m) => m.star.saturated },
+  { header: "aperture_radius", value: (m) => m.star.aperture_radius },
+  { header: "zp_status", value: (m) => m.zp_status },
 ];
 
 export function catalogRowsCsv(rows: PlacedCatalogRow[]): string {

@@ -4,6 +4,9 @@ import { compositeChainState, compositeEstimatePsf } from "../../services/compos
 import { getOutputDir } from "../../infrastructure/tauri";
 import { useProcessingRun } from "../../hooks/useProcessingRun";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
+import { useWcsPixelScale } from "../../hooks/useResolutionSettings";
+import { SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
+import { robustWidth } from "../../utils/resolutionText";
 import { COMPOSITE_RUN_KEY } from "../../utils/compositeChain";
 import { paintKernel } from "../../utils/psfProfile";
 import { Slider, Toggle, RunButton, ErrorAlert, SectionHeader } from "../ui";
@@ -45,6 +48,8 @@ export default function PsfPanel({ selectedFile, onPsfReady, onCompositePsfReady
   const result = runResult && (!compositeMode || compositeChain.psfKernel === runResult.kernel) ? runResult : null;
   const canRun = compositeMode ? compositeInput !== null : !!selectedFile;
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const scale = useWcsPixelScale(compositeMode ? null : selectedFile?.path ?? null);
+  const starScatter = result ? robustWidth(result.stars_used.map((s) => s.fwhm))?.scatter ?? null : null;
 
   const [numStars, setNumStars] = useState(30);
   const [cutoutRadius, setCutoutRadius] = useState(15);
@@ -180,8 +185,10 @@ export default function PsfPanel({ selectedFile, onPsfReady, onCompositePsfReady
             />
             <div className="flex flex-col gap-1.5">
               <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                <div className="text-zinc-500">FWHM</div>
-                <div className="text-zinc-200 font-mono">{result.average_fwhm.toFixed(2)} px</div>
+                <div className="text-zinc-500" title="Mean over the stars used of their width at half maximum. The Resolution section of the Photometry tool measures the image PSF with the photometry estimator.">FWHM</div>
+                <div className="text-zinc-200 font-mono">{`${result.average_fwhm.toFixed(2)} px${scale !== null ? ` (${(result.average_fwhm * scale).toFixed(3)}")` : ""}`}</div>
+                <div className="text-zinc-500" title={SIGMA_MAD_TITLE}>Star scatter</div>
+                <div className="text-zinc-200 font-mono">{starScatter !== null ? `± ${starScatter.toFixed(2)} px${scale !== null ? ` (${(starScatter * scale).toFixed(3)}")` : ""}` : "--"}</div>
                 <div className="text-zinc-500">Ellipticity</div>
                 <div className="text-zinc-200 font-mono">{result.average_ellipticity.toFixed(3)}</div>
                 <div className="text-zinc-500">Spread</div>
@@ -195,9 +202,9 @@ export default function PsfPanel({ selectedFile, onPsfReady, onCompositePsfReady
           <div className="flex flex-col gap-0.5">
             {result.stars_used.map((s, i) => (
               <div key={i} className="flex items-center gap-2 text-[10px] text-zinc-500 font-mono px-1">
-                <span className="text-violet-400/60">#{i + 1}</span>
+                <span className="text-violet-400/90">#{i + 1}</span>
                 <span>({s.x.toFixed(0)},{s.y.toFixed(0)})</span>
-                <span>FWHM={s.fwhm.toFixed(1)}</span>
+                <span>FWHM={s.fwhm.toFixed(1)} px</span>
                 <span>SNR={s.snr.toFixed(0)}</span>
                 <span>e={s.ellipticity.toFixed(2)}</span>
               </div>

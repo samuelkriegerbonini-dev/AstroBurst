@@ -97,6 +97,9 @@ import { NOVA_OFF_NOTE } from "../../../utils/plateSolveResult";
 import { DEFAULT_SOLVE_OPTIONS, SOLVE_OPTIONS_KEY } from "../../../utils/plateSolveOptions";
 import { solveSummaryLine } from "../../../utils/coordFormat";
 import { TauriCommandError } from "../../../shared/types/errors";
+import { STAR_FWHM_CARD_TITLE, STAR_FWHM_METHOD } from "../../../utils/starListText";
+import { adHocErrorBoxLines } from "../../../test/panelRules";
+import plateSolvePanelSource from "../PlateSolvePanel.tsx?raw";
 
 function inputTitled(markup: string, titleStart: string): string {
   const input = markup.match(new RegExp(`<input[^>]*title="${titleStart}[^"]*"[^>]*>`));
@@ -1449,5 +1452,84 @@ describe("GaiaRefineBlock", () => {
     expect(wrapper, "epoch field wrapper").not.toBeNull();
     expect(wrapper![1].split(" ")).toContain("w-40");
     expect(wrapper![1].split(" ")).not.toContain("w-32");
+  });
+});
+
+describe("PlateSolvePanel star list units and failures", () => {
+  const panel = (PlateSolvePanel as unknown as { type: Component }).type;
+  const STARS = [
+    { x: 10.2, y: 20.4, flux: 1500, fwhm: 4.17, snr: 80 },
+    { x: 30.1, y: 40.9, flux: 900, fwhm: 4.09, snr: 55 },
+    { x: 50, y: 60, flux: 400, fwhm: 4.25, snr: 21 },
+  ];
+  const staticMarkup = (props: Props) =>
+    unescapeHtml(renderToStaticMarkup(createElement(PlateSolvePanel, { filePath: "C:/x.fits", solvePath: "C:/x.fits", ...props })));
+
+  afterEach(() => {
+    hooks.run.active = false;
+  });
+
+  it("labels the FWHM column and card with their unit and says how the width is measured", () => {
+    const markup = staticMarkup({ stars: STARS });
+    expect(markup).toContain(`<th class="text-right px-1" title="${STAR_FWHM_METHOD}">FWHM (px)</th>`);
+    expect(markup).toContain('<div class="text-zinc-500">Median FWHM</div><div class="text-cyan-300 font-mono break-words">4.17 px</div>');
+    expect(markup).toContain(`title="${STAR_FWHM_CARD_TITLE}"`);
+  });
+
+  it("adds arcsec once the header gives a pixel scale", async () => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    wcsInfoMock.mockReset().mockResolvedValue(HEADER_WCS);
+    solveHintsMock.mockReset().mockRejectedValue(new Error("no solve_hints_cmd"));
+    const show = () => renderTree(panel, { filePath: "C:/data/f444w_i2d.fits", solvePath: "C:/data/f444w_i2d.fits", stars: STARS });
+    show();
+    await flush();
+    expect(markupOf(show())).toContain('4.17 px (0.262")');
+  });
+
+  it("keeps the sentence that says which stars the median is taken over", () => {
+    const markup = staticMarkup({ stars: STARS, detectedTotal: 348 });
+    expect(markup).toContain('title="Detection keeps the 3 brightest of 348 sources; FWHM is their median"');
+    expect(markup).toContain("3 of 348 (brightest)");
+  });
+
+  it("announces a failed star detection through the compact alert", () => {
+    const markup = staticMarkup({ detectError: "no stars above 5 sigma" });
+    expect(markup).toContain(
+      '<div class="ab-error-alert ab-error-alert-compact" role="alert">Star detection failed: no stars above 5 sigma</div>',
+    );
+  });
+
+  it("holds no hand-made failure box", () => {
+    expect(adHocErrorBoxLines(plateSolvePanelSource)).toEqual([]);
+  });
+
+  it("keeps the clipboard and Gaia failure boxes announced and findable", async () => {
+    const showCards = () => renderTree(cards, { centre: EDGE_CENTRE, source: "header" });
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    clipboardWrite.mockReset().mockRejectedValue(new DOMException(CLIPBOARD_DENIED, "NotAllowedError"));
+    (copyButton(showCards())!.onClick as () => void)();
+    await flush();
+    const copyError = findElement(showCards(), (props) => props["data-copy-error"] === true);
+    expect(copyError, "clipboard failure box").not.toBeNull();
+    expect(copyError!.role).toBe("alert");
+    expect(copyError!.className).toBe("col-span-2 ab-error-alert ab-error-alert-compact");
+
+    hooks.run.active = false;
+    const gaiaProps = {
+      blocker: null,
+      loading: false,
+      epochText: "",
+      epochError: null,
+      epochPlaceholder: "2024.500 (header)",
+      onEpochChange: () => {},
+      onRefine: () => {},
+      result: null,
+      error: "VizieR did not answer",
+    };
+    expect(renderToStaticMarkup(createElement(GaiaRefineBlock, gaiaProps))).toContain(
+      '<div role="alert" data-gaia-refine-error="true" class="ab-error-alert ab-error-alert-compact">VizieR did not answer</div>',
+    );
   });
 });

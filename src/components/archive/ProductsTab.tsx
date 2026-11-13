@@ -20,11 +20,12 @@ import {
   copyDownloadUrls,
   copyMastUris,
   exactBytes,
+  filenameParts,
   formatBytes,
   opensParts,
+  productLabel,
   productView,
   sectionExpanded,
-  shortFilename,
   visibleProducts,
   type ProductSection,
   type SectionOverrides,
@@ -37,7 +38,7 @@ interface ProductsTabProps {
   mission: MastMission;
 }
 
-const DOWNLOAD_NOTE = "Downloads go to the mast folder of the Data folder (Settings); Download and open loads images, cubes, spectra and ramps into the Workspace.";
+const DOWNLOAD_NOTE = "Downloads go to the mast folder of the Data folder (Settings); Download and open loads images, cubes, spectra, ramps and ECSV tables into the Workspace.";
 const FILE_NOUNS: Partial<Record<MastProductClass, string>> = { reference: "CRDS reference", guidestar: "guide-star" };
 
 function plural(n: number, one: string, many: string): string {
@@ -146,6 +147,7 @@ function SectionView({ section, expanded, onToggle, picked, onPick, refusalOf, p
             const canPeek = peekable(p, peeking.mission);
             const entry = canPeek ? peekEntry(peeking.peeks, peeking.mission, peeking.datasetId, p.filename) : null;
             const refusal = onPick ? refusalOf(p) : null;
+            const name = filenameParts(p.filename, p.datasetId);
             return (
               <Fragment key={selectionKey(p)}>
                 <li className="ab-mast-prow" data-cls={p.cls}>
@@ -161,9 +163,10 @@ function SectionView({ section, expanded, onToggle, picked, onPick, refusalOf, p
                     />
                   ) : null}
                   <span className="ab-mast-prow-name ab-mast-mono" title={p.filename}>
-                    {shortFilename(p.filename, p.datasetId)}
+                    <span className="ab-mast-prow-name-head">{name.head}</span>
+                    <span className="ab-mast-prow-name-tail">{name.tail}</span>
                   </span>
-                  <span className="ab-mast-prow-cls">{CLASS_LABELS[p.cls]}</span>
+                  <span className="ab-mast-prow-cls">{productLabel(p)}</span>
                   <span className="ab-mast-prow-size ab-mast-mono" title={exactBytes(p.sizeBytes)}>
                     {formatBytes(p.sizeBytes)}
                   </span>

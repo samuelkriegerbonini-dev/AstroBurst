@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { ClipboardCopy, Compass, Loader2 } from "lucide-react";
+import { Compass, Loader2 } from "lucide-react";
 import { getObservationGeometry } from "../../services/geometry";
 import type { ObservationGeometryResult } from "../../shared/types/geometry";
 import {
@@ -13,12 +13,14 @@ import {
   parseSiteInputs,
   parseTargetInputs,
   saveSiteOverride,
+  siteInUseLine,
+  targetInUseLine,
   type GeometryRow,
   type SiteOverride,
   type StorageLike,
   type TargetOverride,
 } from "../../utils/observationGeometry";
-import { ErrorAlert } from "../ui";
+import { CopyCsvButton, ErrorAlert, SMALL_BUTTON_CLASS } from "../ui";
 
 interface ObservationGeometryPanelProps {
   filePath: string | null;
@@ -34,13 +36,11 @@ const SITE_PLACEHOLDER_DIGITS = 4;
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-amber-500/50 w-full";
-const SMALL_BUTTON_CLASS =
-  "flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed";
 const SECTION_CLASS = "text-[9px] text-zinc-500 uppercase tracking-wider";
-const CHIP_CLASS = "inline-block rounded px-1 py-px text-[8px] leading-tight ml-1 bg-zinc-800 text-zinc-400";
+const CHIP_CLASS = "inline-block rounded px-1 py-px text-[9px] leading-tight ml-1 bg-zinc-800 text-zinc-400";
 const HINT_CLASS = "text-[9px] text-zinc-600";
 const WARN_CLASS = "text-[9px] text-amber-400/90";
-const SOURCE_CLASS = "text-[9px] text-zinc-500 truncate";
+const SOURCE_CLASS = "text-[9px] text-zinc-500 break-words";
 
 function browserStorage(): StorageLike | null {
   try {
@@ -150,14 +150,7 @@ function ObservationGeometryPanel({ filePath }: ObservationGeometryPanelProps) {
     setSiteError(null);
   }, []);
 
-  const copy = useCallback(async () => {
-    if (!result) return;
-    try {
-      await navigator.clipboard.writeText(geometryText(result));
-    } catch (e: unknown) {
-      setError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }, [result]);
+  const copyText = useCallback(() => (result ? geometryText(result) : null), [result]);
 
   const rows = useMemo(() => (result ? geometryRows(result) : []), [result]);
   const timeRows = rows.filter((r) => TIME_ROW_KEYS.includes(r.key));
@@ -215,8 +208,8 @@ function ObservationGeometryPanel({ filePath }: ObservationGeometryPanelProps) {
             {targetError && <div className={WARN_CLASS}>{targetError}</div>}
             {result &&
               (result.target ? (
-                <div className={SOURCE_CLASS} title={result.target.source}>
-                  from {result.target.source}
+                <div className={SOURCE_CLASS} data-geometry-target>
+                  {targetInUseLine(result.target)}
                 </div>
               ) : (
                 <div className={WARN_CLASS}>{NO_TARGET_HINT}</div>
@@ -279,8 +272,8 @@ function ObservationGeometryPanel({ filePath }: ObservationGeometryPanelProps) {
             {siteError && <div className={WARN_CLASS}>{siteError}</div>}
             {result &&
               (result.site ? (
-                <div className={SOURCE_CLASS} title={result.site.source}>
-                  from {result.site.source}
+                <div className={SOURCE_CLASS} data-geometry-site>
+                  {siteInUseLine(result.site)}
                 </div>
               ) : (
                 <div className={WARN_CLASS}>{NO_SITE_HINT}</div>
@@ -334,10 +327,7 @@ function ObservationGeometryPanel({ filePath }: ObservationGeometryPanelProps) {
                 )}
 
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <button type="button" onClick={() => void copy()} className={SMALL_BUTTON_CLASS}>
-                    <ClipboardCopy size={10} />
-                    Copy
-                  </button>
+                  <CopyCsvButton label="Copy" title="Copy the geometry values as text" text={copyText} onError={setError} />
                   <span className="text-[9px] text-zinc-500 font-mono ml-auto">{result.elapsed_ms} ms</span>
                 </div>
               </>

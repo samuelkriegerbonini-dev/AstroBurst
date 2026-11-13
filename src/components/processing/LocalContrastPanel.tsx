@@ -175,7 +175,7 @@ export default function LocalContrastPanel({ selectedFile, outputDir = "./output
           </div>
           <div className="flex justify-between items-center text-[10px] text-zinc-500">
             <span>{progress.stage}</span>
-            <span className="flex items-center gap-2">
+            <span className="flex items-center gap-2 tabular-nums">
               {progress.percent}%
               <button
                 onClick={() => { cancelProgress(LHE_PROGRESS_EVENT).catch(() => {}); }}

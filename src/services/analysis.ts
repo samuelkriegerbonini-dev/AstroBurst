@@ -152,7 +152,25 @@ export type FluxConvention =
       exptime: number | null;
     }
   | { kind: "roman_dn_per_sec"; mjy_per_dn_s: number; pixar_sr: number }
-  | { kind: "generic_zero_point"; zp: number; keyword: string; per_second: boolean; exptime: number | null };
+  | {
+      kind: "generic_zero_point";
+      zp: number;
+      keyword: string;
+      per_second: boolean;
+      exptime: number | null;
+      system?: MagSystem;
+      exptime_applied?: boolean;
+    }
+  | { kind: "flux_density_per_pixel"; jy_per_unit: number; unit: string }
+  | { kind: "survey_zero_point"; zp_ab: number; source: string; exptime_applied: number | null };
+
+export type MagSystem = "ab" | "vega" | "st" | "unknown";
+
+export interface UserZeroPoint {
+  zp: number;
+  system: "ab" | "vega";
+  per_second: boolean;
+}
 
 export interface PhotCal {
   convention: FluxConvention;
@@ -160,6 +178,10 @@ export interface PhotCal {
   notes: string[];
   warnings: string[];
   label: string;
+  origin?: string;
+  mag_system?: MagSystem;
+  jy_per_native_unit?: number | null;
+  area_applied?: boolean;
 }
 
 export interface PhotometryMeasurement {
@@ -167,6 +189,8 @@ export interface PhotometryMeasurement {
   sky?: { ra: number; dec: number } | null;
   gaia?: { gmag?: number | null; bp_rp: number; separation_arcsec: number } | null;
   photcal: PhotCal | null;
+  bunit?: string | null;
+  summed_unit?: string | null;
   warnings: string[];
   masked: boolean;
   gain_used?: number | null;
@@ -203,6 +227,7 @@ export interface PhotometryOptions {
   gaiaMatch?: boolean;
   excludeDq?: boolean;
   gain?: number;
+  zeroPoint?: UserZeroPoint | null;
 }
 
 export function finiteSky(sky: { ra: number | null; dec: number | null } | null | undefined): { ra: number; dec: number } | null {
@@ -227,6 +252,7 @@ export async function measurePhotometry(
     gaiaMatch: options.gaiaMatch ?? false,
     excludeDq: options.excludeDq ?? false,
     gain: options.gain ?? null,
+    zeroPoint: options.zeroPoint ?? null,
   });
   return { ...res, sky: finiteSky(res.sky) };
 }
@@ -241,6 +267,8 @@ export interface BatchPhotometryRow {
 export interface BatchPhotometryResult {
   rows: BatchPhotometryRow[];
   photcal: PhotCal | null;
+  bunit?: string | null;
+  summed_unit?: string | null;
   warnings: string[];
   masked: boolean;
   gain_used?: number | null;
@@ -267,6 +295,7 @@ export async function measurePhotometryBatch(
     gain: options.gain ?? null,
     excludeDq: options.excludeDq ?? false,
     withGrowthCurve: options.withGrowthCurve ?? false,
+    zeroPoint: options.zeroPoint ?? null,
   });
   return { ...res, rows: res.rows.map((row) => ({ ...row, sky: finiteSky(row.sky) })) };
 }
@@ -283,6 +312,7 @@ export interface TimeSeriesOptions {
   siteLat?: number | null;
   siteLon?: number | null;
   siteHeight?: number | null;
+  zeroPoint?: UserZeroPoint | null;
 }
 
 export function timeSeriesPhotometry(
@@ -304,6 +334,7 @@ export function timeSeriesPhotometry(
     siteLat: opts.siteLat ?? null,
     siteLon: opts.siteLon ?? null,
     siteHeight: opts.siteHeight ?? null,
+    zeroPoint: opts.zeroPoint ?? null,
   });
 }
 

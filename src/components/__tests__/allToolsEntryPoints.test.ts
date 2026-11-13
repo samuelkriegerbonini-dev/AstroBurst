@@ -9,9 +9,13 @@ import { modifierKey, shortcutSheet } from "../../utils/shortcutSheet";
 import type { DockToolId } from "../../utils/dockLayout";
 import CommandPalette, { type PaletteAction } from "../CommandPalette";
 import DockContextMenu, { DockMenuList } from "../dock/DockContextMenu";
+import DockShell from "../dock/DockShell";
 import { openToolBrowserDialog } from "../dock/toolBrowserDialog";
 import { rightRailToolsTrigger } from "../dock/dockGeometry";
 import { toolBrowserStore } from "../dock/toolBrowserStore";
+import { productFilterStore } from "../../hooks/useProductFilter";
+import type { PaletteFile } from "../CommandPalette";
+import type { ProcessResult } from "../../shared/types/fits.types";
 
 vi.mock("react", async (original) => {
   const { reactWithFakeHooks } = await import("../../test/hookRuntime");
@@ -264,6 +268,22 @@ describe("Keyboard shortcut sheet", () => {
     expect(escape.stopPropagation).toHaveBeenCalledTimes(1);
     expect(sheetIn(renderApp())).toBeUndefined();
   });
+
+  it("names the close button of the sheet and gives it a button type and a 24 px target", () => {
+    hooks.mount();
+    const palette = renderApp().find((node) => node.type === CommandPalette);
+    (palette?.props.actions as PaletteAction[]).find((action) => action.id === "shortcuts")?.run();
+    const nodes = renderApp();
+    expect(sheetIn(nodes)).toBeDefined();
+    const close = nodes.find((node) => node.type === "button" && node.props["aria-label"] === "Close keyboard shortcuts");
+    expect(close).toBeDefined();
+    expect(close!.props.type).toBe("button");
+    expect(close!.props.title).toBe("Close");
+    expect(String(close!.props.className)).toContain("min-w-6");
+    expect(String(close!.props.className)).toContain("min-h-6");
+    (close!.props.onClick as () => void)();
+    expect(sheetIn(renderApp())).toBeUndefined();
+  });
 });
 
 describe("Tool rows of the command palette", () => {
@@ -285,5 +305,90 @@ describe("Tool rows of the command palette", () => {
     expect(files?.label).toBe("Close Files");
     files?.run();
     expect(dockStore.get().active["left-top"]).toBeNull();
+  });
+});
+
+describe("Files in the command palette", () => {
+  interface AppPalette {
+    files: PaletteFile[];
+    onSelectFile: (id: string) => void;
+  }
+
+  function appPalette(): AppPalette {
+    hooks.mount();
+    hooks.render(App, {});
+    const palette = elements(hooks.render(App, {}) as ReactNode).find((node) => node.type === CommandPalette);
+    if (!palette) throw new Error("App renders no command palette");
+    return { files: palette.props.files as PaletteFile[], onSelectFile: palette.props.onSelectFile as (id: string) => void };
+  }
+
+  function addFile(name: string): string {
+    fileStore.addFiles([{ name, path: `/data/${name}`, size: 1 }]);
+    return fileStore.getFiles().find((file) => file.name === name)!.id;
+  }
+
+  afterEach(() => {
+    productFilterStore.reset();
+  });
+
+  it("lists a file under its instrument", () => {
+    const id = addFile("jw02739001001_02105_00001_nrca1_cal.fits");
+    fileStore.fileDone(id, { header: { INSTRUME: "NIRCAM", FILTER: "F200W" }, png_path: "", previewUrl: "", dimensions: [1, 1], elapsed_ms: 0 } as unknown as ProcessResult);
+    const files = appPalette().files;
+    expect(files).toHaveLength(1);
+    expect(files[0].searchText).toContain("nircam");
+    expect(files[0].hidden).toBe(false);
+  });
+
+  it("keeps a file the chips hide in the list, marked, and reveals it when chosen", () => {
+    const cube = addFile("jw01266-o005_t001_nirspec_g395h-f290lp_s3d.fits");
+    fileStore.fileDone(cube, null);
+    const spectrum = addFile("jw01266-o005_t001_nirspec_g395h-f290lp_x1d.fits");
+    fileStore.fileSpectrum(spectrum, { kind: "x1d", hdu: 1 });
+    productFilterStore.toggleFilter("x1d");
+    const palette = appPalette();
+    expect(palette.files.map((f) => [f.name.slice(-8), f.hidden])).toEqual([["s3d.fits", true], ["x1d.fits", false]]);
+    appModeStore.set("archive");
+    palette.onSelectFile(cube);
+    expect(fileStore.getSelected()).toBe(cube);
+    expect(productFilterStore.getActiveFilters()).toEqual(["x1d", "s3d"]);
+    expect(appModeStore.get()).toBe("workspace");
+  });
+});
+
+describe("Hide file panel", () => {
+  it("moves the focus to the Files button of the rail", () => {
+    loadProcessedFile();
+    hooks.mount();
+    hooks.render(App, {});
+    vi.advanceTimersByTime(600);
+    const tree = elements(hooks.render(App, {}) as ReactNode);
+    const shell = tree.find((node) => node.type === DockShell);
+    expect(shell).toBeDefined();
+    const list = (shell!.props.tools as { files: { props: { onToggle: () => void } } }).files;
+    const found: Record<string, object[]> = {};
+    const page = stubPage(found);
+    const filesButton = focusable(page, "Files rail button");
+    found['[data-dock-strip] [data-tool-id="files"]'] = [filesButton];
+    list.props.onToggle();
+    expect(dockStore.get().active["left-top"]).not.toBe("files");
+    vi.mocked(requestAnimationFrame).mock.calls.at(-1)![0](0);
+    expect(focusedName(page)).toBe("Files rail button");
+  });
+});
+
+describe("Layer role in the Files list", () => {
+  it("hands the role of the open response to the row", () => {
+    const guess = { role: "inverse_variance", basis: "file name -invvar-", assumed: false };
+    fileStore.addFiles([{ name: "legacysurvey-0532m280-invvar-r.fits.fz", path: "/data/legacysurvey-0532m280-invvar-r.fits.fz", size: 1 }]);
+    const id = fileStore.getFiles()[0].id;
+    fileStore.fileDone(id, { png_path: "", previewUrl: "", dimensions: [1, 1], elapsed_ms: 0, plane: { layer: guess } } as unknown as ProcessResult);
+    hooks.mount();
+    hooks.render(App, {});
+    vi.advanceTimersByTime(600);
+    const shell = elements(hooks.render(App, {}) as ReactNode).find((node) => node.type === DockShell);
+    expect(shell).toBeDefined();
+    const list = (shell!.props.tools as { files: { props: { files: { layer?: unknown }[] } } }).files;
+    expect(list.props.files[0].layer).toEqual(guess);
   });
 });

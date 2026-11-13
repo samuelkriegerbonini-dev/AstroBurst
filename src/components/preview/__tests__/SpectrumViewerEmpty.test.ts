@@ -20,7 +20,7 @@ function findButton(node: ReactNode): { onClick: () => void; children: ReactNode
 }
 
 describe("SpectrumViewerEmpty", () => {
-  it("names the spectrum file and the Cube tool and shows no image", () => {
+  it("names the spectrum file and the Spectra tool and shows no image", () => {
     const html = renderToStaticMarkup(createElement(SpectrumViewerEmpty, { name: NAME, onOpenCubeTool: () => {} }));
     expect(html).toContain("data-spectrum-empty");
     expect(html).toContain(`>${spectrumViewerTitle(NAME)}<`);
@@ -30,7 +30,7 @@ describe("SpectrumViewerEmpty", () => {
     expect(html).not.toContain("<canvas");
   });
 
-  it("opens the Cube tool from its button", () => {
+  it("opens the Spectra tool from its button", () => {
     const onOpenCubeTool = vi.fn();
     const button = findButton(SpectrumViewerEmpty({ name: NAME, onOpenCubeTool }));
     expect(button?.children).toBe(SPECTRUM_VIEWER_OPEN_CUBE);

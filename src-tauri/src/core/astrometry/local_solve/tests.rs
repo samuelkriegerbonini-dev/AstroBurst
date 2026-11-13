@@ -17,7 +17,7 @@ use super::*;
 use crate::core::astrometry::healpix_cat::{
     write_catalog, CatHeader, CatType, CatalogStar, MemSource, Record,
 };
-use crate::core::astrometry::solve_hints::{ScaleRange, SCALE_HINT_MARGIN};
+use crate::core::astrometry::solve_hints::{Pointing, ScaleRange, SCALE_HINT_MARGIN};
 use crate::core::astrometry::wcs::angular_separation;
 use crate::core::stacking::{never_cancelled, no_stage};
 
@@ -2362,6 +2362,41 @@ fn a_scale_hint_wider_than_a_tan_image_is_an_unusable_hint_not_a_catalogue_failu
     assert!(
         failure.message.contains("FOCALLEN 0.53 mm") && failure.message.contains("TAN"),
         "the message must point at the scale hint: {}",
+        failure.message
+    );
+}
+
+#[test]
+fn a_search_without_candidates_names_the_scale_hint_to_four_significant_digits() {
+    let hints = SolveHints {
+        centre: Some(Pointing {
+            ra: 274.71103809807056,
+            dec: -13.832388979464445,
+            source: "WCS".to_string(),
+        }),
+        scale: Some(ScaleRange {
+            low_arcsec: 0.08962651146924351,
+            high_arcsec: 0.1095435140179643,
+            source: "WCS".to_string(),
+        }),
+        ..SolveHints::default()
+    };
+    let failure = solve_stars(
+        &random_detections(30, 1600, 1600, 91),
+        (1600, 1600),
+        &hints,
+        &SyntheticProvider::new(TIER1_LABEL, Vec::new()),
+        &LocalSolveParams::default(),
+        &never_cancelled,
+        &no_stage,
+    )
+    .expect_err("an empty catalogue cannot solve");
+    assert_eq!(failure.reason, FailureReason::NoSolution, "{failure:?}");
+    assert!(
+        failure
+            .message
+            .ends_with("(scale hint 0.08963..0.1095 arcsec/px from WCS)"),
+        "{}",
         failure.message
     );
 }

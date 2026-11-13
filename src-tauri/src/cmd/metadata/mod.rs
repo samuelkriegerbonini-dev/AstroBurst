@@ -1,13 +1,18 @@
 use std::fs::File;
+use std::path::Path;
 
 use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, cached_header, image_ref, source_path};
+use crate::core::imaging::layer_roles::{classify_layer, LayerGuess, LayerRole};
+use crate::core::imaging::pixel_probe::data_unit;
 use crate::core::metadata::header_discovery::{
     detect_filter, palette_channel, suggest_palette_with_type, FilterDetection, PaletteType,
 };
 use crate::infra::asdf::converter::is_asdf_file;
+use crate::infra::fits::band_planes::{list_band_planes, HduBandPlanes};
 use crate::infra::fits::dispatcher::resolve_single_image;
+use crate::infra::fits::reader::{extract_header_by_index, HduInfo};
 use crate::infra::image_source::{is_dq_name, is_err_name, list_planes, load_plane_header, plane_ref};
 use crate::types::constants::{
     RES_BITPIX, RES_CARDS, RES_CATEGORIES, RES_CONFIDENCE, RES_EXTENSIONS,
@@ -22,6 +27,13 @@ use crate::types::constants::{
     PLANE_KIND_ARRAY, PLANE_KIND_HDU,
 };
 use crate::types::header::HduHeader;
+
+const RES_ROLE: &str = "role";
+const RES_ROLE_BASIS: &str = "role_basis";
+const RES_ROLE_ASSUMED: &str = "role_assumed";
+const RES_BUNIT: &str = "bunit";
+const RES_BANDS: &str = "bands";
+const NO_IMAGE_DATA: &str = "no image data";
 
 fn header_for(path: &str) -> anyhow::Result<HduHeader> {
     cached_header(path)
@@ -58,13 +70,56 @@ fn narrowband_detections_json(file_headers: &[(String, HduHeader)], palette: &Pa
         .collect()
 }
 
+fn asdf_layers(extensions: &[HduInfo], file_name: &str) -> Vec<(LayerGuess, Option<String>)> {
+    extensions
+        .iter()
+        .map(|ext| {
+            let mut named = HduHeader::empty();
+            named.set("EXTNAME", ext.extname.clone().unwrap_or_default());
+            (classify_layer(&named, file_name), None)
+        })
+        .collect()
+}
+
+fn listed_band_planes(source: &str) -> Vec<HduBandPlanes> {
+    list_band_planes(source).unwrap_or_else(|error| {
+        log::warn!("the band planes of {source} could not be listed: {error:#}");
+        Vec::new()
+    })
+}
+
+fn fits_layers(source: &str, extensions: &[HduInfo], file_name: &str) -> anyhow::Result<Vec<(LayerGuess, Option<String>)>> {
+    let (readable, _tmp) = resolve_single_image(source)?;
+    let file = File::open(&readable)?;
+    extensions
+        .iter()
+        .map(|ext| {
+            let header = extract_header_by_index(&file, ext.index)?;
+            let layer = if ext.has_data {
+                classify_layer(&header, file_name)
+            } else {
+                LayerGuess { role: LayerRole::Other, basis: NO_IMAGE_DATA.to_string(), assumed: false }
+            };
+            Ok((layer, data_unit(&header)))
+        })
+        .collect()
+}
+
 pub(crate) fn extensions_json(path: &str) -> anyhow::Result<serde_json::Value> {
     let source = source_path(path);
     let (extensions, is_asdf) = list_planes(&source)?;
+    let file_name = Path::new(&source).file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let (layers, band_planes) = if is_asdf {
+        (asdf_layers(&extensions, file_name), Vec::new())
+    } else {
+        (fits_layers(&source, &extensions, file_name)?, listed_band_planes(&source))
+    };
     let ext_json: Vec<serde_json::Value> = extensions
         .iter()
-        .map(|ext| {
+        .zip(&layers)
+        .map(|(ext, (layer, bunit))| {
             let name = ext.extname.as_deref().unwrap_or("");
+            let bands = band_planes.iter().find(|listed| listed.hdu == ext.index).map_or(&[][..], |listed| &listed.bands[..]);
             json!({
                 RES_INDEX: ext.index,
                 RES_EXTNAME: ext.extname,
@@ -80,6 +135,11 @@ pub(crate) fn extensions_json(path: &str) -> anyhow::Result<serde_json::Value> {
                 RES_KIND: if is_asdf { PLANE_KIND_ARRAY } else { PLANE_KIND_HDU },
                 RES_IS_DQ: is_dq_name(name),
                 RES_IS_ERR: is_err_name(name),
+                RES_ROLE: layer.role,
+                RES_ROLE_BASIS: layer.basis,
+                RES_ROLE_ASSUMED: layer.assumed,
+                RES_BUNIT: bunit,
+                RES_BANDS: bands,
             })
         })
         .collect();
@@ -298,5 +358,90 @@ mod tests {
             assert!(categories[CATEGORY_OTHER].get(key).is_none(), "{key} is still under Other");
         }
         assert!(categories[CATEGORY_WCS].get("CTYPE2").is_some());
+    }
+
+    fn column(listed: &serde_json::Value, key: &str) -> serde_json::Value {
+        listed[RES_EXTENSIONS].as_array().unwrap().iter().map(|row| row[key].clone()).collect()
+    }
+
+    #[test]
+    fn the_extension_list_gives_the_role_and_unit_of_every_hdu() {
+        use crate::cmd::common::test_support::afw_mef;
+        use crate::infra::fits::reader::test_fixtures::{ramp_f32, write_test_mef, HduData, TestHdu};
+        let dir = tempfile::tempdir().unwrap();
+        let wht = TestHdu { extname: Some("WHT"), extver: None, cols: 4, rows: 4, data: HduData::F32(vec![1.0; 16]), extra_cards: vec![] };
+        let p = afw_mef(dir.path(), "calexp.fits", vec![wht]);
+
+        let listed = extensions_json(&p).unwrap();
+        assert_eq!(column(&listed, "role"), json!(["other", "science", "mask", "variance", "other"]));
+        assert_eq!(
+            column(&listed, "role_basis"),
+            json!(["no image data", "EXTNAME IMAGE", "EXTNAME MASK", "EXTNAME VARIANCE", "EXTNAME WHT"])
+        );
+        assert_eq!(column(&listed, "role_assumed"), json!([false, false, false, false, false]));
+        assert_eq!(column(&listed, "bunit"), json!([null, "nJy", null, "nJy^2", null]));
+        assert_eq!(column(&listed, RES_IS_DQ), json!([false, false, true, false, false]));
+        assert_eq!(column(&listed, RES_IS_ERR), json!([false, false, false, false, false]));
+
+        let weighted = dir.path().join("weighted.fits");
+        write_test_mef(
+            &weighted,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("WGT"), extver: None, cols: 4, rows: 4, data: HduData::F32(vec![4.0; 16]), extra_cards: vec![] },
+            ],
+        );
+        let listed = extensions_json(weighted.to_str().unwrap()).unwrap();
+        let wgt = &listed[RES_EXTENSIONS][2];
+        assert_eq!(wgt["role"], "inverse_variance", "{wgt}");
+        assert_eq!(wgt["role_basis"], "EXTNAME WGT");
+        assert_eq!(wgt["role_assumed"], true);
+    }
+
+    #[test]
+    fn asdf_arrays_get_their_role_from_the_array_name() {
+        use crate::infra::image_source::test_support::write_asdf;
+        let dir = tempfile::tempdir().unwrap();
+        let tree = "data: !core/ndarray-1.0.0\n  data: [[1, 2], [3, 4]]\n  datatype: float32\ndq: !core/ndarray-1.0.0\n  data: [[0, 1], [0, 0]]\n  datatype: uint32\nerr: !core/ndarray-1.0.0\n  data: [[0.1, 0.2], [0.3, 0.4]]\n  datatype: float32\n";
+        let p = write_asdf(&dir, "layers.asdf", tree);
+
+        let listed = extensions_json(&p).unwrap();
+        assert_eq!(column(&listed, RES_EXTNAME), json!(["data", "dq", "err"]));
+        assert_eq!(column(&listed, "role"), json!(["science", "mask", "sigma"]));
+        assert_eq!(column(&listed, "bunit"), json!([null, null, null]));
+        assert_eq!(column(&listed, "bands"), json!([[], [], []]));
+    }
+
+    #[test]
+    fn the_extension_list_names_the_bands_of_a_cube() {
+        use crate::infra::fits::reader::test_fixtures::{ramp_f32, write_test_mef, HduData, TestHdu};
+        use crate::infra::image_source::test_support::{write_band_cutout, CUTOUT_INVVAR, CUTOUT_NAME};
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_band_cutout(dir.path(), CUTOUT_NAME, CUTOUT_INVVAR);
+        let bands_of = |hdu: usize| {
+            json!([
+                {"plane": 0, "label": "g", "key": format!("{p}#hdu={hdu}&plane=0")},
+                {"plane": 1, "label": "r", "key": format!("{p}#hdu={hdu}&plane=1")},
+            ])
+        };
+
+        let listed = extensions_json(&p).unwrap();
+        assert_eq!(column(&listed, "bands"), json!([bands_of(0), bands_of(1), []]), "{listed}");
+        assert_eq!(column(&listed, "role"), json!(["science", "inverse_variance", "mask"]));
+        assert_eq!(column(&listed, "role_basis"), json!(["IMAGETYP IMAGE", "IMAGETYP INVVAR", "IMAGETYP MASKBITS"]));
+        assert_eq!(extensions_json(&format!("{p}#hdu=0&plane=1")).unwrap(), listed);
+
+        let two = dir.path().join("two_hdus.fits");
+        write_test_mef(
+            &two,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("ERR"), extver: None, cols: 4, rows: 4, data: HduData::F32(vec![0.5; 16]), extra_cards: vec![] },
+            ],
+        );
+        let listed = extensions_json(two.to_str().unwrap()).unwrap();
+        assert_eq!(column(&listed, "bands"), json!([[], [], []]), "{listed}");
     }
 }

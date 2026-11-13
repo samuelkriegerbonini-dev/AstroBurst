@@ -26,7 +26,7 @@ describe("deepZoomAvailable", () => {
   });
 });
 
-const everything: AnalysisSectionsInput = { hasHistogram: true, isCube: true, isRamp: true, showFft: true, showDeepZoom: true };
+const everything: AnalysisSectionsInput = { hasHistogram: true, isCube: true, isRamp: true, hasSpectrumSeries: true, hasPhotometricPlanes: true, showFft: true, showDeepZoom: true };
 const nothing: AnalysisSectionsInput = { hasHistogram: false, isCube: false, isRamp: false, showFft: false, showDeepZoom: false };
 const largeMono: AnalysisSectionsInput = { hasHistogram: true, isCube: false, isRamp: false, showFft: true, showDeepZoom: true };
 
@@ -59,7 +59,7 @@ describe("toolSections", () => {
 
   it("lists the Photometry sections whatever the file", () => {
     for (const input of [everything, nothing, largeMono]) {
-      expect(labels("photometry", input)).toEqual(["Photometry", "Table", "Series"]);
+      expect(labels("photometry", input)).toEqual(["Photometry", "Table", "Series", "Multi-band", "Depth", "Resolution", "Compare"]);
     }
   });
 
@@ -67,7 +67,20 @@ describe("toolSections", () => {
     expect(labels("cube", nothing)).toEqual([]);
     expect(labels("cube", { ...nothing, isCube: true })).toEqual(["Spectrum", "PV"]);
     expect(labels("cube", { ...nothing, isRamp: true })).toEqual(["Ramp"]);
-    expect(labels("cube", everything)).toEqual(["Ramp", "Spectrum"]);
+    expect(labels("cube", everything)).toEqual(["Ramp", "Spectrum", "Light curves", "SED"]);
+  });
+
+  it("gives time-series spectra the Light curves section after the Spectrum section", () => {
+    const series: AnalysisSectionsInput = { ...nothing, hasSpectrumDocument: true, hasSpectrumSeries: true };
+    expect(labels("cube", series)).toEqual(["Spectrum", "Light curves"]);
+    expect(showSectionChips(toolSections("cube", series))).toBe(true);
+    expect(labels("cube", { ...nothing, hasSpectrumDocument: true })).toEqual(["Spectrum"]);
+  });
+
+  it("puts the SED of a filter cube between Spectrum and PV and only on a cube", () => {
+    expect(labels("cube", { ...nothing, isCube: true, hasPhotometricPlanes: true })).toEqual(["Spectrum", "SED", "PV"]);
+    expect(labels("cube", { ...nothing, isCube: true, isRamp: true, hasPhotometricPlanes: true })).toEqual(["Ramp", "Spectrum", "SED"]);
+    expect(labels("cube", { ...nothing, hasPhotometricPlanes: true })).toEqual([]);
   });
 
   it("gives a 1D spectrum file only the Spectrum section of the Cube tool", () => {
@@ -114,6 +127,12 @@ describe("ANALYSIS_SECTION", () => {
       pv: ["analysis-pv", "PV"],
       deepZoom: ["analysis-deep-zoom", "Deep Zoom"],
       log: ["analysis-log", "Log"],
+      tso: ["analysis-tso", "Light curves"],
+      sed: ["analysis-sed", "SED"],
+      forced: ["analysis-forced", "Multi-band"],
+      depth: ["analysis-depth", "Depth"],
+      resolution: ["analysis-resolution", "Resolution"],
+      compare: ["analysis-compare", "Compare"],
     });
   });
 
@@ -140,7 +159,7 @@ describe("analysisSections", () => {
     expect(analysisSections(nothing).map((s) => s.label)).toEqual([
       "Stats", "Pixels", "Regions", "Profiles", "Contours",
       "Stars", "Geometry", "Catalog", "Targets",
-      "Photometry", "Table", "Series",
+      "Photometry", "Table", "Series", "Multi-band", "Depth", "Resolution", "Compare",
       "Log",
     ]);
   });
@@ -184,8 +203,8 @@ describe("analysisToolForFile", () => {
 });
 
 describe("CUBE_TOOL_EMPTY_TITLE", () => {
-  it("tells what the Cube tool needs", () => {
-    expect(CUBE_TOOL_EMPTY_TITLE).toBe("Open a data cube or a ramp");
+  it("tells what the Spectra tool needs", () => {
+    expect(CUBE_TOOL_EMPTY_TITLE).toBe("Open a 1D spectrum, a data cube or a ramp");
   });
 });
 

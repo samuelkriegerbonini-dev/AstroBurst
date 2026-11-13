@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import type { CubePrepRecipe, CubePrepStep } from "../../shared/types/cubeprep";
+import { REDSHIFT_HELP, type RedshiftNote } from "./cubePrepInspect";
 
-export const PREP_FIELD = "w-full min-w-0 bg-zinc-900 border border-zinc-700/60 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-cyan-500/60 disabled:opacity-50";
+export const PREP_FIELD = "w-full min-w-0 bg-zinc-900 border border-zinc-700/60 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-cyan-500/60 focus-visible:ring-1 focus-visible:ring-cyan-500/60 disabled:opacity-50";
 export const PREP_BUTTON = "rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40";
 
 export function PrepField({ label, children }: { label: string; children: ReactNode }) {
@@ -16,9 +17,10 @@ interface Props {
   recipe: CubePrepRecipe;
   onChange: (step: CubePrepStep) => void;
   browse: (directory: boolean, selected: (path: string) => void) => void;
+  redshiftNote?: RedshiftNote | null;
 }
 
-export default function CubePrepStepEditor({ step, recipe, onChange, browse }: Props) {
+export default function CubePrepStepEditor({ step, recipe, onChange, browse, redshiftNote }: Props) {
   const patch = (change: Record<string, unknown>) => onChange({ ...step, ...change });
   const choose = (key: string, value: string) => {
     if (step.step === "crop" && key === "mode") {
@@ -61,7 +63,7 @@ export default function CubePrepStepEditor({ step, recipe, onChange, browse }: P
       {step.action === "drop_invalid" && <>{number("threshold", "Signal threshold", 0)}{number("frac_valid", "Minimum valid fraction", 0.01)}{toggle("use_dq", "Exclude flagged DQ pixels")}<p>DQ exclusion uses the dataset mask: DO_NOT_USE (bit 0) for JWST, Roman and any other dataset; 0x3FFF (REED_SOLOMON..COSMIC_RAY_SINGLE) for HST.</p></>}
       {step.action === "remove_filter" && select("filter", "Filter to remove", recipe.inputs.map((input) => input.filter))}
       {step.action === "cut" && pixel}{step.action === "cut_sky" && <>{sky}{select("rounding", "Rounding", ["astroburst", "lightstack"], "astroburst")}</>}
-      {step.action === "header" && <>{number("redshift", "Redshift (optional)")}{number("ra_center", "Centre RA (degrees, optional)")}{number("dec_center", "Centre Dec (degrees, optional)")}{toggle("use_brightest_pixel", "Use brightest pixel as centre")}</>}
+      {step.action === "header" && <>{number("redshift", "Redshift (optional)")}<p>{REDSHIFT_HELP}</p>{redshiftNote?.scale && <p data-redshift-scale title={redshiftNote.cosmology} className="text-zinc-300">{`${redshiftNote.scale}${redshiftNote.psf ? ` · common PSF FWHM ${redshiftNote.psf}` : ""}`}</p>}{number("ra_center", "Centre RA (degrees, optional)")}{number("dec_center", "Centre Dec (degrees, optional)")}{toggle("use_brightest_pixel", "Use brightest pixel as centre")}</>}
       {step.action === "reference_nan_mask" && <>{number("reference_slice", "Reference band index", 0)}{select("mode", "Mask combination", ["reference", "union", "intersection"], "reference")}</>}
       <p>Repeated edits and custom step ordering can be entered in the recipe editor.</p>
     </>; break;

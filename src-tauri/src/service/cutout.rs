@@ -15,9 +15,12 @@ use crate::core::imaging::cutout::{
     cut_int_plane, cut_plane, fraction_on_image, padding_plane, rect_from_region, reported_ltv, resolve_cutout_rect,
     shift_header, CutoutRect, CutoutRequest, RegionRect,
 };
-use crate::core::imaging::dq_flags::DqTable;
+use crate::core::imaging::dq_flags::{DqTable, FlagSet};
+use crate::core::imaging::layer_roles::LayerRole;
+use crate::core::imaging::push_history;
 use crate::core::imaging::region::{RegionShape, RegionSystem};
 use crate::infra::fits::writer::{write_mef_images, HduData, ImageHdu};
+use crate::infra::image_source::ErrOrigin;
 use crate::infra::wcs_source::load_wcs;
 use crate::types::constants::{EXTNAME_DQ, EXTNAME_ERR, EXTNAME_SCI};
 use crate::types::header::HduHeader;
@@ -29,6 +32,8 @@ const PADDED_FLAGS_HST: &[&str] = &["REPLACED_FILL", "MASKED"];
 const PADDED_FLAGS_RAW: &[&str] = &["BIT0", "BIT9"];
 const CARD_HISTORY: &str = "HISTORY";
 const RAW_PADDING_HISTORY: &str = "DQ padding flagged with raw bits 0 and 9 (flag table unknown)";
+const NO_DATA_FLAG: &str = "NO_DATA";
+const PASS_THROUGH_SOURCE_END: &str = ": as is";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CutoutExport {
@@ -55,6 +60,20 @@ pub fn padded_dq_bits(table: DqTable) -> Result<u32> {
         DqTable::Unknown => PADDED_FLAGS_RAW,
     };
     table.mask_from_names(names).map_err(|e| anyhow!(e))
+}
+
+fn named_no_data_bit(flags: &FlagSet) -> Option<u32> {
+    if flags.table != DqTable::Unknown || !flags.is_named() {
+        return None;
+    }
+    flags.flags.iter().find(|(_, name)| name.eq_ignore_ascii_case(NO_DATA_FLAG)).map(|(bit, _)| *bit)
+}
+
+pub fn padded_dq_bits_of(flags: &FlagSet) -> Result<u32> {
+    match named_no_data_bit(flags) {
+        Some(bit) => Ok(bit),
+        None => padded_dq_bits(flags.table),
+    }
 }
 
 pub fn cutout_file_name(stem: &str, rect: &CutoutRect) -> String {
@@ -133,6 +152,14 @@ fn with_padding_note(header: Option<HduHeader>, table: DqTable, padded: bool) ->
     })
 }
 
+fn with_err_origin_note(mut header: HduHeader, origin: Option<&ErrOrigin>) -> HduHeader {
+    let converted = origin.filter(|o| o.role != LayerRole::Sigma || !o.source.ends_with(PASS_THROUGH_SOURCE_END));
+    if let Some(origin) = converted {
+        push_history(&mut header, &format!("ERR is one sigma: {}", origin.source));
+    }
+    header
+}
+
 pub(crate) fn export_cutout(
     path: &str,
     output_path: &str,
@@ -196,9 +223,15 @@ fn export_resolved(
 
     let err = match (include_err, companions.err.as_ref()) {
         (false, _) => None,
-        (true, Some(e)) => Some((cut_plane(e.arr(), &rect), e.header().map(|h| shift_header(h, &rect)))),
+        (true, Some(e)) => {
+            let header = e.header().map(|h| with_err_origin_note(shift_header(h, &rect), companions.err_origin.as_ref()));
+            Some((cut_plane(e.arr(), &rect), header))
+        }
         (true, None) => {
-            warnings.push("no ERR companion plane found; the ERR extension was skipped".to_string());
+            warnings.push(match companions.err_unavailable.as_deref() {
+                Some(reason) => format!("ERR companion not used: {reason}; the ERR extension was skipped"),
+                None => "no ERR companion plane found; the ERR extension was skipped".to_string(),
+            });
             None
         }
     };
@@ -207,16 +240,19 @@ fn export_resolved(
         (false, _) => None,
         (true, Some((e, table))) => {
             let plane = e.int_plane().context("DQ companion has no integer plane")?;
-            let bits = cut_int_plane(&plane.bits, &rect, padded_dq_bits(*table)?);
+            let flags = companions.flags.as_ref().context("DQ companion has no flag set")?;
+            let bits = cut_int_plane(&plane.bits, &rect, padded_dq_bits_of(flags)?);
             let pixels = if plane.signed { IntPixels::Signed(bits.mapv(|b| b as i32)) } else { IntPixels::Unsigned(bits) };
-            Some((pixels, with_padding_note(e.header().map(|h| shift_header(h, &rect)), *table, padded)))
+            let padded_with_raw_bits = padded && named_no_data_bit(flags).is_none();
+            Some((pixels, with_padding_note(e.header().map(|h| shift_header(h, &rect)), *table, padded_with_raw_bits)))
         }
         (true, None) => {
             let table = entry.header().map(DqTable::select).unwrap_or(DqTable::Unknown);
-            warnings.push(format!(
-                "no DQ companion plane found; wrote a synthetic DQ ({}) that flags only the padded pixels",
-                table.label()
-            ));
+            let synthetic = format!("wrote a synthetic DQ ({}) that flags only the padded pixels", table.label());
+            warnings.push(match companions.dq_unavailable.as_deref() {
+                Some(reason) => format!("DQ companion not used: {reason}; {synthetic}"),
+                None => format!("no DQ companion plane found; {synthetic}"),
+            });
             let bits = padding_plane(&rect, img_w, img_h, padded_dq_bits(table)?);
             Some((IntPixels::Unsigned(bits), with_padding_note(synthetic_dq_header(sci_header.as_ref()), table, padded)))
         }
@@ -546,10 +582,12 @@ mod tests {
         assert_eq!(extract_int_plane_by_index(&file, 2).unwrap().bits[[1, 1]], 1);
         assert!(!has_history(&extract_header_by_index(&file, 2).unwrap(), RAW_PADDING_NOTE));
 
-        let synthetic = export_cutout(&src, "", Some(&out_dir), &inside, false, true, false).unwrap();
-        assert_eq!(synthetic.hdus, vec!["SCI", "DQ"]);
-        let file = std::fs::File::open(&synthetic.output_path).unwrap();
-        assert!(extract_int_plane_by_index(&file, 2).unwrap().bits.iter().all(|&v| v == 0));
+        let paired = export_cutout(&src, "", Some(&out_dir), &inside, false, true, false).unwrap();
+        assert_eq!(paired.hdus, vec!["SCI", "DQ"]);
+        let file = std::fs::File::open(&paired.output_path).unwrap();
+        let bits = extract_int_plane_by_index(&file, 2).unwrap().bits;
+        assert_eq!(bits[[1, 1]], 1);
+        assert_eq!(bits.iter().filter(|&&v| v != 0).count(), 1);
         assert!(!has_history(&extract_header_by_index(&file, 2).unwrap(), RAW_PADDING_NOTE));
     }
 
@@ -837,5 +875,170 @@ mod tests {
         assert_eq!(cut.get_f64("SIPIVERR"), Some(0.0088), "meta.wcsinfo.sipiverr: {:?}", cut.get("SIPIVERR"));
         assert!(cut.get("SIPMXERR").unwrap().is_ascii() && cut.get("SIPIVERR").unwrap().is_ascii());
         assert_eq!(cut.get("A_ORDER").map(str::trim), Some("2"), "the SIP terms the card describes are kept");
+    }
+
+    const ONE_SIGMA_HISTORY: &str = "ERR is one sigma";
+
+    fn afw_mef(dir: &tempfile::TempDir, name: &str, more_mask_cards: Vec<(&'static str, String)>) -> String {
+        let mut mask = vec![0i32; 16];
+        mask[5] = 34;
+        let mut mask_cards = vec![("MP_BAD", "0".to_string()), ("MP_SAT", "1".to_string()), ("HIERARCH MP_DETECTED", "5".to_string())];
+        mask_cards.extend(more_mask_cards);
+        let mut variance: Vec<f32> = (0..16).map(|i| (i * i) as f32).collect();
+        variance[6] = -1.0;
+        let path = dir.path().join(name);
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'Subaru'".into())],
+            &[
+                TestHdu { extname: Some("IMAGE"), extver: None, cols: 4, rows: 4, data: TestData::F32(ramp_f32(4, 4)), extra_cards: vec![("BUNIT", "'nJy     '".into())] },
+                TestHdu { extname: Some("MASK"), extver: None, cols: 4, rows: 4, data: TestData::I32(mask), extra_cards: mask_cards },
+                TestHdu { extname: Some("VARIANCE"), extver: None, cols: 4, rows: 4, data: TestData::F32(variance), extra_cards: vec![("BUNIT", "'nJy^2   '".into())] },
+            ],
+        );
+        format!("{}#hdu=1", path.to_str().unwrap())
+    }
+
+    #[test]
+    fn a_cutout_writes_the_sigma_and_records_where_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = afw_mef(&dir, "calexp.fits", vec![]);
+        let out = dir.path().join("calexp_cut.fits").to_str().unwrap().to_string();
+
+        let report = export_cutout_rect(&key, &out, None, CutoutRect { x0: 0, y0: 0, width: 3, height: 3 }, true, false).unwrap();
+        assert_eq!(report.hdus, vec!["SCI", "ERR"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let file = std::fs::File::open(&out).unwrap();
+        let err = extract_image_mmap_by_index(&file, 2).unwrap().image;
+        assert_eq!(err.dim(), (3, 3));
+        assert_eq!(err[[0, 1]], 1.0);
+        assert_eq!(err[[1, 1]], 5.0);
+        assert!(err[[1, 2]].is_nan(), "a negative variance is no data");
+        for (y, x) in [(0, 0), (0, 2), (1, 0), (2, 0), (2, 1), (2, 2)] {
+            let i = (y * 4 + x) as f32;
+            assert_eq!(err[[y, x]], (i * i).sqrt(), "({y}, {x})");
+        }
+        let err_header = extract_header_by_index(&file, 2).unwrap();
+        assert_eq!(err_header.get("BUNIT"), Some("nJy"));
+        assert!(
+            has_history(&err_header, "ERR is one sigma: EXTNAME VARIANCE, HDU 3: square root"),
+            "{:?}",
+            err_header.cards
+        );
+
+        let src = jwst_mef(&dir, "pass_through.fits");
+        let pass_through = dir.path().join("pass_through_cut.fits").to_str().unwrap().to_string();
+        export_cutout(&format!("{src}#hdu=1"), &pass_through, None, &overhanging_box(), true, true, false).unwrap();
+        let file = std::fs::File::open(&pass_through).unwrap();
+        let header = extract_header_by_index(&file, 2).unwrap();
+        assert_eq!(header.get("EXTNAME"), Some("ERR"));
+        assert!(
+            !header.cards.iter().any(|(k, v)| k.trim() == "HISTORY" && v.starts_with(ONE_SIGMA_HISTORY)),
+            "{:?}",
+            header.cards
+        );
+    }
+
+    #[test]
+    fn the_padding_of_a_named_mask_uses_its_no_data_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = afw_mef(&dir, "calexp_no_data.fits", vec![("HIERARCH MP_NO_DATA", "8".to_string())]);
+        let out = dir.path().join("calexp_no_data_cut.fits").to_str().unwrap().to_string();
+
+        let report = export_cutout(&key, &out, None, &overhanging_box(), false, true, false).unwrap();
+        assert_eq!(report.rect, CutoutRect { x0: 2, y0: -1, width: 6, height: 6 });
+        assert_eq!(report.hdus, vec!["SCI", "DQ"]);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let file = std::fs::File::open(&out).unwrap();
+        let dq = extract_int_plane_by_index(&file, 2).unwrap();
+        assert_eq!(dq.bits.iter().filter(|&&v| v == 1 << 8).count(), 28);
+        assert_eq!(dq.bits.iter().filter(|&&v| v == 0).count(), 8);
+        assert_eq!(dq.bits[[0, 0]], 256);
+        assert!(!has_history(&extract_header_by_index(&file, 2).unwrap(), RAW_PADDING_NOTE));
+
+        let mut afw_header = HduHeader::empty();
+        for (key, value) in [("MP_BAD", "0"), ("MP_SAT", "1"), ("HIERARCH MP_DETECTED", "5")] {
+            afw_header.set(key, value.to_string());
+        }
+        let afw = FlagSet::from_headers(Some(&afw_header), None, DqTable::Unknown);
+        assert!(afw.is_named());
+        assert_eq!(padded_dq_bits_of(&afw).unwrap(), padded_dq_bits(DqTable::Unknown).unwrap());
+    }
+
+    #[test]
+    fn a_cutout_says_why_the_dq_was_not_used() {
+        use crate::cmd::common::test_support::float_dq_mef;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = float_dq_mef(dir.path(), "float_dq.fits");
+        let out = dir.path().join("float_dq_cut.fits").to_str().unwrap().to_string();
+
+        let report = export_cutout(&format!("{src}#hdu=1"), &out, None, &overhanging_box(), false, true, false).unwrap();
+        assert_eq!(report.hdus, vec!["SCI", "DQ"]);
+        assert_eq!(
+            report.warnings,
+            vec!["DQ companion not used: mask layer HDU 2 is a floating-point plane (BITPIX -32): flag bits cannot be read exactly; wrote a synthetic DQ (unknown (raw bits)) that flags only the padded pixels".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_cutout_says_why_the_err_was_not_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small_variance.fits");
+        write_test_mef(
+            &path,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: None, cols: 4, rows: 4, data: TestData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("VARIANCE"), extver: None, cols: 2, rows: 2, data: TestData::F32(vec![1.0; 4]), extra_cards: vec![] },
+            ],
+        );
+        let out = dir.path().join("small_variance_cut.fits").to_str().unwrap().to_string();
+
+        let report = export_cutout(&format!("{}#hdu=1", path.to_str().unwrap()), &out, None, &overhanging_box(), true, false, false).unwrap();
+        assert!(
+            report.warnings.contains(&"ERR companion not used: error layer HDU 2 (VARIANCE) is 2x2 and does not match the image 4x4: not used; the ERR extension was skipped".to_string()),
+            "{:?}",
+            report.warnings
+        );
+        assert!(!report.hdus.iter().any(|h| h == "ERR"), "{:?}", report.hdus);
+    }
+
+    #[test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: survey/L2/legacysurvey-0532m280-image-r.fits.fz"]
+    fn real_legacy_cutout_records_where_its_error_came_from() {
+        use crate::core::astrometry::gwcs::test_support::env_dir;
+        use crate::infra::image_source::load_plane;
+        use crate::types::image_ref::ImageRef;
+        use ndarray::s;
+
+        let brick = env_dir("ASTROBURST_SCIENCE_DATA_DIR").join("survey").join("L2");
+        let image = brick.join("legacysurvey-0532m280-image-r.fits.fz").to_string_lossy().into_owned();
+        let maskbits = brick.join("legacysurvey-0532m280-maskbits.fits.fz").to_string_lossy().into_owned();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("legacy_cut.fits").to_string_lossy().into_owned();
+
+        let report = export_cutout_rect(&image, &out, None, CutoutRect { x0: 0, y0: 0, width: 16, height: 16 }, true, true).unwrap();
+        let file = std::fs::File::open(&out).unwrap();
+        let err_header = extract_header_by_index(&file, 2).unwrap();
+        let sigma = extract_image_mmap_by_index(&file, 2).unwrap().image[[0, 0]] as f64;
+        println!("legacy cutout: hdus {:?}; ERR (0, 0) {sigma:e} {:?}", report.hdus, err_header.get("BUNIT"));
+        let cards: Vec<&str> = err_header.cards.iter().filter(|(k, _)| k.trim() == "HISTORY").map(|(_, v)| v.as_str()).collect();
+        println!("legacy cutout: ERR HISTORY cards {cards:?}");
+        let history = cards.join(" ");
+        println!("legacy cutout: warnings {:?}", report.warnings);
+
+        assert_eq!(report.hdus[..3], ["SCI", "ERR", "DQ"]);
+        let expected = 7.175998180759543e-4;
+        assert!((sigma - expected).abs() <= 1e-6 * expected, "{sigma} against {expected}");
+        assert_eq!(err_header.get("BUNIT"), Some("nanomaggy"));
+        assert!(
+            history.contains("ERR is one sigma: file name -invvar-, legacysurvey-0532m280-invvar-r.fits.fz: 1 / square root"),
+            "{history}"
+        );
+        let mask = load_plane(&ImageRef::auto(&maskbits)).unwrap().int_plane.expect("the maskbits file is an integer plane");
+        let dq = extract_int_plane_by_index(&file, 3).unwrap();
+        assert_eq!(dq.bits, mask.bits.slice(s![0..16, 0..16]));
+        assert!(!report.warnings.iter().any(|w| w.contains("companion")), "{:?}", report.warnings);
     }
 }

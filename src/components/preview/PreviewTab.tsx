@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, memo } from "react";
+import { useState, useCallback, useEffect, useMemo, memo, useSyncExternalStore } from "react";
 import { X, SlidersHorizontal, RotateCcw } from "lucide-react";
 import {
   useFileContext,
@@ -14,8 +14,9 @@ import { OverlayLayerKeyContext } from "../../context/OverlayLayerKeyContext";
 import { COMPOSITE_RUN_KEY } from "../../utils/compositeChain";
 import type { RawPixelData, RawRgbPixelData, StfParams } from "../../shared/types";
 import { GRAY_LUT_RGBA, resolveTransferLimits, toDisplayTransfer } from "../../utils/displayTransfer";
-import { CUBE_SPECTRUM_HINT, cubeSpectrumHintShown, histogramOnPath, sameGrid } from "../../utils/previewShell";
+import { cubeSpectrumHint, cubeSpectrumHintShown, histogramOnPath, sameGrid } from "../../utils/previewShell";
 import { emitPixelClick, pixelFromRect, setMousePixel } from "../../hooks/useMousePixelStore";
+import { dockStore } from "../../hooks/useDockLayout";
 
 import ZoomPanView from "../ui/ZoomPanView";
 import GpuViewport, { type ViewportOriginal } from "../render/GpuViewport";
@@ -29,6 +30,8 @@ import { STF_LOCK_RGB_CPU } from "../../utils/analysisTarget";
 import { IDENTITY_STF, RGB_LINEAR_BAKED, rememberRgbEdit, rgbLinearTitle, rgbLinearToggle, setRgbLinear } from "../../utils/displayMemory";
 import { displayMemory, useFileDisplayEntry } from "../../utils/displayMemoryStore";
 import { rgbViewOf } from "../../utils/rgbProduct";
+
+const currentCubeSpectrumHint = () => cubeSpectrumHint(dockStore.get());
 
 interface PreviewTabProps {
   useGpu: boolean;
@@ -64,6 +67,7 @@ function PreviewTabInner({ useGpu, activeBunit, rawPixels, rgbRawPixels, onCubeP
   const [stfOpen, setStfOpen] = useState(false);
   const { display, limits, lut, limitsLoading } = useDisplayContext();
   const regionKey = useRegionKey();
+  const cubeHint = useSyncExternalStore(dockStore.subscribe, currentCubeSpectrumHint, currentCubeSpectrumHint);
 
   const rgbView = rgbViewOf({
     compositePreviewUrl,
@@ -342,7 +346,7 @@ function PreviewTabInner({ useGpu, activeBunit, rawPixels, rgbRawPixels, onCubeP
           regionsEnabled={regionsOnDisplayed}
           original={heldOriginal}
           label={displayed.isProcessed ? displayed.label : null}
-          canvasHint={cubeSpectrumHintShown({ isSpectralCube, fileDims, displayedDims }) ? CUBE_SPECTRUM_HINT : null}
+          canvasHint={cubeSpectrumHintShown({ isSpectralCube, fileDims, displayedDims }) ? cubeHint : null}
         >
           <GpuRenderer
             pixels={rawPixels}

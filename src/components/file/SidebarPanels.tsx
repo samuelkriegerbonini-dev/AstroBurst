@@ -9,6 +9,7 @@ import MeasurementBadge from "../analysis/MeasurementBadge";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "../../utils/analysisLabels";
 import { wcsProbeTarget } from "../../utils/analysisTarget";
 import { colorbarUnit } from "../../utils/colorbar";
+import { layerNotes, layerTag } from "../../utils/fileKinds";
 import { formatSignificant } from "../../utils/formatSignificant";
 import { CUBE_FRAME_VALUE_PENDING, pointerProbePath } from "../../utils/previewShell";
 import "./info-panel.css";
@@ -60,6 +61,7 @@ export const InfoPanel = memo(function InfoPanel() {
   const header = result?.header;
   const statUnit = colorbarUnit(header?.BUNIT, histDataPath !== file.path);
   const observation = OBSERVATION_FIELDS.filter(([key]) => header?.[key]);
+  const tag = layerTag(result?.plane?.layer);
   return (
     <section className="ab-info-panel">
       <header className="ab-info-header">
@@ -74,8 +76,10 @@ export const InfoPanel = memo(function InfoPanel() {
               {result.dimensions && <div><dt>Dimensions</dt><dd>{result.dimensions.join(" × ")}</dd></div>}
               {header?.BITPIX && <div><dt title="FITS BITPIX">BITPIX</dt><dd>{header.BITPIX}</dd></div>}
               {header?.BUNIT && <div><dt title="FITS BUNIT">Data unit</dt><dd>{header.BUNIT}</dd></div>}
+              {tag && <div><dt>Layer</dt><dd title={tag.title}>{tag.text}</dd></div>}
               {typeof result.elapsed_ms === "number" && Number.isFinite(result.elapsed_ms) && <div><dt>Load time</dt><dd>{(result.elapsed_ms / 1000).toFixed(2)} s</dd></div>}
             </dl>
+            {layerNotes(result.plane).map((note) => <p className="ab-info-note" key={note}>{note}</p>)}
           </div>
         )}
         {observation.length > 0 && (

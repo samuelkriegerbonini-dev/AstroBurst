@@ -19,13 +19,13 @@
 
 <p align="center">
   <a href="#what-it-is">What it is</a> &middot;
-  <a href="#feature-tour">Features</a> &middot;
+  <a href="#images">Images</a> &middot;
+  <a href="#ifu-cubes">Cubes</a> &middot;
+  <a href="#1d-spectra-and-jwst-time-series">Spectra</a> &middot;
+  <a href="#survey-images-and-unresolved-sources">Surveys</a> &middot;
   <a href="#install-and-build">Install</a> &middot;
   <a href="#quick-start">Quick start</a> &middot;
-  <a href="#headless-server-and-python-client">Server</a> &middot;
-  <a href="#supported-formats">Formats</a> &middot;
-  <a href="#how-it-compares">Compare</a> &middot;
-  <a href="#project-status">Status</a> &middot;
+  <a href="#limits">Limits</a> &middot;
   <a href="#credits-and-acknowledgements">Credits</a>
 </p>
 
@@ -38,57 +38,73 @@
 </p>
 <p align="center"><em>The Pillars of Creation from three JWST NIRCam mosaics (jw02739), F444W to red, F200W to green and F090W to blue, aligned through their WCS, level-matched and stretched in the compose wizard.</em></p>
 
-**Version:** 0.8.0. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
+**Version:** 0.9.0. What changed in each release is in [CHANGELOG.md](CHANGELOG.md).
 
 ## What it is
 
-AstroBurst opens FITS and ASDF images, displays them, measures them, and composes and exports them. The Rust backend does the processing, React draws the interface, Tauri packages it as a desktop app. A WebGPU shader applies the display stretch and colormap; that is the only place the GPU is used. Everything else, including stacking, alignment, drizzle, deconvolution and compose, runs on the CPU in Rust.
+AstroBurst opens FITS and ASDF images, cubes, spectra and tables, displays them, measures them, and composes and exports them. The Rust backend does the processing, React draws the interface and Tauri packages it as a desktop app; the GPU only applies the display stretch and colormap. Everything runs on this computer: VizieR (Gaia DR3), MAST and the optional catalogues are contacted only by the features that need them, and an image leaves the computer only through an explicit Try astrometry.net. The full tour, with every screenshot, is in [docs/features.md](docs/features.md).
 
-Three reader paths:
+### Images
 
-- **Quick-look.** Open any FITS HDU or ASDF array, pick a stretch, limits and colormap, read pixel values with their units and WCS position, overlay a coordinate grid, a compass and contours, draw regions and measure them. Start at [Viewer, regions and pixel readout](docs/features.md#viewer-regions-and-pixel-readout).
-- **JWST and Roman.** Native ASDF, gWCS evaluation for `_cal` images, per-HDU selection, DQ flag decoding and overlays, DQ-masked statistics, calibrated photometry in AB magnitudes and Jy, cube spectra with line measurement, moment maps, per-spaxel line-fit maps and position-velocity diagrams, science cutouts. Start at [Data quality and units](docs/features.md#data-quality-and-units) and [Science analysis](docs/features.md#science-analysis).
-- **Astrophotography.** Calibration with cosmetic correction and dark optimization, integration with the PixInsight rejection family, a ten-step compose wizard, mosaics by WCS, and a processing tab with DBE, PixelMath, wavelets, deconvolution, LHE, HDRMT and curves, with masks that limit a step to part of the image. Start at [Compose wizard](docs/features.md#compose-wizard) and [Processing](docs/features.md#processing).
-
-Image processing and plate solving run locally first. The solver uses the bundled Tycho-2 catalogue, optional local 2MASS or Siril Gaia DR3 catalogues, or a Gaia DR3 field query through VizieR when the local catalogues are not deep enough. VizieR receives the field centre and radius; the image stays on this computer. Only an explicit Try astrometry.net uploads the image to nova.astrometry.net, and it requires an API key. Gaia refinement, colour calibration (SPCC), the catalog panel and the opt-in Gaia match of click photometry also query VizieR, keeping field queries in a disk cache. The Archive mode searches MAST and downloads its products; optional catalogues and sample data are downloaded on request.
-
-## Feature tour
-
-The full tour, with every screenshot and its caption, is in [docs/features.md](docs/features.md).
-
-**Viewer and regions.** Six stretch curves, four limit algorithms (min/max, IRAF-style zscale, percentile, explicit) and thirteen colormaps, applied by a WebGPU shader, with a CPU viewer when WebGPU is unavailable; a WCS coordinate grid in ICRS, FK5, galactic or ecliptic coordinates, a north/east compass with a scale bar, and a colorbar. Regions (circles, ellipses, boxes, annuli, polygons, lines and points) in pixel or sky coordinates, with background annuli, exclude regions, calibrated fluxes, radial profiles and line cuts, exchanged with DS9 as `.reg` files. The readout gives the value with its unit, the ERR value, the decoded DQ flags and the sky position; an exact PixInsight-style statistics table, a pixel table and dockable tool windows complete the viewer.
+- View any FITS HDU or ASDF array with six stretches, four limit algorithms and thirteen colormaps, a WCS grid, compass and contours, decoded DQ flags and a readout with unit, error and sky position; draw regions and exchange them with DS9.
+- Calibrate, stack with the PixInsight rejection family, drizzle, and join mosaics by WCS; compose colour images in a ten-step wizard; process with DBE, PixelMath, wavelets, deconvolution, LHE, HDRMT, curves and masks.
+- Plate solve on this computer against the bundled Tycho-2 catalogue, refine the WCS against Gaia DR3, and evaluate the gWCS of JWST and Roman images.
+- Aperture photometry in AB magnitudes and Jy with the calibration and its origin stated, a photometry table, the Gaia DR3 cross-match and zero point, and time series with BJD_TDB and ETD and ExoClock exports.
 
 <p align="center">
-  <img src="docs/screenshots/01-viewer-grid-compass-apertures.png" alt="The JWST NIRCam F444W mosaic of the Pillars of Creation with an ICRS grid, a compass and scale bar, a colorbar and labelled photometry apertures, the Astrometry tool with star detection and plate solve on the right, and the Photometry and Log tools docked under the viewer" width="100%">
+  <img src="docs/screenshots/01-viewer-grid-compass-apertures.png" alt="The JWST NIRCam F444W mosaic of the Pillars of Creation with an ICRS grid, a compass and scale bar, a colorbar and labelled photometry apertures, the Astrometry tool with star detection and plate solve on the right, and the Photometry and Log tools docked under the viewer" width="49%">
+  <img src="docs/screenshots/19-m104-miri-composite.png" alt="A colour composite of the Sombrero galaxy M104 from three JWST MIRI mosaics rotated by 90 degrees, filling the viewer, with the three rotated files in the file list and the compose step row showing Align, Blend, Color, Stretch and Adjust done" width="49%">
 </p>
-<p align="center"><em>The NIRCam F444W mosaic of the Pillars (jw02739) with the ICRS grid, the compass, the colorbar and batch photometry apertures, the Astrometry tool on the right and the Photometry and Log tools docked below.</em></p>
+<p align="center"><em>Left, the NIRCam F444W mosaic of the Pillars (jw02739) with the grid, compass, colorbar and batch photometry apertures. Right, the Sombrero from three MIRI mosaics (jw06565), aligned through their WCS and level-matched in the compose wizard.</em></p>
 
-**Data quality, units and WCS.** Any FITS extension or ASDF array can be displayed and measured (`path#hdu=3`, `path#array=roman.dq`). DQ planes are decoded against the JWST, HST and Roman bit tables, painted as an overlay and left out of statistics, photometry and profiles with one toggle. Header WCS goes through the [wcs-rs](https://github.com/cds-astro/wcs-rs) crate with SIP distortion, and the generalized WCS of JWST `_cal` and Roman `_cal.asdf` images is evaluated transform by transform, compared in the test suite with gwcs 1.0.3.
+### IFU cubes
+
+- Region spectra with errors and sky subtraction, channel collapse, moment maps and position-velocity diagrams, without loading the cube whole.
+- Per-spaxel line-fit maps with one or two Gaussian components, ERR weights and DQ masking, in the observer frame or, at a redshift, in the frame of the source.
+- Line measurement against a rest-frame line list, and comparison with the JWST pipeline x1d.
+- JWST `_uncal` ramps with a quick-look slope, and Cube Prep and SAGUI for multiband cubes ([guide](docs/scientific-desktop.md)).
 
 <p align="center">
-  <img src="docs/screenshots/04-hdus-dq-wavelength.png" alt="A JWST NIRSpec IFU cal frame with the DQ overlay painting the do-not-use pixels between the slices, the FITS extensions list and grouped header explorer on the left, a wavelength readout in the status strip, and the pixel table reading the WAVELENGTH plane" width="100%">
+  <img src="docs/screenshots/12-line-fit-kinematics.png" alt="The single-component Br-alpha velocity map of the Galactic Centre minispiral from a JWST NIRSpec G395H IFU cube, in an inverted RdBu colormap with symmetric limits, beside the Fit lines summary, the spaxel inspect mini plot of a two-component fit at spaxel (43, 22) and its parameter table, with the measurement log docked under the viewer" width="49%">
+  <img src="docs/screenshots/11-miri-mrs-cube.png" alt="The moment-1 velocity map of the nucleus of M104 from a JWST MIRI MRS cube in an inverted RdBu colormap centred on the median velocity of the map, beside the spectrum with the brushed line range and continuum windows and the line measurement cards" width="49%">
 </p>
-<p align="center"><em>A NIRSpec IFU <code>_cal</code> frame (jw01266) with its extensions listed, the JWST DQ overlay between the slices and the wavelength at the cursor.</em></p>
+<p align="center"><em>Left, the Br&alpha; velocity map of the Galactic Centre minispiral from a NIRSpec G395H cube (jw01266), with a two-component fit of one spaxel. Right, [NeII] at the nucleus of M104 in a MIRI MRS cube (jw02016), its moment-1 map and the measured line.</em></p>
 
-**MAST archive.** An Archive mode beside the Workspace (Ctrl+2) searches JWST, HST and IUE at MAST by target, coordinates, programme or dataset id, with JWST presets, previews, metadata and product lists. Category filters cover all three missions; object-type filters cover JWST and HST, with Combined L3, Exposures L1-2 and All levels controls. Active filters are removable, and dataset categories appear in the results and metadata. Downloads resume after a dropped connection or a Cancel and open in the Workspace; dataset footprints are drawn on the open image through its WCS, and a header peek reads the headers of a FITS product in byte ranges before any download. Roman stays locked until a MAST token is entered.
+### 1D spectra and JWST time series
 
-**Compose and processing.** A ten-step compose wizard (channels, stack, align, crop, background, blend, colour, stretch, adjust, export) reprojects channels through their WCS, matches their levels, blends them with SHO, HOO, Foraxx, Hubble Legacy and wavelength-based presets, calibrates colour against Gaia DR3 with a blackbody approximation (SPCC) and finishes with Fritsch-Carlson tone curves. Calibration and integration cover bias, dark, flat and flat-dark masters with header checks, cosmetic correction, the PixInsight rejection family, star alignment and drizzle. Mosaic by WCS joins overlapping panels with a celestial WCS (header TAN-SIP, gWCS, or an offline solve from the panel's own header) on one TAN canvas or on the canvas of a previous mosaic, matches their levels over the overlaps, feathers the seams, rejects outliers where three or more panels overlap and writes a coverage plane. Phase-correlation registration is checked against a star transform when enough stars are available, with rotation and scale handled through that transform when it is decisive; mirrored frames are excluded with a warning. The Processing tab has background extraction and de-banding, wavelet denoise, Richardson-Lucy deconvolution, LHE, HDRMT, Curves, Geometry and PixelMath, with undo, redo and a persistent history. The Masks tool builds masks from luminance, a value range, stars, regions or another FITS file, with feather and invert, shows them over the image and exports them as FITS; a mask picked next to Run limits Curves, LHE, HDRMT, denoise, deconvolution, the arcsinh and GHS stretches and PixelMath to part of the image, and masked steps replay from the history.
+- 1D spectra and x1d tables open in the Spectra tool and in the main viewer, in &micro;m, nm or &Aring; and in Jy, mJy, &micro;Jy, F<sub>&lambda;</sub> or AB magnitudes, binned or not, with molecular and atomic bands marked.
+- Line measurement with one-sigma errors, the redshift of each line and the integrated line flux in W m<sup>-2</sup> and erg s<sup>-1</sup> cm<sup>-2</sup>.
+- JWST time-series spectra (`x1dints`): white light and wavelength bins as the pipeline computes them, checked against its `_whtlt.ecsv`, a quick-look depth spectrum and a fitted transmission spectrum.
+- Light curves from images, time-series spectra or saved tables: a quick look, a period search and a least-squares transit or eclipse fit with errors, saved as CSV with their provenance.
 
 <p align="center">
-  <img src="docs/screenshots/19-m104-miri-composite.png" alt="A colour composite of the Sombrero galaxy M104 from three JWST MIRI mosaics rotated by 90 degrees, filling the viewer, with the three rotated files in the file list and the compose step row showing Align, Blend, Color, Stretch and Adjust done" width="100%">
+  <img src="docs/screenshots/20-tso-white-light-curve.png" alt="The Light curves section of the Spectra tool on a JWST NIRSpec PRISM time series of WD 1856+534 b: the white light in normalised flux against BMJD (TDB) with the transit window shaded, above the cards for the out-of-transit scatter, the formal error, the box depth and the points used" width="32%">
+  <img src="docs/screenshots/21-tso-whtlt-comparison.png" alt="The app's white light and the JWST pipeline white-light table drawn together and coinciding on the same time series, above the Pipeline white light table reporting every row paired and matching" width="32%">
+  <img src="docs/screenshots/22-tso-depth-spectrum.png" alt="The quick-look depth spectrum of the same time series: five depths with error bars against wavelength, the white-light depth as a reference line, shaded H2O, CO2, CO, CH4 and SO2 bands, and the depth table with its pixel-loss cells in amber" width="32%">
 </p>
-<p align="center"><em>The Sombrero, M104, from three MIRI mosaics (jw06565), F1280W, F1130W and F770W, rotated with Geometry, aligned through their WCS and level-matched in the compose wizard.</em></p>
+<p align="center">
+  <img src="docs/screenshots/23-tso-fitted-transmission-spectrum.png" alt="The depth spectrum after Fit every bin: the fitted (Rp/Rs) squared of each wavelength bin beside the quick-look depths with the quick look and model fit switches, a note that the two series are on different scales for this grazing transit, the depth table above the Model fit block, and the measurement log under the viewer" width="32%">
+  <img src="docs/screenshots/24-light-curve-transit-fit.png" alt="A JWST NIRCam white-light table of WASP-39 b opened as a light curve in the Photometry tool, with the Legacy Surveys r brick shown last still in the viewer, the transit model over the data divided by the baseline, the residuals in ppm, the four result cards and the table of fitted parameters with their errors" width="32%">
+  <img src="docs/screenshots/25-spectra-line-measurement.png" alt="A JWST NIRSpec G395H x1d spectrum of the Galactic Centre zoomed on about 3.95 to 4.15 micrometres with Br-alpha marked, the line range and continuum windows shaded, and the result card with the flux, the physical flux in watts per square metre, the centroid, the line redshift, the error source and the redshift from two lines" width="32%">
+</p>
+<p align="center"><em>Top: a NIRSpec PRISM time series of WD 1856+534 b (jw02358), its white light, the pipeline's white light drawn over it, and the quick-look depth spectrum. Bottom: the fitted transmission spectrum of the same set, a transit fit of WASP-39 b from a NIRCam white-light table, and a line measured on a NIRSpec G395H x1d (jw01266).</em></p>
 
-**Plate solving and astrometry.** Solve from position and scale hints taken from the header or entered in the Plate Solve panel, with progress, cancellation, star-match checks and SIP distortion fitting. Solve options, saved between sessions, choose the catalogue tiers, the astrometry.net offer after a failure, the default search radius and the maximum SIP order. Settings > Catalogs manages the bundled Tycho-2 catalogue (15.5 MB), an optional 2MASS download (154 MB), an existing Siril Gaia DR3 catalogue or its download from Zenodo, and the VizieR cache. Downloads resume and are checked for integrity. Refine with Gaia DR3 adjusts an existing or newly solved WCS against stars propagated to the observation epoch, reports errors measured on stars held out of the fit, and refuses corrections without enough evidence. Write WCS explicitly saves the result to a copy, with catalogue credits in its HISTORY.
+### Survey images and unresolved sources
 
-**Science analysis.** Aperture photometry with header zero points in AB magnitudes and Jy, a photometry table, and Gaia DR3 catalogs through VizieR with cross-match and zero point. JWST level-2 `_cal` photometry uses a compatible AREA pixel-area map for fluxes and errors. For cubes and spectra: a full FITS spectral axis with air and vacuum conversion, region spectra with errors, moment maps, per-spaxel line-fit kinematic maps, position-velocity diagrams, line measurement with a rest-frame line list, comparison with the JWST pipeline x1d, and 1D spectra. JWST `_uncal` ramps get a quick-look slope compared with the official `_rate` ([docs/quick-slope.md](docs/quick-slope.md)). Contours, surface-brightness profiles, time series with BJD_TDB and observation geometry, CSV, ETD and ExoClock exports, robust sigma statistics and a session measurement log complete the analysis tools.
+- Survey files as the archives deliver them: `.fits.bz2` frames, tile-compressed masks, Pan-STARRS asinh pixels, single bands of a cutout cube, and the error and mask layers of the same file or the files beside it (Legacy Surveys, DES, Euclid, Pan-STARRS, SDSS, Rubin and HSC conventions).
+- Calibration from the pixel unit (nanomaggy, nJy, ...) or the survey zero point, with the origin of the calibration stated, or from a zero point you type.
+- Forced photometry of a list of sky positions in up to 12 band images, with colours, upper limits and the SED of each source, and a comparison with the survey's own catalogue.
+- The depth of an image from empty apertures, the PSF of the image, and whether a source is resolved, with sizes in kpc at a redshift.
 
 <p align="center">
-  <img src="docs/screenshots/12-line-fit-kinematics.png" alt="The single-component Br-alpha velocity map of the Galactic Centre minispiral from a JWST NIRSpec G395H IFU cube, in an inverted RdBu colormap with symmetric limits, beside the Fit lines summary, the spaxel inspect mini plot of a two-component fit at spaxel (43, 22) and its parameter table, with the measurement log docked under the viewer" width="100%">
+  <img src="docs/screenshots/28-photometry-status-resolved.png" alt="A star measured on a Legacy Surveys r-band brick, with the photometry status line naming the unit, the errors taken from the inverse-variance file and the flags from the maskbits file beside the image, the pixel scale and the band, the result cards with the flux density in microjansky and a Resolved or not card reading Unresolved" width="48%">
+  <img src="docs/screenshots/29-profile-psf-resolved.png" alt="A galaxy on a Legacy Surveys r-band brick with its ellipse, and the Profiles section with the surface-brightness profile, dashed PSF R50, R50 and R80 lines, the R50 card and a Resolved or not card reading Resolved with sizes in kpc at redshift 1" width="48%">
 </p>
-<p align="center"><em>The Br&alpha; velocity map of the Galactic Centre minispiral from a NIRSpec G395H IFU cube (jw01266), with a two-component fit of one spaxel and the measurement log.</em></p>
-
-**Headless server.** The readers, the display controls, the region code, stacking, drizzle and the calibration pipeline also run without a window, behind a REST API: see [Headless server and Python client](#headless-server-and-python-client).
+<p align="center">
+  <img src="docs/screenshots/30-catalogue-compare.png" alt="A Legacy Surveys r-band brick with the comparison stars marked in amber, and the Compare section with the measured over catalogue flux ratio of 1.000018 for 21 rows used and the first rows of the comparison table" width="48%">
+  <img src="docs/screenshots/31-multiband-sed.png" alt="Forced photometry of Legacy Surveys g, r and z bricks with the aperture of one source on the r image, the Sources table with its g, r and z AB magnitudes, and the spectral energy distribution of that source with three points" width="48%">
+</p>
+<p align="center"><em>Legacy Surveys DR10 data. Top: a star measured with its calibration, error layer and PSF verdict stated, and a galaxy profile against the PSF. Bottom: the photometry compared with the brick's own catalogue, and forced g, r, z photometry with the SED of one source.</em></p>
 
 ## Install and build
 
@@ -130,14 +146,13 @@ pnpm tauri dev
 
 ## Quick start
 
-1. **Drop** a file, a ZIP (nested ZIPs are followed up to a depth limit) or a folder into the window. `.fits`, `.fit`, `.fts`, their `.gz` forms, `.asdf` and `.zip` are recognised.
-2. **Look.** Click a file for its preview, histogram and headers. Set stretch, limits, colormap and the coordinate grid in the display bar, or hit Auto STF. Hover for value, unit, ERR, DQ and coordinates. Use the HDU panel to switch to another extension or array. `Ctrl+K` or a double `Shift` opens the command palette over files, tools and actions.
-3. **Measure.** Draw a region, add a background annulus, read the statistics. Plot a radial profile or a line cut. Use Plate Solve to solve locally from header or typed hints, optionally Refine with Gaia DR3, then Write WCS to save a copy. Turn on Measure on image click in the Photometry panel, select Crosshair in the viewer toolbar and click a star for calibrated photometry; search Gaia DR3 for a catalog overlay and a zero point. Import or export DS9 `.reg` files.
-4. **Compose.** Open the Compose tab and walk the ten steps.
-5. **Process.** Debayer, background (polynomial or DBE spline) and de-band, wavelet denoise, PSF estimation, deconvolution, the stretch tools, LHE, HDRMT, Curves, PixelMath and Geometry (rotate and flip) sit in the Processing tab, and the Masks tool limits a step to part of the image; calibration with flat-darks, cosmetic correction, subframe gating, stacking with the rejection family, the batch pipeline, drizzle and Mosaic by WCS sit in the Stacking tab.
-6. **Export.** PNG at 8 or 16 bits, FITS with preserved WCS and metadata, a SCI+ERR+DQ cutout, or a ZIP bundle of all channels plus the composite.
+1. **Drop** a file, a ZIP (nested ZIPs are followed up to a depth limit) or a folder into the window. `.fits`, `.fit` and `.fts` files and their `.gz` and `.bz2` forms, `.fits.fz`, `.asdf`, `.zip`, and `.csv` and `.ecsv` tables are recognised.
+2. **Look.** Click a file for its preview, histogram and headers; set stretch, limits, colormap and grid in the display bar, or hit Auto STF. The HDU panel switches to another extension, array or band. `Ctrl+K` or a double `Shift` opens the command palette.
+3. **Measure.** Draw a region and read its statistics, or use the Photometry tool (a click, a table, a time series, several bands), the Spectra tool (spectra, cubes, time series, ramps) and Plate Solve. Results go to the measurement log and to CSV files.
+4. **Compose and process.** The Compose tab walks the ten steps; the Processing and Stacking tabs hold the processing tools, calibration, stacking, drizzle and mosaics.
+5. **Export.** PNG at 8 or 16 bits, FITS with its WCS and metadata, a SCI+ERR+DQ cutout, or a ZIP bundle.
 
-Sample data are downloaded on demand; the installers do not carry them. The empty workspace offers the HST set and the Cube tool offers the JWST sets; the command palette lists the HST download while the workspace is empty, the JWST downloads while a file is shown, and every set already downloaded:
+Sample data are downloaded on demand; the installers do not carry them. The empty workspace offers the HST set and the Spectra tool offers the JWST sets; the command palette lists the HST download while the workspace is empty, the JWST downloads while a file is shown, and every set already downloaded:
 
 | Set | Contents | Download |
 |-----|----------|----------|
@@ -145,15 +160,13 @@ Sample data are downloaded on demand; the installers do not carry them. The empt
 | JWST/NIRSpec Galactic Centre | IFU cube and 1D spectrum, programme 1266 | 176 MB |
 | JWST/MIRI SN 2021aefx | LRS 1D and 2D spectra and a calibrated exposure, programme 2072 | 35 MB |
 
-The HST files come from this repository at a pinned commit; the JWST sets come from AstroBurst's `data-v1` release. Every file is checked against its pinned size and SHA-256. Downloads show progress, can be cancelled and resumed, open the files when complete, and keep them in the Data folder's `samples/` folder. Open sample data reopens them without the network. The HST files are also in [`exampleFits/sample-data/`](exampleFits/sample-data), with a ground-truth catalogue for photometry checks in `synthetic_catalog.csv`. Credits and the JWST data use acknowledgements are listed below and shown before download.
-
-For your own data, MAST and the ESA Hubble Science Archive publish JWST and HST `_cal.fits` and `_i2d.fits` products, and Roman `.asdf` products under instrument WFI. The Archive mode (Ctrl+2) searches MAST, downloads products and opens the downloaded images, cubes, spectra and ramps in the Workspace.
+Every file is checked against its pinned size and SHA-256, and downloads resume after a Cancel. The HST files are also in [`exampleFits/sample-data/`](exampleFits/sample-data). For your own data, MAST and the ESA Hubble Science Archive publish JWST and HST products and Roman `.asdf` products; the Archive mode (Ctrl+2) searches MAST, downloads products and opens them, tables included, in the Workspace. What each reader supports and refuses is in [docs/features.md](docs/features.md#supported-formats).
 
 ## Headless server and Python client
 
 The headless server and the v2 API were contributed by [Jae-Joon Lee](https://github.com/leejjoon).
 
-`astroburst-server` is a separate Axum binary built behind the `server` feature. It shares the FITS and ASDF readers, the display controls and the region code with the desktop app, renders on the CPU, listens on 127.0.0.1:8080 and serves two API generations: v1 (sessions, render, stacking, drizzle and pipeline runs as async jobs with server-sent events) and v2 (sessions, HDUs, header and WCS inspection, cutouts, coordinates, statistics, histogram and render).
+`astroburst-server` is a separate Axum binary built behind the `server` feature. It shares the readers, the display controls and the region code with the desktop app, renders on the CPU, listens on 127.0.0.1:8080, and runs rendering, statistics, cutouts, stacking, drizzle and the calibration pipeline. Routes are in [docs/server-api.md](docs/server-api.md); the Python client for the v1 API is in [agent/README.md](agent/README.md).
 
 ```bash
 cd src-tauri
@@ -162,65 +175,20 @@ cargo run --bin astroburst-server \
   --features server,astrometry-net,asdf-full,vizier
 ```
 
-Routes, request and response shapes, configuration, sessions, jobs and errors are in [docs/server-api.md](docs/server-api.md). The async Python client for the v1 API is described in [agent/README.md](agent/README.md), with runnable examples in [`agent/examples/`](agent/examples).
+## Limits
 
-## Supported formats
-
-- **FITS.** Memory-mapped, multi-extension with automatic SCI selection or any HDU by `path#hdu=<n>`; tile-compressed HDUs read through fitsio-pure; `.fits.gz` decompressed as a capped stream; JWST `_uncal` ramps, x1d tables and `-TAB` spectral axes; header keywords written by MaxIm DL, N.I.N.A. and SharpCap read through aliases.
-- **ASDF.** A native Rust reader for Roman and JWST pipeline products without Python, with imaging gWCS, Roman L1 ramps and float16 arrays; bzip2 and lz4 come with the `asdf-full` feature.
-- **Containers.** ZIP archives, nested ones included, and whole directories.
-- **Export.** PNG at 8 or 16 bits, FITS with BITPIX 16, float32 or float64 and optional Rice compression, keeping WCS and provenance cards, RGB FITS cubes and a ZIP bundle.
-
-What each reader supports and refuses is listed in [docs/features.md](docs/features.md#supported-formats).
-
-## How it compares
-
-AstroBurst sits between a viewer and a processing suite, and is behind the established tools in both directions.
-
-- **DS9** is the reference FITS viewer. AstroBurst matches most of its inspection surface: stretch and limit algorithms, colormaps, frames, a coordinate grid, a compass, contours, region shapes with DS9 `.reg` exchange, per-region statistics, a pixel table and a Gaia catalog overlay. DS9 is ahead on frame management and blinking, image-server integration, 3D rendering, and interoperability through SAMP and XPA, none of which AstroBurst has.
-- **jdaviz** is the JWST and Roman quick-look toolset from STScI. AstroBurst overlaps on ASDF, DQ decoding, unit-aware readout, calibrated photometry, cube spectra with line lists and line measurement, and moment maps, and opens those files without Python. jdaviz is ahead on model fitting (AstroBurst fits one Gaussian per line, or at most two per spaxel in its line-fit maps), Mosviz-style multi-object work, and lives inside a notebook where results are scriptable end to end.
-- **Siril** is the closest free processing comparison. Calibration, registration, integration (rejection families, normalization, drizzle with rejection, cosmetic correction, dark optimization) and stretching are at a comparable level of algorithmic depth. Siril has a mature scripting language, RAW and XISF input, a much larger user base and years of field testing; AstroBurst has no scripting language yet.
-- **PixInsight** is the commercial reference for processing depth. AstroBurst now covers the core of ImageIntegration, CosmeticCorrection, DynamicBackgroundExtraction, PixelMath, LocalHistogramEqualization, HDRMultiscaleTransform, Statistics and NoiseEvaluation, each as a single tool with the essential parameters, and has first versions of masks and WCS mosaics. PixInsight keeps a process container and previews as first-class objects, masks that every process accepts, a deeper mosaic toolset, modern deconvolution, and an enormous body of published workflows.
-
-Where AstroBurst is genuinely different: a single desktop app that reads ASDF natively without Python, decodes DQ against named instrument bit tables, and exposes the same readers, display controls and region code through a headless REST API.
-
-## Project status
-
-Pre-1.0, developed by one maintainer with outside contributions. Formats, command names and the REST API may change before 1.0.
-
-Version 0.8.0 records the noise correlation that alignment and PSF matching introduce in Cube Prep cubes and uses it for SAGUI regional errors, writes FITS products atomically, and adds an All tools browser and cube frame stepping in the viewer. Earlier 0.7.x releases added Cube Prep and SAGUI on the desktop, masks, mosaics by WCS, local-first plate solving and Gaia DR3 WCS refinement. The FITS and ASDF readers, display path, compose wizard and export are used daily; newer processing and science tools have had less time in the field. The [technical document](docs/astroburst_technical_document.pdf) (release 0.8.0) describes the algorithms and the rules behind each step; [CHANGELOG.md](CHANGELOG.md) records later changes. CI checks the TypeScript types, a production build, eslint with zero warnings allowed, the Rust library on Windows, all Rust features on Ubuntu and macOS (including the headless server), the vitest suite and the Node.js script tests.
-
-Real-data validation of the local solver found 46 of 48 DSS2 fields of 0.4 degrees and wider solved with 2MASS, and 23 of 24 fields of 1 degree and wider with Tycho-2 alone, with no false solution in those tests. On the tested JWST FGS fields of the LMC, Gaia refinement reduced a 1.77 arcsec header offset to a hold-out RMS of 34 to 44 mas. These results describe the tested fields, not a general accuracy guarantee.
-
-Known limits:
-
-- There is no published performance benchmark suite covering the whole app; the real-data validation above covers specific scientific cases.
-- The GPU is used for display only. Every algorithm runs on the CPU in Rust.
-- Local plate solving needs usable centre and scale hints. Tycho-2 alone is suited to wider fields; narrower fields need a deeper local catalogue or an online Gaia query. Blind offline solving is not available. Uneven star coverage in dusty or nebulous fields can cause a correct candidate to be refused, and tested TESS frames retain corner differences of up to about 3 pixels from the mission WCS.
-- Gaia refinement, the catalog panel and the optional Gaia match of click photometry need VizieR for a field not yet in the disk cache; SPCC falls back to a synthetic catalogue without it. Only the optional astrometry.net fallback needs an API key and uploads the image.
-- TAN headers with SCAMP-style PV distortion cards keep their linear TAN solution and report unapplied distortion. Full TPV support is not available; explicit `RA---TPV` headers are refused.
-- SPCC is a blackbody approximation at the channel wavelengths, not a fit to Gaia XP spectra through filter transmission curves.
-- Only imaging gWCS is evaluated. Spectroscopic gWCS and chains with `tabular`, `fix_inputs` or JWST pipeline model transforms fall back to the header WCS, or leave a Roman ASDF image without one.
-- The headless server covers rendering, pixel probes, statistics, histograms, cutouts, coordinate conversion, binning, the coordinate grid, WCS inspection, stacking, drizzle and the calibration pipeline; every other tool, from the DQ overlay, DQ-masked statistics, exclude regions and `.reg` exchange to photometry, cube science, the processing tools, the compose wizard and the MAST archive, is desktop-only.
-- The Python client covers the v1 API only.
-- Integration holds every frame in memory; very large frame counts need a machine with matching RAM.
-- Solved-WCS copies and derived maps are written to the output folder, which is cleared at launch; save or move products you want to keep. The measurement log is session-only; Save CSV keeps its rows.
-- The coordinate grid and regions are not drawn in the standalone deep-zoom tile viewer.
-- Masks apply to the Processing steps only: Background, Masked Stretch, Curves on the colour composite and the compose wizard's Stretch and Adjust steps run without a mask.
-- No SAMP or XPA interoperability, no plugin or scripting system, no RAW or XISF input.
-
-Planned work includes broader scientific validation, blind offline solving, extended WCS support, processing presets, additional image formats, more science tools in the headless API, and integration that handles frame sets larger than RAM. Longer-term work includes GPU compute for stacking and alignment, and plugin hooks.
+AstroBurst is pre-1.0 and developed by one maintainer with outside contributions; formats, command names and the REST API may change. Transit and eclipse fits are weighted least squares (no MCMC, circular orbits only), there is no atmospheric retrieval, survey photometry is measured at given positions without source detection or deblending, the SED is shown and not fitted, and local plate solving needs centre and scale hints. Many tools are desktop-only, and there is no SAMP, XPA, scripting, RAW or XISF input. What was validated on real data, and every other limit, is in [docs/features.md](docs/features.md), the [technical document](docs/astroburst_technical_document.pdf) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Credits and acknowledgements
 
 - **Contributors.** [Jae-Joon Lee](https://github.com/leejjoon): the headless server, the v2 API, the Python client, the WCS engine migration, FITS tile compression, zscale and the first colormaps (gray and viridis). [jing2uo](https://github.com/jing2uo) maintains the Flatpak through [FlatPark](https://github.com/flatpark/flatpark).
 - **Sample data.** The HST/WFPC2 narrowband frames of M16: NASA, ESA, J. Hester and P. Scowen (Arizona State University), public domain, from the Hubble archive at STScI. The JWST/NIRSpec Galactic Centre set is from programme 1266 (PI M. Garcia Marin), and the JWST/MIRI SN 2021aefx set is from programme 2072 (PI S. W. Jha): NASA, ESA, CSA, data via MAST at STScI. See the [JWST sample data notice](src-tauri/licenses/jwst-sample-data-NOTICE.txt) for the requested acknowledgements.
-- **Screenshot data.** JWST programmes jw02739 (Pillars of Creation, NIRCam and MIRI), jw06565 (M104, NIRCam and MIRI), jw02016 (M104, MIRI MRS), jw01266 (Galactic Centre, NIRSpec IFU) and jw01476 (LMC, FGS) from MAST, a simulated Roman WFI L2 image, and the HST/WFPC2 M16 frames.
+- **Screenshot data.** JWST programmes jw02739 (Pillars of Creation, NIRCam and MIRI), jw06565 (M104, NIRCam and MIRI), jw02016 (M104, MIRI MRS), jw01266 (Galactic Centre, NIRSpec IFU and G395H x1d), jw01476 (LMC, FGS) and jw02358 (WD 1856+534 b, NIRSpec PRISM time series) and a NIRCam white-light table of WASP-39 b from MAST, a simulated Roman WFI L2 image, the HST/WFPC2 M16 frames, and the Legacy Surveys DR10 images, griz cutout and catalogue of brick 0532m280.
 - **Services.** Gaia DR3 through VizieR at CDS (plate solving, WCS refinement, colour calibration, catalogs and the Gaia match of click photometry), nova.astrometry.net (the optional plate-solving fallback) and MAST at STScI (the Archive mode).
 - **Star catalogues.** The bundled Tycho-2 catalogue is built from CDS I/259 (Hog et al. 2000), based on the ESA Hipparcos mission: Credit: ESA; data obtained from the CDS, Strasbourg, France. The [Tycho-2 notice](src-tauri/licenses/tycho2-catalogue-NOTICE.txt) records both source statements of its terms. Optional 2MASS data: Two Micron All Sky Survey, University of Massachusetts and IPAC/Caltech, funded by NASA and NSF. Gaia DR3: Gaia Collaboration, Vallenari et al. 2023, ESA/Gaia/DPAC, CC BY-NC 3.0 IGO, via VizieR (CDS) or the Siril extract from Zenodo record 14692304. Settings > Catalogs manages the optional downloads. AstroBurst does not bundle, host or redistribute Gaia data.
-- **Libraries and references.** [wcs-rs](https://github.com/cds-astro/wcs-rs) by CDS for header WCS ([ADR 0001](docs/adr/0001-wcs-rs-for-wcs-engine.md)); fitsio-pure for tile-compressed FITS; matplotlib colormap knots; IRAF zscale; wcslib interpolation rules for `-TAB` axes; Morton 2000 for air and vacuum wavelengths; Kasten-Young airmass; Fritsch-Carlson monotone splines; BT.709 luminance weights; the Foraxx and Hubble Legacy palettes; header aliases for MaxIm DL, N.I.N.A. and SharpCap. Named methods: the GHS stretch, Winsorized sigma clipping, the biweight midvariance (BWMV), RANSAC star matching, the Lanczos3 drizzle kernel, Tikhonov-regularized Richardson-Lucy deconvolution, CLAHE, the PixInsight MLT-style detail bias and SCNR, and the Petrosian radius. Instrument and camera conventions: the JWST pipeline's tweakreg correction, the `GAIN` card of ZWO, QHY and ASCOM cameras, and the Bayer and X-Trans CFA layouts. The gWCS evaluator is compared with gwcs 1.0.3 and the barycentric times with astropy. The Python client's image helper uses Pillow. Built with Tauri, React and WebGPU.
+- **Libraries and references.** [wcs-rs](https://github.com/cds-astro/wcs-rs) by CDS for header WCS ([ADR 0001](docs/adr/0001-wcs-rs-for-wcs-engine.md)); fitsio-pure for tile-compressed FITS; matplotlib colormap knots; IRAF zscale; wcslib interpolation rules for `-TAB` axes; Morton 2000 for air and vacuum wavelengths; Kasten-Young airmass; Fritsch-Carlson monotone splines; BT.709 luminance weights; the Foraxx and Hubble Legacy palettes; header aliases for MaxIm DL, N.I.N.A. and SharpCap. Named methods: the GHS stretch, Winsorized sigma clipping, the biweight midvariance (BWMV), RANSAC star matching, the Lanczos3 drizzle kernel, Tikhonov-regularized Richardson-Lucy deconvolution, CLAHE, the PixInsight MLT-style detail bias and SCNR, the Petrosian radius, the Mandel and Agol (2002) transit model, the generalised Lomb-Scargle periodogram (Zechmeister and Kürster 2009) with the Baluev (2008) false-alarm probability, the time-averaging test of Pont et al. (2006), the Lobanov (2005) resolution limit and the Planck 2018 cosmology. Instrument and camera conventions: the JWST pipeline's tweakreg correction, the `GAIN` card of ZWO, QHY and ASCOM cameras, and the Bayer and X-Trans CFA layouts. The gWCS evaluator is compared with gwcs 1.0.3 and the barycentric times with astropy. The Python client's image helper uses Pillow. Built with Tauri, React and WebGPU.
 - **Multiband preparation and segmentation.** [LIGHTSTACK](https://github.com/AndressaWille/lightstack), by Andressa Wille and Thallis Pessi, provides the reference workflow for Cube Prep. [SAGUI](https://github.com/RafaelSdeSouza/sagui), by Rafael S. de Souza, supplies the official R implementation used for regional SED segmentation. Both use the MIT license; see the [third-party notices](src-tauri/licenses/THIRD-PARTY-NOTICES.md).
-- **Compared with.** DS9, jdaviz (STScI), Siril and PixInsight, in [How it compares](#how-it-compares).
+- **Compared with.** DS9, jdaviz (STScI), Siril and PixInsight, the reference tools for viewing, JWST quick look and processing.
 - **Documentation.** [CHANGELOG.md](CHANGELOG.md), the [technical document](docs/astroburst_technical_document.pdf), the full [feature tour](docs/features.md), the [server route reference](docs/server-api.md), the [Python client](agent/README.md), [quick slope](docs/quick-slope.md) and the [desktop Cube Prep and SAGUI guide](docs/scientific-desktop.md).
 
 ## Contributing

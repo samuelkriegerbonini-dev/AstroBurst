@@ -31,7 +31,7 @@ export function shortcutSheet(mac: boolean): readonly ShortcutGroup[] {
         { keys: "Shift Shift", desc: "Search everywhere" },
         { keys: `${mod}1 / ${mod}2`, desc: "Switch to Workspace / Archive" },
         { keys: "↑ / ↓", desc: "Navigate file list (when focused)" },
-        { keys: "Enter", desc: "Select focused file" },
+        { keys: "Enter", desc: "Open the selected spectrum in the Spectra tool" },
         { keys: "Shift+F10 / right-click (sidebar tool)", desc: "Move or reorder the tool, reset the layout, or open All tools" },
         { keys: `${mod}K, then All tools`, desc: "Open any tool or choose the sidebar shortcuts" },
         { keys: "?", desc: "Toggle this help" },

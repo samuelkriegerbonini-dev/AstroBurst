@@ -23,7 +23,9 @@ use crate::core::cubeprep::cube::{plane_text, planes_from_header, planes_from_ta
 use crate::core::imaging::push_history;
 use crate::core::imaging::region::RegionShape;
 use crate::core::imaging::stats::percentile;
+use crate::core::astrometry::wcs::WcsTransform;
 use crate::core::metadata::photcal::{FluxConvention, PhotCal, JY_PER_MJY};
+use crate::core::metadata::units::{classify_unit, UnitClass};
 use crate::infra::fits::table::{find_bintable, load_bintable};
 use crate::infra::fits::writer::{HduData, ImageHdu};
 use crate::infra::render::grayscale::render_grayscale;
@@ -184,14 +186,32 @@ pub fn linear_preview(arr: &Array2<f32>) -> Array2<f32> {
     arr.mapv(|v| if v.is_finite() { ((v - lo) / range).clamp(0.0, 1.0) } else { 0.0 })
 }
 
-fn mjy_per_sr_to_jy_factor(cube: &LazyCube) -> Option<f64> {
+struct JyPerPixelUnit {
+    factor: f64,
+    note: Option<String>,
+}
+
+fn wcs_pixel_area_sr(wcs: &WcsTransform) -> Option<f64> {
+    let cd = wcs.raw_params().4;
+    let square_degrees = (cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0]).abs();
+    let steradians = square_degrees * 1f64.to_radians().powi(2);
+    (steradians.is_finite() && steradians > 0.0).then_some(steradians)
+}
+
+fn jy_per_pixel_unit(cube: &LazyCube) -> Option<JyPerPixelUnit> {
     let header = &cube.header;
     let wcs = load_wcs(&cube.source_path, header).ok();
-    let cal = PhotCal::from_header(header, wcs.as_ref())?;
-    match cal.convention {
-        FluxConvention::JwstMjySr { pixar_sr, .. } => Some(pixar_sr * JY_PER_MJY),
-        _ => None,
+    if let Some(PhotCal { convention: FluxConvention::JwstMjySr { pixar_sr, .. }, .. }) = PhotCal::from_header(header, wcs.as_ref()) {
+        return Some(JyPerPixelUnit { factor: pixar_sr * JY_PER_MJY, note: None });
     }
+    let unit = classify_unit(header);
+    let factor = match unit.class {
+        UnitClass::SurfaceBrightness { jy_per_sr_per_unit } => jy_per_sr_per_unit * wcs.as_ref().and_then(wcs_pixel_area_sr)?,
+        UnitClass::PerPixelPhysical { jy_per_unit } => jy_per_unit,
+        _ => return None,
+    };
+    let note = format!("Jy from BUNIT '{}': {:e} Jy per pixel unit", unit.bunit.unwrap_or_default(), factor);
+    Some(JyPerPixelUnit { factor, note: Some(note) })
 }
 
 pub(crate) fn err_source(err: Option<&LazyCube>) -> String {
@@ -317,14 +337,15 @@ pub(crate) fn region_spectrum_response(
         set.dq.as_deref(),
     )?;
     let axis = cube.spectral_axis().ok();
-    let jy_factor = mjy_per_sr_to_jy_factor(cube);
+    let jy = jy_per_pixel_unit(cube);
     let in_jy = |values: &[f32]| -> Option<Vec<f64>> {
-        jy_factor.map(|factor| values.iter().map(|&v| v as f64 * factor).collect())
+        jy.as_ref().map(|jy| values.iter().map(|&v| v as f64 * jy.factor).collect())
     };
     let flux_jy = in_jy(&spectrum.sum);
     let flux_jy_err = spectrum.err.as_deref().and_then(in_jy);
     let mut notes = set.notes.clone();
     region_error_notes(set, &spectrum, background.is_some(), &mut notes);
+    notes.extend(jy.and_then(|jy| jy.note));
     let factor = region_noise_factor(&spectrum, continuum, &mut notes);
     let err_scaled = match (&spectrum.err, &factor) {
         (Some(err), Some(f)) => Some(err.iter().map(|&e| (e as f64 * f.factor) as f32).collect()),
@@ -655,7 +676,7 @@ fn cube_spectrum_json(path: &str, x: usize, y: usize) -> anyhow::Result<serde_js
     let err = open_cube_set(path).ok().and_then(|set| set.err).map(|err| err.extract_spectrum_at(y, x)).transpose()?;
     let axis = cube.spectral_axis().ok();
     let classification = classify_spectral_cube(&cube.header, cube.geometry.naxis3);
-    let flux_jy = mjy_per_sr_to_jy_factor(&cube).map(|f| spectrum.iter().map(|&v| v as f64 * f).collect::<Vec<f64>>());
+    let flux_jy = jy_per_pixel_unit(&cube).map(|jy| spectrum.iter().map(|&v| v as f64 * jy.factor).collect::<Vec<f64>>());
     Ok(json!({
         RES_SPECTRUM: spectrum,
         KEY_ERR: err,
@@ -756,7 +777,6 @@ pub async fn moment_maps_cmd(
 
 #[cfg(test)]
 mod tests {
-    use crate::core::astrometry::wcs::WcsTransform;
     use std::fs::File;
 
     use super::*;
@@ -1425,7 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn region_spectrum_reports_flux_in_jy_only_for_mjy_per_sr_cubes() {
+    fn region_spectrum_reports_flux_in_jy_for_mjy_per_sr_and_none_for_jy_per_beam() {
         let dir = tempfile::tempdir().unwrap();
         let (_, set) = open_cube(&dir, "line.fits", 0.0);
         let response = region_spectrum_response(&set, &disk(), None, None, Instant::now()).unwrap();
@@ -1457,6 +1477,109 @@ mod tests {
             .sum();
         assert!(line_weight < response.npix);
         assert!((response.sum[20] as f64 - line_weight).abs() < 1e-3, "sum={} weight={}", response.sum[20], line_weight);
+    }
+
+    const AREA_SR: f64 = 3.0461741978670858e-12;
+    const JY_NOTE_PREFIX: &str = "Jy from BUNIT";
+
+    fn region_response_in(dir: &tempfile::TempDir, name: &str, cards: &[(&'static str, &'static str)]) -> RegionSpectrumResponse {
+        let path = dir.path().join(name);
+        write_line_cube_with_cards(&path, cards);
+        let set = alone(LazyCube::open(path.to_str().unwrap()).unwrap());
+        region_spectrum_response(&set, &disk(), None, None, Instant::now()).unwrap()
+    }
+
+    fn assert_flux_is_sum_times(response: &RegionSpectrumResponse, factor: f64, relative: f64) {
+        let flux = response.flux_jy.as_ref().expect("flux in Jy");
+        assert_eq!(flux.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = response.sum[z] as f64 * factor;
+            assert!((flux[z] - expected).abs() <= relative * expected.abs(), "z={} got={} expected={}", z, flux[z], expected);
+        }
+    }
+
+    #[test]
+    fn a_region_spectrum_of_a_jy_per_sr_cube_is_converted_with_the_wcs_pixel_area() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = region_response_in(&dir, "jy_sr.fits", &[("BUNIT", "'Jy/sr'")]);
+        assert_flux_is_sum_times(&response, AREA_SR, 1e-12);
+    }
+
+    #[test]
+    fn a_region_spectrum_in_ujy_per_arcsec2_uses_the_pixel_area_in_arcsec2() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = region_response_in(&dir, "ujy_arcsec2.fits", &[("BUNIT", "'uJy/arcsec2'")]);
+        assert_flux_is_sum_times(&response, 1.296e-7, 1e-9);
+    }
+
+    #[test]
+    fn a_region_spectrum_of_a_flux_density_per_pixel_cube_is_its_sum_in_jy() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = region_response_in(&dir, "jy.fits", &[("BUNIT", "'Jy'")]);
+        let in_jy: Vec<f64> = response.sum.iter().map(|&v| v as f64).collect();
+        assert_eq!(response.flux_jy.as_ref(), Some(&in_jy));
+
+        let response = region_response_in(&dir, "mjy_pixel.fits", &[("BUNIT", "'mJy'")]);
+        assert_flux_is_sum_times(&response, 1e-3, 1e-12);
+
+        let path = dir.path().join("mjy_pixel_s3d.fits");
+        write_line_cube_mef_with_cards(&path, &[("BUNIT", "'mJy'")], SET_NOISE, |_, _, _| SET_ERR, unflagged);
+        let key = path.to_str().unwrap();
+        let value = region_spectrum_json(key, &disk(), None, None).unwrap();
+        let err = f32_array(&value["err"]);
+        let flux_jy_err = value["flux_jy_err"].as_array().expect("error in Jy");
+        assert_eq!(flux_jy_err.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = err[z] as f64 * 1e-3;
+            let got = flux_jy_err[z].as_f64().unwrap();
+            assert!(expected > 0.0 && (got - expected).abs() <= 1e-12 * expected, "channel {}: {} vs {}", z, got, expected);
+        }
+        invalidate_set(key);
+    }
+
+    #[test]
+    fn a_point_spectrum_follows_the_same_factor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jy_sr_point.fits");
+        write_line_cube_with_cards(&path, &[("BUNIT", "'Jy/sr'")]);
+        let key = path.to_str().unwrap();
+        let response = cube_spectrum_json(key, 16, 16).unwrap();
+        let spectrum = response[RES_SPECTRUM].as_array().unwrap();
+        let flux = response[KEY_FLUX_JY].as_array().expect("flux in Jy");
+        assert_eq!(flux.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = spectrum[z].as_f64().unwrap() * AREA_SR;
+            let got = flux[z].as_f64().unwrap();
+            assert!(expected > 0.0 && (got - expected).abs() <= 1e-12 * expected, "z={} got={} expected={}", z, got, expected);
+        }
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn the_note_names_the_unit_and_the_factor_only_for_the_new_conversions() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = region_response_in(&dir, "jy_sr_note.fits", &[("BUNIT", "'Jy/sr'")]);
+        let expected = format!("{} 'Jy/sr': {:e} Jy per pixel unit", JY_NOTE_PREFIX, AREA_SR);
+        assert!(response.notes.iter().any(|n| *n == expected), "{:?}", response.notes);
+
+        let response = region_response_in(&dir, "mjy_sr_note.fits", &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")]);
+        assert!(response.flux_jy.is_some());
+        assert!(!response.notes.iter().any(|n| n.starts_with(JY_NOTE_PREFIX)), "{:?}", response.notes);
+    }
+
+    #[test]
+    fn a_surface_brightness_cube_without_a_celestial_wcs_gets_no_jy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jy_sr_no_wcs.fits");
+        let mut cards = line_cube_cards();
+        cards.retain(|(k, _)| *k != "CTYPE1" && *k != "CTYPE2" && *k != "BUNIT");
+        cards.push(("BUNIT", "'Jy/sr'"));
+        write_cube(&path, LINE_CUBE_SIZE, LINE_CUBE_SIZE, LINE_CUBE_DEPTH, &cards, |z, y, x| line_cube_value(z, y, x, 0.0));
+        let set = alone(LazyCube::open(path.to_str().unwrap()).unwrap());
+        assert!(load_wcs(&set.sci.source_path, &set.sci.header).is_err());
+        let response = region_spectrum_response(&set, &disk(), None, None, Instant::now()).unwrap();
+        assert!(response.flux_jy.is_none(), "{:?}", response.flux_jy);
+        assert!(!response.notes.iter().any(|n| n.starts_with(JY_NOTE_PREFIX)), "{:?}", response.notes);
     }
 
     #[test]
@@ -1633,7 +1756,7 @@ mod tests {
     }
 
     #[test]
-    fn point_spectrum_reports_flux_in_jy_only_for_mjy_per_sr_cubes() {
+    fn point_spectrum_reports_flux_in_jy_for_mjy_per_sr_and_none_for_jy_per_beam() {
         let dir = tempfile::tempdir().unwrap();
         let (key, _) = open_cube(&dir, "line.fits", 0.0);
         let plain = cube_spectrum_json(&key, 16, 16).unwrap();

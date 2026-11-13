@@ -595,7 +595,7 @@ export default function ChannelStep({
                 >
                   {shortName(f.path)}
                   {filterInfo && (
-                    <span className="text-[7px] text-violet-400/70 bg-violet-500/10 px-1 rounded">
+                    <span className="text-[7px] text-violet-400/90 bg-violet-500/10 px-1 rounded">
                       {filterInfo}
                     </span>
                   )}

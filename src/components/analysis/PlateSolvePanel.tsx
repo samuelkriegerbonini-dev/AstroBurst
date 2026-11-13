@@ -38,7 +38,7 @@ import {
   type SolveIdentity,
 } from "../../utils/solvedWcs";
 import OutputNote from "./OutputNote";
-import { DecimalField, Toggle } from "../ui";
+import { DecimalField, ErrorAlert, Toggle, ERROR_ALERT_COMPACT_CLASS } from "../ui";
 import { useCatalogStore } from "../../hooks/useCatalogStore";
 import { useProgress } from "../../hooks/useProgress";
 import { getApiKey, getConfig } from "../../services/config";
@@ -111,6 +111,14 @@ import {
   type SolveField,
 } from "../../utils/plateSolveResult";
 import { starCountLabel } from "../../utils/analysisLabels";
+import {
+  STAR_FWHM_CARD_LABEL,
+  STAR_FWHM_CARD_TITLE,
+  STAR_FWHM_HEADER,
+  STAR_FWHM_METHOD,
+  medianStarFwhm,
+  starFwhmText,
+} from "../../utils/starListText";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import {
   fieldOfViewText,
@@ -247,7 +255,7 @@ export function SolveCentreCards({ centre, source }: SolveCentreCardsProps) {
         <div
           role="alert"
           data-copy-error
-          className="col-span-2 text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words"
+          className={`col-span-2 ${ERROR_ALERT_COMPACT_CLASS}`}
         >
           {copyError}
         </div>
@@ -670,7 +678,7 @@ export function GaiaRefineBlock({
         </div>
       )}
       {error && (
-        <div role="alert" data-gaia-refine-error className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
+        <div role="alert" data-gaia-refine-error className={ERROR_ALERT_COMPACT_CLASS}>
           {error}
         </div>
       )}
@@ -1229,12 +1237,7 @@ function PlateSolvePanel({
     }
   }, [solvePath, refineLoading, wcsSource, refined, solveResult, onWcsWritten]);
 
-  const medianFwhm = useMemo(() => {
-    if (stars.length === 0) return null;
-    const sorted = stars.map((s) => s.fwhm).sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2).toFixed(2);
-  }, [stars]);
+  const medianFwhm = useMemo(() => medianStarFwhm(stars), [stars]);
 
   const activeWcs = solveResult ? solveResult : wcsInfo;
   const positionHint = parsePositionHint(hintTexts.centerRa, hintTexts.centerDec, hintTexts.radius);
@@ -1315,11 +1318,7 @@ function PlateSolvePanel({
             )}
           </button>
 
-          {detectError && (
-            <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
-              Star detection failed: {detectError}
-            </div>
-          )}
+          {detectError && <ErrorAlert compact message={`Star detection failed: ${detectError}`} />}
 
           {overlayUnavailable && (
             <div className="text-[10px] text-zinc-500">
@@ -1341,9 +1340,9 @@ function PlateSolvePanel({
                   <div className="text-zinc-500">Stars</div>
                   <div className="text-cyan-300 font-mono break-words">{starCountLabel(stars.length, detectedTotal)}</div>
                 </div>
-                <div className="bg-zinc-900/80 rounded px-2 py-1">
-                  <div className="text-zinc-500">FWHM</div>
-                  <div className="text-cyan-300 font-mono">{medianFwhm} px</div>
+                <div className="bg-zinc-900/80 rounded px-2 py-1" title={STAR_FWHM_CARD_TITLE}>
+                  <div className="text-zinc-500">{STAR_FWHM_CARD_LABEL}</div>
+                  <div className="text-cyan-300 font-mono break-words">{starFwhmText(medianFwhm, activeWcs?.pixel_scale_arcsec)}</div>
                 </div>
                 <div className="bg-zinc-900/80 rounded px-2 py-1">
                   <div className="text-zinc-500">Time</div>
@@ -1366,7 +1365,7 @@ function PlateSolvePanel({
                     <th className="text-right px-1" title={ZERO_BASED_PIXEL_TITLE}>X (0-based)</th>
                     <th className="text-right px-1" title={ZERO_BASED_PIXEL_TITLE}>Y (0-based)</th>
                     <th className="text-right px-1">Flux</th>
-                    <th className="text-right px-1">FWHM</th>
+                    <th className="text-right px-1" title={STAR_FWHM_METHOD}>{STAR_FWHM_HEADER}</th>
                     <th className="text-right px-1">SNR</th>
                   </tr>
                   </thead>
@@ -1648,11 +1647,7 @@ function PlateSolvePanel({
             />
           )}
 
-          {solveError && !solveFailure && (
-            <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
-              {solveError}
-            </div>
-          )}
+          {solveError && !solveFailure && <ErrorAlert compact message={solveError} />}
 
           {solveError && !solveFailure && !solveLoading && lastSolver === FALLBACK_SOLVER && solveOptions.offerNova && (
             <button
@@ -1726,11 +1721,7 @@ function PlateSolvePanel({
             )}
           </button>
 
-          {wcsWriteError && (
-            <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
-              {wcsWriteError}
-            </div>
-          )}
+          {wcsWriteError && <ErrorAlert compact message={wcsWriteError} />}
 
           {wcsWritten && (
             <div data-wcs-summary className="text-[10px] text-emerald-300 break-words">

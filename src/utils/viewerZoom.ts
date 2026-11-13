@@ -55,8 +55,16 @@ export function wheelZoomFactor(deltaY: number, deltaMode: number): number {
   return Math.exp(-px * WHEEL_K);
 }
 
-export function imageRenderingFor(renderScale: number): "pixelated" | "auto" {
-  return renderScale > 1 ? "pixelated" : "auto";
+function usablePixelRatio(ratio: number | undefined): number {
+  return ratio !== undefined && Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
+}
+
+export function screenPixelRatio(): number {
+  return typeof window !== "undefined" ? usablePixelRatio(window.devicePixelRatio) : 1;
+}
+
+export function imageRenderingFor(renderScale: number, devicePixelRatio?: number): "pixelated" | "auto" {
+  return renderScale * usablePixelRatio(devicePixelRatio) > 1 ? "pixelated" : "auto";
 }
 
 export function previewTextureBadge(renderW: number, fitsW: number | undefined): string | null {

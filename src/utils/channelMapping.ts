@@ -99,7 +99,7 @@ export function filterCardValue(file: ChannelSource): string | null {
 }
 
 export function resolveFilterFromName(name: string): { code: string; nm: number } | null {
-  return filterCodeAndWavelengthNm(name.replace(/\.(?:(?:fits?|fts)(?:\.gz)?|asdf)$/i, ""));
+  return filterCodeAndWavelengthNm(name.replace(/\.(?:(?:fits?|fts)(?:\.(?:gz|bz2))?|asdf)$/i, ""));
 }
 
 export function resolveFileFilter(file: ChannelSource): { code: string; nm: number } | null {

@@ -93,6 +93,7 @@ export function parseAngle(
 }
 
 function wrapLongitude(deg: number): number {
+  if (deg >= 0 && deg < DEG_PER_TURN) return deg;
   return ((deg % DEG_PER_TURN) + DEG_PER_TURN) % DEG_PER_TURN;
 }
 

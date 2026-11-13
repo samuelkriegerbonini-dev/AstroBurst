@@ -133,11 +133,30 @@ describe("usableRows", () => {
     });
     const rows = usableRows(x1d);
     expect(rows.wavelength).toEqual([1, 2, 4, 5]);
-    expect(rows.flux).toEqual([10, NaN, 40, NaN]);
-    expect(rows.err).toEqual([1, null, 4, null]);
+    expect(rows.flux).toEqual([10, NaN, 40, 50]);
+    expect(rows.err).toEqual([1, null, 4, 5]);
     expect(rows.sb).toEqual([null, null, null, null]);
+    expect(rows.flagged).toEqual([false, true, false, false]);
+    expect(rows.droppedDq).toBe(1);
+  });
+
+  it("drops only the rows the flag table excludes", () => {
+    const jwst = x1dOf([1, 2, 3, 4], [10, 20, 30, 40], { dq: [0, 1, 4, 5] });
+    const rows = usableRows(jwst);
     expect(rows.flagged).toEqual([false, true, false, true]);
-    expect(rows.droppedDq).toBe(3);
+    expect(rows.flux).toEqual([10, NaN, 30, NaN]);
+    expect(rows.droppedDq).toBe(2);
+    const hst = usableRows(x1dOf([1, 2, 3, 4], [10, 20, 30, 40], { dq_table: "hst", dq: [0, 0x4000, 1, 0x3fff] }));
+    expect(hst.flagged).toEqual([false, false, true, true]);
+    const unknown = usableRows(x1dOf([1, 2, 3, 4], [10, 20, 30, 40], { dq_table: "unknown", dq: [0, 1, 4, 5] }));
+    expect(unknown.flagged).toEqual([false, false, false, false]);
+    expect(unknown.droppedDq).toBe(0);
+    const unmasked = usableRows(jwst, false);
+    expect(unmasked.flagged).toEqual([false, false, false, false]);
+    expect(unmasked.flux).toEqual([10, 20, 30, 40]);
+    expect(unmasked.droppedDq).toBe(0);
+    const empty = usableRows(x1dOf([], []));
+    expect(empty).toEqual({ wavelength: [], flux: [], err: [], sb: [], flagged: [], droppedDq: 0 });
   });
 
   it("keeps every row when the table has no DQ column and turns null fluxes into NaN", () => {
@@ -281,9 +300,18 @@ describe("labels and entries", () => {
     expect(entry.table?.nRows).toBe(3);
     expect(entry.table?.fluxUnit).toBe("Jy");
     expect(entry.table?.sbUnit).toBe("MJy/sr");
-    expect(entry.table?.resampled.droppedDq).toBe(1);
-    expect(entry.table?.resampled.flux).toEqual([10, NaN, 30]);
-    expect(entry.table?.resampled.fluxErr).toEqual([1, null, 3]);
+    expect(entry.table?.resampled.droppedDq).toBe(0);
+    expect(entry.table?.resampled.flux).toEqual([10, 20, 30]);
+    expect(entry.table?.resampled.fluxErr).toEqual([1, 2, 3]);
+  });
+
+  it("marks the pipeline spectrum as dashed", () => {
+    const vacuum: VacuumAxis = { values: [1, 2, 3], restUm: null, restOrigin: null, reason: null };
+    expect(tableEntry(x1dOf([1, 2, 3], [10, 20, 30]), vacuum, 3).dashed).toBe(true);
+    const doc = spectrumOf(axisOf("wave", [1, 2, 3]), [1, 2, 3]);
+    const entries = documentComparisonEntries(doc, { kind: "file", hdu: 1 }, x1dOf([1, 2, 3], [10, 20, 30]), vacuum, 3);
+    expect(entries[0].dashed).toBeUndefined();
+    expect(entries[1].dashed).toBe(true);
   });
 
   it("tableEntry carries the vacuum reason as its error when the cube has no vacuum axis", () => {
@@ -335,6 +363,14 @@ describe("sibling paths", () => {
     expect(x1dStem("C:/d/a_x1d.fit.gz")).toBe("a");
     expect(x1dStem("C:/d/a_x1d.tar.gz")).toBeNull();
     expect(x1dStem("C:/d/a_x1d.gz")).toBeNull();
+  });
+
+  it("x1dStem strips a bzip2 suffix after the FITS spelling", () => {
+    expect(x1dStem("C:/d/jw01_nrs1_x1d.fits.bz2")).toBe("jw01_nrs1");
+    expect(x1dStem("C:\\d\\a_x1d.FTS.BZ2#hdu=1")).toBe("a");
+    expect(x1dStem("C:/d/a_x1d.bz2")).toBeNull();
+    const cube = fileOf("b", "C:/d/jw01_nrs1_s3d.fits.bz2#hdu=1");
+    expect(findSiblingCube([cube], "C:/d/jw01_nrs1_x1d.fits.bz2")).toBe(cube);
   });
 
   it("findSiblingCube pairs gzip and plain names in every combination", () => {
@@ -505,6 +541,21 @@ describe("documentAsTable", () => {
     expect(known.droppedDq).toBe(1);
   });
 
+  it("counts the flagged rows of a document by its table", () => {
+    const axis = [2.0, 2.1, 2.2];
+    const doc = spectrumOf(axisOf("wave", axis), [1, 2, 3], {
+      source: { kind: "csv", path: "C:/d/jwst_spectrum.csv" },
+      dq: [0, 1, 4],
+      dq_table: "jwst",
+    });
+    const table = documentAsTable(doc);
+    expect(table.dq_flagged_rows).toBe(1);
+    const resampled = resampleTable(table, axis);
+    expect(resampled.flux[0]).toBe(1);
+    expect(resampled.flux[1]).toBeNaN();
+    expect(resampled.flux[2]).toBe(3);
+  });
+
   it("refuses a spectrum whose axis has no vacuum wavelength, naming the file", () => {
     const velocity = spectrumOf(axisOf("vopt", [0, 10, 20], { unit: "km/s" }), [1, 2, 3], { source: { kind: "csv", path: "C:/d/v.csv" } });
     expect(() => documentAsTable(velocity)).toThrow(/v\.csv: .*rest wavelength/);
@@ -547,10 +598,39 @@ describe("documentComparisonEntries", () => {
     expect(entries.map((e) => e.kind)).toEqual(["document"]);
   });
 
+  it("masks the document's own series like its plot", () => {
+    const axis = [2.0, 2.001, 2.002, 2.003];
+    const jwst = spectrumOf(axisOf("wave", axis), [1, 2, 3, 4], { dq: [0, 1, 0, 4], dq_table: "jwst" });
+    const vacuum = vacuumUmAxis(jwst.axis, null, "optical", 4);
+    const source = { kind: "file", hdu: 1 } as const;
+    expect(documentComparisonEntries(jwst, source, null, vacuum, 4)[0].document).toEqual({ flux: [1, NaN, 3, 4], fluxUnit: "Jy", droppedDq: 1 });
+    expect(documentComparisonEntries(jwst, source, null, vacuum, 4, false)[0].document).toEqual({ flux: [1, 2, 3, 4], fluxUnit: "Jy", droppedDq: 0 });
+    const withoutDq = spectrumOf(axisOf("wave", axis), [1, 2, 3, 4], { dq: null, dq_table: "jwst" });
+    const plain = documentComparisonEntries(withoutDq, source, null, vacuum, 4)[0].document;
+    expect(plain?.flux).toBe(withoutDq.flux);
+    expect(plain?.droppedDq).toBe(0);
+    const unknown = spectrumOf(axisOf("wave", axis), [1, 2, 3, 4], { dq: [0, 1, 0, 4], dq_table: "unknown" });
+    const unknownSeries = documentComparisonEntries(unknown, source, null, vacuum, 4)[0].document;
+    expect(unknownSeries?.flux).toBe(unknown.flux);
+    expect(unknownSeries?.droppedDq).toBe(0);
+  });
+
   it("reports the document unit for its entry", () => {
     const doc = spectrumOf(axisOf("wave", AXIS), AXIS.map(() => 1), { flux_unit: "erg/s/cm2/A" });
     const [entry] = documentComparisonEntries(doc, { kind: "file", hdu: 0 }, null, vacuumUmAxis(doc.axis, null, "optical", AXIS.length), AXIS.length);
     expect(entryFluxUnit(entry, "MJy/sr", "sum")).toBe("erg/s/cm2/A");
+  });
+
+  it("reads a time-series pick as a comparison table under the name of its first file", () => {
+    const doc = spectrumOf(axisOf("wave", [2.87, 2.88, 2.89, 2.9]), [1, 2, 3, 4], {
+      source: { kind: "x1dints", paths: ["C:/d/jw03375-o001_x1dints.fits"], detector: "NRS1", sporder: -1, pick: { kind: "median" } },
+    });
+    const table = documentAsTable(doc);
+    expect(table.path).toBe("C:/d/jw03375-o001_x1dints.fits");
+    expect(table.hdu).toBe(0);
+    expect(table.extver).toBeNull();
+    const vacuum = vacuumUmAxis(doc.axis, null, "optical", 4);
+    expect(documentComparisonEntries(doc, { kind: "file", hdu: null }, null, vacuum, 4)[0].label).toBe("jw03375-o001_x1dints.fits");
   });
 });
 

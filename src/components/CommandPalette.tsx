@@ -11,10 +11,14 @@ export interface PaletteAction {
   run: () => void;
 }
 
+export const HIDDEN_FILE_HINT = "hidden by filter";
+
 export interface PaletteFile {
   id: string;
   name: string;
   filter?: string;
+  searchText?: string;
+  hidden?: boolean;
 }
 
 interface CommandPaletteProps {
@@ -96,10 +100,10 @@ export default function CommandPalette({ open, onClose, actions, files, selected
         key: `f:${f.id}`,
         kind: "file" as const,
         label: f.name,
-        hint: f.filter,
+        hint: f.hidden ? (f.filter ? `${f.filter} · ${HIDDEN_FILE_HINT}` : HIDDEN_FILE_HINT) : f.filter,
         icon: FileText,
         run: () => onSelectFile(f.id),
-        score: Math.max(matchScore(f.name, q), f.filter ? matchScore(f.filter, q) : 0),
+        score: Math.max(matchScore(f.name, q), f.filter ? matchScore(f.filter, q) : 0, q && f.searchText?.includes(q) ? 1 : 0),
       }))
       .filter((e) => e.score > 0)
       .slice(0, FILE_CAP);

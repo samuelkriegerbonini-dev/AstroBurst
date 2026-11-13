@@ -15,3 +15,6 @@ pub mod object_names;
 pub mod solve_hints;
 pub mod local_solve;
 pub mod gaia_tie;
+pub mod legacy_pc;
+pub mod cosmology;
+pub mod catalog_compare;

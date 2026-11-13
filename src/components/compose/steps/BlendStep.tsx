@@ -374,9 +374,9 @@ export default function BlendStep({
       <div className="flex flex-col gap-0.5">
         <div className="grid grid-cols-[1fr_60px_60px_60px] gap-1 px-1 text-[9px] text-zinc-600 uppercase tracking-wider">
           <span>Channel</span>
-          <span className="text-center text-red-400/60">R</span>
-          <span className="text-center text-green-400/60">G</span>
-          <span className="text-center text-blue-400/60">B</span>
+          <span className="text-center text-red-400/90">R</span>
+          <span className="text-center text-green-400/90">G</span>
+          <span className="text-center text-blue-400/90">B</span>
         </div>
 
         {activeWeights.map((w) => {

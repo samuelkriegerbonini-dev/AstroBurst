@@ -23,11 +23,12 @@ use crate::core::imaging::cutout::CutoutRect;
 use crate::core::imaging::psf_estimation::EmpiricalPsfOptions;
 use crate::core::history::stamp::{file_stamp, utc_timestamp};
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
+use crate::core::metadata::filter_wavelengths::FilterRegistry;
 use crate::core::metadata::units::{AreaRule, TargetUnit};
 use crate::infra::paths::plain;
 use crate::infra::progress::ProgressHandle;
 use crate::service::cubeprep::{
-    align_set_with, build_cube_with, build_kernels_with, convert_units_file, crop_set_with, edit_cube_with, filter_registry, load_psfs_with,
+    align_set_with, build_cube_with, build_kernels_with, convert_units_file, crop_set_with, edit_cube_with, filter_registry, filter_registry_report, load_psfs_with,
     psf_match_cube_with, CubeInputSpec, PsfInputSpec,
 };
 use crate::service::cutout::export_cutout_rect;
@@ -507,6 +508,11 @@ impl Recipe {
     }
 
     pub fn validate(&self) -> Result<Vec<String>, CodedError> {
+        let (registry, skipped) = filter_registry_report();
+        self.validate_with(&registry, &skipped)
+    }
+
+    fn validate_with(&self, registry: &FilterRegistry, skipped: &[String]) -> Result<Vec<String>, CodedError> {
         let mut filters: Vec<&str> = Vec::new();
         for (index, input) in self.inputs.iter().enumerate() {
             let place = format!("inputs[{index}]");
@@ -523,16 +529,16 @@ impl Recipe {
             require_file(&place, &input.path)?;
             filters.push(&input.filter);
         }
-        let registry = filter_registry();
+        let suffix: String = skipped.iter().map(|warning| format!("; {warning}")).collect();
         let datasets = registry.datasets();
         for (index, input) in self.inputs.iter().enumerate() {
             let place = format!("inputs[{index}]");
             if !datasets.iter().any(|dataset| same(dataset, &input.dataset)) {
-                return Err(coded(RECIPE_INVALID, format!("{place}: dataset {} is not in the filter registry", input.dataset), Some(format!("known datasets: {}", datasets.join(", ")))));
+                return Err(coded(RECIPE_INVALID, format!("{place}: dataset {} is not in the filter registry", input.dataset), Some(format!("known datasets: {}{suffix}", datasets.join(", ")))));
             }
             let entry = registry.entry(&input.dataset, &input.filter).ok_or_else(|| coded(RECIPE_INVALID,
                 format!("{place}: the filter registry has no {} filter {}", input.dataset, input.filter),
-                Some("choose a filter from the dataset's filter registry".into())))?;
+                Some(format!("choose a filter from the dataset's filter registry{suffix}"))))?;
             if !same(&entry.filter, &input.filter) {
                 return Err(coded(RECIPE_INVALID, format!("{place}: {} is an alias of {} {}; write {}", input.filter, entry.dataset, entry.filter, entry.filter),
                     Some(format!("use {} consistently in inputs and step references", entry.filter))));
@@ -542,7 +548,9 @@ impl Recipe {
         for (index, step) in self.steps.iter().enumerate() {
             validate_step(&format!("steps[{index}] ({})", step.kind()), step, &filters, &mut planned)?;
         }
-        Ok(cut_before_match(&self.steps))
+        let mut warnings = cut_before_match(&self.steps);
+        warnings.extend(skipped.iter().cloned());
+        Ok(warnings)
     }
 }
 
@@ -1335,6 +1343,7 @@ mod tests {
     use crate::core::imaging::psf_estimation::RadiusUnit;
     use crate::core::metadata::photcal::card_text;
     use crate::infra::fits::reader::{extract_header_by_index, list_extensions};
+    use crate::types::config::CustomFilter;
     use crate::types::header::HduHeader;
 
     fn fixtures() -> PathBuf {
@@ -2380,6 +2389,73 @@ mod tests {
         after["steps"].as_array_mut().unwrap().push(cut);
         assert!(Recipe::from_value(&after).unwrap().resolved(&fixtures().join("d1")).validate().unwrap().is_empty());
         assert!(Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1")).validate().unwrap().is_empty());
+    }
+
+    const SKIPPED_JWST_WARNING: &str = "custom filter dataset JWST is not used: JWST is a built-in dataset; rename it in filter_datasets to keep its filters";
+
+    fn skipped_jwst() -> (FilterRegistry, Vec<String>) {
+        let filter = CustomFilter { pivot_angstrom: 9990.0, instrument: "X".into(), group: "X".into(), aliases: vec![] };
+        let datasets = BTreeMap::from([("JWST".to_string(), BTreeMap::from([("F999X".to_string(), filter)]))]);
+        FilterRegistry::with_custom_datasets(&datasets)
+    }
+
+    fn d1_input_as(dataset: &str, filter: &str) -> Recipe {
+        let mut value = d1_recipe();
+        value["inputs"][0]["dataset"] = json!(dataset);
+        value["inputs"][0]["filter"] = json!(filter);
+        Recipe::from_value(&value).unwrap().resolved(&fixtures().join("d1"))
+    }
+
+    #[test]
+    fn the_fixture_of_the_skipped_dataset_is_what_the_registry_reports() {
+        let (registry, skipped) = skipped_jwst();
+        assert_eq!(skipped, [SKIPPED_JWST_WARNING]);
+        assert!(registry.entry("JWST", "F444W").is_some());
+    }
+
+    #[test]
+    fn a_skipped_custom_dataset_is_told_with_a_valid_recipe() {
+        let (registry, skipped) = skipped_jwst();
+        let d1 = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        assert_eq!(d1.validate_with(&registry, &skipped).unwrap(), [SKIPPED_JWST_WARNING]);
+        assert!(d1.validate_with(&registry, &[]).unwrap().is_empty());
+        let mut before = d1_recipe();
+        before["steps"].as_array_mut().unwrap().insert(5, json!({ "step": "edit", "action": "cut", "x_start": 2, "x_end": 40, "y_start": 2, "y_end": 40 }));
+        let cut = Recipe::from_value(&before).unwrap().resolved(&fixtures().join("d1"));
+        let advisory = "09_match: 06_edit cuts the cube before the match; pixels within half a kernel width of the cut edges are matched against zeros; place the cut after match to use the cut-away data";
+        assert_eq!(cut.validate_with(&registry, &skipped).unwrap(), [advisory, SKIPPED_JWST_WARNING]);
+        assert_eq!(cut.validate_with(&registry, &[]).unwrap(), [advisory]);
+    }
+
+    #[test]
+    fn a_registry_refusal_carries_the_skipped_dataset_in_its_hint() {
+        let (registry, skipped) = skipped_jwst();
+        let tail = format!("; {SKIPPED_JWST_WARNING}");
+        let known = format!("known datasets: {}", registry.datasets().join(", "));
+
+        let unknown = d1_input_as("HTS", "F814W");
+        let error = unknown.validate_with(&registry, &skipped).unwrap_err();
+        assert_eq!((error.code, error.message.as_str()), (RECIPE_INVALID, "inputs[0]: dataset HTS is not in the filter registry"));
+        assert_eq!(error.hint, Some(format!("{known}{tail}")));
+        assert_eq!(unknown.validate_with(&registry, &[]).unwrap_err().hint, Some(known));
+
+        let missing = d1_input_as("HST", "F20W");
+        let error = missing.validate_with(&registry, &skipped).unwrap_err();
+        assert_eq!((error.code, error.message.as_str()), (RECIPE_INVALID, "inputs[0]: the filter registry has no HST filter F20W"));
+        assert_eq!(error.hint, Some(format!("choose a filter from the dataset's filter registry{tail}")));
+        assert_eq!(missing.validate_with(&registry, &[]).unwrap_err().hint.as_deref(), Some("choose a filter from the dataset's filter registry"));
+
+        let alias = d1_input_as("HST", "F275WU");
+        let error = alias.validate_with(&registry, &skipped).unwrap_err();
+        assert_eq!(error.hint.as_deref(), Some("use F275W consistently in inputs and step references"));
+        assert_eq!(error, alias.validate_with(&registry, &[]).unwrap_err());
+    }
+
+    #[test]
+    fn validate_reads_the_registry_report() {
+        let recipe = Recipe::from_value(&d1_recipe()).unwrap().resolved(&fixtures().join("d1"));
+        let (registry, skipped) = filter_registry_report();
+        assert_eq!(recipe.validate(), recipe.validate_with(&registry, &skipped));
     }
 
     #[test]

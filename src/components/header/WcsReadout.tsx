@@ -1,10 +1,14 @@
-import { useState, useEffect, useCallback, memo } from "react";
+import { useState, useEffect, useCallback, useRef, memo } from "react";
 import { Globe } from "lucide-react";
 import { getWcsInfo, pixelToWorld } from "../../services/astrometry";
 import type { WcsInfo, SkyFrame } from "../../shared/types/astrometry";
 import { formatLat, formatLon, frameAxisLabels, frameLonInHours, pixelScaleText, type CoordFormat } from "../../utils/coordFormat";
 import { ZERO_BASED_PIXEL_TITLE, zeroBasedPixelText } from "../../utils/regionGeometry";
 import { ROTATION_TITLE, orientationLine } from "../../utils/wcsOrientation";
+import { resolutionCheck } from "../../services/resolution";
+import { useResolutionSettings } from "../../hooks/useResolutionSettings";
+import type { ResolutionCheck } from "../../shared/types/resolution";
+import { resolutionRequest, scaleText, type PsfChoice } from "../../utils/resolutionText";
 
 interface WcsReadoutProps {
   filePath: string | null;
@@ -32,6 +36,8 @@ const FORMATS: readonly CoordFormat[] = ["sexagesimal", "decimal"];
 const HOVER_DEBOUNCE_MS = 40;
 const NO_SKY_POSITION: [number, number] = [Number.NaN, Number.NaN];
 const CENTRE_LABEL = "centre";
+const NO_PSF: PsfChoice = { fwhmArcsec: null, halfLightRadiusArcsec: null, reference: null, missing: null };
+const SCALE_SOURCE_NOTE = "Redshift from the Resolution section of the Photometry tool.";
 
 const SELECT_CLASS =
   "min-h-[22px] max-w-full bg-zinc-900 border border-zinc-700 rounded px-1 text-[10px] text-zinc-300 focus:border-zinc-500";
@@ -65,6 +71,13 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
   const wcsInfo = wcs?.filePath === filePath ? wcs.info : null;
   const coordResolved = coordResult?.filePath === filePath && coordResult.frame === pref.frame;
   const center = centerResult?.filePath === filePath && centerResult.frame === pref.frame ? centerResult.point : null;
+  const settings = useResolutionSettings();
+  const [scaleAnswer, setScaleAnswer] = useState<{ requestKey: string; check: ResolutionCheck } | null>(null);
+  const scaleRequest = wcsInfo && settings.redshift !== null ? resolutionRequest(settings, NO_PSF, wcsInfo.pixel_scale_arcsec, {}) : null;
+  const scaleRequestKey = scaleRequest ? JSON.stringify(scaleRequest) : null;
+  const scaleRequestRef = useRef(scaleRequest);
+  scaleRequestRef.current = scaleRequest;
+  const scaleCheck = scaleAnswer !== null && scaleAnswer.requestKey === scaleRequestKey ? scaleAnswer.check : null;
 
   const updatePref = useCallback((patch: Partial<ReadoutPreference>) => {
     setPref((prev) => {
@@ -142,6 +155,24 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
     };
   }, [filePath, wcsInfo, mouseX, mouseY, pref.frame]);
 
+  useEffect(() => {
+    const asked = scaleRequestRef.current;
+    if (asked === null || scaleRequestKey === null) return;
+    let cancelled = false;
+    resolutionCheck(asked)
+      .then((check) => {
+        if (cancelled) return;
+        setScaleAnswer({ requestKey: scaleRequestKey, check });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setScaleAnswer(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scaleRequestKey]);
+
   if (!wcsInfo) return null;
 
   const [lonLabel, latLabel] = frameAxisLabels(pref.frame);
@@ -151,6 +182,8 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
   const shown = hovering ? hovered : center;
   const scale = pixelScaleText(wcsInfo.pixel_scale_arcsec);
   const orientation = orientationLine(wcsInfo);
+  const physicalScale = scaleCheck ? scaleText(scaleCheck) : null;
+  const sexagesimal = pref.format === "sexagesimal";
 
   return (
     <div className="flex flex-col gap-1 text-[10px] font-mono" style={{ color: "#6ee7b7" }}>
@@ -184,8 +217,8 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
         {!hovering && shown && <span className="text-zinc-400">{CENTRE_LABEL}</span>}
         {shown ? (
           <>
-            <span>{lonLabel} {formatLon(shown[0], { hours, format: pref.format })}</span>
-            <span>{latLabel} {formatLat(shown[1], { format: pref.format })}</span>
+            <span>{lonLabel} {formatLon(shown[0], { hours, format: pref.format, precision: sexagesimal ? (hours ? 3 : 2) : undefined })}</span>
+            <span>{latLabel} {formatLat(shown[1], { format: pref.format, precision: sexagesimal ? 2 : undefined })}</span>
           </>
         ) : null}
         {mouseX !== null && mouseY !== null && (
@@ -195,6 +228,9 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
         )}
       </div>
       {orientation && <div className="text-zinc-400" title={ROTATION_TITLE}>{orientation}</div>}
+      {scaleCheck && physicalScale !== null && (
+        <div className="text-zinc-400" data-readout-scale title={`${scaleCheck.cosmology}. ${SCALE_SOURCE_NOTE}`}>{physicalScale}</div>
+      )}
     </div>
   );
 }

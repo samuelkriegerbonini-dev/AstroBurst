@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex, MutexGuard, Once, OnceLock, PoisonError, Weak};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, Context, Result};
+use bzip2::bufread::BzDecoder;
 use flate2::bufread::GzDecoder;
 use tempfile::TempDir;
 
 use crate::core::stacking::memory::{
     effective_memory, format_bytes, MemoryInfo, MEMORY_BUDGET_ENV,
 };
+use crate::infra::fits::bzip::{split_bz2_suffix, starts_with_bzip2, BZIP2_HEAD_BYTES, BZIP2_MAGIC};
 
 pub(crate) const GZIP_MAGIC: [u8; 2] = [0x1F, 0x8B];
 const GZIP_SUFFIX: &str = ".gz";
@@ -40,22 +42,79 @@ pub fn starts_with_gzip(head: &[u8]) -> bool {
     head.starts_with(&GZIP_MAGIC)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Codec {
+    Gzip,
+    Bzip2,
+}
+
+impl Codec {
+    fn of_head(head: &[u8]) -> Option<Self> {
+        if starts_with_gzip(head) {
+            Some(Self::Gzip)
+        } else if starts_with_bzip2(head) {
+            Some(Self::Bzip2)
+        } else {
+            None
+        }
+    }
+
+    fn format_name(self) -> &'static str {
+        match self {
+            Self::Gzip => "gzip",
+            Self::Bzip2 => "bzip2",
+        }
+    }
+
+    fn stream_unit(self) -> &'static str {
+        match self {
+            Self::Gzip => "member",
+            Self::Bzip2 => "stream",
+        }
+    }
+
+    fn first_byte(self) -> u8 {
+        match self {
+            Self::Gzip => GZIP_MAGIC[0],
+            Self::Bzip2 => BZIP2_MAGIC[0],
+        }
+    }
+
+    fn without_suffix(self, name: &str) -> &str {
+        match self {
+            Self::Gzip => split_gz_suffix(name).0,
+            Self::Bzip2 => split_bz2_suffix(name).0,
+        }
+    }
+
+    fn decoder<'a>(self, reader: impl BufRead + 'a) -> Box<dyn Read + 'a> {
+        match self {
+            Self::Gzip => Box::new(GzDecoder::new(reader)),
+            Self::Bzip2 => Box::new(BzDecoder::new(reader)),
+        }
+    }
+}
+
 pub fn resolve_gzip(path: &Path) -> Result<(PathBuf, Option<SharedTempDir>)> {
-    if !is_gzip_file(path) {
+    if compressed_codec(path).is_none() {
         return Ok((path.to_path_buf(), None));
     }
     let root = std::env::temp_dir();
-    SWEEP.call_once(|| sweep_stale_copies(&root, SystemTime::now(), STALE_COPY_AGE));
+    sweep_stale_copies_once();
     let (copy, dir) = COPIES.resolve(path, &root, &temp_folder_cap)?;
     Ok((copy, Some(dir)))
 }
 
 pub fn resolve_gzip_fresh(path: &Path) -> Result<(PathBuf, Option<SharedTempDir>)> {
-    if !is_gzip_file(path) {
+    if compressed_codec(path).is_none() {
         return Ok((path.to_path_buf(), None));
     }
     let (copy, dir) = CopyCache::new().resolve(path, &std::env::temp_dir(), &temp_folder_cap)?;
     Ok((copy, Some(dir)))
+}
+
+pub(super) fn sweep_stale_copies_once() {
+    SWEEP.call_once(|| sweep_stale_copies(&std::env::temp_dir(), SystemTime::now(), STALE_COPY_AGE));
 }
 
 pub(crate) fn temp_folder_cap() -> Cap {
@@ -69,17 +128,17 @@ pub(crate) fn gunzip_or_copy(
     cap: &dyn Fn() -> Cap,
     label: &str,
 ) -> Result<u64> {
-    let mut head = Vec::with_capacity(GZIP_MAGIC.len());
+    let mut head = Vec::with_capacity(BZIP2_HEAD_BYTES);
     input
         .by_ref()
-        .take(GZIP_MAGIC.len() as u64)
+        .take(BZIP2_HEAD_BYTES as u64)
         .read_to_end(&mut head)
         .map_err(|e| anyhow!("{label} could not be extracted: {e}"))?;
     let stream = head.as_slice().chain(input);
-    if !starts_with_gzip(&head) {
-        return copy_capped(stream, output, &cap(), label);
+    match Codec::of_head(&head) {
+        Some(codec) => Ok(decompress_capped(codec, stream, output, &cap(), label)?),
+        None => copy_capped(stream, output, &cap(), label),
     }
-    Ok(gunzip_capped(stream, output, &cap(), label)?)
 }
 
 pub(crate) fn copy_capped(input: impl Read, output: &mut impl Write, cap: &Cap, label: &str) -> Result<u64> {
@@ -101,12 +160,14 @@ pub(crate) fn split_gz_suffix(name: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn is_gzip_file(path: &Path) -> bool {
-    let mut head = [0u8; GZIP_MAGIC.len()];
+fn compressed_codec(path: &Path) -> Option<Codec> {
+    let mut head = Vec::with_capacity(BZIP2_HEAD_BYTES);
     File::open(path)
-        .and_then(|mut file| file.read_exact(&mut head))
-        .is_ok()
-        && starts_with_gzip(&head)
+        .ok()?
+        .take(BZIP2_HEAD_BYTES as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    Codec::of_head(&head)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,17 +439,19 @@ fn decode(path: &Path, root: &Path, cap: &Cap) -> (Outcome, Option<SharedTempDir
     }
 }
 
-fn decompressed_name(path: &Path) -> String {
+fn decompressed_name(path: &Path, codec: Codec) -> String {
     let name = path.file_name().map_or_else(
         || FALLBACK_NAME.to_string(),
         |n| n.to_string_lossy().into_owned(),
     );
-    split_gz_suffix(&name).0.to_string()
+    codec.without_suffix(&name).to_string()
 }
 
 fn gunzip_into(path: &Path, cap: &Cap, root: &Path) -> Result<(PathBuf, TempDir), GunzipError> {
     let label = path.display().to_string();
     let source = File::open(path).map_err(io_failure(format!("Failed to open {label}")))?;
+    let codec = compressed_codec(path)
+        .ok_or_else(|| GunzipError::Io(format!("{label} is no longer a gzip or bzip2 file")))?;
     let guard = tempfile::Builder::new()
         .prefix(TEMP_PREFIX)
         .tempdir_in(root)
@@ -396,13 +459,13 @@ fn gunzip_into(path: &Path, cap: &Cap, root: &Path) -> Result<(PathBuf, TempDir)
             "cannot create a temporary folder in {} to decompress {label}",
             root.display()
         )))?;
-    let copy = guard.path().join(decompressed_name(path));
+    let copy = guard.path().join(decompressed_name(path, codec));
     let file = File::create(&copy).map_err(io_failure(format!(
         "cannot create {} to decompress {label}",
         copy.display()
     )))?;
     let mut out = BufWriter::with_capacity(CHUNK_BYTES, file);
-    gunzip_capped(source, &mut out, cap, &label)?;
+    decompress_capped(codec, source, &mut out, cap, &label)?;
     out.flush().map_err(io_failure(format!(
         "{label}: writing the decompressed copy to {} failed",
         copy.display()
@@ -410,28 +473,30 @@ fn gunzip_into(path: &Path, cap: &Cap, root: &Path) -> Result<(PathBuf, TempDir)
     Ok((copy, guard))
 }
 
-fn gunzip_capped(
+fn decompress_capped(
+    codec: Codec,
     input: impl Read,
     output: &mut impl Write,
     cap: &Cap,
     label: &str,
 ) -> Result<u64, GunzipError> {
+    let format = codec.format_name();
     let mut reader = BufReader::with_capacity(CHUNK_BYTES, input);
     let mut chunk = vec![0u8; CHUNK_BYTES];
     let mut total = 0u64;
     loop {
-        let mut member = GzDecoder::new(&mut reader);
+        let mut member = codec.decoder(&mut reader);
         loop {
             let read = match member.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(read) => read,
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(stream_error(&e, label)),
+                Err(e) => return Err(stream_error(codec, &e, label)),
             };
             total = total.saturating_add(read as u64);
             if total > cap.bytes {
                 return Err(GunzipError::TooLarge {
-                    message: cap.refusal(label, "the decompressed gzip stream"),
+                    message: cap.refusal(label, &format!("the decompressed {format} stream")),
                     cap: cap.bytes,
                 });
             }
@@ -440,12 +505,13 @@ fn gunzip_capped(
                 .map_err(io_failure(format!("{label}: writing the decompressed data failed")))?;
         }
         drop(member);
-        match byte_after_zero_padding(&mut reader).map_err(|e| stream_error(&e, label))? {
+        match byte_after_zero_padding(&mut reader).map_err(|e| stream_error(codec, &e, label))? {
             None => return Ok(total),
-            Some(byte) if byte == GZIP_MAGIC[0] => {}
+            Some(byte) if byte == codec.first_byte() => {}
             Some(_) => {
+                let unit = codec.stream_unit();
                 return Err(GunzipError::Damaged(format!(
-                    "{label} has data after its last gzip member that is neither another member nor zero padding; the file is corrupt"
+                    "{label} has data after its last {format} {unit} that is neither another {unit} nor zero padding; the file is corrupt"
                 )));
             }
         }
@@ -471,15 +537,16 @@ fn byte_after_zero_padding(reader: &mut impl BufRead) -> std::io::Result<Option<
     }
 }
 
-fn stream_error(error: &std::io::Error, label: &str) -> GunzipError {
+fn stream_error(codec: Codec, error: &std::io::Error, label: &str) -> GunzipError {
+    let format = codec.format_name();
     match error.kind() {
         ErrorKind::UnexpectedEof => GunzipError::Damaged(format!(
-            "{label} is a truncated gzip file: the compressed stream ends before its end marker ({error})"
+            "{label} is a truncated {format} file: the compressed stream ends before its end marker ({error})"
         )),
         ErrorKind::InvalidInput | ErrorKind::InvalidData => GunzipError::Damaged(format!(
-            "{label} is not a valid gzip stream ({error}); the file is corrupt or truncated"
+            "{label} is not a valid {format} stream ({error}); the file is corrupt or truncated"
         )),
-        _ => GunzipError::Io(format!("{label}: reading the gzip stream failed: {error}")),
+        _ => GunzipError::Io(format!("{label}: reading the {format} stream failed: {error}")),
     }
 }
 
@@ -524,6 +591,7 @@ mod tests {
     use crate::core::cube::lazy::test_support::write_sci_err_dq_mef;
     use crate::core::cube::lazy::LazyCube;
     use crate::core::stacking::memory::{format_bytes, frame_sizes, MEMORY_BUDGET_ENV};
+    use crate::infra::fits::bzip::test_support::{bzip2_bytes, bzip2_copy};
     use crate::infra::fits::dispatcher::resolve_single_image;
     use crate::infra::fits::reader::test_fixtures::{
         empty_primary_cards, plane_hdu, sci_err_dq_mef, write_raw_hdus,
@@ -550,6 +618,15 @@ mod tests {
 
     fn unlimited() -> Cap {
         budget(u64::MAX)
+    }
+
+    fn gunzip_capped(
+        input: impl Read,
+        output: &mut impl Write,
+        cap: &Cap,
+        label: &str,
+    ) -> Result<u64, GunzipError> {
+        decompress_capped(Codec::Gzip, input, output, cap, label)
     }
 
     fn noisy_image(dir: &Path, name: &str) -> PathBuf {
@@ -922,7 +999,7 @@ mod tests {
             assert_eq!(&resolved, path);
             assert!(guard.is_none());
         }
-        assert!(!is_gzip_file(&dir.path().join("missing.fits.gz")));
+        assert!(compressed_codec(&dir.path().join("missing.fits.gz")).is_none());
     }
 
     #[test]
@@ -936,7 +1013,7 @@ mod tests {
             ("renamed.fits", "renamed.fits"),
         ] {
             let gz = gzip_copy(&plain, name);
-            assert!(is_gzip_file(&gz), "{name}");
+            assert_eq!(compressed_codec(&gz), Some(Codec::Gzip), "{name}");
             let (copy, guard) = resolve_gzip(&gz).unwrap();
             assert!(guard.is_some(), "{name}");
             assert_eq!(copy.file_name().unwrap().to_str().unwrap(), expected);
@@ -1165,5 +1242,294 @@ mod tests {
         let (plain_key, gz_key) = (text(&plain), text(&gz));
         let expected = serde_json::to_value(load_spectrum1d(&plain_key, None).unwrap()).unwrap();
         assert_eq!(document_under(&gz_key, &plain_key), expected);
+    }
+
+    #[test]
+    fn a_bzip2_stream_decodes_to_its_original_bytes() {
+        let original: Vec<u8> = (0..250_000u32)
+            .flat_map(|i| i.wrapping_mul(2_654_435_761).to_be_bytes())
+            .collect();
+        let mut out = Vec::new();
+        let written = decompress_capped(
+            Codec::Bzip2,
+            bzip2_bytes(&original).as_slice(),
+            &mut out,
+            &unlimited(),
+            "noise.bz2",
+        )
+        .unwrap();
+        assert_eq!(written, original.len() as u64);
+        assert_eq!(out, original);
+    }
+
+    #[test]
+    fn concatenated_bzip2_streams_decode_as_one_and_only_zero_padding_may_follow() {
+        let (first, second) = (bzip2_bytes(b"first stream, "), bzip2_bytes(b"second stream"));
+        let joined = [first.as_slice(), second.as_slice()].concat();
+        let spaced = [first.as_slice(), &[0u8; 512], second.as_slice()].concat();
+        let padded = [spaced.as_slice(), &[0u8; 2880]].concat();
+        for (stream, label) in [
+            (&joined, "joined.bz2"),
+            (&spaced, "spaced.bz2"),
+            (&padded, "padded.fits.bz2"),
+        ] {
+            let mut out = Vec::new();
+            decompress_capped(Codec::Bzip2, stream.as_slice(), &mut out, &unlimited(), label).unwrap();
+            assert_eq!(out, b"first stream, second stream", "{label}");
+        }
+
+        let junk = [joined.as_slice(), b"junk"].concat();
+        let err = decompress_capped(
+            Codec::Bzip2,
+            junk.as_slice(),
+            &mut Vec::new(),
+            &unlimited(),
+            "junk.fits.bz2",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("junk.fits.bz2") && err.contains("corrupt"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_bzip2_stream_exactly_at_the_cap_passes_and_one_byte_over_is_refused() {
+        let bz = bzip2_bytes(&[7u8; 4096]);
+        assert_eq!(
+            decompress_capped(Codec::Bzip2, bz.as_slice(), &mut Vec::new(), &budget(4096), "exact.bz2").unwrap(),
+            4096
+        );
+        let mut out = Vec::new();
+        let err = decompress_capped(Codec::Bzip2, bz.as_slice(), &mut out, &budget(4095), "over.bz2")
+            .unwrap_err()
+            .to_string();
+        for expected in ["over.bz2", "memory budget", "bzip2 stream"] {
+            assert!(err.contains(expected), "missing {expected}: {err}");
+        }
+        assert!(
+            out.len() <= 4095,
+            "{} bytes written past the cap",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn a_bzip2_bomb_is_refused_naming_the_cap_before_its_output_passes_it() {
+        let bz = bzip2_bytes(&vec![0u8; BOMB_BYTES]);
+        assert!(
+            (bz.len() as u64) < BOMB_CAP / 8,
+            "the archive must be a bomb: {} bytes",
+            bz.len()
+        );
+        let mut out = Vec::new();
+        let err = decompress_capped(Codec::Bzip2, bz.as_slice(), &mut out, &budget(BOMB_CAP), "bomb.fits.bz2")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            out.len() as u64 <= BOMB_CAP,
+            "{} bytes written past the cap",
+            out.len()
+        );
+        for expected in [
+            "bomb.fits.bz2",
+            format_bytes(BOMB_CAP).as_str(),
+            MEMORY_BUDGET_ENV,
+        ] {
+            assert!(err.contains(expected), "missing {expected}: {err}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let bomb = dir.path().join("bomb.fits.bz2");
+        std::fs::write(&bomb, &bz).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let err = format!(
+            "{:#}",
+            gunzip_into(&bomb, &budget(BOMB_CAP), root.path()).unwrap_err()
+        );
+        assert!(
+            err.contains(&format_bytes(BOMB_CAP)) && err.contains("bomb.fits.bz2"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "the partial copy must be removed"
+        );
+    }
+
+    #[test]
+    fn a_truncated_fits_bz2_is_a_clean_error_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = noisy_image(dir.path(), "frame.fits");
+        let bz = bzip2_bytes(&std::fs::read(&plain).unwrap());
+        let cut = dir.path().join("cut.fits.bz2");
+        std::fs::write(&cut, &bz[..bz.len() / 2]).unwrap();
+        let err = format!(
+            "{:#}",
+            load_plane(&ImageRef::parse(&text(&cut)))
+                .err()
+                .expect("a truncated bzip2 must not load")
+        );
+        assert!(
+            err.contains("cut.fits.bz2") && err.contains("truncated"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_bzip2_checksum_is_a_clean_error() {
+        let mut bz = bzip2_bytes(b"SIMPLE  =                    T");
+        let inside_the_stream_checksum = bz.len() - 2;
+        bz[inside_the_stream_checksum] ^= 0xFF;
+        let err = decompress_capped(Codec::Bzip2, bz.as_slice(), &mut Vec::new(), &unlimited(), "crc.fits.bz2")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("crc.fits.bz2") && err.contains("not a valid bzip2 stream"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn plain_fits_is_not_copied_even_when_named_bz2() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = noisy_image(dir.path(), "frame.fits");
+        let misnamed = dir.path().join("misnamed.fits.bz2");
+        std::fs::copy(&plain, &misnamed).unwrap();
+        let (resolved, guard) = resolve_gzip(&misnamed).unwrap();
+        assert_eq!(resolved, misnamed);
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    fn bzip2_is_recognised_by_its_magic_and_copied_without_the_bz2_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = noisy_image(dir.path(), "frame.fits");
+        let original = std::fs::read(&plain).unwrap();
+        for (name, expected) in [
+            ("frame.fits.bz2", "frame.fits"),
+            ("LUM.FIT.BZ2", "LUM.FIT"),
+            ("renamed.fits", "renamed.fits"),
+        ] {
+            let bz = bzip2_copy(&plain, name);
+            assert_eq!(compressed_codec(&bz), Some(Codec::Bzip2), "{name}");
+            let (copy, guard) = resolve_gzip(&bz).unwrap();
+            assert!(guard.is_some(), "{name}");
+            assert_eq!(copy.file_name().unwrap().to_str().unwrap(), expected);
+            assert_eq!(std::fs::read(&copy).unwrap(), original, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_single_image_fits_bz2_reads_like_the_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = noisy_image(dir.path(), "frame.fits");
+        let bz = bzip2_copy(&plain, "frame.fits.bz2");
+        let (plain_key, bz_key) = (text(&plain), text(&bz));
+        let expected = load_plane(&ImageRef::parse(&plain_key)).unwrap();
+        let loaded = load_plane(&ImageRef::parse(&bz_key)).unwrap();
+        assert_eq!(loaded.arr, expected.arr);
+        assert_eq!(loaded.header.cards, expected.header.cards);
+        assert_eq!(
+            load_fits_image(&bz_key).unwrap(),
+            load_fits_image(&plain_key).unwrap()
+        );
+        assert_eq!(
+            read_primary_header(&bz_key).unwrap().cards,
+            read_primary_header(&plain_key).unwrap().cards
+        );
+        assert_eq!(
+            frame_sizes(std::slice::from_ref(&bz_key)).unwrap(),
+            frame_sizes(&[plain_key]).unwrap()
+        );
+        let (resolved, guard) = resolve_single_image(&bz_key).unwrap();
+        assert!(guard.is_some() && resolved != bz);
+    }
+
+    #[test]
+    fn a_mef_fits_bz2_lists_and_loads_every_extension_with_its_companions() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("cal.fits");
+        sci_err_dq_mef(&plain, 6, 5, (0..30).map(|i| i % 3).collect());
+        let bz = bzip2_copy(&plain, "cal.fits.bz2");
+        let (plain_key, bz_key) = (text(&plain), text(&bz));
+        let shape = |planes: Vec<HduInfo>| {
+            planes
+                .into_iter()
+                .map(|h| (h.index, h.extname, h.naxis1, h.naxis2, h.has_data))
+                .collect::<Vec<_>>()
+        };
+        let (expected, _) = list_planes(&plain_key).unwrap();
+        let (listed, is_asdf) = list_planes(&bz_key).unwrap();
+        assert!(!is_asdf);
+        assert_eq!(listed.len(), 5);
+        assert_eq!(shape(listed), shape(expected));
+        for hdu in 1..=4 {
+            assert_eq!(
+                load_plane(&ImageRef::hdu(&bz_key, hdu)).unwrap().arr,
+                load_plane(&ImageRef::hdu(&plain_key, hdu)).unwrap().arr,
+                "HDU {hdu}"
+            );
+        }
+        let science = load_plane(&ImageRef::parse(&bz_key)).unwrap();
+        let err = science
+            .companions
+            .err
+            .expect("the ERR companion of the compressed MEF");
+        let dq = science
+            .companions
+            .dq
+            .expect("the DQ companion of the compressed MEF");
+        assert_eq!(
+            (err.path.as_str(), dq.path.as_str()),
+            (bz_key.as_str(), bz_key.as_str())
+        );
+        assert_eq!(
+            load_plane(&err).unwrap().arr,
+            load_plane(&ImageRef::hdu(&plain_key, 2)).unwrap().arr
+        );
+    }
+
+    #[test]
+    fn one_bz2_mef_is_decoded_once_for_listing_loading_companions_and_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("i2d.fits");
+        sci_err_dq_mef(&plain, 6, 5, (0..30).map(|i| i % 3).collect());
+        let bz = bzip2_copy(&plain, "i2d.fits.bz2");
+        let bz_key = text(&bz);
+        let before = decodes_on_this_thread();
+        let (_, _pin) = resolve_gzip(&bz).unwrap();
+        list_planes(&bz_key).unwrap();
+        let science = load_plane(&ImageRef::parse(&bz_key)).unwrap();
+        load_plane(&science.companions.err.expect("ERR companion")).unwrap();
+        load_plane(&science.companions.dq.expect("DQ companion")).unwrap();
+        resolve_plane_info(&ImageRef::hdu(&bz_key, 2)).unwrap();
+        read_primary_header(&bz_key).unwrap();
+        load_fits_image(&bz_key).unwrap();
+        frame_sizes(std::slice::from_ref(&bz_key)).unwrap();
+        resolve_single_image(&bz_key).unwrap();
+        assert_eq!(decodes_on_this_thread() - before, 1);
+    }
+
+    #[test]
+    fn a_table_in_a_fits_bz2_reads_like_the_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = write_x1d_fixture(dir.path(), "spec_x1d.fits", 12, &[1], "um");
+        let bz = bzip2_copy(&plain, "spec_x1d.fits.bz2");
+        let (plain_key, bz_key) = (text(&plain), text(&bz));
+        assert_eq!(
+            load_bintable(&bz_key, 1)
+                .unwrap()
+                .column("FLUX")
+                .unwrap()
+                .values,
+            load_bintable(&plain_key, 1)
+                .unwrap()
+                .column("FLUX")
+                .unwrap()
+                .values
+        );
     }
 }

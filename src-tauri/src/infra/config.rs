@@ -755,22 +755,46 @@ mod tests {
     fn filter_datasets_in_the_config_extend_the_registry_and_bad_ones_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = config_file(&dir);
-        let euclid = json!({"EUCLID": {"VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}}});
-        let updated = update_config_field_at(&path, "filter_datasets", euclid.clone()).unwrap();
+        let cfht = json!({"CFHT": {"u": {"lambda": 3676.1, "instrument": "MegaCam", "group": "optical"}}});
+        let updated = update_config_field_at(&path, "filter_datasets", cfht.clone()).unwrap();
         let registry = crate::core::metadata::filter_wavelengths::FilterRegistry::with_datasets(&updated.filter_datasets).unwrap();
-        assert_eq!(registry.entry("euclid", "vis").map(|found| found.pivot_angstrom), Some(7180.0));
-        assert_eq!(stored_json(&path)["filter_datasets"], euclid);
+        assert_eq!(registry.entry("cfht", "U").map(|found| found.pivot_angstrom), Some(3676.1));
+        assert_eq!(stored_json(&path)["filter_datasets"], cfht);
         for refused in [
             json!({"JWST": {"VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}}}),
-            json!({"EUCLID": {"VIS": {"lambda": "7180", "instrument": "VIS", "group": "optical"}}}),
-            json!({"EUCLID": {"H": {"lambda": 17700.0, "instrument": "NISP", "group": "nir", "aliases": ["vis"]}, "VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}}}),
-            json!(["EUCLID"]),
+            json!({"EUCLID": {"VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}}}),
+            json!({"CFHT": {"u": {"lambda": "3676", "instrument": "MegaCam", "group": "optical"}}}),
+            json!({"CFHT": {"g": {"lambda": 4764.0, "instrument": "MegaCam", "group": "optical", "aliases": ["u"]}, "u": {"lambda": 3676.1, "instrument": "MegaCam", "group": "optical"}}}),
+            json!(["CFHT"]),
         ] {
             let err = update_config_field_at(&path, "filter_datasets", refused.clone()).unwrap_err().to_string();
             assert!(err.contains("filter_datasets"), "{refused}: {err}");
-            assert_eq!(stored_json(&path)["filter_datasets"], euclid, "{refused} replaced the stored datasets");
+            assert_eq!(stored_json(&path)["filter_datasets"], cfht, "{refused} replaced the stored datasets");
         }
-        assert!(load_config_at(&path).unwrap().filter_datasets.contains_key("EUCLID"));
+        assert!(load_config_at(&path).unwrap().filter_datasets.contains_key("CFHT"));
+    }
+
+    #[test]
+    fn a_stored_dataset_that_became_built_in_is_skipped_on_load_and_the_rest_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(&dir);
+        let mut stored = serde_json::to_value(AppConfig::default()).unwrap();
+        stored["filter_datasets"] = json!({
+            "EUCLID": {"VIS": {"lambda": 7180.0, "instrument": "VIS", "group": "optical"}},
+            "CFHT": {"u": {"lambda": 3676.1, "instrument": "MegaCam", "group": "optical"}},
+        });
+        let written = serde_json::to_string_pretty(&stored).unwrap();
+        std::fs::write(&path, &written).unwrap();
+        let config = load_config_at(&path).unwrap();
+        assert!(config.filter_datasets.contains_key("EUCLID") && config.filter_datasets.contains_key("CFHT"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written, "loading rewrote the config");
+        let (registry, warnings) = crate::core::metadata::filter_wavelengths::FilterRegistry::with_custom_datasets(&config.filter_datasets);
+        assert_eq!(registry.entry("EUCLID", "VIS").map(|found| found.pivot_angstrom), Some(7103.4));
+        assert_eq!(registry.entry("CFHT", "u").map(|found| found.pivot_angstrom), Some(3676.1));
+        assert_eq!(
+            warnings,
+            ["custom filter dataset EUCLID is not used: EUCLID is a built-in dataset; rename it in filter_datasets to keep its filters"]
+        );
     }
 
     #[test]

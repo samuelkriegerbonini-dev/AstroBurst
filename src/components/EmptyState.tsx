@@ -80,7 +80,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                 Drop your files here to begin
               </h2>
               <p className="text-zinc-300 text-sm leading-relaxed">
-                Process, calibrate, stack and compose JWST / HST astronomical data
+                Measure spectra, light curves and photometry in JWST, HST and survey FITS; calibrate, stack and compose images
               </p>
             </div>
 
@@ -96,7 +96,7 @@ export default function EmptyState({ onBrowseFiles, onSelectFolder, onBrowseArch
                 Browse Files
                 <kbd
                   className="ml-1 text-[9px] font-mono px-1.5 py-0.5 rounded"
-                  style={{ background: "rgba(255,255,255,0.15)", color: "rgba(255,255,255,0.7)" }}
+                  style={{ background: "rgba(0,0,0,0.25)", color: "#ffffff" }}
                 >
                   {`${mod}O`}
                 </kbd>

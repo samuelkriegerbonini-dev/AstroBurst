@@ -1,17 +1,24 @@
 import { describe, it, expect } from "vitest";
 import {
   SB_CSV_COLUMNS,
+  binMeanError,
   firstSurfaceBrightness,
   formatPositionAngles,
   formatRadius,
   parseBinWidth,
   profileFetchReducer,
+  profileNotes,
+  psfReferenceLine,
   sbProfileCsv,
+  sbProfileCsvWithProvenance,
   sbReferenceLines,
   sbSeries,
   sbTotalFlux,
+  withUnit,
 } from "../sbProfile";
 import { CSV_LINE_END } from "../catalogCsv";
+import { provenanceLines, unitLines, withProvenance, type ProvenanceEntry } from "../csvProvenance";
+import type { PhotCal } from "../../services/analysis";
 import type { SbBin, SbProfile } from "../../shared/types/regions";
 
 function bin(overrides: Partial<SbBin> & { sma: number }): SbBin {
@@ -143,6 +150,17 @@ describe("sbSeries", () => {
     expect(sbSeries(p, "mean", "px").series[0].yErr).toEqual([null]);
     expect(sbSeries(p, "mu", "px").series[0].yErr).toEqual([null]);
   });
+
+  it("the linear y title carries the unit of the image", () => {
+    expect(sbSeries(profile(), "mean", "px", "MJy/sr").yLabel).toBe("mean (MJy/sr)");
+    expect(sbSeries(profile({ background: { median: 1, sigma: 0.1, count: 5 } }), "mean", "px", "MJy/sr").yLabel).toBe("mean - bg (MJy/sr)");
+    expect(sbSeries(profile(), "mean", "px", null).yLabel).toBe("mean");
+    expect(sbSeries(profile(), "mean", "px", undefined).yLabel).toBe("mean");
+    expect(sbSeries(profile(), "mean", "px", "  ").yLabel).toBe("mean");
+    expect(sbSeries(profile(), "mu", "px", "MJy/sr").yLabel).toBe("mu (mag/arcsec^2)");
+    expect(sbSeries(profile(), "ee", "px", "MJy/sr").yLabel).toBe("enclosed fraction");
+    expect(sbSeries(profile(), "mean", "px", "MJy/sr").series).toEqual(sbSeries(profile(), "mean", "px").series);
+  });
 });
 
 describe("sbReferenceLines", () => {
@@ -161,6 +179,45 @@ describe("sbReferenceLines", () => {
     const lines = sbReferenceLines(profile({ r50_px: null, petrosian_radius_px: null }), "px");
     expect(lines.map((l) => l.label)).toEqual(["R80"]);
     expect(sbReferenceLines(profile({ r50_px: null, r80_px: null, petrosian_radius_px: null }), "px")).toEqual([]);
+  });
+});
+
+describe("units, PSF mark, notes and bin errors", () => {
+  it("withUnit adds the unit in parentheses only when there is one", () => {
+    expect(withUnit("value", "nanomaggy")).toBe("value (nanomaggy)");
+    expect(withUnit("value - bg", null)).toBe("value - bg");
+    expect(withUnit("value", " ")).toBe("value");
+    expect(withUnit("value", undefined)).toBe("value");
+  });
+
+  it("the PSF mark is the half-light radius of the stars, or half the FWHM", () => {
+    const fwhmOnly = { fwhmArcsec: 1.0, halfLightRadiusArcsec: null };
+    expect(psfReferenceLine(fwhmOnly, 0.25, "px")).toEqual({ axis: "x", value: 2, label: "PSF FWHM/2", color: "#c4b5fd", dashed: true });
+    expect(psfReferenceLine(fwhmOnly, 0.25, "arcsec")?.value).toBe(0.5);
+    const halfLight = { fwhmArcsec: 1.0, halfLightRadiusArcsec: 0.55 };
+    const px = psfReferenceLine(halfLight, 0.25, "px");
+    expect(px?.label).toBe("PSF R50");
+    expect(Math.abs((px?.value ?? Number.NaN) - 2.2)).toBeLessThan(1e-12);
+    expect(psfReferenceLine(halfLight, 0.25, "arcsec")).toEqual({ axis: "x", value: 0.55, label: "PSF R50", color: "#c4b5fd", dashed: true });
+    expect(psfReferenceLine({ fwhmArcsec: null, halfLightRadiusArcsec: null }, 0.25, "px")).toBeNull();
+    expect(psfReferenceLine(fwhmOnly, null, "px")).toBeNull();
+    expect(psfReferenceLine(fwhmOnly, 0, "px")).toBeNull();
+  });
+
+  it("profileNotes reads the notes a result may carry", () => {
+    expect(profileNotes({ notes: ["a", 3, "b"] })).toEqual(["a", "b"]);
+    expect(profileNotes({})).toEqual([]);
+    expect(profileNotes(null)).toEqual([]);
+    expect(profileNotes({ notes: "x" })).toEqual([]);
+  });
+
+  it("binMeanError is the standard error of the mean of a bin", () => {
+    expect(binMeanError(2, 4)).toBe(1);
+    expect(binMeanError(2, 1)).toBeNull();
+    expect(binMeanError(null, 9)).toBeNull();
+    expect(binMeanError(undefined, 9)).toBeNull();
+    expect(binMeanError(Number.NaN, 9)).toBeNull();
+    expect(binMeanError(0, 2)).toBe(0);
   });
 });
 
@@ -195,6 +252,91 @@ describe("sbProfileCsv", () => {
     expect(cells[SB_CSV_COLUMNS.findIndex((c) => c.header === "std")]).toBe("");
     expect(cells[SB_CSV_COLUMNS.findIndex((c) => c.header === "mu_err")]).toBe("");
     expect(cells[SB_CSV_COLUMNS.findIndex((c) => c.header === "mu_ab")]).toBe("20.05");
+  });
+
+  const CONTEXT = { fileName: "brick-r.fits", appVersion: "v0.8.0", exportedUtc: "2026-11-12T18:00:00Z" };
+
+  function nanomaggyCalibration(bunit: string): PhotCal {
+    return {
+      convention: { kind: "generic_zero_point", zp: 22.5, keyword: "MAGZERO", per_second: false, exptime: null },
+      bunit,
+      notes: [],
+      warnings: [],
+      label: "nanomaggy",
+    };
+  }
+
+  it("the profile CSV with provenance keeps the bin table and says how it was measured", () => {
+    const p = profile({ background: { median: 0.01, sigma: 0.002, count: 300 }, r50_px: 4.2 });
+    const entries: ProvenanceEntry[] = [
+      ["software", "AstroBurst v0.8.0"],
+      ["exported_utc", "2026-11-12T18:00:00Z"],
+      ["file", "brick-r.fits"],
+      ["profile", "surface brightness in elliptical annuli"],
+      ["centre_x_px", 50],
+      ["centre_y_px", 50],
+      ["sma_max_px", 3],
+      ["ellipticity", 0.4],
+      ["angle_deg_image", 30],
+      ["sky_pa_deg", 120],
+      ["bin_width_px", 1],
+      ["background_median", 0.01],
+      ["background_sigma", 0.002],
+      ["background_count", 300],
+      ["background", "subtracted from mean, median and the sums"],
+      ["calibration", "none"],
+      ["pixel_scale_arcsec", 0.05],
+      ["pixel_area_arcsec2", 0.0025],
+      ["r50_px", 4.2],
+      ["r80_px", 1.5],
+      ["r90_px", 2.0],
+      ["petrosian_radius_px", 2.4],
+      ["total_mag_ab", 14.5],
+      ["dq_excluded_px", null],
+      ["region_excluded_px", 0],
+      ["positions", "0-based pixels, integer pixel centres"],
+    ];
+    const units = {
+      sma_px: "pixel",
+      sma_arcsec: "arcsec",
+      sma_inner: "pixel",
+      sma_outer: "pixel",
+      count: "pixel",
+      mean: "image unit",
+      median: "image unit",
+      std: "image unit",
+      cumulative_sum: "image unit x pix",
+      mu_ab: "mag/arcsec^2",
+      mu_err: "mag",
+      mag_ab_cumulative: "AB mag",
+    };
+    expect(entries).toHaveLength(26);
+    const text = sbProfileCsvWithProvenance(p, CONTEXT);
+    expect(text.endsWith(sbProfileCsv(p))).toBe(true);
+    expect(text).toBe(withProvenance([...provenanceLines(entries), ...unitLines(units)], sbProfileCsv(p), CSV_LINE_END));
+    const lines = text.split(CSV_LINE_END);
+    expect(lines.slice(0, 3)).toEqual(["# software: AstroBurst v0.8.0", "# exported_utc: 2026-11-12T18:00:00Z", "# file: brick-r.fits"]);
+    expect(lines).toContain("# profile: surface brightness in elliptical annuli");
+    expect(lines).toContain("# background: subtracted from mean, median and the sums");
+    expect(lines).toContain("# unit mu_ab: mag/arcsec^2");
+    expect(lines.filter((line) => line.startsWith("# ellipticity: "))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("# r50_px: "))).toHaveLength(1);
+  });
+
+  it("without a background or a calibration the provenance says none", () => {
+    const bare = sbProfileCsvWithProvenance(profile({ background: null, photcal: null }), CONTEXT).split(CSV_LINE_END);
+    expect(bare).toContain("# background: none subtracted");
+    expect(bare).toContain("# calibration: none");
+    expect(bare).toContain("# unit mean: image unit");
+    expect(bare).toContain("# unit cumulative_sum: image unit x pix");
+
+    const nanomaggy = sbProfileCsvWithProvenance(profile({ photcal: nanomaggyCalibration("nanomaggy") }), CONTEXT).split(CSV_LINE_END);
+    expect(nanomaggy).toContain("# calibration: nanomaggy");
+    expect(nanomaggy).toContain("# unit mean: nanomaggy");
+    expect(nanomaggy).toContain("# unit cumulative_sum: nanomaggy");
+
+    const surface = sbProfileCsvWithProvenance(profile({ photcal: nanomaggyCalibration("MJy/sr") }), CONTEXT).split(CSV_LINE_END);
+    expect(surface).toContain("# unit cumulative_sum: MJy/sr x pix");
   });
 });
 

@@ -1,15 +1,42 @@
 import { useState, useRef, useEffect, memo } from "react";
 import { AlertTriangle, ChevronDown, Loader2, RefreshCw } from "lucide-react";
-import { useDqContext, type DqTarget } from "../../context/PreviewContext";
+import { useDqContext, useFileContext, type DqTarget } from "../../context/PreviewContext";
 import type { DqFlagTableResult } from "../../services/display";
 import type { DqOverlaySettings } from "../../shared/types/dq";
-import { hasBit, listedDqFlags, toggleBit } from "../../utils/dqFlags";
+import type { ProcessedFile } from "../../shared/types";
+import { setFlagExclusion } from "../../services/companions";
+import { applyLayerChange } from "../../hooks/applyLayerChange";
+import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { measurementLog } from "../../utils/measurementLog";
+import { layerAssignmentEntry } from "../../utils/measurementLogLayers";
+import {
+  emptyFlagsText,
+  EXCLUDED_FLAG_TAG,
+  EXCLUDED_FLAG_TITLE,
+  exclusionLabel,
+  exclusionSummary,
+  exclusionTitle,
+  FLAG_LIST_LEGEND,
+  hasBit,
+  isNamedFlagSet,
+  listedDqFlags,
+  toggleBit,
+  UNNAMED_FLAGS_TITLE,
+} from "../../utils/dqFlags";
 
 const BTN_CLASS = "flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-all duration-200 disabled:opacity-30 disabled:cursor-not-allowed";
 const ON_STYLE: React.CSSProperties = { background: "rgba(248,113,113,0.15)", color: "#f87171", border: "1px solid rgba(248,113,113,0.35)" };
 const OFF_STYLE: React.CSSProperties = { color: "var(--ab-text-3)", border: "1px solid transparent" };
-const UNKNOWN_TABLE_TITLE = "DQ flags of unknown origin: raw bits are listed and nothing is excluded";
-const EXCLUSION_TITLE = "Pixels flagged by the exclusion mask are ignored by histogram, stats and photometry";
+const EDIT_BTN_CLASS = "px-1.5 py-0.5 rounded text-[9px] text-zinc-300 hover:text-zinc-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed";
+const EDIT_BTN_STYLE: React.CSSProperties = { border: "1px solid var(--ab-border)" };
+const APPLY_EXCLUSION_TITLE = "Tick flags in the list (they show on the image), then make them the excluded set";
+
+interface ExclusionEditor {
+  busy: boolean;
+  error: string | null;
+  onApply: (mask: number) => void;
+  onDefault: () => void;
+}
 
 interface DqFlagMenuProps {
   flagTable: DqFlagTableResult | null;
@@ -18,11 +45,14 @@ interface DqFlagMenuProps {
   excludeDq: boolean;
   setExcludeDq: (v: boolean) => void;
   dqMaskError: string | null;
+  unavailable?: string | null;
+  exclusion?: ExclusionEditor | null;
 }
 
-export function DqFlagMenu({ flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMaskError }: DqFlagMenuProps) {
-  const unknown = flagTable?.table === "unknown";
+export function DqFlagMenu({ flagTable, overlay, setOverlay, excludeDq, setExcludeDq, dqMaskError, unavailable = null, exclusion = null }: DqFlagMenuProps) {
   const flags = flagTable ? listedDqFlags(flagTable) : [];
+  const emptyText = flagTable ? emptyFlagsText(flagTable) : null;
+  const overlayMask = overlay.mask >>> 0;
   return (
     <div
       className="absolute right-0 top-full mt-1 z-50 w-60 rounded-md shadow-lg flex flex-col"
@@ -31,73 +61,131 @@ export function DqFlagMenu({ flagTable, overlay, setOverlay, excludeDq, setExclu
       <div className="flex items-center justify-between px-2.5 py-1.5" style={{ borderBottom: "1px solid var(--ab-border)" }}>
         <span className="text-[10px] font-semibold text-zinc-300 uppercase tracking-wider">DQ flags</span>
         {flagTable && (
-          <span className="text-[9px] font-mono text-zinc-500 truncate max-w-[120px]" title={unknown ? UNKNOWN_TABLE_TITLE : flagTable.label}>
+          <span
+            className="text-[9px] font-mono text-zinc-500 truncate max-w-[120px]"
+            title={isNamedFlagSet(flagTable) ? flagTable.label : UNNAMED_FLAGS_TITLE}
+          >
             {flagTable.label}
           </span>
         )}
       </div>
 
-      {dqMaskError && (
-        <div className="px-2.5 py-1.5 text-[9px] text-red-400 break-words" style={{ borderBottom: "1px solid var(--ab-border)" }}>
-          overlay unavailable: {dqMaskError}
-        </div>
-      )}
-
-      {!flagTable ? (
-        <div className="flex items-center justify-center py-3">
-          <Loader2 size={12} className="animate-spin text-zinc-600" />
+      {unavailable !== null ? (
+        <div className="flex flex-col gap-0.5 px-2.5 py-1.5 text-[9px] break-words" style={{ color: "var(--ab-text-3)" }}>
+          <span>{`Mask layer not used: ${unavailable}`}</span>
+          <span>Nothing is excluded from histogram, statistics and photometry.</span>
         </div>
       ) : (
         <>
-          <div className="flex items-center gap-2 px-2.5 py-1 text-[9px]">
-            <button
-              onClick={() => setOverlay({ mask: flagTable.default_mask })}
-              className="text-zinc-400 hover:text-zinc-200 transition-colors"
+          {typeof flagTable?.dq_origin === "string" && (
+            <div
+              className="px-2.5 py-1 text-[9px] truncate"
+              style={{ color: "var(--ab-text-3)", borderBottom: "1px solid var(--ab-border)" }}
+              title={flagTable.dq_origin}
             >
-              default
-            </button>
-            <button
-              onClick={() => setOverlay({ mask: 0 })}
-              className="text-zinc-400 hover:text-zinc-200 transition-colors"
-            >
-              none
-            </button>
-            <span className="ml-auto font-mono text-zinc-600">mask {overlay.mask >>> 0}</span>
-          </div>
-          <div className="max-h-[220px] overflow-y-auto px-1.5 pb-1">
-            {flags.map((f) => (
-              <label
-                key={f.bit}
-                className="flex items-center gap-2 px-1 py-[2px] rounded cursor-pointer hover:bg-zinc-800/40"
-              >
-                <input
-                  type="checkbox"
-                  className="accent-red-400"
-                  checked={hasBit(overlay.mask, f.bit)}
-                  onChange={() => setOverlay({ mask: toggleBit(overlay.mask, f.bit) })}
-                />
-                <span className="text-[10px] font-mono text-zinc-300 truncate">{f.name}</span>
-                <span className="ml-auto text-[9px] font-mono text-zinc-600">{f.bit}</span>
-              </label>
-            ))}
-            {unknown && flags.length === 0 && <div className="px-1 py-1 text-[9px] text-zinc-500">no bits set in this plane</div>}
-          </div>
+              {`Mask: ${flagTable.dq_origin}`}
+            </div>
+          )}
+
+          {dqMaskError && (
+            <div className="px-2.5 py-1.5 text-[9px] text-red-400 break-words" style={{ borderBottom: "1px solid var(--ab-border)" }}>
+              overlay unavailable: {dqMaskError}
+            </div>
+          )}
+
+          {!flagTable ? (
+            <div className="flex items-center justify-center py-3">
+              <Loader2 size={12} className="animate-spin text-zinc-600" />
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 px-2.5 py-1 text-[9px]">
+                <button
+                  onClick={() => setOverlay({ mask: flagTable.default_mask })}
+                  className="text-zinc-400 hover:text-zinc-200 transition-colors"
+                >
+                  default
+                </button>
+                <button
+                  onClick={() => setOverlay({ mask: 0 })}
+                  className="text-zinc-400 hover:text-zinc-200 transition-colors"
+                >
+                  none
+                </button>
+                <span className="ml-auto font-mono text-zinc-600">mask {overlayMask}</span>
+              </div>
+              <div className="px-2.5 pb-1 text-[9px] break-words" style={{ color: "var(--ab-text-3)" }}>{FLAG_LIST_LEGEND}</div>
+              <div className="max-h-[220px] overflow-y-auto px-1.5 pb-1">
+                {flags.map((f) => (
+                  <label
+                    key={f.bit}
+                    className="flex items-center gap-2 px-1 py-[2px] rounded cursor-pointer hover:bg-zinc-800/40"
+                  >
+                    <input
+                      type="checkbox"
+                      className="accent-red-400"
+                      checked={hasBit(overlay.mask, f.bit)}
+                      onChange={() => setOverlay({ mask: toggleBit(overlay.mask, f.bit) })}
+                    />
+                    <span className="text-[10px] font-mono text-zinc-300 truncate">{f.name}</span>
+                    <span className="ml-auto text-[9px] font-mono text-zinc-600">{f.bit}</span>
+                    {hasBit(flagTable.exclusion_mask, f.bit) && (
+                      <span className="text-[9px] font-mono text-red-400" title={EXCLUDED_FLAG_TITLE}>{EXCLUDED_FLAG_TAG}</span>
+                    )}
+                  </label>
+                ))}
+                {emptyText !== null && <div className="px-1 py-1 text-[9px] text-zinc-500">{emptyText}</div>}
+              </div>
+            </>
+          )}
+
+          <label
+            className="flex items-center gap-2 px-2.5 py-1.5 cursor-pointer"
+            style={{ borderTop: "1px solid var(--ab-border)" }}
+            title={flagTable ? exclusionTitle(flagTable) : undefined}
+          >
+            <input
+              type="checkbox"
+              className="accent-red-400"
+              checked={excludeDq}
+              onChange={(e) => setExcludeDq(e.target.checked)}
+            />
+            <span className="text-[10px] text-zinc-300">{flagTable ? exclusionLabel(flagTable) : "exclude flags from stats"}</span>
+          </label>
+
+          {exclusion && flagTable && (
+            <div className="flex flex-col gap-1 px-2.5 pb-1.5 text-[9px]">
+              <span className="break-words" style={{ color: "var(--ab-text-3)" }}>{exclusionSummary(flagTable)}</span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  title={APPLY_EXCLUSION_TITLE}
+                  disabled={exclusion.busy || overlayMask === flagTable.exclusion_mask >>> 0}
+                  onClick={() => exclusion.onApply(overlayMask)}
+                  className={EDIT_BTN_CLASS}
+                  style={EDIT_BTN_STYLE}
+                >
+                  Exclude the checked flags
+                </button>
+                {flagTable.exclusion_edited === true && (
+                  <button
+                    type="button"
+                    disabled={exclusion.busy}
+                    onClick={() => exclusion.onDefault()}
+                    className={EDIT_BTN_CLASS}
+                    style={EDIT_BTN_STYLE}
+                  >
+                    Default exclusion
+                  </button>
+                )}
+              </div>
+              {exclusion.error !== null && (
+                <div role="alert" className="text-red-400 break-words">{`Exclusion not changed: ${exclusion.error}`}</div>
+              )}
+            </div>
+          )}
         </>
       )}
-
-      <label
-        className="flex items-center gap-2 px-2.5 py-1.5 cursor-pointer"
-        style={{ borderTop: "1px solid var(--ab-border)" }}
-        title={unknown ? UNKNOWN_TABLE_TITLE : EXCLUSION_TITLE}
-      >
-        <input
-          type="checkbox"
-          className="accent-red-400"
-          checked={excludeDq}
-          onChange={(e) => setExcludeDq(e.target.checked)}
-        />
-        <span className="text-[10px] text-zinc-300">{unknown ? "exclude DQ from stats (excludes nothing)" : "exclude DO_NOT_USE from stats"}</span>
-      </label>
     </div>
   );
 }
@@ -108,16 +196,26 @@ function noDqTitle(target: DqTarget, flagTableLoading: boolean): string {
   return flagTableLoading ? `Reading DQ of ${target.label}…` : `No DQ plane in this product (${target.label})`;
 }
 
+const exclusionKeyOf = (file: Pick<ProcessedFile, "id" | "path"> | null) => (file ? `${file.id}|${file.path}` : null);
+
 function DqControlsInner() {
   const {
     dqRef, dqTarget, flagTable, flagTableLoading, flagTableError, retryFlagTable,
     overlay, setOverlay, excludeDq, setExcludeDq, dqMaskLoading, dqMaskError,
   } = useDqContext();
+  const { file } = useFileContext();
+  const provenance = useMeasurementProvenance();
   const [open, setOpen] = useState(false);
+  const [exclusionBusy, setExclusionBusy] = useState(false);
+  const [exclusionError, setExclusionError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const fileKey = exclusionKeyOf(file);
+  const activeFileKey = useRef(fileKey);
   const hasDq = !!dqRef;
   const tableFailed = flagTableError !== null;
-  const menuAvailable = hasDq && !tableFailed;
+  const plane = dqTarget.kind === "file" ? file?.result?.plane ?? null : null;
+  const unusable = !hasDq && !tableFailed ? plane?.dq_unavailable ?? null : null;
+  const menuAvailable = (hasDq || unusable !== null) && !tableFailed;
 
   useEffect(() => {
     if (!open) return;
@@ -132,7 +230,48 @@ function DqControlsInner() {
     if (!menuAvailable) setOpen(false);
   }, [menuAvailable]);
 
-  const unavailableTitle = tableFailed ? `DQ table unavailable: ${flagTableError}` : noDqTitle(dqTarget, flagTableLoading);
+  useEffect(() => {
+    activeFileKey.current = fileKey;
+    setExclusionBusy(false);
+    setExclusionError(null);
+  }, [fileKey]);
+
+  const changeExclusion = (target: ProcessedFile, mask: number | null) => {
+    const requestedFor = exclusionKeyOf(target);
+    setExclusionBusy(true);
+    setFlagExclusion(target.path, mask).then(
+      (changed) => {
+        if (activeFileKey.current !== requestedFor) return;
+        applyLayerChange(target, changed);
+        measurementLog.append(
+          layerAssignmentEntry(provenance, mask === null ? { role: "exclusion", action: "default", mask: null } : { role: "exclusion", action: "choose", mask }, changed),
+        );
+        setExclusionError(null);
+        setExclusionBusy(false);
+      },
+      (e: unknown) => {
+        if (activeFileKey.current !== requestedFor) return;
+        setExclusionError(e instanceof Error ? e.message : String(e));
+        setExclusionBusy(false);
+      },
+    );
+  };
+
+  const editable = dqTarget.kind === "file" && hasDq && file?.result ? file : null;
+  const exclusion: ExclusionEditor | null = editable
+    ? {
+        busy: exclusionBusy,
+        error: exclusionError,
+        onApply: (mask) => changeExclusion(editable, mask),
+        onDefault: () => changeExclusion(editable, null),
+      }
+    : null;
+
+  const unavailableTitle = tableFailed
+    ? `DQ table unavailable: ${flagTableError}`
+    : unusable !== null
+      ? `Mask layer not used: ${unusable}`
+      : noDqTitle(dqTarget, flagTableLoading);
   const toggleTitle = tableFailed || !hasDq
     ? unavailableTitle
     : dqMaskError
@@ -148,6 +287,7 @@ function DqControlsInner() {
         onClick={() => { if (hasDq) setOverlay({ enabled: !overlay.enabled }); }}
         disabled={!hasDq}
         title={toggleTitle}
+        aria-pressed={overlay.enabled && hasDq}
         className={BTN_CLASS}
         style={overlay.enabled && hasDq ? ON_STYLE : OFF_STYLE}
       >
@@ -170,7 +310,7 @@ function DqControlsInner() {
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          disabled={!hasDq}
+          disabled={!hasDq && unusable === null}
           title={hasDq ? "DQ flags and masking options" : unavailableTitle}
           aria-label="DQ flag options"
           aria-expanded={open && menuAvailable}
@@ -188,6 +328,8 @@ function DqControlsInner() {
           excludeDq={excludeDq}
           setExcludeDq={setExcludeDq}
           dqMaskError={dqMaskError}
+          unavailable={unusable}
+          exclusion={exclusion}
         />
       )}
     </div>

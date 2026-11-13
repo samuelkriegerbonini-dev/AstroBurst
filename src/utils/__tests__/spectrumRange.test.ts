@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  axisTextForChannel,
   axisValueToPixel,
   channelAxisValue,
+  channelFromAxisText,
   channelRangeFromDrag,
   channelWidthAt,
   clampRange,
@@ -12,6 +14,7 @@ import {
   formatRangeLabel,
   fullCubeCollapse,
   nearestChannel,
+  noSpectralAxisText,
   parseChannelInput,
   pixelToAxisValue,
   rangeBounds,
@@ -22,6 +25,7 @@ import {
   windowsOverlapRange,
   type PlotMapping,
 } from "../spectrumRange";
+import { formatAxisValue } from "../spectralAxis";
 import type { ContinuumWindows } from "../../shared/types/cube";
 import type { RampInfo } from "../../shared/types/ramp";
 
@@ -272,18 +276,31 @@ describe("continuum windows over the line range", () => {
     expect(windowsOverlapRange([[50, 59], [65, 75]], null)).toEqual([]);
   });
 
-  it("warns that Moments would fit its baseline over line flux", () => {
+  it("words the overlap note for what can run", () => {
     expect(continuumOverlapNote([[50, 55], [65, 75]], RANGE)).toBe(
-      "Continuum window B overlaps the line range; Moments would fit its baseline over line flux.",
+      "Continuum window B overlaps the line range; Measure line, Moments and Fit lines would fit their continuum over line flux.",
     );
-    expect(continuumOverlapNote([[58, 61], [72, 80]], RANGE)).toBe(
-      "Continuum window A overlaps the line range; Moments would fit its baseline over line flux.",
+    expect(continuumOverlapNote([[58, 61], [72, 80]], RANGE, false)).toBe(
+      "Continuum window A overlaps the line range; Measure line, Moments and Fit lines would fit their continuum over line flux.",
     );
     expect(continuumOverlapNote([[62, 64], [55, 75]], RANGE)).toBe(
-      "Continuum windows A and B overlap the line range; Moments would fit their baseline over line flux.",
+      "Continuum windows A and B overlap the line range; Measure line, Moments and Fit lines would fit their continuum over line flux.",
+    );
+    expect(continuumOverlapNote([[58, 61], [72, 80]], RANGE, true)).toBe(
+      "Continuum window A overlaps the line range; Measure line would fit its continuum over line flux.",
+    );
+    expect(continuumOverlapNote([[62, 64], [55, 75]], RANGE, true)).toBe(
+      "Continuum windows A and B overlap the line range; Measure line would fit its continuum over line flux.",
     );
     expect(continuumOverlapNote([[50, 59], [71, 80]], RANGE)).toBeNull();
+    expect(continuumOverlapNote([[50, 59], [71, 80]], RANGE, true)).toBeNull();
     expect(continuumOverlapNote(null, RANGE)).toBeNull();
+    expect(continuumOverlapNote(null, RANGE, true)).toBeNull();
+  });
+
+  it("says spectrum for a file and cube for a cube", () => {
+    expect(noSpectralAxisText(true)).toBe("no spectral axis for this spectrum");
+    expect(noSpectralAxisText(false)).toBe("no spectral axis for this cube");
   });
 });
 
@@ -363,5 +380,53 @@ describe("spectrumXTicks", () => {
     expect(ticks.map((t) => t.label)).toEqual(["-3000", "-2000", "-1000", "0", "1000", "2000", "3000"]);
     expect(ticks[0].px).toBeCloseTo(50, 9);
     expect(ticks[ticks.length - 1].px).toBeCloseTo(388, 9);
+  });
+});
+
+describe("range boxes in the unit of the axis", () => {
+  const xs = Array.from({ length: 40 }, (_, i) => 0.6555 + i * 1e-4);
+  const m: PlotMapping = { width: 400, padLeft: 62, padRight: 12, xMin: xs[0], xMax: xs[39], xValues: xs, n: 40 };
+  const NO_AXIS = { channel: null, error: "No axis values for these channels" };
+
+  it("prints the axis value of a channel at the resolution of the axis", () => {
+    expect(axisTextForChannel(20, m, "μm")).toBe("0.6575");
+    const fine = Array.from({ length: 40 }, (_, i) => 0.658 + i * 2e-6);
+    expect(axisTextForChannel(1, { ...m, xMin: fine[0], xMax: fine[39], xValues: fine }, "μm")).toBe("0.658002");
+    expect(axisTextForChannel(null, m, "μm")).toBe("");
+    expect(axisTextForChannel(20, { ...m, xValues: null }, "μm")).toBe("20");
+  });
+
+  it("finds the channel of a typed axis value", () => {
+    expect(channelFromAxisText("0.6575", m, "μm")).toEqual({ channel: 20, error: null });
+    expect(channelFromAxisText("0.65753", m, "μm").channel).toBe(20);
+    expect(channelFromAxisText("0.65756", m, "μm").channel).toBe(21);
+    expect(channelFromAxisText(" 0.6555 ", m, "μm").channel).toBe(0);
+    expect(channelFromAxisText("0.6594", m, "μm").channel).toBe(39);
+    expect(channelFromAxisText("0.65546", m, "μm").channel).toBe(0);
+    expect(channelFromAxisText("0.65944", m, "μm").channel).toBe(39);
+    const single: PlotMapping = { ...m, xMin: 0.6575, xMax: 0.6575, xValues: [0.6575], n: 1 };
+    expect(channelFromAxisText("0.6575", single, "μm")).toEqual({ channel: 0, error: null });
+    expect(channelFromAxisText("0.66", single, "μm")).toEqual({ channel: null, error: "Use a value from 0.6575 to 0.6575 μm" });
+  });
+
+  it("refuses what it cannot place, with a reason", () => {
+    const outside = { channel: null, error: "Use a value from 0.6555 to 0.6594 μm" };
+    expect(channelFromAxisText("0.65", m, "μm")).toEqual(outside);
+    expect(channelFromAxisText("0.7", m, "μm")).toEqual(outside);
+    expect(channelFromAxisText("", m, "μm")).toEqual({ channel: null, error: "Enter a number" });
+    expect(channelFromAxisText("0,6575", m, "μm")).toEqual({ channel: null, error: "Use a dot (.) as the decimal separator" });
+    expect(channelFromAxisText("abc", m, "μm")).toEqual({ channel: null, error: "Not a number" });
+    expect(channelFromAxisText("0.6575", { ...m, xValues: null }, "μm")).toEqual(NO_AXIS);
+    expect(channelFromAxisText("0.6575", { ...m, xValues: [], n: 0 }, "μm")).toEqual(NO_AXIS);
+  });
+
+  it("works on a descending axis and on a scaled one", () => {
+    const reversed: PlotMapping = { ...m, xValues: [...xs].reverse() };
+    expect(channelFromAxisText("0.6575", reversed, "μm")).toEqual({ channel: 19, error: null });
+    expect(axisTextForChannel(0, reversed, "μm")).toBe("0.6594");
+    const nm = xs.map((x) => x * 1000);
+    const scaled: PlotMapping = { ...m, xMin: nm[0], xMax: nm[39], xValues: nm };
+    expect(channelFromAxisText("657.5", scaled, "nm")).toEqual({ channel: 20, error: null });
+    expect(axisTextForChannel(20, scaled, "nm")).toBe(formatAxisValue(657.5, "nm", 0.1));
   });
 });

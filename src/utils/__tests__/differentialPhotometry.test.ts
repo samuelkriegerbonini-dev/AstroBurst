@@ -5,12 +5,14 @@ import {
   checkReference,
   checkRmsLabel,
   checkStarCurve,
+  defaultSeriesRoles,
   differentialMag,
   ensembleFlux,
   frameFilesNotice,
   frameJdLabel,
   frameMeasurementErrors,
   frameTimes,
+  frameUnits,
   geometryNotes,
   hasCompleteBjdAxis,
   inFrameOrder,
@@ -22,15 +24,18 @@ import {
   lightCurveCsvText,
   lightCurveExtras,
   measuredTargets,
+  otherFrameNotes,
   referenceTimeSource,
   resolveTimeAxis,
   resultCoversPath,
   saturatedCompLabels,
   saturatedComps,
   seriesRms,
+  seriesTableHeaders,
   timeAxisAvailability,
   timeAxisLabel,
   timeSeriesRoleHint,
+  withExclusiveTarget,
   BJD_AXIS_HINT,
   LIGHT_CURVE_CSV_COLUMNS,
   MAX_TIME_SERIES_TARGETS,
@@ -38,6 +43,7 @@ import {
   NO_TARGET_HINT,
 } from "../differentialPhotometry";
 import { niceTicks } from "../plotScale";
+import { APP_VERSION } from "../constants";
 import type { StarPhotometry } from "../../services/analysis";
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesTarget } from "../../shared/types/analysis";
 import type { FrameGeometry } from "../../shared/types/geometry";
@@ -263,7 +269,7 @@ describe("lightCurveCsv", () => {
     const lines = csv.trimEnd().split("\n");
     expect(lines[0]).toBe(LIGHT_CURVE_CSV_COLUMNS.join(","));
     expect(lines[0]).toBe(
-      "index,file,jd_mid,time_source,exptime,filter,airmass,bjd_tdb,hjd_utc,airmass_computed,altitude_deg,parallactic_angle_deg,diff_mag,diff_err,target_flux,target_err,target_snr,ensemble_flux,fwhm,bg_mean,dx,dy,registered,saturated,centroid_jump,skipped,errors,comp_saturated",
+      "index,file,jd_mid,time_source,exptime,filter,airmass,bjd_tdb,hjd_utc,airmass_computed,altitude_deg,parallactic_angle_deg,diff_mag,diff_err,target_flux,target_err,target_snr,ensemble_flux,fwhm,bg_mean,dx,dy,registered,saturated,centroid_jump,skipped,errors,comp_saturated,rel_flux,rel_flux_err,left_out",
     );
     expect(lines).toHaveLength(4);
     const first = lines[1].split(",");
@@ -277,10 +283,22 @@ describe("lightCurveCsv", () => {
     expect(first[22]).toBe("");
     expect(first[23]).toBe("false");
     expect(first[24]).toBe("false");
-    expect(lines[2]).toBe("1,f1.fits,,,60,V,,,,,,,,,,,,,,,,,,,,dimensions 64 x 64 differ from the reference 128 x 128,,");
+    expect(lines[2]).toBe("1,f1.fits,,,60,V,,,,,,,,,,,,,,,,,,,,dimensions 64 x 64 differ from the reference 128 x 128,,,,,");
     const third = lines[3];
     expect(third).toContain('"R, wide"');
-    expect(third.endsWith(",1.500,-0.250,true,true,false,,,")).toBe(true);
+    expect(third.endsWith(",1.500,-0.250,true,true,false,,,,0.25,0.003061862178,")).toBe(true);
+  });
+
+  it("writes why a frame is left out in the last column", () => {
+    const res = result([
+      frame(0, [T, C1, C2]),
+      frame(1, [null, null, null], { jd_mid: null, time_source: null, airmass: null, offset: null, skipped: "dimensions 64 x 64 differ from the reference 128 x 128" }),
+      frame(2, [star(10, 10, 500, 5, { saturated: true }), C1, C2], { filter: "R, wide", offset: { dx: 1.5, dy: -0.25, confidence: 12, registered: true } }),
+    ]);
+    const rows = lightCurve(res, 0, [1, 2], "jd");
+    const lastCells = (csv: string) => csv.trimEnd().split("\n").slice(1).map((line) => line.split(",").at(-1));
+    expect(lastCells(lightCurveCsv(res, rows, lightCurveExtras(res, 0, [1, 2]), ["by hand", null, "flagged"]))).toEqual(["by hand", "", "flagged"]);
+    expect(lastCells(lightCurveCsv(res, rows, lightCurveExtras(res, 0, [1, 2])))).toEqual(["", "", ""]);
   });
 
   it("lightCurveCsv writes the geometry cells with 6, 6, 4, 3 and 2 digits", () => {
@@ -311,7 +329,7 @@ describe("lightCurveCsv", () => {
     const lines = lightCurveCsv(res, rows, lightCurveExtras(res, 0, [1, 2])).trimEnd().split("\n");
     const col = lines[0].split(",").indexOf("errors");
     expect(lines[1].split(",")[col]).toBe("");
-    expect(lines[2].endsWith(`,"C2: ${failure}",`)).toBe(true);
+    expect(lines[2].endsWith(`,"C2: ${failure}",,,,`)).toBe(true);
   });
 
   it("reports no measurement errors for a skipped frame, whose reason is already in the skipped column", () => {
@@ -672,7 +690,7 @@ describe("saturated comparison stars (front-photometry/B1)", () => {
     ]);
     const lines = lightCurveCsv(res, lightCurve(res, 0, [1, 2], "jd"), lightCurveExtras(res, 0, [1, 2])).trimEnd().split("\n");
     const header = lines[0].split(",");
-    expect(header).toHaveLength(28);
+    expect(header).toHaveLength(31);
     expect(header.indexOf("errors")).toBe(26);
     expect(header[27]).toBe("comp_saturated");
     expect(lines.slice(1).map((l) => l.split(",")[27])).toEqual(["", "C1; C2", ""]);
@@ -703,9 +721,12 @@ describe("light-curve CSV digits and provenance (trust-2)", () => {
 
   it("starts the file with # lines naming the target, the comparison stars, the reference frame, the aperture, the pixel unit and the time columns", () => {
     const res = result([frame(0, [T, C1, C2], { geometry: geometry() }), frame(1, [T, C1, C2], { geometry: geometry({ bjd_tdb: 2460310.5048 }) })]);
-    const lines = lightCurveCsvText(res, 0, [1, 2], "ADU").split("\n");
+    const lines = lightCurveCsvText(res, 0, [1, 2], "ADU", { exportedUtc: "2026-11-12T12:00:00.000Z" }).split("\n");
     const header = lines.indexOf(LIGHT_CURVE_CSV_COLUMNS.join(","));
     expect(lines.slice(0, header)).toEqual([
+      `# software: AstroBurst ${APP_VERSION}`,
+      "# exported_utc: 2026-11-12T12:00:00.000Z",
+      "# file: f0.fits",
       "# target: T",
       "# comparison stars: C1, C2",
       "# reference frame: f0.fits",
@@ -713,6 +734,23 @@ describe("light-curve CSV digits and provenance (trust-2)", () => {
       "# flux: target_flux is the sky-subtracted sum over the aperture pixels, ensemble_flux the same sum added over the comparison stars, target_err the error of target_flux, bg_mean the mean sky per pixel; pixel values in BUNIT ADU",
       "# jd_mid: mid-exposure JD as the header gives it, not converted (time scale in time_source)",
       "# bjd_tdb: BJD_TDB at mid-exposure (source: computed)",
+      "# rel_flux: 10^(-0.4 diff_mag), the target over the sum of the comparison stars, not normalised; rel_flux_err = rel_flux * diff_err / 1.0857",
+      "# left_out: why the light-curve view leaves the frame out of its analysis (flagged, by hand, clipped); blank when the frame is used",
+      "# unit jd_mid: d",
+      "# unit exptime: s",
+      "# unit bjd_tdb: d",
+      "# unit hjd_utc: d",
+      "# unit altitude_deg: deg",
+      "# unit parallactic_angle_deg: deg",
+      "# unit diff_mag: mag",
+      "# unit diff_err: mag",
+      "# unit target_flux: ADU",
+      "# unit target_err: ADU",
+      "# unit ensemble_flux: ADU",
+      "# unit fwhm: px",
+      "# unit bg_mean: ADU",
+      "# unit dx: px",
+      "# unit dy: px",
     ]);
     expect(lines.slice(header).join("\n")).toBe(lightCurveCsv(res, lightCurve(res, 0, [1, 2], "index"), lightCurveExtras(res, 0, [1, 2])));
   });
@@ -724,11 +762,29 @@ describe("light-curve CSV digits and provenance (trust-2)", () => {
       frame(2, [null, null, null], { geometry: geometry({ bjd_source: "header" }), skipped: "failed to load" }),
     ]);
     const lines = lightCurveCsvText(res, 0, [2], null).split("\n");
-    expect(lines.slice(1, 3)).toEqual(["# comparison stars: C2", "# comparison stars left out: C1"]);
+    expect(lines.slice(4, 6)).toEqual(["# comparison stars: C2", "# comparison stars left out: C1"]);
     expect(lines.find((l) => l.startsWith("# flux:"))!.endsWith("; the reference header has no BUNIT")).toBe(true);
     expect(lines).toContain("# bjd_tdb: BJD_TDB at mid-exposure (source: TDB-MID, computed)");
+    const fluxUnitLines = ["# unit target_flux", "# unit target_err", "# unit ensemble_flux", "# unit bg_mean"];
+    expect(lines.filter((l) => fluxUnitLines.some((start) => l.startsWith(start)))).toEqual([]);
+    expect(lines).toContain("# unit fwhm: px");
     const plain = result([frame(0, [T, C1, C2]), frame(1, [T, C1, C2])]);
     expect(lightCurveCsvText(plain, 0, [1, 2], null).split("\n")).toContain("# bjd_tdb: BJD_TDB at mid-exposure (no frame has one)");
+  });
+
+  it("a surface-brightness unit is written as a sum over pixels for the flux columns", () => {
+    const res = result([frame(0, [T, C1, C2]), frame(1, [T, C1, C2])]);
+    const surface = lightCurveCsvText(res, 0, [1, 2], "MJy/sr", { exportedUtc: "x" }).split("\n");
+    expect(surface).toEqual(
+      expect.arrayContaining(["# unit target_flux: MJy/sr x pix", "# unit target_err: MJy/sr x pix", "# unit ensemble_flux: MJy/sr x pix", "# unit bg_mean: MJy/sr"]),
+    );
+    const beam = lightCurveCsvText(res, 0, [1, 2], "Jy/beam", { exportedUtc: "x" }).split("\n");
+    expect(beam).toEqual(expect.arrayContaining(["# unit target_flux: Jy/beam x pix", "# unit bg_mean: Jy/beam"]));
+  });
+
+  it("the export time defaults to now in ISO form", () => {
+    const res = result([frame(0, [T, C1, C2]), frame(1, [T, C1, C2])]);
+    expect(lightCurveCsvText(res, 0, [1, 2], "ADU").split("\n")[1]).toMatch(/^# exported_utc: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   });
 });
 
@@ -771,5 +827,83 @@ describe("BJD_TDB axis hint and time notes (timeseries/D1)", () => {
     expect(geometryNotes(res)).toEqual(["series", "shared", scale]);
     expect(geometryNotes({ ...res, reference_path: "/run/missing.fits" })).toEqual(["series", "shared"]);
     expect(geometryNotes(result([frame(0, [T, C1, C2])]))).toEqual([]);
+  });
+
+  const noted = (i: number, notes: string[], extra: Partial<TimeSeriesFrame> = {}) =>
+    frame(i, [T, C1, C2], { geometry: geometry({ time_scale_notes: notes }), ...extra });
+
+  it("lists the kinds of note that only other frames carry, with their frame count", () => {
+    const local = "TIMESYS LOCAL unknown: treated as UTC";
+    const res = result([noted(0, [scale]), noted(1, [scale, local]), noted(2, [local]), noted(3, [scale, hst])]);
+    expect(otherFrameNotes(res)).toEqual([`${local} (2 of 4 frames)`, `${hst} (1 of 4 frames)`]);
+  });
+
+  it("a kind whose numbers differ from frame to frame is listed once, with the numbers of its first frame", () => {
+    const res = result([
+      noted(0, [scale]),
+      noted(1, ["BJD_TDB = JD_TDB +123.456 s (light time)"]),
+      noted(2, ["BJD_TDB = JD_TDB +124.001 s (light time)"]),
+    ]);
+    expect(otherFrameNotes(res)).toEqual(["BJD_TDB = JD_TDB +123.456 s (light time) (2 of 3 frames; numbers of f1.fits)"]);
+  });
+
+  it("kinds the reference frame or the series notes already show are not repeated, and skipped frames do not count", () => {
+    const later = "TIMESYS UTC: UTC; TT = UTC + 37.000 s + 32.184 s; TDB - TT = +0.0013 s";
+    expect(otherFrameNotes(result([noted(0, [scale]), noted(1, [later])]))).toEqual([]);
+    expect(otherFrameNotes({ ...result([noted(0, []), noted(1, ["series"])]), geometry_notes: ["series"] })).toEqual([]);
+    expect(otherFrameNotes(result([noted(0, []), noted(1, ["new note"], { skipped: "failed to load" })]))).toEqual([]);
+    const unmatched = (res: TimeSeriesResult) => ({ ...res, reference_path: "/run/missing.fits" });
+    expect(otherFrameNotes(unmatched(result([noted(0, [scale]), noted(1, [scale])])))).toEqual([`${scale} (2 of 2 frames)`]);
+    expect(otherFrameNotes(unmatched(result([noted(0, [scale]), noted(1, [later])])))).toEqual([`${scale} (2 of 2 frames; numbers of f0.fits)`]);
+    expect(otherFrameNotes(result([]))).toEqual([]);
+  });
+});
+
+describe("default roles of the Stars list (flows-6)", () => {
+  it("the first star is the target, the next ones are comparison stars and those beyond the limit start as ignore", () => {
+    const ids = Array.from({ length: 70 }, (_, k) => `s${k + 1}`);
+    expect(defaultSeriesRoles(ids, {})).toEqual(["target", ...Array(63).fill("comp"), ...Array(6).fill("ignore")]);
+    expect(defaultSeriesRoles(ids, {}, 3)).toEqual(["target", "comp", "comp", ...Array(67).fill("ignore")]);
+    expect(defaultSeriesRoles([], {})).toEqual([]);
+  });
+
+  it("chosen roles are kept and count against the limit", () => {
+    expect(defaultSeriesRoles(["a", "b", "c", "d"], { c: "target", a: "ignore" }, 2)).toEqual(["ignore", "comp", "target", "ignore"]);
+  });
+
+  it("choosing a target demotes the previous one", () => {
+    expect(withExclusiveTarget({}, ["a", "b", "c"], "c", "target")).toEqual({ a: "comp", c: "target" });
+    expect(withExclusiveTarget({ b: "target" }, ["a", "b", "c"], "c", "target")).toEqual({ b: "comp", c: "target" });
+    expect(withExclusiveTarget({ b: "target" }, ["a", "b", "c"], "a", "check")).toEqual({ b: "target", a: "check" });
+  });
+});
+
+describe("headers and units of the series table (front-photometry/U2, U7)", () => {
+  it("the time headers say when a column is relative to the day shown", () => {
+    expect(seriesTableHeaders("bjd", 2460310, "ADU")).toEqual({
+      jd: "JD [d]",
+      bjd: "BJD_TDB - 2460310 [d]",
+      diffMag: "diff mag [mag]",
+      fwhm: "FWHM [px]",
+      sky: "sky [ADU]",
+      offset: "dx/dy [px]",
+    });
+    const onJd = seriesTableHeaders("jd", 2460310, "ADU");
+    expect([onJd.jd, onJd.bjd]).toEqual(["JD - 2460310 [d]", "BJD_TDB [d]"]);
+    const onIndex = seriesTableHeaders("index", 0, "ADU");
+    expect([onIndex.jd, onIndex.bjd]).toEqual(["JD [d]", "BJD_TDB [d]"]);
+    expect(seriesTableHeaders("bjd", 2460310, null).sky).toBe("sky");
+    expect(seriesTableHeaders("bjd", 2460310, "mixed units").sky).toBe("sky [mixed units]");
+  });
+
+  it("the unit of the frames is one value, none, or a list of what differs", () => {
+    const withUnits = (units: (string | undefined)[], extra: Partial<TimeSeriesFrame>[] = []) =>
+      result(units.map((bunit, i) => frame(i, [], { ...(bunit === undefined ? {} : { bunit }), ...extra[i] })));
+    expect(frameUnits(withUnits(["ADU", " ADU ", "ADU"]))).toEqual({ unit: "ADU", mixed: null });
+    expect(frameUnits(withUnits([undefined, undefined]))).toEqual({ unit: null, mixed: null });
+    expect(frameUnits(withUnits(["ADU", "electron", undefined, "MJy/sr"], [{}, {}, {}, { skipped: "failed to load" }]))).toEqual({
+      unit: "mixed units",
+      mixed: "frames have different BUNIT: ADU (1), electron (1), none (1)",
+    });
   });
 });

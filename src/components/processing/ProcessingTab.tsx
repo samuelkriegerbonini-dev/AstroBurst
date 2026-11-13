@@ -50,6 +50,7 @@ import { beginCompositeCheck } from "../../hooks/useProcessingRun";
 import { adoptRun, useHistoryController, useHistoryRender, useHistorySnapshot } from "../../hooks/useHistory";
 import { chainStepLabel, compareLabelsFor, compositeCrumbLabelFor, crumbLabelFor, nodeAtPath, opLabel, opNameLabel } from "../../utils/historyModel";
 import { historyRerunStore, type PendingRerun } from "../../utils/historyRerunStore";
+import { sectionMemory } from "../../utils/sectionMemory";
 import type { HistoryNode, HistoryState, OpName } from "../../shared/types/ops";
 import { getOutputDir } from "../../infrastructure/tauri";
 import type { CompositeInputView } from "./compositeProps";
@@ -123,6 +124,8 @@ const SECTION_GROUPS: { caption: string; sections: SectionPill[] }[] = [
     ],
   },
 ];
+
+const PROCESSING_SECTION_IDS: readonly ProcessingSection[] = SECTION_GROUPS.flatMap((g) => g.sections.map((s) => s.id));
 
 const SECTION_OP: Partial<Record<ProcessingSection, OpName>> = {
   background: "background",
@@ -364,7 +367,7 @@ function ProcessingTabInner() {
   const historySnapshot = useHistorySnapshot();
   const historyTarget = history.target;
   const historyState = historySnapshot.fileKey === historyTarget?.fileKey ? historySnapshot.state : null;
-  const [active, setActive] = useState<ProcessingSection>(historyRerunStore.get()?.section ?? "background");
+  const [active, setActive] = useState<ProcessingSection>(() => historyRerunStore.get()?.section ?? sectionMemory.get("processing", PROCESSING_SECTION_IDS, "background"));
   const pendingRerun = useSyncExternalStore(historyRerunStore.subscribe, historyRerunStore.get, historyRerunStore.get);
   const armedRerun = useSyncExternalStore(historyRerunStore.subscribe, historyRerunStore.armed, historyRerunStore.armed);
   const pendingSection = pendingRerun?.section ?? null;
@@ -372,6 +375,7 @@ function ProcessingTabInner() {
   useEffect(() => {
     if (pendingSection !== null && pendingSeq !== null) setActive(pendingSection);
   }, [pendingSection, pendingSeq]);
+  useEffect(() => { sectionMemory.set("processing", active); }, [active]);
   const armedHere =
     armedRerun && historyTarget && armedRerun.scope.imageKey === historyTarget.scope.imageKey && armedRerun.scope.basePath === historyTarget.scope.basePath
       ? armedRerun

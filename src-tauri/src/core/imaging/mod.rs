@@ -34,6 +34,9 @@ pub mod hdr;
 pub mod local_contrast;
 pub mod luminance;
 pub mod cutout;
+pub mod asinh;
+pub mod sdss_frame;
+pub mod layer_roles;
 #[cfg(test)]
 mod bench_mask_inputs;
 

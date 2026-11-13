@@ -13,14 +13,16 @@ import {
   measurementAxisValues,
   measurementSpan,
   momentVelocityFrameNote,
+  POOR_FIT_CHI2_RED,
   runForSource,
   spectrumSourceKey,
   spectrumSourceLabel,
   type PlotFrame,
 } from "../lineMeasure";
+import { formatWithUncertainty as fmt } from "../formatUncertainty";
 import { airToVacuumUm, formatAxis } from "../spectralAxis";
 import { axisValueToPixel, channelAxisValue, type PlotMapping } from "../spectrumRange";
-import type { LineMeasurement, SpectralAxisInfo } from "../../shared/types/spectral";
+import type { LineMeasurement, SeriesSpectrumSource, SpectralAxisInfo } from "../../shared/types/spectral";
 
 const AXIS = Array.from({ length: 40 }, (_, i) => 1.0 + i * 0.001);
 
@@ -223,8 +225,8 @@ describe("lineMeasurementRows", () => {
       "Flux",
       "Equivalent width (absorption > 0, emission < 0)",
       "Centroid",
-      "Sigma",
-      "FWHM",
+      "Sigma (2nd moment)",
+      "FWHM (2.355 x sigma)",
       "Peak",
       "SNR",
       "Continuum",
@@ -233,10 +235,10 @@ describe("lineMeasurementRows", () => {
       "Error source",
       "Excluded channels",
     ]);
-    expect(rows[0].value).toBe("0.007520 ± 5.000e-5 Jy/beam x um");
+    expect(rows[0].value).toBe(fmt(7.52e-3, 5e-5, { unit: "Jy/beam x um" }));
     expect(rows[2].value).toBe("1.02000 um / 0.2 km/s");
-    expect(rows[5].value).toBe("1.000 at ch 20");
-    expect(rows[6].value).toBe("150.4");
+    expect(rows[5].value).toBe("1.000 Jy/beam at ch 20");
+    expect(rows[6].value).toBe("150.4 (emission)");
     expect(rows[8].value).toBe("optical, rest 1.02000 um, z = 0, axis frame not declared (no SPECSYS)");
   });
 
@@ -283,8 +285,8 @@ describe("lineMeasurementRows", () => {
     expect(fit).toContain("c 0.6550412 ± 3.090e-6");
     expect(fit).toContain("s 1.100e-4 ± 3.250e-6 um");
     expect(fit).not.toContain("0.00000");
-    expect(rows.find((r) => r.label === "Sigma")?.value).toBe("1.100e-4 um");
-    expect(rows.find((r) => r.label === "FWHM")?.value).toBe("2.590e-4 um");
+    expect(rows.find((r) => r.label === "Sigma (2nd moment)")?.value).toBe("1.100e-4 um");
+    expect(rows.find((r) => r.label === "FWHM (2.355 x sigma)")?.value).toBe("2.590e-4 um");
   });
 
   it("chooses axis decimals from the resolution and keeps five decimals otherwise", () => {
@@ -300,7 +302,7 @@ describe("lineMeasurementRows", () => {
   it("marks unavailable values and drops the velocity and fit rows when absent", () => {
     const rows = lineMeasurementRows(measurement({ velocity: null, fit: null, sigma: null, snr: null }));
     expect(rows.map((r) => r.label)).not.toContain("Gaussian fit");
-    expect(rows.find((r) => r.label === "Sigma")?.value).toBe("n/a um");
+    expect(rows.find((r) => r.label === "Sigma (2nd moment)")?.value).toBe("n/a um");
     expect(rows.find((r) => r.label === "SNR")?.value).toBe("n/a");
   });
 
@@ -341,8 +343,8 @@ describe("lineMeasurementRows at a redshift", () => {
   it("puts the source-frame velocity and widths beside the centroid, sigma and FWHM", () => {
     const m = measurement(REDSHIFTED);
     expect(row(m, "Centroid")).toBe("0.98469 um / 0.0 km/s");
-    expect(row(m, "Sigma")).toBe("3.285e-4 um / 100.0 km/s");
-    expect(row(m, "FWHM")).toBe("7.735e-4 um / 235.5 km/s");
+    expect(row(m, "Sigma (2nd moment)")).toBe("3.285e-4 um / 100.0 km/s");
+    expect(row(m, "FWHM (2.355 x sigma)")).toBe("7.735e-4 um / 235.5 km/s");
   });
 
   it("moves the observer-frame values against the laboratory rest wavelength to their own row and states z", () => {
@@ -365,8 +367,8 @@ describe("lineMeasurementRows for absorption and undefined widths", () => {
   it("labels the extremum of a line with negative flux as its trough", () => {
     const absorption = measurement({ flux: -3.759806e-3, equivalent_width: 3.76e-3, peak: -0.49999882, peak_channel: 20 });
     expect(rowOf(absorption, "Peak")).toBeUndefined();
-    expect(rowOf(absorption, "Trough")?.value).toBe("-0.5000 at ch 20");
-    expect(rowOf(measurement(), "Peak")?.value).toBe("1.000 at ch 20");
+    expect(rowOf(absorption, "Trough")?.value).toBe("-0.5000 Jy/beam at ch 20");
+    expect(rowOf(measurement(), "Peak")?.value).toBe("1.000 Jy/beam at ch 20");
     expect(rowOf(measurement({ flux: 0 }), "Peak")).toBeDefined();
   });
 
@@ -551,8 +553,225 @@ describe("lineMeasurementRows error rows", () => {
   });
 
   it("counts the channels left out by DQ, non-finite flux and unusable ERR", () => {
-    expect(row(measurement(FILE_WEIGHTED), "Excluded channels")).toBe("3 DQ-flagged, 2 non-finite flux, 58 ERR <= 0 or non-finite");
-    expect(row(measurement(), "Excluded channels")).toBe("0 DQ-flagged, 0 non-finite flux, 0 ERR <= 0 or non-finite");
+    expect(row(measurement({ ...FILE_WEIGHTED, n_channels_nominal: undefined }), "Excluded channels")).toBe(
+      "3 DQ-flagged, 2 non-finite flux, 58 ERR <= 0 or non-finite",
+    );
+    expect(row(measurement(), "Excluded channels")).toBe(
+      "in line 0 of 25, in continuum 0 of 12: 0 DQ-flagged, 0 non-finite flux, 0 ERR <= 0 or non-finite",
+    );
+  });
+
+  it("splits the excluded channels into the line and the continuum", () => {
+    const split = measurement({ ...FILE_WEIGHTED, n_channels: 24, n_channels_nominal: 25, continuum_channels: 10 });
+    expect(row(split, "Excluded channels")).toBe(
+      "in line 1 of 25, in continuum 2 of 12: 3 DQ-flagged, 2 non-finite flux, 58 ERR <= 0 or non-finite",
+    );
+    const coinciding = measurement({
+      ...FILE_WEIGHTED,
+      n_channels: 24,
+      n_channels_nominal: 25,
+      continuum_channels: 5,
+      continuum_windows: [
+        [0, 5],
+        [0, 5],
+      ],
+    });
+    expect(row(coinciding, "Excluded channels")).toBe(
+      "in line 1 of 25, in continuum 1 of 6: 3 DQ-flagged, 2 non-finite flux, 58 ERR <= 0 or non-finite",
+    );
+  });
+});
+
+const WITH_ERRORS: Partial<LineMeasurement> = {
+  equivalent_width_err: 5.3e-4,
+  centroid_err: 2.8e-4,
+  sigma_err: 4.9e-4,
+  fwhm_err: 1.16e-3,
+  errors_reliable: true,
+  width_errors_reliable: true,
+  velocity: {
+    ...measurement().velocity!,
+    centroid_err_kms: 82.5,
+    sigma_err_kms: 144.4,
+    fwhm_err_kms: 340.1,
+    source_centroid_err_kms: 82.5,
+    source_sigma_err_kms: 144.4,
+    source_fwhm_err_kms: 340.1,
+    z_line: -1.3e-8,
+    z_line_err: 2.75e-4,
+  },
+};
+
+const PHYSICAL: Partial<LineMeasurement> = {
+  flux_si: 7.84e-17,
+  flux_si_err: 3.8e-18,
+  flux_cgs: 7.84e-14,
+  flux_cgs_err: 3.8e-15,
+  flux_physical_basis: "F_nu in Jy integrated per channel with c / lambda^2",
+};
+
+const EW = "Equivalent width (absorption > 0, emission < 0)";
+const SIGMA = "Sigma (2nd moment)";
+const FWHM = "FWHM (2.355 x sigma)";
+const OBSERVER_FRAME = "Observer frame (against the laboratory rest wavelength)";
+
+describe("lineMeasurementRows with errors, physical flux, redshift and display units", () => {
+  const row = (m: LineMeasurement, label: string) => lineMeasurementRows(m).find((r) => r.label === label)?.value;
+  const labelsOf = (m: LineMeasurement) => lineMeasurementRows(m).map((r) => r.label);
+
+  it("writes the flux with its error through the shared formatter", () => {
+    expect(lineMeasurementRows(measurement())[0].value).toBe(fmt(7.52e-3, 5e-5, { unit: "Jy/beam x um" }));
+    expect(row(measurement({ flux_err: null }), "Flux")).toBe("0.007520 ± n/a Jy/beam x um");
+  });
+
+  it("puts the errors beside equivalent width, centroid, sigma and FWHM, and beside their velocities", () => {
+    const m = measurement(WITH_ERRORS);
+    expect(row(m, EW)).toBe(fmt(-7.52e-3, 5.3e-4, { unit: "um" }));
+    expect(row(m, "Centroid")).toBe(`${fmt(1.02, 2.8e-4, { unit: "um" })} / 0.2 ± 82.5 km/s`);
+    expect(row(m, SIGMA)).toBe(`${fmt(0.003, 4.9e-4, { unit: "um" })} / 881.7 ± 144.4 km/s`);
+    expect(row(m, FWHM)).toBe(`${fmt(0.00706, 1.16e-3, { unit: "um" })} / 2076.3 ± 340.1 km/s`);
+  });
+
+  it("keeps today's text for a result without the new errors", () => {
+    const m = measurement();
+    expect(row(m, EW)).toBe("-0.007520 um");
+    expect(row(m, "Centroid")).toBe("1.02000 um / 0.2 km/s");
+    expect(row(m, SIGMA)).toBe("0.003000 um / 881.7 km/s");
+  });
+
+  it("names sigma as the second moment and FWHM as derived from it", () => {
+    const labels = labelsOf(measurement(WITH_ERRORS));
+    expect(labels).toContain(SIGMA);
+    expect(labels).toContain(FWHM);
+    expect(labels).not.toContain("Sigma");
+    expect(labels).not.toContain("FWHM");
+  });
+
+  it("shows the physical flux in both systems with its basis, or the reason it is absent", () => {
+    const m = measurement(PHYSICAL);
+    expect(row(m, "Physical flux")).toBe(
+      `${fmt(7.84e-17, 3.8e-18, { unit: "W m^-2" })} = ${fmt(7.84e-14, 3.8e-15, { unit: "erg s^-1 cm^-2" })} (F_nu in Jy integrated per channel with c / lambda^2)`,
+    );
+    const labels = labelsOf(m);
+    expect(labels.indexOf("Physical flux")).toBe(labels.indexOf("Flux") + 1);
+    const reason = "no physical flux: Jy/beam is a brightness per beam and this version does not read the beam area";
+    expect(
+      row(measurement({ flux_si: null, flux_si_err: null, flux_cgs: null, flux_cgs_err: null, flux_physical_basis: reason }), "Physical flux"),
+    ).toBe(reason);
+    expect(row(measurement(), "Physical flux")).toBeUndefined();
+    expect(row(measurement({ ...PHYSICAL, flux_physical_basis: "" }), "Physical flux")).toBeUndefined();
+  });
+
+  it("gives the peak its unit and its wavelength", () => {
+    expect(row(measurement({ peak_axis: 1.02 }), "Peak")).toBe("1.000 Jy/beam at 1.02000 um (ch 20)");
+    expect(row(measurement(), "Peak")).toBe("1.000 Jy/beam at ch 20");
+    expect(row(measurement({ flux_unit: "native" }), "Peak")).toBe("1.000 at ch 20");
+  });
+
+  it("labels the centroid and the peak wavelength with the frame", () => {
+    const m = measurement({ ...WITH_ERRORS, wavelength_frame: "air", peak_axis: 1.02 });
+    expect(row(m, "Centroid")?.startsWith(fmt(1.02, 2.8e-4, { unit: "um air" }))).toBe(true);
+    expect(row(m, "Peak")).toContain("at 1.02000 um air (ch 20)");
+    expect(row(m, EW)).toBe(fmt(-7.52e-3, 5.3e-4, { unit: "um" }));
+    expect(row(m, SIGMA)?.startsWith(fmt(0.003, 4.9e-4, { unit: "um" }))).toBe(true);
+  });
+
+  it("prints the signal-to-noise as a magnitude with the sense of the line", () => {
+    expect(row(measurement(), "SNR")).toBe("150.4 (emission)");
+    expect(row(measurement({ flux: -3.76e-3, snr: -21.4 }), "SNR")).toBe("21.4 (absorption)");
+    expect(row(measurement({ snr: null }), "SNR")).toBe("n/a");
+    expect(row(measurement({ flux: 0, snr: 0 }), "SNR")).toBe("0.0");
+  });
+
+  it("shows the redshift the line gives", () => {
+    const velocity = WITH_ERRORS.velocity!;
+    const m = measurement({ ...WITH_ERRORS, velocity: { ...velocity, z_line: 0.5000891, z_line_err: 4.57e-5 } });
+    expect(row(m, "Line redshift")).toBe(`z = ${fmt(0.5000891, 4.57e-5)} (centroid over rest wavelength, minus 1)`);
+    const labels = labelsOf(m);
+    expect(labels.indexOf("Line redshift")).toBe(labels.indexOf("Velocity frame") + 1);
+    const atRedshift = measurement({ ...WITH_ERRORS, velocity: { ...REDSHIFTED.velocity!, z_line: 0.5000891, z_line_err: 4.57e-5 } });
+    const redshiftedLabels = labelsOf(atRedshift);
+    expect(redshiftedLabels.indexOf("Line redshift")).toBe(redshiftedLabels.indexOf(OBSERVER_FRAME) + 1);
+    expect(row(measurement({ ...WITH_ERRORS, velocity: null }), "Line redshift")).toBeUndefined();
+    expect(row(measurement({ ...WITH_ERRORS, velocity: { ...velocity, z_line: null } }), "Line redshift")).toBeUndefined();
+  });
+
+  it("adds the fitted FWHM and the reduced chi2 to the Gaussian row and flags a poor fit", () => {
+    const fit = measurement().fit!;
+    const good = row(measurement(), "Gaussian fit") ?? "";
+    expect(good).toContain("FWHM 0.007064 ± 2.355e-5 um");
+    expect(good).toContain("chi2/dof 20.50/22 = 0.9318");
+    expect(good).not.toContain("poor fit");
+    expect(row(measurement({ fit: { ...fit, chi2: 456.16, dof: 15 } }), "Gaussian fit")).toContain("chi2/dof 456.2/15 = 30.41 (poor fit)");
+    expect(456.16 / 15).toBeGreaterThan(POOR_FIT_CHI2_RED);
+    const noDof = row(measurement({ fit: { ...fit, dof: 0 } }), "Gaussian fit") ?? "";
+    expect(noDof).toContain("chi2/dof 20.50/0,");
+    expect(noDof).not.toContain(" = ");
+  });
+
+  it("says when the errors are only indicative", () => {
+    const reliability = (m: LineMeasurement) => row(m, "Error reliability");
+    expect(reliability(measurement({ ...WITH_ERRORS, errors_reliable: false, snr: 5.135 }))).toBe(
+      "line S/N 5.1 is below 10: the errors of equivalent width, centroid and widths are indicative",
+    );
+    expect(reliability(measurement({ ...WITH_ERRORS, errors_reliable: true, width_errors_reliable: false, sigma: 0.003, sigma_err: 4.9e-4 }))).toBe(
+      "sigma is known to 16 percent: the errors of sigma and FWHM are indicative above 15 percent",
+    );
+    expect(reliability(measurement(WITH_ERRORS))).toBeUndefined();
+    expect(reliability(measurement({ ...WITH_ERRORS, errors_reliable: undefined, width_errors_reliable: undefined }))).toBeUndefined();
+    const noErrors = { equivalent_width_err: null, centroid_err: null, sigma_err: null, fwhm_err: null };
+    expect(reliability(measurement({ ...WITH_ERRORS, ...noErrors, errors_reliable: false, snr: null }))).toBeUndefined();
+    expect(reliability(measurement({ errors_reliable: false, snr: null }))).toBeUndefined();
+    const withTerms = labelsOf(measurement({ ...WITH_ERRORS, ...FILE_WEIGHTED, errors_reliable: false, snr: 5.135 }));
+    expect(withTerms.slice(-3)).toEqual(["Error terms", "Error reliability", "Excluded channels"]);
+    const withoutTerms = labelsOf(measurement({ ...WITH_ERRORS, errors_reliable: false, snr: 5.135 }));
+    expect(withoutTerms.slice(-3)).toEqual(["Error source", "Error reliability", "Excluded channels"]);
+  });
+
+  it("converts positions and widths to the display unit and leaves other axes alone", () => {
+    const angstrom = measurement(WITH_ERRORS);
+    const inA = (label: string) => lineMeasurementRows(angstrom, { axisDisplayUnit: "A" }).find((r) => r.label === label)?.value ?? "";
+    expect(inA(EW)).toBe(fmt(-75.2, 5.3, { unit: "A" }));
+    expect(inA("Centroid").startsWith(fmt(10200, 2.8, { unit: "A" }))).toBe(true);
+    expect(inA(SIGMA).startsWith(fmt(30, 4.9, { unit: "A" }))).toBe(true);
+    expect(inA("Gaussian fit")).toContain("s 30.00 ± 0.1000 A");
+    expect(inA("Velocity frame")).toContain("rest 1.02000 um");
+    const inNm = lineMeasurementRows(angstrom, { axisDisplayUnit: "nm" }).find((r) => r.label === "Centroid")?.value ?? "";
+    expect(inNm.startsWith(fmt(1020, 0.28, { unit: "nm" }))).toBe(true);
+    const ghz = measurement({ ...WITH_ERRORS, axis_unit: "GHz", flux_unit: "Jy x GHz" });
+    const ghzRow = (label: string) => lineMeasurementRows(ghz, { axisDisplayUnit: "A" }).find((r) => r.label === label)?.value ?? "";
+    expect(ghzRow(EW)).toBe(fmt(-7.52e-3, 5.3e-4, { unit: "GHz" }));
+    expect(ghzRow("Centroid").startsWith(fmt(1.02, 2.8e-4, { unit: "GHz" }))).toBe(true);
+  });
+
+  it("keeps the order of the rows", () => {
+    const full = measurement({
+      ...WITH_ERRORS,
+      ...FILE_WEIGHTED,
+      ...PHYSICAL,
+      errors_reliable: false,
+      width_errors_reliable: false,
+      velocity: { ...WITH_ERRORS.velocity!, ...REDSHIFTED.velocity!, z_line: 0.5000891, z_line_err: 4.57e-5 },
+    });
+    expect(labelsOf(full)).toEqual([
+      "Flux",
+      "Physical flux",
+      EW,
+      "Centroid",
+      SIGMA,
+      FWHM,
+      "Peak",
+      "SNR",
+      "Continuum",
+      "Velocity frame",
+      OBSERVER_FRAME,
+      "Line redshift",
+      "Gaussian fit",
+      "Error source",
+      "Error terms",
+      "Error reliability",
+      "Excluded channels",
+    ]);
   });
 });
 
@@ -601,7 +820,7 @@ describe("line measurement CSV for a spectrum file", () => {
   });
 
   it("appends the redshift, the source-frame velocities, the continuum chi2 and the nominal channel count after the error columns", () => {
-    expect(CSV_COLUMNS.slice(50)).toEqual([
+    expect(CSV_COLUMNS.slice(50, 56)).toEqual([
       "velocity_redshift",
       "velocity_source_centroid_kms",
       "velocity_source_sigma_kms",
@@ -634,6 +853,129 @@ describe("line measurement CSV for a spectrum file", () => {
     expect(cellOf(m, "flux_err_level")).toBe("0.000091");
     expect(cellOf(m, "flux_err_slope")).toBe("0.000003");
   });
+
+  const IDENTIFIED: Partial<LineMeasurement> = {
+    equivalent_width_err: 5.3e-4,
+    centroid_err: 2.8e-4,
+    errors_reliable: true,
+    width_errors_reliable: false,
+    peak_axis: 1.02,
+    wavelength_frame: "vacuum",
+    line_id: "h_alpha",
+    line_label: "Hα",
+    redshift: 0.5,
+    flux_si: 7.84e-17,
+    flux_si_err: 3.8e-18,
+    flux_cgs: 7.84e-14,
+    flux_cgs_err: 3.8e-15,
+    flux_physical_basis: "F_nu in Jy integrated per channel with c / lambda^2",
+  };
+  const NEW_COLUMNS = [
+    "equivalent_width_err",
+    "centroid_err",
+    "sigma_err",
+    "fwhm_err",
+    "errors_reliable",
+    "width_errors_reliable",
+    "velocity_centroid_err_kms",
+    "velocity_sigma_err_kms",
+    "velocity_fwhm_err_kms",
+    "velocity_source_centroid_err_kms",
+    "velocity_source_sigma_err_kms",
+    "velocity_source_fwhm_err_kms",
+    "velocity_z_line",
+    "velocity_z_line_err",
+    "peak_axis",
+    "wavelength_frame",
+    "line_id",
+    "line_label",
+    "redshift",
+    "flux_si",
+    "flux_si_err",
+    "flux_cgs",
+    "flux_cgs_err",
+    "flux_physical_basis",
+    "file",
+    "dq",
+  ] as const;
+
+  it("appends the errors, the identity, the physical flux, the file and the DQ handling after the wave 0 columns", () => {
+    expect(CSV_COLUMNS.slice(56, 82)).toEqual([...NEW_COLUMNS]);
+    expect(CSV_COLUMNS.slice(50, 56)).toEqual([
+      "velocity_redshift",
+      "velocity_source_centroid_kms",
+      "velocity_source_sigma_kms",
+      "velocity_source_fwhm_kms",
+      "continuum_chi2_red",
+      "n_channels_nominal",
+    ]);
+    expect(CSV_COLUMNS.indexOf("fit_converged")).toBe(40);
+  });
+
+  it("writes the new cells and leaves them blank when absent", () => {
+    const base = measurement();
+    const m = measurement({
+      ...IDENTIFIED,
+      velocity: { ...base.velocity!, z_line: 0.5000891, z_line_err: 4.57e-5, source_sigma_err_kms: 144.4 },
+    });
+    expect(lineMeasurementCsv(m).split("\n")[1].split(",")).toHaveLength(CSV_COLUMNS.length);
+    expect(cellOf(m, "equivalent_width_err")).toBe("0.00053");
+    expect(cellOf(m, "centroid_err")).toBe("0.00028");
+    expect(cellOf(m, "errors_reliable")).toBe("true");
+    expect(cellOf(m, "width_errors_reliable")).toBe("false");
+    expect(cellOf(m, "peak_axis")).toBe("1.02");
+    expect(cellOf(m, "wavelength_frame")).toBe("vacuum");
+    expect(cellOf(m, "line_id")).toBe("h_alpha");
+    expect(cellOf(m, "line_label")).toBe("Hα");
+    expect(cellOf(m, "redshift")).toBe("0.5");
+    expect(cellOf(m, "flux_si")).toBe("7.84e-17");
+    expect(cellOf(m, "flux_si_err")).toBe("3.8e-18");
+    expect(cellOf(m, "flux_cgs")).toBe("7.84e-14");
+    expect(cellOf(m, "flux_cgs_err")).toBe("3.8e-15");
+    expect(cellOf(m, "flux_physical_basis")).toBe("F_nu in Jy integrated per channel with c / lambda^2");
+    expect(cellOf(m, "velocity_z_line")).toBe("0.5000891");
+    expect(cellOf(m, "velocity_z_line_err")).toBe("0.0000457");
+    expect(cellOf(m, "velocity_source_sigma_err_kms")).toBe("144.4");
+    const plain = measurement();
+    expect(lineMeasurementCsv(plain).split("\n")[1].split(",")).toHaveLength(CSV_COLUMNS.length);
+    expect(NEW_COLUMNS.map((column) => cellOf(plain, column))).toEqual(NEW_COLUMNS.map(() => ""));
+  });
+
+  it("writes the file and the DQ handling when the caller gives them", () => {
+    const [header, row] = lineMeasurementCsv(measurement(), { fileName: "jw01_x1d.fits", dq: "excluded" }).split("\n");
+    expect(header.endsWith(",file,dq,source_series")).toBe(true);
+    expect(row.endsWith(",jw01_x1d.fits,excluded,")).toBe(true);
+    const quoted = lineMeasurementCsv(measurement(), { fileName: "a,b.fits", dq: "off" }).split("\n")[1];
+    expect(quoted.endsWith(',"a,b.fits",off,')).toBe(true);
+  });
+
+  it("starts with provenance and unit lines when asked", () => {
+    const text = lineMeasurementCsv(measurement(), {
+      fileName: "a.fits",
+      dq: "off",
+      provenance: { software: "AstroBurst v0.8.0", exportedUtc: "2026-11-10T03:00:00.000Z" },
+    });
+    const lines = text.split("\n");
+    expect(lines.slice(0, 3)).toEqual(["# software: AstroBurst v0.8.0", "# exported_utc: 2026-11-10T03:00:00.000Z", "# file: a.fits"]);
+    expect(lines).toContain("# unit flux: Jy/beam x um");
+    expect(lines).toContain("# unit centroid: um");
+    expect(lines).toContain("# unit velocity_centroid_kms: km/s");
+    expect(lines).toContain("# unit flux_si: W m^-2");
+    const headerIndex = lines.findIndex((line) => !line.startsWith("#"));
+    expect(headerIndex).toBe(lines.length - 2);
+    expect(lines[headerIndex]).toBe(CSV_COLUMNS.join(","));
+    expect(lines[lines.length - 1].endsWith(",a.fits,off,")).toBe(true);
+    expect(lineMeasurementCsv(measurement(), { fileName: "a.fits", dq: "off" }).split("\n")).toHaveLength(2);
+  });
+
+  it("omits the spectrum-unit lines when the flux unit has no axis factor", () => {
+    const provenance = { software: "AstroBurst v0.8.0", exportedUtc: "2026-11-10T03:00:00.000Z" };
+    const lines = lineMeasurementCsv(measurement({ flux_unit: "native" }), { provenance }).split("\n");
+    expect(lines).toContain("# unit flux: native");
+    expect(lines.some((line) => line.startsWith("# unit peak:"))).toBe(false);
+    expect(lines.some((line) => line.startsWith("# unit continuum_slope:"))).toBe(false);
+    expect(lineMeasurementCsv(measurement(), { provenance }).split("\n")).toContain("# unit peak: Jy/beam");
+  });
 });
 
 describe("spectrum file runs", () => {
@@ -643,6 +985,104 @@ describe("spectrum file runs", () => {
     expect(runForSource(run, { kind: "file", hdu: 1 }, "sum")).toBe(run);
     expect(runForSource(run, { kind: "file", hdu: 2 }, "sum")).toBeNull();
     expect(runForSource(run, { kind: "pixel", x: 1, y: 1 }, "sum")).toBeNull();
+  });
+});
+
+function csvCells(row: string): string[] {
+  const cells: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < row.length; i++) {
+    const character = row[i];
+    if (quoted && character === '"' && row[i + 1] === '"') {
+      cell += '"';
+      i++;
+    } else if (character === '"') {
+      quoted = !quoted;
+    } else if (character === "," && !quoted) {
+      cells.push(cell);
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  cells.push(cell);
+  return cells;
+}
+
+describe("a spectrum picked from a time series", () => {
+  const seriesOf = (detector: string, sporder: number | null, pick: SeriesSpectrumSource["pick"]): SeriesSpectrumSource => ({
+    kind: "series",
+    paths: ["a.fits"],
+    detector,
+    sporder,
+    pick,
+  });
+  const MEAN = seriesOf("NRS1", 2, { kind: "mean", first: 3, last: 9 });
+
+  it("labels a series pick with its detector and pick", () => {
+    expect(spectrumSourceLabel(seriesOf("NRS2", -1, { kind: "median" }))).toBe("time series NRS2, median");
+    expect(spectrumSourceLabel(MEAN)).toBe("time series NRS1, order 2, mean 4 to 10");
+    expect(spectrumSourceLabel(seriesOf("NRS1", 0, { kind: "integration", index: 2 }))).toBe("time series NRS1, integration 3");
+    expect(spectrumSourceLabel(seriesOf("MIRIMAGE", 1, { kind: "median" }))).toBe("time series MIRIMAGE, median");
+    expect(spectrumSourceLabel(seriesOf("NIS", 1, { kind: "median" }))).toBe("time series NIS, order 1, median");
+    expect(spectrumSourceLabel(seriesOf("NIS", null, { kind: "median" }))).toBe("time series NIS, median");
+    expect(spectrumSourceLabel(seriesOf("NIS", 3, { kind: "integration", index: 0 }))).toBe("time series NIS, order 3, integration 1");
+  });
+
+  it("keys a series pick by its files, series and 0-based pick", () => {
+    const key = spectrumSourceKey(MEAN, "sum");
+    expect(key).toContain('"first":3,"last":9');
+    expect(key).toBe('series:sum:{"kind":"series","paths":["a.fits"],"detector":"NRS1","sporder":2,"pick":{"kind":"mean","first":3,"last":9}}');
+    const run = { key };
+    expect(runForSource(run, MEAN, "sum")).toBe(run);
+    expect(runForSource(run, seriesOf("NRS1", 2, { kind: "mean", first: 3, last: 8 }), "sum")).toBeNull();
+    expect(runForSource(run, seriesOf("NRS1", 2, { kind: "median" }), "sum")).toBeNull();
+    expect(runForSource(run, { kind: "file", hdu: null }, "sum")).toBeNull();
+  });
+
+  it("appends the series column after the columns of the file and the DQ handling", () => {
+    expect(CSV_COLUMNS[82]).toBe("source_series");
+    expect(CSV_COLUMNS).toHaveLength(83);
+  });
+
+  it("writes the series pick into the CSV row as sent, counted from 0", () => {
+    const m = measurement({ source: MEAN, err_used: true, err_source: "FLUX_ERROR of the series pick" });
+    const [header, row] = lineMeasurementCsv(m, { fileName: "a.fits", dq: "excluded" }).split("\n");
+    const cells = csvCells(row);
+    expect(cells).toHaveLength(header.split(",").length);
+    expect(cells).toHaveLength(CSV_COLUMNS.length);
+    expect(cells[CSV_COLUMNS.indexOf("source_kind")]).toBe("series");
+    expect(cells[CSV_COLUMNS.indexOf("source_x")]).toBe("");
+    expect(cells[CSV_COLUMNS.indexOf("source_region")]).toBe("");
+    expect(cells[CSV_COLUMNS.indexOf("source_hdu")]).toBe("");
+    expect(cells[CSV_COLUMNS.indexOf("err_source")]).toBe("FLUX_ERROR of the series pick");
+    expect(cells[CSV_COLUMNS.indexOf("dq")]).toBe("excluded");
+    expect(cells[cells.length - 1]).toBe('{"paths":["a.fits"],"detector":"NRS1","sporder":2,"pick":{"kind":"mean","first":3,"last":9}}');
+    expect(header.endsWith(",file,dq,source_series")).toBe(true);
+    expect(JSON.parse(cells[CSV_COLUMNS.indexOf("source_series")])).toEqual({
+      paths: ["a.fits"],
+      detector: "NRS1",
+      sporder: 2,
+      pick: { kind: "mean", first: 3, last: 9 },
+    });
+  });
+
+  it("leaves the series column empty for the other sources", () => {
+    const pixel = csvCells(lineMeasurementCsv(measurement()).split("\n")[1]);
+    expect(pixel).toHaveLength(CSV_COLUMNS.length);
+    expect(pixel[CSV_COLUMNS.indexOf("source_series")]).toBe("");
+    const file = csvCells(lineMeasurementCsv(measurement({ source: { kind: "file", hdu: 1 } })).split("\n")[1]);
+    expect(file[CSV_COLUMNS.indexOf("source_series")]).toBe("");
+  });
+
+  it("names the series pick in the provenance lines of the copied row", () => {
+    const text = lineMeasurementCsv(measurement({ source: MEAN }), {
+      fileName: "a.fits",
+      dq: "excluded",
+      provenance: { software: "AstroBurst v0.8.1", exportedUtc: "2026-11-13T03:00:00.000Z" },
+    });
+    expect(text.split("\n")).toContain("# source: time series NRS1, order 2, mean 4 to 10");
   });
 });
 

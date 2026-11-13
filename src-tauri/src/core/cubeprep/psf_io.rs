@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::astrometry::wcs::read_effective_cd;
 use crate::core::cubeprep::cube::set_text;
+use crate::core::imaging::asinh::{asinh_refusal, asinh_scale};
 use crate::core::imaging::push_history;
 use crate::infra::fits::reader::{parse_header_at, ParsedHdu};
 use crate::math::bspline::{affine_transform, interpolate_line, shift, zoomed_len, SplineMode};
@@ -47,6 +48,9 @@ pub enum PsfError {
     #[error("the reference filter {filter} matches {count} PSFs")]
     AmbiguousReference { filter: String, count: usize },
 }
+
+pub const ASINH_PLANE_REFUSAL: &str =
+    "the pixels are asinh-scaled (BSOFTEN and BOFFSET cards); Cube Prep reads PSF, kernel and noise planes as stored, so give a file with linear pixels";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -232,6 +236,9 @@ fn decode_value(chunk: &[u8], bitpix: i64, blank: Option<i64>) -> Option<f64> {
 
 pub fn decode_planes_f64(bytes: &[u8], parsed: &ParsedHdu, label: &str) -> Result<Vec<Array2<f64>>, PsfError> {
     let header = &parsed.header;
+    if asinh_scale(header).is_some() || asinh_refusal(header).is_some() {
+        return Err(read_error(label, ASINH_PLANE_REFUSAL));
+    }
     let bitpix = header.get_i64("BITPIX").ok_or_else(|| read_error(label, "BITPIX is missing"))?;
     let width = match bitpix {
         8 => 1,
@@ -1050,6 +1057,60 @@ mod tests {
         let d1 = d1_psf("d1_psf_JWST_F150W_20mas.fits");
         assert_eq!((d1.hdu, d1.pixel_scale_arcsec, d1.scale_source, d1.data.dim()), (0, 0.02, ScaleSource::Pixscale, (41, 41)));
         assert!((d1.data.sum() - 1.0).abs() < 1e-12, "D1 PSFs keep their float64 values");
+    }
+
+    fn psf_file_with(dir: &Path, name: &str, cards: &[(&'static str, String)]) -> std::path::PathBuf {
+        let detector = gaussian(4, 1.0, (1.5, 1.5));
+        let mut extra = vec![("PIXELSCL", "0.0312".to_string())];
+        extra.extend(cards.iter().cloned());
+        let path = dir.join(name);
+        write_raw_hdus(&path, &[f64_hdu(true, &detector, &extra)]);
+        path
+    }
+
+    fn asinh_refusal_of(path: &Path) -> PsfError {
+        PsfError::Read { label: path.display().to_string(), message: ASINH_PLANE_REFUSAL.to_string() }
+    }
+
+    #[test]
+    fn an_asinh_scaled_psf_is_refused_instead_of_being_read_as_linear() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = psf_file_with(dir.path(), "asinh.fits", &[("BSOFTEN", "0.25".into()), ("BOFFSET", "3.5".into())]);
+        assert_eq!(load_psf(&path, None).unwrap_err(), asinh_refusal_of(&path));
+    }
+
+    #[test]
+    fn one_asinh_card_is_enough_to_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: [(&str, Vec<(&'static str, String)>); 3] = [
+            ("offset_only.fits", vec![("BOFFSET", "3.5".into())]),
+            ("soften_only.fits", vec![("BSOFTEN", "0.25".into())]),
+            ("zero_soften.fits", vec![("BSOFTEN", "0".into()), ("BOFFSET", "3.5".into())]),
+        ];
+        for (name, cards) in cases {
+            let path = psf_file_with(dir.path(), name, &cards);
+            assert_eq!(load_psf(&path, None).unwrap_err(), asinh_refusal_of(&path), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_linearised_file_is_read_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let detector = gaussian(4, 1.0, (1.5, 1.5));
+        let linearised = psf_file_with(dir.path(), "linearised.fits", &[("ABSOFTEN", "0.25".into()), ("ABOFFSET", "3.5".into())]);
+        assert_eq!(load_psf(&linearised, None).unwrap().data, detector);
+        let plain = psf_file_with(dir.path(), "plain.fits", &[]);
+        assert_eq!(load_psf(&plain, None).unwrap().data, detector);
+    }
+
+    #[test]
+    fn the_refusal_names_the_plane_it_was_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = psf_file_with(dir.path(), "asinh.fits", &[("BSOFTEN", "0.25".into()), ("BOFFSET", "3.5".into())]);
+        let bytes = std::fs::read(&path).unwrap();
+        let hdus = image_hdus(&bytes, "k.fits").unwrap();
+        let message = decode_planes_f64(&bytes, &hdus[0].1, "kernel k.fits").unwrap_err().to_string();
+        assert_eq!(message, format!("kernel k.fits: {ASINH_PLANE_REFUSAL}"));
     }
 
     #[test]

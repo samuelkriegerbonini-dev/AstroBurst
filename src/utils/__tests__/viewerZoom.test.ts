@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import gpuViewportSource from "../../components/render/GpuViewport.tsx?raw";
+import advancedImageViewerSource from "../../components/viewer/AdvancedImageViewer.tsx?raw";
+import zoomPanViewSource from "../../components/ui/ZoomPanView.tsx?raw";
 import {
   FIT_SCALE_CAP,
   VIEWER_ZOOM_MAX,
@@ -10,6 +13,7 @@ import {
   isZoomPresetActive,
   previewTextureBadge,
   renderScaleForFits,
+  screenPixelRatio,
   wheelZoomFactor,
   zoomPercentLabel,
   ACTUAL_SIZE_SCALE,
@@ -128,14 +132,56 @@ describe("wheelZoomFactor", () => {
 });
 
 describe("imageRenderingFor", () => {
-  it("is pixelated whenever a texture pixel is magnified", () => {
+  it("is pixelated whenever a texture pixel covers more than one device pixel", () => {
     expect(imageRenderingFor(1.01)).toBe("pixelated");
     expect(imageRenderingFor(2)).toBe("pixelated");
+    expect(imageRenderingFor(1, 1.5)).toBe("pixelated");
+    expect(imageRenderingFor(0.7, 1.5)).toBe("pixelated");
+    expect(imageRenderingFor(0.51, 2)).toBe("pixelated");
   });
 
-  it("is smooth at or below one screen pixel per texture pixel", () => {
+  it("is smooth at or below one device pixel per texture pixel", () => {
     expect(imageRenderingFor(1)).toBe("auto");
     expect(imageRenderingFor(0.25)).toBe("auto");
+    expect(imageRenderingFor(1, 1)).toBe("auto");
+    expect(imageRenderingFor(0.6, 1.5)).toBe("auto");
+    expect(imageRenderingFor(0.5, 2)).toBe("auto");
+  });
+
+  it("counts a missing or broken ratio as one", () => {
+    for (const ratio of [undefined, Number.NaN, 0, -2, Number.POSITIVE_INFINITY]) {
+      expect(imageRenderingFor(1, ratio)).toBe("auto");
+      expect(imageRenderingFor(1.2, ratio)).toBe("pixelated");
+    }
+  });
+});
+
+describe("screenPixelRatio", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reads the display ratio and falls back to one", () => {
+    expect(screenPixelRatio()).toBe(1);
+    vi.stubGlobal("window", { devicePixelRatio: 1.5 });
+    expect(screenPixelRatio()).toBe(1.5);
+    vi.stubGlobal("window", { devicePixelRatio: 0 });
+    expect(screenPixelRatio()).toBe(1);
+    vi.stubGlobal("window", { devicePixelRatio: Number.NaN });
+    expect(screenPixelRatio()).toBe(1);
+    vi.stubGlobal("window", {});
+    expect(screenPixelRatio()).toBe(1);
+  });
+});
+
+describe("viewers", () => {
+  it.each([
+    ["GpuViewport.tsx", gpuViewportSource],
+    ["AdvancedImageViewer.tsx", advancedImageViewerSource],
+    ["ZoomPanView.tsx", zoomPanViewSource],
+  ])("passes the display ratio to the image rendering rule in %s", (_name, source) => {
+    expect(source.match(/imageRenderingFor\(/g)).toHaveLength(1);
+    expect(source).toMatch(/imageRenderingFor\((?:transform\.scale|scale), screenPixelRatio\(\)\)/);
   });
 });
 

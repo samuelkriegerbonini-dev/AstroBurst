@@ -146,6 +146,20 @@ describe("Tool browser catalog", () => {
     ["histogram", ["image"]],
     ["measure", ["astrometry", "photometry", "cube", "sagui", "log"]],
     ["files and output", ["files", "export", "config"]],
+    ["cube", ["cube", "cubeprep"]],
+    ["spectra", ["cube", "sagui"]],
+    ["PSF", ["processing", "cubeprep"]],
+    ["FWHM", ["processing", "stacking"]],
+    ["Gaia", ["astrometry"]],
+    ["zero point", ["astrometry"]],
+    ["transit", ["photometry"]],
+    ["magnitude", ["photometry"]],
+    ["mosaic", ["stacking"]],
+    ["rotate", ["processing"]],
+    ["stats", ["image"]],
+    ["extension", ["headers"]],
+    ["API key", ["config"]],
+    ["x1d", ["cube"]],
   ])("finds %j by name, description, keyword or category", (query, expected) => {
     expect(listed(search(props(), query))).toEqual(expected);
   });
@@ -162,6 +176,14 @@ describe("Tool browser catalog", () => {
     expect(status(search(props(), "light curve"))).toBe("1 tool found");
     expect(status(search(props(), "process"))).toBe("3 tools found");
     expect(status(search(props(), "unmatched query"))).toBe("0 tools found");
+  });
+
+  it("suggests science words in the search box and in the empty result", () => {
+    expect(renderToStaticMarkup(createElement(ToolBrowser, props()))).toContain('placeholder="Search tools, e.g. light curve, x1d, SED"');
+    hooks.mount();
+    const empty = textOf(search(props(), "unmatched query").map((node) => node.props.children));
+    expect(empty).toContain("Try a tool name or a feature such as light curve, x1d or SED.");
+    expect(empty).not.toContain("histogram");
   });
 
   it("offers a way to clear a search with no results", () => {

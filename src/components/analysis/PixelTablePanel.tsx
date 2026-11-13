@@ -2,21 +2,27 @@ import { useState, useEffect, useRef, useCallback, useMemo, useId, memo } from "
 import { Crosshair, Grid3X3, Plus, Loader2 } from "lucide-react";
 import { pixelTable } from "../../services/analysis";
 import type { PixelTableResult } from "../../shared/types/analysis";
+import type { PixelTableLayers } from "../../shared/types/layers";
 import { useMousePixel, usePixelClick } from "../../hooks/useMousePixelStore";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
 import { useToolHost } from "../../context/ToolHostContext";
-import { measurementLog, pixelEntry } from "../../utils/measurementLog";
+import { measurementLog } from "../../utils/measurementLog";
+import { pixelLayersEntry } from "../../utils/measurementLogLayers";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
-import { Toggle } from "../ui";
+import { ErrorAlert, SMALL_BUTTON_CLASS, Toggle } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
 import {
   DEFAULT_PIXEL_TABLE_SIZE,
+  PIXEL_TABLE_KEY,
   PIXEL_TABLE_PLANES,
   PIXEL_TABLE_SIZES,
+  cellMark,
   cellTone,
+  centreSummary,
   columnIndices,
   displayedPlane,
   formatPlaneCell,
+  layerNotes,
   pixelCellTitle,
   pixelTableCsv,
   planeAvailable,
@@ -35,15 +41,13 @@ const NOTICE_MS = 1500;
 const SUMMARY_DIGITS = 4;
 const SELECT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 font-mono focus:border-sky-500/50";
-const BUTTON_CLASS =
-  "text-[10px] px-2 py-0.5 rounded border border-zinc-700/50 bg-zinc-900 text-zinc-300 hover:border-sky-500/50 disabled:opacity-40 disabled:cursor-default";
 const CELL_BASE = "px-1 py-0.5 text-right whitespace-nowrap border border-zinc-800/60";
 const CELL_TONE_CLASS: Record<CellTone, string> = {
   normal: "text-zinc-300",
   max: "text-amber-200 bg-amber-900/40",
   min: "text-sky-200 bg-sky-900/30",
   nan: "text-zinc-600 bg-zinc-900/60",
-  dq: "text-red-200 bg-red-900/40",
+  dq: "text-red-200 bg-red-900/40 underline decoration-dotted",
 };
 const CENTRE_CLASS = "outline outline-1 outline-sky-400 -outline-offset-1";
 const AXIS_CLASS = "px-1 py-0.5 text-zinc-500 whitespace-nowrap";
@@ -60,7 +64,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   const [follow, setFollow] = useState(false);
   const [planeChoice, setPlaneChoice] = useState<PixelTablePlane>("SCI");
   const [sizeText, setSizeText] = useState(String(DEFAULT_PIXEL_TABLE_SIZE));
-  const [result, setResult] = useState<PixelTableResult | null>(null);
+  const [result, setResult] = useState<(PixelTableResult & PixelTableLayers) | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -162,12 +166,14 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   const copyCsv = useCallback(async () => {
     if (!result || !shown) return;
     try {
-      await navigator.clipboard.writeText(pixelTableCsv(result, shown.grid));
+      await navigator.clipboard.writeText(
+        pixelTableCsv(result, shown.grid, { file: provenance.file, plane: shown.plane, exportedUtc: new Date().toISOString() }),
+      );
       showNotice(`${shown.plane === "SCI" ? "Pixel" : shown.plane} table copied to the clipboard as CSV`);
     } catch (e: unknown) {
       setError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [result, shown, showNotice]);
+  }, [result, shown, showNotice, provenance.file]);
 
   const cols = useMemo(() => (result ? columnIndices(result) : []), [result]);
   const rows = useMemo(() => (result ? rowIndices(result) : []), [result]);
@@ -175,6 +181,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
   const grid = shown?.grid ?? [];
   const stats = shown?.stats;
   const plane = shown?.plane ?? "SCI";
+  const notes = result ? layerNotes(result) : null;
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -211,11 +218,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
           </div>
         )}
 
-        {error && (
-          <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
-            {error}
-          </div>
-        )}
+        <ErrorAlert compact message={error} />
 
         {result && stats && (
           <div className="flex flex-col gap-1.5">
@@ -242,6 +245,7 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
                         const dqNames = result.dq_names?.[r]?.[c] ?? null;
                         const tone = cellTone(v, stats, dqNames);
                         const centre = r === half && c === half;
+                        const mark = cellMark(tone, dqNames, centre);
                         return (
                           <td
                             key={x}
@@ -259,7 +263,9 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
                             )}
                             className={`${CELL_BASE} ${CELL_TONE_CLASS[tone]}${centre ? ` ${CENTRE_CLASS}` : ""}`}
                           >
+                            {mark.glyph && <span aria-hidden="true">{mark.glyph}</span>}
                             {formatPlaneCell(v, plane)}
+                            {mark.srText && <span className="sr-only">{mark.srText}</span>}
                           </td>
                         );
                       })}
@@ -269,7 +275,16 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
               </table>
             </div>
 
+            <div data-pixel-key className="flex flex-wrap items-center gap-1 font-mono text-[9px]">
+              {PIXEL_TABLE_KEY.map((entry) => (
+                <span key={entry.tone} className={`${CELL_BASE} ${CELL_TONE_CLASS[entry.tone]}`}>
+                  {entry.label}
+                </span>
+              ))}
+            </div>
+
             <div className="text-[9px] text-zinc-500 font-mono flex flex-wrap gap-x-2">
+              <span>{centreSummary(result)}</span>
               {(result.err != null || result.wavelength != null) && <span>{plane}</span>}
               {plane === "WAVELENGTH"
                 ? result.wavelength_unit && <span>λ unit {result.wavelength_unit}</span>
@@ -283,7 +298,13 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
               </span>
               {result.dq_table && <span>DQ {result.dq_table}</span>}
               <span>{result.elapsed_ms} ms</span>
+              {notes?.origin && <span>{notes.origin}</span>}
             </div>
+            {notes?.gaps.map((gap) => (
+              <div key={gap} role="status" className="text-[9px] text-amber-300/90">
+                {gap}
+              </div>
+            ))}
 
             <div className="flex items-center justify-between gap-2">
               <select
@@ -299,16 +320,16 @@ function PixelTablePanel({ filePath, measureKey }: PixelTablePanelProps) {
                   </option>
                 ))}
               </select>
-              <button type="button" onClick={copyCsv} className={BUTTON_CLASS}>
+              <button type="button" onClick={copyCsv} className={SMALL_BUTTON_CLASS}>
                 Copy CSV
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  if (result) measurementLog.append(pixelEntry(provenance, result));
+                  if (result) measurementLog.append(pixelLayersEntry(provenance, result));
                 }}
                 disabled={!result}
-                className={`${BUTTON_CLASS} inline-flex items-center gap-1`}
+                className={SMALL_BUTTON_CLASS}
                 title="Log the centre pixel with its ERR value, DQ flag names and wavelength"
               >
                 <Plus size={11} /> Log

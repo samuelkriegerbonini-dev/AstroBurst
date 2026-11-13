@@ -558,6 +558,10 @@ impl SpaxelContext {
             _ => None,
         }
     }
+
+    fn source_frame(&self) -> bool {
+        self.redshift != 0.0 && !self.axis_kind.is_velocity()
+    }
 }
 
 fn slope_at(velocity: impl Fn(f64) -> f64, x: f64, dx: f64) -> f64 {
@@ -1107,7 +1111,8 @@ fn component_fit(ctx: &SpaxelContext, fit: &SingleFit, mean_dx: f64) -> (Compone
         source_flux: source.flux,
         source_flux_err: source.flux_err,
     };
-    (component, observer.unresolved)
+    let unresolved = if ctx.source_frame() { source.unresolved } else { observer.unresolved };
+    (component, unresolved)
 }
 
 struct LineSample {
@@ -1450,7 +1455,7 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     let mut ncomp = vec![0.0f32; npix];
     let two_requested = cfg.components != Components::One;
     let mut component_buffers = two_requested.then(|| [ComponentBuffers::new(npix), ComponentBuffers::new(npix)]);
-    let source_requested = cfg.redshift != 0.0 && !ctx.axis_kind.is_velocity();
+    let source_requested = ctx.source_frame();
     let mut source_single = source_requested.then(|| ComponentBuffers::new(npix));
     let mut source_sigma_corr = vec![f32::NAN; npix];
     let mut source_component_buffers =
@@ -1462,7 +1467,6 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     let mut dq_excluded_samples = 0_u64;
     let mut n_unit_weights = 0usize;
     let mut n_unresolved = 0usize;
-    let mut n_source_unresolved = 0usize;
     let mut n_two_components = 0usize;
 
     let decode_band = |cube: &LazyCube, band_start: usize, row_count: usize| -> Result<Vec<Vec<f32>>> {
@@ -1520,9 +1524,6 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
             chi2_red[p] = o.chi2_red() as f32;
             if let Some(c) = &o.single {
                 snr[p] = c.snr as f32;
-                if c.source_sigma_corr_kms.is_some_and(f64::is_nan) {
-                    n_source_unresolved += 1;
-                }
                 if o.mask & MASK_FITTED != 0 {
                     n_fit += 1;
                     flux[p] = c.flux as f32;
@@ -1592,16 +1593,17 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     ));
     let sigma_label = match (cfg.resolving_power, ctx.sigma_inst) {
         (Some(r), Some(inst)) => {
-            notes.push(format!(
-                "sigma corrected for the LSF with R = {} (sigma_inst = {:.2} km/s); {} spaxels unresolved (sigma_corr NaN)",
-                r, inst, n_unresolved
-            ));
-            if source_requested {
-                notes.push(format!(
-                    "source-frame sigma against the same sigma_inst: {} spaxels unresolved (source_sigma_corr NaN); the unresolved bit of the mask follows the observer-frame sigma",
-                    n_source_unresolved
-                ));
-            }
+            notes.push(if source_requested {
+                format!(
+                    "sigma corrected for the LSF with R = {} (sigma_inst = {:.2} km/s); {} spaxels unresolved in the source frame at redshift {} (source_sigma_corr NaN); the unresolved bit of the mask follows the source-frame sigma",
+                    r, inst, n_unresolved, cfg.redshift
+                )
+            } else {
+                format!(
+                    "sigma corrected for the LSF with R = {} (sigma_inst = {:.2} km/s); {} spaxels unresolved (sigma_corr NaN)",
+                    r, inst, n_unresolved
+                )
+            });
             format!("LSF-corrected (R = {})", r)
         }
         _ => {
@@ -3366,30 +3368,173 @@ mod tests {
         assert_eq!(names[11..15], ["source_flux", "source_velocity", "source_sigma_obs", "source_sigma_corr"]);
         let plane = maps.source.as_ref().and_then(|s| s.sigma_corr.as_ref()).expect("source-frame sigma_corr plane");
         assert_eq!(plane[[1, 1]].to_bits(), (source_corr as f32).to_bits());
-        let source_unresolved = |maps: &LineFitMaps| -> Vec<String> {
-            maps.notes.iter().filter(|n| n.starts_with("source-frame sigma against the same sigma_inst")).cloned().collect()
-        };
-        assert_eq!(
-            source_unresolved(&maps),
-            ["source-frame sigma against the same sigma_inst: 0 spaxels unresolved (source_sigma_corr NaN); the unresolved bit of the mask follows the observer-frame sigma"]
-        );
 
-        let between_cfg = with_sigma_inst(120.0);
-        let between = fit_spaxel(&inputs, &between_cfg, 1, 1).unwrap();
+        let between = fit_spaxel(&inputs, &with_sigma_inst(120.0), 1, 1).unwrap();
         let c = between.single.as_ref().expect("single fit");
         assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 90.0, 1e-4), "{c:?}");
         assert!(c.source_sigma_corr_kms.expect("source-frame correction").is_nan(), "{c:?}");
         assert!(serde_json::to_value(c).unwrap()["source_sigma_corr_kms"].is_null());
-        assert_eq!(between.mask & MASK_UNRESOLVED, 0, "the mask follows the observer-frame width: {}", between.mask);
-        let between_maps = fit_cube_lines(&inputs, &between_cfg).unwrap();
-        assert!(between_maps.mask.iter().all(|m| !bit(*m, MASK_UNRESOLVED)), "{:?}", between_maps.mask);
-        assert!(between_maps.notes.iter().any(|n| n.ends_with("0 spaxels unresolved (sigma_corr NaN)")), "{:?}", between_maps.notes);
-        assert_eq!(
-            source_unresolved(&between_maps),
-            ["source-frame sigma against the same sigma_inst: 16 spaxels unresolved (source_sigma_corr NaN); the unresolved bit of the mask follows the observer-frame sigma"]
-        );
-        let without_redshift = fit_cube_lines(&inputs, &LineFitConfig { redshift: 0.0, ..between_cfg }).unwrap();
-        assert!(source_unresolved(&without_redshift).is_empty(), "{:?}", without_redshift.notes);
+    }
+
+    fn sigma_inst_of(kms: f64) -> (&'static str, serde_json::Value) {
+        ("resolving_power", serde_json::json!(SPEED_OF_LIGHT_KMS / (kms * FWHM_PER_SIGMA)))
+    }
+
+    fn only_lsf_note(maps: &LineFitMaps) -> &str {
+        let found: Vec<&String> = maps.notes.iter().filter(|n| n.starts_with("sigma corrected for the LSF with R = ")).collect();
+        assert_eq!(found.len(), 1, "{:?}", maps.notes);
+        found[0]
+    }
+
+    fn unresolved_spaxels(maps: &LineFitMaps) -> usize {
+        maps.mask.iter().filter(|m| bit(**m, MASK_UNRESOLVED)).count()
+    }
+
+    fn source_frame_count(spaxels: usize) -> String {
+        format!(
+            "; {spaxels} spaxels unresolved in the source frame at redshift 0.5 (source_sigma_corr NaN); the unresolved bit of the mask follows the source-frame sigma"
+        )
+    }
+
+    const ALL_SPAXELS: usize = REDSHIFTED_CUBE_SIZE * REDSHIFTED_CUBE_SIZE;
+
+    #[test]
+    fn at_a_redshift_the_unresolved_bit_follows_the_source_frame_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let cfg = redshifted_cfg(&[sigma_inst_of(120.0)]);
+        let spaxel = fit_spaxel(&inputs, &cfg, 1, 1).unwrap();
+        assert_ne!(spaxel.mask & MASK_UNRESOLVED, 0, "the mask follows the source-frame width: {}", spaxel.mask);
+        assert_ne!(spaxel.mask & MASK_FITTED, 0, "mask={}", spaxel.mask);
+        let c = spaxel.single.as_ref().expect("single fit");
+        assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 90.0, 1e-4), "{c:?}");
+        assert!(c.source_sigma_corr_kms.expect("source-frame correction").is_nan(), "{c:?}");
+        assert!(serde_json::to_value(c).unwrap()["source_sigma_corr_kms"].is_null());
+
+        let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+        assert_eq!(maps.mask.len(), ALL_SPAXELS);
+        assert!(maps.mask.iter().all(|m| bit(*m, MASK_UNRESOLVED) && bit(*m, MASK_FITTED)), "{:?}", maps.mask);
+        assert_eq!(maps.mask[[1, 1]] as u32, spaxel.mask);
+        let observer_corr = maps.sigma_corr.as_ref().expect("sigma_corr plane")[[1, 1]] as f64;
+        assert!(close(observer_corr, 90.0, 1e-4), "sigma_corr plane={observer_corr}");
+        let source_corr = maps.source.as_ref().and_then(|s| s.sigma_corr.as_ref()).expect("source-frame sigma_corr plane");
+        assert!(source_corr.iter().all(|v| v.is_nan()), "{source_corr:?}");
+    }
+
+    #[test]
+    fn at_a_redshift_the_lsf_note_counts_the_spaxels_unresolved_in_the_source_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+
+        let maps = fit_cube_lines(&inputs, &redshifted_cfg(&[sigma_inst_of(120.0)])).unwrap();
+        let note = only_lsf_note(&maps);
+        assert!(note.ends_with(&format!("(sigma_inst = 120.00 km/s){}", source_frame_count(ALL_SPAXELS))), "{note}");
+        assert!(!maps.notes.iter().any(|n| n.starts_with("source-frame sigma against the same sigma_inst")), "{:?}", maps.notes);
+
+        let resolved = redshifted_cfg(&[sigma_inst_of(60.0)]);
+        let maps = fit_cube_lines(&inputs, &resolved).unwrap();
+        let note = only_lsf_note(&maps);
+        assert!(note.ends_with(&format!("(sigma_inst = 60.00 km/s){}", source_frame_count(0))), "{note}");
+        assert_eq!(unresolved_spaxels(&maps), 0, "{:?}", maps.mask);
+        let c = fit_spaxel(&inputs, &resolved, 1, 1).unwrap().single.expect("single fit");
+        assert!(close(c.source_sigma_corr_kms.expect("source-frame correction"), 80.0, 1e-4), "{c:?}");
+        assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 137.4773, 1e-4), "{c:?}");
+    }
+
+    #[test]
+    fn a_line_resolved_in_the_source_frame_is_not_flagged_when_only_its_observer_frame_width_is_below_sigma_inst() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let cfg = redshifted_cfg(&[("convention", serde_json::json!("radio")), sigma_inst_of(80.0)]);
+        let spaxel = fit_spaxel(&inputs, &cfg, 1, 1).unwrap();
+        let c = spaxel.single.as_ref().expect("single fit");
+        assert!(close(c.sigma_kms, 66.6444, 1e-4), "sigma_kms={}", c.sigma_kms);
+        assert!(c.sigma_corr_kms.expect("observer-frame correction").is_nan(), "{c:?}");
+        assert!(close(c.source_sigma_corr_kms.expect("source-frame correction"), 60.0, 1e-4), "{c:?}");
+        assert_eq!(spaxel.mask & MASK_UNRESOLVED, 0, "the mask follows the source-frame width: {}", spaxel.mask);
+
+        let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+        assert_eq!(unresolved_spaxels(&maps), 0, "{:?}", maps.mask);
+        let note = only_lsf_note(&maps);
+        assert!(note.ends_with(&source_frame_count(0)), "{note}");
+    }
+
+    #[test]
+    fn without_a_redshift_the_unresolved_bit_and_the_lsf_note_are_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let null_redshift = redshifted_cfg(&[sigma_inst_of(120.0), ("redshift", serde_json::Value::Null)]);
+        let zero_redshift = LineFitConfig { redshift: 0.0, ..redshifted_cfg(&[sigma_inst_of(120.0)]) };
+        for cfg in [null_redshift, zero_redshift] {
+            let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+            assert_eq!(unresolved_spaxels(&maps), 0, "{:?}", maps.mask);
+            let note = only_lsf_note(&maps);
+            assert!(note.ends_with("; 0 spaxels unresolved (sigma_corr NaN)"), "{note}");
+            assert!(!note.contains("source frame"), "{note}");
+            assert!(!maps.notes.iter().any(|n| n.contains("redshift")), "{:?}", maps.notes);
+        }
+
+        let wide_lsf = redshifted_cfg(&[sigma_inst_of(200.0), ("redshift", serde_json::Value::Null)]);
+        let maps = fit_cube_lines(&inputs, &wide_lsf).unwrap();
+        assert_eq!(unresolved_spaxels(&maps), ALL_SPAXELS, "{:?}", maps.mask);
+        let note = only_lsf_note(&maps);
+        assert!(note.ends_with("; 16 spaxels unresolved (sigma_corr NaN)"), "{note}");
+    }
+
+    #[test]
+    fn a_stored_velocity_axis_keeps_the_observer_frame_rule_when_a_redshift_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vrad.fits");
+        write_stored_velocity_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let cfg = redshifted_cfg(&[sigma_inst_of(120.0)]);
+        let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+        assert_eq!(unresolved_spaxels(&maps), ALL_SPAXELS, "{:?}", maps.mask);
+        let note = only_lsf_note(&maps);
+        assert!(note.ends_with("; 16 spaxels unresolved (sigma_corr NaN)"), "{note}");
+        let ignored = "velocity axis VRAD used as stored: redshift 0.5 ignored, no source-frame values";
+        assert!(maps.notes.iter().any(|n| n == ignored), "{:?}", maps.notes);
+        assert!(maps.source.is_none());
+        let c = fit_spaxel(&inputs, &cfg, 1, 1).unwrap().single.expect("single fit");
+        assert_eq!(c.source_sigma_corr_kms, None);
+
+        let resolved = redshifted_cfg(&[sigma_inst_of(60.0)]);
+        assert_eq!(unresolved_spaxels(&fit_cube_lines(&inputs, &resolved).unwrap()), 0);
+        let c = fit_spaxel(&inputs, &resolved, 1, 1).unwrap().single.expect("single fit");
+        assert!(close(c.sigma_corr_kms.expect("stored-axis correction"), 80.0, 1e-3), "{c:?}");
+    }
+
+    #[test]
+    fn a_redshift_axis_follows_the_source_frame_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zopt.fits");
+        let sigma_z = (1.0 + REDSHIFT) * SOURCE_SIGMA_KMS / SPEED_OF_LIGHT_KMS;
+        let zopt_cards = [("CTYPE3", "'ZOPT'"), ("CUNIT3", ""), ("RESTWAV", ""), ("CRVAL3", "0.4952"), ("CD3_3", "1.2E-4")];
+        write_redshifted_cube(&path, &zopt_cards, 0.4952, 1.2e-4, sigma_z);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let cfg = redshifted_cfg(&[sigma_inst_of(120.0)]);
+        let spaxel = fit_spaxel(&inputs, &cfg, 1, 1).unwrap();
+        let c = spaxel.single.as_ref().expect("single fit");
+        assert!(close(c.sigma_kms, 150.0, 1e-4), "sigma_kms={}", c.sigma_kms);
+        assert!(close(c.source_sigma_kms, SOURCE_SIGMA_KMS, 1e-3), "source_sigma_kms={}", c.source_sigma_kms);
+        assert_ne!(spaxel.mask & MASK_UNRESOLVED, 0, "the mask follows the source-frame width: {}", spaxel.mask);
+        let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+        let note = only_lsf_note(&maps);
+        assert!(note.ends_with(&source_frame_count(ALL_SPAXELS)), "{note}");
     }
 
     #[test]

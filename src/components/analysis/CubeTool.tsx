@@ -1,32 +1,41 @@
-import { useState, useCallback, useLayoutEffect, useMemo, useRef, lazy, Suspense, memo } from "react";
+import { useState, useCallback, useLayoutEffect, useRef, lazy, Suspense, memo } from "react";
 import { FileText, X } from "lucide-react";
 import { getPreviewUrl } from "../../infrastructure/tauri";
-import { fileKeyOf, getRenderRecord, useFileContext, useCubeContext, useRenderActions } from "../../context/PreviewContext";
+import { getRenderRecord, useFileContext, useCubeContext, useRenderActions } from "../../context/PreviewContext";
 import { ANALYSIS_SECTION, CUBE_TOOL_EMPTY_TITLE, toolSections } from "../../utils/analysisSections";
 import { filterFrameLabel, frameRecordLabel } from "../../utils/cubeNavigation";
 import { cubePanelGates, formatRampFrameLabel } from "../../utils/rampLabels";
 import { useSpectrum } from "../../hooks/useSpectrumStore";
-import { openSpectrumCsv, spectrumCsvStore, useOpenSpectrumCsv, useSpectrum1dDoc } from "../../hooks/useSpectrum1dStore";
-import { OPEN_SPECTRUM_CSV_LABEL, cubeToolContent, type SpectrumDocument } from "../../utils/spectrumDocument";
+import { openSpectrumCsv, spectrumCsvStore } from "../../hooks/useSpectrum1dStore";
+import { useActiveSpectrumDocument } from "../../hooks/useActiveSpectrumDocument";
+import { OPEN_SPECTRUM_CSV_LABEL } from "../../utils/spectrumDocument";
 import { fileBaseName } from "../../utils/spectrumExport";
 import { scientificInputRevisionOf } from "../../utils/pixelSource";
+import { isSpectrumSeries } from "../../utils/fileKinds";
 import type { CubeResult } from "./SpectroscopyPanel";
 import TabSpinner from "./TabSpinner";
 import CubeSampleOffers from "./CubeSampleOffers";
 import SedPanel from "./SedPanel";
 import SectionChips, { SectionTipNote } from "./SectionChips";
+import SpectrumSourcePicker from "./SpectrumSourcePicker";
 import { useSectionTip } from "./useSectionTip";
 
 const SpectroscopyPanel = lazy(() => import("./SpectroscopyPanel"));
 const PvPanel = lazy(() => import("./PvPanel"));
 const RampPanel = lazy(() => import("./RampPanel"));
+const TsoLightCurvesPanel = lazy(() => import("./TsoLightCurvesPanel"));
 
 const LINE_TIP_TITLE = "Measure a spectral line";
-const LINE_STEPS = "Drag across the plot to select a line range, set continuum windows A and B beside the line, choose a model, then click Measure line.";
+const LINE_STEPS =
+  "Drag across the plot to select a line range, set continuum windows A and B beside the line, click a rest-line marker or type the rest wavelength to get velocities, choose a model, then click Measure line.";
 const CUBE_SECTION_TIPS = {
   [ANALYSIS_SECTION.spectrum.id]: {
     title: LINE_TIP_TITLE,
     body: `Select Crosshair in the viewer and click the image to extract a spectrum. ${LINE_STEPS}`,
+  },
+  [ANALYSIS_SECTION.sed.id]: {
+    title: "Plot the SED of a filter cube",
+    body: "Select Crosshair in the viewer and click the image, or extract a region spectrum: each filter plane with a pivot wavelength gives one point of the SED.",
   },
 };
 const DOCUMENT_SECTION_TIPS = {
@@ -35,25 +44,18 @@ const DOCUMENT_SECTION_TIPS = {
 
 function CubeTool() {
   const { file } = useFileContext();
-  const { isCube, isSpectrum, cubeDims, ramp, rampSource } = useCubeContext();
+  const { isCube, cubeDims, ramp, rampSource } = useCubeContext();
   const { currentFileKey, publishProcessed, resetProcessed } = useRenderActions();
   const spec = useSpectrum();
-  const csv = useOpenSpectrumCsv();
+  const activeDocument = useActiveSpectrumDocument();
+  const { content, fileKey, path: docPath, viewKey, doc, document: spectrumDocument } = activeDocument;
 
   const filePath = file?.path;
-  const fileKey = fileKeyOf(file);
   const panelKey = scientificInputRevisionOf(file);
   const panelKeyRef = useRef(panelKey);
   panelKeyRef.current = panelKey;
-  const content = cubeToolContent({ isCube, isRamp: ramp !== null, isSpectrum, fileKey, csv });
-  const docPath = content === "spectrum" ? (filePath ?? null) : content === "csv" && csv ? csv.path : null;
-  const docHdu = content === "spectrum" ? (file?.spectrum?.hdu ?? null) : null;
-  const doc = useSpectrum1dDoc(docPath, docHdu);
+  const hasSpectrumSeries = content === "spectrum" && isSpectrumSeries(file);
   const docSpectrum = doc.spectrum;
-  const spectrumDocument = useMemo<SpectrumDocument | null>(
-    () => (docSpectrum ? { source: { kind: "file", hdu: docHdu }, spectrum: docSpectrum } : null),
-    [docSpectrum, docHdu],
-  );
   const [cubeGates] = useState(cubePanelGates);
   const frameSeqRef = useRef(0);
   useLayoutEffect(() => {
@@ -122,13 +124,15 @@ function CubeTool() {
     isCube: content === "cube" && isCube,
     isRamp: content === "cube" && ramp !== null,
     hasSpectrumDocument: docPath !== null,
+    hasSpectrumSeries,
+    hasPhotometricPlanes: content === "cube" && isCube && photometricPlanes !== null,
   });
   const sectionTip = useSectionTip(sections, content === "cube" ? (ramp ? undefined : CUBE_SECTION_TIPS) : DOCUMENT_SECTION_TIPS);
 
   return (
     <Suspense fallback={<TabSpinner />}>
       <div className="flex flex-col gap-3 p-3">
-        <SectionChips label="Cube" sections={sections} tip={sectionTip} />
+        <SectionChips label="Spectra" sections={sections} tip={sectionTip} />
         {content === "empty" && (
           <div className="px-3 py-2 flex flex-col items-start gap-2 text-[10px] text-zinc-500">
             <span data-cube-empty>{CUBE_TOOL_EMPTY_TITLE}</span>
@@ -153,6 +157,7 @@ function CubeTool() {
           <section id={ANALYSIS_SECTION.spectrum.id}>
             <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.spectrum.id} />
             <div className="flex flex-col gap-2">
+              <SpectrumSourcePicker active={activeDocument} />
               {content === "csv" && (
                 <div data-spectrum-csv className="px-1 flex items-center gap-2 text-[10px] font-mono text-zinc-500">
                   <FileText size={10} />
@@ -170,15 +175,21 @@ function CubeTool() {
                 </div>
               )}
               <SpectroscopyPanel
-                key={`${panelKey}|${content}|${docHdu ?? ""}|${docPath}`}
+                key={`${panelKey}|${content}|${viewKey ?? ""}`}
                 documentMode
                 spectrumDocument={spectrumDocument}
                 isLoading={docSpectrum === null && doc.error === null}
                 error={doc.error}
                 filePath={docPath}
+                viewKey={viewKey ?? undefined}
                 publishGate={cubeGates.spectrum}
               />
             </div>
+          </section>
+        )}
+        {hasSpectrumSeries && (
+          <section id={ANALYSIS_SECTION.tso.id}>
+            <TsoLightCurvesPanel key={panelKey} filePath={filePath ?? null} fileKey={fileKey} />
           </section>
         )}
 
@@ -218,7 +229,10 @@ function CubeTool() {
           </section>
         )}
         {content === "cube" && isCube && photometricPlanes && (
-          <SedPanel planes={photometricPlanes} bunit={cubeDims?.bunit ?? null} source={spec} />
+          <section id={ANALYSIS_SECTION.sed.id}>
+            <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.sed.id} />
+            <SedPanel planes={photometricPlanes} bunit={cubeDims?.bunit ?? null} source={spec} />
+          </section>
         )}
         {content === "cube" && isCube && !ramp && (
           <section id={ANALYSIS_SECTION.pv.id}>

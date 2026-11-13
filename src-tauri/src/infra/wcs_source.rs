@@ -11,6 +11,7 @@ use anyhow::Result;
 use crate::core::astrometry::gwcs::{
     classify_wcs_node, find_wcs_node, parse_gwcs, wcsinfo_sip_residuals, GwcsOrigin, GwcsSource, WcsNodeClass,
 };
+use crate::core::astrometry::legacy_pc::with_modern_matrix_cards;
 use crate::core::astrometry::wcs::{WcsKind, WcsTransform};
 use crate::infra::asdf::converter::is_asdf_file;
 use crate::infra::asdf::{AsdfFile, AsdfImage};
@@ -98,7 +99,8 @@ pub fn invalidate_gwcs_cache(path: &str) {
 }
 
 pub fn load_wcs(path: &str, header: &HduHeader) -> Result<WcsTransform> {
-    let linear = header_without_tan_pv(header);
+    let modern = with_modern_matrix_cards(header);
+    let linear = header_without_tan_pv(modern.as_ref());
     let linear = linear.as_ref();
     let wcs = match gwcs_for_path(path) {
         Ok(Some(source)) => match WcsTransform::from_gwcs(source, linear) {
@@ -115,7 +117,8 @@ pub fn load_wcs(path: &str, header: &HduHeader) -> Result<WcsTransform> {
 }
 
 pub fn header_wcs(header: &HduHeader) -> Result<WcsTransform> {
-    WcsTransform::from_header(&header_without_tan_pv(header)).map(|wcs| with_tan_pv_warning(wcs, header))
+    let modern = with_modern_matrix_cards(header);
+    WcsTransform::from_header(&header_without_tan_pv(modern.as_ref())).map(|wcs| with_tan_pv_warning(wcs, header))
 }
 
 fn with_tan_pv_warning(wcs: WcsTransform, header: &HduHeader) -> WcsTransform {

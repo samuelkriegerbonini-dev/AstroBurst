@@ -1,19 +1,29 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { ClipboardCopy, Crosshair, Database, Download, Loader2, Shapes } from "lucide-react";
+import { Crosshair, Database, Download, Loader2, Shapes } from "lucide-react";
 import { catalogConeSearch, catalogCrossMatch, catalogExportCsv, type CatalogExportItems } from "../../services/catalog";
 import { useTimedNotice } from "../../hooks/useTimedNotice";
 import { GAIA_BANDS } from "../../shared/types/catalog";
-import type { CatalogCsvKind, ConeSearchResult, CrossMatchResult, GaiaBand, PlacedCatalogRow, ZeroPointAperture } from "../../shared/types/catalog";
+import type { CatalogCsvKind, ConeSearchResult, CrossMatchResult, GaiaBand, PlacedCatalogRow, ZeroPointFit } from "../../shared/types/catalog";
 import { APERTURE_RANGE_HINT, apertureRadiusInRange } from "../../utils/photometryTable";
 import { overlayStore } from "../../utils/overlayStore";
 import { regionStore } from "../../utils/regionStore";
 import { DEFAULT_REGION_PROPS } from "../../utils/regionPersistence";
 import { generateId } from "../../utils/format";
 import { targetProjectionPath } from "../../utils/skyList";
-import { catalogCsvFileName, catalogRowsCsv, matchesCsv, sourcesCsv } from "../../utils/catalogCsv";
-import { crossMatchEntry, measurementLog } from "../../utils/measurementLog";
+import { catalogCsvFileName } from "../../utils/catalogCsv";
+import { crossMatchEntry, fileNameOf, measurementLog } from "../../utils/measurementLog";
+import {
+  catalogueCsvText,
+  coneCsvHeaderLines,
+  crossMatchCsvHeaderLines,
+  detectionLine,
+  gaiaEpochText,
+  gaiaListLine,
+  zeroPointApertureText,
+} from "../../utils/catalogProvenance";
+import { APP_VERSION } from "../../utils/constants";
 import { CATALOG_LAYER_ID, CATALOG_LAYER_KIND, createCatalogPainter } from "../viewer/painters/catalogPainter";
-import { DecimalField, ErrorAlert, RunButton, Toggle } from "../ui";
+import { CopyCsvButton, DecimalField, ErrorAlert, RunButton, SMALL_BUTTON_CLASS, Toggle } from "../ui";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import CrossMatchPlots from "./CrossMatchPlots";
 
@@ -37,20 +47,23 @@ const MATCH_RADIUS_FIELD: DecimalFieldOptions = { optional: true, min: 0.2 };
 const APERTURE_FIELD: DecimalFieldOptions = { optional: true };
 const APERTURE_TITLE = "Aperture radius in pixels for the zero point; blank uses 1.5 x FWHM of each star";
 const ZERO_POINT_APERTURE_TITLE = "The zero point holds only for instrumental magnitudes measured in this aperture";
+const ZERO_POINT_SYSTEM_TITLE = "Gaia magnitudes are in the Vega system: this is not an AB zero point";
+const LIST_RULE_FIELD = "Cross-match list: every Gaia star in the field, no G limit.";
+const LIST_RULE_SEARCH = "Cross-match list: the radius and G limit typed above.";
+const COPY_TITLE = "Copy the matches (or the catalog when nothing is matched) as CSV, with the header lines of the saved file";
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-cyan-500/50 w-full";
 const SELECT_CLASS = "bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[10px] text-zinc-300 font-mono";
-const SMALL_BUTTON_CLASS =
-  "flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed";
 
 function fmt(v: number | null | undefined, digits = 2): string {
   return v === null || v === undefined || !Number.isFinite(v) ? "--" : v.toFixed(digits);
 }
 
-function zeroPointApertureText(aperture: ZeroPointAperture): string {
-  if (aperture.kind === "fixed") return `aperture r = ${fmt(aperture.radius_px)} px`;
-  return `aperture ${aperture.fwhm_factor} x FWHM per star, median r = ${fmt(aperture.median_radius_px)} px (${fmt(aperture.min_radius_px)} to ${fmt(aperture.max_radius_px)})`;
+function zeroPointUseText(band: GaiaBand, zp: ZeroPointFit): string {
+  const coeff = zp.colour_coeff;
+  const colour = coeff === null ? "" : ` ${coeff < 0 ? "-" : "+"} ${Math.abs(coeff).toFixed(4)} x (BP-RP)`;
+  return `Not applied to the image. Gaia ${band} = mag_inst + ${zp.zp.toFixed(3)}${colour} for a star measured in this aperture.`;
 }
 
 function compareByMagnitude(a: PlacedCatalogRow, b: PlacedCatalogRow): number {
@@ -71,6 +84,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
   const [magLimitText, setMagLimitText] = useState(String(DEFAULT_MAG_LIMIT));
   const [band, setBand] = useState<GaiaBand>("G");
   const [colourTerm, setColourTerm] = useState(true);
+  const [sameList, setSameList] = useState(false);
   const [matchRadiusText, setMatchRadiusText] = useState(String(DEFAULT_MATCH_RADIUS_ARCSEC));
   const [apertureRadiusText, setApertureRadiusText] = useState("");
   const [cone, setCone] = useState<ConeSearchResult | null>(null);
@@ -167,7 +181,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
   }, [wcsPath, searchFieldError, radiusArcmin, magLimit]);
 
   const runCrossMatch = useCallback(async () => {
-    if (!wcsPath || matchFieldError !== null || apertureOutOfRange) return;
+    if (!wcsPath || matchFieldError !== null || apertureOutOfRange || (sameList && searchFieldError !== null)) return;
     const seq = ++requestSeqRef.current;
     setMatching(true);
     setError(null);
@@ -180,6 +194,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
         band,
         colourTerm,
         apertureRadius,
+        ...(sameList ? { coneRadiusArcmin: radiusArcmin, magLimit, maxRows: DEFAULT_MAX_ROWS } : {}),
       });
       if (requestSeqRef.current !== seq) return;
       matched = true;
@@ -191,7 +206,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
       if (requestSeqRef.current === seq) setMatching(false);
     }
     if (matched && !cone) await runSearch();
-  }, [filePath, wcsPath, matchFieldError, apertureOutOfRange, matchRadiusArcsec, band, colourTerm, apertureRadius, cone, runSearch]);
+  }, [filePath, wcsPath, matchFieldError, apertureOutOfRange, sameList, searchFieldError, matchRadiusArcsec, band, colourTerm, apertureRadius, radiusArcmin, magLimit, cone, runSearch]);
 
   const exportItems = useCallback(
     (kind: CatalogCsvKind): CatalogExportItems | null => {
@@ -200,6 +215,15 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
       return cross ? { kind, matches: cross.matches } : null;
     },
     [cone, cross],
+  );
+
+  const headerLinesOf = useCallback(
+    (kind: CatalogCsvKind): string[] | null => {
+      const context = { appVersion: APP_VERSION, exportedUtc: new Date().toISOString(), fileName: fileNameOf(wcsPath) };
+      if (kind === "catalog") return cone ? coneCsvHeaderLines(cone, context) : null;
+      return cross ? crossMatchCsvHeaderLines(kind, cross, context) : null;
+    },
+    [wcsPath, cone, cross],
   );
 
   const exportCsv = useCallback(
@@ -216,7 +240,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
           title: `Export ${kind} CSV`,
         });
         if (!target) return;
-        const result = await catalogExportCsv(wcsPath, target, items);
+        const result = await catalogExportCsv(wcsPath, target, items, headerLinesOf(kind) ?? undefined);
         showSavedPath(result.output_path);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : String(e));
@@ -224,27 +248,14 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
         setExporting(false);
       }
     },
-    [wcsPath, exportItems, exporting, showSavedPath],
+    [wcsPath, exportItems, exporting, showSavedPath, headerLinesOf],
   );
 
-  const copyCsv = useCallback(
-    async (kind: CatalogCsvKind) => {
-      const items = exportItems(kind);
-      if (!items) return;
-      const text =
-        items.kind === "catalog"
-          ? catalogRowsCsv(items.rows)
-          : items.kind === "sources"
-            ? sourcesCsv(items.rows)
-            : matchesCsv(items.matches);
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch (e: unknown) {
-        setError(`Clipboard copy failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    },
-    [exportItems],
-  );
+  const copyText = useCallback((): string | null => {
+    const items = exportItems(cross ? "matches" : "catalog");
+    const lines = items ? headerLinesOf(items.kind) : null;
+    return items && lines ? catalogueCsvText(items, lines) : null;
+  }, [exportItems, headerLinesOf, cross]);
 
   const copyToRegions = useCallback(() => {
     if (!filePath) return;
@@ -264,6 +275,8 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
   const zp = cross?.zero_point ?? null;
   const astrometry = cross?.astrometry ?? null;
   const warnings = [...(cone?.warnings ?? []), ...(cross?.warnings ?? [])];
+  const listLine = cross ? gaiaListLine(cross) : null;
+  const detection = cross ? detectionLine(cross) : null;
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -363,6 +376,10 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
             />
           </div>
           <Toggle label="Colour term" checked={colourTerm} accent="cyan" onChange={setColourTerm} />
+          <div className="col-span-2">
+            <Toggle label="Same Gaia list as the search" checked={sameList} accent="cyan" onChange={setSameList} />
+            <div className="text-[9px] text-zinc-500" data-list-rule>{sameList ? LIST_RULE_SEARCH : LIST_RULE_FIELD}</div>
+          </div>
         </div>
 
         {matchFieldError && <div className="text-[9px] text-amber-400/90" data-field-error>{matchFieldError}</div>}
@@ -373,7 +390,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
             label="Cross-match detected stars"
             runningLabel="Detecting and matching..."
             running={matching}
-            disabled={!wcsPath || busy || matchFieldError !== null || apertureOutOfRange}
+            disabled={!wcsPath || busy || matchFieldError !== null || apertureOutOfRange || (sameList && searchFieldError !== null)}
             accent="amber"
             icon={<Crosshair size={12} />}
             describedBy={noImageReason ? reasonId : undefined}
@@ -386,7 +403,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
         {cone && (
           <div className="text-[10px] text-zinc-400 font-mono">
             {cone.n_on_image} of {cone.n_total} rows on image, r = {fmt(cone.radius_arcmin, 1)}&apos;, epoch{" "}
-            {cone.epoch_year !== null ? `J${cone.epoch_year.toFixed(2)}` : "J2016.0 (no date)"}
+            {gaiaEpochText(cone.epoch_year)}
           </div>
         )}
 
@@ -398,6 +415,8 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
                 {cross.matches.length} of {cross.sources.length} measured ({cross.n_detected} detected) within{" "}
                 {fmt(cross.match_radius_arcsec, 1)}&quot;
               </div>
+              {listLine && <div className="text-zinc-400 font-mono" data-gaia-list>{listLine}</div>}
+              {detection && <div className="text-zinc-400 font-mono" data-detection>{detection}</div>}
             </div>
             <div className="bg-zinc-900/80 rounded px-2 py-1.5 col-span-2">
               <div className="text-zinc-500">Astrometric residuals (star - Gaia)</div>
@@ -408,8 +427,8 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
               </div>
             </div>
             <div className="bg-zinc-900/80 rounded px-2 py-1.5 col-span-2">
-              <div className="text-zinc-500">
-                Zero point ({cross.band}){cross.photcal_present ? " - informational, image already calibrated" : ""}
+              <div className="text-zinc-500" title={ZERO_POINT_SYSTEM_TITLE}>
+                Zero point (Gaia {cross.band}, Vega){cross.photcal_present ? " - informational, image already calibrated" : ""}
               </div>
               <div className="text-cyan-300 font-mono">
                 {zp
@@ -423,6 +442,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
                   {zeroPointApertureText(cross.aperture)}
                 </div>
               )}
+              {zp && <div className="text-zinc-400" data-zp-use>{zeroPointUseText(cross.band, zp)}</div>}
             </div>
           </div>
         )}
@@ -505,10 +525,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
               <Download size={10} />
               Matches CSV
             </button>
-            <button type="button" onClick={() => void copyCsv(cross ? "matches" : "catalog")} className={SMALL_BUTTON_CLASS} title="Copy the matches (or the catalog when nothing is matched) as CSV">
-              <ClipboardCopy size={10} />
-              Copy CSV
-            </button>
+            <CopyCsvButton text={copyText} title={COPY_TITLE} onError={setError} />
           </div>
         )}
 
@@ -518,7 +535,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
           <div className="text-[10px] text-zinc-600">
             Cone search of Gaia DR3 through VizieR around the image centre with proper motions propagated to the
             observation date, full-field cross-match of detected stars with astrometric residuals and a photometric
-            zero point with an optional BP-RP colour term. Requires a WCS.
+            zero point in the Vega system of the Gaia band, with an optional BP-RP colour term. Requires a WCS.
           </div>
         )}
       </div>

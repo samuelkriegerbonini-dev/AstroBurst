@@ -59,6 +59,7 @@ pub struct PhotometryConfig {
     pub subsamples: u8,
     pub gain: Option<f64>,
     pub sky_annulus: Option<(f64, f64)>,
+    pub fixed_position: bool,
 }
 
 impl Default for PhotometryConfig {
@@ -70,6 +71,7 @@ impl Default for PhotometryConfig {
             subsamples: 5,
             gain: None,
             sky_annulus: None,
+            fixed_position: false,
         }
     }
 }
@@ -153,10 +155,10 @@ pub struct GrowthPoint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct SkyEstimate {
-    mean: f64,
-    sigma: f64,
-    count: u32,
+pub(crate) struct SkyLevel {
+    pub mean: f64,
+    pub sigma: f64,
+    pub count: u32,
 }
 
 fn annulus_stats(
@@ -166,7 +168,7 @@ fn annulus_stats(
     inner_r: f64,
     outer_r: f64,
     subsamples: u8,
-) -> SkyEstimate {
+) -> SkyLevel {
     let (h, w) = image.dim();
     let mut vals: Vec<f64> = annulus(h, w, x, y, inner_r, outer_r, subsamples)
         .into_iter()
@@ -177,7 +179,7 @@ fn annulus_stats(
         .collect();
 
     if vals.is_empty() {
-        return SkyEstimate { mean: 0.0, sigma: 0.0, count: 0 };
+        return SkyLevel { mean: 0.0, sigma: 0.0, count: 0 };
     }
 
     vals.sort_by(|a, b| a.total_cmp(b));
@@ -196,7 +198,7 @@ fn annulus_stats(
     devs.sort_by(|a, b| a.total_cmp(b));
     let sigma = sorted_median(&devs) * MAD_TO_SIGMA;
 
-    SkyEstimate { mean, sigma, count: vals.len() as u32 }
+    SkyLevel { mean, sigma, count: vals.len() as u32 }
 }
 
 fn refine_centroid(image: &Array2<f32>, x0: f64, y0: f64, bg: f64, radius: i64) -> (f64, f64) {
@@ -337,7 +339,7 @@ fn fwhm_radial_fit(image: &Array2<f32>, x: f64, y: f64, bg: f64, first_guess: f6
     fwhm
 }
 
-fn area_factor(value: f32) -> f64 {
+pub(crate) fn area_factor(value: f32) -> f64 {
     let area = value as f64;
     if area.is_finite() && area > 0.0 {
         area
@@ -562,6 +564,84 @@ impl<'a> MaskedImage<'a> {
     fn working(&self) -> &Array2<f32> {
         self.masked.as_ref().unwrap_or(self.image)
     }
+
+    pub(crate) fn image(&self) -> &'a Array2<f32> {
+        self.image
+    }
+
+    pub(crate) fn excluded(&self) -> Option<&'a Array2<u8>> {
+        self.excluded
+    }
+
+    pub(crate) fn area(&self) -> Option<&'a Array2<f32>> {
+        self.area
+    }
+}
+
+pub(crate) fn sky_in_annulus(
+    source: &MaskedImage,
+    x: f64,
+    y: f64,
+    r_in: f64,
+    r_out: f64,
+    subsamples: u8,
+) -> Option<SkyLevel> {
+    let sky = annulus_stats(source.working(), x, y, r_in, r_out, subsamples);
+    (sky.count > 0).then_some(sky)
+}
+
+fn fwhm_above_coarse_sky(working: &Array2<f32>, x: f64, y: f64, coarse_sky_mean: f64, subsamples: u8) -> Option<f64> {
+    let fwhm_above = |sky: f64| fwhm_radial_fit(working, x, y, sky, fwhm_truncated_moments(working, x, y, sky));
+    let mut fwhm = fwhm_above(coarse_sky_mean);
+    if let Some(coarse_fwhm) = fwhm.filter(|f| SKY_ANNULUS_INNER_FACTOR * f > COARSE_SKY_INNER) {
+        let wide_sky = annulus_stats(
+            working,
+            x,
+            y,
+            SKY_ANNULUS_INNER_FACTOR * coarse_fwhm,
+            SKY_ANNULUS_OUTER_FACTOR * coarse_fwhm,
+            subsamples,
+        );
+        if wide_sky.count >= MIN_REFINED_SKY_PIXELS {
+            fwhm = fwhm_above(wide_sky.mean);
+        }
+    }
+    fwhm
+}
+
+pub(crate) fn fwhm_at_position(source: &MaskedImage, x: f64, y: f64, subsamples: u8) -> Option<f64> {
+    let working = source.working();
+    let coarse_sky = annulus_stats(working, x, y, COARSE_SKY_INNER, COARSE_SKY_OUTER, subsamples);
+    fwhm_above_coarse_sky(working, x, y, coarse_sky.mean, subsamples)
+}
+
+pub(crate) struct SaturationVerdict {
+    pub saturated: bool,
+    pub source: &'static str,
+    pub n_saturated: u32,
+}
+
+pub(crate) fn saturation_verdict(
+    source: &MaskedImage,
+    saturated: Option<&Array2<u8>>,
+    pixels: &[AperturePixel],
+    peak: f64,
+    level: Option<(f64, &'static str)>,
+) -> SaturationVerdict {
+    let n_saturated = saturated.map_or(0, |map| {
+        pixels.iter().filter(|p| map[[p.y, p.x]] != 0).count() as u32
+    });
+    let level = level.filter(|(level, _)| level.is_finite() && *level > 0.0);
+    let (saturated_flag, saturation_source) = match (saturated, level) {
+        (Some(_), _) => (n_saturated > 0, DQ_SATURATION_SOURCE),
+        (None, Some((level, source_name))) if source_name == IMAGE_MAX_SATURATION_SOURCE => (
+            flat_top_pixel_count(source.image, pixels, source.excluded, level) >= FLAT_TOP_MIN_PIXELS,
+            source_name,
+        ),
+        (None, Some((level, source_name))) => (peak >= HEADER_SATURATION_FRACTION * level, source_name),
+        (None, None) => (false, NO_SATURATION_SOURCE),
+    };
+    SaturationVerdict { saturated: saturated_flag, source: saturation_source, n_saturated }
 }
 
 pub fn measure_star_full(
@@ -584,9 +664,9 @@ pub fn measure_star_prepared(
     click_y: f64,
     config: &PhotometryConfig,
 ) -> Result<StarPhotometry, String> {
-    let image = source.image;
-    let excluded = source.excluded;
-    let area = source.area;
+    let image = source.image();
+    let excluded = source.excluded();
+    let area = source.area();
     let working = source.working();
     let dims = image.dim();
     let (h, w) = dims;
@@ -601,57 +681,54 @@ pub fn measure_star_prepared(
         return Err("Image too small for photometry".into());
     }
 
-    let cx = click_x.round().clamp(0.0, (w - 1) as f64) as usize;
-    let cy = click_y.round().clamp(0.0, (h - 1) as f64) as usize;
+    let (x, y, fwhm, r_ap, searched_peak) = if config.fixed_position {
+        let radius = config
+            .aperture_radius
+            .ok_or("a fixed-position measurement needs an explicit aperture radius")?;
+        if !(MIN_APERTURE_RADIUS..=MAX_APERTURE_RADIUS).contains(&radius) {
+            return Err(format!(
+                "aperture radius {radius} px is outside the {MIN_APERTURE_RADIUS} to {MAX_APERTURE_RADIUS} px limits of a fixed-position measurement"
+            ));
+        }
+        (click_x, click_y, fwhm_at_position(source, click_x, click_y, config.subsamples), radius, None)
+    } else {
+        let cx = click_x.round().clamp(0.0, (w - 1) as f64) as usize;
+        let cy = click_y.round().clamp(0.0, (h - 1) as f64) as usize;
 
-    let r = config.search_radius.max(1);
-    let mut best_x = cx;
-    let mut best_y = cy;
-    let mut best_v = f32::NEG_INFINITY;
-    for ny in cy.saturating_sub(r)..=(cy + r).min(h - 1) {
-        for nx in cx.saturating_sub(r)..=(cx + r).min(w - 1) {
-            let v = working[[ny, nx]];
-            if v.is_finite() && v > best_v {
-                best_v = v;
-                best_y = ny;
-                best_x = nx;
+        let r = config.search_radius.max(1);
+        let mut best_x = cx;
+        let mut best_y = cy;
+        let mut best_v = f32::NEG_INFINITY;
+        for ny in cy.saturating_sub(r)..=(cy + r).min(h - 1) {
+            for nx in cx.saturating_sub(r)..=(cx + r).min(w - 1) {
+                let v = working[[ny, nx]];
+                if v.is_finite() && v > best_v {
+                    best_v = v;
+                    best_y = ny;
+                    best_x = nx;
+                }
             }
         }
-    }
-    if !best_v.is_finite() {
-        return Err("No finite pixels near the clicked position".into());
-    }
+        if !best_v.is_finite() {
+            return Err("No finite pixels near the clicked position".into());
+        }
 
-    let coarse_sky = annulus_stats(
-        working,
-        best_x as f64,
-        best_y as f64,
-        COARSE_SKY_INNER,
-        COARSE_SKY_OUTER,
-        config.subsamples,
-    );
-    let (x, y) = refine_centroid(working, best_x as f64, best_y as f64, coarse_sky.mean, 5);
-
-    let fwhm_above = |sky: f64| fwhm_radial_fit(working, x, y, sky, fwhm_truncated_moments(working, x, y, sky));
-    let mut fwhm = fwhm_above(coarse_sky.mean);
-    if let Some(coarse_fwhm) = fwhm.filter(|f| SKY_ANNULUS_INNER_FACTOR * f > COARSE_SKY_INNER) {
-        let wide_sky = annulus_stats(
+        let coarse_sky = annulus_stats(
             working,
-            x,
-            y,
-            SKY_ANNULUS_INNER_FACTOR * coarse_fwhm,
-            SKY_ANNULUS_OUTER_FACTOR * coarse_fwhm,
+            best_x as f64,
+            best_y as f64,
+            COARSE_SKY_INNER,
+            COARSE_SKY_OUTER,
             config.subsamples,
         );
-        if wide_sky.count >= MIN_REFINED_SKY_PIXELS {
-            fwhm = fwhm_above(wide_sky.mean);
-        }
-    }
-
-    let r_ap = config
-        .aperture_radius
-        .unwrap_or(AUTO_APERTURE_FWHM_FACTOR * fwhm.unwrap_or(4.0))
-        .clamp(MIN_APERTURE_RADIUS, MAX_APERTURE_RADIUS);
+        let (x, y) = refine_centroid(working, best_x as f64, best_y as f64, coarse_sky.mean, 5);
+        let fwhm = fwhm_above_coarse_sky(working, x, y, coarse_sky.mean, config.subsamples);
+        let r_ap = config
+            .aperture_radius
+            .unwrap_or(AUTO_APERTURE_FWHM_FACTOR * fwhm.unwrap_or(4.0))
+            .clamp(MIN_APERTURE_RADIUS, MAX_APERTURE_RADIUS);
+        (x, y, fwhm, r_ap, Some(best_v as f64))
+    };
     let mut warnings = Vec::new();
     if fwhm.is_none() && config.aperture_radius.is_none() {
         warnings.push(format!(
@@ -671,18 +748,24 @@ pub fn measure_star_prepared(
         }
         None => (r_ap * SKY_ANNULUS_INNER_FACTOR, r_ap * SKY_ANNULUS_OUTER_FACTOR),
     };
-    let sky = annulus_stats(working, x, y, sky_inner, sky_outer, config.subsamples);
-    if sky.count == 0 {
+    let Some(sky) = sky_in_annulus(source, x, y, sky_inner, sky_outer, config.subsamples) else {
         return Err(format!(
             "sky annulus {sky_inner:.1} - {sky_outer:.1} px around ({x:.1}, {y:.1}) has no usable pixel: none with at least half its area inside it is on the image, finite and unmasked"
         ));
-    }
+    };
 
     let pixels = circular_aperture(h, w, x, y, r_ap, config.subsamples);
     let ap = aperture_flux(image, area, &pixels, excluded);
     if ap.n_finite == 0 {
         return Err("Aperture contains no finite pixels".into());
     }
+    let peak = searched_peak.unwrap_or_else(|| {
+        pixels
+            .iter()
+            .map(|p| working[[p.y, p.x]])
+            .filter(|v| v.is_finite())
+            .fold(f32::NEG_INFINITY, f32::max) as f64
+    });
     if ap.n_nonfinite > 0 {
         warnings.push(format!(
             "{} aperture pixel{} without data (non-finite): the flux is a lower limit",
@@ -720,19 +803,7 @@ pub fn measure_star_prepared(
     };
     let mag_inst = if net_flux > 0.0 { -2.5 * net_flux.log10() } else { f64::NAN };
 
-    let n_saturated = saturated.map_or(0, |map| {
-        pixels.iter().filter(|p| map[[p.y, p.x]] != 0).count() as u32
-    });
-    let level = config.saturation.filter(|(level, _)| level.is_finite() && *level > 0.0);
-    let (saturated_flag, saturation_source) = match (saturated, level) {
-        (Some(_), _) => (n_saturated > 0, DQ_SATURATION_SOURCE),
-        (None, Some((level, source))) if source == IMAGE_MAX_SATURATION_SOURCE => (
-            flat_top_pixel_count(image, &pixels, excluded, level) >= FLAT_TOP_MIN_PIXELS,
-            source,
-        ),
-        (None, Some((level, source))) => (best_v as f64 >= HEADER_SATURATION_FRACTION * level, source),
-        (None, None) => (false, NO_SATURATION_SOURCE),
-    };
+    let saturation = saturation_verdict(source, saturated, &pixels, peak, config.saturation);
 
     let curve = growth_curve(image, excluded, area, x, y, GROWTH_CURVE_REACH_FACTOR * r_ap, sky.mean, config.subsamples);
     let plateau = growth_plateau(&curve, r_ap, sky_inner)
@@ -748,7 +819,7 @@ pub fn measure_star_prepared(
     Ok(StarPhotometry {
         x,
         y,
-        peak: best_v as f64,
+        peak,
         net_flux,
         flux_err,
         mag_inst,
@@ -760,11 +831,11 @@ pub fn measure_star_prepared(
         bg_mean: sky.mean,
         bg_sigma: sky.sigma,
         bg_pixels: sky.count,
-        saturated: saturated_flag,
-        saturation_source: saturation_source.to_string(),
+        saturated: saturation.saturated,
+        saturation_source: saturation.source.to_string(),
         n_masked: ap.n_masked,
         n_nonfinite: ap.n_nonfinite,
-        n_saturated,
+        n_saturated: saturation.n_saturated,
         err_used,
         aperture_correction,
         ee_in_aperture,
@@ -1109,6 +1180,13 @@ mod tests {
             }
         }
         assert!(measure_star(&img, 5.0, 5.0, &PhotometryConfig::default()).is_err());
+        let fixed = PhotometryConfig {
+            fixed_position: true,
+            aperture_radius: Some(3.0),
+            sky_annulus: Some((30.0, 40.0)),
+            ..PhotometryConfig::default()
+        };
+        assert_eq!(measure_star(&img, 5.0, 5.0, &fixed).unwrap_err(), "Aperture contains no finite pixels");
     }
 
     #[test]
@@ -1116,6 +1194,172 @@ mod tests {
         let cfg = PhotometryConfig::default();
         assert_eq!(cfg.subsamples, 5);
         assert!(cfg.gain.is_none());
+        assert!(!cfg.fixed_position);
+    }
+
+    fn flat_sky_with_a_hot_pixel_five_pixels_right_of_the_target() -> Array2<f32> {
+        let mut img = Array2::from_elem((64, 64), 128.0f32);
+        img[[40, 45]] = 5128.0;
+        img
+    }
+
+    fn faint_target_beside_a_sharp_bright_neighbour() -> Array2<f32> {
+        let mut img = gaussian_scene(96, 96, 40.0, 48.0, 400.0, 2.0, 100.0);
+        let neighbour = gaussian_scene(96, 96, 46.0, 48.0, 4900.0, 1.0, 0.0);
+        img.zip_mut_with(&neighbour, |a, b| *a += *b);
+        img
+    }
+
+    #[test]
+    fn a_fixed_position_measurement_stays_on_the_requested_pixel_next_to_a_brighter_neighbour() {
+        let mut img = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, 2.0, 100.0);
+        let neighbour = gaussian_scene(128, 128, 70.0, 64.0, 2000.0, 2.0, 0.0);
+        img.zip_mut_with(&neighbour, |a, b| *a += *b);
+        let searching = PhotometryConfig { aperture_radius: Some(3.0), ..PhotometryConfig::default() };
+        let fixed = PhotometryConfig { fixed_position: true, ..searching.clone() };
+
+        let a = measure_star(&img, 64.0, 64.0, &searching).unwrap();
+        assert!(a.x > 68.0 && (a.y - 64.0).abs() < 0.1, "({}, {})", a.x, a.y);
+
+        let b = measure_star(&img, 64.0, 64.0, &fixed).unwrap();
+        assert_eq!((b.x, b.y), (64.0, 64.0));
+        assert_eq!(b.aperture_radius, 3.0);
+        let expected = aperture_sum(&img, 64.0, 64.0, 3.0, 5).sum - b.bg_mean * b.aperture_area;
+        assert!((b.net_flux - expected).abs() <= 1e-9 * expected.abs(), "net={} expected={expected}", b.net_flux);
+        assert!((b.bg_mean - 107.08).abs() < 0.01, "bg_mean={}", b.bg_mean);
+        assert!((b.net_flux - 18632.08).abs() < 0.01, "net={}", b.net_flux);
+    }
+
+    #[test]
+    fn a_fixed_position_on_empty_sky_returns_zero_flux_and_no_fwhm() {
+        let img = flat_sky_with_a_hot_pixel_five_pixels_right_of_the_target();
+        let searching = PhotometryConfig {
+            aperture_radius: Some(3.0),
+            sky_annulus: Some((8.0, 12.0)),
+            ..PhotometryConfig::default()
+        };
+        let fixed = PhotometryConfig { fixed_position: true, ..searching.clone() };
+
+        let empty = measure_star(&img, 40.0, 40.0, &fixed).unwrap();
+        assert_eq!((empty.x, empty.y), (40.0, 40.0));
+        assert_eq!(empty.net_flux, 0.0);
+        assert_eq!(empty.flux_err, 0.0);
+        assert_eq!(empty.snr, 0.0);
+        assert!(empty.mag_inst.is_nan(), "mag_inst={}", empty.mag_inst);
+        assert!(empty.fwhm.is_none(), "fwhm={:?}", empty.fwhm);
+        assert_eq!(empty.peak, 128.0);
+        assert!(empty.warnings.is_empty(), "{:?}", empty.warnings);
+
+        let pulled = measure_star(&img, 40.0, 40.0, &searching).unwrap();
+        assert_eq!((pulled.x, pulled.y), (45.0, 40.0));
+        assert!((pulled.net_flux - 5000.0).abs() < 1e-6, "net={}", pulled.net_flux);
+    }
+
+    #[test]
+    fn a_fixed_position_needs_an_explicit_radius_inside_the_aperture_limits() {
+        let img = flat_sky_with_a_hot_pixel_five_pixels_right_of_the_target();
+        let fixed_with = |aperture_radius: Option<f64>| PhotometryConfig {
+            fixed_position: true,
+            aperture_radius,
+            ..PhotometryConfig::default()
+        };
+        assert_eq!(
+            measure_star(&img, 40.0, 40.0, &fixed_with(None)).unwrap_err(),
+            "a fixed-position measurement needs an explicit aperture radius"
+        );
+        assert_eq!(
+            measure_star(&img, 40.0, 40.0, &fixed_with(Some(1.5))).unwrap_err(),
+            "aperture radius 1.5 px is outside the 2 to 60 px limits of a fixed-position measurement"
+        );
+        assert_eq!(
+            measure_star(&img, 40.0, 40.0, &fixed_with(Some(60.5))).unwrap_err(),
+            "aperture radius 60.5 px is outside the 2 to 60 px limits of a fixed-position measurement"
+        );
+        assert_eq!(measure_star(&img, 40.0, 40.0, &fixed_with(Some(2.0))).unwrap().aperture_radius, 2.0);
+
+        let searching = PhotometryConfig { aperture_radius: Some(1.0), ..PhotometryConfig::default() };
+        assert_eq!(measure_star(&img, 40.0, 40.0, &searching).unwrap().aperture_radius, 2.0);
+    }
+
+    #[test]
+    fn a_fixed_position_reports_the_brightest_aperture_pixel_as_the_peak() {
+        let img = faint_target_beside_a_sharp_bright_neighbour();
+        let searching = PhotometryConfig {
+            aperture_radius: Some(3.0),
+            sky_annulus: Some((10.0, 14.0)),
+            saturation: Some((1000.0, "SATURATE")),
+            ..PhotometryConfig::default()
+        };
+        let fixed = PhotometryConfig { fixed_position: true, ..searching.clone() };
+
+        let target = measure_star(&img, 40.0, 48.0, &fixed).unwrap();
+        assert!((target.peak - 500.0).abs() < 0.01, "peak={}", target.peak);
+        assert!(!target.saturated);
+        assert_eq!(target.saturation_source, "SATURATE");
+
+        let pulled = measure_star(&img, 40.0, 48.0, &searching).unwrap();
+        assert!(pulled.saturated);
+        assert!(pulled.peak > 4900.0, "peak={}", pulled.peak);
+    }
+
+    #[test]
+    fn a_fixed_position_measures_the_fwhm_at_the_requested_position() {
+        let img = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, 3.0, 100.0);
+        let fixed = PhotometryConfig { fixed_position: true, aperture_radius: Some(8.0), ..PhotometryConfig::default() };
+        let fwhm = measured_fwhm(&measure_star(&img, 64.0, 64.0, &fixed).unwrap());
+        assert!((fwhm - 7.0645).abs() / 7.0645 < 0.01, "FWHM {fwhm} against 2.35482 x 3");
+    }
+
+    #[test]
+    fn the_fwhm_helper_equals_the_fwhm_of_a_fixed_position_measurement() {
+        let img = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, 3.0, 100.0);
+        let fixed = PhotometryConfig { fixed_position: true, aperture_radius: Some(8.0), ..PhotometryConfig::default() };
+        let measured = measured_fwhm(&measure_star(&img, 64.0, 64.0, &fixed).unwrap());
+        let helper = fwhm_at_position(&MaskedImage::new(&img, None).unwrap(), 64.0, 64.0, 5)
+            .expect("the helper measures the FWHM of a star");
+        assert_eq!(helper.to_bits(), measured.to_bits(), "helper {helper} against {measured}");
+    }
+
+    #[test]
+    fn the_sky_helper_returns_the_annulus_level_and_none_without_pixels() {
+        let img = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        let sky = sky_in_annulus(&MaskedImage::new(&img, None).unwrap(), 32.0, 32.0, 8.0, 14.0, 5).unwrap();
+        assert!((sky.mean - 100.0).abs() < 0.01, "mean={}", sky.mean);
+        assert!(sky.sigma < 0.01, "sigma={}", sky.sigma);
+        assert!(sky.count > 0);
+
+        let blank = Array2::from_elem((64, 64), f32::NAN);
+        assert!(sky_in_annulus(&MaskedImage::new(&blank, None).unwrap(), 32.0, 32.0, 8.0, 14.0, 5).is_none());
+    }
+
+    #[test]
+    fn the_saturation_helper_reproduces_the_three_rules() {
+        let img = faint_target_beside_a_sharp_bright_neighbour();
+        let source = MaskedImage::new(&img, None).unwrap();
+        let pixels = circular_aperture(96, 96, 40.0, 48.0, 3.0, 5);
+        let header_level = Some((1000.0, "SATURATE"));
+
+        let mut dq = Array2::<u8>::zeros((96, 96));
+        dq[[48, 41]] = 1;
+        dq[[48, 60]] = 1;
+        let flagged = saturation_verdict(&source, Some(&dq), &pixels, 500.0, header_level);
+        assert!(flagged.saturated);
+        assert_eq!(flagged.source, "DQ SATURATED");
+        assert_eq!(flagged.n_saturated, 1);
+
+        let below = saturation_verdict(&source, None, &pixels, 500.0, header_level);
+        assert!(!below.saturated);
+        assert_eq!(below.source, "SATURATE");
+        assert_eq!(below.n_saturated, 0);
+
+        let above = saturation_verdict(&source, None, &pixels, 960.0, header_level);
+        assert!(above.saturated);
+        assert_eq!(above.source, "SATURATE");
+
+        let unknown = saturation_verdict(&source, None, &pixels, 960.0, None);
+        assert!(!unknown.saturated);
+        assert_eq!(unknown.source, "none");
+        assert_eq!(unknown.n_saturated, 0);
     }
 
     #[test]
@@ -1173,7 +1417,7 @@ mod tests {
         let all_nan = Array2::from_elem((64, 64), f32::NAN);
         assert_eq!(
             annulus_stats(&all_nan, 32.0, 32.0, 8.0, 14.0, 5),
-            SkyEstimate { mean: 0.0, sigma: 0.0, count: 0 }
+            SkyLevel { mean: 0.0, sigma: 0.0, count: 0 }
         );
     }
 
@@ -1571,6 +1815,8 @@ mod tests {
         assert!((inside.x - 60.0).abs() < 0.5, "x={}", inside.x);
         let err = measure_star(&img, 3000.0, 32.0, &cfg).unwrap_err();
         assert_eq!(err, "position (3000, 32) lies outside the 64 x 64 image");
+        let fixed = PhotometryConfig { fixed_position: true, ..PhotometryConfig::default() };
+        assert_eq!(measure_star(&img, 3000.0, 32.0, &fixed).unwrap_err(), err);
         assert!(measure_star(&img, -500.0, 10.0, &cfg).is_err());
         assert!(measure_star(&img, 63.5, 32.0, &cfg).is_err());
         assert!(measure_star(&img, 32.0, -0.51, &cfg).is_err());

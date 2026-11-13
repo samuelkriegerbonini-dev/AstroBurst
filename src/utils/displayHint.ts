@@ -1,4 +1,4 @@
-import type { DisplayLook, DisplaySettings } from "../shared/types/display";
+import type { DisplayLook, DisplaySettings, StretchMode } from "../shared/types/display";
 import type { DisplayHint } from "../shared/types/preview";
 import { reconcileDisplayPatch } from "./displayTransfer";
 import { withLook } from "./displayMemory";
@@ -6,6 +6,7 @@ import { withLook } from "./displayMemory";
 export interface HintedDisplay {
   display: DisplaySettings;
   snapshot: DisplaySettings | null;
+  stretchBeforeSymmetric?: StretchMode;
 }
 
 export interface HintSource {
@@ -24,7 +25,13 @@ export function displayForRecordChange(state: HintedDisplay, prev: HintSource | 
 }
 
 export function patchHintedDisplay(state: HintedDisplay, patch: Partial<DisplaySettings>): HintedDisplay {
-  return { display: reconcileDisplayPatch(state.display, patch), snapshot: state.snapshot };
+  const stretchBeforeSymmetric = patch.stretch === undefined ? state.stretchBeforeSymmetric : undefined;
+  if (stretchBeforeSymmetric !== undefined && patch.symmetric === false) {
+    return { display: reconcileDisplayPatch(state.display, { ...patch, stretch: stretchBeforeSymmetric }), snapshot: state.snapshot };
+  }
+  const display = reconcileDisplayPatch(state.display, patch);
+  const switchedBySymmetric = patch.stretch === undefined && display.stretch !== state.display.stretch;
+  return { display, snapshot: state.snapshot, stretchBeforeSymmetric: switchedBySymmetric ? state.display.stretch : stretchBeforeSymmetric };
 }
 
 export function persistableDisplay(state: HintedDisplay): DisplaySettings | null {

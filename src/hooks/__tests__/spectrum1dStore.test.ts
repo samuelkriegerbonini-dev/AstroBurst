@@ -7,15 +7,17 @@ import {
   SpectrumCsvStore,
   openSpectrumCsv,
   pickSpectrumCsvFile,
+  requestKey,
 } from "../useSpectrum1dStore";
 
 const dialog = vi.hoisted(() => ({ open: vi.fn<(options: unknown) => Promise<string | string[] | null>>() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
-const reader = vi.hoisted(() => ({ document: vi.fn<(path: string, hdu: number | null) => Promise<unknown>>() }));
+const reader = vi.hoisted(() => ({ request: vi.fn<(request: unknown) => Promise<unknown>>() }));
 vi.mock("../../services/spectrum1d", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../services/spectrum1d")>()),
-  readSpectrumDocument: reader.document,
+  readSpectrumRequest: reader.request,
 }));
+import type { SpectrumRequest } from "../../services/spectrum1d";
 import type { Spectrum1d } from "../../shared/types/spectrum1d";
 
 function spectrumAt(path: string, hdu: number): Spectrum1d {
@@ -50,6 +52,14 @@ function spectrumAt(path: string, hdu: number): Spectrum1d {
   };
 }
 
+function fileRequest(path: string, hdu: number | null): SpectrumRequest {
+  return { kind: "file", path, hdu, wavelengthUnit: null };
+}
+
+function spectrumOf(request: SpectrumRequest): Spectrum1d {
+  return request.kind === "file" ? spectrumAt(request.path, request.hdu ?? 0) : spectrumAt(request.paths[0], 0);
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -63,14 +73,14 @@ function deferred<T>() {
 describe("Spectrum1dStore", () => {
   it("starts empty, marks the document loading, then keeps the spectrum the reader returned", async () => {
     const pending = deferred<Spectrum1d>();
-    const read = vi.fn(() => pending.promise);
+    const read = vi.fn((_request: SpectrumRequest) => pending.promise);
     const store = new Spectrum1dStore(read);
     const listener = vi.fn();
     store.subscribe(listener);
 
     expect(store.getDoc("C:/d/ha.fits", 0)).toBe(EMPTY_SPECTRUM1D_DOC);
     const loading = store.load("C:/d/ha.fits", 0);
-    expect(read).toHaveBeenCalledWith("C:/d/ha.fits", 0);
+    expect(read).toHaveBeenCalledWith(fileRequest("C:/d/ha.fits", 0));
     expect(store.getDoc("C:/d/ha.fits", 0)).toEqual({ loading: true, spectrum: null, error: null });
 
     const spectrum = spectrumAt("C:/d/ha.fits", 0);
@@ -82,16 +92,16 @@ describe("Spectrum1dStore", () => {
 
   it("reads through the document reader by default, so an opened CSV reaches the CSV command", async () => {
     const csv = { ...spectrumAt("C:/d/exported_spectrum.csv", 0), source: { kind: "csv" as const, path: "C:/d/exported_spectrum.csv" } };
-    reader.document.mockReset();
-    reader.document.mockResolvedValueOnce(csv);
+    reader.request.mockReset();
+    reader.request.mockResolvedValueOnce(csv);
     const store = new Spectrum1dStore();
     await store.load("C:/d/exported_spectrum.csv", null);
-    expect(reader.document).toHaveBeenCalledWith("C:/d/exported_spectrum.csv", null);
+    expect(reader.request).toHaveBeenCalledWith(fileRequest("C:/d/exported_spectrum.csv", null));
     expect(store.getDoc("C:/d/exported_spectrum.csv", null).spectrum).toBe(csv);
   });
 
   it("reads a document once while it loads and never again once it is ready", async () => {
-    const read = vi.fn(async (path: string, hdu: number | null) => spectrumAt(path, hdu ?? 0));
+    const read = vi.fn(async (request: SpectrumRequest) => spectrumOf(request));
     const store = new Spectrum1dStore(read);
     await Promise.all([store.load("C:/d/ha.fits", 0), store.load("C:/d/ha.fits", 0)]);
     await store.load("C:/d/ha.fits", 0);
@@ -99,7 +109,7 @@ describe("Spectrum1dStore", () => {
   });
 
   it("keys documents by path and HDU", async () => {
-    const read = vi.fn(async (path: string, hdu: number | null) => spectrumAt(path, hdu ?? 0));
+    const read = vi.fn(async (request: SpectrumRequest) => spectrumOf(request));
     const store = new Spectrum1dStore(read);
     await store.load("C:/d/x1d.fits", 1);
     await store.load("C:/d/x1d.fits", 2);
@@ -111,7 +121,7 @@ describe("Spectrum1dStore", () => {
 
   it("keeps the backend refusal verbatim and reads again on the next load", async () => {
     const refusal = "CTYPE1 = 'WAVE-LOG': log-lambda dispersion is not supported";
-    const read = vi.fn<(path: string, hdu: number | null) => Promise<Spectrum1d>>();
+    const read = vi.fn<(request: SpectrumRequest) => Promise<Spectrum1d>>();
     read.mockRejectedValueOnce(new Error(refusal));
     read.mockRejectedValueOnce("plain string rejection");
     const store = new Spectrum1dStore(read);
@@ -125,7 +135,7 @@ describe("Spectrum1dStore", () => {
   });
 
   it("evicts the least recently loaded document beyond the cap", async () => {
-    const read = vi.fn(async (path: string, hdu: number | null) => spectrumAt(path, hdu ?? 0));
+    const read = vi.fn(async (request: SpectrumRequest) => spectrumOf(request));
     const store = new Spectrum1dStore(read);
     for (let i = 0; i <= MAX_SPECTRUM1D_DOCS; i++) await store.load(`C:/d/s${i}.fits`, 0);
     expect(store.getDoc("C:/d/s0.fits", 0)).toBe(EMPTY_SPECTRUM1D_DOC);
@@ -134,7 +144,7 @@ describe("Spectrum1dStore", () => {
   });
 
   it("keeps a retained document past the cap and lets it go once released", async () => {
-    const read = vi.fn(async (path: string, hdu: number | null) => spectrumAt(path, hdu ?? 0));
+    const read = vi.fn(async (request: SpectrumRequest) => spectrumOf(request));
     const store = new Spectrum1dStore(read);
     const release = store.retain("C:/d/s0.fits", 0);
     for (let i = 0; i <= MAX_SPECTRUM1D_DOCS; i++) await store.load(`C:/d/s${i}.fits`, 0);
@@ -147,7 +157,7 @@ describe("Spectrum1dStore", () => {
   });
 
   it("holds a retained document while a second holder still has it", async () => {
-    const read = vi.fn(async (path: string, hdu: number | null) => spectrumAt(path, hdu ?? 0));
+    const read = vi.fn(async (request: SpectrumRequest) => spectrumOf(request));
     const store = new Spectrum1dStore(read);
     const first = store.retain("C:/d/s0.fits", 0);
     const second = store.retain("C:/d/s0.fits", 0);
@@ -161,7 +171,7 @@ describe("Spectrum1dStore", () => {
 
   it("reads a cached document from disk again when it is reread, at once while it is shown", async () => {
     let version = 0;
-    const read = vi.fn(async (path: string, hdu: number | null) => ({ ...spectrumAt(path, hdu ?? 0), n_rows: ++version }));
+    const read = vi.fn(async (request: SpectrumRequest) => ({ ...spectrumOf(request), n_rows: ++version }));
     const store = new Spectrum1dStore(read);
     const path = "C:/d/x_spectrum.csv";
     await store.load(path, null);
@@ -181,7 +191,7 @@ describe("Spectrum1dStore", () => {
 
   it("leaves a document that is still loading to its own read when it is reread", async () => {
     const slow = deferred<Spectrum1d>();
-    const read = vi.fn(() => slow.promise);
+    const read = vi.fn((_request: SpectrumRequest) => slow.promise);
     const store = new Spectrum1dStore(read);
     const loading = store.load("C:/d/slow.csv", null);
     await store.reread("C:/d/slow.csv", null);
@@ -193,7 +203,8 @@ describe("Spectrum1dStore", () => {
 
   it("never evicts a document while it loads, so it is read once", async () => {
     const slow = deferred<Spectrum1d>();
-    const read = vi.fn(async (path: string, hdu: number | null) => (path === "C:/d/slow.fits" ? slow.promise : spectrumAt(path, hdu ?? 0)));
+    const slowKey = requestKey(fileRequest("C:/d/slow.fits", 0));
+    const read = vi.fn(async (request: SpectrumRequest) => (requestKey(request) === slowKey ? slow.promise : spectrumOf(request)));
     const store = new Spectrum1dStore(read);
     const loading = store.load("C:/d/slow.fits", 0);
     for (let i = 0; i < MAX_SPECTRUM1D_DOCS; i++) await store.load(`C:/d/s${i}.fits`, 0);
@@ -201,8 +212,55 @@ describe("Spectrum1dStore", () => {
     void store.load("C:/d/slow.fits", 0);
     slow.resolve(spectrumAt("C:/d/slow.fits", 0));
     await loading;
-    expect(read.mock.calls.filter(([path]) => path === "C:/d/slow.fits")).toHaveLength(1);
+    expect(read.mock.calls.filter(([request]) => requestKey(request) === slowKey)).toHaveLength(1);
     expect(store.getDoc("C:/d/slow.fits", 0).spectrum).not.toBeNull();
+  });
+
+  it("keys a request by what it reads", () => {
+    expect(requestKey({ kind: "file", path: "C:/a.fits", hdu: 1, wavelengthUnit: null })).toBe("1|C:/a.fits");
+    expect(requestKey({ kind: "file", path: "C:/a.fits", hdu: 0, wavelengthUnit: "nm" })).toBe("0@nm|C:/a.fits");
+    expect(requestKey({ kind: "file", path: "C:/s.csv", hdu: null, wavelengthUnit: null })).toBe("|C:/s.csv");
+    expect(requestKey({ kind: "series", paths: ["C:/x.fits"], detector: "NRS1", sporder: -1, pick: { kind: "median" } })).toBe(
+      "NRS1:-1:median|C:/x.fits",
+    );
+    expect(requestKey({ kind: "series", paths: ["C:/x.fits"], detector: "NIS", sporder: 2, pick: { kind: "integration", index: 2 } })).toBe(
+      "NIS:2:int2|C:/x.fits",
+    );
+    expect(
+      requestKey({ kind: "series", paths: ["C:/a.fits", "C:/b.fits"], detector: "NRS2", sporder: null, pick: { kind: "mean", first: 0, last: 7 } }),
+    ).toBe("NRS2::mean0-7|C:/a.fits;C:/b.fits");
+  });
+
+  it("caches two picks of one file apart and the plain file request under the old key", async () => {
+    const path = "C:/d/jw03375_x1dints.fits";
+    const read = vi.fn(async (request: SpectrumRequest) => spectrumOf(request));
+    const store = new Spectrum1dStore(read);
+    const median: SpectrumRequest = { kind: "series", paths: [path], detector: "NRS1", sporder: -1, pick: { kind: "median" } };
+    const first: SpectrumRequest = { ...median, pick: { kind: "integration", index: 0 } };
+    await store.loadRequest(median);
+    await store.loadRequest(first);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(read.mock.calls.map(([request]) => request)).toEqual([median, first]);
+    expect(store.getRequest(median).spectrum).not.toBeNull();
+    expect(store.getRequest(first).spectrum).not.toBeNull();
+    expect(store.getRequest(median)).not.toBe(store.getRequest(first));
+
+    await store.load(path, 1);
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(store.getDoc(path, 1).spectrum).not.toBeNull();
+    expect(store.getDoc(path, 1)).toBe(store.getRequest(fileRequest(path, 1)));
+    expect(store.getRequest({ kind: "file", path, hdu: 1, wavelengthUnit: "nm" })).toBe(EMPTY_SPECTRUM1D_DOC);
+
+    await store.reread(path, 1);
+    expect(store.getDoc(path, 1)).toBe(EMPTY_SPECTRUM1D_DOC);
+    expect(store.getRequest(median).spectrum).not.toBeNull();
+    expect(store.getRequest(first).spectrum).not.toBeNull();
+
+    const release = store.retainRequest(median);
+    for (let i = 0; i < MAX_SPECTRUM1D_DOCS; i++) await store.load(`C:/d/s${i}.fits`, 0);
+    expect(store.getRequest(median).spectrum).not.toBeNull();
+    expect(store.getRequest(first)).toBe(EMPTY_SPECTRUM1D_DOC);
+    release();
   });
 });
 
@@ -229,7 +287,7 @@ describe("openSpectrumCsv", () => {
   });
 
   it("reads the picked CSV from disk again even when an earlier read of that path is cached", async () => {
-    const read = vi.fn(async (path: string) => spectrumAt(path, 0));
+    const read = vi.fn(async (request: SpectrumRequest) => spectrumOf(request));
     const documents = new Spectrum1dStore(read);
     await documents.load("C:/d/ha_spectrum.csv", null);
     const store = new SpectrumCsvStore();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CLASS_LABELS, copyDownloadUrls, copyMastUris, exactBytes, formatBytes, opensParts, productView, sectionExpanded, shortFilename, visibleProducts } from "../logic/productView";
+import { CLASS_LABELS, copyDownloadUrls, copyMastUris, exactBytes, filenameParts, formatBytes, opensParts, productLabel, productView, sectionExpanded, shortFilename, visibleProducts } from "../logic/productView";
 import { productList } from "./fixtures";
 
 describe("formatBytes", () => {
@@ -37,7 +37,7 @@ describe("productView", () => {
       ["other", 1, false],
     ]);
     expect(view.sections[0]).toMatchObject({ title: "Opens in the app", detail: "2 images, 10.84 GB" });
-    expect(view.sections[1]).toMatchObject({ title: "Catalogues", detail: "1 file, 990 MB" });
+    expect(view.sections[1]).toMatchObject({ title: "Catalogues and tables", detail: "1 file, 990 MB" });
     expect(view.sections[2]).toMatchObject({ title: "Previews", detail: "1 file, 14 MB (see Previews)" });
   });
 
@@ -120,6 +120,16 @@ describe("sections on screen", () => {
     expect(shortFilename("jw02739-o001_t001_nircam", "jw02739-o001_t001_nircam")).toBe("jw02739-o001_t001_nircam");
   });
 
+  it("splits a shown file name so its product suffix is never the part that gets cut", () => {
+    const tso = "jw02358-o030_t003_nirspec";
+    expect(filenameParts(`${tso}_clear-prism-s1600a1-sub2048_x1dints.fits`, tso)).toEqual({ head: "…_clear-prism-s1600a1-sub2048", tail: "_x1dints.fits" });
+    expect(filenameParts(`${tso}_clear-prism-s1600a1-sub2048_whtlt.ecsv`, tso)).toEqual({ head: "…_clear-prism-s1600a1-sub2048", tail: "_whtlt.ecsv" });
+    expect(filenameParts("jw02358030001_04101_00001-seg001_nrs1_calints.fits", tso)).toEqual({ head: "jw02358030001_04101_00001-seg001_nrs1", tail: "_calints.fits" });
+    expect(filenameParts("ick909030_drc.fits", "ICK909030")).toEqual({ head: "…", tail: "_drc.fits" });
+    expect(filenameParts("lwp00501.lihi.gz", "lwp00501")).toEqual({ head: "lwp00501.lihi.gz", tail: "" });
+    expect(filenameParts("_x.fits", "other")).toEqual({ head: "_x.fits", tail: "" });
+  });
+
   it("labels every class in words", () => {
     expect(CLASS_LABELS).toEqual({
       image: "Image",
@@ -134,5 +144,16 @@ describe("sections on screen", () => {
       guidestar: "Guide star",
       other: "Other",
     });
+  });
+
+  it("says what the table products are and keeps roadmap ids out of the notes", () => {
+    const view = productView(list, "opens", false);
+    expect(view.sections.find((s) => s.key === "catalog")?.note).toBe("ECSV tables open in Files as table rows");
+    for (const section of view.sections) expect(section.note ?? "").not.toMatch(/C\d\d/);
+    expect(productLabel({ cls: "catalog", suffix: "whtlt", filename: "a_whtlt.ecsv" })).toBe("Light curve");
+    expect(productLabel({ cls: "catalog", suffix: "", filename: "JW02358-O030_T003_NIRSPEC_WHTLT.ECSV" })).toBe("Light curve");
+    expect(productLabel({ cls: "catalog", suffix: "segm", filename: "a_segm.fits" })).toBe("Segmentation map");
+    expect(productLabel({ cls: "catalog", suffix: "cat", filename: "a_cat.ecsv" })).toBe("Catalogue");
+    expect(productLabel({ cls: "spectrum", suffix: "x1dints", filename: "a_x1dints.fits" })).toBe("Spectrum");
   });
 });

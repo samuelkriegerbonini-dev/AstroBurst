@@ -116,9 +116,9 @@ describe("catalog exports", () => {
 
   it("writes every source with an empty mag_ab when the image is not calibrated", () => {
     const lines = sourcesCsv([source(), source({ mag_ab: null, saturated: true })]).split(CSV_LINE_END);
-    expect(lines[0]).toBe("x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,saturated");
-    expect(lines[1]).toBe("30,31.5,150.000123,2.000456,1234.5,-7.73,17.27,4.7,120,false");
-    expect(lines[2]).toBe("30,31.5,150.000123,2.000456,1234.5,-7.73,,4.7,120,true");
+    expect(lines[0]).toBe("x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,saturated,aperture_radius");
+    expect(lines[1]).toBe("30,31.5,150.000123,2.000456,1234.5,-7.73,17.27,4.7,120,false,7.05");
+    expect(lines[2]).toBe("30,31.5,150.000123,2.000456,1234.5,-7.73,,4.7,120,true,7.05");
   });
 
   it("flattens star and catalog row fields of a match into one line", () => {
@@ -132,14 +132,14 @@ describe("catalog exports", () => {
     };
     const lines = matchesCsv([entry]).split(CSV_LINE_END);
     expect(lines[0]).toBe(
-      "id,x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,cat_ra,cat_dec,g,bp,rp,bp_rp,sep_arcsec,d_ra_arcsec,d_dec_arcsec",
+      "id,x,y,ra,dec,flux,mag_inst,mag_ab,fwhm,snr,cat_ra,cat_dec,g,bp,rp,bp_rp,sep_arcsec,d_ra_arcsec,d_dec_arcsec,saturated,aperture_radius,zp_status",
     );
-    expect(lines[1]).toBe("gaia1,30,31.5,150.000123,2.000456,1234.5,-7.73,,4.7,120,150.0001,2.0001,20,,,0.8,0.3,0.2,-0.1");
+    expect(lines[1]).toBe("gaia1,30,31.5,150.000123,2.000456,1234.5,-7.73,,4.7,120,150.0001,2.0001,20,,,0.8,0.3,0.2,-0.1,false,7.05,used");
   });
 
   it("writes an empty fwhm cell for a star whose FWHM was not measured", () => {
     const star = source({ fwhm: null });
-    expect(sourcesCsv([star]).split(CSV_LINE_END)[1]).toBe("30,31.5,150.000123,2.000456,1234.5,-7.73,17.27,,120,false");
+    expect(sourcesCsv([star]).split(CSV_LINE_END)[1]).toBe("30,31.5,150.000123,2.000456,1234.5,-7.73,17.27,,120,false,7.05");
     const entry: CrossMatchEntry = {
       star,
       row: { id: "gaia2", ra: 150.0001, dec: 2.0001, g: 20, bp: null, rp: null, bp_rp: null },
@@ -148,7 +148,7 @@ describe("catalog exports", () => {
       d_dec_arcsec: -0.1,
       zp_status: null,
     };
-    expect(matchesCsv([entry]).split(CSV_LINE_END)[1]).toBe("gaia2,30,31.5,150.000123,2.000456,1234.5,-7.73,17.27,,120,150.0001,2.0001,20,,,,0.3,0.2,-0.1");
+    expect(matchesCsv([entry]).split(CSV_LINE_END)[1]).toBe("gaia2,30,31.5,150.000123,2.000456,1234.5,-7.73,17.27,,120,150.0001,2.0001,20,,,,0.3,0.2,-0.1,false,7.05,");
   });
 });
 

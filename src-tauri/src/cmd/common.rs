@@ -7,14 +7,20 @@ use rayon::prelude::*;
 use serde_json::json;
 
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
+use crate::core::imaging::asinh::linearised_warning;
 use crate::core::imaging::dq_flags::DqTable;
+use crate::core::imaging::layer_roles::{LayerGuess, LayerRole};
 use crate::core::imaging::sampling::{cell_range, preview_dims};
 use crate::core::imaging::stats::{compute_image_stats, is_valid_pixel};
 use crate::core::imaging::stf::{auto_stf, apply_stf, AutoStfConfig, ImageStats, StfParams};
 use crate::infra::cache::{GLOBAL_IMAGE_CACHE, ImageEntry};
+use crate::infra::fits::band_planes::{band_plane_of_path, loaded_band_plane};
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::gzip::SharedTempDir;
-use crate::infra::image_source::{load_plane, resolve_plane_info};
+use crate::infra::image_source::{
+    dq_source_text, err_source_text, is_stored_sigma, load_plane, mask_unreadable_by_header, resolve_plane_info,
+    sigma_key, CompanionChoice, CompanionOrigin, ErrOrigin, ErrRecipe, CARD_NO_DATA,
+};
 use crate::infra::render::grayscale::save_stf_png;
 use crate::service::common::derived_output_header;
 use crate::types::constants::{
@@ -163,6 +169,66 @@ pub(crate) fn dq_exclusion(path: &str) -> Result<Option<Array2<u8>>> {
     }))
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct ErrOriginJson {
+    role: LayerRole,
+    source: String,
+    assumed: bool,
+    n_no_data: Option<u64>,
+    origin: CompanionOrigin,
+}
+
+impl ErrOriginJson {
+    pub(crate) fn loaded(origin: &ErrOrigin, choice: &CompanionChoice) -> ErrOriginJson {
+        ErrOriginJson {
+            role: origin.role,
+            source: origin.source.clone(),
+            assumed: origin.assumed,
+            n_no_data: Some(origin.n_no_data),
+            origin: choice.origin,
+        }
+    }
+
+    fn described(companion: &ImageRef, choice: &CompanionChoice) -> ErrOriginJson {
+        ErrOriginJson {
+            role: choice.role,
+            source: err_source_text(choice, companion),
+            assumed: choice.assumed,
+            n_no_data: known_no_data(companion, choice),
+            origin: choice.origin,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct PlaneLayers {
+    layer: Option<LayerGuess>,
+    err_origin: Option<ErrOriginJson>,
+    dq_origin: Option<String>,
+    dq_origin_kind: Option<CompanionOrigin>,
+    err_unavailable: Option<String>,
+    dq_unavailable: Option<String>,
+    pairing_notes: Vec<String>,
+    err_recipe: Option<ErrRecipe>,
+    warnings: Vec<&'static str>,
+    band_plane: Option<BandPlaneJson>,
+}
+
+#[derive(serde::Serialize)]
+struct BandPlaneJson {
+    hdu: usize,
+    plane: usize,
+    label: Option<String>,
+}
+
+fn known_no_data(companion: &ImageRef, choice: &CompanionChoice) -> Option<u64> {
+    if is_stored_sigma(choice) {
+        return Some(0);
+    }
+    let derived = GLOBAL_IMAGE_CACHE.get(&sigma_key(companion, choice.role))?;
+    derived.header()?.get_i64(CARD_NO_DATA).and_then(|n| u64::try_from(n).ok())
+}
+
 pub(crate) fn plane_info_json(path: &str, entry: &ImageEntry) -> Result<serde_json::Value> {
     let r = image_ref(path);
     let info = match entry.plane_info() {
@@ -170,12 +236,18 @@ pub(crate) fn plane_info_json(path: &str, entry: &ImageEntry) -> Result<serde_js
         None => resolve_plane_info(&r)?,
     };
     let comps = entry.companions().cloned().unwrap_or_default();
-    let (kind, index, key) = match &info.kind {
+    let (kind, plane_index, key) = match &info.kind {
         PlaneSelector::Hdu(n) => (PLANE_KIND_HDU, Some(*n), None),
         PlaneSelector::Array(k) => (PLANE_KIND_ARRAY, None, Some(k.clone())),
         PlaneSelector::Auto => (PLANE_KIND_HDU, None, None),
     };
-    let dq_ref = comps.dq.as_ref().map(ImageRef::cache_key);
+    let band = band_plane_of_path(&r.path);
+    let index = band.as_ref().map_or(plane_index, |band| Some(band.hdu));
+    let pairing = &info.pairing;
+    let dq_refusal = comps.dq.as_ref().and_then(|dq| mask_unreadable_by_header(dq, pairing.dq.as_ref()));
+    let usable_dq = comps.dq.as_ref().filter(|_| dq_refusal.is_none());
+    let dq_choice = usable_dq.zip(pairing.dq.as_ref());
+    let dq_ref = usable_dq.map(ImageRef::cache_key);
     let err_ref = comps.err.as_ref().map(ImageRef::cache_key);
     let dq_table = match (&dq_ref, entry.header()) {
         (Some(dq_key), Some(header)) => Some(
@@ -184,7 +256,24 @@ pub(crate) fn plane_info_json(path: &str, entry: &ImageEntry) -> Result<serde_js
         ),
         _ => None,
     };
-    Ok(json!({
+    let layers = PlaneLayers {
+        layer: pairing.layer.clone(),
+        err_origin: comps.err.as_ref().zip(pairing.err.as_ref()).map(|(err, choice)| ErrOriginJson::described(err, choice)),
+        dq_origin: dq_choice.map(|(dq, choice)| dq_source_text(choice, dq)),
+        dq_origin_kind: dq_choice.map(|(_, choice)| choice.origin),
+        err_unavailable: pairing.err_unavailable.clone(),
+        dq_unavailable: dq_refusal.or_else(|| pairing.dq_unavailable.clone()),
+        pairing_notes: pairing.notes.clone(),
+        err_recipe: pairing.err_recipe.clone(),
+        warnings: entry.header().and_then(linearised_warning).into_iter().collect(),
+        band_plane: band.as_ref().map(|band| BandPlaneJson {
+            hdu: band.hdu,
+            plane: band.plane,
+            label: entry.header().and_then(loaded_band_plane).and_then(|loaded| loaded.label),
+        }),
+    };
+    let source_path = band.map_or(r.path, |band| band.file);
+    let mut body = json!({
         RES_KIND: kind,
         RES_INDEX: index,
         RES_KEY: key,
@@ -194,9 +283,13 @@ pub(crate) fn plane_info_json(path: &str, entry: &ImageEntry) -> Result<serde_js
         RES_IS_ERR: info.is_err,
         RES_DQ_REF: dq_ref,
         RES_ERR_REF: err_ref,
-        RES_SOURCE_PATH: r.path,
+        RES_SOURCE_PATH: source_path,
         RES_DQ_TABLE: dq_table,
-    }))
+    });
+    if let (Some(fields), serde_json::Value::Object(added)) = (body.as_object_mut(), serde_json::to_value(&layers)?) {
+        fields.extend(added);
+    }
+    Ok(body)
 }
 
 pub(crate) fn write_derived_fits(path: &str, arr: &Array2<f32>, header: Option<&HduHeader>) -> Result<()> {
@@ -368,12 +461,45 @@ pub(crate) use blocking_cmd;
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    use std::path::Path;
+
     use ndarray::Array2;
 
     use super::MAX_PREVIEW_DIM;
     use crate::core::imaging::stats::compute_image_stats;
     use crate::core::imaging::stf::{apply_stf, auto_stf, AutoStfConfig};
+    use crate::infra::fits::reader::test_fixtures::{ramp_f32, write_test_mef, HduData, TestHdu};
     use crate::infra::ipc::encode_with_header_downsampled;
+
+    pub(crate) fn afw_mef(dir: &Path, name: &str, more: Vec<TestHdu>) -> String {
+        let mut mask = vec![0i32; 16];
+        mask[5] = 34;
+        let mut variance: Vec<f32> = (0..16).map(|i| (i * i) as f32).collect();
+        variance[6] = -1.0;
+        let afw_cards = vec![("MP_BAD", "0".to_string()), ("MP_SAT", "1".to_string()), ("HIERARCH MP_DETECTED", "5".to_string())];
+        let mut hdus = vec![
+            TestHdu { extname: Some("IMAGE"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![("BUNIT", "'nJy     '".into())] },
+            TestHdu { extname: Some("MASK"), extver: None, cols: 4, rows: 4, data: HduData::I32(mask), extra_cards: afw_cards },
+            TestHdu { extname: Some("VARIANCE"), extver: None, cols: 4, rows: 4, data: HduData::F32(variance), extra_cards: vec![("BUNIT", "'nJy^2   '".into())] },
+        ];
+        hdus.extend(more);
+        let path = dir.join(name);
+        write_test_mef(&path, &[("TELESCOP", "'Subaru'".into())], &hdus);
+        path.to_str().unwrap().to_string()
+    }
+
+    pub(crate) fn float_dq_mef(dir: &Path, name: &str) -> String {
+        let path = dir.join(name);
+        write_test_mef(
+            &path,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("DQ"), extver: Some(1), cols: 4, rows: 4, data: HduData::F32(vec![0.0; 16]), extra_cards: vec![] },
+            ],
+        );
+        path.to_str().unwrap().to_string()
+    }
 
     pub(crate) fn wide_textured_sky() -> Array2<f32> {
         Array2::from_shape_fn((6, 2 * MAX_PREVIEW_DIM), |(r, c)| {
@@ -429,7 +555,9 @@ mod tests {
     use std::io::Write;
     use std::time::{Duration, SystemTime};
 
-    use super::test_support::{assert_png_matches, gpu_reduced, gpu_view_with_auto_stf, wide_textured_sky};
+    use super::test_support::{
+        afw_mef, assert_png_matches, float_dq_mef, gpu_reduced, gpu_view_with_auto_stf, wide_textured_sky,
+    };
     use super::*;
     use crate::core::cube::lazy::test_support::write_line_cube;
     use crate::infra::fits::reader::test_fixtures::sci_err_dq_mef_with_dq_cards;
@@ -969,6 +1097,10 @@ mod tests {
         assert_eq!(j[RES_ERR_REF], format!("{}#hdu=2", p));
         assert_eq!(j[RES_SOURCE_PATH], p);
         assert_eq!(j[RES_DQ_TABLE], "jwst");
+        assert_eq!(
+            j["err_origin"],
+            json!({"role": "sigma", "source": "EXTNAME ERR, HDU 2: as is", "assumed": false, "n_no_data": 0, "origin": "same_file"})
+        );
 
         let lonely = format!("{}#hdu=4", p);
         let entry = load_cached_full(&lonely).unwrap();
@@ -976,6 +1108,14 @@ mod tests {
         assert!(j[RES_DQ_REF].is_null());
         assert!(j[RES_DQ_TABLE].is_null());
         assert_eq!(j[RES_INDEX], 4);
+        assert_eq!(j["layer"], json!({"role": "science", "basis": "EXTNAME SCI", "assumed": false}));
+        for key in ["err_origin", "dq_origin", "dq_origin_kind", "err_unavailable", "dq_unavailable"] {
+            assert!(j.as_object().unwrap().contains_key(key), "{key}: {j}");
+            assert!(j[key].is_null(), "{key}: {j}");
+        }
+        assert_eq!(j["pairing_notes"], json!([]));
+        assert_eq!(j["warnings"], json!([]));
+        assert!(j.as_object().unwrap().contains_key("err_recipe") && j["err_recipe"].is_null(), "{j}");
 
         let synthetic_key = "__composite_info";
         GLOBAL_IMAGE_CACHE.insert_synthetic(
@@ -1018,7 +1158,9 @@ mod tests {
         assert_eq!(info[RES_DQ_REF], k);
         assert_eq!(info[RES_DQ_TABLE], "unknown");
 
-        assert!(dq_exclusion(&format!("{p}#hdu=1")).unwrap().is_none());
+        let of_the_image = dq_exclusion(&format!("{p}#hdu=1")).unwrap().expect("the MASK HDU is the DQ plane of the SCI HDU");
+        assert_eq!(of_the_image.dim(), (4, 4));
+        assert!(of_the_image.iter().all(|&v| v == 0), "{of_the_image:?}");
     }
 
     #[test]
@@ -1047,5 +1189,267 @@ mod tests {
         assert_eq!(excluded.iter().filter(|&&v| v != 0).count(), 1);
         let info = plane_info_json(&k, &load_cached_full(&k).unwrap()).unwrap();
         assert_eq!(info[RES_DQ_TABLE], "jwst");
+    }
+
+    #[test]
+    fn the_open_response_names_the_layers_without_loading_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = afw_mef(dir.path(), "calexp.fits", vec![]);
+        let k = format!("{p}#hdu=1");
+
+        let j = plane_info_json(&k, &load_cached_full(&k).unwrap()).unwrap();
+        assert_eq!(j["layer"], json!({"role": "science", "basis": "EXTNAME IMAGE", "assumed": false}));
+        assert_eq!(
+            j["err_origin"],
+            json!({"role": "variance", "source": "EXTNAME VARIANCE, HDU 3: square root", "assumed": false, "n_no_data": null, "origin": "same_file"})
+        );
+        assert_eq!(j["dq_origin"], "EXTNAME MASK, HDU 2");
+        assert_eq!(j["dq_origin_kind"], "same_file");
+        assert_eq!(j["pairing_notes"], json!([]));
+        assert!(j["err_unavailable"].is_null() && j["dq_unavailable"].is_null(), "{j}");
+        assert!(!GLOBAL_IMAGE_CACHE.contains(&sigma_key(&ImageRef::hdu(&p, 3), LayerRole::Variance)));
+        assert!(!GLOBAL_IMAGE_CACHE.contains(&format!("{p}#hdu=3")));
+
+        let loaded = load_companions(&k).unwrap();
+        let again = plane_info_json(&k, &load_cached_full(&k).unwrap()).unwrap();
+        assert_eq!(again["err_origin"]["n_no_data"], 1);
+        assert_eq!(again["err_origin"]["source"], loaded.err_origin.expect("the variance was converted").source.as_str());
+    }
+
+    #[test]
+    fn a_dq_that_cannot_be_read_as_integers_is_not_advertised_as_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = float_dq_mef(dir.path(), "float_dq.fits");
+        let k = format!("{p}#hdu=1");
+
+        let j = plane_info_json(&k, &load_cached_full(&k).unwrap()).unwrap();
+        assert!(j[RES_DQ_REF].is_null(), "{j}");
+        assert_eq!(
+            j["dq_unavailable"],
+            "mask layer HDU 2 is a floating-point plane (BITPIX -32): flag bits cannot be read exactly"
+        );
+        assert!(j[RES_DQ_TABLE].is_null(), "{j}");
+        assert!(j["dq_origin"].is_null() && j["dq_origin_kind"].is_null(), "{j}");
+    }
+
+    #[test]
+    fn a_layer_of_another_size_is_reported_in_the_open_response() {
+        use crate::infra::fits::reader::test_fixtures::{ramp_f32, write_test_mef, HduData, TestHdu};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small_variance.fits");
+        write_test_mef(
+            &path,
+            &[],
+            &[
+                TestHdu { extname: Some("SCI"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("VARIANCE"), extver: None, cols: 2, rows: 2, data: HduData::F32(vec![1.0; 4]), extra_cards: vec![] },
+            ],
+        );
+        let k = format!("{}#hdu=1", path.to_str().unwrap());
+
+        let j = plane_info_json(&k, &load_cached_full(&k).unwrap()).unwrap();
+        assert!(j[RES_ERR_REF].is_null(), "{j}");
+        assert!(j["err_origin"].is_null(), "{j}");
+        assert_eq!(j["err_unavailable"], "error layer HDU 2 (VARIANCE) is 2x2 and does not match the image 4x4: not used");
+    }
+
+    #[test]
+    fn a_sibling_pairing_is_said_in_the_open_response() {
+        use crate::infra::fits::reader::test_fixtures::{write_test_mef, HduData, TestHdu};
+        let dir = tempfile::tempdir().unwrap();
+        let in_folder = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+        let image = in_folder("legacysurvey-0001p000-image-r.fits");
+        let invvar = in_folder("legacysurvey-0001p000-invvar-r.fits");
+        let maskbits = in_folder("legacysurvey-0001p000-maskbits.fits");
+        write_fits_mono(&image, &Array2::from_shape_fn((4, 4), |(y, x)| (y * 4 + x) as f32), None).unwrap();
+        write_fits_mono(&invvar, &Array2::from_elem((4, 4), 4.0), None).unwrap();
+        let names = vec![("MBIT_3", "'SATUR_R'".to_string()), ("MBIT_6", "'ALLMASK_R'".to_string())];
+        write_test_mef(
+            Path::new(&maskbits),
+            &[],
+            &[TestHdu { extname: Some("MASKBITS"), extver: None, cols: 4, rows: 4, data: HduData::I32(vec![0; 16]), extra_cards: names }],
+        );
+
+        let j = plane_info_json(&image, &load_cached_full(&image).unwrap()).unwrap();
+        assert_eq!(
+            j["pairing_notes"],
+            json!([
+                "error layer taken from the sibling file legacysurvey-0001p000-invvar-r.fits (name rule Legacy brick, same 4x4 grid)",
+                "mask layer taken from the sibling file legacysurvey-0001p000-maskbits.fits (name rule Legacy brick, same 4x4 grid)",
+            ])
+        );
+        assert_eq!(j[RES_ERR_REF], invvar);
+        assert_eq!(j["err_origin"]["origin"], "sibling");
+        assert_eq!(j["err_origin"]["source"], "file name -invvar-, legacysurvey-0001p000-invvar-r.fits: 1 / square root");
+        assert_eq!(j[RES_DQ_REF], maskbits);
+        assert_eq!(j["dq_origin"], "file name -maskbits, legacysurvey-0001p000-maskbits.fits");
+        assert_eq!(j["dq_origin_kind"], "sibling");
+    }
+
+    #[test]
+    fn the_plane_description_carries_the_asinh_warning_and_the_recipe() {
+        use crate::infra::sdss_frame_file::test_support::{write_frame, FRAME_XINTERP};
+        use crate::infra::sdss_frame_file::SDSS_NO_ERROR_REASON;
+        let dir = tempfile::tempdir().unwrap();
+        let in_folder = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
+        let mut linearised_cards = HduHeader::empty();
+        linearised_cards.set_f64("ABSOFTEN", 0.25);
+        linearised_cards.set_f64("ABOFFSET", 3.5);
+        let linearised = in_folder("ps1_linearised.fits");
+        write_fits_mono(&linearised, &sky(4, 4), Some(&linearised_cards)).unwrap();
+        let j = plane_info_json(&linearised, &load_cached_full(&linearised).unwrap()).unwrap();
+        assert_eq!(j["warnings"], json!(["PS1 asinh-scaled pixels were linearised (BOFFSET, BSOFTEN)"]), "{j}");
+        assert!(j["err_recipe"].is_null(), "{j}");
+
+        let plain = in_folder("plain.fits");
+        write_fits_mono(&plain, &sky(4, 4), None).unwrap();
+        let j = plane_info_json(&plain, &load_cached_full(&plain).unwrap()).unwrap();
+        assert_eq!(j["warnings"], json!([]), "{j}");
+
+        let frame = write_frame(dir.path(), "frame.fits", &FRAME_XINTERP);
+        let j = plane_info_json(&frame, &load_cached_full(&frame).unwrap()).unwrap();
+        assert_eq!(j["err_recipe"], json!({"kind": "sdss_frame", "gain": null, "dark_variance": null}), "{j}");
+        assert_eq!(j["err_unavailable"], SDSS_NO_ERROR_REASON);
+        assert_eq!(j["warnings"], json!([]));
+    }
+
+    #[test]
+    fn the_plane_description_of_a_band_names_the_cube_the_band_and_the_real_file() {
+        use crate::infra::image_source::test_support::{write_band_cutout, CUTOUT_INVVAR, CUTOUT_NAME};
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_band_cutout(dir.path(), CUTOUT_NAME, CUTOUT_INVVAR);
+        let r_band = format!("{p}#hdu=0&plane=1");
+        let j = plane_info_json(&r_band, &load_cached_full(&r_band).unwrap()).unwrap();
+        assert_eq!(j[RES_KIND], "hdu", "{j}");
+        assert_eq!(j[RES_INDEX], 0);
+        assert_eq!(j[RES_SOURCE_PATH], p);
+        assert_eq!(j["band_plane"], json!({"hdu": 0, "plane": 1, "label": "r"}));
+        assert_eq!(j[RES_ERR_REF], format!("{p}#hdu=1&plane=1"));
+        assert_eq!(j[RES_DQ_REF], format!("{p}#hdu=2"));
+        assert_eq!(j["err_origin"]["source"], "IMAGETYP INVVAR, HDU 1 plane 1: 1 / square root");
+        assert_eq!(j["layer"]["basis"], "IMAGETYP IMAGE");
+
+        let mask = format!("{p}#hdu=2");
+        let j = plane_info_json(&mask, &load_cached_full(&mask).unwrap()).unwrap();
+        assert!(j["band_plane"].is_null() && j.as_object().unwrap().contains_key("band_plane"), "{j}");
+        assert_eq!(j[RES_SOURCE_PATH], p);
+
+        let plain = dir.path().join("plain.fits").to_str().unwrap().to_string();
+        write_fits_mono(&plain, &sky(3, 4), None).unwrap();
+        let j = plane_info_json(&plain, &load_cached_full(&plain).unwrap()).unwrap();
+        assert!(j["band_plane"].is_null(), "{j}");
+        assert_eq!(j[RES_SOURCE_PATH], plain);
+
+        let weight_band = format!("{p}#hdu=1&plane=0");
+        let j = plane_info_json(&weight_band, &load_cached_full(&weight_band).unwrap()).unwrap();
+        assert_eq!(j[RES_INDEX], 1, "{j}");
+        assert_eq!(j["band_plane"], json!({"hdu": 1, "plane": 0, "label": "g"}));
+        assert_eq!(j[RES_SOURCE_PATH], p);
+        assert!(j[RES_ERR_REF].is_null() && j[RES_DQ_REF].is_null(), "{j}");
+
+        let odd = dir.path().join("odd.fits#hdu=0&plane=1").to_str().unwrap().to_string();
+        write_fits_mono(&odd, &sky(3, 4), None).unwrap();
+        let j = plane_info_json(&odd, &load_cached_full(&odd).unwrap()).unwrap();
+        assert_eq!(j[RES_INDEX], 0, "{j}");
+        assert!(j["band_plane"].is_null(), "{j}");
+        assert_eq!(j[RES_SOURCE_PATH], odd);
+    }
+
+    fn legacy_cutout() -> String {
+        crate::core::astrometry::gwcs::test_support::env_dir("ASTROBURST_SCIENCE_DATA_DIR")
+            .join("survey")
+            .join("L1")
+            .join("ls-dr10_A_griz_invvar_maskbits_458px.fits")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn relative_gap(measured: f32, expected: f64) -> f64 {
+        ((f64::from(measured) - expected) / expected).abs()
+    }
+
+    fn median_of(values: &Array2<f32>) -> f64 {
+        let mut sorted: Vec<f64> = values.iter().filter(|v| v.is_finite()).map(|v| f64::from(*v)).collect();
+        sorted.sort_by(f64::total_cmp);
+        let mid = sorted.len() / 2;
+        if sorted.len() % 2 == 0 {
+            (sorted[mid - 1] + sorted[mid]) / 2.0
+        } else {
+            sorted[mid]
+        }
+    }
+
+    #[test]
+    #[ignore = "needs ASTROBURST_SCIENCE_DATA_DIR: survey/L1/ls-dr10_A_griz_invvar_maskbits_458px.fits"]
+    fn real_legacy_cutout_bands_take_their_invvar_plane_and_the_mask() {
+        use crate::cmd::metadata::extensions_json;
+        let file = legacy_cutout();
+        let r_band = format!("{file}#hdu=0&plane=1");
+        let j = plane_info_json(&r_band, &load_cached_full(&r_band).unwrap()).unwrap();
+        println!("legacy cutout r band: band_plane {}, err_ref {}, dq_ref {}", j["band_plane"], j[RES_ERR_REF], j[RES_DQ_REF]);
+        assert_eq!(j["band_plane"], json!({"hdu": 0, "plane": 1, "label": "r"}));
+        assert!(j[RES_ERR_REF].as_str().unwrap().ends_with("#hdu=1&plane=1"), "{j}");
+        assert!(j[RES_DQ_REF].as_str().unwrap().ends_with("#hdu=2"), "{j}");
+
+        let loaded = load_companions(&r_band).unwrap();
+        let sigma = loaded.err.as_ref().expect("the r plane of the INVVAR cube is the error layer").arr().clone();
+        for (at, expected) in [
+            ([0, 0], 0.0010828025949942315),
+            ([229, 229], 0.0021034510956936597),
+            ([457, 457], 0.0014306037729749956),
+            ([30, 7], 0.0011229846740154635),
+            ([429, 453], 0.0009375348263118371),
+        ] {
+            let gap = relative_gap(sigma[at], expected);
+            println!("legacy cutout r sigma{at:?} = {} (oracle {expected}, relative {gap:.1e})", sigma[at]);
+            assert!(gap <= 1e-6, "sigma{at:?} = {}, oracle {expected}", sigma[at]);
+        }
+        let median = median_of(&sigma);
+        let origin = loaded.err_origin.as_ref().expect("the error layer says where it came from");
+        println!(
+            "legacy cutout r sigma: median {median} (oracle 0.001301182817121074), n_no_data {}, source {}",
+            origin.n_no_data, origin.source
+        );
+        assert!(((median - 0.001301182817121074) / 0.001301182817121074).abs() <= 1e-6);
+        assert_eq!(origin.n_no_data, 0);
+        assert_eq!(origin.source, "IMAGETYP INVVAR, HDU 1 plane 1: 1 / square root");
+
+        let (mask, _) = loaded.dq.as_ref().expect("the MASKBITS HDU is the mask");
+        let bits = mask.int_plane().expect("the mask is read as integers");
+        for ((y, x), expected) in [((0, 0), 1024), ((30, 7), 256), ((429, 453), 2048), ((7, 380), 1025), ((0, 9), 0)] {
+            println!("legacy cutout mask [{y}, {x}] = {} (expected {expected})", bits.value_at(y, x));
+            assert_eq!(bits.value_at(y, x), expected, "[{y}, {x}]");
+        }
+        let source = loaded.flags.as_ref().map(|flags| flags.source.clone());
+        println!("legacy cutout r flags: {source:?}, exclusion {}, dq_origin {:?}", loaded.exclusion_mask(), loaded.dq_origin);
+        assert_eq!(source.as_deref(), Some("Legacy DR10 maskbits (built-in table)"));
+        assert_eq!(loaded.exclusion_mask(), 72);
+
+        for (plane, band, expected, exclusion) in
+            [(0, "g", 0.0009721814728914486, 36), (2, "i", 0.0017546505292082596, 49152), (3, "z", 0.0033517020869796863, 144)]
+        {
+            let key = format!("{file}#hdu=0&plane={plane}");
+            let loaded = load_companions(&key).unwrap();
+            let sigma = loaded.err.as_ref().expect("each band has its error plane").arr()[[0, 0]];
+            let gap = relative_gap(sigma, expected);
+            println!("legacy cutout {band} sigma[0, 0] = {sigma} (oracle {expected}, relative {gap:.1e}), exclusion {}", loaded.exclusion_mask());
+            assert!(gap <= 1e-6, "{band}");
+            assert_eq!(loaded.exclusion_mask(), exclusion, "{band}");
+        }
+
+        let listed = extensions_json(&file).unwrap();
+        let rows = listed["extensions"].as_array().unwrap();
+        for row in rows {
+            println!("legacy cutout HDU {}: role {}, bands {}", row[RES_INDEX], row["role"], row["bands"]);
+        }
+        let labels = |row: &serde_json::Value| -> Vec<String> {
+            row["bands"].as_array().unwrap().iter().map(|band| band["label"].as_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(rows.len(), 3);
+        assert_eq!(labels(&rows[0]), ["g", "r", "i", "z"]);
+        assert_eq!(labels(&rows[1]), ["g", "r", "i", "z"]);
+        assert_eq!(rows[2]["bands"], json!([]));
+        println!("legacy cutout r plane description: {j}");
     }
 }

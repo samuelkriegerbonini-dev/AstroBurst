@@ -3,7 +3,7 @@ import type { CompositeChain } from "../shared/types/compositeChain";
 import type { FileRenderState } from "../shared/types/preview";
 import type { WizardState } from "./wizard";
 import { assetUrlToPath } from "./exportSources";
-import { parseImageRef } from "./imageRef";
+import { sourceFile } from "./imageRef";
 import { CHAIN_ORDER, normalizeOutputPath } from "./processingChain";
 
 const URL_SCHEME = /^(asset|https?|data|blob):/i;
@@ -48,7 +48,7 @@ export function outputKeepList(input: KeepInput): string[] {
   const inHistory = underDir(input.historyDir);
   const add = (value: string | null | undefined) => {
     if (!value || value.startsWith("__")) return;
-    const path = parseImageRef(value).path;
+    const path = sourceFile(value);
     const key = normalizeOutputPath(path);
     if (inHistory(key)) return;
     if (!kept.has(key)) kept.set(key, path);

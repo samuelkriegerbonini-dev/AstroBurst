@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 vi.mock("react", async (importOriginal) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 
 import { hooks } from "../../test/hookRuntime";
-import CommandPalette from "../CommandPalette";
+import CommandPalette, { HIDDEN_FILE_HINT, type PaletteFile } from "../CommandPalette";
 
 type AnyElement = ReactElement<Record<string, unknown> & { children?: ReactNode }>;
 
@@ -194,5 +194,61 @@ describe("CommandPalette returning focus", () => {
     expect(focusedName(page)).toBe("All tools trigger");
     expect(trigger.focus).toHaveBeenCalledWith({ preventScroll: true });
     expect(trigger.scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+  });
+});
+
+describe("CommandPalette files", () => {
+  const NIRCAM_NAME = "jw02739001001_02105_00001_nrca1_cal.fits";
+
+  function stubBrowser(): void {
+    vi.stubGlobal("window", { addEventListener: () => {}, removeEventListener: () => {} });
+    vi.stubGlobal("document", { activeElement: null, querySelector: () => null });
+    vi.stubGlobal("HTMLElement", class {});
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  }
+
+  function paletteAfterTyping(files: PaletteFile[], query: string): AnyElement[] {
+    stubBrowser();
+    hooks.mount();
+    const props = { open: true, onClose: () => {}, actions: [], files, selectedId: null, onSelectFile: () => {} };
+    const render = () => elements(hooks.render(CommandPalette, props) as ReactNode);
+    const combobox = render().find((el) => el.props.role === "combobox")!;
+    (combobox.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: query } });
+    return render();
+  }
+
+  const options = (tree: AnyElement[]) => tree.filter((el) => el.props.role === "option");
+  const optionLabels = (tree: AnyElement[]) =>
+    tree.filter((el) => el.props.className === "ab-cmdp-item-label").map((el) => String((el.props.children as unknown[])[0]));
+  const markup = (tree: AnyElement[]) => renderToStaticMarkup(tree[0]);
+
+  it("finds a file by the text the Files search matches", () => {
+    const withSearchText: PaletteFile[] = [{ id: "f1", name: NIRCAM_NAME, filter: "F200W", searchText: `${NIRCAM_NAME}\nf200w\nnircam` }];
+    const byInstrument = paletteAfterTyping(withSearchText, "nircam");
+    expect(options(byInstrument)).toHaveLength(1);
+    expect(optionLabels(byInstrument)).toEqual([NIRCAM_NAME]);
+
+    const noMatch = paletteAfterTyping(withSearchText, "wfc3");
+    expect(options(noMatch)).toHaveLength(0);
+    expect(markup(noMatch)).toContain("No matches for");
+
+    const withoutSearchText: PaletteFile[] = [{ id: "f1", name: NIRCAM_NAME, filter: "F200W" }];
+    expect(optionLabels(paletteAfterTyping(withoutSearchText, "nrca1"))).toEqual([NIRCAM_NAME]);
+    expect(optionLabels(paletteAfterTyping(withoutSearchText, "f200"))).toEqual([NIRCAM_NAME]);
+    expect(options(paletteAfterTyping(withoutSearchText, "nircam"))).toHaveLength(0);
+  });
+
+  it("says when a listed file is hidden by the Files filter", () => {
+    const files: PaletteFile[] = [
+      { id: "a", name: "a_s3d.fits", filter: "F290LP", hidden: true },
+      { id: "b", name: "b_s3d.fits", hidden: true },
+      { id: "c", name: "c_x1d.fits", filter: "F290LP" },
+    ];
+    const hints = paletteAfterTyping(files, "")
+      .filter((el) => el.props.className === "ab-cmdp-hint")
+      .map((el) => el.props.children);
+    expect(hints).toEqual(["F290LP · hidden by filter", "hidden by filter", "F290LP"]);
+    expect(HIDDEN_FILE_HINT).toBe("hidden by filter");
   });
 });

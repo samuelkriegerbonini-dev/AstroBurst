@@ -22,6 +22,14 @@ describe("Tool catalog", () => {
     }
   });
 
+  it("describes the measurement tools by what they measure", () => {
+    expect(TOOL_DESCRIPTIONS.astrometry).toBe("Solve sky coordinates, detect sources and cross-match them with Gaia and other catalogues.");
+    expect(TOOL_DESCRIPTIONS.photometry).toBe("Measure aperture flux and magnitudes, multi-band photometry, image depth and source size, and build light curves.");
+    expect(TOOL_DESCRIPTIONS.cube).toBe("Measure 1D spectra (x1d, CSV), time-series spectra and IFU cubes: line fits, white light and moment maps.");
+    expect(TOOL_DESCRIPTIONS.cubeprep).toBe("Match units, pixel grids and PSFs across bands for multiband work.");
+    expect(TOOL_DESCRIPTIONS.sagui).toBe("Segment multiband images into regions and measure their spectral energy distributions.");
+  });
+
   it("names the categories by what the tools do", () => {
     expect(TOOL_CATEGORIES.map((category) => [category.label, [...category.tools]])).toEqual([
       ["Inspect", ["image", "headers", "info"]],

@@ -186,15 +186,15 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, hea
         <div className="flex flex-col gap-2 animate-fade-in">
           <div className="grid grid-cols-3 gap-1.5">
             <div className="ab-metric-card flex flex-col items-center p-2 rounded">
-              <span className="text-[9px] text-red-400/70 uppercase">R Factor</span>
+              <span className="text-[9px] text-red-400/90 uppercase">R Factor</span>
               <span className="text-sm font-mono text-zinc-200">{result.r_factor?.toFixed(4)}</span>
             </div>
             <div className="ab-metric-card flex flex-col items-center p-2 rounded">
-              <span className="text-[9px] text-green-400/70 uppercase">G Factor</span>
+              <span className="text-[9px] text-green-400/90 uppercase">G Factor</span>
               <span className="text-sm font-mono text-zinc-200">{result.g_factor?.toFixed(4)}</span>
             </div>
             <div className="ab-metric-card flex flex-col items-center p-2 rounded">
-              <span className="text-[9px] text-blue-400/70 uppercase">B Factor</span>
+              <span className="text-[9px] text-blue-400/90 uppercase">B Factor</span>
               <span className="text-sm font-mono text-zinc-200">{result.b_factor?.toFixed(4)}</span>
             </div>
           </div>

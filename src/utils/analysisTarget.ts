@@ -3,6 +3,7 @@ import { samePath } from "./processingChain";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions, type DecimalFieldState } from "./decimalText";
 import { APERTURE_RANGE_HINT, apertureRadiusInRange } from "./photometryTable";
 import { IDENTITY_STF } from "./displayMemory";
+import { colorbarUnit } from "./colorbar";
 import type { StfParams } from "../shared/types";
 
 export interface CompositeViewInput {
@@ -67,12 +68,17 @@ export interface MeasureKeyInput {
   composite: boolean;
   processedFitsPath: string | null;
   processedVersion: number;
+  filePath?: string | null;
+  reloads?: number;
 }
 
 export function analysisMeasureKey(input: MeasureKeyInput): string | null {
   if (!input.path) return null;
-  if (input.composite || input.processedFitsPath !== input.path) return input.path;
-  return `${input.path}@${input.processedVersion}`;
+  if (input.composite) return input.path;
+  if (input.processedFitsPath === input.path) return `${input.path}@${input.processedVersion}`;
+  const reloads = input.reloads ?? 0;
+  if (input.filePath && samePath(input.path, input.filePath) && reloads > 0) return `${input.path}#${reloads}`;
+  return input.path;
 }
 
 export function statisticsRunKey(input: {
@@ -235,6 +241,17 @@ export interface HistogramChannelInput {
 export function histogramChannelLabel({ isRgbFile, histDataPath, filePath }: HistogramChannelInput): "R" | null {
   if (!isRgbFile || !histDataPath || !filePath) return null;
   return samePath(histDataPath, filePath) ? "R" : null;
+}
+
+export interface HistogramUnitInput {
+  bunit: string | null | undefined;
+  histDataPath: string | null;
+  filePath: string | null;
+}
+
+export function histogramUnit({ bunit, histDataPath, filePath }: HistogramUnitInput): string | null {
+  if (!histDataPath || !filePath || !samePath(histDataPath, filePath)) return null;
+  return colorbarUnit(bunit, false);
 }
 
 export interface CpuStfInput {

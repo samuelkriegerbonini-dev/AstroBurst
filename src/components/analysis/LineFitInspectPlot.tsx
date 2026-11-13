@@ -166,12 +166,12 @@ function drawInspectPlot(canvas: HTMLCanvasElement, plot: InspectPlotData, width
   }
 }
 
-function LineFitInspectPlot({ spaxel }: { spaxel: LineFitSpaxel }) {
+function LineFitInspectPlot({ spaxel, redshift = null }: { spaxel: LineFitSpaxel; redshift?: number | null }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const summaryId = useId();
   const [width, setWidth] = useState(0);
-  const plot = useMemo(() => lineFitInspectPlot(spaxel), [spaxel]);
+  const plot = useMemo(() => lineFitInspectPlot(spaxel, redshift), [spaxel, redshift]);
   const summary = useMemo(() => lineFitInspectSummary(spaxel, plot), [spaxel, plot]);
 
   useEffect(() => {

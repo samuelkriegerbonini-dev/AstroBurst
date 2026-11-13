@@ -1,11 +1,13 @@
-import type { MastDownloadInput, MastDownloadItem, MastMissionId } from "../../../shared/types/mast";
+import type { MastDownloadInput, MastDownloadItem, MastMissionId, MastOpensAs } from "../../../shared/types/mast";
 import { mastDownload, mastDownloadCancel, mastDownloads, mastErrorOf, onMastDownload } from "../../../services/mast";
 import { ingestUnlessLoaded, rowsHolding, showOrOpen } from "../../../hooks/useFileIngest";
 import { refreshOverwrittenFiles } from "../../../hooks/refreshOverwrittenFiles";
 import { spectrum1dStore } from "../../../hooks/useSpectrum1dStore";
 import { appModeStore, type AppMode } from "../../../hooks/useAppMode";
+import { dockStore } from "../../../hooks/useDockLayout";
 import { FILE_STATUS } from "../../../utils/constants";
-import { openableDownload, recoveryInput } from "../logic/downloadView";
+import { spectrumHdu } from "../../../utils/fileKinds";
+import { archiveOpenTool, openableDownload, recoveryInput } from "../logic/downloadView";
 import { downloadsStore, pendingOpens, showGroupOf, unsettledDownloads, type DownloadsStore } from "./downloadsStore";
 
 export interface OpenDeps {
@@ -13,13 +15,14 @@ export interface OpenDeps {
   load: (path: string) => void;
   setMode: (mode: AppMode) => void;
   reload: (path: string) => void;
+  route?: (opensAs: MastOpensAs | null) => void;
 }
 
 export async function reloadRewritten(path: string): Promise<void> {
   const spectra = rowsHolding(path).filter((row) => row.status === FILE_STATUS.SPECTRUM);
   await Promise.all([
     refreshOverwrittenFiles({ output_path: path }),
-    ...spectra.map((row) => spectrum1dStore.reread(row.path, row.spectrum?.hdu ?? null)),
+    ...spectra.map((row) => spectrum1dStore.reread(row.path, spectrumHdu(row.spectrum))),
   ]);
 }
 
@@ -28,6 +31,10 @@ const LIVE_DEPS: OpenDeps = {
   load: (path) => void ingestUnlessLoaded(path, { keepMode: true }),
   setMode: (mode) => appModeStore.set(mode),
   reload: (path) => void reloadRewritten(path),
+  route: (opensAs) => {
+    const tool = archiveOpenTool(opensAs, dockStore.get());
+    if (tool) dockStore.dispatch({ type: "open", tool });
+  },
 };
 
 let requestSeq = 0;
@@ -42,7 +49,9 @@ export function nextDownloadRequestId(now: number = Date.now()): string {
 export function openDownloaded(item: MastDownloadItem, deps: OpenDeps = LIVE_DEPS): boolean {
   if (item.state !== "done" || !openableDownload(item)) return false;
   deps.setMode("workspace");
-  return deps.show(item.path);
+  const shown = deps.show(item.path);
+  if (shown) deps.route?.(item.opensAs);
+  return shown;
 }
 
 function settleFinished(store: DownloadsStore, deps: OpenDeps): void {

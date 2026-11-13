@@ -4,12 +4,13 @@ import { displayFilterValue, type ChannelSource } from "../utils/channelMapping"
 type Listener = () => void;
 export type FilterMode = "or" | "and";
 
-const JWST_PRODUCT_TYPES: readonly string[] = ["i2d", "segm", "cal", "calints", "rate", "rateints", "x1d", "x1dints", "s2d", "s3d", "uncal", "qslope", "crf", "bsub", "srctype", "outlier", "tweakreg", "skymatch", "whtlt"];
-const PRODUCT_FILE_SUFFIX = /(?:(?:\.fits|\.fit|\.fts)(?:\.gz)?|\.asdf)$/.source;
+const JWST_PRODUCT_TYPES: readonly string[] = ["i2d", "segm", "cal", "calints", "rate", "rateints", "x1d", "x1dints", "c1d", "s2d", "s3d", "uncal", "qslope", "crf", "crfints", "bsub", "srctype", "outlier", "tweakreg", "skymatch", "whtlt"];
+const PRODUCT_FILE_SUFFIX = /(?:(?:\.fits|\.fit|\.fts)(?:\.gz|\.bz2)?|\.asdf)$/.source;
 const JWST_PRODUCT_RE = new RegExp(`[_-](${JWST_PRODUCT_TYPES.join("|")})${PRODUCT_FILE_SUFFIX}`, "i");
+const TABLE_PRODUCT_RE = /[_-](whtlt)\.ecsv$/i;
 
 export function extractProductType(filename: string): string | null {
-  const match = filename.match(JWST_PRODUCT_RE);
+  const match = filename.match(JWST_PRODUCT_RE) ?? filename.match(TABLE_PRODUCT_RE);
   return match ? match[1].toLowerCase() : null;
 }
 

@@ -91,6 +91,12 @@ describe("releaseCubes", () => {
     ]);
   });
 
+  it("releases the cube file of a band plane once", async () => {
+    typedInvokeMock.mockResolvedValue(undefined);
+    await releaseCubes(["C:/d/cut.fits#hdu=0&plane=1", "C:/d/cut.fits#hdu=0&plane=2", "C:/d/cut.fits"]);
+    expect(typedInvokeMock.mock.calls).toEqual([["release_cube_cmd", { path: "C:/d/cut.fits" }]]);
+  });
+
   it("keeps releasing the other files when one release fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     typedInvokeMock.mockRejectedValueOnce(new Error("gone")).mockResolvedValueOnce(undefined);

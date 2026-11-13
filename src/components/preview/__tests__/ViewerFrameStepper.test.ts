@@ -166,6 +166,7 @@ describe("ViewerFrameStepper", () => {
     expect(byTitle(nodes, "Previous frame")?.disabled).toBe(true);
     expect(byTitle(nodes, "Next frame")?.disabled).toBe(true);
     expect(nodes.some((p) => typeof p.title === "string" && p.title.includes("pause playback"))).toBe(true);
+    expect(readoutOf(nodes)?.title).toBe("Playing in the Spectra tool: pause playback to step frames");
     const arrow = key("ArrowRight");
     viewer().keys?.onKeyDown(arrow as never);
     expect(request).not.toHaveBeenCalled();
@@ -179,6 +180,7 @@ describe("ViewerFrameStepper with a frame that failed to load", () => {
     const readout = readoutOf(nodes);
     expect(readout?.children).toBe("Failed: ch 6 (0–39)");
     expect(readout?.title).toContain("Could not load ch 6 (0–39): disk unavailable");
+    expect(readout?.title).toMatch(/Retry it in the Spectra tool$/);
     expect(readout?.className).toContain("text-red-400");
     press(byTitle(nodes, "Next frame"));
     press(byTitle(nodes, "Previous frame"));

@@ -273,7 +273,7 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
       <div className="grid grid-cols-3 gap-1.5">
         {(["r", "g", "b"] as Channel[]).map((ch) => (
           <div key={ch} className="ab-metric-card flex flex-col items-center p-2 rounded">
-            <span className={`text-[9px] uppercase ${ch === "r" ? "text-red-400/70" : ch === "g" ? "text-green-400/70" : "text-blue-400/70"}`}>
+            <span className={`text-[9px] uppercase ${ch === "r" ? "text-red-400/90" : ch === "g" ? "text-green-400/90" : "text-blue-400/90"}`}>
               {ch} frames
             </span>
             <span className={`text-sm font-mono ${culledPaths[ch].length >= 2 ? "text-zinc-200" : "text-zinc-600"}`}>
@@ -435,7 +435,7 @@ export default function DrizzleRgbPanel({ files = [], runTarget = null, onResult
           <div className="flex justify-between items-center text-[10px] text-zinc-500">
             <span>{stackProgressText(progress.stage, progress.current, progress.total)}</span>
             <span className="flex items-center gap-2">
-              <span>{progress.percent}%</span>
+              <span className="tabular-nums">{progress.percent}%</span>
               <button
                 type="button"
                 data-testid="drizzle-rgb-cancel"

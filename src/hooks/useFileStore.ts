@@ -5,6 +5,7 @@ import { isCalibRefAsdf } from "../utils/validation";
 import { normalizeOutputPath, samePath } from "../utils/processingChain";
 import type { ProcessedFile, QueueStats, AstroFile, ProcessResult, ResampleResult } from "../shared/types";
 import type { Spectrum1dKind } from "../shared/types/spectrum1d";
+import type { TableProbe } from "../shared/types/tables";
 
 type Listener = () => void;
 
@@ -18,6 +19,11 @@ const enum NotifyChannel {
 interface SelectOnLoad {
   path: string;
   onSelected: (file: ProcessedFile) => void;
+}
+
+export interface AddFilesOutcome {
+  added: number;
+  loaded: ProcessedFile[];
 }
 
 interface StoreState {
@@ -37,7 +43,7 @@ class FileStore {
     fileMap: new Map(),
     selected: null,
     isProcessing: false,
-    stats: { total: 0, done: 0, failed: 0, spectra: 0, totalBytes: 0 },
+    stats: { total: 0, done: 0, failed: 0, spectra: 0, tables: 0, totalBytes: 0 },
     version: 0,
     selectedVersion: 0,
     statsVersion: 0,
@@ -117,11 +123,11 @@ class FileStore {
   getDoneCount = () => this.state.stats.done;
   getIsComplete = () => {
     const s = this.state.stats;
-    return s.total > 0 && s.done + s.failed + s.spectra === s.total && !this.state.isProcessing;
+    return s.total > 0 && s.done + s.failed + s.spectra + (s.tables ?? 0) === s.total && !this.state.isProcessing;
   };
   getProgress = () => {
     const s = this.state.stats;
-    return s.total > 0 ? Math.round(((s.done + s.failed + s.spectra) / s.total) * 100) : 0;
+    return s.total > 0 ? Math.round(((s.done + s.failed + s.spectra + (s.tables ?? 0)) / s.total) * 100) : 0;
   };
 
   private scheduleFlush(channels: number) {
@@ -158,13 +164,23 @@ class FileStore {
     this.scheduleFlush(NotifyChannel.All);
   }
 
-  addFiles(fileList: AstroFile[]) {
-    const queued = new Set<string>();
+  addFiles(fileList: AstroFile[]): AddFilesOutcome {
+    const held = new Map<string, ProcessedFile | null>();
     for (const f of this.state.fileMap.values()) {
-      if (f.status === FILE_STATUS.QUEUED) queued.add(normalizeOutputPath(f.path));
+      if (f.status !== FILE_STATUS.ERROR) held.set(normalizeOutputPath(f.sourcePath || f.path), f);
     }
-    const valid = fileList.filter((f) => !isCalibRefAsdf(f.name) && !queued.has(normalizeOutputPath(f.path)));
-    if (valid.length === 0) return;
+    const loaded: ProcessedFile[] = [];
+    const valid: AstroFile[] = [];
+    for (const f of fileList) {
+      if (isCalibRefAsdf(f.name)) continue;
+      const key = normalizeOutputPath(f.path);
+      const row = held.get(key);
+      if (row && !loaded.includes(row)) loaded.push(row);
+      if (row !== undefined) continue;
+      held.set(key, null);
+      valid.push(f);
+    }
+    if (valid.length === 0) return { added: 0, loaded };
 
     let addedBytes = 0;
     const newFiles: ProcessedFile[] = valid.map((f) => {
@@ -198,11 +214,16 @@ class FileStore {
     this.bumpVersion();
 
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | NotifyChannel.List);
+    return { added: newFiles.length, loaded };
   }
 
   setProcessing(value: boolean) {
     this.state.isProcessing = value;
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats);
+    if (value || this.state.selected !== null) return;
+    const files = this.getFiles();
+    const first = files.find((f) => f.status === FILE_STATUS.SPECTRUM) ?? files.find((f) => f.status === FILE_STATUS.TABLE);
+    if (first) this.selectFallback(first.id);
   }
 
   fileStarted(id: string) {
@@ -283,13 +304,24 @@ class FileStore {
   }
 
   fileSpectrum(id: string, probe: Spectrum1dKind) {
+    this.settleWithoutImage(id, { status: FILE_STATUS.SPECTRUM, spectrum: probe }, "spectra");
+  }
+
+  fileCsvSpectrum(id: string, probe: TableProbe) {
+    this.settleWithoutImage(id, { status: FILE_STATUS.SPECTRUM, spectrum: undefined, table: probe }, "spectra");
+  }
+
+  fileTable(id: string, probe: TableProbe) {
+    this.settleWithoutImage(id, { status: FILE_STATUS.TABLE, table: probe }, "tables");
+  }
+
+  private settleWithoutImage(id: string, settled: Pick<ProcessedFile, "status" | "spectrum" | "table">, counter: "spectra" | "tables") {
     const existing = this.state.fileMap.get(id);
     if (!existing) return;
 
     const updated: ProcessedFile = {
       ...existing,
-      status: FILE_STATUS.SPECTRUM,
-      spectrum: probe,
+      ...settled,
       error: null,
       finishedAt: Date.now(),
     };
@@ -301,7 +333,7 @@ class FileStore {
       this.state.selected = id;
       this.state.selectedVersion++;
     }
-    this.state.stats = { ...this.state.stats, spectra: this.state.stats.spectra + 1 };
+    this.state.stats = { ...this.state.stats, [counter]: (this.state.stats[counter] ?? 0) + 1 };
     this.state.statsVersion++;
     this.bumpVersion();
 
@@ -377,7 +409,7 @@ class FileStore {
       fileMap: new Map(),
       selected: null,
       isProcessing: false,
-      stats: { total: 0, done: 0, failed: 0, spectra: 0, totalBytes: 0 },
+      stats: { total: 0, done: 0, failed: 0, spectra: 0, tables: 0, totalBytes: 0 },
       version: 0,
       selectedVersion: 0,
       statsVersion: 0,

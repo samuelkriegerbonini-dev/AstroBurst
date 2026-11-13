@@ -107,7 +107,7 @@ export function mefSizeSummary(result: CompressMefResult): string {
   const sourceText =
     source === result.source_size_bytes
       ? kilobytes(source)
-      : `${kilobytes(source)} decompressed (${kilobytes(result.source_size_bytes)} .gz on disk)`;
+      : `${kilobytes(source)} decompressed (${kilobytes(result.source_size_bytes)} compressed on disk)`;
   const ratio = source > 0 ? ` (${Math.round((result.output_size_bytes / source) * 100)}%)` : "";
   return `${sourceText} → ${kilobytes(result.output_size_bytes)}${ratio}, ${result.elapsed_ms} ms`;
 }

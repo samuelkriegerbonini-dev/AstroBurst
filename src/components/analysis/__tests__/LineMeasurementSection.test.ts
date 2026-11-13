@@ -1,7 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+
+vi.mock("../LineRedshiftSummary", async () => {
+  const react = await import("react");
+  return {
+    default: ({ fileName, source }: { fileName: string | null; source: string | null }) =>
+      react.createElement("i", { "data-redshift-summary": true, "data-file": fileName, "data-source": source }),
+  };
+});
+
 import LineMeasurementSection from "../LineMeasurementSection";
+import lineMeasurementSectionSource from "../LineMeasurementSection.tsx?raw";
+import { SMALL_BUTTON_CLASS } from "../../ui";
+import { adHocErrorBoxLines } from "../../../test/panelRules";
 import { LINE_MODEL_LABELS, LINE_MODELS, type LineMeasurement } from "../../../shared/types/spectral";
 
 const RESULT: LineMeasurement = {
@@ -114,5 +126,79 @@ describe("LineMeasurementSection model names and equivalent-width sign", () => {
 
   it("labels the equivalent-width card with its sign convention", () => {
     expect(render()).toContain("Equivalent width (absorption &gt; 0, emission &lt; 0)");
+  });
+});
+
+describe("LineMeasurementSection identity, failure, measured series and display unit", () => {
+  it("names the line and the requested redshift in the footer", () => {
+    expect(render({ result: { ...RESULT, line_label: "Hα", line_id: "h_alpha", redshift: 0.5 } })).toContain(
+      "Hα at z = 0.5, spectrum file, HDU 1, ch 5-30",
+    );
+    expect(render({ result: { ...RESULT, line_id: "h_alpha" } })).toContain("h_alpha, spectrum file");
+    expect(render()).toContain("<span>spectrum file, HDU 1, ch 5-30");
+    const atZero = render({ result: { ...RESULT, line_label: "Hα", redshift: 0 } });
+    expect(atZero).toContain("Hα, spectrum file, HDU 1, ch 5-30");
+    expect(atZero).not.toContain("at z =");
+    const withoutRedshift = render({ result: { ...RESULT, line_label: "Hα" } });
+    expect(withoutRedshift).toContain("Hα, spectrum file, HDU 1, ch 5-30");
+    expect(withoutRedshift).not.toContain("at z =");
+  });
+
+  it("announces a failed measurement", () => {
+    expect(render({ error: "line range 5..=4 is invalid" })).toMatch(/role="alert"[^>]*>line range 5\.\.=4 is invalid</);
+  });
+
+  it("shows which series was measured when the panel says so", () => {
+    const note = "measures the sum series (MJy/sr x pix)";
+    expect(render({ measuredSeriesNote: note }).split(note)).toHaveLength(2);
+    expect(render()).not.toContain("measures the sum series");
+  });
+
+  it("passes the display unit to the rows", () => {
+    expect(render({ axisDisplayUnit: "A" })).toMatch(/Equivalent width \(absorption &gt; 0, emission &lt; 0\)<\/div><div[^>]*>[^<]* A<\/div>/);
+    expect(render()).toMatch(/Equivalent width \(absorption &gt; 0, emission &lt; 0\)<\/div><div[^>]*>[^<]* um<\/div>/);
+  });
+});
+
+describe("LineMeasurementSection redshift summary and copy", () => {
+  it("mounts the redshift summary only when the panel passes the file, with the source of the result", () => {
+    const html = render({ filePath: "C:/d/a.fits#hdu=1" });
+    expect(html).toContain("data-redshift-summary");
+    expect(html).toContain('data-file="a.fits"');
+    expect(html).toContain(`data-source="${JSON.stringify(RESULT.source).replace(/"/g, "&quot;")}"`);
+    expect(render()).not.toContain("data-redshift-summary");
+    expect(render({ filePath: null })).not.toContain("data-redshift-summary");
+    expect(render({ filePath: "C:/d/a.fits#hdu=1", result: null })).not.toContain("data-redshift-summary");
+  });
+
+  it("titles the copy button with what the row carries", () => {
+    expect(render()).toContain('title="Copy the measurement as one CSV row with its units and provenance"');
+  });
+});
+
+describe("LineMeasurementSection sweep rules", () => {
+  it("holds no hand-made failure box", () => {
+    expect(adHocErrorBoxLines(lineMeasurementSectionSource)).toEqual([]);
+  });
+
+  it("announces a failed measurement through the compact alert", () => {
+    expect(render({ result: null, error: "no continuum channel is left outside the line" })).toContain(
+      '<div class="ab-error-alert ab-error-alert-compact" role="alert">no continuum channel is left outside the line</div>',
+    );
+  });
+
+  it("copies the line through the shared button", () => {
+    const html = render();
+    const button = /<button([^>]*)>((?:(?!<\/button>).)*)<\/button>(<span[^>]*>[^<]*<\/span>)?/.exec(
+      html.slice(html.lastIndexOf("<button", html.indexOf('title="Copy the measurement as one CSV row with its units and provenance"'))),
+    );
+    expect(button?.[1]).toContain('title="Copy the measurement as one CSV row with its units and provenance"');
+    expect(button?.[1]).toContain(`class="ml-auto ${SMALL_BUTTON_CLASS}"`);
+    expect(button?.[2]).toMatch(/Copy CSV$/);
+    expect(button?.[3]).toBe('<span role="status" class="sr-only" data-copy-status=""></span>');
+  });
+
+  it("shows no copy button before a measurement", () => {
+    expect(render({ result: null })).not.toContain("Copy CSV");
   });
 });

@@ -101,22 +101,56 @@ export function arrayRef(path: string, key: string): string {
   return formatImageRef({ path, plane: { kind: "array", key } });
 }
 
-const SOURCE_EXTENSION = /\.(fits?|fts)(\.(fz|gz))?$|\.(asdf|zip|gz)$/i;
+export interface BandPlaneRef {
+  file: string;
+  hdu: number;
+  plane: number;
+}
+
+const FRAGMENT_PLANE = "&plane=";
+const BAND_PLANE_FRAGMENT_RE = /^hdu=(0|[1-9][0-9]*)&plane=(0|[1-9][0-9]*)$/;
+
+export function parseBandPlaneRef(key: string): BandPlaneRef | null {
+  if (key.startsWith("__")) return null;
+  const pos = key.lastIndexOf("#");
+  if (pos <= 0) return null;
+  const match = BAND_PLANE_FRAGMENT_RE.exec(key.slice(pos + 1));
+  if (!match) return null;
+  const hdu = Number(match[1]);
+  const plane = Number(match[2]);
+  return Number.isSafeInteger(hdu) && Number.isSafeInteger(plane) ? { file: key.slice(0, pos), hdu, plane } : null;
+}
+
+export function bandPlaneRef(file: string, hdu: number, plane: number): string {
+  return `${file}#${FRAGMENT_HDU}${hdu}${FRAGMENT_PLANE}${plane}`;
+}
+
+export function sourceFile(pathOrRef: string): string {
+  const path = parseImageRef(pathOrRef).path;
+  return parseBandPlaneRef(path)?.file ?? path;
+}
+
+const SOURCE_EXTENSION = /\.(fits?|fts)(\.(fz|gz|bz2))?$|\.(asdf|zip|gz|bz2)$/i;
 
 export function exportStem(pathOrRef: string, fallback = "output"): string {
-  const stem = parseImageRef(pathOrRef)
-    .path
-    .split("#")[0]
+  const path = parseImageRef(pathOrRef).path;
+  const band = parseBandPlaneRef(path);
+  if (band) return `${exportStem(band.file, fallback)}_hdu${band.hdu}_plane${band.plane}`;
+  const stem = path
     .split(/[/\\]/)
     .pop()
-    ?.replace(SOURCE_EXTENSION, "");
+    ?.split("#")[0]
+    .replace(SOURCE_EXTENSION, "");
   return stem && stem.length > 0 ? stem : fallback;
 }
 
 export function planeLabel(ref: ImageRef, extname?: string | null): string | null {
   switch (ref.plane.kind) {
-    case "auto":
-      return null;
+    case "auto": {
+      const band = parseBandPlaneRef(ref.path);
+      if (!band) return null;
+      return extname ? `HDU ${band.hdu} · ${extname} · plane ${band.plane}` : `HDU ${band.hdu} · plane ${band.plane}`;
+    }
     case "hdu":
       return extname ? `HDU ${ref.plane.index} · ${extname}` : `HDU ${ref.plane.index}`;
     case "array":

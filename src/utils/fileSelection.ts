@@ -9,7 +9,7 @@ interface SelectableRow extends StatusRow {
 }
 
 export function isSelectableStatus(status: string): boolean {
-  return status === FILE_STATUS.DONE || status === FILE_STATUS.SPECTRUM;
+  return status === FILE_STATUS.DONE || status === FILE_STATUS.SPECTRUM || status === FILE_STATUS.TABLE;
 }
 
 export function selectableRows<T extends StatusRow>(rows: readonly T[]): T[] {

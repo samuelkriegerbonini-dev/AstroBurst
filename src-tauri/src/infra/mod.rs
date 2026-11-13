@@ -23,3 +23,8 @@ pub mod net {
 pub mod catalog_store;
 #[cfg(feature = "net")]
 pub mod samples;
+pub mod tables;
+pub mod sibling_files;
+pub mod sdss_frame_file;
+#[cfg(test)]
+mod real_survey_layouts;

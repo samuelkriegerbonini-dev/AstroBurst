@@ -165,7 +165,7 @@ describe("samplePaletteActions", () => {
     ]);
     expect(actions[0].icon).toBe(Download);
     expect(actions[1].icon).toBe(Sparkles);
-    expect(actions[0].keywords).toEqual(expect.arrayContaining(["Sample", "Download", "Cube"]));
+    expect(actions[0].keywords).toEqual(expect.arrayContaining(["Sample", "Download", "Cube", "Spectra"]));
     actions[0].run();
     actions[1].run();
     expect(calls.cube.download).toHaveBeenCalledWith(IFU_SAMPLE_SET);
@@ -242,7 +242,7 @@ describe("samplePaletteActions", () => {
     expect(listed(ready, shown)).toEqual(listed(ready, empty));
     const readme = readFileSync(fileURLToPath(new URL("../../../README.md", import.meta.url)), "utf8");
     expect(readme.split(/\r?\n/).find((line) => line.startsWith("Sample data are downloaded on demand"))).toBe(
-      "Sample data are downloaded on demand; the installers do not carry them. The empty workspace offers the HST set and the Cube tool offers the JWST sets; the command palette lists the HST download while the workspace is empty, the JWST downloads while a file is shown, and every set already downloaded:",
+      "Sample data are downloaded on demand; the installers do not carry them. The empty workspace offers the HST set and the Spectra tool offers the JWST sets; the command palette lists the HST download while the workspace is empty, the JWST downloads while a file is shown, and every set already downloaded:",
     );
   });
 });

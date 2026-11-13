@@ -39,6 +39,7 @@ import {
   spectrumViewerTitle,
   statusStripIdleText,
   statusStripParts,
+  tableViewerTitle,
   viewerClickRoute,
   viewerPublishesPixel,
   viewerSizes,
@@ -595,9 +596,9 @@ describe("cubeSpectrumHint", () => {
     expect(cubeSpectrumHint(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "cube" }))).toBe(CUBE_SPECTRUM_HINT);
   });
 
-  it("names the Cube tool while another tool holds its anchor", () => {
+  it("names the Spectra tool while another tool holds its anchor", () => {
     expect(cubeSpectrumHint(dockReducer(DEFAULT_DOCK_LAYOUT, { type: "open", tool: "photometry" }))).toBe(CUBE_TOOL_SPECTRUM_HINT);
-    expect(CUBE_TOOL_SPECTRUM_HINT).toBe("Click to extract a spectrum into the Cube tool");
+    expect(CUBE_TOOL_SPECTRUM_HINT).toBe("Click to extract a spectrum into the Spectra tool");
   });
 });
 
@@ -785,7 +786,16 @@ describe("statusStripParts", () => {
         { x: 12, y: 34, value: 1.5, unit: "MJy/sr", wavelength: null },
         { x: 12, y: 34, radec: [150, -2.5] },
       ),
-    ).toEqual({ position: "x 12  y 34", value: "1.5000 MJy/sr", sky: "RA 10h00m00.00s  Dec -02°30'00.0\" ICRS", wavelength: null });
+    ).toEqual({ position: "x 12  y 34", value: "1.5000 MJy/sr", sky: "RA 10h00m00.000s  Dec -02°30'00.00\" ICRS", wavelength: null });
+  });
+
+  it("prints the sky position finely enough to tell neighbouring pixels apart", () => {
+    expect(statusStripParts({ x: 1, y: 1 }, null, { x: 1, y: 1, radec: [274.72992, -13.85181] })?.sky).toBe(
+      "RA 18h18m55.181s  Dec -13°51'06.52\" ICRS",
+    );
+    expect(statusStripParts({ x: 1, y: 1 }, null, { x: 1, y: 1, radec: [274.72992 + 8.869e-6, -13.85181] })?.sky).toBe(
+      "RA 18h18m55.183s  Dec -13°51'06.52\" ICRS",
+    );
   });
 
   it("omits the unit when the file has none", () => {
@@ -830,9 +840,15 @@ describe("formatWavelength", () => {
 });
 
 describe("spectrum viewer empty state", () => {
-  it("names the file and the Cube tool instead of showing an image", () => {
+  it("names the file and the Spectra tool instead of showing an image", () => {
     expect(spectrumViewerTitle("jw01266_x1d.fits")).toBe("jw01266_x1d.fits is a 1D spectrum");
-    expect(SPECTRUM_VIEWER_HINT).toBe("It has no image to show here. The Cube tool plots and measures it.");
-    expect(SPECTRUM_VIEWER_OPEN_CUBE).toBe("Open the Cube tool");
+    expect(SPECTRUM_VIEWER_HINT).toBe("It has no image to show here. The Spectra tool plots and measures it.");
+    expect(SPECTRUM_VIEWER_OPEN_CUBE).toBe("Open the Spectra tool");
+  });
+});
+
+describe("table viewer note", () => {
+  it("names the file as a table", () => {
+    expect(tableViewerTitle("C1_ls_dr10_box_A.csv")).toBe("C1_ls_dr10_box_A.csv is a table");
   });
 });

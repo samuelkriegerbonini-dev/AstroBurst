@@ -3,6 +3,7 @@ import { Crosshair } from "lucide-react";
 import { probePixel } from "../../services/display";
 import type { PixelProbeResult } from "../../shared/types/analysis";
 import { ZERO_BASED_PIXEL_TITLE, zeroBasedPixelText } from "../../utils/regionGeometry";
+import { errorOriginLine } from "../../utils/pixelTable";
 
 interface PixelReadoutProps {
   filePath: string | null;
@@ -52,11 +53,12 @@ function PixelReadoutInner({ filePath, mouseX, mouseY }: PixelReadoutProps) {
 
   const n = probe.neighborhood;
   const err = probe.err && probe.err.value !== null ? probe.err : null;
+  const errOrigin = errorOriginLine(err?.source);
   return (
     <div className="flex flex-col gap-1 text-[10px] font-mono" style={{ color: "#fcd34d" }}>
       <div className="flex items-center gap-2 flex-wrap">
         <Crosshair size={10} />
-        <span>
+        <span title={err?.source ? `Error layer: ${err.source}` : undefined}>
           {fmt(probe.value)}
           {probe.unit ? ` ${probe.unit}` : ""}
           {err ? ` ± ${fmt(err.value)}${err.unit ? ` ${err.unit}` : ""}` : ""}
@@ -65,8 +67,13 @@ function PixelReadoutInner({ filePath, mouseX, mouseY }: PixelReadoutProps) {
           {zeroBasedPixelText(probe.x, probe.y)}
         </span>
       </div>
+      {errOrigin && (
+        <div className="text-zinc-400 truncate" title={errOrigin}>
+          {errOrigin}
+        </div>
+      )}
       {probe.dq && (
-        <div className="flex items-center gap-2 flex-wrap" style={{ color: "rgba(248,113,113,0.8)" }} title={probe.dq.table}>
+        <div className="flex items-center gap-2 flex-wrap" style={{ color: "rgba(248,113,113,0.8)" }} title={probe.dq.source ?? probe.dq.table}>
           <span>DQ = {probe.dq.text}</span>
         </div>
       )}

@@ -2,8 +2,11 @@ import { memo, useEffect, useId, useState } from "react";
 import type { VelocityConvention } from "../../shared/types/spectral";
 import { conventionLabel } from "../../utils/spectralAxis";
 import {
+  BAND_SPECIES,
+  DEFAULT_BAND_SPECIES,
   LINE_FAMILIES,
   MAX_REDSHIFT,
+  REST_BANDS,
   REST_LINES,
   familyLabel,
   formatRedshift,
@@ -12,13 +15,14 @@ import {
   parseSystemicInput,
   resyncRedshiftText,
   resyncSystemicText,
+  toggleBandSpecies,
   velocityKmsFromRedshift,
   type LineFamily,
   type LineListAvailability,
 } from "../../utils/lineList";
 import { DecimalField } from "../ui";
 
-interface LineListControlsProps {
+export interface LineListControlsProps {
   visible: boolean;
   onVisibleChange: (visible: boolean) => void;
   redshift: number;
@@ -31,6 +35,9 @@ interface LineListControlsProps {
   clickHint: string;
   pickedLabel: string | null;
   drawnCount: number;
+  bandSpecies?: readonly string[];
+  onBandSpeciesChange?: (species: string[]) => void;
+  bandDrawnCount?: number;
 }
 
 const INPUT_CLASS =
@@ -39,6 +46,13 @@ const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
 const ACCENT_COLOR = "#22d3ee";
 const REDSHIFT_RANGE_ERROR = `Use a redshift above -1 and at most ${MAX_REDSHIFT}`;
 const SYSTEMIC_RANGE_ERROR = `Use a velocity whose redshift is above -1 and at most ${MAX_REDSHIFT}`;
+const BAND_NOTE = "band origins and atomic lines from NIST; the shaded widths of molecular bands are display guides";
+
+function bandSourcesOf(species: string): string {
+  return REST_BANDS.filter((band) => band.species === species)
+    .map((band) => band.source)
+    .join(" | ");
+}
 
 function LineListControls({
   visible,
@@ -53,6 +67,9 @@ function LineListControls({
   clickHint,
   pickedLabel,
   drawnCount,
+  bandSpecies = [],
+  onBandSpeciesChange,
+  bandDrawnCount = 0,
 }: LineListControlsProps) {
   const redshiftId = useId();
   const systemicId = useId();
@@ -148,6 +165,52 @@ function LineListControls({
           );
         })}
       </div>
+
+      {onBandSpeciesChange && (
+        <>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-[10px] text-zinc-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={bandSpecies.length > 0}
+                onChange={(e) => onBandSpeciesChange(e.target.checked ? [...DEFAULT_BAND_SPECIES] : [])}
+              />
+              Bands
+            </label>
+            {bandSpecies.length > 0 && availability.ok && (
+              <span className="ml-auto text-[9px] font-mono text-zinc-600">
+                {bandDrawnCount} of {REST_BANDS.length} in range
+              </span>
+            )}
+          </div>
+          {bandSpecies.length > 0 && (
+            <>
+              <div role="group" aria-label="Band species" className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
+                {BAND_SPECIES.map((species) => {
+                  const enabled = bandSpecies.includes(species);
+                  return (
+                    <button
+                      key={species}
+                      type="button"
+                      aria-pressed={enabled}
+                      title={bandSourcesOf(species)}
+                      onClick={() => onBandSpeciesChange(toggleBandSpecies(bandSpecies, species))}
+                      className="px-2 py-0.5 rounded border transition-colors"
+                      style={{
+                        borderColor: enabled ? ACCENT_COLOR : "var(--ab-border)",
+                        color: enabled ? ACCENT_COLOR : "var(--ab-text-3)",
+                      }}
+                    >
+                      {species}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[9px] text-zinc-500">{BAND_NOTE}</p>
+            </>
+          )}
+        </>
+      )}
 
       <p className="text-[9px] font-mono text-zinc-500">{frameLabel}</p>
       {availability.ok

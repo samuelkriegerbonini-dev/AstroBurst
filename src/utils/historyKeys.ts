@@ -29,6 +29,13 @@ export function historyKeyAction(e: HistoryKeyEvent, ctx: HistoryKeyContext): Hi
   return null;
 }
 
+export function openMenuPresent(candidates: Iterable<{ closest(selector: string): unknown }>): boolean {
+  for (const candidate of candidates) {
+    if (candidate.closest("[inert]") === null) return true;
+  }
+  return false;
+}
+
 export function isMacPlatform(platform: string): boolean {
   return /^mac/i.test(platform);
 }

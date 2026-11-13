@@ -13,8 +13,11 @@ pub const MASK_CACHE_MAX_ENTRIES: usize = 16;
 pub const MASK_CACHE_MAX_BYTES: usize = 512 * 1024 * 1024;
 const MASK_KEY_PREFIX: &str = "__mask__";
 
+// parallel tests share this cache: with 16 entries one test evicts the raster another test is counting
+const SHARED_CACHE_ENTRIES: usize = if cfg!(test) { 4096 } else { MASK_CACHE_MAX_ENTRIES };
+
 pub static MASK_CACHE: LazyLock<MaskCache> =
-    LazyLock::new(|| MaskCache::new(MASK_CACHE_MAX_ENTRIES, MASK_CACHE_MAX_BYTES));
+    LazyLock::new(|| MaskCache::new(SHARED_CACHE_ENTRIES, MASK_CACHE_MAX_BYTES));
 
 pub struct MaskCache {
     rasters: ImageCache,

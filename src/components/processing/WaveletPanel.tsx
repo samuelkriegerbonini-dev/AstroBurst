@@ -337,7 +337,7 @@ export default function WaveletPanel({
           </div>
           <div className="flex justify-between items-center text-[10px] text-zinc-500">
             <span>{progress.stage}</span>
-            <span className="flex items-center gap-2">
+            <span className="flex items-center gap-2 tabular-nums">
               {progress.percent}%
               <button
                 onClick={() => { cancelProgress(WAVELET_PROGRESS_EVENT).catch(() => {}); }}

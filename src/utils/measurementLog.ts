@@ -1,4 +1,4 @@
-import type { BatchPhotometryResult, PhotCal, PhotometryMeasurement } from "../services/analysis";
+import type { BatchPhotometryResult, PhotCal, PhotometryMeasurement, UserZeroPoint } from "../services/analysis";
 import type { PixelTableResult, TimeSeriesResult } from "../shared/types/analysis";
 import type { SkySeparationResult } from "../shared/types/astrometry";
 import type { CrossMatchResult } from "../shared/types/catalog";
@@ -7,7 +7,8 @@ import type { LineCut, RadialProfile, Region, RegionShape, RegionStats, RegionSt
 import type { LineMeasurement, LineModel } from "../shared/types/spectral";
 import type { ChannelStatisticsBody } from "../shared/types/statistics";
 import type { MeasurementSource } from "./analysisTarget";
-import { buildCsv, type CsvColumn } from "./catalogCsv";
+import { buildCsv, CSV_LINE_END, type CsvColumn } from "./catalogCsv";
+import { exportEntries, provenanceLines, summedPixelUnit, withProvenance } from "./csvProvenance";
 import {
   bjdSources,
   checkReference,
@@ -21,8 +22,9 @@ import {
 import { generateId } from "./format";
 import { exportStem, parseImageRef } from "./imageRef";
 import type { LineFitRun } from "./lineFit";
-import { batchWarnings, measurementWarnings } from "./photometryPanel";
+import { batchWarnings, calibratedMagnitude, calibrationText, measurementWarnings } from "./photometryPanel";
 import { summedFluxUnit } from "./photometryTable";
+import { radiusInArcsec, type RadiiInput, type RadiusUnit } from "./photometryUnits";
 import { regionSkyOf } from "./regionCsv";
 import { isExcludeRegion } from "./regionExclude";
 import { firstSurfaceBrightness } from "./sbProfile";
@@ -48,11 +50,23 @@ export const MEASUREMENT_KINDS = [
   "spectrum_compare",
   "pv",
   "line_fit",
+  "tso_light_curve",
+  "tso_depth_spectrum",
+  "tso_transit_spectrum",
+  "periodogram",
+  "forced_photometry",
+  "image_depth",
+  "resolution_check",
+  "catalog_compare",
+  "sed",
+  "layer_assignment",
+  "transit_fit",
 ] as const;
 
 const DEFAULT_CLIP_SIGMA = 3;
 const DEFAULT_CLIP_ITERS = 5;
 const AUTO = "auto";
+const GAIA_CATALOGUE = "Gaia DR3";
 const NO_GAIN = "none";
 const DEFAULT_CSV_NAME = "astroburst_measurements.csv";
 const CSV_SUFFIX = "_measurements.csv";
@@ -229,13 +243,23 @@ export function spectrumUnitOf(fluxUnit: string, axisUnit: string): string | nul
 
 export function lineUnitNote(fluxUnit: string, axisUnit: string): string {
   const spectrumUnit = spectrumUnitOf(fluxUnit, axisUnit) ?? "the flux unit without the axis factor";
-  return `flux, flux_err, flux_err_pixel, flux_err_level, flux_err_slope in ${fluxUnit}; peak, continuum_level, continuum_sigma, fit_amplitude in the spectrum unit (${spectrumUnit}); continuum_slope in the spectrum unit per ${axisUnit}; centroid, sigma, fwhm, equivalent_width, fit_centre, fit_sigma, fit_centre_err, fit_sigma_err in ${axisUnit}; centroid_kms, sigma_kms, fwhm_kms, source_centroid_kms, source_sigma_kms, source_fwhm_kms in km/s`;
+  return `flux, flux_err, flux_err_pixel, flux_err_level, flux_err_slope in ${fluxUnit}; peak, continuum_level, continuum_sigma, fit_amplitude in the spectrum unit (${spectrumUnit}); continuum_slope in the spectrum unit per ${axisUnit}; centroid, sigma, fwhm, equivalent_width, fit_centre, fit_sigma, fit_centre_err, fit_sigma_err in ${axisUnit}; centroid_kms, sigma_kms, fwhm_kms, source_centroid_kms, source_sigma_kms, source_fwhm_kms in km/s; equivalent_width_err, centroid_err, sigma_err, fwhm_err, peak_axis in ${axisUnit}; fit_amplitude_err in the spectrum unit (${spectrumUnit}); every _err_kms value in km/s; flux_si, flux_si_err in W m^-2; flux_cgs, flux_cgs_err in erg s^-1 cm^-2; z_line, z_line_err dimensionless`;
 }
 
-function photometryUnitNote(photcal: PhotCal | null): string {
-  const sumUnit = summedFluxUnit(photcal) ?? `${IMAGE_UNIT}, summed over the aperture pixels`;
-  const pixelUnit = photcal?.bunit ?? IMAGE_UNIT;
-  return `net_flux, flux_err, flux_total in ${sumUnit}; peak, bg_mean, bg_sigma in ${pixelUnit} (pixel values); flux_jy, flux_err_jy in Jy; mag_inst, mag_ab, mag_ab_err, mag_ab_total, gaia_gmag, gaia_bp_rp in mag; x, y, fwhm, ee50_radius, ee80_radius in px; ra, dec in deg; aperture_correction = flux_total / net_flux and ee_in_aperture = net_flux / flux_total, both dimensionless`;
+type PhotometryUnits = Pick<PhotometryMeasurement, "photcal" | "bunit" | "summed_unit">;
+
+function photometrySumUnit(res: PhotometryUnits): string | null {
+  return res.summed_unit ?? summedFluxUnit(res.photcal);
+}
+
+function photometryPixelUnit(res: PhotometryUnits): string | null {
+  return res.bunit ?? res.photcal?.bunit ?? null;
+}
+
+function photometryUnitNote(res: PhotometryUnits): string {
+  const sumUnit = photometrySumUnit(res) ?? `${IMAGE_UNIT}, summed over the aperture pixels`;
+  const pixelUnit = photometryPixelUnit(res) ?? IMAGE_UNIT;
+  return `net_flux, flux_err, flux_total in ${sumUnit}; peak, bg_mean, bg_sigma in ${pixelUnit} (pixel values); flux_jy, flux_err_jy in Jy; mag_inst, mag_ab, mag_ab_err, mag_ab_total, mag, mag_err, gaia_gmag, gaia_bp_rp in mag (mag and mag_err in the system of the parameter mag_system); x, y, fwhm, ee50_radius, ee80_radius in px; ra, dec in deg; aperture_correction = flux_total / net_flux and ee_in_aperture = net_flux / flux_total, both dimensionless`;
 }
 
 export interface RadialLogRequest {
@@ -275,7 +299,37 @@ function unionKeys(entries: readonly MeasurementLogEntry[], pick: (e: Measuremen
   return keys;
 }
 
-export function measurementLogCsv(entries: readonly MeasurementLogEntry[]): string {
+export interface MeasurementLogCsvContext {
+  exportedUtc: string;
+}
+
+const LOG_TIMESTAMPS_TEXT = "UTC, ISO 8601, the time each row was logged";
+const LOG_UNITS_TEXT = "the unit column gives the unit of the main values of a row; the notes of the row name the values that have another unit";
+const LOG_COLUMNS_TEXT = "p_ columns are parameters and v_ columns are values; an empty cell means the row has no such key; the notes of a row are joined by a vertical bar";
+
+function logProvenanceLines(entries: readonly MeasurementLogEntry[], context: MeasurementLogCsvContext): string[] {
+  const kinds = MEASUREMENT_KINDS.filter((kind) => entries.some((e) => e.kind === kind));
+  return provenanceLines([
+    ...exportEntries(entries.map((e) => e.file), context.exportedUtc),
+    ["rows", entries.length],
+    ["kinds", kinds.length > 0 ? kinds.join("; ") : null],
+    ["timestamps", LOG_TIMESTAMPS_TEXT],
+    ["units", LOG_UNITS_TEXT],
+    ["columns", LOG_COLUMNS_TEXT],
+  ]);
+}
+
+function pixelUnitOf(unit: string | null | undefined): string | null {
+  const trimmed = unit?.trim() ?? "";
+  return trimmed === "" ? null : trimmed;
+}
+
+function summedUnitNotes(keys: readonly string[], pixelUnit: string | null): string[] {
+  const sumUnit = summedPixelUnit(pixelUnit);
+  return sumUnit !== null && sumUnit !== pixelUnit ? [`${keys.join(", ")} in ${sumUnit}`] : [];
+}
+
+export function measurementLogCsv(entries: readonly MeasurementLogEntry[], context?: MeasurementLogCsvContext): string {
   const columns: CsvColumn<MeasurementLogEntry>[] = [
     { header: FIXED_COLUMNS[0], value: (e) => e.timestamp_utc },
     { header: FIXED_COLUMNS[1], value: (e) => e.kind },
@@ -288,7 +342,8 @@ export function measurementLogCsv(entries: readonly MeasurementLogEntry[]): stri
     ...unionKeys(entries, (e) => e.params).map((key) => ({ header: `${PARAM_PREFIX}${key}`, value: (e: MeasurementLogEntry) => e.params[key] })),
     ...unionKeys(entries, (e) => e.values).map((key) => ({ header: `${VALUE_PREFIX}${key}`, value: (e: MeasurementLogEntry) => e.values[key] })),
   ];
-  return buildCsv(columns, [...entries]);
+  const table = buildCsv(columns, [...entries]);
+  return context === undefined ? table : withProvenance(logProvenanceLines(entries, context), table, CSV_LINE_END);
 }
 
 export function measurementLogCsvFileName(filePath: string | null): string {
@@ -320,6 +375,9 @@ export interface RegionStatsMeasured {
   dqExcluded: number | null;
   regionExcluded: number;
   elapsedMs: number;
+  notes?: readonly string[];
+  bunit?: string | null;
+  summedUnit?: string | null;
 }
 
 export function regionLogReady(
@@ -388,23 +446,89 @@ function pixelSource(x: number, y: number): string {
 const IMAGE_SOURCE = JSON.stringify({ kind: "image" });
 const FILE_SOURCE = JSON.stringify({ kind: "file" });
 
-interface PhotometryLogOptions {
+export interface PhotometryRequestLog {
+  radiusUnit?: RadiusUnit;
+  typedRadii?: RadiiInput;
+  pixelScaleArcsec?: number | null;
+  zeroPoint?: UserZeroPoint | null;
+  limitSigma?: number;
+  fCorr?: number | null;
+}
+
+export interface PhotometryLimitLog {
+  limitJy: number | null;
+  limitAb: number | null;
+  limitNative: number | null;
+}
+
+export interface PhotometryLogOptions extends PhotometryRequestLog {
   apertureRadius?: number;
   annulusInner?: number;
   annulusOuter?: number;
   gain?: number;
   gaiaMatch: boolean;
   excludeDq: boolean;
+  limit?: PhotometryLimitLog | null;
+}
+
+export const BATCH_ROWS_NOTE = "per-source rows are not kept in this log: save the table CSV to keep them";
+
+const LIMIT_NOTE =
+  "upper_limit_jy in Jy, upper_limit_ab in mag (AB), upper_limit_native in the unit of net_flux; a value is a limit when the flux is below limit_sigma x flux_err x f_corr";
+
+function typedArcsec(unit: RadiusUnit, typed: number | undefined): LogValue {
+  return unit === "arcsec" ? requestedOrAuto(typed) : null;
+}
+
+function radiusRequestParams(opts: PhotometryRequestLog): LogRecord {
+  const unit = opts.radiusUnit ?? "px";
+  return {
+    radius_unit: unit,
+    aperture_radius_arcsec: typedArcsec(unit, opts.typedRadii?.aperture),
+    annulus_inner_arcsec: typedArcsec(unit, opts.typedRadii?.skyInner),
+    annulus_outer_arcsec: typedArcsec(unit, opts.typedRadii?.skyOuter),
+    pixel_scale_arcsec: positiveOrNull(opts.pixelScaleArcsec),
+  };
+}
+
+function calibrationSource(photcal: PhotCal | null): LogValue {
+  if (!photcal) return null;
+  const convention = photcal.convention;
+  return convention.kind === "generic_zero_point" && convention.keyword === "user" ? "user" : "header";
+}
+
+function calibrationParams(opts: PhotometryRequestLog, res: PhotometryUnits): LogRecord {
+  return {
+    zero_point: opts.zeroPoint?.zp ?? null,
+    zero_point_system: opts.zeroPoint?.system ?? null,
+    zero_point_per_second: opts.zeroPoint?.per_second ?? null,
+    calibration: calibrationText(res.photcal),
+    calibration_source: calibrationSource(res.photcal),
+    mag_system: res.photcal ? (res.photcal.mag_system ?? "ab") : null,
+    bunit: photometryPixelUnit(res),
+    ...(opts.limitSigma === undefined ? {} : { limit_sigma: opts.limitSigma, f_corr: opts.fCorr ?? null }),
+  };
+}
+
+function calibrationNotes(photcal: PhotCal | null): string[] {
+  return (photcal?.notes ?? []).map((text) => `calibration: ${text}`);
+}
+
+function arcsecRequestNotes(opts: PhotometryRequestLog): string[] {
+  const scale = positiveOrNull(opts.pixelScaleArcsec);
+  if (opts.radiusUnit !== "arcsec" || scale === null) return [];
+  return [`radii typed in arcsec and converted to pixels with ${String(scale)} arcsec/px, the square root of the pixel area`];
 }
 
 export function photometryEntry(prov: MeasurementProvenance, res: PhotometryMeasurement, opts: PhotometryLogOptions): MeasurementLogDraft {
   const p = res.photometry;
+  const magnitude = calibratedMagnitude(p, res.photcal);
   return {
     kind: "photometry",
     file: prov.file,
     image: prov.image,
     dq: dqHandlingOf(opts.excludeDq, res.masked),
-    unit: summedFluxUnit(res.photcal),
+    unit: photometrySumUnit(res),
     source: pixelSource(p.x, p.y),
     params: {
       aperture_radius_px: requestedOrAuto(opts.apertureRadius),
@@ -416,6 +540,9 @@ export function photometryEntry(prov: MeasurementProvenance, res: PhotometryMeas
       sky_inner_effective_px: finiteOrNull(p.sky_inner),
       sky_outer_effective_px: finiteOrNull(p.sky_outer),
       photcal: res.photcal?.label ?? null,
+      ...radiusRequestParams(opts),
+      aperture_effective_arcsec: radiusInArcsec(p.aperture_radius, opts.pixelScaleArcsec ?? null),
+      ...calibrationParams(opts, res),
     },
     values: {
       x: finiteOrNull(p.x),
@@ -447,18 +574,47 @@ export function photometryEntry(prov: MeasurementProvenance, res: PhotometryMeas
       gaia_separation_arcsec: finiteOrNull(res.gaia?.separation_arcsec),
       n_nonfinite: finiteOrNull(p.n_nonfinite),
       ee_in_aperture: finiteOrNull(p.ee_in_aperture),
+      mag: finiteOrNull(magnitude.mag),
+      mag_err: finiteOrNull(magnitude.magErr),
+      ...(opts.limit === undefined
+        ? {}
+        : {
+            upper_limit_jy: opts.limit?.limitJy ?? null,
+            upper_limit_ab: opts.limit?.limitAb ?? null,
+            upper_limit_native: opts.limit?.limitNative ?? null,
+          }),
     },
-    notes: [...measurementWarnings(res), photometryUnitNote(res.photcal)],
+    notes: [
+      ...measurementWarnings(res),
+      ...calibrationNotes(res.photcal),
+      photometryUnitNote(res),
+      ...arcsecRequestNotes(opts),
+      ...(opts.limit === undefined ? [] : [LIMIT_NOTE]),
+    ],
   };
 }
 
-interface BatchLogOptions {
+export interface BatchLogOptions extends PhotometryRequestLog {
   apertureRadius?: number;
   annulusInner?: number;
   annulusOuter?: number;
   gain?: number;
   excludeDq: boolean;
-  from: "stars" | "regions" | "pasted";
+  from: "stars" | "regions" | "pasted" | "sky";
+  placement?: { requested: number; onImage: number } | null;
+  nLimits?: number;
+  saved?: { path: string; rows: number } | null;
+}
+
+function skyLeftOutNotes(placement: BatchLogOptions["placement"]): string[] {
+  if (!placement) return [];
+  const outside = placement.requested - placement.onImage;
+  return outside > 0 ? [`${outside} of ${placement.requested} sky positions are outside the image and were left out`] : [];
+}
+
+function batchRowsNote(saved: BatchLogOptions["saved"]): string {
+  if (!saved) return BATCH_ROWS_NOTE;
+  return `per-source rows saved to ${fileNameOf(saved.path) ?? saved.path} (${rowCount(saved.rows)})`;
 }
 
 export function batchPhotometryEntry(prov: MeasurementProvenance, res: BatchPhotometryResult, opts: BatchLogOptions): MeasurementLogDraft {
@@ -468,7 +624,7 @@ export function batchPhotometryEntry(prov: MeasurementProvenance, res: BatchPhot
     file: prov.file,
     image: prov.image,
     dq: dqHandlingOf(opts.excludeDq, res.masked),
-    unit: summedFluxUnit(res.photcal),
+    unit: photometrySumUnit(res),
     source: JSON.stringify({ kind: "points", n: res.rows.length, from: opts.from }),
     params: {
       aperture_radius_px: requestedOrAuto(opts.apertureRadius),
@@ -476,6 +632,9 @@ export function batchPhotometryEntry(prov: MeasurementProvenance, res: BatchPhot
       annulus_outer_px: requestedOrAuto(opts.annulusOuter),
       gain: gainOrNone(opts.gain),
       photcal: res.photcal?.label ?? null,
+      ...radiusRequestParams(opts),
+      ...calibrationParams(opts, res),
+      ...(opts.saved ? { csv_path: opts.saved.path, csv_rows: opts.saved.rows } : {}),
     },
     values: {
       n_points: res.rows.length,
@@ -486,8 +645,18 @@ export function batchPhotometryEntry(prov: MeasurementProvenance, res: BatchPhot
       median_snr: medianOf(measured.map((p) => p.snr)),
       median_fwhm: medianOf(measured.map((p) => positiveOrNull(p.fwhm))),
       n_with_nonfinite: measured.filter((p) => p.n_nonfinite > 0).length,
+      ...(opts.placement
+        ? { n_sky_requested: opts.placement.requested, n_sky_outside: opts.placement.requested - opts.placement.onImage }
+        : {}),
+      ...(opts.nLimits === undefined ? {} : { n_limits: opts.nLimits }),
     },
-    notes: batchWarnings(res),
+    notes: [
+      ...batchWarnings(res),
+      ...calibrationNotes(res.photcal),
+      ...skyLeftOutNotes(opts.placement),
+      ...arcsecRequestNotes(opts),
+      batchRowsNote(opts.saved),
+    ],
   };
 }
 
@@ -525,6 +694,10 @@ function regionStatsValues(s: RegionStats): LogRecord {
     pa_sky_deg: finiteOrNull(sky?.pa_sky_deg),
     net_err: finiteOrNull(s.net_err),
     net_err_terms: s.net_err_terms ?? null,
+    n_padding: finiteOrNull(s.n_padding),
+    bg_median: finiteOrNull(s.background?.median),
+    bg_sigma: finiteOrNull(s.background?.sigma),
+    bg_n: finiteOrNull(s.background?.count),
   };
 }
 
@@ -544,9 +717,10 @@ export function regionStatsEntries(
     photcal: photcal?.label ?? null,
   };
   const ownParams: LogRecord = { ...params, region_excluded_px: 0 };
-  const pixelUnit = photcal?.bunit ?? null;
-  const sumUnit = summedFluxUnit(photcal);
+  const pixelUnit = photcal?.bunit ?? measured.bunit ?? null;
+  const sumUnit = measured.summedUnit ?? summedFluxUnit(photcal);
   const sumUnitNotes = sumUnit !== null && sumUnit !== pixelUnit ? [`sum, sum_err, net_sum, net_err in ${sumUnit}`] : [];
+  const commandNotes = measured.notes ?? [];
   return measured.regions.map((region) => {
     const entry = stats.get(region.id);
     const s = entry?.stats ?? null;
@@ -562,7 +736,7 @@ export function regionStatsEntries(
       source: regionSource(region.props.text, region.shape, background),
       params: own ? ownParams : params,
       values: s ? regionStatsValues(s) : {},
-      notes: [...notes, ...(own ? [EXCLUDE_ROW_NOTE] : []), ...(s ? sumUnitNotes : [])],
+      notes: [...notes, ...(own ? [EXCLUDE_ROW_NOTE] : []), ...(s ? sumUnitNotes : []), ...commandNotes],
     };
   });
 }
@@ -573,14 +747,16 @@ export function radialProfileEntry(
   excludeDq: boolean,
   req: RadialLogRequest,
   region: Region,
+  pixelUnit?: string | null,
 ): MeasurementLogDraft {
   const last = data.bins.length > 0 ? data.bins[data.bins.length - 1] : null;
+  const unit = pixelUnitOf(pixelUnit);
   return {
     kind: "radial_profile",
     file: prov.file,
     image: prov.image,
     dq: profileDqHandling(excludeDq, data),
-    unit: null,
+    unit,
     source: regionSource(region.props.text, region.shape, null),
     params: {
       x: finiteOrNull(data.x),
@@ -598,7 +774,7 @@ export function radialProfileEntry(
       background_count: finiteOrNull(data.background?.count),
       cumulative_sum_last: finiteOrNull(last?.cumulative_sum),
     },
-    notes: [],
+    notes: summedUnitNotes(["cumulative_sum_last"], unit),
   };
 }
 
@@ -651,6 +827,7 @@ export function lineCutEntry(
   excludeDq: boolean,
   region: Region,
   exclude: readonly RegionShape[],
+  pixelUnit?: string | null,
 ): MeasurementLogDraft {
   const finite = cut.values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
   return {
@@ -658,7 +835,7 @@ export function lineCutEntry(
     file: prov.file,
     image: prov.image,
     dq: profileDqHandling(excludeDq, cut),
-    unit: null,
+    unit: pixelUnitOf(pixelUnit),
     source: regionSource(region.props.text, region.shape, null),
     params: {
       x1: finiteOrNull(cut.x1),
@@ -719,7 +896,7 @@ export function lineEntry(
   return {
     kind: "line",
     file: fileNameOf(filePath),
-    image: result.source.kind === "file" ? SPECTRUM_FILE_IMAGE : LOADED_CUBE_IMAGE,
+    image: result.source.kind === "file" || result.source.kind === "series" ? SPECTRUM_FILE_IMAGE : LOADED_CUBE_IMAGE,
     dq: dqRequested === null ? "not_applied" : dqHandlingOf(dqRequested, result.n_dq_excluded > 0),
     unit: result.flux_unit,
     source: JSON.stringify(result.source),
@@ -741,6 +918,13 @@ export function lineEntry(
       err_source: result.err_source,
       redshift: finiteOrNull(velocity?.redshift),
       n_channels_nominal: finiteOrNull(result.n_channels_nominal),
+      line_id: result.line_id ?? null,
+      line_label: result.line_label ?? null,
+      redshift_requested: finiteOrNull(result.redshift),
+      wavelength_frame: result.wavelength_frame ?? null,
+      errors_reliable: result.errors_reliable ?? null,
+      width_errors_reliable: result.width_errors_reliable ?? null,
+      flux_physical_basis: result.flux_physical_basis ?? null,
     },
     values: {
       flux: finiteOrNull(result.flux),
@@ -776,18 +960,38 @@ export function lineEntry(
       source_sigma_kms: finiteOrNull(velocity?.source_sigma_kms),
       source_fwhm_kms: finiteOrNull(velocity?.source_fwhm_kms),
       continuum_chi2_red: finiteOrNull(result.continuum_chi2_red),
+      equivalent_width_err: finiteOrNull(result.equivalent_width_err),
+      centroid_err: finiteOrNull(result.centroid_err),
+      sigma_err: finiteOrNull(result.sigma_err),
+      fwhm_err: finiteOrNull(result.fwhm_err),
+      centroid_err_kms: finiteOrNull(velocity?.centroid_err_kms),
+      sigma_err_kms: finiteOrNull(velocity?.sigma_err_kms),
+      fwhm_err_kms: finiteOrNull(velocity?.fwhm_err_kms),
+      source_centroid_err_kms: finiteOrNull(velocity?.source_centroid_err_kms),
+      source_sigma_err_kms: finiteOrNull(velocity?.source_sigma_err_kms),
+      source_fwhm_err_kms: finiteOrNull(velocity?.source_fwhm_err_kms),
+      z_line: finiteOrNull(velocity?.z_line),
+      z_line_err: finiteOrNull(velocity?.z_line_err),
+      peak_axis: finiteOrNull(result.peak_axis),
+      flux_si: finiteOrNull(result.flux_si),
+      flux_si_err: finiteOrNull(result.flux_si_err),
+      flux_cgs: finiteOrNull(result.flux_cgs),
+      flux_cgs_err: finiteOrNull(result.flux_cgs_err),
+      fit_amplitude_err: finiteOrNull(fit?.amplitude_err),
+      fit_iterations: finiteOrNull(fit?.iterations),
     },
     notes: [...result.notes, lineUnitNote(result.flux_unit, result.axis_unit)],
   };
 }
 
-interface TimeSeriesLogOptions {
+export interface TimeSeriesLogOptions {
   apertureRadius: number;
   annulusInner?: number;
   annulusOuter?: number;
   gain?: number;
   excludeDq: boolean;
   trackDrift: boolean;
+  compIdx?: readonly number[];
 }
 
 function extremeFrame(frames: TimeSeriesResult["frames"], pick: (f: TimeSeriesResult["frames"][number]) => number | null, better: (a: number, b: number) => boolean) {
@@ -802,7 +1006,11 @@ function extremeFrame(frames: TimeSeriesResult["frames"], pick: (f: TimeSeriesRe
 
 export function timeSeriesEntry(res: TimeSeriesResult, opts: TimeSeriesLogOptions): MeasurementLogDraft {
   const targetIdx = res.targets.findIndex((t) => t.role === "target");
-  const compIdx = res.targets.map((t, i) => (t.role === "comp" ? i : -1)).filter((i) => i >= 0);
+  const allComps = res.targets.map((t, i) => (t.role === "comp" ? i : -1)).filter((i) => i >= 0);
+  const inUse = opts.compIdx;
+  const compIdx = inUse ? allComps.filter((i) => inUse.includes(i)) : allComps;
+  const leftOut = allComps.filter((i) => !compIdx.includes(i));
+  const leftOutLabels = leftOut.map((i) => res.targets[i].label);
   const checkIdx = res.targets.map((t, i) => (t.role === "check" ? i : -1)).filter((i) => i >= 0);
   const targetCurve = targetIdx >= 0 ? lightCurve(res, targetIdx, compIdx, "index") : [];
   const reference = checkReference(res, compIdx, checkIdx, "index");
@@ -824,7 +1032,7 @@ export function timeSeriesEntry(res: TimeSeriesResult, opts: TimeSeriesLogOption
       kind: "frames",
       n: res.n_frames,
       reference: referenceName,
-      targets: res.targets.map((t) => ({ x: t.x, y: t.y, label: t.label, role: t.role })),
+      targets: res.targets.map((t, i) => ({ x: t.x, y: t.y, label: t.label, role: t.role, ...(leftOut.includes(i) ? { left_out: true } : {}) })),
     }),
     params: {
       n_frames: res.n_frames,
@@ -840,6 +1048,10 @@ export function timeSeriesEntry(res: TimeSeriesResult, opts: TimeSeriesLogOption
       first_frame: first ? first.frame.file_name : (res.frames[0]?.file_name ?? null),
       last_frame: last ? last.frame.file_name : (res.frames[res.frames.length - 1]?.file_name ?? null),
       bjd_source: bjdSources(used),
+      comps_left_out: leftOutLabels.length > 0 ? leftOutLabels.join("; ") : null,
+      target_ra_deg: res.geometry_target ? res.geometry_target.ra_deg : null,
+      target_dec_deg: res.geometry_target ? res.geometry_target.dec_deg : null,
+      target_source: res.geometry_target ? res.geometry_target.source : null,
     },
     values: {
       n_used: targetCurve.filter((p) => p.mag !== null).length,
@@ -856,7 +1068,10 @@ export function timeSeriesEntry(res: TimeSeriesResult, opts: TimeSeriesLogOption
     },
     notes: [
       ...res.warnings,
-      ...saturatedComps(res).map((comp) => `comparison star ${comp.label} saturated on ${comp.frames} ${comp.frames === 1 ? "frame" : "frames"}`),
+      ...saturatedComps(res).map(
+        (comp) => `comparison star ${comp.label} saturated on ${comp.frames} ${comp.frames === 1 ? "frame" : "frames"}${leftOut.includes(comp.index) ? ", left out of the ensemble" : ""}`,
+      ),
+      ...(leftOut.length > 0 ? [`ensemble: ${compIdx.length} of ${allComps.length} comparison stars (left out: ${leftOutLabels.join(", ")})`] : []),
     ],
   };
 }
@@ -922,7 +1137,13 @@ export function statisticsEntry(prov: MeasurementProvenance, input: StatisticsLo
     source: input.region ? regionSource(null, input.region, null) : IMAGE_SOURCE,
     params: { noise: input.noise, region_kind: input.regionKind, dq_excluded_px: input.dqExcluded },
     values,
-    notes: input.channels.flatMap((c) => (c.body.noise_note ? [prefixed ? `${c.label}: ${c.body.noise_note}` : c.body.noise_note] : [])),
+    notes: [
+      ...input.channels.flatMap((c) => (c.body.noise_note ? [prefixed ? `${c.label}: ${c.body.noise_note}` : c.body.noise_note] : [])),
+      ...summedUnitNotes(
+        input.channels.map((c) => (prefixed ? `${c.label.toLowerCase()}_sum` : "sum")),
+        pixelUnitOf(input.unit),
+      ),
+    ],
   };
 }
 
@@ -935,22 +1156,33 @@ export function crossMatchEntry(
   const astrometry = res.astrometry;
   const fixedRadius = res.aperture?.kind === "fixed" ? res.aperture.radius_px : null;
   const autoAperture = res.aperture?.kind === "auto" ? res.aperture : null;
+  const query = res.catalog_query ?? null;
   return {
     kind: "catalog_crossmatch",
     file: fileNameOf(filePath),
     image: LOADED_FILE_IMAGE,
     dq: "not_applied",
-    unit: "mag",
+    unit: "mag (Vega)",
     source: FILE_SOURCE,
     params: {
       band: res.band,
       match_radius_arcsec: finiteOrNull(res.match_radius_arcsec),
       colour_term: opts.colourTerm,
-      detection_sigma: opts.sigma,
-      max_stars: opts.maxStars,
+      detection_sigma: finiteOrNull(res.detection_sigma) ?? opts.sigma,
+      max_stars: finiteOrNull(res.max_stars) ?? opts.maxStars,
       epoch_year: finiteOrNull(res.epoch_year),
       aperture_radius_px: fixedRadius ?? (autoAperture ? AUTO : null),
       aperture_effective_px: fixedRadius ?? finiteOrNull(autoAperture?.median_radius_px),
+      aperture_fwhm_factor: autoAperture ? finiteOrNull(autoAperture.fwhm_factor) : null,
+      aperture_min_px: fixedRadius ?? finiteOrNull(autoAperture?.min_radius_px),
+      aperture_max_px: fixedRadius ?? finiteOrNull(autoAperture?.max_radius_px),
+      catalogue: GAIA_CATALOGUE,
+      catalogue_table: res.catalog_table ?? null,
+      catalogue_source: res.catalog_source ?? null,
+      magnitude_system: "Vega",
+      cone_radius_arcmin: finiteOrNull(query?.radius_arcmin),
+      g_limit_mag: finiteOrNull(query?.mag_limit),
+      max_rows: finiteOrNull(query?.max_rows),
     },
     values: {
       n_detected: res.n_detected,
@@ -969,6 +1201,9 @@ export function crossMatchEntry(
       astrometry_rms_arcsec: finiteOrNull(astrometry?.rms_arcsec),
       astrometry_n: finiteOrNull(astrometry?.n),
       photcal_present: res.photcal_present,
+      n_measured: res.sources.length,
+      row_cap_reached: query ? query.row_cap_reached : null,
+      cone_smaller_than_field: query ? query.cone_smaller_than_field : null,
     },
     notes: [...res.warnings],
   };
@@ -981,11 +1216,13 @@ export function spectrumExportEntry(filePath: string, input: SpectrumExportInput
   const region = input.source.kind === "region" ? input.region : null;
   const regionDq = region?.n_dq_excluded ?? null;
   const dq: DqHandling =
-    isFile && summary.params.dq_column === true
-      ? "reported"
-      : regionDq !== null
-        ? dqHandlingOf(true, regionDq.some((n) => n > 0))
-        : "not_applied";
+    typeof summary.params.bin_factor === "number"
+      ? dqHandlingOf(summary.params.bin_dq_requested === true, Number(summary.params.bin_dq_excluded) > 0)
+      : isFile && summary.params.dq_column === true
+        ? "reported"
+        : regionDq !== null
+          ? dqHandlingOf(true, regionDq.some((n) => n > 0))
+          : "not_applied";
   const warning = region?.noise_factor?.warning ?? null;
   return {
     kind: "spectrum_export",
@@ -1086,6 +1323,9 @@ export function lineFitEntry(run: LineFitRun): MeasurementLogDraft {
       sigma_label: result.sigma_label,
       fits_velocity: result.planes.velocity?.fits_path ?? null,
       fits_flux: result.planes.flux?.fits_path ?? null,
+      redshift: finiteOrNull(config.redshift ?? 0),
+      fits_source_velocity: result.planes.source_velocity?.fits_path ?? null,
+      fits_source_flux: result.planes.source_flux?.fits_path ?? null,
     },
     values: {
       n_fit: result.n_fit,

@@ -2,6 +2,7 @@ import type { CollapseRangeMode, ContinuumWindows } from "../shared/types/cube";
 import type { RampInfo } from "../shared/types/ramp";
 import { formatTickLabels, niceTicks } from "./plotScale";
 import { formatAxisValue } from "./spectralAxis";
+import { decimalFieldState } from "./decimalText";
 
 export interface ChannelRange {
   z0: number;
@@ -165,6 +166,42 @@ export function parseChannelInput(text: string, n: number): number | null {
   return value;
 }
 
+export function axisTextForChannel(channel: number | null, m: PlotMapping, unit: string): string {
+  if (channel === null) return "";
+  if (!m.xValues || m.xValues.length !== m.n) return String(channel);
+  return formatAxisValue(m.xValues[channel], unit, channelWidthAt(m.xValues, channel));
+}
+
+export interface AxisEntry {
+  channel: number | null;
+  error: string | null;
+}
+
+const NO_AXIS_ERROR = "No axis values for these channels";
+
+export function channelFromAxisText(text: string, m: PlotMapping, unit: string): AxisEntry {
+  const state = decimalFieldState(text, {});
+  if (state.value === null) return { channel: null, error: state.error };
+  const values = m.xValues && m.xValues.length === m.n ? m.xValues : [];
+  let lowest = -1;
+  let highest = -1;
+  values.forEach((v, i) => {
+    if (!Number.isFinite(v)) return;
+    if (lowest < 0 || v < values[lowest]) lowest = i;
+    if (highest < 0 || v > values[highest]) highest = i;
+  });
+  if (lowest < 0) return { channel: null, error: NO_AXIS_ERROR };
+  const lowStep = channelWidthAt(values, lowest);
+  const highStep = channelWidthAt(values, highest);
+  const v = state.value;
+  if (v < values[lowest] - lowStep / 2 || v > values[highest] + highStep / 2) {
+    const from = formatAxisValue(values[lowest], unit, lowStep);
+    const to = formatAxisValue(values[highest], unit, highStep);
+    return { channel: null, error: `Use a value from ${from} to ${to} ${unit}` };
+  }
+  return { channel: nearestChannel(v, m), error: null };
+}
+
 export type WindowSide = 0 | 1;
 export type WindowEdge = 0 | 1;
 
@@ -195,13 +232,21 @@ export function windowsOverlapRange(windows: ContinuumWindows | null, range: Cha
   return ([0, 1] as const).filter((side) => windows[side][0] <= range.z1 && windows[side][1] >= range.z0);
 }
 
-export function continuumOverlapNote(windows: ContinuumWindows | null, range: ChannelRange | null): string | null {
+export function continuumOverlapNote(windows: ContinuumWindows | null, range: ChannelRange | null, documentMode = false): string | null {
   const sides = windowsOverlapRange(windows, range);
   if (sides.length === 0) return null;
-  if (sides.length === 2) {
-    return "Continuum windows A and B overlap the line range; Moments would fit their baseline over line flux.";
-  }
-  return `Continuum window ${WINDOW_LETTERS[sides[0]]} overlaps the line range; Moments would fit its baseline over line flux.`;
+  const overlap =
+    sides.length === 2
+      ? "Continuum windows A and B overlap the line range"
+      : `Continuum window ${WINDOW_LETTERS[sides[0]]} overlaps the line range`;
+  const consequence = documentMode
+    ? "Measure line would fit its continuum over line flux."
+    : "Measure line, Moments and Fit lines would fit their continuum over line flux.";
+  return `${overlap}; ${consequence}`;
+}
+
+export function noSpectralAxisText(documentMode: boolean): string {
+  return documentMode ? "no spectral axis for this spectrum" : "no spectral axis for this cube";
 }
 
 export function spectralSectionsVisible(ramp: RampInfo | null): boolean {

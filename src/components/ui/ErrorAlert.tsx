@@ -2,13 +2,17 @@ import { memo } from "react";
 
 interface ErrorAlertProps {
   message: string | null;
+  compact?: boolean;
+  className?: string;
 }
 
-function ErrorAlert({ message }: ErrorAlertProps) {
+function ErrorAlert({ message, compact = false, className }: ErrorAlertProps) {
   if (!message) return null;
 
+  const classes = `ab-error-alert${compact ? " ab-error-alert-compact" : ""}${className ? ` ${className}` : ""}`;
+
   return (
-    <div className="ab-error-alert" role="alert">
+    <div className={classes} role="alert">
       {message}
     </div>
   );

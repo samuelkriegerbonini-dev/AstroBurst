@@ -72,6 +72,7 @@ const BACKGROUND_CLIP_SIGMA: f32 = 3.0;
 const BACKGROUND_CLIP_ROUNDS: usize = 2;
 const SCALE_WINDOW_TOLERANCE: f64 = 1e-9;
 const MAX_TAN_FIELD_DEG: f64 = 120.0;
+const SCALE_TEXT_DIGITS: f64 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RankingKey {
@@ -586,6 +587,14 @@ fn wrap_longitude_deg(value: f64) -> f64 {
 
 fn is_positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
+}
+
+fn scale_text(arcsec: f64) -> String {
+    if !is_positive(arcsec) {
+        return arcsec.to_string();
+    }
+    let decimals = (SCALE_TEXT_DIGITS - 1.0 - arcsec.log10().floor()).max(0.0) as usize;
+    format!("{arcsec:.decimals$}")
 }
 
 fn centre_crpix((width, height): (usize, usize)) -> (f64, f64) {
@@ -2463,7 +2472,10 @@ fn solve_detections(
                 ),
                 None => format!(
                     "no centre produced {} consistent star matches (scale hint {}..{} arcsec/px from {})",
-                    params.min_matches, scale.low_arcsec, scale.high_arcsec, scale.source
+                    params.min_matches,
+                    scale_text(scale.low_arcsec),
+                    scale_text(scale.high_arcsec),
+                    scale.source
                 ),
             };
             let searched = if plan.capped {

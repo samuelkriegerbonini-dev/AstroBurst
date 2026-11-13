@@ -1,6 +1,6 @@
 import { memo, useMemo } from "react";
-import type { CrossMatchResult, GaiaBand, MatchedCatalogRow } from "../../shared/types/catalog";
-import { splitZeroPointPoints } from "../../utils/plotInteraction";
+import type { CrossMatchResult } from "../../shared/types/catalog";
+import { zeroPointSplitOf } from "../../utils/zeroPointPlot";
 import ProfilePlot, { type PlotReferenceLine, type ProfileSeries } from "../regions/ProfilePlot";
 
 interface CrossMatchPlotsProps {
@@ -19,12 +19,6 @@ const RESIDUALS_CSV = "residuals";
 const ZERO_POINT_CSV = "zero_point";
 const RMS_DIGITS = 3;
 const TITLE_CLASS = "text-[10px] text-zinc-500";
-
-function catalogueMag(row: MatchedCatalogRow, band: GaiaBand): number | null {
-  if (band === "BP") return row.bp;
-  if (band === "RP") return row.rp;
-  return row.g;
-}
 
 function fmtArcsec(v: number): string {
   return Number.isFinite(v) ? `${v.toFixed(RMS_DIGITS)}"` : "--";
@@ -61,14 +55,7 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
   const zeroPoint = useMemo(() => {
     const zp = cross.zero_point;
     const coeff = zp ? zp.colour_coeff : null;
-    const split = splitZeroPointPoints(
-      cross.matches.map((m) => catalogueMag(m.row, cross.band)),
-      cross.matches.map((m) => m.star.mag_inst),
-      zp ? zp.zp : null,
-      cross.matches.map((m) => m.zp_status),
-      cross.matches.map((m) => m.row.bp_rp),
-      coeff,
-    );
+    const split = zeroPointSplitOf(cross);
     const series: ProfileSeries[] = [
       { x: split.fitted.x, y: split.fitted.y, color: FITTED_COLOR, label: "in fit", mode: "points" },
     ];
@@ -120,7 +107,7 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
         <div className={TITLE_CLASS}>Zero point</div>
         <ProfilePlot
           series={zeroPoint.series}
-          xLabel={`Gaia ${cross.band} (mag)`}
+          xLabel={`Gaia ${cross.band} (Vega mag)`}
           yLabel={zeroPoint.yLabel}
           height={PLOT_HEIGHT}
           toolbar

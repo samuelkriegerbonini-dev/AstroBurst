@@ -7,6 +7,8 @@ import {
   formatTickLabels,
   formatLogTickLabel,
   tickLabels,
+  legendRows,
+  fitLegendLabel,
 } from "../plotScale";
 
 describe("niceTicks", () => {
@@ -60,6 +62,17 @@ describe("formatAxisTick", () => {
     expect(formatAxisTick(4.2e6, 1e6)).toBe("4.20e+6");
     expect(formatAxisTick(NaN, 1)).toBe("");
     expect(formatAxisTick(2, 0)).toBe("2.00");
+  });
+
+  it("keeps enough mantissa digits for five distinct labels on a narrow range of large values", () => {
+    const r = 11000;
+    const ticks = [0, 1, 2, 3, 4].map((i) => formatAxisTick(1010500 - (i * r) / 4, r));
+    expect(new Set(ticks).size).toBe(5);
+    expect(ticks).toEqual(["1.011e+6", "1.008e+6", "1.005e+6", "1.002e+6", "1.00e+6"]);
+  });
+
+  it("the existing exponent pins do not move", () => {
+    expect(formatAxisTick(1.23456789e9, 10)).toBe("1.234568e+9");
   });
 });
 
@@ -156,5 +169,46 @@ describe("finiteExtent", () => {
   it("returns null when nothing is finite", () => {
     expect(finiteExtent([])).toBeNull();
     expect(finiteExtent([null, NaN])).toBeNull();
+  });
+});
+
+function expectSlots(actual: { x: number; row: number }[], expected: { x: number; row: number }[]) {
+  expect(actual.map((s) => s.row)).toEqual(expected.map((s) => s.row));
+  actual.forEach((s, i) => expect(s.x).toBeCloseTo(expected[i].x, 10));
+}
+
+describe("legendRows", () => {
+  it("wraps the four zero-point labels of the Gaia plot onto two rows inside 320 px", () => {
+    expectSlots(legendRows([70.2, 91.8, 59.4, 151.2], 58, 320), [
+      { x: 58, row: 0 },
+      { x: 149.2, row: 0 },
+      { x: 58, row: 1 },
+      { x: 138.4, row: 1 },
+    ]);
+  });
+
+  it("keeps one row when every entry fits", () => {
+    expect(legendRows([30, 30], 58, 300)).toEqual([
+      { x: 58, row: 0 },
+      { x: 109, row: 0 },
+    ]);
+  });
+
+  it("leaves an entry wider than the row alone on its row", () => {
+    expect(legendRows([400, 20], 58, 300)).toEqual([
+      { x: 58, row: 0 },
+      { x: 58, row: 1 },
+    ]);
+    expect(legendRows([], 58, 300)).toEqual([]);
+  });
+});
+
+describe("fitLegendLabel", () => {
+  it("fitLegendLabel shortens in the middle and keeps both ends", () => {
+    expect(fitLegendLabel("abcdefghij", 10)).toBe("abcdefghij");
+    expect(fitLegendLabel("abcdefghijk", 10)).toBe("abcd...ijk");
+    expect(fitLegendLabel("jw02734-o002_t001_nirspec_g395h-f290lp_x1d.fits", 20)).toBe("jw02734-o...x1d.fits");
+    expect(fitLegendLabel("abcdef", 3)).toBe("abc");
+    expect(fitLegendLabel("abc", 0)).toBe("a");
   });
 });

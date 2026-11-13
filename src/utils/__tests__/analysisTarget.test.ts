@@ -12,6 +12,7 @@ import {
   detectedStarsOnMeasuredImage,
   histogramChannelLabel,
   histogramStfLock,
+  histogramUnit,
   isCompositeOnScreen,
   isFileRgbView,
   regionStatsRunKey,
@@ -203,6 +204,40 @@ describe("analysisMeasureKey", () => {
   it("is null without a path", () => {
     expect(analysisMeasureKey({ path: null, composite: false, processedFitsPath: null, processedVersion: 7 })).toBeNull();
   });
+
+  const P = "C:/data/l2_r.fits";
+  const base = { path: P, composite: false, processedFitsPath: null, processedVersion: 0, filePath: P };
+
+  it("changes when the file itself is read again under the same path", () => {
+    expect(analysisMeasureKey({ ...base, reloads: 0 })).toBe(P);
+    expect(analysisMeasureKey({ ...base, reloads: 1 })).toBe("C:/data/l2_r.fits#1");
+    expect(analysisMeasureKey({ ...base, reloads: 2 })).toBe("C:/data/l2_r.fits#2");
+  });
+
+  it("keeps the keys of a processing product and of the composite", () => {
+    expect(analysisMeasureKey({ ...base, processedFitsPath: P, processedVersion: 4, reloads: 3 })).toBe("C:/data/l2_r.fits@4");
+    expect(analysisMeasureKey({ ...base, composite: true, reloads: 3 })).toBe(P);
+  });
+
+  it("does not tie another image to the reloads of the file", () => {
+    expect(analysisMeasureKey({ ...base, path: "C:/out/other.fits", reloads: 3 })).toBe("C:/out/other.fits");
+    expect(analysisMeasureKey({ path: P, composite: false, processedFitsPath: null, processedVersion: 0, reloads: 3 })).toBe(P);
+  });
+
+  it("compares the two paths as the app does elsewhere", () => {
+    expect(analysisMeasureKey({ ...base, path: "C:\\data\\L2_R.fits", reloads: 1 })).toBe("C:\\data\\L2_R.fits#1");
+  });
+
+  it("moves every run key that is built on it", () => {
+    const reloaded = "C:/data/l2_r.fits#1";
+    expect(statisticsRunKey({ filePath: P, composite: false, rgbPath: null, measureKey: reloaded })).not.toBe(
+      statisticsRunKey({ filePath: P, composite: false, rgbPath: null, measureKey: P }),
+    );
+    expect(regionStatsRunKey(P, reloaded)).not.toBe(regionStatsRunKey(P, P));
+    expect(starDetectionScope({ path: P, measureKey: reloaded, composite: false, rgbPath: null, compositeVersion: 0 })).not.toBe(
+      starDetectionScope({ path: P, measureKey: P, composite: false, rgbPath: null, compositeVersion: 0 }),
+    );
+  });
 });
 
 describe("statisticsRunKey", () => {
@@ -382,5 +417,24 @@ describe("apertureRangeHint (time series r_ap)", () => {
     expect(apertureRangeHint(radius("1"))).toBe(APERTURE_RANGE_HINT);
     expect(apertureRangeHint(radius("61"))).toBe(APERTURE_RANGE_HINT);
     expect(apertureRangeHint(radius("5"))).toBeNull();
+  });
+});
+
+describe("histogramUnit", () => {
+  const file = "C:/data/jw_i2d.fits";
+
+  it("gives the unit of the file while the histogram is of that file", () => {
+    expect(histogramUnit({ bunit: "MJy/sr", histDataPath: file, filePath: file })).toBe("MJy/sr");
+    expect(histogramUnit({ bunit: "'DN/s    '", histDataPath: file, filePath: file })).toBe("DN/s");
+    expect(histogramUnit({ bunit: "MJy/sr", histDataPath: "C:\\data\\JW_I2D.fits", filePath: file })).toBe("MJy/sr");
+  });
+
+  it("gives no unit for a product, a missing path or an empty BUNIT", () => {
+    expect(histogramUnit({ bunit: "MJy/sr", histDataPath: "C:/out/jw_i2d_bg.fits", filePath: file })).toBeNull();
+    expect(histogramUnit({ bunit: "MJy/sr", histDataPath: null, filePath: file })).toBeNull();
+    expect(histogramUnit({ bunit: "MJy/sr", histDataPath: file, filePath: null })).toBeNull();
+    for (const bunit of [undefined, null, "", "   "]) {
+      expect(histogramUnit({ bunit, histDataPath: file, filePath: file })).toBeNull();
+    }
   });
 });

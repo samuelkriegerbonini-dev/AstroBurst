@@ -379,7 +379,7 @@ export default function StackingPanel({
                       {isSelected && <CheckCircle2 size={10} className="text-emerald-400" />}
                     </span>
                     <span className="truncate">{row.label}</span>
-                    <span className="ml-auto text-[9px] text-emerald-500/60 shrink-0">{row.tag}</span>
+                    <span className="ml-auto text-[9px] text-emerald-500/90 shrink-0">{row.tag}</span>
                   </button>
                 );
               }
@@ -396,7 +396,7 @@ export default function StackingPanel({
                   {stackedPaths.has(row.path) ? (
                     <span data-testid="stack-frame-stacked" className="ml-auto text-[9px] text-sky-300/70 shrink-0" title="Already a stacked result: All leaves it out; select it by hand to stack it again">stacked</span>
                   ) : isRejected ? (
-                    <span className="ml-auto text-[9px] text-red-400/70 shrink-0" title="Rejected by subframe quality analysis">rejected</span>
+                    <span className="ml-auto text-[9px] text-red-400/90 shrink-0" title="Rejected by subframe quality analysis">rejected</span>
                   ) : weight !== undefined ? (
                     <span className="ml-auto text-[9px] text-teal-400/70 shrink-0 font-mono" title="Subframe quality weight">{(weight * 100).toFixed(0)}%</span>
                   ) : null}

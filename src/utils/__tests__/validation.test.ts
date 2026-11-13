@@ -1,10 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   astroFileFromPath,
+  childPath,
   dialogExtensions,
+  expandDroppedPaths,
   FITS_FILE_EXTENSIONS,
   folderErrorReport,
   folderReport,
+  ingestDrop,
+  isIngestibleFile,
+  isTextTableFile,
   isValidFitsFile,
   partitionIncoming,
   rejectionReport,
@@ -35,6 +41,63 @@ describe("partitionIncoming", () => {
 
   it("returns three empty lists for no input", () => {
     expect(partitionIncoming([])).toEqual({ accepted: [], skipped: [], calib: [] });
+  });
+
+  it("keeps the calibration rule and accepts CSV tables and bzip2 FITS", () => {
+    const result = partitionIncoming(["C:\\a\\m42.fits", "C:\\a\\notes.txt", "/b/C1.csv", "/b/frame-r-001462-4-0165.fits.bz2"]);
+    expect(result.accepted).toEqual(["C:\\a\\m42.fits", "/b/C1.csv", "/b/frame-r-001462-4-0165.fits.bz2"]);
+    expect(result.skipped).toEqual(["C:\\a\\notes.txt"]);
+    expect(partitionIncoming(["/b/C1.csv", CALIB]).calib).toEqual([CALIB]);
+  });
+});
+
+describe("isIngestibleFile", () => {
+  it("accepts CSV and ECSV tables and bzip2 FITS", () => {
+    for (const name of [
+      "C1_ls_dr10_box_A.csv",
+      "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv",
+      "frame-r-001462-4-0165.fits.bz2",
+      "X.FIT.BZ2",
+      "a.fts.bz2",
+    ]) expect(isIngestibleFile(name), name).toBe(true);
+    expect(isValidFitsFile("frame-r-001462-4-0165.fits.bz2")).toBe(true);
+    expect(isValidFitsFile("C1_ls_dr10_box_A.csv")).toBe(false);
+    expect(isTextTableFile("C4_sdss_dr17_field_1462_4_165.csv")).toBe(true);
+    expect(isTextTableFile("a.fits")).toBe(false);
+  });
+
+  it("rejects other compressed tables and a bare bzip2", () => {
+    for (const name of [
+      "table.csv.gz",
+      "table.csv.bz2",
+      "notes.bz2",
+      "x.tar.bz2",
+      "frame.fz.bz2",
+      "notes.txt",
+      "jw03375-o001_20261013t072715_tso3_00001_asn.json",
+    ]) expect(isIngestibleFile(name), name).toBe(false);
+  });
+
+  it("offers the tables and the bzip2 spellings, never a bare bz2", () => {
+    for (const ext of ["csv", "ecsv", "fits.bz2", "fit.bz2", "fts.bz2"]) expect(SUPPORTED_EXTENSIONS).toContain(ext);
+    expect(SUPPORTED_EXTENSIONS).not.toContain("bz2");
+    expect(SUPPORTED_EXTENSIONS_LABEL).toContain(".ecsv");
+    expect(SUPPORTED_EXTENSIONS_LABEL).toContain(".fits.bz2");
+    expect(SUPPORTED_EXTENSIONS).toEqual(["fits", "fit", "fts", "fz", "asdf", "zip", "fits.gz", "fit.gz", "fts.gz", "fits.bz2", "fit.bz2", "fts.bz2", "csv", "ecsv"]);
+  });
+});
+
+describe.skipIf(!process.env.ASTROBURST_SCIENCE_DATA_DIR)("the science data set", () => {
+  it("accepts every data file of the manifest and skips only the two association files", () => {
+    const manifest = readFileSync(`${process.env.ASTROBURST_SCIENCE_DATA_DIR}/MANIFEST.tsv`, "utf8");
+    const names = manifest
+      .split(/\r?\n/)
+      .slice(1)
+      .filter((line) => line.length > 0)
+      .map((line) => line.split("\t")[1]);
+    const result = partitionIncoming(names);
+    expect(result.skipped).toEqual(["jw03375-o001_20261013t072715_tso3_00001_asn.json", "jw02327-o001_20260925t123033_tso3_00001_asn.json"]);
+    expect(result.accepted.length).toBe(names.length - 2);
   });
 });
 
@@ -88,6 +151,64 @@ describe("folderErrorReport", () => {
   });
 });
 
+describe("dropped folders", () => {
+  const nightEntries = [
+    { name: "a.fits", isDirectory: false },
+    { name: "b.fits.gz", isDirectory: false },
+    { name: "notes.txt", isDirectory: false },
+    { name: "raw", isDirectory: true },
+    { name: null, isDirectory: false },
+  ];
+  const nightReader = () =>
+    vi.fn(async (dir: string) => {
+      if (dir !== "C:\\night") throw new Error("not a directory");
+      return nightEntries;
+    });
+
+  it("joins a folder and a name with the separator of the folder", () => {
+    expect(childPath("C:\\night", "a.fits")).toBe("C:\\night\\a.fits");
+    expect(childPath("/data/night", "a.fits")).toBe("/data/night/a.fits");
+    expect(childPath("/data/night/", "a.fits")).toBe("/data/night/a.fits");
+  });
+
+  it("reads a dropped folder like Select Folder", async () => {
+    const before = partitionIncoming(["C:\\night"]);
+    expect(before.accepted).toEqual([]);
+    expect(before.skipped).toEqual(["C:\\night"]);
+    expect(await ingestDrop(["C:\\night"], nightReader())).toEqual({
+      accepted: ["C:\\night\\a.fits", "C:\\night\\b.fits.gz"],
+      report: null,
+    });
+  });
+
+  it("keeps dropped files as they are and never lists their folder", async () => {
+    const readDir = nightReader();
+    expect(await expandDroppedPaths(["C:\\a\\m42.fits", "C:\\a\\C1.csv"], readDir)).toEqual({
+      paths: ["C:\\a\\m42.fits", "C:\\a\\C1.csv"],
+      emptyFolders: [],
+    });
+    expect(readDir).not.toHaveBeenCalled();
+  });
+
+  it("counts a dropped file the app does not open as skipped and says which folder held nothing", async () => {
+    const readDir = vi.fn(async (dir: string) => {
+      if (dir === "C:\\night") return nightEntries;
+      if (dir === "C:\\empty") return [{ name: "readme.txt", isDirectory: false }];
+      if (dir === "C:\\crds") return [{ name: "jwst_nircam_distortion_0001.asdf", isDirectory: false }];
+      throw new Error("not a directory");
+    });
+    expect(await ingestDrop(["C:\\night", "C:\\a\\notes.txt", "C:\\empty"], readDir)).toEqual({
+      accepted: ["C:\\night\\a.fits", "C:\\night\\b.fits.gz"],
+      report: { skipped: 1, calib: 0, message: "No FITS/ASDF files directly in C:\\empty (subfolders are not scanned)" },
+    });
+    const emptyOnly = await ingestDrop(["C:\\empty"], readDir);
+    expect(emptyOnly.accepted).toEqual([]);
+    expect(emptyOnly.report?.message).toBe(folderReport("C:\\empty", { accepted: [], skipped: [], calib: [] })?.message);
+    expect(await ingestDrop(["C:\\crds"], readDir)).toEqual({ accepted: [], report: { skipped: 0, calib: 1, message: null } });
+    expect((await expandDroppedPaths(["C:\\crds"], readDir)).emptyFolders).toEqual([]);
+  });
+});
+
 describe("isValidFitsFile", () => {
   it("accepts fpack tile-compressed files", () => {
     expect(isValidFitsFile("image.fits.fz")).toBe(true);
@@ -129,7 +250,11 @@ describe("dialogExtensions", () => {
 
   it("adds gz on macOS, whose open panel matches only the last extension of fits.gz", () => {
     const mac = dialogExtensions(SUPPORTED_EXTENSIONS, true);
-    expect(mac).toEqual([...SUPPORTED_EXTENSIONS, "gz"]);
+    expect(mac).toEqual([...SUPPORTED_EXTENSIONS, "gz", "bz2"]);
+  });
+
+  it("adds bz2 on macOS when a bzip2 spelling is offered", () => {
+    expect(dialogExtensions(["fits", "fits.bz2"], true)).toEqual(["fits", "fits.bz2", "bz2"]);
   });
 
   it("adds nothing on macOS when no gzip spelling is offered", () => {

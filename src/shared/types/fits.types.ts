@@ -2,6 +2,8 @@ import type { FileStatus } from "./queue";
 import type { HistogramData } from "./analysis";
 import type { DqTableName } from "./dq";
 import type { Spectrum1dKind } from "./spectrum1d";
+import type { TableProbe } from "./tables";
+import type { BandPlaneInfo, CompanionOrigin, ErrOrigin, ErrRecipe, LayerGuess } from "./layers";
 
 export type PlaneKind = "hdu" | "array";
 
@@ -17,6 +19,16 @@ export interface PlaneInfo {
   err_ref: string | null;
   source_path: string;
   dq_table: DqTableName | null;
+  layer?: LayerGuess | null;
+  err_origin?: ErrOrigin | null;
+  dq_origin?: string | null;
+  dq_origin_kind?: CompanionOrigin | null;
+  err_unavailable?: string | null;
+  dq_unavailable?: string | null;
+  pairing_notes?: string[];
+  err_recipe?: ErrRecipe | null;
+  warnings?: string[];
+  band_plane?: BandPlaneInfo | null;
 }
 
 export interface StfParams {
@@ -88,5 +100,6 @@ export interface ProcessedFile {
   startedAt: number | null;
   finishedAt: number | null;
   spectrum?: Spectrum1dKind;
+  table?: TableProbe;
   reloads?: number;
 }

@@ -234,7 +234,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
                 <span className="text-[10px] font-medium text-zinc-300">{bin.shortLabel}</span>
                 <span className="text-[8px] text-zinc-600">{source}</span>
                 {!path && (
-                  <span className="text-[8px] text-red-400/60">no path</span>
+                  <span className="text-[8px] text-red-400/90">no path</span>
                 )}
               </div>
               <button

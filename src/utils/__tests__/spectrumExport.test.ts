@@ -15,8 +15,12 @@ import {
   spectrumCsvFileName,
   spectrumExportSummary,
   vacuumUmAxis,
+  type SpectrumExportDisplay,
   type SpectrumExportInput,
 } from "../spectrumExport";
+import { fluxDisplay, scaleWavelengths } from "../spectrumUnits";
+import { binAxis, binSpectrum, BINNING_BASIS } from "../spectrumBinning";
+import { documentDqExclusions } from "../spectrumDocument";
 import { shapeCentre } from "../regionGeometry";
 import { airToVacuumUm, velocityKms, wavelengthFromVelocityUm, SPEED_OF_LIGHT_KMS } from "../spectralAxis";
 import type { RadialVelocityCorrectionResult, SpectralAxisInfo, SpectralAxisKind, SpectrumSource } from "../../shared/types/spectral";
@@ -819,5 +823,473 @@ describe("spectrumCsv for a region spectrum with propagated errors", () => {
     const pixel = spectrumExportSummary(exportInput({ source: { kind: "pixel", x: 3, y: 4 }, region: null }));
     expect(pixel.params).not.toHaveProperty("err_source");
     expect(pixel.params).not.toHaveProperty("noise_factor");
+  });
+});
+
+const SOFTWARE = "AstroBurst v0.8.0";
+const DISPLAY: SpectrumExportDisplay = { wavelengthUnit: "um", fluxUnit: "native", binFactor: 1, dqExcluded: null };
+const DOC_EXPORTED = "# exported_utc: 2026-10-17T12:00:00.000Z";
+const INSTRUMENT_KEYS = ["instrument", "disperser", "filter", "detector", "telescope", "target", "source_type", "date_obs"];
+const NIRSPEC_CARDS = {
+  INSTRUME: "NIRSPEC",
+  GRATING: "G235H",
+  FILTER: "F170LP",
+  DETECTOR: "NRS1",
+  TARGNAME: "NGC 7469",
+  SRCTYPE: "POINT",
+};
+const NIRSPEC_LINES = [
+  "# instrument: NIRSPEC",
+  "# disperser: G235H",
+  "# filter: F170LP",
+  "# detector: NRS1",
+  "# target: NGC 7469",
+  "# source_type: POINT",
+];
+
+function headerBlock(csv: string): string[] {
+  const lines = csvLines(csv);
+  return lines.slice(0, lines.findIndex((line) => !line.startsWith("#")));
+}
+
+function unitLinesOf(csv: string): string[] {
+  return headerBlock(csv).filter((line) => line.startsWith("# unit "));
+}
+
+function instrumentLinesOf(csv: string): string[] {
+  return headerBlock(csv).filter((line) => INSTRUMENT_KEYS.some((key) => line.startsWith(`# ${key}:`)));
+}
+
+function closeTo(cell: string, expected: number, relative: number): boolean {
+  return Math.abs(Number(cell) - expected) <= relative * Math.abs(expected);
+}
+
+const DOC_INDICES = Array.from({ length: DOC_ROWS }, (_, i) => i);
+
+describe("spectrumCsv provenance, instrument and units of the round", () => {
+  it("keeps the 0.8.0 layout when no software name is given", () => {
+    const golden = readFileSync(EXPORT_FIXTURE, "utf8").replace(/\r\n/g, "\n");
+    for (const software of [undefined, "", "  "]) {
+      const csv = spectrumCsv(documentExportInput(x1dDocument(), { software }));
+      const block = headerBlock(csv);
+      expect(block[0], String(software)).toBe("# file: jw_test_x1d.fits");
+      expect(block[block.length - 1]).toBe(DOC_EXPORTED);
+      expect(block.some((line) => line.startsWith("# unit "))).toBe(false);
+      expect(csv.replace(/\r\n/g, "\n")).toBe(golden);
+    }
+  });
+
+  it("starts with program, time and file and ends the header with the units", () => {
+    const oldCsv = spectrumCsv(documentExportInput());
+    const csv = spectrumCsv(documentExportInput(x1dDocument(), { software: SOFTWARE }));
+    const lines = csvLines(csv);
+    expect(lines.slice(0, 3)).toEqual(["# software: AstroBurst v0.8.0", DOC_EXPORTED, "# file: jw_test_x1d.fits"]);
+    expect(lines.filter((line) => line.startsWith("# file:"))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("# exported_utc:"))).toHaveLength(1);
+    const firstUnit = lines.findIndex((line) => line.startsWith("# unit "));
+    const oldOwn = headerBlock(oldCsv).filter((line) => !line.startsWith("# file:") && !line.startsWith("# exported_utc:"));
+    expect(lines.slice(3, firstUnit)).toEqual(oldOwn);
+    expect(headerBlock(csv).slice(-4)).toEqual([
+      "# unit wavelength_vacuum_um: um",
+      "# unit vacuum_wavelength_um: um",
+      "# unit flux: Jy",
+      "# unit err: Jy",
+    ]);
+    expect(headerRow(csv)).toBe(headerRow(oldCsv));
+    expect(dataRows(csv)).toEqual(dataRows(oldCsv));
+
+    const empty = spectrumCsv(documentExportInput(x1dDocument(), { software: SOFTWARE, values: [] }));
+    expect(csvLines(empty).slice(0, 3)).toEqual(lines.slice(0, 3));
+    expect(unitLinesOf(empty)).toEqual(["# unit flux: Jy", "# unit err: Jy"]);
+    expect(headerRow(empty)).toBe("channel,flux,flux_unit,err,dq");
+    expect(dataRows(empty)).toEqual([]);
+  });
+
+  it("writes no unit for a flux that has none", () => {
+    const csv = spectrumCsv(airExportInput(airDocument({ flux_unit: null }), { software: SOFTWARE, mode: "wavelength_air" }));
+    expect(unitLinesOf(csv)).toEqual([
+      "# unit wavelength_vacuum_um: um",
+      "# unit wavelength_air_um: um",
+      "# unit air_wavelength_um: um",
+    ]);
+  });
+
+  it("states the units of a region export", () => {
+    expect(unitLinesOf(spectrumCsv({ ...regionErrorInput("sum"), software: SOFTWARE }))).toEqual([
+      "# unit wavelength_vacuum_um: um",
+      "# unit vacuum_wavelength_um: um",
+      "# unit flux: MJy/sr x pix",
+      "# unit flux_jy: Jy",
+      "# unit err: MJy/sr x pix",
+      "# unit err_scaled: MJy/sr x pix",
+    ]);
+    const counts = spectrumCsv({ ...regionErrorInput("sum"), software: SOFTWARE, bunit: "DN/s" });
+    expect(unitLinesOf(counts)).toContain("# unit flux: DN/s x pix");
+    expect(column(counts, "flux_unit")[0]).toBe("DN/s x pix");
+    expect(headerBlock(counts)).toContain("# flux_unit: DN/s x pix");
+    const velocity = spectrumCsv(documentExportInput(x1dDocument(), { software: SOFTWARE, mode: "velocity", restUm: 1.87 }));
+    expect(headerRow(velocity)).toContain(",velocity_optical_kms,");
+    expect(unitLinesOf(velocity)).toContain("# unit velocity_optical_kms: km/s");
+  });
+
+  it("names instrument, disperser and target of a spectrum file", () => {
+    const nirspec = x1dDocument({ cards: NIRSPEC_CARDS });
+    const round = headerBlock(spectrumCsv(documentExportInput(nirspec, { software: SOFTWARE })));
+    const dq = round.indexOf("# dq_table: jwst");
+    expect(dq).toBeGreaterThan(0);
+    expect(round.slice(dq + 1, dq + 7)).toEqual(NIRSPEC_LINES);
+    expect(round[dq + 7].startsWith("# unit ")).toBe(true);
+
+    const old = headerBlock(spectrumCsv(documentExportInput(nirspec)));
+    const exported = old.indexOf(DOC_EXPORTED);
+    expect(exported).toBe(old.length - 1);
+    expect(old.slice(exported - 6, exported)).toEqual(NIRSPEC_LINES);
+
+    const ground = airDocument({ cards: { OBJECT: "'HD 37795 '", TELESCOP: "OHP", "DATE-OBS": "2019-01-05" } });
+    expect(instrumentLinesOf(spectrumCsv(airExportInput(ground, { software: SOFTWARE })))).toEqual([
+      "# telescope: OHP",
+      "# target: HD 37795",
+      "# date_obs: 2019-01-05",
+    ]);
+
+    const reopened = x1dDocument({
+      source: { kind: "csv", path: "C:/data/jw_test_x1d_spectrum.csv" },
+      cards: { instrument: "NIRSPEC", disperser: "G395H", target: "WASP-39" },
+    });
+    const reopenedCsv = spectrumCsv(
+      documentExportInput(reopened, { fileName: "jw_test_x1d_spectrum.csv", source: { kind: "file", hdu: null }, software: SOFTWARE }),
+    );
+    expect(instrumentLinesOf(reopenedCsv)).toEqual(["# instrument: NIRSPEC", "# disperser: G395H", "# target: WASP-39"]);
+
+    expect(instrumentLinesOf(spectrumCsv(documentExportInput(x1dDocument({ cards: {} }), { software: SOFTWARE })))).toEqual([]);
+    expect(instrumentLinesOf(spectrumCsv({ ...regionErrorInput("sum"), software: SOFTWARE }))).toEqual([]);
+    const pixel = exportInput({ source: { kind: "pixel", x: 3, y: 4 }, region: null, software: SOFTWARE });
+    expect(instrumentLinesOf(spectrumCsv(pixel))).toEqual([]);
+  });
+
+  it("writes the displayed wavelength in the unit of the view", () => {
+    const nm = spectrumCsv(documentExportInput(x1dDocument(), { display: { ...DISPLAY, wavelengthUnit: "nm" } }));
+    expect(headerRow(nm)).toBe("channel,wavelength_vacuum_um,vacuum_wavelength_nm,flux,flux_unit,err,dq");
+    expect(column(nm, "vacuum_wavelength_nm")).toEqual(cells(scaleWavelengths(DOC_INDICES.map(docWavelength), "nm")));
+    expect(closeTo(column(nm, "vacuum_wavelength_nm")[0], 1800, 1e-12)).toBe(true);
+    expect(column(nm, "wavelength_vacuum_um")).toEqual(column(spectrumCsv(documentExportInput()), "wavelength_vacuum_um"));
+    const nmRound = spectrumCsv(
+      documentExportInput(x1dDocument(), { software: SOFTWARE, display: { ...DISPLAY, wavelengthUnit: "nm" } }),
+    );
+    expect(unitLinesOf(nmRound)).toContain("# unit vacuum_wavelength_nm: nm");
+
+    const angstrom = spectrumCsv(
+      documentExportInput(x1dDocument(), { software: SOFTWARE, display: { ...DISPLAY, wavelengthUnit: "A" } }),
+    );
+    expect(headerRow(angstrom)).toBe("channel,wavelength_vacuum_um,vacuum_wavelength_angstrom,flux,flux_unit,err,dq");
+    expect(unitLinesOf(angstrom)).toContain("# unit vacuum_wavelength_angstrom: Angstrom");
+    expect(column(angstrom, "vacuum_wavelength_angstrom")).toEqual(cells(scaleWavelengths(DOC_INDICES.map(docWavelength), "A")));
+
+    const air = spectrumCsv(airExportInput(airDocument(), { mode: "wavelength_air", display: { ...DISPLAY, wavelengthUnit: "A" } }));
+    expect(headerRow(air)).toBe("channel,wavelength_vacuum_um,wavelength_air_um,air_wavelength_angstrom,flux,flux_unit");
+    expect(column(air, "wavelength_air_um")).toEqual(cells(AIR_UM));
+
+    for (const mode of ["frequency", "velocity"] as const) {
+      const plain = spectrumCsv(documentExportInput(x1dDocument(), { mode, restUm: 1.87 }));
+      const shown = spectrumCsv(documentExportInput(x1dDocument(), { mode, restUm: 1.87, display: { ...DISPLAY, wavelengthUnit: "nm" } }));
+      expect(shown, mode).toBe(plain);
+    }
+
+    const region = spectrumCsv({ ...regionErrorInput("sum"), display: { ...DISPLAY, wavelengthUnit: "nm" } });
+    expect(headerRow(region).split(",")).toContain("vacuum_wavelength_nm");
+
+    const golden = readFileSync(EXPORT_FIXTURE, "utf8").replace(/\r\n/g, "\n");
+    expect(spectrumCsv(documentExportInput(x1dDocument(), { display: null })).replace(/\r\n/g, "\n")).toBe(golden);
+    expect(spectrumCsv(documentExportInput(x1dDocument(), { display: DISPLAY })).replace(/\r\n/g, "\n")).toBe(golden);
+  });
+
+  it("adds the flux of the view beside the flux of the file", () => {
+    const doc = x1dDocument();
+    const oldCsv = spectrumCsv(documentExportInput(doc));
+    const csv = spectrumCsv(documentExportInput(doc, { display: { ...DISPLAY, fluxUnit: "mJy" } }));
+    expect(headerRow(csv).endsWith(",err,dq,flux_display,err_display")).toBe(true);
+    const fluxInput = { flux: doc.flux, err: doc.err, vacuumUm: doc.axis.values, fluxUnit: "Jy" };
+    const d = fluxDisplay(fluxInput, "mJy");
+    const shownFlux = column(csv, "flux_display");
+    const shownErr = column(csv, "err_display");
+    expect(shownFlux).toEqual(cells(d.values));
+    expect(shownErr).toEqual(cells(d.errors!));
+    expect(closeTo(shownFlux[0], 12.3, 1e-12)).toBe(true);
+    expect(closeTo(shownErr[0], 0.1, 1e-12)).toBe(true);
+    expect(shownFlux[5]).toBe("");
+    expect(shownErr[7]).toBe("");
+    expect(column(csv, "flux")).toEqual(column(oldCsv, "flux"));
+    expect(column(csv, "err")).toEqual(column(oldCsv, "err"));
+    expect(headerBlock(csv)).toContain("# display_flux_unit: mJy");
+    expect(headerBlock(csv)).toContain("# display_flux_basis: Jy x 1000");
+    const round = spectrumCsv(documentExportInput(doc, { software: SOFTWARE, display: { ...DISPLAY, fluxUnit: "mJy" } }));
+    expect(unitLinesOf(round).slice(-2)).toEqual(["# unit flux_display: mJy", "# unit err_display: mJy"]);
+
+    const flam = spectrumCsv(documentExportInput(doc, { display: { ...DISPLAY, fluxUnit: "flam_cgs" } }));
+    const flamFlux = column(flam, "flux_display");
+    expect(flamFlux).toEqual(cells(fluxDisplay(fluxInput, "flam_cgs").values));
+    expect(closeTo(flamFlux[0], 1.1381009979629634e-15, 1e-12)).toBe(true);
+    expect(headerBlock(flam)).toContain(
+      "# display_flux_basis: F_lambda = F_nu x c / lambda^2 with the vacuum wavelength of each sample (c = 299792458 m/s)",
+    );
+
+    const ab = spectrumCsv(documentExportInput(doc, { display: { ...DISPLAY, fluxUnit: "ab" } }));
+    expect(Math.abs(Number(column(ab, "flux_display")[0]) - 13.675237221401506)).toBeLessThanOrEqual(1e-12);
+
+    const noErr = spectrumCsv(documentExportInput(x1dDocument({ err: null }), { display: { ...DISPLAY, fluxUnit: "mJy" } }));
+    expect(headerRow(noErr)).toBe("channel,wavelength_vacuum_um,vacuum_wavelength_um,flux,flux_unit,dq,flux_display");
+  });
+
+  it("says why a display unit was not written", () => {
+    const counts = x1dDocument({ flux_unit: "DN/s" });
+    const csv = spectrumCsv(documentExportInput(counts, { software: SOFTWARE, display: { ...DISPLAY, fluxUnit: "Jy" } }));
+    expect(headerRow(csv)).not.toContain("flux_display");
+    expect(headerBlock(csv)).toContain("# display_flux_note: Jy is not available for flux in DN/s");
+    expect(headerBlock(csv).some((line) => line.startsWith("# display_flux_unit:"))).toBe(false);
+    expect(unitLinesOf(csv).some((line) => line.includes("_display"))).toBe(false);
+    const old = headerBlock(spectrumCsv(documentExportInput(counts, { display: { ...DISPLAY, fluxUnit: "Jy" } })));
+    expect(old[old.length - 2]).toBe("# display_flux_note: Jy is not available for flux in DN/s");
+  });
+
+  it("gives a cube export no display flux", () => {
+    const shown: SpectrumExportDisplay = { ...DISPLAY, fluxUnit: "mJy" };
+    expect(spectrumCsv({ ...regionErrorInput("jy"), display: shown })).toBe(spectrumCsv(regionErrorInput("jy")));
+    expect(spectrumCsv({ ...regionErrorInput("jy"), software: SOFTWARE, display: shown })).toBe(
+      spectrumCsv({ ...regionErrorInput("jy"), software: SOFTWARE }),
+    );
+  });
+
+  it("adds the view to the export summary only when it changed the file", () => {
+    const changed = spectrumExportSummary(
+      documentExportInput(x1dDocument(), { display: { ...DISPLAY, wavelengthUnit: "nm", fluxUnit: "mJy" } }),
+    );
+    expect(changed.params.wavelength_unit).toBe("nm");
+    expect(changed.params.display_flux_unit).toBe("mJy");
+    for (const display of [DISPLAY, null, undefined]) {
+      const summary = spectrumExportSummary(documentExportInput(x1dDocument(), { display }));
+      expect(summary.params).not.toHaveProperty("wavelength_unit");
+      expect(summary.params).not.toHaveProperty("display_flux_unit");
+    }
+  });
+
+  it("stays a file the spectrum reader accepts", () => {
+    const csv = spectrumCsv(
+      documentExportInput(x1dDocument({ cards: NIRSPEC_CARDS }), {
+        software: SOFTWARE,
+        display: { ...DISPLAY, wavelengthUnit: "nm", fluxUnit: "mJy" },
+      }),
+    );
+    const block = headerBlock(csv);
+    expect(block.every((line) => line.startsWith("# "))).toBe(true);
+    const header = headerRow(csv).split(",");
+    for (const name of ["wavelength_vacuum_um", "flux", "err", "dq"]) {
+      expect(header.filter((cell) => cell === name), name).toHaveLength(1);
+    }
+    const rows = dataRows(csv);
+    expect(rows).toHaveLength(DOC_ROWS);
+    for (const row of rows) expect(row.split(",")).toHaveLength(header.length);
+    expect(block).toContain("# flux_unit: Jy");
+    expect(block).toContain("# dq_table: jwst");
+    expect(block.filter((line) => INSTRUMENT_KEYS.some((key) => line.startsWith(`# ${key}:`)))).toEqual(NIRSPEC_LINES);
+  });
+});
+
+const BINNED_DISPLAY: SpectrumExportDisplay = { ...DISPLAY, binFactor: 4 };
+const BINNING_LINE_4 =
+  "# binning: factor 4, 3 bins of 12 channels; flux = mean of the samples used in a bin; err = sqrt(sum err^2) / n_used, the channels treated as independent";
+const BINNING_LINES_4 = [BINNING_LINE_4, "# binning_samples: 11 used, 0 excluded by DQ, 1 not finite", "# binning_dq: not applied"];
+
+function binningLinesOf(csv: string): string[] {
+  return headerBlock(csv).filter((line) => line.startsWith("# binning"));
+}
+
+function expectNear(actual: string[], expected: readonly (number | null)[]): void {
+  expect(actual).toHaveLength(expected.length);
+  expected.forEach((value, i) => {
+    if (value === null) expect(actual[i], `cell ${i}`).toBe("");
+    else expect(closeTo(actual[i], value, 1e-12), `cell ${i}: ${actual[i]} vs ${value}`).toBe(true);
+  });
+}
+
+describe("spectrumCsv of a binned spectrum file", () => {
+  it("writes the bins of a binned spectrum file instead of its channels", () => {
+    const doc = x1dDocument();
+    const csv = spectrumCsv(documentExportInput(doc, { display: BINNED_DISPLAY }));
+    expect(headerRow(csv)).toBe("bin,channel_first,channel_last,n_used,wavelength_vacuum_um,vacuum_wavelength_um,flux,flux_unit,err");
+    expect(dataRows(csv)).toHaveLength(3);
+    expect(column(csv, "bin")).toEqual(["0", "1", "2"]);
+    expect(column(csv, "channel_first")).toEqual(["0", "4", "8"]);
+    expect(column(csv, "channel_last")).toEqual(["3", "7", "11"]);
+    expect(column(csv, "n_used")).toEqual(["4", "3", "4"]);
+    expectNear(column(csv, "flux"), [0.0123684, 0.0125584, 0.0127332]);
+    expectNear(column(csv, "err"), [5.0753078724349326e-5, null, 5.475285380690216e-5]);
+    expectNear(column(csv, "wavelength_vacuum_um"), [1.802055, 1.807535, 1.813015]);
+    const bins = binSpectrum(doc.flux, doc.err, null, 4);
+    const centres = cells(binAxis(doc.axis.values, 4));
+    expect(column(csv, "flux")).toEqual(cells(bins.flux));
+    expect(column(csv, "err")).toEqual(cells(bins.err!));
+    expect(column(csv, "wavelength_vacuum_um")).toEqual(centres);
+    expect(column(csv, "vacuum_wavelength_um")).toEqual(centres);
+    expect(column(csv, "flux_unit")).toEqual(["Jy", "Jy", "Jy"]);
+    expect(headerRow(csv).split(",")).not.toContain("dq");
+    expect(csvLines(csv).some((line) => line.startsWith("# dq_table:"))).toBe(false);
+  });
+
+  it("applies the DQ exclusions of the view before binning and says so", () => {
+    const doc = x1dDocument();
+    const mask = documentDqExclusions(doc);
+    expect(mask).toEqual(DOC_INDICES.map((i) => i === 3));
+    const csv = spectrumCsv(documentExportInput(doc, { display: { ...BINNED_DISPLAY, dqExcluded: mask } }));
+    expect(column(csv, "n_used")).toEqual(["3", "3", "4"]);
+    expectNear(column(csv, "flux").slice(0, 1), [0.0123456]);
+    expectNear(column(csv, "err").slice(0, 1), [5.831428260345449e-5]);
+    expect(column(csv, "flux")).toEqual(cells(binSpectrum(doc.flux, doc.err, mask, 4).flux));
+    expect(headerBlock(csv)).toContain("# binning_dq: jwst exclusions applied before binning");
+    expect(headerBlock(csv)).toContain("# binning_samples: 10 used, 1 excluded by DQ, 1 not finite");
+    const off = spectrumCsv(documentExportInput(doc, { display: { ...BINNED_DISPLAY, dqExcluded: null } }));
+    expect(binningLinesOf(off)).toEqual(BINNING_LINES_4);
+    expect(column(off, "n_used")).toEqual(["4", "3", "4"]);
+    const wrongLength = spectrumCsv(
+      documentExportInput(doc, { display: { ...BINNED_DISPLAY, dqExcluded: [true, true, true, true, true] } }),
+    );
+    expect(wrongLength).toBe(off);
+
+    const emptyBin = spectrumCsv(
+      documentExportInput(doc, { display: { ...BINNED_DISPLAY, dqExcluded: DOC_INDICES.map((i) => i <= 3) } }),
+    );
+    expect(dataRows(emptyBin)).toHaveLength(3);
+    expect(column(emptyBin, "n_used")[0]).toBe("0");
+    expect(column(emptyBin, "flux")[0]).toBe("");
+    expect(column(emptyBin, "err")[0]).toBe("");
+    expect(headerBlock(emptyBin)).toContain("# binning_samples: 7 used, 4 excluded by DQ, 1 not finite");
+  });
+
+  it("states the binning in the header", () => {
+    expect(binningLinesOf(spectrumCsv(documentExportInput(x1dDocument(), { display: BINNED_DISPLAY })))).toEqual(BINNING_LINES_4);
+    expect(BINNING_LINE_4.endsWith(`; ${BINNING_BASIS}`)).toBe(true);
+
+    const five = spectrumCsv(documentExportInput(x1dDocument(), { display: { ...DISPLAY, binFactor: 5 } }));
+    expect(binningLinesOf(five)[0]).toBe(`# binning: factor 5, 3 bins of 12 channels, the last bin holds 2; ${BINNING_BASIS}`);
+    expect(column(five, "n_used")).toEqual(["5", "4", "2"]);
+    expectNear(column(five, "flux"), [0.0123912, 0.012642, 0.0127788]);
+
+    const whole = spectrumCsv(documentExportInput(x1dDocument(), { display: { ...DISPLAY, binFactor: 50 } }));
+    expect(binningLinesOf(whole)[0]).toBe(`# binning: factor 12, 1 bin of 12 channels; ${BINNING_BASIS}`);
+    expect(column(whole, "channel_first")).toEqual(["0"]);
+    expect(column(whole, "channel_last")).toEqual(["11"]);
+    expect(column(whole, "n_used")).toEqual(["11"]);
+
+    const nirspec = x1dDocument({ cards: NIRSPEC_CARDS });
+    const block = headerBlock(spectrumCsv(documentExportInput(nirspec, { software: SOFTWARE, display: BINNED_DISPLAY })));
+    const firstUnit = block.findIndex((line) => line.startsWith("# unit "));
+    expect(block.slice(firstUnit - 3, firstUnit)).toEqual(BINNING_LINES_4);
+    expect(block.slice(firstUnit - 9, firstUnit - 3)).toEqual(NIRSPEC_LINES);
+    expect(block.slice(firstUnit)).toEqual([
+      "# unit wavelength_vacuum_um: um",
+      "# unit vacuum_wavelength_um: um",
+      "# unit flux: Jy",
+      "# unit err: Jy",
+    ]);
+    const channels = headerBlock(spectrumCsv(documentExportInput(nirspec, { software: SOFTWARE })));
+    const channelsOwn = channels.slice(0, channels.findIndex((line) => line.startsWith("# unit ")));
+    expect(block.slice(0, firstUnit - 3)).toEqual(channelsOwn.filter((line) => !line.startsWith("# dq_table:")));
+
+    const bare = headerBlock(spectrumCsv(documentExportInput(x1dDocument(), { software: SOFTWARE, display: BINNED_DISPLAY })));
+    const bareUnit = bare.findIndex((line) => line.startsWith("# unit "));
+    expect(bare.slice(bareUnit - 4, bareUnit)).toEqual([
+      "# flux_jy_note: spectrum file: flux exported in its own unit (flux_unit)",
+      ...BINNING_LINES_4,
+    ]);
+  });
+
+  it("bins every wavelength column by its own mean", () => {
+    const csv = spectrumCsv(airExportInput(airDocument(), { mode: "wavelength_air", display: { ...DISPLAY, binFactor: 2 } }));
+    expect(headerRow(csv)).toBe(
+      "bin,channel_first,channel_last,n_used,wavelength_vacuum_um,wavelength_air_um,air_wavelength_um,flux,flux_unit",
+    );
+    expectNear(column(csv, "wavelength_air_um"), [0.656285, 0.6563]);
+    expectNear(column(csv, "air_wavelength_um"), [0.656285, 0.6563]);
+    expect(column(csv, "wavelength_vacuum_um")).toEqual(cells(binAxis(AIR_UM.map(airToVacuumUm), 2)));
+    expect(column(csv, "flux")).toEqual(["2", "3.5"]);
+    expect(column(csv, "n_used")).toEqual(["2", "1"]);
+    expect(binningLinesOf(csv)[0]).toBe(`# binning: factor 2, 2 bins of 3 channels, the last bin holds 1; ${BINNING_BASIS}`);
+
+    const angstrom = spectrumCsv(
+      airExportInput(airDocument(), { mode: "wavelength_air", display: { ...DISPLAY, wavelengthUnit: "A", binFactor: 2 } }),
+    );
+    expect(headerRow(angstrom)).toBe(
+      "bin,channel_first,channel_last,n_used,wavelength_vacuum_um,wavelength_air_um,air_wavelength_angstrom,flux,flux_unit",
+    );
+    expectNear(column(angstrom, "air_wavelength_angstrom"), [6562.85, 6563]);
+    expect(column(angstrom, "wavelength_air_um")).toEqual(column(csv, "wavelength_air_um"));
+  });
+
+  it("converts the bins for the display columns", () => {
+    const doc = x1dDocument();
+    const csv = spectrumCsv(documentExportInput(doc, { display: { ...BINNED_DISPLAY, fluxUnit: "mJy" } }));
+    expect(headerRow(csv).endsWith(",err,flux_display,err_display")).toBe(true);
+    expectNear(column(csv, "flux_display"), [12.3684, 12.5584, 12.7332]);
+    expectNear(column(csv, "err_display"), [0.050753078724349324, null, 0.05475285380690216]);
+    const block = headerBlock(csv);
+    expect(block).toContain("# display_flux_unit: mJy");
+    expect(block.indexOf("# display_flux_unit: mJy")).toBe(block.indexOf("# binning_dq: not applied") + 1);
+
+    const bins = binSpectrum(doc.flux, doc.err, null, 4);
+    const flam = spectrumCsv(documentExportInput(doc, { display: { ...BINNED_DISPLAY, fluxUnit: "flam_cgs" } }));
+    const expected = fluxDisplay({ flux: bins.flux, err: bins.err, vacuumUm: binAxis(doc.axis.values, 4), fluxUnit: "Jy" }, "flam_cgs");
+    expect(column(flam, "flux_display")).toEqual(cells(expected.values));
+    expect(column(flam, "flux")).toEqual(column(csv, "flux"));
+  });
+
+  it("leaves every other export as it was", () => {
+    const plain = spectrumCsv(documentExportInput());
+    for (const display of [{ ...DISPLAY, binFactor: 1 }, { ...DISPLAY, binFactor: 0 }, null]) {
+      expect(spectrumCsv(documentExportInput(x1dDocument(), { display })), JSON.stringify(display)).toBe(plain);
+    }
+    expect(spectrumCsv(documentExportInput(x1dDocument(), { software: SOFTWARE, display: DISPLAY }))).toBe(
+      spectrumCsv(documentExportInput(x1dDocument(), { software: SOFTWARE })),
+    );
+    expect(spectrumCsv({ ...regionErrorInput("sum"), display: BINNED_DISPLAY })).toBe(spectrumCsv(regionErrorInput("sum")));
+    expect(spectrumCsv({ ...regionErrorInput("sum"), display: BINNED_DISPLAY }).replace(/\r\n/g, "\n")).toBe(regionFixture("sum"));
+    const pixel = exportInput({ source: { kind: "pixel", x: 3, y: 4 }, region: null });
+    expect(spectrumCsv({ ...pixel, display: BINNED_DISPLAY })).toBe(spectrumCsv(pixel));
+
+    const empty = spectrumCsv(documentExportInput(x1dDocument(), { values: [], display: BINNED_DISPLAY }));
+    expect(headerRow(empty)).toBe("channel,flux,flux_unit,err,dq");
+    expect(dataRows(empty)).toEqual([]);
+    expect(binningLinesOf(empty)).toEqual([]);
+  });
+
+  it("names a binned export", () => {
+    const file = { kind: "file", hdu: 1 } as const;
+    expect(spectrumCsvFileName(DOC_PATH, file, BINNED_DISPLAY)).toBe("jw_test_x1d_spectrum_bin4.csv");
+    expect(spectrumCsvFileName(DOC_PATH, file, { ...DISPLAY, binFactor: 1 })).toBe("jw_test_x1d_spectrum.csv");
+    expect(spectrumCsvFileName(DOC_PATH, file, null)).toBe("jw_test_x1d_spectrum.csv");
+    expect(spectrumCsvFileName(DOC_PATH, file)).toBe("jw_test_x1d_spectrum.csv");
+    expect(spectrumCsvFileName("C:/d/c.fits", { kind: "pixel", x: 3, y: 4 }, BINNED_DISPLAY)).toBe("c_spectrum_pixel_3_4.csv");
+  });
+
+  it("records the binning in the export summary", () => {
+    const doc = x1dDocument();
+    const summary = spectrumExportSummary(
+      documentExportInput(doc, { display: { ...BINNED_DISPLAY, dqExcluded: documentDqExclusions(doc) } }),
+    );
+    expect(summary.params).toMatchObject({
+      bin_factor: 4,
+      n_bins: 3,
+      bin_dq_requested: true,
+      bin_dq_excluded: 1,
+      n_channels: 12,
+      dq_column: false,
+      dq_table: null,
+    });
+    expect(Math.abs((summary.values.flux_max as number) - 0.0127332)).toBeLessThanOrEqual(1e-12 * 0.0127332);
+    const sum = 0.0123456 + 0.0125584 + 0.0127332;
+    expect(Math.abs((summary.values.flux_sum as number) - sum)).toBeLessThanOrEqual(1e-12 * sum);
+    const channels = spectrumExportSummary(documentExportInput(doc, { display: DISPLAY }));
+    for (const key of ["bin_factor", "n_bins", "bin_dq_requested", "bin_dq_excluded"]) {
+      expect(channels.params, key).not.toHaveProperty(key);
+    }
+    expect(channels.params.dq_column).toBe(true);
   });
 });

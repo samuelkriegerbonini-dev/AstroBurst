@@ -48,6 +48,13 @@ describe("outputKeepList", () => {
     expect(keep).toContain(`${OUT}/B.png`);
   });
 
+  it("keeps the cube file of a loaded band plane, not its key", () => {
+    const f = { ...file("cut"), path: "D:/data/cut.fits#hdu=0&plane=1", sourcePath: "D:/data/cut.fits#hdu=0&plane=1" };
+    const keep = outputKeepList({ files: [f], records: [] });
+    expect(keep).toContain("D:/data/cut.fits");
+    expect(keep.filter((entry) => entry.includes("#hdu="))).toEqual([]);
+  });
+
   it("keeps the processed result and every chain entry of every render record", () => {
     const chain = withStep(
       withStep(EMPTY_CHAIN, "background", { fitsPath: `${OUT}/A_bg.fits`, previewUrl: `${asset(`${OUT}/A_bg.png`)}?v=2`, dimensions: null }),

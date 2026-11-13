@@ -5,16 +5,19 @@ import { LINE_FIT_COMPONENTS } from "../../shared/types/cube";
 import LineFitInspectPlot from "./LineFitInspectPlot";
 import OutputNote from "./OutputNote";
 import StaleResultNote from "./StaleResultNote";
-import { DecimalField } from "../ui";
+import { DecimalField, ERROR_ALERT_COMPACT_CLASS } from "../ui";
 import { scienceDqSummary } from "../../utils/analysisLabels";
 import {
   RESOLVING_POWER_HINT,
+  fitRedshiftHint,
   lineFitSpaxelNotes,
   lineFitSpaxelRows,
   lineFitSummary,
   planeLabel,
   planeUnit,
+  preferredLineFitPlane,
   sigmaCaption,
+  sourceFrameCaption,
   type LineFitRun,
 } from "../../utils/lineFit";
 
@@ -46,6 +49,7 @@ interface LineFitSectionProps {
   inspectLoading: boolean;
   inspectError: string | null;
   frameNote: string;
+  redshift?: number | null;
 }
 
 type LineFitStatus = "idle" | "running" | "done" | "error";
@@ -57,7 +61,6 @@ const INPUT_CLASS =
 const SELECT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-1.5 py-0.5 text-[10px] text-zinc-200 focus:border-violet-500/50 disabled:opacity-40";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
-const ERROR_CLASS = "text-[10px] text-red-400/80 px-2 py-1 rounded bg-red-900/15 border border-red-800/20";
 
 function FitBtn({ loading, disabled, onClick }: { loading: boolean; disabled: boolean; onClick: () => void }) {
   return (
@@ -121,14 +124,18 @@ function LineFitSection({
   inspectLoading,
   inspectError,
   frameNote,
+  redshift,
 }: LineFitSectionProps) {
   const snrId = useId();
   const resolvingPowerId = useId();
   const componentsId = useId();
   const result = run?.result ?? null;
-  const rows = inspect && result ? lineFitSpaxelRows(inspect, result.units, result.resolving_power) : [];
+  const runRedshift = run?.config.redshift ?? null;
+  const rows = inspect && result ? lineFitSpaxelRows(inspect, result.units, result.resolving_power, runRedshift) : [];
   const spaxelNotes = inspect && result ? lineFitSpaxelNotes(inspect, result.notes) : [];
-  const outputPath = result?.planes[shownPlane ?? "velocity"]?.fits_path || null;
+  const outputPath = result ? result.planes[shownPlane ?? preferredLineFitPlane(result)]?.fits_path || null : null;
+  const sourceFrame = run ? sourceFrameCaption(run) : null;
+  const redshiftHint = fitRedshiftHint(redshift);
   const errText = availabilityText("ERR", errAvailable);
   const dqText = availabilityText("DQ", dqAvailable);
 
@@ -212,11 +219,16 @@ function LineFitSection({
           ))}
         </select>
         <FitBtn loading={loading} disabled={loading || !ready} onClick={onFit} />
+        {redshiftHint && (
+          <span data-linefit-redshift className="text-zinc-500">
+            {redshiftHint}
+          </span>
+        )}
         {!ready && !loading && readyHint && <span className="text-zinc-600">{readyHint}</span>}
       </div>
 
       {error && (
-        <p data-linefit-error className={ERROR_CLASS}>
+        <p data-linefit-error role="alert" className={ERROR_ALERT_COMPACT_CLASS}>
           {error}
         </p>
       )}
@@ -267,6 +279,7 @@ function LineFitSection({
             </span>
             <span data-linefit-sigma>{sigmaCaption(result)}</span>
             <span data-linefit-frame>{frameNote}</span>
+            {sourceFrame && <span data-linefit-source-frame>{sourceFrame}</span>}
           </div>
           {outputPath && <OutputNote path={outputPath} />}
           {result.provenance_path && <OutputNote path={result.provenance_path} kind="manifest" provenance={result.provenance} />}
@@ -295,7 +308,7 @@ function LineFitSection({
                 <div className="text-[10px] font-mono text-zinc-500">
                   spaxel ({inspect.x}, {inspect.y}), ch {inspect.z0}-{inspect.z1}
                 </div>
-                <LineFitInspectPlot spaxel={inspect} />
+                <LineFitInspectPlot spaxel={inspect} redshift={runRedshift} />
                 <div className="grid grid-cols-2 gap-1.5">
                   {rows.map((row) => (
                     <div key={row.label} className="bg-zinc-900/80 rounded px-2 py-1.5">
@@ -320,7 +333,7 @@ function LineFitSection({
             )}
             {inspectLoading && <p className="text-[10px] font-mono text-zinc-500">fitting the spaxel…</p>}
             {inspectError && (
-              <p data-linefit-inspect-error className={ERROR_CLASS}>
+              <p data-linefit-inspect-error role="alert" className={ERROR_ALERT_COMPACT_CLASS}>
                 {inspectError}
               </p>
             )}

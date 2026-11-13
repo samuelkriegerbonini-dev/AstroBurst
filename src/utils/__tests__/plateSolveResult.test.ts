@@ -173,7 +173,7 @@ describe("localFailure", () => {
     expect(failure).toEqual({
       kind: "no_solution",
       message: NO_SOLUTION,
-      best: { matched: 14, predicted: 120, rmsPx: 6.27 },
+      best: { matched: 14, predicted: 120, rmsPx: 6.27, falseAlarmLog10: null, covered: null },
       expectedTier0Stars: 20.4,
       centresTried: 397,
       detections: 286,
@@ -181,11 +181,12 @@ describe("localFailure", () => {
       apiKeyStored: null,
       minMatches: null,
       maxRmsPx: null,
+      maxFalseAlarmLog10: null,
       tier0MinExpectedStars: null,
     });
     expect(
-      localFailure(noSolution({ best: { matched: 3, predicted: 50, rmsPx: 2 }, expected_tier0_stars: 75, centres_tried: 1, can_fallback: false })),
-    ).toMatchObject({ best: { matched: 3, predicted: 50, rmsPx: 2 }, expectedTier0Stars: 75, centresTried: 1, canFallback: false });
+      localFailure(noSolution({ best: { matched: 3, predicted: 50, rmsPx: 2, false_alarm_log10: -3.5 }, expected_tier0_stars: 75, centres_tried: 1, can_fallback: false })),
+    ).toMatchObject({ best: { matched: 3, predicted: 50, rmsPx: 2, falseAlarmLog10: -3.5 }, expectedTier0Stars: 75, centresTried: 1, canFallback: false });
   });
 
   it("gives nothing for an error that is not a local solve failure", () => {
@@ -208,6 +209,7 @@ describe("localFailure", () => {
       apiKeyStored: null,
       minMatches: null,
       maxRmsPx: null,
+      maxFalseAlarmLog10: null,
       tier0MinExpectedStars: null,
     });
     expect(localFailure(new TauriCommandError("plate_solve_cmd", NO_SOLUTION, "local_no_solution"))?.canFallback).toBe(true);
@@ -235,6 +237,8 @@ const MISSING_HINT =
   "The offline solver needs an approximate centre and none was found in the header or the panel; type it in the hint fields, or try astrometry.net, which can solve without hints";
 const NO_CATALOGUE =
   "No offline star catalogue is available (tier0-tycho2: the bundled Tycho-2 catalogue was not found in this installation); install one in Settings > Catalogs";
+const HST_NO_SOLUTION =
+  "No offline solution. tier1-gaia-siril: no solution within 0.03 deg of the hint after 19 centres: no centre produced 8 consistent star matches (scale hint 0.08963..0.1095 arcsec/px from WCS); tier1-2mass: no solution within 0.03 deg of the hint after 19 centres: no centre produced 8 consistent star matches (scale hint 0.08963..0.1095 arcsec/px from WCS); tier2-gaia-vizier: no solution within 0.02 deg of the hint after 19 centres: best candidate matched 14 of 22 predicted stars, rms 0.65 px, log10 P -7.0, cell coverage log10 P -0.2, cell matches above chance log10 P -1.0; the online tier searches 0.02 deg around the hint, not the requested 0.03 deg; tier0-tycho2: no solution within 0.03 deg of the hint after 19 centres: no centre produced 8 consistent star matches (scale hint 0.08963..0.1095 arcsec/px from WCS)";
 
 describe("failureHeading and failureLines", () => {
   it("states the reason, the best candidate, the search and the tier-0 star count", () => {
@@ -243,7 +247,7 @@ describe("failureHeading and failureLines", () => {
     )!;
     expect(failureLines(failure)).toEqual([
       "Searched 397 centres with 286 detected stars.",
-      "Best candidate: 14 of 120 predicted stars matched, RMS 6.27 px; a solution needs 8 matches and an RMS of 1 px or less.",
+      "Best candidate: 14 of 120 predicted stars matched, RMS 6.27 px; a solution needs an RMS of 1 px or less.",
       `${NO_SOLUTION}.`,
       "About 20 Tycho-2 stars are expected in this field, fewer than tier 0 needs; add a deeper catalogue in Settings > Catalogs, such as a Siril Gaia DR3 extract.",
     ]);
@@ -269,17 +273,62 @@ describe("failureHeading and failureLines", () => {
   it("quotes the acceptance thresholds the backend sends instead of its own copies", () => {
     const failure = localFailure(
       noSolution({
-        best: { matched: 5, predicted: 40, rms_px: 1.2 },
+        best: { matched: 5, predicted: 40, rms_px: 1.8, falseAlarmLog10: -7.5 },
         expectedTier0Stars: 45,
         minMatches: 6,
         maxRmsPx: 1.5,
+        maxFalseAlarmLog10: -8,
         tier0MinExpectedStars: 40,
       }),
     )!;
     expect(failureLines(failure)).toEqual([
-      "Best candidate: 5 of 40 predicted stars matched, RMS 1.20 px; a solution needs 6 matches and an RMS of 1.5 px or less.",
+      "Best candidate: 5 of 40 predicted stars matched, RMS 1.80 px, false-alarm probability 10^-7.5; a solution needs 6 matches, an RMS of 1.5 px or less and a false-alarm probability below 10^-8.",
       `${NO_SOLUTION}.`,
     ]);
+  });
+
+  it("names the false-alarm probability that refused a best candidate meeting the match and RMS thresholds, as on 656nmos.fits", () => {
+    const context = {
+      best: {
+        catalog: "tier2-gaia-vizier",
+        centre: [274.71097451756015, -13.832391002435887],
+        matched: 14,
+        predicted: 22,
+        rmsPx: 0.6479768925696433,
+        falseAlarmLog10: -6.994454267420924,
+        coverageLog10: -0.19619110799941705,
+        covered: true,
+      },
+      centresTried: 76,
+      detections: 300,
+      expectedTier0Stars: 0.12024023446158293,
+      minMatches: 8,
+      maxRmsPx: 1,
+      maxFalseAlarmLog10: -9,
+      tier0MinExpectedStars: 50,
+    };
+    const headline = [
+      "Searched 76 centres with 300 detected stars.",
+      "Best candidate: 14 of 22 predicted stars matched, RMS 0.65 px, false-alarm probability 10^-7.0; a solution needs a false-alarm probability below 10^-9.",
+    ];
+    const lines = (sent: Record<string, unknown>) =>
+      failureLines(localFailure(new TauriCommandError("plate_solve_cmd", HST_NO_SOLUTION, "local_no_solution", sent))!);
+    expect(lines(context).slice(0, 2)).toEqual(headline);
+    expect(lines({ ...context, maxFalseAlarmLog10: undefined }).slice(0, 2)).toEqual(headline);
+    expect(lines(context).join("\n")).not.toMatch(/needs 8 matches|1 px or less/);
+  });
+
+  it("names uneven coverage only for a candidate that passed the match and false-alarm tests, and quotes no threshold a candidate meets", () => {
+    const best = { matched: 40, predicted: 60, rmsPx: 0.4, falseAlarmLog10: -30 };
+    expect(failureLines(localFailure(noSolution({ best: { ...best, covered: false } }))!)[0]).toBe(
+      "Best candidate: 40 of 60 predicted stars matched, RMS 0.40 px, too few matches in part of the image; a solution needs matches across the whole image.",
+    );
+    expect(failureLines(localFailure(noSolution({ best: { ...best, matched: 6, covered: false } }))!)[0]).toBe(
+      "Best candidate: 6 of 60 predicted stars matched, RMS 0.40 px; a solution needs 8 matches.",
+    );
+    expect(failureLines(localFailure(noSolution({ best: { ...best, covered: true } }))!)[0]).toBe(
+      "Best candidate: 40 of 60 predicted stars matched, RMS 0.40 px.",
+    );
   });
 
   it("leaves out what the error does not carry and does not suggest a deeper catalogue for a rich field", () => {

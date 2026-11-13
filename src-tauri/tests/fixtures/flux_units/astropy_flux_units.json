@@ -1,0 +1,912 @@
+{
+ "kind": "astropy_flux_unit_goldens",
+ "versions": {
+  "python": "3.13.17",
+  "numpy": "2.5.4",
+  "astropy": "8.0.2"
+ },
+ "method": "astropy.units: spectral_density(lambda) for F_nu and F_lambda, ABmag for AB magnitudes, Unit.to for the factors of astropy_spellings; defined_spellings are written by hand for spellings astropy does not read as flux densities (A as Angstrom, IRAF and ESO forms) and for the refusals",
+ "tolerance": {
+  "relative": 1e-12,
+  "ab_mag_absolute": 1e-12
+ },
+ "constants": {
+  "c_m_per_s": 299792458.0,
+  "ab_zero_point_mag": 8.899999999999997,
+  "ab_zero_flux_jy": 3630.7805477010033
+ },
+ "conversions": [
+  {
+   "lambda_um": 0.1216,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 2.0274658744156864e-20,
+   "flambda_si_um": 2.027465874415686e-19,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 0.1216,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 7.361728590003357e-17,
+   "flambda_si_um": 7.361728590003355e-16,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 0.1216,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 2.027465874415686e-14,
+   "flambda_si_um": 2.0274658744156857e-13,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.001
+  },
+  {
+   "lambda_um": 0.1216,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 2.5030282699186295e-13,
+   "flambda_si_um": 2.503028269918629e-12,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 0.1216,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 2.0274658744156862e-11,
+   "flambda_si_um": 2.0274658744156858e-10,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 0.1216,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 7.361283657956079e-08,
+   "flambda_si_um": 7.361283657956078e-07,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.780547701004
+  },
+  {
+   "lambda_um": 0.1216,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 3.041198811623529e-05,
+   "flambda_si_um": 0.0003041198811623528,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  },
+  {
+   "lambda_um": 0.5,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 1.1991698320000004e-21,
+   "flambda_si_um": 1.1991698320000001e-20,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 0.5,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 4.354185659992001e-18,
+   "flambda_si_um": 4.354185659992e-17,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 0.5,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 1.1991698320000002e-15,
+   "flambda_si_um": 1.199169832e-14,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.001
+  },
+  {
+   "lambda_um": 0.5,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 1.4804471077939202e-14,
+   "flambda_si_um": 1.48044710779392e-13,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 0.5,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 1.1991698320000003e-12,
+   "flambda_si_um": 1.1991698320000001e-11,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 0.5,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 4.353922499415481e-09,
+   "flambda_si_um": 4.3539224994154804e-08,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.7805477010033
+  },
+  {
+   "lambda_um": 0.5,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 1.7987547480000002e-06,
+   "flambda_si_um": 1.798754748e-05,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  },
+  {
+   "lambda_um": 0.6563,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 6.960106650646722e-22,
+   "flambda_si_um": 6.96010665064672e-21,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 0.6563,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 2.5272147248498248e-18,
+   "flambda_si_um": 2.5272147248498245e-17,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 0.6563,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 6.960106650646721e-16,
+   "flambda_si_um": 6.96010665064672e-15,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.001
+  },
+  {
+   "lambda_um": 0.6563,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 8.592669266622416e-15,
+   "flambda_si_um": 8.592669266622416e-14,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 0.6563,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 6.960106650646722e-13,
+   "flambda_si_um": 6.960106650646721e-12,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 0.6563,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 2.52706198370925e-09,
+   "flambda_si_um": 2.5270619837092492e-08,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.7805477010033
+  },
+  {
+   "lambda_um": 0.6563,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 1.0440159975970083e-06,
+   "flambda_si_um": 1.0440159975970081e-05,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  },
+  {
+   "lambda_um": 1.0,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 2.997924580000001e-22,
+   "flambda_si_um": 2.9979245800000002e-21,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 1.0,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 1.0885464149980002e-18,
+   "flambda_si_um": 1.088546414998e-17,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 1.0,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 2.9979245800000005e-16,
+   "flambda_si_um": 2.99792458e-15,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.001
+  },
+  {
+   "lambda_um": 1.0,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 3.7011177694848005e-15,
+   "flambda_si_um": 3.7011177694848e-14,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 1.0,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 2.997924580000001e-13,
+   "flambda_si_um": 2.9979245800000003e-12,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 1.0,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 1.0884806248538702e-09,
+   "flambda_si_um": 1.0884806248538701e-08,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.7805477010033
+  },
+  {
+   "lambda_um": 1.0,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 4.4968868700000005e-07,
+   "flambda_si_um": 4.49688687e-06,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  },
+  {
+   "lambda_um": 2.2,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 6.194059049586779e-23,
+   "flambda_si_um": 6.194059049586778e-22,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 2.2,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 2.2490628409049593e-19,
+   "flambda_si_um": 2.2490628409049587e-18,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 2.2,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 6.194059049586778e-17,
+   "flambda_si_um": 6.194059049586777e-16,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.0009999999999999998
+  },
+  {
+   "lambda_um": 2.2,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 7.646937540257853e-16,
+   "flambda_si_um": 7.646937540257852e-15,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 2.2,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 6.194059049586779e-14,
+   "flambda_si_um": 6.194059049586777e-13,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 2.2,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 2.2489269108551038e-10,
+   "flambda_si_um": 2.2489269108551034e-09,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.7805477010033
+  },
+  {
+   "lambda_um": 2.2,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 9.291088574380168e-08,
+   "flambda_si_um": 9.291088574380166e-07,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  },
+  {
+   "lambda_um": 4.3,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 1.621376192536507e-23,
+   "flambda_si_um": 1.6213761925365065e-22,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 4.3,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 5.887216955100056e-20,
+   "flambda_si_um": 5.887216955100055e-19,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 4.3,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 1.6213761925365065e-17,
+   "flambda_si_um": 1.6213761925365063e-16,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.0009999999999999998
+  },
+  {
+   "lambda_um": 4.3,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 2.0016861922578697e-16,
+   "flambda_si_um": 2.0016861922578693e-15,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 4.3,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 1.6213761925365067e-14,
+   "flambda_si_um": 1.6213761925365065e-13,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 4.3,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 5.886861140367065e-11,
+   "flambda_si_um": 5.886861140367063e-10,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.7805477010033
+  },
+  {
+   "lambda_um": 4.3,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 2.4320642888047598e-08,
+   "flambda_si_um": 2.4320642888047596e-07,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  },
+  {
+   "lambda_um": 10.0,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 2.9979245800000012e-24,
+   "flambda_si_um": 2.997924580000001e-23,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 10.0,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 1.0885464149980004e-20,
+   "flambda_si_um": 1.0885464149980002e-19,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 10.0,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 2.997924580000001e-18,
+   "flambda_si_um": 2.9979245800000006e-17,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.001
+  },
+  {
+   "lambda_um": 10.0,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 3.7011177694848015e-17,
+   "flambda_si_um": 3.7011177694848006e-16,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 10.0,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 2.997924580000001e-15,
+   "flambda_si_um": 2.9979245800000005e-14,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 10.0,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 1.0884806248538704e-11,
+   "flambda_si_um": 1.0884806248538702e-10,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.7805477010033
+  },
+  {
+   "lambda_um": 10.0,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 4.496886870000001e-09,
+   "flambda_si_um": 4.4968868700000007e-08,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  },
+  {
+   "lambda_um": 25.0,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 4.796679328000003e-25,
+   "flambda_si_um": 4.796679328000002e-24,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 25.0,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 1.7416742639968008e-21,
+   "flambda_si_um": 1.7416742639968005e-20,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 25.0,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 4.796679328000002e-19,
+   "flambda_si_um": 4.7966793280000015e-18,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.001
+  },
+  {
+   "lambda_um": 25.0,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 5.921788431175683e-18,
+   "flambda_si_um": 5.921788431175681e-17,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 25.0,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 4.796679328000002e-16,
+   "flambda_si_um": 4.796679328000001e-15,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 25.0,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 1.7415689997661927e-12,
+   "flambda_si_um": 1.7415689997661925e-11,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.7805477010033
+  },
+  {
+   "lambda_um": 25.0,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 7.195018992000003e-10,
+   "flambda_si_um": 7.195018992000002e-09,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  },
+  {
+   "lambda_um": 1000.0,
+   "fnu_jy": 1e-09,
+   "flambda_cgs": 2.997924580000001e-28,
+   "flambda_si_um": 2.9979245800000008e-27,
+   "ab_mag": 31.4,
+   "fnu_jy_back": 1e-09
+  },
+  {
+   "lambda_um": 1000.0,
+   "fnu_jy": 3.631e-06,
+   "flambda_cgs": 1.0885464149980003e-24,
+   "flambda_si_um": 1.088546414998e-23,
+   "ab_mag": 22.499934377717764,
+   "fnu_jy_back": 3.631e-06
+  },
+  {
+   "lambda_um": 1000.0,
+   "fnu_jy": 0.001,
+   "flambda_cgs": 2.997924580000001e-22,
+   "flambda_si_um": 2.9979245800000002e-21,
+   "ab_mag": 16.4,
+   "fnu_jy_back": 0.001
+  },
+  {
+   "lambda_um": 1000.0,
+   "fnu_jy": 0.0123456,
+   "flambda_cgs": 3.701117769484801e-21,
+   "flambda_si_um": 3.7011177694848e-20,
+   "ab_mag": 13.671219495930568,
+   "fnu_jy_back": 0.0123456
+  },
+  {
+   "lambda_um": 1000.0,
+   "fnu_jy": 1.0,
+   "flambda_cgs": 2.997924580000001e-19,
+   "flambda_si_um": 2.9979245800000003e-18,
+   "ab_mag": 8.899999999999997,
+   "fnu_jy_back": 1.0
+  },
+  {
+   "lambda_um": 1000.0,
+   "fnu_jy": 3630.780547701003,
+   "flambda_cgs": 1.0884806248538704e-15,
+   "flambda_si_um": 1.0884806248538702e-14,
+   "ab_mag": -0.0,
+   "fnu_jy_back": 3630.7805477010033
+  },
+  {
+   "lambda_um": 1000.0,
+   "fnu_jy": 1500000.0,
+   "flambda_cgs": 4.496886870000001e-13,
+   "flambda_si_um": 4.49688687e-12,
+   "ab_mag": -6.540228147639207,
+   "fnu_jy_back": 1500000.0
+  }
+ ],
+ "astropy_spellings": [
+  {
+   "text": "Jy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1.0
+  },
+  {
+   "text": "mJy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 0.001
+  },
+  {
+   "text": "uJy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1e-06
+  },
+  {
+   "text": "nJy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1e-09
+  },
+  {
+   "text": "MJy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1000000.0
+  },
+  {
+   "text": "kJy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1000.0000000000001
+  },
+  {
+   "text": "erg / (Hz s cm2)",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1e+23
+  },
+  {
+   "text": "erg s-1 cm-2 Hz-1",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1e+23
+  },
+  {
+   "text": "W / (Hz m2)",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 9.999999999999999e+25
+  },
+  {
+   "text": "W m-2 Hz-1",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 9.999999999999999e+25
+  },
+  {
+   "text": "erg / (Angstrom s cm2)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg / (s cm2 Angstrom)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg s-1 cm-2 Angstrom-1",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "Angstrom-1 cm-2 erg s-1",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg / (cm2 s AA)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "1e-17 erg / (Angstrom s cm2)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 9.999999999999999e-18
+  },
+  {
+   "text": "erg / (s cm2 um)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 0.00010000000000000002
+  },
+  {
+   "text": "erg / (s cm2 nm)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 0.10000000000000002
+  },
+  {
+   "text": "W / (m2 um)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 0.10000000000000002
+  },
+  {
+   "text": "W m-2 um-1",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 0.10000000000000002
+  },
+  {
+   "text": "W / (m2 nm)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 100.0
+  },
+  {
+   "text": "W / (m2 Angstrom)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1000.0
+  }
+ ],
+ "defined_spellings": [
+  {
+   "text": "\u00b5Jy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1e-06
+  },
+  {
+   "text": "\u03bcJy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1e-06
+  },
+  {
+   "text": "JY",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1.0
+  },
+  {
+   "text": "jy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1.0
+  },
+  {
+   "text": "Jansky",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1.0
+  },
+  {
+   "text": "10 Jy",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 10.0
+  },
+  {
+   "text": "erg/s/cm2/Hz",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1e+23
+  },
+  {
+   "text": "W/m2/Hz",
+   "kind": "flux_density_nu",
+   "jy_per_unit": 1e+26
+  },
+  {
+   "text": "erg/s/cm**2/Angstrom",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg/cm2/s/A",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg/s/cm2/A",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg/s/cm^2/A",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "ergs/cm2/s/A",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg cm-2 s-1 A-1",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg.s**(-1).cm**(-2).angstrom**(-1)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg/s/cm2/AA",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg/s/cm2/Ang",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "erg cm**-2 s**-1 Angstrom**-1",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1.0
+  },
+  {
+   "text": "1E-17 erg/cm^2/s/Ang",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1e-17
+  },
+  {
+   "text": "10**(-16)erg.cm**(-2).s**(-1).angstrom**(-1)",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1e-16
+  },
+  {
+   "text": "10^-17 erg/s/cm2/A",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1e-17
+  },
+  {
+   "text": "10**-20 erg/s/cm**2/Angstrom",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 1e-20
+  },
+  {
+   "text": "erg/s/cm2/um",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 0.0001
+  },
+  {
+   "text": "W/m2/um",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 0.1
+  },
+  {
+   "text": "W/m^2/micron",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 0.1
+  },
+  {
+   "text": "W m-2 \u00b5m-1",
+   "kind": "flux_density_lambda",
+   "cgs_per_unit": 0.1
+  },
+  {
+   "text": "MJy/sr",
+   "kind": "surface_brightness"
+  },
+  {
+   "text": "MJy / sr",
+   "kind": "surface_brightness"
+  },
+  {
+   "text": "MJy.sr-1",
+   "kind": "surface_brightness"
+  },
+  {
+   "text": "Jy/arcsec2",
+   "kind": "surface_brightness"
+  },
+  {
+   "text": "erg/s/cm2/A/arcsec2",
+   "kind": "surface_brightness"
+  },
+  {
+   "text": "Jy/pixel",
+   "kind": "surface_brightness"
+  },
+  {
+   "text": "Jy/beam",
+   "kind": "surface_brightness"
+  },
+  {
+   "text": "MJy/sr x pix",
+   "kind": "surface_brightness"
+  },
+  {
+   "text": "DN/s",
+   "kind": "rate"
+  },
+  {
+   "text": "DN / s",
+   "kind": "rate"
+  },
+  {
+   "text": "dn/s",
+   "kind": "rate"
+  },
+  {
+   "text": "DN s-1",
+   "kind": "rate"
+  },
+  {
+   "text": "count/s",
+   "kind": "rate"
+  },
+  {
+   "text": "counts/s",
+   "kind": "rate"
+  },
+  {
+   "text": "ct/s",
+   "kind": "rate"
+  },
+  {
+   "text": "electron/s",
+   "kind": "rate"
+  },
+  {
+   "text": "electrons/s",
+   "kind": "rate"
+  },
+  {
+   "text": "ADU/s",
+   "kind": "rate"
+  },
+  {
+   "text": "",
+   "kind": "unknown"
+  },
+  {
+   "text": "native",
+   "kind": "unknown"
+  },
+  {
+   "text": "DN",
+   "kind": "unknown"
+  },
+  {
+   "text": "counts",
+   "kind": "unknown"
+  },
+  {
+   "text": "Jy x um",
+   "kind": "unknown"
+  },
+  {
+   "text": "mag",
+   "kind": "unknown"
+  },
+  {
+   "text": "foo",
+   "kind": "unknown"
+  },
+  {
+   "text": "MJY",
+   "kind": "unknown"
+  },
+  {
+   "text": "mjy",
+   "kind": "unknown"
+  },
+  {
+   "text": "erg/s/cm2",
+   "kind": "unknown"
+  },
+  {
+   "text": "erg / s cm2",
+   "kind": "unknown"
+  },
+  {
+   "text": "Jy/",
+   "kind": "unknown"
+  },
+  {
+   "text": "(Jy",
+   "kind": "unknown"
+  },
+  {
+   "text": "Jy)",
+   "kind": "unknown"
+  },
+  {
+   "text": "erg//s",
+   "kind": "unknown"
+  },
+  {
+   "text": "erg/(s/(cm2))",
+   "kind": "unknown"
+  },
+  {
+   "text": "1e-17",
+   "kind": "unknown"
+  },
+  {
+   "text": "e-/s",
+   "kind": "unknown"
+  }
+ ]
+}

@@ -264,7 +264,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
       {(state.wbMode === "manual" || state.wbMode === "auto") && (
         <div className="flex flex-col gap-2 pl-2">
           {state.wbMode === "auto" && autoLoading && (
-            <div className="flex items-center gap-2 text-[10px] text-cyan-400/60">
+            <div className="flex items-center gap-2 text-[10px] text-cyan-400/90">
               <Loader2 size={10} className="animate-spin" />
               Computing stability-based WB...
             </div>

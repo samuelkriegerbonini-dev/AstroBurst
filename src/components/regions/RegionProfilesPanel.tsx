@@ -1,5 +1,4 @@
 import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { useTimedFlag } from "../../hooks/useTimedNotice";
 import { Activity, Plus, Loader2 } from "lucide-react";
 import type { RadialProfile, LineCut, RegionShape } from "../../shared/types";
 import type { SbProfile } from "../../shared/types/regions";
@@ -7,6 +6,11 @@ import { radialProfile, lineCut, sbProfile } from "../../services/regions";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useDqContext } from "../../context/PreviewContext";
 import { useMeasurementProvenance } from "../../hooks/useMeasurementLog";
+import { useMeasurementSource } from "../../hooks/useAnalysisTarget";
+import { useImageUnit } from "../../hooks/useImageUnit";
+import { useHeaderSeeing, useImagePsf, useResolutionSettings } from "../../hooks/useResolutionSettings";
+import { psfChoice } from "../../utils/resolutionText";
+import { APP_VERSION } from "../../utils/constants";
 import {
   lineCutEntry,
   measurementLog,
@@ -23,14 +27,18 @@ import {
   MIN_BIN_WIDTH,
   SB_X_UNITS,
   SB_Y_MODES,
+  binMeanError,
   firstSurfaceBrightness,
   formatPositionAngles,
   formatRadius,
   parseBinWidth,
   profileFetchReducer,
-  sbProfileCsv,
+  profileNotes,
+  psfReferenceLine,
+  sbProfileCsvWithProvenance,
   sbReferenceLines,
   sbSeries,
+  withUnit,
   type ProfileFetchState,
   type SbXUnit,
   type SbYMode,
@@ -38,6 +46,8 @@ import {
 import ProfilePlot, { type ProfileSeries } from "./ProfilePlot";
 import LineSkyReadout from "./LineSkyReadout";
 import MeasurementBadge from "../analysis/MeasurementBadge";
+import ResolutionCard from "../analysis/ResolutionCard";
+import { CopyCsvButton, ErrorAlert, SMALL_BUTTON_CLASS } from "../ui";
 
 interface RegionProfilesPanelProps {
   filePath: string | null;
@@ -52,7 +62,6 @@ const CUT_COLOR = "#a78bfa";
 const DEFAULT_BIN_WIDTH_TEXT = "1";
 const DEFAULT_BIN_WIDTH = 1;
 const BIN_WIDTH_HINT = `bin width must be between ${MIN_BIN_WIDTH} and ${MAX_BIN_WIDTH} px, written with a dot; using ${DEFAULT_BIN_WIDTH}`;
-const COPIED_FEEDBACK_MS = 1500;
 const CSV_NAME: Record<ProfileRequest["kind"], string> = { radial: "radial-profile", sb: "sb-profile", cut: "line-cut" };
 const MAG_DIGITS = 2;
 const ELLIPTICITY_DIGITS = 3;
@@ -62,9 +71,8 @@ const INPUT_CLASS =
 const SEGMENT_CLASS = "px-1.5 py-0.5 rounded text-[9px] font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 disabled:opacity-40 disabled:cursor-not-allowed";
 const SEGMENT_ACTIVE_CLASS = "px-1.5 py-0.5 rounded text-[9px] font-mono text-sky-300 bg-zinc-800/80";
 const LABEL_CLASS = "text-[9px] text-zinc-500 uppercase";
-const SMALL_BUTTON_CLASS =
-  "px-2 py-0.5 rounded text-[9px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40";
-const LOG_BUTTON_CLASS = `${SMALL_BUTTON_CLASS} inline-flex items-center gap-1`;
+const COPY_CSV_TITLE = "Copy every bin as CSV, with how the profile was measured";
+const PROFILE_PENDING_TITLE = "Waiting for the profile that matches the current region and DQ setting";
 
 type ProfileMode = "radial" | "sb";
 const PROFILE_MODES: readonly ProfileMode[] = ["radial", "sb"];
@@ -112,6 +120,10 @@ function panelTitle(kind: ProfileRequest["kind"]): string {
   return "Line cut";
 }
 
+function isPositiveFinite(v: number | null | undefined): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
 function formatMag(v: number | null): string {
   return v === null || !Number.isFinite(v) ? "--" : v.toFixed(MAG_DIGITS);
 }
@@ -122,17 +134,19 @@ interface SegmentedProps<T extends string> {
   labels: (v: T) => string;
   disabledOption?: (v: T) => boolean;
   disabled?: boolean;
+  label?: string;
   onChange: (v: T) => void;
 }
 
-function Segmented<T extends string>({ options, value, labels, disabledOption, disabled, onChange }: SegmentedProps<T>) {
+export function Segmented<T extends string>({ options, value, labels, disabledOption, disabled, label, onChange }: SegmentedProps<T>) {
   return (
-    <div className="flex items-center gap-0.5">
+    <div className="flex items-center gap-0.5" role={label ? "group" : undefined} aria-label={label}>
       {options.map((opt) => (
         <button
           key={opt}
           type="button"
           disabled={disabled || disabledOption?.(opt)}
+          aria-pressed={opt === value}
           onClick={() => onChange(opt)}
           className={opt === value ? SEGMENT_ACTIVE_CLASS : SEGMENT_CLASS}
         >
@@ -145,24 +159,30 @@ function Segmented<T extends string>({ options, value, labels, disabledOption, d
 
 function Card({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="bg-zinc-900/80 rounded px-2 py-1.5" title={title}>
+    <div className="bg-zinc-900/80 rounded px-2 py-1.5" title={title ?? value}>
       <div className="text-[9px] text-zinc-500 uppercase">{label}</div>
-      <div className="text-[10px] font-mono text-zinc-200 truncate">{value}</div>
+      <div className="text-[10px] font-mono text-zinc-200 break-words">{value}</div>
     </div>
   );
 }
 
-function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfilesPanelProps) {
+export function RegionProfilesPanelInner({ filePath, measurePath, measureKey }: RegionProfilesPanelProps) {
   const doc = useRegionDoc(filePath);
   const { excludeDq } = useDqContext();
   const provenance = useMeasurementProvenance();
+  const source = useMeasurementSource(false);
+  const unit = useImageUnit(measurePath, source === null || source.tone === "original");
+  const resolutionSettings = useResolutionSettings();
+  const imagePsf = useImagePsf(measurePath);
+  const headerSeeing = useHeaderSeeing(resolutionSettings.psfSource === "header" ? measurePath : null);
+  const psf = useMemo(() => psfChoice(resolutionSettings, imagePsf.psf, headerSeeing), [resolutionSettings, imagePsf.psf, headerSeeing]);
   const [{ result, error }, dispatch] = useReducer(profileFetchReducer<ProfileResult>, NO_PROFILE);
   const [loading, setLoading] = useState(false);
   const [mode, setMode] = useState<ProfileMode>("radial");
   const [binWidthText, setBinWidthText] = useState(DEFAULT_BIN_WIDTH_TEXT);
   const [xUnit, setXUnit] = useState<SbXUnit>("px");
   const [yMode, setYMode] = useState<SbYMode>("mean");
-  const [copied, flagCopied] = useTimedFlag(COPIED_FEEDBACK_MS);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const seqRef = useRef(0);
 
   const selected = doc.regions.find((r) => r.id === doc.selectedId);
@@ -229,8 +249,16 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
   const effectiveXUnit: SbXUnit = xUnit === "arcsec" && arcsecAvailable ? "arcsec" : "px";
   const effectiveYMode: SbYMode = yMode === "mu" && !muAvailable ? "mean" : yMode;
 
-  const sbLayout = useMemo(() => (sb ? sbSeries(sb, effectiveYMode, effectiveXUnit) : null), [sb, effectiveYMode, effectiveXUnit]);
-  const referenceLines = useMemo(() => (sb ? sbReferenceLines(sb, effectiveXUnit) : []), [sb, effectiveXUnit]);
+  const sbLayout = useMemo(
+    () => (sb ? sbSeries(sb, effectiveYMode, effectiveXUnit, unit) : null),
+    [sb, effectiveYMode, effectiveXUnit, unit],
+  );
+  const referenceLines = useMemo(() => {
+    if (!sb) return [];
+    const psfLine = psfReferenceLine(psf, sb.pixel_scale_arcsec, effectiveXUnit);
+    const lines = sbReferenceLines(sb, effectiveXUnit);
+    return psfLine ? [...lines, psfLine] : lines;
+  }, [sb, effectiveXUnit, psf]);
 
   const series = useMemo<ProfileSeries[]>(() => {
     if (!result) return [];
@@ -239,31 +267,32 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
       const bins = result.data.bins;
       const x = bins.map((b) => b.r + 0.5);
       return [
-        { x, y: bins.map((b) => b.mean), color: MEAN_COLOR, label: "mean" },
+        { x, y: bins.map((b) => b.mean), yErr: bins.map((b) => binMeanError(b.std, b.count)), color: MEAN_COLOR, label: "mean" },
         { x, y: bins.map((b) => b.median), color: MEDIAN_COLOR, label: "median" },
       ];
     }
     return [{ x: result.data.distance, y: result.data.values, color: CUT_COLOR, label: "value" }];
   }, [result, sbLayout]);
 
-  const handleCopyCsv = useCallback(() => {
-    if (!sb) return;
-    navigator.clipboard?.writeText(sbProfileCsv(sb));
-    flagCopied();
-  }, [sb, flagCopied]);
-
   const logReady = profileLogReady(result, requestKey, excludeDq);
+  const copyText = useCallback(() => {
+    setCopyError(null);
+    return sb && logReady
+      ? sbProfileCsvWithProvenance(sb, { fileName: provenance.file, appVersion: APP_VERSION, exportedUtc: new Date().toISOString() })
+      : null;
+  }, [sb, logReady, provenance.file]);
+
   const handleLog = useCallback(() => {
     if (!logReady || !result || !selected) return;
     const req = JSON.parse(result.requestKey) as ProfileRequest;
     if (result.kind === "radial" && req.kind === "radial") {
-      measurementLog.append(radialProfileEntry(provenance, result.data, result.excludeDq, req, selected));
+      measurementLog.append(radialProfileEntry(provenance, result.data, result.excludeDq, req, selected, unit));
     } else if (result.kind === "sb" && req.kind === "sb") {
       measurementLog.append(sbProfileEntry(provenance, result.data, result.excludeDq, req, selected));
     } else if (result.kind === "cut") {
-      measurementLog.append(lineCutEntry(provenance, result.data, result.excludeDq, selected, req.exclude));
+      measurementLog.append(lineCutEntry(provenance, result.data, result.excludeDq, selected, req.exclude, unit));
     }
-  }, [logReady, result, selected, provenance]);
+  }, [logReady, result, selected, provenance, unit]);
 
   if (!selected || !request) return null;
 
@@ -272,11 +301,10 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
   const yLabel =
     result?.kind === "sb"
       ? (sbLayout?.yLabel ?? "")
-      : result?.kind === "radial" && result.data.background
-        ? "value - bg"
-        : "value";
+      : withUnit(result?.kind === "radial" && result.data.background ? "value - bg" : "value", unit);
   const showControls = request.kind === "radial" || request.kind === "sb";
   const scale = sb?.pixel_scale_arcsec ?? null;
+  const resultNotes = result && result.kind !== "sb" ? profileNotes(result.data) : [];
 
   return (
     <div className="ab-panel overflow-hidden">
@@ -308,7 +336,7 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
             {selected.shape.shape === "circle" && (
               <div className="flex items-center gap-1">
                 <span className={LABEL_CLASS}>mode</span>
-                <Segmented options={PROFILE_MODES} value={mode} labels={(m) => PROFILE_MODE_LABEL[m]} onChange={setMode} />
+                <Segmented options={PROFILE_MODES} value={mode} labels={(m) => PROFILE_MODE_LABEL[m]} label="Profile kind" onChange={setMode} />
               </div>
             )}
             <label className="flex items-center gap-1">
@@ -332,6 +360,7 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
                 labels={(u) => u}
                 disabled={request.kind !== "sb"}
                 disabledOption={(u) => u === "arcsec" && !arcsecAvailable}
+                label="Radius unit"
                 onChange={setXUnit}
               />
             </div>
@@ -343,17 +372,14 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
                 labels={(m) => Y_MODE_LABEL[m]}
                 disabled={request.kind !== "sb"}
                 disabledOption={(m) => m === "mu" && !muAvailable}
+                label="Profile value"
                 onChange={setYMode}
               />
             </div>
           </div>
         )}
         {request.kind === "sb" && binWidth === null && <div className="text-[9px] text-amber-300">{BIN_WIDTH_HINT}</div>}
-        {error && (
-          <div className="text-[10px] text-red-400 bg-red-900/20 border border-red-800/30 rounded px-2.5 py-1.5 break-words">
-            {error}
-          </div>
-        )}
+        <ErrorAlert compact message={error} />
         {result && (
           <ProfilePlot
             key={result.kind}
@@ -379,6 +405,14 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
               <Card label="ellipticity" value={sb.ellipticity.toFixed(ELLIPTICITY_DIGITS)} />
               <Card label="position angle" value={formatPositionAngles(sb.angle_deg, sb.sky_pa_deg, sb.ellipticity)} />
             </div>
+            {isPositiveFinite(sb.r50_px) && isPositiveFinite(scale) && (
+              <ResolutionCard
+                filePath={measurePath}
+                halfLightRadiusArcsec={sb.r50_px * scale}
+                context="profile"
+                sourceLabel={shapeSummary(selected.shape)}
+              />
+            )}
             <div className="flex flex-wrap items-center justify-between gap-1">
               {sb.photcal ? (
                 <span
@@ -395,13 +429,17 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
                   uncalibrated: {sb.calibration_warnings[0] ?? MISSING_CALIBRATION_REASON}
                 </span>
               )}
-              <button type="button" onClick={handleCopyCsv} className={SMALL_BUTTON_CLASS} title="Copy every bin as CSV">
-                {copied ? "copied" : "Copy CSV"}
-              </button>
-              <button type="button" onClick={handleLog} disabled={loading || !logReady} className={LOG_BUTTON_CLASS} title="Log the profile summary on screen">
+              <CopyCsvButton
+                text={copyText}
+                disabled={loading || !logReady}
+                title={loading || !logReady ? PROFILE_PENDING_TITLE : COPY_CSV_TITLE}
+                onError={setCopyError}
+              />
+              <button type="button" onClick={handleLog} disabled={loading || !logReady} className={SMALL_BUTTON_CLASS} title="Log the profile summary on screen">
                 <Plus size={10} /> Log
               </button>
             </div>
+            <ErrorAlert compact message={copyError} />
             <div className="flex flex-wrap gap-x-3 text-[9px] font-mono text-zinc-500">
               <span>{sb.bins.length} bins</span>
               <span>bin {sb.bin_width} px</span>
@@ -435,7 +473,7 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
             {result.data.bins.length > 0 && (
               <span>cum {result.data.bins[result.data.bins.length - 1].cumulative_sum.toExponential(3)}</span>
             )}
-            <button type="button" onClick={handleLog} disabled={loading || !logReady} className={LOG_BUTTON_CLASS} title="Log the profile summary on screen">
+            <button type="button" onClick={handleLog} disabled={loading || !logReady} className={SMALL_BUTTON_CLASS} title="Log the profile summary on screen">
               <Plus size={10} /> Log
             </button>
           </div>
@@ -445,16 +483,26 @@ function RegionProfilesPanel({ filePath, measurePath, measureKey }: RegionProfil
             <div className="flex flex-wrap gap-x-3 text-[9px] font-mono text-zinc-500">
               <span>length {result.data.length.toFixed(1)} px</span>
               <span>{result.data.n_samples} samples</span>
-              <button type="button" onClick={handleLog} disabled={loading || !logReady} className={LOG_BUTTON_CLASS} title="Log the profile summary on screen">
+              <button type="button" onClick={handleLog} disabled={loading || !logReady} className={SMALL_BUTTON_CLASS} title="Log the profile summary on screen">
                 <Plus size={10} /> Log
               </button>
             </div>
             <LineSkyReadout measurePath={measurePath} measureKey={measureKey} shape={selected.shape} />
           </div>
         )}
+        {resultNotes.length > 0 && (
+          <details className="text-[9px] text-zinc-600">
+            <summary className="cursor-pointer">notes ({resultNotes.length})</summary>
+            <ul className="list-disc pl-4 mt-0.5 space-y-0.5">
+              {resultNotes.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+          </details>
+        )}
       </div>
     </div>
   );
 }
 
-export default memo(RegionProfilesPanel);
+export default memo(RegionProfilesPanelInner);
