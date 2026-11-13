@@ -5,7 +5,7 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::core::astrometry::wcs::WcsTransform;
-use crate::core::cubeprep::psf_io::{fit_gaussian, wcs_scale};
+use crate::core::cubeprep::psf_io::{fit_gaussian, wcs_axis_scales, wcs_scale};
 use crate::core::imaging::psf_estimation::{
     build_empirical_psf, empirical_psf_header, parse_radec_list, propose_psf_stars, stars_from_regions, CentroidMethod,
     EmpiricalPsfOptions, PsfHeaderLabels, PsfStar, StarReport,
@@ -57,6 +57,7 @@ pub struct EmpiricalPsfReport {
     pub elapsed_ms: u64,
 }
 
+const AXIS_SCALE_TOLERANCE: f64 = 0.01;
 const STARS_EXTNAME: &str = "STARS";
 const STARS_HISTORY: &str = "Extension STARS lists every requested star: 1-based pixel position, measured centre, \
 centroid method, border background, aperture flux and the reason a rejected star was left out.";
@@ -114,13 +115,27 @@ fn source_stars(
     }
 }
 
-fn resolve_pixel_scale(given: Option<f64>, header: Option<&HduHeader>, wcs: Option<&WcsTransform>) -> Result<Option<f64>> {
+fn axis_scale_warning((scale_x, scale_y): (f64, f64)) -> Option<String> {
+    (scale_x.min(scale_y) > 0.0 && (scale_x - scale_y).abs() > AXIS_SCALE_TOLERANCE * scale_x.max(scale_y)).then(|| {
+        format!("pixel scales differ per axis ({scale_x:.5} x {scale_y:.5} arcsec); the PSF pixel scale and its FWHM in arcsec use their mean")
+    })
+}
+
+fn resolve_pixel_scale(
+    given: Option<f64>,
+    header: Option<&HduHeader>,
+    wcs: Option<&WcsTransform>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<f64>> {
     match given {
         Some(scale) if scale.is_finite() && scale > 0.0 => Ok(Some(scale)),
         Some(scale) => bail!("pixel_scale_arcsec must be a positive number, got {scale}"),
-        None => Ok(header
-            .and_then(wcs_scale)
-            .or_else(|| wcs.map(WcsTransform::pixel_scale_arcsec).filter(|scale| scale.is_finite() && *scale > 0.0))),
+        None => {
+            warnings.extend(header.and_then(wcs_axis_scales).and_then(axis_scale_warning));
+            Ok(header
+                .and_then(wcs_scale)
+                .or_else(|| wcs.map(WcsTransform::pixel_scale_arcsec).filter(|scale| scale.is_finite() && *scale > 0.0)))
+        }
     }
 }
 
@@ -241,7 +256,7 @@ pub fn build_empirical_psf_file(
     let wcs = header.and_then(|header| load_wcs(path, header).ok());
     let mut warnings = Vec::new();
     let stars = source_stars(entry.arr(), header, wcs.as_ref(), source, &mut warnings)?;
-    let pixel_scale_arcsec = resolve_pixel_scale(pixel_scale_arcsec, header, wcs.as_ref())?;
+    let pixel_scale_arcsec = resolve_pixel_scale(pixel_scale_arcsec, header, wcs.as_ref(), &mut warnings)?;
     let built = build_empirical_psf(entry.arr(), &stars, pixel_scale_arcsec, options).map_err(|e| anyhow!(e))?;
     let (dataset, filter) = psf_labels(path, header, dataset, filter, &mut warnings);
     let fwhm_px = fit_gaussian(&built.psf).map(|fit| fit.fwhm_px);
@@ -316,6 +331,11 @@ mod tests {
     const STARS: [(f64, f64); 4] = [(50.3, 60.6), (140.3, 60.6), (50.3, 150.6), (140.3, 150.6)];
 
     fn star_field(dir: &tempfile::TempDir, wcs: bool) -> String {
+        let name = if wcs { "jw_f444w_field.fits" } else { "plain_field.fits" };
+        star_field_at(dir, name, wcs.then_some((SCALE_ARCSEC, SCALE_ARCSEC)))
+    }
+
+    fn star_field_at(dir: &tempfile::TempDir, name: &str, axis_scales_arcsec: Option<(f64, f64)>) -> String {
         let mut image = Array2::<f64>::from_elem((SIZE, SIZE), 3.0);
         for (x, y) in STARS {
             let norm = 4000.0 / (2.0 * PI * 1.8 * 1.8);
@@ -323,7 +343,7 @@ mod tests {
                 *value += norm * (-((c as f64 - x).powi(2) + (r as f64 - y).powi(2)) / (2.0 * 1.8 * 1.8)).exp();
             }
         }
-        let path = dir.path().join(if wcs { "jw_f444w_field.fits" } else { "plain_field.fits" });
+        let path = dir.path().join(name);
         let mut cards: Vec<(&'static str, String)> = vec![
             ("SIMPLE", "T".into()),
             ("BITPIX", "-32".into()),
@@ -331,8 +351,7 @@ mod tests {
             ("NAXIS1", SIZE.to_string()),
             ("NAXIS2", SIZE.to_string()),
         ];
-        if wcs {
-            let s = SCALE_ARCSEC / 3600.0;
+        if let Some((scale_x, scale_y)) = axis_scales_arcsec {
             cards.extend([
                 ("TELESCOP", "'JWST'".into()),
                 ("INSTRUME", "'NIRCAM'".into()),
@@ -343,10 +362,10 @@ mod tests {
                 ("CRPIX2", "100.5".into()),
                 ("CRVAL1", "53.1625".into()),
                 ("CRVAL2", "-27.7914".into()),
-                ("CD1_1", format!("{:E}", -s)),
+                ("CD1_1", format!("{:E}", -(scale_x / 3600.0))),
                 ("CD1_2", "0.0".into()),
                 ("CD2_1", "0.0".into()),
-                ("CD2_2", format!("{:E}", s)),
+                ("CD2_2", format!("{:E}", scale_y / 3600.0)),
             ]);
         }
         let data: Vec<u8> = image.iter().flat_map(|v| (*v as f32).to_be_bytes()).collect();
@@ -473,6 +492,84 @@ mod tests {
         let scaled = build_empirical_psf_file(&plain, &PsfStarSource::Auto { num_stars: None }, &arcsec, Some("hst"), Some("f814w"), Some(0.04), None).unwrap();
         assert_eq!(scaled.normalization_radius_px, 20.0);
         assert_eq!((scaled.dataset.as_deref(), scaled.filter.as_deref()), (Some("hst"), Some("f814w")));
+    }
+
+    const RECTANGULAR_SCALES_ARCSEC: (f64, f64) = (0.1355, 0.1211);
+    const RECTANGULAR_MEAN_SCALE_ARCSEC: f64 = 0.1283;
+
+    fn pixel_stars() -> Vec<PsfStar> {
+        STARS.iter().map(|&(x, y)| PsfStar { name: format!("p{x}"), x, y }).collect()
+    }
+
+    fn rectangular_pixel_psf(dir: &tempfile::TempDir) -> (String, EmpiricalPsfReport) {
+        let image = star_field_at(dir, "jw_f444w_rectangular.fits", Some(RECTANGULAR_SCALES_ARCSEC));
+        let out = dir.path().join("psfs");
+        let source = PsfStarSource::Pixels { stars: pixel_stars() };
+        let report =
+            build_empirical_psf_file(&image, &source, &EmpiricalPsfOptions::default(), None, None, None, Some(out.to_str().unwrap())).unwrap();
+        (image, report)
+    }
+
+    #[test]
+    fn rectangular_pixels_give_the_empirical_psf_the_scale_every_other_tool_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let (image, report) = rectangular_pixel_psf(&dir);
+        let entry = crate::service::image_files::load_cached_full(&image).unwrap();
+        let reported = load_wcs(&image, entry.header().unwrap()).unwrap().pixel_scale_arcsec();
+        assert!((reported - RECTANGULAR_MEAN_SCALE_ARCSEC).abs() < 1e-12, "{reported}");
+        let scale = report.pixel_scale_arcsec.unwrap();
+        assert!(
+            (scale / reported - 1.0).abs() < 1e-14,
+            "the PSF scale {scale} is not the {reported} arcsec per pixel the WCS tools and the cube PIXSCALE report for the same grid"
+        );
+        let fwhm = report.fwhm_px.unwrap();
+        assert!((report.fwhm_arcsec.unwrap() - fwhm * reported).abs() < 1e-12, "{:?} against {fwhm} px", report.fwhm_arcsec);
+        let file = std::fs::File::open(report.output_path.as_deref().unwrap()).unwrap();
+        let header = extract_image_mmap_by_index(&file, 0).unwrap().header;
+        assert!((header.get_f64("PIXSCALE").unwrap() - RECTANGULAR_MEAN_SCALE_ARCSEC).abs() < 1e-12, "{:?}", header.get_f64("PIXSCALE"));
+        let disclosed = "pixel scales differ per axis (0.13550 x 0.12110 arcsec); the PSF pixel scale and its FWHM in arcsec use their mean";
+        assert!(report.warnings.iter().any(|w| w == disclosed), "{:?}", report.warnings);
+
+        let source = PsfStarSource::Pixels { stars: pixel_stars() };
+        let options = EmpiricalPsfOptions::default();
+        let given = build_empirical_psf_file(&image, &source, &options, None, None, Some(0.13), None).unwrap();
+        assert_eq!(given.pixel_scale_arcsec, Some(0.13));
+        assert!(!given.warnings.iter().any(|w| w.contains("pixel scales differ")), "{:?}", given.warnings);
+        let square = build_empirical_psf_file(&star_field(&dir, true), &source, &options, None, None, None, None).unwrap();
+        assert!(!square.warnings.iter().any(|w| w.contains("pixel scales differ")), "{:?}", square.warnings);
+    }
+
+    #[test]
+    fn a_kernel_built_from_the_empirical_psf_passes_the_scale_check_of_a_cube_on_the_same_rectangular_grid() {
+        use crate::core::cubeprep::cube::test_support::small_cube;
+        use crate::core::cubeprep::kernel::{build_kernel, kernel_file_name, kernel_header, KernelOptions};
+        use crate::core::cubeprep::match_cube::{match_cube, MatchMode, MatchOptions, PlaneKernel};
+        use crate::core::cubeprep::psf_io::{load_psf, pixel_scale};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_, report) = rectangular_pixel_psf(&dir);
+        let psf = load_psf(std::path::Path::new(report.output_path.as_deref().unwrap()), None).unwrap();
+        let reported = report.pixel_scale_arcsec.unwrap();
+        assert!((psf.pixel_scale_arcsec / reported - 1.0).abs() < 1e-14, "the written PIXSCALE {} against the reported {reported}", psf.pixel_scale_arcsec);
+
+        let centre = (psf.data.nrows() / 2) as f64;
+        let wide = Array2::from_shape_fn(psf.data.dim(), |(r, c)| (-((r as f64 - centre).powi(2) + (c as f64 - centre).powi(2)) / 18.0).exp());
+        let target = &wide / wide.sum();
+        let kernel = build_kernel(&psf.data, &target, &KernelOptions::default()).unwrap();
+        let header = kernel_header(&kernel, "F150W", "F444W", Some(psf.pixel_scale_arcsec));
+        let kernel_scale = pixel_scale(&header, None, &mut Vec::new()).unwrap().map(|(scale, _)| scale);
+        assert_eq!(kernel_scale, Some(psf.pixel_scale_arcsec), "the kernel file carries the scale of its target PSF");
+
+        let mut cube = small_cube(&[("JWST", "F150W"), ("JWST", "F444W")], (64, 72), |z, y, x| (1.0 + z as f64 + 0.01 * (x + y) as f64) as f32);
+        cube.header.set("CD1_1", format!("{:E}", -(RECTANGULAR_SCALES_ARCSEC.0 / 3600.0)));
+        cube.header.set("CD2_2", format!("{:E}", RECTANGULAR_SCALES_ARCSEC.1 / 3600.0));
+        let cube_scale = cube.wcs().unwrap().pixel_scale_arcsec();
+        assert!((cube_scale - RECTANGULAR_MEAN_SCALE_ARCSEC).abs() < 1e-12, "{cube_scale}");
+
+        let plane_kernel = PlaneKernel { filter: "F150W".into(), label: kernel_file_name("F150W", "F444W"), data: kernel.data, pixel_scale_arcsec: kernel_scale };
+        let options = MatchOptions { reference: "F444W".into(), mode: MatchMode::Astroburst, allow_unmatched: false };
+        let outcome = match_cube(&cube, &[plane_kernel], &options, &[]).map(|_| ()).map_err(|error| error.to_string());
+        assert_eq!(outcome, Ok(()), "kernel at {kernel_scale:?} arcsec per pixel, cube at {cube_scale}");
     }
 
     #[test]

@@ -20,6 +20,12 @@ pub struct DetectedStar {
     pub snr: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct StarExtent {
+    pub star: DetectedStar,
+    pub whole_component_fwhm: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionResult {
     pub stars: Vec<DetectedStar>,
@@ -218,13 +224,64 @@ fn truncated_second_moment_fraction(peak: f64, cut: f64) -> f64 {
     (1.0 - tail * (1.0 + u)) / (1.0 - tail)
 }
 
+const FWHM_PER_SIGMA: f64 = 2.3548200450309493;
+const CORE_MIN_PIXELS: usize = 9;
+
+fn core_fwhm(
+    image: &Array2<f32>,
+    component: &[(usize, usize)],
+    bg_median: f64,
+    (cx, cy): (f64, f64),
+    peak: f64,
+    cut_above_bg: f64,
+) -> Option<f64> {
+    if component.len() <= CORE_MIN_PIXELS {
+        return None;
+    }
+    let mut values: Vec<f64> = component
+        .iter()
+        .map(|&(pr, pc)| (image[[pr, pc]] as f64 - bg_median).max(0.0))
+        .collect();
+    values.select_nth_unstable_by(CORE_MIN_PIXELS - 1, |a, b| b.total_cmp(a));
+    let level = values[CORE_MIN_PIXELS - 1].min(0.5 * peak);
+    if level <= cut_above_bg {
+        return None;
+    }
+
+    let mut sum = 0.0f64;
+    let mut sum_dx = 0.0f64;
+    let mut sum_dy = 0.0f64;
+    let mut sum_r2 = 0.0f64;
+    let mut faintest_kept = peak;
+    let mut brightest_left_out = cut_above_bg;
+    for &(pr, pc) in component {
+        let v = (image[[pr, pc]] as f64 - bg_median).max(0.0);
+        if v < level {
+            brightest_left_out = brightest_left_out.max(v);
+            continue;
+        }
+        faintest_kept = faintest_kept.min(v);
+        let dx = pc as f64 - cx;
+        let dy = pr as f64 - cy;
+        sum += v;
+        sum_dx += dx * v;
+        sum_dy += dy * v;
+        sum_r2 += (dx * dx + dy * dy) * v;
+    }
+    let offset2 = (sum_dx * sum_dx + sum_dy * sum_dy) / (sum * sum);
+    let central_r2 = (sum_r2 / sum - offset2).max(0.0);
+    let truncation_level = (faintest_kept * brightest_left_out).max(0.0).sqrt();
+    let kept_fraction = truncated_second_moment_fraction(peak, truncation_level);
+    Some((central_r2 / (2.0 * kept_fraction)).sqrt() * FWHM_PER_SIGMA)
+}
+
 fn measure_component(
     image: &Array2<f32>,
     component: &[(usize, usize)],
     bg_median: f64,
     bg_sigma: f64,
     cut_above_bg: f64,
-) -> Option<DetectedStar> {
+) -> Option<StarExtent> {
     let npix = component.len();
     if npix < 3 {
         return None;
@@ -268,11 +325,12 @@ fn measure_component(
         return None;
     }
     let sigma_star = (sum_r2 / (2.0 * sum_flux * kept_fraction)).sqrt();
-    let fwhm = sigma_star * 2.3548200450309493;
+    let component_fwhm = sigma_star * FWHM_PER_SIGMA;
 
-    if fwhm < 0.5 || fwhm > 30.0 {
+    if component_fwhm < 0.5 || component_fwhm > 30.0 {
         return None;
     }
+    let fwhm = core_fwhm(image, component, bg_median, (cx, cy), peak_val, cut_above_bg).unwrap_or(component_fwhm);
 
     let ixx = sum_xx / sum_flux;
     let iyy = sum_yy / sum_flux;
@@ -290,7 +348,7 @@ fn measure_component(
 
     let snr = confidence::compute_detection_snr(peak_val, bg_sigma);
 
-    Some(DetectedStar {
+    let star = DetectedStar {
         x: cx,
         y: cy,
         flux: sum_flux,
@@ -299,21 +357,32 @@ fn measure_component(
         peak: peak_val,
         npix,
         snr,
-    })
+    };
+    Some(StarExtent { star, whole_component_fwhm: component_fwhm })
 }
 
 pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResult {
     let (rows, cols) = image.dim();
+    let (extents, (background_median, background_sigma)) = star_extents_and_background(image, sigma_threshold);
+    DetectionResult {
+        stars: extents.into_iter().map(|extent| extent.star).collect(),
+        background_median,
+        background_sigma,
+        threshold_sigma: sigma_threshold,
+        image_width: cols,
+        image_height: rows,
+    }
+}
+
+pub fn detect_star_extents(image: &Array2<f32>, sigma_threshold: f64) -> Vec<StarExtent> {
+    star_extents_and_background(image, sigma_threshold).0
+}
+
+fn star_extents_and_background(image: &Array2<f32>, sigma_threshold: f64) -> (Vec<StarExtent>, (f64, f64)) {
+    let (rows, cols) = image.dim();
 
     if rows < 3 || cols < 3 {
-        return DetectionResult {
-            stars: Vec::new(),
-            background_median: 0.0,
-            background_sigma: 1.0,
-            threshold_sigma: sigma_threshold,
-            image_width: cols,
-            image_height: rows,
-        };
+        return (Vec::new(), (0.0, 1.0));
     }
 
     let tile_size = (rows.min(cols) / 8).max(32).min(256);
@@ -322,7 +391,7 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
     let threshold = bg_median + sigma_threshold * bg_sigma;
 
     let mut visited = Array2::<bool>::default((rows, cols));
-    let mut stars = Vec::new();
+    let mut extents = Vec::new();
 
     for r in 1..rows - 1 {
         for c in 1..cols - 1 {
@@ -364,23 +433,24 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
             }
 
             for pixels in deblend_component(image, &component, bg_median) {
-                if let Some(star) = measure_component(image, &pixels, bg_median, bg_sigma, threshold - bg_median) {
-                    stars.push(star);
+                if let Some(extent) = measure_component(image, &pixels, bg_median, bg_sigma, threshold - bg_median) {
+                    extents.push(extent);
                 }
             }
         }
     }
 
-    stars.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+    extents.sort_by(|a, b| b.star.flux.total_cmp(&a.star.flux));
 
     let dedup_radius = 3.0f64;
     let dedup_r2 = dedup_radius * dedup_radius;
     let cell_size = dedup_radius;
     let mut grid: std::collections::HashMap<(usize, usize), Vec<usize>> =
-        std::collections::HashMap::with_capacity(stars.len());
-    let mut deduped = Vec::with_capacity(stars.len());
+        std::collections::HashMap::with_capacity(extents.len());
+    let mut deduped = Vec::with_capacity(extents.len());
 
-    for (i, star) in stars.iter().enumerate() {
+    for (i, extent) in extents.iter().enumerate() {
+        let star = &extent.star;
         let gx = (star.x / cell_size) as usize;
         let gy = (star.y / cell_size) as usize;
 
@@ -389,8 +459,8 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
             for nx in gx.saturating_sub(1)..=gx + 1 {
                 if let Some(cell) = grid.get(&(ny, nx)) {
                     for &j in cell {
-                        let dx = star.x - stars[j].x;
-                        let dy = star.y - stars[j].y;
+                        let dx = star.x - extents[j].star.x;
+                        let dy = star.y - extents[j].star.y;
                         if dx * dx + dy * dy < dedup_r2 {
                             too_close = true;
                             break 'outer;
@@ -402,18 +472,11 @@ pub fn detect_stars(image: &Array2<f32>, sigma_threshold: f64) -> DetectionResul
 
         if !too_close {
             grid.entry((gy, gx)).or_default().push(i);
-            deduped.push(star.clone());
+            deduped.push(extent.clone());
         }
     }
 
-    DetectionResult {
-        stars: deduped,
-        background_median: bg_median,
-        background_sigma: bg_sigma,
-        threshold_sigma: sigma_threshold,
-        image_width: cols,
-        image_height: rows,
-    }
+    (deduped, (bg_median, bg_sigma))
 }
 
 #[cfg(test)]
@@ -574,13 +637,140 @@ mod tests {
         for peak_over_cut in [2.0, 3.0, 10.0, 100.0] {
             let img = noise_free_star(41, 100.0, cut * peak_over_cut, sigma);
             let component = component_above(&img, 100.0 + cut as f32);
-            let star = measure_component(&img, &component, 100.0, 10.0, cut).expect("star measured");
+            let star = measure_component(&img, &component, 100.0, 10.0, cut).expect("star measured").star;
             assert!(
                 (star.fwhm - true_fwhm).abs() / true_fwhm < 0.05,
                 "peak {peak_over_cut}x the cut gave FWHM {} for a true {true_fwhm}",
                 star.fwhm
             );
         }
+    }
+
+    fn pixel_integrated_star(size: usize, (x0, y0): (f64, f64), bg: f32, amp: f64, profile: impl Fn(f64) -> f64) -> Array2<f32> {
+        const SUBSAMPLES: usize = 9;
+        let offset = |i: usize| (i as f64 + 0.5) / SUBSAMPLES as f64 - 0.5;
+        Array2::from_shape_fn((size, size), |(y, x)| {
+            let mut sum = 0.0;
+            for j in 0..SUBSAMPLES {
+                for i in 0..SUBSAMPLES {
+                    sum += profile((x as f64 + offset(i) - x0).powi(2) + (y as f64 + offset(j) - y0).powi(2));
+                }
+            }
+            bg + (amp * sum / (SUBSAMPLES * SUBSAMPLES) as f64) as f32
+        })
+    }
+
+    fn moffat(fwhm: f64, beta: f64) -> impl Fn(f64) -> f64 {
+        let alpha2 = (fwhm / 2.0).powi(2) / (2f64.powf(1.0 / beta) - 1.0);
+        move |d2| (1.0 + d2 / alpha2).powf(-beta)
+    }
+
+    fn gaussian(fwhm: f64) -> impl Fn(f64) -> f64 {
+        let sigma = fwhm / FWHM_PER_SIGMA;
+        move |d2| (-d2 / (2.0 * sigma * sigma)).exp()
+    }
+
+    #[test]
+    fn fwhm_of_a_moffat_star_does_not_grow_with_its_brightness() {
+        let true_fwhm = 4.0;
+        let cut = 50.0;
+        let measured: Vec<f64> = [2.0, 10.0, 100.0, 1000.0]
+            .iter()
+            .map(|peak_over_cut| {
+                let img = pixel_integrated_star(81, (40.3, 40.6), 100.0, cut * peak_over_cut, moffat(true_fwhm, 2.5));
+                let component = component_above(&img, 100.0 + cut as f32);
+                measure_component(&img, &component, 100.0, 10.0, cut).expect("star measured").star.fwhm
+            })
+            .collect();
+        assert!(
+            measured.iter().all(|fwhm| (fwhm - true_fwhm).abs() / true_fwhm < 0.08),
+            "Moffat beta 2.5 star of FWHM {true_fwhm} px measured as {measured:.2?} px at 2, 10, 100 and 1000 times the cut"
+        );
+    }
+
+    #[test]
+    fn detected_moffat_stars_report_one_fwhm_whatever_their_brightness() {
+        let true_fwhm = 4.0;
+        let mut img = gaussian_noise(240, 480, 10.0, 11);
+        img += 1000.0;
+        let stars: [(f64, f64, f64); 4] = [(60.3, 120.6, 500.0), (180.7, 120.2, 5000.0), (300.4, 120.5, 50000.0), (420.6, 120.3, 5000.0)];
+        for &(x0, y0, amp) in &stars {
+            let stamp = pixel_integrated_star(101, (50.0 + x0 - x0.round(), 50.0 + y0 - y0.round()), 0.0, amp, moffat(true_fwhm, 2.5));
+            let (row, col) = (y0.round() as usize - 50, x0.round() as usize - 50);
+            let mut target = img.slice_mut(ndarray::s![row..row + 101, col..col + 101]);
+            target += &stamp;
+        }
+        let result = detect_stars(&img, 5.0);
+        let measured: Vec<f64> = stars
+            .iter()
+            .map(|&(x0, y0, _)| result.stars.iter().find(|s| (s.x - x0).hypot(s.y - y0) < 1.0).expect("star detected").fwhm)
+            .collect();
+        assert!(
+            measured.iter().all(|fwhm| (fwhm - true_fwhm).abs() / true_fwhm < 0.10),
+            "Moffat beta 2.5 stars of FWHM {true_fwhm} px with peaks of 10, 100, 1000 and 100 times the 5 sigma cut measured as {measured:.2?} px"
+        );
+    }
+
+    #[test]
+    fn fwhm_of_a_bright_undersampled_star_does_not_depend_on_its_pixel_phase() {
+        let true_fwhm = 1.5;
+        let pixel_integrated_fwhm = (true_fwhm * true_fwhm + FWHM_PER_SIGMA.powi(2) / 12.0).sqrt();
+        let cut = 50.0;
+        for centre in [(20.0, 20.0), (20.5, 20.0), (20.5, 20.5), (20.3, 20.6)] {
+            let img = pixel_integrated_star(41, centre, 100.0, cut * 100.0, gaussian(true_fwhm));
+            let component = component_above(&img, 100.0 + cut as f32);
+            let star = measure_component(&img, &component, 100.0, 10.0, cut).expect("star measured").star;
+            assert!(
+                (star.fwhm - pixel_integrated_fwhm).abs() / pixel_integrated_fwhm < 0.10,
+                "star centred at {centre:?} gave FWHM {} for a pixel-integrated {pixel_integrated_fwhm}",
+                star.fwhm
+            );
+        }
+    }
+
+    #[test]
+    fn whole_component_fwhm_is_the_brightness_dependent_width_reported_at_c3f19b3() {
+        let cut = 50.0;
+        let moffat_star = moffat(4.0, 2.5);
+        let gaussian_star = gaussian(4.0);
+        let profiles: [(&str, &dyn Fn(f64) -> f64, [f64; 3]); 2] = [
+            ("Moffat beta 2.5", &moffat_star, [4.7814796957596, 5.86336812212113, 6.7316042072205935]),
+            ("Gaussian", &gaussian_star, [4.113771445172538, 4.0602748575409615, 4.055714506820952]),
+        ];
+        for (name, profile, at_c3f19b3) in profiles {
+            let widths: Vec<f64> = [10.0, 100.0, 1000.0]
+                .iter()
+                .map(|peak_over_cut| {
+                    let img = pixel_integrated_star(81, (40.3, 40.6), 100.0, cut * peak_over_cut, profile);
+                    let component = component_above(&img, 100.0 + cut as f32);
+                    measure_component(&img, &component, 100.0, 10.0, cut).expect("star measured").whole_component_fwhm
+                })
+                .collect();
+            assert!(
+                widths.iter().zip(&at_c3f19b3).all(|(width, expected)| (width - expected).abs() < 1e-9),
+                "{name} star of FWHM 4 px at 10, 100 and 1000 times the cut: whole-component FWHM {widths:.4?} px, c3f19b3 reported {at_c3f19b3:.4?} px"
+            );
+        }
+    }
+
+    #[test]
+    fn star_extents_pair_each_detected_star_with_the_width_of_its_whole_component() {
+        let mut img = make_test_image(300, 300);
+        add_gaussian(&mut img, 150, 60, 20000.0, 3.0, 5000.0);
+        let extents = detect_star_extents(&img, 5.0);
+        let stars = detect_stars(&img, 5.0).stars;
+        let bits = |s: &DetectedStar| {
+            [s.x.to_bits(), s.y.to_bits(), s.flux.to_bits(), s.fwhm.to_bits(), s.eccentricity.to_bits(), s.peak.to_bits(), s.npix as u64, s.snr.to_bits()]
+        };
+        assert_eq!(extents.iter().map(|extent| bits(&extent.star)).collect::<Vec<_>>(), stars.iter().map(bits).collect::<Vec<_>>());
+
+        let whole_component: Vec<f64> = extents.iter().map(|extent| extent.whole_component_fwhm).collect();
+        let reported: Vec<f64> = stars.iter().map(|star| star.fwhm).collect();
+        let near = |measured: &[f64], expected: [f64; 4]| measured.len() == 4 && measured.iter().zip(expected).all(|(m, e)| (m - e).abs() < 5e-4);
+        assert!(
+            near(&whole_component, [8.279, 4.621, 4.632, 4.651]) && near(&reported, [12.349, 4.738, 4.736, 4.739]),
+            "clipped star and three Gaussian stars, brightest first: whole-component FWHM {whole_component:.3?} px, reported FWHM {reported:.3?} px"
+        );
     }
 
     #[test]

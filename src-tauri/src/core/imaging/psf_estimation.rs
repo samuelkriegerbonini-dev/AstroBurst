@@ -97,7 +97,7 @@ fn select_psf_stars(image: &Array2<f32>, config: &PsfEstimationConfig) -> Result
             let close_enough = s.distance_from_center < max_dist;
             let saturated = is_saturated(d, saturation_level, stats.median, config.saturation_threshold);
 
-            in_bounds && !saturated && round_enough && close_enough
+            d.fwhm_measured && in_bounds && !saturated && round_enough && close_enough
         })
         .map(|d| d.star)
         .collect();
@@ -114,6 +114,9 @@ fn select_psf_stars(image: &Array2<f32>, config: &PsfEstimationConfig) -> Result
 
     candidates.sort_by(|a, b| score_star(b).total_cmp(&score_star(a)));
     candidates.truncate(config.num_stars);
+    for star in &mut candidates {
+        star.fwhm = fwhm_with_sky_beyond_the_star(image, star);
+    }
     Ok((candidates, detected_total))
 }
 
@@ -187,6 +190,8 @@ const PLATEAU_MIN_PIXELS: usize = 5;
 const PLATEAU_WINDOW: usize = 4;
 const HALF_MAX_WINDOW: usize = 32;
 const PLATEAU_NOISE_SIGMAS: f64 = 3.0;
+const LOCAL_BG_RADIUS: usize = 10;
+const LOCAL_BG_INNER_FRACTION: f64 = 0.6;
 
 struct LocalStats {
     _mean: f64,
@@ -242,6 +247,7 @@ struct Detection {
     star: StarCandidate,
     raw_peak: f64,
     plateau: bool,
+    fwhm_measured: bool,
 }
 
 fn connected_count(
@@ -398,7 +404,7 @@ fn detect_stars_for_psf(
 
             let (sub_x, sub_y) = centroid_subpixel(image, x, y, 3);
             let sub_peak = subpixel_peak(image, x, y);
-            let Some((fwhm_major, fwhm_minor)) = measure_fwhm(image, sub_x, sub_y) else {
+            let Some(((fwhm_major, fwhm_minor), fwhm_measured)) = measure_fwhm(image, sub_x, sub_y) else {
                 continue;
             };
             let fwhm = (fwhm_major + fwhm_minor) / 2.0;
@@ -430,6 +436,7 @@ fn detect_stars_for_psf(
                     },
                     raw_peak: val,
                     plateau: has_plateau(image, y, x, (fwhm_major, fwhm_minor), bg_mean, stats.noise),
+                    fwhm_measured,
                 });
             }
         }
@@ -440,7 +447,7 @@ fn detect_stars_for_psf(
 
 fn centroid_subpixel(image: &Array2<f32>, x: usize, y: usize, radius: usize) -> (f64, f64) {
     let (h, w) = image.dim();
-    let bg = estimate_local_bg(image, x, y, 10);
+    let bg = estimate_local_bg(image, x, y, LOCAL_BG_RADIUS);
     let mut sum_x = 0.0f64;
     let mut sum_y = 0.0f64;
     let mut sum_w = 0.0f64;
@@ -466,23 +473,41 @@ fn centroid_subpixel(image: &Array2<f32>, x: usize, y: usize, radius: usize) -> 
     }
 }
 
-fn measure_fwhm(image: &Array2<f32>, x: f64, y: f64) -> Option<(f64, f64)> {
+fn measure_fwhm(image: &Array2<f32>, x: f64, y: f64) -> Option<((f64, f64), bool)> {
     let (h, w) = image.dim();
     let ix = x.round() as usize;
     let iy = y.round() as usize;
 
     if ix >= w || iy >= h {
-        return Some((4.0, 4.0));
+        return Some(((4.0, 4.0), false));
     }
 
     let peak = subpixel_peak(image, ix, iy);
     if !peak.is_finite() {
         return None;
     }
-    let bg = estimate_local_bg(image, ix, iy, 10);
+    let bg = estimate_local_bg(image, ix, iy, LOCAL_BG_RADIUS);
+    let measured = fwhm_above_half_max(image, x, y, peak, bg);
+    Some((measured.unwrap_or((4.0, 4.0)), measured.is_some()))
+}
+
+fn fwhm_with_sky_beyond_the_star(image: &Array2<f32>, star: &StarCandidate) -> f64 {
+    let sky_inner = star.fwhm * 2.0;
+    if sky_inner <= LOCAL_BG_INNER_FRACTION * LOCAL_BG_RADIUS as f64 {
+        return star.fwhm;
+    }
+    let (sky, _) = annulus_stats(image, star.x, star.y, sky_inner, star.fwhm * 3.0);
+    let peak = subpixel_peak(image, star.x.round() as usize, star.y.round() as usize);
+    fwhm_above_half_max(image, star.x, star.y, peak, sky).map_or(star.fwhm, |(major, minor)| (major + minor) / 2.0)
+}
+
+fn fwhm_above_half_max(image: &Array2<f32>, x: f64, y: f64, peak: f64, bg: f64) -> Option<(f64, f64)> {
+    let (h, w) = image.dim();
+    let ix = x.round() as usize;
+    let iy = y.round() as usize;
     let net_peak = peak - bg;
     if net_peak <= 0.0 {
-        return Some((4.0, 4.0));
+        return None;
     }
 
     let threshold = bg + net_peak * 0.5;
@@ -515,7 +540,7 @@ fn measure_fwhm(image: &Array2<f32>, x: f64, y: f64) -> Option<(f64, f64)> {
     }
 
     if sum_w <= 0.0 {
-        return Some((4.0, 4.0));
+        return None;
     }
 
     let half_max_truncation = 1.0 - std::f64::consts::LN_2;
@@ -575,7 +600,7 @@ fn subpixel_peak(image: &Array2<f32>, ix: usize, iy: usize) -> f64 {
 
 fn estimate_local_bg(image: &Array2<f32>, ix: usize, iy: usize, radius: usize) -> f64 {
     let (h, w) = image.dim();
-    let inner_r2 = (radius as f64 * 0.6) * (radius as f64 * 0.6);
+    let inner_r2 = (radius as f64 * LOCAL_BG_INNER_FRACTION) * (radius as f64 * LOCAL_BG_INNER_FRACTION);
     let outer_r2 = (radius as f64) * (radius as f64);
     let mut vals = Vec::new();
 
@@ -1702,6 +1727,25 @@ mod tests {
     }
 
     #[test]
+    fn wide_stars_report_their_fwhm_with_the_sky_measured_beyond_them() {
+        let mut image = noisy_background(512, 512, 100.0, 8.66, 909);
+        let stars = [(150.3, 150.6, 10.0f64), (360.6, 150.2, 12.0), (256.4, 360.5, 15.0)];
+        for (x, y, fwhm) in stars {
+            add_star_at(&mut image, x, y, 9900.0, (fwhm / FWHM_PER_SIGMA) as f32);
+        }
+        let psf = estimate_psf(&image, &PsfEstimationConfig::default()).expect("psf");
+        let measured: Vec<f64> = stars
+            .iter()
+            .map(|&(x, y, _)| psf.stars_used.iter().find(|s| (s.x - x).abs() < 1.0 && (s.y - y).abs() < 1.0).expect("wide star used").fwhm)
+            .collect();
+        for (&(_, _, fwhm), found) in stars.iter().zip(&measured) {
+            assert!((found - fwhm).abs() / fwhm < 0.03, "Gaussian stars of FWHM 10, 12 and 15 px measured as {measured:.2?} px");
+        }
+        let mean = (10.0 + 12.0 + 15.0) / 3.0;
+        assert!((psf.average_fwhm - mean).abs() / mean < 0.03, "average FWHM {} for a true {mean}", psf.average_fwhm);
+    }
+
+    #[test]
     fn flat_topped_star_is_rejected_as_saturated() {
         let mut image = noisy_background(256, 256, 100.0, 0.5, 99);
         add_star(&mut image, 100, 128, 30000.0, 1.7);
@@ -1710,6 +1754,46 @@ mod tests {
         let psf = estimate_psf(&image, &PsfEstimationConfig::default()).expect("psf");
         assert!(has_star_near(&psf, 156.0, 128.0, 1.0), "unsaturated star rejected: {:?}", psf.stars_used);
         assert!(!has_star_near(&psf, 100.0, 128.0, 3.0), "clipped star used: {:?}", psf.stars_used);
+    }
+
+    #[test]
+    fn a_star_whose_fwhm_cannot_be_measured_is_not_ranked_first_and_not_proposed() {
+        let mut image = noisy_background(512, 512, 100.0, 8.66, 6021);
+        let stars = [(196usize, 256usize), (316, 256), (256, 196), (256, 316), (196, 196), (316, 316)];
+        for (i, &(x, y)) in stars.iter().enumerate() {
+            add_star(&mut image, x, y, 4000.0 + 300.0 * i as f32, 1.2);
+        }
+        add_star(&mut image, 256, 256, 9000.0, 1.2);
+        for y in 255..=257 {
+            for x in 255..=257 {
+                image[[y, x]] = 50.0;
+            }
+        }
+
+        let proposed = propose_psf_stars(&image, &PsfEstimationConfig::default()).expect("proposals");
+        let on_the_hollow_star = |s: &StarCandidate| (s.x - 256.0).hypot(s.y - 256.0) < 4.0;
+        assert!(
+            !on_the_hollow_star(&proposed[0]),
+            "the star with a hollow core, whose FWHM cannot be measured, is ranked first: {:?}",
+            proposed[0]
+        );
+        assert!(!proposed.iter().any(on_the_hollow_star), "hollow star proposed: {proposed:?}");
+        assert_eq!(proposed.len(), stars.len(), "{proposed:?}");
+    }
+
+    #[test]
+    fn a_clipped_star_too_broad_to_measure_still_marks_the_saturation_level() {
+        let mut image = noisy_background(512, 512, 100.0, 8.66, 3131);
+        let clipped = [(346usize, 346usize, 8.0f32), (150, 360, 1.7)];
+        let unsaturated = [(256usize, 256usize), (196, 256), (316, 256), (256, 316)];
+        add_star(&mut image, 346, 346, 200000.0, 8.0);
+        add_star(&mut image, 150, 360, 21500.0, 1.7);
+        for (i, &(x, y)) in unsaturated.iter().enumerate() {
+            add_star(&mut image, x, y, 11000.0 + 1000.0 * i as f32, 1.7);
+        }
+        image.mapv_inplace(|v| v.min(20000.0));
+
+        assert_clipped_rejected_and_unsaturated_used(&image, &clipped, &unsaturated);
     }
 }
 

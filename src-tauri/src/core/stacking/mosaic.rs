@@ -7,7 +7,7 @@ use ndarray::{s, Array2, Axis, Zip};
 use serde::Serialize;
 
 use crate::core::alignment::wcs_reproject::{point_source_residual, reproject_to_grid, StarResidual};
-use crate::core::analysis::star_detection::detect_stars;
+use crate::core::analysis::star_detection::detect_star_extents;
 use crate::core::astrometry::gwcs::sip_fit::lu_solve;
 use crate::core::astrometry::local_solve::GAIA_ONLINE_TIER;
 use crate::core::astrometry::plate_solve::SolveResult;
@@ -1017,8 +1017,8 @@ fn block_means(warped: &Array2<f32>, window: &CanvasWindow, grid: &BlockGrid) ->
 
 fn star_blocks(luminance: &Array2<f32>, window: &CanvasWindow, grid: &BlockGrid) -> Result<Array2<bool>> {
     let config = StarMaskConfig::default();
-    let detection = detect_stars(luminance, config.detection_sigma);
-    let mask = generate_star_mask_from_detection(luminance, &detection, &config).map_err(anyhow::Error::msg)?.mask;
+    let stars = detect_star_extents(luminance, config.detection_sigma);
+    let mask = generate_star_mask_from_detection(luminance, &stars, &config).map_err(anyhow::Error::msg)?.mask;
     let mut touched = Array2::from_elem((grid.rows, grid.cols), false);
     for (pixel, &weight) in mask.indexed_iter() {
         if weight > 0.0 {

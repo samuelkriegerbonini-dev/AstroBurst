@@ -264,10 +264,17 @@ fn keyword_scale(header: &HduHeader, key: &str) -> Option<f64> {
     header.get_f64(key).filter(|scale| scale.is_finite() && *scale > 0.0)
 }
 
-pub fn wcs_scale(header: &HduHeader) -> Option<f64> {
+pub(crate) fn wcs_axis_scales(header: &HduHeader) -> Option<(f64, f64)> {
     card_text(header, "CTYPE1")?;
     let cd = read_effective_cd(header).ok()?;
-    Some(cd[0][0].hypot(cd[1][0]) * 3600.0).filter(|scale| scale.is_finite() && *scale > 0.0)
+    Some((cd[0][0].hypot(cd[1][0]) * 3600.0, cd[0][1].hypot(cd[1][1]) * 3600.0))
+}
+
+pub fn wcs_scale(header: &HduHeader) -> Option<f64> {
+    let (scale_x, scale_y) = wcs_axis_scales(header)?;
+    let usable = |scale: f64| scale.is_finite() && scale > 0.0;
+    let rectangular = usable(scale_x) && usable(scale_y) && differs(scale_y, scale_x);
+    Some(if rectangular { (scale_x + scale_y) / 2.0 } else { scale_x }).filter(|scale| usable(*scale))
 }
 
 fn differs(a: f64, b: f64) -> bool {
@@ -1043,6 +1050,65 @@ mod tests {
         let d1 = d1_psf("d1_psf_JWST_F150W_20mas.fits");
         assert_eq!((d1.hdu, d1.pixel_scale_arcsec, d1.scale_source, d1.data.dim()), (0, 0.02, ScaleSource::Pixscale, (41, 41)));
         assert!((d1.data.sum() - 1.0).abs() < 1e-12, "D1 PSFs keep their float64 values");
+    }
+
+    #[test]
+    fn wcs_scale_is_the_mean_axis_scale_and_keeps_the_first_axis_bits_on_square_pixels() {
+        use crate::core::cubeprep::cube::test_support::{cd_grid, header_of, pc_grid};
+        use crate::infra::wcs_source::header_wcs;
+
+        let mut rectangular = header_of(&cd_grid((64, 64), 0.1355, 0.0));
+        rectangular.set("CD2_2", format!("{:E}", 0.1211 / 3600.0));
+        let scale = wcs_scale(&rectangular).unwrap();
+        assert!((scale - 0.1283).abs() < 1e-12, "0.1355 x 0.1211 arcsec pixels have a mean scale of 0.1283 arcsec, got {scale}");
+        let reported = header_wcs(&rectangular).unwrap().pixel_scale_arcsec();
+        assert!((scale / reported - 1.0).abs() < 1e-14, "{scale} against the {reported} the WCS tools and the cube PIXSCALE report");
+
+        let first_axis_bits = |header: &HduHeader| {
+            let cd = read_effective_cd(header).unwrap();
+            Some((cd[0][0].hypot(cd[1][0]) * 3600.0).to_bits())
+        };
+        for rotation in [0.0, 17.3, 45.0, 123.4, 270.0] {
+            for arcsec in [0.02, 0.031, 0.04, 0.13] {
+                for grid in [cd_grid((64, 64), arcsec, rotation), pc_grid((64, 64), arcsec, rotation)] {
+                    let header = header_of(&grid);
+                    assert_eq!(wcs_scale(&header).map(f64::to_bits), first_axis_bits(&header), "{arcsec} arcsec at {rotation} deg");
+                }
+            }
+        }
+
+        let mut folders = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lightstack")];
+        let (mut checked, mut last_bits_apart) = (0, 0);
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "fits") {
+                    let label = path.display().to_string();
+                    for (hdu, parsed) in image_hdus(&std::fs::read(&path).unwrap(), &label).unwrap() {
+                        if let Some((scale_x, scale_y)) = wcs_axis_scales(&parsed.header) {
+                            assert_eq!(wcs_scale(&parsed.header).map(f64::to_bits), first_axis_bits(&parsed.header), "{label} HDU {hdu}");
+                            checked += 1;
+                            last_bits_apart += usize::from(scale_x != scale_y);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked >= 76 && last_bits_apart >= 3, "{checked} LIGHTSTACK fixture headers with a celestial WCS, {last_bits_apart} with axis scales that differ in the last bits");
+
+        let with_cd = |cd: [(&str, f64); 4]| {
+            let mut header = header_of(&cd_grid((64, 64), 0.05, 0.0));
+            for (key, value) in cd {
+                header.set(key, format!("{value:E}"));
+            }
+            header
+        };
+        let no_second_axis = with_cd([("CD1_1", -1e-5), ("CD2_1", 2e-6), ("CD1_2", 0.0), ("CD2_2", 0.0)]);
+        assert_eq!(wcs_scale(&no_second_axis).map(f64::to_bits), first_axis_bits(&no_second_axis));
+        let no_first_axis = with_cd([("CD1_1", 0.0), ("CD2_1", 0.0), ("CD1_2", 2e-6), ("CD2_2", 1e-5)]);
+        assert_eq!(wcs_scale(&no_first_axis), None);
     }
 
     #[test]
