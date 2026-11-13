@@ -4,7 +4,7 @@ export interface FrameGeometry {
   jd_tdb: number | null;
   bjd_tdb: number | null;
   hjd_utc: number | null;
-  bjd_source: "computed" | "header" | null;
+  bjd_source: "computed" | "header" | "TDB-MID" | "BMIDTIME" | null;
   lst_deg: number | null;
   hour_angle_deg: number | null;
   altitude_deg: number | null;

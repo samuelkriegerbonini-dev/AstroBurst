@@ -9,7 +9,7 @@ use crate::core::astrometry::spectral::{
     sun_barycentric_position_au, sun_geometric_longitude_deg, target_unit_vector, SiteLocation, AU_KM, SPEED_OF_LIGHT_KMS,
     WGS84_A_M, WGS84_F,
 };
-use crate::core::astrometry::time::{gmst_deg, jd_from_gregorian, julian_centuries_j2000, JD_J2000, SECONDS_PER_DAY};
+use crate::core::astrometry::time::{gmst_deg, jd_from_gregorian, jd_from_mjd, julian_centuries_j2000, JD_J2000, SECONDS_PER_DAY};
 use crate::core::astrometry::wcs::{angular_separation, pixel_center};
 use crate::infra::wcs_source::load_wcs;
 use crate::types::header::HduHeader;
@@ -82,6 +82,12 @@ const BJD_REFERENCE_INTEGER_KEY: &str = "BJDREFI";
 const BJD_REFERENCE_FRACTION_KEY: &str = "BJDREFF";
 const TIME_START_KEY: &str = "TSTART";
 const TIME_STOP_KEY: &str = "TSTOP";
+const TIME_UNIT_KEY: &str = "TIMEUNIT";
+const TIME_UNITS_PER_DAY: [(&str, f64); 4] = [("d", 1.0), ("h", 24.0), ("min", 1440.0), ("s", SECONDS_PER_DAY)];
+const TIME_UNIT_ABSENT_NOTE: &str = "TIMEUNIT absent: TSTART and TSTOP read as days, the unit Kepler and TESS write next to BJDREFI (the FITS default is s)";
+const SPACECRAFT_BJD_KEYS: [(&str, Option<&str>); 2] = [("TDB-MID", None), ("BMIDTIME", Some("BARTDELT"))];
+const CORRECTION_DRIFT_TOLERANCE_SECONDS: f64 = 10.0;
+const MAX_LIGHT_TIME_SECONDS: f64 = 1.05 * AU_LIGHT_SECONDS;
 const TELESCOP_KEY: &str = "TELESCOP";
 const IMAGE_CENTRE_LABEL: &str = "image centre";
 const REFERENCE_FRAME_SUFFIX: &str = " on the reference frame";
@@ -342,12 +348,25 @@ fn no_time_reason(problems: &[String]) -> String {
     std::iter::once(NO_TIME_REASON.to_string()).chain(problems.iter().cloned()).collect::<Vec<_>>().join("; ")
 }
 
-fn barycentric_reference_mid_jd(header: &HduHeader) -> Option<f64> {
+fn barycentric_reference_mid_jd(header: &HduHeader, notes: &mut Vec<String>) -> Option<f64> {
     let integer = finite_card(header, BJD_REFERENCE_INTEGER_KEY)?;
     let fraction = finite_card(header, BJD_REFERENCE_FRACTION_KEY).unwrap_or(0.0);
     let start = finite_card(header, TIME_START_KEY)?;
     let stop = finite_card(header, TIME_STOP_KEY)?;
-    Some(integer + fraction + (start + stop) / 2.0)
+    let units_per_day = match card_string(header, TIME_UNIT_KEY) {
+        None => {
+            notes.push(TIME_UNIT_ABSENT_NOTE.to_string());
+            1.0
+        }
+        Some(unit) => match TIME_UNITS_PER_DAY.iter().find(|(name, _)| unit.eq_ignore_ascii_case(name)) {
+            Some((_, units_per_day)) => *units_per_day,
+            None => {
+                notes.push(format!("TIMEUNIT {unit} is not s, min, h or d: BJDREFI + BJDREFF + (TSTART + TSTOP)/2 not used"));
+                return None;
+            }
+        },
+    };
+    Some(integer + fraction + (start + stop) / 2.0 / units_per_day)
 }
 
 fn scale_rule_note(timesys: Option<&str>, scale: &str, jd_header: f64, jd_utc: f64, jd_tt: f64) -> String {
@@ -379,7 +398,7 @@ fn scale_rule_note(timesys: Option<&str>, scale: &str, jd_header: f64, jd_utc: f
 pub fn header_time(header: &HduHeader) -> Result<HeaderTime, String> {
     let mut notes = invalid_time_cards(header);
     let mid_exposure = mid_exposure_jd(header).filter(|(jd, _)| jd.is_finite());
-    let barycentric_mid = barycentric_reference_mid_jd(header);
+    let barycentric_mid = barycentric_reference_mid_jd(header, &mut notes);
     if mid_exposure.is_none() && barycentric_mid.is_none() {
         return Err(no_time_reason(&notes));
     }
@@ -638,13 +657,48 @@ fn earth_bound_site<'a>(
     }
 }
 
+fn spacecraft_header_bjd(header: &HduHeader, time: &HeaderTime) -> Result<(f64, &'static str), String> {
+    let mut refused = Vec::new();
+    for (key, correction_key) in SPACECRAFT_BJD_KEYS {
+        let Some(bjd) = finite_card(header, key).map(jd_from_mjd) else {
+            continue;
+        };
+        let light_time = (bjd - time.jd_tdb) * SECONDS_PER_DAY;
+        let correction = (bjd - time.jd_utc) * SECONDS_PER_DAY;
+        let stated = correction_key.and_then(|stated_key| finite_card(header, stated_key).map(|seconds| (stated_key, seconds)));
+        if light_time.abs() > MAX_LIGHT_TIME_SECONDS {
+            refused.push(format!(
+                "{key} is not used ({light_time:+.1} s from the mid-exposure JD_TDB, beyond the {MAX_LIGHT_TIME_SECONDS:.0} s light time to the barycentre)"
+            ));
+        } else if let Some((stated_key, seconds)) = stated.filter(|(_, seconds)| (correction - seconds).abs() > CORRECTION_DRIFT_TOLERANCE_SECONDS) {
+            refused.push(format!("{key} is not used ({key} - mid-exposure UTC = {correction:+.3} s, {stated_key} = {seconds:+.3} s)"));
+        } else {
+            return Ok((bjd, key));
+        }
+    }
+    if refused.is_empty() {
+        let keys: Vec<&str> = SPACECRAFT_BJD_KEYS.iter().map(|(key, _)| *key).collect();
+        return Err(format!("the header carries no barycentric mid-exposure time ({})", keys.join(" or ")));
+    }
+    Err(format!("the header {}", refused.join(" and ")))
+}
+
 fn light_time(header: &HduHeader, time: &HeaderTime, target: Option<&ResolvedTarget>, notes: &mut Vec<String>) -> LightTime {
     if let Some(bjd) = time.bjd_header {
         return LightTime { bjd_tdb: Some(bjd), hjd_utc: None, bjd_source: Some(BJD_SOURCE_HEADER.to_string()) };
     }
     if let Some(telescop) = spacecraft_name(header) {
-        notes.push(format!("TELESCOP {telescop} is a spacecraft: the light-time correction needs its ephemeris"));
-        return LightTime { bjd_tdb: None, hjd_utc: None, bjd_source: None };
+        return match spacecraft_header_bjd(header, time) {
+            Ok((bjd, key)) => {
+                notes.push(format!("BJD_TDB from {key} (barycentric mid-exposure time in the header, MJD in TDB): no light-time term computed"));
+                notes.push(format!("TELESCOP {telescop} is a spacecraft: HJD_UTC needs the spacecraft ephemeris"));
+                LightTime { bjd_tdb: Some(bjd), hjd_utc: None, bjd_source: Some(key.to_string()) }
+            }
+            Err(reason) => {
+                notes.push(format!("TELESCOP {telescop} is a spacecraft: BJD_TDB and HJD_UTC need the spacecraft ephemeris and {reason}"));
+                LightTime { bjd_tdb: None, hjd_utc: None, bjd_source: None }
+            }
+        };
     }
     let Some(target) = target else {
         notes.push(NO_TARGET_LIGHT_TIME_NOTE.to_string());
@@ -769,7 +823,7 @@ mod tests {
     use super::*;
     use crate::core::astrometry::frames::{ecliptic_j2000_to_icrs, mat_transpose};
     use crate::core::astrometry::spectral::sun_geometric_longitude_deg;
-    use crate::core::astrometry::time::{jd_from_gregorian, SECONDS_PER_DAY};
+    use crate::core::astrometry::time::{jd_from_gregorian, jd_from_mjd, SECONDS_PER_DAY};
     use crate::core::imaging::region::test_support::{header_with_cd, make_header, north_up_cd};
 
     const ONE_TENTH_MS_DAYS: f64 = 1e-4 / 86400.0;
@@ -1056,6 +1110,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bjdref_start_and_stop_follow_timeunit_and_an_unknown_unit_is_refused() {
+        let reference = [("TIMESYS", "TDB"), ("TIMEREF", "SOLARSYSTEM"), ("BJDREFI", "2457000"), ("BJDREFF", "0.0")];
+        let timed = |cards: &[(&str, &str)]| header_time(&make_header(&[&reference[..], cards].concat()));
+        for (unit, start, stop) in [
+            ("d", "1325.0", "1325.02"),
+            ("s", "114480000.0", "114481728.0"),
+            ("min", "1908000.0", "1908028.8"),
+            ("h", "31800.0", "31800.48"),
+        ] {
+            let time = timed(&[("TIMEUNIT", unit), ("TSTART", start), ("TSTOP", stop)]).unwrap();
+            let bjd = time.bjd_header.expect("BJD from BJDREF");
+            assert!((bjd - 2458325.01).abs() <= BJD_TOLERANCE_DAYS, "TIMEUNIT {unit}: BJD {bjd} is {} d from 2458325.01", bjd - 2458325.01);
+            assert!(!time.notes.iter().any(|n| n.contains("TIMEUNIT")), "TIMEUNIT {unit}: {:?}", time.notes);
+        }
+        let absent = timed(&[("TSTART", "1325.0"), ("TSTOP", "1325.02")]).unwrap();
+        assert_eq!(absent.bjd_header, Some(2457000.0 + 0.0 + (1325.0 + 1325.02) / 2.0));
+        let assumed = "TIMEUNIT absent: TSTART and TSTOP read as days, the unit Kepler and TESS write next to BJDREFI (the FITS default is s)";
+        assert!(absent.notes.iter().any(|n| n == assumed), "{:?}", absent.notes);
+        let refusal = "TIMEUNIT cy is not s, min, h or d: BJDREFI + BJDREFF + (TSTART + TSTOP)/2 not used";
+        let refused = timed(&[("TIMEUNIT", "cy"), ("TSTART", "0.0362768"), ("TSTOP", "0.0362774")]).unwrap_err();
+        assert_eq!(refused, format!("{NO_TIME_REASON}; {refusal}"));
+        let dated = timed(&[("TIMEUNIT", "cy"), ("TSTART", "0.0362768"), ("TSTOP", "0.0362774"), ("MJD-AVG", "58324.51")]).unwrap();
+        assert!(dated.source.contains("MJD-AVG"), "{}", dated.source);
+        assert!(dated.notes.iter().any(|n| n == refusal), "{:?}", dated.notes);
+    }
+
     const BJD_TOLERANCE_DAYS: f64 = 1e-9;
 
     fn equator_target() -> ResolvedTarget {
@@ -1244,6 +1325,108 @@ mod tests {
             g.time_scale_notes
         );
         assert!(!g.time_scale_notes.iter().any(|n| n == GEOCENTRIC_MOON_SEPARATION_NOTE), "{:?}", g.time_scale_notes);
+    }
+
+    const JWST_TARGET: [(&str, &str); 3] = [("TELESCOP", "JWST"), ("TARG_RA", "266.4168375"), ("TARG_DEC", "-29.007811111111096")];
+    const JWST_EXPOSURE_MJD_AVG: &str = "60541.68468854167";
+    const JWST_EXPOSURE_TDB_MID: f64 = 60541.688475812225;
+    const JWST_EXPOSURE_BARTDELT: &str = "327.22708247601986";
+    const JWST_COMBINED_MJD_AVG: &str = "60541.67540058738";
+    const JWST_COMBINED_TDB_MID: f64 = 60541.67918865736;
+    const JWST_COMBINED_STALE_BMIDTIME: &str = "60541.6749680976";
+    const JWST_COMBINED_BARTDELT: &str = "327.3275383282453";
+    const ASTROPY_GEOCENTRIC_BJD_TDB: f64 = 2460542.188425630;
+    const JWST_GEOCENTRE_LIGHT_SECONDS: f64 = 6.0;
+
+    fn spacecraft_geometry(cards: &[(&str, &str)]) -> FrameGeometry {
+        let h = make_header(cards);
+        let target = resolve_target("", &h, None, &GeometryOverrides::default()).unwrap();
+        frame_geometry(&h, &header_time(&h).unwrap(), Some(&target), None)
+    }
+
+    fn notes_naming<'a>(g: &'a FrameGeometry, time_name: &str) -> Vec<&'a str> {
+        g.time_scale_notes.iter().map(String::as_str).filter(|n| n.contains(time_name)).collect()
+    }
+
+    #[test]
+    fn a_jwst_exposure_reports_its_header_tdb_mid_as_bjd_tdb_and_names_the_keyword() {
+        let tdb_mid = JWST_EXPOSURE_TDB_MID.to_string();
+        let exposure = [
+            ("TIMESYS", "UTC"),
+            ("TIMEUNIT", "s"),
+            ("EXPMID", JWST_EXPOSURE_MJD_AVG),
+            ("MJD-AVG", JWST_EXPOSURE_MJD_AVG),
+            ("TDB-MID", tdb_mid.as_str()),
+            ("BMIDTIME", tdb_mid.as_str()),
+            ("BARTDELT", JWST_EXPOSURE_BARTDELT),
+        ];
+        let g = spacecraft_geometry(&[&JWST_TARGET[..], &exposure[..]].concat());
+        let bjd = g.bjd_tdb.expect("BJD_TDB from the header");
+        assert_eq!(bjd, jd_from_mjd(JWST_EXPOSURE_TDB_MID));
+        assert_eq!(g.bjd_source.as_deref(), Some("TDB-MID"));
+        assert_eq!(g.jd_utc, Some(jd_from_mjd(60541.68468854167)));
+        assert_eq!(g.hjd_utc, None);
+        let from_geocentre = seconds(bjd - ASTROPY_GEOCENTRIC_BJD_TDB);
+        assert!((from_geocentre - 4.336).abs() < 0.01 && from_geocentre.abs() < JWST_GEOCENTRE_LIGHT_SECONDS, "{from_geocentre} s");
+        let named = "BJD_TDB from TDB-MID (barycentric mid-exposure time in the header, MJD in TDB): no light-time term computed";
+        assert_eq!(notes_naming(&g, "BJD_TDB"), [named]);
+        assert_eq!(notes_naming(&g, "HJD_UTC"), ["TELESCOP JWST is a spacecraft: HJD_UTC needs the spacecraft ephemeris"]);
+        assert!(!g.time_scale_notes.iter().any(|n| n.contains("Roemer")), "{:?}", g.time_scale_notes);
+        assert_no_topocentric_block(&g);
+
+        let primary_only = [("EXPMID", JWST_EXPOSURE_MJD_AVG), ("BMIDTIME", tdb_mid.as_str()), ("BARTDELT", JWST_EXPOSURE_BARTDELT)];
+        let g = spacecraft_geometry(&[&JWST_TARGET[..], &primary_only[..]].concat());
+        assert_eq!((g.bjd_tdb, g.bjd_source.as_deref()), (Some(jd_from_mjd(JWST_EXPOSURE_TDB_MID)), Some("BMIDTIME")));
+    }
+
+    #[test]
+    fn a_combined_jwst_product_uses_tdb_mid_and_refuses_the_first_exposure_bmidtime() {
+        let tdb_mid = JWST_COMBINED_TDB_MID.to_string();
+        let combined = [
+            ("EXPMID", JWST_COMBINED_MJD_AVG),
+            ("MJD-AVG", JWST_COMBINED_MJD_AVG),
+            ("BMIDTIME", JWST_COMBINED_STALE_BMIDTIME),
+            ("BARTDELT", JWST_COMBINED_BARTDELT),
+        ];
+        let with_sci = [&JWST_TARGET[..], &combined[..], &[("TDB-MID", tdb_mid.as_str())][..]].concat();
+        let g = spacecraft_geometry(&with_sci);
+        assert_eq!((g.bjd_tdb, g.bjd_source.as_deref()), (Some(jd_from_mjd(JWST_COMBINED_TDB_MID)), Some("TDB-MID")));
+
+        let g = spacecraft_geometry(&[&JWST_TARGET[..], &combined[..]].concat());
+        assert_eq!((g.bjd_tdb, g.hjd_utc, g.bjd_source.as_deref()), (None, None, None));
+        let refused = "TELESCOP JWST is a spacecraft: BJD_TDB and HJD_UTC need the spacecraft ephemeris and the header BMIDTIME is not used (BMIDTIME - mid-exposure UTC = -37.367 s, BARTDELT = +327.328 s)";
+        assert_eq!(notes_naming(&g, "BJD_TDB"), [refused]);
+        assert_eq!(notes_naming(&g, "HJD_UTC"), [refused]);
+
+        let far = [("EXPMID", JWST_COMBINED_MJD_AVG), ("BMIDTIME", "60541.69")];
+        let g = spacecraft_geometry(&[&JWST_TARGET[..], &far[..]].concat());
+        assert_eq!(g.bjd_tdb, None);
+        let reason = notes_naming(&g, "BJD_TDB");
+        assert!(reason.len() == 1 && reason[0].contains("BMIDTIME is not used") && reason[0].contains("light time"), "{reason:?}");
+    }
+
+    #[test]
+    fn a_spacecraft_or_targetless_frame_without_bjd_names_the_reason_in_one_quotable_note() {
+        let hst = [
+            ("TELESCOP", "HST"),
+            ("DATE-OBS", "2021-06-04"),
+            ("TIME-OBS", "08:15:32"),
+            ("EXPTIME", "339.0"),
+            ("RA_TARG", "10.0"),
+            ("DEC_TARG", "-5.0"),
+        ];
+        let g = spacecraft_geometry(&hst);
+        assert!(g.jd_utc.is_some());
+        assert_eq!((g.bjd_tdb, g.hjd_utc, g.bjd_source.as_deref()), (None, None, None));
+        let reason = "TELESCOP HST is a spacecraft: BJD_TDB and HJD_UTC need the spacecraft ephemeris and the header carries no barycentric mid-exposure time (TDB-MID or BMIDTIME)";
+        assert_eq!(notes_naming(&g, "BJD_TDB"), [reason]);
+        assert_eq!(notes_naming(&g, "HJD_UTC"), [reason]);
+
+        let ground = make_header(&[("DATE-OBS", "2026-03-21T10:00:00"), ("EXPTIME", "600")]);
+        let g = frame_geometry(&ground, &header_time(&ground).unwrap(), None, None);
+        assert_eq!((g.bjd_tdb, g.hjd_utc), (None, None));
+        assert_eq!(notes_naming(&g, "BJD_TDB"), [NO_TARGET_LIGHT_TIME_NOTE]);
+        assert_eq!(notes_naming(&g, "HJD_UTC"), [NO_TARGET_LIGHT_TIME_NOTE]);
     }
 
     fn assert_no_topocentric_block(g: &FrameGeometry) {

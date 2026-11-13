@@ -60,6 +60,9 @@ function star(flux: number, err: number, extra: Partial<StarPhotometry> = {}): S
     growth_curve: [],
     ee50_radius: null,
     ee80_radius: null,
+    n_nonfinite: 0,
+    ee_in_aperture: null,
+    warnings: [],
     ...extra,
   };
 }
@@ -176,9 +179,9 @@ const EXOCLOCK_JD_UTC_GOLDEN = [
   "# time: jd_utc = JD_UTC at mid-exposure",
   ...EXOCLOCK_PROVENANCE.slice(4),
   "jd_utc,rel_flux,rel_flux_err,airmass,fwhm_px,sky,dx_px,dy_px",
-  "2460310.60000040,0.25,0.003061862178,1.2000,3.000,10.000,0.000,0.000",
-  "2460310.60069490,0.245,0.003041586757,1.1500,3.000,10.000,0.500,-0.250",
-  "2460310.60208380,0.24,0.003021588986,1.2000,3.000,10.000,0.500,-0.250",
+  "2460310.60000040,0.25,0.003061862178,1.2000,3.000,10,0.000,0.000",
+  "2460310.60069490,0.245,0.003041586757,1.1500,3.000,10,0.500,-0.250",
+  "2460310.60208380,0.24,0.003021588986,1.2000,3.000,10,0.500,-0.250",
   "",
 ].join("\n");
 
@@ -247,7 +250,21 @@ describe("ExoClock export (C02)", () => {
   it("leaves dx_px and dy_px empty for a rejected drift offset, since that frame was measured unshifted", () => {
     const frames = withFrame(1, { offset: { dx: 37.2, dy: -51.9, confidence: 1.1, registered: false } });
     const lines = exoClockCsv(source(frames), "jd_utc").trimEnd().split("\n");
-    expect(lines.at(-1)).toBe("2460310.60208380,0.24,0.003021588986,1.2000,3.000,10.000,,");
+    expect(lines.at(-1)).toBe("2460310.60208380,0.24,0.003021588986,1.2000,3.000,10,,");
+  });
+
+  it("writes the sky with the significant digits of rel_flux, so a sky measured on [0, 1] data keeps them (trust-2)", () => {
+    const frames = withFrame(0, { targets: [star(500, 5, { bg_mean: 0.0123 }), star(1000, 10), star(1000, 10)] });
+    const row = exoClockCsv(source(frames), "jd_utc").split("\n").find((l) => l.startsWith("2460310.60000040,"));
+    expect(row!.split(",")[5]).toBe("0.0123");
+  });
+
+  it("names the source of the BJD_TDB column after the time line, and only in a BJD_TDB file", () => {
+    const lines = exoClockCsv(source(), "bjd_tdb").split("\n");
+    expect(lines.slice(4, 6)).toEqual(["# time: bjd_tdb = BJD_TDB at mid-exposure", "# bjd_tdb source: computed"]);
+    const jwst = goldenFrames().map((f) => ({ ...f, geometry: geometry(f.jd_mid!, { hjd_utc: null, bjd_source: "TDB-MID" }) }));
+    expect(exoClockCsv(source(jwst), "bjd_tdb").split("\n")).toContain("# bjd_tdb source: TDB-MID");
+    expect(exoClockCsv(source(), "hjd_utc").split("\n").some((l) => l.startsWith("# bjd_tdb source"))).toBe(false);
   });
 
   it("writes zero drift on the reference row and leaves the others empty when drift was not tracked", () => {
@@ -265,6 +282,15 @@ describe("target and comparison names from the current Point regions (C02)", () 
     expect([0, 1, 9, 41].every((i) => isDefaultPointLabel(defaultPointLabel(i)))).toBe(true);
     expect(isDefaultPointLabel("HAT-P-32")).toBe(false);
     expect(isDefaultPointLabel("P1b")).toBe(false);
+  });
+
+  it("treats the placeholder labels of pasted positions and of stars or points added from the photometry table as unnamed (flows-2)", () => {
+    for (const label of ["p1", "star 1", "point 1", "Star 12", "POINT 3", "p40"]) expect(isDefaultPointLabel(label), label).toBe(true);
+    for (const label of ["WASP-12", "Kepler-10", "star", "point", "p0", "star 1b", "TYC 1-2-3"]) expect(isDefaultPointLabel(label), label).toBe(false);
+    const pasted = TARGETS.map((t) => (t.role === "target" ? { ...t, label: "p1" } : t));
+    expect(etdBlocker(source(goldenFrames(), pasted))).toBe('no target name: label the target\'s Point region with the star\'s designation (now "p1")');
+    const added = TARGETS.map((t) => (t.role === "target" ? { ...t, label: "star 3" } : t));
+    expect(exoClockBlocker(source(goldenFrames(), added), "bjd_tdb")).toMatch(/^no target name/);
   });
 
   it("unblocks the export once the target's region is named, without measuring again", () => {
@@ -396,6 +422,55 @@ describe("named blockers (C02)", () => {
     expect(exoClockBlocker(source(frames), "hjd_utc")).toBe("no HJD_UTC for f1.fits (needs DATE-OBS and the target RA/Dec)");
     expect(exoClockBlocker(source(frames), "jd_utc")).toBeNull();
     expect(etdBlocker(source(frames))).toBeNull();
+  });
+
+  it("quotes the spacecraft note of a timed frame for BJD_TDB and HJD_UTC instead of asking for DATE-OBS and RA/Dec, and leaves JD_UTC open (timeseries/D1)", () => {
+    const hst =
+      "TELESCOP HST is a spacecraft: BJD_TDB and HJD_UTC need the spacecraft ephemeris and the header carries no barycentric mid-exposure time (TDB-MID or BMIDTIME)";
+    const scale = "TIMESYS UTC: UTC; TT = UTC + 37.000 s + 32.184 s; TDB - TT = +0.0012 s";
+    const frames = goldenFrames().map((f) => ({ ...f, geometry: geometry(f.jd_mid!, { bjd_tdb: null, hjd_utc: null, bjd_source: null, time_scale_notes: [scale, hst] }) }));
+    expect(exoClockBlocker(source(frames), "bjd_tdb")).toBe(`no BJD_TDB for f0.fits (${hst})`);
+    expect(exoClockBlocker(source(frames), "hjd_utc")).toBe(`no HJD_UTC for f0.fits (${hst})`);
+    expect(exoClockBlocker(source(frames), "jd_utc")).toBeNull();
+    expect(etdBlocker(source(frames))).toBeNull();
+    const stale =
+      "TELESCOP JWST is a spacecraft: BJD_TDB and HJD_UTC need the spacecraft ephemeris and the header BMIDTIME is not used (BMIDTIME - mid-exposure UTC = -37.367 s, BARTDELT = +327.328 s)";
+    const combined = withFrame(1, { geometry: geometry(2460310.6020838, { bjd_tdb: null, hjd_utc: null, bjd_source: null, time_scale_notes: [stale] }) });
+    expect(exoClockBlocker(source(combined), "bjd_tdb")).toBe(`no BJD_TDB for f1.fits (${stale})`);
+  });
+
+  it("exports the TDB-MID BJD_TDB and the UTC JD of JWST frames and quotes why HJD_UTC is missing (timeseries/D1)", () => {
+    const tdbMid = "BJD_TDB from TDB-MID (barycentric mid-exposure time in the header, MJD in TDB): no light-time term computed";
+    const noHjd = "TELESCOP JWST is a spacecraft: HJD_UTC needs the spacecraft ephemeris";
+    const frames = goldenFrames().map((f) => ({ ...f, geometry: geometry(f.jd_mid!, { hjd_utc: null, bjd_source: "TDB-MID", time_scale_notes: [tdbMid, noHjd] }) }));
+    expect(exoClockBlocker(source(frames), "bjd_tdb")).toBeNull();
+    expect(exoClockBlocker(source(frames), "jd_utc")).toBeNull();
+    expect(etdText(source(frames))).toBe(ETD_GOLDEN);
+    expect(exoClockBlocker(source(frames), "hjd_utc")).toBe(`no HJD_UTC for f0.fits (${noHjd})`);
+  });
+
+  it("names the missing target coordinates and keeps the barycentric-header reason for JD_UTC (timeseries/D1)", () => {
+    const noTarget = "no target coordinates: BJD_TDB and HJD_UTC need a WCS, RA/DEC keywords or a target override";
+    const targetless = withFrame(1, { geometry: geometry(2460310.6020838, { bjd_tdb: null, hjd_utc: null, bjd_source: null, time_scale_notes: [noTarget] }) });
+    expect(exoClockBlocker(source(targetless), "bjd_tdb")).toBe(`no BJD_TDB for f1.fits (${noTarget})`);
+    expect(exoClockBlocker(source(targetless), "hjd_utc")).toBe(`no HJD_UTC for f1.fits (${noTarget})`);
+    expect(etdBlocker(source(targetless))).toBeNull();
+    const barycentric = withFrame(1, {
+      geometry: geometry(2460310.6020838, { bjd_source: "header", hjd_utc: null, time_scale_notes: ["an HJD_UTC note that is not a JD_UTC reason"] }),
+    });
+    expect(etdBlocker(source(barycentric))).toBe("no JD_UTC for f1.fits (the header time is barycentric: TREFPOS/TIMEREF/BJDREF)");
+  });
+
+  it("refuses a frame whose comparison star is saturated, names the star and the frame, and opens once it is left out (front-photometry/B1)", () => {
+    const frames = withFrame(1, { targets: [star(480, 5), star(1000, 10, { saturated: true }), star(1000, 10)] });
+    const expected = "comparison star C1 saturated on f1.fits (leave it out of the ensemble)";
+    expect(etdBlocker(source(frames))).toBe(expected);
+    for (const time of ["jd_utc", "bjd_tdb", "hjd_utc"] as const) expect(exoClockBlocker(source(frames), time)).toBe(expected);
+    const leftOut = { ...source(frames), compIdx: [2] };
+    expect(etdBlocker(leftOut)).toBeNull();
+    expect(exoClockCsv(leftOut, "jd_utc").split("\n")).toContain("# comparison stars: C2");
+    const targetSaturated = withFrame(1, { targets: [star(480, 5, { saturated: true }), star(1000, 10), star(1000, 10)] });
+    expect(etdBlocker(source(targetSaturated))).toBeNull();
   });
 
   it("refuses a measured frame whose time is the exposure start because no exposure card was found", () => {

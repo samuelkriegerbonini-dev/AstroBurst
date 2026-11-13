@@ -73,7 +73,7 @@ describe("getObservationGeometry", () => {
 
   it("types bjd_tdb as number or null", () => {
     expectTypeOf<FrameGeometry["bjd_tdb"]>().toEqualTypeOf<number | null>();
-    expectTypeOf<FrameGeometry["bjd_source"]>().toEqualTypeOf<"computed" | "header" | null>();
+    expectTypeOf<FrameGeometry["bjd_source"]>().toEqualTypeOf<"computed" | "header" | "TDB-MID" | "BMIDTIME" | null>();
     expect(RESULT.geometry.bjd_tdb).not.toBeNull();
   });
 });

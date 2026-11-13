@@ -1,5 +1,5 @@
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesTarget } from "../shared/types/analysis";
-import { lightCurve, lightCurveExtras, MAG_ERR_FACTOR, referenceStem } from "./differentialPhotometry";
+import { apertureLine, bjdSources, lightCurve, lightCurveExtras, MAG_ERR_FACTOR, referenceStem, saturatedCompLabels } from "./differentialPhotometry";
 import { fileBaseName, isFiniteNumber } from "./values";
 
 export type ExoClockTime = "jd_utc" | "bjd_tdb" | "hjd_utc";
@@ -22,7 +22,7 @@ const EXOCLOCK_COLUMNS = ["rel_flux", "rel_flux_err", "airmass", "fwhm_px", "sky
 const EXOCLOCK_TIME_DIGITS = 8;
 const FLUX_SIGNIFICANT_DIGITS = 10;
 const PRINTF_PRECISION = 6;
-const DEFAULT_POINT_LABEL = /^P[1-9]\d*$/;
+const DEFAULT_POINT_LABEL = /^(?:p|star |point )[1-9]\d*$/i;
 const DATE_ONLY_MARK = "date only";
 const EXPOSURE_START_MARK = "EXPTIME missing";
 const HALF_EXPOSURE_NOTE = /\/2 \((\S+) s\)/;
@@ -85,6 +85,10 @@ function cell(value: number | null, digits: number): string {
   return isFiniteNumber(value) ? value.toFixed(digits) : "";
 }
 
+function significantCell(value: number | null): string {
+  return isFiniteNumber(value) ? significant(value) : "";
+}
+
 function comps(source: LightCurveExportSource): number[] {
   return source.compIdx.filter((i) => i !== source.targetIdx);
 }
@@ -114,6 +118,8 @@ function timeBlocker(frame: TimeSeriesFrame, time: ExoClockTime): string | null 
   const name = TIME_NAMES[time];
   const refusal = frame.geometry && !isFiniteNumber(frame.geometry.jd_utc) ? frame.geometry.time_scale_notes[0] : undefined;
   if (refusal) return `no ${name} for ${frame.file_name} (${refusal})`;
+  const reason = time !== "jd_utc" ? frame.geometry?.time_scale_notes.find((note) => note.includes(name)) : undefined;
+  if (reason) return `no ${name} for ${frame.file_name} (${reason})`;
   if (time !== "bjd_tdb" && frame.geometry?.bjd_source === "header") {
     return `no ${name} for ${frame.file_name} (the header time is barycentric: TREFPOS/TIMEREF/BJDREF)`;
   }
@@ -125,14 +131,16 @@ function hasFluxErrors(frame: TimeSeriesFrame, stars: number[]): boolean {
   return stars.every((i) => isFiniteNumber(frame.targets[i]?.flux_err));
 }
 
-function frameBlocker(row: ExportRow, time: ExoClockTime, stars: number[]): string | null {
+function frameBlocker(row: ExportRow, time: ExoClockTime, source: LightCurveExportSource): string | null {
   const name = row.frame.file_name;
   const missingTime = timeBlocker(row.frame, time);
   if (missingTime) return missingTime;
   const timeSource = row.frame.time_source ?? "";
   if (timeSource.includes(DATE_ONLY_MARK)) return `no time of day for ${name} (DATE-OBS is a date only)`;
   if (timeSource.includes(EXPOSURE_START_MARK)) return `no EXPTIME for ${name} (the time is the exposure start, not mid-exposure)`;
-  if (!(row.err > 0) || !hasFluxErrors(row.frame, stars)) return `no errors for ${name} (flux_err missing)`;
+  if (!(row.err > 0) || !hasFluxErrors(row.frame, [source.targetIdx, ...comps(source)])) return `no errors for ${name} (flux_err missing)`;
+  const saturated = saturatedCompLabels(row.frame, source.result.targets, comps(source));
+  if (saturated.length > 0) return `comparison star ${saturated[0]} saturated on ${name} (leave it out of the ensemble)`;
   return null;
 }
 
@@ -155,9 +163,8 @@ function exportBlocker(source: LightCurveExportSource, time: ExoClockTime): stri
   const rows = exportRows(source);
   if (rows.length === 0) return NO_ROWS_BLOCKER;
   if (source.result.area_mixed) return AREA_MIXED_BLOCKER;
-  const stars = [source.targetIdx, ...comps(source)];
   for (const row of rows) {
-    const blocker = frameBlocker(row, time, stars);
+    const blocker = frameBlocker(row, time, source);
     if (blocker) return blocker;
   }
   return null;
@@ -202,13 +209,6 @@ function distinct(values: (string | number | null)[]): string {
   return seen.length > 0 ? seen.join(", ") : "unknown";
 }
 
-function apertureLine(source: LightCurveExportSource, rows: ExportRow[]): string {
-  const reference = source.result.frames.find((f) => f.path === source.result.reference_path);
-  const star = reference?.targets[source.targetIdx] ?? rows[0].frame.targets[source.targetIdx];
-  if (!star) return "# aperture px: unknown";
-  return `# aperture px: ${star.aperture_radius}; sky annulus px: ${star.sky_inner} to ${star.sky_outer}`;
-}
-
 function offsetCell(frame: TimeSeriesFrame, value: number | null, referencePath: string): string {
   if (frame.offset === null && frame.path === referencePath) return cell(0, 3);
   return frame.offset?.registered ? cell(value, 3) : "";
@@ -227,10 +227,11 @@ export function exoClockCsv(source: LightCurveExportSource, time: ExoClockTime):
     `# comparison stars: ${comps(source).map((i) => result.targets[i]?.label ?? `#${i}`).join(", ")}`,
     `# reference frame: ${fileBaseName(result.reference_path)}`,
     `# time: ${time} = ${TIME_NAMES[time]} at mid-exposure`,
+    ...(time === "bjd_tdb" ? [`# bjd_tdb source: ${bjdSources(measured.map((r) => r.frame)) ?? "unknown"}`] : []),
     `# flux: target / sum of comparison fluxes, not normalised; rel_flux_err = rel_flux * diff_err / ${MAG_ERR_FACTOR}`,
     `# filter: ${distinct(measured.map((r) => r.frame.filter))}`,
     `# exposure s: ${distinct(measured.map((r) => exposureSeconds(r.frame)))}`,
-    apertureLine(source, measured),
+    apertureLine(result, source.targetIdx),
     `# rows: ${rows.length} of ${result.frames.length} frames (${omitted} omitted: skipped or no differential magnitude)`,
     [time, ...EXOCLOCK_COLUMNS].join(","),
   ];
@@ -244,7 +245,7 @@ export function exoClockCsv(source: LightCurveExportSource, time: ExoClockTime):
         significant(flux.err),
         cell(extra?.airmass ?? null, 4),
         cell(extra?.fwhm ?? null, 3),
-        cell(extra?.sky ?? null, 3),
+        significantCell(extra?.sky ?? null),
         offsetCell(row.frame, extra?.dx ?? null, result.reference_path),
         offsetCell(row.frame, extra?.dy ?? null, result.reference_path),
       ].join(","),

@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { filterMatchingFrames, orderWithReferenceFirst, pathOf, sameDimensions } from "../useFrameSet";
+import { filterMatchingFrames, matchingLightFrames, orderWithReferenceFirst, pathOf, sameDimensions } from "../useFrameSet";
 import type { ProcessedFile } from "../../shared/types";
 
-function file(id: string, path: string, dims: [number, number] | null): ProcessedFile {
+function file(id: string, path: string, dims: [number, number] | null, header: Record<string, string> | null = null): ProcessedFile {
   return {
     id,
     name: path.split("/").pop() ?? path,
@@ -11,12 +11,38 @@ function file(id: string, path: string, dims: [number, number] | null): Processe
     imageRef: null,
     size: 1,
     status: "done",
-    result: dims ? { png_path: "", previewUrl: "", dimensions: dims, elapsed_ms: 0 } : null,
+    result: dims ? { png_path: "", previewUrl: "", dimensions: dims, elapsed_ms: 0, header } : null,
     error: null,
     startedAt: null,
     finishedAt: null,
   } as ProcessedFile;
 }
+
+describe("matchingLightFrames (flows-1)", () => {
+  const LIGHT = { IMAGETYP: "'Light Frame'", FILTER: "'V'" };
+  const all = [
+    file("a", "/night/light_001.fits", [3008, 2008], LIGHT),
+    file("b", "/night/light_002.fits", [3008, 2008], LIGHT),
+    file("c", "/night/flat_001.fits", [3008, 2008], { IMAGETYP: "'Flat Field'", FILTER: "'V'" }),
+    file("d", "/night/stacked.fits", [3008, 2008], { ...LIGHT, ABPROC: "'stacked'", ABCOMB: "'mean'" }),
+  ];
+
+  it("measures only the light frames of the reference size and names the calibration frames and stacked results it leaves out", () => {
+    const kept = matchingLightFrames(all, [3008, 2008]);
+    expect(kept.files.map(pathOf)).toEqual(["/night/light_001.fits", "/night/light_002.fits"]);
+    expect(kept.leftOutLine).toBe("1 frame left out by IMAGETYP: 1 flat; 1 stacked result left out of the analysis");
+  });
+
+  it("leaves frames of another size out of the count, keeps frames without IMAGETYP and says nothing when no frame was left out", () => {
+    const darkOfAnotherSize = file("e", "/night/dark_001.fits", [1504, 1004], { IMAGETYP: "'Dark Frame'" });
+    const untyped = file("f", "/night/frame_003.fits", [3008, 2008], { FILTER: "'V'" });
+    const kept = matchingLightFrames([...all, darkOfAnotherSize, untyped], [3008, 2008]);
+    expect(kept.files.map(pathOf)).toEqual(["/night/light_001.fits", "/night/light_002.fits", "/night/frame_003.fits"]);
+    expect(kept.leftOutLine).toBe("1 frame left out by IMAGETYP: 1 flat; 1 stacked result left out of the analysis");
+    expect(matchingLightFrames(all.slice(0, 2), [3008, 2008]).leftOutLine).toBeNull();
+    expect(matchingLightFrames(all, null)).toEqual({ files: [], leftOutLine: null });
+  });
+});
 
 describe("filterMatchingFrames", () => {
   const files = [

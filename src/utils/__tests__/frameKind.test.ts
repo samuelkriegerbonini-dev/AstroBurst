@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  cardText,
   classifyImagetyp,
   frameKindOf,
   imagetypLeftOutLine,
@@ -7,6 +8,7 @@ import {
   isStackedProduct,
   sortByFrameKind,
   stackedLeftOutLine,
+  subframeLightFiles,
   subframeLights,
   type FrameKind,
 } from "../frameKind";
@@ -167,5 +169,33 @@ describe("subframeLights", () => {
     });
     expect(subframeLights(files.filter((f) => f.name !== "flat_1.fits")).leftOutLine).toBe("1 stacked result left out of the analysis");
     expect(subframeLights([files[0], files[3]]).leftOutLine).toBeNull();
+  });
+});
+
+describe("subframeLightFiles", () => {
+  it("keeps the light files themselves in order with the left-out line of subframeLights (flows-1)", () => {
+    const files = [
+      frame("light_001.fits", { IMAGETYP: "'Light Frame'", FILTER: "'V'" }),
+      frame("dark_001.fits", { IMAGETYP: "'Dark Frame'" }),
+      frame("stacked.fits", { IMAGETYP: "'Light Frame'", FILTER: "'V'", ABPROC: "'stacked'", ABCOMB: "'mean'" }),
+      frame("light_002.fits", { IMAGETYP: "'Light Frame'", FILTER: "'V'" }),
+      frame("bias_001.fits", { IMAGETYP: "'Bias Frame'" }),
+    ];
+    const kept = subframeLightFiles(files);
+    expect(kept.files).toHaveLength(2);
+    expect(kept.files[0]).toBe(files[0]);
+    expect(kept.files[1]).toBe(files[3]);
+    expect(kept.leftOutLine).toBe("2 frames left out by IMAGETYP: 1 dark, 1 bias; 1 stacked result left out of the analysis");
+    expect(kept.leftOutLine).toBe(subframeLights(files).leftOutLine);
+    expect(subframeLightFiles([files[0]])).toEqual({ files: [files[0]], leftOutLine: null });
+  });
+});
+
+describe("cardText", () => {
+  it("reads a header card value without its quotes and padding, and nothing for a blank card", () => {
+    expect(cardText("'ADU     '")).toBe("ADU");
+    expect(cardText("MJy/sr")).toBe("MJy/sr");
+    expect(cardText("''")).toBeNull();
+    expect(cardText(undefined)).toBeNull();
   });
 });

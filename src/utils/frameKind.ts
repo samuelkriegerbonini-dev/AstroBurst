@@ -42,7 +42,7 @@ const LEFT_OUT_NOUNS: Record<CalibrationFrameKind, readonly [string, string]> = 
   bias: ["bias", "bias"],
 };
 
-function cardText(raw: string | undefined): string | null {
+export function cardText(raw: string | undefined): string | null {
   if (raw == null) return null;
   const text = String(raw).trim().replace(/^'+|'+$/g, "").trim();
   return text === "" ? null : text;
@@ -121,10 +121,15 @@ export function stackedLeftOutLine(count: number, leftOutOf: string): string | n
   return `${count} stacked result${count === 1 ? "" : "s"} left out of ${leftOutOf}`;
 }
 
-export function subframeLights<T extends FrameKindSource & { path: string }>(files: readonly T[]): { paths: string[]; leftOutLine: string | null } {
+export function subframeLightFiles<T extends FrameKindSource>(files: readonly T[]): { files: T[]; leftOutLine: string | null } {
   const sorted = sortByFrameKind(files);
   const lights = sorted.lights.filter((file) => !isStackedProduct(file.result?.header));
   const lines = [imagetypLeftOutLine(sorted.calibration), stackedLeftOutLine(sorted.lights.length - lights.length, "the analysis")];
   const said = lines.filter((line): line is string => line !== null);
-  return { paths: lights.map((file) => file.path), leftOutLine: said.length > 0 ? said.join("; ") : null };
+  return { files: lights, leftOutLine: said.length > 0 ? said.join("; ") : null };
+}
+
+export function subframeLights<T extends FrameKindSource & { path: string }>(files: readonly T[]): { paths: string[]; leftOutLine: string | null } {
+  const { files: lights, leftOutLine } = subframeLightFiles(files);
+  return { paths: lights.map((file) => file.path), leftOutLine };
 }

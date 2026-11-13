@@ -30,6 +30,13 @@ export interface LightCurveExtra {
   saturated: boolean | null;
   centroidJump: boolean | null;
   errors: string | null;
+  compSaturated: string[];
+}
+
+export interface SaturatedComp {
+  index: number;
+  label: string;
+  frames: number;
 }
 
 export interface CheckReference {
@@ -45,6 +52,7 @@ export const FRAME_JD_DIGITS = 5;
 export const RELATIVE_JD_DIGITS = 4;
 export const NO_TARGET_HINT = "Mark one star as the target.";
 export const NO_COMP_HINT = "Mark at least one star as comp; the differential light curve divides the target by the comparison stars.";
+export const BJD_AXIS_HINT = "BJD_TDB needs a time, a target and no skipped-geometry frame";
 
 const JD_TICK_MIN_DIGITS = 3;
 const JD_READOUT_DIGITS = 6;
@@ -79,6 +87,7 @@ export const LIGHT_CURVE_CSV_COLUMNS = [
   "centroid_jump",
   "skipped",
   "errors",
+  "comp_saturated",
 ] as const;
 
 function isFiniteNumber(v: number | null | undefined): v is number {
@@ -119,6 +128,24 @@ export function hasCompleteTimeAxis(result: TimeSeriesResult): boolean {
 export function hasCompleteBjdAxis(result: TimeSeriesResult): boolean {
   const measured = result.frames.filter((f) => f.skipped === null);
   return measured.length > 0 && measured.every((f) => isFiniteNumber(f.geometry?.bjd_tdb));
+}
+
+export function bjdAxisHint(result: TimeSeriesResult): string {
+  const frame = result.frames.find((f) => f.skipped === null && !isFiniteNumber(f.geometry?.bjd_tdb));
+  const geometry = frame?.geometry;
+  if (!frame || !geometry) return BJD_AXIS_HINT;
+  const note = isFiniteNumber(geometry.jd_utc) ? geometry.time_scale_notes.find((n) => n.includes("BJD_TDB")) : geometry.time_scale_notes[0];
+  return note ? `no BJD_TDB for ${frame.file_name} (${note})` : BJD_AXIS_HINT;
+}
+
+export function bjdSources(frames: readonly TimeSeriesFrame[]): string | null {
+  const sources = new Set(frames.flatMap((f) => (f.geometry && isFiniteNumber(f.geometry.bjd_tdb) && f.geometry.bjd_source ? [f.geometry.bjd_source] : [])));
+  return sources.size > 0 ? [...sources].join(", ") : null;
+}
+
+export function geometryNotes(result: TimeSeriesResult): string[] {
+  const reference = result.frames.find((f) => f.path === result.reference_path);
+  return [...new Set([...result.geometry_notes, ...(reference?.geometry?.time_scale_notes ?? [])])];
 }
 
 export interface TimeAxisAvailability {
@@ -300,6 +327,18 @@ export function frameMeasurementErrors(
   });
 }
 
+export function saturatedCompLabels(frame: TimeSeriesFrame, targets: readonly TimeSeriesTarget[], compIdx: readonly number[]): string[] {
+  return compIdx.filter((i) => frame.targets[i]?.saturated === true).map((i) => targets[i]?.label ?? `#${i}`);
+}
+
+export function saturatedComps(result: TimeSeriesResult): SaturatedComp[] {
+  const measured = result.frames.filter((f) => f.skipped === null);
+  return result.targets.flatMap((star, index) => {
+    const frames = star.role === "comp" ? measured.filter((f) => f.targets[index]?.saturated === true).length : 0;
+    return frames > 0 ? [{ index, label: star.label, frames }] : [];
+  });
+}
+
 export function lightCurveExtras(result: TimeSeriesResult, targetIdx: number, compIdx: number[]): LightCurveExtra[] {
   const comps = compIdx.filter((i) => i !== targetIdx);
   const jumps = new Set(centroidJumps(result));
@@ -321,6 +360,7 @@ export function lightCurveExtras(result: TimeSeriesResult, targetIdx: number, co
       saturated: target ? target.saturated : null,
       centroidJump: frame.skipped === null ? jumps.has(frame.index) : null,
       errors: errors.length > 0 ? errors.join("; ") : null,
+      compSaturated: saturatedCompLabels(frame, result.targets, comps),
     };
   });
 }
@@ -357,12 +397,12 @@ export function lightCurveCsv(result: TimeSeriesResult, rows: LightCurvePoint[],
         csvCell(frame.geometry?.parallactic_angle_deg ?? null, 2),
         csvCell(row.mag, 5),
         csvCell(row.err, 5),
-        csvCell(row.flux, 3),
-        csvCell(e?.targetErr ?? null, 3),
+        csvCell(row.flux),
+        csvCell(e?.targetErr ?? null),
         csvCell(e?.targetSnr ?? null, 2),
-        csvCell(e?.ensembleFlux ?? null, 3),
-        csvCell(e?.fwhm ?? null, 3),
-        csvCell(e?.sky ?? null, 3),
+        csvCell(e?.ensembleFlux ?? null),
+        csvCell(e?.fwhm ?? null),
+        csvCell(e?.sky ?? null),
         csvCell(e?.dx ?? null, 3),
         csvCell(e?.dy ?? null, 3),
         csvCell(e?.registered ?? null),
@@ -370,10 +410,41 @@ export function lightCurveCsv(result: TimeSeriesResult, rows: LightCurvePoint[],
         csvCell(e?.centroidJump ?? null),
         csvCell(frame.skipped),
         csvCell(e?.errors ?? null),
+        csvCell(e?.compSaturated.join("; ") ?? null),
       ].join(","),
     );
   });
   return lines.join("\n") + "\n";
+}
+
+export function apertureLine(result: TimeSeriesResult, targetIdx: number): string {
+  const reference = result.frames.find((f) => f.path === result.reference_path);
+  const star = reference?.targets[targetIdx] ?? result.frames.find((f) => f.targets[targetIdx])?.targets[targetIdx];
+  if (!star) return "# aperture px: unknown";
+  return `# aperture px: ${star.aperture_radius}; sky annulus px: ${star.sky_inner} to ${star.sky_outer}`;
+}
+
+function provenanceLines(result: TimeSeriesResult, targetIdx: number, comps: number[], fluxUnit: string | null): string[] {
+  const label = (i: number) => result.targets[i]?.label ?? `#${i}`;
+  const leftOut = result.targets.flatMap((star, i) => (star.role === "comp" && !comps.includes(i) ? [star.label] : []));
+  const sources = bjdSources(result.frames.filter((f) => f.skipped === null));
+  const unit = fluxUnit === null ? "the reference header has no BUNIT" : `pixel values in BUNIT ${fluxUnit}`;
+  return [
+    `# target: ${label(targetIdx)}`,
+    `# comparison stars: ${comps.map(label).join(", ")}`,
+    ...(leftOut.length > 0 ? [`# comparison stars left out: ${leftOut.join(", ")}`] : []),
+    `# reference frame: ${fileBaseName(result.reference_path)}`,
+    apertureLine(result, targetIdx),
+    `# flux: target_flux is the sky-subtracted sum over the aperture pixels, ensemble_flux the same sum added over the comparison stars, target_err the error of target_flux, bg_mean the mean sky per pixel; ${unit}`,
+    "# jd_mid: mid-exposure JD as the header gives it, not converted (time scale in time_source)",
+    `# bjd_tdb: BJD_TDB at mid-exposure (${sources === null ? "no frame has one" : `source: ${sources}`})`,
+  ];
+}
+
+export function lightCurveCsvText(result: TimeSeriesResult, targetIdx: number, compIdx: number[], fluxUnit: string | null): string {
+  const comps = compIdx.filter((i) => i !== targetIdx);
+  const table = lightCurveCsv(result, lightCurve(result, targetIdx, comps, "index"), lightCurveExtras(result, targetIdx, comps));
+  return [...provenanceLines(result, targetIdx, comps, fluxUnit), table].join("\n");
 }
 
 export function referenceStem(referencePath: string): string {
@@ -423,9 +494,15 @@ export function jdOffsetLabel(value: number, step?: number): string {
   return value.toFixed(digits);
 }
 
-export function timeAxisLabel(axis: TimeAxis, jd0: number): string {
+function headerTimeIsBarycentric(frames: readonly TimeSeriesFrame[]): boolean {
+  const measured = frames.filter((f) => f.skipped === null);
+  return measured.length > 0 && measured.every((f) => f.geometry?.bjd_source === "header");
+}
+
+export function timeAxisLabel(axis: TimeAxis, jd0: number, frames: readonly TimeSeriesFrame[]): string {
   if (axis === "bjd") return `BJD_TDB - ${jd0}`;
-  return axis === "jd" ? `JD (header time, not barycentric) - ${jd0}` : "frame index";
+  if (axis === "index") return "frame index";
+  return headerTimeIsBarycentric(frames) ? `JD (header time, barycentric) - ${jd0}` : `JD (header time, not barycentric) - ${jd0}`;
 }
 
 export function referenceTimeSource(result: TimeSeriesResult): string | null {

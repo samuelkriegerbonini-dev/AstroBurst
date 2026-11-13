@@ -1284,6 +1284,64 @@ mod tests {
         assert!(out.geometry_target.as_ref().is_some_and(|t| t.source.starts_with("WCS at")), "{:?}", out.geometry_target);
     }
 
+    const JWST_MJD_AVG: f64 = 60541.68468854167;
+    const JWST_TDB_MID: f64 = 60541.688475812225;
+    const JWST_BARTDELT_SECONDS: f64 = 327.22708247601986;
+
+    #[test]
+    fn jwst_frames_carry_their_header_tdb_mid_as_bjd_tdb_next_to_the_utc_mid_time() {
+        use crate::core::astrometry::time::jd_from_mjd;
+        let dir = tempfile::tempdir().unwrap();
+        let after = |mjd: f64, i: usize| mjd + i as f64 * CADENCE_SECONDS / 86400.0;
+        let (paths, targets) = write_headed_stack(dir.path(), "jwst_tdb", 3, |i, header| {
+            sited_wcs_cards(header);
+            header.set("TELESCOP", "JWST".to_string());
+            header.set(TIMESYS_KEY, UTC_SCALE.to_string());
+            header.set("MJD-AVG", format!("{}", after(JWST_MJD_AVG, i)));
+            header.set("TDB-MID", format!("{}", after(JWST_TDB_MID, i)));
+            header.set("BARTDELT", format!("{JWST_BARTDELT_SECONDS}"));
+        });
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 0);
+        for (i, frame) in out.frames.iter().enumerate() {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            let bjd = geometry.bjd_tdb.unwrap_or_else(|| panic!("frame {i} has no BJD_TDB: {:?}", geometry.time_scale_notes));
+            let header_bjd = jd_from_mjd(after(JWST_TDB_MID, i));
+            assert!((bjd - header_bjd).abs() <= SERIES_BJD_TOLERANCE_DAYS, "frame {i}: {} s off TDB-MID", (bjd - header_bjd) * 86400.0);
+            assert_eq!(geometry.bjd_source.as_deref(), Some("TDB-MID"));
+            let jd_utc = geometry.jd_utc.expect("JD_UTC");
+            assert!((jd_utc - jd_from_mjd(after(JWST_MJD_AVG, i))).abs() <= SERIES_BJD_TOLERANCE_DAYS, "frame {i}: {jd_utc}");
+            assert_eq!(frame.jd_mid, geometry.jd_utc);
+            assert_eq!((geometry.hjd_utc, geometry.altitude_deg), (None, None));
+        }
+    }
+
+    #[test]
+    fn a_combined_jwst_file_takes_tdb_mid_from_its_sci_header_over_the_first_exposure_bmidtime_of_the_primary() {
+        use crate::core::astrometry::time::jd_from_mjd;
+        use crate::core::cube::lazy::test_support::write_i2d_like_mef;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jw_combined_i2d.fits");
+        let primary = [
+            ("TELESCOP", "'JWST'"),
+            ("TIMESYS", "'UTC'"),
+            ("EXPMID", "60541.67540058738"),
+            ("BMIDTIME", "60541.6749680976"),
+            ("BARTDELT", "327.3275383282453"),
+            ("TARG_RA", "266.4168375"),
+            ("TARG_DEC", "-29.007811111111096"),
+        ];
+        let sci = [("MJD-AVG", "60541.67540058738"), ("TDB-MID", "60541.67918865736")];
+        write_i2d_like_mef(&path, 32, 32, &primary, &sci);
+        let key = path.to_str().unwrap();
+        let entry = load_entry(key).unwrap();
+        let series = series_geometry(key, entry.header(), &[], &GeometryOverrides::default());
+        let geometry = frame_geometry_of(entry.header(), &series).expect("geometry block");
+        assert_eq!(geometry.bjd_tdb, Some(jd_from_mjd(60541.67918865736)), "{:?}", geometry.time_scale_notes);
+        assert_eq!(geometry.bjd_source.as_deref(), Some("TDB-MID"));
+        assert_eq!(geometry.jd_utc, Some(jd_from_mjd(60541.67540058738)));
+    }
+
     #[test]
     fn a_plain_stack_has_time_scales_but_no_target_and_no_site_geometry() {
         let dir = tempfile::tempdir().unwrap();

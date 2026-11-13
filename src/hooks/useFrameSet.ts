@@ -1,6 +1,11 @@
 import { useMemo } from "react";
-import { useDoneFiles } from "./useFileStore";
+import { subframeLightFiles } from "../utils/frameKind";
 import type { ProcessedFile } from "../shared/types";
+
+export interface MatchingFrames {
+  files: ProcessedFile[];
+  leftOutLine: string | null;
+}
 
 export function pathOf(file: ProcessedFile): string {
   return file.path;
@@ -21,6 +26,10 @@ export function filterMatchingFrames(files: ProcessedFile[], referenceDims: [num
   });
 }
 
+export function matchingLightFrames(files: ProcessedFile[], referenceDims: [number, number] | null): MatchingFrames {
+  return subframeLightFiles(filterMatchingFrames(files, referenceDims));
+}
+
 export function orderWithReferenceFirst(files: ProcessedFile[], referencePath: string | null): ProcessedFile[] {
   if (!referencePath) return files;
   const reference = files.find((f) => pathOf(f) === referencePath);
@@ -28,12 +37,11 @@ export function orderWithReferenceFirst(files: ProcessedFile[], referencePath: s
   return [reference, ...files.filter((f) => f !== reference)];
 }
 
-export function useMatchingFrames(referenceDims: [number, number] | null): ProcessedFile[] {
-  const files = useDoneFiles();
+export function useMatchingFrames(files: ProcessedFile[], referenceDims: [number, number] | null): MatchingFrames {
   const width = referenceDims?.[0];
   const height = referenceDims?.[1];
   return useMemo(
-    () => filterMatchingFrames(files, width !== undefined && height !== undefined ? [width, height] : null),
+    () => matchingLightFrames(files, width !== undefined && height !== undefined ? [width, height] : null),
     [files, width, height],
   );
 }

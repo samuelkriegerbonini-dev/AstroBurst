@@ -10,14 +10,18 @@ import {
   type TimeSeriesRole,
   type TimeSeriesTarget,
 } from "../../shared/types/analysis";
-import { useDqContext, useFileContext, useRenderContext } from "../../context/PreviewContext";
+import type { Region } from "../../shared/types/regions";
+import { useDoneFilesContext, useDqContext, useFileContext, useRenderContext } from "../../context/PreviewContext";
 import { useRegionDoc } from "../../hooks/useRegionStore";
 import { useProgress } from "../../hooks/useProgress";
 import { useAnalysisTarget } from "../../hooks/useAnalysisTarget";
 import { orderWithReferenceFirst, pathOf, useMatchingFrames } from "../../hooks/useFrameSet";
 import { fileStore } from "../../hooks/useFileStore";
+import { regionStore } from "../../utils/regionStore";
+import { cardText } from "../../utils/frameKind";
 import {
   MAX_TIME_SERIES_TARGETS,
+  bjdAxisHint,
   centroidJumps,
   checkReference,
   checkRmsLabel,
@@ -26,22 +30,25 @@ import {
   frameJdLabel,
   frameMeasurementErrors,
   frameTimes,
+  geometryNotes,
   inFrameOrder,
   jdOffsetLabel,
   jdZero,
   lightCurve,
-  lightCurveCsv,
   lightCurveCsvFileName,
-  lightCurveExtras,
+  lightCurveCsvText,
   measuredTargets,
   referenceTimeSource,
   resolveTimeAxis,
   resultCoversPath,
+  saturatedCompLabels,
+  saturatedComps,
   seriesRms,
   timeAxisAvailability,
   timeAxisLabel,
   timeSeriesRoleHint,
   type LightCurvePoint,
+  type SaturatedComp,
   type TimeAxis,
 } from "../../utils/differentialPhotometry";
 import {
@@ -100,8 +107,9 @@ const SKY_OUT_TITLE = "Outer sky radius in pixels; blank uses 3 × r_ap";
 const STARS_HINT =
   "Draw Point regions on the target and comparison stars, or use Add as Point regions in the photometry table.";
 const FRAMES_HINT = "Load the other frames of the sequence; only done files with the same dimensions are measured.";
+const REFERENCE_LEFT_OUT_HINT = "The current file is a calibration frame or a stacked result, so it cannot be the reference.";
+const STAR_NAME_TITLE = "Name of the star, kept on its Point region; ETD and ExoClock need the target's designation";
 const NO_PLOT_HINT = "No frame has a positive target and comparison flux to plot.";
-const BJD_AXIS_HINT = "BJD_TDB needs a time, a target and no skipped-geometry frame";
 const AIRMASS_COLUMN_TITLE = "header AIRMASS, else Kasten & Young 1989";
 const ETD_TITLE = "ETD (var.astro.cz): JD_UT, V-C, err as Siril writes it; upload with Time standard Gjd and Brightness in Magnitudes";
 const EXOCLOCK_TITLE =
@@ -111,6 +119,7 @@ const EXOCLOCK_TIME_TITLE = "Time column of the ExoClock file; ExoClock recommen
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-amber-500/50 w-full";
 const SELECT_CLASS = "bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[10px] text-zinc-300 font-mono w-full";
+const NAME_CLASS = `${SELECT_CLASS} min-w-0`;
 const SMALL_BUTTON_CLASS =
   "flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-zinc-700/60 text-zinc-300 hover:bg-zinc-800/80 disabled:opacity-40 disabled:cursor-not-allowed";
 const SECTION_CLASS = "text-[9px] text-zinc-500 uppercase tracking-wider";
@@ -134,8 +143,14 @@ function instrumentalMag(flux: number | null | undefined): number | null {
   return typeof flux === "number" && Number.isFinite(flux) && flux > 0 ? -2.5 * Math.log10(flux) : null;
 }
 
+function saturatedCompText(comp: SaturatedComp, leftOut: boolean): string {
+  const frames = `${comp.frames} ${comp.frames === 1 ? "frame" : "frames"}`;
+  return `comparison star ${comp.label} saturated on ${frames}${leftOut ? ", left out of the ensemble" : ""}`;
+}
+
 interface PointTarget {
   id: string;
+  region: Region;
   target: TimeSeriesTarget;
 }
 
@@ -146,6 +161,7 @@ function pointTargets(regions: ReturnType<typeof useRegionDoc>["regions"], roles
     const index = rows.length;
     rows.push({
       id: region.id,
+      region,
       target: {
         x: region.shape.x,
         y: region.shape.y,
@@ -165,6 +181,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const seriesId = useId();
   const axisId = useId();
   const { file } = useFileContext();
+  const { doneFiles } = useDoneFilesContext();
   const { excludeDq } = useDqContext();
   const { processed } = useRenderContext();
   const analysisTarget = useAnalysisTarget();
@@ -182,6 +199,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const [timeAxis, setTimeAxis] = useState<TimeAxis>("bjd");
   const [exoClockTime, setExoClockTime] = useState<ExoClockTime>("jd_utc");
   const [result, setResult] = useState<TimeSeriesResult | null>(null);
+  const [fluxUnit, setFluxUnit] = useState<string | null>(null);
+  const [leftOut, setLeftOut] = useState<number[]>([]);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedPath, showSavedPath, clearSavedPath] = useTimedNotice<string>(SAVED_NOTICE_MS);
@@ -204,6 +223,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     if (resultCoversPath(resultRef.current, filePath)) return;
     abandon();
     setResult(null);
+    setLeftOut([]);
     setError(null);
     setRunning(false);
     clearSavedPath();
@@ -229,9 +249,10 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   }, [filePath]);
 
   const dims = file?.result?.dimensions ?? null;
-  const matching = useMatchingFrames(dims);
-  const frames = useMemo(() => orderWithReferenceFirst(matching, filePath), [matching, filePath]);
+  const matching = useMatchingFrames(doneFiles, dims);
+  const frames = useMemo(() => orderWithReferenceFirst(matching.files, filePath), [matching, filePath]);
   const referenceLoaded = frames.length > 0 && pathOf(frames[0]) === filePath;
+  const referenceLeftOut = !referenceLoaded && doneFiles.some((f) => pathOf(f) === filePath);
 
   const targets = useMemo(() => pointTargets(regionDoc.regions, roles), [regionDoc, roles]);
   const referenceDoc = useRegionDoc(result?.reference_path ?? filePath);
@@ -276,7 +297,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const measure = useCallback(async () => {
     if (!canMeasure || apertureRadius === undefined) return;
     const seq = beginRun(runRef.current);
-    const storeOrder = matching.map(pathOf);
+    const storeOrder = matching.files.map(pathOf);
+    const referenceUnit = cardText(frames[0].result?.header?.BUNIT);
     setRunning(true);
     setError(null);
     clearSavedPath();
@@ -296,6 +318,8 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
       });
       if (!isCurrentRun(runRef.current, seq)) return;
       setResult(inFrameOrder(res, storeOrder));
+      setFluxUnit(referenceUnit);
+      setLeftOut([]);
       measurementLog.append(timeSeriesEntry(res, { apertureRadius, annulusInner, annulusOuter, gain, excludeDq, trackDrift }));
       setSeriesKey(SERIES_TARGET);
     } catch (e: unknown) {
@@ -317,11 +341,24 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     setRoles((prev) => ({ ...prev, [id]: role }));
   }, []);
 
+  const nameStar = useCallback(
+    (region: Region, typed: string) => {
+      const text = typed.trim();
+      if (!filePath || text === (region.props.text ?? "").trim()) return;
+      regionStore.update(filePath, region.id, { props: { ...region.props, text: text === "" ? null : text } });
+    },
+    [filePath],
+  );
+
+  const toggleLeftOut = useCallback((index: number) => {
+    setLeftOut((prev) => (prev.includes(index) ? prev.filter((i) => i !== index) : [...prev, index]));
+  }, []);
+
   const analysis = useMemo(() => {
     if (!result) return null;
     const echo = result.targets;
     const targetIdx = echo.findIndex((t) => t.role === "target");
-    const compIdx = echo.map((t, i) => (t.role === "comp" ? i : -1)).filter((i) => i >= 0);
+    const compIdx = echo.map((t, i) => (t.role === "comp" && !leftOut.includes(i) ? i : -1)).filter((i) => i >= 0);
     const checkIdx = echo.map((t, i) => (t.role === "check" ? i : -1)).filter((i) => i >= 0);
     const axis = resolveTimeAxis(result, timeAxis);
     const targetCurve = targetIdx >= 0 ? lightCurve(result, targetIdx, compIdx, axis) : [];
@@ -353,7 +390,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
       used: targetCurve.filter((p) => p.mag !== null).length,
       jumps: new Set(centroidJumps(result)),
     };
-  }, [result, timeAxis]);
+  }, [result, timeAxis, leftOut]);
 
   const activeKey = analysis && analysis.options.some((o) => o.key === seriesKey) ? seriesKey : (analysis?.options[0]?.key ?? SERIES_TARGET);
 
@@ -405,10 +442,18 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     [result, frames],
   );
 
+  const exportSource = useMemo((): LightCurveExportSource | null => {
+    if (!result || !analysis) return null;
+    const labelled = withCurrentLabels(result, referenceTargets.map((t) => t.target));
+    return { result: labelled, targetIdx: analysis.targetIdx, compIdx: analysis.compIdx };
+  }, [result, analysis, referenceTargets]);
+  const saturated = useMemo(() => (exportSource ? saturatedComps(exportSource.result) : []), [exportSource]);
+  const notes = useMemo(() => (result ? geometryNotes(result) : []), [result]);
+
   const csvText = useCallback((): string => {
-    if (!result || !analysis || analysis.targetIdx < 0) return "";
-    return lightCurveCsv(result, analysis.targetCurve, lightCurveExtras(result, analysis.targetIdx, analysis.compIdx));
-  }, [result, analysis]);
+    if (!exportSource || exportSource.targetIdx < 0) return "";
+    return lightCurveCsvText(exportSource.result, exportSource.targetIdx, exportSource.compIdx, fluxUnit);
+  }, [exportSource, fluxUnit]);
 
   const copyCsv = useCallback(async () => {
     try {
@@ -440,11 +485,6 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     );
   }, [result, csvText, saveText]);
 
-  const exportSource = useMemo((): LightCurveExportSource | null => {
-    if (!result || !analysis) return null;
-    const labelled = withCurrentLabels(result, referenceTargets.map((t) => t.target));
-    return { result: labelled, targetIdx: analysis.targetIdx, compIdx: analysis.compIdx };
-  }, [result, analysis, referenceTargets]);
   const etdBlock = useMemo(() => (exportSource ? etdBlocker(exportSource) : null), [exportSource]);
   const exoClockBlock = useMemo(() => (exportSource ? exoClockBlocker(exportSource, exoClockTime) : null), [exportSource, exoClockTime]);
   const exportNotes = useMemo(() => exportBlockerNotes(etdBlock, exoClockBlock), [etdBlock, exoClockBlock]);
@@ -465,7 +505,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     );
   }, [exportSource, exoClockBlock, exoClockTime, saveText]);
 
-  const xLabel = timeAxisLabel(analysis?.axis ?? "index", analysis?.jd0 ?? 0);
+  const xLabel = timeAxisLabel(analysis?.axis ?? "index", analysis?.jd0 ?? 0, result?.frames ?? []);
   const axes = useMemo(() => (result ? timeAxisAvailability(result) : { jd: false, bjd: false, any: false }), [result]);
   const yLabel = activeKey === SERIES_RAW ? "inst mag" : "diff mag";
   const xTickFormat = analysis && analysis.axis !== "index" ? jdOffsetLabel : undefined;
@@ -489,11 +529,21 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
           <div className="text-[10px] text-zinc-600">{STARS_HINT}</div>
         ) : (
           <div className="space-y-0.5">
-            {targets.map(({ id, target }) => (
+            {targets.map(({ id, region, target }) => (
               <div key={id} className="grid grid-cols-[1fr_auto_auto] items-center gap-1.5 text-[10px] font-mono">
-                <span className="text-zinc-300 truncate" title={target.label}>
-                  {target.label}
-                </span>
+                <input
+                  key={region.props.text ?? ""}
+                  type="text"
+                  defaultValue={region.props.text ?? ""}
+                  placeholder={target.label}
+                  aria-label={`Name of ${target.label}`}
+                  title={STAR_NAME_TITLE}
+                  onBlur={(e) => nameStar(region, e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") e.currentTarget.blur();
+                  }}
+                  className={NAME_CLASS}
+                />
                 <span className="text-zinc-500">
                   {fmt(target.x, 1)}, {fmt(target.y, 1)}
                 </span>
@@ -525,9 +575,12 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
           {frames.length} matching {frames.length === 1 ? "frame" : "frames"}
           {dims ? ` at ${dims[0]} x ${dims[1]}` : ""}
         </div>
+        {matching.leftOutLine && <div className="text-[9px] text-zinc-500">{matching.leftOutLine}</div>}
         {frames.length < 2 && <div className="text-[10px] text-zinc-600">{FRAMES_HINT}</div>}
         {!referenceLoaded && !!filePath && (
-          <div className="text-[9px] text-amber-400/90">The current file is not a done frame, so it cannot be the reference.</div>
+          <div className="text-[9px] text-amber-400/90">
+            {referenceLeftOut ? REFERENCE_LEFT_OUT_HINT : "The current file is not a done frame, so it cannot be the reference."}
+          </div>
         )}
         {!onFileGrid && !!filePath ? (
           <div className="text-[9px] text-amber-400/90">{otherGridHint(processed?.label ?? null)}</div>
@@ -633,11 +686,11 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
 
         <ErrorAlert message={error} />
         <WarningList warnings={result?.warnings} />
-        {result && result.geometry_notes.length > 0 && (
+        {notes.length > 0 && (
           <details className="text-[9px] text-zinc-500">
             <summary className="cursor-pointer select-none">Geometry notes</summary>
             <ul className="mt-1 space-y-0.5 list-disc pl-4">
-              {result.geometry_notes.map((note) => (
+              {notes.map((note) => (
                 <li key={note}>{note}</li>
               ))}
             </ul>
@@ -679,9 +732,21 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                   </option>
                   <option value="index">frame index</option>
                 </select>
-                {!axes.bjd && <div className="text-[9px] text-zinc-600">{BJD_AXIS_HINT}</div>}
+                {!axes.bjd && <div className="text-[9px] text-zinc-600">{bjdAxisHint(result)}</div>}
               </div>
             </div>
+
+            {saturated.map((comp) => {
+              const out = leftOut.includes(comp.index);
+              return (
+                <div key={comp.index} className={`flex items-center gap-1.5 text-[9px] ${out ? "text-zinc-500" : "text-amber-400/90"}`}>
+                  <span className="flex-1">{saturatedCompText(comp, out)}</span>
+                  <button type="button" onClick={() => toggleLeftOut(comp.index)} className={SMALL_BUTTON_CLASS}>
+                    {out ? `Put ${comp.label} back` : `Leave ${comp.label} out`}
+                  </button>
+                </div>
+              );
+            })}
 
             {plottable ? (
               <ProfilePlot
@@ -757,6 +822,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                     const isCurrent = frame.index === currentFrameIndex;
                     const measurementErrors =
                       analysis.targetIdx >= 0 ? frameMeasurementErrors(frame, result.targets, analysis.targetIdx, analysis.compIdx) : [];
+                    const saturatedComp = saturatedCompLabels(frame, result.targets, analysis.compIdx);
                     const tone = frame.skipped ? "text-zinc-500" : isCurrent ? "text-amber-200" : "text-zinc-300";
                     return (
                       <tr key={frame.index} className={`${tone} ${isCurrent ? "bg-zinc-800/60" : ""}`}>
@@ -786,6 +852,9 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
                         </td>
                         <td className="text-left px-1.5 py-0.5 max-w-[140px]">
                           {target?.saturated && <span className={`${CHIP_CLASS} bg-red-900/50 text-red-300`}>saturated</span>}
+                          {saturatedComp.length > 0 && (
+                            <span className={`${CHIP_CLASS} bg-red-900/50 text-red-300`}>{`comp ${saturatedComp.join(", ")} saturated`}</span>
+                          )}
                           {lowConfidence && <span className={`${CHIP_CLASS} bg-amber-900/50 text-amber-300`}>low-confidence drift</span>}
                           {jump && <span className={`${CHIP_CLASS} bg-amber-900/50 text-amber-300`}>centroid jump</span>}
                           {frame.skipped && (
