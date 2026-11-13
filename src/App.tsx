@@ -271,13 +271,18 @@ export default function App() {
     };
   }, [shortcutsOpen]);
   const handleShortcutsKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      closeShortcuts();
+      return;
+    }
     if (e.key !== "Tab") return;
     const focusables = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
     const target = focusTrapTarget(focusables.length, focusables.indexOf(document.activeElement as HTMLElement), e.shiftKey);
     if (target === null) return;
     e.preventDefault();
     focusables[target].focus();
-  }, []);
+  }, [closeShortcuts]);
   const lastShiftUp = useRef(0);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -469,14 +474,15 @@ export default function App() {
     ];
     acts.push(...sampleEntries);
     if (view !== "empty") {
+      const toolsOnScreen = mode === "workspace";
       for (const { tool, label } of paletteToolEntries(dockLayout, hasVisibleFile)) {
         acts.push({
           id: `tool-${tool}`,
-          label,
+          label: toolsOnScreen ? label : `Open ${DOCK_TOOL_META[tool].label}`,
           hint: "Tool",
           keywords: DOCK_TOOL_META[tool].keywords,
           icon: DOCK_TOOLS[tool].icon,
-          run: inWorkspace(() => dockStore.dispatch({ type: "toggle", tool })),
+          run: inWorkspace(() => dockStore.dispatch({ type: toolsOnScreen ? "toggle" : "open", tool })),
         });
       }
       acts.push({ id: "all-tools", label: "All tools", keywords: ["Tools", "Sidebar", "Pin", "Browse"], icon: LayoutGrid, run: inWorkspace(toolBrowserStore.open) });
@@ -486,7 +492,7 @@ export default function App() {
         icon: Columns2,
         run: inWorkspace(() => dockStore.resetAll()),
       });
-      acts.push({
+      if (hasVisibleFile) acts.push({
         ...openSpectrumCsvPaletteAction(
           inWorkspace(() => {
             void openSpectrumCsv(visibleFileKey).then((opened) => {
@@ -514,7 +520,7 @@ export default function App() {
     acts.push(...archivePaletteActions);
     acts.push({ id: "shortcuts", label: "Keyboard Shortcuts", hint: "?", icon: InfoIcon, run: openShortcuts });
     return acts;
-  }, [view, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, newBatchEntry, handleBrowseFiles, handleSelectFolder, sampleEntries, handleExportZip, discardBatch, armNewBatchInPalette, confirmNewBatchInPalette, openShortcuts, archivePaletteActions]);
+  }, [view, mode, dockLayout, hasVisibleFile, visibleFileKey, stats.done, isComplete, newBatchEntry, handleBrowseFiles, handleSelectFolder, sampleEntries, handleExportZip, discardBatch, armNewBatchInPalette, confirmNewBatchInPalette, openShortcuts, archivePaletteActions]);
 
   const handlePaletteSelectFile = useCallback((id: string) => {
     showWorkspace();

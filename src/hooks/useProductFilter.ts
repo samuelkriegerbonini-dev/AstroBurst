@@ -4,7 +4,9 @@ import { displayFilterValue, type ChannelSource } from "../utils/channelMapping"
 type Listener = () => void;
 export type FilterMode = "or" | "and";
 
-const JWST_PRODUCT_RE = /[_-](i2d|segm|cal|rate|rateints|x1d|s2d|s3d|uncal|qslope|crf|bsub|srctype|outlier|tweakreg|skymatch|whtlt)(?:(?:\.fits|\.fit|\.fts)(?:\.gz)?|\.asdf)$/i;
+const JWST_PRODUCT_TYPES: readonly string[] = ["i2d", "segm", "cal", "calints", "rate", "rateints", "x1d", "x1dints", "s2d", "s3d", "uncal", "qslope", "crf", "bsub", "srctype", "outlier", "tweakreg", "skymatch", "whtlt"];
+const PRODUCT_FILE_SUFFIX = /(?:(?:\.fits|\.fit|\.fts)(?:\.gz)?|\.asdf)$/.source;
+const JWST_PRODUCT_RE = new RegExp(`[_-](${JWST_PRODUCT_TYPES.join("|")})${PRODUCT_FILE_SUFFIX}`, "i");
 
 export function extractProductType(filename: string): string | null {
   const match = filename.match(JWST_PRODUCT_RE);
@@ -39,9 +41,9 @@ export function fileSearchText(file: FilterableFile): string {
 }
 
 function singleMatch(file: FilterableFile, filter: string): boolean {
-  const pt = extractProductType(file.name);
-  if (pt === filter) return true;
-  return fileSearchText(file).includes(filter.toLowerCase());
+  const chip = filter.toLowerCase();
+  if (JWST_PRODUCT_TYPES.includes(chip)) return extractProductType(file.name) === chip;
+  return fileSearchText(file).includes(chip);
 }
 
 export function matchesActiveFilters(file: FilterableFile, filters: string[], mode: FilterMode): boolean {

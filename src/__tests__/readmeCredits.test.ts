@@ -36,7 +36,7 @@ const CREDITED: Record<string, string[]> = {
     "zscale",
     "astropy",
     "wcslib",
-    "Greisen et al. 2006",
+    "Morton 2000",
     "Kasten-Young",
     "Fritsch-Carlson",
     "BT.709",

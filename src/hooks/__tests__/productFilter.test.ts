@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractProductType, fileSearchText, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "../useProductFilter";
+import { detectProductTypes, extractProductType, fileSearchText, filtersRevealing, matchesActiveFilters, metadataFilterable, processedFilterable, productFilterStore } from "../useProductFilter";
 import { displayFilterValue } from "../../utils/channelMapping";
 
 const WFPC2 = [
@@ -10,6 +10,8 @@ const WFPC2 = [
 
 const NIRCAM = { name: "jw02739-o001_t001_nircam_clear-f200w_i2d.fits", filter: "F200W", instrument: "NIRCAM" };
 const NIRCAM_BARE = { name: "jw02739-o001_t001_nrcb1_i2d.fits", filter: "F200W", instrument: "NIRCAM" };
+const TSO_CALINTS = "jw01366004001_04101_00001-seg001_nis_calints.fits";
+const TSO_X1DINTS = "jw01366004001_04101_00001-seg001_nis_x1dints.fits";
 
 describe("extractProductType", () => {
   it("gives the quick-slope product its own chip next to uncal and rate", () => {
@@ -28,6 +30,50 @@ describe("extractProductType", () => {
     expect(extractProductType("jw01_nrs1_cal.asdf.gz")).toBeNull();
     expect(extractProductType("jw01_nrs1_s3d.gz")).toBeNull();
     expect(extractProductType("jw01_nrs1_s3d.tar.gz")).toBeNull();
+  });
+
+  it("gives the per-integration products of a time series their own chips", () => {
+    expect(extractProductType(TSO_CALINTS)).toBe("calints");
+    expect(extractProductType(TSO_X1DINTS)).toBe("x1dints");
+    expect(extractProductType("jw01366004001_04101_00001-seg001_nis_rateints.fits")).toBe("rateints");
+  });
+});
+
+describe("product chips", () => {
+  const exposures = ["00001", "00002", "00003", "00004"].flatMap((exposure) => ["nrs1", "nrs2"].map((detector) => `jw01266005001_02103_${exposure}_${detector}`));
+  const jw01266 = [
+    ...exposures.flatMap((exposure) => ["cal", "uncal", "rate", "rateints", "s3d", "x1d"].map((product) => `${exposure}_${product}.fits`)),
+    ...["g235h-f170lp", "g395h-f290lp"].flatMap((grating) => ["s3d", "x1d"].map((product) => `jw01266-o005_t001_nirspec_${grating}_${product}.fits`)),
+  ];
+  const kept = (names: string[], filters: string[], mode: "or" | "and" = "or") => names.filter((name) => matchesActiveFilters({ name }, filters, mode));
+
+  it("finds the six product chips of the 52 jw01266 NIRSpec IFU files", () => {
+    expect(jw01266).toHaveLength(52);
+    expect(detectProductTypes(jw01266)).toEqual(["cal", "rate", "rateints", "s3d", "uncal", "x1d"]);
+  });
+
+  it.each([
+    ["cal", 8],
+    ["uncal", 8],
+    ["rate", 8],
+    ["rateints", 8],
+    ["s3d", 10],
+    ["x1d", 10],
+  ])("keeps only the %s files under their chip", (chip, count) => {
+    const files = kept(jw01266, [chip]);
+    expect(files.filter((name) => extractProductType(name) !== chip)).toEqual([]);
+    expect(files).toHaveLength(count);
+  });
+
+  it("leaves the per-integration calints and x1dints products out of the cal and x1d chips", () => {
+    expect(kept([TSO_CALINTS, TSO_X1DINTS], ["cal"])).toEqual([]);
+    expect(kept([TSO_CALINTS, TSO_X1DINTS], ["x1d"])).toEqual([]);
+    expect(kept([TSO_CALINTS, TSO_X1DINTS], ["calints"])).toEqual([TSO_CALINTS]);
+    expect(kept([TSO_CALINTS, TSO_X1DINTS], ["x1dints"])).toEqual([TSO_X1DINTS]);
+  });
+
+  it("combines a product chip with a text chip on the file name", () => {
+    expect(kept(jw01266, ["cal", "nrs1"], "and")).toEqual(exposures.filter((exposure) => exposure.endsWith("nrs1")).map((exposure) => `${exposure}_cal.fits`));
   });
 });
 

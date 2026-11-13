@@ -230,6 +230,21 @@ describe("samplePaletteActions", () => {
   it.each(["absent", "partial", "downloading"] as const)("lists no M16 download once a batch is loaded, where its progress and errors would not show (%s)", (state) => {
     expect(samplePaletteActions([{ ...M16, state }], shown, runs())).toEqual([]);
   });
+
+  it("lists what the README says it lists in each view", () => {
+    const absent = [M16, IFU, LRS];
+    const ready = absent.map((set) => ({ ...set, state: "ready" as const, received_bytes: set.total_bytes }));
+    const listed = (sets: readonly PaletteSampleSet[], view: { workspaceEmpty: boolean; fileShown: boolean }) => samplePaletteActions(sets, view, runs()).map((a) => a.id);
+    expect(listed(absent, empty)).toEqual(["download-sample"]);
+    expect(listed(absent, shown)).toEqual(["download-sample-jwst-gc-nirspec-ifu", "download-sample-jwst-miri-lrs"]);
+    expect(listed(absent, { workspaceEmpty: false, fileShown: false })).toEqual([]);
+    expect(listed(ready, empty)).toEqual(["open-sample", "open-sample-jwst-gc-nirspec-ifu", "open-sample-jwst-miri-lrs"]);
+    expect(listed(ready, shown)).toEqual(listed(ready, empty));
+    const readme = readFileSync(fileURLToPath(new URL("../../../README.md", import.meta.url)), "utf8");
+    expect(readme.split(/\r?\n/).find((line) => line.startsWith("Sample data are downloaded on demand"))).toBe(
+      "Sample data are downloaded on demand; the installers do not carry them. The empty workspace offers the HST set and the Cube tool offers the JWST sets; the command palette lists the HST download while the workspace is empty, the JWST downloads while a file is shown, and every set already downloaded:",
+    );
+  });
 });
 
 describe("sampleSetRun", () => {
