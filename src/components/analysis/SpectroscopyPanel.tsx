@@ -81,6 +81,8 @@ import type {
   VelocityConvention,
 } from "../../shared/types/spectral";
 import {
+  PLUS_MINUS,
+  formatQuantity,
   lineMeasurementAxis,
   lineOverlayPolylines,
   momentVelocityFrameNote,
@@ -95,6 +97,7 @@ import {
   SPECTRUM_FILE_CORRECTION_NOTE,
   defaultFrameChoice,
   documentAxis,
+  documentDqExclusions,
   documentFrameLine,
   documentSummary,
   type SpectrumDocument,
@@ -104,6 +107,7 @@ import { pixelToWorld } from "../../services/astrometry";
 import { shapeCentre } from "../../utils/regionGeometry";
 import {
   fileBaseName,
+  fluxUnitLabel,
   regionForShape,
   regionForSource,
   saveCsvDialog,
@@ -158,6 +162,7 @@ import {
   axisValueToPixel,
   channelAxisValue,
   channelRangeFromDrag,
+  channelWidthAt,
   commitRangeEdge,
   commitWindowEdge,
   continuumOverlapNote,
@@ -314,7 +319,7 @@ function hasArea(shape: RegionShape): boolean {
 
 function pickRegion(regions: Region[], selectedId: string | null): { target: Region | null; background: Region | null } {
   const selected = regions.find((r) => r.id === selectedId) ?? null;
-  const target = selected && hasArea(selected.shape) ? selected : (regions.find((r) => hasArea(r.shape)) ?? null);
+  const target = selected && hasArea(selected.shape) ? selected : (regions.find((r) => r.props.include && hasArea(r.shape)) ?? null);
   if (!target) return { target: null, background: null };
   const linked = target.backgroundId ? (regions.find((r) => r.id === target.backgroundId) ?? null) : null;
   const background = linked && linked.shape.shape === "annulus" ? linked : null;
@@ -344,6 +349,8 @@ const LINE_LIST_DASH = [2, 3];
 const ERROR_BAND_FILL = "rgba(34,211,238,0.16)";
 const ERROR_BAND_SCALED_STROKE = "rgba(34,211,238,0.55)";
 const ERROR_BAND_SCALED_DASH = [3, 3];
+const DQ_TICK_COLOR = "rgba(244,63,94,0.7)";
+const DQ_TICK_LENGTH = 4;
 const LINE_LIST_FONT = "9px 'JetBrains Mono', monospace";
 const LINE_LIST_LABEL_H = 12;
 const LINE_PICK_DOUBLE_CLICK_GUARD_MS = 400;
@@ -637,6 +644,13 @@ function SpectroscopyPanel({
   }, [documentMode, docSpectrum, region, regionView, spectrum]);
   const shownRegionView: RegionView = region && regionView === "jy" && !region.flux_jy ? "sum" : regionView;
   const bandErrors = useMemo(() => (region ? regionViewErrors(region, shownRegionView) : null), [region, shownRegionView]);
+  const dqExcluded = useMemo(() => (docSpectrum && useDq ? documentDqExclusions(docSpectrum) : null), [docSpectrum, useDq]);
+  const plotSeries = useMemo(
+    () => (dqExcluded ? series.map((value, i) => (dqExcluded[i] ? NaN : value)) : series),
+    [series, dqExcluded],
+  );
+  const seriesErr = docSpectrum?.err ?? bandErrors?.err ?? null;
+  const exportView: RegionView = region ? shownRegionView : "sum";
   const n = series.length;
   const totalFrames = cubeDims ? (cubeDims.frames ?? 0) : 0;
   const channelCount = totalFrames > 0 ? totalFrames : n;
@@ -764,14 +778,14 @@ function SpectroscopyPanel({
   const plotParams = useMemo(() => {
     if (n === 0) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 };
     const [xMin, xMax] = axisX.values ? arrayMinMax(axisX.values) : [0, n - 1];
-    const [seriesMin, seriesMax] = arrayMinMax(series);
-    const band = errorBandExtent(axisX.values, series, bandErrors);
+    const [seriesMin, seriesMax] = arrayMinMax(plotSeries);
+    const band = errorBandExtent(axisX.values, plotSeries, bandErrors);
     const rawYMin = band ? Math.min(seriesMin, band[0]) : seriesMin;
     const rawYMax = band ? Math.max(seriesMax, band[1]) : seriesMax;
     const span = rawYMax - rawYMin;
     const yPad = span > 0 ? span * 0.05 : Math.max(Math.abs(rawYMax), 1) * 0.05;
     return { xMin, xMax, yMin: rawYMin - yPad, yMax: rawYMax + yPad };
-  }, [series, axisX, n, bandErrors]);
+  }, [plotSeries, axisX, n, bandErrors]);
 
   const currentSource = useMemo<SpectrumSource | null>(() => {
     if (region) return regionSource;
@@ -781,6 +795,7 @@ function SpectroscopyPanel({
     () => (documentMode ? (spectrumDocument?.source ?? null) : currentSource),
     [documentMode, spectrumDocument, currentSource],
   );
+  const fluxUnit = fluxUnitLabel(bunit, exportView, measureSource?.kind ?? "pixel");
   const lineOverlayVisible = runForSource(lineResult, measureSource, region ? regionView : MEASURED_SERIES_VIEW) !== null;
   const visibleLineResult = runForSource(lineResult, measureSource, MEASURED_SERIES_VIEW)?.result ?? null;
   const lineShiftKms = useMemo(
@@ -849,7 +864,7 @@ function SpectroscopyPanel({
     setLineError(null);
     setLineLoading(false);
     return () => { lineSeq.current++; };
-  }, [inputKey, docSpectrum, measureSourceKey, range?.z0, range?.z1, continuumKey, restUm, convention, lineModel, lineShiftKms, frameChoice, useErr, useDq]);
+  }, [inputKey, docSpectrum, measureSourceKey, range?.z0, range?.z1, continuumKey, restUm, redshift, convention, lineModel, lineShiftKms, frameChoice, useErr, useDq]);
 
   useLayoutEffect(() => {
     const lineFitSeq = lineFitSeqRef;
@@ -963,7 +978,7 @@ function SpectroscopyPanel({
 
     const plotH = H - PAD.top - PAD.bottom;
     const { yMin, yMax } = plotParams;
-    const yRange = Math.max(yMax - yMin, 1e-10);
+    const yRange = yMax > yMin ? yMax - yMin : 1;
     const m = mappingFor(W);
     const toY = (yi: number) => PAD.top + plotH - ((yi - yMin) / yRange) * plotH;
 
@@ -983,9 +998,9 @@ function SpectroscopyPanel({
       ctx.beginPath();
       ctx.rect(PAD.left, PAD.top, W - PAD.left - PAD.right, plotH);
       ctx.clip();
-      fillBand(ctx, errorBandRuns(axisX.values, series, bandErrors.err), toPx, toY, ERROR_BAND_FILL);
+      fillBand(ctx, errorBandRuns(axisX.values, plotSeries, bandErrors.err), toPx, toY, ERROR_BAND_FILL);
       if (bandErrors.scaled) {
-        const scaledRuns = errorBandRuns(axisX.values, series, bandErrors.scaled);
+        const scaledRuns = errorBandRuns(axisX.values, plotSeries, bandErrors.scaled);
         outlineBand(ctx, scaledRuns, toPx, toY, ERROR_BAND_SCALED_STROKE, ERROR_BAND_SCALED_DASH);
       }
       ctx.restore();
@@ -997,8 +1012,11 @@ function SpectroscopyPanel({
     let started = false;
     for (let i = 0; i < n; i++) {
       const x = axisX.values ? axisX.values[i] : i;
-      const y = series[i];
-      if (!Number.isFinite(y) || !Number.isFinite(x)) continue;
+      const y = plotSeries[i];
+      if (!Number.isFinite(y) || !Number.isFinite(x)) {
+        started = false;
+        continue;
+      }
       const cx = axisValueToPixel(x, m);
       const cy = toY(y);
       if (!started) {
@@ -1007,6 +1025,21 @@ function SpectroscopyPanel({
       } else ctx.lineTo(cx, cy);
     }
     ctx.stroke();
+
+    if (dqExcluded) {
+      const dqTickBase = PAD.top + plotH;
+      ctx.strokeStyle = DQ_TICK_COLOR;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const x = axisX.values ? axisX.values[i] : i;
+        if (!dqExcluded[i] || !Number.isFinite(x)) continue;
+        const px = Math.round(axisValueToPixel(x, m)) + 0.5;
+        ctx.moveTo(px, dqTickBase);
+        ctx.lineTo(px, dqTickBase - DQ_TICK_LENGTH);
+      }
+      ctx.stroke();
+    }
 
     ctx.font = "9px 'JetBrains Mono', monospace";
     ctx.fillStyle = themeColor("--ab-text-3", "#94949e");
@@ -1033,7 +1066,7 @@ function SpectroscopyPanel({
     for (const tick of xTicks) ctx.fillText(tick.label, tick.px, plotBottom + X_TICK_BASELINE);
     ctx.fillStyle = themeColor("--ab-text-4", "#8b8b94");
     ctx.fillText(axisX.label, W / 2, H - 4);
-  }, [series, n, axisX, plotParams, mappingFor, region, bandErrors]);
+  }, [plotSeries, n, axisX, plotParams, mappingFor, region, bandErrors, dqExcluded]);
 
   const drawOverlay = useCallback(() => {
     const overlay = overlayRef.current;
@@ -1129,9 +1162,9 @@ function SpectroscopyPanel({
     if (hoveredIdx === null || hoveredIdx < 0 || hoveredIdx >= n) return;
     const plotH = H - PAD.top - PAD.bottom;
     const { yMin, yMax } = plotParams;
-    const yRange = Math.max(yMax - yMin, 1e-10);
+    const yRange = yMax > yMin ? yMax - yMin : 1;
     const x = axisX.values ? axisX.values[hoveredIdx] : hoveredIdx;
-    const y = series[hoveredIdx];
+    const y = plotSeries[hoveredIdx];
     if (!Number.isFinite(y) || !Number.isFinite(x)) return;
     const cx = axisValueToPixel(x, m);
     const cy = PAD.top + plotH - ((y - yMin) / yRange) * plotH;
@@ -1156,9 +1189,11 @@ function SpectroscopyPanel({
 
     ctx.font = "10px 'JetBrains Mono', monospace";
     const delta = frameLinked && markerChannel !== null ? `, ${formatFrameDelta(hoveredIdx, markerChannel)}` : "";
+    const err = seriesErr?.[hoveredIdx];
+    const flux = `${formatQuantity(y)}${Number.isFinite(err) ? ` ${PLUS_MINUS} ${formatQuantity(err)}` : ""} ${fluxUnit}`;
     const label = axisX.values
-      ? `ch ${hoveredIdx}${delta} · ${formatAxisValue(x, axisX.unit)} ${axisX.unit} → ${y.toFixed(3)}`
-      : `ch ${hoveredIdx}${delta} → ${y.toFixed(3)}`;
+      ? `ch ${hoveredIdx}${delta} · ${formatAxisValue(x, axisX.unit, channelWidthAt(axisX.values, hoveredIdx))} ${axisX.unit} → ${flux}`
+      : `ch ${hoveredIdx}${delta} → ${flux}`;
     const tw = ctx.measureText(label).width;
     const tx = Math.min(cx + 8, W - tw - 8);
     const ty = Math.max(cy - 8, 16);
@@ -1166,7 +1201,7 @@ function SpectroscopyPanel({
     ctx.fillRect(tx - 3, ty - 11, tw + 6, 14);
     ctx.fillStyle = "#fafafa";
     ctx.fillText(label, tx, ty);
-  }, [series, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, activeBrush, lineResult, lineOverlayVisible, frameLinked, shownFrame, ramp, lineMarksShown, pickedMarkId, inspect, processed, lineFitRun, pixelCoord, region]);
+  }, [plotSeries, seriesErr, fluxUnit, n, axisX, plotParams, mappingFor, hoveredIdx, range, windows, drag, activeBrush, lineResult, lineOverlayVisible, frameLinked, shownFrame, ramp, lineMarksShown, pickedMarkId, inspect, processed, lineFitRun, pixelCoord, region]);
 
   useEffect(() => {
     drawPlot();
@@ -1386,7 +1421,7 @@ function SpectroscopyPanel({
           regionId: match?.id ?? null,
           regionText: match?.props.text ?? null,
           backgroundId,
-          view: region ? (regionView === "jy" && !region.flux_jy ? "sum" : regionView) : "sum",
+          view: exportView,
           bunit,
           values: series,
           region,
@@ -1412,7 +1447,7 @@ function SpectroscopyPanel({
         if (exportSeqRef.current === seq) setExportBusy(false);
       }
     },
-    [filePath, measureSource, n, regionDoc.regions, axis, mode, restUm, convention, correction, correctionResult, region, regionView, bunit, series, docSpectrum],
+    [filePath, measureSource, n, regionDoc.regions, axis, mode, restUm, convention, correction, correctionResult, region, exportView, bunit, series, docSpectrum],
   );
 
   const handleCollapseRange = useCallback(async () => {
@@ -1515,6 +1550,7 @@ function SpectroscopyPanel({
         convention,
         model: lineModel,
         velocityShiftKms: lineShiftKms,
+        redshift,
         ...documentOptions,
       });
       if (lineSeqRef.current !== seq) return;
@@ -1535,6 +1571,7 @@ function SpectroscopyPanel({
     documentMode,
     lineShiftKms,
     restUm,
+    redshift,
     convention,
     lineModel,
     useErr,
@@ -1802,7 +1839,7 @@ function SpectroscopyPanel({
                   {choice}
                 </button>
               ))}
-            <span className="text-zinc-500">{documentFrameLine(docSpectrum.wavelength_frame, frameChoice)}</span>
+            <span className="text-zinc-500">{documentFrameLine(docSpectrum, frameChoice)}</span>
           </div>
           {frameChoice === "air" && <span className="text-zinc-600">{AIR_FRAME_FORMULA_NOTE}</span>}
         </div>

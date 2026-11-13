@@ -23,10 +23,10 @@ import {
 import type { SpectralAxisInfo, SpectralAxisKind } from "../../shared/types/spectral";
 
 const GOLDEN = {
-  refractiveIndexAt0_5: 1.00029434858,
-  vacuumFromAir0_5: 0.500147172245,
-  airFromVacuum0_6563: 0.656108763679,
-  vacuumFromAir0_6563: 0.656491290559,
+  refractiveIndexAt0_5: 1.000278973402,
+  vacuumFromAir0_5: 0.500139484864,
+  airFromVacuum0_6563: 0.656118745353,
+  vacuumFromAir0_6563: 0.656481303377,
   hAlphaOptical: 1004.94195886,
   hAlphaRadio: 1001.584521792,
   hAlphaRelativistic: 1003.257622482,
@@ -53,14 +53,38 @@ function axisOf(kind: SpectralAxisKind, values: number[], extra: Partial<Spectra
   };
 }
 
+const ASTROPY_WCS_AWAV_TO_WAVE_UM: readonly (readonly [number, number])[] = [
+  [0.3, 0.30008746722391305],
+  [0.4, 0.40011310211157125],
+  [0.5, 0.500139481900647],
+  [0.6563, 0.6564812947826457],
+  [0.9, 0.9002470639216287],
+  [1.5, 1.5004099263548047],
+  [2.5, 2.500682112780638],
+];
+const ASTROPY_WCS_AGREEMENT = 3e-8;
+
 describe("air and vacuum wavelengths", () => {
-  it("matches the Rust golden values for the Greisen formula", () => {
+  it("agrees with astropy.wcs AWAV to WAVE within 3e-8 from 0.3 to 2.5 um", () => {
+    const off = ASTROPY_WCS_AWAV_TO_WAVE_UM.flatMap(([airUm, astropyUm]) => {
+      const vacuumUm = airToVacuumUm(airUm);
+      const relative = (vacuumUm - astropyUm) / astropyUm;
+      return Math.abs(relative) > ASTROPY_WCS_AGREEMENT
+        ? [`air ${airUm} um: vacuum ${vacuumUm} um, astropy.wcs ${astropyUm} um, ${(relative * SPEED_OF_LIGHT_KMS).toFixed(3)} km/s`]
+        : [];
+    });
+    expect(off).toEqual([]);
+  });
+
+  it("matches the Rust golden values for the Morton (2000) standard-air index", () => {
+    expect(airRefractiveIndex(0.5)).toBe(1 + 8.34254e-5 + 2.406147e-2 / (130 - 4) + 1.5998e-4 / (38.9 - 4));
     expect(airRefractiveIndex(0.5)).toBeCloseTo(GOLDEN.refractiveIndexAt0_5, 10);
     expect(airToVacuumUm(0.5)).toBeCloseTo(GOLDEN.vacuumFromAir0_5, 10);
-    expect(airToVacuumUm(0.5) * 1e4).toBeCloseTo(5001.472, 2);
+    expect(airToVacuumUm(0.5) * 1e4).toBeCloseTo(5001.3948, 3);
     expect(vacuumToAirUm(0.6563)).toBeCloseTo(GOLDEN.airFromVacuum0_6563, 10);
     expect(airToVacuumUm(0.6563)).toBeCloseTo(GOLDEN.vacuumFromAir0_6563, 10);
-    expect(AIR_VACUUM_FORMULA).toContain("Greisen");
+    expect(vacuumToAirUm(0.656461) * 1e4).toBeCloseTo(6562.797, 3);
+    expect(AIR_VACUUM_FORMULA).toBe("Morton (2000, ApJS 130, 403)");
   });
 
   it("round trips within 1e-6 and passes short wavelengths through unchanged", () => {
@@ -135,7 +159,7 @@ describe("formatAxis", () => {
     expect(vac!.label).toBe("Vacuum wavelength (μm)");
     const air = formatAxis(wave, "wavelength_air", null, "optical")!;
     expect(air.values[0]).toBeCloseTo(GOLDEN.airFromVacuum0_6563, 10);
-    expect(air.notes.some((n) => n.includes("Greisen"))).toBe(true);
+    expect(air.notes.some((n) => n.includes("Morton (2000"))).toBe(true);
     const freq = formatAxis(wave, "frequency", null, "optical")!;
     expect(freq.values[0]).toBeCloseTo(SPEED_OF_LIGHT_KMS / 0.6563, 8);
     expect(freq.unit).toBe("GHz");
@@ -167,7 +191,7 @@ describe("formatAxis", () => {
     expect(vac.notes.some((n) => n.includes(`below ${AIR_FORMULA_MIN_UM} um`) && n.includes("left unchanged"))).toBe(true);
     const visible = formatAxis(axisOf("awav", [0.5, NaN]), "wavelength_vac", null, "optical")!;
     expect(visible.notes.some((n) => n.includes("left unchanged"))).toBe(false);
-    expect(visible.notes.some((n) => n.includes("Greisen"))).toBe(true);
+    expect(visible.notes.some((n) => n.includes("Morton (2000"))).toBe(true);
   });
 
   it("needs a rest wavelength for velocity and converts air axes to vacuum first", () => {
@@ -176,7 +200,7 @@ describe("formatAxis", () => {
     const awav = axisOf("awav", [GOLDEN.airFromVacuum0_6563]);
     const vac = formatAxis(awav, "wavelength_vac", null, "optical")!;
     expect(vac.values[0]).toBeCloseTo(0.6563, 9);
-    expect(vac.notes.some((n) => n.includes("Greisen"))).toBe(true);
+    expect(vac.notes.some((n) => n.includes("Morton (2000"))).toBe(true);
     const air = formatAxis(awav, "wavelength_air", null, "optical")!;
     expect(air.values[0]).toBe(GOLDEN.airFromVacuum0_6563);
     const freq = axisOf("freq", [230.538]);
@@ -245,5 +269,21 @@ describe("rest wavelength and corrections", () => {
     expect(formatAxisValue(230.538, "GHz")).toBe("230.5380");
     expect(formatAxisValue(1004.94195886, "km/s")).toBe("1004.9");
     expect(formatAxisValue(NaN, "km/s")).toBe("—");
+  });
+
+  it("formats a value to the channel spacing when a step is given", () => {
+    expect(Number(formatAxisValue(0.658002, "μm", 2e-6))).toBeCloseTo(0.658002, 6);
+    expect(formatAxisValue(0.658002, "μm", 2e-6)).toBe("0.658002");
+    expect(formatAxisValue(0.658004, "μm", 2e-6)).toBe("0.658004");
+    expect(formatAxisValue(0.589158, "μm", 1e-6)).toBe("0.589158");
+    expect(formatAxisValue(-0.96, "km/s", 0.04)).toBe("-0.96");
+  });
+
+  it("keeps four decimals of micron and one of km/s for channels of 1e-4 um or 0.1 km/s and coarser", () => {
+    expect(formatAxisValue(1.2345678, "μm", 6.65e-4)).toBe("1.2346");
+    expect(formatAxisValue(0.65750001, "μm", 0.6576 - 0.6575)).toBe("0.6575");
+    expect(formatAxisValue(1004.94195886, "km/s", 0.1)).toBe("1004.9");
+    expect(formatAxisValue(1.2345678, "μm", 0)).toBe("1.2346");
+    expect(formatAxisValue(1.2345678, "μm", NaN)).toBe("1.2346");
   });
 });

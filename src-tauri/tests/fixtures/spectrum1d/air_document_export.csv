@@ -7,13 +7,13 @@
 # sky_note: spectrum file: no sky position is read for a 1D spectrum
 # stored_frame: not stated
 # velocity_frame: as stored; shift_kms: 0; method: -; the shift is applied to velocity columns only; wavelength_vacuum_um is as stored
-# wavelength_air_note: wavelength_vacuum_um converted from the spectrum's air wavelengths with Greisen et al. 2006 (FITS Paper III eq. 65); wavelength_air_um holds the spectrum's own air axis
+# wavelength_air_note: wavelength_vacuum_um converted from the spectrum's air wavelengths with Morton (2000, ApJS 130, 403); wavelength_air_um holds the spectrum's own air axis
 # view: sum
 # flux_unit: native
 # flux_jy_note: spectrum file: flux exported in its own unit (flux_unit)
 # precision: f32_widened
 # exported_utc: 2026-10-17T12:00:00.000Z
 channel,wavelength_vacuum_um,wavelength_air_um,air_wavelength_um,flux,flux_unit
-0,0.6564712848862345,0.65628,0.65628,1.5,native
-1,0.6564812877223972,0.65629,0.65629,2.5,native
-2,0.656491290558561,0.6563,0.6563,3.5,native
+0,0.6564612979997992,0.65628,0.65628,1.5,native
+1,0.6564713006882613,0.65629,0.65629,2.5,native
+2,0.6564813033767246,0.6563,0.6563,3.5,native

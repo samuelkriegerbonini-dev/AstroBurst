@@ -5,6 +5,7 @@ import {
   cubeToolContent,
   defaultFrameChoice,
   documentAxis,
+  documentDqExclusions,
   documentFrameLine,
   documentSummary,
   openSpectrumCsvPaletteAction,
@@ -67,16 +68,50 @@ describe("document wavelength frame", () => {
   });
 
   it("states the frame, and says when the choice differs from the file", () => {
-    expect(documentFrameLine("air", "air")).toBe("air wavelengths, as the file reads");
-    expect(documentFrameLine("vacuum", "vacuum")).toBe("vacuum wavelengths, as the file reads");
-    expect(documentFrameLine("air", "vacuum")).toBe("vacuum wavelengths, set here (the file reads as air)");
-    expect(documentFrameLine("vacuum", "air")).toBe("air wavelengths, set here (the file reads as vacuum)");
-    expect(documentFrameLine("not_wavelength", null)).toBe("the spectral axis is not a wavelength: no air or vacuum frame applies");
+    const vacuumDoc = doc({ wavelength_frame: "vacuum", axis: { ...AIR_AXIS, kind: "wave" } });
+    expect(documentFrameLine(doc(), "air")).toBe("air wavelengths, as the file reads");
+    expect(documentFrameLine(vacuumDoc, "vacuum")).toBe("vacuum wavelengths, as the file reads");
+    expect(documentFrameLine(doc(), "vacuum")).toBe("vacuum wavelengths, set here (the file reads as air)");
+    expect(documentFrameLine(vacuumDoc, "air")).toBe("air wavelengths, set here (the file reads as vacuum)");
+    expect(documentFrameLine(doc({ wavelength_frame: "not_wavelength" }), null)).toBe(
+      "the spectral axis is not a wavelength: no air or vacuum frame applies",
+    );
   });
 
-  it("names both refractive-index formulas for an air frame", () => {
-    expect(AIR_FRAME_FORMULA_NOTE).toContain("Morton (2000)");
-    expect(AIR_FRAME_FORMULA_NOTE).toContain("Greisen et al. 2006");
+  it("says the frame was assumed when no card of the file names it", () => {
+    const assumedAir = doc({
+      notes: [
+        "CTYPE1 'LINEAR' with no JWST, HST or Roman TELESCOP and no AIRORVAC or VACUUM card naming the frame: air wavelengths assumed, the ground-based default",
+      ],
+    });
+    expect(documentFrameLine(assumedAir, "air")).toBe("air wavelengths, assumed (no card of the file names the frame)");
+    expect(documentFrameLine(assumedAir, "vacuum")).toBe("vacuum wavelengths, set here (air was assumed for the file)");
+    const assumedVacuum = doc({
+      wavelength_frame: "vacuum",
+      axis: { ...AIR_AXIS, kind: "wave" },
+      notes: ["CTYPE1 'WAVELENGTH' is not a FITS spectral code: treated as WAVE, vacuum wavelengths assumed"],
+    });
+    expect(documentFrameLine(assumedVacuum, "vacuum")).toBe("vacuum wavelengths, assumed (no card of the file names the frame)");
+    const unitAssumed = doc({ notes: ["CTYPE1 'AWAV': air wavelengths", "CUNIT1 absent: Angstrom assumed"] });
+    expect(documentFrameLine(unitAssumed, "air")).toBe("air wavelengths, as the file reads");
+  });
+
+  it("names the one refractive-index formula that converts air and vacuum for the plot and the line velocities", () => {
+    expect(AIR_FRAME_FORMULA_NOTE).toBe("air and vacuum wavelengths are converted with Morton (2000), for the plot and for line velocities");
+    expect(AIR_FRAME_FORMULA_NOTE).not.toContain("Greisen");
+  });
+});
+
+describe("documentDqExclusions", () => {
+  it("excludes the rows the line measurement excludes: bit 0 for JWST and Roman, 0x3FFF for HST", () => {
+    expect(documentDqExclusions(doc({ dq: [0, 1, 4, 5], dq_table: "jwst" }))).toEqual([false, true, false, true]);
+    expect(documentDqExclusions(doc({ dq: [0, 1, 4, 5], dq_table: "roman" }))).toEqual([false, true, false, true]);
+    expect(documentDqExclusions(doc({ dq: [0, 4, 0x4000, 0x2000], dq_table: "hst" }))).toEqual([false, true, false, true]);
+  });
+
+  it("excludes nothing without a DQ column or with an unknown flag table", () => {
+    expect(documentDqExclusions(doc({ dq: null, dq_table: "jwst" }))).toBeNull();
+    expect(documentDqExclusions(doc({ dq: [0, 1, 2], dq_table: "unknown" }))).toBeNull();
   });
 });
 

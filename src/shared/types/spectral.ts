@@ -109,6 +109,10 @@ export interface LineVelocity {
   convention: VelocityConvention;
   shift_applied_kms: number;
   axis_frame: string | null;
+  redshift?: number;
+  source_centroid_kms?: number | null;
+  source_sigma_kms?: number | null;
+  source_fwhm_kms?: number | null;
 }
 
 export interface GaussianFitResult {
@@ -134,11 +138,13 @@ export interface LineMeasurement {
   z0: number;
   z1: number;
   n_channels: number;
+  n_channels_nominal?: number;
   axis_unit: string;
   flux_unit: string;
   continuum_level: number | null;
   continuum_slope: number | null;
   continuum_sigma: number | null;
+  continuum_chi2_red?: number | null;
   continuum_reference: number | null;
   continuum_linear: boolean;
   continuum_channels: number;

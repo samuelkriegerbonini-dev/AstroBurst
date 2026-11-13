@@ -1,26 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createElement } from "react";
+import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { SpectralAxisInfo } from "../../../shared/types/spectral";
 
-const effects = vi.hoisted(() => ({ pending: [] as (() => unknown)[] }));
 const correctionMock = vi.hoisted(() => vi.fn<(path: string) => Promise<unknown>>());
 
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react")>();
-  return {
-    ...actual,
-    useEffect: (effect: () => unknown) => {
-      effects.pending.push(effect);
-    },
-  };
-});
+vi.mock("react", async (importOriginal) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../../services/spectral", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/spectral")>()),
   getRadialVelocityCorrection: correctionMock,
 }));
 
+import { hooks } from "../../../test/hookRuntime";
 import SpectralAxisControls, { type SpectralAxisControlsProps } from "../SpectralAxisControls";
+import { documentAxis } from "../../../utils/spectrumDocument";
+
+const controlsFunction = (SpectralAxisControls as unknown as { type: (props: SpectralAxisControlsProps) => ReactElement }).type;
 
 const AXIS: SpectralAxisInfo = {
   kind: "wave",
@@ -42,7 +37,6 @@ const AXIS: SpectralAxisInfo = {
 const NOTE = "The correction is not computed for a spectrum file.";
 
 function render(extra: Partial<SpectralAxisControlsProps>): string {
-  effects.pending = [];
   const props: SpectralAxisControlsProps = {
     filePath: null,
     axis: AXIS,
@@ -56,12 +50,11 @@ function render(extra: Partial<SpectralAxisControlsProps>): string {
     onCorrectionChange: () => {},
     ...extra,
   };
-  const html = renderToStaticMarkup(createElement(SpectralAxisControls, props));
-  effects.pending.forEach((effect) => effect());
-  return html;
+  return renderToStaticMarkup(hooks.render(controlsFunction, props) as ReactElement);
 }
 
 beforeEach(() => {
+  hooks.mount();
   correctionMock.mockReset();
   correctionMock.mockResolvedValue({ error: "no target coordinates" });
 });
@@ -87,5 +80,27 @@ describe("SpectralAxisControls correction request", () => {
     expect(correctionMock).not.toHaveBeenCalled();
     expect(html).toContain("Load a spectrum or cube to compute the correction.");
     expect(html).not.toContain(NOTE);
+  });
+});
+
+describe("SpectralAxisControls rest wavelength prefill", () => {
+  it("keeps the picked rest wavelength when the document frame relabels the same axis as air", () => {
+    const onRestChange = vi.fn();
+    render({ axis: AXIS, restValue: null, onRestChange });
+    expect(onRestChange).toHaveBeenLastCalledWith(null);
+    render({ axis: AXIS, restValue: 0.65646, onRestChange });
+    onRestChange.mockClear();
+    const relabelled = documentAxis(AXIS, "air");
+    expect(relabelled).not.toBe(AXIS);
+    render({ axis: relabelled, restValue: 0.65646, onRestChange });
+    expect(onRestChange).not.toHaveBeenCalled();
+  });
+
+  it("prefills the rest wavelength of a newly opened axis from its header", () => {
+    const onRestChange = vi.fn();
+    render({ axis: AXIS, restValue: 0.65646, onRestChange });
+    onRestChange.mockClear();
+    render({ axis: { ...AXIS, values: [2.16, 2.17, 2.18], rest_wavelength_um: 2.1661 }, restValue: 0.65646, onRestChange });
+    expect(onRestChange).toHaveBeenCalledExactlyOnceWith(2.1661);
   });
 });

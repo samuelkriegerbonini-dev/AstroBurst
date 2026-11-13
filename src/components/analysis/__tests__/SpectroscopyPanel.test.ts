@@ -1852,3 +1852,279 @@ describe("SpectroscopyPanel product of an earlier run on the viewer", () => {
     await running;
   });
 });
+
+type PathOp = ["M" | "L", number, number];
+
+function strokeCanvas() {
+  const strokes: { style: unknown; ops: PathOp[] }[] = [];
+  const ticks: string[] = [];
+  let ops: PathOp[] = [];
+  const ctx = new Proxy({} as Record<string | symbol, unknown>, {
+    get: (target, key) => {
+      if (key === "beginPath") return () => (ops = []);
+      if (key === "moveTo") return (x: number, y: number) => ops.push(["M", x, y]);
+      if (key === "lineTo") return (x: number, y: number) => ops.push(["L", x, y]);
+      if (key === "stroke") return () => strokes.push({ style: target.strokeStyle, ops });
+      if (key === "fillText") {
+        return (text: string) => {
+          if (target.textAlign === "right") ticks.push(text);
+        };
+      }
+      return key in target ? target[key] : key === "measureText" ? () => ({ width: 10 }) : () => {};
+    },
+    set: (target, key, value) => {
+      target[key] = value;
+      return true;
+    },
+  });
+  const canvas = { width: 0, height: 0, parentElement: { getBoundingClientRect: () => ({ width: 400 }) }, getContext: () => ctx };
+  return { canvas, strokes, lastTicks: () => ticks.slice(-5).map(Number) };
+}
+
+const SERIES_STROKE = "#a855f7";
+const PLOT_BOTTOM = 180 - 24;
+
+function subpaths(ops: PathOp[]): PathOp[][] {
+  return ops.reduce<PathOp[][]>((paths, op) => {
+    if (op[0] === "M" || paths.length === 0) paths.push([op]);
+    else paths[paths.length - 1].push(op);
+    return paths;
+  }, []);
+}
+
+function channelPx(i: number): number {
+  return 50 + ((AIR_VALUES[i] - AIR_VALUES[0]) / (AIR_VALUES[N_DOC - 1] - AIR_VALUES[0])) * 338;
+}
+
+function drawnDocument(props: Props) {
+  const plot = strokeCanvas();
+  (mustFind(pass(props), (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas").ref as { current: unknown }).current = plot.canvas;
+  (mustFind(pass(props), (p) => p["data-frame-choice"] === "vacuum", "vacuum frame button").onClick as () => void)();
+  pass(props);
+  const series = plot.strokes.filter((s) => s.style === SERIES_STROKE).at(-1);
+  const dqTicks = plot.strokes.filter((s) => s.ops.length > 0 && s.ops.every((op) => (op[0] === "M" ? op[2] === PLOT_BOTTOM : op[2] < PLOT_BOTTOM)));
+  return { series: series ? subpaths(series.ops) : [], dqTicks: dqTicks.at(-1)?.ops.filter((op) => op[0] === "M") ?? [], ticks: plot.lastTicks() };
+}
+
+function readoutCanvas() {
+  const texts: string[] = [];
+  const ctx = new Proxy({} as Record<string | symbol, unknown>, {
+    get: (target, key) => {
+      if (key === "fillText") return (text: string) => texts.push(text);
+      return key in target ? target[key] : key === "measureText" ? () => ({ width: 10 }) : () => {};
+    },
+    set: (target, key, value) => {
+      target[key] = value;
+      return true;
+    },
+  });
+  return { canvas: { width: 400, height: 180, getContext: () => ctx }, texts };
+}
+
+function hoverReadout(props: Props, channel: number): string | undefined {
+  const tree = pass(props);
+  const overlay = readoutCanvas();
+  (mustFind(tree, (p) => p.className === "absolute inset-0 w-full pointer-events-none", "overlay canvas").ref as { current: unknown }).current =
+    overlay.canvas;
+  const plot = mustFind(tree, (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas");
+  (plot.ref as { current: unknown }).current = { width: 400, height: 180, getBoundingClientRect: () => ({ left: 0, width: 400 }) };
+  (plot.onMouseMove as (e: unknown) => void)({ clientX: 50 + (338 * channel) / (N_DOC - 1) });
+  pass(props);
+  return overlay.texts.filter((text) => new RegExp(`^ch ${channel}[ ,]`).test(text)).at(-1);
+}
+
+const FAINT_FLUX = AIR_VALUES.map((_, i) => 1e-17 * (1 + Math.exp(-((i - 20) ** 2) / 8)));
+
+describe("SpectroscopyPanel plot of a spectrum file", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+  });
+
+  const docProps = (doc: SpectrumDocument): Props => ({ documentMode: true, spectrumDocument: doc, filePath: DOC_PATH, publishGate: createFramePublishGate() });
+
+  it("labels the y axis of an F_lambda spectrum with its own range", () => {
+    const props = docProps(documentOf({ flux: FAINT_FLUX }));
+    const plot = yTickCanvas();
+    (mustFind(pass(props), (p) => p.className === "w-full rounded-md cursor-crosshair", "plot canvas").ref as { current: unknown }).current = plot.canvas;
+    (mustFind(pass(props), (p) => p["data-frame-choice"] === "vacuum", "vacuum frame button").onClick as () => void)();
+    pass(props);
+    const ticks = plot.lastTicks();
+    expect(ticks[4]).toBeGreaterThan(0);
+    expect(ticks[4]).toBeCloseTo(9.5e-18, 20);
+    expect(ticks[0]).toBeCloseTo(2.05e-17, 19);
+  });
+
+  it("lifts the pen across non-finite flux instead of bridging the gap with a straight line", () => {
+    const flux = AIR_VALUES.map((_, i) => (i >= 10 && i <= 14 ? NaN : 1 + Math.exp(-((i - 25) ** 2) / 8)));
+    const { series } = drawnDocument(docProps(documentOf({ flux })));
+    expect(series.map((path) => path.length)).toEqual([10, 25]);
+    expect(series[0].at(-1)![1]).toBeCloseTo(channelPx(9), 6);
+    expect(series[1][0][1]).toBeCloseTo(channelPx(15), 6);
+  });
+
+  it("leaves DQ-flagged rows out of the line and of the y range, and marks them at the bottom edge", () => {
+    const flux = AIR_VALUES.map((_, i) => (i >= 10 && i <= 14 ? 0 : 5 + Math.exp(-((i - 25) ** 2) / 8)));
+    const dq = AIR_VALUES.map((_, i) => (i >= 10 && i <= 14 ? 1 : 0));
+    const drawn = drawnDocument(docProps(documentOf({ flux, dq, dq_table: "jwst" })));
+    expect(drawn.series.map((path) => path.length)).toEqual([10, 25]);
+    expect(drawn.ticks[4]).toBeGreaterThan(4.9);
+    expect(drawn.dqTicks).toHaveLength(5);
+    drawn.dqTicks.forEach((op, k) => expect(op[1]).toBeCloseTo(Math.round(channelPx(10 + k)) + 0.5, 6));
+  });
+
+  it("draws the flagged rows as data when DQ masking is switched off, as the measurement then uses them", () => {
+    const flux = AIR_VALUES.map((_, i) => (i >= 10 && i <= 14 ? 0 : 5 + Math.exp(-((i - 25) ** 2) / 8)));
+    const dq = AIR_VALUES.map((_, i) => (i >= 10 && i <= 14 ? 1 : 0));
+    const props = docProps(documentOf({ flux, dq, dq_table: "jwst" }));
+    pass(props);
+    (lineSection(pass(props)).errControls as { onUseDq: (v: boolean) => void }).onUseDq(false);
+    const drawn = drawnDocument(props);
+    expect(drawn.series.map((path) => path.length)).toEqual([40]);
+    expect(drawn.ticks[4]).toBeLessThan(0);
+    expect(drawn.dqTicks).toHaveLength(0);
+  });
+
+  it("draws flagged rows as data when the DQ flag table is unknown, as the measurement does", () => {
+    const flux = AIR_VALUES.map((_, i) => (i >= 10 && i <= 14 ? 0 : 5));
+    const dq = AIR_VALUES.map((_, i) => (i >= 10 && i <= 14 ? 1 : 0));
+    const drawn = drawnDocument(docProps(documentOf({ flux, dq, dq_table: "unknown" })));
+    expect(drawn.series.map((path) => path.length)).toEqual([40]);
+  });
+
+  it("prints the hovered flux of a faint spectrum with its error and unit", () => {
+    const err = AIR_VALUES.map(() => 5e-19);
+    const readout = hoverReadout(docProps(documentOf({ flux: FAINT_FLUX, err })), 20);
+    expect(readout).toMatch(/^ch 20 · 0\.\d{4} μm → 2\.000e-17 ± 5\.000e-19 erg\/s\/cm2\/A$/);
+  });
+
+  it("prints the hovered flux without an error when the file has none, and native when it has no unit", () => {
+    const readout = hoverReadout(docProps(documentOf({ flux: FAINT_FLUX, err: null, flux_unit: null })), 20);
+    expect(readout).toMatch(/^ch 20 · 0\.\d{4} μm → 2\.000e-17 native$/);
+  });
+
+  it("prints the hovered wavelength to the channel spacing of a high-resolution spectrum", () => {
+    const fine = AIR_VALUES.map((_, i) => 0.658 + i * 2e-6);
+    const doc = documentOf({ wavelength_frame: "vacuum", axis: { ...airAxis("wave"), values: fine, crval: fine[0], cdelt: 2e-6 } });
+    expect(hoverReadout(docProps(doc), 20)).toMatch(/^ch 20 · 0\.658040 μm → /);
+    expect(hoverReadout(docProps(doc), 21)).toMatch(/^ch 21 · 0\.658042 μm → /);
+  });
+
+  it("states an assumed frame and the one air and vacuum formula", () => {
+    const assumed = documentOf({
+      notes: [
+        "CTYPE1 'LINEAR' with no JWST, HST or Roman TELESCOP and no AIRORVAC or VACUUM card naming the frame: air wavelengths assumed, the ground-based default",
+      ],
+    });
+    const html = renderDocument(assumed);
+    expect(html).toContain("air wavelengths, assumed (no card of the file names the frame)");
+    expect(html).toContain("air and vacuum wavelengths are converted with Morton (2000), for the plot and for line velocities");
+    expect(html).not.toContain("Greisen");
+  });
+});
+
+describe("SpectroscopyPanel hover readout of a cube", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+  });
+
+  afterEach(() => {
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+  });
+
+  it("prints a pixel spectrum's flux in the BUNIT of the cube", () => {
+    expect(hoverReadout(cubeProps(), 20)).toBe("ch 20, +20 from displayed · 0.6575 μm → 1.000 DN");
+  });
+
+  it("prints a region spectrum's flux with the error of the shown series in the unit of the export", () => {
+    showRegion(regionWithErrors(null));
+    expect(hoverReadout(cubeProps(), 20)).toBe("ch 20, +20 from displayed · 0.6575 μm → 11.00 ± 0.2200 DN x pix");
+  });
+});
+
+describe("SpectroscopyPanel region pick", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    cubeState.ramp = null;
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+    spectrumState.regionContinuum = null;
+    backend.regionSpectrum.mockReset().mockResolvedValue(regionWithErrors(null));
+  });
+
+  afterEach(() => {
+    regionDocState.regions = [];
+    spectrumState.region = null;
+    spectrumState.regionSource = null;
+  });
+
+  it("falls back to the first included area region, not to an exclude region drawn before it", async () => {
+    const box: RegionShape = { shape: "box", x: 2, y: 2, width: 2, height: 2, angle: 0 };
+    regionDocState.regions = [
+      { id: "r0", shape: box, props: { color: null, width: null, text: null, dash: null, include: false }, backgroundId: null } as Region,
+      { id: "r1", shape: REGION_CIRCLE, props: { color: null, width: null, text: null, dash: null, include: true }, backgroundId: null } as Region,
+    ];
+    const props = cubeProps();
+    pass(props);
+    const button = mustFind(
+      pass(props),
+      (p) => typeof p.title === "string" && p.title.includes(" region") && typeof p.onClick === "function",
+      "region spectrum button",
+    );
+    await (button.onClick as () => Promise<void>)();
+    expect(backend.regionSpectrum).toHaveBeenLastCalledWith("C:/data/cube.fits", REGION_CIRCLE, null, null);
+  });
+});
+
+describe("SpectroscopyPanel line measurement at a redshift", () => {
+  beforeEach(() => {
+    hooks.run.cells = [];
+    hooks.run.effects = [];
+    cubeState.ramp = null;
+    spectralMock.measure.mockReset().mockImplementation(async (_path, source) => measured(source as LineMeasurement["source"]));
+    logMock.append.mockReset();
+  });
+
+  const docProps = (): Props => ({ documentMode: true, spectrumDocument: documentOf(), filePath: DOC_PATH, publishGate: createFramePublishGate() });
+  const lineList = (tree: ReactNode) => mustFind(tree, (p) => typeof p.onRedshiftChange === "function", "line list controls");
+
+  it("sends the redshift of the line list, zero included", async () => {
+    await brushAndMeasure(docProps());
+    expect(spectralMock.measure.mock.calls[0][2]).toMatchObject({ redshift: 0 });
+    const props = docProps();
+    hooks.run.cells = [];
+    pass(props);
+    (lineList(pass(props)).onRedshiftChange as (z: number) => void)(0.5);
+    commitRangeStart(pass(props), 5);
+    await (lineSection(pass(props)).onMeasure as () => Promise<void>)();
+    expect(spectralMock.measure.mock.calls[1][2]).toMatchObject({ redshift: 0.5 });
+  });
+
+  it("sends the redshift for a cube spaxel too", async () => {
+    const props = cubeProps();
+    pass(props);
+    (lineList(pass(props)).onRedshiftChange as (z: number) => void)(2.0);
+    commitRangeStart(pass(props), 5);
+    await (lineSection(pass(props)).onMeasure as () => Promise<void>)();
+    expect(spectralMock.measure.mock.calls[0][2]).toMatchObject({ redshift: 2.0 });
+  });
+
+  it("clears a measurement after the redshift changes, as it does for every other request input", async () => {
+    const props = docProps();
+    await brushAndMeasure(props);
+    expect(lineSection(pass(props)).result).not.toBeNull();
+    (lineList(pass(props)).onRedshiftChange as (z: number) => void)(0.5);
+    expect(lineSection(settledPanel(props)).result).toBeNull();
+  });
+});

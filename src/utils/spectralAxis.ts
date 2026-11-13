@@ -8,20 +8,29 @@ import type {
 
 export const SPEED_OF_LIGHT_KMS = 299792.458;
 export const AIR_FORMULA_MIN_UM = 0.2;
-export const AIR_VACUUM_FORMULA = "Greisen et al. 2006 (FITS Paper III eq. 65)";
+export const AIR_VACUUM_FORMULA = "Morton (2000, ApJS 130, 403)";
 
+const MORTON_CONSTANT = 8.34254e-5;
+const MORTON_UV_TERM = 2.406147e-2;
+const MORTON_UV_POLE = 130;
+const MORTON_IR_TERM = 1.5998e-4;
+const MORTON_IR_POLE = 38.9;
 const AIR_VACUUM_TOLERANCE_UM = 1e-10;
 const AIR_VACUUM_MAX_ITERATIONS = 50;
 const MICRON = "μm";
 const EM_DASH = "—";
+const AXIS_DECIMALS = 4;
+const VELOCITY_AXIS_DECIMALS = 1;
+const MAX_AXIS_DECIMALS = 10;
+const STEP_LOG_EPSILON = 1e-9;
 
 export const SPECTRAL_MODES: readonly SpectralAxisMode[] = ["wavelength_vac", "wavelength_air", "frequency", "velocity"];
 export const VELOCITY_CONVENTIONS: readonly VelocityConvention[] = ["optical", "radio", "relativistic"];
 export const CORRECTION_FRAMES: readonly CorrectionFrame[] = ["none", "heliocentric", "barycentric"];
 
-export function airRefractiveIndex(lambdaUm: number): number {
-  const l2 = lambdaUm * lambdaUm;
-  return 1 + 1e-6 * (287.6155 + 1.62887 / l2 + 0.0136 / (l2 * l2));
+export function airRefractiveIndex(lambdaVacuumUm: number): number {
+  const sigma2 = 1 / (lambdaVacuumUm * lambdaVacuumUm);
+  return 1 + MORTON_CONSTANT + MORTON_UV_TERM / (MORTON_UV_POLE - sigma2) + MORTON_IR_TERM / (MORTON_IR_POLE - sigma2);
 }
 
 function airFormulaApplies(lambdaUm: number): boolean {
@@ -220,8 +229,12 @@ export function applyCorrectionKms(
   return valuesKms.map((v) => v + shift);
 }
 
-export function formatAxisValue(value: number, unit: string): string {
+export function formatAxisValue(value: number, unit: string, step?: number): string {
   if (!Number.isFinite(value)) return EM_DASH;
-  const decimals = unit === "km/s" ? 1 : 4;
+  const unitDecimals = unit === "km/s" ? VELOCITY_AXIS_DECIMALS : AXIS_DECIMALS;
+  const decimals =
+    step !== undefined && Number.isFinite(step) && step > 0
+      ? Math.min(MAX_AXIS_DECIMALS, Math.max(unitDecimals, Math.ceil(-Math.log10(step) - STEP_LOG_EPSILON)))
+      : unitDecimals;
   return value.toFixed(decimals);
 }

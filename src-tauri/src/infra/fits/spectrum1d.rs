@@ -509,7 +509,7 @@ mod tests {
         );
         assert_eq!(s.err, Some(widen(&err())));
         assert_eq!(s.flux_unit.as_deref(), Some("erg/s/cm2/A"));
-        assert_eq!(s.wavelength_frame, WavelengthFrame::Air);
+        assert_eq!(s.wavelength_frame, WavelengthFrame::Vacuum);
         assert!(
             (s.axis.values[2] - 6501.0e-4).abs() < 1e-12,
             "{}",

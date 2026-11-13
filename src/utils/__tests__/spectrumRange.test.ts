@@ -131,6 +131,20 @@ describe("range bounds, spans and labels", () => {
     const kms = mapping([-300, -200, -100, 0], 4);
     expect(formatRangeLabel({ z0: 1, z1: 2 }, kms, "km/s")).toBe("ch 1–2 (-200.0–-100.0 km/s)");
   });
+
+  it("keeps range bounds apart when channels are finer than 1e-4 um", () => {
+    const fine = Array.from({ length: 40 }, (_, i) => 0.658 + i * 2e-6);
+    const label = formatRangeLabel({ z0: 10, z1: 20 }, mapping(fine), "μm");
+    const [, lo, hi] = /\(([^–]+)–([^ ]+) μm\)/.exec(label)!;
+    expect(Math.abs(Number(lo) - fine[10])).toBeLessThan(1e-6);
+    expect(Math.abs(Number(hi) - fine[20])).toBeLessThan(1e-6);
+    expect(label).toBe("ch 10–20 (0.658020–0.658040 μm)");
+  });
+
+  it("keeps range bounds apart on a velocity grid finer than 0.1 km/s", () => {
+    const fine = mapping([-1.0, -0.96, -0.92, -0.88], 4);
+    expect(formatRangeLabel({ z0: 1, z1: 2 }, fine, "km/s")).toBe("ch 1–2 (-0.96–-0.92 km/s)");
+  });
 });
 
 describe("channelWidthAt", () => {

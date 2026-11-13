@@ -73,13 +73,14 @@ function SpectralAxisControls({
   const [restText, setRestText] = useState(() => (restValue === null ? "" : String(restValue)));
   const [response, setResponse] = useState<RadialVelocityCorrectionResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const prefilledAxis = useRef<SpectralAxisInfo | null>(restValue === null ? null : axis);
+  const prefilledValues = useRef<number[] | null>(restValue === null ? null : (axis?.values ?? null));
   const loadedRef = useRef(onCorrectionLoaded);
   loadedRef.current = onCorrectionLoaded;
 
   useEffect(() => {
-    if (axis === prefilledAxis.current) return;
-    prefilledAxis.current = axis;
+    const values = axis?.values ?? null;
+    if (values === prefilledValues.current) return;
+    prefilledValues.current = values;
     onRestChange(defaultRestUm(axis));
   }, [axis, onRestChange]);
 

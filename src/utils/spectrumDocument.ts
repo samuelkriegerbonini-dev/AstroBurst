@@ -1,4 +1,5 @@
 import type { PaletteAction } from "../components/CommandPalette";
+import type { DqTableName } from "../shared/types/dq";
 import type { FileSpectrumSource, SpectralAxisInfo } from "../shared/types/spectral";
 import type { Spectrum1d, WavelengthFrame, WavelengthFrameChoice } from "../shared/types/spectrum1d";
 
@@ -25,13 +26,15 @@ export interface CubeToolContentInput {
 export const OPEN_SPECTRUM_CSV_LABEL = "Open spectrum (CSV)";
 
 export const AIR_FRAME_FORMULA_NOTE =
-  "line velocities convert the vacuum rest wavelength to air with Morton (2000); the plot converts between air and vacuum with Greisen et al. 2006";
+  "air and vacuum wavelengths are converted with Morton (2000), for the plot and for line velocities";
 
 export const SPECTRUM_FILE_CORRECTION_NOTE = "The correction is not computed for a spectrum file.";
 
 const NOT_WAVELENGTH_FRAME ="the spectral axis is not a wavelength: no air or vacuum frame applies";
 const NATIVE_FLUX_UNIT = "native units";
 const CSV_PATH_RE = /\.csv$/i;
+const ASSUMED_FRAME_NOTE = /(air|vacuum) wavelengths assumed/;
+const DQ_EXCLUSION_MASKS: Record<DqTableName, number> = { jwst: 1, roman: 1, hst: 0x3fff, unknown: 0 };
 
 export function isSpectrumCsvPath(path: string): boolean {
   return CSV_PATH_RE.test(path);
@@ -47,10 +50,22 @@ export function documentAxis(axis: SpectralAxisInfo, choice: WavelengthFrameChoi
   return axis;
 }
 
-export function documentFrameLine(fileFrame: WavelengthFrame, choice: WavelengthFrameChoice | null): string {
+export function documentFrameLine(spectrum: Spectrum1d, choice: WavelengthFrameChoice | null): string {
+  const fileFrame = spectrum.wavelength_frame;
   if (fileFrame === "not_wavelength" || choice === null) return NOT_WAVELENGTH_FRAME;
-  if (choice === fileFrame) return `${choice} wavelengths, as the file reads`;
-  return `${choice} wavelengths, set here (the file reads as ${fileFrame})`;
+  const assumed = spectrum.notes.some((note) => ASSUMED_FRAME_NOTE.test(note));
+  if (choice === fileFrame) {
+    return assumed ? `${choice} wavelengths, assumed (no card of the file names the frame)` : `${choice} wavelengths, as the file reads`;
+  }
+  return assumed
+    ? `${choice} wavelengths, set here (${fileFrame} was assumed for the file)`
+    : `${choice} wavelengths, set here (the file reads as ${fileFrame})`;
+}
+
+export function documentDqExclusions(spectrum: Spectrum1d): boolean[] | null {
+  const mask = DQ_EXCLUSION_MASKS[spectrum.dq_table];
+  if (spectrum.dq === null || mask === 0) return null;
+  return spectrum.dq.map((bits) => (bits & mask) !== 0);
 }
 
 export function documentLayout(source: Spectrum1d["source"]): string {

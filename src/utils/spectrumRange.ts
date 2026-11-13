@@ -1,6 +1,7 @@
 import type { CollapseRangeMode, ContinuumWindows } from "../shared/types/cube";
 import type { RampInfo } from "../shared/types/ramp";
 import { formatTickLabels, niceTicks } from "./plotScale";
+import { formatAxisValue } from "./spectralAxis";
 
 export interface ChannelRange {
   z0: number;
@@ -128,8 +129,8 @@ export function formatRangeLabel(range: ChannelRange, m: PlotMapping, unit: stri
   const channels = range.z0 === range.z1 ? `ch ${range.z0}` : `ch ${range.z0}–${range.z1}`;
   if (!m.xValues || m.xValues.length !== m.n) return channels;
   const { lo, hi } = rangeBounds(range, m);
-  const decimals = unit === "km/s" ? 1 : 4;
-  return `${channels} (${lo.toFixed(decimals)}–${hi.toFixed(decimals)} ${unit})`;
+  const step = Math.min(channelWidthAt(m.xValues, range.z0), channelWidthAt(m.xValues, range.z1));
+  return `${channels} (${formatAxisValue(lo, unit, step)}–${formatAxisValue(hi, unit, step)} ${unit})`;
 }
 
 export function windowsAreValid(windows: ContinuumWindows | null, n: number): boolean {

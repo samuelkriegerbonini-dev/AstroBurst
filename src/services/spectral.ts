@@ -49,6 +49,7 @@ export interface MeasureLineOptions {
   useErr?: boolean | null;
   useDq?: boolean | null;
   wavelengthFrame?: WavelengthFrameChoice | null;
+  redshift?: number | null;
 }
 
 export function measureSpectralLine(
@@ -69,5 +70,6 @@ export function measureSpectralLine(
     useErr: opts.useErr ?? null,
     useDq: opts.useDq ?? null,
     wavelengthFrame: opts.wavelengthFrame ?? null,
+    redshift: opts.redshift ?? null,
   });
 }

@@ -15,6 +15,7 @@ import type {
   FluxErrorTerms,
   LineMeasurement,
   LineMeasurementSource,
+  LineVelocity,
   SpectrumSource,
 } from "../../shared/types/spectral";
 
@@ -39,6 +40,16 @@ describe("line measurement types", () => {
     expectTypeOf<MeasureLineOptions["useErr"]>().toEqualTypeOf<boolean | null | undefined>();
     expectTypeOf<MeasureLineOptions["useDq"]>().toEqualTypeOf<boolean | null | undefined>();
     expectTypeOf<MeasureLineOptions["wavelengthFrame"]>().toEqualTypeOf<"air" | "vacuum" | null | undefined>();
+    expectTypeOf<MeasureLineOptions["redshift"]>().toEqualTypeOf<number | null | undefined>();
+  });
+
+  it("carries the source-frame velocities, the continuum chi2 and the nominal channel count of wave 0", () => {
+    expectTypeOf<LineVelocity["redshift"]>().toEqualTypeOf<number | undefined>();
+    expectTypeOf<LineVelocity["source_centroid_kms"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<LineVelocity["source_sigma_kms"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<LineVelocity["source_fwhm_kms"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<LineMeasurement["continuum_chi2_red"]>().toEqualTypeOf<number | null | undefined>();
+    expectTypeOf<LineMeasurement["n_channels_nominal"]>().toEqualTypeOf<number | undefined>();
   });
 });
 
@@ -65,6 +76,7 @@ describe("measureSpectralLine", () => {
       useErr: null,
       useDq: null,
       wavelengthFrame: null,
+      redshift: null,
     });
   });
 
@@ -104,6 +116,7 @@ describe("measureSpectralLine", () => {
       useErr: null,
       useDq: null,
       wavelengthFrame: null,
+      redshift: null,
     });
   });
 
@@ -131,7 +144,17 @@ describe("measureSpectralLine", () => {
       useErr: false,
       useDq: true,
       wavelengthFrame: "vacuum",
+      redshift: null,
     });
+  });
+
+  it("sends the redshift of the line list as typed, zero included", async () => {
+    typedInvokeMock.mockResolvedValue({ flux: 1 });
+    const source: FileSpectrumSource = { kind: "file", hdu: 0 };
+    await measureSpectralLine("C:/d/qso.fits", source, { z0: 10, z1: 30, restUm: 0.65646, redshift: 0.5 });
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("measure_spectral_line_cmd", expect.objectContaining({ redshift: 0.5 }));
+    await measureSpectralLine("C:/d/qso.fits", source, { z0: 10, z1: 30, restUm: 0.65646, redshift: 0 });
+    expect(typedInvokeMock).toHaveBeenLastCalledWith("measure_spectral_line_cmd", expect.objectContaining({ redshift: 0 }));
   });
 });
 

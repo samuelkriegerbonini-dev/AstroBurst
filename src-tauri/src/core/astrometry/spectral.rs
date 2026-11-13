@@ -10,10 +10,15 @@ use crate::core::metadata::header_aliases::{
 use crate::types::header::HduHeader;
 
 pub const SPEED_OF_LIGHT_KMS: f64 = 299792.458;
-pub const AIR_VACUUM_FORMULA: &str = "Greisen et al. 2006 (FITS Paper III eq. 65)";
+pub const AIR_VACUUM_FORMULA: &str = "Morton (2000, ApJS 130, 403)";
 pub const AIR_FORMULA_MIN_UM: f64 = 0.2;
 pub const CORRECTION_ACCURACY_KMS: f64 = 0.02;
 
+const MORTON_CONSTANT: f64 = 8.34254e-5;
+const MORTON_UV_TERM: f64 = 2.406147e-2;
+const MORTON_UV_POLE: f64 = 130.0;
+const MORTON_IR_TERM: f64 = 1.5998e-4;
+const MORTON_IR_POLE: f64 = 38.9;
 const AIR_VACUUM_TOLERANCE_UM: f64 = 1e-10;
 const AIR_VACUUM_MAX_ITERATIONS: usize = 50;
 pub(crate) const AU_KM: f64 = 149597870.7;
@@ -640,16 +645,17 @@ pub fn spectral_axis_on_with(
     })
 }
 
-pub fn air_refractive_index(lambda_um: f64) -> f64 {
-    let l2 = lambda_um * lambda_um;
-    1.0 + 1e-6 * (287.6155 + 1.62887 / l2 + 0.01360 / (l2 * l2))
+pub fn air_refractive_index(lambda_vacuum_um: f64) -> f64 {
+    let sigma2 = 1.0 / (lambda_vacuum_um * lambda_vacuum_um);
+    1.0 + MORTON_CONSTANT
+        + MORTON_UV_TERM / (MORTON_UV_POLE - sigma2)
+        + MORTON_IR_TERM / (MORTON_IR_POLE - sigma2)
 }
 
 pub fn air_formula_applies(lambda_um: f64) -> bool {
     lambda_um >= AIR_FORMULA_MIN_UM
 }
 
-#[cfg(test)]
 pub fn vacuum_to_air_um(lambda_vacuum_um: f64) -> f64 {
     if !air_formula_applies(lambda_vacuum_um) {
         return lambda_vacuum_um;
@@ -1708,15 +1714,45 @@ mod tests {
         assert!((axis.values[2] - 0.501).abs() < 1e-12);
     }
 
+    const ASTROPY_WCS_AWAV_TO_WAVE_UM: [(f64, f64); 7] = [
+        (0.3, 0.30008746722391305),
+        (0.4, 0.40011310211157125),
+        (0.5, 0.500139481900647),
+        (0.6563, 0.6564812947826457),
+        (0.9, 0.9002470639216287),
+        (1.5, 1.5004099263548047),
+        (2.5, 2.500682112780638),
+    ];
+    const ASTROPY_WCS_AGREEMENT: f64 = 3e-8;
+
     #[test]
-    fn air_5000_angstrom_becomes_vacuum_5001_472_by_the_greisen_formula() {
-        let n: f64 = 1.0 + 1e-6 * (287.6155 + 1.62887 / 0.25 + 0.01360 / 0.0625);
-        let expected_angstrom: f64 = 5000.0 * n;
-        assert!((expected_angstrom - 5001.4717).abs() < 0.002, "{expected_angstrom}");
+    fn air_to_vacuum_agrees_with_astropy_wcs_awav_to_wave_within_3e_8_from_0_3_to_2_5_um() {
+        let off: Vec<String> = ASTROPY_WCS_AWAV_TO_WAVE_UM
+            .iter()
+            .filter_map(|&(air_um, astropy_um)| {
+                let vacuum_um = air_to_vacuum_um(air_um);
+                let relative = (vacuum_um - astropy_um) / astropy_um;
+                (relative.abs() > ASTROPY_WCS_AGREEMENT).then(|| {
+                    format!(
+                        "air {air_um} um: vacuum {vacuum_um} um, astropy.wcs {astropy_um} um, relative {relative:e}, {:+.3} km/s",
+                        relative * SPEED_OF_LIGHT_KMS
+                    )
+                })
+            })
+            .collect();
+        assert!(off.is_empty(), "{}", off.join("\n"));
+    }
+
+    #[test]
+    fn air_5000_angstrom_becomes_vacuum_5001_395_by_the_morton_2000_standard_air_index() {
+        let sigma2: f64 = 1.0 / 0.25;
+        let n: f64 = 1.0 + 8.34254e-5 + 2.406147e-2 / (130.0 - sigma2) + 1.5998e-4 / (38.9 - sigma2);
+        assert_eq!(air_refractive_index(0.5), n);
         let vacuum_um = air_to_vacuum_um(0.5);
-        assert!((vacuum_um * 1e4 - expected_angstrom).abs() < 0.002, "{}", vacuum_um * 1e4);
-        assert!((vacuum_um * 1e4 - 5001.472).abs() < 0.002);
-        assert!(AIR_VACUUM_FORMULA.contains("Greisen"));
+        assert!((vacuum_um * 1e4 - 5001.3948).abs() < 1e-4, "{}", vacuum_um * 1e4);
+        let h_alpha_air_angstrom = vacuum_to_air_um(6564.61e-4) * 1e4;
+        assert!((h_alpha_air_angstrom - 6562.79).abs() <= 0.01, "{h_alpha_air_angstrom}");
+        assert!(AIR_VACUUM_FORMULA.contains("Morton (2000"));
     }
 
     #[test]
@@ -1766,10 +1802,10 @@ mod tests {
 
     #[test]
     fn golden_values_shared_with_the_typescript_mirror() {
-        assert!((air_refractive_index(0.5) - 1.00029434858).abs() < 1e-10);
-        assert!((air_to_vacuum_um(0.5) - 0.500147172245).abs() < 1e-10);
-        assert!((vacuum_to_air_um(0.6563) - 0.656108763679).abs() < 1e-10);
-        assert!((air_to_vacuum_um(0.6563) - 0.656491290559).abs() < 1e-10);
+        assert!((air_refractive_index(0.5) - 1.000278973402).abs() < 1e-10);
+        assert!((air_to_vacuum_um(0.5) - 0.500139484864).abs() < 1e-10);
+        assert!((vacuum_to_air_um(0.6563) - 0.656118745353).abs() < 1e-10);
+        assert!((air_to_vacuum_um(0.6563) - 0.656481303377).abs() < 1e-10);
         assert!((velocity_kms(0.6585, 0.6563, VelocityConvention::Optical) - 1004.94195886).abs() < 1e-8);
         assert!((velocity_kms(0.6585, 0.6563, VelocityConvention::Radio) - 1001.584521792).abs() < 1e-8);
         assert!((velocity_kms(0.6585, 0.6563, VelocityConvention::Relativistic) - 1003.257622482).abs() < 1e-8);
@@ -1803,7 +1839,7 @@ mod tests {
         let v = velocity_axis(&axis, 0.6563, VelocityConvention::Optical).unwrap();
         let vacuum = air_to_vacuum_um(0.6561);
         assert!((v.values_kms[0] - velocity_kms(vacuum, 0.6563, VelocityConvention::Optical)).abs() < 1e-9);
-        assert!(v.notes.iter().any(|n| n.contains("Greisen")));
+        assert!(v.notes.iter().any(|n| n.contains("Morton (2000")));
         let h = axis_header(&[("CTYPE3", "VRAD"), ("CUNIT3", "m/s"), ("CRVAL3", "1500.0"), ("CDELT3", "500.0")]);
         let axis = spectral_axis(&h, 2).unwrap();
         let v = velocity_axis(&axis, 0.6563, VelocityConvention::Optical).unwrap();

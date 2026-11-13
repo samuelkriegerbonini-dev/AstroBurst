@@ -4,15 +4,14 @@ use serde::Serialize;
 
 use crate::core::analysis::x1d::{X1dSpectrum, COL_WAVELENGTH, EXTNAME_EXTRACT1D};
 use crate::core::astrometry::spectral::{
-    air_formula_applies, is_non_linear_spectral_ctype, is_spacecraft, spectral_axis_on,
-    wavelength_unit_to_um, AxisKind, SpectralAxis,
+    is_non_linear_spectral_ctype, is_spacecraft, spectral_axis_on, wavelength_unit_to_um, AxisKind,
+    SpectralAxis,
 };
 use crate::core::imaging::dq_flags::DqTable;
 use crate::math::exact_median_f64;
 use crate::types::constants::{DEFAULT_WAVELENGTH_UNIT, HEADER_BUNIT};
 use crate::types::header::HduHeader;
 
-pub const MORTON_AIR_FORMULA: &str = "Morton (2000, ApJS 130, 403)";
 pub const IRAF_WAT_CARD_WIDTH: usize = 68;
 pub const CSV_WAVELENGTH_VACUUM_COLUMN: &str = "wavelength_vacuum_um";
 pub const CSV_WAVELENGTH_AIR_COLUMN: &str = "wavelength_air_um";
@@ -32,14 +31,10 @@ const CSV_QUOTE: char = '"';
 const CSV_SEPARATOR: char = ',';
 const BYTE_ORDER_MARK: char = '\u{feff}';
 
-const MORTON_CONSTANT: f64 = 8.34254e-5;
-const MORTON_UV_TERM: f64 = 2.406147e-2;
-const MORTON_UV_POLE: f64 = 130.0;
-const MORTON_IR_TERM: f64 = 1.5998e-4;
-const MORTON_IR_POLE: f64 = 38.9;
-
 const CTYPE1: &str = "CTYPE1";
 const CUNIT1: &str = "CUNIT1";
+const AIRORVAC: &str = "AIRORVAC";
+const VACUUM: &str = "VACUUM";
 const DC_FLAG: &str = "DC-FLAG";
 const DC_FLAG_LINEAR: f64 = 0.0;
 const DC_FLAG_LOG: f64 = 1.0;
@@ -71,6 +66,7 @@ const IRAF_WAVELENGTH_UNITS: [&str; 10] = [
     "micrometers",
 ];
 const SPACE_MISSIONS: &str = "JWST, HST or Roman";
+const ASSUMED_FRAME: &str = "wavelengths assumed";
 const CARDS_OF_INTEREST: [&str; 11] = [
     "OBJECT", "TARGNAME", "TELESCOP", "INSTRUME", "DETECTOR", "GRATING", "FILTER", "SRCTYPE",
     "DATE-OBS", DC_FLAG, "WAT0_001",
@@ -132,21 +128,11 @@ pub struct Wcs1dArrays {
     pub dq: Option<Vec<u32>>,
 }
 
-pub fn morton_air_refractive_index(lambda_vacuum_um: f64) -> f64 {
-    let sigma2 = 1.0 / (lambda_vacuum_um * lambda_vacuum_um);
-    1.0 + MORTON_CONSTANT
-        + MORTON_UV_TERM / (MORTON_UV_POLE - sigma2)
-        + MORTON_IR_TERM / (MORTON_IR_POLE - sigma2)
-}
-
-pub fn vacuum_to_air_morton_um(lambda_vacuum_um: f64) -> f64 {
-    if !air_formula_applies(lambda_vacuum_um) {
-        return lambda_vacuum_um;
-    }
-    lambda_vacuum_um / morton_air_refractive_index(lambda_vacuum_um)
-}
-
 impl Spectrum1d {
+    pub fn frame_assumed(&self) -> bool {
+        self.notes.iter().any(|note| note.contains(ASSUMED_FRAME))
+    }
+
     pub fn from_x1d(x1d: X1dSpectrum) -> Spectrum1d {
         let mut notes = x1d.notes;
         notes.push(format!(
@@ -635,6 +621,41 @@ fn space_mission(header: &HduHeader) -> Option<String> {
     card_upper(header, "TELESCOP").filter(|telescop| is_spacecraft(telescop))
 }
 
+fn declared_frame(
+    header: &HduHeader,
+    described: &str,
+    notes: &mut Vec<String>,
+) -> Option<WavelengthFrame> {
+    let airorvac = card(header, AIRORVAC).and_then(|value| {
+        let stated = value.to_lowercase();
+        let frame = if stated.starts_with("air") {
+            WavelengthFrame::Air
+        } else if stated.starts_with("vac") {
+            WavelengthFrame::Vacuum
+        } else {
+            return None;
+        };
+        Some((frame, format!("{AIRORVAC} '{value}'")))
+    });
+    let vacuum = card_upper(header, VACUUM).and_then(|value| {
+        let frame = match value.as_str() {
+            "T" | "1" => WavelengthFrame::Vacuum,
+            "F" | "0" => WavelengthFrame::Air,
+            _ => return None,
+        };
+        Some((frame, format!("{VACUUM} = {value}")))
+    });
+    let (frame, stated_by) = airorvac.or(vacuum)?;
+    notes.push(format!(
+        "{described} with {stated_by}: {}",
+        match frame {
+            WavelengthFrame::Air => "air wavelengths",
+            _ => "vacuum wavelengths",
+        }
+    ));
+    Some(frame)
+}
+
 fn mission_frame(header: &HduHeader, described: &str, notes: &mut Vec<String>) -> WavelengthFrame {
     match space_mission(header) {
         Some(telescop) => {
@@ -645,7 +666,7 @@ fn mission_frame(header: &HduHeader, described: &str, notes: &mut Vec<String>) -
         }
         None => {
             notes.push(format!(
-                "{described} with no {SPACE_MISSIONS} TELESCOP: read as air wavelengths, the ground-based default"
+                "{described} with no {SPACE_MISSIONS} TELESCOP and no {AIRORVAC} or {VACUUM} card naming the frame: air {ASSUMED_FRAME}, the ground-based default"
             ));
             WavelengthFrame::Air
         }
@@ -701,7 +722,18 @@ fn ctype_axis(
             Ok((probe, WavelengthFrame::Air))
         }
         AxisKind::Wave => {
-            let frame = mission_frame(header, &format!("{CTYPE1} '{ctype}'"), notes);
+            let described = format!("{CTYPE1} '{ctype}'");
+            let frame = match declared_frame(header, &described, notes) {
+                Some(frame) => frame,
+                None => {
+                    notes.push(if ctype.split('-').next() == Some(VACUUM_CODE) {
+                        format!("{described}: vacuum wavelengths, the FITS definition of {VACUUM_CODE}")
+                    } else {
+                        format!("{described} is not a FITS spectral code: treated as {VACUUM_CODE}, vacuum {ASSUMED_FRAME}")
+                    });
+                    WavelengthFrame::Vacuum
+                }
+            };
             let mut axis = normalised_axis(
                 header,
                 len,
@@ -787,7 +819,10 @@ fn linear_layout_axis(
             }
         },
     };
-    let frame = mission_frame(header, &described, notes);
+    let frame = match declared_frame(header, &described, notes) {
+        Some(frame) => frame,
+        None => mission_frame(header, &described, notes),
+    };
     let mut axis = normalised_axis(header, len, frame_code(frame), Some(&unit), &label)?;
     axis.ctype = ctype.unwrap_or_default();
     Ok((axis, frame))
@@ -810,7 +845,9 @@ mod tests {
     use super::*;
     use crate::core::analysis::x1d::read_x1d_spectrum;
     use crate::core::analysis::x1d::test_fixtures::write_x1d_fixture;
-    use crate::core::astrometry::spectral::AxisKind;
+    use crate::core::astrometry::spectral::{
+        air_to_vacuum_um, vacuum_to_air_um, velocity_kms, AxisKind, VelocityConvention,
+    };
 
     const LEN: usize = 64;
     const PATH: &str = "spec.fits";
@@ -915,7 +952,9 @@ mod tests {
         assert_eq!(s.cards.get("WAT1_001").map(String::as_str), Some(IRAF_WAT1));
         assert_eq!(s.cards.get("DC-FLAG").map(String::as_str), Some("0"));
         assert!(
-            s.notes.iter().any(|n| n.contains("air wavelengths")),
+            s.notes
+                .iter()
+                .any(|n| n.contains("air wavelengths assumed") && n.contains("ground-based")),
             "{:?}",
             s.notes
         );
@@ -996,36 +1035,142 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bess_shaped_wave_header_without_a_mission_card_opens_as_air_with_the_note() {
-        let s = open(&[
-            ("CTYPE1", "WAVE"),
-            ("CUNIT1", "Angstrom"),
-            ("CRVAL1", "6400.0"),
-            ("CDELT1", "0.1"),
-            ("CRPIX1", "1.0"),
-            ("OBJECT", "HD 37795"),
-            ("DATE-OBS", "2024-01-02T20:10:00"),
-            ("BSS_VHEL", "0.0"),
-            ("BSS_INST", "C11 LHIRES III 2400"),
-            ("BSS_SITE", "Observatory"),
-        ])
-        .unwrap();
-        assert_eq!(s.wavelength_frame, WavelengthFrame::Air);
-        assert_eq!(s.axis.kind, AxisKind::Awav);
-        assert_eq!(s.axis.ctype, "WAVE");
-        let note = s
-            .notes
+    const BESS_SHAPED_WAVE: [(&str, &str); 10] = [
+        ("CTYPE1", "WAVE"),
+        ("CUNIT1", "Angstrom"),
+        ("CRVAL1", "6400.0"),
+        ("CDELT1", "0.1"),
+        ("CRPIX1", "1.0"),
+        ("OBJECT", "HD 37795"),
+        ("DATE-OBS", "2024-01-02T20:10:00"),
+        ("BSS_VHEL", "0.0"),
+        ("BSS_INST", "C11 LHIRES III 2400"),
+        ("BSS_SITE", "Observatory"),
+    ];
+
+    fn frame_note(s: &Spectrum1d) -> &str {
+        s.notes
             .iter()
-            .find(|n| n.contains("air wavelengths"))
-            .unwrap_or_else(|| panic!("{:?}", s.notes));
-        assert!(note.contains("ground-based"), "{note}");
-        assert!(
-            !s.axis.notes.iter().any(|n| n.contains("vacuum")),
-            "{:?}",
-            s.axis.notes
+            .find(|n| n.contains("air wavelengths") || n.contains("vacuum wavelengths"))
+            .unwrap_or_else(|| panic!("{:?}", s.notes))
+    }
+
+    #[test]
+    fn bess_shaped_wave_header_without_a_frame_card_opens_as_vacuum_by_the_fits_definition() {
+        let s = open(&BESS_SHAPED_WAVE).unwrap();
+        assert_eq!(s.wavelength_frame, WavelengthFrame::Vacuum);
+        assert_eq!(s.axis.kind, AxisKind::Wave);
+        assert_eq!(s.axis.ctype, "WAVE");
+        assert_eq!(
+            frame_note(&s),
+            "CTYPE1 'WAVE': vacuum wavelengths, the FITS definition of WAVE"
         );
         assert_eq!(s.cards.get("OBJECT").map(String::as_str), Some("HD 37795"));
+    }
+
+    const IRAF_LINEAR_AXIS: &str =
+        "IRAF linear wavelength axis (CTYPE1 = 'LINEAR', WAT1 units=angstroms)";
+    const SYNONYM_WAVE: [(&str, &str); 4] = [
+        ("CTYPE1", "Wavelength"),
+        ("CUNIT1", "Angstrom"),
+        ("CRVAL1", "6400.0"),
+        ("CDELT1", "0.1"),
+    ];
+
+    fn open_with(base: &[(&str, &str)], extra: &[(&str, &str)]) -> Spectrum1d {
+        open(&[base, extra].concat()).unwrap()
+    }
+
+    #[test]
+    fn an_airorvac_or_vacuum_card_names_the_frame_of_a_wave_axis_and_of_a_linear_layout() {
+        let iraf = iraf_cards("angstroms");
+        let linear: Vec<(&str, &str)> = iraf.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let cases: [(&[(&str, &str)], &str, (&str, &str), WavelengthFrame, &str); 8] = [
+            (&BESS_SHAPED_WAVE, "CTYPE1 'WAVE'", ("AIRORVAC", "air"), WavelengthFrame::Air, "AIRORVAC 'air': air wavelengths"),
+            (&BESS_SHAPED_WAVE, "CTYPE1 'WAVE'", ("AIRORVAC", "'VAC     '"), WavelengthFrame::Vacuum, "AIRORVAC 'VAC': vacuum wavelengths"),
+            (&BESS_SHAPED_WAVE, "CTYPE1 'WAVE'", ("VACUUM", "F"), WavelengthFrame::Air, "VACUUM = F: air wavelengths"),
+            (&BESS_SHAPED_WAVE, "CTYPE1 'WAVE'", ("VACUUM", "0"), WavelengthFrame::Air, "VACUUM = 0: air wavelengths"),
+            (&BESS_SHAPED_WAVE, "CTYPE1 'WAVE'", ("VACUUM", "T"), WavelengthFrame::Vacuum, "VACUUM = T: vacuum wavelengths"),
+            (&linear, IRAF_LINEAR_AXIS, ("AIRORVAC", "vac"), WavelengthFrame::Vacuum, "AIRORVAC 'vac': vacuum wavelengths"),
+            (&linear, IRAF_LINEAR_AXIS, ("VACUUM", "1"), WavelengthFrame::Vacuum, "VACUUM = 1: vacuum wavelengths"),
+            (&linear, IRAF_LINEAR_AXIS, ("AIRORVAC", "air"), WavelengthFrame::Air, "AIRORVAC 'air': air wavelengths"),
+        ];
+        for (base, described, card, frame, stated) in cases {
+            let s = open_with(base, &[card]);
+            assert_eq!(s.wavelength_frame, frame, "{card:?}");
+            assert_eq!(s.axis.kind == AxisKind::Awav, frame == WavelengthFrame::Air, "{card:?}");
+            assert_eq!(frame_note(&s), format!("{described} with {stated}"));
+        }
+        let both = open_with(&BESS_SHAPED_WAVE, &[("VACUUM", "T"), ("AIRORVAC", "air")]);
+        assert_eq!(both.wavelength_frame, WavelengthFrame::Air);
+        let synonym = open_with(&SYNONYM_WAVE, &[("AIRORVAC", "air")]);
+        assert_eq!(
+            frame_note(&synonym),
+            "CTYPE1 'WAVELENGTH' with AIRORVAC 'air': air wavelengths"
+        );
+    }
+
+    #[test]
+    fn a_frame_card_that_names_no_frame_leaves_the_axis_to_its_default() {
+        let iraf = iraf_cards("angstroms");
+        let linear_cards: Vec<(&str, &str)> = iraf.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        for card in [("AIRORVAC", "unknown"), ("VACUUM", "1.2E-6")] {
+            let wave = open_with(&BESS_SHAPED_WAVE, &[card]);
+            assert_eq!(wave.wavelength_frame, WavelengthFrame::Vacuum, "{card:?}");
+            assert!(frame_note(&wave).contains("FITS definition"), "{}", frame_note(&wave));
+            let linear = open_with(&linear_cards, &[card]);
+            assert_eq!(linear.wavelength_frame, WavelengthFrame::Air, "{card:?}");
+            assert!(
+                frame_note(&linear).contains("air wavelengths assumed"),
+                "{}",
+                frame_note(&linear)
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_frame_that_no_card_names_is_marked_as_assumed_in_the_notes() {
+        let linear = open_owned(&iraf_cards("angstroms")).unwrap();
+        assert_eq!(linear.wavelength_frame, WavelengthFrame::Air);
+        assert_eq!(
+            frame_note(&linear),
+            format!("{IRAF_LINEAR_AXIS} with no JWST, HST or Roman TELESCOP and no AIRORVAC or VACUUM card naming the frame: air wavelengths assumed, the ground-based default")
+        );
+        let synonym = open(&SYNONYM_WAVE).unwrap();
+        assert_eq!(synonym.wavelength_frame, WavelengthFrame::Vacuum);
+        assert_eq!(synonym.axis.kind, AxisKind::Wave);
+        assert_eq!(synonym.axis.ctype, "WAVELENGTH");
+        assert_eq!(
+            frame_note(&synonym),
+            "CTYPE1 'WAVELENGTH' is not a FITS spectral code: treated as WAVE, vacuum wavelengths assumed"
+        );
+        let stated = [
+            open(&BESS_SHAPED_WAVE).unwrap(),
+            open_with(&BESS_SHAPED_WAVE, &[("CTYPE1", "AWAV")]),
+            open_with(&SYNONYM_WAVE, &[("VACUUM", "F")]),
+            open(&[
+                ("CUNIT1", "um"),
+                ("CRVAL1", "2.0"),
+                ("CDELT1", "0.001"),
+                ("TELESCOP", "JWST"),
+            ])
+            .unwrap(),
+        ];
+        for s in &stated {
+            assert!(!frame_note(s).contains("assumed"), "{}", frame_note(s));
+            assert!(!s.frame_assumed(), "{}", frame_note(s));
+        }
+        assert!(linear.frame_assumed() && synonym.frame_assumed());
+        let unit_assumed = open(&[
+            ("CTYPE1", "LINEAR"),
+            ("WAT1_001", "wtype=linear label=Wavelength"),
+            ("CRVAL1", "4000.0"),
+            ("CDELT1", "2.5"),
+            ("AIRORVAC", "vac"),
+        ])
+        .unwrap();
+        assert!(unit_assumed.notes.iter().any(|n| n.ends_with("Angstrom assumed")), "{:?}", unit_assumed.notes);
+        assert!(!unit_assumed.frame_assumed(), "an assumed unit is not an assumed frame: {:?}", unit_assumed.notes);
     }
 
     #[test]
@@ -1040,12 +1185,9 @@ mod tests {
         .unwrap();
         assert_eq!(jwst.wavelength_frame, WavelengthFrame::Vacuum);
         assert_eq!(jwst.axis.kind, AxisKind::Wave);
-        assert!(
-            jwst.notes
-                .iter()
-                .any(|n| n.contains("vacuum wavelengths") && n.contains("JWST")),
-            "{:?}",
-            jwst.notes
+        assert_eq!(
+            frame_note(&jwst),
+            "CTYPE1 'WAVE': vacuum wavelengths, the FITS definition of WAVE"
         );
         assert_eq!(jwst.dq_table, DqTable::Jwst);
 
@@ -1222,15 +1364,40 @@ mod tests {
     }
 
     #[test]
-    fn morton_2000_converts_vacuum_h_alpha_to_its_standard_air_wavelength() {
-        let air_angstrom = vacuum_to_air_morton_um(6564.61e-4) * 1e4;
-        assert!((air_angstrom - 6562.79).abs() <= 0.01, "{air_angstrom}");
+    fn the_rest_wavelength_conversion_of_a_line_measurement_inverts_the_air_to_vacuum_conversion_of_the_axis() {
+        for vacuum_um in [0.3, 0.5, 0.656461, 0.9, 2.5] {
+            let back = air_to_vacuum_um(vacuum_to_air_um(vacuum_um));
+            let relative = (back - vacuum_um) / vacuum_um;
+            assert!(
+                relative.abs() < 1e-9,
+                "{vacuum_um} um: back {back} um, relative {relative:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn fits_wave_axis_without_a_frame_card_is_vacuum_so_a_line_at_its_vacuum_rest_wavelength_has_no_velocity() {
+        let s = open(&[
+            ("CTYPE1", "WAVE"),
+            ("CUNIT1", "Angstrom"),
+            ("CRVAL1", "5000.0"),
+            ("CDELT1", "1.0"),
+            ("CRPIX1", "1.0"),
+        ])
+        .unwrap();
+        let rest_um = match s.wavelength_frame {
+            WavelengthFrame::Air => vacuum_to_air_um(0.5),
+            _ => 0.5,
+        };
+        let velocity = velocity_kms(s.axis.values[0], rest_um, VelocityConvention::Optical);
         assert!(
-            morton_air_refractive_index(0.65646) > 1.000_27,
-            "{}",
-            morton_air_refractive_index(0.65646)
+            velocity.abs() < 1e-6,
+            "{velocity} km/s with the axis read as {:?}",
+            s.wavelength_frame
         );
-        assert_eq!(vacuum_to_air_morton_um(0.15), 0.15);
+        assert_eq!(s.wavelength_frame, WavelengthFrame::Vacuum);
+        assert_eq!(s.axis.kind, AxisKind::Wave);
+        assert_eq!(s.axis.ctype, "WAVE");
     }
 
     #[test]
@@ -1267,6 +1434,7 @@ mod tests {
             "{:?}",
             s.notes
         );
+        assert!(!s.frame_assumed(), "{:?}", s.notes);
     }
 
     const CSV_PATH: &str = "C:/data/jw_test_x1d_spectrum.csv";
@@ -1405,8 +1573,8 @@ mod tests {
     }
 
     #[test]
-    fn from_csv_reads_an_air_document_export_on_its_own_air_column_not_the_greisen_vacuum_one() {
-        let text = "# file: ha.fits\n# wavelength_air_note: wavelength_vacuum_um converted from air\nchannel,wavelength_vacuum_um,wavelength_air_um,flux,flux_unit\n0,0.6564712848862345,0.65628,1.5,Jy\n1,0.6564812876247376,0.65629,2.5,Jy\n";
+    fn from_csv_reads_an_air_document_export_on_its_own_air_column_not_the_converted_vacuum_one() {
+        let text = "# file: ha.fits\n# wavelength_air_note: wavelength_vacuum_um converted from air\nchannel,wavelength_vacuum_um,wavelength_air_um,flux,flux_unit\n0,0.6564612979997992,0.65628,1.5,Jy\n1,0.6564713006882613,0.65629,2.5,Jy\n";
         let s = Spectrum1d::from_csv(CSV_PATH, text).unwrap();
         assert_eq!(s.wavelength_frame, WavelengthFrame::Air);
         assert_eq!(s.axis.kind, AxisKind::Awav);

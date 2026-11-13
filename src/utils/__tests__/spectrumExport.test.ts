@@ -602,7 +602,7 @@ describe("spectrumCsv for a spectrum file", () => {
 
 const AIR_UM = [0.65628, 0.65629, 0.6563];
 const AIR_NOTE_LINE =
-  "# wavelength_air_note: wavelength_vacuum_um converted from the spectrum's air wavelengths with Greisen et al. 2006 (FITS Paper III eq. 65); wavelength_air_um holds the spectrum's own air axis";
+  "# wavelength_air_note: wavelength_vacuum_um converted from the spectrum's air wavelengths with Morton (2000, ApJS 130, 403); wavelength_air_um holds the spectrum's own air axis";
 
 function airDocument(extra: Partial<Spectrum1d> = {}): Spectrum1d {
   return {
@@ -627,10 +627,10 @@ function airExportInput(document: Spectrum1d = airDocument(), extra: Partial<Spe
 }
 
 describe("spectrumCsv for other spectrum file shapes", () => {
-  it("writes an air spectrum's own air axis next to its Greisen vacuum wavelengths and says which formula made them", () => {
+  it("writes an air spectrum's own air axis next to its Morton (2000) vacuum wavelengths and says which formula made them", () => {
     const csv = spectrumCsv(airExportInput());
     expect(headerRow(csv)).toBe("channel,wavelength_vacuum_um,wavelength_air_um,vacuum_wavelength_um,flux,flux_unit");
-    expect(airToVacuumUm(0.65628)).toBe(0.6564712848862345);
+    expect(airToVacuumUm(0.65628)).toBe(0.6564612979997992);
     expect(dataRows(csv)).toEqual(
       AIR_UM.map((air, i) => `${i},${airToVacuumUm(air)},${air},${airToVacuumUm(air)},${[1.5, 2.5, 3.5][i]},erg/s/cm2/A`),
     );
