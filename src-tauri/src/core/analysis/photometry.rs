@@ -1,8 +1,11 @@
+use std::f64::consts::LN_2;
+
 use ndarray::Array2;
 use serde::Serialize;
 
 use crate::core::analysis::aperture::{annulus, circular_aperture, weighted_sum, AperturePixel, ApertureSum};
 use crate::core::imaging::dq_flags::apply_exclusion;
+use crate::math::gauss_newton::solve_linear;
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::header::HduHeader;
 
@@ -29,6 +32,12 @@ const FLAT_TOP_TOLERANCE: f64 = 1e-3;
 const FLAT_TOP_MIN_PIXELS: usize = 2;
 pub const MIN_APERTURE_RADIUS: f64 = 2.0;
 pub const MAX_APERTURE_RADIUS: f64 = 60.0;
+pub const AUTO_APERTURE_FWHM_FACTOR: f64 = 1.5;
+const FWHM_FIT_REACH_FACTOR: f64 = 1.2;
+const FWHM_FIT_MIN_REACH: f64 = 2.5;
+const FWHM_FIT_MAX_REACH: f64 = 48.0;
+const FWHM_FIT_PASSES: usize = 6;
+const FWHM_FIT_RIDGE: f64 = 1e-12;
 
 fn sorted_median(vals: &[f64]) -> f64 {
     let n = vals.len();
@@ -105,7 +114,7 @@ pub struct StarPhotometry {
     pub flux_err: f64,
     pub mag_inst: f64,
     pub snr: f64,
-    pub fwhm: f64,
+    pub fwhm: Option<f64>,
     pub aperture_radius: f64,
     pub aperture_pixels: u32,
     pub aperture_area: f64,
@@ -115,9 +124,11 @@ pub struct StarPhotometry {
     pub saturated: bool,
     pub saturation_source: String,
     pub n_masked: u32,
+    pub n_nonfinite: u32,
     pub n_saturated: u32,
     pub err_used: bool,
     pub aperture_correction: Option<f64>,
+    pub ee_in_aperture: Option<f64>,
     pub flux_total: Option<f64>,
     pub plateau_radius: Option<f64>,
     pub flux_jy: Option<f64>,
@@ -132,6 +143,7 @@ pub struct StarPhotometry {
     pub ee50_radius: Option<f64>,
     pub ee80_radius: Option<f64>,
     pub area_applied: bool,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -265,6 +277,66 @@ fn fwhm_truncated_moments(image: &Array2<f32>, x: f64, y: f64, bg: f64) -> f64 {
     fwhm.clamp(0.5, 40.0)
 }
 
+fn half_maximum_radius_squared(slope: f64, curvature: f64) -> Option<f64> {
+    let drop_rate = (slope * slope - 4.0 * curvature * LN_2).sqrt() - slope;
+    (drop_rate > 0.0).then(|| 2.0 * LN_2 / drop_rate)
+}
+
+fn fwhm_radial_fit(image: &Array2<f32>, x: f64, y: f64, bg: f64, first_guess: f64) -> Option<f64> {
+    if !(first_guess > 0.0) {
+        return None;
+    }
+    let (h, w) = image.dim();
+    let (cx, cy) = (x.round() as i64, y.round() as i64);
+    let mut reach = (FWHM_FIT_REACH_FACTOR * first_guess).clamp(FWHM_FIT_MIN_REACH, FWHM_FIT_MAX_REACH);
+    let mut profile: Option<[f64; 3]> = None;
+    let mut fwhm = None;
+    for _ in 0..FWHM_FIT_PASSES {
+        let reach2 = reach * reach;
+        let half = reach.ceil() as i64;
+        let mut normal = [[0.0f64; 3]; 3];
+        let mut rhs = [0.0f64; 3];
+        for ny in (cy - half).max(0)..=(cy + half).min(h as i64 - 1) {
+            for nx in (cx - half).max(0)..=(cx + half).min(w as i64 - 1) {
+                let t = (nx as f64 - x).powi(2) + (ny as f64 - y).powi(2);
+                let u = t / reach2;
+                let v = image[[ny as usize, nx as usize]] as f64 - bg;
+                if u >= 1.0 || !v.is_finite() {
+                    continue;
+                }
+                let (weight, weighted_log) = match profile {
+                    None if v > 0.0 => (v * v, v * v * v.ln()),
+                    None => continue,
+                    Some([level, slope, curvature]) => {
+                        let t_model = if curvature > 0.0 { t.min(-slope / (2.0 * curvature)) } else { t };
+                        let eta = level + slope * t_model + curvature * t_model * t_model;
+                        let mu = eta.exp();
+                        (mu * mu, mu * mu * eta + mu * (v - mu))
+                    }
+                };
+                let taper = (1.0 - u) * (1.0 - u);
+                let basis = [1.0, u, u * u];
+                for i in 0..3 {
+                    rhs[i] += taper * weighted_log * basis[i];
+                    for j in 0..3 {
+                        normal[i][j] += taper * weight * basis[i] * basis[j];
+                    }
+                }
+            }
+        }
+        normal[1][1] += FWHM_FIT_RIDGE * normal[0][0];
+        normal[2][2] += FWHM_FIT_RIDGE * normal[0][0];
+        let solution = solve_linear(&mut normal.map(|row| row.to_vec()), &mut rhs)?;
+        let (slope, curvature) = (solution[1] / reach2, solution[2] / (reach2 * reach2));
+        let t_half = half_maximum_radius_squared(slope, curvature)?;
+        profile = Some([solution[0], slope, curvature]);
+        let width = 2.0 * t_half.sqrt();
+        fwhm = (t_half < reach2 && (0.5..=40.0).contains(&width)).then_some(width);
+        reach = (FWHM_FIT_REACH_FACTOR * width).clamp(FWHM_FIT_MIN_REACH, FWHM_FIT_MAX_REACH);
+    }
+    fwhm
+}
+
 fn area_factor(value: f32) -> f64 {
     let area = value as f64;
     if area.is_finite() && area > 0.0 {
@@ -301,6 +373,7 @@ struct ApertureFlux {
     geometric_weight: f64,
     n_finite: u32,
     n_masked: u32,
+    n_nonfinite: u32,
 }
 
 impl ApertureFlux {
@@ -311,6 +384,7 @@ impl ApertureFlux {
             geometric_weight: ap.weight,
             n_finite: ap.n_finite,
             n_masked: ap.n_masked,
+            n_nonfinite: ap.n_nonfinite,
         }
     }
 
@@ -326,7 +400,7 @@ fn area_weighted_sum(
     excluded: Option<&Array2<u8>>,
 ) -> ApertureFlux {
     let mask = excluded.filter(|m| m.dim() == image.dim());
-    let mut flux = ApertureFlux { sum: 0.0, weight: 0.0, geometric_weight: 0.0, n_finite: 0, n_masked: 0 };
+    let mut flux = ApertureFlux { sum: 0.0, weight: 0.0, geometric_weight: 0.0, n_finite: 0, n_masked: 0, n_nonfinite: 0 };
     for p in pixels {
         let Some(&value) = image.get((p.y, p.x)) else {
             continue;
@@ -336,6 +410,7 @@ fn area_weighted_sum(
             continue;
         }
         if !value.is_finite() {
+            flux.n_nonfinite += 1;
             continue;
         }
         let geometric = p.weight as f64;
@@ -557,26 +632,32 @@ pub fn measure_star_prepared(
     );
     let (x, y) = refine_centroid(working, best_x as f64, best_y as f64, coarse_sky.mean, 5);
 
-    let mut fwhm = fwhm_truncated_moments(working, x, y, coarse_sky.mean);
-    if SKY_ANNULUS_INNER_FACTOR * fwhm > COARSE_SKY_INNER {
+    let fwhm_above = |sky: f64| fwhm_radial_fit(working, x, y, sky, fwhm_truncated_moments(working, x, y, sky));
+    let mut fwhm = fwhm_above(coarse_sky.mean);
+    if let Some(coarse_fwhm) = fwhm.filter(|f| SKY_ANNULUS_INNER_FACTOR * f > COARSE_SKY_INNER) {
         let wide_sky = annulus_stats(
             working,
             x,
             y,
-            SKY_ANNULUS_INNER_FACTOR * fwhm,
-            SKY_ANNULUS_OUTER_FACTOR * fwhm,
+            SKY_ANNULUS_INNER_FACTOR * coarse_fwhm,
+            SKY_ANNULUS_OUTER_FACTOR * coarse_fwhm,
             config.subsamples,
         );
         if wide_sky.count >= MIN_REFINED_SKY_PIXELS {
-            fwhm = fwhm_truncated_moments(working, x, y, wide_sky.mean);
+            fwhm = fwhm_above(wide_sky.mean);
         }
     }
-    let fwhm_eff = if fwhm > 0.0 { fwhm } else { 4.0 };
 
     let r_ap = config
         .aperture_radius
-        .unwrap_or(1.5 * fwhm_eff)
+        .unwrap_or(AUTO_APERTURE_FWHM_FACTOR * fwhm.unwrap_or(4.0))
         .clamp(MIN_APERTURE_RADIUS, MAX_APERTURE_RADIUS);
+    let mut warnings = Vec::new();
+    if fwhm.is_none() && config.aperture_radius.is_none() {
+        warnings.push(format!(
+            "FWHM not measured: the automatic aperture radius of {r_ap:.1} px is a fallback, not {AUTO_APERTURE_FWHM_FACTOR} x FWHM"
+        ));
+    }
 
     let (sky_inner, sky_outer) = match config.sky_annulus {
         Some((r_in, r_out)) => {
@@ -602,6 +683,13 @@ pub fn measure_star_prepared(
     if ap.n_finite == 0 {
         return Err("Aperture contains no finite pixels".into());
     }
+    if ap.n_nonfinite > 0 {
+        warnings.push(format!(
+            "{} aperture pixel{} without data (non-finite): the flux is a lower limit",
+            ap.n_nonfinite,
+            if ap.n_nonfinite == 1 { "" } else { "s" }
+        ));
+    }
 
     let net_flux = ap.net(sky.mean);
     let n_ap = ap.weight;
@@ -625,7 +713,7 @@ pub fn measure_star_prepared(
         }
     };
     let flux_err = variance.max(0.0).sqrt();
-    let snr = if flux_err > 1e-12 {
+    let snr = if flux_err > 0.0 {
         net_flux / flux_err
     } else {
         net_flux.max(0.0)
@@ -650,7 +738,8 @@ pub fn measure_star_prepared(
     let plateau = growth_plateau(&curve, r_ap, sky_inner)
         .filter(|_| net_flux > 0.0)
         .filter(|p| (net_flux / p.flux).is_finite() && net_flux / p.flux > 0.0);
-    let aperture_correction = plateau.map(|p| net_flux / p.flux);
+    let aperture_correction = plateau.map(|p| p.flux / net_flux);
+    let ee_in_aperture = plateau.map(|p| net_flux / p.flux);
     let flux_total = plateau.map(|p| p.flux);
     let plateau_radius = plateau.map(|p| p.radius);
     let ee50_radius = flux_total.and_then(|total| encircled_radius(&curve, total, 0.5));
@@ -674,9 +763,11 @@ pub fn measure_star_prepared(
         saturated: saturated_flag,
         saturation_source: saturation_source.to_string(),
         n_masked: ap.n_masked,
+        n_nonfinite: ap.n_nonfinite,
         n_saturated,
         err_used,
         aperture_correction,
+        ee_in_aperture,
         flux_total,
         plateau_radius,
         flux_jy: None,
@@ -691,6 +782,7 @@ pub fn measure_star_prepared(
         ee50_radius,
         ee80_radius,
         area_applied: area.is_some(),
+        warnings,
     })
 }
 
@@ -746,6 +838,10 @@ mod tests {
         }
     }
 
+    fn measured_fwhm(res: &StarPhotometry) -> f64 {
+        res.fwhm.expect("the FWHM of a star is measured")
+    }
+
     fn sum_of_squared_weights(res: &StarPhotometry, dims: (usize, usize)) -> f64 {
         circular_aperture(dims.0, dims.1, res.x, res.y, res.aperture_radius, 5)
             .iter()
@@ -788,12 +884,8 @@ mod tests {
         assert!(rel_err < 0.03, "flux={} vs {} ({:.1}%)", result.net_flux, true_flux, rel_err * 100.0);
 
         let true_fwhm = 2.3548 * sigma;
-        assert!(
-            (result.fwhm - true_fwhm).abs() / true_fwhm < 0.15,
-            "fwhm={} vs {}",
-            result.fwhm,
-            true_fwhm
-        );
+        let fwhm = measured_fwhm(&result);
+        assert!((fwhm - true_fwhm).abs() / true_fwhm < 0.15, "fwhm={} vs {}", fwhm, true_fwhm);
 
         assert!(result.mag_inst.is_finite());
         assert!(!result.saturated);
@@ -908,11 +1000,8 @@ mod tests {
             let img = gaussian_scene(160, 160, 80.0, 80.0, 1000.0, sigma, 100.0);
             let res = measure_star(&img, 80.0, 80.0, &PhotometryConfig::default()).unwrap();
             let true_fwhm = 2.3548200450309493 * sigma;
-            assert!(
-                (res.fwhm - true_fwhm).abs() / true_fwhm < 0.05,
-                "sigma {sigma}: FWHM {} against a true {true_fwhm}",
-                res.fwhm
-            );
+            let fwhm = measured_fwhm(&res);
+            assert!((fwhm - true_fwhm).abs() / true_fwhm < 0.05, "sigma {sigma}: FWHM {fwhm} against a true {true_fwhm}");
         }
     }
 
@@ -1302,10 +1391,13 @@ mod tests {
         let wider = at(10.0);
         let corr8 = wide.aperture_correction.expect("correction at r=8");
         let corr10 = wider.aperture_correction.expect("correction at r=10");
-        assert!(corr8 > 0.9 && corr8 < 1.0, "corr8={corr8}");
-        assert!(corr10 > corr8 && corr10 < 1.0, "corr10={corr10} corr8={corr8}");
+        assert!(corr8 > 1.0 && corr8 < 1.1, "corr8={corr8}");
+        assert!(corr10 > 1.0 && corr10 < corr8, "corr10={corr10} corr8={corr8}");
         let total = wide.flux_total.expect("total flux");
-        assert!((total - wide.net_flux / corr8).abs() < 1e-6);
+        assert!((total - wide.net_flux * corr8).abs() < 1e-6);
+        let enclosed8 = serde_json::to_value(&wide).unwrap()["ee_in_aperture"].as_f64().expect("enclosed fraction at r=8");
+        assert!(enclosed8 > 0.9 && enclosed8 < 1.0, "enclosed8={enclosed8}");
+        assert!((enclosed8 * corr8 - 1.0).abs() < 1e-12);
         let plateau = wide.plateau_radius.expect("plateau radius");
         assert!(plateau > 8.0 && plateau < 16.0, "plateau={plateau}");
         let true_flux = 2.0 * std::f64::consts::PI * 1000.0 * 9.0;
@@ -1314,11 +1406,28 @@ mod tests {
         let narrow = at(4.0);
         assert!(narrow.aperture_correction.is_none(), "plateau inside the sky annulus must not be trusted");
         assert!(narrow.flux_total.is_none());
+        assert!(serde_json::to_value(&narrow).unwrap()["ee_in_aperture"].is_null());
 
         let flat = Array2::from_elem((128, 128), 10.0f32);
         let cfg = PhotometryConfig { aperture_radius: Some(8.0), ..PhotometryConfig::default() };
         let none = measure_star(&flat, 64.0, 64.0, &cfg).unwrap();
         assert!(none.aperture_correction.is_none());
+    }
+
+    #[test]
+    fn an_aperture_enclosing_93_percent_reports_the_multiplicative_correction_above_one() {
+        let img = gaussian_scene(128, 128, 64.0, 64.0, 1000.0, 3.0, 10.0);
+        let cfg = PhotometryConfig { aperture_radius: Some(6.92), ..PhotometryConfig::default() };
+        let res = measure_star(&img, 64.0, 64.0, &cfg).unwrap();
+        let total = res.flux_total.expect("total flux");
+        let correction = res.aperture_correction.expect("aperture correction");
+        assert!(correction > 1.0, "correction {correction} would make the total fainter than the aperture flux");
+        assert!((correction - total / res.net_flux).abs() < 1e-12, "correction {correction} against total over net {}", total / res.net_flux);
+        let brighter_mag = 2.5 * correction.log10();
+        assert!((brighter_mag - 0.0788).abs() < 0.003, "the total is {brighter_mag} mag brighter than the aperture flux");
+        let enclosed = serde_json::to_value(&res).unwrap()["ee_in_aperture"].as_f64().expect("enclosed fraction");
+        assert!((enclosed - 0.93).abs() < 0.005, "enclosed fraction {enclosed}");
+        assert!((enclosed - res.net_flux / total).abs() < 1e-12);
     }
 
     #[test]
@@ -1530,5 +1639,223 @@ mod tests {
         let wrong = Array2::<u8>::ones((8, 8));
         let ignored = MaskedImage::new(&img, Some(&wrong)).unwrap();
         assert!(ignored.masked.is_none() && ignored.excluded.is_none());
+    }
+
+    #[test]
+    fn non_finite_pixels_inside_the_aperture_are_counted_and_make_the_flux_a_lower_limit() {
+        let clean = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        let cfg = PhotometryConfig { aperture_radius: Some(6.0), ..PhotometryConfig::default() };
+        let whole = measure_star(&clean, 32.0, 32.0, &cfg).unwrap();
+
+        let mut edge = clean.clone();
+        for y in 31..=33 {
+            edge[[y, 35]] = f32::NAN;
+        }
+        let partial = measure_star(&edge, 32.0, 32.0, &cfg).unwrap();
+        let json = serde_json::to_value(&partial).unwrap();
+        assert_eq!(json["n_nonfinite"], 3, "net flux {} against {} with no count of the missing pixels", partial.net_flux, whole.net_flux);
+        assert_eq!(
+            json["warnings"],
+            serde_json::json!(["3 aperture pixels without data (non-finite): the flux is a lower limit"])
+        );
+        assert!(partial.net_flux < whole.net_flux && partial.aperture_area < whole.aperture_area);
+        assert_eq!(partial.n_masked, 0);
+
+        let whole_json = serde_json::to_value(&whole).unwrap();
+        assert_eq!(whole_json["n_nonfinite"], 0);
+        assert_eq!(whole_json["warnings"], serde_json::json!([]));
+
+        let area = Array2::from_elem((64, 64), 1.02f32);
+        let source = MaskedImage::new(&edge, None).unwrap().with_area(Some(&area));
+        let weighted = serde_json::to_value(measure_star_prepared(&source, None, None, 32.0, 32.0, &cfg).unwrap()).unwrap();
+        assert_eq!(weighted["area_applied"], true);
+        assert_eq!(weighted["n_nonfinite"], 3);
+        assert_eq!(weighted["warnings"], json["warnings"]);
+
+        let mut mask = Array2::<u8>::zeros((64, 64));
+        mask[[31, 35]] = 1;
+        let masked = serde_json::to_value(measure_star_masked(&edge, 32.0, 32.0, &cfg, Some(&mask)).unwrap()).unwrap();
+        assert_eq!(masked["n_masked"], 1);
+        assert_eq!(masked["n_nonfinite"], 2);
+
+        let mut single = clean.clone();
+        single[[32, 35]] = f32::NAN;
+        let one = serde_json::to_value(measure_star(&single, 32.0, 32.0, &cfg).unwrap()).unwrap();
+        assert_eq!(
+            one["warnings"],
+            serde_json::json!(["1 aperture pixel without data (non-finite): the flux is a lower limit"])
+        );
+
+        let mut hollow = clean.clone();
+        hollow.slice_mut(ndarray::s![31..34, 31..34]).fill(f32::NAN);
+        let core = measure_star(&hollow, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+        let core_json = serde_json::to_value(&core).unwrap();
+        assert_eq!(core.aperture_radius, 6.0);
+        assert!(core.net_flux < 0.8 * whole.net_flux, "net flux {} against {}", core.net_flux, whole.net_flux);
+        assert_eq!(core_json["n_nonfinite"], 9);
+        assert!(core_json["fwhm"].is_null(), "FWHM {} reported for a star with no core", core_json["fwhm"]);
+        assert_eq!(
+            core_json["warnings"],
+            serde_json::json!([
+                "FWHM not measured: the automatic aperture radius of 6.0 px is a fallback, not 1.5 x FWHM",
+                "9 aperture pixels without data (non-finite): the flux is a lower limit"
+            ])
+        );
+    }
+
+    #[test]
+    fn snr_does_not_depend_on_the_unit_of_the_pixel_values() {
+        let mut img = gaussian_scene(64, 64, 32.0, 32.0, 5000.0, 2.0, 100.0);
+        deterministic_noise(&mut img);
+        let reference = measure_star(&img, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+        assert!(reference.snr > 100.0, "snr={}", reference.snr);
+
+        let small_unit = img.mapv(|v| v * 1e-17);
+        let scaled = measure_star(&small_unit, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+        assert!(scaled.flux_err > 0.0 && scaled.flux_err < 1e-12, "flux_err={}", scaled.flux_err);
+        assert!(
+            (scaled.snr - reference.snr).abs() / reference.snr < 1e-3,
+            "snr {} in a unit 1e17 times larger against {}",
+            scaled.snr,
+            reference.snr
+        );
+        let (scaled_fwhm, reference_fwhm) = (measured_fwhm(&scaled), measured_fwhm(&reference));
+        assert!((scaled_fwhm - reference_fwhm).abs() / reference_fwhm < 1e-3, "fwhm {} against {}", scaled_fwhm, reference_fwhm);
+        assert!((scaled.aperture_radius - reference.aperture_radius).abs() / reference.aperture_radius < 1e-3);
+    }
+
+    #[test]
+    fn an_unmeasured_fwhm_is_absent_and_the_automatic_aperture_fallback_is_flagged() {
+        let blank = Array2::from_elem((64, 64), 10.0f32);
+        let auto = measure_star(&blank, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+        let json = serde_json::to_value(&auto).unwrap();
+        assert!(json["fwhm"].is_null(), "FWHM {} reported for a position with no source", json["fwhm"]);
+        assert_eq!(auto.fwhm, None, "an unmeasured FWHM is absent, not a NaN in a number");
+        assert_eq!(auto.aperture_radius, 6.0);
+        assert_eq!(
+            json["warnings"],
+            serde_json::json!(["FWHM not measured: the automatic aperture radius of 6.0 px is a fallback, not 1.5 x FWHM"])
+        );
+
+        let fixed = PhotometryConfig { aperture_radius: Some(5.0), ..PhotometryConfig::default() };
+        let json = serde_json::to_value(measure_star(&blank, 32.0, 32.0, &fixed).unwrap()).unwrap();
+        assert!(json["fwhm"].is_null());
+        assert_eq!(json["aperture_radius"], 5.0);
+        assert_eq!(json["warnings"], serde_json::json!([]));
+
+        let mut noisy_sky = Array2::from_elem((64, 64), 100.0f32);
+        deterministic_noise(&mut noisy_sky);
+        let json = serde_json::to_value(measure_star(&noisy_sky, 32.0, 32.0, &PhotometryConfig::default()).unwrap()).unwrap();
+        assert!(json["fwhm"].is_null(), "FWHM {} reported on a noisy sky with no source", json["fwhm"]);
+        assert_eq!(json["aperture_radius"], 6.0);
+
+        let star = gaussian_scene(64, 64, 32.0, 32.0, 1000.0, 2.0, 100.0);
+        let measured = measure_star(&star, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+        assert!(measured.fwhm.is_some_and(|f| f > 0.0), "a measured FWHM is present: {:?}", measured.fwhm);
+        let json = serde_json::to_value(&measured).unwrap();
+        assert_eq!(json["fwhm"].as_f64(), measured.fwhm);
+        assert_eq!(json["warnings"], serde_json::json!([]));
+    }
+
+    const GAUSSIAN_SIGMA_TO_FWHM: f64 = 2.3548200450309493;
+    const GAUSS_LEGENDRE_8: [(f64, f64); 8] = [
+        (-0.9602898564975363, 0.1012285362903763),
+        (-0.7966664774136267, 0.2223810344533745),
+        (-0.5255324099163290, 0.3137066458778873),
+        (-0.1834346424956498, 0.3626837833783620),
+        (0.1834346424956498, 0.3626837833783620),
+        (0.5255324099163290, 0.3137066458778873),
+        (0.7966664774136267, 0.2223810344533745),
+        (0.9602898564975363, 0.1012285362903763),
+    ];
+    const SUBPIXEL_OFFSETS: [(&str, f64, f64); 3] = [("centre", 0.0, 0.0), ("edge", 0.5, 0.0), ("corner", 0.5, 0.5)];
+    const IMAGE_FWHM_ORACLE: [(&str, f64, f64); 8] = [
+        ("gaussian", 1.5, 1.661526),
+        ("gaussian", 2.0, 2.118745),
+        ("gaussian", 3.0, 3.077981),
+        ("gaussian", 6.0, 6.038630),
+        ("moffat", 1.5, 1.749496),
+        ("moffat", 2.0, 2.190178),
+        ("moffat", 3.0, 3.128345),
+        ("moffat", 6.0, 6.064665),
+    ];
+
+    fn pixel_integrated_gaussian(size: usize, star_x: f64, star_y: f64, fwhm: f64, flux: f64, bg: f64) -> Array2<f32> {
+        let scale = fwhm / GAUSSIAN_SIGMA_TO_FWHM * std::f64::consts::SQRT_2;
+        let column = |i: usize, centre: f64| {
+            0.5 * (libm::erf((i as f64 + 0.5 - centre) / scale) - libm::erf((i as f64 - 0.5 - centre) / scale))
+        };
+        Array2::from_shape_fn((size, size), |(y, x)| (bg + flux * column(x, star_x) * column(y, star_y)) as f32)
+    }
+
+    fn pixel_integrated_moffat(size: usize, star_x: f64, star_y: f64, fwhm: f64, beta: f64, flux: f64, bg: f64) -> Array2<f32> {
+        let alpha2 = (fwhm / 2.0).powi(2) / (2.0_f64.powf(1.0 / beta) - 1.0);
+        let norm = (beta - 1.0) / (std::f64::consts::PI * alpha2);
+        Array2::from_shape_fn((size, size), |(y, x)| {
+            let mut sum = 0.0;
+            for (node_y, weight_y) in GAUSS_LEGENDRE_8 {
+                for (node_x, weight_x) in GAUSS_LEGENDRE_8 {
+                    let dx = x as f64 + 0.5 * node_x - star_x;
+                    let dy = y as f64 + 0.5 * node_y - star_y;
+                    sum += 0.25 * weight_x * weight_y * (1.0 + (dx * dx + dy * dy) / alpha2).powf(-beta);
+                }
+            }
+            (bg + flux * norm * sum) as f32
+        })
+    }
+
+    fn pixel_integrated_star(profile: &str, star_x: f64, star_y: f64, fwhm: f64) -> Array2<f32> {
+        match profile {
+            "gaussian" => pixel_integrated_gaussian(64, star_x, star_y, fwhm, 20000.0, 100.0),
+            _ => pixel_integrated_moffat(64, star_x, star_y, fwhm, 2.5, 20000.0, 100.0),
+        }
+    }
+
+    #[test]
+    fn fwhm_of_a_faint_star_on_a_noisy_sky_stays_near_the_true_width() {
+        let true_fwhm = GAUSSIAN_SIGMA_TO_FWHM * 2.0;
+        for (amp, tolerance) in [(40.0, 0.05), (8.0, 0.15)] {
+            let mut img = gaussian_scene(64, 64, 32.3, 31.6, amp, 2.0, 100.0);
+            deterministic_noise(&mut img);
+            let res = measure_star(&img, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+            let fwhm = measured_fwhm(&res);
+            assert!((fwhm - true_fwhm).abs() / true_fwhm < tolerance, "amplitude {amp}: FWHM {fwhm} against {true_fwhm}");
+        }
+    }
+
+    #[test]
+    fn fwhm_of_a_star_does_not_depend_on_its_subpixel_position_down_to_one_and_a_half_pixels() {
+        let mut failures = Vec::new();
+        println!("profile   true  image   offset    fwhm  aperture");
+        for (profile, fwhm, image_fwhm) in IMAGE_FWHM_ORACLE {
+            let tolerance = if fwhm < 2.0 {
+                0.04
+            } else if fwhm < 3.0 {
+                0.025
+            } else {
+                0.012
+            };
+            let mut measured = Vec::new();
+            for (offset, dx, dy) in SUBPIXEL_OFFSETS {
+                let img = pixel_integrated_star(profile, 32.0 + dx, 32.0 + dy, fwhm);
+                let res = measure_star(&img, 32.0, 32.0, &PhotometryConfig::default()).unwrap();
+                let found = measured_fwhm(&res);
+                println!("{profile:8} {fwhm:5.1} {image_fwhm:6.4}  {offset:6} {:7.4}  {:7.4}", found, res.aperture_radius);
+                assert!(
+                    (res.aperture_radius - (1.5 * found).clamp(MIN_APERTURE_RADIUS, MAX_APERTURE_RADIUS)).abs() < 1e-12,
+                    "{profile} {fwhm} {offset}: aperture {} does not follow the FWHM {}",
+                    res.aperture_radius,
+                    found
+                );
+                measured.push(found);
+            }
+            let lowest = measured.iter().cloned().fold(f64::INFINITY, f64::min);
+            let highest = measured.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let near_the_image_fwhm = measured.iter().all(|f| ((f - image_fwhm) / image_fwhm).abs() <= tolerance);
+            if !near_the_image_fwhm || (highest - lowest) / image_fwhm > tolerance {
+                failures.push(format!("{profile} {fwhm}: {lowest:.4} to {highest:.4} against {image_fwhm:.4}"));
+            }
+        }
+        assert!(failures.is_empty(), "the FWHM moves with the subpixel position: {failures:#?}");
     }
 }

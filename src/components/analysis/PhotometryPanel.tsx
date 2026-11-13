@@ -13,6 +13,7 @@ import {
   createClickLogGate,
   gaiaFailureWarning,
   loadGaiaMatchPreference,
+  measurementWarnings,
   replaceNewest,
   saveGaiaMatchPreference,
   withWarning,
@@ -26,15 +27,18 @@ import ProfilePlot from "../regions/ProfilePlot";
 import type { ProfileSeries } from "../regions/ProfilePlot";
 import {
   APERTURE_RANGE_HINT,
+  FALLBACK_APERTURE_RADIUS_PX,
   MAX_SKY_OUTER_RADIUS_PX,
   apertureRadiusInRange,
   growthReferenceLines,
   plateauCaption,
+  summedFluxUnit,
 } from "../../utils/photometryTable";
 import MeasurementBadge from "./MeasurementBadge";
 
 interface PhotometryPanelProps {
   filePath?: string | null;
+  measureKey?: string | null;
 }
 
 const INPUT_CLASS =
@@ -43,8 +47,8 @@ const GROWTH_PLOT_HEIGHT = 140;
 const GROWTH_CURVE_COLOR = "#fbbf24";
 const GROWTH_CSV_NAME = "growth-curve";
 const ANNULUS_NEEDS_BOTH = "sky annulus needs both an inner and an outer radius";
-const APERTURE_DEFAULTS_CAPTION = "blank: r_ap = 1.5 × FWHM, sky 2–3 × r_ap";
-const APERTURE_TITLE = "Aperture radius in pixels; blank uses 1.5 × FWHM of the clicked star";
+const APERTURE_DEFAULTS_CAPTION = `blank: r_ap = 1.5 × FWHM (${FALLBACK_APERTURE_RADIUS_PX} px if the FWHM is not measured), sky 2–3 × r_ap`;
+const APERTURE_TITLE = `Aperture radius in pixels; blank uses 1.5 × FWHM of the clicked star, or ${FALLBACK_APERTURE_RADIUS_PX} px when its FWHM is not measured`;
 const SKY_IN_TITLE = "Inner sky radius in pixels; blank uses 2 × r_ap";
 const SKY_OUT_TITLE = "Outer sky radius in pixels; blank uses 3 × r_ap";
 const GAIA_PENDING_TEXT = "Querying Gaia DR3 (VizieR)...";
@@ -108,15 +112,15 @@ function formatJansky(v: number | null | undefined): string {
   return `${(v * 1e9).toFixed(4)} nJy`;
 }
 
-function fluxUnitLabel(bunit: string | null | undefined): string {
-  return bunit ? ` ${bunit}` : "";
+function fluxUnitLabel(unit: string | null): string {
+  return unit ? ` ${unit}` : "";
 }
 
 function bestMag(p: StarPhotometry): string {
   return p.mag_ab != null ? `AB ${formatMag(p.mag_ab)}` : `inst ${formatMag(p.mag_inst)}`;
 }
 
-function PhotometryPanel({ filePath }: PhotometryPanelProps) {
+function PhotometryPanel({ filePath, measureKey }: PhotometryPanelProps) {
   const apertureId = useId();
   const skyInId = useId();
   const skyOutId = useId();
@@ -165,7 +169,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
     setIsMeasuring(false);
     setGaiaPending(false);
     busyRef.current = false;
-  }, [filePath, logGate]);
+  }, [filePath, measureKey, logGate]);
 
   useEffect(() => () => logGate.supersede(), [logGate]);
 
@@ -284,8 +288,8 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
 
   const phot = result?.photometry;
   const photcal = result?.photcal ?? null;
-  const warnings = result?.warnings ?? [];
-  const unit = fluxUnitLabel(photcal?.bunit);
+  const warnings = result ? measurementWarnings(result) : [];
+  const unit = fluxUnitLabel(summedFluxUnit(photcal));
   const growth = useMemo(() => (phot && phot.growth_curve.length > 0 ? growthSeries(phot, eeFraction) : null), [phot, eeFraction]);
   const growthLines = useMemo(() => (phot ? growthReferenceLines(phot) : []), [phot]);
 
@@ -405,6 +409,11 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                   {phot.n_masked} masked
                 </span>
               )}
+              {phot.n_nonfinite > 0 && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded text-amber-300 bg-amber-900/30">
+                  {phot.n_nonfinite} no data
+                </span>
+              )}
               {phot.n_saturated > 0 && (
                 <span className="text-[9px] px-1.5 py-0.5 rounded text-red-300 bg-red-900/30">
                   {phot.n_saturated} saturated
@@ -447,7 +456,7 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
             </div>
             <div className="bg-zinc-900/80 rounded px-2 py-1.5">
               <div className="text-zinc-500">FWHM</div>
-              <div className="text-yellow-300 font-mono">{phot.fwhm.toFixed(2)} px</div>
+              <div className="text-yellow-300 font-mono">{phot.fwhm == null ? "--" : `${phot.fwhm.toFixed(2)} px`}</div>
             </div>
             <div className="bg-zinc-900/80 rounded px-2 py-1.5">
               <div className="text-zinc-500">Aperture</div>
@@ -485,6 +494,11 @@ function PhotometryPanel({ filePath }: PhotometryPanelProps) {
                   {phot.flux_total != null ? ` → total ${formatSci(phot.flux_total)}${unit}` : ""}
                   {phot.mag_ab_total != null ? `, AB ${formatMag(phot.mag_ab_total)}` : ""}
                 </div>
+                {phot.ee_in_aperture != null && (
+                  <div className="text-zinc-500">
+                    EE in aperture <span className="text-zinc-300 font-mono">{phot.ee_in_aperture.toFixed(4)}</span>
+                  </div>
+                )}
               </div>
             )}
             {sky && (

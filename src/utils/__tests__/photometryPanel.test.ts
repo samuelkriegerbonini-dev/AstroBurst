@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { PhotometryMeasurement } from "../../services/analysis";
+import type { BatchPhotometryResult, PhotometryMeasurement, StarPhotometry } from "../../services/analysis";
 import {
   GAIA_MATCH_PREF_KEY,
+  batchWarnings,
   createClickLogGate,
   detectedStarsLabel,
   gaiaFailureWarning,
   loadGaiaMatchPreference,
+  measurementWarnings,
   replaceNewest,
   saveGaiaMatchPreference,
   withWarning,
@@ -149,6 +151,46 @@ describe("click log gate", () => {
     gate.supersede();
     gate.begin();
     expect(log.rows).toEqual([]);
+  });
+});
+
+const FWHM_FALLBACK = "FWHM not measured: the automatic aperture radius of 6.0 px is a fallback, not 1.5 x FWHM";
+const NO_DATA_3 = "3 aperture pixels without data (non-finite): the flux is a lower limit";
+const NO_DATA_9 = "9 aperture pixels without data (non-finite): the flux is a lower limit";
+const PROCESSED = "photometry on processed data (stack)";
+
+function starWarnings(warnings: string[]): StarPhotometry {
+  return { warnings } as StarPhotometry;
+}
+
+describe("measurementWarnings", () => {
+  it("shows the per-star warnings after the image warnings, each once", () => {
+    const result = { ...measurement([PROCESSED, FWHM_FALLBACK]), photometry: starWarnings([FWHM_FALLBACK, NO_DATA_3]) };
+    expect(measurementWarnings(result)).toEqual([PROCESSED, FWHM_FALLBACK, NO_DATA_3]);
+  });
+
+  it("returns the image warnings alone when the star has none", () => {
+    expect(measurementWarnings({ ...measurement([PROCESSED]), photometry: starWarnings([]) })).toEqual([PROCESSED]);
+  });
+});
+
+describe("batchWarnings", () => {
+  it("adds each distinct per-star warning of the measured rows once, after the image warnings", () => {
+    const result: BatchPhotometryResult = {
+      rows: [
+        { index: 0, photometry: starWarnings([FWHM_FALLBACK]), sky: null, error: null },
+        { index: 1, photometry: null, sky: null, error: "outside the image" },
+        { index: 2, photometry: starWarnings([FWHM_FALLBACK, NO_DATA_3]), sky: null, error: null },
+        { index: 3, photometry: starWarnings([NO_DATA_9, PROCESSED]), sky: null, error: null },
+      ],
+      photcal: null,
+      warnings: [PROCESSED],
+      masked: false,
+      n_measured: 3,
+      n_failed: 1,
+      elapsed_ms: 4,
+    };
+    expect(batchWarnings(result)).toEqual([PROCESSED, FWHM_FALLBACK, NO_DATA_3, NO_DATA_9]);
   });
 });
 

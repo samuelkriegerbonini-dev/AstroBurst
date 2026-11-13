@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ANALYSIS_SECTION } from "../../../utils/analysisSections";
 
 const IMAGE_PATH = "C:/data/m31.fits";
+const panelProps = vi.hoisted(() => ({ photometry: null as Record<string, unknown> | null }));
 
 vi.mock("../../../hooks/useAnalysisMeasure", () => ({
   useAnalysisMeasure: () => ({
@@ -15,7 +16,12 @@ vi.mock("../../../hooks/useAnalysisMeasure", () => ({
   }),
 }));
 vi.mock("../../../hooks/useStarDetectionStore", () => ({ useStarDetection: () => ({ result: null }) }));
-vi.mock("../PhotometryPanel", () => ({ default: () => "[photometry-panel]" }));
+vi.mock("../PhotometryPanel", () => ({
+  default: (props: Record<string, unknown>) => {
+    panelProps.photometry = props;
+    return "[photometry-panel]";
+  },
+}));
 vi.mock("../PhotometryTablePanel", () => ({ default: () => "[photometry-table]" }));
 vi.mock("../TimeSeriesPanel", () => ({ default: () => "[time-series]" }));
 
@@ -51,5 +57,13 @@ describe("PhotometryTool section chips", () => {
     expect(section).toContain(`data-section-tip="${ANALYSIS_SECTION.photometry.id}"`);
     expect(section).toContain('aria-live="polite"');
     expect(section.indexOf("data-section-tip")).toBeLessThan(section.indexOf("[photometry-panel]"));
+  });
+});
+
+describe("PhotometryTool panel inputs", () => {
+  it("gives the single-star panel the measure key, so a file rewritten under the same path clears its result", async () => {
+    panelProps.photometry = null;
+    await render();
+    expect(panelProps.photometry).toEqual({ filePath: IMAGE_PATH, measureKey: `${IMAGE_PATH}@1` });
   });
 });

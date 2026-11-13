@@ -14,6 +14,7 @@ import { generateId } from "../../utils/format";
 import {
   APERTURE_RANGE_HINT,
   BATCH_SEMANTICS_TEXT,
+  FALLBACK_APERTURE_RADIUS_PX,
   MAX_SKY_OUTER_RADIUS_PX,
   STARS_ELSEWHERE_NOTICE,
   abCellText,
@@ -29,7 +30,7 @@ import {
   type PhotometryTableRow,
   type SortDirection,
 } from "../../utils/photometryTable";
-import { detectedStarsLabel } from "../../utils/photometryPanel";
+import { batchWarnings, detectedStarsLabel } from "../../utils/photometryPanel";
 import { GAIN_TITLE, gainCaption, nextGainText } from "../../utils/photometryGain";
 import { ZERO_BASED_PIXEL_TITLE } from "../../utils/regionGeometry";
 import { APERTURE_LAYER_ID, APERTURE_LAYER_KIND, createAperturePainter, type ApertureMarker } from "../viewer/painters/aperturePainter";
@@ -66,8 +67,8 @@ const DUPLICATE_TOLERANCE_PX = 1;
 const SAVED_NOTICE_MS = 6000;
 const PASTE_ROWS = 4;
 const ANNULUS_NEEDS_BOTH = "sky annulus needs both an inner and an outer radius";
-const APERTURE_DEFAULTS_CAPTION = "blank: r_ap = 1.5 × FWHM, sky 2–3 × r_ap";
-const APERTURE_TITLE = "Aperture radius in pixels; blank uses 1.5 × FWHM of each star";
+const APERTURE_DEFAULTS_CAPTION = `blank: r_ap = 1.5 × FWHM (${FALLBACK_APERTURE_RADIUS_PX} px if the FWHM is not measured), sky 2–3 × r_ap`;
+const APERTURE_TITLE = `Aperture radius in pixels; blank uses 1.5 × FWHM of each star, or ${FALLBACK_APERTURE_RADIUS_PX} px for a star whose FWHM is not measured`;
 const SKY_IN_TITLE = "Inner sky radius in pixels; blank uses 2 × r_ap";
 const SKY_OUT_TITLE = "Outer sky radius in pixels; blank uses 3 × r_ap";
 const ZERO_BASED_CAPTION = "x, y: 0-based pixel centres; DS9 and .reg files are 1-based";
@@ -137,6 +138,7 @@ function rowFlags(row: PhotometryTableRow, duplicate: boolean): string {
   if (duplicate) flags.push("dup");
   if (p?.saturated) flags.push("sat");
   if (p && p.n_masked > 0) flags.push(`${p.n_masked} masked`);
+  if (p && p.n_nonfinite > 0) flags.push(`${p.n_nonfinite} no data`);
   if (p && p.aperture_correction == null) flags.push("no plateau");
   return flags.join(", ");
 }
@@ -524,24 +526,33 @@ function PhotometryTablePanel({
           </div>
         )}
 
-        <WarningList warnings={result?.warnings} />
+        <WarningList warnings={result ? batchWarnings(result) : null} />
 
         {shown.length > 0 && (
           <div className="max-h-56 overflow-auto border border-zinc-800/60 rounded">
             <table className="w-full text-[9px] font-mono">
               <thead className="sticky top-0 bg-zinc-900 text-zinc-500">
                 <tr>
-                  {TABLE_COLUMNS.map((column) => (
-                    <th
-                      key={column.key}
-                      onClick={() => toggleSort(column.key)}
-                      className={`${column.key === "label" ? "text-left" : "text-right"} px-1.5 py-0.5 cursor-pointer select-none hover:text-zinc-300`}
-                      title={column.note ? `Sort by ${column.header}\n${column.note}` : `Sort by ${column.header}`}
-                    >
-                      {column.header}
-                      {sortKey === column.key ? (sortDir === "asc" ? " ^" : " v") : ""}
-                    </th>
-                  ))}
+                  {TABLE_COLUMNS.map((column) => {
+                    const sorted = sortKey === column.key;
+                    return (
+                      <th
+                        key={column.key}
+                        aria-sort={sorted ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
+                        className={`${column.key === "label" ? "text-left" : "text-right"} px-1.5 py-0.5`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => toggleSort(column.key)}
+                          className="cursor-pointer select-none hover:text-zinc-300"
+                          title={column.note ? `Sort by ${column.header}\n${column.note}` : `Sort by ${column.header}`}
+                        >
+                          {column.header}
+                          {sorted && <span aria-hidden="true" className="ml-0.5">{sortDir === "asc" ? "▲" : "▼"}</span>}
+                        </button>
+                      </th>
+                    );
+                  })}
                   <th className="text-left px-1.5 py-0.5">flags</th>
                 </tr>
               </thead>

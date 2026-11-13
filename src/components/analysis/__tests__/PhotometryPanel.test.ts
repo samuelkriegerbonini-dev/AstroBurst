@@ -3,7 +3,7 @@ import { createElement, isValidElement } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { Check } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { GainModel, PhotometryMeasurement } from "../../../services/analysis";
+import type { GainModel, PhotCal, PhotometryMeasurement, StarPhotometry } from "../../../services/analysis";
 
 
 const gainModelMock = vi.hoisted(() => vi.fn<(path: string) => Promise<GainModel>>());
@@ -33,6 +33,7 @@ vi.mock("../../../hooks/useAnalysisTarget", () => ({ useMeasurementSource: () =>
 vi.mock("../../../hooks/useMousePixelStore", () => ({ usePixelClick: () => pixelClick.current }));
 
 import { hooks } from "../../../test/hookRuntime";
+import { elementsOf, textOf } from "../../../test/elementTree";
 import PhotometryPanel from "../PhotometryPanel";
 import PhotometryTablePanel from "../PhotometryTablePanel";
 import { fluxCellText } from "../../../utils/photometryTable";
@@ -266,9 +267,11 @@ function measurementAt(sky: { ra: number; dec: number }): PhotometryMeasurement 
       saturated: false,
       saturation_source: "none",
       n_masked: 0,
+      n_nonfinite: 0,
       n_saturated: 0,
       err_used: false,
       aperture_correction: null,
+      ee_in_aperture: null,
       flux_total: null,
       plateau_radius: null,
       flux_jy: null,
@@ -282,6 +285,7 @@ function measurementAt(sky: { ra: number; dec: number }): PhotometryMeasurement 
       growth_curve: [],
       ee50_radius: null,
       ee80_radius: null,
+      warnings: [],
     },
     sky,
     gaia: null,
@@ -396,9 +400,10 @@ function measuredStar(over: Record<string, unknown>): Record<string, unknown> {
   return {
     x: 10.04, y: 12.06, peak: 900, net_flux: 1234.5678, flux_err: 12, mag_inst: -7.73, snr: 102.9, fwhm: 3.214,
     aperture_radius: 5, aperture_pixels: 78, aperture_area: 78.5, bg_mean: 10.25, bg_sigma: 2, bg_pixels: 200,
-    saturated: false, saturation_source: "none", n_masked: 0, n_saturated: 0, err_used: true,
-    aperture_correction: 1.0421, flux_total: 1286.6, plateau_radius: 9, flux_jy: null, flux_err_jy: null,
+    saturated: false, saturation_source: "none", n_masked: 0, n_nonfinite: 0, n_saturated: 0, err_used: true,
+    aperture_correction: 1.0421, ee_in_aperture: 0.9596, flux_total: 1286.6, plateau_radius: 9, flux_jy: null, flux_err_jy: null,
     mag_ab: 24.5123, mag_ab_err: 0.0314, mag_ab_total: null, st_mag: null, sky_inner: 10, sky_outer: 15, ee50_radius: 2.345,
+    warnings: [],
     ...over,
   };
 }
@@ -490,5 +495,195 @@ describe("PhotometryTablePanel with a decimal comma in the aperture", () => {
     (measureButton(tree).onClick as () => void)();
     expect(batchMock).toHaveBeenCalledTimes(1);
     expect(batchMock.mock.calls[0][2]).toMatchObject({ apertureRadius: 2.5 });
+  });
+});
+
+const JWST_I2D: PhotCal = {
+  convention: { kind: "jwst_mjy_sr", pixar_sr: 2.29e-14, pixar_a2: 0.000974, derived_pixar: false },
+  bunit: "MJy/sr",
+  notes: [],
+  warnings: [],
+  label: "JWST MJy/sr, PIXAR_SR from header",
+};
+const HST_RATE: PhotCal = {
+  convention: { kind: "hst_counts", photflam: 1.5e-19, photplam: 6563, photzpt: -21.1, per_second: true, exptime: null },
+  bunit: "ELECTRONS/S",
+  notes: [],
+  warnings: [],
+  label: "HST PHOTFLAM/PHOTPLAM (count rate), STmag to ABmag",
+};
+const FWHM_FALLBACK = "FWHM not measured: the automatic aperture radius of 6.0 px is a fallback, not 1.5 x FWHM";
+const NO_DATA_3 = "3 aperture pixels without data (non-finite): the flux is a lower limit";
+const PROCESSED = "photometry on processed data (stack)";
+
+function measurementWith(star: Partial<StarPhotometry>, rest: Partial<PhotometryMeasurement> = {}): PhotometryMeasurement {
+  const base = measurementAt({ ra: 83.82208, dec: -5.39111 });
+  return { ...base, ...rest, photometry: { ...base.photometry, ...star } };
+}
+
+const texts = (tree: ReactNode) => elementsOf(tree).map((element) => textOf(element));
+
+function cardValue(tree: ReactNode, label: string): string | null {
+  const card = elementsOf(tree).find((element) => {
+    const children = (element.props as Props).children;
+    return Array.isArray(children) && isValidElement(children[0]) && textOf(children[0]) === label;
+  });
+  return card ? textOf(((card.props as Props).children as ReactNode[])[1]) : null;
+}
+
+describe("PhotometryPanel result card with the fields wave 0 added", () => {
+  const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+  const measured = async (result: PhotometryMeasurement): Promise<ReactNode> => {
+    measureMock.mockReset().mockResolvedValue(result);
+    (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+    pixelClick.current = { seq: 1, x: 10, y: 12 };
+    show();
+    await flush();
+    return show();
+  };
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    pixelClick.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+  });
+
+  it("prints -- for an unmeasured FWHM instead of failing to render the card", async () => {
+    const tree = await measured(measurementWith({ fwhm: null, warnings: [FWHM_FALLBACK] }));
+    expect(cardValue(tree, "FWHM")).toBe("--");
+  });
+
+  it("keeps a measured FWHM in pixels", async () => {
+    expect(cardValue(await measured(measurementWith({ fwhm: 3.214 })), "FWHM")).toBe("3.21 px");
+  });
+
+  it("labels the net flux, the total and the growth axis of an MJy/sr image with the unit of a sum over pixels", async () => {
+    const tree = await measured(
+      measurementWith(
+        {
+          aperture_correction: 1.0421,
+          ee_in_aperture: 0.9596,
+          flux_total: 1286.6,
+          plateau_radius: 9,
+          growth_curve: [
+            { r: 1, flux: 400 },
+            { r: 5, flux: 1234.5 },
+          ],
+        },
+        { photcal: JWST_I2D },
+      ),
+    );
+    const shown = texts(tree);
+    expect(shown).not.toContain("Net flux MJy/sr");
+    expect(shown).toContain("Net flux MJy/sr x pix");
+    expect(shown).toContain("1.0421 → total 1.287e+3 MJy/sr x pix");
+    expect(findElement(tree, (props) => typeof props.yLabel === "string")?.yLabel).toBe("net flux MJy/sr x pix");
+  });
+
+  it("keeps BUNIT as the unit of a summed count rate", async () => {
+    expect(texts(await measured(measurementWith({}, { photcal: HST_RATE })))).toContain("Net flux ELECTRONS/S");
+  });
+
+  it("shows the enclosed fraction in the aperture beside the multiplicative correction", async () => {
+    const tree = await measured(measurementWith({ aperture_correction: 1.0421, ee_in_aperture: 0.9596, flux_total: 1286.6, plateau_radius: 9 }));
+    expect(texts(tree)).toContain("EE in aperture 0.9596");
+  });
+
+  it("badges the aperture pixels without data next to the masked count", async () => {
+    const shown = texts(await measured(measurementWith({ n_masked: 2, n_nonfinite: 3, warnings: [NO_DATA_3] })));
+    expect(shown).toContain("2 masked");
+    expect(shown).toContain("3 no data");
+  });
+
+  it("shows no data badge when every aperture pixel holds data", async () => {
+    expect(texts(await measured(measurementWith({}))).some((text) => text.endsWith(" no data"))).toBe(false);
+  });
+
+  it("shows the per-star warnings with the image warnings", async () => {
+    const tree = await measured(measurementWith({ n_nonfinite: 3, warnings: [NO_DATA_3] }, { warnings: [PROCESSED] }));
+    for (const warning of [PROCESSED, NO_DATA_3]) {
+      expect(elementsWhere(tree, (props) => props.children === warning), warning).toHaveLength(1);
+    }
+  });
+
+  it("shows a warning once when the star and the image both carry it", async () => {
+    const tree = await measured(measurementWith({ n_nonfinite: 3, warnings: [NO_DATA_3] }, { warnings: [PROCESSED, NO_DATA_3] }));
+    expect(elementsWhere(tree, (props) => props.children === NO_DATA_3)).toHaveLength(1);
+  });
+
+  it("shows the fallback-aperture warning of a star whose FWHM was not measured", async () => {
+    const tree = await measured(measurementWith({ fwhm: null, aperture_radius: 6, warnings: [FWHM_FALLBACK] }));
+    expect(elementsWhere(tree, (props) => props.children === FWHM_FALLBACK)).toHaveLength(1);
+  });
+
+  it("states the 6 px radius a blank aperture takes when the FWHM is not measured", () => {
+    const tree = show();
+    expect(elementsWhere(tree, (props) => props.children === "blank: r_ap = 1.5 × FWHM (6 px if the FWHM is not measured), sky 2–3 × r_ap")).toHaveLength(1);
+    expect(findElement(tree, byTitlePrefix(APERTURE_TITLE_PREFIX))?.title).toBe(
+      "Aperture radius in pixels; blank uses 1.5 × FWHM of the clicked star, or 6 px when its FWHM is not measured",
+    );
+  });
+});
+
+describe("PhotometryPanel when the measured file is rewritten under the same path", () => {
+  const CALIBRATED = "C:/out/x_calibrated.fits";
+  const version = (n: number): Props => ({ filePath: CALIBRATED, measureKey: `${CALIBRATED}@${n}` });
+  const show = (props: Props) => renderTree(PhotometryPanel.type as unknown as Panel, props);
+  const click = async (props: Props, seq: number) => {
+    pixelClick.current = { seq, x: 10 + seq, y: 12 };
+    show(props);
+    await flush();
+  };
+  const arm = (props: Props) => (findElement(show(props), (p) => p.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+  const cardShown = (tree: ReactNode) => texts(tree).includes("Net flux");
+  const previousShown = (tree: ReactNode) => texts(tree).includes("Previous");
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    measureMock.mockReset().mockResolvedValue(measurementAt({ ra: 83.82208, dec: -5.39111 }));
+    pixelClick.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+  });
+
+  it("drops the result card and the Previous list when a Stacking re-run rewrites the file and the measure key moves on", async () => {
+    arm(version(3));
+    await click(version(3), 1);
+    await click(version(3), 2);
+    let tree = show(version(3));
+    expect(cardShown(tree)).toBe(true);
+    expect(previousShown(tree)).toBe(true);
+    show(version(4));
+    tree = show(version(4));
+    expect(cardShown(tree)).toBe(false);
+    expect(previousShown(tree)).toBe(false);
+  });
+
+  it("starts a new Previous list on the rewritten file instead of mixing both versions", async () => {
+    arm(version(3));
+    await click(version(3), 1);
+    show(version(4));
+    await click(version(4), 2);
+    const tree = show(version(4));
+    expect(cardShown(tree)).toBe(true);
+    expect(previousShown(tree)).toBe(false);
+  });
+
+  it("keeps the result while the measure key stays the same", async () => {
+    arm(version(3));
+    await click(version(3), 1);
+    show(version(3));
+    expect(cardShown(show(version(3)))).toBe(true);
   });
 });

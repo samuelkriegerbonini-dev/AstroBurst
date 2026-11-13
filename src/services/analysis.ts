@@ -104,7 +104,7 @@ export interface StarPhotometry {
   flux_err: number;
   mag_inst: number | null;
   snr: number;
-  fwhm: number;
+  fwhm: number | null;
   aperture_radius: number;
   aperture_pixels: number;
   aperture_area: number;
@@ -114,9 +114,11 @@ export interface StarPhotometry {
   saturated: boolean;
   saturation_source: string;
   n_masked: number;
+  n_nonfinite: number;
   n_saturated: number;
   err_used: boolean;
   aperture_correction: number | null;
+  ee_in_aperture: number | null;
   flux_total: number | null;
   plateau_radius: number | null;
   flux_jy: number | null;
@@ -130,6 +132,7 @@ export interface StarPhotometry {
   growth_curve: GrowthPoint[];
   ee50_radius: number | null;
   ee80_radius: number | null;
+  warnings: string[];
 }
 
 export interface GrowthPoint {

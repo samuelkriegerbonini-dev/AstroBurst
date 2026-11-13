@@ -34,7 +34,7 @@ function PhotometryTool() {
         <SectionChips label="Photometry" sections={SECTIONS} tip={sectionTip} />
         <section id={ANALYSIS_SECTION.photometry.id}>
           <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.photometry.id} />
-          <PhotometryPanel filePath={effectivePath} />
+          <PhotometryPanel filePath={effectivePath} measureKey={measureKey} />
         </section>
 
         <section id={ANALYSIS_SECTION.table.id}>

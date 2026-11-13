@@ -1,4 +1,4 @@
-import type { PhotometryMeasurement } from "../services/analysis";
+import type { BatchPhotometryResult, PhotometryMeasurement } from "../services/analysis";
 
 export const GAIA_MATCH_PREF_KEY = "astroburst.photometry.gaiaMatch.v1";
 
@@ -23,6 +23,14 @@ export function gaiaFailureWarning(error: unknown): string {
 
 export function withWarning(result: PhotometryMeasurement, warning: string): PhotometryMeasurement {
   return result.warnings.includes(warning) ? result : { ...result, warnings: [...result.warnings, warning] };
+}
+
+export function measurementWarnings(result: PhotometryMeasurement): string[] {
+  return [...new Set([...result.warnings, ...result.photometry.warnings])];
+}
+
+export function batchWarnings(result: BatchPhotometryResult): string[] {
+  return [...new Set([...result.warnings, ...result.rows.flatMap((row) => row.photometry?.warnings ?? [])])];
 }
 
 export function replaceNewest(

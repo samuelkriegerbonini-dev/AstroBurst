@@ -1,4 +1,4 @@
-import type { StarPhotometry } from "../services/analysis";
+import type { PhotCal, StarPhotometry } from "../services/analysis";
 import type { PlotReferenceLine } from "../components/regions/ProfilePlot";
 import { buildCsv, type CsvCell, type CsvColumn } from "./catalogCsv";
 import { formatSignificantFixed } from "./formatSignificant";
@@ -42,6 +42,8 @@ export const PHOTOMETRY_COLUMN_KEYS = [
   "n_masked",
   "err_used",
   "error",
+  "n_nonfinite",
+  "ee_in_aperture",
 ] as const;
 
 export type PhotometryColumnKey = (typeof PHOTOMETRY_COLUMN_KEYS)[number];
@@ -51,9 +53,10 @@ export const PEAK_SEARCH_RADIUS_PX = 8;
 export const MIN_APERTURE_RADIUS_PX = 2;
 export const MAX_APERTURE_RADIUS_PX = 60;
 export const MAX_SKY_OUTER_RADIUS_PX = 512;
+export const FALLBACK_APERTURE_RADIUS_PX = 6;
 export const APERTURE_RANGE_HINT = `Aperture radius must be between ${MIN_APERTURE_RADIUS_PX} and ${MAX_APERTURE_RADIUS_PX} px.`;
 const PEAK_SEARCH_BOX_PX = 2 * PEAK_SEARCH_RADIUS_PX + 1;
-export const BATCH_SEMANTICS_TEXT = `Each position snaps to the brightest pixel in the ${PEAK_SEARCH_BOX_PX} x ${PEAK_SEARCH_BOX_PX} px box around it (${PEAK_SEARCH_RADIUS_PX} px each way) and is then recentred on that light, so a brighter neighbour beyond ${PEAK_SEARCH_RADIUS_PX} px can take over the input; check the measured x/y. Two inputs on one star measure the same star (flagged as duplicates). The aperture radius is fixed for every source (leave it blank for 1.5 x FWHM per star). When the curve of growth has no plateau before the sky annulus, the correction, total flux and EE radii are empty.`;
+export const BATCH_SEMANTICS_TEXT = `Each position snaps to the brightest pixel in the ${PEAK_SEARCH_BOX_PX} x ${PEAK_SEARCH_BOX_PX} px box around it (${PEAK_SEARCH_RADIUS_PX} px each way) and is then recentred on that light, so a brighter neighbour beyond ${PEAK_SEARCH_RADIUS_PX} px can take over the input; check the measured x/y. Two inputs on one star measure the same star (flagged as duplicates). The aperture radius is fixed for every source (leave it blank for 1.5 x FWHM per star, or ${FALLBACK_APERTURE_RADIUS_PX} px where the FWHM is not measured). When the curve of growth has no plateau before the sky annulus, the correction, total flux and EE radii are empty.`;
 export const STARS_ELSEWHERE_NOTICE =
   "The detected stars came from the RGB composite, not from the image this table measures, so they are not offered here; go back to the file and detect again.";
 
@@ -102,6 +105,14 @@ export function abCellText(mag: number | null | undefined, err: number | null | 
   if (mag == null || !Number.isFinite(mag)) return MISSING_CELL;
   const text = mag.toFixed(MAG_DECIMALS);
   return err != null && Number.isFinite(err) ? `${text} ± ${err.toFixed(MAG_DECIMALS)}` : text;
+}
+
+const SURFACE_BRIGHTNESS_UNIT = "MJy/sr";
+const PIXEL_SUM_SUFFIX = " x pix";
+
+export function summedFluxUnit(photcal: PhotCal | null | undefined): string | null {
+  if (photcal?.convention.kind === "jwst_mjy_sr") return `${photcal.bunit ?? SURFACE_BRIGHTNESS_UNIT}${PIXEL_SUM_SUFFIX}`;
+  return photcal?.bunit ?? null;
 }
 
 export const PHOTOMETRY_CSV_COLUMNS: CsvColumn<PhotometryTableRow>[] = PHOTOMETRY_COLUMN_KEYS.map((key) => ({

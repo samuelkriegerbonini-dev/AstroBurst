@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   BATCH_SEMANTICS_TEXT,
+  FALLBACK_APERTURE_RADIUS_PX,
   MAX_APERTURE_RADIUS_PX,
   MAX_SKY_OUTER_RADIUS_PX,
   MIN_APERTURE_RADIUS_PX,
@@ -18,10 +19,11 @@ import {
   plateauCaption,
   rowValue,
   sortRows,
+  summedFluxUnit,
   type PhotometryTableRow,
 } from "../photometryTable";
 import { CSV_LINE_END } from "../catalogCsv";
-import type { StarPhotometry } from "../../services/analysis";
+import type { FluxConvention, PhotCal, StarPhotometry } from "../../services/analysis";
 
 function phot(overrides: Partial<StarPhotometry> = {}): StarPhotometry {
   return {
@@ -42,9 +44,11 @@ function phot(overrides: Partial<StarPhotometry> = {}): StarPhotometry {
     saturated: false,
     saturation_source: "none",
     n_masked: 0,
+    n_nonfinite: 0,
     n_saturated: 0,
     err_used: false,
     aperture_correction: null,
+    ee_in_aperture: null,
     flux_total: null,
     plateau_radius: null,
     flux_jy: null,
@@ -58,6 +62,7 @@ function phot(overrides: Partial<StarPhotometry> = {}): StarPhotometry {
     growth_curve: [],
     ee50_radius: null,
     ee80_radius: null,
+    warnings: [],
     ...overrides,
   };
 }
@@ -65,6 +70,32 @@ function phot(overrides: Partial<StarPhotometry> = {}): StarPhotometry {
 function row(index: number, p: Partial<StarPhotometry> | null, overrides: Partial<PhotometryTableRow> = {}): PhotometryTableRow {
   return { index, label: `s${index}`, photometry: p ? phot(p) : null, sky: null, error: p ? null : "failed", ...overrides };
 }
+
+function photcal(convention: FluxConvention, bunit: string | null): PhotCal {
+  return { convention, bunit, notes: [], warnings: [], label: "calibration" };
+}
+
+const JWST_I2D = photcal({ kind: "jwst_mjy_sr", pixar_sr: 2.29e-14, pixar_a2: 0.000974, derived_pixar: false }, "MJy/sr");
+const HST_RATE = photcal({ kind: "hst_counts", photflam: 1.5e-19, photplam: 6563, photzpt: -21.1, per_second: true, exptime: null }, "ELECTRONS/S");
+
+describe("summedFluxUnit (B2)", () => {
+  it("names an aperture sum on an MJy/sr image MJy/sr x pix, the unit of a sum over pixels, not the surface brightness", () => {
+    expect(summedFluxUnit(JWST_I2D)).toBe("MJy/sr x pix");
+  });
+
+  it("keeps BUNIT for count, rate and zero-point images, where the sum over pixels is a flux in the pixel unit", () => {
+    expect(summedFluxUnit(HST_RATE)).toBe("ELECTRONS/S");
+    expect(summedFluxUnit(photcal({ kind: "jwst_dn_per_sec", photmjsr: 0.5, pixar_sr: 2.1e-13 }, "DN/s"))).toBe("DN/s");
+    expect(summedFluxUnit(photcal({ kind: "roman_dn_per_sec", mjy_per_dn_s: 0.3324, pixar_sr: 2.8e-13 }, "DN / s"))).toBe("DN / s");
+    expect(summedFluxUnit(photcal({ kind: "generic_zero_point", zp: 25, keyword: "MAGZPT", per_second: false, exptime: 300 }, "ADU"))).toBe("ADU");
+  });
+
+  it("names no unit when the header has no BUNIT or no calibration was read", () => {
+    expect(summedFluxUnit(photcal({ kind: "generic_zero_point", zp: 25, keyword: "MAGZPT", per_second: false, exptime: null }, null))).toBeNull();
+    expect(summedFluxUnit(null)).toBeNull();
+    expect(summedFluxUnit(undefined)).toBeNull();
+  });
+});
 
 describe("parsePositions", () => {
   it("accepts space, comma and tab separated pairs and skips comments and blanks", () => {
@@ -131,30 +162,48 @@ describe("sortRows", () => {
   });
 });
 
+const CSV_HEADER_GOLDEN =
+  "index,label,x,y,ra,dec,net_flux,flux_err,snr,mag_inst,mag_ab,mag_ab_err,flux_jy,flux_err_jy,fwhm,aperture_radius,sky_inner,sky_outer,bg_mean,bg_sigma,aperture_correction,flux_total,mag_ab_total,ee50_radius,ee80_radius,saturated,n_masked,err_used,error,n_nonfinite,ee_in_aperture";
+
 describe("photometryTableCsv", () => {
+  const cellOf = (line: string, key: (typeof PHOTOMETRY_COLUMN_KEYS)[number]) => line.split(",")[PHOTOMETRY_COLUMN_KEYS.indexOf(key)];
+
   it("writes the columns in the specified order with blank nulls", () => {
     expect(PHOTOMETRY_CSV_COLUMNS.map((c) => c.header)).toEqual([...PHOTOMETRY_COLUMN_KEYS]);
     expect(PHOTOMETRY_COLUMN_KEYS[0]).toBe("index");
-    expect(PHOTOMETRY_COLUMN_KEYS[PHOTOMETRY_COLUMN_KEYS.length - 1]).toBe("error");
     const rows = [
       row(0, { x: 1.5, y: 2.5, mag_ab: 17.25, saturated: true, err_used: true }, { sky: { ra: 150.1, dec: 2.2 } }),
       row(1, null),
     ];
     const csv = photometryTableCsv(rows);
     const lines = csv.split(CSV_LINE_END);
-    expect(lines[0].startsWith("index,label,x,y,ra,dec,net_flux,flux_err,snr,mag_inst,mag_ab,")).toBe(true);
-    expect(lines[0].endsWith(",ee50_radius,ee80_radius,saturated,n_masked,err_used,error")).toBe(true);
+    expect(lines[0]).toBe(CSV_HEADER_GOLDEN);
     const first = lines[1].split(",");
     expect(first.slice(0, 6)).toEqual(["0", "s0", "1.5", "2.5", "150.1", "2.2"]);
     expect(first[10]).toBe("17.25");
-    expect(first[first.length - 4]).toBe("true");
-    expect(first[first.length - 2]).toBe("true");
-    expect(first[first.length - 1]).toBe("");
+    expect(cellOf(lines[1], "saturated")).toBe("true");
+    expect(cellOf(lines[1], "err_used")).toBe("true");
+    expect(cellOf(lines[1], "error")).toBe("");
     const second = lines[2].split(",");
     expect(second[0]).toBe("1");
     expect(second[2]).toBe("");
-    expect(second[second.length - 1]).toBe("failed");
+    expect(cellOf(lines[2], "error")).toBe("failed");
     expect(second.length).toBe(PHOTOMETRY_COLUMN_KEYS.length);
+  });
+
+  it("appends the count of aperture pixels without data and the enclosed fraction after the error column", () => {
+    const lines = photometryTableCsv([row(0, { n_nonfinite: 3, aperture_correction: 1 / 0.93, ee_in_aperture: 0.93 }), row(1, null)]).split(CSV_LINE_END);
+    expect(lines[0].endsWith(",err_used,error,n_nonfinite,ee_in_aperture")).toBe(true);
+    expect(cellOf(lines[1], "n_nonfinite")).toBe("3");
+    expect(cellOf(lines[1], "ee_in_aperture")).toBe("0.93");
+    expect(Number(cellOf(lines[1], "aperture_correction"))).toBeCloseTo(1.0753, 4);
+    expect(cellOf(lines[2], "n_nonfinite")).toBe("");
+    expect(cellOf(lines[2], "ee_in_aperture")).toBe("");
+  });
+
+  it("leaves the FWHM cell empty when the FWHM was not measured", () => {
+    const lines = photometryTableCsv([row(0, { fwhm: null })]).split(CSV_LINE_END);
+    expect(cellOf(lines[1], "fwhm")).toBe("");
   });
 
   it("blanks non-finite numbers", () => {
@@ -222,6 +271,11 @@ describe("BATCH_SEMANTICS_TEXT", () => {
     expect(BATCH_SEMANTICS_TEXT).toContain("17 x 17 px box");
     expect(BATCH_SEMANTICS_TEXT).toMatch(/beyond 8 px/);
     expect(BATCH_SEMANTICS_TEXT).not.toMatch(/within 8 px/);
+  });
+
+  it("states the 6 px radius a blank aperture takes when the FWHM of a star is not measured (1.5 x the 4 px default)", () => {
+    expect(FALLBACK_APERTURE_RADIUS_PX).toBe(6);
+    expect(BATCH_SEMANTICS_TEXT).toContain("(leave it blank for 1.5 x FWHM per star, or 6 px where the FWHM is not measured)");
   });
 });
 
