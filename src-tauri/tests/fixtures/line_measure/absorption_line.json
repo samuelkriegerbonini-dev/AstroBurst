@@ -31,7 +31,7 @@
     "sigma_err": 2.9445632442498236e-9
   },
   "flux": -0.0037598062946999707,
-  "flux_err": 5.669084469616341e-9,
+  "flux_err": 2.375373308148357e-8,
   "flux_unit": "",
   "fwhm": 0.007062462506742727,
   "n_channels": 25,
@@ -39,10 +39,10 @@
     "flux is negative: centroid and sigma are weighted by the absorbed flux",
     "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid"
   ],
-  "peak": -0.00016607787257660878,
-  "peak_channel": 32,
+  "peak": -0.49999882298550846,
+  "peak_channel": 20,
   "sigma": 0.002999151685346685,
-  "snr": -663212.2549682909,
+  "snr": -158282.7542013092,
   "velocity": null,
   "z0": 8,
   "z1": 32

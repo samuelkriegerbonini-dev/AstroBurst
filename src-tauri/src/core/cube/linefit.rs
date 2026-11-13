@@ -126,6 +126,8 @@ struct LineFitConfigWire {
     resolving_power: Option<f64>,
     #[serde(default)]
     components: Option<String>,
+    #[serde(default)]
+    redshift: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +145,7 @@ pub struct LineFitConfig {
     pub dq_policy: Option<DqPolicy>,
     pub resolving_power: Option<f64>,
     pub components: Components,
+    pub redshift: f64,
 }
 
 impl TryFrom<LineFitConfigWire> for LineFitConfig {
@@ -166,6 +169,10 @@ impl TryFrom<LineFitConfigWire> for LineFitConfig {
             Some(name) => Components::parse(name)?,
             None => Components::One,
         };
+        let redshift = wire.redshift.unwrap_or(0.0);
+        if !(redshift.is_finite() && redshift > -1.0) {
+            return Err(format!("redshift must be a finite number above -1, got {}", redshift));
+        }
         Ok(LineFitConfig {
             z0: wire.z0,
             z1: wire.z1,
@@ -179,6 +186,7 @@ impl TryFrom<LineFitConfigWire> for LineFitConfig {
             dq_policy: wire.dq_policy,
             resolving_power: wire.resolving_power,
             components,
+            redshift,
         })
     }
 }
@@ -217,6 +225,13 @@ pub struct ComponentFit {
     pub flux: f64,
     pub flux_err: f64,
     pub snr: f64,
+    pub source_velocity_kms: f64,
+    pub source_v_err_kms: f64,
+    pub source_sigma_kms: f64,
+    pub source_sigma_err_kms: f64,
+    pub source_sigma_corr_kms: Option<f64>,
+    pub source_flux: f64,
+    pub source_flux_err: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -283,6 +298,13 @@ pub struct ComponentPlanes {
 }
 
 #[derive(Debug, Clone)]
+pub struct SourceFramePlanes {
+    pub single: ComponentPlanes,
+    pub sigma_corr: Option<Array2<f32>>,
+    pub components: Option<[ComponentPlanes; 2]>,
+}
+
+#[derive(Debug, Clone)]
 pub struct LineFitMaps {
     pub flux: Array2<f32>,
     pub velocity: Array2<f32>,
@@ -296,6 +318,7 @@ pub struct LineFitMaps {
     pub mask: Array2<f32>,
     pub ncomp: Array2<f32>,
     pub components: Option<[ComponentPlanes; 2]>,
+    pub source: Option<SourceFramePlanes>,
     pub continuum_windows: ContinuumWindows,
     pub flux_unit: String,
     pub velocity_unit: &'static str,
@@ -350,6 +373,29 @@ pub fn plane_names(cfg: &LineFitConfig, maps: &LineFitMaps) -> Vec<&'static str>
             "c2_v_err",
             "c2_sigma_err",
         ]);
+    }
+    if let Some(source) = &maps.source {
+        names.extend(["source_flux", "source_velocity", "source_sigma_obs"]);
+        if source.sigma_corr.is_some() {
+            names.push("source_sigma_corr");
+        }
+        names.extend(["source_flux_err", "source_v_err", "source_sigma_err"]);
+        if source.components.is_some() {
+            names.extend([
+                "c1_source_flux",
+                "c1_source_velocity",
+                "c1_source_sigma_obs",
+                "c1_source_flux_err",
+                "c1_source_v_err",
+                "c1_source_sigma_err",
+                "c2_source_flux",
+                "c2_source_velocity",
+                "c2_source_sigma_obs",
+                "c2_source_flux_err",
+                "c2_source_v_err",
+                "c2_source_sigma_err",
+            ]);
+        }
     }
     names
 }
@@ -444,6 +490,23 @@ fn frame_note(axis: &SpectralAxis) -> String {
     }
 }
 
+fn redshift_note(axis: &SpectralAxis, redshift: f64) -> String {
+    if axis.kind.is_velocity() {
+        return format!(
+            "velocity axis {} used as stored: redshift {} ignored, no source-frame values",
+            axis.ctype, redshift
+        );
+    }
+    let (width, reference) = match axis.kind {
+        AxisKind::Zopt => ("c·sigma/(1 + centre)", "zero redshift"),
+        _ => ("c·sigma/centre", "the laboratory rest wavelength"),
+    };
+    format!(
+        "redshift {}: source-frame values give the velocity relative to z, sigma = {} and flux = A·that sigma·sqrt(2π); velocity, sigma_obs, sigma_corr and flux are observer-frame values against {}",
+        redshift, width, reference
+    )
+}
+
 struct SpaxelContext {
     axis: Vec<f64>,
     axis_unit: String,
@@ -457,6 +520,7 @@ struct SpaxelContext {
     x_bounds: (f64, f64),
     axis_kind: AxisKind,
     rest_um: Option<f64>,
+    redshift: f64,
     convention: VelocityConvention,
     sigma_inst: Option<f64>,
     weighting: Weighting,
@@ -476,9 +540,28 @@ impl SpaxelContext {
         }
     }
 
-    fn dv_dx_at(&self, x: f64, dx: f64) -> f64 {
-        (self.to_velocity(x + dx) - self.to_velocity(x - dx)).abs() / (2.0 * dx)
+    fn to_source_velocity(&self, x: f64) -> f64 {
+        let stretch = 1.0 + self.redshift;
+        let systemic = self.rest_um.unwrap_or(1.0) * stretch;
+        match self.axis_kind {
+            AxisKind::Wave | AxisKind::Awav => velocity_kms(x, systemic, self.convention),
+            AxisKind::Freq => velocity_kms(wavelength_um_from_frequency_ghz(x), systemic, self.convention),
+            AxisKind::Zopt => velocity_kms(1.0 + x, stretch, self.convention),
+            _ => f64::NAN,
+        }
     }
+
+    fn source_sigma(&self, centre: f64, sigma: f64) -> Option<f64> {
+        match self.axis_kind {
+            AxisKind::Wave | AxisKind::Awav | AxisKind::Freq => Some(SPEED_OF_LIGHT_KMS * (sigma / centre).abs()),
+            AxisKind::Zopt => Some(SPEED_OF_LIGHT_KMS * (sigma / (1.0 + centre)).abs()),
+            _ => None,
+        }
+    }
+}
+
+fn slope_at(velocity: impl Fn(f64) -> f64, x: f64, dx: f64) -> f64 {
+    (velocity(x + dx) - velocity(x - dx)).abs() / (2.0 * dx)
 }
 
 fn positions_of(channels: &[usize], range: (usize, usize)) -> Vec<usize> {
@@ -557,6 +640,9 @@ fn build_context(cube: &LazyCube, cfg: &LineFitConfig, weighting: Weighting) -> 
         }
     };
     notes.push(frame_note(&axis));
+    if cfg.redshift != 0.0 {
+        notes.push(redshift_note(&axis, cfg.redshift));
+    }
     let windows = resolve_windows(cfg, depth, &mut notes)?;
     let mut channels: Vec<usize> = (cfg.z0..=cfg.z1)
         .chain(windows.0 .0..=windows.0 .1)
@@ -584,6 +670,7 @@ fn build_context(cube: &LazyCube, cfg: &LineFitConfig, weighting: Weighting) -> 
         x_bounds,
         axis_kind: axis.kind,
         rest_um,
+        redshift: cfg.redshift,
         convention: cfg.convention,
         sigma_inst,
         weighting,
@@ -954,24 +1041,49 @@ fn auto_rejection(delta_bic: f64, chi2_red_single: f64, amplitude_snrs: [f64; 2]
         .map(|c| format!("component {} amplitude below {} sigma", c + 1, COMPONENT_SNR_MIN))
 }
 
-fn component_fit(ctx: &SpaxelContext, fit: &SingleFit, mean_dx: f64) -> (ComponentFit, bool) {
-    let [a, xc, sx] = fit.params;
-    let [a_err, xc_err, sx_err] = fit.errors;
-    let v = ctx.to_velocity(xc);
-    let v_err = xc_err * ctx.dv_dx_at(xc, mean_dx);
-    let sv = (ctx.to_velocity(xc + sx) - v).abs();
+struct WidthAndFlux {
+    sigma_kms: f64,
+    sigma_err_kms: f64,
+    sigma_corr_kms: Option<f64>,
+    unresolved: bool,
+    flux: f64,
+    flux_err: f64,
+}
+
+const NO_SOURCE_FRAME: WidthAndFlux = WidthAndFlux {
+    sigma_kms: f64::NAN,
+    sigma_err_kms: f64::NAN,
+    sigma_corr_kms: None,
+    unresolved: false,
+    flux: f64::NAN,
+    flux_err: f64::NAN,
+};
+
+fn width_and_flux(fit: &SingleFit, sv: f64, sigma_inst: Option<f64>) -> WidthAndFlux {
+    let [a, _, sx] = fit.params;
+    let [a_err, _, sx_err] = fit.errors;
     let k = if sx > 0.0 { sv / sx } else { f64::NAN };
     let sv_err = sx_err * k;
     let flux = a * sv * sqrt_two_pi();
     let cov_a_sv = k * fit.cov_a_sigma;
     let variance = (sv * a_err) * (sv * a_err) + (a * sv_err) * (a * sv_err) + 2.0 * a * sv * cov_a_sv;
     let flux_err = sqrt_two_pi() * variance.max(0.0).sqrt();
-    let snr = if flux_err > 0.0 { flux / flux_err } else { f64::NAN };
-    let (sigma_corr, unresolved) = match ctx.sigma_inst {
+    let (sigma_corr_kms, unresolved) = match sigma_inst {
         Some(inst) if sv > inst => (Some((sv * sv - inst * inst).sqrt()), false),
         Some(_) => (Some(f64::NAN), true),
         None => (None, false),
     };
+    WidthAndFlux { sigma_kms: sv, sigma_err_kms: sv_err, sigma_corr_kms, unresolved, flux, flux_err }
+}
+
+fn component_fit(ctx: &SpaxelContext, fit: &SingleFit, mean_dx: f64) -> (ComponentFit, bool) {
+    let [a, xc, sx] = fit.params;
+    let [a_err, xc_err, sx_err] = fit.errors;
+    let v = ctx.to_velocity(xc);
+    let v_err = xc_err * slope_at(|x| ctx.to_velocity(x), xc, mean_dx);
+    let observer = width_and_flux(fit, (ctx.to_velocity(xc + sx) - v).abs(), ctx.sigma_inst);
+    let source = ctx.source_sigma(xc, sx).map_or(NO_SOURCE_FRAME, |sigma| width_and_flux(fit, sigma, ctx.sigma_inst));
+    let snr = if observer.flux_err > 0.0 { observer.flux / observer.flux_err } else { f64::NAN };
     let component = ComponentFit {
         amplitude: a,
         centre: xc,
@@ -981,14 +1093,21 @@ fn component_fit(ctx: &SpaxelContext, fit: &SingleFit, mean_dx: f64) -> (Compone
         sigma_err: sx_err,
         velocity_kms: v,
         v_err_kms: v_err,
-        sigma_kms: sv,
-        sigma_err_kms: sv_err,
-        sigma_corr_kms: sigma_corr,
-        flux,
-        flux_err,
+        sigma_kms: observer.sigma_kms,
+        sigma_err_kms: observer.sigma_err_kms,
+        sigma_corr_kms: observer.sigma_corr_kms,
+        flux: observer.flux,
+        flux_err: observer.flux_err,
         snr,
+        source_velocity_kms: ctx.to_source_velocity(xc),
+        source_v_err_kms: xc_err * slope_at(|x| ctx.to_source_velocity(x), xc, mean_dx),
+        source_sigma_kms: source.sigma_kms,
+        source_sigma_err_kms: source.sigma_err_kms,
+        source_sigma_corr_kms: source.sigma_corr_kms,
+        source_flux: source.flux,
+        source_flux_err: source.flux_err,
     };
-    (component, unresolved)
+    (component, observer.unresolved)
 }
 
 struct LineSample {
@@ -1265,6 +1384,15 @@ impl ComponentBuffers {
         self.sigma_err[p] = c.sigma_err_kms as f32;
     }
 
+    fn set_source(&mut self, p: usize, c: &ComponentFit) {
+        self.flux[p] = c.source_flux as f32;
+        self.velocity[p] = c.source_velocity_kms as f32;
+        self.sigma_obs[p] = c.source_sigma_kms as f32;
+        self.flux_err[p] = c.source_flux_err as f32;
+        self.v_err[p] = c.source_v_err_kms as f32;
+        self.sigma_err[p] = c.source_sigma_err_kms as f32;
+    }
+
     fn into_planes(self, shape: (usize, usize)) -> Result<ComponentPlanes> {
         Ok(ComponentPlanes {
             flux: Array2::from_shape_vec(shape, self.flux)?,
@@ -1322,6 +1450,11 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     let mut ncomp = vec![0.0f32; npix];
     let two_requested = cfg.components != Components::One;
     let mut component_buffers = two_requested.then(|| [ComponentBuffers::new(npix), ComponentBuffers::new(npix)]);
+    let source_requested = cfg.redshift != 0.0 && !ctx.axis_kind.is_velocity();
+    let mut source_single = source_requested.then(|| ComponentBuffers::new(npix));
+    let mut source_sigma_corr = vec![f32::NAN; npix];
+    let mut source_component_buffers =
+        (source_requested && two_requested).then(|| [ComponentBuffers::new(npix), ComponentBuffers::new(npix)]);
     let mut n_fit = 0usize;
     let mut n_masked = 0usize;
     let mut n_const_continuum = 0usize;
@@ -1329,6 +1462,7 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     let mut dq_excluded_samples = 0_u64;
     let mut n_unit_weights = 0usize;
     let mut n_unresolved = 0usize;
+    let mut n_source_unresolved = 0usize;
     let mut n_two_components = 0usize;
 
     let decode_band = |cube: &LazyCube, band_start: usize, row_count: usize| -> Result<Vec<Vec<f32>>> {
@@ -1386,6 +1520,9 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
             chi2_red[p] = o.chi2_red() as f32;
             if let Some(c) = &o.single {
                 snr[p] = c.snr as f32;
+                if c.source_sigma_corr_kms.is_some_and(f64::is_nan) {
+                    n_source_unresolved += 1;
+                }
                 if o.mask & MASK_FITTED != 0 {
                     n_fit += 1;
                     flux[p] = c.flux as f32;
@@ -1398,6 +1535,14 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
                     if let (Some(buffers), Some(pair)) = (component_buffers.as_mut(), &o.pair) {
                         buffers[0].set(p, &pair[0]);
                         buffers[1].set(p, &pair[1]);
+                    }
+                    if let Some(buffers) = source_single.as_mut() {
+                        buffers.set_source(p, c);
+                        source_sigma_corr[p] = c.source_sigma_corr_kms.unwrap_or(f64::NAN) as f32;
+                    }
+                    if let (Some(buffers), Some(pair)) = (source_component_buffers.as_mut(), &o.pair) {
+                        buffers[0].set_source(p, &pair[0]);
+                        buffers[1].set_source(p, &pair[1]);
                     }
                 } else {
                     n_masked += 1;
@@ -1451,6 +1596,12 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
                 "sigma corrected for the LSF with R = {} (sigma_inst = {:.2} km/s); {} spaxels unresolved (sigma_corr NaN)",
                 r, inst, n_unresolved
             ));
+            if source_requested {
+                notes.push(format!(
+                    "source-frame sigma against the same sigma_inst: {} spaxels unresolved (source_sigma_corr NaN); the unresolved bit of the mask follows the observer-frame sigma",
+                    n_source_unresolved
+                ));
+            }
             format!("LSF-corrected (R = {})", r)
         }
         _ => {
@@ -1469,6 +1620,17 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
         Some([first, second]) => Some([first.into_planes(shape)?, second.into_planes(shape)?]),
         None => None,
     };
+    let source = match source_single {
+        Some(single) => Some(SourceFramePlanes {
+            single: single.into_planes(shape)?,
+            sigma_corr: if ctx.sigma_inst.is_some() { Some(plane(source_sigma_corr)?) } else { None },
+            components: match source_component_buffers {
+                Some([first, second]) => Some([first.into_planes(shape)?, second.into_planes(shape)?]),
+                None => None,
+            },
+        }),
+        None => None,
+    };
     Ok(LineFitMaps {
         flux: plane(flux)?,
         velocity: plane(velocity)?,
@@ -1483,6 +1645,7 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
         mask: plane(mask)?,
         ncomp: plane(ncomp)?,
         components,
+        source,
         continuum_windows: ctx.windows,
         flux_unit,
         velocity_unit: VELOCITY_UNIT,
@@ -1705,6 +1868,7 @@ pub(crate) mod test_support {
             dq_policy: None,
             resolving_power: None,
             components: Components::One,
+            redshift: 0.0,
         }
     }
 
@@ -1730,6 +1894,58 @@ pub(crate) mod test_support {
 
     pub fn centre_err_channels(fit: &ComponentFit) -> f64 {
         fit.centre_err / LINE_CDELT_UM
+    }
+
+    pub const REDSHIFT: f64 = 0.5;
+    pub const REDSHIFTED_REST_UM: f64 = 0.656461;
+    pub const SOURCE_SIGMA_KMS: f64 = 100.0;
+    pub const REDSHIFTED_AMPLITUDE: f64 = 2.0;
+    pub const REDSHIFTED_CUBE_SIZE: usize = 4;
+    pub const REDSHIFTED_DEPTH: usize = 81;
+    pub const REDSHIFTED_CENTRE_CHANNEL: usize = 40;
+    pub const REDSHIFTED_LINE: (usize, usize) = (16, 64);
+    pub const REDSHIFTED_WINDOWS: ContinuumWindows = ((0, 9), (71, 80));
+
+    pub fn write_redshifted_cube(
+        path: &std::path::Path,
+        axis_cards: &[(&'static str, &'static str)],
+        first: f64,
+        step: f64,
+        sigma: f64,
+    ) {
+        let mut cards = line_cube_cards();
+        for (key, value) in axis_cards {
+            cards.retain(|(k, _)| k != key);
+            cards.push((key, value));
+        }
+        let centre = first + step * REDSHIFTED_CENTRE_CHANNEL as f64;
+        write_cube(path, REDSHIFTED_CUBE_SIZE, REDSHIFTED_CUBE_SIZE, REDSHIFTED_DEPTH, &cards, |z, _, _| {
+            (1.0 + REDSHIFTED_AMPLITUDE * gaussian(first + step * z as f64, centre, sigma)) as f32
+        });
+    }
+
+    pub fn write_redshifted_line_cube(path: &std::path::Path) {
+        let sigma_um = REDSHIFTED_REST_UM * (1.0 + REDSHIFT) * SOURCE_SIGMA_KMS / SPEED_OF_LIGHT_KMS;
+        write_redshifted_cube(path, &[("CRVAL3", "0.9814915"), ("CD3_3", "8.0E-5")], 0.9814915, 8.0e-5, sigma_um);
+    }
+
+    pub fn write_stored_velocity_cube(path: &std::path::Path) {
+        let cards = [("CTYPE3", "'VRAD'"), ("CUNIT3", "'km/s'"), ("RESTWAV", ""), ("CRVAL3", "-1000.0"), ("CD3_3", "25.0")];
+        write_redshifted_cube(path, &cards, -1000.0, 25.0, SOURCE_SIGMA_KMS);
+    }
+
+    pub fn redshifted_cfg(overrides: &[(&str, serde_json::Value)]) -> LineFitConfig {
+        let mut config = serde_json::json!({
+            "z0": REDSHIFTED_LINE.0,
+            "z1": REDSHIFTED_LINE.1,
+            "rest_um": REDSHIFTED_REST_UM,
+            "continuum": REDSHIFTED_WINDOWS,
+            "redshift": REDSHIFT,
+        });
+        for (key, value) in overrides {
+            config[*key] = value.clone();
+        }
+        serde_json::from_value(config).unwrap()
     }
 }
 
@@ -2176,6 +2392,12 @@ mod tests {
         assert!(cfg.emission_only && cfg.use_err && cfg.use_dq);
         assert!(cfg.resolving_power.is_none());
         assert_eq!(cfg.components, Components::One);
+        assert_eq!(cfg.redshift, 0.0);
+        for (text, redshift) in [(r#"{"z0":8,"z1":32,"redshift":null}"#, 0.0), (r#"{"z0":8,"z1":32,"redshift":0.5}"#, 0.5)] {
+            assert_eq!(serde_json::from_str::<LineFitConfig>(text).unwrap().redshift, redshift, "{}", text);
+        }
+        let refused = serde_json::from_str::<LineFitConfig>(r#"{"z0":8,"z1":32,"redshift":-1}"#).unwrap_err().to_string();
+        assert!(refused.contains("redshift must be a finite number above -1, got -1"), "{}", refused);
 
         let cfg: LineFitConfig = serde_json::from_str(
             r#"{"z0":530,"z1":560,"rest_um":1.875613,"convention":"radio","continuum":[[500,520],[568,588]],"snr_threshold":5,"emission_only":false,"use_err":false,"use_dq":false,"resolving_power":2700,"components":"auto"}"#,
@@ -2943,5 +3165,324 @@ mod tests {
         }
         println!("inflation: n_two_components truthful {} underestimated {}", n_true, n_under);
         assert!(n_under as f64 >= 0.95 * small_disk_pixel_count() as f64, "{} vs {}", n_under, n_true);
+    }
+
+    const OBSERVER_FRAME: [(&str, f64, f64); 3] =
+        [("optical", 149_896.229, 150.0), ("radio", 99_930.819, 66.644), ("relativistic", 115_304.792, 85.182)];
+    const SOURCE_VELOCITY_TOLERANCE_KMS: f64 = 0.05;
+    const BASE_PLANES: [&str; 10] =
+        ["flux", "velocity", "sigma_obs", "flux_err", "v_err", "sigma_err", "chi2_red", "snr", "mask", "ncomp"];
+    const SOURCE_PLANES: [&str; 6] =
+        ["source_flux", "source_velocity", "source_sigma_obs", "source_flux_err", "source_v_err", "source_sigma_err"];
+
+    fn close(found: f64, expected: f64, relative: f64) -> bool {
+        (found - expected).abs() <= relative * expected.abs()
+    }
+
+    fn single_json(inputs: &LineFitInputs, cfg: &LineFitConfig) -> serde_json::Value {
+        serde_json::to_value(fit_spaxel(inputs, cfg, 1, 1).unwrap().single.expect("single fit")).unwrap()
+    }
+
+    fn reported(single: &serde_json::Value, key: &str) -> f64 {
+        single[key].as_f64().unwrap_or_else(|| {
+            panic!(
+                "{} is not reported: the only width is sigma_kms = {} km/s for a source-frame sigma of {} km/s",
+                key, single["sigma_kms"], SOURCE_SIGMA_KMS
+            )
+        })
+    }
+
+    #[test]
+    fn a_line_on_a_redshifted_cube_reports_its_source_frame_velocity_width_and_flux() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let source_flux = REDSHIFTED_AMPLITUDE * SOURCE_SIGMA_KMS * sqrt_two_pi();
+        for (convention, observer_velocity, observer_sigma) in OBSERVER_FRAME {
+            let single = single_json(&inputs, &redshifted_cfg(&[("convention", serde_json::json!(convention))]));
+            let (velocity, sigma, flux) = (reported(&single, "velocity_kms"), reported(&single, "sigma_kms"), reported(&single, "flux"));
+            assert!(close(velocity, observer_velocity, 1e-6), "{convention}: velocity_kms={velocity}");
+            assert!(close(sigma, observer_sigma, 1e-4), "{convention}: sigma_kms={sigma}");
+            assert!(close(flux, REDSHIFTED_AMPLITUDE * observer_sigma * sqrt_two_pi(), 1e-4), "{convention}: flux={flux}");
+            let source_sigma = reported(&single, "source_sigma_kms");
+            assert!(close(source_sigma, SOURCE_SIGMA_KMS, 1e-3), "{convention}: source_sigma_kms={source_sigma}");
+            let source_velocity = reported(&single, "source_velocity_kms");
+            assert!(source_velocity.abs() < SOURCE_VELOCITY_TOLERANCE_KMS, "{convention}: source_velocity_kms={source_velocity}");
+            assert!(close(reported(&single, "source_flux"), source_flux, 1e-3), "{convention}: {single}");
+        }
+    }
+
+    const REDSHIFT_NOTE: &str = "redshift 0.5: source-frame values give the velocity relative to z, sigma = c·sigma/centre and flux = A·that sigma·sqrt(2π); velocity, sigma_obs, sigma_corr and flux are observer-frame values against the laboratory rest wavelength";
+
+    fn bits(plane: &Array2<f32>) -> Vec<u32> {
+        plane.iter().map(|v| v.to_bits()).collect()
+    }
+
+    fn assert_planes_hold_the_source_frame_of(planes: &ComponentPlanes, p: [usize; 2], fit: &ComponentFit) {
+        for (name, plane, value) in [
+            ("flux", &planes.flux, fit.source_flux),
+            ("velocity", &planes.velocity, fit.source_velocity_kms),
+            ("sigma_obs", &planes.sigma_obs, fit.source_sigma_kms),
+            ("flux_err", &planes.flux_err, fit.source_flux_err),
+            ("v_err", &planes.v_err, fit.source_v_err_kms),
+            ("sigma_err", &planes.sigma_err, fit.source_sigma_err_kms),
+        ] {
+            assert_eq!(plane[p].to_bits(), (value as f32).to_bits(), "source {name}: plane {} fit {value}", plane[p]);
+        }
+    }
+
+    #[test]
+    fn a_redshift_adds_the_source_frame_planes_after_the_observer_frame_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let plain = redshifted_cfg(&[("redshift", serde_json::Value::Null)]);
+        let plain_maps = fit_cube_lines(&inputs, &plain).unwrap();
+        assert_eq!(plain_maps.n_fit, REDSHIFTED_CUBE_SIZE * REDSHIFTED_CUBE_SIZE);
+        assert_eq!(plane_names(&plain, &plain_maps), BASE_PLANES);
+        assert!(plain_maps.source.is_none());
+        assert!(!plain_maps.notes.iter().any(|n| n.contains("redshift")), "{:?}", plain_maps.notes);
+        let zero = redshifted_cfg(&[("redshift", serde_json::json!(0.0))]);
+        assert!(fit_cube_lines(&inputs, &zero).unwrap().source.is_none());
+
+        let cfg = redshifted_cfg(&[]);
+        let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+        assert_eq!(plane_names(&cfg, &maps), [BASE_PLANES.as_slice(), SOURCE_PLANES.as_slice()].concat());
+        assert!(maps.notes.iter().any(|n| n == REDSHIFT_NOTE), "{:?}", maps.notes);
+        let source = maps.source.as_ref().expect("source-frame planes");
+        assert!(source.sigma_corr.is_none() && source.components.is_none());
+        let p = [1, 2];
+        let spaxel = fit_spaxel(&inputs, &cfg, p[1], p[0]).unwrap();
+        assert!(spaxel.notes.iter().any(|n| n == REDSHIFT_NOTE), "{:?}", spaxel.notes);
+        assert_planes_hold_the_source_frame_of(&source.single, p, spaxel.single.as_ref().expect("single fit"));
+        assert!((source.single.sigma_obs[p] as f64 - SOURCE_SIGMA_KMS).abs() < 0.01, "{}", source.single.sigma_obs[p]);
+        assert!(source.single.velocity[p].abs() < SOURCE_VELOCITY_TOLERANCE_KMS as f32, "{}", source.single.velocity[p]);
+        for (name, with, without) in [
+            ("flux", &maps.flux, &plain_maps.flux),
+            ("velocity", &maps.velocity, &plain_maps.velocity),
+            ("sigma_obs", &maps.sigma_obs, &plain_maps.sigma_obs),
+            ("flux_err", &maps.flux_err, &plain_maps.flux_err),
+            ("v_err", &maps.v_err, &plain_maps.v_err),
+            ("sigma_err", &maps.sigma_err, &plain_maps.sigma_err),
+            ("chi2_red", &maps.chi2_red, &plain_maps.chi2_red),
+            ("snr", &maps.snr, &plain_maps.snr),
+            ("mask", &maps.mask, &plain_maps.mask),
+            ("ncomp", &maps.ncomp, &plain_maps.ncomp),
+        ] {
+            assert_eq!(bits(with), bits(without), "{name} moved with the redshift");
+        }
+    }
+
+    #[test]
+    fn without_a_redshift_the_source_frame_velocity_is_the_observer_frame_one_and_the_width_needs_no_redshift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let fit_with = |redshift: serde_json::Value| {
+            fit_spaxel(&inputs, &redshifted_cfg(&[("redshift", redshift)]), 1, 1).unwrap().single.expect("single fit")
+        };
+        let (with, without) = (fit_with(serde_json::json!(REDSHIFT)), fit_with(serde_json::Value::Null));
+        assert_eq!(without.source_velocity_kms.to_bits(), without.velocity_kms.to_bits());
+        assert_eq!(without.source_v_err_kms.to_bits(), without.v_err_kms.to_bits());
+        assert_eq!(without.source_sigma_kms.to_bits(), with.source_sigma_kms.to_bits());
+        assert_eq!(without.source_flux.to_bits(), with.source_flux.to_bits());
+        assert!(close(without.source_sigma_kms, SOURCE_SIGMA_KMS, 1e-3), "source_sigma_kms={}", without.source_sigma_kms);
+        for (name, a, b) in [
+            ("velocity_kms", with.velocity_kms, without.velocity_kms),
+            ("v_err_kms", with.v_err_kms, without.v_err_kms),
+            ("sigma_kms", with.sigma_kms, without.sigma_kms),
+            ("sigma_err_kms", with.sigma_err_kms, without.sigma_err_kms),
+            ("flux", with.flux, without.flux),
+            ("flux_err", with.flux_err, without.flux_err),
+            ("snr", with.snr, without.snr),
+        ] {
+            assert_eq!(a.to_bits(), b.to_bits(), "{name} moved with the redshift");
+        }
+    }
+
+    #[test]
+    fn source_frame_errors_follow_the_width_ratio_and_the_velocity_slope_of_each_convention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noisy.fits");
+        write_linefit_mef(
+            &path,
+            LINE_CUBE_SIZE,
+            LINE_CUBE_SIZE,
+            LINE_CUBE_DEPTH,
+            |z, y, x| line_sci(z, y, x) + deterministic_noise(z, y, x, noise_amplitude(0.02)),
+            Some(|_, _, _| 0.02f32),
+            None::<fn(usize, usize, usize) -> i32>,
+        );
+        let (sci, err) = open_pair(&path);
+        let inputs = LineFitInputs { sci: &sci, err: Some(&err), dq: None };
+        let centre = LINE_DISK_CENTRE as usize;
+        let stretch = 1.0 + REDSHIFT;
+        let slopes = [
+            (VelocityConvention::Optical, 1.0 / stretch, 1e-9),
+            (VelocityConvention::Radio, stretch, 1e-9),
+            (VelocityConvention::Relativistic, (stretch * stretch + 1.0).powi(2) / (4.0 * stretch * stretch), 1e-3),
+        ];
+        for (convention, slope_ratio, tolerance) in slopes {
+            let cfg = LineFitConfig { rest_um: Some(LINE_REST_UM / stretch), redshift: REDSHIFT, convention, ..line_cfg() };
+            let c = fit_spaxel(&inputs, &cfg, centre, centre).unwrap().single.expect("single fit");
+            assert!(c.sigma_err_kms > 0.0 && c.flux_err > 0.0 && c.v_err_kms > 0.0, "{c:?}");
+            assert!(close(c.source_sigma_kms, SPEED_OF_LIGHT_KMS * c.sigma / c.centre, 1e-12), "{c:?}");
+            let width_ratio = c.source_sigma_kms / c.sigma_kms;
+            assert!(close(c.source_sigma_err_kms / c.sigma_err_kms, width_ratio, 1e-12), "{convention:?}: {c:?}");
+            assert!(close(c.source_flux / c.flux, width_ratio, 1e-12), "{convention:?}: {c:?}");
+            assert!(close(c.source_flux_err / c.flux_err, width_ratio, 1e-12), "{convention:?}: {c:?}");
+            assert!(close(c.source_flux / c.source_flux_err, c.snr, 1e-12), "{convention:?}: {c:?}");
+            let slope = c.source_v_err_kms / c.v_err_kms;
+            assert!(close(slope, slope_ratio, tolerance), "{convention:?}: v_err ratio {slope} expected {slope_ratio}");
+            assert!(c.source_velocity_kms.abs() < 5.0 * c.source_v_err_kms, "{convention:?}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn the_instrumental_width_is_removed_from_the_source_frame_width_in_the_source_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let with_sigma_inst = |kms: f64| redshifted_cfg(&[("resolving_power", serde_json::json!(SPEED_OF_LIGHT_KMS / (kms * FWHM_PER_SIGMA)))]);
+
+        let resolved = with_sigma_inst(60.0);
+        let c = fit_spaxel(&inputs, &resolved, 1, 1).unwrap().single.expect("single fit");
+        let observer_corr = c.sigma_corr_kms.expect("observer-frame correction");
+        let source_corr = c.source_sigma_corr_kms.expect("source-frame correction");
+        assert!(close(observer_corr, (150.0f64 * 150.0 - 60.0 * 60.0).sqrt(), 1e-4), "sigma_corr_kms={observer_corr}");
+        assert!(close(source_corr, 80.0, 1e-4), "source_sigma_corr_kms={source_corr}");
+        let maps = fit_cube_lines(&inputs, &resolved).unwrap();
+        let names = plane_names(&resolved, &maps);
+        assert_eq!(names.len(), 18, "{names:?}");
+        assert_eq!(names[3], "sigma_corr");
+        assert_eq!(names[11..15], ["source_flux", "source_velocity", "source_sigma_obs", "source_sigma_corr"]);
+        let plane = maps.source.as_ref().and_then(|s| s.sigma_corr.as_ref()).expect("source-frame sigma_corr plane");
+        assert_eq!(plane[[1, 1]].to_bits(), (source_corr as f32).to_bits());
+        let source_unresolved = |maps: &LineFitMaps| -> Vec<String> {
+            maps.notes.iter().filter(|n| n.starts_with("source-frame sigma against the same sigma_inst")).cloned().collect()
+        };
+        assert_eq!(
+            source_unresolved(&maps),
+            ["source-frame sigma against the same sigma_inst: 0 spaxels unresolved (source_sigma_corr NaN); the unresolved bit of the mask follows the observer-frame sigma"]
+        );
+
+        let between_cfg = with_sigma_inst(120.0);
+        let between = fit_spaxel(&inputs, &between_cfg, 1, 1).unwrap();
+        let c = between.single.as_ref().expect("single fit");
+        assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 90.0, 1e-4), "{c:?}");
+        assert!(c.source_sigma_corr_kms.expect("source-frame correction").is_nan(), "{c:?}");
+        assert!(serde_json::to_value(c).unwrap()["source_sigma_corr_kms"].is_null());
+        assert_eq!(between.mask & MASK_UNRESOLVED, 0, "the mask follows the observer-frame width: {}", between.mask);
+        let between_maps = fit_cube_lines(&inputs, &between_cfg).unwrap();
+        assert!(between_maps.mask.iter().all(|m| !bit(*m, MASK_UNRESOLVED)), "{:?}", between_maps.mask);
+        assert!(between_maps.notes.iter().any(|n| n.ends_with("0 spaxels unresolved (sigma_corr NaN)")), "{:?}", between_maps.notes);
+        assert_eq!(
+            source_unresolved(&between_maps),
+            ["source-frame sigma against the same sigma_inst: 16 spaxels unresolved (source_sigma_corr NaN); the unresolved bit of the mask follows the observer-frame sigma"]
+        );
+        let without_redshift = fit_cube_lines(&inputs, &LineFitConfig { redshift: 0.0, ..between_cfg }).unwrap();
+        assert!(source_unresolved(&without_redshift).is_empty(), "{:?}", without_redshift.notes);
+    }
+
+    #[test]
+    fn a_redshift_axis_gets_source_frame_values_and_a_stored_velocity_axis_gets_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = redshifted_cfg(&[]);
+        let zopt = dir.path().join("zopt.fits");
+        let sigma_z = (1.0 + REDSHIFT) * SOURCE_SIGMA_KMS / SPEED_OF_LIGHT_KMS;
+        let zopt_cards = [("CTYPE3", "'ZOPT'"), ("CUNIT3", ""), ("RESTWAV", ""), ("CRVAL3", "0.4952"), ("CD3_3", "1.2E-4")];
+        write_redshifted_cube(&zopt, &zopt_cards, 0.4952, 1.2e-4, sigma_z);
+        let cube = open(&zopt);
+        let fit = fit_spaxel(&only_sci(&cube), &cfg, 1, 1).unwrap();
+        let c = fit.single.as_ref().expect("single fit");
+        assert!(close(c.velocity_kms, SPEED_OF_LIGHT_KMS * REDSHIFT, 1e-6), "velocity_kms={}", c.velocity_kms);
+        assert!(close(c.sigma_kms, 150.0, 1e-4), "sigma_kms={}", c.sigma_kms);
+        assert!(c.source_velocity_kms.abs() < SOURCE_VELOCITY_TOLERANCE_KMS, "source_velocity_kms={}", c.source_velocity_kms);
+        assert!(close(c.source_sigma_kms, SOURCE_SIGMA_KMS, 1e-3), "source_sigma_kms={}", c.source_sigma_kms);
+        let on_a_redshift_axis = "redshift 0.5: source-frame values give the velocity relative to z, sigma = c·sigma/(1 + centre) and flux = A·that sigma·sqrt(2π); velocity, sigma_obs, sigma_corr and flux are observer-frame values against zero redshift";
+        assert!(fit.notes.iter().any(|n| n == on_a_redshift_axis), "{:?}", fit.notes);
+        assert!(fit_cube_lines(&only_sci(&cube), &cfg).unwrap().source.is_some());
+
+        let vrad = dir.path().join("vrad.fits");
+        write_stored_velocity_cube(&vrad);
+        let cube = open(&vrad);
+        let fit = fit_spaxel(&only_sci(&cube), &cfg, 1, 1).unwrap();
+        let c = fit.single.as_ref().expect("single fit");
+        assert!(c.velocity_kms.abs() < SOURCE_VELOCITY_TOLERANCE_KMS && close(c.sigma_kms, SOURCE_SIGMA_KMS, 1e-3), "{c:?}");
+        for (name, value) in [
+            ("source_velocity_kms", c.source_velocity_kms),
+            ("source_v_err_kms", c.source_v_err_kms),
+            ("source_sigma_kms", c.source_sigma_kms),
+            ("source_sigma_err_kms", c.source_sigma_err_kms),
+            ("source_flux", c.source_flux),
+            ("source_flux_err", c.source_flux_err),
+        ] {
+            assert!(value.is_nan(), "{name}={value} on a stored velocity axis");
+        }
+        assert_eq!(c.source_sigma_corr_kms, None);
+        let ignored = "velocity axis VRAD used as stored: redshift 0.5 ignored, no source-frame values";
+        assert!(fit.notes.iter().any(|n| n == ignored), "{:?}", fit.notes);
+        let maps = fit_cube_lines(&only_sci(&cube), &cfg).unwrap();
+        assert!(maps.source.is_none());
+        assert_eq!(plane_names(&cfg, &maps), BASE_PLANES);
+        assert!(maps.notes.iter().any(|n| n == ignored), "{:?}", maps.notes);
+    }
+
+    #[test]
+    fn a_frequency_axis_reports_the_source_frame_width_and_velocity_of_the_same_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("freq.fits");
+        let first_ghz = 303_453.179_498_350_5;
+        let centre_ghz = first_ghz + 25.0 * REDSHIFTED_CENTRE_CHANNEL as f64;
+        let freq_cards = [("CTYPE3", "'FREQ'"), ("CUNIT3", "'GHz'"), ("RESTWAV", ""), ("CRVAL3", "303453.1794983505"), ("CD3_3", "25.0")];
+        write_redshifted_cube(&path, &freq_cards, first_ghz, 25.0, centre_ghz * SOURCE_SIGMA_KMS / SPEED_OF_LIGHT_KMS);
+        let cube = open(&path);
+        let c = fit_spaxel(&only_sci(&cube), &redshifted_cfg(&[]), 1, 1).unwrap().single.expect("single fit");
+        assert!(close(c.centre, SPEED_OF_LIGHT_KMS / (REDSHIFTED_REST_UM * (1.0 + REDSHIFT)), 1e-9), "centre={} GHz", c.centre);
+        assert!(close(c.velocity_kms, SPEED_OF_LIGHT_KMS * REDSHIFT, 1e-6), "velocity_kms={}", c.velocity_kms);
+        assert!(close(c.sigma_kms, 149.949_982, 1e-4), "sigma_kms={}", c.sigma_kms);
+        assert!(c.source_velocity_kms.abs() < SOURCE_VELOCITY_TOLERANCE_KMS, "source_velocity_kms={}", c.source_velocity_kms);
+        assert!(close(c.source_sigma_kms, SOURCE_SIGMA_KMS, 1e-3), "source_sigma_kms={}", c.source_sigma_kms);
+    }
+
+    #[test]
+    fn two_component_runs_at_a_redshift_carry_the_source_frame_planes_of_each_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("double.fits");
+        write_double_peak_mef(&path, (24.0, 32.0), 2.5, 0.02);
+        let (sci, err) = open_pair(&path);
+        let inputs = LineFitInputs { sci: &sci, err: Some(&err), dq: None };
+        let cfg = LineFitConfig {
+            components: Components::Auto,
+            rest_um: Some(LINE_REST_UM / (1.0 + REDSHIFT)),
+            redshift: REDSHIFT,
+            ..wide_cfg()
+        };
+        let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+        let names = plane_names(&cfg, &maps);
+        assert_eq!(names.len(), 40, "{names:?}");
+        assert_eq!((names[21], names[22], names[28], names[39]), ("c2_sigma_err", "source_flux", "c1_source_flux", "c2_source_sigma_err"));
+        let source = maps.source.as_ref().expect("source-frame planes");
+        let planes = source.components.as_ref().expect("source-frame component planes");
+        let centre = SMALL_DISK_CENTRE as usize;
+        let p = [centre, centre];
+        let spaxel = fit_spaxel(&inputs, &cfg, centre, centre).unwrap();
+        assert_eq!(spaxel.ncomp, 2, "{:?}", spaxel.notes);
+        assert_planes_hold_the_source_frame_of(&source.single, p, spaxel.single.as_ref().expect("single fit"));
+        for (component, plane) in spaxel.components.iter().zip(planes) {
+            assert_planes_hold_the_source_frame_of(plane, p, component);
+            assert!(close(component.source_sigma_kms, SPEED_OF_LIGHT_KMS * component.sigma / component.centre, 1e-12), "{component:?}");
+            assert!(close(component.sigma_kms / component.source_sigma_kms, 1.0 + REDSHIFT, 0.02), "{component:?}");
+        }
+        assert!(planes[0].velocity[p] < planes[1].velocity[p]);
+        assert!(source.single.velocity[[0, 0]].is_nan() && planes[0].velocity[[0, 0]].is_nan());
     }
 }

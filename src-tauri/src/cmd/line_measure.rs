@@ -8,13 +8,11 @@ use crate::cmd::cube::{err_source, APERTURE_SUBSAMPLES, ERR_SOURCE_NONE};
 use crate::core::analysis::line_measure::{
     measure_line_with_errors, resolve_windows, with_velocity, ContinuumWindows, LineMeasurement, LineModel,
 };
-use crate::core::analysis::spectrum1d::{
-    vacuum_to_air_morton_um, Spectrum1d, Spectrum1dSource, WavelengthFrame, CSV_ERR_COLUMN, MORTON_AIR_FORMULA,
-};
+use crate::core::analysis::spectrum1d::{Spectrum1d, Spectrum1dSource, WavelengthFrame, CSV_ERR_COLUMN};
 use crate::core::analysis::x1d::{COL_FLUX_ERROR, EXTNAME_EXTRACT1D};
 use crate::core::astrometry::spectral::{
-    air_formula_applies, air_to_vacuum_um, AxisKind, SpectralAxis, VelocityConvention, AIR_FORMULA_MIN_UM,
-    AIR_VACUUM_FORMULA,
+    air_formula_applies, air_to_vacuum_um, vacuum_to_air_um, AxisKind, SpectralAxis, VelocityConvention,
+    AIR_FORMULA_MIN_UM, AIR_VACUUM_FORMULA,
 };
 use crate::core::cube::companions::{open_cube_set, CubeSet};
 use crate::core::cube::lazy::{ApertureSpectrum, LazyCube};
@@ -30,6 +28,7 @@ pub const DEFAULT_CONVENTION: &str = "optical";
 pub const FRAME_AIR: &str = "air";
 pub const FRAME_VACUUM: &str = "vacuum";
 pub const KEY_ERR_SOURCE: &str = "err_source";
+const ASSUMED_FRAME_SUFFIX: &str = " assumed, no header card names the frame";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -71,6 +70,7 @@ pub struct LineRequest {
     pub convention: VelocityConvention,
     pub model: LineModel,
     pub velocity_shift_kms: Option<f64>,
+    pub redshift: Option<f64>,
 }
 
 fn bunit(cube: &LazyCube) -> Option<String> {
@@ -239,7 +239,15 @@ fn extract_spectrum(
 fn add_velocity(m: &mut LineMeasurement, axis: &SpectralAxis, rest_um: Option<f64>, request: &LineRequest) {
     match (rest_um, axis.kind) {
         (Some(rest), AxisKind::Wave | AxisKind::Awav | AxisKind::Freq) => {
-            with_velocity(m, rest, request.convention, axis.kind, axis.specsys.as_deref(), request.velocity_shift_kms);
+            with_velocity(
+                m,
+                rest,
+                request.redshift,
+                request.convention,
+                axis.kind,
+                axis.specsys.as_deref(),
+                request.velocity_shift_kms,
+            );
         }
         (None, AxisKind::Wave | AxisKind::Awav | AxisKind::Freq) => {
             m.notes.push("no rest wavelength: velocities not computed".to_string());
@@ -386,19 +394,31 @@ fn measured_flux(flux: &[f64], notes: &mut Vec<String>) -> Vec<f32> {
     narrowed
 }
 
-fn air_rest_um(rest_um: f64, notes: &mut Vec<String>) -> f64 {
-    if !air_formula_applies(rest_um) {
+fn air_rest_um(rest_um: f64, redshift: Option<f64>, notes: &mut Vec<String>) -> f64 {
+    let stretch = 1.0 + redshift.unwrap_or(0.0);
+    let observed_um = rest_um * stretch;
+    if !air_formula_applies(observed_um) {
+        let located = match redshift {
+            Some(z) => format!("rest wavelength {} um, at {} um for redshift {},", rest_um, observed_um, z),
+            None => format!("rest wavelength {} um", rest_um),
+        };
         notes.push(format!(
-            "rest wavelength {} um is below {} um where {} does not apply: left as vacuum",
-            rest_um, AIR_FORMULA_MIN_UM, MORTON_AIR_FORMULA
+            "{} is below {} um where {} does not apply: left as vacuum",
+            located, AIR_FORMULA_MIN_UM, AIR_VACUUM_FORMULA
         ));
         return rest_um;
     }
-    let air = vacuum_to_air_morton_um(rest_um);
-    notes.push(format!(
-        "vacuum rest wavelength {} um converted to {:.7} um in air with {} to match the air wavelength axis",
-        rest_um, air, MORTON_AIR_FORMULA
-    ));
+    let air = vacuum_to_air_um(observed_um) / stretch;
+    notes.push(match redshift {
+        Some(z) => format!(
+            "vacuum rest wavelength {} um converted to {:.7} um in air with {} evaluated at {:.7} um, where the line falls at redshift {}, to match the air wavelength axis",
+            rest_um, air, AIR_VACUUM_FORMULA, observed_um, z
+        ),
+        None => format!(
+            "vacuum rest wavelength {} um converted to {:.7} um in air with {} to match the air wavelength axis",
+            rest_um, air, AIR_VACUUM_FORMULA
+        ),
+    });
     air
 }
 
@@ -411,14 +431,19 @@ fn measure_file_line(
     let doc = load_spectrum1d(path, hdu)?;
     let frame = document_frame(doc.wavelength_frame, options.wavelength_frame).map_err(anyhow::Error::msg)?;
     let label = document_label(&doc.source);
+    let file_frame = format!(
+        "{}{}",
+        frame_text(doc.wavelength_frame),
+        if doc.frame_assumed() { ASSUMED_FRAME_SUFFIX } else { "" }
+    );
     let mut notes = vec![if frame == doc.wavelength_frame {
-        format!("spectrum file, {}: {}", label, frame_text(frame))
+        format!("spectrum file, {}: {}", label, file_frame)
     } else {
         format!(
             "spectrum file, {}: {} set by the request (the file reads as {})",
             label,
             frame_text(frame),
-            frame_text(doc.wavelength_frame)
+            file_frame
         )
     }];
     let err = document_errors(&doc, options.use_err, &mut notes);
@@ -440,7 +465,7 @@ fn measure_file_line(
     notes.append(&mut m.notes);
     m.notes = notes;
     let rest = match (request.rest_um.or(doc.axis.rest_wavelength_um), frame) {
-        (Some(rest), WavelengthFrame::Air) => Some(air_rest_um(rest, &mut m.notes)),
+        (Some(rest), WavelengthFrame::Air) => Some(air_rest_um(rest, request.redshift, &mut m.notes)),
         (rest, _) => rest,
     };
     add_velocity(&mut m, &doc.axis, rest, request);
@@ -496,6 +521,7 @@ pub async fn measure_spectral_line_cmd(
     use_err: Option<bool>,
     use_dq: Option<bool>,
     wavelength_frame: Option<String>,
+    redshift: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     if path.trim().is_empty() {
         return Err("path must name a cube or spectrum file, got an empty string".to_string());
@@ -517,11 +543,16 @@ pub async fn measure_spectral_line_cmd(
             return Err(format!("velocity_shift_kms must be a finite number of km/s, got {}", shift));
         }
     }
+    if let Some(z) = redshift {
+        if !(z.is_finite() && z > -1.0) {
+            return Err(format!("redshift must be a finite number above -1, got {}", z));
+        }
+    }
     let convention = VelocityConvention::parse(convention.as_deref().unwrap_or(DEFAULT_CONVENTION))?;
     let model = LineModel::parse(model.as_deref().unwrap_or(LineModel::None.name()))?;
     let wavelength_frame = wavelength_frame.as_deref().map(parse_wavelength_frame).transpose()?;
     let options = MeasureOptions { use_err: use_err.unwrap_or(true), use_dq: use_dq.unwrap_or(true), wavelength_frame };
-    let request = LineRequest { z0, z1, continuum, rest_um, convention, model, velocity_shift_kms };
+    let request = LineRequest { z0, z1, continuum, rest_um, convention, model, velocity_shift_kms, redshift };
     blocking_cmd!(measure_line_json_with(&path, &source, &request, &options))
 }
 
@@ -550,6 +581,7 @@ mod tests {
             convention: VelocityConvention::Optical,
             model,
             velocity_shift_kms: None,
+            redshift: None,
         }
     }
 
@@ -856,6 +888,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -864,6 +897,9 @@ mod tests {
         assert_eq!(value["err_used"], true);
         assert_eq!(value[KEY_ERR_SOURCE], "FLUX_ERROR column (HDU 1)");
         assert!(number(&value["flux_err_terms"], "pixel") > 0.0, "{}", value["flux_err_terms"]);
+        let chi2_red = number(&value, "continuum_chi2_red");
+        assert!(chi2_red > 0.0 && chi2_red < 1.0, "chi2_red={}", chi2_red);
+        assert_eq!(value["n_channels_nominal"], 25);
         assert_eq!(value["axis_unit"], "um");
         assert_eq!(value["flux_unit"], "Jy x um");
         let flux_err = number(&value, "flux_err");
@@ -883,6 +919,7 @@ mod tests {
             None,
             None,
             Some("sideways".to_string()),
+            None,
         )
         .await
         .unwrap_err();
@@ -944,6 +981,9 @@ mod tests {
         assert_eq!(value["n_bad_err"], 2);
         assert_eq!(value["n_nonfinite"], 1);
         assert_eq!(value["n_channels"], 25 - 6);
+        assert_eq!(value["n_channels_nominal"], 25);
+        let dropped_inside_the_line = "6 of the 25 channels in the line range 8..=32 were dropped (3 DQ-flagged, 1 with non-finite flux, 2 with ERR <= 0 or not finite)";
+        assert!(notes_of(&value).iter().any(|n| n.starts_with(dropped_inside_the_line)), "{:?}", notes_of(&value));
         assert_eq!(value[RES_SOURCE], serde_json::json!({ "kind": "file", "hdu": 1 }));
 
         let without_dq = MeasureOptions { use_dq: false, ..MeasureOptions::default() };
@@ -954,15 +994,20 @@ mod tests {
     }
 
     fn h_alpha_air_document(dir: &tempfile::TempDir) -> String {
-        let centre = vacuum_to_air_morton_um(H_ALPHA_VACUUM_UM) * 1e4;
+        h_alpha_air_document_with(dir, "h_alpha_air.fits", &[])
+    }
+
+    fn h_alpha_air_document_with(dir: &tempfile::TempDir, name: &str, frame_cards: &[(&'static str, String)]) -> String {
+        let centre = vacuum_to_air_um(H_ALPHA_VACUUM_UM) * 1e4;
         let flux: Vec<f32> = (0..H_ALPHA_CHANNELS)
             .map(|i| {
                 let d = (H_ALPHA_START_ANGSTROM + H_ALPHA_STEP_ANGSTROM * i as f64 - centre) / H_ALPHA_SIGMA_ANGSTROM;
                 (1.0 + (-0.5 * d * d).exp()) as f32
             })
             .collect();
-        let cards = iraf_linear_cards(H_ALPHA_START_ANGSTROM, H_ALPHA_STEP_ANGSTROM, H_ALPHA_BUNIT);
-        write_wcs1d(dir.path(), "h_alpha_air.fits", &cards, &flux).to_str().unwrap().to_string()
+        let mut cards = iraf_linear_cards(H_ALPHA_START_ANGSTROM, H_ALPHA_STEP_ANGSTROM, H_ALPHA_BUNIT);
+        cards.extend(frame_cards.iter().cloned());
+        write_wcs1d(dir.path(), name, &cards, &flux).to_str().unwrap().to_string()
     }
 
     fn h_alpha_request() -> LineRequest {
@@ -974,6 +1019,7 @@ mod tests {
             convention: VelocityConvention::Optical,
             model: LineModel::None,
             velocity_shift_kms: None,
+            redshift: None,
         }
     }
 
@@ -981,7 +1027,7 @@ mod tests {
     fn an_air_document_converts_the_vacuum_rest_wavelength_with_morton_before_velocities() {
         let dir = tempfile::tempdir().unwrap();
         let path = h_alpha_air_document(&dir);
-        let air_rest = vacuum_to_air_morton_um(H_ALPHA_VACUUM_UM);
+        let air_rest = vacuum_to_air_um(H_ALPHA_VACUUM_UM);
         let value = measure_line_json(&path, &file_source(), &h_alpha_request()).unwrap();
         assert_eq!(value[RES_SOURCE], serde_json::json!({ "kind": "file", "hdu": 0 }));
         assert_eq!(value["err_used"], false);
@@ -1004,6 +1050,150 @@ mod tests {
         let notes = notes_of(&value);
         assert!(notes.iter().any(|n| n.contains("vacuum wavelengths set by the request")), "{:?}", notes);
         assert!(notes.iter().all(|n| !n.contains("Morton (2000")), "{:?}", notes);
+    }
+
+    #[test]
+    fn a_measurement_on_a_file_whose_frame_no_card_names_says_that_the_frame_is_assumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let assumed = h_alpha_air_document(&dir);
+        let stated = h_alpha_air_document_with(&dir, "h_alpha_airorvac.fits", &[("AIRORVAC", "'air'".to_string())]);
+        let assumed_air = "spectrum file, 1D array in HDU 0: air wavelengths assumed, no header card names the frame";
+        let stated_air = "spectrum file, 1D array in HDU 0: air wavelengths";
+        for (path, requested, note) in [
+            (&assumed, None, assumed_air),
+            (&assumed, Some(WavelengthFrame::Air), assumed_air),
+            (
+                &assumed,
+                Some(WavelengthFrame::Vacuum),
+                "spectrum file, 1D array in HDU 0: vacuum wavelengths set by the request (the file reads as air wavelengths assumed, no header card names the frame)",
+            ),
+            (&stated, None, stated_air),
+            (&stated, Some(WavelengthFrame::Air), stated_air),
+            (
+                &stated,
+                Some(WavelengthFrame::Vacuum),
+                "spectrum file, 1D array in HDU 0: vacuum wavelengths set by the request (the file reads as air wavelengths)",
+            ),
+        ] {
+            let options = MeasureOptions { wavelength_frame: requested, ..MeasureOptions::default() };
+            let value = measure_line_json_with(path, &file_source(), &h_alpha_request(), &options).unwrap();
+            assert_eq!(notes_of(&value)[0], note, "{path} with the request frame {requested:?}");
+        }
+    }
+
+    const REDSHIFT: f64 = 0.5;
+    const SOURCE_SIGMA_KMS: f64 = 100.0;
+    const REDSHIFTED_LINE: (usize, usize) = (16, 64);
+    const REDSHIFTED_WINDOWS: ContinuumWindows = ((0, 9), (71, 80));
+    const SOURCE_VELOCITY_TOLERANCE_KMS: f64 = 0.05;
+    const UNDERSTATED_ERR: f64 = 0.005;
+
+    fn gaussian_line(axis: &[f64], centre: f64, sigma: f64) -> Vec<f32> {
+        axis.iter()
+            .map(|&x| {
+                let d = (x - centre) / sigma;
+                (1.0 + (-0.5 * d * d).exp()) as f32
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_command_takes_a_redshift_and_reports_source_frame_velocities_beside_the_observer_frame_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let centre = H_ALPHA_VACUUM_UM * (1.0 + REDSHIFT);
+        let sigma_um = centre * SOURCE_SIGMA_KMS / SPEED_OF_LIGHT_KMS;
+        let axis: Vec<f64> = (0..81).map(|i| centre + (i as f64 - 40.0) * sigma_um / 4.0).collect();
+        let flux = gaussian_line(&axis, centre, sigma_um);
+        let n = axis.len();
+        let path = write_document(&dir, "redshifted_x1d.fits", &axis, &flux, &vec![DOCUMENT_ERR; n], &vec![0; n]);
+        let measure = |redshift: Option<f64>| {
+            measure_spectral_line_cmd(
+                path.clone(),
+                file_source(),
+                REDSHIFTED_LINE.0,
+                REDSHIFTED_LINE.1,
+                Some(REDSHIFTED_WINDOWS),
+                Some(H_ALPHA_VACUUM_UM),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                redshift,
+            )
+        };
+        let value = measure(Some(REDSHIFT)).await.unwrap();
+        let velocity = &value["velocity"];
+        assert_eq!(number(velocity, "redshift"), REDSHIFT);
+        assert_relative("source-frame sigma", number(velocity, "source_sigma_kms"), SOURCE_SIGMA_KMS, 1e-3);
+        assert_relative("source-frame FWHM", number(velocity, "source_fwhm_kms"), SOURCE_SIGMA_KMS * 2.354_820_045, 1e-3);
+        assert!(number(velocity, "source_centroid_kms").abs() < SOURCE_VELOCITY_TOLERANCE_KMS, "{}", velocity);
+        assert_relative("observer-frame sigma", number(velocity, "sigma_kms"), 150.0, 1e-3);
+        assert_relative("observer-frame centroid", number(velocity, "centroid_kms"), SPEED_OF_LIGHT_KMS * REDSHIFT, 1e-6);
+        assert!(notes_of(&value).iter().any(|n| n.starts_with("redshift 0.5: source_centroid_kms")), "{:?}", notes_of(&value));
+
+        let without = measure(None).await.unwrap();
+        assert_eq!(number(&without["velocity"], "redshift"), 0.0);
+        assert_eq!(without["velocity"]["source_centroid_kms"], without["velocity"]["centroid_kms"]);
+        assert_eq!(without["velocity"]["centroid_kms"], velocity["centroid_kms"]);
+        assert_eq!(without["velocity"]["sigma_kms"], velocity["sigma_kms"]);
+        assert_relative("source-frame sigma", number(&without["velocity"], "source_sigma_kms"), SOURCE_SIGMA_KMS, 1e-3);
+        assert!(notes_of(&without).iter().all(|n| !n.starts_with("redshift")), "{:?}", notes_of(&without));
+
+        for (bad, shown) in [(-1.0, "-1"), (f64::NAN, "NaN"), (f64::INFINITY, "inf")] {
+            let refused = measure(Some(bad)).await.unwrap_err();
+            assert_eq!(refused, format!("redshift must be a finite number above -1, got {}", shown));
+        }
+    }
+
+    #[test]
+    fn an_air_document_measured_at_a_redshift_converts_the_rest_wavelength_where_the_line_is_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        let centre = vacuum_to_air_um(H_ALPHA_VACUUM_UM * (1.0 + REDSHIFT)) * 1e4;
+        let sigma = centre * SOURCE_SIGMA_KMS / SPEED_OF_LIGHT_KMS;
+        let (start, step) = (9796.0, 0.8);
+        let axis: Vec<f64> = (0..121).map(|i| start + step * i as f64).collect();
+        let cards = iraf_linear_cards(start, step, H_ALPHA_BUNIT);
+        let path = write_wcs1d(dir.path(), "h_alpha_air_redshifted.fits", &cards, &gaussian_line(&axis, centre, sigma));
+        let request = LineRequest {
+            z0: 35,
+            z1: 85,
+            continuum: Some(((0, 20), (100, 120))),
+            redshift: Some(REDSHIFT),
+            ..h_alpha_request()
+        };
+        let value = measure_line_json(path.to_str().unwrap(), &file_source(), &request).unwrap();
+        let velocity = &value["velocity"];
+        assert!(number(velocity, "source_centroid_kms").abs() < SOURCE_VELOCITY_TOLERANCE_KMS, "{}", velocity);
+        assert_relative("source-frame sigma", number(velocity, "source_sigma_kms"), SOURCE_SIGMA_KMS, 1e-3);
+        assert_relative("observer-frame centroid", number(velocity, "centroid_kms"), SPEED_OF_LIGHT_KMS * REDSHIFT, 1e-6);
+        let notes = notes_of(&value);
+        assert!(notes.iter().any(|n| n.contains("where the line falls at redshift 0.5")), "{:?}", notes);
+        let naive_rest = vacuum_to_air_um(H_ALPHA_VACUUM_UM) * (1.0 + REDSHIFT);
+        let naive_kms = SPEED_OF_LIGHT_KMS * (centre * 1e-4 - naive_rest) / naive_rest;
+        assert!(naive_kms.abs() > 4.0 * SOURCE_VELOCITY_TOLERANCE_KMS, "naive_kms={}", naive_kms);
+    }
+
+    #[test]
+    fn a_file_whose_flux_error_understates_the_continuum_scatter_has_its_flux_error_scaled_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (axis, flux) = centre_arrays(0.05);
+        let n = axis.len();
+        let err = vec![UNDERSTATED_ERR; n];
+        let path = write_document(&dir, "understated_x1d.fits", &axis, &flux, &err, &vec![0; n]);
+        let value = measure_line_json(&path, &file_source(), &request(LineModel::None)).unwrap();
+        let scale = number(&value, "continuum_chi2_red").sqrt();
+        assert!(scale > 5.0 && scale < 7.0, "scale={}", scale);
+        assert_total_is_the_quadrature_of_the_terms(&value);
+        let propagated_pixel = pixel_term(&err, &axis, LINE_RANGE.0..=LINE_RANGE.1);
+        assert_relative("scaled pixel term", number(&value["flux_err_terms"], "pixel"), scale * propagated_pixel, 1e-9);
+        let scatter_path = MeasureOptions { use_err: false, ..MeasureOptions::default() };
+        let unweighted = measure_line_json_with(&path, &file_source(), &request(LineModel::None), &scatter_path).unwrap();
+        assert_relative("scatter-path flux error", number(&value, "flux_err"), number(&unweighted, "flux_err"), 1e-9);
+        let notes = notes_of(&value);
+        assert!(notes.iter().any(|n| n.contains("ERR understates the scatter")), "{:?}", notes);
+        assert!(notes.iter().any(|n| n.contains("each scaled by 6.0")), "{:?}", notes);
     }
 
     #[test]
@@ -1185,7 +1375,8 @@ mod tests {
         let value = measure_line_json_with(&key, &centre_pixel(), &request(LineModel::None), &unweighted).unwrap();
         assert_eq!(value["err_used"], false);
         assert_eq!(value[KEY_ERR_SOURCE], ERR_SOURCE_NONE);
-        assert!(value["flux_err_terms"].is_null());
+        assert!(value["continuum_chi2_red"].is_null(), "{}", value["continuum_chi2_red"]);
+        assert_total_is_the_quadrature_of_the_terms(&value);
         assert_eq!(value["n_dq_excluded"], PIXEL_FLAGGED_CHANNELS.len());
         assert!(notes_of(&value).iter().any(|n| n.contains("use_err = false")), "{:?}", notes_of(&value));
 
@@ -1353,12 +1544,19 @@ mod tests {
             let value = measure_line_json(&path, &source, &request(LineModel::None)).unwrap();
             assert_eq!(value["err_used"], false, "{}", value);
             assert_eq!(value[KEY_ERR_SOURCE], ERR_SOURCE_NONE);
-            assert!(value["flux_err_terms"].is_null());
+            assert!(value["continuum_chi2_red"].is_null(), "{}", value["continuum_chi2_red"]);
             assert_eq!(value["n_dq_excluded"], 0);
-            let continuum_sigma = number(&value, "continuum_sigma");
+            assert_total_is_the_quadrature_of_the_terms(&value);
+            let terms = &value["flux_err_terms"];
             let widths = channel_widths(&LazyCube::open(&path).unwrap().spectral_axis().unwrap().values);
-            let mean_dx = widths[LINE_RANGE.0..=LINE_RANGE.1].iter().sum::<f64>() / 25.0;
-            assert_relative("scatter error", number(&value, "flux_err"), continuum_sigma * 5.0 * mean_dx, 1e-12);
+            let line_widths = &widths[LINE_RANGE.0..=LINE_RANGE.1];
+            let residual_rms = number(terms, "pixel") / line_widths.iter().map(|w| w * w).sum::<f64>().sqrt();
+            let continuum_sigma = number(&value, "continuum_sigma");
+            assert!(residual_rms > 0.5 * continuum_sigma && residual_rms < 2.0 * continuum_sigma, "{} {}", residual_rms, continuum_sigma);
+            let level = residual_rms * line_widths.iter().sum::<f64>() / 12f64.sqrt();
+            assert_relative("level term", number(terms, "level"), level, 1e-9);
+            assert!(number(terms, "slope") > 0.0 && number(terms, "slope") < number(terms, "pixel"), "{}", terms);
+            assert!(number(&value, "flux_err") > 1.7 * number(terms, "pixel"), "{}", value);
         }
         GLOBAL_CUBE_CACHE.invalidate(&path);
     }
@@ -1403,6 +1601,7 @@ mod tests {
             convention: VelocityConvention::Optical,
             model,
             velocity_shift_kms: None,
+            redshift: None,
         }
     }
 

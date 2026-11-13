@@ -5,6 +5,8 @@ import type {
   LineMeasurementSource,
   SpectralAxisInfo,
 } from "../shared/types/spectral";
+import { SIGMA_MAD_LABEL } from "./analysisLabels";
+import { formatRedshift } from "./lineList";
 import { airToVacuumUm } from "./spectralAxis";
 import { axisValueToPixel, channelAxisValue, type PlotMapping } from "./spectrumRange";
 
@@ -47,7 +49,6 @@ export const MODEL_SUBSAMPLES = 4;
 export const UNAVAILABLE = "n/a";
 export const PLUS_MINUS = "±";
 
-const MIN_Y_RANGE = 1e-10;
 const GENERAL_DIGITS = 4;
 const EXPONENT_BELOW = 1e-3;
 const EXPONENT_ABOVE = 1e6;
@@ -108,6 +109,12 @@ export const CSV_COLUMNS = [
   "n_dq_excluded",
   "n_nonfinite",
   "n_bad_err",
+  "velocity_redshift",
+  "velocity_source_centroid_kms",
+  "velocity_source_sigma_kms",
+  "velocity_source_fwhm_kms",
+  "continuum_chi2_red",
+  "n_channels_nominal",
 ] as const;
 
 function finite(value: number | null | undefined): value is number {
@@ -213,7 +220,7 @@ function samplePolyline(
   if (lo > hi) return [];
   const left = mapping.padLeft;
   const right = mapping.width - mapping.padRight;
-  const yRange = Math.max(frame.yMax - frame.yMin, MIN_Y_RANGE);
+  const yRange = frame.yMax > frame.yMin ? frame.yMax - frame.yMin : 1;
   const toY = (y: number) => frame.top + frame.height - ((y - frame.yMin) / yRange) * frame.height;
   const points: PlotPoint[] = [];
   const push = (xMeasured: number, xDisplay: number) => {
@@ -266,23 +273,30 @@ export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
   const rows: MeasurementRow[] = [
     { label: "Flux", value: `${formatQuantity(m.flux)} ${PLUS_MINUS} ${formatQuantity(m.flux_err)} ${m.flux_unit}` },
     { label: "Equivalent width (absorption > 0, emission < 0)", value: `${formatQuantity(m.equivalent_width)} ${unit}` },
-    { label: "Centroid", value: withVelocity(`${formatAxisQuantity(m.centroid)} ${unit}`, v?.centroid_kms, v !== null) },
-    { label: "Sigma", value: withVelocity(`${formatQuantity(m.sigma)} ${unit}`, v?.sigma_kms, v !== null) },
-    { label: "FWHM", value: withVelocity(`${formatQuantity(m.fwhm)} ${unit}`, v?.fwhm_kms, v !== null) },
-    { label: "Peak", value: `${formatQuantity(m.peak)} at ch ${m.peak_channel}` },
+    { label: "Centroid", value: withVelocity(`${formatAxisQuantity(m.centroid)} ${unit}`, v?.source_centroid_kms, v !== null) },
+    { label: "Sigma", value: withVelocity(`${formatQuantity(m.sigma)} ${unit}`, v?.source_sigma_kms, v !== null) },
+    { label: "FWHM", value: withVelocity(`${formatQuantity(m.fwhm)} ${unit}`, v?.source_fwhm_kms, v !== null) },
+    { label: finite(m.flux) && m.flux < 0 ? "Trough" : "Peak", value: `${formatQuantity(m.peak)} at ch ${m.peak_channel}` },
     { label: "SNR", value: finite(m.snr) ? m.snr.toFixed(1) : UNAVAILABLE },
     {
       label: "Continuum",
-      value: `level ${formatQuantity(m.continuum_level)}, slope ${formatQuantity(m.continuum_slope)}, sigma ${formatQuantity(m.continuum_sigma)}, ${m.continuum_channels} ch ${m.continuum_linear ? "linear" : "constant"}`,
+      value: `level ${formatQuantity(m.continuum_level)}, slope ${formatQuantity(m.continuum_slope)}, ${SIGMA_MAD_LABEL} ${formatQuantity(m.continuum_sigma)}, ${m.continuum_channels} ch ${m.continuum_linear ? "linear" : "constant"}`,
     },
   ];
   if (v) {
+    const redshift = v.redshift ?? 0;
     const frame = v.axis_frame ? `axis frame ${v.axis_frame}` : UNDECLARED_AXIS_FRAME;
     const shift = v.shift_applied_kms !== 0 ? `, shift ${formatVelocity(v.shift_applied_kms)}` : "";
     rows.push({
       label: "Velocity frame",
-      value: `${v.convention}, rest ${formatAxisQuantity(v.rest_um)} um, ${frame}${shift}`,
+      value: `${v.convention}, rest ${formatAxisQuantity(v.rest_um)} um, z = ${formatRedshift(redshift)}, ${frame}${shift}`,
     });
+    if (redshift !== 0) {
+      rows.push({
+        label: "Observer frame (against the laboratory rest wavelength)",
+        value: `centroid ${formatVelocity(v.centroid_kms)}, sigma ${formatVelocity(v.sigma_kms)}, FWHM ${formatVelocity(v.fwhm_kms)}`,
+      });
+    }
   }
   if (m.fit) {
     const f = m.fit;
@@ -291,7 +305,12 @@ export function lineMeasurementRows(m: LineMeasurement): MeasurementRow[] {
       value: `A ${formatQuantity(f.amplitude)} ${PLUS_MINUS} ${formatQuantity(f.amplitude_err)}, c ${formatAxisQuantity(f.centre, f.centre_err)} ${PLUS_MINUS} ${formatQuantity(f.centre_err)}, s ${formatQuantity(f.sigma)} ${PLUS_MINUS} ${formatQuantity(f.sigma_err)} ${unit}, chi2/dof ${formatQuantity(f.chi2)}/${f.dof}, ${f.iterations} it`,
     });
   }
-  rows.push({ label: "Error source", value: m.err_used ? `${m.err_source}, weights 1/ERR^2` : NO_ERR_SOURCE });
+  const chi2Red = m.continuum_chi2_red;
+  const scatterScale =
+    finite(chi2Red) && chi2Red > 1
+      ? `, flux error x ${formatQuantity(Math.sqrt(chi2Red))} from the continuum scatter (chi2_red ${formatQuantity(chi2Red)})`
+      : "";
+  rows.push({ label: "Error source", value: m.err_used ? `${m.err_source}, weights 1/ERR^2${scatterScale}` : NO_ERR_SOURCE });
   const terms = m.flux_err_terms;
   if (terms) {
     rows.push({
@@ -369,6 +388,12 @@ export function lineMeasurementCsv(m: LineMeasurement): string {
     m.n_dq_excluded,
     m.n_nonfinite,
     m.n_bad_err,
+    v?.redshift ?? null,
+    v?.source_centroid_kms ?? null,
+    v?.source_sigma_kms ?? null,
+    v?.source_fwhm_kms ?? null,
+    m.continuum_chi2_red ?? null,
+    m.n_channels_nominal ?? null,
   ];
   return `${CSV_COLUMNS.join(",")}\n${values.map(csvCell).join(",")}`;
 }

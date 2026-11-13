@@ -20,19 +20,19 @@
   "equivalent_width": -0.00015641870984420058,
   "fit": null,
   "flux": 0.00015417285071690664,
-  "flux_err": 0.00018239980647053407,
+  "flux_err": 0.00026756129053112816,
   "flux_unit": "",
   "fwhm": null,
   "n_channels": 24,
   "notes": [
-    "1 channels with non-finite flux were skipped",
+    "1 of the 25 channels in the line range 8..=32 were dropped (1 with non-finite flux): flux, equivalent width, centroid and sigma sum the 24 remaining channels and miss the share of the dropped ones, and the flux error does not include that loss",
     "continuum-subtracted profile has a negative second moment: sigma undefined",
     "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid"
   ],
   "peak": 0.06401201067103313,
   "peak_channel": 17,
   "sigma": null,
-  "snr": 0.8452467889093546,
+  "snr": 0.5762150810786665,
   "velocity": null,
   "z0": 8,
   "z1": 32

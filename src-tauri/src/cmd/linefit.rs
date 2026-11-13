@@ -17,7 +17,7 @@ use crate::core::cube::companions::open_cube_set;
 use crate::core::cube::companions::{open_cube_set_fresh, DqPolicy};
 use crate::core::cube::lazy::LazyCube;
 use crate::core::cube::linefit::{
-    fit_cube_lines, fit_spaxel, plane_names, Components, LineFitConfig, LineFitMaps, Weighting,
+    fit_cube_lines, fit_spaxel, plane_names, ComponentPlanes, Components, LineFitConfig, LineFitMaps, Weighting,
 };
 use crate::core::cube::moments::{ContinuumWindows, VELOCITY_UNIT};
 use crate::infra::render::grayscale::render_grayscale;
@@ -28,6 +28,7 @@ pub const ABPROC_PREFIX: &str = "linefit-";
 pub const FILE_TAG: &str = "linefit";
 const CARD_LINEFIT: &str = "LINEFIT";
 const CARD_REST: &str = "LFREST";
+const CARD_REDSHIFT: &str = "LFREDSH";
 const CARD_Z0: &str = "LFZ0";
 const CARD_Z1: &str = "LFZ1";
 const CARD_CONVENTION: &str = "LFCONV";
@@ -49,27 +50,17 @@ const MASK_C_TEXT: &str = "mask 0 & ncomp>=1: converged below S/N threshold; nco
 const PLANE_MASK: &str = "mask";
 const SIGMA_OBSERVED: &str = "observed";
 const SIGMA_CORRECTED: &str = "corrected";
-const FLUX_PLANES: [&str; 6] = ["flux", "flux_err", "c1_flux", "c1_flux_err", "c2_flux", "c2_flux_err"];
-const VELOCITY_PLANES: [&str; 13] = [
-    "velocity",
-    "v_err",
-    "sigma_obs",
-    "sigma_corr",
-    "sigma_err",
-    "c1_velocity",
-    "c1_v_err",
-    "c1_sigma_obs",
-    "c1_sigma_err",
-    "c2_velocity",
-    "c2_v_err",
-    "c2_sigma_obs",
-    "c2_sigma_err",
-];
+const SOURCE_PREFIX: &str = "source_";
+const COMPONENT_PREFIXES: [&str; 2] = ["c1_", "c2_"];
+const FLUX_PLANES: [&str; 2] = ["flux", "flux_err"];
+const VELOCITY_PLANES: [&str; 5] = ["velocity", "v_err", "sigma_obs", "sigma_corr", "sigma_err"];
 
 pub(crate) fn plane_unit(plane: &str, maps: &LineFitMaps) -> Option<String> {
-    if FLUX_PLANES.contains(&plane) {
+    let of_component = COMPONENT_PREFIXES.iter().find_map(|prefix| plane.strip_prefix(prefix)).unwrap_or(plane);
+    let quantity = of_component.strip_prefix(SOURCE_PREFIX).unwrap_or(of_component);
+    if FLUX_PLANES.contains(&quantity) {
         Some(maps.flux_unit.clone())
-    } else if VELOCITY_PLANES.contains(&plane) {
+    } else if VELOCITY_PLANES.contains(&quantity) {
         Some(VELOCITY_UNIT.to_string())
     } else {
         None
@@ -89,6 +80,9 @@ pub(crate) fn line_fit_header(
     header.set(CARD_LINEFIT, plane.to_string());
     if let Some(rest) = maps.rest_um {
         header.set_f64(CARD_REST, rest);
+    }
+    if maps.source.is_some() {
+        header.set_f64(CARD_REDSHIFT, cfg.redshift);
     }
     header.set(CARD_Z0, cfg.z0.to_string());
     header.set(CARD_Z1, cfg.z1.to_string());
@@ -130,18 +124,22 @@ fn save_plane(arr: &Array2<f32>, header: &HduHeader, output_dir: &str, name: &st
     Ok(MapFiles { png_path, fits_path })
 }
 
+fn component_plane<'a>(planes: &'a ComponentPlanes, field: &str) -> Option<&'a Array2<f32>> {
+    match field {
+        "flux" => Some(&planes.flux),
+        "velocity" => Some(&planes.velocity),
+        "sigma_obs" => Some(&planes.sigma_obs),
+        "flux_err" => Some(&planes.flux_err),
+        "v_err" => Some(&planes.v_err),
+        "sigma_err" => Some(&planes.sigma_err),
+        _ => None,
+    }
+}
+
 fn plane_array<'a>(maps: &'a LineFitMaps, plane: &str) -> Option<&'a Array2<f32>> {
-    let component = |index: usize, field: &str| {
-        let planes = &maps.components.as_ref()?[index];
-        match field {
-            "flux" => Some(&planes.flux),
-            "velocity" => Some(&planes.velocity),
-            "sigma_obs" => Some(&planes.sigma_obs),
-            "flux_err" => Some(&planes.flux_err),
-            "v_err" => Some(&planes.v_err),
-            "sigma_err" => Some(&planes.sigma_err),
-            _ => None,
-        }
+    let component = |index: usize, field: &str| match field.strip_prefix(SOURCE_PREFIX) {
+        Some(field) => component_plane(&maps.source.as_ref()?.components.as_ref()?[index], field),
+        None => component_plane(&maps.components.as_ref()?[index], field),
     };
     match plane {
         "flux" => Some(&maps.flux),
@@ -155,9 +153,11 @@ fn plane_array<'a>(maps: &'a LineFitMaps, plane: &str) -> Option<&'a Array2<f32>
         "snr" => Some(&maps.snr),
         "mask" => Some(&maps.mask),
         "ncomp" => Some(&maps.ncomp),
+        "source_sigma_corr" => maps.source.as_ref()?.sigma_corr.as_ref(),
         other => match other.split_once('_') {
             Some(("c1", field)) => component(0, field),
             Some(("c2", field)) => component(1, field),
+            Some(("source", field)) => component_plane(&maps.source.as_ref()?.single, field),
             _ => None,
         },
     }
@@ -211,7 +211,7 @@ pub(crate) fn line_fit_files(
     t0: Instant,
 ) -> Result<LineFitResponse> {
     let set = &input.set;
-    let mut run = ScientificRun::new(path, output_dir, "linefit", input, serde_json::json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": cfg.rest_um, "convention": cfg.convention, "continuum": cfg.continuum, "snr_threshold": cfg.snr_threshold, "emission_only": cfg.emission_only, "use_err": cfg.use_err, "use_dq": cfg.use_dq, "dq_policy": cfg.dq_policy, "resolving_power": cfg.resolving_power, "components": cfg.components }))?;
+    let mut run = ScientificRun::new(path, output_dir, "linefit", input, serde_json::json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": cfg.rest_um, "convention": cfg.convention, "continuum": cfg.continuum, "snr_threshold": cfg.snr_threshold, "emission_only": cfg.emission_only, "use_err": cfg.use_err, "use_dq": cfg.use_dq, "dq_policy": cfg.dq_policy, "resolving_power": cfg.resolving_power, "components": cfg.components, "redshift": cfg.redshift }))?;
     let output_dir = run.output_dir.clone();
     let maps = fit_cube_lines(&set.inputs(), cfg)?;
     let stem = output_stem(path);
@@ -230,7 +230,7 @@ pub(crate) fn line_fit_files(
     let (rows, cols) = maps.flux.dim();
     let notes: Vec<String> = set.notes.iter().cloned().chain(maps.notes).collect();
     let provenance_path = run.finish(
-        serde_json::json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": maps.rest_um, "convention": cfg.convention, "continuum": maps.continuum_windows, "snr_threshold": cfg.snr_threshold, "emission_only": cfg.emission_only, "weighting": maps.weighting, "err_hdu": maps.err_hdu, "dq_hdu": maps.dq_hdu, "dq_policy": cfg.effective_dq_policy(), "dq_applied": maps.dq_hdu.is_some(), "dq_excluded_samples": maps.dq_excluded_samples, "resolving_power": cfg.resolving_power, "components": cfg.components, "flux_unit": maps.flux_unit, "velocity_unit": maps.velocity_unit, "velocity_shift_kms": 0.0 }),
+        serde_json::json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": maps.rest_um, "convention": cfg.convention, "continuum": maps.continuum_windows, "snr_threshold": cfg.snr_threshold, "emission_only": cfg.emission_only, "weighting": maps.weighting, "err_hdu": maps.err_hdu, "dq_hdu": maps.dq_hdu, "dq_policy": cfg.effective_dq_policy(), "dq_applied": maps.dq_hdu.is_some(), "dq_excluded_samples": maps.dq_excluded_samples, "resolving_power": cfg.resolving_power, "components": cfg.components, "redshift": maps.source.as_ref().map(|_| cfg.redshift), "flux_unit": maps.flux_unit, "velocity_unit": maps.velocity_unit, "velocity_shift_kms": 0.0 }),
         serde_json::json!({ "planes": planes, "plane_order": plane_order }),
         &notes,
     )?;
@@ -605,6 +605,18 @@ mod tests {
             assert!(single[field].is_number(), "{} missing in {}", field, single);
         }
         assert!(single["sigma_corr_kms"].is_null());
+        for field in [
+            "source_velocity_kms",
+            "source_v_err_kms",
+            "source_sigma_kms",
+            "source_sigma_err_kms",
+            "source_flux",
+            "source_flux_err",
+        ] {
+            assert!(single[field].is_number(), "{} missing in {}", field, single);
+        }
+        assert!(single["source_sigma_corr_kms"].is_null());
+        assert_eq!(single["source_velocity_kms"], single["velocity_kms"], "no redshift given: {}", single);
         let err = spaxel_json(&key, &line_cfg(), 99, 0).unwrap_err().to_string();
         assert!(err.contains("outside"), "{}", err);
         GLOBAL_CUBE_CACHE.invalidate(&key);
@@ -669,6 +681,97 @@ mod tests {
         assert_eq!(response.plane_order[3], "sigma_corr");
         assert_eq!(response.plane_order[10], "ncomp");
         assert_eq!(response.plane_order[11], "c1_flux");
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+    }
+
+    const OBSERVER_PLANES: [&str; 10] =
+        ["flux", "velocity", "sigma_obs", "flux_err", "v_err", "sigma_err", "chi2_red", "snr", "mask", "ncomp"];
+    const SOURCE_PLANES: [&str; 6] =
+        ["source_flux", "source_velocity", "source_sigma_obs", "source_flux_err", "source_v_err", "source_sigma_err"];
+
+    #[test]
+    fn a_redshift_writes_the_source_frame_planes_with_their_units_and_the_redshift_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let key = path.to_str().unwrap().to_string();
+        let out = out_dir(&dir);
+        let pixel = (1, 1);
+
+        let plain = redshifted_cfg(&[("redshift", serde_json::Value::Null)]);
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &plain, Instant::now()).unwrap();
+        assert_eq!(response.plane_order, OBSERVER_PLANES);
+        let observed = reopen(&response.planes["sigma_obs"].fits_path);
+        assert!((observed.image[pixel] as f64 - 150.0).abs() < 0.01, "sigma_obs {}", observed.image[pixel]);
+        assert!(observed.header.get(CARD_REDSHIFT).is_none());
+        assert!(response.provenance.effective["redshift"].is_null(), "{}", response.provenance.effective);
+
+        let cfg = redshifted_cfg(&[]);
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &cfg, Instant::now()).unwrap();
+        let written = |plane: &str| {
+            let files = response
+                .planes
+                .get(plane)
+                .unwrap_or_else(|| panic!("plane {} was not written: {:?}", plane, response.plane_order));
+            assert!(std::path::Path::new(&files.png_path).exists(), "{}", files.png_path);
+            reopen(&files.fits_path)
+        };
+        assert!((written("sigma_obs").image[pixel] as f64 - 150.0).abs() < 0.01);
+        let sigma = written("source_sigma_obs");
+        assert!((sigma.image[pixel] as f64 - SOURCE_SIGMA_KMS).abs() < 0.01, "source_sigma_obs {}", sigma.image[pixel]);
+        assert_eq!(sigma.header.get(CARD_LINEFIT), Some("source_sigma_obs"));
+        assert_eq!(sigma.header.get(HEADER_ABPROC), Some("linefit-source_sigma_obs"));
+        assert_eq!(sigma.header.get("BUNIT"), Some("km/s"));
+        assert!((sigma.header.get_f64(CARD_REDSHIFT).unwrap() - REDSHIFT).abs() < 1e-12);
+        assert!(sigma.header.get("CTYPE3").is_none());
+        assert!(WcsTransform::from_header(&sigma.header).is_ok());
+        let velocity = written("source_velocity");
+        assert!(velocity.image[pixel].abs() < 0.05, "source_velocity {}", velocity.image[pixel]);
+        assert_eq!(velocity.header.get("BUNIT"), Some("km/s"));
+        assert!((written("velocity").image[pixel] as f64 - 149_896.229).abs() < 0.1);
+        let flux = written("source_flux");
+        let expected_flux = REDSHIFTED_AMPLITUDE * SOURCE_SIGMA_KMS * (2.0 * std::f64::consts::PI).sqrt();
+        assert!((flux.image[pixel] as f64 - expected_flux).abs() < 1e-3 * expected_flux, "source_flux {}", flux.image[pixel]);
+        assert_eq!(flux.header.get("BUNIT"), Some("Jy/beam km/s"));
+        for (plane, unit) in [("source_flux_err", "Jy/beam km/s"), ("source_v_err", "km/s"), ("source_sigma_err", "km/s")] {
+            assert_eq!(written(plane).header.get("BUNIT"), Some(unit), "{}", plane);
+        }
+        assert_eq!(response.plane_order, [OBSERVER_PLANES.as_slice(), SOURCE_PLANES.as_slice()].concat());
+        assert_eq!(response.provenance.parameters["redshift"], REDSHIFT);
+        assert_eq!(response.provenance.effective["redshift"], REDSHIFT, "{}", response.provenance.effective);
+        assert!(response.notes.iter().any(|n| n.starts_with("redshift 0.5: ")), "{:?}", response.notes);
+
+        let every_plane = redshifted_cfg(&[("resolving_power", serde_json::json!(2700.0)), ("components", serde_json::json!("two"))]);
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &every_plane, Instant::now()).unwrap();
+        assert_eq!(response.plane_order.len(), 42, "{:?}", response.plane_order);
+        assert_eq!(response.plane_order[23..27], ["source_flux", "source_velocity", "source_sigma_obs", "source_sigma_corr"]);
+        assert_eq!((response.plane_order[30].as_str(), response.plane_order[41].as_str()), ("c1_source_flux", "c2_source_sigma_err"));
+        for plane in &response.plane_order[23..] {
+            let reopened = reopen(&response.planes[plane].fits_path);
+            let unit = if plane.ends_with("flux") || plane.ends_with("flux_err") { "Jy/beam km/s" } else { "km/s" };
+            assert_eq!(reopened.header.get("BUNIT"), Some(unit), "{}", plane);
+            assert_eq!(reopened.header.get(CARD_LINEFIT), Some(plane.as_str()));
+            assert_eq!(reopened.image.dim(), (REDSHIFTED_CUBE_SIZE, REDSHIFTED_CUBE_SIZE), "{}", plane);
+        }
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+    }
+
+    #[test]
+    fn a_redshift_that_a_stored_velocity_axis_ignores_is_not_recorded_as_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vrad.fits");
+        write_stored_velocity_cube(&path);
+        let key = path.to_str().unwrap().to_string();
+        let out = out_dir(&dir);
+        let response = line_fit_files(&VerifiedCubeSet::open(&key).unwrap(), &key, &out, &redshifted_cfg(&[]), Instant::now()).unwrap();
+        assert_eq!(response.plane_order, OBSERVER_PLANES);
+        let sigma = reopen(&response.planes["sigma_obs"].fits_path);
+        assert!((sigma.image[(1, 1)] as f64 - SOURCE_SIGMA_KMS).abs() < 0.1, "sigma_obs {}", sigma.image[(1, 1)]);
+        assert_eq!(sigma.header.get(CARD_REDSHIFT), None, "the header must not name a redshift that no plane used");
+        let ignored = "velocity axis VRAD used as stored: redshift 0.5 ignored, no source-frame values";
+        assert!(response.notes.iter().any(|n| n == ignored), "{:?}", response.notes);
+        assert_eq!(response.provenance.parameters["redshift"], REDSHIFT);
+        assert!(response.provenance.effective["redshift"].is_null(), "{}", response.provenance.effective);
         GLOBAL_CUBE_CACHE.invalidate(&key);
     }
 
@@ -750,6 +853,7 @@ mod tests {
                 convention: VelocityConvention::Optical,
                 model: LineModel::Gaussian,
                 velocity_shift_kms: None,
+                redshift: None,
             };
             let unweighted = MeasureOptions { use_err: false, use_dq: false, wavelength_frame: None };
             let shipped = measure_line_json_with(&key, &SpectrumSource::Pixel { x, y }, &request, &unweighted).unwrap();

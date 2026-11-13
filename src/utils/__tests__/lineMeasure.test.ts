@@ -29,11 +29,13 @@ function measurement(overrides: Partial<LineMeasurement> = {}): LineMeasurement 
     z0: 8,
     z1: 32,
     n_channels: 25,
+    n_channels_nominal: 25,
     axis_unit: "um",
     flux_unit: "Jy/beam x um",
     continuum_level: 1.0,
     continuum_slope: 0.0,
     continuum_sigma: 0.01,
+    continuum_chi2_red: null,
     continuum_reference: 1.02,
     continuum_linear: true,
     continuum_channels: 12,
@@ -58,6 +60,10 @@ function measurement(overrides: Partial<LineMeasurement> = {}): LineMeasurement 
       convention: "optical",
       shift_applied_kms: 0,
       axis_frame: null,
+      redshift: 0,
+      source_centroid_kms: 0.2,
+      source_sigma_kms: 881.7,
+      source_fwhm_kms: 2076.3,
     },
     fit: {
       amplitude: 1.0,
@@ -231,7 +237,7 @@ describe("lineMeasurementRows", () => {
     expect(rows[2].value).toBe("1.02000 um / 0.2 km/s");
     expect(rows[5].value).toBe("1.000 at ch 20");
     expect(rows[6].value).toBe("150.4");
-    expect(rows[8].value).toBe("optical, rest 1.02000 um, axis frame not declared (no SPECSYS)");
+    expect(rows[8].value).toBe("optical, rest 1.02000 um, z = 0, axis frame not declared (no SPECSYS)");
   });
 
   it("states the equivalent-width sign of specutils and IRAF splot next to a negative emission width", () => {
@@ -245,11 +251,11 @@ describe("lineMeasurementRows", () => {
     const velocity = base.velocity!;
     const frameRow = (m: LineMeasurement) => lineMeasurementRows(m).find((r) => r.label === "Velocity frame")?.value;
     expect(frameRow(measurement({ velocity: { ...velocity, axis_frame: "BARYCENT", shift_applied_kms: 0 } }))).toBe(
-      "optical, rest 1.02000 um, axis frame BARYCENT",
+      "optical, rest 1.02000 um, z = 0, axis frame BARYCENT",
     );
     expect(frameRow(measurement({ velocity: { ...velocity, axis_frame: null, shift_applied_kms: 0 } }))).not.toContain("topocentric");
     expect(frameRow(measurement({ velocity: { ...velocity, axis_frame: "TOPOCENT", shift_applied_kms: 25.3 } }))).toBe(
-      "optical, rest 1.02000 um, axis frame TOPOCENT, shift 25.3 km/s",
+      "optical, rest 1.02000 um, z = 0, axis frame TOPOCENT, shift 25.3 km/s",
     );
   });
 
@@ -306,6 +312,92 @@ describe("lineMeasurementRows", () => {
     expect(formatQuantity(0)).toBe("0.000");
     expect(formatQuantity(null)).toBe("n/a");
     expect(formatQuantity(NaN)).toBe("n/a");
+  });
+});
+
+const REDSHIFTED: Partial<LineMeasurement> = {
+  centroid: 0.98469,
+  sigma: 3.2846e-4,
+  fwhm: 7.7346e-4,
+  velocity: {
+    centroid_kms: 149896.229,
+    sigma_kms: 150.0,
+    fwhm_kms: 353.223,
+    rest_um: 0.65646,
+    convention: "optical",
+    shift_applied_kms: 0,
+    axis_frame: null,
+    redshift: 0.5,
+    source_centroid_kms: 0,
+    source_sigma_kms: 100.0,
+    source_fwhm_kms: 235.482,
+  },
+};
+
+describe("lineMeasurementRows at a redshift", () => {
+  const row = (m: LineMeasurement, label: string) => lineMeasurementRows(m).find((r) => r.label === label)?.value;
+  const OBSERVER = "Observer frame (against the laboratory rest wavelength)";
+
+  it("puts the source-frame velocity and widths beside the centroid, sigma and FWHM", () => {
+    const m = measurement(REDSHIFTED);
+    expect(row(m, "Centroid")).toBe("0.98469 um / 0.0 km/s");
+    expect(row(m, "Sigma")).toBe("3.285e-4 um / 100.0 km/s");
+    expect(row(m, "FWHM")).toBe("7.735e-4 um / 235.5 km/s");
+  });
+
+  it("moves the observer-frame values against the laboratory rest wavelength to their own row and states z", () => {
+    const m = measurement(REDSHIFTED);
+    expect(row(m, OBSERVER)).toBe("centroid 149896.2 km/s, sigma 150.0 km/s, FWHM 353.2 km/s");
+    expect(row(m, "Velocity frame")).toBe("optical, rest 0.65646 um, z = 0.5, axis frame not declared (no SPECSYS)");
+    const labels = lineMeasurementRows(m).map((r) => r.label);
+    expect(labels.indexOf(OBSERVER)).toBe(labels.indexOf("Velocity frame") + 1);
+  });
+
+  it("shows no observer-frame row at z = 0, where it would repeat the source frame", () => {
+    expect(row(measurement(), OBSERVER)).toBeUndefined();
+    expect(row(measurement({ velocity: null }), OBSERVER)).toBeUndefined();
+  });
+});
+
+describe("lineMeasurementRows for absorption and undefined widths", () => {
+  const rowOf = (m: LineMeasurement, label: string) => lineMeasurementRows(m).find((r) => r.label === label);
+
+  it("labels the extremum of a line with negative flux as its trough", () => {
+    const absorption = measurement({ flux: -3.759806e-3, equivalent_width: 3.76e-3, peak: -0.49999882, peak_channel: 20 });
+    expect(rowOf(absorption, "Peak")).toBeUndefined();
+    expect(rowOf(absorption, "Trough")?.value).toBe("-0.5000 at ch 20");
+    expect(rowOf(measurement(), "Peak")?.value).toBe("1.000 at ch 20");
+    expect(rowOf(measurement({ flux: 0 }), "Peak")).toBeDefined();
+  });
+
+  it("prints an undefined equivalent width as unavailable", () => {
+    expect(rowOf(measurement({ equivalent_width: null }), "Equivalent width (absorption > 0, emission < 0)")?.value).toBe("n/a um");
+  });
+
+  it("names the continuum scatter as the robust sigma it is", () => {
+    expect(rowOf(measurement(), "Continuum")?.value).toBe("level 1.000, slope 0.000, σ(MAD) 0.01000, 12 ch linear");
+  });
+});
+
+describe("line overlay on a faint F_lambda spectrum", () => {
+  it("places a 1e-17 continuum inside a 0.9e-17 to 2.1e-17 frame instead of on a 1e-10 floor", () => {
+    const xs = Array.from({ length: 40 }, (_, i) => 0.6555 + i * 1e-4);
+    const m: PlotMapping = { width: 400, padLeft: 50, padRight: 12, xMin: xs[0], xMax: xs[39], xValues: xs, n: 40 };
+    const run = measurement({
+      z0: 15,
+      z1: 25,
+      continuum_level: 1e-17,
+      continuum_slope: 0,
+      continuum_reference: xs[20],
+      continuum_windows: [
+        [0, 4],
+        [35, 39],
+      ],
+      fit: null,
+    });
+    const { continuum } = lineOverlayPolylines(run, xs, m, { top: 10, height: 146, yMin: 0.9e-17, yMax: 2.1e-17 });
+    expect(continuum.length).toBeGreaterThan(0);
+    expect(continuum[0].y).toBeCloseTo(143.83, 1);
   });
 });
 
@@ -437,11 +529,25 @@ describe("lineMeasurementRows error rows", () => {
     expect(row(measurement(), "Error source")).toBe("none: flux error from the continuum scatter");
   });
 
-  it("lists the pixel, level and slope terms of the flux error in the flux unit, only when ERR was used", () => {
+  it("lists the pixel, level and slope terms of the flux error in the flux unit, and no row when the backend sent no terms", () => {
     expect(row(measurement(FILE_WEIGHTED), "Error terms")).toBe("pixel 4.000e-5, level 2.500e-5, slope 1.200e-6 Jy x um");
     expect(row(measurement(), "Error terms")).toBeUndefined();
     const order = lineMeasurementRows(measurement(FILE_WEIGHTED)).map((r) => r.label);
     expect(order.slice(-3)).toEqual(["Error source", "Error terms", "Excluded channels"]);
+  });
+
+  it("lists the three terms of the continuum-scatter error when no ERR was used", () => {
+    const scatter = measurement({ err_used: false, flux_err_terms: { pixel: 2.4e-4, level: 9.1e-5, slope: 3e-6 } });
+    expect(row(scatter, "Error source")).toBe("none: flux error from the continuum scatter");
+    expect(row(scatter, "Error terms")).toBe("pixel 2.400e-4, level 9.100e-5, slope 3.000e-6 Jy/beam x um");
+  });
+
+  it("says how much the continuum scatter scaled an ERR-propagated flux error", () => {
+    expect(row(measurement({ ...FILE_WEIGHTED, continuum_chi2_red: 3065.964 }), "Error source")).toBe(
+      "FLUX_ERROR column (HDU 1), weights 1/ERR^2, flux error x 55.37 from the continuum scatter (chi2_red 3066)",
+    );
+    expect(row(measurement({ ...FILE_WEIGHTED, continuum_chi2_red: 0.93 }), "Error source")).toBe("FLUX_ERROR column (HDU 1), weights 1/ERR^2");
+    expect(row(measurement({ ...FILE_WEIGHTED, continuum_chi2_red: null }), "Error source")).toBe("FLUX_ERROR column (HDU 1), weights 1/ERR^2");
   });
 
   it("counts the channels left out by DQ, non-finite flux and unusable ERR", () => {
@@ -456,7 +562,7 @@ describe("line measurement CSV for a spectrum file", () => {
 
   it("keeps the existing columns in place and appends the HDU and the error columns", () => {
     expect(CSV_COLUMNS.indexOf("fit_converged")).toBe(40);
-    expect(CSV_COLUMNS.slice(41)).toEqual([
+    expect(CSV_COLUMNS.slice(41, 50)).toEqual([
       "source_hdu",
       "err_used",
       "err_source",
@@ -492,6 +598,41 @@ describe("line measurement CSV for a spectrum file", () => {
     expect(cellOf(m, "err_used")).toBe("false");
     expect(cellOf(m, "err_source")).toBe("none");
     expect(cellOf(m, "flux_err_pixel")).toBe("");
+  });
+
+  it("appends the redshift, the source-frame velocities, the continuum chi2 and the nominal channel count after the error columns", () => {
+    expect(CSV_COLUMNS.slice(50)).toEqual([
+      "velocity_redshift",
+      "velocity_source_centroid_kms",
+      "velocity_source_sigma_kms",
+      "velocity_source_fwhm_kms",
+      "continuum_chi2_red",
+      "n_channels_nominal",
+    ]);
+  });
+
+  it("writes the redshift, the source-frame values, chi2_red and the nominal count, blank when absent", () => {
+    const m = measurement({ ...REDSHIFTED, ...FILE_WEIGHTED, continuum_chi2_red: 3065.964, n_channels: 24, n_channels_nominal: 25 });
+    expect(lineMeasurementCsv(m).split("\n")[1].split(",")).toHaveLength(CSV_COLUMNS.length);
+    expect(cellOf(m, "velocity_redshift")).toBe("0.5");
+    expect(cellOf(m, "velocity_source_centroid_kms")).toBe("0");
+    expect(cellOf(m, "velocity_source_sigma_kms")).toBe("100");
+    expect(cellOf(m, "velocity_source_fwhm_kms")).toBe("235.482");
+    expect(cellOf(m, "velocity_centroid_kms")).toBe("149896.229");
+    expect(cellOf(m, "continuum_chi2_red")).toBe("3065.964");
+    expect(cellOf(m, "n_channels")).toBe("24");
+    expect(cellOf(m, "n_channels_nominal")).toBe("25");
+    const bare = measurement({ velocity: null });
+    expect(cellOf(bare, "velocity_redshift")).toBe("");
+    expect(cellOf(bare, "velocity_source_sigma_kms")).toBe("");
+    expect(cellOf(bare, "continuum_chi2_red")).toBe("");
+  });
+
+  it("fills the flux error terms of the continuum-scatter path", () => {
+    const m = measurement({ err_used: false, flux_err_terms: { pixel: 2.4e-4, level: 9.1e-5, slope: 3e-6 } });
+    expect(cellOf(m, "flux_err_pixel")).toBe("0.00024");
+    expect(cellOf(m, "flux_err_level")).toBe("0.000091");
+    expect(cellOf(m, "flux_err_slope")).toBe("0.000003");
   });
 });
 

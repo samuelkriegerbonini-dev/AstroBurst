@@ -85,6 +85,21 @@ describe("LineMeasurementSection error rows and switches", () => {
   });
 });
 
+describe("LineMeasurementSection channel count", () => {
+  it("prints the measured channels out of the nominal line range", () => {
+    const html = render({ result: { ...RESULT, n_channels: 26, n_channels_nominal: 26 } });
+    expect(html).toContain("26 of 26 channels");
+    expect(html).not.toContain("data-dropped-channels");
+  });
+
+  it("marks a line range with dropped channels as a warning, since the flux is then a partial sum", () => {
+    const html = render({ result: { ...RESULT, n_channels: 24, n_channels_nominal: 26 } });
+    expect(html).toContain("24 of 26 channels");
+    expect(html).toMatch(/<span[^>]*data-dropped-channels="2"[^>]*>24 of 26 channels<\/span>/);
+    expect(html).toContain("text-amber-300/80");
+  });
+});
+
 describe("LineMeasurementSection model names and equivalent-width sign", () => {
   it("names the models by what they compute and keeps the logged values", () => {
     expect(LINE_MODEL_LABELS).toEqual({ none: "direct integration", gaussian: "direct + Gaussian fit" });

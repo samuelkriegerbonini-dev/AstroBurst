@@ -91,6 +91,8 @@ function LineMeasurementSection({
 
   const rows = result ? lineMeasurementRows(result) : [];
   const fit = result?.fit ?? null;
+  const nominalChannels = result ? (result.n_channels_nominal ?? result.z1 - result.z0 + 1) : 0;
+  const droppedChannels = result ? nominalChannels - result.n_channels : 0;
 
   return (
     <div className="px-3 pb-2 flex flex-col gap-2" style={{ borderTop: "1px solid var(--ab-border)", paddingTop: 8 }}>
@@ -179,8 +181,19 @@ function LineMeasurementSection({
           </div>
           <div className="text-[10px] font-mono text-zinc-500 flex items-center gap-2 flex-wrap">
             <span>
-              {spectrumSourceLabel(result.source)}, ch {result.z0}-{result.z1}, {result.n_channels} channels, continuum{" "}
-              {result.continuum_windows[0][0]}-{result.continuum_windows[0][1]} and {result.continuum_windows[1][0]}-
+              {spectrumSourceLabel(result.source)}, ch {result.z0}-{result.z1},{" "}
+              {droppedChannels !== 0 ? (
+                <span
+                  data-dropped-channels={droppedChannels}
+                  className="text-amber-300/80"
+                  title="Channels were dropped inside the line range: flux, equivalent width, centroid and sigma are partial sums; the notes say which and why"
+                >
+                  {`${result.n_channels} of ${nominalChannels} channels`}
+                </span>
+              ) : (
+                `${result.n_channels} of ${nominalChannels} channels`
+              )}
+              , continuum {result.continuum_windows[0][0]}-{result.continuum_windows[0][1]} and {result.continuum_windows[1][0]}-
               {result.continuum_windows[1][1]}
             </span>
             <span className="ml-auto">{result.elapsed_ms}ms</span>
