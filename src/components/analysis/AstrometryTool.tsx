@@ -37,7 +37,7 @@ const SECTION_TIPS = {
 function AstrometryTool() {
   const { publishProcessed } = useRenderActions();
   const { starOverlayRef } = useStarOverlayContext();
-  const { effectivePath, compositeOnScreen, rgbPath, regionKey, targetWidth, targetHeight, filePath, fileKey, detectionScope, starsOnMeasuredImage } =
+  const { effectivePath, compositeOnScreen, rgbPath, regionKey, measureKey, targetWidth, targetHeight, filePath, fileKey, detectionScope, starsOnMeasuredImage } =
     useAnalysisMeasure();
   const { result: starResult, loading: starLoading, error: detectError } = useStarDetection(detectionScope);
   const sectionTip = useSectionTip(ASTROMETRY_SECTIONS, SECTION_TIPS);
@@ -116,7 +116,7 @@ function AstrometryTool() {
 
         <section id={ANALYSIS_SECTION.catalog.id}>
           <SectionTipNote tip={sectionTip} sectionId={ANALYSIS_SECTION.catalog.id} />
-          <CatalogPanel filePath={skyFilePath} measurePath={effectivePath} />
+          <CatalogPanel filePath={skyFilePath} measurePath={effectivePath} measureKey={measureKey} />
         </section>
 
         <section id={ANALYSIS_SECTION.targets.id}>

@@ -3,7 +3,8 @@ import { ClipboardCopy, Crosshair, Database, Download, Loader2, Shapes } from "l
 import { catalogConeSearch, catalogCrossMatch, catalogExportCsv, type CatalogExportItems } from "../../services/catalog";
 import { useTimedNotice } from "../../hooks/useTimedNotice";
 import { GAIA_BANDS } from "../../shared/types/catalog";
-import type { CatalogCsvKind, ConeSearchResult, CrossMatchResult, GaiaBand, PlacedCatalogRow } from "../../shared/types/catalog";
+import type { CatalogCsvKind, ConeSearchResult, CrossMatchResult, GaiaBand, PlacedCatalogRow, ZeroPointAperture } from "../../shared/types/catalog";
+import { APERTURE_RANGE_HINT, apertureRadiusInRange } from "../../utils/photometryTable";
 import { overlayStore } from "../../utils/overlayStore";
 import { regionStore } from "../../utils/regionStore";
 import { DEFAULT_REGION_PROPS } from "../../utils/regionPersistence";
@@ -19,6 +20,7 @@ import CrossMatchPlots from "./CrossMatchPlots";
 interface CatalogPanelProps {
   filePath: string | null;
   measurePath?: string | null;
+  measureKey?: string | null;
 }
 
 const DEFAULT_MAG_LIMIT = 18;
@@ -32,6 +34,9 @@ const NO_IMAGE_REASON = "Select an image first. Gaia DR3 search needs its WCS, f
 const RADIUS_FIELD: DecimalFieldOptions = { optional: true, min: 0.1 };
 const MAG_LIMIT_FIELD: DecimalFieldOptions = { optional: true, min: 5 };
 const MATCH_RADIUS_FIELD: DecimalFieldOptions = { optional: true, min: 0.2 };
+const APERTURE_FIELD: DecimalFieldOptions = { optional: true };
+const APERTURE_TITLE = "Aperture radius in pixels for the zero point; blank uses 1.5 x FWHM of each star";
+const ZERO_POINT_APERTURE_TITLE = "The zero point holds only for instrumental magnitudes measured in this aperture";
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-cyan-500/50 w-full";
@@ -43,24 +48,31 @@ function fmt(v: number | null | undefined, digits = 2): string {
   return v === null || v === undefined || !Number.isFinite(v) ? "--" : v.toFixed(digits);
 }
 
+function zeroPointApertureText(aperture: ZeroPointAperture): string {
+  if (aperture.kind === "fixed") return `aperture r = ${fmt(aperture.radius_px)} px`;
+  return `aperture ${aperture.fwhm_factor} x FWHM per star, median r = ${fmt(aperture.median_radius_px)} px (${fmt(aperture.min_radius_px)} to ${fmt(aperture.max_radius_px)})`;
+}
+
 function compareByMagnitude(a: PlacedCatalogRow, b: PlacedCatalogRow): number {
   const ga = a.g ?? Number.POSITIVE_INFINITY;
   const gb = b.g ?? Number.POSITIVE_INFINITY;
   return ga - gb;
 }
 
-function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
+function CatalogPanel({ filePath, measurePath = null, measureKey = null }: CatalogPanelProps) {
   const wcsPath = targetProjectionPath(filePath, measurePath);
   const radiusId = useId();
   const magLimitId = useId();
   const bandId = useId();
   const matchRadiusId = useId();
+  const apertureId = useId();
   const reasonId = useId();
   const [radiusText, setRadiusText] = useState("");
   const [magLimitText, setMagLimitText] = useState(String(DEFAULT_MAG_LIMIT));
   const [band, setBand] = useState<GaiaBand>("G");
   const [colourTerm, setColourTerm] = useState(true);
   const [matchRadiusText, setMatchRadiusText] = useState(String(DEFAULT_MATCH_RADIUS_ARCSEC));
+  const [apertureRadiusText, setApertureRadiusText] = useState("");
   const [cone, setCone] = useState<ConeSearchResult | null>(null);
   const [cross, setCross] = useState<CrossMatchResult | null>(null);
   const [searching, setSearching] = useState(false);
@@ -76,14 +88,20 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
   const radiusField = decimalFieldState(radiusText, RADIUS_FIELD);
   const magLimitField = decimalFieldState(magLimitText, MAG_LIMIT_FIELD);
   const matchRadiusField = decimalFieldState(matchRadiusText, MATCH_RADIUS_FIELD);
+  const apertureField = decimalFieldState(apertureRadiusText, APERTURE_FIELD);
   const radiusArcmin = radiusField.value;
   const magLimit = magLimitField.value ?? DEFAULT_MAG_LIMIT;
   const matchRadiusArcsec = matchRadiusField.value ?? DEFAULT_MATCH_RADIUS_ARCSEC;
+  const apertureRadius = apertureField.value ?? undefined;
+  const apertureOutOfRange = !apertureRadiusInRange(apertureRadius);
   const searchFieldError = firstFieldError([
     ["Radius (arcmin)", radiusField],
     ["G limit (mag)", magLimitField],
   ]);
-  const matchFieldError = firstFieldError([['Match radius (")', matchRadiusField]]);
+  const matchFieldError = firstFieldError([
+    ['Match radius (")', matchRadiusField],
+    ["Aperture r (px)", apertureField],
+  ]);
 
   useEffect(() => {
     requestSeqRef.current++;
@@ -93,7 +111,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
     setHoverId(null);
     setSearching(false);
     setMatching(false);
-  }, [filePath, wcsPath]);
+  }, [filePath, wcsPath, measureKey]);
 
   const matchedIds = useMemo(() => new Set((cross?.matches ?? []).map((m) => m.row.id)), [cross]);
   const separations = useMemo(() => {
@@ -149,7 +167,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
   }, [wcsPath, searchFieldError, radiusArcmin, magLimit]);
 
   const runCrossMatch = useCallback(async () => {
-    if (!wcsPath || matchFieldError !== null) return;
+    if (!wcsPath || matchFieldError !== null || apertureOutOfRange) return;
     const seq = ++requestSeqRef.current;
     setMatching(true);
     setError(null);
@@ -161,6 +179,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
         radiusArcsec: matchRadiusArcsec,
         band,
         colourTerm,
+        apertureRadius,
       });
       if (requestSeqRef.current !== seq) return;
       matched = true;
@@ -172,7 +191,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
       if (requestSeqRef.current === seq) setMatching(false);
     }
     if (matched && !cone) await runSearch();
-  }, [filePath, wcsPath, matchFieldError, matchRadiusArcsec, band, colourTerm, cone, runSearch]);
+  }, [filePath, wcsPath, matchFieldError, apertureOutOfRange, matchRadiusArcsec, band, colourTerm, apertureRadius, cone, runSearch]);
 
   const exportItems = useCallback(
     (kind: CatalogCsvKind): CatalogExportItems | null => {
@@ -303,7 +322,7 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
         </div>
         {noImageReason && <div id={reasonId} data-run-blocked className="text-[9px] text-zinc-500">{noImageReason}</div>}
 
-        <div className="grid grid-cols-3 gap-2 items-end">
+        <div className="grid grid-cols-2 gap-2 items-end">
           <div className="flex flex-col gap-0.5">
             <label htmlFor={bandId} className="text-[9px] text-zinc-500 uppercase">
               Band
@@ -329,17 +348,32 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
               className={INPUT_CLASS}
             />
           </div>
+          <div className="flex flex-col gap-0.5">
+            <label htmlFor={apertureId} className="text-[9px] text-zinc-500 uppercase">
+              Aperture r (px)
+            </label>
+            <DecimalField
+              id={apertureId}
+              {...APERTURE_FIELD}
+              value={apertureRadiusText}
+              placeholder="auto"
+              title={APERTURE_TITLE}
+              onChange={setApertureRadiusText}
+              className={INPUT_CLASS}
+            />
+          </div>
           <Toggle label="Colour term" checked={colourTerm} accent="cyan" onChange={setColourTerm} />
         </div>
 
         {matchFieldError && <div className="text-[9px] text-amber-400/90" data-field-error>{matchFieldError}</div>}
+        {apertureOutOfRange && <div className="text-[9px] text-amber-400/90">{APERTURE_RANGE_HINT}</div>}
 
         <div title={noImageReason ?? undefined}>
           <RunButton
             label="Cross-match detected stars"
             runningLabel="Detecting and matching..."
             running={matching}
-            disabled={!wcsPath || busy || matchFieldError !== null}
+            disabled={!wcsPath || busy || matchFieldError !== null || apertureOutOfRange}
             accent="amber"
             icon={<Crosshair size={12} />}
             describedBy={noImageReason ? reasonId : undefined}
@@ -384,6 +418,11 @@ function CatalogPanel({ filePath, measurePath = null }: CatalogPanelProps) {
                     }`
                   : "--"}
               </div>
+              {zp && cross.aperture && (
+                <div className="text-zinc-400 font-mono" title={ZERO_POINT_APERTURE_TITLE}>
+                  {zeroPointApertureText(cross.aperture)}
+                </div>
+              )}
             </div>
           </div>
         )}

@@ -15,6 +15,7 @@ interface CapturedPanelProps {
 interface SkyPanelProps {
   filePath: string | null;
   measurePath?: string | null;
+  measureKey?: string | null;
 }
 
 interface ChipProps {
@@ -213,5 +214,10 @@ describe("AstrometryTool catalog and targets panels", () => {
       expect(panel?.filePath).toBe(FRAME_PATH);
       expect(panel?.measurePath).toBe(STACK_PATH);
     }
+  });
+
+  it("gives the catalog panel the version key of the measured image, so a step that rewrites the same path clears the cross-match", async () => {
+    await renderTool();
+    expect(skyPanels.catalog?.measureKey).toBe(`${STACK_PATH}@1`);
   });
 });

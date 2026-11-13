@@ -131,10 +131,19 @@ pub struct CrossMatch {
     pub d_dec_arcsec: f64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ZeroPointStatus {
+    Used,
+    Clipped,
+    Saturated,
+    NoColour,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ZeroPointFit {
     pub zp: f64,
-    pub zp_err: f64,
+    pub zp_err: Option<f64>,
     pub colour_coeff: Option<f64>,
     pub rms: f64,
     pub n_used: usize,
@@ -142,6 +151,8 @@ pub struct ZeroPointFit {
     pub n_without_colour: usize,
     pub band: String,
     pub colour_term_used: bool,
+    #[serde(skip)]
+    pub sample_status: Vec<Option<ZeroPointStatus>>,
 }
 
 struct ColumnMap {
@@ -446,46 +457,59 @@ fn linear_fit(points: &[(f64, f64)]) -> Option<(f64, f64)> {
     Some((intercept, slope))
 }
 
+fn kept_status(len: usize, kept: &[usize]) -> Vec<Option<ZeroPointStatus>> {
+    let mut status = vec![Some(ZeroPointStatus::Clipped); len];
+    for &i in kept {
+        status[i] = Some(ZeroPointStatus::Used);
+    }
+    status
+}
+
 fn fit_with_colour(points: &[(f64, f64)], band: &str) -> Option<ZeroPointFit> {
-    let mut kept: Vec<(f64, f64)> = points.to_vec();
-    let (mut zp, mut coeff) = linear_fit(&kept)?;
-    let mut n_rejected = 0usize;
+    let mut kept: Vec<usize> = (0..points.len()).collect();
+    let (mut zp, mut coeff) = linear_fit(points)?;
     for _ in 0..ZERO_POINT_CLIP_ITERATIONS {
-        let residuals: Vec<f64> = kept.iter().map(|(d, x)| d - zp - coeff * x).collect();
+        let residuals: Vec<f64> = kept.iter().map(|&i| points[i].0 - zp - coeff * points[i].1).collect();
         let sigma = robust_sigma(&residuals);
         if sigma <= SIGMA_FLOOR_MAG {
             break;
         }
         let limit = ZERO_POINT_CLIP_SIGMA * sigma;
-        let filtered: Vec<(f64, f64)> = kept
+        let filtered: Vec<usize> = kept
             .iter()
             .zip(&residuals)
             .filter(|(_, r)| r.abs() <= limit)
-            .map(|(p, _)| *p)
+            .map(|(i, _)| *i)
             .collect();
         if filtered.len() == kept.len() || filtered.len() < MIN_FIT_SAMPLES_WITH_COLOUR {
             break;
         }
-        let Some((next_zp, next_coeff)) = linear_fit(&filtered) else {
+        let survivors: Vec<(f64, f64)> = filtered.iter().map(|&i| points[i]).collect();
+        let Some((next_zp, next_coeff)) = linear_fit(&survivors) else {
             break;
         };
-        n_rejected += kept.len() - filtered.len();
         kept = filtered;
         zp = next_zp;
         coeff = next_coeff;
     }
-    let residuals: Vec<f64> = kept.iter().map(|(d, x)| d - zp - coeff * x).collect();
+    let n = kept.len() as f64;
+    let residuals: Vec<f64> = kept.iter().map(|&i| points[i].0 - zp - coeff * points[i].1).collect();
     let rms = root_mean_square(&residuals);
+    let mean_colour = kept.iter().map(|&i| points[i].1).sum::<f64>() / n;
+    let colour_spread: f64 = kept.iter().map(|&i| (points[i].1 - mean_colour).powi(2)).sum();
+    let zp_err = (kept.len() > 2)
+        .then(|| rms * (n / (n - 2.0)).sqrt() * (1.0 / n + mean_colour * mean_colour / colour_spread).sqrt());
     Some(ZeroPointFit {
         zp,
-        zp_err: rms / (kept.len() as f64).sqrt(),
+        zp_err,
         colour_coeff: Some(coeff),
         rms,
         n_used: kept.len(),
-        n_rejected,
+        n_rejected: points.len() - kept.len(),
         n_without_colour: 0,
         band: band.to_string(),
         colour_term_used: true,
+        sample_status: kept_status(points.len(), &kept),
     })
 }
 
@@ -493,36 +517,38 @@ fn fit_median(diffs: &[f64], band: &str) -> Option<ZeroPointFit> {
     if diffs.is_empty() {
         return None;
     }
-    let mut kept: Vec<f64> = diffs.to_vec();
-    let mut zp = exact_median_f64(&kept);
-    let mut n_rejected = 0usize;
+    let mut kept: Vec<usize> = (0..diffs.len()).collect();
+    let mut zp = exact_median_f64(diffs);
     for _ in 0..ZERO_POINT_CLIP_ITERATIONS {
-        let residuals: Vec<f64> = kept.iter().map(|d| d - zp).collect();
+        let residuals: Vec<f64> = kept.iter().map(|&i| diffs[i] - zp).collect();
         let sigma = robust_sigma(&residuals);
         if sigma <= SIGMA_FLOOR_MAG {
             break;
         }
         let limit = ZERO_POINT_CLIP_SIGMA * sigma;
         let before = kept.len();
-        kept.retain(|d| (d - zp).abs() <= limit);
+        kept.retain(|&i| (diffs[i] - zp).abs() <= limit);
         if kept.len() == before {
             break;
         }
-        n_rejected += before - kept.len();
-        zp = exact_median_f64(&kept);
+        let survivors: Vec<f64> = kept.iter().map(|&i| diffs[i]).collect();
+        zp = exact_median_f64(&survivors);
     }
-    let residuals: Vec<f64> = kept.iter().map(|d| d - zp).collect();
+    let residuals: Vec<f64> = kept.iter().map(|&i| diffs[i] - zp).collect();
     let rms = root_mean_square(&residuals);
+    let median_over_mean_error = std::f64::consts::FRAC_PI_2.sqrt();
+    let zp_err = (kept.len() > 1).then(|| median_over_mean_error * rms / (kept.len() as f64 - 1.0).sqrt());
     Some(ZeroPointFit {
         zp,
-        zp_err: rms / (kept.len() as f64).sqrt(),
+        zp_err,
         colour_coeff: None,
         rms,
         n_used: kept.len(),
-        n_rejected,
+        n_rejected: diffs.len() - kept.len(),
         n_without_colour: 0,
         band: band.to_string(),
         colour_term_used: false,
+        sample_status: kept_status(diffs.len(), &kept),
     })
 }
 
@@ -534,24 +560,38 @@ pub fn fit_zero_point(
     band: &str,
 ) -> Option<ZeroPointFit> {
     let n = mag_inst.len().min(cat_mag.len());
-    let samples: Vec<(f64, Option<f64>)> = (0..n)
+    let samples: Vec<(usize, f64, Option<f64>)> = (0..n)
         .filter_map(|i| {
             let diff = cat_mag[i] - mag_inst[i];
             diff.is_finite()
-                .then(|| (diff, colour.get(i).copied().flatten().filter(|c| c.is_finite())))
+                .then(|| (i, diff, colour.get(i).copied().flatten().filter(|c| c.is_finite())))
         })
         .collect();
+    let mut status = vec![None; n];
     if use_colour_term {
-        let with_colour: Vec<(f64, f64)> = samples.iter().filter_map(|(d, c)| c.map(|c| (*d, c))).collect();
+        let with_colour: Vec<(usize, f64, f64)> = samples.iter().filter_map(|(i, d, c)| c.map(|c| (*i, *d, c))).collect();
         if with_colour.len() >= MIN_FIT_SAMPLES_WITH_COLOUR {
-            if let Some(mut fit) = fit_with_colour(&with_colour, band) {
+            let points: Vec<(f64, f64)> = with_colour.iter().map(|(_, d, c)| (*d, *c)).collect();
+            if let Some(mut fit) = fit_with_colour(&points, band) {
                 fit.n_without_colour = samples.len() - with_colour.len();
+                for (i, _, c) in &samples {
+                    status[*i] = c.is_none().then_some(ZeroPointStatus::NoColour);
+                }
+                for ((i, _, _), fitted) in with_colour.iter().zip(&fit.sample_status) {
+                    status[*i] = *fitted;
+                }
+                fit.sample_status = status;
                 return Some(fit);
             }
         }
     }
-    let diffs: Vec<f64> = samples.iter().map(|(d, _)| *d).collect();
-    fit_median(&diffs, band)
+    let diffs: Vec<f64> = samples.iter().map(|(_, d, _)| *d).collect();
+    let mut fit = fit_median(&diffs, band)?;
+    for ((i, _, _), fitted) in samples.iter().zip(&fit.sample_status) {
+        status[*i] = *fitted;
+    }
+    fit.sample_status = status;
+    Some(fit)
 }
 
 pub type CatalogCacheKey = (i64, i64, i64, Option<i64>, usize);
@@ -1158,7 +1198,11 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         assert!(fit.colour_term_used);
         assert_eq!(fit.band, "G");
         assert!(fit.rms > 0.0 && fit.rms < 0.01, "{fit:?}");
-        assert!((fit.zp_err - fit.rms / 19f64.sqrt()).abs() < 1e-12);
+        let colours: Vec<f64> = colour.iter().enumerate().filter(|(i, _)| *i != 7).filter_map(|(_, c)| *c).collect();
+        let mean_colour = colours.iter().sum::<f64>() / 19.0;
+        let colour_spread: f64 = colours.iter().map(|c| (c - mean_colour).powi(2)).sum();
+        let intercept_error = fit.rms * (19f64 / 17.0).sqrt() * (1.0 / 19.0 + mean_colour * mean_colour / colour_spread).sqrt();
+        assert!((fit.zp_err.unwrap() - intercept_error).abs() < 1e-12, "{fit:?}");
     }
 
     #[test]
@@ -1214,6 +1258,122 @@ mag\tdeg\tdeg\t\tmas/yr\tmas/yr\tmas\tmag\tmag\tmag\n\
         assert_eq!(single.zp, 25.0);
         assert_eq!(single.n_used, 1);
         assert_eq!(single.n_rejected, 0);
+    }
+
+    fn serialised_zp_err(fit: &ZeroPointFit) -> Option<f64> {
+        serde_json::to_value(fit).unwrap()["zp_err"].as_f64()
+    }
+
+    #[test]
+    fn the_colour_term_zero_point_error_is_the_standard_error_of_the_intercept_at_colour_zero() {
+        const SCIPY_INTERCEPT_STDERR: f64 = 2.131670976510981e-3;
+        let (inst, cat, colour) = synthetic_photometry(20);
+        let fit = fit_zero_point(&inst, &cat, &colour, true, "G").unwrap();
+        assert_eq!(fit.n_used, 19);
+        let reported = serialised_zp_err(&fit).unwrap();
+        let at_mean_colour = fit.rms / 19f64.sqrt();
+        assert!(
+            (reported - SCIPY_INTERCEPT_STDERR).abs() < 1e-12,
+            "zp_err {reported:e} must be the standard error {SCIPY_INTERCEPT_STDERR:e} of the intercept at BP-RP = 0 (scipy.stats.linregress intercept_stderr); rms / sqrt(n) = {at_mean_colour:e} is the error of the line at the mean colour"
+        );
+        assert!(reported > 2.3 * at_mean_colour, "colour zero lies two standard deviations outside this sample: {reported:e} vs {at_mean_colour:e}");
+    }
+
+    #[test]
+    fn the_median_zero_point_error_is_the_standard_error_of_a_median() {
+        const NUMPY_MEDIAN_ERROR: f64 = 1.756261963787168e-2;
+        let (inst, cat, colour) = synthetic_photometry(20);
+        let fit = fit_zero_point(&inst, &cat, &colour, false, "G").unwrap();
+        assert_eq!(fit.n_used, 19);
+        let reported = serialised_zp_err(&fit).unwrap();
+        assert!(
+            (reported - NUMPY_MEDIAN_ERROR).abs() < 1e-12,
+            "zp_err {reported:e} must be sqrt(pi/2) * s / sqrt(n) = {NUMPY_MEDIAN_ERROR:e} with s on n - 1 degrees of freedom; rms / sqrt(n) = {:e} is the error of a mean",
+            fit.rms / 19f64.sqrt()
+        );
+
+        let pair = fit_zero_point(&[-13.0, -13.2], &[12.0, 12.0], &[None, None], false, "G").unwrap();
+        assert!((pair.zp - 25.1).abs() < 1e-12, "{pair:?}");
+        let pair_error = serialised_zp_err(&pair).unwrap();
+        assert!((pair_error - 0.1 * std::f64::consts::FRAC_PI_2.sqrt()).abs() < 1e-12, "{pair_error:e}");
+
+        let single = fit_zero_point(&[-13.0], &[12.0], &[None], false, "RP").unwrap();
+        assert_eq!(single.n_used, 1);
+        assert_eq!(serialised_zp_err(&single), None, "one star carries no scatter: its zero point has no error estimate, not an error of 0");
+    }
+
+    #[test]
+    fn fit_zero_point_tells_how_each_sample_entered_the_fit() {
+        let (inst, mut cat, mut colour) = synthetic_photometry(20);
+        colour[2] = None;
+        colour[11] = Some(f64::NAN);
+        cat[15] = f64::NAN;
+        let count = |fit: &ZeroPointFit, wanted: ZeroPointStatus| fit.sample_status.iter().filter(|s| **s == Some(wanted)).count();
+
+        let fit = fit_zero_point(&inst, &cat, &colour, true, "G").unwrap();
+        assert!(fit.colour_term_used);
+        assert_eq!(fit.sample_status.len(), 20);
+        for (i, status) in fit.sample_status.iter().enumerate() {
+            let expected = match i {
+                15 => None,
+                2 | 11 => Some(ZeroPointStatus::NoColour),
+                7 => Some(ZeroPointStatus::Clipped),
+                _ => Some(ZeroPointStatus::Used),
+            };
+            assert_eq!(*status, expected, "sample {i} of the colour fit");
+        }
+        assert_eq!(
+            (count(&fit, ZeroPointStatus::Used), count(&fit, ZeroPointStatus::Clipped), count(&fit, ZeroPointStatus::NoColour)),
+            (fit.n_used, fit.n_rejected, fit.n_without_colour)
+        );
+        assert_eq!((fit.n_used, fit.n_rejected, fit.n_without_colour), (16, 1, 2));
+
+        let median = fit_zero_point(&inst, &cat, &colour, false, "G").unwrap();
+        for (i, status) in median.sample_status.iter().enumerate() {
+            let expected = match i {
+                15 => None,
+                7 => Some(ZeroPointStatus::Clipped),
+                _ => Some(ZeroPointStatus::Used),
+            };
+            assert_eq!(*status, expected, "sample {i} of the median fit");
+        }
+        assert_eq!((count(&median, ZeroPointStatus::Used), count(&median, ZeroPointStatus::Clipped)), (median.n_used, median.n_rejected));
+
+        let too_few: Vec<Option<f64>> = colour.iter().enumerate().map(|(i, c)| if i < 2 { *c } else { None }).collect();
+        let fallback = fit_zero_point(&inst, &cat, &too_few, true, "G").unwrap();
+        assert!(!fallback.colour_term_used);
+        assert_eq!(fallback.sample_status, median.sample_status, "the fallback median fit leaves no sample out for its colour");
+
+        let serialised = serde_json::to_value(&fit).unwrap();
+        assert!(serialised.get("sample_status").is_none(), "the status travels with each match, not inside zero_point: {serialised}");
+        let names: Vec<serde_json::Value> = [ZeroPointStatus::Used, ZeroPointStatus::Clipped, ZeroPointStatus::Saturated, ZeroPointStatus::NoColour]
+            .iter()
+            .map(|s| serde_json::to_value(s).unwrap())
+            .collect();
+        assert_eq!(names, ["used", "clipped", "saturated", "no_colour"]);
+    }
+
+    #[test]
+    fn the_clipped_set_is_the_one_of_the_fit_and_not_three_times_the_final_rms() {
+        let fit_of = |residuals: &[f64]| {
+            let inst: Vec<f64> = residuals.iter().map(|r| -13.0 - r).collect();
+            fit_zero_point(&inst, &vec![12.0; residuals.len()], &vec![None; residuals.len()], false, "G").unwrap()
+        };
+        let pairs = |value: f64, count: usize| (0..count).flat_map(move |_| [value, -value]);
+
+        let heavy_tails: Vec<f64> = [0.046, -0.046, 0.0].into_iter().chain(pairs(0.01, 10)).chain(pairs(0.04, 4)).collect();
+        let fit = fit_of(&heavy_tails);
+        assert_eq!((fit.n_used, fit.n_rejected), (29, 2), "{fit:?}");
+        assert!((fit.zp - 25.0).abs() < 1e-12, "{fit:?}");
+        assert!(0.046 < 3.0 * fit.rms, "both clipped stars lie inside three times the final rms {}", fit.rms);
+        assert_eq!(fit.sample_status[..2], [Some(ZeroPointStatus::Clipped); 2]);
+        assert!(fit.sample_status[2..].iter().all(|s| *s == Some(ZeroPointStatus::Used)), "{:?}", fit.sample_status);
+
+        let two_valued: Vec<f64> = [0.085, -0.085, 0.0].into_iter().chain(pairs(0.02, 30)).collect();
+        let fit = fit_of(&two_valued);
+        assert_eq!((fit.n_used, fit.n_rejected), (63, 0), "{fit:?}");
+        assert!(0.085 > 3.0 * fit.rms, "two kept stars lie outside three times the final rms {}", fit.rms);
+        assert!(fit.sample_status.iter().all(|s| *s == Some(ZeroPointStatus::Used)), "{:?}", fit.sample_status);
     }
 
     #[test]

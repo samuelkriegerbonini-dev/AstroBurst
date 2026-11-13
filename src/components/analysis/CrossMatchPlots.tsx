@@ -12,6 +12,7 @@ const MEDIAN_COLOR = "#a1a1aa";
 const FITTED_COLOR = "#22d3ee";
 const MODEL_COLOR = "#e4e4e7";
 const OUTLIER_COLOR = "#fbbf24";
+const SATURATED_COLOR = "#f87171";
 const NO_COLOUR_COLOR = "#a1a1aa";
 const PLOT_HEIGHT = 170;
 const RESIDUALS_CSV = "residuals";
@@ -52,8 +53,8 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
     const a = cross.astrometry;
     if (!a) return [];
     return [
-      { axis: "x", value: a.median_d_ra_arcsec, label: "median", color: MEDIAN_COLOR },
-      { axis: "y", value: a.median_d_dec_arcsec, label: `rms ${fmtArcsec(a.rms_arcsec)}`, color: MEDIAN_COLOR },
+      { axis: "x", value: a.median_d_ra_arcsec, label: `median ${fmtArcsec(a.median_d_ra_arcsec)}`, color: MEDIAN_COLOR },
+      { axis: "y", value: a.median_d_dec_arcsec, label: `median ${fmtArcsec(a.median_d_dec_arcsec)}`, color: MEDIAN_COLOR },
     ];
   }, [cross]);
 
@@ -64,12 +65,12 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
       cross.matches.map((m) => catalogueMag(m.row, cross.band)),
       cross.matches.map((m) => m.star.mag_inst),
       zp ? zp.zp : null,
-      zp ? zp.rms : null,
+      cross.matches.map((m) => m.zp_status),
       cross.matches.map((m) => m.row.bp_rp),
       coeff,
     );
     const series: ProfileSeries[] = [
-      { x: split.fitted.x, y: split.fitted.y, color: FITTED_COLOR, label: "matched stars", mode: "points" },
+      { x: split.fitted.x, y: split.fitted.y, color: FITTED_COLOR, label: "in fit", mode: "points" },
     ];
     if (split.line) {
       series.push({
@@ -82,7 +83,10 @@ function CrossMatchPlots({ cross }: CrossMatchPlotsProps) {
       });
     }
     if (split.outliers.x.length > 0) {
-      series.push({ x: split.outliers.x, y: split.outliers.y, color: OUTLIER_COLOR, label: "outside fit", mode: "points" });
+      series.push({ x: split.outliers.x, y: split.outliers.y, color: OUTLIER_COLOR, label: "rejected by clipping", mode: "points" });
+    }
+    if (split.saturated.x.length > 0) {
+      series.push({ x: split.saturated.x, y: split.saturated.y, color: SATURATED_COLOR, label: "saturated (not fitted)", mode: "points" });
     }
     if (split.noColour.x.length > 0) {
       series.push({

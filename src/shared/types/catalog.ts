@@ -52,11 +52,12 @@ export interface MeasuredSource {
   ra: number;
   dec: number;
   flux: number;
-  fwhm: number;
+  fwhm: number | null;
   snr: number;
   mag_inst: number;
   mag_ab: number | null;
   saturated: boolean;
+  aperture_radius: number;
 }
 
 export interface MatchedCatalogRow {
@@ -69,12 +70,15 @@ export interface MatchedCatalogRow {
   bp_rp: number | null;
 }
 
+export type ZeroPointStatus = "used" | "clipped" | "saturated" | "no_colour";
+
 export interface CrossMatchEntry {
   star: MeasuredSource;
   row: MatchedCatalogRow;
   sep_arcsec: number;
   d_ra_arcsec: number;
   d_dec_arcsec: number;
+  zp_status: ZeroPointStatus | null;
 }
 
 export interface AstrometrySummary {
@@ -86,7 +90,7 @@ export interface AstrometrySummary {
 
 export interface ZeroPointFit {
   zp: number;
-  zp_err: number;
+  zp_err: number | null;
   colour_coeff: number | null;
   rms: number;
   n_used: number;
@@ -95,6 +99,16 @@ export interface ZeroPointFit {
   band: GaiaBand;
   colour_term_used: boolean;
 }
+
+export type ZeroPointAperture =
+  | { kind: "fixed"; radius_px: number }
+  | {
+      kind: "auto";
+      fwhm_factor: number;
+      median_radius_px: number | null;
+      min_radius_px: number | null;
+      max_radius_px: number | null;
+    };
 
 export interface CrossMatchResult {
   matches: CrossMatchEntry[];
@@ -110,6 +124,7 @@ export interface CrossMatchResult {
   elapsed_ms: number;
   warnings: string[];
   catalog_source?: CatalogSource;
+  aperture?: ZeroPointAperture;
 }
 
 export interface CrossMatchOptions {

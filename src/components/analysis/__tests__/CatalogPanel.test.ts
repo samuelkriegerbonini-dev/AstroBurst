@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isValidElement, type ReactNode } from "react";
-import type { ConeSearchResult } from "../../../shared/types/catalog";
+import type { ConeSearchResult, CrossMatchEntry, CrossMatchResult, ZeroPointFit, ZeroPointStatus } from "../../../shared/types/catalog";
+import type { PlotReferenceLine, ProfileSeries } from "../../regions/ProfilePlot";
+import { APERTURE_RANGE_HINT } from "../../../utils/photometryTable";
 
 const WCS_PATH = "C:/data/m16.fits";
 
 const backend = vi.hoisted(() => ({
   cone: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+  crossMatch: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   exported: [] as string[],
 }));
 
@@ -13,6 +16,7 @@ vi.mock("react", async (importOriginal) => (await import("../../../test/hookRunt
 vi.mock("../../../services/catalog", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../services/catalog")>()),
   catalogConeSearch: backend.cone,
+  catalogCrossMatch: backend.crossMatch,
   catalogExportCsv: async (_path: string, outputPath: string) => {
     backend.exported.push(outputPath);
     return { output_path: outputPath, n: 1 };
@@ -24,6 +28,7 @@ import { hooks } from "../../../test/hookRuntime";
 
 const { default: CatalogPanel } = await import("../CatalogPanel");
 const { default: TargetsPanel } = await import("../TargetsPanel");
+const { default: CrossMatchPlots } = await import("../CrossMatchPlots");
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 
@@ -150,5 +155,223 @@ describe("Sky panels without an image", () => {
     const noTargets = runReason(elements(hooks.render(targets, { filePath: WCS_PATH }) as ReactNode), "Place");
     expect(noTargets.run?.disabled).toBe(true);
     expect(noTargets.reason).toBe("Enter at least one target to place.");
+  });
+});
+
+const ZERO_POINT = 25;
+const AUTO_APERTURE = { kind: "auto", fwhm_factor: 1.5, median_radius_px: 7.06, min_radius_px: 4.62, max_radius_px: 9.06 } as const;
+
+function zeroPointMatch(index: number, residual: number, zpStatus: ZeroPointStatus | null, bpRp: number | null = null): CrossMatchEntry {
+  const g = 12 + index / 8;
+  return {
+    star: {
+      x: 10 + index, y: 20, ra: 274.7, dec: -13.8, flux: 1000, fwhm: 3.2, snr: 80, mag_inst: g - ZERO_POINT - residual, mag_ab: null,
+      saturated: zpStatus === "saturated", aperture_radius: 4.8,
+    },
+    row: { id: `Gaia DR3 ${index}`, ra: 274.7, dec: -13.8, g, bp: null, rp: null, bp_rp: bpRp },
+    sep_arcsec: 0.2,
+    d_ra_arcsec: 0.01,
+    d_dec_arcsec: 0.004,
+    zp_status: zpStatus,
+  };
+}
+
+function fitOf(matches: CrossMatchEntry[], rms: number, zpErr: number | null = 0.012): ZeroPointFit {
+  const count = (status: ZeroPointStatus) => matches.filter((m) => m.zp_status === status).length;
+  return {
+    zp: ZERO_POINT, zp_err: zpErr, colour_coeff: null, rms, n_used: count("used"), n_rejected: count("clipped"), n_without_colour: count("no_colour"),
+    band: "G", colour_term_used: false,
+  };
+}
+
+function crossMatchResult(matches: CrossMatchEntry[], overrides: Partial<CrossMatchResult> = {}): CrossMatchResult {
+  return {
+    matches,
+    sources: matches.map((m) => m.star),
+    astrometry: { median_d_ra_arcsec: 0.01, median_d_dec_arcsec: 0.004, rms_arcsec: 0.052, n: matches.length },
+    zero_point: fitOf(matches, 0.02),
+    photcal_present: false,
+    epoch_year: 2024.5,
+    n_detected: matches.length,
+    n_catalog: 120,
+    band: "G",
+    match_radius_arcsec: 2,
+    elapsed_ms: 9,
+    warnings: [],
+    aperture: AUTO_APERTURE,
+    ...overrides,
+  };
+}
+
+const pairs = (value: number, count: number) => Array.from({ length: count }, () => [value, -value]).flat();
+const catalogueG = (matches: CrossMatchEntry[]) => matches.map((m) => m.row.g);
+
+interface PlotProps {
+  series: ProfileSeries[];
+  referenceLines?: PlotReferenceLine[];
+  csvName?: string;
+}
+
+const plotsType = (CrossMatchPlots as unknown as { type: (props: { cross: CrossMatchResult }) => unknown }).type;
+
+function plotsOf(cross: CrossMatchResult): { residuals: PlotProps; zeroPoint: PlotProps } {
+  hooks.mount();
+  const nodes = elements(hooks.render(plotsType, { cross }) as ReactNode);
+  const plot = (csvName: string) => nodes.find((p) => p.csvName === csvName) as unknown as PlotProps;
+  return { residuals: plot("residuals"), zeroPoint: plot("zero_point") };
+}
+
+const pointGroups = (plot: PlotProps) => Object.fromEntries(plot.series.filter((s) => s.mode === "points").map((s) => [s.label, s.x]));
+
+describe("CrossMatchPlots zero point plot", () => {
+  afterEach(() => hooks.mount());
+
+  it("draws the saturated star the fit left out apart from the fitted stars, although it lies on the line", () => {
+    const matches = [
+      zeroPointMatch(0, 0, "saturated"),
+      zeroPointMatch(1, 0, "used"),
+      zeroPointMatch(2, 0.02, "used"),
+      zeroPointMatch(3, -0.02, "used"),
+      zeroPointMatch(4, 1.5, "clipped"),
+    ];
+    const { zeroPoint } = plotsOf(crossMatchResult(matches, { zero_point: fitOf(matches, 0.016329931618554522) }));
+    expect(zeroPoint.series[0].x, "the first series draws only the stars of the fit").toEqual(catalogueG(matches.slice(1, 4)));
+    expect(pointGroups(zeroPoint)).toEqual({
+      "in fit": catalogueG(matches.slice(1, 4)),
+      "rejected by clipping": catalogueG(matches.slice(4)),
+      "saturated (not fitted)": catalogueG(matches.slice(0, 1)),
+    });
+  });
+
+  it("draws the stars the fit clipped as rejected although they lie inside three times the final rms", () => {
+    const residuals = [0.046, -0.046, 0, ...pairs(0.01, 10), ...pairs(0.04, 4)];
+    const matches = residuals.map((r, i) => zeroPointMatch(i, r, i < 2 ? "clipped" : "used"));
+    const { zeroPoint } = plotsOf(crossMatchResult(matches, { zero_point: fitOf(matches, 0.022590812902) }));
+    expect(zeroPoint.series[0].x, "29 stars in the fit, 3 x rms = 0.0678 mag").toEqual(catalogueG(matches.slice(2)));
+    expect(pointGroups(zeroPoint)["rejected by clipping"]).toEqual(catalogueG(matches.slice(0, 2)));
+  });
+
+  it("draws the stars the fit kept as in the fit although they lie outside three times the final rms", () => {
+    const residuals = [0.085, -0.085, 0, ...pairs(0.02, 30)];
+    const matches = residuals.map((r, i) => zeroPointMatch(i, r, "used"));
+    const { zeroPoint } = plotsOf(crossMatchResult(matches, { zero_point: fitOf(matches, 0.024704604031) }));
+    expect(zeroPoint.series[0].x, "63 stars in the fit, 3 x rms = 0.0741 mag").toEqual(catalogueG(matches));
+    expect(pointGroups(zeroPoint)["rejected by clipping"]).toBeUndefined();
+  });
+
+  it("keeps the stars without BP-RP in their own series and leaves out a match without a status", () => {
+    const matches = [zeroPointMatch(0, 0.04, "used", 0.4), zeroPointMatch(1, 0.09, "used", 0.8), zeroPointMatch(2, 0, "no_colour"), zeroPointMatch(3, 0, null)];
+    const cross = crossMatchResult(matches, { zero_point: { ...fitOf(matches, 0.005), colour_coeff: 0.1, colour_term_used: true } });
+    const { zeroPoint } = plotsOf(cross);
+    expect(pointGroups(zeroPoint)).toEqual({
+      "in fit": catalogueG(matches.slice(0, 2)),
+      "no BP-RP (not in colour fit)": catalogueG(matches.slice(2, 3)),
+    });
+    expect(zeroPoint.series.find((s) => s.mode === "line")?.label).toBe("mag - ZP (25.000)");
+  });
+});
+
+describe("CrossMatchPlots residual plot", () => {
+  afterEach(() => hooks.mount());
+
+  it("labels both median lines as medians with their values and keeps the rms in the legend", () => {
+    const { residuals } = plotsOf(crossMatchResult([zeroPointMatch(0, 0, "used")]));
+    expect((residuals.referenceLines ?? []).map((l) => [l.axis, l.value, l.label])).toEqual([
+      ["x", 0.01, 'median 0.010"'],
+      ["y", 0.004, 'median 0.004"'],
+    ]);
+    expect(residuals.series.map((s) => s.label)).toEqual(['star - Gaia, rms 0.052"']);
+  });
+});
+
+describe("CatalogPanel cross-match", () => {
+  const SELECTED = "C:/data/x.fits";
+  const CALIBRATED = "C:/out/x_calibrated.fits";
+  const first = { filePath: SELECTED, measurePath: CALIBRATED, measureKey: `${CALIBRATED}@1` };
+  type CatalogProps = typeof first;
+  const catalogPanel = panel as unknown as (props: CatalogProps) => unknown;
+  const render = (props: CatalogProps) => hooks.render(catalogPanel, props) as ReactNode;
+  const matches = [zeroPointMatch(0, 0, "used"), zeroPointMatch(1, 0.01, "used"), zeroPointMatch(2, -0.01, "used")];
+
+  function fieldLabelled(nodes: Props[], text: string): Props | undefined {
+    const label = nodes.find((p) => typeof p.htmlFor === "string" && textOf(p.children as ReactNode).trim() === text);
+    return nodes.find((p) => label !== undefined && p.id === label.htmlFor && typeof p.onChange === "function");
+  }
+
+  async function crossMatched(props: CatalogProps): Promise<void> {
+    const run = elements(render(props)).find((p) => p.label === "Cross-match detected stars");
+    expect(run?.disabled, "Cross-match detected stars is enabled").toBe(false);
+    (run!.onClick as () => void)();
+    await flush();
+  }
+
+  beforeEach(() => {
+    hooks.mount();
+    backend.cone.mockReset().mockResolvedValue(CONE);
+    backend.crossMatch.mockReset().mockResolvedValue(crossMatchResult(matches));
+  });
+
+  afterEach(() => hooks.mount());
+
+  it("states the automatic aperture of the zero point: 1.5 x FWHM per star, with the median and range of the radii in the fit", async () => {
+    await crossMatched(first);
+    const text = textOf(render(first));
+    expect(text).toContain("ZP 25.000 ± 0.012");
+    expect(text).toContain("aperture 1.5 x FWHM per star, median r = 7.06 px (4.62 to 9.06)");
+  });
+
+  it("states a fixed aperture with the radius the backend used", async () => {
+    backend.crossMatch.mockResolvedValue(crossMatchResult(matches, { aperture: { kind: "fixed", radius_px: 5 } }));
+    await crossMatched(first);
+    expect(textOf(render(first))).toContain("aperture r = 5.00 px");
+  });
+
+  it("prints a zero point fitted on one star without an error", async () => {
+    const single = [zeroPointMatch(0, 0, "used")];
+    backend.crossMatch.mockResolvedValue(crossMatchResult(single, { zero_point: fitOf(single, 0, null) }));
+    await crossMatched(first);
+    expect(textOf(render(first))).toContain("ZP 25.000 ± --  n=1, 0 rejected");
+  });
+
+  it("sends the radius typed in Aperture r (px) and no radius when the field is blank", async () => {
+    await crossMatched(first);
+    expect((backend.crossMatch.mock.calls[0][1] as { apertureRadius?: number }).apertureRadius).toBeUndefined();
+    const field = fieldLabelled(elements(render(first)), "Aperture r (px)");
+    expect(field, "the panel has an Aperture r (px) field").toBeDefined();
+    expect(field?.placeholder).toBe("auto");
+    (field!.onChange as (text: string) => void)("6");
+    await crossMatched(first);
+    expect(backend.crossMatch.mock.calls[1]).toEqual([CALIBRATED, expect.objectContaining({ apertureRadius: 6 })]);
+  });
+
+  it("refuses an aperture radius outside 2 to 60 px with the range hint", () => {
+    const field = fieldLabelled(elements(render(first)), "Aperture r (px)");
+    expect(field, "the panel has an Aperture r (px) field").toBeDefined();
+    (field!.onChange as (text: string) => void)("1");
+    const nodes = elements(render(first));
+    expect(nodes.find((p) => p.label === "Cross-match detected stars")?.disabled).toBe(true);
+    expect(nodes.some((p) => textOf(p.children as ReactNode) === APERTURE_RANGE_HINT)).toBe(true);
+  });
+
+  it("clears the cross-match when a step re-publishes the measured image under the same path", async () => {
+    await crossMatched(first);
+    expect(textOf(render(first))).toContain("ZP 25.000");
+    expect(elements(render(first)).some((p) => p.cross !== undefined)).toBe(true);
+    const republished = { ...first, measureKey: `${CALIBRATED}@2` };
+    render(republished);
+    const after = render(republished);
+    expect(textOf(after)).not.toContain("ZP 25.000");
+    expect(elements(after).some((p) => p.cross !== undefined), "no plot of the previous version").toBe(false);
+  });
+
+  it("lists the warnings of the cross-match, the Gaia row cap and the cone limit among them", async () => {
+    const warnings = [
+      "VizieR row cap of 5000 reached: the Gaia list holds only the brightest stars in G within the cone, so fainter detections find no partner",
+      "Gaia cone limited to 5 deg: the field reaches 7.7 deg from its centre, so detections beyond the cone find no partner",
+    ];
+    backend.crossMatch.mockResolvedValue(crossMatchResult(matches, { warnings }));
+    await crossMatched(first);
+    const nodes = elements(render(first));
+    for (const warning of warnings) expect(nodes.some((p) => p.children === warning), warning).toBe(true);
   });
 });

@@ -1,4 +1,5 @@
 import type { PlotHit, ProfileSeries } from "../components/regions/ProfilePlot";
+import type { ZeroPointStatus } from "../shared/types/catalog";
 import { buildCsv, type CsvColumn } from "./catalogCsv";
 
 export type Domain = [number, number];
@@ -281,11 +282,10 @@ export function seriesToCsv(series: ProfileSeries[], xLabel: string): string {
   return buildCsv(columns, rows);
 }
 
-export const OUTLIER_SIGMA = 3;
-
 export interface ZeroPointSplit {
   fitted: { x: number[]; y: number[] };
   outliers: { x: number[]; y: number[] };
+  saturated: { x: number[]; y: number[] };
   noColour: { x: number[]; y: number[] };
   line: { x: number[]; y: number[] } | null;
 }
@@ -294,40 +294,32 @@ export function splitZeroPointPoints(
   catMag: (number | null)[],
   magInst: (number | null)[],
   zp: number | null,
-  rms: number | null,
+  status: (ZeroPointStatus | null)[],
   colour: (number | null)[] = [],
   colourCoeff: number | null = null,
 ): ZeroPointSplit {
   const fitted = { x: [] as number[], y: [] as number[] };
   const outliers = { x: [] as number[], y: [] as number[] };
+  const saturated = { x: [] as number[], y: [] as number[] };
   const noColour = { x: [] as number[], y: [] as number[] };
+  const groups = { used: fitted, clipped: outliers, saturated, no_colour: noColour };
   const fit = zp !== null && Number.isFinite(zp) ? zp : null;
-  const limit = fit !== null && rms !== null && Number.isFinite(rms) && rms > 0 ? OUTLIER_SIGMA * rms : null;
   const coeff = colourCoeff !== null && Number.isFinite(colourCoeff) ? colourCoeff : null;
   const n = Math.min(catMag.length, magInst.length);
   for (let i = 0; i < n; i++) {
     const x = catMag[i];
     const raw = magInst[i];
-    if (x === null || raw === null || !Number.isFinite(x) || !Number.isFinite(raw)) continue;
-    let y = raw;
-    if (coeff !== null) {
-      const c = colour[i] ?? null;
-      if (c === null || !Number.isFinite(c)) {
-        noColour.x.push(x);
-        noColour.y.push(raw);
-        continue;
-      }
-      y = raw + coeff * c;
-    }
-    const outside = fit !== null && limit !== null && Math.abs(y - (x - fit)) > limit;
-    const target = outside ? outliers : fitted;
-    target.x.push(x);
-    target.y.push(y);
+    const entered = status[i] ?? null;
+    if (entered === null || x === null || raw === null || !Number.isFinite(x) || !Number.isFinite(raw)) continue;
+    const c = colour[i] ?? null;
+    const corrected = entered !== "no_colour" && coeff !== null && c !== null && Number.isFinite(c);
+    groups[entered].x.push(x);
+    groups[entered].y.push(corrected ? raw + coeff * c : raw);
   }
   const xs = fitted.x.concat(outliers.x);
   const ext = finiteExtentOf(xs);
   const line = fit !== null && ext ? { x: [ext[0], ext[1]], y: [ext[0] - fit, ext[1] - fit] } : null;
-  return { fitted, outliers, noColour, line };
+  return { fitted, outliers, saturated, noColour, line };
 }
 
 function finiteExtentOf(values: number[]): Domain | null {

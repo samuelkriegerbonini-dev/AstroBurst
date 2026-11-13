@@ -10,12 +10,13 @@ use crate::cmd::common::{blocking_cmd, load_cached_full, HEADER_DISPLAY_REFERRED
 use crate::cmd::pixelmath::DEFAULT_PIXELMATH_SUFFIX;
 use crate::cmd::processing::{ABPROC_HDRMT, ABPROC_LHE};
 use crate::core::analysis::photometry::{
-    measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, DQ_SATURATION_SOURCE,
+    measure_star_prepared, saturation_level, MaskedImage, PhotometryConfig, AUTO_APERTURE_FWHM_FACTOR, DQ_SATURATION_SOURCE,
+    MAX_APERTURE_RADIUS, MIN_APERTURE_RADIUS,
 };
 use crate::core::analysis::star_detection::{detect_stars, DetectedStar};
 use crate::core::astrometry::catalog::{
     cross_match, fit_zero_point, observation_epoch_year, propagate_epoch, query_gaia_cached, CatalogRow,
-    ConeQuery, CrossMatch, ZeroPointFit, DEFAULT_MAX_ROWS, MAX_CONE_RADIUS_DEG, MIN_CONE_RADIUS_DEG,
+    ConeQuery, CrossMatch, ZeroPointFit, ZeroPointStatus, DEFAULT_MAX_ROWS, MAX_CONE_RADIUS_DEG, MIN_CONE_RADIUS_DEG,
 };
 use crate::core::astrometry::wcs::{pixel_center, WcsTransform};
 use crate::infra::wcs_source::load_wcs;
@@ -118,11 +119,12 @@ pub struct MeasuredSource {
     pub ra: f64,
     pub dec: f64,
     pub flux: f64,
-    pub fwhm: f64,
+    pub fwhm: Option<f64>,
     pub snr: f64,
     pub mag_inst: f64,
     pub mag_ab: Option<f64>,
     pub saturated: bool,
+    pub aperture_radius: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +145,7 @@ pub struct MatchEntry {
     pub sep_arcsec: f64,
     pub d_ra_arcsec: f64,
     pub d_dec_arcsec: f64,
+    pub zp_status: Option<ZeroPointStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +154,20 @@ pub struct AstrometrySummary {
     pub median_d_dec_arcsec: f64,
     pub rms_arcsec: f64,
     pub n: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ZeroPointAperture {
+    Fixed {
+        radius_px: f64,
+    },
+    Auto {
+        fwhm_factor: f64,
+        median_radius_px: Option<f64>,
+        min_radius_px: Option<f64>,
+        max_radius_px: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,6 +183,7 @@ pub struct CrossMatchResult {
     pub band: String,
     pub match_radius_arcsec: f64,
     pub catalog_source: &'static str,
+    pub aperture: ZeroPointAperture,
 }
 
 pub(crate) struct FieldGeometry {
@@ -336,6 +354,7 @@ fn measure_sources(
             mag_inst: phot.mag_inst,
             mag_ab,
             saturated: phot.saturated,
+            aperture_radius: phot.aperture_radius,
         });
     }
     sources
@@ -418,8 +437,11 @@ pub(crate) fn crossmatch_for_path(
 
     let (level, level_source) = saturation_level(Some(header), entry.stats().max);
     let saturation_source = if planes.saturated.is_some() { DQ_SATURATION_SOURCE } else { level_source };
+    let fixed_aperture = aperture_radius
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .map(|r| r.clamp(MIN_APERTURE_RADIUS, MAX_APERTURE_RADIUS));
     let config = PhotometryConfig {
-        aperture_radius: aperture_radius.filter(|r| r.is_finite() && *r > 0.0),
+        aperture_radius: fixed_aperture,
         saturation: Some((level, level_source)),
         ..PhotometryConfig::default()
     };
@@ -436,6 +458,19 @@ pub(crate) fn crossmatch_for_path(
     let geometry = field_geometry(&wcs, cols, image_rows);
     let query = cone_query_for_field(&geometry, None, None, None);
     let hit = query_gaia_cached(&query).map_err(|e| anyhow::anyhow!(e))?;
+    if hit.rows.len() >= query.max_rows {
+        warnings.push(format!(
+            "VizieR row cap of {} reached: the Gaia list holds only the brightest stars in G within the cone, so fainter detections find no partner",
+            query.max_rows
+        ));
+    }
+    let field_radius_deg = geometry.diagonal_arcmin / 2.0 / ARCMIN_PER_DEGREE;
+    if field_radius_deg > query.radius_deg {
+        warnings.push(format!(
+            "Gaia cone limited to {} deg: the field reaches {:.1} deg from its centre, so detections beyond the cone find no partner",
+            query.radius_deg, field_radius_deg
+        ));
+    }
     let (rows, epoch_year) = epoch_propagated_rows(header, &hit.rows, &mut warnings);
 
     let match_radius = radius_arcsec
@@ -474,12 +509,15 @@ pub(crate) fn crossmatch_for_path(
     }
 
     let astrometry = summarize_astrometry(&pairs);
+    let mut fitted = zero_point.iter().flat_map(|fit| fit.sample_status.iter().copied());
     let matches: Vec<MatchEntry> = pairs
         .iter()
         .map(|m| {
             let row = &rows[m.row_index];
+            let star = sources[m.star_index].clone();
+            let zp_status = if star.saturated { Some(ZeroPointStatus::Saturated) } else { fitted.next().flatten() };
             MatchEntry {
-                star: sources[m.star_index].clone(),
+                star,
                 row: MatchedRow {
                     id: row.id.clone(),
                     ra: row.ra_epoch,
@@ -492,9 +530,26 @@ pub(crate) fn crossmatch_for_path(
                 sep_arcsec: m.sep_arcsec,
                 d_ra_arcsec: m.d_ra_arcsec,
                 d_dec_arcsec: m.d_dec_arcsec,
+                zp_status,
             }
         })
         .collect();
+    let aperture = match fixed_aperture {
+        Some(radius_px) => ZeroPointAperture::Fixed { radius_px },
+        None => {
+            let radii: Vec<f64> = matches
+                .iter()
+                .filter(|m| m.zp_status == Some(ZeroPointStatus::Used))
+                .map(|m| m.star.aperture_radius)
+                .collect();
+            ZeroPointAperture::Auto {
+                fwhm_factor: AUTO_APERTURE_FWHM_FACTOR,
+                median_radius_px: (!radii.is_empty()).then(|| exact_median_f64(&radii)),
+                min_radius_px: radii.iter().copied().reduce(f64::min),
+                max_radius_px: radii.iter().copied().reduce(f64::max),
+            }
+        }
+    };
 
     let body = serde_json::to_value(CrossMatchResult {
         matches,
@@ -508,6 +563,7 @@ pub(crate) fn crossmatch_for_path(
         band,
         match_radius_arcsec: match_radius,
         catalog_source: hit.source_name(),
+        aperture,
     })?;
     Ok(with_envelope(body, t0.elapsed().as_millis() as u64, warnings))
 }
@@ -1190,5 +1246,266 @@ mod tests {
 
         let plain = crossmatch_for_path(&linear, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
         assert!(!warning_texts(&plain).iter().any(|w| w.starts_with("PV distortion")), "{:?}", warning_texts(&plain));
+    }
+
+    fn star_field_at(dir: &tempfile::TempDir, name: &str, cards: &[(&str, &str)]) -> (String, WcsTransform, ConeQuery) {
+        let path = write_star_field(dir, name, cards);
+        let wcs = WcsTransform::from_header(&wcs_header(cards)).unwrap();
+        let query = cone_query_for_field(&field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE), None, None, None);
+        (path, wcs, query)
+    }
+
+    fn zp_status_by_id(out: &Value) -> std::collections::BTreeMap<String, Value> {
+        out["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["row"]["id"].as_str().unwrap().to_string(), m["zp_status"].clone()))
+            .collect()
+    }
+
+    fn status_by_id(expected: &[(&str, Value)]) -> std::collections::BTreeMap<String, Value> {
+        expected.iter().map(|(id, status)| (id.to_string(), status.clone())).collect()
+    }
+
+    #[test]
+    fn crossmatch_warns_when_the_gaia_list_is_cut_at_the_row_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [("CRVAL1", "152.0"), ("CRVAL2", "4.0"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let (path, wcs, query) = star_field_at(&dir, "capped.fits", &cards);
+        assert_eq!(query.max_rows, DEFAULT_MAX_ROWS);
+        let mut rows = catalog_rows_for_field(&wcs);
+        let template = rows[0].clone();
+        rows.extend((rows.len()..DEFAULT_MAX_ROWS).map(|i| {
+            let dec = 4.2 + i as f64 * 1e-5;
+            CatalogRow { id: format!("faint{i}"), dec, dec_epoch: dec, g: Some(20.0), ..template.clone() }
+        }));
+        prime_cache(&query, rows);
+
+        let capped = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        assert_eq!(capped["n_catalog"], DEFAULT_MAX_ROWS);
+        assert_eq!(capped["matches"].as_array().unwrap().len(), 5);
+        let warnings = warning_texts(&capped);
+        assert!(
+            warnings.contains(
+                &"VizieR row cap of 5000 reached: the Gaia list holds only the brightest stars in G within the cone, so fainter detections find no partner"
+                    .to_string()
+            ),
+            "{warnings:?}"
+        );
+
+        let (whole_path, whole_wcs, whole_query) = star_field_at(&dir, "whole.fits", &[("DATE-OBS", "2016-01-01T00:00:00")]);
+        prime_cache(&whole_query, catalog_rows_for_field(&whole_wcs));
+        let whole = crossmatch_for_path(&whole_path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        let warnings = warning_texts(&whole);
+        assert!(!warnings.iter().any(|w| w.starts_with("VizieR row cap") || w.starts_with("Gaia cone limited")), "{warnings:?}");
+    }
+
+    #[test]
+    fn crossmatch_warns_when_the_field_is_wider_than_the_largest_gaia_cone() {
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [
+            ("CRVAL1", "153.0"),
+            ("CRVAL2", "5.0"),
+            ("CD1_1", "-8.5e-2"),
+            ("CD2_2", "8.5e-2"),
+            ("DATE-OBS", "2016-01-01T00:00:00"),
+        ];
+        let (path, wcs, query) = star_field_at(&dir, "wide.fits", &cards);
+        assert_eq!(query.radius_deg, MAX_CONE_RADIUS_DEG, "half the 15.4 deg diagonal does not fit the cone");
+        prime_cache(&query, catalog_rows_for_field(&wcs));
+
+        let out = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        let warnings = warning_texts(&out);
+        assert!(
+            warnings.contains(
+                &"Gaia cone limited to 5 deg: the field reaches 7.7 deg from its centre, so detections beyond the cone find no partner"
+                    .to_string()
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn crossmatch_tells_for_each_match_how_it_entered_the_zero_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [("CRVAL1", "154.0"), ("CRVAL2", "6.0"), ("DATE-OBS", "2016-01-01T00:00:00"), ("SATURATE", "4000")];
+        let (path, wcs, query) = star_field_at(&dir, "status.fits", &cards);
+        let mut rows = catalog_rows_for_field(&wcs);
+        for (row, offset) in rows.iter_mut().zip([0.0, 0.0, 0.02, -0.02, 1.5]) {
+            row.g = row.g.map(|g| g + offset);
+        }
+        prime_cache(&query, rows);
+
+        let out = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        let zp = &out["zero_point"];
+        assert_eq!((zp["n_used"].as_u64(), zp["n_rejected"].as_u64()), (Some(3), Some(1)), "{zp:?}");
+        assert_eq!(
+            zp_status_by_id(&out),
+            status_by_id(&[
+                ("star0", json!("saturated")),
+                ("star1", json!("used")),
+                ("star2", json!("used")),
+                ("star3", json!("used")),
+                ("star4", json!("clipped")),
+            ]),
+            "the plot must draw the sets of the fit: the saturated star sits on the line and was never fitted"
+        );
+
+        let no_magnitudes = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), Some("RP".into()), Some(false), None).unwrap();
+        assert!(no_magnitudes["zero_point"].is_null());
+        assert_eq!(
+            zp_status_by_id(&no_magnitudes),
+            status_by_id(&[
+                ("star0", json!("saturated")),
+                ("star1", Value::Null),
+                ("star2", Value::Null),
+                ("star3", Value::Null),
+                ("star4", Value::Null),
+            ]),
+            "a match without a magnitude in the band is no zero-point sample"
+        );
+    }
+
+    #[test]
+    fn crossmatch_marks_matches_without_a_colour_as_left_out_of_the_colour_fit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [("CRVAL1", "155.0"), ("CRVAL2", "7.0"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let (path, wcs, query) = star_field_at(&dir, "colour.fits", &cards);
+        let mut rows = catalog_rows_for_field(&wcs);
+        let colours = [Some(0.4), Some(0.8), Some(1.2), Some(1.6), None];
+        let scatter = [0.01, -0.01, -0.01, 0.01, 0.0];
+        for ((row, colour), noise) in rows.iter_mut().zip(colours).zip(scatter) {
+            row.bp_rp = colour;
+            row.g = row.g.map(|g| g + 0.1 * colour.unwrap_or(0.0) + noise);
+        }
+        prime_cache(&query, rows);
+
+        let out = crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(true), None).unwrap();
+        let zp = &out["zero_point"];
+        assert_eq!(zp["colour_term_used"], true, "{zp:?}");
+        assert_eq!(
+            (zp["n_used"].as_u64(), zp["n_rejected"].as_u64(), zp["n_without_colour"].as_u64()),
+            (Some(4), Some(0), Some(1)),
+            "{zp:?}"
+        );
+        assert!((zp["colour_coeff"].as_f64().unwrap() - 0.1).abs() < 0.01, "{zp:?}");
+        assert_eq!(
+            zp_status_by_id(&out),
+            status_by_id(&[
+                ("star0", json!("used")),
+                ("star1", json!("used")),
+                ("star2", json!("used")),
+                ("star3", json!("used")),
+                ("star4", json!("no_colour")),
+            ])
+        );
+    }
+
+    #[test]
+    fn crossmatch_states_the_aperture_behind_the_zero_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, wcs, query) = star_field_at(&dir, "aperture.fits", &[("DATE-OBS", "2016-01-01T00:00:00")]);
+        prime_cache(&query, catalog_rows_for_field(&wcs));
+        let run = |aperture_radius: Option<f64>| {
+            crossmatch_for_path(&path, Some(5.0), Some(50), Some(2.0), None, Some(false), aperture_radius).unwrap()
+        };
+        let source_radii = |out: &Value| -> Vec<f64> {
+            out["sources"].as_array().unwrap().iter().map(|s| s["aperture_radius"].as_f64().unwrap()).collect()
+        };
+
+        let auto = run(None);
+        assert_eq!(auto["aperture"]["kind"], "auto", "the result must say which aperture the zero point was measured in: {:?}", auto["aperture"]);
+        assert_eq!(auto["aperture"]["fwhm_factor"], 1.5);
+        for m in auto["matches"].as_array().unwrap() {
+            let radius = m["star"]["aperture_radius"].as_f64().unwrap();
+            assert!(m["star"]["fwhm"].is_number(), "every star of this field has a measurable FWHM: {m:?}");
+            assert!(
+                (radius - expected_automatic_radius(&m["star"])).abs() < 1e-9,
+                "the automatic aperture is 1.5 x FWHM of each star: {m:?}"
+            );
+        }
+        let mut radii: Vec<f64> = auto["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["star"]["aperture_radius"].as_f64().unwrap())
+            .collect();
+        radii.sort_by(f64::total_cmp);
+        assert_eq!(radii.len(), 5);
+        assert!(radii[0] > 6.0 && radii[4] < 8.0, "a Gaussian of sigma 2 px has FWHM 4.71 px: {radii:?}");
+        assert_eq!(auto["aperture"]["median_radius_px"].as_f64(), Some(radii[2]));
+        assert_eq!(auto["aperture"]["min_radius_px"].as_f64(), Some(radii[0]));
+        assert_eq!(auto["aperture"]["max_radius_px"].as_f64(), Some(radii[4]));
+
+        let six = run(Some(6.0));
+        assert_eq!(six["aperture"], json!({"kind": "fixed", "radius_px": 6.0}));
+        assert!(source_radii(&six).iter().all(|r| *r == 6.0), "{:?}", source_radii(&six));
+        let four = run(Some(4.0));
+        assert_eq!(four["aperture"], json!({"kind": "fixed", "radius_px": 4.0}));
+        let shift = six["zero_point"]["zp"].as_f64().unwrap() - four["zero_point"]["zp"].as_f64().unwrap();
+        let expected_shift = 2.5 * ((1.0 - (-4.5f64).exp()) / (1.0 - (-2.0f64).exp())).log10();
+        assert!(
+            (shift - expected_shift).abs() < 0.02,
+            "a Gaussian of sigma 2 px holds 98.9% of its flux within 6 px and 86.5% within 4 px: zero point shift {shift} vs {expected_shift}"
+        );
+
+        let clamped = run(Some(0.5));
+        assert_eq!(clamped["aperture"], json!({"kind": "fixed", "radius_px": 2.0}), "the radius that was used, not the one that was asked");
+        assert!(source_radii(&clamped).iter().all(|r| *r == 2.0), "{:?}", source_radii(&clamped));
+    }
+
+    const FALLBACK_APERTURE_RADIUS: f64 = 6.0;
+    const FLAT_BLOCK: (usize, usize) = (60, 60);
+    const FLAT_BLOCK_EXCESS: f32 = 500.0;
+
+    fn expected_automatic_radius(star: &Value) -> f64 {
+        match star["fwhm"].as_f64() {
+            Some(fwhm) => (AUTO_APERTURE_FWHM_FACTOR * fwhm).clamp(MIN_APERTURE_RADIUS, MAX_APERTURE_RADIUS),
+            None => FALLBACK_APERTURE_RADIUS,
+        }
+    }
+
+    #[test]
+    fn a_source_whose_fwhm_cannot_be_measured_has_no_fwhm_and_the_fallback_aperture() {
+        let dir = tempfile::tempdir().unwrap();
+        let cards = [("CRVAL1", "156.0"), ("CRVAL2", "8.0"), ("DATE-OBS", "2016-01-01T00:00:00")];
+        let mut image = star_field();
+        let (x, y) = FLAT_BLOCK;
+        image.slice_mut(ndarray::s![y - 1..=y + 1, x - 1..=x + 1]).mapv_inplace(|v| v + FLAT_BLOCK_EXCESS);
+        let path = dir.path().join("block.fits");
+        write_fits_mono(path.to_str().unwrap(), &image, Some(&wcs_header(&cards))).unwrap();
+        let wcs = WcsTransform::from_header(&wcs_header(&cards)).unwrap();
+        let query = cone_query_for_field(&field_geometry(&wcs, IMAGE_SIZE, IMAGE_SIZE), None, None, None);
+        let mut rows = catalog_rows_for_field(&wcs);
+        let sky = wcs.pixel_to_world(x as f64, y as f64);
+        let block_flux = 9.0 * f64::from(FLAT_BLOCK_EXCESS);
+        rows.push(CatalogRow {
+            id: "block".into(),
+            ra: sky.ra,
+            dec: sky.dec,
+            ra_epoch: sky.ra,
+            dec_epoch: sky.dec,
+            g: Some(TEST_ZERO_POINT - 2.5 * block_flux.log10()),
+            ..rows[0].clone()
+        });
+        prime_cache(&query, rows);
+
+        let out = crossmatch_for_path(path.to_str().unwrap(), Some(5.0), Some(50), Some(2.0), None, Some(false), None).unwrap();
+        let matches = out["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 6, "{matches:?}");
+        for m in matches {
+            let radius = m["star"]["aperture_radius"].as_f64().unwrap();
+            assert!((radius - expected_automatic_radius(&m["star"])).abs() < 1e-9, "{m:?}");
+        }
+        assert_eq!(matches.iter().filter(|m| m["star"]["fwhm"].is_number()).count(), 5, "{matches:?}");
+        let block = &matches.iter().find(|m| m["row"]["id"] == "block").expect("the block is matched")["star"];
+        assert!(block["fwhm"].is_null(), "a flat block has no FWHM to measure: {block:?}");
+        assert_eq!(block["aperture_radius"], FALLBACK_APERTURE_RADIUS);
+        assert!((block["flux"].as_f64().unwrap() - block_flux).abs() < 1e-6 * block_flux, "{block:?}");
+        let csv = build_csv(CSV_KIND_SOURCES, std::slice::from_ref(block)).unwrap();
+        let cells: Vec<&str> = csv.split(CSV_LINE_END).nth(1).unwrap().split(',').collect();
+        assert_eq!(cells[7], "", "the fwhm cell of {csv}");
+        assert_ne!(cells[8], "", "the snr cell of {csv}");
     }
 }
