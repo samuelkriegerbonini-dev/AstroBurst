@@ -1,11 +1,13 @@
 import { useState, useCallback, useMemo } from "react";
 import type { WizardState } from "../wizard";
-import { applyToneComposite, type CurvePoint, type ToneResult } from "../../../services/tone";
+import { applyToneComposite, isCurveIdentity, type CurvePoint, type ToneResult } from "../../../services/tone";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { getPreviewUrl } from "../../../infrastructure/tauri/client";
 import { RunButton } from "../../ui";
 import CurveEditor from "../CurveEditor";
 import { useCompositeStf } from "../../../context/CompositeContext";
+import { useWizardRunGuard } from "../../../context/WizardRunGuardContext";
+import { WIZARD_INPUTS_CHANGED } from "../../../utils/wizardRunGuard";
 import { toneRunSummary } from "../../../utils/wizard";
 import { curvesInputLine, hasStretchBake } from "../../../utils/stretchCommitState";
 
@@ -28,18 +30,9 @@ const CHANNEL_COLORS: Record<CurveChannel, string> = {
   b: "#3b82f6",
 };
 
-function isIdentity(pts: CurvePoint[]): boolean {
-  if (pts.length !== 2) return false;
-  return (
-    Math.abs(pts[0].x) < 1e-4 &&
-    Math.abs(pts[0].y) < 1e-4 &&
-    Math.abs(pts[1].x - 1) < 1e-4 &&
-    Math.abs(pts[1].y - 1) < 1e-4
-  );
-}
-
 export default function AdjustStep({ state, onResult }: AdjustStepProps) {
   const { wizardStfR, wizardStfG, wizardStfB, wizardStfLinked } = useCompositeStf();
+  const { beginComposite, discardLateComposite } = useWizardRunGuard();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ToneResult | null>(null);
   const [error, setError] = useState("");
@@ -53,8 +46,8 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
   const isLinked = curveMode === "linked";
 
   const curvesActive = useMemo(() => {
-    if (isLinked) return !isIdentity(curveLinked);
-    return !isIdentity(curveR) || !isIdentity(curveG) || !isIdentity(curveB);
+    if (isLinked) return !isCurveIdentity(curveLinked);
+    return !isCurveIdentity(curveR) || !isCurveIdentity(curveG) || !isCurveIdentity(curveB);
   }, [isLinked, curveLinked, curveR, curveG, curveB]);
 
   const handleResetCurves = useCallback(() => {
@@ -68,6 +61,7 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
   const handleApply = useCallback(async () => {
     setLoading(true);
     setError("");
+    const isCurrent = beginComposite();
     try {
       const dir = await getOutputDir();
 
@@ -86,6 +80,10 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
         curvesB: cB,
         scnr: null,
       });
+      if (!isCurrent()) {
+        discardLateComposite();
+        throw new Error(WIZARD_INPUTS_CHANGED);
+      }
 
       setResult(res);
 
@@ -100,7 +98,7 @@ export default function AdjustStep({ state, onResult }: AdjustStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [isLinked, curveLinked, curveR, curveG, curveB, wizardStfR, wizardStfG, wizardStfB, wizardStfLinked, onResult]);
+  }, [isLinked, curveLinked, curveR, curveG, curveB, wizardStfR, wizardStfG, wizardStfB, wizardStfLinked, onResult, beginComposite, discardLateComposite]);
 
   return (
     <div className="flex flex-col gap-3 p-3">

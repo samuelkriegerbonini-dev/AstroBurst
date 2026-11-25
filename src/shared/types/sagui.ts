@@ -81,6 +81,8 @@ export interface SaguiResult {
   width: number;
   height: number;
   labels: number[];
+  labels_width?: number;
+  labels_height?: number;
   regions: SaguiRegion[];
   warnings: string[];
 }

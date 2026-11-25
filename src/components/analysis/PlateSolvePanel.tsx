@@ -823,7 +823,7 @@ function PlateSolvePanel({
 
   useEffect(() => {
     getApiKey("astrometry")
-      .then((r) => setHasApiKey(!!r?.key))
+      .then((r) => setHasApiKey(r?.stored === true))
       .catch(() => setHasApiKey(false));
     getConfig()
       .then((cfg) => {
@@ -1148,7 +1148,7 @@ function PlateSolvePanel({
   const handleFallback = useCallback(async () => {
     const seq = solveSeqRef.current;
     const stored = await getApiKey("astrometry").then(
-      (r) => Boolean(r?.key),
+      (r) => r?.stored === true,
       () => false,
     );
     if (solveSeqRef.current !== seq) return;

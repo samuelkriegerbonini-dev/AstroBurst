@@ -1,7 +1,6 @@
 import {
   createContext,
   useContext,
-  useReducer,
   useCallback,
   useEffect,
   useMemo,
@@ -29,21 +28,21 @@ import { withSpccWb } from "../utils/levelMatch";
 import { discardNoticesAfterReset, nextDiscardNotices, stackStateAfterReset, type StackRunOutcome } from "../utils/stackRun";
 import { cancelProgress } from "../services/progress";
 import { STACK_PROGRESS_EVENT } from "../shared/types/stacking";
+import { WizardRunGuardCtx } from "./WizardRunGuardContext";
+import { bumpsCompositeGeneration, lateCompositeDiscarded, type WizardRunGuard } from "../utils/wizardRunGuard";
+import { compositeChainResets } from "../utils/compositeChainResets";
 
 export type WizardAction =
   | { type: "SET_BINS"; bins: FrequencyBin[] }
   | { type: "SET_BLEND_WEIGHTS"; weights: BlendWeight[]; preset: string }
   | { type: "SET_WB"; mode: WizardState["wbMode"]; r?: number; g?: number; b?: number }
-  | { type: "SET_STACKED"; channelId: string; path: string }
+  | { type: "SET_STACKED"; channelId: string; path: string; files: string[] }
   | { type: "SET_BACKGROUND"; channelId: string; path: string }
   | { type: "SET_ALIGNED"; paths: Record<string, string> }
   | { type: "SET_CROPPED"; paths: Record<string, string> }
-  | { type: "SET_MASK"; path: string | null }
   | { type: "SET_MASK_PARAMS"; growth: number; protection: number }
-  | { type: "SET_SEGM"; path: string | null }
   | { type: "SET_STRETCH"; mode: WizardState["stretchMode"]; factor?: number; target?: number }
   | { type: "SET_SCNR"; enabled: boolean; amount?: number; method?: string; preserveLuminance?: boolean }
-  | { type: "SET_RESULT"; png: string | null; fits: string | null }
   | { type: "SET_COMPOSITE_READY"; ready: boolean }
   | { type: "SET_SUBFRAME_RESULT"; binId: string; result: SubframeAnalysisResult }
   | { type: "SET_EXCLUDED_FILES"; binId: string; files: string[] }
@@ -81,10 +80,12 @@ function applyAction(state: WizardState, action: WizardAction): WizardState {
         return { ...state, bins: action.bins, completedSteps: unchangedCompleted };
       }
       const stackedPaths = { ...state.stackedPaths };
+      const stackedFrom = { ...state.stackedFrom };
       const excludedFiles = { ...state.excludedFiles };
       const subframeResults = { ...state.subframeResults };
       for (const id of changedIds) {
         delete stackedPaths[id];
+        delete stackedFrom[id];
         delete excludedFiles[id];
         delete subframeResults[id];
       }
@@ -94,6 +95,7 @@ function applyAction(state: WizardState, action: WizardAction): WizardState {
         ...downstream,
         bins: action.bins,
         stackedPaths,
+        stackedFrom,
         excludedFiles,
         subframeResults,
         completedSteps: completed,
@@ -106,7 +108,12 @@ function applyAction(state: WizardState, action: WizardAction): WizardState {
       return { ...state, wbMode: action.mode, wbR: action.r ?? state.wbR, wbG: action.g ?? state.wbG, wbB: action.b ?? state.wbB };
     case "SET_STACKED": {
       const downstream = invalidateDownstream(state, "stack");
-      return { ...state, ...downstream, stackedPaths: { ...state.stackedPaths, [action.channelId]: action.path } };
+      return {
+        ...state,
+        ...downstream,
+        stackedPaths: { ...state.stackedPaths, [action.channelId]: action.path },
+        stackedFrom: { ...state.stackedFrom, [action.channelId]: action.files },
+      };
     }
     case "SET_BACKGROUND": {
       const downstream = invalidateDownstream(state, "background");
@@ -120,12 +127,8 @@ function applyAction(state: WizardState, action: WizardAction): WizardState {
       const downstream = invalidateDownstream(state, "crop");
       return { ...state, ...downstream, croppedPaths: { ...state.croppedPaths, ...action.paths } };
     }
-    case "SET_MASK":
-      return { ...state, starMaskPath: action.path };
     case "SET_MASK_PARAMS":
       return { ...state, maskGrowth: action.growth, maskProtection: action.protection };
-    case "SET_SEGM":
-      return { ...state, segmPath: action.path };
     case "SET_STRETCH":
       return { ...state, stretchMode: action.mode, stretchFactor: action.factor ?? state.stretchFactor, targetBackground: action.target ?? state.targetBackground };
     case "SET_SCNR":
@@ -136,8 +139,6 @@ function applyAction(state: WizardState, action: WizardAction): WizardState {
         scnrMethod: (action.method as WizardState["scnrMethod"]) ?? state.scnrMethod,
         scnrPreserveLuminance: action.preserveLuminance ?? state.scnrPreserveLuminance,
       };
-    case "SET_RESULT":
-      return { ...state, resultPng: action.png, resultFits: action.fits };
     case "SET_COMPOSITE_READY":
       return { ...state, compositeReady: action.ready };
     case "SET_SUBFRAME_RESULT":
@@ -201,6 +202,8 @@ interface ComposeWizardContextValue {
 
 const ComposeWizardCtx = createContext<ComposeWizardContextValue | null>(null);
 const WizardCompositeDimsCtx = createContext<[number, number] | null>(null);
+const WizardCompositeReadyCtx = createContext(false);
+const WizardDispatchCtx = createContext<Dispatch<WizardAction> | null>(null);
 
 export function useComposeWizardContext(): ComposeWizardContextValue {
   const val = useContext(ComposeWizardCtx);
@@ -212,12 +215,22 @@ export function useWizardCompositeDims(): [number, number] | null {
   return useContext(WizardCompositeDimsCtx);
 }
 
+export function useWizardCompositeReady(): boolean {
+  return useContext(WizardCompositeReadyCtx);
+}
+
+export function useWizardDispatch(): Dispatch<WizardAction> {
+  const dispatch = useContext(WizardDispatchCtx);
+  if (!dispatch) throw new Error("useWizardDispatch must be used within ComposeWizardProvider");
+  return dispatch;
+}
+
 interface Props {
   children: React.ReactNode;
 }
 
 export function ComposeWizardProvider({ children }: Props) {
-  const [state, reactDispatch] = useReducer(wizardReducer, INITIAL_STATE);
+  const [state, setState] = useState(INITIAL_STATE);
   const [activeStep, setActiveStepRaw] = useState("channels");
   const [compositeDims, setCompositeDims] = useState<[number, number] | null>(null);
   const [stackRun, setStackRunState] = useState<WizardStackRun | null>(null);
@@ -228,6 +241,8 @@ export function ComposeWizardProvider({ children }: Props) {
   const [alignRun, setAlignRunState] = useState<WizardAlignRun | null>(null);
   const alignRunRef = useRef<WizardAlignRun | null>(null);
   const latestStateRef = useRef(INITIAL_STATE);
+  const runEpochRef = useRef(0);
+  const compositeGenerationRef = useRef(0);
   const { clearComposite } = useCompositeActions();
 
   const updateAlignRun = useCallback((event: AlignRunEvent<AlignResult>) => {
@@ -265,8 +280,11 @@ export function ComposeWizardProvider({ children }: Props) {
   }, []);
 
   const dispatch = useCallback((action: WizardAction) => {
-    latestStateRef.current = wizardReducer(latestStateRef.current, action);
+    const before = latestStateRef.current;
+    latestStateRef.current = wizardReducer(before, action);
+    if (bumpsCompositeGeneration(before, latestStateRef.current, action.type)) compositeGenerationRef.current += 1;
     if (action.type === "RESET") {
+      runEpochRef.current += 1;
       updateAlignRun({ type: "reset" });
       const next = stackStateAfterReset(stackGenerationRef.current, stackRunRef.current !== null);
       stackGenerationRef.current = next.generation;
@@ -275,10 +293,32 @@ export function ComposeWizardProvider({ children }: Props) {
       setStackDiscarded(discardNoticesAfterReset());
       if (next.cancel) cancelProgress(STACK_PROGRESS_EVENT).catch(() => {});
     }
-    reactDispatch(action);
+    setState(latestStateRef.current);
   }, [updateAlignRun, setStackRun]);
 
   const getState = useCallback(() => latestStateRef.current, []);
+
+  useEffect(
+    () => compositeChainResets.subscribe((restored) => dispatch({ type: "RECORD_COMPOSITE_OP", op: { kind: "chainReset", restored } })),
+    [dispatch],
+  );
+
+  const runGuard = useMemo<WizardRunGuard>(() => ({
+    begin: (inputs) => {
+      const epoch = runEpochRef.current;
+      const key = inputs(latestStateRef.current);
+      return () => runEpochRef.current === epoch && inputs(latestStateRef.current) === key;
+    },
+    beginComposite: () => {
+      const generation = compositeGenerationRef.current;
+      return () => compositeGenerationRef.current === generation;
+    },
+    discardLateComposite: () => {
+      void clearComposite();
+      const current = latestStateRef.current;
+      if (current.compositeReady) dispatch({ type: "UPDATE", partial: lateCompositeDiscarded(current) });
+    },
+  }), [dispatch, clearComposite]);
   const wasReadyRef = useRef(state.compositeReady);
 
   useEffect(() => {
@@ -326,7 +366,13 @@ export function ComposeWizardProvider({ children }: Props) {
   return (
     <ComposeWizardCtx.Provider value={value}>
       <WizardCompositeDimsCtx.Provider value={state.compositeReady ? compositeDims : null}>
-        {children}
+        <WizardRunGuardCtx.Provider value={runGuard}>
+          <WizardDispatchCtx.Provider value={dispatch}>
+            <WizardCompositeReadyCtx.Provider value={state.compositeReady}>
+              {children}
+            </WizardCompositeReadyCtx.Provider>
+          </WizardDispatchCtx.Provider>
+        </WizardRunGuardCtx.Provider>
       </WizardCompositeDimsCtx.Provider>
     </ComposeWizardCtx.Provider>
   );

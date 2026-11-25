@@ -21,6 +21,7 @@ export interface CompositeChainEntry {
   label: string;
   displayed: CompositeDisplayed;
   modelPreviewUrl?: string | null;
+  history?: string[];
 }
 
 export interface CompositeChainBase {

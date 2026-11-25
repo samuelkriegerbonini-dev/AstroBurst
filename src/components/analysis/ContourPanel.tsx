@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ClipboardCopy, Eye, EyeOff, Layers, Loader2, Shapes } from "lucide-react";
 import { contourLines } from "../../services/contours";
 import { CONTOUR_MODES } from "../../shared/types/contours";
@@ -30,6 +30,8 @@ import { CONTOUR_LAYER_ID, CONTOUR_LAYER_KIND, createContourPainter } from "../v
 import { DecimalField, ErrorAlert, RunButton, SMALL_BUTTON_CLASS, Toggle, WarningList } from "../ui";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions, type DecimalFieldState } from "../../utils/decimalText";
 import MeasurementBadge from "./MeasurementBadge";
+import StaleResultNote from "./StaleResultNote";
+import { sameRequest } from "../../utils/sameRequest";
 
 interface ContourPanelProps {
   filePath: string | null;
@@ -91,6 +93,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
   const [lineWidthText, setLineWidthText] = useState<string>(DEFAULT_LINE_WIDTH);
   const [result, setResult] = useState<ContourResult | null>(null);
   const [resultSmoothPx, setResultSmoothPx] = useState(0);
+  const [resultOptions, setResultOptions] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -141,6 +144,23 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
   }, [overlayKey, show, result, hidden, highlightIndex, colourMode, lineWidthText]);
 
   const generated = mode === "linear" || mode === "log" || mode === "sqrt";
+  const currentOptions = useMemo(() => {
+    const request = buildContourRequest({
+      mode,
+      levelsText: levelsInput,
+      nLevelsText,
+      loText,
+      hiText,
+      sigmaText,
+      smoothText,
+      binChoice,
+      imageWidth: imageWidth ?? 0,
+      imageHeight: imageHeight ?? 0,
+      excludeDq,
+    });
+    return request.ok ? request.options : null;
+  }, [mode, levelsInput, nLevelsText, loText, hiText, sigmaText, smoothText, binChoice, imageWidth, imageHeight, excludeDq]);
+  const stale = result !== null && !sameRequest(resultOptions, currentOptions);
 
   const run = useCallback(async () => {
     if (!filePath) return;
@@ -181,6 +201,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
       const next = await contourLines(filePath, request.options);
       if (requestSeqRef.current !== seq) return;
       setResult(next);
+      setResultOptions(request.options);
       setResultSmoothPx(request.options.smoothSigma ?? 0);
       setHidden(new Set());
       setHighlightIndex(null);
@@ -384,6 +405,7 @@ function ContourPanel({ filePath, overlayKey, imageWidth, imageHeight, measureKe
 
         {result && (
           <>
+            {stale && <StaleResultNote />}
             <div className="bg-zinc-900/80 rounded px-2 py-1.5 text-[10px]">
               <div className="text-zinc-500">Background and trace</div>
               <div data-testid="contour-background" className="text-zinc-300 font-mono">

@@ -118,7 +118,7 @@ function WcsReadoutInner({ filePath, imageWidth, imageHeight, mouseX, mouseY }: 
       return;
     }
     let cancelled = false;
-    pixelToWorld(filePath, [[imageWidth / 2, imageHeight / 2]], pref.frame)
+    pixelToWorld(filePath, [[(imageWidth - 1) / 2, (imageHeight - 1) / 2]], pref.frame)
       .then((res) => {
         if (cancelled) return;
         setCenter({ filePath, frame: pref.frame, point: res.points[0] ?? null });

@@ -37,7 +37,10 @@ self.onmessage = function (e: MessageEvent) {
     const pixels: Float32Array | null = e.data.pixels || _pixels;
     const width: number = e.data.width || _width;
     const height: number = e.data.height || _height;
-    if (!pixels) return;
+    if (!pixels) {
+      self.postMessage({ type: "failed", id, message: "the STF worker holds no pixels" });
+      return;
+    }
 
     const transfer = e.data.transfer as DisplayTransfer;
     const lut = e.data.lut as Uint8Array;
@@ -47,8 +50,13 @@ self.onmessage = function (e: MessageEvent) {
     renderRgba(pixels.subarray(0, len), transfer, lut, rgba);
 
     const imgData = new ImageData(rgba.subarray(0, len * 4) as Uint8ClampedArray<ArrayBuffer>, width, height);
-    createImageBitmap(imgData).then((bitmap) => {
-      self.postMessage({ type: "rendered", id, bitmap, width, height }, { transfer: [bitmap] });
-    });
+    createImageBitmap(imgData).then(
+      (bitmap) => {
+        self.postMessage({ type: "rendered", id, bitmap, width, height }, { transfer: [bitmap] });
+      },
+      (err: unknown) => {
+        self.postMessage({ type: "failed", id, message: err instanceof Error ? err.message : String(err) });
+      },
+    );
   }
 };

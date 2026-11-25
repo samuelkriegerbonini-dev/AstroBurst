@@ -65,8 +65,10 @@ export function mergePage(prev: ResultSet | null, page: MastSearchPage): ResultS
   const seen = new Set(prev.rows.map(rowIdentity));
   const added = page.rows.filter((r) => !seen.has(rowIdentity(r)));
   const merged = fromPage(page, [...prev.rows, ...added]);
+  const stalled = page.rows.length > 0 && added.length === 0;
   return {
     ...merged,
+    hasMore: merged.hasMore && !stalled,
     columns: prev.columns.length ? prev.columns : page.columns,
     requestBody: prev.requestBody,
     applied: prev.applied,

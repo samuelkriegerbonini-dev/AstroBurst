@@ -78,6 +78,7 @@ export interface FrameDocOptions {
   id?: string;
   label?: string;
   overlay?: string;
+  jumps?: ReadonlySet<number>;
 }
 
 function frameTimeAxis(result: TimeSeriesResult, axis: TimeAxis): Pick<LightCurveDoc, "timeScale" | "timeLabel"> {
@@ -118,7 +119,7 @@ export function lightCurveDocFromFrames(
 ): LightCurveDoc {
   const comps = compIdx.filter((i) => i !== targetIdx);
   const curve = lightCurve(result, targetIdx, compIdx, axis);
-  const jumps = new Set(centroidJumps(result));
+  const jumps = options.jumps ?? new Set(centroidJumps(result));
   const target = starLabel(result, targetIdx);
   const compLabels = comps.map((i) => starLabel(result, i));
   const timeSource = referenceTimeSource(result);
@@ -154,7 +155,7 @@ export function lightCurveDocFromFrames(
 
 export function rawFluxDocFromFrames(result: TimeSeriesResult, starIdx: number, axis: TimeAxis, options: FrameDocOptions = {}): LightCurveDoc {
   const timeline = frameTimes(result, axis);
-  const jumps = new Set(centroidJumps(result));
+  const jumps = options.jumps ?? new Set(centroidJumps(result));
   const label = starLabel(result, starIdx);
   return {
     id: options.id ?? `raw:${starIdx}`,

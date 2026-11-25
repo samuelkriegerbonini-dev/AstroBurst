@@ -5,7 +5,7 @@ import type { ArchiveController } from "./state/archiveController";
 import { emptyView, notResolvedView } from "./logic/resultsView";
 import { errorDetails, errorView } from "./logic/errorCopy";
 import { NO_OBJECT_FILTERS } from "./logic/objectFilters";
-import { ROMAN_SEARCH_DISABLED, missionEntries, notDeployedView, viewAvailability } from "./logic/missionState";
+import { ROMAN_SEARCH_DISABLED, STATUS_OPEN, missionEntries, notDeployedView, viewAvailability } from "./logic/missionState";
 import { useNow } from "./state/useNow";
 
 interface ViewProps {
@@ -144,7 +144,26 @@ export function LockedView({ state }: { state: ArchiveState }) {
   );
 }
 
+export function searchInsteadMissions(state: ArchiveState): { id: ArchiveState["form"]["mission"]; label: string }[] {
+  return missionEntries(state.missions, romanLockOf(state))
+    .filter((e) => e.placement === "tab" && e.enabled && e.lock === null && e.status === STATUS_OPEN && e.id !== state.form.mission)
+    .map((e) => ({ id: e.id, label: e.label }));
+}
+
 function BackToJwst({ state, ctl }: ViewProps) {
+  const text = state.form.text.trim();
+  const instead = searchInsteadMissions(state);
+  if (text && instead.length) {
+    return (
+      <>
+        {instead.map((m) => (
+          <button key={m.id} type="button" data-testid="mast-search-instead" data-mission={m.id} className="ab-btn-secondary ab-mast-action" onClick={() => void ctl.tryMission(m.id)}>
+            {`Search ${m.label} instead`}
+          </button>
+        ))}
+      </>
+    );
+  }
   if (state.form.mission === "jwst") return null;
   return (
     <button type="button" className="ab-btn-secondary ab-mast-action" onClick={() => ctl.switchMission("jwst")}>

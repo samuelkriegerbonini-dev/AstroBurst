@@ -189,7 +189,7 @@ function bundledDataFiles(): string[] {
 }
 
 function sampleSetIds(): string[] {
-  const source = readFileSync(tauriPath("src/infra/samples.rs"), "utf8").replace(/\r\n/g, "\n");
+  const source = readFileSync(tauriPath("src/infra/net/samples.rs"), "utf8").replace(/\r\n/g, "\n");
   const sets = /^static SAMPLE_SETS\b[\s\S]*?^\];$/m.exec(source)?.[0] ?? "";
   return [...sets.matchAll(/^ {8}id: "([^"]+)",$/gm)].map((match) => match[1]);
 }

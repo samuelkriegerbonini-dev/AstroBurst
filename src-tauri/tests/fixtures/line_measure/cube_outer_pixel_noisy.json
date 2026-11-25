@@ -28,6 +28,7 @@
     "flux is negative: centroid and sigma are weighted by the absorbed flux",
     "continuum-subtracted profile has a negative second moment: sigma undefined",
     "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid",
+    "sigma_kms, fwhm_kms and the source-frame widths are observed widths: the instrumental width is not removed (no resolving power given)",
     "line velocity from the optical convention with rest wavelength 1.02 um, axis frame BARYCENT, no frame shift applied"
   ],
   "peak": -0.04761637272418695,

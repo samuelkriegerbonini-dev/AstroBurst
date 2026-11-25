@@ -5,6 +5,7 @@ import type {
   SpectralAxisMode,
   VelocityConvention,
 } from "../shared/types/spectral";
+import { MISSING_VALUE } from "./formatUncertainty";
 
 export const SPEED_OF_LIGHT_KMS = 299792.458;
 export const AIR_FORMULA_MIN_UM = 0.2;
@@ -18,7 +19,6 @@ const MORTON_IR_POLE = 38.9;
 const AIR_VACUUM_TOLERANCE_UM = 1e-10;
 const AIR_VACUUM_MAX_ITERATIONS = 50;
 const MICRON = "μm";
-const EM_DASH = "—";
 const AXIS_DECIMALS = 4;
 const UNIT_AXIS_DECIMALS: ReadonlyMap<string, number> = new Map([
   ["km/s", 1],
@@ -234,7 +234,7 @@ export function applyCorrectionKms(
 }
 
 export function formatAxisValue(value: number, unit: string, step?: number): string {
-  if (!Number.isFinite(value)) return EM_DASH;
+  if (!Number.isFinite(value)) return MISSING_VALUE;
   const unitDecimals = UNIT_AXIS_DECIMALS.get(unit) ?? AXIS_DECIMALS;
   const decimals =
     step !== undefined && Number.isFinite(step) && step > 0

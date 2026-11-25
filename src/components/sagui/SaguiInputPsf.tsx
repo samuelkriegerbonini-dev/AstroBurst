@@ -5,7 +5,7 @@ import { resolutionCheck } from "../../services/resolution";
 import type { ResolutionCheck } from "../../shared/types/resolution";
 import type { SaguiInputInfo } from "../../shared/types/sagui";
 import { resolutionRows } from "../../utils/resolutionText";
-import { bandName, bandPsfLines, cubeRedshift, physicalRequest, regionBudgetText, type RegionBudgetText } from "./saguiInputPsfModel";
+import { bandName, bandPsfLines, cubeRedshift, physicalRequest, psfMismatchText, regionBudgetText, type RegionBudgetText } from "./saguiInputPsfModel";
 
 export interface SaguiInputPsfProps {
   input: SaguiInputInfo;
@@ -19,11 +19,12 @@ export interface SaguiInputPsfViewProps extends SaguiInputPsfProps {
 }
 
 const TONE: Record<RegionBudgetText["tone"], string> = { ok: "text-zinc-400", warn: "text-amber-300", muted: "text-zinc-500" };
-const NO_REDSHIFT_CARD = "The cube has no REDSHIFT card: the PSF is given in arcsec only. Cube Prep writes the card in Edit, Set centre / redshift.";
+const NO_REDSHIFT_CARD = "The cube has no REDSHIFT card: the PSF is given in arcsec only. Cube Prep writes the card from the Redshift field of its Cube step.";
 
 export function SaguiInputPsfView({ input, psfTarget, nRegions, check, error }: SaguiInputPsfViewProps): React.JSX.Element {
   const lines = bandPsfLines(input);
   const budget = regionBudgetText(input, psfTarget, nRegions);
+  const mismatch = psfMismatchText(input, psfTarget);
   const redshift = cubeRedshift(input);
   return (
     <div data-sagui-psf className="space-y-1 text-[10px]">
@@ -35,6 +36,11 @@ export function SaguiInputPsfView({ input, psfTarget, nRegions, check, error }: 
             {line}
           </div>
         ))
+      )}
+      {mismatch !== null && (
+        <p data-psf-mismatch className="text-amber-300">
+          {mismatch}
+        </p>
       )}
       {budget !== null && (
         <p data-region-budget={budget.tone} className={TONE[budget.tone]}>

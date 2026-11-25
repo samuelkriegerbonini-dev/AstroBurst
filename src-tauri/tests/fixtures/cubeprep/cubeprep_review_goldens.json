@@ -1,0 +1,51 @@
+{
+  "created_by": "scripts/oracle/cubeprep_review_goldens.py",
+  "python": "3.13.17",
+  "numpy": "2.5.4",
+  "scipy": "1.18.1",
+  "astropy": "8.0.2",
+  "matched_noise": {
+    "aligned_map": [
+      [
+        0.25,
+        0.5,
+        0.25
+      ],
+      [
+        0.5,
+        1.0,
+        0.5
+      ],
+      [
+        0.25,
+        0.5,
+        0.25
+      ]
+    ],
+    "aligned_err": 0.5,
+    "kernel_size": 41,
+    "kernel_sigma_px": 2.0,
+    "kernel_sum_squares": 0.019894367886486918,
+    "box": 15,
+    "region_sum_variance": 161.19794127984792,
+    "matched_pixel_variance": 0.018707286015788874
+  },
+  "area_psf": {
+    "fwhm_mas": 50.0,
+    "source_pixel_mas": 15.8,
+    "target_pixel_mas": 40.0,
+    "source_side": 161,
+    "integrated_peak": 0.427415874039504,
+    "integrated_next": 0.1116355599056028,
+    "integrated_diagonal": 0.02915778049526907,
+    "integrated_second": 0.0015409447118299364,
+    "integrated_fwhm_mas": 57.47672238697005,
+    "point_sampled_peak": 0.5562482850485466,
+    "point_sampled_fwhm_mas": 50.0
+  },
+  "lightstack_area_rule": {
+    "scale_in_arcsec": 0.031,
+    "scale_out_arcsec": 0.063,
+    "pixel_area_ratio": 4.1300728407908425
+  }
+}

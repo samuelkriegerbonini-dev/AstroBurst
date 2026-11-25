@@ -80,7 +80,20 @@ pub fn blend_channels(
         .map(|w| (w.channel_idx, w.r_weight as f32, w.g_weight as f32, w.b_weight as f32, w.offset as f32))
         .collect();
 
-    let slices: Vec<&[f32]> = channels
+    for &(ch_idx, ..) in &valid_weights {
+        if channels[ch_idx].dim() != (rows, cols) {
+            anyhow::bail!(
+                "Blend channel {} is {}x{} but the composite is {}x{}",
+                ch_idx,
+                channels[ch_idx].ncols(),
+                channels[ch_idx].nrows(),
+                cols,
+                rows
+            );
+        }
+    }
+    let standard: Vec<_> = channels.iter().map(|ch| ch.as_standard_layout()).collect();
+    let slices: Vec<&[f32]> = standard
         .iter()
         .map(|ch| ch.as_slice().unwrap_or(&[]))
         .collect();
@@ -150,6 +163,30 @@ mod tests {
         assert_eq!(r.as_slice().unwrap(), &[8.0, 0.0, 0.0, 12.0]);
         assert_eq!(g.as_slice().unwrap(), &[4.0, 0.0, 0.0, 6.0]);
         assert_eq!(b.as_slice().unwrap(), &[4.0, 0.0, 0.0, 6.0]);
+    }
+
+    #[test]
+    fn a_channel_stored_in_column_order_is_blended_like_any_other() {
+        let transposed = Array2::from_shape_fn((6, 4), |(x, y)| (10 * y + x + 1) as f32).reversed_axes();
+        assert_eq!(transposed.dim(), (4, 6));
+        assert!(transposed.as_slice().is_none());
+        let channels = [&transposed];
+        let weights = vec![weight(0, 1.0, 1.0, 1.0)];
+
+        let (r, _, _) = blend_channels(&channels, &weights, 4, 6).unwrap();
+
+        for ((y, x), &v) in r.indexed_iter() {
+            assert_eq!(v, (10 * y + x + 1) as f32, "pixel ({y},{x})");
+        }
+    }
+
+    #[test]
+    fn a_channel_of_another_size_is_refused() {
+        let small = arr2(&[[1.0f32, 2.0], [3.0, 4.0]]);
+        let channels = [&small];
+        let weights = vec![weight(0, 1.0, 1.0, 1.0)];
+        let refused = blend_channels(&channels, &weights, 2, 3);
+        assert!(refused.is_err(), "a 2x2 channel was blended into a 2x3 composite");
     }
 
     #[test]

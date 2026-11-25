@@ -68,6 +68,8 @@ import { CopyCsvButton, DecimalField, ErrorAlert, RunButton, SMALL_BUTTON_CLASS,
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import MeasurementBadge from "./MeasurementBadge";
 import PhotometryStatusLine from "./PhotometryStatusLine";
+import StaleResultNote from "./StaleResultNote";
+import { sameRequest } from "../../utils/sameRequest";
 import type { Star } from "./PlateSolvePanel";
 
 interface PhotometryTablePanelProps {
@@ -88,6 +90,7 @@ interface BatchRun {
   status: PhotometryStatus | null;
   fCorr: number | null;
   fCorrRadius: string | null;
+  request: unknown;
 }
 
 interface TableColumn {
@@ -259,7 +262,7 @@ function PhotometryTablePanel({
   const { excludeDq } = useDqContext();
   const status = usePhotometryStatus(filePath, excludeDq, measureKey ?? null);
   const arcsecPerPx = status.status?.pixel_scale_arcsec ?? null;
-  const depth = useImageDepth(filePath ?? null);
+  const depth = useImageDepth(filePath ?? null, measureKey ?? null);
   const provenance = useMeasurementProvenance();
   const regionDoc = useRegionDoc(overlayKey);
   const requestSeqRef = useRef(0);
@@ -368,6 +371,12 @@ function PhotometryTablePanel({
     if (acceptedFCorr !== null && appliedDepthFactor(offer, acceptedFCorr) === null) setAcceptedFCorr(null);
   }, [offer, acceptedFCorr]);
 
+  const runRequest = useMemo(
+    () => ({ filePath, source, points: input.points, apertureRadius, annulusInner, annulusOuter, gain, excludeDq, zeroPoint, fCorr }),
+    [filePath, source, input.points, apertureRadius, annulusInner, annulusOuter, gain, excludeDq, zeroPoint, fCorr],
+  );
+  const stale = run !== null && !sameRequest(run.request, runRequest);
+
   const measure = useCallback(async () => {
     if (!filePath || input.points.length === 0 || apertureOutOfRange || fieldError !== null || radiusError !== null || skyUnplaceable) return;
     const seq = ++requestSeqRef.current;
@@ -422,7 +431,7 @@ function PhotometryTablePanel({
         fCorr,
         nLimits: result.rows.filter((r) => r.photometry !== null && photometryLimit(r.photometry, fCorr).isLimit).length,
       };
-      setRun({ result, labels, log, status: measuredStatus, fCorr, fCorrRadius });
+      setRun({ result, labels, log, status: measuredStatus, fCorr, fCorrRadius, request: runRequest });
       measurementLog.append(batchPhotometryEntry(provenance, result, log));
     } catch (e: unknown) {
       if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
@@ -450,6 +459,7 @@ function PhotometryTablePanel({
     status.status,
     fCorr,
     offer,
+    runRequest,
   ]);
 
   const rows = useMemo(
@@ -840,6 +850,8 @@ function PhotometryTablePanel({
         )}
 
         <ErrorAlert message={error} />
+
+        {stale && <StaleResultNote />}
 
         {result && (
           <div className="grid grid-cols-2 gap-1.5 text-[10px]">

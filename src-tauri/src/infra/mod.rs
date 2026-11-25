@@ -1,17 +1,9 @@
-#[cfg(feature = "tauri")]
-pub mod app_log;
-pub mod cache;
-pub mod config;
-pub mod fits;
-pub mod image_source;
-pub mod ipc;
-pub mod paths;
-pub mod progress;
-pub mod render;
+pub mod app;
 pub mod asdf;
-pub mod asdf_bridge;
 pub mod astrometry;
-pub mod wcs_source;
+pub mod catalog_store;
+pub mod fits;
+pub mod images;
 #[cfg(feature = "mast")]
 pub mod mast;
 #[cfg(feature = "net")]
@@ -20,11 +12,14 @@ pub mod net;
 pub mod net {
     pub mod paths;
 }
-pub mod catalog_store;
-#[cfg(feature = "net")]
-pub mod samples;
+pub mod render;
 pub mod tables;
-pub mod sibling_files;
-pub mod sdss_frame_file;
-#[cfg(test)]
-mod real_survey_layouts;
+
+#[cfg(feature = "tauri")]
+pub use app::app_log;
+pub use app::{config, ipc, paths, progress};
+pub use asdf::asdf_bridge;
+pub use astrometry::wcs_source;
+pub use images::{cache, image_source, sdss_frame_file, sibling_files};
+#[cfg(feature = "net")]
+pub use net::samples;

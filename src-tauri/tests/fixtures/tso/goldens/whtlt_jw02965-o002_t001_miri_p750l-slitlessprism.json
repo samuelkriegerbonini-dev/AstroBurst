@@ -1,0 +1,99 @@
+{
+ "golden": "tso/whtlt",
+ "produced_by": {
+  "script": "tso_golden_whtlt.py",
+  "command": "python -I scripts/oracle/tso_golden_whtlt.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw02965-o002_t001_miri_p750l-slitlessprism_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 751,
+    "sha256": "77917cd91508f089b745e8f9d08b5579b9f6685e82c13d0a2dbc55f22b2d9e2d"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "ecsv": {
+  "first_line": "# %ECSV 1.0",
+  "line_ending": "LF",
+  "n_header_lines": 15,
+  "delimiter_key_present": false,
+  "delimiter_used": "single space",
+  "schema_line": "# schema: astropy-2.0",
+  "has_serialized_columns_block": false,
+  "has_yaml_anchor_or_alias": false,
+  "column_name_line": "MJD whitelight_flux"
+ },
+ "layout": "legacy (MJD, whitelight_flux)",
+ "columns": [
+  {
+   "name": "MJD",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux",
+   "unit": null,
+   "datatype": "float64"
+  }
+ ],
+ "meta": {
+  "instrument": "MIRI",
+  "detector": "MIRIMAGE",
+  "exp_type": "MIR_LRS-SLITLESS",
+  "subarray": "SLITLESSPRISM",
+  "filter": "P750L",
+  "pupil": null,
+  "target_name": "NAME Luhman 16",
+  "number_of_integrations": 10
+ },
+ "meta_key_order": [
+  "instrument",
+  "detector",
+  "exp_type",
+  "subarray",
+  "filter",
+  "pupil",
+  "target_name",
+  "number_of_integrations"
+ ],
+ "n_data_rows": 10,
+ "non_numeric_tokens": [],
+ "series": [
+  {
+   "flux_column": "whitelight_flux",
+   "time_column": "MJD",
+   "bjd_column": null,
+   "detector_suffix": null,
+   "order_suffix": null,
+   "flux_unit": null,
+   "time_unit": null,
+   "rows_with_finite_time": 10,
+   "time_first": 60133.89834643888,
+   "time_last": 60133.8996888771,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 12.88740683812648,
+   "flux_first3": [
+    2.2626413563627708,
+    2.315984470655146,
+    2.338002209401887
+   ],
+   "flux_last3": [
+    2.3417643411452964,
+    2.338699480134398,
+    2.3337767381890724
+   ],
+   "flux_sum_fsum": 23.27636993162461,
+   "flux_min": 2.2626413563627708,
+   "flux_max": 2.3423483121354223,
+   "flux_negative_rows": 0
+  }
+ ]
+}

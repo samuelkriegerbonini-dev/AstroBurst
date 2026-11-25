@@ -26,6 +26,8 @@ import { CATALOG_LAYER_ID, CATALOG_LAYER_KIND, createCatalogPainter } from "../v
 import { CopyCsvButton, DecimalField, ErrorAlert, RunButton, SMALL_BUTTON_CLASS, Toggle } from "../ui";
 import { decimalFieldState, firstFieldError, type DecimalFieldOptions } from "../../utils/decimalText";
 import CrossMatchPlots from "./CrossMatchPlots";
+import StaleResultNote from "./StaleResultNote";
+import { sameRequest } from "../../utils/sameRequest";
 
 interface CatalogPanelProps {
   filePath: string | null;
@@ -88,7 +90,9 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
   const [matchRadiusText, setMatchRadiusText] = useState(String(DEFAULT_MATCH_RADIUS_ARCSEC));
   const [apertureRadiusText, setApertureRadiusText] = useState("");
   const [cone, setCone] = useState<ConeSearchResult | null>(null);
+  const [coneRequest, setConeRequest] = useState<unknown>(null);
   const [cross, setCross] = useState<CrossMatchResult | null>(null);
+  const [crossRequest, setCrossRequest] = useState<unknown>(null);
   const [searching, setSearching] = useState(false);
   const [matching, setMatching] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -116,6 +120,21 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
     ['Match radius (")', matchRadiusField],
     ["Aperture r (px)", apertureField],
   ]);
+
+  const currentConeRequest = useMemo(() => ({ wcsPath, radiusArcmin, magLimit }), [wcsPath, radiusArcmin, magLimit]);
+  const currentCrossRequest = useMemo(
+    () => ({
+      wcsPath,
+      matchRadiusArcsec,
+      band,
+      colourTerm,
+      apertureRadius,
+      cone: sameList ? { radiusArcmin, magLimit } : null,
+    }),
+    [wcsPath, matchRadiusArcsec, band, colourTerm, apertureRadius, sameList, radiusArcmin, magLimit],
+  );
+  const coneStale = cone !== null && !sameRequest(coneRequest, currentConeRequest);
+  const crossStale = cross !== null && !sameRequest(crossRequest, currentCrossRequest);
 
   useEffect(() => {
     requestSeqRef.current++;
@@ -171,6 +190,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
       });
       if (requestSeqRef.current !== seq) return null;
       setCone(result);
+      setConeRequest(currentConeRequest);
       return result;
     } catch (e: unknown) {
       if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
@@ -178,7 +198,7 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
     } finally {
       if (requestSeqRef.current === seq) setSearching(false);
     }
-  }, [wcsPath, searchFieldError, radiusArcmin, magLimit]);
+  }, [wcsPath, searchFieldError, radiusArcmin, magLimit, currentConeRequest]);
 
   const runCrossMatch = useCallback(async () => {
     if (!wcsPath || matchFieldError !== null || apertureOutOfRange || (sameList && searchFieldError !== null)) return;
@@ -199,14 +219,15 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
       if (requestSeqRef.current !== seq) return;
       matched = true;
       setCross(result);
+      setCrossRequest(currentCrossRequest);
       measurementLog.append(crossMatchEntry(filePath ?? wcsPath, result, { sigma: DEFAULT_DETECTION_SIGMA, maxStars: DEFAULT_MAX_STARS, colourTerm }));
     } catch (e: unknown) {
       if (requestSeqRef.current === seq) setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (requestSeqRef.current === seq) setMatching(false);
     }
-    if (matched && !cone) await runSearch();
-  }, [filePath, wcsPath, matchFieldError, apertureOutOfRange, sameList, searchFieldError, matchRadiusArcsec, band, colourTerm, apertureRadius, radiusArcmin, magLimit, cone, runSearch]);
+    if (matched && (!cone || (sameList && coneStale))) await runSearch();
+  }, [filePath, wcsPath, matchFieldError, apertureOutOfRange, sameList, searchFieldError, matchRadiusArcsec, band, colourTerm, apertureRadius, radiusArcmin, magLimit, cone, coneStale, currentCrossRequest, runSearch]);
 
   const exportItems = useCallback(
     (kind: CatalogCsvKind): CatalogExportItems | null => {
@@ -399,6 +420,8 @@ function CatalogPanel({ filePath, measurePath = null, measureKey = null }: Catal
         </div>
 
         <ErrorAlert message={error} />
+
+        {(coneStale || crossStale) && <StaleResultNote />}
 
         {cone && (
           <div className="text-[10px] text-zinc-400 font-mono">

@@ -575,8 +575,6 @@ describe("CatalogComparePanel", () => {
     expect(presetSelect(edited).value).toBe("legacy_dr10:r");
     expect(formOf(edited).radiusText).toBe("3");
     run("Choose table", edited);
-    await flush();
-    await flush();
-    expect(presetSelect(show({ filePath: "C:/d/brick-g.fits", measureKey: "v1" })).value).toBe("legacy_dr10:g");
+    await vi.waitFor(() => expect(presetSelect(show({ filePath: "C:/d/brick-g.fits", measureKey: "v1" })).value).toBe("legacy_dr10:g"));
   });
 });

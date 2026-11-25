@@ -1,8 +1,13 @@
 import type { ChannelStatistics, DataRange, StatisticsUnit } from "../shared/types/statistics";
 import { SIGMA_MAD_LABEL, SIGMA_MAD_TITLE } from "./analysisLabels";
+import { csvCell } from "./catalogCsv";
 
 export const UINT16_MAX = 65535;
 export const MAD_TO_SIGMA = 1.4826;
+export const EMPTY_SELECTION_REASON =
+  "No usable pixel in the selection: every pixel is non-finite, excluded by DQ or left out as zero padding, so no statistic is given.";
+
+const MOMENT_KEYS = ["mean", "median", "avg_dev", "mad", "bwmv_sqrt", "min", "max", "sum", "variance", "std_dev"] as const;
 
 export type StatisticKind = "count" | "fraction" | "location" | "scale" | "variance" | "sum";
 export type StatisticKey = keyof ChannelStatistics | "sigma_mad";
@@ -90,11 +95,23 @@ export function convertScaleValue(value: number, unit: StatisticsUnit, range: Da
   return c ? c.scale(value) : value;
 }
 
+export function isEmptySelection(stats: ChannelStatistics): boolean {
+  return stats.count === 0;
+}
+
+export function withoutEmptyMoments(stats: ChannelStatistics): ChannelStatistics {
+  if (!isEmptySelection(stats)) return stats;
+  const blank = { ...stats };
+  for (const key of MOMENT_KEYS) blank[key] = Number.NaN;
+  return blank;
+}
+
 export function convertStatistics(
-  stats: ChannelStatistics,
+  raw: ChannelStatistics,
   unit: StatisticsUnit,
   range: DataRange,
 ): ChannelStatistics {
+  const stats = withoutEmptyMoments(raw);
   const c = converters(unit, range);
   if (!c) return stats;
   const sumOffset = c.location(0);
@@ -142,6 +159,6 @@ export function statisticsToCsv(
 ): string {
   const converted = channels.map((c) => convertStatistics(c.stats, unit, range));
   const header = ["statistic", ...channels.map((c) => c.label)].join(",");
-  const rows = STATISTIC_ROWS.map((row) => [row.key, ...converted.map((s) => String(statisticValue(s, row.key)))].join(","));
+  const rows = STATISTIC_ROWS.map((row) => [row.key, ...converted.map((s) => csvCell(statisticValue(s, row.key)))].join(","));
   return [header, ...rows].join("\n");
 }

@@ -12,6 +12,9 @@ import {
   isPublic,
   EXPOSURE_LEVELS,
   levelBadge,
+  levelTitle,
+  programmeText,
+  setupText,
 } from "../logic/cardLabel";
 import { row } from "./fixtures";
 
@@ -87,8 +90,9 @@ describe("card text helpers", () => {
   it("badges the level from its tokens, so source-based 2bs, 3 sets read L3 like the Combined L3 filter", () => {
     expect(levelBadge({ level: "3", levelClass: "combined" })).toBe("L3");
     expect(levelBadge({ level: "2bs, 3", levelClass: "exposure" })).toBe("L3");
-    expect(levelBadge({ level: "1b, 2a, 2b", levelClass: "exposure" })).toBe("L1-2");
-    expect(levelBadge({ level: "2b", levelClass: "exposure" })).toBe("L1-2");
+    expect(levelBadge({ level: "1b, 2a, 2b", levelClass: "exposure" })).toBe("L1b-2b");
+    expect(levelBadge({ level: "2b", levelClass: "exposure" })).toBe("L2b");
+    expect(levelBadge({ level: "2a", levelClass: "exposure" })).toBe("L2a");
     expect(levelBadge({ level: "2bs", levelClass: "exposure" })).toBe("L2bs");
     expect(levelBadge({ level: null, levelClass: "unknown" })).toBeNull();
     expect(levelBadge({ level: "wfi_image", levelClass: "unknown" })).toBeNull();
@@ -121,8 +125,26 @@ describe("card text helpers", () => {
 
 describe("exposure levels", () => {
   it("are the productLevel tokens Rust sends for Exposures L1-2", () => {
-    const rust = readFileSync(fileURLToPath(new URL("../../../../src-tauri/src/core/mast/object_filters.rs", import.meta.url)), "utf8");
+    const rust = readFileSync(fileURLToPath(new URL("../../../../src-tauri/src/core/mast/search/object_filters.rs", import.meta.url)), "utf8");
     const tokens = /const EXPOSURE_LEVELS: &str = "([^"]+)";/.exec(rust)?.[1].split(",").map((t) => t.trim());
     expect(tokens).toEqual([...EXPOSURE_LEVELS]);
+  });
+});
+
+describe("what a card tells a science user", () => {
+  it("explains the level badge", () => {
+    expect(levelTitle({ level: "2b", levelClass: "exposure" })).toBe("level 2b: calibrated exposures (cal)");
+    expect(levelTitle({ level: "2bs, 3", levelClass: "exposure" })).toBe("level 3: combined products (i2d, s3d, x1d)");
+    expect(levelTitle({ level: null, levelClass: "unknown" })).toBeNull();
+  });
+
+  it("names the exposure type or the HST aperture and the programme and observation", () => {
+    expect(setupText(row("a"))).toBe("NRC_IMAGE");
+    expect(setupText(row("a", { expType: null, values: { sci_aper_1234: "WFC3/IR" } }))).toBe("WFC3/IR");
+    expect(setupText(row("a", { expType: null, values: {} }))).toBe("");
+    expect(programmeText(row("a"))).toBe("prog 2739.1");
+    expect(programmeText(row("a", { values: {} }))).toBe("prog 2739.1");
+    expect(programmeText(row("a", { values: {}, observation: null }))).toBe("prog 2739");
+    expect(programmeText(row("a", { values: {}, program: null }))).toBe("");
   });
 });

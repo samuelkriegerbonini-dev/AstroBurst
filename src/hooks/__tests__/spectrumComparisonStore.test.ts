@@ -101,6 +101,20 @@ describe("SpectrumComparisonStore", () => {
     expect(notified).toBe(3);
   });
 
+  it("commit keeps the input revision the spectra were measured on and invalidate drops a pending one", () => {
+    const store = new SpectrumComparisonStore();
+    const seq = store.begin(path, 1, null, "r0");
+    expect(store.getDoc(path).pendingRevision).toBe("r0");
+    expect(store.getDoc(path).revision).toBeNull();
+    store.commit(path, seq, [entry]);
+    expect(store.getDoc(path).revision).toBe("r0");
+    expect(store.getDoc(path).pendingRevision).toBeNull();
+    store.begin(path, 1, null, "r1");
+    store.invalidate(path);
+    expect(store.getDoc(path).pendingRevision).toBeNull();
+    expect(store.getDoc(path).revision).toBe("r0");
+  });
+
   it("docs are kept per file path and patch keeps the other fields", () => {
     const store = new SpectrumComparisonStore();
     expect(store.getDoc("unknown")).toBe(EMPTY_COMPARISON_DOC);
@@ -110,8 +124,10 @@ describe("SpectrumComparisonStore", () => {
       loading: false,
       regionVersion: null,
       pixelKey: null,
+      revision: null,
       pendingRegionVersion: null,
       pendingPixelKey: null,
+      pendingRevision: null,
       normalise: "none",
       offsetStep: null,
       includePixel: true,

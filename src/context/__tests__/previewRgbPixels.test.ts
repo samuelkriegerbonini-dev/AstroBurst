@@ -66,6 +66,7 @@ function rgbBuffer(): ArrayBuffer {
 
 interface RgbPixelsValue {
   rgbRawPixels: RawRgbPixelData | null;
+  rgbRawPixelsError: string | null;
   loadRgbRawPixels: (source: string | null, force?: boolean, displayReferred?: boolean) => void;
 }
 
@@ -143,5 +144,20 @@ describe("PreviewProvider loads RGB pixels with the domain of the product it sho
     expect(rgbRequests()).toEqual([{ path: RGB, maxDim: 1000 }]);
     expect(loaded?.displayReferred).toBe(false);
     expect([loaded?.r.min, loaded?.r.max]).toEqual([Math.fround(0.1), Math.fround(0.9)]);
+  });
+
+  it("keeps the reason when the RGB pixels fail to load, so the GPU toggle can say why the CPU view is shown", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    rgbPixelsValue(renderProvider()).loadRgbRawPixels(RGB, true);
+    await flushMicrotasks();
+    invokeMock.mockImplementation((command) =>
+      command === "get_raw_rgb_pixels_preview" ? Promise.reject(new Error("RGB product file is locked")) : new Promise(() => {}),
+    );
+    rgbPixelsValue(renderProvider()).loadRgbRawPixels(CURVES, true, true);
+    await flushMicrotasks();
+    const value = rgbPixelsValue(renderProvider());
+    expect(value.rgbRawPixelsError).toBe("RGB product file is locked");
+    expect(value.rgbRawPixels).toBeNull();
+    errorLog.mockRestore();
   });
 });

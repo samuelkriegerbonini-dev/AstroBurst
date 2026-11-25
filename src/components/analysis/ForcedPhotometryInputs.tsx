@@ -17,6 +17,7 @@ import { noiseOfferText } from "./forcedPhotometryInputsModel";
 export interface ForcedInputFile {
   name: string;
   path: string;
+  measureKey?: string | null;
 }
 
 export interface ForcedPhotometryInputsProps {
@@ -28,6 +29,7 @@ export interface ForcedPhotometryInputsProps {
 
 export interface BandNoiseOfferProps {
   path: string;
+  measureKey?: string | null;
   label: string;
   fCorr: number | null;
   radius: number | null;
@@ -80,8 +82,8 @@ function positionsCount(positions: ForcedPositionsParse): string {
   return positions.total > n ? `${count} of ${positions.total} read` : count;
 }
 
-export function BandNoiseOffer({ path, label, fCorr, radius, unit, disabled = false }: BandNoiseOfferProps) {
-  const latestDepth = () => depthStore.latest(path);
+export function BandNoiseOffer({ path, measureKey = path, label, fCorr, radius, unit, disabled = false }: BandNoiseOfferProps) {
+  const latestDepth = () => depthStore.latest(path, measureKey);
   const depth = useSyncExternalStore(depthStore.subscribe, latestDepth, latestDepth);
   const offer = noiseFactorOffer(depth, radius, unit);
   const text = noiseOfferText(offer, fCorr);
@@ -318,6 +320,7 @@ function ForcedPhotometryInputs({ fields, positions, files, disabled = false }: 
               {zeroPoint !== null && <div className={HINT_CLASS}>{ZERO_POINT_CAPTIONS[zeroPoint.system]}</div>}
               <BandNoiseOffer
                 path={band.path}
+                measureKey={files.find((f) => f.path === band.path)?.measureKey ?? band.path}
                 label={band.label || band.fileName}
                 fCorr={band.fCorr}
                 radius={fields.radius}

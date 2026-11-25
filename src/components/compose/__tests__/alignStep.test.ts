@@ -526,7 +526,7 @@ describe("StackStep run that outlives its inputs", () => {
     const onStacked = renderStack();
     await captured.clicks["Stack All"]();
     expect(mocks.stackFrames.mock.calls[0][0]).toEqual(FRAMES);
-    expect(onStacked).toHaveBeenCalledWith("r", STACKED);
+    expect(onStacked).toHaveBeenCalledWith("r", STACKED, FRAMES);
     expect(mocks.recordStackOutcome.mock.calls).toEqual([["r", { store: true, notice: null }, 0]]);
   });
 });

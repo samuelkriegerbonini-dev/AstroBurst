@@ -152,6 +152,14 @@ export function psfFwhmRows(steps: readonly StepReport[]): PsfFwhmRow[] {
   return rows;
 }
 
+export function fwhmChange(row: Pick<PsfFwhmRow, "matchedPx" | "targetPx">): number | null {
+  return row.matchedPx !== null && row.targetPx !== null ? row.matchedPx / row.targetPx - 1 : null;
+}
+
+export function signedPercent(change: number): string {
+  return `${change > 0 ? "+" : "-"}${Math.abs(100 * change).toFixed(1)} %`;
+}
+
 export function fwhmCell(px: number | null, scaleArcsec: number | null): string {
   if (px === null) return "--";
   return scaleArcsec === null ? `${px.toFixed(2)} px` : `${px.toFixed(2)} px (${(px * scaleArcsec).toFixed(3)}")`;

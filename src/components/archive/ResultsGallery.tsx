@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import DatasetCard from "./DatasetCard";
 import type { MastRow } from "../../shared/types/mast";
-import type { ArchiveState } from "./state/archiveReducer";
+import { currentMission, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { galleryColumns, galleryDemand, galleryMove } from "./logic/gridNav";
 import { thumbStatus } from "./logic/thumbQueue";
@@ -29,6 +29,10 @@ const MAX_MOUNTED = 200;
 
 function cardSelector(rowKey: string): string {
   return `[data-testid="mast-card"][data-row-key="${CSS.escape(rowKey)}"]`;
+}
+
+export function focusDateFilter(): void {
+  document.querySelector<HTMLInputElement>('[data-testid="mast-filter-date"] input')?.focus();
 }
 
 export default function ResultsGallery({ state, ctl, rows, missionLabel, onOpenDetail }: ResultsGalleryProps) {
@@ -223,7 +227,14 @@ export default function ResultsGallery({ state, ctl, rows, missionLabel, onOpenD
       {state.loadingMore !== null ? (
         <p className="ab-mast-more">{`Loading rows ${state.loadingMore + 1} to ${state.loadingMore + 200}`}</p>
       ) : results?.truncated ? (
-        <p className="ab-mast-more">Showing the first 2,000 rows. Narrow the search to see the rest.</p>
+        <p className="ab-mast-more">
+          Showing the first 2,000 rows. Narrow the search to see the rest.
+          {currentMission(state)?.quickFilters.some((f) => f.id === "date") ? (
+            <button type="button" data-testid="mast-narrow-date" className="ab-mast-link-btn" onClick={focusDateFilter}>
+              Narrow by date
+            </button>
+          ) : null}
+        </p>
       ) : null}
     </div>
   );

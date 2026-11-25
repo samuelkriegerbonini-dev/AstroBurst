@@ -24,8 +24,9 @@ interface ResultsRegionProps {
   onOpenDetail?: () => void;
 }
 
-function hasCountdown(state: ArchiveState): boolean {
-  return state.thumbs.pausedUntil !== null || Object.values(state.banners).some((b) => b?.until !== null && b?.until !== undefined);
+export function hasCountdown(state: ArchiveState, now: number): boolean {
+  const pending = (until: number | null | undefined) => until !== null && until !== undefined && until > now;
+  return pending(state.thumbs.pausedUntil) || Object.values(state.banners).some((b) => pending(b?.until));
 }
 
 function ResultsBody({ state, ctl, onOpenDetail }: { state: ArchiveState; ctl: ArchiveController; onOpenDetail?: () => void }) {
@@ -81,7 +82,7 @@ function Skeleton() {
 }
 
 export default function ResultsRegion({ state, ctl, around, onEditQuery, onSwitchToWorkspace, onOpenDetail }: ResultsRegionProps) {
-  const now = useNow(hasCountdown(state) ? 1000 : null);
+  const now = useNow(hasCountdown(state, Date.now()) ? 1000 : null);
   const rs = resultsState(state);
   const view = effectiveView(state);
   const banner = visibleBanner(state, now);

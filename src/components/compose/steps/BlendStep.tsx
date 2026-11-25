@@ -5,6 +5,8 @@ import { blendChannels, lrgbCombineComposite, renderLinearCompositePreview } fro
 import { measureChannelLevels } from "../../../services/channelLevels";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
+import { useWizardRunGuard } from "../../../context/WizardRunGuardContext";
+import { blendInputKey, WIZARD_INPUTS_CHANGED } from "../../../utils/wizardRunGuard";
 import { RunButton, Slider, Toggle } from "../../ui";
 import type { ProcessedFile } from "../../../shared/types";
 import {
@@ -36,8 +38,10 @@ import {
   type MeasuredLevel,
 } from "../../../utils/levelMatch";
 import {
+  BLEND_WEIGHTS_CHANGED,
   blendMatrixError,
   blendWeightsCoverAllColumns,
+  blendWeightsSignature,
   presetBinNames,
   presetPlan,
   resolvePresetWeights,
@@ -109,6 +113,7 @@ export default function BlendStep({
   onCompositeOp,
 }: BlendStepProps) {
   const { compositeStfR, compositeStfG, compositeStfB, compositeStfLinked } = useCompositeStf();
+  const { begin, beginComposite, discardLateComposite } = useWizardRunGuard();
   const [loading, setLoading] = useState(false);
   const [levelProgress, setLevelProgress] = useState<string | null>(null);
   const matchOn = useMemo(() => levelMatchEnabled(state, files, filterDetections), [state, files, filterDetections]);
@@ -135,7 +140,7 @@ export default function BlendStep({
     const resolved = resolvePresetWeights(preset, filledBins);
     if (!resolved) {
       setPresetError(
-        `${preset.label} cannot fill R, G and B from the channels you loaded — it would leave an output channel black. Use Auto (λ) or set the weights by hand.`,
+        `${preset.label} cannot fill R, G and B from the channels you loaded; it would leave an output channel black. Use Auto (λ) or set the weights by hand.`,
       );
       return;
     }
@@ -227,6 +232,9 @@ export default function BlendStep({
   const handleRunBlend = useCallback(async () => {
     setLoading(true);
     setError("");
+    const inputsCurrent = begin(blendInputKey);
+    const compositeCurrent = beginComposite();
+    const isCurrent = () => inputsCurrent() && compositeCurrent();
     try {
       const request = blendRequest(state, filledBins, activeWeights);
 
@@ -261,11 +269,16 @@ export default function BlendStep({
         scales = outcome.scales;
       }
       setLevelProgress(null);
+      if (!isCurrent()) throw new Error(WIZARD_INPUTS_CHANGED);
 
       const dir = await getOutputDir();
       const res = await blendChannels(request.paths, scaleBlendWeights(request.weights, request.channelOrder, scales), dir, {
         preset: state.blendPreset,
       });
+      if (!isCurrent()) {
+        discardLateComposite();
+        throw new Error(WIZARD_INPUTS_CHANGED);
+      }
 
       setResult({ ...res, weights: request.weights });
 
@@ -275,6 +288,13 @@ export default function BlendStep({
         kind: "blend",
         preset: state.blendPreset,
         levels: scales ? levelMatchEntries(state, files, scales) : null,
+        weights: request.weights.map((w) => ({
+          channel: levelMatchChannelLabel(state, request.channelOrder[w.channelIdx], files),
+          r: w.r,
+          g: w.g,
+          b: w.b,
+        })),
+        signature: blendWeightsSignature(activeWeights, matchOn),
       });
       onCompositeReady(previewUrl, blendCompositeStf(res), res.dimensions);
     } catch (e) {
@@ -283,14 +303,18 @@ export default function BlendStep({
       setLevelProgress(null);
       setLoading(false);
     }
-  }, [filledBins, state, activeWeights, matchOn, files, onLevelScales, onCompositeReady, onCompositeOp]);
+  }, [filledBins, state, activeWeights, matchOn, files, onLevelScales, onCompositeReady, onCompositeOp, begin, beginComposite, discardLateComposite]);
 
   const lPath = useMemo(() => resolveChannelPath(state, "l"), [state]);
+  const blendedSignature = state.compositeHistory.signature;
+  const weightsChanged =
+    state.compositeReady && blendedSignature !== null && blendedSignature !== blendWeightsSignature(activeWeights, matchOn);
 
   const handleApplyLrgb = useCallback(async () => {
     if (!lPath) return;
     setLrgbLoading(true);
     setLrgbError("");
+    const isCurrent = beginComposite();
     try {
       const dir = await getOutputDir();
       const res = await lrgbCombineComposite(lPath, dir, {
@@ -298,6 +322,10 @@ export default function BlendStep({
         chrominance: lrgbChrominance,
         stfLinked: compositeStfLinked,
       });
+      if (!isCurrent()) {
+        discardLateComposite();
+        throw new Error(WIZARD_INPUTS_CHANGED);
+      }
       setLrgbApplied(true);
       onCompositeOp({ kind: "lrgb", lightness: lrgbLightness, chrominance: lrgbChrominance });
       const recomputed = stfTripleOf(res);
@@ -312,7 +340,7 @@ export default function BlendStep({
     } finally {
       setLrgbLoading(false);
     }
-  }, [lPath, lrgbLightness, lrgbChrominance, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onCompositeReady, onCompositeOp]);
+  }, [lPath, lrgbLightness, lrgbChrominance, compositeStfR, compositeStfG, compositeStfB, compositeStfLinked, onCompositeReady, onCompositeOp, beginComposite, discardLateComposite]);
 
   if (filledBins.length < 2) {
     return (
@@ -393,7 +421,7 @@ export default function BlendStep({
                   const frames = effectiveBinFiles(state, bin).length;
                   const partial = stage === "raw" && frames > 1;
                   const title = partial
-                    ? `Using 1 of ${frames} files — run Stack to combine them first`
+                    ? `Using 1 of ${frames} files: run Stack to combine them first`
                     : `Source: ${stage} output`;
                   return (
                     <span
@@ -451,7 +479,7 @@ export default function BlendStep({
           <AlertTriangle size={12} className="shrink-0 mt-px" />
           <span>
             {unalignedBins.map((b) => b.shortLabel).join(", ")} {unalignedBins.length === 1 ? "was" : "were"} never
-            aligned — blending unregistered channels can cause color fringing. Run Align first.
+            aligned; blending unregistered channels can cause color fringing. Run Align first.
           </span>
         </div>
       )}
@@ -462,7 +490,7 @@ export default function BlendStep({
           <span>
             The selected channels cover disjoint sky regions
             {disjointPairs[0].separation_arcmin != null ? ` (~${disjointPairs[0].separation_arcmin.toFixed(1)}′ apart)` : ""}
-            — the blend will have no common signal. Check the channel assignment in step 1.
+            ; the blend will have no common signal. Check the channel assignment in step 1.
           </span>
         </div>
       )}
@@ -481,6 +509,9 @@ export default function BlendStep({
         accent="amber"
         onClick={handleRunBlend}
       />
+      {weightsChanged && !loading && (
+        <div className="text-[9px] text-amber-400/90" data-testid="blend-weights-changed">{BLEND_WEIGHTS_CHANGED}</div>
+      )}
 
       <div className="flex items-center gap-2 pt-1">
         <div className="flex-1 flex items-center gap-1 text-[9px] text-zinc-600 flex-wrap">

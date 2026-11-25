@@ -2,6 +2,7 @@ mod blend;
 mod color;
 pub(crate) mod composite_chain;
 mod crop;
+pub(crate) mod helpers;
 mod levels;
 mod overlay_preview;
 mod rgb;

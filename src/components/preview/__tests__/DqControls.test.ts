@@ -278,7 +278,7 @@ describe("DqControls states", () => {
     expect(toggle(tree).props.title).toBe("Show flagged DQ pixels over the image");
     (toggle(tree).props.onClick as () => void)();
     expect(actions.setOverlay).toHaveBeenCalledWith({ enabled: true });
-    expect(toggle(render({ dqRef: JWST.dq_ref, flagTable: JWST, overlay: { enabled: true, mask: 7 } })).props.title).toBe("DQ overlay shown — click to hide");
+    expect(toggle(render({ dqRef: JWST.dq_ref, flagTable: JWST, overlay: { enabled: true, mask: 7 } })).props.title).toBe("DQ overlay shown; click to hide");
   });
 
   it("reports a failed mask and shows a spinner while the mask loads", () => {

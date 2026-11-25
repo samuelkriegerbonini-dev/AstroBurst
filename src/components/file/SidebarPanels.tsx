@@ -25,11 +25,11 @@ const OBSERVATION_FIELDS = [
 ] as const;
 
 function formatStat(value: number | undefined, digits: number): string {
-  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "—";
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "--";
 }
 
 function formatDataStat(value: number | undefined, unit: string | null): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
   const text = value !== 0 && Math.abs(value) < 1e-3 ? value.toExponential(3) : formatSignificant(value);
   return unit === null ? text : `${text} ${unit}`;
 }

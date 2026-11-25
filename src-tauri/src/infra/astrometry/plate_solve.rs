@@ -286,8 +286,12 @@ mod astrometry_net_impl {
             }
         };
 
+        let mut warnings = Vec::new();
         let wcs_cards = fetch_wcs_cards(&client, base_url, jid).await.unwrap_or_else(|e| {
             log::warn!("WCS file for job {} unavailable: {:#}", jid, e);
+            warnings.push(format!(
+                "astrometry.net solved the image but its WCS file could not be downloaded ({e:#}); the solution cannot be written to the image, solve again to retry"
+            ));
             Vec::new()
         });
 
@@ -302,6 +306,7 @@ mod astrometry_net_impl {
             wcs_cards,
             solver: SOLVER_ASTROMETRY_NET.to_string(),
             parity: parity.map(|p| parity_name(p > 0.0).to_string()),
+            warnings,
             ..SolveResult::default()
         })
     }
@@ -699,6 +704,27 @@ mod tests {
             .unwrap();
         assert_eq!(result.ra_center, 83.822);
         assert!(result.wcs_cards.is_empty(), "{:?}", result.wcs_cards);
+    }
+
+    #[tokio::test]
+    async fn a_solve_whose_wcs_file_could_not_be_downloaded_says_why_it_cannot_be_written() {
+        let api_url = serve_a_solved_job(FULL_CALIBRATION, None);
+        let dir = tempfile::tempdir().unwrap();
+        let result = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(api_url), None, &never_cancelled, &ignore_stage)
+            .await
+            .unwrap();
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert!(
+            result.warnings[0].starts_with("astrometry.net solved the image but its WCS file could not be downloaded (")
+                && result.warnings[0].ends_with("); the solution cannot be written to the image, solve again to retry"),
+            "{:?}",
+            result.warnings
+        );
+        let solved = serve_a_solved_job(FULL_CALIBRATION, Some(nova_wcs_file()));
+        let complete = solve_astrometry_net(&upload_fixture(&dir), 1024, 683, &solve_config(solved), None, &never_cancelled, &ignore_stage)
+            .await
+            .unwrap();
+        assert!(complete.warnings.is_empty(), "{:?}", complete.warnings);
     }
 
     async fn solve_error(api_url: String) -> String {

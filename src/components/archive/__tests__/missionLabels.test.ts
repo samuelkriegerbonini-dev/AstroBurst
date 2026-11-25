@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { CATEGORY_COLUMN, MISSION_LABELS, missionLabelOf } from "../logic/missionLabels";
 import type { MastMissionId } from "../../../shared/types/mast";
 
-const rust = readFileSync(fileURLToPath(new URL("../../../../src-tauri/src/core/mast/missions.rs", import.meta.url)), "utf8");
+const rust = readFileSync(fileURLToPath(new URL("../../../../src-tauri/src/core/mast/search/missions.rs", import.meta.url)), "utf8");
 
 function rustLabels(): Record<string, string> {
   const body = rust.slice(rust.indexOf("pub fn label("), rust.indexOf("pub fn dataset_column("));

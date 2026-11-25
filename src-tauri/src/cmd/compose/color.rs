@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::cmd::common::{blocking_cmd, resolve_output_dir, MAX_PREVIEW_DIM};
 use crate::cmd::helpers;
-use crate::core::compose::white_balance::{analyze_wb_reference, validate_wb_factor, WbChannel};
+use crate::core::compose::white_balance::{analyze_wb_reference, auto_white_balance, validate_wb_factor, AutoWhiteBalance, WbChannel, WbMethod};
 use crate::core::imaging::stats::{compute_image_stats, compute_image_stats_with_known_range};
 use crate::core::imaging::stf::{auto_stf, make_stf_u8_fn, AutoStfConfig, StfParams};
 use crate::types::image::ImageStats;
@@ -19,6 +19,8 @@ const PAR_THRESHOLD: usize = 4_000_000;
 const IDENTITY_FACTOR_TOLERANCE: f64 = 1e-6;
 
 pub const RES_EMPTY_CHANNELS: &str = "empty_channels";
+pub const RES_WB_METHOD: &str = "method";
+pub const RES_WB_SOURCE_PIXELS: &str = "source_pixels";
 pub const RES_BLEND_STF_LINKED: &str = "blend_stf_linked";
 
 fn validated_wb_factors(r_factor: f64, g_factor: f64, b_factor: f64) -> anyhow::Result<(f32, f32, f32)> {
@@ -30,8 +32,18 @@ fn validated_wb_factors(r_factor: f64, g_factor: f64, b_factor: f64) -> anyhow::
 }
 
 fn auto_wb_payload(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -> anyhow::Result<serde_json::Value> {
-    let analysis = analyze_wb_reference(sr, sg, sb);
-    analysis.median_ratio_is_valid()?;
+    balance_payload(&AutoWhiteBalance {
+        analysis: analyze_wb_reference(sr, sg, sb),
+        method: WbMethod::SkyMedianRatio,
+        source_pixels: 0,
+    })
+}
+
+fn balance_payload(balance: &AutoWhiteBalance) -> anyhow::Result<serde_json::Value> {
+    let analysis = &balance.analysis;
+    if balance.method == WbMethod::SkyMedianRatio {
+        analysis.median_ratio_is_valid()?;
+    }
 
     let reference = analysis.reference.ok_or_else(|| {
         anyhow::anyhow!("Auto white balance found no usable signal: R, G and B are all empty. Check the blend inputs.")
@@ -49,6 +61,8 @@ fn auto_wb_payload(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -> anyhow:
         RES_STAB_B: analysis.stability.2,
         RES_REF_CHANNEL: reference.as_str(),
         RES_EMPTY_CHANNELS: empty,
+        RES_WB_METHOD: balance.method.as_str(),
+        RES_WB_SOURCE_PIXELS: balance.source_pixels,
     }))
 }
 
@@ -275,7 +289,10 @@ pub async fn compute_auto_wb_cmd() -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let (entry_r, entry_g, entry_b) = helpers::load_orig_or_composite()?;
 
-        auto_wb_payload(entry_r.stats(), entry_g.stats(), entry_b.stats())
+        balance_payload(&auto_white_balance(
+            [entry_r.arr(), entry_g.arr(), entry_b.arr()],
+            [entry_r.stats(), entry_g.stats(), entry_b.stats()],
+        ))
     })
 }
 
@@ -293,6 +310,27 @@ mod tests {
             mean: median,
             valid_count: 1000,
         }
+    }
+
+    #[test]
+    fn the_payload_names_the_method_that_gave_the_factors() {
+        let star = |sky: f32| {
+            Array2::from_shape_fn((64, 64), |(y, x)| {
+                let d2 = (x as f32 - 32.0).powi(2) + (y as f32 - 32.0).powi(2);
+                sky + ((y * 13 + x * 7) % 5) as f32 + 1000.0 * (-d2 / 8.0).exp()
+            })
+        };
+        let planes = [star(200.0), star(100.0), star(100.0)];
+        let stats = [0, 1, 2].map(|i| compute_image_stats(&planes[i]));
+        let balance = auto_white_balance([&planes[0], &planes[1], &planes[2]], [&stats[0], &stats[1], &stats[2]]);
+        let payload = balance_payload(&balance).unwrap();
+        assert_eq!(payload[RES_WB_METHOD], "source_signal");
+        assert!(payload[RES_WB_SOURCE_PIXELS].as_u64().unwrap() >= 30);
+        assert!((payload[RES_G_FACTOR].as_f64().unwrap() / payload[RES_R_FACTOR].as_f64().unwrap() - 1.0).abs() < 0.02);
+
+        let by_medians = auto_wb_payload(&stats[0], &stats[1], &stats[2]).unwrap();
+        assert_eq!(by_medians[RES_WB_METHOD], "sky_median_ratio");
+        assert_eq!(by_medians[RES_WB_SOURCE_PIXELS], 0);
     }
 
     #[test]

@@ -7,11 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
+use reqwest::Url;
 use tempfile::TempDir;
 
 use super::*;
-use crate::core::astrometry::healpix_cat::{write_catalog, CatHeader, CatalogStar, Record};
+use crate::core::astrometry::healpix_cat::{write_catalog, CatHeader, CatType, CatalogStar, Record, SIRIL_ASTROMETRIC_FILE};
 use crate::infra::net::test_server::{serve, Resource, TestServer};
+use crate::types::config::AppConfig;
 
 const KIB: u64 = 1 << 10;
 const MIB: u64 = 1 << 20;

@@ -6,7 +6,7 @@ import type { SaguiInputInfo } from "../../../shared/types/sagui";
 import type { ResolutionCheck } from "../../../shared/types/resolution";
 import { DEFAULT_RESOLUTION_SETTINGS } from "../../../utils/resolutionText";
 
-const state: SaguiState = { config: { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 4294967295, psf_target: "", mode: "ward", knn_k: 40 }, input: null, runtime: null, status: "idle", operation: null, installation: null, installParent: "", progress: null, result: null, outputDir: null, unit: null, error: null };
+const state: SaguiState = { config: { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 4294967295, psf_target: "", mode: "ward", knn_k: 40 }, input: null, runtime: null, status: "idle", operation: null, installation: null, installParent: "", progress: null, result: null, outputDir: null, error: null };
 vi.mock("../saguiStore", async (original) => ({ ...await original<typeof import("../saguiStore")>(), useSaguiState: () => state }));
 vi.mock("../../../hooks/useFileStore", () => ({ fileStore: { getSelectedFile: () => null } }));
 vi.mock("../../../hooks/useFileIngest", () => ({ showWhenLoaded: vi.fn() }));
@@ -16,7 +16,7 @@ vi.mock("../../../hooks/useResolutionSettings", async () => {
 });
 import SaguiPanel from "../SaguiPanel";
 import { SaguiInputPsfView, type SaguiInputPsfViewProps } from "../SaguiInputPsf";
-import { bandPsfLines, physicalRequest, regionBudgetText } from "../saguiInputPsfModel";
+import { bandPsfLines, physicalRequest, psfMismatchText, regionBudgetText } from "../saguiInputPsfModel";
 
 const BAND = { psf_fwhm_arcsec: 0.1388, pixscale_arcsec: 0.04, psf_area_px: 27.28684761586353 };
 const INPUT: SaguiInputInfo = { width: 40, height: 30, bands: [{ filter: "F200W", pivot_um: 2 }, { filter: "F444W", pivot_um: 4.4 }], unit: "Jy/pixel", has_err: true, has_dq: true, has_noise_correlation: false, dq_flags: [], estimated_memory_bytes: 2 * 1024 ** 3, warnings: ["NOISCORR extension is absent: regional errors assume independent pixels and error_correlated stays empty; resampling and PSF matching create covariance that is not stored"] };
@@ -30,7 +30,7 @@ const CHECK: ResolutionCheck = {
 };
 const OK_TEXT = "20 regions over 40 × 30 pixels give 60.0 pixels per region, above the PSF noise-equivalent area of 27.3 pixels (F444W). Up to 43 regions keep one PSF area each on the full footprint; masks shrink the support, so the run can still warn.";
 const WARN_TEXT = "60 regions over 40 × 30 pixels give 20.0 pixels per region, below the PSF noise-equivalent area of 27.3 pixels (F444W): regions smaller than the PSF are not resolved. Request at most 43 regions, fewer when masks shrink the support.";
-const NO_CARD = "The cube has no REDSHIFT card: the PSF is given in arcsec only. Cube Prep writes the card in Edit, Set centre / redshift.";
+const NO_CARD = "The cube has no REDSHIFT card: the PSF is given in arcsec only. Cube Prep writes the card from the Redshift field of its Cube step.";
 const PSF_LINE = (filter: string, pivot: string) => `${filter} (${pivot} µm) · PSF FWHM 0.1388 arcsec · 0.04000"/px · PSF area 27.3 px`;
 const markupText = (text: string) => text.replaceAll('"', "&quot;");
 
@@ -108,6 +108,40 @@ describe("SAGUI input PSF view", () => {
     expect(html).toContain(markupText(PSF_LINE("F200W", "2.000")));
     expect(html).toContain(markupText(PSF_LINE("F444W", "4.400")));
     expect(html).toContain(OK_TEXT);
+  });
+});
+
+const D1_FWHM: [string, number, number][] = [["F814W", 0.8046, 0.1537], ["F150W", 1.5007, 0.1405], ["F200W", 1.9886, 0.1415], ["F277W", 2.7617, 0.145], ["F356W", 3.5684, 0.1684], ["F444W", 4.4043, 0.1388]];
+const D1_INPUT: SaguiInputInfo = { ...INPUT, width: 43, height: 43, bands: D1_FWHM.map(([filter, pivot_um, psf_fwhm_arcsec]) => ({ filter, pivot_um, psf_fwhm_arcsec, pixscale_arcsec: 0.04, psf_area_px: null })) };
+const D1_TARGET_TEXT = "PSF not matched to F444W (0.1388 arcsec): F356W +21.3 %, F814W +10.7 %, F277W +4.5 % (tolerance 2 %). Regional colours mix resolutions; rebuild the kernels in Cube Prep before relying on these SEDs.";
+const D1_WIDEST_TEXT = "PSF FWHM differs between bands, relative to the widest, F356W (0.1684 arcsec): F444W -17.6 %, F150W -16.6 %, F200W -16.0 %, F277W -13.9 %, F814W -8.7 % (tolerance 2 %). The cube is not PSF-homogenized; enter a target only after matching every band to it.";
+
+describe("SAGUI input PSF homogeneity", () => {
+  it("lists the bands whose PSF misses the target by more than 2 percent, widest miss first", () => {
+    expect(psfMismatchText(D1_INPUT, "f444w")).toBe(D1_TARGET_TEXT);
+  });
+
+  it("compares with the widest stated PSF when no target is entered", () => {
+    expect(psfMismatchText(D1_INPUT, " ")).toBe(D1_WIDEST_TEXT);
+  });
+
+  it("says nothing for a homogeneous cube, an unstated PSF or an unknown target", () => {
+    const matched = { ...D1_INPUT, bands: D1_INPUT.bands.map((band) => ({ ...band, psf_fwhm_arcsec: 0.1388 * (band.filter === "F200W" ? 1.019 : 1) })) };
+    expect(psfMismatchText(matched, "F444W")).toBeNull();
+    expect(psfMismatchText(matched, "")).toBeNull();
+    expect(psfMismatchText(INPUT, "F444W")).toBeNull();
+    expect(psfMismatchText(D1_INPUT, "F999X")).toBeNull();
+    expect(psfMismatchText({ ...D1_INPUT, bands: [D1_INPUT.bands[4]] }, "")).toBeNull();
+  });
+
+  it("the view and the panel show the mismatch as a warning", () => {
+    const html = view({ input: D1_INPUT, psfTarget: "F444W", nRegions: 6 });
+    expect(html).toContain("data-psf-mismatch");
+    expect(html).toContain(D1_TARGET_TEXT);
+    withState({ input: D1_INPUT, config: { ...state.config, psf_target: "" } }, () => {
+      expect(renderToStaticMarkup(createElement(SaguiPanel))).toContain(D1_WIDEST_TEXT);
+    });
+    expect(view({ input: INPUT_PSF, psfTarget: "F444W", nRegions: 20 })).not.toContain("data-psf-mismatch");
   });
 });
 

@@ -153,8 +153,8 @@ describe("ForcedPhotometryPanel", () => {
     const inputs = ofType(shown, ForcedPhotometryInputs);
     expect(inputs).toBeDefined();
     expect(inputs!.props.files).toEqual([
-      { name: "brick-g.fits", path: "C:/d/brick-g.fits" },
-      { name: "brick-r.fits", path: "C:/d/brick-r.fits" },
+      { name: "brick-g.fits", path: "C:/d/brick-g.fits", measureKey: "C:/d/brick-g.fits" },
+      { name: "brick-r.fits", path: "C:/d/brick-r.fits", measureKey: "C:/d/brick-r.fits" },
     ]);
     expect(inputs!.props.fields).toBe(forcedPhotometryStore.getSnapshot().fields);
     expect(inputs!.props.disabled).toBe(false);

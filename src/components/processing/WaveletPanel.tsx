@@ -16,11 +16,13 @@ import { useRenderContext } from "../../context/PreviewContext";
 import { useCompositeStf } from "../../context/CompositeContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
+import { waveletHistory } from "../../utils/compositeChainHistory";
+import { WAVELET_DEFAULTS } from "../../services/processingDefaults";
 import { WAVELET_PROGRESS_EVENT } from "../../shared/types/processing";
 import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice, describedByIds } from "./compositeProps";
 import type { CompositePanelProps, CompositeWaveletResult } from "./compositeProps";
 
-const DEFAULT_THRESHOLDS = [3.0, 2.5, 2.0, 1.5, 1.0];
+const DEFAULT_THRESHOLDS: readonly number[] = WAVELET_DEFAULTS.thresholds;
 const DEFAULT_BIAS = 0;
 const BIAS_MIN = -1;
 const BIAS_MAX = 3;
@@ -213,7 +215,8 @@ export default function WaveletPanel({
         linear: softThreshold,
         layerBias: layerBias.slice(0, numScales),
       });
-      onCompositeDone("denoise", RESULT_LABEL, res, chainCall.displayStf);
+      const history = waveletHistory({ numScales, thresholds, linear: softThreshold, layerBias, mask: chainCall.mask });
+      onCompositeDone("denoise", RESULT_LABEL, res, chainCall.displayStf, history);
       return {
         composite: true as const,
         res,

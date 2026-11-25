@@ -1,19 +1,19 @@
 // astroburst headless server — contributed by Jae-Joon Lee <https://github.com/leejjoon>
-mod config;
-mod error;
-mod extractors;
+mod app;
 mod handlers;
-mod job;
-mod router;
+mod http_layer;
 mod science;
-mod session;
-mod state;
 mod v2;
 
+use app::{config, job, router, session, state};
+use http_layer::{error, extractors};
+
 #[cfg(test)]
-mod route_docs;
+mod api_docs;
 #[cfg(test)]
-mod tests;
+use api_docs::route_docs;
+#[cfg(test)]
+use app::tests;
 
 use std::sync::Arc;
 

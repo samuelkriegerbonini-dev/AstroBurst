@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { createCubePrepDraft } from "../cubePrepModel";
 import type { CubePrepState } from "../cubePrepStore";
+import type { CubePrepRecipe } from "../../../shared/types/cubeprep";
 import { DOCK_TOOL_META, DEFAULT_DOCK_LAYOUT } from "../../../utils/dockLayout";
 
 const state: CubePrepState = { draft: createCubePrepDraft(), status: "idle", validation: null, progress: null, report: null, outputDir: null, error: null, startedAt: null };
@@ -19,12 +20,41 @@ function withState(change: Partial<CubePrepState>, check: () => void) {
   try { check(); } finally { Object.assign(state, saved); }
 }
 
+describe("Cube Prep profile check", () => {
+  it("says what a recipe sets apart from the selected defaults, offers to apply them and names a fixed kernel", () => {
+    const draft = createCubePrepDraft();
+    const recipe: CubePrepRecipe = { ...draft.recipe, inputs: [{ path: "a.fits", dataset: "JWST", filter: "F444W" }], steps: [{ step: "align", reference: "F444W", method: "bilinear", border_crop: 1, area_rule: "scale" }, { step: "cube", reference: "F444W", order: "wavelength", output: "cube.fits", layout: "mef" }, { step: "kernels", reference: "F444W", method: "wiener", eps: 0.05, shape: "reference" }] };
+    withState({ draft: { ...draft, profile: "scientific", recipe } }, () => {
+      const html = render();
+      expect(html).toContain("data-profile-differences");
+      expect(html).toContain("This recipe differs from the Scientific MEF defaults: Align method: bilinear → exact.");
+      expect(html).toContain("Apply these defaults");
+      expect(html).toContain("Kernels keep this recipe&#x27;s fixed eps 0.05;");
+    });
+    const html = render();
+    expect(html).not.toContain("data-profile-differences");
+    expect(html).not.toContain("Kernels keep this recipe");
+  });
+});
+
 describe("Cube Prep desktop panel", () => {
   it("is available without an open file and exposes the entire recipe workflow", () => {
     expect(DOCK_TOOL_META.cubeprep.needsFile).toBe(false);
     expect(DEFAULT_DOCK_LAYOUT.anchors["right-top"]).toContain("cubeprep");
     const html = render();
-    for (const label of ["Inputs", "Crop", "Units", "Align", "Cube", "Edit", "PSFs", "Kernels", "Match", "Export", "LIGHTSTACK 0.4.0", "Scientific MEF", "Validate &amp; run", "Working folder"]) expect(html).toContain(label);
+    for (const label of ["Inputs", "Crop", "Units", "Align", "Cube", "Edit", "PSFs", "Kernels", "Match", "Export", "LIGHTSTACK 0.4.0", "Scientific MEF", "Cube for", "Save runs in", "Import recipe", "Validate"]) expect(html).toContain(label);
+  });
+
+  it("lists the folder checks the run needs with the recipe problems and disables Run (PREPUI-16)", () => {
+    const draft = createCubePrepDraft();
+    draft.recipe.inputs = [{ path: "a.fits", dataset: "JWST", filter: "F200W" }];
+    draft.recipe.steps = [{ step: "align", reference: "F200W" }, { step: "cube", output: "cube.fits" }];
+    draft.outputParent = "/runs";
+    withState({ draft }, () => {
+      const html = render();
+      expect(html).toContain("<li>Choose the input folder for relative file paths.</li>");
+      expect(html).toMatch(/<button disabled=""[^>]*class="ab-run-btn[^"]*"[^>]*><span[^>]*>Choose the input folder for relative file paths\.<\/span><\/button>/);
+    });
   });
 
   it("shows retained output and explicit cancellation without a success claim", () => {
@@ -74,6 +104,7 @@ describe("Cube Prep desktop panel", () => {
     const draft = createCubePrepDraft();
     draft.recipe.inputs = [{ path: "a.fits", dataset: "JWST", filter: "F200W" }];
     draft.recipe.steps = [{ step: "align", reference: "F200W" }, { step: "cube", output: "cube.fits" }];
+    draft.baseDir = "/data";
     withState({ draft }, () => expect(render()).toMatch(/<button class="[^"]*">Validate<\/button>/));
   });
 
@@ -93,10 +124,12 @@ describe("Cube Prep desktop panel", () => {
     expect(html).toContain('aria-label="Browse working folder"');
   });
 
-  it("marks enabled steps without reading the check glyph aloud (SCIENCE-26)", () => {
+  it("numbers the enabled steps in run order and offers the others as steps to add (SCIENCE-26)", () => {
     const html = render();
-    expect(html.match(/<span aria-hidden="true"> ✓<\/span><span class="sr-only">, enabled<\/span>/g)).toHaveLength(3);
-    expect(html).not.toMatch(/[^>] ✓/);
+    const nav = /<nav aria-label="Preparation steps"[^>]*>(.*?)<\/nav>/.exec(html)?.[1] ?? "";
+    expect(nav.match(/aria-pressed="false">\d+\. [A-Za-z]+/g)?.map((label) => label.replace('aria-pressed="false">', ""))).toEqual(["1. Units", "2. Align", "3. Cube", "4. PSFs", "5. Kernels", "6. Match"]);
+    expect(nav.match(/aria-label="Add the [A-Za-z]+ step">\+ [A-Za-z]+/g)).toHaveLength(3);
+    expect(nav).not.toContain("✓");
   });
 
   it("shows the run folder and final cube by name, with the full path on hover and Show in folder (SCIENCE-27)", () => {
@@ -118,9 +151,14 @@ describe("Cube Prep desktop panel", () => {
   it("uses the shared run button with a running state for Validate & run (SCIENCE-29)", () => {
     const runButton = (html: string) => /<button[^>]*class="ab-run-btn[^"]*"[^>]*>(?:(?!<\/button>).)*<\/button>/.exec(html)?.[0] ?? "";
     const idle = runButton(render());
-    expect(idle).toContain("Validate &amp; run");
+    expect(idle).toContain("Add at least one input image.");
     expect(idle).toContain('data-accent="cyan"');
     expect(idle).toContain('data-running="false"');
+    const draft = createCubePrepDraft();
+    draft.recipe.inputs = [{ path: "/data/a.fits", dataset: "JWST", filter: "F200W" }];
+    draft.recipe.steps = [{ step: "align", reference: "F200W" }, { step: "cube", output: "cube.fits" }];
+    Object.assign(draft, { baseDir: "/data", outputParent: "/runs" });
+    withState({ draft }, () => expect(runButton(render())).toContain("Validate &amp; run"));
     withState({ status: "validating", startedAt: 1 }, () => {
       const validating = runButton(render());
       expect(validating).toContain('aria-busy="true"');

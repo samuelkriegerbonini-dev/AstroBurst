@@ -1,5 +1,6 @@
 import type { MastError, MastMission, MastMissionId, MastTokenStatus } from "../../../shared/types/mast";
 import { errorView, operationName } from "./errorCopy";
+import { downloadsOffered } from "./downloadView";
 
 export type RomanLock = "locked" | "checking" | "unlocked" | "expired";
 export type MissionAccent = "amber" | "sky" | "violet" | "muted";
@@ -13,6 +14,7 @@ export interface MissionEntry {
   reason: string | null;
   lock: RomanLock | null;
   accent: MissionAccent;
+  status: string;
 }
 
 export interface TokenView {
@@ -34,13 +36,11 @@ export const TAB_MISSIONS: readonly MastMissionId[] = ["jwst", "hst", "roman"];
 export const MORE_ORDER: readonly MastMissionId[] = ["iue", "classy", "ullyses", "roman_cgi", "roman_spectra", "tess", "multi_mission"];
 export const ROMAN_SEARCH_DISABLED = "Roman needs an authorized MAST token";
 
-const OFFER_NOTES: Partial<Record<MastMissionId, string>> = {
-  iue: "search and metadata; no preview images at MAST",
-  classy: "search and metadata (galaxy sample); no previews",
-  ullyses: "search and metadata (targets); no previews",
-};
-
-const ROMAN_CGI_REASON = "needs Roman authorization; coronagraphy is not processed by AstroBurst";
+export const STATUS_OPEN = "open";
+export const STATUS_TOKEN = "token";
+export const STATUS_NOT_PROCESSED = "token, not processed";
+export const STATUS_NOT_SERVED = "not served by MAST";
+export const STATUS_UNSUPPORTED = "not in AstroBurst";
 
 const ACCENTS: Partial<Record<MastMissionId, MissionAccent>> = { jwst: "amber", hst: "sky", roman: "violet" };
 
@@ -56,18 +56,31 @@ function notDeployedReason(m: MastMission): string {
   return `not deployed by MAST (HTTP 404, checked ${m.checkedOn})`;
 }
 
+function listText(parts: readonly string[]): string {
+  return parts.length < 2 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+export function offerText(m: Pick<MastMission, "capabilities">): string {
+  const parts = ["search", "metadata"];
+  if (m.capabilities.products) parts.push(downloadsOffered(m) ? "downloads" : "product lists");
+  return m.capabilities.images ? listText([...parts, "previews"]) : `${listText(parts)}; no preview images at MAST`;
+}
+
 function entryFor(m: MastMission, roman: RomanLock): MissionEntry {
   const placement = TAB_MISSIONS.includes(m.id) ? "tab" : "more";
   const accent = ACCENTS[m.id] ?? "muted";
-  if (m.id === "roman") return { id: m.id, label: m.label, placement, enabled: true, reason: null, lock: roman, accent };
-  if (m.id === "roman_cgi") return { id: m.id, label: m.label, placement, enabled: false, reason: ROMAN_CGI_REASON, lock: null, accent };
-  if (m.availability === "not_deployed") return { id: m.id, label: m.label, placement, enabled: false, reason: notDeployedReason(m), lock: null, accent };
-  if (m.availability === "unsupported" || !m.capabilities.search) {
-    return { id: m.id, label: m.label, placement, enabled: false, reason: m.note ?? "not supported by AstroBurst yet", lock: null, accent };
+  const entry = { id: m.id, label: m.label, placement, accent } as const;
+  if (m.id === "roman") return { ...entry, enabled: true, reason: null, lock: roman, status: roman === "unlocked" ? STATUS_OPEN : STATUS_TOKEN };
+  if (m.availability === "not_deployed") return { ...entry, enabled: false, reason: notDeployedReason(m), lock: null, status: STATUS_NOT_SERVED };
+  if (m.availability === "token" && !m.capabilities.search) {
+    return { ...entry, enabled: false, reason: m.note ?? "needs a MAST token; not processed by AstroBurst", lock: null, status: STATUS_NOT_PROCESSED };
   }
-  if (m.availability === "token") return { id: m.id, label: m.label, placement, enabled: false, reason: ROMAN_CGI_REASON, lock: null, accent };
-  const reason = placement === "more" && m.id in OFFER_NOTES ? OFFER_NOTES[m.id] ?? null : null;
-  return { id: m.id, label: m.label, placement, enabled: true, reason, lock: null, accent };
+  if (m.availability === "unsupported" || !m.capabilities.search) {
+    return { ...entry, enabled: false, reason: m.note ?? "not supported by AstroBurst yet", lock: null, status: STATUS_UNSUPPORTED };
+  }
+  if (m.availability === "token") return { ...entry, enabled: false, reason: m.note ?? "needs a MAST token", lock: null, status: STATUS_TOKEN };
+  const reason = placement === "more" ? offerText(m) : null;
+  return { ...entry, enabled: true, reason, lock: null, status: STATUS_OPEN };
 }
 
 export function missionEntries(missions: readonly MastMission[], roman: RomanLock): MissionEntry[] {
@@ -81,7 +94,9 @@ export function tabMissions(entries: readonly MissionEntry[], current: MastMissi
 }
 
 export function moreMenu(entries: readonly MissionEntry[]): { enabled: MissionEntry[]; disabled: MissionEntry[] } {
-  const ordered = MORE_ORDER.map((id) => entries.find((e) => e.id === id)).filter((e): e is MissionEntry => !!e && e.placement === "more");
+  const known = MORE_ORDER.map((id) => entries.find((e) => e.id === id));
+  const others = entries.filter((e) => e.placement === "more" && !MORE_ORDER.includes(e.id));
+  const ordered = [...known, ...others].filter((e): e is MissionEntry => !!e && e.placement === "more");
   return { enabled: ordered.filter((e) => e.enabled), disabled: ordered.filter((e) => !e.enabled) };
 }
 
@@ -94,7 +109,7 @@ export function viewAvailability(m: MastMission): ViewAvailability {
     previews: images,
     previewsReason: images ? null : noImages,
     products: m.capabilities.products,
-    productsReason: m.capabilities.products ? null : `Product lists for ${m.label} arrive with spectra support (MA15)`,
+    productsReason: m.capabilities.products ? null : `MAST lists no products for ${m.label} in AstroBurst yet.`,
   };
 }
 
@@ -148,16 +163,21 @@ function moreEntry(entry: MissionEntry, mission: MastMission | undefined, probe:
   return { ...entry, reason, current: entry.id === current, check, note };
 }
 
-export function moreMenuView(
-  missions: readonly MastMission[],
-  roman: RomanLock,
-  probes: MissionProbes,
-  current: MastMissionId,
-  now: number,
-): { enabled: MoreEntry[]; disabled: MoreEntry[] } {
+export interface MoreMenuView {
+  enabled: MoreEntry[];
+  disabled: MoreEntry[];
+  notServed: MoreEntry[];
+}
+
+export function moreMenuView(missions: readonly MastMission[], roman: RomanLock, probes: MissionProbes, current: MastMissionId, now: number): MoreMenuView {
   const { enabled, disabled } = moreMenu(missionEntries(missions, roman));
   const view = (e: MissionEntry) => moreEntry(e, missions.find((m) => m.id === e.id), probes[e.id], current, now);
-  return { enabled: enabled.map(view), disabled: disabled.map(view) };
+  const all = disabled.map(view);
+  return { enabled: enabled.map(view), disabled: all.filter((e) => e.check === null), notServed: all.filter((e) => e.check !== null) };
+}
+
+export function notServedTitle(entries: readonly MoreEntry[]): string {
+  return `Not served by MAST today (${entries.length})`;
 }
 
 export function notDeployedView(input: { label: string; operation?: string; at: number | null; status: number | null; checkedOn: string; now: number }): { title: string; text: string } {

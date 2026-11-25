@@ -21,10 +21,13 @@ pub const ROMAN_CONVERSION_MJY_KEYS: [&str; 2] = [
     "ROMAN_META_PHOTOMETRY_CONVERSION_MEGAJANSKYS",
     "ROMAN_META_PHOTOMETRY_CONVERSION_MEGAJANSKYS_VALUE",
 ];
-pub const ROMAN_PIXEL_AREA_SR_KEYS: [&str; 2] = [
+pub const ROMAN_PIXEL_AREA_SR_KEYS: [&str; 4] = [
+    "ROMAN_META_PHOTOMETRY_PIXEL_AREA",
+    "ROMAN_META_PHOTOMETRY_PIXEL_AREA_VALUE",
     "ROMAN_META_PHOTOMETRY_PIXELAREA_STERADIANS",
     "ROMAN_META_PHOTOMETRY_PIXELAREA_STERADIANS_VALUE",
 ];
+pub const HST_PIXEL_AREA_MAP_WARNING: &str = "flat-fielded HST frame (flt or flc) that keeps its detector distortion: the pixel area map is not applied, so the flux of a point source changes by a few percent across the detector; multiply the frame by its pixel area map or measure on the drizzled product";
 
 const MJY_PER_SR_UNITS: [&str; 6] = ["MJY/SR", "MJYSR-1", "MJY.SR-1", "MJY.SR**-1", "MJYSR**-1", "MJY/STERADIAN"];
 const PIXEL_AREA_TOLERANCE_RATIO: f64 = 1.10;
@@ -50,6 +53,11 @@ const NON_SCIENCE_CARD_VALUES: [(&str, &[&str]); 4] = [
 const PAN_STARRS_MASK_COUNT_CARD: &str = "MSKNUM";
 const NON_SCIENCE_EXTNAMES: [&str; 11] =
     ["MASK", "MSK", "FLAG", "MASKBITS", "DQ", "VARIANCE", "VAR", "IVAR", "INVVAR", "WGT", "WEIGHT"];
+const PER_SECOND_DIVISORS: [&str; 3] = ["/SECOND", "/SEC", "/S"];
+const PER_SECOND_POWERS: [&str; 3] = ["S-1", "S**-1", "S^-1"];
+const HST_DISTORTION_CARDS: [&str; 3] = ["A_ORDER", "D2IMDIS1", "IDCTAB"];
+const HST_DRIZZLE_CARDS: [&str; 3] = ["D001DATA", "D001VER", "NDRIZIM"];
+const SIP_CTYPE_SUFFIX: &str = "-SIP";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -225,7 +233,16 @@ fn is_dn_per_second(unit: &str) -> bool {
 }
 
 pub(crate) fn is_rate_unit(unit: &str) -> bool {
-    unit.contains("/S")
+    let divided_by_seconds = PER_SECOND_DIVISORS.iter().any(|divisor| {
+        unit.match_indices(divisor).any(|(at, _)| !unit[at + divisor.len()..].starts_with(|next: char| next.is_ascii_alphabetic()))
+    });
+    divided_by_seconds || PER_SECOND_POWERS.iter().any(|power| unit.contains(power))
+}
+
+fn keeps_detector_distortion(header: &HduHeader) -> bool {
+    let distorted = HST_DISTORTION_CARDS.iter().any(|card| header.get(card).is_some())
+        || card_text(header, "CTYPE1").is_some_and(|ctype| ctype.to_ascii_uppercase().ends_with(SIP_CTYPE_SUFFIX));
+    distorted && !HST_DRIZZLE_CARDS.iter().any(|card| header.get(card).is_some())
 }
 
 fn positive_exptime(header: &HduHeader) -> Option<f64> {
@@ -443,6 +460,9 @@ impl PhotCal {
                     "EXPTIME missing; counts in '{}' cannot be converted to a rate, magnitudes are unavailable",
                     bunit.as_deref().unwrap_or("?")
                 ));
+            }
+            if keeps_detector_distortion(header) {
+                warnings.push(HST_PIXEL_AREA_MAP_WARNING.to_string());
             }
             notes.push("HST: STmag = -2.5 log10(rate * PHOTFLAM) + PHOTZPT; ABmag = STmag - 5 log10(PHOTPLAM) + 18.692".into());
             let origin = format!(
@@ -662,6 +682,16 @@ impl PhotCal {
 
     pub fn pixar_from_header(&self) -> bool {
         matches!(self.convention, FluxConvention::JwstMjySr { derived_pixar: false, .. })
+    }
+
+    pub fn is_space_telescope_convention(&self) -> bool {
+        matches!(
+            self.convention,
+            FluxConvention::JwstMjySr { .. }
+                | FluxConvention::JwstDnPerSec { .. }
+                | FluxConvention::HstCounts { .. }
+                | FluxConvention::RomanDnPerSec { .. }
+        )
     }
 
     pub fn apply_area_map(&mut self, hdu: usize, map_mean: f64) {
@@ -975,6 +1005,77 @@ mod tests {
         assert!(matches!(cal.convention, FluxConvention::HstCounts { per_second: false, exptime: None, .. }));
         assert!(cal.warnings.iter().any(|w| w.contains("EXPTIME")), "{:?}", cal.warnings);
         assert!(cal.calibrate(100.0, None).is_none());
+    }
+
+    #[test]
+    fn hst_flc_header_warns_that_no_pixel_area_map_is_applied() {
+        let flat_fielded = |extra: &[(&str, &str)]| {
+            let mut cards = vec![("BUNIT", "ELECTRONS"), ("EXPTIME", "500"), ("PHOTFLAM", "1.5E-19"), ("PHOTPLAM", "5921")];
+            cards.extend_from_slice(extra);
+            PhotCal::from_header(&make_header(&cards), None).expect("hst calibration")
+        };
+        let names_the_map = |cal: &PhotCal| cal.warnings.iter().filter(|w| w.contains("pixel area map")).count();
+        for distortion in [[("A_ORDER", "4")], [("D2IMDIS1", "Lookup")], [("IDCTAB", "jref$11d1433lj_idc.fits")], [("CTYPE1", "RA---TAN-SIP")]] {
+            let cal = flat_fielded(&distortion);
+            assert_eq!(names_the_map(&cal), 1, "{distortion:?}: {:?}", cal.warnings);
+            assert!(cal.converts_to_jansky());
+        }
+        let drizzled = flat_fielded(&[("IDCTAB", "jref$11d1433lj_idc.fits"), ("D001DATA", "j8bt06nyq_flc.fits[sci,1]")]);
+        assert_eq!(names_the_map(&drizzled), 0, "{:?}", drizzled.warnings);
+        let mosaic_counted = flat_fielded(&[("A_ORDER", "4"), ("NDRIZIM", "4")]);
+        assert_eq!(names_the_map(&mosaic_counted), 0, "{:?}", mosaic_counted.warnings);
+        assert_eq!(names_the_map(&flat_fielded(&[])), 0);
+    }
+
+    #[test]
+    fn a_rate_is_a_unit_with_a_per_second_factor_whatever_its_spelling() {
+        for rate in ["COUNTS-1", "ADUS-1", "COUNT/S", "ELECTRONS/S", "E-/S", "DN/S", "ELECTRON.S-1", "COUNTS**-1", "E-/SEC", "ADU/SECOND"] {
+            assert!(is_rate_unit(rate), "{rate} is a rate");
+        }
+        for stored in ["JY/SR", "UJY/SR", "W/M2/SR", "MJY/SR", "ADU", "ELECTRONS", "COUNTS", "NANOMAGGY", "JY/STERADIAN", ""] {
+            assert!(!is_rate_unit(stored), "{stored} is not a rate");
+        }
+        let per_second = make_header(&[("BUNIT", "count s-1"), ("PHOTFLAM", "1.9E-19"), ("PHOTPLAM", "5300"), ("EXPTIME", "1000")]);
+        assert!(matches!(
+            PhotCal::from_header(&per_second, None).unwrap().convention,
+            FluxConvention::HstCounts { per_second: true, .. }
+        ));
+    }
+
+    #[test]
+    fn roman_pixel_area_is_read_from_pixel_area_with_the_older_name_as_fallback() {
+        let current = make_header(&[
+            ("BUNIT", "DN / s"),
+            ("ROMAN_META_PHOTOMETRY_CONVERSION_MEGAJANSKYS", "0.3324"),
+            ("ROMAN_META_PHOTOMETRY_PIXEL_AREA", "2.8E-13"),
+        ]);
+        let cal = PhotCal::from_header(&current, None);
+        assert!(
+            matches!(
+                cal.as_ref().map(|cal| &cal.convention),
+                Some(FluxConvention::RomanDnPerSec { mjy_per_dn_s, pixar_sr }) if *mjy_per_dn_s == 0.3324 && *pixar_sr == 2.8e-13
+            ),
+            "{cal:?}"
+        );
+        let both = make_header(&[
+            ("BUNIT", "DN / s"),
+            ("ROMAN_META_PHOTOMETRY_CONVERSION_MEGAJANSKYS", "0.3324"),
+            ("ROMAN_META_PHOTOMETRY_PIXELAREA_STERADIANS", "9.9E-13"),
+            ("ROMAN_META_PHOTOMETRY_PIXEL_AREA", "2.8E-13"),
+        ]);
+        assert!(matches!(
+            PhotCal::from_header(&both, None).unwrap().convention,
+            FluxConvention::RomanDnPerSec { pixar_sr, .. } if pixar_sr == 2.8e-13
+        ));
+        let quantity = make_header(&[
+            ("BUNIT", "DN / s"),
+            ("ROMAN_META_PHOTOMETRY_CONVERSION_MEGAJANSKYS", "0.3324"),
+            ("ROMAN_META_PHOTOMETRY_PIXEL_AREA_VALUE", "2.8E-13"),
+        ]);
+        assert!(matches!(
+            PhotCal::from_header(&quantity, None).map(|cal| cal.convention),
+            Some(FluxConvention::RomanDnPerSec { pixar_sr, .. }) if pixar_sr == 2.8e-13
+        ));
     }
 
     #[test]

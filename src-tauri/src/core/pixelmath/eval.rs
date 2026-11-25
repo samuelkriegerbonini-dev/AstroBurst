@@ -828,6 +828,7 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+
     #[test]
     fn compiles_to_postfix_with_resolved_slots_and_reducers() {
         let program = compile("$T * (A / med(A)) - min(A)", &names(&["$T", "A"])).unwrap();

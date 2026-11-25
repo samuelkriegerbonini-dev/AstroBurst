@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { SaguiRegion, SaguiRegionalBand, SaguiResult } from "../../shared/types/sagui";
-import { PREP_FIELD, PrepField } from "../cubeprep/CubePrepStepEditor";
+import { PREP_BUTTON } from "../cubeprep/CubePrepStepEditor";
 import { regionAt, regionColor, sedDomain } from "./saguiPlot";
 
 const PLOT = { left: 54, right: 328, top: 22, bottom: 186 };
@@ -96,10 +96,16 @@ function SedPlot({ region, unit }: { region: SaguiRegion; unit: string }) {
   </div>;
 }
 
-export default function SaguiViewer({ result }: { result: SaguiResult }) {
+function snrText(region: SaguiRegion): string {
+  if (typeof region.min_snr === "number" && Number.isFinite(region.min_snr)) return region.min_snr.toPrecision(3);
+  return typeof region.min_snr_lower_bound === "number" && Number.isFinite(region.min_snr_lower_bound) ? `≥ ${region.min_snr_lower_bound}` : "--";
+}
+
+export default function SaguiViewer({ result, onSaveRegion }: { result: SaguiResult; onSaveRegion?: (region: SaguiRegion) => void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [selection, setSelection] = useState<number | null>(null);
   const selected = result.regions.find((region) => region.region === selection) ?? result.regions[0];
+  const largestFirst = [...result.regions].sort((a, b) => b.n_pixels - a.n_pixels || a.region - b.region);
   useEffect(() => {
     const element = canvas.current;
     const context = element?.getContext("2d");
@@ -124,7 +130,7 @@ export default function SaguiViewer({ result }: { result: SaguiResult }) {
   }, [result, selected]);
   return <div className="space-y-3">
     <h3 className="font-semibold text-cyan-200">Regions and SEDs</h3>
-    <canvas ref={canvas} role="img" aria-label="Categorical region map; select a region with the menu below" className="w-full max-h-96 object-contain rounded bg-zinc-950 cursor-crosshair" style={{ imageRendering: "pixelated" }} onClick={(event) => {
+    <canvas ref={canvas} role="img" aria-label="Categorical region map; select a region with the list below" className="w-full max-h-96 object-contain rounded bg-zinc-950 cursor-crosshair" style={{ imageRendering: "pixelated" }} onClick={(event) => {
       const bounds = event.currentTarget.getBoundingClientRect();
       const canvasRatio = result.width / result.height;
       const displayWidth = Math.min(bounds.width, bounds.height * canvasRatio);
@@ -134,8 +140,9 @@ export default function SaguiViewer({ result }: { result: SaguiResult }) {
       const region = regionAt(result, x, y);
       if (region !== null && region > 0) setSelection(region);
     }} />
-    <p className="text-[10px] text-zinc-500">Categorical colors; dark background = excluded pixels. X increases right, Y upward. Click a region or select it below.</p>
-    <PrepField label="Selected region"><select className={PREP_FIELD} value={selected?.region ?? ""} onChange={(e) => setSelection(Number(e.target.value))}>{result.regions.map((region) => <option key={region.region} value={region.region}>Region {region.region} · {region.n_pixels} pixels</option>)}</select></PrepField>
+    <p className="text-[10px] text-zinc-500">Categorical colors; dark background = excluded pixels. X increases right, Y upward. Click a region on the map or in the list below.</p>
+    <div className="max-h-48 overflow-auto rounded border border-zinc-700/60"><table className="w-full text-[10px]"><caption className="sr-only">Regions, largest first</caption><thead><tr className="text-zinc-500"><th scope="col" className="text-left">Region</th><th scope="col" className="text-right">Pixels</th><th scope="col" className="text-right">Components</th><th scope="col" className="text-right">Min SNR</th></tr></thead><tbody>{largestFirst.map((region) => { const active = region.region === selected?.region; return <tr key={region.region} className={active ? "bg-cyan-500/10 text-cyan-200" : undefined}><td><button type="button" aria-pressed={active} className="w-full text-left hover:text-cyan-200" onClick={() => setSelection(region.region)}>{`Region ${region.region}`}</button></td><td className="text-right font-mono">{region.n_pixels}</td><td className="text-right font-mono">{region.n_components ?? "--"}</td><td className="text-right font-mono">{snrText(region)}</td></tr>; })}</tbody></table></div>
+    {selected && onSaveRegion && <button type="button" className={PREP_BUTTON} onClick={() => onSaveRegion(selected)}>{`Save the SED of region ${selected.region} as CSV`}</button>}
     {selected && <SedPlot region={selected} unit={result.unit} />}
   </div>;
 }

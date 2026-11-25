@@ -1,0 +1,147 @@
+{
+ "golden": "tso/whtlt",
+ "produced_by": {
+  "script": "tso_golden_whtlt.py",
+  "command": "python -I scripts/oracle/tso_golden_whtlt.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 14107,
+    "sha256": "9b14e06ec70a31f2f7777530518721ea160265e595876676db54af4c20369055"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "ecsv": {
+  "first_line": "# %ECSV 1.0",
+  "line_ending": "LF",
+  "n_header_lines": 20,
+  "delimiter_key_present": false,
+  "delimiter_used": "single space",
+  "schema_line": "# schema: astropy-2.0",
+  "has_serialized_columns_block": true,
+  "has_yaml_anchor_or_alias": false,
+  "column_name_line": "MJD_UTC_NRS1 BJD_TDB_NRS1 whitelight_flux_NRS1"
+ },
+ "layout": "current (MJD_UTC, BJD_TDB, whitelight_flux with optional order and detector suffixes)",
+ "columns": [
+  {
+   "name": "MJD_UTC_NRS1",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "BJD_TDB_NRS1",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux_NRS1",
+   "unit": "Jy",
+   "datatype": "float64"
+  }
+ ],
+ "meta": {
+  "instrument": "NIRSPEC",
+  "exp_type": "NRS_BRIGHTOBJ",
+  "subarray": "SUB2048",
+  "filter": "CLEAR",
+  "pupil": null,
+  "target_name": "WD 1856+534 b",
+  "number_of_integrations": 240
+ },
+ "meta_key_order": [
+  "instrument",
+  "exp_type",
+  "subarray",
+  "filter",
+  "pupil",
+  "target_name",
+  "number_of_integrations"
+ ],
+ "n_data_rows": 240,
+ "non_numeric_tokens": [],
+ "series": [
+  {
+   "flux_column": "whitelight_flux_NRS1",
+   "time_column": "MJD_UTC_NRS1",
+   "bjd_column": "BJD_TDB_NRS1",
+   "detector_suffix": "NRS1",
+   "order_suffix": null,
+   "flux_unit": "Jy",
+   "time_unit": null,
+   "rows_with_finite_time": 240,
+   "time_first": 60061.44133176829,
+   "time_last": 60061.526222939145,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 30.688690789975226,
+   "flux_first3": [
+    0.16369951048163586,
+    0.16398261037017267,
+    0.16391382997867548
+   ],
+   "flux_last3": [
+    0.16397001246584397,
+    0.1639757849388719,
+    0.1640142699204498
+   ],
+   "flux_sum_fsum": 37.761493394107156,
+   "flux_min": 0.00512653064346067,
+   "flux_max": 0.16425668674225807,
+   "flux_negative_rows": 0,
+   "bjd_first": 60061.4421733457,
+   "bjd_last": 60061.52706665472,
+   "bjd_minus_time_s_first": 72.71228791214526
+  }
+ ],
+ "transit_scan": {
+  "median_all": 0.16396500128388564,
+  "rows_below_0p9_median_index0": [
+   179,
+   190
+  ],
+  "rows_below_0p9_median_contiguous": true,
+  "rows_below_0p9_median_count": 12,
+  "first_low_mjd_utc": 60061.50491134814,
+  "last_low_mjd_utc": 60061.50881847316,
+  "first_low_bjd_tdb": 60061.50575452695,
+  "last_low_bjd_tdb": 60061.50966175038,
+  "minimum_index0": 185,
+  "minimum_mjd_utc": 60061.50704250724,
+  "minimum_bjd_tdb": 60061.50788573973,
+  "minimum_flux": 0.00512653064346067,
+  "median_outside": 0.16396954980586376,
+  "depth_at_minimum": 0.9687348617500605,
+  "depth_mean_of_low_rows": 0.7894475385304618,
+  "normalised_flux_index0_175_to_194": [
+   0.9990425672161701,
+   1.0008706198049377,
+   0.9829156783279768,
+   0.9082612768807131,
+   0.6346460906143849,
+   0.327387457796844,
+   0.1183496193633644,
+   0.06329339908540654,
+   0.03485811109771129,
+   0.04858345146615163,
+   0.0312651382499395,
+   0.0486041703724282,
+   0.07101491139053775,
+   0.13853712966785223,
+   0.32467804389279653,
+   0.6854120146370412,
+   0.9102555164803567,
+   0.9863155207654659,
+   0.9999047069606329,
+   1.000536396957
+  ]
+ }
+}

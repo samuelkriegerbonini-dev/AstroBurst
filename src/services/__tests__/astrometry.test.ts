@@ -88,7 +88,7 @@ describe("plateSolve", () => {
 
   it("sends exactly the arguments plate_solve_cmd declares, so a renamed one is not dropped without a word", async () => {
     await plateSolve("C:/d/light.fits");
-    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/cmd/astrometry.rs", import.meta.url)), "utf8");
+    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/cmd/astrometry/wcs/wcs_commands.rs", import.meta.url)), "utf8");
     const start = rust.indexOf("pub async fn plate_solve_cmd(");
     expect(start).toBeGreaterThan(-1);
     const signature = rust.slice(start, rust.indexOf(") -> Result", start));

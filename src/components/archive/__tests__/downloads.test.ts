@@ -15,9 +15,10 @@ import {
   downloadInput,
   downloadStatusText,
   downloadsPillText,
+  downloadsOffered,
   downloadsUnavailable,
-  HLSP_NAME_TEXT,
   listDownloadRefusal,
+  NO_URI_TEXT,
   needsConfirmation,
   openableDownload,
   picksAfterSend,
@@ -119,25 +120,30 @@ describe("download confirmation", () => {
     expect(refused).toContain("quota");
   });
 
-  it("offers no download for Roman products and says why", () => {
-    expect(downloadsUnavailable("roman")).toBe("Roman downloads are not enabled yet.");
-    expect(downloadsUnavailable("roman_cgi")).toBe("Roman downloads are not enabled yet.");
-    expect(downloadsUnavailable("jwst")).toBeNull();
-    expect(downloadsUnavailable("hst")).toBeNull();
+  it("reads from the mission capabilities whether downloads are offered, and says why not", () => {
+    const caps = (products: boolean, downloads?: boolean) => ({ search: true, images: true, products, ...(downloads === undefined ? {} : { downloads }) }) as never;
+    expect(downloadsOffered({ capabilities: caps(true) })).toBe(true);
+    expect(downloadsOffered({ capabilities: caps(false) })).toBe(false);
+    expect(downloadsOffered({ capabilities: caps(true, false) })).toBe(false);
+    expect(downloadsOffered({ capabilities: caps(false, true) })).toBe(true);
+    expect(downloadsUnavailable({ id: "jwst", label: "JWST", capabilities: caps(true) })).toBeNull();
+    expect(downloadsUnavailable({ id: "roman", label: "Roman", capabilities: caps(true, true) })).toBeNull();
+    expect(downloadsUnavailable({ id: "roman", label: "Roman", capabilities: caps(true, false), downloadsNote: "needs an authorized MAST token." })).toBe("Roman downloads are not offered: needs an authorized MAST token.");
+    expect(downloadsUnavailable({ id: "tess", label: "TESS", capabilities: caps(false), note: null })).toBe("TESS downloads are not offered by AstroBurst yet.");
     const html = renderToStaticMarkup(
       createElement(DownloadBarView, {
         count: 0,
         bytes: 0,
         confirming: null,
         error: null,
-        unavailable: "Roman downloads are not enabled yet.",
+        unavailable: "Roman downloads are not offered: needs an authorized MAST token.",
         onDownload: vi.fn(),
         onConfirm: vi.fn(),
         onCancel: vi.fn(),
       }),
     );
     expect(html).toContain('data-state="unavailable"');
-    expect(html).toContain("Roman downloads are not enabled yet.");
+    expect(html).toContain("Roman downloads are not offered: needs an authorized MAST token.");
     expect(html).not.toContain("Download and open");
     expect(html).not.toContain("<button");
   });
@@ -419,6 +425,7 @@ describe("download rows", () => {
     expect(downloadStatusText(item({ state: "downloading", received: 0, total: null, sizeBytes: 0 }))).toBe("Starting");
     expect(downloadStatusText(item({ state: "queued" }))).toBe("Queued");
     expect(downloadStatusText(item({ state: "cancelled", action: "resume" }))).toBe("Cancelled");
+    expect(downloadStatusText(item({ state: "cancelled", action: "resume", received: 58_786_560, total: 117_573_120 }))).toBe("Paused at 50% of 118 MB");
     const queueHtml = (second: MastDownloadItem) =>
       renderToStaticMarkup(
         createElement(DownloadQueueView, {
@@ -435,7 +442,8 @@ describe("download rows", () => {
     expect(html.match(/>Open</g)).toHaveLength(1);
     expect(queueHtml(item({ id: "dl1:1", state: "done", verified: true, opensAs: "catalog", filename: "x_cat.ecsv" })).match(/>Open</g)).toHaveLength(2);
     expect(html.match(/>Show in folder</g)).toHaveLength(2);
-    expect(html.match(/>Cancel</g)).toHaveLength(1);
+    expect(html.match(/>Pause</g)).toHaveLength(1);
+    expect(html.match(/>Cancel</g)).toBeNull();
     expect(html).toContain('aria-valuenow="50"');
   });
 });
@@ -481,26 +489,43 @@ describe("download requests", () => {
     expect(picksAfterSend(since, "jwst:a")).toBe(since);
   });
 
-  it("refuses up front the files whose MAST URI the download engine refuses", () => {
-    const jwst = { id: "jwst", label: "JWST" } as const;
-    const hst = { id: "hst", label: "HST" } as const;
-    const iue = { id: "iue", label: "IUE" } as const;
+  it("leaves the URI checks to the download engine and refuses up front only what the mission does not offer", () => {
+    const caps = { search: true, images: false, products: true };
+    const jwst = { id: "jwst", label: "JWST", capabilities: { ...caps, images: true } } as const;
+    const classyMission = { id: "classy", label: "CLASSY", capabilities: caps } as const;
+    const iue = { id: "iue", label: "IUE", capabilities: caps } as const;
+    const roman = { id: "roman", label: "Roman", capabilities: { ...caps, downloads: false }, downloadsNote: "needs an authorized MAST token" } as never;
     const ceers = product({ mastUri: "mast:HLSP/ceers/nircam1/ceers_nircam1_f200w_v0.5_i2d.fits" });
     const classy = product({
-      filename: "hlsp_classy_hst_cos_j0021+0052_g130m_v1_coadded.fits",
-      mastUri: "mast:HLSP/classy/j0021+0052/hlsp_classy_hst_cos_j0021+0052_g130m_v1_coadded.fits",
+      filename: "hlsp_classy_hst_cos_j0021+0052_multi_v1_coadded.fits",
+      mastUri: "mast:HLSP/classy/j0021+0052/hlsp_classy_hst_cos_j0021+0052_multi_v1_coadded.fits",
     });
-    const lwp = product({ filename: "lwp00501.lihi.gz", mastUri: "mast:IUE/url//pub/iue/data/lwp/00000/lwp00501.lihi.gz" });
+    const lwp = product({ filename: "lwp01232.elbll.gz", mastUri: "mast:IUE/url/pub/iue/data/lwp/01000/lwp01232.elbll.gz" });
     expect(productDownloadRefusal(product(), jwst)).toBeNull();
     expect(productDownloadRefusal(ceers, jwst)).toBeNull();
-    expect(productDownloadRefusal(ceers, iue)).toBeNull();
-    expect(productDownloadRefusal(classy, hst)).toBe(HLSP_NAME_TEXT);
-    expect(productDownloadRefusal(lwp, iue)).toBe("IUE downloads are not enabled yet.");
-    expect(productDownloadRefusal(product(), { id: "roman", label: "Roman" })).toBe("Roman downloads are not enabled yet.");
-    expect(listDownloadRefusal([lwp, lwp], iue)).toBe("IUE downloads are not enabled yet.");
-    expect(listDownloadRefusal([product(), classy], hst)).toBeNull();
+    expect(productDownloadRefusal(classy, classyMission)).toBeNull();
+    expect(productDownloadRefusal(lwp, iue)).toBeNull();
+    expect(productDownloadRefusal(product({ mastUri: "" }), jwst)).toBe(NO_URI_TEXT);
+    expect(productDownloadRefusal(product(), roman)).toBe("Roman downloads are not offered: needs an authorized MAST token.");
+    expect(listDownloadRefusal([lwp, lwp], iue)).toBeNull();
+    expect(listDownloadRefusal([product({ mastUri: "" }), product({ mastUri: "" })], jwst)).toBe(NO_URI_TEXT);
     expect(listDownloadRefusal([], iue)).toBeNull();
-    expect(listDownloadRefusal([product()], { id: "roman", label: "Roman" })).toBe("Roman downloads are not enabled yet.");
+    expect(listDownloadRefusal([product()], roman)).toBe("Roman downloads are not offered: needs an authorized MAST token.");
+  });
+
+  it("passes the calibration versions of a listed product on to the download engine", () => {
+    const calibration = { calibrationSoftwareVersion: "0.19.1", crdsContext: "roman_0042.pmap", crdsSoftwareVersion: "12.1.4" };
+    expect(downloadInput({ ...product(), calibration } as MastProduct, null)).toMatchObject({ calibration });
+    expect(downloadInput(product(), null)).not.toHaveProperty("calibration");
+  });
+
+  it("sends the listed MAST URI when it is not the plain product form", () => {
+    expect(downloadInput(product(), "2739").uri).toBeNull();
+    const lwp = product({ datasetId: "lwp01232", filename: "lwp01232.elbll.gz", mastUri: "mast:IUE/url/pub/iue/data/lwp/01000/lwp01232.elbll.gz" });
+    expect(downloadInput(lwp, null).uri).toBe("mast:IUE/url/pub/iue/data/lwp/01000/lwp01232.elbll.gz");
+    const classy = product({ mastUri: "mast:HLSP/classy/j0021+0052/hlsp_classy_hst_cos_j0021+0052_multi_v1_coadded.fits" });
+    expect(downloadInput(classy, null).uri).toBe("mast:HLSP/classy/j0021+0052/hlsp_classy_hst_cos_j0021+0052_multi_v1_coadded.fits");
+    expect(downloadInput(product({ mastUri: "https://example.org/x.fits" }), null).uri).toBeNull();
   });
 
   it("gives every request a fresh id the Rust validator accepts", () => {
@@ -521,7 +546,7 @@ describe("footer downloads pill", () => {
         romanUnlocked: false,
         processing: null,
         onRoman: vi.fn(),
-        downloads: { downloading: 2, queued: 1, done: 0, failed: 0, total: 3 },
+        downloads: { downloading: 2, queued: 1, done: 0, failed: 0, stopped: 0, total: 3 },
         drawerOpen: false,
         onDownloads,
       }),
@@ -534,8 +559,9 @@ describe("footer downloads pill", () => {
     expect(html).toContain("Downloads: 2 running, 1 queued");
     const quiet = renderToStaticMarkup(createElement(FooterStatusView, { total: 0, thumbs: 0, queued: 0, romanUnlocked: false, processing: null, onRoman: vi.fn() }));
     expect(quiet).not.toContain("mast-downloads-pill");
-    expect(downloadsPillText({ downloading: 0, queued: 0, done: 3, failed: 0, total: 3 })).toBe("Downloads: 3 done");
-    expect(downloadsPillText({ downloading: 0, queued: 0, done: 1, failed: 2, total: 3 })).toBe("Downloads: 2 failed");
-    expect(downloadsPillText({ downloading: 0, queued: 0, done: 0, failed: 0, total: 0 })).toBe("Downloads");
+    expect(downloadsPillText({ downloading: 0, queued: 0, done: 3, failed: 0, stopped: 0, total: 3 })).toBe("Downloads: 3 done");
+    expect(downloadsPillText({ downloading: 0, queued: 0, done: 1, failed: 2, stopped: 0, total: 3 })).toBe("Downloads: 2 failed");
+    expect(downloadsPillText({ downloading: 0, queued: 0, done: 1, failed: 0, stopped: 2, total: 3 })).toBe("Downloads: 2 to resume");
+    expect(downloadsPillText({ downloading: 0, queued: 0, done: 0, failed: 0, stopped: 0, total: 0 })).toBe("Downloads");
   });
 });

@@ -18,6 +18,7 @@ describe("computeScaleLimits", () => {
     const res = await computeScaleLimits("/a.fits", { ...DEFAULT_DISPLAY_SETTINGS, limits: "zscale", symmetric: true, centre: 0.5 });
     expect(typedInvokeMock).toHaveBeenCalledWith("compute_scale_limits_cmd", {
       path: "/a.fits",
+      excludeDq: false,
       algorithm: "zscale",
       vmin: null,
       vmax: null,

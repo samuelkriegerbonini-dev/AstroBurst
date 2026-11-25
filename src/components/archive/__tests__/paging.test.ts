@@ -57,6 +57,14 @@ describe("mergePage", () => {
     expect(second.rows).toHaveLength(202);
   });
 
+  it("stops loading more when a full page brings only rows already loaded", () => {
+    const first = mergePage(null, page(rows(200), { hasMore: true, totalReported: 900 }));
+    const again = mergePage(first, page(rows(200), { offset: 200, hasMore: true, totalReported: 900 }));
+    expect(again.rows).toHaveLength(200);
+    expect(again.hasMore).toBe(false);
+    expect(nextOffset(again)).toBeNull();
+  });
+
   it("keeps a later page's row whose dataset id repeats with other values, as IUE lists one row per aperture", () => {
     const aperture = (id: string, aper: string) => row(id, { values: { iue_data_id: id, iue_aper: aper } });
     const first = mergePage(null, page([...rows(199), aperture("LWP15521", "LARGE")], { hasMore: true, totalReported: 272 }));

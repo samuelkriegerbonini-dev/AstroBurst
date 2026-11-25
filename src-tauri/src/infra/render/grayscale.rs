@@ -10,7 +10,7 @@ pub(crate) fn quantize_grayscale_l8(data: &Array2<f32>) -> Result<(Vec<u8>, usiz
     let (rows, cols) = data.dim();
     let slice = data.as_slice().context("Array not contiguous")?;
     let (min, max) = find_minmax_simd(slice);
-    let range = (max - min).max(1e-10);
+    let range = if max > min { max - min } else { 1.0 };
     let inv_range = 255.0 / range;
 
     let pixels: Vec<u8> = slice
@@ -41,7 +41,7 @@ pub fn render_grayscale_16bit(data: &Array2<f32>, path: &str) -> Result<()> {
     let (rows, cols) = data.dim();
     let slice = data.as_slice().context("Array not contiguous")?;
     let (min, max) = find_minmax_simd(slice);
-    let range = (max - min).max(1e-10);
+    let range = if max > min { max - min } else { 1.0 };
     let inv_range = 65535.0 / range;
 
     let mut pixels = vec![0u8; slice.len() * 2];
@@ -148,6 +148,14 @@ mod tests {
             .write_image(bytes, w, h, ColorType::L16.into())
             .unwrap();
         out
+    }
+
+    #[test]
+    fn linear_quantisation_handles_erg_units() {
+        let image = ndarray::Array2::from_shape_vec((1, 3), vec![1e-19f32, 5e-19, 1e-17]).unwrap();
+        let (pixels, cols, rows) = super::quantize_grayscale_l8(&image).unwrap();
+        assert_eq!((cols, rows), (3, 1));
+        assert_eq!(pixels, vec![0, 10, 255]);
     }
 
     #[test]

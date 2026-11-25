@@ -26,7 +26,7 @@ export interface CompositeInputView {
 export interface CompositePanelProps {
   compositeMode: boolean;
   compositeInput: CompositeInputView | null;
-  onCompositeDone: (step: ChainStep, label: string, result: CompositeStepResult, callStf: DisplayStf) => void;
+  onCompositeDone: (step: ChainStep, label: string, result: CompositeStepResult, callStf: DisplayStf, history?: readonly string[]) => void;
   fileName: string;
   runNoteId?: string;
   onRunLabelChange?: (label: string) => void;

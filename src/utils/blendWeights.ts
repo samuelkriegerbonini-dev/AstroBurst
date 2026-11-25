@@ -231,3 +231,13 @@ export function presetPlan(
     title: presetWeightsTitle(attempt.rows, nameOf),
   };
 }
+
+export const BLEND_WEIGHTS_CHANGED = "Weights changed since the last Blend: Run Blend to apply.";
+
+export function blendWeightsSignature(weights: readonly BlendWeight[], levelMatch: boolean): string {
+  const used = weights
+    .filter((w) => w.r > 0 || w.g > 0 || w.b > 0)
+    .map((w) => `${w.channelId}:${w.r}:${w.g}:${w.b}`)
+    .sort();
+  return `${levelMatch ? "match" : "raw"}|${used.join("|")}`;
+}

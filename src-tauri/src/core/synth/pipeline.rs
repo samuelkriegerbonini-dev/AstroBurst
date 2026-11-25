@@ -328,6 +328,12 @@ pub fn frame_header(noise: &NoiseParams, frame_index: usize, cadence_seconds: f6
 pub fn synth_header(config: &SynthConfig, frame_index: u32, frame: Option<&FrameParams>) -> HduHeader {
     let mut header = frame_header(&config.noise, frame_index as usize, config.cadence_seconds);
     header.set("SYNSEED", config.field.seed.to_string());
+    if let Some(noise_seed) = config.noise.seed {
+        header.set("SYNNSEED", noise_seed.to_string());
+    }
+    header.set_f64("SYNSKY", config.noise.sky_background);
+    header.set_f64("SYNDARK", config.noise.dark_current);
+    header.set_f64("SYNBIAS", config.noise.bias_level);
     header.set("SYNFIELD", config.field_type.name().to_string());
     header.set("SYNPSF", config.psf_type.name().to_string());
     let fwhm_factor = frame.map_or(1.0, |p| p.fwhm_factor);
@@ -1034,6 +1040,22 @@ mod tests {
         legacy.noise.seed = Some(1000);
         assert_ne!(prepare_stack(&legacy).unwrap().frame(0), stack_a.frame(0));
         assert_eq!(prepare_stack(&legacy).unwrap().frame(0), prepare_stack(&legacy).unwrap().frame(0));
+    }
+
+    #[test]
+    fn headers_carry_the_noise_seed_and_the_noise_model() {
+        let mut config = one_bright_star_config();
+        config.noise.seed = Some(1000);
+        config.noise.sky_background = 35.0;
+        config.noise.dark_current = 0.25;
+        config.noise.bias_level = 120.0;
+        let header = synth_header(&config, 0, None);
+        assert_eq!(header.get_i64("SYNNSEED"), Some(1000));
+        assert_eq!(header.get_f64("SYNSKY"), Some(35.0));
+        assert_eq!(header.get_f64("SYNDARK"), Some(0.25));
+        assert_eq!(header.get_f64("SYNBIAS"), Some(120.0));
+        config.noise.seed = None;
+        assert_eq!(synth_header(&config, 0, None).get("SYNNSEED"), None);
     }
 
     #[test]

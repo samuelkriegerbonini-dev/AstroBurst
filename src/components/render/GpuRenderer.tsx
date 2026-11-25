@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
-import { renderStfInWorker, cancelPendingRenders, setWorkerPixels, clearWorkerPixels } from "../../utils/stfworker";
+import { renderStfInWorker, cancelPendingRenders, setWorkerPixels, clearWorkerPixels, presentWorkerBitmap } from "../../utils/stfworker";
 import {
   STF_UNIFORM_WORD,
   getGpuSingleton,
@@ -290,26 +290,10 @@ export default function GpuRenderer({
         lut,
       });
 
-      if (renderSeqRef.current !== seq) return;
-
-      const canvas = canvasRef.current;
-      if (!canvas || !result.bitmap) return;
-      const w = result.width;
-      const h = result.height;
-
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-      }
-
-      const ctx = canvas.getContext("bitmaprenderer");
-      if (ctx) {
-        ctx.transferFromImageBitmap(result.bitmap);
-      } else {
-        const ctx2d = canvas.getContext("2d")!;
-        ctx2d.drawImage(result.bitmap, 0, 0);
-        result.bitmap.close();
-      }
+      if (!result.bitmap) return;
+      presentWorkerBitmap(canvasRef.current, result, renderSeqRef.current === seq);
+    } catch (err) {
+      console.warn("[AstroBurst] STF worker render failed:", err);
     } finally {
       cpuBusyRef.current = false;
       if (cpuPendingRef.current) {

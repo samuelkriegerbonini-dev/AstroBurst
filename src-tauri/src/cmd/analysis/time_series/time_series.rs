@@ -1,0 +1,1855 @@
+use std::path::Path;
+use std::time::Instant;
+
+use anyhow::bail;
+use serde::{Deserialize, Serialize};
+
+use crate::cmd::analysis::{
+    annulus_arg, aperture_radius_arg, apply_calibration, check_annulus_clears_aperture, photometry_planes,
+    processed_data_warning, resolve_dq_mask, user_photcal, area::AreaWeights, UserZeroPoint, USER_ZERO_POINT_WARNING,
+};
+use crate::cmd::common::{blocking_cmd, load_cached, load_cached_full};
+use crate::core::alignment::pair::offset_within_limits;
+use crate::core::alignment::phase_correlation::{is_low_confidence, phase_correlate};
+use crate::core::analysis::gain::{gain_model, photon_noise_warning};
+use crate::core::analysis::photometry::{measure_star_prepared, saturation_level, PhotometryConfig, StarPhotometry};
+use crate::core::astrometry::geometry::{
+    frame_geometry, geometry_method_notes, header_time, resolve_series_target, resolve_site, FrameGeometry,
+    GeometryOverrides, ResolvedTarget,
+};
+use crate::core::astrometry::spectral::mid_exposure_jd;
+use crate::infra::wcs_source::load_wcs;
+use crate::core::metadata::filter_wavelengths::effective_filter;
+use crate::core::metadata::photcal::PhotCal;
+use crate::core::stacking::frame_cards::exposure_seconds;
+use crate::infra::cache::ImageEntry;
+use crate::infra::progress::ProgressHandle;
+use crate::types::constants::EVENT_TIME_SERIES_PROGRESS;
+use crate::types::error::AppError;
+use crate::types::header::HduHeader;
+
+pub const MAX_TIME_SERIES_FRAMES: usize = 2000;
+pub const MAX_TIME_SERIES_TARGETS: usize = 64;
+pub const MAX_CALIBRATION_WARNINGS: usize = 8;
+const TRACKED_SEARCH_RADIUS_PX: usize = 3;
+const MAX_REFERENCE_OFFSET_PX: f64 = 3.0;
+const MAX_TRACKED_OFFSET_PX: f64 = 1.5;
+const ROLE_TARGET: &str = "target";
+const ROLE_COMP: &str = "comp";
+const ROLE_CHECK: &str = "check";
+const ROLE_IGNORE: &str = "ignore";
+const ROLE_NAMES: [&str; 4] = [ROLE_TARGET, ROLE_COMP, ROLE_CHECK, ROLE_IGNORE];
+const AIRMASS_KEY: &str = "AIRMASS";
+const TIMESYS_KEY: &str = "TIMESYS";
+const FILTER_KEY: &str = "FILTER";
+const BUNIT_KEY: &str = "BUNIT";
+const UTC_SCALE: &str = "UTC";
+const NO_SERIES_TARGET_NOTE: &str = "no target coordinates: BJD_TDB and HJD_UTC need a WCS, RA/DEC keywords or a target override";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TimeSeriesTarget {
+    pub x: f64,
+    pub y: f64,
+    pub label: String,
+    pub role: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrameOffset {
+    pub dx: f64,
+    pub dy: f64,
+    pub confidence: f64,
+    pub registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimeSeriesFrame {
+    pub index: usize,
+    pub path: String,
+    pub file_name: String,
+    pub jd_mid: Option<f64>,
+    pub time_source: Option<String>,
+    pub exptime: Option<f64>,
+    pub filter: Option<String>,
+    pub airmass: Option<f64>,
+    pub geometry: Option<FrameGeometry>,
+    pub offset: Option<FrameOffset>,
+    pub photcal_label: Option<String>,
+    pub bunit: Option<String>,
+    pub targets: Vec<Option<StarPhotometry>>,
+    pub errors: Vec<Option<String>>,
+    pub skipped: Option<String>,
+    #[serde(skip)]
+    filter_unchecked: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimeSeriesResult {
+    pub reference_path: String,
+    pub targets: Vec<TimeSeriesTarget>,
+    pub frames: Vec<TimeSeriesFrame>,
+    pub n_frames: usize,
+    pub n_skipped: usize,
+    pub warnings: Vec<String>,
+    pub area_mixed: bool,
+    pub geometry_target: Option<ResolvedTarget>,
+    pub geometry_notes: Vec<String>,
+    pub elapsed_ms: u64,
+}
+
+fn file_name_of(path: &str) -> String {
+    let without_fragment = path.split('#').next().unwrap_or(path);
+    Path::new(without_fragment)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn header_string(header: &HduHeader, key: &str) -> Option<String> {
+    header
+        .get(key)
+        .map(|v| v.trim().trim_matches('\'').trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn finite_card(header: &HduHeader, key: &str) -> Option<f64> {
+    header.get_f64(key).filter(|v| v.is_finite())
+}
+
+fn load_entry(path: &str) -> anyhow::Result<ImageEntry> {
+    load_cached_full(path).or_else(|_| load_cached(path))
+}
+
+fn check_cancelled(progress: Option<&ProgressHandle>) -> anyhow::Result<()> {
+    if progress.is_some_and(|p| p.is_cancelled()) {
+        return Err(AppError::Cancelled.into());
+    }
+    Ok(())
+}
+
+fn skipped_frame(index: usize, path: &str, n_targets: usize, reason: String) -> TimeSeriesFrame {
+    TimeSeriesFrame {
+        index,
+        path: path.to_string(),
+        file_name: file_name_of(path),
+        jd_mid: None,
+        time_source: None,
+        exptime: None,
+        filter: None,
+        airmass: None,
+        geometry: None,
+        offset: None,
+        photcal_label: None,
+        bunit: None,
+        targets: (0..n_targets).map(|_| None).collect(),
+        errors: vec![None; n_targets],
+        skipped: Some(reason),
+        filter_unchecked: false,
+    }
+}
+
+fn dimension_mismatch(frame: (usize, usize), reference: (usize, usize)) -> String {
+    format!(
+        "dimensions {} x {} differ from the reference {} x {}",
+        frame.1, frame.0, reference.1, reference.0
+    )
+}
+
+enum FilterMatch {
+    Same,
+    Differs(String),
+    Unchecked,
+    Unnamed,
+}
+
+fn filter_match(entry: &ImageEntry, reference: &ImageEntry) -> FilterMatch {
+    let empty = HduHeader::empty();
+    let frame_header = entry.header().unwrap_or(&empty);
+    let reference_header = reference.header().unwrap_or(&empty);
+    let (frame, expected) = match (effective_filter(frame_header), effective_filter(reference_header)) {
+        (Some(frame), Some(expected)) => (frame, expected),
+        (None, None) => match (header_string(frame_header, FILTER_KEY), header_string(reference_header, FILTER_KEY)) {
+            (Some(frame), Some(expected)) => (frame, expected),
+            (None, None) => return FilterMatch::Unnamed,
+            _ => return FilterMatch::Unchecked,
+        },
+        _ => return FilterMatch::Unchecked,
+    };
+    let (frame, expected) = (frame.to_ascii_uppercase(), expected.to_ascii_uppercase());
+    if frame == expected {
+        FilterMatch::Same
+    } else {
+        FilterMatch::Differs(format!("filter {frame} differs from the reference filter {expected}"))
+    }
+}
+
+fn time_source_with_scale(header: &HduHeader, source: String) -> String {
+    match header_string(header, TIMESYS_KEY) {
+        None => format!("{source}; UTC assumed (no TIMESYS)"),
+        Some(scale) if scale.eq_ignore_ascii_case(UTC_SCALE) => format!("{source}; time scale {scale} (TIMESYS)"),
+        Some(scale) => format!("{source}; time scale {scale} (TIMESYS), not converted to UTC"),
+    }
+}
+
+pub(crate) struct SeriesGeometry {
+    target: Option<ResolvedTarget>,
+    overrides: GeometryOverrides,
+    notes: Vec<String>,
+}
+
+fn series_geometry(
+    reference_path: &str,
+    reference: Option<&HduHeader>,
+    targets: &[TimeSeriesTarget],
+    overrides: &GeometryOverrides,
+) -> SeriesGeometry {
+    let empty = HduHeader::empty();
+    let header = reference.unwrap_or(&empty);
+    let target_star = targets
+        .iter()
+        .find(|t| t.role == ROLE_TARGET)
+        .map(|t| (t.x, t.y, t.label.as_str()));
+    let target = resolve_series_target(reference_path, header, target_star, overrides);
+    let mut notes = match &target {
+        Some(t) => vec![format!("target {} held constant for every frame", t.source)],
+        None => vec![NO_SERIES_TARGET_NOTE.to_string()],
+    };
+    notes.extend(geometry_method_notes(header, target.as_ref(), resolve_site(header, overrides).as_ref()));
+    SeriesGeometry { target, overrides: *overrides, notes }
+}
+
+fn frame_geometry_of(header: Option<&HduHeader>, series: &SeriesGeometry) -> Option<FrameGeometry> {
+    header.map(|h| match header_time(h) {
+        Ok(time) => frame_geometry(h, &time, series.target.as_ref(), resolve_site(h, &series.overrides).as_ref()),
+        Err(reason) => FrameGeometry::without_time(&reason),
+    })
+}
+
+struct FrameShift {
+    offset: Option<FrameOffset>,
+    dx: f64,
+    dy: f64,
+}
+
+fn track_frame(reference: &ImageEntry, entry: &ImageEntry, file_name: &str, warnings: &mut Vec<String>) -> FrameShift {
+    let (rows, cols) = entry.arr().dim();
+    let r = phase_correlate(reference.arr(), entry.arr());
+    let registered = offset_within_limits(r.dy, r.dx, rows, cols) && !is_low_confidence(r.confidence);
+    if !registered {
+        warnings.push(format!(
+            "{file_name}: drift offset ({:.2}, {:.2}) rejected at confidence {:.1}, measured unshifted",
+            r.dx, r.dy, r.confidence
+        ));
+    }
+    let (dx, dy) = if registered { (r.dx, r.dy) } else { (0.0, 0.0) };
+    FrameShift {
+        offset: Some(FrameOffset { dx: r.dx, dy: r.dy, confidence: r.confidence, registered }),
+        dx,
+        dy,
+    }
+}
+
+fn reference_anchors(
+    targets: &[TimeSeriesTarget],
+    reference_frame: &TimeSeriesFrame,
+    later_frames_checked: bool,
+    warnings: &mut Vec<String>,
+) -> Vec<Option<(f64, f64)>> {
+    targets
+        .iter()
+        .zip(&reference_frame.targets)
+        .map(|(target, measured)| {
+            let Some(phot) = measured else {
+                if later_frames_checked && target.role != ROLE_IGNORE {
+                    warnings.push(format!(
+                        "{}: not measured on the reference frame, so later frames re-find it around the placed point ({:.1}, {:.1}) without an identity check",
+                        target.label, target.x, target.y
+                    ));
+                }
+                return None;
+            };
+            let distance = (phot.x - target.x).hypot(phot.y - target.y);
+            if distance > MAX_REFERENCE_OFFSET_PX {
+                warnings.push(format!(
+                    "{}: the reference centroid ({:.1}, {:.1}) is {distance:.1} px from the placed point ({:.1}, {:.1}); the peak search may have locked onto a brighter neighbour",
+                    target.label, phot.x, phot.y, target.x, target.y
+                ));
+            }
+            Some((phot.x, phot.y))
+        })
+        .collect()
+}
+
+fn push_once(warnings: &mut Vec<String>, message: String) {
+    if !warnings.contains(&message) {
+        warnings.push(message);
+    }
+}
+
+struct SeriesCalibration<'a> {
+    zero_point: Option<&'a UserZeroPoint>,
+    distinct_warnings: Vec<String>,
+    zero_point_failures: usize,
+    first_zero_point_failure: Option<String>,
+}
+
+impl<'a> SeriesCalibration<'a> {
+    fn new(zero_point: Option<&'a UserZeroPoint>) -> Self {
+        SeriesCalibration { zero_point, distinct_warnings: Vec::new(), zero_point_failures: 0, first_zero_point_failure: None }
+    }
+
+    fn frame_calibration(
+        &mut self,
+        header: Option<&HduHeader>,
+        header_calibration: Option<PhotCal>,
+        warnings: &mut Vec<String>,
+    ) -> Option<PhotCal> {
+        if let Some(cal) = header_calibration {
+            self.push_calibration_warnings(&cal, warnings);
+            if self.zero_point.is_some() {
+                push_once(warnings, format!("user zero point not applied: the header calibrates this image ({})", cal.origin));
+            }
+            return Some(cal);
+        }
+        match user_photcal(header, self.zero_point?) {
+            Ok((cal, notes)) => {
+                self.push_calibration_warnings(&cal, warnings);
+                for note in notes {
+                    push_once(warnings, note);
+                }
+                Some(cal)
+            }
+            Err(e) => {
+                self.zero_point_failures += 1;
+                self.first_zero_point_failure.get_or_insert_with(|| format!("{e:#}"));
+                None
+            }
+        }
+    }
+
+    fn push_calibration_warnings(&mut self, cal: &PhotCal, warnings: &mut Vec<String>) {
+        for warning in &cal.warnings {
+            if warning == USER_ZERO_POINT_WARNING {
+                push_once(warnings, warning.clone());
+            } else if !self.distinct_warnings.contains(warning) {
+                self.distinct_warnings.push(warning.clone());
+                if self.distinct_warnings.len() <= MAX_CALIBRATION_WARNINGS {
+                    push_once(warnings, warning.clone());
+                }
+            }
+        }
+    }
+
+    fn push_summary(&self, warnings: &mut Vec<String>) {
+        if let Some(reason) = &self.first_zero_point_failure {
+            let n = self.zero_point_failures;
+            warnings.push(format!("user zero point not applied on {n} {}: {reason}", if n == 1 { "frame" } else { "frames" }));
+        }
+        match self.distinct_warnings.len().saturating_sub(MAX_CALIBRATION_WARNINGS) {
+            0 => {}
+            1 => warnings.push("1 more calibration warning on other frames".to_string()),
+            more => warnings.push(format!("{more} more calibration warnings on other frames")),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_frame(
+    index: usize,
+    path: &str,
+    entry: &ImageEntry,
+    reference: &ImageEntry,
+    targets: &[TimeSeriesTarget],
+    anchors: &[Option<(f64, f64)>],
+    config_base: &PhotometryConfig,
+    exclude_dq: bool,
+    track_drift: bool,
+    warnings: &mut Vec<String>,
+    calibration: &mut SeriesCalibration,
+    series: &SeriesGeometry,
+) -> TimeSeriesFrame {
+    let file_name = file_name_of(path);
+    let dims = entry.arr().dim();
+    let reference_dims = reference.arr().dim();
+    if dims != reference_dims {
+        return skipped_frame(index, path, targets.len(), dimension_mismatch(dims, reference_dims));
+    }
+    let filter_unchecked = match filter_match(entry, reference) {
+        FilterMatch::Differs(reason) => return skipped_frame(index, path, targets.len(), reason),
+        FilterMatch::Unchecked => true,
+        FilterMatch::Same | FilterMatch::Unnamed => false,
+    };
+    let planes = photometry_planes(path, dims);
+    let mask = resolve_dq_mask(path, exclude_dq, dims);
+    let header = entry.header();
+    if let Some(message) = processed_data_warning(header) {
+        if !warnings.contains(&message) {
+            warnings.push(message);
+        }
+    }
+    let wcs = header.and_then(|h| load_wcs(path, h).ok());
+    let header_calibration = header.and_then(|h| PhotCal::from_header(h, wcs.as_ref()));
+    let mut photcal = calibration.frame_calibration(header, header_calibration, warnings);
+    let mut area_warnings = Vec::new();
+    let area = AreaWeights::resolve(path, entry, photcal.as_mut(), &mut area_warnings);
+    for message in area_warnings {
+        let message = format!("{file_name}: {message}");
+        if !warnings.contains(&message) {
+            warnings.push(message);
+        }
+    }
+    let config = PhotometryConfig {
+        saturation: Some(saturation_level(header, entry.stats().max)),
+        ..config_base.clone()
+    };
+    let tracked_config = PhotometryConfig { search_radius: TRACKED_SEARCH_RADIUS_PX, ..config.clone() };
+    let timing = header.and_then(|h| mid_exposure_jd(h).map(|(jd, source)| (jd, time_source_with_scale(h, source))));
+    let geometry = frame_geometry_of(header, series);
+    let shift = if track_drift && index > 0 {
+        track_frame(reference, entry, &file_name, warnings)
+    } else {
+        FrameShift { offset: None, dx: 0.0, dy: 0.0 }
+    };
+    let registered = index > 0 && shift.offset.as_ref().is_some_and(|o| o.registered);
+    let source = area.masked_image(entry, mask.as_ref().map(|m| &m.map));
+
+    let mut measured: Vec<Option<StarPhotometry>> = Vec::with_capacity(targets.len());
+    let mut errors: Vec<Option<String>> = Vec::with_capacity(targets.len());
+    for (i, target) in targets.iter().enumerate() {
+        if target.role == ROLE_IGNORE {
+            measured.push(None);
+            errors.push(None);
+            continue;
+        }
+        let anchor = anchors.get(i).copied().flatten().filter(|_| registered);
+        let (expected_x, expected_y, target_config) = match anchor {
+            Some((ax, ay)) => (ax + shift.dx, ay + shift.dy, &tracked_config),
+            None => (target.x + shift.dx, target.y + shift.dy, &config),
+        };
+        let outcome = source.as_ref().map_err(String::clone).and_then(|s| {
+            measure_star_prepared(
+                s,
+                planes.err.as_ref().map(|e| e.arr()),
+                planes.saturated.as_ref(),
+                expected_x,
+                expected_y,
+                target_config,
+            )
+        });
+        let landed = |phot: &StarPhotometry| (phot.x - expected_x).hypot(phot.y - expected_y);
+        match outcome {
+            Ok(phot) if anchor.is_some() && landed(&phot) > MAX_TRACKED_OFFSET_PX => {
+                measured.push(None);
+                errors.push(Some(format!(
+                    "centroid ({:.1}, {:.1}) landed {:.1} px from the expected position ({expected_x:.1}, {expected_y:.1}) of the reference star; another source or a cosmic ray is inside the search box",
+                    phot.x,
+                    phot.y,
+                    landed(&phot)
+                )));
+            }
+            Ok(mut phot) => {
+                if let Some(cal) = &photcal {
+                    apply_calibration(&mut phot, cal);
+                }
+                phot.growth_curve.clear();
+                measured.push(Some(phot));
+                errors.push(None);
+            }
+            Err(e) => {
+                measured.push(None);
+                errors.push(Some(e));
+            }
+        }
+    }
+
+    TimeSeriesFrame {
+        index,
+        path: path.to_string(),
+        file_name,
+        jd_mid: timing.as_ref().map(|(jd, _)| *jd),
+        time_source: timing.map(|(_, source)| source),
+        exptime: header.and_then(exposure_seconds),
+        filter: header.and_then(effective_filter),
+        airmass: header.and_then(|h| finite_card(h, AIRMASS_KEY)),
+        geometry,
+        offset: shift.offset,
+        photcal_label: photcal.as_ref().map(|cal| cal.label()),
+        bunit: header.and_then(|h| header_string(h, BUNIT_KEY)),
+        targets: measured,
+        errors,
+        skipped: None,
+        filter_unchecked,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn measure_time_series(
+    paths: &[String],
+    targets: &[TimeSeriesTarget],
+    config_base: &PhotometryConfig,
+    exclude_dq: bool,
+    track_drift: bool,
+    progress: Option<&ProgressHandle>,
+) -> anyhow::Result<TimeSeriesResult> {
+    measure_time_series_with(paths, targets, config_base, exclude_dq, track_drift, progress, &GeometryOverrides::default(), None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn measure_time_series_with(
+    paths: &[String],
+    targets: &[TimeSeriesTarget],
+    config_base: &PhotometryConfig,
+    exclude_dq: bool,
+    track_drift: bool,
+    progress: Option<&ProgressHandle>,
+    overrides: &GeometryOverrides,
+    zero_point: Option<&UserZeroPoint>,
+) -> anyhow::Result<TimeSeriesResult> {
+    let t0 = Instant::now();
+    let Some(reference_path) = paths.first() else {
+        bail!("time series needs at least one frame path, got 0");
+    };
+    let reference = load_entry(reference_path)?;
+    let series = series_geometry(reference_path, reference.header(), targets, overrides);
+    let mut warnings: Vec<String> = Vec::new();
+    let mut calibration = SeriesCalibration::new(zero_point);
+    let mut anchors: Vec<Option<(f64, f64)>> = Vec::new();
+    let mut frames: Vec<TimeSeriesFrame> = Vec::with_capacity(paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        check_cancelled(progress)?;
+        let loaded = if index == 0 { Ok(reference.clone()) } else { load_entry(path) };
+        let frame = match loaded {
+            Ok(entry) => measure_frame(
+                index,
+                path,
+                &entry,
+                &reference,
+                targets,
+                &anchors,
+                config_base,
+                exclude_dq,
+                track_drift,
+                &mut warnings,
+                &mut calibration,
+                &series,
+            ),
+            Err(e) => skipped_frame(index, path, targets.len(), format!("failed to load: {e:#}")),
+        };
+        if index == 0 {
+            anchors = reference_anchors(targets, &frame, track_drift && paths.len() > 1, &mut warnings);
+        }
+        let file_name = frame.file_name.clone();
+        frames.push(frame);
+        if let Some(p) = progress {
+            p.tick_with_stage(&file_name);
+        }
+    }
+    calibration.push_summary(&mut warnings);
+    let unchecked = frames
+        .iter()
+        .filter(|f| f.index > 0 && f.skipped.is_none() && !f.offset.as_ref().is_some_and(|o| o.registered))
+        .count();
+    if unchecked > 0 {
+        warnings.push(format!(
+            "target identity is not checked on {unchecked} {} where drift is not tracked or its offset was rejected: each star is re-found there by the {} px peak search around its placed point",
+            if unchecked == 1 { "frame" } else { "frames" },
+            config_base.search_radius
+        ));
+    }
+    let filter_unchecked = frames
+        .iter()
+        .filter(|f| f.index > 0 && f.skipped.is_none() && f.filter_unchecked)
+        .count();
+    if filter_unchecked > 0 {
+        warnings.push(format!(
+            "filter match not checked on {filter_unchecked} {}: only the frame or only the reference names a filter",
+            if filter_unchecked == 1 { "frame" } else { "frames" }
+        ));
+    }
+    let area_mixed = area_consistency_warning(&frames);
+    warnings.extend(area_mixed.iter().cloned());
+    let usable_gain = config_base.gain.is_some_and(|g| g.is_finite() && g > 0.0);
+    let err_used = frames.iter().flat_map(|f| f.targets.iter().flatten()).all(|t| t.err_used);
+    let model = gain_model(reference.header(), crate::cmd::analysis::has_err_extension(reference_path, reference.arr().dim()));
+    warnings.extend(photon_noise_warning(&model, usable_gain, err_used));
+    let n_skipped = frames.iter().filter(|f| f.skipped.is_some()).count();
+    Ok(TimeSeriesResult {
+        reference_path: reference_path.clone(),
+        targets: targets.to_vec(),
+        n_frames: frames.len(),
+        n_skipped,
+        frames,
+        warnings,
+        area_mixed: area_mixed.is_some(),
+        geometry_target: series.target,
+        geometry_notes: series.notes,
+        elapsed_ms: t0.elapsed().as_millis() as u64,
+    })
+}
+
+const MAX_NAMED_FRAMES: usize = 5;
+
+fn named_frames(names: &[&str]) -> String {
+    let shown = names.iter().take(MAX_NAMED_FRAMES).copied().collect::<Vec<_>>().join(", ");
+    match names.len().saturating_sub(MAX_NAMED_FRAMES) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
+fn area_consistency_warning(frames: &[TimeSeriesFrame]) -> Option<String> {
+    let mut with: Vec<&str> = Vec::new();
+    let mut without: Vec<&str> = Vec::new();
+    for frame in frames.iter().filter(|f| f.skipped.is_none()) {
+        match frame.targets.iter().flatten().next().map(|t| t.area_applied) {
+            Some(true) => with.push(&frame.file_name),
+            Some(false) => without.push(&frame.file_name),
+            None => {}
+        }
+    }
+    if with.is_empty() || without.is_empty() {
+        return None;
+    }
+    let (group, names) = if with.len() <= without.len() { ("only on", &with) } else { ("not on", &without) };
+    Some(format!(
+        "AREA pixel-area map applied on {} of {} measured frames ({group} {}): fluxes with and without the map differ by the aperture mean AREA, a step of a few hundredths of a magnitude in the light curve",
+        with.len(),
+        with.len() + without.len(),
+        named_frames(names)
+    ))
+}
+
+pub(crate) fn validate_time_series_args(
+    paths: &[String],
+    targets: &[TimeSeriesTarget],
+    aperture_radius: f64,
+    annulus_inner: Option<f64>,
+    annulus_outer: Option<f64>,
+    gain: Option<f64>,
+) -> anyhow::Result<PhotometryConfig> {
+    if paths.is_empty() {
+        bail!("time series needs at least one frame path, got 0");
+    }
+    if paths.len() > MAX_TIME_SERIES_FRAMES {
+        bail!("time series of {} frames exceeds the limit of {MAX_TIME_SERIES_FRAMES}", paths.len());
+    }
+    if targets.is_empty() {
+        bail!("time series needs at least one target star, got 0");
+    }
+    if targets.len() > MAX_TIME_SERIES_TARGETS {
+        bail!("time series of {} targets exceeds the limit of {MAX_TIME_SERIES_TARGETS}", targets.len());
+    }
+    for (i, t) in targets.iter().enumerate() {
+        if !t.x.is_finite() || !t.y.is_finite() {
+            bail!("target {i} ({}) position ({}, {}) must be finite", t.label, t.x, t.y);
+        }
+        if !ROLE_NAMES.contains(&t.role.as_str()) {
+            bail!("target {i} ({}) role '{}' must be one of target, comp, check or ignore", t.label, t.role);
+        }
+    }
+    aperture_radius_arg(Some(aperture_radius))?;
+    let sky_annulus = annulus_arg(annulus_inner, annulus_outer)?;
+    check_annulus_clears_aperture(Some(aperture_radius), sky_annulus)?;
+    if let Some(g) = gain {
+        if !g.is_finite() || g <= 0.0 {
+            bail!("gain {g} must be a positive finite number of e-/ADU");
+        }
+    }
+    Ok(PhotometryConfig {
+        aperture_radius: Some(aperture_radius),
+        gain,
+        sky_annulus,
+        ..PhotometryConfig::default()
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn time_series_photometry_cmd(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    targets: Vec<TimeSeriesTarget>,
+    aperture_radius: f64,
+    annulus_inner: Option<f64>,
+    annulus_outer: Option<f64>,
+    gain: Option<f64>,
+    exclude_dq: Option<bool>,
+    track_drift: Option<bool>,
+    target_ra: Option<f64>,
+    target_dec: Option<f64>,
+    site_lat: Option<f64>,
+    site_lon: Option<f64>,
+    site_height: Option<f64>,
+    zero_point: Option<UserZeroPoint>,
+) -> Result<serde_json::Value, String> {
+    let config = validate_time_series_args(&paths, &targets, aperture_radius, annulus_inner, annulus_outer, gain)
+        .map_err(|e| format!("{e:#}"))?;
+    let overrides = GeometryOverrides { target_ra, target_dec, site_lat, site_lon, site_height };
+    crate::cmd::geometry::validate_geometry_overrides(&overrides).map_err(|e| format!("{e:#}"))?;
+    crate::cmd::analysis::check_user_zero_point(zero_point.as_ref()).map_err(|e| format!("{e:#}"))?;
+    let progress = ProgressHandle::new(&app, EVENT_TIME_SERIES_PROGRESS, paths.len() as u64);
+    blocking_cmd!({
+        let result = measure_time_series_with(
+            &paths,
+            &targets,
+            &config,
+            exclude_dq.unwrap_or(false),
+            track_drift.unwrap_or(true),
+            Some(&progress),
+            &overrides,
+            zero_point.as_ref(),
+        )?;
+        progress.emit_complete();
+        Ok(serde_json::to_value(result)?)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmd::analysis::UserMagSystem;
+    use crate::core::alignment::pair::shift_image_subpixel;
+    use crate::core::analysis::gain::SKY_ONLY_ERRORS_WARNING;
+    use crate::core::metadata::photcal::MagSystem;
+    use crate::core::synth::pipeline::{frame_header, generate_stack, FieldType, PsfType, SynthConfig};
+    use crate::core::synth::star_field::{uniform_field, Star};
+    use crate::infra::fits::writer::write_fits_mono;
+    use ndarray::Array2;
+
+    const FIELD_SIZE: u32 = 128;
+    const N_FRAMES: u32 = 8;
+    const CADENCE_SECONDS: f64 = 60.0;
+    const EDGE_MARGIN: f64 = 20.0;
+    const ISOLATION_PX: f64 = 26.0;
+    const SYNTH_GAIN: f64 = 1.5;
+    const APERTURE_RADIUS: f64 = 5.0;
+    const SHIFT_X: f64 = 6.0;
+    const SHIFT_Y: f64 = -4.0;
+    const OFFSET_TOLERANCE_PX: f64 = 0.5;
+    const CENTROID_TOLERANCE_PX: f64 = 0.5;
+
+    fn stack_config(seed: u64) -> SynthConfig {
+        let mut config = SynthConfig::default();
+        config.field.width = FIELD_SIZE;
+        config.field.height = FIELD_SIZE;
+        config.field.n_stars = 6;
+        config.field.flux_min = 40_000.0;
+        config.field.flux_max = 400_000.0;
+        config.field.seed = seed;
+        config.field_type = FieldType::Uniform;
+        config.psf_type = PsfType::Moffat { fwhm: 3.0, beta: 4.0 };
+        config.noise.gain = SYNTH_GAIN;
+        config.n_frames = N_FRAMES;
+        config.cadence_seconds = CADENCE_SECONDS;
+        config
+    }
+
+    fn brightest_first(stars: &[Star]) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..stars.len()).collect();
+        order.sort_by(|a, b| stars[*b].flux.total_cmp(&stars[*a].flux));
+        order
+    }
+
+    fn well_separated(stars: &[Star], chosen: &[usize]) -> bool {
+        let limit = FIELD_SIZE as f64 - 1.0 - EDGE_MARGIN;
+        chosen.iter().all(|&i| {
+            let s = &stars[i];
+            let inside = s.x >= EDGE_MARGIN && s.x <= limit && s.y >= EDGE_MARGIN && s.y <= limit;
+            let isolated = stars
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .all(|(_, o)| ((o.x - s.x).powi(2) + (o.y - s.y).powi(2)).sqrt() >= ISOLATION_PX);
+            inside && isolated
+        })
+    }
+
+    fn isolated_stack_config() -> SynthConfig {
+        (1..=2000u64)
+            .map(stack_config)
+            .find(|config| {
+                let stars = uniform_field(&config.field);
+                let order = brightest_first(&stars);
+                well_separated(&stars, &order[..3])
+            })
+            .expect("a seed with three isolated bright stars")
+    }
+
+    struct Stack {
+        paths: Vec<String>,
+        stars: Vec<Star>,
+        targets: Vec<TimeSeriesTarget>,
+        config: SynthConfig,
+    }
+
+    fn write_stack(dir: &std::path::Path, mutate: impl Fn(usize, Array2<f32>) -> Array2<f32>) -> Stack {
+        let config = isolated_stack_config();
+        let (frames, _, stars) = generate_stack(&config).unwrap();
+        let paths: Vec<String> = frames
+            .into_iter()
+            .enumerate()
+            .map(|(i, frame)| {
+                let path = dir.join(format!("frame_{i:04}.fits"));
+                let header = frame_header(&config.noise, i, config.cadence_seconds);
+                write_fits_mono(path.to_str().unwrap(), &mutate(i, frame), Some(&header)).unwrap();
+                path.to_str().unwrap().to_string()
+            })
+            .collect();
+        let targets = bright_targets(&stars);
+        Stack { paths, stars, targets, config }
+    }
+
+    fn bright_targets(stars: &[Star]) -> Vec<TimeSeriesTarget> {
+        brightest_first(stars)[..3]
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| TimeSeriesTarget {
+                x: stars[i].x,
+                y: stars[i].y,
+                label: format!("S{k}"),
+                role: if k == 0 { ROLE_TARGET.into() } else { ROLE_COMP.into() },
+            })
+            .collect()
+    }
+
+    fn base_config() -> PhotometryConfig {
+        PhotometryConfig {
+            aperture_radius: Some(APERTURE_RADIUS),
+            gain: Some(SYNTH_GAIN),
+            ..PhotometryConfig::default()
+        }
+    }
+
+    fn differential(frame: &TimeSeriesFrame) -> (f64, f64) {
+        let t = frame.targets[0].as_ref().unwrap();
+        let c1 = frame.targets[1].as_ref().unwrap();
+        let c2 = frame.targets[2].as_ref().unwrap();
+        let ensemble = c1.net_flux + c2.net_flux;
+        let ensemble_err = (c1.flux_err.powi(2) + c2.flux_err.powi(2)).sqrt();
+        let mag = -2.5 * (t.net_flux / ensemble).log10();
+        let err = 1.0857 * ((t.flux_err / t.net_flux).powi(2) + (ensemble_err / ensemble).powi(2)).sqrt();
+        (mag, err)
+    }
+
+    #[test]
+    fn a_synthetic_stack_gives_a_flat_differential_light_curve_at_the_catalog_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let out = measure_time_series(&stack.paths, &stack.targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_frames, N_FRAMES as usize);
+        assert_eq!(out.n_skipped, 0);
+        assert_eq!(out.reference_path, stack.paths[0]);
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        for frame in &out.frames {
+            assert!(frame.skipped.is_none());
+            assert!(frame.targets.iter().all(|t| t.is_some()), "{:?}", frame.errors);
+            assert!(frame.targets.iter().flatten().all(|t| t.growth_curve.is_empty()));
+            assert_eq!(frame.exptime, Some(stack.config.noise.exposure_time));
+            assert!(frame.time_source.as_deref().unwrap().contains("DATE-OBS"));
+        }
+
+        let order = brightest_first(&stack.stars);
+        let catalog_adu = |i: usize| stack.stars[order[i]].flux / SYNTH_GAIN;
+        let expected = -2.5 * (catalog_adu(0) / (catalog_adu(1) + catalog_adu(2))).log10();
+        let curve: Vec<(f64, f64)> = out.frames.iter().map(differential).collect();
+        let n = curve.len() as f64;
+        let mean = curve.iter().map(|(m, _)| m).sum::<f64>() / n;
+        let rms = (curve.iter().map(|(m, _)| (m - mean).powi(2)).sum::<f64>() / n).sqrt();
+        let mean_err = curve.iter().map(|(_, e)| e).sum::<f64>() / n;
+        assert!((mean - expected).abs() < 0.02, "mean {mean} expected {expected}");
+        assert!(rms < 3.0 * mean_err, "rms {rms} against propagated error {mean_err}");
+
+        for pair in out.frames.windows(2) {
+            let step = pair[1].jd_mid.unwrap() - pair[0].jd_mid.unwrap();
+            assert!((step - CADENCE_SECONDS / 86400.0).abs() < 1e-8, "step {step}");
+        }
+        for frame in &out.frames[1..] {
+            let offset = frame.offset.as_ref().expect("tracked offset");
+            assert!(offset.registered);
+            assert!(offset.dx.abs() < OFFSET_TOLERANCE_PX && offset.dy.abs() < OFFSET_TOLERANCE_PX, "{} {}", offset.dx, offset.dy);
+        }
+        assert!(out.frames[0].offset.is_none());
+    }
+
+    #[test]
+    fn drift_tracking_recovers_a_shifted_frame_and_recentres_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |i, frame| if i == 3 { shift_image_subpixel(&frame, -SHIFT_Y, -SHIFT_X) } else { frame });
+        let tracked = measure_time_series(&stack.paths, &stack.targets, &base_config(), false, true, None).unwrap();
+        let offset = tracked.frames[3].offset.as_ref().expect("offset on the shifted frame");
+        assert!(offset.registered, "confidence {}", offset.confidence);
+        assert!((offset.dx - SHIFT_X).abs() < OFFSET_TOLERANCE_PX, "dx {}", offset.dx);
+        assert!((offset.dy - SHIFT_Y).abs() < OFFSET_TOLERANCE_PX, "dy {}", offset.dy);
+        let reference = tracked.frames[0].targets[0].as_ref().unwrap();
+        let shifted = tracked.frames[3].targets[0].as_ref().expect("target measured on the shifted frame");
+        let moved_x = shifted.x - SHIFT_X;
+        let moved_y = shifted.y - SHIFT_Y;
+        assert!((moved_x - reference.x).abs() < CENTROID_TOLERANCE_PX, "{moved_x} vs {}", reference.x);
+        assert!((moved_y - reference.y).abs() < CENTROID_TOLERANCE_PX, "{moved_y} vs {}", reference.y);
+        let (m_ref, e_ref) = differential(&tracked.frames[0]);
+        let (m_shift, _) = differential(&tracked.frames[3]);
+        assert!((m_ref - m_shift).abs() < 5.0 * e_ref, "{m_ref} vs {m_shift}");
+
+        let untracked = measure_time_series(&stack.paths, &stack.targets, &base_config(), false, false, None).unwrap();
+        assert!(untracked.frames.iter().all(|f| f.offset.is_none()));
+        let previous = untracked.frames[2].targets[0].as_ref().unwrap();
+        match untracked.frames[3].targets[0].as_ref() {
+            Some(found) => {
+                let jump = ((found.x - previous.x).powi(2) + (found.y - previous.y).powi(2)).sqrt();
+                assert!(jump > 2.0, "the peak search followed the star by {jump} px, which the centroid-jump check flags");
+            }
+            None => assert!(untracked.frames[3].errors[0].is_some()),
+        }
+    }
+
+    #[test]
+    fn a_frame_of_different_dimensions_is_skipped_with_a_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let small = dir.path().join("small.fits");
+        write_fits_mono(small.to_str().unwrap(), &Array2::<f32>::zeros((64, 64)), None).unwrap();
+        let mut paths = stack.paths[..2].to_vec();
+        paths.push(small.to_str().unwrap().to_string());
+        let out = measure_time_series(&paths, &stack.targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_frames, 3);
+        assert_eq!(out.n_skipped, 1);
+        let skipped = &out.frames[2];
+        assert_eq!(skipped.skipped.as_deref(), Some("dimensions 64 x 64 differ from the reference 128 x 128"));
+        assert_eq!(skipped.file_name, "small.fits");
+        assert!(skipped.targets.iter().all(|t| t.is_none()));
+        assert!(skipped.offset.is_none());
+        assert!(out.frames[..2].iter().all(|f| f.skipped.is_none()));
+        assert_eq!(file_name_of("/data/run/frame.fits#hdu=2"), "frame.fits");
+    }
+
+    #[test]
+    fn ignored_targets_and_missing_files_do_not_stop_the_series() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let mut targets = stack.targets.clone();
+        targets[1].role = ROLE_IGNORE.into();
+        let mut paths = stack.paths[..2].to_vec();
+        paths.push(dir.path().join("missing.fits").to_str().unwrap().to_string());
+        let out = measure_time_series(&paths, &targets, &base_config(), false, false, None).unwrap();
+        assert_eq!(out.n_skipped, 1);
+        assert!(out.frames[2].skipped.as_deref().unwrap().starts_with("failed to load"));
+        assert!(out.frames[0].targets[1].is_none() && out.frames[0].errors[1].is_none());
+        assert!(out.frames[0].targets[0].is_some() && out.frames[0].targets[2].is_some());
+    }
+
+    fn target(role: &str) -> TimeSeriesTarget {
+        TimeSeriesTarget { x: 10.0, y: 10.0, label: "t".into(), role: role.into() }
+    }
+
+    #[test]
+    fn too_many_targets_and_no_paths_are_refused_before_loading() {
+        let path = vec!["/nowhere/frame.fits".to_string()];
+        let err = validate_time_series_args(&[], &[target(ROLE_TARGET)], 5.0, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("at least one frame path"), "{err}");
+        let many: Vec<TimeSeriesTarget> = (0..65).map(|_| target(ROLE_COMP)).collect();
+        let err = validate_time_series_args(&path, &many, 5.0, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("65 targets exceeds the limit of 64"), "{err}");
+        let err = validate_time_series_args(&path, &[target("guide")], 5.0, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("role 'guide'"), "{err}");
+        let mut nan = target(ROLE_TARGET);
+        nan.x = f64::NAN;
+        let err = validate_time_series_args(&path, &[nan], 5.0, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("must be finite"), "{err}");
+        let err = validate_time_series_args(&path, &[target(ROLE_TARGET)], 1.0, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("aperture radius 1"), "{err}");
+        let err = validate_time_series_args(&path, &[target(ROLE_TARGET)], 5.0, Some(4.0), Some(12.0), None).unwrap_err();
+        assert!(err.to_string().contains("larger than the aperture radius"), "{err}");
+        let err = validate_time_series_args(&path, &[target(ROLE_TARGET)], 5.0, Some(8.0), None, None).unwrap_err();
+        assert!(err.to_string().contains("both an inner and an outer"), "{err}");
+        let err = validate_time_series_args(&path, &[target(ROLE_TARGET)], 5.0, None, None, Some(0.0)).unwrap_err();
+        assert!(err.to_string().contains("gain 0"), "{err}");
+        let config = validate_time_series_args(&path, &[target(ROLE_CHECK)], 5.0, Some(8.0), Some(12.0), Some(1.5)).unwrap();
+        assert_eq!(config.aperture_radius, Some(5.0));
+        assert_eq!(config.sky_annulus, Some((8.0, 12.0)));
+        assert_eq!(config.gain, Some(1.5));
+        let err = validate_time_series_args(&path, &[target(ROLE_TARGET)], 5.0, Some(20.0), Some(3000.0), None).unwrap_err();
+        assert!(err.to_string().contains("sky annulus outer radius 3000 must be at most 512 pixels"), "{err}");
+        let err = validate_time_series_args(&path, &[target(ROLE_TARGET)], 61.0, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("aperture radius 61 must be between 2 and 60 pixels"), "{err}");
+    }
+
+    fn gaussian_field(stars: &[(f64, f64, f64)]) -> Array2<f32> {
+        let sigma = 3.0 / 2.354_820_045_f64;
+        let norm = 2.0 * std::f64::consts::PI * sigma * sigma;
+        Array2::from_shape_fn((FIELD_SIZE as usize, FIELD_SIZE as usize), |(y, x)| {
+            let flux: f64 = stars
+                .iter()
+                .map(|&(sx, sy, f)| f / norm * (-((x as f64 - sx).powi(2) + (y as f64 - sy).powi(2)) / (2.0 * sigma * sigma)).exp())
+                .sum();
+            (100.0 + flux) as f32
+        })
+    }
+
+    fn write_fields(dir: &Path, prefix: &str, fields: &[Array2<f32>]) -> Vec<String> {
+        fields
+            .iter()
+            .enumerate()
+            .map(|(i, field)| {
+                let path = dir.join(format!("{prefix}_{i:04}.fits"));
+                write_fits_mono(path.to_str().unwrap(), field, None).unwrap();
+                path.to_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    fn write_headed_stack(dir: &Path, prefix: &str, frames: usize, card: impl Fn(usize, &mut HduHeader)) -> (Vec<String>, Vec<TimeSeriesTarget>) {
+        let config = isolated_stack_config();
+        let (images, _, stars) = generate_stack(&config).unwrap();
+        let paths = images
+            .into_iter()
+            .take(frames)
+            .enumerate()
+            .map(|(i, image)| {
+                let path = dir.join(format!("{prefix}_{i:04}.fits"));
+                let mut header = frame_header(&config.noise, i, config.cadence_seconds);
+                card(i, &mut header);
+                write_fits_mono(path.to_str().unwrap(), &image, Some(&header)).unwrap();
+                path.to_str().unwrap().to_string()
+            })
+            .collect();
+        (paths, bright_targets(&stars))
+    }
+
+    fn crowded_targets() -> Vec<TimeSeriesTarget> {
+        vec![
+            TimeSeriesTarget { x: 64.0, y: 64.0, label: "T".into(), role: ROLE_TARGET.into() },
+            TimeSeriesTarget { x: 30.0, y: 30.0, label: "C1".into(), role: ROLE_COMP.into() },
+            TimeSeriesTarget { x: 98.0, y: 34.0, label: "C2".into(), role: ROLE_COMP.into() },
+        ]
+    }
+
+    const CROWDED_COMPS: [(f64, f64, f64); 2] = [(30.0, 30.0, 20_000.0), (98.0, 34.0, 15_000.0)];
+
+    fn crowded_field(stars: &[(f64, f64, f64)]) -> Array2<f32> {
+        let all: Vec<(f64, f64, f64)> = stars.iter().chain(CROWDED_COMPS.iter()).copied().collect();
+        gaussian_field(&all)
+    }
+
+    #[test]
+    fn a_target_that_fades_below_a_neighbour_in_the_search_box_is_never_measured_on_the_neighbour() {
+        let dir = tempfile::tempdir().unwrap();
+        let flux_of = |i: usize| if (2..=4).contains(&i) { 4_000.0 } else { 10_000.0 };
+        let fields: Vec<Array2<f32>> = (0..6)
+            .map(|i| crowded_field(&[(64.0, 64.0, flux_of(i)), (71.0, 69.0, 8_000.0)]))
+            .collect();
+        let paths = write_fields(dir.path(), "eclipse", &fields);
+        let out = measure_time_series(&paths, &crowded_targets(), &base_config(), false, true, None).unwrap();
+        assert!(out.frames[1..].iter().all(|f| f.offset.as_ref().is_some_and(|o| o.registered)));
+        let anchor = out.frames[0].targets[0].as_ref().unwrap();
+        assert!((anchor.x - 64.0).hypot(anchor.y - 64.0) < 1.0, "anchor ({}, {})", anchor.x, anchor.y);
+        let mut rejected = 0;
+        for frame in &out.frames {
+            match frame.targets[0].as_ref() {
+                Some(t) => {
+                    assert!((t.x - 64.0).hypot(t.y - 64.0) < 2.0, "frame {} measured at ({}, {})", frame.index, t.x, t.y);
+                    let injected = flux_of(frame.index);
+                    assert!((t.net_flux / injected - 1.0).abs() < 0.03, "frame {} net {} for {injected}", frame.index, t.net_flux);
+                }
+                None => {
+                    rejected += 1;
+                    let error = frame.errors[0].as_deref().unwrap_or("");
+                    assert!(error.contains("from the expected position"), "frame {}: {error}", frame.index);
+                }
+            }
+        }
+        assert!(rejected > 0);
+        assert!(out.frames[0].targets[0].is_some() && out.frames[1].targets[0].is_some() && out.frames[5].targets[0].is_some());
+        assert!(out.frames.iter().all(|f| f.targets[1].is_some() && f.targets[2].is_some()));
+        assert!(!out.warnings.iter().any(|w| w.contains("identity is not checked")), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn a_placed_point_whose_reference_centroid_lands_on_a_brighter_neighbour_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let field = crowded_field(&[(64.0, 64.0, 3_000.0), (70.0, 70.0, 6_000.0)]);
+        let paths = write_fields(dir.path(), "crowded", &[field.clone(), field]);
+        let out = measure_time_series(&paths, &crowded_targets(), &base_config(), false, true, None).unwrap();
+        let reported: Vec<&String> = out.warnings.iter().filter(|w| w.contains("placed point")).collect();
+        assert_eq!(reported.len(), 1, "{:?}", out.warnings);
+        let centroid: Vec<f64> = reported[0]
+            .strip_prefix("T: the reference centroid (")
+            .and_then(|rest| rest.split(')').next())
+            .unwrap_or_else(|| panic!("{}", reported[0]))
+            .split(", ")
+            .map(|number| number.parse().unwrap())
+            .collect();
+        assert!((centroid[0] - 70.0).hypot(centroid[1] - 70.0) < 1.0, "the brighter neighbour is at (70, 70): {}", reported[0]);
+        assert!(reported[0].contains("placed point (64.0, 64.0)"), "{}", reported[0]);
+        assert!(out.frames[0].targets[0].is_some());
+    }
+
+    #[test]
+    fn untracked_frames_are_measured_as_before_and_warn_once_that_identity_is_unchecked() {
+        let dir = tempfile::tempdir().unwrap();
+        let field = crowded_field(&[(64.0, 64.0, 10_000.0)]);
+        let paths = write_fields(dir.path(), "untracked", &[field.clone(), field.clone(), field]);
+        let out = measure_time_series(&paths, &crowded_targets(), &base_config(), false, false, None).unwrap();
+        let unchecked: Vec<&String> = out.warnings.iter().filter(|w| w.contains("identity is not checked")).collect();
+        assert_eq!(unchecked.len(), 1, "{:?}", out.warnings);
+        assert!(unchecked[0].starts_with("target identity is not checked on 2 frames"), "{}", unchecked[0]);
+        assert!(out.frames.iter().all(|f| f.targets.iter().all(|t| t.is_some())));
+        let tracked = measure_time_series(&paths, &crowded_targets(), &base_config(), false, true, None).unwrap();
+        assert!(tracked.warnings.is_empty(), "{:?}", tracked.warnings);
+    }
+
+    #[test]
+    fn a_comp_star_drifted_out_of_the_frame_is_reported_instead_of_measured_at_the_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        let size = 256usize;
+        let drift = 40.0;
+        let sigma = 1.3;
+        let mut stars: Vec<(f64, f64)> = (0..40u32)
+            .map(|k| (20.0 + f64::from(k * 37 % 180), 20.0 + f64::from(k * 53 % 216)))
+            .collect();
+        stars.push((230.0, 128.0));
+        let render = |dx: f64| {
+            Array2::from_shape_fn((size, size), |(y, x)| {
+                let mut v = 100.0f64;
+                for (sx, sy) in &stars {
+                    let r2 = (x as f64 - sx - dx).powi(2) + (y as f64 - sy).powi(2);
+                    v += 20_000.0 * (-r2 / (2.0 * sigma * sigma)).exp();
+                }
+                v as f32
+            })
+        };
+        let paths = write_fields(dir.path(), "drift", &[render(0.0), render(drift)]);
+        let targets = vec![
+            TimeSeriesTarget { x: stars[3].0, y: stars[3].1, label: "T".into(), role: ROLE_TARGET.into() },
+            TimeSeriesTarget { x: 230.0, y: 128.0, label: "C".into(), role: ROLE_COMP.into() },
+        ];
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        let offset = out.frames[1].offset.as_ref().unwrap();
+        assert!(offset.registered && (offset.dx - drift).abs() < 0.5, "{} {}", offset.dx, offset.confidence);
+        assert!(out.frames[0].targets[1].is_some());
+        assert!(out.frames[1].targets[1].is_none(), "{:?}", out.frames[1].targets[1].as_ref().map(|t| (t.x, t.net_flux)));
+        let error = out.frames[1].errors[1].as_deref().unwrap();
+        assert!(error.contains("lies outside the 256 x 256 image"), "{error}");
+        assert!(out.frames[1].targets[0].is_some(), "{:?}", out.frames[1].errors[0]);
+    }
+
+    #[test]
+    fn a_frame_taken_through_a_different_filter_is_skipped_with_a_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let filters = ["V", "V", "B", "v"];
+        let (paths, targets) = write_headed_stack(dir.path(), "filtered", 4, |i, header| header.set("FILTER", filters[i].to_string()));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_frames, 4);
+        assert_eq!(out.n_skipped, 1);
+        assert!(out.frames[..2].iter().all(|f| f.skipped.is_none() && f.filter.as_deref() == Some("V")));
+        assert_eq!(out.frames[2].skipped.as_deref(), Some("filter B differs from the reference filter V"));
+        assert!(out.frames[3].skipped.is_none(), "{:?}", out.frames[3].skipped);
+        assert_eq!(out.frames[3].filter.as_deref(), Some("v"));
+        assert!(out.frames[2].targets.iter().all(|t| t.is_none()));
+
+        let (unlabelled, _) = write_headed_stack(dir.path(), "unlabelled", 3, |i, header| {
+            if i == 1 {
+                header.set("FILTER", "R".to_string());
+            }
+        });
+        let mixed = measure_time_series(&unlabelled, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(mixed.n_skipped, 0);
+    }
+
+    #[test]
+    fn frames_whose_pupil_filter_differs_are_skipped_as_a_filter_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let pupils = ["F470N", "CLEAR"];
+        let (paths, targets) = write_headed_stack(dir.path(), "pupil", 2, |i, header| {
+            header.set("FILTER", "F444W".to_string());
+            header.set("PUPIL", pupils[i].to_string());
+        });
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 1);
+        assert_eq!(out.frames[0].filter.as_deref(), Some("F470N"));
+        assert!(out.frames[0].skipped.is_none());
+        assert_eq!(out.frames[1].skipped.as_deref(), Some("filter F444W differs from the reference filter F470N"));
+        assert!(out.frames[1].targets.iter().all(|t| t.is_none()));
+    }
+
+    #[test]
+    fn filter_names_are_compared_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let filters = ["f444w", "F444W"];
+        let (paths, targets) = write_headed_stack(dir.path(), "cased", 2, |i, header| header.set("FILTER", filters[i].to_string()));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 0);
+        assert!(out.frames[1].skipped.is_none(), "{:?}", out.frames[1].skipped);
+        assert_eq!(out.frames[0].filter.as_deref(), Some("f444w"));
+        assert_eq!(out.frames[1].filter.as_deref(), Some("F444W"));
+        assert!(out.frames.iter().all(|f| f.targets.iter().all(|t| t.is_some())));
+    }
+
+    #[test]
+    fn frames_labelled_by_a_bare_wheel_slot_are_still_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let slots = ["1", "1", "2"];
+        let (paths, targets) = write_headed_stack(dir.path(), "slots", 3, |i, header| header.set("FILTER", slots[i].to_string()));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 1);
+        assert!(out.frames[1].skipped.is_none(), "{:?}", out.frames[1].skipped);
+        assert_eq!(out.frames[2].skipped.as_deref(), Some("filter 2 differs from the reference filter 1"));
+        assert!(out.frames[2].targets.iter().all(|t| t.is_none()));
+        assert!(out.frames.iter().all(|f| f.filter.is_none()), "{:?}", out.frames[0].filter);
+    }
+
+    #[test]
+    fn frames_carrying_processing_provenance_raise_the_processed_data_warning_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "stretched", 3, |_, header| {
+            header.set("ABPROC", "arcsinh".to_string());
+        });
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        let processed: Vec<&str> = out
+            .warnings
+            .iter()
+            .map(String::as_str)
+            .filter(|w| w.starts_with("photometry on processed data"))
+            .collect();
+        assert_eq!(processed, vec!["photometry on processed data (arcsinh)"], "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn a_series_without_gain_or_err_plane_warns_that_errors_leave_out_source_photon_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let no_gain = PhotometryConfig { gain: None, ..base_config() };
+        let out = measure_time_series(&stack.paths[..2], &stack.targets, &no_gain, false, true, None).unwrap();
+        assert!(out.frames[0].targets.iter().flatten().all(|t| !t.err_used));
+        assert_eq!(out.warnings, vec![SKY_ONLY_ERRORS_WARNING.to_string()]);
+        let with_gain = measure_time_series(&stack.paths[..2], &stack.targets, &base_config(), false, true, None).unwrap();
+        assert!(with_gain.warnings.is_empty(), "{:?}", with_gain.warnings);
+    }
+
+    #[test]
+    fn the_time_source_names_the_header_time_scale_without_changing_the_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tt_paths, targets) = write_headed_stack(dir.path(), "tt", 2, |_, header| header.set(TIMESYS_KEY, "TT".to_string()));
+        let (utc_paths, _) = write_headed_stack(dir.path(), "utc", 2, |_, header| header.set(TIMESYS_KEY, "UTC".to_string()));
+        let (plain_paths, _) = write_headed_stack(dir.path(), "plain", 2, |_, _| {});
+        let run = |paths: &[String]| measure_time_series(paths, &targets, &base_config(), false, true, None).unwrap();
+        let (tt, utc, plain) = (run(&tt_paths), run(&utc_paths), run(&plain_paths));
+        let source = |out: &TimeSeriesResult| out.frames[0].time_source.clone().unwrap();
+        assert!(source(&tt).ends_with("; time scale TT (TIMESYS), not converted to UTC"), "{}", source(&tt));
+        assert!(source(&utc).ends_with("; time scale UTC (TIMESYS)"), "{}", source(&utc));
+        assert!(source(&plain).ends_with("; UTC assumed (no TIMESYS)"), "{}", source(&plain));
+        assert!(source(&plain).starts_with("DATE-OBS"), "{}", source(&plain));
+        assert_eq!(tt.frames[0].jd_mid, plain.frames[0].jd_mid);
+        assert_eq!(utc.frames[1].jd_mid, plain.frames[1].jd_mid);
+    }
+
+    fn sited_wcs_cards(header: &mut HduHeader) {
+        header.set_f64("SITELAT", 19.82);
+        header.set_f64("SITELONG", -155.47);
+        header.set("CTYPE1", "RA---TAN".to_string());
+        header.set("CTYPE2", "DEC--TAN".to_string());
+        header.set_f64("CRPIX1", 64.5);
+        header.set_f64("CRPIX2", 64.5);
+        header.set_f64("CRVAL1", 150.0);
+        header.set_f64("CRVAL2", 2.0);
+        header.set_f64("CD1_1", -2.7778e-4);
+        header.set_f64("CD1_2", 0.0);
+        header.set_f64("CD2_1", 0.0);
+        header.set_f64("CD2_2", 2.7778e-4);
+    }
+
+    #[test]
+    fn frames_carry_bjd_tdb_from_the_reference_wcs_target_when_the_headers_have_a_site() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "sited", 4, |_, header| sited_wcs_cards(header));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 0);
+        let mut light_time_seconds: Vec<f64> = Vec::new();
+        for frame in &out.frames {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            let jd_utc = geometry.jd_utc.expect("JD_UTC");
+            let bjd = geometry.bjd_tdb.expect("BJD_TDB");
+            assert!((bjd - jd_utc).abs() * 86400.0 < 600.0, "{}", (bjd - jd_utc) * 86400.0);
+            assert_eq!(geometry.bjd_source.as_deref(), Some("computed"));
+            assert!(geometry.hjd_utc.is_some());
+            let altitude = geometry.altitude_deg.expect("altitude from the site and the WCS target");
+            assert!(geometry.lst_deg.is_some() && geometry.azimuth_deg.is_some() && geometry.parallactic_angle_deg.is_some());
+            assert_eq!(geometry.airmass_computed.is_some(), altitude >= 0.0, "airmass only above the horizon: altitude {altitude}");
+            light_time_seconds.push((bjd - jd_utc) * 86400.0);
+        }
+        let max = light_time_seconds.iter().cloned().fold(f64::MIN, f64::max);
+        let min = light_time_seconds.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(max - min < 0.1, "{light_time_seconds:?}");
+        let target = out.geometry_target.as_ref().expect("series target");
+        assert!(target.source.starts_with("WCS at"), "{}", target.source);
+        assert!(target.source.contains("reference frame"), "{}", target.source);
+        assert!((target.ra_deg - 150.0).abs() < 0.05 && (target.dec_deg - 2.0).abs() < 0.05, "{target:?}");
+        assert!(!out.geometry_notes.is_empty());
+        assert!(out.geometry_notes.iter().any(|n| n.contains("held constant")), "{:?}", out.geometry_notes);
+    }
+
+    const SERIES_BJD_TOLERANCE_DAYS: f64 = 1e-9;
+    const BARYCENTRIC_MJD: f64 = 60310.25;
+
+    fn barycentric_mjd(i: usize) -> f64 {
+        BARYCENTRIC_MJD + i as f64 * CADENCE_SECONDS / 86400.0
+    }
+
+    #[test]
+    fn a_tdb_barycentric_series_hands_the_header_bjd_to_the_exports_unchanged() {
+        use crate::core::astrometry::time::jd_from_mjd;
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "bary", 3, |i, header| {
+            sited_wcs_cards(header);
+            header.set("MJD-AVG", format!("{}", barycentric_mjd(i)));
+            header.set(TIMESYS_KEY, "TDB".to_string());
+            header.set("TREFPOS", "BARYCENTER".to_string());
+        });
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        let json = serde_json::to_value(&out).unwrap();
+        for (i, frame) in json["frames"].as_array().unwrap().iter().enumerate() {
+            let header_bjd = jd_from_mjd(barycentric_mjd(i));
+            let geometry = &frame["geometry"];
+            let bjd = geometry["bjd_tdb"].as_f64().expect("BJD_TDB");
+            assert!((bjd - header_bjd).abs() <= SERIES_BJD_TOLERANCE_DAYS, "frame {i}: {} s off the header", (bjd - header_bjd) * 86400.0);
+            assert!((frame["jd_mid"].as_f64().unwrap() - header_bjd).abs() <= SERIES_BJD_TOLERANCE_DAYS);
+            assert_eq!(geometry["bjd_source"], "header", "{geometry}");
+            assert!(geometry["hjd_utc"].is_null() && geometry["altitude_deg"].is_null(), "{geometry}");
+        }
+    }
+
+    #[test]
+    fn a_utc_topocentric_series_gets_only_the_leap_second_tt_tdb_and_roemer_terms() {
+        use crate::core::astrometry::geometry::{
+            jd_tt_from_utc, romer_delay_seconds, tai_minus_utc_seconds, tdb_minus_tt_seconds, LightTimeCentre, TT_MINUS_TAI_SECONDS,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (implicit, targets) = write_headed_stack(dir.path(), "utc", 3, |_, header| sited_wcs_cards(header));
+        let (explicit, _) = write_headed_stack(dir.path(), "topo", 3, |_, header| {
+            sited_wcs_cards(header);
+            header.set("TREFPOS", "TOPOCENTER".to_string());
+        });
+        let run = |paths: &[String]| measure_time_series(paths, &targets, &base_config(), false, true, None).unwrap();
+        let (implicit, explicit) = (run(&implicit), run(&explicit));
+        let target = implicit.geometry_target.clone().expect("series target");
+        for (a, b) in implicit.frames.iter().zip(&explicit.frames) {
+            let (ga, gb) = (a.geometry.as_ref().unwrap(), b.geometry.as_ref().unwrap());
+            let jd_utc = ga.jd_utc.unwrap();
+            assert_eq!(a.jd_mid, Some(jd_utc));
+            let jd_tt = jd_tt_from_utc(jd_utc);
+            let roemer = romer_delay_seconds(jd_tt, target.ra_deg, target.dec_deg, LightTimeCentre::Barycentre);
+            let terms = tai_minus_utc_seconds(jd_utc).0 + TT_MINUS_TAI_SECONDS + tdb_minus_tt_seconds(jd_tt) + roemer;
+            let bjd = ga.bjd_tdb.unwrap();
+            assert!((bjd - (jd_utc + terms / 86400.0)).abs() <= SERIES_BJD_TOLERANCE_DAYS, "{} s", (bjd - jd_utc) * 86400.0 - terms);
+            assert_eq!((ga.bjd_tdb, ga.hjd_utc, ga.bjd_source.as_deref()), (gb.bjd_tdb, gb.hjd_utc, Some("computed")));
+        }
+    }
+
+    #[test]
+    fn an_unsupported_or_contradictory_time_reference_gets_no_light_time_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        for (prefix, cards, named) in [
+            ("helio", &[("TREFPOS", "HELIOCENTER")][..], "TREFPOS HELIOCENTER"),
+            ("mixed", &[("TREFPOS", "TOPOCENTER"), ("TIMEREF", "SOLARSYSTEM")][..], "TIMEREF SOLARSYSTEM"),
+        ] {
+            let (paths, targets) = write_headed_stack(dir.path(), prefix, 2, |_, header| {
+                sited_wcs_cards(header);
+                for (key, value) in cards {
+                    header.set(key, value.to_string());
+                }
+            });
+            let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+            for frame in &out.frames {
+                let geometry = frame.geometry.as_ref().expect("geometry block");
+                assert_eq!((geometry.bjd_tdb, geometry.hjd_utc, geometry.jd_utc), (None, None, None), "{prefix}: {geometry:?}");
+                assert!(geometry.time_scale_notes.iter().any(|n| n.contains(named)), "{prefix}: {:?}", geometry.time_scale_notes);
+            }
+        }
+    }
+
+    #[test]
+    fn an_impossible_date_obs_is_not_turned_into_another_date_and_the_card_is_named() {
+        use crate::core::astrometry::time::jd_from_mjd;
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "feb30", 2, |_, header| header.set("DATE-OBS", "2024-02-30T00:00:00".to_string()));
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        let config = isolated_stack_config();
+        for frame in &out.frames {
+            let mjd_obs = 60310.0 + frame.index as f64 * CADENCE_SECONDS / 86400.0;
+            let expected = jd_from_mjd(mjd_obs) + config.noise.exposure_time / 2.0 / 86400.0;
+            assert!((frame.jd_mid.unwrap() - expected).abs() < 1e-8, "frame {}: {:?}", frame.index, frame.jd_mid);
+            assert!(frame.time_source.as_deref().unwrap().starts_with("MJD-OBS"), "{:?}", frame.time_source);
+            let notes = &frame.geometry.as_ref().unwrap().time_scale_notes;
+            assert!(
+                notes.iter().any(|n| n.starts_with("DATE-OBS ignored") && n.contains("'2024-02-30T00:00:00'") && n.contains("February 2024 has 29 days")),
+                "{notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spacecraft_frames_keep_the_persisted_site_override_out_of_the_topocentric_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "jwst", 3, |_, header| {
+            sited_wcs_cards(header);
+            header.set("TELESCOP", "JWST".to_string());
+        });
+        let overrides = GeometryOverrides { site_lat: Some(19.82), site_lon: Some(-155.47), ..GeometryOverrides::default() };
+        let out = measure_time_series_with(&paths, &targets, &base_config(), false, true, None, &overrides, None).unwrap();
+        assert_eq!(out.n_skipped, 0);
+        for frame in &out.frames {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            assert!(geometry.jd_utc.is_some());
+            assert_eq!(geometry.bjd_tdb, None);
+            assert_eq!(geometry.lst_deg, None);
+            assert_eq!(geometry.altitude_deg, None);
+            assert_eq!(geometry.airmass_computed, None);
+            assert_eq!(geometry.parallactic_angle_deg, None);
+            assert_eq!(geometry.sun_altitude_deg, None);
+            assert_eq!(geometry.moon_altitude_deg, None);
+            assert_eq!(geometry.moon_separation_deg, None);
+            assert!(geometry.time_scale_notes.iter().any(|n| n.contains("site from user not applied")), "{:?}", geometry.time_scale_notes);
+        }
+        assert!(out.geometry_target.as_ref().is_some_and(|t| t.source.starts_with("WCS at")), "{:?}", out.geometry_target);
+    }
+
+    const JWST_MJD_AVG: f64 = 60541.68468854167;
+    const JWST_TDB_MID: f64 = 60541.688475812225;
+    const JWST_BARTDELT_SECONDS: f64 = 327.22708247601986;
+
+    #[test]
+    fn jwst_frames_carry_their_header_tdb_mid_as_bjd_tdb_next_to_the_utc_mid_time() {
+        use crate::core::astrometry::time::jd_from_mjd;
+        let dir = tempfile::tempdir().unwrap();
+        let after = |mjd: f64, i: usize| mjd + i as f64 * CADENCE_SECONDS / 86400.0;
+        let (paths, targets) = write_headed_stack(dir.path(), "jwst_tdb", 3, |i, header| {
+            sited_wcs_cards(header);
+            header.set("TELESCOP", "JWST".to_string());
+            header.set(TIMESYS_KEY, UTC_SCALE.to_string());
+            header.set("MJD-AVG", format!("{}", after(JWST_MJD_AVG, i)));
+            header.set("TDB-MID", format!("{}", after(JWST_TDB_MID, i)));
+            header.set("BARTDELT", format!("{JWST_BARTDELT_SECONDS}"));
+        });
+        let out = measure_time_series(&paths, &targets, &base_config(), false, true, None).unwrap();
+        assert_eq!(out.n_skipped, 0);
+        for (i, frame) in out.frames.iter().enumerate() {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            let bjd = geometry.bjd_tdb.unwrap_or_else(|| panic!("frame {i} has no BJD_TDB: {:?}", geometry.time_scale_notes));
+            let header_bjd = jd_from_mjd(after(JWST_TDB_MID, i));
+            assert!((bjd - header_bjd).abs() <= SERIES_BJD_TOLERANCE_DAYS, "frame {i}: {} s off TDB-MID", (bjd - header_bjd) * 86400.0);
+            assert_eq!(geometry.bjd_source.as_deref(), Some("TDB-MID"));
+            let jd_utc = geometry.jd_utc.expect("JD_UTC");
+            assert!((jd_utc - jd_from_mjd(after(JWST_MJD_AVG, i))).abs() <= SERIES_BJD_TOLERANCE_DAYS, "frame {i}: {jd_utc}");
+            assert_eq!(frame.jd_mid, geometry.jd_utc);
+            assert_eq!((geometry.hjd_utc, geometry.altitude_deg), (None, None));
+        }
+    }
+
+    #[test]
+    fn a_combined_jwst_file_takes_tdb_mid_from_its_sci_header_over_the_first_exposure_bmidtime_of_the_primary() {
+        use crate::core::astrometry::time::jd_from_mjd;
+        use crate::core::cube::lazy::test_support::write_i2d_like_mef;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jw_combined_i2d.fits");
+        let primary = [
+            ("TELESCOP", "'JWST'"),
+            ("TIMESYS", "'UTC'"),
+            ("EXPMID", "60541.67540058738"),
+            ("BMIDTIME", "60541.6749680976"),
+            ("BARTDELT", "327.3275383282453"),
+            ("TARG_RA", "266.4168375"),
+            ("TARG_DEC", "-29.007811111111096"),
+        ];
+        let sci = [("MJD-AVG", "60541.67540058738"), ("TDB-MID", "60541.67918865736")];
+        write_i2d_like_mef(&path, 32, 32, &primary, &sci);
+        let key = path.to_str().unwrap();
+        let entry = load_entry(key).unwrap();
+        let series = series_geometry(key, entry.header(), &[], &GeometryOverrides::default());
+        let geometry = frame_geometry_of(entry.header(), &series).expect("geometry block");
+        assert_eq!(geometry.bjd_tdb, Some(jd_from_mjd(60541.67918865736)), "{:?}", geometry.time_scale_notes);
+        assert_eq!(geometry.bjd_source.as_deref(), Some("TDB-MID"));
+        assert_eq!(geometry.jd_utc, Some(jd_from_mjd(60541.67540058738)));
+    }
+
+    #[test]
+    fn a_plain_stack_has_time_scales_but_no_target_and_no_site_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let out = measure_time_series(&stack.paths[..2], &stack.targets, &base_config(), false, true, None).unwrap();
+        for frame in &out.frames {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            assert!(geometry.jd_utc.is_some() && geometry.jd_tt.is_some() && geometry.jd_tdb.is_some());
+            assert_eq!(geometry.bjd_tdb, None);
+            assert_eq!(geometry.hjd_utc, None);
+            assert_eq!(geometry.altitude_deg, None);
+            assert_eq!(geometry.airmass_computed, None);
+            assert!(geometry.moon_illumination.is_some());
+        }
+        assert!(out.geometry_target.is_none());
+        assert!(out.geometry_notes.iter().any(|n| n.contains("no target coordinates")), "{:?}", out.geometry_notes);
+    }
+
+    #[test]
+    fn site_and_target_overrides_supply_the_geometry_for_a_plain_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let overrides = GeometryOverrides {
+            target_ra: Some(150.0),
+            target_dec: Some(2.0),
+            site_lat: Some(19.82),
+            site_lon: Some(-155.47),
+            site_height: None,
+        };
+        let out = measure_time_series_with(&stack.paths[..2], &stack.targets, &base_config(), false, true, None, &overrides, None).unwrap();
+        for frame in &out.frames {
+            let geometry = frame.geometry.as_ref().expect("geometry block");
+            assert!(geometry.altitude_deg.is_some() && geometry.bjd_tdb.is_some() && geometry.lst_deg.is_some());
+        }
+        assert_eq!(out.geometry_target.as_ref().unwrap().source, "user");
+        assert!(out.geometry_notes.iter().any(|n| n.contains("site from user")), "{:?}", out.geometry_notes);
+    }
+
+    #[test]
+    fn skipped_frames_carry_no_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let small = dir.path().join("small.fits");
+        write_fits_mono(small.to_str().unwrap(), &Array2::<f32>::zeros((64, 64)), None).unwrap();
+        let mut paths = stack.paths[..2].to_vec();
+        paths.push(small.to_str().unwrap().to_string());
+        let out = measure_time_series(&paths, &stack.targets, &base_config(), false, true, None).unwrap();
+        assert!(out.frames[2].skipped.is_some());
+        assert!(out.frames[2].geometry.is_none());
+        assert!(out.frames[..2].iter().all(|f| f.geometry.is_some()));
+    }
+
+    fn filter_notes(out: &TimeSeriesResult) -> Vec<&str> {
+        out.warnings
+            .iter()
+            .map(String::as_str)
+            .filter(|w| w.starts_with("filter match not checked"))
+            .collect()
+    }
+
+    fn series_of(paths: &[String], targets: &[TimeSeriesTarget]) -> TimeSeriesResult {
+        measure_time_series(paths, targets, &base_config(), false, true, None).unwrap()
+    }
+
+    const ONE_UNCHECKED_FILTER: &str = "filter match not checked on 1 frame: only the frame or only the reference names a filter";
+    const TWO_UNCHECKED_FILTERS: &str = "filter match not checked on 2 frames: only the frame or only the reference names a filter";
+
+    #[test]
+    fn a_filter_named_on_one_side_only_is_measured_and_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "onesided", 3, |i, header| {
+            if i == 1 {
+                header.set("FILTER", "R".to_string());
+            }
+        });
+        let out = series_of(&paths, &targets);
+        assert_eq!(out.n_skipped, 0);
+        assert_eq!(filter_notes(&out), vec![ONE_UNCHECKED_FILTER], "{:?}", out.warnings);
+
+        let (paths, targets) = write_headed_stack(dir.path(), "refonly", 3, |i, header| {
+            if i == 0 {
+                header.set("FILTER", "V".to_string());
+            }
+        });
+        let out = series_of(&paths, &targets);
+        assert_eq!(out.n_skipped, 0);
+        assert_eq!(filter_notes(&out), vec![TWO_UNCHECKED_FILTERS], "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn frames_without_any_filter_name_or_with_the_same_one_raise_no_filter_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "nofilter", 3, |_, _| {});
+        let out = series_of(&paths, &targets);
+        assert!(filter_notes(&out).is_empty(), "{:?}", out.warnings);
+
+        let (paths, targets) = write_headed_stack(dir.path(), "samefilter", 3, |_, header| header.set("FILTER", "V".to_string()));
+        let out = series_of(&paths, &targets);
+        assert_eq!(out.n_skipped, 0);
+        assert!(filter_notes(&out).is_empty(), "{:?}", out.warnings);
+
+        let slots = ["1", "1", "2"];
+        let (paths, targets) = write_headed_stack(dir.path(), "slotnotes", 3, |i, header| header.set("FILTER", slots[i].to_string()));
+        let out = series_of(&paths, &targets);
+        assert_eq!(out.n_skipped, 1);
+        assert!(filter_notes(&out).is_empty(), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn a_skipped_frame_is_not_counted_as_an_unchecked_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut paths, targets) = write_headed_stack(dir.path(), "refgap", 3, |i, header| {
+            if i == 0 {
+                header.set("FILTER", "V".to_string());
+            }
+        });
+        paths[1] = dir.path().join("missing.fits").to_str().unwrap().to_string();
+        let out = series_of(&paths, &targets);
+        assert_eq!(out.n_skipped, 1);
+        assert_eq!(filter_notes(&out), vec![ONE_UNCHECKED_FILTER], "{:?}", out.warnings);
+        assert!(out.frames[1].skipped.is_some());
+        assert_eq!(out.frames[1].bunit, None);
+    }
+
+    #[test]
+    fn exptime_follows_the_exposure_aliases_of_frames_without_exptime() {
+        let dir = tempfile::tempdir().unwrap();
+        let exptimes = |prefix: &str, card: &dyn Fn(&mut HduHeader)| -> Vec<Option<f64>> {
+            let (paths, targets) = write_headed_stack(dir.path(), prefix, 2, |_, header| card(header));
+            series_of(&paths, &targets).frames.iter().map(|f| f.exptime).collect()
+        };
+        let jwst = exptimes("jwstexp", &|header| {
+            header.remove("EXPTIME");
+            header.set_f64("XPOSURE", 145.889);
+            header.set_f64("EFFEXPTM", 145.889);
+        });
+        assert_eq!(jwst, vec![Some(145.889); 2]);
+        let effective_only = exptimes("effexp", &|header| {
+            header.remove("EXPTIME");
+            header.set_f64("EFFEXPTM", 29.766);
+        });
+        assert_eq!(effective_only, vec![Some(29.766); 2]);
+        let both = exptimes("bothexp", &|header| {
+            header.set_f64("EXPTIME", 60.0);
+            header.set_f64("XPOSURE", 30.0);
+        });
+        assert_eq!(both, vec![Some(60.0); 2]);
+        let none = exptimes("noexp", &|header| header.remove("EXPTIME"));
+        assert_eq!(none, vec![None; 2]);
+        let zero = exptimes("zeroexp", &|header| header.set_f64("EXPTIME", 0.0));
+        assert_eq!(zero, vec![None; 2]);
+    }
+
+    #[test]
+    fn frames_carry_the_pixel_unit_of_their_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let out = series_of(&stack.paths[..3], &stack.targets);
+        assert!(out.frames.iter().all(|f| f.bunit.as_deref() == Some("ADU")), "{:?}", out.frames[0].bunit);
+
+        let (paths, targets) = write_headed_stack(dir.path(), "nounit", 2, |_, header| header.remove("BUNIT"));
+        let out = series_of(&paths, &targets);
+        assert!(out.frames.iter().all(|f| f.bunit.is_none()), "{:?}", out.frames[0].bunit);
+
+        let (paths, targets) = write_headed_stack(dir.path(), "surface", 2, |_, header| header.set("BUNIT", "MJy/sr  ".to_string()));
+        let out = series_of(&paths, &targets);
+        assert!(out.frames.iter().all(|f| f.bunit.as_deref() == Some("MJy/sr")), "{:?}", out.frames[0].bunit);
+    }
+
+    #[test]
+    fn the_series_json_names_the_new_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = write_stack(dir.path(), |_, frame| frame);
+        let out = series_of(&stack.paths[..2], &stack.targets);
+        let json = serde_json::to_value(&out).unwrap();
+        let frame = json["frames"][0].as_object().unwrap();
+        assert_eq!(frame["bunit"], "ADU");
+        for key in ["exptime", "filter", "photcal_label", "skipped"] {
+            assert!(frame.contains_key(key), "{key} missing from {:?}", frame.keys().collect::<Vec<_>>());
+        }
+        assert!(!frame.contains_key("filter_unchecked"));
+    }
+
+    const AB25: UserZeroPoint = UserZeroPoint { zp: 25.0, system: UserMagSystem::Ab, per_second: false };
+    const AB25_PER_SECOND: UserZeroPoint = UserZeroPoint { zp: 25.0, system: UserMagSystem::Ab, per_second: true };
+    const JY_PER_COUNT_AT_AB25: f64 = 3.63078054770101e-07;
+    const JY_PER_COUNT_AT_AB25_OVER_600_S: f64 = 6.051300912835017e-10;
+    const HST_WITHOUT_EXPTIME_WARNING: &str =
+        "EXPTIME missing; counts in 'ADU' cannot be converted to a rate, magnitudes are unavailable";
+
+    fn run(paths: &[String], targets: &[TimeSeriesTarget], zero_point: Option<&UserZeroPoint>) -> TimeSeriesResult {
+        measure_time_series_with(paths, targets, &base_config(), false, true, None, &GeometryOverrides::default(), zero_point).unwrap()
+    }
+
+    fn count(out: &TimeSeriesResult, text: &str) -> usize {
+        out.warnings.iter().filter(|w| w.as_str() == text).count()
+    }
+
+    fn stars_of(out: &TimeSeriesResult) -> Vec<&StarPhotometry> {
+        out.frames.iter().flat_map(|f| f.targets.iter().flatten()).collect()
+    }
+
+    fn hst_counts(header: &mut HduHeader) {
+        header.set_f64("PHOTFLAM", 1.0e-19);
+        header.set_f64("PHOTPLAM", 5000.0);
+        header.remove("EXPTIME");
+    }
+
+    fn assert_relative(measured: f64, expected: f64, tolerance: f64) {
+        assert!((measured - expected).abs() <= tolerance * expected.abs(), "measured {measured:e} expected {expected:e}");
+    }
+
+    #[test]
+    fn calibration_warnings_of_the_frames_reach_the_series_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "hst", 3, |_, header| hst_counts(header));
+        let out = run(&paths, &targets, None);
+        assert_eq!(out.n_skipped, 0);
+        assert!(out.frames.iter().all(|f| f.photcal_label.is_some()), "{:?}", out.frames[0].photcal_label);
+        assert_eq!(count(&out, HST_WITHOUT_EXPTIME_WARNING), 1, "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn a_typed_ab_zero_point_calibrates_every_frame_of_a_series_without_calibration() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "plain", 3, |_, _| {});
+        let out = run(&paths, &targets, Some(&AB25));
+        let stars = stars_of(&out);
+        assert_eq!(stars.len(), 9);
+        for star in stars {
+            let net = star.net_flux;
+            assert_relative(star.flux_jy.expect("flux in Jy"), net * JY_PER_COUNT_AT_AB25, 1e-12);
+            let mag = star.mag_ab.expect("AB magnitude");
+            assert!((mag - (25.0 - 2.5 * net.log10())).abs() <= 1e-9, "{mag}");
+        }
+        let label = PhotCal::from_user_zero_point(25.0, MagSystem::Ab, false, None).label();
+        assert!(out.frames.iter().all(|f| f.photcal_label.as_deref() == Some(label.as_str())), "{:?}", out.frames[0].photcal_label);
+        assert_eq!(count(&out, USER_ZERO_POINT_WARNING), 1, "{:?}", out.warnings);
+
+        let plain = run(&paths, &targets, None);
+        assert!(stars_of(&plain).iter().all(|s| s.flux_jy.is_none() && s.mag_ab.is_none()));
+        assert!(plain.frames.iter().all(|f| f.photcal_label.is_none()));
+        assert!(!plain.warnings.iter().any(|w| w.contains("zero point")), "{:?}", plain.warnings);
+    }
+
+    #[test]
+    fn the_light_curve_numbers_do_not_depend_on_the_zero_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "plain", 3, |_, _| {});
+        let (typed, plain) = (run(&paths, &targets, Some(&AB25)), run(&paths, &targets, None));
+        assert_eq!(typed.n_skipped, plain.n_skipped);
+        for (a, b) in typed.frames.iter().zip(&plain.frames) {
+            assert_eq!(a.skipped, b.skipped);
+            let offset = |f: &TimeSeriesFrame| f.offset.as_ref().map(|o| (o.dx.to_bits(), o.dy.to_bits(), o.registered));
+            assert_eq!(offset(a), offset(b));
+            for (sa, sb) in a.targets.iter().zip(&b.targets) {
+                let bits = |s: &Option<StarPhotometry>| {
+                    s.as_ref().map(|s| (s.net_flux.to_bits(), s.flux_err.to_bits(), s.x.to_bits(), s.y.to_bits()))
+                };
+                assert_eq!(bits(sa), bits(sb));
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_calibration_wins_over_the_typed_zero_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "jwst", 3, |_, header| {
+            header.set("BUNIT", "MJy/sr".to_string());
+            header.set_f64("PIXAR_SR", 2.1e-13);
+        });
+        let (typed, plain) = (run(&paths, &targets, Some(&AB25)), run(&paths, &targets, None));
+        let flux_bits = |out: &TimeSeriesResult| stars_of(out).iter().map(|s| s.flux_jy.map(f64::to_bits)).collect::<Vec<_>>();
+        assert!(flux_bits(&plain).iter().all(Option::is_some));
+        assert_eq!(flux_bits(&typed), flux_bits(&plain));
+        let not_applied = typed
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("user zero point not applied: the header calibrates this image ("))
+            .count();
+        assert_eq!(not_applied, 1, "{:?}", typed.warnings);
+        assert_eq!(count(&typed, USER_ZERO_POINT_WARNING), 0, "{:?}", typed.warnings);
+    }
+
+    #[test]
+    fn a_per_second_zero_point_without_exposure_time_is_reported_once_and_leaves_the_frames_uncalibrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "noexp", 3, |_, header| header.remove("EXPTIME"));
+        let (typed, plain) = (run(&paths, &targets, Some(&AB25_PER_SECOND)), run(&paths, &targets, None));
+        assert!(stars_of(&typed).iter().all(|s| s.flux_jy.is_none()));
+        assert_eq!(
+            count(
+                &typed,
+                "user zero point not applied on 3 frames: a zero point per second needs EXPTIME to turn the pixel values into a rate, and this header has none (BUNIT 'ADU')"
+            ),
+            1,
+            "{:?}",
+            typed.warnings
+        );
+        let net_bits = |out: &TimeSeriesResult| stars_of(out).iter().map(|s| s.net_flux.to_bits()).collect::<Vec<_>>();
+        assert_eq!(net_bits(&typed), net_bits(&plain));
+    }
+
+    #[test]
+    fn a_per_second_zero_point_uses_the_exposure_time_of_each_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "exp600", 3, |_, header| header.set_f64("EXPTIME", 600.0));
+        let out = run(&paths, &targets, Some(&AB25_PER_SECOND));
+        let stars = stars_of(&out);
+        assert_eq!(stars.len(), 9);
+        for star in stars {
+            assert_relative(star.flux_jy.expect("flux in Jy"), star.net_flux * JY_PER_COUNT_AT_AB25_OVER_600_S, 1e-12);
+        }
+        assert_eq!(
+            count(&out, "the user zero point is defined for one count per second: the pixel values are divided by EXPTIME = 600.0 s"),
+            1,
+            "{:?}",
+            out.warnings
+        );
+        assert_eq!(count(&out, USER_ZERO_POINT_WARNING), 1, "{:?}", out.warnings);
+        assert!(!out.warnings.iter().any(|w| w.contains("EXPTIME 600 s applied")), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn a_vega_zero_point_gives_magnitudes_in_its_own_system_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, targets) = write_headed_stack(dir.path(), "vega", 3, |_, _| {});
+        let vega = UserZeroPoint { zp: 25.0, system: UserMagSystem::Vega, per_second: false };
+        let out = run(&paths, &targets, Some(&vega));
+        assert!(stars_of(&out).iter().all(|s| s.flux_jy.is_none() && s.mag_ab.is_none()));
+        assert_eq!(count(&out, USER_ZERO_POINT_WARNING), 1, "{:?}", out.warnings);
+        let position = out.warnings.iter().position(|w| w == USER_ZERO_POINT_WARNING).unwrap();
+        assert!(out.warnings.len() > position + 1, "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn a_zero_point_that_is_not_finite_is_refused_before_any_frame_is_read() {
+        let refused = |zp: f64| {
+            crate::cmd::analysis::check_user_zero_point(Some(&UserZeroPoint { zp, ..AB25 }))
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(refused(f64::NAN), "user zero point NaN must be a finite magnitude");
+        assert_eq!(refused(f64::INFINITY), "user zero point inf must be a finite magnitude");
+        assert!(crate::cmd::analysis::check_user_zero_point(None).is_ok());
+        assert!(crate::cmd::analysis::check_user_zero_point(Some(&AB25)).is_ok());
+    }
+
+    fn distinct_unit_counts(i: usize, header: &mut HduHeader) {
+        header.set("BUNIT", format!("ADU{i}"));
+        hst_counts(header);
+    }
+
+    fn capped_series(dir: &Path, extra: usize) -> TimeSeriesResult {
+        let (mut paths, targets) = write_headed_stack(dir, "capa", 8, distinct_unit_counts);
+        if extra > 0 {
+            let (more, _) = write_headed_stack(dir, "capb", extra, |i, header| distinct_unit_counts(i + 8, header));
+            paths.extend(more);
+        }
+        run(&paths, &targets, None)
+    }
+
+    #[test]
+    fn many_distinct_calibration_warnings_are_capped() {
+        let exptime_lines = |out: &TimeSeriesResult| out.warnings.iter().filter(|w| w.starts_with("EXPTIME missing; counts in")).count();
+        let more_lines = |out: &TimeSeriesResult| out.warnings.iter().filter(|w| w.contains("more calibration warning")).cloned().collect::<Vec<_>>();
+        let dir = tempfile::tempdir().unwrap();
+        let ten = capped_series(dir.path(), 2);
+        assert_eq!(ten.n_frames, 10);
+        assert_eq!(exptime_lines(&ten), MAX_CALIBRATION_WARNINGS, "{:?}", ten.warnings);
+        assert_eq!(more_lines(&ten), vec!["2 more calibration warnings on other frames".to_string()]);
+        let dir = tempfile::tempdir().unwrap();
+        let nine = capped_series(dir.path(), 1);
+        assert_eq!(exptime_lines(&nine), MAX_CALIBRATION_WARNINGS, "{:?}", nine.warnings);
+        assert_eq!(more_lines(&nine), vec!["1 more calibration warning on other frames".to_string()]);
+        let dir = tempfile::tempdir().unwrap();
+        let eight = capped_series(dir.path(), 0);
+        assert_eq!(exptime_lines(&eight), MAX_CALIBRATION_WARNINGS, "{:?}", eight.warnings);
+        assert!(more_lines(&eight).is_empty(), "{:?}", eight.warnings);
+    }
+}

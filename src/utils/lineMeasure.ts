@@ -7,8 +7,9 @@ import type {
   SpectralAxisInfo,
 } from "../shared/types/spectral";
 import { SIGMA_MAD_LABEL } from "./analysisLabels";
+import { csvEscape } from "./catalogCsv";
 import { provenanceLines, unitLines, withProvenance } from "./csvProvenance";
-import { formatWithUncertainty } from "./formatUncertainty";
+import { MISSING_VALUE, formatWithUncertainty } from "./formatUncertainty";
 import { formatRedshift } from "./lineList";
 import { spectrumUnitOf } from "./measurementLog";
 import { airToVacuumUm } from "./spectralAxis";
@@ -62,7 +63,7 @@ export interface LineCsvContext {
 
 export const FWHM_PER_SIGMA = 2.354820045030949;
 export const MODEL_SUBSAMPLES = 4;
-export const UNAVAILABLE = "n/a";
+export const UNAVAILABLE = MISSING_VALUE;
 export const PLUS_MINUS = "±";
 export const POOR_FIT_CHI2_RED = 3;
 
@@ -528,7 +529,7 @@ function csvCell(value: unknown): string {
   if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
   if (typeof value === "boolean") return value ? "true" : "false";
   const text = String(value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  return csvEscape(text);
 }
 
 function lineCsvUnit(column: LineCsvColumn, m: LineMeasurement, spectrumUnit: string | null): string | null {

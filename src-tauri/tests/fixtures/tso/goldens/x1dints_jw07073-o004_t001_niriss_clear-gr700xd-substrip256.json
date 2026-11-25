@@ -1,0 +1,1164 @@
+{
+ "golden": "tso/x1dints",
+ "label": "A3",
+ "produced_by": {
+  "script": "tso_golden_x1dints.py",
+  "command": "python -I scripts/oracle/tso_golden_x1dints.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw07073-o004_t001_niriss_clear-gr700xd-substrip256_x1dints.fits",
+    "set": "tso/A3",
+    "bytes": 3674880,
+    "sha256": "96e2fe751b1538cc7418ddcbd451fb740af1824d85007919cce7edac3137c9ad"
+   },
+   {
+    "file": "jw07073-o004_t001_niriss_clear-gr700xd-substrip256_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 1310,
+    "sha256": "386d87d3a81265bc4b5d471f08a503524d920c815d62c5c828eb3dadbf96d0d8"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "primary": {
+  "DATAMODL": "TSOMultiSpecModel",
+  "CAL_VER": "3.0.0",
+  "EXP_TYPE": "NIS_SOSS",
+  "INSTRUME": "NIRISS",
+  "DETECTOR": "NIS",
+  "FILTER": "CLEAR",
+  "PUPIL": "GR700XD",
+  "GRATING": null,
+  "SUBARRAY": "SUBSTRIP256",
+  "NINTS": 5,
+  "INTSTART": 1,
+  "INTEND": 5,
+  "EXSEGNUM": 1,
+  "EXSEGTOT": 1,
+  "TARGNAME": "LTT-1445A",
+  "S_PHOTOM": "COMPLETE"
+ },
+ "product_level": "3",
+ "layout": "row_per_integration",
+ "n_hdus": 7,
+ "hdus": [
+  {
+   "index": 0,
+   "name": "PRIMARY",
+   "extver": null,
+   "naxis1": null,
+   "naxis2": null
+  },
+  {
+   "index": 1,
+   "name": "INT_TIMES",
+   "extver": 1,
+   "naxis1": 52,
+   "naxis2": 5
+  },
+  {
+   "index": 2,
+   "name": "EXTRACT1D",
+   "extver": 1,
+   "naxis1": 286780,
+   "naxis2": 5
+  },
+  {
+   "index": 3,
+   "name": "EXTRACT1D",
+   "extver": 2,
+   "naxis1": 249680,
+   "naxis2": 5
+  },
+  {
+   "index": 4,
+   "name": "EXTRACT1D",
+   "extver": 3,
+   "naxis1": 158820,
+   "naxis2": 5
+  },
+  {
+   "index": 5,
+   "name": "HDRTAB",
+   "extver": 1,
+   "naxis1": 2249,
+   "naxis2": 1
+  },
+  {
+   "index": 6,
+   "name": "ASDF",
+   "extver": null,
+   "naxis1": 100330,
+   "naxis2": 1
+  }
+ ],
+ "n_extract1d": 3,
+ "int_times_rows": 5,
+ "series_keys": [
+  {
+   "detector": "NIS",
+   "sporder": 1
+  },
+  {
+   "detector": "NIS",
+   "sporder": 2
+  },
+  {
+   "detector": "NIS",
+   "sporder": 3
+  }
+ ],
+ "series": [
+  {
+   "key": {
+    "detector": "NIS",
+    "sporder": 1
+   },
+   "detector_source": "primary header (EXTRACT1D has no DETECTOR card)",
+   "extract1d_hdus": [
+    2
+   ],
+   "rows_per_extract1d": [
+    5
+   ],
+   "integrations": 5,
+   "tform_repeat": [
+    2048
+   ],
+   "n_alongdisp": {
+    "min": 2048,
+    "max": 2048,
+    "sum": 10240,
+    "rows_zero": 0,
+    "rows_below_tform_repeat": 0,
+    "source": "N_ALONGDISP column"
+   },
+   "int_num": {
+    "first": 1,
+    "last": 5,
+    "min": 1,
+    "max": 5,
+    "distinct": 5,
+    "source": "INT_NUM column"
+   },
+   "segment_values": [
+    1
+   ],
+   "units": {
+    "WAVELENGTH": "um",
+    "FLUX": "MJy",
+    "FLUX_ERROR": "MJy",
+    "MJD-AVG": "d",
+    "TDB-MID": "d"
+   },
+   "time": {
+    "mjd_avg_first": 61043.21309070602,
+    "mjd_avg_last": null,
+    "mjd_avg_min_finite": 61043.21309070602,
+    "mjd_avg_max_finite": 61043.21309070602,
+    "mjd_avg_nan_rows": 4,
+    "mjd_avg_distinct_finite": 1,
+    "tdb_mid_first": 61043.21592608525,
+    "tdb_mid_last": 61043.21592608525,
+    "tdb_mid_nan_rows": 0,
+    "tdb_mid_distinct_finite": 1,
+    "mjd_beg_first": 61043.21309070602,
+    "mjd_end_last": 61043.21309070602,
+    "strictly_increasing_in_hdu_and_row_order": null,
+    "source": "per-row columns"
+   },
+   "first_valid_row": {
+    "hdu": 2,
+    "row0": 0,
+    "int_num": 1,
+    "n_alongdisp": 2048,
+    "wavelength_first3": [
+     2.8329402405819173,
+     2.8319530344473756,
+     2.8309658283323555
+    ],
+    "wavelength_last3": [
+     0.8491389518812792,
+     0.8482612176785985,
+     0.8473834834322623
+    ],
+    "direction": "descending"
+   },
+   "masking_counts": {
+    "valid_elements": 10240,
+    "flux_nan": 50,
+    "dq_nonzero": 0,
+    "flux_nan_with_dq_zero": 50,
+    "flux_finite_with_dq_nonzero": 0,
+    "flux_error_nan": 50
+   },
+   "storage": {
+    "NAXIS1": 286780,
+    "NAXIS2": 5,
+    "PCOUNT": 0,
+    "TFIELDS": 27,
+    "WAVELENGTH": {
+     "column": 2,
+     "TFORM": "2048D",
+     "TDIM": "(2048)",
+     "TUNIT": "um",
+     "TZERO": null
+    },
+    "DQ": {
+     "column": 13,
+     "TFORM": "2048J",
+     "TDIM": "(2048)",
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_element0_stored_bytes_hex": "80000000",
+     "row0_element0_value": 0
+    },
+    "N_ALONGDISP": {
+     "column": 20,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_stored_bytes_hex": "80000800",
+     "row0_stored_int32": -2147481600,
+     "row0_value": 2048
+    },
+    "INT_NUM": {
+     "column": 1,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": null
+    },
+    "row_length_rule": "NAXIS1 = 140 * repeat + 60",
+    "row_length_rule_holds": true
+   },
+   "white_light_as_archived": {
+    "limits_um": [
+     0.93,
+     2.82
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.7119146038247
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.7119146038247
+     }
+    ],
+    "sum_all_fsum": 1503.7119146038247,
+    "numpy_nansum_vs_exact_sum_max_rel": 0.0,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_1",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 1503.7119146038247
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 1503.7119146038247
+      }
+     ],
+     "sum_all_fsum": 1503.7119146038247,
+     "max_rel_diff_computed_vs_whtlt": 0.0,
+     "rows_bitwise_equal": 1,
+     "within_1e-4": true,
+     "expected_to_match": true,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    },
+    "limits_source": "order 1 CLEAR range 0.93 to 2.82 um reused for every order (range-reuse quirk, confirmed bitwise on this file); step parameters in cal_logs are None"
+   },
+   "white_light_all_rows_archived_limits": {
+    "meaning": "per-row sums in HDU and row order with no row dropped; use it to test the sum when the time rule removes rows",
+    "limits_um": [
+     0.93,
+     2.82
+    ],
+    "rows": 5,
+    "first5": [
+     {
+      "int_num": 1,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.7119146038247
+     },
+     {
+      "int_num": 2,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.777442805529
+     },
+     {
+      "int_num": 3,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.9937065740291
+     },
+     {
+      "int_num": 4,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1504.2827848196785
+     },
+     {
+      "int_num": 5,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.362138485283
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.7119146038247
+     },
+     {
+      "int_num": 2,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.777442805529
+     },
+     {
+      "int_num": 3,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.9937065740291
+     },
+     {
+      "int_num": 4,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1504.2827848196785
+     },
+     {
+      "int_num": 5,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.362138485283
+     }
+    ],
+    "sum_all_fsum": 7519.127987288344
+   },
+   "white_light_open_limits": {
+    "limits_um": [
+     -1.0,
+     10000000000.0
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1528.81783621079
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1528.81783621079
+     }
+    ],
+    "sum_all_fsum": 1528.81783621079,
+    "numpy_nansum_vs_exact_sum_max_rel": 1.4872515878463517e-16,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_1",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 1503.7119146038247
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 1503.7119146038247
+      }
+     ],
+     "sum_all_fsum": 1503.7119146038247,
+     "max_rel_diff_computed_vs_whtlt": 0.016695965073589093,
+     "rows_bitwise_equal": 0,
+     "within_1e-4": false,
+     "expected_to_match": false,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    }
+   },
+   "white_light_soss_own_range_per_order": {
+    "limits_um": [
+     0.93,
+     2.82
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.7119146038247
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 1503.7119146038247
+     }
+    ],
+    "sum_all_fsum": 1503.7119146038247,
+    "numpy_nansum_vs_exact_sum_max_rel": 0.0,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_1",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 1503.7119146038247
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 1503.7119146038247
+      }
+     ],
+     "sum_all_fsum": 1503.7119146038247,
+     "max_rel_diff_computed_vs_whtlt": 0.0,
+     "rows_bitwise_equal": 1,
+     "within_1e-4": true,
+     "expected_to_match": true,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    }
+   }
+  },
+  {
+   "key": {
+    "detector": "NIS",
+    "sporder": 2
+   },
+   "detector_source": "primary header (EXTRACT1D has no DETECTOR card)",
+   "extract1d_hdus": [
+    3
+   ],
+   "rows_per_extract1d": [
+    5
+   ],
+   "integrations": 5,
+   "tform_repeat": [
+    1783
+   ],
+   "n_alongdisp": {
+    "min": 1783,
+    "max": 1783,
+    "sum": 8915,
+    "rows_zero": 0,
+    "rows_below_tform_repeat": 0,
+    "source": "N_ALONGDISP column"
+   },
+   "int_num": {
+    "first": 1,
+    "last": 5,
+    "min": 1,
+    "max": 5,
+    "distinct": 5,
+    "source": "INT_NUM column"
+   },
+   "segment_values": [
+    1
+   ],
+   "units": {
+    "WAVELENGTH": "um",
+    "FLUX": "MJy",
+    "FLUX_ERROR": "MJy",
+    "MJD-AVG": "d",
+    "TDB-MID": "d"
+   },
+   "time": {
+    "mjd_avg_first": 61043.21309070602,
+    "mjd_avg_last": null,
+    "mjd_avg_min_finite": 61043.21309070602,
+    "mjd_avg_max_finite": 61043.21309070602,
+    "mjd_avg_nan_rows": 4,
+    "mjd_avg_distinct_finite": 1,
+    "tdb_mid_first": 61043.21592608525,
+    "tdb_mid_last": 61043.21592608525,
+    "tdb_mid_nan_rows": 0,
+    "tdb_mid_distinct_finite": 1,
+    "mjd_beg_first": 61043.21309070602,
+    "mjd_end_last": 61043.21309070602,
+    "strictly_increasing_in_hdu_and_row_order": null,
+    "source": "per-row columns"
+   },
+   "first_valid_row": {
+    "hdu": 3,
+    "row0": 0,
+    "int_num": 1,
+    "n_alongdisp": 1783,
+    "wavelength_first3": [
+     1.4138421961399272,
+     1.4133842641364875,
+     1.412926333659344
+    ],
+    "wavelength_last3": [
+     0.5886635230187085,
+     0.5882546711519454,
+     0.5878459442296309
+    ],
+    "direction": "descending"
+   },
+   "masking_counts": {
+    "valid_elements": 8915,
+    "flux_nan": 25,
+    "dq_nonzero": 0,
+    "flux_nan_with_dq_zero": 25,
+    "flux_finite_with_dq_nonzero": 0,
+    "flux_error_nan": 25
+   },
+   "storage": {
+    "NAXIS1": 249680,
+    "NAXIS2": 5,
+    "PCOUNT": 0,
+    "TFIELDS": 27,
+    "WAVELENGTH": {
+     "column": 2,
+     "TFORM": "1783D",
+     "TDIM": "(1783)",
+     "TUNIT": "um",
+     "TZERO": null
+    },
+    "DQ": {
+     "column": 13,
+     "TFORM": "1783J",
+     "TDIM": "(1783)",
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_element0_stored_bytes_hex": "80000000",
+     "row0_element0_value": 0
+    },
+    "N_ALONGDISP": {
+     "column": 20,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_stored_bytes_hex": "800006f7",
+     "row0_stored_int32": -2147481865,
+     "row0_value": 1783
+    },
+    "INT_NUM": {
+     "column": 1,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": null
+    },
+    "row_length_rule": "NAXIS1 = 140 * repeat + 60",
+    "row_length_rule_holds": true
+   },
+   "white_light_as_archived": {
+    "limits_um": [
+     0.93,
+     2.82
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14055.279010227225
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14055.279010227225
+     }
+    ],
+    "sum_all_fsum": 14055.279010227225,
+    "numpy_nansum_vs_exact_sum_max_rel": 0.0,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_2",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 14055.279010227225
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 14055.279010227225
+      }
+     ],
+     "sum_all_fsum": 14055.279010227225,
+     "max_rel_diff_computed_vs_whtlt": 0.0,
+     "rows_bitwise_equal": 1,
+     "within_1e-4": true,
+     "expected_to_match": true,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    },
+    "limits_source": "order 1 CLEAR range 0.93 to 2.82 um reused for every order (range-reuse quirk, confirmed bitwise on this file); step parameters in cal_logs are None"
+   },
+   "white_light_all_rows_archived_limits": {
+    "meaning": "per-row sums in HDU and row order with no row dropped; use it to test the sum when the time rule removes rows",
+    "limits_um": [
+     0.93,
+     2.82
+    ],
+    "rows": 5,
+    "first5": [
+     {
+      "int_num": 1,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14055.279010227225
+     },
+     {
+      "int_num": 2,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14062.083247427432
+     },
+     {
+      "int_num": 3,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14060.005830239925
+     },
+     {
+      "int_num": 4,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14056.856591987394
+     },
+     {
+      "int_num": 5,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14034.706408212178
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14055.279010227225
+     },
+     {
+      "int_num": 2,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14062.083247427432
+     },
+     {
+      "int_num": 3,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14060.005830239925
+     },
+     {
+      "int_num": 4,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14056.856591987394
+     },
+     {
+      "int_num": 5,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14034.706408212178
+     }
+    ],
+    "sum_all_fsum": 70268.93108809415
+   },
+   "white_light_open_limits": {
+    "limits_um": [
+     -1.0,
+     10000000000.0
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14223.7920289192
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 14223.7920289192
+     }
+    ],
+    "sum_all_fsum": 14223.7920289192,
+    "numpy_nansum_vs_exact_sum_max_rel": 0.0,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_2",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 14055.279010227225
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 14055.279010227225
+      }
+     ],
+     "sum_all_fsum": 14055.279010227225,
+     "max_rel_diff_computed_vs_whtlt": 0.01198930441504282,
+     "rows_bitwise_equal": 0,
+     "within_1e-4": false,
+     "expected_to_match": false,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    }
+   },
+   "white_light_soss_own_range_per_order": {
+    "limits_um": [
+     0.64,
+     0.83
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 74.12198300093027
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 74.12198300093027
+     }
+    ],
+    "sum_all_fsum": 74.12198300093027,
+    "numpy_nansum_vs_exact_sum_max_rel": 0.0,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_2",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 14055.279010227225
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 14055.279010227225
+      }
+     ],
+     "sum_all_fsum": 14055.279010227225,
+     "max_rel_diff_computed_vs_whtlt": 0.9947263954741136,
+     "rows_bitwise_equal": 0,
+     "within_1e-4": false,
+     "expected_to_match": false,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    }
+   }
+  },
+  {
+   "key": {
+    "detector": "NIS",
+    "sporder": 3
+   },
+   "detector_source": "primary header (EXTRACT1D has no DETECTOR card)",
+   "extract1d_hdus": [
+    4
+   ],
+   "rows_per_extract1d": [
+    5
+   ],
+   "integrations": 5,
+   "tform_repeat": [
+    1134
+   ],
+   "n_alongdisp": {
+    "min": 1134,
+    "max": 1134,
+    "sum": 5670,
+    "rows_zero": 0,
+    "rows_below_tform_repeat": 0,
+    "source": "N_ALONGDISP column"
+   },
+   "int_num": {
+    "first": 1,
+    "last": 5,
+    "min": 1,
+    "max": 5,
+    "distinct": 5,
+    "source": "INT_NUM column"
+   },
+   "segment_values": [
+    1
+   ],
+   "units": {
+    "WAVELENGTH": "um",
+    "FLUX": "MJy",
+    "FLUX_ERROR": "MJy",
+    "MJD-AVG": "d",
+    "TDB-MID": "d"
+   },
+   "time": {
+    "mjd_avg_first": 61043.21309070602,
+    "mjd_avg_last": null,
+    "mjd_avg_min_finite": 61043.21309070602,
+    "mjd_avg_max_finite": 61043.21309070602,
+    "mjd_avg_nan_rows": 4,
+    "mjd_avg_distinct_finite": 1,
+    "tdb_mid_first": 61043.21592608525,
+    "tdb_mid_last": 61043.21592608525,
+    "tdb_mid_nan_rows": 0,
+    "tdb_mid_distinct_finite": 1,
+    "mjd_beg_first": 61043.21309070602,
+    "mjd_end_last": 61043.21309070602,
+    "strictly_increasing_in_hdu_and_row_order": null,
+    "source": "per-row columns"
+   },
+   "first_valid_row": {
+    "hdu": 4,
+    "row0": 0,
+    "int_num": 1,
+    "n_alongdisp": 1134,
+    "wavelength_first3": [
+     0.9556302324967343,
+     0.955309643600813,
+     0.9549890562384763
+    ],
+    "wavelength_last3": [
+     0.633060454539978,
+     0.6328535742311957,
+     0.632646909646051
+    ],
+    "direction": "descending"
+   },
+   "masking_counts": {
+    "valid_elements": 5670,
+    "flux_nan": 25,
+    "dq_nonzero": 0,
+    "flux_nan_with_dq_zero": 25,
+    "flux_finite_with_dq_nonzero": 0,
+    "flux_error_nan": 25
+   },
+   "storage": {
+    "NAXIS1": 158820,
+    "NAXIS2": 5,
+    "PCOUNT": 0,
+    "TFIELDS": 27,
+    "WAVELENGTH": {
+     "column": 2,
+     "TFORM": "1134D",
+     "TDIM": "(1134)",
+     "TUNIT": "um",
+     "TZERO": null
+    },
+    "DQ": {
+     "column": 13,
+     "TFORM": "1134J",
+     "TDIM": "(1134)",
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_element0_stored_bytes_hex": "80000000",
+     "row0_element0_value": 0
+    },
+    "N_ALONGDISP": {
+     "column": 20,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_stored_bytes_hex": "8000046e",
+     "row0_stored_int32": -2147482514,
+     "row0_value": 1134
+    },
+    "INT_NUM": {
+     "column": 1,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": null
+    },
+    "row_length_rule": "NAXIS1 = 140 * repeat + 60",
+    "row_length_rule_holds": true
+   },
+   "white_light_as_archived": {
+    "limits_um": [
+     0.93,
+     2.82
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.554793231367526
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.554793231367526
+     }
+    ],
+    "sum_all_fsum": 37.554793231367526,
+    "numpy_nansum_vs_exact_sum_max_rel": 0.0,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_3",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 37.554793231367526
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 37.554793231367526
+      }
+     ],
+     "sum_all_fsum": 37.554793231367526,
+     "max_rel_diff_computed_vs_whtlt": 0.0,
+     "rows_bitwise_equal": 1,
+     "within_1e-4": true,
+     "expected_to_match": true,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    },
+    "limits_source": "order 1 CLEAR range 0.93 to 2.82 um reused for every order (range-reuse quirk, confirmed bitwise on this file); step parameters in cal_logs are None"
+   },
+   "white_light_all_rows_archived_limits": {
+    "meaning": "per-row sums in HDU and row order with no row dropped; use it to test the sum when the time rule removes rows",
+    "limits_um": [
+     0.93,
+     2.82
+    ],
+    "rows": 5,
+    "first5": [
+     {
+      "int_num": 1,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.554793231367526
+     },
+     {
+      "int_num": 2,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.46388532898028
+     },
+     {
+      "int_num": 3,
+      "tdb_mid": 61043.21592608525,
+      "sum": 38.78818169393344
+     },
+     {
+      "int_num": 4,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.02923257981955
+     },
+     {
+      "int_num": 5,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.162741322165886
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.554793231367526
+     },
+     {
+      "int_num": 2,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.46388532898028
+     },
+     {
+      "int_num": 3,
+      "tdb_mid": 61043.21592608525,
+      "sum": 38.78818169393344
+     },
+     {
+      "int_num": 4,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.02923257981955
+     },
+     {
+      "int_num": 5,
+      "tdb_mid": 61043.21592608525,
+      "sum": 37.162741322165886
+     }
+    ],
+    "sum_all_fsum": 187.9988341562667
+   },
+   "white_light_open_limits": {
+    "limits_um": [
+     -1.0,
+     10000000000.0
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 464.89407864634666
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 464.89407864634666
+     }
+    ],
+    "sum_all_fsum": 464.89407864634666,
+    "numpy_nansum_vs_exact_sum_max_rel": 0.0,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_3",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 37.554793231367526
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 37.554793231367526
+      }
+     ],
+     "sum_all_fsum": 37.554793231367526,
+     "max_rel_diff_computed_vs_whtlt": 11.379087691475966,
+     "rows_bitwise_equal": 0,
+     "within_1e-4": false,
+     "expected_to_match": false,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    }
+   },
+   "white_light_soss_own_range_per_order": {
+    "limits_um": [
+     0.64,
+     0.95
+    ],
+    "rows_in_series": 5,
+    "rows_kept": 1,
+    "rows_dropped_nan_or_repeated_mjd_avg": 4,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 458.74746665555347
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 61043.21309070602,
+      "tdb_mid": 61043.21592608525,
+      "sum": 458.74746665555347
+     }
+    ],
+    "sum_all_fsum": 458.74746665555347,
+    "numpy_nansum_vs_exact_sum_max_rel": 1.2391004418012058e-16,
+    "whtlt": {
+     "time_column": "MJD_UTC",
+     "bjd_column": "BJD_TDB",
+     "flux_column": "whitelight_flux_order_3",
+     "whtlt_rows_finite_time": 1,
+     "rows_joined_on_identical_time": 1,
+     "first5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 37.554793231367526
+      }
+     ],
+     "last5": [
+      {
+       "time": 61043.21309070602,
+       "flux": 37.554793231367526
+      }
+     ],
+     "sum_all_fsum": 37.554793231367526,
+     "max_rel_diff_computed_vs_whtlt": 11.215417186011454,
+     "rows_bitwise_equal": 0,
+     "within_1e-4": false,
+     "expected_to_match": false,
+     "bjd_equals_tdb_mid_bitwise_rows": 1
+    }
+   }
+  }
+ ]
+}

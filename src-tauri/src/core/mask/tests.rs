@@ -3,7 +3,11 @@ use std::f64::consts::SQRT_2;
 use std::ops::Range;
 use std::path::Path;
 
+use ndarray::{Array2, Zip};
+
 use super::*;
+use crate::core::imaging::region::RegionShape;
+use crate::core::imaging::star_mask::StarMaskConfig;
 use crate::core::history::id::Fnv1a;
 use crate::core::imaging::contour::gaussian_blur_nan;
 use crate::core::imaging::luminance::rgb_to_luminance;

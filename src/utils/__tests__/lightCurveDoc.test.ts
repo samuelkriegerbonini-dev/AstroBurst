@@ -143,7 +143,7 @@ const C1 = star(40, 40, 1000, 10);
 const C2 = star(70, 70, 1000, 10);
 
 const DIFF_MAG = 1.505149978319906;
-const DIFF_ERR = 0.013297055068698485;
+const DIFF_ERR = (2.5 / Math.LN10) * Math.sqrt((5 / 500) ** 2 + (Math.sqrt(200) / 2000) ** 2);
 
 function plainSeries(extra: Partial<TimeSeriesFrame> = {}): TimeSeriesResult {
   return result([0, 1, 2].map((i) => frame(i, [T, C1, C2], extra)));
@@ -221,7 +221,7 @@ describe("light-curve documents from an image series", () => {
     doc.err.forEach((e) => expect(e).toBeCloseTo(DIFF_ERR, 12));
     expect(doc.pointRef).toEqual([0, 1, 2]);
     expect(doc.flags).toEqual([[], [], []]);
-    expect(doc.magErrFactor).toBe(1.0857);
+    expect(doc.magErrFactor).toBe(2.5 / Math.LN10);
     expect(doc.magErrFactor).toBe(MAG_ERR_FACTOR);
     expect(doc.source).toEqual({ kind: "frames", reference: "f0.fits", target: "T", comps: ["C1", "C2"] });
     expect(doc.notes).toEqual([
@@ -333,6 +333,13 @@ describe("light-curve documents from an image series", () => {
     expect(doc.flags[0]).not.toContain("centroid jump");
     expect(doc.flags[1]).not.toContain("centroid jump");
     expect(rawFluxDocFromFrames(res, 1, "jd").flags).toEqual([[], [], ["centroid jump"]]);
+  });
+
+  it("the document builders take the centroid jumps the caller computed once instead of computing them again", () => {
+    const res = result([frame(0, [T, C1, C2]), frame(1, [T, C1, C2]), frame(2, [star(15, 10, 500, 5), C1, C2])]);
+    const jumps = new Set([0]);
+    expect(lightCurveDocFromFrames(res, 0, [1, 2], "jd", { jumps }).flags.map((f) => f.includes("centroid jump"))).toEqual([true, false, false]);
+    expect(rawFluxDocFromFrames(res, 1, "jd", { jumps }).flags).toEqual([["centroid jump"], [], []]);
   });
 
   it("timeOffset ignores skipped frames and is zero for an index axis", () => {

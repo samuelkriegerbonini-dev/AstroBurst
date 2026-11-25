@@ -253,7 +253,7 @@ function PreviewTabInner({ useGpu, activeBunit, rawPixels, rgbRawPixels, onCubeP
               <button
                 onClick={toggleStfLinked}
                 className={`text-[9px] px-1.5 py-0.5 rounded transition-colors ${compositeStfLinked ? "text-violet-200 bg-violet-600/25" : "text-zinc-400 bg-zinc-800/60 hover:text-zinc-200"}`}
-                title={compositeStfLinked ? "Channels linked — click to adjust R/G/B independently" : "Independent channels — click to link"}
+                title={compositeStfLinked ? "Channels linked; click to adjust R/G/B independently" : "Independent channels; click to link"}
               >
                 {compositeStfLinked ? "Linked RGB" : "Per-channel"}
               </button>

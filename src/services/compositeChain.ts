@@ -13,6 +13,8 @@ import type {
   CompositePixelMathResult,
   CompositeWaveletResult,
 } from "../shared/types/compositeChain";
+import { compositeChainResets } from "../utils/compositeChainResets";
+import { BACKGROUND_DEFAULTS, DECONV_DEFAULTS, WAVELET_DEFAULTS } from "./processingDefaults";
 
 export const CHAIN_PREVIEWS: [string, string][] = [
   ["png_path", "previewUrl"],
@@ -43,11 +45,11 @@ export function compositeBackground(
   return withPreview<CompositeBackgroundResult>("composite_background_cmd", outputDir, {
     ...chainArgs(chain),
     model: options.model,
-    gridSize: options.gridSize ?? 8,
-    polyDegree: options.polyDegree ?? 3,
-    sigmaClip: options.sigmaClip ?? 2.5,
-    iterations: options.iterations ?? 3,
-    mode: options.mode ?? "subtract",
+    gridSize: options.gridSize ?? BACKGROUND_DEFAULTS.gridSize,
+    polyDegree: options.polyDegree ?? BACKGROUND_DEFAULTS.polyDegree,
+    sigmaClip: options.sigmaClip ?? BACKGROUND_DEFAULTS.sigmaClip,
+    iterations: options.iterations ?? BACKGROUND_DEFAULTS.iterations,
+    mode: options.mode ?? BACKGROUND_DEFAULTS.mode,
     dbe: options.dbe ?? null,
   }, BACKGROUND_PREVIEWS);
 }
@@ -64,9 +66,9 @@ export function compositeWaveletDenoise(
 ): Promise<CompositeWaveletResult> {
   return withPreview<CompositeWaveletResult>("composite_wavelet_denoise_cmd", outputDir, {
     ...chainArgs(chain),
-    numScales: options.numScales ?? 5,
-    thresholds: options.thresholds ?? [3.0, 2.5, 2.0, 1.5, 1.0],
-    linear: options.linear ?? true,
+    numScales: options.numScales ?? WAVELET_DEFAULTS.numScales,
+    thresholds: options.thresholds ?? [...WAVELET_DEFAULTS.thresholds],
+    linear: options.linear ?? WAVELET_DEFAULTS.linear,
     layerBias: options.layerBias ?? null,
   }, CHAIN_PREVIEWS);
 }
@@ -89,15 +91,15 @@ export function compositeDeconvolveRL(
 ): Promise<CompositeDeconvolveResult> {
   return withPreview<CompositeDeconvolveResult>("composite_deconvolve_rl_cmd", outputDir, {
     ...chainArgs(chain),
-    iterations: options.iterations ?? 20,
-    psfSigma: options.psfSigma ?? 2.0,
-    psfSize: options.psfSize ?? 15,
-    regularization: options.regularization ?? 0.001,
-    deringing: options.deringing ?? true,
-    deringThreshold: options.deringThreshold ?? 0.1,
-    useEmpiricalPsf: options.useEmpiricalPsf ?? false,
-    psfNumStars: options.psfNumStars ?? 30,
-    psfCutoutRadius: options.psfCutoutRadius ?? 15,
+    iterations: options.iterations ?? DECONV_DEFAULTS.iterations,
+    psfSigma: options.psfSigma ?? DECONV_DEFAULTS.psfSigma,
+    psfSize: options.psfSize ?? DECONV_DEFAULTS.psfSize,
+    regularization: options.regularization ?? DECONV_DEFAULTS.regularization,
+    deringing: options.deringing ?? DECONV_DEFAULTS.deringing,
+    deringThreshold: options.deringThreshold ?? DECONV_DEFAULTS.deringThreshold,
+    useEmpiricalPsf: options.useEmpiricalPsf ?? DECONV_DEFAULTS.useEmpiricalPsf,
+    psfNumStars: options.psfNumStars ?? DECONV_DEFAULTS.psfNumStars,
+    psfCutoutRadius: options.psfCutoutRadius ?? DECONV_DEFAULTS.psfCutoutRadius,
     psfKernel: options.psfKernel ?? null,
   }, CHAIN_PREVIEWS);
 }
@@ -135,8 +137,10 @@ export function compositePixelMath(
   }, CHAIN_PREVIEWS);
 }
 
-export function compositeChainReset(): Promise<CompositeChainResetResult> {
-  return typedInvoke<CompositeChainResetResult>("composite_chain_reset_cmd", {});
+export async function compositeChainReset(): Promise<CompositeChainResetResult> {
+  const res = await typedInvoke<CompositeChainResetResult>("composite_chain_reset_cmd", {});
+  compositeChainResets.notify(res.restored);
+  return res;
 }
 
 export function compositeChainState(): Promise<CompositeChainStateResult> {

@@ -1,0 +1,166 @@
+{
+  "generator": "scripts/oracle/quick_slope_noise_oracle.py",
+  "numpy": "2.5.4",
+  "python": "3.13.17",
+  "seed": 20261125,
+  "ramps_per_case": 400000,
+  "read_noise_difference_sigma_dn": {
+    "read_dn": 8.0,
+    "sigma_dn": 11.313708498984761
+  },
+  "cases": [
+    {
+      "name": "ols_dark",
+      "estimator": "unweighted least squares over all groups",
+      "ngroups": 10,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 0.0,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "monte_carlo_std_dn_s": 0.06030749239896704,
+      "monte_carlo_mean_dn_s": 1.7865398666169164e-05,
+      "exact_std_dn_s": 0.06037226760580496,
+      "closed_form_std_dn_s": 0.060372267605804955,
+      "read_only_std_dn_s": 0.060372267605804955
+    },
+    {
+      "name": "ols_half",
+      "estimator": "unweighted least squares over all groups",
+      "ngroups": 10,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 0.5,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "monte_carlo_std_dn_s": 0.08858512161134721,
+      "monte_carlo_mean_dn_s": 0.5000423019642878,
+      "exact_std_dn_s": 0.08854706621936265,
+      "closed_form_std_dn_s": 0.08854706621936265,
+      "read_only_std_dn_s": 0.060372267605804955
+    },
+    {
+      "name": "ols_five",
+      "estimator": "unweighted least squares over all groups",
+      "ngroups": 10,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 5.0,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "monte_carlo_std_dn_s": 0.21330433789640518,
+      "monte_carlo_mean_dn_s": 4.999706822233295,
+      "exact_std_dn_s": 0.21354749611681142,
+      "closed_form_std_dn_s": 0.21354749611681142,
+      "read_only_std_dn_s": 0.060372267605804955
+    },
+    {
+      "name": "ols_fifty",
+      "estimator": "unweighted least squares over all groups",
+      "ngroups": 10,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 50.0,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "monte_carlo_std_dn_s": 0.650536571051163,
+      "monte_carlo_mean_dn_s": 49.998575400125866,
+      "exact_std_dn_s": 0.650555174227977,
+      "closed_form_std_dn_s": 0.650555174227977,
+      "read_only_std_dn_s": 0.060372267605804955
+    },
+    {
+      "name": "ols_fifty_twenty_groups",
+      "estimator": "unweighted least squares over all groups",
+      "ngroups": 20,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 50.0,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "monte_carlo_std_dn_s": 0.4557595227460908,
+      "monte_carlo_mean_dn_s": 49.99929331418003,
+      "exact_std_dn_s": 0.4551014245352373,
+      "closed_form_std_dn_s": 0.4551014245352371,
+      "read_only_std_dn_s": 0.021264424822249127
+    },
+    {
+      "name": "ols_miri_like",
+      "estimator": "unweighted least squares over all groups",
+      "ngroups": 40,
+      "tgroup_s": 2.775,
+      "rate_dn_s": 200.0,
+      "read_dn": 5.0,
+      "gain_e_dn": 3.9,
+      "monte_carlo_std_dn_s": 0.7459395827429152,
+      "monte_carlo_mean_dn_s": 199.99779326982224,
+      "exact_std_dn_s": 0.7454549523618033,
+      "closed_form_std_dn_s": 0.7454549523618031,
+      "read_only_std_dn_s": 0.024679900949504223
+    },
+    {
+      "name": "median_dark_hit_at_group_five",
+      "estimator": "median of the group differences left after dropping the listed ones",
+      "ngroups": 10,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 0.0,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "dropped_differences": [
+        4
+      ],
+      "monte_carlo_std_dn_s": 0.21821860762659395,
+      "monte_carlo_mean_dn_s": 0.0002607330628138772
+    },
+    {
+      "name": "median_half_hit_at_group_five",
+      "estimator": "median of the group differences left after dropping the listed ones",
+      "ngroups": 10,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 0.5,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "dropped_differences": [
+        4
+      ],
+      "monte_carlo_std_dn_s": 0.23174636016459393,
+      "monte_carlo_mean_dn_s": 0.4994788964067903
+    },
+    {
+      "name": "median_fifty_hit_at_group_five",
+      "estimator": "median of the group differences left after dropping the listed ones",
+      "ngroups": 10,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 50.0,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "dropped_differences": [
+        4
+      ],
+      "monte_carlo_std_dn_s": 0.7901246481164848,
+      "monte_carlo_mean_dn_s": 49.99421874445897
+    },
+    {
+      "name": "median_dark_three_groups",
+      "estimator": "median of the group differences left after dropping the listed ones",
+      "ngroups": 3,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 0.0,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "dropped_differences": [],
+      "monte_carlo_std_dn_s": 0.3880975718943467,
+      "monte_carlo_mean_dn_s": -0.00028998214465971627
+    },
+    {
+      "name": "median_fifty_two_hits",
+      "estimator": "median of the group differences left after dropping the listed ones",
+      "ngroups": 10,
+      "tgroup_s": 14.589,
+      "rate_dn_s": 50.0,
+      "read_dn": 8.0,
+      "gain_e_dn": 1.0,
+      "dropped_differences": [
+        1,
+        5
+      ],
+      "monte_carlo_std_dn_s": 0.8946217596282746,
+      "monte_carlo_mean_dn_s": 49.99370850491947
+    }
+  ]
+}

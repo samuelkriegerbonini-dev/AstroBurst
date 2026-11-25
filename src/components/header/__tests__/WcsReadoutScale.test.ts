@@ -208,6 +208,12 @@ describe("sexagesimal digits", () => {
     expect(html).toContain("-13°51&#x27;06.52&quot;");
   });
 
+  it("takes the galactic centre at the zero-based pixel centre the backend uses for the ICRS centre", async () => {
+    stubReadoutPreference('{"frame":"galactic","format":"decimal"}');
+    await settle({ ...centred, imageWidth: 100, imageHeight: 50 });
+    expect(mocks.world).toHaveBeenCalledWith("a.fits", [[49.5, 24.5]], "galactic");
+  });
+
   it("the decimal format keeps six decimals", async () => {
     stubReadoutPreference('{"frame":"icrs","format":"decimal"}');
     const html = await settle(centred);

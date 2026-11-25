@@ -1,5 +1,7 @@
 use anyhow::{bail, Result};
+use ndarray::Array2;
 
+use crate::core::imaging::stats::is_valid_pixel;
 use crate::types::image::ImageStats;
 
 pub const MIN_WB_SKY_SIGMAS: f64 = 1.0;
@@ -121,6 +123,87 @@ pub fn analyze_wb_reference(sr: &ImageStats, sg: &ImageStats, sb: &ImageStats) -
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WbMethod {
+    SourceSignal,
+    SkyMedianRatio,
+}
+
+impl WbMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WbMethod::SourceSignal => "source_signal",
+            WbMethod::SkyMedianRatio => "sky_median_ratio",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AutoWhiteBalance {
+    pub analysis: WbAnalysis,
+    pub method: WbMethod,
+    pub source_pixels: usize,
+}
+
+pub const WB_SOURCE_SIGMAS: f64 = 3.0;
+pub const MIN_WB_SOURCE_PIXELS: usize = 30;
+
+fn source_signal(planes: [&Array2<f32>; 3], stats: [&ImageStats; 3]) -> Option<([f64; 3], usize)> {
+    let same_size = planes[0].dim() == planes[1].dim() && planes[1].dim() == planes[2].dim();
+    if !same_size || stats.iter().any(|s| !has_data(s) || !(s.sigma > 0.0)) {
+        return None;
+    }
+    let sky = stats.map(|s| s.median);
+    let threshold = [0, 1, 2].map(|i| sky[i] + WB_SOURCE_SIGMAS * stats[i].sigma);
+    let mut sums = [0.0f64; 3];
+    let mut count = 0usize;
+    for ((&r, &g), &b) in planes[0].iter().zip(planes[1].iter()).zip(planes[2].iter()) {
+        let values = [r, g, b];
+        let is_source = (0..3).all(|i| is_valid_pixel(values[i]) && values[i] as f64 > threshold[i]);
+        if is_source {
+            for i in 0..3 {
+                sums[i] += values[i] as f64 - sky[i];
+            }
+            count += 1;
+        }
+    }
+    let usable = count >= MIN_WB_SOURCE_PIXELS && sums.iter().all(|s| s.is_finite() && *s > 0.0);
+    usable.then_some((sums, count))
+}
+
+pub fn auto_white_balance(planes: [&Array2<f32>; 3], stats: [&ImageStats; 3]) -> AutoWhiteBalance {
+    let mut analysis = analyze_wb_reference(stats[0], stats[1], stats[2]);
+    let Some((signal, source_pixels)) = source_signal(planes, stats) else {
+        return AutoWhiteBalance { analysis, method: WbMethod::SkyMedianRatio, source_pixels: 0 };
+    };
+    let channels = [WbChannel::R, WbChannel::G, WbChannel::B];
+    let strongest = (0..3).max_by(|a, b| signal[*a].total_cmp(&signal[*b])).unwrap_or(0);
+    let reference = analysis
+        .reference
+        .and_then(|chosen| channels.iter().position(|c| *c == chosen))
+        .unwrap_or(strongest);
+    analysis.factors = (
+        signal[reference] / signal[0],
+        signal[reference] / signal[1],
+        signal[reference] / signal[2],
+    );
+    analysis.reference = Some(channels[reference]);
+    AutoWhiteBalance { analysis, method: WbMethod::SourceSignal, source_pixels }
+}
+
+pub fn select_auto_white_balance(planes: [&Array2<f32>; 3], stats: [&ImageStats; 3]) -> Result<(f64, f64, f64)> {
+    let balance = auto_white_balance(planes, stats);
+    if balance.method == WbMethod::SkyMedianRatio {
+        return select_wb_reference(stats[0], stats[1], stats[2]);
+    }
+    let (r, g, b) = balance.analysis.factors;
+    Ok((
+        validate_wb_factor(WbChannel::R, r)?,
+        validate_wb_factor(WbChannel::G, g)?,
+        validate_wb_factor(WbChannel::B, b)?,
+    ))
+}
+
 pub fn select_wb_reference(
     sr: &ImageStats,
     sg: &ImageStats,
@@ -187,6 +270,41 @@ mod tests {
             pedestal + sigma * gauss as f32 + star
         });
         crate::core::imaging::stats::compute_image_stats(&data)
+    }
+
+    fn starry_channel(sky: f32, seed: u64) -> Array2<f32> {
+        let mut state = seed;
+        let mut uniform = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        Array2::from_shape_fn((128, 128), |(y, x)| {
+            let gauss = (-2.0 * uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * uniform()).cos();
+            let d2 = (x as f64 - 64.0).powi(2) + (y as f64 - 64.0).powi(2);
+            (sky as f64 + 3.0 * gauss + 1000.0 * (-d2 / 8.0).exp()) as f32
+        })
+    }
+
+    fn star_flux_above(channel: &Array2<f32>, sky: f64) -> f64 {
+        channel
+            .indexed_iter()
+            .filter(|((y, x), _)| (*x as f64 - 64.0).hypot(*y as f64 - 64.0) <= 8.0)
+            .map(|(_, &v)| v as f64 - sky)
+            .sum()
+    }
+
+    #[test]
+    fn a_coloured_sky_pedestal_does_not_tint_a_white_star() {
+        let skies = [200.0f32, 100.0, 100.0];
+        let planes = [starry_channel(skies[0], 1), starry_channel(skies[1], 2), starry_channel(skies[2], 3)];
+        let stats = [0, 1, 2].map(|i| crate::core::imaging::stats::compute_image_stats(&planes[i]));
+        let balance = auto_white_balance([&planes[0], &planes[1], &planes[2]], [&stats[0], &stats[1], &stats[2]]);
+        let (fr, fg, fb) = balance.analysis.factors;
+        let flux = [0, 1, 2].map(|i| star_flux_above(&planes[i], skies[i] as f64));
+        let red_over_green = (fr * flux[0]) / (fg * flux[1]);
+        let blue_over_green = (fb * flux[2]) / (fg * flux[1]);
+        assert!((red_over_green - 1.0).abs() < 0.02, "the white star comes out with R/G = {red_over_green}");
+        assert!((blue_over_green - 1.0).abs() < 0.02, "the white star comes out with B/G = {blue_over_green}");
     }
 
     #[test]

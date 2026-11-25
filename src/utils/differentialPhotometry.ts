@@ -2,6 +2,8 @@ import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesRole, TimeSeriesTarge
 import { fileBaseName } from "./values";
 import { exportEntries, provenanceLines, summedPixelUnit, unitLines, withProvenance } from "./csvProvenance";
 import { relativeFlux } from "./lightCurveAnalysis";
+import { csvEscape } from "./catalogCsv";
+import { MAG_ERR_PER_RELATIVE_FLUX_ERR, MAG_ERR_PER_RELATIVE_FLUX_ERR_TEXT } from "./photometryConstants";
 
 export type TimeAxis = "jd" | "bjd" | "index";
 
@@ -47,7 +49,7 @@ export interface CheckReference {
   curve: LightCurvePoint[];
 }
 
-export const MAG_ERR_FACTOR = 1.0857;
+export const MAG_ERR_FACTOR = MAG_ERR_PER_RELATIVE_FLUX_ERR;
 export const DEFAULT_CENTROID_JUMP_PX = 2;
 export const MAX_TIME_SERIES_TARGETS = 64;
 export const FRAME_JD_DIGITS = 5;
@@ -406,7 +408,7 @@ function csvCell(v: number | string | boolean | null | undefined, digits?: numbe
     if (!Number.isFinite(v)) return "";
     return digits === undefined ? String(v) : v.toFixed(digits);
   }
-  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  return csvEscape(v);
 }
 
 function tenDigitCell(v: number | null): string {
@@ -510,7 +512,7 @@ export function lightCurveCsvText(
   const lines = [
     ...provenanceLines(exportEntries(fileBaseName(result.reference_path), options.exportedUtc)),
     ...exportKeyLines(result, targetIdx, comps, fluxUnit),
-    `# rel_flux: 10^(-0.4 diff_mag), the target over the sum of the comparison stars, not normalised; rel_flux_err = rel_flux * diff_err / ${MAG_ERR_FACTOR}`,
+    `# rel_flux: 10^(-0.4 diff_mag), the target over the sum of the comparison stars, not normalised; rel_flux_err = rel_flux * diff_err / (${MAG_ERR_PER_RELATIVE_FLUX_ERR_TEXT})`,
     "# left_out: why the light-curve view leaves the frame out of its analysis (flagged, by hand, clipped); blank when the frame is used",
     ...unitLines({
       jd_mid: "d",

@@ -1,15 +1,30 @@
 use std::borrow::Cow;
 use std::fs::File;
-use std::path::Path;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use memmap2::Mmap;
 use serde_yaml::Value;
 
-use super::blocks::{BlockHeader, BlockRef};
+use super::blocks::{BlockHeader, BlockRef, Compression};
+use super::tree::STREAMED_BLOCK;
+use crate::core::stacking::memory::{format_bytes, MEMORY_BUDGET_ENV};
 
 const ASDF_MAGIC: &[u8] = b"#ASDF";
 const BLOCK_INDEX_MAGIC: &[u8] = b"#ASDF BLOCK INDEX";
 const STREAMED_FLAG: u32 = 0x1;
+const FORMAT_VERSION_PREFIX: &str = "#ASDF ";
+const STANDARD_VERSION_PREFIX: &str = "#ASDF_STANDARD ";
+const KNOWN_MAJOR_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOrigin {
+    pub path: PathBuf,
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+    pub tree_digest: u64,
+}
 
 enum Backing {
     Mapped(Mmap),
@@ -36,16 +51,37 @@ pub struct AsdfFile {
     pub tree: Value,
     pub blocks: Vec<BlockRef>,
     backing: Backing,
+    origin: Option<FileOrigin>,
 }
 
 impl AsdfFile {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, AsdfError> {
         let file = File::open(path.as_ref())?;
-        if file.metadata()?.len() == 0 {
+        let metadata = file.metadata()?;
+        if metadata.len() == 0 {
             return Err(AsdfError::InvalidMagic);
         }
         let mmap = unsafe { Mmap::map(&file)? };
-        Self::parse(Backing::Mapped(mmap))
+        let mut parsed = Self::parse(Backing::Mapped(mmap))?;
+        parsed.origin = Some(FileOrigin {
+            path: path.as_ref().to_path_buf(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            tree_digest: parsed.tree_digest(),
+        });
+        Ok(parsed)
+    }
+
+    pub fn origin(&self) -> Option<&FileOrigin> {
+        self.origin.as_ref()
+    }
+
+    fn tree_digest(&self) -> u64 {
+        let bytes = self.backing.as_slice();
+        let (yaml_end, _) = find_tree_end(bytes);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes[..yaml_end].hash(&mut hasher);
+        hasher.finish()
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, AsdfError> {
@@ -60,24 +96,70 @@ impl AsdfFile {
         let (yaml_end, blocks_start) = find_tree_end(bytes);
         let text = std::str::from_utf8(&bytes[..yaml_end])
             .map_err(|e| AsdfError::YamlParse(e.to_string()))?;
+        check_versions(text)?;
         let tree = parse_tree(text)?;
         let blocks = read_blocks(bytes, blocks_start)?;
         Ok(Self {
             tree,
             blocks,
             backing,
+            origin: None,
         })
     }
 
+    fn block(&self, index: usize) -> Result<&BlockRef, AsdfError> {
+        if index != STREAMED_BLOCK {
+            return self.blocks.get(index).ok_or(AsdfError::BlockOutOfRange(index));
+        }
+        self.blocks
+            .last()
+            .filter(|block| block.header.flags & STREAMED_FLAG != 0)
+            .ok_or(AsdfError::BlockOutOfRange(self.blocks.len()))
+    }
+
     pub fn block_data(&self, index: usize) -> Result<Cow<'_, [u8]>, AsdfError> {
-        let block = self
-            .blocks
-            .get(index)
-            .ok_or(AsdfError::BlockOutOfRange(index))?;
-        let bytes = self.backing.as_slice();
-        let raw = &bytes[block.data_start..block.data_start + block.used_size];
+        let block = self.block(index)?;
+        let raw = block
+            .data_start
+            .checked_add(block.used_size)
+            .and_then(|end| self.backing.as_slice().get(block.data_start..end))
+            .ok_or(AsdfError::BlockTruncated)?;
         block.header.decompress(raw)
     }
+
+    pub fn block_len(&self, index: usize) -> Result<usize, AsdfError> {
+        let block = self.block(index)?;
+        if block.header.compression == Compression::None {
+            return Ok(block.used_size);
+        }
+        usize::try_from(block.header.data_size)
+            .map_err(|_| AsdfError::ShapeOverflow(format!("block declares data_size {}", block.header.data_size)))
+    }
+
+    pub fn block_is_compressed(&self, index: usize) -> bool {
+        self.block(index).is_ok_and(|block| block.header.compression != Compression::None)
+    }
+}
+
+fn major_version(line: &str, prefix: &str) -> Option<u32> {
+    line.strip_prefix(prefix)?.trim().split('.').next()?.parse().ok()
+}
+
+fn check_versions(text: &str) -> Result<(), AsdfError> {
+    let head = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .take_while(|line| line.starts_with('#') || line.starts_with('%'));
+    for line in head {
+        let major = major_version(line, STANDARD_VERSION_PREFIX).or_else(|| major_version(line, FORMAT_VERSION_PREFIX));
+        if major.is_some_and(|major| major > KNOWN_MAJOR_VERSION) {
+            return Err(AsdfError::UnsupportedVersion(format!(
+                "{} (this reader knows major version {KNOWN_MAJOR_VERSION})",
+                line.trim()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn find_tree_end(bytes: &[u8]) -> (usize, usize) {
@@ -249,6 +331,11 @@ pub enum AsdfError {
     BlockOutOfRange(usize),
     ExternalBlock(String),
     ShapeMismatch { got: usize, expected: usize },
+    TooLarge { what: String, needed: u64, available: u64 },
+    ShapeOverflow(String),
+    InvalidStrides(String),
+    UnsupportedDtype(String),
+    UnsupportedVersion(String),
 }
 
 impl From<std::io::Error> for AsdfError {
@@ -283,6 +370,20 @@ impl std::fmt::Display for AsdfError {
                     got, expected
                 )
             }
+            AsdfError::TooLarge { what, needed, available } => write!(
+                f,
+                "{} needs about {} of memory but only {} is available. If the system can page this much, set {} to the memory to allow (in MB) and restart.",
+                what,
+                format_bytes(*needed),
+                format_bytes(*available),
+                MEMORY_BUDGET_ENV
+            ),
+            AsdfError::ShapeOverflow(what) => {
+                write!(f, "Array size overflows the addressable memory: {}", what)
+            }
+            AsdfError::InvalidStrides(reason) => write!(f, "Invalid strides: {}", reason),
+            AsdfError::UnsupportedDtype(d) => write!(f, "Unsupported datatype: {}", d),
+            AsdfError::UnsupportedVersion(v) => write!(f, "Unsupported version: {}", v),
         }
     }
 }
@@ -350,6 +451,22 @@ meta:
       transform: null
 ...
 "##;
+
+    #[test]
+    fn a_future_major_version_of_the_format_or_the_standard_is_refused_by_name() {
+        let body = "--- !core/asdf-1.1.0\nmeta: {a: 1}\n...\n";
+        let open = |head: &str| AsdfFile::from_bytes(format!("{head}{body}").into_bytes());
+        assert!(open("#ASDF 1.0.0\n#ASDF_STANDARD 1.6.0\n%YAML 1.1\n").is_ok());
+        assert!(open("#ASDF 1.0.0\n%YAML 1.1\n").is_ok(), "the standard line is optional");
+        match open("#ASDF 2.0.0\n#ASDF_STANDARD 1.6.0\n%YAML 1.1\n") {
+            Err(AsdfError::UnsupportedVersion(what)) => assert!(what.contains("#ASDF 2.0.0"), "{what}"),
+            other => panic!("expected a version refusal, got {:?}", other.map(|f| f.blocks.len())),
+        }
+        match open("#ASDF 1.0.0\n#ASDF_STANDARD 2.1.0\n%YAML 1.1\n") {
+            Err(AsdfError::UnsupportedVersion(what)) => assert!(what.contains("#ASDF_STANDARD 2.1.0"), "{what}"),
+            other => panic!("expected a version refusal, got {:?}", other.map(|f| f.blocks.len())),
+        }
+    }
 
     #[test]
     fn verbatim_tags_survive_parse_tree() {

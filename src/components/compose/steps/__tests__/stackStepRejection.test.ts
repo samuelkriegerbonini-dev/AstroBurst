@@ -74,7 +74,7 @@ const change = (tree: ReactNode, update: Record<string, unknown>) => (rejectionC
 const normalizationSelect = (tree: ReactNode) => nodes(tree).find((el) => el.type === "select" && el.props["data-testid"] === "stack-normalization");
 const labelled = (tree: ReactNode, label: string) => nodes(tree).find((el) => el.props.label === label);
 const firstStack = (tree: ReactNode) => nodes(tree).find((el) => el.type === "button" && textOf(el.props.children).trim() === "Stack");
-const TODAY = { rejection: "sigma_clip", sigmaLow: 3, sigmaHigh: 3, maxIterations: 5, winsorCutoff: 5, percentileLow: 0.2, percentileHigh: 0.1, minmaxLow: 1, minmaxHigh: 1 };
+const TODAY = { rejection: "sigma_clip", sigmaLow: 4, sigmaHigh: 3, maxIterations: 5, winsorCutoff: 5, percentileLow: 0.2, percentileHigh: 0.1, minmaxLow: 1, minmaxHigh: 1 };
 
 describe("compose Stack step integration settings", () => {
   beforeEach(() => {
@@ -89,7 +89,7 @@ describe("compose Stack step integration settings", () => {
     hooks.mount();
   });
 
-  it("starts from what it ran before: sigma 3.0/3.0, the backend's other defaults and Additive with scaling", async () => {
+  it("starts from the Stacking tab defaults, sigma 4.0/3.0, so the same frames stack the same from both places", async () => {
     vi.mocked(stackFrames).mockResolvedValue(STACKED);
     const view = stepView();
     expect(rejectionControls(view())?.props).toMatchObject({ frameCount: 3, settings: TODAY });

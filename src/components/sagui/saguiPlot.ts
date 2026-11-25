@@ -1,10 +1,12 @@
 import type { SaguiRegionalBand } from "../../shared/types/sagui";
 
-export function regionAt(result: { width: number; height: number; labels: number[] }, x: number, y: number): number | null {
+export function regionAt(result: { width: number; height: number; labels: number[]; labels_width?: number; labels_height?: number }, x: number, y: number): number | null {
   if (x < 0 || y < 0 || x >= 1 || y >= 1 || !Number.isFinite(x) || !Number.isFinite(y)) return null;
-  const col = Math.floor(x * result.width);
-  const row = result.height - 1 - Math.floor(y * result.height);
-  return result.labels[row * result.width + col] ?? null;
+  const width = result.labels_width ?? result.width;
+  const height = result.labels_height ?? result.height;
+  const col = Math.floor(x * width);
+  const row = height - 1 - Math.floor(y * height);
+  return result.labels[row * width + col] ?? null;
 }
 
 export function regionColor(region: number): [number, number, number] {

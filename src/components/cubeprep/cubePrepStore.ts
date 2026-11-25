@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { cancelCubePrep, onCubePrepProgress, runCubePrepRecipe, validateCubePrepRecipe } from "../../services/cubeprep";
 import type { CubePrepProgress, CubePrepRecipe, CubePrepReport, CubePrepValidation } from "../../shared/types/cubeprep";
-import { createCubePrepDraft, cubePrepError, parseRecipe, recipeProblems, workingDirectory, type CubePrepDraft } from "./cubePrepModel";
+import { createCubePrepDraft, cubePrepError, cubePrepProblems, parseRecipe, workingDirectory, type CubePrepDraft } from "./cubePrepModel";
 
 export interface CubePrepApi {
   validate(recipe: CubePrepRecipe, baseDir: string): Promise<CubePrepValidation>;
@@ -23,41 +23,45 @@ export interface CubePrepState {
 
 type CubePrepStorage = Pick<Storage, "getItem" | "setItem">;
 const STORAGE_KEY = "ab.cubeprep.v1";
+const DRAFT_KEY = "ab.cubeprep.draft.v1";
 const API: CubePrepApi = { validate: validateCubePrepRecipe, run: runCubePrepRecipe, listen: onCubePrepProgress, cancel: cancelCubePrep };
 
 function storageOrNull(): CubePrepStorage | null {
   try { return typeof window === "undefined" ? null : window.localStorage; } catch { return null; }
 }
 
+function savedDraft(value: unknown): CubePrepDraft | null {
+  const draft = value as Partial<CubePrepDraft> | null | undefined;
+  if (!draft || typeof draft.baseDir !== "string" || typeof draft.outputParent !== "string") return null;
+  return { baseDir: draft.baseDir, outputParent: draft.outputParent, recipe: parseRecipe(JSON.stringify(draft.recipe)), profile: draft.profile === "scientific" ? "scientific" : "lightstack" };
+}
+
 export function createCubePrepStore(api: CubePrepApi = API, storage: CubePrepStorage | null = storageOrNull()) {
   let state: CubePrepState = { draft: createCubePrepDraft(), status: "idle", validation: null, progress: null, report: null, outputDir: null, error: null, startedAt: null };
   try {
     const saved = JSON.parse(storage?.getItem(STORAGE_KEY) ?? "null") as Partial<CubePrepState> | null;
-    if (saved?.draft && typeof saved.draft.baseDir === "string" && typeof saved.draft.outputParent === "string") {
-      const recipe = parseRecipe(JSON.stringify(saved.draft.recipe));
-      state = { ...state, draft: { ...saved.draft, recipe, profile: saved.draft.profile === "scientific" ? "scientific" : "lightstack" }, report: saved.report?.recipe_version === 1 ? saved.report : null, outputDir: typeof saved.outputDir === "string" ? saved.outputDir : null };
-    }
+    const draft = savedDraft(JSON.parse(storage?.getItem(DRAFT_KEY) ?? "null")) ?? savedDraft(saved?.draft);
+    if (draft) state = { ...state, draft, report: saved?.report?.recipe_version === 1 ? saved.report : null, outputDir: typeof saved?.outputDir === "string" ? saved.outputDir : null };
   } catch { state = { ...state }; }
   let revision = 0;
   let runId: string | null = null;
   let cancelRequested = false;
   const listeners = new Set<() => void>();
+  const write = (key: string, value: unknown) => { try { storage?.setItem(key, JSON.stringify(value)); } catch { return; } };
   const update = (change: Partial<CubePrepState>, persist = false) => {
+    const before = state;
     state = { ...state, ...change };
     if (persist) {
-      try { storage?.setItem(STORAGE_KEY, JSON.stringify({ draft: state.draft, report: state.report, outputDir: state.outputDir })); } catch { state = { ...state }; }
+      if (state.draft !== before.draft) write(DRAFT_KEY, state.draft);
+      if (state.report !== before.report || state.outputDir !== before.outputDir) write(STORAGE_KEY, { report: state.report, outputDir: state.outputDir });
     }
     listeners.forEach((listener) => listener());
   };
-  const localProblems = () => {
-    const problems = recipeProblems(state.draft.recipe);
-    if (!state.draft.baseDir.trim()) problems.push("Choose the input folder for relative file paths.");
-    return problems;
-  };
+  const localProblems = (forRun: boolean) => cubePrepProblems(state.draft, forRun).map((problem) => problem.text);
   const validate = async () => {
     if (runId) return;
     const current = ++revision;
-    const problems = localProblems();
+    const problems = localProblems(false);
     if (problems.length) { update({ status: "error", validation: null, error: problems.join(" ") }); return; }
     const draft = state.draft;
     update({ status: "validating", validation: null, error: null });
@@ -70,8 +74,7 @@ export function createCubePrepStore(api: CubePrepApi = API, storage: CubePrepSto
   };
   const run = async () => {
     if (runId) return;
-    const problems = localProblems();
-    if (!state.draft.outputParent.trim()) problems.push("Choose a working folder for this run.");
+    const problems = localProblems(true);
     if (problems.length) { update({ status: "error", error: problems.join(" ") }); return; }
     ++revision;
     const id = `${new Date().toISOString().replace(/[^0-9]/g, "")}-${Math.random().toString(36).slice(2, 9)}`;

@@ -1,4 +1,5 @@
 import { DEFAULT_QUICK_SLOPE_PARAMS } from "../shared/types/ramp";
+import { MISSING_VALUE } from "./formatUncertainty";
 import type {
   CompareBin,
   FlagConfusion,
@@ -297,11 +298,11 @@ function signedPercent(v: number, digits: number): string {
 }
 
 function fixedOrNa(v: number | null, digits: number): string {
-  return v === null || !Number.isFinite(v) ? "n/a" : v.toFixed(digits);
+  return v === null || !Number.isFinite(v) ? MISSING_VALUE : v.toFixed(digits);
 }
 
 function percentOrNa(v: number | null): string {
-  return v === null || !Number.isFinite(v) ? "n/a" : `${(v * 100).toFixed(1)} %`;
+  return v === null || !Number.isFinite(v) ? MISSING_VALUE : `${(v * 100).toFixed(1)} %`;
 }
 
 function faintReasons(bins: CompareBin[], scope: string): string[] {
@@ -388,7 +389,7 @@ export function ampFaintRows(cmp: RateComparison): AmpFaintRow[] {
 }
 
 export function quickFlaggedShare(cmp: RateComparison): string {
-  if (cmp.good_pixels <= 0) return "n/a";
+  if (cmp.good_pixels <= 0) return MISSING_VALUE;
   return `${((cmp.quick_flagged_in_good / cmp.good_pixels) * 100).toFixed(2)} %`;
 }
 

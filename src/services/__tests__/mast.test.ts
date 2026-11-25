@@ -143,14 +143,14 @@ describe("MAST_COMMANDS", () => {
   });
 
   it("matches the commands cmd/mast.rs defines, in the same order", () => {
-    const defined = [...rustSource("cmd/mast.rs").matchAll(/#\[tauri::command\]\s*pub async fn (\w+)\(/g)].map((m) => m[1]);
+    const defined = [...rustSource("cmd/datasets/mast.rs").matchAll(/#\[tauri::command\]\s*pub async fn (\w+)\(/g)].map((m) => m[1]);
     expect(defined).toEqual([...MAST_COMMANDS]);
   });
 });
 
 describe("MAST error codes", () => {
   it("mirror MastErrorCode of core/mast/types.rs, in the same order", () => {
-    const rust = rustSource("core/mast/types.rs");
+    const rust = rustSource("core/mast/contract/types.rs");
     const block = rust.slice(rust.indexOf("pub enum MastErrorCode"), rust.indexOf("impl MastErrorCode"));
     const codes = [...block.matchAll(/#\[serde\(rename = "(mast_\w+)"\)\]/g)].map((m) => m[1]);
     expect(codes).toHaveLength(21);
@@ -172,7 +172,7 @@ describe("MAST presets contract", () => {
   };
 
   it("mirror MastPreset, MastQuery.preset and MastSearchPage.droppedConditions of core/mast/types.rs", () => {
-    const rust = rustSource("core/mast/types.rs");
+    const rust = rustSource("core/mast/contract/types.rs");
     const preset: MastPreset = {
       id: "tso",
       mission: "jwst",
@@ -188,7 +188,7 @@ describe("MAST presets contract", () => {
   });
 
   it("mirror the footprint input, result, set and region types of core/mast/types.rs", () => {
-    const rust = rustSource("core/mast/types.rs");
+    const rust = rustSource("core/mast/contract/types.rs");
     const footprint: MastFootprint = {
       datasetId: "a",
       polygons: [[[0, 0], [1, 0], [1, 1]]],
@@ -204,11 +204,11 @@ describe("MAST presets contract", () => {
     expect(fields(rust, "MastFootprintSet")).toEqual(Object.keys(set));
     expect(fields(rust, "MastFootprintRegions")).toEqual(Object.keys(regions));
     expect(fields(rust, "MastFootprintNote")).toEqual(Object.keys(regions.notes[0]));
-    expect(fields(rustSource("core/astrometry/stcs.rs"), "BoundingCone")).toEqual(Object.keys(footprint.cone!));
+    expect(fields(rustSource("core/astrometry/sky/stcs.rs"), "BoundingCone")).toEqual(Object.keys(footprint.cone!));
   });
 
   it("mirror the download input and item of core/mast/types.rs", () => {
-    const rust = rustSource("core/mast/types.rs");
+    const rust = rustSource("core/mast/contract/types.rs");
     const item: MastDownloadItem = {
       id: "dl1:0",
       requestId: "dl1",
@@ -236,7 +236,7 @@ describe("MAST presets contract", () => {
   });
 
   it("mirror the object filter contract of core/mast/types.rs", () => {
-    const rust = rustSource("core/mast/types.rs");
+    const rust = rustSource("core/mast/contract/types.rs");
     const snake = (name: string) => name.replace(/(?<!^)([A-Z])/g, "_$1").toLowerCase();
     const variants = (name: string) => {
       const start = rust.indexOf(`pub enum ${name} {`);
@@ -271,7 +271,7 @@ describe("MAST presets contract", () => {
   });
 
   it("mirror the header peek result of core/mast/types.rs", () => {
-    const rust = rustSource("core/mast/types.rs");
+    const rust = rustSource("core/mast/contract/types.rs");
     expect(fields(rust, "MastPeek")).toEqual(Object.keys(PEEK));
     expect(fields(rust, "MastPeekFootprint")).toEqual(Object.keys(PEEK.footprints[0]));
     expect(fields(rust, "MastPeekHdu")).toEqual(Object.keys(PEEK.hdus[0]));

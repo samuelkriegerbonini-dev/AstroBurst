@@ -1,0 +1,581 @@
+{
+ "golden": "tso/quicklook",
+ "produced_by": {
+  "script": "tso_golden_quicklook.py",
+  "command": "python -I scripts/oracle/tso_golden_quicklook.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_x1dints.fits",
+    "set": "tso/E1",
+    "bytes": 14702400,
+    "sha256": "a5e7022d22e779fdf43b14fba6e7d23644c9547c920b6a52c13435c63706bfbc"
+   },
+   {
+    "file": "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 14107,
+    "sha256": "9b14e06ec70a31f2f7777530518721ea160265e595876676db54af4c20369055"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "caveat": "Regression pin of the level-3 file, not a planet measurement: between INT_NUM 180 and 191 the extraction lost pixels (NPIXELS falls from 7 to about 3), so in-transit FLUX is biased low. See npixels_diagnostic.",
+ "label": "quick look, no limb darkening or systematics model",
+ "series_key": {
+  "detector": "NRS1",
+  "sporder": 0
+ },
+ "n_integrations": 240,
+ "n_elements": 431,
+ "wavelength_identical_in_all_rows": true,
+ "definitions": {
+  "S_b(t)": "numpy nansum of FLUX over the selected elements of integration t (NaN skipped)",
+  "e_b(t)": "sqrt of the sum of FLUX_ERROR^2 over the selected elements whose FLUX is finite",
+  "F_in, F_out": "arithmetic mean of S_b over the window integrations",
+  "D": "1 - F_in / F_out",
+  "sigma_x_scatter": "sample standard deviation (ddof = 1) of S_b over the window, divided by sqrt(N)",
+  "sigma_x_pipeline": "sqrt(sum over the window of e_b^2) / N",
+  "sigma_D": "(F_in / F_out) * sqrt((sigma_in / F_in)^2 + (sigma_out / F_out)^2), research section 6.2 item 5",
+  "bin membership": "lo <= WAVELENGTH < hi, WAVELENGTH taken from the first row",
+  "variant A": "all elements, NaN skipped per integration (what the pipeline white light does)",
+  "variant B": "only elements whose FLUX is finite in every one of the 240 integrations",
+  "tolerance_hint": "numpy pairwise summation; a sequential sum differs at the 1e-15 relative level, compare with 1e-10 relative"
+ },
+ "windows": {
+  "in_transit_int_num": [
+   183,
+   188
+  ],
+  "out_of_transit_int_num": [
+   [
+    1,
+    170
+   ],
+   [
+    201,
+    240
+   ]
+  ],
+  "selection": "in: the contiguous integrations whose pipeline white light is below 0.10 of its median; out: everything at least 10 integrations away from the dip",
+  "rule_check_int_num_below_0p10_of_median": [
+   183,
+   184,
+   185,
+   186,
+   187,
+   188
+  ],
+  "in_window_tdb_mid": [
+   60061.50682013334,
+   60061.508596144
+  ],
+  "in_window_mjd_avg": [
+   60061.505976927685,
+   60061.50775289361
+  ]
+ },
+ "bin_edges_um": [
+  0.6,
+  1.0,
+  2.0,
+  3.0,
+  4.0,
+  5.3
+ ],
+ "white_light_pipeline": {
+  "median": 0.16396500128388564,
+  "normalised_by_median_int_num_176_to_195": [
+   [
+    176,
+    0.9990702814663972
+   ],
+   [
+    177,
+    1.0008983847668247
+   ],
+   [
+    178,
+    0.9829429452052403
+   ],
+   [
+    179,
+    0.9082864727843963
+   ],
+   [
+    180,
+    0.6346636962111213
+   ],
+   [
+    181,
+    0.3273965397901687
+   ],
+   [
+    182,
+    0.118352902477691
+   ],
+   [
+    183,
+    0.06329515489557674
+   ],
+   [
+    184,
+    0.03485907808995477
+   ],
+   [
+    185,
+    0.04858479921045704
+   ],
+   [
+    186,
+    0.031266005570205195
+   ],
+   [
+    187,
+    0.048605518691492856
+   ],
+   [
+    188,
+    0.07101688140171518
+   ],
+   [
+    189,
+    0.13854097280007038
+   ],
+   [
+    190,
+    0.32468705072478443
+   ],
+   [
+    191,
+    0.6854310285216398
+   ],
+   [
+    192,
+    0.9102807677058622
+   ],
+   [
+    193,
+    0.9863428819571132
+   ],
+   [
+    194,
+    0.999932445127315
+   ],
+   [
+    195,
+    1.0005641526472744
+   ]
+  ],
+  "equals_whtlt_bitwise_rows": 240,
+  "whtlt_rows": 240
+ },
+ "variants": {
+  "A_pipeline_sum_nan_skipped": {
+   "white": {
+    "n_in": 6,
+    "n_out": 210,
+    "F_in": 0.008133413871789402,
+    "F_out": 0.1639531116709505,
+    "D": 0.9503918297804987,
+    "sigma_in_scatter": 0.0010377355627975882,
+    "sigma_out_scatter": 1.0491899665707357e-05,
+    "sigma_D_scatter": 0.006329466289158166,
+    "sigma_in_pipeline": 4.508857428312998e-05,
+    "sigma_out_pipeline": 5.8021423576837344e-06,
+    "sigma_D_pipeline": 0.00027501456081958594,
+    "sigma_D_larger": 0.006329466289158166,
+    "n_elements_selected": 431,
+    "finite_elements_per_integration_in_window": [
+     327,
+     407
+    ],
+    "finite_elements_per_integration_out_window": [
+     406,
+     407
+    ]
+   },
+   "bins": [
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.0012649768617860404,
+     "F_out": 0.03876765485762595,
+     "D": 0.9673703022163279,
+     "sigma_in_scatter": 0.00038831051701171485,
+     "sigma_out_scatter": 2.528172188319162e-06,
+     "sigma_D_scatter": 0.010016353251191705,
+     "sigma_in_pipeline": 2.8508388894902184e-05,
+     "sigma_out_pipeline": 2.4996776265433656e-06,
+     "sigma_D_pipeline": 0.0007353683290367279,
+     "sigma_D_larger": 0.010016353251191705,
+     "lo_um": 0.6,
+     "hi_um": 1.0,
+     "n_elements_selected": 49,
+     "finite_elements_per_integration_in_window": [
+      10,
+      48
+     ],
+     "finite_elements_per_integration_out_window": [
+      48,
+      48
+     ]
+    },
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.0007514364163705012,
+     "F_out": 0.04497353778118477,
+     "D": 0.983291587599211,
+     "sigma_in_scatter": 0.00021592943872774086,
+     "sigma_out_scatter": 8.326811638610143e-06,
+     "sigma_D_scatter": 0.0048012563432253096,
+     "sigma_in_pipeline": 1.9266122168393286e-05,
+     "sigma_out_pipeline": 1.963028359003321e-06,
+     "sigma_D_pipeline": 0.0004283885822162704,
+     "sigma_D_larger": 0.0048012563432253096,
+     "lo_um": 1.0,
+     "hi_um": 2.0,
+     "n_elements_selected": 54,
+     "finite_elements_per_integration_in_window": [
+      17,
+      54
+     ],
+     "finite_elements_per_integration_out_window": [
+      53,
+      54
+     ]
+    },
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.001788423741455887,
+     "F_out": 0.027938001407376404,
+     "D": 0.93598598141012,
+     "sigma_in_scatter": 0.00019959647332221873,
+     "sigma_out_scatter": 2.516517315427423e-06,
+     "sigma_D_scatter": 0.0071442668865198,
+     "sigma_in_pipeline": 2.6346373141201177e-05,
+     "sigma_out_pipeline": 1.9032240467198224e-06,
+     "sigma_D_pipeline": 0.0009430400711400589,
+     "sigma_D_larger": 0.0071442668865198,
+     "lo_um": 2.0,
+     "hi_um": 3.0,
+     "n_elements_selected": 64,
+     "finite_elements_per_integration_in_window": [
+      59,
+      64
+     ],
+     "finite_elements_per_integration_out_window": [
+      63,
+      64
+     ]
+    },
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.0007290972302729849,
+     "F_out": 0.0239025868805652,
+     "D": 0.9694971412962083,
+     "sigma_in_scatter": 7.242987638989613e-05,
+     "sigma_out_scatter": 2.4941643009260076e-06,
+     "sigma_D_scatter": 0.0030302124497207017,
+     "sigma_in_pipeline": 3.6969235570355287e-06,
+     "sigma_out_pipeline": 2.352047768043011e-06,
+     "sigma_D_pipeline": 0.00015469537502730567,
+     "sigma_D_larger": 0.0030302124497207017,
+     "lo_um": 3.0,
+     "hi_um": 4.0,
+     "n_elements_selected": 88,
+     "finite_elements_per_integration_in_window": [
+      88,
+      88
+     ],
+     "finite_elements_per_integration_out_window": [
+      88,
+      88
+     ]
+    },
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.003599479621903987,
+     "F_out": 0.02837133074419814,
+     "D": 0.8731296866418552,
+     "sigma_in_scatter": 0.000229555602757729,
+     "sigma_out_scatter": 4.6796796602433455e-06,
+     "sigma_D_scatter": 0.00809113864280491,
+     "sigma_in_pipeline": 1.1885672408951924e-05,
+     "sigma_out_pipeline": 3.795865762743241e-06,
+     "sigma_D_pipeline": 0.00041927623623093054,
+     "sigma_D_larger": 0.00809113864280491,
+     "lo_um": 4.0,
+     "hi_um": 5.3,
+     "n_elements_selected": 153,
+     "finite_elements_per_integration_in_window": [
+      153,
+      153
+     ],
+     "finite_elements_per_integration_out_window": [
+      153,
+      153
+     ]
+    }
+   ]
+  },
+  "B_elements_finite_in_every_integration": {
+   "white": {
+    "n_in": 6,
+    "n_out": 210,
+    "F_in": 0.0064833549496611355,
+    "F_out": 0.091551203985301,
+    "D": 0.9291832912355574,
+    "sigma_in_scatter": 0.0005515910352351233,
+    "sigma_out_scatter": 5.827436908368414e-06,
+    "sigma_D_scatter": 0.006024947413029558,
+    "sigma_in_pipeline": 3.176980398397887e-05,
+    "sigma_out_pipeline": 4.995194225219525e-06,
+    "sigma_D_pipeline": 0.0003470382903750682,
+    "sigma_D_larger": 0.006024947413029558,
+    "n_elements_selected": 316,
+    "finite_elements_per_integration_in_window": [
+     316,
+     316
+    ],
+    "finite_elements_per_integration_out_window": [
+     316,
+     316
+    ]
+   },
+   "bins": [
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.00028323360730302235,
+     "F_out": 0.00430541769670515,
+     "D": 0.9342146041904889,
+     "sigma_in_scatter": 7.187067754853799e-05,
+     "sigma_out_scatter": 9.769395624671989e-07,
+     "sigma_D_scatter": 0.016693085629909708,
+     "sigma_in_pipeline": 1.387284061876871e-05,
+     "sigma_out_pipeline": 1.1011305532612115e-06,
+     "sigma_D_pipeline": 0.0032222262080943403,
+     "sigma_D_larger": 0.016693085629909708,
+     "lo_um": 0.6,
+     "hi_um": 1.0,
+     "n_elements_selected": 7,
+     "finite_elements_per_integration_in_window": [
+      7,
+      7
+     ],
+     "finite_elements_per_integration_out_window": [
+      7,
+      7
+     ]
+    },
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.00020812932406382836,
+     "F_out": 0.011585359691016529,
+     "D": 0.9820351435247008,
+     "sigma_in_scatter": 4.444152396823615e-05,
+     "sigma_out_scatter": 1.5331862288606876e-06,
+     "sigma_D_scatter": 0.003836008003962797,
+     "sigma_in_pipeline": 7.749439431613877e-06,
+     "sigma_out_pipeline": 8.269688794067389e-07,
+     "sigma_D_pipeline": 0.0006689005675085045,
+     "sigma_D_larger": 0.003836008003962797,
+     "lo_um": 1.0,
+     "hi_um": 2.0,
+     "n_elements_selected": 13,
+     "finite_elements_per_integration_in_window": [
+      13,
+      13
+     ],
+     "finite_elements_per_integration_out_window": [
+      13,
+      13
+     ]
+    },
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.0016634151661173147,
+     "F_out": 0.02338650897281598,
+     "D": 0.9288728741835374,
+     "sigma_in_scatter": 0.0001661418770943488,
+     "sigma_out_scatter": 1.7765611083521669e-06,
+     "sigma_D_scatter": 0.00710417811143148,
+     "sigma_in_pipeline": 2.4533130139526502e-05,
+     "sigma_out_pipeline": 1.7649004881044922e-06,
+     "sigma_D_pipeline": 0.0010490429046417862,
+     "sigma_D_larger": 0.00710417811143148,
+     "lo_um": 2.0,
+     "hi_um": 3.0,
+     "n_elements_selected": 55,
+     "finite_elements_per_integration_in_window": [
+      55,
+      55
+     ],
+     "finite_elements_per_integration_out_window": [
+      55,
+      55
+     ]
+    },
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.0007290972302729849,
+     "F_out": 0.0239025868805652,
+     "D": 0.9694971412962083,
+     "sigma_in_scatter": 7.242987638989613e-05,
+     "sigma_out_scatter": 2.4941643009260076e-06,
+     "sigma_D_scatter": 0.0030302124497207017,
+     "sigma_in_pipeline": 3.6969235570355287e-06,
+     "sigma_out_pipeline": 2.352047768043011e-06,
+     "sigma_D_pipeline": 0.00015469537502730567,
+     "sigma_D_larger": 0.0030302124497207017,
+     "lo_um": 3.0,
+     "hi_um": 4.0,
+     "n_elements_selected": 88,
+     "finite_elements_per_integration_in_window": [
+      88,
+      88
+     ],
+     "finite_elements_per_integration_out_window": [
+      88,
+      88
+     ]
+    },
+    {
+     "n_in": 6,
+     "n_out": 210,
+     "F_in": 0.003599479621903987,
+     "F_out": 0.02837133074419814,
+     "D": 0.8731296866418552,
+     "sigma_in_scatter": 0.000229555602757729,
+     "sigma_out_scatter": 4.6796796602433455e-06,
+     "sigma_D_scatter": 0.00809113864280491,
+     "sigma_in_pipeline": 1.1885672408951924e-05,
+     "sigma_out_pipeline": 3.795865762743241e-06,
+     "sigma_D_pipeline": 0.00041927623623093054,
+     "sigma_D_larger": 0.00809113864280491,
+     "lo_um": 4.0,
+     "hi_um": 5.3,
+     "n_elements_selected": 153,
+     "finite_elements_per_integration_in_window": [
+      153,
+      153
+     ],
+     "finite_elements_per_integration_out_window": [
+      153,
+      153
+     ]
+    }
+   ]
+  }
+ },
+ "timing": {
+  "TDB-MID": {
+   "deficit_centroid": 60061.50769302038,
+   "time_of_minimum": 60061.50788573973,
+   "int_num_of_minimum": 186,
+   "half_flux_crossing_ingress": 60061.50591024067,
+   "half_flux_crossing_egress": 60061.50947913229,
+   "half_flux_midpoint": 60061.50769468648,
+   "half_flux_duration_min": 5.139203940052539
+  },
+  "MJD-AVG": {
+   "deficit_centroid": 60061.50684979274,
+   "time_of_minimum": 60061.50704250724,
+   "int_num_of_minimum": 186,
+   "half_flux_crossing_ingress": 60061.50506705793,
+   "half_flux_crossing_egress": 60061.50863585967,
+   "half_flux_midpoint": 60061.5068514588,
+   "half_flux_duration_min": 5.139074502512813
+  }
+ },
+ "ephemeris_check": {
+  "status": "T0 and P are the values recalled in research-tso.md section 8.4 (Vanderburg et al. 2020), not verified against the paper",
+  "T0_BJD_TDB": 2458779.375083,
+  "P_d": 1.4079405,
+  "observed_centroid_BJD_TDB": 2460062.00769302,
+  "epoch": 911,
+  "predicted_BJD_TDB": 2460062.0088784997,
+  "observed_minus_predicted_min": -1.707090586423874
+ },
+ "npixels_diagnostic": {
+  "mean_NPIXELS_common_elements_in_window": 3.273718252836185,
+  "mean_NPIXELS_common_elements_out_window": 6.9301614644284495,
+  "integrations_with_10_or_more_common_elements_below_baseline_NPIXELS": [
+   [
+    180,
+    112
+   ],
+   [
+    181,
+    253
+   ],
+   [
+    182,
+    312
+   ],
+   [
+    183,
+    314
+   ],
+   [
+    184,
+    316
+   ],
+   [
+    185,
+    316
+   ],
+   [
+    186,
+    316
+   ],
+   [
+    187,
+    315
+   ],
+   [
+    188,
+    314
+   ],
+   [
+    189,
+    312
+   ],
+   [
+    190,
+    251
+   ],
+   [
+    191,
+    96
+   ]
+  ],
+  "n_common_elements": 316,
+  "nan_flux_elements_per_integration_in_window": [
+   25,
+   95,
+   24,
+   104,
+   27,
+   25
+  ],
+  "nan_flux_elements_per_integration_out_window_min_max": [
+   24,
+   25
+  ]
+ }
+}

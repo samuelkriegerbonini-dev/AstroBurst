@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSaguiStore, type SaguiApi } from "../saguiStore";
-import type { SaguiInputInfo, SaguiResult, SaguiSavedResult } from "../../../shared/types/sagui";
+import { createSaguiStore, isRecipePath, saguiConfigProblems, type SaguiApi } from "../saguiStore";
+import type { SaguiInputInfo, SaguiProgress, SaguiResult, SaguiRuntimeInfo, SaguiSavedResult } from "../../../shared/types/sagui";
 import type { CubePrepReport } from "../../../shared/types/cubeprep";
 
 const input: SaguiInputInfo = { width: 2, height: 2, bands: [{ filter: "F200W", pivot_um: 2 }, { filter: "F444W", pivot_um: 4.4 }], unit: "Jy/pixel", has_err: false, has_dq: true, estimated_memory_bytes: 200000000, warnings: ["ERR is absent"] };
@@ -248,7 +248,6 @@ describe("SAGUI desktop lifecycle", () => {
     await store.run();
     expect(vi.mocked(api.listen).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(api.run).mock.invocationCallOrder[0]);
     expect(store.get().result).toEqual(result);
-    expect(store.get().unit).toBe("Jy/pixel");
     expect(vi.mocked(api.run).mock.calls[0][0].output_dir).toBe("/out");
     store.edit({ ...store.get().config, n_regions: 3 });
     expect(store.get().result).toBeNull();
@@ -264,14 +263,16 @@ describe("SAGUI desktop lifecycle", () => {
     expect(store.get().status).toBe("error");
     expect(folders.length).toBeGreaterThan(0);
     expect(folders.every((folder) => folder === null)).toBe(true);
-    vi.mocked(api.run).mockImplementationOnce(async (_config, id) => {
-      expect(store.get()).toMatchObject({ status: "running", outputDir: `/out/sagui-${id}` });
+    vi.mocked(api.run).mockImplementationOnce(async () => {
+      expect(store.get()).toMatchObject({ status: "running", outputDir: null });
       return result;
     });
     await store.run();
     expect(store.get()).toMatchObject({ status: "complete", outputDir: "/out/run" });
     let resolveInput!: (value: SaguiInputInfo) => void;
     vi.mocked(api.inspectInput).mockReturnValueOnce(new Promise((yes) => { resolveInput = yes; }));
+    store.edit({ ...store.get().config, input_path: "/data/next.fits" });
+    store.edit({ ...store.get().config, psf_target: "F444W" });
     const early = store.run();
     expect(store.get().outputDir).toBeNull();
     await store.cancel();
@@ -284,13 +285,13 @@ describe("SAGUI desktop lifecycle", () => {
     const { store } = setup();
     await store.run();
     const ran = store.get();
-    expect(ran).toMatchObject({ result, outputDir: "/out/run", unit: "Jy/pixel", input });
+    expect(ran).toMatchObject({ result, outputDir: "/out/run", input });
     store.edit({ ...ran.config, output_dir: "/next" });
-    expect(store.get()).toMatchObject({ result, outputDir: "/out/run", unit: "Jy/pixel", input, runtime: ran.runtime, status: "idle" });
+    expect(store.get()).toMatchObject({ result, outputDir: "/out/run", input, runtime: ran.runtime, status: "idle" });
     store.edit({ ...store.get().config, rscript_path: "/opt/Rscript" });
     expect(store.get()).toMatchObject({ result, input, runtime: null });
     store.edit({ ...store.get().config, n_regions: 3 });
-    expect(store.get()).toMatchObject({ result: null, outputDir: null, unit: null, input });
+    expect(store.get()).toMatchObject({ result: null, outputDir: null, input });
     store.edit({ ...store.get().config, input_path: "/data/other.fits" });
     expect(store.get().input).toBeNull();
   });
@@ -326,7 +327,7 @@ describe("SAGUI desktop lifecycle", () => {
     vi.mocked(api.inspectInput).mockReturnValueOnce(new Promise((yes) => { resolve = yes; }));
     let current = true;
     const pending = store.prepareCubePrep(report, () => current);
-    const kept = { result, input: before.input, outputDir: "/out/run", unit: "Jy/pixel", config: before.config };
+    const kept = { result, input: before.input, outputDir: "/out/run", config: before.config };
     expect(store.get()).toMatchObject({ status: "checking", ...kept });
     current = false;
     resolve({ ...input, unit: "MJy/sr" });
@@ -336,7 +337,7 @@ describe("SAGUI desktop lifecycle", () => {
     await expect(store.prepareCubePrep(report)).rejects.toThrow("multiband");
     expect(store.get()).toMatchObject({ status: "error", ...kept });
     expect(await store.prepareCubePrep(report)).toBe(true);
-    expect(store.get()).toMatchObject({ status: "idle", result: null, outputDir: null, unit: null, input });
+    expect(store.get()).toMatchObject({ status: "idle", result: null, outputDir: null, input });
     expect(store.get().config.input_path).toBe("/prepared/run/final.fits");
   });
 
@@ -357,5 +358,138 @@ describe("SAGUI desktop lifecycle", () => {
     resolve(input);
     await work;
     expect(store.get().input).toBeNull();
+  });
+});
+
+describe("SAGUI fixes (PREPUI)", () => {
+  it("clears a PSF target that was stated for another cube (PREPUI-04)", () => {
+    const { store } = setup();
+    expect(store.get().config.psf_target).toBe("F444W");
+    store.edit({ ...store.get().config, input_path: "/data/other.fits" });
+    expect(store.get().config.psf_target).toBe("");
+    store.edit({ ...store.get().config, input_path: "/data/third.fits", psf_target: "F200W" });
+    expect(store.get().config.psf_target).toBe("F200W");
+    store.edit({ ...store.get().config, n_regions: 4 });
+    expect(store.get().config.psf_target).toBe("F200W");
+  });
+
+  it("sets the union of the Cube Prep DQ masks when the handed-off cube mixes HST and JWST planes (PREPUI-07)", async () => {
+    const { store, api } = setup();
+    const report = { output_dir: "/prepared", cube: "final.fits", steps: [] } as unknown as CubePrepReport;
+    vi.mocked(api.inspectInput).mockResolvedValueOnce({ ...input, dq_flags: [{ filter: "F814W", table: "hst", flagged_finite: { COSMIC_RAY: 12 } }, { filter: "F444W", table: "jwst", flagged_finite: { DO_NOT_USE: 3 } }] });
+    await store.prepareCubePrep(report);
+    expect(store.get().config.dq_exclude_bits).toBe(16383);
+    vi.mocked(api.inspectInput).mockResolvedValueOnce({ ...input, dq_flags: [{ filter: "F200W", table: "jwst", flagged_finite: {} }, { filter: "F444W", table: "jwst", flagged_finite: {} }] });
+    await store.prepareCubePrep(report);
+    expect(store.get().config.dq_exclude_bits).toBe(1);
+    store.edit({ ...store.get().config, dq_exclude_bits: 7 });
+    vi.mocked(api.inspectInput).mockResolvedValueOnce(input);
+    await store.prepareCubePrep(report);
+    expect(store.get().config.dq_exclude_bits).toBe(7);
+  });
+
+  it("does not read the cube and start R again for a run right after a check (PREPUI-09)", async () => {
+    const { store, api } = setup();
+    await store.inspect();
+    await store.run();
+    expect(api.inspectInput).toHaveBeenCalledOnce();
+    expect(api.inspectRuntime).toHaveBeenCalledOnce();
+    expect(store.get()).toMatchObject({ status: "complete", result });
+    store.edit({ ...store.get().config, input_path: "/data/other.fits" });
+    store.edit({ ...store.get().config, psf_target: "F444W" });
+    await store.run();
+    expect(api.inspectInput).toHaveBeenCalledTimes(2);
+    expect(api.inspectInput).toHaveBeenLastCalledWith("/data/other.fits");
+  });
+
+  it("names the fix of each runtime issue when Run refuses the runtime (PREPUI-13)", async () => {
+    const { store, api } = setup();
+    vi.mocked(api.inspectRuntime).mockResolvedValue({ available: true, ready: false, r_version: "4.5.1", sagui_version: "0.0.0.9000", sagui_commit: "other", issues: ["Expected R 4.6.2; found 4.5.1", "SAGUI does not match the pinned upstream commit"] });
+    await store.run();
+    expect(api.run).not.toHaveBeenCalled();
+    expect(store.get().error).toBe("Expected R 4.6.2; found 4.5.1: install R 4.6.2 alongside your current R (the Windows installer is in the CRAN archive) and choose its Rscript. SAGUI does not match the pinned upstream commit: use Install / repair SAGUI library to build the pinned commit into a new private library.");
+  });
+
+  it("reports an installed library when Cancel is pressed during the check that follows the installation (PREPUI-14)", async () => {
+    const { store, api } = setup();
+    store.setInstallParent("/private");
+    let verify!: (value: SaguiRuntimeInfo) => void;
+    vi.mocked(api.inspectRuntime).mockReturnValueOnce(new Promise((yes) => { verify = yes; }));
+    const work = store.install();
+    await vi.waitFor(() => expect(api.inspectRuntime).toHaveBeenCalledOnce());
+    await store.cancel();
+    verify({ available: true, ready: true, r_version: "4.6.2", sagui_version: "0.0.0.9000", sagui_commit: "pinned", issues: [] });
+    await work;
+    expect(store.get()).toMatchObject({ status: "installed", config: { library_path: "/private/install-one/library" } });
+    expect(api.cancelInstall).not.toHaveBeenCalled();
+    expect(store.canCancel()).toBe(false);
+  });
+
+  it("names the run folder only once the backend reports that R started (PREPUI-15)", async () => {
+    const { store, api } = setup();
+    let progress!: (value: SaguiProgress) => void;
+    vi.mocked(api.listen).mockImplementation(async (_id, callback) => { progress = callback; return vi.fn(); });
+    let finish!: (value: SaguiResult) => void;
+    vi.mocked(api.run).mockReturnValueOnce(new Promise((yes) => { finish = yes; }));
+    const work = store.run();
+    await vi.waitFor(() => expect(api.run).toHaveBeenCalledOnce());
+    expect(store.get()).toMatchObject({ status: "running", outputDir: null });
+    progress({ stage: "Checking calibrated input and runtime", current: 0, total: 5, percent: 0 });
+    expect(store.get().outputDir).toBeNull();
+    progress({ stage: "Running official SAGUI in isolated R", current: 1, total: 5, percent: 20 });
+    expect(store.get().outputDir).toBe(`/out/sagui-${vi.mocked(api.run).mock.calls[0][1]}`);
+    finish(result);
+    await work;
+    expect(store.get().outputDir).toBe("/out/run");
+  });
+
+  it("says that no run folder exists when the run is cancelled before R starts (PREPUI-15)", async () => {
+    const { store, api } = setup();
+    let reject!: (reason: unknown) => void;
+    vi.mocked(api.run).mockReturnValueOnce(new Promise((_yes, no) => { reject = no; }));
+    const work = store.run();
+    await vi.waitFor(() => expect(api.run).toHaveBeenCalledOnce());
+    await store.cancel();
+    reject(new Error("SAGUI cancelled"));
+    await work;
+    expect(store.get()).toMatchObject({ status: "cancelled", outputDir: null });
+  });
+
+  it("checks a newly chosen cube without starting R (proposal 14)", async () => {
+    const { store, api } = setup();
+    await store.inspectCube();
+    expect(api.inspectInput).toHaveBeenCalledWith("/data/cube.fits");
+    expect(api.inspectRuntime).not.toHaveBeenCalled();
+    expect(store.get()).toMatchObject({ status: "idle", input });
+    store.edit({ ...store.get().config, input_path: "/data/recipe.json" });
+    await store.inspectCube();
+    expect(api.inspectInput).toHaveBeenCalledOnce();
+  });
+
+  it("restores stored numbers that are not valid to their defaults and words a fractional region count (PREPUI-23)", () => {
+    const stored = { input_path: "/data/cube.fits", output_dir: "/out", rscript_path: "", library_path: "", n_regions: null, starlet_threshold: null, dq_exclude_bits: 3, knn_k: "x", starlet_scales: null };
+    const storage = { getItem: (key: string) => key === "ab.sagui.v1" ? JSON.stringify(stored) : null, setItem: vi.fn() };
+    expect(createSaguiStore(setup().api, storage).get().config).toMatchObject({ n_regions: 20, starlet_threshold: 3, dq_exclude_bits: 3, knn_k: 40, starlet_scales: [1, 2, 3] });
+    const ready = { input_path: "C:\\runs\\cube.fits", output_dir: "C:\\runs", rscript_path: "Rscript", library_path: "lib", n_regions: 6, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 1, psf_target: "F444W", mode: "ward" as const, knn_k: 40 };
+    expect(saguiConfigProblems({ ...ready, n_regions: 2.5 })).toEqual(["Number of regions must be a whole number."]);
+    expect(saguiConfigProblems({ ...ready, n_regions: 1 })).toEqual(["Choose at least two regions."]);
+    expect(saguiConfigProblems({ ...ready, n_regions: Number.NaN })).toEqual(["Enter the number of regions."]);
+  });
+});
+
+describe("SAGUI cube field", () => {
+  const ready = { input_path: "C:\runs\cube.fits", output_dir: "C:\runs", rscript_path: "Rscript", library_path: "lib", n_regions: 6, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 1, psf_target: "F444W", mode: "ward" as const, knn_k: 40 };
+  it("asks for a FITS cube and names a Cube Prep recipe put in its place", () => {
+    expect(saguiConfigProblems(ready)).toEqual([]);
+    for (const path of ["C:\runs\cube.fits.gz", "/data/cube.FTS", "/data/cube.fit.fz"]) expect(saguiConfigProblems({ ...ready, input_path: path })).toEqual([]);
+    expect(saguiConfigProblems({ ...ready, input_path: "C:\astrokit\entregas\desktop-d1-scientific-recipe.json" })).toEqual(["The cube field holds a JSON file. A Cube Prep recipe opens in Cube Prep; choose its prepared FITS cube here."]);
+    expect(saguiConfigProblems({ ...ready, input_path: "C:\runs\regions.csv" })).toEqual(["Choose a FITS cube: .fits, .fit or .fts, optionally compressed as .gz, .bz2 or .fz."]);
+    expect(saguiConfigProblems({ ...ready, input_path: " " })).toEqual(["Choose a prepared multiband FITS cube."]);
+  });
+
+  it("recognises a recipe path regardless of case and spaces", () => {
+    expect(isRecipePath(" C:\recipes\D1.JSON ")).toBe(true);
+    expect(isRecipePath("C:\runs\cube.fits")).toBe(false);
+    expect(isRecipePath("")).toBe(false);
   });
 });

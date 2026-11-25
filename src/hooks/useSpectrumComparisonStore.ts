@@ -8,8 +8,10 @@ export interface ComparisonDoc {
   loading: boolean;
   regionVersion: number | null;
   pixelKey: string | null;
+  revision: string | null;
   pendingRegionVersion: number | null;
   pendingPixelKey: string | null;
+  pendingRevision: string | null;
   normalise: NormaliseMode;
   offsetStep: number | null;
   includePixel: boolean;
@@ -33,8 +35,10 @@ export const EMPTY_COMPARISON_DOC: ComparisonDoc = Object.freeze({
   loading: false,
   regionVersion: null,
   pixelKey: null,
+  revision: null,
   pendingRegionVersion: null,
   pendingPixelKey: null,
+  pendingRevision: null,
   normalise: "none",
   offsetStep: null,
   includePixel: true,
@@ -59,8 +63,10 @@ export type ComparisonPatch = Partial<
     | "entries"
     | "regionVersion"
     | "pixelKey"
+    | "revision"
     | "pendingRegionVersion"
     | "pendingPixelKey"
+    | "pendingRevision"
     | "table"
     | "tableError"
     | "tableLoading"
@@ -101,10 +107,17 @@ export class SpectrumComparisonStore {
     this.write(filePath, { ...this.getDoc(filePath), ...patch });
   }
 
-  begin(filePath: string, regionVersion: number, pixelKey: string | null): number {
+  begin(filePath: string, regionVersion: number, pixelKey: string | null, revision: string | null = null): number {
     const doc = this.getDoc(filePath);
     const seq = doc.seq + 1;
-    this.write(filePath, { ...doc, seq, loading: true, pendingRegionVersion: regionVersion, pendingPixelKey: pixelKey });
+    this.write(filePath, {
+      ...doc,
+      seq,
+      loading: true,
+      pendingRegionVersion: regionVersion,
+      pendingPixelKey: pixelKey,
+      pendingRevision: revision,
+    });
     return seq;
   }
 
@@ -117,8 +130,10 @@ export class SpectrumComparisonStore {
       loading: false,
       regionVersion: doc.pendingRegionVersion,
       pixelKey: doc.pendingPixelKey,
+      revision: doc.pendingRevision,
       pendingRegionVersion: null,
       pendingPixelKey: null,
+      pendingRevision: null,
     });
     return true;
   }
@@ -126,7 +141,14 @@ export class SpectrumComparisonStore {
   invalidate(filePath: string): void {
     const doc = this.docs.get(filePath);
     if (!doc) return;
-    this.write(filePath, { ...doc, seq: doc.seq + 1, loading: false, pendingRegionVersion: null, pendingPixelKey: null });
+    this.write(filePath, {
+      ...doc,
+      seq: doc.seq + 1,
+      loading: false,
+      pendingRegionVersion: null,
+      pendingPixelKey: null,
+      pendingRevision: null,
+    });
   }
 
   forget(filePath: string): void {

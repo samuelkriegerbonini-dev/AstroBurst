@@ -1,3 +1,4 @@
+use std::f64::consts::{FRAC_PI_2, PI};
 use std::ops::Range;
 
 use anyhow::{bail, Context, Result};
@@ -6,6 +7,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::core::cube::lazy::LazyCube;
+use crate::core::ramp::group_dq::RampDq;
 use crate::core::ramp::info::RampInfo;
 use crate::core::ramp::irs2::{Irs2Layout, Irs2Resolution, Irs2Sample, IRS2_ALREADY_STRIPPED_NOTE};
 use crate::core::stacking::{stop_if_cancelled, CancelCheck};
@@ -25,6 +27,10 @@ pub const NO_LAYOUT_BAND_ROWS: usize = 256;
 pub const MAX_SAT_DN: f32 = 65_535.0;
 pub const MIN_JUMP_K: f32 = 1.0;
 pub const MIN_GROUPS_OLS_FLOOR: usize = 2;
+pub const JUMP_MODEL_GAIN_E_PER_DN: f32 = 1.0;
+pub const MIN_GAIN_E_PER_DN: f32 = 0.001;
+pub const MAX_GAIN_E_PER_DN: f32 = 1000.0;
+pub const SECOND_DIFFERENCE_VARIANCE_RATIO: f64 = 3.0;
 
 pub const DQ_DO_NOT_USE: u32 = 1;
 pub const DQ_SATURATED: u32 = 2;
@@ -52,6 +58,7 @@ pub struct QuickSlopeParams {
     pub min_groups_ols: usize,
     pub ref_correction: RefCorrection,
     pub ref_window_rows: Option<usize>,
+    pub gain_e_per_dn: Option<f32>,
 }
 
 impl Default for QuickSlopeParams {
@@ -63,11 +70,33 @@ impl Default for QuickSlopeParams {
             min_groups_ols: DEFAULT_MIN_GROUPS_OLS,
             ref_correction: RefCorrection::Auto,
             ref_window_rows: Some(DEFAULT_REF_WINDOW_ROWS),
+            gain_e_per_dn: None,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseModel {
+    ReadNoiseOnly,
+    ReadAndPhoton,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DqSource {
+    Threshold,
+    Groupdq,
+}
+
 impl QuickSlopeParams {
+    pub fn noise_model(&self) -> NoiseModel {
+        match self.gain_e_per_dn {
+            Some(_) => NoiseModel::ReadAndPhoton,
+            None => NoiseModel::ReadNoiseOnly,
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if !self.sat_dn.is_finite() || self.sat_dn <= 0.0 || self.sat_dn > MAX_SAT_DN {
             bail!("sat_dn must be a finite threshold in (0, {MAX_SAT_DN}] DN, got {}", self.sat_dn);
@@ -86,6 +115,11 @@ impl QuickSlopeParams {
                 bail!("ref_window_rows must be at least {MIN_REF_WINDOW_ROWS} rows (or null for the whole band), got {window}");
             }
         }
+        if let Some(gain) = self.gain_e_per_dn {
+            if !gain.is_finite() || !(MIN_GAIN_E_PER_DN..=MAX_GAIN_E_PER_DN).contains(&gain) {
+                bail!("gain_e_per_dn must be between {MIN_GAIN_E_PER_DN} and {MAX_GAIN_E_PER_DN} electrons per DN (or null when the gain is not known), got {gain}");
+            }
+        }
         Ok(())
     }
 }
@@ -93,24 +127,46 @@ impl QuickSlopeParams {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct PixelFit {
     pub slope: f32,
-    pub ngood: u16,
+    pub ngood: u32,
     pub dq: u32,
     pub noise: f32,
-    pub n_usable: u16,
-    pub first_saturated: Option<u16>,
+    pub n_usable: u32,
+    pub first_saturated: Option<u32>,
 }
 
-fn usable_groups(raw: &[f32], corrected: &[f32], sat_dn: f32) -> (usize, Option<usize>) {
+struct UsableSpan {
+    start: usize,
+    end: usize,
+    saturated_at: Option<usize>,
+}
+
+fn usable_span(raw: &[f32], corrected: &[f32], sat_dn: f32, group_dq: Option<&[u32]>) -> UsableSpan {
     let len = raw.len().min(corrected.len());
-    for g in 0..len {
-        if raw[g] >= sat_dn {
-            return (g, Some(g));
+    let Some(flags) = group_dq else {
+        for g in 0..len {
+            if raw[g] >= sat_dn {
+                return UsableSpan { start: 0, end: g, saturated_at: Some(g) };
+            }
+            if !corrected[g].is_finite() {
+                return UsableSpan { start: 0, end: g, saturated_at: None };
+            }
         }
-        if !corrected[g].is_finite() {
-            return (g, None);
+        return UsableSpan { start: 0, end: len, saturated_at: None };
+    };
+    let len = len.min(flags.len());
+    let mut start = 0;
+    while start < len && flags[start] & DQ_DO_NOT_USE != 0 && flags[start] & DQ_SATURATED == 0 {
+        start += 1;
+    }
+    for g in start..len {
+        if flags[g] & DQ_SATURATED != 0 {
+            return UsableSpan { start, end: g, saturated_at: Some(g) };
+        }
+        if flags[g] & DQ_DO_NOT_USE != 0 || !corrected[g].is_finite() {
+            return UsableSpan { start, end: g, saturated_at: None };
         }
     }
-    (len, None)
+    UsableSpan { start, end: len, saturated_at: None }
 }
 
 fn ols_slope(values: &[f32], tgroup_s: f64) -> f64 {
@@ -131,7 +187,42 @@ fn robust_difference_scale(d: &[f32], scratch: &mut [f32], med: f32, params: &Qu
         *s = (v - med).abs();
     }
     let mad_sigma = MAD_TO_SIGMA_F32 * median_f32_mut(scratch);
-    mad_sigma.max(params.scale_floor_dn).max(band_scale_dn)
+    let gain = params.gain_e_per_dn.unwrap_or(JUMP_MODEL_GAIN_E_PER_DN);
+    let model_sigma = (band_scale_dn * band_scale_dn + med.max(0.0) / gain).sqrt();
+    mad_sigma.max(params.scale_floor_dn).max(model_sigma)
+}
+
+fn photon_variance_of_a_step(step_dn: f64, params: &QuickSlopeParams) -> f64 {
+    params.gain_e_per_dn.map_or(0.0, |gain| step_dn.max(0.0) / gain as f64)
+}
+
+fn ols_step_variance(groups: usize, read_variance: f64, photon_variance: f64) -> f64 {
+    let n = groups as f64;
+    let span = n * (n * n - 1.0);
+    12.0 * read_variance / span + 6.0 * (n * n + 1.0) * photon_variance / (5.0 * span)
+}
+
+fn independent_median_factor(kept: usize) -> f64 {
+    let k = kept as f64;
+    let offset = if kept % 2 == 1 { FRAC_PI_2 - 1.0 } else { PI - 2.0 };
+    FRAC_PI_2 * k / (k + offset)
+}
+
+fn median_step_variance(kept: usize, adjacent_pairs: usize, read_variance: f64, photon_variance: f64) -> f64 {
+    let single = 2.0 * read_variance + photon_variance;
+    if kept == 0 {
+        return f64::NAN;
+    }
+    if single <= 0.0 {
+        return 0.0;
+    }
+    let correlation = -read_variance / single;
+    let k = kept as f64;
+    match kept {
+        1 => single,
+        2 => single * (1.0 + if adjacent_pairs == 1 { correlation } else { 0.0 }) / 2.0,
+        _ => single / k * independent_median_factor(kept) * (1.0 + 4.0 * adjacent_pairs as f64 / (PI * k) * correlation.asin()),
+    }
 }
 
 pub fn fit_pixel(
@@ -143,43 +234,76 @@ pub fn fit_pixel(
     diffs: &mut Vec<f32>,
     flagged: &mut Vec<usize>,
 ) -> PixelFit {
-    let (n, saturated_at) = usable_groups(raw, corrected, params.sat_dn);
-    let mut dq = if saturated_at.is_some() { DQ_SATURATED } else { 0 };
-    let n_usable = n as u16;
-    let first_saturated = saturated_at.map(|g| g as u16);
+    fit_pixel_with_group_dq(raw, corrected, None, tgroup_s, band_scale_dn, params, diffs, flagged)
+}
+
+pub fn fit_pixel_with_group_dq(
+    raw: &[f32],
+    corrected: &[f32],
+    group_dq: Option<&[u32]>,
+    tgroup_s: f64,
+    band_scale_dn: f32,
+    params: &QuickSlopeParams,
+    diffs: &mut Vec<f32>,
+    flagged: &mut Vec<usize>,
+) -> PixelFit {
+    let span = usable_span(raw, corrected, params.sat_dn, group_dq);
+    let n = span.end - span.start;
+    let values = &corrected[span.start..span.end];
+    let mut dq = if span.saturated_at.is_some() { DQ_SATURATED } else { 0 };
+    let n_usable = n as u32;
+    let first_saturated = span.saturated_at.map(|g| g as u32);
     flagged.clear();
     if n < 2 {
         dq |= DQ_DO_NOT_USE;
         return PixelFit { slope: f32::NAN, ngood: n_usable, dq, noise: f32::NAN, n_usable, first_saturated };
     }
-    if n == 2 {
-        let slope = ((corrected[1] - corrected[0]) as f64 / tgroup_s) as f32;
+    let m = n - 1;
+    if let Some(flags) = group_dq {
+        flagged.extend((0..m).filter(|i| flags[span.start + i + 1] & DQ_JUMP_DET != 0).map(|i| span.start + i));
+    }
+    if n == 2 && flagged.is_empty() {
+        let slope = ((values[1] - values[0]) as f64 / tgroup_s) as f32;
         return PixelFit { slope, ngood: 2, dq, noise: f32::NAN, n_usable, first_saturated };
     }
-    let m = n - 1;
     diffs.clear();
-    diffs.extend((0..m).map(|i| corrected[i + 1] - corrected[i]));
+    diffs.extend((0..m).map(|i| values[i + 1] - values[i]));
     diffs.extend_from_within(0..m);
     let (d, scratch) = diffs.split_at_mut(m);
     let med = median_f32_mut(scratch);
     let s = robust_difference_scale(d, scratch, med, params, band_scale_dn);
     if n >= 4 {
         let threshold = params.jump_k * s;
-        flagged.extend(d.iter().enumerate().filter(|(_, v)| (**v - med).abs() > threshold).map(|(i, _)| i));
-    }
-    if !flagged.is_empty() {
-        let mut kept = 0;
         for (i, v) in d.iter().enumerate() {
-            if !flagged.contains(&i) {
-                scratch[kept] = *v;
-                kept += 1;
+            let index = span.start + i;
+            if (*v - med).abs() > threshold && !flagged.contains(&index) {
+                flagged.push(index);
             }
         }
+        flagged.sort_unstable();
+    }
+    let read_variance = (band_scale_dn as f64).powi(2) / 2.0;
+    if !flagged.is_empty() {
+        let (mut kept, mut adjacent_pairs, mut previous_kept) = (0, 0, false);
+        for (i, v) in d.iter().enumerate() {
+            let is_kept = !flagged.contains(&(span.start + i));
+            if is_kept {
+                scratch[kept] = *v;
+                kept += 1;
+                adjacent_pairs += previous_kept as usize;
+            }
+            previous_kept = is_kept;
+        }
+        let ngood = (n - flagged.len()) as u32;
+        if kept == 0 {
+            return PixelFit { slope: f32::NAN, ngood, dq: dq | DQ_JUMP_DET | DQ_DO_NOT_USE, noise: f32::NAN, n_usable, first_saturated };
+        }
         let kept_median = median_f32_mut(&mut scratch[..kept]) as f64;
-        let noise = MEDIAN_EFFICIENCY_F32 as f64 * s as f64 / (kept as f64).sqrt() / tgroup_s;
+        let photon_variance = photon_variance_of_a_step(kept_median, params);
+        let noise = median_step_variance(kept, adjacent_pairs, read_variance, photon_variance).sqrt() / tgroup_s;
         return PixelFit {
             slope: (kept_median / tgroup_s) as f32,
-            ngood: (n - flagged.len()) as u16,
+            ngood,
             dq: dq | DQ_JUMP_DET,
             noise: noise as f32,
             n_usable,
@@ -187,11 +311,13 @@ pub fn fit_pixel(
         };
     }
     if n >= params.min_groups_ols {
-        let nf = n as f64;
-        let noise = (s as f64 / 2f64.sqrt()) * (12.0 / (nf * (nf * nf - 1.0))).sqrt() / tgroup_s;
-        return PixelFit { slope: ols_slope(&corrected[..n], tgroup_s) as f32, ngood: n_usable, dq, noise: noise as f32, n_usable, first_saturated };
+        let slope = ols_slope(values, tgroup_s);
+        let photon_variance = photon_variance_of_a_step(slope * tgroup_s, params);
+        let noise = ols_step_variance(n, read_variance, photon_variance).sqrt() / tgroup_s;
+        return PixelFit { slope: slope as f32, ngood: n_usable, dq, noise: noise as f32, n_usable, first_saturated };
     }
-    let noise = MEDIAN_EFFICIENCY_F32 as f64 * s as f64 / (m as f64).sqrt() / tgroup_s;
+    let photon_variance = photon_variance_of_a_step(med as f64, params);
+    let noise = median_step_variance(m, m - 1, read_variance, photon_variance).sqrt() / tgroup_s;
     PixelFit { slope: (med as f64 / tgroup_s) as f32, ngood: n_usable, dq, noise: noise as f32, n_usable, first_saturated }
 }
 
@@ -291,13 +417,27 @@ pub fn band_scale(
     offsets: &ReferenceOffsets,
     params: &QuickSlopeParams,
 ) -> f32 {
-    if check_band_shape(band, width, &band_rows).is_err() {
+    band_scale_with_group_dq(band, None, width, band_rows, science_rows, offsets, params)
+}
+
+pub fn band_scale_with_group_dq(
+    band: &[Vec<f32>],
+    group_dq: Option<&[Vec<f32>]>,
+    width: usize,
+    band_rows: Range<usize>,
+    science_rows: &[usize],
+    offsets: &ReferenceOffsets,
+    params: &QuickSlopeParams,
+) -> f32 {
+    if check_band_shape(band, width, &band_rows).is_err() || group_dq.is_some_and(|dq| check_band_shape(dq, width, &band_rows).is_err()) {
         return 0.0;
     }
     let ngroups = band.len();
     let mut raw = vec![0f32; ngroups];
     let mut corrected = vec![0f32; ngroups];
-    let mut diffs: Vec<f32> = Vec::with_capacity(2 * ngroups);
+    let mut flags = vec![0u32; ngroups];
+    let mut steps: Vec<f32> = Vec::with_capacity(ngroups);
+    let mut step_medians: Vec<f32> = Vec::new();
     let mut pool: Vec<f32> = Vec::new();
     for r in science_rows.iter().copied().step_by(BAND_SCALE_ROW_STEP) {
         let offset_rows: Vec<&[f32]> = (0..ngroups).map(|g| offsets.row(r, g)).collect();
@@ -305,25 +445,67 @@ pub fn band_scale(
             for g in 0..ngroups {
                 raw[g] = band[g][r * width + x];
                 corrected[g] = raw[g] - offset_rows[g][x];
+                if let Some(dq) = group_dq {
+                    flags[g] = dq[g][r * width + x] as u32;
+                }
             }
-            let (n, _) = usable_groups(&raw, &corrected, params.sat_dn);
-            if n < 3 {
+            let span = usable_span(&raw, &corrected, params.sat_dn, group_dq.map(|_| flags.as_slice()));
+            if span.end - span.start < 3 {
                 continue;
             }
-            let m = n - 1;
-            diffs.clear();
-            diffs.extend((0..m).map(|i| corrected[i + 1] - corrected[i]));
-            diffs.extend_from_within(0..m);
-            let (d, scratch) = diffs.split_at_mut(m);
-            let med = median_f32_mut(scratch);
-            pool.extend(d.iter().map(|v| (v - med).abs()));
+            let values = &corrected[span.start..span.end];
+            pool.extend(values.windows(3).map(|w| (w[2] - 2.0 * w[1] + w[0]).abs()));
+            steps.clear();
+            steps.extend(values.windows(2).map(|w| w[1] - w[0]));
+            step_medians.push(median_f32_mut(&mut steps));
         }
     }
     if pool.is_empty() {
-        0.0
-    } else {
-        MAD_TO_SIGMA_F32 * median_f32_mut(&mut pool)
+        return 0.0;
     }
+    let second_difference_sigma = (MAD_TO_SIGMA_F32 * median_f32_mut(&mut pool)) as f64;
+    let mut variance = second_difference_sigma * second_difference_sigma;
+    if let Some(gain) = params.gain_e_per_dn {
+        let typical_step = median_f32_mut(&mut step_medians).max(0.0) as f64;
+        variance = (variance - 2.0 * typical_step / gain as f64).max(0.0);
+    }
+    (variance / SECOND_DIFFERENCE_VARIANCE_RATIO).sqrt() as f32
+}
+
+pub struct PreparedBand {
+    pub groups: Vec<Vec<f32>>,
+    pub group_dq: Option<Vec<Vec<f32>>>,
+    pub science_rows: Vec<usize>,
+    pub offsets: ReferenceOffsets,
+    pub scale: f32,
+}
+
+impl PreparedBand {
+    pub fn group_dq_at(&self, band_row: usize, x: usize, width: usize) -> Option<Vec<u32>> {
+        self.group_dq.as_ref().map(|planes| planes.iter().map(|plane| plane[band_row * width + x] as u32).collect())
+    }
+}
+
+pub fn prepare_band(
+    cube: &LazyCube,
+    ramp_dq: Option<&RampDq>,
+    info: &RampInfo,
+    plan: &SlopePlan,
+    params: &QuickSlopeParams,
+    integration: usize,
+    band: &Range<usize>,
+) -> Result<PreparedBand> {
+    let width = cube.geometry.naxis1;
+    let z0 = integration * info.ngroups;
+    let groups = cube.decode_row_band_batch(z0, z0 + info.ngroups, band.start, band.len())?;
+    let group_dq = ramp_dq.map(|dq| dq.decode_groups(z0, z0 + info.ngroups, band.start, band.len())).transpose()?;
+    let science_rows = science_rows_of_band(plan.layout.as_ref(), band);
+    let offsets = match (&plan.layout, plan.apply_correction) {
+        (Some(layout), true) => reference_offsets(&groups, width, band.clone(), layout, params.ref_window_rows)?,
+        _ => ReferenceOffsets::zero(info.ngroups, width),
+    };
+    let scale = band_scale_with_group_dq(&groups, group_dq.as_deref(), width, band.clone(), &science_rows, &offsets, params);
+    Ok(PreparedBand { groups, group_dq, science_rows, offsets, scale })
 }
 
 #[derive(Debug, Clone)]
@@ -393,39 +575,43 @@ struct BandOutputs<'a> {
 }
 
 fn fit_band(
-    groups: &[Vec<f32>],
+    prepared: &PreparedBand,
     width: usize,
-    science_rows: &[usize],
-    offsets: &ReferenceOffsets,
-    band_scale_dn: f32,
+    band_start: usize,
+    ramp_dq: Option<&RampDq>,
     tgroup_s: f64,
     params: &QuickSlopeParams,
     mut out: BandOutputs,
 ) {
-    let rows = Array1::from_vec(science_rows.to_vec());
-    let ngroups = groups.len();
+    let rows = Array1::from_vec(prepared.science_rows.clone());
+    let ngroups = prepared.groups.len();
     Zip::from(&rows)
         .and(out.sci.axis_iter_mut(Axis(0)))
         .and(out.ngood.axis_iter_mut(Axis(0)))
         .and(out.dq.axis_iter_mut(Axis(0)))
         .and(out.noise.axis_iter_mut(Axis(0)))
         .par_for_each(|&r, mut sci_row, mut ngood_row, mut dq_row, mut noise_row| {
-            let offset_rows: Vec<&[f32]> = (0..ngroups).map(|g| offsets.row(r, g)).collect();
+            let offset_rows: Vec<&[f32]> = (0..ngroups).map(|g| prepared.offsets.row(r, g)).collect();
             let mut raw = vec![0f32; ngroups];
             let mut corrected = vec![0f32; ngroups];
+            let mut flags = vec![0u32; ngroups];
             let mut diffs = Vec::with_capacity(2 * ngroups);
             let mut flagged = Vec::with_capacity(ngroups);
             let row_start = r * width;
             for x in 0..width {
                 for g in 0..ngroups {
-                    let value = groups[g][row_start + x];
+                    let value = prepared.groups[g][row_start + x];
                     raw[g] = value;
                     corrected[g] = value - offset_rows[g][x];
+                    if let Some(dq) = &prepared.group_dq {
+                        flags[g] = dq[g][row_start + x] as u32;
+                    }
                 }
-                let fit = fit_pixel(&raw, &corrected, tgroup_s, band_scale_dn, params, &mut diffs, &mut flagged);
+                let group_dq = prepared.group_dq.as_ref().map(|_| flags.as_slice());
+                let fit = fit_pixel_with_group_dq(&raw, &corrected, group_dq, tgroup_s, prepared.scale, params, &mut diffs, &mut flagged);
                 sci_row[x] = fit.slope;
                 ngood_row[x] = fit.ngood as i32;
-                dq_row[x] = fit.dq;
+                dq_row[x] = fit.dq | ramp_dq.map_or(0, |dq| dq.pixel_bits(band_start + r, x));
                 noise_row[x] = fit.noise;
             }
         });
@@ -444,6 +630,8 @@ pub struct QuickSlopeProduct {
     pub tgroup_s: f64,
     pub integration: usize,
     pub warnings: Vec<String>,
+    pub noise_model: NoiseModel,
+    pub dq_source: DqSource,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -474,35 +662,32 @@ pub fn quick_slope(
             bail!("IRS2 layout spans {} rows but the cube frame has {height}", layout.n_fast);
         }
     }
+    let ramp_dq = RampDq::open(cube, info)?;
+    let mut warnings = plan.warnings.clone();
+    if let Some(dq) = &ramp_dq {
+        warnings.push(dq.note().to_string());
+    }
     let out_rows = plan.layout.as_ref().map_or(height, Irs2Layout::science_rows);
     let mut sci = Array2::from_elem((out_rows, width), f32::NAN);
     let mut noise = Array2::from_elem((out_rows, width), f32::NAN);
     let mut ngood = Array2::<i32>::zeros((out_rows, width));
     let mut dq = Array2::<u32>::zeros((out_rows, width));
     let bands = slope_bands(plan.layout.as_ref(), height);
-    let z0 = integration * info.ngroups;
     let mut band_scales_dn = Vec::with_capacity(bands.len());
     for (band_index, band) in bands.iter().enumerate() {
         stop_if_cancelled(cancelled)?;
-        let groups = cube.decode_row_band_batch(z0, z0 + info.ngroups, band.start, band.len())?;
-        let science_rows = science_rows_of_band(plan.layout.as_ref(), band);
-        let offsets = match (&plan.layout, plan.apply_correction) {
-            (Some(layout), true) => reference_offsets(&groups, width, band.clone(), layout, params.ref_window_rows)?,
-            _ => ReferenceOffsets::zero(info.ngroups, width),
-        };
-        let scale = band_scale(&groups, width, band.clone(), &science_rows, &offsets, params);
-        band_scales_dn.push(scale);
-        let out_start = match (&plan.layout, science_rows.first()) {
+        let prepared = prepare_band(cube, ramp_dq.as_ref(), info, &plan, params, integration, band)?;
+        band_scales_dn.push(prepared.scale);
+        let out_start = match (&plan.layout, prepared.science_rows.first()) {
             (Some(layout), Some(first)) => layout.science_row_of(band.start + first).unwrap_or(0),
             _ => band.start,
         };
-        let out_end = out_start + science_rows.len();
+        let out_end = out_start + prepared.science_rows.len();
         fit_band(
-            &groups,
+            &prepared,
             width,
-            &science_rows,
-            &offsets,
-            scale,
+            band.start,
+            ramp_dq.as_ref(),
             tgroup_s,
             params,
             BandOutputs {
@@ -526,7 +711,9 @@ pub fn quick_slope(
         band_scales_dn,
         tgroup_s,
         integration,
-        warnings: plan.warnings,
+        warnings,
+        noise_model: params.noise_model(),
+        dq_source: if ramp_dq.is_some() { DqSource::Groupdq } else { DqSource::Threshold },
     })
 }
 
@@ -538,7 +725,7 @@ mod tests {
     use crate::core::ramp::irs2::{Irs2Resolution, Irs2Sample, IRS2_ALREADY_STRIPPED_NOTE};
     use crate::core::ramp::test_support::{
         deterministic_noise, drift_slope_dn_per_s, irs2_synthetic_value, irs2_truth_slope, owner_like_irs2, write_synthetic_uncal,
-        SyntheticUncal, SYNTHETIC_DRIFT_DN, SYNTHETIC_PEDESTAL_DN, SYNTHETIC_TGROUP_S,
+        NoiseRamps, SyntheticUncal, SYNTHETIC_DRIFT_DN, SYNTHETIC_PEDESTAL_DN, SYNTHETIC_TGROUP_S,
     };
     use crate::core::stacking::is_cancellation;
 
@@ -659,13 +846,15 @@ mod tests {
 
     #[test]
     fn a_linear_ramp_fits_its_slope_exactly_with_no_flags() {
-        let (fit, flagged) = fit_raw(&linear(10, 50.0), 0.0);
+        let (fit, flagged) = fit_raw(&linear(10, 50.0), 3.0);
         assert!(close(fit.slope, 5.0, 1e-6), "{}", fit.slope);
         assert_eq!((fit.ngood, fit.dq, fit.n_usable, fit.first_saturated), (10, 0, 10, None));
         let expected = 3.0 / 2f32.sqrt() * (12.0f32 / 990.0).sqrt() / 10.0;
         assert!(close(fit.noise, expected, 1e-5), "noise {} expected {expected}", fit.noise);
         assert!(close(fit.noise, 0.023355, 1e-5));
         assert!(flagged.is_empty());
+        let (noiseless, _) = fit_raw(&linear(10, 50.0), 0.0);
+        assert_eq!(noiseless.noise, 0.0, "a band with no read noise and no gain has no read noise term");
     }
 
     #[test]
@@ -674,7 +863,7 @@ mod tests {
         for v in raw.iter_mut().skip(6) {
             *v = 65_000.0;
         }
-        let (fit, _) = fit_raw(&raw, 0.0);
+        let (fit, _) = fit_raw(&raw, 3.0);
         assert_eq!((fit.n_usable, fit.first_saturated, fit.dq, fit.ngood), (6, Some(6), DQ_SATURATED, 6));
         assert!(close(fit.slope, 5.0, 1e-6));
         let six = 3.0 / 2f32.sqrt() * (12.0f32 / (6.0 * 35.0)).sqrt() / 10.0;
@@ -696,16 +885,30 @@ mod tests {
     #[test]
     fn a_difference_exactly_at_the_jump_threshold_is_not_flagged_and_one_above_is() {
         let params = QuickSlopeParams { scale_floor_dn: 3.0, jump_k: 5.0, ..Default::default() };
-        let mut ramp: Vec<f32> = (0..10).map(|g| 10.0 * g as f32).collect();
-        ramp[9] = ramp[8] + 25.0;
+        let mut ramp: Vec<f32> = vec![100.0; 10];
+        ramp[9] = ramp[8] + 15.0;
         let (fit, flagged) = fit_with(&ramp, &ramp, 0.0, &params);
         assert!(flagged.is_empty(), "{flagged:?}");
         assert_eq!((fit.dq, fit.ngood, fit.n_usable), (0, 10, 10));
-        ramp[9] = ramp[8] + 25.5;
+        ramp[9] = ramp[8] + 15.5;
         let (fit, flagged) = fit_with(&ramp, &ramp, 0.0, &params);
         assert_eq!(flagged, vec![8]);
         assert_eq!((fit.dq, fit.ngood, fit.n_usable), (DQ_JUMP_DET, 9, 10));
+        assert!(close(fit.slope, 0.0, 1e-6), "{}", fit.slope);
+
+        let mut lit: Vec<f32> = (0..10).map(|g| 10.0 * g as f32).collect();
+        lit[9] = lit[8] + 25.5;
+        let (fit, flagged) = fit_with(&lit, &lit, 0.0, &params);
+        assert!(flagged.is_empty(), "10 DN per group at 1 e-/DN has a photon sigma of sqrt(10) DN, above the 3 DN floor: {flagged:?}");
+        assert_eq!(fit.dq, 0);
+        lit[9] = lit[8] + 26.0;
+        let (fit, flagged) = fit_with(&lit, &lit, 0.0, &params);
+        assert_eq!(flagged, vec![8], "16 DN from the median is above 5 x sqrt(10) = 15.81 DN");
         assert!(close(fit.slope, 1.0, 1e-6), "{}", fit.slope);
+        let with_gain = QuickSlopeParams { gain_e_per_dn: Some(4.0), ..params.clone() };
+        lit[9] = lit[8] + 25.5;
+        let (_, flagged) = fit_with(&lit, &lit, 0.0, &with_gain);
+        assert_eq!(flagged, vec![8], "at 4 e-/DN the photon sigma is sqrt(10 / 4) DN and the 3 DN floor decides again");
     }
 
     #[test]
@@ -740,22 +943,29 @@ mod tests {
         for v in raw.iter_mut().skip(5) {
             *v += 500.0;
         }
-        let (fit, flagged) = fit_raw(&raw, 0.0);
+        let (fit, flagged) = fit_raw(&raw, 3.0);
         assert_eq!((fit.dq, fit.ngood, fit.n_usable), (DQ_JUMP_DET, 9, 10));
         assert!(close(fit.slope, 5.0, 1e-6), "{}", fit.slope);
         assert_eq!(flagged, vec![4]);
-        let expected = 1.2533 * 3.0 / 8f32.sqrt() / 10.0;
+        let single_difference_variance = 9.0f64;
+        let even_median_factor = FRAC_PI_2 * 8.0 / (8.0 + PI - 2.0);
+        let adjacent_pairs_of_eight_kept = 6.0;
+        let correlation_term = 1.0 + 4.0 * adjacent_pairs_of_eight_kept / (PI * 8.0) * (-0.5f64).asin();
+        let expected = ((single_difference_variance / 8.0 * even_median_factor * correlation_term).sqrt() / 10.0) as f32;
+        assert!(close(expected, 0.08793, 1e-4), "{expected}");
         assert!(close(fit.noise, expected, 1e-5), "noise {} expected {expected}", fit.noise);
     }
 
     #[test]
     fn three_groups_skip_the_jump_test_and_use_the_median_difference() {
-        let (fit, flagged) = fit_raw(&[1000.0, 1050.0, 1300.0], 0.0);
+        let (fit, flagged) = fit_raw(&[1000.0, 1050.0, 1300.0], 4.0);
         assert_eq!((fit.dq, fit.ngood, fit.n_usable), (0, 3, 3));
         assert!(flagged.is_empty());
-        let s = (MAD_TO_SIGMA_F32 * 100.0).max(3.0);
         assert!(close(fit.slope, 150.0 / 10.0, 1e-5), "{}", fit.slope);
-        assert!(close(fit.noise, 1.2533 * s / 2f32.sqrt() / 10.0, 1e-4), "{}", fit.noise);
+        let read_sigma = 4.0 / 2f32.sqrt();
+        let half_span_slope_error = read_sigma * 2f32.sqrt() / 2.0 / 10.0;
+        assert!(close(fit.noise, half_span_slope_error, 1e-5), "the median of two differences is (last - first) / 2: {}", fit.noise);
+        assert!(close(fit.noise, 0.2, 1e-5));
     }
 
     #[test]
@@ -1144,5 +1354,164 @@ mod tests {
         assert_eq!(product.dq[[12, 7]], DQ_SATURATED | DQ_DO_NOT_USE);
         assert!(product.sci[[12, 7]].is_nan());
         assert!(close(product.sci[[9, 1]], 5.0, 1e-5));
+    }
+
+    const NOISE_ORACLE: &str = "scripts/oracle/quick_slope_noise_oracle.py, numpy 2.5.4, 400000 ramps per case";
+    const ORACLE_TGROUP_S: f64 = 14.589;
+    const ORACLE_READ_DN: f64 = 8.0;
+    const ORACLE_DIFFERENCE_SIGMA_DN: f64 = 11.313708498984761;
+    const ORACLE_OLS_DARK_STD: f64 = 0.06031;
+    const ORACLE_OLS_READ_ONLY_STD: f64 = 0.06037;
+    const ORACLE_OLS_FIFTY_STD: f64 = 0.65054;
+    const ORACLE_OLS_MIRI_LIKE_STD: f64 = 0.74594;
+    const ORACLE_MEDIAN_DARK_HIT_STD: f64 = 0.21822;
+    const ORACLE_MEDIAN_FIFTY_HIT_STD: f64 = 0.79012;
+    const MC_ROWS: usize = 200;
+    const MC_WIDTH: usize = 100;
+    const MC_BAND_ROWS: usize = 300;
+    const MC_BAND_WIDTH: usize = 200;
+
+    fn oracle_ramps(rate_dn_s: f64, seed: u64) -> NoiseRamps {
+        NoiseRamps { ngroups: 10, tgroup_s: ORACLE_TGROUP_S, rate_dn_s, read_dn: ORACLE_READ_DN, gain_e_dn: 1.0, hit_dn: 0.0, hit_from_group: 0, seed }
+    }
+
+    fn dark_band_scale(ramps: &NoiseRamps, params: &QuickSlopeParams) -> f32 {
+        let dark = NoiseRamps { rate_dn_s: 0.0, hit_dn: 0.0, seed: ramps.seed + 1, ..*ramps };
+        let band = dark.band(MC_BAND_ROWS, MC_BAND_WIDTH);
+        let rows: Vec<usize> = (0..MC_BAND_ROWS).collect();
+        band_scale(&band, MC_BAND_WIDTH, 0..MC_BAND_ROWS, &rows, &ReferenceOffsets::zero(ramps.ngroups, MC_BAND_WIDTH), params)
+    }
+
+    fn fit_noise_ramps(ramps: &NoiseRamps, band_scale_dn: f32, params: &QuickSlopeParams) -> Vec<PixelFit> {
+        let mut diffs = Vec::new();
+        let mut flagged = Vec::new();
+        (0..MC_ROWS * MC_WIDTH)
+            .map(|p| {
+                let raw = ramps.pixel(p);
+                fit_pixel(&raw, &raw, ramps.tgroup_s, band_scale_dn, params, &mut diffs, &mut flagged)
+            })
+            .collect()
+    }
+
+    fn scatter_and_median_noise(fits: &[&PixelFit]) -> (f64, f64, f64) {
+        let n = fits.len() as f64;
+        let mean = fits.iter().map(|f| f.slope as f64).sum::<f64>() / n;
+        let std = (fits.iter().map(|f| (f.slope as f64 - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+        let mut noises: Vec<f32> = fits.iter().map(|f| f.noise).collect();
+        (mean, std, crate::math::median::median_f32_mut(&mut noises) as f64)
+    }
+
+    fn within(value: f64, reference: f64, fraction: f64) -> bool {
+        (value - reference).abs() <= fraction * reference
+    }
+
+    #[test]
+    fn with_a_gain_the_noise_plane_tracks_the_slope_scatter_of_an_illuminated_pixel() {
+        let params = QuickSlopeParams { gain_e_per_dn: Some(1.0), ..Default::default() };
+        let ramps = oracle_ramps(50.0, 11);
+        let fits = fit_noise_ramps(&ramps, dark_band_scale(&ramps, &params), &params);
+        let clean: Vec<&PixelFit> = fits.iter().filter(|f| f.dq == 0).collect();
+        let (mean, std, noise) = scatter_and_median_noise(&clean);
+        println!("50 DN/s gain 1: mean {mean:.4} std {std:.4} median NOISE {noise:.4} oracle {ORACLE_OLS_FIFTY_STD} ({NOISE_ORACLE})");
+        assert!(within(mean, 50.0, 0.001), "the unweighted fit is unbiased: {mean}");
+        assert!(within(std, ORACLE_OLS_FIFTY_STD, 0.03), "simulated scatter {std} against {ORACLE_OLS_FIFTY_STD} from {NOISE_ORACLE}");
+        assert!(within(noise, ORACLE_OLS_FIFTY_STD, 0.10), "median NOISE {noise} against the slope scatter {ORACLE_OLS_FIFTY_STD} from {NOISE_ORACLE}");
+
+        let miri_params = QuickSlopeParams { gain_e_per_dn: Some(3.9), ..Default::default() };
+        let miri = NoiseRamps { ngroups: 40, tgroup_s: 2.775, rate_dn_s: 200.0, read_dn: 5.0, gain_e_dn: 3.9, hit_dn: 0.0, hit_from_group: 0, seed: 13 };
+        let fits = fit_noise_ramps(&miri, dark_band_scale(&miri, &miri_params), &miri_params);
+        let clean: Vec<&PixelFit> = fits.iter().filter(|f| f.dq == 0).collect();
+        let (_, std, noise) = scatter_and_median_noise(&clean);
+        println!("200 DN/s, 40 groups, gain 3.9: std {std:.4} median NOISE {noise:.4} oracle {ORACLE_OLS_MIRI_LIKE_STD}");
+        assert!(within(std, ORACLE_OLS_MIRI_LIKE_STD, 0.03), "simulated scatter {std} against {ORACLE_OLS_MIRI_LIKE_STD} from {NOISE_ORACLE}");
+        assert!(within(noise, ORACLE_OLS_MIRI_LIKE_STD, 0.10), "median NOISE {noise} against {ORACLE_OLS_MIRI_LIKE_STD} from {NOISE_ORACLE}");
+    }
+
+    #[test]
+    fn without_a_gain_the_noise_plane_is_the_read_noise_part_whatever_the_flux() {
+        let params = QuickSlopeParams::default();
+        assert_eq!(params.gain_e_per_dn, None);
+        for (rate, seed) in [(0.0, 21u64), (50.0, 23)] {
+            let ramps = oracle_ramps(rate, seed);
+            let fits = fit_noise_ramps(&ramps, dark_band_scale(&ramps, &params), &params);
+            let clean: Vec<&PixelFit> = fits.iter().filter(|f| f.dq == 0).collect();
+            let (_, std, noise) = scatter_and_median_noise(&clean);
+            println!("{rate} DN/s without gain: std {std:.4} median NOISE {noise:.4} read part {ORACLE_OLS_READ_ONLY_STD}");
+            assert!(within(noise, ORACLE_OLS_READ_ONLY_STD, 0.05), "{rate} DN/s: median NOISE {noise} against the read noise part {ORACLE_OLS_READ_ONLY_STD} from {NOISE_ORACLE}");
+        }
+    }
+
+    #[test]
+    fn the_band_scale_is_the_read_noise_sigma_of_a_group_difference() {
+        let params = QuickSlopeParams::default();
+        let ramps = oracle_ramps(0.0, 31);
+        let scale = dark_band_scale(&ramps, &params) as f64;
+        println!("read noise {ORACLE_READ_DN} DN: band scale {scale:.3} DN against sqrt(2) x read = {ORACLE_DIFFERENCE_SIGMA_DN:.3}");
+        assert!(within(scale, ORACLE_DIFFERENCE_SIGMA_DN, 0.04), "band scale {scale} against {ORACLE_DIFFERENCE_SIGMA_DN}");
+        let fits = fit_noise_ramps(&ramps, scale as f32, &params);
+        let clean: Vec<&PixelFit> = fits.iter().filter(|f| f.dq == 0).collect();
+        let (_, std, noise) = scatter_and_median_noise(&clean);
+        assert!(within(std, ORACLE_OLS_DARK_STD, 0.03), "simulated scatter {std} against {ORACLE_OLS_DARK_STD} from {NOISE_ORACLE}");
+        assert!(within(noise, ORACLE_OLS_DARK_STD, 0.05), "median NOISE {noise} against {ORACLE_OLS_DARK_STD} from {NOISE_ORACLE}");
+
+        let gain_params = QuickSlopeParams { gain_e_per_dn: Some(1.0), ..Default::default() };
+        let lit = oracle_ramps(50.0, 33).band(MC_BAND_ROWS, MC_BAND_WIDTH);
+        let rows: Vec<usize> = (0..MC_BAND_ROWS).collect();
+        let lit_scale = band_scale(&lit, MC_BAND_WIDTH, 0..MC_BAND_ROWS, &rows, &ReferenceOffsets::zero(10, MC_BAND_WIDTH), &gain_params) as f64;
+        println!("uniformly lit band at 50 DN/s with gain 1: band scale {lit_scale:.3} DN");
+        assert!(within(lit_scale, ORACLE_DIFFERENCE_SIGMA_DN, 0.10), "with a gain the photon noise of the band is taken out of its read noise scale: {lit_scale}");
+    }
+
+    #[test]
+    fn the_median_path_noise_tracks_the_slope_scatter_after_a_hit() {
+        let cases = [(0.0, None, ORACLE_MEDIAN_DARK_HIT_STD, 41u64), (50.0, Some(1.0f32), ORACLE_MEDIAN_FIFTY_HIT_STD, 43)];
+        for (rate, gain, oracle_std, seed) in cases {
+            let params = QuickSlopeParams { gain_e_per_dn: gain, ..Default::default() };
+            let ramps = NoiseRamps { hit_dn: 400.0, hit_from_group: 5, ..oracle_ramps(rate, seed) };
+            let fits = fit_noise_ramps(&ramps, dark_band_scale(&ramps, &params), &params);
+            let hit: Vec<&PixelFit> = fits.iter().filter(|f| f.dq == DQ_JUMP_DET && f.ngood == 9).collect();
+            assert!(hit.len() as f64 > 0.95 * fits.len() as f64, "{rate} DN/s: {} of {} ramps flagged exactly the hit", hit.len(), fits.len());
+            let (mean, std, noise) = scatter_and_median_noise(&hit);
+            println!("{rate} DN/s, 400 DN hit at group 5, gain {gain:?}: mean {mean:.4} std {std:.4} median NOISE {noise:.4} oracle {oracle_std}");
+            assert!(within(std, oracle_std, 0.05), "{rate} DN/s: simulated scatter {std} against {oracle_std} from {NOISE_ORACLE}");
+            assert!(within(noise, oracle_std, 0.10), "{rate} DN/s: median NOISE {noise} against {oracle_std} from {NOISE_ORACLE}");
+        }
+    }
+
+    #[test]
+    fn bright_clean_ramps_are_rarely_flagged() {
+        let params = QuickSlopeParams::default();
+        for (rate, seed) in [(50.0, 51u64), (300.0, 53)] {
+            let ramps = oracle_ramps(rate, seed);
+            let fits = fit_noise_ramps(&ramps, dark_band_scale(&ramps, &params), &params);
+            let flagged = jump_fraction(&fits);
+            println!("{rate} DN/s clean ramps: false JUMP_DET {:.3} %", flagged * 100.0);
+            assert!(flagged < 0.005, "{rate} DN/s: false JUMP_DET fraction {flagged}");
+        }
+    }
+
+    #[test]
+    fn a_hit_of_twelve_sigma_on_a_lit_pixel_is_still_flagged() {
+        let params = QuickSlopeParams::default();
+        let sigma = (2.0 * ORACLE_READ_DN * ORACLE_READ_DN + 5.0 * ORACLE_TGROUP_S).sqrt();
+        let ramps = NoiseRamps { hit_dn: (12.0 * sigma) as f32, hit_from_group: 5, ..oracle_ramps(5.0, 61) };
+        let fits = fit_noise_ramps(&ramps, dark_band_scale(&ramps, &params), &params);
+        let detected = jump_fraction(&fits);
+        assert!(detected > 0.95, "a 12 sigma hit at 5 DN/s is flagged in {detected} of the ramps");
+    }
+
+    #[test]
+    fn group_counts_above_the_sixteen_bit_range_are_not_wrapped() {
+        let groups = 70_000usize;
+        let raw: Vec<f32> = (0..groups).map(|g| 1000.0 + 0.5 * g as f32).collect();
+        let (fit, _) = fit_raw(&raw, 0.0);
+        assert_eq!((fit.ngood as usize, fit.n_usable as usize, fit.dq), (groups, groups, 0));
+        let mut saturating = raw.clone();
+        for v in saturating.iter_mut().skip(66_000) {
+            *v = 65_000.0;
+        }
+        let (fit, _) = fit_raw(&saturating, 0.0);
+        assert_eq!(fit.first_saturated.map(|g| g as usize), Some(66_000));
+        assert_eq!(fit.ngood as usize, 66_000);
     }
 }

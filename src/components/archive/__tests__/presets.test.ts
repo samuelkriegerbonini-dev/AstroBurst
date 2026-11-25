@@ -199,7 +199,7 @@ describe("preset results", () => {
     const view = productView(tsoProducts(), "opens", false, PRESETS[0]);
     expect(view.sections.map((s) => [s.key, s.count, s.expanded])).toEqual([
       ["preset", 2, true],
-      ["opens", 1, false],
+      ["intermediate", 1, false],
       ["catalog", 1, false],
       ["preview", 1, false],
     ]);
@@ -209,7 +209,7 @@ describe("preset results", () => {
     const everything = productView(tsoProducts(), "everything", false, PRESETS[0]);
     expect(everything.sections.every((s) => s.expanded)).toBe(true);
     const none = productView(tsoProducts(), "opens", false, PRESETS[2]);
-    expect(none.sections.map((s) => s.key)).toEqual(["opens", "catalog", "preview"]);
+    expect(none.sections.map((s) => s.key)).toEqual(["opens", "intermediate", "catalog", "preview"]);
     expect(none.presetNote).toBe("No Pipeline catalogues files (cat, segm) in this dataset");
     expect(productView(tsoProducts(), "opens", false).presetNote).toBeNull();
   });

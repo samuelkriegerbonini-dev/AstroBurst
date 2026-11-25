@@ -20,13 +20,13 @@
   "equivalent_width": -0.0,
   "fit": {
     "amplitude": 0.0,
-    "amplitude_err": null,
+    "amplitude_err": 0.0,
     "centre": 1.008,
     "centre_err": null,
     "chi2": 0.0,
     "converged": false,
     "dof": 22,
-    "iterations": 16,
+    "iterations": 1,
     "sigma": 0.006000000000000005,
     "sigma_err": null
   },
@@ -39,7 +39,8 @@
     "flux is not positive: centroid set to the peak channel, sigma undefined",
     "continuum scatter is zero or unknown: flux error and SNR are not meaningful",
     "continuum scatter is zero or unknown: the Gaussian fit used unit weights",
-    "Gaussian fit did not converge after 16 iterations: the non-parametric values stand",
+    "Gaussian fit did not converge: the data cannot determine centre and sigma, on which the model does not depend at the fitted point (as when the amplitude is zero); the non-parametric values stand",
+    "Gaussian fit: centre ended on a bound of the fit: no error is quoted there, and the other errors do not account for the bound",
     "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid"
   ],
   "peak": 0.0,

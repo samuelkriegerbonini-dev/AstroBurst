@@ -38,6 +38,8 @@ pub const ROMAN_READ_PATTERN_KEY: &str = "roman.meta.exposure.read_pattern";
 pub const ROMAN_NRESULTANTS_KEY: &str = "roman.meta.exposure.nresultants";
 pub const ROMAN_MA_TABLE_KEY: &str = "roman.meta.exposure.ma_table_name";
 pub const ROMAN_DETECTOR_KEY: &str = "roman.meta.instrument.detector";
+pub const ROMAN_EXPOSURE_KEY: &str = "roman.meta.exposure";
+pub const ROMAN_DATA_KEY: &str = "roman.data";
 
 const SOURCE_FITS: &str = "fits";
 const SOURCE_ASDF: &str = "asdf";
@@ -81,6 +83,15 @@ struct AsdfRampEntry {
 
 static ASDF_RAMP_CACHE: Mutex<Option<AsdfRampEntry>> = Mutex::new(None);
 
+struct AsdfSourceEntry {
+    path: String,
+    plane: PlaneSelector,
+    mtime: Option<SystemTime>,
+    source: Arc<AsdfRampSource>,
+}
+
+static ASDF_SOURCE_CACHE: Mutex<Option<AsdfSourceEntry>> = Mutex::new(None);
+
 #[cfg(test)]
 static ASDF_RAMP_CACHE_EVENTS: Mutex<(usize, usize)> = Mutex::new((0, 0));
 
@@ -97,21 +108,69 @@ fn note_cache_event(hit: bool) {
 #[cfg(not(test))]
 fn note_cache_event(_hit: bool) {}
 
-fn asdf_ramp_image(path: &str, key: &str) -> Result<Arc<AsdfImage>> {
-    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+#[cfg(test)]
+static ASDF_SOURCE_PARSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn asdf_source_parses() -> usize {
+    ASDF_SOURCE_PARSES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn open_asdf(path: &str) -> Result<AsdfFile> {
+    #[cfg(test)]
+    ASDF_SOURCE_PARSES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    AsdfFile::open(path).map_err(|e| anyhow!("ASDF load failed: {}", e))
+}
+
+fn file_mtime(path: &str) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
+fn cached_asdf_image(path: &str, key: &str, mtime: Option<SystemTime>) -> Option<Arc<AsdfImage>> {
+    let slot = ASDF_RAMP_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    slot.as_ref().filter(|entry| entry.path == path && entry.key == key && entry.mtime == mtime).map(|entry| Arc::clone(&entry.image))
+}
+
+fn load_asdf_image(asdf: &AsdfFile, path: &str, key: &str, mtime: Option<SystemTime>) -> Result<Arc<AsdfImage>> {
     let mut slot = ASDF_RAMP_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = slot.as_ref() {
-        if entry.path == path && entry.key == key && entry.mtime == mtime {
-            note_cache_event(true);
-            return Ok(Arc::clone(&entry.image));
-        }
-    }
-    note_cache_event(false);
     slot.take();
-    let asdf = AsdfFile::open(path).map_err(|e| anyhow!("ASDF load failed: {}", e))?;
-    let image = Arc::new(AsdfImage::load_array(&asdf, key).map_err(|e| anyhow!("ASDF load failed: {}", e))?);
+    let image = Arc::new(AsdfImage::load_array(asdf, key).map_err(|e| anyhow!("ASDF load failed: {}", e))?);
     *slot = Some(AsdfRampEntry { path: path.to_string(), key: key.to_string(), mtime, image: Arc::clone(&image) });
     Ok(image)
+}
+
+fn asdf_ramp_image(path: &str, key: &str) -> Result<Arc<AsdfImage>> {
+    let mtime = file_mtime(path);
+    if let Some(image) = cached_asdf_image(path, key, mtime) {
+        note_cache_event(true);
+        return Ok(image);
+    }
+    note_cache_event(false);
+    ASDF_RAMP_CACHE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    load_asdf_image(&open_asdf(path)?, path, key, mtime)
+}
+
+fn cached_asdf_source(path: &str, plane: &PlaneSelector, mtime: Option<SystemTime>) -> Option<Arc<AsdfRampSource>> {
+    let slot = ASDF_SOURCE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    slot.as_ref().filter(|entry| entry.path == path && &entry.plane == plane && entry.mtime == mtime).map(|entry| Arc::clone(&entry.source))
+}
+
+fn asdf_ramp(path: &str, plane: &PlaneSelector, with_image: bool) -> Result<(Arc<AsdfRampSource>, Option<Arc<AsdfImage>>)> {
+    let mtime = file_mtime(path);
+    if let Some(source) = cached_asdf_source(path, plane, mtime) {
+        let image = if with_image { Some(asdf_ramp_image(path, &source.key)?) } else { None };
+        return Ok((source, image));
+    }
+    let asdf = open_asdf(path)?;
+    let source = Arc::new(ramp_source_of(&asdf, path, plane)?);
+    *ASDF_SOURCE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(AsdfSourceEntry { path: path.to_string(), plane: plane.clone(), mtime, source: Arc::clone(&source) });
+    let image = match (with_image, cached_asdf_image(path, &source.key, mtime)) {
+        (false, _) => None,
+        (true, Some(image)) => Some(image),
+        (true, None) => Some(load_asdf_image(&asdf, path, &source.key, mtime)?),
+    };
+    Ok((source, image))
 }
 
 pub(crate) fn release_asdf_ramp(path: &str) {
@@ -119,6 +178,10 @@ pub(crate) fn release_asdf_ramp(path: &str) {
     let mut slot = ASDF_RAMP_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if slot.as_ref().is_some_and(|entry| path_key(&entry.path) == source) {
         slot.take();
+    }
+    let mut parsed = ASDF_SOURCE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if parsed.as_ref().is_some_and(|entry| path_key(&entry.path) == source) {
+        parsed.take();
     }
 }
 
@@ -198,12 +261,15 @@ fn pick_ramp_array(arrays: &[AsdfArrayInfo], plane: &PlaneSelector) -> Option<As
         .or_else(|| arrays.first().cloned())
 }
 
-fn asdf_ramp_source(path: &str, plane: &PlaneSelector) -> Result<AsdfRampSource> {
-    let asdf = AsdfFile::open(path).map_err(|e| anyhow!("ASDF load failed: {}", e))?;
-    let array = pick_ramp_array(&list_arrays(&asdf), plane)
+fn is_roman_ramp_array(tree: &Value, key: &str) -> bool {
+    key == ROMAN_DATA_KEY || tree_node(tree, ROMAN_EXPOSURE_KEY).is_some_and(|node| node.as_mapping().is_some())
+}
+
+fn ramp_source_of(asdf: &AsdfFile, path: &str, plane: &PlaneSelector) -> Result<AsdfRampSource> {
+    let array = pick_ramp_array(&list_arrays(asdf), plane)
         .with_context(|| format!("{} holds no array that can be read as a ramp", path))?;
     let tree = &asdf.tree;
-    let ramp = if is_resultant_stack(&array) {
+    let ramp = if is_resultant_stack(&array) && is_roman_ramp_array(tree, &array.key) {
         let read_pattern = tree_read_pattern(tree, ROMAN_READ_PATTERN_KEY);
         roman_ramp_info(
             &array.shape,
@@ -272,7 +338,7 @@ pub(crate) fn ramp_info_json(path: &str) -> Result<serde_json::Value> {
     if !is_asdf_ref(&reference) {
         return fits_ramp_info_json(path);
     }
-    let source = asdf_ramp_source(&reference.path, &reference.plane)?;
+    let (source, _) = asdf_ramp(&reference.path, &reference.plane, false)?;
     let geometry = plane_geometry(&source.shape);
     Ok(json!({
         KEY_SOURCE: SOURCE_ASDF,
@@ -308,10 +374,10 @@ pub(crate) fn ramp_pixel_series_json(path: &str, x: usize, y: usize, integration
         if integration != 0 {
             bail!("Integration {} out of range (nints=1)", integration);
         }
-        let source = asdf_ramp_source(&reference.path, &reference.plane)?;
-        let image = asdf_ramp_image(&reference.path, &source.key)?;
+        let (source, image) = asdf_ramp(&reference.path, &reference.plane, true)?;
+        let image = image.context("the ASDF ramp array was not loaded")?;
         let values = asdf_pixel_series(&image, x, y)?;
-        (values, source.ramp, image.plane_count(), 1)
+        (values, source.ramp.clone(), image.plane_count(), 1)
     } else {
         let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
         let values = cube.extract_group_series(y, x, integration)?;
@@ -429,8 +495,8 @@ pub(crate) fn ramp_frame_json(
     if !is_asdf_ref(&reference) {
         return cube_frame_json(path, frame_index, output_path, output_fits);
     }
-    let source = asdf_ramp_source(&reference.path, &reference.plane)?;
-    let image = asdf_ramp_image(&reference.path, &source.key)?;
+    let (_, image) = asdf_ramp(&reference.path, &reference.plane, true)?;
+    let image = image.context("the ASDF ramp array was not loaded")?;
     let plane = image
         .plane(frame_index)
         .with_context(|| format!("Frame index {} out of range (depth={})", frame_index, image.plane_count()))?;
@@ -772,7 +838,7 @@ mod tests {
         let mixed = write_asdf(&dir, "mixed.asdf", &format!("{}{}", INTERLEAVED_COLOUR_TREE, PLANAR_CUBE_TREE));
         let info = ramp_info_json(&mixed).unwrap();
         assert_eq!(info[KEY_ARRAY_KEY], "cube");
-        assert_eq!(info[RES_RAMP]["ngroups"], 2);
+        assert!(info[RES_RAMP].is_null(), "a planar cube outside a roman tree is not a WFI ramp: {}", info[RES_RAMP]);
         assert_eq!(info[RES_FRAMES], 2);
     }
 
@@ -872,6 +938,73 @@ mod tests {
         std::fs::write(&path, std::fs::read(&path).unwrap()).unwrap();
         let rewritten = asdf_ramp_image(&path, "roman.data").unwrap();
         assert!(!Arc::ptr_eq(&back, &rewritten), "a newer mtime must reload the array");
+    }
+
+    #[test]
+    fn a_segmented_uncal_reports_its_ramp_and_its_first_exposure_integration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jw02327001001_03101_00001-seg002_nrs1_uncal.fits");
+        let primary = [
+            ("NGROUPS", "5"),
+            ("NINTS", "9"),
+            ("INTSTART", "4"),
+            ("INTEND", "6"),
+            ("TGROUP", "10.0"),
+            ("DATAMODL", "'Level1bModel'"),
+            ("DETECTOR", "'NRS1'"),
+        ];
+        write_u16_ramp_mef(&path, 3, 2, 5, 3, &primary, &[], ramp_value);
+        let key = path.to_str().unwrap();
+        let info = ramp_info_json(key).unwrap();
+        assert!(!info[RES_RAMP].is_null(), "a segment of a segmented exposure is a ramp");
+        assert_eq!((info[RES_RAMP]["ngroups"].as_u64(), info[RES_RAMP]["nints"].as_u64()), (Some(5), Some(3)));
+        assert_eq!(info[RES_RAMP]["intstart"], json!(4));
+        assert_eq!(info[RES_FRAMES], 15);
+        let series = ramp_pixel_series_json(key, 2, 1, Some(2)).unwrap();
+        assert_eq!(series[KEY_VALUES], json!([32012.0, 32112.0, 32212.0, 32312.0, 32412.0]));
+        assert_eq!(series[KEY_NINTS], 3);
+        assert!(ramp_pixel_series_json(key, 2, 1, Some(3)).is_err());
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn a_three_dimensional_asdf_array_outside_a_roman_tree_is_not_a_roman_ramp() {
+        let _serial = ASDF_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_asdf(&dir, "plain_cube.asdf", PLANAR_CUBE_TREE);
+        let info = ramp_info_json(&path).unwrap();
+        assert_eq!(info[KEY_ARRAY_KEY], "cube");
+        assert!(info[RES_RAMP].is_null(), "a cube with no roman node is not a WFI resultant ramp: {}", info[RES_RAMP]);
+        assert_eq!(info[RES_FRAMES], 2);
+        let series = ramp_pixel_series_json(&path, 1, 0, None).unwrap();
+        assert_eq!(series[KEY_VALUES], json!([2.0, 6.0]));
+        assert!(series[KEY_GROUP_TIMES].is_null());
+    }
+
+    #[test]
+    fn repeated_asdf_ramp_requests_parse_the_tree_once() {
+        let _serial = ASDF_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_asdf(&dir, "parse_once.asdf", ROMAN_RAMP_TREE);
+        let png = dir.path().join("frame.png");
+        let before = asdf_source_parses();
+        for x in 0..2 {
+            for y in 0..2 {
+                let series = ramp_pixel_series_json(&path, x, y, None).unwrap();
+                assert_eq!(series[KEY_NGROUPS], 3);
+                assert!(!series[KEY_GROUP_TIMES].is_null());
+            }
+        }
+        for frame in 0..3 {
+            ramp_frame_json(&path, frame, png.to_str().unwrap(), None).unwrap();
+        }
+        let parses = asdf_source_parses() - before;
+        assert_eq!(parses, 1, "seven requests on the same file and array parsed the ASDF tree {parses} times");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, std::fs::read(&path).unwrap()).unwrap();
+        ramp_pixel_series_json(&path, 0, 0, None).unwrap();
+        assert_eq!(asdf_source_parses() - before, 2, "a rewritten file is parsed again");
+        release_asdf_ramp(&path);
     }
 
     #[test]

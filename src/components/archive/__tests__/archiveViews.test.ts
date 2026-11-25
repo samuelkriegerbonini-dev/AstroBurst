@@ -644,7 +644,7 @@ describe("categories in the results", () => {
     const second = tag(markup, "mast-card", ' data-dataset="jw02739-o002_t001_nircam"');
     expect(second).toContain("category unknown");
     expect(markup.split("ab-mast-card-cat").length - 1).toBe(1);
-    expect(markup.split('class="ab-mast-badge">L3<').length - 1).toBe(2);
+    expect(markup.split('class="ab-mast-badge" title="level 3: combined products (i2d, s3d, x1d)">L3<').length - 1).toBe(2);
   });
 
   it("reads unknown in muted text in the table", () => {

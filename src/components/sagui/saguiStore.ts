@@ -3,6 +3,8 @@ import { cancelSagui, cancelSaguiInstall, inspectSaguiInput, inspectSaguiRuntime
 import type { SaguiConfig, SaguiInputInfo, SaguiInstallation, SaguiProgress, SaguiResult, SaguiRuntimeInfo, SaguiSavedResult } from "../../shared/types/sagui";
 import type { CubePrepReport } from "../../shared/types/cubeprep";
 import { cubePrepError, cubePrepPsfTarget, joinProductPath } from "../cubeprep/cubePrepModel";
+import { FITS_INPUT } from "../cubeprep/cubePrepInspect";
+import { recommendedDqMask, runtimeIssuesText } from "./saguiPanelModel";
 
 export interface SaguiApi {
   load(manifestPath: string): Promise<SaguiSavedResult>;
@@ -27,28 +29,51 @@ export interface SaguiState {
   progress: SaguiProgress | null;
   result: SaguiResult | null;
   outputDir: string | null;
-  unit: string | null;
   error: string | null;
 }
 
 const DEFAULT_CONFIG: SaguiConfig = { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 1, psf_target: "", mode: "ward", knn_k: 40 };
+const NUMBER_KEYS = ["n_regions", "starlet_threshold", "dq_exclude_bits", "knn_k"] as const;
+
+function storedConfig(saved: Partial<SaguiConfig>): SaguiConfig {
+  const config = { ...DEFAULT_CONFIG, ...saved };
+  for (const key of NUMBER_KEYS) if (typeof config[key] !== "number" || !Number.isFinite(config[key])) config[key] = DEFAULT_CONFIG[key];
+  if (!Array.isArray(config.starlet_scales) || !config.starlet_scales.every((scale) => typeof scale === "number" && Number.isFinite(scale))) config.starlet_scales = [...DEFAULT_CONFIG.starlet_scales];
+  return config;
+}
 const RESULT_INDEPENDENT_KEYS = new Set<keyof SaguiConfig>(["output_dir", "rscript_path", "library_path"]);
 const API: SaguiApi = { load: loadSaguiResult, inspectInput: inspectSaguiInput, inspectRuntime: inspectSaguiRuntime, run: runSagui, listen: onSaguiProgress, cancel: cancelSagui, install: installSaguiRuntime, listenInstall: onSaguiInstallProgress, cancelInstall: cancelSaguiInstall };
 type SaguiStorage = Pick<Storage, "getItem" | "setItem">;
 function browserStorage(): SaguiStorage | null { try { return typeof window === "undefined" ? null : window.localStorage; } catch { return null; } }
 
-export function saguiConfigProblems(config: SaguiConfig): string[] {
-  const problems: string[] = [];
-  if (!config.input_path.trim()) problems.push("Choose a prepared multiband FITS cube.");
-  if (!config.rscript_path.trim() || !config.library_path.trim()) problems.push("Choose Rscript and its private SAGUI library.");
-  if (!config.output_dir.trim()) problems.push("Choose a working folder.");
-  if (!config.psf_target.trim()) problems.push("Identify the verified common PSF target.");
-  if (!Number.isInteger(config.n_regions) || config.n_regions < 2) problems.push("Choose at least two regions.");
-  if (!Number.isInteger(config.dq_exclude_bits) || config.dq_exclude_bits < 0 || config.dq_exclude_bits > 0xffffffff) problems.push("DQ bits must be an unsigned 32-bit integer.");
-  if (!config.starlet_scales.length || config.starlet_scales.some((scale) => !Number.isInteger(scale) || scale < 1 || scale > 10)) problems.push("Starlet scales must be integers from 1 to 10.");
-  if (!Number.isFinite(config.starlet_threshold) || config.starlet_threshold <= 0) problems.push("Starlet threshold must be positive.");
-  if (!Number.isInteger(config.knn_k) || config.knn_k < 2 || config.knn_k > 4096) problems.push("Sparse neighbours must be between 2 and 4096.");
+export function isRecipePath(path: string): boolean {
+  return /\.json$/i.test(path.trim());
+}
+
+export type SaguiSection = "cube" | "runtime" | "regions" | "run";
+
+export function saguiProblemList(config: SaguiConfig): { section: SaguiSection; text: string }[] {
+  const problems: { section: SaguiSection; text: string }[] = [];
+  const add = (section: SaguiSection, text: string) => problems.push({ section, text });
+  const input = config.input_path.trim();
+  if (!input) add("cube", "Choose a prepared multiband FITS cube.");
+  else if (isRecipePath(input)) add("cube", "The cube field holds a JSON file. A Cube Prep recipe opens in Cube Prep; choose its prepared FITS cube here.");
+  else if (!FITS_INPUT.test(input)) add("cube", "Choose a FITS cube: .fits, .fit or .fts, optionally compressed as .gz, .bz2 or .fz.");
+  if (!config.rscript_path.trim() || !config.library_path.trim()) add("runtime", "Choose Rscript and its private SAGUI library.");
+  if (!config.output_dir.trim()) add("run", "Choose a working folder.");
+  if (!config.psf_target.trim()) add("regions", "Identify the verified common PSF target.");
+  if (!Number.isFinite(config.n_regions)) add("regions", "Enter the number of regions.");
+  else if (!Number.isInteger(config.n_regions)) add("regions", "Number of regions must be a whole number.");
+  else if (config.n_regions < 2) add("regions", "Choose at least two regions.");
+  if (!Number.isInteger(config.dq_exclude_bits) || config.dq_exclude_bits < 0 || config.dq_exclude_bits > 0xffffffff) add("regions", "DQ bits must be an unsigned 32-bit integer.");
+  if (!config.starlet_scales.length || config.starlet_scales.some((scale) => !Number.isInteger(scale) || scale < 1 || scale > 10)) add("regions", "Starlet scales must be integers from 1 to 10.");
+  if (!Number.isFinite(config.starlet_threshold) || config.starlet_threshold <= 0) add("regions", "Starlet threshold must be positive.");
+  if (!Number.isInteger(config.knn_k) || config.knn_k < 2 || config.knn_k > 4096) add("regions", "Sparse neighbours must be between 2 and 4096.");
   return problems;
+}
+
+export function saguiConfigProblems(config: SaguiConfig): string[] {
+  return saguiProblemList(config).map((problem) => problem.text);
 }
 
 export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | null = browserStorage()) {
@@ -56,13 +81,14 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
   let installParent = "";
   try {
     const saved = JSON.parse(storage?.getItem("ab.sagui.v1") ?? "null") as Partial<SaguiConfig> | null;
-    if (saved && typeof saved.input_path === "string" && typeof saved.rscript_path === "string" && typeof saved.library_path === "string" && typeof saved.output_dir === "string") config = { ...config, ...saved };
+    if (saved && typeof saved.input_path === "string" && typeof saved.rscript_path === "string" && typeof saved.library_path === "string" && typeof saved.output_dir === "string") config = storedConfig(saved);
     installParent = storage?.getItem("ab.sagui.installParent.v1") ?? "";
   } catch { config = { ...DEFAULT_CONFIG }; }
-  let state: SaguiState = { config, input: null, runtime: null, status: "idle", operation: null, installParent, installation: null, progress: null, result: null, outputDir: null, unit: null, error: null };
+  let state: SaguiState = { config, input: null, runtime: null, status: "idle", operation: null, installParent, installation: null, progress: null, result: null, outputDir: null, error: null };
   let revision = 0;
   let active: string | null = null;
   let cancelled = false;
+  let verifying = false;
   const subscribers = new Set<() => void>();
   const patch = (change: Partial<SaguiState>) => { state = { ...state, ...change }; subscribers.forEach((listener) => listener()); };
   const check = async (candidate: SaguiConfig) => {
@@ -78,16 +104,27 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
       if (key === revision) patch({ ...data, status: "idle" });
     } catch (error) { if (key === revision) patch({ status: "error", error: cubePrepError(error) }); }
   };
+  const inspectCube = async () => {
+    if (active) return;
+    const path = state.config.input_path.trim();
+    if (!path || isRecipePath(path) || !FITS_INPUT.test(path)) return;
+    const key = ++revision;
+    patch({ status: "checking", operation: null, error: null, input: null });
+    try {
+      const input = await api.inspectInput(path);
+      if (key === revision) patch({ input, status: "idle" });
+    } catch (error) { if (key === revision) patch({ status: "error", error: cubePrepError(error) }); }
+  };
   const restore = async (manifestPath: string) => {
     if (active) return;
     const key = ++revision;
-    patch({ status: "checking", operation: "restore", error: null, input: null, result: null, progress: null, outputDir: null, unit: null, installation: null });
+    patch({ status: "checking", operation: "restore", error: null, input: null, result: null, progress: null, outputDir: null, installation: null });
     try {
       const saved = await api.load(manifestPath);
       if (key !== revision) return;
       const { rscript_path, library_path, output_dir } = state.config;
       const config = { ...saved.config, rscript_path, library_path, output_dir };
-      patch({ config, result: saved.result, outputDir: saved.result.output_dir, unit: saved.result.unit, status: "restored", operation: null });
+      patch({ config, result: saved.result, outputDir: saved.result.output_dir, status: "restored", operation: null });
       try { storage?.setItem("ab.sagui.v1", JSON.stringify(config)); } catch { return; }
     } catch (error) { if (key === revision) patch({ status: "error", operation: null, error: cubePrepError(error) }); }
   };
@@ -110,8 +147,8 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
       const input = await api.inspectInput(path);
       if (key !== revision) return false;
       if (!isCurrent()) { patch({ status: "idle" }); return false; }
-      const config = { ...state.config, input_path: path, output_dir: state.config.output_dir || report.output_dir, psf_target: cubePrepPsfTarget(report, input.bands.map((band) => band.filter)) };
-      patch({ config, input, status: "idle", installation: null, result: null, progress: null, outputDir: null, unit: null });
+      const config = { ...state.config, input_path: path, output_dir: state.config.output_dir || report.output_dir, psf_target: cubePrepPsfTarget(report, input.bands.map((band) => band.filter)), dq_exclude_bits: recommendedDqMask(input.dq_flags) ?? state.config.dq_exclude_bits };
+      patch({ config, input, status: "idle", installation: null, result: null, progress: null, outputDir: null });
       try { storage?.setItem("ab.sagui.v1", JSON.stringify(config)); } catch { return true; }
       return true;
     } catch (error) {
@@ -130,16 +167,18 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
     active = id;
     cancelled = false;
     const candidate = { ...state.config };
-    patch({ status: "checking", operation: "segment", error: null, result: null, input: null, runtime: null, unit: null, progress: null, outputDir: null });
+    const checked = state.input !== null && state.runtime?.ready === true ? { input: state.input, runtime: state.runtime } : null;
+    patch({ status: "checking", operation: "segment", error: null, result: null, input: checked?.input ?? null, runtime: checked?.runtime ?? null, progress: null, outputDir: null });
     let stop: (() => void) | undefined;
     try {
-      const data = await check(candidate);
+      const data = checked ?? await check(candidate);
       if (cancelled) { patch({ status: "cancelled" }); return; }
       patch(data);
-      if (!data.runtime.ready) throw new Error(data.runtime.issues.join(" ") || "The official SAGUI runtime is not ready.");
-      stop = await api.listen(id, (progress) => { if (active === id && !cancelled) patch({ progress }); });
+      if (!data.runtime.ready) throw new Error(runtimeIssuesText(data.runtime.issues) || "The official SAGUI runtime is not ready.");
+      const folder = joinProductPath(candidate.output_dir, `sagui-${id}`);
+      stop = await api.listen(id, (progress) => { if (active === id && !cancelled) patch(progress.current >= 1 ? { progress, outputDir: folder } : { progress }); });
       if (cancelled) { patch({ status: "cancelled" }); return; }
-      patch({ status: "running", unit: data.input.unit, outputDir: joinProductPath(candidate.output_dir, `sagui-${id}`) });
+      patch({ status: "running" });
       const result = await api.run(candidate, id);
       patch({ result, status: "complete", progress: null, outputDir: result.output_dir });
     } catch (error) {
@@ -155,7 +194,7 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
     cancelled = false;
     const { rscript_path: rscript } = state.config;
     const parent = state.installParent;
-    patch({ status: "checking", operation: "install", error: null, installation: null, result: null, input: null, runtime: null, unit: null, progress: null, outputDir: joinProductPath(parent, `install-${id}`) });
+    patch({ status: "checking", operation: "install", error: null, installation: null, result: null, input: null, runtime: null, progress: null, outputDir: joinProductPath(parent, `install-${id}`) });
     let stop: (() => void) | undefined;
     try {
       stop = await api.listenInstall(id, (progress) => { if (active === id && !cancelled) patch({ progress }); });
@@ -163,19 +202,20 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
       patch({ status: "installing" });
       const installation = await api.install(rscript, parent, id);
       if (cancelled) { patch({ status: "cancelled", progress: null }); return; }
+      verifying = true;
       patch({ status: "checking", progress: null });
       const runtime = await api.inspectRuntime(installation.rscript_path, installation.library_path);
-      if (cancelled) { patch({ status: "cancelled" }); return; }
-      if (!runtime.ready) throw new Error(runtime.issues.join(" ") || "The installed SAGUI runtime could not be verified.");
+      if (!runtime.ready) throw new Error(runtimeIssuesText(runtime.issues) || "The installed SAGUI runtime could not be verified.");
       const config = { ...state.config, rscript_path: installation.rscript_path, library_path: installation.library_path };
       patch({ config, installation, runtime, status: "installed", error: null });
       try { storage?.setItem("ab.sagui.v1", JSON.stringify(config)); } catch { return; }
     } catch (error) {
-      patch({ status: cancelled ? "cancelled" : "error", error: cancelled ? null : cubePrepError(error), progress: null });
-    } finally { stop?.(); active = null; cancelled = false; }
+      const stopped = cancelled && !verifying;
+      patch({ status: stopped ? "cancelled" : "error", error: stopped ? null : cubePrepError(error), progress: null });
+    } finally { stop?.(); active = null; cancelled = false; verifying = false; }
   };
   const cancel = async () => {
-    if (!active || cancelled) return;
+    if (!active || cancelled || verifying) return;
     const id = active;
     cancelled = true;
     const running = state.status === "running" || state.status === "installing";
@@ -190,6 +230,7 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
   return {
     get: () => state,
     isJobActive: () => active !== null,
+    canCancel: () => active !== null && !verifying,
     subscribe: (callback: () => void) => { subscribers.add(callback); return () => { subscribers.delete(callback); }; },
     edit: (next: SaguiConfig) => {
       if (active) return;
@@ -197,21 +238,22 @@ export function createSaguiStore(api: SaguiApi = API, storage: SaguiStorage | nu
       const previous = state.config;
       const changed = (key: keyof SaguiConfig) => JSON.stringify(previous[key]) !== JSON.stringify(next[key]);
       const keys = [...new Set([...Object.keys(previous), ...Object.keys(next)])] as (keyof SaguiConfig)[];
+      const config = changed("input_path") && !changed("psf_target") ? { ...next, psf_target: "" } : next;
       const keepResult = state.result !== null && !keys.some((key) => !RESULT_INDEPENDENT_KEYS.has(key) && changed(key));
       patch({
-        config: next, status: "idle", operation: null, progress: null, error: null,
+        config, status: "idle", operation: null, progress: null, error: null,
         ...(changed("input_path") ? { input: null } : {}),
         ...(changed("rscript_path") || changed("library_path") ? { runtime: null } : {}),
-        ...(keepResult ? {} : { result: null, outputDir: null, unit: null }),
+        ...(keepResult ? {} : { result: null, outputDir: null }),
       });
-      try { storage?.setItem("ab.sagui.v1", JSON.stringify(next)); } catch { return; }
+      try { storage?.setItem("ab.sagui.v1", JSON.stringify(config)); } catch { return; }
     },
     setInstallParent: (path: string) => {
       if (active) return;
       patch({ installParent: path });
       try { storage?.setItem("ab.sagui.installParent.v1", path); } catch { return; }
     },
-    inspect, inspectRuntime, prepareCubePrep, restore, run, install, cancel,
+    inspect, inspectCube, inspectRuntime, prepareCubePrep, restore, run, install, cancel,
   };
 }
 

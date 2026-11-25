@@ -2,11 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+const apiKeyMock = vi.hoisted(() =>
+  vi.fn<() => Promise<{ stored: boolean; hint: string | null; service: string }>>(async () => ({ stored: false, hint: null, service: "astrometry" })),
+);
+
 vi.mock("react", async (importOriginal) => (await import("../../test/hookRuntime")).reactWithFakeHooks(await importOriginal()));
 vi.mock("../../services/config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../services/config")>()),
   getConfig: async () => ({ astrometry_api_url: "https://nova.astrometry.net", plate_solve_timeout_secs: 120, data_dir_override: null, mast_quota_gb: null }),
-  getApiKey: async () => ({ key: null }),
+  getApiKey: apiKeyMock,
   getOutputDirInfo: async () => ({ output_dir: "C:/out", total_size: 0, file_count: 0 }),
 }));
 vi.mock("../../infrastructure/tauri", async (importOriginal) => ({
@@ -106,6 +110,13 @@ describe("Settings panel", () => {
     expect(plateSolving).toBeGreaterThan(0);
     expect(catalogs).toBeGreaterThan(plateSolving);
     expect(archive).toBeGreaterThan(catalogs);
+  });
+
+  it("shows the stored key only as the hint Rust sends", async () => {
+    apiKeyMock.mockResolvedValueOnce({ stored: true, hint: "0123...cdef", service: "astrometry" });
+    hooks.mount();
+    hooks.render(ConfigPanel, {});
+    await vi.waitFor(() => expect(textOf(hooks.render(ConfigPanel, {}) as ReactNode)).toContain("0123...cdef"));
   });
 
   it("says the astrometry.net key is only for the optional fallback", async () => {

@@ -19,16 +19,16 @@
   ],
   "equivalent_width": -0.00019128762773786755,
   "fit": {
-    "amplitude": 0.03579254359330141,
-    "amplitude_err": 0.0211396249357024,
-    "centre": 1.0118164757312378,
-    "centre_err": 0.0012740720677298211,
-    "chi2": 15.546625881964658,
-    "converged": false,
+    "amplitude": 0.06317873660733993,
+    "amplitude_err": 0.03084963380665887,
+    "centre": 1.0108564111081573,
+    "centre_err": 0.0004942420009316185,
+    "chi2": 14.289417646920143,
+    "converged": true,
     "dof": 22,
-    "iterations": 50,
-    "sigma": 0.001870330604533843,
-    "sigma_err": 0.0012921475188951994
+    "iterations": 89,
+    "sigma": 0.0008582785125812687,
+    "sigma_err": 0.00047568891331154086
   },
   "flux": 0.00018851550530724835,
   "flux_err": 0.0002768464453071623,
@@ -37,7 +37,7 @@
   "n_channels": 25,
   "notes": [
     "continuum-subtracted profile has a negative second moment: sigma undefined",
-    "Gaussian fit did not converge after 50 iterations: the non-parametric values stand",
+    "Gaussian fit without ERR: absolute-sigma errors from the continuum rms, inflated by sqrt(chi2_red) where chi2_red > 1",
     "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid"
   ],
   "peak": 0.06401201067103313,

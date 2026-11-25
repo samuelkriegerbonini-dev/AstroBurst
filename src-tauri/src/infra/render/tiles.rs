@@ -96,7 +96,7 @@ fn render_tile(
         return Ok(());
     }
 
-    let range = (global_max - global_min).max(1e-10);
+    let range = if global_max > global_min { global_max - global_min } else { 1.0 };
     let inv_range = 255.0 / range;
 
     let mut buf = vec![0u8; tile_size * tile_size];

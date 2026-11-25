@@ -156,25 +156,32 @@ describe("More menu", () => {
     expect(markup.indexOf('data-testid="mast-more"')).toBeGreaterThan(markup.lastIndexOf('data-testid="mast-mission-tab"'));
   });
 
-  it("lists IUE, CLASSY and ULLYSES enabled and the others disabled, each with its reason", () => {
-    const markup = html(MoreMenuList, { view: moreMenuView(MISSIONS, "locked", {}, "jwst", Date.now()), onPick: vi.fn(), onCheck: vi.fn() });
+  it("lists IUE, CLASSY and ULLYSES enabled with a status, Roman CGI disabled, and folds the missions MAST does not serve into one line", () => {
+    const cgi = MISSIONS.map((m) => (m.id === "roman_cgi" ? { ...m, note: "needs Roman authorization; coronagraphy is not processed by the app" } : m));
+    const markup = html(MoreMenuList, { view: moreMenuView(cgi, "locked", {}, "jwst", Date.now()), onPick: vi.fn(), onCheck: vi.fn() });
     expect(tag(markup, "mast-more-menu")).not.toBe("");
     for (const id of ["iue", "classy", "ullyses"]) expect(attrTag(markup, `data-mission="${id}"`)).toContain('aria-disabled="false"');
-    for (const id of ["roman_cgi", "roman_spectra", "tess", "multi_mission"]) expect(attrTag(markup, `data-mission="${id}"`)).toContain('aria-disabled="true"');
+    expect(attrTag(markup, 'data-mission="roman_cgi"')).toContain('aria-disabled="true"');
+    for (const id of ["roman_spectra", "tess", "multi_mission"]) expect(attrTag(markup, `data-mission="${id}"`)).toBe("");
     expect(markup).toContain("search and metadata; no preview images at MAST");
-    expect(markup).toContain("needs Roman authorization; coronagraphy is not processed by AstroBurst");
-    expect(markup.split("not deployed by MAST (HTTP 404, checked 2026-10-16)").length - 1).toBe(3);
-    expect(markup.split("data-check-mission=").length - 1).toBe(3);
+    expect(markup).toContain("needs Roman authorization; coronagraphy is not processed by the app");
+    expect(markup).toContain('data-status="open"');
+    expect(markup).toContain('data-status="token, not processed"');
+    expect(tag(markup, "mast-more-not-served")).not.toBe("");
+    expect(markup).toContain("Not served by MAST today (3)");
+    expect(markup).toContain("Roman Spectra, TESS, All missions");
+    expect(markup).toContain('data-check-missions="roman_spectra tess multi_mission"');
+    expect(markup.split("data-check-mission=").length - 1).toBe(0);
     expect(markup).toContain('role="separator"');
   });
 
-  it("shows a check in flight and the outcome of the last one", () => {
+  it("shows a check in flight on the one Check again of the missions MAST does not serve", () => {
     const at = Date.now();
     const view = moreMenuView(MISSIONS, "locked", { tess: { stage: "checking", at, error: null }, multi_mission: { stage: "done", at, error: null } }, "jwst", at);
     const markup = html(MoreMenuList, { view, onPick: vi.fn(), onCheck: vi.fn() });
-    expect(attrTag(markup, 'data-check-mission="tess"')).toContain('aria-disabled="true"');
+    expect(attrTag(markup, 'data-check-missions="roman_spectra tess multi_mission"')).toContain('aria-disabled="true"');
     expect(markup).toContain("Checking");
-    expect(markup).toContain(`not deployed by MAST (HTTP 404, checked ${clockText(at)} today)`);
+    expect(view.notServed.find((e) => e.id === "multi_mission")?.reason).toBe(`not deployed by MAST (HTTP 404, checked ${clockText(at)} today)`);
   });
 });
 
@@ -188,6 +195,15 @@ describe("missions that are not deployed or have no images", () => {
     expect(markup).toContain(`Checked ${clockText(at)} today (HTTP 404). AstroBurst will show it once MAST deploys it.`);
     expect(tag(markup, "mast-check-again")).toContain('data-checking="false"');
     expect(markup).toContain("Back to JWST");
+  });
+
+  it("offers the same query in the missions MAST serves openly instead of only Back to JWST", () => {
+    const s = on("tess");
+    const markup = region({ ...s, form: { ...s.form, text: "M16" } });
+    expect(markup).toContain(">Search JWST instead<");
+    expect(markup).toContain(">Search HST instead<");
+    expect(markup).not.toContain("Search Roman instead");
+    expect(markup).not.toContain("Back to JWST");
   });
 
   it("marks Check again busy while the probe runs", () => {

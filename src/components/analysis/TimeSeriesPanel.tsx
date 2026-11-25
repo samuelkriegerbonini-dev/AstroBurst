@@ -3,6 +3,8 @@ import { Clock, Download, Loader2, X } from "lucide-react";
 import LightCurveView from "./LightCurveView";
 import LightCurveTablePanel from "./LightCurveTablePanel";
 import PhotometryStatusLine from "./PhotometryStatusLine";
+import StaleResultNote from "./StaleResultNote";
+import { sameRequest } from "../../utils/sameRequest";
 import { photometryGainModel, timeSeriesPhotometry, type GainModel } from "../../services/analysis";
 import { measurementLog, timeSeriesEntry, type TimeSeriesLogOptions } from "../../utils/measurementLog";
 import { cancelProgress } from "../../services/progress";
@@ -203,6 +205,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const [timeAxis, setTimeAxis] = useState<TimeAxis>("bjd");
   const [exoClockTime, setExoClockTime] = useState<ExoClockTime>("jd_utc");
   const [result, setResult] = useState<TimeSeriesResult | null>(null);
+  const [resultRequest, setResultRequest] = useState<unknown>(null);
   const [fluxUnit, setFluxUnit] = useState<string | null>(null);
   const [leftOut, setLeftOut] = useState<number[]>([]);
   const [running, setRunning] = useState(false);
@@ -289,6 +292,21 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
   const apertureValid = apertureRadius !== undefined && apertureRadiusInRange(apertureRadius);
   const apertureHint = apertureRangeHint(apertureField);
   const sent = useMemo(() => measuredTargets(targets.map((t) => t.target)), [targets]);
+  const request = useMemo(
+    () => ({
+      frames: frames.map(pathOf),
+      targets: sent.map(({ x, y, role }) => ({ x, y, role })),
+      apertureRadius,
+      annulusInner,
+      annulusOuter,
+      gain,
+      excludeDq,
+      trackDrift,
+      target: targetInputs.target,
+    }),
+    [frames, sent, apertureRadius, annulusInner, annulusOuter, gain, excludeDq, trackDrift, targetInputs],
+  );
+  const stale = result !== null && !sameRequest(resultRequest, request);
   const overLimit = sent.length > MAX_TIME_SERIES_TARGETS;
   const roleHint = timeSeriesRoleHint(targets.map((t) => t.target.role));
   const onFileGrid = !!filePath && displaysFileGrid(processed, filePath);
@@ -334,6 +352,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
       });
       if (!isCurrentRun(runRef.current, seq)) return;
       setResult(inFrameOrder(res, storeOrder));
+      setResultRequest(request);
       setFluxUnit(referenceUnit);
       setLeftOut([]);
       setSeriesStatus(`Measured ${res.n_frames} ${res.n_frames === 1 ? "frame" : "frames"}, ${res.n_skipped} skipped`);
@@ -349,7 +368,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
         resetProgress();
       }
     }
-  }, [canMeasure, apertureRadius, matching, frames, sent, annulusInner, annulusOuter, gain, excludeDq, trackDrift, targetInputs, resetProgress, clearSavedPath]);
+  }, [canMeasure, apertureRadius, matching, frames, sent, annulusInner, annulusOuter, gain, excludeDq, trackDrift, targetInputs, request, resetProgress, clearSavedPath]);
 
   const cancel = useCallback(() => {
     cancelProgress(TIME_SERIES_PROGRESS_EVENT).catch(() => {});
@@ -441,15 +460,18 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
     if (!exportSource || !analysis) return [];
     const { result: labelled, targetIdx, compIdx } = exportSource;
     const label = (i: number) => labelled.targets[i].label;
+    const jumps = analysis.jumps;
     return [
-      ...(targetIdx >= 0 ? [lightCurveDocFromFrames(labelled, targetIdx, compIdx, timeAxis)] : []),
+      ...(targetIdx >= 0 ? [lightCurveDocFromFrames(labelled, targetIdx, compIdx, timeAxis, { jumps })] : []),
       ...analysis.checkIdx.map((i) =>
-        lightCurveDocFromFrames(labelled, i, compIdx, timeAxis, { id: `check:${i}`, label: `check star ${label(i)}` }),
+        lightCurveDocFromFrames(labelled, i, compIdx, timeAxis, { id: `check:${i}`, label: `check star ${label(i)}`, jumps }),
       ),
       ...(compIdx.length >= 2
-        ? compIdx.map((i) => lightCurveDocFromFrames(labelled, i, compIdx, timeAxis, { id: `comp:${i}`, label: `comp ${label(i)} vs others` }))
+        ? compIdx.map((i) =>
+            lightCurveDocFromFrames(labelled, i, compIdx, timeAxis, { id: `comp:${i}`, label: `comp ${label(i)} vs others`, jumps }),
+          )
         : []),
-      ...compIdx.map((i) => rawFluxDocFromFrames(labelled, i, timeAxis, { overlay: RAW_COMPS_OVERLAY })),
+      ...compIdx.map((i) => rawFluxDocFromFrames(labelled, i, timeAxis, { overlay: RAW_COMPS_OVERLAY, jumps })),
     ];
   }, [exportSource, analysis, timeAxis]);
 
@@ -828,6 +850,7 @@ function TimeSeriesPanel({ filePath }: TimeSeriesPanelProps) {
 
         {result && analysis && group && (
           <>
+            {stale && <StaleResultNote />}
             <div className={SECTION_CLASS}>Light curve</div>
             <div className="grid grid-cols-2 gap-1.5">
               <div className="flex flex-col gap-0.5">

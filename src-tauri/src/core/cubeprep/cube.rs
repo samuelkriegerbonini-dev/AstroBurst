@@ -27,7 +27,9 @@ pub const DQ_DO_NOT_USE: u32 = 1;
 const HIERARCH_PREFIX: &str = "HIERARCH ";
 const PLANE_KEY_PREFIXES: [&str; 2] = ["FILTER", "DATASET"];
 const PLANE_SUMMARY_KEYS: [&str; 3] = ["NFILTERS", "FILTERS", "DATASETS"];
-const CENTRE_KEYS: [&str; 4] = ["GAL_RA", "GAL_DEC", "GAL_XCEN", "GAL_YCEN"];
+const CARD_CENTRE_X: &str = "GAL_XCEN";
+const CARD_CENTRE_Y: &str = "GAL_YCEN";
+const CENTRE_KEYS: [&str; 4] = ["GAL_RA", "GAL_DEC", CARD_CENTRE_X, CARD_CENTRE_Y];
 const PIXEL_BOX_KEYS: [&str; 4] = ["XMINPIX", "XMAXPIX", "YMINPIX", "YMAXPIX"];
 const SIP_ORDER_KEYS: [&str; 6] = ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER", "A_DMAX", "B_DMAX"];
 const SIP_RESIDUAL_KEYS: [&str; 2] = ["SIPMXERR", "SIPIVERR"];
@@ -165,6 +167,7 @@ pub enum MatchStatus {
     Reference,
     Unmatched,
     External,
+    Mismatched,
 }
 
 impl MatchStatus {
@@ -174,11 +177,12 @@ impl MatchStatus {
             Self::Reference => "reference",
             Self::Unmatched => "unmatched",
             Self::External => "external",
+            Self::Mismatched => "mismatched",
         }
     }
 
     pub fn parse(text: &str) -> Option<Self> {
-        [Self::Matched, Self::Reference, Self::Unmatched, Self::External].into_iter().find(|status| status.label() == text.trim())
+        [Self::Matched, Self::Reference, Self::Unmatched, Self::External, Self::Mismatched].into_iter().find(|status| status.label() == text.trim())
     }
 }
 
@@ -1004,6 +1008,15 @@ pub fn subcube(cube: &Cube, x_start: i64, x_end: i64, y_start: i64, y_end: i64) 
     for (key, value) in PIXEL_BOX_KEYS.iter().zip([x_start, x_end, y_start, y_end]) {
         header.set(key, value.to_string());
     }
+    if let Some((x, y)) = header.get_i64(CARD_CENTRE_X).zip(header.get_i64(CARD_CENTRE_Y)) {
+        if (x_start..x_end).contains(&x) && (y_start..y_end).contains(&y) {
+            header.set(CARD_CENTRE_X, (x - x_start).to_string());
+            header.set(CARD_CENTRE_Y, (y - y_start).to_string());
+        } else {
+            header.remove(CARD_CENTRE_X);
+            header.remove(CARD_CENTRE_Y);
+        }
+    }
     push_history(&mut header, &format!("Cut x {x_start}:{x_end}, y {y_start}:{y_end} (0-based pixel indices, end excluded)"));
     Ok(Cube {
         header,
@@ -1047,8 +1060,8 @@ pub fn update_metadata(cube: &mut Cube, redshift: Option<f64>, centre: Option<(f
     }
     remove_keys(header, |key| CENTRE_KEYS.contains(&key));
     if let (Some(x), Some(y)) = (found.x, found.y) {
-        header.set("GAL_XCEN", x.to_string());
-        header.set("GAL_YCEN", y.to_string());
+        header.set(CARD_CENTRE_X, x.to_string());
+        header.set(CARD_CENTRE_Y, y.to_string());
     }
     if found.kind != "UNKNOWN" {
         header.set_f64("GAL_RA", found.ra);
@@ -1543,6 +1556,24 @@ mod tests {
         assert_eq!(cut.filters, cube.filters);
         assert!(matches!(subcube(&cube, 2, 9, 0, 3).unwrap_err(), CubeError::BoxOutside { .. }));
         assert!(matches!(subcube(&cube, 4, 4, 0, 3).unwrap_err(), CubeError::BoxOutside { .. }));
+    }
+
+    #[test]
+    fn a_cut_after_the_header_edit_moves_the_brightest_pixel_cards() {
+        let filters = [("JWST", "F150W"), ("JWST", "F444W")];
+        let mut cube = small_cube(&filters, (9, 12), |_, y, x| if (y, x) == (5, 7) { 40.0 } else { 1.0 });
+        update_metadata(&mut cube, None, None, true).unwrap();
+        assert_eq!((cube.header.get_i64("GAL_XCEN"), cube.header.get_i64("GAL_YCEN")), (Some(7), Some(5)));
+        let cut = subcube(&cube, 2, 10, 1, 9).unwrap();
+        assert_eq!((cut.header.get_i64("GAL_XCEN"), cut.header.get_i64("GAL_YCEN")), (Some(5), Some(4)), "the brightest pixel is counted from the cut origin");
+        let sky = cut.wcs().unwrap().pixel_to_world(cut.header.get_f64("GAL_XCEN").unwrap(), cut.header.get_f64("GAL_YCEN").unwrap());
+        assert!((sky.ra - cut.header.get_f64("GAL_RA").unwrap()).abs() < 1e-9 && (sky.dec - cut.header.get_f64("GAL_DEC").unwrap()).abs() < 1e-9);
+        assert_eq!(cut.planes[0][[4, 5]], 40.0);
+        let again = subcube(&cut, 1, 8, 2, 8).unwrap();
+        assert_eq!((again.header.get_i64("GAL_XCEN"), again.header.get_i64("GAL_YCEN")), (Some(4), Some(2)));
+        let outside = subcube(&cube, 0, 6, 0, 9).unwrap();
+        assert!(outside.header.get("GAL_XCEN").is_none() && outside.header.get("GAL_YCEN").is_none(), "a brightest pixel outside the box has no pixel cards");
+        assert_eq!(outside.header.get_f64("GAL_RA"), cube.header.get_f64("GAL_RA"), "the sky position of the centre stays");
     }
 
     #[test]

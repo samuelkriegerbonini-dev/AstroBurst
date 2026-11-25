@@ -18,14 +18,17 @@ import { statisticsRunKey } from "../../utils/analysisTarget";
 import { Toggle, RunButton, ErrorAlert } from "../ui";
 import MeasurementBadge from "./MeasurementBadge";
 import {
+  EMPTY_SELECTION_REASON,
   STATISTIC_ROWS,
   UNIT_LABELS,
   convertScaleValue,
   convertStatistics,
   fitsSixteenBit,
   formatStatistic,
+  isEmptySelection,
   statisticValue,
   statisticsToCsv,
+  withoutEmptyMoments,
 } from "../../utils/statisticsUnits";
 import { DQ_NOT_APPLIED_PREFIX, STATISTICS_DESCRIPTION, dqExclusionGap } from "../../utils/statisticsNotes";
 import { statisticsClipboardCsv } from "../../utils/statisticsExport";
@@ -188,6 +191,13 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
     region: useRegion && !isShowingComposite ? selectedShape : null,
   });
   const stale = result !== null && !logReady;
+  const emptyChannels = result ? result.channels.filter((c) => isEmptySelection(c.body.statistics)).map((c) => c.label) : [];
+  const emptySelection =
+    emptyChannels.length === 0
+      ? null
+      : emptyChannels.length === result?.channels.length
+        ? EMPTY_SELECTION_REASON
+        : `${emptyChannels.join(", ")}: ${EMPTY_SELECTION_REASON}`;
   const dqGap =
     result && result.excludeDq && !result.masked && !result.composite
       ? dqExclusionGap({ planeReason: file?.path === filePath ? file.result?.plane?.dq_unavailable : null, flagTable })
@@ -211,14 +221,16 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
       dqGap,
       noiseMethod: result.channels.find((c) => c.body.noise)?.body.noise?.method ?? null,
       exportedUtc: new Date().toISOString(),
+      emptySelection,
     });
     navigator.clipboard?.writeText(csv);
     flagCopied();
-  }, [result, stale, converted, noiseSigmas, unit, flagCopied, provenance.file, dqGap]);
+  }, [result, stale, converted, noiseSigmas, unit, flagCopied, provenance.file, dqGap, emptySelection]);
 
   const handleLog = useCallback(() => {
     if (!logReady || !result) return;
-    measurementLog.append(statisticsEntry(provenance, result));
+    const channels = result.channels.map((c) => ({ ...c, body: { ...c.body, statistics: withoutEmptyMoments(c.body.statistics) } }));
+    measurementLog.append(statisticsEntry(provenance, { ...result, channels }));
   }, [logReady, result, provenance]);
 
   const hasTarget = Boolean(filePath) || isShowingComposite;
@@ -317,6 +329,12 @@ function StatisticsPanel({ filePath, composite: isShowingComposite, rgbPath, mea
             {dqGap && (
               <div role="status" className="text-[10px] text-amber-300/90">
                 {DQ_NOT_APPLIED_PREFIX + dqGap}
+              </div>
+            )}
+
+            {emptySelection && (
+              <div role="status" data-empty-selection className="text-[10px] text-amber-300/90">
+                {emptySelection}
               </div>
             )}
 

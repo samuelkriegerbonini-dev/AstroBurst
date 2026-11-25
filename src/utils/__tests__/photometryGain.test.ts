@@ -168,7 +168,7 @@ describe("gainCaption", () => {
 
   it("reports a GAIN card as present but not applied", () => {
     expect(gainCaption(model({ gain_card: 120 }), "")).toBe(
-      "no gain in the header; GAIN=120 present (camera gain setting on ZWO/QHY CMOS; e-/ADU on IRAF/NOAO/LCO pipelines) — not applied; enter the e-/ADU value if that is what it is",
+      "no gain in the header; GAIN=120 present (camera gain setting on ZWO/QHY CMOS; e-/ADU on IRAF/NOAO/LCO pipelines), not applied; enter the e-/ADU value if that is what it is",
     );
   });
 
@@ -208,12 +208,12 @@ describe("gainCaption", () => {
 
   it("prefixes a field value that differs from the header model", () => {
     const caption = gainCaption(headerGain(7), "3.2");
-    expect(caption!.startsWith("field value 3.2 differs from the header model — ")).toBe(true);
-    expect(caption).toBe("field value 3.2 differs from the header model — gain 7 e-/ADU from EGAIN");
+    expect(caption!.startsWith("field value 3.2 differs from the header model: ")).toBe(true);
+    expect(caption).toBe("field value 3.2 differs from the header model: gain 7 e-/ADU from EGAIN");
   });
 
   it("prefixes a value carried over to a file whose Poisson noise comes from the ERR plane (C-S5-3)", () => {
-    expect(gainCaption(ERR_PLANE, "3.5")).toBe(`field value 3.5 differs from the header model — ${ERR_CAPTION}`);
+    expect(gainCaption(ERR_PLANE, "3.5")).toBe(`field value 3.5 differs from the header model: ${ERR_CAPTION}`);
   });
 });
 

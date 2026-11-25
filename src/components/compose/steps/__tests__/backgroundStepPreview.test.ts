@@ -13,6 +13,11 @@ vi.mock("../../../../services/processing", async (importOriginal) => ({
   extractBackgroundBatch: mocks.extractBackgroundBatch,
 }));
 
+vi.mock("../../../../context/WizardRunGuardContext", async () => {
+  const { UNGUARDED_RUNS } = await import("../../../../utils/wizardRunGuard");
+  return { useWizardRunGuard: () => UNGUARDED_RUNS };
+});
+
 vi.mock("../../../../infrastructure/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../infrastructure/tauri")>()),
   getOutputDir: () => Promise.resolve("C:/out"),

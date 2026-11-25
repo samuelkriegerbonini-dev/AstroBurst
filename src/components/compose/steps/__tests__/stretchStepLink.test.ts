@@ -41,7 +41,8 @@ vi.mock("../../../ui", async (importOriginal) => {
 });
 
 vi.mock("../../../../context/CompositeContext", () => ({
-  useCompositeStf: () => ({
+  useCompositePreview: () => ({ compositeVersion: 0 }),
+    useCompositeStf: () => ({
     compositeStfR: context.stf.r,
     compositeStfG: context.stf.g,
     compositeStfB: context.stf.b,
@@ -85,7 +86,6 @@ function render(): void {
     state: AUTO_STF_STATE,
     onStretchChange: () => {},
     onMaskParams: () => {},
-    onMask: () => {},
     onResult: () => {},
     onChannelOutput: () => {},
     onCompositeOp: () => {},

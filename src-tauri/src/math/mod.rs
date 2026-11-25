@@ -1,15 +1,12 @@
-pub mod median;
-pub mod sigma_clip;
-pub mod simd;
+pub mod fitting;
+pub mod fourier;
+pub mod geometry;
+pub mod statistics;
 
-pub mod fft;
-pub mod gauss_newton;
-pub mod complex;
-pub mod normalization;
-pub mod window;
-pub mod subpixel;
-pub mod polygon;
-pub mod bspline;
+pub use fitting::gauss_newton;
+pub use fourier::{complex, fft, normalization, subpixel, window};
+pub use geometry::{bspline, polygon};
+pub use statistics::{median, sigma_clip, simd};
 
 pub use median::{exact_median_mut, exact_median_f64, median_f32_mut, exact_mad_mut, f32_cmp, f64_cmp};
 pub use sigma_clip::sigma_clipped_stats;

@@ -1,0 +1,105 @@
+{
+ "golden": "tso/whtlt",
+ "produced_by": {
+  "script": "tso_golden_whtlt.py",
+  "command": "python -I scripts/oracle/tso_golden_whtlt.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 3155,
+    "sha256": "de31bef3e407461d099beadeffd884e2fa4ea37df5356c4bc9894991f9e092c5"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "ecsv": {
+  "first_line": "# %ECSV 1.0",
+  "line_ending": "LF",
+  "n_header_lines": 20,
+  "delimiter_key_present": false,
+  "delimiter_used": "single space",
+  "schema_line": "# schema: astropy-2.0",
+  "has_serialized_columns_block": true,
+  "has_yaml_anchor_or_alias": false,
+  "column_name_line": "MJD_UTC_NRS1 BJD_TDB_NRS1 whitelight_flux_NRS1"
+ },
+ "layout": "current (MJD_UTC, BJD_TDB, whitelight_flux with optional order and detector suffixes)",
+ "columns": [
+  {
+   "name": "MJD_UTC_NRS1",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "BJD_TDB_NRS1",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux_NRS1",
+   "unit": "Jy",
+   "datatype": "float64"
+  }
+ ],
+ "meta": {
+  "instrument": "NIRSPEC",
+  "exp_type": "NRS_BRIGHTOBJ",
+  "subarray": "SUB2048",
+  "filter": "F290LP",
+  "pupil": null,
+  "target_name": "WISE-J085510.74-071442.5",
+  "number_of_integrations": 44
+ },
+ "meta_key_order": [
+  "instrument",
+  "exp_type",
+  "subarray",
+  "filter",
+  "pupil",
+  "target_name",
+  "number_of_integrations"
+ ],
+ "n_data_rows": 44,
+ "non_numeric_tokens": [],
+ "series": [
+  {
+   "flux_column": "whitelight_flux_NRS1",
+   "time_column": "MJD_UTC_NRS1",
+   "bjd_column": "BJD_TDB_NRS1",
+   "detector_suffix": "NRS1",
+   "order_suffix": null,
+   "flux_unit": "Jy",
+   "time_unit": null,
+   "rows_with_finite_time": 44,
+   "time_first": 60280.05386059504,
+   "time_last": 60280.501435225575,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 899.3127461755648,
+   "flux_first3": [
+    -219.0388902270913,
+    -226.98763483456162,
+    -225.41546757783343
+   ],
+   "flux_last3": [
+    -224.67999978526555,
+    -232.23638911151616,
+    -232.7479249095655
+   ],
+   "flux_sum_fsum": -8701.993488389966,
+   "flux_min": -246.01600284469572,
+   "flux_max": 0.3502760353781277,
+   "flux_negative_rows": 38,
+   "bjd_first": 60280.05657544178,
+   "bjd_last": 60280.50418870245,
+   "bjd_minus_time_s_first": 234.56275784410536
+  }
+ ]
+}

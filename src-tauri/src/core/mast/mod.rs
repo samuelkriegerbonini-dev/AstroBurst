@@ -1,16 +1,7 @@
-pub mod errors;
-pub mod footprints;
-pub mod ids;
-pub mod images;
-pub mod jpeg;
-pub mod local_level;
-pub mod missions;
-pub mod normalize;
-pub mod object_filters;
-pub mod presets;
-pub mod preview;
-pub mod products;
-#[cfg(test)]
-mod provenance;
-pub mod query;
-pub mod types;
+pub mod contract;
+pub mod dataset;
+pub mod search;
+
+pub use contract::{errors, ids, types};
+pub use dataset::{footprints, images, jpeg, preview, products};
+pub use search::{local_level, missions, normalize, object_filters, presets, query};

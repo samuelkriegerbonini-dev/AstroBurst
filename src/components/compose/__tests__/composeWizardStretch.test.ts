@@ -62,7 +62,8 @@ vi.mock("../../../context/PreviewContext", () => ({
 
 vi.mock("../../../context/CompositeContext", () => ({
   useCompositeActions: () => actions,
-  useCompositeStf: () => ({
+  useCompositePreview: () => ({ compositeVersion: 0 }),
+    useCompositeStf: () => ({
     compositeStfR: onScreen.stf.r,
     compositeStfG: onScreen.stf.g,
     compositeStfB: onScreen.stf.b,

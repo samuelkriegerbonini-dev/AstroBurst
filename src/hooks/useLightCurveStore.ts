@@ -6,8 +6,12 @@ export const EMPTY_LIGHT_CURVES: readonly LightCurveDoc[] = Object.freeze([]);
 
 type Listener = () => void;
 
+function sameValues(a: readonly unknown[], b: readonly unknown[]): boolean {
+  return a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
+}
+
 function sameTimeBase(a: LightCurveDoc, b: LightCurveDoc): boolean {
-  return a.timeScale === b.timeScale && a.time.length === b.time.length;
+  return a.timeScale === b.timeScale && sameValues(a.time, b.time) && sameValues(a.pointRef, b.pointRef);
 }
 
 export class LightCurveStore {

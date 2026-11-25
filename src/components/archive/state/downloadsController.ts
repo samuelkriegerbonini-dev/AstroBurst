@@ -8,7 +8,8 @@ import { dockStore } from "../../../hooks/useDockLayout";
 import { FILE_STATUS } from "../../../utils/constants";
 import { spectrumHdu } from "../../../utils/fileKinds";
 import { archiveOpenTool, openableDownload, recoveryInput } from "../logic/downloadView";
-import { downloadsStore, pendingOpens, showGroupOf, unsettledDownloads, type DownloadsStore } from "./downloadsStore";
+import { contextOf, downloadsStore, pendingOpens, showGroupOf, unsettledDownloads, type DownloadsStore, type OpenContext } from "./downloadsStore";
+import { archiveStore } from "./archiveStore";
 
 export interface OpenDeps {
   show: (path: string) => boolean;
@@ -16,6 +17,19 @@ export interface OpenDeps {
   setMode: (mode: AppMode) => void;
   reload: (path: string) => void;
   route?: (opensAs: MastOpensAs | null) => void;
+  here?: () => OpenContext | null;
+  announce?: (text: string) => void;
+  now?: () => number;
+}
+
+export function stillWhereAsked(asked: OpenContext | null, now: OpenContext | null): boolean {
+  if (!asked || !now) return true;
+  return asked.mode === now.mode && asked.mission === now.mission && asked.datasetId === now.datasetId;
+}
+
+export function currentContext(): OpenContext | null {
+  const s = archiveStore.getState();
+  return { mode: appModeStore.get(), mission: s.form.mission, datasetId: s.selectedId ?? "" };
 }
 
 export async function reloadRewritten(path: string): Promise<void> {
@@ -35,7 +49,15 @@ const LIVE_DEPS: OpenDeps = {
     const tool = archiveOpenTool(opensAs, dockStore.get());
     if (tool) dockStore.dispatch({ type: "open", tool });
   },
+  here: currentContext,
+  announce: (text) => archiveStore.dispatch({ type: "announce", text }),
+  now: () => Date.now(),
 };
+
+export function finishedText(items: readonly Pick<MastDownloadItem, "filename">[]): string {
+  if (items.length === 0) return "";
+  return items.length === 1 ? `Downloaded ${items[0].filename}` : `Downloaded ${items.length} files`;
+}
 
 let requestSeq = 0;
 let watching: Promise<void> | null = null;
@@ -67,9 +89,15 @@ function settleFinished(store: DownloadsStore, deps: OpenDeps): void {
       continue;
     }
     store.dispatch({ type: "shown", group });
-    openDownloaded(item, deps);
+    if (stillWhereAsked(contextOf(store.getState(), item), deps.here?.() ?? null)) {
+      openDownloaded(item, deps);
+      continue;
+    }
+    deps.load(item.path);
+    store.dispatch({ type: "ready", id: item.id });
   }
   for (const item of due) if (!item.reused) deps.reload(item.path);
+  deps.announce?.(finishedText(due.filter((item) => !item.reused)));
 }
 
 export function watchDownloads(store: DownloadsStore = downloadsStore, deps: OpenDeps = LIVE_DEPS): Promise<void> {
@@ -77,7 +105,7 @@ export function watchDownloads(store: DownloadsStore = downloadsStore, deps: Ope
   autoSettle ??= store.subscribe(() => settleFinished(store, deps));
   watching = (async () => {
     try {
-      await onMastDownload((item) => store.dispatch({ type: "item", item }));
+      await onMastDownload((item) => store.dispatch({ type: "item", item, at: deps.now?.() }));
       const current = await mastDownloads();
       store.dispatch({ type: "settled", ids: current.filter((item) => item.state === "done").map((item) => item.id) });
       store.dispatch({ type: "snapshot", items: current });
@@ -93,13 +121,14 @@ export async function startDownloads(
   items: readonly MastDownloadInput[],
   open: boolean,
   store: DownloadsStore = downloadsStore,
+  context: OpenContext | null = currentContext(),
 ): Promise<boolean> {
   if (!items.length) return false;
   void watchDownloads(store);
   const requestId = nextDownloadRequestId();
   try {
     const snapshot = await mastDownload(requestId, mission, items, open);
-    if (open) store.dispatch({ type: "showGroup", group: requestId, ids: requestedItems(snapshot, requestId, items).map((item) => item.id) });
+    if (open) store.dispatch({ type: "showGroup", group: requestId, ids: requestedItems(snapshot, requestId, items).map((item) => item.id), context });
     store.dispatch({ type: "snapshot", items: snapshot });
     store.dispatch({ type: "enqueueFailed", error: null });
     store.dispatch({ type: "drawer", open: true });
@@ -116,6 +145,16 @@ function requestedItems(snapshot: readonly MastDownloadItem[], requestId: string
   return snapshot.filter((item) => item.requestId === requestId || (joined(item) && asked(item)));
 }
 
+export async function discardDownload(item: MastDownloadItem, store: DownloadsStore = downloadsStore): Promise<void> {
+  try {
+    await mastDownloadCancel(item.id);
+    store.dispatch({ type: "snapshot", items: await mastDownloads() });
+    store.dispatch({ type: "cancelFailed", error: null });
+  } catch (err) {
+    store.dispatch({ type: "cancelFailed", error: mastErrorOf(err) });
+  }
+}
+
 export async function cancelDownload(item: MastDownloadItem, store: DownloadsStore = downloadsStore): Promise<void> {
   try {
     await mastDownloadCancel(item.id);
@@ -125,8 +164,17 @@ export async function cancelDownload(item: MastDownloadItem, store: DownloadsSto
   }
 }
 
-export function recoverDownload(item: MastDownloadItem, store: DownloadsStore = downloadsStore): Promise<boolean> {
-  return startDownloads(item.mission, [recoveryInput(item)], item.open, store);
+export function recoverDownload(item: MastDownloadItem, store: DownloadsStore = downloadsStore, context: OpenContext | null = currentContext()): Promise<boolean> {
+  return startDownloads(item.mission, [recoveryInput(item)], item.open, store, context);
+}
+
+export function showReady(item: MastDownloadItem, store: DownloadsStore = downloadsStore, deps: OpenDeps = LIVE_DEPS): boolean {
+  store.dispatch({ type: "readyDismissed", id: item.id });
+  return openDownloaded(item, deps);
+}
+
+export function dismissReady(item: MastDownloadItem, store: DownloadsStore = downloadsStore): void {
+  store.dispatch({ type: "readyDismissed", id: item.id });
 }
 
 export async function revealDownload(item: MastDownloadItem): Promise<void> {

@@ -88,10 +88,6 @@ describe("outputKeepList", () => {
       stackedPaths: { r: `${OUT}/stack_r.fits` },
       backgroundPaths: { r: `${OUT}/r_bg.fits`, g: "__wizard_ch_g_aligned" },
       channelResults: { r: { starless: { path: `${OUT}/r_starless.fits`, note: "" }, stretched: null } },
-      starMaskPath: null,
-      segmPath: null,
-      resultPng: null,
-      resultFits: null,
     };
     const keep = outputKeepList({ files: [], records: [], wizard });
     expect(keep).toEqual(expect.arrayContaining([`${OUT}/stack_r.fits`, `${OUT}/r_bg.fits`, `${OUT}/r_starless.fits`]));

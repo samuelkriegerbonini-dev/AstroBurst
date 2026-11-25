@@ -1,10 +1,5 @@
-mod cards;
-mod combine;
-mod drizzle;
+mod integration;
 mod mosaic;
-mod pipeline;
 
-pub use combine::*;
-pub use drizzle::*;
+pub use integration::*;
 pub use mosaic::*;
-pub use pipeline::*;

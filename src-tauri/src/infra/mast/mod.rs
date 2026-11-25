@@ -1,22 +1,13 @@
 pub mod api;
-pub mod auth;
-pub mod cache;
-pub mod client;
-pub mod download;
-pub mod error;
-pub mod hub;
-pub mod lookup;
-pub mod models;
-pub mod peek;
-pub mod queue;
-pub mod ratelimit;
-pub mod registry;
-pub mod secret;
-pub mod service;
-pub mod settings;
+pub mod downloads;
+pub mod http;
+pub mod session;
+
+pub use downloads::{download, peek, queue, transfer};
 #[cfg(any(test, feature = "test-support"))]
-pub mod testing;
-pub mod transfer;
+pub use http::testing;
+pub use http::{client, error, models, ratelimit, secret};
+pub use session::{auth, cache, hub, lookup, registry, service, settings};
 
 pub use api::{Mission, MissionEndpoint};
 pub use client::{AuthTransport, MastClient, MastClientBuilder, RedirectAllowlist, RedirectRules, DEFAULT_BASE_URL};

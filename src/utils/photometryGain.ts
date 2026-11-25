@@ -72,7 +72,7 @@ function unavailableCaption(model: GainModel): string | null {
   if (model.note) parts.push(model.note);
   if (finite(model.gain_card) && model.source === null && GAIN_CARD_UNITS.has(model.unit_class)) {
     parts.push(
-      `GAIN=${formatSignificantFixed(model.gain_card)} present (camera gain setting on ZWO/QHY CMOS; e-/ADU on IRAF/NOAO/LCO pipelines) — not applied; enter the e-/ADU value if that is what it is`,
+      `GAIN=${formatSignificantFixed(model.gain_card)} present (camera gain setting on ZWO/QHY CMOS; e-/ADU on IRAF/NOAO/LCO pipelines), not applied; enter the e-/ADU value if that is what it is`,
     );
   }
   return parts.length > 0 ? parts.join("; ") : null;
@@ -89,5 +89,5 @@ export function gainCaption(model: GainModel | null, fieldText: string): string 
   const caption = modelCaption(model);
   if (caption === null) return null;
   const carriedOver = fieldText !== "" && fieldText !== gainPrefillText(model);
-  return carriedOver ? `field value ${fieldText} differs from the header model — ${caption}` : caption;
+  return carriedOver ? `field value ${fieldText} differs from the header model: ${caption}` : caption;
 }

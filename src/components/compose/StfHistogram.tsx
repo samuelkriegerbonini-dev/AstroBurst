@@ -24,6 +24,7 @@ interface SymmetryPointMarker {
 type StfHistogramProps = (StfMarkers | SymmetryPointMarker) & {
   channels: ChannelSpec[];
   height?: number;
+  version?: number;
 };
 
 interface Curve extends HistogramFrame {
@@ -37,7 +38,7 @@ function sharedFrameTransform(curve: Curve, shared: HistogramFrame | null): stri
 }
 
 export default function StfHistogram(props: StfHistogramProps) {
-  const { channels, height = 44 } = props;
+  const { channels, height = 44, version } = props;
   const [curves, setCurves] = useState<Curve[] | null>(null);
   const channelSig = useMemo(() => channels.map((c) => c.key).join("|"), [channels]);
 
@@ -71,7 +72,7 @@ export default function StfHistogram(props: StfHistogramProps) {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelSig]);
+  }, [channelSig, version]);
 
   if (!curves || curves.length === 0) return null;
 

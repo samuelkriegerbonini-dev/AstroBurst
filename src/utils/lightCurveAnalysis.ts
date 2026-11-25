@@ -1,7 +1,8 @@
 import { MAD_TO_SIGMA } from "./statisticsUnits";
+import { MAG_ERR_PER_RELATIVE_FLUX_ERR } from "./photometryConstants";
 
 export const QUICK_LOOK_LABEL = "quick look, no limb darkening or systematics model";
-export const MAG_ERR_EXACT = 2.5 / Math.LN10;
+export const MAG_ERR_EXACT = MAG_ERR_PER_RELATIVE_FLUX_ERR;
 
 export interface TimeWindow {
   start: number;

@@ -1,7 +1,9 @@
 import { isFiniteNumber } from "./values";
+import { AB_MAG_ZERO_POINT } from "./photometryConstants";
+import { fnuJyToAb } from "./fluxUnits";
 
 export const DEFAULT_LIMIT_SIGMA = 3;
-export const AB_ZERO_POINT_JY = 8.9;
+export const AB_ZERO_POINT_JY = AB_MAG_ZERO_POINT;
 
 export interface UpperLimit {
   isLimit: boolean;
@@ -11,7 +13,7 @@ export interface UpperLimit {
 }
 
 export function abFromJy(fluxJy: number | null | undefined): number | null {
-  return isFiniteNumber(fluxJy) && fluxJy > 0 ? -2.5 * Math.log10(fluxJy) + AB_ZERO_POINT_JY : null;
+  return isFiniteNumber(fluxJy) ? fnuJyToAb(fluxJy) : null;
 }
 
 export function effectiveError(errJy: number | null | undefined, fCorr?: number | null): number | null {

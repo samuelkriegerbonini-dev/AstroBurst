@@ -8,7 +8,7 @@ export function formatTime(ms: number): string {
 }
 
 export function formatThroughput(bytes: number, ms: number): string {
-  if (ms <= 0 || bytes <= 0) return "—";
+  if (ms <= 0 || bytes <= 0) return "--";
   const mbps = (bytes / 1024 / 1024) / (ms / 1000);
   return `${mbps.toFixed(1)} MB/s`;
 }

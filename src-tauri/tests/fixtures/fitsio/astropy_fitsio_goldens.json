@@ -1,0 +1,326 @@
+{
+ "generator": "scripts/oracle/fitsio_review_goldens.py",
+ "astropy": "8.0.2",
+ "numpy": "2.5.4",
+ "python": "3.13.17",
+ "merged_headers": [
+  {
+   "file": "primary_cube_ext_stamp.fits",
+   "astropy_header_1": {
+    "BUNIT": null,
+    "CRVAL1": null,
+    "CTYPE1": null,
+    "DATAMAX": null,
+    "NAXIS3": null,
+    "SIMPLE": null,
+    "EXTEND": null,
+    "TELESCOP": null,
+    "INHERIT": null,
+    "EXTNAME": "STAMP",
+    "NAXIS": 2
+   }
+  },
+  {
+   "file": "primary_cube_ext_stamp_inherit_f.fits",
+   "astropy_header_1": {
+    "BUNIT": null,
+    "CRVAL1": null,
+    "CTYPE1": null,
+    "DATAMAX": null,
+    "NAXIS3": null,
+    "SIMPLE": null,
+    "EXTEND": null,
+    "TELESCOP": null,
+    "INHERIT": false,
+    "EXTNAME": "STAMP",
+    "NAXIS": 2
+   }
+  },
+  {
+   "file": "empty_primary_sci.fits",
+   "astropy_header_1": {
+    "BUNIT": null,
+    "CRVAL1": null,
+    "CTYPE1": null,
+    "DATAMAX": null,
+    "NAXIS3": null,
+    "SIMPLE": null,
+    "EXTEND": null,
+    "TELESCOP": null,
+    "INHERIT": null,
+    "EXTNAME": "SCI",
+    "NAXIS": 2
+   }
+  },
+  {
+   "file": "empty_primary_sci_inherit_f.fits",
+   "astropy_header_1": {
+    "BUNIT": null,
+    "CRVAL1": null,
+    "CTYPE1": null,
+    "DATAMAX": null,
+    "NAXIS3": null,
+    "SIMPLE": null,
+    "EXTEND": null,
+    "TELESCOP": null,
+    "INHERIT": false,
+    "EXTNAME": "SCI",
+    "NAXIS": 2
+   }
+  }
+ ],
+ "scaled_float_columns": [
+  {
+   "file": "tscal_e_0.fits",
+   "tform": "E",
+   "tscal": 1e-17,
+   "tzero": 0.0,
+   "astropy_values": [
+    1e-17,
+    2e-17,
+    3e-17
+   ]
+  },
+  {
+   "file": "tscal_e_1.fits",
+   "tform": "E",
+   "tscal": 0.5,
+   "tzero": 5.0,
+   "astropy_values": [
+    5.5,
+    6.0,
+    6.5
+   ]
+  },
+  {
+   "file": "tscal_d_2.fits",
+   "tform": "D",
+   "tscal": 1e-17,
+   "tzero": 0.0,
+   "astropy_values": [
+    1e-17,
+    2e-17,
+    3e-17
+   ]
+  },
+  {
+   "file": "tscal_d_3.fits",
+   "tform": "D",
+   "tscal": 0.5,
+   "tzero": 5.0,
+   "astropy_values": [
+    5.5,
+    6.0,
+    6.5
+   ]
+  }
+ ],
+ "duplicate_keys": {
+  "file": "duplicate_keys.fits",
+  "astropy_exptime": 100.0,
+  "astropy_bunit": "MJy/sr",
+  "exptime_cards": 2
+ },
+ "heap_gap": {
+  "file": "rice_i16_theap_gap.fits",
+  "gap_bytes": 16,
+  "theap": 200,
+  "astropy_sum": 261136.0,
+  "astropy_identical_to_ungapped": true
+ },
+ "float_cards": [
+  {
+   "bits": "3fd3333333333334",
+   "python_repr": "0.30000000000000004",
+   "astropy_text": "0.30000000000000004",
+   "astropy_card": "K       =  0.30000000000000004                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "3fd3333333333334"
+  },
+  {
+   "bits": "3c670ef54646d497",
+   "python_repr": "1E-17",
+   "astropy_text": "1E-17",
+   "astropy_card": "K       =                1E-17                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "3c670ef54646d497"
+  },
+  {
+   "bits": "4059000000000000",
+   "python_repr": "100.0",
+   "astropy_text": "100.0",
+   "astropy_card": "K       =                100.0                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "4059000000000000"
+  },
+  {
+   "bits": "3eef75104d551d69",
+   "python_repr": "1.5E-05",
+   "astropy_text": "1.5E-05",
+   "astropy_card": "K       =              1.5E-05                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "3eef75104d551d69"
+  },
+  {
+   "bits": "4341c37937e08000",
+   "python_repr": "1E+16",
+   "astropy_text": "1E+16",
+   "astropy_card": "K       =                1E+16                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "4341c37937e08000"
+  },
+  {
+   "bits": "c004000000000000",
+   "python_repr": "-2.5",
+   "astropy_text": "-2.5",
+   "astropy_card": "K       =                 -2.5                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "c004000000000000"
+  },
+  {
+   "bits": "0000000000000000",
+   "python_repr": "0.0",
+   "astropy_text": "0.0",
+   "astropy_card": "K       =                  0.0                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "0000000000000000"
+  },
+  {
+   "bits": "40667ffffffe63af",
+   "python_repr": "179.999999997",
+   "astropy_text": "179.999999997",
+   "astropy_card": "K       =        179.999999997                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "40667ffffffe63af"
+  },
+  {
+   "bits": "3f00002000400080",
+   "python_repr": "3.051850947599719E-05",
+   "astropy_text": "3.05185094759971E-05",
+   "astropy_card": "K       = 3.05185094759971E-05                                                  ",
+   "astropy_text_round_trips": false,
+   "astropy_reads_python_repr_bits": "3f00002000400080"
+  },
+  {
+   "bits": "44dfe185ca57c517",
+   "python_repr": "6.02214076E+23",
+   "astropy_text": "6.02214076E+23",
+   "astropy_card": "K       =       6.02214076E+23                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "44dfe185ca57c517"
+  },
+  {
+   "bits": "0000000000000001",
+   "python_repr": "5E-324",
+   "astropy_text": "5E-324",
+   "astropy_card": "K       =               5E-324                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "0000000000000001"
+  },
+  {
+   "bits": "7fefffffffffffff",
+   "python_repr": "1.7976931348623157E+308",
+   "astropy_text": "1.7976931348623E+308",
+   "astropy_card": "K       = 1.7976931348623E+308                                                  ",
+   "astropy_text_round_trips": false,
+   "astropy_reads_python_repr_bits": "7fefffffffffffff"
+  },
+  {
+   "bits": "81aa74fe1c1e8908",
+   "python_repr": "-1.2345678901234568E-300",
+   "astropy_text": "-1.234567890123E-300",
+   "astropy_card": "K       = -1.234567890123E-300                                                  ",
+   "astropy_text_round_trips": false,
+   "astropy_reads_python_repr_bits": "81aa74fe1c1e8908"
+  },
+  {
+   "bits": "40fe240c9fcb68cd",
+   "python_repr": "123456.78901234567",
+   "astropy_text": "123456.78901234567",
+   "astropy_card": "K       =   123456.78901234567                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "40fe240c9fcb68cd"
+  },
+  {
+   "bits": "3f202e85be180b74",
+   "python_repr": "0.00012345678901234567",
+   "astropy_text": "0.000123456789012345",
+   "astropy_card": "K       = 0.000123456789012345                                                  ",
+   "astropy_text_round_trips": false,
+   "astropy_reads_python_repr_bits": "3f202e85be180b74"
+  },
+  {
+   "bits": "4340000000000001",
+   "python_repr": "9007199254740994.0",
+   "astropy_text": "9007199254740994.0",
+   "astropy_card": "K       =   9007199254740994.0                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "4340000000000001"
+  },
+  {
+   "bits": "3fd5555555555555",
+   "python_repr": "0.3333333333333333",
+   "astropy_text": "0.3333333333333333",
+   "astropy_card": "K       =   0.3333333333333333                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "3fd5555555555555"
+  },
+  {
+   "bits": "403a7d70a3d70a3d",
+   "python_repr": "26.49",
+   "astropy_text": "26.49",
+   "astropy_card": "K       =                26.49                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "403a7d70a3d70a3d"
+  },
+  {
+   "bits": "8000000000000000",
+   "python_repr": "-0.0",
+   "astropy_text": "-0.0",
+   "astropy_card": "K       =                 -0.0                                                  ",
+   "astropy_text_round_trips": true,
+   "astropy_reads_python_repr_bits": "8000000000000000"
+  }
+ ],
+ "nddata_layers": [
+  {
+   "uncertainty": "StdDevUncertainty",
+   "extensions": [
+    {
+     "extname": "MASK",
+     "utype": null
+    },
+    {
+     "extname": "UNCERT",
+     "utype": "StdDevUncertainty"
+    }
+   ]
+  },
+  {
+   "uncertainty": "VarianceUncertainty",
+   "extensions": [
+    {
+     "extname": "MASK",
+     "utype": null
+    },
+    {
+     "extname": "UNCERT",
+     "utype": "VarianceUncertainty"
+    }
+   ]
+  },
+  {
+   "uncertainty": "InverseVariance",
+   "extensions": [
+    {
+     "extname": "MASK",
+     "utype": null
+    },
+    {
+     "extname": "UNCERT",
+     "utype": "InverseVariance"
+    }
+   ]
+  }
+ ]
+}

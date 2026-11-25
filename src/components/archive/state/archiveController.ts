@@ -131,7 +131,7 @@ export interface ArchiveController {
   tryMission(id: MastMissionId): Promise<void>;
   checkMission(id: MastMissionId): Promise<void>;
   openRomanAccess(): void;
-  saveToken(raw: string): Promise<void>;
+  saveToken(raw: string): Promise<boolean>;
   checkToken(): Promise<void>;
   cancelTokenCheck(): void;
   clearToken(): Promise<void>;
@@ -140,6 +140,7 @@ export interface ArchiveController {
   setRomanPanel(open: boolean): void;
   tokenFocusDone(seq: number): void;
   search(opts?: { refresh?: boolean; sort?: SortKey[] }): Promise<void>;
+  refresh(): Promise<void>;
   cancelSearch(): void;
   loadMore(opts?: { auto?: boolean }): Promise<void>;
   retry(): void;
@@ -397,14 +398,14 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     }
   }
 
-  async function saveToken(raw: string): Promise<void> {
+  async function saveToken(raw: string): Promise<boolean> {
     const s = get();
-    if (s.token.checking) return;
+    if (s.token.checking) return false;
     const before = s.token.status;
     const format = checkTokenFormat(raw);
     if (!format.ok) {
       dispatch({ type: "tokenSaveFailed", error: { code: "mast_bad_input", message: format.reason, context: {} }, status: before ?? { present: false, authorized: null } });
-      return;
+      return false;
     }
     dispatch({ type: "tokenCheckStarted", step: "info" });
     tokenRequest = TOKEN_SAVE_ID;
@@ -413,11 +414,14 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
       tokenRequest = null;
       dispatch({ type: "tokenSaved", status, at: clock.now() });
       afterAuthorized(status);
+      return true;
     } catch (err) {
       const error = mastErrorOf(err);
       const status = await storedStatus(before);
       tokenRequest = null;
-      dispatch({ type: "tokenSaveFailed", error, status, saved: tokenWasSaved(error, before, status) });
+      const saved = tokenWasSaved(error, before, status);
+      dispatch({ type: "tokenSaveFailed", error, status, saved });
+      return false;
     }
   }
 
@@ -533,6 +537,26 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     if (!query || !isCurrent(generation)) return;
     try {
       const page = await call("other", () => services.search(searchId(generation), query, opts.refresh ?? false));
+      dispatch({ type: "pageLoaded", generation, page });
+    } catch (err) {
+      const e = mastErrorOf(err);
+      if (e.code !== "mast_cancelled") dispatch({ type: "searchFailed", generation, error: e, at: clock.now() });
+    }
+  }
+
+  async function refresh(): Promise<void> {
+    cancelObjectSearch();
+    const s = get();
+    const shown = s.shownRun;
+    if (!s.resultsQuery || !shown || s.run || !gateOpen(s)) return;
+    const sort = s.sort.by === "server" ? s.sort.keys : s.resultsQuery.sort;
+    const query: MastQuery = { ...s.resultsQuery, sort: sort.map((k) => ({ ...k })), offset: 0 };
+    const generation = s.generation + 1;
+    cancelAllButThumbs(s.generation);
+    dispatch({ type: "searchStarted", generation, text: shown.text, kind: shown.kind, name: shown.name, query, at: clock.now() });
+    if (s.resolved) dispatch({ type: "nameResolved", generation, resolved: s.resolved, query, at: clock.now() });
+    try {
+      const page = await call("other", () => services.search(searchId(generation), query, true));
       dispatch({ type: "pageLoaded", generation, page });
     } catch (err) {
       const e = mastErrorOf(err);
@@ -899,6 +923,7 @@ export function createArchiveController(deps: ArchiveControllerDeps): ArchiveCon
     setRomanPanel: (open) => dispatch({ type: "tokenPanel", open }),
     tokenFocusDone: (seq) => dispatch({ type: "tokenFocusDone", seq }),
     search,
+    refresh,
     cancelSearch,
     loadMore,
     retry,

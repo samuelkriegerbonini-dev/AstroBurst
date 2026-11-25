@@ -1,0 +1,105 @@
+{
+ "golden": "tso/whtlt",
+ "produced_by": {
+  "script": "tso_golden_whtlt.py",
+  "command": "python -I scripts/oracle/tso_golden_whtlt.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw04498-o013_t008_miri_p750l-slitlessprism_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 4166,
+    "sha256": "35dd53592a4c01c9c809b9b37b20fc8df4cbfd67a06b56ba959d6ff2e21d15f7"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "ecsv": {
+  "first_line": "# %ECSV 1.0",
+  "line_ending": "LF",
+  "n_header_lines": 20,
+  "delimiter_key_present": false,
+  "delimiter_used": "single space",
+  "schema_line": "# schema: astropy-2.0",
+  "has_serialized_columns_block": true,
+  "has_yaml_anchor_or_alias": false,
+  "column_name_line": "MJD_UTC BJD_TDB whitelight_flux"
+ },
+ "layout": "current (MJD_UTC, BJD_TDB, whitelight_flux with optional order and detector suffixes)",
+ "columns": [
+  {
+   "name": "MJD_UTC",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "BJD_TDB",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux",
+   "unit": "Jy",
+   "datatype": "float64"
+  }
+ ],
+ "meta": {
+  "instrument": "MIRI",
+  "exp_type": "MIR_LRS-SLITLESS",
+  "subarray": "SLITLESSPRISM",
+  "filter": "P750L",
+  "pupil": null,
+  "target_name": "HR 6538",
+  "number_of_integrations": 64
+ },
+ "meta_key_order": [
+  "instrument",
+  "exp_type",
+  "subarray",
+  "filter",
+  "pupil",
+  "target_name",
+  "number_of_integrations"
+ ],
+ "n_data_rows": 64,
+ "non_numeric_tokens": [],
+ "series": [
+  {
+   "flux_column": "whitelight_flux",
+   "time_column": "MJD_UTC",
+   "bjd_column": "BJD_TDB",
+   "detector_suffix": null,
+   "order_suffix": null,
+   "flux_unit": "Jy",
+   "time_unit": null,
+   "rows_with_finite_time": 64,
+   "time_first": 60463.27446656057,
+   "time_last": 60463.27516218557,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 0.9539999300613999,
+   "flux_first3": [
+    105.1244014781455,
+    106.12335012948236,
+    106.53349239238682
+   ],
+   "flux_last3": [
+    119.09384728254673,
+    118.87525552747529,
+    119.5095089099595
+   ],
+   "flux_sum_fsum": 7420.285204061691,
+   "flux_min": 105.1244014781455,
+   "flux_max": 119.58681092464039,
+   "flux_negative_rows": 0,
+   "bjd_first": 60463.278435296284,
+   "bjd_last": 60463.2791309261,
+   "bjd_minus_time_s_first": 342.89876560214907
+  }
+ ]
+}

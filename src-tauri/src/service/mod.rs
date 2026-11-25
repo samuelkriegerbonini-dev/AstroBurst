@@ -1,8 +1,9 @@
-pub mod common;
-pub(crate) mod image_files;
-pub(crate) mod area;
-pub(crate) mod cutout;
-pub mod cubeprep;
-pub mod cubeprep_recipe;
+pub mod cube_preparation;
+pub(crate) mod extraction;
+pub mod image_io;
 pub mod sagui;
-pub(crate) mod empirical_psf;
+
+pub use cube_preparation::{cubeprep, cubeprep_recipe};
+pub(crate) use extraction::{cutout, empirical_psf};
+pub use image_io::common;
+pub(crate) use image_io::{area, image_files};

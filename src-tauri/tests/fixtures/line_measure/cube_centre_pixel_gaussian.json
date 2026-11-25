@@ -20,15 +20,15 @@
   "equivalent_width": -0.007519594888064127,
   "fit": {
     "amplitude": 0.9999983066363657,
-    "amplitude_err": 8.50022980096352e-7,
+    "amplitude_err": 2.8731240418677797e-6,
     "centre": 1.0199999979961245,
-    "centre_err": 2.9445606253232516e-9,
+    "centre_err": 9.952775540720662e-9,
     "chi2": 10.958255906065059,
     "converged": true,
     "dof": 22,
     "iterations": 3,
     "sigma": 0.002999990151443715,
-    "sigma_err": 2.944563243937537e-9
+    "sigma_err": 9.952784391779792e-9
   },
   "flux": 0.007519612589399946,
   "flux_err": 4.750746616343203e-8,
@@ -36,7 +36,9 @@
   "fwhm": 0.007062462506742739,
   "n_channels": 25,
   "notes": [
+    "Gaussian fit without ERR: absolute-sigma errors from the continuum rms, inflated by sqrt(chi2_red) where chi2_red > 1",
     "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid",
+    "sigma_kms, fwhm_kms and the source-frame widths are observed widths: the instrumental width is not removed (no resolving power given)",
     "line velocity from the optical convention with rest wavelength 1.02 um, axis frame BARYCENT, no frame shift applied"
   ],
   "peak": 0.9999976459710171,

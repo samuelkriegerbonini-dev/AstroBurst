@@ -43,7 +43,7 @@ const RESET_DISPLAY_TITLE =
   "Reset this file's display (stretch, limits, colormap, invert, symmetric, STF) and the colorbar, grid and compass";
 
 function formatLimit(v: number): string {
-  if (!Number.isFinite(v)) return "—";
+  if (!Number.isFinite(v)) return "--";
   const abs = Math.abs(v);
   if (abs !== 0 && (abs < 1e-3 || abs >= 1e6)) return v.toExponential(3);
   return v.toFixed(abs < 10 ? 4 : 2);
@@ -51,7 +51,7 @@ function formatLimit(v: number): string {
 
 function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOnlyTitle = NEEDS_GPU_TITLE }: DisplayControlsProps) {
   const {
-    display, setDisplay, limits, limitsLoading, limitsError,
+    display, setDisplay, limits, limitsLoading, limitsError, histError,
     linear, linearBlocked, toggleLinear, resetDisplay, setAsDefault, sameGroup, setSameGroup,
   } = useDisplayContext();
   const { rawPixelsLoading } = useRawPixelsContext();
@@ -436,6 +436,11 @@ function DisplayControlsInner({ vmin, vmax, renderOnlyDisabled = false, renderOn
       {!renderOnlyDisabled && !isMtf && limitsError && (
         <span className="w-full text-[9px] text-red-400/80 truncate" title={limitsError}>
           {limitsError}
+        </span>
+      )}
+      {isMtf && histError && (
+        <span className="w-full text-[9px] text-red-400/80 truncate" title={histError}>
+          {`Histogram failed, default STF in use: ${histError}`}
         </span>
       )}
       {!renderOnlyDisabled && !isMtf && limits && limits.notes.length > 0 && (

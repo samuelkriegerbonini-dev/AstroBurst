@@ -39,6 +39,7 @@ import {
   DRIZZLE_SCALE,
   type DrizzleKernel,
 } from "../../../utils/drizzleParams";
+import { isCancelledRun } from "../../../utils/cancelledRun";
 import {
   claimStackProgress,
   releaseStackProgress,
@@ -48,14 +49,14 @@ import {
 } from "../../../utils/stackProgressLock";
 
 const ELAPSED_TICK_MS = 100;
-const COMPOSE_REJECTION_DEFAULTS: RejectionSettings = { ...boundRejectionSettings(DEFAULT_STACK_SETTINGS), sigmaLow: 3.0, sigmaHigh: 3.0 };
+const COMPOSE_REJECTION_DEFAULTS: RejectionSettings = boundRejectionSettings(DEFAULT_STACK_SETTINGS);
 
 let lastStackToken = 0;
 
 interface StackStepProps {
   state: WizardState;
   dispatch: React.Dispatch<WizardAction>;
-  onStacked: (channelId: string, path: string) => void;
+  onStacked: (channelId: string, path: string, files: string[]) => void;
 }
 
 interface StackDisplayResult {
@@ -168,7 +169,8 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
   ): Promise<StackBinOutcome> => {
     const latest = getState();
     const latestBin = latest.bins.find((b) => b.id === binId);
-    const files = latestBin ? effectiveBinFiles(latest, latestBin).map(resolveEffectivePath) : [];
+    const binFiles = latestBin ? effectiveBinFiles(latest, latestBin) : [];
+    const files = binFiles.map(resolveEffectivePath);
     if (files.length < 2) {
       setErrors((prev) => ({ ...prev, [binId]: `Need at least 2 files after exclusions, got ${files.length}` }));
       return "failed";
@@ -223,14 +225,14 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
       if (discarded()) return "discarded";
       setResults((prev) => ({ ...prev, [binId]: result }));
       if (result.fits_path) {
-        onStacked(binId, result.fits_path);
+        onStacked(binId, result.fits_path, binFiles);
       }
       recordStackOutcome(binId, { store: true, notice: null }, started.generation);
       return "done";
     } catch (e) {
       if (discarded()) return "discarded";
       const msg = e instanceof Error ? e.message : String(e);
-      if (/cancel/i.test(msg)) {
+      if (isCancelledRun(msg)) {
         setCancelled((prev) => ({ ...prev, [binId]: true }));
         return "cancelled";
       }
@@ -286,7 +288,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
         </span>
         <RunButton
           label="Stack All"
-          runningLabel={stackRun?.batch ? `Stacking ${stackRun.batch.label} — ${stackRun.batch.current}/${stackRun.batch.total}` : "Stacking..."}
+          runningLabel={stackRun?.batch ? `Stacking ${stackRun.batch.label}: ${stackRun.batch.current}/${stackRun.batch.total}` : "Stacking..."}
           running={anyLoading}
           disabled={busyLine !== null}
           describedBy={busyLine ? busyId : undefined}
@@ -390,7 +392,7 @@ export default function StackStep({ state, dispatch, onStacked }: StackStepProps
 
       {useDrizzle && Object.keys(state.subframeResults).length > 0 && (
         <p className="text-[9px] text-amber-400/70">
-          Drizzle ignores subframe quality weights — they apply only to sigma-clip stacking.
+          Drizzle ignores subframe quality weights; they apply only to sigma-clip stacking.
         </p>
       )}
       {!useDrizzle && combine === "median" && Object.keys(state.subframeResults).length > 0 && (

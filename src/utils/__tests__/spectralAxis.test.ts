@@ -268,7 +268,7 @@ describe("rest wavelength and corrections", () => {
     expect(formatAxisValue(0.65630001, "μm")).toBe("0.6563");
     expect(formatAxisValue(230.538, "GHz")).toBe("230.5380");
     expect(formatAxisValue(1004.94195886, "km/s")).toBe("1004.9");
-    expect(formatAxisValue(NaN, "km/s")).toBe("—");
+    expect(formatAxisValue(NaN, "km/s")).toBe("--");
   });
 
   it("formats a value to the channel spacing when a step is given", () => {

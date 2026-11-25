@@ -5,6 +5,7 @@ import { generateTiles, generateTilesRgb } from "../../services/tiles";
 import { getOutputDirTiles, getPreviewUrl } from "../../infrastructure/tauri";
 import { computeMaxLevel, createTileSlotPool, readTilePyramid, tileSlotDir, tileUrl } from "../../utils/deepZoomTiles";
 
+export const DEEP_ZOOM_UNAVAILABLE = "Deep Zoom is unavailable in this build";
 export const DEEP_ZOOM_OVERLAYS_NOTICE =
   "Deep Zoom shows the pixels only: the grid, regions, apertures and other overlays are not drawn here.";
 
@@ -112,7 +113,7 @@ function DeepZoomViewer({
       try {
         OSD = (await import("openseadragon")).default;
       } catch {
-        if (!destroyed) setError("OpenSeadragon not installed. Run: npm install openseadragon");
+        if (!destroyed) setError(DEEP_ZOOM_UNAVAILABLE);
         return;
       }
       if (destroyed) return;

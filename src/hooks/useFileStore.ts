@@ -371,6 +371,29 @@ class FileStore {
     this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | (isSelected ? NotifyChannel.Selected : 0));
   }
 
+  fileReloadFailed(id: string, error: string) {
+    const existing = this.state.fileMap.get(id);
+    if (!existing || existing.status !== FILE_STATUS.DONE) return;
+
+    this.state.fileMap.set(id, {
+      ...existing,
+      status: FILE_STATUS.ERROR,
+      error,
+      reloads: (existing.reloads ?? 0) + 1,
+      finishedAt: Date.now(),
+    });
+    this.state.stats = {
+      ...this.state.stats,
+      done: Math.max(0, this.state.stats.done - 1),
+      failed: this.state.stats.failed + 1,
+    };
+    this.state.statsVersion++;
+    const isSelected = this.state.selected === id;
+    if (isSelected) this.state.selectedVersion++;
+    this.bumpVersion();
+    this.scheduleFlush(NotifyChannel.All | NotifyChannel.Stats | (isSelected ? NotifyChannel.Selected : 0));
+  }
+
   switchImageRef(id: string, ref: string, result: ProcessResult) {
     const existing = this.state.fileMap.get(id);
     if (!existing) return;

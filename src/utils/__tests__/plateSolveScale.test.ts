@@ -474,7 +474,7 @@ describe("panelHints", () => {
   });
 
   it("names the header WCS source as the Rust hints do", () => {
-    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/core/astrometry/solve_hints.rs", import.meta.url)), "utf8");
+    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/core/astrometry/plate_solving/solve_hints.rs", import.meta.url)), "utf8");
     expect(rust).toContain(`const WCS_SOURCE: &str = "${WCS_HINT_SOURCE}";`);
   });
 

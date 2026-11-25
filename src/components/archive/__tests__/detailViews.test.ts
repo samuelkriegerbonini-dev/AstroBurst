@@ -325,7 +325,7 @@ describe("products tab", () => {
     );
     const markup = html(DetailPane, { state: s, ctl });
     expect(tag(markup, "mast-products")).toContain('data-state="ready"');
-    expect(markup).toContain(">Products 10<");
+    expect(markup).toContain(">Products 10, 23.61 GB<");
     expect(markup).toMatch(/data-group="image" data-count="2"/);
     expect(markup).toMatch(/data-group="catalog" data-count="1"/);
     const hidden = tag(markup, "mast-hidden-summary");
@@ -341,13 +341,16 @@ describe("products tab", () => {
     expect(markup).toContain("Select files to download");
     expect(markup).toMatch(/<input type="checkbox" class="ab-mast-prow-pick" aria-label="Select a_i2d.fits"/);
     expect(markup).not.toContain("mast-dl-confirm");
-    expect(markup).toContain("Downloads go to the mast folder of the Data folder (Settings)");
+    expect(markup).toContain("Downloads go to the mast folder of the Data folder (Settings), one folder per mission and programme.");
+    expect(markup).toContain('data-testid="mast-select-science"');
+    expect(markup).toContain("Select science files (2)");
     expect(markup).not.toContain("arrives with the download engine");
   });
 
-  it("lists Roman products without checkboxes or download buttons and says why", () => {
-    const roman = MISSIONS.find((m) => m.id === "roman");
-    if (!roman) throw new Error("the fixtures lost the Roman mission");
+  it("lists Roman products without checkboxes or download buttons when the mission does not offer downloads, and says why", () => {
+    const listed = MISSIONS.find((m) => m.id === "roman");
+    if (!listed) throw new Error("the fixtures lost the Roman mission");
+    const roman = { ...listed, capabilities: { ...listed.capabilities, downloads: false }, downloadsNote: "needs an authorized MAST token" } as typeof listed;
     const key = "roman:r0001";
     const s = run(
       base(),
@@ -359,11 +362,11 @@ describe("products tab", () => {
     expect(markup).toContain("a_i2d.fits");
     expect(markup).not.toContain("ab-mast-prow-pick");
     expect(tag(markup, "mast-dl-bar")).toContain('data-state="unavailable"');
-    expect(markup).toContain("Roman downloads are not enabled yet.");
+    expect(markup).toContain("Roman downloads are not offered: needs an authorized MAST token.");
     expect(buttons(markup).filter((b) => /^Download/.test(b))).toEqual([]);
   });
 
-  it("lists IUE products without checkboxes or download buttons and says why", () => {
+  it("offers IUE downloads as soon as the mission lists products, with the listed URI", () => {
     const iue = MISSIONS.find((m) => m.id === "iue");
     if (!iue) throw new Error("the fixtures lost the IUE mission");
     const key = "iue:lwp00501";
@@ -375,10 +378,10 @@ describe("products tab", () => {
     );
     const markup = html(ProductsTab, { state: s, ctl, row: row("lwp00501"), mission: { ...iue, capabilities: { ...iue.capabilities, products: true } } });
     expect(tag(markup, "mast-products")).toContain('data-state="ready"');
-    expect(markup).not.toContain("ab-mast-prow-pick");
-    expect(tag(markup, "mast-dl-bar")).toContain('data-state="unavailable"');
-    expect(markup).toContain("IUE downloads are not enabled yet.");
-    expect(buttons(markup).filter((b) => /^Download/.test(b))).toEqual([]);
+    expect(markup).toContain("ab-mast-prow-pick");
+    expect(tag(markup, "mast-dl-bar")).not.toContain('data-state="unavailable"');
+    expect(markup).not.toContain("IUE downloads are not");
+    expect(buttons(markup).filter((b) => /^Download/.test(b))).toEqual(["Download", "Download and open"]);
   });
 
   it("keeps the product suffix of a long file name in a part of the row that is never cut", () => {
@@ -401,7 +404,7 @@ describe("products tab", () => {
 
   it("disables the checkbox of a file the app cannot download and keeps the others", () => {
     const classy = product("hlsp_classy_hst_cos_j0021+0052_g130m_v1_coadded.fits", "image", 1_000, {
-      mastUri: "mast:HLSP/classy/j0021+0052/hlsp_classy_hst_cos_j0021+0052_g130m_v1_coadded.fits",
+      mastUri: "",
     });
     const list = productList();
     const s = run(
@@ -413,7 +416,7 @@ describe("products tab", () => {
     expect(markup).toMatch(/<input type="checkbox" class="ab-mast-prow-pick" aria-label="Select a_i2d.fits"/);
     const box = /<input[^>]*aria-label="Select hlsp_classy_hst_cos_j0021\+0052_g130m_v1_coadded.fits"[^>]*>/.exec(markup)?.[0] ?? "";
     expect(box).toContain('disabled=""');
-    expect(box).toContain("title=\"Only HLSP files");
+    expect(box).toContain('title="MAST gives no download address for this file"');
     expect(tag(markup, "mast-dl-bar")).not.toContain('data-state="unavailable"');
   });
 
@@ -432,7 +435,7 @@ describe("products tab", () => {
   it("explains when a mission's product lists are not supported yet", () => {
     const markup = html(DetailPane, { state: productsTab(iueState()), ctl });
     expect(tag(markup, "mast-products")).toContain('data-state="unavailable"');
-    expect(markup).toContain("Product lists for IUE arrive with spectra support (MA15)");
+    expect(markup).toContain("MAST lists no products for IUE in AstroBurst yet.");
   });
 });
 

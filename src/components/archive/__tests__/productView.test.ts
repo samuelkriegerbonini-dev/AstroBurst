@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { CLASS_LABELS, copyDownloadUrls, copyMastUris, exactBytes, filenameParts, formatBytes, opensParts, productLabel, productView, sectionExpanded, shortFilename, visibleProducts } from "../logic/productView";
-import { productList } from "./fixtures";
+import {
+  CLASS_LABELS,
+  copyDownloadUrls,
+  copyJdavizUris,
+  copyMastUris,
+  exactBytes,
+  filenameParts,
+  formatBytes,
+  opensParts,
+  productExtras,
+  productLabel,
+  productLabelTitle,
+  productView,
+  scienceSelection,
+  sectionExpanded,
+  shortFilename,
+  versionText,
+  visibleProducts,
+} from "../logic/productView";
+import { product, productList } from "./fixtures";
 
 describe("formatBytes", () => {
   it.each([
@@ -36,7 +54,7 @@ describe("productView", () => {
       ["auxiliary", 1, false],
       ["other", 1, false],
     ]);
-    expect(view.sections[0]).toMatchObject({ title: "Opens in the app", detail: "2 images, 10.84 GB" });
+    expect(view.sections[0]).toMatchObject({ title: "Science files", detail: "2 images, 10.84 GB" });
     expect(view.sections[1]).toMatchObject({ title: "Catalogues and tables", detail: "1 file, 990 MB" });
     expect(view.sections[2]).toMatchObject({ title: "Previews", detail: "1 file, 14 MB (see Previews)" });
   });
@@ -154,6 +172,53 @@ describe("sections on screen", () => {
     expect(productLabel({ cls: "catalog", suffix: "", filename: "JW02358-O030_T003_NIRSPEC_WHTLT.ECSV" })).toBe("Light curve");
     expect(productLabel({ cls: "catalog", suffix: "segm", filename: "a_segm.fits" })).toBe("Segmentation map");
     expect(productLabel({ cls: "catalog", suffix: "cat", filename: "a_cat.ecsv" })).toBe("Catalogue");
-    expect(productLabel({ cls: "spectrum", suffix: "x1dints", filename: "a_x1dints.fits" })).toBe("Spectrum");
+    expect(productLabel({ cls: "spectrum", suffix: "x1dints", filename: "a_x1dints.fits" })).toBe("x1dints");
+    expect(productLabel({ cls: "image", suffix: "", filename: "a.fits" })).toBe("Image");
+    expect(productLabelTitle({ cls: "spectrum", suffix: "x1d" })).toBe("Spectrum: extracted 1-D spectrum");
+    expect(productLabelTitle({ cls: "image", suffix: "zzz" })).toBe("Image");
+  });
+});
+
+describe("science files against intermediate stages", () => {
+  const list = {
+    ...productList(),
+    products: [
+      product("a_cal.fits", "image", 3_000, { suffix: "cal" }),
+      product("a_i2d.fits", "image", 5_000, { suffix: "i2d" }),
+      product("a_x1d.fits", "spectrum", 70, { suffix: "x1d" }),
+      product("a_rate.fits", "image", 2_000, { suffix: "rate" }),
+      product("a_uncal.fits", "ramp", 9_000, { suffix: "uncal" }),
+      product("x_jit.fits", "auxiliary", 5, { suffix: "jit" }),
+    ],
+  };
+
+  it("lists science files open and the intermediate stages folded, each with its size", () => {
+    const view = productView(list, "opens", false);
+    expect(view.sections.map((s) => [s.key, s.count, s.bytes, s.expanded])).toEqual([
+      ["opens", 3, 8_070, true],
+      ["intermediate", 2, 11_000, false],
+      ["auxiliary", 1, 5, false],
+    ]);
+    expect(view.sections[1]).toMatchObject({ title: "Intermediate files", detail: "1 image, 1 ramp, 11 KB" });
+    expect(productView(list, "everything", false).sections.every((s) => s.expanded)).toBe(true);
+  });
+
+  it("selects the science files, skipping the ones the app may not download", () => {
+    const view = productView(list, "opens", false);
+    expect(scienceSelection(view, () => null).map((p) => p.filename)).toEqual(["a_cal.fits", "a_i2d.fits", "a_x1d.fits"]);
+    expect(scienceSelection(view, (p) => (p.suffix === "cal" ? "refused" : null)).map((p) => p.filename)).toEqual(["a_i2d.fits", "a_x1d.fits"]);
+  });
+});
+
+describe("fields MAST added to the product listing", () => {
+  it("reads the Jdaviz URI and the Roman calibration versions when present, and nothing when absent", () => {
+    const calibration = { calibrationSoftwareVersion: "0.19.1", crdsContext: "roman_0042.pmap", crdsSoftwareVersion: "12.1.4" };
+    const roman = { ...product("r_cal.asdf", "image", 10), jdavizUri: "mast:ROMAN/product/r_cal.asdf", calibration } as never;
+    expect(productExtras(roman)).toEqual({ jdavizUri: "mast:ROMAN/product/r_cal.asdf", calibrationVersion: "0.19.1", crdsVersion: "roman_0042.pmap" });
+    expect(versionText(productExtras(roman))).toBe("calibration 0.19.1, CRDS roman_0042.pmap");
+    const plain = product("a_cal.fits", "image", 10);
+    expect(productExtras({ ...plain, jdavizUri: "" } as never)).toEqual({ jdavizUri: null, calibrationVersion: null, crdsVersion: null });
+    expect(versionText(productExtras(plain))).toBeNull();
+    expect(copyJdavizUris([roman, plain])).toBe("mast:ROMAN/product/r_cal.asdf");
   });
 });

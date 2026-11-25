@@ -17,7 +17,7 @@ const LOCK_WORDS: Record<RomanLock, string> = {
 };
 
 function tabLabel(entry: MissionEntry): string {
-  return entry.lock && entry.lock !== "unlocked" ? `${entry.label}, ${LOCK_WORDS[entry.lock]}` : entry.label;
+  return entry.lock && entry.lock !== "unlocked" ? `${entry.label}, ${LOCK_WORDS[entry.lock]}` : `${entry.label}, ${entry.status}`;
 }
 
 export default function MissionTabs({ state, ctl }: MissionTabsProps) {
@@ -67,6 +67,9 @@ export default function MissionTabs({ state, ctl }: MissionTabsProps) {
           >
             {t.lock ? t.lock === "unlocked" ? <LockOpen size={11} aria-hidden="true" /> : <Lock size={11} aria-hidden="true" /> : null}
             {t.label}
+            <span className="ab-mast-tab-status" data-status={t.status} aria-hidden="true">
+              {t.status}
+            </span>
           </button>
         );
       })}

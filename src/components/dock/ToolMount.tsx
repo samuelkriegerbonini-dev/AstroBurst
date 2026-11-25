@@ -11,6 +11,7 @@ import {
 } from "../../utils/dockLayout";
 import { useGpuDisplay } from "../../hooks/useGpuDisplay";
 import { ToolHostContext } from "../../context/ToolHostContext";
+import PanelErrorBoundary from "../ui/PanelErrorBoundary";
 
 export interface ToolMountProps {
   tool: DockToolId;
@@ -118,7 +119,9 @@ const ToolMount = memo(function ToolMount({ tool, content, containers, anchor, a
   if (!mounted || !ready) return null;
   return createPortal(
     <ToolHostContext.Provider value={hostValue}>
-      <Suspense fallback={<TabSpinner />}>{content}</Suspense>
+      <PanelErrorBoundary name={meta.label}>
+        <Suspense fallback={<TabSpinner />}>{content}</Suspense>
+      </PanelErrorBoundary>
     </ToolHostContext.Provider>,
     host,
   );

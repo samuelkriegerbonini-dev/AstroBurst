@@ -195,7 +195,7 @@ export default function CommandPalette({ open, onClose, actions, files, selected
                   {Icon && <Icon size={13} style={{ flexShrink: 0, opacity: 0.7 }} />}
                   <span className="ab-cmdp-item-label">
                     {entry.label}
-                    {entry.kind === "file" && entry.key === `f:${selectedId}` && <span className="ab-cmdp-current"> — current</span>}
+                    {entry.kind === "file" && entry.key === `f:${selectedId}` && <span className="ab-cmdp-current"> (current)</span>}
                   </span>
                   {entry.hint && <span className="ab-cmdp-hint">{entry.hint}</span>}
                 </button>

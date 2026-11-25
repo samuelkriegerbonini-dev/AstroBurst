@@ -18,6 +18,7 @@ import { bandOfPath, forcedRequest, isStale } from "../../utils/forcedPhotometry
 import { FORCED_LAYER_ID, forcedApertureLayer } from "../../utils/forcedOverlay";
 import { overlayStore } from "../../utils/overlayStore";
 import { measurementLog } from "../../utils/measurementLog";
+import { analysisMeasureKey } from "../../utils/analysisTarget";
 import { forcedPhotometryEntry } from "../../utils/measurementLogForced";
 import { APERTURE_LAYER_KIND, createAperturePainter } from "../viewer/painters/aperturePainter";
 import { progressText, runLabel, runSummary } from "./forcedPhotometryPanelModel";
@@ -31,7 +32,15 @@ export function ForcedPhotometryPanelInner({ filePath }: ForcedPhotometryPanelPr
   const state = useForcedPhotometry();
   const plan = useMemo(() => forcedRequest(state.fields), [state.fields]);
   const doneFiles = useDoneFiles();
-  const files = useMemo(() => doneFiles.map((f) => ({ name: f.name, path: f.path })), [doneFiles]);
+  const files = useMemo(
+    () =>
+      doneFiles.map((f) => ({
+        name: f.name,
+        path: f.path,
+        measureKey: analysisMeasureKey({ path: f.path, composite: false, processedFitsPath: null, processedVersion: 0, filePath: f.path, reloads: f.reloads }),
+      })),
+    [doneFiles],
+  );
   const progress = useProgress(FORCED_PHOTOMETRY_PROGRESS_EVENT);
   const blockedId = useId();
   const blocker = plan.blockers.length > 0 ? plan.blockers[0] : null;

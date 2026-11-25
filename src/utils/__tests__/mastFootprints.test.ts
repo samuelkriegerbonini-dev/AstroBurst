@@ -96,10 +96,10 @@ describe("footprint items from archive rows", () => {
     expect(footprintBlock(footprintInput(row({ values: { targtype: "MOVING" } })))).toBe(MOVING_TEXT);
     expect(footprintBlock(footprintInput(row({ sRegion: null })))).toBe(NO_FOOTPRINT_TEXT);
     expect(footprintBlock(input({ polygons: [[[1, 2], [3, 4], [5, 6]]] }))).toBeNull();
-    const rust = rustSource("core/mast/footprints.rs");
+    const rust = rustSource("core/mast/dataset/footprints.rs");
     expect(rust).toContain(`pub const MAX_FOOTPRINT_VERTICES: usize = ${MAX_FOOTPRINT_VERTICES.toLocaleString("en-US").replace(",", "_")};`);
     expect(rust).toContain('const MOVING_TARGTYPE: &str = "MOVING";');
-    expect(rustSource("core/astrometry/stcs.rs")).toContain(`pub const CIRCLE_VERTICES: usize = ${CIRCLE_VERTICES};`);
+    expect(rustSource("core/astrometry/sky/stcs.rs")).toContain(`pub const CIRCLE_VERTICES: usize = ${CIRCLE_VERTICES};`);
   });
 });
 

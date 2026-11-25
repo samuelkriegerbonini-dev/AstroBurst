@@ -30,7 +30,7 @@ describe("formatCount", () => {
   });
 
   it("shows a dash for a value that is not a finite number", () => {
-    expect(formatCount(Number.NaN)).toBe("—");
-    expect(formatCount(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(formatCount(Number.NaN)).toBe("--");
+    expect(formatCount(Number.POSITIVE_INFINITY)).toBe("--");
   });
 });

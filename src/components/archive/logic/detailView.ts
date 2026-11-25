@@ -83,7 +83,7 @@ export function detailHeader(row: MastRow, missionLabel: string): DetailHeader {
 
 export function tabLabels(input: { set: MastImageSet | null; products: MastProductList | null; previewsEnabled: boolean }): TabLabels {
   const previews = !input.previewsEnabled ? "Previews (none)" : input.set ? `Previews ${input.set.entries.length}` : "Previews";
-  return { previews, metadata: "Metadata", products: input.products ? `Products ${input.products.totalCount}` : "Products" };
+  return { previews, metadata: "Metadata", products: input.products ? `Products ${input.products.totalCount}, ${formatBytes(input.products.totalBytes)}` : "Products" };
 }
 
 export function groupsOf(set: MastImageSet): MastImageSet["groups"] {

@@ -29,6 +29,7 @@ import {
   type ImageSize,
 } from "../../utils/dbeSamples";
 import { backgroundModelLabel } from "../../utils/historyModel";
+import { backgroundHistory } from "../../utils/compositeChainHistory";
 import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice, describedByIds } from "./compositeProps";
 import type { CompositeBackgroundResult, CompositePanelProps } from "./compositeProps";
 import { backgroundControlsFor, withinRange, type BackgroundModel, type BackgroundOperation } from "./backgroundControls";
@@ -342,7 +343,16 @@ export default function BackgroundPanel({
         mode: applyAs,
         dbe: spline ? splineConfig : null,
       });
-      onCompositeDone("background", spline ? backgroundModelLabel("spline") : RESULT_LABEL, res, chainCall.displayStf);
+      const history = backgroundHistory({
+        model,
+        gridSize: params.gridSize,
+        polyDegree: params.polyDegree,
+        sigmaClip: params.sigmaClip,
+        iterations,
+        mode: applyAs,
+        dbe: spline ? splineConfig : null,
+      });
+      onCompositeDone("background", spline ? backgroundModelLabel("spline") : RESULT_LABEL, res, chainCall.displayStf, history);
       const stamp = Date.now();
       return {
         composite: true as const,

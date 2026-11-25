@@ -305,8 +305,8 @@ export default function ComposeWizard() {
           <StackStep
             state={state}
             dispatch={dispatch}
-            onStacked={(channelId, path) => {
-              dispatch({ type: "SET_STACKED", channelId, path });
+            onStacked={(channelId, path, files) => {
+              dispatch({ type: "SET_STACKED", channelId, path, files });
               completeStep("stack");
             }}
           />
@@ -388,7 +388,6 @@ export default function ComposeWizard() {
           <StretchStep
             state={state}
             onStretchChange={(mode, factor, target) => dispatch({ type: "SET_STRETCH", mode, factor, target })}
-            onMask={(path) => dispatch({ type: "SET_MASK", path })}
             onMaskParams={(growth, protection) => dispatch({ type: "SET_MASK_PARAMS", growth, protection })}
             onResult={(url, stf, bakedStf) => {
               dispatch({ type: "UPDATE", partial: { bakedStf: bakedStf ?? null } });
@@ -460,7 +459,7 @@ export default function ComposeWizard() {
                 className={`ab-step-pill ${
                   isActive ? colors.tab : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
                 } ${isSuggested ? "ab-step-suggested" : ""}`}
-                title={blockedReason ? `${step.label} — ${blockedReason}` : step.label}
+                title={blockedReason ? `${step.label}: ${blockedReason}` : step.label}
               >
                 <span className="text-[9px] text-zinc-600 font-mono">{idx + 1}</span>
                 {step.shortLabel}

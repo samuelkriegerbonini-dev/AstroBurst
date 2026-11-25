@@ -154,9 +154,9 @@ function withFrame(index: number, patch: Partial<TimeSeriesFrame>): TimeSeriesFr
 const ETD_GOLDEN = [
   "#JD_UT (+ 2460310)",
   "# JD_UT V-C err",
-  "2460310.600000 1.50515 0.0132971",
-  "2460310.600695 1.52708 0.0134786",
-  "2460310.602084 1.54947 0.0136689",
+  "2460310.600000 1.50515 0.0132975",
+  "2460310.600695 1.52708 0.013479",
+  "2460310.602084 1.54947 0.0136694",
 ].join("\n");
 
 const EXPOSURE_START_SOURCE = "DATE-OBS (EXPTIME missing: exposure start used); UTC assumed (no TIMESYS)";
@@ -166,7 +166,7 @@ const EXOCLOCK_PROVENANCE = [
   "# target: HAT-P-32",
   "# comparison stars: C1, C2",
   "# reference frame: f0.fits",
-  "# flux: target / sum of comparison fluxes, not normalised; rel_flux_err = rel_flux * diff_err / 1.0857",
+  "# flux: target / sum of comparison fluxes, not normalised; rel_flux_err = rel_flux * diff_err / (2.5 / ln(10))",
   "# filter: V",
   "# exposure s: 60",
   "# aperture px: 5; sky annulus px: 10 to 15",
@@ -506,7 +506,7 @@ describe("named blockers (C02)", () => {
   });
 
   it("reads the date-only, exposure-start and half-exposure notes exactly as core/astrometry/spectral.rs writes them", () => {
-    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/core/astrometry/spectral.rs", import.meta.url)), "utf8");
+    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/core/astrometry/spectral_axis/spectral.rs", import.meta.url)), "utf8");
     const dateOnly = /if date_only \{\s*"([^"]+)"/.exec(rust)?.[1];
     const startNote = /let exposure_note = match exposure \{[\s\S]*?None => "([^"]+)"\.to_string\(\)/.exec(rust)?.[1];
     const halfNote = /Some\(\(s, key\)\) => format!\("([^"]+)", key, s\)/.exec(rust)?.[1];

@@ -559,7 +559,7 @@ describe("unstacked channels and excluded files", () => {
     expect(wizardHeaderSourcePath(s, [])).toBe("/raw/ha_2.fits");
   });
 
-  it("drops the results built on a channel whose input an exclusion changes, and keeps them otherwise", () => {
+  it("drops the results built on a channel whose input an exclusion changes, including a stack made before it, and keeps them otherwise", () => {
     const base = stateWith(
       { ha: ["/h1.fits", "/h2.fits"], oiii: ["/o.fits"] },
       {
@@ -580,8 +580,14 @@ describe("unstacked channels and excluded files", () => {
     expect(same.alignedPaths).toBe(base.alignedPaths);
     expect(same.compositeReady).toBe(true);
     const stacked = { ...base, stackedPaths: { ha: "/out/stacked_ha_1.fits" } };
-    expect(withExcludedFiles(stacked, "ha", ["/h2.fits"]).alignedPaths).toBe(base.alignedPaths);
-    expect(withExcludedFiles(stacked, "ha", []).alignedPaths).toBe(base.alignedPaths);
+    expect(withExcludedFiles(stacked, "ha", ["/h1.fits"]).alignedPaths).toBe(base.alignedPaths);
+    expect(withExcludedFiles(stacked, "ha", ["/h2.fits"]).alignedPaths).toEqual({});
+    const reincluded = withExcludedFiles(stacked, "ha", []);
+    expect(reincluded.alignedPaths).toEqual({});
+    expect(reincluded.compositeReady).toBe(false);
+    expect(STEPS.find((s) => s.id === "align")!.blockedReason(reincluded)).toBe(
+      "the Hα stack is out of date (built from 1 frame, 2 selected now); stack Hα again",
+    );
   });
 
   it("drops the composite when re-including a frame makes the channel need a stack, although its input file is the same", () => {
@@ -776,7 +782,7 @@ describe("wizard provider", () => {
   it("reads actions dispatched before the next render through getState", async () => {
     const ctx = await mountWizard();
     ctx.dispatch({ type: "SET_BINS", bins: binsOf({ ha: ["/h.fits"], oiii: ["/o.fits"] }) });
-    ctx.dispatch({ type: "SET_STACKED", channelId: "ha", path: "/out/stacked_ha_1.fits" });
+    ctx.dispatch({ type: "SET_STACKED", channelId: "ha", path: "/out/stacked_ha_1.fits", files: ["/h.fits"] });
     expect(alignInputs(ctx.getState())).toEqual([
       { binId: "ha", path: "/out/stacked_ha_1.fits" },
       { binId: "oiii", path: "/o.fits" },
@@ -1018,11 +1024,11 @@ describe("autoWbErrorText", () => {
 describe("alignChannelOutcome", () => {
   it("tags a channel left at identity and suggests the other method", () => {
     expect(alignChannelOutcome({ registered: false, method_used: "phase_correlation_identity" }, "phase_correlation", false)).toEqual({
-      unregistered: "not registered — low-confidence match, channel left unshifted; try Star-based Affine",
+      unregistered: "not registered: low-confidence match, channel left unshifted; try Star-based Affine",
       usedMethod: null,
     });
     expect(alignChannelOutcome({ registered: false, method_used: "identity" }, "affine", false).unregistered).toBe(
-      "not registered — low-confidence match, channel left unshifted; try Phase Correlation",
+      "not registered: low-confidence match, channel left unshifted; try Phase Correlation",
     );
   });
 

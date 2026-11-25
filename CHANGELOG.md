@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Cube Prep lists the settings in which the recipe differs from the selected profile, with Apply these defaults. Import recipe selects the profile closer to the imported recipe and names a fixed kernel regularization, which stays as saved.
+- The SAGUI cube check names the bands whose PSF FWHM differs by more than 2 % from the PSF target, or from the widest band when no target is entered.
+- A Cube Prep recipe placed in the SAGUI cube field is reported, and Open this recipe in Cube Prep imports it there.
+
+### Changed
+- Send to SAGUI and Use Cube Prep result fill the verified common PSF target only when every matched band ends within 2 % of the target FWHM in the kernel diagnostics; otherwise the target stays blank.
+- The SAGUI cube Browse lists FITS files only.
+
 ## [0.9.0] - 2026-11-13
 
 ### Added

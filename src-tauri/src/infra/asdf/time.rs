@@ -35,6 +35,17 @@ pub fn decode(metadata: &HashMap<String, String>, key: &str) -> Option<AsdfTime>
     mjd.is_finite().then_some(AsdfTime { iso, mjd, scale })
 }
 
+pub fn undecoded_format(metadata: &HashMap<String, String>, key: &str) -> Option<String> {
+    if decode(metadata, key).is_some() {
+        return None;
+    }
+    let field = |suffix: &str| non_empty(metadata.get(&format!("{key}.{suffix}")));
+    if let Some(format) = field("format") {
+        return Some(format.to_ascii_lowercase());
+    }
+    non_empty(metadata.get(key)).or(field("value")).map(|_| "unrecognised".to_string())
+}
+
 pub fn iso_from_mjd(mjd: f64) -> String {
     let mut day = mjd.floor();
     let mut ms = ((mjd - day) * MS_PER_DAY).round();
@@ -137,6 +148,15 @@ mod tests {
         }
         assert!(decode(&metadata(&[]), START).is_none());
         assert!(decode(&metadata(&[("roman.meta.exposure.end_time", "2026-10-31T00:02:15.986")]), START).is_none());
+    }
+
+    #[test]
+    fn an_undecoded_time_names_its_format() {
+        let yday = metadata(&[(&format!("{START}.value"), "2026:304:00:00:00.000"), (&format!("{START}.format"), "YDAY")]);
+        assert_eq!(undecoded_format(&yday, START).as_deref(), Some("yday"));
+        assert_eq!(undecoded_format(&metadata(&[(START, "J2026.5")]), START).as_deref(), Some("unrecognised"));
+        assert_eq!(undecoded_format(&metadata(&[(START, "2026-10-31T00:00:00.000")]), START), None);
+        assert_eq!(undecoded_format(&metadata(&[]), START), None, "an absent time is not an undecoded one");
     }
 
     #[test]

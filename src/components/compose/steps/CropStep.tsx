@@ -10,6 +10,8 @@ import {
 import type { ChannelOverlayPreview, CropBounds } from "../../../shared/types/compose";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { useComposeWizardContext } from "../../../context/ComposeWizardContext";
+import { useWizardRunGuard } from "../../../context/WizardRunGuardContext";
+import { cropInputKey, WIZARD_INPUTS_CHANGED } from "../../../utils/wizardRunGuard";
 import { DecimalNumberField, RunButton } from "../../ui";
 import CropEditor from "../CropEditor";
 import {
@@ -79,6 +81,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
   const [stepHeight, setStepHeight] = useState(0);
   const loadSeqRef = useRef(0);
   const { alignRun } = useComposeWizardContext();
+  const { begin } = useWizardRunGuard();
   const aligning = alignRun?.running ?? false;
 
   const observeStep = useCallback((element: HTMLDivElement | null) => {
@@ -188,6 +191,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
     setLoading(true);
     setError("");
     setSkipped(false);
+    const isCurrent = begin(cropInputKey);
     try {
       const paths = alignedEntries.map(([, p]) => p);
       const binIds = alignedEntries.map(([binId]) => binId);
@@ -203,6 +207,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
         binIds,
         state.alignRunToken,
       );
+      if (!isCurrent()) throw new Error(WIZARD_INPUTS_CHANGED);
       setResult(res);
 
       const cropped: Record<string, string> = {};
@@ -226,7 +231,7 @@ export default function CropStep({ state, onCropped }: CropStepProps) {
     } finally {
       setLoading(false);
     }
-  }, [alignedEntries, aligning, margins, onCropped, state.alignRunToken]);
+  }, [alignedEntries, aligning, margins, onCropped, state.alignRunToken, begin]);
 
   const handleSkip = useCallback(() => {
     if (aligning) return;

@@ -18,6 +18,7 @@ import { FRAME_KIND_CHIPS, FRAME_KIND_NAMES, frameKindOf, imagetypLeftOutLine, i
 import { correctedCopySwap, listedCosmeticCopies, type CosmeticCopy } from "../../utils/cosmeticCopies";
 import { openInFiles } from "./resultHandoff";
 import RejectionControls from "./RejectionControls";
+import { isCancelledRun } from "../../utils/cancelledRun";
 import { claimStackProgress, releaseStackProgress, stackProgressBusyLine, useStackProgressHolder } from "../../utils/stackProgressLock";
 import {
   appendMissingPaths,
@@ -97,6 +98,7 @@ export default function StackingPanel({
   const [noiseWeighting, setNoiseWeighting] = useState(false);
   const [effectiveWeights, setEffectiveWeights] = useState<EffectiveWeights | null>(null);
   const prevInjectedRef = useRef<string[]>([]);
+  const cancelRequestedRef = useRef(false);
   const listRef = useRef<HTMLDivElement>(null);
   const listRafRef = useRef<number | null>(null);
   const [listScrollTop, setListScrollTop] = useState(0);
@@ -230,6 +232,7 @@ export default function StackingPanel({
     const target = runTarget;
     const inputs = [...selectedPaths];
     const name = stackOutputName(inputs[0], inputs.length, new Date());
+    cancelRequestedRef.current = false;
     setIsStacking(true);
     setError(null);
     setResult(null);
@@ -245,7 +248,9 @@ export default function StackingPanel({
         noise = await noiseWeightsFor(paths);
         frameWeights = combineFrameWeights(weights, noise.weights);
       }
-      const res = await stackFrames(paths, await getOutputDir(), {
+      const outputDir = await getOutputDir();
+      if (cancelRequestedRef.current) return;
+      const res = await stackFrames(paths, outputDir, {
         name,
         sigmaLow,
         sigmaHigh,
@@ -268,7 +273,7 @@ export default function StackingPanel({
       onResult?.(res, inputs, target);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (!/cancel/i.test(msg)) setError(msg);
+      if (!isCancelledRun(msg)) setError(msg);
     } finally {
       setIsStacking(false);
       stopTimer();
@@ -462,7 +467,10 @@ export default function StackingPanel({
             <span className="flex items-center gap-2">
               <span className="font-mono">{timer.formatted}</span>
               <button
-                onClick={() => { cancelProgress(STACK_PROGRESS_EVENT).catch(() => {}); }}
+                onClick={() => {
+                  cancelRequestedRef.current = true;
+                  cancelProgress(STACK_PROGRESS_EVENT).catch(() => {});
+                }}
                 title="Cancel stacking"
                 aria-label="Cancel stacking"
                 className="text-zinc-500 hover:text-red-400 transition-colors"

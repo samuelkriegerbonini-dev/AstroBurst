@@ -15,6 +15,8 @@ import { imageDepthEntry } from "../../utils/measurementLogQa";
 import { overlayStore } from "../../utils/overlayStore";
 import { psfChoice, significant } from "../../utils/resolutionText";
 import { saveCsvDialog } from "../../utils/spectrumExport";
+import { sameRequest } from "../../utils/sameRequest";
+import StaleResultNote from "./StaleResultNote";
 import { DEFAULT_DEPTH_FIELDS, depthOptions, type DepthFields, type DepthRadiusUnit } from "./depthPanelModel";
 
 export interface DepthPanelProps {
@@ -141,6 +143,7 @@ export function DepthPanelInner({ filePath, measureKey }: DepthPanelProps) {
   const detectId = useId();
   const psfId = useId();
   const depth = state.depth;
+  const stale = depth !== null && state.options !== undefined && !sameRequest(state.options, depthOptions(fields));
 
   useEffect(() => {
     if (!overlayKey || !showApertures || !depth) return;
@@ -317,6 +320,7 @@ export function DepthPanelInner({ filePath, measureKey }: DepthPanelProps) {
 
         {depth && (
           <>
+            {stale && <StaleResultNote />}
             <DepthResultView depth={depth} />
             <div className="flex flex-wrap items-center gap-1.5">
               <button

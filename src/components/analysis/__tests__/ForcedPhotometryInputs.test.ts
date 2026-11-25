@@ -9,7 +9,7 @@ vi.mock("react", async (importOriginal) => (await import("../../../test/hookRunt
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
 vi.mock("@tauri-apps/plugin-fs", () => ({ readTextFile: async () => "53.1 -28.1 a" }));
 vi.mock("../../../hooks/useDepthStore", () => ({
-  depthStore: { subscribe: () => () => {}, latest: (path: string) => depths.current[path] ?? null },
+  depthStore: { subscribe: () => () => {}, latest: (path: string, key: string | null) => depths.current[`${path}|${key ?? ""}`] ?? null },
 }));
 
 import { hooks } from "../../../test/hookRuntime";
@@ -62,6 +62,7 @@ const PER_SECOND_TITLE =
   "The zero point is for one count per second: the backend divides the counts by the exposure time of the header";
 
 const R_PATH = "C:/d/brick-r.fits";
+const at = (path: string, key: string = path) => `${path}|${key}`;
 const DEPTH = { radius_arcsec: 1.0, radius_px: 3.8167938931297707, f_corr: 1.647 };
 
 const bandRow = () => elementsOf<Props>(byData(show(), "data-forced-band", R_PATH)[0]) as Element[];
@@ -282,7 +283,7 @@ describe("ForcedPhotometryInputs", () => {
   it("offers the depth factor measured with the same aperture", () => {
     forcedPhotometryStore.addBand(FILES[1]);
     forcedPhotometryStore.setFields({ radius: 1, radiusUnit: "arcsec" });
-    depths.current[R_PATH] = DEPTH;
+    depths.current[at(R_PATH)] = DEPTH;
     const shown = offerElements();
     expect(shown[0].props["data-forced-noise-offer"]).toBe("usable");
     expect(offerTexts(shown)).toEqual(["Depth section: f_corr 1.65 for this image at r = 1 arcsec."]);
@@ -301,7 +302,7 @@ describe("ForcedPhotometryInputs", () => {
   });
 
   it("names a depth measured with another aperture and does not offer it", () => {
-    depths.current[R_PATH] = DEPTH;
+    depths.current[at(R_PATH)] = DEPTH;
     const other = offerElements({ radius: 2 });
     expect(other[0].props["data-forced-noise-offer"]).toBe("other_radius");
     const [text] = offerTexts(other);
@@ -325,12 +326,19 @@ describe("ForcedPhotometryInputs", () => {
 
   it("shows nothing without a depth for that image", () => {
     expect(offer()).toBeNull();
-    depths.current[R_PATH] = { ...DEPTH, f_corr: null };
+    depths.current[at(R_PATH)] = { ...DEPTH, f_corr: null };
     expect(offer()).toBeNull();
-    depths.current = { "C:/d/brick-g.fits": DEPTH };
+    depths.current = { [at("C:/d/brick-g.fits")]: DEPTH };
     expect(offer()).toBeNull();
     expect(noiseOfferText({ kind: "none" }, null)).toBeNull();
     expect(noiseOfferText({ kind: "none" }, 1.647)).toBeNull();
+  });
+
+  it("does not offer the depth of an earlier revision of a rewritten band file", () => {
+    depths.current[at(R_PATH)] = DEPTH;
+    expect(offer({ measureKey: `${R_PATH}#1` })).toBeNull();
+    depths.current[at(R_PATH, `${R_PATH}#1`)] = DEPTH;
+    expect(offerElements({ measureKey: `${R_PATH}#1` })[0].props["data-forced-noise-offer"]).toBe("usable");
   });
 
   it("every band row carries the offer with the aperture of the form", () => {
@@ -340,8 +348,8 @@ describe("ForcedPhotometryInputs", () => {
     forcedPhotometryStore.setFields({ radius: 3.8168, radiusUnit: "px" });
     const offers = show().filter((e) => e.type === BandNoiseOffer);
     expect(offers.map((e) => e.props)).toEqual([
-      { path: R_PATH, label: "r", fCorr: 1.647, radius: 3.8168, unit: "px", disabled: false },
-      { path: "C:/d/brick-g.fits", label: "brick-g.fits", fCorr: null, radius: 3.8168, unit: "px", disabled: false },
+      { path: R_PATH, measureKey: R_PATH, label: "r", fCorr: 1.647, radius: 3.8168, unit: "px", disabled: false },
+      { path: "C:/d/brick-g.fits", measureKey: "C:/d/brick-g.fits", label: "brick-g.fits", fCorr: null, radius: 3.8168, unit: "px", disabled: false },
     ]);
     const rows = byData(show(), "data-forced-band", R_PATH);
     expect((elementsOf<Props>(rows[0]) as Element[]).filter((e) => e.type === BandNoiseOffer)).toHaveLength(1);

@@ -5,7 +5,7 @@ import type { ThumbFailure, ThumbStatus } from "./logic/thumbQueue";
 import type { ThumbRef } from "./state/archiveReducer";
 import SlotError from "./SlotError";
 import { slotError, type SlotErrorView } from "./logic/errorCopy";
-import { cardAccessibleName, categoryText, dateText, exclusiveText, exposureText, filterRangeText, instrumentText, isPublic, levelBadge } from "./logic/cardLabel";
+import { cardAccessibleName, categoryText, dateText, exclusiveText, exposureText, filterRangeText, instrumentText, isPublic, levelBadge, levelTitle, programmeText, setupText } from "./logic/cardLabel";
 
 export const SLOW_LOADING_SEC = 3;
 
@@ -36,6 +36,7 @@ function DatasetCard({ row, rowKey, missionLabel, status, thumb, failure, paused
   const instrument = instrumentText(row.instrument);
   const title = row.target?.trim() || row.datasetId;
   const meta = [dateText(row.dateObs), exposureText(row.expTimeS)].filter(Boolean).join("  ");
+  const setup = [setupText(row), programmeText(row)].filter(Boolean).join("  ");
   const failed = !locked && status === "failed" && failure ? slotError(failure.error, { surface: "thumb", rowPublic: isPublic(row), waitedMs: failure.waitedMs }) : null;
   const slot = failed ?? (!locked && status === "paused" ? paused : null);
   return (
@@ -97,7 +98,11 @@ function DatasetCard({ row, rowKey, missionLabel, status, thumb, failure, paused
         ) : null}
         <span className="ab-mast-badges">
           {instrument ? <span className="ab-mast-badge">{instrument}</span> : null}
-          {level ? <span className="ab-mast-badge">{level}</span> : null}
+          {level ? (
+            <span className="ab-mast-badge" title={levelTitle(row) ?? undefined}>
+              {level}
+            </span>
+          ) : null}
           {thumb?.imageCount ? (
             <span className="ab-mast-badge ab-mast-badge-count" title={`${thumb.imageCount} images`}>
               {thumb.imageCount}
@@ -113,6 +118,11 @@ function DatasetCard({ row, rowKey, missionLabel, status, thumb, failure, paused
           </span>
         ) : null}
         <span className="ab-mast-card-meta">{filterRangeText(row.filters)}</span>
+        {setup ? (
+          <span className="ab-mast-card-meta" data-testid="mast-card-setup" title={setup}>
+            {setup}
+          </span>
+        ) : null}
         <span className="ab-mast-card-meta">{meta}</span>
         {exclusive ? <span className="ab-mast-card-excl">{exclusive}</span> : null}
       </div>

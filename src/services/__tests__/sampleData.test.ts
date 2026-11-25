@@ -173,7 +173,7 @@ describe("isSampleNotDownloaded", () => {
   });
 
   it("matches the rejection text the Rust boundary sends", () => {
-    expect(rustSource("cmd/sample_data.rs")).toMatch(/const NOT_DOWNLOADED: &str = "not downloaded";/);
+    expect(rustSource("cmd/datasets/sample_data.rs")).toMatch(/const NOT_DOWNLOADED: &str = "not downloaded";/);
   });
 });
 
@@ -185,7 +185,7 @@ describe("sampleErrorMessage", () => {
   });
 
   it("shows a missing release asset with its 404 as the Rust boundary words it", () => {
-    const rustText = rustSource("infra/samples.rs").match(/#\[error\(\s*"\{file\}: ([^"]*)"\s*\)\]\s*NotPublished \{/)?.[1];
+    const rustText = rustSource("infra/net/samples.rs").match(/#\[error\(\s*"\{file\}: ([^"]*)"\s*\)\]\s*NotPublished \{/)?.[1];
     expect(rustText, "SampleError::NotPublished display").toBe("not available on GitHub (HTTP 404); the sample release may not be published yet");
     expect(sampleErrorMessage(new TauriCommandError("sample_download_cmd", NOT_PUBLISHED))).toBe(NOT_PUBLISHED);
     expect(isSampleCancelled(new TauriCommandError("sample_download_cmd", NOT_PUBLISHED))).toBe(false);
@@ -201,7 +201,7 @@ describe("sample data contract with the Rust boundary", () => {
   };
 
   it("matches the commands cmd/sample_data.rs defines", () => {
-    const defined = [...rustSource("cmd/sample_data.rs").matchAll(/#\[tauri::command\]\s*pub (?:async )?fn (\w+)/g)].map((m) => m[1]);
+    const defined = [...rustSource("cmd/datasets/sample_data.rs").matchAll(/#\[tauri::command\]\s*pub (?:async )?fn (\w+)/g)].map((m) => m[1]);
     expect([...defined].sort()).toEqual([...SAMPLE_COMMANDS].sort());
   });
 
@@ -211,21 +211,21 @@ describe("sample data contract with the Rust boundary", () => {
   });
 
   it("emits progress under the same event name", () => {
-    expect(rustSource("cmd/sample_data.rs")).toContain(`"${SAMPLE_DOWNLOAD_EVENT}"`);
+    expect(rustSource("cmd/datasets/sample_data.rs")).toContain(`"${SAMPLE_DOWNLOAD_EVENT}"`);
   });
 
   it("recognises the cancel and not downloaded rejections exactly as the Rust boundary words them", () => {
-    const cancelledText = rustSource("infra/samples.rs").match(/#\[error\("([^"]*)"\)\]\s*Cancelled,/)?.[1];
-    const notDownloadedText = rustSource("cmd/sample_data.rs").match(/const NOT_DOWNLOADED: &str = "([^"]*)";/)?.[1];
+    const cancelledText = rustSource("infra/net/samples.rs").match(/#\[error\("([^"]*)"\)\]\s*Cancelled,/)?.[1];
+    const notDownloadedText = rustSource("cmd/datasets/sample_data.rs").match(/const NOT_DOWNLOADED: &str = "([^"]*)";/)?.[1];
     expect(cancelledText, "SampleError::Cancelled display").toBeDefined();
     expect(notDownloadedText, "NOT_DOWNLOADED").toBeDefined();
-    expect(rustSource("cmd/sample_data.rs")).toMatch(/download_set\([^)]*\)\s*\.await\s*\.map_err\(\|error\| error\.to_string\(\)\)\?/);
+    expect(rustSource("cmd/datasets/sample_data.rs")).toMatch(/download_set\([^)]*\)\s*\.await\s*\.map_err\(\|error\| error\.to_string\(\)\)\?/);
     expect(isSampleCancelled(new TauriCommandError("sample_download_cmd", cancelledText!))).toBe(true);
     expect(isSampleNotDownloaded(new TauriCommandError("sample_open_cmd", notDownloadedText!))).toBe(true);
   });
 
   const rustSets = () => {
-    const rust = rustSource("infra/samples.rs").replace(/\r\n/g, "\n");
+    const rust = rustSource("infra/net/samples.rs").replace(/\r\n/g, "\n");
     const start = rust.indexOf("static SAMPLE_SETS");
     expect(start, "static SAMPLE_SETS").toBeGreaterThanOrEqual(0);
     const body = rust.slice(start, rust.indexOf("\n];", start));
@@ -249,7 +249,7 @@ describe("sample data contract with the Rust boundary", () => {
   });
 
   it("mirrors the snake_case payloads of SampleSetReport, SampleOpen and SampleProgress", () => {
-    const rust = rustSource("cmd/sample_data.rs");
+    const rust = rustSource("cmd/datasets/sample_data.rs");
     expect(fields(rust, "SampleSetReport")).toEqual(Object.keys(M16).sort());
     expect(Object.keys(IFU).sort()).toEqual(Object.keys(M16).sort());
     expect(Object.keys(LRS).sort()).toEqual(Object.keys(M16).sort());

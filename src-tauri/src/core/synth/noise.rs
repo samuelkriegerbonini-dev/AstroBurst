@@ -150,6 +150,15 @@ mod tests {
         assert!(out.iter().enumerate().filter(|(i, _)| *i != 8 * 16 + 8).all(|(_, v)| *v == 100.0));
     }
 
+    const GOLDEN_SEED_42_ROW: [f32; 8] = [143.31613, 139.68369, 159.4381, 154.83363, 133.2782, 148.63397, 143.29294, 147.50208];
+
+    #[test]
+    fn the_noise_stream_of_a_seed_is_pinned() {
+        let model = NoiseParams { readout_noise: 3.0, sky_background: 50.0, ..params() };
+        let out = apply_noise(&Array2::<f32>::zeros((1, 8)), &model, 42, None);
+        assert_eq!(out.as_slice().unwrap(), &GOLDEN_SEED_42_ROW, "the stream of seed 42 changed");
+    }
+
     #[test]
     fn sky_background_is_a_level_in_adu() {
         let sky = NoiseParams { sky_background: 200.0, ..params() };

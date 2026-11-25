@@ -32,6 +32,16 @@ interface ViewState {
   cubeFrame?: number;
   pixelClick?: { x: number; y: number; seq: number };
   noFile?: boolean;
+  heldSource?: { key: string; dims: [number, number] | null } | null;
+  rawPixelsError?: string | null;
+  rawPixelsLoading?: boolean;
+}
+
+function shownSourceKey(view: ViewState): string {
+  const filePath = view.filePath ?? "/data/cube_s3d.fits";
+  if (!view.label) return `${filePath}|${view.reloads ?? 0}`;
+  const productPath = view.productPath === undefined ? "/out/result.fits" : view.productPath;
+  return productPath === null ? `${filePath}|${view.productVersion ?? 0}` : `${productPath}|${view.productVersion ?? 0}`;
 }
 
 const S3D_GRID: [number, number] = [53, 55];
@@ -102,8 +112,9 @@ vi.mock("../../context/PreviewContext", () => ({
         },
   useRawPixelsContext: () => ({
     rawPixels: state.gpu ? ({ width: state.displayedDims[0], height: state.displayedDims[1] } as unknown) : null,
-    rawPixelsLoading: false,
-    rawPixelsError: null,
+    rawPixelsLoading: state.rawPixelsLoading ?? false,
+    rawPixelsError: state.rawPixelsError ?? null,
+    rawPixelsSource: state.gpu ? (state.heldSource === undefined ? { key: shownSourceKey(state), dims: state.displayedDims } : state.heldSource) : null,
     loadRawPixels: () => {},
     clearRawPixels: () => {},
     rgbRawPixels: null,
@@ -192,7 +203,7 @@ import { cubeFrameRequesters, formatFrameLabel } from "../../utils/cubeNavigatio
 import { beginSpectrum, commitSpectrum, resetSpectrum, useSpectrum, type SpectrumState } from "../../hooks/useSpectrumStore";
 
 function render(view: Partial<ViewState>): string {
-  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false, reloads: undefined, finishedAt: undefined, imageRef: undefined, fileHeader: undefined, filePath: undefined, fileName: undefined, productPath: undefined, productVersion: undefined, previewOnly: undefined, compositeUrl: undefined, cubeFrame: undefined, pixelClick: undefined }, view);
+  Object.assign(state, { label: null, isCube: true, isSpectralCube: true, fileDims: S3D_GRID, displayedDims: S3D_GRID, gpu: false, spectrum: false, reloads: undefined, finishedAt: undefined, imageRef: undefined, fileHeader: undefined, filePath: undefined, fileName: undefined, productPath: undefined, productVersion: undefined, previewOnly: undefined, compositeUrl: undefined, cubeFrame: undefined, pixelClick: undefined, heldSource: undefined, rawPixelsError: undefined, rawPixelsLoading: undefined }, view);
   return renderToStaticMarkup(createElement(PreviewPanel));
 }
 
@@ -699,6 +710,35 @@ describe("PreviewPanel frame stepper", () => {
     expect(viewport?.props.onKeyDown).toBeUndefined();
     expect(viewport?.props.style).toBeUndefined();
     expect(locate(tree, isRing)).toBeNull();
+  });
+});
+
+describe("PreviewPanel draws GPU pixels only under the label of the image they belong to", () => {
+  const INPUT_PIXELS = { key: "/data/cube_s3d.fits|0", dims: S3D_GRID };
+
+  function viewerAfterRender(view: Partial<ViewState>): "gpu" | "cpu" {
+    tabProps.length = 0;
+    viewerProps.length = 0;
+    render({ gpu: true, isCube: false, isSpectralCube: false, ...view });
+    return tabProps.length > 0 ? "gpu" : "cpu";
+  }
+
+  it("shows the CPU viewer for a product on another grid while the GPU still holds the input pixels", () => {
+    expect(viewerAfterRender({ label: "Crop", displayedDims: [20, 30], heldSource: INPUT_PIXELS, rawPixelsLoading: true })).toBe("cpu");
+  });
+
+  it("keeps the input pixels on screen while the pixels of a product on the same grid load", () => {
+    expect(viewerAfterRender({ label: "Arcsinh", displayedDims: S3D_GRID, heldSource: INPUT_PIXELS, rawPixelsLoading: true })).toBe("gpu");
+  });
+
+  it("draws the pixels of the shown product", () => {
+    expect(viewerAfterRender({ label: "Crop", displayedDims: [20, 30] })).toBe("gpu");
+  });
+
+  it("names the GPU viewer, not the CPU viewer, when a reload of the pixels on screen fails", () => {
+    render({ gpu: true, isCube: false, isSpectralCube: false, rawPixelsError: "busy" });
+    const title = String(hostProps.get("gpu-toggle")?.title);
+    expect(title).toBe("GPU image load failed: busy. The GPU viewer keeps the last image; click to switch to CPU");
   });
 });
 

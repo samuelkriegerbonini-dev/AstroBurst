@@ -7,6 +7,8 @@ import { ingestUnlessLoaded } from "./useFileIngest";
 import { forgetStf } from "../utils/displayMemory";
 import { displayMemory } from "../utils/displayMemoryStore";
 
+export const RELOAD_FAILED_PREFIX = "A step rewrote this file and reloading it failed: ";
+
 let reloadSeq = 0;
 
 function retryErroredRows(written: readonly string[]): void {
@@ -32,6 +34,7 @@ export async function refreshOverwrittenFiles(result: unknown): Promise<string[]
         fileStore.fileReloaded(id, { ...fresh, previewUrl });
       } catch (e) {
         console.warn(`[AstroBurst] ${file.path} was rewritten by a step but could not be reloaded:`, e);
+        fileStore.fileReloadFailed(id, `${RELOAD_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}`);
       }
     }),
   );

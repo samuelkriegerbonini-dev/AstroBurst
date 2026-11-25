@@ -60,6 +60,7 @@ export default function RomanPanel({ state, ctl }: RomanPanelProps) {
     replacing: token.replacing,
     expanded: token.expanded,
     checkedOn: currentMission(state)?.checkedOn ?? "",
+    capabilities: currentMission(state)?.capabilities,
   });
   const focus = token.focus;
   const formShown = view.form;
@@ -81,7 +82,8 @@ export default function RomanPanel({ state, ctl }: RomanPanelProps) {
     const el = inputRef.current;
     if (!el || token.checking) return;
     const raw = el.value;
-    void ctl.saveToken(raw).finally(() => {
+    void ctl.saveToken(raw).then((saved) => {
+      if (!saved) return;
       if (inputRef.current) inputRef.current.value = "";
       setHasText(false);
       setShow(false);
@@ -162,6 +164,11 @@ export default function RomanPanel({ state, ctl }: RomanPanelProps) {
         {view.title}
       </h2>
       {view.intro ? <p className="ab-mast-roman-text">{view.intro}</p> : null}
+      {view.offer ? (
+        <p data-testid="mast-roman-offer" className="ab-mast-roman-text">
+          {view.offer}
+        </p>
+      ) : null}
       {view.needs ? (
         <div className="ab-mast-roman-needs">
           <p className="ab-mast-roman-text">{ROMAN_NEEDS_TITLE}</p>

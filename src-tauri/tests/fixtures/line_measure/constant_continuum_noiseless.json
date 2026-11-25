@@ -20,15 +20,15 @@
   "equivalent_width": -0.007519646888045838,
   "fit": {
     "amplitude": 0.9999994384903658,
-    "amplitude_err": 2.515326408499169e-7,
+    "amplitude_err": 7.792315209656708e-7,
     "centre": 1.02,
-    "centre_err": 8.713340254663512e-10,
+    "centre_err": 2.6993353055057783e-9,
     "chi2": 631.840449761638,
     "converged": true,
     "dof": 22,
     "iterations": 3,
     "sigma": 0.002999996928204636,
-    "sigma_err": 8.713348004059152e-10
+    "sigma_err": 2.6993377062174034e-9
   },
   "flux": 0.00751965256532034,
   "flux_err": 1.667415597814898e-8,
@@ -36,6 +36,7 @@
   "fwhm": 0.007062552259425486,
   "n_channels": 25,
   "notes": [
+    "Gaussian fit without ERR: absolute-sigma errors from the continuum rms, inflated by sqrt(chi2_red) where chi2_red > 1",
     "continuum: constant fitted over 6 channels in 0..=5 and 0..=5, level quoted at the centroid"
   ],
   "peak": 0.9999992450078328,

@@ -16,7 +16,8 @@ vi.mock("../../../infrastructure/tauri", () => ({ getOutputDir: vi.fn() }));
 vi.mock("../../../hooks/useFileIngest", () => ingest);
 
 import { hooks } from "../../../test/hookRuntime";
-import { stackFrames } from "../../../services/stacking";
+import { noiseWeightsFor, stackFrames } from "../../../services/stacking";
+import { cancelProgress } from "../../../services/progress";
 import StackingPanel, { NoiseWeightHintLine } from "../StackingPanel";
 import { correctedCopySwap, type CosmeticCopy } from "../../../utils/cosmeticCopies";
 import { claimStackProgress, releaseStackProgress, stackProgressHolder } from "../../../utils/stackProgressLock";
@@ -373,5 +374,44 @@ describe("StackingPanel and the shared stack-progress", () => {
     expect(stackProgressHolder()).toBe("stack");
     finish({ png_path: "C:/out/stack.png", dimensions: [8, 8], elapsed_ms: 5, frame_count: 3 });
     await vi.waitFor(() => expect(stackProgressHolder()).toBeNull());
+  });
+});
+
+describe("StackingPanel Cancel before the stack starts", () => {
+  type AnyProps = Record<string, unknown> & { children?: ReactNode };
+  const panel = StackingPanel as unknown as (props: { files: ProcessedFile[] }) => ReactNode;
+
+  function nodes(node: ReactNode): ReactElement<AnyProps>[] {
+    if (Array.isArray(node)) return node.flatMap(nodes);
+    if (!isValidElement<AnyProps>(node)) return [];
+    return [node, ...nodes(node.props.children)];
+  }
+
+  beforeEach(() => {
+    hooks.mount();
+    vi.mocked(stackFrames).mockReset();
+    vi.mocked(noiseWeightsFor).mockReset();
+    vi.mocked(cancelProgress).mockReset().mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    for (const run of ["stack", "drizzle", "compose"] as const) releaseStackProgress(run);
+    hooks.mount();
+  });
+
+  it("keeps a Cancel pressed while the noise weights are measured and never starts the stack", async () => {
+    let measured: (summary: Awaited<ReturnType<typeof noiseWeightsFor>>) => void = () => {};
+    vi.mocked(noiseWeightsFor).mockReturnValue(new Promise((resolve) => { measured = resolve; }));
+    vi.mocked(stackFrames).mockResolvedValue({ png_path: "C:/out/stack.png", dimensions: [8, 8], elapsed_ms: 5, frame_count: 3 });
+    const view = () => hooks.render(panel, { files: FILES }) as ReactNode;
+    (nodes(view()).find((el) => el.props["data-testid"] === "stack-select-all")?.props.onClick as () => void)();
+    (nodes(view()).find((el) => el.props.label === "Weight frames by noise (1/sigma^2)")?.props.onChange as (on: boolean) => void)(true);
+    const running = (nodes(view()).find((el) => el.props.runningLabel === "Stacking...")?.props.onClick as () => Promise<void>)();
+    await vi.waitFor(() => expect(vi.mocked(noiseWeightsFor)).toHaveBeenCalledTimes(1));
+    (nodes(view()).find((el) => el.props["aria-label"] === "Cancel stacking")?.props.onClick as () => void)();
+    measured({ weights: [1, 1, 1], min: 1, max: 1, missing: 0 });
+    await running;
+    expect(vi.mocked(stackFrames)).not.toHaveBeenCalled();
+    expect(nodes(view()).find((el) => el.props.message !== undefined)?.props.message ?? null).toBeNull();
   });
 });

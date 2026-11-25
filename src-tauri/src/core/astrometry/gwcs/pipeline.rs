@@ -1,8 +1,19 @@
+use super::fk5::rotate_sky;
 use super::inverse::newton_exact;
 pub use super::inverse::NewtonOptions;
 use super::transform::{Kind, Node};
 pub use super::transform::Vals;
 use super::GwcsError;
+use crate::core::astrometry::frames::{mat_transpose, Mat3};
+
+const LINEAR_START_STEP_PX: f64 = 0.5;
+const LINEAR_START_SINGULAR_DET: f64 = 1e-30;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldFrameCorrection {
+    pub note: String,
+    pub to_icrs: Option<Mat3>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameKind {
@@ -58,6 +69,7 @@ pub struct GwcsPipeline {
     pub source_key: String,
     forward: Node,
     backward: Result<Node, GwcsError>,
+    world_frame: Option<WorldFrameCorrection>,
 }
 
 impl GwcsPipeline {
@@ -88,7 +100,30 @@ impl GwcsPipeline {
             });
         }
         let backward = Self::build_backward(&transforms);
-        Ok(Self { steps, bounding_box, name, source_key, forward, backward })
+        Ok(Self { steps, bounding_box, name, source_key, forward, backward, world_frame: None })
+    }
+
+    pub fn with_world_frame(mut self, correction: Option<WorldFrameCorrection>) -> Self {
+        self.world_frame = correction;
+        self
+    }
+
+    fn world_rotation(&self) -> Option<&Mat3> {
+        self.world_frame.as_ref().and_then(|frame| frame.to_icrs.as_ref())
+    }
+
+    fn to_output_frame(&self, world: [f64; 2]) -> [f64; 2] {
+        match self.world_rotation() {
+            Some(matrix) => rotate_sky(matrix, world[0], world[1]),
+            None => world,
+        }
+    }
+
+    fn to_stored_frame(&self, lon: f64, lat: f64) -> [f64; 2] {
+        match self.world_rotation() {
+            Some(matrix) => rotate_sky(&mat_transpose(matrix), lon, lat),
+            None => [lon, lat],
+        }
     }
 
     fn build_backward(transforms: &[&Node]) -> Result<Node, GwcsError> {
@@ -123,6 +158,10 @@ impl GwcsPipeline {
         self.frame_names().join("->")
     }
 
+    pub fn frame_note(&self) -> Option<&str> {
+        self.world_frame.as_ref().map(|frame| frame.note.as_str())
+    }
+
     pub fn backward_error(&self) -> Option<&GwcsError> {
         self.backward.as_ref().err()
     }
@@ -143,7 +182,7 @@ impl GwcsPipeline {
             return [f64::NAN, f64::NAN];
         }
         let out = self.forward.eval(Vals::pair(x, y));
-        [out.v[0], out.v[1]]
+        self.to_output_frame([out.v[0], out.v[1]])
     }
 
     pub fn forward_frames(&self, x: f64, y: f64) -> Vec<(String, Vals)> {
@@ -155,17 +194,23 @@ impl GwcsPipeline {
             let name = self.steps.get(k + 1).map(|s| s.frame.name.clone()).unwrap_or_default();
             out.push((name, vals));
         }
+        if let Some((_, world)) = out.last_mut().filter(|entry| entry.1.n == 2) {
+            let [lon, lat] = self.to_output_frame([world.v[0], world.v[1]]);
+            *world = Vals::pair(lon, lat);
+        }
         out
     }
 
     pub fn backward_analytic(&self, lon: f64, lat: f64) -> Result<[f64; 2], GwcsError> {
         let backward = self.backward.as_ref().map_err(Clone::clone)?;
+        let [lon, lat] = self.to_stored_frame(lon, lat);
         let out = backward.eval(Vals::pair(lon, lat));
         Ok([out.v[0], out.v[1]])
     }
 
     pub fn backward_frames(&self, lon: f64, lat: f64) -> Result<Vec<(String, Vals)>, GwcsError> {
         let mut out = Vec::with_capacity(self.steps.len());
+        let [lon, lat] = self.to_stored_frame(lon, lat);
         let mut vals = Vals::pair(lon, lat);
         for step in self.steps.iter().rev() {
             let Some(t) = &step.transform else { continue };
@@ -180,8 +225,22 @@ impl GwcsPipeline {
             .backward_analytic(lon, lat)
             .ok()
             .or_else(|| self.bbox_centre())
+            .or_else(|| self.linear_start(lon, lat))
             .unwrap_or([f64::NAN, f64::NAN]);
         newton_exact(&|p| self.forward(p[0], p[1], false), [lon, lat], start, opts)
+    }
+
+    fn linear_start(&self, lon: f64, lat: f64) -> Option<[f64; 2]> {
+        let origin = self.forward(0.0, 0.0, false);
+        let j = self.local_jacobian_deg_per_px(0.0, 0.0, LINEAR_START_STEP_PX);
+        let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+        if !(det.abs() >= LINEAR_START_SINGULAR_DET) {
+            return None;
+        }
+        let east = wrap_delta_deg(lon - origin[0]) * origin[1].to_radians().cos();
+        let north = lat - origin[1];
+        let start = [(j[1][1] * east - j[0][1] * north) / det, (j[0][0] * north - j[1][0] * east) / det];
+        (start[0].is_finite() && start[1].is_finite()).then_some(start)
     }
 
     pub fn out_of_bounds(&self, p: [f64; 2]) -> [f64; 2] {
@@ -606,6 +665,55 @@ mod tests {
         assert!(r.converged, "{what}: {r:?} for pixel {p:?} world {w:?}");
         assert_close_slice(&r.pixel, &p, 1e-6, what);
         r
+    }
+
+    fn distorted_tan_without_inverse(bounding_box: Option<BoundingBox>) -> GwcsPipeline {
+        let poly = |c10: f64, c01: f64, c20: f64, c11: f64, c02: f64| {
+            Node::new(
+                Kind::Poly2D { degree: 2, coeffs: vec![0.0, c01, c02, c10, c11, 0.0, c20, 0.0, 0.0], domain: None, window: None },
+                "polynomial",
+                "s",
+            )
+        };
+        let distortion = Node::new(
+            Kind::Concatenate(Box::new(poly(1.0, 0.0, 2.0e-6, -1.0e-6, 5.0e-7)), Box::new(poly(0.0, 1.0, -4.0e-7, 1.5e-6, 1.0e-6))),
+            "concatenate",
+            "s",
+        );
+        let duplicate = Node::new(Kind::Mapping { mapping: vec![0, 1, 0, 1], n_inputs: 2 }, "remap_axes", "s");
+        let chain = [
+            compose(duplicate, distortion),
+            pair_node(Kind::Scale(0.11 / 3600.0), Kind::Scale(0.11 / 3600.0), "scale"),
+            Node::new(Kind::Pix2SkyTan, "gnomonic", "s"),
+            Node::new(Kind::rotate_native2celestial(83.6, -5.4, 180.0), "rotate3d", "s"),
+        ]
+        .into_iter()
+        .fold(pair_node(Kind::Shift(-1023.5), Kind::Shift(-1023.5), "shift"), compose);
+        let steps = vec![
+            GwcsStep { frame: frame("detector", FrameKind::Frame2D, "pixel"), transform: Some(chain) },
+            GwcsStep { frame: frame("world", FrameKind::Celestial { reference: "icrs".into() }, "deg"), transform: None },
+        ];
+        GwcsPipeline::new(steps, bounding_box, "fitted by hand".into(), "wcs".into()).unwrap()
+    }
+
+    #[test]
+    fn a_gwcs_without_inverse_or_bbox_still_inverts() {
+        let pipeline = distorted_tan_without_inverse(None);
+        assert!(pipeline.backward_error().is_some(), "a fitted polynomial has no derived inverse");
+        assert!(pipeline.bbox_centre().is_none());
+        let centre = pipeline.forward(1023.5, 1023.5, false);
+        assert_close_slice(&centre, &[83.6, -5.4], 1e-9, "the reference pixel");
+        let with_box = distorted_tan_without_inverse(Some(BoundingBox::square(-0.5, 2047.5)));
+        for p in [[700.0, 900.0], [0.0, 0.0], [2047.0, 2047.0], [1023.5, 1023.5], [5.0, 2040.0]] {
+            let w = pipeline.forward(p[0], p[1], false);
+            let r = pipeline.backward_exact(w[0], w[1], &NewtonOptions::default());
+            assert!(r.converged, "{p:?}: sky to pixel must not be NaN for want of a starting point: {r:?}");
+            assert_close_slice(&r.pixel, &p, 1e-6, &format!("round trip of {p:?}"));
+            let boxed = with_box.backward_exact(w[0], w[1], &NewtonOptions::default());
+            assert_close_slice(&boxed.pixel, &r.pixel, 1e-6, &format!("{p:?} agrees with the start at the box centre"));
+        }
+        let far = pipeline.backward_exact(263.6, 5.4, &NewtonOptions::default());
+        assert!(far.pixel[0].is_nan() && far.pixel[1].is_nan(), "the antipode is still not a solution: {far:?}");
     }
 
     #[test]

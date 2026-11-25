@@ -206,7 +206,7 @@ export default function DebayerPanel({ selectedFile, outputDir, onPreviewUpdate,
         <div className="flex flex-col gap-2 animate-fade-in bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-3 py-2.5">
           <div className="flex items-center gap-1.5 text-xs text-emerald-300 font-medium">
             <CheckCircle2 size={12} />
-            Batch Complete — {batchResult.succeeded} ok, {batchResult.failed} failed
+            Batch Complete: {batchResult.succeeded} ok, {batchResult.failed} failed
           </div>
           {batchResult.results.filter((r) => r.error).slice(0, 4).map((r) => (
             <div key={r.path} className="text-[9px] text-amber-400/90 truncate" title={`${r.path}: ${r.error}`}>

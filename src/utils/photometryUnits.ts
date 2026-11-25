@@ -1,10 +1,11 @@
+import { MAG_ERR_PER_RELATIVE_FLUX_ERR } from "./photometryConstants";
 import { MAX_APERTURE_RADIUS_PX, MAX_SKY_OUTER_RADIUS_PX, MIN_APERTURE_RADIUS_PX } from "./photometryTable";
 
 export type RadiusUnit = "px" | "arcsec";
 export const RADIUS_UNITS: readonly RadiusUnit[] = ["px", "arcsec"];
 export const UNDERSAMPLED_FWHM_PX = 2;
 export const MIN_SKY_INNER_RADIUS_PX = 1;
-export const MAG_ERR_PER_RELATIVE_FLUX_ERR = 1.0857362047581294;
+export { MAG_ERR_PER_RELATIVE_FLUX_ERR };
 
 const NO_PIXEL_SCALE_ERROR =
   "Radii in arcsec need the pixel scale of a celestial WCS, which this image does not have. Switch the unit to px.";

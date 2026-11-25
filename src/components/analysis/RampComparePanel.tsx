@@ -20,6 +20,7 @@ import type { Histogram, RateComparison } from "../../shared/types/ramp";
 import type { CubeResult } from "./SpectroscopyPanel";
 import OutputNote from "./OutputNote";
 import StaleResultNote from "./StaleResultNote";
+import { MISSING_VALUE } from "../../utils/formatUncertainty";
 
 interface RampComparePanelProps {
   qslopePath: string;
@@ -55,7 +56,7 @@ function fileName(path: string): string {
 }
 
 function signedDelta(v: number | null): string {
-  if (v === null || !Number.isFinite(v)) return "n/a";
+  if (v === null || !Number.isFinite(v)) return MISSING_VALUE;
   return `${v >= 0 ? "+" : ""}${v.toFixed(4)}`;
 }
 
@@ -217,7 +218,7 @@ function RampComparePanel({ qslopePath, ratePath, dimensions, onCubeResult, onIn
           <div className="space-y-1">
             <div className={LABEL_CLASS}>Signed difference: quick − official (DN/s)</div>
             <div className="grid grid-cols-3 gap-2 text-[10px] font-mono">
-              {([["Bias", cmp.difference_metrics.bias], ["MAE", cmp.difference_metrics.mae], ["RMSE", cmp.difference_metrics.rmse], ["Median Δ", cmp.difference_metrics.median_delta], [SIGMA_MAD_LABEL, cmp.difference_metrics.mad_sigma]] as const).map(([label, value]) => <div key={label}><span className="text-zinc-500">{label}</span><div className="text-zinc-300">{value === null || !Number.isFinite(value) ? "n/a" : value.toPrecision(4)}</div></div>)}
+              {([["Bias", cmp.difference_metrics.bias], ["MAE", cmp.difference_metrics.mae], ["RMSE", cmp.difference_metrics.rmse], ["Median Δ", cmp.difference_metrics.median_delta], [SIGMA_MAD_LABEL, cmp.difference_metrics.mad_sigma]] as const).map(([label, value]) => <div key={label}><span className="text-zinc-500">{label}</span><div className="text-zinc-300">{value === null || !Number.isFinite(value) ? MISSING_VALUE : value.toPrecision(4)}</div></div>)}
             </div>
             <p className="text-[9px] text-zinc-500">{cmp.difference_metrics.n} finite pairs; quick DQ exclusion mask {cmp.quick_exclude_bits}, official mask {cmp.official_exclude_bits}. {SIGMA_MAD_LABEL} = {SIGMA_MAD_TITLE}. The ratio additionally requires |official| ≥ {cmp.ratio_min_abs_rate} DN/s. Both images use the selected science rows.</p>
           </div>

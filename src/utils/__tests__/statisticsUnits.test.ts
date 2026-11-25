@@ -156,6 +156,22 @@ describe("statisticsToCsv", () => {
     expect(csv.find((l) => l.startsWith("padding,"))).toBe("padding,4");
   });
 
+  it("writes empty cells, not zeros, for a selection with no usable pixel, in every unit", () => {
+    const empty: ChannelStatistics = {
+      count: 0, total: 12, fraction: 0, mean: 0, median: 0, avg_dev: 0, mad: 0, bwmv_sqrt: 0, min: 0, max: 0,
+      sum: 0, variance: 0, std_dev: 0, nan_count: 12, padding: 0, excluded: 0,
+    };
+    for (const [unit, range] of [["raw", { min: null, max: null }], ["normalized", { min: 2, max: 4 }]] as const) {
+      const lines = statisticsToCsv([{ label: "K", stats: empty }], unit, range).split("\n");
+      for (const key of ["mean", "median", "std_dev", "min", "max", "sum", "variance", "mad", "sigma_mad"]) {
+        expect(lines.find((l) => l.startsWith(`${key},`)), `${unit} ${key}`).toBe(`${key},`);
+      }
+      expect(lines.find((l) => l.startsWith("count,"))).toBe("count,0");
+      expect(lines.find((l) => l.startsWith("nan_count,"))).toBe("nan_count,12");
+    }
+    expect(formatStatistic(statisticValue(convertStatistics(empty, "normalized", { min: 2, max: 4 }), "mean"), "location", "normalized")).toBe("--");
+  });
+
   it("converts units and handles three channels", () => {
     const csv = statisticsToCsv(
       [

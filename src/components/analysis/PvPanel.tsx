@@ -3,6 +3,7 @@ import { Activity, Loader2 } from "lucide-react";
 import { CopyCsvButton, ErrorAlert, SMALL_BUTTON_CLASS } from "../ui";
 import SpectralAxisControls from "./SpectralAxisControls";
 import OutputNote from "./OutputNote";
+import StaleResultNote from "./StaleResultNote";
 import ProfilePlot from "../regions/ProfilePlot";
 import { computePvDiagram } from "../../services/pv";
 import { measurementLog, pvEntry } from "../../utils/measurementLog";
@@ -39,6 +40,8 @@ import {
   pvSpectralLabel,
   ridgeSeries,
 } from "../../utils/pvDiagram";
+import { MISSING_VALUE } from "../../utils/formatUncertainty";
+import { sameRequest } from "../../utils/sameRequest";
 
 interface PvPanelProps {
   filePath: string | undefined;
@@ -56,7 +59,6 @@ const WIDTH_TITLE = "width averaged across the slit in pixels, one sample per st
 const PLOT_HEIGHT = 200;
 const CSV_NAME = "pv-ridge";
 const SIGNIFICANT_DIGITS = 4;
-const EM_DASH = "—";
 
 function Card({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
@@ -68,7 +70,7 @@ function Card({ label, value, title }: { label: string; value: string; title?: s
 }
 
 function sig(value: number | null, unit: string): string {
-  if (value === null || !Number.isFinite(value)) return EM_DASH;
+  if (value === null || !Number.isFinite(value)) return MISSING_VALUE;
   return `${value.toPrecision(SIGNIFICANT_DIGITS)} ${unit}`.trim();
 }
 
@@ -122,6 +124,24 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
   const runMode = pvEffectiveMode(axis, mode);
   const blocker = pvRunBlocker({ line, step, width, z0, z1, mode: runMode, restUm, axis });
   const disabled = line === null || !filePath;
+  const requestParams = useMemo<PvRunParams | null>(() => {
+    if (!filePath || !region || !line || step === null || width === null || z0 === null || z1 === null) return null;
+    return {
+      filePath,
+      regionId: region.id,
+      line,
+      stepPx: step,
+      widthPx: width,
+      z0,
+      z1,
+      mode: runMode,
+      restUm,
+      convention,
+      correction,
+      velocityShiftKms: pvShiftKms(correction, correctionResult, runMode),
+    };
+  }, [filePath, region, line, step, width, z0, z1, runMode, restUm, convention, correction, correctionResult]);
+  const stale = run !== null && !sameRequest(run.params, requestParams);
 
   const publishPv = useCallback(
     (params: PvRunParams, res: PvDiagramResult) => {
@@ -140,38 +160,24 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
   );
 
   const handleRun = useCallback(async () => {
-    if (!filePath || !region || !line || step === null || width === null || z0 === null || z1 === null) return;
+    if (!requestParams) return;
+    const params = requestParams;
     const seq = ++seqRef.current;
     setLoading(true);
     setError(null);
-    const velocityShiftKms = pvShiftKms(correction, correctionResult, runMode);
-    const params: PvRunParams = {
-      filePath,
-      regionId: region.id,
-      line,
-      stepPx: step,
-      widthPx: width,
-      z0,
-      z1,
-      mode: runMode,
-      restUm,
-      convention,
-      correction,
-      velocityShiftKms,
-    };
     try {
       const dir = await getOutputDir();
       if (seqRef.current !== seq) return;
-      const res = await computePvDiagram(filePath, dir, {
-        line,
-        stepPx: step,
-        widthPx: width,
-        z0,
-        z1,
-        mode: runMode,
-        restUm,
-        convention,
-        velocityShiftKms,
+      const res = await computePvDiagram(params.filePath, dir, {
+        line: params.line,
+        stepPx: params.stepPx,
+        widthPx: params.widthPx,
+        z0: params.z0,
+        z1: params.z1,
+        mode: params.mode,
+        restUm: params.restUm,
+        convention: params.convention,
+        velocityShiftKms: params.velocityShiftKms,
       });
       if (seqRef.current !== seq) return;
       const run: PvRun = { params, result: res };
@@ -183,7 +189,7 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
     } finally {
       if (seqRef.current === seq) setLoading(false);
     }
-  }, [filePath, region, line, step, width, z0, z1, runMode, restUm, convention, correction, correctionResult, publishPv]);
+  }, [requestParams, publishPv]);
 
   const copyText = useCallback(() => {
     setIoError(null);
@@ -343,6 +349,7 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
         )}
         {run && res && summary && (
           <>
+            {stale && <StaleResultNote />}
             <ProfilePlot
               series={ridgeSeries(res)}
               xLabel={offsetLabel(res.offset_unit)}
@@ -355,13 +362,13 @@ function PvPanel({ filePath, fileKey, inputRevision, cubeDims }: PvPanelProps) {
               <Card label="gradient" value={sig(summary.ridge_gradient, summary.ridge_gradient_unit)} title="Least-squares slope of the ridge over the offsets" />
               <Card label="ridge span" value={sig(summary.ridge_span, res.spectral_unit)} />
               <Card label="slit length" value={`${sig(summary.slit_length, offsetUnit)} (${summary.slit_length_px.toFixed(1)} px)`} />
-              <Card label="slit PA" value={summary.slit_pa_deg === null ? EM_DASH : `${summary.slit_pa_deg.toFixed(1)}° E of N`} />
+              <Card label="slit PA" value={summary.slit_pa_deg === null ? MISSING_VALUE : `${summary.slit_pa_deg.toFixed(1)}° E of N`} />
               <Card label="offset step" value={sig(summary.offset_step, offsetUnit)} />
               <Card
                 label="peak"
                 value={
                   summary.peak_value === null
-                    ? EM_DASH
+                    ? MISSING_VALUE
                     : `${sig(summary.peak_value, summary.bunit ?? "")} at ${sig(summary.peak_offset, offsetUnit)}, ${sig(summary.peak_spectral, res.spectral_unit)}`
                 }
               />

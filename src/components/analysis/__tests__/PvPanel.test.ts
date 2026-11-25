@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { PvDiagramResult } from "../../../shared/types/pv";
 
 const backend = vi.hoisted(() => ({ run: vi.fn(), publish: vi.fn(), log: vi.fn() }));
+const LINE_REGION = { id: "line", shape: { shape: "line", x1: 1, y1: 1, x2: 4, y2: 1 }, props: { include: true }, backgroundId: null };
+const regionState = vi.hoisted(() => ({ regions: [] as unknown[] }));
 const dialog = vi.hoisted(() => ({ save: vi.fn() }));
 
 vi.mock("react", async (original) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await original()));
@@ -15,10 +17,7 @@ vi.mock("../../../context/PreviewContext", () => ({
 }));
 vi.mock("../../../hooks/useRegionKey", () => ({ useRegionKey: () => "cube.fits" }));
 vi.mock("../../../hooks/useRegionStore", () => ({
-  useRegionDoc: () => ({
-    selectedId: "line",
-    regions: [{ id: "line", shape: { shape: "line", x1: 1, y1: 1, x2: 4, y2: 1 }, props: { include: true }, backgroundId: null }],
-  }),
+  useRegionDoc: () => ({ selectedId: "line", regions: regionState.regions }),
 }));
 vi.mock("../../../utils/measurementLog", () => ({ measurementLog: { append: backend.log }, pvEntry: (value: unknown) => value }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialog.save }));
@@ -27,6 +26,7 @@ import { hooks } from "../../../test/hookRuntime";
 import { elementsOf, findElement, textOf } from "../../../test/elementTree";
 import { CopyCsvButton, ErrorAlert, SMALL_BUTTON_CLASS } from "../../ui";
 import PvPanel from "../PvPanel";
+import StaleResultNote from "../StaleResultNote";
 
 type Props = Record<string, unknown>;
 
@@ -117,6 +117,7 @@ function compactAlert(tree: ReactNode, message: string): ReactElement<Props> | u
 
 beforeEach(() => {
   hooks.mount();
+  regionState.regions = [LINE_REGION];
   backend.run.mockReset().mockResolvedValue(RESULT);
   backend.publish.mockReset();
   backend.log.mockReset();
@@ -124,6 +125,30 @@ beforeEach(() => {
 });
 
 afterEach(() => hooks.mount());
+
+describe("PV panel result validity", () => {
+  const staleNote = (tree: ReactNode) => findElement<Props>(tree, (el) => el.type === StaleResultNote);
+
+  it("marks the ridge as stale once the slit line moves, and current again when it is back", async () => {
+    await runPv();
+    expect(staleNote(show())).toBeUndefined();
+    regionState.regions = [{ ...LINE_REGION, shape: { ...LINE_REGION.shape, x1: 2 } }];
+    expect(staleNote(show())).toBeDefined();
+    regionState.regions = [LINE_REGION];
+    expect(staleNote(show())).toBeUndefined();
+  });
+
+  it("marks the ridge as stale after the step is edited and when the line is deleted", async () => {
+    await runPv();
+    const stepField = findElement<Props>(show(), (el) => el.type === "input" && el.props.title === "Sample spacing along the slit in pixels");
+    (stepField!.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: "2" } });
+    expect(staleNote(show())).toBeDefined();
+    hooks.mount();
+    await runPv();
+    regionState.regions = [];
+    expect(staleNote(show())).toBeDefined();
+  });
+});
 
 describe("PV panel failures and copy", () => {
   it("announces a failed run through the compact alert", async () => {

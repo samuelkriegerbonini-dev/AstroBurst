@@ -108,10 +108,13 @@ function gpuOnTitle(state: GpuToggleState, cpuViewerShown: boolean): string {
 
 function gpuToggleTitle(input: GpuToggleInput, state: GpuToggleState): string {
   const { available, supported, useGpu, loadError, reason, cpuViewerShown } = input;
-  if (loadError) return `GPU image load failed: ${loadError} — showing the CPU viewer; click to switch to CPU`;
+  if (loadError) {
+    const shown = cpuViewerShown ? "The CPU viewer shows the image" : "The GPU viewer keeps the last image";
+    return `GPU image load failed: ${loadError}. ${shown}; click to switch to CPU`;
+  }
   if (state === "probing") return cpuViewerShown ? GPU_PROBING_CPU_VIEWER_TOGGLE_TITLE : GPU_PROBING_TOGGLE_TITLE;
-  if (available === false && supported) return `${reason ?? "GPU unavailable"} — click to retry`;
-  return reason ?? (useGpu ? gpuOnTitle(state, cpuViewerShown) : "Rendering on CPU — click to use GPU");
+  if (available === false && supported) return `${reason ?? "GPU unavailable"}; click to retry`;
+  return reason ?? (useGpu ? gpuOnTitle(state, cpuViewerShown) : "Rendering on CPU; click to use GPU");
 }
 
 export function gpuToggleView(input: GpuToggleInput): GpuToggleView {
@@ -236,7 +239,7 @@ export function reseedsRgbFileView({ sameFile, isRgb, previousPreviewUrl, nextPr
 }
 
 export function formatPixelValue(v: number | null): string {
-  if (v === null || !Number.isFinite(v)) return "—";
+  if (v === null || !Number.isFinite(v)) return "--";
   const abs = Math.abs(v);
   if (abs !== 0 && (abs < 1e-3 || abs >= 1e6)) return v.toExponential(3);
   if (Number.isInteger(v)) return String(v);

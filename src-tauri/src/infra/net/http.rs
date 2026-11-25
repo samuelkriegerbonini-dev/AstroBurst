@@ -10,6 +10,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const TRANSFER_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const GET_ATTEMPTS: u32 = 3;
 const RETRY_BACKOFF: Duration = Duration::from_secs(1);
+const GET_BODY_CAP: u64 = 64 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedirectRule {
@@ -218,6 +219,17 @@ pub async fn get_with_retry(
     subject: &str,
     referer: Option<&str>,
 ) -> Result<(StatusCode, Vec<u8>)> {
+    get_with_retry_capped(client, url, label, subject, referer, GET_BODY_CAP).await
+}
+
+async fn get_with_retry_capped(
+    client: &Client,
+    url: &str,
+    label: &str,
+    subject: &str,
+    referer: Option<&str>,
+    cap: u64,
+) -> Result<(StatusCode, Vec<u8>)> {
     let mut last_error: Option<reqwest::Error> = None;
     for attempt in 1..=GET_ATTEMPTS {
         if attempt > 1 {
@@ -227,7 +239,7 @@ pub async fn get_with_retry(
         if let Some(referer) = referer {
             request = request.header(reqwest::header::REFERER, referer);
         }
-        let response = match request.send().await {
+        let mut response = match request.send().await {
             Ok(response) => response,
             Err(error) if is_transient(&error) => {
                 log::warn!(
@@ -247,8 +259,24 @@ pub async fn get_with_retry(
             log::warn!("{label} ({subject}) attempt {attempt}/{GET_ATTEMPTS}: HTTP {status}");
             continue;
         }
-        match response.bytes().await {
-            Ok(body) => return Ok((status, body.to_vec())),
+        if response.content_length().is_some_and(|len| len > cap) {
+            bail!("{label}: the response body is larger than the {cap}-byte cap ({subject})");
+        }
+        let mut body = Vec::new();
+        let read = loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if (body.len() + chunk.len()) as u64 > cap {
+                        bail!("{label}: the response body is larger than the {cap}-byte cap ({subject})");
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(None) => break Ok(()),
+                Err(error) => break Err(error),
+            }
+        };
+        match read {
+            Ok(()) => return Ok((status, body)),
             Err(error) if is_transient(&error) => {
                 log::warn!(
                     "{label} ({subject}) body attempt {attempt}/{GET_ATTEMPTS}: {}",
@@ -281,7 +309,7 @@ mod tests {
     use reqwest::StatusCode;
 
     use super::{
-        build_client, get_with_retry, net_failure_text, net_kind, status_failure_text, HttpProfile, NetKind,
+        build_client, get_with_retry, get_with_retry_capped, net_failure_text, net_kind, status_failure_text, HttpProfile, NetKind,
         RedirectRule,
     };
 
@@ -387,6 +415,23 @@ mod tests {
             },
             ..HttpProfile::request()
         }
+    }
+
+    #[tokio::test]
+    async fn a_body_larger_than_the_cap_is_refused_without_buffering_it() {
+        let server = serve(|_, _| Reply::Status(200, "a body that is longer than sixteen bytes"));
+        let client = reqwest::Client::new();
+        let err = get_with_retry_capped(&client, &format!("{}/x", server.url), "Probe", "item 1", None, 16)
+            .await
+            .expect_err("a body over the cap was buffered whole");
+        let text = format!("{err:#}");
+        assert!(text.contains("16"), "{text}");
+        assert_eq!(server.heads().len(), 1, "an oversized body was retried");
+        let (status, body) = get_with_retry_capped(&client, &format!("{}/x", server.url), "Probe", "item 1", None, 64)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"a body that is longer than sixteen bytes");
     }
 
     #[tokio::test]

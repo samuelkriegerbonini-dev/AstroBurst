@@ -70,6 +70,7 @@ import { localSmallButtonLines } from "../../../test/panelRules";
 import { CopyCsvButton, ErrorAlert } from "../../ui";
 
 const { default: TimeSeriesPanel } = await import("../TimeSeriesPanel");
+const { default: StaleResultNote } = await import("../StaleResultNote");
 const { default: LightCurveTablePanel } = await import("../LightCurveTablePanel");
 const { default: PhotometryStatusLine } = await import("../PhotometryStatusLine");
 
@@ -265,6 +266,19 @@ describe("TimeSeriesPanel after a run", () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("marks the light curve as stale after the aperture or a star position changes, not after a rename", async () => {
+    const isStale = (tree: ReactNode) => elementsOf(tree).some((el) => el.type === StaleResultNote);
+    expect(isStale(await measured())).toBe(false);
+    backend.regions = new Map([[REF, [point("r1", 10, 10, "WD 1856"), point("r2", 40, 40)]]]);
+    expect(isStale(show())).toBe(false);
+    typeInto("r_ap px", "9");
+    expect(isStale(show())).toBe(true);
+    typeInto("r_ap px", "5");
+    expect(isStale(show())).toBe(false);
+    backend.regions = new Map([[REF, [point("r1", 10, 10), point("r2", 40, 41)]]]);
+    expect(isStale(show())).toBe(true);
   });
 
   it("names a drawn Point region from the Stars list so ETD and ExoClock unlock (flows-2)", async () => {

@@ -6,7 +6,10 @@ use anyhow::{bail, Context, Result};
 use ndarray::{s, Array2, ArrayView2, Axis, Zip};
 use serde::Serialize;
 
+use crate::core::cube::lazy::LazyCube;
+use crate::core::ramp::info::card_usize;
 use crate::core::ramp::irs2::Irs2Layout;
+use crate::core::ramp::product::{CARD_EXPOSURE_INTEGRATION, CARD_INTEGRATION, CARD_NINTS};
 use crate::core::ramp::quick_slope::{DQ_DO_NOT_USE, DQ_JUMP_DET, DQ_SATURATED};
 use crate::core::metadata::photcal::card_text;
 use crate::infra::fits::gzip::resolve_gzip;
@@ -14,6 +17,7 @@ use crate::infra::fits::reader::{extract_image_mmap_by_index, extract_int_plane_
 use crate::math::median::{exact_median_f64, f32_cmp, f64_cmp};
 use crate::types::constants::MAD_TO_SIGMA;
 use crate::types::header::HduHeader;
+use crate::types::ImageRef;
 
 pub const RATE_BIN_EDGES: [f64; 8] = [f64::NEG_INFINITY, 0.05, 0.3, 1.0, 3.0, 10.0, 30.0, f64::INFINITY];
 pub const FAINT_BIN_COUNT: usize = 2;
@@ -107,6 +111,7 @@ pub struct RateComparison {
     pub ratio_min_abs_rate: f32,
     pub difference_metrics: DifferenceMetrics,
     pub warnings: Vec<String>,
+    pub rate_plane: Option<usize>,
 }
 
 pub struct OfficialRate {
@@ -115,6 +120,24 @@ pub struct OfficialRate {
     pub err: Option<Array2<f32>>,
     pub dq: Array2<u32>,
     pub detector: Option<String>,
+    pub plane: Option<usize>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuickIntegration {
+    pub index: usize,
+    pub exposure_number: Option<usize>,
+    pub nints: Option<usize>,
+}
+
+pub fn quick_integration(qslope_primary: &HduHeader) -> Option<QuickIntegration> {
+    let index = card_usize(qslope_primary, CARD_INTEGRATION)?;
+    Some(QuickIntegration {
+        index,
+        exposure_number: card_usize(qslope_primary, CARD_EXPOSURE_INTEGRATION),
+        nints: card_usize(qslope_primary, CARD_NINTS).or_else(|| card_usize(qslope_primary, "NINTS")),
+    })
 }
 
 pub struct QuickSlopePlanes {
@@ -141,36 +164,99 @@ fn check_plane_shape(name: &str, shape: (usize, usize), reference: (usize, usize
     Ok(())
 }
 
-fn read_rate_science(file: &File, hdus: &[HduInfo], path: &str) -> Result<(Array2<f32>, HduHeader)> {
-    let image = extract_image_mmap_by_index(file, required_hdu(hdus, "SCI", path)?)?;
-    if let Some(unit) = card_text(&image.header, "BUNIT") {
+fn check_rate_unit(header: &HduHeader, path: &str) -> Result<()> {
+    if let Some(unit) = card_text(header, "BUNIT") {
         let compact = unit.to_ascii_uppercase().replace(' ', "");
         if !matches!(compact.as_str(), "DN/S" | "DN*S^-1" | "DN*S**-1" | "DN.S-1") {
             bail!("{path}: SCI BUNIT {unit} is not DN/s; compare slopes in the same detector count-rate units");
         }
     }
+    Ok(())
+}
+
+fn read_rate_science(file: &File, hdus: &[HduInfo], path: &str) -> Result<(Array2<f32>, HduHeader)> {
+    let image = extract_image_mmap_by_index(file, required_hdu(hdus, "SCI", path)?)?;
+    check_rate_unit(&image.header, path)?;
     Ok((image.image, image.header))
 }
 
+fn integration_planes(hdus: &[HduInfo], index: usize) -> Option<usize> {
+    let hdu = hdus.iter().find(|h| h.index == index)?;
+    (hdu.naxis == 3 && hdu.naxis3 > 1).then(|| hdu.naxis3 as usize)
+}
+
+fn rateints_plane(quick: Option<&QuickIntegration>, rate_primary: &HduHeader, planes: usize, path: &str) -> Result<usize> {
+    let Some(quick) = quick else { return Ok(0) };
+    let rate_first = card_usize(rate_primary, "INTSTART").filter(|first| *first >= 1);
+    let plane = match (quick.exposure_number, rate_first) {
+        (Some(number), Some(first)) => number.checked_sub(first),
+        _ => Some(quick.index),
+    };
+    match plane {
+        Some(plane) if plane < planes => Ok(plane),
+        _ => bail!(
+            "{path} holds {planes} integrations{} but the quick slope is integration {}: compare it with the rateints that holds that integration",
+            rate_first.map_or(String::new(), |first| format!(" starting at integration {first} of the exposure")),
+            quick.exposure_number.unwrap_or(quick.index + 1)
+        ),
+    }
+}
+
+fn read_rateints_plane(readable: &Path, hdus: &[HduInfo], plane: usize, path: &str) -> Result<(Array2<f32>, HduHeader, Option<Array2<f32>>, Array2<u32>)> {
+    let readable = readable.to_string_lossy();
+    let open = |name: &str, index: usize| LazyCube::open(&ImageRef::hdu(&readable, index).cache_key()).with_context(|| format!("Cannot read {name} of {path}"));
+    let sci_cube = open("SCI", required_hdu(hdus, "SCI", path)?)?;
+    check_rate_unit(&sci_cube.header, path)?;
+    let sci = sci_cube.frame_uncached(plane)?;
+    let err = match hdu_named(hdus, "ERR") {
+        Some(index) => Some(open("ERR", index)?.frame_uncached(plane)?),
+        None => None,
+    };
+    let dq_cube = open("DQ", required_hdu(hdus, "DQ", path)?)?;
+    let (dq_rows, dq_cols) = (dq_cube.geometry.naxis2, dq_cube.geometry.naxis1);
+    let bits: Vec<u32> = dq_cube.decode_dq_rows(plane, 0, dq_rows)?.into_iter().map(|flags| flags.unwrap_or(DQ_DO_NOT_USE)).collect();
+    let dq = Array2::from_shape_vec((dq_rows, dq_cols), bits).context("Failed to reshape the DQ plane")?;
+    Ok((sci, sci_cube.merged_header(), err, dq))
+}
+
 pub fn read_official_rate(path: &str) -> Result<OfficialRate> {
+    read_official_rate_for(path, None)
+}
+
+pub fn read_official_rate_for(path: &str, quick: Option<&QuickIntegration>) -> Result<OfficialRate> {
     let (readable, _decompressed) = resolve_gzip(Path::new(path))?;
     let file = File::open(&readable).with_context(|| format!("Failed to open {path}"))?;
     let hdus = list_extensions(&file)?;
-    let (sci, header) = read_rate_science(&file, &hdus, path)?;
-    let err = match hdu_named(&hdus, "ERR") {
-        Some(index) => Some(extract_image_mmap_by_index(&file, index)?.image),
-        None => None,
+    let primary = read_primary_header(path)?;
+    let mut notes = Vec::new();
+    let stacked = integration_planes(&hdus, required_hdu(&hdus, "SCI", path)?);
+    let (sci, header, err, dq, plane) = match stacked {
+        Some(planes) => {
+            let plane = rateints_plane(quick, &primary, planes, path)?;
+            let (sci, header, err, dq) = read_rateints_plane(&readable, &hdus, plane, path)?;
+            (sci, header, err, dq, Some(plane))
+        }
+        None => {
+            let (sci, header) = read_rate_science(&file, &hdus, path)?;
+            let err = match hdu_named(&hdus, "ERR") {
+                Some(index) => Some(extract_image_mmap_by_index(&file, index)?.image),
+                None => None,
+            };
+            let dq = extract_int_plane_by_index(&file, required_hdu(&hdus, "DQ", path)?)?.bits;
+            if let Some((quick, nints)) = quick.and_then(|quick| quick.nints.filter(|n| *n > 1).map(|n| (quick, n))) {
+                notes.push(format!(
+                    "the official rate is the combination of the {nints} integrations of the exposure, the quick slope is integration {} alone: the differences include the scatter between integrations",
+                    quick.index + 1
+                ));
+            }
+            (sci, header, err, dq, None)
+        }
     };
-    let dq = extract_int_plane_by_index(&file, required_hdu(&hdus, "DQ", path)?)?.bits;
     check_plane_shape("DQ", dq.dim(), sci.dim(), path)?;
     if let Some(err) = &err {
         check_plane_shape("ERR", err.dim(), sci.dim(), path)?;
     }
-    let detector = read_primary_header(path)?
-        .get("DETECTOR")
-        .map(|d| d.trim().trim_matches('\'').trim().to_string())
-        .filter(|d| !d.is_empty());
-    Ok(OfficialRate { header, sci, err, dq, detector })
+    Ok(OfficialRate { header, sci, err, dq, detector: card_text(&primary, "DETECTOR"), plane, notes })
 }
 
 pub fn read_qslope(path: &str) -> Result<QuickSlopePlanes> {
@@ -518,7 +604,9 @@ pub fn compare_with_rate(
         difference_metrics: difference_metrics(&pair),
         warnings: [("quick slope", &quick.header), ("official rate", &official.header)].into_iter()
             .filter(|(_, header)| card_text(header, "BUNIT").is_none())
-            .map(|(name, _)| format!("{name} SCI has no BUNIT: DN/s is assumed from the rate-product contract")).collect(),
+            .map(|(name, _)| format!("{name} SCI has no BUNIT: DN/s is assumed from the rate-product contract"))
+            .chain(official.notes.iter().cloned()).collect(),
+        rate_plane: official.plane,
     })
 }
 
@@ -569,7 +657,7 @@ mod tests {
 
     fn planes(rows: usize, cols: usize, pixel: impl Fn(usize, usize) -> Pixel) -> (QuickSlopePlanes, OfficialRate) {
         let mut quick = QuickSlopePlanes { header: HduHeader::empty(), sci: Array2::zeros((rows, cols)), dq: Array2::zeros((rows, cols)), ngood: Array2::zeros((rows, cols)) };
-        let mut official = OfficialRate { header: HduHeader::empty(), sci: Array2::zeros((rows, cols)), err: Some(Array2::from_elem((rows, cols), 0.06)), dq: Array2::zeros((rows, cols)), detector: Some("NRS1".into()) };
+        let mut official = OfficialRate { header: HduHeader::empty(), sci: Array2::zeros((rows, cols)), err: Some(Array2::from_elem((rows, cols), 0.06)), dq: Array2::zeros((rows, cols)), detector: Some("NRS1".into()), plane: None, notes: Vec::new() };
         for y in 0..rows {
             for x in 0..cols {
                 let p = pixel(y, x);

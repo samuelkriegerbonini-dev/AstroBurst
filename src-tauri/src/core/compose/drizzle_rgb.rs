@@ -170,7 +170,10 @@ pub fn process_drizzle_rgb(
     let stats_b_raw = ChannelStats::from(&sb_full);
 
     let (wb_r, wb_g, wb_b) = match &config.white_balance {
-        WhiteBalance::Auto => white_balance::select_wb_reference(&sr_full, &sg_full, &sb_full)?,
+        WhiteBalance::Auto => white_balance::select_auto_white_balance(
+            [&r_img, &g_img, &b_img],
+            [&sr_full, &sg_full, &sb_full],
+        )?,
         WhiteBalance::Manual(r, g, b) => (
             white_balance::validate_wb_factor(white_balance::WbChannel::R, *r)?,
             white_balance::validate_wb_factor(white_balance::WbChannel::G, *g)?,

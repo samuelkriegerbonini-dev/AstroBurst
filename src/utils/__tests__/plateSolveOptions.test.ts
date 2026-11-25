@@ -199,7 +199,7 @@ describe("Solve options applied to a solve", () => {
   });
 
   it("offers Auto and exactly the SIP orders plate_solve_cmd accepts", () => {
-    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/cmd/astrometry.rs", import.meta.url)), "utf8");
+    const rust = readFileSync(fileURLToPath(new URL("../../../src-tauri/src/cmd/astrometry/wcs/wcs_commands.rs", import.meta.url)), "utf8");
     const bound = (name: string) => Number(new RegExp(`const ${name}: u8 = (\\d+);`).exec(rust)?.[1]);
     const accepted = Array.from({ length: bound("MAX_SIP_ORDER_CAP") - bound("MIN_SIP_ORDER_CAP") + 1 }, (_, i) => bound("MIN_SIP_ORDER_CAP") + i);
     expect(accepted).toEqual([2, 3, 4]);

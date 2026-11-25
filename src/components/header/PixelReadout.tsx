@@ -15,7 +15,7 @@ const HOVER_DEBOUNCE_MS = 40;
 const BOX_SIZE = 5;
 
 function fmt(v: number | null): string {
-  if (v === null || !Number.isFinite(v)) return "—";
+  if (v === null || !Number.isFinite(v)) return "--";
   const abs = Math.abs(v);
   if (abs !== 0 && (abs < 1e-3 || abs >= 1e6)) return v.toExponential(3);
   if (Number.isInteger(v)) return String(v);

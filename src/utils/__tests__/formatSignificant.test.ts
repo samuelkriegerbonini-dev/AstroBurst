@@ -30,7 +30,7 @@ describe("formatSignificant", () => {
     expect(formatSignificant(0)).toBe("0");
     expect(formatSignificant(-0.0123)).toBe("-0.0123");
     expect(formatSignificant(-2048.4)).toBe("-2048");
-    expect(formatSignificant(Number.NaN)).toBe("—");
+    expect(formatSignificant(Number.NaN)).toBe("--");
   });
 });
 
@@ -54,7 +54,7 @@ describe("formatSignificantFixed", () => {
   it("rounds negatives symmetrically and keeps zero and non-finite values", () => {
     expect(formatSignificantFixed(-12345.6)).toBe("-12350");
     expect(formatSignificantFixed(0)).toBe("0");
-    expect(formatSignificantFixed(Number.NaN)).toBe("—");
+    expect(formatSignificantFixed(Number.NaN)).toBe("--");
   });
 
   it("honours another digit count", () => {

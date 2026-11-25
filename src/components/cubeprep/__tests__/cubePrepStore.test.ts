@@ -179,6 +179,39 @@ describe("Cube Prep desktop job lifecycle", () => {
     expect(store.get()).toMatchObject({ report: null, outputDir: null });
   });
 
+  it("saves the draft under its own key, so a large report cannot stop the draft from persisting (PREPUI-18)", async () => {
+    const data = new Map<string, string>();
+    const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => { if (v.length > 4000) throw new Error("QuotaExceededError"); data.set(k, v); } };
+    const large: CubePrepReport = { ...report, files: Array.from({ length: 200 }, (_, i) => ({ path: `product-${i}.fits`, bytes: i, sha256: "0".repeat(64) })) };
+    const { api, store: source } = setup();
+    vi.mocked(api.run).mockResolvedValue(large);
+    const first = createCubePrepStore(api, storage);
+    first.edit(source.get().draft);
+    await first.run();
+    const draft = first.get().draft;
+    first.edit({ ...draft, recipe: { ...draft.recipe, name: "renamed" } });
+    expect(createCubePrepStore(api, storage).get().draft.recipe.name).toBe("renamed");
+  });
+
+  it("restores a draft and report saved by an earlier version under the single key (PREPUI-18)", () => {
+    const { api, store: source } = setup();
+    const legacy = { draft: source.get().draft, report, outputDir: "/data/job" };
+    const storage = { getItem: (k: string) => k === "ab.cubeprep.v1" ? JSON.stringify(legacy) : null, setItem: vi.fn() };
+    const restored = createCubePrepStore(api, storage).get();
+    expect(restored.draft).toEqual(source.get().draft);
+    expect(restored).toMatchObject({ report, outputDir: "/data/job" });
+  });
+
+  it("refuses to validate or run without the folders the backend needs and names them (PREPUI-16)", async () => {
+    const { store, api } = setup();
+    store.edit({ ...store.get().draft, baseDir: "", outputParent: "" });
+    await store.validate();
+    expect(store.get()).toMatchObject({ status: "error", error: "Choose the input folder for relative file paths." });
+    await store.run();
+    expect(store.get().error).toBe("Choose the input folder for relative file paths. Choose a working folder for this run.");
+    expect(api.validate).not.toHaveBeenCalled();
+  });
+
   it("persists configuration without reviving a running job after restart", async () => {
     const data = new Map<string, string>();
     const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => { data.set(k, v); } };

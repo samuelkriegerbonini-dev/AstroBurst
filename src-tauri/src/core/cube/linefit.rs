@@ -9,7 +9,7 @@ use crate::core::astrometry::spectral::{
 };
 use crate::core::cube::companions::{check_companion, CubeSet, DqPolicy, FLOAT_DQ_NOTE};
 use crate::core::cube::lazy::{median_band_rows, LazyCube};
-use crate::core::cube::moments::{channel_widths, ContinuumWindows, DEFAULT_SNR_THRESHOLD, VELOCITY_UNIT};
+use crate::core::cube::moments::{channel_widths, velocity_integrated_unit, ContinuumWindows, DEFAULT_SNR_THRESHOLD, VELOCITY_UNIT};
 use crate::math::gauss_newton::{fit_least_squares, FitResult};
 use crate::math::{exact_mad_mut, exact_median_mut};
 use crate::types::constants::MAD_TO_SIGMA;
@@ -36,6 +36,7 @@ pub const MASK_UNRESOLVED: u32 = 16;
 pub const MASK_NOT_CONVERGED: u32 = 32;
 pub const MASK_TWO_REJECTED: u32 = 64;
 pub const MASK_TWO_COMPONENTS: u32 = 128;
+pub const MASK_AT_BOUND: u32 = 256;
 
 const BAND_BYTES: usize = 256 << 20;
 const MIN_LINE_SAMPLES: usize = 4;
@@ -331,9 +332,11 @@ pub struct LineFitMaps {
     pub n_channels: usize,
     pub n_fit: usize,
     pub n_masked: usize,
+    pub n_at_bound: usize,
     pub n_const_continuum: usize,
     pub n_two_components: usize,
     pub median_chi2_red: Option<f64>,
+    pub intensity_unit: Option<String>,
     pub notes: Vec<String>,
 }
 
@@ -347,8 +350,15 @@ pub fn error_scale(weighting: Weighting, chi2: f64, dof: usize) -> f64 {
     }
     let reduced = chi2 / dof as f64;
     match weighting {
-        Weighting::Err => reduced.max(1.0),
-        Weighting::Continuum => reduced,
+        Weighting::Err | Weighting::Continuum => reduced.max(1.0),
+    }
+}
+
+fn formal_scale(chi2: f64, dof: usize) -> f64 {
+    if dof == 0 {
+        1.0
+    } else {
+        chi2 / dof as f64
     }
 }
 
@@ -561,6 +571,16 @@ impl SpaxelContext {
 
     fn source_frame(&self) -> bool {
         self.redshift != 0.0 && !self.axis_kind.is_velocity()
+    }
+
+    fn observer_sigma_inst(&self, centre: f64, dx: f64) -> Option<f64> {
+        let inst = self.sigma_inst?;
+        let coordinate = match self.axis_kind {
+            AxisKind::Wave | AxisKind::Awav | AxisKind::Freq => centre.abs(),
+            AxisKind::Zopt => (1.0 + centre).abs(),
+            _ => return Some(inst),
+        };
+        Some(inst * slope_at(|x| self.to_velocity(x), centre, dx) * coordinate / SPEED_OF_LIGHT_KMS)
     }
 }
 
@@ -927,10 +947,11 @@ struct PairInput<'a> {
     mean_dx: f64,
     lower: [f64; SINGLE_PARAMETERS],
     upper: [f64; SINGLE_PARAMETERS],
+    formal_errors: bool,
 }
 
 fn fit_two(ctx: &SpaxelContext, input: &PairInput) -> PairOutcome {
-    let PairInput { xs, ys, weights, continuum, single, chi2_single, dof_single, mean_dx, lower, upper } = *input;
+    let PairInput { xs, ys, weights, continuum, single, chi2_single, dof_single, mean_dx, lower, upper, formal_errors } = *input;
     let model_single = gaussian_model(continuum.intercept, continuum.slope, ctx.x_ref);
     let mut jac = [0.0; SINGLE_PARAMETERS];
     let residuals: Vec<f64> = xs.iter().zip(ys).map(|(&x, &y)| y - model_single(x, &single.params, &mut jac)).collect();
@@ -997,7 +1018,7 @@ fn fit_two(ctx: &SpaxelContext, input: &PairInput) -> PairOutcome {
     let Some(cov) = parameter_covariance(xs, ys, weights, &fit.params, &k_rows, &continuum.cov, &model) else {
         return rejected("pair covariance is singular", Some(delta_bic));
     };
-    let scale = error_scale(ctx.weighting, fit.chi2, fit.dof);
+    let scale = if formal_errors { formal_scale(fit.chi2, fit.dof) } else { error_scale(ctx.weighting, fit.chi2, fit.dof) };
     let errors: Vec<f64> = (0..PAIR_PARAMETERS).map(|i| (scale * cov[i][i]).max(0.0).sqrt()).collect();
     let fits = [0, 1].map(|c| SingleFit {
         params: [p[3 * c], p[3 * c + 1], p[3 * c + 2]],
@@ -1085,7 +1106,7 @@ fn component_fit(ctx: &SpaxelContext, fit: &SingleFit, mean_dx: f64) -> (Compone
     let [a_err, xc_err, sx_err] = fit.errors;
     let v = ctx.to_velocity(xc);
     let v_err = xc_err * slope_at(|x| ctx.to_velocity(x), xc, mean_dx);
-    let observer = width_and_flux(fit, (ctx.to_velocity(xc + sx) - v).abs(), ctx.sigma_inst);
+    let observer = width_and_flux(fit, (ctx.to_velocity(xc + sx) - v).abs(), ctx.observer_sigma_inst(xc, mean_dx));
     let source = ctx.source_sigma(xc, sx).map_or(NO_SOURCE_FRAME, |sigma| width_and_flux(fit, sigma, ctx.sigma_inst));
     let snr = if observer.flux_err > 0.0 { observer.flux / observer.flux_err } else { f64::NAN };
     let component = ComponentFit {
@@ -1264,6 +1285,12 @@ fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[O
     if !fit.converged {
         outcome.notes.push(format!("Gaussian fit did not converge after {} iterations", fit.iterations));
         outcome.mask |= MASK_NOT_CONVERGED;
+        if fit.params.get(2) == Some(&lower[2]) {
+            outcome.mask |= MASK_AT_BOUND;
+            outcome.notes.push(
+                "the fit ended at the lower sigma bound (a quarter of a channel): the line is narrower than the sampling can measure".to_string(),
+            );
+        }
         outcome.continuum = Some(continuum);
         return outcome;
     }
@@ -1274,7 +1301,7 @@ fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[O
         outcome.continuum = Some(continuum);
         return outcome;
     };
-    let scale = error_scale(ctx.weighting, fit.chi2, fit.dof);
+    let scale = if outcome.unit_weights { formal_scale(fit.chi2, fit.dof) } else { error_scale(ctx.weighting, fit.chi2, fit.dof) };
     let errors = [0, 1, 2].map(|i| (scale * cov[i][i]).max(0.0).sqrt());
     let single = SingleFit {
         params: [fit.params[0], fit.params[1], fit.params[2]],
@@ -1286,11 +1313,22 @@ fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[O
     if unresolved {
         outcome.mask |= MASK_UNRESOLVED;
     }
-    if component.snr.abs() >= ctx.snr_threshold {
+    let at_bound = single.params[1] == ctx.x_bounds.0
+        || single.params[1] == ctx.x_bounds.1
+        || single.params[2] == lower[2]
+        || single.params[2] == upper[2];
+    if at_bound {
+        outcome.mask |= MASK_AT_BOUND;
+        outcome.notes.push(
+            "Gaussian fit stopped at a bound of the centre or the width: not reported as fitted (the line is cut by the window, broader than it, or narrower than a quarter of a channel)".to_string(),
+        );
+    } else if component.snr.abs() >= ctx.snr_threshold {
         outcome.mask |= MASK_FITTED;
     }
     if ctx.components != Components::One {
-        if outcome.mask & MASK_FITTED == 0 {
+        if at_bound {
+            outcome.notes.push("two components not attempted: the single fit stopped at a bound".to_string());
+        } else if outcome.mask & MASK_FITTED == 0 {
             outcome.notes.push(format!(
                 "two components not attempted: single fit |S/N| {:.1} below the threshold {}",
                 component.snr.abs(),
@@ -1314,6 +1352,7 @@ fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[O
                 mean_dx,
                 lower,
                 upper,
+                formal_errors: outcome.unit_weights,
             };
             match fit_two(ctx, &input) {
                 PairOutcome::Accepted { components, delta_bic } => {
@@ -1355,7 +1394,7 @@ fn weighting_note(weighting: Weighting, err: Option<&LazyCube>) -> String {
             "weights: 1/ERR^2 from HDU {} (EXTNAME ERR); absolute-sigma errors, inflated by sqrt(chi2_red) where chi2_red > 1; continuum uncertainty propagated",
             cube.hdu_index
         ),
-        _ => "weights: 1/scatter^2 of the continuum residuals per spaxel; formal errors scaled by chi2/dof; continuum uncertainty propagated".to_string(),
+        _ => "weights: 1/scatter^2 of the continuum residuals per spaxel; absolute errors from that scatter, inflated by sqrt(chi2_red) where chi2_red > 1, the same rule as with ERR and as the 1D line measurement (formal errors scaled by chi2/dof only where the scatter is zero or unknown); continuum uncertainty propagated".to_string(),
     }
 }
 
@@ -1462,6 +1501,7 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
         (source_requested && two_requested).then(|| [ComponentBuffers::new(npix), ComponentBuffers::new(npix)]);
     let mut n_fit = 0usize;
     let mut n_masked = 0usize;
+    let mut n_at_bound = 0usize;
     let mut n_const_continuum = 0usize;
     let mut n_dq_spaxels = 0usize;
     let mut dq_excluded_samples = 0_u64;
@@ -1545,6 +1585,8 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
                         buffers[0].set_source(p, &pair[0]);
                         buffers[1].set_source(p, &pair[1]);
                     }
+                } else if c.snr.abs() >= cfg.snr_threshold {
+                    n_at_bound += 1;
                 } else {
                     n_masked += 1;
                 }
@@ -1583,10 +1625,8 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
     if two_requested {
         notes.push(two_component_note(cfg.components, n_two_components));
     }
-    let flux_unit = match bunit(sci) {
-        Some(unit) => format!("{} {}", unit, VELOCITY_UNIT),
-        None => VELOCITY_UNIT.to_string(),
-    };
+    let intensity_unit = bunit(sci);
+    let flux_unit = velocity_integrated_unit(intensity_unit.as_deref(), &mut notes);
     notes.push(format!(
         "flux = A·sigma_v·sqrt(2π) in {}; flux_err includes the amplitude-sigma covariance and the continuum uncertainty",
         flux_unit
@@ -1604,6 +1644,11 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
                     r, inst, n_unresolved
                 )
             });
+            if !ctx.axis_kind.is_velocity() {
+                notes.push(
+                    "observer-frame sigma_corr removes sigma_inst scaled to the observer velocity scale at the fitted centre (sigma_inst x centre / rest in the optical convention): it is the source-frame value times the stretch of the frame".to_string(),
+                );
+            }
             format!("LSF-corrected (R = {})", r)
         }
         _ => {
@@ -1615,6 +1660,12 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
         "SNR threshold {}: {} spaxels fitted, {} converged fits below threshold",
         cfg.snr_threshold, n_fit, n_masked
     ));
+    if n_at_bound > 0 {
+        notes.push(format!(
+            "{} fits above the S/N threshold stopped at a bound of the centre or the width (mask bit 256): not reported, the line is cut by the window, broader than it, or narrower than a quarter of a channel",
+            n_at_bound
+        ));
+    }
 
     let shape = (rows, cols);
     let plane = |v: Vec<f32>| Array2::from_shape_vec(shape, v);
@@ -1660,8 +1711,10 @@ pub fn fit_cube_lines(inputs: &LineFitInputs, cfg: &LineFitConfig) -> Result<Lin
         n_channels: cfg.z1 - cfg.z0 + 1,
         n_fit,
         n_masked,
+        n_at_bound,
         n_const_continuum,
         n_two_components,
+        intensity_unit,
         notes,
     })
 }
@@ -2017,7 +2070,8 @@ mod tests {
         }
         assert_eq!(maps.n_fit, disk_pixel_count());
         assert_eq!(maps.weighting, Weighting::Continuum);
-        assert_eq!(maps.flux_unit, "Jy/beam km/s");
+        assert_eq!(maps.flux_unit, "Jy beam-1 km s-1");
+        assert_eq!(maps.intensity_unit.as_deref(), Some("Jy/beam"));
         assert_eq!(maps.velocity_unit, "km/s");
         assert_eq!(maps.n_channels, 25);
         assert!(maps.notes.iter().any(|n| n.starts_with("weights: 1/scatter^2 of the continuum residuals per spaxel")), "{:?}", maps.notes);
@@ -2454,7 +2508,7 @@ mod tests {
 
         assert_eq!(error_scale(Weighting::Err, 4.0, 16), 1.0);
         assert_eq!(error_scale(Weighting::Err, 64.0, 16), 4.0);
-        assert_eq!(error_scale(Weighting::Continuum, 4.0, 16), 0.25);
+        assert_eq!(error_scale(Weighting::Continuum, 4.0, 16), 1.0);
         assert_eq!(error_scale(Weighting::Continuum, 64.0, 16), 4.0);
         assert_eq!(error_scale(Weighting::Err, 1.0, 0), 1.0);
 
@@ -3359,8 +3413,13 @@ mod tests {
         let c = fit_spaxel(&inputs, &resolved, 1, 1).unwrap().single.expect("single fit");
         let observer_corr = c.sigma_corr_kms.expect("observer-frame correction");
         let source_corr = c.source_sigma_corr_kms.expect("source-frame correction");
-        assert!(close(observer_corr, (150.0f64 * 150.0 - 60.0 * 60.0).sqrt(), 1e-4), "sigma_corr_kms={observer_corr}");
-        assert!(close(source_corr, 80.0, 1e-4), "source_sigma_corr_kms={source_corr}");
+        let goldens = review_goldens();
+        let resolved_widths = &goldens["lsf_widths"][0];
+        assert_eq!((resolved_widths["sigma_inst_kms"].as_f64(), resolved_widths["redshift"].as_f64()), (Some(60.0), Some(REDSHIFT)));
+        let expected_observer = resolved_widths["observer_sigma_corr_kms"].as_f64().unwrap();
+        assert!(close(observer_corr, expected_observer, 1e-4), "sigma_corr_kms={observer_corr} expected {expected_observer}");
+        assert!(close(source_corr, resolved_widths["source_sigma_corr_kms"].as_f64().unwrap(), 1e-4), "source_sigma_corr_kms={source_corr}");
+        assert!(close(observer_corr / source_corr, 1.0 + REDSHIFT, 1e-6), "observer {observer_corr} source {source_corr}");
         let maps = fit_cube_lines(&inputs, &resolved).unwrap();
         let names = plane_names(&resolved, &maps);
         assert_eq!(names.len(), 18, "{names:?}");
@@ -3371,9 +3430,11 @@ mod tests {
 
         let between = fit_spaxel(&inputs, &with_sigma_inst(120.0), 1, 1).unwrap();
         let c = between.single.as_ref().expect("single fit");
-        assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 90.0, 1e-4), "{c:?}");
+        assert!(goldens["lsf_widths"][1]["observer_sigma_corr_kms"].is_null() && goldens["lsf_widths"][1]["source_sigma_corr_kms"].is_null());
+        assert!(c.sigma_corr_kms.expect("observer-frame correction").is_nan(), "{c:?}");
         assert!(c.source_sigma_corr_kms.expect("source-frame correction").is_nan(), "{c:?}");
         assert!(serde_json::to_value(c).unwrap()["source_sigma_corr_kms"].is_null());
+        assert!(serde_json::to_value(c).unwrap()["sigma_corr_kms"].is_null());
     }
 
     fn sigma_inst_of(kms: f64) -> (&'static str, serde_json::Value) {
@@ -3410,7 +3471,7 @@ mod tests {
         assert_ne!(spaxel.mask & MASK_UNRESOLVED, 0, "the mask follows the source-frame width: {}", spaxel.mask);
         assert_ne!(spaxel.mask & MASK_FITTED, 0, "mask={}", spaxel.mask);
         let c = spaxel.single.as_ref().expect("single fit");
-        assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 90.0, 1e-4), "{c:?}");
+        assert!(c.sigma_corr_kms.expect("observer-frame correction").is_nan(), "{c:?}");
         assert!(c.source_sigma_corr_kms.expect("source-frame correction").is_nan(), "{c:?}");
         assert!(serde_json::to_value(c).unwrap()["source_sigma_corr_kms"].is_null());
 
@@ -3418,8 +3479,8 @@ mod tests {
         assert_eq!(maps.mask.len(), ALL_SPAXELS);
         assert!(maps.mask.iter().all(|m| bit(*m, MASK_UNRESOLVED) && bit(*m, MASK_FITTED)), "{:?}", maps.mask);
         assert_eq!(maps.mask[[1, 1]] as u32, spaxel.mask);
-        let observer_corr = maps.sigma_corr.as_ref().expect("sigma_corr plane")[[1, 1]] as f64;
-        assert!(close(observer_corr, 90.0, 1e-4), "sigma_corr plane={observer_corr}");
+        let observer_corr = maps.sigma_corr.as_ref().expect("sigma_corr plane");
+        assert!(observer_corr.iter().all(|v| v.is_nan()), "{observer_corr:?}");
         let source_corr = maps.source.as_ref().and_then(|s| s.sigma_corr.as_ref()).expect("source-frame sigma_corr plane");
         assert!(source_corr.iter().all(|v| v.is_nan()), "{source_corr:?}");
     }
@@ -3444,11 +3505,11 @@ mod tests {
         assert_eq!(unresolved_spaxels(&maps), 0, "{:?}", maps.mask);
         let c = fit_spaxel(&inputs, &resolved, 1, 1).unwrap().single.expect("single fit");
         assert!(close(c.source_sigma_corr_kms.expect("source-frame correction"), 80.0, 1e-4), "{c:?}");
-        assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 137.4773, 1e-4), "{c:?}");
+        assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 120.0, 1e-4), "{c:?}");
     }
 
     #[test]
-    fn a_line_resolved_in_the_source_frame_is_not_flagged_when_only_its_observer_frame_width_is_below_sigma_inst() {
+    fn a_line_resolved_in_the_source_frame_is_resolved_in_the_radio_observer_frame_too() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("redshifted.fits");
         write_redshifted_line_cube(&path);
@@ -3458,7 +3519,7 @@ mod tests {
         let spaxel = fit_spaxel(&inputs, &cfg, 1, 1).unwrap();
         let c = spaxel.single.as_ref().expect("single fit");
         assert!(close(c.sigma_kms, 66.6444, 1e-4), "sigma_kms={}", c.sigma_kms);
-        assert!(c.sigma_corr_kms.expect("observer-frame correction").is_nan(), "{c:?}");
+        assert!(close(c.sigma_corr_kms.expect("observer-frame correction"), 60.0 / (1.0 + REDSHIFT), 2e-3), "{c:?}");
         assert!(close(c.source_sigma_corr_kms.expect("source-frame correction"), 60.0, 1e-4), "{c:?}");
         assert_eq!(spaxel.mask & MASK_UNRESOLVED, 0, "the mask follows the source-frame width: {}", spaxel.mask);
 
@@ -3475,8 +3536,8 @@ mod tests {
         write_redshifted_line_cube(&path);
         let cube = open(&path);
         let inputs = only_sci(&cube);
-        let null_redshift = redshifted_cfg(&[sigma_inst_of(120.0), ("redshift", serde_json::Value::Null)]);
-        let zero_redshift = LineFitConfig { redshift: 0.0, ..redshifted_cfg(&[sigma_inst_of(120.0)]) };
+        let null_redshift = redshifted_cfg(&[sigma_inst_of(60.0), ("redshift", serde_json::Value::Null)]);
+        let zero_redshift = LineFitConfig { redshift: 0.0, ..redshifted_cfg(&[sigma_inst_of(60.0)]) };
         for cfg in [null_redshift, zero_redshift] {
             let maps = fit_cube_lines(&inputs, &cfg).unwrap();
             assert_eq!(unresolved_spaxels(&maps), 0, "{:?}", maps.mask);
@@ -3486,7 +3547,7 @@ mod tests {
             assert!(!maps.notes.iter().any(|n| n.contains("redshift")), "{:?}", maps.notes);
         }
 
-        let wide_lsf = redshifted_cfg(&[sigma_inst_of(200.0), ("redshift", serde_json::Value::Null)]);
+        let wide_lsf = redshifted_cfg(&[sigma_inst_of(120.0), ("redshift", serde_json::Value::Null)]);
         let maps = fit_cube_lines(&inputs, &wide_lsf).unwrap();
         assert_eq!(unresolved_spaxels(&maps), ALL_SPAXELS, "{:?}", maps.mask);
         let note = only_lsf_note(&maps);
@@ -3629,5 +3690,142 @@ mod tests {
         }
         assert!(planes[0].velocity[p] < planes[1].velocity[p]);
         assert!(source.single.velocity[[0, 0]].is_nan() && planes[0].velocity[[0, 0]].is_nan());
+    }
+
+    const REVIEW_GOLDENS: &str = include_str!("../../../tests/fixtures/cube/cube_review_goldens.json");
+    const REVIEW_SEED: u64 = 20_261_125;
+
+    fn review_goldens() -> serde_json::Value {
+        serde_json::from_str(REVIEW_GOLDENS).unwrap()
+    }
+
+    fn seeded_normal_noise(seed: u64, count: usize, sigma: f64) -> Vec<f64> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(seed);
+        (0..count)
+            .map(|_| {
+                let u1: f64 = rng.gen::<f64>().max(1e-300);
+                let u2: f64 = rng.gen::<f64>();
+                sigma * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+            })
+            .collect()
+    }
+
+    fn write_noisy_line_cube(path: &std::path::Path, size: usize, depth: usize, noise_sigma: f64, line: impl Fn(f64, usize) -> f64) {
+        let noise = seeded_normal_noise(REVIEW_SEED, depth * size * size, noise_sigma);
+        write_cube(path, size, size, depth, &line_cube_cards(), |z, y, x| {
+            (1.0 + line(z as f64, x) + noise[(z * size + y) * size + x]) as f32
+        });
+    }
+
+    const PINNED_SIZE: usize = 16;
+    const PINNED_DEPTH: usize = 60;
+    const PINNED_LINE: (usize, usize) = (20, 40);
+    const PINNED_WINDOWS: ContinuumWindows = ((0, 14), (50, 59));
+
+    #[test]
+    fn a_single_fit_pinned_at_the_window_bound_is_not_reported_as_fitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pinned.fits");
+        write_noisy_line_cube(&path, PINNED_SIZE, PINNED_DEPTH, 1.0 / 30.0, |z, _| gaussian(z, PINNED_LINE.1 as f64 + 1.0, 2.0));
+        let cube = open(&path);
+        let inputs = only_sci(&cube);
+        let cfg = LineFitConfig { z0: PINNED_LINE.0, z1: PINNED_LINE.1, continuum: Some(PINNED_WINDOWS), ..line_cfg() };
+        let maps = fit_cube_lines(&inputs, &cfg).unwrap();
+        let (mut pinned, mut pinned_detections, mut withheld) = (0usize, 0usize, 0usize);
+        for y in 0..PINNED_SIZE {
+            for x in 0..PINNED_SIZE {
+                let spaxel = fit_spaxel(&inputs, &cfg, x, y).unwrap();
+                let Some(single) = spaxel.single.as_ref() else {
+                    continue;
+                };
+                let detected = single.snr.abs() >= cfg.snr_threshold;
+                if detected && spaxel.mask & MASK_AT_BOUND != 0 {
+                    withheld += 1;
+                }
+                let bounds = [spaxel.axis[PINNED_LINE.0 - spaxel.span.0], spaxel.axis[PINNED_LINE.1 - spaxel.span.0]];
+                if !bounds.contains(&single.centre) {
+                    continue;
+                }
+                pinned += 1;
+                pinned_detections += usize::from(detected);
+                assert_eq!(spaxel.mask & MASK_FITTED, 0, "({x}, {y}): centre {} on the window bound is reported as fitted, v_err {} km/s", single.centre, single.v_err_kms);
+                assert_ne!(spaxel.mask & MASK_AT_BOUND, 0, "({x}, {y}): mask {}", spaxel.mask);
+                assert!(maps.velocity[[y, x]].is_nan() && maps.flux[[y, x]].is_nan(), "({x}, {y}): {}", maps.velocity[[y, x]]);
+                assert_eq!(maps.mask[[y, x]] as u32, spaxel.mask);
+                assert!(spaxel.notes.iter().any(|n| n.contains("stopped at a bound")), "{:?}", spaxel.notes);
+            }
+        }
+        assert!(pinned_detections >= 5, "{pinned_detections} of {pinned} fits pinned on a bound pass the S/N threshold");
+        assert!(withheld >= pinned_detections, "{withheld} withheld, {pinned_detections} pinned detections");
+        assert_eq!(maps.n_at_bound, withheld);
+        assert!(maps.mask.iter().all(|m| !(bit(*m, MASK_AT_BOUND) && bit(*m, MASK_FITTED))));
+        let counted = format!("{withheld} fits above the S/N threshold stopped at a bound of the centre or the width");
+        assert!(maps.notes.iter().any(|n| n.contains(&counted)), "{:?}", maps.notes);
+    }
+
+    const COVERAGE_SIZE: usize = 40;
+    const COVERAGE_DEPTH: usize = 71;
+    const COVERAGE_LINE: (usize, usize) = (33, 37);
+    const COVERAGE_WINDOWS: ContinuumWindows = ((3, 27), (43, 67));
+
+    fn coverage_centre(x: usize) -> f64 {
+        35.0 + 0.2 * ((x % 5) as f64 - 2.0)
+    }
+
+    #[test]
+    fn errors_without_err_cover_the_truth_at_three_sigma_for_a_five_channel_line() {
+        let goldens = review_goldens();
+        let golden = &goldens["line_fit_coverage_without_err"];
+        assert_eq!((golden["line_channels"].as_u64(), golden["peak_snr"].as_f64()), (Some(5), Some(30.0)));
+        let formal = golden["fraction_beyond_3_sigma_formal_errors"].as_f64().unwrap();
+        let floored = golden["fraction_beyond_3_sigma_absolute_errors_floored"].as_f64().unwrap();
+        assert!(formal > 0.05 && floored < 0.01, "scipy reference: formal {formal}, absolute with floor {floored}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coverage.fits");
+        write_noisy_line_cube(&path, COVERAGE_SIZE, COVERAGE_DEPTH, 1.0 / 30.0, |z, x| gaussian(z, coverage_centre(x), 1.0));
+        let cube = open(&path);
+        let cfg = LineFitConfig { z0: COVERAGE_LINE.0, z1: COVERAGE_LINE.1, continuum: Some(COVERAGE_WINDOWS), ..line_cfg() };
+        let maps = fit_cube_lines(&only_sci(&cube), &cfg).unwrap();
+        assert_eq!(maps.weighting, Weighting::Continuum);
+        let (mut fitted, mut beyond) = (0usize, 0usize);
+        for y in 0..COVERAGE_SIZE {
+            for x in 0..COVERAGE_SIZE {
+                if !bit(maps.mask[[y, x]], MASK_FITTED) {
+                    continue;
+                }
+                fitted += 1;
+                let offset = maps.velocity[[y, x]] as f64 - v_of_channel(coverage_centre(x));
+                if offset.abs() > 3.0 * maps.v_err[[y, x]] as f64 {
+                    beyond += 1;
+                }
+            }
+        }
+        assert!(fitted >= 1500, "{fitted} of {} spaxels fitted", COVERAGE_SIZE * COVERAGE_SIZE);
+        let fraction = beyond as f64 / fitted as f64;
+        assert!(
+            fraction < 0.02,
+            "{beyond} of {fitted} velocities ({fraction:.4}) are beyond 3 reported sigma; scipy gives {formal} with formal errors and {floored} with absolute errors"
+        );
+        let stated = maps.notes.iter().any(|n| n.starts_with("weights: 1/scatter^2") && n.contains("absolute") && n.contains("where chi2_red > 1"));
+        assert!(stated, "{:?}", maps.notes);
+    }
+
+    const UNDERSAMPLED_SIZE: usize = 20;
+    const UNDERSAMPLED_WINDOWS: ContinuumWindows = ((0, 14), (46, 59));
+
+    #[test]
+    fn an_undersampled_line_that_stops_at_the_sigma_floor_is_flagged_at_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("undersampled.fits");
+        write_noisy_line_cube(&path, UNDERSAMPLED_SIZE, PINNED_DEPTH, 0.1, |z, x| gaussian(z, 30.0 + 0.2 * ((x % 5) as f64 - 2.0), 0.5));
+        let cube = open(&path);
+        let cfg = LineFitConfig { z0: PINNED_LINE.0, z1: PINNED_LINE.1, continuum: Some(UNDERSAMPLED_WINDOWS), ..line_cfg() };
+        let maps = fit_cube_lines(&only_sci(&cube), &cfg).unwrap();
+        let not_converged = maps.mask.iter().filter(|m| bit(**m, MASK_NOT_CONVERGED)).count();
+        let at_floor = maps.mask.iter().filter(|m| bit(**m, MASK_NOT_CONVERGED) && bit(**m, MASK_AT_BOUND)).count();
+        assert!(not_converged >= 20, "{not_converged} of {} fits did not converge", UNDERSAMPLED_SIZE * UNDERSAMPLED_SIZE);
+        assert!(2 * at_floor >= not_converged, "{at_floor} of {not_converged} fits without convergence are flagged at the sigma floor");
     }
 }

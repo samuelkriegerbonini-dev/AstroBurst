@@ -1,0 +1,537 @@
+{
+ "golden": "tso/x1dints",
+ "label": "B1",
+ "produced_by": {
+  "script": "tso_golden_x1dints.py",
+  "command": "python -I scripts/oracle/tso_golden_x1dints.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw01274-o013_t008_miri_p750l-slitlessprism_x1dints.fits",
+    "set": "tso/B1",
+    "bytes": 780480,
+    "sha256": "1954b9b953605d7d4b55baceccd0df39a06c5b8638431d4dc5935a98ca7bba05"
+   },
+   {
+    "file": "jw01274-o013_t008_miri_p750l-slitlessprism_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 744,
+    "sha256": "4ecaf28ff36f114e16a09796795f5019c370c6f36131da8f5e302ed91d510704"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "primary": {
+  "DATAMODL": "MultiSpecModel",
+  "CAL_VER": "1.15.1",
+  "EXP_TYPE": "MIR_LRS-SLITLESS",
+  "INSTRUME": "MIRI",
+  "DETECTOR": "MIRIMAGE",
+  "FILTER": "P750L",
+  "PUPIL": null,
+  "GRATING": null,
+  "SUBARRAY": "SLITLESSPRISM",
+  "NINTS": 10,
+  "INTSTART": 1,
+  "INTEND": 10,
+  "EXSEGNUM": 1,
+  "EXSEGTOT": 1,
+  "TARGNAME": "GJ1132",
+  "S_PHOTOM": "COMPLETE"
+ },
+ "product_level": "3",
+ "layout": "extension_per_integration",
+ "n_hdus": 13,
+ "hdus": [
+  {
+   "index": 0,
+   "name": "PRIMARY",
+   "extver": null,
+   "naxis1": null,
+   "naxis2": null
+  },
+  {
+   "index": 1,
+   "name": "INT_TIMES",
+   "extver": 1,
+   "naxis1": 52,
+   "naxis2": 10
+  },
+  {
+   "index": 2,
+   "name": "EXTRACT1D",
+   "extver": 1,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 3,
+   "name": "EXTRACT1D",
+   "extver": 2,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 4,
+   "name": "EXTRACT1D",
+   "extver": 3,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 5,
+   "name": "EXTRACT1D",
+   "extver": 4,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 6,
+   "name": "EXTRACT1D",
+   "extver": 5,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 7,
+   "name": "EXTRACT1D",
+   "extver": 6,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 8,
+   "name": "EXTRACT1D",
+   "extver": 7,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 9,
+   "name": "EXTRACT1D",
+   "extver": 8,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 10,
+   "name": "EXTRACT1D",
+   "extver": 9,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 11,
+   "name": "EXTRACT1D",
+   "extver": 10,
+   "naxis1": 140,
+   "naxis2": 388
+  },
+  {
+   "index": 12,
+   "name": "ASDF",
+   "extver": null,
+   "naxis1": 107779,
+   "naxis2": 1
+  }
+ ],
+ "n_extract1d": 10,
+ "int_times_rows": 10,
+ "series_keys": [
+  {
+   "detector": "MIRIMAGE",
+   "sporder": 1
+  }
+ ],
+ "series": [
+  {
+   "key": {
+    "detector": "MIRIMAGE",
+    "sporder": 1
+   },
+   "detector_source": "primary header (EXTRACT1D has no DETECTOR card)",
+   "extract1d_hdus": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "rows_per_extract1d": {
+    "each": 388,
+    "meaning": "spectral elements, one integration per extension"
+   },
+   "integrations": 10,
+   "tform_repeat": [
+    388
+   ],
+   "n_alongdisp": {
+    "min": 388,
+    "max": 388,
+    "sum": 3880,
+    "rows_zero": 0,
+    "rows_below_tform_repeat": 0,
+    "source": "NAXIS2 of each extension (legacy layout has no N_ALONGDISP)"
+   },
+   "int_num": {
+    "first": 1,
+    "last": 10,
+    "min": 1,
+    "max": 10,
+    "distinct": 10,
+    "source": "INT_NUM keyword of each EXTRACT1D"
+   },
+   "segment_values": [
+    1
+   ],
+   "units": {
+    "WAVELENGTH": "um",
+    "FLUX": "Jy",
+    "FLUX_ERROR": "Jy",
+    "MJD-AVG": null,
+    "TDB-MID": null
+   },
+   "time": {
+    "mjd_avg_first": 60126.800615279506,
+    "mjd_avg_last": 60126.80109527951,
+    "mjd_avg_min_finite": 60126.800615279506,
+    "mjd_avg_max_finite": 60126.80109527951,
+    "mjd_avg_nan_rows": 0,
+    "mjd_avg_distinct_finite": 10,
+    "tdb_mid_first": 60126.80095917577,
+    "tdb_mid_last": 60126.80143914741,
+    "tdb_mid_nan_rows": 0,
+    "tdb_mid_distinct_finite": 10,
+    "mjd_beg_first": 60126.80058953238,
+    "mjd_end_last": 60126.801121026634,
+    "strictly_increasing_in_hdu_and_row_order": true,
+    "source": "keywords MJD-AVG and TDB-MID of each EXTRACT1D"
+   },
+   "first_valid_row": {
+    "hdu": 2,
+    "row0": 0,
+    "int_num": 1,
+    "n_alongdisp": 388,
+    "wavelength_first3": [
+     13.993632316589355,
+     13.980284690856934,
+     13.966923713684082
+    ],
+    "wavelength_last3": [
+     4.390594005584717,
+     4.174907207489014,
+     3.7063305377960205
+    ],
+    "direction": "descending"
+   },
+   "masking_counts": {
+    "valid_elements": 3880,
+    "flux_nan": 110,
+    "dq_nonzero": 0,
+    "flux_nan_with_dq_zero": 110,
+    "flux_finite_with_dq_nonzero": 0,
+    "flux_error_nan": 100
+   },
+   "storage": {
+    "NAXIS1": 140,
+    "NAXIS2": 388,
+    "PCOUNT": 0,
+    "TFIELDS": 18,
+    "WAVELENGTH": {
+     "column": 1,
+     "TFORM": "D",
+     "TDIM": null,
+     "TUNIT": "um",
+     "TZERO": null
+    },
+    "DQ": {
+     "column": 12,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_stored_bytes_hex": "80000000",
+     "row0_value": 0
+    },
+    "row_length_rule": "NAXIS1 = 17 * 8 + 4 = 140",
+    "row_length_rule_holds": true
+   },
+   "white_light_as_archived": {
+    "limits_um": [
+     5.0,
+     12.0
+    ],
+    "rows_in_series": 10,
+    "rows_kept": 10,
+    "rows_dropped_nan_or_repeated_mjd_avg": 0,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 60126.800615279506,
+      "tdb_mid": 60126.80095917577,
+      "sum": 2.1636166086166684
+     },
+     {
+      "int_num": 2,
+      "mjd_avg": 60126.80066861284,
+      "tdb_mid": 60126.80101250596,
+      "sum": 2.3930142098838862
+     },
+     {
+      "int_num": 3,
+      "mjd_avg": 60126.80072194617,
+      "tdb_mid": 60126.80106583614,
+      "sum": 2.352551170701493
+     },
+     {
+      "int_num": 4,
+      "mjd_avg": 60126.80077527951,
+      "tdb_mid": 60126.801119166324,
+      "sum": 2.348223499638631
+     },
+     {
+      "int_num": 5,
+      "mjd_avg": 60126.80082861284,
+      "tdb_mid": 60126.8011724965,
+      "sum": 2.3531744200232545
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 6,
+      "mjd_avg": 60126.800881946176,
+      "tdb_mid": 60126.80122582668,
+      "sum": 2.336852349058596
+     },
+     {
+      "int_num": 7,
+      "mjd_avg": 60126.800935279505,
+      "tdb_mid": 60126.80127915686,
+      "sum": 2.346181230181303
+     },
+     {
+      "int_num": 8,
+      "mjd_avg": 60126.80098861284,
+      "tdb_mid": 60126.80133248705,
+      "sum": 2.3571386580742333
+     },
+     {
+      "int_num": 9,
+      "mjd_avg": 60126.80104194617,
+      "tdb_mid": 60126.80138581723,
+      "sum": 2.33453568119384
+     },
+     {
+      "int_num": 10,
+      "mjd_avg": 60126.80109527951,
+      "tdb_mid": 60126.80143914741,
+      "sum": 2.362247136444509
+     }
+    ],
+    "sum_all_fsum": 23.347534963816415,
+    "numpy_nansum_vs_exact_sum_max_rel": 2.052531895352735e-16,
+    "whtlt": {
+     "time_column": "MJD",
+     "bjd_column": null,
+     "flux_column": "whitelight_flux",
+     "whtlt_rows_finite_time": 10,
+     "rows_joined_on_identical_time": 10,
+     "first5": [
+      {
+       "time": 60126.800615279506,
+       "flux": 2.163616608616668
+      },
+      {
+       "time": 60126.80066861284,
+       "flux": 2.3930142098838867
+      },
+      {
+       "time": 60126.80072194617,
+       "flux": 2.3525511707014934
+      },
+      {
+       "time": 60126.80077527951,
+       "flux": 2.3482234996386313
+      },
+      {
+       "time": 60126.80082861284,
+       "flux": 2.353174420023255
+      }
+     ],
+     "last5": [
+      {
+       "time": 60126.800881946176,
+       "flux": 2.3368523490585957
+      },
+      {
+       "time": 60126.800935279505,
+       "flux": 2.346181230181303
+      },
+      {
+       "time": 60126.80098861284,
+       "flux": 2.3571386580742333
+      },
+      {
+       "time": 60126.80104194617,
+       "flux": 2.33453568119384
+      },
+      {
+       "time": 60126.80109527951,
+       "flux": 2.362247136444509
+      }
+     ],
+     "sum_all_fsum": 23.347534963816415,
+     "max_rel_diff_computed_vs_whtlt": 2.052531895352735e-16,
+     "rows_bitwise_equal": 4,
+     "within_1e-4": true,
+     "expected_to_match": true
+    },
+    "limits_source": "not recorded in this cal_ver 1.15.1 file; 5.0 to 12.0 um is the MIRI value seen in A4 and reproduces the legacy whtlt to 3e-16 relative (window search: min in (4.9957, 5.0763], max in [11.9833, 12.0003))"
+   },
+   "white_light_open_limits": {
+    "limits_um": [
+     -1.0,
+     10000000000.0
+    ],
+    "rows_in_series": 10,
+    "rows_kept": 10,
+    "rows_dropped_nan_or_repeated_mjd_avg": 0,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 60126.800615279506,
+      "tdb_mid": 60126.80095917577,
+      "sum": 9.881612573959114
+     },
+     {
+      "int_num": 2,
+      "mjd_avg": 60126.80066861284,
+      "tdb_mid": 60126.80101250596,
+      "sum": 8.798984522408517
+     },
+     {
+      "int_num": 3,
+      "mjd_avg": 60126.80072194617,
+      "tdb_mid": 60126.80106583614,
+      "sum": 10.67436119983633
+     },
+     {
+      "int_num": 4,
+      "mjd_avg": 60126.80077527951,
+      "tdb_mid": 60126.801119166324,
+      "sum": 10.626401383005915
+     },
+     {
+      "int_num": 5,
+      "mjd_avg": 60126.80082861284,
+      "tdb_mid": 60126.8011724965,
+      "sum": 10.6392907213496
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 6,
+      "mjd_avg": 60126.800881946176,
+      "tdb_mid": 60126.80122582668,
+      "sum": 10.608780461821825
+     },
+     {
+      "int_num": 7,
+      "mjd_avg": 60126.800935279505,
+      "tdb_mid": 60126.80127915686,
+      "sum": 10.65742023508888
+     },
+     {
+      "int_num": 8,
+      "mjd_avg": 60126.80098861284,
+      "tdb_mid": 60126.80133248705,
+      "sum": 10.748272656707256
+     },
+     {
+      "int_num": 9,
+      "mjd_avg": 60126.80104194617,
+      "tdb_mid": 60126.80138581723,
+      "sum": 10.582973852268777
+     },
+     {
+      "int_num": 10,
+      "mjd_avg": 60126.80109527951,
+      "tdb_mid": 60126.80143914741,
+      "sum": 10.759792305986108
+     }
+    ],
+    "sum_all_fsum": 103.97788991243232,
+    "numpy_nansum_vs_exact_sum_max_rel": 1.6716447792392423e-16,
+    "whtlt": {
+     "time_column": "MJD",
+     "bjd_column": null,
+     "flux_column": "whitelight_flux",
+     "whtlt_rows_finite_time": 10,
+     "rows_joined_on_identical_time": 10,
+     "first5": [
+      {
+       "time": 60126.800615279506,
+       "flux": 2.163616608616668
+      },
+      {
+       "time": 60126.80066861284,
+       "flux": 2.3930142098838867
+      },
+      {
+       "time": 60126.80072194617,
+       "flux": 2.3525511707014934
+      },
+      {
+       "time": 60126.80077527951,
+       "flux": 2.3482234996386313
+      },
+      {
+       "time": 60126.80082861284,
+       "flux": 2.353174420023255
+      }
+     ],
+     "last5": [
+      {
+       "time": 60126.800881946176,
+       "flux": 2.3368523490585957
+      },
+      {
+       "time": 60126.800935279505,
+       "flux": 2.346181230181303
+      },
+      {
+       "time": 60126.80098861284,
+       "flux": 2.3571386580742333
+      },
+      {
+       "time": 60126.80104194617,
+       "flux": 2.33453568119384
+      },
+      {
+       "time": 60126.80109527951,
+       "flux": 2.362247136444509
+      }
+     ],
+     "sum_all_fsum": 23.347534963816415,
+     "max_rel_diff_computed_vs_whtlt": 3.567173562360954,
+     "rows_bitwise_equal": 0,
+     "within_1e-4": false,
+     "expected_to_match": false
+    }
+   }
+  }
+ ]
+}

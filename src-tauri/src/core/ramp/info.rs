@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::core::cube::eager::ctype_is_spectral;
+use crate::core::metadata::photcal::card_text;
 use crate::types::header::HduHeader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -46,6 +47,7 @@ pub struct RampInfo {
     pub irs2: Option<Irs2Header>,
     pub frame_width: usize,
     pub frame_height: usize,
+    pub intstart: Option<usize>,
 }
 
 pub const RAMP_DATAMODELS: [&str; 2] = ["Level1bModel", "RampModel"];
@@ -53,14 +55,7 @@ pub const CUBE_DATAMODELS: [&str; 2] = ["CubeModel", "IFUCubeModel"];
 pub const ROMAN_INSTRUMENT: &str = "WFI";
 pub const DEFAULT_IRS2_OUTPUTS: usize = 5;
 
-fn card_text(header: &HduHeader, key: &str) -> Option<String> {
-    header
-        .get(key)
-        .map(|s| s.trim().trim_matches('\'').trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn card_usize(header: &HduHeader, key: &str) -> Option<usize> {
+pub(crate) fn card_usize(header: &HduHeader, key: &str) -> Option<usize> {
     header.get_i64(key).and_then(|v| usize::try_from(v).ok())
 }
 
@@ -116,6 +111,13 @@ pub fn group_time_seconds(header: &HduHeader) -> (Option<f64>, TgroupSource) {
     (None, TgroupSource::None)
 }
 
+fn segment_integrations(header: &HduHeader, ngroups: usize, naxis3: usize, naxis4: Option<usize>, exposure_nints: usize) -> Option<usize> {
+    let stored = naxis4?;
+    let first = card_usize(header, "INTSTART").filter(|first| *first >= 1)?;
+    let last = card_usize(header, "INTEND").filter(|last| *last >= first && *last <= exposure_nints)?;
+    (ngroups == naxis3 && stored < exposure_nints && last - first + 1 == stored).then_some(stored)
+}
+
 pub fn ramp_info(header: &HduHeader) -> Option<RampInfo> {
     let naxis = header.get_i64("NAXIS").unwrap_or(0);
     let naxis3 = card_usize(header, "NAXIS3").unwrap_or(0);
@@ -125,7 +127,8 @@ pub fn ramp_info(header: &HduHeader) -> Option<RampInfo> {
         return None;
     }
     let ngroups = card_usize(header, "NGROUPS").unwrap_or(naxis3);
-    let nints = card_usize(header, "NINTS").or(naxis4).unwrap_or(1);
+    let exposure_nints = card_usize(header, "NINTS").or(naxis4).unwrap_or(1);
+    let nints = segment_integrations(header, ngroups, naxis3, naxis4, exposure_nints).unwrap_or(exposure_nints);
     let declared = ngroups.checked_mul(nints)?;
     let stored = naxis3.checked_mul(naxis4.unwrap_or(1).max(1))?;
     if ngroups == 0 || nints == 0 || declared != stored {
@@ -150,6 +153,7 @@ pub fn ramp_info(header: &HduHeader) -> Option<RampInfo> {
         irs2: irs2_header(header),
         frame_width: card_usize(header, "NAXIS1").unwrap_or(0),
         frame_height: card_usize(header, "NAXIS2").unwrap_or(0),
+        intstart: card_usize(header, "INTSTART").filter(|first| *first >= 1),
     })
 }
 
@@ -197,6 +201,7 @@ pub fn roman_ramp_info(
         irs2: None,
         frame_width: shape[2],
         frame_height: shape[1],
+        intstart: None,
     })
 }
 
@@ -393,6 +398,41 @@ mod tests {
         assert_eq!((info.ngroups, info.nints), (10, 2));
         let from_axes = make_header(&[("NAXIS", "4"), ("NAXIS1", "8"), ("NAXIS2", "8"), ("NAXIS3", "10"), ("NAXIS4", "3"), ("NGROUPS", "10")]);
         assert_eq!(ramp_info(&from_axes).unwrap().nints, 3);
+    }
+
+    fn segment_header(naxis4: &str, nints: &str, intstart: Option<&str>, intend: Option<&str>) -> HduHeader {
+        let mut cards = vec![("NAXIS", "4"), ("NAXIS1", "8"), ("NAXIS2", "8"), ("NAXIS3", "5"), ("NAXIS4", naxis4), ("NGROUPS", "5"), ("NINTS", nints)];
+        if let Some(first) = intstart {
+            cards.push(("INTSTART", first));
+        }
+        if let Some(last) = intend {
+            cards.push(("INTEND", last));
+        }
+        make_header(&cards)
+    }
+
+    #[test]
+    fn a_segment_of_a_segmented_exposure_is_a_ramp_of_its_own_integrations() {
+        let first = ramp_info(&segment_header("250", "1000", Some("1"), Some("250"))).expect("segment 1 of 4 is a ramp");
+        assert_eq!((first.ngroups, first.nints, first.intstart), (5, 250, Some(1)));
+        let third = ramp_info(&segment_header("250", "1000", Some("501"), Some("750"))).expect("segment 3 of 4 is a ramp");
+        assert_eq!((third.ngroups, third.nints, third.intstart), (5, 250, Some(501)));
+        let last = ramp_info(&segment_header("4", "44", Some("41"), Some("44"))).expect("a short last segment is a ramp");
+        assert_eq!((last.nints, last.intstart), (4, Some(41)));
+        let single = ramp_info(&segment_header("1", "44", Some("44"), Some("44"))).expect("a one-integration segment is a ramp");
+        assert_eq!((single.nints, single.intstart), (1, Some(44)));
+    }
+
+    #[test]
+    fn a_fourth_axis_that_matches_neither_nints_nor_the_segment_cards_is_not_a_ramp() {
+        assert_eq!(ramp_info(&segment_header("250", "1000", None, None)), None);
+        assert_eq!(ramp_info(&segment_header("250", "1000", Some("1"), Some("200"))), None);
+        assert_eq!(ramp_info(&segment_header("250", "1000", Some("901"), Some("1150"))), None);
+        assert_eq!(ramp_info(&segment_header("250", "1000", Some("0"), Some("249"))), None);
+        let whole = ramp_info(&segment_header("3", "3", Some("1"), Some("3"))).expect("an unsegmented exposure is a ramp");
+        assert_eq!((whole.nints, whole.intstart), (3, Some(1)));
+        let no_cards = ramp_info(&segment_header("3", "3", None, None)).unwrap();
+        assert_eq!(no_cards.intstart, None);
     }
 
     #[test]

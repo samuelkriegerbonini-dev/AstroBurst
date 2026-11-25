@@ -25,6 +25,7 @@ import { useComposeWizardContext } from "./ComposeWizardContext";
 import { fileSwitchCompositeAction, reseedsRgbFileView } from "../utils/previewShell";
 import { rawPixelsHolder } from "../utils/pixelHolder";
 import { pixelSourceVersion, scientificInputRevisionOf } from "../utils/pixelSource";
+import { heldPixelsSourceKey, type HeldPixelsSource } from "../utils/gpuMonoPixels";
 import type {
   ProcessedFile,
   ProcessResult,
@@ -153,10 +154,12 @@ interface RawPixelsContextValue {
   rawPixels: RawPixelData | null;
   rawPixelsLoading: boolean;
   rawPixelsError: string | null;
+  rawPixelsSource: HeldPixelsSource | null;
   loadRawPixels: (force?: boolean) => void;
   clearRawPixels: () => void;
   rgbRawPixels: RawRgbPixelData | null;
   rgbRawPixelsLoading: boolean;
+  rgbRawPixelsError: string | null;
   loadRgbRawPixels: (source: string | null, force?: boolean, displayReferred?: boolean) => void;
   clearRgbRawPixels: () => void;
 }
@@ -175,6 +178,7 @@ interface DisplayContextValue {
   lut: Uint8Array | null;
   limitsLoading: boolean;
   limitsError: string | null;
+  histError: string | null;
   linear: LinearUndo | null;
   linearBlocked: string | null;
   toggleLinear: () => void;
@@ -401,8 +405,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [rawPixels, setRawPixels] = useState<RawPixelData | null>(null);
   const [rawPixelsLoading, setRawPixelsLoading] = useState(false);
   const [rawPixelsError, setRawPixelsError] = useState<string | null>(null);
+  const [rawPixelsSource, setRawPixelsSource] = useState<HeldPixelsSource | null>(null);
   const [rgbRawPixels, setRgbRawPixels] = useState<RawRgbPixelData | null>(null);
   const [rgbRawPixelsLoading, setRgbRawPixelsLoading] = useState(false);
+  const [rgbRawPixelsError, setRgbRawPixelsError] = useState<string | null>(null);
   const [narrowbandPalette, setNarrowbandPalette] = useState<PaletteSuggestion | null>(null);
   const [narrowbandFilters, setNarrowbandFilters] = useState<NarrowbandFilterDetection[]>([]);
   const [selectedPalette, setSelectedPaletteRaw] = useState("SHO");
@@ -415,8 +421,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const [displayToken, setDisplayToken] = useState<DisplayToken | null>(null);
   const autoStfRef = useRef<StfParams | null>(null);
   const [limits, setLimits] = useState<ScaleLimits | null>(null);
+  const [limitsSource, setLimitsSource] = useState<string | null>(null);
   const [limitsLoading, setLimitsLoading] = useState(false);
   const [limitsError, setLimitsError] = useState<string | null>(null);
+  const [histError, setHistError] = useState<{ source: string; message: string } | null>(null);
   const [lut, setLut] = useState<Uint8Array | null>(GRAY_LUT_RGBA);
   const [flagTable, setFlagTable] = useState<DqFlagTableResult | null>(null);
   const [flagTableSource, setFlagTableSource] = useState<string | null>(null);
@@ -475,6 +483,9 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }
   const chain = current.chain;
   const sourceVersion = pixelSourceVersion(file, processedPath, processedVersion);
+  const limitsKey = imagePath ? heldPixelsSourceKey(processedPath ?? imagePath, sourceVersion) : null;
+  const histKey = imagePath ? `${heldPixelsSourceKey(processedPath ?? imagePath, sourceVersion)}|${excludeDq}` : null;
+  const displayedDims = processed?.dimensions ?? file?.result?.dimensions ?? null;
   const processedPreviewOnly = processed !== null && processed.fitsPath === null && processed.previewUrl !== null;
   const stfPreviewUrl =
     !processedPreviewOnly && stfPreview.key === fileKey && stfPreview.version === processedVersion ? stfPreview.url : null;
@@ -499,6 +510,13 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   const rawPixelsRef = useRef(rawPixels);
   rawPixelsRef.current = rawPixels;
+  const rawPixelsSourceRef = useRef(rawPixelsSource);
+  rawPixelsSourceRef.current = rawPixelsSource;
+  const rgbHeldSourceRef = useRef<string | null>(null);
+  const sourceVersionRef = useRef(sourceVersion);
+  sourceVersionRef.current = sourceVersion;
+  const displayedDimsRef = useRef(displayedDims);
+  displayedDimsRef.current = displayedDims;
   const rawPixelsLoadingRef = useRef(rawPixelsLoading);
   rawPixelsLoadingRef.current = rawPixelsLoading;
   const rgbRawPixelsRef = useRef(rgbRawPixels);
@@ -511,6 +529,12 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   imagePathRef.current = imagePath;
   const fileKeyRef = useRef(fileKey);
   fileKeyRef.current = fileKey;
+  const fileRef = useRef(file);
+  fileRef.current = file;
+  const compositeRef = useRef(composite);
+  compositeRef.current = composite;
+  const isSpectrumRef = useRef(isSpectrum);
+  isSpectrumRef.current = isSpectrum;
   const viewRef = useRef<RenderView>(current);
   viewRef.current = current;
   const processedRef = useRef<ProcessedResult | null>(processed);
@@ -739,6 +763,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       return;
     }
     setLimitsLoading(true);
+    const requestKey = limitsKey;
     const timer = window.setTimeout(() => {
       computeScaleLimits(processedPath ?? imagePath, {
         ...DEFAULT_DISPLAY_SETTINGS,
@@ -750,15 +775,18 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         userHi,
         symmetric: displaySymmetric,
         centre: displayCentre,
-      })
+      }, excludeDq)
         .then((res) => {
           if (limitsSeqRef.current !== seq) return;
           setLimits(res);
+          setLimitsSource(requestKey);
           setLimitsError(null);
         })
         .catch((err) => {
           if (limitsSeqRef.current !== seq) return;
           console.error("[AstroBurst] Scale limits failed:", err);
+          setLimits(null);
+          setLimitsSource(null);
           setLimitsError(err instanceof Error ? err.message : String(err));
         })
         .finally(() => {
@@ -769,7 +797,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [imagePath, processedPath, sourceVersion, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi, displaySymmetric, displayCentre]);
+  }, [imagePath, processedPath, sourceVersion, limitsKey, excludeDq, displayStretch, displayLimits, percentileLow, percentileHigh, zscaleContrast, userLo, userHi, displaySymmetric, displayCentre]);
 
   useEffect(() => {
     let cancelled = false;
@@ -823,15 +851,20 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const seq = ++rawPixelsAbortRef.current;
     const maxDim = computePreviewMaxDim();
     lastFetchMaxDimRef.current = maxDim;
+    const source: HeldPixelsSource = { key: heldPixelsSourceKey(path, sourceVersionRef.current), dims: displayedDimsRef.current };
     getRawPixelsPreview(path, maxDim)
       .then((result) => {
         if (rawPixelsAbortRef.current !== seq) return;
         setRawPixels(rawPixelsHolder(result));
+        setRawPixelsSource(source);
       })
       .catch((err) => {
         if (rawPixelsAbortRef.current !== seq) return;
         console.error("[AstroBurst] Raw pixels load failed:", err);
         setRawPixelsError(err instanceof Error ? err.message : String(err));
+        if (rawPixelsSourceRef.current?.key === source.key) return;
+        setRawPixels(null);
+        setRawPixelsSource(null);
       })
       .finally(() => {
         if (rawPixelsAbortRef.current !== seq) return;
@@ -842,6 +875,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const clearRawPixels = useCallback(() => {
     rawPixelsAbortRef.current++;
     setRawPixels(null);
+    setRawPixelsSource(null);
     setRawPixelsLoading(false);
     setRawPixelsError(null);
   }, []);
@@ -849,6 +883,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   const loadRgbRawPixels = useCallback((source: string | null, force = false, displayReferred = false) => {
     if (!force && (rgbRawPixelsRef.current || rgbRawPixelsLoadingRef.current)) return;
     setRgbRawPixelsLoading(true);
+    setRgbRawPixelsError(null);
     const seq = ++rgbRawPixelsAbortRef.current;
     const maxDim = computePreviewMaxDim();
     lastFetchMaxDimRef.current = maxDim;
@@ -856,11 +891,16 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     getRawRgbPixelsPreview(source, maxDim, displayReferred)
       .then((result) => {
         if (rgbRawPixelsAbortRef.current !== seq) return;
+        rgbHeldSourceRef.current = source;
         setRgbRawPixels(result);
       })
       .catch((err) => {
         if (rgbRawPixelsAbortRef.current !== seq) return;
         console.error("[AstroBurst] RGB raw pixels load failed:", err);
+        setRgbRawPixelsError(err instanceof Error ? err.message : String(err));
+        if (rgbHeldSourceRef.current === source) return;
+        rgbHeldSourceRef.current = null;
+        setRgbRawPixels(null);
       })
       .finally(() => {
         if (rgbRawPixelsAbortRef.current !== seq) return;
@@ -870,8 +910,10 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   const clearRgbRawPixels = useCallback(() => {
     rgbRawPixelsAbortRef.current++;
+    rgbHeldSourceRef.current = null;
     setRgbRawPixels(null);
     setRgbRawPixelsLoading(false);
+    setRgbRawPixelsError(null);
   }, []);
 
   useEffect(() => {
@@ -898,6 +940,11 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   }, [loadRawPixels, loadRgbRawPixels]);
 
   useEffect(() => {
+    const file = fileRef.current;
+    const fileKey = fileKeyRef.current;
+    const composite = compositeRef.current;
+    const isSpectrum = isSpectrumRef.current;
+    const processedPath = processedRef.current?.fitsPath ?? null;
     if (!file?.path || inputRevision === previousFileRevisionRef.current) return;
     previousFileRevisionRef.current = inputRevision;
 
@@ -925,12 +972,17 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     setCubeFileKey(fileKey);
     resetRampIntegration();
     setRawPixels(null);
+    setRawPixelsSource(null);
     setRawPixelsLoading(false);
     setRawPixelsError(null);
+    rgbHeldSourceRef.current = null;
     setRgbRawPixels(null);
     setRgbRawPixelsLoading(false);
+    setRgbRawPixelsError(null);
     setNarrowbandPalette(null);
     setLimits(null);
+    setLimitsSource(null);
+    setHistError(null);
     rawPixelsAbortRef.current++;
     rgbRawPixelsAbortRef.current++;
 
@@ -992,7 +1044,6 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
       setIsCube(true);
       probeRamp();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inputRevision]);
 
   const fileResult = file?.result ?? null;
@@ -1021,6 +1072,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     const precomputed = processedPath || excludeDq ? null : precomputedHist;
     const histPath = processedPath ?? imagePath;
     const source = stfSourceKey({ filePath: imagePath, processedPath, version: sourceVersion, excludeDq });
+    const requestKey = histKey;
     const applyAutoStf = (auto: StfParams | null) => {
       autoStfRef.current = auto;
       const stf = resolveStf(fileEntry(displayMemory.get(), imagePath), source, processedPath !== null, auto, linearRef.current !== null);
@@ -1029,6 +1081,7 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
     if (precomputed?.bins) {
       setHistData(precomputed);
       setHistDataPath(histPath);
+      setHistError(null);
       applyAutoStf(precomputed.auto_stf ?? null);
       return;
     }
@@ -1037,12 +1090,18 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
         if (histSeqRef.current !== seq) return;
         setHistData(data);
         setHistDataPath(histPath);
+        setHistError(null);
         applyAutoStf(data.auto_stf ?? null);
       })
       .catch((err) => {
-        if (histSeqRef.current === seq) console.error("[AstroBurst] Histogram fetch failed:", err);
+        if (histSeqRef.current !== seq) return;
+        console.error("[AstroBurst] Histogram fetch failed:", err);
+        autoStfRef.current = null;
+        const stf = resolveStf(fileEntry(displayMemory.get(), imagePath), source, processedPath !== null, null, linearRef.current !== null);
+        setStfParams(stf ?? DEFAULT_STF);
+        if (requestKey !== null) setHistError({ source: requestKey, message: err instanceof Error ? err.message : String(err) });
       });
-  }, [fileKey, imagePath, processedPath, sourceVersion, excludeDq, precomputedHist]);
+  }, [fileKey, imagePath, processedPath, sourceVersion, excludeDq, precomputedHist, histKey]);
 
   const plane = file?.result?.plane ?? null;
   const dqRgbView = rgbViewOf({ compositePreviewUrl, fileIsRgb: !!file?.result?.is_rgb, filePath: imagePath, filePreviewUrl: file?.result?.previewUrl ?? null, processed });
@@ -1171,12 +1230,12 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
 
   const rawPixelsValue = useMemo<RawPixelsContextValue>(
     () => ({
-      rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
-      rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels,
+      rawPixels, rawPixelsLoading, rawPixelsError, rawPixelsSource, loadRawPixels, clearRawPixels,
+      rgbRawPixels, rgbRawPixelsLoading, rgbRawPixelsError, loadRgbRawPixels, clearRgbRawPixels,
     }),
     [
-      rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
-      rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels,
+      rawPixels, rawPixelsLoading, rawPixelsError, rawPixelsSource, loadRawPixels, clearRawPixels,
+      rgbRawPixels, rgbRawPixelsLoading, rgbRawPixelsError, loadRgbRawPixels, clearRgbRawPixels,
     ],
   );
 
@@ -1191,13 +1250,15 @@ export function PreviewProvider({ file, doneFiles, children }: Props) {
   );
 
   const linearBlocked = displayState.snapshot ? LINEAR_HINT_TITLE : processedPreviewOnly ? PNG_ONLY_TITLE : null;
+  const activeLimits = limitsKey !== null && limitsSource === limitsKey ? limits : null;
+  const activeHistError = histKey !== null && histError?.source === histKey ? histError.message : null;
   const displayValue = useMemo<DisplayContextValue>(
     () => ({
-      display, setDisplay, limits, lut, limitsLoading, limitsError,
+      display, setDisplay, limits: activeLimits, lut, limitsLoading, limitsError, histError: activeHistError,
       linear, linearBlocked, toggleLinear, resetDisplay, setAsDefault, sameGroup, setSameGroup,
     }),
     [
-      display, setDisplay, limits, lut, limitsLoading, limitsError,
+      display, setDisplay, activeLimits, lut, limitsLoading, limitsError, activeHistError,
       linear, linearBlocked, toggleLinear, resetDisplay, setAsDefault, sameGroup, setSameGroup,
     ],
   );

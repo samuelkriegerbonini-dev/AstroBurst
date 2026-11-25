@@ -39,9 +39,6 @@ export async function withPreview<T extends object>(
 ): Promise<T> {
   const res = await withDirInvoke<T & Record<string, unknown>>(cmd, outputDir, args);
   announceCommandOutputs(res);
-  // Resolve all preview URLs in parallel and return a NEW object instead of
-  // mutating the backend response in place (mutation breaks identity-based
-  // memoization and can expose partially-populated objects between awaits).
   const resolved = await Promise.all(
     previews.map(([key, urlKey]) => resolvePreview(res, key, urlKey)),
   );

@@ -67,15 +67,41 @@ export interface LevelScale {
 
 export interface CompositeHistory {
   blend: string | null;
+  weights: string[];
   levels: string[];
   colorBalance: string[];
   after: string[];
+  chain: string[];
+  signature: string | null;
 }
 
-export const EMPTY_COMPOSITE_HISTORY: CompositeHistory = { blend: null, levels: [], colorBalance: [], after: [] };
+export const EMPTY_COMPOSITE_HISTORY: CompositeHistory = {
+  blend: null,
+  weights: [],
+  levels: [],
+  colorBalance: [],
+  after: [],
+  chain: [],
+  signature: null,
+};
+
+export interface BlendWeightEntry {
+  channel: string;
+  r: number;
+  g: number;
+  b: number;
+}
 
 export type CompositeOp =
-  | { kind: "blend"; preset: string; levels?: readonly LevelMatchEntry[] | null }
+  | {
+      kind: "blend";
+      preset: string;
+      levels?: readonly LevelMatchEntry[] | null;
+      weights?: readonly BlendWeightEntry[];
+      signature?: string | null;
+    }
+  | { kind: "chain"; lines: readonly string[]; restarted: boolean }
+  | { kind: "chainReset"; restored: boolean }
   | { kind: "colorBalance"; mode: string; r: number; g: number; b: number; scnr: { method: string; amount: number } | null }
   | { kind: "resetColorBalance" }
   | { kind: "lrgb"; lightness: number; chrominance: number }
@@ -84,6 +110,7 @@ export type CompositeOp =
 export interface WizardState {
   bins: FrequencyBin[];
   stackedPaths: Record<string, string>;
+  stackedFrom: Record<string, string[]>;
   alignedPaths: Record<string, string>;
   croppedPaths: Record<string, string>;
   backgroundPaths: Record<string, string>;
@@ -96,8 +123,6 @@ export interface WizardState {
   wbR: number;
   wbG: number;
   wbB: number;
-  starMaskPath: string | null;
-  segmPath: string | null;
   maskGrowth: number;
   maskProtection: number;
   stretchMode: "masked" | "arcsinh" | "ghs" | "auto_stf";
@@ -107,8 +132,6 @@ export interface WizardState {
   scnrAmount: number;
   scnrMethod: "average" | "maximum";
   scnrPreserveLuminance: boolean;
-  resultPng: string | null;
-  resultFits: string | null;
   completedSteps: Record<string, boolean>;
   subframeResults: Record<string, SubframeAnalysisResult>;
   excludedFiles: Record<string, string[]>;
@@ -189,6 +212,7 @@ export const BLEND_PRESETS: Record<string, { label: string; desc: string; weight
 export const INITIAL_STATE: WizardState = {
   bins: DEFAULT_BINS.map((b) => ({ ...b, files: [] })),
   stackedPaths: {},
+  stackedFrom: {},
   alignedPaths: {},
   croppedPaths: {},
   backgroundPaths: {},
@@ -201,8 +225,6 @@ export const INITIAL_STATE: WizardState = {
   wbR: 1.0,
   wbG: 1.0,
   wbB: 1.0,
-  starMaskPath: null,
-  segmPath: null,
   maskGrowth: 2.5,
   maskProtection: 0.85,
   stretchMode: "masked",
@@ -212,8 +234,6 @@ export const INITIAL_STATE: WizardState = {
   scnrAmount: 0.5,
   scnrMethod: "average",
   scnrPreserveLuminance: false,
-  resultPng: null,
-  resultFits: null,
   completedSteps: {},
   subframeResults: {},
   excludedFiles: {},
@@ -268,6 +288,31 @@ export function unstackedBins(state: WizardState): FrequencyBin[] {
   return state.bins.filter((b) => effectiveBinFiles(state, b).length >= 2 && !state.stackedPaths[b.id]);
 }
 
+function sameFileList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((f, i) => f === b[i]);
+}
+
+function stackOutOfDate(state: WizardState, bin: FrequencyBin): boolean {
+  const from = state.stackedFrom[bin.id];
+  return !!state.stackedPaths[bin.id] && from !== undefined && !sameFileList(from, effectiveBinFiles(state, bin));
+}
+
+export function staleStackBins(state: WizardState): FrequencyBin[] {
+  return state.bins.filter((b) => stackOutOfDate(state, b));
+}
+
+export function staleStackReason(state: WizardState): string | null {
+  const bins = staleStackBins(state).filter((b) => effectiveBinFiles(state, b).length >= 2);
+  if (bins.length === 0) return null;
+  const names = joinNames(bins.map((b) => b.shortLabel));
+  if (bins.length > 1) return `the ${names} stacks are out of date (the frame selection changed); stack them again`;
+  const built = state.stackedFrom[bins[0].id]?.length ?? 0;
+  const selected = effectiveBinFiles(state, bins[0]).length;
+  const frames = built === 1 ? "1 frame" : `${built} frames`;
+  const detail = built === selected ? "the frame selection changed" : `built from ${frames}, ${selected} selected now`;
+  return `the ${names} stack is out of date (${detail}); stack ${names} again`;
+}
+
 export function unstackedReason(state: WizardState): string | null {
   const bins = unstackedBins(state);
   if (bins.length === 0) return null;
@@ -287,7 +332,7 @@ export function fullyExcludedReason(state: WizardState): string | null {
 }
 
 function channelInputsReason(state: WizardState): string | null {
-  return fullyExcludedReason(state) ?? unstackedReason(state);
+  return fullyExcludedReason(state) ?? staleStackReason(state) ?? unstackedReason(state);
 }
 
 function gate(blockedReason: (s: WizardState) => string | null): Pick<StepDef, "enabled" | "blockedReason"> {
@@ -547,7 +592,10 @@ function stagePath(state: WizardState, binId: string, stage: PipelineStage): str
     case "background": return state.backgroundPaths[binId];
     case "cropped": return state.croppedPaths[binId];
     case "aligned": return state.alignedPaths[binId];
-    case "stacked": return state.stackedPaths[binId];
+    case "stacked": {
+      const bin = state.bins.find((b) => b.id === binId);
+      return bin && stackOutOfDate(state, bin) ? undefined : state.stackedPaths[binId];
+    }
   }
 }
 
@@ -564,12 +612,19 @@ export function resolveChannelPath(
   return bin ? effectiveBinFiles(state, bin)[0] ?? null : null;
 }
 
+function withStackRecord(state: WizardState, binId: string): WizardState {
+  const bin = state.bins.find((b) => b.id === binId);
+  if (!bin || !state.stackedPaths[binId] || state.stackedFrom[binId] !== undefined) return state;
+  return { ...state, stackedFrom: { ...state.stackedFrom, [binId]: effectiveBinFiles(state, bin) } };
+}
+
 export function withExcludedFiles(state: WizardState, binId: string, files: string[]): WizardState {
-  const next: WizardState = { ...state, excludedFiles: { ...state.excludedFiles, [binId]: files } };
+  const before = withStackRecord(state, binId);
+  const next: WizardState = { ...before, excludedFiles: { ...before.excludedFiles, [binId]: files } };
   const needsStack = (s: WizardState) => unstackedBins(s).some((b) => b.id === binId);
-  const sameInput = resolveChannelPath(next, binId, "stacked") === resolveChannelPath(state, binId, "stacked");
-  if (sameInput && needsStack(next) === needsStack(state)) return next;
-  return { ...next, ...invalidateDownstream(state, "align"), alignedPaths: {}, alignRefBinId: null, alignRunToken: null };
+  const sameInput = resolveChannelPath(next, binId, "stacked") === resolveChannelPath(before, binId, "stacked");
+  if (sameInput && needsStack(next) === needsStack(before)) return next;
+  return { ...next, ...invalidateDownstream(before, "align"), alignedPaths: {}, alignRefBinId: null, alignRunToken: null };
 }
 
 export function resolveAnyChannelPath(
@@ -709,7 +764,7 @@ export function wizardHeaderSourcePath(
         ? active[0]
         : undefined;
   if (!bin) return null;
-  return state.stackedPaths[bin.id] ?? effectiveBinFiles(state, bin)[0] ?? null;
+  return resolveChannelPath(state, bin.id, "stacked");
 }
 
 export function wizardChannelExport(state: WizardState): { r: string; g: string; b: string; monoBinId: string | null } | null {
@@ -901,7 +956,7 @@ export function alignChannelOutcome(
   const registered = channel.registered ?? !(used && IDENTITY_ALIGN_METHODS.has(used));
   if (!registered) {
     const other = requestedMethod === "affine" ? "Phase Correlation" : "Star-based Affine";
-    return { unregistered: `not registered — low-confidence match, channel left unshifted; try ${other}`, usedMethod: null };
+    return { unregistered: `not registered: low-confidence match, channel left unshifted; try ${other}`, usedMethod: null };
   }
   return { unregistered: null, usedMethod };
 }
@@ -1380,29 +1435,60 @@ export function starRemovalNote(sigma: number, growth: number): string {
 
 const percent = (v: number) => `${Math.round(v * 100)}%`;
 
+export function blendWeightLine(entry: BlendWeightEntry): string {
+  return `Blend ${entry.channel}: R=${entry.r.toFixed(3)} G=${entry.g.toFixed(3)} B=${entry.b.toFixed(3)}`;
+}
+
+function bakedChain(history: CompositeHistory, ...lines: string[]): Pick<CompositeHistory, "after" | "chain"> {
+  return { after: [...history.after, ...history.chain, ...lines], chain: [] };
+}
+
 export function applyCompositeOp(history: CompositeHistory, op: CompositeOp): CompositeHistory {
   switch (op.kind) {
     case "blend":
-      return { blend: `Blend: ${op.preset}`, levels: (op.levels ?? []).map(levelMatchLine), colorBalance: [], after: [] };
+      return {
+        ...EMPTY_COMPOSITE_HISTORY,
+        blend: `Blend: ${op.preset}`,
+        weights: (op.weights ?? []).map(blendWeightLine),
+        levels: (op.levels ?? []).map(levelMatchLine),
+        signature: op.signature ?? null,
+      };
     case "colorBalance": {
       const lines: string[] = [];
       if (op.r !== 1 || op.g !== 1 || op.b !== 1) {
         lines.push(`White balance: ${op.mode} R=${op.r.toFixed(3)} G=${op.g.toFixed(3)} B=${op.b.toFixed(3)}`);
       }
       if (op.scnr) lines.push(`SCNR: ${op.scnr.method} ${percent(op.scnr.amount)}`);
-      return { ...history, colorBalance: lines };
+      return { ...history, ...bakedChain(history), colorBalance: lines };
     }
     case "resetColorBalance":
-      return { ...history, colorBalance: [] };
+      return { ...history, ...bakedChain(history), colorBalance: [] };
     case "lrgb":
-      return { ...history, after: [...history.after, `LRGB: lightness ${percent(op.lightness)}, chrominance ${percent(op.chrominance)}`] };
+      return { ...history, ...bakedChain(history, `LRGB: lightness ${percent(op.lightness)}, chrominance ${percent(op.chrominance)}`) };
     case "starRemoval":
-      return { ...history, after: [...history.after, `Star removal: ${starRemovalParams(op.sigma, op.growth)}`] };
+      return { ...history, ...bakedChain(history, `Star removal: ${starRemovalParams(op.sigma, op.growth)}`) };
+    case "chain":
+      return op.restarted ? { ...history, ...bakedChain(history), chain: [...op.lines] } : { ...history, chain: [...op.lines] };
+    case "chainReset":
+      return op.restored ? { ...history, chain: [] } : { ...history, ...bakedChain(history) };
   }
 }
 
 export function compositeHistoryLines(history: CompositeHistory): string[] {
-  return [...(history.blend ? [history.blend] : []), ...history.levels, ...history.colorBalance, ...history.after];
+  return [
+    ...(history.blend ? [history.blend] : []),
+    ...history.weights,
+    ...history.levels,
+    ...history.colorBalance,
+    ...history.after,
+    ...history.chain,
+  ];
+}
+
+export function exportFitsContents(history: CompositeHistory): string {
+  const lines = compositeHistoryLines(history);
+  if (lines.length === 0) return "FITS holds the linear composite.";
+  return `FITS holds the linear composite, written to HISTORY as: ${lines.join("; ")}.`;
 }
 
 export function levelMatchFactors(entry: LevelMatchEntry): string {

@@ -9,6 +9,7 @@ import {
   TOKEN_PAGE_NOTE,
   TOKEN_STORAGE_NOTE,
   romanIntro,
+  romanOffer,
   romanPanelView,
   tokenWasSaved,
   type RomanPanelInput,
@@ -61,6 +62,7 @@ describe("romanPanelView", () => {
       layout: "full",
       title: "Roman access",
       intro: romanIntro("2026-10-16"),
+      offer: null,
       needs: ROMAN_NEEDS,
       tokenLine: "Token on this computer: none",
       message: null,
@@ -181,5 +183,16 @@ describe("tokenWasSaved", () => {
     expect(tokenWasSaved(net(), { present: false, authorized: null }, { present: true, authorized: null })).toBe(true);
     expect(tokenWasSaved(net(), null, { present: false, authorized: null })).toBe(false);
     expect(tokenWasSaved(net(), { present: true, authorized: false }, { present: true, authorized: false })).toBe(false);
+  });
+});
+
+describe("what Roman access gives", () => {
+  it("follows the mission capabilities, so a download capability that turns on shows without a code change", () => {
+    expect(romanOffer({ search: true, images: true, products: true })).toBe("Once access is confirmed, AstroBurst searches Roman, shows previews and lists the products, and downloads them with the same token.");
+    expect(romanOffer({ search: true, images: true, products: true, downloads: false } as never)).toBe("Once access is confirmed, AstroBurst searches Roman, shows previews and lists the products; downloads are not offered yet.");
+    expect(romanOffer({ search: true, images: false, products: false })).toBe("Once access is confirmed, AstroBurst searches Roman.");
+    expect(romanOffer(undefined)).toBeNull();
+    expect(romanPanelView(input({ capabilities: { search: true, images: true, products: true } })).offer).toContain("downloads them");
+    expect(romanPanelView(input({ state: "authorized", capabilities: { search: true, images: true, products: true } })).offer).toBeNull();
   });
 });

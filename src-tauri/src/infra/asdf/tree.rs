@@ -1,6 +1,9 @@
 use serde_yaml::Value;
 
 use super::parser::AsdfError;
+use crate::core::astrometry::gwcs::fk5::{Fk5Frame, FK5_REFERENCE};
+
+pub const STREAMED_BLOCK: usize = usize::MAX;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArraySource {
@@ -52,6 +55,7 @@ pub struct WcsInfo {
     pub ctype: [String; 2],
     pub cunit: [String; 2],
     pub lonpole: Option<f64>,
+    pub frame_note: Option<String>,
 }
 
 fn field_usize(node: &Value, key: &str) -> Option<usize> {
@@ -78,13 +82,35 @@ fn parse_shape(seq: &[Value]) -> Result<(Vec<usize>, bool), AsdfError> {
     Ok((shape, streamed))
 }
 
-fn parse_strides(node: &Value, rank: usize) -> Option<Vec<isize>> {
-    let seq = node.get("strides")?.as_sequence()?;
+fn parse_strides(node: &Value, rank: usize) -> Result<Option<Vec<isize>>, AsdfError> {
+    let Some(strides) = node.get("strides").filter(|v| !untag(v).is_null()) else {
+        return Ok(None);
+    };
+    let Some(seq) = strides.as_sequence() else {
+        return Err(AsdfError::InvalidStrides("strides is not a list".into()));
+    };
     let parsed: Vec<isize> = seq
         .iter()
         .filter_map(|v| v.as_i64().map(|n| n as isize))
         .collect();
-    (parsed.len() == seq.len() && parsed.len() == rank).then_some(parsed)
+    if parsed.len() != seq.len() {
+        return Err(AsdfError::InvalidStrides("strides are not all integers".into()));
+    }
+    if parsed.len() != rank {
+        return Err(AsdfError::InvalidStrides(format!("{} entries for {} axes", parsed.len(), rank)));
+    }
+    Ok(Some(parsed))
+}
+
+pub(crate) fn checked_len(shape: &[usize], element_size: usize) -> Result<usize, AsdfError> {
+    shape
+        .iter()
+        .try_fold(element_size.max(1), |bytes, &n| bytes.checked_mul(n))
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+        .ok_or_else(|| {
+            let axes: Vec<String> = shape.iter().map(usize::to_string).collect();
+            AsdfError::ShapeOverflow(format!("shape [{}] of {}-byte elements", axes.join(", "), element_size.max(1)))
+        })
 }
 
 fn field_byteorder(node: &Value, fallback: ByteOrder) -> ByteOrder {
@@ -219,6 +245,7 @@ impl NdArrayMeta {
             .ok_or_else(|| AsdfError::MissingField("source".into()))?;
         let source = match source_node.as_u64() {
             Some(n) => ArraySource::Block(n as usize),
+            None if source_node.as_i64() == Some(-1) => ArraySource::Block(STREAMED_BLOCK),
             None => {
                 let uri = source_node
                     .as_str()
@@ -234,15 +261,20 @@ impl NdArrayMeta {
             .map(|seq| parse_shape(seq))
             .ok_or_else(|| AsdfError::MissingField("shape".into()))??;
 
-        let dtype_str = node
-            .get("datatype")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AsdfError::MissingField("datatype".into()))?;
+        let dtype_str = match node.get("datatype").map(untag) {
+            Some(Value::String(s)) => s.as_str(),
+            Some(Value::Sequence(_)) | Some(Value::Mapping(_)) => {
+                return Err(AsdfError::UnsupportedDtype(
+                    "structured or string datatype (only scalar numeric types are read)".into(),
+                ))
+            }
+            _ => return Err(AsdfError::MissingField("datatype".into())),
+        };
 
         let (dtype, prefix_order) = DType::parse(dtype_str)?;
         let byteorder = field_byteorder(node, prefix_order);
         let offset = field_usize_or(node, "offset", 0);
-        let strides = parse_strides(node, shape.len());
+        let strides = parse_strides(node, shape.len())?;
 
         Ok(Self {
             source,
@@ -285,15 +317,15 @@ impl NdArrayMeta {
         })
     }
 
-    pub fn resolve_streamed_shape(&mut self, block_len: usize) {
+    pub fn resolve_streamed_shape(&mut self, block_len: usize) -> Result<(), AsdfError> {
         if !self.streamed_first_dim || self.shape.is_empty() {
-            return;
+            return Ok(());
         }
-        let rest: usize = self.shape[1..].iter().product::<usize>().max(1);
-        let elem = self.byte_size_per_element().max(1);
+        let row_bytes = checked_len(&self.shape[1..], self.byte_size_per_element())?;
         let usable = block_len.saturating_sub(self.offset);
-        self.shape[0] = usable / (rest * elem);
+        self.shape[0] = if row_bytes == 0 { 0 } else { usable / row_bytes };
         self.streamed_first_dim = false;
+        Ok(())
     }
 
     pub fn byte_size_per_element(&self) -> usize {
@@ -322,8 +354,8 @@ const GWCS_PIXEL_ORIGIN_TO_FITS: f64 = 1.0;
 const GWCS_LONPOLE: f64 = 180.0;
 const GWCS_ANGLE_TOLERANCE_DEG: f64 = 1e-9;
 const IDENTITY_2X2: [[f64; 2]; 2] = [[1.0, 0.0], [0.0, 1.0]];
-const PIXEL_UNITS: &[(&str, f64)] = &[("", 1.0), ("pix", 1.0), ("pixel", 1.0)];
-const SCALE_UNITS: &[(&str, f64)] = &[
+pub(crate) const PIXEL_UNITS: &[(&str, f64)] = &[("", 1.0), ("pix", 1.0), ("pixel", 1.0)];
+pub(crate) const SCALE_UNITS: &[(&str, f64)] = &[
     ("", 1.0),
     ("deg", 1.0),
     ("deg/pix", 1.0),
@@ -332,7 +364,7 @@ const SCALE_UNITS: &[(&str, f64)] = &[
     ("arcsec/pix", 1.0 / 3600.0),
     ("arcsec/pixel", 1.0 / 3600.0),
 ];
-const ANGLE_UNITS: &[(&str, f64)] = &[
+pub(crate) const ANGLE_UNITS: &[(&str, f64)] = &[
     ("", 1.0),
     ("deg", 1.0),
     ("degree", 1.0),
@@ -589,6 +621,7 @@ impl<'a> GwcsChain<'a> {
             ctype: ["RA---TAN".into(), "DEC--TAN".into()],
             cunit: ["deg".into(), "deg".into()],
             lonpole: Some(GWCS_LONPOLE),
+            frame_note: None,
         })
     }
 }
@@ -628,6 +661,7 @@ impl WcsInfo {
             ctype,
             cunit,
             lonpole: None,
+            frame_note: None,
         })
     }
 
@@ -659,13 +693,13 @@ impl WcsInfo {
         for leaf in leaves {
             chain.apply(leaf)?;
         }
-        Self::check_world_frame(steps)?;
-        chain.finish().map(Some)
+        let frame_note = Self::check_world_frame(steps)?;
+        chain.finish().map(|wcs| Some(Self { frame_note, ..wcs }))
     }
 
-    fn check_world_frame(steps: &[Value]) -> Result<(), String> {
+    fn check_world_frame(steps: &[Value]) -> Result<Option<String>, String> {
         let Some(frame) = steps.last().and_then(|s| s.get("frame")) else {
-            return Ok(());
+            return Ok(None);
         };
         let axis_types: Vec<String> = frame
             .get("axis_physical_types")
@@ -681,11 +715,20 @@ impl WcsInfo {
         if axis_types.iter().any(|t| !t.starts_with("pos.eq.")) {
             return Err(format!("gwcs world axes {} are not RA/Dec", axis_types.join(", ")));
         }
-        let reference = frame.get("reference_frame").map(Self::model_name).unwrap_or_default();
-        if reference.is_empty() || reference == "icrs" || reference == "fk5" {
-            Ok(())
+        let reference_frame = frame.get("reference_frame");
+        let reference = reference_frame.map(Self::model_name).unwrap_or_default();
+        if reference.is_empty() || reference == "icrs" {
+            return Ok(None);
+        }
+        let Some(node) = reference_frame.filter(|_| reference == FK5_REFERENCE) else {
+            return Err(format!("gwcs world frame '{reference}' is not ICRS"));
+        };
+        let fk5 = Fk5Frame::from_reference_frame(node)
+            .map_err(|shown| format!("gwcs world frame 'fk5' has an equinox that cannot be read ('{shown}')"))?;
+        if fk5.is_j2000() {
+            Ok(Some(fk5.note()))
         } else {
-            Err(format!("gwcs world frame '{reference}' is not ICRS"))
+            Err(format!("gwcs world frame 'fk5' of equinox {} needs precession to J2000", fk5.equinox_label))
         }
     }
 
@@ -919,14 +962,33 @@ mod tests {
     }
 
     #[test]
-    fn test_strides_wrong_length_ignored() {
-        let node: Value = serde_yaml::from_str(
-            "source: 0\nshape: [4, 4]\ndatatype: float32\nbyteorder: little\nstrides: [4]\n",
-        )
+    fn a_strides_list_that_does_not_match_the_array_is_an_error() {
+        for (strides, named) in [("[4]", "1 entries for 2 axes"), ("[16, x]", "not all integers"), ("16", "not a list")] {
+            let node: Value = serde_yaml::from_str(&format!(
+                "source: 0\nshape: [4, 4]\ndatatype: float32\nbyteorder: little\nstrides: {strides}\n"
+            ))
             .unwrap();
-        let meta = NdArrayMeta::from_yaml(&node).unwrap();
-        assert_eq!(meta.strides, None);
-        assert_eq!(meta.effective_strides(), vec![16, 4]);
+            match NdArrayMeta::from_yaml(&node) {
+                Err(AsdfError::InvalidStrides(reason)) => assert!(reason.contains(named), "{strides}: {reason}"),
+                other => panic!("{strides}: a malformed view must not be read as contiguous, got {:?}", other.map(|m| m.strides)),
+            }
+        }
+    }
+
+    #[test]
+    fn a_structured_or_string_datatype_is_refused_by_name() {
+        let node: Value = serde_yaml::from_str(
+            "source: 0\nshape: [4]\ndatatype: [{name: a, datatype: int8}, {name: b, datatype: float32}]\nbyteorder: little\n",
+        )
+        .unwrap();
+        match NdArrayMeta::from_yaml(&node) {
+            Err(AsdfError::UnsupportedDtype(reason)) => assert!(reason.contains("structured"), "{reason}"),
+            other => panic!("expected an unsupported datatype, got {:?}", other.map(|m| m.dtype)),
+        }
+        let node: Value = serde_yaml::from_str("source: 0\nshape: [4]\ndatatype: [ascii, 8]\n").unwrap();
+        assert!(matches!(NdArrayMeta::from_yaml(&node), Err(AsdfError::UnsupportedDtype(_))));
+        let node: Value = serde_yaml::from_str("source: 0\nshape: [4]\n").unwrap();
+        assert!(matches!(NdArrayMeta::from_yaml(&node), Err(AsdfError::MissingField(f)) if f == "datatype"));
     }
 
     #[test]
@@ -936,7 +998,7 @@ mod tests {
                 .unwrap();
         let mut meta = NdArrayMeta::from_yaml(&node).unwrap();
         assert!(meta.streamed_first_dim);
-        meta.resolve_streamed_shape(3 * 4 * 4);
+        meta.resolve_streamed_shape(3 * 4 * 4).unwrap();
         assert_eq!(meta.shape, vec![3, 4]);
         assert!(!meta.streamed_first_dim);
     }
@@ -978,6 +1040,25 @@ mod tests {
     fn gwcs(yaml: &str) -> Result<Option<WcsInfo>, String> {
         let tree: Value = serde_yaml::from_str(yaml).unwrap();
         WcsInfo::from_gwcs(&tree, &inline_arrays)
+    }
+
+    fn fk5_chain(frame_attributes: &str) -> String {
+        format!(
+            "wcs:\n  steps:\n    - transform: !transform/compose-1.2.0\n        forward:\n          - !transform/shift-1.2.0 {{offset: -10.0}}\n          - !transform/shift-1.2.0 {{offset: -10.0}}\n          - !transform/scale-1.2.0 {{factor: 0.001}}\n          - !transform/scale-1.2.0 {{factor: 0.001}}\n          - !transform/gnomonic-1.2.0 {{direction: pix2sky}}\n          - !transform/rotate3d-1.3.0 {{phi: 150.0, theta: 30.0, psi: 180.0, direction: native2celestial}}\n    - frame:\n        name: world\n        axis_physical_types: [pos.eq.ra, pos.eq.dec]\n        reference_frame: !tag:astropy.org:astropy/coordinates/frames/fk5-1.1.0\n          frame_attributes: {frame_attributes}\n"
+        )
+    }
+
+    #[test]
+    fn an_fk5_chain_of_another_equinox_is_not_folded_into_tan_cards() {
+        let reason = gwcs(&fk5_chain("{equinox: J1975.000}")).expect_err("CRVAL in FK5 J1975 must not be written as it stands");
+        assert!(reason.contains("fk5") && reason.contains("J1975"), "{reason}");
+        let j2000 = gwcs(&fk5_chain("{equinox: J2000.000}")).unwrap().expect("FK5 J2000 folds into TAN cards");
+        assert_eq!(j2000.crval, [150.0, 30.0]);
+        assert_eq!(j2000.frame_note.as_deref(), Some("FK5 J2000 read as ICRS; 22 mas FK5-ICRS tie not applied"));
+        let default_equinox = gwcs(&fk5_chain("{}")).unwrap().expect("astropy's default FK5 equinox is J2000");
+        assert_eq!(default_equinox.crval, [150.0, 30.0]);
+        let icrs = gwcs(&fk5_chain("{}").replace("fk5-1.1.0", "icrs-1.1.0")).unwrap().unwrap();
+        assert_eq!(icrs.frame_note, None);
     }
 
     #[test]

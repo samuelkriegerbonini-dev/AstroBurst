@@ -3,7 +3,7 @@ use ndarray::Array2;
 use rayon::prelude::*;
 use serde::Deserialize;
 
-use crate::core::astrometry::spectral::{velocity_axis, AxisKind, SpectralAxis, VelocityConvention};
+use crate::core::astrometry::spectral::{velocity_axis, velocity_kms, AxisKind, SpectralAxis, VelocityConvention};
 use crate::core::cube::companions::{check_companion, CubeSet, DqPolicy, FLOAT_DQ_NOTE};
 use crate::core::cube::lazy::{err_variance, median_band_rows, LazyCube};
 use crate::core::cube::noise_factor::{residual_dof_correction, EXPECTED_FACTOR_RANGE};
@@ -13,6 +13,7 @@ use crate::types::constants::{EXTNAME_ERR, MAD_TO_SIGMA};
 
 pub const DEFAULT_SNR_THRESHOLD: f64 = 3.0;
 pub const VELOCITY_UNIT: &str = "km/s";
+pub const INTEGRATED_VELOCITY_FACTOR: &str = "km s-1";
 pub const REST_REQUIRED_MESSAGE: &str = "rest wavelength required for velocity moments";
 pub const DQ_NOT_APPLIED_NOTE: &str =
     "DQ is ignored for this result: flagged samples with finite SCI values remain included";
@@ -41,6 +42,10 @@ struct MomentConfigWire {
     mask_below_threshold: Option<bool>,
     #[serde(default)]
     dq_policy: Option<DqPolicy>,
+    #[serde(default)]
+    redshift: Option<f64>,
+    #[serde(default)]
+    weight_threshold_sigma: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +59,8 @@ pub struct MomentConfig {
     pub snr_threshold: f64,
     pub mask_below_threshold: bool,
     pub dq_policy: Option<DqPolicy>,
+    pub redshift: f64,
+    pub weight_threshold_sigma: Option<f64>,
 }
 
 impl TryFrom<MomentConfigWire> for MomentConfig {
@@ -68,6 +75,15 @@ impl TryFrom<MomentConfigWire> for MomentConfig {
         if !snr_threshold.is_finite() || snr_threshold < 0.0 {
             return Err(format!("snr_threshold must be a non-negative number, got {}", snr_threshold));
         }
+        let redshift = wire.redshift.unwrap_or(0.0);
+        if !(redshift.is_finite() && redshift > -1.0) {
+            return Err(format!("redshift must be a finite number above -1, got {}", redshift));
+        }
+        if let Some(k) = wire.weight_threshold_sigma {
+            if !(k.is_finite() && k >= 0.0) {
+                return Err(format!("weight_threshold_sigma must be a non-negative number, got {}", k));
+            }
+        }
         Ok(MomentConfig {
             z0: wire.z0,
             z1: wire.z1,
@@ -77,7 +93,27 @@ impl TryFrom<MomentConfigWire> for MomentConfig {
             snr_threshold,
             mask_below_threshold: wire.mask_below_threshold.unwrap_or(true),
             dq_policy: wire.dq_policy,
+            redshift,
+            weight_threshold_sigma: wire.weight_threshold_sigma,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VelocityFrame {
+    Observer,
+    Source,
+    Stored,
+}
+
+impl VelocityFrame {
+    pub fn name(self) -> &'static str {
+        match self {
+            VelocityFrame::Observer => "observer",
+            VelocityFrame::Source => "source",
+            VelocityFrame::Stored => "stored",
+        }
     }
 }
 
@@ -86,6 +122,13 @@ pub struct MomentMaps {
     pub m0: Array2<f32>,
     pub m1: Array2<f32>,
     pub m2: Array2<f32>,
+    pub coverage: Array2<f32>,
+    pub n_partial_pixels: usize,
+    pub rest_um: Option<f64>,
+    pub redshift: Option<f64>,
+    pub velocity_frame: VelocityFrame,
+    pub weight_threshold_sigma: Option<f64>,
+    pub intensity_unit: Option<String>,
     pub m0_unit: String,
     pub velocity_unit: &'static str,
     pub noise_per_channel: Option<f64>,
@@ -169,7 +212,13 @@ fn fit_pixel_line(xs: &[f64], ys: &[f32], constant_only: bool) -> (PixelFit, Opt
         .filter(|(_, y)| y.is_finite())
         .map(|(&x, &y)| (y as f64 - (line.intercept + line.slope * x)) as f32)
         .collect();
-    let fit = PixelFit { intercept: line.intercept as f32, slope: line.slope as f32, sigma: robust_sigma(&mut residuals) };
+    let correction = if line.channels > line.fitted_parameters {
+        residual_dof_correction(line.channels, line.fitted_parameters)
+    } else {
+        1.0
+    };
+    let sigma = (robust_sigma(&mut residuals) as f64 * correction) as f32;
+    let fit = PixelFit { intercept: line.intercept as f32, slope: line.slope as f32, sigma };
     (fit, Some(line))
 }
 
@@ -267,7 +316,45 @@ fn velocity_frame_note(axis: &SpectralAxis) -> String {
     )
 }
 
-fn velocities_for(axis: &SpectralAxis, cfg: &MomentConfig, notes: &mut Vec<String>) -> Result<Vec<f64>> {
+pub fn unit_product(unit: &str, factor: &str) -> Option<String> {
+    let mut parts = unit.split('/').map(str::trim);
+    let numerator = parts.next().filter(|n| !n.is_empty())?;
+    let Some(denominator) = parts.next() else {
+        return Some(format!("{numerator} {factor}"));
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    let name = denominator.trim_end_matches(|c: char| c.is_ascii_digit());
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let power = &denominator[name.len()..];
+    Some(format!("{numerator} {name}-{} {factor}", if power.is_empty() { "1" } else { power }))
+}
+
+pub fn velocity_integrated_unit(unit: Option<&str>, notes: &mut Vec<String>) -> String {
+    let Some(unit) = unit else {
+        return VELOCITY_UNIT.to_string();
+    };
+    unit_product(unit, INTEGRATED_VELOCITY_FACTOR).unwrap_or_else(|| {
+        let written = format!("{} {}", unit, VELOCITY_UNIT);
+        notes.push(format!(
+            "BUNIT '{}' has more than one solidus or a compound denominator: the integrated unit is written as '{}' and means ({}) x km/s; a FITS unit parser may read it differently",
+            unit, written, unit
+        ));
+        written
+    })
+}
+
+struct VelocityScale {
+    values: Vec<f64>,
+    rest_um: Option<f64>,
+    redshift: Option<f64>,
+    frame: VelocityFrame,
+}
+
+fn velocity_scale(axis: &SpectralAxis, cfg: &MomentConfig, notes: &mut Vec<String>) -> Result<VelocityScale> {
     if !axis.kind.is_spectral() {
         bail!(
             "CTYPE3 '{}' is not a spectral axis: moments need a wavelength, frequency or velocity axis",
@@ -279,22 +366,56 @@ fn velocities_for(axis: &SpectralAxis, cfg: &MomentConfig, notes: &mut Vec<Strin
             "velocity axis {} used as stored in {} (rest wavelength and convention ignored)",
             axis.ctype, axis.unit
         ));
+        if cfg.redshift != 0.0 {
+            notes.push(format!(
+                "velocity axis {} used as stored: redshift {} ignored, the moments are not in the source frame",
+                axis.ctype, cfg.redshift
+            ));
+        }
         notes.push(velocity_frame_note(axis));
-        return Ok(axis.values.clone());
+        return Ok(VelocityScale { values: axis.values.clone(), rest_um: None, redshift: None, frame: VelocityFrame::Stored });
     }
     let rest_um = match cfg.rest_um.filter(|r| r.is_finite() && *r > 0.0).or(axis.rest_wavelength_um) {
         Some(rest) => rest,
         None => bail!("{}", REST_REQUIRED_MESSAGE),
     };
-    let velocity = velocity_axis(axis, rest_um, cfg.convention).map_err(anyhow::Error::msg)?;
+    let stretch = 1.0 + cfg.redshift;
+    let velocity = velocity_axis(axis, rest_um * stretch, cfg.convention).map_err(anyhow::Error::msg)?;
     notes.extend(velocity.notes);
-    notes.push(format!(
-        "velocities from the {} convention with rest wavelength {} um",
-        cfg.convention.name(),
-        rest_um
-    ));
+    let source_frame = cfg.redshift != 0.0;
+    let values = if source_frame && axis.kind == AxisKind::Zopt {
+        axis.values.iter().map(|&z| velocity_kms(1.0 + z, stretch, cfg.convention)).collect()
+    } else {
+        velocity.values_kms
+    };
+    if !source_frame {
+        notes.push(format!(
+            "velocities from the {} convention with rest wavelength {} um",
+            cfg.convention.name(),
+            rest_um
+        ));
+    } else if axis.kind == AxisKind::Zopt {
+        notes.push(format!(
+            "velocities from the {} convention on the redshift axis, relative to redshift {}: source frame (M0, M1 and M2 scale with it)",
+            cfg.convention.name(),
+            cfg.redshift
+        ));
+    } else {
+        notes.push(format!(
+            "velocities from the {} convention with rest wavelength {} um at redshift {}: source frame, relative to {} um (M0, M1 and M2 scale with it)",
+            cfg.convention.name(),
+            rest_um,
+            cfg.redshift,
+            rest_um * stretch
+        ));
+    }
     notes.push(velocity_frame_note(axis));
-    Ok(velocity.values_kms)
+    Ok(VelocityScale {
+        values,
+        rest_um: Some(rest_um),
+        redshift: source_frame.then_some(cfg.redshift),
+        frame: if source_frame { VelocityFrame::Source } else { VelocityFrame::Observer },
+    })
 }
 
 fn check_window(window: (usize, usize), depth: usize) -> Result<()> {
@@ -498,11 +619,11 @@ struct PixelAccumulator {
 }
 
 impl PixelAccumulator {
-    fn add(&mut self, value: f64, v: f64, dv: f64, shape_width: f64) {
+    fn add(&mut self, value: f64, v: f64, dv: f64, shape_width: f64, floor: f64) {
         self.count += 1;
         self.used_width_squared += dv * dv;
         self.m0 += value * dv;
-        if value > 0.0 {
+        if value > floor {
             let weight = value * shape_width;
             self.weight += weight;
             self.weighted_v += weight * v;
@@ -530,10 +651,10 @@ struct OverlapAccumulator {
 }
 
 impl OverlapAccumulator {
-    fn add(&mut self, value: f64, variance: f64, u: f64, dv: f64, shape_width: f64, x: f64) {
+    fn add(&mut self, value: f64, variance: f64, u: f64, dv: f64, shape_width: f64, x: f64, floor: f64) {
         self.m0 += dv * variance;
         self.m0_x += dv * variance * x;
-        if value > 0.0 {
+        if value > floor {
             for ((plain, by_x), power) in self.u.iter_mut().zip(self.x_u.iter_mut()).zip([1.0, u, u * u]) {
                 *plain += variance * shape_width * power;
                 *by_x += variance * shape_width * x * power;
@@ -560,11 +681,11 @@ impl PixelBaseline<'_> {
 }
 
 impl ErrorAccumulator {
-    fn add(&mut self, value: f64, variance: f64, u: f64, dv: f64, shape_width: f64, x: f64) {
+    fn add(&mut self, value: f64, variance: f64, u: f64, dv: f64, shape_width: f64, x: f64, floor: f64) {
         self.m0_variance += dv * dv * variance;
         self.dv += dv;
         self.dv_x += dv * x;
-        if value > 0.0 {
+        if value > floor {
             let powers = [1.0, u, u * u, u * u * u, u * u * u * u];
             for (slot, power) in self.variance_u.iter_mut().zip(powers) {
                 *slot += variance * shape_width * shape_width * power;
@@ -613,7 +734,7 @@ fn error_from_variance(variance: f64) -> f32 {
 
 fn error_notes(err_hdu: usize, continuum: Option<&ContinuumFit>, notes: &mut Vec<String>) {
     notes.push(format!(
-        "error planes: first-order propagation of the ERR cube (HDU {}){}; M1 and M2 errors use only the positive channels, like the maps, so they are biased in low-S/N wings and degrade below S/N ~5",
+        "error planes: first-order propagation of the ERR cube (HDU {}){}; M1 and M2 errors use only the channels the maps use (the positive channels, or those above the weight threshold), so they are biased in low-S/N wings and degrade below S/N ~5",
         err_hdu,
         if continuum.is_some() { " including the covariance of the fitted continuum" } else { "" }
     ));
@@ -625,7 +746,7 @@ fn error_notes(err_hdu: usize, continuum: Option<&ContinuumFit>, notes: &mut Vec
         Some(Some(f)) => {
             let sampling = if f.stride > 1 { format!(", one pixel in {}", f.stride) } else { String::new() };
             notes.push(format!(
-                "noise factor {:.3}: robust sigma of the continuum-window residuals divided by the ERR, pooled over {} residuals from {} pixels with non-zero scatter{}; the error planes hold the propagated ERR and the factor applies only on display or export",
+                "noise factor {:.3}: robust sigma of the continuum-window residuals divided by the ERR, pooled over {} residuals from {} pixels with non-zero scatter{}; the ERR extension of each map holds the propagated ERR, not scaled: multiply it by the factor, which is also the ABNOISEF card of the SCI header",
                 f.factor, f.residuals, f.pixels, sampling
             ));
             let (low, high) = EXPECTED_FACTOR_RANGE;
@@ -636,6 +757,28 @@ fn error_notes(err_hdu: usize, continuum: Option<&ContinuumFit>, notes: &mut Vec
                 ));
             }
         }
+    }
+}
+
+fn pixel_noise(continuum: Option<&ContinuumFit>, global_noise: Option<f64>, i: usize) -> Option<f64> {
+    let per_pixel = continuum.map(|fit| fit.pixels[i].sigma as f64).filter(|s| s.is_finite() && *s > 0.0);
+    match (per_pixel, global_noise) {
+        (Some(local), Some(floor)) => Some(local.max(floor)),
+        (local, floor) => local.or(floor),
+    }
+}
+
+fn weight_definition_note(threshold: Option<f64>, continuum_subtracted: bool) -> String {
+    let channels = if continuum_subtracted { "continuum-subtracted channels" } else { "channels" };
+    match threshold {
+        Some(k) => format!(
+            "M1 and M2 use only the {} above {} x the per-pixel noise (weight threshold); M0 sums every channel of the range",
+            channels, k
+        ),
+        None => format!(
+            "M1 and M2 are weighted by the positive {} only (no noise threshold): noise in a range much wider than the line biases M2 high, about x1.2 at peak S/N 30 over +-5 sigma and x2.6 over +-12 sigma; narrow the range or set a weight threshold",
+            channels
+        ),
     }
 }
 
@@ -655,6 +798,7 @@ fn moment_memory_bytes(rows: usize, cols: usize, window_channels: Option<usize>,
     let err = u64::from(has_err);
     let planes = 1 + err;
     let accumulating = size_of::<PixelAccumulator>() as u64
+        + F32_BYTES
         + MOMENT_PLANES * F32_BYTES * planes
         + err * size_of::<ErrorAccumulator>() as u64
         + u64::from(overlap) * size_of::<OverlapAccumulator>() as u64
@@ -734,11 +878,12 @@ fn moment_maps_with_dq(
     }
     let axis = cube.spectral_axis().map_err(anyhow::Error::msg)?;
     let mut notes = Vec::new();
-    let velocities = velocities_for(&axis, cfg, &mut notes)?;
+    let scale = velocity_scale(&axis, cfg, &mut notes)?;
+    let velocities = &scale.values;
     if velocities.len() != depth {
         bail!("spectral axis has {} values for a cube with {} channels", velocities.len(), depth);
     }
-    let widths = channel_widths(&velocities);
+    let widths = channel_widths(velocities);
     let dv_mean = widths[cfg.z0..=cfg.z1].iter().sum::<f64>() / n_channels as f64;
     if !(dv_mean > 0.0) {
         bail!("channel velocity width is zero: the spectral axis has no usable step");
@@ -756,7 +901,8 @@ fn moment_maps_with_dq(
     }
     let overlap = err.is_some() && in_windows[cfg.z0..=cfg.z1].iter().any(|&w| w);
     let required = moment_memory_bytes(rows, cols, windows.as_ref().map(|(_, c)| c.len()), err.is_some(), overlap)
-        .saturating_add(if dq.is_some() { (rows as u64).saturating_mul(cols as u64).saturating_mul(16) } else { 0 });
+        .saturating_add(if dq.is_some() { (rows as u64).saturating_mul(cols as u64).saturating_mul(16) } else { 0 })
+        .saturating_add(if cfg.weight_threshold_sigma.is_some() { (rows as u64).saturating_mul(cols as u64).saturating_mul(8) } else { 0 });
     check_moment_memory(required, rows, cols, err.is_some(), memory)?;
 
     let continuum = match &windows {
@@ -768,7 +914,7 @@ fn moment_maps_with_dq(
             let level = median_finite(fit.pixels.iter().map(|p| p.sigma)).filter(|s| *s > 0.0);
             match level {
                 Some(s) => notes.push(format!(
-                    "noise per channel = robust sigma of the {} residuals per pixel, floored at the map median {:.4e}",
+                    "noise per channel = robust sigma of the {} residuals per pixel, scaled by sqrt(n / (n - p)) for the p fitted baseline parameters and floored at the map median {:.4e}",
                     if fit.linear { "linear-fit" } else { "constant-fit" },
                     s
                 )),
@@ -780,6 +926,11 @@ fn moment_maps_with_dq(
     };
 
     let npix = rows * cols;
+    notes.push(weight_definition_note(cfg.weight_threshold_sigma, continuum.is_some()));
+    let weight_floor: Option<Vec<f64>> = cfg.weight_threshold_sigma.map(|k| {
+        (0..npix).map(|i| pixel_noise(continuum.as_ref(), global_noise, i).map_or(0.0, |sigma| k * sigma)).collect()
+    });
+    let floor_at = |i: usize| weight_floor.as_ref().map_or(0.0, |floor| floor[i]);
     let mut acc = vec![PixelAccumulator::default(); npix];
     let mut err_acc = err.map(|_| vec![ErrorAccumulator::default(); npix]);
     let mut overlap_acc = overlap.then(|| vec![OverlapAccumulator::default(); npix]);
@@ -827,22 +978,24 @@ fn moment_maps_with_dq(
                             .for_each(|(i, ((a, e), o))| {
                                 if let Some(value) = value_at(i) {
                                     let variance = err_variance(sigma[i]);
-                                    a.add(value, v, dv, shape_width);
-                                    e.add(value, variance, u, dv, shape_width, xz);
-                                    o.add(value, variance, u, dv, shape_width, xz);
+                                    let floor = floor_at(i);
+                                    a.add(value, v, dv, shape_width, floor);
+                                    e.add(value, variance, u, dv, shape_width, xz, floor);
+                                    o.add(value, variance, u, dv, shape_width, xz, floor);
                                 }
                             }),
                         None => acc.par_iter_mut().zip(err_acc.par_iter_mut()).enumerate().for_each(|(i, (a, e))| {
                             if let Some(value) = value_at(i) {
-                                a.add(value, v, dv, shape_width);
-                                e.add(value, err_variance(sigma[i]), u, dv, shape_width, xz);
+                                let floor = floor_at(i);
+                                a.add(value, v, dv, shape_width, floor);
+                                e.add(value, err_variance(sigma[i]), u, dv, shape_width, xz, floor);
                             }
                         }),
                     }
                 }
                 _ => acc.par_iter_mut().enumerate().for_each(|(i, a)| {
                     if let Some(value) = value_at(i) {
-                        a.add(value, v, dv, shape_width);
+                        a.add(value, v, dv, shape_width, floor_at(i));
                     }
                 }),
             }
@@ -856,19 +1009,22 @@ fn moment_maps_with_dq(
     let mut errors = err_acc.as_ref().map(|_| [vec![f32::NAN; npix], vec![f32::NAN; npix], vec![f32::NAN; npix]]);
     let mut masked = 0usize;
     let mut unmaskable = 0usize;
+    let mut coverage = vec![0.0f32; npix];
+    let mut with_data = 0usize;
+    let mut n_partial_pixels = 0usize;
+    let mut fewest_channels = n_channels;
     for i in 0..npix {
         let a = acc[i];
         if a.count == 0 {
             continue;
         }
-        let per_pixel = continuum
-            .as_ref()
-            .map(|fit| fit.pixels[i].sigma as f64)
-            .filter(|s| s.is_finite() && *s > 0.0);
-        let noise = match (per_pixel, global_noise) {
-            (Some(local), Some(floor)) => Some(local.max(floor)),
-            (local, floor) => local.or(floor),
-        };
+        coverage[i] = a.count as f32;
+        with_data += 1;
+        if (a.count as usize) < n_channels {
+            n_partial_pixels += 1;
+            fewest_channels = fewest_channels.min(a.count as usize);
+        }
+        let noise = pixel_noise(continuum.as_ref(), global_noise, i);
         let passes = match noise {
             Some(sigma) => {
                 let integrated_noise = if uniform_velocity_widths { sigma * (a.count as f64).sqrt() * dv_mean } else { sigma * a.used_width_squared.sqrt() };
@@ -915,17 +1071,28 @@ fn moment_maps_with_dq(
         npix,
         if cfg.mask_below_threshold { ", M0 too" } else { "" }
     ));
+    notes.push(
+        "the S/N mask keeps positive integrated signal only: an absorption feature (negative M0) is masked at any threshold; turn the mask off to keep its M0".to_string(),
+    );
     if unmaskable > 0 {
-        notes.push(format!("{} pixels had no noise estimate and were kept unmasked", unmaskable));
+        notes.push(format!(
+            "{} pixels had no noise estimate and were kept unmasked{}",
+            unmaskable,
+            if weight_floor.is_some() { "; their M1 and M2 weights are not thresholded" } else { "" }
+        ));
+    }
+    if n_partial_pixels > 0 {
+        notes.push(format!(
+            "{} of {} pixels with data use fewer than the {} channels of the range (fewest: {}): their M0 integrates fewer channels and M1 and M2 lean to the surviving ones; the coverage map gives the channels used per pixel",
+            n_partial_pixels, with_data, n_channels, fewest_channels
+        ));
     }
     if let Some(e) = err {
         error_notes(e.hdu_index, continuum.as_ref(), &mut notes);
     }
 
-    let m0_unit = match bunit(cube) {
-        Some(unit) => format!("{} {}", unit, VELOCITY_UNIT),
-        None => VELOCITY_UNIT.to_string(),
-    };
+    let intensity_unit = bunit(cube);
+    let m0_unit = velocity_integrated_unit(intensity_unit.as_deref(), &mut notes);
     let shape = (rows, cols);
     let [m0_err, m1_err, m2_err] = match errors {
         Some([e0, e1, e2]) => [
@@ -939,6 +1106,13 @@ fn moment_maps_with_dq(
         m0: Array2::from_shape_vec(shape, m0)?,
         m1: Array2::from_shape_vec(shape, m1)?,
         m2: Array2::from_shape_vec(shape, m2)?,
+        coverage: Array2::from_shape_vec(shape, coverage)?,
+        n_partial_pixels,
+        rest_um: scale.rest_um,
+        redshift: scale.redshift,
+        velocity_frame: scale.frame,
+        weight_threshold_sigma: cfg.weight_threshold_sigma,
+        intensity_unit,
         m0_unit,
         velocity_unit: VELOCITY_UNIT,
         noise_per_channel: global_noise,
@@ -983,6 +1157,8 @@ mod tests {
             snr_threshold: DEFAULT_SNR_THRESHOLD,
             mask_below_threshold: true,
             dq_policy: None,
+            redshift: 0.0,
+            weight_threshold_sigma: None,
         }
     }
 
@@ -999,7 +1175,7 @@ mod tests {
         let maps = moment_maps(&cube, &line_config()).unwrap();
 
         assert_eq!(maps.n_channels, 25);
-        assert_eq!(maps.m0_unit, "Jy/beam km/s");
+        assert_eq!(maps.m0_unit, "Jy beam-1 km s-1");
         assert_eq!(maps.velocity_unit, "km/s");
         assert_eq!(maps.m0.dim(), (LINE_CUBE_SIZE, LINE_CUBE_SIZE));
         let noise = maps.noise_per_channel.expect("noise estimate");
@@ -1102,9 +1278,11 @@ mod tests {
             snr_threshold: DEFAULT_SNR_THRESHOLD,
             mask_below_threshold: true,
             dq_policy: None,
+            redshift: 0.0,
+            weight_threshold_sigma: None,
         };
         let maps = moment_maps(&cube, &cfg).unwrap();
-        assert_eq!(maps.m0_unit, "K km/s");
+        assert_eq!(maps.m0_unit, "K km s-1");
         assert!((maps.m1[[3, 3]] as f64 + 20.0).abs() < 0.2 * 40.0, "m1={}", maps.m1[[3, 3]]);
         assert!((maps.m2[[3, 3]] as f64 - 60.0).abs() < 6.0, "m2={}", maps.m2[[3, 3]]);
         assert!(maps.m0[[3, 3]].is_finite());
@@ -1300,7 +1478,8 @@ mod tests {
 
     fn p0_nonuniform_config() -> MomentConfig {
         MomentConfig { z0: 0, z1: 3, rest_um: Some(1.0), convention: VelocityConvention::Optical,
-            continuum: None, snr_threshold: 0.0, mask_below_threshold: false, dq_policy: None }
+            continuum: None, snr_threshold: 0.0, mask_below_threshold: false, dq_policy: None,
+            redshift: 0.0, weight_threshold_sigma: None }
     }
 
     #[test]
@@ -1680,7 +1859,7 @@ mod tests {
     }
 
     fn velocities_of(cube: &LazyCube, cfg: &MomentConfig) -> Vec<f64> {
-        velocities_for(&cube.spectral_axis().unwrap(), cfg, &mut Vec::new()).unwrap()
+        velocity_scale(&cube.spectral_axis().unwrap(), cfg, &mut Vec::new()).unwrap().values
     }
 
     fn ac2_positive_core_fraction(noise: &[f32], m1: &Array2<f32>, velocities: &[f64], block_y: usize, x: usize) -> Option<f64> {
@@ -2038,5 +2217,225 @@ mod tests {
         let refused = moment_maps_within(&set.sci, set.err.as_deref(), &cfg, Some(tiny)).unwrap_err().to_string();
         assert!(refused.contains("moment maps") && refused.contains(MEMORY_BUDGET_ENV), "{}", refused);
         assert!(moment_maps_within(&set.sci, set.err.as_deref(), &cfg, None).is_ok());
+    }
+
+    const REVIEW_GOLDENS: &str = include_str!("../../../tests/fixtures/cube/cube_review_goldens.json");
+
+    fn review_goldens() -> serde_json::Value {
+        serde_json::from_str(REVIEW_GOLDENS).unwrap()
+    }
+
+    fn redshifted_moment_config(redshift: Option<f64>) -> MomentConfig {
+        use crate::core::cube::linefit::test_support::{REDSHIFTED_LINE, REDSHIFTED_REST_UM, REDSHIFTED_WINDOWS};
+        serde_json::from_value(serde_json::json!({
+            "z0": REDSHIFTED_LINE.0,
+            "z1": REDSHIFTED_LINE.1,
+            "rest_um": REDSHIFTED_REST_UM,
+            "continuum": REDSHIFTED_WINDOWS,
+            "redshift": redshift,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn moment_maps_at_a_redshift_are_in_the_source_frame() {
+        use crate::core::cube::linefit::test_support::{write_redshifted_line_cube, REDSHIFT, REDSHIFTED_CUBE_SIZE, REDSHIFTED_REST_UM};
+        let golden = &review_goldens()["redshifted_moment"];
+        assert_eq!(golden["redshift"].as_f64(), Some(REDSHIFT));
+        assert_eq!(golden["rest_um"].as_f64(), Some(REDSHIFTED_REST_UM));
+        let expected_m2 = golden["m2_source_frame_kms"].as_f64().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("redshifted.fits");
+        write_redshifted_line_cube(&path);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let maps = moment_maps(&cube, &redshifted_moment_config(Some(REDSHIFT))).unwrap();
+        for y in 0..REDSHIFTED_CUBE_SIZE {
+            for x in 0..REDSHIFTED_CUBE_SIZE {
+                let (m1, m2) = (maps.m1[[y, x]] as f64, maps.m2[[y, x]] as f64);
+                assert!((m2 - expected_m2).abs() < 0.01 * expected_m2, "M2({x}, {y}) = {m2} km/s, source frame {expected_m2}");
+                assert!(m1.abs() < 1.0, "M1({x}, {y}) = {m1} km/s, source frame 0");
+            }
+        }
+        assert_eq!(maps.velocity_frame, VelocityFrame::Source);
+        assert_eq!(maps.redshift, Some(REDSHIFT));
+        assert_eq!(maps.rest_um, Some(REDSHIFTED_REST_UM));
+        let named = maps.notes.iter().any(|n| n.contains("source frame") && n.contains("redshift 0.5") && n.contains("0.656461"));
+        assert!(named, "{:?}", maps.notes);
+
+        let observer = moment_maps(&cube, &redshifted_moment_config(None)).unwrap();
+        let laboratory_m2 = golden["m2_against_the_laboratory_rest_kms"].as_f64().unwrap();
+        let laboratory_m1 = golden["m1_against_the_laboratory_rest_kms"].as_f64().unwrap();
+        assert!((observer.m2[[1, 1]] as f64 - laboratory_m2).abs() < 0.01 * laboratory_m2, "{}", observer.m2[[1, 1]]);
+        assert!((observer.m1[[1, 1]] as f64 - laboratory_m1).abs() < 1e-4 * laboratory_m1, "{}", observer.m1[[1, 1]]);
+        assert_eq!(observer.velocity_frame, VelocityFrame::Observer);
+        assert_eq!(observer.redshift, None);
+        assert_eq!(observer.rest_um, Some(REDSHIFTED_REST_UM));
+        assert!(!observer.notes.iter().any(|n| n.contains("redshift")), "{:?}", observer.notes);
+        assert!(serde_json::from_str::<MomentConfig>(r#"{"z0":1,"z1":2,"redshift":-1}"#).is_err());
+    }
+
+    #[test]
+    fn a_stored_velocity_axis_keeps_its_moments_and_says_the_redshift_is_ignored() {
+        use crate::core::cube::linefit::test_support::{write_stored_velocity_cube, REDSHIFT};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vrad.fits");
+        write_stored_velocity_cube(&path);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let plain = moment_maps(&cube, &redshifted_moment_config(None)).unwrap();
+        let sent = moment_maps(&cube, &redshifted_moment_config(Some(REDSHIFT))).unwrap();
+        assert_same_maps(&sent, &plain);
+        assert_eq!(sent.velocity_frame, VelocityFrame::Stored);
+        assert_eq!((sent.redshift, sent.rest_um), (None, None));
+        assert!(sent.notes.iter().any(|n| n.contains("redshift 0.5 ignored")), "{:?}", sent.notes);
+        assert!(!plain.notes.iter().any(|n| n.contains("redshift")), "{:?}", plain.notes);
+    }
+
+    const UNIT_CUBE_CARDS: [(&str, &str); 5] =
+        [("CTYPE3", "'VRAD'"), ("CUNIT3", "'km/s'"), ("CRVAL3", "0"), ("CDELT3", "1"), ("CRPIX3", "1")];
+
+    #[test]
+    fn m0_bunit_has_a_single_solidus_at_most() {
+        let goldens = review_goldens();
+        let rows: Vec<&serde_json::Value> =
+            goldens["integrated_units"].as_array().unwrap().iter().filter(|row| row["factor"] == "km s-1").collect();
+        assert!(rows.len() >= 5, "{rows:?}");
+        let dir = tempfile::tempdir().unwrap();
+        for (k, row) in rows.iter().enumerate() {
+            assert_eq!(row["equals_intended"], true, "astropy does not read {row} as BUNIT x km/s");
+            let (bunit, written) = (row["bunit"].as_str().unwrap(), row["written"].as_str().unwrap());
+            let quoted = format!("'{bunit}'");
+            let mut cards: Vec<(&str, &str)> = UNIT_CUBE_CARDS.to_vec();
+            cards.push(("BUNIT", quoted.as_str()));
+            let path = dir.path().join(format!("unit_{k}.fits"));
+            write_cube(&path, 2, 2, 6, &cards, |z, _, _| z as f32);
+            let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+            let maps = moment_maps(&cube, &MomentConfig { z0: 1, z1: 4, ..p0_nonuniform_config() }).unwrap();
+            assert_eq!(maps.m0_unit, written, "BUNIT '{bunit}'");
+            assert!(maps.m0_unit.matches('/').count() <= 1, "{}", maps.m0_unit);
+            assert_eq!(maps.intensity_unit.as_deref(), Some(bunit));
+        }
+        let compound = dir.path().join("compound.fits");
+        let mut cards: Vec<(&str, &str)> = UNIT_CUBE_CARDS.to_vec();
+        cards.push(("BUNIT", "'erg/s/cm2/Angstrom'"));
+        write_cube(&compound, 2, 2, 6, &cards, |z, _, _| z as f32);
+        let maps = moment_maps(&LazyCube::open(compound.to_str().unwrap()).unwrap(), &MomentConfig { z0: 1, z1: 4, ..p0_nonuniform_config() }).unwrap();
+        assert_eq!(maps.m0_unit, "erg/s/cm2/Angstrom km/s");
+        assert!(maps.notes.iter().any(|n| n.contains("erg/s/cm2/Angstrom") && n.contains("solidus")), "{:?}", maps.notes);
+    }
+
+    const BIAS_SIZE: usize = 20;
+    const BIAS_WINDOW: usize = 20;
+    const BIAS_SEED: u64 = 20_261_125;
+
+    fn bias_maps(dir: &tempfile::TempDir, golden: &serde_json::Value, weight_threshold_sigma: Option<f64>) -> MomentMaps {
+        let channels = golden["channels"].as_u64().unwrap() as usize;
+        let peak = golden["peak_snr"].as_f64().unwrap();
+        let step = golden["channel_kms"].as_f64().unwrap();
+        let sigma_channels = golden["true_sigma_kms"].as_f64().unwrap() / step;
+        assert_eq!(golden["window_channels"].as_u64(), Some(BIAS_WINDOW as u64));
+        let depth = channels + 2 * BIAS_WINDOW;
+        let centre = BIAS_WINDOW as f64 + (channels as f64 - 1.0) / 2.0;
+        let mut rng = StdRng::seed_from_u64(BIAS_SEED);
+        let noise: Vec<f64> = (0..depth * BIAS_SIZE * BIAS_SIZE).map(|_| gaussian(&mut rng)).collect();
+        let cdelt = format!("{step}");
+        let cards = [("CTYPE3", "'VRAD'"), ("CUNIT3", "'km/s'"), ("CRVAL3", "0"), ("CDELT3", cdelt.as_str()), ("CRPIX3", "1")];
+        let path = dir.path().join("bias.fits");
+        write_cube(&path, BIAS_SIZE, BIAS_SIZE, depth, &cards, |z, y, x| {
+            let d = (z as f64 - centre) / sigma_channels;
+            (peak * (-0.5 * d * d).exp() + noise[(z * BIAS_SIZE + y) * BIAS_SIZE + x]) as f32
+        });
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let cfg = MomentConfig {
+            z0: BIAS_WINDOW,
+            z1: BIAS_WINDOW + channels - 1,
+            continuum: Some(((0, BIAS_WINDOW - 1), (BIAS_WINDOW + channels, depth - 1))),
+            weight_threshold_sigma,
+            ..line_config()
+        };
+        moment_maps(&cube, &cfg).unwrap()
+    }
+
+    fn median_of_finite(map: &Array2<f32>) -> f64 {
+        median_finite(map.iter().copied()).expect("finite pixels")
+    }
+
+    #[test]
+    fn an_m2_weight_threshold_of_two_sigma_removes_the_noise_bias() {
+        let goldens = review_goldens();
+        let golden = &goldens["moment_two_bias"][0];
+        assert_eq!(golden["channels"], 25);
+        let threshold = golden["threshold_sigma"].as_f64().unwrap();
+        let injected = golden["true_sigma_kms"].as_f64().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let clipped = bias_maps(&dir, golden, Some(threshold));
+        let m2 = median_of_finite(&clipped.m2);
+        assert!((m2 - injected).abs() <= 0.05 * injected, "median M2 with a {threshold} sigma threshold = {m2} km/s, injected {injected}");
+        assert_eq!(clipped.weight_threshold_sigma, Some(threshold));
+        assert!(clipped.notes.iter().any(|n| n.contains("above 2 x the per-pixel noise")), "{:?}", clipped.notes);
+
+        let plain = bias_maps(&dir, golden, None);
+        let biased = golden["median_m2_positive_weights_kms"].as_f64().unwrap();
+        let m2 = median_of_finite(&plain.m2);
+        assert!((m2 - biased).abs() <= 0.10 * biased, "median M2 without a threshold = {m2} km/s, estimator expectation {biased}");
+        assert_eq!(plain.weight_threshold_sigma, None);
+        let stated = plain.notes.iter().any(|n| n.contains("positive continuum-subtracted channels") && n.contains("biases M2 high"));
+        assert!(stated, "{:?}", plain.notes);
+        assert_eq!(bits(&plain.m0), bits(&clipped.m0), "the threshold must not clip M0");
+        assert!(serde_json::from_str::<MomentConfig>(r#"{"z0":1,"z1":2,"weight_threshold_sigma":-2}"#).is_err());
+    }
+
+    #[test]
+    fn partially_covered_pixels_report_their_channel_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.fits");
+        write_cube(&path, 3, 1, 13, &UNIT_CUBE_CARDS, |z, _, x| if x == 1 && (3..=7).contains(&z) { f32::NAN } else { 1.0 });
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let maps = moment_maps(&cube, &MomentConfig { z0: 1, z1: 11, ..p0_nonuniform_config() }).unwrap();
+        assert_eq!(maps.coverage.iter().copied().collect::<Vec<f32>>(), vec![11.0, 6.0, 11.0]);
+        assert_eq!(maps.n_partial_pixels, 1);
+        assert_eq!(maps.m0.iter().copied().collect::<Vec<f32>>(), vec![11.0, 6.0, 11.0]);
+        let noted = maps.notes.iter().any(|n| n.contains("1 of 3 pixels") && n.contains("fewer than the 11 channels"));
+        assert!(noted, "{:?}", maps.notes);
+
+        let full = dir.path().join("full.fits");
+        write_cube(&full, 3, 1, 13, &UNIT_CUBE_CARDS, |_, _, _| 1.0);
+        let maps = moment_maps(&LazyCube::open(full.to_str().unwrap()).unwrap(), &MomentConfig { z0: 1, z1: 11, ..p0_nonuniform_config() }).unwrap();
+        assert_eq!(maps.n_partial_pixels, 0);
+        assert!(!maps.notes.iter().any(|n| n.contains("fewer than")), "{:?}", maps.notes);
+    }
+
+    #[test]
+    fn the_per_pixel_noise_is_corrected_for_the_fitted_baseline_parameters() {
+        let alternating: Vec<f32> = (0..10).map(|k| if k % 2 == 0 { 2.0 } else { 0.0 }).collect();
+        let xs: Vec<f64> = (0..10).map(f64::from).collect();
+        let constant = fit_pixel(&xs, &alternating, true);
+        let expected = MAD_TO_SIGMA * (10.0f64 / 9.0).sqrt();
+        assert!((constant.sigma as f64 - expected).abs() < 1e-6, "constant fit: sigma {} expected {expected}", constant.sigma);
+
+        let balanced = [1.0f32, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0];
+        let linear = fit_pixel(&xs[..8], &balanced, false);
+        assert!(linear.slope.abs() < 1e-7 && linear.intercept.abs() < 1e-7, "{linear:?}");
+        let expected = MAD_TO_SIGMA * (8.0f64 / 6.0).sqrt();
+        assert!((linear.sigma as f64 - expected).abs() < 1e-6, "linear fit: sigma {} expected {expected}", linear.sigma);
+
+        let exact = fit_pixel(&xs[..2], &[1.0, 3.0], true);
+        assert!(exact.sigma.is_finite(), "{exact:?}");
+    }
+
+    #[test]
+    fn moment_notes_say_that_absorption_is_masked_and_where_the_noise_factor_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("line_noisy.fits");
+        write_line_cube(&path, GOLDEN_MOMENT_NOISE);
+        let err_path = dir.path().join("line_err.fits");
+        write_cube(&err_path, LINE_CUBE_SIZE, LINE_CUBE_SIZE, LINE_CUBE_DEPTH, &[], |_, _, _| LINE_ERR_SIGMA);
+        let set = CubeSet { sci: open_arc(&path), err: Some(open_arc(&err_path)), dq: None, notes: Vec::new() };
+        let maps = moment_maps_set(&set, &line_config()).unwrap();
+        assert!(maps.noise_factor.is_some());
+        assert!(maps.notes.iter().any(|n| n.contains("absorption") && n.contains("masked")), "{:?}", maps.notes);
+        let factor_note = maps.notes.iter().find(|n| n.starts_with("noise factor ")).expect("noise factor note");
+        assert!(factor_note.contains("ABNOISEF") && factor_note.contains("not scaled"), "{factor_note}");
+        assert!(!factor_note.contains("applies only on display or export"), "{factor_note}");
     }
 }

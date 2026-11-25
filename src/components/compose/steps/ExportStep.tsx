@@ -5,6 +5,7 @@ import {
   channelExportHistory,
   compositeHistoryLines,
   exportBlockedReason,
+  exportFitsContents,
   exportMappingBanner,
   exportWcsWarning,
   resolveExportRgbPaths,
@@ -19,6 +20,10 @@ import { getExportDir } from "../../../infrastructure/tauri";
 import { useCompositeStf } from "../../../context/CompositeContext";
 import { revealInFolder } from "../../../utils/revealInFolder";
 import { RunButton } from "../../ui";
+import { useWizardRunGuard } from "../../../context/WizardRunGuardContext";
+import { WIZARD_EXPORT_INPUTS_CHANGED } from "../../../utils/wizardRunGuard";
+
+const channelExportKey = (s: WizardState) => JSON.stringify(wizardChannelExport(s));
 
 interface ExportStepProps {
   state: WizardState;
@@ -37,6 +42,7 @@ function buildHistory(state: WizardState, exported: (string | null)[]): string[]
 
 export default function ExportStep({ state }: ExportStepProps) {
   const { wizardStfR, wizardStfG, wizardStfB, wizardStfLinked } = useCompositeStf();
+  const { begin, beginComposite } = useWizardRunGuard();
 
   const formatId = useId();
   const bitDepthId = useId();
@@ -62,6 +68,7 @@ export default function ExportStep({ state }: ExportStepProps) {
     setHeaderWarning(null);
     setSavedPath(null);
     setRevealError(null);
+    const isCurrent = state.compositeReady ? beginComposite() : begin(channelExportKey);
 
     try {
       const ts = Date.now();
@@ -116,9 +123,10 @@ export default function ExportStep({ state }: ExportStepProps) {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      if (!isCurrent()) setError(WIZARD_EXPORT_INPUTS_CHANGED);
       setLoading(false);
     }
-  }, [state, format, bitDepth, bitpix, wizardStfR, wizardStfG, wizardStfB, wizardStfLinked]);
+  }, [state, format, bitDepth, bitpix, wizardStfR, wizardStfG, wizardStfB, wizardStfLinked, begin, beginComposite]);
 
   const handleZipExport = useCallback(async () => {
     setZipLoading(true);
@@ -167,7 +175,7 @@ export default function ExportStep({ state }: ExportStepProps) {
       }
 
       if (missing.length === filesToZip.length) {
-        throw new Error(`ZIP failed — none of the ${filesToZip.length} files could be read`);
+        throw new Error(`ZIP failed: none of the ${filesToZip.length} files could be read`);
       }
 
       const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
@@ -196,7 +204,7 @@ export default function ExportStep({ state }: ExportStepProps) {
 
       {state.compositeReady && (
         <div className="text-[10px] text-emerald-400/70 bg-emerald-500/5 border border-emerald-500/10 rounded-md px-2 py-1.5">
-          PNG exports the composite as processed (stretch + curves when applied, else STF). FITS stays linear (WB + SCNR only).
+          PNG exports the composite as processed (stretch + curves when applied, else STF). {exportFitsContents(state.compositeHistory)}
         </div>
       )}
 

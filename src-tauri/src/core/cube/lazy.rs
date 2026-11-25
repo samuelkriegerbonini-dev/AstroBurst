@@ -16,6 +16,7 @@ use crate::core::cube::linefit::dq_flagged;
 use crate::core::imaging::region::RegionShape;
 use crate::core::imaging::stats::is_valid_pixel;
 use crate::core::ramp::info::{ramp_info, RampInfo};
+use crate::core::stacking::memory::{effective_memory, format_bytes, MemoryInfo, MEMORY_BUDGET_ENV};
 use crate::infra::fits::compress::is_compressed_image_hdu;
 use crate::infra::fits::dispatcher::resolve_single_image;
 use crate::infra::fits::gzip::SharedTempDir;
@@ -121,6 +122,7 @@ pub fn normalize_frame_with_stats(data: &Array2<f32>, stats: &GlobalCubeStats) -
 
 const DEFAULT_CACHE_BYTES: usize = 256 << 20;
 const BATCH_SIZE: usize = 32;
+const BATCH_BYTES: usize = 256 << 20;
 const STATS_SAMPLE_FRAMES: usize = 32;
 const STATS_TARGET_SAMPLES: usize = 4_000_000;
 const MAX_FITS_AXES: i64 = 999;
@@ -364,6 +366,57 @@ fn companion_batch_channels(companions: usize) -> usize {
     BATCH_SIZE / (1 + companions)
 }
 
+fn batch_channels(decoded_plane_bytes: usize, companions: usize, budget_bytes: usize) -> usize {
+    let per_channel = decoded_plane_bytes.saturating_mul(1 + companions).max(1);
+    (budget_bytes / per_channel).clamp(1, companion_batch_channels(companions).max(1))
+}
+
+fn decoded_bytes(pixels: usize) -> usize {
+    pixels.saturating_mul(size_of::<f32>())
+}
+
+fn collapse_memory_bytes(rows: usize, cols: usize, range_len: usize, mode: CollapseMode, has_err: bool, has_dq: bool) -> u64 {
+    let npix = (rows as u64).saturating_mul(cols as u64);
+    let err = u64::from(has_err);
+    let dq = u64::from(has_dq);
+    let companions = usize::from(has_err) + 4 * usize::from(has_dq);
+    let working = |plane_pixels: u64, state_per_pixel: u64| {
+        let plane_bytes = plane_pixels.saturating_mul(size_of::<f32>() as u64);
+        let batch = batch_channels(usize::try_from(plane_bytes).unwrap_or(usize::MAX), companions, BATCH_BYTES).min(range_len.max(1)) as u64;
+        plane_pixels
+            .saturating_mul(state_per_pixel + size_of::<Option<u32>>() as u64 * dq)
+            .saturating_add(batch.saturating_mul(plane_bytes).saturating_mul(1 + err))
+    };
+    let state = match mode {
+        CollapseMode::Sum | CollapseMode::Mean => working(npix, (size_of::<f64>() + size_of::<u32>()) as u64 + size_of::<f64>() as u64 * err),
+        CollapseMode::Median => {
+            let band_rows = median_band_rows(range_len + 4 * usize::from(has_dq), cols, rows, RANGE_MEDIAN_SINGLE_PASS_BYTES);
+            let band_pixels = (band_rows as u64).saturating_mul(cols as u64);
+            working(band_pixels, (size_of::<f32>() * range_len + size_of::<u32>()) as u64 + size_of::<f64>() as u64 * err)
+        }
+    };
+    npix.saturating_mul(size_of::<f32>() as u64 * (1 + err)).saturating_add(state)
+}
+
+fn check_collapse_memory(required: u64, rows: usize, cols: usize, mode: CollapseMode, has_err: bool, info: Option<MemoryInfo>) -> Result<()> {
+    let Some(info) = info else {
+        return Ok(());
+    };
+    if required > info.commit_available {
+        bail!(
+            "a {} collapse of this {}x{} cube{} needs about {} of memory but only {} is available: cut the cube to a smaller field first, close other applications, or, if the system can page this much, set {} to the memory to allow (in MB) and restart",
+            mode.name(),
+            cols,
+            rows,
+            if has_err { " with its ERR cube" } else { "" },
+            format_bytes(required),
+            format_bytes(info.commit_available),
+            MEMORY_BUDGET_ENV
+        );
+    }
+    Ok(())
+}
+
 fn collapse_error(variance: f64, channels: usize, mode: CollapseMode) -> f32 {
     if channels == 0 {
         return f32::NAN;
@@ -415,7 +468,7 @@ fn display_sigma(samples: &[f32], median: f32, mad_sigma: f32) -> f32 {
     }
 }
 
-fn median_or_nan(values: &mut Vec<f32>) -> f32 {
+fn median_or_nan(values: &mut [f32]) -> f32 {
     if values.is_empty() {
         f32::NAN
     } else {
@@ -510,9 +563,29 @@ fn unsupported_axis(axis: i64, len: i64) -> String {
     )
 }
 
+fn is_exposure_segment(merged: &HduHeader, naxis3: i64, naxis4: i64) -> bool {
+    let (Some(first), Some(last), Some(total)) = (merged.get_i64("INTSTART"), merged.get_i64("INTEND"), merged.get_i64("NINTS")) else {
+        return false;
+    };
+    merged.get_i64("NGROUPS") == Some(naxis3) && first >= 1 && last >= first && last <= total && last - first + 1 == naxis4
+}
+
+fn stored_ramp(merged: &HduHeader, naxis3: i64, naxis4: i64) -> Option<RampInfo> {
+    let stored = |r: &RampInfo| r.ngroups as i64 == naxis3 && r.nints as i64 == naxis4;
+    if let Some(ramp) = ramp_info(merged).filter(stored) {
+        return Some(ramp);
+    }
+    if !is_exposure_segment(merged, naxis3, naxis4) {
+        return None;
+    }
+    let mut segment = merged.clone();
+    segment.set("NINTS", naxis4.to_string());
+    ramp_info(&segment).filter(stored)
+}
+
 fn fourth_axis_is_a_ramp(header: &HduHeader, primary: Option<&HduHeader>, naxis3: i64, naxis4: i64) -> bool {
     let merged = primary.map_or_else(|| header.clone(), |p| p.merge_with(header));
-    ramp_info(&merged).is_some_and(|r| r.ngroups as i64 == naxis3 && r.nints as i64 == naxis4)
+    stored_ramp(&merged, naxis3, naxis4).is_some()
 }
 
 fn cube_depth(header: &HduHeader, primary: Option<&HduHeader>) -> std::result::Result<CubeShape, String> {
@@ -771,7 +844,7 @@ impl LazyCube {
 
     pub fn ramp(&self) -> Option<RampInfo> {
         let g = &self.geometry;
-        ramp_info(&self.merged_header()).filter(|r| r.ngroups == g.naxis3 && r.nints == g.naxis4)
+        stored_ramp(&self.merged_header(), i64::try_from(g.naxis3).ok()?, i64::try_from(g.naxis4).ok()?)
     }
 
     pub fn extract_group_series(&self, y: usize, x: usize, integration: usize) -> Result<Vec<f32>> {
@@ -917,10 +990,10 @@ impl LazyCube {
         let mut bg_levels: Option<Vec<f32>> = bg_pixels.as_ref().map(|_| Vec::with_capacity(depth));
         let mut bg_errors: Option<Vec<f32>> = bg_pixels.as_ref().map(|_| Vec::with_capacity(depth));
         let mut dropouts = ApertureDropouts::for_aperture(pixels.len(), depth);
-        let batch_channels = companion_batch_channels(usize::from(err.is_some()) + usize::from(dq.is_some()));
+        let per_batch = batch_channels(decoded_bytes(row_count * cols), usize::from(err.is_some()) + usize::from(dq.is_some()), BATCH_BYTES);
 
-        for batch_start in (0..depth).step_by(batch_channels) {
-            let batch_end = (batch_start + batch_channels).min(depth);
+        for batch_start in (0..depth).step_by(per_batch) {
+            let batch_end = (batch_start + per_batch).min(depth);
             let bands = self.decode_row_band_batch(batch_start, batch_end, y0, row_count)?;
             let err_bands = err.map(|c| c.decode_row_band_batch(batch_start, batch_end, y0, row_count)).transpose()?;
             let dq_bands = dq.map(|c| c.decode_row_band_batch(batch_start, batch_end, y0, row_count)).transpose()?;
@@ -1028,9 +1101,25 @@ impl LazyCube {
         dq: Option<&LazyCube>,
         zero_policy: CollapseZeroPolicy,
     ) -> Result<RangeCollapse> {
+        self.collapse_range_within(z0, z1, mode, err, dq, zero_policy, effective_memory())
+    }
+
+    fn collapse_range_within(
+        &self,
+        z0: usize,
+        z1: usize,
+        mode: CollapseMode,
+        err: Option<&LazyCube>,
+        dq: Option<&LazyCube>,
+        zero_policy: CollapseZeroPolicy,
+        memory: Option<MemoryInfo>,
+    ) -> Result<RangeCollapse> {
         self.check_channel_range(z0, z1)?;
         check_companion(EXTNAME_ERR, self, err)?;
         check_companion(EXTNAME_DQ, self, dq)?;
+        let (rows, cols) = (self.geometry.naxis2, self.geometry.naxis1);
+        let required = collapse_memory_bytes(rows, cols, z1 - z0 + 1, mode, err.is_some(), dq.is_some());
+        check_collapse_memory(required, rows, cols, mode, err.is_some(), memory)?;
         match mode {
             CollapseMode::Sum | CollapseMode::Mean => self.collapse_range_linear(z0, z1, mode, err, dq, zero_policy),
             CollapseMode::Median => {
@@ -1060,11 +1149,11 @@ impl LazyCube {
         let mut sum = vec![0.0f64; npix];
         let mut count = vec![0u32; npix];
         let mut variance = err.map(|_| vec![0.0f64; npix]);
-        let batch_channels = companion_batch_channels(usize::from(err.is_some()) + 4 * usize::from(dq.is_some()));
+        let per_batch = batch_channels(decoded_bytes(npix), usize::from(err.is_some()) + 4 * usize::from(dq.is_some()), BATCH_BYTES);
         let mut dq_excluded_samples = 0;
 
-        for batch_start in (z0..=z1).step_by(batch_channels) {
-            let batch_end = (batch_start + batch_channels).min(z1 + 1);
+        for batch_start in (z0..=z1).step_by(per_batch) {
+            let batch_end = (batch_start + per_batch).min(z1 + 1);
             let frames = self.decode_frames(batch_start, batch_end)?;
             let err_frames = err.map(|c| c.decode_frames(batch_start, batch_end)).transpose()?;
             for (k, pixels) in frames.iter().enumerate() {
@@ -1126,32 +1215,35 @@ impl LazyCube {
         let g = &self.geometry;
         let (rows, cols) = (g.naxis2, g.naxis1);
         let band_rows = band_rows.clamp(1, rows.max(1));
+        let range_len = z1 - z0 + 1;
         let mut data: Vec<f32> = Vec::with_capacity(rows * cols);
         let mut errors: Option<Vec<f32>> = err.map(|_| Vec::with_capacity(rows * cols));
-        let batch_channels = companion_batch_channels(usize::from(err.is_some()) + 4 * usize::from(dq.is_some()));
+        let per_batch = batch_channels(decoded_bytes(band_rows * cols), usize::from(err.is_some()) + 4 * usize::from(dq.is_some()), BATCH_BYTES);
         let mut dq_excluded_samples = 0;
 
         for band_start in (0..rows).step_by(band_rows) {
             let band_end = (band_start + band_rows).min(rows);
             let row_count = band_end - band_start;
             let band_npix = row_count * cols;
-            let mut samples: Vec<Vec<f32>> = vec![Vec::with_capacity(z1 - z0 + 1); band_npix];
+            let mut samples = vec![0.0f32; band_npix * range_len];
+            let mut counts = vec![0u32; band_npix];
             let mut variance = vec![0.0f64; if err.is_some() { band_npix } else { 0 }];
 
-            for batch_start in (z0..=z1).step_by(batch_channels) {
-                let batch_end = (batch_start + batch_channels).min(z1 + 1);
+            for batch_start in (z0..=z1).step_by(per_batch) {
+                let batch_end = (batch_start + per_batch).min(z1 + 1);
                 let bands = self.decode_row_band_batch(batch_start, batch_end, band_start, row_count)?;
                 let err_bands = err.map(|c| c.decode_row_band_batch(batch_start, batch_end, band_start, row_count)).transpose()?;
                 for (k, pixels) in bands.iter().enumerate() {
                     let sigma = err_bands.as_ref().map(|b| &b[k]);
                     let flags = dq.map(|cube| cube.decode_dq_rows(batch_start + k, band_start, row_count)).transpose()?;
-                    for (i, (slot, &v)) in samples.iter_mut().zip(pixels.iter()).enumerate() {
+                    for (i, &v) in pixels.iter().enumerate().take(band_npix) {
                         if v.is_finite() && flags.as_ref().is_some_and(|f| DqPolicy::DoNotUse.excludes(f[i])) {
                             dq_excluded_samples += 1;
                             continue;
                         }
                         if zero_policy.accepts(v) {
-                            slot.push(v);
+                            samples[i * range_len + counts[i] as usize] = v;
+                            counts[i] += 1;
                             if let Some(sigma) = sigma {
                                 variance[i] += err_variance(sigma[i]);
                             }
@@ -1161,9 +1253,13 @@ impl LazyCube {
             }
 
             if let Some(errors) = errors.as_mut() {
-                errors.extend(variance.iter().zip(&samples).map(|(&v, s)| collapse_error(v, s.len(), CollapseMode::Median)));
+                errors.extend(variance.iter().zip(&counts).map(|(&v, &n)| collapse_error(v, n as usize, CollapseMode::Median)));
             }
-            let band_result: Vec<f32> = samples.into_par_iter().map(|mut vals| median_or_nan(&mut vals)).collect();
+            let band_result: Vec<f32> = samples
+                .par_chunks_mut(range_len)
+                .zip(counts.par_iter())
+                .map(|(values, &n)| median_or_nan(&mut values[..n as usize]))
+                .collect();
             data.extend_from_slice(&band_result);
         }
 
@@ -2761,7 +2857,6 @@ mod tests {
         write_u16_ramp_mef(&path, 3, 2, 10, 1, &primary, &[], |_, g, _, _| (30000 + g) as u16);
         let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
         assert_eq!((cube.geometry.naxis3, cube.geometry.naxis4, cube.geometry.depth), (10, 1, 10));
-        assert!(ramp_info(&cube.merged_header()).is_some(), "the product check alone accepts 5 x 2 on 10 x 1");
         assert!(cube.ramp().is_none(), "the cube reports no ramp when the axes disagree with the cards");
         assert_eq!(cube.extract_spectrum_at(0, 0).unwrap().len(), 10);
         assert_eq!(cube.extract_group_series(0, 0, 0).unwrap().len(), 10);
@@ -2843,6 +2938,97 @@ mod tests {
         assert_eq!(cube.get_frame(0).unwrap()[[1, 2]], 12.0);
         assert_eq!(cube.get_frame(3).unwrap()[[0, 0]], 300.0);
         assert!(cube.ramp().is_none());
+    }
+
+    const SEGMENT_PRIMARY: [(&str, &str); 6] = [
+        ("NGROUPS", "5"),
+        ("NINTS", "9"),
+        ("INTSTART", "4"),
+        ("INTEND", "6"),
+        ("TGROUP", "10.0"),
+        ("DATAMODL", "'Level1bModel'"),
+    ];
+
+    fn segment_primary(overrides: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+        let mut cards = SEGMENT_PRIMARY.to_vec();
+        for &(key, value) in overrides {
+            cards.retain(|(k, _)| *k != key);
+            cards.push((key, value));
+        }
+        cards
+    }
+
+    #[test]
+    fn a_segment_of_a_segmented_exposure_opens_as_a_ramp_of_its_own_integrations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jw_seg002_uncal.fits");
+        write_u16_ramp_mef(&path, 3, 2, 5, 3, &SEGMENT_PRIMARY, &[], ramp_value);
+        let cube = LazyCube::open(path.to_str().unwrap())
+            .unwrap_or_else(|e| panic!("a segment with NINTS 9 and integrations 4..6 on NAXIS4 3 was refused: {e:#}"));
+        assert_eq!((cube.geometry.naxis3, cube.geometry.naxis4, cube.geometry.depth), (5, 3, 15));
+        let ramp = cube.ramp().expect("the segment is a ramp of the integrations it stores");
+        assert_eq!((ramp.ngroups, ramp.nints), (5, 3));
+        assert_eq!(cube.extract_group_series(1, 2, 2).unwrap(), vec![32012.0, 32112.0, 32212.0, 32312.0, 32412.0]);
+        assert!(cube.extract_group_series(1, 2, 3).unwrap_err().to_string().contains("out of range"));
+
+        let single = dir.path().join("jw_seg009_uncal.fits");
+        write_u16_ramp_mef(&single, 3, 2, 5, 1, &segment_primary(&[("INTSTART", "9"), ("INTEND", "9")]), &[], ramp_value);
+        let cube = LazyCube::open(single.to_str().unwrap()).unwrap();
+        assert_eq!((cube.geometry.naxis3, cube.geometry.naxis4, cube.geometry.depth), (5, 1, 5));
+        let ramp = cube.ramp().expect("a segment with one integration is a ramp");
+        assert_eq!((ramp.ngroups, ramp.nints), (5, 1));
+    }
+
+    #[test]
+    fn a_fourth_axis_that_disagrees_with_the_segment_cards_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: [(&str, &[(&'static str, &'static str)]); 4] = [
+            ("short", &[("INTEND", "5")]),
+            ("beyond", &[("INTSTART", "8"), ("INTEND", "10")]),
+            ("zero", &[("INTSTART", "0"), ("INTEND", "2")]),
+            ("groups", &[("NGROUPS", "4")]),
+        ];
+        for (name, overrides) in cases {
+            let path = dir.path().join(format!("{name}.fits"));
+            write_u16_ramp_mef(&path, 3, 2, 5, 3, &segment_primary(overrides), &[], ramp_value);
+            let err = format!("{:#}", LazyCube::open(&format!("{}#hdu=1", path.to_str().unwrap())).err().unwrap_or_else(|| panic!("{name} opened")));
+            assert!(err.contains("NAXIS4=3"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn frame_batch_follows_a_byte_budget() {
+        let budget = 256 << 20;
+        assert_eq!(BATCH_BYTES, budget);
+        assert_eq!(batch_channels(4088 * 4088 * 4, 0, budget), 4);
+        assert_eq!(batch_channels(4088 * 4088 * 4, 1, budget), 2);
+        assert_eq!(batch_channels(4088 * 4088 * 4, 5, budget), 1);
+        assert_eq!(batch_channels(53 * 55 * 4, 0, budget), 32);
+        assert_eq!(batch_channels(53 * 55 * 4, 1, budget), 16);
+        assert_eq!(batch_channels(53 * 55 * 4, 5, budget), 5);
+        assert_eq!(batch_channels(usize::MAX, 3, budget), 1);
+        assert_eq!(batch_channels(0, 0, budget), 32);
+    }
+
+    #[test]
+    fn a_collapse_above_the_memory_budget_is_refused_by_name() {
+        use crate::core::stacking::memory::MEMORY_BUDGET_ENV;
+        let dir = tempfile::tempdir().unwrap();
+        let cube = open_line_cube(&dir, 0.0);
+        let tiny = MemoryInfo { physical_available: 1 << 10, commit_available: 1 << 10 };
+        for mode in [CollapseMode::Sum, CollapseMode::Mean, CollapseMode::Median] {
+            let refused = cube.collapse_range_within(0, 39, mode, None, None, CollapseZeroPolicy::default(), Some(tiny));
+            let message = refused.err().unwrap_or_else(|| panic!("a {} collapse ran with 1 KiB of memory", mode.name())).to_string();
+            for part in ["collapse", "32x32", MEMORY_BUDGET_ENV] {
+                assert!(message.contains(part), "{part} missing from: {message}");
+            }
+            assert!(cube.collapse_range_within(0, 39, mode, None, None, CollapseZeroPolicy::default(), None).is_ok());
+        }
+        let npix = 4088u64 * 4088;
+        assert_eq!(collapse_memory_bytes(4088, 4088, 40, CollapseMode::Sum, false, false), npix * (8 + 4 + 4) + 4 * npix * 4);
+        assert_eq!(collapse_memory_bytes(4088, 4088, 40, CollapseMode::Mean, true, false), npix * (8 + 4 + 8 + 4 + 4) + 2 * npix * 8);
+        let median = collapse_memory_bytes(4088, 4088, 3, CollapseMode::Median, false, false);
+        assert_eq!(median, npix * (3 * 4 + 4) + npix * 4 + 3 * npix * 4);
     }
 
     #[test]

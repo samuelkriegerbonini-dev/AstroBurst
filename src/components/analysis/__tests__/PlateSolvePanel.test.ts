@@ -49,7 +49,13 @@ const clipboardWrite = vi.hoisted(() => vi.fn<(text: string) => Promise<void>>()
 const wcsInfoMock = vi.hoisted(() => vi.fn<(path: string) => Promise<unknown>>());
 const plateSolveMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 const solveHintsMock = vi.hoisted(() => vi.fn<(path: string) => Promise<unknown>>());
-const apiKeyMock = vi.hoisted(() => vi.fn<() => Promise<{ key: string | null }>>(() => Promise.resolve({ key: "test-key" })));
+const STORED_KEY = { stored: true, hint: "test...-key", service: "astrometry" };
+const NO_KEY = { stored: false, hint: null, service: "astrometry" };
+const apiKeyMock = vi.hoisted(() =>
+  vi.fn<() => Promise<{ stored: boolean; hint: string | null; service: string }>>(() =>
+    Promise.resolve({ stored: true, hint: "test...-key", service: "astrometry" }),
+  ),
+);
 const cancelSolveMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Promise.resolve(true)));
 const refineMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>());
 const cancelRefineMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>(() => Promise.resolve(true)));
@@ -456,7 +462,7 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
     wcsInfoMock.mockReset().mockRejectedValue(new Error("no celestial WCS"));
     solveHintsMock.mockReset().mockResolvedValue(OBJCT_HINTS);
     plateSolveMock.mockReset().mockResolvedValue(LOCAL_RESULT);
-    apiKeyMock.mockReset().mockResolvedValue({ key: "test-key" });
+    apiKeyMock.mockReset().mockResolvedValue(STORED_KEY);
     cancelSolveMock.mockClear();
   });
 
@@ -480,7 +486,7 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
   });
 
   it("does not ask for an astrometry.net key before a local solve has failed", async () => {
-    apiKeyMock.mockResolvedValue({ key: null });
+    apiKeyMock.mockResolvedValue(NO_KEY);
     show();
     await flush();
     expect(markupOf(show())).not.toMatch(/API key/);
@@ -540,7 +546,7 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
   });
 
   it("re-reads the saved key at the click, so a key saved in Settings after the failure is used", async () => {
-    apiKeyMock.mockResolvedValue({ key: null });
+    apiKeyMock.mockResolvedValue(NO_KEY);
     plateSolveMock.mockRejectedValueOnce(
       new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", { canFallback: true, apiKeyStored: false }),
     );
@@ -548,7 +554,7 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
     const markup = markupOf(failed);
     expect(markup).toContain("needs an astrometry.net API key: save it in Settings, then click Try astrometry.net.");
     expect(buttonEndingWith(markup, "Try astrometry.net")).not.toMatch(/^<button[^>]*\sdisabled=""/);
-    apiKeyMock.mockResolvedValue({ key: "saved-later" });
+    apiKeyMock.mockResolvedValue({ stored: true, hint: "save...ater", service: "astrometry" });
     plateSolveMock.mockResolvedValueOnce(SOLVE_RESULT);
     (fallbackBlock(failed)!.onFallback as () => void)();
     await flush();
@@ -557,7 +563,7 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
   });
 
   it("uploads nothing and says why when no key is saved at the click", async () => {
-    apiKeyMock.mockResolvedValue({ key: null });
+    apiKeyMock.mockResolvedValue(NO_KEY);
     plateSolveMock.mockRejectedValueOnce(new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", {}));
     const failed = await solveOnce();
     (fallbackBlock(failed)!.onFallback as () => void)();
@@ -569,7 +575,7 @@ describe("PlateSolvePanel local-first solve (M08)", () => {
   });
 
   it("takes the stored-key state from the backend's failure", async () => {
-    apiKeyMock.mockResolvedValue({ key: null });
+    apiKeyMock.mockResolvedValue(NO_KEY);
     plateSolveMock.mockRejectedValueOnce(
       new TauriCommandError("plate_solve_cmd", NO_SOLUTION_TEXT, "local_no_solution", { canFallback: true, apiKeyStored: true }),
     );
@@ -792,7 +798,7 @@ describe("PlateSolvePanel Solve options (wave 1)", () => {
     wcsInfoMock.mockReset().mockRejectedValue(new Error("no celestial WCS"));
     solveHintsMock.mockReset().mockResolvedValue(OBJCT_HINTS);
     plateSolveMock.mockReset().mockResolvedValue(LOCAL_RESULT);
-    apiKeyMock.mockReset().mockResolvedValue({ key: "test-key" });
+    apiKeyMock.mockReset().mockResolvedValue(STORED_KEY);
   });
 
   afterEach(() => {
@@ -1133,7 +1139,7 @@ describe("PlateSolvePanel Gaia DR3 refinement (C21)", () => {
     plateSolveMock.mockReset().mockResolvedValue(LOCAL_RESULT);
     refineMock.mockReset().mockResolvedValue(APPLIED_TIE);
     writeWcsMock.mockReset().mockResolvedValue(WRITTEN);
-    apiKeyMock.mockReset().mockResolvedValue({ key: "test-key" });
+    apiKeyMock.mockReset().mockResolvedValue(STORED_KEY);
     Object.assign(refineProgress, { active: false, percent: 0, stage: "", current: 0, total: 0 });
     refineProgress.reset.mockClear();
   });

@@ -189,7 +189,7 @@ function PhotometryPanel({ filePath, measureKey }: PhotometryPanelProps) {
   const { excludeDq } = useDqContext();
   const status = usePhotometryStatus(filePath ?? null, excludeDq, measureKey ?? null);
   const arcsecPerPx = status.status?.pixel_scale_arcsec ?? null;
-  const depth = useImageDepth(filePath ?? null);
+  const depth = useImageDepth(filePath ?? null, measureKey ?? null);
   const { active } = useToolHost();
   const provenance = useMeasurementProvenance();
   const lastSeqRef = useRef(0);

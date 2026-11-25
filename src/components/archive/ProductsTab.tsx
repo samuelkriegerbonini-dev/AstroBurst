@@ -7,9 +7,9 @@ import { useNow } from "./state/useNow";
 import { PRODUCTS_SLOW_NOTE, productsFailureText, productsListingText } from "./logic/detailView";
 import { viewAvailability } from "./logic/missionState";
 import { errorView } from "./logic/errorCopy";
-import { downloadInput, listDownloadRefusal, needsConfirmation, picksAfterSend, productDownloadRefusal, selectionBytes, selectionKey, type PickedProducts } from "./logic/downloadView";
+import { downloadInput, downloadRoot, listDownloadRefusal, needsConfirmation, picksAfterSend, productDownloadRefusal, selectionBytes, selectionKey, type PickedProducts } from "./logic/downloadView";
 import { presetById } from "./logic/presetView";
-import { useDownloadsError } from "./state/downloadsStore";
+import { useDownloads, useDownloadsError } from "./state/downloadsStore";
 import { startDownloads } from "./state/downloadsController";
 import { peekEntry, usePeeks, type PeekEntry, type PeeksState } from "./state/peeksStore";
 import { peeksController } from "./state/peeksController";
@@ -18,14 +18,19 @@ import { DownloadBarView, type ConfirmKind } from "./DownloadBar";
 import {
   CLASS_LABELS,
   copyDownloadUrls,
+  copyJdavizUris,
   copyMastUris,
   exactBytes,
   filenameParts,
   formatBytes,
   opensParts,
+  productExtras,
   productLabel,
+  productLabelTitle,
   productView,
+  scienceSelection,
   sectionExpanded,
+  versionText,
   visibleProducts,
   type ProductSection,
   type SectionOverrides,
@@ -38,7 +43,12 @@ interface ProductsTabProps {
   mission: MastMission;
 }
 
-const DOWNLOAD_NOTE = "Downloads go to the mast folder of the Data folder (Settings); Download and open loads images, cubes, spectra, ramps and ECSV tables into the Workspace.";
+const OPEN_NOTE = "Download and open loads images, cubes, spectra, ramps and ECSV tables into the Workspace.";
+
+export function downloadNote(root: string | null): string {
+  const where = root ? `Downloads go to ${root}, one folder per mission and programme.` : "Downloads go to the mast folder of the Data folder (Settings), one folder per mission and programme.";
+  return `${where} ${OPEN_NOTE}`;
+}
 const FILE_NOUNS: Partial<Record<MastProductClass, string>> = { reference: "CRDS reference", guidestar: "guide-star" };
 
 function plural(n: number, one: string, many: string): string {
@@ -148,6 +158,7 @@ function SectionView({ section, expanded, onToggle, picked, onPick, refusalOf, p
             const entry = canPeek ? peekEntry(peeking.peeks, peeking.mission, peeking.datasetId, p.filename) : null;
             const refusal = onPick ? refusalOf(p) : null;
             const name = filenameParts(p.filename, p.datasetId);
+            const versions = versionText(productExtras(p));
             return (
               <Fragment key={selectionKey(p)}>
                 <li className="ab-mast-prow" data-cls={p.cls}>
@@ -166,12 +177,19 @@ function SectionView({ section, expanded, onToggle, picked, onPick, refusalOf, p
                     <span className="ab-mast-prow-name-head">{name.head}</span>
                     <span className="ab-mast-prow-name-tail">{name.tail}</span>
                   </span>
-                  <span className="ab-mast-prow-cls">{productLabel(p)}</span>
+                  <span className="ab-mast-prow-cls" title={productLabelTitle(p)}>
+                    {productLabel(p)}
+                  </span>
                   <span className="ab-mast-prow-size ab-mast-mono" title={exactBytes(p.sizeBytes)}>
                     {formatBytes(p.sizeBytes)}
                   </span>
                   <span className="ab-mast-prow-tail">
                     {p.badges.includes("hap_aligned") ? <span className="ab-mast-badge">HAP aligned</span> : null}
+                    {versions ? (
+                      <span className="ab-mast-prow-version" data-testid="mast-product-versions">
+                        {versions}
+                      </span>
+                    ) : null}
                     {canPeek ? <PeekButton product={p} entry={entry} onPeek={peeking.onPeek} /> : null}
                   </span>
                 </li>
@@ -191,6 +209,7 @@ export default function ProductsTab({ state, ctl, row, mission }: ProductsTabPro
   const [picked, setPicked] = useState<PickedProducts>({ key, ids: new Set() });
   const [confirming, setConfirming] = useState<ConfirmKind | null>(null);
   const refusal = useDownloadsError();
+  const downloads = useDownloads();
   const peeks = usePeeks();
   const products = state.products[key];
   const loading = !products || products.stage === "loading";
@@ -255,7 +274,14 @@ export default function ProductsTab({ state, ctl, row, mission }: ProductsTabPro
   const blocked = listDownloadRefusal(products.list.products, mission);
   const refusalOf = (product: MastProduct) => productDownloadRefusal(product, mission);
   const pickedIds = picked.key === key ? picked.ids : new Set<string>();
-  const chosen = products.list.products.filter((p) => pickedIds.has(selectionKey(p)));
+  const chosen = visible.filter((p) => pickedIds.has(selectionKey(p)));
+  const science = blocked ? [] : scienceSelection(view, refusalOf);
+  const selectScience = () => {
+    setPicked({ key, ids: new Set(science.map(selectionKey)) });
+    setOverrides((o) => ({ ...o, [view.sections.some((s) => s.key === "preset") ? "preset" : "opens"]: true }));
+    setConfirming(null);
+  };
+  const jdaviz = copyJdavizUris(visible);
   const chosenBytes = selectionBytes(chosen);
   const togglePick = (product: MastProduct) => {
     const next = new Set(pickedIds);
@@ -297,6 +323,11 @@ export default function ProductsTab({ state, ctl, row, mission }: ProductsTabPro
             Everything
           </label>
         </fieldset>
+        {science.length ? (
+          <button type="button" data-testid="mast-select-science" className="ab-btn-secondary ab-mast-action" title={science.map((p) => p.filename).join("\n")} onClick={selectScience}>
+            {`Select science files (${science.length})`}
+          </button>
+        ) : null}
         <button type="button" className="ab-btn-secondary ab-mast-action" onClick={() => ctl.refreshProducts()} title="List again, past the 24 h cache">
           <RefreshCw size={11} aria-hidden="true" />
           Refresh
@@ -335,7 +366,13 @@ export default function ProductsTab({ state, ctl, row, mission }: ProductsTabPro
         onCancel={() => setConfirming(null)}
       />
       <div className="ab-mast-actions">
-        <button type="button" className="ab-btn-secondary ab-mast-action" disabled={visible.length === 0} onClick={() => void ctl.copy(copyMastUris(visible), plural(visible.length, "MAST URI", "MAST URIs"))}>
+        <button
+          type="button"
+          className="ab-btn-secondary ab-mast-action"
+          title="mast: URIs of the files shown, which Jdaviz and astroquery open directly"
+          disabled={visible.length === 0}
+          onClick={() => void ctl.copy(copyMastUris(visible), plural(visible.length, "MAST URI", "MAST URIs"))}
+        >
           Copy MAST URIs
         </button>
         <button
@@ -346,8 +383,22 @@ export default function ProductsTab({ state, ctl, row, mission }: ProductsTabPro
         >
           Copy Download/file URLs
         </button>
+        {jdaviz ? (
+          <button
+            type="button"
+            data-testid="mast-copy-jdaviz"
+            className="ab-btn-secondary ab-mast-action"
+            title="MAST URIs that Jdaviz opens directly"
+            onClick={() => {
+              const count = jdaviz.split("\n").length;
+              void ctl.copy(jdaviz, plural(count, "Jdaviz URI", "Jdaviz URIs"));
+            }}
+          >
+            Copy Jdaviz URIs
+          </button>
+        ) : null}
       </div>
-      {blocked ? null : <p className="ab-mast-detail-note">{DOWNLOAD_NOTE}</p>}
+      {blocked ? null : <p className="ab-mast-detail-note">{downloadNote(downloadRoot(downloads.items))}</p>}
     </div>
   );
 }

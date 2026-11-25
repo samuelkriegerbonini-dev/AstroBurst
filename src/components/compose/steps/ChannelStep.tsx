@@ -423,7 +423,7 @@ export default function ChannelStep({
                       : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
                   }`}>
             {armedAction === "clear"
-              ? `Confirm — clears ${assignedFileCount} assignment${assignedFileCount === 1 ? "" : "s"}?`
+              ? `Confirm: clears ${assignedFileCount} assignment${assignedFileCount === 1 ? "" : "s"}?`
               : "Clear"}
           </button>
         </div>
@@ -535,7 +535,7 @@ export default function ChannelStep({
             {disjointPairs.length > 3 ? ` and ${disjointPairs.length - 3} more pair(s)` : ""}
             {" "}point at different sky regions
             {disjointPairs[0].separation_arcmin != null ? ` (~${disjointPairs[0].separation_arcmin.toFixed(1)}′ apart)` : ""}
-            {" "}— their WCS footprints do not overlap, so blending them produces a patchwork with no common signal. Check the channel assignment.
+            {"; "}their WCS footprints do not overlap, so blending them produces a patchwork with no common signal. Check the channel assignment.
           </span>
         </div>
       )}
@@ -547,7 +547,7 @@ export default function ChannelStep({
             Auto Map could not resolve {unmappedFiles.length} file(s):{" "}
             {unmappedFiles.slice(0, 4).map((u) => `${u.name}${u.filter ? ` [${u.filter}]` : " [no FILTER keyword]"}`).join(", ")}
             {unmappedFiles.length > 4 ? ` and ${unmappedFiles.length - 4} more` : ""}
-            {" "}— their filter is not in the wavelength table, so they stay unassigned. Drop them into a channel manually.
+            {"; "}their filter is not in the wavelength table, so they stay unassigned. Drop them into a channel manually.
           </span>
         </div>
       )}

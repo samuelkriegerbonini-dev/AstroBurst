@@ -4,8 +4,11 @@ import type { WizardState } from "../wizard";
 import { resolveChannelPath as resolveWizardPath } from "../wizard";
 import { backgroundAlignNotice, backgroundRunSummary, type BackgroundRunSummaryInput } from "../../../utils/wizard";
 import { extractBackground, extractBackgroundBatch } from "../../../services/processing";
+import { BACKGROUND_DEFAULTS } from "../../../services/processingDefaults";
 import { getOutputDir } from "../../../infrastructure/tauri";
 import { bustPreviewUrl } from "../../../hooks/useProcessingRun";
+import { useWizardRunGuard } from "../../../context/WizardRunGuardContext";
+import { channelInputKey, channelsInputKey, WIZARD_INPUTS_CHANGED } from "../../../utils/wizardRunGuard";
 import { CompareView, RunButton, Slider } from "../../ui";
 
 interface BackgroundStepProps {
@@ -28,9 +31,10 @@ function resolveChannelPath(state: WizardState, binId: string): string | null {
 }
 
 export default function BackgroundStep({ state, onBackground }: BackgroundStepProps) {
-  const [gridSize, setGridSize] = useState(8);
-  const [polyDegree, setPolyDegree] = useState(3);
-  const [sigmaClip, setSigmaClip] = useState(2.5);
+  const { begin } = useWizardRunGuard();
+  const [gridSize, setGridSize] = useState<number>(BACKGROUND_DEFAULTS.gridSize);
+  const [polyDegree, setPolyDegree] = useState<number>(BACKGROUND_DEFAULTS.polyDegree);
+  const [sigmaClip, setSigmaClip] = useState<number>(BACKGROUND_DEFAULTS.sigmaClip);
   const modeId = useId();
   const [mode, setMode] = useState<"independent" | "linked" | "neutralize" | "deband_auto" | "deband_rows" | "deband_cols" | "deband_both">("independent");
   const [loading, setLoading] = useState<Record<string, boolean>>({});
@@ -51,15 +55,17 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
     }
     setLoading((prev) => ({ ...prev, [binId]: true }));
     setErrors((prev) => ({ ...prev, [binId]: "" }));
+    const isCurrent = begin(channelInputKey(binId, "cropped"));
     try {
       const result = await extractBackground(path, await getOutputDir(), {
         gridSize,
         polyDegree,
         sigmaClip,
-        iterations: 3,
-        mode: "subtract",
+        iterations: BACKGROUND_DEFAULTS.iterations,
+        mode: BACKGROUND_DEFAULTS.mode,
         binId,
       });
+      if (!isCurrent()) throw new Error(WIZARD_INPUTS_CHANGED);
       const stamp = Date.now();
       setResults((prev) => ({
         ...prev,
@@ -76,7 +82,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
     } finally {
       setLoading((prev) => ({ ...prev, [binId]: false }));
     }
-  }, [state, gridSize, polyDegree, sigmaClip, onBackground]);
+  }, [state, gridSize, polyDegree, sigmaClip, onBackground, begin]);
 
   const handleExtractAllBatch = useCallback(async (batchMode: string) => {
     const paths: string[] = [];
@@ -96,15 +102,17 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
       return next;
     });
     setErrors({});
+    const isCurrent = begin(channelsInputKey(binIds, "cropped"));
     try {
       const res = await extractBackgroundBatch(paths, binIds, await getOutputDir(), {
         gridSize,
         polyDegree,
         sigmaClip,
-        iterations: 3,
+        iterations: BACKGROUND_DEFAULTS.iterations,
         mode: batchMode,
         runToken: state.alignRunToken,
       });
+      if (!isCurrent()) throw new Error(WIZARD_INPUTS_CHANGED);
       const nextResults: Record<string, BgExtractResult> = {};
       for (const r of res.results ?? []) {
         nextResults[r.bin_id] = {
@@ -131,7 +139,7 @@ export default function BackgroundStep({ state, onBackground }: BackgroundStepPr
         return next;
       });
     }
-  }, [activeBins, state, gridSize, polyDegree, sigmaClip, onBackground]);
+  }, [activeBins, state, gridSize, polyDegree, sigmaClip, onBackground, begin]);
 
   const handleExtractAll = useCallback(async () => {
     if (mode === "independent") {

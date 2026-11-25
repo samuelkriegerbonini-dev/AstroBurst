@@ -1,12 +1,12 @@
 {
   "axis_unit": "um",
-  "centroid": 1.0199999863957592,
+  "centroid": 1.019999986367345,
   "continuum_channels": 12,
-  "continuum_level": 112.68025377025901,
+  "continuum_level": 113.09758993208534,
   "continuum_linear": true,
-  "continuum_reference": 1.0199999863957592,
-  "continuum_sigma": 0.00024382187734299802,
-  "continuum_slope": 0.008476621044145169,
+  "continuum_reference": 1.019999986367345,
+  "continuum_sigma": 0.0002438452858594246,
+  "continuum_slope": 0.008508201466185725,
   "continuum_windows": [
     [
       0,
@@ -17,22 +17,23 @@
       39
     ]
   ],
-  "equivalent_width": -0.007188594503741367,
+  "equivalent_width": -0.007173767862164523,
   "fit": null,
-  "flux": 0.810012652933025,
-  "flux_err": 5.110836736381398e-6,
+  "flux": 0.8113358559430143,
+  "flux_err": 5.1297449131017515e-6,
   "flux_unit": "Jy/beam x pix x um",
-  "fwhm": 0.007062462736043728,
+  "fwhm": 0.007062462867944297,
   "n_channels": 25,
   "notes": [
-    "circle region: flux summed over 112.7 pixels",
+    "circle region: flux summed over 113.1 pixels",
     "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid",
+    "sigma_kms, fwhm_kms and the source-frame widths are observed widths: the instrumental width is not removed (no resolving power given)",
     "line velocity from the optical convention with rest wavelength 1.02 um, axis frame BARYCENT, no frame shift applied"
   ],
-  "peak": 107.71974012611004,
+  "peak": 107.89571145940023,
   "peak_channel": 20,
-  "sigma": 0.0029991517827218546,
-  "snr": 158489.2444649943,
+  "sigma": 0.002999151838734869,
+  "snr": 158163.00219350128,
   "source": {
     "background": null,
     "kind": "region",
@@ -45,12 +46,12 @@
   },
   "velocity": {
     "axis_frame": "BARYCENT",
-    "centroid_kms": -0.0039984792177776484,
+    "centroid_kms": -0.004006830542133113,
     "convention": "optical",
-    "fwhm_kms": 2075.757905070589,
+    "fwhm_kms": 2075.7579438380067,
     "rest_um": 1.02,
     "shift_applied_kms": 0.0,
-    "sigma_kms": 881.49322044832
+    "sigma_kms": 881.4932369113264
   },
   "z0": 8,
   "z1": 32

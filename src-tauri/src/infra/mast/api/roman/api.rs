@@ -45,12 +45,8 @@ impl RomanApi {
         self.endpoint.post_list_products(dataset_ids).await
     }
 
-    pub async fn get_image_list(
-        &self,
-        fileset_name: &str,
-        category: Option<&str>,
-    ) -> MastResult<Vec<ImageListResult>> {
-        self.endpoint.get_image_list(fileset_name, category).await
+    pub async fn get_image_list(&self, fileset_name: &str) -> MastResult<Vec<ImageListResult>> {
+        self.endpoint.get_image_list(fileset_name).await
     }
 
     pub async fn get_image_preview(

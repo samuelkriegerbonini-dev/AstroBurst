@@ -1,0 +1,151 @@
+{
+ "golden": "tso/whtlt",
+ "produced_by": {
+  "script": "tso_golden_whtlt.py",
+  "command": "python -I scripts/oracle/tso_golden_whtlt.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw01366-o003_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 52311,
+    "sha256": "35e5ae251caf2b8feac925218a5d2a0bffdab85f432a3f5b2820c41aa8eb0bea"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "ecsv": {
+  "first_line": "# %ECSV 1.0",
+  "line_ending": "LF",
+  "n_header_lines": 27,
+  "delimiter_key_present": false,
+  "delimiter_used": "single space",
+  "schema_line": "# schema: astropy-2.0",
+  "has_serialized_columns_block": true,
+  "has_yaml_anchor_or_alias": true,
+  "column_name_line": "MJD_UTC_NRS1 BJD_TDB_NRS1 whitelight_flux_NRS1 MJD_UTC_NRS2 BJD_TDB_NRS2 whitelight_flux_NRS2"
+ },
+ "layout": "current (MJD_UTC, BJD_TDB, whitelight_flux with optional order and detector suffixes)",
+ "columns": [
+  {
+   "name": "MJD_UTC_NRS1",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "BJD_TDB_NRS1",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux_NRS1",
+   "unit": "Jy",
+   "datatype": "float64"
+  },
+  {
+   "name": "MJD_UTC_NRS2",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "BJD_TDB_NRS2",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux_NRS2",
+   "unit": "Jy",
+   "datatype": "float64"
+  }
+ ],
+ "meta": {
+  "instrument": "NIRSPEC",
+  "exp_type": "NRS_BRIGHTOBJ",
+  "subarray": "SUB2048",
+  "filter": "F290LP",
+  "pupil": null,
+  "target_name": "WASP-39",
+  "number_of_integrations": 465
+ },
+ "meta_key_order": [
+  "instrument",
+  "exp_type",
+  "subarray",
+  "filter",
+  "pupil",
+  "target_name",
+  "number_of_integrations"
+ ],
+ "n_data_rows": 465,
+ "non_numeric_tokens": [],
+ "series": [
+  {
+   "flux_column": "whitelight_flux_NRS1",
+   "time_column": "MJD_UTC_NRS1",
+   "bjd_column": "BJD_TDB_NRS1",
+   "detector_suffix": "NRS1",
+   "order_suffix": null,
+   "flux_unit": "Jy",
+   "time_unit": null,
+   "rows_with_finite_time": 465,
+   "time_first": 59790.91978428565,
+   "time_last": 59791.26382320383,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 64.06241906806827,
+   "flux_first3": [
+    -4420.80089171448,
+    -2572.3256186797666,
+    -6073.510944496869
+   ],
+   "flux_last3": [
+    -4599.143944198278,
+    -8192.83285291151,
+    -3043.9832592914977
+   ],
+   "flux_sum_fsum": -2359131.007886567,
+   "flux_min": -13848.933985501813,
+   "flux_max": 5200.521291938266,
+   "flux_negative_rows": 444,
+   "bjd_first": 59790.920506999464,
+   "bjd_last": 59791.26451276611,
+   "bjd_minus_time_s_first": 62.44247336871922
+  },
+  {
+   "flux_column": "whitelight_flux_NRS2",
+   "time_column": "MJD_UTC_NRS2",
+   "bjd_column": "BJD_TDB_NRS2",
+   "detector_suffix": "NRS2",
+   "order_suffix": null,
+   "flux_unit": "Jy",
+   "time_unit": null,
+   "rows_with_finite_time": 465,
+   "time_first": 59790.919780242635,
+   "time_last": 59791.26381916081,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 64.06241906806827,
+   "flux_first3": [
+    32.41469297700512,
+    32.4543608152303,
+    32.45585676421277
+   ],
+   "flux_last3": [
+    32.37401167299922,
+    32.37729374011758,
+    32.371280573886224
+   ],
+   "flux_sum_fsum": 14981.129925355544,
+   "flux_min": 31.615288009672014,
+   "flux_max": 32.48074673679645,
+   "flux_negative_rows": 0,
+   "bjd_first": 59790.92050295683,
+   "bjd_last": 59791.264508723485,
+   "bjd_minus_time_s_first": 62.44250668678433
+  }
+ ]
+}

@@ -21,6 +21,7 @@ import type {
 import type { CompositeStfFields } from "../shared/types/compose";
 import { CHAIN_PREVIEWS, chainArgs } from "./compositeChain";
 import { recordOp } from "./ops";
+import { BACKGROUND_DEFAULTS, DECONV_DEFAULTS as DECONV_SHARED, WAVELET_DEFAULTS } from "./processingDefaults";
 import type { HistoryScope, OpSpec, PsfSpec, RunOpResult } from "../shared/types/ops";
 import type { MaskChoice } from "../shared/types/masks";
 import type { DbeConfig } from "../shared/types/dbe";
@@ -53,16 +54,16 @@ export interface DeconvolveSettings {
 }
 
 const DECONV_DEFAULTS: DeconvolveSettings = {
-  iterations: 20,
-  psfSigma: 2.0,
-  psfSize: 15,
-  regularization: 0.001,
-  deringing: true,
-  deringThreshold: 0.1,
-  useEmpiricalPsf: false,
+  iterations: DECONV_SHARED.iterations,
+  psfSigma: DECONV_SHARED.psfSigma,
+  psfSize: DECONV_SHARED.psfSize,
+  regularization: DECONV_SHARED.regularization,
+  deringing: DECONV_SHARED.deringing,
+  deringThreshold: DECONV_SHARED.deringThreshold,
+  useEmpiricalPsf: DECONV_SHARED.useEmpiricalPsf,
 };
-const EMPIRICAL_PSF_STARS = 30;
-const EMPIRICAL_PSF_RADIUS = 15;
+const EMPIRICAL_PSF_STARS = DECONV_SHARED.psfNumStars;
+const EMPIRICAL_PSF_RADIUS = DECONV_SHARED.psfCutoutRadius;
 
 function psfSpecOf(options: DeconvolveOptions): PsfSpec {
   const kernel = options.psfKernel;
@@ -112,15 +113,15 @@ export function deconvolveRL(
 ): Promise<DeconvolveRunResult> {
   return withPreview<DeconvolveRunResult>("deconvolve_rl_cmd", outputDir, {
     path,
-    iterations: options.iterations ?? 20,
-    psfSigma: options.psfSigma ?? 2.0,
-    psfSize: options.psfSize ?? 15,
-    regularization: options.regularization ?? 0.001,
-    deringing: options.deringing ?? true,
-    deringThreshold: options.deringThreshold ?? 0.1,
-    useEmpiricalPsf: options.useEmpiricalPsf ?? false,
-    psfNumStars: options.psfNumStars ?? 30,
-    psfCutoutRadius: options.psfCutoutRadius ?? 15,
+    iterations: options.iterations ?? DECONV_SHARED.iterations,
+    psfSigma: options.psfSigma ?? DECONV_SHARED.psfSigma,
+    psfSize: options.psfSize ?? DECONV_SHARED.psfSize,
+    regularization: options.regularization ?? DECONV_SHARED.regularization,
+    deringing: options.deringing ?? DECONV_SHARED.deringing,
+    deringThreshold: options.deringThreshold ?? DECONV_SHARED.deringThreshold,
+    useEmpiricalPsf: options.useEmpiricalPsf ?? DECONV_SHARED.useEmpiricalPsf,
+    psfNumStars: options.psfNumStars ?? DECONV_SHARED.psfNumStars,
+    psfCutoutRadius: options.psfCutoutRadius ?? DECONV_SHARED.psfCutoutRadius,
     psfKernel: options.psfKernel ?? null,
   });
 }
@@ -133,7 +134,6 @@ export interface BackgroundOptions {
   mode?: string;
 }
 
-const BACKGROUND_DEFAULTS = { gridSize: 8, polyDegree: 3, sigmaClip: 2.5, iterations: 3, mode: "subtract" } as const;
 const DEBAND_MODELS = ["deband_rows", "deband_cols", "deband_both", "deband_auto"] as const;
 export type DebandModel = (typeof DEBAND_MODELS)[number];
 
@@ -204,11 +204,11 @@ export function extractBackground(
 ): Promise<BackgroundResult> {
   return withPreview<BackgroundResult>("extract_background_cmd", outputDir, {
     path,
-    gridSize: options.gridSize ?? 8,
-    polyDegree: options.polyDegree ?? 3,
-    sigmaClip: options.sigmaClip ?? 2.5,
-    iterations: options.iterations ?? 3,
-    mode: options.mode ?? "subtract",
+    gridSize: options.gridSize ?? BACKGROUND_DEFAULTS.gridSize,
+    polyDegree: options.polyDegree ?? BACKGROUND_DEFAULTS.polyDegree,
+    sigmaClip: options.sigmaClip ?? BACKGROUND_DEFAULTS.sigmaClip,
+    iterations: options.iterations ?? BACKGROUND_DEFAULTS.iterations,
+    mode: options.mode ?? BACKGROUND_DEFAULTS.mode,
     binId: options.binId ?? null,
   }, [
     ["corrected_png", "previewUrl"],
@@ -242,11 +242,11 @@ export function extractBackgroundBatch(
     paths,
     binIds,
     outputDir,
-    gridSize: options.gridSize ?? 8,
-    polyDegree: options.polyDegree ?? 3,
-    sigmaClip: options.sigmaClip ?? 2.5,
-    iterations: options.iterations ?? 3,
-    mode: options.mode ?? "subtract",
+    gridSize: options.gridSize ?? BACKGROUND_DEFAULTS.gridSize,
+    polyDegree: options.polyDegree ?? BACKGROUND_DEFAULTS.polyDegree,
+    sigmaClip: options.sigmaClip ?? BACKGROUND_DEFAULTS.sigmaClip,
+    iterations: options.iterations ?? BACKGROUND_DEFAULTS.iterations,
+    mode: options.mode ?? BACKGROUND_DEFAULTS.mode,
     referenceBin: options.referenceBin ?? null,
     runToken: options.runToken ?? null,
   });
@@ -266,15 +266,14 @@ export interface WaveletSettings {
   layerBias: number[];
 }
 
-const WAVELET_DEFAULT_THRESHOLDS = [3.0, 2.5, 2.0, 1.5, 1.0];
 
 export function waveletOp(options: WaveletOptions): OpSpec {
   return {
     op: "wavelet_denoise",
     v: 1,
-    numScales: options.numScales ?? 5,
-    thresholds: options.thresholds ?? WAVELET_DEFAULT_THRESHOLDS,
-    linearDenoise: options.linear ?? true,
+    numScales: options.numScales ?? WAVELET_DEFAULTS.numScales,
+    thresholds: options.thresholds ?? [...WAVELET_DEFAULTS.thresholds],
+    linearDenoise: options.linear ?? WAVELET_DEFAULTS.linear,
     layerBias: options.layerBias ?? null,
   };
 }
@@ -300,9 +299,9 @@ export function waveletDenoise(
 ): Promise<WaveletResult> {
   return withPreview<WaveletResult>("wavelet_denoise_cmd", outputDir, {
     path,
-    numScales: options.numScales ?? 5,
-    thresholds: options.thresholds ?? [3.0, 2.5, 2.0, 1.5, 1.0],
-    linear: options.linear ?? true,
+    numScales: options.numScales ?? WAVELET_DEFAULTS.numScales,
+    thresholds: options.thresholds ?? [...WAVELET_DEFAULTS.thresholds],
+    linear: options.linear ?? WAVELET_DEFAULTS.linear,
     layerBias: options.layerBias ?? null,
   });
 }

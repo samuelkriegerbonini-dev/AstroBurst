@@ -1,6 +1,7 @@
 import type { TimeSeriesFrame, TimeSeriesResult, TimeSeriesTarget } from "../shared/types/analysis";
 import { apertureLine, bjdSources, lightCurve, lightCurveExtras, MAG_ERR_FACTOR, referenceStem, saturatedCompLabels } from "./differentialPhotometry";
 import { fileBaseName, isFiniteNumber } from "./values";
+import { MAG_ERR_PER_RELATIVE_FLUX_ERR_TEXT } from "./photometryConstants";
 
 export type ExoClockTime = "jd_utc" | "bjd_tdb" | "hjd_utc";
 
@@ -264,7 +265,7 @@ export function exoClockCsv(source: LightCurveExportSource, time: ExoClockTime):
     `# time: ${time} = ${TIME_NAMES[time]} at mid-exposure`,
     ...(time === "bjd_tdb" ? [`# bjd_tdb source: ${bjdSources(measured.map((r) => r.frame)) ?? "unknown"}`] : []),
     ...(bjdComputed ? [`# bjd_tdb accuracy: ${BJD_ACCURACY_NOTE}`] : []),
-    `# flux: target / sum of comparison fluxes, not normalised; rel_flux_err = rel_flux * diff_err / ${MAG_ERR_FACTOR}`,
+    `# flux: target / sum of comparison fluxes, not normalised; rel_flux_err = rel_flux * diff_err / (${MAG_ERR_PER_RELATIVE_FLUX_ERR_TEXT})`,
     `# filter: ${distinct(measured.map((r) => r.frame.filter))}`,
     `# exposure s: ${distinct(measured.map((r) => exposureSeconds(r.frame)))}`,
     apertureLine(result, source.targetIdx),

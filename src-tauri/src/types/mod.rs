@@ -1,11 +1,12 @@
-pub mod compose;
-pub mod config;
-pub mod constants;
-pub mod error;
-pub mod header;
-pub mod image;
-pub mod image_ref;
-pub mod stacking;
+pub mod combination;
+pub mod errors;
+pub mod images;
+pub mod settings;
+
+pub use combination::{compose, stacking};
+pub use errors::error;
+pub use images::{header, image, image_ref};
+pub use settings::{config, constants};
 
 pub use header::HduHeader;
 pub use image::ImageStats;

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::http::error_chain;
+use crate::infra::app::file_lock::{try_lock_temporary_file, HeldLock};
 
 const FORMAT_VERSION: u32 = 1;
 const BUFFER_BYTES: usize = 1 << 20;
@@ -191,6 +192,7 @@ pub(crate) struct Files {
     part: PathBuf,
     sidecar: PathBuf,
     record: PathBuf,
+    lock: PathBuf,
 }
 
 impl Files {
@@ -228,6 +230,7 @@ impl Files {
             part: with(".part"),
             sidecar: with(".part.json"),
             record: with(".done.json"),
+            lock: with(".part.lock"),
         }
     }
 
@@ -237,7 +240,10 @@ impl Files {
     }
 }
 
-struct Claim(PathBuf);
+struct Claim {
+    key: PathBuf,
+    _part_lock: Option<HeldLock>,
+}
 
 fn claims() -> &'static Mutex<HashSet<PathBuf>> {
     static CLAIMS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -249,10 +255,16 @@ impl Claim {
         let key = claim_key(std::path::absolute(dest)?);
         let mut held = claims().lock().unwrap_or_else(PoisonError::into_inner);
         if held.insert(key.clone()) {
-            Ok(Self(key))
+            Ok(Self { key, _part_lock: None })
         } else {
             Err(DownloadError::Busy)
         }
+    }
+
+    fn take_with_part_lock(files: &Files) -> Result<Self, DownloadError> {
+        let mut claim = Self::take(&files.dest)?;
+        claim._part_lock = Some(try_lock_temporary_file(&files.lock)?.ok_or(DownloadError::Busy)?);
+        Ok(claim)
     }
 }
 
@@ -261,7 +273,7 @@ impl Drop for Claim {
         claims()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.0);
+            .remove(&self.key);
     }
 }
 
@@ -422,11 +434,11 @@ pub async fn download(
     req: &DownloadRequest,
     observer: &dyn DownloadObserver,
 ) -> Result<DownloadOutcome, DownloadError> {
-    let claim = Arc::new(Claim::take(&req.dest)?);
     let files = Files::for_dest(&req.dest);
     if let Some(parent) = req.dest.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
+    let claim = Arc::new(Claim::take_with_part_lock(&files)?);
     match fs::metadata(&files.dest) {
         Ok(meta) => {
             let record = match read_json::<Record>(&files.record) {
@@ -450,9 +462,10 @@ pub async fn download(
     }
     let mut resume = resume_point(&files, req)?;
     let mut carry = None;
+    let mut reached = 0u64;
     loop {
         let response = send(ranged(client, req, resume.as_ref()), observer).await?;
-        match accept(&response, resume.take())? {
+        match accept(&response, resume.take(), req.expected_sha256.is_some())? {
             Next::Restart => carry = None,
             Next::Finalise(resume) => return finalise_part(req, &files, resume, &claim).await,
             Next::Stream(start) => {
@@ -461,6 +474,13 @@ pub async fn download(
                 match streamed {
                     Streamed::Done(outcome) => return Ok(outcome),
                     Streamed::Short(next) => {
+                        if next.offset <= reached {
+                            return Err(DownloadError::Transport(format!(
+                                "the transfer ended early at byte {} again",
+                                next.offset
+                            )));
+                        }
+                        reached = next.offset;
                         carry = Some(next);
                         resume = resume_point(&files, req)?;
                     }
@@ -573,7 +593,7 @@ async fn send(
     }
 }
 
-fn accept(response: &Response, resume: Option<Resume>) -> Result<Next, DownloadError> {
+fn accept(response: &Response, resume: Option<Resume>, digest_pinned: bool) -> Result<Next, DownloadError> {
     let headers = response.headers();
     let etag = header_text(headers, &ETAG);
     let last_modified = header_text(headers, &LAST_MODIFIED);
@@ -594,9 +614,9 @@ fn accept(response: &Response, resume: Option<Resume>) -> Result<Next, DownloadE
                 (&etag, &resume.sidecar.etag),
                 (Some(remote), Some(local)) if remote != local
             );
-            let unvalidated_total_differs = resume.sidecar.if_range().is_none()
-                && (total.is_none() || total != resume.sidecar.expected_size);
-            if start != resume.offset || etag_changed || unvalidated_total_differs {
+            let unvalidated_splice = resume.sidecar.if_range().is_none()
+                && (!digest_pinned || total.is_none() || total != resume.sidecar.expected_size);
+            if start != resume.offset || etag_changed || unvalidated_splice {
                 return Ok(Next::Restart);
             }
             Ok(Next::Stream(Start {
@@ -736,7 +756,7 @@ async fn stream(
         throttle.tick(observer, received, expected);
     }
     sidecar.received = received;
-    let short = start.offset > 0 && expected.is_some_and(|expected| received < expected);
+    let short = expected.is_some_and(|expected| received < expected);
     if short && received == start.offset {
         let error = DownloadError::Transport(format!(
             "the partial response from byte {received} ended without a body"
@@ -1374,7 +1394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn t04b_without_validators_a_206_with_the_expected_total_is_appended() {
+    async fn t04b_without_validators_a_206_with_the_expected_total_is_appended_when_a_sha256_is_pinned() {
         let payload = body(SIZE, 6);
         let server = serve(
             Resource::new(payload.clone())
@@ -1383,7 +1403,8 @@ mod tests {
                 .drop_after(MIB),
         );
         let spot = spot();
-        let req = request(&server, &spot);
+        let mut req = request(&server, &spot);
+        req.expected_sha256 = Some(digest(&payload));
         assert!(fetch(&req).await.is_err());
         let outcome = fetch(&req).await.unwrap();
         assert_eq!(outcome.resumed_from, MIB);
@@ -2222,5 +2243,63 @@ mod tests {
         assert!(matches!(Claim::take(&shouted), Err(DownloadError::Busy)));
         drop(held);
         assert!(Claim::take(&shouted).is_ok());
+    }
+
+    fn part_lock_of(files: &Files) -> PathBuf {
+        let mut name = files.dest.as_os_str().to_owned();
+        name.push(".part.lock");
+        PathBuf::from(name)
+    }
+
+    #[tokio::test]
+    async fn a_destination_another_process_is_downloading_is_refused_busy() {
+        let payload = body(64 * KIB, 43);
+        let server = serve(Resource::new(payload.clone()));
+        let spot = spot();
+        let req = request(&server, &spot);
+        let other_process = crate::infra::app::file_lock::try_lock_file(&part_lock_of(&spot.files))
+            .unwrap()
+            .expect("the test holds the lock as another process would");
+        let error = fetch(&req).await.unwrap_err();
+        assert!(matches!(error, DownloadError::Busy), "{error:?}");
+        assert!(server.requests().is_empty(), "a second process started writing the same part");
+        drop(other_process);
+        let outcome = fetch(&req).await.unwrap();
+        assert_eq!(file_digest(&outcome.path), digest(&payload));
+        assert!(!part_lock_of(&spot.files).exists(), "the part lock was left behind");
+    }
+
+    #[tokio::test]
+    async fn without_validators_or_a_pinned_digest_a_changed_file_of_the_same_size_is_not_spliced() {
+        let old = body(SIZE, 44);
+        let new = body(SIZE, 45);
+        let server = serve(
+            Resource::new(old)
+                .no_etag()
+                .no_last_modified()
+                .drop_after(MIB)
+                .change_etag_after(1, new.clone()),
+        );
+        let spot = spot();
+        let req = request(&server, &spot);
+        assert!(fetch(&req).await.is_err());
+        let outcome = fetch(&req).await.unwrap();
+        assert_eq!(file_digest(&spot.files.dest), digest(&new), "two versions of the file were spliced");
+        assert_eq!(outcome.resumed_from, 0);
+    }
+
+    #[tokio::test]
+    async fn a_first_attempt_that_ends_cleanly_before_the_expected_size_is_continued() {
+        let payload = body(SIZE, 46);
+        let server = serve(Resource::new(payload.clone()).no_content_length().drop_after(MIB));
+        let spot = spot();
+        let mut req = request(&server, &spot);
+        req.expected_size = Some(SIZE);
+        let outcome = fetch(&req).await.expect("the first short body was discarded instead of continued");
+        assert_eq!(outcome.bytes, SIZE);
+        assert_eq!(file_digest(&spot.files.dest), digest(&payload));
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].header("range"), Some("bytes=1048576-"));
     }
 }

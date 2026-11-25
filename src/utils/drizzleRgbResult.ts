@@ -30,9 +30,7 @@ export function monoDrizzleResultItems(result: StackResult, channelLabel: string
   ];
 }
 
-export function isCancelledRun(message: string): boolean {
-  return /cancel/i.test(message);
-}
+export { isCancelledRun } from "./cancelledRun";
 
 export const DRIZZLE_GAIN_FIELD: DecimalFieldOptions = { min: WB_APPLY_MIN, max: WB_APPLY_MAX };
 

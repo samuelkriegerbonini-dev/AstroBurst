@@ -3,6 +3,7 @@ import { getRenderRecord, useRenderActions } from "../context/PreviewContext";
 import { liveCompositeVersion } from "../context/CompositeContext";
 import type { ChainStep, ProcessingChain } from "../shared/types/preview";
 import { EMPTY_CHAIN, inputFor, samePath, withVersionParam } from "../utils/processingChain";
+import { isCancelledRun } from "../utils/cancelledRun";
 
 export const BUSY_TITLE = "Another step is running on this file";
 export const OTHER_FILE_TITLE = "This step is running on another file";
@@ -157,7 +158,7 @@ export function bustPreviewUrl(url: string | null | undefined, stamp: number): s
 }
 
 export function isCancelMessage(message: string): boolean {
-  return /cancel/i.test(message);
+  return isCancelledRun(message);
 }
 
 let runState: RunState = EMPTY_RUN_STATE;

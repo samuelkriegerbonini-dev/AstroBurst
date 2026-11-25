@@ -43,6 +43,7 @@ vi.mock("../../../../services/processing", async (importOriginal) => ({
 vi.mock("../../../../context/CompositeContext", () => {
   const stf = { shadow: 0, midtone: 0.5, highlight: 1 };
   return {
+    useCompositePreview: () => ({ compositeVersion: 0 }),
     useCompositeStf: () => ({
       compositeStfR: stf,
       compositeStfG: stf,
@@ -96,7 +97,6 @@ function composeGhs(): Rendered {
     state: ghsState(),
     onStretchChange: vi.fn(),
     onMaskParams: vi.fn(),
-    onMask: vi.fn(),
     onResult: vi.fn(),
     onChannelOutput: vi.fn(),
     onCompositeOp: vi.fn(),
@@ -133,5 +133,20 @@ describe("Compose › Stretch GHS controls", () => {
     const hint = ghsHint(composeGhs().html);
     expect(hint).toBeDefined();
     expect(hint).toBe(ghsHint(processingGhs().html));
+  });
+});
+
+describe("Compose › Stretch masked mode", () => {
+  it("does not offer a star mask import that has no entry point", () => {
+    const html = renderToStaticMarkup(createElement(StretchStep, {
+      state: { ...ghsState(), stretchMode: "masked" },
+      onStretchChange: vi.fn(),
+      onMaskParams: vi.fn(),
+      onResult: vi.fn(),
+      onChannelOutput: vi.fn(),
+      onCompositeOp: vi.fn(),
+    } as Parameters<typeof StretchStep>[0]));
+    expect(html).toContain("Star mask protects bright stars during the stretch.");
+    expect(html).not.toContain(".segm");
   });
 });

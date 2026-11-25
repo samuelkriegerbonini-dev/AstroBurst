@@ -6,6 +6,7 @@ export interface DepthState {
   depth: ImageDepth | null;
   loading: boolean;
   error: string | null;
+  options?: ImageDepthOptions;
 }
 
 export const EMPTY_DEPTH: DepthState = Object.freeze({ depth: null, loading: false, error: null });
@@ -41,10 +42,11 @@ export class DepthStore {
   async measure(key: string, path: string, options: ImageDepthOptions): Promise<void> {
     const run = ++this.seq;
     this.runs.set(key, run);
-    this.set(key, { depth: this.getSnapshot(key).depth, loading: true, error: null });
+    const previous = this.getSnapshot(key);
+    this.set(key, { depth: previous.depth, loading: true, error: null, options: previous.options });
     try {
       const depth = await this.run(path, options);
-      if (this.runs.get(key) === run) this.set(key, { depth, loading: false, error: null });
+      if (this.runs.get(key) === run) this.set(key, { depth, loading: false, error: null, options });
     } catch (error) {
       if (this.runs.get(key) === run) {
         this.set(key, { depth: null, loading: false, error: error instanceof Error ? error.message : String(error) });
@@ -57,10 +59,8 @@ export class DepthStore {
     if (this.states.delete(key)) this.emit();
   }
 
-  latest(path: string): ImageDepth | null {
-    const prefix = `${path}|`;
-    const newestFirst = [...this.states.entries()].reverse();
-    return newestFirst.find(([key, state]) => key.startsWith(prefix) && state.depth !== null)?.[1].depth ?? null;
+  latest(path: string, measureKey: string | null | undefined): ImageDepth | null {
+    return this.getSnapshot(depthKey(path, measureKey)).depth;
   }
 
   private set(key: string, state: DepthState): void {

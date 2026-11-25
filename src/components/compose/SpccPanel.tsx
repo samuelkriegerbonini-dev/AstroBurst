@@ -7,6 +7,8 @@ import { solveTargetMissing, spccWcsStatus, type SpccHeaderWcs } from "../../uti
 import { spccSyntheticNotice, type SpccCatalogChoice } from "../../utils/spccCatalog";
 import { useHeaderWcs } from "../../hooks/useHeaderWcs";
 import { solveInAstrometry } from "./solveInAstrometry";
+import { useWizardRunGuard } from "../../context/WizardRunGuardContext";
+import { spccInputKey, WIZARD_INPUTS_CHANGED } from "../../utils/wizardRunGuard";
 
 interface SpccResult {
   r_factor?: number;
@@ -55,6 +57,7 @@ const ICON = (
 
 export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, headerWcs, wavelengthsNm, onFactorsReady }: SpccPanelProps) {
   const whiteRefId = useId();
+  const { begin } = useWizardRunGuard();
   const catalogId = useId();
   const minSnrId = useId();
   const [whiteRef, setWhiteRef] = useState("average_spiral");
@@ -81,6 +84,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, hea
     setIsRunning(true);
     setError(null);
     setResult(null);
+    const isCurrent = begin(spccInputKey);
     try {
       const res = await spccCalibrate(rPath, gPath, bPath, {
         wcsPath: wcsPath ?? undefined,
@@ -89,6 +93,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, hea
         catalog,
         wavelengthsNm,
       }) as SpccResult;
+      if (!isCurrent()) throw new Error(WIZARD_INPUTS_CHANGED);
       setResultCatalog(catalog);
       setResult(res);
       if (res?.r_factor != null && res?.g_factor != null && res?.b_factor != null) {
@@ -99,7 +104,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, hea
     } finally {
       setIsRunning(false);
     }
-  }, [rPath, gPath, bPath, wcsPath, whiteRef, minSnr, catalog, wavelengthsNm, onFactorsReady]);
+  }, [rPath, gPath, bPath, wcsPath, whiteRef, minSnr, catalog, wavelengthsNm, onFactorsReady, begin]);
 
   return (
     <div className="flex flex-col gap-3 p-3 border border-cyan-800/20 bg-cyan-900/5 rounded-lg">
@@ -215,7 +220,7 @@ export default function SpccPanel({ rPath, gPath, bPath, wcsPath, wcsReason, hea
           )}
 
           <div className="text-[10px] text-cyan-400/80 bg-cyan-900/20 border border-cyan-800/20 rounded px-2.5 py-1.5">
-            Factors loaded — click Apply Color Balance to apply them.
+            Factors loaded: click Apply Color Balance to apply them.
           </div>
         </div>
       )}

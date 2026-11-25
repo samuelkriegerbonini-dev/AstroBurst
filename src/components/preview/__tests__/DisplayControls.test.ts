@@ -27,10 +27,11 @@ interface MemoryState {
 
 const NO_MEMORY: MemoryState = { linear: null, linearBlocked: null, sameGroup: true };
 
-const displayState: { display: DisplaySettings; memory: MemoryState; rawPixelsLoading: boolean } = {
+const displayState: { display: DisplaySettings; memory: MemoryState; rawPixelsLoading: boolean; histError: string | null } = {
   display: DEFAULT_DISPLAY_SETTINGS,
   memory: NO_MEMORY,
   rawPixelsLoading: false,
+  histError: null,
 };
 
 const setDisplay = vi.fn((patch: Partial<DisplaySettings>) => { displayState.display = { ...displayState.display, ...patch }; });
@@ -43,6 +44,7 @@ vi.mock("../../../context/PreviewContext", () => ({
     limits: null,
     limitsLoading: false,
     limitsError: null,
+    histError: displayState.histError,
     linear: displayState.memory.linear,
     linearBlocked: displayState.memory.linearBlocked,
     toggleLinear: () => {},
@@ -514,5 +516,21 @@ describe("DisplayControls compact toggles", () => {
     for (const id of ["symmetric", "invert", "colorbar", "grid", "compass", "same-group"]) {
       expect(openingTag(html, `display-${id}`)).toContain('<button type="button"');
     }
+  });
+});
+
+describe("DisplayControls histogram failure", () => {
+  afterEach(() => {
+    displayState.histError = null;
+  });
+
+  it("says the default STF is in use, and why, when the histogram of the shown image failed", () => {
+    displayState.histError = "histogram failed: empty plane";
+    const html = render({}, { stretch: "mtf" });
+    expect(html).toContain("Histogram failed, default STF in use: histogram failed: empty plane");
+  });
+
+  it("says nothing about the histogram when it loaded", () => {
+    expect(render({}, { stretch: "mtf" })).not.toContain("Histogram failed");
   });
 });

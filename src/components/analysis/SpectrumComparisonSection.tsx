@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useState, useSyncExternalStore } from "react";
 import { Layers } from "lucide-react";
 import ProfilePlot from "../regions/ProfilePlot";
 import { DecimalNumberField, SMALL_BUTTON_CLASS } from "../ui";
@@ -7,6 +7,8 @@ import { getCubeSpectrum, getCubeSpectrumRegion } from "../../services/cube";
 import { readX1dSpectrum } from "../../services/spectral";
 import { readSpectrumDocument } from "../../services/spectrum1d";
 import { spectrumComparisonStore, useSpectrumComparison } from "../../hooks/useSpectrumComparisonStore";
+import { fileStore } from "../../hooks/useFileStore";
+import { scientificInputRevisionOf } from "../../utils/pixelSource";
 import { useTimedNotice } from "../../hooks/useTimedNotice";
 import { measurementLog, spectrumCompareEntry } from "../../utils/measurementLog";
 import type { ContinuumWindows } from "../../shared/types/cube";
@@ -123,6 +125,11 @@ function SpectrumComparisonSection({
 }: SpectrumComparisonSectionProps) {
   const documentMode = fileSpectrum !== null && fileSpectrumSource !== null;
   const doc = useSpectrumComparison(filePath);
+  const revisionOf = useCallback(() => {
+    const file = fileStore.getDoneFiles().find((f) => f.path === filePath);
+    return file ? scientificInputRevisionOf(file) : null;
+  }, [filePath]);
+  const revision = useSyncExternalStore(fileStore.subscribeToStats, revisionOf, revisionOf);
   const normaliseId = useId();
   const stepId = useId();
   const [saveBusy, setSaveBusy] = useState(false);
@@ -162,10 +169,14 @@ function SpectrumComparisonSection({
   const tablePlotted = useMemo(() => plottedTable(entries, result), [entries, result]);
   const stale = documentMode
     ? doc.tableLoading
-    : doc.loading || doc.tableLoading || doc.regionVersion !== regionDoc.version || doc.pixelKey !== pixelKey;
+    : doc.loading ||
+      doc.tableLoading ||
+      doc.regionVersion !== regionDoc.version ||
+      doc.pixelKey !== pixelKey ||
+      doc.revision !== revision;
 
   const runFetch = useCallback(async () => {
-    const seq = spectrumComparisonStore.begin(filePath, regionDoc.version, pixelKey);
+    const seq = spectrumComparisonStore.begin(filePath, regionDoc.version, pixelKey, revision);
     const pixel = pixelKey !== null && pixelCoord ? pixelCoord : null;
     const regionJobs = Promise.allSettled(
       candidates.map((region) => getCubeSpectrumRegion(filePath, region.shape, linkedAnnulus(regions, region))),
@@ -175,16 +186,16 @@ function SpectrumComparisonSection({
     const pixelSettled = pixelJob ? (await pixelJob)[0] : null;
     const pixelEntry = pixel && pixelSettled ? { coord: pixel, result: pixelSettled } : null;
     spectrumComparisonStore.commit(filePath, seq, entriesFrom(candidates, regions, settled, pixelEntry));
-  }, [filePath, regionDoc.version, pixelKey, pixelCoord, candidates, regions]);
+  }, [filePath, regionDoc.version, pixelKey, revision, pixelCoord, candidates, regions]);
 
   useEffect(() => {
     if (!doc.enabled || documentMode) return;
     if (doc.loading) {
-      if (doc.pendingRegionVersion === regionDoc.version && doc.pendingPixelKey === pixelKey) return;
+      if (doc.pendingRegionVersion === regionDoc.version && doc.pendingPixelKey === pixelKey && doc.pendingRevision === revision) return;
       spectrumComparisonStore.invalidate(filePath);
       return;
     }
-    if (doc.regionVersion === regionDoc.version && doc.pixelKey === pixelKey) return;
+    if (doc.regionVersion === regionDoc.version && doc.pixelKey === pixelKey && doc.revision === revision) return;
     const timer = window.setTimeout(runFetch, COMPARE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [
@@ -196,8 +207,11 @@ function SpectrumComparisonSection({
     doc.pixelKey,
     doc.pendingRegionVersion,
     doc.pendingPixelKey,
+    doc.revision,
+    doc.pendingRevision,
     regionDoc.version,
     pixelKey,
+    revision,
     runFetch,
   ]);
 

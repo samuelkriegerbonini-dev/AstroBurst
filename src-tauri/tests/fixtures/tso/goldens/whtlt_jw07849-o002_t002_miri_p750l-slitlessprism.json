@@ -1,0 +1,135 @@
+{
+ "golden": "tso/whtlt",
+ "produced_by": {
+  "script": "tso_golden_whtlt.py",
+  "command": "python -I scripts/oracle/tso_golden_whtlt.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw07849-o002_t002_miri_p750l-slitlessprism_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 6271,
+    "sha256": "beacb0f5c508fecf6a5adf552b9a9c2091d47799a0de5ddfaa65e01140c551d9"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "ecsv": {
+  "first_line": "# %ECSV 1.0",
+  "line_ending": "LF",
+  "n_header_lines": 20,
+  "delimiter_key_present": false,
+  "delimiter_used": "single space",
+  "schema_line": "# schema: astropy-2.0",
+  "has_serialized_columns_block": true,
+  "has_yaml_anchor_or_alias": false,
+  "column_name_line": "MJD_UTC BJD_TDB whitelight_flux"
+ },
+ "layout": "current (MJD_UTC, BJD_TDB, whitelight_flux with optional order and detector suffixes)",
+ "columns": [
+  {
+   "name": "MJD_UTC",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "BJD_TDB",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux",
+   "unit": "Jy",
+   "datatype": "float64"
+  }
+ ],
+ "meta": {
+  "instrument": "MIRI",
+  "exp_type": "MIR_LRS-SLITLESS",
+  "subarray": "SLITLESSPRISM",
+  "filter": "P750L",
+  "pupil": null,
+  "target_name": "Kepler-12",
+  "number_of_integrations": 100
+ },
+ "meta_key_order": [
+  "instrument",
+  "exp_type",
+  "subarray",
+  "filter",
+  "pupil",
+  "target_name",
+  "number_of_integrations"
+ ],
+ "n_data_rows": 100,
+ "non_numeric_tokens": [],
+ "series": [
+  {
+   "flux_column": "whitelight_flux",
+   "time_column": "MJD_UTC",
+   "bjd_column": "BJD_TDB",
+   "detector_suffix": null,
+   "order_suffix": null,
+   "flux_unit": "Jy",
+   "time_unit": null,
+   "rows_with_finite_time": 100,
+   "time_first": 61207.50402118654,
+   "time_last": 61207.61281722258,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 94.94926747865975,
+   "flux_first3": [
+    0.0727906475348244,
+    0.0849690408950836,
+    0.20557482756712334
+   ],
+   "flux_last3": [
+    0.11698999201793092,
+    0.1342488788334158,
+    0.06647788547918454
+   ],
+   "flux_sum_fsum": 16.080810437960725,
+   "flux_min": 0.019638920648330845,
+   "flux_max": 0.21020068436511669,
+   "flux_negative_rows": 0,
+   "bjd_first": 61207.50626390643,
+   "bjd_last": 61207.61506210225,
+   "bjd_minus_time_s_first": 193.7709981109947
+  }
+ ],
+ "note": "Kepler-12: integrations 3 to 71 stay near 0.2 Jy; from integration 72 on the series is erratic between 0.02 and 0.16 Jy. No transit or eclipse can be read from it.",
+ "quality_scan": {
+  "median_rows_3_to_71": 0.20103962605970205,
+  "rel_std_rows_3_to_71": 0.06886943249855801,
+  "median_rows_72_to_100": 0.08146108276612748,
+  "rows_below_half_of_first_median": [
+   1,
+   2,
+   72,
+   73,
+   74,
+   75,
+   76,
+   78,
+   79,
+   80,
+   81,
+   82,
+   83,
+   84,
+   85,
+   88,
+   91,
+   92,
+   93,
+   95,
+   97,
+   100
+  ]
+ }
+}

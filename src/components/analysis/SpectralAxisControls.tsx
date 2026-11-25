@@ -19,6 +19,7 @@ import {
   parseRestInput,
 } from "../../utils/spectralAxis";
 import { DecimalField } from "../ui";
+import { MISSING_VALUE } from "../../utils/formatUncertainty";
 
 export interface SpectralAxisControlsProps {
   filePath: string | null;
@@ -47,7 +48,7 @@ function frameLabel(frame: CorrectionFrame): string {
 }
 
 function signed(value: number, decimals: number): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return MISSING_VALUE;
   return `${value >= 0 ? "+" : ""}${value.toFixed(decimals)}`;
 }
 

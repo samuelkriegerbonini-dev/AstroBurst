@@ -158,6 +158,7 @@ const LONG_HEADER = [
   "flux_total_ujy",
   "mag_ab",
   "mag_ab_err",
+  "mag_ab_err_corr",
   "upper_limit_ujy",
   "upper_limit_ab",
   "snr",
@@ -183,7 +184,8 @@ const LONG_UNITS = {
   flux_err_corr_ujy: "uJy",
   flux_total_ujy: "uJy",
   mag_ab: "mag (AB)",
-  mag_ab_err: "mag (AB)",
+  mag_ab_err: "mag (AB); formal error from flux_err_ujy, without f_corr",
+  mag_ab_err_corr: "mag (AB); error from flux_err_corr_ujy (f_corr applied), empty when f_corr is not given",
   upper_limit_ujy: "uJy",
   upper_limit_ab: "mag (AB)",
   fwhm_px: "px",
@@ -281,6 +283,20 @@ describe("forcedPhotometry", () => {
       err: null,
       limit: false,
     });
+  });
+
+  it("the magnitude error and the colours carry the f_corr corrected flux error, 1.0857362 x err_corr / flux", () => {
+    const noisy = cell({ flux_jy: 1e-5, flux_err_jy: 1e-6, flux_err_corr_jy: 1.5e-6, mag_ab: 23.9, mag_ab_err: 0.10857 });
+    const bands = [band(0, "g", 0.4808), band(1, "r", 0.6418)];
+    const magnitude = cellMagnitude(noisy, bands[0], "aperture");
+    expect(Math.abs((magnitude.err ?? Number.NaN) - 0.16286)).toBeLessThan(1e-6);
+    const colour = forcedColour(run(bands, [[noisy, noisy]]), 0, 0, 1);
+    expect(Math.abs((colour.err ?? Number.NaN) - 0.23032)).toBeLessThan(1e-6);
+    expect(magCellText(noisy)).toBe(formatWithUncertainty(23.9, 1.0857362047581294 * 0.15));
+    const fromBackend = cell({ ...noisy, mag_ab_err_corr: 0.2 });
+    expect(cellMagnitude(fromBackend, bands[0], "aperture").err).toBe(0.2);
+    expect(magCellText(fromBackend)).toBe(formatWithUncertainty(23.9, 0.2));
+    expect(cellMagnitude(cell({ mag_ab_err: 0.03 }), bands[0], "aperture").err).toBe(0.03);
   });
 
   it("adjacent pairs skip bands without calibration, filter or data", () => {
@@ -419,7 +435,7 @@ describe("forcedPhotometry", () => {
     expect(csv.comments).toContain(`# aperture_weights: ${FORCED_WEIGHTS_NOTE}`);
     expect(csv.comments).toContain(`# flux_error: ${FORCED_ERROR_NOTE}`);
     expect(csv.header).toBe(LONG_HEADER.join(","));
-    expect(LONG_HEADER).toHaveLength(28);
+    expect(LONG_HEADER).toHaveLength(29);
     expect(csv.rows).toHaveLength(4);
     expect(csv.tail).toBe("");
     const column = (name: string) => LONG_HEADER.indexOf(name);
@@ -432,6 +448,12 @@ describe("forcedPhotometry", () => {
     expect(cells[1][column("flux_ujy")]).toBe("2");
     expect(cells[1][column("flux_err_ujy")]).toBe("0.1");
     expect(cells[1][column("flux_err_corr_ujy")]).toBe("");
+    expect(cells[1][column("mag_ab_err")]).toBe("0.054287");
+    expect(cells[1][column("mag_ab_err_corr")]).toBe("");
+    const noisy = run([band(0, "r", 0.6418, { f_corr: 1.5 })], [[cell({ flux_jy: 1e-5, flux_err_jy: 1e-6, flux_err_corr_jy: 1.5e-6, mag_ab_err: 0.10857 })]]);
+    const noisyRow = splitCsv(forcedLongCsv(csvInput(noisy))).rows[0].split(",");
+    expect(noisyRow[column("mag_ab_err")]).toBe("0.10857");
+    expect(Math.abs(Number(noisyRow[column("mag_ab_err_corr")]) - 0.16286)).toBeLessThan(1e-6);
     expect(cells[1][column("mag_ab")]).toBe("23.147425");
     expect(cells[1][column("on_image")]).toBe("true");
     expect(cells[1][column("error")]).toBe("");
@@ -489,7 +511,7 @@ describe("forcedPhotometry", () => {
     );
     const csv = splitCsv(forcedWideCsv(csvInput(result)));
     expect(csv.header).toBe(
-      "id,ra_deg,dec_deg,g_flux_ujy,g_flux_err_ujy,g_mag_ab,g_mag_ab_err,g_upper_limit_ab,g_masked_fraction,r_flux_ujy,r_flux_err_ujy,r_mag_ab,r_mag_ab_err,r_upper_limit_ab,r_masked_fraction,g-r,g-r_err,g-r_limit",
+      "id,ra_deg,dec_deg,g_flux_ujy,g_flux_err_ujy,g_flux_err_corr_ujy,g_mag_ab,g_mag_ab_err,g_mag_ab_err_corr,g_upper_limit_ab,g_masked_fraction,r_flux_ujy,r_flux_err_ujy,r_flux_err_corr_ujy,r_mag_ab,r_mag_ab_err,r_mag_ab_err_corr,r_upper_limit_ab,r_masked_fraction,g-r,g-r_err,g-r_limit",
     );
     expect(csv.comments).toContain("# colours: g-r (aperture)");
     const colours = csv.comments.indexOf("# colours: g-r (aperture)");
@@ -499,10 +521,13 @@ describe("forcedPhotometry", () => {
     expect(csv.comments).toContain("# unit g_flux_ujy: uJy");
     expect(csv.comments).toContain("# unit r_flux_err_ujy: uJy");
     expect(csv.comments).toContain("# unit g_mag_ab: mag (AB)");
-    expect(csv.comments).toContain("# unit g_mag_ab_err: mag (AB)");
+    expect(csv.comments).toContain("# unit g_mag_ab_err: mag (AB); formal error from flux_err_ujy, without f_corr");
+    expect(csv.comments).toContain(
+      "# unit g_mag_ab_err_corr: mag (AB); error from flux_err_corr_ujy (f_corr applied), empty when f_corr is not given",
+    );
     expect(csv.comments).toContain("# unit r_upper_limit_ab: mag (AB)");
     expect(csv.comments).toContain("# unit g-r: mag (AB)");
-    expect(csv.comments).toContain("# unit g-r_err: mag (AB)");
+    expect(csv.comments).toContain("# unit g-r_err: mag (AB); from the magnitude errors with f_corr applied where the band gives it");
     expect(csv.rows).toHaveLength(2);
     const header = csv.header.split(",");
     const first = csv.rows[0].split(",");
@@ -521,7 +546,7 @@ describe("forcedPhotometry", () => {
     const oneBand = splitCsv(forcedWideCsv(csvInput(run([band(0, "r", 0.6418)], []))));
     expect(oneBand.comments).toContain("# colours: none");
     expect(oneBand.header).toBe(
-      "id,ra_deg,dec_deg,r_flux_ujy,r_flux_err_ujy,r_mag_ab,r_mag_ab_err,r_upper_limit_ab,r_masked_fraction",
+      "id,ra_deg,dec_deg,r_flux_ujy,r_flux_err_ujy,r_flux_err_corr_ujy,r_mag_ab,r_mag_ab_err,r_mag_ab_err_corr,r_upper_limit_ab,r_masked_fraction",
     );
     expect(oneBand.rows).toEqual([]);
     expect(oneBand.tail).toBe("");

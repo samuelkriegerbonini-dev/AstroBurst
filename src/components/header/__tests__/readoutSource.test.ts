@@ -222,7 +222,7 @@ describe("WCS readout source", () => {
     const html = wcs();
     expect(html).not.toContain("11.125000");
     expect(html).not.toContain("30.000000");
-    expect(mocks.world).toHaveBeenLastCalledWith("a.fits", [[100, 50]], "galactic");
+    expect(mocks.world).toHaveBeenLastCalledWith("a.fits", [[99.5, 49.5]], "galactic");
     next.resolve({ points: [[66, 77]], frame: "galactic" });
     await vi.advanceTimersByTimeAsync(40);
     expect(mocks.world).toHaveBeenLastCalledWith("a.fits", [[4, 5]], "galactic");

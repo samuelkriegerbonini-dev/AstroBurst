@@ -70,6 +70,7 @@ import { localSmallButtonLines } from "../../../test/panelRules";
 import photometryTablePanelSource from "../PhotometryTablePanel.tsx?raw";
 
 const { default: PhotometryTablePanel } = await import("../PhotometryTablePanel");
+const { default: StaleResultNote } = await import("../StaleResultNote");
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 
@@ -149,6 +150,19 @@ describe("PhotometryTablePanel Saved notice", () => {
   afterEach(() => {
     hooks.mount();
     vi.useRealTimers();
+  });
+
+  it("marks the table as stale after the aperture or the positions change", async () => {
+    const isStale = (tree: ReactNode) => elementsOf(tree).some((el) => el.type === StaleResultNote);
+    await measured();
+    expect(isStale(show())).toBe(false);
+    const aperture = () => elements(show()).find((p) => String(p.title ?? "").startsWith("Aperture radius in"))!;
+    (aperture().onChange as (text: string) => void)("7");
+    expect(isStale(show())).toBe(true);
+    (aperture().onChange as (text: string) => void)("5");
+    expect(isStale(show())).toBe(false);
+    const moved = hooks.render(panel, { filePath: FIRST, overlayKey: null, stars: [{ ...STARS[0], x: 11 }] }) as ReactNode;
+    expect(isStale(moved)).toBe(true);
   });
 
   it("cancels the notice timer when the panel closes", async () => {

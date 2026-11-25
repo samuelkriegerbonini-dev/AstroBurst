@@ -23,6 +23,7 @@ import { focusRailTool } from "./components/dock/railFocus";
 
 import Confetti from "./components/Confetti";
 import ErrorBoundary from "./components/ErrorBoundary";
+import PanelErrorBoundary from "./components/ui/PanelErrorBoundary";
 import { AstroLogo } from "./components/AstroLogo";
 
 import { alreadyInFilesMessage, useFileQueue } from "./hooks/useFileQueue";
@@ -74,6 +75,7 @@ type ViewState = "empty" | "processing" | "complete";
 const MemoizedPreviewPanel = memo(PreviewPanel);
 const ArchiveRoot = lazy(() => import("./components/archive/ArchiveRoot"));
 const ArchiveFooterStatus = lazy(() => import("./components/archive/ArchiveFooterStatus"));
+const WorkspaceDownloads = lazy(() => import("./components/archive/WorkspaceDownloads"));
 const HIDDEN_LAYER: CSSProperties = { visibility: "hidden" };
 const showWorkspace = () => appModeStore.set("workspace");
 const showArchive = () => appModeStore.set("archive");
@@ -435,13 +437,12 @@ export default function App() {
     );
   }, [exportZip, activeFilters, filterMode]);
 
-  const storeVersion = useSyncExternalStore(fileStore.subscribe, fileStore.getVersion);
+  const storeFiles = useSyncExternalStore(fileStore.subscribe, fileStore.getFiles);
   const metaCacheRef = useRef<WeakMap<ProcessedFile, MetadataFile>>(new WeakMap());
-  const metadataFiles = useMemo(
-    () => toMetadataFiles(fileIds, (id) => fileStore.getFile(id), metaCacheRef.current),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fileIds, storeVersion],
-  );
+  const metadataFiles = useMemo(() => {
+    const byId = new Map(storeFiles.map((f) => [f.id, f]));
+    return toMetadataFiles(fileIds, (id) => byId.get(id), metaCacheRef.current);
+  }, [fileIds, storeFiles]);
 
   const comparableX1d = useMemo(() => comparableX1dIds(metadataFiles), [metadataFiles]);
 
@@ -741,7 +742,9 @@ export default function App() {
                                 ),
                               }}
                             >
-                              <MemoizedPreviewPanel tableNote={tableNote} onTableAction={handleTableAction} />
+                              <PanelErrorBoundary name="Preview">
+                                <MemoizedPreviewPanel tableNote={tableNote} onTableAction={handleTableAction} />
+                              </PanelErrorBoundary>
                             </DockShell>
                           </div>
                         </PreviewProvider>
@@ -758,7 +761,17 @@ export default function App() {
                 )}
               </DropZone>
             </div>
-            <AppFooter mode={mode} onModeChange={appModeStore.set} onOpenPalette={openPalette} onOpenShortcuts={openShortcuts}>
+            <AppFooter
+              mode={mode}
+              onModeChange={appModeStore.set}
+              onOpenPalette={openPalette}
+              onOpenShortcuts={openShortcuts}
+              status={mode === "workspace" && archiveMounted ? (
+                <Suspense fallback={null}>
+                  <WorkspaceDownloads />
+                </Suspense>
+              ) : null}
+            >
               {mode === "archive" ? (
                 <Suspense fallback={null}>
                   <ArchiveFooterStatus processing={processing} />

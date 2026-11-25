@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { monoPixelsAction } from "../gpuMonoPixels";
+import { heldPixelsDrawable, heldPixelsSourceKey, monoPixelsAction } from "../gpuMonoPixels";
 
 interface GpuPixels {
   loadedKey: string | null;
@@ -65,5 +65,26 @@ describe("monoPixelsAction", () => {
   it("keeps pixels already loaded for the same key or when there is no key", () => {
     expect(monoPixelsAction(false, "k|b.fits|3", "k|b.fits|3", true)).toBe("keep");
     expect(monoPixelsAction(false, null, "k|b.fits|3", true)).toBe("keep");
+  });
+});
+
+describe("heldPixelsDrawable", () => {
+  const INPUT = { key: heldPixelsSourceKey("C:/data/a.fits", 0), dims: [100, 50] as [number, number] };
+
+  it("draws pixels loaded for the source on screen", () => {
+    expect(heldPixelsDrawable(INPUT, "C:/data/a.fits|0", [100, 50])).toBe(true);
+  });
+
+  it("lets pixels of the previous source stand in only for an image on the same grid", () => {
+    expect(heldPixelsDrawable(INPUT, "C:/out/b.fits|3", [100, 50])).toBe(true);
+    expect(heldPixelsDrawable(INPUT, "C:/out/crop.fits|4", [60, 50])).toBe(false);
+    expect(heldPixelsDrawable(INPUT, "C:/out/rot90.fits|5", [50, 100])).toBe(false);
+    expect(heldPixelsDrawable(INPUT, "C:/out/b.fits|3", null)).toBe(false);
+    expect(heldPixelsDrawable({ ...INPUT, dims: null }, "C:/out/b.fits|3", [100, 50])).toBe(false);
+  });
+
+  it("draws nothing without held pixels or a shown source", () => {
+    expect(heldPixelsDrawable(null, "C:/data/a.fits|0", [100, 50])).toBe(false);
+    expect(heldPixelsDrawable(INPUT, null, [100, 50])).toBe(false);
   });
 });

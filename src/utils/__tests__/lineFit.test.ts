@@ -430,7 +430,7 @@ describe("line-fit results in the viewer", () => {
     const auto = lineFitSummary(result({ components: "auto", n_two_components: 351 }));
     expect(auto).toContain(", 351 two-component");
     expect(lineFitSummary(result({ components: "two", n_two_components: 0 }))).toContain("0 two-component");
-    expect(lineFitSummary(result({ median_chi2_red: null }))).toContain("median χ²_red n/a");
+    expect(lineFitSummary(result({ median_chi2_red: null }))).toContain("median χ²_red --");
   });
 
   it("sigmaCaption and lineFitFrameNote say what the sigma and the velocity frame are", () => {
@@ -541,7 +541,7 @@ describe("lineFitSpaxelRows", () => {
     expect(value(s, "Flux")).toBe("601.5 ± 25.00 MJy/sr km/s");
     expect(value(s, "S/N")).toBe("24.1");
     expect(value(s, "ncomp")).toBe("1");
-    expect(value(s, "ΔBIC")).toBe("n/a");
+    expect(value(s, "ΔBIC")).toBe("--");
     expect(value(s, "Dropped")).toBe("DQ 2 ch, ERR 0 ch");
     expect(value(s, "Fit")).toContain("converged");
   });
@@ -600,9 +600,9 @@ describe("lineFitSpaxelRows", () => {
     expect(value(spaxel(), "Amplitude")).toBe("2.500 ± 0.1000 MJy/sr");
     expect(value(spaxel(), "Continuum")).toBe("linear, 2 ch, level 1.000 MJy/sr, σ(MAD) 0.05000 MJy/sr");
     const constant = spaxel({ continuum: { intercept: 1, slope: 0, x_ref: 2, sigma: null, linear: false, channels: 1 } });
-    expect(value(constant, "Continuum")).toBe("constant, 1 ch, level 1.000 MJy/sr, σ(MAD) n/a");
-    expect(value(spaxel({ continuum: null }), "Continuum")).toBe("n/a");
-    expect(value(spaxel({ single: null }), "Amplitude")).toBe("n/a");
+    expect(value(constant, "Continuum")).toBe("constant, 1 ch, level 1.000 MJy/sr, σ(MAD) --");
+    expect(value(spaxel({ continuum: null }), "Continuum")).toBe("--");
+    expect(value(spaxel({ single: null }), "Amplitude")).toBe("--");
   });
 
   it("leaves the numbers alone when the cube has no unit", () => {
@@ -628,9 +628,9 @@ describe("lineFitSpaxelRows", () => {
     expect(componentRows[1].value).toContain("V 35.5 ± 2.3 km/s");
   });
 
-  it("shows n/a values and a no-fit status when the spaxel was not fitted", () => {
+  it("shows missing values and a no-fit status when the spaxel was not fitted", () => {
     const s = spaxel({ single: null, converged: false, mask: 0, ncomp: 0, chi2: null, chi2_red: null, model: null });
-    expect(value(s, "V")).toBe("n/a");
+    expect(value(s, "V")).toBe("--");
     expect(value(s, "Fit")).toBe("no fit attempted (fewer than 4 usable line samples or no usable continuum sample)");
     const noContinuum = spaxel({ single: null, converged: false, mask: 0, ncomp: 0, continuum: null, model: null, dropped_err: [0, 2] });
     expect(value(noContinuum, "Fit")).toContain("no fit attempted");

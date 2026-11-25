@@ -165,7 +165,7 @@ describe("differentialMag and ensembleFlux", () => {
     expect(ens!.err).toBeCloseTo(Math.sqrt(200), 10);
     const diff = differentialMag(T, ens!);
     expect(diff!.mag).toBeCloseTo(1.5051, 4);
-    const expectedErr = 1.0857 * Math.sqrt((5 / 500) ** 2 + (Math.sqrt(200) / 2000) ** 2);
+    const expectedErr = (2.5 / Math.LN10) * Math.sqrt((5 / 500) ** 2 + (Math.sqrt(200) / 2000) ** 2);
     expect(diff!.err).toBeCloseTo(expectedErr, 10);
   });
 
@@ -734,7 +734,7 @@ describe("light-curve CSV digits and provenance (trust-2)", () => {
       "# flux: target_flux is the sky-subtracted sum over the aperture pixels, ensemble_flux the same sum added over the comparison stars, target_err the error of target_flux, bg_mean the mean sky per pixel; pixel values in BUNIT ADU",
       "# jd_mid: mid-exposure JD as the header gives it, not converted (time scale in time_source)",
       "# bjd_tdb: BJD_TDB at mid-exposure (source: computed)",
-      "# rel_flux: 10^(-0.4 diff_mag), the target over the sum of the comparison stars, not normalised; rel_flux_err = rel_flux * diff_err / 1.0857",
+      "# rel_flux: 10^(-0.4 diff_mag), the target over the sum of the comparison stars, not normalised; rel_flux_err = rel_flux * diff_err / (2.5 / ln(10))",
       "# left_out: why the light-curve view leaves the frame out of its analysis (flagged, by hand, clipped); blank when the frame is used",
       "# unit jd_mid: d",
       "# unit exptime: s",

@@ -34,7 +34,7 @@ import { compositeChainStore } from "../utils/compositeChainStore";
 import { COMPOSITE_RUN_KEY, compositeResultTarget, hasCompositeReset, lastCompositeStep } from "../utils/compositeChain";
 import AdvancedImageViewer from "./viewer/AdvancedImageViewer";
 import { loadGpuPreference, saveGpuPreference } from "../utils/gpuPreference";
-import { monoPixelsAction } from "../utils/gpuMonoPixels";
+import { heldPixelsDrawable, heldPixelsSourceKey, monoPixelsAction } from "../utils/gpuMonoPixels";
 import { pixelSourceVersion, scientificInputRevisionOf } from "../utils/pixelSource";
 import { colorbarUnit } from "../utils/colorbar";
 import { middleEllipsis } from "../utils/filenameDisplay";
@@ -97,8 +97,8 @@ export default function PreviewPanel({ tableNote = null, onTableAction }: { tabl
   const { file } = useFileContext();
   const { isCube, isSpectralCube, isSpectrum, ramp } = useCubeContext();
   const rampIntegration = useRampIntegration();
-  const { rawPixels, rawPixelsLoading, rawPixelsError, loadRawPixels, clearRawPixels,
-          rgbRawPixels, rgbRawPixelsLoading, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
+  const { rawPixels, rawPixelsLoading, rawPixelsError, rawPixelsSource, loadRawPixels, clearRawPixels,
+          rgbRawPixels, rgbRawPixelsLoading, rgbRawPixelsError, loadRgbRawPixels, clearRgbRawPixels } = useRawPixelsContext();
   const { processed, processedVersion, stfPreviewUrl, chain } = useRenderContext();
   const { currentFileKey, setStfPreviewUrl } = useRenderActions();
   const history = useHistoryController();
@@ -175,9 +175,12 @@ export default function PreviewPanel({ tableNote = null, onTableAction }: { tabl
   const metadataLabel = isCompositeView ? "Composite" : displayed.isProcessed ? displayed.label : file?.name;
   const metadataPath = isCompositeView || displayed.previewOnly ? undefined : metadataProductPath ?? file?.path;
   const toggleLoading = isRgbView ? rgbRawPixelsLoading : rawPixelsLoading;
-  const gpuLoadError = useGpu && !isRgbView && !rawPixelsLoading ? rawPixelsError : null;
+  const gpuLoadError = !useGpu || toggleLoading ? null : isRgbView ? rgbRawPixelsError : rawPixelsError;
+  const shownPixelsPath = processedSourcePath ?? filePath;
+  const shownPixelsKey = shownPixelsPath ? heldPixelsSourceKey(shownPixelsPath, sourceVersion) : null;
+  const heldPixelsShown = rawPixels !== null && heldPixelsDrawable(rawPixelsSource, shownPixelsKey, displayed.dimensions);
 
-  const gpuDisplayInput = { hasFile: !!file, rgbView: isRgbView, useGpu, hasRawPixels: rawPixels !== null, previewOnly: displayed.previewOnly, isSpectrum };
+  const gpuDisplayInput = { hasFile: !!file, rgbView: isRgbView, useGpu, hasRawPixels: heldPixelsShown, previewOnly: displayed.previewOnly, isSpectrum };
   const gpuDisplay = gpuDisplayOnScreen(gpuDisplayInput);
   const viewer = previewViewer(gpuDisplayInput);
   const spectrumShown = viewer === "spectrum";
@@ -476,7 +479,7 @@ export default function PreviewPanel({ tableNote = null, onTableAction }: { tabl
     loadError: gpuLoadError,
     reason: gpuReason,
     pngOnlyMono: !isRgbView && displayedPreviewOnly,
-    cpuViewerShown: viewer === "cpu",
+    cpuViewerShown: viewer === "cpu" || (isRgbView && rgbRawPixels === null),
   }), gpuLost && gpuDisplay);
   const gpuToggleBusy = gpuToggle.state === "probing" || gpuToggle.state === "loading";
 
@@ -596,7 +599,7 @@ export default function PreviewPanel({ tableNote = null, onTableAction }: { tabl
             <PreviewTab
               useGpu={useGpu}
               activeBunit={activeBunit}
-              rawPixels={rawPixels}
+              rawPixels={heldPixelsShown ? rawPixels : null}
               rgbRawPixels={rgbRawPixels}
               onCubePixelClick={spectrumClickHandler}
               onBackToFile={handleBackToFile}

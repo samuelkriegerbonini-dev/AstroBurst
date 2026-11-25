@@ -2,7 +2,7 @@ use std::path::Path;
 
 use ndarray::Array2;
 
-use crate::core::cube::lazy::test_support::write_u16_ramp_mef;
+use crate::core::cube::lazy::test_support::{image_hdu, write_bytes, write_u16_ramp_mef};
 use crate::core::ramp::irs2::{Irs2Layout, Irs2Sample};
 use crate::infra::fits::writer::{write_mef_images, HduData, ImageHdu};
 use crate::types::header::HduHeader;
@@ -167,4 +167,156 @@ pub fn write_synthetic_rate(path: &Path, sci: &Array2<f32>, err: &Array2<f32>, d
     let text = path.to_str().unwrap().to_string();
     write_mef_images(&text, Some(&primary), &hdus).unwrap();
     text
+}
+
+pub const UNSIGNED_DQ_BZERO: &str = "2147483648";
+
+fn be_f32(values: impl Iterator<Item = f32>) -> Vec<u8> {
+    values.flat_map(|v| v.to_be_bytes()).collect()
+}
+
+fn be_u32_offset(values: impl Iterator<Item = u32>) -> Vec<u8> {
+    values.flat_map(|v| ((v as i64 - 2_147_483_648) as i32).to_be_bytes()).collect()
+}
+
+pub struct SyntheticRampModel {
+    pub cols: usize,
+    pub rows: usize,
+    pub ngroups: usize,
+    pub nints: usize,
+    pub tgroup_s: f64,
+    pub with_group_dq: bool,
+    pub with_pixel_dq: bool,
+}
+
+pub fn write_synthetic_ramp_model(
+    path: &Path,
+    spec: &SyntheticRampModel,
+    value: impl Fn(usize, usize, usize, usize) -> f32,
+    group_dq: impl Fn(usize, usize, usize, usize) -> u8,
+    pixel_dq: impl Fn(usize, usize) -> u32,
+) -> String {
+    let nints = spec.nints.to_string();
+    let ngroups = spec.ngroups.to_string();
+    let tgroup = format!("{}", spec.tgroup_s);
+    let primary: Vec<(&str, &str)> = vec![
+        ("EXTEND", "T"),
+        ("TELESCOP", "'JWST'"),
+        ("INSTRUME", "'NIRCAM'"),
+        ("DETECTOR", "'NRCA1'"),
+        ("DATAMODL", "'RampModel'"),
+        ("READPATT", "'RAPID'"),
+        ("NINTS", &nints),
+        ("NGROUPS", &ngroups),
+        ("NFRAMES", "1"),
+        ("GROUPGAP", "0"),
+        ("TFRAME", &tgroup),
+        ("TGROUP", &tgroup),
+    ];
+    let mut bytes = image_hdu("SIMPLE", &[], 8, &primary, Vec::new());
+    let mut cells = Vec::with_capacity(spec.nints * spec.ngroups * spec.rows * spec.cols);
+    for i in 0..spec.nints {
+        for g in 0..spec.ngroups {
+            for y in 0..spec.rows {
+                for x in 0..spec.cols {
+                    cells.push((i, g, y, x));
+                }
+            }
+        }
+    }
+    let cube_axes = [spec.cols, spec.rows, spec.ngroups, spec.nints];
+    let sci = be_f32(cells.iter().map(|&(i, g, y, x)| value(i, g, y, x)));
+    bytes.extend(image_hdu("XTENSION", &cube_axes, -32, &[("EXTNAME", "'SCI'"), ("BUNIT", "'DN'")], sci));
+    if spec.with_pixel_dq {
+        let mut plane = Vec::with_capacity(spec.rows * spec.cols);
+        for y in 0..spec.rows {
+            for x in 0..spec.cols {
+                plane.push(pixel_dq(y, x));
+            }
+        }
+        let cards = [("BZERO", UNSIGNED_DQ_BZERO), ("BSCALE", "1"), ("EXTNAME", "'PIXELDQ'")];
+        bytes.extend(image_hdu("XTENSION", &[spec.cols, spec.rows], 32, &cards, be_u32_offset(plane.into_iter())));
+    }
+    if spec.with_group_dq {
+        let flags: Vec<u8> = cells.iter().map(|&(i, g, y, x)| group_dq(i, g, y, x)).collect();
+        bytes.extend(image_hdu("XTENSION", &cube_axes, 8, &[("EXTNAME", "'GROUPDQ'")], flags));
+    }
+    write_bytes(path, &bytes);
+    path.to_str().unwrap().to_string()
+}
+
+pub fn write_synthetic_rateints(
+    path: &Path,
+    cols: usize,
+    rows: usize,
+    planes: usize,
+    primary_cards: &[(&str, &str)],
+    rate: impl Fn(usize, usize, usize) -> f32,
+    dq: impl Fn(usize, usize, usize) -> u32,
+) -> String {
+    let mut primary: Vec<(&str, &str)> = vec![("EXTEND", "T"), ("TELESCOP", "'JWST'"), ("DATAMODL", "'CubeModel'")];
+    primary.extend_from_slice(primary_cards);
+    let mut bytes = image_hdu("SIMPLE", &[], 8, &primary, Vec::new());
+    let mut cells = Vec::with_capacity(planes * rows * cols);
+    for i in 0..planes {
+        for y in 0..rows {
+            for x in 0..cols {
+                cells.push((i, y, x));
+            }
+        }
+    }
+    let axes = [cols, rows, planes];
+    let rate_cards = [("EXTNAME", "'SCI'"), ("BUNIT", "'DN/s'")];
+    bytes.extend(image_hdu("XTENSION", &axes, -32, &rate_cards, be_f32(cells.iter().map(|&(i, y, x)| rate(i, y, x)))));
+    let err_cards = [("EXTNAME", "'ERR'"), ("BUNIT", "'DN/s'")];
+    bytes.extend(image_hdu("XTENSION", &axes, -32, &err_cards, be_f32(cells.iter().map(|_| SYNTHETIC_ERR))));
+    let dq_cards = [("BZERO", UNSIGNED_DQ_BZERO), ("BSCALE", "1"), ("EXTNAME", "'DQ'")];
+    bytes.extend(image_hdu("XTENSION", &axes, 32, &dq_cards, be_u32_offset(cells.iter().map(|&(i, y, x)| dq(i, y, x)))));
+    write_bytes(path, &bytes);
+    path.to_str().unwrap().to_string()
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NoiseRamps {
+    pub ngroups: usize,
+    pub tgroup_s: f64,
+    pub rate_dn_s: f64,
+    pub read_dn: f64,
+    pub gain_e_dn: f64,
+    pub hit_dn: f32,
+    pub hit_from_group: usize,
+    pub seed: u64,
+}
+
+pub const NOISE_RAMP_PEDESTAL_DN: f64 = 10_000.0;
+const NOISE_RAMP_SEED_SPAN: u64 = 4096;
+const NOISE_RAMP_READ_STREAM: u64 = 2048;
+
+impl NoiseRamps {
+    pub fn pixel(&self, index: usize) -> Vec<f32> {
+        let step = self.rate_dn_s * self.tgroup_s;
+        let step_sigma = (step / self.gain_e_dn).max(0.0).sqrt();
+        let base = self.seed * NOISE_RAMP_SEED_SPAN;
+        let mut signal = 0.0f64;
+        (0..self.ngroups)
+            .map(|g| {
+                if g > 0 {
+                    signal += step + step_sigma * deterministic_noise(base + g as u64, index) as f64;
+                }
+                let read = self.read_dn * deterministic_noise(base + NOISE_RAMP_READ_STREAM + g as u64, index) as f64;
+                let hit = if self.hit_dn != 0.0 && g >= self.hit_from_group { self.hit_dn as f64 } else { 0.0 };
+                (NOISE_RAMP_PEDESTAL_DN + signal + read + hit) as f32
+            })
+            .collect()
+    }
+
+    pub fn band(&self, rows: usize, width: usize) -> Vec<Vec<f32>> {
+        let mut band = vec![vec![0f32; rows * width]; self.ngroups];
+        for p in 0..rows * width {
+            for (g, value) in self.pixel(p).into_iter().enumerate() {
+                band[g][p] = value;
+            }
+        }
+        band
+    }
 }

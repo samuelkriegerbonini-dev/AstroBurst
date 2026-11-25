@@ -296,14 +296,14 @@ describe("lineMeasurementRows", () => {
     expect(formatAxisQuantity(0.5, 1e-15)).toBe("0.5000000000");
     expect(formatAxisQuantity(1.02, 0)).toBe("1.02000");
     expect(formatAxisQuantity(1.02, NaN)).toBe("1.02000");
-    expect(formatAxisQuantity(null, 1e-6)).toBe("n/a");
+    expect(formatAxisQuantity(null, 1e-6)).toBe("--");
   });
 
   it("marks unavailable values and drops the velocity and fit rows when absent", () => {
     const rows = lineMeasurementRows(measurement({ velocity: null, fit: null, sigma: null, snr: null }));
     expect(rows.map((r) => r.label)).not.toContain("Gaussian fit");
-    expect(rows.find((r) => r.label === "Sigma (2nd moment)")?.value).toBe("n/a um");
-    expect(rows.find((r) => r.label === "SNR")?.value).toBe("n/a");
+    expect(rows.find((r) => r.label === "Sigma (2nd moment)")?.value).toBe("-- um");
+    expect(rows.find((r) => r.label === "SNR")?.value).toBe("--");
   });
 
   it("formats tiny and huge numbers in exponent form and others with four digits", () => {
@@ -312,8 +312,8 @@ describe("lineMeasurementRows", () => {
     expect(formatQuantity(1234567)).toBe("1.235e+6");
     expect(formatQuantity(1.5)).toBe("1.500");
     expect(formatQuantity(0)).toBe("0.000");
-    expect(formatQuantity(null)).toBe("n/a");
-    expect(formatQuantity(NaN)).toBe("n/a");
+    expect(formatQuantity(null)).toBe("--");
+    expect(formatQuantity(NaN)).toBe("--");
   });
 });
 
@@ -373,7 +373,7 @@ describe("lineMeasurementRows for absorption and undefined widths", () => {
   });
 
   it("prints an undefined equivalent width as unavailable", () => {
-    expect(rowOf(measurement({ equivalent_width: null }), "Equivalent width (absorption > 0, emission < 0)")?.value).toBe("n/a um");
+    expect(rowOf(measurement({ equivalent_width: null }), "Equivalent width (absorption > 0, emission < 0)")?.value).toBe("-- um");
   });
 
   it("names the continuum scatter as the robust sigma it is", () => {
@@ -621,7 +621,7 @@ describe("lineMeasurementRows with errors, physical flux, redshift and display u
 
   it("writes the flux with its error through the shared formatter", () => {
     expect(lineMeasurementRows(measurement())[0].value).toBe(fmt(7.52e-3, 5e-5, { unit: "Jy/beam x um" }));
-    expect(row(measurement({ flux_err: null }), "Flux")).toBe("0.007520 ± n/a Jy/beam x um");
+    expect(row(measurement({ flux_err: null }), "Flux")).toBe("0.007520 ± -- Jy/beam x um");
   });
 
   it("puts the errors beside equivalent width, centroid, sigma and FWHM, and beside their velocities", () => {
@@ -679,7 +679,7 @@ describe("lineMeasurementRows with errors, physical flux, redshift and display u
   it("prints the signal-to-noise as a magnitude with the sense of the line", () => {
     expect(row(measurement(), "SNR")).toBe("150.4 (emission)");
     expect(row(measurement({ flux: -3.76e-3, snr: -21.4 }), "SNR")).toBe("21.4 (absorption)");
-    expect(row(measurement({ snr: null }), "SNR")).toBe("n/a");
+    expect(row(measurement({ snr: null }), "SNR")).toBe("--");
     expect(row(measurement({ flux: 0, snr: 0 }), "SNR")).toBe("0.0");
   });
 

@@ -37,6 +37,9 @@ use crate::types::constants::{
 use crate::types::image::{ImageStats, StfParams};
 use crate::types::stacking::RLConfig;
 
+pub const RES_HISTORY_LINES: &str = "history_lines";
+pub(crate) const STEP_HISTORY: &str = "history";
+
 const CHANNEL_COUNT: u64 = 3;
 const BASE_SUFFIX: &str = "base";
 const MODEL_SUFFIX: &str = "bgmodel";
@@ -285,6 +288,7 @@ struct ChainState {
     generation: Option<u64>,
     base: Option<CompositeSnapshot>,
     steps: [Option<CompositeSnapshot>; 7],
+    history: [Option<String>; 7],
 }
 
 impl ChainState {
@@ -307,6 +311,14 @@ impl ChainState {
             .collect()
     }
 
+    fn history_lines(&self) -> Vec<String> {
+        CHAIN_ORDER
+            .into_iter()
+            .filter(|step| self.steps[*step as usize].is_some())
+            .filter_map(|step| self.history[step as usize].clone())
+            .collect()
+    }
+
     fn clear(&mut self) {
         *self = Self::default();
     }
@@ -316,13 +328,15 @@ impl ChainState {
         self.base = Some(base);
     }
 
-    fn set_step(&mut self, step: ChainStep, state: CompositeSnapshot, generation: u64) {
+    fn set_step(&mut self, step: ChainStep, state: CompositeSnapshot, generation: u64, history: Option<String>) {
         for other in CHAIN_ORDER {
             if other.stage() >= step.stage() {
                 self.steps[other as usize] = None;
+                self.history[other as usize] = None;
             }
         }
         self.steps[step as usize] = Some(state);
+        self.history[step as usize] = history;
         self.generation = Some(generation);
     }
 }
@@ -338,6 +352,19 @@ fn try_lock_chain() -> Option<MutexGuard<'static, ChainState>> {
         Ok(chain) => Some(chain),
         Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
         Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+pub(crate) fn step_history(step: ChainStep, parameters: &Value) -> String {
+    format!("AstroBurst composite {} {}", step.name(), parameters)
+}
+
+pub(crate) fn composite_chain_history() -> Vec<String> {
+    let chain = lock_chain();
+    if chain.is_valid(helpers::composite_generation()) {
+        chain.history_lines()
+    } else {
+        Vec::new()
     }
 }
 
@@ -549,9 +576,11 @@ pub(crate) fn run_chain_step(
     if let Some((base, _)) = captured {
         chain.restart(base);
     }
-    chain.set_step(step, state, generation);
+    let history = extras[STEP_HISTORY].as_str().map(str::to_string);
+    chain.set_step(step, state, generation, history);
 
     let common = json!({
+        RES_HISTORY_LINES: chain.history_lines(),
         RES_PNG_PATH: png_path,
         RES_BASE_PNG_PATH: base_png,
         RES_BASE_DISPLAYED: chain.base.as_ref().map(|base| displayed_tier(base).name()),
@@ -661,11 +690,16 @@ fn background_step(
     let model_png = chain_png_path(output_dir, MODEL_SUFFIX);
     let models = triplet_from([r.model, g.model, b.model]);
     render_linear(&models, auto_display_stf(&models, false), false, &model_png)?;
+    let parameters = match model {
+        BackgroundModel::Polynomial(config) => json!({ "model": BACKGROUND_MODEL_POLYNOMIAL, "config": config }),
+        BackgroundModel::Spline(config) => json!({ "model": BACKGROUND_MODEL_SPLINE, "config": config }),
+    };
     let extras = json!({
         RES_MODEL_PNG_PATH: model_png,
         RES_SAMPLE_COUNT: [r.sample_count, g.sample_count, b.sample_count],
         RES_RMS_RESIDUAL: [r.rms_residual, g.rms_residual, b.rms_residual],
         RES_DBE_REJECTED_COUNT: rejected,
+        STEP_HISTORY: step_history(ChainStep::Background, &parameters),
     });
     Ok(StepOutput { state: linear_state(input, [r.corrected, g.corrected, b.corrected]), extras, blend_base: None })
 }
@@ -707,6 +741,7 @@ fn denoise_step(
     let extras = json!({
         RES_SCALES_PROCESSED: r.scales_processed,
         RES_NOISE_ESTIMATE: [r.noise_estimate, g.noise_estimate, b.noise_estimate],
+        STEP_HISTORY: step_history(ChainStep::Denoise, &json!(config)),
     });
     Ok(StepOutput { state: linear_state(input, [r.denoised, g.denoised, b.denoised]), extras, blend_base: None })
 }
@@ -749,10 +784,13 @@ fn deconv_step(
 ) -> anyhow::Result<StepOutput> {
     let kernel = psf.kernel(|psf_config| estimated_kernel(&key_luminance(&input.key)?, psf_config))?;
     let [r, g, b] = per_channel(key_planes(input), progress, |plane, part| richardson_lucy(plane, &kernel, config, part))?;
+    let mut parameters = json!(config);
+    parameters["psf"] = json!(psf.source());
     let extras = json!({
         RES_ITERATIONS_RUN: [r.iterations_run, g.iterations_run, b.iterations_run],
         RES_CONVERGENCE: [r.convergence, g.convergence, b.convergence],
         RES_PSF_SOURCE: psf.source(),
+        STEP_HISTORY: step_history(ChainStep::Deconv, &parameters),
     });
     Ok(StepOutput { state: linear_state(input, [r.image, g.image, b.image]), extras, blend_base: None })
 }
@@ -843,10 +881,18 @@ fn pixelmath_step(
         DisplayedTier::Toned => toned_state(input, evaluated.results),
     };
     let [stats_r, stats_g, stats_b] = evaluated.stats;
+    let parameters = json!({
+        "expression": expression,
+        "slots": slots,
+        "truncate": opts.truncate,
+        "rescale": opts.rescale,
+        "masked": mask.is_some(),
+    });
     let extras = json!({
         RES_STATS: { RES_R: stats_r, RES_G: stats_g, RES_B: stats_b },
         RES_NON_FINITE_COUNT: evaluated.non_finite,
         RES_WARNINGS: evaluated.warnings,
+        STEP_HISTORY: step_history(ChainStep::PixelMath, &parameters),
     });
     Ok(StepOutput { state, extras, blend_base: None })
 }
@@ -907,6 +953,7 @@ pub async fn composite_chain_state_cmd() -> Result<Value, String> {
             RES_LIVE_GENERATION: live,
             RES_LIVE_DISPLAYED: live_displayed,
             RES_STEPS: chain.step_names(),
+            RES_HISTORY_LINES: chain.history_lines(),
         }))
     })
 }
@@ -1961,6 +2008,40 @@ mod tests {
         let expected = k.each_ref().map(|p| richardson_lucy(p, &generate_gaussian_psf(5, 1.0), &config, None).unwrap().image);
         assert_eq!(key_gaussian, expected, "a Gaussian PSF must ignore the provided kernel");
         assert_eq!(steps(&state), vec!["deconv"]);
+    }
+
+    fn history_lines(value: &Value) -> Vec<String> {
+        serde_json::from_value(value["history_lines"].clone()).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn chain_steps_report_their_parameters_as_history_lines() {
+        let _guard = helpers::composite_test_lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        install_composite(&planes());
+        let call = ChainCall { output_dir: out_dir(&dir), chain_input: "base".into(), display_stf: Some(display_stf(true)), mask: None };
+        let wavelet = WaveletConfig { num_scales: 2, thresholds: vec![4.0, 3.0], linear_denoise: true, layer_bias: None };
+        let denoised = run_chain_step(ChainStep::Denoise, &call, |input, _| denoise_step(input, &wavelet, [None; 3]));
+        let config = RLConfig { iterations: 3, ..RLConfig::default() };
+        let gaussian = DeconvPsf::choose(Some(false), None, 5, 1.0, None, None).unwrap();
+        let chained = ChainCall { chain_input: "denoise".into(), ..call };
+        let deconvolved = run_chain_step(ChainStep::Deconv, &chained, |input, _| deconv_step(input, &gaussian, &config, [None; 3]));
+        let state_with_steps = state().await;
+        let from_export = composite_chain_history();
+        composite_chain_reset_cmd().await.unwrap();
+        let state_after_reset = state().await;
+        helpers::clear_composite();
+
+        let denoise_lines = history_lines(&denoised.unwrap());
+        assert_eq!(denoise_lines.len(), 1, "{denoise_lines:?}");
+        assert!(denoise_lines[0].contains("denoise") && denoise_lines[0].contains("\"thresholds\":[4.0,3.0]"), "{denoise_lines:?}");
+        let lines = history_lines(&deconvolved.unwrap());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].contains("deconv") && lines[1].contains("\"iterations\":3"), "{lines:?}");
+        assert!(lines[1].contains("gaussian"), "{lines:?}");
+        assert_eq!(history_lines(&state_with_steps), lines);
+        assert_eq!(from_export, lines);
+        assert!(history_lines(&state_after_reset).is_empty());
     }
 
     #[tokio::test]

@@ -277,7 +277,7 @@ function DqControlsInner() {
     : dqMaskError
       ? `DQ overlay failed: ${dqMaskError}`
       : overlay.enabled
-        ? "DQ overlay shown — click to hide"
+        ? "DQ overlay shown; click to hide"
         : "Show flagged DQ pixels over the image";
   const pending = dqMaskLoading || (!hasDq && flagTableLoading);
 

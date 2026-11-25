@@ -6,6 +6,7 @@ use crate::core::alignment::triangles::{self, StarPair, TriangleParams};
 use crate::core::analysis::star_detection::detect_stars;
 use crate::core::imaging::sampling::bicubic_sample;
 use crate::math::median::exact_median_f64;
+use crate::types::stacking::StarFit;
 
 const MIN_MATCHES_AFFINE: usize = 6;
 const MIN_MATCHES_RIGID: usize = 4;
@@ -211,6 +212,10 @@ impl AffineTransform {
         Self { a: 1.0, b: 0.0, tx, c: 0.0, d: 1.0, ty }
     }
 
+    pub fn terms(&self) -> [f64; 6] {
+        [self.a, self.b, self.tx, self.c, self.d, self.ty]
+    }
+
     #[inline(always)]
     pub fn map(&self, x: f64, y: f64) -> (f64, f64) {
         (
@@ -242,6 +247,16 @@ pub struct AffineAlignResult {
     pub method: AffineAlignMethod,
     pub confidence: f64,
     pub rejection: Option<String>,
+}
+
+impl AffineAlignResult {
+    pub fn star_fit(&self) -> Option<StarFit> {
+        (self.matched_stars > 0).then_some(StarFit {
+            matched_stars: self.matched_stars,
+            inliers: self.inliers,
+            residual_px: self.residual_px,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

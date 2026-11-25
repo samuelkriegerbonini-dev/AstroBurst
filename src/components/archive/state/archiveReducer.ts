@@ -87,6 +87,13 @@ export interface Banner {
   text: string;
   retry: BannerRetry;
   allLevels?: boolean;
+  previous?: string;
+}
+
+export interface ShownRun {
+  text: string;
+  kind: QueryKind;
+  name: string | null;
 }
 
 interface StoredBanner extends Banner {
@@ -228,6 +235,8 @@ export interface ArchiveState {
   thumbBannerHidden: boolean;
   thumbRefs: Record<string, ThumbRef>;
   resultsQuery: MastQuery | null;
+  shownRun: ShownRun | null;
+  resultsStale: boolean;
   sort: TableSort;
   tableThumbs: boolean;
 }
@@ -372,6 +381,8 @@ export function createInitialState(form: Partial<ArchiveForm> = {}): ArchiveStat
     thumbBannerHidden: false,
     thumbRefs: {},
     resultsQuery: null,
+    shownRun: null,
+    resultsStale: false,
     sort: LOCAL_ORDER,
     tableThumbs: false,
   };
@@ -574,10 +585,22 @@ function thumbPauseBanner(s: ArchiveState, now: number): Banner | null {
   return { kind: "rate-limited", text: rateLimitText("thumbs", (q.pausedUntil - now) / 1000, q.status), retry: "resume" };
 }
 
+export function previousResultsText(label: string): string {
+  return `Showing the previous results for ${label}.`;
+}
+
+function withPrevious(text: string, previous: string | undefined): string {
+  return previous ? `${text} ${previousResultsText(previous)}` : text;
+}
+
 function storedBanner(b: StoredBanner, now: number): Banner | null {
-  if (b.until === null) return b.allLevels ? { kind: b.kind, text: b.text, retry: b.retry, allLevels: true } : { kind: b.kind, text: b.text, retry: b.retry };
+  const extra = b.previous ? { previous: b.previous } : {};
+  if (b.until === null) {
+    const text = withPrevious(b.text, b.previous);
+    return b.allLevels ? { kind: b.kind, text, retry: b.retry, allLevels: true, ...extra } : { kind: b.kind, text, retry: b.retry, ...extra };
+  }
   if (now >= b.until) return null;
-  return { kind: b.kind, text: rateLimitText("search", (b.until - now) / 1000, b.status), retry: b.retry };
+  return { kind: b.kind, text: withPrevious(rateLimitText("search", (b.until - now) / 1000, b.status), b.previous), retry: b.retry, ...extra };
 }
 
 export function visibleBanner(s: ArchiveState, now: number): Banner | null {
@@ -625,7 +648,7 @@ function orderOf(query: MastQuery | null, page: MastSearchPage): TableSort {
 
 function notResolvedState(s: ArchiveState, name: string, elapsedMs: number): ArchiveState {
   return announce(
-    { ...s, ...resetForResults(s), run: null, results: null, resultsQuery: null, resolved: null, error: null, selectedId: null, selectedKey: null, notResolved: { name, elapsedMs } },
+    { ...s, ...resetForResults(s), run: null, results: null, resultsQuery: null, shownRun: null, resultsStale: false, resolved: null, error: null, selectedId: null, selectedKey: null, notResolved: { name, elapsedMs } },
     "Name not found",
   );
 }
@@ -645,6 +668,8 @@ function onPageLoaded(s: ArchiveState, a: Extract<ArchiveAction, { type: "pageLo
       run: null,
       results,
       resultsQuery: s.run.query,
+      shownRun: { text: s.run.text, kind: s.run.kind, name: s.run.name },
+      resultsStale: false,
       sort: orderOf(s.run.query, a.page),
       resolved: s.run.resolved,
       notResolved: null,
@@ -661,8 +686,20 @@ function onPageLoaded(s: ArchiveState, a: Extract<ArchiveAction, { type: "pageLo
   return { ...s, results, loadingMore: null };
 }
 
+function sameQuery(a: MastQuery, b: MastQuery): boolean {
+  return JSON.stringify({ ...a, offset: 0, limit: 0 }) === JSON.stringify({ ...b, offset: 0, limit: 0 });
+}
+
+function previousShown(s: ArchiveState, run: SearchRun): string | undefined {
+  const shown = s.shownRun;
+  if (!shown || !s.results || s.results.rows.length === 0) return undefined;
+  const differs = run.text !== shown.text || (run.query !== null && s.resultsQuery !== null && !sameQuery(run.query, s.resultsQuery));
+  return differs ? shown.text || undefined : undefined;
+}
+
 function onSearchFailed(s: ArchiveState, a: Extract<ArchiveAction, { type: "searchFailed" }>): ArchiveState {
   if (!s.run || s.run.generation !== a.generation) return s;
+  const previous = previousShown(s, s.run);
   const base: ArchiveState = { ...s, run: null };
   const hasResults = !!s.results && s.results.rows.length > 0;
   const levelSearch = isLevelSearch(s.form, s.presets);
@@ -671,7 +708,7 @@ function onSearchFailed(s: ArchiveState, a: Extract<ArchiveAction, { type: "sear
     case "silent":
       return base;
     case "blocking":
-      return announce({ ...base, error: a.error, results: null, resultsQuery: null, notResolved: null, selectedId: null, selectedKey: null }, view.title ?? view.text);
+      return announce({ ...base, error: a.error, results: null, resultsQuery: null, shownRun: null, resultsStale: false, notResolved: null, selectedId: null, selectedKey: null }, view.title ?? view.text);
     case "inline":
       return announce({ ...base, queryError: { text: view.text, field: view.field ?? "query" } }, view.text);
     case "unavailable": {
@@ -679,13 +716,16 @@ function onSearchFailed(s: ArchiveState, a: Extract<ArchiveAction, { type: "sear
       return announce({ ...base, unavailable }, view.text);
     }
     case "roman":
+      if (!tokenMission(s, a.error)) return unauthorizedBanner(base, a.error, "search", previous);
       return onRomanFailure(base, a.error);
     default: {
       const kind = view.bannerKind ?? "server";
       const rateLimited = a.error.code === "mast_rate_limited";
       const until = rateLimited ? a.at + (a.error.context.retryAfterSec ?? 10) * 1000 : null;
-      const banner: Banner = levelSearch && a.error.code === "mast_timeout" ? { kind, text: view.text, retry: "search", allLevels: true } : { kind, text: view.text, retry: "search" };
-      return announce(raise(base, banner, until, a.error.context.status ?? null), view.text);
+      const plain: Banner = levelSearch && a.error.code === "mast_timeout" ? { kind, text: view.text, retry: "search", allLevels: true } : { kind, text: view.text, retry: "search" };
+      const banner: Banner = previous ? { ...plain, previous } : plain;
+      const stale: ArchiveState = previous ? { ...base, resultsStale: true } : base;
+      return announce(raise(stale, banner, until, a.error.context.status ?? null), withPrevious(view.text, previous));
     }
   }
 }
@@ -695,10 +735,27 @@ function onPageFailed(s: ArchiveState, a: Extract<ArchiveAction, { type: "pageFa
   const base: ArchiveState = { ...s, loadingMore: null };
   const view = errorView(a.error, { surface: "search", hasResults: true, missionLabel: missionLabel(s), now: new Date(a.at) });
   if (view.placement === "silent") return base;
-  if (view.placement === "roman") return onRomanFailure(base, a.error);
+  if (view.placement === "roman") return tokenMission(s, a.error) ? onRomanFailure(base, a.error) : unauthorizedBanner(base, a.error, "page");
   const kind = view.bannerKind ?? "server";
   const until = a.error.code === "mast_rate_limited" ? a.at + (a.error.context.retryAfterSec ?? 10) * 1000 : null;
   return announce(raise(base, { kind, text: view.text, retry: "page" }, until, a.error.context.status ?? null), view.text);
+}
+
+function tokenMission(s: ArchiveState, error: MastError): boolean {
+  const id = error.context.mission ?? s.form.mission;
+  if (error.code === "mast_token_rejected") return true;
+  return s.missions.find((m) => m.id === id)?.availability === "token" || id === "roman" || id === "roman_cgi";
+}
+
+export function unauthorizedText(label: string, status: number | null): string {
+  return `MAST refused the ${label} request (HTTP ${status ?? 401}): this data needs authorization AstroBurst does not have.`;
+}
+
+function unauthorizedBanner(s: ArchiveState, error: MastError, retry: BannerRetry, previous?: string): ArchiveState {
+  const label = missionLabelOf(s, error.context.mission ?? s.form.mission);
+  const text = unauthorizedText(label, error.context.status ?? null);
+  const banner: Banner = previous ? { kind: "server", text, retry, previous } : { kind: "server", text, retry };
+  return announce(raise(previous ? { ...s, resultsStale: true } : s, banner, null, error.context.status ?? null), withPrevious(text, previous));
 }
 
 function onRomanFailure(s: ArchiveState, error: MastError): ArchiveState {

@@ -9,15 +9,18 @@ use crate::cmd::common::{blocking_cmd, invalidate_written, resolve_output_dir, s
 use crate::cmd::science_provenance::{publish_source_manifest, VerifiedSource};
 use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
 use crate::core::cube::lazy::LazyCube;
-use crate::core::ramp::compare::{compare_with_rate, comparison_images, read_official_rate, read_qslope, OFFICIAL_EXCLUDE_BITS, QUICK_EXCLUDE_BITS, RATIO_MIN_RATE};
+use crate::core::ramp::compare::{
+    compare_with_rate, comparison_images, quick_integration, read_official_rate_for, read_qslope, OFFICIAL_EXCLUDE_BITS, QUICK_EXCLUDE_BITS, RATIO_MIN_RATE,
+};
 use crate::core::imaging::push_history;
+use crate::core::metadata::photcal::card_text;
+use crate::core::ramp::group_dq::RampDq;
 use crate::core::ramp::irs2::{Irs2Layout, Irs2Sample};
 use crate::core::ramp::product::{
-    qslope_output_path, qslope_primary_header, sibling_rate_path, write_qslope, CARD_ABPROC, CARD_BUNIT, QSLOPE_SUFFIX,
+    noise_extname, qslope_output_path, qslope_primary_header, sibling_rate_path, write_qslope, CARD_ABPROC, CARD_BUNIT, QSLOPE_SUFFIX,
 };
 use crate::core::ramp::quick_slope::{
-    band_scale, fit_pixel, plan_slope, quick_slope, reference_offsets, science_rows_of_band, slope_bands, QuickSlopeParams,
-    RefCorrection, ReferenceOffsets, ERR_TGROUP_MISSING,
+    fit_pixel_with_group_dq, plan_slope, prepare_band, quick_slope, slope_bands, QuickSlopeParams, RefCorrection, ERR_TGROUP_MISSING,
 };
 use crate::infra::fits::reader::read_primary_header;
 use crate::infra::fits::writer::filter_header;
@@ -66,6 +69,12 @@ const KEY_QSLOPE_PATH: &str = "qslope_path";
 const KEY_RATE_PATH: &str = "rate_path";
 const KEY_RATIO_PNG_PATH: &str = "ratio_png_path";
 const KEY_RATIO_FITS_PATH: &str = "ratio_fits_path";
+const KEY_NOISE_MODEL: &str = "noise_model";
+const KEY_NOISE_EXTNAME: &str = "noise_extname";
+const KEY_DQ_SOURCE: &str = "dq_source";
+const KEY_EXPOSURE_INTEGRATION: &str = "exposure_integration";
+const KEY_GROUP_DQ: &str = "group_dq";
+const KEY_PIXEL_DQ: &str = "pixel_dq";
 
 fn deserialize_some<'de, T, D>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
 where
@@ -85,6 +94,7 @@ pub struct QuickSlopeParamsInput {
     pub ref_correction: Option<RefCorrection>,
     #[serde(deserialize_with = "deserialize_some")]
     pub ref_window_rows: Option<Option<usize>>,
+    pub gain_e_per_dn: Option<f32>,
 }
 
 impl QuickSlopeParamsInput {
@@ -97,6 +107,7 @@ impl QuickSlopeParamsInput {
             min_groups_ols: self.min_groups_ols.unwrap_or(defaults.min_groups_ols),
             ref_correction: self.ref_correction.unwrap_or(defaults.ref_correction),
             ref_window_rows: self.ref_window_rows.unwrap_or(defaults.ref_window_rows),
+            gain_e_per_dn: self.gain_e_per_dn.or(defaults.gain_e_per_dn),
         }
     }
 }
@@ -106,10 +117,7 @@ fn file_name(path: &str) -> String {
 }
 
 fn detector_card(primary: &HduHeader) -> Option<String> {
-    primary
-        .get("DETECTOR")
-        .map(|d| d.trim().trim_matches('\'').trim().to_string())
-        .filter(|d| !d.is_empty())
+    card_text(primary, "DETECTOR")
 }
 
 fn with_extension(path: &str, extension: &str) -> String {
@@ -180,8 +188,9 @@ fn quick_slope_files_from_source(
     invalidate_written(&fits_path);
     written?;
     save_auto_stf_preview_png(&product.sci, &png_path)?;
+    let exposure_integration = info.intstart.map(|first| first + integration);
     let provenance_path = publish_source_manifest(&out_dir, "quick_slope", &[("ramp", &source.identity)],
-        json!({ "integration": integration, "requested": params, "tgroup_s": product.tgroup_s, "tgroup_source": info.tgroup_source, "warnings": product.warnings }),
+        json!({ "integration": integration, "exposure_integration": exposure_integration, "requested": params, "tgroup_s": product.tgroup_s, "tgroup_source": info.tgroup_source, "band_scales_dn": product.band_scales_dn, "noise_model": product.noise_model, "dq_source": product.dq_source, "warnings": product.warnings }),
         json!({ "fits_path": fits_path, "png_path": png_path }), &cancelled)?;
     let _ = run_dir.keep();
     let rate_sibling = sibling_rate_path(&ImageRef::parse(path).path);
@@ -208,6 +217,10 @@ fn quick_slope_files_from_source(
         KEY_COUNTS: product.counts,
         KEY_RATE_SIBLING: rate_sibling,
         KEY_WARNINGS: product.warnings,
+        KEY_NOISE_MODEL: product.noise_model,
+        KEY_NOISE_EXTNAME: noise_extname(product.noise_model),
+        KEY_DQ_SOURCE: product.dq_source,
+        KEY_EXPOSURE_INTEGRATION: exposure_integration,
         RES_ELAPSED_MS: started.elapsed().as_millis() as u64,
     }))
 }
@@ -237,21 +250,19 @@ pub(crate) fn pixel_fit_json(path: &str, x: usize, y: usize, integration: usize,
         .into_iter()
         .find(|band| band.contains(&y))
         .with_context(|| format!("row {y} belongs to no slope band"))?;
-    let z0 = integration * info.ngroups;
-    let groups = cube.decode_row_band_batch(z0, z0 + info.ngroups, band.start, band.len())?;
-    let science_rows = science_rows_of_band(plan.layout.as_ref(), &band);
-    let offsets = match (&plan.layout, plan.apply_correction) {
-        (Some(layout), true) => reference_offsets(&groups, width, band.clone(), layout, params.ref_window_rows)?,
-        _ => ReferenceOffsets::zero(info.ngroups, width),
-    };
-    let scale = band_scale(&groups, width, band.clone(), &science_rows, &offsets, params);
+    let ramp_dq = RampDq::open(&cube, &info)?;
+    let prepared = prepare_band(&cube, ramp_dq.as_ref(), &info, &plan, params, integration, &band)?;
+    let scale = prepared.scale;
     let r = y - band.start;
-    let raw: Vec<f32> = groups.iter().map(|plane| plane[r * width + x]).collect();
-    let ref_offsets: Vec<f32> = (0..info.ngroups).map(|g| offsets.get(r, g, x)).collect();
+    let raw: Vec<f32> = prepared.groups.iter().map(|plane| plane[r * width + x]).collect();
+    let ref_offsets: Vec<f32> = (0..info.ngroups).map(|g| prepared.offsets.get(r, g, x)).collect();
     let corrected: Vec<f32> = raw.iter().zip(&ref_offsets).map(|(v, o)| v - o).collect();
+    let group_dq = prepared.group_dq_at(r, x, width);
+    let pixel_dq = ramp_dq.as_ref().map(|dq| dq.pixel_bits(y, x));
     let mut diffs = Vec::new();
     let mut flagged = Vec::new();
-    let fit = fit_pixel(&raw, &corrected, tgroup_s, scale, params, &mut diffs, &mut flagged);
+    let mut fit = fit_pixel_with_group_dq(&raw, &corrected, group_dq.as_deref(), tgroup_s, scale, params, &mut diffs, &mut flagged);
+    fit.dq |= pixel_dq.unwrap_or(0);
     let group_times_s: Vec<f64> = (0..info.ngroups).map(|g| g as f64 * tgroup_s).collect();
     Ok(json!({
         KEY_X: x,
@@ -266,6 +277,9 @@ pub(crate) fn pixel_fit_json(path: &str, x: usize, y: usize, integration: usize,
         KEY_FLAGGED_DIFFS: flagged,
         KEY_AMPLIFIER: amplifier,
         KEY_SCIENCE_ROW: science_row,
+        KEY_NOISE_MODEL: params.noise_model(),
+        KEY_GROUP_DQ: group_dq,
+        KEY_PIXEL_DQ: pixel_dq,
     }))
 }
 
@@ -311,7 +325,7 @@ fn compare_rate_files_from_sources(
         }
     }
     let quick = read_qslope(&quick_source.readable)?;
-    let official = read_official_rate(&official_source.readable)?;
+    let official = read_official_rate_for(&official_source.readable, quick_integration(&qslope_primary).as_ref())?;
     let layout = Irs2Layout::from_product_header(&qslope_primary)?;
     let science_rows = match (uncal_rows, &layout) {
         (None, _) => None,
@@ -349,6 +363,9 @@ fn compare_rate_files_from_sources(
     push_history(&mut header, &format!("Quick slope input: {qslope_path}"));
     push_history(&mut header, &format!("Official rate input: {rate_path}"));
     push_history(&mut header, "Only finite pairs with quick DO_NOT_USE clear and official DQ zero; pixels outside selected science rows are NaN");
+    if let Some(plane) = official.plane {
+        push_history(&mut header, &format!("Official rate: integration {} of the rateints stack (plane {plane}, 0-based)", plane + 1));
+    }
     for warning in &comparison.warnings { push_history(&mut header, warning); }
     write_derived_fits(&ratio_fits_path, &images.ratio, Some(&header))?;
     save_auto_stf_preview_png(&images.ratio, &ratio_png_path)?;
@@ -367,7 +384,7 @@ fn compare_rate_files_from_sources(
     object.insert("difference_png_path".into(), json!(difference_png_path));
     object.insert("difference_fits_path".into(), json!(difference_fits_path));
     let provenance_path = publish_source_manifest(&out_dir, "compare_rate", &[("quick_slope", &quick_source.identity), ("official_rate", &official_source.identity)],
-        json!({ "uncal_rows": uncal_rows, "science_rows": science_rows, "quick_exclude_bits": QUICK_EXCLUDE_BITS, "official_exclude_bits": OFFICIAL_EXCLUDE_BITS, "ratio_min_abs_rate": RATIO_MIN_RATE, "warnings": comparison.warnings }),
+        json!({ "uncal_rows": uncal_rows, "science_rows": science_rows, "quick_exclude_bits": QUICK_EXCLUDE_BITS, "official_exclude_bits": OFFICIAL_EXCLUDE_BITS, "ratio_min_abs_rate": RATIO_MIN_RATE, "rate_plane": official.plane, "warnings": comparison.warnings }),
         json!({ "ratio_fits_path": ratio_fits_path, "ratio_png_path": ratio_png_path, "difference_fits_path": difference_fits_path, "difference_png_path": difference_png_path }), &|| false)?;
     object.insert("provenance_path".into(), json!(provenance_path));
     object.insert(RES_ELAPSED_MS.to_string(), json!(started.elapsed().as_millis() as u64));
@@ -417,10 +434,14 @@ mod tests {
     use super::*;
     use crate::core::ramp::compare::read_qslope;
     use crate::core::ramp::irs2::IRS2_ALREADY_STRIPPED_NOTE;
+    use crate::core::cube::lazy::test_support::write_u16_ramp_mef;
+    use crate::core::ramp::quick_slope::{DQ_DO_NOT_USE, DQ_JUMP_DET, DQ_SATURATED};
     use crate::core::ramp::test_support::{
-        irs2_synthetic_value, irs2_truth_slope, owner_like_irs2, truth_rate_planes, write_synthetic_rate, write_synthetic_uncal,
-        SyntheticUncal, SYNTHETIC_ERR, SYNTHETIC_PEDESTAL_DN, SYNTHETIC_TGROUP_S,
+        irs2_synthetic_value, irs2_truth_slope, owner_like_irs2, truth_rate_planes, write_synthetic_ramp_model, write_synthetic_rate,
+        write_synthetic_rateints, write_synthetic_uncal, SyntheticRampModel, SyntheticUncal, SYNTHETIC_ERR, SYNTHETIC_PEDESTAL_DN,
+        SYNTHETIC_TGROUP_S,
     };
+    use crate::infra::fits::reader::list_extensions;
 
     const NRS1_NAME: &str = "jw01266005001_02103_00001_nrs1_uncal.fits";
     const NRS2_NAME: &str = "jw01266005001_02103_00001_nrs2_uncal.fits";
@@ -532,6 +553,7 @@ mod tests {
         let expected = [
             "fits_path", "png_path", "dimensions", "integration", "nints", "ngroups", "tgroup_s", "tgroup_source", "detector", "readpatt",
             "ref_corrected", "stripped", "params", "band_scales_dn", "counts", "rate_sibling", "warnings", "elapsed_ms", "provenance_path",
+            "noise_model", "noise_extname", "dq_source", "exposure_integration",
         ];
         assert_eq!(sorted_keys(&result), sorted(&expected));
         assert!(result["rate_sibling"].is_null());
@@ -631,6 +653,7 @@ mod tests {
             "detector", "good_pixels", "quick_flagged_in_good", "bins", "amp_bins", "zero_shift", "jump", "saturated", "saturated_rule",
             "saturated_any_group", "rel_hist", "delta_hist", "science_rows", "qslope_path", "rate_path", "ratio_png_path", "ratio_fits_path",
             "elapsed_ms", "difference_metrics", "quick_exclude_bits", "official_exclude_bits", "ratio_min_abs_rate", "warnings", "difference_png_path", "difference_fits_path", "provenance_path",
+            "rate_plane",
         ];
         assert_eq!(sorted_keys(&windowed), sorted(&expected));
         assert_eq!(windowed["science_rows"], json!([1040, 1200]));
@@ -747,7 +770,7 @@ mod tests {
             let fit = pixel_fit_json(&uncal, x, y, 0, &params).unwrap();
             let expected = [
                 "x", "y", "integration", "group_times_s", "raw", "corrected", "ref_offsets", "band_scale_dn", "fit", "flagged_diffs", "amplifier",
-                "science_row",
+                "science_row", "noise_model", "group_dq", "pixel_dq",
             ];
             assert_eq!(sorted_keys(&fit), sorted(&expected));
             let science_row = layout.science_row_of(y).unwrap();
@@ -774,6 +797,225 @@ mod tests {
         let uncorrected = pixel_fit_json(&uncal, 3, 700, 0, &off).unwrap();
         assert!(uncorrected["ref_offsets"].is_null());
         assert_eq!(uncorrected["raw"], uncorrected["corrected"]);
+    }
+
+    const MODEL_SATURATED: (usize, usize) = (1, 1);
+    const MODEL_JUMP: (usize, usize) = (2, 3);
+    const MODEL_EDGE_GROUPS: (usize, usize) = (0, 4);
+    const MODEL_DEAD: (usize, usize) = (3, 5);
+    const MODEL_DEAD_BITS: u32 = 1 | 1024;
+    const MODEL_TGROUP_S: f64 = 10.0;
+
+    fn ramp_model_value(_i: usize, g: usize, y: usize, x: usize) -> f32 {
+        let base = 100.0 + 50.0 * g as f32;
+        match (y, x) {
+            MODEL_SATURATED if g < 4 => 1000.0 + 5000.0 * g as f32,
+            MODEL_SATURATED => 50_000.0,
+            MODEL_JUMP if g >= 6 => base + 12.0,
+            MODEL_EDGE_GROUPS if g == 0 => 30_000.0,
+            MODEL_EDGE_GROUPS if g == 9 => 5.0,
+            _ => base,
+        }
+    }
+
+    fn ramp_model_group_dq(_i: usize, g: usize, y: usize, x: usize) -> u8 {
+        match (y, x) {
+            MODEL_SATURATED if g >= 4 => 2,
+            MODEL_JUMP if g == 6 => 4,
+            MODEL_EDGE_GROUPS if g == 0 || g == 9 => 1,
+            _ => 0,
+        }
+    }
+
+    fn ramp_model_pixel_dq(y: usize, x: usize) -> u32 {
+        if (y, x) == MODEL_DEAD { MODEL_DEAD_BITS } else { 0 }
+    }
+
+    fn ramp_model_spec(with_group_dq: bool, with_pixel_dq: bool) -> SyntheticRampModel {
+        SyntheticRampModel { cols: 6, rows: 4, ngroups: 10, nints: 1, tgroup_s: MODEL_TGROUP_S, with_group_dq, with_pixel_dq }
+    }
+
+    #[test]
+    fn a_ramp_model_uses_groupdq_and_pixeldq_in_place_of_the_raw_threshold() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let ramp = write_synthetic_ramp_model(&data.path().join("jw_nrca1_ramp.fits"), &ramp_model_spec(true, true), ramp_model_value, ramp_model_group_dq, ramp_model_pixel_dq);
+        let result = quick_slope_files(&ramp, &out_dir(&out, "products"), 0, &QuickSlopeParams::default(), None).unwrap();
+        let planes = read_qslope(result["fits_path"].as_str().unwrap()).unwrap();
+        let at = |pixel: (usize, usize)| (planes.sci[[pixel.0, pixel.1]], planes.ngood[[pixel.0, pixel.1]], planes.dq[[pixel.0, pixel.1]]);
+        let (slope, ngood, dq) = at(MODEL_SATURATED);
+        assert!((slope - 500.0).abs() < 1e-3, "the four groups before GROUPDQ SATURATED give 500 DN/s, got {slope}");
+        assert_eq!((ngood, dq), (4, DQ_SATURATED));
+        let (slope, ngood, dq) = at(MODEL_JUMP);
+        assert!((slope - 5.0).abs() < 1e-4, "the difference flagged JUMP_DET in GROUPDQ is left out, got {slope}");
+        assert_eq!((ngood, dq), (9, DQ_JUMP_DET));
+        let (slope, ngood, dq) = at(MODEL_EDGE_GROUPS);
+        assert!((slope - 5.0).abs() < 1e-4, "the DO_NOT_USE first and last groups are left out, got {slope}");
+        assert_eq!((ngood, dq), (8, 0));
+        let (slope, ngood, dq) = at(MODEL_DEAD);
+        assert!((slope - 5.0).abs() < 1e-4, "{slope}");
+        assert_eq!((ngood, dq), (10, MODEL_DEAD_BITS), "PIXELDQ is carried into the product DQ");
+        let (slope, ngood, dq) = at((0, 0));
+        assert!((slope - 5.0).abs() < 1e-4, "{slope}");
+        assert_eq!((ngood, dq), (10, 0));
+        assert_eq!(result["dq_source"], json!("groupdq"));
+        assert_eq!(result["counts"], json!({ "saturated": 1, "jump_det": 1, "do_not_use": 1 }));
+        let warnings = result["warnings"].to_string();
+        assert!(warnings.contains("GROUPDQ") && warnings.contains("PIXELDQ"), "{warnings}");
+        let fit = pixel_fit_json(&ramp, MODEL_SATURATED.1, MODEL_SATURATED.0, 0, &QuickSlopeParams::default()).unwrap();
+        assert_eq!(fit["fit"]["slope"].as_f64(), Some(planes.sci[[MODEL_SATURATED.0, MODEL_SATURATED.1]] as f64));
+        assert_eq!(fit["fit"]["dq"].as_u64(), Some(DQ_SATURATED as u64));
+        assert_eq!(fit["group_dq"], json!([0, 0, 0, 0, 2, 2, 2, 2, 2, 2]));
+        let dead = pixel_fit_json(&ramp, MODEL_DEAD.1, MODEL_DEAD.0, 0, &QuickSlopeParams::default()).unwrap();
+        assert_eq!(dead["fit"]["dq"].as_u64(), Some(MODEL_DEAD_BITS as u64));
+        assert_eq!(MODEL_DEAD_BITS & DQ_DO_NOT_USE, DQ_DO_NOT_USE);
+    }
+
+    #[test]
+    fn a_ramp_model_without_groupdq_is_refused_and_one_without_pixeldq_says_so() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let bare = write_synthetic_ramp_model(&data.path().join("bare_ramp.fits"), &ramp_model_spec(false, false), ramp_model_value, ramp_model_group_dq, ramp_model_pixel_dq);
+        let refused = quick_slope_files(&bare, &out_dir(&out, "bare"), 0, &QuickSlopeParams::default(), None);
+        assert!(refused.is_err(), "a RampModel without GROUPDQ must not be sloped with the raw threshold");
+        let message = format!("{:#}", refused.unwrap_err());
+        assert!(message.contains("GROUPDQ"), "{message}");
+        let no_pixel = write_synthetic_ramp_model(&data.path().join("no_pixeldq_ramp.fits"), &ramp_model_spec(true, false), ramp_model_value, ramp_model_group_dq, ramp_model_pixel_dq);
+        let result = quick_slope_files(&no_pixel, &out_dir(&out, "no_pixel"), 0, &QuickSlopeParams::default(), None).unwrap();
+        let planes = read_qslope(result["fits_path"].as_str().unwrap()).unwrap();
+        assert_eq!(planes.dq[[MODEL_DEAD.0, MODEL_DEAD.1]], 0);
+        assert_eq!(planes.ngood[[MODEL_SATURATED.0, MODEL_SATURATED.1]], 4);
+        assert!(result["warnings"].to_string().contains("no PIXELDQ"), "{}", result["warnings"]);
+    }
+
+    fn integration_rate(integration: usize, x: usize) -> f32 {
+        0.5 * (integration + 1) as f32 + 0.1 * x as f32
+    }
+
+    fn three_integration_uncal(dir: &tempfile::TempDir) -> String {
+        let spec = SyntheticUncal { cols: 8, rows: 64, ngroups: 10, nints: 3, irs2: None, tgroup_s: 10.0, detector: "NRS1", write_fastaxis: false };
+        write_synthetic_uncal(&dir.path().join("three_uncal.fits"), &spec, |i, g, _y, x| 1000.0 + integration_rate(i, x) * (10.0 * g as f32))
+    }
+
+    #[test]
+    fn the_comparison_uses_the_integration_of_the_quick_slope() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let uncal = three_integration_uncal(&data);
+        let rateints = write_synthetic_rateints(&data.path().join("three_rateints.fits"), 8, 64, 3, &[("DETECTOR", "'NRS1'")], |i, _y, x| integration_rate(i, x), |_, _, _| 0);
+        for integration in [2usize, 0] {
+            let slope = quick_slope_files(&uncal, &out_dir(&out, "products"), integration, &QuickSlopeParams::default(), None).unwrap();
+            let cmp = compare_rate_files(slope["fits_path"].as_str().unwrap(), &rateints, &out_dir(&out, "cmp"), None).unwrap();
+            let median_delta = cmp["difference_metrics"]["median_delta"].as_f64().unwrap();
+            assert!(median_delta.abs() < 1e-4, "integration {integration} against its own rateints plane: median delta {median_delta}");
+            assert_eq!(cmp["rate_plane"], json!(integration));
+            assert_eq!(cmp["good_pixels"].as_u64(), Some(64 * 8));
+        }
+    }
+
+    #[test]
+    fn comparing_one_integration_with_a_combined_rate_or_a_short_rateints_is_reported() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let uncal = three_integration_uncal(&data);
+        let slope = quick_slope_files(&uncal, &out_dir(&out, "products"), 2, &QuickSlopeParams::default(), None).unwrap();
+        let qslope = slope["fits_path"].as_str().unwrap();
+        let combined = Array2::from_shape_fn((64, 8), |(_, x)| integration_rate(1, x));
+        let err = Array2::from_elem((64, 8), SYNTHETIC_ERR);
+        let dq = Array2::zeros((64, 8));
+        let rate = write_synthetic_rate(&data.path().join("three_rate.fits"), &combined, &err, &dq, "NRS1");
+        let cmp = compare_rate_files(qslope, &rate, &out_dir(&out, "cmp"), None).unwrap();
+        assert!(cmp["rate_plane"].is_null(), "{}", cmp["rate_plane"]);
+        let warnings = cmp["warnings"].to_string();
+        assert!(warnings.contains("combination of the 3 integrations"), "{warnings}");
+        let single = quick_slope_files(&write_irs2(&data, NRS1_NAME, 8, false, "NRS1", true).0, &out_dir(&out, "single"), 0, &QuickSlopeParams::default(), None).unwrap();
+        let (sci, err, dq) = truth_rate_planes(&Irs2Layout::new(3200, 16, 4, 5, false).unwrap(), 8);
+        let single_rate = write_synthetic_rate(&data.path().join("single_rate.fits"), &sci, &err, &dq, "NRS1");
+        let single_cmp = compare_rate_files(single["fits_path"].as_str().unwrap(), &single_rate, &out_dir(&out, "cmp"), None).unwrap();
+        assert!(!single_cmp["warnings"].to_string().contains("combination"), "{}", single_cmp["warnings"]);
+        let short = write_synthetic_rateints(&data.path().join("short_rateints.fits"), 8, 64, 2, &[("DETECTOR", "'NRS1'")], |i, _y, x| integration_rate(i, x), |_, _, _| 0);
+        let refused = compare_rate_files(qslope, &short, &out_dir(&out, "cmp"), None);
+        assert!(refused.is_err(), "integration 3 has no plane in a rateints of two integrations");
+        let message = format!("{:#}", refused.unwrap_err());
+        assert!(message.contains("integration"), "{message}");
+    }
+
+    fn extension_names(path: &str) -> Vec<String> {
+        let file = std::fs::File::open(path).unwrap();
+        list_extensions(&file).unwrap().iter().skip(1).map(|h| h.extname.clone().unwrap_or_default().trim().to_string()).collect()
+    }
+
+    #[test]
+    fn the_noise_extension_is_named_for_what_it_holds() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let (uncal, _) = write_irs2(&data, NRS1_NAME, 8, false, "NRS1", true);
+        let plain = quick_slope_files(&uncal, &out_dir(&out, "plain"), 0, &QuickSlopeParams::default(), None).unwrap();
+        assert_eq!(plain["noise_model"], json!("read_noise_only"));
+        let plain_path = plain["fits_path"].as_str().unwrap();
+        assert_eq!(extension_names(plain_path), vec!["SCI", "NGOOD", "DQ", "RNOISE"]);
+        let primary = read_primary_header(plain_path).unwrap();
+        assert_eq!(primary.get("ABNOISE"), Some("read"));
+        assert_eq!(primary.get("ABGAIN"), None);
+        assert!(plain["params"]["gain_e_per_dn"].is_null());
+
+        let params = QuickSlopeParams { gain_e_per_dn: Some(1.5), ..Default::default() };
+        let with_gain = quick_slope_files(&uncal, &out_dir(&out, "gain"), 0, &params, None).unwrap();
+        assert_eq!(with_gain["noise_model"], json!("read_and_photon"));
+        let gain_path = with_gain["fits_path"].as_str().unwrap();
+        assert_eq!(extension_names(gain_path), vec!["SCI", "NGOOD", "DQ", "NOISE"]);
+        let primary = read_primary_header(gain_path).unwrap();
+        assert_eq!(primary.get("ABNOISE"), Some("read+photon"));
+        assert_eq!(primary.get_f64("ABGAIN"), Some(1.5));
+        assert_eq!(with_gain["params"]["gain_e_per_dn"].as_f64(), Some(1.5));
+        let fit = pixel_fit_json(&uncal, 3, 700, 0, &params).unwrap();
+        assert_eq!(fit["noise_model"], json!("read_and_photon"));
+        let fit = pixel_fit_json(&uncal, 3, 700, 0, &QuickSlopeParams::default()).unwrap();
+        assert_eq!(fit["noise_model"], json!("read_noise_only"));
+    }
+
+    #[test]
+    fn a_gain_must_be_a_positive_finite_number() {
+        for bad in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
+            let params = QuickSlopeParams { gain_e_per_dn: Some(bad), ..Default::default() };
+            assert!(params.validate().is_err(), "gain {bad} must be refused");
+        }
+        let input: QuickSlopeParamsInput = serde_json::from_value(json!({ "gain_e_per_dn": 3.9 })).unwrap();
+        let resolved = input.resolve();
+        assert_eq!(resolved.gain_e_per_dn, Some(3.9));
+        assert!(resolved.validate().is_ok());
+    }
+
+    #[test]
+    fn a_segment_of_a_segmented_exposure_is_sloped_and_names_its_exposure_integration() {
+        let data = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let path = data.path().join("jw02327001001_03101_00001-seg002_nrs1_uncal.fits");
+        let primary = [
+            ("NGROUPS", "5"),
+            ("NINTS", "9"),
+            ("INTSTART", "4"),
+            ("INTEND", "6"),
+            ("TGROUP", "10.0"),
+            ("DATAMODL", "'Level1bModel'"),
+            ("DETECTOR", "'NRS1'"),
+        ];
+        write_u16_ramp_mef(&path, 4, 8, 5, 3, &primary, &[], |i, g, _, _| (1000 + (i + 1) * 10 * g) as u16);
+        let text = path.to_str().unwrap();
+        let opened = LazyCube::open(text);
+        assert!(opened.is_ok(), "{:#}", opened.err().unwrap());
+        let info = opened.unwrap().ramp().expect("a segment is a ramp");
+        assert_eq!((info.ngroups, info.nints, info.intstart), (5, 3, Some(4)));
+        let result = quick_slope_files(text, &out_dir(&out, "products"), 2, &QuickSlopeParams::default(), None).unwrap();
+        assert_eq!((result["nints"].as_u64(), result["integration"].as_u64()), (Some(3), Some(2)));
+        assert_eq!(result["exposure_integration"], json!(6));
+        let fits_path = result["fits_path"].as_str().unwrap();
+        assert!(fits_path.ends_with("-seg002_nrs1_int003_qslope.fits"), "{fits_path}");
+        let planes = read_qslope(fits_path).unwrap();
+        assert!((planes.sci[[3, 2]] - 3.0).abs() < 1e-4, "{}", planes.sci[[3, 2]]);
+        let primary = read_primary_header(fits_path).unwrap();
+        assert_eq!((primary.get_i64("ABINTEG"), primary.get_i64("ABINTNUM"), primary.get_i64("ABEXPINT")), (Some(2), Some(3), Some(6)));
+        assert!(quick_slope_files(text, &out_dir(&out, "products"), 3, &QuickSlopeParams::default(), None).is_err());
     }
 
     #[test]

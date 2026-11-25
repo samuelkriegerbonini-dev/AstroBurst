@@ -1,0 +1,151 @@
+{
+ "golden": "tso/whtlt",
+ "produced_by": {
+  "script": "tso_golden_whtlt.py",
+  "command": "python -I scripts/oracle/tso_golden_whtlt.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 1946,
+    "sha256": "3ba5f9d855bf7c66706437faa95eb66c101bf813e0bcbda500dfc3395322f686"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "ecsv": {
+  "first_line": "# %ECSV 1.0",
+  "line_ending": "LF",
+  "n_header_lines": 27,
+  "delimiter_key_present": false,
+  "delimiter_used": "single space",
+  "schema_line": "# schema: astropy-2.0",
+  "has_serialized_columns_block": true,
+  "has_yaml_anchor_or_alias": true,
+  "column_name_line": "MJD_UTC_NRS1 BJD_TDB_NRS1 whitelight_flux_NRS1 MJD_UTC_NRS2 BJD_TDB_NRS2 whitelight_flux_NRS2"
+ },
+ "layout": "current (MJD_UTC, BJD_TDB, whitelight_flux with optional order and detector suffixes)",
+ "columns": [
+  {
+   "name": "MJD_UTC_NRS1",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "BJD_TDB_NRS1",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux_NRS1",
+   "unit": "Jy",
+   "datatype": "float64"
+  },
+  {
+   "name": "MJD_UTC_NRS2",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "BJD_TDB_NRS2",
+   "unit": null,
+   "datatype": "float64"
+  },
+  {
+   "name": "whitelight_flux_NRS2",
+   "unit": "Jy",
+   "datatype": "float64"
+  }
+ ],
+ "meta": {
+  "instrument": "NIRSPEC",
+  "exp_type": "NRS_BRIGHTOBJ",
+  "subarray": "SUB2048",
+  "filter": "F290LP",
+  "pupil": null,
+  "target_name": "SIPS J1256-1257B",
+  "number_of_integrations": 8
+ },
+ "meta_key_order": [
+  "instrument",
+  "exp_type",
+  "subarray",
+  "filter",
+  "pupil",
+  "target_name",
+  "number_of_integrations"
+ ],
+ "n_data_rows": 8,
+ "non_numeric_tokens": [],
+ "series": [
+  {
+   "flux_column": "whitelight_flux_NRS1",
+   "time_column": "MJD_UTC_NRS1",
+   "bjd_column": "BJD_TDB_NRS1",
+   "detector_suffix": "NRS1",
+   "order_suffix": null,
+   "flux_unit": "Jy",
+   "time_unit": null,
+   "rows_with_finite_time": 8,
+   "time_first": 60496.52120635712,
+   "time_last": 60496.557820564216,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 451.9239279907197,
+   "flux_first3": [
+    -5953.629162915719,
+    -6100.921631032233,
+    -5799.353148838366
+   ],
+   "flux_last3": [
+    -6017.764644230122,
+    -6600.571152547745,
+    -6114.179097844157
+   ],
+   "flux_sum_fsum": -48889.218080477076,
+   "flux_min": -6600.571152547745,
+   "flux_max": -5799.353148838366,
+   "flux_negative_rows": 8,
+   "bjd_first": 60496.522504382556,
+   "bjd_last": 60496.55911503738,
+   "bjd_minus_time_s_first": 112.14939735364169
+  },
+  {
+   "flux_column": "whitelight_flux_NRS2",
+   "time_column": "MJD_UTC_NRS2",
+   "bjd_column": "BJD_TDB_NRS2",
+   "detector_suffix": "NRS2",
+   "order_suffix": null,
+   "flux_unit": "Jy",
+   "time_unit": null,
+   "rows_with_finite_time": 8,
+   "time_first": 60496.52110465069,
+   "time_last": 60496.55771818249,
+   "time_strictly_increasing": true,
+   "cadence_s_median": 451.9155928166583,
+   "flux_first3": [
+    3.7127694054398646,
+    3.717856876332009,
+    3.7136729465646683
+   ],
+   "flux_last3": [
+    3.7058234472052494,
+    3.705853534243069,
+    3.7026733212328358
+   ],
+   "flux_sum_fsum": 29.66909685181698,
+   "flux_min": 3.7026733212328358,
+   "flux_max": 3.717856876332009,
+   "flux_negative_rows": 0,
+   "bjd_first": 60496.52240268599,
+   "bjd_last": 60496.55901266559,
+   "bjd_minus_time_s_first": 112.15024979319423
+  }
+ ]
+}

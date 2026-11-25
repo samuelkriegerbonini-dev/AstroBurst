@@ -6,7 +6,7 @@ import { missionLabelOf } from "./logic/missionLabels";
 
 interface SummaryLineProps {
   state: ArchiveState;
-  ctl: Pick<ArchiveController, "search" | "clearObjectFilters">;
+  ctl: Pick<ArchiveController, "refresh" | "clearObjectFilters">;
 }
 
 export default function SummaryLine({ state, ctl }: SummaryLineProps) {
@@ -32,10 +32,11 @@ export default function SummaryLine({ state, ctl }: SummaryLineProps) {
           data-total={view.total}
           data-applied={view.applied}
           data-preset={view.preset ?? undefined}
+          data-stale={state.resultsStale ? "true" : undefined}
           className="ab-mast-summary"
           title={view.text}
         >
-          {view.text}
+          {state.resultsStale ? `Previous results: ${view.text}` : view.text}
         </div>
         {view.ignored ? (
           <span data-testid="mast-summary-ignored" className="ab-mast-summary-note" title={view.ignored}>
@@ -50,10 +51,10 @@ export default function SummaryLine({ state, ctl }: SummaryLineProps) {
         <button
           type="button"
           className="ab-mast-icon-btn"
-          title="Search again without MAST answers cached in AstroBurst"
+          title="Search again for the results shown, without MAST answers cached in AstroBurst"
           aria-label="Refresh"
           disabled={!!state.run}
-          onClick={() => void ctl.search({ refresh: true })}
+          onClick={() => void ctl.refresh()}
         >
           <RefreshCw size={12} aria-hidden="true" />
         </button>

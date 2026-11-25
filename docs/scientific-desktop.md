@@ -10,7 +10,7 @@ Cube Prep uses the same recipe runner as the headless API. SAGUI runs in a separ
 2. Choose **Scientific MEF for regional SEDs / SAGUI** under **Apply defaults**. Keep **Units** at `Jy/pixel` for SAGUI. Select an alignment reference and a cube reference, and choose a persistent **Working folder**.
 3. Configure the enabled steps. For bands with different PSFs, enable and configure **PSFs**, **Kernels** and **Match**. Check the resulting PSFs, residuals and diagnostics before calling the cube suitable for regional photometry.
 4. Select **Validate** to resolve inputs, filters, parameters and dependencies without running the pipeline. Read its warnings and effective recipe. Then select **Validate & run**.
-5. Inspect the step reports and product list. Use **Open final cube** to load the FITS product in Files, or **Send to SAGUI** to check the current cube and open the SAGUI tool with its path selected. This does not start segmentation. The common PSF target is copied only when the final cube follows a complete matching step with no unmatched band; otherwise it remains blank. In SAGUI, **Use Cube Prep result** performs the same input check and selection.
+5. Inspect the step reports and product list. Use **Open final cube** to load the FITS product in Files, or **Send to SAGUI** to check the current cube and open the SAGUI tool with its path selected. This does not start segmentation. The common PSF target is copied only when the final cube follows a complete matching step with no unmatched band and the kernel diagnostics put every matched band within 2 % of the target FWHM, the tolerance of the kernel warnings; otherwise it remains blank. In SAGUI, **Use Cube Prep result** performs the same input check and selection.
 
 Changing an input or recipe parameter clears the displayed result associated with the previous settings. Its files remain in the previous run folder.
 
@@ -19,6 +19,8 @@ Changing an input or recipe parameter clears the displayed result associated wit
 The initial **LIGHTSTACK 0.4.0 compatibility** profile makes its choices explicit: conversion to Jy per pixel, bilinear alignment, a one-pixel border crop, the LIGHTSTACK area rule, wavelength ordering and the LIGHTSTACK cube layout. That layout stores SCI only. Use it for comparisons with the reference pipeline while accounting for its discarded ERR/DQ companions.
 
 The scientific profile selects MEF output and the physical pixel-area rule: scale per-pixel flux for a change of pixel area, or keep surface brightness when the selected unit is `MJy/sr`. It also selects AstroBurst crop rounding and matching behavior, and enables DQ use for an existing invalid-pixel editing step. Applying a profile changes these settings on enabled steps; it does not add missing PSF inputs, enable every step, invent uncertainties or certify the result. SAGUI requires per-pixel flux, so convert a surface-brightness cube before segmentation.
+
+When the enabled steps differ from the selected profile, for example after **Import recipe** or a manual edit, the panel lists each difference and offers **Apply these defaults**. Import selects the profile closer to the imported recipe. A fixed kernel regularization in the recipe is not part of the profile and stays as saved; under the scientific profile the panel names it, and the automatic choice can be turned on in **Kernels**.
 
 | Step | Purpose and checks |
 |---|---|
@@ -55,9 +57,9 @@ The installation records the dependency versions actually obtained. It is not a 
 
 ## Segment and inspect regional SEDs
 
-1. Select **Use Cube Prep result**, **Use selected FITS**, or browse to a prepared multiband cube. Select the whole file, rather than an individual HDU or plane.
+1. Select **Use Cube Prep result**, **Use selected FITS**, or browse to a prepared multiband cube. Select the whole file, rather than an individual HDU or plane. Browse lists FITS files; a Cube Prep recipe placed in this field is reported, and **Open this recipe in Cube Prep** imports it there.
 2. Enter the **Number of regions** and choose **Exact Ward** or **Sparse Ward (approximation)**. Exact Ward has quadratic memory demand in the pixel count. The displayed estimate uses the full footprint before masking; the runner checks memory for the selected mode before starting R. For large fields, crop the input or explicitly choose sparse mode and its nearest-neighbor count. Sparse mode is a different approximation and is never selected silently.
-3. Enter the **Verified common PSF target**. This field records a target already established by your preparation and diagnostics. A name such as `F444W` does not verify PSF matching, including for an external cube.
+3. Enter the **Verified common PSF target**. This field records a target already established by your preparation and diagnostics. A name such as `F444W` does not verify PSF matching, including for an external cube. When the cube states the PSF FWHM of its bands, the check names every band more than 2 % away from the target, or from the widest band while the field is empty.
 4. Configure **Use starlet morphology mask**, its scales and threshold. Choose **DQ bits to exclude (decimal mask)** according to the instrument and analysis. `4294967295` excludes every flagged bit; `0` ignores DQ flags. Non-finite science values remain excluded in either case.
 5. Select a persistent **Working folder**, then **Check cube and runtime**. Inspect dimensions, filters, pivot wavelengths, units, ERR/DQ availability, memory estimate and warnings. Select **Validate & segment** to execute the official package.
 6. Click a colored region or select its identifier in **Regions and SEDs** to inspect the regional fluxes and uncertainties. The map uses X to the right and Y upwards; label zero is background. The SED display retains negative fluxes and marks unknown uncertainties explicitly.

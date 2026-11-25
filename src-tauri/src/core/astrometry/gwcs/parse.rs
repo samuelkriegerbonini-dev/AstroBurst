@@ -1,9 +1,10 @@
 use serde_yaml::Value;
 
-use super::pipeline::{BoundingBox, FrameKind, GwcsFrame, GwcsPipeline, GwcsStep};
+use super::fk5::{Fk5Frame, FK5_REFERENCE};
+use super::pipeline::{BoundingBox, FrameKind, GwcsFrame, GwcsPipeline, GwcsStep, WorldFrameCorrection};
 use super::transform::{ArithOp, Axis, Kind, Node, MAX_LANES};
 use super::GwcsError;
-use crate::infra::asdf::tree::{flatten_inline, untag, ArraySource, NdArrayMeta, WcsInfo};
+use crate::infra::asdf::tree::{flatten_inline, untag, ArraySource, NdArrayMeta, WcsInfo, ANGLE_UNITS, SCALE_UNITS};
 
 pub type ArrayResolver<'a> = &'a dyn Fn(&Value) -> Option<(Vec<usize>, Vec<f64>)>;
 
@@ -21,7 +22,11 @@ pub const WCS_NODE_SEARCH_ORDER: [&str; 6] =
     ["meta.wcs", "roman.meta.wcs", "wcs", "gwcs", "roman.wcs_l2", "roman.wcs_l1"];
 
 const PIXEL_UNITS: [&str; 3] = ["", "pixel", "pix"];
-const ICRS_LIKE_REFERENCES: [&str; 3] = ["", "icrs", "fk5"];
+const ICRS_REFERENCES: [&str; 2] = ["", "icrs"];
+const KNOWN_TRANSFORM_MAJOR_VERSION: u32 = 1;
+const PIXEL_UNITS_EXPECTED: &str = "dimensionless or pixel";
+const SCALE_UNITS_EXPECTED: &str = "dimensionless, pixel, deg or arcsec, optionally per pixel,";
+const ANGLE_UNITS_EXPECTED: &str = "dimensionless, deg, rad, arcmin, arcsec or mas";
 const FITSWCS_IMAGING: &str = "fitswcs_imaging";
 const FITSWCS_ANGLE_UNITS_DEG: [(&str, f64); 5] =
     [("", 1.0), ("deg", 1.0), ("arcmin", 1.0 / 60.0), ("arcsec", 1.0 / 3600.0), ("mas", 1.0 / 3_600_000.0)];
@@ -136,6 +141,9 @@ fn parse_node_impl(node: &Value, arrays: ArrayResolver, path: &str, read_inverse
     } else {
         tag_family(node).unwrap_or_else(|| "untagged".to_string())
     };
+    if let Some((major, minor, patch)) = tag_version(node).filter(|v| v.0 > KNOWN_TRANSFORM_MAJOR_VERSION) {
+        return Err(GwcsError::UnsupportedTag { tag: format!("{family}-{major}.{minor}.{patch}"), path: path.to_string() });
+    }
     let kind = match family.as_str() {
         FITSWCS_IMAGING => fitswcs_imaging_kind(node, arrays, path)?,
         "compose" => {
@@ -157,12 +165,12 @@ fn parse_node_impl(node: &Value, arrays: ArrayResolver, path: &str, read_inverse
             Kind::Concatenate(Box::new(a), Box::new(b))
         }
         "shift" => Kind::Shift(scalar_param(node, "offset", path)?),
-        "scale" => Kind::Scale(scalar_param(node, "factor", path)?),
+        "scale" => Kind::Scale(unit_param(node, "factor", path, scale_factor, SCALE_UNITS_EXPECTED)?),
         "polynomial" => polynomial_kind(node, arrays, path)?,
         "remap_axes" => mapping_kind(node, path)?,
         "identity" => Kind::Identity(node.get("n_dims").and_then(Value::as_u64).map_or(1, |n| n as usize)),
         "affine" => affine_kind(node, arrays, path)?,
-        "rotate2d" => Kind::Rotation2D { angle_deg: scalar_param(node, "angle", path)? },
+        "rotate2d" => Kind::Rotation2D { angle_deg: angle_param(node, "angle", path)? },
         "rotate_sequence_3d" => rotation_sequence_kind(node, path)?,
         "spherical_cartesian" => spherical_cartesian_kind(node, path)?,
         "gnomonic" => gnomonic_kind(node, path)?,
@@ -215,18 +223,19 @@ pub fn parse_gwcs(wcs: &Value, arrays: ArrayResolver, source_key: &str) -> Resul
         steps.push(GwcsStep { frame: parsed.frame.clone(), transform });
         frames.push(parsed);
     }
-    check_frames(&frames[0], &frames[frames.len() - 1])?;
+    let world_frame = check_frames(&frames[0], &frames[frames.len() - 1])?;
     let bounding_box = match step_nodes[0].get("transform") {
         Some(t) if !t.is_null() => parse_bounding_box(t, "steps[0].transform")?,
         _ => None,
     };
-    GwcsPipeline::new(steps, bounding_box, name, source_key.to_string())
+    Ok(GwcsPipeline::new(steps, bounding_box, name, source_key.to_string())?.with_world_frame(world_frame))
 }
 
 struct ParsedFrame {
     frame: GwcsFrame,
     axes_order: Vec<usize>,
     naxes: usize,
+    fk5: Option<Result<Fk5Frame, String>>,
 }
 
 fn strings_at(node: &Value, key: &str) -> Vec<String> {
@@ -280,6 +289,12 @@ fn parse_frame(node: &Value) -> ParsedFrame {
             axis_physical_types = children.iter().flat_map(|c| strings_at(c, "axis_physical_types")).collect();
         }
     }
+    let fk5 = match &kind {
+        FrameKind::Celestial { reference } if reference == FK5_REFERENCE => {
+            node.get("reference_frame").map(Fk5Frame::from_reference_frame)
+        }
+        _ => None,
+    };
     ParsedFrame {
         frame: GwcsFrame {
             name: node.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
@@ -290,10 +305,11 @@ fn parse_frame(node: &Value) -> ParsedFrame {
         },
         axes_order: usizes_at(node, "axes_order"),
         naxes: frame_naxes(node),
+        fk5,
     }
 }
 
-fn check_frames(first: &ParsedFrame, last: &ParsedFrame) -> Result<(), GwcsError> {
+fn check_frames(first: &ParsedFrame, last: &ParsedFrame) -> Result<Option<WorldFrameCorrection>, GwcsError> {
     if first.naxes != 2 {
         return Err(GwcsError::Frame(format!(
             "first frame '{}' must have 2 pixel axes (found {})",
@@ -321,16 +337,20 @@ fn check_frames(first: &ParsedFrame, last: &ParsedFrame) -> Result<(), GwcsError
     if last.frame.unit.iter().any(|u| !u.is_empty() && !u.eq_ignore_ascii_case("deg")) {
         return Err(GwcsError::Frame(format!("world frame unit [{}] is not deg", last.frame.unit.join(", "))));
     }
-    match &last.frame.kind {
-        FrameKind::Celestial { reference } => {
-            if !ICRS_LIKE_REFERENCES.contains(&reference.as_str()) {
+    match (&last.frame.kind, &last.fk5) {
+        (FrameKind::Celestial { .. }, Some(Ok(fk5))) => Ok(Some(WorldFrameCorrection { note: fk5.note(), to_icrs: fk5.to_j2000() })),
+        (FrameKind::Celestial { reference }, Some(Err(shown))) => Err(GwcsError::Frame(format!(
+            "reference frame '{reference}' has an equinox that cannot be read ('{shown}')"
+        ))),
+        (FrameKind::Celestial { reference }, None) => {
+            if !ICRS_REFERENCES.contains(&reference.as_str()) {
                 return Err(GwcsError::Frame(format!("reference frame '{reference}' is not ICRS")));
             }
+            Ok(None)
         }
-        FrameKind::Frame2D => return Err(GwcsError::Frame("world frame is a frame2d, not a celestial frame".into())),
-        FrameKind::Other(tag) => return Err(GwcsError::Frame(format!("world frame '{tag}' is not a celestial frame"))),
+        (FrameKind::Frame2D, _) => Err(GwcsError::Frame("world frame is a frame2d, not a celestial frame".into())),
+        (FrameKind::Other(tag), _) => Err(GwcsError::Frame(format!("world frame '{tag}' is not a celestial frame"))),
     }
-    Ok(())
 }
 
 fn parse_bounding_box(transform: &Value, path: &str) -> Result<Option<BoundingBox>, GwcsError> {
@@ -405,7 +425,13 @@ fn pair_pair_at(v: &Value) -> Option<[[f64; 2]; 2]> {
     }
 }
 
-fn scalar_param(node: &Value, key: &str, path: &str) -> Result<f64, GwcsError> {
+fn unit_param(
+    node: &Value,
+    key: &str,
+    path: &str,
+    factor: fn(&str) -> Option<f64>,
+    expected_units: &str,
+) -> Result<f64, GwcsError> {
     let Some(v) = node.get(key) else {
         return Err(GwcsError::Missing { path: path.to_string(), field: key.to_string() });
     };
@@ -416,13 +442,32 @@ fn scalar_param(node: &Value, key: &str, path: &str) -> Result<f64, GwcsError> {
         return Err(GwcsError::Parse(format!("parameter '{key}' at {path} is not a number")));
     };
     let unit: String = v.get("unit").and_then(Value::as_str).unwrap_or("").split_whitespace().collect();
-    if PIXEL_UNITS.iter().any(|u| u.eq_ignore_ascii_case(&unit)) {
-        Ok(value)
-    } else {
-        Err(GwcsError::Parse(format!(
-            "quantity unit '{unit}' at {path} is not supported (dimensionless or pixel expected)"
-        )))
+    match factor(&unit) {
+        Some(factor) => Ok(value * factor),
+        None => Err(GwcsError::Parse(format!(
+            "quantity unit '{unit}' at {path} is not supported ({expected_units} expected)"
+        ))),
     }
+}
+
+fn table_factor(table: &[(&str, f64)], unit: &str) -> Option<f64> {
+    table.iter().find(|(u, _)| u.eq_ignore_ascii_case(unit)).map(|&(_, f)| f)
+}
+
+fn scale_factor(unit: &str) -> Option<f64> {
+    pixel_factor(unit).or_else(|| table_factor(SCALE_UNITS, unit)).or_else(|| angle_per_pixel_factor(unit))
+}
+
+fn rotation_angle_factor(unit: &str) -> Option<f64> {
+    table_factor(ANGLE_UNITS, unit).or_else(|| angle_factor(unit))
+}
+
+fn scalar_param(node: &Value, key: &str, path: &str) -> Result<f64, GwcsError> {
+    unit_param(node, key, path, pixel_factor, PIXEL_UNITS_EXPECTED)
+}
+
+fn angle_param(node: &Value, key: &str, path: &str) -> Result<f64, GwcsError> {
+    unit_param(node, key, path, rotation_angle_factor, ANGLE_UNITS_EXPECTED)
 }
 
 fn string_param<'a>(node: &'a Value, key: &str, default: &'a str) -> &'a str {
@@ -669,9 +714,9 @@ fn spherical_cartesian_kind(node: &Value, path: &str) -> Result<Kind, GwcsError>
 }
 
 fn rotate3d_kind(node: &Value, path: &str) -> Result<Kind, GwcsError> {
-    let lon = scalar_param(node, "phi", path)?;
-    let lat = scalar_param(node, "theta", path)?;
-    let lon_pole = scalar_param(node, "psi", path)?;
+    let lon = angle_param(node, "phi", path)?;
+    let lat = angle_param(node, "theta", path)?;
+    let lon_pole = angle_param(node, "psi", path)?;
     match string_param(node, "direction", "native2celestial") {
         "native2celestial" => Ok(Kind::rotate_native2celestial(lon, lat, lon_pole)),
         "celestial2native" => Ok(Kind::rotate_celestial2native(lon, lat, lon_pole)),
@@ -966,6 +1011,142 @@ mod tests {
         assert_close_slice(&pipeline.backward_analytic(2.0, 3.0).unwrap(), &[1.0, 2.0], 0.0, "stored polynomial inverses through the alias");
     }
 
+    fn tan_chain(scale: &str, phi: &str, theta: &str, psi: &str) -> String {
+        format!(
+            "!transform/compose-1.2.0\n      forward:\n      - !transform/compose-1.2.0\n        forward:\n        - !transform/compose-1.2.0\n          forward:\n          - !transform/concatenate-1.2.0\n            forward:\n            - !transform/shift-1.2.0 {{offset: -10.0}}\n            - !transform/shift-1.2.0 {{offset: -20.0}}\n          - !transform/concatenate-1.2.0\n            forward:\n            - !transform/scale-1.2.0 {{factor: {scale}}}\n            - !transform/scale-1.2.0 {{factor: {scale}}}\n        - !transform/gnomonic-1.2.0 {{direction: pix2sky}}\n      - !transform/rotate3d-1.3.0 {{phi: {phi}, theta: {theta}, psi: {psi}, direction: native2celestial}}"
+        )
+    }
+
+    fn quantity(value: f64, unit: &str) -> String {
+        format!("!unit/quantity-1.1.0 {{value: {value:?}, unit: !unit/unit-1.0.0 {unit}}}")
+    }
+
+    #[test]
+    fn quantity_parameters_of_a_tan_gwcs_are_evaluated() {
+        let plain = parse_wcs_body(&wcs_body(DETECTOR, &tan_chain("0.05", "5.6", "-72.05", "180.0"), &icrs_world())).unwrap();
+        assert_close_slice(&plain.forward(10.0, 20.0, false), &[5.6, -72.05], 1e-12, "the reference pixel maps to (phi, theta)");
+        let with_units = tan_chain(
+            &quantity(180.0, "arcsec"),
+            &quantity(5.6, "deg"),
+            &quantity(-72.05_f64.to_radians(), "rad"),
+            &quantity(180.0, "deg"),
+        );
+        let quantities = parse_wcs_body(&wcs_body(DETECTOR, &with_units, &icrs_world()))
+            .unwrap_or_else(|e| panic!("a TAN chain written with quantities must be evaluated: {e:#}"));
+        assert_close_slice(&quantities.forward(10.0, 20.0, false), &[5.6, -72.05], 1e-12, "the reference pixel maps to (phi, theta)");
+        for (x, y) in [(0.0, 0.0), (10.5, 19.5), (11.0, 20.0), (10.0, 21.0)] {
+            let got = quantities.forward(x, y, false);
+            let expected = plain.forward(x, y, false);
+            assert_close_slice(&got, &expected, 1e-9, &format!("180 arcsec per pixel is 0.05 deg per pixel at ({x}, {y})"));
+        }
+        let per_pixel = tan_chain(&quantity(3.0, "arcmin/pix"), "5.6", "-72.05", "180.0");
+        let per_pixel = parse_wcs_body(&wcs_body(DETECTOR, &per_pixel, &icrs_world())).unwrap();
+        assert_close_slice(&per_pixel.forward(11.0, 20.0, false), &plain.forward(11.0, 20.0, false), 1e-9, "3 arcmin/pix is 0.05 deg per pixel");
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Fk5Golden {
+        astropy: String,
+        cases: Vec<Fk5Case>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Fk5Case {
+        equinox: String,
+        lon_deg: f64,
+        lat_deg: f64,
+        fk5_j2000_ra_deg: f64,
+        fk5_j2000_dec_deg: f64,
+        unprecessed_error_arcmin: f64,
+        fk5_j2000_to_icrs_mas: f64,
+    }
+
+    fn fk5_goldens() -> Fk5Golden {
+        let path = fixtures_dir().join("fk5_precession_astropy.json");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        serde_json::from_str(&text).unwrap()
+    }
+
+    fn fk5_world(equinox: &str) -> String {
+        format!(
+            "!<tag:stsci.edu:gwcs/celestial_frame-1.2.0>\n      axes_names: [lon, lat]\n      axes_order: [0, 1]\n      axis_physical_types: [pos.eq.ra, pos.eq.dec]\n      name: world\n      reference_frame: !<tag:astropy.org:astropy/coordinates/frames/fk5-1.1.0>\n        frame_attributes:\n          equinox: {equinox}\n      unit: [!unit/unit-1.0.0 deg, !unit/unit-1.0.0 deg]"
+        )
+    }
+
+    fn separation_mas(a: [f64; 2], b: [f64; 2]) -> f64 {
+        crate::core::astrometry::wcs::angular_separation(a[0], a[1], b[0], b[1]) * 3.6e6
+    }
+
+    #[test]
+    fn an_fk5_frame_of_another_equinox_is_precessed_to_j2000() {
+        let goldens = fk5_goldens();
+        assert_eq!(goldens.astropy, "8.0.2", "values of scripts/oracle/fk5_precession_goldens.py");
+        for case in &goldens.cases {
+            let what = format!("FK5 {} ({}, {})", case.equinox, case.lon_deg, case.lat_deg);
+            let chain = tan_chain("0.001", &format!("{:?}", case.lon_deg), &format!("{:?}", case.lat_deg), "180.0");
+            let world = fk5_world(&format!("!time/time-1.1.0 {}", case.equinox));
+            let pipeline = parse_wcs_body(&wcs_body(DETECTOR, &chain, &world)).unwrap_or_else(|e| panic!("{what}: {e:#}"));
+            let j2000 = [case.fk5_j2000_ra_deg, case.fk5_j2000_dec_deg];
+            let got = pipeline.forward(10.0, 20.0, false);
+            let off = separation_mas(got, j2000);
+            assert!(off < 1e-4, "{what}: forward gives {got:?}, {off} mas from astropy {} ({} arcmin when the equinox is ignored)", goldens.astropy, case.unprecessed_error_arcmin);
+            assert!(case.fk5_j2000_to_icrs_mas < 25.0, "{what}: the frame tie left over is about 22 mas");
+            let back = pipeline.backward_analytic(j2000[0], j2000[1]).unwrap();
+            assert_close_slice(&back, &[10.0, 20.0], 1e-6, &format!("{what} analytic inverse"));
+            let exact = pipeline.backward_exact(j2000[0], j2000[1], &NewtonOptions::default());
+            assert!(exact.converged, "{what}: {exact:?}");
+            assert_close_slice(&exact.pixel, &[10.0, 20.0], 1e-6, &format!("{what} exact inverse"));
+        }
+    }
+
+    #[test]
+    fn an_fk5_equinox_is_read_in_every_form_astropy_writes_and_refused_when_unreadable() {
+        let chain = tan_chain("0.001", "150.0", "30.0", "180.0");
+        let j1975 = [150.36012784985985, 29.87924127015363];
+        for equinox in [
+            "!time/time-1.1.0 J1975.000",
+            "J1975.0",
+            "1975.0",
+            "!time/time-1.1.0 {value: J1975.0, format: jyear_str, scale: tt}",
+            "!time/time-1.1.0 {value: 1975.0, format: jyear}",
+            "!time/time-1.1.0 {value: 2442413.75, format: jd}",
+            "!time/time-1.1.0 {value: 42413.25, format: mjd}",
+        ] {
+            let pipeline = parse_wcs_body(&wcs_body(DETECTOR, &chain, &fk5_world(equinox))).unwrap_or_else(|e| panic!("{equinox}: {e:#}"));
+            let off = separation_mas(pipeline.forward(10.0, 20.0, false), j1975);
+            assert!(off < 1e-4, "{equinox}: {off} mas from astropy 8.0.2");
+            let note = pipeline.frame_note().unwrap_or_else(|| panic!("{equinox}: the frame handling is stated"));
+            assert_eq!(note, "FK5 J1975.0 precessed to J2000; 22 mas FK5-ICRS tie not applied");
+        }
+        let besselian = parse_wcs_body(&wcs_body(DETECTOR, &chain, &fk5_world("!time/time-1.1.0 B1950.0"))).unwrap();
+        let off = separation_mas(besselian.forward(10.0, 20.0, false), [150.71958491383842, 29.758036398195383]);
+        assert!(off < 1e-4, "B1950.0: {off} mas from astropy 8.0.2");
+        assert_eq!(besselian.frame_note(), Some("FK5 B1950.0 precessed to J2000; 22 mas FK5-ICRS tie not applied"));
+
+        for equinox in ["!time/time-1.1.0 J2000.000", "J2000", "2000.0"] {
+            let j2000 = parse_wcs_body(&wcs_body(DETECTOR, &chain, &fk5_world(equinox))).unwrap();
+            assert_close_slice(&j2000.forward(10.0, 20.0, false), &[150.0, 30.0], 1e-12, "FK5 J2000 needs no precession");
+            assert_eq!(j2000.frame_note(), Some("FK5 J2000 read as ICRS; 22 mas FK5-ICRS tie not applied"));
+        }
+        let default_equinox = parse_wcs_body(&wcs_body(DETECTOR, &chain, &world("fk5", "[0, 1]", "[pos.eq.ra, pos.eq.dec]", "deg"))).unwrap();
+        assert_close_slice(&default_equinox.forward(10.0, 20.0, false), &[150.0, 30.0], 1e-12, "astropy's default FK5 equinox is J2000");
+        let icrs = parse_wcs_body(&wcs_body(DETECTOR, &chain, &icrs_world())).unwrap();
+        assert_eq!(icrs.frame_note(), None);
+
+        let text = err_text(parse_wcs_body(&wcs_body(DETECTOR, &chain, &fk5_world("the vernal one"))));
+        assert_eq!(text, "gWCS frame: reference frame 'fk5' has an equinox that cannot be read ('the vernal one')");
+    }
+
+    #[test]
+    fn a_transform_tag_of_a_future_major_version_is_refused_by_name() {
+        let text = err_text(transform_node("!transform/shift-9.0.0 {offset: 1}"));
+        assert_eq!(text, "gWCS transform 'shift-9.0.0' at transform is not supported by the evaluator");
+        assert!(transform_node("!transform/shift-1.99.0 {offset: 1}").is_ok(), "a minor version above the known one is still read");
+        let nested = "!transform/concatenate-1.4.0 {forward: [!transform/shift-1.4.0 {offset: 1.0}, !transform/scale-2.0.0 {factor: 2.0}]}";
+        let text = err_text(transform_node(nested));
+        assert_eq!(text, "gWCS transform 'scale-2.0.0' at transform/forward[1] is not supported by the evaluator");
+    }
+
     #[test]
     fn refusal_texts_name_frames() {
         let composite = "!<tag:stsci.edu:gwcs/composite_frame-1.1.0>\n      frames:\n      - !<tag:stsci.edu:gwcs/celestial_frame-1.2.0> {axes_names: [lon, lat], axes_order: [0, 1], axis_physical_types: [pos.eq.ra, pos.eq.dec], name: sky, reference_frame: !<tag:astropy.org:astropy/coordinates/frames/icrs-1.1.0> {frame_attributes: {}}, unit: [!unit/unit-1.0.0 deg, !unit/unit-1.0.0 deg]}\n      - !<tag:stsci.edu:gwcs/spectral_frame-1.1.0> {axes_names: [wavelength], axes_order: [2], axis_physical_types: [em.wl], name: spectral, unit: [!unit/unit-1.0.0 um]}\n      name: world";
@@ -1215,13 +1396,19 @@ mod tests {
     }
 
     #[test]
-    fn quantity_units_restricted_to_pixels() {
+    fn quantity_units_follow_the_kind_of_parameter() {
         let tree = parse_real_syntax("transform: !transform/shift-1.4.0 {offset: !unit/quantity-1.1.0 {value: 2.5, unit: !unit/unit-1.0.0 pixel}, inputs: [x], outputs: [y]}\n");
         let node = parse_node(&tree["transform"], &no_arrays, "transform").unwrap();
         assert_close(node.eval(Vals::one(1.0)).v[0], 3.5, 0.0, "pixel quantity");
-        let tree = parse_real_syntax("transform: !transform/scale-1.4.0 {factor: !unit/quantity-1.1.0 {value: 2.0, unit: !unit/unit-1.0.0 arcsec}, inputs: [x], outputs: [y]}\n");
+        let tree = parse_real_syntax("transform: !transform/shift-1.4.0 {offset: !unit/quantity-1.1.0 {value: 2.0, unit: !unit/unit-1.0.0 arcsec}, inputs: [x], outputs: [y]}\n");
         let text = err_text(parse_node(&tree["transform"], &no_arrays, "steps[0].transform/forward[0]"));
         assert_eq!(text, "gWCS: quantity unit 'arcsec' at steps[0].transform/forward[0] is not supported (dimensionless or pixel expected)");
+        let tree = parse_real_syntax("transform: !transform/scale-1.4.0 {factor: !unit/quantity-1.1.0 {value: 2.0, unit: !unit/unit-1.0.0 um}, inputs: [x], outputs: [y]}\n");
+        let text = err_text(parse_node(&tree["transform"], &no_arrays, "transform"));
+        assert_eq!(text, "gWCS: quantity unit 'um' at transform is not supported (dimensionless, pixel, deg or arcsec, optionally per pixel, expected)");
+        let tree = parse_real_syntax("transform: !transform/rotate2d-1.3.0 {angle: !unit/quantity-1.1.0 {value: 2.0, unit: !unit/unit-1.0.0 pixel}}\n");
+        let text = err_text(parse_node(&tree["transform"], &no_arrays, "transform"));
+        assert_eq!(text, "gWCS: quantity unit 'pixel' at transform is not supported (dimensionless, deg, rad, arcmin, arcsec or mas expected)");
         let tree = parse_real_syntax("transform: !transform/shift-1.4.0 {inputs: [x], outputs: [y]}\n");
         let text = err_text(parse_node(&tree["transform"], &no_arrays, "transform"));
         assert_eq!(text, "gWCS node at transform lacks 'offset'");

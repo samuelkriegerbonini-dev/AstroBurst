@@ -1,0 +1,2324 @@
+use std::time::Instant;
+
+use ndarray::Array2;
+use serde::Serialize;
+use serde_json::json;
+
+use crate::cmd::common::{
+    blocking_cmd, output_stem, render_named_and_save, resolve_output_dir, write_derived_fits,
+    write_derived_mef, OutputValues,
+};
+use crate::cmd::science_provenance::{ScientificProvenance, ScientificRun, VerifiedCubeSet};
+use crate::service::common::derived_output_header;
+use crate::infra::wcs_source::load_wcs;
+use crate::core::cube::cache::GLOBAL_CUBE_CACHE;
+use crate::core::cube::companions::{open_cube_set, CubeSet};
+use crate::service::cubeprep::filter_registry;
+use crate::core::cube::eager::{build_wavelength_axis, classify_cube, classify_spectral_cube, ramp_classification};
+use crate::core::cube::lazy::{ApertureSpectrum, CollapseMode, CollapseZeroPolicy, LazyCube};
+use crate::core::cube::companions::{DqPolicy, FLOAT_DQ_NOTE};
+use crate::core::cube::moments::{moment_maps_set, unit_product, ContinuumWindows, MomentConfig, MomentMaps, VelocityFrame, DQ_NOT_APPLIED_NOTE};
+use crate::core::cube::noise_factor::{noise_factor, NoiseFactor};
+use crate::core::cubeprep::cube::{plane_text, planes_from_header, planes_from_table, remove_plane_keys, CubePlane, CTYPE_FILTER, FILTERS_EXTNAME};
+use crate::core::imaging::push_history;
+use crate::core::imaging::region::RegionShape;
+use crate::core::imaging::stats::percentile;
+use crate::core::astrometry::wcs::WcsTransform;
+use crate::core::metadata::photcal::{FluxConvention, PhotCal, JY_PER_MJY};
+use crate::core::metadata::units::{classify_unit, UnitClass};
+use crate::infra::fits::table::{find_bintable, load_bintable};
+use crate::infra::fits::writer::{HduData, ImageHdu};
+use crate::infra::render::grayscale::render_grayscale;
+use crate::types::constants::{
+    RES_BITPIX, RES_FITS_PATH, RES_FRAME_INDEX, RES_FRAMES, RES_HEIGHT,
+    RES_OUTPUT_PATH, RES_SPECTRUM, RES_WIDTH, RES_UNIT,
+    RES_SPECTRAL_CLASSIFICATION, RES_IS_SPECTRAL, RES_SPECTRAL_REASON,
+    RES_AXIS_TYPE, RES_AXIS_UNIT, RES_CHANNEL_COUNT, RES_WAVELENGTHS, RES_RAMP,
+    EXTNAME_DQ, EXTNAME_ERR, EXTNAME_SCI,
+};
+use crate::types::header::HduHeader;
+
+pub const KEY_SPECTRAL_AXIS: &str = "spectral_axis";
+pub const APERTURE_SUBSAMPLES: u8 = 5;
+
+const KEY_AXIS_UNIT_ASSUMED: &str = "axis_unit_assumed";
+const CARD_BUNIT: &str = "BUNIT";
+const CARD_CHANNEL: &str = "CHANNEL";
+const CARD_FILTER: &str = "FILTER";
+const CARD_SPECTRAL_TYPE: &str = "SPECTYPE";
+const CARD_SPECTRAL_VALUE: &str = "SPECVAL";
+const CARD_SPECTRAL_UNIT: &str = "SPECUNIT";
+pub(crate) const CARD_GROUP: &str = "ABGROUP";
+pub(crate) const CARD_INTEGRATION: &str = "ABINTEG";
+pub(crate) const CARD_NOISE_FACTOR: &str = "ABNOISEF";
+pub const ERR_SOURCE_NONE: &str = "none";
+const MEDIAN_ERROR_NOTE: &str =
+    "the median error is approximate: sqrt(pi/2) = 1.2533 times the error of the mean of the same channels";
+const ABPROC_CUBE_FRAME: &str = "cube-frame";
+const SUMMED_UNIT_SUFFIX: &str = " x channels";
+const SUMMED_UNIT_FACTOR: &str = "chan";
+const COVERAGE_UNIT: &str = "chan";
+const ABPROC_MOMENT_COVERAGE: &str = "moment-coverage";
+const CARD_MOMENT_Z0: &str = "MOMZ0";
+const CARD_MOMENT_Z1: &str = "MOMZ1";
+const CARD_MOMENT_REST: &str = "MOMREST";
+const CARD_MOMENT_CONVENTION: &str = "MOMCONV";
+const CARD_MOMENT_REDSHIFT: &str = "MOMREDSH";
+const CARD_MOMENT_FRAME: &str = "MOMFRAME";
+const CARD_MOMENT_SNR: &str = "MOMSNR";
+const CARD_MOMENT_MASK: &str = "MOMMASK";
+const CARD_MOMENT_CONT_A: &str = "MOMCONTA";
+const CARD_MOMENT_CONT_B: &str = "MOMCONTB";
+const CARD_MOMENT_CLIP: &str = "MOMCLIP";
+const MOMENT_HISTORY_POSITIVE: &str = "AstroBurst moments: M1 and M2 weighted by the positive channels only";
+const MOMENT_HISTORY_CLIPPED: &str = "AstroBurst moments: M1 and M2 weighted by channels above MOMCLIP x noise";
+
+const PREVIEW_LOW_PERCENTILE: f64 = 0.01;
+const PREVIEW_HIGH_PERCENTILE: f64 = 0.99;
+const AXIS3_KEYS: [&str; 10] = [
+    "NAXIS3", "CTYPE3", "CRVAL3", "CDELT3", "CRPIX3", "CUNIT3", "CNAME3", "CRDER3", "CSYER3", "CROTA3",
+];
+
+fn is_axis3_matrix_key(key: &str) -> bool {
+    let Some(body) = key.strip_prefix("CD").or_else(|| key.strip_prefix("PC")) else {
+        return false;
+    };
+    body.starts_with("3_") || body.ends_with("_3")
+}
+
+pub fn strip_spectral_axis(header: &HduHeader) -> HduHeader {
+    let mut out = header.clone();
+    let keys: Vec<String> = out.cards.iter().map(|(k, _)| k.clone()).collect();
+    for key in keys {
+        let upper = key.trim().to_uppercase();
+        if AXIS3_KEYS.contains(&upper.as_str()) || is_axis3_matrix_key(&upper) {
+            out.remove(&key);
+        }
+    }
+    if out.get("NAXIS").is_some() {
+        out.set("NAXIS", "2".to_string());
+    }
+    if out.get("WCSAXES").is_some() || out.get("CTYPE1").is_some() {
+        out.set("WCSAXES", "2".to_string());
+    }
+    out
+}
+
+fn card_text(header: &HduHeader, key: &str) -> Option<String> {
+    header
+        .get(key)
+        .map(|s| s.trim().trim_matches('\'').trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn plane_header(cube: &LazyCube, abproc: &str, values: OutputValues) -> HduHeader {
+    derived_output_header(Some(&strip_spectral_axis(&cube.header)), abproc, values)
+}
+
+pub(crate) fn collapse_header(cube: &LazyCube, mode: CollapseMode) -> HduHeader {
+    let abproc = format!("collapse-{}", mode.name());
+    if mode != CollapseMode::Sum {
+        return plane_header(cube, &abproc, OutputValues::Linear);
+    }
+    let mut header = plane_header(cube, &abproc, OutputValues::Rescaled);
+    if let Some(unit) = card_text(&cube.header, CARD_BUNIT) {
+        header.set(CARD_BUNIT, unit_product(&unit, SUMMED_UNIT_FACTOR).unwrap_or_else(|| format!("{}{}", unit, SUMMED_UNIT_SUFFIX)));
+    }
+    header
+}
+
+pub(crate) fn stamp_dq_header(header: &mut HduHeader, policy: DqPolicy, hdu: Option<usize>, excluded: u64) {
+    header.set("ABDQPOL", policy.name().into());
+    header.set("ABDQBIT", "1".into());
+    header.set("ABDQAPP", if hdu.is_some() { "T" } else { "F" }.into());
+    header.set("ABDQNUM", excluded.to_string());
+    header.remove("ABDQHDU");
+    if let Some(hdu) = hdu { header.set("ABDQHDU", hdu.to_string()); }
+    push_history(header, &format!("AstroBurst DQ policy: {}; applied={}", policy.name(), hdu.is_some()));
+}
+
+fn moment_header(cube: &LazyCube, order: u8, unit: &str) -> HduHeader {
+    let mut header = plane_header(cube, &format!("moment{}", order), OutputValues::Rescaled);
+    header.set(CARD_BUNIT, unit.to_string());
+    header
+}
+
+fn stamp_moment_header(header: &mut HduHeader, cfg: &MomentConfig, maps: &MomentMaps) {
+    header.set(CARD_MOMENT_Z0, cfg.z0.to_string());
+    header.set(CARD_MOMENT_Z1, cfg.z1.to_string());
+    if let Some(rest) = maps.rest_um {
+        header.set_f64(CARD_MOMENT_REST, rest);
+        header.set(CARD_MOMENT_CONVENTION, cfg.convention.name().to_string());
+    }
+    if let Some(redshift) = maps.redshift {
+        header.set_f64(CARD_MOMENT_REDSHIFT, redshift);
+    }
+    header.set(CARD_MOMENT_FRAME, maps.velocity_frame.name().to_string());
+    header.set_f64(CARD_MOMENT_SNR, cfg.snr_threshold);
+    header.set(CARD_MOMENT_MASK, if cfg.mask_below_threshold { "T" } else { "F" }.into());
+    if let Some((a, b)) = cfg.continuum {
+        header.set(CARD_MOMENT_CONT_A, format!("{}-{}", a.0, a.1));
+        header.set(CARD_MOMENT_CONT_B, format!("{}-{}", b.0, b.1));
+    }
+    match maps.weight_threshold_sigma {
+        Some(threshold) => {
+            header.set_f64(CARD_MOMENT_CLIP, threshold);
+            push_history(header, MOMENT_HISTORY_CLIPPED);
+        }
+        None => push_history(header, MOMENT_HISTORY_POSITIVE),
+    }
+}
+
+fn has_filter_axis(header: &HduHeader) -> bool {
+    card_text(header, "CTYPE3").is_some_and(|ctype| ctype.eq_ignore_ascii_case(CTYPE_FILTER))
+}
+
+fn filters_table_planes(cube: &LazyCube) -> Option<Vec<CubePlane>> {
+    let index = find_bintable(&cube.source_path, FILTERS_EXTNAME, 1).ok()?;
+    let planes = planes_from_table(&load_bintable(&cube.source_path, index).ok()?).ok()?;
+    (planes.len() == cube.geometry.naxis3).then_some(planes)
+}
+
+fn keyword_planes(cube: &LazyCube) -> Option<Vec<CubePlane>> {
+    has_filter_axis(&cube.header)
+        .then(|| planes_from_header(&cube.header, cube.geometry.naxis3, &filter_registry()).ok())
+        .flatten()
+}
+
+pub(crate) fn frame_header(cube: &LazyCube, z: usize) -> HduHeader {
+    let mut header = plane_header(cube, ABPROC_CUBE_FRAME, OutputValues::Linear);
+    header.set(CARD_CHANNEL, z.to_string());
+    if has_filter_axis(&cube.header) {
+        let filter = plane_text(&cube.header, "FILTER", z + 1);
+        remove_plane_keys(&mut header);
+        if let Some(filter) = filter {
+            header.set(CARD_FILTER, filter);
+        }
+    }
+    if let Some(ramp) = cube.ramp() {
+        header.set(CARD_GROUP, (z % ramp.ngroups).to_string());
+        header.set(CARD_INTEGRATION, (z / ramp.ngroups).to_string());
+    }
+    if let Ok(axis) = cube.spectral_axis() {
+        if let Some(value) = axis.header_values().get(z).copied().filter(|v| v.is_finite()) {
+            header.set_f64(CARD_SPECTRAL_VALUE, value);
+            if !axis.ctype.is_empty() {
+                header.set(CARD_SPECTRAL_TYPE, axis.ctype.clone());
+            }
+            if !axis.header_unit.is_empty() {
+                header.set(CARD_SPECTRAL_UNIT, axis.header_unit.clone());
+            }
+        }
+    }
+    header
+}
+
+pub fn linear_preview(arr: &Array2<f32>) -> Array2<f32> {
+    let mut finite: Vec<f32> = arr.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return Array2::zeros(arr.dim());
+    }
+    let mut lo = percentile(&mut finite, PREVIEW_LOW_PERCENTILE);
+    let mut hi = percentile(&mut finite, PREVIEW_HIGH_PERCENTILE);
+    if hi <= lo {
+        lo = finite.iter().copied().fold(f32::INFINITY, f32::min);
+        hi = finite.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    }
+    let range = (hi - lo).max(1e-10);
+    arr.mapv(|v| if v.is_finite() { ((v - lo) / range).clamp(0.0, 1.0) } else { 0.0 })
+}
+
+struct JyPerPixelUnit {
+    factor: f64,
+    note: Option<String>,
+}
+
+fn wcs_pixel_area_sr(wcs: &WcsTransform) -> Option<f64> {
+    let cd = wcs.raw_params().4;
+    let square_degrees = (cd[0][0] * cd[1][1] - cd[0][1] * cd[1][0]).abs();
+    let steradians = square_degrees * 1f64.to_radians().powi(2);
+    (steradians.is_finite() && steradians > 0.0).then_some(steradians)
+}
+
+fn jy_per_pixel_unit(cube: &LazyCube) -> Option<JyPerPixelUnit> {
+    let header = &cube.header;
+    let wcs = load_wcs(&cube.source_path, header).ok();
+    if let Some(PhotCal { convention: FluxConvention::JwstMjySr { pixar_sr, .. }, .. }) = PhotCal::from_header(header, wcs.as_ref()) {
+        return Some(JyPerPixelUnit { factor: pixar_sr * JY_PER_MJY, note: None });
+    }
+    let unit = classify_unit(header);
+    let factor = match unit.class {
+        UnitClass::SurfaceBrightness { jy_per_sr_per_unit } => jy_per_sr_per_unit * wcs.as_ref().and_then(wcs_pixel_area_sr)?,
+        UnitClass::PerPixelPhysical { jy_per_unit } => jy_per_unit,
+        _ => return None,
+    };
+    let note = format!("Jy from BUNIT '{}': {:e} Jy per pixel unit", unit.bunit.unwrap_or_default(), factor);
+    Some(JyPerPixelUnit { factor, note: Some(note) })
+}
+
+pub(crate) fn err_source(err: Option<&LazyCube>) -> String {
+    match err {
+        Some(cube) => format!("{} HDU {}", EXTNAME_ERR, cube.hdu_index),
+        None => ERR_SOURCE_NONE.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegionSpectrumResponse {
+    pub sum: Vec<f32>,
+    pub mean: Vec<f32>,
+    pub npix: f64,
+    pub n_bg: usize,
+    pub bg_per_pixel: Option<Vec<f32>>,
+    pub wavelengths: Option<Vec<f64>>,
+    pub unit: String,
+    pub bg_subtracted: bool,
+    pub flux_jy: Option<Vec<f64>>,
+    pub sum_raw: Vec<f32>,
+    pub flux_jy_raw: Option<Vec<f64>>,
+    pub coverage: Vec<f64>,
+    pub n_incomplete_channels: usize,
+    pub err: Option<Vec<f32>>,
+    pub err_scaled: Option<Vec<f32>>,
+    pub mean_err: Option<Vec<f32>>,
+    pub used_weight: Vec<f64>,
+    pub err_source: String,
+    pub bg_err_per_pixel: Option<Vec<f32>>,
+    pub flux_jy_err: Option<Vec<f64>>,
+    pub n_dq_excluded: Option<Vec<u32>>,
+    pub noise_factor: Option<NoiseFactor>,
+    pub notes: Vec<String>,
+    pub elapsed_ms: u64,
+}
+
+fn region_error_notes(set: &CubeSet, spectrum: &ApertureSpectrum, background: bool, notes: &mut Vec<String>) {
+    match &set.err {
+        Some(err) => notes.push(format!(
+            "error propagated from the ERR cube (HDU {}) as sqrt(sum w^2 ERR^2) over the aperture{}",
+            err.hdu_index,
+            if background { ", plus the variance of the clipped-median sky level, pi/2 times that of a mean" } else { "" }
+        )),
+        None => notes.push("no ERR cube: the region spectrum has no error column".to_string()),
+    }
+    if let Some(dq) = &set.dq {
+        let dropped: u64 = spectrum.n_dq_excluded.iter().map(|&n| u64::from(n)).sum();
+        let channels = spectrum.n_dq_excluded.iter().filter(|&&n| n > 0).count();
+        notes.push(format!(
+            "{} cube (HDU {}): aperture spaxels with bit 0 (DO_NOT_USE) dropped per channel, {} spaxel-channels over {} channels",
+            EXTNAME_DQ, dq.hdu_index, dropped, channels
+        ));
+    }
+}
+
+fn window_channels((start, end): (usize, usize), depth: usize) -> Vec<usize> {
+    (start..=end).filter(|&z| z < depth).collect()
+}
+
+fn complete_aperture_sums(spectrum: &ApertureSpectrum, windows: ContinuumWindows) -> (Vec<f32>, usize) {
+    let mut sums = spectrum.sum.clone();
+    let distinct = if windows.0 == windows.1 { vec![windows.0] } else { vec![windows.0, windows.1] };
+    let mut skipped = 0;
+    for window in distinct {
+        let channels = window_channels(window, sums.len());
+        let incomplete = spectrum.dropouts.incomplete_channels(&channels);
+        for z in channels {
+            if incomplete[z] && sums[z].is_finite() {
+                sums[z] = f32::NAN;
+                skipped += 1;
+            }
+        }
+    }
+    (sums, skipped)
+}
+
+fn region_noise_factor(
+    spectrum: &ApertureSpectrum,
+    continuum: Option<ContinuumWindows>,
+    notes: &mut Vec<String>,
+) -> Option<NoiseFactor> {
+    let windows = continuum?;
+    let Some(err) = spectrum.err.as_deref() else {
+        notes.push("continuum windows given but no ERR cube: the noise factor needs the propagated error".to_string());
+        return None;
+    };
+    let (sums, skipped) = complete_aperture_sums(spectrum, windows);
+    if skipped > 0 {
+        notes.push(format!(
+            "{} continuum-window channels lost aperture spaxels (DQ bit 0 or non-finite flux) that other channels of the same window kept: left out of the noise factor",
+            skipped
+        ));
+    }
+    match noise_factor(&sums, err, windows) {
+        Ok(factor) => {
+            notes.extend(factor.warning.clone());
+            Some(factor)
+        }
+        Err(reason) => {
+            notes.push(format!("noise factor not measured: {}", reason));
+            None
+        }
+    }
+}
+
+struct ApertureCoverage {
+    sum: Vec<f32>,
+    coverage: Vec<f64>,
+    n_incomplete_channels: usize,
+}
+
+fn aperture_coverage(spectrum: &ApertureSpectrum, notes: &mut Vec<String>) -> ApertureCoverage {
+    let depth = spectrum.sum.len();
+    let every_channel: Vec<usize> = (0..depth).collect();
+    let incomplete = spectrum.dropouts.incomplete_channels(&every_channel);
+    let lost_everywhere = spectrum.dropouts.dropped_in_every(&every_channel);
+    let kept_weight = (0..depth).find(|&z| !incomplete[z]).map_or(spectrum.npix, |z| spectrum.used_weight[z]);
+    let coverage = spectrum.used_weight.iter().map(|&w| if kept_weight > 0.0 { w / kept_weight } else { 0.0 }).collect();
+    let mut sum = spectrum.sum.clone();
+    let mut n_incomplete_channels = 0;
+    for z in (0..depth).filter(|&z| incomplete[z]) {
+        if sum[z].is_finite() {
+            n_incomplete_channels += 1;
+        }
+        sum[z] = f32::NAN;
+    }
+    if lost_everywhere > 0 {
+        notes.push(format!(
+            "{} no data in any channel: the sum covers {:.1} of {:.1} pixels",
+            if lost_everywhere == 1 { "1 aperture spaxel has".to_string() } else { format!("{} aperture spaxels have", lost_everywhere) },
+            kept_weight,
+            spectrum.npix
+        ));
+    }
+    if n_incomplete_channels > 0 {
+        notes.push(format!(
+            "{} of {} channels lost aperture spaxels (non-finite flux or DQ bit 0) that other channels kept: their sum and Jy are blank (NaN) so that a coverage dip is not read as flux; the raw sums are in sum_raw and flux_jy_raw and the fraction of the aperture each channel kept is in coverage; mean, err and the Jy error describe the spaxels each channel kept",
+            n_incomplete_channels, depth
+        ));
+    }
+    ApertureCoverage { sum, coverage, n_incomplete_channels }
+}
+
+fn mean_errors(err: &[f32], used_weight: &[f64]) -> Vec<f32> {
+    err.iter()
+        .zip(used_weight)
+        .map(|(&e, &w)| if w > 0.0 { (e as f64 / w) as f32 } else { f32::NAN })
+        .collect()
+}
+
+pub(crate) fn region_spectrum_response(
+    set: &CubeSet,
+    shape: &RegionShape,
+    background: Option<&RegionShape>,
+    continuum: Option<ContinuumWindows>,
+    t0: Instant,
+) -> anyhow::Result<RegionSpectrumResponse> {
+    let cube = &set.sci;
+    let spectrum = cube.extract_spectrum_aperture_with(
+        shape,
+        background,
+        APERTURE_SUBSAMPLES,
+        set.err.as_deref(),
+        set.dq.as_deref(),
+    )?;
+    let axis = cube.spectral_axis().ok();
+    let jy = jy_per_pixel_unit(cube);
+    let in_jy = |values: &[f32]| -> Option<Vec<f64>> {
+        jy.as_ref().map(|jy| values.iter().map(|&v| v as f64 * jy.factor).collect())
+    };
+    let flux_jy_raw = in_jy(&spectrum.sum);
+    let flux_jy_err = spectrum.err.as_deref().and_then(in_jy);
+    let mut notes = set.notes.clone();
+    let covered = aperture_coverage(&spectrum, &mut notes);
+    let flux_jy = in_jy(&covered.sum);
+    region_error_notes(set, &spectrum, background.is_some(), &mut notes);
+    notes.extend(jy.and_then(|jy| jy.note));
+    let factor = region_noise_factor(&spectrum, continuum, &mut notes);
+    let err_scaled = match (&spectrum.err, &factor) {
+        (Some(err), Some(f)) => Some(err.iter().map(|&e| (e as f64 * f.factor) as f32).collect()),
+        _ => None,
+    };
+    let mean_err = spectrum.err.as_deref().map(|err| mean_errors(err, &spectrum.used_weight));
+    Ok(RegionSpectrumResponse {
+        sum: covered.sum,
+        sum_raw: spectrum.sum,
+        flux_jy_raw,
+        coverage: covered.coverage,
+        n_incomplete_channels: covered.n_incomplete_channels,
+        mean: spectrum.mean,
+        npix: spectrum.npix,
+        n_bg: spectrum.n_bg,
+        bg_subtracted: spectrum.bg_per_pixel.is_some(),
+        bg_per_pixel: spectrum.bg_per_pixel,
+        wavelengths: axis.as_ref().map(|a| a.values.clone()),
+        unit: axis.map(|a| a.unit).unwrap_or_default(),
+        flux_jy,
+        err: spectrum.err,
+        err_scaled,
+        mean_err,
+        used_weight: spectrum.used_weight,
+        err_source: err_source(set.err.as_deref()),
+        bg_err_per_pixel: spectrum.bg_err_per_pixel.filter(|_| set.err.is_some()),
+        flux_jy_err,
+        n_dq_excluded: set.dq.as_ref().map(|_| spectrum.n_dq_excluded),
+        noise_factor: factor,
+        notes,
+        elapsed_ms: t0.elapsed().as_millis() as u64,
+    })
+}
+
+fn write_value_with_error(
+    fits_path: &str,
+    value: &Array2<f32>,
+    header: &HduHeader,
+    err: Option<(&Array2<f32>, &HduHeader)>,
+) -> anyhow::Result<()> {
+    let Some((err, err_header)) = err else {
+        return write_derived_fits(fits_path, value, Some(header));
+    };
+    let hdus = [
+        ImageHdu { data: HduData::F32(value), header: Some(header), extname: EXTNAME_SCI, extver: 1 },
+        ImageHdu { data: HduData::F32(err), header: Some(err_header), extname: EXTNAME_ERR, extver: 1 },
+    ];
+    write_derived_mef(fits_path, None, &hdus)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CollapseRangeResponse {
+    pub provenance: ScientificProvenance,
+    pub provenance_path: String,
+    pub png_path: String,
+    pub fits_path: String,
+    pub z0: usize,
+    pub z1: usize,
+    pub mode: &'static str,
+    pub zero_policy: CollapseZeroPolicy,
+    pub dq_policy: DqPolicy,
+    pub dq_applied: bool,
+    pub dq_hdu: Option<usize>,
+    pub dq_excluded_samples: u64,
+    pub dimensions: [usize; 2],
+    pub has_err: bool,
+    pub err_source: String,
+    pub notes: Vec<String>,
+    pub elapsed_ms: u64,
+}
+
+pub(crate) fn collapse_range_files(
+    input: &VerifiedCubeSet,
+    path: &str,
+    output_dir: &str,
+    z0: usize,
+    z1: usize,
+    mode: CollapseMode,
+    t0: Instant,
+) -> anyhow::Result<CollapseRangeResponse> {
+    collapse_range_files_with_policy(input, path, output_dir, z0, z1, mode, CollapseZeroPolicy::default(), None, t0)
+}
+
+fn collapse_range_files_with_policy(
+    input: &VerifiedCubeSet,
+    path: &str,
+    output_dir: &str,
+    z0: usize,
+    z1: usize,
+    mode: CollapseMode,
+    zero_policy: CollapseZeroPolicy,
+    dq_policy: Option<DqPolicy>,
+    t0: Instant,
+) -> anyhow::Result<CollapseRangeResponse> {
+    let set = &input.set;
+    let mut run = ScientificRun::new(path, output_dir, "collapse", input, json!({ "z0": z0, "z1": z1, "mode": mode.name(), "zero_policy": zero_policy, "dq_policy": dq_policy }))?;
+    let dq_policy = dq_policy.unwrap_or_default();
+    let dq = set.dq.as_deref().filter(|_| dq_policy == DqPolicy::DoNotUse);
+    let dq_hdu = dq.map(|cube| cube.hdu_index);
+    let output_dir = run.output_dir.clone();
+    let cube = &set.sci;
+    let collapsed = cube.collapse_range_with_dq(z0, z1, mode, set.err.as_deref(), dq, zero_policy)?;
+    let arr = &collapsed.value;
+    let name = format!("{}_collapse_{}_{}-{}", output_stem(path), mode.name(), z0, z1);
+    let (png_path, _) = render_named_and_save(arr, &output_dir, &name, false, None)?;
+    let fits_path = format!("{}/{}.fits", output_dir, name);
+    let mut header = collapse_header(cube, mode);
+    header.set("ABZERO", zero_policy.name().to_string());
+    push_history(&mut header, &format!("AstroBurst collapse zero policy: {}", zero_policy.name()));
+    stamp_dq_header(&mut header, dq_policy, dq_hdu, collapsed.dq_excluded_samples);
+    run.stamp_header(&mut header);
+    let mut err_header = header.clone();
+    let mut notes = set.notes.clone();
+    notes.push(zero_policy.note().to_string());
+    if let (Some(err), Some(_)) = (&set.err, &collapsed.err) {
+        notes.push(format!("ERR extension propagated from the ERR cube (HDU {})", err.hdu_index));
+        if mode == CollapseMode::Median {
+            notes.push(MEDIAN_ERROR_NOTE.to_string());
+            push_history(&mut err_header, MEDIAN_ERROR_NOTE);
+        }
+    }
+    if let Some(dq) = dq {
+        notes.push(format!("DQ HDU {}: DO_NOT_USE (bit 0) and invalid flags excluded {} finite samples", dq.hdu_index, collapsed.dq_excluded_samples));
+        if dq.geometry.bitpix < 0 { notes.push(FLOAT_DQ_NOTE.into()); }
+    } else if set.dq.is_some() {
+        notes.push(DQ_NOT_APPLIED_NOTE.to_string());
+    } else {
+        notes.push("No DQ cube is available: no DQ samples excluded".into());
+    }
+    write_value_with_error(&fits_path, arr, &header, collapsed.err.as_ref().map(|e| (e, &err_header)))?;
+    let (rows, cols) = arr.dim();
+    let provenance_path = run.finish(
+        json!({ "z0": z0, "z1": z1, "mode": mode.name(), "zero_policy": zero_policy, "err_hdu": set.err.as_ref().map(|cube| cube.hdu_index), "dq_policy": dq_policy, "dq_hdu": dq_hdu, "dq_applied": dq_hdu.is_some(), "dq_excluded_samples": collapsed.dq_excluded_samples, "unit": header.get(CARD_BUNIT), "median_error_approximation": mode == CollapseMode::Median && collapsed.err.is_some() }),
+        json!({ "fits_path": fits_path, "png_path": png_path }),
+        &notes,
+    )?;
+    Ok(CollapseRangeResponse {
+        provenance: run.provenance,
+        provenance_path,
+        png_path,
+        fits_path,
+        z0,
+        z1,
+        mode: mode.name(),
+        zero_policy,
+        dq_policy,
+        dq_applied: dq_hdu.is_some(),
+        dq_hdu,
+        dq_excluded_samples: collapsed.dq_excluded_samples,
+        dimensions: [cols, rows],
+        has_err: collapsed.err.is_some(),
+        err_source: err_source(set.err.as_deref()),
+        notes,
+        elapsed_ms: t0.elapsed().as_millis() as u64,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MapFiles {
+    pub png_path: String,
+    pub fits_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MomentMapsResponse {
+    pub provenance: ScientificProvenance,
+    pub provenance_path: String,
+    pub m0: MapFiles,
+    pub m1: MapFiles,
+    pub m2: MapFiles,
+    pub coverage: MapFiles,
+    pub n_partial_pixels: usize,
+    pub rest_um: Option<f64>,
+    pub redshift: Option<f64>,
+    pub velocity_frame: VelocityFrame,
+    pub weight_threshold_sigma: Option<f64>,
+    pub intensity_unit: Option<String>,
+    pub m0_unit: String,
+    pub velocity_unit: &'static str,
+    pub noise_per_channel: Option<f64>,
+    pub n_channels: usize,
+    pub notes: Vec<String>,
+    pub dimensions: [usize; 2],
+    pub has_err: bool,
+    pub err_source: String,
+    pub noise_factor: Option<f64>,
+    pub dq_policy: DqPolicy,
+    pub dq_applied: bool,
+    pub dq_hdu: Option<usize>,
+    pub dq_excluded_samples: u64,
+    pub elapsed_ms: u64,
+}
+
+fn save_map(
+    arr: &Array2<f32>,
+    err: Option<&Array2<f32>>,
+    header: &HduHeader,
+    noise_factor: Option<f64>,
+    output_dir: &str,
+    name: &str,
+) -> anyhow::Result<MapFiles> {
+    let png_path = format!("{}/{}.png", output_dir, name);
+    render_grayscale(&linear_preview(arr), &png_path)?;
+    let fits_path = format!("{}/{}.fits", output_dir, name);
+    match err {
+        Some(err) => {
+            let mut sci_header = header.clone();
+            if let Some(factor) = noise_factor {
+                sci_header.set_f64(CARD_NOISE_FACTOR, factor);
+            }
+            write_value_with_error(&fits_path, arr, &sci_header, Some((err, header)))?;
+        }
+        None => write_derived_fits(&fits_path, arr, Some(header))?,
+    }
+    Ok(MapFiles { png_path, fits_path })
+}
+
+pub(crate) fn moment_map_files(
+    input: &VerifiedCubeSet,
+    path: &str,
+    output_dir: &str,
+    cfg: &MomentConfig,
+    t0: Instant,
+) -> anyhow::Result<MomentMapsResponse> {
+    let set = &input.set;
+    let mut run = ScientificRun::new(path, output_dir, "moments", input, json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": cfg.rest_um, "convention": cfg.convention, "continuum": cfg.continuum, "snr_threshold": cfg.snr_threshold, "mask_below_threshold": cfg.mask_below_threshold, "dq_policy": cfg.dq_policy, "redshift": cfg.redshift, "weight_threshold_sigma": cfg.weight_threshold_sigma }))?;
+    let dq_policy = cfg.dq_policy.unwrap_or_default();
+    let output_dir = run.output_dir.clone();
+    let cube = &set.sci;
+    let maps = moment_maps_set(set, cfg)?;
+    let stem = output_stem(path);
+    let range = format!("{}-{}", cfg.z0, cfg.z1);
+    let factor = maps.noise_factor;
+    let stamped = |mut header: HduHeader| {
+        stamp_dq_header(&mut header, dq_policy, maps.dq_hdu, maps.dq_excluded_samples);
+        stamp_moment_header(&mut header, cfg, &maps);
+        run.stamp_header(&mut header);
+        header
+    };
+    let m0_header = stamped(moment_header(cube, 0, &maps.m0_unit));
+    let velocity_header = |order: u8| stamped(moment_header(cube, order, maps.velocity_unit));
+    let mut coverage_header = plane_header(cube, ABPROC_MOMENT_COVERAGE, OutputValues::Rescaled);
+    coverage_header.set(CARD_BUNIT, COVERAGE_UNIT.to_string());
+    let coverage_header = stamped(coverage_header);
+    let name = |order: u8| format!("{}_m{}_{}", stem, order, range);
+    let m0 = save_map(&maps.m0, maps.m0_err.as_ref(), &m0_header, factor, &output_dir, &name(0))?;
+    let m1 = save_map(&maps.m1, maps.m1_err.as_ref(), &velocity_header(1), factor, &output_dir, &name(1))?;
+    let m2 = save_map(&maps.m2, maps.m2_err.as_ref(), &velocity_header(2), factor, &output_dir, &name(2))?;
+    let coverage = save_map(&maps.coverage, None, &coverage_header, None, &output_dir, &format!("{}_mcov_{}", stem, range))?;
+    let (rows, cols) = maps.m0.dim();
+    let axis = cube.spectral_axis().map_err(anyhow::Error::msg)?;
+    let notes: Vec<String> = set.notes.iter().cloned().chain(maps.notes).collect();
+    let provenance_path = run.finish(
+        json!({ "z0": cfg.z0, "z1": cfg.z1, "rest_um": maps.rest_um, "redshift": maps.redshift, "velocity_frame": maps.velocity_frame, "convention": if axis.kind.is_velocity() { None } else { Some(cfg.convention) }, "velocity_axis_as_stored": axis.kind.is_velocity(), "spectral_frame": axis.specsys, "velocity_shift_kms": 0.0, "continuum": cfg.continuum, "snr_threshold": cfg.snr_threshold, "mask_below_threshold": cfg.mask_below_threshold, "weight_threshold_sigma": maps.weight_threshold_sigma, "n_partial_pixels": maps.n_partial_pixels, "err_hdu": maps.err_hdu, "dq_policy": dq_policy, "dq_hdu": maps.dq_hdu, "dq_applied": maps.dq_hdu.is_some(), "dq_excluded_samples": maps.dq_excluded_samples, "noise_factor": factor, "intensity_unit": maps.intensity_unit, "m0_unit": maps.m0_unit, "velocity_unit": maps.velocity_unit }),
+        json!({ "m0": m0, "m1": m1, "m2": m2, "coverage": coverage }),
+        &notes,
+    )?;
+    Ok(MomentMapsResponse {
+        provenance: run.provenance,
+        provenance_path,
+        m0,
+        m1,
+        m2,
+        coverage,
+        n_partial_pixels: maps.n_partial_pixels,
+        rest_um: maps.rest_um,
+        redshift: maps.redshift,
+        velocity_frame: maps.velocity_frame,
+        weight_threshold_sigma: maps.weight_threshold_sigma,
+        intensity_unit: maps.intensity_unit,
+        m0_unit: maps.m0_unit,
+        velocity_unit: maps.velocity_unit,
+        noise_per_channel: maps.noise_per_channel,
+        n_channels: maps.n_channels,
+        notes,
+        dimensions: [cols, rows],
+        has_err: maps.m0_err.is_some(),
+        err_source: err_source(set.err.as_deref()),
+        noise_factor: factor,
+        dq_policy,
+        dq_applied: maps.dq_hdu.is_some(),
+        dq_hdu: maps.dq_hdu,
+        dq_excluded_samples: maps.dq_excluded_samples,
+        elapsed_ms: t0.elapsed().as_millis() as u64,
+    })
+}
+
+fn cube_info_json(path: &str) -> anyhow::Result<serde_json::Value> {
+    let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
+    let geo = &cube.geometry;
+    let ramp = cube.ramp();
+    let table = filters_table_planes(&cube);
+    let classification = match &ramp {
+        Some(r) => ramp_classification(r, geo.naxis3),
+        None => classify_cube(&cube.header, geo.naxis3, table.is_some()),
+    };
+    let planes = table.or_else(|| keyword_planes(&cube));
+    Ok(json!({
+        RES_WIDTH: geo.naxis1,
+        RES_HEIGHT: geo.naxis2,
+        RES_FRAMES: geo.depth,
+        RES_BITPIX: geo.bitpix,
+        KEY_BUNIT: card_text(&cube.header, CARD_BUNIT),
+        RES_RAMP: ramp,
+        RES_SPECTRAL_CLASSIFICATION: {
+            RES_IS_SPECTRAL: classification.is_spectral,
+            RES_SPECTRAL_REASON: classification.reason,
+            RES_AXIS_TYPE: classification.axis_type,
+            RES_AXIS_UNIT: classification.axis_unit,
+            KEY_AXIS_UNIT_ASSUMED: classification.axis_unit_assumed,
+            RES_CHANNEL_COUNT: classification.channel_count,
+            KEY_IS_PHOTOMETRIC: classification.is_photometric,
+        },
+        RES_WAVELENGTHS: build_wavelength_axis(&cube.header),
+        KEY_SPECTRAL_AXIS: cube.spectral_axis().ok(),
+        KEY_PHOTOMETRIC_PLANES: planes,
+    }))
+}
+
+pub(crate) fn cube_frame_json(
+    path: &str,
+    frame_index: usize,
+    output_path: &str,
+    output_fits: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
+    let frame = cube.get_frame(frame_index)?;
+    cube.save_display_png(&frame, output_path)?;
+    if let Some(fits_path) = output_fits {
+        write_derived_fits(fits_path, &frame, Some(&frame_header(&cube, frame_index)))?;
+    }
+    Ok(json!({
+        RES_FRAME_INDEX: frame_index,
+        RES_OUTPUT_PATH: output_path,
+        RES_FITS_PATH: output_fits,
+    }))
+}
+
+const KEY_FLUX_JY: &str = "flux_jy";
+const KEY_ERR: &str = "err";
+const KEY_IS_PHOTOMETRIC: &str = "is_photometric";
+const KEY_PHOTOMETRIC_PLANES: &str = "photometric_planes";
+const KEY_BUNIT: &str = "bunit";
+
+fn cube_spectrum_json(path: &str, x: usize, y: usize) -> anyhow::Result<serde_json::Value> {
+    let cube = GLOBAL_CUBE_CACHE.get_or_open(path)?;
+    let spectrum = cube.extract_spectrum_at(y, x)?;
+    let err = open_cube_set(path).ok().and_then(|set| set.err).map(|err| err.extract_spectrum_at(y, x)).transpose()?;
+    let axis = cube.spectral_axis().ok();
+    let classification = classify_spectral_cube(&cube.header, cube.geometry.naxis3);
+    let flux_jy = jy_per_pixel_unit(&cube).map(|jy| spectrum.iter().map(|&v| v as f64 * jy.factor).collect::<Vec<f64>>());
+    Ok(json!({
+        RES_SPECTRUM: spectrum,
+        KEY_ERR: err,
+        RES_WAVELENGTHS: axis.as_ref().map(|a| a.header_values()),
+        RES_UNIT: axis.map(|a| a.header_unit),
+        RES_IS_SPECTRAL: classification.is_spectral,
+        KEY_FLUX_JY: flux_jy,
+    }))
+}
+
+fn region_spectrum_json(
+    path: &str,
+    shape: &RegionShape,
+    background: Option<&RegionShape>,
+    continuum: Option<ContinuumWindows>,
+) -> anyhow::Result<serde_json::Value> {
+    let t0 = Instant::now();
+    let set = open_cube_set(path)?;
+    let response = region_spectrum_response(&set, shape, background, continuum, t0)?;
+    Ok(serde_json::to_value(&response)?)
+}
+
+fn collapse_range_json(path: &str, output_dir: &str, z0: usize, z1: usize, mode: &str, zero_policy: Option<CollapseZeroPolicy>, dq_policy: Option<DqPolicy>) -> anyhow::Result<serde_json::Value> {
+    let t0 = Instant::now();
+    let mode = CollapseMode::parse(mode)?;
+    let out_dir = resolve_output_dir(output_dir)?;
+    let input = VerifiedCubeSet::open(path)?;
+    let response = match (zero_policy, dq_policy) {
+        (None, None) => collapse_range_files(&input, path, &out_dir, z0, z1, mode, t0)?,
+        _ => collapse_range_files_with_policy(&input, path, &out_dir, z0, z1, mode, zero_policy.unwrap_or_default(), dq_policy, t0)?,
+    };
+    Ok(serde_json::to_value(&response)?)
+}
+
+fn moment_maps_json(path: &str, output_dir: &str, config: &MomentConfig) -> anyhow::Result<serde_json::Value> {
+    let t0 = Instant::now();
+    let out_dir = resolve_output_dir(output_dir)?;
+    let input = VerifiedCubeSet::open(path)?;
+    let response = moment_map_files(&input, path, &out_dir, config, t0)?;
+    Ok(serde_json::to_value(&response)?)
+}
+
+#[tauri::command]
+pub async fn get_cube_info(path: String) -> Result<serde_json::Value, String> {
+    blocking_cmd!(cube_info_json(&path))
+}
+
+#[tauri::command]
+pub async fn get_cube_frame(
+    path: String,
+    frame_index: usize,
+    output_path: String,
+    output_fits: Option<String>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!(cube_frame_json(&path, frame_index, &output_path, output_fits.as_deref()))
+}
+
+#[tauri::command]
+pub async fn get_cube_spectrum(
+    path: String,
+    x: usize,
+    y: usize,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!(cube_spectrum_json(&path, x, y))
+}
+
+#[tauri::command]
+pub async fn get_cube_spectrum_region_cmd(
+    path: String,
+    shape: RegionShape,
+    background: Option<RegionShape>,
+    continuum: Option<ContinuumWindows>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!(region_spectrum_json(&path, &shape, background.as_ref(), continuum))
+}
+
+#[tauri::command]
+pub async fn collapse_cube_range_cmd(
+    path: String,
+    output_dir: String,
+    z0: usize,
+    z1: usize,
+    mode: String,
+    zero_policy: Option<CollapseZeroPolicy>,
+    dq_policy: Option<DqPolicy>,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!(collapse_range_json(&path, &output_dir, z0, z1, &mode, zero_policy, dq_policy))
+}
+
+#[tauri::command]
+pub async fn moment_maps_cmd(
+    path: String,
+    output_dir: String,
+    config: MomentConfig,
+) -> Result<serde_json::Value, String> {
+    blocking_cmd!(moment_maps_json(&path, &output_dir, &config))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+    use crate::cmd::common::HEADER_ABPROC;
+    use crate::core::astrometry::spectral::VelocityConvention;
+    use crate::core::cube::companions::open_cube_set;
+    use crate::core::cube::lazy::{region_pixels, test_support::*};
+    use crate::core::cube::moments::{moment_maps_set, ContinuumWindows, DEFAULT_SNR_THRESHOLD, DQ_NOT_APPLIED_NOTE};
+    use crate::core::cube::noise_factor::noise_factor;
+    use crate::infra::fits::reader::extract_image_mmap;
+    use crate::infra::image_source::load_plane;
+    use crate::types::constants::{EXTNAME_ERR, EXTNAME_SCI};
+    use crate::types::image_ref::ImageRef;
+
+    fn alone(cube: LazyCube) -> CubeSet {
+        CubeSet { sci: std::sync::Arc::new(cube), err: None, dq: None, notes: Vec::new() }
+    }
+
+    fn open_cube(dir: &tempfile::TempDir, name: &str, noise: f32) -> (String, CubeSet) {
+        let path = dir.path().join(name);
+        write_line_cube(&path, noise);
+        let text = path.to_str().unwrap().to_string();
+        let set = alone(LazyCube::open(&text).unwrap());
+        (text, set)
+    }
+
+    fn disk() -> RegionShape {
+        RegionShape::Circle { x: LINE_DISK_CENTRE, y: LINE_DISK_CENTRE, r: LINE_DISK_RADIUS }
+    }
+
+    fn line_moment_config() -> MomentConfig {
+        MomentConfig {
+            z0: 8,
+            z1: 32,
+            rest_um: None,
+            convention: VelocityConvention::Optical,
+            continuum: Some(((0, 5), (34, 39))),
+            snr_threshold: DEFAULT_SNR_THRESHOLD,
+            mask_below_threshold: true,
+            dq_policy: None,
+            redshift: 0.0,
+            weight_threshold_sigma: None,
+        }
+    }
+
+    fn reopen(path: &str) -> crate::infra::fits::reader::MmapImageResult {
+        extract_image_mmap(&File::open(path).unwrap()).unwrap()
+    }
+
+    const GOLDEN_NOISE: f32 = 0.01;
+    const GOLDEN_COLLAPSE_RANGE: (usize, usize) = (15, 25);
+    const FITS_CARD_BYTES: usize = 80;
+    const PRE_ERR_REGION_FIELDS: [&str; 9] =
+        ["sum", "mean", "npix", "n_bg", "bg_per_pixel", "wavelengths", "unit", "bg_subtracted", "flux_jy"];
+    const GOLDEN_NO_ERR_SHA256: [(&str, &str); 8] = [
+        ("region", "a3451f6ef209921f1299e171300d1cc1abdcb570aaf090c91fff77ea9146eb9b"),
+        ("region_bg", "d963038ab3b471e8d5c1292fd9e6bd6b1a10e0a64effb13eb4b31eab31d7a53c"),
+        ("sum", "68f9c31d54058218d084f698f845d6f1bb5940121648e2732f3a117cdbae48c5"),
+        ("mean", "da223b7c0e33a697597cf660de8c3494bb489ab3809ae51e672d7cafc008683b"),
+        ("median", "870e6d195ab6da283d16c0a346dd2312d4c3c7cbfde6e1e1225891c0ec5cfdaf"),
+        ("m0", "095e193d408e1c40c694c31e0a65f3ea0486777f7a7cc1dfa4c094e4b002a441"),
+        ("m1", "ce87c7fd3458b3b33da49031979a939888bd1e449786af563e2a04d69b27aafd"),
+        ("m2", "a2be6f5271aff2ce68d86e441966df76e150410a12d04a8ab24d86e982963335"),
+    ];
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    fn without_version_stamp(bytes: &[u8]) -> Vec<u8> {
+        let stamp = format!("AstroBurst {}", env!("CARGO_PKG_VERSION"));
+        bytes
+            .chunks(FITS_CARD_BYTES)
+            .flat_map(|card| {
+                if card.windows(stamp.len()).any(|w| w == stamp.as_bytes()) {
+                    let text = String::from_utf8_lossy(card).replace(&stamp, "AstroBurst");
+                    format!("{:<width$}", text.trim_end(), width = FITS_CARD_BYTES).into_bytes()
+                } else {
+                    card.to_vec()
+                }
+            })
+            .collect()
+    }
+
+    fn fits_sha256(path: &str) -> String {
+        sha256_hex(&without_version_stamp(&without_scientific_run_cards(&std::fs::read(path).unwrap())))
+    }
+
+    fn without_scientific_run_cards(bytes: &[u8]) -> Vec<u8> {
+        let block_size = crate::types::constants::BLOCK_SIZE;
+        let mut output = Vec::new();
+        let mut skip = false;
+        for (i, card) in bytes.chunks_exact(FITS_CARD_BYTES).enumerate() {
+            let key = std::str::from_utf8(&card[..8]).unwrap().trim();
+            skip = ["ABRUNID", "ABPROV", "ABSRC", "ABSCIHDU", "ABZERO", "ABDQPOL", "ABDQBIT", "ABDQAPP", "ABDQNUM", "ABDQHDU"].contains(&key)
+                || key.starts_with("MOM")
+                || (key == "HISTORY" && ["AstroBurst collapse zero policy:", "AstroBurst DQ policy:", "AstroBurst moments:"].iter().any(|marker| String::from_utf8_lossy(card).contains(marker)))
+                || (key == "CONTINUE" && skip);
+            if !skip {
+                output.extend_from_slice(card);
+            }
+            if key == "END" {
+                let data_start = ((i + 1) * FITS_CARD_BYTES).div_ceil(block_size) * block_size;
+                output.resize(output.len().div_ceil(block_size) * block_size, b' ');
+                output.extend_from_slice(&bytes[data_start..]);
+                return output;
+            }
+        }
+        panic!("FITS header has no END card");
+    }
+
+    fn pre_err_region_sha256(response: &RegionSpectrumResponse) -> String {
+        let value = serde_json::to_value(response).unwrap();
+        let fields: Vec<(&str, &serde_json::Value)> = PRE_ERR_REGION_FIELDS.iter().map(|k| (*k, &value[*k])).collect();
+        sha256_hex(serde_json::to_string(&fields).unwrap().as_bytes())
+    }
+
+    fn no_err_output_hashes(dir: &tempfile::TempDir) -> Vec<(&'static str, String)> {
+        let (path, _) = open_cube(dir, "golden.fits", GOLDEN_NOISE);
+        let set = open_cube_set(&path).unwrap();
+        assert!(set.err.is_none() && set.dq.is_none());
+        let out_dir = dir.path().join("golden_out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out = out_dir.to_str().unwrap();
+        let background = RegionShape::Annulus { x: LINE_DISK_CENTRE, y: LINE_DISK_CENTRE, r_inner: 9.0, r_outer: 13.0 };
+        let mut hashes = vec![
+            ("region", pre_err_region_sha256(&region_spectrum_response(&set, &disk(), None, None, Instant::now()).unwrap())),
+            (
+                "region_bg",
+                pre_err_region_sha256(
+                    &region_spectrum_response(&set, &disk(), Some(&background), None, Instant::now()).unwrap(),
+                ),
+            ),
+        ];
+        let (z0, z1) = GOLDEN_COLLAPSE_RANGE;
+        for mode in [CollapseMode::Sum, CollapseMode::Mean, CollapseMode::Median] {
+            let files = collapse_range_files(&VerifiedCubeSet::open(&path).unwrap(), &path, out, z0, z1, mode, Instant::now()).unwrap();
+            assert!(!files.has_err);
+            hashes.push((mode.name(), fits_sha256(&files.fits_path)));
+        }
+        let maps = moment_map_files(&VerifiedCubeSet::open(&path).unwrap(), &path, out, &line_moment_config(), Instant::now()).unwrap();
+        assert!(!maps.has_err && maps.noise_factor.is_none());
+        for (name, files) in [("m0", &maps.m0), ("m1", &maps.m1), ("m2", &maps.m2)] {
+            hashes.push((name, fits_sha256(&files.fits_path)));
+        }
+        GLOBAL_CUBE_CACHE.invalidate(&path);
+        hashes
+    }
+
+    #[test]
+    fn no_err_region_collapse_and_moment_outputs_match_their_pre_error_golden_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected: Vec<(&str, String)> = GOLDEN_NO_ERR_SHA256.iter().map(|&(k, v)| (k, v.to_string())).collect();
+        assert_eq!(no_err_output_hashes(&dir), expected);
+    }
+
+    #[test]
+    fn collapse_and_moment_runs_keep_distinct_products_linked_to_their_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = open_cube(&dir, "source.fits", GOLDEN_NOISE);
+        let output = dir.path().to_str().unwrap();
+        let first = collapse_range_files(&VerifiedCubeSet::open(&path).unwrap(), &path, output, 15, 25, CollapseMode::Sum, Instant::now()).unwrap();
+        let before = std::fs::read(&first.fits_path).unwrap();
+        let second = collapse_range_files(&VerifiedCubeSet::open(&path).unwrap(), &path, output, 15, 25, CollapseMode::Mean, Instant::now()).unwrap();
+        assert_ne!(first.provenance.run_id, second.provenance.run_id);
+        assert_ne!(first.fits_path, second.fits_path);
+        assert_eq!(std::fs::read(&first.fits_path).unwrap(), before);
+        for result in [&first, &second] {
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&result.provenance_path).unwrap()).unwrap();
+            assert_eq!(saved["products"]["fits_path"], result.fits_path);
+            assert_eq!(saved["provenance"], serde_json::to_value(&result.provenance).unwrap());
+            let reopened = reopen(&result.fits_path);
+            assert_eq!(reopened.header.get("ABRUNID"), Some(result.provenance.run_id.as_str()));
+            assert_eq!(reopened.header.get("ABPROV"), Some("provenance.json"));
+            assert_eq!(reopened.header.get("ABSRC"), Some(path.as_str()));
+        }
+        let cfg = line_moment_config();
+        let first = moment_map_files(&VerifiedCubeSet::open(&path).unwrap(), &path, output, &cfg, Instant::now()).unwrap();
+        let before = std::fs::read(&first.m0.fits_path).unwrap();
+        let second = moment_map_files(&VerifiedCubeSet::open(&path).unwrap(), &path, output, &MomentConfig { mask_below_threshold: false, ..cfg }, Instant::now()).unwrap();
+        assert_ne!(first.provenance.run_id, second.provenance.run_id);
+        assert_ne!(first.m0.fits_path, second.m0.fits_path);
+        assert_eq!(std::fs::read(&first.m0.fits_path).unwrap(), before);
+        for result in [&first, &second] {
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&result.provenance_path).unwrap()).unwrap();
+            assert_eq!(saved["products"]["m0"]["fits_path"], result.m0.fits_path);
+            assert_eq!(saved["provenance"], serde_json::to_value(&result.provenance).unwrap());
+            for map in [&result.m0, &result.m1, &result.m2] {
+                assert_eq!(reopen(&map.fits_path).header.get("ABRUNID"), Some(result.provenance.run_id.as_str()));
+            }
+        }
+    }
+
+    #[test]
+    fn collapse_zero_policy_is_explicit_in_products_and_manifests_and_omission_preserves_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-policy.fits");
+        write_cube(&path, 4, 2, 3, &[("BUNIT", "'Jy'")], |z, _, x| match x {
+            0 => [0.0, 2.0, 4.0][z],
+            1 => [f32::NAN, 2.0, 4.0][z],
+            2 => 0.0,
+            _ => -2.0,
+        });
+        let key = path.to_str().unwrap();
+        for requested in [None, Some(CollapseZeroPolicy::ExcludeZeroPadding), Some(CollapseZeroPolicy::IncludePhysicalZeros)] {
+            let policy = requested.unwrap_or_default();
+            for mode in [CollapseMode::Sum, CollapseMode::Mean, CollapseMode::Median] {
+                let response = collapse_range_json(key, dir.path().to_str().unwrap(), 0, 2, mode.name(), requested, None).unwrap();
+                assert_eq!(response["zero_policy"], policy.name());
+                assert!(response["notes"].as_array().unwrap().iter().any(|n| n.as_str() == Some(policy.note())));
+                let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(response["provenance_path"].as_str().unwrap()).unwrap()).unwrap();
+                assert_eq!(saved["provenance"]["parameters"]["zero_policy"], policy.name());
+                assert_eq!(saved["provenance"]["effective"]["zero_policy"], policy.name());
+                assert_eq!(saved["provenance"]["effective"]["dq_applied"], false);
+                let product = reopen(response["fits_path"].as_str().unwrap());
+                assert_eq!(product.header.get("ABZERO"), Some(policy.name()));
+                assert_eq!(product.header.get_i64("BITPIX"), Some(-32));
+                assert_eq!(product.header.get("BUNIT"), Some(if mode == CollapseMode::Sum { "Jy chan" } else { "Jy" }));
+                assert!(product.header.cards.iter().any(|(k, v)| k == "HISTORY" && v == &format!("AstroBurst collapse zero policy: {}", policy.name())));
+                assert_eq!(product.image[(0, 0)], if mode == CollapseMode::Sum { 6.0 } else if policy == CollapseZeroPolicy::IncludePhysicalZeros { 2.0 } else { 3.0 });
+                if policy == CollapseZeroPolicy::IncludePhysicalZeros {
+                    assert_eq!(product.image[(0, 2)], 0.0);
+                } else {
+                    assert!(product.image[(0, 2)].is_nan());
+                }
+                assert_eq!(product.image[(0, 1)], if mode == CollapseMode::Sum { 6.0 } else { 3.0 });
+            }
+        }
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn dq_policy_is_recorded_consistently_for_collapse_and_moment_products() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq-products.fits");
+        write_line_cube_mef(&path, 0.01, |_, _, _| 0.5, |z, _, _| if z == 20 { (1 << 24) | 1 } else { 1 << 24 });
+        let key = path.to_str().unwrap();
+        let expected_count = (LINE_CUBE_SIZE * LINE_CUBE_SIZE) as u64;
+        for requested in [None, Some(DqPolicy::Ignore), Some(DqPolicy::DoNotUse)] {
+            let policy = requested.unwrap_or_default();
+            let applied = policy == DqPolicy::DoNotUse;
+            let collapse = collapse_range_json(key, dir.path().to_str().unwrap(), 8, 32, "mean", Some(CollapseZeroPolicy::IncludePhysicalZeros), requested).unwrap();
+            let cfg = MomentConfig { dq_policy: requested, ..line_moment_config() };
+            let moments = moment_maps_json(key, dir.path().to_str().unwrap(), &cfg).unwrap();
+            for (response, fits) in [(&collapse, collapse["fits_path"].as_str().unwrap()), (&moments, moments["m0"]["fits_path"].as_str().unwrap())] {
+                assert_eq!(response["dq_policy"], policy.name());
+                assert_eq!(response["dq_applied"], applied);
+                assert_eq!(response["dq_hdu"], json!(applied.then_some(3)));
+                assert_eq!(response["dq_excluded_samples"], if applied { expected_count } else { 0 });
+                let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(response["provenance_path"].as_str().unwrap()).unwrap()).unwrap();
+                assert_eq!(saved["provenance"]["parameters"]["dq_policy"], json!(requested));
+                assert_eq!(saved["provenance"]["effective"]["dq_policy"], policy.name());
+                assert_eq!(saved["provenance"]["effective"]["dq_applied"], applied);
+                for hdu in [1, 2] {
+                    let header = crate::infra::fits::reader::extract_header_by_index(&File::open(fits).unwrap(), hdu).unwrap();
+                    assert_eq!(header.get("ABDQPOL"), Some(policy.name()));
+                    assert_eq!(header.get("ABDQAPP"), Some(if applied { "T" } else { "F" }));
+                    assert_eq!(header.get_i64("ABDQNUM"), Some(if applied { expected_count as i64 } else { 0 }));
+                }
+            }
+        }
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn the_golden_hash_ignores_only_the_version_stamp_cards() {
+        let stamp = format!("AstroBurst {}", env!("CARGO_PKG_VERSION"));
+        let card = |text: &str| format!("{:<width$}", text, width = FITS_CARD_BYTES).into_bytes();
+        let stamped = [card(&format!("PROGRAM = '{}'", stamp)), card("BUNIT   = 'Jy/beam'")].concat();
+        let other = [card("PROGRAM = 'AstroBurst 9.9.99'"), card("BUNIT   = 'Jy/beam'")].concat();
+        let normalised = without_version_stamp(&stamped);
+        assert_eq!(normalised.len(), stamped.len());
+        assert_eq!(&normalised[..FITS_CARD_BYTES], card("PROGRAM = 'AstroBurst'").as_slice());
+        assert_eq!(&normalised[FITS_CARD_BYTES..], &stamped[FITS_CARD_BYTES..]);
+        assert_eq!(without_version_stamp(&other), other);
+    }
+
+    #[test]
+    fn the_golden_hash_removes_only_run_cards_and_their_continuations_before_the_data() {
+        let block_size = crate::types::constants::BLOCK_SIZE;
+        let card = |text: &str| format!("{:<width$}", text, width = FITS_CARD_BYTES).into_bytes();
+        let mut science = card("SIMPLE  = T");
+        for i in 0..30 {
+            science.extend(card(&format!("HISTORY unchanged {i}")));
+        }
+        science.extend(card("BUNIT   = 'Jy/beam'"));
+        science.extend(card("ABPROC  = 'collapse_sum'"));
+        science.extend(card("OBSERVER= 'a long retained&'"));
+        science.extend(card("CONTINUE  'observer name'"));
+        let mut stamped = science.clone();
+        for text in ["ABRUNID = 'collapse-random'", "ABPROV  = 'provenance.json'", "ABSRC   = 'long path&'", "CONTINUE  'source.fits'", "ABSCIHDU= 1"] {
+            stamped.extend(card(text));
+        }
+        let data = b"ABRUNID scientific pixel bytes";
+        for bytes in [&mut science, &mut stamped] {
+            bytes.extend(card("END"));
+            bytes.resize(bytes.len().div_ceil(block_size) * block_size, b' ');
+            bytes.extend(data);
+        }
+        assert_eq!(without_scientific_run_cards(&stamped), science);
+    }
+
+    #[test]
+    fn open_cube_set_resolves_the_err_and_dq_companions_of_a_mef_cube() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("set_s3d.fits");
+        write_mef_cube(&path, 4, 3, 6, &[("SCI", 10.0), ("ERR", 0.5), ("DQ", 0.0)]);
+        let key = path.to_str().unwrap();
+        let set = open_cube_set(key).unwrap();
+        assert_eq!(set.sci.hdu_index, 1);
+        assert_eq!(set.err.as_ref().map(|c| c.hdu_index), Some(2));
+        assert_eq!(set.dq.as_ref().map(|c| c.hdu_index), Some(3));
+        assert_eq!(set.err.as_ref().unwrap().extract_spectrum_at(2, 3).unwrap()[4], 4.5);
+        assert_eq!(set.dq.as_ref().unwrap().extract_spectrum_at(0, 1).unwrap()[5], 5.0);
+        let refused = open_cube_set(&format!("{}#hdu=3", key)).err().expect("the DQ plane must be refused").to_string();
+        assert!(refused.contains("opens the DQ extension (HDU 3): cube products need the SCI cube"), "{}", refused);
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    const SET_NOISE: f32 = 0.01;
+    const SET_ERR: f32 = 0.005_773_5;
+    const SET_ERR_SOURCE: &str = "ERR HDU 2";
+    const SET_WINDOWS: ContinuumWindows = ((0, 5), (34, 39));
+    const REGION_WINDOWS: ContinuumWindows = ((0, 6), (34, 39));
+    const RELATIVE_TOLERANCE: f64 = 1e-6;
+
+    fn write_set(dir: &tempfile::TempDir, name: &str, dq: impl Fn(usize, usize, usize) -> i32) -> String {
+        let path = dir.path().join(name);
+        write_line_cube_mef(&path, SET_NOISE, |_, _, _| SET_ERR, dq);
+        path.to_str().unwrap().to_string()
+    }
+
+    fn unflagged(_: usize, _: usize, _: usize) -> i32 {
+        0
+    }
+
+    fn out_dir(dir: &tempfile::TempDir) -> String {
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        out.to_str().unwrap().to_string()
+    }
+
+    fn same_bits(a: &Array2<f32>, b: &Array2<f32>) -> bool {
+        a.dim() == b.dim() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    fn extname(plane: &crate::infra::image_source::LoadedPlane) -> Option<String> {
+        plane.info.extname.as_deref().map(|n| n.trim().trim_matches('\'').trim().to_string())
+    }
+
+    fn invalidate_set(key: &str) {
+        for hdu in ["", "#hdu=1", "#hdu=2", "#hdu=3"] {
+            GLOBAL_CUBE_CACHE.invalidate(&format!("{}{}", key, hdu));
+        }
+    }
+
+    #[test]
+    fn a_collapse_of_a_cube_with_err_writes_sci_and_err_extensions_that_the_viewer_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_set(&dir, "collapse_s3d.fits", unflagged);
+        let out = out_dir(&dir);
+        let (z0, z1) = (15, 25);
+        let n = (z1 - z0 + 1) as f64;
+        let sum_err = SET_ERR as f64 * n.sqrt();
+        let sci = LazyCube::open(&format!("{}#hdu=1", key)).unwrap();
+        for (mode, expected_err) in [
+            (CollapseMode::Sum, sum_err),
+            (CollapseMode::Mean, sum_err / n),
+            (CollapseMode::Median, std::f64::consts::FRAC_PI_2.sqrt() * sum_err / n),
+        ] {
+            let value = collapse_range_json(&key, &out, z0, z1, mode.name(), None, None).unwrap();
+            assert_eq!(value["has_err"], true, "{}", value);
+            assert_eq!(value["err_source"], SET_ERR_SOURCE, "{}", value);
+            let fits = value["fits_path"].as_str().unwrap();
+            let plane = load_plane(&ImageRef::parse(fits)).unwrap();
+            assert_eq!(extname(&plane).as_deref(), Some(EXTNAME_SCI));
+            assert!(same_bits(&plane.arr, &sci.collapse_range(z0, z1, mode).unwrap()), "{} values", mode.name());
+            assert_eq!(plane.header.get(HEADER_ABPROC), Some(format!("collapse-{}", mode.name()).as_str()));
+            let err_ref = plane.companions.err.clone().expect("the ERR extension is the companion of SCI");
+            let err_plane = load_plane(&err_ref).unwrap();
+            assert_eq!(extname(&err_plane).as_deref(), Some(EXTNAME_ERR));
+            for &e in err_plane.arr.iter() {
+                assert!((e as f64 - expected_err).abs() <= RELATIVE_TOLERANCE * expected_err, "{} error {}", mode.name(), e);
+            }
+            let notes: Vec<&str> = value["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
+            assert_eq!(notes.iter().any(|n| n.contains("approximate")), mode == CollapseMode::Median, "{:?}", notes);
+            assert!(notes.iter().any(|n| n.contains(DQ_NOT_APPLIED_NOTE)), "{:?}", notes);
+        }
+        invalidate_set(&key);
+    }
+
+    #[test]
+    fn moment_maps_of_a_cube_with_err_are_mef_files_whose_sci_carries_abnoisef_and_whose_err_the_viewer_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_set(&dir, "moments_s3d.fits", unflagged);
+        let out = out_dir(&dir);
+        let value = moment_maps_json(&key, &out, &line_moment_config()).unwrap();
+        assert_eq!(value["has_err"], true, "{}", value);
+        assert_eq!(value["err_source"], SET_ERR_SOURCE, "{}", value);
+        let factor = value["noise_factor"].as_f64().expect("noise factor with continuum windows and ERR");
+        let maps = moment_maps_set(&open_cube_set(&key).unwrap(), &line_moment_config()).unwrap();
+        assert_eq!(maps.noise_factor, Some(factor));
+        let planes = [
+            ("m0", &maps.m0, maps.m0_err.as_ref().unwrap()),
+            ("m1", &maps.m1, maps.m1_err.as_ref().unwrap()),
+            ("m2", &maps.m2, maps.m2_err.as_ref().unwrap()),
+        ];
+        for (name, map, err_map) in planes {
+            let fits = value[name]["fits_path"].as_str().unwrap();
+            let plane = load_plane(&ImageRef::parse(fits)).unwrap();
+            assert_eq!(extname(&plane).as_deref(), Some(EXTNAME_SCI), "{}", name);
+            assert!(same_bits(&plane.arr, map), "{} values", name);
+            let card = plane.header.get_f64(CARD_NOISE_FACTOR).unwrap_or_else(|| panic!("{} SCI has no {}", name, CARD_NOISE_FACTOR));
+            assert!((card - factor).abs() <= 1e-13 * factor, "{} card {} factor {}", name, card, factor);
+            let err_plane = load_plane(&plane.companions.err.clone().expect("ERR companion")).unwrap();
+            assert_eq!(extname(&err_plane).as_deref(), Some(EXTNAME_ERR), "{}", name);
+            assert!(same_bits(&err_plane.arr, err_map), "{} error values", name);
+            assert!(err_plane.header.get(CARD_NOISE_FACTOR).is_none(), "{} ERR carries the factor card", name);
+            assert_eq!(err_plane.header.get("BUNIT"), plane.header.get("BUNIT"), "{}", name);
+        }
+        invalidate_set(&key);
+    }
+
+    const TRANSIENT_FLAG_CHANNELS: [usize; 2] = [3, 4];
+    const CENTRE_SPAXEL: (usize, usize) = (16, 16);
+    const JUMP_ONLY_SPAXEL: (usize, usize) = (16, 17);
+    const DO_NOT_USE: i32 = 1;
+    const JUMP_DET: i32 = 4;
+
+    fn centre_flagged_in_two_channels(z: usize, y: usize, x: usize) -> i32 {
+        if (y, x) == CENTRE_SPAXEL && TRANSIENT_FLAG_CHANNELS.contains(&z) {
+            DO_NOT_USE
+        } else if (y, x) == JUMP_ONLY_SPAXEL {
+            JUMP_DET
+        } else {
+            0
+        }
+    }
+
+    fn f32_array(value: &serde_json::Value) -> Vec<f32> {
+        value.as_array().unwrap_or_else(|| panic!("not an array: {}", value)).iter().map(|v| v.as_f64().unwrap() as f32).collect()
+    }
+
+    fn notes_of(value: &serde_json::Value) -> Vec<String> {
+        value["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect()
+    }
+
+    fn aperture_weight_squares(skip: Option<(usize, usize)>) -> f64 {
+        region_pixels(&disk(), LINE_CUBE_SIZE, LINE_CUBE_SIZE, APERTURE_SUBSAMPLES)
+            .unwrap()
+            .iter()
+            .filter(|p| Some((p.y, p.x)) != skip)
+            .map(|p| (p.weight as f64).powi(2))
+            .sum()
+    }
+
+    #[test]
+    fn a_region_spectrum_of_a_cube_with_err_carries_the_propagated_error_its_source_the_dq_counts_and_the_noise_factor() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_set(&dir, "region_s3d.fits", centre_flagged_in_two_channels);
+        let value = region_spectrum_json(&key, &disk(), None, Some(REGION_WINDOWS)).unwrap();
+        let set = open_cube_set(&key).unwrap();
+        let spectrum = set
+            .sci
+            .extract_spectrum_aperture_with(&disk(), None, APERTURE_SUBSAMPLES, set.err.as_deref(), set.dq.as_deref())
+            .unwrap();
+        assert_eq!(value["err_source"], SET_ERR_SOURCE);
+        let err = f32_array(&value["err"]);
+        assert_eq!(err.len(), LINE_CUBE_DEPTH);
+        for (z, &e) in err.iter().enumerate() {
+            let skip = TRANSIENT_FLAG_CHANNELS.contains(&z).then_some(CENTRE_SPAXEL);
+            let expected = SET_ERR as f64 * aperture_weight_squares(skip).sqrt();
+            assert!((e as f64 - expected).abs() <= RELATIVE_TOLERANCE * expected, "channel {}: {} vs {}", z, e, expected);
+        }
+        assert_eq!(f32_array(&value["sum_raw"]), spectrum.sum);
+        for (z, sum) in value["sum"].as_array().unwrap().iter().enumerate() {
+            if TRANSIENT_FLAG_CHANNELS.contains(&z) {
+                assert!(sum.is_null(), "channel {z} lost its centre spaxel and its sum {sum} is presented as a flux");
+            } else {
+                assert_eq!(sum.as_f64().map(|v| v as f32), Some(spectrum.sum[z]), "channel {z}");
+            }
+        }
+        assert_eq!(value["n_incomplete_channels"], TRANSIENT_FLAG_CHANNELS.len());
+        let expected_excluded: Vec<u64> =
+            (0..LINE_CUBE_DEPTH).map(|z| u64::from(TRANSIENT_FLAG_CHANNELS.contains(&z))).collect();
+        let reported_excluded: Vec<u64> = value["n_dq_excluded"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+        assert_eq!(reported_excluded, expected_excluded);
+        let mut complete = spectrum.sum.clone();
+        for &z in &TRANSIENT_FLAG_CHANNELS {
+            complete[z] = f32::NAN;
+        }
+        let factor = noise_factor(&complete, &err, REGION_WINDOWS).unwrap();
+        let reported = &value["noise_factor"];
+        assert_eq!(reported["factor"].as_f64(), Some(factor.factor), "{}", reported);
+        assert_eq!(reported["n_channels"], 11);
+        assert_eq!(reported["windows"], serde_json::json!([[0, 6], [34, 39]]));
+        let relative_se = factor.factor_se / factor.factor;
+        assert!((factor.factor - 1.0).abs() <= 3.0 * relative_se, "factor {} relative SE {}", factor.factor, relative_se);
+        assert!(reported["warning"].is_null(), "{}", reported);
+        assert!(
+            notes_of(&value).iter().any(|n| n.contains("2 continuum-window channels lost aperture spaxels")),
+            "{:?}",
+            notes_of(&value)
+        );
+        let scaled = f32_array(&value["err_scaled"]);
+        for z in 0..LINE_CUBE_DEPTH {
+            assert_eq!(scaled[z], (err[z] as f64 * factor.factor) as f32, "channel {}", z);
+        }
+        let used_weight: Vec<f64> =
+            value["used_weight"].as_array().expect("used weight per channel").iter().map(|w| w.as_f64().unwrap()).collect();
+        assert_eq!(used_weight, spectrum.used_weight);
+        let mean_err = f32_array(&value["mean_err"]);
+        for z in 0..LINE_CUBE_DEPTH {
+            let back = mean_err[z] as f64 * used_weight[z];
+            assert!((back - err[z] as f64).abs() <= RELATIVE_TOLERANCE * err[z] as f64, "channel {}: {} vs {}", z, back, err[z]);
+        }
+        assert!(used_weight[TRANSIENT_FLAG_CHANNELS[0]] < used_weight[0], "{:?}", used_weight);
+        assert!(value["flux_jy_err"].is_null());
+        assert!(notes_of(&value).iter().any(|n| n.contains("ERR cube (HDU 2)")), "{:?}", notes_of(&value));
+        assert!(notes_of(&value).iter().any(|n| n.contains("DQ cube (HDU 3)")), "{:?}", notes_of(&value));
+
+        let windowless = region_spectrum_json(&key, &disk(), None, None).unwrap();
+        assert!(windowless["noise_factor"].is_null() && windowless["err_scaled"].is_null(), "{}", windowless);
+        assert_eq!(f32_array(&windowless["err"]), err);
+
+        let short = region_spectrum_json(&key, &disk(), None, Some(((0, 3), (34, 39)))).unwrap();
+        assert!(short["noise_factor"].is_null() && short["err_scaled"].is_null(), "{}", short);
+        assert_eq!(f32_array(&short["sum_raw"]), spectrum.sum);
+        assert!(notes_of(&short).iter().any(|n| n.contains("continuum window 0..=3 has 4 channels")), "{:?}", notes_of(&short));
+        invalidate_set(&key);
+    }
+
+    #[test]
+    fn a_region_spectrum_in_mjy_per_sr_converts_its_error_to_jy_and_a_cube_without_err_reports_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mjy_s3d.fits");
+        let pixar_sr = 3.0461742e-12;
+        write_line_cube_mef_with_cards(&path, &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")], SET_NOISE, |_, _, _| SET_ERR, unflagged);
+        let key = path.to_str().unwrap();
+        let value = region_spectrum_json(key, &disk(), None, None).unwrap();
+        let err = f32_array(&value["err"]);
+        let flux_jy_err = value["flux_jy_err"].as_array().expect("error in Jy");
+        assert_eq!(flux_jy_err.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = err[z] as f64 * pixar_sr * JY_PER_MJY;
+            let got = flux_jy_err[z].as_f64().unwrap();
+            assert!((got - expected).abs() <= 1e-12 * expected, "channel {}: {} vs {}", z, got, expected);
+        }
+        invalidate_set(key);
+
+        let (plain, _) = open_cube(&dir, "plain.fits", SET_NOISE);
+        let value = region_spectrum_json(&plain, &disk(), None, Some(SET_WINDOWS)).unwrap();
+        assert_eq!(value["err_source"], ERR_SOURCE_NONE);
+        for key in ["err", "err_scaled", "mean_err", "flux_jy_err", "n_dq_excluded", "noise_factor", "bg_err_per_pixel"] {
+            assert!(value[key].is_null(), "{} = {}", key, value[key]);
+        }
+        assert_eq!(value["used_weight"].as_array().map(Vec::len), Some(LINE_CUBE_DEPTH), "{}", value["used_weight"]);
+        assert!(notes_of(&value).iter().any(|n| n.contains("no ERR cube")), "{:?}", notes_of(&value));
+        GLOBAL_CUBE_CACHE.invalidate(&plain);
+    }
+
+    #[test]
+    fn cube_products_of_a_file_cut_short_inside_its_err_extension_still_run_and_say_why_they_have_no_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_set(&dir, "cut_s3d.fits", unflagged);
+        let file = File::open(&key).unwrap();
+        let err_data_start = crate::infra::fits::reader::list_extensions(&file).unwrap()[2].data_start;
+        drop(file);
+        let mut bytes = std::fs::read(&key).unwrap();
+        bytes.truncate(err_data_start + 1000);
+        std::fs::write(&key, &bytes).unwrap();
+        let reason = |notes: &[String]| {
+            notes.iter().any(|n| n.starts_with("ERR extension (HDU 2) could not be read: ") && n.ends_with("products have no error column"))
+        };
+        let region = region_spectrum_json(&key, &disk(), None, Some(SET_WINDOWS)).unwrap();
+        assert_eq!(region["err_source"], ERR_SOURCE_NONE);
+        assert!(region["err"].is_null() && region["noise_factor"].is_null(), "{}", region);
+        assert!(reason(&notes_of(&region)), "{:?}", notes_of(&region));
+        let out = out_dir(&dir);
+        let collapse = collapse_range_json(&key, &out, 15, 25, "sum", None, None).unwrap();
+        assert_eq!(collapse["has_err"], false);
+        assert!(reason(&notes_of(&collapse)), "{:?}", notes_of(&collapse));
+        let moments = moment_maps_json(&key, &out, &line_moment_config()).unwrap();
+        assert_eq!(moments["has_err"], false);
+        assert!(reason(&notes_of(&moments)), "{:?}", notes_of(&moments));
+        invalidate_set(&key);
+    }
+
+    #[test]
+    fn strip_spectral_axis_removes_every_third_axis_card_and_keeps_bunit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pc.fits");
+        write_line_cube_with_cards(&path, &[("PC3_3", "1.0"), ("PC1_3", "0.0"), ("CD2_3", "0.0"), ("CNAME3", "'wave'")]);
+        let cube = LazyCube::open(path.to_str().unwrap()).unwrap();
+        let header = strip_spectral_axis(&cube.header);
+        for key in ["NAXIS3", "CTYPE3", "CRVAL3", "CRPIX3", "CUNIT3", "CD3_3", "PC3_3", "PC1_3", "CD2_3", "CNAME3"] {
+            assert!(header.get(key).is_none(), "{} survived", key);
+            assert!(!header.cards.iter().any(|(k, _)| k == key), "{} card survived", key);
+        }
+        assert_eq!(header.get("WCSAXES"), Some("2"));
+        assert_eq!(header.get("NAXIS"), Some("2"));
+        assert_eq!(header.get("BUNIT"), Some("Jy/beam"));
+        assert_eq!(header.get("CTYPE1"), Some("RA---TAN"));
+        assert_eq!(header.get("CD1_1"), Some("-1.0E-4"));
+        assert_eq!(header.get("RESTWAV"), Some("1.020E-6"));
+        assert!(is_axis3_matrix_key("PC3_1") && is_axis3_matrix_key("CD1_3") && !is_axis3_matrix_key("CD1_2"));
+        assert!(!is_axis3_matrix_key("PCOUNT"));
+    }
+
+    #[test]
+    fn collapsed_range_fits_reopens_as_a_2d_image_with_the_wcs_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, set) = open_cube(&dir, "line.fits", 0.0);
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out = collapse_range_files(&VerifiedCubeSet::open(&path).unwrap(), &path, out_dir.to_str().unwrap(), 15, 25, CollapseMode::Sum, Instant::now()).unwrap();
+        assert_eq!(out.mode, "sum");
+        assert_eq!(out.dimensions, [LINE_CUBE_SIZE, LINE_CUBE_SIZE]);
+        assert!(out.fits_path.ends_with("line_collapse_sum_15-25.fits"));
+        assert!(std::path::Path::new(&out.png_path).exists());
+
+        let reopened = reopen(&out.fits_path);
+        assert_eq!(reopened.image.dim(), (LINE_CUBE_SIZE, LINE_CUBE_SIZE));
+        assert_eq!(reopened.header.get_i64("NAXIS"), Some(2));
+        assert!(reopened.header.get("NAXIS3").is_none());
+        assert!(reopened.header.get("CTYPE3").is_none());
+        assert!(reopened.header.get("CD3_3").is_none());
+        assert_eq!(reopened.header.get_i64("WCSAXES"), Some(2));
+        assert_eq!(reopened.header.get("BUNIT"), Some("Jy beam-1 chan"));
+        assert_eq!(reopened.header.get(HEADER_ABPROC), Some("collapse-sum"));
+        let n = 11.0f32;
+        let line_sum: f32 = (15..=25).map(line_profile).sum();
+        let centre = (LINE_DISK_CENTRE as usize, LINE_DISK_CENTRE as usize);
+        assert!((reopened.image[centre] - (n + line_sum)).abs() < 1e-3);
+        assert!((reopened.image[[0, 0]] - n).abs() < 1e-5);
+
+        let original = WcsTransform::from_header(&set.sci.header).unwrap();
+        let written = WcsTransform::from_header(&reopened.header).unwrap();
+        let a = original.pixel_to_world(10.0, 10.0);
+        let b = written.pixel_to_world(10.0, 10.0);
+        assert!((a.ra - b.ra).abs() < 1e-9 && (a.dec - b.dec).abs() < 1e-9, "{:?} vs {:?}", (a.ra, a.dec), (b.ra, b.dec));
+    }
+
+    #[test]
+    fn a_summed_collapse_drops_the_flux_density_calibration_and_a_mean_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mjy_cube.fits");
+        write_line_cube_with_cards(
+            &path,
+            &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "1.0E-13"), ("PIXAR_A2", "0.0042"), ("SATURATE", "5000.0"), ("DATAMAX", "3.0")],
+        );
+        let key = path.to_str().unwrap();
+        let out = dir.path().join("out");
+        let out = out.to_str().unwrap();
+        std::fs::create_dir_all(out).unwrap();
+
+        let sum = collapse_range_files(&VerifiedCubeSet::open(key).unwrap(), key, out, 0, 39, CollapseMode::Sum, Instant::now()).unwrap();
+        let header = reopen(&sum.fits_path).header;
+        assert_eq!(header.get("BUNIT"), Some("MJy sr-1 chan"));
+        for dropped in ["PIXAR_SR", "PIXAR_A2", "SATURATE", "DATAMAX"] {
+            assert!(header.get(dropped).is_none(), "{} survived a channel sum", dropped);
+        }
+        assert_eq!(header.get(HEADER_ABPROC), Some("collapse-sum"));
+        assert!(PhotCal::from_header(&header, None).is_none(), "a channel sum was calibrated as a flux density");
+
+        let mean = collapse_range_files(&VerifiedCubeSet::open(key).unwrap(), key, out, 0, 39, CollapseMode::Mean, Instant::now()).unwrap();
+        let header = reopen(&mean.fits_path).header;
+        assert_eq!(header.get("BUNIT"), Some("MJy/sr"));
+        assert!(header.get("PIXAR_SR").is_some());
+        assert!(header.get("DATAMAX").is_none());
+        assert_eq!(header.get(HEADER_ABPROC), Some("collapse-mean"));
+        assert!(matches!(
+            PhotCal::from_header(&header, None).map(|c| c.convention),
+            Some(FluxConvention::JwstMjySr { .. })
+        ));
+    }
+
+    #[test]
+    fn region_spectrum_reports_flux_in_jy_for_mjy_per_sr_and_none_for_jy_per_beam() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, set) = open_cube(&dir, "line.fits", 0.0);
+        let response = region_spectrum_response(&set, &disk(), None, None, Instant::now()).unwrap();
+        assert!(response.flux_jy.is_none());
+        assert!(!response.bg_subtracted);
+        assert_eq!(response.unit, "um");
+        let wavelengths = response.wavelengths.as_ref().unwrap();
+        assert_eq!(wavelengths.len(), LINE_CUBE_DEPTH);
+        assert!((wavelengths[20] - LINE_REST_UM).abs() < 1e-12);
+        assert!((response.npix - disk_pixel_count() as f64).abs() < 1.0);
+
+        let path = dir.path().join("mjy.fits");
+        write_line_cube_with_cards(&path, &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")]);
+        let mjy = alone(LazyCube::open(path.to_str().unwrap()).unwrap());
+        let background = RegionShape::Annulus { x: LINE_DISK_CENTRE, y: LINE_DISK_CENTRE, r_inner: 9.0, r_outer: 13.0 };
+        let response = region_spectrum_response(&mjy, &disk(), Some(&background), None, Instant::now()).unwrap();
+        assert!(response.bg_subtracted);
+        let flux = response.flux_jy.as_ref().expect("flux in Jy");
+        assert_eq!(flux.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = response.sum[z] as f64 * 3.0461742e-12 * JY_PER_MJY;
+            assert!((flux[z] - expected).abs() <= 1e-12 * expected.abs().max(1.0), "z={}", z);
+        }
+        let line_weight: f64 = region_pixels(&disk(), LINE_CUBE_SIZE, LINE_CUBE_SIZE, APERTURE_SUBSAMPLES)
+            .unwrap()
+            .iter()
+            .filter(|p| inside_disk(p.y, p.x))
+            .map(|p| p.weight as f64)
+            .sum();
+        assert!(line_weight < response.npix);
+        assert!((response.sum[20] as f64 - line_weight).abs() < 1e-3, "sum={} weight={}", response.sum[20], line_weight);
+    }
+
+    const AREA_SR: f64 = 3.0461741978670858e-12;
+    const JY_NOTE_PREFIX: &str = "Jy from BUNIT";
+
+    fn region_response_in(dir: &tempfile::TempDir, name: &str, cards: &[(&'static str, &'static str)]) -> RegionSpectrumResponse {
+        let path = dir.path().join(name);
+        write_line_cube_with_cards(&path, cards);
+        let set = alone(LazyCube::open(path.to_str().unwrap()).unwrap());
+        region_spectrum_response(&set, &disk(), None, None, Instant::now()).unwrap()
+    }
+
+    fn assert_flux_is_sum_times(response: &RegionSpectrumResponse, factor: f64, relative: f64) {
+        let flux = response.flux_jy.as_ref().expect("flux in Jy");
+        assert_eq!(flux.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = response.sum[z] as f64 * factor;
+            assert!((flux[z] - expected).abs() <= relative * expected.abs(), "z={} got={} expected={}", z, flux[z], expected);
+        }
+    }
+
+    #[test]
+    fn a_region_spectrum_of_a_jy_per_sr_cube_is_converted_with_the_wcs_pixel_area() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = region_response_in(&dir, "jy_sr.fits", &[("BUNIT", "'Jy/sr'")]);
+        assert_flux_is_sum_times(&response, AREA_SR, 1e-12);
+    }
+
+    #[test]
+    fn a_region_spectrum_in_ujy_per_arcsec2_uses_the_pixel_area_in_arcsec2() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = region_response_in(&dir, "ujy_arcsec2.fits", &[("BUNIT", "'uJy/arcsec2'")]);
+        assert_flux_is_sum_times(&response, 1.296e-7, 1e-9);
+    }
+
+    #[test]
+    fn a_region_spectrum_of_a_flux_density_per_pixel_cube_is_its_sum_in_jy() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = region_response_in(&dir, "jy.fits", &[("BUNIT", "'Jy'")]);
+        let in_jy: Vec<f64> = response.sum.iter().map(|&v| v as f64).collect();
+        assert_eq!(response.flux_jy.as_ref(), Some(&in_jy));
+
+        let response = region_response_in(&dir, "mjy_pixel.fits", &[("BUNIT", "'mJy'")]);
+        assert_flux_is_sum_times(&response, 1e-3, 1e-12);
+
+        let path = dir.path().join("mjy_pixel_s3d.fits");
+        write_line_cube_mef_with_cards(&path, &[("BUNIT", "'mJy'")], SET_NOISE, |_, _, _| SET_ERR, unflagged);
+        let key = path.to_str().unwrap();
+        let value = region_spectrum_json(key, &disk(), None, None).unwrap();
+        let err = f32_array(&value["err"]);
+        let flux_jy_err = value["flux_jy_err"].as_array().expect("error in Jy");
+        assert_eq!(flux_jy_err.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = err[z] as f64 * 1e-3;
+            let got = flux_jy_err[z].as_f64().unwrap();
+            assert!(expected > 0.0 && (got - expected).abs() <= 1e-12 * expected, "channel {}: {} vs {}", z, got, expected);
+        }
+        invalidate_set(key);
+    }
+
+    #[test]
+    fn a_point_spectrum_follows_the_same_factor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jy_sr_point.fits");
+        write_line_cube_with_cards(&path, &[("BUNIT", "'Jy/sr'")]);
+        let key = path.to_str().unwrap();
+        let response = cube_spectrum_json(key, 16, 16).unwrap();
+        let spectrum = response[RES_SPECTRUM].as_array().unwrap();
+        let flux = response[KEY_FLUX_JY].as_array().expect("flux in Jy");
+        assert_eq!(flux.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = spectrum[z].as_f64().unwrap() * AREA_SR;
+            let got = flux[z].as_f64().unwrap();
+            assert!(expected > 0.0 && (got - expected).abs() <= 1e-12 * expected, "z={} got={} expected={}", z, got, expected);
+        }
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn the_note_names_the_unit_and_the_factor_only_for_the_new_conversions() {
+        let dir = tempfile::tempdir().unwrap();
+        let response = region_response_in(&dir, "jy_sr_note.fits", &[("BUNIT", "'Jy/sr'")]);
+        let expected = format!("{} 'Jy/sr': {:e} Jy per pixel unit", JY_NOTE_PREFIX, AREA_SR);
+        assert!(response.notes.iter().any(|n| *n == expected), "{:?}", response.notes);
+
+        let response = region_response_in(&dir, "mjy_sr_note.fits", &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")]);
+        assert!(response.flux_jy.is_some());
+        assert!(!response.notes.iter().any(|n| n.starts_with(JY_NOTE_PREFIX)), "{:?}", response.notes);
+    }
+
+    #[test]
+    fn a_surface_brightness_cube_without_a_celestial_wcs_gets_no_jy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jy_sr_no_wcs.fits");
+        let mut cards = line_cube_cards();
+        cards.retain(|(k, _)| *k != "CTYPE1" && *k != "CTYPE2" && *k != "BUNIT");
+        cards.push(("BUNIT", "'Jy/sr'"));
+        write_cube(&path, LINE_CUBE_SIZE, LINE_CUBE_SIZE, LINE_CUBE_DEPTH, &cards, |z, y, x| line_cube_value(z, y, x, 0.0));
+        let set = alone(LazyCube::open(path.to_str().unwrap()).unwrap());
+        assert!(load_wcs(&set.sci.source_path, &set.sci.header).is_err());
+        let response = region_spectrum_response(&set, &disk(), None, None, Instant::now()).unwrap();
+        assert!(response.flux_jy.is_none(), "{:?}", response.flux_jy);
+        assert!(!response.notes.iter().any(|n| n.starts_with(JY_NOTE_PREFIX)), "{:?}", response.notes);
+    }
+
+    #[test]
+    fn moment_map_files_write_three_2d_fits_with_their_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = open_cube(&dir, "line.fits", 0.01);
+        let out_dir = dir.path().join("maps");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out = moment_map_files(&VerifiedCubeSet::open(&path).unwrap(), &path, out_dir.to_str().unwrap(), &line_moment_config(), Instant::now()).unwrap();
+        assert_eq!(out.m0_unit, "Jy beam-1 km s-1");
+        assert_eq!(out.velocity_unit, "km/s");
+        assert_eq!(out.n_channels, 25);
+        assert_eq!(out.dimensions, [LINE_CUBE_SIZE, LINE_CUBE_SIZE]);
+        assert!(out.m0.fits_path.ends_with("line_m0_8-32.fits"));
+        for (files, unit, abproc) in [(&out.m0, "Jy beam-1 km s-1", "moment0"), (&out.m1, "km/s", "moment1"), (&out.m2, "km/s", "moment2")] {
+            assert!(std::path::Path::new(&files.png_path).exists());
+            let reopened = reopen(&files.fits_path);
+            assert_eq!(reopened.header.get_i64("NAXIS"), Some(2));
+            assert!(reopened.header.get("CTYPE3").is_none());
+            assert_eq!(reopened.header.get("BUNIT"), Some(unit));
+            assert_eq!(reopened.header.get(HEADER_ABPROC), Some(abproc));
+            assert_eq!(reopened.image.dim(), (LINE_CUBE_SIZE, LINE_CUBE_SIZE));
+            assert!(WcsTransform::from_header(&reopened.header).is_ok());
+        }
+        let m1 = reopen(&out.m1.fits_path).image;
+        let centre = (LINE_DISK_CENTRE as usize, LINE_DISK_CENTRE as usize);
+        assert!(m1[centre].is_finite());
+        assert!(m1[[0, 0]].is_nan());
+    }
+
+    #[test]
+    fn a_moment_zero_map_of_an_mjy_per_sr_cube_is_not_calibrated_as_a_flux_density() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mjy_line.fits");
+        write_line_cube_with_cards(&path, &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "1.0E-13"), ("SATURATE", "5000.0")]);
+        let key = path.to_str().unwrap();
+        let out = dir.path().join("maps");
+        std::fs::create_dir_all(&out).unwrap();
+        let maps = moment_map_files(&VerifiedCubeSet::open(key).unwrap(), key, out.to_str().unwrap(), &line_moment_config(), Instant::now()).unwrap();
+        assert_eq!(maps.m0_unit, "MJy sr-1 km s-1");
+        let header = reopen(&maps.m0.fits_path).header;
+        assert_eq!(header.get("BUNIT"), Some("MJy sr-1 km s-1"));
+        assert!(header.get("PIXAR_SR").is_none());
+        assert!(header.get("SATURATE").is_none());
+        let wcs = WcsTransform::from_header(&header).ok();
+        assert!(PhotCal::from_header(&header, wcs.as_ref()).is_none(), "M0 was calibrated as MJy/sr");
+    }
+
+    #[test]
+    fn every_cube_command_accepts_the_plane_ref_the_frontend_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refcube.fits");
+        write_line_cube(&path, 0.01);
+        let key = format!("{}#hdu=0", path.to_str().unwrap());
+        let out = dir.path().join("out");
+        let out = out.to_str().unwrap();
+
+        let info = cube_info_json(&key).unwrap();
+        assert_eq!(info[RES_FRAMES], LINE_CUBE_DEPTH);
+        assert_eq!(info[RES_WIDTH], LINE_CUBE_SIZE);
+        let spectrum = cube_spectrum_json(&key, 16, 16).unwrap();
+        assert_eq!(spectrum[RES_SPECTRUM].as_array().unwrap().len(), LINE_CUBE_DEPTH);
+        let region = region_spectrum_json(&key, &disk(), None, None).unwrap();
+        assert_eq!(region["sum"].as_array().unwrap().len(), LINE_CUBE_DEPTH);
+        std::fs::create_dir_all(out).unwrap();
+        let png = format!("{}/frame.png", out);
+        let frame = cube_frame_json(&key, 3, &png, None).unwrap();
+        assert_eq!(frame[RES_OUTPUT_PATH], png);
+        let collapsed = collapse_range_json(&key, out, 15, 25, "mean", None, None).unwrap();
+        assert!(collapsed["fits_path"].as_str().unwrap().ends_with("refcube_hdu0_collapse_mean_15-25.fits"));
+        let moments = moment_maps_json(&key, out, &line_moment_config()).unwrap();
+        assert!(moments["m0"]["fits_path"].as_str().unwrap().contains("refcube_hdu0_m0_8-32"));
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+    }
+
+    #[test]
+    fn collapse_previews_use_the_auto_stf_transfer_of_the_processing_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stf_cube.fits");
+        write_line_cube(&path, 0.05);
+        let key = path.to_str().unwrap();
+        let out = dir.path().join("out");
+        let out = out.to_str().unwrap();
+        let last = LINE_CUBE_DEPTH - 1;
+        let cube = LazyCube::open(key).unwrap();
+        for mode in [CollapseMode::Mean, CollapseMode::Median] {
+            let collapsed = cube.collapse_range(0, last, mode).unwrap();
+            let response = collapse_range_json(key, out, 0, last, mode.name(), None, None).unwrap();
+            let png = response["png_path"].as_str().unwrap();
+            let written = image::open(png).unwrap().to_luma8();
+            assert_eq!(written.dimensions(), (LINE_CUBE_SIZE as u32, LINE_CUBE_SIZE as u32));
+            assert_eq!(
+                written.as_raw(),
+                &crate::cmd::common::auto_stretch_preview(&collapsed),
+                "{} is not rendered with the auto-STF transfer",
+                png
+            );
+        }
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn an_exported_frame_keeps_the_celestial_wcs_unit_and_its_channel_coordinate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frames.fits");
+        write_line_cube(&path, 0.0);
+        let key = path.to_str().unwrap();
+        let png = dir.path().join("frame_0003.png");
+        let fits = dir.path().join("frame_0003.fits");
+        let result = cube_frame_json(key, 3, png.to_str().unwrap(), Some(fits.to_str().unwrap())).unwrap();
+        assert_eq!(result[RES_FITS_PATH], fits.to_str().unwrap());
+
+        let reopened = reopen(fits.to_str().unwrap());
+        let header = &reopened.header;
+        assert_eq!(header.get_i64("NAXIS"), Some(2));
+        assert!(header.get("NAXIS3").is_none() && header.get("CTYPE3").is_none());
+        assert_eq!(header.get("CTYPE1"), Some("RA---TAN"));
+        assert_eq!(header.get("BUNIT"), Some("Jy/beam"));
+        assert_eq!(header.get_i64(CARD_CHANNEL), Some(3));
+        assert!((header.get_f64(CARD_SPECTRAL_VALUE).unwrap() - 1.003).abs() < 1e-9);
+        assert_eq!(header.get(CARD_SPECTRAL_UNIT), Some("um"));
+        assert_eq!(header.get(CARD_SPECTRAL_TYPE), Some("WAVE"));
+        assert_eq!(header.get(HEADER_ABPROC), Some(ABPROC_CUBE_FRAME));
+        let original = WcsTransform::from_header(&LazyCube::open(key).unwrap().header).unwrap();
+        let written = WcsTransform::from_header(header).unwrap();
+        let (a, b) = (original.pixel_to_world(5.0, 7.0), written.pixel_to_world(5.0, 7.0));
+        assert!((a.ra - b.ra).abs() < 1e-9 && (a.dec - b.dec).abs() < 1e-9);
+        assert_eq!(reopened.image[[0, 0]], LINE_CONTINUUM);
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn a_frame_preview_is_not_crushed_by_one_hot_pixel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hot_frame.fits");
+        write_cube(&path, 8, 8, 3, &[], |z, y, x| {
+            if z == 2 && y == 0 && x == 0 {
+                1.0e6
+            } else {
+                50.0 + deterministic_noise(0, y, x, 1.0)
+            }
+        });
+        let key = path.to_str().unwrap();
+        let png = dir.path().join("hot.png");
+        cube_frame_json(key, 2, png.to_str().unwrap(), None).unwrap();
+        let pixels = image::open(&png).unwrap().to_luma8();
+        let sky = &pixels.as_raw()[1..];
+        let lit = sky.iter().filter(|&&v| v > 0).count();
+        assert!(lit > sky.len() / 2, "sky rendered black next to a hot pixel: {:?}", sky);
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn cube_info_and_point_spectrum_label_their_axes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("muse.fits");
+        let cards = [("CTYPE3", "'AWAV'"), ("CUNIT3", "'Angstrom'"), ("CRVAL3", "4750.0"), ("CD3_3", "1.25"), ("CRPIX3", "1.0")];
+        write_cube(&path, 4, 4, 3, &cards, |z, _, _| 1.0 + z as f32);
+        let key = path.to_str().unwrap();
+        let spectrum = cube_spectrum_json(key, 1, 1).unwrap();
+        assert_eq!(spectrum[RES_WAVELENGTHS][1], 4751.25);
+        assert_eq!(spectrum[RES_UNIT], "Angstrom");
+        let info = cube_info_json(key).unwrap();
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][KEY_AXIS_UNIT_ASSUMED], false);
+        assert_eq!(info[KEY_SPECTRAL_AXIS]["unit"], "um");
+
+        let bare = dir.path().join("bare_wave.fits");
+        write_cube(&bare, 4, 4, 3, &[("CTYPE3", "'WAVE'"), ("CRVAL3", "4.7E-7"), ("CDELT3", "1.0E-10")], |_, _, _| 1.0);
+        let info = cube_info_json(bare.to_str().unwrap()).unwrap();
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][KEY_AXIS_UNIT_ASSUMED], true);
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][RES_AXIS_UNIT], "M");
+        GLOBAL_CUBE_CACHE.invalidate(key);
+        GLOBAL_CUBE_CACHE.invalidate(bare.to_str().unwrap());
+    }
+
+    #[test]
+    fn point_spectrum_reports_flux_in_jy_for_mjy_per_sr_and_none_for_jy_per_beam() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key, _) = open_cube(&dir, "line.fits", 0.0);
+        let plain = cube_spectrum_json(&key, 16, 16).unwrap();
+        assert!(plain[KEY_FLUX_JY].is_null(), "Jy reported for a Jy/beam cube: {}", plain[KEY_FLUX_JY]);
+
+        let mjy_path = dir.path().join("mjy.fits");
+        write_line_cube_with_cards(&mjy_path, &[("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")]);
+        let mjy_key = mjy_path.to_str().unwrap();
+        let response = cube_spectrum_json(mjy_key, 16, 16).unwrap();
+        let spectrum = response[RES_SPECTRUM].as_array().unwrap();
+        let flux = response[KEY_FLUX_JY].as_array().expect("flux in Jy");
+        assert_eq!(flux.len(), LINE_CUBE_DEPTH);
+        for z in 0..LINE_CUBE_DEPTH {
+            let expected = spectrum[z].as_f64().unwrap() * 3.0461742e-12 * JY_PER_MJY;
+            let got = flux[z].as_f64().unwrap();
+            assert!((got - expected).abs() <= 1e-12 * expected.abs().max(1.0), "z={} got={} expected={}", z, got, expected);
+        }
+        let pinned = 2.0 * 3.0461742e-12 * JY_PER_MJY;
+        let got = flux[20].as_f64().unwrap();
+        assert!((got - pinned).abs() <= 1e-12 * pinned, "channel 20: got={} expected={}", got, pinned);
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+        GLOBAL_CUBE_CACHE.invalidate(mjy_key);
+    }
+
+    fn write_ramp_fixture(dir: &tempfile::TempDir, name: &str) -> String {
+        let path = dir.path().join(name);
+        let primary = [
+            ("TELESCOP", "'JWST'"),
+            ("NGROUPS", "3"),
+            ("NINTS", "2"),
+            ("TGROUP", "10.0"),
+            ("READPATT", "'NRSIRS2RAPID'"),
+            ("DATAMODL", "'Level1bModel'"),
+        ];
+        write_u16_ramp_mef(&path, 4, 3, 3, 2, &primary, &[("BUNIT", "'DN'")], |i, g, y, x| (30000 + i * 1000 + g * 100 + y * 10 + x) as u16);
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn cube_info_json_carries_the_ramp_block_and_the_flattened_frame_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_ramp_fixture(&dir, "ramp_info.fits");
+        let info = get_cube_info(key.clone()).await.unwrap();
+        assert_eq!(info[RES_FRAMES], 6);
+        assert_eq!(info[RES_WIDTH], 4);
+        assert_eq!(info[RES_HEIGHT], 3);
+        assert_eq!(info[RES_RAMP]["ngroups"], 3);
+        assert_eq!(info[RES_RAMP]["nints"], 2);
+        assert_eq!(info[RES_RAMP]["tgroup_s"], 10.0);
+        assert_eq!(info[RES_RAMP]["kind"], "jwst_groups");
+        assert_eq!(info[RES_RAMP]["group_times_s"], serde_json::json!([0.0, 10.0, 20.0]));
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][RES_IS_SPECTRAL], false);
+        let reason = info[RES_SPECTRAL_CLASSIFICATION][RES_SPECTRAL_REASON].as_str().unwrap();
+        assert!(reason.starts_with("ramp:"), "{}", reason);
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][RES_CHANNEL_COUNT], 3);
+        assert!(info[RES_WAVELENGTHS].is_null());
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+
+        let plain = dir.path().join("plain.fits");
+        write_line_cube(&plain, 0.0);
+        let plain_key = plain.to_str().unwrap().to_string();
+        let info = get_cube_info(plain_key.clone()).await.unwrap();
+        assert!(info[RES_RAMP].is_null(), "{}", info[RES_RAMP]);
+        assert_eq!(info[RES_FRAMES], LINE_CUBE_DEPTH);
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][RES_IS_SPECTRAL], true);
+        GLOBAL_CUBE_CACHE.invalidate(&plain_key);
+    }
+
+    #[test]
+    fn a_ramp_frame_header_names_group_and_integration() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_ramp_fixture(&dir, "ramp_frame.fits");
+        let cube = LazyCube::open(&key).unwrap();
+        let header = frame_header(&cube, 4);
+        assert_eq!(header.get_i64("ABGROUP"), Some(1));
+        assert_eq!(header.get_i64("ABINTEG"), Some(1));
+        assert_eq!(header.get_i64(CARD_CHANNEL), Some(4));
+        assert_eq!(header.get("TELESCOP"), None, "the primary header must not leak into a derived frame");
+        assert_eq!(header.get("BUNIT"), Some("DN"));
+        assert_eq!(header.get(HEADER_ABPROC), Some(ABPROC_CUBE_FRAME));
+        assert!(header.get("NAXIS4").is_none() && header.get("NAXIS3").is_none(), "{:?}", header.cards);
+        let first = frame_header(&cube, 0);
+        assert_eq!((first.get_i64("ABGROUP"), first.get_i64("ABINTEG")), (Some(0), Some(0)));
+
+        let png = dir.path().join("ramp_frame.png");
+        let fits = dir.path().join("ramp_frame_4.fits");
+        cube_frame_json(&key, 4, png.to_str().unwrap(), Some(fits.to_str().unwrap())).unwrap();
+        let reopened = reopen(fits.to_str().unwrap());
+        assert_eq!(reopened.header.get_i64("ABGROUP"), Some(1));
+        assert_eq!(reopened.header.get_i64("ABINTEG"), Some(1));
+        assert_eq!(reopened.image[[1, 2]], 31112.0);
+
+        let plain = dir.path().join("plain_frame.fits");
+        write_line_cube(&plain, 0.0);
+        let plain_cube = LazyCube::open(plain.to_str().unwrap()).unwrap();
+        let header = frame_header(&plain_cube, 3);
+        assert!(header.get("ABGROUP").is_none() && header.get("ABINTEG").is_none());
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+    }
+
+    fn lightstack_cube_bytes(filters: &[&str], cols: usize, rows: usize, value: impl Fn(usize, usize, usize) -> f64) -> Vec<u8> {
+        let mut cards: Vec<(String, String)> = [
+            ("EXTEND", "T"),
+            ("WCSAXES", "3"),
+            ("CRPIX1", "3.0"),
+            ("CRPIX2", "2.5"),
+            ("CRPIX3", "1.0"),
+            ("CD1_1", "-1.1111111111111E-05"),
+            ("CD2_2", "1.1111111111111E-05"),
+            ("CD3_3", "1.0"),
+            ("CUNIT1", "'deg'"),
+            ("CUNIT2", "'deg'"),
+            ("CTYPE1", "'RA---TAN'"),
+            ("CTYPE2", "'DEC--TAN'"),
+            ("CTYPE3", "'FILTER'"),
+            ("CRVAL1", "3.58"),
+            ("CRVAL2", "-30.4"),
+            ("CRVAL3", "0.0"),
+            ("LONPOLE", "180.0"),
+            ("LATPOLE", "-30.4"),
+            ("MJDREF", "0.0"),
+            ("RADESYS", "'ICRS'"),
+            ("BUNIT", "'Jy'"),
+        ]
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        for (i, filter) in filters.iter().enumerate() {
+            let n = i + 1;
+            cards.push((format!("FILTER{n}"), format!("'{filter}'")));
+            let dataset_key = if n >= 10 { format!("HIERARCH DATASET{n}") } else { format!("DATASET{n}") };
+            cards.push((dataset_key, "'JWST'".to_string()));
+        }
+        cards.push(("NFILTERS".to_string(), filters.len().to_string()));
+        cards.push(("FILTERS".to_string(), format!("'{}'", filters.join(","))));
+        let card_refs: Vec<(&str, &str)> = cards.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+        let mut data = Vec::with_capacity(cols * rows * filters.len() * 8);
+        for z in 0..filters.len() {
+            for y in 0..rows {
+                for x in 0..cols {
+                    data.extend_from_slice(&value(z, y, x).to_be_bytes());
+                }
+            }
+        }
+        image_hdu("SIMPLE", &[cols, rows, filters.len()], -64, &card_refs, data)
+    }
+
+    #[test]
+    fn a_lightstack_cube_opens_as_a_photometric_cube_with_filter_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("datacube_nircam.fits");
+        let filters = ["F070W", "F090W", "F115W", "F150W", "F200W", "F277W", "F356W", "F410M", "F444W", "F480M"];
+        write_bytes(&path, &lightstack_cube_bytes(&filters, 6, 5, |z, y, x| (z * 100 + y * 6 + x) as f64 + 0.5));
+        let key = path.to_str().unwrap();
+
+        let info = cube_info_json(key).unwrap();
+        let classification = &info[RES_SPECTRAL_CLASSIFICATION];
+        assert_eq!(classification[RES_IS_SPECTRAL], false, "{classification}");
+        assert_eq!(classification[KEY_IS_PHOTOMETRIC], true, "{classification}");
+        assert_eq!(classification[RES_CHANNEL_COUNT], 10);
+        assert_eq!(info[KEY_BUNIT], "Jy", "the SED labels its flux axis with the cube unit");
+        let planes = info[KEY_PHOTOMETRIC_PLANES].as_array().expect("plane labels");
+        let names: Vec<&str> = planes.iter().map(|plane| plane["filter"].as_str().unwrap()).collect();
+        assert_eq!(names, filters);
+        assert_eq!(planes[9]["dataset"], "JWST", "HIERARCH DATASET10 names the dataset of plane 10");
+        assert_eq!(planes[9]["instrument"], "NIRCam");
+        assert!((planes[9]["pivot_um"].as_f64().unwrap() - 4.818195).abs() < 1e-9, "{}", planes[9]);
+
+        let spectrum = cube_spectrum_json(key, 2, 3).unwrap();
+        assert_eq!(spectrum[RES_IS_SPECTRAL], false);
+        let values: Vec<f64> = spectrum[RES_SPECTRUM].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!(values, (0..10).map(|z| (z * 100 + 3 * 6 + 2) as f64 + 0.5).collect::<Vec<_>>());
+        assert!(spectrum[KEY_ERR].is_null(), "a LIGHTSTACK cube has no ERR plane");
+
+        let png = dir.path().join("plane9.png");
+        let fits = dir.path().join("plane9.fits");
+        cube_frame_json(key, 9, png.to_str().unwrap(), Some(fits.to_str().unwrap())).unwrap();
+        let exported = reopen(fits.to_str().unwrap());
+        assert_eq!(exported.header.get("FILTER"), Some("F480M"), "an exported plane names its filter");
+        assert_eq!(exported.image[[3, 2]], (900 + 3 * 6 + 2) as f32 + 0.5);
+        GLOBAL_CUBE_CACHE.invalidate(key);
+
+        let small = dir.path().join("datacube_acs.fits");
+        write_bytes(&small, &lightstack_cube_bytes(&filters[..4], 6, 5, |z, _, _| z as f64));
+        let small_key = small.to_str().unwrap();
+        let info = cube_info_json(small_key).unwrap();
+        assert_eq!(info[RES_SPECTRAL_CLASSIFICATION][KEY_IS_PHOTOMETRIC], false);
+        assert!(info[RES_SPECTRAL_CLASSIFICATION][RES_SPECTRAL_REASON].as_str().unwrap().contains("likely RGB"));
+        assert_eq!(info[KEY_PHOTOMETRIC_PLANES].as_array().map(Vec::len), Some(4), "four labelled planes keep their labels");
+        GLOBAL_CUBE_CACHE.invalidate(small_key);
+
+        let plain = dir.path().join("plain_line.fits");
+        write_line_cube(&plain, 0.0);
+        let plain_key = plain.to_str().unwrap();
+        assert!(cube_info_json(plain_key).unwrap()[KEY_PHOTOMETRIC_PLANES].is_null());
+        GLOBAL_CUBE_CACHE.invalidate(plain_key);
+    }
+
+    #[test]
+    fn a_point_spectrum_carries_the_err_cube_at_that_pixel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sci_err_s3d.fits");
+        write_mef_cube(&path, 4, 3, 6, &[("SCI", 1.0), ("ERR", 0.5), ("DQ", 0.0)]);
+        let key = path.to_str().unwrap();
+        let spectrum = cube_spectrum_json(key, 1, 2).unwrap();
+        let err: Vec<f64> = spectrum[KEY_ERR].as_array().expect("ERR at the pixel").iter().map(|v| v.as_f64().unwrap()).collect();
+        assert_eq!(err, (0..6).map(|z| 0.5 + z as f64).collect::<Vec<_>>(), "the ERR fixture holds 0.5 + plane index");
+        let err_key = format!("{key}#hdu=2");
+        assert!(cube_spectrum_json(&err_key, 1, 2).unwrap()[KEY_ERR].is_null(), "the ERR extension itself has no ERR companion");
+        for hdu in ["", "#hdu=2"] {
+            GLOBAL_CUBE_CACHE.invalidate(&format!("{key}{hdu}"));
+        }
+    }
+
+    const REVIEW_GOLDENS: &str = include_str!("../../../tests/fixtures/cube/cube_review_goldens.json");
+    const DROPOUT_CHANNEL: usize = 4;
+    const DROPOUT_PIXAR_SR: f64 = 3.0461742e-12;
+
+    fn write_flat_mjy_cube(path: &std::path::Path, missing: impl Fn(usize, usize, usize) -> bool) {
+        let mut cards = line_cube_cards();
+        cards.retain(|(k, _)| *k != "BUNIT");
+        cards.extend([("BUNIT", "'MJy/sr'"), ("PIXAR_SR", "3.0461742E-12")]);
+        write_cube(path, LINE_CUBE_SIZE, LINE_CUBE_SIZE, LINE_CUBE_DEPTH, &cards, |z, y, x| if missing(z, y, x) { f32::NAN } else { 1.0 });
+    }
+
+    fn f64_array(value: &serde_json::Value) -> Vec<f64> {
+        value.as_array().unwrap_or_else(|| panic!("not an array: {}", value)).iter().map(|v| v.as_f64().unwrap_or(f64::NAN)).collect()
+    }
+
+    #[test]
+    fn region_sum_blanks_a_channel_that_lost_aperture_spaxels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dropout.fits");
+        write_flat_mjy_cube(&path, |z, y, x| (z, y, x) == (DROPOUT_CHANNEL, CENTRE_SPAXEL.0, CENTRE_SPAXEL.1));
+        let key = path.to_str().unwrap();
+        let value = region_spectrum_json(key, &disk(), None, None).unwrap();
+        let pixels = region_pixels(&disk(), LINE_CUBE_SIZE, LINE_CUBE_SIZE, APERTURE_SUBSAMPLES).unwrap();
+        let nominal: f64 = pixels.iter().map(|p| p.weight as f64).sum();
+        let lost = pixels.iter().find(|p| (p.y, p.x) == CENTRE_SPAXEL).expect("centre spaxel in the aperture").weight as f64;
+        let jy = DROPOUT_PIXAR_SR * JY_PER_MJY;
+
+        let sum = &value["sum"];
+        assert!(sum[DROPOUT_CHANNEL].is_null(), "channel {DROPOUT_CHANNEL} kept {} of {nominal} pixels and its sum {} is presented as a flux", nominal - lost, sum[DROPOUT_CHANNEL]);
+        assert!(value["flux_jy"][DROPOUT_CHANNEL].is_null(), "{}", value["flux_jy"][DROPOUT_CHANNEL]);
+        let (raw, raw_jy) = (f64_array(&value["sum_raw"]), f64_array(&value["flux_jy_raw"]));
+        let (coverage, used) = (f64_array(&value["coverage"]), f64_array(&value["used_weight"]));
+        assert_eq!((raw.len(), raw_jy.len(), coverage.len()), (LINE_CUBE_DEPTH, LINE_CUBE_DEPTH, LINE_CUBE_DEPTH));
+        for z in 0..LINE_CUBE_DEPTH {
+            let kept = if z == DROPOUT_CHANNEL { nominal - lost } else { nominal };
+            assert!((raw[z] - kept).abs() < 1e-4 * nominal, "raw sum of channel {z}: {} expected {kept}", raw[z]);
+            assert!((raw_jy[z] - kept * jy).abs() < 1e-4 * nominal * jy, "raw Jy of channel {z}: {}", raw_jy[z]);
+            assert!((used[z] - kept).abs() < 1e-9, "used weight of channel {z}: {}", used[z]);
+            assert!((coverage[z] - kept / nominal).abs() < 1e-9, "coverage of channel {z}: {}", coverage[z]);
+            if z != DROPOUT_CHANNEL {
+                assert!((sum[z].as_f64().unwrap() - nominal).abs() < 1e-4 * nominal, "sum of channel {z}: {}", sum[z]);
+                assert!((value["flux_jy"][z].as_f64().unwrap() - nominal * jy).abs() < 1e-4 * nominal * jy);
+            }
+        }
+        assert!((value["mean"][DROPOUT_CHANNEL].as_f64().unwrap() - 1.0).abs() < 1e-6, "{}", value["mean"][DROPOUT_CHANNEL]);
+        assert_eq!(value["n_incomplete_channels"], 1);
+        let noted = notes_of(&value).iter().any(|n| n.contains("1 of 40 channels lost aperture spaxels") && n.contains("sum_raw"));
+        assert!(noted, "{:?}", notes_of(&value));
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn a_spaxel_missing_in_every_channel_does_not_blank_the_region_sum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("always_missing.fits");
+        write_flat_mjy_cube(&path, |_, y, x| (y, x) == CENTRE_SPAXEL);
+        let key = path.to_str().unwrap();
+        let value = region_spectrum_json(key, &disk(), None, None).unwrap();
+        let pixels = region_pixels(&disk(), LINE_CUBE_SIZE, LINE_CUBE_SIZE, APERTURE_SUBSAMPLES).unwrap();
+        let nominal: f64 = pixels.iter().map(|p| p.weight as f64).sum();
+        let lost = pixels.iter().find(|p| (p.y, p.x) == CENTRE_SPAXEL).unwrap().weight as f64;
+        for (z, sum) in f64_array(&value["sum"]).into_iter().enumerate() {
+            assert!((sum - (nominal - lost)).abs() < 1e-4 * nominal, "channel {z}: {sum}");
+        }
+        assert_eq!(value["n_incomplete_channels"], 0);
+        assert!(f64_array(&value["coverage"]).iter().all(|c| (c - 1.0).abs() < 1e-12), "{}", value["coverage"]);
+        let noted = notes_of(&value).iter().any(|n| n.contains("1 aperture spaxel has no data in any channel"));
+        assert!(noted, "{:?}", notes_of(&value));
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    fn history_of(header: &HduHeader) -> Vec<&str> {
+        header.cards.iter().filter(|(k, _)| k.trim() == "HISTORY").map(|(_, v)| v.as_str()).collect()
+    }
+
+    #[test]
+    fn moment_maps_carry_their_velocity_reference_in_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = open_cube(&dir, "line.fits", 0.01);
+        let out_dir = dir.path().join("maps");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let out = out_dir.to_str().unwrap();
+        let cfg = MomentConfig { rest_um: Some(LINE_REST_UM), ..line_moment_config() };
+        let value = moment_maps_json(&path, out, &cfg).unwrap();
+        for name in ["m0", "m1", "m2"] {
+            let h = reopen(value[name]["fits_path"].as_str().unwrap()).header;
+            let rest = h.get_f64("MOMREST").unwrap_or_else(|| panic!("{name} does not carry the rest wavelength of its velocity scale"));
+            assert!((rest - LINE_REST_UM).abs() < 1e-12, "{name}: MOMREST {rest}");
+            assert_eq!(h.get("MOMCONV"), Some("optical"), "{name}");
+            assert_eq!(h.get("MOMFRAME"), Some("observer"), "{name}");
+            assert_eq!((h.get_i64("MOMZ0"), h.get_i64("MOMZ1")), (Some(8), Some(32)), "{name}");
+            assert_eq!(h.get_f64("MOMSNR"), Some(3.0), "{name}");
+            assert_eq!(h.get("MOMMASK"), Some("T"), "{name}");
+            assert_eq!((h.get("MOMCONTA"), h.get("MOMCONTB")), (Some("0-5"), Some("34-39")), "{name}");
+            assert!(h.get("MOMREDSH").is_none() && h.get("MOMCLIP").is_none(), "{name}");
+            assert!(history_of(&h).iter().any(|line| line.starts_with("AstroBurst moments:")), "{name}: {:?}", history_of(&h));
+        }
+        assert_eq!(value["velocity_frame"], "observer");
+        assert_eq!(value["rest_um"], LINE_REST_UM);
+        assert!(value["redshift"].is_null() && value["weight_threshold_sigma"].is_null(), "{value}");
+        assert_eq!(value["intensity_unit"], "Jy/beam");
+
+        let stretch = 1.5;
+        let shifted = MomentConfig { rest_um: Some(LINE_REST_UM / stretch), redshift: stretch - 1.0, weight_threshold_sigma: Some(2.0), mask_below_threshold: false, ..line_moment_config() };
+        let value = moment_maps_json(&path, out, &shifted).unwrap();
+        let h = reopen(value["m1"]["fits_path"].as_str().unwrap()).header;
+        assert!((h.get_f64("MOMREST").unwrap() - LINE_REST_UM / stretch).abs() < 1e-12);
+        assert_eq!(h.get_f64("MOMREDSH"), Some(0.5));
+        assert_eq!(h.get("MOMFRAME"), Some("source"));
+        assert_eq!(h.get_f64("MOMCLIP"), Some(2.0));
+        assert_eq!(h.get("MOMMASK"), Some("F"));
+        assert_eq!((value["velocity_frame"].as_str(), value["redshift"].as_f64(), value["weight_threshold_sigma"].as_f64()), (Some("source"), Some(0.5), Some(2.0)));
+        let m1 = reopen(value["m1"]["fits_path"].as_str().unwrap()).image;
+        let centre = (LINE_DISK_CENTRE as usize, LINE_DISK_CENTRE as usize);
+        let channel_kms = crate::core::astrometry::spectral::SPEED_OF_LIGHT_KMS * LINE_CDELT_UM / LINE_REST_UM;
+        assert!((m1[centre] as f64).abs() < 0.2 * channel_kms, "source-frame M1 at the disk centre: {} km/s", m1[centre]);
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(value["provenance_path"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(saved["provenance"]["parameters"]["redshift"], 0.5);
+        assert_eq!(saved["provenance"]["effective"]["redshift"], 0.5);
+        assert_eq!(saved["provenance"]["effective"]["velocity_frame"], "source");
+        assert_eq!(saved["provenance"]["effective"]["weight_threshold_sigma"], 2.0);
+        GLOBAL_CUBE_CACHE.invalidate(&path);
+    }
+
+    #[test]
+    fn moment_maps_write_a_coverage_map_of_the_channels_used_per_pixel() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partial.fits");
+        write_cube(&path, LINE_CUBE_SIZE, LINE_CUBE_SIZE, LINE_CUBE_DEPTH, &line_cube_cards(), |z, y, x| {
+            if (y, x) == CENTRE_SPAXEL && (10..=12).contains(&z) { f32::NAN } else { line_cube_value(z, y, x, 0.01) }
+        });
+        let key = path.to_str().unwrap();
+        let out_dir = dir.path().join("maps");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let value = moment_maps_json(key, out_dir.to_str().unwrap(), &line_moment_config()).unwrap();
+        let fits = value["coverage"]["fits_path"].as_str().expect("the moment maps come without a coverage map");
+        assert!(fits.ends_with("partial_mcov_8-32.fits"), "{fits}");
+        assert!(std::path::Path::new(value["coverage"]["png_path"].as_str().unwrap()).exists());
+        let reopened = reopen(fits);
+        assert_eq!(reopened.image.dim(), (LINE_CUBE_SIZE, LINE_CUBE_SIZE));
+        assert_eq!(reopened.image[CENTRE_SPAXEL], 22.0);
+        assert_eq!(reopened.image[[0, 0]], 25.0);
+        assert_eq!(reopened.header.get(HEADER_ABPROC), Some("moment-coverage"));
+        assert_eq!(reopened.header.get("BUNIT"), Some("chan"));
+        assert_eq!((reopened.header.get_i64("MOMZ0"), reopened.header.get_i64("MOMZ1")), (Some(8), Some(32)));
+        assert!(WcsTransform::from_header(&reopened.header).is_ok());
+        assert_eq!(value["n_partial_pixels"], 1);
+        let noted = notes_of(&value).iter().any(|n| n.contains("1 of 1024 pixels") && n.contains("fewer than the 25 channels"));
+        assert!(noted, "{:?}", notes_of(&value));
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(value["provenance_path"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(saved["products"]["coverage"]["fits_path"], fits);
+        assert_eq!(saved["provenance"]["effective"]["n_partial_pixels"], 1);
+        GLOBAL_CUBE_CACHE.invalidate(key);
+    }
+
+    #[test]
+    fn a_summed_collapse_writes_a_bunit_that_astropy_reads_as_the_cube_unit_times_channels() {
+        let goldens: serde_json::Value = serde_json::from_str(REVIEW_GOLDENS).unwrap();
+        let rows: Vec<&serde_json::Value> = goldens["integrated_units"].as_array().unwrap().iter().filter(|row| row["factor"] == "chan").collect();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let dir = tempfile::tempdir().unwrap();
+        for (k, row) in rows.iter().enumerate() {
+            assert_eq!(row["equals_intended"], true, "{row}");
+            let quoted = format!("'{}'", row["bunit"].as_str().unwrap());
+            let path = dir.path().join(format!("sum_{k}.fits"));
+            write_cube(&path, 4, 2, 3, &[("BUNIT", quoted.as_str())], |z, _, _| 1.0 + z as f32);
+            let key = path.to_str().unwrap();
+            let response = collapse_range_json(key, dir.path().to_str().unwrap(), 0, 2, "sum", None, None).unwrap();
+            let header = reopen(response["fits_path"].as_str().unwrap()).header;
+            assert_eq!(header.get("BUNIT"), row["written"].as_str(), "sum of a {} cube", row["bunit"]);
+            GLOBAL_CUBE_CACHE.invalidate(key);
+        }
+    }
+
+    const DOCUMENTS_FITS_DIR_VAR: &str = "ASTROBURST_DOCUMENTS_FITS_DIR";
+    const BR_ALPHA_UM: f64 = 4.052262;
+
+    #[test]
+    #[ignore = "needs ASTROBURST_DOCUMENTS_FITS_DIR with the jw01266 G395H s3d cube"]
+    fn the_real_g395h_cube_reports_the_aperture_and_moment_coverage_that_numpy_counts() {
+        let goldens: serde_json::Value = serde_json::from_str(REVIEW_GOLDENS).unwrap();
+        let golden = &goldens["real_g395h_cube"];
+        let number = |key: &str| golden[key].as_f64().unwrap_or_else(|| panic!("{key} missing from the goldens"));
+        let count = |key: &str| golden[key].as_u64().unwrap_or_else(|| panic!("{key} missing from the goldens")) as usize;
+        let folder = std::env::var(DOCUMENTS_FITS_DIR_VAR).expect(DOCUMENTS_FITS_DIR_VAR);
+        let key = format!("{}/{}", folder.trim_end_matches('/'), golden["file"].as_str().unwrap());
+        let region = &golden["region"];
+        let shape = RegionShape::Circle { x: region["x"].as_f64().unwrap(), y: region["y"].as_f64().unwrap(), r: region["r"].as_f64().unwrap() };
+        assert!(APERTURE_SUBSAMPLES > 1 && region["weights"].as_str().is_some_and(|w| w.contains("exact")), "{region}");
+
+        let value = region_spectrum_json(&key, &shape, None, None).unwrap();
+        assert!((value["npix"].as_f64().unwrap() - number("aperture_weight")).abs() < 1e-4, "{}", value["npix"]);
+        assert_eq!(value["n_incomplete_channels"].as_u64(), Some(count("channels_with_incomplete_aperture_and_a_finite_sum") as u64));
+        let coverage = f64_array(&value["coverage"]);
+        for (channel, expected) in [(1887, number("coverage_of_channel_1887")), (count("least_covered_channel"), number("least_covered_channel_coverage"))] {
+            assert!((coverage[channel] - expected).abs() < 1e-5, "coverage of channel {channel}: {} expected {expected}", coverage[channel]);
+        }
+        let empty = value["sum_raw"].as_array().unwrap().iter().filter(|v| v.is_null()).count();
+        assert_eq!(empty, count("channels_without_any_aperture_spaxel"));
+        let blank = value["sum"].as_array().unwrap().iter().filter(|v| v.is_null()).count();
+        assert_eq!(blank, empty + count("channels_with_incomplete_aperture_and_a_finite_sum"));
+        assert!(value["sum"][1887].is_null() && value["sum_raw"][1887].is_number(), "{} {}", value["sum"][1887], value["sum_raw"][1887]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let range = &golden["moment_range"];
+        let cfg: MomentConfig = serde_json::from_value(json!({
+            "z0": range[0], "z1": range[1], "rest_um": BR_ALPHA_UM, "snr_threshold": 0, "mask_below_threshold": false, "dq_policy": "do_not_use",
+        }))
+        .unwrap();
+        let moments = moment_maps_json(&key, dir.path().to_str().unwrap(), &cfg).unwrap();
+        assert_eq!(moments["n_partial_pixels"].as_u64(), Some(count("moment_pixels_with_partial_coverage") as u64));
+        let channels = (cfg.z1 - cfg.z0 + 1) as f32;
+        let map = reopen(moments["coverage"]["fits_path"].as_str().unwrap()).image;
+        assert_eq!(map.iter().filter(|c| **c > 0.0).count(), count("moment_pixels_with_data"));
+        assert_eq!(map.iter().filter(|c| **c == channels).count(), count("moment_pixels_with_every_channel"));
+        let fewest = map.iter().copied().filter(|c| *c > 0.0).fold(f32::INFINITY, f32::min);
+        assert_eq!(fewest, count("moment_fewest_channels") as f32);
+        GLOBAL_CUBE_CACHE.invalidate(&key);
+    }
+
+    #[test]
+    fn linear_preview_scales_percentiles_and_blacks_out_nan() {
+        let arr = Array2::from_shape_vec((2, 3), vec![f32::NAN, 0.0, 1.0, 2.0, 3.0, 4.0]).unwrap();
+        let out = linear_preview(&arr);
+        assert_eq!(out[[0, 0]], 0.0);
+        assert_eq!(out[[0, 1]], 0.0);
+        assert!((out[[1, 2]] - 1.0).abs() < 1e-6);
+        assert!(out[[0, 2]] > 0.0 && out[[0, 2]] < out[[1, 0]] && out[[1, 0]] < out[[1, 1]]);
+        let flat = Array2::from_elem((2, 2), 5.0f32);
+        assert!(linear_preview(&flat).iter().all(|v| v.is_finite()));
+        let empty = Array2::from_elem((2, 2), f32::NAN);
+        assert!(linear_preview(&empty).iter().all(|v| *v == 0.0));
+    }
+}

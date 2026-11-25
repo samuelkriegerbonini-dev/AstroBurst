@@ -1,21 +1,44 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use rayon::prelude::*;
 use serde_yaml::Value;
 
-use super::parser::{AsdfError, AsdfFile};
-use super::tree::{f16_bits_to_f32, untag, ArraySource, ByteOrder, DType, NdArrayMeta, WcsInfo};
+use super::blocks::check_memory;
+use super::parser::{AsdfError, AsdfFile, FileOrigin};
+use super::tree::{checked_len, f16_bits_to_f32, untag, ArraySource, ByteOrder, DType, NdArrayMeta, WcsInfo};
 use crate::core::astrometry::gwcs::{
     classify_wcs_node, find_wcs_node, fit_pipeline_tan_sip, parse_gwcs, SipFit, SipFitOptions, WcsNodeClass,
 };
+use crate::core::stacking::memory::{effective_memory, MemoryInfo};
 use crate::types::image::IntPlane;
 
 enum PixelLayout {
     Planar,
     Interleaved,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PixelRequest {
+    All,
+    Plane(usize),
+    HeaderOnly,
+}
+
+struct PlaneView {
+    offset: usize,
+    shape: [usize; 2],
+    strides: [isize; 2],
+}
+
+const F32_BYTES: u64 = 4;
+const WCS_CACHE_CAPACITY: usize = 16;
+
+type WcsCacheKey = (FileOrigin, Option<(usize, usize)>);
+
+static WCS_CACHE: Mutex<Vec<(WcsCacheKey, AsdfWcs)>> = Mutex::new(Vec::new());
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AsdfArrayInfo {
@@ -107,7 +130,7 @@ pub fn list_arrays(asdf: &AsdfFile) -> Vec<AsdfArrayInfo> {
 #[derive(Debug, Clone)]
 pub enum AsdfWcs {
     Tan(WcsInfo),
-    Gwcs { fit: SipFit, key: String },
+    Gwcs { fit: SipFit, key: String, frame_note: Option<String> },
     None(Option<String>),
 }
 
@@ -121,12 +144,22 @@ pub struct AsdfImage {
     pub wcs: AsdfWcs,
     pub metadata: HashMap<String, String>,
     pub unit: Option<String>,
+    pub dtype: Option<DType>,
+    pub loaded_plane: Option<usize>,
 }
 
 impl AsdfImage {
     pub fn from_file(asdf: &AsdfFile) -> Result<Self, AsdfError> {
+        Self::from_file_with(asdf, PixelRequest::All)
+    }
+
+    pub fn describe_file(asdf: &AsdfFile) -> Result<Self, AsdfError> {
+        Self::from_file_with(asdf, PixelRequest::HeaderOnly)
+    }
+
+    fn from_file_with(asdf: &AsdfFile, request: PixelRequest) -> Result<Self, AsdfError> {
         match Self::find_data_array(&asdf.tree)? {
-            Some((key, meta)) => Self::from_array(asdf, &key, meta),
+            Some((key, meta)) => Self::from_array(asdf, &key, meta, request),
             None => Ok(Self::empty(
                 Self::resolve_wcs(asdf, None),
                 Self::extract_metadata(&asdf.tree, ""),
@@ -135,6 +168,47 @@ impl AsdfImage {
     }
 
     fn resolve_wcs(asdf: &AsdfFile, naxis: Option<(usize, usize)>) -> AsdfWcs {
+        let Some(origin) = asdf.origin() else {
+            return Self::fit_wcs(asdf, naxis);
+        };
+        let key: WcsCacheKey = (origin.clone(), naxis);
+        {
+            let mut cache = WCS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(position) = cache.iter().position(|(cached, _)| *cached == key) {
+                let hit = cache.remove(position);
+                let wcs = hit.1.clone();
+                cache.push(hit);
+                return wcs;
+            }
+        }
+        let wcs = Self::fit_wcs(asdf, naxis);
+        let mut cache = WCS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= WCS_CACHE_CAPACITY {
+            cache.remove(0);
+        }
+        cache.push((key, wcs.clone()));
+        wcs
+    }
+
+    fn science_grid(asdf: &AsdfFile) -> Option<(String, usize, usize)> {
+        let (key, mut meta) = Self::find_data_array(&asdf.tree).ok().flatten()?;
+        Self::resolve_streamed(asdf, &mut meta).ok()?;
+        let (height, width, _, _) = Self::interpret_shape(&meta.shape);
+        Some((key, width, height))
+    }
+
+    fn wcs_for_array(asdf: &AsdfFile, key: &str, width: usize, height: usize) -> AsdfWcs {
+        match Self::science_grid(asdf) {
+            Some((science_key, science_width, science_height))
+                if science_key != key && (science_width, science_height) != (width, height) =>
+            {
+                AsdfWcs::None(None)
+            }
+            _ => Self::resolve_wcs(asdf, Some((width, height))),
+        }
+    }
+
+    fn fit_wcs(asdf: &AsdfFile, naxis: Option<(usize, usize)>) -> AsdfWcs {
         if let Some(wcs) = WcsInfo::from_yaml(&asdf.tree) {
             return AsdfWcs::Tan(wcs);
         }
@@ -155,7 +229,7 @@ impl AsdfImage {
             Err(e) => return AsdfWcs::None(reason.or_else(|| Some(format!("{e:#}")))),
         };
         match fit_pipeline_tan_sip(&pipeline, &SipFitOptions::default(), naxis) {
-            Ok(fit) => AsdfWcs::Gwcs { fit, key: key.0 },
+            Ok(fit) => AsdfWcs::Gwcs { fit, key: key.0, frame_note: pipeline.frame_note().map(str::to_string) },
             Err(e) => AsdfWcs::None(Some(format!("{e:#}"))),
         }
     }
@@ -167,8 +241,8 @@ impl AsdfImage {
             ArraySource::Block(index) => *index,
         };
         let block = asdf.block_data(index).ok()?;
-        meta.resolve_streamed_shape(block.len());
-        let raw = Self::gather_array_bytes(&block, &meta);
+        meta.resolve_streamed_shape(block.len()).ok()?;
+        let raw = Self::gather_array_bytes(&block, &meta).ok()?;
         let order = meta.byteorder;
         let values = match meta.dtype {
             DType::Float64 => raw.chunks_exact(8).map(|c| Self::read_f64(c, order)).collect(),
@@ -192,6 +266,8 @@ impl AsdfImage {
             wcs,
             metadata,
             unit: None,
+            dtype: None,
+            loaded_plane: None,
         }
     }
 
@@ -216,80 +292,150 @@ impl AsdfImage {
         (!text.is_empty()).then_some(text)
     }
 
-    fn from_array(asdf: &AsdfFile, key: &str, mut meta: NdArrayMeta) -> Result<Self, AsdfError> {
-        let mut pixels = match &meta.source {
-            ArraySource::Inline(values) => values.iter().map(|&v| v as f32).collect(),
-            ArraySource::Block(index) => {
-                let block = asdf.block_data(*index)?;
-                meta.resolve_streamed_shape(block.len());
-                let raw = Self::gather_array_bytes(&block, &meta);
-                Self::to_f32_pixels(&raw, &meta)
-            }
+    fn resolve_streamed(asdf: &AsdfFile, meta: &mut NdArrayMeta) -> Result<(), AsdfError> {
+        let index = match &meta.source {
+            ArraySource::Block(index) if meta.streamed_first_dim => *index,
+            _ => return Ok(()),
         };
+        meta.resolve_streamed_shape(asdf.block_len(index)?)
+    }
 
+    fn decode_budget(key: &str, shape: &[usize], elements: usize) -> Result<(), AsdfError> {
+        check_memory(
+            || format!("Decoding ASDF array '{}' [{}]", key, shape_label(shape)),
+            (elements as u64).saturating_mul(F32_BYTES),
+            effective_memory(),
+        )
+    }
+
+    fn from_array(asdf: &AsdfFile, key: &str, mut meta: NdArrayMeta, request: PixelRequest) -> Result<Self, AsdfError> {
+        Self::resolve_streamed(asdf, &mut meta)?;
+        let total = checked_len(&meta.shape, meta.byte_size_per_element())? / meta.byte_size_per_element().max(1);
         let (height, width, channels, layout) = Self::interpret_shape(&meta.shape);
+        let plane_len = width.saturating_mul(height);
 
-        let expected: usize = meta.shape.iter().product();
-        if pixels.len() < expected {
-            return Err(AsdfError::ShapeMismatch {
-                got: pixels.len(),
-                expected,
-            });
-        }
-        pixels.truncate(expected);
-
-        let data = match layout {
-            PixelLayout::Interleaved if channels > 1 => {
-                Self::deinterleave(&pixels, width, height, channels)
+        let (data, loaded_plane) = match request {
+            PixelRequest::HeaderOnly => (Vec::new(), None),
+            PixelRequest::All => {
+                let mut pixels: Vec<f32> = match &meta.source {
+                    ArraySource::Inline(values) => values.iter().map(|&v| v as f32).collect(),
+                    ArraySource::Block(index) => {
+                        Self::decode_budget(key, &meta.shape, total)?;
+                        let block = asdf.block_data(*index)?;
+                        let raw = Self::gather_array_bytes(&block, &meta)?;
+                        Self::to_f32_pixels(&raw, &meta)
+                    }
+                };
+                if pixels.len() < total {
+                    return Err(AsdfError::ShapeMismatch { got: pixels.len(), expected: total });
+                }
+                pixels.truncate(total);
+                let data = match layout {
+                    PixelLayout::Interleaved if channels > 1 => Self::deinterleave(&pixels, width, height, channels),
+                    _ => pixels,
+                };
+                (data, None)
             }
-            _ => pixels,
+            PixelRequest::Plane(plane) => {
+                let mut pixels = match &meta.source {
+                    ArraySource::Inline(values) => Self::inline_plane(values, &meta.shape, plane)?,
+                    ArraySource::Block(index) => {
+                        Self::decode_budget(key, &meta.shape, plane_len)?;
+                        let block = asdf.block_data(*index)?;
+                        let raw = Self::gather_plane_bytes(&block, &meta, plane)?;
+                        Self::to_f32_pixels(&raw, &meta)
+                    }
+                };
+                if pixels.len() < plane_len {
+                    return Err(AsdfError::ShapeMismatch { got: pixels.len(), expected: plane_len });
+                }
+                pixels.truncate(plane_len);
+                (pixels, Some(plane))
+            }
         };
 
         Ok(Self {
             width,
             height,
             channels,
-            shape: meta.shape,
             data,
-            wcs: Self::resolve_wcs(asdf, Some((width, height))),
+            wcs: Self::wcs_for_array(asdf, key, width, height),
             metadata: Self::extract_metadata(&asdf.tree, key),
             unit: Self::extract_unit(&asdf.tree, key),
+            dtype: Some(meta.dtype.clone()),
+            loaded_plane,
+            shape: meta.shape,
         })
     }
 
-    pub fn load_array(asdf: &AsdfFile, key: &str) -> Result<Self, AsdfError> {
+    fn keyed_meta(asdf: &AsdfFile, key: &str) -> Result<NdArrayMeta, AsdfError> {
         let node = Self::node_at(&asdf.tree, key)
             .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
-        let meta = Self::try_meta_or_wrapped(node)?
-            .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
-        Self::from_array(asdf, key, meta)
+        Self::try_meta_or_wrapped(node)?.ok_or_else(|| AsdfError::MissingField(key.to_string()))
+    }
+
+    pub(crate) fn array_meta(asdf: &AsdfFile, key: &str) -> Result<NdArrayMeta, AsdfError> {
+        let mut meta = Self::keyed_meta(asdf, key)?;
+        Self::resolve_streamed(asdf, &mut meta)?;
+        checked_len(&meta.shape, meta.byte_size_per_element())?;
+        Ok(meta)
+    }
+
+    pub fn load_array(asdf: &AsdfFile, key: &str) -> Result<Self, AsdfError> {
+        Self::from_array(asdf, key, Self::keyed_meta(asdf, key)?, PixelRequest::All)
+    }
+
+    pub fn load_array_plane(asdf: &AsdfFile, key: &str, plane: usize) -> Result<Self, AsdfError> {
+        Self::from_array(asdf, key, Self::keyed_meta(asdf, key)?, PixelRequest::Plane(plane))
+    }
+
+    pub fn describe_array(asdf: &AsdfFile, key: &str) -> Result<Self, AsdfError> {
+        Self::from_array(asdf, key, Self::keyed_meta(asdf, key)?, PixelRequest::HeaderOnly)
+    }
+
+    fn mask_value(value: i128, key: &str) -> Result<u32, AsdfError> {
+        u32::try_from(value).map_err(|_| {
+            AsdfError::UnsupportedDtype(format!(
+                "64 bit mask '{key}' holds the value {value}, which does not fit 32 bits"
+            ))
+        })
+    }
+
+    fn inline_mask_value(value: f64, key: &str) -> Result<u32, AsdfError> {
+        if value.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&value) {
+            return Ok(value as u32);
+        }
+        Err(AsdfError::UnsupportedDtype(format!(
+            "64 bit mask '{key}' holds the value {value}, which does not fit 32 bits"
+        )))
+    }
+
+    fn wide_mask_bits(raw: &[u8], meta: &NdArrayMeta, key: &str) -> Result<Vec<u32>, AsdfError> {
+        let signed = meta.dtype == DType::Int64;
+        raw.chunks_exact(8)
+            .map(|c| {
+                let b: [u8; 8] = c.try_into().unwrap_or([0u8; 8]);
+                let value = match (signed, meta.byteorder) {
+                    (true, ByteOrder::Big) => i128::from(i64::from_be_bytes(b)),
+                    (true, ByteOrder::Little) => i128::from(i64::from_le_bytes(b)),
+                    (false, ByteOrder::Big) => i128::from(u64::from_be_bytes(b)),
+                    (false, ByteOrder::Little) => i128::from(u64::from_le_bytes(b)),
+                };
+                Self::mask_value(value, key)
+            })
+            .collect()
     }
 
     pub fn load_array_int(asdf: &AsdfFile, key: &str) -> Result<Option<IntPlane>, AsdfError> {
-        let node = Self::node_at(&asdf.tree, key)
-            .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
-        let mut meta = Self::try_meta_or_wrapped(node)?
-            .ok_or_else(|| AsdfError::MissingField(key.to_string()))?;
+        let mut meta = Self::keyed_meta(asdf, key)?;
         let signed = match meta.dtype {
             DType::Int8 | DType::Int16 | DType::Int32 => true,
-            DType::UInt8 | DType::UInt16 | DType::UInt32 | DType::Bool8 => false,
+            DType::UInt8 | DType::UInt16 | DType::UInt32 | DType::Bool8 | DType::Int64 | DType::UInt64 => false,
             _ => return Ok(None),
         };
-        let bits: Vec<u32> = match &meta.source {
-            ArraySource::Inline(values) => values
-                .iter()
-                .map(|&v| if signed { v as i64 as u32 } else { v as u32 })
-                .collect(),
-            ArraySource::Block(index) => {
-                let block = asdf.block_data(*index)?;
-                meta.resolve_streamed_shape(block.len());
-                let raw = Self::gather_array_bytes(&block, &meta);
-                match Self::to_int_pixels(&raw, &meta) {
-                    Some((bits, _)) => bits,
-                    None => return Ok(None),
-                }
-            }
-        };
+        let wide = matches!(meta.dtype, DType::Int64 | DType::UInt64);
+        Self::resolve_streamed(asdf, &mut meta)?;
+        checked_len(&meta.shape, meta.byte_size_per_element())?;
         if meta.shape.len() < 2 {
             return Ok(None);
         }
@@ -299,6 +445,29 @@ impl AsdfImage {
         }
         let (height, width) = (geometry.height, geometry.width);
         let expected = width * height;
+        let bits: Vec<u32> = match &meta.source {
+            ArraySource::Inline(values) => values
+                .iter()
+                .take(expected)
+                .map(|&v| match (wide, signed) {
+                    (true, _) => Self::inline_mask_value(v, key),
+                    (false, true) => Ok(v as i64 as u32),
+                    (false, false) => Ok(v as u32),
+                })
+                .collect::<Result<Vec<u32>, AsdfError>>()?,
+            ArraySource::Block(index) => {
+                let block = asdf.block_data(*index)?;
+                let raw = Self::gather_plane_bytes(&block, &meta, 0)?;
+                if wide {
+                    Self::wide_mask_bits(&raw, &meta, key)?
+                } else {
+                    match Self::to_int_pixels(&raw, &meta) {
+                        Some((bits, _)) => bits,
+                        None => return Ok(None),
+                    }
+                }
+            }
+        };
         if bits.len() < expected {
             return Err(AsdfError::ShapeMismatch { got: bits.len(), expected });
         }
@@ -358,7 +527,12 @@ impl AsdfImage {
             return None;
         }
         let size = self.width.checked_mul(self.height)?;
-        let start = index.checked_mul(size)?;
+        let slot = match self.loaded_plane {
+            Some(held) if held == index => 0,
+            Some(_) => return None,
+            None => index,
+        };
+        let start = slot.checked_mul(size)?;
         let end = start.checked_add(size)?;
         (end <= self.data.len()).then_some((start, end))
     }
@@ -477,35 +651,137 @@ impl AsdfImage {
         Ok(None)
     }
 
-    fn gather_array_bytes<'a>(block: &'a [u8], meta: &NdArrayMeta) -> Cow<'a, [u8]> {
-        Self::gather_elements(
+    pub(crate) fn gather_array_bytes<'a>(block: &'a [u8], meta: &NdArrayMeta) -> Result<Cow<'a, [u8]>, AsdfError> {
+        Self::gather_elements_within(
             block,
             &meta.shape,
             meta.byte_size_per_element(),
             meta.offset,
             &meta.effective_strides(),
+            effective_memory(),
         )
     }
 
-    fn gather_elements<'a>(
+    fn plane_view(meta: &NdArrayMeta, plane: usize) -> Result<PlaneView, AsdfError> {
+        let rank = meta.shape.len();
+        let strides = meta.effective_strides();
+        let (height, width, planes, layout) = Self::interpret_shape(&meta.shape);
+        if plane >= planes.max(1) {
+            return Err(AsdfError::ShapeMismatch { got: plane, expected: planes });
+        }
+        let mut offset = meta.offset as i128;
+        let element = meta.byte_size_per_element().max(1) as isize;
+        let view = match (rank, layout) {
+            (0, _) => ([1, 1], [element, element]),
+            (1, _) => ([1, width], [strides[0].saturating_mul(width as isize), strides[0]]),
+            (3, PixelLayout::Interleaved) => {
+                offset += plane as i128 * strides[2] as i128;
+                ([height, width], [strides[0], strides[1]])
+            }
+            _ => {
+                let mut rest = plane;
+                for axis in (0..rank - 2).rev() {
+                    let length = meta.shape[axis].max(1);
+                    offset += (rest % length) as i128 * strides[axis] as i128;
+                    rest /= length;
+                }
+                ([height, width], [strides[rank - 2], strides[rank - 1]])
+            }
+        };
+        let offset = usize::try_from(offset).map_err(|_| AsdfError::ShapeMismatch { got: 0, expected: width.saturating_mul(height) })?;
+        Ok(PlaneView { offset, shape: view.0, strides: view.1 })
+    }
+
+    pub(crate) fn gather_plane_bytes<'a>(
+        block: &'a [u8],
+        meta: &NdArrayMeta,
+        plane: usize,
+    ) -> Result<Cow<'a, [u8]>, AsdfError> {
+        let view = Self::plane_view(meta, plane)?;
+        Self::gather_elements_within(
+            block,
+            &view.shape,
+            meta.byte_size_per_element(),
+            view.offset,
+            &view.strides,
+            effective_memory(),
+        )
+    }
+
+    pub(crate) fn sample_bytes<'a>(
+        block: &'a [u8],
+        meta: &NdArrayMeta,
+        plane: usize,
+        row: usize,
+        column: usize,
+    ) -> Result<&'a [u8], AsdfError> {
+        let view = Self::plane_view(meta, plane)?;
+        let element = meta.byte_size_per_element().max(1);
+        let position = view.offset as i128 + row as i128 * view.strides[0] as i128 + column as i128 * view.strides[1] as i128;
+        usize::try_from(position)
+            .ok()
+            .and_then(|start| block.get(start..start.checked_add(element)?))
+            .ok_or(AsdfError::ShapeMismatch { got: block.len() / element, expected: plane.saturating_add(1) })
+    }
+
+    fn inline_index(shape: &[usize], plane: usize, row: usize, column: usize) -> Option<usize> {
+        let (height, width, planes, layout) = Self::interpret_shape(shape);
+        if plane >= planes.max(1) || row >= height || column >= width {
+            return None;
+        }
+        let within = row.checked_mul(width)?.checked_add(column)?;
+        match layout {
+            PixelLayout::Interleaved if planes > 1 => within.checked_mul(planes)?.checked_add(plane),
+            _ => plane.checked_mul(width.checked_mul(height)?)?.checked_add(within),
+        }
+    }
+
+    pub(crate) fn inline_sample(values: &[f64], shape: &[usize], plane: usize, row: usize, column: usize) -> Result<f32, AsdfError> {
+        Self::inline_index(shape, plane, row, column)
+            .and_then(|index| values.get(index))
+            .map(|&v| v as f32)
+            .ok_or(AsdfError::ShapeMismatch { got: values.len(), expected: plane.saturating_add(1) })
+    }
+
+    pub(crate) fn inline_plane(values: &[f64], shape: &[usize], plane: usize) -> Result<Vec<f32>, AsdfError> {
+        let (height, width, planes, _) = Self::interpret_shape(shape);
+        if plane >= planes.max(1) {
+            return Err(AsdfError::ShapeMismatch { got: plane, expected: planes });
+        }
+        let mut out = Vec::with_capacity(width.saturating_mul(height).min(values.len()));
+        for row in 0..height {
+            for column in 0..width {
+                out.push(Self::inline_sample(values, shape, plane, row, column)?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn gather_elements_within<'a>(
         block: &'a [u8],
         shape: &[usize],
         element_size: usize,
         offset: usize,
         strides: &[isize],
-    ) -> Cow<'a, [u8]> {
+        memory: Option<MemoryInfo>,
+    ) -> Result<Cow<'a, [u8]>, AsdfError> {
         let elem = element_size.max(1);
-        let count: usize = shape.iter().product();
-        let expected = count.saturating_mul(elem);
+        let expected = checked_len(shape, elem)?;
+        let count = expected / elem;
 
         if strides == NdArrayMeta::contiguous_strides(shape, elem).as_slice()
             && offset <= block.len()
         {
             let end = offset.saturating_add(expected).min(block.len());
             let usable = ((end - offset) / elem) * elem;
-            return Cow::Borrowed(&block[offset..offset + usable]);
+            return Ok(Cow::Borrowed(&block[offset..offset + usable]));
         }
 
+        check_memory(
+            || format!("Reading a strided view [{}] of a {}-byte block", shape_label(shape), block.len()),
+            expected as u64,
+            memory,
+        )?;
         let ndim = shape.len();
         let mut out = Vec::with_capacity(expected.min(block.len()));
         let mut idx = vec![0usize; ndim];
@@ -531,7 +807,7 @@ impl AsdfImage {
                 idx[axis] = 0;
             }
         }
-        Cow::Owned(out)
+        Ok(Cow::Owned(out))
     }
 
     fn read_f16(c: &[u8], order: ByteOrder) -> f32 {
@@ -570,7 +846,7 @@ impl AsdfImage {
         }
     }
 
-    fn to_f32_pixels(raw: &[u8], meta: &NdArrayMeta) -> Vec<f32> {
+    pub(crate) fn to_f32_pixels(raw: &[u8], meta: &NdArrayMeta) -> Vec<f32> {
         let order = meta.byteorder;
 
         macro_rules! decode {
@@ -629,7 +905,7 @@ impl AsdfImage {
             n => (
                 shape[n - 2],
                 shape[n - 1],
-                shape[..n - 2].iter().product(),
+                shape[..n - 2].iter().fold(1usize, |planes, &axis| planes.saturating_mul(axis)),
                 PixelLayout::Planar,
             ),
         }
@@ -1083,6 +1359,107 @@ mod tests {
     }
 
     #[test]
+    fn zero_strides_over_a_tiny_block_are_refused_before_allocating() {
+        let budget = MemoryInfo { physical_available: 1 << 20, commit_available: 1 << 20 };
+        let block = [0u8; 8];
+        let result = AsdfImage::gather_elements_within(&block, &[2048, 2048], 8, 0, &[0, 0], Some(budget));
+        match result {
+            Err(AsdfError::TooLarge { needed, available, .. }) => {
+                assert!(needed >= 2048 * 2048 * 8, "{needed}");
+                assert_eq!(available, 1 << 20);
+            }
+            other => panic!("a 32 MiB broadcast of an 8 byte block must not fit a 1 MiB budget, got {:?}", other.map(|b| b.len())),
+        }
+        let small = AsdfImage::gather_elements_within(&block, &[4, 4], 8, 0, &[0, 0], Some(budget)).unwrap();
+        assert_eq!(small.len(), 16 * 8, "a broadcast view that fits is still read");
+    }
+
+    #[test]
+    fn overflowing_shape_is_an_error_not_a_panic() {
+        let tree = "data: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [2147483648, 2147483648, 4]\n";
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[raw_block(&f32_le(&[1.; 4]))])).unwrap();
+        let result = AsdfImage::load_array(&file, "data");
+        assert!(matches!(result, Err(AsdfError::ShapeOverflow(_))), "{:?}", result.map(|i| i.data.len()));
+        let result = AsdfImage::load_array_int(&file, "data");
+        assert!(result.is_ok(), "a float array is declined before its size matters: {:?}", result.map(|p| p.is_some()));
+    }
+
+    #[test]
+    fn overflowing_streamed_shape_is_an_error() {
+        let tree = "data: !core/ndarray-1.0.0\n  source: 0\n  datatype: float64\n  byteorder: little\n  shape: ['*', 2305843009213693952]\n";
+        let streamed = block(1, b"\0\0\0\0", &f32_le(&[1.; 12]), 0, 0, 0);
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[streamed])).unwrap();
+        let result = AsdfImage::load_array(&file, "data");
+        assert!(matches!(result, Err(AsdfError::ShapeOverflow(_))), "{:?}", result.map(|i| i.data.len()));
+    }
+
+    #[test]
+    fn opening_one_plane_of_a_cube_decodes_one_plane() {
+        let (n, h, w) = (64usize, 512usize, 512usize);
+        let value = |i: usize| ((i / (h * w)) * 100 + i % 7) as u16;
+        let tree = format!("data: !core/ndarray-1.0.0\n  source: 0\n  datatype: uint16\n  byteorder: little\n  shape: [{n}, {h}, {w}]\n");
+        let raw: Vec<u8> = (0..n * h * w).flat_map(|i| value(i).to_le_bytes()).collect();
+        let file = AsdfFile::from_bytes(asdf_bytes(&tree, &[raw_block(&raw)])).unwrap();
+        drop(raw);
+
+        let third = AsdfImage::load_array_plane(&file, "data", 2).unwrap();
+        assert_eq!(third.data.len(), h * w, "only the requested plane is decoded");
+        assert_eq!(third.plane_count(), n);
+        assert_eq!(third.shape, vec![n, h, w]);
+        let plane = third.plane(2).expect("the requested plane is the one held");
+        for (r, c) in [(0, 0), (0, w - 1), (h / 2, 3), (h - 1, w - 1)] {
+            assert_eq!(plane[[r, c]], f32::from(value(2 * h * w + r * w + c)), "({r}, {c})");
+        }
+        assert!(third.plane(0).is_none(), "a plane that was not decoded is not served from another plane's pixels");
+        assert!(matches!(AsdfImage::load_array_plane(&file, "data", n), Err(AsdfError::ShapeMismatch { .. })));
+    }
+
+    #[test]
+    fn one_plane_of_an_interleaved_or_strided_cube_matches_the_full_decode() {
+        let tree = "woven: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [5, 4, 3]\nflipped: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [5, 2, 6]\n  offset: 192\n  strides: [-48, 24, 4]\n";
+        let values: Vec<f32> = (0..60).map(|i| i as f32).collect();
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[raw_block(&f32_le(&values))])).unwrap();
+        for key in ["woven", "flipped"] {
+            let full = AsdfImage::load_array(&file, key).unwrap();
+            for index in 0..full.plane_count() {
+                let one = AsdfImage::load_array_plane(&file, key, index).unwrap();
+                assert_eq!(one.plane(index), full.plane(index), "{key} plane {index}");
+                assert_eq!(one.data.len(), full.width * full.height, "{key} plane {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_64_bit_mask_keeps_its_bits_or_is_refused() {
+        let tree = "dq: !core/ndarray-1.0.0\n  source: 0\n  datatype: int64\n  byteorder: little\n  shape: [1, 2]\nwide: !core/ndarray-1.0.0\n  source: 1\n  datatype: uint64\n  byteorder: big\n  shape: [1, 2]\n";
+        let dq: Vec<u8> = [2147483649i64, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let wide: Vec<u8> = [1u64 << 40, 0].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let file = AsdfFile::from_bytes(asdf_bytes(tree, &[raw_block(&dq), raw_block(&wide)])).unwrap();
+        let plane = AsdfImage::load_array_int(&file, "dq")
+            .unwrap()
+            .expect("a 64 bit mask whose values fit 32 bits is an integer plane");
+        assert_eq!(plane.bits.as_slice().unwrap(), &[0x8000_0001, 1]);
+        assert_eq!(plane.value_at(0, 0), 2147483649, "bit 0 of 2^31 + 1 survives; f32 would round it away");
+        match AsdfImage::load_array_int(&file, "wide") {
+            Err(AsdfError::UnsupportedDtype(reason)) => assert!(reason.contains("wide") && reason.contains("32 bits"), "{reason}"),
+            other => panic!("a mask value above 32 bits must be refused by name, got {:?}", other.map(|p| p.is_some())),
+        }
+    }
+
+    #[test]
+    fn source_minus_one_names_the_streamed_block() {
+        let tree = "other: !core/ndarray-1.0.0\n  source: 0\n  datatype: float32\n  byteorder: little\n  shape: [2]\ndata: !core/ndarray-1.0.0\n  source: -1\n  datatype: float32\n  byteorder: little\n  shape: ['*', 2]\n";
+        let streamed = block(1, b"\0\0\0\0", &f32_le(&[1., 2., 3., 4., 5., 6., 7., 8.]), 0, 0, 0);
+        let img = load_bytes(asdf_bytes(tree, &[raw_block(&f32_le(&[9., 9.])), streamed])).unwrap();
+        assert_eq!((img.height, img.width), (4, 2));
+        assert_eq!(img.data, vec![1., 2., 3., 4., 5., 6., 7., 8.]);
+
+        let no_stream = "data: !core/ndarray-1.0.0\n  source: -1\n  datatype: float32\n  byteorder: little\n  shape: ['*', 2]\n";
+        let result = load_bytes(asdf_bytes(no_stream, &[raw_block(&f32_le(&[1., 2.]))]));
+        assert!(matches!(result, Err(AsdfError::BlockOutOfRange(_))), "{:?}", result.map(|i| i.data.len()));
+    }
+
+    #[test]
     fn asdf_reference_suite() {
         let (dir, external) = fixtures_dir();
 
@@ -1195,7 +1572,7 @@ mod tests {
                 ArraySource::Inline(_) => panic!("fixture arrays are block-backed"),
             };
             let block = asdf.block_data(index).expect("source block present");
-            let raw = AsdfImage::gather_array_bytes(&block, &meta);
+            let raw = AsdfImage::gather_array_bytes(&block, &meta).unwrap();
             let pixels = AsdfImage::to_f32_pixels(&raw, &meta);
             let sum: f64 = pixels.iter().map(|&v| v as f64).sum();
             if (sum - expected).abs() > 1e-6 || pixels.len() != meta.shape.iter().product::<usize>() {
@@ -1484,7 +1861,7 @@ mod tests {
         let file = AsdfFile::from_bytes(test_fixtures::nircam_gwcs_with_inline_data()).unwrap();
         let img = AsdfImage::from_file(&file).unwrap();
         assert_eq!((img.width, img.height), (4, 4));
-        let AsdfWcs::Gwcs { fit, key } = &img.wcs else {
+        let AsdfWcs::Gwcs { fit, key, .. } = &img.wcs else {
             panic!("a polynomial distortion chain is fitted, not refused: {:?}", img.wcs);
         };
         assert_eq!(key, "wcs");

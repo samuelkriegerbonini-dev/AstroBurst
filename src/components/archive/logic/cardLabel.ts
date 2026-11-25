@@ -16,13 +16,51 @@ export function instrumentText(instrument: string | null): string {
   return INSTRUMENT_NAMES[trimmed.toUpperCase()] ?? trimmed;
 }
 
-export function levelBadge(row: Pick<MastRow, "level" | "levelClass">): string | null {
+const LEVEL_MEANINGS: Readonly<Record<string, string>> = {
+  "1b": "uncalibrated ramps (uncal)",
+  "2a": "count-rate images (rate)",
+  "2b": "calibrated exposures (cal)",
+  "2c": "calibrated exposures with outliers flagged (crf)",
+  "3": "combined products (i2d, s3d, x1d)",
+};
+
+function levelTokens(row: Pick<MastRow, "level" | "levelClass">): string[] | null {
   const raw = row.level?.trim();
   if (!raw || row.levelClass === "unknown") return null;
-  const tokens = raw.split(",").map((t) => t.trim().toLowerCase());
+  return raw.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+}
+
+export function levelBadge(row: Pick<MastRow, "level" | "levelClass">): string | null {
+  const tokens = levelTokens(row);
+  if (!tokens || tokens.length === 0) return null;
   if (tokens.includes("3")) return "L3";
-  if (tokens.some((t) => EXPOSURE_LEVELS.has(t))) return "L1-2";
-  return `L${raw}`;
+  const exposures = tokens.filter((t) => EXPOSURE_LEVELS.has(t));
+  if (exposures.length === 1) return `L${exposures[0]}`;
+  if (exposures.length > 1) return `L${exposures[0]}-${exposures[exposures.length - 1]}`;
+  return `L${row.level?.trim()}`;
+}
+
+export function levelTitle(row: Pick<MastRow, "level" | "levelClass">): string | null {
+  const tokens = levelTokens(row);
+  if (!tokens) return null;
+  const shown = tokens.includes("3") ? ["3"] : tokens;
+  const parts = shown.map((t) => (LEVEL_MEANINGS[t] ? `level ${t}: ${LEVEL_MEANINGS[t]}` : `level ${t}`));
+  return parts.join("; ");
+}
+
+export function setupText(row: Pick<MastRow, "expType" | "values">): string {
+  const aperture = row.values.sci_aper_1234;
+  const setup = row.expType?.trim() || (typeof aperture === "string" ? aperture.trim() : "");
+  return setup;
+}
+
+export function programmeText(row: Pick<MastRow, "program" | "observation" | "values">): string {
+  const progObs = row.values._prog_obs;
+  if (typeof progObs === "string" && progObs.trim()) return `prog ${progObs.trim()}`;
+  const program = row.program?.trim();
+  if (!program) return "";
+  const observation = row.observation?.trim();
+  return observation ? `prog ${program}.${observation}` : `prog ${program}`;
 }
 
 export function categoryText(row: Pick<MastRow, "values">): string | null {

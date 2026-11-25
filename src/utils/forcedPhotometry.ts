@@ -8,6 +8,7 @@ import type {
 import { buildCsv, CSV_LINE_END, type CsvColumn } from "./catalogCsv";
 import { PROVENANCE_FILE_SEPARATOR, provenanceLines, unitLines, withProvenance, type ProvenanceEntry } from "./csvProvenance";
 import { MISSING_VALUE, formatWithUncertainty } from "./formatUncertainty";
+import { MAG_ERR_PER_RELATIVE_FLUX_ERR } from "./photometryConstants";
 
 export const UJY_PER_JY = 1e6;
 export const FORCED_WEIGHTS_NOTE = "5 x 5 subsampled overlap of the aperture with boundary pixels";
@@ -49,6 +50,9 @@ const UJY_DIGITS = 12;
 const PROVENANCE_DIGITS = 6;
 const UJY_UNIT = "uJy";
 const AB_UNIT = "mag (AB)";
+const FORMAL_MAG_ERR_UNIT = `${AB_UNIT}; formal error from flux_err_ujy, without f_corr`;
+const CORRECTED_MAG_ERR_UNIT = `${AB_UNIT}; error from flux_err_corr_ujy (f_corr applied), empty when f_corr is not given`;
+const COLOUR_ERR_UNIT = `${AB_UNIT}; from the magnitude errors with f_corr applied where the band gives it`;
 const NO_MAGNITUDE: ForcedMagnitude = { mag: null, err: null, limit: false };
 
 function finite(value: number | null | undefined): value is number {
@@ -96,7 +100,18 @@ export function cellMagnitude(cell: ForcedCell | null, band: ForcedBand, basis: 
   if (!finite(mag)) return NO_MAGNITUDE;
   const shifted = mag - 2.5 * Math.log10(basisFactor(band, basis));
   if (limit) return { mag: shifted, err: null, limit: true };
-  return { mag: shifted, err: finite(cell.mag_ab_err) ? cell.mag_ab_err : null, limit: false };
+  return { mag: shifted, err: effectiveMagErr(cell), limit: false };
+}
+
+export function correctedMagErr(cell: ForcedCell): number | null {
+  if (finite(cell.mag_ab_err_corr)) return cell.mag_ab_err_corr;
+  const flux = cell.flux_jy;
+  const err = cell.flux_err_corr_jy;
+  return finite(flux) && flux > 0 && finite(err) ? (MAG_ERR_PER_RELATIVE_FLUX_ERR * err) / flux : null;
+}
+
+function effectiveMagErr(cell: ForcedCell): number | null {
+  return correctedMagErr(cell) ?? (finite(cell.mag_ab_err) ? cell.mag_ab_err : null);
 }
 
 export function forcedColour(result: ForcedPhotometryResult, source: number, a: number, b: number): ForcedColour {
@@ -142,7 +157,7 @@ export function fluxCellText(cell: ForcedCell | null, band: ForcedBand): string 
 export function magCellText(cell: ForcedCell | null): string {
   if (cell === null) return MISSING_VALUE;
   if (isLimit(cell)) return finite(cell.upper_limit_ab) ? "> " + cell.upper_limit_ab.toFixed(2) : MISSING_VALUE;
-  return finite(cell.mag_ab) ? formatWithUncertainty(cell.mag_ab, cell.mag_ab_err) : MISSING_VALUE;
+  return finite(cell.mag_ab) ? formatWithUncertainty(cell.mag_ab, effectiveMagErr(cell)) : MISSING_VALUE;
 }
 
 export function colourCellText(colour: ForcedColour): string {
@@ -300,6 +315,7 @@ const FORCED_LONG_COLUMNS: CsvColumn<ForcedLongRow>[] = [
   { header: "flux_total_ujy", value: (r) => toUjy(r.cell?.flux_total_jy) },
   { header: "mag_ab", value: (r) => r.cell?.mag_ab },
   { header: "mag_ab_err", value: (r) => r.cell?.mag_ab_err },
+  { header: "mag_ab_err_corr", value: (r) => (r.cell ? correctedMagErr(r.cell) : null) },
   { header: "upper_limit_ujy", value: (r) => toUjy(r.cell?.upper_limit_jy) },
   { header: "upper_limit_ab", value: (r) => r.cell?.upper_limit_ab },
   { header: "snr", value: (r) => r.cell?.snr },
@@ -325,7 +341,8 @@ const FORCED_LONG_UNITS: Record<string, string> = {
   flux_err_corr_ujy: UJY_UNIT,
   flux_total_ujy: UJY_UNIT,
   mag_ab: AB_UNIT,
-  mag_ab_err: AB_UNIT,
+  mag_ab_err: FORMAL_MAG_ERR_UNIT,
+  mag_ab_err_corr: CORRECTED_MAG_ERR_UNIT,
   upper_limit_ujy: UJY_UNIT,
   upper_limit_ab: AB_UNIT,
   fwhm_px: "px",
@@ -338,6 +355,10 @@ export function forcedLongCsv(input: ForcedCsvInput): string {
   );
   const lines = [...provenanceLines(provenanceEntries(input, [])), ...unitLines(FORCED_LONG_UNITS)];
   return withProvenance(lines, buildCsv(FORCED_LONG_COLUMNS, rows), CSV_LINE_END);
+}
+
+function correctedOf(cell: ForcedCell | null): number | null {
+  return cell ? correctedMagErr(cell) : null;
 }
 
 interface ForcedWideRow {
@@ -362,15 +383,19 @@ export function forcedWideCsv(input: ForcedCsvInput): string {
     columns.push(
       { header: `${slug}_flux_ujy`, value: (r) => toUjy(cellOf(r)?.flux_jy) },
       { header: `${slug}_flux_err_ujy`, value: (r) => toUjy(cellOf(r)?.flux_err_jy) },
+      { header: `${slug}_flux_err_corr_ujy`, value: (r) => toUjy(cellOf(r)?.flux_err_corr_jy) },
       { header: `${slug}_mag_ab`, value: (r) => cellOf(r)?.mag_ab },
       { header: `${slug}_mag_ab_err`, value: (r) => cellOf(r)?.mag_ab_err },
+      { header: `${slug}_mag_ab_err_corr`, value: (r) => correctedOf(cellOf(r)) },
       { header: `${slug}_upper_limit_ab`, value: (r) => cellOf(r)?.upper_limit_ab },
       { header: `${slug}_masked_fraction`, value: (r) => cellOf(r)?.masked_fraction },
     );
     units[`${slug}_flux_ujy`] = UJY_UNIT;
     units[`${slug}_flux_err_ujy`] = UJY_UNIT;
+    units[`${slug}_flux_err_corr_ujy`] = UJY_UNIT;
     units[`${slug}_mag_ab`] = AB_UNIT;
-    units[`${slug}_mag_ab_err`] = AB_UNIT;
+    units[`${slug}_mag_ab_err`] = FORMAL_MAG_ERR_UNIT;
+    units[`${slug}_mag_ab_err_corr`] = CORRECTED_MAG_ERR_UNIT;
     units[`${slug}_upper_limit_ab`] = AB_UNIT;
   }
   const colourNames: string[] = [];
@@ -382,7 +407,7 @@ export function forcedWideCsv(input: ForcedCsvInput): string {
       { header: `${name}_limit`, value: (r) => r.colours[p].limit },
     );
     units[name] = AB_UNIT;
-    units[`${name}_err`] = AB_UNIT;
+    units[`${name}_err`] = COLOUR_ERR_UNIT;
     colourNames.push(`${name} (${colourBasis(result.bands[a], result.bands[b])})`);
   });
   const rows = result.sources.map((source, s) => ({ source, colours: pairs.map(([a, b]) => forcedColour(result, s, a, b)) }));

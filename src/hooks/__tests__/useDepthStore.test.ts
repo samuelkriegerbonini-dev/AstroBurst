@@ -28,7 +28,7 @@ describe("DepthStore", () => {
     expect(calls[0].options).toEqual({});
     calls[0].resolve(depthOf(25.5));
     await pending;
-    expect(store.getSnapshot("a|")).toEqual({ depth: depthOf(25.5), loading: false, error: null });
+    expect(store.getSnapshot("a|")).toEqual({ depth: depthOf(25.5), loading: false, error: null, options: {} });
     expect(notified).toBe(2);
     expect(store.getSnapshot(null)).toBe(EMPTY_DEPTH);
     expect(store.getSnapshot("b|")).toBe(EMPTY_DEPTH);
@@ -39,10 +39,11 @@ describe("DepthStore", () => {
     expect(depthKey("a", "v2")).toBe("a|v2");
 
     const again = store.measure("a|", "a", { nSigma: 3 });
-    expect(store.getSnapshot("a|")).toEqual({ depth: depthOf(25.5), loading: true, error: null });
+    expect(store.getSnapshot("a|")).toEqual({ depth: depthOf(25.5), loading: true, error: null, options: {} });
     calls[1].resolve(depthOf(26));
     await again;
     expect(store.getSnapshot("a|").depth).toEqual(depthOf(26));
+    expect(store.getSnapshot("a|").options).toEqual({ nSigma: 3 });
   });
 
   it("errors, stale answers and the cache limit", async () => {
@@ -62,7 +63,7 @@ describe("DepthStore", () => {
     await newer;
     calls[2].resolve(depthOf(20));
     await older;
-    expect(store.getSnapshot("b|")).toEqual({ depth: depthOf(27), loading: false, error: null });
+    expect(store.getSnapshot("b|")).toEqual({ depth: depthOf(27), loading: false, error: null, options: { seed: 2 } });
 
     const forgotten = store.measure("c|", "c", {});
     store.forget("c|");
@@ -79,28 +80,30 @@ describe("DepthStore", () => {
     for (const key of keys.slice(1)) expect(fresh.getSnapshot(key).depth).not.toBeNull();
   });
 
-  it("latest gives the newest depth of a file whatever the measure key", async () => {
+  it("latest gives the depth of the same data revision only, never one of an earlier revision of the path", async () => {
     const { calls, run } = manualRun();
     const store = new DepthStore(run);
-    const v1 = store.measure("a|v1", "a", {});
+    const before = store.measure(depthKey("a.fits", "a.fits"), "a.fits", {});
     calls[0].resolve(depthOf(25));
-    await v1;
-    expect(store.latest("a")).toEqual(depthOf(25));
-    const v2 = store.measure("a|v2", "a", {});
+    await before;
+    expect(store.latest("a.fits", "a.fits")).toEqual(depthOf(25));
+    expect(store.latest("a.fits", "a.fits#1")).toBeNull();
+    expect(store.latest("b.fits", "b.fits")).toBeNull();
+
+    const rewritten = store.measure(depthKey("a.fits", "a.fits#1"), "a.fits", {});
     calls[1].resolve(depthOf(26));
-    await v2;
-    expect(store.latest("a")).toEqual(depthOf(26));
-    expect(store.latest("b")).toBeNull();
-    expect(store.latest("a|")).toBeNull();
+    await rewritten;
+    expect(store.latest("a.fits", "a.fits#1")).toEqual(depthOf(26));
+    expect(store.latest("a.fits", "a.fits")).toEqual(depthOf(25));
 
-    const v3 = store.measure("a|v3", "a", {});
+    const failed = store.measure(depthKey("a.fits", "a.fits#2"), "a.fits", {});
     calls[2].reject(new Error(NO_WCS));
-    await v3;
-    expect(store.latest("a")).toEqual(depthOf(26));
+    await failed;
+    expect(store.latest("a.fits", "a.fits#2")).toBeNull();
 
-    const other = store.measure("ab|", "ab", {});
+    const other = store.measure(depthKey("a.fits.gz", null), "a.fits.gz", {});
     calls[3].resolve(depthOf(22));
     await other;
-    expect(store.latest("a")).toEqual(depthOf(26));
+    expect(store.latest("a.fits", null)).toBeNull();
   });
 });

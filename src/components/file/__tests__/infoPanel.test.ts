@@ -114,9 +114,9 @@ describe("InfoPanel", () => {
     current.file = { name: "x.fits", result: {} };
     current.histData = { mean: Number.NaN, median: undefined, sigma: Number.POSITIVE_INFINITY };
     const html = render();
-    expect(metric(html, "Mean")).toBe("—");
-    expect(metric(html, "Median")).toBe("—");
-    expect(metric(html, SIGMA_MAD_LABEL)).toBe("—");
+    expect(metric(html, "Mean")).toBe("--");
+    expect(metric(html, "Median")).toBe("--");
+    expect(metric(html, SIGMA_MAD_LABEL)).toBe("--");
   });
 
   it("keeps four significant digits and the data unit for the small statistics of a rate image", () => {

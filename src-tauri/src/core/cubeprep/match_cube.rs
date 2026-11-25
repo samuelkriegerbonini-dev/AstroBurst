@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::alignment::wcs_reproject::smallest_odd_support;
 use crate::core::cubeprep::align::NoiseSource;
 use crate::core::cubeprep::cube::{Cube, CubeNoise, MatchStatus, PlaneNoise, DQ_DO_NOT_USE};
+use crate::core::cubeprep::kernel::FWHM_WARNING;
 use crate::core::imaging::convolve::{convolve_fft, convolve_fft_with_variance, padded_len, ConvolveError, ConvolveOptions, FftPlanCache, PreparedSpectrum};
 use crate::core::imaging::push_history;
 use crate::core::stacking::memory::{check_memory, effective_memory, format_bytes, MemoryInfo, MemoryJob};
@@ -26,6 +27,7 @@ const EDGE_RING_PX: usize = 2;
 const EDGE_RING_SIGMAS: f64 = 3.0;
 const MAD_TO_SIGMA: f64 = 1.4826;
 const MATCH_ERROR_NOTE: &str = "ERR uses squared kernel weights assuming independent input pixels; existing covariance from alignment or other processing is not included and output covariance is not stored";
+const MATCH_CORRELATED_ERROR_NOTE: &str = "ERR uses squared kernel weights times, for each matched plane with a NOISCORR map, the factor sum_d Q_align(d) KK(d) / KK(0), where KK is the autocorrelation of the kernel: the per-pixel variance for stationary noise with the alignment covariance; the output covariance is the NOISCORR map";
 const MATCH_DQ_NOTE: &str = "DQ is the bitwise OR of finite SCI contributors under every nonzero kernel coefficient, including negative lobes; flags do not exclude SCI";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -115,6 +117,7 @@ pub struct DqSpread {
 pub struct MatchedPlane {
     pub filter: String,
     pub status: PlaneStatus,
+    pub match_status: MatchStatus,
     pub kernel: Option<String>,
     pub masked_pixels: usize,
     pub boundary_band_px: Option<usize>,
@@ -304,7 +307,7 @@ fn edge_ring_warning(filter: &str, sci: &Array2<f32>, band: usize) -> Option<Str
     })
 }
 
-fn matched_correlation(aligned: &Array2<f32>, kernel: &Array2<f64>) -> Array2<f32> {
+fn matched_correlation(aligned: &Array2<f32>, kernel: &Array2<f64>) -> (Array2<f32>, f64) {
     let weights = kernel.mapv(|weight| if weight.is_finite() { weight } else { 0.0 });
     let (rows, cols) = weights.dim();
     let overlap = |len: usize, shift: isize| (-shift).max(0) as usize..(len as isize - shift.max(0)) as usize;
@@ -328,7 +331,8 @@ fn matched_correlation(aligned: &Array2<f32>, kernel: &Array2<f64>) -> Array2<f3
         }
     }
     let centre = correlation[[size / 2, size / 2]];
-    smallest_odd_support(&correlation.mapv(|value| (value / centre) as f32))
+    let independent = autocorrelation[[rows - 1, cols - 1]];
+    (smallest_odd_support(&correlation.mapv(|value| (value / centre) as f32)), centre / independent)
 }
 
 fn planes_in_flight(cube: &Cube, kernels: &[Option<&PlaneKernel>], memory: Option<MemoryInfo>, warnings: &mut Vec<String>) -> Result<usize, MatchError> {
@@ -541,7 +545,21 @@ pub fn match_cube_with(
         }
         let (match_status, fwhm_px) = match kernel {
             _ if *status == PlaneStatus::Reference => (MatchStatus::Reference, target_fwhm_px),
-            Some((_, cards)) if cards.sum_squares.is_finite() => (MatchStatus::Matched, Some(cards.matched_fwhm_px)),
+            Some((_, cards)) if cards.sum_squares.is_finite() => {
+                let departure = cards.matched_fwhm_px / cards.target_fwhm_px - 1.0;
+                if departure.abs() > FWHM_WARNING {
+                    warnings.push(format!(
+                        "{filter}: the matched FWHM {:.3} px differs from the target FWHM {:.3} px by {:+.2} percent, more than the {:.0} percent tolerance, so the plane is recorded as mismatched",
+                        cards.matched_fwhm_px,
+                        cards.target_fwhm_px,
+                        100.0 * departure,
+                        100.0 * FWHM_WARNING
+                    ));
+                    (MatchStatus::Mismatched, Some(cards.matched_fwhm_px))
+                } else {
+                    (MatchStatus::Matched, Some(cards.matched_fwhm_px))
+                }
+            }
             Some(_) => (MatchStatus::External, None),
             None => (MatchStatus::Unmatched, None),
         };
@@ -552,6 +570,7 @@ pub fn match_cube_with(
         planes.push(MatchedPlane {
             filter,
             status: *status,
+            match_status,
             kernel: kernel.map(|(kernel, _)| kernel.label.clone()),
             masked_pixels,
             boundary_band_px: kernel.map(|(kernel, _)| boundary_band(&kernel.data)),
@@ -560,15 +579,27 @@ pub fn match_cube_with(
         });
         statuses.push(match_status);
     }
+    let mut covariance_in_err = false;
+    let mut covariance_notes = Vec::new();
     let noise = noise.and_then(|noise| match noise.for_planes(&cube.filters) {
         Ok(aligned) => Some(CubeNoise {
             planes: aligned
                 .planes
                 .into_iter()
                 .zip(&assigned)
-                .map(|(plane, (_, kernel))| match kernel {
+                .enumerate()
+                .map(|(z, (plane, (_, kernel)))| match kernel {
                     Some((kernel, cards)) => {
-                        PlaneNoise { correlation: matched_correlation(&plane.correlation, &kernel.data), noiscorr_match: 1.0 / cards.sum_squares.sqrt(), ..plane }
+                        let (correlation, variance_factor) = matched_correlation(&plane.correlation, &kernel.data);
+                        if let Some(err) = matched.err.as_mut().filter(|_| variance_factor.is_finite() && variance_factor > 0.0) {
+                            covariance_in_err = true;
+                            if variance_factor != 1.0 {
+                                let sigma_factor = variance_factor.sqrt();
+                                err[z].mapv_inplace(|sigma| (f64::from(sigma) * sigma_factor) as f32);
+                                covariance_notes.push(format!("{}: ERR multiplied by {sigma_factor:.6} for the alignment covariance under the kernel", cube.filters[z].filter));
+                            }
+                        }
+                        PlaneNoise { correlation, noiscorr_match: 1.0 / cards.sum_squares.sqrt(), ..plane }
                     }
                     None => PlaneNoise { noiscorr_match: 1.0, ..plane },
                 })
@@ -584,8 +615,13 @@ pub fn match_cube_with(
     let header = &mut matched.header;
     if assigned.iter().any(|(status, _)| *status == PlaneStatus::Matched) {
         if cube.err.is_some() {
-            warnings.push(MATCH_ERROR_NOTE.to_string());
-            push_history(header, MATCH_ERROR_NOTE);
+            let note = if covariance_in_err { MATCH_CORRELATED_ERROR_NOTE } else { MATCH_ERROR_NOTE };
+            warnings.push(note.to_string());
+            push_history(header, note);
+            for note in covariance_notes {
+                push_history(header, &note);
+                warnings.push(note);
+            }
         }
         if cube.dq.is_some() {
             warnings.push(MATCH_DQ_NOTE.to_string());
@@ -805,6 +841,7 @@ mod tests {
         let reference = MatchedPlane {
             filter: "F444W".to_string(),
             status: PlaneStatus::Reference,
+            match_status: MatchStatus::Reference,
             kernel: None,
             masked_pixels: 0,
             boundary_band_px: None,
@@ -1332,6 +1369,65 @@ mod tests {
         let short = CubeNoise { planes: noise.planes[..2].to_vec(), source: NoiseSource::Align };
         let missing = match_cube_with(&cube, &kernels, &cards, &options(MatchMode::Astroburst), &[], Some(&short), None, &|| false).unwrap();
         assert!(missing.noise.is_none() && missing.matched.warnings.iter().any(|warning| warning.contains("noise") && warning.contains("F444W")), "{:?}", missing.matched.warnings);
+    }
+
+    const REVIEW_GOLDENS: &str = "scripts/oracle/cubeprep_review_goldens.py with numpy 2.5.4 and scipy 1.18.1";
+    const GOLDEN_REGION_SUM_VARIANCE: f64 = 161.19794127984792;
+    const GOLDEN_MATCHED_PIXEL_VARIANCE: f64 = 0.018707286015788874;
+
+    #[test]
+    fn matched_noise_map_and_err_give_the_exact_regional_variance() {
+        let dims = (81, 81);
+        let mut cube = small_cube(&FILTERS[1..], dims, |_, _, _| 1.0);
+        cube.err = Some(vec![Array2::from_elem(dims, 0.5f32); 2]);
+        let aligned = Array2::from_shape_fn((3, 3), |(y, x)| [0.5f32, 1.0, 0.5][y] * [0.5f32, 1.0, 0.5][x]);
+        let plane = |filter: &str| PlaneNoise { filter: filter.to_string(), correlation: aligned.clone(), noiscorr_align: 2.0, noiscorr_match: 1.0 };
+        let noise = CubeNoise { planes: vec![plane("F277W"), plane("F444W")], source: NoiseSource::Align };
+        let data = gaussian(41, 41, 2.0);
+        let cards = [KernelCards { sum_squares: data.iter().map(|weight| weight * weight).sum(), ..KernelCards::ABSENT }];
+        let products = match_cube_with(&cube, &[kernel("F277W", data)], &cards, &options(MatchMode::Astroburst), &[], Some(&noise), None, &|| false).unwrap();
+        let err = &products.matched.cube.err.as_ref().unwrap()[0];
+        let map = &products.noise.as_ref().unwrap().planes[0].correlation;
+        let half = (map.nrows() / 2) as isize;
+        let region = 33..48usize;
+        let mut variance = 0.0;
+        for py in region.clone() {
+            for px in region.clone() {
+                for qy in region.clone() {
+                    for qx in region.clone() {
+                        let (dy, dx) = (qy as isize - py as isize, qx as isize - px as isize);
+                        if dy.abs() <= half && dx.abs() <= half {
+                            variance += f64::from(err[[py, px]]) * f64::from(err[[qy, qx]]) * f64::from(map[[(half + dy) as usize, (half + dx) as usize]]);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            (variance / GOLDEN_REGION_SUM_VARIANCE - 1.0).abs() < 0.01,
+            "sum_pq ERR_p ERR_q Q(p-q) over 15x15 px is {variance}, the exact variance of the sum is {GOLDEN_REGION_SUM_VARIANCE} ({REVIEW_GOLDENS})"
+        );
+        let pixel = f64::from(err[[40, 40]]).powi(2);
+        assert!(
+            (pixel / GOLDEN_MATCHED_PIXEL_VARIANCE - 1.0).abs() < 1e-3,
+            "ERR^2 of a matched pixel is {pixel}, its exact variance is {GOLDEN_MATCHED_PIXEL_VARIANCE} ({REVIEW_GOLDENS})"
+        );
+        let reference = &products.matched.cube.err.as_ref().unwrap()[1];
+        assert!(reference.iter().all(|&sigma| sigma == 0.5), "the reference plane keeps its ERR");
+    }
+
+    #[test]
+    fn a_kernel_whose_matched_fwhm_misses_the_target_is_not_reported_matched() {
+        let cube = small_cube(&FILTERS, DIMS, scene);
+        let kernels = [kernel("F150W", gaussian(7, 7, 1.0)), kernel("F277W", gaussian(7, 7, 1.2))];
+        let off = KernelCards { source_fwhm_px: 2.0, target_fwhm_px: 3.0, matched_fwhm_px: 3.2, sum_squares: 0.1 };
+        let within = KernelCards { matched_fwhm_px: 3.05, ..off };
+        let products = match_cube_with(&cube, &kernels, &[off, within], &options(MatchMode::Astroburst), &[], None, None, &|| false).unwrap();
+        let labels: Vec<&str> = products.statuses.iter().map(|status| status.label()).collect();
+        assert_eq!(labels, ["mismatched", "matched", "reference"], "a matched FWHM 6.7 percent from the target is outside the 2 percent tolerance");
+        let named: Vec<&String> = products.matched.warnings.iter().filter(|warning| warning.contains("mismatched")).collect();
+        assert!(named.len() == 1 && named[0].starts_with("F150W") && named[0].contains("3.200") && named[0].contains("3.000"), "{:?}", products.matched.warnings);
+        assert_eq!(MatchStatus::parse("mismatched").map(MatchStatus::label), Some("mismatched"));
     }
 
     #[test]

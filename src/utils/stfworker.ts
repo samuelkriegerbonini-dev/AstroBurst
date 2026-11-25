@@ -2,7 +2,7 @@ import type { DisplayTransfer } from "./displayTransfer";
 
 export type { DisplayTransfer } from "./displayTransfer";
 
-interface RenderResult {
+export interface RenderResult {
   bitmap: ImageBitmap;
   width: number;
   height: number;
@@ -16,12 +16,18 @@ interface RenderParams {
   lut: Uint8Array;
 }
 
-type Callback = (result: RenderResult | null) => void;
+type Callback = (result: RenderResult | null, failure?: string) => void;
 
 let _worker: Worker | null = null;
 const _pendingCallbacks = new Map<number, Callback>();
 let _nextId = 0;
 let _hasPixels = false;
+
+function failPending(reason: string): void {
+  const callbacks = [..._pendingCallbacks.values()];
+  _pendingCallbacks.clear();
+  for (const cb of callbacks) cb(null, reason);
+}
 
 function getStfWorker(): Worker {
   if (_worker) return _worker;
@@ -30,7 +36,15 @@ function getStfWorker(): Worker {
     { type: "module" },
   );
   _worker.onmessage = (e: MessageEvent) => {
-    const { type, id, bitmap, width, height } = e.data;
+    const { type, id, bitmap, width, height, message } = e.data;
+    if (type === "failed") {
+      const cb = _pendingCallbacks.get(id);
+      if (cb) {
+        _pendingCallbacks.delete(id);
+        cb(null, typeof message === "string" ? message : "STF render failed");
+      }
+      return;
+    }
     if (type === "pixelsReady") {
       _hasPixels = true;
       const cb = _pendingCallbacks.get(id);
@@ -49,6 +63,9 @@ function getStfWorker(): Worker {
         (bitmap as ImageBitmap).close();
       }
     }
+  };
+  _worker.onerror = (e: ErrorEvent) => {
+    failPending(`STF worker error: ${e?.message ?? "unknown"}`);
   };
   return _worker;
 }
@@ -78,9 +95,9 @@ export function renderStfInWorker(params: RenderParams): Promise<RenderResult> {
   return new Promise((resolve, reject) => {
     const worker = getStfWorker();
     const id = _nextId++;
-    _pendingCallbacks.set(id, (result) => {
+    _pendingCallbacks.set(id, (result, failure) => {
       if (result) resolve(result);
-      else reject(new Error("STF render returned no result"));
+      else reject(new Error(failure ?? "STF render returned no result"));
     });
 
     const { pixels, width, height, transfer, lut } = params;
@@ -103,7 +120,7 @@ export function renderStfInWorker(params: RenderParams): Promise<RenderResult> {
 }
 
 export function cancelPendingRenders(): void {
-  _pendingCallbacks.clear();
+  failPending("STF render cancelled");
 }
 
 export function clearWorkerPixels(): void {
@@ -117,8 +134,26 @@ export function terminateStfWorker(): void {
   if (_worker) {
     _worker.terminate();
     _worker = null;
-    _pendingCallbacks.clear();
+    failPending("STF worker stopped");
     _nextId = 0;
     _hasPixels = false;
   }
+}
+
+export function presentWorkerBitmap(canvas: HTMLCanvasElement | null, result: RenderResult, current: boolean): void {
+  if (!current || !canvas) {
+    result.bitmap.close();
+    return;
+  }
+  if (canvas.width !== result.width || canvas.height !== result.height) {
+    canvas.width = result.width;
+    canvas.height = result.height;
+  }
+  const ctx = canvas.getContext("bitmaprenderer");
+  if (ctx) {
+    ctx.transferFromImageBitmap(result.bitmap);
+    return;
+  }
+  canvas.getContext("2d")?.drawImage(result.bitmap, 0, 0);
+  result.bitmap.close();
 }

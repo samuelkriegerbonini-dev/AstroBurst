@@ -43,7 +43,8 @@ import {
 import { compositeChainStore } from "../../utils/compositeChainStore";
 import { compositeInputDisplayed, nonLinearInputNote, upstreamSteps, type NonLinearInput } from "../../utils/nonLinearInput";
 import { wizardStepStaleAfterCompositeWrite } from "../../utils/compositeSync";
-import { useComposeWizardContext } from "../../context/ComposeWizardContext";
+import { linearChainHistory } from "../../utils/compositeChainHistory";
+import { useWizardCompositeReady, useWizardDispatch } from "../../context/ComposeWizardContext";
 import { useCompositeMode } from "../../hooks/useCompositeMode";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { beginCompositeCheck } from "../../hooks/useProcessingRun";
@@ -345,9 +346,10 @@ function ProcessingTabInner() {
   const { publishProcessed, setChain, currentFileKey } = useRenderActions();
   const { compositePreviewUrl } = useCompositePreview();
   const { setCompositePreviewUrl, setCompositeStf, setCompositeAutoStf, setCompositeStfLinked, replaceParked } = useCompositeActions();
-  const { state: wizardState, dispatch: wizardDispatch } = useComposeWizardContext();
-  const wizardReadyRef = useRef(wizardState.compositeReady);
-  wizardReadyRef.current = wizardState.compositeReady;
+  const wizardCompositeReady = useWizardCompositeReady();
+  const wizardDispatch = useWizardDispatch();
+  const wizardReadyRef = useRef(wizardCompositeReady);
+  wizardReadyRef.current = wizardCompositeReady;
   const compositeMode = useCompositeMode();
   const compositeModeRef = useRef(compositeMode);
   compositeModeRef.current = compositeMode;
@@ -431,7 +433,7 @@ function ProcessingTabInner() {
   );
 
   const handleCompositeDone = useCallback(
-    (step: ChainStep, label: string, result: CompositeStepResult, callStf: DisplayStf) => {
+    (step: ChainStep, label: string, result: CompositeStepResult, callStf: DisplayStf, history?: readonly string[]) => {
       const previewUrl = result.previewUrl;
       if (!previewUrl) return;
       const entry: CompositePsfEntry = {
@@ -439,13 +441,19 @@ function ProcessingTabInner() {
         label,
         displayed: result.displayed,
         modelPreviewUrl: result.modelPreviewUrl ?? null,
+        ...(history ? { history: [...history] } : {}),
         ...psfUseOf(step, psfSourceOf(result)),
       };
       compositeChainStore.update((c) => withCompositeStep(c, step, entry, result, callStf));
+      const accepted = compositeChainHolds(compositeChainStore.get(), step, previewUrl);
+      if (accepted) {
+        const lines = linearChainHistory(compositeChainStore.get());
+        wizardDispatch({ type: "RECORD_COMPOSITE_OP", op: { kind: "chain", lines, restarted: result.chain_restarted } });
+      }
       const outcome = compositeStepOutcome({
         step,
         displayed: result.displayed,
-        accepted: compositeChainHolds(compositeChainStore.get(), step, previewUrl),
+        accepted,
         compositeMode: compositeModeAfterRun({
           mounted: mountedRef.current,
           compositeModeAtLastRender: compositeModeRef.current,

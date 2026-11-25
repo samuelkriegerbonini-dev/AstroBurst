@@ -23,7 +23,7 @@ export interface KeepFile {
 
 export type KeepWizard = Pick<
   WizardState,
-  "stackedPaths" | "backgroundPaths" | "channelResults" | "starMaskPath" | "segmPath" | "resultPng" | "resultFits"
+  "stackedPaths" | "backgroundPaths" | "channelResults"
 >;
 
 export interface KeepInput {
@@ -91,10 +91,6 @@ export function outputKeepList(input: KeepInput): string[] {
       add(result.starless?.path);
       add(result.stretched?.path);
     }
-    add(w.starMaskPath);
-    add(w.segmPath);
-    add(w.resultFits);
-    addUrl(w.resultPng);
   }
 
   const composite = input.compositeChain;

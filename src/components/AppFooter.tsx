@@ -13,9 +13,10 @@ interface AppFooterProps {
   onOpenPalette: () => void;
   onOpenShortcuts: () => void;
   children?: ReactNode;
+  status?: ReactNode;
 }
 
-export default function AppFooter({ mode, onModeChange, onOpenPalette, onOpenShortcuts, children }: AppFooterProps) {
+export default function AppFooter({ mode, onModeChange, onOpenPalette, onOpenShortcuts, children, status = null }: AppFooterProps) {
   const searchKeys = `${modifierKey(isMacPlatform(navigator.platform))}K`;
   return (
     <footer
@@ -36,6 +37,7 @@ export default function AppFooter({ mode, onModeChange, onOpenPalette, onOpenSho
             {children}
           </>
         ) : null}
+        {status}
       </div>
       <div className="flex items-center gap-1">
         <button

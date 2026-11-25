@@ -1,0 +1,214 @@
+{
+  "generator": "scripts/oracle/sigma_clip_small_sample_oracle.py",
+  "tool": "scipy 1.18.1, numpy 2.5.4, python 3.13.17",
+  "definition": "threshold = scipy.stats.t.isf(scipy.stats.norm.sf(sigma), dof): the Student t quantile whose upper tail equals the Gaussian upper tail at sigma",
+  "thresholds": [
+    {
+      "sigma": 1.5,
+      "dof": 1,
+      "threshold": 4.69443776228959
+    },
+    {
+      "sigma": 2.0,
+      "dof": 1,
+      "threshold": 13.967730199244555
+    },
+    {
+      "sigma": 2.5,
+      "dof": 1,
+      "threshold": 51.25389027968509
+    },
+    {
+      "sigma": 3.0,
+      "dof": 1,
+      "threshold": 235.8014979604683
+    },
+    {
+      "sigma": 3.5,
+      "dof": 1,
+      "threshold": 1368.3148763389747
+    },
+    {
+      "sigma": 4.0,
+      "dof": 1,
+      "threshold": 10050.439032690902
+    },
+    {
+      "sigma": 5.0,
+      "dof": 1,
+      "threshold": 1110441.7955811995
+    },
+    {
+      "sigma": 6.0,
+      "dof": 1,
+      "threshold": 322637210.9815231
+    },
+    {
+      "sigma": 1.5,
+      "dof": 2,
+      "threshold": 2.453572513108665
+    },
+    {
+      "sigma": 2.0,
+      "dof": 2,
+      "threshold": 4.526536687430167
+    },
+    {
+      "sigma": 2.5,
+      "dof": 2,
+      "threshold": 8.889474763313439
+    },
+    {
+      "sigma": 3.0,
+      "dof": 2,
+      "threshold": 19.206744211508592
+    },
+    {
+      "sigma": 3.5,
+      "dof": 2,
+      "threshold": 46.344843085862195
+    },
+    {
+      "sigma": 4.0,
+      "dof": 2,
+      "threshold": 125.64112695753786
+    },
+    {
+      "sigma": 5.0,
+      "dof": 2,
+      "threshold": 1320.7105639083427
+    },
+    {
+      "sigma": 6.0,
+      "dof": 2,
+      "threshold": 22512.159922964445
+    },
+    {
+      "sigma": 1.5,
+      "dof": 3,
+      "threshold": 2.043357425313693
+    },
+    {
+      "sigma": 2.0,
+      "dof": 3,
+      "threshold": 3.306822175005652
+    },
+    {
+      "sigma": 2.5,
+      "dof": 3,
+      "threshold": 5.404545159622831
+    },
+    {
+      "sigma": 3.0,
+      "dof": 3,
+      "threshold": 9.218940458700258
+    },
+    {
+      "sigma": 3.5,
+      "dof": 3,
+      "threshold": 16.72651706509572
+    },
+    {
+      "sigma": 4.0,
+      "dof": 3,
+      "threshold": 32.616397028667386
+    },
+    {
+      "sigma": 5.0,
+      "dof": 3,
+      "threshold": 156.67784113720273
+    },
+    {
+      "sigma": 6.0,
+      "dof": 3,
+      "threshold": 1037.7702313076634
+    }
+  ],
+  "monte_carlo": {
+    "trials": 400000,
+    "seed": 20261125,
+    "cases": [
+      {
+        "frames": 3,
+        "sigma_low": 4.0,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.0013466666666667182,
+        "gaussian_tail_fraction": 0.001381569273463213,
+        "combined_sigma": 0.5775333191408024,
+        "ideal_sigma": 0.5773502691896257
+      },
+      {
+        "frames": 4,
+        "sigma_low": 4.0,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.0013737499999999514,
+        "gaussian_tail_fraction": 0.001381569273463213,
+        "combined_sigma": 0.5013525035040474,
+        "ideal_sigma": 0.5
+      },
+      {
+        "frames": 5,
+        "sigma_low": 4.0,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.0013499999999999623,
+        "gaussian_tail_fraction": 0.001381569273463213,
+        "combined_sigma": 0.44812073096155536,
+        "ideal_sigma": 0.4472135954999579
+      },
+      {
+        "frames": 3,
+        "sigma_low": 2.5,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.007557499999999995,
+        "gaussian_tail_fraction": 0.007559563357406225,
+        "combined_sigma": 0.5830665587179112,
+        "ideal_sigma": 0.5773502691896257
+      },
+      {
+        "frames": 4,
+        "sigma_low": 2.5,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.00769624999999996,
+        "gaussian_tail_fraction": 0.007559563357406225,
+        "combined_sigma": 0.5065109947081471,
+        "ideal_sigma": 0.5
+      },
+      {
+        "frames": 5,
+        "sigma_low": 2.5,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.007834499999999966,
+        "gaussian_tail_fraction": 0.007559563357406225,
+        "combined_sigma": 0.4553113834420874,
+        "ideal_sigma": 0.4472135954999579
+      },
+      {
+        "frames": 3,
+        "sigma_low": 3.0,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.0027058333333332962,
+        "gaussian_tail_fraction": 0.0026997960632601866,
+        "combined_sigma": 0.5802149103413494,
+        "ideal_sigma": 0.5773502691896257
+      },
+      {
+        "frames": 4,
+        "sigma_low": 3.0,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.0026818749999999447,
+        "gaussian_tail_fraction": 0.0026997960632601866,
+        "combined_sigma": 0.5015160795481367,
+        "ideal_sigma": 0.5
+      },
+      {
+        "frames": 5,
+        "sigma_low": 3.0,
+        "sigma_high": 3.0,
+        "rejected_fraction": 0.0027239999999999487,
+        "gaussian_tail_fraction": 0.0026997960632601866,
+        "combined_sigma": 0.4495062844890772,
+        "ideal_sigma": 0.4472135954999579
+      }
+    ]
+  }
+}

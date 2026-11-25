@@ -13,6 +13,7 @@ import { DEFAULT_REJECT_SIGMA, lightCurveDocsFromTso } from "../utils/tsoLightCu
 import { lightCurveStore } from "./useLightCurveStore";
 
 export const MAX_TSO_SETS = 8;
+export const MAX_TSO_CURVE_GROUPS = 2 * MAX_TSO_SETS;
 
 export interface TsoSetState {
   paths: readonly string[];
@@ -90,6 +91,7 @@ export class TsoStore {
   private extraDocs = new Map<string, readonly LightCurveDoc[]>();
   private openSeq = new Map<string, number>();
   private curvesSeq = new Map<string, number>();
+  private groupOrder = new Set<string>();
   private sequence = 0;
   private listeners = new Set<Listener>();
 
@@ -131,6 +133,24 @@ export class TsoStore {
     this.notify();
   }
 
+  private forgetGroup(group: string): void {
+    this.groupOrder.delete(group);
+    this.drafts.delete(group);
+    this.curves.delete(group);
+    this.computed.delete(group);
+    this.extraDocs.delete(group);
+    this.curvesSeq.delete(group);
+  }
+
+  private touchGroup(group: string): void {
+    this.groupOrder.delete(group);
+    this.groupOrder.add(group);
+    for (const candidate of [...this.groupOrder]) {
+      if (this.groupOrder.size <= MAX_TSO_CURVE_GROUPS) break;
+      if (candidate !== group && !this.getCurves(candidate).loading) this.forgetGroup(candidate);
+    }
+  }
+
   getSet(fileKey: string): TsoSetState {
     return this.sets.get(fileKey) ?? EMPTY_TSO_SET;
   }
@@ -148,6 +168,16 @@ export class TsoStore {
     } catch (e) {
       if (this.openSeq.get(fileKey) === seq) this.writeSet(fileKey, { paths: asked, loading: false, result: null, error: errorText(e) });
     }
+  }
+
+  async reread(path: string): Promise<void> {
+    const holding = [...this.sets].filter(([, state]) => !state.loading && state.paths.includes(path));
+    await Promise.all(
+      holding.map(([fileKey, state]) => {
+        this.sets.delete(fileKey);
+        return this.open(fileKey, state.paths);
+      }),
+    );
   }
 
   getChosen(fileKey: string): readonly string[] {
@@ -174,6 +204,7 @@ export class TsoStore {
 
   patchDraft(group: string, patch: Partial<TsoCurvesDraft>): void {
     this.drafts.set(group, Object.freeze({ ...this.getDraft(group), ...patch }));
+    this.touchGroup(group);
     this.notify();
   }
 
@@ -196,6 +227,7 @@ export class TsoStore {
     const seq = this.nextSequence();
     this.curvesSeq.set(group, seq);
     this.curves.set(group, { loading: true, result: this.getCurves(group).result, error: null });
+    this.touchGroup(group);
     this.notify();
     try {
       const result = await this.readCurves([...paths], series, request);
@@ -212,6 +244,7 @@ export class TsoStore {
 
   setExtraDocs(group: string, docs: readonly LightCurveDoc[]): void {
     this.extraDocs.set(group, [...docs]);
+    this.touchGroup(group);
     this.writeDocs(group);
   }
 }

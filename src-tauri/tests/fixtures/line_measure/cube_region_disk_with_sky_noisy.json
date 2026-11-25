@@ -1,12 +1,12 @@
 {
   "axis_unit": "um",
-  "centroid": 1.0200360185836774,
+  "centroid": 1.0200312459021086,
   "continuum_channels": 12,
-  "continuum_level": 0.02653662204640075,
+  "continuum_level": 0.024326255878399934,
   "continuum_linear": true,
-  "continuum_reference": 1.0200360185836774,
-  "continuum_sigma": 0.3953765457808971,
-  "continuum_slope": -11.199498396497601,
+  "continuum_reference": 1.0200312459021086,
+  "continuum_sigma": 0.38226299080252646,
+  "continuum_slope": -10.131462919811574,
   "continuum_windows": [
     [
       0,
@@ -19,32 +19,34 @@
   ],
   "equivalent_width": null,
   "fit": {
-    "amplitude": 107.99938740273133,
-    "amplitude_err": 0.18915079219337896,
-    "centre": 1.0200008554451907,
-    "centre_err": 6.069042406334857e-6,
-    "chi2": 17.855197831268832,
+    "amplitude": 108.15191024895489,
+    "amplitude_err": 0.21204363831568693,
+    "centre": 1.0199982766317515,
+    "centre_err": 6.790968264876615e-6,
+    "chi2": 20.07808346526006,
     "converged": true,
     "dof": 22,
     "iterations": 4,
-    "sigma": 0.003000986429623949,
-    "sigma_err": 6.069047862568529e-6
+    "sigma": 0.0029996554887077326,
+    "sigma_err": 6.790974282153145e-6
   },
-  "flux": 0.8116439583322833,
-  "flux_err": 0.003737005438509199,
+  "flux": 0.8123513440605646,
+  "flux_err": 0.0035059725716196986,
   "flux_unit": "Jy/beam x pix x um",
-  "fwhm": 0.007030025617399797,
+  "fwhm": 0.0070267487696721136,
   "n_channels": 25,
   "notes": [
-    "circle region: flux summed over 112.7 pixels, sky from 244 background pixels subtracted per channel",
+    "circle region: flux summed over 113.1 pixels, sky from 252 background pixels subtracted per channel",
     "continuum reaches or crosses zero inside the line: equivalent width undefined",
+    "Gaussian fit without ERR: absolute-sigma errors from the continuum rms, inflated by sqrt(chi2_red) where chi2_red > 1",
     "continuum: first-order line fitted over 12 channels in 0..=5 and 34..=39, level quoted at the centroid",
+    "sigma_kms, fwhm_kms and the source-frame widths are observed widths: the instrumental width is not removed (no resolving power given)",
     "line velocity from the optical convention with rest wavelength 1.02 um, axis frame BARYCENT, no frame shift applied"
   ],
-  "peak": 108.1937249659108,
+  "peak": 108.26585400359487,
   "peak_channel": 20,
-  "sigma": 0.0029853770067204445,
-  "snr": 217.19100271260828,
+  "sigma": 0.002983985457614772,
+  "snr": 231.70499125875145,
   "source": {
     "background": {
       "r_inner": 8.0,
@@ -63,12 +65,12 @@
   },
   "velocity": {
     "axis_frame": "BARYCENT",
-    "centroid_kms": 10.586372288558472,
+    "centroid_kms": 9.183613525053785,
     "convention": "optical",
-    "fwhm_kms": 2066.2241761208907,
+    "fwhm_kms": 2065.26106412598,
     "rest_um": 1.02,
     "shift_applied_kms": 0.0,
-    "sigma_kms": 877.4446185308121
+    "sigma_kms": 877.0356225241138
   },
   "z0": 8,
   "z1": 32

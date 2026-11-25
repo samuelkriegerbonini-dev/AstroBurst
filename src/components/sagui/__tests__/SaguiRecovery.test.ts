@@ -4,9 +4,9 @@ import type { SaguiState } from "../saguiStore";
 import type { CubePrepReport } from "../../../shared/types/cubeprep";
 
 const mocks = vi.hoisted(() => ({ open: vi.fn(), restore: vi.fn(), openUrl: vi.fn(), inspect: vi.fn(), inspectRuntime: vi.fn(), prepare: vi.fn(), edit: vi.fn(), reveal: vi.fn(), report: null as CubePrepReport | null }));
-const state: SaguiState = { config: { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 4294967295, psf_target: "", mode: "ward", knn_k: 40 }, input: null, runtime: null, status: "idle", operation: null, installation: null, installParent: "", progress: null, result: null, outputDir: null, unit: null, error: null };
+const state: SaguiState = { config: { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 4294967295, psf_target: "", mode: "ward", knn_k: 40 }, input: null, runtime: null, status: "idle", operation: null, installation: null, installParent: "", progress: null, result: null, outputDir: null, error: null };
 vi.mock("react", async (original) => (await import("../../../test/hookRuntime")).reactWithFakeHooks(await original()));
-vi.mock("../saguiStore", async (original) => ({ ...await original<typeof import("../saguiStore")>(), useSaguiState: () => state, saguiStore: { get: () => state, restore: mocks.restore, inspect: mocks.inspect, inspectRuntime: mocks.inspectRuntime, prepareCubePrep: mocks.prepare, edit: mocks.edit, isJobActive: () => false } }));
+vi.mock("../saguiStore", async (original) => ({ ...await original<typeof import("../saguiStore")>(), useSaguiState: () => state, saguiStore: { get: () => state, restore: mocks.restore, inspect: mocks.inspect, inspectRuntime: mocks.inspectRuntime, prepareCubePrep: mocks.prepare, edit: mocks.edit, isJobActive: () => false, canCancel: () => false } }));
 vi.mock("../../cubeprep/cubePrepStore", () => ({ cubePrepStore: { get: () => ({ report: mocks.report }) } }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open, save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl, revealItemInDir: vi.fn() }));
@@ -48,7 +48,7 @@ describe("SAGUI saved-result chooser", () => {
     await vi.waitFor(() => expect(mocks.restore).toHaveBeenCalledWith("/old/job/manifest.json"));
     expect(mocks.open).toHaveBeenCalledWith({ title: "Open previous SAGUI result", multiple: false, filters: [{ name: "SAGUI manifest", extensions: ["json"] }] });
     const updated = hooks.render(SaguiPanel, {}) as ReactNode;
-    const scales = find(updated, (props) => props.label === "Starlet scales (1–10)")!.children;
+    const scales = find(updated, (props) => props.label === "Starlet scales (1 = finest, 1 to 10)")!.children;
     expect(isValidElement<Props>(scales) && scales.props.value).toBe("2, 4");
   });
 

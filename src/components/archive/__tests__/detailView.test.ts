@@ -108,7 +108,7 @@ describe("detail header", () => {
 describe("tabs and access", () => {
   it("counts previews and products once known and marks missing previews", () => {
     expect(tabLabels({ set: null, products: null, previewsEnabled: true })).toEqual({ previews: "Previews", metadata: "Metadata", products: "Products" });
-    expect(tabLabels({ set: L3, products: productList(), previewsEnabled: true })).toEqual({ previews: "Previews 6", metadata: "Metadata", products: "Products 10" });
+    expect(tabLabels({ set: L3, products: productList(), previewsEnabled: true })).toEqual({ previews: "Previews 6", metadata: "Metadata", products: "Products 10, 23.61 GB" });
     expect(tabLabels({ set: null, products: null, previewsEnabled: false }).previews).toBe("Previews (none)");
   });
 

@@ -345,6 +345,18 @@ describe("search flow", () => {
     expect(t.svc.search).toHaveBeenCalledWith("g1:search", expect.anything(), true);
   });
 
+  it("refreshes the results on screen, not the text typed since, and keeps the server order", async () => {
+    const t = await ready();
+    t.ctl.setText("M16");
+    await t.ctl.search({ sort: [{ column: "date_obs", desc: true }] });
+    t.ctl.setText("M1");
+    await t.ctl.refresh();
+    expect(t.svc.resolve).toHaveBeenCalledTimes(1);
+    expect(t.svc.search).toHaveBeenLastCalledWith("g2:search", expect.objectContaining({ where: expect.objectContaining({ raDeg: M16.raDeg }), sort: [{ column: "date_obs", desc: true }] }), true);
+    expect(t.store.getState().shownRun?.text).toBe("M16");
+    expect(t.store.getState().form.text).toBe("M1");
+  });
+
   it("never sends a Roman request without an authorized token", async () => {
     const t = await ready();
     t.ctl.setText("M16");
@@ -1262,7 +1274,7 @@ describe("Roman token", () => {
   it("checks the format before any request and says why the token was refused", async () => {
     const t = await ready();
     t.ctl.switchMission("roman");
-    await t.ctl.saveToken("  short  ");
+    expect(await t.ctl.saveToken("  short  ")).toBe(false);
     expect(t.svc.tokenSave).not.toHaveBeenCalled();
     const s = t.store.getState();
     expect(romanPanelState(s)).toBe("rejected");
@@ -1275,7 +1287,7 @@ describe("Roman token", () => {
     const t = await ready({ tokenSave, search });
     t.ctl.setText("274.688 -13.792");
     t.ctl.switchMission("roman");
-    await t.ctl.saveToken(`  ${MARKER}\n`);
+    expect(await t.ctl.saveToken(`  ${MARKER}\n`)).toBe(true);
     expect(tokenSave).toHaveBeenCalledWith("token:save", MARKER);
     await flush();
     const s = t.store.getState();
@@ -1301,7 +1313,7 @@ describe("Roman token", () => {
     const tokenStatus = vi.fn(async () => ({ present: false, authorized: null }));
     const t = await ready({ tokenSave, tokenStatus });
     t.ctl.switchMission("roman");
-    await t.ctl.saveToken(MARKER);
+    expect(await t.ctl.saveToken(MARKER)).toBe(false);
     expect(tokenStatus).toHaveBeenLastCalledWith("token:check", false);
     const s = t.store.getState();
     expect(romanPanelState(s)).toBe("rejected");

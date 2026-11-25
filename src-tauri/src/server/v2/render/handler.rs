@@ -230,18 +230,23 @@ pub async fn render(
         .cache
         .get(&target)
         .ok_or_else(|| AppError::NotFound(format!("image ref {target} not found in session")))?;
-    let arr = entry.arr();
-    let (rows, cols) = arr.dim();
-    let wcs = entry.header().and_then(|h| load_wcs(&session.wcs_source_path(&target), h).ok());
-
-    let resolved = match &params.region {
-        Some(spec) => resolve_region_clamped(spec, cols, rows, wcs.as_ref())?,
-        None => ResolvedRegion { x: 0, y: 0, width: cols, height: rows, clipped: false },
-    };
-
-    let region_arr = arr
-        .slice(s![resolved.y..resolved.y + resolved.height, resolved.x..resolved.x + resolved.width])
-        .to_owned();
+    let wcs_path = session.wcs_source_path(&target);
+    let region = params.region.clone();
+    let (wcs, resolved, region_arr) = tokio::task::spawn_blocking(move || {
+        let arr = entry.arr();
+        let (rows, cols) = arr.dim();
+        let wcs = entry.header().and_then(|h| load_wcs(&wcs_path, h).ok());
+        let resolved = match &region {
+            Some(spec) => resolve_region_clamped(spec, cols, rows, wcs.as_ref())?,
+            None => ResolvedRegion { x: 0, y: 0, width: cols, height: rows, clipped: false },
+        };
+        let region_arr = arr
+            .slice(s![resolved.y..resolved.y + resolved.height, resolved.x..resolved.x + resolved.width])
+            .to_owned();
+        Ok::<_, AppError>((wcs, resolved, region_arr))
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("task panic: {e}")))??;
 
     let long_side = resolved.width.max(resolved.height);
     let factor = match params.max_dim {

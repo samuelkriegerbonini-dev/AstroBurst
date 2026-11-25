@@ -1,0 +1,357 @@
+{
+ "golden": "tso/x1dints",
+ "label": "A6",
+ "produced_by": {
+  "script": "tso_golden_x1dints.py",
+  "command": "python -I scripts/oracle/tso_golden_x1dints.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512_x1dints.fits",
+    "set": "tso/A6",
+    "bytes": 4124160,
+    "sha256": "dbf1983b952e00748906854e3e4c48d62daadc9a87949d95378e037bbcbe584f"
+   },
+   {
+    "file": "jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 4376,
+    "sha256": "6bb945ce4d6ac3cec05cd68e6234e960851b5cfef701a0972107536db9363f33"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "primary": {
+  "DATAMODL": "TSOMultiSpecModel",
+  "CAL_VER": "3.0.0",
+  "EXP_TYPE": "NRS_BRIGHTOBJ",
+  "INSTRUME": "NIRSPEC",
+  "DETECTOR": "NRS1",
+  "FILTER": "CLEAR",
+  "PUPIL": null,
+  "GRATING": "PRISM",
+  "SUBARRAY": "SUB512",
+  "NINTS": 65,
+  "INTSTART": 1,
+  "INTEND": 65,
+  "EXSEGNUM": 1,
+  "EXSEGTOT": 1,
+  "TARGNAME": "2QZ J103448.9+005200",
+  "S_PHOTOM": "COMPLETE"
+ },
+ "product_level": "3",
+ "layout": "row_per_integration",
+ "n_hdus": 5,
+ "hdus": [
+  {
+   "index": 0,
+   "name": "PRIMARY",
+   "extver": null,
+   "naxis1": null,
+   "naxis2": null
+  },
+  {
+   "index": 1,
+   "name": "INT_TIMES",
+   "extver": 1,
+   "naxis1": 52,
+   "naxis2": 65
+  },
+  {
+   "index": 2,
+   "name": "EXTRACT1D",
+   "extver": 1,
+   "naxis1": 60400,
+   "naxis2": 65
+  },
+  {
+   "index": 3,
+   "name": "HDRTAB",
+   "extver": 1,
+   "naxis1": 2675,
+   "naxis2": 1
+  },
+  {
+   "index": 4,
+   "name": "ASDF",
+   "extver": null,
+   "naxis1": 109091,
+   "naxis2": 1
+  }
+ ],
+ "n_extract1d": 1,
+ "int_times_rows": 65,
+ "series_keys": [
+  {
+   "detector": "NRS1",
+   "sporder": 0
+  }
+ ],
+ "series": [
+  {
+   "key": {
+    "detector": "NRS1",
+    "sporder": 0
+   },
+   "detector_source": "EXTRACT1D header",
+   "extract1d_hdus": [
+    2
+   ],
+   "rows_per_extract1d": [
+    65
+   ],
+   "integrations": 65,
+   "tform_repeat": [
+    431
+   ],
+   "n_alongdisp": {
+    "min": 431,
+    "max": 431,
+    "sum": 28015,
+    "rows_zero": 0,
+    "rows_below_tform_repeat": 0,
+    "source": "N_ALONGDISP column"
+   },
+   "int_num": {
+    "first": 1,
+    "last": 65,
+    "min": 1,
+    "max": 65,
+    "distinct": 65,
+    "source": "INT_NUM column"
+   },
+   "segment_values": [
+    1
+   ],
+   "units": {
+    "WAVELENGTH": "um",
+    "FLUX": "Jy",
+    "FLUX_ERROR": "Jy",
+    "MJD-AVG": "d",
+    "TDB-MID": "d"
+   },
+   "time": {
+    "mjd_avg_first": 60796.95485544182,
+    "mjd_avg_last": 60797.055553154765,
+    "mjd_avg_min_finite": 60796.95485544182,
+    "mjd_avg_max_finite": 60797.055553154765,
+    "mjd_avg_nan_rows": 0,
+    "mjd_avg_distinct_finite": 65,
+    "tdb_mid_first": 60796.95842671788,
+    "tdb_mid_last": 60797.05911576449,
+    "tdb_mid_nan_rows": 0,
+    "tdb_mid_distinct_finite": 65,
+    "mjd_beg_first": 60796.95407004993,
+    "mjd_end_last": 60797.05633854666,
+    "strictly_increasing_in_hdu_and_row_order": true,
+    "source": "per-row columns"
+   },
+   "first_valid_row": {
+    "hdu": 2,
+    "row0": 0,
+    "int_num": 1,
+    "n_alongdisp": 431,
+    "wavelength_first3": [
+     0.5524153961529221,
+     0.5557963153106529,
+     0.559246162366847
+    ],
+    "wavelength_last3": [
+     5.354063970613874,
+     5.361335788635605,
+     5.368596776621393
+    ],
+    "direction": "ascending"
+   },
+   "masking_counts": {
+    "valid_elements": 28015,
+    "flux_nan": 1590,
+    "dq_nonzero": 1590,
+    "flux_nan_with_dq_zero": 0,
+    "flux_finite_with_dq_nonzero": 0,
+    "flux_error_nan": 0
+   },
+   "storage": {
+    "NAXIS1": 60400,
+    "NAXIS2": 65,
+    "PCOUNT": 0,
+    "TFIELDS": 27,
+    "WAVELENGTH": {
+     "column": 2,
+     "TFORM": "431D",
+     "TDIM": "(431)",
+     "TUNIT": "um",
+     "TZERO": null
+    },
+    "DQ": {
+     "column": 13,
+     "TFORM": "431J",
+     "TDIM": "(431)",
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_element0_stored_bytes_hex": "80000001",
+     "row0_element0_value": 1
+    },
+    "N_ALONGDISP": {
+     "column": 20,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_stored_bytes_hex": "800001af",
+     "row0_stored_int32": -2147483217,
+     "row0_value": 431
+    },
+    "INT_NUM": {
+     "column": 1,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": null
+    },
+    "row_length_rule": "NAXIS1 = 140 * repeat + 60",
+    "row_length_rule_holds": true
+   },
+   "white_light_as_archived": {
+    "limits_um": [
+     -1.0,
+     10000000000.0
+    ],
+    "rows_in_series": 65,
+    "rows_kept": 65,
+    "rows_dropped_nan_or_repeated_mjd_avg": 0,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 1,
+      "mjd_avg": 60796.95485544182,
+      "tdb_mid": 60796.95842671788,
+      "sum": 0.016091166200930186
+     },
+     {
+      "int_num": 2,
+      "mjd_avg": 60796.95642884359,
+      "tdb_mid": 60796.9599999843,
+      "sum": 0.016399022694723386
+     },
+     {
+      "int_num": 3,
+      "mjd_avg": 60796.95800224535,
+      "tdb_mid": 60796.96157325071,
+      "sum": 0.01665597121806469
+     },
+     {
+      "int_num": 4,
+      "mjd_avg": 60796.95957564712,
+      "tdb_mid": 60796.96314651712,
+      "sum": 0.016878643919752835
+     },
+     {
+      "int_num": 5,
+      "mjd_avg": 60796.96114904888,
+      "tdb_mid": 60796.96471978353,
+      "sum": 0.016961159517659093
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 61,
+      "mjd_avg": 60797.049259547704,
+      "tdb_mid": 60797.052822699305,
+      "sum": 0.016796236322842398
+     },
+     {
+      "int_num": 62,
+      "mjd_avg": 60797.05083294947,
+      "tdb_mid": 60797.054395965606,
+      "sum": 0.01667658264125234
+     },
+     {
+      "int_num": 63,
+      "mjd_avg": 60797.052406351235,
+      "tdb_mid": 60797.0559692319,
+      "sum": 0.016483827241728442
+     },
+     {
+      "int_num": 64,
+      "mjd_avg": 60797.053979753,
+      "tdb_mid": 60797.057542498194,
+      "sum": 0.016078314134743775
+     },
+     {
+      "int_num": 65,
+      "mjd_avg": 60797.055553154765,
+      "tdb_mid": 60797.05911576449,
+      "sum": 0.01572451606661172
+     }
+    ],
+    "sum_all_fsum": 1.0538909536835777,
+    "numpy_nansum_vs_exact_sum_max_rel": 2.1536434502957165e-16,
+    "whtlt": {
+     "time_column": "MJD_UTC_NRS1",
+     "bjd_column": "BJD_TDB_NRS1",
+     "flux_column": "whitelight_flux_NRS1",
+     "whtlt_rows_finite_time": 65,
+     "rows_joined_on_identical_time": 65,
+     "first5": [
+      {
+       "time": 60796.95485544182,
+       "flux": 0.016091166200930186
+      },
+      {
+       "time": 60796.95642884359,
+       "flux": 0.016399022694723386
+      },
+      {
+       "time": 60796.95800224535,
+       "flux": 0.01665597121806469
+      },
+      {
+       "time": 60796.95957564712,
+       "flux": 0.016878643919752835
+      },
+      {
+       "time": 60796.96114904888,
+       "flux": 0.016961159517659093
+      }
+     ],
+     "last5": [
+      {
+       "time": 60797.049259547704,
+       "flux": 0.016796236322842398
+      },
+      {
+       "time": 60797.05083294947,
+       "flux": 0.01667658264125234
+      },
+      {
+       "time": 60797.052406351235,
+       "flux": 0.016483827241728442
+      },
+      {
+       "time": 60797.053979753,
+       "flux": 0.016078314134743775
+      },
+      {
+       "time": 60797.055553154765,
+       "flux": 0.01572451606661172
+      }
+     ],
+     "sum_all_fsum": 1.0538909536835777,
+     "max_rel_diff_computed_vs_whtlt": 0.0,
+     "rows_bitwise_equal": 65,
+     "within_1e-4": true,
+     "expected_to_match": true,
+     "bjd_equals_tdb_mid_bitwise_rows": 65
+    },
+    "limits_source": "cal_logs: no pars-whitelightstep match, min_wavelength None, max_wavelength None, so -1.0 and 1.0e10"
+   }
+  }
+ ]
+}

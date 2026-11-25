@@ -46,22 +46,34 @@ describe("missionEntries", () => {
     expect(missionEntries(MISSIONS, "expired").find((e) => e.id === "roman")?.lock).toBe("expired");
   });
 
-  it("puts IUE, CLASSY and ULLYSES in More, enabled, with what they offer", () => {
-    expect(byId.iue).toMatchObject({ placement: "more", enabled: true, reason: "search and metadata; no preview images at MAST" });
-    expect(byId.classy).toMatchObject({ placement: "more", enabled: true, reason: "search and metadata (galaxy sample); no previews" });
-    expect(byId.ullyses).toMatchObject({ placement: "more", enabled: true, reason: "search and metadata (targets); no previews" });
+  it("puts IUE, CLASSY and ULLYSES in More, enabled, with what their capabilities offer", () => {
+    for (const id of ["iue", "classy", "ullyses"]) expect(byId[id]).toMatchObject({ placement: "more", enabled: true, reason: "search and metadata; no preview images at MAST", status: "open" });
+    const listed = missionEntries(
+      MISSIONS.map((m) => (m.id === "iue" ? { ...m, capabilities: { ...m.capabilities, products: true } } : m)),
+      "locked",
+    ).find((e) => e.id === "iue");
+    expect(listed?.reason).toBe("search, metadata and downloads; no preview images at MAST");
+    const listOnly = missionEntries(
+      MISSIONS.map((m) => (m.id === "iue" ? { ...m, capabilities: { ...m.capabilities, products: true, downloads: false } as MastMission["capabilities"] } : m)),
+      "locked",
+    ).find((e) => e.id === "iue");
+    expect(listOnly?.reason).toBe("search, metadata and product lists; no preview images at MAST");
   });
 
-  it("disables Roman CGI, Roman Spectra, TESS and All missions with their reasons", () => {
-    expect(byId.roman_cgi).toMatchObject({ placement: "more", enabled: false, reason: "needs Roman authorization; coronagraphy is not processed by AstroBurst" });
+  it("disables Roman CGI, Roman Spectra, TESS and All missions with the reason and a status word", () => {
+    expect(byId.roman_cgi).toMatchObject({ placement: "more", enabled: false, status: "token, not processed" });
+    const noted = missionEntries(MISSIONS.map((m) => (m.id === "roman_cgi" ? { ...m, note: "needs Roman authorization; coronagraphy is not processed by the app" } : m)), "locked");
+    expect(noted.find((e) => e.id === "roman_cgi")?.reason).toBe("needs Roman authorization; coronagraphy is not processed by the app");
     for (const id of ["roman_spectra", "tess", "multi_mission"]) {
-      expect(byId[id]).toMatchObject({ placement: "more", enabled: false, reason: "not deployed by MAST (HTTP 404, checked 2026-10-16)" });
+      expect(byId[id]).toMatchObject({ placement: "more", enabled: false, reason: "not deployed by MAST (HTTP 404, checked 2026-10-16)", status: "not served by MAST" });
     }
+    expect([byId.jwst.status, byId.hst.status, byId.roman.status]).toEqual(["open", "open", "token"]);
+    expect(missionEntries(MISSIONS, "unlocked").find((e) => e.id === "roman")?.status).toBe("open");
   });
 
   it("enables an undeployed mission once a probe finds it open", () => {
     const probed: MastMission[] = MISSIONS.map((m) => (m.id === "tess" ? { ...m, availability: "open", capabilities: { search: true, images: false, products: false } } : m));
-    expect(missionEntries(probed, "locked").find((e) => e.id === "tess")).toMatchObject({ enabled: true, reason: null });
+    expect(missionEntries(probed, "locked").find((e) => e.id === "tess")).toMatchObject({ enabled: true, reason: "search and metadata; no preview images at MAST", status: "open" });
   });
 
   it("uses the probe date in the reason", () => {
@@ -104,7 +116,7 @@ describe("viewAvailability", () => {
       previews: false,
       previewsReason: "MAST's IUE search API serves no thumbnails or previews.",
       products: false,
-      productsReason: "Product lists for IUE arrive with spectra support (MA15)",
+      productsReason: "MAST lists no products for IUE in AstroBurst yet.",
     });
   });
 });
@@ -138,17 +150,17 @@ describe("check times", () => {
 describe("moreMenuView", () => {
   const now = new Date(2026, 9, 16, 15, 0).getTime();
   const at = new Date(2026, 9, 16, 10, 42).getTime();
-  const byId = (view: ReturnType<typeof moreMenuView>) => Object.fromEntries([...view.enabled, ...view.disabled].map((e) => [e.id, e]));
+  const byId = (view: ReturnType<typeof moreMenuView>) => Object.fromEntries([...view.enabled, ...view.disabled, ...view.notServed].map((e) => [e.id, e]));
 
   it("lists the offers first and the disabled missions with their reasons, and offers Check again only where MAST may deploy later", () => {
     const view = moreMenuView(MISSIONS, "locked", {}, "jwst", now);
     expect(view.enabled.map((e) => [e.id, e.reason, e.check])).toEqual([
       ["iue", "search and metadata; no preview images at MAST", null],
-      ["classy", "search and metadata (galaxy sample); no previews", null],
-      ["ullyses", "search and metadata (targets); no previews", null],
+      ["classy", "search and metadata; no preview images at MAST", null],
+      ["ullyses", "search and metadata; no preview images at MAST", null],
     ]);
-    expect(view.disabled.map((e) => [e.id, e.check])).toEqual([
-      ["roman_cgi", null],
+    expect(view.disabled.map((e) => [e.id, e.check])).toEqual([["roman_cgi", null]]);
+    expect(view.notServed.map((e) => [e.id, e.check])).toEqual([
       ["roman_spectra", "idle"],
       ["tess", "idle"],
       ["multi_mission", "idle"],

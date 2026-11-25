@@ -22,7 +22,7 @@ use crate::math::polygon::{self, Point};
 use crate::types::header::HduHeader;
 use crate::types::image::IntPlane;
 
-const DEFAULT_BORDER_CROP: usize = 1;
+pub const DEFAULT_BORDER_CROP: usize = 1;
 const SAME_GRID_TOLERANCE_PX: f64 = 1e-6;
 const GRID_SAMPLE_FRACTIONS: [f64; 3] = [0.0, 0.5, 1.0];
 const ARCSEC2_PER_DEG2: f64 = 3600.0 * 3600.0;
@@ -33,7 +33,7 @@ const PIXEL_AREA_HISTORY: &str = "Per-pixel values divided by the relative pixel
 const ALIGN_ERROR_HISTORY: &str = "ERR propagated with squared effective resampling weights assuming independent input pixels; input covariance is unknown and output covariance is not stored";
 const ALIGN_DQ_HISTORY: &str = "DQ propagated by bitwise OR of nonzero effective contributors; DQ flags do not exclude SCI samples";
 const NOISCORR_ALIGN_HISTORY: &str = "NOISCORR holds Q(d), the normalised autocorrelation of the output noise for white input noise through the resampling weights w: the mean over output pixel pairs (p, p+d) of sum_i w_pi w_(p+d)i divided by the mean of sum_i w_pi^2, NCORRK x NCORRK, centred, zero outside; the variance of a sum over pixels is sum_pq ERR_p ERR_q Q(p-q)";
-const NOISCORR_MATCH_HISTORY: &str = "NOISCORR holds Q(d) after PSF matching: the alignment map convolved with the autocorrelation of the matching kernel and normalised to Q(0) = 1, NCORRK x NCORRK, centred, zero outside; the variance of a sum over pixels is sum_pq ERR_p ERR_q Q(p-q)";
+const NOISCORR_MATCH_HISTORY: &str = "NOISCORR holds Q(d) after PSF matching: the alignment map convolved with the autocorrelation of the matching kernel and normalised to Q(0) = 1, NCORRK x NCORRK, centred, zero outside; ERR of a matched plane holds the alignment covariance under the kernel, so the variance of a sum over pixels is sum_pq ERR_p ERR_q Q(p-q)";
 const NCORRALN_HISTORY: &str = "NCORRALN = 1/sqrt(mean over output pixels of sum_i w_pi^2) is the white-noise per-pixel ratio sigma_in/sigma_out of the resampling, not an aperture factor; aperture sums use the NOISCORR map";
 const PARTIAL_COVERAGE_TOLERANCE: f64 = 1e-6;
 pub const NOISCORR_EXTNAME: &str = "NOISCORR";
@@ -574,6 +574,19 @@ fn crop_border(image: Array2<f32>, mut header: HduHeader, crop: usize) -> (Array
     (cropped, header)
 }
 
+fn remove_scaled_surface_brightness_unit(input: &HduHeader, area: &AreaCorrection, header: &mut HduHeader) -> Option<String> {
+    let unit = classify_unit(input);
+    let scaled = area.rule == AreaRule::Lightstack && area.data_factor != 1.0 && matches!(unit.class, UnitClass::SurfaceBrightness { .. });
+    let bunit = unit.bunit.filter(|_| scaled)?;
+    header.remove("BUNIT");
+    let note = format!(
+        "BUNIT {bunit} removed: area rule lightstack multiplied the surface brightness by the pixel-area ratio {:.6}, so the values are no longer {bunit}",
+        area.data_factor
+    );
+    push_history(header, &note);
+    Some(note)
+}
+
 fn alignment_areas(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions, plan: &AlignPlan) -> (Option<Array2<f32>>, Option<Array2<f32>>) {
     let per_pixel = options.per_actual_pixel && plan.reprojected && holds_per_pixel_values(input.header, plan.area.as_ref());
     let (in_rows, in_cols) = input.image.dim();
@@ -602,14 +615,17 @@ pub fn align_image(input: &AlignInput, grid: &AlignGrid, options: &AlignOptions,
     if pixel_area.is_some() {
         push_history(&mut header, PIXEL_AREA_HISTORY);
     }
+    let mut unit_removal = None;
     if let Some(area) = &plan.area {
         apply_area_correction(area, &mut image, None, &mut header);
+        unit_removal = remove_scaled_surface_brightness_unit(input.header, area, &mut header);
     }
     let diagnostics = flux_diagnostics(input, grid, plan, &image, footprint.as_ref(), options.border_crop);
     let (image, header) = crop_border(image, header, options.border_crop);
     let (rows, cols) = image.dim();
     let coverage = if image.is_empty() { 0.0 } else { image.iter().filter(|v| v.is_finite()).count() as f64 / image.len() as f64 };
     let mut warnings = plan.warnings.clone();
+    warnings.extend(unit_removal);
     warnings.extend(resample_warning);
     if coverage == 0.0 {
         warnings.push(NO_OVERLAP_WARNING.to_string());
@@ -844,6 +860,33 @@ mod tests {
             let wrong_shape = Array2::from_elem((1, 1), 1.0);
             assert!(matches!(align_image_with_companions(&input, &grid, &opts, &plan, AlignCompanions { err: Some(&wrong_shape), dq: None, no_data_dq: 513 }), Err(AlignError::CompanionShape { plane: "ERR", .. })));
         }
+    }
+
+    #[test]
+    fn lightstack_area_rule_on_surface_brightness_removes_bunit() {
+        let golden_ratio = "4.130073";
+        let target = grid_header((8, 8), (4.5, 4.5), (150.0, 2.0), 0.063, 0.0, "MJy/sr");
+        let target_wcs = wcs_of(&target);
+        let grid = AlignGrid { label: "reference", header: &target, wcs: &target_wcs, rows: 8, cols: 8 };
+        let science = Array2::from_elem((16, 16), 2.0f32);
+        let opts = options(ResampleMethod::Bilinear, 0, Some(AreaRule::Lightstack));
+        let aligned_in = |bunit: &str| {
+            let mut header = grid_header((16, 16), (8.5, 8.5), (150.0, 2.0), 0.031, 0.0, bunit);
+            header.set_f64("PIXAR_SR", 2.26e-14);
+            let wcs = wcs_of(&header);
+            let input = AlignInput { image: &science, header: &header, wcs: &wcs };
+            let plan = plan_alignment(&input, &grid, &opts).unwrap();
+            align_image(&input, &grid, &opts, &plan)
+        };
+        let surface = aligned_in("MJy/sr");
+        assert!((f64::from(surface.image[[4, 4]]) / 2.0 - 4.1300728407908425).abs() < 1e-5, "scripts/oracle/cubeprep_review_goldens.py: (0.063 / 0.031)^2");
+        assert_eq!(surface.header.get("BUNIT"), None, "values multiplied by the pixel-area ratio are no longer MJy/sr");
+        let removal = format!("BUNIT MJy/sr removed: area rule lightstack multiplied the surface brightness by the pixel-area ratio {golden_ratio}");
+        assert!(history(&surface.header).contains(&removal), "{}", history(&surface.header));
+        assert!(surface.report.warnings.iter().any(|warning| warning.contains(&removal)), "{:?}", surface.report.warnings);
+        let per_pixel = aligned_in("Jy");
+        assert_eq!(per_pixel.header.get("BUNIT").map(str::trim), Some("Jy"), "a per-pixel flux keeps its unit under the lightstack rule");
+        assert!(!history(&per_pixel.header).contains("BUNIT Jy removed"));
     }
 
     fn textured(rows: usize, cols: usize, seed: u64) -> Array2<f32> {

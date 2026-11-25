@@ -12,6 +12,17 @@ const render = (bands: SaguiRegionalBand[]) => {
 const pointHeights = (html: string) => [...html.matchAll(/<circle [^>]*cy="([^"]+)"/g)].map((match) => Number(match[1]));
 const svgOf = (html: string) => /<svg[\s\S]*<\/svg>/.exec(html)?.[0] ?? "";
 
+describe("SAGUI region list", () => {
+  it("lists the regions largest first with components and minimum SNR, and offers to save the selected SED (proposals 20, 22)", () => {
+    const bands = [band("F200W", 2, 1, 0.1)];
+    const result: SaguiResult = { run_id: "list", unit: "Jy", output_dir: "/out", labels_path: "l.fits", mask_path: "m.fits", table_path: "r.csv", manifest_path: "manifest.json", width: 2, height: 1, labels: [1, 2], warnings: [], regions: [{ region: 1, n_pixels: 5, n_components: 1, min_snr: 12.345, bands }, { region: 2, n_pixels: 40, n_components: 3, min_snr: null, min_snr_lower_bound: 2.5, bands }] };
+    const html = renderToStaticMarkup(createElement(SaguiViewer, { result, onSaveRegion: () => undefined }));
+    expect(html).toMatch(/<button[^>]*aria-pressed="false"[^>]*>Region 2<\/button><\/td><td[^>]*>40<\/td><td[^>]*>3<\/td><td[^>]*>≥ 2.5<\/td>[\s\S]*<button[^>]*aria-pressed="true"[^>]*>Region 1<\/button><\/td><td[^>]*>5<\/td><td[^>]*>1<\/td><td[^>]*>12.3<\/td>/);
+    expect(html).toContain("Save the SED of region 1 as CSV");
+    expect(renderToStaticMarkup(createElement(SaguiViewer, { result }))).not.toContain("as CSV");
+  });
+});
+
 describe("SAGUI regional SED plot", () => {
   it("uses a log flux axis when every flux is positive and a linear one when any flux is zero or negative (SCIENCE-22)", () => {
     const html = render([band("F090W", 0.902, 2e-6), band("F200W", 1.99, 2e-5), band("F444W", 4.42, 3e-4)]);

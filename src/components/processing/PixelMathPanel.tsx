@@ -7,6 +7,7 @@ import { useCompositeStf } from "../../context/CompositeContext";
 import { useCompositeChain } from "../../hooks/useCompositeChain";
 import { chainHoldsOutput, pixelMathTarget } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
+import { pixelMathHistory } from "../../utils/compositeChainHistory";
 import { INPUT_CHANGED_MESSAGE, bustPreviewUrl, useProcessingRun } from "../../hooks/useProcessingRun";
 import { ingestUnlessLoaded } from "../../hooks/useFileIngest";
 import { pixelMathOptionsOf, recordPixelMath, validatePixelMath, type PixelMathSettings } from "../../services/pixelmath";
@@ -390,7 +391,7 @@ export default function PixelMathPanel({
         truncate,
         rescale,
       });
-      onCompositeDone("pixelMath", "PixelMath", res, displayStf);
+      onCompositeDone("pixelMath", "PixelMath", res, displayStf, pixelMathHistory({ expression, truncate, rescale, mask }));
       return {
         mode: "composite",
         res,

@@ -445,7 +445,7 @@ describe("compare formatting", () => {
         p16_delta: -0.061,
         p84_delta: 0.058,
       }),
-    ).toBe("[-inf,0.05) n=1200000 rate 0.01 err n/a delta -0.001 p16..p84 -0.06..+0.06");
+    ).toBe("[-inf,0.05) n=1200000 rate 0.01 err -- delta -0.001 p16..p84 -0.06..+0.06");
     expect(formatCompareBin({ ...bin(30, null, 1.5, 0.05), n: 20 })).toMatch(/^\[30,inf\) n=20 /);
   });
 
@@ -457,15 +457,15 @@ describe("compare formatting", () => {
       "NOT aligned: best dy +3, corr 0.9000, corr at dy 0 0.1234 (next dy -2, 0.850)",
     );
     expect(formatShiftCheck({ best_dy: 0, corr_at_zero: null, corr_best: null, second_dy: 0, second_corr: null, passed: false })).toBe(
-      "NOT aligned: best dy 0, corr n/a, corr at dy 0 n/a (next dy 0, n/a)",
+      "NOT aligned: best dy 0, corr --, corr at dy 0 -- (next dy 0, --)",
     );
   });
 
-  it("formats recall and precision as percentages and n/a when undefined", () => {
+  it("formats recall and precision as percentages and the missing marker when undefined", () => {
     expect(formatConfusion({ tp: 120, fp: 30, fn_: 10, recall: 120 / 130, precision: 0.8 })).toBe(
       "tp 120, fp 30, fn 10, recall 92.3 %, precision 80.0 %",
     );
-    expect(formatConfusion(NO_CONFUSION)).toBe("tp 0, fp 0, fn 0, recall n/a, precision n/a");
+    expect(formatConfusion(NO_CONFUSION)).toBe("tp 0, fp 0, fn 0, recall --, precision --");
   });
 
   it("lists the two faint medians of every amplifier with a null for a missing bin", () => {
@@ -479,7 +479,7 @@ describe("compare formatting", () => {
 
   it("states the share of good pixels the quick slope flagged", () => {
     expect(quickFlaggedShare(comparison())).toBe("0.16 %");
-    expect(quickFlaggedShare(comparison({ good_pixels: 0, quick_flagged_in_good: 0 }))).toBe("n/a");
+    expect(quickFlaggedShare(comparison({ good_pixels: 0, quick_flagged_in_good: 0 }))).toBe("--");
   });
 
   it("turns histogram edges into bin centres", () => {

@@ -167,7 +167,7 @@ export default function DropZone({ onFilesAdded, report = null, children }: Drop
             <span style={{ overflowWrap: "anywhere" }}>
               {[
                 rejected.message,
-                rejected.skipped > 0 ? `${rejected.skipped} file${rejected.skipped > 1 ? "s" : ""} skipped — supported: ${SUPPORTED_EXTENSIONS_LABEL}` : null,
+                rejected.skipped > 0 ? `${rejected.skipped} file${rejected.skipped > 1 ? "s" : ""} skipped; supported: ${SUPPORTED_EXTENSIONS_LABEL}` : null,
                 rejected.calib > 0 ? `${rejected.calib} JWST calibration reference .asdf skipped (not a loadable image)` : null,
               ].filter(Boolean).join(" · ")}
             </span>

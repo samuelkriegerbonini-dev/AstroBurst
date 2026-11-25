@@ -129,6 +129,33 @@ describe("search states", () => {
     expect(visibleBanner(s, 10)?.kind).toBe("server");
   });
 
+  it("says the results on screen are the previous ones when a search for another target fails", () => {
+    const s = run(
+      searched(),
+      { type: "searchStarted", generation: 2, text: "NGC 628", kind: "name", name: "NGC 628", query: null, at: 0 },
+      { type: "searchFailed", generation: 2, error: netErr, at: 10 },
+    );
+    expect(s.results?.rows).toHaveLength(2);
+    expect(visibleBanner(s, 10)?.text).toContain("Showing the previous results for M16.");
+    expect(s.resultsStale).toBe(true);
+    const again = run(s, { type: "searchStarted", generation: 3, text: "NGC 628", kind: "name", name: "NGC 628", query: null, at: 20 }, { type: "nameResolved", generation: 3, resolved: M16, query: QUERY, at: 21 }, { type: "pageLoaded", generation: 3, page: page(ROWS) });
+    expect(again.resultsStale).toBe(false);
+    const same = run(searched(), { type: "searchStarted", generation: 2, text: "M16", kind: "name", name: "M16", query: null, at: 0 }, { type: "searchFailed", generation: 2, error: netErr, at: 10 });
+    expect(visibleBanner(same, 10)?.text).not.toContain("previous results");
+  });
+
+  it("raises a server banner with the status when a mission without a token answers 401", () => {
+    const s = run(
+      searched(),
+      { type: "searchStarted", generation: 2, text: "M17", kind: "name", name: "M17", query: null, at: 0 },
+      { type: "searchFailed", generation: 2, error: { code: "mast_unauthorized", message: "Only authorized users", context: { mission: "jwst", status: 401 } }, at: 10 },
+    );
+    const banner = visibleBanner(s, 10);
+    expect(banner?.kind).toBe("server");
+    expect(banner?.text).toContain("401");
+    expect(s.live.text).toContain("401");
+  });
+
   it("puts a rejected query inline and leaves the region as it was", () => {
     const s = run(
       base(),

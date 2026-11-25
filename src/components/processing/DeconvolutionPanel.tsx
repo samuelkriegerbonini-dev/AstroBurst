@@ -16,6 +16,7 @@ import { useRenderContext } from "../../context/PreviewContext";
 import { useCompositeStf } from "../../context/CompositeContext";
 import { chainHoldsOutput } from "../../utils/processingChain";
 import { COMPOSITE_RUN_KEY, compositeChainHolds } from "../../utils/compositeChain";
+import { deconvHistory } from "../../utils/compositeChainHistory";
 import { DECONV_PROGRESS_EVENT } from "../../shared/types/processing";
 import { COMPOSITE_RESTARTED_NOTICE, channelTriple, compositeModeNotice, describedByIds } from "./compositeProps";
 import type { ChannelTriple, CompositeDeconvolveResult, CompositePanelProps } from "./compositeProps";
@@ -212,7 +213,17 @@ export default function DeconvolutionPanel({
         deringThreshold: params.deringThreshold,
         ...psfRequest(params.psf, psfKernel),
       });
-      onCompositeDone("deconv", RESULT_LABEL, res, chainCall.displayStf);
+      const history = deconvHistory({
+        iterations: params.iterations,
+        psf: params.psf,
+        psfSigma: params.psfSigma,
+        psfSize: enforceOdd(params.psfSize),
+        regularization: params.regularization,
+        deringing: params.deringing,
+        deringThreshold: params.deringThreshold,
+        mask: chainCall.mask,
+      });
+      onCompositeDone("deconv", RESULT_LABEL, res, chainCall.displayStf, history);
       return {
         composite: true as const,
         res,

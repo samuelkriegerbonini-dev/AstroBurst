@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject } from "react";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { romanLockOf, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
-import { moreMenuView, type MoreEntry } from "./logic/missionState";
+import { moreMenuView, notServedTitle, type MoreEntry, type MoreMenuView } from "./logic/missionState";
 import { useNow } from "./state/useNow";
 import type { MastMissionId } from "../../shared/types/mast";
 
 const MENU_ID = "mast-more-menu";
 
 interface MoreMenuListProps {
-  view: { enabled: MoreEntry[]; disabled: MoreEntry[] };
+  view: MoreMenuView;
   onPick: (id: MastMissionId) => void;
   onCheck: (id: MastMissionId) => void;
   listRef?: RefObject<HTMLDivElement | null>;
@@ -21,7 +21,10 @@ function keepFocusInside(e: MouseEvent<HTMLDivElement>) {
 }
 
 export function MoreMenuList({ view, onPick, onCheck, listRef, onKeyDown }: MoreMenuListProps) {
-  const row = (e: MoreEntry) => {
+  const [notServedOpen, setNotServedOpen] = useState(false);
+  const checking = view.notServed.some((e) => e.check === "checking");
+  const notes = view.notServed.map((e) => e.note).filter((note): note is string => !!note);
+  const row = (e: MoreEntry, withCheck = true) => {
     const reasonId = `mast-more-reason-${e.id}`;
     return (
       <div key={e.id} className="ab-mast-missions-row">
@@ -37,7 +40,12 @@ export function MoreMenuList({ view, onPick, onCheck, listRef, onKeyDown }: More
             if (e.enabled) onPick(e.id);
           }}
         >
-          <span className="ab-mast-missions-label">{e.label}</span>
+          <span className="ab-mast-missions-label">
+            {e.label}
+            <span className="ab-mast-missions-status" data-status={e.status}>
+              {e.status}
+            </span>
+          </span>
           {e.reason || e.note ? (
             <span id={reasonId} className="ab-mast-missions-reason">
               {e.reason}
@@ -45,7 +53,7 @@ export function MoreMenuList({ view, onPick, onCheck, listRef, onKeyDown }: More
             </span>
           ) : null}
         </button>
-        {e.check ? (
+        {withCheck && e.check ? (
           <button
             type="button"
             data-check-mission={e.id}
@@ -72,9 +80,43 @@ export function MoreMenuList({ view, onPick, onCheck, listRef, onKeyDown }: More
 
   return (
     <div id={MENU_ID} ref={listRef} data-testid="mast-more-menu" role="group" aria-label="More missions" className="ab-mast-menu ab-mast-missions-menu" onKeyDown={onKeyDown} onMouseDown={keepFocusInside}>
-      {view.enabled.map(row)}
-      {view.enabled.length && view.disabled.length ? <div role="separator" className="ab-mast-missions-sep" /> : null}
-      {view.disabled.map(row)}
+      {view.enabled.map((e) => row(e))}
+      {view.enabled.length && view.disabled.length + view.notServed.length ? <div role="separator" className="ab-mast-missions-sep" /> : null}
+      {view.disabled.map((e) => row(e))}
+      {view.notServed.length ? (
+        <div className="ab-mast-missions-row" data-testid="mast-more-not-served">
+          <button type="button" className="ab-mast-missions-item" aria-expanded={notServedOpen} onClick={() => setNotServedOpen((v) => !v)}>
+            <span className="ab-mast-missions-label">
+              {notServedOpen ? <ChevronDown size={10} aria-hidden="true" /> : <ChevronRight size={10} aria-hidden="true" />}
+              {notServedTitle(view.notServed)}
+            </span>
+            <span className="ab-mast-missions-reason">
+              {view.notServed.map((e) => e.label).join(", ")}
+              {notes.length ? <span className="ab-mast-missions-note">{notes[0]}</span> : null}
+            </span>
+          </button>
+          <button
+            type="button"
+            data-check-missions={view.notServed.map((e) => e.id).join(" ")}
+            aria-disabled={checking}
+            aria-label={checking ? "Checking the missions MAST does not serve" : "Check the missions MAST does not serve again"}
+            className="ab-mast-missions-check"
+            onClick={() => {
+              if (!checking) view.notServed.forEach((e) => onCheck(e.id));
+            }}
+          >
+            {checking ? (
+              <>
+                <Loader2 size={10} aria-hidden="true" className="ab-mast-spin" />
+                Checking…
+              </>
+            ) : (
+              "Check again"
+            )}
+          </button>
+        </div>
+      ) : null}
+      {notServedOpen ? view.notServed.map((e) => row(e, false)) : null}
     </div>
   );
 }

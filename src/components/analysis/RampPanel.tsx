@@ -23,6 +23,7 @@ import { useProgress } from "../../hooks/useProgress";
 import { setIntegration, useRampIntegration } from "../../hooks/useRampStore";
 import { useSpectrum } from "../../hooks/useSpectrumStore";
 import { decodeDqBits } from "../../utils/dqFlags";
+import { MISSING_VALUE } from "../../utils/formatUncertainty";
 import { createFramePublishGate, type FramePublishGate } from "../../utils/cubeNavigation";
 import {
   QSLOPE_ACCURACY_NOTE,
@@ -110,7 +111,7 @@ function errorText(e: unknown): string {
 }
 
 function fixedOrNa(v: number | null | undefined, digits: number): string {
-  return v === null || v === undefined || !Number.isFinite(v) ? "n/a" : v.toFixed(digits);
+  return v === null || v === undefined || !Number.isFinite(v) ? MISSING_VALUE : v.toFixed(digits);
 }
 
 function sameSlopeParams(a: QuickSlopeParams, b: QuickSlopeParams): boolean {

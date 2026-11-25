@@ -32,6 +32,31 @@ fn urlencoding_decode(input: &str) -> String {
 }
 
 #[cfg(feature = "tauri")]
+fn asset_roots(app: &tauri::AppHandle) -> Vec<std::path::PathBuf> {
+    let paths = app.path();
+    let mut roots: Vec<std::path::PathBuf> = [paths.app_data_dir(), paths.app_local_data_dir()]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    roots.extend(crate::infra::net::paths::try_data_root().ok());
+    roots.push(crate::infra::net::paths::cache_root());
+    roots
+}
+
+#[cfg(feature = "tauri")]
+fn read_asset(app: &tauri::AppHandle, path: &str) -> Option<Vec<u8>> {
+    let scope = app.asset_protocol_scope();
+    let config_dir = crate::infra::config::config_dir().ok();
+    let served = crate::infra::app::asset_scope::asset_path_allowed(
+        std::path::Path::new(path),
+        &asset_roots(app),
+        config_dir.as_deref(),
+        |candidate| scope.is_allowed(candidate),
+    )?;
+    std::fs::read(served).ok()
+}
+
+#[cfg(feature = "tauri")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     crate::core::astrometry::catalog_disk::init_from_env();
@@ -44,7 +69,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
 
-        .register_asynchronous_uri_scheme_protocol("asset", |_ctx, request, responder| {
+        .register_asynchronous_uri_scheme_protocol("asset", |ctx, request, responder| {
             let raw_path = request.uri().path().to_string();
             let path = urlencoding_decode(&raw_path);
 
@@ -54,31 +79,28 @@ pub fn run() {
                 path
             };
 
-            if crate::infra::config::is_api_key_file(&path) {
-                let refused = tauri::http::Response::builder()
-                    .status(404)
-                    .header("Cache-Control", "no-store")
-                    .body(Vec::new())
-                    .unwrap();
-                responder.respond(refused);
-                return;
-            }
+            let app = ctx.app_handle().clone();
+            let dev_origin = app.config().build.dev_url.as_ref().map(|url| url.origin().ascii_serialization());
+            let cors_origin = crate::infra::app::asset_scope::allowed_origin(
+                request.headers().get("origin").and_then(|value| value.to_str().ok()),
+                dev_origin.as_deref(),
+            );
 
             std::thread::spawn(move || {
                 const RETRY_DELAYS: &[u64] = &[100, 300, 800];
-                let mut data = std::fs::read(&path);
-                if data.is_err() {
+                let mut data = read_asset(&app, &path);
+                if data.is_none() {
                     for &delay in RETRY_DELAYS {
                         std::thread::sleep(std::time::Duration::from_millis(delay));
-                        data = std::fs::read(&path);
-                        if data.is_ok() {
+                        data = read_asset(&app, &path);
+                        if data.is_some() {
                             break;
                         }
                     }
                 }
 
                 match data {
-                    Ok(bytes) => {
+                    Some(bytes) => {
                         let mime = if path.ends_with(".png") {
                             "image/png"
                         } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
@@ -89,16 +111,16 @@ pub fn run() {
                             "application/octet-stream"
                         };
 
-                        let response = tauri::http::Response::builder()
+                        let mut response = tauri::http::Response::builder()
                             .status(200)
                             .header("Content-Type", mime)
-                            .header("Access-Control-Allow-Origin", "*")
-                            .header("Cache-Control", "no-store, must-revalidate")
-                            .body(bytes)
-                            .unwrap();
-                        responder.respond(response);
+                            .header("Cache-Control", "no-store, must-revalidate");
+                        if let Some(origin) = &cors_origin {
+                            response = response.header("Access-Control-Allow-Origin", origin.as_str()).header("Vary", "Origin");
+                        }
+                        responder.respond(response.body(bytes).unwrap());
                     }
-                    Err(_) => {
+                    None => {
                         let response = tauri::http::Response::builder()
                             .status(404)
                             .header("Cache-Control", "no-store")
@@ -116,7 +138,9 @@ pub fn run() {
                 }
             }
             if let Ok(data_dir) = app.path().app_data_dir() {
-                cmd::output::clear_output_dir(&data_dir);
+                if let Some(owner) = cmd::output::claim_output_at_launch(&data_dir) {
+                    app.manage(owner);
+                }
             }
             #[cfg(feature = "mast")]
             cmd::mast::install(app);

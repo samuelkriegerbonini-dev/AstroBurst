@@ -161,7 +161,7 @@ describe("fluxUnits", () => {
       expect(flambdaCgsToFnuJy(1, lambdaUm), `Jy at ${lambdaUm} um`).toBeNaN();
       expect(fnuJyToFlambdaSiUm(1, lambdaUm), `SI at ${lambdaUm} um`).toBeNaN();
     }
-    expect(MAG_ERR_PER_RELATIVE_FLUX_ERR).toBe(1.085736204758129);
+    expect(MAG_ERR_PER_RELATIVE_FLUX_ERR).toBe(2.5 / Math.LN10);
     expect(abMagErr(1, 0.01)).toBe(MAG_ERR_PER_RELATIVE_FLUX_ERR * 0.01);
     expect(abMagErr(0, 0.01)).toBeNull();
     expect(abMagErr(1, -0.1)).toBeNull();

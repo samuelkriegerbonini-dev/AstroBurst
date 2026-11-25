@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 
-use crate::core::ramp::info::RampInfo;
+use crate::core::metadata::photcal::card_text;
+use crate::core::ramp::info::{card_usize, RampInfo};
 use crate::types::header::HduHeader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,17 +63,6 @@ pub fn make_irs2_mask(n_fast: usize, nrs_norm: usize, nrs_ref: usize, noutputs: 
             }
         })
         .collect())
-}
-
-fn card_usize(header: &HduHeader, key: &str) -> Option<usize> {
-    header.get_i64(key).and_then(|v| usize::try_from(v).ok())
-}
-
-fn card_text(header: &HduHeader, key: &str) -> Option<String> {
-    header
-        .get(key)
-        .map(|s| s.trim().trim_matches('\'').trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 fn check_fast_axis(fast_axis: Option<i64>, reversed: bool, detector: &str) -> Result<()> {
@@ -292,6 +282,7 @@ mod tests {
             irs2: irs2.then_some(Irs2Header { nrs_norm: 16, nrs_ref: 4, noutputs, fast_axis, slow_axis: fast_axis.map(|f| f.signum()) }),
             frame_width: 2048,
             frame_height,
+            intstart: None,
         }
     }
 

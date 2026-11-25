@@ -7,6 +7,9 @@ import LargeView from "./LargeView";
 import ArchiveToast from "./ArchiveToast";
 import ArchiveLiveRegion from "./ArchiveLiveRegion";
 import DownloadQueue from "./DownloadQueue";
+import DownloadReady from "./DownloadReady";
+import { downloadsStore } from "./state/downloadsStore";
+import { setDrawerOpen } from "./state/downloadsController";
 import { archiveStore, useArchiveState } from "./state/archiveStore";
 import { archiveController } from "./state/archiveController";
 import { selectedRow } from "./state/archiveReducer";
@@ -138,10 +141,13 @@ export default function ArchiveRoot({ active, workspaceFile, onSwitchToWorkspace
       const s = archiveStore.getState();
       if (s.large.open) return;
       if (e.key === "Escape") {
-        const layer = innermostLayer({ menuOpen: false, largeOpen: false, drawerOpen: s.detail.narrow && s.detail.drawerOpen, tokenChecking: s.token.checking, searching: !!s.run });
+        const layer = innermostLayer({ menuOpen: false, largeOpen: false, drawerOpen: s.detail.narrow && s.detail.drawerOpen, downloadsOpen: downloadsStore.getState().drawerOpen, tokenChecking: s.token.checking, searching: !!s.run });
         if (layer === "drawer") {
           e.preventDefault();
           ctl.closeDrawer();
+        } else if (layer === "downloads") {
+          e.preventDefault();
+          setDrawerOpen(false);
         } else if (layer === "token") {
           e.preventDefault();
           ctl.cancelTokenCheck();
@@ -212,6 +218,7 @@ export default function ArchiveRoot({ active, workspaceFile, onSwitchToWorkspace
       </div>
       <LargeView state={state} ctl={ctl} onFocusQuery={focusQuery} />
       <ArchiveToast toast={state.toast} ctl={ctl} />
+      <DownloadReady showLabel="Show in Workspace" />
       <DownloadQueue />
       <ArchiveLiveRegion live={state.live} />
     </div>

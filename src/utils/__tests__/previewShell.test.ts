@@ -406,13 +406,16 @@ describe("gpuToggleView", () => {
   });
 
   it("says the CPU viewer is shown after a GPU image load failure", () => {
-    const view = gpuToggleView({ ...onGpu, loadError: "boom" });
+    const view = gpuToggleView({ ...onGpu, loadError: "boom", cpuViewerShown: true });
     expect(view).toEqual({
       state: "failed",
       label: "GPU failed",
-      title: "GPU image load failed: boom — showing the CPU viewer; click to switch to CPU",
+      title: "GPU image load failed: boom. The CPU viewer shows the image; click to switch to CPU",
       tone: "failed",
     });
+    expect(gpuToggleView({ ...onGpu, loadError: "boom" }).title).toBe(
+      "GPU image load failed: boom. The GPU viewer keeps the last image; click to switch to CPU",
+    );
     expect(gpuToggleView({ ...onGpu, loadError: "boom", pngOnlyMono: true }).tone).toBe("failed");
   });
 
@@ -439,9 +442,9 @@ describe("gpuToggleView", () => {
   it("keeps the other titles when the CPU viewer is shown", () => {
     const shown = { ...onGpu, cpuViewerShown: true };
     expect(gpuToggleView({ ...shown, pngOnlyMono: true }).title).toBe(GPU_PNG_ONLY_TOGGLE_TITLE);
-    expect(gpuToggleView({ ...shown, useGpu: false }).title).toBe("Rendering on CPU — click to use GPU");
+    expect(gpuToggleView({ ...shown, useGpu: false }).title).toBe("Rendering on CPU; click to use GPU");
     expect(gpuToggleView({ ...shown, loadError: "boom" }).title).toBe(
-      "GPU image load failed: boom — showing the CPU viewer; click to switch to CPU",
+      "GPU image load failed: boom. The CPU viewer shows the image; click to switch to CPU",
     );
   });
 
@@ -469,11 +472,11 @@ describe("gpuToggleView", () => {
       probing: true,
       useGpu: false,
       available: false,
-      reason: "GPU device lost — using CPU",
+      reason: "GPU device lost; using CPU",
       cpuViewerShown: true,
     };
     expect(gpuToggleView(retrying).title).toBe(GPU_PROBING_CPU_VIEWER_TOGGLE_TITLE);
-    expect(gpuToggleView({ ...retrying, probing: false }).title).toBe("GPU device lost — using CPU — click to retry");
+    expect(gpuToggleView({ ...retrying, probing: false }).title).toBe("GPU device lost; using CPU; click to retry");
     for (const input of [retrying, { ...retrying, available: null }, { ...retrying, useGpu: true, available: null }]) {
       expect(gpuToggleView(input).title).not.toContain("click");
     }
@@ -483,17 +486,17 @@ describe("gpuToggleView", () => {
     expect(gpuToggleView({ ...onGpu, useGpu: false })).toEqual({
       state: "cpu",
       label: "CPU",
-      title: "Rendering on CPU — click to use GPU",
+      title: "Rendering on CPU; click to use GPU",
       tone: "off",
     });
     expect(gpuToggleView({ ...onGpu, useGpu: false, pngOnlyMono: true }).state).toBe("cpu");
   });
 
   it("offers a retry with the reason when the GPU is unavailable", () => {
-    expect(gpuToggleView({ ...onGpu, useGpu: false, available: false, reason: "GPU device lost — using CPU" })).toEqual({
+    expect(gpuToggleView({ ...onGpu, useGpu: false, available: false, reason: "GPU device lost; using CPU" })).toEqual({
       state: "unavailable",
       label: "CPU",
-      title: "GPU device lost — using CPU — click to retry",
+      title: "GPU device lost; using CPU; click to retry",
       tone: "off",
     });
     expect(gpuToggleView({ ...onGpu, useGpu: false, available: false, supported: false, reason: "WebGPU not supported by this browser" }).title).toBe(
@@ -768,9 +771,9 @@ describe("formatPixelValue", () => {
     expect(formatPixelValue(1234567.5)).toBe("1.235e+6");
   });
 
-  it("shows a dash for a missing or non-finite value", () => {
-    expect(formatPixelValue(null)).toBe("—");
-    expect(formatPixelValue(Number.NaN)).toBe("—");
+  it("shows the missing value marker for a missing or non-finite value", () => {
+    expect(formatPixelValue(null)).toBe("--");
+    expect(formatPixelValue(Number.NaN)).toBe("--");
   });
 });
 

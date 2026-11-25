@@ -1,6 +1,7 @@
-import type { MastError, MastTokenStatus } from "../../../shared/types/mast";
+import type { MastError, MastMission, MastTokenStatus } from "../../../shared/types/mast";
 import { ROMAN_CONFIRMED_TEXT, ROMAN_NO_ACCESS_TEXT, TOKEN_EXPIRY_TEXT, TOKEN_REJECTED_TEXT } from "./errorCopy";
 import { clockText } from "./missionState";
+import { downloadsOffered } from "./downloadView";
 
 export type RomanPanelState = "none" | "checking" | "authorized" | "not-authorized" | "rejected" | "expired" | "unreachable";
 export type RomanAction = "open-page" | "check" | "replace" | "remove" | "cancel" | "try-again" | "manage" | "collapse" | "cancel-replace";
@@ -14,12 +15,14 @@ export interface RomanPanelInput {
   replacing: boolean;
   expanded: boolean;
   checkedOn: string;
+  capabilities?: MastMission["capabilities"];
 }
 
 export interface RomanPanelView {
   layout: "compact" | "full";
   title: string;
   intro: string | null;
+  offer: string | null;
   needs: string[] | null;
   tokenLine: string | null;
   message: string | null;
@@ -61,6 +64,18 @@ export const ACTION_LABELS: Record<RomanAction, string> = {
 
 const TOKEN_LINE = "Token on this computer: ";
 const MANAGE: RomanAction[] = ["check", "replace", "remove"];
+
+export function romanOffer(capabilities: MastMission["capabilities"] | undefined): string | null {
+  if (!capabilities || !capabilities.search) return null;
+  const parts = ["searches Roman"];
+  if (capabilities.images) parts.push("shows previews");
+  if (capabilities.products) parts.push("lists the products");
+  const done = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  if (!capabilities.products) return `Once access is confirmed, AstroBurst ${done}.`;
+  return downloadsOffered({ capabilities })
+    ? `Once access is confirmed, AstroBurst ${done}, and downloads them with the same token.`
+    : `Once access is confirmed, AstroBurst ${done}; downloads are not offered yet.`;
+}
 
 export function romanIntro(checkedOn: string): string {
   return `MAST answers Roman searches only for authorized users. Without a token MAST replies "Only authorized users can make search API calls" (HTTP 401, checked ${checkedOn}).`;
@@ -139,6 +154,7 @@ export function romanPanelView(input: RomanPanelInput): RomanPanelView {
     layout: compact ? "compact" : "full",
     title: ROMAN_PANEL_TITLE,
     intro: state === "authorized" ? null : romanIntro(input.checkedOn),
+    offer: state === "authorized" ? null : romanOffer(input.capabilities),
     needs: present || state === "authorized" ? null : ROMAN_NEEDS,
     tokenLine: tokenLine(input),
     message,

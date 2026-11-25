@@ -8,7 +8,7 @@ import { fileStore } from "../useFileStore";
 import { refreshOverwrittenFiles } from "../refreshOverwrittenFiles";
 import { registerFileIngest } from "../useFileIngest";
 import { fileKeyOf } from "../../context/PreviewContext";
-import { pixelSourceVersion } from "../../utils/pixelSource";
+import { pixelSourceVersion, scientificInputRevisionOf } from "../../utils/pixelSource";
 import type { ProcessedFile, ProcessResult } from "../../shared/types";
 
 function loaded(name: string, path: string, median: number): string {
@@ -73,13 +73,45 @@ describe("refreshOverwrittenFiles", () => {
     expect(processFitsFullMock).not.toHaveBeenCalled();
   });
 
-  it("keeps the old state when the reload fails", async () => {
+  it("marks a rewritten file whose reload fails as failed with the reason, so results keyed to the old data stop looking current", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const output = loaded("M42_arcsinh.fits", "C:/out/M42_arcsinh.fits", 0.2);
+    fileStore.selectFile(output);
+    const before = fileStore.getFile(output) as ProcessedFile;
+    const selectedVersion = fileStore.getSelectedVersion();
     processFitsFullMock.mockRejectedValue(new Error("locked"));
+
     await refreshOverwrittenFiles({ fits_path: "C:/out/M42_arcsinh.fits" });
-    expect(fileStore.getFile(output)?.result?.stats?.median).toBe(0.2);
+
+    const after = fileStore.getFile(output) as ProcessedFile;
+    expect(after.status).toBe("error");
+    expect(after.error).toBe("A step rewrote this file and reloading it failed: locked");
+    expect(scientificInputRevisionOf(after)).not.toBe(scientificInputRevisionOf(before));
+    expect(pixelSourceVersion(after, null, 0)).not.toBe(pixelSourceVersion(before, null, 0));
+    expect(fileStore.getSelectedVersion()).toBeGreaterThan(selectedVersion);
+    expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 1 });
+    expect(fileStore.getDoneFiles()).toEqual([]);
     warn.mockRestore();
+  });
+
+  it("loads a file again when a later step rewrites it after a failed reload", async () => {
+    const kicks: string[][] = [];
+    const unregister = registerFileIngest((files) => kicks.push(files.map((f) => f.path)));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const output = loaded("M42_arcsinh.fits", "C:/out/M42_arcsinh.fits", 0.2);
+      processFitsFullMock.mockRejectedValueOnce(new Error("locked"));
+      await refreshOverwrittenFiles({ fits_path: "C:/out/M42_arcsinh.fits" });
+
+      await refreshOverwrittenFiles({ fits_path: "C:/out/M42_arcsinh.fits" });
+
+      expect(fileStore.getFile(output)).toMatchObject({ status: "queued", error: null });
+      expect(fileStore.getStats()).toMatchObject({ total: 1, done: 0, failed: 0 });
+      expect(kicks).toEqual([["C:/out/M42_arcsinh.fits"]]);
+    } finally {
+      warn.mockRestore();
+      unregister();
+    }
   });
 
   it("requeues a written output whose row errored and kicks the queue, without a second row", async () => {

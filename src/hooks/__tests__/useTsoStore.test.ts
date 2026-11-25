@@ -385,3 +385,36 @@ describe("TsoStore curves", () => {
     lightCurveStore.remove("other");
   });
 });
+
+describe("TsoStore bounds and rewritten files", () => {
+  it("keeps the curves, requests, drafts and extra documents of the last groups only", async () => {
+    const kept = 2 * MAX_TSO_SETS;
+    const store = new TsoStore(vi.fn<OpenReader>(), vi.fn<CurvesReader>().mockResolvedValue(CURVES));
+    store.patchDraft("g0", { binsText: "1-2" });
+    store.setExtraDocs("g0", [whtltDoc()]);
+    await store.compute("g0", ["a"], NRS1, { mode: "pipeline" });
+    for (let k = 1; k <= kept; k += 1) await store.compute(`g${k}`, ["a"], NRS1, { mode: "pipeline" });
+    expect(store.getCurves("g0")).toBe(EMPTY_TSO_CURVES);
+    expect(store.getRequest("g0")).toBeNull();
+    expect(store.getDraft("g0")).toBe(DEFAULT_TSO_DRAFT);
+    expect(store.getCurves("g1").result).toBe(CURVES);
+    expect(store.getCurves(`g${kept}`).result).toBe(CURVES);
+    for (let k = 0; k <= kept; k += 1) lightCurveStore.remove(`g${k}`);
+  });
+
+  it("reads a set again when one of its files is rewritten, keeping the ticked segments", async () => {
+    const open = vi.fn<OpenReader>().mockResolvedValue(OPEN);
+    const store = new TsoStore(open, vi.fn<CurvesReader>());
+    await store.open("k", ["a", "b"]);
+    await store.open("other", ["c"]);
+    store.setChosen("k", ["b"]);
+    const reread = { ...OPEN };
+    open.mockResolvedValueOnce(reread);
+    await store.reread("b");
+    expect(open).toHaveBeenCalledTimes(3);
+    expect(open.mock.calls[2][0]).toEqual(["a", "b"]);
+    expect(store.getSet("k").result).toBe(reread);
+    expect(store.getSet("other").result).toBe(OPEN);
+    expect(store.getChosen("k")).toEqual(["b"]);
+  });
+});

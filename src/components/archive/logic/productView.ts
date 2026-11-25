@@ -2,7 +2,7 @@ import type { MastPreset, MastProduct, MastProductClass, MastProductList } from 
 import { presetProducts } from "./presetView";
 
 export type ProductMode = "opens" | "everything";
-export type SectionKey = "preset" | "opens" | "catalog" | "preview" | "association" | "auxiliary" | "other" | "hidden";
+export type SectionKey = "preset" | "opens" | "intermediate" | "catalog" | "preview" | "association" | "auxiliary" | "other" | "hidden";
 
 export interface ProductSection {
   key: SectionKey;
@@ -67,6 +67,36 @@ function plural(n: number, one: string, many: string): string {
 }
 
 const OPENS: readonly MastProductClass[] = ["image", "cube", "spectrum", "ramp"];
+const INTERMEDIATE_SUFFIXES: ReadonlySet<string> = new Set(["uncal", "rate", "rateints", "ramp", "trapsfilled", "dark", "ima", "raw", "spt"]);
+
+export const SUFFIX_MEANINGS: Readonly<Record<string, string>> = {
+  uncal: "uncalibrated ramp",
+  rate: "count-rate image of one exposure",
+  rateints: "count-rate image per integration",
+  cal: "calibrated exposure",
+  calints: "calibrated exposure per integration",
+  crf: "calibrated exposure with outliers flagged",
+  i2d: "resampled and combined image",
+  s2d: "rectified 2-D spectrum",
+  s3d: "spectral cube",
+  x1d: "extracted 1-D spectrum",
+  x1dints: "1-D spectra per integration",
+  c1d: "combined 1-D spectrum",
+  flt: "calibrated exposure",
+  flc: "calibrated exposure with CTE correction",
+  drz: "drizzled image",
+  drc: "drizzled image with CTE correction",
+  raw: "raw exposure",
+  ima: "intermediate exposure",
+};
+
+export function isIntermediate(product: Pick<MastProduct, "cls" | "suffix">): boolean {
+  return product.cls === "ramp" || INTERMEDIATE_SUFFIXES.has(product.suffix.toLowerCase());
+}
+
+export function isScience(product: Pick<MastProduct, "cls" | "suffix">): boolean {
+  return OPENS.includes(product.cls) && !isIntermediate(product);
+}
 const NOUNS: Record<string, [string, string]> = {
   image: ["image", "images"],
   cube: ["cube", "cubes"],
@@ -129,9 +159,23 @@ export function productView(list: MastProductList, mode: ProductMode, showHidden
   const focused = picked.length > 0;
   if (focused && preset) sections.push(presetSection(preset, picked));
   const rest = list.products.filter((p) => !picked.includes(p));
-  const opens = rest.filter((p) => OPENS.includes(p.cls));
+  const opens = rest.filter(isScience);
   if (opens.length) {
-    sections.push({ key: "opens", title: "Opens in the app", detail: opensDetail(opens), note: null, classes: [...OPENS], products: opens, count: opens.length, bytes: sum(opens), expanded: everything || !focused });
+    sections.push({ key: "opens", title: "Science files", detail: opensDetail(opens), note: null, classes: [...OPENS], products: opens, count: opens.length, bytes: sum(opens), expanded: everything || !focused });
+  }
+  const intermediate = rest.filter((p) => OPENS.includes(p.cls) && isIntermediate(p));
+  if (intermediate.length) {
+    sections.push({
+      key: "intermediate",
+      title: "Intermediate files",
+      detail: opensDetail(intermediate),
+      note: "earlier pipeline stages, such as rate and uncal",
+      classes: [...OPENS],
+      products: intermediate,
+      count: intermediate.length,
+      bytes: sum(intermediate),
+      expanded: everything,
+    });
   }
   for (const spec of SECTIONS) {
     const products = rest.filter((p) => spec.classes.includes(p.cls));
@@ -183,10 +227,60 @@ export const CLASS_LABELS: Readonly<Record<MastProductClass, string>> = {
 };
 
 export function productLabel(product: Pick<MastProduct, "cls" | "suffix" | "filename">): string {
+  const suffix = product.suffix.trim().toLowerCase();
+  if (OPENS.includes(product.cls) && suffix) return suffix;
   if (product.cls !== "catalog") return CLASS_LABELS[product.cls];
   if (product.suffix === "whtlt" || product.filename.toLowerCase().endsWith("_whtlt.ecsv")) return "Light curve";
   if (product.suffix === "segm") return "Segmentation map";
   return CLASS_LABELS.catalog;
+}
+
+export function productLabelTitle(product: Pick<MastProduct, "cls" | "suffix">): string {
+  const meaning = SUFFIX_MEANINGS[product.suffix.trim().toLowerCase()];
+  return meaning ? `${CLASS_LABELS[product.cls]}: ${meaning}` : CLASS_LABELS[product.cls];
+}
+
+export function scienceSelection(view: ProductView, refusalOf: (product: MastProduct) => string | null): MastProduct[] {
+  const preset = view.sections.find((s) => s.key === "preset");
+  const source = preset ? preset.products : (view.sections.find((s) => s.key === "opens")?.products ?? []);
+  return source.filter((p) => refusalOf(p) === null);
+}
+
+export interface ProductExtras {
+  jdavizUri: string | null;
+  calibrationVersion: string | null;
+  crdsVersion: string | null;
+}
+
+function text(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export function calibrationOf(product: MastProduct): Record<string, unknown> | null {
+  const value = (product as MastProduct & { calibration?: unknown }).calibration;
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+export function productExtras(product: MastProduct): ProductExtras {
+  const raw = product as MastProduct & Record<string, unknown>;
+  const calibration = calibrationOf(product);
+  return {
+    jdavizUri: text(raw.jdavizUri),
+    calibrationVersion: text(calibration?.calibrationSoftwareVersion),
+    crdsVersion: text(calibration?.crdsContext),
+  };
+}
+
+export function versionText(extras: ProductExtras): string | null {
+  const parts = [extras.calibrationVersion ? `calibration ${extras.calibrationVersion}` : null, extras.crdsVersion ? `CRDS ${extras.crdsVersion}` : null].filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+}
+
+export function copyJdavizUris(products: readonly MastProduct[]): string {
+  return products
+    .map((p) => productExtras(p).jdavizUri)
+    .filter((uri): uri is string => uri !== null)
+    .join("\n");
 }
 
 export function shortFilename(filename: string, datasetId: string): string {

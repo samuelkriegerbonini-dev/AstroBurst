@@ -101,6 +101,7 @@ export interface ForcedCell {
   flux_total_jy: number | null;
   mag_ab: number | null;
   mag_ab_err: number | null;
+  mag_ab_err_corr?: number | null;
   upper_limit_jy: number | null;
   upper_limit_ab: number | null;
   snr: number | null;

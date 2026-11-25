@@ -35,6 +35,7 @@ import { hooks } from "../../../test/hookRuntime";
 const { default: CatalogPanel } = await import("../CatalogPanel");
 const { default: TargetsPanel } = await import("../TargetsPanel");
 const { default: CrossMatchPlots } = await import("../CrossMatchPlots");
+const { default: StaleResultNote } = await import("../StaleResultNote");
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 
@@ -97,6 +98,25 @@ describe("CatalogPanel Saved notice", () => {
   afterEach(() => {
     hooks.mount();
     vi.useRealTimers();
+  });
+
+  it("marks the cone list as stale after the radius or the G limit is edited", async () => {
+    const staleNotes = (tree: ReactNode): number => {
+      if (Array.isArray(tree)) return tree.reduce((n: number, t: ReactNode) => n + staleNotes(t), 0);
+      if (!isValidElement<Props>(tree)) return 0;
+      return (tree.type === StaleResultNote ? 1 : 0) + staleNotes(tree.props.children);
+    };
+    const typeIn = (title: string, text: string) =>
+      (elements(show()).find((p) => p.title === title)!.onChange as (value: string) => void)(text);
+    await searched();
+    expect(staleNotes(show())).toBe(0);
+    typeIn("Cone radius in arcmin; blank uses half the image diagonal", "5");
+    expect(staleNotes(show())).toBe(1);
+    typeIn("Cone radius in arcmin; blank uses half the image diagonal", "");
+    expect(staleNotes(show())).toBe(0);
+    const limit = elements(show()).find((p) => p.placeholder === "18");
+    (limit!.onChange as (value: string) => void)("16");
+    expect(staleNotes(show())).toBe(1);
   });
 
   it("cancels the notice timer when the panel closes", async () => {
@@ -372,6 +392,24 @@ describe("CatalogPanel cross-match", () => {
     (field!.onChange as (text: string) => void)("6");
     await crossMatched(first);
     expect(backend.crossMatch.mock.calls[1]).toEqual([CALIBRATED, expect.objectContaining({ apertureRadius: 6 })]);
+  });
+
+  it("marks the match as stale after its aperture changes and refetches a same-list cone searched with other parameters", async () => {
+    const isStaleNote = (tree: ReactNode): boolean =>
+      Array.isArray(tree) ? tree.some(isStaleNote) : isValidElement<Props>(tree) && (tree.type === StaleResultNote || isStaleNote(tree.props.children));
+    await crossMatched(first);
+    expect(isStaleNote(render(first))).toBe(false);
+    (fieldLabelled(elements(render(first)), "Aperture r (px)")!.onChange as (text: string) => void)("6");
+    expect(isStaleNote(render(first))).toBe(true);
+    (fieldLabelled(elements(render(first)), "Aperture r (px)")!.onChange as (text: string) => void)("");
+    expect(isStaleNote(render(first))).toBe(false);
+    (elements(render(first)).find((p) => p.label === "Same Gaia list as the search")!.onChange as (on: boolean) => void)(true);
+    (fieldLabelled(elements(render(first)), "Radius (arcmin)")!.onChange as (text: string) => void)("5");
+    const conesBefore = backend.cone.mock.calls.length;
+    await crossMatched(first);
+    await vi.waitFor(() => expect(backend.cone.mock.calls.length).toBe(conesBefore + 1));
+    expect(backend.cone.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ radiusArcmin: 5 }));
+    expect(isStaleNote(render(first))).toBe(false);
   });
 
   it("refuses an aperture radius outside 2 to 60 px with the range hint", () => {

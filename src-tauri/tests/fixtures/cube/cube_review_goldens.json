@@ -1,0 +1,203 @@
+{
+  "generator": "scripts/oracle/cube_review_goldens.py",
+  "python": "3.13.17",
+  "astropy": "8.0.2",
+  "photutils": "3.1.1",
+  "numpy": "2.5.4",
+  "scipy": "1.18.1",
+  "seed": 20261125,
+  "integrated_units": [
+    {
+      "bunit": "MJy/sr",
+      "factor": "km s-1",
+      "written": "MJy sr-1 km s-1",
+      "parsed": "MJy km / (s sr)",
+      "equals_intended": true
+    },
+    {
+      "bunit": "Jy/beam",
+      "factor": "km s-1",
+      "written": "Jy beam-1 km s-1",
+      "parsed": "Jy km / (beam s)",
+      "equals_intended": true
+    },
+    {
+      "bunit": "Jy",
+      "factor": "km s-1",
+      "written": "Jy km s-1",
+      "parsed": "Jy km / s",
+      "equals_intended": true
+    },
+    {
+      "bunit": "K",
+      "factor": "km s-1",
+      "written": "K km s-1",
+      "parsed": "K km / s",
+      "equals_intended": true
+    },
+    {
+      "bunit": "uJy/arcsec2",
+      "factor": "km s-1",
+      "written": "uJy arcsec-2 km s-1",
+      "parsed": "km uJy / (s arcsec2)",
+      "equals_intended": true
+    },
+    {
+      "bunit": "MJy/sr",
+      "factor": "chan",
+      "written": "MJy sr-1 chan",
+      "parsed": "MJy chan / sr",
+      "equals_intended": true
+    },
+    {
+      "bunit": "Jy/beam",
+      "factor": "chan",
+      "written": "Jy beam-1 chan",
+      "parsed": "Jy chan / beam",
+      "equals_intended": true
+    },
+    {
+      "bunit": "Jy",
+      "factor": "chan",
+      "written": "Jy chan",
+      "parsed": "Jy chan",
+      "equals_intended": true
+    }
+  ],
+  "legacy_units": [
+    {
+      "written": "MJy/sr km/s",
+      "parsed": "MJy / (km s sr)"
+    },
+    {
+      "written": "Jy/beam km/s",
+      "parsed": "Jy / (beam km s)"
+    },
+    {
+      "written": "MJy/sr x channels",
+      "parsed": "does not parse: 'MJy/sr x channels' did not parse as fits unit: At col 7, Unit 'x' not supported by the FITS standard.  If this is meant to be a custom unit, define it with 'u.def_unit'. To have it recognized inside a file reader or other code, enable it with 'u.add_enabled_units'. For details, see https://docs.astropy.org/en/latest/units/combining_and_defining.html"
+    }
+  ],
+  "moment_two_bias": [
+    {
+      "peak_snr": 30.0,
+      "channels": 25,
+      "window_channels": 20,
+      "pixels": 4000,
+      "channel_kms": 40.0,
+      "true_sigma_kms": 40.0,
+      "threshold_sigma": 2.0,
+      "median_m2_positive_weights_kms": 103.91326193625046,
+      "median_m2_thresholded_kms": 39.17189830517198,
+      "median_noise_estimate": 0.9884545038385495
+    },
+    {
+      "peak_snr": 30.0,
+      "channels": 11,
+      "window_channels": 20,
+      "pixels": 4000,
+      "channel_kms": 40.0,
+      "true_sigma_kms": 40.0,
+      "threshold_sigma": 2.0,
+      "median_m2_positive_weights_kms": 47.43857780896951,
+      "median_m2_thresholded_kms": 38.72095193015397,
+      "median_noise_estimate": 0.9863894461468241
+    }
+  ],
+  "line_fit_coverage_without_err": {
+    "trials": 4000,
+    "fitted": 4000,
+    "line_channels": 5,
+    "window_channels_each_side": 25,
+    "peak_snr": 30.0,
+    "fraction_beyond_3_sigma_formal_errors": 0.09525,
+    "fraction_beyond_3_sigma_absolute_errors_floored": 0.00425,
+    "normal_expectation": 0.0026997960632601866
+  },
+  "float32_wave_tab": [
+    {
+      "first": 4.9,
+      "step": 0.0008,
+      "count": 300,
+      "median_step": 0.0008001327514648438,
+      "endpoint_step": 0.000800000385297182,
+      "max_deviation_over_step_with_median_step": 0.04946364719904649,
+      "max_deviation_over_step_with_endpoint_step": 0.0005282683366680736
+    },
+    {
+      "first": 4.9,
+      "step": 0.0008,
+      "count": 60,
+      "median_step": 0.0008001327514648438,
+      "endpoint_step": 0.0007999953577073953,
+      "max_deviation_over_step_with_median_step": 0.010131108462455305,
+      "max_deviation_over_step_with_endpoint_step": 0.0004243067128184577
+    }
+  ],
+  "lsf_widths": [
+    {
+      "sigma_inst_kms": 60.0,
+      "source_sigma_kms": 100.0,
+      "redshift": 0.5,
+      "source_sigma_corr_kms": 80.0,
+      "observer_sigma_corr_kms": 120.0,
+      "observer_sigma_corr_before_the_fix_kms": 137.4772708486752
+    },
+    {
+      "sigma_inst_kms": 120.0,
+      "source_sigma_kms": 100.0,
+      "redshift": 0.5,
+      "source_sigma_corr_kms": null,
+      "observer_sigma_corr_kms": null,
+      "observer_sigma_corr_before_the_fix_kms": 90.0
+    },
+    {
+      "sigma_inst_kms": 47.152,
+      "source_sigma_kms": 92.862,
+      "redshift": 3.5,
+      "source_sigma_corr_kms": 80.00024962461053,
+      "observer_sigma_corr_kms": 360.0011233107474,
+      "observer_sigma_corr_before_the_fix_kms": 415.2102449807808
+    }
+  ],
+  "redshifted_moment": {
+    "rest_um": 0.656461,
+    "redshift": 0.5,
+    "source_sigma_kms": 100.0,
+    "sigma_um": 0.00032845772924681115,
+    "m2_source_frame_kms": 100.0,
+    "m2_against_the_laboratory_rest_kms": 150.0,
+    "m1_against_the_laboratory_rest_kms": 149896.229
+  },
+  "real_g395h_cube": {
+    "file": "jw01266-o005_t001_nirspec_g395h-f290lp_s3d.fits",
+    "shape_zyx": [
+      3610,
+      55,
+      53
+    ],
+    "region": {
+      "x": 18.0,
+      "y": 32.0,
+      "r": 3.0,
+      "weights": "photutils CircularAperture, method exact"
+    },
+    "aperture_spaxels": 45,
+    "aperture_weight": 28.274333882308138,
+    "spaxels_without_data_in_any_channel": 0,
+    "kept_weight": 28.274333882308134,
+    "channels_with_incomplete_aperture_and_a_finite_sum": 106,
+    "channels_without_any_aperture_spaxel": 61,
+    "least_covered_channel": 1867,
+    "least_covered_channel_coverage": 0.00028091918666535003,
+    "coverage_of_channel_1887": 0.5530516476972985,
+    "moment_range": [
+      1769,
+      1786
+    ],
+    "moment_pixels_with_data": 779,
+    "moment_pixels_with_every_channel": 755,
+    "moment_pixels_with_partial_coverage": 24,
+    "moment_fewest_channels": 4
+  }
+}

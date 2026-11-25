@@ -177,8 +177,8 @@ export default function ConfigPanel() {
       setApiUrlDraft(cfg.astrometry_api_url ?? "");
       setDataDirDraft(cfg.data_dir_override ?? "");
       setQuotaDraft(decimalDraftText(cfg.mast_quota_gb));
-      if (keyResult?.key) {
-        setApiKeyMasked(keyResult.key.slice(0, 4) + "..." + keyResult.key.slice(-4));
+      if (keyResult?.stored) {
+        setApiKeyMasked(keyResult.hint ?? "saved");
         setApiKey("");
       } else {
         setApiKeyMasked(null);
@@ -201,7 +201,8 @@ export default function ConfigPanel() {
     setError(null);
     try {
       await saveApiKey(apiKey.trim(), "astrometry");
-      setApiKeyMasked(apiKey.slice(0, 4) + "..." + apiKey.slice(-4));
+      const saved = await getApiKey("astrometry").catch(() => null);
+      setApiKeyMasked(saved?.stored ? (saved.hint ?? "saved") : null);
       setApiKey("");
       setSaveStatus("success");
       setTimeout(() => setSaveStatus("idle"), 2000);
@@ -417,7 +418,7 @@ export default function ConfigPanel() {
                 className="w-full bg-zinc-900 border border-zinc-700/50 rounded-md px-3 py-1.5 text-[11px] font-mono text-zinc-300 focus:border-teal-500/50"
               />
               <p className="text-[10px] text-zinc-600 mt-1">
-                Must be an https:// URL — the API key is sent to this host.
+                Must be an https:// URL: the API key is sent to this host.
               </p>
             </div>
 
@@ -489,7 +490,7 @@ export default function ConfigPanel() {
             )}
             {isOverCap(storageInfo) && (
               <span className="text-[10px] text-amber-400">
-                Over the size limit. The limit is not enforced automatically — Clean up removes the oldest outputs that
+                Over the size limit. The limit is not enforced automatically. Clean up removes the oldest outputs that
                 no loaded file, processed result or wizard step still uses.
               </span>
             )}
@@ -513,7 +514,7 @@ export default function ConfigPanel() {
             }}
           >
             <Trash2 size={12} />
-            {cleanArmed ? "Confirm — deletes oldest unused outputs" : "Clean up"}
+            {cleanArmed ? "Confirm: deletes oldest unused outputs" : "Clean up"}
           </button>
         </div>
       </div>

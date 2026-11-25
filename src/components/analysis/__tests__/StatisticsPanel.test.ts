@@ -14,7 +14,7 @@ vi.mock("../../../services/statistics", () => ({ computeStatistics: backend.comp
 
 import { hooks } from "../../../test/hookRuntime";
 import StatisticsPanel from "../StatisticsPanel";
-import { STATISTIC_ROWS, formatStatistic, statisticValue } from "../../../utils/statisticsUnits";
+import { EMPTY_SELECTION_REASON, STATISTIC_ROWS, formatStatistic, statisticValue } from "../../../utils/statisticsUnits";
 
 const STATS: ChannelStatistics = {
   count: 5, total: 6, fraction: 5 / 6, mean: 22, median: 3, avg_dev: 20.2, mad: 1.25, bwmv_sqrt: 1.5, min: 1, max: 100,
@@ -104,6 +104,26 @@ describe("StatisticsPanel table (UX-35)", () => {
     expect(text.startsWith("# software: AstroBurst")).toBe(true);
     for (const part of ["# file: 502nmos.fits", "# region: full frame", "# bunit: MJy/sr", "# display_unit: raw", "statistic,K"]) expect(text).toContain(part);
     expect(text).not.toContain("unit,raw");
+  });
+
+  it("shows no numbers and the reason for a selection with no usable pixel, on screen and in the CSV", async () => {
+    const empty: ChannelStatistics = {
+      ...STATS, count: 0, fraction: 0, mean: 0, median: 0, avg_dev: 0, mad: 0, bwmv_sqrt: 0, min: 0, max: 0, sum: 0, variance: 0, std_dev: 0, nan_count: 6,
+    };
+    backend.compute.mockResolvedValue({ ...RESULT, statistics: empty });
+    backend.clipboard.mockClear();
+    const tree = await computed();
+    const rows = elements(tree).filter((p) => typeof p["data-statistic"] === "string");
+    const cell = (key: string) => textOf(rows.find((row) => row["data-statistic"] === key)!.children as ReactNode);
+    for (const key of ["mean", "median", "std_dev", "min", "max", "sum"]) expect(cell(key), key).toBe(`${STATISTIC_ROWS.find((r) => r.key === key)!.label}--`);
+    expect(cell("count")).toBe("count0");
+    const status = elements(tree).find((p) => p["data-empty-selection"] !== undefined);
+    expect(textOf(status?.children as ReactNode)).toBe(EMPTY_SELECTION_REASON);
+    (elements(show()).find((p) => p.title === "Copy the table as CSV")!.onClick as () => void)();
+    const text = String(backend.clipboard.mock.calls[0][0]);
+    expect(text).toContain(`# empty_selection: ${EMPTY_SELECTION_REASON}`);
+    expect(text).toContain("\nmean,\n");
+    expect(text).not.toContain("mean,0");
   });
 
   it("says that exact zeros are left out", async () => {

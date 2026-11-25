@@ -287,11 +287,11 @@ export function getGpuSingleton(): Promise<GpuResources | null> {
         const error = (e as GPUUncapturedErrorEvent).error;
         console.error("[AstroBurst] WebGPU uncaptured error:", error);
         if (error instanceof GPUValidationError) return;
-        handleGpuLost(generation, "uncaptured error", "GPU error — using CPU");
+        handleGpuLost(generation, "uncaptured error", "GPU error; using CPU");
       });
 
       device.lost.then((info) => {
-        handleGpuLost(generation, `device lost: ${info?.reason ?? "unknown"}`, "GPU device lost — using CPU");
+        handleGpuLost(generation, `device lost: ${info?.reason ?? "unknown"}`, "GPU device lost; using CPU");
       });
 
       _gpuSingleton = { device, pipeline, rgbPipeline, format };

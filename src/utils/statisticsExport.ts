@@ -11,6 +11,7 @@ export interface StatisticsCsvInput {
   dqGap: string | null;
   noiseMethod: string | null;
   exportedUtc: string;
+  emptySelection?: string | null;
 }
 
 const STATISTICS_LINE_END = "\n";
@@ -20,6 +21,7 @@ export function statisticsClipboardCsv(input: StatisticsCsvInput): string {
   if (input.dqExcluded !== null) entries.push(["dq_excluded", input.dqExcluded]);
   if (input.dqGap !== null) entries.push(["dq_exclusion", `requested but not applied: ${input.dqGap}`]);
   if (input.noiseMethod !== null) entries.push(["noise_method", input.noiseMethod]);
+  if (input.emptySelection) entries.push(["empty_selection", input.emptySelection]);
   entries.push(["bunit", input.bunit], ["display_unit", input.displayUnit]);
   return withProvenance(provenanceLines(entries), input.table, STATISTICS_LINE_END);
 }

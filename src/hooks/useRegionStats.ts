@@ -191,7 +191,7 @@ export function useRegionStats(
     setMeasured(null);
     setNotes(NO_NOTES);
     setUnits(NO_UNITS);
-  }, [filePath]);
+  }, [filePath, runKey]);
 
   useEffect(() => {
     if (!filePath || regions.length === 0) {

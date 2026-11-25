@@ -3,6 +3,7 @@ import type { SaguiBand, SaguiInputInfo } from "../../shared/types/sagui";
 import { pixelScaleText } from "../../utils/coordFormat";
 import { RESOLUTION_LIMITS, resolutionRequest, saguiRegionBudget, significant, type PsfChoice } from "../../utils/resolutionText";
 import { isFiniteNumber } from "../../utils/values";
+import { MATCHED_FWHM_TOLERANCE } from "../cubeprep/cubePrepModel";
 
 export interface RegionBudgetText {
   text: string;
@@ -45,6 +46,33 @@ function bandPsfLine(band: SaguiBand): string {
 
 export function bandPsfLines(input: SaguiInputInfo): string[] | null {
   return input.bands.some(statesPsf) ? input.bands.map(bandPsfLine) : null;
+}
+
+function statedFwhm(band: SaguiBand): number {
+  return band.psf_fwhm_arcsec ?? 0;
+}
+
+function signedPercent(change: number): string {
+  return `${change > 0 ? "+" : "-"}${Math.abs(100 * change).toFixed(1)} %`;
+}
+
+export function psfMismatchText(input: SaguiInputInfo, psfTarget: string): string | null {
+  const stated = input.bands.filter(statesPsf);
+  if (stated.length < 2) return null;
+  const named = psfTarget.trim() !== "";
+  const target = named ? targetBand(input, psfTarget) : stated.reduce((widest, band) => (statedFwhm(band) > statedFwhm(widest) ? band : widest));
+  if (target === null || !statesPsf(target)) return null;
+  const misses = stated
+    .filter((band) => band !== target)
+    .map((band) => ({ filter: band.filter, change: statedFwhm(band) / statedFwhm(target) - 1 }))
+    .filter(({ change }) => Math.abs(change) > MATCHED_FWHM_TOLERANCE)
+    .sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+  if (misses.length === 0) return null;
+  const list = `${misses.map(({ filter, change }) => `${filter} ${signedPercent(change)}`).join(", ")} (tolerance ${Math.round(100 * MATCHED_FWHM_TOLERANCE)} %)`;
+  const reference = `${target.filter} (${significant(statedFwhm(target), 4)} arcsec)`;
+  return named
+    ? `PSF not matched to ${reference}: ${list}. Regional colours mix resolutions; rebuild the kernels in Cube Prep before relying on these SEDs.`
+    : `PSF FWHM differs between bands, relative to the widest, ${reference}: ${list}. The cube is not PSF-homogenized; enter a target only after matching every band to it.`;
 }
 
 export function regionBudgetText(input: SaguiInputInfo, psfTarget: string, nRegions: number): RegionBudgetText | null {

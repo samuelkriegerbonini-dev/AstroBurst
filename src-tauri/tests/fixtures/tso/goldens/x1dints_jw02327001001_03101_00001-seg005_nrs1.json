@@ -1,0 +1,350 @@
+{
+ "golden": "tso/x1dints",
+ "label": "C6",
+ "produced_by": {
+  "script": "tso_golden_x1dints.py",
+  "command": "python -I scripts/oracle/tso_golden_x1dints.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "jw02327001001_03101_00001-seg005_nrs1_x1dints.fits",
+    "set": "tso/C",
+    "bytes": 1641600,
+    "sha256": "f7081a7346a37a98e4856ba9c6e2ce2992a326fb1604dda9853b9afea1d97e8d"
+   },
+   {
+    "file": "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv",
+    "set": "tso/whtlt",
+    "bytes": 3155,
+    "sha256": "de31bef3e407461d099beadeffd884e2fa4ea37df5356c4bc9894991f9e092c5"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "primary": {
+  "DATAMODL": "TSOMultiSpecModel",
+  "CAL_VER": "3.0.0",
+  "EXP_TYPE": "NRS_BRIGHTOBJ",
+  "INSTRUME": "NIRSPEC",
+  "DETECTOR": "NRS1",
+  "FILTER": "F290LP",
+  "PUPIL": null,
+  "GRATING": "G395M",
+  "SUBARRAY": "SUB2048",
+  "NINTS": 44,
+  "INTSTART": 33,
+  "INTEND": 40,
+  "EXSEGNUM": 5,
+  "EXSEGTOT": 6,
+  "TARGNAME": "WISE-J085510.74-071442.5",
+  "S_PHOTOM": "COMPLETE"
+ },
+ "product_level": "2b",
+ "layout": "row_per_integration",
+ "n_hdus": 4,
+ "hdus": [
+  {
+   "index": 0,
+   "name": "PRIMARY",
+   "extver": null,
+   "naxis1": null,
+   "naxis2": null
+  },
+  {
+   "index": 1,
+   "name": "INT_TIMES",
+   "extver": 1,
+   "naxis1": 52,
+   "naxis2": 8
+  },
+  {
+   "index": 2,
+   "name": "EXTRACT1D",
+   "extver": 1,
+   "naxis1": 181920,
+   "naxis2": 8
+  },
+  {
+   "index": 3,
+   "name": "ASDF",
+   "extver": null,
+   "naxis1": 138756,
+   "naxis2": 1
+  }
+ ],
+ "n_extract1d": 1,
+ "int_times_rows": 8,
+ "series_keys": [
+  {
+   "detector": "NRS1",
+   "sporder": -1
+  }
+ ],
+ "series": [
+  {
+   "key": {
+    "detector": "NRS1",
+    "sporder": -1
+   },
+   "detector_source": "EXTRACT1D header",
+   "extract1d_hdus": [
+    2
+   ],
+   "rows_per_extract1d": [
+    8
+   ],
+   "integrations": 8,
+   "tform_repeat": [
+    1299
+   ],
+   "n_alongdisp": {
+    "min": 1299,
+    "max": 1299,
+    "sum": 10392,
+    "rows_zero": 0,
+    "rows_below_tform_repeat": 0,
+    "source": "N_ALONGDISP column"
+   },
+   "int_num": {
+    "first": 33,
+    "last": 40,
+    "min": 33,
+    "max": 40,
+    "distinct": 8,
+    "source": "INT_NUM column"
+   },
+   "segment_values": [
+    5
+   ],
+   "units": {
+    "WAVELENGTH": "um",
+    "FLUX": "Jy",
+    "FLUX_ERROR": "Jy",
+    "MJD-AVG": "d",
+    "TDB-MID": "d"
+   },
+   "time": {
+    "mjd_avg_first": 60280.38693938986,
+    "mjd_avg_last": 60280.45980037622,
+    "mjd_avg_min_finite": 60280.38693938986,
+    "mjd_avg_max_finite": 60280.45980037622,
+    "mjd_avg_nan_rows": 0,
+    "mjd_avg_distinct_finite": 8,
+    "tdb_mid_first": 60280.389682996065,
+    "tdb_mid_last": 60280.46255026468,
+    "tdb_mid_nan_rows": 0,
+    "tdb_mid_distinct_finite": 8,
+    "mjd_beg_first": 60280.3817402537,
+    "mjd_end_last": 60280.46499951238,
+    "strictly_increasing_in_hdu_and_row_order": true,
+    "source": "per-row columns"
+   },
+   "first_valid_row": {
+    "hdu": 2,
+    "row0": 0,
+    "int_num": 33,
+    "n_alongdisp": 1299,
+    "wavelength_first3": [
+     2.848429652675818,
+     2.8502291545571627,
+     2.852028648687558
+    ],
+    "wavelength_last3": [
+     5.17846349118785,
+     5.180257949448807,
+     5.182052338975267
+    ],
+    "direction": "ascending"
+   },
+   "masking_counts": {
+    "valid_elements": 10392,
+    "flux_nan": 184,
+    "dq_nonzero": 184,
+    "flux_nan_with_dq_zero": 0,
+    "flux_finite_with_dq_nonzero": 0,
+    "flux_error_nan": 0
+   },
+   "storage": {
+    "NAXIS1": 181920,
+    "NAXIS2": 8,
+    "PCOUNT": 0,
+    "TFIELDS": 27,
+    "WAVELENGTH": {
+     "column": 2,
+     "TFORM": "1299D",
+     "TDIM": "(1299)",
+     "TUNIT": "um",
+     "TZERO": null
+    },
+    "DQ": {
+     "column": 13,
+     "TFORM": "1299J",
+     "TDIM": "(1299)",
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_element0_stored_bytes_hex": "80000001",
+     "row0_element0_value": 1
+    },
+    "N_ALONGDISP": {
+     "column": 20,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": 2147483648,
+     "row0_stored_bytes_hex": "80000513",
+     "row0_stored_int32": -2147482349,
+     "row0_value": 1299
+    },
+    "INT_NUM": {
+     "column": 1,
+     "TFORM": "J",
+     "TDIM": null,
+     "TUNIT": null,
+     "TZERO": null
+    },
+    "row_length_rule": "NAXIS1 = 140 * repeat + 60",
+    "row_length_rule_holds": true
+   },
+   "white_light_as_archived": {
+    "limits_um": [
+     -1.0,
+     10000000000.0
+    ],
+    "rows_in_series": 8,
+    "rows_kept": 8,
+    "rows_dropped_nan_or_repeated_mjd_avg": 0,
+    "sorted_by": "MJD-AVG ascending",
+    "first5": [
+     {
+      "int_num": 33,
+      "mjd_avg": 60280.38693938986,
+      "tdb_mid": 60280.389682996065,
+      "sum": -230.5141751204606
+     },
+     {
+      "int_num": 34,
+      "mjd_avg": 60280.3973481022,
+      "tdb_mid": 60280.40009260606,
+      "sum": -231.02125144158535
+     },
+     {
+      "int_num": 35,
+      "mjd_avg": 60280.40775681453,
+      "tdb_mid": 60280.41050221599,
+      "sum": -227.2075986309106
+     },
+     {
+      "int_num": 36,
+      "mjd_avg": 60280.41816552688,
+      "tdb_mid": 60280.420911825866,
+      "sum": -227.9598592562527
+     },
+     {
+      "int_num": 37,
+      "mjd_avg": 60280.42857423921,
+      "tdb_mid": 60280.431321435666,
+      "sum": -235.98436752993487
+     }
+    ],
+    "last5": [
+     {
+      "int_num": 36,
+      "mjd_avg": 60280.41816552688,
+      "tdb_mid": 60280.420911825866,
+      "sum": -227.9598592562527
+     },
+     {
+      "int_num": 37,
+      "mjd_avg": 60280.42857423921,
+      "tdb_mid": 60280.431321435666,
+      "sum": -235.98436752993487
+     },
+     {
+      "int_num": 38,
+      "mjd_avg": 60280.43898295155,
+      "tdb_mid": 60280.4417310454,
+      "sum": -225.41373783393993
+     },
+     {
+      "int_num": 39,
+      "mjd_avg": 60280.44939166389,
+      "tdb_mid": 60280.45214065508,
+      "sum": -228.50543086165465
+     },
+     {
+      "int_num": 40,
+      "mjd_avg": 60280.45980037622,
+      "tdb_mid": 60280.46255026468,
+      "sum": -232.58858786238252
+     }
+    ],
+    "sum_all_fsum": -1839.1950085371213,
+    "numpy_nansum_vs_exact_sum_max_rel": 1.260868556793198e-16,
+    "whtlt": {
+     "time_column": "MJD_UTC_NRS1",
+     "bjd_column": "BJD_TDB_NRS1",
+     "flux_column": "whitelight_flux_NRS1",
+     "whtlt_rows_finite_time": 44,
+     "rows_joined_on_identical_time": 8,
+     "first5": [
+      {
+       "time": 60280.38693938986,
+       "flux": -230.51468446524663
+      },
+      {
+       "time": 60280.3973481022,
+       "flux": -231.02196943202566
+      },
+      {
+       "time": 60280.40775681453,
+       "flux": -227.2075988314301
+      },
+      {
+       "time": 60280.41816552688,
+       "flux": -227.9600964147356
+      },
+      {
+       "time": 60280.42857423921,
+       "flux": -235.98478678330204
+      }
+     ],
+     "last5": [
+      {
+       "time": 60280.41816552688,
+       "flux": -227.9600964147356
+      },
+      {
+       "time": 60280.42857423921,
+       "flux": -235.98478678330204
+      },
+      {
+       "time": 60280.43898295155,
+       "flux": -225.41620249556698
+      },
+      {
+       "time": 60280.44939166389,
+       "flux": -228.5058868546638
+      },
+      {
+       "time": 60280.45980037622,
+       "flux": -232.58915296928274
+      }
+     ],
+     "sum_all_fsum": -1839.2003782462534,
+     "max_rel_diff_computed_vs_whtlt": 1.093382640537109e-05,
+     "rows_bitwise_equal": 0,
+     "within_1e-4": true,
+     "expected_to_match": false,
+     "bjd_equals_tdb_mid_bitwise_rows": 8
+    },
+    "limits_source": "level 2b has no whtlt; open limits used and compared with the level-3 whtlt of the same observation"
+   }
+  }
+ ]
+}

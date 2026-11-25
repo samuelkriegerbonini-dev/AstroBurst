@@ -166,6 +166,21 @@ describe("LightCurveStore", () => {
     expect(store.getView("g")).toEqual({ ...DEFAULT_LIGHT_CURVE_VIEW, ...patch });
   });
 
+  it("a new run on other frames of the same length resets the windows and the hand exclusions", () => {
+    const store = new LightCurveStore();
+    store.put("g", [doc("a", 3, "bjd_tdb")]);
+    store.patchView("g", { window: { start: 1, end: 2 }, excluded: [1] });
+    const shifted = doc("b", 3, "bjd_tdb");
+    store.put("g", [{ ...shifted, time: shifted.time.map((t) => t + 0.5) }]);
+    expect(store.getView("g").excluded).toEqual([]);
+    expect(store.getView("g").window).toBeNull();
+
+    store.patchView("g", { excluded: [2] });
+    const renumbered = doc("c", 3, "bjd_tdb");
+    store.put("g", [{ ...renumbered, time: shifted.time.map((t) => t + 0.5), pointRef: [4, 5, 6] }]);
+    expect(store.getView("g").excluded).toEqual([]);
+  });
+
   it("patchView on an unknown group does nothing and getView returns the default", () => {
     const store = new LightCurveStore();
     const listener = vi.fn();

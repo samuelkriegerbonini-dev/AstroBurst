@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::core::ramp::info::RampInfo;
 use crate::core::ramp::irs2::CARD_UNCAL_FAST_LEN;
-use crate::core::ramp::quick_slope::{QuickSlopeParams, QuickSlopeProduct};
+use crate::core::ramp::quick_slope::{DqSource, NoiseModel, QuickSlopeParams, QuickSlopeProduct};
 use crate::infra::fits::writer::{write_mef_images, HduData, ImageHdu};
 use crate::types::header::HduHeader;
 use crate::types::image_ref::source_stem;
@@ -40,7 +40,49 @@ pub const REFCOR_NONE: &str = "none";
 pub const BUNIT_RATE: &str = "DN/s";
 pub const BUNIT_GROUPS: &str = "groups";
 pub const DQ_NOTE: &str = "JWST DQ bits: DO_NOT_USE 1, SATURATED 2, JUMP_DET 4";
-pub const NOISE_NOTE: &str = "slope error from the robust scale of group differences";
+pub const DQ_BIT_NOTES: [(&str, &str); 3] = [
+    ("ABDQ1", "DO_NOT_USE: fewer than two usable groups or a PIXELDQ flag"),
+    ("ABDQ2", "SATURATED: at least one group saturated, NGOOD has the rest"),
+    ("ABDQ4", "JUMP_DET: a difference left out, the slope is a median"),
+];
+pub const NOISE_NOTE: &str = "slope error: read noise and photon noise of the estimator";
+pub const READ_NOISE_NOTE: &str = "read noise part of the slope error only: no gain was given";
+pub const EXT_READ_NOISE: &str = "RNOISE";
+pub const CARD_INTEGRATION_NUMBER: &str = "ABINTNUM";
+pub const CARD_EXPOSURE_INTEGRATION: &str = "ABEXPINT";
+pub const CARD_NINTS: &str = "ABNINTS";
+pub const CARD_SCALE_FLOOR: &str = "ABSFLOOR";
+pub const CARD_MIN_GROUPS_OLS: &str = "ABMINOLS";
+pub const CARD_BAND_SCALE_PREFIX: &str = "ABBSCL";
+pub const MAX_BAND_SCALE_CARDS: usize = 99;
+pub const CARD_NOISE_MODEL: &str = "ABNOISE";
+pub const CARD_GAIN: &str = "ABGAIN";
+pub const CARD_DQ_SOURCE: &str = "ABDQSRC";
+pub const NOISE_MODEL_READ: &str = "read";
+pub const NOISE_MODEL_READ_PHOTON: &str = "read+photon";
+pub const DQ_SOURCE_THRESHOLD: &str = "threshold";
+pub const DQ_SOURCE_GROUPDQ: &str = "groupdq";
+
+pub fn noise_extname(model: NoiseModel) -> &'static str {
+    match model {
+        NoiseModel::ReadAndPhoton => EXT_NOISE,
+        NoiseModel::ReadNoiseOnly => EXT_READ_NOISE,
+    }
+}
+
+fn noise_model_label(model: NoiseModel) -> &'static str {
+    match model {
+        NoiseModel::ReadAndPhoton => NOISE_MODEL_READ_PHOTON,
+        NoiseModel::ReadNoiseOnly => NOISE_MODEL_READ,
+    }
+}
+
+fn dq_source_label(source: DqSource) -> &'static str {
+    match source {
+        DqSource::Threshold => DQ_SOURCE_THRESHOLD,
+        DqSource::Groupdq => DQ_SOURCE_GROUPDQ,
+    }
+}
 
 fn strip_suffix_ignore_case(stem: &str, suffix: &str) -> Option<String> {
     let cut = stem.len().checked_sub(suffix.len())?;
@@ -111,10 +153,25 @@ pub fn qslope_primary_header(
     header.set(CARD_ABPROC, ABPROC_QSLOPE.to_string());
     header.set(CARD_VERSION, env!("CARGO_PKG_VERSION").to_string());
     header.set(CARD_INTEGRATION, product.integration.to_string());
+    header.set(CARD_INTEGRATION_NUMBER, (product.integration + 1).to_string());
+    header.set(CARD_NINTS, info.nints.to_string());
+    if let Some(first) = info.intstart {
+        header.set(CARD_EXPOSURE_INTEGRATION, (first + product.integration).to_string());
+    }
     header.set(CARD_NGROUPS, info.ngroups.to_string());
     header.set(CARD_TGROUP, format!("{}", product.tgroup_s));
     header.set(CARD_SAT_DN, format!("{}", params.sat_dn));
     header.set(CARD_JUMP_K, format!("{}", params.jump_k));
+    header.set(CARD_SCALE_FLOOR, format!("{}", params.scale_floor_dn));
+    header.set(CARD_MIN_GROUPS_OLS, params.min_groups_ols.to_string());
+    for (band, scale) in product.band_scales_dn.iter().enumerate().take(MAX_BAND_SCALE_CARDS) {
+        header.set(&format!("{CARD_BAND_SCALE_PREFIX}{}", band + 1), format!("{scale}"));
+    }
+    header.set(CARD_NOISE_MODEL, noise_model_label(product.noise_model).to_string());
+    if let Some(gain) = params.gain_e_per_dn {
+        header.set(CARD_GAIN, format!("{gain}"));
+    }
+    header.set(CARD_DQ_SOURCE, dq_source_label(product.dq_source).to_string());
     header.set(CARD_REF_CORRECTION, ref_correction_label(product).to_string());
     header.set(CARD_REF_WINDOW, params.ref_window_rows.unwrap_or(0).to_string());
     if let Some(layout) = &product.layout {
@@ -133,13 +190,23 @@ pub fn qslope_history_cards(info: &RampInfo, params: &QuickSlopeParams, product:
         (Some(_), false, _) => "IRS2 rows stripped, no reference-offset correction (ref_correction=off)".to_string(),
         (None, _, _) => "no IRS2 layout: no reference-offset correction, frame size kept".to_string(),
     };
+    let saturation = match product.dq_source {
+        DqSource::Threshold => format!("saturation: fixed threshold {:.0} DN", params.sat_dn),
+        DqSource::Groupdq => "saturation, jumps and unusable groups from GROUPDQ; PIXELDQ kept".to_string(),
+    };
+    let noise = match params.gain_e_per_dn {
+        Some(gain) => format!("NOISE: read + photon noise of the estimator, gain {gain} e-/DN"),
+        None => "RNOISE: read noise part of the slope error only (no gain given)".to_string(),
+    };
     vec![
         "AstroBurst quick slope: unweighted OLS or median of group differences".to_string(),
         format!("per pixel over {} groups of integration {}", info.ngroups, product.integration),
+        "integration index is 0-based; ABINTNUM and the file name are 1-based".to_string(),
         format!("divided by TGROUP = {:.6} s", product.tgroup_s),
         correction,
-        format!("saturation: fixed threshold {:.0} DN", params.sat_dn),
-        format!("jumps: |d - med| > k * max(pixel MAD, floor, band scale), k = {}", params.jump_k),
+        saturation,
+        format!("jumps: |d - med| > k * max(pixel MAD, floor, noise model), k = {}", params.jump_k),
+        noise,
         "no superbias, linearity, dark, refpix FFT, weighted fit or variances".to_string(),
         "not a calwebb_detector1 rate product".to_string(),
     ]
@@ -152,14 +219,21 @@ pub fn write_qslope(path: &str, primary: &HduHeader, product: &QuickSlopeProduct
     ngood.set(CARD_BUNIT, BUNIT_GROUPS.to_string());
     let mut dq = HduHeader::empty();
     dq.set(CARD_NOTE, DQ_NOTE.to_string());
+    for (key, meaning) in DQ_BIT_NOTES {
+        dq.set(key, meaning.to_string());
+    }
     let mut noise = HduHeader::empty();
     noise.set(CARD_BUNIT, BUNIT_RATE.to_string());
-    noise.set(CARD_NOTE, NOISE_NOTE.to_string());
+    let noise_note = match product.noise_model {
+        NoiseModel::ReadAndPhoton => NOISE_NOTE,
+        NoiseModel::ReadNoiseOnly => READ_NOISE_NOTE,
+    };
+    noise.set(CARD_NOTE, noise_note.to_string());
     let hdus = [
         ImageHdu { data: HduData::F32(&product.sci), header: Some(&sci), extname: EXT_SCI, extver: 1 },
         ImageHdu { data: HduData::I32(&product.ngood), header: Some(&ngood), extname: EXT_NGOOD, extver: 1 },
         ImageHdu { data: HduData::U32(&product.dq), header: Some(&dq), extname: EXT_DQ, extver: 1 },
-        ImageHdu { data: HduData::F32(&product.noise), header: Some(&noise), extname: EXT_NOISE, extver: 1 },
+        ImageHdu { data: HduData::F32(&product.noise), header: Some(&noise), extname: noise_extname(product.noise_model), extver: 1 },
     ];
     write_mef_images(path, Some(primary), &hdus)
 }
@@ -174,7 +248,7 @@ mod tests {
     use crate::core::imaging::region::test_support::make_header;
     use crate::core::ramp::info::{Irs2Header, RampKind, TgroupSource};
     use crate::core::ramp::irs2::{Irs2Layout, Irs2Resolution, IRS2_ALREADY_STRIPPED_NOTE};
-    use crate::core::ramp::quick_slope::{FlagCounts, RefCorrection, DQ_JUMP_DET, DQ_SATURATED};
+    use crate::core::ramp::quick_slope::{DqSource, FlagCounts, NoiseModel, RefCorrection, DQ_JUMP_DET, DQ_SATURATED};
     use crate::infra::fits::reader::{extract_header_by_index, extract_image_mmap_by_index, extract_int_plane_by_index, list_extensions, read_primary_header};
 
     const OWNER_NAME: &str = "jw01266005001_02103_00001_nrs1_uncal.fits";
@@ -198,6 +272,7 @@ mod tests {
             irs2: Some(Irs2Header { nrs_norm: 16, nrs_ref: 4, noutputs: 5, fast_axis: Some(-2), slow_axis: Some(-1) }),
             frame_width: 2048,
             frame_height,
+            intstart: None,
         }
     }
 
@@ -214,6 +289,8 @@ mod tests {
             tgroup_s: 14.589,
             integration,
             warnings: Vec::new(),
+            noise_model: NoiseModel::ReadNoiseOnly,
+            dq_source: DqSource::Threshold,
         }
     }
 
@@ -326,7 +403,7 @@ mod tests {
         let file = File::open(text).unwrap();
         let hdus = list_extensions(&file).unwrap();
         let names: Vec<String> = hdus.iter().skip(1).map(|h| h.extname.clone().unwrap_or_default().trim().to_string()).collect();
-        assert_eq!(names, vec!["SCI", "NGOOD", "DQ", "NOISE"]);
+        assert_eq!(names, vec!["SCI", "NGOOD", "DQ", "RNOISE"]);
         assert_eq!(hdus[0].naxis, 0);
         let sci = extract_image_mmap_by_index(&file, 1).unwrap();
         assert_eq!(sci.header.get("BUNIT"), Some("DN/s"));
@@ -342,7 +419,7 @@ mod tests {
         let ngood_plane = extract_int_plane_by_index(&file, 2).unwrap();
         assert_eq!(ngood_plane.bits[[1, 2]] as i32, 4);
         let noise = extract_header_by_index(&file, 4).unwrap();
-        assert_eq!((noise.get("BUNIT"), noise.get("ABNOTE")), (Some("DN/s"), Some(NOISE_NOTE)));
+        assert_eq!((noise.get("BUNIT"), noise.get("ABNOTE")), (Some("DN/s"), Some(READ_NOISE_NOTE)));
 
         let written = read_primary_header(text).unwrap();
         assert_eq!(written.get("ABPROC"), Some("qslope"));
@@ -370,6 +447,46 @@ mod tests {
         for forbidden in ["CAL_VER", "S_RAMP", "DATAMODL", "S_DQINIT", "R_MASK", "CRDS_CTX", "NEXTEND", "ABDQTAB", "DATE", "BUNIT"] {
             assert_eq!(written.get(forbidden), None, "{forbidden} must not be in the product primary");
         }
+    }
+
+    #[test]
+    fn the_primary_header_carries_every_parameter_that_changes_the_numbers() {
+        let layout = Irs2Layout::new(3200, 16, 4, 5, true).unwrap();
+        let mut product = sample_product(2, 2, Some(layout), true, 2);
+        product.band_scales_dn = vec![11.5, 12.25, 13.0, 14.75];
+        let params = QuickSlopeParams { scale_floor_dn: 30.0, min_groups_ols: 9, ..Default::default() };
+        let mut three_integrations = info(10, 14.589, 3200);
+        three_integrations.nints = 3;
+        let primary = qslope_primary_header(&uncal_primary(), &three_integrations, &params, &product, "p_qslope.fits");
+        assert_eq!(primary.get_f64("ABSFLOOR"), Some(30.0));
+        assert_eq!(primary.get_i64("ABMINOLS"), Some(9));
+        let scales: Vec<Option<f64>> = (1..=4).map(|band| primary.get_f64(&format!("ABBSCL{band}"))).collect();
+        assert_eq!(scales, vec![Some(11.5), Some(12.25), Some(13.0), Some(14.75)]);
+        assert_eq!(primary.get("ABBSCL5"), None);
+        assert_eq!(primary.get_i64("ABINTEG"), Some(2), "ABINTEG keeps its 0-based value");
+        assert_eq!(primary.get_i64("ABINTNUM"), Some(3), "ABINTNUM is the 1-based number used in the file name");
+        assert_eq!(primary.get_i64("ABNINTS"), Some(3));
+        let history: Vec<&str> = primary.cards.iter().filter(|(k, _)| k.trim() == "HISTORY").map(|(_, v)| v.as_str()).collect();
+        assert!(history.iter().any(|h| h.contains("0-based")), "{history:?}");
+        assert!(history.iter().all(|h| h.len() <= HISTORY_MAX_BYTES), "{history:?}");
+    }
+
+    #[test]
+    fn the_dq_extension_says_what_each_quick_slope_bit_means() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dq_notes_qslope.fits");
+        let text = path.to_str().unwrap();
+        let product = sample_product(2, 2, None, false, 0);
+        let mut plain_info = info(5, 10.0, 64);
+        plain_info.irs2 = None;
+        let primary = qslope_primary_header(&uncal_primary(), &plain_info, &QuickSlopeParams::default(), &product, "dq_notes_qslope.fits");
+        write_qslope(text, &primary, &product).unwrap();
+        let dq_header = extract_header_by_index(&File::open(text).unwrap(), 3).unwrap();
+        assert_eq!(dq_header.get("ABNOTE"), Some(DQ_NOTE));
+        let note = |key: &str| dq_header.get(key).unwrap_or_default().to_ascii_lowercase();
+        assert!(note("ABDQ1").contains("fewer than two usable groups"), "{}", note("ABDQ1"));
+        assert!(note("ABDQ2").contains("at least one group"), "{}", note("ABDQ2"));
+        assert!(note("ABDQ4").contains("median"), "{}", note("ABDQ4"));
     }
 
     #[test]

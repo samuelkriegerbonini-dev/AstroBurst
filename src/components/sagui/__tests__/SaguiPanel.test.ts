@@ -5,7 +5,7 @@ import type { SaguiState } from "../saguiStore";
 import type { SaguiResult } from "../../../shared/types/sagui";
 import { DOCK_TOOL_META, DEFAULT_DOCK_LAYOUT } from "../../../utils/dockLayout";
 
-const state: SaguiState = { config: { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 4294967295, psf_target: "", mode: "ward", knn_k: 40 }, input: null, runtime: null, status: "idle", operation: null, installation: null, installParent: "", progress: null, result: null, outputDir: null, unit: null, error: null };
+const state: SaguiState = { config: { input_path: "", output_dir: "", rscript_path: "", library_path: "", n_regions: 20, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 4294967295, psf_target: "", mode: "ward", knn_k: 40 }, input: null, runtime: null, status: "idle", operation: null, installation: null, installParent: "", progress: null, result: null, outputDir: null, error: null };
 vi.mock("../saguiStore", async (original) => ({ ...await original<typeof import("../saguiStore")>(), useSaguiState: () => state }));
 vi.mock("../../../hooks/useFileStore", () => ({ fileStore: { getSelectedFile: () => null } }));
 vi.mock("../../../hooks/useFileIngest", () => ({ showWhenLoaded: vi.fn() }));
@@ -29,7 +29,7 @@ describe("SAGUI desktop entry and scientific viewer", () => {
     expect(DOCK_TOOL_META.sagui.needsFile).toBe(false);
     expect(DEFAULT_DOCK_LAYOUT.anchors["right-top"]).toContain("sagui");
     const html = renderToStaticMarkup(createElement(SaguiPanel));
-    for (const text of ["Rscript executable", "Private R package library", "Use Cube Prep result", "Starlet scales", "Sparse Ward (approximation)", "DQ bits to exclude", "Working folder", "Install / repair SAGUI library", "Library installation folder", "Open previous SAGUI result"]) expect(html).toContain(text);
+    for (const text of ["Rscript executable", "Private R package library", "Use Cube Prep result", "Starlet scales", "Sparse Ward (approximation)", "DQ bits to exclude", "Save runs in", "Install / repair SAGUI library", "Library installation folder", "Open previous SAGUI result"]) expect(html).toContain(text);
     expect(html).not.toContain("Segmentation completed");
   });
 
@@ -37,7 +37,8 @@ describe("SAGUI desktop entry and scientific viewer", () => {
     const html = renderToStaticMarkup(createElement(SaguiPanel));
     expect(html).toContain("Required: R 4.6.2 (installs alongside other R versions;");
     expect(html).toContain("https://cran.r-project.org/bin/windows/base/old/4.6.2/");
-    expect(html).toContain("SAGUI commit 56fd3ea776d7c00e056368498da9412bd58b84bb");
+    expect(html).toContain('SAGUI commit <span title="56fd3ea776d7c00e056368498da9412bd58b84bb" class="font-mono">56fd3ea</span>');
+    expect(html).toContain('aria-label="Copy the full SAGUI commit hash"');
   });
 
   it("shows missing-runtime issues without fabricated segmentations", () => {
@@ -63,11 +64,11 @@ describe("SAGUI desktop entry and scientific viewer", () => {
     expect(html).toContain("unknown");
     expect(html).toContain("-2.0000e+0");
     expect(html).toContain("Summed flux (Jy)");
-    expect(html).toContain("Region 1 · 1 pixels");
+    expect(html).toMatch(/>Region 1<\/button><\/td><td[^>]*>1<\/td>/);
   });
 
   it("labels regional flux with the result unit when the cube used millijanskys per pixel", () => {
-    state.unit = "mJy/pixel";
+    state.input = { width: 1, height: 1, bands: [{ filter: "F200W", pivot_um: 2 }], unit: "mJy/pixel", has_err: false, has_dq: false, estimated_memory_bytes: 1, warnings: [] };
     state.result = { run_id: "converted", unit: "Jy", output_dir: "/out", labels_path: "labels.fits", mask_path: "mask.fits", table_path: "regions.csv", manifest_path: "manifest.json", width: 1, height: 1, labels: [1], warnings: [], regions: [{ region: 1, n_pixels: 1, bands: [{ filter: "F200W", pivot_um: 2, flux: 0.011, error: null }] }] };
     try {
       const html = renderToStaticMarkup(createElement(SaguiPanel));
@@ -76,7 +77,7 @@ describe("SAGUI desktop entry and scientific viewer", () => {
       expect(html).not.toContain("Summed flux (mJy)");
     } finally {
       state.result = null;
-      state.unit = null;
+      state.input = null;
     }
   });
 });
@@ -145,7 +146,7 @@ describe("SAGUI panel status, actions and products", () => {
   });
 
   it("lists the run folder and products by name, with the full path on hover and a Show in folder action each (SCIENCE-27)", () => {
-    withState({ status: "complete", operation: "segment", result: RESULT, outputDir: RUN, unit: "Jy/pixel" }, () => {
+    withState({ status: "complete", operation: "segment", result: RESULT, outputDir: RUN }, () => {
       const html = render();
       for (const path of [RUN, RESULT.labels_path, RESULT.mask_path, RESULT.table_path, RESULT.manifest_path]) {
         const name = path.split("\\").at(-1)!;
@@ -162,7 +163,8 @@ describe("SAGUI panel status, actions and products", () => {
 
   it("uses the shared run button with a running state for Validate & segment (SCIENCE-29)", () => {
     const idle = runButton(render());
-    expect(idle).toContain("Validate &amp; segment");
+    expect(idle).toContain("Choose a prepared multiband FITS cube.");
+    withState({ input: { width: 2, height: 2, bands: [{ filter: "F200W", pivot_um: 2 }], unit: "Jy/pixel", has_err: true, has_dq: false, estimated_memory_bytes: 1, warnings: [] }, config: { ...state.config, input_path: "C:\runs\cube.fits", output_dir: "C:\runs", rscript_path: "Rscript", library_path: "lib", psf_target: "F200W" } }, () => expect(runButton(render())).toContain("Validate &amp; segment"));
     expect(idle).toContain('data-accent="violet"');
     expect(idle).toContain('data-running="false"');
     withState({ status: "running", operation: "segment", outputDir: RUN }, () => {
@@ -199,6 +201,24 @@ describe("SAGUI panel status, actions and products", () => {
       expect(html).toContain("Before R starts, only the cube and the sparse neighbor graph are checked against free memory; exact Ward checks its own memory in R on the clustered support and refuses more than 65536 pixels.");
     });
     withState({ input: { ...INPUT, has_noise_correlation: true, warnings: [] } }, () => expect(render()).toContain("NOISCORR present"));
+  });
+
+  it("offers to open a recipe put in the cube field in Cube Prep, and only then", () => {
+    withState({ config: { ...state.config, input_path: "C:\astrokit\entregas\desktop-d1-scientific-recipe.json" } }, () => {
+      const html = render();
+      expect(html).toContain("Open this recipe in Cube Prep");
+      expect(html).toContain("The cube field holds a JSON file.");
+    });
+    withState({ config: { ...state.config, input_path: "C:\runs\cube.fits" } }, () => {
+      expect(render()).not.toContain("Open this recipe in Cube Prep");
+    });
+  });
+
+  it("numbers the four sections, marks the current one and keeps Open previous result at the end (proposal 13)", () => {
+    const html = render();
+    expect(html).toMatch(/<h3 id="[^"]+" class="[^"]*">1\. Cube<span class="sr-only">, <\/span><span class="[^"]*">current step<\/span><\/h3>/);
+    for (const title of ["2. R runtime", "3. Regions", "4. Run"]) expect(html).toMatch(new RegExp(`<h3 id="[^"]+" class="[^"]*">${title.replace(".", "\\.")}</h3>`));
+    expect(html.indexOf("Open previous SAGUI result")).toBeGreaterThan(html.indexOf("4. Run"));
   });
 
   it("explains the default DQ mask per mission", () => {

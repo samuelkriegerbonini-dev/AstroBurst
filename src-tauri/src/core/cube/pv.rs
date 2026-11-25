@@ -26,6 +26,7 @@ pub const PV_TAB_LINEAR_TOL: f64 = 0.01;
 const PV_BAND_BYTES: usize = 64 << 20;
 const PV_MAX_CHANNELS_PER_BATCH: usize = 32;
 const TAB_CTYPE_SUFFIX: &str = "-TAB";
+const NON_LINEAR_TAB_HISTORY: &str = "PV axis 2 is the channel number: the -TAB table is not linear";
 const COUNT_EPSILON: f64 = 1e-9;
 const ARCSEC_PER_DEG: f64 = 3600.0;
 const UNIT_UM: &str = "um";
@@ -177,7 +178,7 @@ fn sig4(value: f64) -> String {
     }
 }
 
-fn native_axis(axis: &SpectralAxis, z0: usize, z1: usize) -> Result<PvNativeAxis> {
+fn native_axis(axis: &SpectralAxis, z0: usize, z1: usize, notes: &mut Vec<String>) -> Result<PvNativeAxis> {
     let scale = if axis.header_scale.is_finite() && axis.header_scale != 0.0 { axis.header_scale } else { 1.0 };
     let cunit = if axis.header_unit.is_empty() { axis.kind.fits_default_unit().to_string() } else { axis.header_unit.clone() };
     if !axis.tabulated {
@@ -197,21 +198,27 @@ fn native_axis(axis: &SpectralAxis, z0: usize, z1: usize) -> Result<PvNativeAxis
             z1
         );
     }
-    let steps: Vec<f64> = range.windows(2).map(|w| w[1] - w[0]).collect();
-    let cdelt = if steps.is_empty() { axis.cdelt } else { exact_median_f64(&steps) };
     let first = range[0];
+    let cdelt = if range.len() < 2 { axis.cdelt } else { (range[range.len() - 1] - first) / (range.len() - 1) as f64 };
     let dev = range
         .iter()
         .enumerate()
         .map(|(k, v)| (v - (first + k as f64 * cdelt)).abs())
         .fold(0.0f64, f64::max);
     if dev > PV_TAB_LINEAR_TOL * cdelt.abs() {
-        bail!(
-            "the -TAB spectral axis deviates from linear by {} {} (more than 1% of the step {}); a PV FITS cannot describe it",
+        notes.push(format!(
+            "the -TAB spectral axis deviates from linear by {} {} (more than 1% of the step {}): axis 2 of the PV FITS is the channel number; the plot uses the tabulated values",
             sig4(dev),
             axis.unit,
             sig4(cdelt)
-        );
+        ));
+        return Ok(PvNativeAxis {
+            ctype: None,
+            cunit: None,
+            crval: z0 as f64,
+            cdelt: 1.0,
+            history: Some(NON_LINEAR_TAB_HISTORY.to_string()),
+        });
     }
     Ok(PvNativeAxis {
         ctype: Some(axis.ctype.trim_end_matches(TAB_CTYPE_SUFFIX).to_string()),
@@ -329,7 +336,7 @@ fn resolve_spectral(cube: &LazyCube, cfg: &PvConfig, n_channels: usize) -> Resul
             ));
         }
     }
-    let native = native_axis(&axis, cfg.z0, cfg.z1)?;
+    let native = native_axis(&axis, cfg.z0, cfg.z1, &mut notes)?;
     Ok(SpectralResolution { values, unit, convention_applies, rest_um, native, notes })
 }
 
@@ -806,28 +813,76 @@ mod tests {
     }
 
     #[test]
-    fn pv_refuses_a_tab_axis_that_is_not_close_to_linear() {
-        let err = format!("{:#}", native_axis(&tab_axis(&[1.0, 2.0, 4.0, 8.0]), 0, 3).err().unwrap());
-        assert!(err.contains("deviates from linear"), "{err}");
-        assert!(err.contains("more than 1% of the step 2"), "{err}");
-        assert!(err.contains("a PV FITS cannot describe it"), "{err}");
+    fn a_tab_axis_that_is_not_close_to_linear_is_written_as_a_channel_axis() {
+        let mut notes = Vec::new();
+        let bent = native_axis(&tab_axis(&[1.0, 2.0, 4.0, 8.0]), 0, 3, &mut notes).expect("a bent table still gives a PV axis");
+        assert_eq!((bent.ctype.as_deref(), bent.cunit.as_deref()), (None, None));
+        assert_eq!((bent.crval, bent.cdelt), (0.0, 1.0));
+        let history = bent.history.clone().unwrap_or_default();
+        assert!(history.contains("channel number") && history.len() <= 72 && history.is_ascii(), "{history}");
+        let named = notes.iter().any(|n| n.contains("deviates from linear") && n.contains("more than 1% of the step") && n.contains("channel number"));
+        assert!(named, "{notes:?}");
 
-        let native = native_axis(&tab_axis(&[1.0, 1.5, 2.0, 2.5000001]), 0, 3).unwrap();
-        assert!((native.cdelt - 0.5).abs() < 1e-9, "{}", native.cdelt);
+        let mut notes = Vec::new();
+        let native = native_axis(&tab_axis(&[1.0, 1.5, 2.0, 2.5000001]), 0, 3, &mut notes).unwrap();
+        assert!((native.cdelt - 0.5).abs() < 1e-7, "{}", native.cdelt);
         assert_eq!(native.crval, 1.0);
         assert_eq!(native.ctype.as_deref(), Some("WAVE"));
         assert_eq!(native.cunit.as_deref(), Some("um"));
         let history = native.history.clone().unwrap_or_default();
         assert!(history.contains("-TAB table"), "{history}");
         assert!(history.len() <= 72 && history.is_ascii(), "{history}");
+        assert!(notes.is_empty(), "{notes:?}");
 
-        let sub_range = native_axis(&tab_axis(&[1.0, 2.0, 4.0, 8.0, 8.5, 9.0]), 3, 5).unwrap();
+        let sub_range = native_axis(&tab_axis(&[1.0, 2.0, 4.0, 8.0, 8.5, 9.0]), 3, 5, &mut notes).unwrap();
         assert!((sub_range.cdelt - 0.5).abs() < 1e-9, "{}", sub_range.cdelt);
         assert_eq!(sub_range.crval, 8.0);
 
-        let linear = native_axis(&SpectralAxis { tabulated: false, ..tab_axis(&[1.0, 2.0, 4.0, 8.0]) }, 0, 3).unwrap();
+        let linear = native_axis(&SpectralAxis { tabulated: false, ..tab_axis(&[1.0, 2.0, 4.0, 8.0]) }, 0, 3, &mut notes).unwrap();
         assert_eq!(linear.history, None);
         assert_eq!(linear.ctype.as_deref(), Some("WAVE-TAB"));
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    const REVIEW_GOLDENS: &str = include_str!("../../../tests/fixtures/cube/cube_review_goldens.json");
+
+    fn tab_cube_pv(dir: &tempfile::TempDir, name: &str, table: &[f32]) -> Result<PvDiagram> {
+        let path = dir.path().join(name);
+        write_cube_with_wcs_table(&path, 4, 4, &tab_cube_cards(), table, |z, _, x| 1.0 + z as f32 + x as f32 * 0.01);
+        let cfg = PvConfig { mode: PvSpectralMode::WavelengthVac, ..config((0.0, 1.0, 3.0, 1.0), 1.0, 0.0, 0, table.len() - 1) };
+        pv_diagram(&open(&path), &cfg)
+    }
+
+    #[test]
+    fn a_float32_linear_wave_tab_axis_is_written_as_linear() {
+        let goldens: serde_json::Value = serde_json::from_str(REVIEW_GOLDENS).unwrap();
+        let golden = &goldens["float32_wave_tab"][0];
+        let (first, step, count) = (golden["first"].as_f64().unwrap(), golden["step"].as_f64().unwrap(), golden["count"].as_u64().unwrap() as usize);
+        assert!(golden["max_deviation_over_step_with_median_step"].as_f64().unwrap() > PV_TAB_LINEAR_TOL);
+        assert!(golden["max_deviation_over_step_with_endpoint_step"].as_f64().unwrap() < PV_TAB_LINEAR_TOL);
+        let table: Vec<f32> = (0..count).map(|k| (first + step * k as f64) as f32).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let pv = tab_cube_pv(&dir, "float32_tab.fits", &table)
+            .unwrap_or_else(|e| panic!("a float32 table on an exact {step} um grid was refused: {e:#}"));
+        assert_eq!(pv.native.ctype.as_deref(), Some("WAVE"));
+        assert!((pv.native.cdelt - step).abs() < 2e-9, "CDELT {} for a {step} um grid", pv.native.cdelt);
+        assert!((pv.native.cdelt - golden["endpoint_step"].as_f64().unwrap()).abs() < 1e-12, "{}", pv.native.cdelt);
+        assert_eq!(pv.native.crval, table[0] as f64);
+        assert!(!pv.notes.iter().any(|n| n.contains("channel number")), "{:?}", pv.notes);
+    }
+
+    #[test]
+    fn a_non_linear_tab_axis_still_gives_a_pv_for_display() {
+        let table = [1.0f32, 1.1, 1.3, 1.6, 2.0, 2.5];
+        let dir = tempfile::tempdir().unwrap();
+        let pv = tab_cube_pv(&dir, "bent_tab.fits", &table)
+            .unwrap_or_else(|e| panic!("a table that is not linear gave no PV for display: {e:#}"));
+        assert_eq!(pv.spectral_values, table.iter().map(|&v| v as f64).collect::<Vec<f64>>());
+        assert_eq!(pv.spectral_unit, "um");
+        assert_eq!((pv.native.ctype.as_deref(), pv.native.crval, pv.native.cdelt), (None, 0.0, 1.0));
+        assert!(pv.notes.iter().any(|n| n.contains("deviates from linear") && n.contains("channel number")), "{:?}", pv.notes);
+        assert_eq!(pv.data.dim(), (6, 4));
+        assert!(pv.data.iter().all(|v| v.is_finite()));
     }
 
     #[test]

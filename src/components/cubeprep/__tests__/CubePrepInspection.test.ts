@@ -101,7 +101,7 @@ const CHECK: ResolutionCheck = {
 };
 
 function openEdit(): ReactNode {
-  find(render(), (p) => Array.isArray(p.children) && p.children[0] === "Edit")!.onClick!();
+  find(render(), (p) => "aria-pressed" in p && Array.isArray(p.children) && typeof p.children[0] === "string" && /^\d+\. Edit$/.test(p.children[0]))!.onClick!();
   return render();
 }
 

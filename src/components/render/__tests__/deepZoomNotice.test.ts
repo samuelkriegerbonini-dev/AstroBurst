@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 vi.mock("../../../services/tiles", () => ({ generateTiles: vi.fn(), generateTilesRgb: vi.fn() }));
 vi.mock("../../../infrastructure/tauri", () => ({ getOutputDirTiles: vi.fn(), getPreviewUrl: vi.fn() }));
 
-import DeepZoomViewer, { DEEP_ZOOM_OVERLAYS_NOTICE } from "../DeepZoomviewer";
+import DeepZoomViewer, { DEEP_ZOOM_OVERLAYS_NOTICE, DEEP_ZOOM_UNAVAILABLE } from "../DeepZoomviewer";
 
 describe("Deep Zoom overlay notice", () => {
   it("says that the grid, regions and apertures are not drawn", () => {
@@ -20,5 +20,11 @@ describe("Deep Zoom overlay notice", () => {
     );
     expect(html).toContain(DEEP_ZOOM_OVERLAYS_NOTICE);
     expect(html).toContain('role="note"');
+  });
+});
+
+describe("Deep Zoom without its tile viewer", () => {
+  it("tells the user the view is unavailable, without developer instructions", () => {
+    expect(DEEP_ZOOM_UNAVAILABLE).toBe("Deep Zoom is unavailable in this build");
   });
 });

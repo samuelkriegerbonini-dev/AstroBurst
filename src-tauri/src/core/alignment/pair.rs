@@ -4,7 +4,9 @@ use anyhow::Result;
 use ndarray::Array2;
 use rayon::prelude::*;
 
-use crate::core::alignment::affine::{self, AffineAlignMethod, AffineAlignResult, AlignmentStars, TranslationCheck};
+use crate::core::alignment::affine::{
+    self, AffineAlignMethod, AffineAlignResult, AffineTransform, AlignmentStars, TranslationCheck,
+};
 use crate::core::alignment::phase_correlation::{self, PhaseCorrelationResult};
 use crate::core::imaging::sampling::bicubic_sample;
 use crate::types::compose::AlignMethod;
@@ -141,45 +143,64 @@ pub fn align_pair_to(
     rows: usize,
     cols: usize,
 ) -> Result<AlignPairResult> {
+    align_pair_recorded(reference, target, method, rows, cols).map(|(result, _)| result)
+}
+
+pub fn align_pair_recorded(
+    reference: &AlignReference,
+    target: &Array2<f32>,
+    method: AlignMethod,
+    rows: usize,
+    cols: usize,
+) -> Result<(AlignPairResult, AffineTransform)> {
     let registration = match method {
         AlignMethod::PhaseCorrelation => {
             let pc = phase_correlation::phase_correlate(reference.image, target);
             if !confident_translation(&pc, rows, cols) {
-                return Ok(AlignPairResult {
-                    aligned: target.clone(),
-                    offset: (0.0, 0.0),
-                    center_offset: (0.0, 0.0),
-                    registered: false,
-                    confidence: pc.confidence,
-                    method_used: PHASE_CORRELATION_IDENTITY.into(),
-                    matched_stars: 0,
-                    inliers: 0,
-                    residual_px: 0.0,
-                    rejection: None,
-                });
+                return Ok((
+                    AlignPairResult {
+                        aligned: target.clone(),
+                        offset: (0.0, 0.0),
+                        center_offset: (0.0, 0.0),
+                        registered: false,
+                        confidence: pc.confidence,
+                        method_used: PHASE_CORRELATION_IDENTITY.into(),
+                        matched_stars: 0,
+                        inliers: 0,
+                        residual_px: 0.0,
+                        rejection: None,
+                    },
+                    AffineTransform::identity(),
+                ));
             }
             register_translation(reference, target, &pc, rows, cols)
         }
         AlignMethod::Affine => register_stars(reference, target),
     };
     Ok(match registration {
-        Registration::Shift { dy, dx, confidence, rejection } => AlignPairResult {
-            aligned: shift_image_subpixel(target, dy, dx),
-            offset: (dy, dx),
-            center_offset: (dy, dx),
-            registered: true,
-            confidence,
-            method_used: PHASE_CORRELATION.into(),
-            matched_stars: 0,
-            inliers: 0,
-            residual_px: 0.0,
-            rejection,
-        },
+        Registration::Shift { dy, dx, confidence, rejection } => (
+            AlignPairResult {
+                aligned: shift_image_subpixel(target, dy, dx),
+                offset: (dy, dx),
+                center_offset: (dy, dx),
+                registered: true,
+                confidence,
+                method_used: PHASE_CORRELATION.into(),
+                matched_stars: 0,
+                inliers: 0,
+                residual_px: 0.0,
+                rejection,
+            },
+            AffineTransform::translation(dx, dy),
+        ),
         Registration::Warp(result) => {
-            let warped = affine::warp_image(target, &result.transform, rows, cols);
-            star_pair_result(warped, true, result, rows, cols)
+            let transform = result.transform;
+            let warped = affine::warp_image(target, &transform, rows, cols);
+            (star_pair_result(warped, true, result, rows, cols), transform)
         }
-        Registration::Failed(result) => star_pair_result(target.clone(), false, result, rows, cols),
+        Registration::Failed(result) => {
+            (star_pair_result(target.clone(), false, result, rows, cols), AffineTransform::identity())
+        }
     })
 }
 

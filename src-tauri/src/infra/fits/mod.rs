@@ -1,16 +1,10 @@
-pub mod asdf_hdu;
 pub mod compress;
-pub mod compressed_guard;
-pub mod dispatcher;
-pub mod file_bytes;
-pub mod gzip;
-pub mod header_peek;
-pub mod mef_writer;
-pub mod reader;
-pub mod spectrum1d;
-pub mod table;
-pub mod writer;
-pub mod x1dints;
-pub mod bzip;
-pub mod int_tiles;
-pub mod band_planes;
+pub mod read;
+pub mod resolve;
+pub mod tables;
+pub mod write;
+
+pub use read::{asdf_hdu, compressed_guard, file_bytes, header_peek, int_tiles, reader};
+pub use resolve::{band_planes, bzip, dispatcher, gzip};
+pub use tables::{spectrum1d, table, x1dints};
+pub use write::{mef_writer, writer};

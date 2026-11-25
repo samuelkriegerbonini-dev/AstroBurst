@@ -58,6 +58,7 @@ import { depthStore } from "../../../hooks/useDepthStore";
 import { imageDepthEntry } from "../../../utils/measurementLogQa";
 import { DEFAULT_RESOLUTION_SETTINGS } from "../../../utils/resolutionText";
 import { RunButton } from "../../ui";
+import StaleResultNote from "../StaleResultNote";
 
 type Props = Record<string, unknown> & { children?: ReactNode };
 type Element = ReactElement<Props>;
@@ -256,6 +257,22 @@ describe("DepthPanelInner", () => {
     hooks.mount();
     const empty = runButton(show({ filePath: null }));
     expect(empty.props.disabled).toBe(true);
+  });
+
+  it("marks the depth as stale once the radius, sigma or seed differ from the measured ones", () => {
+    const props = { filePath: "a.fits", measureKey: "v1" };
+    const isStale = (shown: Element[]) => shown.some((e) => e.type === StaleResultNote);
+    live.state = { depth: DEPTH, loading: false, error: null, options: depthOptions(DEFAULT_DEPTH_FIELDS) };
+    let shown = show(props);
+    expect(isStale(shown)).toBe(false);
+    (field(shown, "nSigma").props.onValueChange as (value: number | null) => void)(3);
+    shown = show(props);
+    expect(isStale(shown)).toBe(true);
+    (field(shown, "nSigma").props.onValueChange as (value: number | null) => void)(DEFAULT_DEPTH_FIELDS.nSigma);
+    shown = show(props);
+    expect(isStale(shown)).toBe(false);
+    (field(shown, "seed").props.onValueChange as (value: number | null) => void)(7);
+    expect(isStale(show(props))).toBe(true);
   });
 
   it("the result is drawn on the image and removed when hidden", () => {

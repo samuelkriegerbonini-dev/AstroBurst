@@ -1,0 +1,710 @@
+{
+ "golden": "tso/index",
+ "produced_by": {
+  "script": "tso_golden_index.py",
+  "command": "python -I scripts/oracle/tso_golden_index.py <data root> <goldens/tso dir>",
+  "environment": {
+   "python": "3.13.17",
+   "numpy": "2.5.4",
+   "astropy": "8.0.2"
+  },
+  "generated": "2026-11-09",
+  "inputs": [
+   {
+    "file": "MANIFEST.tsv",
+    "set": "",
+    "bytes": 18884,
+    "sha256": "4e3aec05fdb89a32731010a98f098bd595dc4076946032c96ae61c3e8b0dc99c"
+   }
+  ],
+  "number_format": "float64 written with Python repr (shortest round-trip decimal); null stands for NaN or not applicable; integers are exact",
+  "data_root_note": "inputs live under docs/notCommit/science-focus-data (not committed); sha256 and bytes are the MANIFEST.tsv values, re-checked on disk by tso_golden_index.py"
+ },
+ "data_files_checked": 34,
+ "all_sizes_signatures_and_sha256_ok": true,
+ "data_files": [
+  {
+   "set": "tso/A1",
+   "file": "jw02459-o013_t007_nircam_f322w2-grismr-subgrism64_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 1356480,
+   "bytes_on_disk": 1356480,
+   "sha256_manifest": "5aac57e7c57a9a2f0d98fa2bf488f2971f87c729f5ed2a3657480244720e1a1b",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/A3",
+   "file": "jw07073-o004_t001_niriss_clear-gr700xd-substrip256_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 3674880,
+   "bytes_on_disk": 3674880,
+   "sha256_manifest": "96e2fe751b1538cc7418ddcbd451fb740af1824d85007919cce7edac3137c9ad",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/A4",
+   "file": "jw04498-o013_t008_miri_p750l-slitlessprism_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 3686400,
+   "bytes_on_disk": 3686400,
+   "sha256_manifest": "e5a3b8b084bed0ea9688dcc174a5bb0b9aea3d468bf7b16e6a1ba524795fdf6c",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/A5",
+   "file": "jw03375-o001_20261013t072715_tso3_00001_asn.json",
+   "kind": "JSON",
+   "bytes_manifest": 3973,
+   "bytes_on_disk": 3973,
+   "sha256_manifest": "27e73019c144a546ebb70c7b8c45da3e471da5c4aac1e839af70ffd521be08c8",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/A5",
+   "file": "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 3980160,
+   "bytes_on_disk": 3980160,
+   "sha256_manifest": "af74a5f60dbe0765b0a056129e5567d105ea35c5fef144678ba529bc1c5eb48c",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/A5",
+   "file": "jw03375001001_03101_00001-seg001_nrs1_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 1607040,
+   "bytes_on_disk": 1607040,
+   "sha256_manifest": "6bbfbf36a70c1d67947887c087f62627d3f38f477252b6c5099945aa1f49792d",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/A5",
+   "file": "jw03375001001_03101_00001-seg001_nrs2_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 2491200,
+   "bytes_on_disk": 2491200,
+   "sha256_manifest": "b6d46b5ea64906327fe7ea8c7b53b7f83a47590ab7c873bb2a0fdea57e198c35",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/A6",
+   "file": "jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 4124160,
+   "bytes_on_disk": 4124160,
+   "sha256_manifest": "dbf1983b952e00748906854e3e4c48d62daadc9a87949d95378e037bbcbe584f",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/B1",
+   "file": "jw01274-o013_t008_miri_p750l-slitlessprism_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 780480,
+   "bytes_on_disk": 780480,
+   "sha256_manifest": "1954b9b953605d7d4b55baceccd0df39a06c5b8638431d4dc5935a98ca7bba05",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/C",
+   "file": "jw02327-o001_20260925t123033_tso3_00001_asn.json",
+   "kind": "JSON",
+   "bytes_manifest": 5049,
+   "bytes_on_disk": 5049,
+   "sha256_manifest": "fbeece638084ba722ee5f2748e6fbf2d140cae6e010db6d15a71fe5b394b03ab",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/C",
+   "file": "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 8429760,
+   "bytes_on_disk": 8429760,
+   "sha256_manifest": "07a821f0ea69c03394ab08366b982c2e98bd9a4dbdb65ed4e5ef19630f37ba14",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/C",
+   "file": "jw02327001001_03101_00001-seg001_nrs1_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 1641600,
+   "bytes_on_disk": 1641600,
+   "sha256_manifest": "96e7b1f76396d97beb2459f0f7b05d6f85867ef170ed9121b2adb33938d3df09",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/C",
+   "file": "jw02327001001_03101_00001-seg002_nrs1_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 1641600,
+   "bytes_on_disk": 1641600,
+   "sha256_manifest": "60e0da6ef9594c071324a99d6ae5b01ca2e6d7cff10110c5468be23c9c1a3dce",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/C",
+   "file": "jw02327001001_03101_00001-seg003_nrs1_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 1641600,
+   "bytes_on_disk": 1641600,
+   "sha256_manifest": "08b466cd92ff73832e1269914c1ddeb7d69b37b47d187e418cbd025935a75f09",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/C",
+   "file": "jw02327001001_03101_00001-seg004_nrs1_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 1641600,
+   "bytes_on_disk": 1641600,
+   "sha256_manifest": "33b684f8143e1c4c5fe793c4b9d53f635e3dfb18b3947ee916ccd048f7cf52f4",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/C",
+   "file": "jw02327001001_03101_00001-seg005_nrs1_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 1641600,
+   "bytes_on_disk": 1641600,
+   "sha256_manifest": "f7081a7346a37a98e4856ba9c6e2ce2992a326fb1604dda9853b9afea1d97e8d",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/C",
+   "file": "jw02327001001_03101_00001-seg006_nrs1_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 912960,
+   "bytes_on_disk": 912960,
+   "sha256_manifest": "6c1ed276939742a4a0e1553bdf0d4c8038ceed611f19223d3c2d2cc1fa371373",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/E1",
+   "file": "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_x1dints.fits",
+   "kind": "FITS",
+   "bytes_manifest": 14702400,
+   "bytes_on_disk": 14702400,
+   "sha256_manifest": "a5e7022d22e779fdf43b14fba6e7d23644c9547c920b6a52c13435c63706bfbc",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw01201-o103_t012_niriss_clear-gr700xd-substrip256_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 12308,
+   "bytes_on_disk": 12308,
+   "sha256_manifest": "7efda2137471668fb127a9a5687528fe6cc7cf57024de55b5b165b17591cee27",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw01274-o013_t008_miri_p750l-slitlessprism_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 744,
+   "bytes_on_disk": 744,
+   "sha256_manifest": "4ecaf28ff36f114e16a09796795f5019c370c6f36131da8f5e302ed91d510704",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw01366-o001_t001_niriss_clear-gr700xd-substrip256_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 50604,
+   "bytes_on_disk": 50604,
+   "sha256_manifest": "619a2a743b2198feb10365ff8a6267a4a4e7e9acdcfe8a9a556356cb1340a43b",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw01366-o002_t001_nircam_f322w2-grismr-subgrism256_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 20478,
+   "bytes_on_disk": 20478,
+   "sha256_manifest": "746468f704ae7d467daf3efe9e0b900f672482a51987597089f8d2f09bdae54c",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw01366-o003_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 52311,
+   "bytes_on_disk": 52311,
+   "sha256_manifest": "35e5ae251caf2b8feac925218a5d2a0bffdab85f432a3f5b2820c41aa8eb0bea",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw01538-o067_t013_niriss_clear-gr700xd-substrip96_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 1018,
+   "bytes_on_disk": 1018,
+   "sha256_manifest": "600a0563497387229bdd90513e951156b2aa239223b2a5348ced3b246788382c",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 3155,
+   "bytes_on_disk": 3155,
+   "sha256_manifest": "de31bef3e407461d099beadeffd884e2fa4ea37df5356c4bc9894991f9e092c5",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 14107,
+   "bytes_on_disk": 14107,
+   "sha256_manifest": "9b14e06ec70a31f2f7777530518721ea160265e595876676db54af4c20369055",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw02459-o013_t007_nircam_f322w2-grismr-subgrism64_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 697,
+   "bytes_on_disk": 697,
+   "sha256_manifest": "45a93144bc90b7103dfcafc0b085610865f565aa0616a96ab97bfbc19ab1f5dc",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw02965-o002_t001_miri_p750l-slitlessprism_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 751,
+   "bytes_on_disk": 751,
+   "sha256_manifest": "77917cd91508f089b745e8f9d08b5579b9f6685e82c13d0a2dbc55f22b2d9e2d",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 1946,
+   "bytes_on_disk": 1946,
+   "sha256_manifest": "3ba5f9d855bf7c66706437faa95eb66c101bf813e0bcbda500dfc3395322f686",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw04498-o013_t008_miri_p750l-slitlessprism_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 4166,
+   "bytes_on_disk": 4166,
+   "sha256_manifest": "35dd53592a4c01c9c809b9b37b20fc8df4cbfd67a06b56ba959d6ff2e21d15f7",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 4376,
+   "bytes_on_disk": 4376,
+   "sha256_manifest": "6bb945ce4d6ac3cec05cd68e6234e960851b5cfef701a0972107536db9363f33",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw06828-o003_t001_nirspec_clear-prism-s1600a1-sub512_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 488,
+   "bytes_on_disk": 488,
+   "sha256_manifest": "13506cbbf45e120d6c20f808c79f172f4e3b7b98d47ab3b60b47ff049030fb61",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw07073-o004_t001_niriss_clear-gr700xd-substrip256_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 1310,
+   "bytes_on_disk": 1310,
+   "sha256_manifest": "386d87d3a81265bc4b5d471f08a503524d920c815d62c5c828eb3dadbf96d0d8",
+   "sha256_matches": true,
+   "signature_ok": true
+  },
+  {
+   "set": "tso/whtlt",
+   "file": "jw07849-o002_t002_miri_p750l-slitlessprism_whtlt.ecsv",
+   "kind": "ECSV",
+   "bytes_manifest": 6271,
+   "bytes_on_disk": 6271,
+   "sha256_manifest": "beacb0f5c508fecf6a5adf552b9a9c2091d47799a0de5ddfaa65e01140c551d9",
+   "sha256_matches": true,
+   "signature_ok": true
+  }
+ ],
+ "goldens": [
+  {
+   "golden_file": "quicklook_jw02358-o030_nirspec_prism.json",
+   "kind": "tso/quicklook",
+   "label": "quick look, no limb darkening or systematics model",
+   "script": "tso_golden_quicklook.py",
+   "inputs": [
+    "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_x1dints.fits",
+    "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "stitch_jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048.json",
+   "kind": "tso/stitch",
+   "label": "C",
+   "script": "tso_golden_stitch.py",
+   "inputs": [
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_x1dints.fits",
+    "jw02327001001_03101_00001-seg001_nrs1_x1dints.fits",
+    "jw02327001001_03101_00001-seg002_nrs1_x1dints.fits",
+    "jw02327001001_03101_00001-seg003_nrs1_x1dints.fits",
+    "jw02327001001_03101_00001-seg004_nrs1_x1dints.fits",
+    "jw02327001001_03101_00001-seg005_nrs1_x1dints.fits",
+    "jw02327001001_03101_00001-seg006_nrs1_x1dints.fits"
+   ]
+  },
+  {
+   "golden_file": "stitch_jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048.json",
+   "kind": "tso/stitch",
+   "label": "A5",
+   "script": "tso_golden_stitch.py",
+   "inputs": [
+    "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_x1dints.fits",
+    "jw03375001001_03101_00001-seg001_nrs1_x1dints.fits",
+    "jw03375001001_03101_00001-seg001_nrs2_x1dints.fits"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw01201-o103_t012_niriss_clear-gr700xd-substrip256.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw01201-o103_t012_niriss_clear-gr700xd-substrip256_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw01274-o013_t008_miri_p750l-slitlessprism.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw01274-o013_t008_miri_p750l-slitlessprism_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw01366-o001_t001_niriss_clear-gr700xd-substrip256.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw01366-o001_t001_niriss_clear-gr700xd-substrip256_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw01366-o002_t001_nircam_f322w2-grismr-subgrism256.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw01366-o002_t001_nircam_f322w2-grismr-subgrism256_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw01366-o003_t001_nirspec_f290lp-g395h-s1600a1-sub2048.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw01366-o003_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw01538-o067_t013_niriss_clear-gr700xd-substrip96.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw01538-o067_t013_niriss_clear-gr700xd-substrip96_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw02459-o013_t007_nircam_f322w2-grismr-subgrism64.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw02459-o013_t007_nircam_f322w2-grismr-subgrism64_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw02965-o002_t001_miri_p750l-slitlessprism.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw02965-o002_t001_miri_p750l-slitlessprism_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw04498-o013_t008_miri_p750l-slitlessprism.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw04498-o013_t008_miri_p750l-slitlessprism_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw06828-o003_t001_nirspec_clear-prism-s1600a1-sub512.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw06828-o003_t001_nirspec_clear-prism-s1600a1-sub512_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw07073-o004_t001_niriss_clear-gr700xd-substrip256.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw07073-o004_t001_niriss_clear-gr700xd-substrip256_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "whtlt_jw07849-o002_t002_miri_p750l-slitlessprism.json",
+   "kind": "tso/whtlt",
+   "label": null,
+   "script": "tso_golden_whtlt.py",
+   "inputs": [
+    "jw07849-o002_t002_miri_p750l-slitlessprism_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw01274-o013_t008_miri_p750l-slitlessprism.json",
+   "kind": "tso/x1dints",
+   "label": "B1",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw01274-o013_t008_miri_p750l-slitlessprism_x1dints.fits",
+    "jw01274-o013_t008_miri_p750l-slitlessprism_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048.json",
+   "kind": "tso/x1dints",
+   "label": "C1",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_x1dints.fits",
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02327001001_03101_00001-seg001_nrs1.json",
+   "kind": "tso/x1dints",
+   "label": "C2",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02327001001_03101_00001-seg001_nrs1_x1dints.fits",
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02327001001_03101_00001-seg002_nrs1.json",
+   "kind": "tso/x1dints",
+   "label": "C3",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02327001001_03101_00001-seg002_nrs1_x1dints.fits",
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02327001001_03101_00001-seg003_nrs1.json",
+   "kind": "tso/x1dints",
+   "label": "C4",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02327001001_03101_00001-seg003_nrs1_x1dints.fits",
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02327001001_03101_00001-seg004_nrs1.json",
+   "kind": "tso/x1dints",
+   "label": "C5",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02327001001_03101_00001-seg004_nrs1_x1dints.fits",
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02327001001_03101_00001-seg005_nrs1.json",
+   "kind": "tso/x1dints",
+   "label": "C6",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02327001001_03101_00001-seg005_nrs1_x1dints.fits",
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02327001001_03101_00001-seg006_nrs1.json",
+   "kind": "tso/x1dints",
+   "label": "C7",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02327001001_03101_00001-seg006_nrs1_x1dints.fits",
+    "jw02327-o001_t001_nirspec_f290lp-g395m-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048.json",
+   "kind": "tso/x1dints",
+   "label": "E1",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_x1dints.fits",
+    "jw02358-o030_t003_nirspec_clear-prism-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw02459-o013_t007_nircam_f322w2-grismr-subgrism64.json",
+   "kind": "tso/x1dints",
+   "label": "A1",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw02459-o013_t007_nircam_f322w2-grismr-subgrism64_x1dints.fits",
+    "jw02459-o013_t007_nircam_f322w2-grismr-subgrism64_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048.json",
+   "kind": "tso/x1dints",
+   "label": "A5",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_x1dints.fits",
+    "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw03375001001_03101_00001-seg001_nrs1.json",
+   "kind": "tso/x1dints",
+   "label": "A5a",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw03375001001_03101_00001-seg001_nrs1_x1dints.fits",
+    "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw03375001001_03101_00001-seg001_nrs2.json",
+   "kind": "tso/x1dints",
+   "label": "A5b",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw03375001001_03101_00001-seg001_nrs2_x1dints.fits",
+    "jw03375-o001_t001_nirspec_f290lp-g395h-s1600a1-sub2048_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw04498-o013_t008_miri_p750l-slitlessprism.json",
+   "kind": "tso/x1dints",
+   "label": "A4",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw04498-o013_t008_miri_p750l-slitlessprism_x1dints.fits",
+    "jw04498-o013_t008_miri_p750l-slitlessprism_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512.json",
+   "kind": "tso/x1dints",
+   "label": "A6",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512_x1dints.fits",
+    "jw04967-o005_t004_nirspec_clear-prism-s1600a1-sub512_whtlt.ecsv"
+   ]
+  },
+  {
+   "golden_file": "x1dints_jw07073-o004_t001_niriss_clear-gr700xd-substrip256.json",
+   "kind": "tso/x1dints",
+   "label": "A3",
+   "script": "tso_golden_x1dints.py",
+   "inputs": [
+    "jw07073-o004_t001_niriss_clear-gr700xd-substrip256_x1dints.fits",
+    "jw07073-o004_t001_niriss_clear-gr700xd-substrip256_whtlt.ecsv"
+   ]
+  }
+ ],
+ "test_gate": "real-data tests are ignored tests gated by an environment variable that points at the data root; nothing from the data folder is committed"
+}

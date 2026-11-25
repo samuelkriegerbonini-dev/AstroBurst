@@ -8,9 +8,10 @@ import { withNodataEntry } from "../utils/displayTransfer";
 export type { ColormapLutResult, ColormapName, DisplaySettings, ScaleLimits } from "../shared/types/display";
 export type { PixelProbeResult } from "../shared/types/analysis";
 
-export function computeScaleLimits(path: string, s: DisplaySettings): Promise<ScaleLimits> {
+export function computeScaleLimits(path: string, s: DisplaySettings, excludeDq = false): Promise<ScaleLimits> {
   return typedInvoke<ScaleLimits>("compute_scale_limits_cmd", {
     path,
+    excludeDq,
     algorithm: s.limits,
     vmin: s.userLo,
     vmax: s.userHi,

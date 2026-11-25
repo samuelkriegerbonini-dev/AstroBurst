@@ -13,6 +13,8 @@ import { spccWavelengths } from "../../../utils/spccWavelengths";
 import { solvedWcsVersion, spccSolvedWcsPath, spccWcsSource, subscribeSolvedWcs } from "../../../utils/solvedWcs";
 import { stfTripleOf, wbStretchNote, type CompositeStfTriple } from "../../../utils/compositeStfResponse";
 import { useCompositeStf } from "../../../context/CompositeContext";
+import { useWizardRunGuard } from "../../../context/WizardRunGuardContext";
+import { WIZARD_INPUTS_CHANGED } from "../../../utils/wizardRunGuard";
 
 const SpccPanel = lazy(() => import("../SpccPanel"));
 
@@ -35,6 +37,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
   useSyncExternalStore(subscribeSolvedWcs, solvedWcsVersion, solvedWcsVersion);
   const wcsSource = spccWcsSource(state);
   const { compositeStfLinked } = useCompositeStf();
+  const { beginComposite, discardLateComposite } = useWizardRunGuard();
 
   const [localR, setLocalR] = useState(state.wbR);
   const [localG, setLocalG] = useState(state.wbG);
@@ -166,12 +169,17 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
     setLoading(true);
     setError("");
     setElapsed(null);
+    const isCurrent = beginComposite();
     try {
       const dir = await getOutputDir();
       const scnr = state.scnrEnabled
         ? { enabled: true, method: scnrMethod, amount: state.scnrAmount, preserveLuminance: preserveLum }
         : undefined;
       const res = await calibrateAndScnr(dir, appliedR, appliedG, appliedB, scnr, compositeStfLinked);
+      if (!isCurrent()) {
+        discardLateComposite();
+        throw new Error(WIZARD_INPUTS_CHANGED);
+      }
       onCompositeOp({
         kind: "colorBalance",
         mode: state.wbMode,
@@ -192,13 +200,18 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
     } finally {
       setLoading(false);
     }
-  }, [appliedR, appliedG, appliedB, state.wbMode, state.scnrEnabled, state.scnrAmount, scnrMethod, preserveLum, compositeStfLinked, onResult, onCompositeOp]);
+  }, [appliedR, appliedG, appliedB, state.wbMode, state.scnrEnabled, state.scnrAmount, scnrMethod, preserveLum, compositeStfLinked, onResult, onCompositeOp, beginComposite, discardLateComposite]);
 
   const handleReset = useCallback(async () => {
     setLoading(true);
     setError("");
+    const isCurrent = beginComposite();
     try {
       const res = await resetWb(await getOutputDir(), compositeStfLinked);
+      if (!isCurrent()) {
+        discardLateComposite();
+        throw new Error(WIZARD_INPUTS_CHANGED);
+      }
       setLocalR(1.0);
       setLocalG(1.0);
       setLocalB(1.0);
@@ -217,7 +230,7 @@ export default function ColorBalanceStep({ state, doneFiles, filterDetections, o
     } finally {
       setLoading(false);
     }
-  }, [compositeStfLinked, onResult, onWbChange, onCompositeOp]);
+  }, [compositeStfLinked, onResult, onWbChange, onCompositeOp, beginComposite, discardLateComposite]);
 
   const isFactorsNeutral = appliedR === 1.0 && appliedG === 1.0 && appliedB === 1.0;
 
