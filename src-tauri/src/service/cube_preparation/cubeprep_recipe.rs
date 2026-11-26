@@ -1671,7 +1671,7 @@ mod tests {
                 assert_eq!((noise.get_i64("NAXIS"), maps.len()), (Some(3), 6), "{}", product.path);
                 let filters = load_bintable(target.join(&product.path).to_str().unwrap(), extensions.iter().find(|hdu| hdu.extname.as_deref() == Some("FILTERS")).unwrap().index).unwrap();
                 let matched = folder == "08_match" || folder == "09_export";
-                let statuses: Vec<&str> = if matched { vec!["matched", "matched", "matched", "matched", "matched", "reference"] } else { vec!["unmatched"; 6] };
+                let statuses: Vec<&str> = if matched { vec!["mismatched", "matched", "matched", "mismatched", "mismatched", "reference"] } else { vec!["unmatched"; 6] };
                 assert_eq!(filters.text_column("MATCH").unwrap(), statuses, "{}", product.path);
                 let column = |name: &str| match filters.flattened_column(name).unwrap().values {
                     ColumnValues::F64(values) => values,
@@ -1679,7 +1679,7 @@ mod tests {
                 };
                 assert!(column("NOISCORR_ALIGN").iter().all(|factor| factor.is_finite() && *factor >= 1.0 - 1e-9), "{}", product.path);
                 let factors = column("NOISCORR_MATCH");
-                assert!(factors.iter().zip(&statuses).all(|(factor, status)| if *status == "matched" { *factor > 1.0 } else { (factor - 1.0).abs() < 1e-12 }), "{}: {factors:?}", product.path);
+                assert!(factors.iter().zip(&statuses).all(|(factor, status)| if matches!(*status, "matched" | "mismatched") { *factor > 1.0 } else { (factor - 1.0).abs() < 1e-12 }), "{}: {factors:?}", product.path);
             }
             checked.push(folder.to_string());
         }
@@ -2322,7 +2322,7 @@ mod tests {
     const SCIENTIFIC_PIVOT_UM: [f64; SCIENTIFIC_PLANES] = [0.804553, 1.500744, 1.988648, 2.76174, 3.568362, 4.404315];
     const SCIENTIFIC_PSF_FWHM_ARCSEC: [f64; SCIENTIFIC_PLANES] = [0.15369, 0.14046, 0.14152, 0.14502, 0.16839, 0.13884];
     const SCIENTIFIC_PSF_FWHM_TOLERANCE_ARCSEC: f64 = 5e-6;
-    const SCIENTIFIC_MATCH: [&str; SCIENTIFIC_PLANES] = ["matched", "matched", "matched", "matched", "matched", "reference"];
+    const SCIENTIFIC_MATCH: [&str; SCIENTIFIC_PLANES] = ["mismatched", "matched", "matched", "mismatched", "mismatched", "reference"];
     const SCIENTIFIC_KERNEL_HALF_WIDTH: usize = 10;
     const SCIENTIFIC_KERNELS: [&str; SCIENTIFIC_PLANES] = [
         "kernel_f814w_to_f444w.fits",
@@ -2416,7 +2416,7 @@ mod tests {
         let aligned_sizes: Vec<usize> = aligned.iter().map(|(header, _)| header.get_i64("NCORRK").unwrap() as usize).collect();
         let supports: Vec<usize> = maps.iter().map(support).collect();
         let expected_supports: Vec<usize> =
-            aligned_sizes.iter().zip(SCIENTIFIC_MATCH).map(|(size, status)| if status == "matched" { size + 4 * SCIENTIFIC_KERNEL_HALF_WIDTH } else { *size }).collect();
+            aligned_sizes.iter().zip(SCIENTIFIC_MATCH).map(|(size, status)| if matches!(status, "matched" | "mismatched") { size + 4 * SCIENTIFIC_KERNEL_HALF_WIDTH } else { *size }).collect();
         assert_eq!(supports, expected_supports, "aligned map sizes {aligned_sizes:?}");
         assert_eq!(k, *expected_supports.iter().max().unwrap());
         assert!(maps.iter().all(|map| map.dim() == (k, k) && (map[[centre, centre]] - 1.0).abs() < 1e-6 && map.iter().all(|value| value.is_finite())));
@@ -2892,8 +2892,9 @@ mod tests {
         use ndarray::Array2;
         use crate::core::cubeprep::psf_io::{fit_gaussian, load_psf, GAUSSIAN_SIGMA_TO_FWHM};
         use crate::infra::fits::writer::write_fits_mono;
-        let golden = "scripts/oracle/cubeprep_review_goldens.py with scipy 1.18.1 and astropy 8.0.2";
-        let (peak, next, diagonal, second, fwhm_mas) = (0.427415874039504, 0.1116355599056028, 0.02915778049526907, 0.0015409447118299364, 57.47672238697005);
+        let golden = "scripts/oracle/cubeprep_review_goldens.py with numpy 2.5.4, scipy 1.18.1 and astropy 8.0.2";
+        let (peak, next, diagonal, second) = (0.4262694044141988, 0.11178305916283471, 0.029313510536048727, 0.0015280647145696751);
+        let integrated_fwhm_mas = 57.47672238697005;
         let (side, pixel_mas, sigma_mas) = (161usize, 15.8, 50.0 / GAUSSIAN_SIGMA_TO_FWHM);
         let line: Vec<f64> = (0..side)
             .map(|i| {
@@ -2921,10 +2922,10 @@ mod tests {
         let centre = prepared.data.nrows() / 2;
         for (name, (dy, dx), expected) in [("peak", (0, 0), peak), ("next", (0, 1), next), ("diagonal", (1, 1), diagonal), ("second", (0, 2), second)] {
             let got = prepared.data[[centre + dy, centre + dx]];
-            assert!((got - expected).abs() < 2e-3 * peak, "{name}: {got} against the pixel-integrated Gaussian {expected} ({golden})");
+            assert!((got - expected).abs() < 1e-9 * peak, "{name}: {got} against {expected}, the scipy cubic spline of the cumulative flux on the same input ({golden}, area_method_*)");
         }
         let fitted = fit_gaussian(&prepared.data).unwrap().fwhm_px * 40.0;
-        assert!((fitted / fwhm_mas - 1.0).abs() < 0.01, "FWHM {fitted} mas against {fwhm_mas} mas ({golden})");
+        assert!((fitted / integrated_fwhm_mas - 1.0).abs() < 0.01, "FWHM {fitted} mas against {integrated_fwhm_mas} mas of the analytic pixel-integrated Gaussian ({golden}, integrated_fwhm_mas)");
 
         let default = psfs_only_run(step(None), &dir.path().join("default"));
         assert!(default.steps[0].parameters.get("method").is_none(), "an absent method is not written into the saved recipe");

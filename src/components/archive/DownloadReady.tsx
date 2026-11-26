@@ -11,7 +11,7 @@ interface DownloadReadyViewProps {
   onDismiss: (item: MastDownloadItem) => void;
 }
 
-export function readyText(item: Pick<MastDownloadItem, "filename">): string {
+function readyText(item: Pick<MastDownloadItem, "filename">): string {
   return `${item.filename} is downloaded and loaded in Files.`;
 }
 

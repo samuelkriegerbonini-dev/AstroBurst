@@ -747,6 +747,7 @@ mod tests {
     const NOTE_A_RS_WITH_B: &str = "a_rs and b are strongly correlated (r = -0.996): their errors are not independent";
     const NOTE_WHITE_RESIDUALS: &str = "time-averaging test: binned residuals reach 1.00 times the white-noise expectation (beta); the errors are not enlarged by it";
     const NOTE_DENSITY: &str = "stellar density from a_rs and the period: circular orbit, planet mass neglected";
+    const WARNING_GRAZING_OF_WD_1856: &str = "grazing transit (b + rp above 1): rp^2 = 52.9984 is not the fraction of light blocked; the model blocks 0.8582 of the flux at mid-transit";
     const WARNING_CORRELATED_NOISE_OF_WD_1856: &str = "correlated noise: binned residuals are 1.55 times above the white-noise expectation, so the errors of the fit are too small by about that factor";
     const NOTE_ECLIPSE_MODEL: &str = "model: eclipse of a uniform planet disc by the star, circular orbit; flux = baseline polynomial x (1 - depth x hidden fraction of the planet), depth = flux_ratio / (1 + flux_ratio)";
     const NOTE_MID_ECLIPSE_TIME: &str = "t0 is the mid-eclipse time; on a circular orbit it is the mid-transit time plus half a period";
@@ -1709,7 +1710,7 @@ mod tests {
         assert_close(param(&fit, "b").value + param(&fit, "rp").value, 13.943830956289091, 1e-6, "b + rp of the white dwarf fit");
         assert_eq!(
             grazing_lines(&fit),
-            ["grazing transit (b + rp above 1): rp^2 = 52.9984 is not the fraction of light blocked; the model blocks 0.8582 of the flux at mid-transit"],
+            [WARNING_GRAZING_OF_WD_1856],
             "the blocked fraction 0.8581831611 is the area two discs of radii 1 and 7.28 share at a distance of 6.663830956, over pi"
         );
 
@@ -1772,7 +1773,7 @@ mod tests {
         assert_eq!(
             fit.warnings,
             [
-                "grazing transit (b + rp above 1): rp^2 = 52.9984 is not the fraction of light blocked; the model blocks 0.8582 of the flux at mid-transit",
+                WARNING_GRAZING_OF_WD_1856,
                 "reduced chi2 = 5647.9: the model or the errors do not describe the scatter, so the errors of the fit are too small unless they are scaled",
                 WARNING_CORRELATED_NOISE_OF_WD_1856,
             ]
@@ -1821,7 +1822,7 @@ mod tests {
         assert_relative(param(&scaled, "t0").err.unwrap(), 3.2984918348266615e-05, 1e-3, "error of t0");
         assert_relative(param(&scaled, "b").err.unwrap(), 0.019200433369833982, 1e-3, "error of b");
         assert_relative(scaled.derived.inclination_err.unwrap(), 0.003274762474977313, 1e-3, "error of the inclination");
-        assert_eq!(scaled.warnings, [WARNING_CORRELATED_NOISE_OF_WD_1856]);
+        assert_eq!(scaled.warnings, [WARNING_GRAZING_OF_WD_1856, WARNING_CORRELATED_NOISE_OF_WD_1856]);
     }
 
     #[test]

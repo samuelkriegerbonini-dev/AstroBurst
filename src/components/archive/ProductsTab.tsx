@@ -45,7 +45,7 @@ interface ProductsTabProps {
 
 const OPEN_NOTE = "Download and open loads images, cubes, spectra, ramps and ECSV tables into the Workspace.";
 
-export function downloadNote(root: string | null): string {
+function downloadNote(root: string | null): string {
   const where = root ? `Downloads go to ${root}, one folder per mission and programme.` : "Downloads go to the mast folder of the Data folder (Settings), one folder per mission and programme.";
   return `${where} ${OPEN_NOTE}`;
 }

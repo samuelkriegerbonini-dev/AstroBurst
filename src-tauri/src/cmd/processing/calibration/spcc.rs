@@ -58,6 +58,26 @@ fn spcc_header(r_path: &str, r_entry: &ImageEntry, wcs_path: Option<&str>) -> an
     Ok((source_path.to_string(), shift_header(&header, &rect)))
 }
 
+fn white_reference_arg(name: Option<&str>) -> anyhow::Result<WhiteReference> {
+    match name.map(str::to_ascii_lowercase).as_deref() {
+        None | Some("spiral") | Some("average_spiral") => Ok(WhiteReference::AverageSpiral),
+        Some("g2v") => Ok(WhiteReference::G2V),
+        Some("photopic") => Ok(WhiteReference::Photopic),
+        Some(_) => anyhow::bail!(
+            "unknown white reference '{}': use g2v, photopic or average_spiral",
+            name.unwrap_or_default()
+        ),
+    }
+}
+
+fn catalog_arg(name: Option<&str>) -> anyhow::Result<SpccCatalog> {
+    match name {
+        None | Some("gaia") | Some("gaia_dr3") => Ok(SpccCatalog::GaiaDr3Tap),
+        Some("builtin") | Some("synthetic") => Ok(SpccCatalog::BuiltinBpRp),
+        Some(other) => anyhow::bail!("unknown SPCC catalog '{other}': use gaia or builtin"),
+    }
+}
+
 #[tauri::command]
 pub async fn spcc_calibrate_cmd(
     r_path: String,
@@ -71,23 +91,13 @@ pub async fn spcc_calibrate_cmd(
     wavelengths_nm: Option<[f64; 3]>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let wr = white_reference_arg(white_reference.as_deref())?;
+        let cat = catalog_arg(catalog.as_deref())?;
         let r_entry = load_from_cache_or_disk(&r_path)?;
         let g_entry = load_from_cache_or_disk(&g_path)?;
         let b_entry = load_from_cache_or_disk(&b_path)?;
 
         let (wcs_source, header) = spcc_header(&r_path, &r_entry, wcs_path.as_deref())?;
-
-        let wr = match white_reference.as_deref() {
-            Some("g2v") | Some("G2V") => WhiteReference::G2V,
-            Some("photopic") => WhiteReference::Photopic,
-            Some("spiral") | Some("average_spiral") | None => WhiteReference::AverageSpiral,
-            _ => WhiteReference::AverageSpiral,
-        };
-
-        let cat = match catalog.as_deref() {
-            Some("builtin") | Some("synthetic") => SpccCatalog::BuiltinBpRp,
-            _ => SpccCatalog::GaiaDr3Tap,
-        };
 
         let mut config = SpccConfig {
             min_snr: min_snr.unwrap_or(20.0),

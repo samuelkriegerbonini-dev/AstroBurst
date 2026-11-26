@@ -7,7 +7,7 @@ import SummaryLine from "./SummaryLine";
 import ResultsGallery from "./ResultsGallery";
 import ResultsTable from "./ResultsTable";
 import { BlockingError, EmptyResults, LockedView, NoImagesIntro, NotResolved, UnavailableView } from "./StateViews";
-import { currentMission, effectiveView, resultsState, rowsOnScreen, visibleBanner, type ArchiveState } from "./state/archiveReducer";
+import { currentMission, effectiveView, hasCountdown, resultsState, rowsOnScreen, visibleBanner, type ArchiveState } from "./state/archiveReducer";
 import type { ArchiveController } from "./state/archiveController";
 import { displayRows, isLevelSearch, searchProgress } from "./logic/resultsView";
 import type { AroundTarget } from "./logic/aroundQuery";
@@ -22,11 +22,6 @@ interface ResultsRegionProps {
   onEditQuery?: () => void;
   onSwitchToWorkspace?: () => void;
   onOpenDetail?: () => void;
-}
-
-export function hasCountdown(state: ArchiveState, now: number): boolean {
-  const pending = (until: number | null | undefined) => until !== null && until !== undefined && until > now;
-  return pending(state.thumbs.pausedUntil) || Object.values(state.banners).some((b) => pending(b?.until));
 }
 
 function ResultsBody({ state, ctl, onOpenDetail }: { state: ArchiveState; ctl: ArchiveController; onOpenDetail?: () => void }) {

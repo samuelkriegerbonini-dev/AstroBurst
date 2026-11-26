@@ -1328,10 +1328,13 @@ mod tests {
         let (rows, cols) = (64, 400);
         let ramp = |_: usize, x: usize| 900.0 + 200.0 * x as f32 / (cols - 1) as f32;
         let green = noisy(rows, cols, 41, |y, x| ramp(y, x) + 50.0);
-        let mut red = noisy(rows, cols, 42, ramp);
-        red.slice_mut(ndarray::s![.., 360..]).fill(0.0);
 
         for mode in [BackgroundMode::Subtract, BackgroundMode::Divide] {
+            let mut red = match mode {
+                BackgroundMode::Subtract => noisy(rows, cols, 42, ramp),
+                BackgroundMode::Divide => noisy(rows, cols, 42, |y, x| 0.9 * (ramp(y, x) + 50.0)),
+            };
+            red.slice_mut(ndarray::s![.., 360..]).fill(0.0);
             let config = BackgroundConfig { poly_degree: 1, mode: mode.clone(), ..BackgroundConfig::default() };
             let res = extract_background_linked(&[&red, &green], &green, &config).unwrap();
             let (r_out, g_out) = (&res.corrected[0], &res.corrected[1]);

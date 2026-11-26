@@ -31,7 +31,7 @@ function cardSelector(rowKey: string): string {
   return `[data-testid="mast-card"][data-row-key="${CSS.escape(rowKey)}"]`;
 }
 
-export function focusDateFilter(): void {
+function focusDateFilter(): void {
   document.querySelector<HTMLInputElement>('[data-testid="mast-filter-date"] input')?.focus();
 }
 

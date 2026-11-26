@@ -1555,7 +1555,7 @@ mod tests {
 
     const GOLDEN_MOMENT_NOISE: f32 = 0.01;
     const GOLDEN_MOMENT_SHA256: [(&str, &str); 2] = [
-        ("windows", "18371255802c383e4c3361bec9a0fc9e5ea1cdcc062e7e6a4d40fbf916d489e9"),
+        ("windows", "7a48e98e0c2f4860ecd5eb248194c4946f3ad7ec6db147b77ab49f55b5873fce"),
         ("no_windows", "0ee908c0ca5414d5728f4e53e7285c0145aa19f3c26f31ef79a48f28dea70717"),
     ];
 

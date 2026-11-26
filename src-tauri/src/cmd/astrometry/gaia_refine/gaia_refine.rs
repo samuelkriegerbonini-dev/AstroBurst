@@ -2152,7 +2152,7 @@ mod tests {
         assert_eq!((first.cache_source.as_str(), first.rows.len(), first.quality_columns), ("network", 2, true));
         let second = super::tie_catalogue(&q, Some(dir.path()), &fetch).unwrap();
         assert_eq!(second.cache_source, "memory");
-        crate::core::astrometry::catalog::forget_tie_cones();
+        crate::core::astrometry::catalog::forget_tie_cone(&q);
         let third = super::tie_catalogue(&q, Some(dir.path()), &fetch).unwrap();
         assert_eq!((third.cache_source.as_str(), third.rows.len()), ("disk", 2));
         assert_eq!(calls.get(), 1);

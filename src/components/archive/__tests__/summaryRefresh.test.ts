@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import SummaryLine from "../SummaryLine";
-import { archiveReducer, createInitialState, type ArchiveAction, type ArchiveState } from "../state/archiveReducer";
+import { archiveReducer, createInitialState, hasCountdown, type ArchiveAction, type ArchiveState } from "../state/archiveReducer";
 import { elementsOf } from "../../../test/elementTree";
 import { MISSIONS, page, row } from "./fixtures";
 import type { MastError, MastQuery, MastResolved } from "../../../shared/types/mast";
@@ -53,8 +53,7 @@ describe("summary line", () => {
 });
 
 describe("countdown timer of the results region", () => {
-  it("stops once the rate-limit banner has expired", async () => {
-    const { hasCountdown } = await import("../ResultsRegion");
+  it("stops once the rate-limit banner has expired", () => {
     const limited = [
       { type: "pageRequested", generation: 1, offset: 200 },
       { type: "pageFailed", generation: 1, error: { code: "mast_rate_limited", message: "429", context: { retryAfterSec: 10, status: 429 } }, at: 1_000 },

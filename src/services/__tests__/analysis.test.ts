@@ -42,7 +42,15 @@ describe("measurePhotometry arguments", () => {
       excludeDq: false,
       gain: null,
       zeroPoint: null,
+      fCorr: null,
+      limitSigma: null,
     });
+  });
+
+  it("sends the noise factor and the sigma of the upper limit under the argument names of the command", async () => {
+    typedInvokeMock.mockResolvedValue({ ...BASE, sky: null });
+    await measurePhotometry("/a.fits", 1, 2, { fCorr: 1.65, limitSigma: 3 });
+    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ fCorr: 1.65, limitSigma: 3 });
   });
 
   it("forwards explicit annulus radii and gain", async () => {
@@ -76,7 +84,15 @@ describe("measurePhotometryBatch", () => {
       excludeDq: false,
       withGrowthCurve: false,
       zeroPoint: null,
+      fCorr: null,
+      limitSigma: null,
     });
+  });
+
+  it("sends the noise factor and the sigma of the upper limit with the batch", async () => {
+    typedInvokeMock.mockResolvedValue({ ...BATCH, rows: [] });
+    await measurePhotometryBatch("/b.fits", [[1, 2]], { fCorr: 1.65, limitSigma: 3 });
+    expect(typedInvokeMock.mock.calls[0][1]).toMatchObject({ fCorr: 1.65, limitSigma: 3 });
   });
 
   it("forwards every option", async () => {

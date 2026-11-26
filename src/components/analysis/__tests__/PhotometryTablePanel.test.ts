@@ -55,13 +55,16 @@ import {
   NO_DETECTED_STARS_HINT,
   PHOTOMETRY_COLUMN_KEYS,
   PHOTOMETRY_CSV_COLUMNS,
+  PHOTOMETRY_LIMIT_FROM_MEASUREMENT,
+  PHOTOMETRY_LIMIT_FROM_PANEL,
+  PHOTOMETRY_TOTAL_LIMIT_NOTE,
   STARS_ELSEWHERE_NOTICE,
   abCellText,
   photometryTableCsv,
   tableUnitsCaption,
 } from "../../../utils/photometryTable";
-import { calibratedMagnitude } from "../../../utils/photometryPanel";
-import type { PhotCal, StarPhotometry } from "../../../services/analysis";
+import { calibratedMagnitude, photometryLimit } from "../../../utils/photometryPanel";
+import type { PhotCal, PhotometryUpperLimit, StarPhotometry } from "../../../services/analysis";
 import type { ImageDepth } from "../../../shared/types/depth";
 import { BATCH_ROWS_NOTE, measurementLog } from "../../../utils/measurementLog";
 import { provenanceLines } from "../../../utils/csvProvenance";
@@ -800,7 +803,7 @@ describe("PhotometryTablePanel CSV provenance", () => {
     expect(lines).toContain("# calibration: none");
     const star = measuredStar() as unknown as StarPhotometry;
     const body = photometryTableCsv([
-      { index: 0, label: "star 1", photometry: star, sky: null, error: null, magnitude: calibratedMagnitude(star, null) },
+      { index: 0, label: "star 1", photometry: star, sky: null, error: null, magnitude: calibratedMagnitude(star, null), limit: photometryLimit(star, null) },
     ]);
     expect(text.endsWith(body)).toBe(true);
   });
@@ -853,6 +856,16 @@ const brightStar = () => ({
   mag_ab_err: 0.239,
   err_used: true,
 });
+const MEASURED_ROW_LIMIT: PhotometryUpperLimit = {
+  limit_sigma: 3,
+  f_corr: null,
+  f_corr_requested: null,
+  is_limit: true,
+  upper_limit_native: 75,
+  upper_limit_jy: 1.4454397707459279e-7,
+  upper_limit_ab: 26,
+  rule: "upper limit = 3 x flux error (errors from the error layer, no noise factor given)",
+};
 const LIMIT_CAPTION =
   "1 of 2 measured rows are below 3 sigma: a magnitude cell with > is a 3 sigma limit; the CSV keeps the measured flux and adds the limit columns";
 
@@ -930,9 +943,10 @@ describe("PhotometryTablePanel upper limits and the Depth factor", () => {
     const first = lines[header + 1].split(",");
     const second = lines[header + 2].split(",");
     expect(first[PHOTOMETRY_COLUMN_KEYS.indexOf("flux_jy")]).toBe("2e-7");
-    expect(Number(first.at(-2))).toBeCloseTo(3.3e-7, 10);
-    expect(Number(first.at(-1))).toBeCloseTo(25.103715150305284, 10);
-    expect(second.slice(-2)).toEqual(["", ""]);
+    const limitAt = PHOTOMETRY_COLUMN_KEYS.indexOf("upper_limit_jy");
+    expect(Number(first[limitAt])).toBeCloseTo(3.3e-7, 10);
+    expect(Number(first[limitAt + 1])).toBeCloseTo(25.103715150305284, 10);
+    expect(second.slice(limitAt, limitAt + 2)).toEqual(["", ""]);
   });
 
   it("logs how many rows are limits", async () => {
@@ -980,6 +994,71 @@ describe("PhotometryTablePanel upper limits and the Depth factor", () => {
     await measureTwo();
     expect(runEntries().at(-1)!.params.f_corr).toBeNull();
     expect(runEntries().at(-1)!.values.n_limits).toBe(1);
+  });
+
+  it("sends the sigma and the accepted Depth factor with the batch, so the command computes the limits", async () => {
+    depthHolder.current = PX_DEPTH;
+    typeAperture("3.82");
+    await measureTwo();
+    expect(backend.batch.mock.calls.at(-1)![2]).toMatchObject({ fCorr: null, limitSigma: 3 });
+    (offerButton()!.onClick as () => void)();
+    await measureTwo();
+    expect(backend.batch.mock.calls.at(-1)![2]).toMatchObject({ fCorr: 1.65, limitSigma: 3 });
+  });
+
+  it("uses the limit each row of the command carries and names it as the source in the CSV", async () => {
+    const detected: PhotometryUpperLimit = { ...MEASURED_ROW_LIMIT, is_limit: false, upper_limit_native: null, upper_limit_jy: null, upper_limit_ab: null };
+    backend.batch.mockReset().mockResolvedValue({
+      ...batchOf([]),
+      rows: [
+        { index: 0, photometry: faintStar(), limit: detected, sky: null, error: null },
+        { index: 1, photometry: brightStar(), limit: MEASURED_ROW_LIMIT, sky: null, error: null },
+      ],
+      n_measured: 2,
+      photcal: AB_USER,
+    });
+    await measureTwo();
+    expect(cellsOf("mag_ab")).toEqual([abCellText(25.647, 0.6), "> 26.00"]);
+    expect(flagCells()[1].split(", ")).toContain("below 3 sigma");
+    const entry = runEntries().at(-1)!;
+    expect(entry.values.n_limits).toBe(1);
+    expect(entry.params.limit_source).toBe("measurement");
+    const lines = await savedLines();
+    expect(lines).toContain(`# limit_source: ${PHOTOMETRY_LIMIT_FROM_MEASUREMENT}`);
+    const header = lines.findIndex((line) => line.startsWith("index,label,"));
+    const cell = (line: string, key: (typeof PHOTOMETRY_COLUMN_KEYS)[number]) => line.split(",")[PHOTOMETRY_COLUMN_KEYS.indexOf(key)];
+    expect(cell(lines[header + 2], "upper_limit_ab")).toBe("26");
+    expect(cell(lines[header + 2], "upper_limit_native")).toBe("75");
+    expect(lines[header + 2].endsWith(`,75,3,,,"${MEASURED_ROW_LIMIT.rule}",,`)).toBe(true);
+    expect(cell(lines[header + 1], "upper_limit_ab")).toBe("");
+  });
+
+  it("names the panel as the source of the limits when the command gave none", async () => {
+    await measureTwo();
+    expect(runEntries().at(-1)!.params.limit_source).toBe("panel");
+    expect(await savedLines()).toContain(`# limit_source: ${PHOTOMETRY_LIMIT_FROM_PANEL}`);
+  });
+
+  it("flags a plateau total that is a lower limit, with the reason in the tooltip and in the CSV", async () => {
+    const reason = "the growth curve of a diffraction-limited image flattens before the wings of the PSF end";
+    backend.batch.mockReset().mockResolvedValue({
+      ...batchOf([{ ...brightStar(), total_is_lower_limit: true, total_limit_reason: reason }, { ...brightStar(), x: 70, y: 72, total_is_lower_limit: false, total_limit_reason: null }]),
+      photcal: AB_USER,
+    });
+    await measureTwo();
+    expect(flagCells()[0].split(", ")).toContain("total is a lower limit");
+    expect(flagCells()[1]).toBe("");
+    const titles = elementsOf(showTwo())
+      .filter((e) => e.type === "td" && (e.props as Props)["data-column"] === undefined)
+      .map((td) => (td.props as Props).title);
+    expect(titles[0]).toBe(`total is a lower limit: ${reason}`);
+    expect(titles[1]).toBe("");
+    const lines = await savedLines();
+    expect(lines).toContain(`# total_limit: ${PHOTOMETRY_TOTAL_LIMIT_NOTE}`);
+    const header = lines.findIndex((line) => line.startsWith("index,label,"));
+    expect(lines[header].endsWith(",total_is_lower_limit,total_limit_reason")).toBe(true);
+    expect(lines[header + 1].endsWith(`,true,${reason}`)).toBe(true);
+    expect(lines[header + 2].endsWith(",false,")).toBe(true);
   });
 });
 

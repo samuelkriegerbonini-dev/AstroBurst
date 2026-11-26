@@ -1,4 +1,4 @@
-import type { MastPreset, MastProduct, MastProductClass, MastProductList } from "../../../shared/types/mast";
+import type { MastCalibration, MastPreset, MastProduct, MastProductClass, MastProductList } from "../../../shared/types/mast";
 import { presetProducts } from "./presetView";
 
 export type ProductMode = "opens" | "everything";
@@ -256,9 +256,8 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-export function calibrationOf(product: MastProduct): Record<string, unknown> | null {
-  const value = (product as MastProduct & { calibration?: unknown }).calibration;
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+export function calibrationOf(product: MastProduct): MastCalibration | null {
+  return product.calibration ?? null;
 }
 
 export function productExtras(product: MastProduct): ProductExtras {

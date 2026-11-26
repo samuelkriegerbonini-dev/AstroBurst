@@ -3209,7 +3209,7 @@ async fn v2_wcs_grid_handler_returns_lines_labels_and_steps() {
     assert_eq!(json["ref"], "img_0");
     assert_eq!(json["frame"], "icrs");
     assert!((json["lat_step_deg"].as_f64().unwrap() * 3600.0 - 5.0).abs() < 1e-9, "{}", json["lat_step_deg"]);
-    assert!((json["lon_step_deg"].as_f64().unwrap() * 240.0 - 1.0).abs() < 1e-9, "{}", json["lon_step_deg"]);
+    assert!((json["lon_step_deg"].as_f64().unwrap() * 240.0 - 0.2).abs() < 1e-9, "{}", json["lon_step_deg"]);
     assert_eq!(json["notes"], serde_json::json!([]));
     let lines = json["lines"].as_array().unwrap();
     let lat_lines = lines.iter().filter(|l| l["kind"] == "lat").count();

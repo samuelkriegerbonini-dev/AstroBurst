@@ -1,10 +1,18 @@
-import type { BatchPhotometryResult, MagSystem, PhotCal, PhotometryMeasurement, StarPhotometry, UserZeroPoint } from "../services/analysis";
+import type {
+  BatchPhotometryResult,
+  MagSystem,
+  PhotCal,
+  PhotometryMeasurement,
+  PhotometryUpperLimit,
+  StarPhotometry,
+  UserZeroPoint,
+} from "../services/analysis";
 import { decimalFieldState, type DecimalFieldOptions } from "./decimalText";
 import type { NoiseFactorOffer } from "./forcedPhotometryRequest";
 import { formatFluxDensityJy, formatWithUncertainty } from "./formatUncertainty";
 import { radiusInArcsec, radiusInPixels, systemMagnitude, type NativeZeroPoint, type RadiusUnit } from "./photometryUnits";
 import { DEFAULT_LIMIT_SIGMA, upperLimit } from "./upperLimits";
-import { isFiniteNumber } from "./values";
+import { finiteOrNull, isFiniteNumber } from "./values";
 
 export const GAIA_MATCH_PREF_KEY = "astroburst.photometry.gaiaMatch.v1";
 
@@ -149,6 +157,8 @@ export function userZeroPoint(text: string, system: "ab" | "vega", perSecond: bo
   return value === null ? undefined : { zp: value, system, per_second: perSecond };
 }
 
+export type PhotometryLimitSource = "measurement" | "panel";
+
 export interface PhotometryLimit {
   sigma: number;
   fCorr: number | null;
@@ -156,6 +166,9 @@ export interface PhotometryLimit {
   limitJy: number | null;
   limitAb: number | null;
   limitNative: number | null;
+  fCorrRequested?: number | null;
+  rule?: string | null;
+  source?: PhotometryLimitSource;
 }
 
 export function appliedDepthFactor(offer: NoiseFactorOffer, accepted: number | null): number | null {
@@ -180,16 +193,32 @@ export function depthNoiseText(offer: NoiseFactorOffer, accepted: number | null)
   return `Depth section: f_corr ${factor} for this image at ${radius}, the radius of this aperture. Not applied: click Use to multiply the errors by it before the limit test.`;
 }
 
-export function photometryLimit(phot: StarPhotometry, fCorr: number | null): PhotometryLimit {
+function reportedLimit(reported: PhotometryUpperLimit): PhotometryLimit {
+  return {
+    sigma: reported.limit_sigma,
+    fCorr: finiteOrNull(reported.f_corr),
+    isLimit: reported.is_limit,
+    limitJy: finiteOrNull(reported.upper_limit_jy),
+    limitAb: finiteOrNull(reported.upper_limit_ab),
+    limitNative: finiteOrNull(reported.upper_limit_native),
+    fCorrRequested: finiteOrNull(reported.f_corr_requested),
+    rule: reported.rule,
+    source: "measurement",
+  };
+}
+
+export function photometryLimit(phot: StarPhotometry, fCorr: number | null, reported?: PhotometryUpperLimit | null): PhotometryLimit {
+  if (reported) return reportedLimit(reported);
   const sigma = DEFAULT_LIMIT_SIGMA;
   const factor = phot.err_used ? fCorr : null;
   const native = upperLimit(phot.net_flux, phot.flux_err, sigma, factor ?? undefined);
   const limitNative = native.isLimit ? native.limitJy : null;
+  const fallback = { sigma, fCorr: factor, fCorrRequested: fCorr, rule: null, source: "panel" as const };
   if (isFiniteNumber(phot.flux_jy) && isFiniteNumber(phot.flux_err_jy)) {
     const jy = upperLimit(phot.flux_jy, phot.flux_err_jy, sigma, factor ?? undefined);
-    return { sigma, fCorr: factor, isLimit: jy.isLimit, limitJy: jy.limitJy, limitAb: jy.limitAb, limitNative };
+    return { ...fallback, isLimit: jy.isLimit, limitJy: jy.limitJy, limitAb: jy.limitAb, limitNative };
   }
-  return { sigma, fCorr: factor, isLimit: native.isLimit, limitJy: null, limitAb: null, limitNative };
+  return { ...fallback, isLimit: native.isLimit, limitJy: null, limitAb: null, limitNative };
 }
 
 export function limitSentence(limit: PhotometryLimit, summedUnit: string | null): string | null {
@@ -200,4 +229,26 @@ export function limitSentence(limit: PhotometryLimit, summedUnit: string | null)
       : `net flux below ${formatWithUncertainty(limit.limitNative, null)}${summedUnit === null ? "" : ` ${summedUnit}`}`;
   const factor = limit.fCorr === null ? "" : `; errors multiplied by f_corr ${limit.fCorr.toFixed(2)} from the Depth section`;
   return `not detected at ${limit.sigma} sigma: ${bound}${factor}`;
+}
+
+export function limitRuleText(limit: PhotometryLimit | null | undefined): string | null {
+  const rule = limit?.rule?.trim() ?? "";
+  return rule === "" ? null : `limit rule: ${rule}`;
+}
+
+export const TOTAL_LOWER_LIMIT_LEGEND = '"> x" is a lower limit of the total flux and "< m" the magnitude it corresponds to';
+
+export function totalIsLowerLimit(phot: StarPhotometry | null | undefined): boolean {
+  return phot?.total_is_lower_limit === true;
+}
+
+export function totalLimitReason(phot: StarPhotometry | null | undefined): string | null {
+  const reason = totalIsLowerLimit(phot) ? (phot?.total_limit_reason?.trim() ?? "") : "";
+  return reason === "" ? null : reason;
+}
+
+export function totalLimitNote(phot: StarPhotometry | null | undefined): string | null {
+  if (!totalIsLowerLimit(phot)) return null;
+  const reason = totalLimitReason(phot);
+  return reason === null ? `total: ${TOTAL_LOWER_LIMIT_LEGEND}` : `total: ${TOTAL_LOWER_LIMIT_LEGEND}; ${reason}`;
 }

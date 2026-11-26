@@ -16,7 +16,9 @@ use crate::service::common::derived_output_header;
 use crate::core::astrometry::catalog::{
     answering_host, is_vizier_mirror, query_gaia_cached, solver_cone_query, CatalogRow, ConeKind, ConeQuery, GAIA_VIZIER_TABLE,
 };
-use crate::core::astrometry::celestial::wcs_cards::{is_celestial_wcs_card, is_lookup_distortion_card};
+use crate::core::astrometry::celestial::wcs_cards::{
+    axis_beyond_the_celestial_pair, is_celestial_wcs_card, is_lookup_distortion_card,
+};
 use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
 use crate::core::astrometry::gaia_tie::{GAIA_DR3_ATTRIBUTION, GAIA_DR3_ATTRIBUTION_SIRIL, GAIA_ESA_ACKNOWLEDGEMENT};
 use crate::core::astrometry::grid::{wcs_grid, WcsGrid, DEFAULT_DENSITY, MAX_DENSITY, MIN_DENSITY};
@@ -1417,6 +1419,7 @@ pub(crate) fn write_wcs_copy_with_credit(
     }
     let abproc = if tie.is_empty() { ABPROC_PLATE_SOLVED } else { crate::cmd::astrometry::gaia_refine::ABPROC_GAIA_TIED };
     let mut header = derived_output_header(Some(&merged), abproc, OutputValues::Linear);
+    keep_the_axes_beyond_the_celestial_pair(&mut header, &merged);
     for line in crate::cmd::astrometry::gaia_refine::history_cards(&history) {
         header.cards.push(("HISTORY".to_string(), line));
     }
@@ -1449,6 +1452,23 @@ pub(crate) fn write_wcs_copy_with_credit(
         RES_SIP_INV_ERR_PX: orientation.sip_inv_err_px,
         RES_ELAPSED_MS: started.elapsed().as_millis() as u64,
     }))
+}
+
+fn keep_the_axes_beyond_the_celestial_pair(header: &mut HduHeader, source: &HduHeader) {
+    let mut highest_axis = 0;
+    for (key, value) in &source.cards {
+        let key = key.trim();
+        if let Some(axis) = axis_beyond_the_celestial_pair(key) {
+            if header.get(key).is_none() {
+                header.set(key, value.clone());
+            }
+            highest_axis = highest_axis.max(axis);
+        }
+    }
+    let declared = header.get_i64("WCSAXES");
+    if declared.is_some_and(|axes| axes < highest_axis as i64) {
+        header.set("WCSAXES", highest_axis.to_string());
+    }
 }
 
 #[tauri::command]
@@ -2275,6 +2295,7 @@ mod tests {
             assert!(header.get(key).is_some(), "{key} does not belong to the celestial WCS and must be kept");
         }
         assert_eq!(header.get_f64("CRVAL3"), Some(2.1e-6));
+        assert_eq!(header.get_i64("WCSAXES"), Some(3), "the WCSAXES = 2 of the solve must cover the kept third axis");
         assert_eq!(header.get_f64("CRVAL1"), Some(83.822));
     }
 

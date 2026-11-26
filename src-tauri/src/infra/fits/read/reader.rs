@@ -1838,7 +1838,7 @@ mod tests {
         let path = dir.path().join("mef.fits");
         write_test_mef(
             &path,
-            &[],
+            &[("TELESCOP", "'JWST    '".into())],
             &[
                 TestHdu { extname: Some("WEIGHT"), extver: None, cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
                 TestHdu { extname: Some("SCI"), extver: None, cols: 6, rows: 3, data: HduData::F32(ramp_f32(6, 3)), extra_cards: vec![] },
@@ -1848,7 +1848,8 @@ mod tests {
         assert_eq!(auto_hdu_index(&file).unwrap(), 2);
         let merged = extract_header_by_index_merged(&file, 2).unwrap();
         assert_eq!(merged.get("EXTNAME"), Some("SCI"));
-        assert_eq!(merged.get("EXTEND"), Some("T"));
+        assert_eq!(merged.get("TELESCOP"), Some("JWST"));
+        assert_eq!(merged.get("EXTEND"), None);
         assert!(extract_header_by_index_merged(&file, 5).is_err());
     }
 

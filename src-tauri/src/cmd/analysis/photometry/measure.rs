@@ -4,13 +4,55 @@ use rayon::prelude::*;
 use crate::cmd::catalog::field_geometry;
 use crate::cmd::common::{blocking_cmd, load_cached, load_cached_full};
 use crate::types::constants::{RES_ELAPSED_MS, RES_PHOTOMETRY, RES_SKY, RES_GAIA, RES_GAIN_USED, RES_MASKED, RES_WARNINGS, RES_ROWS, RES_INDEX, RES_ERROR, RES_N_MEASURED, RES_N_FAILED};
+use crate::core::analysis::forced::{ab_from_jy, applied_noise_factor, limit_rule, upper_limit, FORCED_DEFAULT_LIMIT_SIGMA};
 use crate::core::analysis::gain::{gain_model, photon_noise_warning};
 use crate::core::analysis::photometry::{StarPhotometry, MAX_APERTURE_RADIUS, MIN_APERTURE_RADIUS};
 use crate::core::astrometry::catalog::{query_gaia_cached, CatalogHit, CatalogRow, ConeQuery};
 use crate::types::image_ref::PlaneSelector;
 use crate::cmd::analysis::{RES_PHOTCAL, UserZeroPoint, check_user_zero_point, gaia_match_field, gaia_match_outcome, gaia_rows_for_match, has_err_extension, photometry_context_with, pixel_units};
 
+pub(in crate::cmd::analysis) const RES_LIMIT: &str = "limit";
 const MAX_BATCH_POINTS: usize = 5000;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LimitRequest {
+    pub f_corr: Option<f64>,
+    pub limit_sigma: f64,
+}
+
+impl Default for LimitRequest {
+    fn default() -> Self {
+        Self { f_corr: None, limit_sigma: FORCED_DEFAULT_LIMIT_SIGMA }
+    }
+}
+
+pub(in crate::cmd::analysis) fn limit_request(f_corr: Option<f64>, limit_sigma: Option<f64>) -> anyhow::Result<LimitRequest> {
+    let is_positive = |value: f64| value.is_finite() && value > 0.0;
+    if let Some(factor) = f_corr.filter(|value| !is_positive(*value)) {
+        anyhow::bail!("f_corr {factor} must be a positive finite number");
+    }
+    if let Some(sigma) = limit_sigma.filter(|value| !is_positive(*value)) {
+        anyhow::bail!("limit_sigma {sigma} must be a positive finite number");
+    }
+    Ok(LimitRequest { f_corr, limit_sigma: limit_sigma.unwrap_or(FORCED_DEFAULT_LIMIT_SIGMA) })
+}
+
+pub(in crate::cmd::analysis) fn limit_json(phot: &StarPhotometry, request: &LimitRequest) -> serde_json::Value {
+    let noise_factor = applied_noise_factor(request.f_corr, phot.err_used);
+    let native = upper_limit(phot.net_flux, Some(phot.flux_err), noise_factor, request.limit_sigma);
+    let calibrated = phot.flux_jy.zip(phot.flux_err_jy);
+    let jy = calibrated.and_then(|(flux, err)| upper_limit(flux, Some(err), noise_factor, request.limit_sigma));
+    json!({
+        "limit_sigma": request.limit_sigma,
+        "f_corr": noise_factor,
+        "f_corr_requested": request.f_corr,
+        "is_limit": if calibrated.is_some() { jy.is_some() } else { native.is_some() },
+        "upper_limit_native": native,
+        "upper_limit_jy": jy,
+        "upper_limit_ab": jy.and_then(ab_from_jy),
+        "rule": limit_rule(request.limit_sigma, request.f_corr, true, phot.err_used),
+    })
+}
 pub(in crate::cmd::analysis) const PAR_BATCH_POINTS: usize = 64;
 pub(in crate::cmd::analysis) const MAX_SKY_ANNULUS_RADIUS: f64 = 512.0;
 
@@ -36,6 +78,7 @@ pub(crate) fn photometry_for_path(
         gain,
         None,
         &mut |q| query_gaia_cached(q),
+        LimitRequest::default(),
     )
 }
 
@@ -50,6 +93,7 @@ pub(crate) fn photometry_for_path_with_catalog(
     gain: Option<f64>,
     zero_point: Option<&UserZeroPoint>,
     cached: &mut dyn FnMut(&ConeQuery) -> Result<CatalogHit, String>,
+    limit: LimitRequest,
 ) -> anyhow::Result<serde_json::Value> {
     let t0 = Instant::now();
     let ctx = photometry_context_with(path, exclude_dq, zero_point)?;
@@ -94,6 +138,7 @@ pub(crate) fn photometry_for_path_with_catalog(
 
     Ok(json!({
         RES_PHOTOMETRY: serde_json::to_value(&phot)?,
+        RES_LIMIT: limit_json(&phot, &limit),
         RES_SKY: sky,
         RES_GAIA: gaia,
         RES_PHOTCAL: ctx.photcal_json()?,
@@ -157,8 +202,11 @@ pub async fn measure_photometry_cmd(
     exclude_dq: Option<bool>,
     gain: Option<f64>,
     zero_point: Option<UserZeroPoint>,
+    f_corr: Option<f64>,
+    limit_sigma: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
+        let limit = limit_request(f_corr, limit_sigma)?;
         if !x.is_finite() || !y.is_finite() {
             anyhow::bail!("photometry position ({x}, {y}) must be finite");
         }
@@ -177,6 +225,7 @@ pub async fn measure_photometry_cmd(
             gain,
             zero_point.as_ref(),
             &mut |q| query_gaia_cached(q),
+            limit,
         )
     })
 }
@@ -192,9 +241,12 @@ pub async fn measure_photometry_batch_cmd(
     exclude_dq: Option<bool>,
     with_growth_curve: Option<bool>,
     zero_point: Option<UserZeroPoint>,
+    f_corr: Option<f64>,
+    limit_sigma: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     blocking_cmd!({
         let t0 = Instant::now();
+        let limit = limit_request(f_corr, limit_sigma)?;
         if points.is_empty() {
             anyhow::bail!("batch photometry needs at least one point");
         }
@@ -235,6 +287,7 @@ pub async fn measure_photometry_batch_cmd(
                     rows.push(json!({
                         RES_INDEX: index,
                         RES_PHOTOMETRY: serde_json::to_value(&phot)?,
+                        RES_LIMIT: limit_json(&phot, &limit),
                         RES_SKY: sky,
                         RES_ERROR: serde_json::Value::Null,
                     }));
@@ -242,6 +295,7 @@ pub async fn measure_photometry_batch_cmd(
                 Err(e) => rows.push(json!({
                     RES_INDEX: index,
                     RES_PHOTOMETRY: serde_json::Value::Null,
+                    RES_LIMIT: serde_json::Value::Null,
                     RES_SKY: serde_json::Value::Null,
                     RES_ERROR: e,
                 })),

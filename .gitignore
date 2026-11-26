@@ -55,6 +55,7 @@ __pycache__/
 # Small FITS test fixtures, committed directly like tests/fixtures/asdf/*.asdf (compressed FITS of a few KB each; the LIGHTSTACK oracle set, capped at 2 MB by its test)
 !src-tauri/tests/fixtures/fits_compressed/*.fits
 !src-tauri/tests/fixtures/lightstack/**/*.fits
+!src-tauri/tests/fixtures/fitsio/*.fits
 /exampleFits/sample-data/heavyTest/
 COMMIT_MESSAGE.md
 ROADMAP.md

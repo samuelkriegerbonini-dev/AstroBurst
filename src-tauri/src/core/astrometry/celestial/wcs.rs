@@ -9,6 +9,7 @@ use wcs::{ImgXY, LonLat, WCSParams};
 
 use crate::core::astrometry::celestial::header_rules::{
     celestial_unit_factors, refuse_unsupported_projection_cards, tan_pole_cards_change_the_projection,
+    ORIGIN_FIDUCIAL_PROJECTIONS,
 };
 use crate::core::astrometry::frames::{convert_from_icrs, convert_to_icrs, SkyFrame};
 use crate::core::astrometry::legacy_pc::with_modern_matrix_cards;
@@ -24,6 +25,7 @@ pub const GWCS_NEWTON_SKIP_MARGIN_PX: f64 = 8.0;
 pub const GWCS_SIP_COMPARISON_GRID: usize = 9;
 const GWCS_JACOBIAN_STEP_PX: f64 = 0.5;
 const GWCS_PROJECTION: &str = "gWCS";
+const PARABOLIC_PROJECTION: &str = "PAR";
 const MAS_PER_DEG: f64 = 3_600_000.0;
 const SIP_INVERSE_MAX_ITERATIONS: usize = 64;
 const SIP_INVERSE_STEP_PX: f64 = 1e-10;
@@ -135,9 +137,79 @@ impl std::fmt::Display for CelestialCoord {
 
 pub const SIP_RESIDUAL_KEYS: [&str; 2] = ["SIPMXERR", "SIPIVERR"];
 
+#[derive(Debug, Clone, Copy)]
+struct DefaultPoleRotation {
+    native_to_sky: [[f64; 3]; 3],
+}
+
+fn rotation_about_z(angle: f64) -> [[f64; 3]; 3] {
+    let (sin, cos) = angle.sin_cos();
+    [[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]
+}
+
+fn rotation_about_y(angle: f64) -> [[f64; 3]; 3] {
+    let (sin, cos) = angle.sin_cos();
+    [[cos, 0.0, sin], [0.0, 1.0, 0.0], [-sin, 0.0, cos]]
+}
+
+fn matrix_product(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    out
+}
+
+impl DefaultPoleRotation {
+    fn for_fiducial_point_at_the_native_origin(alpha0_deg: f64, delta0_deg: f64) -> Self {
+        let (lonpole_deg, native_pole_dec_deg, native_pole_ra_deg): (f64, f64, f64) = if delta0_deg >= 90.0 {
+            (0.0, 0.0, alpha0_deg)
+        } else if delta0_deg >= 0.0 {
+            (0.0, 90.0 - delta0_deg, alpha0_deg + 180.0)
+        } else {
+            (180.0, 90.0 + delta0_deg, alpha0_deg)
+        };
+        let first = rotation_about_z(native_pole_ra_deg.to_radians());
+        let second = rotation_about_y((90.0 - native_pole_dec_deg).to_radians());
+        let third = rotation_about_z((180.0 - lonpole_deg).to_radians());
+        DefaultPoleRotation { native_to_sky: matrix_product(&matrix_product(&first, &second), &third) }
+    }
+
+    fn unit_vector(lonlat: &LonLat) -> [f64; 3] {
+        let (sin_lon, cos_lon) = lonlat.lon().sin_cos();
+        let (sin_lat, cos_lat) = lonlat.lat().sin_cos();
+        [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat]
+    }
+
+    fn lonlat_of(v: [f64; 3]) -> LonLat {
+        let lon = v[1].atan2(v[0]);
+        let lon = if lon < 0.0 { lon + std::f64::consts::TAU } else { lon };
+        LonLat::new(lon, v[2].atan2(v[0].hypot(v[1])))
+    }
+
+    fn native_to_sky(&self, native: &LonLat) -> LonLat {
+        let n = Self::unit_vector(native);
+        let m = &self.native_to_sky;
+        Self::lonlat_of([0, 1, 2].map(|i| m[i][0] * n[0] + m[i][1] * n[1] + m[i][2] * n[2]))
+    }
+
+    fn sky_to_native(&self, sky: &LonLat) -> LonLat {
+        let v = Self::unit_vector(sky);
+        let m = &self.native_to_sky;
+        Self::lonlat_of([0, 1, 2].map(|j| m[0][j] * v[0] + m[1][j] * v[1] + m[2][j] * v[2]))
+    }
+}
+
+fn is_pole_or_fiducial_card(key: &str) -> bool {
+    matches!(key, "LONPOLE" | "LATPOLE") || key.strip_prefix("PV1_").is_some_and(|m| m.parse::<u32>().is_ok())
+}
+
 #[derive(Debug)]
 struct HeaderBackend {
     engine: wcs::WCS,
+    default_pole_rotation: Option<DefaultPoleRotation>,
     differential_tan: bool,
     sip_a: Option<SipPoly>,
     sip_b: Option<SipPoly>,
@@ -360,6 +432,9 @@ fn celestial_axis_pair(header: &HduHeader) -> Result<(String, String, SkyFrame)>
     if projection != projection2 {
         bail!("CTYPE1 projection '{projection}' and CTYPE2 projection '{projection2}' differ");
     }
+    if projection == PARABOLIC_PROJECTION {
+        bail!("CTYPE1 '{ctype1_raw}': the parabolic projection (PAR) is not supported; the projection library this reader uses gives sky positions that disagree with wcslib for it");
+    }
     Ok((axis1, projection, frame))
 }
 
@@ -400,10 +475,14 @@ impl WcsTransform {
         let naxis1 = header.get_i64("NAXIS1").context("Missing NAXIS1")?;
         let naxis2 = header.get_i64("NAXIS2").context("Missing NAXIS2")?;
 
+        let default_pole_rotation = ORIGIN_FIDUCIAL_PROJECTIONS
+            .contains(&projection.as_str())
+            .then(|| DefaultPoleRotation::for_fiducial_point_at_the_native_origin(crval1, crval2));
+        let (engine_crval1, engine_crval2) = if default_pole_rotation.is_some() { (0.0, 0.0) } else { (crval1, crval2) };
         let mut map: Map<String, Value> = Map::new();
         for (key, val) in &header.cards {
             let ku = key.to_uppercase();
-            if is_projection_param_key(&ku) {
+            if is_projection_param_key(&ku) && !(default_pole_rotation.is_some() && is_pole_or_fiducial_card(&ku)) {
                 insert_numeric_card(&mut map, &ku, val);
             }
         }
@@ -412,8 +491,8 @@ impl WcsTransform {
         map.insert("NAXIS2".into(), Value::Number(naxis2.into()));
         map.insert("CTYPE1".into(), Value::String(format!("RA---{projection}")));
         map.insert("CTYPE2".into(), Value::String(format!("DEC--{projection}")));
-        map.insert("CRVAL1".into(), number(crval1)?);
-        map.insert("CRVAL2".into(), number(crval2)?);
+        map.insert("CRVAL1".into(), number(engine_crval1)?);
+        map.insert("CRVAL2".into(), number(engine_crval2)?);
         map.insert("CRPIX1".into(), number(0.0)?);
         map.insert("CRPIX2".into(), number(0.0)?);
         map.insert("CD1_1".into(), number(1.0)?);
@@ -429,6 +508,7 @@ impl WcsTransform {
         Ok(WcsTransform {
             backend: Backend::Header(HeaderBackend {
                 engine,
+                default_pole_rotation,
                 differential_tan: projection == "TAN"
                     && crval2.abs() < 90.0
                     && !tan_pole_cards_change_the_projection(header),
@@ -637,7 +717,11 @@ impl WcsTransform {
             };
         }
 
-        match header.engine.unproj(&ImgXY::new(ix, iy)) {
+        let sky = header.engine.unproj(&ImgXY::new(ix, iy)).map(|native| match &header.default_pole_rotation {
+            Some(rotation) => rotation.native_to_sky(&native),
+            None => native,
+        });
+        match sky {
             Some(ll) => {
                 let (ra, dec) = convert_to_icrs(self.frame, ll.lon().to_degrees(), ll.lat().to_degrees());
                 CelestialCoord { ra, dec }
@@ -671,7 +755,12 @@ impl WcsTransform {
         let plane = if header.differential_tan {
             self.tan_plane_from_world(lon, lat)
         } else {
-            header.engine.proj(&LonLat::new(lon.to_radians(), lat.to_radians())).map(|xy| (xy.x(), xy.y()))
+            let sky = LonLat::new(lon.to_radians(), lat.to_radians());
+            let native = match &header.default_pole_rotation {
+                Some(rotation) => rotation.sky_to_native(&sky),
+                None => sky,
+            };
+            header.engine.proj(&native).map(|xy| (xy.x(), xy.y()))
         };
         match plane {
             Some((x, y)) => {
@@ -2924,6 +3013,51 @@ mod gwcs_tests {
             assert_sky(&wcs, (0.0, 0.0), origin, what);
             assert_sky(&wcs, (80.0, 15.0), inner, what);
         }
+    }
+
+    #[test]
+    fn the_reference_column_of_a_default_pole_header_stays_on_the_reference_meridian() {
+        let wrapped = |ra: f64| ra.rem_euclid(360.0);
+        for projection in ["CAR", "CEA", "MER", "SFL", "MOL", "AIT", "CYP", "HPX"] {
+            for (crval1, crval2) in [(187.25_f64, -63.0_f64), (359.5, 40.0), (30.0, 90.0), (187.25, -90.0)] {
+                let (ctype1, ctype2) = (format!("RA---{projection}"), format!("DEC--{projection}"));
+                let (crval1_text, crval2_text) = (crval1.to_string(), crval2.to_string());
+                let wcs = WcsTransform::from_header(&make_header(&[
+                    ("NAXIS1", "100"), ("NAXIS2", "100"),
+                    ("CTYPE1", ctype1.as_str()), ("CTYPE2", ctype2.as_str()),
+                    ("CRPIX1", "50.0"), ("CRPIX2", "50.0"),
+                    ("CRVAL1", crval1_text.as_str()), ("CRVAL2", crval2_text.as_str()),
+                    ("CDELT1", "-0.5"), ("CDELT2", "0.5"),
+                ]))
+                .unwrap_or_else(|e| panic!("{projection}: {e:#}"));
+                for y in (0..100).step_by(7).filter(|&y| y != 49) {
+                    let sky = wcs.pixel_to_world(49.0, y as f64);
+                    let meridian = if crval2.abs() == 90.0 && y < 49 { crval1 + 180.0 } else { crval1 };
+                    let offset = (wrapped(sky.ra - meridian) + 180.0).rem_euclid(360.0) - 180.0;
+                    assert!(
+                        offset.abs() < 1e-9,
+                        "{projection} at ({crval1}, {crval2}), pixel (49, {y}): RA {} is off the meridian {} by {offset:e} deg",
+                        sky.ra,
+                        wrapped(meridian)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_parabolic_projection_header_is_refused_by_name() {
+        let refusal = WcsTransform::from_header(&make_header(&[
+            ("NAXIS1", "100"), ("NAXIS2", "100"),
+            ("CTYPE1", "RA---PAR"), ("CTYPE2", "DEC--PAR"),
+            ("CRPIX1", "50.0"), ("CRPIX2", "50.0"),
+            ("CRVAL1", "30.0"), ("CRVAL2", "40.0"),
+            ("CDELT1", "-0.01"), ("CDELT2", "0.01"),
+        ]))
+        .err()
+        .map(|e| format!("{e:#}"))
+        .expect("a PAR header gets no WCS");
+        assert!(refusal.contains("RA---PAR") && refusal.contains("parabolic projection (PAR) is not supported"), "{refusal}");
     }
 
     #[test]

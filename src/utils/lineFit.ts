@@ -323,6 +323,8 @@ function quantityWithUnit(value: number | null | undefined, unit: string | null)
 }
 
 export function lineFitSpectrumUnit(units: LineFitUnits): string | null {
+  const intensity = units.intensity?.trim();
+  if (intensity) return intensity;
   const suffix = ` ${units.velocity}`;
   if (!units.flux.endsWith(suffix)) return null;
   const unit = units.flux.slice(0, -suffix.length);

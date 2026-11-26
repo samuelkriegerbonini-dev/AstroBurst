@@ -219,6 +219,7 @@ export interface LineFitUnits {
   flux: string;
   velocity: string;
   sigma: string;
+  intensity?: string | null;
 }
 
 export interface LineFitResult extends ScienceDqMetadata {

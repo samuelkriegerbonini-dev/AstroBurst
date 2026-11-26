@@ -933,6 +933,7 @@ mod tests {
             ("CUNIT1", "'nm      '"),
             ("CRVAL1", "500.0"),
             ("CDELT1", "0.5"),
+            ("CRPIX1", "1.0"),
             ("OBJECT", "'HD 37795'"),
         ];
         let path = write(

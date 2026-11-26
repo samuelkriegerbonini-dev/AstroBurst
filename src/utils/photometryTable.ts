@@ -55,6 +55,13 @@ export const PHOTOMETRY_COLUMN_KEYS = [
   "mag_system",
   "upper_limit_jy",
   "upper_limit_ab",
+  "upper_limit_native",
+  "limit_sigma",
+  "f_corr",
+  "f_corr_requested",
+  "limit_rule",
+  "total_is_lower_limit",
+  "total_limit_reason",
 ] as const;
 
 export type PhotometryColumnKey = (typeof PHOTOMETRY_COLUMN_KEYS)[number];
@@ -107,6 +114,20 @@ export function rowValue(row: PhotometryTableRow, key: PhotometryColumnKey): Csv
       return row.limit?.limitJy ?? null;
     case "upper_limit_ab":
       return row.limit?.limitAb ?? null;
+    case "upper_limit_native":
+      return finiteOrNull(row.limit?.limitNative);
+    case "limit_sigma":
+      return finiteOrNull(row.limit?.sigma);
+    case "f_corr":
+      return finiteOrNull(row.limit?.fCorr);
+    case "f_corr_requested":
+      return finiteOrNull(row.limit?.fCorrRequested);
+    case "limit_rule":
+      return row.limit?.rule ?? null;
+    case "total_is_lower_limit":
+      return p?.total_is_lower_limit ?? null;
+    case "total_limit_reason":
+      return p?.total_limit_reason ?? null;
     default:
       return p ? finiteOrNull(p[key]) : null;
   }
@@ -183,6 +204,12 @@ export const PHOTOMETRY_ERROR_NOTE =
 export const PHOTOMETRY_POSITIONS_NOTE = `x, y are measured centroids in 0-based pixels (integer pixel centres); each input position snaps to the brightest pixel within ${PEAK_SEARCH_RADIUS_PX} px and is recentred`;
 export const PHOTOMETRY_CORRECTION_NOTE =
   "flux_total / net_flux from the curve of growth of each star; empty when the curve has no plateau before the sky annulus";
+export const PHOTOMETRY_LIMIT_FROM_MEASUREMENT =
+  "the photometry command, row by row: upper_limit_jy, upper_limit_ab and upper_limit_native follow the rule of the column limit_rule, with the sigma of limit_sigma and the factor of f_corr (f_corr_requested is the factor sent, f_corr the one applied)";
+export const PHOTOMETRY_LIMIT_FROM_PANEL =
+  "computed by the panel with the rule of the line upper_limit: the measurement gave no limit, so limit_rule is empty";
+export const PHOTOMETRY_TOTAL_LIMIT_NOTE =
+  "where total_is_lower_limit is true, flux_total is a lower limit of the total flux and mag_ab_total an upper limit of the total magnitude (the source is at least that bright); total_limit_reason says why";
 export const PHOTOMETRY_LIMIT_NOTE =
   "a row is a limit when flux_jy < limit_sigma x flux_err_jy x f_corr; then upper_limit_jy = limit_sigma x flux_err_jy x f_corr and upper_limit_ab = -2.5 log10(upper_limit_jy) + 8.90; f_corr is 1 unless the line f_corr names a factor; the measured flux and error are kept";
 
@@ -248,7 +275,29 @@ function depthFactorText(context: PhotometryCsvContext): string {
   return `${sentenceNumber(context.fCorr)} from the Depth section${radius}, applied on request to rows measured with an error layer`;
 }
 
-export function photometryCsvProvenance(context: PhotometryCsvContext, nRows: number): ProvenanceEntry[] {
+export function photometryLimitSource(rows: readonly PhotometryTableRow[]): string | null {
+  const limits = rows.flatMap((row) => (row.photometry && row.limit ? [row.limit] : []));
+  if (limits.length === 0) return null;
+  const measured = limits.filter((limit) => limit.source === "measurement").length;
+  if (measured === limits.length) return PHOTOMETRY_LIMIT_FROM_MEASUREMENT;
+  if (measured === 0) return PHOTOMETRY_LIMIT_FROM_PANEL;
+  return `${measured} of ${limits.length} measured rows from the photometry command (rule in the column limit_rule), the others computed by the panel with the rule of the line upper_limit`;
+}
+
+function rowEntries(rows: readonly PhotometryTableRow[]): ProvenanceEntry[] {
+  const source = photometryLimitSource(rows);
+  const lowerTotals = rows.some((row) => row.photometry?.total_is_lower_limit === true);
+  return [
+    ...(source === null ? [] : [["limit_source", source] as ProvenanceEntry]),
+    ...(lowerTotals ? [["total_limit", PHOTOMETRY_TOTAL_LIMIT_NOTE] as ProvenanceEntry] : []),
+  ];
+}
+
+export function photometryCsvProvenance(
+  context: PhotometryCsvContext,
+  nRows: number,
+  rows: readonly PhotometryTableRow[] = [],
+): ProvenanceEntry[] {
   return [
     ...exportEntries(context.fileName, context.exportedUtc),
     ["image", context.image],
@@ -271,6 +320,7 @@ export function photometryCsvProvenance(context: PhotometryCsvContext, nRows: nu
     ["limit_sigma", context.limitSigma],
     ["f_corr", depthFactorText(context)],
     ["upper_limit", PHOTOMETRY_LIMIT_NOTE],
+    ...rowEntries(rows),
     ["aperture_correction", PHOTOMETRY_CORRECTION_NOTE],
     ["positions", PHOTOMETRY_POSITIONS_NOTE],
     ...context.calibrationNotes.map((note): ProvenanceEntry => ["calibration_note", note]),
@@ -307,6 +357,7 @@ export function photometryCsvUnits(context: PhotometryCsvContext): Record<string
     mag_err: "mag",
     upper_limit_jy: "Jy",
     upper_limit_ab: "mag (AB)",
+    upper_limit_native: summed,
   };
 }
 
@@ -314,7 +365,7 @@ export function photometryTableCsv(rows: PhotometryTableRow[], context?: Photome
   const body = buildCsv(PHOTOMETRY_CSV_COLUMNS, rows);
   if (!context) return body;
   return withProvenance(
-    [...provenanceLines(photometryCsvProvenance(context, rows.length)), ...unitLines(photometryCsvUnits(context))],
+    [...provenanceLines(photometryCsvProvenance(context, rows.length, rows)), ...unitLines(photometryCsvUnits(context))],
     body,
     CSV_LINE_END,
   );

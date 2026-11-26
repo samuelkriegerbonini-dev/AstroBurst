@@ -99,14 +99,14 @@ export default function SaguiPanel() {
   const edit = (change: Partial<SaguiConfig>) => { setLocalError(null); saguiStore.edit({ ...config, ...change }); };
   const perform = async (operation: () => Promise<void>) => { setLocalError(null); try { await operation(); } catch (error) { setLocalError(cubePrepError(error)); } };
   const check = async (kind: CheckKind, action: () => Promise<unknown>) => { setCheckKind(kind); try { await action(); } finally { setCheckKind(null); } };
-  const useCubePrep = () => void perform(async () => {
+  const takeCubePrepResult = () => void perform(async () => {
     const report = cubePrepStore.get().report;
     if (!report) throw new Error("No prepared cube is available. Run Cube Prep or choose a multiband FITS file.");
     await check("prepared", () => saguiStore.prepareCubePrep(report, () => cubePrepStore.get().report === report));
   });
   const chooseCube = (path: string | undefined | null) => {
     if (!path) { setLocalError("No prepared cube is available. Choose a multiband FITS file."); return; }
-    if (prepCube && sameFile(path, prepCube)) { useCubePrep(); return; }
+    if (prepCube && sameFile(path, prepCube)) { takeCubePrepResult(); return; }
     const currentConfig = saguiStore.get().config;
     setExternalTarget(false);
     setLocalError(null);
@@ -158,7 +158,7 @@ export default function SaguiPanel() {
         {isRecipePath(config.input_path) && (confirmReplace
           ? <div className="space-y-1 rounded border border-amber-500/30 p-2 text-[10px] text-amber-300"><p>{`Cube Prep holds a draft with ${draftInputs()} ${draftInputs() === 1 ? "input" : "inputs"}; opening this recipe replaces it. Save the draft from Cube Prep first if you need it.`}</p><div className="flex gap-1"><button className={PREP_BUTTON} onClick={() => openRecipeInCubePrep(true)}>Replace the draft</button><button className={PREP_BUTTON} onClick={() => setConfirmReplace(false)}>Keep the draft</button></div></div>
           : <button className={PREP_BUTTON} onClick={() => openRecipeInCubePrep(false)}>Open this recipe in Cube Prep</button>)}
-        <div className="flex flex-wrap gap-1"><button className={prepCube ? PRIMARY_BUTTON : PREP_BUTTON} onClick={useCubePrep}>Use Cube Prep result</button><button className={PREP_BUTTON} onClick={() => chooseCube(fileStore.getSelectedFile()?.path)}>Use selected FITS</button></div>
+        <div className="flex flex-wrap gap-1"><button className={prepCube ? PRIMARY_BUTTON : PREP_BUTTON} onClick={takeCubePrepResult}>Use Cube Prep result</button><button className={PREP_BUTTON} onClick={() => chooseCube(fileStore.getSelectedFile()?.path)}>Use selected FITS</button></div>
         {prepCube && <p className="text-[10px] text-zinc-500" title={prepCube}>{`Cube Prep result: ${fileBaseName(prepCube) || prepCube}`}</p>}
         {!config.input_path.trim() && !prepCube && <div data-empty-cube className="space-y-1 rounded border border-dashed border-zinc-700 p-3 text-[11px] text-zinc-400"><p>{"No cube yet. Prepare one in Cube Prep with Cube for set to Regional SEDs with SAGUI, then use its result here, or choose a multiband FITS cube."}</p><button className={PREP_BUTTON} onClick={() => dockStore.dispatch({ type: "open", tool: "cubeprep" })}>Prepare in Cube Prep</button></div>}
         <p className="text-[10px] text-zinc-500">Requires registered photometric bands, per-pixel flux units, celestial WCS and a verified common PSF. Prepare a MEF cube in Cube Prep to retain available ERR and DQ.</p>

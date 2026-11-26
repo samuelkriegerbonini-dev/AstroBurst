@@ -70,6 +70,7 @@ const CAL_INPUT: MastDownloadInput = {
   uri: null,
   opensAs: "image",
   replace: false,
+  calibration: null,
 };
 
 const FOOTPRINT_INPUT: MastFootprintInput = {
@@ -230,6 +231,7 @@ describe("MAST presets contract", () => {
       verified: true,
       action: null,
       error: null,
+      calibration: undefined,
     };
     expect(fields(rust, "MastDownloadInput")).toEqual(Object.keys(CAL_INPUT));
     expect(fields(rust, "MastDownloadItem")).toEqual(Object.keys(item));

@@ -223,6 +223,12 @@ export type MastProductClass =
   | "image" | "cube" | "spectrum" | "ramp" | "catalog" | "preview"
   | "association" | "auxiliary" | "reference" | "guidestar" | "other";
 
+export interface MastCalibration {
+  calibrationSoftwareVersion: string;
+  crdsContext: string;
+  crdsSoftwareVersion: string;
+}
+
 export interface MastProduct {
   datasetId: string;
   filename: string;
@@ -236,6 +242,7 @@ export interface MastProduct {
   mastUri: string;
   downloadUrl: string;
   badges: "hap_aligned"[];
+  calibration?: MastCalibration;
 }
 
 export interface MastProductList {
@@ -309,6 +316,7 @@ export interface MastDownloadInput {
   uri: string | null;
   opensAs: MastOpensAs | null;
   replace: boolean;
+  calibration?: MastCalibration | null;
 }
 
 export interface MastDownloadItem {
@@ -332,6 +340,7 @@ export interface MastDownloadItem {
   verified: boolean | null;
   action: MastDownloadAction | null;
   error: MastError | null;
+  calibration?: MastCalibration;
 }
 
 export interface MastFootprintInput {

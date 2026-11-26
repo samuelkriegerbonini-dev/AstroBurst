@@ -662,10 +662,6 @@ pub fn is_vizier_mirror(host: &str) -> bool {
     host.eq_ignore_ascii_case(VIZIER_MIRROR_HOST)
 }
 
-#[cfg(test)]
-pub fn forget_answering_hosts() {
-    ANSWERING_HOSTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
-}
 
 fn quantize(value: f64, quantum: f64) -> i64 {
     (value / quantum).round() as i64
@@ -747,8 +743,9 @@ where
 }
 
 #[cfg(test)]
-pub fn forget_tie_cones() {
-    TIE_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+pub fn forget_tie_cone(q: &ConeQuery) {
+    let key = catalog_cache_key(q);
+    TIE_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|(known, _)| *known != key);
 }
 
 pub fn query_gaia_cached_in<F>(dir: Option<&Path>, q: &ConeQuery, fetch: F) -> Result<CatalogHit, String>
@@ -2058,8 +2055,8 @@ not a row\n";
         assert_eq!(answering_host(ConeKind::Tie, &q).as_deref(), Some(VIZIER_MIRROR_HOST));
         assert_eq!(answering_host(ConeKind::Photometric, &q), None, "a tie cone says nothing about the photometric cone of the same field");
 
-        forget_tie_cones();
-        forget_answering_hosts();
+        forget_tie_cone(&q);
+        forget_answering_host(ConeKind::Tie, &q);
         let again = query_gaia_tie_cached_in(Some(dir.path()), &q, |_| Err("the disk cache holds this cone".to_string())).unwrap();
         assert_eq!(again.source, CatalogSource::Disk);
         assert_eq!(answering_host(ConeKind::Tie, &q).as_deref(), Some(VIZIER_MIRROR_HOST), "the cached cone still names the host that answered");

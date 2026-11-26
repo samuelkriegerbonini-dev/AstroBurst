@@ -132,7 +132,20 @@ export interface StarPhotometry {
   growth_curve: GrowthPoint[];
   ee50_radius: number | null;
   ee80_radius: number | null;
+  total_is_lower_limit?: boolean;
+  total_limit_reason?: string | null;
   warnings: string[];
+}
+
+export interface PhotometryUpperLimit {
+  limit_sigma: number;
+  f_corr: number | null;
+  f_corr_requested: number | null;
+  is_limit: boolean;
+  upper_limit_native: number | null;
+  upper_limit_jy: number | null;
+  upper_limit_ab: number | null;
+  rule: string;
 }
 
 export interface GrowthPoint {
@@ -186,6 +199,7 @@ export interface PhotCal {
 
 export interface PhotometryMeasurement {
   photometry: StarPhotometry;
+  limit?: PhotometryUpperLimit | null;
   sky?: { ra: number; dec: number } | null;
   gaia?: { gmag?: number | null; bp_rp: number; separation_arcsec: number } | null;
   photcal: PhotCal | null;
@@ -228,6 +242,8 @@ export interface PhotometryOptions {
   excludeDq?: boolean;
   gain?: number;
   zeroPoint?: UserZeroPoint | null;
+  fCorr?: number | null;
+  limitSigma?: number | null;
 }
 
 export function finiteSky(sky: { ra: number | null; dec: number | null } | null | undefined): { ra: number; dec: number } | null {
@@ -253,6 +269,8 @@ export async function measurePhotometry(
     excludeDq: options.excludeDq ?? false,
     gain: options.gain ?? null,
     zeroPoint: options.zeroPoint ?? null,
+    fCorr: options.fCorr ?? null,
+    limitSigma: options.limitSigma ?? null,
   });
   return { ...res, sky: finiteSky(res.sky) };
 }
@@ -260,6 +278,7 @@ export async function measurePhotometry(
 export interface BatchPhotometryRow {
   index: number;
   photometry: StarPhotometry | null;
+  limit?: PhotometryUpperLimit | null;
   sky: { ra: number; dec: number } | null;
   error: string | null;
 }
@@ -296,6 +315,8 @@ export async function measurePhotometryBatch(
     excludeDq: options.excludeDq ?? false,
     withGrowthCurve: options.withGrowthCurve ?? false,
     zeroPoint: options.zeroPoint ?? null,
+    fCorr: options.fCorr ?? null,
+    limitSigma: options.limitSigma ?? null,
   });
   return { ...res, rows: res.rows.map((row) => ({ ...row, sky: finiteSky(row.sky) })) };
 }

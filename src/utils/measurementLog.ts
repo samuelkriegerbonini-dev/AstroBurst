@@ -22,7 +22,7 @@ import {
 import { generateId } from "./format";
 import { exportStem, parseImageRef } from "./imageRef";
 import type { LineFitRun } from "./lineFit";
-import { batchWarnings, calibratedMagnitude, calibrationText, measurementWarnings } from "./photometryPanel";
+import { batchWarnings, calibratedMagnitude, calibrationText, measurementWarnings, type PhotometryLimitSource } from "./photometryPanel";
 import { summedFluxUnit } from "./photometryTable";
 import { radiusInArcsec, type RadiiInput, type RadiusUnit } from "./photometryUnits";
 import { regionSkyOf } from "./regionCsv";
@@ -453,6 +453,9 @@ export interface PhotometryRequestLog {
   zeroPoint?: UserZeroPoint | null;
   limitSigma?: number;
   fCorr?: number | null;
+  fCorrRequested?: number | null;
+  limitRule?: string | null;
+  limitSource?: PhotometryLimitSource;
 }
 
 export interface PhotometryLimitLog {
@@ -507,6 +510,9 @@ function calibrationParams(opts: PhotometryRequestLog, res: PhotometryUnits): Lo
     mag_system: res.photcal ? (res.photcal.mag_system ?? "ab") : null,
     bunit: photometryPixelUnit(res),
     ...(opts.limitSigma === undefined ? {} : { limit_sigma: opts.limitSigma, f_corr: opts.fCorr ?? null }),
+    ...(opts.fCorrRequested === undefined ? {} : { f_corr_requested: opts.fCorrRequested }),
+    ...(opts.limitRule === undefined ? {} : { limit_rule: opts.limitRule }),
+    ...(opts.limitSource === undefined ? {} : { limit_source: opts.limitSource }),
   };
 }
 
@@ -583,6 +589,9 @@ export function photometryEntry(prov: MeasurementProvenance, res: PhotometryMeas
             upper_limit_ab: opts.limit?.limitAb ?? null,
             upper_limit_native: opts.limit?.limitNative ?? null,
           }),
+      ...(p.total_is_lower_limit === undefined
+        ? {}
+        : { total_is_lower_limit: p.total_is_lower_limit, total_limit_reason: p.total_limit_reason ?? null }),
     },
     notes: [
       ...measurementWarnings(res),

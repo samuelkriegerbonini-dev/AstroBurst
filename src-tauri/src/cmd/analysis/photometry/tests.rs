@@ -10,7 +10,7 @@ use crate::types::constants::{HISTOGRAM_BINS, HISTOGRAM_BINS_DISPLAY, RES_BINS, 
 use crate::types::image::{AutoStfConfig, ImageStats, StfParams};
 use crate::core::analysis::fft::FftResult;
 use crate::core::analysis::gain::gain_model;
-use crate::core::analysis::photometry::{measure_star_prepared, MaskedImage, PhotometryConfig};
+use crate::core::analysis::photometry::{measure_star_prepared, MaskedImage, PhotometryConfig, INTERQUARTILE_MEAN_VARIANCE_FACTOR};
 use crate::core::analysis::star_detection::{detect_stars as detect_stars_core, DetectionResult};
 use crate::core::astrometry::catalog::{query_gaia_cached, CatalogHit, CatalogRow, ConeQuery, GAIA_MATCH_FALLBACK_ROWS, GAIA_MATCH_MAG_LIMIT};
 use crate::core::astrometry::wcs::WcsTransform;
@@ -496,10 +496,10 @@ fn gaussian_fits(dir: &std::path::Path, name: &str) -> String {
 async fn batch_photometry_of_one_point_equals_the_single_measurement_field_by_field() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "batch.fits");
-    let single = measure_photometry_cmd(path.clone(), 31.0, 33.0, Some(5.0), Some(10.0), Some(15.0), Some(false), None, Some(2.0), None)
+    let single = measure_photometry_cmd(path.clone(), 31.0, 33.0, Some(5.0), Some(10.0), Some(15.0), Some(false), None, Some(2.0), None, None, None)
         .await
         .unwrap();
-    let batch = measure_photometry_batch_cmd(path.clone(), vec![(31.0, 33.0)], Some(5.0), Some(10.0), Some(15.0), Some(2.0), None, Some(true), None)
+    let batch = measure_photometry_batch_cmd(path.clone(), vec![(31.0, 33.0)], Some(5.0), Some(10.0), Some(15.0), Some(2.0), None, Some(true), None, None, None)
         .await
         .unwrap();
     let rows = batch[RES_ROWS].as_array().unwrap();
@@ -519,7 +519,7 @@ async fn batch_photometry_of_one_point_equals_the_single_measurement_field_by_fi
     assert!(!phot["growth_curve"].as_array().unwrap().is_empty());
     assert!(phot["growth_curve"][0]["r"].is_number() && phot["growth_curve"][0]["flux"].is_number());
 
-    let mixed = measure_photometry_batch_cmd(path, vec![(32.0, 32.0), (5.0, 5.0)], None, None, None, None, None, None, None)
+    let mixed = measure_photometry_batch_cmd(path, vec![(32.0, 32.0), (5.0, 5.0)], None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(mixed[RES_N_MEASURED], 2);
@@ -552,13 +552,13 @@ async fn batch_photometry_without_gain_warns_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "batch_photon_noise.fits");
     let points = vec![(32.0, 32.0), (30.0, 34.0), (34.0, 30.0)];
-    let out = measure_photometry_batch_cmd(path.clone(), points.clone(), Some(5.0), None, None, None, None, None, None)
+    let out = measure_photometry_batch_cmd(path.clone(), points.clone(), Some(5.0), None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(out[RES_N_MEASURED], 3);
     assert_eq!(sky_only_warnings(&out), 1, "{}", out[RES_WARNINGS]);
     assert!(out[RES_GAIN_USED].is_null(), "{}", out[RES_GAIN_USED]);
-    let with = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, Some(2.0), None, None, None).await.unwrap();
+    let with = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, Some(2.0), None, None, None, None, None).await.unwrap();
     assert_eq!(sky_only_warnings(&with), 0, "{}", with[RES_WARNINGS]);
     assert_eq!(with[RES_GAIN_USED], 2.0);
 }
@@ -722,7 +722,7 @@ async fn photometry_results_carry_the_pixel_unit_and_the_unit_of_a_sum() {
     ];
     for (path, bunit, summed_unit) in cases {
         let single = photometry_for_path(&path, 32.0, 32.0, None, None, false, false, None).unwrap();
-        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, None, None, None, None, None, None)
+        let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, None, None, None, None, None, None, None, None)
             .await
             .unwrap();
         for out in [&single, &batch] {
@@ -989,10 +989,10 @@ fn the_layer_report_and_resolve_dq_mask_agree_on_every_fixture() {
 async fn the_warning_order_keeps_batch_and_single_equal() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "plain.fits");
-    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), None, None, Some(false), Some(true), Some(2.0), None)
+    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), None, None, Some(false), Some(true), Some(2.0), None, None, None)
         .await
         .unwrap();
-    let batch = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), None, None, Some(2.0), Some(true), None, None)
+    let batch = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), None, None, Some(2.0), Some(true), None, None, None, None)
         .await
         .unwrap();
     assert_eq!(batch[RES_WARNINGS], single[RES_WARNINGS]);
@@ -1004,27 +1004,27 @@ async fn a_sky_annulus_inside_the_aperture_is_refused_by_both_commands() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "refused.fits");
     let sentence = "sky annulus inner radius 5 must be larger than the aperture radius 5";
-    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), Some(5.0), Some(10.0), Some(false), None, None, None)
+    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), Some(5.0), Some(10.0), Some(false), None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(single.contains(sentence), "{single}");
-    let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(5.0), Some(5.0), Some(10.0), None, None, None, None)
+    let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(5.0), Some(5.0), Some(10.0), None, None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(batch.contains(sentence), "{batch}");
 
-    let auto_radius = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, Some(2.0), Some(4.0), None, None, None, None)
+    let auto_radius = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, Some(2.0), Some(4.0), None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(auto_radius[RES_N_FAILED], 1);
     assert!(auto_radius[RES_ROWS][0][RES_ERROR].as_str().unwrap().contains("must be larger than the aperture radius"));
     assert!(auto_radius[RES_ROWS][0][RES_PHOTOMETRY].is_null());
 
-    let half = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(8.0), None, Some(false), None, None, None)
+    let half = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(8.0), None, Some(false), None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(half.contains("sky annulus needs both an inner and an outer radius"), "{half}");
-    let inverted = measure_photometry_cmd(path, 32.0, 32.0, None, Some(12.0), Some(8.0), Some(false), None, None, None)
+    let inverted = measure_photometry_cmd(path, 32.0, 32.0, None, Some(12.0), Some(8.0), Some(false), None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(inverted.contains("sky annulus outer radius 8 must be larger than the inner radius 12"), "{inverted}");
@@ -1035,15 +1035,15 @@ async fn batch_photometry_refuses_too_many_empty_or_non_finite_points() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "limits.fits");
     let too_many = vec![(32.0, 32.0); 6000];
-    let err = measure_photometry_batch_cmd(path.clone(), too_many, None, None, None, None, None, None, None)
+    let err = measure_photometry_batch_cmd(path.clone(), too_many, None, None, None, None, None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(err.contains("6000 points exceeds the limit of 5000"), "{err}");
-    let empty = measure_photometry_batch_cmd(path.clone(), vec![], None, None, None, None, None, None, None)
+    let empty = measure_photometry_batch_cmd(path.clone(), vec![], None, None, None, None, None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(empty.contains("at least one point"), "{empty}");
-    let nan = measure_photometry_batch_cmd(path, vec![(32.0, f64::NAN)], None, None, None, None, None, None, None)
+    let nan = measure_photometry_batch_cmd(path, vec![(32.0, f64::NAN)], None, None, None, None, None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(nan.contains("point 0"), "{nan}");
@@ -1053,7 +1053,7 @@ async fn batch_photometry_refuses_too_many_empty_or_non_finite_points() {
 async fn batch_photometry_without_growth_curves_still_reports_encircled_energy_radii() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "growth.fits");
-    let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(6.0), None, None, None, None, Some(false), None)
+    let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(6.0), None, None, None, None, Some(false), None, None, None)
         .await
         .unwrap();
     let phot = &out[RES_ROWS][0][RES_PHOTOMETRY];
@@ -1070,7 +1070,7 @@ async fn batch_photometry_reports_positions_outside_the_image_as_failed_rows() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "outside.fits");
     let points = vec![(32.0, 32.0), (3000.0, 3000.0), (-500.0, 10.0), (70.0, 32.0)];
-    let out = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, None, None, None, None).await.unwrap();
+    let out = measure_photometry_batch_cmd(path, points, Some(5.0), None, None, None, None, None, None, None, None).await.unwrap();
     assert_eq!(out[RES_N_MEASURED], 1);
     assert_eq!(out[RES_N_FAILED], 3);
     for i in [1usize, 2, 3] {
@@ -1086,11 +1086,11 @@ async fn a_sky_annulus_wider_than_the_limit_is_refused_by_every_photometry_comma
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "wide_annulus.fits");
     let sentence = "sky annulus outer radius 3000 must be at most 512 pixels";
-    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(20.0), Some(3000.0), Some(false), None, None, None)
+    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, Some(20.0), Some(3000.0), Some(false), None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(single.contains(sentence), "{single}");
-    let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 100], Some(5.0), Some(20.0), Some(3000.0), None, None, None, None)
+    let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 100], Some(5.0), Some(20.0), Some(3000.0), None, None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(batch.contains(sentence), "{batch}");
@@ -1102,27 +1102,27 @@ async fn a_sky_annulus_wider_than_the_limit_is_refused_by_every_photometry_comma
 async fn an_aperture_radius_outside_the_measurable_range_is_refused_once_by_both_commands() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "aperture_range.fits");
-    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(1.5), None, None, Some(false), None, None, None)
+    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(1.5), None, None, Some(false), None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(single.contains("aperture radius 1.5 must be between 2 and 60 pixels"), "{single}");
-    let small = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 3], Some(1.5), Some(1.8), Some(4.0), None, None, None, None)
+    let small = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0); 3], Some(1.5), Some(1.8), Some(4.0), None, None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(small.contains("aperture radius 1.5 must be between 2 and 60 pixels"), "{small}");
-    let large = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(100.0), None, None, None, None, None, None)
+    let large = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(100.0), None, None, None, None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(large.contains("aperture radius 100 must be between 2 and 60 pixels"), "{large}");
-    let single_large = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(100.0), None, None, Some(false), None, None, None)
+    let single_large = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(100.0), None, None, Some(false), None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(single_large.contains("aperture radius 100 must be between 2 and 60 pixels"), "{single_large}");
-    let nan = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(f64::NAN), None, None, None, None, None, None)
+    let nan = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], Some(f64::NAN), None, None, None, None, None, None, None, None)
         .await
         .unwrap_err();
     assert!(nan.contains("aperture radius NaN"), "{nan}");
-    let edge = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(2.0), None, None, None, None, None, None)
+    let edge = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(2.0), None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(edge[RES_N_MEASURED], 1);
@@ -1133,7 +1133,7 @@ async fn an_aperture_radius_outside_the_measurable_range_is_refused_once_by_both
 async fn batch_photometry_reports_a_sky_annulus_with_no_usable_pixel_as_a_failed_row() {
     let dir = tempfile::tempdir().unwrap();
     let path = gaussian_fits(dir.path(), "thin_annulus.fits");
-    let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), Some(10.0), Some(10.3), None, None, None, None)
+    let out = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), Some(10.0), Some(10.3), None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(out[RES_N_FAILED], 1);
@@ -1148,7 +1148,7 @@ async fn batch_photometry_with_dq_exclusion_equals_the_single_measurement_for_ev
     let key = jwst_star_mef(&dir.path().join("jwst_batch_dq.fits"), vec![]);
     let points: Vec<(f64, f64)> = (0..70).map(|i| (24.0 + (i % 10) as f64 * 1.7, 24.0 + (i / 10) as f64 * 2.3)).collect();
     assert!(points.len() > PAR_BATCH_POINTS);
-    let batch = measure_photometry_batch_cmd(key.clone(), points.clone(), None, None, None, None, Some(true), Some(true), None)
+    let batch = measure_photometry_batch_cmd(key.clone(), points.clone(), None, None, None, None, Some(true), Some(true), None, None, None)
         .await
         .unwrap();
     assert_eq!(batch[RES_MASKED], true);
@@ -1374,7 +1374,7 @@ fn gaia_match_uses_the_cached_field_cone() {
     primed.insert(catalog_cache_key(&field), vec![gaia_row(star.ra, star.dec, 12.0)]);
     let mut seen = Vec::new();
     let mut cached = |q: &ConeQuery| catalog_from_map(&primed, &mut seen, q);
-    let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached).unwrap();
+    let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached, LimitRequest::default()).unwrap();
     assert_eq!(out[RES_GAIA][RES_BP_RP], 0.8, "{}", out[RES_GAIA]);
     assert_eq!(out[RES_GAIA][RES_GMAG], 12.0);
     assert!(out[RES_GAIA][RES_SEPARATION_ARCSEC].as_f64().unwrap() < 1.0, "{}", out[RES_GAIA]);
@@ -1398,7 +1398,7 @@ fn a_capped_field_cone_falls_back_to_the_per_star_cone() {
     primed.insert(catalog_cache_key(&per_star), vec![gaia_row(star.ra, star.dec, 12.0)]);
     let mut seen = Vec::new();
     let mut cached = |q: &ConeQuery| catalog_from_map(&primed, &mut seen, q);
-    let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached).unwrap();
+    let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached, LimitRequest::default()).unwrap();
     assert_eq!(out[RES_GAIA][RES_BP_RP], 0.8, "{}", out[RES_GAIA]);
     assert_eq!(out[RES_GAIA][RES_GMAG], 12.0);
     assert_eq!(field.max_rows, 5000);
@@ -1414,7 +1414,7 @@ fn a_gaia_query_failure_becomes_a_warning_at_the_caller() {
     let dir = tempfile::tempdir().unwrap();
     let path = wcs_gaussian_fits_at(dir.path(), "offline.fits", 213.5, -18.25);
     let mut cached = |_: &ConeQuery| Err("VizieR request failed: timeout".to_string());
-    let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached).unwrap();
+    let out = photometry_for_path_with_catalog(&path, 32.0, 32.0, None, None, true, false, None, None, &mut cached, LimitRequest::default()).unwrap();
     assert!(out[RES_GAIA].is_null(), "{}", out[RES_GAIA]);
     let warnings = out[RES_WARNINGS].as_array().unwrap();
     assert!(
@@ -1453,7 +1453,7 @@ fn wcs_gaussian_fits_at(dir: &std::path::Path, name: &str, crval1: f64, crval2: 
 async fn click_photometry_skips_the_gaia_match_unless_asked() {
     let dir = tempfile::tempdir().unwrap();
     let path = wcs_gaussian_fits(dir.path(), "wcs.fits");
-    let out = measure_photometry_cmd(path, 32.0, 32.0, None, None, None, None, None, None, None).await.unwrap();
+    let out = measure_photometry_cmd(path, 32.0, 32.0, None, None, None, None, None, None, None, None, None).await.unwrap();
     assert!(out[RES_SKY][RES_RA].is_number(), "{}", out[RES_SKY]);
     assert!(out[RES_GAIA].is_null());
     let warnings = out[RES_WARNINGS].as_array().unwrap();
@@ -1495,19 +1495,19 @@ fn flux_bits(phot: &serde_json::Value) -> Vec<u64> {
     bits
 }
 
-const HEAD_15AFA22_FLUX_BITS: [u64; 48] = [
-    0x40d75c70674d66e1, 0x400fc29c5ad9e12b, 0x40b78997fc2dd42a, 0x3f41f85858818451,
-    0x3e786e5372411c0e, 0x40310d602c12372e, 0x3f279e162f820bf8, 0x4030ffbd755aac0d,
-    0x408a393148ebcb56, 0x40a556062cd496c9, 0x40b805056b3f574c, 0x40c2c2bd8a6c847b,
-    0x40ca5f6f7f358ad2, 0x40d04d371bace26e, 0x40d33f33a038ba1b, 0x40d506b4dd20abd0,
-    0x40d6883460052aa6, 0x40d75c70674d66e1, 0x40d7f39cca6557ae, 0x40d83ca7d26b0ca2,
-    0x40d8684e461bcf10, 0x40d87be8f02a60aa, 0x40d88429e75192a3, 0x40d8878eea6c1ba0,
-    0x40d88924aa49fcac, 0x40d8898ee2ac7720, 0x40d88a8720604db2, 0x40d88ad549dff961,
-    0x40d88accb6fc3754, 0x40d88a25e40dcede, 0x40d888dbc6d4d012, 0x40d8891ff82b1b3c,
-    0x40d8895afa6c920e, 0x40d8896100069a3e, 0x40d88a559d158afe, 0x40d88a4a24dbd3e4,
-    0x40d888dbb2e5f9ac, 0x40d8883f5b43948c, 0x40d887f3a33a88a4, 0x40d8882b0f7e0564,
-    0x40d888a5603f7c50, 0x40d888c1277c1cb4, 0x40d889229160b098, 0x40d888110c29d574,
-    0x40d886b8036f7328, 0x40d886d1e9ced978, 0x40d886f28331d198, 0x40d886ed3199d5c4,
+const CAL_FLUX_BITS_WITH_EXACT_APERTURES: [u64; 48] = [
+    0x40d762388cafa96e, 0x4010c7dffbfb7750, 0x40b64bb2ed1af100, 0x3f41fccaebe1d968,
+    0x3e79d10c86678318, 0x40310d1b69e9fc5c, 0x3f28eed4047b1f62, 0x4030ffba7c157c80,
+    0x408884da268f2115, 0x40a6512a6d8b02bd, 0x40b7f060ad487ae7, 0x40c2e5ae2c5c6589,
+    0x40ca6b7ff1af0530, 0x40d0573dd1e3a777, 0x40d320faa659214d, 0x40d50e88126a1057,
+    0x40d682d0d21ef6af, 0x40d762388cafa96e, 0x40d7f2c76252ad9a, 0x40d83ddec1252bc0,
+    0x40d8688d649b6ff4, 0x40d87c014f1bf8e4, 0x40d88439b8bf294e, 0x40d887d1f1463cac,
+    0x40d88967de022180, 0x40d889e11e934d36, 0x40d88ae91bbb9b4a, 0x40d88b2330e7428c,
+    0x40d88b3cb1350ae4, 0x40d88a7c9bb7c394, 0x40d8896a7d60a166, 0x40d889c634ff54f0,
+    0x40d889e6dc3d03d4, 0x40d88a13bb908b12, 0x40d88b02d0bdb046, 0x40d88afadf101baa,
+    0x40d889bf295d4324, 0x40d88919da2225a8, 0x40d888ec733fc094, 0x40d8891a07157d40,
+    0x40d889b8085e79e0, 0x40d88a055f41e648, 0x40d88a5612cc5648, 0x40d88976d600f048,
+    0x40d888092a07a28c, 0x40d8883c098c8490, 0x40d8886ebd754328, 0x40d88878b50a91d4,
 ];
 const HEAD_LABEL: &str = "JWST MJy/sr, PIXAR_SR from header";
 const AREA_LABEL: &str = "JWST MJy/sr, PIXAR_SR from header, AREA pixel-area map applied";
@@ -1585,7 +1585,7 @@ fn a_jwst_cal_without_an_area_extension_keeps_the_head_photometry_bit_for_bit() 
     let fixture = jwst_cal_mef(&dir.path().join("cal.fits"), &[], cal_sci_cards(), CalPlanes::ALL, vec![]);
     let out = cal_photometry(&fixture.key, false);
     let phot = &out[RES_PHOTOMETRY];
-    assert_eq!(flux_bits(phot), HEAD_15AFA22_FLUX_BITS.to_vec());
+    assert_eq!(flux_bits(phot), CAL_FLUX_BITS_WITH_EXACT_APERTURES.to_vec());
     assert_eq!(out[RES_PHOTCAL][RES_LABEL], HEAD_LABEL);
     assert!(notes_of(&out).iter().any(|n| n == JWST_MJY_SR_NOTE), "{:?}", notes_of(&out));
     assert!(!mentions_area(&out[RES_PHOTCAL]["notes"]), "{}", out[RES_PHOTCAL]["notes"]);
@@ -1668,7 +1668,7 @@ fn area_map_fluxes_match_a_hand_sum_over_the_masked_aperture() {
         area_weight += w;
     }
     assert!(touched_block, "the 1.02 block must overlap the aperture");
-    variance += area_weight * area_weight * bg_sigma * bg_sigma / bg_pixels;
+    variance += INTERQUARTILE_MEAN_VARIANCE_FACTOR * area_weight * area_weight * bg_sigma * bg_sigma / bg_pixels;
     let expected_jy = JY_PER_MJY * CAL_PIXAR_SR * net;
     let expected_err_jy = JY_PER_MJY * CAL_PIXAR_SR * variance.sqrt();
 
@@ -1766,8 +1766,11 @@ fn without_an_err_plane_the_area_map_enters_the_variance_once_like_photon_counts
             assert_eq!(phot[field], plain[field], "{name}: {field}");
         }
         let (n_ap, sigma, n_bg) = (number(plain, "aperture_area"), number(plain, "bg_sigma"), number(plain, "bg_pixels"));
+        let (x, y, r) = (number(plain, "x"), number(plain, "y"), number(plain, "aperture_radius"));
+        let squared_weights: f64 = circular_aperture(CAL_SIZE, CAL_SIZE, x, y, r, 5).iter().map(|p| (p.weight as f64).powi(2)).sum();
         let poisson = gain.map_or(0.0, |g| number(plain, "net_flux").max(0.0) / g);
-        let expected = (scale * (poisson + n_ap * sigma * sigma) + scale * scale * n_ap * n_ap * sigma * sigma / n_bg).sqrt();
+        let sky_mean_variance = INTERQUARTILE_MEAN_VARIANCE_FACTOR * scale * scale * n_ap * n_ap * sigma * sigma / n_bg;
+        let expected = (scale * (poisson + squared_weights * sigma * sigma) + sky_mean_variance).sqrt();
         let flux_err = number(phot, "flux_err");
         assert!(
             relative_gap(flux_err, expected) < 1e-9,
@@ -1794,6 +1797,7 @@ fn without_an_err_plane_the_area_map_enters_the_variance_once_like_photon_counts
     let (bg_mean, bg_sigma, bg_pixels) = (number(phot, "bg_mean"), number(phot, "bg_sigma"), number(phot, "bg_pixels"));
     let mut net = 0.0f64;
     let mut area_weight = 0.0f64;
+    let mut squared_area_weight = 0.0f64;
     for p in circular_aperture(CAL_SIZE, CAL_SIZE, x, y, r, 5) {
         if mask[[p.y, p.x]] != 0 {
             continue;
@@ -1802,8 +1806,10 @@ fn without_an_err_plane_the_area_map_enters_the_variance_once_like_photon_counts
         let signal = blocked.sci[[p.y, p.x]] as f64 - bg_mean;
         net += w * a * signal;
         area_weight += w * a;
+        squared_area_weight += w * w * a;
     }
-    let variance = net.max(0.0) / gain + area_weight * bg_sigma * bg_sigma + area_weight * area_weight * bg_sigma * bg_sigma / bg_pixels;
+    let sky_mean_variance = INTERQUARTILE_MEAN_VARIANCE_FACTOR * area_weight * area_weight * bg_sigma * bg_sigma / bg_pixels;
+    let variance = net.max(0.0) / gain + squared_area_weight * bg_sigma * bg_sigma + sky_mean_variance;
     let flux_err = number(phot, "flux_err");
     assert!(relative_gap(number(phot, "net_flux"), net) < 1e-9);
     assert!(relative_gap(flux_err, variance.sqrt()) < 1e-9, "flux_err {flux_err} vs hand sum {}", variance.sqrt());
@@ -1884,10 +1890,10 @@ async fn batch_photometry_with_an_area_map_equals_the_single_measurement() {
         CalPlanes::ALL,
         vec![area_hdu(blocked_area(), CAL_SIZE, Some(1))],
     );
-    let single = measure_photometry_cmd(fixture.key.clone(), 32.0, 32.0, Some(CAL_APERTURE_RADIUS), None, None, Some(false), Some(true), None, None)
+    let single = measure_photometry_cmd(fixture.key.clone(), 32.0, 32.0, Some(CAL_APERTURE_RADIUS), None, None, Some(false), Some(true), None, None, None, None)
         .await
         .unwrap();
-    let batch = measure_photometry_batch_cmd(fixture.key.clone(), vec![(32.0, 32.0)], Some(CAL_APERTURE_RADIUS), None, None, None, Some(true), Some(true), None)
+    let batch = measure_photometry_batch_cmd(fixture.key.clone(), vec![(32.0, 32.0)], Some(CAL_APERTURE_RADIUS), None, None, None, Some(true), Some(true), None, None, None)
         .await
         .unwrap();
     let rows = batch[RES_ROWS].as_array().unwrap();
@@ -2105,7 +2111,7 @@ fn user_zero_point(zp: f64, system: UserMagSystem, per_second: bool) -> UserZero
 fn measured_with(path: &str, zero_point: Option<&UserZeroPoint>) -> anyhow::Result<serde_json::Value> {
     photometry_for_path_with_catalog(path, 32.0, 32.0, Some(5.0), None, false, false, None, zero_point, &mut |q| {
         query_gaia_cached(q)
-    })
+    }, LimitRequest::default())
 }
 
 fn warning_texts(out: &serde_json::Value) -> Vec<String> {
@@ -2238,9 +2244,9 @@ async fn a_non_finite_zero_point_is_refused_by_the_commands() {
     let path = "C:/nope/missing_user_zero_point.fits".to_string();
     let nan = || Some(user_zero_point(f64::NAN, UserMagSystem::Ab, false));
     let expected = "user zero point NaN must be a finite magnitude";
-    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, None, None, None, None, None, nan()).await.unwrap_err();
+    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, None, None, None, None, None, None, nan(), None, None).await.unwrap_err();
     assert!(single.contains(expected), "{single}");
-    let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, None, None, None, None, None, nan())
+    let batch = measure_photometry_batch_cmd(path.clone(), vec![(32.0, 32.0)], None, None, None, None, None, None, nan(), None, None)
         .await
         .unwrap_err();
     assert!(batch.contains(expected), "{batch}");
@@ -2253,10 +2259,10 @@ async fn batch_and_single_agree_with_a_typed_zero_point() {
     let dir = tempfile::tempdir().unwrap();
     let path = counts_star(dir.path(), "adu_batch.fits", &[("BUNIT", "adu"), ("EXPTIME", "600")]);
     let zp = || Some(user_zero_point(25.0, UserMagSystem::Ab, true));
-    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), None, None, Some(false), None, None, zp())
+    let single = measure_photometry_cmd(path.clone(), 32.0, 32.0, Some(5.0), None, None, Some(false), None, None, zp(), None, None)
         .await
         .unwrap();
-    let batch = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), None, None, None, None, Some(true), zp())
+    let batch = measure_photometry_batch_cmd(path, vec![(32.0, 32.0)], Some(5.0), None, None, None, None, Some(true), zp(), None, None)
         .await
         .unwrap();
     assert!(single[RES_PHOTOMETRY]["flux_jy"].is_number(), "{}", single[RES_PHOTOMETRY]);
@@ -2630,7 +2636,7 @@ fn the_plateau_flux_of_a_space_telescope_image_is_a_lower_limit_of_the_total() {
 async fn the_upper_limit_of_a_measurement_comes_from_the_backend_with_its_rule() {
     let dir = tempfile::tempdir().unwrap();
     let path = counts_star(dir.path(), "limit_rule.fits", &[("BUNIT", "nanomaggy")]);
-    let empty_sky = measure_photometry_cmd(path.clone(), 10.0, 10.0, Some(3.0), Some(6.0), Some(9.0), Some(false), None, None, None)
+    let empty_sky = measure_photometry_cmd(path.clone(), 10.0, 10.0, Some(3.0), Some(6.0), Some(9.0), Some(false), None, None, None, None, None)
         .await
         .unwrap();
     let phot = &empty_sky[RES_PHOTOMETRY];
@@ -2640,7 +2646,7 @@ async fn the_upper_limit_of_a_measurement_comes_from_the_backend_with_its_rule()
     assert_eq!(limit["rule"], "upper limit = 3 x flux error (errors from the sky scatter)", "{limit}");
     assert!(limit["f_corr"].is_null(), "{limit}");
 
-    let batch = measure_photometry_batch_cmd(path, vec![(10.0, 10.0), (32.0, 32.0)], Some(3.0), Some(6.0), Some(9.0), None, None, None, None)
+    let batch = measure_photometry_batch_cmd(path, vec![(10.0, 10.0), (32.0, 32.0)], Some(3.0), Some(6.0), Some(9.0), None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(batch[RES_ROWS][0]["limit"], *limit);

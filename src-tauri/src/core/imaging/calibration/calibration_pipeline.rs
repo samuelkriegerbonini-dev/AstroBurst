@@ -165,6 +165,8 @@ pub struct BatchChannelStats {
     pub sky_levels: Vec<Option<f64>>,
     #[serde(default)]
     pub dark_scales: Vec<f32>,
+    #[serde(default)]
+    pub rejected_pixels_per_light: Vec<Option<usize>>,
     #[serde(skip)]
     pub dark_group_of: Vec<Option<usize>>,
     #[serde(skip)]
@@ -780,6 +782,10 @@ pub fn run_batch_pipeline_with_rejection(
                 sky_levels[input] = Some(f64::from(divisor));
             }
         }
+        let mut rejected_pixels_per_light: Vec<Option<usize>> = vec![None; channel.lights.len()];
+        for (&input, &count) in kept.iter().zip(&rejection_counts) {
+            rejected_pixels_per_light[input] = Some(count);
+        }
 
         let mean_val = stacked.iter().map(|&v| v as f64).sum::<f64>() / stacked.len() as f64;
         let var: f64 = stacked
@@ -806,6 +812,7 @@ pub fn run_batch_pipeline_with_rejection(
             sky_reference: sky_reference.map(f64::from),
             sky_levels,
             dark_scales: if masters.dark.is_some() { dark_scales } else { Vec::new() },
+            rejected_pixels_per_light,
             dark_group_of: channel.dark_group.clone(),
             alignment,
         });
@@ -2232,7 +2239,7 @@ mod tests {
 
     #[test]
     fn rejected_pixels_are_reported_by_input_light_when_alignment_left_one_out() {
-        let reference = blob_light(150.0, 50.0);
+        let reference = blob_light(150.0, 50.0) + seeded_gaussian(300, 300, 5.0, 160);
         let mut struck = reference.clone();
         struck[[10, 10]] = 400.0;
         let channel = light_channel(vec![reference.clone(), blob_light(150.0, 250.0), reference.clone(), reference, struck]);

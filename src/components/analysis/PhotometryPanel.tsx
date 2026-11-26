@@ -21,6 +21,7 @@ import {
   createClickLogGate,
   depthNoiseText,
   gaiaFailureWarning,
+  limitRuleText,
   limitSentence,
   loadGaiaMatchPreference,
   magnitudeTitle,
@@ -28,6 +29,9 @@ import {
   photometryLimit,
   replaceNewest,
   saveGaiaMatchPreference,
+  totalIsLowerLimit,
+  totalLimitNote,
+  totalLimitReason,
   userZeroPoint,
   withWarning,
 } from "../../utils/photometryPanel";
@@ -150,11 +154,14 @@ function bestMag(p: StarPhotometry): string {
   return p.mag_ab != null ? `AB ${formatMag(p.mag_ab)}` : `inst ${formatMag(p.mag_inst)}`;
 }
 
-function limitLog(phot: StarPhotometry, fCorr: number | null) {
-  const limit = photometryLimit(phot, fCorr);
+function limitLog(result: PhotometryMeasurement, fCorr: number | null) {
+  const limit = photometryLimit(result.photometry, fCorr, result.limit);
   return {
-    limitSigma: DEFAULT_LIMIT_SIGMA,
+    limitSigma: limit.sigma,
     fCorr: limit.fCorr,
+    fCorrRequested: limit.fCorrRequested ?? null,
+    limitRule: limit.rule ?? null,
+    limitSource: limit.source,
     limit: limit.isLimit ? { limitJy: limit.limitJy, limitAb: limit.limitAb, limitNative: limit.limitNative } : null,
   };
 }
@@ -286,12 +293,13 @@ function PhotometryPanel({ filePath, measureKey }: PhotometryPanelProps) {
       if (!filePath || busyRef.current || apertureOutOfRange || fieldError !== null || radiusError !== null) return;
       const seq = logGate.begin();
       const options = { apertureRadius, annulusInner, annulusOuter, gain, excludeDq };
+      const limitRequest = { fCorr, limitSigma: DEFAULT_LIMIT_SIGMA };
       const logged = { ...options, radiusUnit, typedRadii, pixelScaleArcsec: arcsecPerPx, zeroPoint: zeroPoint ?? null };
       busyRef.current = true;
       setIsMeasuring(true);
       setGaiaPending(false);
       setError(null);
-      const local = await measurePhotometry(filePath, x, y, { ...options, gaiaMatch: false, zeroPoint }).catch((e: unknown) => {
+      const local = await measurePhotometry(filePath, x, y, { ...options, ...limitRequest, gaiaMatch: false, zeroPoint }).catch((e: unknown) => {
         if (logGate.isCurrent(seq)) {
           setError(e instanceof Error ? e.message : String(e));
           setIsMeasuring(false);
@@ -305,14 +313,14 @@ function PhotometryPanel({ filePath, measureKey }: PhotometryPanelProps) {
       setHistory((prev) => [local, ...prev].slice(0, 4));
       setIsMeasuring(false);
       const appendLocal = () =>
-        measurementLog.append(photometryEntry(provenance, local, { ...logged, ...limitLog(local.photometry, fCorr), gaiaMatch: false }));
+        measurementLog.append(photometryEntry(provenance, local, { ...logged, ...limitLog(local, fCorr), gaiaMatch: false }));
       if (!gaiaMatch) {
         logGate.commit(seq, appendLocal);
         return;
       }
       logGate.hold(seq, appendLocal);
       setGaiaPending(true);
-      const matched = await measurePhotometry(filePath, x, y, { ...options, gaiaMatch: true, zeroPoint }).catch((e: unknown) =>
+      const matched = await measurePhotometry(filePath, x, y, { ...options, ...limitRequest, gaiaMatch: true, zeroPoint }).catch((e: unknown) =>
         withWarning(local, gaiaFailureWarning(e)),
       );
       if (!logGate.isCurrent(seq)) return;
@@ -320,7 +328,7 @@ function PhotometryPanel({ filePath, measureKey }: PhotometryPanelProps) {
       setResult(matched);
       setHistory((prev) => replaceNewest(prev, local, matched));
       logGate.commit(seq, () =>
-        measurementLog.append(photometryEntry(provenance, matched, { ...logged, ...limitLog(matched.photometry, fCorr), gaiaMatch: true })),
+        measurementLog.append(photometryEntry(provenance, matched, { ...logged, ...limitLog(matched, fCorr), gaiaMatch: true })),
       );
     },
     [
@@ -378,13 +386,17 @@ function PhotometryPanel({ filePath, measureKey }: PhotometryPanelProps) {
 
   const phot = result?.photometry;
   const photcal = result?.photcal ?? null;
-  const warnings = result ? measurementWarnings(result) : [];
+  const totalReason = totalLimitReason(phot);
+  const totalNote = totalLimitNote(phot);
+  const lowerTotal = totalIsLowerLimit(phot);
+  const warnings = result ? measurementWarnings(result).filter((warning) => warning !== totalReason) : [];
   const summedUnit = result?.summed_unit ?? summedFluxUnit(photcal);
   const unit = fluxUnitLabel(summedUnit);
   const pixelUnit = fluxUnitLabel(result?.bunit ?? photcal?.bunit ?? null);
   const magnitude = phot ? calibratedMagnitude(phot, photcal) : null;
-  const limit = phot ? photometryLimit(phot, measuredFCorr) : null;
+  const limit = phot ? photometryLimit(phot, measuredFCorr, result?.limit) : null;
   const limitText = limit ? limitSentence(limit, summedUnit) : null;
+  const ruleText = limitRuleText(limit);
   const magnitudeText =
     limit?.isLimit && limit.limitAb !== null
       ? `> ${limit.limitAb.toFixed(2)} (${limit.sigma} sigma)`
@@ -638,6 +650,11 @@ function PhotometryPanel({ filePath, measureKey }: PhotometryPanelProps) {
                 {limitText}
               </div>
             )}
+            {ruleText && (
+              <div className="col-span-2 text-[9px] text-zinc-500" data-photometry-limit-rule>
+                {ruleText}
+              </div>
+            )}
             <div className="bg-zinc-900/80 rounded px-2 py-1.5">
               <div className="text-zinc-500">Mag (inst){phot.st_mag != null ? " / ST" : ""}</div>
               <div className="text-zinc-300 font-mono">
@@ -697,11 +714,16 @@ function PhotometryPanel({ filePath, measureKey }: PhotometryPanelProps) {
                   Aperture correction
                   {plateauCaption(phot.plateau_radius)}
                 </div>
-                <div className="text-zinc-300 font-mono">
+                <div className="text-zinc-300 font-mono" title={totalReason ?? undefined} data-total-flux>
                   {phot.aperture_correction.toFixed(4)}
-                  {phot.flux_total != null ? ` → total ${formatSci(phot.flux_total)}${unit}` : ""}
-                  {phot.mag_ab_total != null ? `, AB ${formatMag(phot.mag_ab_total)}` : ""}
+                  {phot.flux_total != null ? ` → total ${lowerTotal ? "> " : ""}${formatSci(phot.flux_total)}${unit}` : ""}
+                  {phot.mag_ab_total != null ? `, AB ${lowerTotal ? "< " : ""}${formatMag(phot.mag_ab_total)}` : ""}
                 </div>
+                {totalNote && (
+                  <div className="text-[9px] text-amber-400/90" data-total-lower-limit>
+                    {totalNote}
+                  </div>
+                )}
                 {phot.ee_in_aperture != null && (
                   <div className="text-zinc-500">
                     EE in aperture <span className="text-zinc-300 font-mono">{phot.ee_in_aperture.toFixed(4)}</span>

@@ -144,7 +144,7 @@ export function LockedView({ state }: { state: ArchiveState }) {
   );
 }
 
-export function searchInsteadMissions(state: ArchiveState): { id: ArchiveState["form"]["mission"]; label: string }[] {
+function searchInsteadMissions(state: ArchiveState): { id: ArchiveState["form"]["mission"]; label: string }[] {
   return missionEntries(state.missions, romanLockOf(state))
     .filter((e) => e.placement === "tab" && e.enabled && e.lock === null && e.status === STATUS_OPEN && e.id !== state.form.mission)
     .map((e) => ({ id: e.id, label: e.label }));

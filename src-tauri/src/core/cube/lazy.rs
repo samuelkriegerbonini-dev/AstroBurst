@@ -1923,8 +1923,8 @@ mod tests {
     const GOLDEN_APERTURE_NOISE: f32 = 0.01;
     const GOLDEN_APERTURE_SUBSAMPLES: u8 = 5;
     const GOLDEN_APERTURE_SHA256: [(&str, &str); 2] = [
-        ("disk", "ac5592a2abc5f6c1c068db65baf1cd100970503fa5d0ade37876d193a4d82de8"),
-        ("disk_annulus", "37c19b8f028b5c36d0e06375f2ff39e28ded116c0731ee43e5f61de3bcaae4d8"),
+        ("disk", "087fa6a7b2f4e70ca2b31cb0b247bc0c5d3e1d3e996268ebbdbf6ae21939fdfc"),
+        ("disk_annulus", "c076228793eeadce11feb0cf9167eaf9fbe3a4f44f84a2dc924b959827658aac"),
     ];
 
     fn golden_background() -> RegionShape {

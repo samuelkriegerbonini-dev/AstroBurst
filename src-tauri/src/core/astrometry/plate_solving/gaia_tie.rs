@@ -2681,7 +2681,14 @@ mod tests {
         let update = result.header_update.as_ref().unwrap();
         let keys: Vec<&str> = update.cards.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["CRVAL1", "CRVAL2", "CD1_1", "CD1_2", "CD2_1", "CD2_2", "RADESYS"]);
-        assert_eq!(update.remove, ["PC1_1", "PC1_2", "PC2_1", "PC2_2", "CDELT1", "CDELT2", "CROTA1", "CROTA2", "EQUINOX", "RADECSYS"]);
+        assert_eq!(
+            update.remove,
+            [
+                "PC1_1", "PC1_2", "PC2_1", "PC2_2", "CDELT1", "CDELT2", "CROTA1", "CROTA2",
+                "PC001001", "PC001002", "PC002001", "PC002002", "CD001001", "CD001002", "CD002001", "CD002002",
+                "EQUINOX", "RADECSYS",
+            ]
+        );
         assert!(update.remove.iter().all(|k| !k.starts_with("A_") && !k.starts_with("B_") && !k.starts_with("CRPIX")));
         assert_eq!(result.report.wcs_kind, "header TAN-SIP");
     }

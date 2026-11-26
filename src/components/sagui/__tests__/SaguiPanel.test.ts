@@ -164,7 +164,7 @@ describe("SAGUI panel status, actions and products", () => {
   it("uses the shared run button with a running state for Validate & segment (SCIENCE-29)", () => {
     const idle = runButton(render());
     expect(idle).toContain("Choose a prepared multiband FITS cube.");
-    withState({ input: { width: 2, height: 2, bands: [{ filter: "F200W", pivot_um: 2 }], unit: "Jy/pixel", has_err: true, has_dq: false, estimated_memory_bytes: 1, warnings: [] }, config: { ...state.config, input_path: "C:\runs\cube.fits", output_dir: "C:\runs", rscript_path: "Rscript", library_path: "lib", psf_target: "F200W" } }, () => expect(runButton(render())).toContain("Validate &amp; segment"));
+    withState({ input: { width: 2, height: 2, bands: [{ filter: "F200W", pivot_um: 2 }], unit: "Jy/pixel", has_err: true, has_dq: false, estimated_memory_bytes: 1, warnings: [] }, config: { ...state.config, input_path: "C:\\runs\\cube.fits", output_dir: "C:\\runs", rscript_path: "Rscript", library_path: "lib", psf_target: "F200W" } }, () => expect(runButton(render())).toContain("Validate &amp; segment"));
     expect(idle).toContain('data-accent="violet"');
     expect(idle).toContain('data-running="false"');
     withState({ status: "running", operation: "segment", outputDir: RUN }, () => {
@@ -204,12 +204,12 @@ describe("SAGUI panel status, actions and products", () => {
   });
 
   it("offers to open a recipe put in the cube field in Cube Prep, and only then", () => {
-    withState({ config: { ...state.config, input_path: "C:\astrokit\entregas\desktop-d1-scientific-recipe.json" } }, () => {
+    withState({ config: { ...state.config, input_path: "C:\\astrokit\\entregas\\desktop-d1-scientific-recipe.json" } }, () => {
       const html = render();
       expect(html).toContain("Open this recipe in Cube Prep");
       expect(html).toContain("The cube field holds a JSON file.");
     });
-    withState({ config: { ...state.config, input_path: "C:\runs\cube.fits" } }, () => {
+    withState({ config: { ...state.config, input_path: "C:\\runs\\cube.fits" } }, () => {
       expect(render()).not.toContain("Open this recipe in Cube Prep");
     });
   });

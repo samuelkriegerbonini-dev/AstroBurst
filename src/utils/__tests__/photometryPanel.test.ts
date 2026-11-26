@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { BatchPhotometryResult, PhotCal, PhotometryMeasurement, StarPhotometry } from "../../services/analysis";
+import type { BatchPhotometryResult, PhotCal, PhotometryMeasurement, PhotometryUpperLimit, StarPhotometry } from "../../services/analysis";
 import {
   GAIA_MATCH_PREF_KEY,
   appliedDepthFactor,
@@ -12,6 +12,8 @@ import {
   depthRadiusText,
   detectedStarsLabel,
   gaiaFailureWarning,
+  TOTAL_LOWER_LIMIT_LEGEND,
+  limitRuleText,
   limitSentence,
   loadGaiaMatchPreference,
   magnitudeColumnHeader,
@@ -21,6 +23,9 @@ import {
   photometryLimit,
   replaceNewest,
   saveGaiaMatchPreference,
+  totalIsLowerLimit,
+  totalLimitNote,
+  totalLimitReason,
   userZeroPoint,
   withWarning,
 } from "../photometryPanel";
@@ -417,6 +422,9 @@ describe("upper limit of a photometry measurement", () => {
       limitJy: expect.closeTo(3.3e-7, 12),
       limitAb: expect.closeTo(25.103715150305284, 12),
       limitNative: expect.closeTo(36.900000000000006, 12),
+      fCorrRequested: null,
+      rule: null,
+      source: "panel",
     });
     const detected = photometryLimit(phot({ flux_jy: 5.0e-7, net_flux: 50 }), null);
     expect(detected.isLimit).toBe(false);
@@ -471,5 +479,85 @@ describe("upper limit of a photometry measurement", () => {
     );
     expect(withFactor!.endsWith("; errors multiplied by f_corr 1.65 from the Depth section")).toBe(true);
     expect(limitSentence(photometryLimit(phot({ flux_jy: 5.0e-7, net_flux: 50 }), null), "adu")).toBeNull();
+  });
+});
+
+const MEASURED_RULE = "upper limit = 3 x flux error; the noise factor 1.65 is not applied, the errors come from the sky scatter and not from an error layer";
+const MEASURED_LIMIT: PhotometryUpperLimit = {
+  limit_sigma: 3,
+  f_corr: null,
+  f_corr_requested: 1.65,
+  is_limit: true,
+  upper_limit_native: 36.9,
+  upper_limit_jy: 3.3e-7,
+  upper_limit_ab: 25.103715150305284,
+  rule: MEASURED_RULE,
+};
+
+describe("upper limit reported by the photometry command", () => {
+  it("takes the limit of the measurement as it came, with the factor sent and the factor applied", () => {
+    expect(photometryLimit(phot({ err_used: false }), 1.65, MEASURED_LIMIT)).toEqual({
+      sigma: 3,
+      fCorr: null,
+      isLimit: true,
+      limitJy: 3.3e-7,
+      limitAb: 25.103715150305284,
+      limitNative: 36.9,
+      fCorrRequested: 1.65,
+      rule: MEASURED_RULE,
+      source: "measurement",
+    });
+  });
+
+  it("follows the verdict of the measurement even where the panel rule would say otherwise", () => {
+    const detected = { ...MEASURED_LIMIT, is_limit: false, upper_limit_native: null, upper_limit_jy: null, upper_limit_ab: null };
+    const limit = photometryLimit(phot(), null, detected);
+    expect(photometryLimit(phot(), null).isLimit).toBe(true);
+    expect(limit.isLimit).toBe(false);
+    expect(limitSentence(limit, "adu")).toBeNull();
+    expect(limitRuleText(limit)).toBe(`limit rule: ${MEASURED_RULE}`);
+  });
+
+  it("falls back to the panel rule when the measurement has no limit", () => {
+    for (const missing of [null, undefined]) {
+      const limit = photometryLimit(phot(), 1.65, missing);
+      expect(limit.source).toBe("panel");
+      expect(limit.rule).toBeNull();
+      expect(limitRuleText(limit)).toBeNull();
+      expect(limit.fCorr).toBe(1.65);
+      expect(limit.fCorrRequested).toBe(1.65);
+      expect(limit.limitJy).toBeCloseTo(5.445e-7, 15);
+    }
+    expect(limitRuleText(null)).toBeNull();
+  });
+
+  it("words a measured limit like the panel one", () => {
+    expect(limitSentence(photometryLimit(phot(), null, MEASURED_LIMIT), "adu")).toBe(
+      `not detected at 3 sigma: AB > 25.10 (flux below ${formatFluxDensityJy(3.3e-7, null)})`,
+    );
+    const applied = { ...MEASURED_LIMIT, f_corr: 1.65, upper_limit_jy: 5.445e-7, upper_limit_ab: 24.560005289770515 };
+    expect(limitSentence(photometryLimit(phot(), null, applied), "adu")!.endsWith("; errors multiplied by f_corr 1.65 from the Depth section")).toBe(true);
+  });
+});
+
+describe("plateau total as a lower limit", () => {
+  const reason = "the growth curve of a diffraction-limited image flattens before the wings of the PSF end";
+
+  it("reads the flag and the reason of the measurement", () => {
+    const lower = phot({ flux_total: 1100, total_is_lower_limit: true, total_limit_reason: reason });
+    expect(totalIsLowerLimit(lower)).toBe(true);
+    expect(totalLimitReason(lower)).toBe(reason);
+    expect(totalLimitNote(lower)).toBe(`total: ${TOTAL_LOWER_LIMIT_LEGEND}; ${reason}`);
+    expect(TOTAL_LOWER_LIMIT_LEGEND).toBe('"> x" is a lower limit of the total flux and "< m" the magnitude it corresponds to');
+    expect(totalLimitNote(phot({ total_is_lower_limit: true, total_limit_reason: null }))).toBe(`total: ${TOTAL_LOWER_LIMIT_LEGEND}`);
+  });
+
+  it("says nothing for a measurement without the flag or saved before it existed", () => {
+    for (const p of [phot({ total_is_lower_limit: false, total_limit_reason: null }), phot(), null, undefined]) {
+      expect(totalIsLowerLimit(p)).toBe(false);
+      expect(totalLimitReason(p)).toBeNull();
+      expect(totalLimitNote(p)).toBeNull();
+    }
+    expect(totalLimitReason(phot({ total_is_lower_limit: false, total_limit_reason: reason }))).toBeNull();
   });
 });

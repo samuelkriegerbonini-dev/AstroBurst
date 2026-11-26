@@ -1165,6 +1165,37 @@ fn start_values(samples: &[LineSample], mean_dx: f64, x_bounds: (f64, f64), emis
     [peak_excess.max(0.0), x0, sigma0]
 }
 
+fn optimum_at_sigma_floor<F>(xs: &[f64], ys: &[f64], weights: &[f64], fit: &FitResult, lower: &[f64; 3], upper: &[f64; 3], model: &F) -> bool
+where
+    F: Fn(f64, &[f64], &mut [f64]) -> f64,
+{
+    let floor = lower[2];
+    let at_floor = |sigma: f64| !(sigma > SIGMA_LOWER_MARGIN * floor);
+    let Some(&sigma) = fit.params.get(2) else {
+        return false;
+    };
+    if at_floor(sigma) {
+        return true;
+    }
+    let centre = fit.params[1];
+    let mut jacobian = [0.0; 3];
+    let (mut projection, mut norm) = (0.0, 0.0);
+    for ((&x, &y), &w) in xs.iter().zip(ys).zip(weights) {
+        let base = model(x, &[0.0, centre, floor], &mut jacobian);
+        let shape = model(x, &[1.0, centre, floor], &mut jacobian) - base;
+        projection += w * shape * (y - base);
+        norm += w * shape * shape;
+    }
+    if !(norm > 0.0) {
+        return false;
+    }
+    let amplitude = (projection / norm).clamp(lower[0], upper[0]);
+    let held_lower = [lower[0], lower[1], floor];
+    let held_upper = [upper[0], upper[1], floor];
+    fit_least_squares(xs, ys, weights, &[amplitude, centre, floor], &held_lower, &held_upper, MAX_FIT_ITERATIONS, model)
+        .is_ok_and(|at_the_floor| at_the_floor.chi2 <= fit.chi2)
+}
+
 fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[Option<u32>]>) -> SpaxelOutcome {
     let n = ctx.channels.len();
     let mut usable = vec![false; n];
@@ -1285,10 +1316,10 @@ fn fit_one(ctx: &SpaxelContext, sci: &[f32], err: Option<&[f32]>, dq: Option<&[O
     if !fit.converged {
         outcome.notes.push(format!("Gaussian fit did not converge after {} iterations", fit.iterations));
         outcome.mask |= MASK_NOT_CONVERGED;
-        if fit.params.get(2) == Some(&lower[2]) {
+        if optimum_at_sigma_floor(&xs, &ys, &weights, &fit, &lower, &upper, &model) {
             outcome.mask |= MASK_AT_BOUND;
             outcome.notes.push(
-                "the fit ended at the lower sigma bound (a quarter of a channel): the line is narrower than the sampling can measure".to_string(),
+                "the best width is the lower sigma bound (a quarter of a channel): a fit held there matches the data at least as well as where the free fit stopped, so the line is narrower than the sampling can measure".to_string(),
             );
         }
         outcome.continuum = Some(continuum);

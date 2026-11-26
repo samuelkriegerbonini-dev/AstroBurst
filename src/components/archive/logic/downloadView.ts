@@ -101,7 +101,7 @@ export function downloadInput(product: MastProduct, program: string | null, repl
     opensAs: product.opensAs,
     replace,
   };
-  return calibration ? ({ ...input, calibration } as MastDownloadInput) : input;
+  return calibration ? { ...input, calibration } : input;
 }
 
 export function recoveryInput(item: MastDownloadItem): MastDownloadInput {

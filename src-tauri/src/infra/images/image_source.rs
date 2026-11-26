@@ -3439,10 +3439,21 @@ mod tests {
     #[test]
     fn load_plane_header_uses_requested_hdu() {
         let dir = tempfile::tempdir().unwrap();
-        let p = mef_path(&dir);
+        let path = dir.path().join("jw_cal.fits");
+        write_test_mef(
+            &path,
+            &[("TELESCOP", "'JWST    '".into())],
+            &[
+                TestHdu { extname: Some("SCI"), extver: Some(1), cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("ERR"), extver: Some(1), cols: 4, rows: 4, data: HduData::F32(ramp_f32(4, 4)), extra_cards: vec![] },
+                TestHdu { extname: Some("DQ"), extver: Some(1), cols: 4, rows: 4, data: HduData::I32(vec![0; 16]), extra_cards: vec![] },
+            ],
+        );
+        let p = path.to_str().unwrap().to_string();
         let h = load_plane_header(&ImageRef::hdu(&p, 3)).unwrap();
         assert_eq!(h.get("EXTNAME"), Some("DQ"));
-        assert_eq!(h.get("EXTEND"), Some("T"));
+        assert_eq!(h.get("TELESCOP"), Some("JWST"));
+        assert_eq!(h.get("EXTEND"), None);
         let h = load_plane_header(&ImageRef::auto(&p)).unwrap();
         assert_eq!(h.get("EXTNAME"), Some("SCI"));
         assert!(load_plane_header(&ImageRef::array(&p, "x")).is_err());

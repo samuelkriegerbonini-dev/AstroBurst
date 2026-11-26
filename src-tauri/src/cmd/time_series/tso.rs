@@ -818,12 +818,17 @@ mod tests {
         let masked = CurveRequest { exclude_um: vec![[0.95, 1.05]], ..request(CurveMode::Masked) };
         let curves = tso_light_curves_cmd(vec![path.clone()], nrs1(), masked).await.unwrap();
         assert_eq!(curves["mode"], "masked");
-        assert_eq!(curves["white"]["flux"], json!([38.0, 68.0, 98.0]));
-        assert_eq!(curves["white"]["n_used"], json!([3, 3, 3]));
-        assert_eq!(curves["row_index"], json!([0, 1, 2]));
+        assert_eq!(curves["white"]["flux"], json!([50.0, 130.0]));
+        assert_eq!(curves["white"]["n_used"], json!([4, 4]));
+        assert_eq!(curves["row_index"], json!([0, 2]));
         let notes = texts(&curves["notes"]);
-        assert!(notes.contains(&"4 of 5 channels are valid in every integration"), "{notes:?}");
+        assert!(notes.contains(&"5 of 5 channels are valid in every integration kept"), "{notes:?}");
         assert!(notes.contains(&"1 channel(s) removed by the exclusion ranges"), "{notes:?}");
+        let warnings = texts(&curves["warnings"]);
+        assert!(
+            warnings.iter().any(|warning| warning.starts_with("masked mode left out 1 of 3 integration(s) (INT_NUM 2)")),
+            "{warnings:?}"
+        );
 
         let pipeline = tso_light_curves_cmd(vec![path], nrs1(), request(CurveMode::Pipeline)).await.unwrap();
         assert_eq!(pipeline["mode"], "pipeline");

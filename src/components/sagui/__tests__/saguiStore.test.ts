@@ -478,18 +478,18 @@ describe("SAGUI fixes (PREPUI)", () => {
 });
 
 describe("SAGUI cube field", () => {
-  const ready = { input_path: "C:\runs\cube.fits", output_dir: "C:\runs", rscript_path: "Rscript", library_path: "lib", n_regions: 6, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 1, psf_target: "F444W", mode: "ward" as const, knn_k: 40 };
+  const ready = { input_path: "C:\\runs\\cube.fits", output_dir: "C:\\runs", rscript_path: "Rscript", library_path: "lib", n_regions: 6, starlet: true, starlet_scales: [1, 2, 3], starlet_threshold: 3, dq_exclude_bits: 1, psf_target: "F444W", mode: "ward" as const, knn_k: 40 };
   it("asks for a FITS cube and names a Cube Prep recipe put in its place", () => {
     expect(saguiConfigProblems(ready)).toEqual([]);
-    for (const path of ["C:\runs\cube.fits.gz", "/data/cube.FTS", "/data/cube.fit.fz"]) expect(saguiConfigProblems({ ...ready, input_path: path })).toEqual([]);
-    expect(saguiConfigProblems({ ...ready, input_path: "C:\astrokit\entregas\desktop-d1-scientific-recipe.json" })).toEqual(["The cube field holds a JSON file. A Cube Prep recipe opens in Cube Prep; choose its prepared FITS cube here."]);
-    expect(saguiConfigProblems({ ...ready, input_path: "C:\runs\regions.csv" })).toEqual(["Choose a FITS cube: .fits, .fit or .fts, optionally compressed as .gz, .bz2 or .fz."]);
+    for (const path of ["C:\\runs\\cube.fits.gz", "/data/cube.FTS", "/data/cube.fit.fz"]) expect(saguiConfigProblems({ ...ready, input_path: path })).toEqual([]);
+    expect(saguiConfigProblems({ ...ready, input_path: "C:\\astrokit\\entregas\\desktop-d1-scientific-recipe.json" })).toEqual(["The cube field holds a JSON file. A Cube Prep recipe opens in Cube Prep; choose its prepared FITS cube here."]);
+    expect(saguiConfigProblems({ ...ready, input_path: "C:\\runs\\regions.csv" })).toEqual(["Choose a FITS cube: .fits, .fit or .fts, optionally compressed as .gz, .bz2 or .fz."]);
     expect(saguiConfigProblems({ ...ready, input_path: " " })).toEqual(["Choose a prepared multiband FITS cube."]);
   });
 
   it("recognises a recipe path regardless of case and spaces", () => {
-    expect(isRecipePath(" C:\recipes\D1.JSON ")).toBe(true);
-    expect(isRecipePath("C:\runs\cube.fits")).toBe(false);
+    expect(isRecipePath(" C:\\recipes\\D1.JSON ")).toBe(true);
+    expect(isRecipePath("C:\\runs\\cube.fits")).toBe(false);
     expect(isRecipePath("")).toBe(false);
   });
 });

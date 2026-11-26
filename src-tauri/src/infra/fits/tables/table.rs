@@ -699,6 +699,7 @@ pub mod test_support {
 
     use super::{parse_tform, tform_elem_bytes, TformKind};
     use crate::infra::fits::reader::test_fixtures::{empty_primary_cards, write_raw_hdus};
+    use crate::types::header::is_commentary_key;
 
     fn leak(text: String) -> &'static str {
         Box::leak(text.into_boxed_str())
@@ -743,7 +744,12 @@ pub mod test_support {
                 cards.push((leak(format!("TUNIT{n}")), format!("'{unit:<8}'")));
             }
         }
-        cards.extend(extra.iter().cloned());
+        for (key, value) in extra.iter().cloned() {
+            match cards.iter_mut().find(|(existing, _)| *existing == key && !is_commentary_key(key)) {
+                Some(card) => card.1 = value,
+                None => cards.push((key, value)),
+            }
+        }
         cards
     }
 

@@ -783,7 +783,8 @@ mod tests {
         assert!((choose_step(StepTable::Decimal, field, 9) - 0.01).abs() < 1e-12);
         assert!((choose_step(StepTable::Hours, 360.0, 9) - 45.0).abs() < 1e-9);
         assert!((choose_step(StepTable::Sexagesimal, 1000.0, 9) - 45.0).abs() < 1e-9);
-        assert!((choose_step(StepTable::Sexagesimal, 0.0, 9) * 3600.0 - 1.0).abs() < 1e-9);
+        assert!((choose_step(StepTable::Sexagesimal, 0.0, 9) * 3600.0 - 0.1).abs() < 1e-9);
+        assert!((choose_step(StepTable::Hours, 0.0, 9) * 240.0 - 0.01).abs() < 1e-9);
         assert!((choose_step(StepTable::Decimal, f64::NAN, 9) - 45.0).abs() < 1e-9);
         assert_eq!(target_lines(3), 9);
         assert_eq!(target_lines(0), 5);

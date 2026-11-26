@@ -3,7 +3,7 @@ import { createElement, isValidElement } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { Check } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { GainModel, PhotCal, PhotometryMeasurement, StarPhotometry } from "../../../services/analysis";
+import type { GainModel, PhotCal, PhotometryMeasurement, PhotometryUpperLimit, StarPhotometry } from "../../../services/analysis";
 
 
 const gainModelMock = vi.hoisted(() => vi.fn<(path: string) => Promise<GainModel>>());
@@ -1496,5 +1496,135 @@ describe("PhotometryPanel upper limit, Depth factor and Resolved or not card", (
     expect(lastEntry().params.f_corr).toBeNull();
     typeAperture("3.82");
     expect(offerButton(show())!.children).toBe("Use");
+  });
+});
+
+const MEASURED_RULE = "upper limit = 3 x flux error x noise factor 1.65 (errors from the error layer)";
+const MEASURED_LIMIT: PhotometryUpperLimit = {
+  limit_sigma: 3,
+  f_corr: 1.65,
+  f_corr_requested: 1.65,
+  is_limit: true,
+  upper_limit_native: 75,
+  upper_limit_jy: 9.120108393559097e-7,
+  upper_limit_ab: 24,
+  rule: MEASURED_RULE,
+};
+const PLATEAU_REASON =
+  "the growth curve of a diffraction-limited image flattens before the wings of the PSF end: the plateau flux is a lower limit of the total flux, the aperture correction and the encircled-energy radii are lower limits and the encircled-energy fraction is an upper limit; use the encircled-energy correction of the instrument for a total flux";
+const PLATEAU: Partial<StarPhotometry> = { aperture_correction: 1.0421, ee_in_aperture: 0.9596, flux_total: 1286.6, plateau_radius: 9, mag_ab_total: 17.25 };
+
+describe("PhotometryPanel limits and totals from the photometry command", () => {
+  const show = () => renderTree(PhotometryPanel.type as unknown as Panel, { filePath: FIRST });
+  let clicks = 0;
+  const measure = async (result: PhotometryMeasurement): Promise<ReactNode> => {
+    measureMock.mockReset().mockResolvedValue(result);
+    (findElement(show(), (props) => props.label === "Measure on image click")!.onChange as (on: boolean) => void)(true);
+    pixelClick.current = { seq: ++clicks, x: 10, y: 12 };
+    show();
+    await flush();
+    return show();
+  };
+  const typeAperture = (text: string) => (findElement(show(), byTitlePrefix("Aperture radius in"))!.onChange as (text: string) => void)(text);
+  const useDepthFactor = () => (findElement(show(), (props) => props["data-action"] === "use-depth-fcorr")!.onClick as () => void)();
+  const marked = (tree: ReactNode, key: string) => {
+    const line = findElement(tree, (props) => props[key] === true);
+    return line ? textOf(line.children) : null;
+  };
+  const lastEntry = () => measurementLog.getSnapshot().at(-1)!;
+
+  beforeEach(() => {
+    hooks.run.active = true;
+    hooks.run.cells = [];
+    gainModelMock.mockReset().mockReturnValue(pending());
+    measureMock.mockReset().mockReturnValue(new Promise(() => {}));
+    pixelClick.current = null;
+    clicks = 0;
+    measurementLog.clear();
+    depthHolder.current = null;
+  });
+
+  afterEach(() => {
+    hooks.run.active = false;
+    pixelClick.current = null;
+    depthHolder.current = null;
+  });
+
+  it("sends the sigma and the accepted Depth factor with both requests of a Gaia match", async () => {
+    depthHolder.current = PX_DEPTH;
+    typeAperture("3.82");
+    await measure(measurementWith(NEAR_LIMIT, { photcal: AB_USER }));
+    expect(measureMock.mock.calls[0][3]).toMatchObject({ fCorr: null, limitSigma: 3 });
+    useDepthFactor();
+    (findElement(show(), (props) => props.label === "Match Gaia DR3 (online)")!.onChange as (on: boolean) => void)(true);
+    await measure(measurementWith(NEAR_LIMIT, { photcal: AB_USER }));
+    await flush();
+    expect(measureMock.mock.calls.length).toBe(2);
+    for (const call of measureMock.mock.calls) expect(call[3]).toMatchObject({ fCorr: 1.65, limitSigma: 3 });
+  });
+
+  it("shows and logs the limit of the measurement with its rule", async () => {
+    const tree = await measure(measurementWith(NEAR_LIMIT, { photcal: AB_USER, limit: MEASURED_LIMIT }));
+    expect(cardValue(tree, "AB mag")).toBe("> 24.00 (3 sigma)");
+    expect(marked(tree, "data-photometry-limit")).toBe(
+      `not detected at 3 sigma: AB > 24.00 (flux below ${formatFluxDensityJy(9.120108393559097e-7, null)}); errors multiplied by f_corr 1.65 from the Depth section`,
+    );
+    expect(marked(tree, "data-photometry-limit-rule")).toBe(`limit rule: ${MEASURED_RULE}`);
+    const entry = lastEntry();
+    expect(entry.params.limit_sigma).toBe(3);
+    expect(entry.params.f_corr).toBe(1.65);
+    expect(entry.params.f_corr_requested).toBe(1.65);
+    expect(entry.params.limit_rule).toBe(MEASURED_RULE);
+    expect(entry.params.limit_source).toBe("measurement");
+    expect([entry.values.upper_limit_jy, entry.values.upper_limit_ab, entry.values.upper_limit_native]).toEqual([9.120108393559097e-7, 24, 75]);
+  });
+
+  it("shows the rule of a detection and keeps the measured magnitude", async () => {
+    const detected = { ...MEASURED_LIMIT, f_corr: null, f_corr_requested: null, is_limit: false, upper_limit_native: null, upper_limit_jy: null, upper_limit_ab: null, rule: "upper limit = 3 x flux error (errors from the sky scatter)" };
+    const tree = await measure(measurementWith(FAINT, { photcal: AB_USER, limit: detected }));
+    expect(cardValue(tree, "AB mag")).toBe(abCellText(25.647, 0.6));
+    expect(marked(tree, "data-photometry-limit")).toBeNull();
+    expect(marked(tree, "data-photometry-limit-rule")).toBe("limit rule: upper limit = 3 x flux error (errors from the sky scatter)");
+    expect([lastEntry().values.upper_limit_jy, lastEntry().values.upper_limit_ab]).toEqual([null, null]);
+  });
+
+  it("falls back to the panel rule for a result without a limit and shows no rule line", async () => {
+    for (const limit of [null, undefined]) {
+      const tree = await measure(measurementWith(FAINT, { photcal: AB_USER, limit }));
+      expect(cardValue(tree, "AB mag")).toBe("> 25.10 (3 sigma)");
+      expect(marked(tree, "data-photometry-limit-rule")).toBeNull();
+      const entry = lastEntry();
+      expect(entry.params.limit_source).toBe("panel");
+      expect(entry.params.limit_rule).toBeNull();
+      expect(entry.values.upper_limit_jy as number).toBeCloseTo(3.3e-7, 15);
+    }
+  });
+
+  it("shows a plateau total that is a lower limit with its markers and its reason once", async () => {
+    const tree = await measure(
+      measurementWith({ ...PLATEAU, total_is_lower_limit: true, total_limit_reason: PLATEAU_REASON, warnings: [PLATEAU_REASON] }, { photcal: HST_RATE }),
+    );
+    const total = findElement(tree, (props) => props["data-total-flux"] === true)!;
+    expect(textOf(total.children)).toBe("1.0421 → total > 1.287e+3 ELECTRONS/S, AB < 17.25");
+    expect(total.title).toBe(PLATEAU_REASON);
+    expect(marked(tree, "data-total-lower-limit")).toBe(
+      `total: "> x" is a lower limit of the total flux and "< m" the magnitude it corresponds to; ${PLATEAU_REASON}`,
+    );
+    expect(texts(tree).filter((text) => text === PLATEAU_REASON)).toEqual([]);
+    const entry = lastEntry();
+    expect(entry.values.total_is_lower_limit).toBe(true);
+    expect(entry.values.total_limit_reason).toBe(PLATEAU_REASON);
+    expect(entry.values.flux_total).toBe(1286.6);
+  });
+
+  it("keeps the plain total of a measurement without the flag or saved before it existed", async () => {
+    for (const star of [{ ...PLATEAU, total_is_lower_limit: false, total_limit_reason: null }, PLATEAU]) {
+      const tree = await measure(measurementWith(star, { photcal: HST_RATE }));
+      const total = findElement(tree, (props) => props["data-total-flux"] === true)!;
+      expect(textOf(total.children)).toBe("1.0421 → total 1.287e+3 ELECTRONS/S, AB 17.25");
+      expect(total.title).toBeUndefined();
+      expect(marked(tree, "data-total-lower-limit")).toBeNull();
+    }
+    expect(lastEntry().values.total_is_lower_limit).toBeUndefined();
   });
 });

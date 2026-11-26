@@ -1373,7 +1373,7 @@ mod tests {
         let expected = aperture_sum(&img, 64.0, 64.0, 3.0, 5).sum - b.bg_mean * b.aperture_area;
         assert!((b.net_flux - expected).abs() <= 1e-9 * expected.abs(), "net={} expected={expected}", b.net_flux);
         assert!((b.bg_mean - 107.08).abs() < 0.01, "bg_mean={}", b.bg_mean);
-        assert!((b.net_flux - 18632.08).abs() < 0.01, "net={}", b.net_flux);
+        assert!((b.net_flux - 18671.44).abs() < 0.01, "net={}", b.net_flux);
     }
 
     #[test]

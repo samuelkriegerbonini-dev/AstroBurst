@@ -54,6 +54,7 @@ import {
   detectedStarsLabel,
   magnitudeColumnHeader,
   photometryLimit,
+  totalLimitReason,
   userZeroPoint,
 } from "../../utils/photometryPanel";
 import { noiseFactorOffer } from "../../utils/forcedPhotometryRequest";
@@ -121,6 +122,7 @@ const ZERO_BASED_CAPTION = "x, y: 0-based pixel centres; DS9 and .reg files are 
 const USE_DEPTH_FACTOR_LABEL = "Use the Depth noise factor for this aperture";
 const REMOVE_DEPTH_FACTOR_LABEL = "Do not use the Depth noise factor";
 const NO_STARS: Star[] = [];
+const TOTAL_LOWER_LIMIT_FLAG = "total is a lower limit";
 
 const INPUT_CLASS =
   "bg-zinc-900 border border-zinc-700/50 rounded px-2 py-1 text-xs text-zinc-200 font-mono focus:border-amber-500/50 w-full";
@@ -210,10 +212,17 @@ function rowFlags(row: PhotometryTableRow, duplicate: boolean): string {
   if (duplicate) flags.push("dup");
   if (p?.saturated) flags.push("sat");
   if (row.limit?.isLimit) flags.push(`below ${row.limit.sigma} sigma`);
+  if (p?.total_is_lower_limit === true) flags.push(TOTAL_LOWER_LIMIT_FLAG);
   if (p && p.n_masked > 0) flags.push(`${p.n_masked} masked`);
   if (p && p.n_nonfinite > 0) flags.push(`${p.n_nonfinite} no data`);
   if (p && p.aperture_correction == null) flags.push("no plateau");
   return flags.join(", ");
+}
+
+function rowFlagsTitle(row: PhotometryTableRow, duplicate: boolean): string {
+  const flags = rowFlags(row, duplicate);
+  const reason = row.error ? null : totalLimitReason(row.photometry);
+  return reason === null ? flags : `${flags}: ${reason}`;
 }
 
 function limitCaptionText(limits: number, measured: number, fCorr: number | null): string {
@@ -413,8 +422,11 @@ function PhotometryTablePanel({
         gain,
         excludeDq,
         zeroPoint,
+        fCorr,
+        limitSigma: DEFAULT_LIMIT_SIGMA,
       });
       if (requestSeqRef.current !== seq) return;
+      const limits = result.rows.flatMap((r) => (r.photometry ? [photometryLimit(r.photometry, fCorr, r.limit)] : []));
       const log: BatchLogOptions = {
         apertureRadius,
         annulusInner,
@@ -429,7 +441,8 @@ function PhotometryTablePanel({
         placement,
         limitSigma: DEFAULT_LIMIT_SIGMA,
         fCorr,
-        nLimits: result.rows.filter((r) => r.photometry !== null && photometryLimit(r.photometry, fCorr).isLimit).length,
+        nLimits: limits.filter((limit) => limit.isLimit).length,
+        ...(limits.length > 0 && limits.every((limit) => limit.source === limits[0].source) ? { limitSource: limits[0].source } : {}),
       };
       setRun({ result, labels, log, status: measuredStatus, fCorr, fCorrRadius, request: runRequest });
       measurementLog.append(batchPhotometryEntry(provenance, result, log));
@@ -472,7 +485,7 @@ function PhotometryTablePanel({
             sky: r.sky,
             error: r.error,
             magnitude: r.photometry ? calibratedMagnitude(r.photometry, run.result.photcal) : undefined,
-            limit: r.photometry ? photometryLimit(r.photometry, run.fCorr) : undefined,
+            limit: r.photometry ? photometryLimit(r.photometry, run.fCorr, r.limit) : undefined,
           }))
         : [],
     [run],
@@ -929,7 +942,7 @@ function PhotometryTablePanel({
                           {cellText(row, column)}
                         </td>
                       ))}
-                      <td className="text-left px-1.5 py-0.5 truncate max-w-[140px]" title={rowFlags(row, duplicate)}>
+                      <td className="text-left px-1.5 py-0.5 truncate max-w-[140px]" title={rowFlagsTitle(row, duplicate)}>
                         {rowFlags(row, duplicate)}
                       </td>
                     </tr>

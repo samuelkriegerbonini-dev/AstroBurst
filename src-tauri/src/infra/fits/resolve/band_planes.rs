@@ -814,8 +814,7 @@ mod tests {
         assert_eq!(h.get("OBJECT"), Some("E"));
         assert_eq!(h.get("TELESCOP"), Some("X"));
         assert_eq!(h.get("EXTNAME"), Some("SCI"));
-        assert_eq!(h.get("BUNIT"), Some("adu"));
-        for key in ["BSCALE", "XTENSION", "PCOUNT", "GCOUNT"] {
+        for key in ["BUNIT", "BSCALE", "XTENSION", "PCOUNT", "GCOUNT"] {
             assert_eq!(h.get(key), None, "{key}");
         }
         let commentary: Vec<(&str, &str)> = h

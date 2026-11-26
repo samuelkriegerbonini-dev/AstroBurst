@@ -148,7 +148,7 @@ fn brgamma_maps_preserve_detection_states_units_and_spaxel_values() {
     let fixture = fixture();
     let (_dir, set, config) = open_fixture(&fixture);
     let maps = fit_cube_lines(&set.inputs(), &config).unwrap();
-    assert_eq!(maps.flux_unit, "Jy/beam km/s");
+    assert_eq!(maps.flux_unit, "Jy beam-1 km s-1");
     assert_eq!(maps.n_fit, 4);
     assert_eq!(maps.n_masked, 1);
     for case in &fixture.cases {

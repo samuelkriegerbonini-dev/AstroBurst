@@ -201,12 +201,13 @@ mod tests {
             ("CUNIT3", "um"),
             ("CRVAL3", "1.0"),
             ("CDELT3", "0.5"),
+            ("CRPIX3", "1"),
             ("CTYPE1", "RA---TAN"),
             ("CRVAL1", "10"),
             ("CDELT1", "0.1"),
         ]);
         assert_eq!(header_spectral_axis(&cube).unwrap().values, vec![1.0, 1.5, 2.0]);
-        let legacy_cube = make_header(&[("NAXIS", "3"), ("NAXIS3", "2"), ("CRVAL3", "10.0"), ("CDELT3", "2.0")]);
+        let legacy_cube = make_header(&[("NAXIS", "3"), ("NAXIS3", "2"), ("CRVAL3", "10.0"), ("CDELT3", "2.0"), ("CRPIX3", "1")]);
         let axis = header_spectral_axis(&legacy_cube).unwrap();
         assert_eq!(axis.kind, AxisKind::Unknown);
         assert_eq!(axis.values, vec![10.0, 12.0]);
@@ -218,6 +219,7 @@ mod tests {
             ("CUNIT1", "Angstrom"),
             ("CRVAL1", "5000"),
             ("CDELT1", "2"),
+            ("CRPIX1", "1"),
             ("CTYPE2", "LINEAR"),
         ]);
         let axis = header_spectral_axis(&long_slit).unwrap();
@@ -234,6 +236,7 @@ mod tests {
             ("CUNIT2", "GHz"),
             ("CRVAL2", "100"),
             ("CDELT2", "1"),
+            ("CRPIX2", "1"),
         ]);
         assert_eq!(header_spectral_axis(&spatial_first).unwrap().values, vec![100.0, 101.0]);
         let image = make_header(&[

@@ -10,8 +10,11 @@ import {
   PHOTOMETRY_CORRECTION_NOTE,
   PHOTOMETRY_CSV_COLUMNS,
   PHOTOMETRY_ERROR_NOTE,
+  PHOTOMETRY_LIMIT_FROM_MEASUREMENT,
+  PHOTOMETRY_LIMIT_FROM_PANEL,
   PHOTOMETRY_LIMIT_NOTE,
   PHOTOMETRY_POSITIONS_NOTE,
+  PHOTOMETRY_TOTAL_LIMIT_NOTE,
   PHOTOMETRY_WEIGHTS_NOTE,
   abCellText,
   apertureRadiusInRange,
@@ -23,6 +26,7 @@ import {
   photometryCsvFileName,
   photometryCsvProvenance,
   photometryCsvUnits,
+  photometryLimitSource,
   photometryTableCsv,
   plateauCaption,
   rowValue,
@@ -37,7 +41,8 @@ import { exportEntries, provenanceLines, unitLines, withProvenance } from "../cs
 import { APP_VERSION } from "../constants";
 import { FORCED_WEIGHTS_NOTE } from "../forcedPhotometry";
 import { formatWithUncertainty } from "../formatUncertainty";
-import type { FluxConvention, PhotCal, StarPhotometry } from "../../services/analysis";
+import type { FluxConvention, PhotCal, PhotometryUpperLimit, StarPhotometry } from "../../services/analysis";
+import { photometryLimit } from "../photometryPanel";
 
 function phot(overrides: Partial<StarPhotometry> = {}): StarPhotometry {
   return {
@@ -189,7 +194,10 @@ describe("sortRows", () => {
 });
 
 const CSV_HEADER_GOLDEN =
-  "index,label,x,y,ra,dec,net_flux,flux_err,snr,mag_inst,mag_ab,mag_ab_err,flux_jy,flux_err_jy,fwhm,aperture_radius,sky_inner,sky_outer,bg_mean,bg_sigma,aperture_correction,flux_total,mag_ab_total,ee50_radius,ee80_radius,saturated,n_masked,err_used,error,n_nonfinite,ee_in_aperture,mag,mag_err,mag_system,upper_limit_jy,upper_limit_ab";
+  "index,label,x,y,ra,dec,net_flux,flux_err,snr,mag_inst,mag_ab,mag_ab_err,flux_jy,flux_err_jy,fwhm,aperture_radius,sky_inner,sky_outer,bg_mean,bg_sigma,aperture_correction,flux_total,mag_ab_total,ee50_radius,ee80_radius,saturated,n_masked,err_used,error,n_nonfinite,ee_in_aperture,mag,mag_err,mag_system,upper_limit_jy,upper_limit_ab,upper_limit_native,limit_sigma,f_corr,f_corr_requested,limit_rule,total_is_lower_limit,total_limit_reason";
+
+const ADDED_COLUMNS = ",upper_limit_native,limit_sigma,f_corr,f_corr_requested,limit_rule,total_is_lower_limit,total_limit_reason";
+const ADDED_EMPTY_CELLS = ",,,,,,,";
 
 describe("photometryTableCsv", () => {
   const cellOf = (line: string, key: (typeof PHOTOMETRY_COLUMN_KEYS)[number]) => line.split(",")[PHOTOMETRY_COLUMN_KEYS.indexOf(key)];
@@ -219,7 +227,7 @@ describe("photometryTableCsv", () => {
 
   it("appends the count of aperture pixels without data and the enclosed fraction after the error column", () => {
     const lines = photometryTableCsv([row(0, { n_nonfinite: 3, aperture_correction: 1 / 0.93, ee_in_aperture: 0.93 }), row(1, null)]).split(CSV_LINE_END);
-    expect(lines[0].endsWith(",err_used,error,n_nonfinite,ee_in_aperture,mag,mag_err,mag_system,upper_limit_jy,upper_limit_ab")).toBe(true);
+    expect(lines[0].endsWith(`,err_used,error,n_nonfinite,ee_in_aperture,mag,mag_err,mag_system,upper_limit_jy,upper_limit_ab${ADDED_COLUMNS}`)).toBe(true);
     expect(cellOf(lines[1], "n_nonfinite")).toBe("3");
     expect(cellOf(lines[1], "ee_in_aperture")).toBe("0.93");
     expect(Number(cellOf(lines[1], "aperture_correction"))).toBeCloseTo(1.0753, 4);
@@ -238,7 +246,7 @@ describe("photometryTableCsv", () => {
   });
 
   it("appends the calibrated magnitude, its error and its system after the enclosed fraction", () => {
-    expect(PHOTOMETRY_COLUMN_KEYS).toHaveLength(36);
+    expect(PHOTOMETRY_COLUMN_KEYS).toHaveLength(43);
     expect(PHOTOMETRY_COLUMN_KEYS.slice(30, 34)).toEqual(["ee_in_aperture", "mag", "mag_err", "mag_system"]);
     const vega = row(0, { mag_inst: -9.87, mag_ab: null }, { magnitude: { mag: 11.562, magErr: 0.00612, system: "vega" } });
     expect(rowValue(vega, "mag")).toBe(11.562);
@@ -250,13 +258,13 @@ describe("photometryTableCsv", () => {
     expect(rowValue(plain, "mag_err")).toBeNull();
     expect(rowValue(plain, "mag_system")).toBeNull();
     const lines = photometryTableCsv([vega, plain]).split(CSV_LINE_END);
-    expect(lines[0].endsWith(",ee_in_aperture,mag,mag_err,mag_system,upper_limit_jy,upper_limit_ab")).toBe(true);
-    expect(lines[1].endsWith(",11.562,0.00612,vega,,")).toBe(true);
-    expect(lines[2].endsWith(",,,,,")).toBe(true);
+    expect(lines[0].endsWith(`,ee_in_aperture,mag,mag_err,mag_system,upper_limit_jy,upper_limit_ab${ADDED_COLUMNS}`)).toBe(true);
+    expect(lines[1].endsWith(`,11.562,0.00612,vega,,${ADDED_EMPTY_CELLS}`)).toBe(true);
+    expect(lines[2].endsWith(`,,,,,${ADDED_EMPTY_CELLS}`)).toBe(true);
   });
 
-  it("appends the upper limit in Jy and in AB magnitude as the last two columns", () => {
-    expect(PHOTOMETRY_COLUMN_KEYS.slice(-2)).toEqual(["upper_limit_jy", "upper_limit_ab"]);
+  it("keeps the upper limit in Jy and in AB magnitude right after mag_system", () => {
+    expect(PHOTOMETRY_COLUMN_KEYS.slice(34, 36)).toEqual(["upper_limit_jy", "upper_limit_ab"]);
     const limit = { sigma: 3, fCorr: null, isLimit: true, limitJy: 3.3e-7, limitAb: 25.103715150305284, limitNative: 36.900000000000006 };
     const faint = row(0, { net_flux: 20, flux_err: 12.3, flux_jy: 2.0e-7, flux_err_jy: 1.1e-7 }, { limit });
     expect(rowValue(faint, "upper_limit_jy")).toBe(3.3e-7);
@@ -272,9 +280,9 @@ describe("photometryTableCsv", () => {
     const lines = photometryTableCsv([faint, bright, plain]).split(CSV_LINE_END);
     expect(lines[0]).toBe(CSV_HEADER_GOLDEN);
     expect(cellOf(lines[1], "flux_jy")).toBe("2e-7");
-    expect(lines[1].split(",").slice(-2).map(Number)).toEqual([3.3e-7, 25.103715150305284]);
-    expect(lines[2].split(",").slice(-2)).toEqual(["", ""]);
-    expect(lines[3].split(",").slice(-2)).toEqual(["", ""]);
+    expect(lines[1].split(",").slice(34, 36).map(Number)).toEqual([3.3e-7, 25.103715150305284]);
+    expect(lines[2].split(",").slice(34, 36)).toEqual(["", ""]);
+    expect(lines[3].split(",").slice(34, 36)).toEqual(["", ""]);
   });
 });
 
@@ -340,7 +348,7 @@ describe("photometry table provenance (C-CSVPROV)", () => {
     const lines = photometryTableCsv(tableRows()).split(CSV_LINE_END);
     expect(lines.some((line) => line.startsWith("#"))).toBe(false);
     expect(lines[0]).toBe(CSV_HEADER_GOLDEN);
-    expect(lines[0].split(",")).toHaveLength(36);
+    expect(lines[0].split(",")).toHaveLength(43);
   });
 
   it("lists the provenance of a photometry table in the order of the contract", () => {
@@ -424,8 +432,9 @@ describe("photometry table provenance (C-CSVPROV)", () => {
     expect(Object.keys(units)).toEqual([
       "x", "y", "ra", "dec", "net_flux", "flux_err", "mag_inst", "mag_ab", "mag_ab_err", "flux_jy", "flux_err_jy",
       "fwhm", "aperture_radius", "sky_inner", "sky_outer", "bg_mean", "bg_sigma", "flux_total", "mag_ab_total",
-      "ee50_radius", "ee80_radius", "mag", "mag_err", "upper_limit_jy", "upper_limit_ab",
+      "ee50_radius", "ee80_radius", "mag", "mag_err", "upper_limit_jy", "upper_limit_ab", "upper_limit_native",
     ]);
+    expect(units.upper_limit_native).toBe("nanomaggy");
     expect(units.upper_limit_jy).toBe("Jy");
     expect(units.upper_limit_ab).toBe("mag (AB)");
     const columns: readonly string[] = PHOTOMETRY_COLUMN_KEYS;
@@ -594,5 +603,122 @@ describe("photometry table captions", () => {
   it("says where detected stars come from", () => {
     expect(NO_DETECTED_STARS_HINT).toContain("Detect Stars");
     expect(NO_DETECTED_STARS_HINT).toContain("Astrometry");
+  });
+});
+
+const REPORTED_RULE = "upper limit = 3 x flux error x noise factor 1.65 (errors from the error layer)";
+const REPORTED_LIMIT: PhotometryUpperLimit = {
+  limit_sigma: 3,
+  f_corr: 1.65,
+  f_corr_requested: 1.65,
+  is_limit: true,
+  upper_limit_native: 60.885,
+  upper_limit_jy: 5.445e-7,
+  upper_limit_ab: 24.560005289770515,
+  rule: REPORTED_RULE,
+};
+const PLATEAU_REASON =
+  "the growth curve of a diffraction-limited image flattens before the wings of the PSF end: the plateau flux is a lower limit of the total flux, the aperture correction and the encircled-energy radii are lower limits and the encircled-energy fraction is an upper limit; use the encircled-energy correction of the instrument for a total flux";
+
+describe("photometry CSV columns of the measured limit and of the plateau total", () => {
+  const cellOf = (line: string, key: (typeof PHOTOMETRY_COLUMN_KEYS)[number]) => line.split(",")[PHOTOMETRY_COLUMN_KEYS.indexOf(key)];
+  const faint: Partial<StarPhotometry> = { net_flux: 50, flux_err: 12.3, flux_jy: 5.0e-7, flux_err_jy: 1.1e-7, err_used: true };
+
+  it("appends the limit of the measurement, its sigma, the factors and the rule after upper_limit_ab", () => {
+    expect(PHOTOMETRY_COLUMN_KEYS.slice(36)).toEqual([
+      "upper_limit_native",
+      "limit_sigma",
+      "f_corr",
+      "f_corr_requested",
+      "limit_rule",
+      "total_is_lower_limit",
+      "total_limit_reason",
+    ]);
+    const measured = row(0, faint, { limit: photometryLimit(phot(faint), null, REPORTED_LIMIT) });
+    expect(rowValue(measured, "upper_limit_jy")).toBe(5.445e-7);
+    expect(rowValue(measured, "upper_limit_ab")).toBe(24.560005289770515);
+    expect(rowValue(measured, "upper_limit_native")).toBe(60.885);
+    expect(rowValue(measured, "limit_sigma")).toBe(3);
+    expect(rowValue(measured, "f_corr")).toBe(1.65);
+    expect(rowValue(measured, "f_corr_requested")).toBe(1.65);
+    expect(rowValue(measured, "limit_rule")).toBe(REPORTED_RULE);
+  });
+
+  it("takes the limit of the measurement over the panel rule, so a sigma the panel does not use reaches the CSV", () => {
+    const fiveSigma = { ...REPORTED_LIMIT, limit_sigma: 5, f_corr: null, f_corr_requested: null, rule: "upper limit = 5 x flux error (errors from the error layer, no noise factor given)" };
+    const limit = photometryLimit(phot(faint), null, fiveSigma);
+    expect(limit.source).toBe("measurement");
+    expect(rowValue(row(0, faint, { limit }), "limit_sigma")).toBe(5);
+    expect(photometryLimit(phot(faint), null).isLimit).toBe(false);
+    expect(limit.isLimit).toBe(true);
+  });
+
+  it("separates the factor sent from the factor applied when the errors come from the sky scatter", () => {
+    const skyScatter = { ...REPORTED_LIMIT, f_corr: null, is_limit: false, upper_limit_native: null, upper_limit_jy: null, upper_limit_ab: null };
+    const r = row(0, { ...faint, err_used: false }, { limit: photometryLimit(phot({ ...faint, err_used: false }), 1.65, skyScatter) });
+    expect(rowValue(r, "f_corr")).toBeNull();
+    expect(rowValue(r, "f_corr_requested")).toBe(1.65);
+    expect(rowValue(r, "upper_limit_jy")).toBeNull();
+  });
+
+  it("falls back to the panel rule for a row without a measured limit and leaves limit_rule empty", () => {
+    const fallback = row(0, faint, { limit: photometryLimit(phot(faint), 1.65) });
+    expect(fallback.limit!.source).toBe("panel");
+    expect(rowValue(fallback, "upper_limit_jy")).toBeCloseTo(5.445e-7, 15);
+    expect(rowValue(fallback, "upper_limit_native")).toBeCloseTo(60.885, 12);
+    expect(rowValue(fallback, "limit_sigma")).toBe(3);
+    expect(rowValue(fallback, "f_corr")).toBe(1.65);
+    expect(rowValue(fallback, "f_corr_requested")).toBe(1.65);
+    expect(rowValue(fallback, "limit_rule")).toBeNull();
+  });
+
+  it("writes the lower-limit flag and its reason, quoted, as the last two columns", () => {
+    const lower = row(0, { flux_total: 1100, total_is_lower_limit: true, total_limit_reason: PLATEAU_REASON });
+    const plain = row(1, { flux_total: 1100, total_is_lower_limit: false, total_limit_reason: null });
+    const older = row(2, { flux_total: 1100 });
+    expect(rowValue(lower, "total_is_lower_limit")).toBe(true);
+    expect(rowValue(lower, "total_limit_reason")).toBe(PLATEAU_REASON);
+    expect(rowValue(plain, "total_is_lower_limit")).toBe(false);
+    expect(rowValue(older, "total_is_lower_limit")).toBeNull();
+    expect(rowValue(older, "total_limit_reason")).toBeNull();
+    const lines = photometryTableCsv([lower, plain, older, row(3, null)]).split(CSV_LINE_END);
+    expect(lines[0]).toBe(CSV_HEADER_GOLDEN);
+    expect(lines[1].endsWith(`,true,"${PLATEAU_REASON}"`)).toBe(true);
+    expect(cellOf(lines[1], "flux_total")).toBe("1100");
+    expect(lines[2].endsWith(",false,")).toBe(true);
+    expect(lines[3].endsWith(",,")).toBe(true);
+    expect(lines[4].endsWith(",,")).toBe(true);
+  });
+
+  it("names the source of the limits and the meaning of a lower-limit total in the provenance", () => {
+    const measured = row(0, faint, { limit: photometryLimit(phot(faint), null, REPORTED_LIMIT) });
+    const panel = row(1, faint, { limit: photometryLimit(phot(faint), null) });
+    expect(photometryLimitSource([measured, row(2, null)])).toBe(PHOTOMETRY_LIMIT_FROM_MEASUREMENT);
+    expect(photometryLimitSource([panel])).toBe(PHOTOMETRY_LIMIT_FROM_PANEL);
+    expect(photometryLimitSource([measured, panel])).toBe(
+      "1 of 2 measured rows from the photometry command (rule in the column limit_rule), the others computed by the panel with the rule of the line upper_limit",
+    );
+    expect(photometryLimitSource([row(0, faint)])).toBeNull();
+    expect(PHOTOMETRY_LIMIT_FROM_MEASUREMENT).toBe(
+      "the photometry command, row by row: upper_limit_jy, upper_limit_ab and upper_limit_native follow the rule of the column limit_rule, with the sigma of limit_sigma and the factor of f_corr (f_corr_requested is the factor sent, f_corr the one applied)",
+    );
+    expect(PHOTOMETRY_LIMIT_FROM_PANEL).toBe("computed by the panel with the rule of the line upper_limit: the measurement gave no limit, so limit_rule is empty");
+
+    const entries = photometryCsvProvenance(CONTEXT, 2, [measured, row(1, { total_is_lower_limit: true, total_limit_reason: PLATEAU_REASON })]);
+    const keys = entries.map(([key]) => key);
+    expect(keys.slice(keys.indexOf("upper_limit"), keys.indexOf("aperture_correction") + 1)).toEqual([
+      "upper_limit",
+      "limit_source",
+      "total_limit",
+      "aperture_correction",
+    ]);
+    expect(entries.find(([key]) => key === "limit_source")?.[1]).toBe(PHOTOMETRY_LIMIT_FROM_MEASUREMENT);
+    expect(entries.find(([key]) => key === "total_limit")?.[1]).toBe(PHOTOMETRY_TOTAL_LIMIT_NOTE);
+    expect(PHOTOMETRY_TOTAL_LIMIT_NOTE).toBe(
+      "where total_is_lower_limit is true, flux_total is a lower limit of the total flux and mag_ab_total an upper limit of the total magnitude (the source is at least that bright); total_limit_reason says why",
+    );
+    const csv = photometryTableCsv([panel], CONTEXT).split(CSV_LINE_END);
+    expect(csv).toContain(`# limit_source: ${PHOTOMETRY_LIMIT_FROM_PANEL}`);
+    expect(csv.some((line) => line.startsWith("# total_limit:"))).toBe(false);
   });
 });

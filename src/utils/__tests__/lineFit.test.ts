@@ -588,7 +588,14 @@ describe("lineFitSpaxelRows", () => {
     expect(lineFitSpaxelRows(spaxel(), units).some((r) => r.label.startsWith("c1"))).toBe(false);
   });
 
-  it("reads the unit of the spectrum from the flux unit of the fit", () => {
+  it("takes the unit of the spectrum from the intensity unit the fit reports", () => {
+    expect(lineFitSpectrumUnit({ flux: "Jy beam-1 km s-1", velocity: "km/s", sigma: "km/s", intensity: "Jy/beam" })).toBe("Jy/beam");
+    expect(lineFitSpectrumUnit({ flux: "MJy sr-1 km s-1", velocity: "km/s", sigma: "km/s", intensity: "MJy/sr" })).toBe("MJy/sr");
+    expect(lineFitSpectrumUnit({ flux: "km s-1", velocity: "km/s", sigma: "km/s", intensity: null })).toBeNull();
+    expect(lineFitSpectrumUnit({ flux: "Jy beam-1 km s-1", velocity: "km/s", sigma: "km/s", intensity: " " })).toBeNull();
+  });
+
+  it("reads the unit of the spectrum from the flux unit of a fit saved without an intensity unit", () => {
     expect(lineFitSpectrumUnit({ flux: "MJy/sr km/s", velocity: "km/s", sigma: "km/s" })).toBe("MJy/sr");
     expect(lineFitSpectrumUnit({ flux: "Jy/beam km/s", velocity: "km/s", sigma: "km/s" })).toBe("Jy/beam");
     expect(lineFitSpectrumUnit({ flux: "km/s", velocity: "km/s", sigma: "km/s" })).toBeNull();

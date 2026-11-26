@@ -3027,10 +3027,13 @@ mod tests {
         for (p, bits) in [((2usize, 3usize), 1u32), ((4, 5), 2), ((6, 7), 0x4000), ((8, 9), 16)] {
             dq[p] = bits;
         }
-        let flagged = |telescope: &str, dq_mask: bool| -> Vec<(usize, usize)> {
-            let path = dir.path().join(format!("{telescope}_{dq_mask}.fits")).to_string_lossy().into_owned();
+        let flagged = |cards: &[(&str, &str)], dq_mask: bool| -> Vec<(usize, usize)> {
+            let name = cards.iter().map(|(_, value)| *value).collect::<Vec<_>>().join("_");
+            let path = dir.path().join(format!("{name}_{dq_mask}.fits")).to_string_lossy().into_owned();
             let mut primary = HduHeader::empty();
-            primary.set("TELESCOP", telescope.to_string());
+            for (key, value) in cards {
+                primary.set(key, value.to_string());
+            }
             let hdus = [
                 ImageHdu { data: HduData::F32(&sci), header: Some(&wcs), extname: "SCI", extver: 1 },
                 ImageHdu { data: HduData::U32(&dq), header: None, extname: "DQ", extver: 1 },
@@ -3038,15 +3041,15 @@ mod tests {
             write_mef_images(&path, Some(&primary), &hdus).unwrap();
             let tiles = load_tiles(&[path]).unwrap();
             let pixels = load_tile_pixels(&tiles[0], dq_mask).unwrap();
-            assert_eq!(pixels.planes, vec![sci.clone()], "{telescope}");
+            assert_eq!(pixels.planes, vec![sci.clone()], "{name}");
             let valid = tile_validity(&pixels.planes, pixels.excluded.as_ref());
             valid.indexed_iter().filter(|(_, v)| !**v).map(|(p, _)| p).collect()
         };
-        assert_eq!(flagged("JWST", true), vec![(2, 3)]);
-        assert_eq!(flagged("ROMAN", true), vec![(2, 3)]);
-        assert_eq!(flagged("HST", true), vec![(2, 3), (4, 5), (8, 9)]);
-        assert!(flagged("SYNTH", true).is_empty());
-        assert!(flagged("JWST", false).is_empty());
+        assert_eq!(flagged(&[("TELESCOP", "JWST")], true), vec![(2, 3)]);
+        assert_eq!(flagged(&[("TELESCOP", "ROMAN")], true), vec![(2, 3)]);
+        assert_eq!(flagged(&[("TELESCOP", "HST"), ("INSTRUME", "WFC3")], true), vec![(2, 3), (4, 5), (8, 9)]);
+        assert!(flagged(&[("TELESCOP", "SYNTH")], true).is_empty());
+        assert!(flagged(&[("TELESCOP", "JWST")], false).is_empty());
 
         let padded_path = dir.path().join("padded.fits").to_string_lossy().into_owned();
         let mut padded = Array2::from_elem((31, 41), 9.0f32);

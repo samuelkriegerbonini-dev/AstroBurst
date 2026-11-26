@@ -938,14 +938,14 @@ mod tests {
     const PRE_ERR_REGION_FIELDS: [&str; 9] =
         ["sum", "mean", "npix", "n_bg", "bg_per_pixel", "wavelengths", "unit", "bg_subtracted", "flux_jy"];
     const GOLDEN_NO_ERR_SHA256: [(&str, &str); 8] = [
-        ("region", "a3451f6ef209921f1299e171300d1cc1abdcb570aaf090c91fff77ea9146eb9b"),
-        ("region_bg", "d963038ab3b471e8d5c1292fd9e6bd6b1a10e0a64effb13eb4b31eab31d7a53c"),
-        ("sum", "68f9c31d54058218d084f698f845d6f1bb5940121648e2732f3a117cdbae48c5"),
+        ("region", "1a83610589d6753854e131a5354d985050cb291f6a76711b0d2cac901aad884d"),
+        ("region_bg", "12f8e04a7be24d7824702c20d2e75e0311d89729478f02aef12085f66d9bed0e"),
+        ("sum", "dbee552150acf1ee2fea1e2f342796472f9e6416efe4d6e15a0ed95086380612"),
         ("mean", "da223b7c0e33a697597cf660de8c3494bb489ab3809ae51e672d7cafc008683b"),
         ("median", "870e6d195ab6da283d16c0a346dd2312d4c3c7cbfde6e1e1225891c0ec5cfdaf"),
-        ("m0", "095e193d408e1c40c694c31e0a65f3ea0486777f7a7cc1dfa4c094e4b002a441"),
-        ("m1", "ce87c7fd3458b3b33da49031979a939888bd1e449786af563e2a04d69b27aafd"),
-        ("m2", "a2be6f5271aff2ce68d86e441966df76e150410a12d04a8ab24d86e982963335"),
+        ("m0", "cbfd02cfd1532203ec86a86909ea6457a48c1e1a611b64c3d01ee4086211f4b6"),
+        ("m1", "75e9a09202ca7485f1a1c3f569153538eb678466fb7c80c66c32c1bebd95f60d"),
+        ("m2", "194adbc2d07dc4c1edad6bc1ba704890a56fb01795c31a9bd0ba11d1dae2c05b"),
     ];
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -972,6 +972,9 @@ mod tests {
         sha256_hex(&without_version_stamp(&without_scientific_run_cards(&std::fs::read(path).unwrap())))
     }
 
+    const INPUT_IDENTITY_CARDS: [&str; 11] =
+        ["ABOP", "ABSRCHDU", "ABSRCPLN", "ABSRCARR", "ABSRCSZ", "ABSRCMT", "ABSRCSHA", "ABINPUTS", "ABINPUT", "ABPARAMS", "ABVER"];
+
     fn without_scientific_run_cards(bytes: &[u8]) -> Vec<u8> {
         let block_size = crate::types::constants::BLOCK_SIZE;
         let mut output = Vec::new();
@@ -979,6 +982,7 @@ mod tests {
         for (i, card) in bytes.chunks_exact(FITS_CARD_BYTES).enumerate() {
             let key = std::str::from_utf8(&card[..8]).unwrap().trim();
             skip = ["ABRUNID", "ABPROV", "ABSRC", "ABSCIHDU", "ABZERO", "ABDQPOL", "ABDQBIT", "ABDQAPP", "ABDQNUM", "ABDQHDU"].contains(&key)
+                || INPUT_IDENTITY_CARDS.contains(&key)
                 || key.starts_with("MOM")
                 || (key == "HISTORY" && ["AstroBurst collapse zero policy:", "AstroBurst DQ policy:", "AstroBurst moments:"].iter().any(|marker| String::from_utf8_lossy(card).contains(marker)))
                 || (key == "CONTINUE" && skip);

@@ -616,6 +616,11 @@ export function visibleBanner(s: ArchiveState, now: number): Banner | null {
   return null;
 }
 
+export function hasCountdown(state: ArchiveState, now: number): boolean {
+  const pending = (until: number | null | undefined) => until !== null && until !== undefined && until > now;
+  return pending(state.thumbs.pausedUntil) || Object.values(state.banners).some((b) => pending(b?.until));
+}
+
 function raise(s: ArchiveState, banner: Banner, until: number | null = null, status: number | null = null): ArchiveState {
   return { ...s, banners: { ...s.banners, [banner.kind]: { ...banner, until, status } } };
 }

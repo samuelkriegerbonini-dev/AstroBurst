@@ -41,7 +41,12 @@
     "integrated_second": 0.0015409447118299364,
     "integrated_fwhm_mas": 57.47672238697005,
     "point_sampled_peak": 0.5562482850485466,
-    "point_sampled_fwhm_mas": 50.0
+    "point_sampled_fwhm_mas": 50.0,
+    "area_method_peak": 0.4262694044141988,
+    "area_method_next": 0.11178305916283471,
+    "area_method_diagonal": 0.029313510536048727,
+    "area_method_second": 0.0015280647145696751,
+    "area_method_fwhm_mas": 57.561977269416204
   },
   "lightstack_area_rule": {
     "scale_in_arcsec": 0.031,

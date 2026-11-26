@@ -14,6 +14,7 @@ use crate::cmd::analysis::{DqMask, LayerReport, PhotometryPlanes, UserZeroPoint,
 pub const PHOTOMETRY_SATURATED_FLAG: &str = "SATURATED";
 pub const HEADER_PROCESSING_PROVENANCE: &str = "ABPROC";
 pub const RES_PHOTCAL: &str = "photcal";
+pub const DIFFRACTION_LIMITED_TOTAL_REASON: &str = "the growth curve of a diffraction-limited image flattens before the wings of the PSF end: the plateau flux is a lower limit of the total flux, the aperture correction and the encircled-energy radii are lower limits and the encircled-energy fraction is an upper limit; use the encircled-energy correction of the instrument for a total flux";
 
 pub(crate) fn apply_calibration(phot: &mut StarPhotometry, cal: &PhotCal) {
     if let Some(c) = cal.calibrate(phot.net_flux, Some(phot.flux_err)) {
@@ -27,6 +28,15 @@ pub(crate) fn apply_calibration(phot: &mut StarPhotometry, cal: &PhotCal) {
         .flux_total
         .and_then(|total| cal.calibrate(total, None))
         .and_then(|c| c.mag_ab);
+}
+
+fn flag_plateau_of_a_diffraction_limited_image(phot: &mut StarPhotometry, cal: &PhotCal) {
+    if phot.flux_total.is_none() || phot.total_is_lower_limit || !cal.is_space_telescope_convention() {
+        return;
+    }
+    phot.total_is_lower_limit = true;
+    phot.total_limit_reason = Some(DIFFRACTION_LIMITED_TOTAL_REASON.to_string());
+    phot.warnings.push(DIFFRACTION_LIMITED_TOTAL_REASON.to_string());
 }
 
 fn photcal_json(cal: &PhotCal) -> anyhow::Result<serde_json::Value> {
@@ -163,6 +173,7 @@ impl PhotometryContext {
         )?;
         if let Some(cal) = &self.photcal {
             apply_calibration(&mut phot, cal);
+            flag_plateau_of_a_diffraction_limited_image(&mut phot, cal);
         }
         Ok(phot)
     }

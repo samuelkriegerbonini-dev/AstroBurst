@@ -3048,7 +3048,7 @@ mod tests {
         let weight: Vec<f32> = (0..81).map(|i| if covered(i) { 4.0 } else { 0.0 }).collect();
         write_test_mef(
             &path,
-            &[("TELESCOP", "'HST'".into())],
+            &[("TELESCOP", "'HST'".into()), ("INSTRUME", "'WFC3'".into())],
             &[
                 TestHdu { extname: Some("SCI"), extver: Some(1), cols: 9, rows: 9, data: TestData::F32(sci), extra_cards: cards },
                 TestHdu { extname: Some("WGT"), extver: Some(1), cols: 9, rows: 9, data: TestData::F32(weight), extra_cards: vec![] },
@@ -3063,7 +3063,7 @@ mod tests {
         cards.push(("BUNIT", "'Jy'".into()));
         write_test_mef(
             &path,
-            &[("TELESCOP", "'HST'".into())],
+            &[("TELESCOP", "'HST'".into()), ("INSTRUME", "'WFC3'".into())],
             &[TestHdu { extname: Some("SCI"), extver: Some(1), cols: 9, rows: 9, data: TestData::F32(vec![1.0; 81]), extra_cards: cards }],
         );
         path.to_str().unwrap().to_string()
@@ -3097,6 +3097,7 @@ mod tests {
         assert!(converted.warnings.iter().any(|warning| warning.contains("zero weight") && warning.contains("27 pixels")), "{:?}", converted.warnings);
 
         let cube_dir = dir.path().join("cube");
+        std::fs::create_dir_all(&cube_dir).unwrap();
         let spec = CubeInputSpec { path: mosaic.clone(), dataset: Some("HST".into()), filter: Some("F814W".into()) };
         let built = build_cube(&[spec], cube_dir.join("cube.fits").to_str().unwrap(), None, CubeOptions { layout: CubeLayout::Mef, order: PlaneOrder::Given }, None).unwrap();
         let cube = read_cube_file(&built.output_path, &FilterRegistry::builtin()).unwrap().cube;

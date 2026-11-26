@@ -1714,11 +1714,11 @@ mod tests {
         let err = spectral_axis(&h, 2).unwrap_err();
         assert!(err.contains("frequency unit") && err.contains("wavelength unit"), "{err}");
         for spelling in ["MICRONS", "micron", "'um      '", "µm"] {
-            let h = axis_header(&[("CTYPE3", "WAVE"), ("CUNIT3", spelling), ("CRVAL3", "2.0"), ("CDELT3", "1.0")]);
+            let h = axis_header(&[("CTYPE3", "WAVE"), ("CUNIT3", spelling), ("CRVAL3", "2.0"), ("CDELT3", "1.0"), ("CRPIX3", "1.0")]);
             assert_eq!(spectral_axis(&h, 1).unwrap().values, vec![2.0], "{spelling}");
         }
         for spelling in ["km/s", "km s-1", "KM/S", "km s^-1"] {
-            let h = axis_header(&[("CTYPE3", "VRAD"), ("CUNIT3", spelling), ("CRVAL3", "5.0"), ("CDELT3", "1.0")]);
+            let h = axis_header(&[("CTYPE3", "VRAD"), ("CUNIT3", spelling), ("CRVAL3", "5.0"), ("CDELT3", "1.0"), ("CRPIX3", "1.0")]);
             assert_eq!(spectral_axis(&h, 1).unwrap().values, vec![5.0], "{spelling}");
         }
         let h = axis_header(&[("CTYPE3", "WAVE"), ("CUNIT3", "parsec"), ("CRVAL3", "1.0"), ("CDELT3", "1.0")]);
@@ -1852,13 +1852,13 @@ mod tests {
 
     #[test]
     fn velocity_axis_converts_air_wavelengths_and_passes_velocity_axes_through() {
-        let h = axis_header(&[("CTYPE3", "AWAV"), ("CUNIT3", "Angstrom"), ("CRVAL3", "6561.0"), ("CDELT3", "1.0")]);
+        let h = axis_header(&[("CTYPE3", "AWAV"), ("CUNIT3", "Angstrom"), ("CRVAL3", "6561.0"), ("CDELT3", "1.0"), ("CRPIX3", "1.0")]);
         let axis = spectral_axis(&h, 1).unwrap();
         let v = velocity_axis(&axis, 0.6563, VelocityConvention::Optical).unwrap();
         let vacuum = air_to_vacuum_um(0.6561);
         assert!((v.values_kms[0] - velocity_kms(vacuum, 0.6563, VelocityConvention::Optical)).abs() < 1e-9);
         assert!(v.notes.iter().any(|n| n.contains("Morton (2000")));
-        let h = axis_header(&[("CTYPE3", "VRAD"), ("CUNIT3", "m/s"), ("CRVAL3", "1500.0"), ("CDELT3", "500.0")]);
+        let h = axis_header(&[("CTYPE3", "VRAD"), ("CUNIT3", "m/s"), ("CRVAL3", "1500.0"), ("CDELT3", "500.0"), ("CRPIX3", "1.0")]);
         let axis = spectral_axis(&h, 2).unwrap();
         let v = velocity_axis(&axis, 0.6563, VelocityConvention::Optical).unwrap();
         assert!((v.values_kms[0] - 1.5).abs() < 1e-12 && (v.values_kms[1] - 2.0).abs() < 1e-12, "{:?}", v.values_kms);

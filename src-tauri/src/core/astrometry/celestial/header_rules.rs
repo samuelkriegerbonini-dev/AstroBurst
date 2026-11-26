@@ -9,6 +9,7 @@ const ANGLE_TOLERANCE_DEG: f64 = 1e-9;
 const DEFAULT_LATPOLE_DEG: f64 = 90.0;
 const ZENITHAL_PROJECTIONS: [&str; 10] = ["AZP", "SZP", "TAN", "STG", "SIN", "ARC", "ZPN", "ZEA", "AIR", "NCP"];
 const CONIC_PROJECTIONS: [&str; 4] = ["COP", "COD", "COE", "COO"];
+pub const ORIGIN_FIDUCIAL_PROJECTIONS: [&str; 9] = ["CYP", "CEA", "CAR", "MER", "SFL", "PAR", "MOL", "AIT", "HPX"];
 const LOOKUP_DISTORTION_CARDS: [&str; 6] = ["CPDIS1", "CPDIS2", "CQDIS1", "CQDIS2", "D2IMDIS1", "D2IMDIS2"];
 
 fn card<'a>(header: &'a HduHeader, key: &str) -> Option<&'a str> {
@@ -61,13 +62,14 @@ pub fn tan_pole_cards_change_the_projection(header: &HduHeader) -> bool {
 }
 
 pub fn refuse_unsupported_projection_cards(header: &HduHeader, projection: &str, crval2_deg: f64) -> Result<()> {
-    if projection == "TAN" {
+    let zenithal = ZENITHAL_PROJECTIONS.contains(&projection);
+    let conic = CONIC_PROJECTIONS.contains(&projection);
+    if projection == "TAN" || !(zenithal || conic || ORIGIN_FIDUCIAL_PROJECTIONS.contains(&projection)) {
         return Ok(());
     }
-    let zenithal = ZENITHAL_PROJECTIONS.contains(&projection);
     let native_latitude = if zenithal {
         90.0
-    } else if CONIC_PROJECTIONS.contains(&projection) {
+    } else if conic {
         numeric_card(header, "PV2_1").unwrap_or(0.0)
     } else {
         0.0

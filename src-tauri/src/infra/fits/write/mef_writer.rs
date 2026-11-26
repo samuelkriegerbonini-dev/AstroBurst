@@ -948,7 +948,9 @@ mod tests {
 
         let err = write_compressed_mef(source_path.to_str().unwrap(), occupied.to_str().unwrap(), &lossless())
             .unwrap_err();
-        assert!(err.to_string().contains("Failed to replace"), "{err}");
+        let chain = format!("{err:#}");
+        assert!(chain.contains("Failed to write the output FITS file"), "{chain}");
+        assert!(chain.contains("cannot replace it with"), "{chain}");
         let mut names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

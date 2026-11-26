@@ -347,7 +347,8 @@ mod tests {
         assert!(std::path::Path::new(png).exists());
         assert!(std::path::Path::new(fits).exists());
         let written = crate::infra::fits::reader::read_primary_header(fits).unwrap();
-        assert_eq!(written.get("EXTNAME"), Some("SCI"));
+        assert_eq!(written.get("EXTNAME"), None);
+        assert_eq!(written.get("ABPROC"), Some(SUFFIX_COSMETIC));
         assert_eq!(written.get("BUNIT"), Some("MJy/sr"));
         assert!(written.get("XTENSION").is_none());
 
